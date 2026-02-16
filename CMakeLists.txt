@@ -47,6 +47,7 @@ add_executable(mpvpn
     src/vpn_client.c
     src/vpn_server.c
     src/addr_pool.c
+    src/path_mgr.c
     src/log.c
 )
 

@@ -305,6 +305,27 @@ svr_stateless_reset(const unsigned char *buf, size_t size,
 }
 
 /* ================================================================
+ *  Multipath callbacks (server is passive — accepts paths from client)
+ * ================================================================ */
+
+static int
+svr_path_created(xqc_connection_t *conn, const xqc_cid_t *cid,
+                  uint64_t path_id, void *conn_user_data)
+{
+    (void)conn; (void)cid; (void)conn_user_data;
+    LOG_INF("new path created: path_id=%" PRIu64, path_id);
+    return 0;
+}
+
+static void
+svr_path_removed(const xqc_cid_t *cid, uint64_t path_id,
+                  void *conn_user_data)
+{
+    (void)cid; (void)conn_user_data;
+    LOG_INF("path removed: path_id=%" PRIu64, path_id);
+}
+
+/* ================================================================
  *  H3 connection callbacks
  * ================================================================ */
 
@@ -620,8 +641,18 @@ static void
 svr_dgram_mss_updated_notify(xqc_h3_conn_t *conn, size_t mss,
                               void *user_data)
 {
-    (void)conn; (void)user_data;
+    (void)conn;
+    svr_conn_t *svr_conn = (svr_conn_t *)user_data;
     LOG_INF("datagram MSS updated: %zu", mss);
+
+    /* Update server TUN MTU based on QUIC datagram MSS */
+    if (svr_conn && svr_conn->ctx) {
+        size_t udp_mss = xqc_h3_ext_masque_udp_mss(
+            mss, svr_conn->masque_stream_id);
+        if (udp_mss >= 68) {
+            mpvpn_tun_set_mtu(&svr_conn->ctx->tun, (int)udp_mss);
+        }
+    }
 }
 
 /* ================================================================
@@ -718,12 +749,14 @@ mpvpn_server_run(const mpvpn_server_cfg_t *cfg)
     };
 
     xqc_transport_callbacks_t tcbs = {
-        .server_accept  = svr_accept,
-        .server_refuse  = svr_refuse,
-        .write_socket   = svr_write_socket,
-        .write_socket_ex = svr_write_socket_ex,
-        .stateless_reset = svr_stateless_reset,
+        .server_accept                  = svr_accept,
+        .server_refuse                  = svr_refuse,
+        .write_socket                   = svr_write_socket,
+        .write_socket_ex                = svr_write_socket_ex,
+        .stateless_reset                = svr_stateless_reset,
         .conn_send_packet_before_accept = svr_write_socket,
+        .path_created_notify            = svr_path_created,
+        .path_removed_notify            = svr_path_removed,
     };
 
     xqc_config_t config;
@@ -741,11 +774,12 @@ mpvpn_server_run(const mpvpn_server_cfg_t *cfg)
         return -1;
     }
 
-    /* Connection settings: enable datagrams */
+    /* Connection settings: enable datagrams + multipath */
     xqc_conn_settings_t conn_settings;
     memset(&conn_settings, 0, sizeof(conn_settings));
     conn_settings.max_datagram_frame_size = 65535;
     conn_settings.proto_version = XQC_VERSION_V1;
+    conn_settings.enable_multipath = 1;
     xqc_server_set_conn_settings(g_svr.engine, &conn_settings);
 
     /* H3 callbacks */

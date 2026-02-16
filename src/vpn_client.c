@@ -1,4 +1,5 @@
 #include "vpn_client.h"
+#include "path_mgr.h"
 #include "tun.h"
 #include "log.h"
 
@@ -46,12 +47,10 @@ struct cli_ctx_s {
     xqc_engine_t        *engine;
     struct event_base   *eb;
     struct event        *ev_engine;  /* xquic timer */
-    struct event        *ev_socket;  /* UDP socket read */
     struct event        *ev_tun;     /* TUN device read (added after tunnel up) */
 
-    int                  udp_fd;
-    struct sockaddr_in   local_addr;
-    socklen_t            local_addrlen;
+    /* Multipath: per-path UDP sockets */
+    mpvpn_path_mgr_t     path_mgr;
     struct sockaddr_in   server_addr;
     socklen_t            server_addrlen;
 
@@ -74,7 +73,6 @@ struct cli_conn_s {
     xqc_h3_conn_t       *h3_conn;
     xqc_cid_t            cid;
     size_t               dgram_mss;
-    int                  fd;    /* UDP socket fd (same as ctx->udp_fd) */
 
     /* MASQUE session */
     xqc_h3_request_t    *masque_request;
@@ -152,10 +150,12 @@ cli_write_socket(const unsigned char *buf, size_t size,
                  const struct sockaddr *peer_addr, socklen_t peer_addrlen,
                  void *conn_user_data)
 {
+    /* Legacy single-path write — use primary path */
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
+    int fd = mpvpn_path_mgr_get_fd(&conn->ctx->path_mgr, 0);
     ssize_t res;
     do {
-        res = sendto(conn->fd, buf, size, 0, peer_addr, peer_addrlen);
+        res = sendto(fd, buf, size, 0, peer_addr, peer_addrlen);
     } while (res < 0 && errno == EINTR);
 
     if (res < 0) {
@@ -173,8 +173,20 @@ cli_write_socket_ex(uint64_t path_id,
                     const struct sockaddr *peer_addr, socklen_t peer_addrlen,
                     void *conn_user_data)
 {
-    (void)path_id;
-    return cli_write_socket(buf, size, peer_addr, peer_addrlen, conn_user_data);
+    cli_conn_t *conn = (cli_conn_t *)conn_user_data;
+    int fd = mpvpn_path_mgr_get_fd(&conn->ctx->path_mgr, path_id);
+    ssize_t res;
+    do {
+        res = sendto(fd, buf, size, 0, peer_addr, peer_addrlen);
+    } while (res < 0 && errno == EINTR);
+
+    if (res < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return XQC_SOCKET_EAGAIN;
+        }
+        return XQC_SOCKET_ERROR;
+    }
+    return res;
 }
 
 /* ================================================================
@@ -182,14 +194,25 @@ cli_write_socket_ex(uint64_t path_id,
  * ================================================================ */
 
 static void
-cli_socket_read_handler(cli_ctx_t *ctx)
+cli_socket_read_handler(cli_ctx_t *ctx, int sock_fd)
 {
     unsigned char buf[PACKET_BUF_SIZE];
     struct sockaddr_in6 peer_addr;
     socklen_t peer_addrlen = sizeof(peer_addr);
 
+    /* Find local addr for this path's socket */
+    mpvpn_path_t *path = mpvpn_path_mgr_find_by_fd(&ctx->path_mgr, sock_fd);
+    struct sockaddr_in local_addr;
+    socklen_t local_addrlen = sizeof(local_addr);
+    if (path) {
+        memcpy(&local_addr, &path->local_addr, sizeof(local_addr));
+        local_addrlen = path->local_addrlen;
+    } else {
+        memset(&local_addr, 0, sizeof(local_addr));
+    }
+
     for (;;) {
-        ssize_t n = recvfrom(ctx->udp_fd, buf, sizeof(buf), 0,
+        ssize_t n = recvfrom(sock_fd, buf, sizeof(buf), 0,
                              (struct sockaddr *)&peer_addr, &peer_addrlen);
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
@@ -201,7 +224,7 @@ cli_socket_read_handler(cli_ctx_t *ctx)
         uint64_t recv_time = mpvpn_now_us();
         xqc_engine_packet_process(
             ctx->engine, buf, (size_t)n,
-            (struct sockaddr *)&ctx->local_addr, ctx->local_addrlen,
+            (struct sockaddr *)&local_addr, local_addrlen,
             (struct sockaddr *)&peer_addr, peer_addrlen,
             (xqc_usec_t)recv_time, NULL);
     }
@@ -211,10 +234,9 @@ cli_socket_read_handler(cli_ctx_t *ctx)
 static void
 cli_socket_event_callback(int fd, short what, void *arg)
 {
-    (void)fd;
     cli_ctx_t *ctx = (cli_ctx_t *)arg;
     if (what & EV_READ) {
-        cli_socket_read_handler(ctx);
+        cli_socket_read_handler(ctx, fd);
     }
 }
 
@@ -325,7 +347,18 @@ cli_setup_tun(cli_ctx_t *ctx, const uint8_t *ip, uint8_t prefix)
     if (mpvpn_tun_set_addr(&ctx->tun, local_ip, peer_ip, 32) < 0) {
         return -1;
     }
-    if (mpvpn_tun_set_mtu(&ctx->tun, 1280) < 0) {
+    /* Set MTU based on QUIC datagram MSS minus MASQUE framing overhead */
+    int tun_mtu = 1280;
+    if (ctx->conn && ctx->conn->dgram_mss > 0) {
+        size_t udp_mss = xqc_h3_ext_masque_udp_mss(
+            ctx->conn->dgram_mss, ctx->conn->masque_stream_id);
+        if (udp_mss >= 68) {
+            tun_mtu = (int)udp_mss;
+        }
+        LOG_INF("TUN MTU from dgram_mss=%zu masque_udp_mss=%zu → %d",
+                ctx->conn->dgram_mss, udp_mss, tun_mtu);
+    }
+    if (mpvpn_tun_set_mtu(&ctx->tun, tun_mtu) < 0) {
         return -1;
     }
     if (mpvpn_tun_up(&ctx->tun) < 0) {
@@ -670,6 +703,15 @@ cli_dgram_mss_updated_notify(xqc_h3_conn_t *conn, size_t mss,
         cli_conn->dgram_mss = mss;
     }
     LOG_INF("datagram MSS updated: %zu", mss);
+
+    /* Update TUN MTU if tunnel is already up */
+    if (cli_conn && cli_conn->ctx->tun_up) {
+        size_t udp_mss = xqc_h3_ext_masque_udp_mss(
+            mss, cli_conn->masque_stream_id);
+        if (udp_mss >= 68) {
+            mpvpn_tun_set_mtu(&cli_conn->ctx->tun, (int)udp_mss);
+        }
+    }
 }
 
 /* ================================================================
@@ -695,51 +737,74 @@ cli_save_tp_cb(const char *data, size_t data_len, void *user_data)
 }
 
 /* ================================================================
- *  UDP socket creation
+ *  Multipath callbacks
+ * ================================================================ */
+
+static void
+cli_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
+{
+    cli_conn_t *conn = (cli_conn_t *)conn_user_data;
+    cli_ctx_t *ctx = conn->ctx;
+
+    if (ctx->cfg->n_paths <= 1) {
+        return;  /* single-path mode */
+    }
+
+    LOG_INF("ready_to_create_path: adding secondary paths");
+
+    for (int i = 1; i < ctx->path_mgr.n_paths; i++) {
+        mpvpn_path_t *p = &ctx->path_mgr.paths[i];
+        if (p->in_use) continue;
+
+        uint64_t new_path_id = 0;
+        xqc_int_t ret = xqc_conn_create_path(
+            ctx->engine, &conn->cid, &new_path_id, 0);
+        if (ret < 0) {
+            LOG_WRN("xqc_conn_create_path[%d]: %d", i, ret);
+            return;
+        }
+
+        p->path_id = new_path_id;
+        p->in_use = 1;
+        LOG_INF("path[%d] created: path_id=%" PRIu64 " iface=%s",
+                i, new_path_id, p->iface);
+    }
+}
+
+static void
+cli_path_removed(const xqc_cid_t *cid, uint64_t path_id,
+                  void *conn_user_data)
+{
+    (void)cid;
+    cli_conn_t *conn = (cli_conn_t *)conn_user_data;
+    cli_ctx_t *ctx = conn->ctx;
+
+    mpvpn_path_t *p = mpvpn_path_mgr_find_by_path_id(&ctx->path_mgr, path_id);
+    if (p) {
+        LOG_INF("path removed: path_id=%" PRIu64 " iface=%s", path_id, p->iface);
+        p->in_use = 0;
+        p->path_id = 0;
+    } else {
+        LOG_WRN("path_removed: unknown path_id=%" PRIu64, path_id);
+    }
+}
+
+/* ================================================================
+ *  Resolve server address
  * ================================================================ */
 
 static int
-cli_create_udp_socket(cli_ctx_t *ctx)
+cli_resolve_server(cli_ctx_t *ctx)
 {
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) {
-        LOG_ERR("socket: %s", strerror(errno));
-        return -1;
-    }
-
-    if (fcntl(fd, F_SETFL, O_NONBLOCK) < 0) {
-        close(fd);
-        return -1;
-    }
-
-    int bufsize = 1 * 1024 * 1024;
-    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
-
-    /* Bind to any local address */
-    memset(&ctx->local_addr, 0, sizeof(ctx->local_addr));
-    ctx->local_addr.sin_family = AF_INET;
-    ctx->local_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    ctx->local_addrlen = sizeof(ctx->local_addr);
-
-    if (bind(fd, (struct sockaddr *)&ctx->local_addr, sizeof(ctx->local_addr)) < 0) {
-        LOG_ERR("bind: %s", strerror(errno));
-        close(fd);
-        return -1;
-    }
-
-    /* Resolve server address */
     memset(&ctx->server_addr, 0, sizeof(ctx->server_addr));
     ctx->server_addr.sin_family = AF_INET;
     ctx->server_addr.sin_port = htons((uint16_t)ctx->cfg->server_port);
     if (inet_pton(AF_INET, ctx->cfg->server_addr, &ctx->server_addr.sin_addr) != 1) {
         LOG_ERR("invalid server address: %s", ctx->cfg->server_addr);
-        close(fd);
         return -1;
     }
     ctx->server_addrlen = sizeof(ctx->server_addr);
-
-    return fd;
+    return 0;
 }
 
 /* ================================================================
@@ -782,11 +847,13 @@ mpvpn_client_run(const mpvpn_client_cfg_t *cfg)
     };
 
     xqc_transport_callbacks_t tcbs = {
-        .write_socket    = cli_write_socket,
-        .write_socket_ex = cli_write_socket_ex,
-        .save_token      = cli_save_token,
-        .save_session_cb = cli_save_session_cb,
-        .save_tp_cb      = cli_save_tp_cb,
+        .write_socket                = cli_write_socket,
+        .write_socket_ex             = cli_write_socket_ex,
+        .save_token                  = cli_save_token,
+        .save_session_cb             = cli_save_session_cb,
+        .save_tp_cb                  = cli_save_tp_cb,
+        .ready_to_create_path_notify = cli_ready_to_create_path,
+        .path_removed_notify         = cli_path_removed,
     };
 
     xqc_config_t config;
@@ -842,16 +909,44 @@ mpvpn_client_run(const mpvpn_client_cfg_t *cfg)
     };
     xqc_h3_engine_set_local_settings(g_cli.engine, &h3s);
 
-    /* ---- Create UDP socket ---- */
-    g_cli.udp_fd = cli_create_udp_socket(&g_cli);
-    if (g_cli.udp_fd < 0) {
+    /* ---- Resolve server address ---- */
+    if (cli_resolve_server(&g_cli) < 0) {
         return -1;
     }
 
-    g_cli.ev_socket = event_new(g_cli.eb, g_cli.udp_fd,
-                                 EV_READ | EV_PERSIST,
-                                 cli_socket_event_callback, &g_cli);
-    event_add(g_cli.ev_socket, NULL);
+    /* ---- Create UDP sockets (one per path) ---- */
+    mpvpn_path_mgr_init(&g_cli.path_mgr);
+
+    if (cfg->n_paths > 0) {
+        /* Multipath: create one socket per specified interface */
+        for (int i = 0; i < cfg->n_paths; i++) {
+            int idx = mpvpn_path_mgr_add(&g_cli.path_mgr, cfg->path_ifaces[i],
+                                          &g_cli.server_addr);
+            if (idx < 0) {
+                LOG_ERR("failed to create path socket for %s", cfg->path_ifaces[i]);
+                return -1;
+            }
+        }
+    } else {
+        /* Single-path: one socket on any interface */
+        int idx = mpvpn_path_mgr_add(&g_cli.path_mgr, NULL, &g_cli.server_addr);
+        if (idx < 0) {
+            return -1;
+        }
+    }
+
+    /* Register all path sockets with libevent */
+    for (int i = 0; i < g_cli.path_mgr.n_paths; i++) {
+        mpvpn_path_t *p = &g_cli.path_mgr.paths[i];
+        p->ev_socket = event_new(g_cli.eb, p->fd,
+                                  EV_READ | EV_PERSIST,
+                                  cli_socket_event_callback, &g_cli);
+        event_add(p->ev_socket, NULL);
+    }
+
+    /* Mark primary path (path 0) as in-use with path_id=0 */
+    g_cli.path_mgr.paths[0].path_id = 0;
+    g_cli.path_mgr.paths[0].in_use = 1;
 
     /* ---- Create H3 connection ---- */
     cli_conn_t *conn = calloc(1, sizeof(*conn));
@@ -860,13 +955,15 @@ mpvpn_client_run(const mpvpn_client_cfg_t *cfg)
         return -1;
     }
     conn->ctx = &g_cli;
-    conn->fd  = g_cli.udp_fd;
     g_cli.conn = conn;
+
+    int multipath = (cfg->n_paths > 1) ? 1 : 0;
 
     xqc_conn_settings_t conn_settings;
     memset(&conn_settings, 0, sizeof(conn_settings));
     conn_settings.max_datagram_frame_size = 65535;
     conn_settings.proto_version = XQC_VERSION_V1;
+    conn_settings.enable_multipath = multipath;
 
     xqc_conn_ssl_config_t conn_ssl_config;
     memset(&conn_ssl_config, 0, sizeof(conn_ssl_config));
@@ -893,7 +990,8 @@ mpvpn_client_run(const mpvpn_client_cfg_t *cfg)
         xqc_h3_ext_datagram_set_user_data(conn->h3_conn, conn);
     }
 
-    LOG_INF("connecting to %s:%d ...", cfg->server_addr, cfg->server_port);
+    LOG_INF("connecting to %s:%d (multipath=%d, paths=%d) ...",
+            cfg->server_addr, cfg->server_port, multipath, g_cli.path_mgr.n_paths);
 
     /* ---- Main event loop ---- */
     event_base_dispatch(g_cli.eb);
@@ -902,9 +1000,8 @@ mpvpn_client_run(const mpvpn_client_cfg_t *cfg)
     LOG_INF("client shutting down");
     cli_cleanup_routes(&g_cli);
     if (g_cli.ev_tun)    event_free(g_cli.ev_tun);
-    if (g_cli.ev_socket) event_free(g_cli.ev_socket);
     if (g_cli.ev_engine) event_free(g_cli.ev_engine);
-    if (g_cli.udp_fd >= 0) close(g_cli.udp_fd);
+    mpvpn_path_mgr_destroy(&g_cli.path_mgr);
     mpvpn_tun_destroy(&g_cli.tun);
     xqc_engine_destroy(g_cli.engine);
     event_base_free(g_cli.eb);

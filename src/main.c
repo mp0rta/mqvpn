@@ -24,6 +24,7 @@ usage(const char *prog)
         "  --cert PATH               TLS certificate (server mode)\n"
         "  --key PATH                TLS private key (server mode)\n"
         "  --insecure                Skip TLS cert verification (client mode)\n"
+        "  --path IFACE              Network interface for multipath (repeatable, client mode)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
         "  --help                    Show this help\n",
         prog, prog);
@@ -62,6 +63,7 @@ main(int argc, char *argv[])
         {"cert",      required_argument, NULL, 'c'},
         {"key",       required_argument, NULL, 'k'},
         {"insecure",  no_argument,       NULL, 'i'},
+        {"path",      required_argument, NULL, 'p'},
         {"log-level", required_argument, NULL, 'L'},
         {"help",      no_argument,       NULL, 'h'},
         {NULL, 0, NULL, 0},
@@ -76,9 +78,11 @@ main(int argc, char *argv[])
     const char *key_file    = "server.key";
     int         insecure    = 0;
     const char *log_level_str = "info";
+    const char *path_ifaces[MPVPN_MAX_PATH_IFACES];
+    int         n_paths = 0;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "m:s:l:n:t:c:k:iL:h", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "m:s:l:n:t:c:k:ip:L:h", long_opts, NULL)) != -1) {
         switch (opt) {
         case 'm': mode = optarg; break;
         case 's': server_str = optarg; break;
@@ -88,6 +92,14 @@ main(int argc, char *argv[])
         case 'c': cert_file = optarg; break;
         case 'k': key_file = optarg; break;
         case 'i': insecure = 1; break;
+        case 'p':
+            if (n_paths < MPVPN_MAX_PATH_IFACES) {
+                path_ifaces[n_paths++] = optarg;
+            } else {
+                fprintf(stderr, "error: max %d paths supported\n", MPVPN_MAX_PATH_IFACES);
+                return 1;
+            }
+            break;
         case 'L': log_level_str = optarg; break;
         case 'h':
             usage(argv[0]);
@@ -140,7 +152,11 @@ main(int argc, char *argv[])
             .tun_name    = tun_name,
             .insecure    = insecure,
             .log_level   = xqc_log_level,
+            .n_paths     = n_paths,
         };
+        for (int i = 0; i < n_paths; i++) {
+            cfg.path_ifaces[i] = path_ifaces[i];
+        }
         return mpvpn_client_run(&cfg);
 
     } else if (strcmp(mode, "server") == 0) {
