@@ -2,6 +2,8 @@
 
 Multipath VPN for Linux using MASQUE CONNECT-IP (RFC 9484) over HTTP/3.
 
+> Project status: Experimental implementation
+
 IP packets are tunneled as HTTP Datagrams (Context ID=0) associated with an HTTP/3 Extended CONNECT request stream (`:protocol=connect-ip`), and carried over QUIC DATAGRAM frames. Control and configuration are exchanged as Capsules (ADDRESS_ASSIGN, ROUTE_ADVERTISEMENT) on the CONNECT stream.
 
 ```
@@ -19,6 +21,20 @@ TUN (IP packet)
 - **Dynamic TUN MTU** — derived from QUIC path MTU / `max_datagram_frame_size` minus MASQUE framing overhead, adjusted via PMTUD
 - **Split tunneling** — server IP routed via original gateway to prevent routing loops
 - Linux TUN device with automatic IP assignment and route configuration
+
+## Supported Environment
+
+- Linux only (requires `/dev/net/tun`)
+- Root privileges are required for TUN, routing, and network namespace operations
+- `xquic` `feature/masque` branch is required
+
+## xquic Baseline (Pinned)
+
+- Submodule path: `third_party/xquic`
+- Fork: `https://github.com/mp0rta/xquic.git`
+- Branch: `feature/masque`
+- Pinned commit: `3a159b0a4b43ba07752ed2d9eb83b5bdf1c355fe`
+- Reference: `docs/xquic_baseline.md`
 
 ## Architecture
 
@@ -59,6 +75,9 @@ Client                                          Server
 ```bash
 git clone --recurse-submodules https://github.com/mp0rta/mpvpn.git
 cd mpvpn
+
+# If cloned without --recurse-submodules
+git submodule update --init --recursive --checkout
 
 # 1. BoringSSL
 cd third_party/xquic/third_party/boringssl
