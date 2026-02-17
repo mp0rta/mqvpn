@@ -15,6 +15,7 @@
 #include <sys/time.h>
 #include <net/if.h>
 #include <inttypes.h>
+#include <sys/wait.h>
 
 #include <event2/event.h>
 #include <xquic/xquic.h>
@@ -48,6 +49,8 @@ struct cli_ctx_s {
     struct event_base   *eb;
     struct event        *ev_engine;  /* xquic timer */
     struct event        *ev_tun;     /* TUN device read (added after tunnel up) */
+    struct event        *ev_sigint;
+    struct event        *ev_sigterm;
 
     /* Multipath: per-path UDP sockets */
     mpvpn_path_mgr_t     path_mgr;
@@ -88,21 +91,22 @@ struct cli_conn_s {
 struct cli_stream_s {
     cli_conn_t          *conn;
     xqc_h3_request_t    *h3_request;
+    uint8_t             *capsule_buf;
+    size_t               capsule_len;
+    size_t               capsule_cap;
 };
 
 /* ---------- static context ---------- */
 
 static cli_ctx_t g_cli;
-static volatile sig_atomic_t g_running = 1;
 
 static void
-signal_handler(int sig)
+cli_signal_event_callback(evutil_socket_t sig, short events, void *arg)
 {
     (void)sig;
-    g_running = 0;
-    if (g_cli.eb) {
-        event_base_loopbreak(g_cli.eb);
-    }
+    (void)events;
+    cli_ctx_t *ctx = (cli_ctx_t *)arg;
+    event_base_loopbreak(ctx->eb);
 }
 
 /* ================================================================
@@ -245,6 +249,108 @@ cli_socket_event_callback(int fd, short what, void *arg)
  * ================================================================ */
 
 static int
+cli_run_ip_cmd(const char *const argv[])
+{
+    pid_t pid = fork();
+    if (pid < 0) {
+        LOG_WRN("fork for ip command failed: %s", strerror(errno));
+        return -1;
+    }
+    if (pid == 0) {
+        execvp("ip", (char * const *)argv);
+        _exit(127);
+    }
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR) {
+            continue;
+        }
+        LOG_WRN("waitpid failed: %s", strerror(errno));
+        return -1;
+    }
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static int
+cli_discover_route(const char *server_ip, char *gateway, size_t gateway_len,
+                    char *iface, size_t iface_len)
+{
+    int fds[2];
+    if (pipe(fds) < 0) {
+        LOG_WRN("pipe failed: %s", strerror(errno));
+        return -1;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        LOG_WRN("fork failed: %s", strerror(errno));
+        return -1;
+    }
+
+    if (pid == 0) {
+        const char *const argv[] = {"ip", "-4", "route", "get", server_ip, NULL};
+        close(fds[0]);
+        if (dup2(fds[1], STDOUT_FILENO) < 0) {
+            _exit(127);
+        }
+        close(fds[1]);
+        execvp("ip", (char * const *)argv);
+        _exit(127);
+    }
+
+    close(fds[1]);
+    char out[1024];
+    ssize_t nread = read(fds[0], out, sizeof(out) - 1);
+    close(fds[0]);
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            return -1;
+        }
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || nread <= 0) {
+        return -1;
+    }
+
+    out[nread] = '\0';
+    gateway[0] = '\0';
+    iface[0] = '\0';
+
+    char *saveptr = NULL;
+    for (char *tok = strtok_r(out, " \t\r\n", &saveptr);
+         tok;
+         tok = strtok_r(NULL, " \t\r\n", &saveptr)) {
+        if (strcmp(tok, "via") == 0) {
+            tok = strtok_r(NULL, " \t\r\n", &saveptr);
+            if (tok) {
+                snprintf(gateway, gateway_len, "%s", tok);
+            }
+            continue;
+        }
+        if (strcmp(tok, "dev") == 0) {
+            tok = strtok_r(NULL, " \t\r\n", &saveptr);
+            if (tok) {
+                snprintf(iface, iface_len, "%s", tok);
+            }
+            continue;
+        }
+    }
+
+    if (gateway[0] == '\0' || iface[0] == '\0') {
+        return -1;
+    }
+    return 0;
+}
+
+static int
 cli_setup_routes(cli_ctx_t *ctx)
 {
     /* Extract server IP (without port) */
@@ -252,31 +358,8 @@ cli_setup_routes(cli_ctx_t *ctx)
     inet_ntop(AF_INET, &saddr, ctx->server_ip_str, sizeof(ctx->server_ip_str));
 
     /* Discover current gateway and interface for the server IP */
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "ip route get %s", ctx->server_ip_str);
-    FILE *fp = popen(cmd, "r");
-    if (!fp) {
-        LOG_WRN("popen(ip route get) failed: %s", strerror(errno));
-        return -1;
-    }
-
-    char line[512];
-    ctx->orig_gateway[0] = '\0';
-    ctx->orig_iface[0] = '\0';
-
-    while (fgets(line, sizeof(line), fp)) {
-        char *via = strstr(line, "via ");
-        if (via && ctx->orig_gateway[0] == '\0') {
-            sscanf(via + 4, "%15s", ctx->orig_gateway);
-        }
-        char *dev = strstr(line, "dev ");
-        if (dev && ctx->orig_iface[0] == '\0') {
-            sscanf(dev + 4, "%15s", ctx->orig_iface);
-        }
-    }
-    pclose(fp);
-
-    if (ctx->orig_gateway[0] == '\0' || ctx->orig_iface[0] == '\0') {
+    if (cli_discover_route(ctx->server_ip_str, ctx->orig_gateway, sizeof(ctx->orig_gateway),
+                            ctx->orig_iface, sizeof(ctx->orig_iface)) < 0) {
         LOG_WRN("could not determine original gateway/iface for %s",
                 ctx->server_ip_str);
         return -1;
@@ -285,17 +368,30 @@ cli_setup_routes(cli_ctx_t *ctx)
     LOG_INF("split tunnel: server %s via %s dev %s",
             ctx->server_ip_str, ctx->orig_gateway, ctx->orig_iface);
 
-    /* Pin server IP to original route */
-    snprintf(cmd, sizeof(cmd),
-             "ip route add %s/32 via %s dev %s 2>/dev/null || true",
-             ctx->server_ip_str, ctx->orig_gateway, ctx->orig_iface);
-    if (system(cmd)) { /* best-effort */ }
+    char host_cidr[INET_ADDRSTRLEN + 4];
+    snprintf(host_cidr, sizeof(host_cidr), "%s/32", ctx->server_ip_str);
+    const char *const pin_route[] = {
+        "ip", "route", "replace", host_cidr, "via", ctx->orig_gateway,
+        "dev", ctx->orig_iface, NULL
+    };
+    if (cli_run_ip_cmd(pin_route) < 0) {
+        LOG_WRN("failed to pin server route");
+        return -1;
+    }
 
-    /* Set default route through TUN */
-    snprintf(cmd, sizeof(cmd),
-             "ip route add default dev %s metric 10 2>/dev/null || true",
-             ctx->tun.name);
-    if (system(cmd)) { /* best-effort */ }
+    const char *const tun_default[] = {
+        "ip", "route", "replace", "default", "dev", ctx->tun.name,
+        "metric", "10", NULL
+    };
+    if (cli_run_ip_cmd(tun_default) < 0) {
+        LOG_WRN("failed to set default route via %s", ctx->tun.name);
+        const char *const undo_pin[] = {
+            "ip", "route", "del", host_cidr, "via", ctx->orig_gateway,
+            "dev", ctx->orig_iface, NULL
+        };
+        (void)cli_run_ip_cmd(undo_pin);
+        return -1;
+    }
 
     ctx->routing_configured = 1;
     return 0;
@@ -307,17 +403,20 @@ cli_cleanup_routes(cli_ctx_t *ctx)
     if (!ctx->routing_configured)
         return;
 
-    char cmd[256];
-
     /* Remove TUN default route */
-    snprintf(cmd, sizeof(cmd), "ip route del default dev %s 2>/dev/null || true",
-             ctx->tun.name);
-    if (system(cmd)) { /* best-effort */ }
+    const char *const del_default[] = {
+        "ip", "route", "del", "default", "dev", ctx->tun.name, NULL
+    };
+    (void)cli_run_ip_cmd(del_default);
 
     /* Remove server IP pinned route */
-    snprintf(cmd, sizeof(cmd), "ip route del %s/32 via %s dev %s 2>/dev/null || true",
-             ctx->server_ip_str, ctx->orig_gateway, ctx->orig_iface);
-    if (system(cmd)) { /* best-effort */ }
+    char host_cidr[INET_ADDRSTRLEN + 4];
+    snprintf(host_cidr, sizeof(host_cidr), "%s/32", ctx->server_ip_str);
+    const char *const del_pin[] = {
+        "ip", "route", "del", host_cidr, "via", ctx->orig_gateway,
+        "dev", ctx->orig_iface, NULL
+    };
+    (void)cli_run_ip_cmd(del_pin);
 
     ctx->routing_configured = 0;
     LOG_INF("split tunnel routes cleaned up");
@@ -532,9 +631,98 @@ cli_request_close_notify(xqc_h3_request_t *h3_request,
         if (stream->conn) {
             stream->conn->tunnel_ok = 0;
         }
+        free(stream->capsule_buf);
         free(stream);
     }
     return 0;
+}
+
+static int
+cli_stream_append_capsules(cli_stream_t *stream, const uint8_t *buf, size_t len)
+{
+    if (len == 0) {
+        return 0;
+    }
+
+    size_t need = stream->capsule_len + len;
+    if (need > stream->capsule_cap) {
+        size_t new_cap = stream->capsule_cap ? stream->capsule_cap * 2 : 4096;
+        while (new_cap < need) {
+            new_cap *= 2;
+        }
+        uint8_t *new_buf = realloc(stream->capsule_buf, new_cap);
+        if (!new_buf) {
+            return -1;
+        }
+        stream->capsule_buf = new_buf;
+        stream->capsule_cap = new_cap;
+    }
+
+    memcpy(stream->capsule_buf + stream->capsule_len, buf, len);
+    stream->capsule_len += len;
+    return 0;
+}
+
+static void
+cli_process_capsules(cli_stream_t *stream)
+{
+    cli_conn_t *conn = stream->conn;
+
+    while (stream->capsule_len > 0) {
+        uint64_t cap_type;
+        const uint8_t *cap_payload;
+        size_t cap_len, consumed;
+
+        xqc_int_t xret = xqc_h3_ext_capsule_decode(
+            stream->capsule_buf, stream->capsule_len,
+            &cap_type, &cap_payload, &cap_len, &consumed);
+        if (xret != XQC_OK) {
+            break;
+        }
+
+        if (cap_type == XQC_H3_CAPSULE_ADDRESS_ASSIGN) {
+            uint64_t req_id;
+            uint8_t ip_ver, ip_addr[16], prefix;
+            size_t ip_len = 16;
+            xret = xqc_h3_ext_connectip_parse_address_assign(
+                cap_payload, cap_len, &req_id, &ip_ver,
+                ip_addr, &ip_len, &prefix);
+            if (xret == XQC_OK && ip_ver == 4) {
+                memcpy(conn->assigned_ip, ip_addr, 4);
+                conn->assigned_prefix = prefix;
+                conn->addr_assigned = 1;
+                LOG_INF("ADDRESS_ASSIGN: %d.%d.%d.%d/%d",
+                        ip_addr[0], ip_addr[1], ip_addr[2], ip_addr[3], prefix);
+            }
+        } else if (cap_type == XQC_H3_CAPSULE_ROUTE_ADVERTISEMENT) {
+            uint8_t ip_ver, start_ip[16], end_ip[16], ip_proto;
+            size_t ip_len, bytes_consumed;
+
+            const uint8_t *rp = cap_payload;
+            size_t rremain = cap_len;
+            while (rremain > 0) {
+                ip_len = 16;
+                xret = xqc_h3_ext_connectip_parse_route_advertisement(
+                    rp, rremain, &ip_ver, start_ip, end_ip,
+                    &ip_len, &ip_proto, &bytes_consumed);
+                if (xret != XQC_OK) break;
+                LOG_INF("ROUTE_ADVERTISEMENT: ipv%d proto=%d "
+                        "%d.%d.%d.%d-%d.%d.%d.%d",
+                        ip_ver, ip_proto,
+                        start_ip[0], start_ip[1], start_ip[2], start_ip[3],
+                        end_ip[0], end_ip[1], end_ip[2], end_ip[3]);
+                rp += bytes_consumed;
+                rremain -= bytes_consumed;
+            }
+        }
+
+        if (consumed < stream->capsule_len) {
+            memmove(stream->capsule_buf,
+                    stream->capsule_buf + consumed,
+                    stream->capsule_len - consumed);
+        }
+        stream->capsule_len -= consumed;
+    }
 }
 
 static int
@@ -569,67 +757,19 @@ cli_request_read_notify(xqc_h3_request_t *h3_request,
         do {
             n = xqc_h3_request_recv_body(h3_request, buf, sizeof(buf), &fin);
             if (n <= 0) break;
-
-            const uint8_t *p = (const uint8_t *)buf;
-            size_t remain = (size_t)n;
-
-            while (remain > 0) {
-                uint64_t cap_type;
-                const uint8_t *cap_payload;
-                size_t cap_len, consumed;
-
-                xqc_int_t xret = xqc_h3_ext_capsule_decode(
-                    p, remain, &cap_type, &cap_payload, &cap_len, &consumed);
-                if (xret != XQC_OK) {
-                    LOG_DBG("capsule decode: %d (remain=%zu)", xret, remain);
-                    break;
-                }
-
-                if (cap_type == XQC_H3_CAPSULE_ADDRESS_ASSIGN) {
-                    uint64_t req_id;
-                    uint8_t ip_ver, ip_addr[16], prefix;
-                    size_t ip_len = 16;
-                    xret = xqc_h3_ext_connectip_parse_address_assign(
-                        cap_payload, cap_len, &req_id, &ip_ver,
-                        ip_addr, &ip_len, &prefix);
-                    if (xret == XQC_OK && ip_ver == 4) {
-                        memcpy(conn->assigned_ip, ip_addr, 4);
-                        conn->assigned_prefix = prefix;
-                        conn->addr_assigned = 1;
-                        LOG_INF("ADDRESS_ASSIGN: %d.%d.%d.%d/%d",
-                                ip_addr[0], ip_addr[1], ip_addr[2],
-                                ip_addr[3], prefix);
-                    }
-                } else if (cap_type == XQC_H3_CAPSULE_ROUTE_ADVERTISEMENT) {
-                    uint8_t ip_ver, start_ip[16], end_ip[16], ip_proto;
-                    size_t ip_len, bytes_consumed;
-
-                    const uint8_t *rp = cap_payload;
-                    size_t rremain = cap_len;
-                    while (rremain > 0) {
-                        ip_len = 16;
-                        xret = xqc_h3_ext_connectip_parse_route_advertisement(
-                            rp, rremain, &ip_ver, start_ip, end_ip,
-                            &ip_len, &ip_proto, &bytes_consumed);
-                        if (xret != XQC_OK) break;
-                        LOG_INF("ROUTE_ADVERTISEMENT: ipv%d proto=%d "
-                                "%d.%d.%d.%d-%d.%d.%d.%d",
-                                ip_ver, ip_proto,
-                                start_ip[0], start_ip[1], start_ip[2], start_ip[3],
-                                end_ip[0], end_ip[1], end_ip[2], end_ip[3]);
-                        rp += bytes_consumed;
-                        rremain -= bytes_consumed;
-                    }
-                }
-
-                p += consumed;
-                remain -= consumed;
+            if (cli_stream_append_capsules(stream, buf, (size_t)n) < 0) {
+                LOG_ERR("capsule buffer OOM");
+                return -1;
             }
+            cli_process_capsules(stream);
         } while (n > 0 && !fin);
 
         /* Set up TUN after ADDRESS_ASSIGN */
         if (conn->addr_assigned && !conn->ctx->tun_up) {
-            cli_setup_tun(conn->ctx, conn->assigned_ip, conn->assigned_prefix);
+            if (cli_setup_tun(conn->ctx, conn->assigned_ip, conn->assigned_prefix) < 0) {
+                LOG_ERR("TUN setup failed after ADDRESS_ASSIGN");
+                return -1;
+            }
         }
     }
 
@@ -817,11 +957,6 @@ mpvpn_client_run(const mpvpn_client_cfg_t *cfg)
     memset(&g_cli, 0, sizeof(g_cli));
     g_cli.cfg = cfg;
     g_cli.tun.fd = -1;
-    g_running = 1;
-
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
-    signal(SIGPIPE, SIG_IGN);
 
     /* Create event base */
     g_cli.eb = event_base_new();
@@ -831,6 +966,14 @@ mpvpn_client_run(const mpvpn_client_cfg_t *cfg)
     }
 
     g_cli.ev_engine = event_new(g_cli.eb, -1, 0, cli_engine_callback, &g_cli);
+    g_cli.ev_sigint = evsignal_new(g_cli.eb, SIGINT, cli_signal_event_callback, &g_cli);
+    g_cli.ev_sigterm = evsignal_new(g_cli.eb, SIGTERM, cli_signal_event_callback, &g_cli);
+    if (!g_cli.ev_sigint || !g_cli.ev_sigterm) {
+        LOG_ERR("failed to create signal events");
+        return -1;
+    }
+    event_add(g_cli.ev_sigint, NULL);
+    event_add(g_cli.ev_sigterm, NULL);
 
     /* ---- xquic engine setup ---- */
     xqc_engine_ssl_config_t engine_ssl_config;
@@ -999,6 +1142,8 @@ mpvpn_client_run(const mpvpn_client_cfg_t *cfg)
     /* ---- Cleanup ---- */
     LOG_INF("client shutting down");
     cli_cleanup_routes(&g_cli);
+    if (g_cli.ev_sigterm) event_free(g_cli.ev_sigterm);
+    if (g_cli.ev_sigint)  event_free(g_cli.ev_sigint);
     if (g_cli.ev_tun)    event_free(g_cli.ev_tun);
     if (g_cli.ev_engine) event_free(g_cli.ev_engine);
     mpvpn_path_mgr_destroy(&g_cli.path_mgr);

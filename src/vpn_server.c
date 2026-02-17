@@ -46,6 +46,8 @@ struct svr_ctx_s {
     struct event        *ev_engine;  /* xquic timer */
     struct event        *ev_socket;  /* UDP socket read */
     struct event        *ev_tun;     /* TUN device read */
+    struct event        *ev_sigint;
+    struct event        *ev_sigterm;
 
     int                  udp_fd;
     struct sockaddr_in   local_addr;
@@ -84,16 +86,14 @@ struct svr_stream_s {
 /* ---------- static context (M1: single instance) ---------- */
 
 static svr_ctx_t g_svr;
-static volatile sig_atomic_t g_running = 1;
 
 static void
-signal_handler(int sig)
+svr_signal_event_callback(evutil_socket_t sig, short events, void *arg)
 {
     (void)sig;
-    g_running = 0;
-    if (g_svr.eb) {
-        event_base_loopbreak(g_svr.eb);
-    }
+    (void)events;
+    svr_ctx_t *ctx = (svr_ctx_t *)arg;
+    event_base_loopbreak(ctx->eb);
 }
 
 /* ================================================================
@@ -268,16 +268,9 @@ svr_accept(xqc_engine_t *engine, xqc_connection_t *conn,
            const xqc_cid_t *cid, void *user_data)
 {
     (void)engine;
-    svr_ctx_t *ctx = (svr_ctx_t *)user_data;
-
-    svr_conn_t *svr_conn = calloc(1, sizeof(*svr_conn));
-    if (!svr_conn) return -1;
-    svr_conn->ctx = ctx;
-    memcpy(&svr_conn->cid, cid, sizeof(*cid));
-
-    xqc_conn_set_transport_user_data(conn, svr_conn);
-    xqc_conn_get_peer_addr(conn, (struct sockaddr *)&svr_conn->peer_addr,
-                           sizeof(svr_conn->peer_addr), &svr_conn->peer_addrlen);
+    (void)user_data;
+    (void)conn;
+    (void)cid;
 
     LOG_INF("connection accepted");
     return 0;
@@ -715,11 +708,6 @@ mpvpn_server_run(const mpvpn_server_cfg_t *cfg)
     memset(&g_svr, 0, sizeof(g_svr));
     g_svr.cfg = cfg;
     g_svr.tun.fd = -1;
-    g_running = 1;
-
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
-    signal(SIGPIPE, SIG_IGN);
 
     /* Initialize address pool */
     if (mpvpn_addr_pool_init(&g_svr.pool, cfg->subnet) < 0) {
@@ -734,6 +722,14 @@ mpvpn_server_run(const mpvpn_server_cfg_t *cfg)
     }
 
     g_svr.ev_engine = event_new(g_svr.eb, -1, 0, svr_engine_callback, &g_svr);
+    g_svr.ev_sigint = evsignal_new(g_svr.eb, SIGINT, svr_signal_event_callback, &g_svr);
+    g_svr.ev_sigterm = evsignal_new(g_svr.eb, SIGTERM, svr_signal_event_callback, &g_svr);
+    if (!g_svr.ev_sigint || !g_svr.ev_sigterm) {
+        LOG_ERR("failed to create signal events");
+        return -1;
+    }
+    event_add(g_svr.ev_sigint, NULL);
+    event_add(g_svr.ev_sigterm, NULL);
 
     /* ---- xquic engine setup ---- */
     xqc_engine_ssl_config_t engine_ssl_config;
@@ -873,6 +869,8 @@ mpvpn_server_run(const mpvpn_server_cfg_t *cfg)
 
     /* ---- Cleanup ---- */
     LOG_INF("server shutting down");
+    if (g_svr.ev_sigterm) event_free(g_svr.ev_sigterm);
+    if (g_svr.ev_sigint)  event_free(g_svr.ev_sigint);
     if (g_svr.ev_tun)    event_free(g_svr.ev_tun);
     if (g_svr.ev_socket) event_free(g_svr.ev_socket);
     if (g_svr.ev_engine) event_free(g_svr.ev_engine);

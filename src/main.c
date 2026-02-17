@@ -163,7 +163,9 @@ main(int argc, char *argv[])
         char bind_addr[256] = "0.0.0.0";
         int  bind_port = 443;
         if (listen_str) {
-            parse_host_port(listen_str, bind_addr, sizeof(bind_addr), &bind_port);
+            if (parse_host_port(listen_str, bind_addr, sizeof(bind_addr), &bind_port) < 0) {
+                return 1;
+            }
         }
 
         mpvpn_server_cfg_t cfg = {
