@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <inttypes.h>
 #include <event2/event.h>
 
 void
@@ -107,8 +108,11 @@ mpvpn_path_mgr_get_fd(mpvpn_path_mgr_t *mgr, uint64_t path_id)
     if (p)
         return p->fd;
     /* Fallback to primary (path 0) */
-    if (mgr->n_paths > 0)
+    if (mgr->n_paths > 0) {
+        LOG_WRN("path_mgr: path_id=%" PRIu64 " not found, falling back to path 0",
+                path_id);
         return mgr->paths[0].fd;
+    }
     return -1;
 }
 
@@ -117,6 +121,7 @@ mpvpn_path_mgr_destroy(mpvpn_path_mgr_t *mgr)
 {
     for (int i = 0; i < mgr->n_paths; i++) {
         if (mgr->paths[i].ev_socket) {
+            event_del(mgr->paths[i].ev_socket);
             event_free(mgr->paths[i].ev_socket);
             mgr->paths[i].ev_socket = NULL;
         }

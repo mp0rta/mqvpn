@@ -19,7 +19,13 @@ mpvpn_addr_pool_init(mpvpn_addr_pool_t *pool, const char *cidr)
         return -1;
     }
     *slash = '\0';
-    pool->prefix_len = atoi(slash + 1);
+    char *endptr;
+    long plen = strtol(slash + 1, &endptr, 10);
+    if (endptr == slash + 1 || *endptr != '\0' || plen < 0 || plen > 32) {
+        LOG_ERR("addr_pool: invalid prefix length in CIDR: %s", cidr);
+        return -1;
+    }
+    pool->prefix_len = (int)plen;
 
     if (inet_pton(AF_INET, buf, &pool->base) != 1) {
         LOG_ERR("addr_pool: invalid address: %s", buf);
@@ -47,7 +53,6 @@ mpvpn_addr_pool_alloc(mpvpn_addr_pool_t *pool, struct in_addr *out)
     /* Linear scan starting from pool->next */
     for (uint32_t i = 0; i < pool->pool_size; i++) {
         uint32_t off = ((pool->next - 1 + i) % pool->pool_size) + 1;
-        if (off == 0) off = 1;
         /* skip offset 1 (server) */
         if (off == 1) continue;
 
@@ -72,6 +77,10 @@ mpvpn_addr_pool_release(mpvpn_addr_pool_t *pool, const struct in_addr *addr)
 {
     uint32_t base_h = ntohl(pool->base.s_addr);
     uint32_t addr_h = ntohl(addr->s_addr);
+    if (addr_h < base_h) {
+        LOG_WRN("addr_pool: release underflow: addr outside pool range");
+        return;
+    }
     uint32_t off = addr_h - base_h;
 
     if (off >= 1 && off <= pool->pool_size) {

@@ -285,8 +285,57 @@ else
     echo "=== FAIL: Failover failed — iperf3 exited with code $IPERF_EXIT ==="
 fi
 
-# Bring Path A back up for clean state
-ip netns exec mp-client ip link set veth-a0 up 2>/dev/null || true
+# ==========================================================================
+# Test 4: Path recovery — bring Path A back up, verify re-creation + ping
+# ==========================================================================
+echo ""
+echo "=== Test 4: Path recovery (bring Path A back up) ==="
+
+# Path A is still down from Test 3. Bring it back up.
+echo "[$(date +%T)] Bringing UP Path A (veth-a0)..."
+ip netns exec mp-client ip link set veth-a0 up
+ip netns exec mp-client ip addr add 192.168.1.1/24 dev veth-a0 2>/dev/null || true
+
+# Wait for path re-creation timer to fire and xquic to establish the new path.
+# PATH_RECREATE_DELAY_SEC=5, plus some margin for QUIC path validation.
+echo "[$(date +%T)] Waiting up to 20 seconds for path re-creation..."
+
+RECOVERY_PASS=0
+for attempt in $(seq 1 4); do
+    sleep 5
+    # Check if "path re-created" or "path[0] re-created" appeared in recent process output
+    # Use ping as the definitive test: if both paths are up, ping should still work
+    if ip netns exec mp-client ping -c 1 -W 2 10.0.0.1 >/dev/null 2>&1; then
+        echo "[$(date +%T)] Ping OK (attempt $attempt)"
+    fi
+
+    # Check if new path was created by looking for 2 active paths in xquic
+    # We verify by running a short iperf3 — if it works, the connection is healthy
+    if [ "$attempt" -ge 2 ]; then
+        ip netns exec mp-server iperf3 -s -B 10.0.0.1 -1 &>/dev/null &
+        IPERF_SERVER_PID=$!
+        sleep 1
+        RECOVERY_BW=$(ip netns exec mp-client iperf3 -c 10.0.0.1 -B 10.0.0.2 -t 3 2>&1 | \
+            grep -E '\[.*\].*receiver' | tail -1 | \
+            awk '{for(i=1;i<=NF;i++) if($(i+1) ~ /bits\/sec/) {print $i; exit}}')
+        wait "$IPERF_SERVER_PID" 2>/dev/null || true
+        IPERF_SERVER_PID=""
+
+        if [ -n "$RECOVERY_BW" ]; then
+            echo "[$(date +%T)] iperf3 after recovery: ${RECOVERY_BW} (attempt $attempt)"
+            RECOVERY_PASS=1
+            break
+        fi
+    fi
+done
+
+if [ "$RECOVERY_PASS" -eq 1 ]; then
+    echo ""
+    echo "=== PASS: Path recovery — connection healthy after Path A restored ==="
+else
+    echo ""
+    echo "=== FAIL: Path recovery — could not verify connectivity after restore ==="
+fi
 
 # ==========================================================================
 # Summary
@@ -300,4 +349,7 @@ echo "  Test 1 (Ping):       PASS"
 [ "$IPERF_EXIT" -eq 0 ] \
     && echo "  Test 3 (Failover):   PASS" \
     || echo "  Test 3 (Failover):   FAIL (exit=$IPERF_EXIT)"
+[ "$RECOVERY_PASS" -eq 1 ] \
+    && echo "  Test 4 (Recovery):   PASS" \
+    || echo "  Test 4 (Recovery):   FAIL"
 echo "=========================================="

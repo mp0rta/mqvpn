@@ -22,7 +22,10 @@
 #include <xquic/xqc_http3.h>
 
 #define PACKET_BUF_SIZE  65536
-#define MASQUE_FRAME_BUF 65536
+#define MASQUE_FRAME_BUF (PACKET_BUF_SIZE + 16)
+
+#define PATH_RECREATE_DELAY_SEC   5
+#define PATH_RECREATE_MAX_RETRIES 6
 
 static uint64_t
 mpvpn_now_us(void)
@@ -51,6 +54,8 @@ struct cli_ctx_s {
     struct event        *ev_tun;     /* TUN device read (added after tunnel up) */
     struct event        *ev_sigint;
     struct event        *ev_sigterm;
+    struct event        *ev_path_recreate;  /* timer to re-create removed paths */
+    int                  path_recreate_retries;
 
     /* Multipath: per-path UDP sockets */
     mpvpn_path_mgr_t     path_mgr;
@@ -59,6 +64,8 @@ struct cli_ctx_s {
 
     mpvpn_tun_t          tun;
     int                  tun_up;
+    int                  tun_paused;     /* TUN reading paused (QUIC backpressure) */
+    uint64_t             tun_drop_cnt;   /* TUN write failure counter */
 
     /* Split tunneling state */
     int                  routing_configured;
@@ -512,7 +519,14 @@ cli_tun_read_handler(int fd, short what, void *arg)
         xret = xqc_h3_ext_datagram_send(
             conn->h3_conn, frame_buf, frame_written,
             &dgram_id, XQC_DATA_QOS_HIGH);
-        if (xret < 0 && xret != -XQC_EAGAIN) {
+        if (xret == -XQC_EAGAIN) {
+            /* QUIC send queue full — pause TUN reading */
+            event_del(ctx->ev_tun);
+            ctx->tun_paused = 1;
+            LOG_DBG("TUN read paused (QUIC backpressure)");
+            break;
+        }
+        if (xret < 0) {
             LOG_DBG("datagram_send: %d", xret);
         }
     }
@@ -599,6 +613,7 @@ cli_masque_start_tunnel(cli_conn_t *conn)
     ssize_t ret = xqc_h3_request_send_headers(req, &headers, 0);
     if (ret < 0) {
         LOG_ERR("send Extended CONNECT: %zd", ret);
+        free(stream);
         return -1;
     }
 
@@ -637,6 +652,8 @@ cli_request_close_notify(xqc_h3_request_t *h3_request,
     return 0;
 }
 
+#define MAX_CAPSULE_BUF  65536
+
 static int
 cli_stream_append_capsules(cli_stream_t *stream, const uint8_t *buf, size_t len)
 {
@@ -645,6 +662,10 @@ cli_stream_append_capsules(cli_stream_t *stream, const uint8_t *buf, size_t len)
     }
 
     size_t need = stream->capsule_len + len;
+    if (need > MAX_CAPSULE_BUF) {
+        LOG_ERR("capsule buffer exceeds max (%zu > %d)", need, MAX_CAPSULE_BUF);
+        return -1;
+    }
     if (need > stream->capsule_cap) {
         size_t new_cap = stream->capsule_cap ? stream->capsule_cap * 2 : 4096;
         while (new_cap < need) {
@@ -809,13 +830,26 @@ cli_dgram_read_notify(xqc_h3_conn_t *h3_conn, const void *data,
     }
 
     /* Write IP packet to TUN (delivered to local apps) */
-    mpvpn_tun_write(&conn->ctx->tun, payload, payload_len);
+    int wret = mpvpn_tun_write(&conn->ctx->tun, payload, payload_len);
+    if (wret < 0) {
+        conn->ctx->tun_drop_cnt++;
+        LOG_WRN("TUN write failed (drops=%" PRIu64 ")", conn->ctx->tun_drop_cnt);
+    }
 }
 
 static void
-cli_dgram_write_notify(xqc_h3_conn_t *conn, void *user_data)
+cli_dgram_write_notify(xqc_h3_conn_t *h3_conn, void *user_data)
 {
-    (void)conn; (void)user_data;
+    (void)h3_conn;
+    cli_conn_t *conn = (cli_conn_t *)user_data;
+    if (!conn) return;
+    cli_ctx_t *ctx = conn->ctx;
+
+    if (ctx->tun_paused && ctx->ev_tun) {
+        event_add(ctx->ev_tun, NULL);
+        ctx->tun_paused = 0;
+        LOG_DBG("TUN read resumed (QUIC queue has space)");
+    }
 }
 
 static void
@@ -912,6 +946,40 @@ cli_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
 }
 
 static void
+cli_path_recreate_callback(int fd, short what, void *arg)
+{
+    (void)fd; (void)what;
+    cli_ctx_t *ctx = (cli_ctx_t *)arg;
+    cli_conn_t *conn = ctx->conn;
+
+    if (!conn || !conn->h3_conn) {
+        return;  /* connection shutting down */
+    }
+
+    int recreated = 0;
+    for (int i = 0; i < ctx->path_mgr.n_paths; i++) {
+        mpvpn_path_t *p = &ctx->path_mgr.paths[i];
+        if (!p->in_use && p->active && p->fd >= 0) {
+            uint64_t new_path_id = 0;
+            xqc_int_t ret = xqc_conn_create_path(
+                ctx->engine, &conn->cid, &new_path_id, 0);
+            if (ret < 0) {
+                LOG_WRN("path re-create[%d]: xqc_conn_create_path failed: %d",
+                        i, ret);
+            } else {
+                p->path_id = new_path_id;
+                p->in_use = 1;
+                recreated++;
+                LOG_INF("path[%d] re-created: path_id=%" PRIu64 " iface=%s",
+                        i, new_path_id, p->iface);
+            }
+        }
+    }
+
+    xqc_engine_main_logic(ctx->engine);
+}
+
+static void
 cli_path_removed(const xqc_cid_t *cid, uint64_t path_id,
                   void *conn_user_data)
 {
@@ -924,6 +992,20 @@ cli_path_removed(const xqc_cid_t *cid, uint64_t path_id,
         LOG_INF("path removed: path_id=%" PRIu64 " iface=%s", path_id, p->iface);
         p->in_use = 0;
         p->path_id = 0;
+
+        /* Schedule path re-creation (with retry limit) */
+        if (ctx->ev_path_recreate && p->active && p->fd >= 0
+            && ctx->path_recreate_retries < PATH_RECREATE_MAX_RETRIES) {
+            ctx->path_recreate_retries++;
+            struct timeval tv = { .tv_sec = PATH_RECREATE_DELAY_SEC };
+            event_add(ctx->ev_path_recreate, &tv);
+            LOG_INF("path re-creation scheduled in %d sec (attempt %d/%d)",
+                    PATH_RECREATE_DELAY_SEC,
+                    ctx->path_recreate_retries, PATH_RECREATE_MAX_RETRIES);
+        } else if (ctx->path_recreate_retries >= PATH_RECREATE_MAX_RETRIES) {
+            LOG_WRN("path re-creation: max retries (%d) reached, giving up",
+                    PATH_RECREATE_MAX_RETRIES);
+        }
     } else {
         LOG_WRN("path_removed: unknown path_id=%" PRIu64, path_id);
     }
@@ -966,6 +1048,8 @@ mpvpn_client_run(const mpvpn_client_cfg_t *cfg)
     }
 
     g_cli.ev_engine = event_new(g_cli.eb, -1, 0, cli_engine_callback, &g_cli);
+    g_cli.ev_path_recreate = event_new(g_cli.eb, -1, 0,
+                                        cli_path_recreate_callback, &g_cli);
     g_cli.ev_sigint = evsignal_new(g_cli.eb, SIGINT, cli_signal_event_callback, &g_cli);
     g_cli.ev_sigterm = evsignal_new(g_cli.eb, SIGTERM, cli_signal_event_callback, &g_cli);
     if (!g_cli.ev_sigint || !g_cli.ev_sigterm) {
@@ -1107,6 +1191,7 @@ mpvpn_client_run(const mpvpn_client_cfg_t *cfg)
     conn_settings.max_datagram_frame_size = 65535;
     conn_settings.proto_version = XQC_VERSION_V1;
     conn_settings.enable_multipath = multipath;
+    conn_settings.mp_ping_on = multipath;
 
     xqc_conn_ssl_config_t conn_ssl_config;
     memset(&conn_ssl_config, 0, sizeof(conn_ssl_config));
@@ -1144,8 +1229,9 @@ mpvpn_client_run(const mpvpn_client_cfg_t *cfg)
     cli_cleanup_routes(&g_cli);
     if (g_cli.ev_sigterm) event_free(g_cli.ev_sigterm);
     if (g_cli.ev_sigint)  event_free(g_cli.ev_sigint);
-    if (g_cli.ev_tun)    event_free(g_cli.ev_tun);
-    if (g_cli.ev_engine) event_free(g_cli.ev_engine);
+    if (g_cli.ev_tun)            event_free(g_cli.ev_tun);
+    if (g_cli.ev_path_recreate)  event_free(g_cli.ev_path_recreate);
+    if (g_cli.ev_engine)         event_free(g_cli.ev_engine);
     mpvpn_path_mgr_destroy(&g_cli.path_mgr);
     mpvpn_tun_destroy(&g_cli.tun);
     xqc_engine_destroy(g_cli.engine);

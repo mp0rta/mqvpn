@@ -47,6 +47,7 @@ mpvpn_tun_create(mpvpn_tun_t *tun, const char *dev_name)
 
     tun->fd = fd;
     strncpy(tun->name, ifr.ifr_name, IFNAMSIZ - 1);
+    tun->name[IFNAMSIZ - 1] = '\0';
     LOG_INF("TUN device %s created (fd=%d)", tun->name, tun->fd);
     return 0;
 }

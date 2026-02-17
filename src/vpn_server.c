@@ -20,7 +20,7 @@
 #include <xquic/xqc_http3.h>
 
 #define PACKET_BUF_SIZE  65536
-#define MASQUE_FRAME_BUF 65536
+#define MASQUE_FRAME_BUF (PACKET_BUF_SIZE + 16)
 
 static uint64_t
 mpvpn_now_us(void)
@@ -54,6 +54,8 @@ struct svr_ctx_s {
     socklen_t            local_addrlen;
 
     mpvpn_tun_t          tun;
+    int                  tun_paused;     /* TUN reading paused (QUIC backpressure) */
+    uint64_t             tun_drop_cnt;   /* TUN write failure counter */
     mpvpn_addr_pool_t    pool;
 
     /* M1: single client — track the active conn for return traffic */
@@ -251,7 +253,14 @@ svr_tun_read_handler(int fd, short what, void *arg)
         xret = xqc_h3_ext_datagram_send(
             ctx->active_conn->h3_conn, frame_buf, frame_written,
             &dgram_id, XQC_DATA_QOS_HIGH);
-        if (xret < 0 && xret != -XQC_EAGAIN) {
+        if (xret == -XQC_EAGAIN) {
+            /* QUIC send queue full — pause TUN reading */
+            event_del(ctx->ev_tun);
+            ctx->tun_paused = 1;
+            LOG_DBG("TUN read paused (QUIC backpressure)");
+            break;
+        }
+        if (xret < 0) {
             LOG_DBG("datagram_send return: %d", xret);
         }
     }
@@ -483,6 +492,13 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
         return -1;
     }
 
+    /* M1: refuse if another client is already tunneled */
+    if (ctx->active_conn && ctx->active_conn != conn
+        && ctx->active_conn->tunnel_established) {
+        LOG_WRN("rejecting new MASQUE tunnel: active connection exists");
+        return -1;
+    }
+
     conn->tunnel_established = 1;
     ctx->active_conn = conn;
     LOG_INF("MASQUE tunnel established (stream_id=%" PRIu64 ")",
@@ -607,14 +623,27 @@ svr_dgram_read_notify(xqc_h3_conn_t *conn, const void *data,
     }
 
     /* Write raw IP packet to TUN (kernel routes to internet via NAT) */
-    mpvpn_tun_write(&svr_conn->ctx->tun, payload, payload_len);
+    int wret = mpvpn_tun_write(&svr_conn->ctx->tun, payload, payload_len);
+    if (wret < 0) {
+        svr_conn->ctx->tun_drop_cnt++;
+        LOG_WRN("TUN write failed (drops=%" PRIu64 ")",
+                svr_conn->ctx->tun_drop_cnt);
+    }
 }
 
 static void
-svr_dgram_write_notify(xqc_h3_conn_t *conn, void *user_data)
+svr_dgram_write_notify(xqc_h3_conn_t *h3_conn, void *user_data)
 {
-    (void)conn; (void)user_data;
-    /* Could retry pending sends here; for M1 we rely on the TUN read loop */
+    (void)h3_conn;
+    svr_conn_t *svr_conn = (svr_conn_t *)user_data;
+    if (!svr_conn) return;
+    svr_ctx_t *ctx = svr_conn->ctx;
+
+    if (ctx->tun_paused && ctx->ev_tun) {
+        event_add(ctx->ev_tun, NULL);
+        ctx->tun_paused = 0;
+        LOG_DBG("TUN read resumed (QUIC queue has space)");
+    }
 }
 
 static void
@@ -779,6 +808,7 @@ mpvpn_server_run(const mpvpn_server_cfg_t *cfg)
     conn_settings.max_datagram_frame_size = 65535;
     conn_settings.proto_version = XQC_VERSION_V1;
     conn_settings.enable_multipath = 1;
+    conn_settings.mp_ping_on = 1;
     xqc_server_set_conn_settings(g_svr.engine, &conn_settings);
 
     /* H3 callbacks */
