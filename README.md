@@ -16,7 +16,7 @@ TUN (IP packet)
 ## Features
 
 - **MASQUE CONNECT-IP** (RFC 9484) — IP tunneling over HTTP/3
-- **Multipath QUIC** (RFC 9443) — bind up to 4 network interfaces; this is a QUIC transport extension independent of MASQUE
+- **Multipath QUIC** (RFC 9443) — bind multiple network interfaces; this is a QUIC transport extension independent of MASQUE
 - **Seamless failover** — zero-downtime path switching when an interface goes down
 - **Dynamic TUN MTU** — derived from QUIC path MTU / `max_datagram_frame_size` minus MASQUE framing overhead, adjusted via PMTUD
 - **Split tunneling** — server IP routed via original gateway to prevent routing loops
