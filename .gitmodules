@@ -1,4 +1,4 @@
 [submodule "third_party/xquic"]
 	path = third_party/xquic
-	url = git@mp0rta:mp0rta/xquic.git
+	url = https://github.com/mp0rta/xquic.git
 	branch = feature/masque
