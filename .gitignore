@@ -1,5 +1,6 @@
 build/
 impl_status.md
+benchmarks/
 *.o
 *.d
 CMakeCache.txt
