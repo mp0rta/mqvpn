@@ -27,6 +27,7 @@
 #define PATH_RECREATE_DELAY_SEC   5
 #define PATH_RECREATE_MAX_RETRIES 6
 #define TUN_RESUME_SAFETY_MS      100
+#define XQC_SNDQ_MAX_PKTS         16384
 
 static uint64_t
 mpvpn_now_us(void)
@@ -93,6 +94,8 @@ struct cli_conn_s {
     int                  addr_assigned;   /* ADDRESS_ASSIGN received */
     uint8_t              assigned_ip[4];
     uint8_t              assigned_prefix;
+    uint64_t             dgram_lost_cnt;
+    uint64_t             dgram_acked_cnt;
 };
 
 /* ---------- per-stream state ---------- */
@@ -108,6 +111,21 @@ struct cli_stream_s {
 /* ---------- static context ---------- */
 
 static cli_ctx_t g_cli;
+
+static void
+cli_log_conn_stats(const char *tag, const xqc_cid_t *cid)
+{
+    if (!g_cli.engine || !cid) {
+        return;
+    }
+    xqc_conn_stats_t st = xqc_conn_get_stats(g_cli.engine, cid);
+    LOG_INF("%s: send=%u recv=%u lost=%u lost_dgram=%u srtt=%.2fms min_rtt=%.2fms inflight=%" PRIu64 " app_bytes=%" PRIu64 " standby_bytes=%" PRIu64 " mp_state=%d",
+            tag,
+            st.send_count, st.recv_count, st.lost_count, st.lost_dgram_count,
+            (double)st.srtt / 1000.0, (double)st.min_rtt / 1000.0,
+            st.inflight_bytes, st.total_app_bytes, st.standby_path_app_bytes,
+            st.mp_state);
+}
 
 static void
 cli_signal_event_callback(evutil_socket_t sig, short events, void *arg)
@@ -574,6 +592,10 @@ cli_h3_conn_close_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
     cli_conn_t *conn = (cli_conn_t *)user_data;
     int err = xqc_h3_conn_get_errno(h3_conn);
     LOG_INF("connection closed (errno=%d)", err);
+    cli_log_conn_stats("client conn stats",
+                       cid ? cid : &conn->cid);
+    LOG_INF("client dgram summary: acked=%" PRIu64 " lost=%" PRIu64,
+            conn->dgram_acked_cnt, conn->dgram_lost_cnt);
 
     if (conn->ctx->eb) {
         event_base_loopbreak(conn->ctx->eb);
@@ -878,14 +900,25 @@ static void
 cli_dgram_acked_notify(xqc_h3_conn_t *conn, uint64_t dgram_id,
                         void *user_data)
 {
-    (void)conn; (void)dgram_id; (void)user_data;
+    (void)conn; (void)dgram_id;
+    cli_conn_t *cli_conn = (cli_conn_t *)user_data;
+    if (!cli_conn) return;
+    cli_conn->dgram_acked_cnt++;
 }
 
 static int
 cli_dgram_lost_notify(xqc_h3_conn_t *conn, uint64_t dgram_id,
                        void *user_data)
 {
-    (void)conn; (void)dgram_id; (void)user_data;
+    (void)conn;
+    cli_conn_t *cli_conn = (cli_conn_t *)user_data;
+    if (!cli_conn) return 0;
+    cli_conn->dgram_lost_cnt++;
+    if ((cli_conn->dgram_lost_cnt % 256) == 0) {
+        LOG_WRN("client datagram loss checkpoint: lost=%" PRIu64 " acked=%" PRIu64 " (last_dgram_id=%" PRIu64 ")",
+                cli_conn->dgram_lost_cnt, cli_conn->dgram_acked_cnt, dgram_id);
+        cli_log_conn_stats("client loss checkpoint", &cli_conn->cid);
+    }
     return 0;
 }
 
@@ -1231,6 +1264,10 @@ mpvpn_client_run(const mpvpn_client_cfg_t *cfg)
     conn_settings.proto_version = XQC_VERSION_V1;
     conn_settings.enable_multipath = multipath;
     conn_settings.mp_ping_on = multipath;
+    conn_settings.pacing_on = 1;
+    conn_settings.cong_ctrl_callback = xqc_bbr_cb;
+    conn_settings.sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
+    conn_settings.so_sndbuf = 8 * 1024 * 1024;
 
     xqc_conn_ssl_config_t conn_ssl_config;
     memset(&conn_ssl_config, 0, sizeof(conn_ssl_config));

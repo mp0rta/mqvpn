@@ -22,6 +22,7 @@
 #define PACKET_BUF_SIZE      65536
 #define MASQUE_FRAME_BUF     (PACKET_BUF_SIZE + 16)
 #define TUN_RESUME_SAFETY_MS 100
+#define XQC_SNDQ_MAX_PKTS    16384
 
 static uint64_t
 mpvpn_now_us(void)
@@ -77,6 +78,8 @@ struct svr_conn_s {
     uint64_t              masque_stream_id;
     struct in_addr        assigned_ip;
     int                   tunnel_established;
+    uint64_t              dgram_lost_cnt;
+    uint64_t              dgram_acked_cnt;
 };
 
 /* ---------- per-stream (request) state ---------- */
@@ -90,6 +93,21 @@ struct svr_stream_s {
 /* ---------- static context (M1: single instance) ---------- */
 
 static svr_ctx_t g_svr;
+
+static void
+svr_log_conn_stats(const char *tag, const xqc_cid_t *cid)
+{
+    if (!g_svr.engine || !cid) {
+        return;
+    }
+    xqc_conn_stats_t st = xqc_conn_get_stats(g_svr.engine, cid);
+    LOG_INF("%s: send=%u recv=%u lost=%u lost_dgram=%u srtt=%.2fms min_rtt=%.2fms inflight=%" PRIu64 " app_bytes=%" PRIu64 " standby_bytes=%" PRIu64 " mp_state=%d",
+            tag,
+            st.send_count, st.recv_count, st.lost_count, st.lost_dgram_count,
+            (double)st.srtt / 1000.0, (double)st.min_rtt / 1000.0,
+            st.inflight_bytes, st.total_app_bytes, st.standby_path_app_bytes,
+            st.mp_state);
+}
 
 static void
 svr_signal_event_callback(evutil_socket_t sig, short events, void *arg)
@@ -204,6 +222,7 @@ svr_socket_read_handler(svr_ctx_t *ctx)
         }
     }
     xqc_engine_finish_recv(ctx->engine);
+    xqc_engine_main_logic(ctx->engine);
 }
 
 static void
@@ -376,6 +395,11 @@ svr_h3_conn_close_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
     (void)h3_conn; (void)cid;
     svr_conn_t *svr_conn = (svr_conn_t *)conn_user_data;
     if (!svr_conn) return 0;
+
+    svr_log_conn_stats("server conn stats",
+                       cid ? cid : &svr_conn->cid);
+    LOG_INF("server dgram summary: acked=%" PRIu64 " lost=%" PRIu64,
+            svr_conn->dgram_acked_cnt, svr_conn->dgram_lost_cnt);
 
     if (svr_conn->assigned_ip.s_addr) {
         mpvpn_addr_pool_release(&svr_conn->ctx->pool, &svr_conn->assigned_ip);
@@ -673,15 +697,26 @@ static void
 svr_dgram_acked_notify(xqc_h3_conn_t *conn, uint64_t dgram_id,
                         void *user_data)
 {
-    (void)conn; (void)dgram_id; (void)user_data;
+    (void)conn; (void)dgram_id;
+    svr_conn_t *svr_conn = (svr_conn_t *)user_data;
+    if (!svr_conn) return;
+    svr_conn->dgram_acked_cnt++;
 }
 
 static int
 svr_dgram_lost_notify(xqc_h3_conn_t *conn, uint64_t dgram_id,
                        void *user_data)
 {
-    (void)conn; (void)dgram_id; (void)user_data;
-    LOG_DBG("datagram lost: %" PRIu64, dgram_id);
+    (void)conn;
+    svr_conn_t *svr_conn = (svr_conn_t *)user_data;
+    if (!svr_conn) return 0;
+
+    svr_conn->dgram_lost_cnt++;
+    if ((svr_conn->dgram_lost_cnt % 256) == 0) {
+        LOG_WRN("datagram loss checkpoint: lost=%" PRIu64 " acked=%" PRIu64 " (last_dgram_id=%" PRIu64 ")",
+                svr_conn->dgram_lost_cnt, svr_conn->dgram_acked_cnt, dgram_id);
+        svr_log_conn_stats("server loss checkpoint", &svr_conn->cid);
+    }
     return 0;
 }
 
@@ -833,6 +868,10 @@ mpvpn_server_run(const mpvpn_server_cfg_t *cfg)
     conn_settings.proto_version = XQC_VERSION_V1;
     conn_settings.enable_multipath = 1;
     conn_settings.mp_ping_on = 1;
+    conn_settings.pacing_on = 1;
+    conn_settings.cong_ctrl_callback = xqc_bbr_cb;
+    conn_settings.sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
+    conn_settings.so_sndbuf = 8 * 1024 * 1024;
     xqc_server_set_conn_settings(g_svr.engine, &conn_settings);
 
     /* H3 callbacks */
