@@ -19,8 +19,9 @@
 #include <xquic/xquic.h>
 #include <xquic/xqc_http3.h>
 
-#define PACKET_BUF_SIZE  65536
-#define MASQUE_FRAME_BUF (PACKET_BUF_SIZE + 16)
+#define PACKET_BUF_SIZE      65536
+#define MASQUE_FRAME_BUF     (PACKET_BUF_SIZE + 16)
+#define TUN_RESUME_SAFETY_MS 100
 
 static uint64_t
 mpvpn_now_us(void)
@@ -46,6 +47,7 @@ struct svr_ctx_s {
     struct event        *ev_engine;  /* xquic timer */
     struct event        *ev_socket;  /* UDP socket read */
     struct event        *ev_tun;     /* TUN device read */
+    struct event        *ev_tun_resume; /* safety timer to resume TUN read */
     struct event        *ev_sigint;
     struct event        *ev_sigterm;
 
@@ -219,6 +221,18 @@ svr_socket_event_callback(int fd, short what, void *arg)
  * ================================================================ */
 
 static void
+svr_tun_resume_safety(int fd, short what, void *arg)
+{
+    (void)fd; (void)what;
+    svr_ctx_t *ctx = (svr_ctx_t *)arg;
+    if (ctx->tun_paused && ctx->ev_tun) {
+        event_add(ctx->ev_tun, NULL);
+        ctx->tun_paused = 0;
+        LOG_DBG("TUN read resumed (safety timer)");
+    }
+}
+
+static void
 svr_tun_read_handler(int fd, short what, void *arg)
 {
     (void)fd; (void)what;
@@ -258,6 +272,9 @@ svr_tun_read_handler(int fd, short what, void *arg)
             event_del(ctx->ev_tun);
             ctx->tun_paused = 1;
             LOG_DBG("TUN read paused (QUIC backpressure)");
+            struct timeval tv = { .tv_sec = 0,
+                                  .tv_usec = TUN_RESUME_SAFETY_MS * 1000 };
+            event_add(ctx->ev_tun_resume, &tv);
             break;
         }
         if (xret < 0) {
@@ -392,6 +409,13 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
     svr_ctx_t *ctx = conn->ctx;
     ssize_t ret;
 
+    /* M1: refuse early if another client is already tunneled */
+    if (ctx->active_conn && ctx->active_conn != conn
+        && ctx->active_conn->tunnel_established) {
+        LOG_WRN("rejecting new MASQUE tunnel: active connection exists");
+        return -1;
+    }
+
     /* 1. Send 200 response headers (fin=0 to keep stream open) */
     xqc_http_header_t resp_hdrs[] = {
         { .name  = {.iov_base = ":status",          .iov_len = 7},
@@ -489,13 +513,6 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
     ret = xqc_h3_request_send_body(h3_request, route_capsule, rc_written, 0);
     if (ret < 0) {
         LOG_ERR("send ROUTE_ADVERTISEMENT: %zd", ret);
-        return -1;
-    }
-
-    /* M1: refuse if another client is already tunneled */
-    if (ctx->active_conn && ctx->active_conn != conn
-        && ctx->active_conn->tunnel_established) {
-        LOG_WRN("rejecting new MASQUE tunnel: active connection exists");
         return -1;
     }
 
@@ -626,8 +643,13 @@ svr_dgram_read_notify(xqc_h3_conn_t *conn, const void *data,
     int wret = mpvpn_tun_write(&svr_conn->ctx->tun, payload, payload_len);
     if (wret < 0) {
         svr_conn->ctx->tun_drop_cnt++;
-        LOG_WRN("TUN write failed (drops=%" PRIu64 ")",
-                svr_conn->ctx->tun_drop_cnt);
+        if (wret == MPVPN_TUN_EAGAIN) {
+            LOG_DBG("TUN write EAGAIN (drops=%" PRIu64 ")",
+                    svr_conn->ctx->tun_drop_cnt);
+        } else {
+            LOG_WRN("TUN write failed (drops=%" PRIu64 ")",
+                    svr_conn->ctx->tun_drop_cnt);
+        }
     }
 }
 
@@ -642,6 +664,7 @@ svr_dgram_write_notify(xqc_h3_conn_t *h3_conn, void *user_data)
     if (ctx->tun_paused && ctx->ev_tun) {
         event_add(ctx->ev_tun, NULL);
         ctx->tun_paused = 0;
+        evtimer_del(ctx->ev_tun_resume);
         LOG_DBG("TUN read resumed (QUIC queue has space)");
     }
 }
@@ -751,6 +774,7 @@ mpvpn_server_run(const mpvpn_server_cfg_t *cfg)
     }
 
     g_svr.ev_engine = event_new(g_svr.eb, -1, 0, svr_engine_callback, &g_svr);
+    g_svr.ev_tun_resume = evtimer_new(g_svr.eb, svr_tun_resume_safety, &g_svr);
     g_svr.ev_sigint = evsignal_new(g_svr.eb, SIGINT, svr_signal_event_callback, &g_svr);
     g_svr.ev_sigterm = evsignal_new(g_svr.eb, SIGTERM, svr_signal_event_callback, &g_svr);
     if (!g_svr.ev_sigint || !g_svr.ev_sigterm) {
@@ -901,9 +925,10 @@ mpvpn_server_run(const mpvpn_server_cfg_t *cfg)
     LOG_INF("server shutting down");
     if (g_svr.ev_sigterm) event_free(g_svr.ev_sigterm);
     if (g_svr.ev_sigint)  event_free(g_svr.ev_sigint);
-    if (g_svr.ev_tun)    event_free(g_svr.ev_tun);
-    if (g_svr.ev_socket) event_free(g_svr.ev_socket);
-    if (g_svr.ev_engine) event_free(g_svr.ev_engine);
+    if (g_svr.ev_tun)         event_free(g_svr.ev_tun);
+    if (g_svr.ev_tun_resume) event_free(g_svr.ev_tun_resume);
+    if (g_svr.ev_socket)     event_free(g_svr.ev_socket);
+    if (g_svr.ev_engine)     event_free(g_svr.ev_engine);
     if (g_svr.udp_fd >= 0) close(g_svr.udp_fd);
     mpvpn_tun_destroy(&g_svr.tun);
     xqc_engine_destroy(g_svr.engine);

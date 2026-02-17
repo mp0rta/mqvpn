@@ -26,6 +26,7 @@
 
 #define PATH_RECREATE_DELAY_SEC   5
 #define PATH_RECREATE_MAX_RETRIES 6
+#define TUN_RESUME_SAFETY_MS      100
 
 static uint64_t
 mpvpn_now_us(void)
@@ -55,6 +56,7 @@ struct cli_ctx_s {
     struct event        *ev_sigint;
     struct event        *ev_sigterm;
     struct event        *ev_path_recreate;  /* timer to re-create removed paths */
+    struct event        *ev_tun_resume;     /* safety timer to resume TUN read */
     int                  path_recreate_retries;
 
     /* Multipath: per-path UDP sockets */
@@ -491,6 +493,18 @@ cli_setup_tun(cli_ctx_t *ctx, const uint8_t *ip, uint8_t prefix)
  * ================================================================ */
 
 static void
+cli_tun_resume_safety(int fd, short what, void *arg)
+{
+    (void)fd; (void)what;
+    cli_ctx_t *ctx = (cli_ctx_t *)arg;
+    if (ctx->tun_paused && ctx->ev_tun) {
+        event_add(ctx->ev_tun, NULL);
+        ctx->tun_paused = 0;
+        LOG_DBG("TUN read resumed (safety timer)");
+    }
+}
+
+static void
 cli_tun_read_handler(int fd, short what, void *arg)
 {
     (void)fd; (void)what;
@@ -524,6 +538,9 @@ cli_tun_read_handler(int fd, short what, void *arg)
             event_del(ctx->ev_tun);
             ctx->tun_paused = 1;
             LOG_DBG("TUN read paused (QUIC backpressure)");
+            struct timeval tv = { .tv_sec = 0,
+                                  .tv_usec = TUN_RESUME_SAFETY_MS * 1000 };
+            event_add(ctx->ev_tun_resume, &tv);
             break;
         }
         if (xret < 0) {
@@ -833,7 +850,11 @@ cli_dgram_read_notify(xqc_h3_conn_t *h3_conn, const void *data,
     int wret = mpvpn_tun_write(&conn->ctx->tun, payload, payload_len);
     if (wret < 0) {
         conn->ctx->tun_drop_cnt++;
-        LOG_WRN("TUN write failed (drops=%" PRIu64 ")", conn->ctx->tun_drop_cnt);
+        if (wret == MPVPN_TUN_EAGAIN) {
+            LOG_DBG("TUN write EAGAIN (drops=%" PRIu64 ")", conn->ctx->tun_drop_cnt);
+        } else {
+            LOG_WRN("TUN write failed (drops=%" PRIu64 ")", conn->ctx->tun_drop_cnt);
+        }
     }
 }
 
@@ -848,6 +869,7 @@ cli_dgram_write_notify(xqc_h3_conn_t *h3_conn, void *user_data)
     if (ctx->tun_paused && ctx->ev_tun) {
         event_add(ctx->ev_tun, NULL);
         ctx->tun_paused = 0;
+        evtimer_del(ctx->ev_tun_resume);
         LOG_DBG("TUN read resumed (QUIC queue has space)");
     }
 }
@@ -977,6 +999,22 @@ cli_path_recreate_callback(int fd, short what, void *arg)
     }
 
     xqc_engine_main_logic(ctx->engine);
+
+    /* Reset retries only if all recreated paths survived main_logic
+     * (i.e. were not immediately removed by xquic) */
+    if (recreated > 0) {
+        int all_survived = 1;
+        for (int i = 0; i < ctx->path_mgr.n_paths; i++) {
+            mpvpn_path_t *p = &ctx->path_mgr.paths[i];
+            if (p->active && p->fd >= 0 && !p->in_use) {
+                all_survived = 0;
+                break;
+            }
+        }
+        if (all_survived) {
+            ctx->path_recreate_retries = 0;
+        }
+    }
 }
 
 static void
@@ -1050,6 +1088,7 @@ mpvpn_client_run(const mpvpn_client_cfg_t *cfg)
     g_cli.ev_engine = event_new(g_cli.eb, -1, 0, cli_engine_callback, &g_cli);
     g_cli.ev_path_recreate = event_new(g_cli.eb, -1, 0,
                                         cli_path_recreate_callback, &g_cli);
+    g_cli.ev_tun_resume = evtimer_new(g_cli.eb, cli_tun_resume_safety, &g_cli);
     g_cli.ev_sigint = evsignal_new(g_cli.eb, SIGINT, cli_signal_event_callback, &g_cli);
     g_cli.ev_sigterm = evsignal_new(g_cli.eb, SIGTERM, cli_signal_event_callback, &g_cli);
     if (!g_cli.ev_sigint || !g_cli.ev_sigterm) {
@@ -1230,6 +1269,7 @@ mpvpn_client_run(const mpvpn_client_cfg_t *cfg)
     if (g_cli.ev_sigterm) event_free(g_cli.ev_sigterm);
     if (g_cli.ev_sigint)  event_free(g_cli.ev_sigint);
     if (g_cli.ev_tun)            event_free(g_cli.ev_tun);
+    if (g_cli.ev_tun_resume)     event_free(g_cli.ev_tun_resume);
     if (g_cli.ev_path_recreate)  event_free(g_cli.ev_path_recreate);
     if (g_cli.ev_engine)         event_free(g_cli.ev_engine);
     mpvpn_path_mgr_destroy(&g_cli.path_mgr);

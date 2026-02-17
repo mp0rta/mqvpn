@@ -183,7 +183,7 @@ mpvpn_tun_write(mpvpn_tun_t *tun, const uint8_t *buf, size_t len)
     ssize_t n = write(tun->fd, buf, len);
     if (n < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return 0;
+            return MPVPN_TUN_EAGAIN;
         }
         LOG_ERR("tun write: %s", strerror(errno));
         return -1;

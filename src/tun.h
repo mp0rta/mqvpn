@@ -6,6 +6,9 @@
 #include <net/if.h>
 #include <netinet/in.h>
 
+/* mpvpn_tun_write() returns this when the kernel buffer is full (EAGAIN). */
+#define MPVPN_TUN_EAGAIN (-2)
+
 typedef struct {
     int             fd;
     char            name[IFNAMSIZ];
