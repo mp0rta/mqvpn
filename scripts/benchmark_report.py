@@ -4,6 +4,7 @@
 import json
 import sys
 import os
+import re
 from pathlib import Path
 
 
@@ -40,6 +41,40 @@ def parse_iperf3_json(filepath):
     return None
 
 
+def parse_udp_sweep(bench_dir, prefix):
+    """Parse UDP sweep results and return sorted list of (rate_mbps, loss%, jitter)."""
+    results = []
+    for f in sorted(bench_dir.glob(f"{prefix}_*.json")):
+        # Skip DL files when looking for UL
+        # e.g. prefix="m3_udp_sweep_1path" should not match "m3_udp_sweep_1path_dl_10M.json"
+        suffix = f.name[len(prefix):]  # e.g. "_dl_10M.json" or "_10M.json"
+        if '_dl' not in prefix and suffix.startswith('_dl'):
+            continue
+        # Extract rate from filename like m3_udp_sweep_1path_85M.json
+        m = re.search(r'_(\d+)M\.json$', f.name)
+        if not m:
+            continue
+        rate = int(m.group(1))
+        result = parse_iperf3_json(str(f))
+        if result and 'error' not in result and result['type'] == 'UDP':
+            results.append({
+                'rate': rate,
+                'mbps': result['mbps'],
+                'lost_pct': result['lost_pct'],
+                'jitter_ms': result['jitter_ms'],
+            })
+    results.sort(key=lambda x: x['rate'])
+    return results
+
+
+def find_max_udp_bandwidth(sweep_results, loss_threshold=1.0):
+    """Find highest rate with loss < threshold. Scan from highest rate downward."""
+    for r in reversed(sweep_results):
+        if r['lost_pct'] < loss_threshold:
+            return r
+    return None
+
+
 def parse_failover_intervals(filepath):
     """Extract per-second throughput from failover test."""
     with open(filepath) as f:
@@ -68,7 +103,6 @@ def parse_ping(filepath):
             stats['avg_ms'] = float(parts[1])
             stats['max_ms'] = float(parts[2])
         if 'packet loss' in line:
-            # "X packets transmitted, Y received, Z% packet loss"
             for token in line.split(','):
                 if 'packet loss' in token:
                     stats['loss_pct'] = token.strip().split('%')[0].strip()
@@ -81,8 +115,16 @@ def generate_report(bench_dir):
     report = []
     report.append("# mpvpn M3 Benchmark Report\n")
     report.append(f"Date: {os.popen('date -I').read().strip()}")
-    report.append("Environment: Local machine (2x ISP) → Kagoya VPS (1 Gbps shared)")
-    report.append("Underlay: Tailscale (single-path) / Direct IP (multipath)")
+    report.append("Environment: Local machine (2x ISP) → ConoHa VPS (100 Mbps)")
+    report.append("Underlay: Direct WAN (163.44.118.182)")
+    report.append("Protocol: MASQUE CONNECT-IP (RFC 9484) over HTTP/3")
+    report.append("")
+    report.append("IP packets are tunneled as HTTP Datagrams (Context ID=0) "
+                  "on an H3 Extended CONNECT stream (:protocol=connect-ip), "
+                  "carried over QUIC DATAGRAM frames (RFC 9221). "
+                  "Capsules (ADDRESS_ASSIGN, ROUTE_ADVERTISEMENT) on the "
+                  "CONNECT stream handle control; Multipath QUIC (RFC 9443) "
+                  "is a separate transport extension.")
     report.append("")
 
     # Latency
@@ -90,8 +132,9 @@ def generate_report(bench_dir):
     report.append("| Path | Min (ms) | Avg (ms) | Max (ms) | Loss |")
     report.append("|------|----------|----------|----------|------|")
 
-    for name, file in [("Direct (Tailscale)", "m3_latency_direct.txt"),
-                        ("VPN tunnel",         "m3_latency_vpn.txt")]:
+    for name, file in [("Direct WAN (IPv6)",   "m3_latency_direct_wan_v6.txt"),
+                        ("1-path QUIC tunnel", "m3_latency_vpn_1path.txt"),
+                        ("2-path QUIC tunnel", "m3_latency_vpn_2path.txt")]:
         path = bench_dir / file
         if path.exists():
             stats = parse_ping(str(path))
@@ -101,41 +144,81 @@ def generate_report(bench_dir):
                     f"| {name} | {stats['min_ms']:.1f} | "
                     f"{stats['avg_ms']:.1f} | {stats['max_ms']:.1f} | {loss}% |")
 
-    # Throughput
-    report.append("\n## Throughput\n")
+    # TCP Throughput
+    report.append("\n## TCP Throughput\n")
     report.append("| Test | Direction | Mbps | Notes |")
     report.append("|------|-----------|------|-------|")
 
-    test_files = [
-        ("Direct (no VPN, iperf3 TCP)",  "m3_iperf_direct.json",       "UL"),
-        ("1-path QUIC (iperf3 TCP)",     "m3_iperf_sp_tcp.json",       "UL"),
-        ("1-path QUIC (iperf3 TCP)",     "m3_iperf_sp_tcp_dl.json",    "DL"),
-        ("1-path QUIC (iperf3 UDP)",     "m3_iperf_sp_udp.json",       "UL"),
-        ("1-path QUIC (iperf3 UDP)",     "m3_iperf_sp_udp_dl.json",    "DL"),
-        ("2-path QUIC (iperf3 TCP)",     "m3_iperf_mp_tcp.json",       "UL"),
-        ("2-path QUIC (iperf3 TCP)",     "m3_iperf_mp_tcp_dl.json",    "DL"),
-        ("2-path QUIC (iperf3 UDP)",     "m3_iperf_mp_udp.json",       "UL"),
+    tcp_tests = [
+        ("Direct (no VPN)",  "m3_iperf_direct_tcp_ul.json", "UL"),
+        ("Direct (no VPN)",  "m3_iperf_direct_tcp_dl.json", "DL"),
+        ("1-path QUIC",      "m3_iperf_1path_tcp_ul.json",  "UL"),
+        ("1-path QUIC",      "m3_iperf_1path_tcp_dl.json",  "DL"),
+        ("2-path QUIC",      "m3_iperf_mp_tcp.json",        "UL"),
+        ("2-path QUIC",      "m3_iperf_mp_tcp_dl.json",     "DL"),
     ]
 
-    for test_name, filename, direction in test_files:
+    for test_name, filename, direction in tcp_tests:
         path = bench_dir / filename
         if path.exists():
             result = parse_iperf3_json(str(path))
-            if result and 'error' not in result:
-                if result['type'] == 'TCP':
-                    notes = f"retrans={result.get('retransmits', 'N/A')}"
-                    mbps = result['recv_mbps']
-                else:
-                    notes = (f"loss={result.get('lost_pct', 0):.1f}%, "
-                             f"jitter={result.get('jitter_ms', 0):.1f}ms")
-                    mbps = result['mbps']
+            if result and 'error' not in result and result['type'] == 'TCP':
                 report.append(
-                    f"| {test_name} | {direction} | {mbps:.1f} | {notes} |")
+                    f"| {test_name} | {direction} | {result['recv_mbps']:.1f} "
+                    f"| retrans={result.get('retransmits', 'N/A')} |")
+
+    # UDP Throughput (sweep)
+    report.append("\n## UDP Throughput (Bandwidth Sweep)\n")
+    report.append("iperf3 UDP at increasing target rates (10s each). "
+                  "Max bandwidth with loss < 1%:\n")
+    report.append("| Test | Direction | Max Mbps (loss < 1%) | Next rate → loss |")
+    report.append("|------|-----------|---------------------|-----------------|")
+
+    sweep_configs = [
+        ("1-path QUIC", "UL", "m3_udp_sweep_1path"),
+        ("1-path QUIC", "DL", "m3_udp_sweep_1path_dl"),
+        ("2-path QUIC", "UL", "m3_udp_sweep_2path"),
+        ("2-path QUIC", "DL", "m3_udp_sweep_2path_dl"),
+    ]
+
+    all_sweeps = {}
+    for test_name, direction, prefix in sweep_configs:
+        sweep = parse_udp_sweep(bench_dir, prefix)
+        all_sweeps[(test_name, direction)] = sweep
+        best = find_max_udp_bandwidth(sweep)
+        if best:
+            # Find next rate that exceeds threshold
+            next_over = None
+            for r in sweep:
+                if r['rate'] > best['rate'] and r['lost_pct'] >= 1.0:
+                    next_over = r
+                    break
+            next_str = (f"{next_over['rate']}M → {next_over['lost_pct']:.1f}%"
+                        if next_over else "—")
+            report.append(
+                f"| {test_name} | {direction} | {best['rate']:.0f} "
+                f"| {next_str} |")
+
+    # Sweep detail tables
+    report.append("\n### Sweep Details\n")
+    for test_name, direction, prefix in sweep_configs:
+        sweep = all_sweeps.get((test_name, direction), [])
+        if not sweep:
+            continue
+        report.append(f"**{test_name} {direction}:**\n")
+        report.append("| Rate | Mbps | Loss | Jitter |")
+        report.append("|------|------|------|--------|")
+        for r in sweep:
+            marker = " **" if r['lost_pct'] >= 1.0 else ""
+            report.append(
+                f"| {r['rate']}M | {r['mbps']:.1f} | {r['lost_pct']:.2f}% "
+                f"| {r['jitter_ms']:.2f}ms |{marker}")
+        report.append("")
 
     # Failover
     failover_path = bench_dir / "m3_failover.json"
     if failover_path.exists():
-        report.append("\n## Failover Test\n")
+        report.append("## Failover Test\n")
         report.append("60-second iperf3 with Path A (enp5s0) taken down at t=20s "
                        "and restored at t=40s.\n")
         intervals = parse_failover_intervals(str(failover_path))
@@ -151,7 +234,6 @@ def generate_report(bench_dir):
                     f"t={iv['start']:5.1f}s: {iv['mbps']:7.1f} Mbps{marker}")
             report.append("```\n")
 
-            # Summary stats
             before = [iv['mbps'] for iv in intervals if iv['start'] < 18]
             during = [iv['mbps'] for iv in intervals if 22 <= iv['start'] < 38]
             after = [iv['mbps'] for iv in intervals if iv['start'] >= 42]

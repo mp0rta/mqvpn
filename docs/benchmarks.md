@@ -1,28 +1,112 @@
 # mpvpn M3 Benchmark Report
 
 Date: 2026-02-17
-Environment: Local machine (2x ISP) → Kagoya VPS (1 Gbps shared)
-Underlay: Tailscale (single-path) / Direct IP (multipath)
+Environment: Local machine (2x ISP) → ConoHa VPS (100 Mbps)
+Underlay: Direct WAN (163.44.118.182)
+Protocol: MASQUE CONNECT-IP (RFC 9484) over HTTP/3
+
+IP packets are tunneled as HTTP Datagrams (Context ID=0) on an H3 Extended CONNECT stream (:protocol=connect-ip), carried over QUIC DATAGRAM frames (RFC 9221). Capsules (ADDRESS_ASSIGN, ROUTE_ADVERTISEMENT) on the CONNECT stream handle control; Multipath QUIC (RFC 9443) is a separate transport extension.
 
 ## Latency
 
 | Path | Min (ms) | Avg (ms) | Max (ms) | Loss |
 |------|----------|----------|----------|------|
-| Direct (Tailscale) | 20.5 | 21.0 | 22.3 | 12% |
-| VPN tunnel | 20.8 | 21.4 | 21.8 | 18% |
+| Direct WAN (IPv6) | 19.9 | 20.4 | 20.8 | 0% |
+| 1-path QUIC tunnel | 24.3 | 32.9 | 60.7 | 0% |
+| 2-path QUIC tunnel | 20.8 | 21.3 | 22.2 | 0% |
 
-## Throughput
+## TCP Throughput
 
 | Test | Direction | Mbps | Notes |
 |------|-----------|------|-------|
-| Direct (no VPN, iperf3 TCP) | UL | 92.0 | retrans=137 |
-| 1-path QUIC (iperf3 TCP) | UL | 25.6 | retrans=12 |
-| 1-path QUIC (iperf3 TCP) | DL | 29.1 | retrans=166 |
-| 1-path QUIC (iperf3 UDP) | UL | 200.0 | loss=72.8%, jitter=0.6ms |
-| 1-path QUIC (iperf3 UDP) | DL | 200.0 | loss=49.3%, jitter=0.2ms |
-| 2-path QUIC (iperf3 TCP) | UL | 91.5 | retrans=1511 |
-| 2-path QUIC (iperf3 TCP) | DL | 15.1 | retrans=812 |
-| 2-path QUIC (iperf3 UDP) | UL | 500.0 | loss=80.3%, jitter=0.2ms |
+| Direct (no VPN) | UL | 104.0 | retrans=7 |
+| Direct (no VPN) | DL | 107.5 | retrans=3011 |
+| 1-path QUIC | UL | 90.7 | retrans=923 |
+| 1-path QUIC | DL | 59.3 | retrans=71 |
+| 2-path QUIC | UL | 90.0 | retrans=1394 |
+| 2-path QUIC | DL | 76.7 | retrans=700 |
+
+## UDP Throughput (Bandwidth Sweep)
+
+iperf3 UDP at increasing target rates (10s each). Max bandwidth with loss < 1%:
+
+| Test | Direction | Max Mbps (loss < 1%) | Next rate → loss |
+|------|-----------|---------------------|-----------------|
+| 1-path QUIC | UL | 110 | 120M → 8.1% |
+| 1-path QUIC | DL | 100 | 110M → 2.1% |
+| 2-path QUIC | UL | 110 | 120M → 4.9% |
+| 2-path QUIC | DL | 90 | 95M → 15.7% |
+
+### Sweep Details
+
+**1-path QUIC UL:**
+
+| Rate | Mbps | Loss | Jitter |
+|------|------|------|--------|
+| 10M | 10.0 | 0.00% | 0.34ms |
+| 30M | 30.0 | 0.00% | 0.16ms |
+| 50M | 50.0 | 0.00% | 0.08ms |
+| 70M | 70.0 | 0.00% | 0.10ms |
+| 80M | 80.0 | 0.00% | 0.09ms |
+| 85M | 85.0 | 0.02% | 0.15ms |
+| 90M | 90.0 | 0.00% | 0.11ms |
+| 95M | 95.0 | 0.00% | 0.14ms |
+| 100M | 100.0 | 0.00% | 0.10ms |
+| 110M | 110.0 | 0.00% | 0.14ms |
+| 120M | 120.0 | 8.06% | 0.15ms | **
+
+**1-path QUIC DL:**
+
+| Rate | Mbps | Loss | Jitter |
+|------|------|------|--------|
+| 10M | 10.0 | 0.12% | 0.11ms |
+| 30M | 30.0 | 0.68% | 0.34ms |
+| 50M | 50.0 | 0.24% | 0.35ms |
+| 70M | 70.0 | 0.13% | 0.22ms |
+| 80M | 80.0 | 2.78% | 0.49ms | **
+| 85M | 85.0 | 0.12% | 3.98ms |
+| 90M | 90.0 | 0.07% | 0.22ms |
+| 95M | 95.0 | 0.21% | 0.07ms |
+| 100M | 100.0 | 0.29% | 0.24ms |
+| 110M | 110.0 | 2.12% | 0.44ms | **
+| 120M | 120.0 | 19.49% | 0.31ms | **
+
+**2-path QUIC UL:**
+
+| Rate | Mbps | Loss | Jitter |
+|------|------|------|--------|
+| 10M | 10.0 | 0.00% | 0.20ms |
+| 30M | 30.0 | 0.00% | 0.12ms |
+| 50M | 50.0 | 0.00% | 0.15ms |
+| 70M | 70.0 | 0.00% | 0.12ms |
+| 80M | 80.0 | 0.00% | 0.13ms |
+| 85M | 85.0 | 0.00% | 0.11ms |
+| 90M | 90.0 | 0.00% | 0.10ms |
+| 95M | 95.0 | 0.00% | 0.10ms |
+| 100M | 100.0 | 0.00% | 0.09ms |
+| 110M | 110.0 | 0.00% | 0.14ms |
+| 120M | 120.0 | 4.91% | 0.14ms | **
+| 130M | 130.0 | 10.16% | 0.16ms | **
+| 140M | 140.0 | 16.57% | 0.16ms | **
+| 150M | 150.0 | 22.14% | 0.16ms | **
+| 175M | 175.0 | 33.28% | 0.15ms | **
+| 200M | 200.0 | 41.63% | 0.15ms | **
+
+**2-path QUIC DL:**
+
+| Rate | Mbps | Loss | Jitter |
+|------|------|------|--------|
+| 10M | 10.0 | 0.00% | 0.13ms |
+| 30M | 30.0 | 0.00% | 0.04ms |
+| 50M | 50.0 | 0.00% | 0.06ms |
+| 70M | 70.0 | 0.00% | 0.03ms |
+| 80M | 80.0 | 0.00% | 0.03ms |
+| 85M | 85.0 | 0.00% | 0.19ms |
+| 90M | 90.0 | 0.00% | 0.38ms |
+| 95M | 95.0 | 15.66% | 0.26ms | **
+| 100M | 100.0 | 17.68% | 0.28ms | **
+| 110M | 110.0 | 11.00% | 0.13ms | **
+| 120M | 120.0 | 22.08% | 0.30ms | **
 
 ## Failover Test
 
