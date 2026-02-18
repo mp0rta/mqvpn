@@ -1,216 +1,222 @@
 # mpvpn
 
-Multipath VPN for Linux using MASQUE CONNECT-IP (RFC 9484) over HTTP/3.
+L3VPN built on a [fork of XQUIC](https://github.com/mp0rta/xquic/tree/feature/masque).
+It implements [MASQUE CONNECT-IP (RFC 9484)](https://www.rfc-editor.org/rfc/rfc9484) over HTTP/3 using
+[HTTP Datagrams (RFC 9297)](https://www.rfc-editor.org/rfc/rfc9297) / [QUIC DATAGRAM frames (RFC 9221)](https://www.rfc-editor.org/rfc/rfc9221).
+Optionally, it can use XQUIC's Multipath QUIC (I-D: [draft-ietf-quic-multipath](https://datatracker.ietf.org/doc/draft-ietf-quic-multipath/))
+to keep a single tunnel alive across multiple interfaces.
+This is an independent personal project focused on an end-to-end standards-based implementation.
 
-> Project status: Experimental implementation
-
-IP packets are tunneled as HTTP Datagrams (Context ID=0) associated with an HTTP/3 Extended CONNECT request stream (`:protocol=connect-ip`), and carried over QUIC DATAGRAM frames. Control and configuration are exchanged as Capsules (ADDRESS_ASSIGN, ROUTE_ADVERTISEMENT) on the CONNECT stream.
-
-```
-TUN (IP packet)
- → HTTP Datagram [Quarter Stream ID + Context ID=0 + payload]  (RFC 9297)
-   → QUIC DATAGRAM frame  (RFC 9221)
-     → UDP → WAN
-```
+<!-- TODO: 30-second demo GIF here -->
+<!-- ![Failover demo](docs/demo/failover.gif) -->
 
 ## Features
 
-- **MASQUE CONNECT-IP** (RFC 9484) — IP tunneling over HTTP/3
-- **Multipath QUIC** (RFC 9443) — bind multiple network interfaces; this is a QUIC transport extension independent of MASQUE
-- **Seamless failover** — zero-downtime path switching when an interface goes down
-- **Dynamic TUN MTU** — derived from QUIC path MTU / `max_datagram_frame_size` minus MASQUE framing overhead, adjusted via PMTUD
-- **Split tunneling** — server IP routed via original gateway to prevent routing loops
-- Linux TUN device with automatic IP assignment and route configuration
+- **Seamless failover** — If one path goes down, the tunnel continues on another without reconnecting (Multipath QUIC).
+- **Multiple network paths** — Bind to two or more Linux interfaces (e.g. two ISP lines, WiFi + LTE) via XQUIC's Multipath QUIC.
+- **Standards-based tunnel** — MASQUE CONNECT-IP (RFC 9484) with HTTP Datagrams (RFC 9297) over QUIC DATAGRAM frames (RFC 9221). No proprietary tunnel format.
+- **HTTP/3-native** — Runs over UDP/443 using standardized HTTP/3 + QUIC DATAGRAM mechanisms.
+- **Lightweight** — ~3,000 lines of C. Single binary, no runtime dependencies beyond libevent.
 
-## Supported Environment
+## Quick Start
 
-- Linux only (requires `/dev/net/tun`)
-- Root privileges are required for TUN, routing, and network namespace operations
-- `xquic` `feature/masque` branch is required
+```bash
+# Build (see "Building" section below for full steps including BoringSSL and xquic)
+git clone --recurse-submodules https://github.com/mp0rta/mpvpn.git
+cd mpvpn && mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release \
+      -DXQUIC_BUILD_DIR=../third_party/xquic/build
+make -j$(nproc)
 
-## xquic Baseline (Pinned)
+# Server
+sudo ./mpvpn --mode server --listen 0.0.0.0:443 \
+    --cert server.crt --key server.key
 
-- Submodule path: `third_party/xquic`
-- Fork: `https://github.com/mp0rta/xquic.git`
-- Branch: `feature/masque`
-- Pinned commit: `3a159b0a4b43ba07752ed2d9eb83b5bdf1c355fe`
-- Reference: `docs/xquic_baseline.md`
+# Client (single path)
+sudo ./mpvpn --mode client --server yourserver.com:443 --insecure
+
+# Client (multipath — two interfaces)
+sudo ./mpvpn --mode client --server yourserver.com:443 \
+    --path eth0 --path eth1 --insecure
+```
+
+## Benchmarks
+
+Measured over direct WAN between a Tokyo client (2 NICs: 10G + 1G) and an EC2 c6in.large instance.
+Full report: [`docs/benchmarks_v2.md`](docs/benchmarks_v2.md)
+
+| Test | UL | DL |
+|------|----|----|
+| 1-path mpvpn (TCP) | 361 Mbps | 475 Mbps |
+| 2-path mpvpn (TCP) | 419 Mbps | 342 Mbps |
+| 1-path mpvpn (UDP, loss < 1%) | 700 Mbps | 700 Mbps |
+| 2-path mpvpn (UDP, loss < 1%) | 600 Mbps | 600 Mbps |
+| Failover (primary path down) | **PASS** — zero downtime | — |
+| Stability (1 h) | 382 Mbps avg | 482 Mbps avg |
 
 ## Architecture
 
 ```
-Client                                          Server
-┌──────────┐                                  ┌──────────┐
-│   App    │                                  │  Network │
-│ (iperf3) │                                  │          │
-└────┬─────┘                                  └────▲─────┘
-     │ IP packet                                   │ IP packet
-┌────▼─────┐                                  ┌────┴─────┐
-│   TUN    │ mpvpn0                            │   TUN    │ mpvpn0
-└────┬─────┘                                  └────▲─────┘
-     │                                             │
-┌────▼─────────────────────────────────────────────┴─────┐
-│           MASQUE CONNECT-IP over HTTP/3                 │
-│  Data:    HTTP Datagram → QUIC DATAGRAM frame          │
-│  Control: Capsules on CONNECT stream                   │
-├─────────────┬─────────────┬──────────────────────┬─────┤
-│  Path A     │  Path B     │  Path C              │ ... │
-│  (enp5s0)   │  (enp4s0)   │  (wlan0)             │     │
-│  UDP socket │  UDP socket │  UDP socket          │     │
-└─────────────┴─────────────┴──────────────────────┴─────┘
-        Multipath QUIC (MinRTT scheduler)
+┌─────────────────┐                          ┌─────────────────┐
+│   Application   │                          │    Internet     │
+│  (TCP/UDP/any)  │                          │                 │
+├─────────────────┤                          ├─────────────────┤
+│   TUN device    │                          │   TUN device    │
+│   (mpvpn0)      │                          │   (mpvpn0)      │
+├─────────────────┤                          ├─────────────────┤
+│  MASQUE         │    HTTP Datagrams        │  MASQUE         │
+│  CONNECT-IP     │◄──(Context ID = 0)──────►│  CONNECT-IP     │
+│  (RFC 9484)     │    full IP packets       │  (RFC 9484)     │
+├─────────────────┤                          ├─────────────────┤
+│  HTTP/3         │    Extended CONNECT      │  HTTP/3         │
+│                 │    :protocol=connect-ip  │                 │
+├─────────────────┤                          ├─────────────────┤
+│  Multipath QUIC │◄── Path A ──────────────►│  QUIC           │
+│  (MP-QUIC)      │◄── Path B ──────────────►│  (single socket)│
+├─────────────────┤                          ├─────────────────┤
+│  UDP  │  UDP    │                          │      UDP        │
+│ eth0  │ eth1    │                          │     eth0        │
+└───────┴─────────┘                          └─────────────────┘
+     Client                                      Server
 ```
 
-## Quick Start
+Key design points:
+- IP packets are carried as HTTP Datagrams with Context ID set to zero (full IP header, no parsing needed)
+- Server uses a single UDP socket; XQUIC can receive packets from multiple peer addresses on the same connection
+- XQUIC's MinRTT scheduler selects the lowest-latency path per packet
+- Failover is handled at the QUIC transport layer by XQUIC — mpvpn just provides sockets and forwards packets
 
-### Prerequisites
+## How It Works
 
-- Linux (TUN device support)
-- CMake 3.10+, GCC/Clang with C11
-- libevent2 (`apt install libevent-dev`)
-- Go 1.18+ (for BoringSSL build)
+The [xquic fork](https://github.com/mp0rta/xquic/tree/feature/masque) adds MASQUE CONNECT-IP (RFC 9484) to XQUIC's QUIC/HTTP3 stack. mpvpn is the VPN application layer on top: TUN devices, routes, IP address assignment, and server-side NAT.
 
-### Build
+On connection, the client sends an HTTP/3 Extended CONNECT request with `:protocol=connect-ip`. The server replies with control capsules (`ADDRESS_ASSIGN`, `ROUTE_ADVERTISEMENT`). mpvpn configures the TUN device and routing table with the assigned IP, then enters a forwarding loop: TUN reads become HTTP Datagrams, incoming datagrams get written back to the TUN.
+
+For multipath, mpvpn creates per-interface UDP sockets and registers them as additional QUIC paths via `xqc_conn_create_path()`. XQUIC handles path validation, packet scheduling, and failover transparently.
+
+The server side is simple: one UDP socket, one TUN device, NAT via iptables. It does not need to know about multipath — XQUIC sees packets arriving from different source addresses on the same connection.
+
+## Building
+
+### Requirements
+
+- Linux (kernel 3.x+ for TUN support)
+- CMake 3.22+ (required for BoringSSL build)
+- GCC or Clang (C11)
+- Go (latest stable; needed when running BoringSSL tests)
+- libevent 2.x
+
+### Build Steps
 
 ```bash
 git clone --recurse-submodules https://github.com/mp0rta/mpvpn.git
 cd mpvpn
 
-# If cloned without --recurse-submodules
-git submodule update --init --recursive --checkout
-
-# 1. BoringSSL
+# 1. Build BoringSSL (required by xquic)
 cd third_party/xquic/third_party/boringssl
 mkdir -p build && cd build
 cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
 make -j$(nproc) ssl crypto
+cd ../../../../..
 
-# 2. xquic
-cd ../../../
+# 2. Build xquic
+cd third_party/xquic
 mkdir -p build && cd build
-cmake -DCMAKE_BUILD_TYPE=Release \
-      -DSSL_TYPE=boringssl \
-      -DSSL_PATH=../third_party/boringssl \
-      -DXQC_ENABLE_TESTING=OFF ..
+cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
+      -DSSL_PATH=../third_party/boringssl ..
 make -j$(nproc)
+cd ../../..
 
-# 3. mpvpn
-cd ../../
+# 3. Build mpvpn
 mkdir -p build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release \
       -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
 make -j$(nproc)
 ```
 
-### Run
+### Server Setup
 
 ```bash
-# Generate self-signed cert (for testing)
+# Generate self-signed certificate (for testing)
+mkdir -p certs
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-  -keyout server.key -out server.crt -days 365 -nodes -subj '/CN=mpvpn'
+    -keyout certs/server.key -out certs/server.crt \
+    -days 365 -nodes -subj "/CN=mpvpn"
 
-# Server
-sudo ./build/mpvpn --mode server \
-  --listen 0.0.0.0:4433 \
-  --cert server.crt --key server.key \
-  --subnet 10.0.0.0/24
+# Enable NAT
+sudo sysctl -w net.ipv4.ip_forward=1
+IFACE=$(ip route get 8.8.8.8 | grep -oP 'dev \K\S+')
+sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o $IFACE -j MASQUERADE
+sudo iptables -A FORWARD -s 10.0.0.0/24 -j ACCEPT
+sudo iptables -A FORWARD -d 10.0.0.0/24 -j ACCEPT
 
-# Client (single path)
-sudo ./build/mpvpn --mode client \
-  --server <server-ip>:4433 \
-  --insecure --path eth0
-
-# Client (multipath)
-sudo ./build/mpvpn --mode client \
-  --server <server-ip>:4433 \
-  --insecure --path eth0 --path eth1
+# Start server
+sudo ./build/mpvpn --mode server --listen 0.0.0.0:443 \
+    --subnet 10.0.0.0/24 --cert certs/server.crt --key certs/server.key
 ```
 
-### CLI Options
+With this setup, the client's default route points through the mpvpn tunnel. All traffic flows: client app → TUN (mpvpn0) → QUIC tunnel → server → NAT → internet. The client automatically configures routing so that only the server address bypasses the tunnel.
 
-| Option | Mode | Description |
-|--------|------|-------------|
-| `--mode {client,server}` | both | Required. Operating mode |
-| `--server HOST:PORT` | client | Server address |
-| `--listen BIND:PORT` | server | Bind address (default: `0.0.0.0:443`) |
-| `--cert PATH` | server | TLS certificate file |
-| `--key PATH` | server | TLS private key file |
-| `--subnet CIDR` | server | Client address pool (default: `10.0.0.0/24`) |
-| `--tun-name NAME` | both | TUN device name (default: `mpvpn0`) |
-| `--path IFACE` | client | Network interface to use (repeatable, max 4) |
-| `--insecure` | client | Skip TLS certificate verification |
-| `--log-level LEVEL` | both | `debug`, `info`, `warn`, or `error` |
-
-## Benchmark Results
-
-Tested over direct WAN: Local machine (2x ISP) → ConoHa VPS (100 Mbps).
-
-**Latency:**
-
-| Path | Avg (ms) | Overhead |
-|------|----------|----------|
-| Direct WAN | 20.4 | — |
-| 2-path QUIC tunnel | 21.3 | +0.9 ms |
-
-**TCP Throughput (iperf3 over tunnel):**
-
-| Test | UL (Mbps) | DL (Mbps) |
-|------|-----------|-----------|
-| Direct (no VPN) | 104.0 | 107.5 |
-| 1-path QUIC | 90.7 | 59.3 |
-| 2-path QUIC | 90.0 | 76.7 |
-
-**UDP Max Bandwidth (loss < 1%):**
-
-| Test | UL (Mbps) | DL (Mbps) |
-|------|-----------|-----------|
-| 1-path QUIC | 110 | 100 |
-| 2-path QUIC | 110 | 90 |
-
-**Failover:** Zero downtime — throughput maintained when a path goes down and is restored.
-
-**Stability:** 1-hour continuous test at 89 Mbps, zero memory growth (7.5 MB RSS).
-
-Full results: [docs/benchmarks.md](docs/benchmarks.md)
-
-## Project Structure
+## Usage
 
 ```
-src/
-  main.c           CLI argument parsing and entry point
-  vpn_client.c     MASQUE client, QUIC connection, multipath, TUN I/O
-  vpn_server.c     MASQUE server, address assignment, route advertisement
-  path_mgr.c       Per-path UDP socket management (SO_BINDTODEVICE)
-  tun.c            Linux TUN device creation, IP config, MTU
-  addr_pool.c      CIDR-based IP address pool
-  log.c            Logging (debug/info/warn/error)
-scripts/
-  run_test.sh              Smoke test (network namespaces)
-  run_multipath_test.sh    Multipath + failover test (iperf3)
-  vps_setup.sh             VPS server deployment
-  vps_teardown.sh          VPS cleanup
-  benchmark_report.py      Parse iperf3 JSON → Markdown report
-third_party/
-  xquic/           QUIC library (feature/masque branch) + BoringSSL
+mpvpn --mode client|server [options]
+
+Client options:
+  --server HOST:PORT     Server address
+  --path IFACE           Network interface (repeatable, for multipath)
+  --insecure             Skip TLS certificate verification
+  --tun-name NAME        TUN device name (default: mpvpn0)
+  --log-level LEVEL      debug|info|warn|error (default: info)
+
+Server options:
+  --listen BIND:PORT     Listen address (default: 0.0.0.0:443)
+  --subnet CIDR          Client IP pool (default: 10.0.0.0/24)
+  --cert PATH            TLS certificate file
+  --key PATH             TLS private key file
+  --log-level LEVEL      debug|info|warn|error (default: info)
 ```
 
-## Dependencies
+## Roadmap
 
-| Library | Purpose |
-|---------|---------|
-| [xquic](https://github.com/alibaba/xquic) (feature/masque) | QUIC, HTTP/3, MASQUE CONNECT-IP |
-| [BoringSSL](https://github.com/google/boringssl) | TLS 1.3 for QUIC |
-| [libevent2](https://libevent.org/) | Event loop |
+### v0.1.0 — First public release
+- [ ] TLS certificate verification by default (remove `--insecure` as implicit behavior)
+- [ ] Tunnel source IP validation (prevent IP spoofing through the tunnel)
+- [ ] CI with GitHub Actions (build + netns smoke tests)
 
-## RFCs
+### v0.2.0 — Multi-client & auth
+- [ ] Multi-client support (per-connection session management)
+- [ ] Pre-shared key / token authentication
 
-- [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) — QUIC
-- [RFC 9221](https://www.rfc-editor.org/rfc/rfc9221) — QUIC Unreliable Datagram Extension
-- [RFC 9297](https://www.rfc-editor.org/rfc/rfc9297) — HTTP Datagrams and the Capsule Protocol
-- [RFC 9298](https://www.rfc-editor.org/rfc/rfc9298) — MASQUE CONNECT-UDP
-- [RFC 9484](https://www.rfc-editor.org/rfc/rfc9484) — MASQUE CONNECT-IP
-- [RFC 9443](https://www.rfc-editor.org/rfc/rfc9443) — Multipath Extension for QUIC
+### Future
+- [ ] WiFi + LTE multipath testing
+- [ ] Android client (VpnService + WiFi/LTE handover)
+- [ ] IPv6 support
+- [ ] Replace `ip` command with netlink API
+- [ ] Performance optimization (GSO/GRO, io_uring, batch send)
+- [ ] Interop testing with other MASQUE implementations (masque-go, Google QUICHE)
+- [ ] Bandwidth aggregation scheduler (try weighted round-robin by cwnd / BBR bandwidth estimate)
+
+## Protocol Standards
+
+| Protocol | Specification | Implemented by |
+|----------|--------------|----------------|
+| MASQUE CONNECT-IP | [RFC 9484](https://www.rfc-editor.org/rfc/rfc9484) | xquic fork |
+| HTTP Datagrams | [RFC 9297](https://www.rfc-editor.org/rfc/rfc9297) | xquic fork |
+| QUIC Datagrams | [RFC 9221](https://www.rfc-editor.org/rfc/rfc9221) | XQUIC |
+| Multipath QUIC | [draft-ietf-quic-multipath](https://datatracker.ietf.org/doc/draft-ietf-quic-multipath/) | XQUIC |
+| HTTP/3 | [RFC 9114](https://www.rfc-editor.org/rfc/rfc9114) | XQUIC |
+| Extended CONNECT (`:protocol`, HTTP/3) | [RFC 9220](https://www.rfc-editor.org/rfc/rfc9220) | XQUIC |
+| Extended CONNECT (`:protocol`, HTTP/2 reference) | [RFC 8441](https://www.rfc-editor.org/rfc/rfc8441) | XQUIC |
 
 ## License
 
-[Mozilla Public License 2.0](LICENSE)
+mpvpn is licensed under [Apache-2.0](LICENSE).
+Copyright (c) 2026 github.com/mp0rta.
+
+mpvpn uses a [fork of XQUIC](https://github.com/mp0rta/xquic/tree/feature/masque) (Apache-2.0) as a git submodule. The fork adds MASQUE CONNECT-IP (RFC 9484) and HTTP Datagrams (RFC 9297) on top of XQUIC's QUIC, HTTP/3, and Multipath QUIC transport. Plans to contribute the MASQUE implementation upstream.
+
+## Acknowledgments
+
+- [XQUIC](https://github.com/alibaba/xquic) — QUIC, HTTP/3, and Multipath QUIC library by Alibaba
+- IETF QUIC and MASQUE working groups for the protocol specifications
