@@ -788,7 +788,8 @@ cli_process_capsules(cli_stream_t *stream)
             if (xret != XQC_OK) {
                 LOG_ERR("ROUTE_ADVERTISEMENT validation failed: %d "
                         "(RFC 9484 §4.7.3 ordering violation)", xret);
-                /* MUST abort the stream */
+                /* RFC 9484 §4.7.3: MUST abort the stream */
+                xqc_h3_request_close(stream->h3_request);
                 return;
             }
 
@@ -887,6 +888,65 @@ cli_request_write_notify(xqc_h3_request_t *h3_request,
  *  H3 datagram callbacks (server → client: IP packets)
  * ================================================================ */
 
+/* Send ICMP Time Exceeded back through tunnel (RFC 9484 §4.4 SHOULD) */
+static void
+cli_send_icmp_time_exceeded(cli_conn_t *conn, const uint8_t *orig_pkt,
+                            size_t orig_len)
+{
+    if (orig_len < 20 || !conn->addr_assigned) return;
+
+    size_t ihl = (orig_pkt[0] & 0x0F) * 4;
+    if (ihl < 20 || ihl > orig_len) return;
+    size_t icmp_data_len = ihl + 8;
+    if (icmp_data_len > orig_len) icmp_data_len = orig_len;
+
+    size_t total_len = 20 + 8 + icmp_data_len;
+    uint8_t pkt[128];
+    if (total_len > sizeof(pkt)) return;
+    memset(pkt, 0, total_len);
+
+    /* IP header: client assigned addr → original src */
+    pkt[0]  = 0x45;
+    pkt[1]  = 0xC0;
+    pkt[2]  = (total_len >> 8) & 0xFF;
+    pkt[3]  = total_len & 0xFF;
+    pkt[8]  = 64;
+    pkt[9]  = 1;   /* ICMP */
+    memcpy(pkt + 12, conn->assigned_ip, 4);
+    memcpy(pkt + 16, orig_pkt + 12, 4);
+
+    uint32_t cksum = 0;
+    for (int i = 0; i < 20; i += 2)
+        cksum += ((uint32_t)pkt[i] << 8) | pkt[i + 1];
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    uint16_t ip_cksum = ~(uint16_t)cksum;
+    pkt[10] = ip_cksum >> 8;
+    pkt[11] = ip_cksum & 0xFF;
+
+    uint8_t *icmp = pkt + 20;
+    icmp[0] = 11;
+    icmp[1] = 0;
+    memcpy(icmp + 8, orig_pkt, icmp_data_len);
+
+    size_t icmp_total = 8 + icmp_data_len;
+    cksum = 0;
+    for (size_t i = 0; i < icmp_total; i += 2) {
+        cksum += ((uint32_t)icmp[i] << 8);
+        if (i + 1 < icmp_total)
+            cksum += icmp[i + 1];
+    }
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    uint16_t icmp_cksum = ~(uint16_t)cksum;
+    icmp[2] = icmp_cksum >> 8;
+    icmp[3] = icmp_cksum & 0xFF;
+
+    /* Send back through TUN to local app */
+    mpvpn_tun_write(&conn->ctx->tun, pkt, total_len);
+    LOG_DBG("sent ICMP Time Exceeded to local app");
+}
+
 static void
 cli_dgram_read_notify(xqc_h3_conn_t *h3_conn, const void *data,
                        size_t data_len, void *user_data, uint64_t ts)
@@ -924,6 +984,7 @@ cli_dgram_read_notify(xqc_h3_conn_t *h3_conn, const void *data,
     memcpy(fwd_pkt, payload, payload_len);
     if (fwd_pkt[8] <= 1) {
         LOG_DBG("dropping packet: TTL expired");
+        cli_send_icmp_time_exceeded(conn, payload, payload_len);
         return;
     }
     fwd_pkt[8]--;
