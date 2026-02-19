@@ -35,7 +35,8 @@ jobs:
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
-          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl ..
+          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
+                -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
           make -j$(nproc)
 
       - name: Build mpvpn
