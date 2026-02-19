@@ -35,8 +35,7 @@ jobs:
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
-          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
-                -DSSL_PATH=../third_party/boringssl ..
+          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl ..
           make -j$(nproc)
 
       - name: Build mpvpn
