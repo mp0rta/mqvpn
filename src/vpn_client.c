@@ -751,10 +751,10 @@ cli_process_capsules(cli_stream_t *stream)
         if (cap_type == XQC_H3_CAPSULE_ADDRESS_ASSIGN) {
             uint64_t req_id;
             uint8_t ip_ver, ip_addr[16], prefix;
-            size_t ip_len = 16;
+            size_t ip_len = 16, aa_consumed;
             xret = xqc_h3_ext_connectip_parse_address_assign(
                 cap_payload, cap_len, &req_id, &ip_ver,
-                ip_addr, &ip_len, &prefix);
+                ip_addr, &ip_len, &prefix, &aa_consumed);
             if (xret == XQC_OK && ip_ver == 4) {
                 memcpy(conn->assigned_ip, ip_addr, 4);
                 conn->assigned_prefix = prefix;
