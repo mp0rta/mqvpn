@@ -1,18 +1,18 @@
 #!/bin/bash
-# scripts/vps_setup.sh — Run on VPS to start mpvpn server
+# scripts/vps_setup.sh — Run on VPS to start mqvpn server
 set -e
 
 PORT=${1:-10020}
 SUBNET="10.0.0.0/24"
-CERT_DIR="/root/mpvpn/certs"
-BUILD_DIR="/root/mpvpn/build"
+CERT_DIR="/root/mqvpn/certs"
+BUILD_DIR="/root/mqvpn/build"
 
 # Generate certs if missing
 if [ ! -f "$CERT_DIR/server.crt" ]; then
     mkdir -p "$CERT_DIR"
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
         -keyout "$CERT_DIR/server.key" -out "$CERT_DIR/server.crt" \
-        -days 365 -nodes -subj "/CN=mpvpn-test"
+        -days 365 -nodes -subj "/CN=mqvpn-test"
     echo "Generated TLS certificates"
 fi
 
@@ -33,10 +33,10 @@ iptables -C FORWARD -d $SUBNET -j ACCEPT 2>/dev/null || \
 echo "NAT configured: $SUBNET → $IFACE"
 
 # Start server
-echo "Starting mpvpn server on port $PORT..."
-$BUILD_DIR/mpvpn --mode server \
+echo "Starting mqvpn server on port $PORT..."
+$BUILD_DIR/mqvpn --mode server \
     --listen 0.0.0.0:$PORT \
     --subnet $SUBNET \
     --cert "$CERT_DIR/server.crt" \
     --key "$CERT_DIR/server.key" \
-    --log-level debug 2>&1 | tee /root/mpvpn-server.log
+    --log-level debug 2>&1 | tee /root/mqvpn-server.log

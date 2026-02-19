@@ -1,4 +1,4 @@
-# xquic Baseline for mpvpn
+# xquic Baseline for mqvpn
 
 This project pins a forked `xquic` as a git submodule.
 
@@ -12,8 +12,8 @@ This project pins a forked `xquic` as a git submodule.
 ## Reproducible Checkout
 
 ```bash
-git clone --recurse-submodules https://github.com/mp0rta/mpvpn.git
-cd mpvpn
+git clone --recurse-submodules https://github.com/mp0rta/mqvpn.git
+cd mqvpn
 git submodule update --init --recursive --checkout
 git submodule status
 ```

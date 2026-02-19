@@ -1,4 +1,4 @@
-# xquic MASQUE API Audit — mpvpn M1
+# xquic MASQUE API Audit — mqvpn M1
 
 Audit date: 2026-02-16
 Branch: `mp0rta/xquic` `feature/masque`
@@ -6,7 +6,7 @@ Pinned commit: `3a159b0a4b43ba07752ed2d9eb83b5bdf1c355fe`
 
 ## Summary
 
-**All MASQUE APIs required for mpvpn M1 are publicly exported** in
+**All MASQUE APIs required for mqvpn M1 are publicly exported** in
 `include/xquic/xqc_http3.h` and `include/xquic/xquic.h`.
 No additional header file is needed.
 

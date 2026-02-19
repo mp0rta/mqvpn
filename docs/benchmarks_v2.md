@@ -1,4 +1,4 @@
-# mpvpn Benchmark Report(EC2)
+# mqvpn Benchmark Report(EC2)
 
 Environment: Local machine (2x ISP: 10Gbps(NIC:enp4s0, primary path) + 1Gbps(NIC:enp5s0, secondly path)) → EC2 c6in.large (Tokyo, up to 25 Gbps burst)
 
@@ -10,10 +10,10 @@ Protocol: MASQUE CONNECT-IP (RFC 9484) over HTTP/3
 |------|-----------|------|
 | Direct (no VPN) | UL | 825 |
 | Direct (no VPN) | DL | 647 |
-| 1-path mpvpn | UL | 361 |
-| 1-path mpvpn | DL | 475 |
-| 2-path mpvpn | UL | 419 |
-| 2-path mpvpn | DL | 342 |
+| 1-path mqvpn | UL | 361 |
+| 1-path mqvpn | DL | 475 |
+| 2-path mqvpn | UL | 419 |
+| 2-path mqvpn | DL | 342 |
 
 ## UDP Throughput (iperf3 UDP, Bandwidth Sweep)
 
@@ -25,10 +25,10 @@ iperf3 UDP at increasing target rates (10s each). Max bandwidth with loss < 1%:
 |------|-----------|----------------------|
 | Direct (no VPN) | UL | 1000 |
 | Direct (no VPN) | DL | 1000 |
-| 1-path mpvpn | UL | 700 (0.82%) |
-| 1-path mpvpn | DL | 700 (0%) |
-| 2-path mpvpn | UL | 600 (0.42%) |
-| 2-path mpvpn | DL | 600 (0.001%) |
+| 1-path mqvpn | UL | 700 (0.82%) |
+| 1-path mqvpn | DL | 700 (0%) |
+| 2-path mqvpn | UL | 600 (0.42%) |
+| 2-path mqvpn | DL | 600 (0.001%) |
 
 ### Sweep Details
 
@@ -54,7 +54,7 @@ iperf3 UDP at increasing target rates (10s each). Max bandwidth with loss < 1%:
 | 700M | 700 | 0.018% |
 | 1000M | 997 | 0.26% |
 
-**1-path mpvpn (iperf3 UDP) UL:**
+**1-path mqvpn (iperf3 UDP) UL:**
 
 | Rate | Mbps | Loss | Jitter |
 |------|------|------|--------|
@@ -71,7 +71,7 @@ iperf3 UDP at increasing target rates (10s each). Max bandwidth with loss < 1%:
 | 600M | 598 | 0.19% | 0.03ms |
 | 700M | 694 | 0.82% | 0.01ms |
 
-**1-path mpvpn (iperf3 UDP) DL:**
+**1-path mqvpn (iperf3 UDP) DL:**
 
 | Rate | Mbps | Loss | Jitter |
 |------|------|------|--------|
@@ -88,7 +88,7 @@ iperf3 UDP at increasing target rates (10s each). Max bandwidth with loss < 1%:
 | 600M | 600 | 0.00% | 0.01ms |
 | 700M | 700 | 0.00% | 0.01ms |
 
-**2-path mpvpn (iperf3 UDP) UL:**
+**2-path mqvpn (iperf3 UDP) UL:**
 
 | Rate | Mbps | Loss | Jitter |
 |------|------|------|--------|
@@ -105,7 +105,7 @@ iperf3 UDP at increasing target rates (10s each). Max bandwidth with loss < 1%:
 | 600M | 597 | 0.42% | 0.01ms |
 | 700M | 690 | 1.4% | 0.07ms |
 
-**2-path mpvpn (iperf3 UDP) DL:**
+**2-path mqvpn (iperf3 UDP) DL:**
 
 | Rate | Mbps | Loss | Jitter |
 |------|------|------|--------|
@@ -128,12 +128,12 @@ MASQUE CONNECT-IP over HTTP/3 on standard HTTPS port (UDP 443):
 
 | Test | Direction | Mbps | Result |
 |------|-----------|------|--------|
-| 1-path mpvpn, port 443 | UL | 361 | **PASS**|
-| 1-path mpvpn, port 443 | DL | 485 | **PASS**|
+| 1-path mqvpn, port 443 | UL | 361 | **PASS**|
+| 1-path mqvpn, port 443 | DL | 485 | **PASS**|
 
 ## Failover Test
 ![failover test](bench_v2_failover.png)
-60-second iperf3 (TCP UL) with primary path (enp4s0) taken down at t≈15s. 2-path mpvpn connection (enp4s0 + enp5s0).
+60-second iperf3 (TCP UL) with primary path (enp4s0) taken down at t≈15s. 2-path mqvpn connection (enp4s0 + enp5s0).
 
 ```
 t=  0s:  456 Mbps
@@ -206,7 +206,7 @@ t= 59s:  331 Mbps
 
 ## Stability Test (30min UL + 30min DL)
 
-1-path mpvpn, iperf3 TCP, 1800s per direction:
+1-path mqvpn, iperf3 TCP, 1800s per direction:
 
 ### UL (30 minutes)
 
@@ -312,7 +312,7 @@ t= 59s:  331 Mbps
 
 ## Known Issues
 
-1. **2-path mpvpn DL lower than 1-path**: 2-path DL (342 Mbps) is lower than 1-path DL (475 Mbps). MinRTT scheduler selects only the lowest-RTT path each packet sending, so the second path adds overhead without bandwidth aggregation.
+1. **2-path mqvpn DL lower than 1-path**: 2-path DL (342 Mbps) is lower than 1-path DL (475 Mbps). MinRTT scheduler selects only the lowest-RTT path each packet sending, so the second path adds overhead without bandwidth aggregation.
 
 2. **Multipath secondary path idle timeout**: When using 2 paths with MinRTT scheduler, the non-preferred path may time out due to receiving no traffic. `mp_ping_on = 1` mitigates this but does not fully solve it.
 

@@ -6,7 +6,7 @@
 #include <arpa/inet.h>
 
 int
-mpvpn_addr_pool_init(mpvpn_addr_pool_t *pool, const char *cidr)
+mqvpn_addr_pool_init(mqvpn_addr_pool_t *pool, const char *cidr)
 {
     memset(pool, 0, sizeof(*pool));
 
@@ -39,8 +39,8 @@ mpvpn_addr_pool_init(mpvpn_addr_pool_t *pool, const char *cidr)
 
     uint32_t host_bits = 32 - pool->prefix_len;
     uint32_t total_hosts = (1U << host_bits) - 2; /* exclude network and broadcast */
-    pool->pool_size = total_hosts > MPVPN_ADDR_POOL_MAX
-                    ? MPVPN_ADDR_POOL_MAX : total_hosts;
+    pool->pool_size = total_hosts > MQVPN_ADDR_POOL_MAX
+                    ? MQVPN_ADDR_POOL_MAX : total_hosts;
     pool->next = 2; /* .1 is reserved for server */
 
     LOG_INF("addr_pool: %s, %u addresses available", cidr, pool->pool_size - 1);
@@ -48,7 +48,7 @@ mpvpn_addr_pool_init(mpvpn_addr_pool_t *pool, const char *cidr)
 }
 
 int
-mpvpn_addr_pool_alloc(mpvpn_addr_pool_t *pool, struct in_addr *out)
+mqvpn_addr_pool_alloc(mqvpn_addr_pool_t *pool, struct in_addr *out)
 {
     /* Linear scan starting from pool->next */
     for (uint32_t i = 0; i < pool->pool_size; i++) {
@@ -73,7 +73,7 @@ mpvpn_addr_pool_alloc(mpvpn_addr_pool_t *pool, struct in_addr *out)
 }
 
 void
-mpvpn_addr_pool_release(mpvpn_addr_pool_t *pool, const struct in_addr *addr)
+mqvpn_addr_pool_release(mqvpn_addr_pool_t *pool, const struct in_addr *addr)
 {
     uint32_t base_h = ntohl(pool->base.s_addr);
     uint32_t addr_h = ntohl(addr->s_addr);
@@ -92,7 +92,7 @@ mpvpn_addr_pool_release(mpvpn_addr_pool_t *pool, const struct in_addr *addr)
 }
 
 void
-mpvpn_addr_pool_server_addr(const mpvpn_addr_pool_t *pool, struct in_addr *out)
+mqvpn_addr_pool_server_addr(const mqvpn_addr_pool_t *pool, struct in_addr *out)
 {
     uint32_t base_h = ntohl(pool->base.s_addr);
     out->s_addr = htonl(base_h + 1);

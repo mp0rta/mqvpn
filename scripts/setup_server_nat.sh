@@ -1,6 +1,6 @@
 #!/bin/bash
-# setup_server_nat.sh — Configure NAT for mpvpn server
-# Run on the VPN server after mpvpn-server starts.
+# setup_server_nat.sh — Configure NAT for mqvpn server
+# Run on the VPN server after mqvpn-server starts.
 #
 # Usage: sudo ./setup_server_nat.sh [SUBNET] [IFACE]
 

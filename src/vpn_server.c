@@ -26,7 +26,7 @@
 #define XQC_SNDQ_MAX_PKTS    16384
 
 static uint64_t
-mpvpn_now_us(void)
+mqvpn_now_us(void)
 {
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -42,7 +42,7 @@ typedef struct svr_stream_s     svr_stream_t;
 /* ---------- server context (global per server instance) ---------- */
 
 struct svr_ctx_s {
-    const mpvpn_server_cfg_t *cfg;
+    const mqvpn_server_cfg_t *cfg;
 
     xqc_engine_t        *engine;
     struct event_base   *eb;
@@ -57,10 +57,10 @@ struct svr_ctx_s {
     struct sockaddr_in   local_addr;
     socklen_t            local_addrlen;
 
-    mpvpn_tun_t          tun;
+    mqvpn_tun_t          tun;
     int                  tun_paused;     /* TUN reading paused (QUIC backpressure) */
     uint64_t             tun_drop_cnt;   /* TUN write failure counter */
-    mpvpn_addr_pool_t    pool;
+    mqvpn_addr_pool_t    pool;
 
     /* M1: single client — track the active conn for return traffic */
     svr_conn_t          *active_conn;
@@ -215,7 +215,7 @@ svr_socket_read_handler(svr_ctx_t *ctx)
             break;
         }
 
-        uint64_t recv_time = mpvpn_now_us();
+        uint64_t recv_time = mqvpn_now_us();
         xqc_int_t ret = xqc_engine_packet_process(
             ctx->engine, buf, (size_t)n,
             (struct sockaddr *)&ctx->local_addr, ctx->local_addrlen,
@@ -264,7 +264,7 @@ svr_tun_read_handler(int fd, short what, void *arg)
     if (!ctx->active_conn || !ctx->active_conn->tunnel_established) {
         /* Drain the fd even if no active tunnel */
         uint8_t discard[PACKET_BUF_SIZE];
-        while (mpvpn_tun_read(&ctx->tun, discard, sizeof(discard)) > 0)
+        while (mqvpn_tun_read(&ctx->tun, discard, sizeof(discard)) > 0)
             ;
         return;
     }
@@ -273,7 +273,7 @@ svr_tun_read_handler(int fd, short what, void *arg)
     uint8_t frame_buf[MASQUE_FRAME_BUF];
 
     for (;;) {
-        int n = mpvpn_tun_read(&ctx->tun, pkt, sizeof(pkt));
+        int n = mqvpn_tun_read(&ctx->tun, pkt, sizeof(pkt));
         if (n <= 0) break;
 
         /* Frame with quarter-stream-ID + context_id=0 */
@@ -406,7 +406,7 @@ svr_h3_conn_close_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
             svr_conn->dgram_acked_cnt, svr_conn->dgram_lost_cnt);
 
     if (svr_conn->assigned_ip.s_addr) {
-        mpvpn_addr_pool_release(&svr_conn->ctx->pool, &svr_conn->assigned_ip);
+        mqvpn_addr_pool_release(&svr_conn->ctx->pool, &svr_conn->assigned_ip);
     }
 
     if (svr_conn->ctx->active_conn == svr_conn) {
@@ -470,7 +470,7 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
     conn->masque_stream_id = xqc_h3_stream_id(h3_request);
 
     /* 2. Allocate client IP from pool */
-    if (mpvpn_addr_pool_alloc(&ctx->pool, &conn->assigned_ip) < 0) {
+    if (mqvpn_addr_pool_alloc(&ctx->pool, &conn->assigned_ip) < 0) {
         LOG_ERR("IP pool exhausted");
         return -1;
     }
@@ -760,7 +760,7 @@ svr_send_icmp_time_exceeded(svr_conn_t *svr_conn, const uint8_t *orig_pkt,
     /* IP header: server TUN addr → client assigned addr */
     svr_ctx_t *ctx = svr_conn->ctx;
     struct in_addr srv_addr;
-    mpvpn_addr_pool_server_addr(&ctx->pool, &srv_addr);
+    mqvpn_addr_pool_server_addr(&ctx->pool, &srv_addr);
 
     pkt[0]  = 0x45;                          /* IPv4, IHL=5 */
     pkt[1]  = 0xC0;                          /* DSCP=CS6 (network control) */
@@ -875,10 +875,10 @@ svr_dgram_read_notify(xqc_h3_conn_t *conn, const void *data,
     fwd_pkt[11] = sum & 0xFF;
 
     /* Write IP packet to TUN (kernel routes to internet via NAT) */
-    int wret = mpvpn_tun_write(&svr_conn->ctx->tun, fwd_pkt, payload_len);
+    int wret = mqvpn_tun_write(&svr_conn->ctx->tun, fwd_pkt, payload_len);
     if (wret < 0) {
         svr_conn->ctx->tun_drop_cnt++;
-        if (wret == MPVPN_TUN_EAGAIN) {
+        if (wret == MQVPN_TUN_EAGAIN) {
             LOG_DBG("TUN write EAGAIN (drops=%" PRIu64 ")",
                     svr_conn->ctx->tun_drop_cnt);
         } else {
@@ -944,7 +944,7 @@ svr_dgram_mss_updated_notify(xqc_h3_conn_t *conn, size_t mss,
         size_t udp_mss = xqc_h3_ext_masque_udp_mss(
             mss, svr_conn->masque_stream_id);
         if (udp_mss >= 68) {
-            mpvpn_tun_set_mtu(&svr_conn->ctx->tun, (int)udp_mss);
+            mqvpn_tun_set_mtu(&svr_conn->ctx->tun, (int)udp_mss);
         }
     }
 }
@@ -1001,14 +1001,14 @@ svr_create_udp_socket(const char *addr, int port, svr_ctx_t *ctx)
  * ================================================================ */
 
 int
-mpvpn_server_run(const mpvpn_server_cfg_t *cfg)
+mqvpn_server_run(const mqvpn_server_cfg_t *cfg)
 {
     memset(&g_svr, 0, sizeof(g_svr));
     g_svr.cfg = cfg;
     g_svr.tun.fd = -1;
 
     /* Initialize address pool */
-    if (mpvpn_addr_pool_init(&g_svr.pool, cfg->subnet) < 0) {
+    if (mqvpn_addr_pool_init(&g_svr.pool, cfg->subnet) < 0) {
         return -1;
     }
 
@@ -1125,25 +1125,25 @@ mpvpn_server_run(const mpvpn_server_cfg_t *cfg)
     xqc_h3_engine_set_local_settings(g_svr.engine, &h3s);
 
     /* ---- Create TUN device ---- */
-    if (mpvpn_tun_create(&g_svr.tun, cfg->tun_name) < 0) {
+    if (mqvpn_tun_create(&g_svr.tun, cfg->tun_name) < 0) {
         return -1;
     }
 
     /* Server gets .1, clients get .2+ */
     struct in_addr srv_addr;
-    mpvpn_addr_pool_server_addr(&g_svr.pool, &srv_addr);
+    mqvpn_addr_pool_server_addr(&g_svr.pool, &srv_addr);
     char srv_ip[INET_ADDRSTRLEN], base_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &srv_addr, srv_ip, sizeof(srv_ip));
     inet_ntop(AF_INET, &g_svr.pool.base, base_ip, sizeof(base_ip));
 
-    if (mpvpn_tun_set_addr(&g_svr.tun, srv_ip, base_ip,
+    if (mqvpn_tun_set_addr(&g_svr.tun, srv_ip, base_ip,
                             g_svr.pool.prefix_len) < 0) {
         return -1;
     }
-    if (mpvpn_tun_set_mtu(&g_svr.tun, 1280) < 0) {
+    if (mqvpn_tun_set_mtu(&g_svr.tun, 1280) < 0) {
         return -1;
     }
-    if (mpvpn_tun_up(&g_svr.tun) < 0) {
+    if (mqvpn_tun_up(&g_svr.tun) < 0) {
         return -1;
     }
 
@@ -1164,7 +1164,7 @@ mpvpn_server_run(const mpvpn_server_cfg_t *cfg)
                               svr_tun_read_handler, &g_svr);
     event_add(g_svr.ev_tun, NULL);
 
-    LOG_INF("mpvpn server ready — listening on %s:%d, subnet %s",
+    LOG_INF("mqvpn server ready — listening on %s:%d, subnet %s",
             cfg->listen_addr ? cfg->listen_addr : "0.0.0.0",
             cfg->listen_port, cfg->subnet);
 
@@ -1180,7 +1180,7 @@ mpvpn_server_run(const mpvpn_server_cfg_t *cfg)
     if (g_svr.ev_socket)     event_free(g_svr.ev_socket);
     if (g_svr.ev_engine)     event_free(g_svr.ev_engine);
     if (g_svr.udp_fd >= 0) close(g_svr.udp_fd);
-    mpvpn_tun_destroy(&g_svr.tun);
+    mqvpn_tun_destroy(&g_svr.tun);
     xqc_engine_destroy(g_svr.engine);
     event_base_free(g_svr.eb);
 

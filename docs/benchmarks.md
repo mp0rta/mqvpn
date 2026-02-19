@@ -1,4 +1,4 @@
-# mpvpn M3 Benchmark Report
+# mqvpn M3 Benchmark Report
 
 Date: 2026-02-17
 Environment: Local machine (2x ISP) → ConoHa VPS (100 Mbps)
@@ -12,8 +12,8 @@ IP packets are tunneled as HTTP Datagrams (Context ID=0) on an H3 Extended CONNE
 | Path | Min (ms) | Avg (ms) | Max (ms) | Loss |
 |------|----------|----------|----------|------|
 | Direct WAN (IPv6) | 19.9 | 20.4 | 20.8 | 0% |
-| 1-path mpvpn tunnel | 24.3 | 32.9 | 60.7 | 0% |
-| 2-path mpvpn tunnel | 20.8 | 21.3 | 22.2 | 0% |
+| 1-path mqvpn tunnel | 24.3 | 32.9 | 60.7 | 0% |
+| 2-path mqvpn tunnel | 20.8 | 21.3 | 22.2 | 0% |
 
 ## TCP Throughput
 
@@ -21,10 +21,10 @@ IP packets are tunneled as HTTP Datagrams (Context ID=0) on an H3 Extended CONNE
 |------|-----------|------|-------|
 | Direct (no VPN) | UL | 104.0 | retrans=7 |
 | Direct (no VPN) | DL | 107.5 | retrans=3011 |
-| 1-path mpvpn | UL | 90.7 | retrans=923 |
-| 1-path mpvpn | DL | 59.3 | retrans=71 |
-| 2-path mpvpn | UL | 90.0 | retrans=1394 |
-| 2-path mpvpn | DL | 76.7 | retrans=700 |
+| 1-path mqvpn | UL | 90.7 | retrans=923 |
+| 1-path mqvpn | DL | 59.3 | retrans=71 |
+| 2-path mqvpn | UL | 90.0 | retrans=1394 |
+| 2-path mqvpn | DL | 76.7 | retrans=700 |
 
 ## UDP Throughput (Bandwidth Sweep)
 
@@ -32,14 +32,14 @@ iperf3 UDP at increasing target rates (10s each). Max bandwidth with loss < 1%:
 
 | Test | Direction | Max Mbps (loss < 1%) | Next rate → loss |
 |------|-----------|---------------------|-----------------|
-| 1-path mpvpn | UL | 110 | 120M → 8.1% |
-| 1-path mpvpn | DL | 100 | 110M → 2.1% |
-| 2-path mpvpn | UL | 110 | 120M → 4.9% |
-| 2-path mpvpn | DL | 90 | 95M → 15.7% |
+| 1-path mqvpn | UL | 110 | 120M → 8.1% |
+| 1-path mqvpn | DL | 100 | 110M → 2.1% |
+| 2-path mqvpn | UL | 110 | 120M → 4.9% |
+| 2-path mqvpn | DL | 90 | 95M → 15.7% |
 
 ### Sweep Details
 
-**1-path mpvpn UL:**
+**1-path mqvpn UL:**
 
 | Rate | Mbps | Loss | Jitter |
 |------|------|------|--------|
@@ -55,7 +55,7 @@ iperf3 UDP at increasing target rates (10s each). Max bandwidth with loss < 1%:
 | 110M | 110.0 | 0.00% | 0.14ms |
 | 120M | 120.0 | 8.06% | 0.15ms | **
 
-**1-path mpvpn DL:**
+**1-path mqvpn DL:**
 
 | Rate | Mbps | Loss | Jitter |
 |------|------|------|--------|
@@ -71,7 +71,7 @@ iperf3 UDP at increasing target rates (10s each). Max bandwidth with loss < 1%:
 | 110M | 110.0 | 2.12% | 0.44ms | **
 | 120M | 120.0 | 19.49% | 0.31ms | **
 
-**2-path mpvpn UL:**
+**2-path mqvpn UL:**
 
 | Rate | Mbps | Loss | Jitter |
 |------|------|------|--------|
@@ -92,7 +92,7 @@ iperf3 UDP at increasing target rates (10s each). Max bandwidth with loss < 1%:
 | 175M | 175.0 | 33.28% | 0.15ms | **
 | 200M | 200.0 | 41.63% | 0.15ms | **
 
-**2-path mpvpn DL:**
+**2-path mqvpn DL:**
 
 | Rate | Mbps | Loss | Jitter |
 |------|------|------|--------|

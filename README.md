@@ -205,7 +205,6 @@ Server options:
 | QUIC Datagrams | [RFC 9221](https://www.rfc-editor.org/rfc/rfc9221) | XQUIC |
 | Multipath QUIC | [draft-ietf-quic-multipath](https://datatracker.ietf.org/doc/draft-ietf-quic-multipath/) | XQUIC |
 | HTTP/3 | [RFC 9114](https://www.rfc-editor.org/rfc/rfc9114) | XQUIC |
-| Extended CONNECT (`:protocol`, HTTP/3) | [RFC 9220](https://www.rfc-editor.org/rfc/rfc9220) | XQUIC |
 
 ## License
 

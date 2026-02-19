@@ -1,18 +1,18 @@
 #!/bin/bash
 # run_multipath_test.sh — Multipath smoke test using network namespaces
 #
-# Creates two netns with 2 veth pairs (2 paths), runs mpvpn server and client
+# Creates two netns with 2 veth pairs (2 paths), runs mqvpn server and client
 # with --path options, verifies multipath negotiation and connectivity.
 #
-# Usage: sudo ./run_multipath_test.sh [path-to-mpvpn-binary]
+# Usage: sudo ./run_multipath_test.sh [path-to-mqvpn-binary]
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MPVPN="${1:-${SCRIPT_DIR}/../build/mpvpn}"
+MQVPN="${1:-${SCRIPT_DIR}/../build/mqvpn}"
 
-if [ ! -f "$MPVPN" ]; then
-    echo "error: mpvpn binary not found at $MPVPN"
+if [ ! -f "$MQVPN" ]; then
+    echo "error: mqvpn binary not found at $MQVPN"
     echo "Build first: mkdir build && cd build && cmake .. && make"
     exit 1
 fi
@@ -22,14 +22,14 @@ if ! command -v iperf3 &>/dev/null; then
     exit 1
 fi
 
-MPVPN="$(realpath "$MPVPN")"
+MQVPN="$(realpath "$MQVPN")"
 WORK_DIR="$(mktemp -d)"
 
 # Generate self-signed cert
 echo "Generating self-signed certificate..."
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
     -keyout "${WORK_DIR}/server.key" -out "${WORK_DIR}/server.crt" \
-    -days 365 -nodes -subj "/CN=mpvpn-test" 2>/dev/null
+    -days 365 -nodes -subj "/CN=mqvpn-test" 2>/dev/null
 
 IPERF_SERVER_PID=""
 IPERF_CLIENT_PID=""
@@ -98,7 +98,7 @@ ip netns exec mp-client ping -c 1 -W 1 192.168.2.2 >/dev/null
 echo "OK: Path B (192.168.2.x) working"
 
 echo "=== Starting VPN server (multipath enabled) ==="
-ip netns exec mp-server "$MPVPN" \
+ip netns exec mp-server "$MQVPN" \
     --mode server \
     --listen 0.0.0.0:4433 \
     --subnet 10.0.0.0/24 \
@@ -116,7 +116,7 @@ fi
 echo "Server running (PID $SERVER_PID)"
 
 echo "=== Starting VPN client (2 paths: veth-a0, veth-b0) ==="
-ip netns exec mp-client "$MPVPN" \
+ip netns exec mp-client "$MQVPN" \
     --mode client \
     --server 192.168.1.2:4433 \
     --path veth-a0 --path veth-b0 \
@@ -135,8 +135,8 @@ echo "Client running (PID $CLIENT_PID)"
 # Show TUN devices
 echo ""
 echo "=== TUN devices ==="
-ip netns exec mp-server ip addr show dev mpvpn0 2>/dev/null || echo "(server TUN not found)"
-ip netns exec mp-client ip addr show dev mpvpn0 2>/dev/null || echo "(client TUN not found)"
+ip netns exec mp-server ip addr show dev mqvpn0 2>/dev/null || echo "(server TUN not found)"
+ip netns exec mp-client ip addr show dev mqvpn0 2>/dev/null || echo "(client TUN not found)"
 
 echo ""
 echo "=== Routes in client namespace ==="

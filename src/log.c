@@ -3,23 +3,23 @@
 #include <time.h>
 #include <sys/time.h>
 
-static mpvpn_log_level_t g_log_level = MPVPN_LOG_INFO;
+static mqvpn_log_level_t g_log_level = MQVPN_LOG_INFO;
 
 static const char *level_str[] = {
-    [MPVPN_LOG_DEBUG] = "DBG",
-    [MPVPN_LOG_INFO]  = "INF",
-    [MPVPN_LOG_WARN]  = "WRN",
-    [MPVPN_LOG_ERROR] = "ERR",
+    [MQVPN_LOG_DEBUG] = "DBG",
+    [MQVPN_LOG_INFO]  = "INF",
+    [MQVPN_LOG_WARN]  = "WRN",
+    [MQVPN_LOG_ERROR] = "ERR",
 };
 
 void
-mpvpn_log_set_level(mpvpn_log_level_t level)
+mqvpn_log_set_level(mqvpn_log_level_t level)
 {
     g_log_level = level;
 }
 
 void
-mpvpn_log(mpvpn_log_level_t level, const char *fmt, ...)
+mqvpn_log(mqvpn_log_level_t level, const char *fmt, ...)
 {
     if (level < g_log_level) {
         return;

@@ -39,7 +39,7 @@ jobs:
                 -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
           make -j$(nproc)
 
-      - name: Build mpvpn
+      - name: Build mqvpn
         run: |
           mkdir -p build && cd build
           cmake -DCMAKE_BUILD_TYPE=Release \

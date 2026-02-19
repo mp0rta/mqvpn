@@ -12,7 +12,7 @@
 #include <arpa/inet.h>
 
 int
-mpvpn_tun_create(mpvpn_tun_t *tun, const char *dev_name)
+mqvpn_tun_create(mqvpn_tun_t *tun, const char *dev_name)
 {
     memset(tun, 0, sizeof(*tun));
     tun->fd = -1;
@@ -53,7 +53,7 @@ mpvpn_tun_create(mpvpn_tun_t *tun, const char *dev_name)
 }
 
 int
-mpvpn_tun_set_addr(mpvpn_tun_t *tun, const char *addr,
+mqvpn_tun_set_addr(mqvpn_tun_t *tun, const char *addr,
                     const char *peer_addr, int prefix_len)
 {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -113,7 +113,7 @@ mpvpn_tun_set_addr(mpvpn_tun_t *tun, const char *addr,
 }
 
 int
-mpvpn_tun_set_mtu(mpvpn_tun_t *tun, int mtu)
+mqvpn_tun_set_mtu(mqvpn_tun_t *tun, int mtu)
 {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) return -1;
@@ -136,7 +136,7 @@ mpvpn_tun_set_mtu(mpvpn_tun_t *tun, int mtu)
 }
 
 int
-mpvpn_tun_up(mpvpn_tun_t *tun)
+mqvpn_tun_up(mqvpn_tun_t *tun)
 {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) return -1;
@@ -164,7 +164,7 @@ mpvpn_tun_up(mpvpn_tun_t *tun)
 }
 
 int
-mpvpn_tun_read(mpvpn_tun_t *tun, uint8_t *buf, size_t buf_len)
+mqvpn_tun_read(mqvpn_tun_t *tun, uint8_t *buf, size_t buf_len)
 {
     ssize_t n = read(tun->fd, buf, buf_len);
     if (n < 0) {
@@ -178,12 +178,12 @@ mpvpn_tun_read(mpvpn_tun_t *tun, uint8_t *buf, size_t buf_len)
 }
 
 int
-mpvpn_tun_write(mpvpn_tun_t *tun, const uint8_t *buf, size_t len)
+mqvpn_tun_write(mqvpn_tun_t *tun, const uint8_t *buf, size_t len)
 {
     ssize_t n = write(tun->fd, buf, len);
     if (n < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return MPVPN_TUN_EAGAIN;
+            return MQVPN_TUN_EAGAIN;
         }
         LOG_ERR("tun write: %s", strerror(errno));
         return -1;
@@ -192,7 +192,7 @@ mpvpn_tun_write(mpvpn_tun_t *tun, const uint8_t *buf, size_t len)
 }
 
 void
-mpvpn_tun_destroy(mpvpn_tun_t *tun)
+mqvpn_tun_destroy(mqvpn_tun_t *tun)
 {
     if (tun->fd >= 0) {
         LOG_INF("TUN %s: destroying", tun->name);

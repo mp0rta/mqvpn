@@ -30,7 +30,7 @@
 #define XQC_SNDQ_MAX_PKTS         16384
 
 static uint64_t
-mpvpn_now_us(void)
+mqvpn_now_us(void)
 {
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -48,7 +48,7 @@ static void cli_tun_read_handler(int fd, short what, void *arg);
 /* ---------- client context ---------- */
 
 struct cli_ctx_s {
-    const mpvpn_client_cfg_t *cfg;
+    const mqvpn_client_cfg_t *cfg;
 
     xqc_engine_t        *engine;
     struct event_base   *eb;
@@ -61,11 +61,11 @@ struct cli_ctx_s {
     int                  path_recreate_retries;
 
     /* Multipath: per-path UDP sockets */
-    mpvpn_path_mgr_t     path_mgr;
+    mqvpn_path_mgr_t     path_mgr;
     struct sockaddr_in   server_addr;
     socklen_t            server_addrlen;
 
-    mpvpn_tun_t          tun;
+    mqvpn_tun_t          tun;
     int                  tun_up;
     int                  tun_paused;     /* TUN reading paused (QUIC backpressure) */
     uint64_t             tun_drop_cnt;   /* TUN write failure counter */
@@ -183,7 +183,7 @@ cli_write_socket(const unsigned char *buf, size_t size,
 {
     /* Legacy single-path write — use primary path */
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
-    int fd = mpvpn_path_mgr_get_fd(&conn->ctx->path_mgr, 0);
+    int fd = mqvpn_path_mgr_get_fd(&conn->ctx->path_mgr, 0);
     ssize_t res;
     do {
         res = sendto(fd, buf, size, 0, peer_addr, peer_addrlen);
@@ -205,7 +205,7 @@ cli_write_socket_ex(uint64_t path_id,
                     void *conn_user_data)
 {
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
-    int fd = mpvpn_path_mgr_get_fd(&conn->ctx->path_mgr, path_id);
+    int fd = mqvpn_path_mgr_get_fd(&conn->ctx->path_mgr, path_id);
     ssize_t res;
     do {
         res = sendto(fd, buf, size, 0, peer_addr, peer_addrlen);
@@ -232,7 +232,7 @@ cli_socket_read_handler(cli_ctx_t *ctx, int sock_fd)
     socklen_t peer_addrlen = sizeof(peer_addr);
 
     /* Find local addr for this path's socket */
-    mpvpn_path_t *path = mpvpn_path_mgr_find_by_fd(&ctx->path_mgr, sock_fd);
+    mqvpn_path_t *path = mqvpn_path_mgr_find_by_fd(&ctx->path_mgr, sock_fd);
     struct sockaddr_in local_addr;
     socklen_t local_addrlen = sizeof(local_addr);
     if (path) {
@@ -252,7 +252,7 @@ cli_socket_read_handler(cli_ctx_t *ctx, int sock_fd)
             break;
         }
 
-        uint64_t recv_time = mpvpn_now_us();
+        uint64_t recv_time = mqvpn_now_us();
         xqc_engine_packet_process(
             ctx->engine, buf, (size_t)n,
             (struct sockaddr *)&local_addr, local_addrlen,
@@ -458,7 +458,7 @@ cli_setup_tun(cli_ctx_t *ctx, const uint8_t *ip, uint8_t prefix)
 {
     (void)prefix;
 
-    if (mpvpn_tun_create(&ctx->tun, ctx->cfg->tun_name) < 0) {
+    if (mqvpn_tun_create(&ctx->tun, ctx->cfg->tun_name) < 0) {
         return -1;
     }
 
@@ -470,7 +470,7 @@ cli_setup_tun(cli_ctx_t *ctx, const uint8_t *ip, uint8_t prefix)
     char peer_ip[INET_ADDRSTRLEN];
     snprintf(peer_ip, sizeof(peer_ip), "%d.%d.%d.1", ip[0], ip[1], ip[2]);
 
-    if (mpvpn_tun_set_addr(&ctx->tun, local_ip, peer_ip, 32) < 0) {
+    if (mqvpn_tun_set_addr(&ctx->tun, local_ip, peer_ip, 32) < 0) {
         return -1;
     }
     /* Set MTU based on QUIC datagram MSS minus MASQUE framing overhead */
@@ -484,10 +484,10 @@ cli_setup_tun(cli_ctx_t *ctx, const uint8_t *ip, uint8_t prefix)
         LOG_INF("TUN MTU from dgram_mss=%zu masque_udp_mss=%zu → %d",
                 ctx->conn->dgram_mss, udp_mss, tun_mtu);
     }
-    if (mpvpn_tun_set_mtu(&ctx->tun, tun_mtu) < 0) {
+    if (mqvpn_tun_set_mtu(&ctx->tun, tun_mtu) < 0) {
         return -1;
     }
-    if (mpvpn_tun_up(&ctx->tun) < 0) {
+    if (mqvpn_tun_up(&ctx->tun) < 0) {
         return -1;
     }
 
@@ -535,7 +535,7 @@ cli_tun_read_handler(int fd, short what, void *arg)
     uint8_t frame_buf[MASQUE_FRAME_BUF];
 
     for (;;) {
-        int n = mpvpn_tun_read(&ctx->tun, pkt, sizeof(pkt));
+        int n = mqvpn_tun_read(&ctx->tun, pkt, sizeof(pkt));
         if (n <= 0) break;
 
         /* Drop non-IPv4 packets (IPv6 not yet supported) */
@@ -943,7 +943,7 @@ cli_send_icmp_time_exceeded(cli_conn_t *conn, const uint8_t *orig_pkt,
     icmp[3] = icmp_cksum & 0xFF;
 
     /* Send back through TUN to local app */
-    mpvpn_tun_write(&conn->ctx->tun, pkt, total_len);
+    mqvpn_tun_write(&conn->ctx->tun, pkt, total_len);
     LOG_DBG("sent ICMP Time Exceeded to local app");
 }
 
@@ -994,10 +994,10 @@ cli_dgram_read_notify(xqc_h3_conn_t *h3_conn, const void *data,
     fwd_pkt[11] = sum & 0xFF;
 
     /* Write IP packet to TUN (delivered to local apps) */
-    int wret = mpvpn_tun_write(&conn->ctx->tun, fwd_pkt, payload_len);
+    int wret = mqvpn_tun_write(&conn->ctx->tun, fwd_pkt, payload_len);
     if (wret < 0) {
         conn->ctx->tun_drop_cnt++;
-        if (wret == MPVPN_TUN_EAGAIN) {
+        if (wret == MQVPN_TUN_EAGAIN) {
             LOG_DBG("TUN write EAGAIN (drops=%" PRIu64 ")", conn->ctx->tun_drop_cnt);
         } else {
             LOG_WRN("TUN write failed (drops=%" PRIu64 ")", conn->ctx->tun_drop_cnt);
@@ -1063,7 +1063,7 @@ cli_dgram_mss_updated_notify(xqc_h3_conn_t *conn, size_t mss,
         size_t udp_mss = xqc_h3_ext_masque_udp_mss(
             mss, cli_conn->masque_stream_id);
         if (udp_mss >= 68) {
-            mpvpn_tun_set_mtu(&cli_conn->ctx->tun, (int)udp_mss);
+            mqvpn_tun_set_mtu(&cli_conn->ctx->tun, (int)udp_mss);
         }
     }
 }
@@ -1119,7 +1119,7 @@ cli_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
     LOG_INF("ready_to_create_path: adding secondary paths");
 
     for (int i = 1; i < ctx->path_mgr.n_paths; i++) {
-        mpvpn_path_t *p = &ctx->path_mgr.paths[i];
+        mqvpn_path_t *p = &ctx->path_mgr.paths[i];
         if (p->in_use) continue;
 
         uint64_t new_path_id = 0;
@@ -1150,7 +1150,7 @@ cli_path_recreate_callback(int fd, short what, void *arg)
 
     int recreated = 0;
     for (int i = 0; i < ctx->path_mgr.n_paths; i++) {
-        mpvpn_path_t *p = &ctx->path_mgr.paths[i];
+        mqvpn_path_t *p = &ctx->path_mgr.paths[i];
         if (!p->in_use && p->active && p->fd >= 0) {
             uint64_t new_path_id = 0;
             xqc_int_t ret = xqc_conn_create_path(
@@ -1175,7 +1175,7 @@ cli_path_recreate_callback(int fd, short what, void *arg)
     if (recreated > 0) {
         int all_survived = 1;
         for (int i = 0; i < ctx->path_mgr.n_paths; i++) {
-            mpvpn_path_t *p = &ctx->path_mgr.paths[i];
+            mqvpn_path_t *p = &ctx->path_mgr.paths[i];
             if (p->active && p->fd >= 0 && !p->in_use) {
                 all_survived = 0;
                 break;
@@ -1195,7 +1195,7 @@ cli_path_removed(const xqc_cid_t *cid, uint64_t path_id,
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
     cli_ctx_t *ctx = conn->ctx;
 
-    mpvpn_path_t *p = mpvpn_path_mgr_find_by_path_id(&ctx->path_mgr, path_id);
+    mqvpn_path_t *p = mqvpn_path_mgr_find_by_path_id(&ctx->path_mgr, path_id);
     if (p) {
         LOG_INF("path removed: path_id=%" PRIu64 " iface=%s", path_id, p->iface);
         p->in_use = 0;
@@ -1242,7 +1242,7 @@ cli_resolve_server(cli_ctx_t *ctx)
  * ================================================================ */
 
 int
-mpvpn_client_run(const mpvpn_client_cfg_t *cfg)
+mqvpn_client_run(const mqvpn_client_cfg_t *cfg)
 {
     memset(&g_cli, 0, sizeof(g_cli));
     g_cli.cfg = cfg;
@@ -1352,12 +1352,12 @@ mpvpn_client_run(const mpvpn_client_cfg_t *cfg)
     }
 
     /* ---- Create UDP sockets (one per path) ---- */
-    mpvpn_path_mgr_init(&g_cli.path_mgr);
+    mqvpn_path_mgr_init(&g_cli.path_mgr);
 
     if (cfg->n_paths > 0) {
         /* Multipath: create one socket per specified interface */
         for (int i = 0; i < cfg->n_paths; i++) {
-            int idx = mpvpn_path_mgr_add(&g_cli.path_mgr, cfg->path_ifaces[i],
+            int idx = mqvpn_path_mgr_add(&g_cli.path_mgr, cfg->path_ifaces[i],
                                           &g_cli.server_addr);
             if (idx < 0) {
                 LOG_ERR("failed to create path socket for %s", cfg->path_ifaces[i]);
@@ -1366,7 +1366,7 @@ mpvpn_client_run(const mpvpn_client_cfg_t *cfg)
         }
     } else {
         /* Single-path: one socket on any interface */
-        int idx = mpvpn_path_mgr_add(&g_cli.path_mgr, NULL, &g_cli.server_addr);
+        int idx = mqvpn_path_mgr_add(&g_cli.path_mgr, NULL, &g_cli.server_addr);
         if (idx < 0) {
             return -1;
         }
@@ -1374,7 +1374,7 @@ mpvpn_client_run(const mpvpn_client_cfg_t *cfg)
 
     /* Register all path sockets with libevent */
     for (int i = 0; i < g_cli.path_mgr.n_paths; i++) {
-        mpvpn_path_t *p = &g_cli.path_mgr.paths[i];
+        mqvpn_path_t *p = &g_cli.path_mgr.paths[i];
         p->ev_socket = event_new(g_cli.eb, p->fd,
                                   EV_READ | EV_PERSIST,
                                   cli_socket_event_callback, &g_cli);
@@ -1448,8 +1448,8 @@ mpvpn_client_run(const mpvpn_client_cfg_t *cfg)
     if (g_cli.ev_tun_resume)     event_free(g_cli.ev_tun_resume);
     if (g_cli.ev_path_recreate)  event_free(g_cli.ev_path_recreate);
     if (g_cli.ev_engine)         event_free(g_cli.ev_engine);
-    mpvpn_path_mgr_destroy(&g_cli.path_mgr);
-    mpvpn_tun_destroy(&g_cli.tun);
+    mqvpn_path_mgr_destroy(&g_cli.path_mgr);
+    mqvpn_tun_destroy(&g_cli.tun);
     xqc_engine_destroy(g_cli.engine);
     event_base_free(g_cli.eb);
     free(conn);

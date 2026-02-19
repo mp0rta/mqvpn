@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(mpvpn C)
+project(mqvpn C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -40,8 +40,8 @@ if(NOT EVENT_LIB)
     message(FATAL_ERROR "libevent not found. Install: apt install libevent-dev")
 endif()
 
-# ---------- mpvpn ----------
-add_executable(mpvpn
+# ---------- mqvpn ----------
+add_executable(mqvpn
     src/main.c
     src/tun.c
     src/vpn_client.c
@@ -51,7 +51,7 @@ add_executable(mpvpn
     src/log.c
 )
 
-target_include_directories(mpvpn PRIVATE
+target_include_directories(mqvpn PRIVATE
     ${XQUIC_INCLUDE_DIR}
     ${EVENT_INCLUDE_DIR}
 )
@@ -71,7 +71,7 @@ find_library(SSL_LIB ssl
 find_library(CRYPTO_LIB crypto
     HINTS ${BORINGSSL_BUILD_DIR} /usr/local/lib /usr/local/babassl/lib)
 
-target_link_libraries(mpvpn
+target_link_libraries(mqvpn
     ${XQUIC_LIB}
     ${EVENT_LIB}
     ${SSL_LIB}
@@ -83,4 +83,4 @@ target_link_libraries(mpvpn
 )
 
 # ---------- Install ----------
-install(TARGETS mpvpn DESTINATION bin)
+install(TARGETS mqvpn DESTINATION bin)

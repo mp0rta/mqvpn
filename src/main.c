@@ -20,7 +20,7 @@ usage(const char *prog)
         "  --server HOST:PORT        Server address (client mode)\n"
         "  --listen BIND:PORT        Listen address (server mode, default 0.0.0.0:443)\n"
         "  --subnet CIDR             Client IP pool (server mode, default 10.0.0.0/24)\n"
-        "  --tun-name NAME           TUN device name (default mpvpn0)\n"
+        "  --tun-name NAME           TUN device name (default mqvpn0)\n"
         "  --cert PATH               TLS certificate (server mode)\n"
         "  --key PATH                TLS private key (server mode)\n"
         "  --insecure                Skip TLS cert verification (client mode)\n"
@@ -73,12 +73,12 @@ main(int argc, char *argv[])
     const char *server_str  = NULL;
     const char *listen_str  = "0.0.0.0:443";
     const char *subnet      = "10.0.0.0/24";
-    const char *tun_name    = "mpvpn0";
+    const char *tun_name    = "mqvpn0";
     const char *cert_file   = "server.crt";
     const char *key_file    = "server.key";
     int         insecure    = 0;
     const char *log_level_str = "info";
-    const char *path_ifaces[MPVPN_MAX_PATH_IFACES];
+    const char *path_ifaces[MQVPN_MAX_PATH_IFACES];
     int         n_paths = 0;
 
     int opt;
@@ -93,10 +93,10 @@ main(int argc, char *argv[])
         case 'k': key_file = optarg; break;
         case 'i': insecure = 1; break;
         case 'p':
-            if (n_paths < MPVPN_MAX_PATH_IFACES) {
+            if (n_paths < MQVPN_MAX_PATH_IFACES) {
                 path_ifaces[n_paths++] = optarg;
             } else {
-                fprintf(stderr, "error: max %d paths supported\n", MPVPN_MAX_PATH_IFACES);
+                fprintf(stderr, "error: max %d paths supported\n", MQVPN_MAX_PATH_IFACES);
                 return 1;
             }
             break;
@@ -117,20 +117,20 @@ main(int argc, char *argv[])
     }
 
     /* Set log level */
-    mpvpn_log_level_t log_level = MPVPN_LOG_INFO;
-    if      (strcmp(log_level_str, "debug") == 0) log_level = MPVPN_LOG_DEBUG;
-    else if (strcmp(log_level_str, "info")  == 0) log_level = MPVPN_LOG_INFO;
-    else if (strcmp(log_level_str, "warn")  == 0) log_level = MPVPN_LOG_WARN;
-    else if (strcmp(log_level_str, "error") == 0) log_level = MPVPN_LOG_ERROR;
-    mpvpn_log_set_level(log_level);
+    mqvpn_log_level_t log_level = MQVPN_LOG_INFO;
+    if      (strcmp(log_level_str, "debug") == 0) log_level = MQVPN_LOG_DEBUG;
+    else if (strcmp(log_level_str, "info")  == 0) log_level = MQVPN_LOG_INFO;
+    else if (strcmp(log_level_str, "warn")  == 0) log_level = MQVPN_LOG_WARN;
+    else if (strcmp(log_level_str, "error") == 0) log_level = MQVPN_LOG_ERROR;
+    mqvpn_log_set_level(log_level);
 
     /* Map our log level to xquic log level (roughly) */
     int xqc_log_level;
     switch (log_level) {
-    case MPVPN_LOG_DEBUG: xqc_log_level = 5; break; /* XQC_LOG_DEBUG */
-    case MPVPN_LOG_INFO:  xqc_log_level = 3; break; /* XQC_LOG_INFO */
-    case MPVPN_LOG_WARN:  xqc_log_level = 2; break; /* XQC_LOG_WARN */
-    case MPVPN_LOG_ERROR: xqc_log_level = 1; break; /* XQC_LOG_ERROR */
+    case MQVPN_LOG_DEBUG: xqc_log_level = 5; break; /* XQC_LOG_DEBUG */
+    case MQVPN_LOG_INFO:  xqc_log_level = 3; break; /* XQC_LOG_INFO */
+    case MQVPN_LOG_WARN:  xqc_log_level = 2; break; /* XQC_LOG_WARN */
+    case MQVPN_LOG_ERROR: xqc_log_level = 1; break; /* XQC_LOG_ERROR */
     default: xqc_log_level = 3; break;
     }
 
@@ -150,7 +150,7 @@ main(int argc, char *argv[])
             LOG_WRN("--insecure: TLS certificate verification disabled");
         }
 
-        mpvpn_client_cfg_t cfg = {
+        mqvpn_client_cfg_t cfg = {
             .server_addr = host,
             .server_port = port,
             .tun_name    = tun_name,
@@ -161,7 +161,7 @@ main(int argc, char *argv[])
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];
         }
-        return mpvpn_client_run(&cfg);
+        return mqvpn_client_run(&cfg);
 
     } else if (strcmp(mode, "server") == 0) {
         char bind_addr[256] = "0.0.0.0";
@@ -172,7 +172,7 @@ main(int argc, char *argv[])
             }
         }
 
-        mpvpn_server_cfg_t cfg = {
+        mqvpn_server_cfg_t cfg = {
             .listen_addr = bind_addr,
             .listen_port = bind_port,
             .subnet      = subnet,
@@ -181,7 +181,7 @@ main(int argc, char *argv[])
             .key_file    = key_file,
             .log_level   = xqc_log_level,
         };
-        return mpvpn_server_run(&cfg);
+        return mqvpn_server_run(&cfg);
 
     } else {
         fprintf(stderr, "error: --mode must be 'client' or 'server'\n");

@@ -113,7 +113,7 @@ def generate_report(bench_dir):
     """Generate markdown benchmark report."""
     bench_dir = Path(bench_dir)
     report = []
-    report.append("# mpvpn M3 Benchmark Report\n")
+    report.append("# mqvpn M3 Benchmark Report\n")
     report.append(f"Date: {os.popen('date -I').read().strip()}")
     report.append("Environment: Local machine (2x ISP) → ConoHa VPS (100 Mbps)")
     report.append("Underlay: Direct WAN (163.44.118.182)")

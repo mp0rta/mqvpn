@@ -11,25 +11,25 @@
 #include <event2/event.h>
 
 void
-mpvpn_path_mgr_init(mpvpn_path_mgr_t *mgr)
+mqvpn_path_mgr_init(mqvpn_path_mgr_t *mgr)
 {
     memset(mgr, 0, sizeof(*mgr));
-    for (int i = 0; i < MPVPN_MAX_PATHS; i++) {
+    for (int i = 0; i < MQVPN_MAX_PATHS; i++) {
         mgr->paths[i].fd = -1;
     }
 }
 
 int
-mpvpn_path_mgr_add(mpvpn_path_mgr_t *mgr, const char *iface,
+mqvpn_path_mgr_add(mqvpn_path_mgr_t *mgr, const char *iface,
                     const struct sockaddr_in *peer_addr)
 {
-    if (mgr->n_paths >= MPVPN_MAX_PATHS) {
-        LOG_ERR("path_mgr: max paths (%d) reached", MPVPN_MAX_PATHS);
+    if (mgr->n_paths >= MQVPN_MAX_PATHS) {
+        LOG_ERR("path_mgr: max paths (%d) reached", MQVPN_MAX_PATHS);
         return -1;
     }
 
     int idx = mgr->n_paths;
-    mpvpn_path_t *p = &mgr->paths[idx];
+    mqvpn_path_t *p = &mgr->paths[idx];
 
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
@@ -81,8 +81,8 @@ mpvpn_path_mgr_add(mpvpn_path_mgr_t *mgr, const char *iface,
     return idx;
 }
 
-mpvpn_path_t *
-mpvpn_path_mgr_find_by_fd(mpvpn_path_mgr_t *mgr, int fd)
+mqvpn_path_t *
+mqvpn_path_mgr_find_by_fd(mqvpn_path_mgr_t *mgr, int fd)
 {
     for (int i = 0; i < mgr->n_paths; i++) {
         if (mgr->paths[i].fd == fd)
@@ -91,8 +91,8 @@ mpvpn_path_mgr_find_by_fd(mpvpn_path_mgr_t *mgr, int fd)
     return NULL;
 }
 
-mpvpn_path_t *
-mpvpn_path_mgr_find_by_path_id(mpvpn_path_mgr_t *mgr, uint64_t path_id)
+mqvpn_path_t *
+mqvpn_path_mgr_find_by_path_id(mqvpn_path_mgr_t *mgr, uint64_t path_id)
 {
     for (int i = 0; i < mgr->n_paths; i++) {
         if (mgr->paths[i].in_use && mgr->paths[i].path_id == path_id)
@@ -102,9 +102,9 @@ mpvpn_path_mgr_find_by_path_id(mpvpn_path_mgr_t *mgr, uint64_t path_id)
 }
 
 int
-mpvpn_path_mgr_get_fd(mpvpn_path_mgr_t *mgr, uint64_t path_id)
+mqvpn_path_mgr_get_fd(mqvpn_path_mgr_t *mgr, uint64_t path_id)
 {
-    mpvpn_path_t *p = mpvpn_path_mgr_find_by_path_id(mgr, path_id);
+    mqvpn_path_t *p = mqvpn_path_mgr_find_by_path_id(mgr, path_id);
     if (p)
         return p->fd;
     /* Fallback to primary (path 0) */
@@ -117,7 +117,7 @@ mpvpn_path_mgr_get_fd(mpvpn_path_mgr_t *mgr, uint64_t path_id)
 }
 
 void
-mpvpn_path_mgr_destroy(mpvpn_path_mgr_t *mgr)
+mqvpn_path_mgr_destroy(mqvpn_path_mgr_t *mgr)
 {
     for (int i = 0; i < mgr->n_paths; i++) {
         if (mgr->paths[i].ev_socket) {
