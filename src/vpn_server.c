@@ -1,4 +1,5 @@
 #include "vpn_server.h"
+#include "flow_sched.h"
 #include "tun.h"
 #include "addr_pool.h"
 #include "log.h"
@@ -64,6 +65,10 @@ struct svr_ctx_s {
 
     /* M1: single client — track the active conn for return traffic */
     svr_conn_t          *active_conn;
+
+    /* WLB flow scheduler */
+    flow_sched_t         flow_sched;
+    struct event        *ev_sched_timer;
 };
 
 /* ---------- per-connection state ---------- */
@@ -240,6 +245,32 @@ svr_socket_event_callback(int fd, short what, void *arg)
 }
 
 /* ================================================================
+ *  WLB scheduler timer (1s interval)
+ * ================================================================ */
+
+static void
+svr_sched_timer_cb(int fd, short what, void *arg)
+{
+    (void)fd; (void)what;
+    svr_ctx_t *ctx = (svr_ctx_t *)arg;
+    if (!ctx->active_conn || !ctx->flow_sched.enabled) return;
+
+    xqc_conn_stats_t stats = xqc_conn_get_stats(ctx->engine,
+                                                  &ctx->active_conn->cid);
+    int n = 0;
+    for (int i = 0; i < XQC_MAX_PATHS_COUNT; i++) {
+        if (stats.paths_info[i].path_id == UINT64_MAX) break;
+        n++;
+    }
+
+    flow_sched_update(&ctx->flow_sched, stats.paths_info, n);
+    flow_sched_expire(&ctx->flow_sched, mqvpn_now_us());
+
+    struct timeval tv = { .tv_sec = 1 };
+    evtimer_add(ctx->ev_sched_timer, &tv);
+}
+
+/* ================================================================
  *  TUN read handler (internet return traffic → MASQUE datagram to client)
  * ================================================================ */
 
@@ -287,9 +318,16 @@ svr_tun_read_handler(int fd, short what, void *arg)
         }
 
         uint64_t dgram_id;
-        xret = xqc_h3_ext_datagram_send(
-            ctx->active_conn->h3_conn, frame_buf, frame_written,
-            &dgram_id, XQC_DATA_QOS_HIGH);
+        uint64_t sched_path = flow_sched_get_path(&ctx->flow_sched, pkt, n);
+        if (sched_path != UINT64_MAX) {
+            xret = xqc_h3_ext_datagram_send_on_path(
+                ctx->active_conn->h3_conn, frame_buf, frame_written,
+                &dgram_id, XQC_DATA_QOS_HIGH, sched_path);
+        } else {
+            xret = xqc_h3_ext_datagram_send(
+                ctx->active_conn->h3_conn, frame_buf, frame_written,
+                &dgram_id, XQC_DATA_QOS_HIGH);
+        }
         if (xret == -XQC_EAGAIN) {
             /* QUIC send queue full — pause TUN reading */
             event_del(ctx->ev_tun);
@@ -356,6 +394,7 @@ svr_path_created(xqc_connection_t *conn, const xqc_cid_t *cid,
 {
     (void)conn; (void)cid; (void)conn_user_data;
     LOG_INF("new path created: path_id=%" PRIu64, path_id);
+    flow_sched_add_path(&g_svr.flow_sched, path_id);
     return 0;
 }
 
@@ -365,6 +404,7 @@ svr_path_removed(const xqc_cid_t *cid, uint64_t path_id,
 {
     (void)cid; (void)conn_user_data;
     LOG_INF("path removed: path_id=%" PRIu64, path_id);
+    flow_sched_remove_path(&g_svr.flow_sched, path_id);
 }
 
 /* ================================================================
@@ -387,6 +427,9 @@ svr_h3_conn_create_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
     xqc_h3_ext_datagram_set_user_data(h3_conn, svr_conn);
     xqc_h3_conn_get_peer_addr(h3_conn, (struct sockaddr *)&svr_conn->peer_addr,
                                sizeof(svr_conn->peer_addr), &svr_conn->peer_addrlen);
+
+    /* Register initial path 0 with flow scheduler */
+    flow_sched_add_path(&g_svr.flow_sched, 0);
 
     LOG_INF("H3 connection created");
     return 0;
@@ -1167,6 +1210,15 @@ mqvpn_server_run(const mqvpn_server_cfg_t *cfg)
                               svr_tun_read_handler, &g_svr);
     event_add(g_svr.ev_tun, NULL);
 
+    /* Initialize flow scheduler */
+    flow_sched_init(&g_svr.flow_sched, cfg->scheduler);
+    g_svr.ev_sched_timer = evtimer_new(g_svr.eb, svr_sched_timer_cb, &g_svr);
+    if (cfg->scheduler == MQVPN_SCHED_WLB) {
+        LOG_INF("WLB flow scheduler enabled");
+        struct timeval tv = { .tv_sec = 1 };
+        evtimer_add(g_svr.ev_sched_timer, &tv);
+    }
+
     LOG_INF("mqvpn server ready — listening on %s:%d, subnet %s",
             cfg->listen_addr ? cfg->listen_addr : "0.0.0.0",
             cfg->listen_port, cfg->subnet);
@@ -1178,10 +1230,11 @@ mqvpn_server_run(const mqvpn_server_cfg_t *cfg)
     LOG_INF("server shutting down");
     if (g_svr.ev_sigterm) event_free(g_svr.ev_sigterm);
     if (g_svr.ev_sigint)  event_free(g_svr.ev_sigint);
-    if (g_svr.ev_tun)         event_free(g_svr.ev_tun);
-    if (g_svr.ev_tun_resume) event_free(g_svr.ev_tun_resume);
-    if (g_svr.ev_socket)     event_free(g_svr.ev_socket);
-    if (g_svr.ev_engine)     event_free(g_svr.ev_engine);
+    if (g_svr.ev_tun)          event_free(g_svr.ev_tun);
+    if (g_svr.ev_tun_resume)  event_free(g_svr.ev_tun_resume);
+    if (g_svr.ev_sched_timer) event_free(g_svr.ev_sched_timer);
+    if (g_svr.ev_socket)      event_free(g_svr.ev_socket);
+    if (g_svr.ev_engine)      event_free(g_svr.ev_engine);
     if (g_svr.udp_fd >= 0) close(g_svr.udp_fd);
     mqvpn_tun_destroy(&g_svr.tun);
     xqc_engine_destroy(g_svr.engine);

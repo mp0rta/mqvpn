@@ -1,5 +1,6 @@
 #include "vpn_client.h"
 #include "path_mgr.h"
+#include "flow_sched.h"
 #include "tun.h"
 #include "log.h"
 
@@ -77,6 +78,10 @@ struct cli_ctx_s {
     char                 server_ip_str[INET_ADDRSTRLEN];
 
     cli_conn_t          *conn;
+
+    /* WLB flow scheduler */
+    flow_sched_t         flow_sched;
+    struct event        *ev_sched_timer;
 };
 
 /* ---------- per-connection state ---------- */
@@ -511,6 +516,28 @@ cli_setup_tun(cli_ctx_t *ctx, const uint8_t *ip, uint8_t prefix)
  * ================================================================ */
 
 static void
+cli_sched_timer_cb(int fd, short what, void *arg)
+{
+    (void)fd; (void)what;
+    cli_ctx_t *ctx = (cli_ctx_t *)arg;
+    if (!ctx->conn || !ctx->flow_sched.enabled) return;
+
+    xqc_conn_stats_t stats = xqc_conn_get_stats(ctx->engine, &ctx->conn->cid);
+
+    int n = 0;
+    for (int i = 0; i < XQC_MAX_PATHS_COUNT; i++) {
+        if (stats.paths_info[i].path_id == UINT64_MAX) break;
+        n++;
+    }
+
+    flow_sched_update(&ctx->flow_sched, stats.paths_info, n);
+    flow_sched_expire(&ctx->flow_sched, mqvpn_now_us());
+
+    struct timeval tv = { .tv_sec = 1 };
+    evtimer_add(ctx->ev_sched_timer, &tv);
+}
+
+static void
 cli_tun_resume_safety(int fd, short what, void *arg)
 {
     (void)fd; (void)what;
@@ -562,9 +589,16 @@ cli_tun_read_handler(int fd, short what, void *arg)
         }
 
         uint64_t dgram_id;
-        xret = xqc_h3_ext_datagram_send(
-            conn->h3_conn, frame_buf, frame_written,
-            &dgram_id, XQC_DATA_QOS_HIGH);
+        uint64_t sched_path = flow_sched_get_path(&ctx->flow_sched, pkt, n);
+        if (sched_path != UINT64_MAX) {
+            xret = xqc_h3_ext_datagram_send_on_path(
+                conn->h3_conn, frame_buf, frame_written,
+                &dgram_id, XQC_DATA_QOS_HIGH, sched_path);
+        } else {
+            xret = xqc_h3_ext_datagram_send(
+                conn->h3_conn, frame_buf, frame_written,
+                &dgram_id, XQC_DATA_QOS_HIGH);
+        }
         if (xret == -XQC_EAGAIN) {
             /* QUIC send queue full — pause TUN reading */
             event_del(ctx->ev_tun);
@@ -1132,6 +1166,7 @@ cli_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
 
         p->path_id = new_path_id;
         p->in_use = 1;
+        flow_sched_add_path(&ctx->flow_sched, new_path_id);
         LOG_INF("path[%d] created: path_id=%" PRIu64 " iface=%s",
                 i, new_path_id, p->iface);
     }
@@ -1259,6 +1294,7 @@ mqvpn_client_run(const mqvpn_client_cfg_t *cfg)
     g_cli.ev_path_recreate = event_new(g_cli.eb, -1, 0,
                                         cli_path_recreate_callback, &g_cli);
     g_cli.ev_tun_resume = evtimer_new(g_cli.eb, cli_tun_resume_safety, &g_cli);
+    g_cli.ev_sched_timer = evtimer_new(g_cli.eb, cli_sched_timer_cb, &g_cli);
     g_cli.ev_sigint = evsignal_new(g_cli.eb, SIGINT, cli_signal_event_callback, &g_cli);
     g_cli.ev_sigterm = evsignal_new(g_cli.eb, SIGTERM, cli_signal_event_callback, &g_cli);
     if (!g_cli.ev_sigint || !g_cli.ev_sigterm) {
@@ -1385,6 +1421,15 @@ mqvpn_client_run(const mqvpn_client_cfg_t *cfg)
     g_cli.path_mgr.paths[0].path_id = 0;
     g_cli.path_mgr.paths[0].in_use = 1;
 
+    /* Initialize flow scheduler */
+    flow_sched_init(&g_cli.flow_sched, cfg->scheduler);
+    flow_sched_add_path(&g_cli.flow_sched, 0);
+    if (cfg->scheduler == MQVPN_SCHED_WLB) {
+        LOG_INF("WLB flow scheduler enabled");
+        struct timeval tv = { .tv_sec = 1 };
+        evtimer_add(g_cli.ev_sched_timer, &tv);
+    }
+
     /* ---- Create H3 connection ---- */
     cli_conn_t *conn = calloc(1, sizeof(*conn));
     if (!conn) {
@@ -1447,6 +1492,7 @@ mqvpn_client_run(const mqvpn_client_cfg_t *cfg)
     if (g_cli.ev_tun)            event_free(g_cli.ev_tun);
     if (g_cli.ev_tun_resume)     event_free(g_cli.ev_tun_resume);
     if (g_cli.ev_path_recreate)  event_free(g_cli.ev_path_recreate);
+    if (g_cli.ev_sched_timer)    event_free(g_cli.ev_sched_timer);
     if (g_cli.ev_engine)         event_free(g_cli.ev_engine);
     mqvpn_path_mgr_destroy(&g_cli.path_mgr);
     mqvpn_tun_destroy(&g_cli.tun);
