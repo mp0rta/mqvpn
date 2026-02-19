@@ -136,22 +136,11 @@ make -j$(nproc)
 ### Server Setup
 
 ```bash
-# Generate self-signed certificate (for testing)
-mkdir -p certs
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-    -keyout certs/server.key -out certs/server.crt \
-    -days 365 -nodes -subj "/CN=mqvpn"
+# Generate certs, configure NAT, and start server
+sudo scripts/start_server.sh
 
-# Enable NAT
-sudo sysctl -w net.ipv4.ip_forward=1
-IFACE=$(ip route get 8.8.8.8 | grep -oP 'dev \K\S+')
-sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o $IFACE -j MASQUERADE
-sudo iptables -A FORWARD -s 10.0.0.0/24 -j ACCEPT
-sudo iptables -A FORWARD -d 10.0.0.0/24 -j ACCEPT
-
-# Start server
-sudo ./build/mqvpn --mode server --listen 0.0.0.0:443 \
-    --subnet 10.0.0.0/24 --cert certs/server.crt --key certs/server.key
+# Or with custom options
+sudo scripts/start_server.sh --listen 0.0.0.0:4433 --subnet 10.0.0.0/24
 ```
 
 With this setup, the client's default route points through the mqvpn tunnel. All traffic flows: client app → TUN (mqvpn0) → QUIC tunnel → server → NAT → internet. The client automatically configures routing so that only the server address bypasses the tunnel.
@@ -195,6 +184,7 @@ Server options:
 - [ ] Performance optimization (GSO/GRO, io_uring, batch send)
 - [ ] Interop testing with other MASQUE implementations (masque-go, Google QUICHE)
 - [ ] Bandwidth aggregation scheduler (try weighted round-robin by cwnd / BBR bandwidth estimate)
+- [ ] DATAGRAM Capsule fallback (RFC 9297 stream-based carriage when QUIC DATAGRAMs are unavailable)
 
 ## Protocol Standards
 

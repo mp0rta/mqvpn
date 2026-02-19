@@ -14,5 +14,6 @@ iptables -D FORWARD -s $SUBNET -j ACCEPT 2>/dev/null || true
 iptables -D FORWARD -d $SUBNET -j ACCEPT 2>/dev/null || true
 
 ip link del mqvpn0 2>/dev/null || true
+ip link del mpvpn0 2>/dev/null || true
 
 echo "Cleaned up"

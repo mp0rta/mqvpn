@@ -437,11 +437,12 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
     svr_ctx_t *ctx = conn->ctx;
     ssize_t ret;
 
-    /* M1: refuse early if another client is already tunneled */
+    /* If another client is tunneled, close the old connection first */
     if (ctx->active_conn && ctx->active_conn != conn
         && ctx->active_conn->tunnel_established) {
-        LOG_WRN("rejecting new MASQUE tunnel: active connection exists");
-        return -1;
+        LOG_INF("closing previous connection for new client");
+        xqc_h3_conn_close(ctx->engine, &ctx->active_conn->cid);
+        /* conn_close_notify will free old conn and set active_conn=NULL */
     }
 
     /* 1. Send 200 response headers (fin=0 to keep stream open) */
@@ -1083,6 +1084,8 @@ mqvpn_server_run(const mqvpn_server_cfg_t *cfg)
     conn_settings.cong_ctrl_callback = xqc_bbr_cb;
     conn_settings.sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
     conn_settings.so_sndbuf = 8 * 1024 * 1024;
+    conn_settings.idle_time_out = 30000;       /* 30s idle timeout */
+    conn_settings.init_idle_time_out = 10000;  /* 10s initial idle timeout */
     xqc_server_set_conn_settings(g_svr.engine, &conn_settings);
 
     /* H3 callbacks */

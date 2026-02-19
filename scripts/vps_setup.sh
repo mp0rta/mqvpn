@@ -25,10 +25,10 @@ iptables -C INPUT -p udp --dport $PORT -j ACCEPT 2>/dev/null || \
     iptables -A INPUT -p udp --dport $PORT -j ACCEPT
 iptables -t nat -C POSTROUTING -s $SUBNET -o $IFACE -j MASQUERADE 2>/dev/null || \
     iptables -t nat -A POSTROUTING -s $SUBNET -o $IFACE -j MASQUERADE
-iptables -C FORWARD -s $SUBNET -j ACCEPT 2>/dev/null || \
-    iptables -A FORWARD -s $SUBNET -j ACCEPT
-iptables -C FORWARD -d $SUBNET -j ACCEPT 2>/dev/null || \
-    iptables -A FORWARD -d $SUBNET -j ACCEPT
+iptables -C FORWARD -i mqvpn0 -s $SUBNET -j ACCEPT 2>/dev/null || \
+    iptables -I FORWARD -i mqvpn0 -s $SUBNET -j ACCEPT
+iptables -C FORWARD -o mqvpn0 -d $SUBNET -j ACCEPT 2>/dev/null || \
+    iptables -I FORWARD -o mqvpn0 -d $SUBNET -j ACCEPT
 
 echo "NAT configured: $SUBNET → $IFACE"
 
