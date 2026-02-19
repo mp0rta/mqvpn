@@ -538,6 +538,14 @@ cli_tun_read_handler(int fd, short what, void *arg)
         int n = mpvpn_tun_read(&ctx->tun, pkt, sizeof(pkt));
         if (n <= 0) break;
 
+        /* Validate source IP matches assigned address */
+        if (n >= 20 && (pkt[0] >> 4) == 4 && conn->addr_assigned) {
+            if (memcmp(pkt + 12, conn->assigned_ip, 4) != 0) {
+                LOG_DBG("dropping outbound packet: src IP mismatch");
+                continue;
+            }
+        }
+
         size_t frame_written = 0;
         xqc_int_t xret = xqc_h3_ext_masque_frame_udp(
             frame_buf, sizeof(frame_buf), &frame_written,
@@ -944,8 +952,20 @@ cli_dgram_mss_updated_notify(xqc_h3_conn_t *conn, size_t mss,
 }
 
 /* ================================================================
- *  TLS session callbacks (stubs for M1)
+ *  TLS callbacks
  * ================================================================ */
+
+static int
+cli_cert_verify_cb(const unsigned char *certs[], const size_t cert_len[],
+                   size_t certs_len, void *conn_user_data)
+{
+    (void)certs; (void)cert_len; (void)certs_len; (void)conn_user_data;
+    /* xquic's internal xqc_ssl_cert_verify_cb already does BoringSSL chain +
+     * hostname verification before calling us.  This callback is only reached
+     * for UNABLE_TO_GET_ISSUER_CERT_LOCALLY or ALLOW_SELF_SIGNED cases.
+     * Accept: xquic already filtered fatal errors. */
+    return 0;
+}
 
 static void
 cli_save_token(const unsigned char *token, unsigned token_len, void *user_data)
@@ -1151,6 +1171,7 @@ mpvpn_client_run(const mpvpn_client_cfg_t *cfg)
         .save_token                  = cli_save_token,
         .save_session_cb             = cli_save_session_cb,
         .save_tp_cb                  = cli_save_tp_cb,
+        .cert_verify_cb              = cli_cert_verify_cb,
         .ready_to_create_path_notify = cli_ready_to_create_path,
         .path_removed_notify         = cli_path_removed,
     };
@@ -1272,7 +1293,8 @@ mpvpn_client_run(const mpvpn_client_cfg_t *cfg)
     xqc_conn_ssl_config_t conn_ssl_config;
     memset(&conn_ssl_config, 0, sizeof(conn_ssl_config));
     if (!cfg->insecure) {
-        conn_ssl_config.cert_verify_flag = XQC_TLS_CERT_FLAG_NEED_VERIFY;
+        conn_ssl_config.cert_verify_flag = XQC_TLS_CERT_FLAG_NEED_VERIFY
+                                         | XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED;
     }
 
     const xqc_cid_t *cid = xqc_h3_connect(

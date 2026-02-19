@@ -146,6 +146,10 @@ main(int argc, char *argv[])
             return 1;
         }
 
+        if (insecure) {
+            LOG_WRN("--insecure: TLS certificate verification disabled");
+        }
+
         mpvpn_client_cfg_t cfg = {
             .server_addr = host,
             .server_port = port,

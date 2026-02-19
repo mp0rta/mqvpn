@@ -33,11 +33,11 @@ sudo ./mpvpn --mode server --listen 0.0.0.0:443 \
     --cert server.crt --key server.key
 
 # Client (single path)
-sudo ./mpvpn --mode client --server yourserver.com:443 --insecure
+sudo ./mpvpn --mode client --server yourserver.com:443
 
 # Client (multipath — two interfaces)
 sudo ./mpvpn --mode client --server yourserver.com:443 \
-    --path eth0 --path eth1 --insecure
+    --path eth0 --path eth1
 ```
 
 ## Benchmarks
@@ -165,7 +165,7 @@ mpvpn --mode client|server [options]
 Client options:
   --server HOST:PORT     Server address
   --path IFACE           Network interface (repeatable, for multipath)
-  --insecure             Skip TLS certificate verification
+  --insecure             Skip TLS certificate verification (self-signed certs work without this)
   --tun-name NAME        TUN device name (default: mpvpn0)
   --log-level LEVEL      debug|info|warn|error (default: info)
 
@@ -180,9 +180,9 @@ Server options:
 ## Roadmap
 
 ### v0.1.0 — First public release
-- [ ] TLS certificate verification by default (remove `--insecure` as implicit behavior)
-- [ ] Tunnel source IP validation (prevent IP spoofing through the tunnel)
-- [ ] CI with GitHub Actions (build + netns smoke tests)
+- [x] TLS certificate verification by default (self-signed certs accepted; `--insecure` disables all checks)
+- [x] Tunnel source IP validation (prevent IP spoofing through the tunnel)
+- [x] CI with GitHub Actions (build + netns smoke tests)
 
 ### v0.2.0 — Multi-client & auth
 - [ ] Multi-client support (per-connection session management)

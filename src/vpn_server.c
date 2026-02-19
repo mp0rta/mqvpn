@@ -663,6 +663,15 @@ svr_dgram_read_notify(xqc_h3_conn_t *conn, const void *data,
         return;
     }
 
+    /* Validate source IP matches assigned address (prevent spoofing) */
+    if (payload_len >= 20 && (payload[0] >> 4) == 4) {
+        if (memcmp(payload + 12, &svr_conn->assigned_ip.s_addr, 4) != 0) {
+            LOG_WRN("dropping packet: src IP mismatch (expected %s)",
+                    inet_ntoa(svr_conn->assigned_ip));
+            return;
+        }
+    }
+
     /* Write raw IP packet to TUN (kernel routes to internet via NAT) */
     int wret = mpvpn_tun_write(&svr_conn->ctx->tun, payload, payload_len);
     if (wret < 0) {
