@@ -538,8 +538,14 @@ cli_tun_read_handler(int fd, short what, void *arg)
         int n = mpvpn_tun_read(&ctx->tun, pkt, sizeof(pkt));
         if (n <= 0) break;
 
+        /* Drop non-IPv4 packets (IPv6 not yet supported) */
+        if (n < 20 || (pkt[0] >> 4) != 4) {
+            LOG_DBG("dropping non-IPv4 outbound packet");
+            continue;
+        }
+
         /* Validate source IP matches assigned address */
-        if (n >= 20 && (pkt[0] >> 4) == 4 && conn->addr_assigned) {
+        if (conn->addr_assigned) {
             if (memcmp(pkt + 12, conn->assigned_ip, 4) != 0) {
                 LOG_DBG("dropping outbound packet: src IP mismatch");
                 continue;
@@ -749,20 +755,43 @@ cli_process_capsules(cli_stream_t *stream)
         }
 
         if (cap_type == XQC_H3_CAPSULE_ADDRESS_ASSIGN) {
-            uint64_t req_id;
-            uint8_t ip_ver, ip_addr[16], prefix;
-            size_t ip_len = 16, aa_consumed;
-            xret = xqc_h3_ext_connectip_parse_address_assign(
-                cap_payload, cap_len, &req_id, &ip_ver,
-                ip_addr, &ip_len, &prefix, &aa_consumed);
-            if (xret == XQC_OK && ip_ver == 4) {
-                memcpy(conn->assigned_ip, ip_addr, 4);
-                conn->assigned_prefix = prefix;
-                conn->addr_assigned = 1;
-                LOG_INF("ADDRESS_ASSIGN: %d.%d.%d.%d/%d",
-                        ip_addr[0], ip_addr[1], ip_addr[2], ip_addr[3], prefix);
+            /* Loop over all entries (RFC 9484 §4.7.1: capsule may contain
+             * multiple assigned addresses) */
+            const uint8_t *ap = cap_payload;
+            size_t aremain = cap_len;
+            while (aremain > 0) {
+                uint64_t req_id;
+                uint8_t ip_ver, ip_addr[16], prefix;
+                size_t ip_len = 16, aa_consumed;
+                xret = xqc_h3_ext_connectip_parse_address_assign(
+                    ap, aremain, &req_id, &ip_ver,
+                    ip_addr, &ip_len, &prefix, &aa_consumed);
+                if (xret != XQC_OK) break;
+
+                if (ip_ver == 4 && !conn->addr_assigned) {
+                    memcpy(conn->assigned_ip, ip_addr, 4);
+                    conn->assigned_prefix = prefix;
+                    conn->addr_assigned = 1;
+                }
+                LOG_INF("ADDRESS_ASSIGN: req_id=%" PRIu64 " ipv%d "
+                        "%d.%d.%d.%d/%d",
+                        req_id, ip_ver,
+                        ip_addr[0], ip_addr[1], ip_addr[2], ip_addr[3],
+                        prefix);
+                ap += aa_consumed;
+                aremain -= aa_consumed;
             }
         } else if (cap_type == XQC_H3_CAPSULE_ROUTE_ADVERTISEMENT) {
+            /* Validate ordering requirements (RFC 9484 §4.7.3 MUST) */
+            xret = xqc_h3_ext_connectip_validate_route_advertisement(
+                cap_payload, cap_len);
+            if (xret != XQC_OK) {
+                LOG_ERR("ROUTE_ADVERTISEMENT validation failed: %d "
+                        "(RFC 9484 §4.7.3 ordering violation)", xret);
+                /* MUST abort the stream */
+                return;
+            }
+
             uint8_t ip_ver, start_ip[16], end_ip[16], ip_proto;
             size_t ip_len, bytes_consumed;
 
@@ -782,6 +811,8 @@ cli_process_capsules(cli_stream_t *stream)
                 rp += bytes_consumed;
                 rremain -= bytes_consumed;
             }
+        } else {
+            /* RFC 9297 §3.2: unknown capsule types MUST be silently ignored */
         }
 
         if (consumed < stream->capsule_len) {
@@ -876,8 +907,33 @@ cli_dgram_read_notify(xqc_h3_conn_t *h3_conn, const void *data,
         return;
     }
 
+    /* Check IP version */
+    if (payload_len < 1) return;
+    uint8_t ip_ver = payload[0] >> 4;
+    if (ip_ver == 6) {
+        LOG_DBG("dropping IPv6 packet (not supported)");
+        return;
+    }
+    if (ip_ver != 4 || payload_len < 20) {
+        LOG_DBG("dropping non-IPv4 packet (version=%d len=%zu)", ip_ver, payload_len);
+        return;
+    }
+
+    /* Decrement TTL before forwarding (RFC 9484 §4.3 MUST) */
+    uint8_t fwd_pkt[PACKET_BUF_SIZE];
+    memcpy(fwd_pkt, payload, payload_len);
+    if (fwd_pkt[8] <= 1) {
+        LOG_DBG("dropping packet: TTL expired");
+        return;
+    }
+    fwd_pkt[8]--;
+    uint32_t sum = ((uint32_t)fwd_pkt[10] << 8 | fwd_pkt[11]) + 0x0100;
+    sum = (sum & 0xFFFF) + (sum >> 16);
+    fwd_pkt[10] = (sum >> 8) & 0xFF;
+    fwd_pkt[11] = sum & 0xFF;
+
     /* Write IP packet to TUN (delivered to local apps) */
-    int wret = mpvpn_tun_write(&conn->ctx->tun, payload, payload_len);
+    int wret = mpvpn_tun_write(&conn->ctx->tun, fwd_pkt, payload_len);
     if (wret < 0) {
         conn->ctx->tun_drop_cnt++;
         if (wret == MPVPN_TUN_EAGAIN) {

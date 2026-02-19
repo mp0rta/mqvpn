@@ -21,6 +21,7 @@
 
 #define PACKET_BUF_SIZE      65536
 #define MASQUE_FRAME_BUF     (PACKET_BUF_SIZE + 16)
+#define MAX_CAPSULE_BUF      65536
 #define TUN_RESUME_SAFETY_MS 100
 #define XQC_SNDQ_MAX_PKTS    16384
 
@@ -88,6 +89,9 @@ struct svr_stream_s {
     svr_conn_t          *conn;
     xqc_h3_request_t    *h3_request;
     int                  header_sent;
+    uint8_t             *capsule_buf;
+    size_t               capsule_len;
+    size_t               capsule_cap;
 };
 
 /* ---------- static context (M1: single instance) ---------- */
@@ -477,21 +481,18 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
     uint8_t ip_bytes[4];
     memcpy(ip_bytes, &conn->assigned_ip.s_addr, 4);
 
-    xqc_int_t xret = xqc_h3_ext_connectip_build_address_request(
-        addr_payload, sizeof(addr_payload), &addr_written,
-        1,          /* request_id */
-        4,          /* IPv4 */
-        ip_bytes,
-        32          /* /32 */
-    );
-    if (xret != XQC_OK) {
-        LOG_ERR("build ADDRESS_ASSIGN payload: %d", xret);
-        return -1;
-    }
+    /* Build ADDRESS_ASSIGN payload directly (RFC 9484 §4.7.1):
+     * request_id=0 (unsolicited) + ip_version + ip_addr + prefix_len.
+     * Cannot use build_address_request() as it rejects request_id=0. */
+    addr_payload[0] = 0x00;  /* request_id=0 (varint) */
+    addr_payload[1] = 4;     /* IPv4 */
+    memcpy(addr_payload + 2, ip_bytes, 4);
+    addr_payload[6] = 32;    /* /32 */
+    addr_written = 7;
 
     uint8_t capsule_buf[128];
     size_t cap_written = 0;
-    xret = xqc_h3_ext_capsule_encode(
+    xqc_int_t xret = xqc_h3_ext_capsule_encode(
         capsule_buf, sizeof(capsule_buf), &cap_written,
         XQC_H3_CAPSULE_ADDRESS_ASSIGN,
         addr_payload, addr_written);
@@ -577,6 +578,7 @@ svr_request_close_notify(xqc_h3_request_t *h3_request,
         if (stream->conn) {
             stream->conn->tunnel_established = 0;
         }
+        free(stream->capsule_buf);
         free(stream);
     }
     return 0;
@@ -593,8 +595,9 @@ svr_request_read_notify(xqc_h3_request_t *h3_request,
         xqc_http_headers_t *headers = xqc_h3_request_recv_headers(h3_request, &fin);
         if (!headers) return -1;
 
-        /* Detect Extended CONNECT for connect-ip */
+        /* Validate Extended CONNECT for connect-ip (RFC 9484 §4.5) */
         int is_connect = 0, is_connect_ip = 0;
+        int has_scheme_https = 0, has_capsule_proto = 0, has_valid_path = 0;
         for (int i = 0; i < (int)headers->count; i++) {
             xqc_http_header_t *h = &headers->headers[i];
             if (h->name.iov_len == 7
@@ -609,21 +612,114 @@ svr_request_read_notify(xqc_h3_request_t *h3_request,
                 && memcmp(h->value.iov_base, "connect-ip", 10) == 0) {
                 is_connect_ip = 1;
             }
+            if (h->name.iov_len == 7
+                && memcmp(h->name.iov_base, ":scheme", 7) == 0
+                && h->value.iov_len == 5
+                && memcmp(h->value.iov_base, "https", 5) == 0) {
+                has_scheme_https = 1;
+            }
+            if (h->name.iov_len == 5
+                && memcmp(h->name.iov_base, ":path", 5) == 0
+                && h->value.iov_len >= 24
+                && memcmp(h->value.iov_base,
+                          "/.well-known/masque/ip/", 22) == 0) {
+                has_valid_path = 1;
+            }
+            if (h->name.iov_len == 16
+                && memcmp(h->name.iov_base, "capsule-protocol", 16) == 0
+                && h->value.iov_len == 2
+                && memcmp(h->value.iov_base, "?1", 2) == 0) {
+                has_capsule_proto = 1;
+            }
         }
 
         if (is_connect && is_connect_ip) {
+            if (!has_scheme_https || !has_valid_path || !has_capsule_proto) {
+                LOG_WRN("rejecting CONNECT-IP: missing required headers "
+                        "(scheme=%d path=%d capsule=%d)",
+                        has_scheme_https, has_valid_path, has_capsule_proto);
+                return -1;
+            }
             LOG_INF("Extended CONNECT for connect-ip received");
             svr_masque_send_response(h3_request, stream);
             return 0;
         }
     }
 
-    /* Drain any body data (capsule traffic from client — not expected in M1) */
+    /* Parse capsule traffic from client (RFC 9484 §4.7.2: ADDRESS_REQUEST) */
     if (flag & XQC_REQ_NOTIFY_READ_BODY) {
-        unsigned char discard[4096];
+        unsigned char buf[4096];
         ssize_t n;
         do {
-            n = xqc_h3_request_recv_body(h3_request, discard, sizeof(discard), &fin);
+            n = xqc_h3_request_recv_body(h3_request, buf, sizeof(buf), &fin);
+            if (n <= 0) break;
+
+            /* Append to capsule buffer */
+            size_t need = stream->capsule_len + (size_t)n;
+            if (need > MAX_CAPSULE_BUF) {
+                LOG_ERR("server capsule buffer overflow");
+                break;
+            }
+            if (need > stream->capsule_cap) {
+                size_t new_cap = stream->capsule_cap ? stream->capsule_cap * 2 : 4096;
+                while (new_cap < need) new_cap *= 2;
+                uint8_t *new_buf = realloc(stream->capsule_buf, new_cap);
+                if (!new_buf) break;
+                stream->capsule_buf = new_buf;
+                stream->capsule_cap = new_cap;
+            }
+            memcpy(stream->capsule_buf + stream->capsule_len, buf, (size_t)n);
+            stream->capsule_len += (size_t)n;
+
+            /* Process complete capsules */
+            while (stream->capsule_len > 0) {
+                uint64_t cap_type;
+                const uint8_t *cap_payload;
+                size_t cap_len, consumed;
+                xqc_int_t xr = xqc_h3_ext_capsule_decode(
+                    stream->capsule_buf, stream->capsule_len,
+                    &cap_type, &cap_payload, &cap_len, &consumed);
+                if (xr != XQC_OK) break;
+
+                if (cap_type == XQC_H3_CAPSULE_ADDRESS_REQUEST
+                    && stream->conn && stream->conn->tunnel_established) {
+                    /* Parse ADDRESS_REQUEST (same wire format as ADDRESS_ASSIGN) */
+                    uint64_t req_id;
+                    uint8_t ip_ver, ip_addr[16], prefix;
+                    size_t ip_len = 16, aa_consumed;
+                    xr = xqc_h3_ext_connectip_parse_address_assign(
+                        cap_payload, cap_len, &req_id, &ip_ver,
+                        ip_addr, &ip_len, &prefix, &aa_consumed);
+                    if (xr == XQC_OK && req_id != 0) {
+                        LOG_INF("ADDRESS_REQUEST: req_id=%" PRIu64 " ipv%d",
+                                req_id, ip_ver);
+                        /* Respond with ADDRESS_ASSIGN for already-assigned IP */
+                        uint8_t resp_payload[64];
+                        size_t resp_written = 0;
+                        uint8_t ip_bytes[4];
+                        memcpy(ip_bytes, &stream->conn->assigned_ip.s_addr, 4);
+                        xqc_h3_ext_connectip_build_address_request(
+                            resp_payload, sizeof(resp_payload), &resp_written,
+                            req_id, 4, ip_bytes, 32);
+                        uint8_t cap_buf[128];
+                        size_t cap_written = 0;
+                        xqc_h3_ext_capsule_encode(
+                            cap_buf, sizeof(cap_buf), &cap_written,
+                            XQC_H3_CAPSULE_ADDRESS_ASSIGN,
+                            resp_payload, resp_written);
+                        xqc_h3_request_send_body(h3_request,
+                            cap_buf, cap_written, 0);
+                    }
+                }
+                /* RFC 9297 §3.2: unknown capsule types silently ignored */
+
+                if (consumed < stream->capsule_len) {
+                    memmove(stream->capsule_buf,
+                            stream->capsule_buf + consumed,
+                            stream->capsule_len - consumed);
+                }
+                stream->capsule_len -= consumed;
+            }
         } while (n > 0);
     }
 
@@ -641,6 +737,85 @@ svr_request_write_notify(xqc_h3_request_t *h3_request,
 /* ================================================================
  *  H3 datagram callbacks (client → server: IP packets)
  * ================================================================ */
+
+/* Send ICMP Time Exceeded back to client through the tunnel (RFC 9484 §4.4 SHOULD) */
+static void
+svr_send_icmp_time_exceeded(svr_conn_t *svr_conn, const uint8_t *orig_pkt,
+                             size_t orig_len)
+{
+    if (orig_len < 20) return;
+
+    /* ICMP payload: original IP header + first 8 bytes of original data */
+    size_t ihl = (orig_pkt[0] & 0x0F) * 4;
+    if (ihl < 20 || ihl > orig_len) return;
+    size_t icmp_data_len = ihl + 8;
+    if (icmp_data_len > orig_len) icmp_data_len = orig_len;
+
+    /* Build IP + ICMP packet */
+    size_t total_len = 20 + 8 + icmp_data_len;  /* IP(20) + ICMP hdr(8) + data */
+    uint8_t pkt[128];
+    if (total_len > sizeof(pkt)) return;
+    memset(pkt, 0, total_len);
+
+    /* IP header: server TUN addr → client assigned addr */
+    svr_ctx_t *ctx = svr_conn->ctx;
+    struct in_addr srv_addr;
+    mpvpn_addr_pool_server_addr(&ctx->pool, &srv_addr);
+
+    pkt[0]  = 0x45;                          /* IPv4, IHL=5 */
+    pkt[1]  = 0xC0;                          /* DSCP=CS6 (network control) */
+    pkt[2]  = (total_len >> 8) & 0xFF;       /* total length */
+    pkt[3]  = total_len & 0xFF;
+    pkt[8]  = 64;                            /* TTL */
+    pkt[9]  = 1;                             /* protocol: ICMP */
+    memcpy(pkt + 12, &srv_addr.s_addr, 4);  /* src = server */
+    memcpy(pkt + 16, orig_pkt + 12, 4);     /* dst = original src */
+
+    /* IP header checksum */
+    uint32_t cksum = 0;
+    for (int i = 0; i < 20; i += 2)
+        cksum += ((uint32_t)pkt[i] << 8) | pkt[i + 1];
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    uint16_t ip_cksum = ~(uint16_t)cksum;
+    pkt[10] = ip_cksum >> 8;
+    pkt[11] = ip_cksum & 0xFF;
+
+    /* ICMP Time Exceeded: type=11, code=0, unused=0 */
+    uint8_t *icmp = pkt + 20;
+    icmp[0] = 11;   /* type: Time Exceeded */
+    icmp[1] = 0;    /* code: TTL exceeded in transit */
+    /* icmp[2..3] = checksum (computed below) */
+    /* icmp[4..7] = unused (zeroed) */
+    memcpy(icmp + 8, orig_pkt, icmp_data_len);
+
+    /* ICMP checksum */
+    size_t icmp_total = 8 + icmp_data_len;
+    cksum = 0;
+    for (size_t i = 0; i < icmp_total; i += 2) {
+        cksum += ((uint32_t)icmp[i] << 8);
+        if (i + 1 < icmp_total)
+            cksum += icmp[i + 1];
+    }
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    uint16_t icmp_cksum = ~(uint16_t)cksum;
+    icmp[2] = icmp_cksum >> 8;
+    icmp[3] = icmp_cksum & 0xFF;
+
+    /* Send back through tunnel as MASQUE datagram */
+    uint8_t frame_buf[256];
+    size_t frame_written = 0;
+    xqc_int_t xret = xqc_h3_ext_masque_frame_udp(
+        frame_buf, sizeof(frame_buf), &frame_written,
+        svr_conn->masque_stream_id, pkt, total_len);
+    if (xret != XQC_OK) return;
+
+    uint64_t dgram_id;
+    xqc_h3_ext_datagram_send(svr_conn->h3_conn, frame_buf, frame_written,
+                              &dgram_id, XQC_DATA_QOS_LOW);
+    LOG_DBG("sent ICMP Time Exceeded to client");
+}
 
 static void
 svr_dgram_read_notify(xqc_h3_conn_t *conn, const void *data,
@@ -663,17 +838,44 @@ svr_dgram_read_notify(xqc_h3_conn_t *conn, const void *data,
         return;
     }
 
-    /* Validate source IP matches assigned address (prevent spoofing) */
-    if (payload_len >= 20 && (payload[0] >> 4) == 4) {
-        if (memcmp(payload + 12, &svr_conn->assigned_ip.s_addr, 4) != 0) {
-            LOG_WRN("dropping packet: src IP mismatch (expected %s)",
-                    inet_ntoa(svr_conn->assigned_ip));
-            return;
-        }
+    /* Check IP version */
+    if (payload_len < 1) return;
+    uint8_t ip_ver = payload[0] >> 4;
+
+    if (ip_ver == 6) {
+        /* IPv6 not yet supported — drop to prevent validation bypass */
+        LOG_DBG("dropping IPv6 packet (not supported)");
+        return;
+    }
+    if (ip_ver != 4 || payload_len < 20) {
+        LOG_DBG("dropping non-IPv4 packet (version=%d len=%zu)", ip_ver, payload_len);
+        return;
     }
 
-    /* Write raw IP packet to TUN (kernel routes to internet via NAT) */
-    int wret = mpvpn_tun_write(&svr_conn->ctx->tun, payload, payload_len);
+    /* Validate source IP matches assigned address (prevent spoofing) */
+    if (memcmp(payload + 12, &svr_conn->assigned_ip.s_addr, 4) != 0) {
+        LOG_WRN("dropping packet: src IP mismatch (expected %s)",
+                inet_ntoa(svr_conn->assigned_ip));
+        return;
+    }
+
+    /* Decrement TTL before forwarding (RFC 9484 §4.3 MUST) */
+    uint8_t fwd_pkt[PACKET_BUF_SIZE];
+    memcpy(fwd_pkt, payload, payload_len);
+    if (fwd_pkt[8] <= 1) {
+        LOG_DBG("dropping packet: TTL expired");
+        svr_send_icmp_time_exceeded(svr_conn, payload, payload_len);
+        return;
+    }
+    fwd_pkt[8]--;
+    /* Incremental IP header checksum update (RFC 1141) */
+    uint32_t sum = ((uint32_t)fwd_pkt[10] << 8 | fwd_pkt[11]) + 0x0100;
+    sum = (sum & 0xFFFF) + (sum >> 16);
+    fwd_pkt[10] = (sum >> 8) & 0xFF;
+    fwd_pkt[11] = sum & 0xFF;
+
+    /* Write IP packet to TUN (kernel routes to internet via NAT) */
+    int wret = mpvpn_tun_write(&svr_conn->ctx->tun, fwd_pkt, payload_len);
     if (wret < 0) {
         svr_conn->ctx->tun_drop_cnt++;
         if (wret == MPVPN_TUN_EAGAIN) {
