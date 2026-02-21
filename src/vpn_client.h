@@ -13,6 +13,7 @@ typedef struct mqvpn_client_cfg_s {
     int          log_level;     /* xquic log level */
     const char  *path_ifaces[MQVPN_MAX_PATH_IFACES]; /* network interfaces for multipath */
     int          n_paths;       /* number of path interfaces (0 = single-path) */
+    int          scheduler;     /* 0=minrtt, 1=wlb (default) */
 } mqvpn_client_cfg_t;
 
 /* Run the VPN client (blocks until shutdown). Returns 0 on clean exit. */

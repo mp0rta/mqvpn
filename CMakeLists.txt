@@ -48,6 +48,7 @@ add_executable(mqvpn
     src/vpn_server.c
     src/addr_pool.c
     src/path_mgr.c
+    src/flow_sched.c
     src/log.c
 )
 

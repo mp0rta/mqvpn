@@ -1,5 +1,6 @@
 #include "vpn_client.h"
 #include "path_mgr.h"
+#include "flow_sched.h"
 #include "tun.h"
 #include "log.h"
 
@@ -77,6 +78,7 @@ struct cli_ctx_s {
     char                 server_ip_str[INET_ADDRSTRLEN];
 
     cli_conn_t          *conn;
+
 };
 
 /* ---------- per-connection state ---------- */
@@ -562,6 +564,10 @@ cli_tun_read_handler(int fd, short what, void *arg)
         }
 
         uint64_t dgram_id;
+        /* Set flow hash for xquic's WLB scheduler (no-op if MinRTT) */
+        uint32_t fh = flow_hash_pkt(pkt, n);
+        xqc_conn_set_dgram_flow_hash(
+            xqc_h3_conn_get_xqc_conn(conn->h3_conn), fh);
         xret = xqc_h3_ext_datagram_send(
             conn->h3_conn, frame_buf, frame_written,
             &dgram_id, XQC_DATA_QOS_HIGH);
@@ -1385,6 +1391,10 @@ mqvpn_client_run(const mqvpn_client_cfg_t *cfg)
     g_cli.path_mgr.paths[0].path_id = 0;
     g_cli.path_mgr.paths[0].in_use = 1;
 
+    if (cfg->scheduler == MQVPN_SCHED_WLB) {
+        LOG_INF("WLB scheduler enabled (xquic-internal)");
+    }
+
     /* ---- Create H3 connection ---- */
     cli_conn_t *conn = calloc(1, sizeof(*conn));
     if (!conn) {
@@ -1403,9 +1413,16 @@ mqvpn_client_run(const mqvpn_client_cfg_t *cfg)
     conn_settings.enable_multipath = multipath;
     conn_settings.mp_ping_on = multipath;
     conn_settings.pacing_on = 1;
-    conn_settings.cong_ctrl_callback = xqc_bbr_cb;
+    conn_settings.cong_ctrl_callback = xqc_bbr2_cb;
+    conn_settings.cc_params.cc_optimization_flags =
+        XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
     conn_settings.sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
     conn_settings.so_sndbuf = 8 * 1024 * 1024;
+    if (cfg->scheduler == MQVPN_SCHED_WLB) {
+        conn_settings.scheduler_callback = xqc_wlb_scheduler_cb;
+    } else {
+        conn_settings.scheduler_callback = xqc_minrtt_scheduler_cb;
+    }
 
     xqc_conn_ssl_config_t conn_ssl_config;
     memset(&conn_ssl_config, 0, sizeof(conn_ssl_config));

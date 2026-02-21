@@ -1,8 +1,8 @@
 # xquic MASQUE API Audit — mqvpn M1
 
-Audit date: 2026-02-16
+Audit date: 2026-02-21
 Branch: `mp0rta/xquic` `feature/masque`
-Pinned commit: `3a159b0a4b43ba07752ed2d9eb83b5bdf1c355fe`
+Pinned commit: `34e5beec0e1af4af8444384788289fd8d6738dbd`
 
 ## Summary
 
@@ -144,3 +144,41 @@ typedef struct {
 | `xqc_conn_create_path()` | `xquic.h` | Create additional QUIC path |
 | `xqc_conn_close_path()` | `xquic.h` | Close a path |
 | `xqc_h3_ext_datagram_send_on_path()` | `xqc_http3.h` | Path-pinned datagram send |
+
+## WLB Scheduler APIs (added in `feature/masque`)
+
+### Scheduler Callback
+
+| Symbol | Header | Purpose |
+|---|---|---|
+| `xqc_wlb_scheduler_cb` | `xquic.h` | WLB scheduler callback (flow-affinity WRR with LATE weights) |
+
+### Flow Hash Hint
+
+| Function | Header | Purpose |
+|---|---|---|
+| `xqc_conn_set_dgram_flow_hash()` | `xquic.h` | Set flow hash before `datagram_send()` for WLB flow pinning |
+
+### Scheduler Configuration
+
+```c
+/* Select WLB scheduler */
+conn_settings.scheduler_callback = xqc_wlb_scheduler_cb;
+
+/* Set flow hash before each datagram send */
+xqc_conn_set_dgram_flow_hash(conn, flow_hash_pkt(pkt, len));
+xqc_h3_ext_datagram_send(h3_conn, frame_buf, frame_len, &dgram_id, qos);
+```
+
+### Implementation Notes
+
+1. **WLB uses LATE (Loss-Aware Throughput Estimation)** for weight computation,
+   aligned with BBR2+ congestion control parameters (2% loss threshold,
+   0.3 beta, fast convergence reset cycle).
+
+2. **Flow pinning**: Inner flows (identified by 5-tuple hash) are pinned to
+   QUIC paths via a 4096-entry hash table with 60s idle expiry. This prevents
+   TCP reordering inside the VPN tunnel.
+
+3. **MinRTT fallback**: Non-datagram packets (`po_flow_hash == 0`) and
+   cwnd-blocked states fall back to MinRTT path selection.

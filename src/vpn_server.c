@@ -1,4 +1,5 @@
 #include "vpn_server.h"
+#include "flow_sched.h"
 #include "tun.h"
 #include "addr_pool.h"
 #include "log.h"
@@ -64,6 +65,7 @@ struct svr_ctx_s {
 
     /* M1: single client — track the active conn for return traffic */
     svr_conn_t          *active_conn;
+
 };
 
 /* ---------- per-connection state ---------- */
@@ -287,6 +289,14 @@ svr_tun_read_handler(int fd, short what, void *arg)
         }
 
         uint64_t dgram_id;
+        /* Provide per-packet flow hint for xquic WLB (same as client side). */
+        uint32_t fh = flow_hash_pkt(pkt, n);
+        xqc_conn_set_dgram_flow_hash(
+            xqc_h3_conn_get_xqc_conn(ctx->active_conn->h3_conn), fh);
+
+        /* Server has a single UDP socket — write_socket_ex ignores path_id,
+         * so send_on_path() is meaningless.  Always use send() which lets
+         * xquic's internal scheduler (MinRTT or WLB) pick the best path. */
         xret = xqc_h3_ext_datagram_send(
             ctx->active_conn->h3_conn, frame_buf, frame_written,
             &dgram_id, XQC_DATA_QOS_HIGH);
@@ -1081,7 +1091,14 @@ mqvpn_server_run(const mqvpn_server_cfg_t *cfg)
     conn_settings.enable_multipath = 1;
     conn_settings.mp_ping_on = 1;
     conn_settings.pacing_on = 1;
-    conn_settings.cong_ctrl_callback = xqc_bbr_cb;
+    conn_settings.cong_ctrl_callback = xqc_bbr2_cb;
+    conn_settings.cc_params.cc_optimization_flags =
+        XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
+    if (cfg->scheduler == MQVPN_SCHED_WLB) {
+        conn_settings.scheduler_callback = xqc_wlb_scheduler_cb;
+    } else {
+        conn_settings.scheduler_callback = xqc_minrtt_scheduler_cb;
+    }
     conn_settings.sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
     conn_settings.so_sndbuf = 8 * 1024 * 1024;
     conn_settings.idle_time_out = 30000;       /* 30s idle timeout */
@@ -1178,10 +1195,10 @@ mqvpn_server_run(const mqvpn_server_cfg_t *cfg)
     LOG_INF("server shutting down");
     if (g_svr.ev_sigterm) event_free(g_svr.ev_sigterm);
     if (g_svr.ev_sigint)  event_free(g_svr.ev_sigint);
-    if (g_svr.ev_tun)         event_free(g_svr.ev_tun);
-    if (g_svr.ev_tun_resume) event_free(g_svr.ev_tun_resume);
-    if (g_svr.ev_socket)     event_free(g_svr.ev_socket);
-    if (g_svr.ev_engine)     event_free(g_svr.ev_engine);
+    if (g_svr.ev_tun)          event_free(g_svr.ev_tun);
+    if (g_svr.ev_tun_resume)  event_free(g_svr.ev_tun_resume);
+    if (g_svr.ev_socket)      event_free(g_svr.ev_socket);
+    if (g_svr.ev_engine)      event_free(g_svr.ev_engine);
     if (g_svr.udp_fd >= 0) close(g_svr.udp_fd);
     mqvpn_tun_destroy(&g_svr.tun);
     xqc_engine_destroy(g_svr.engine);
