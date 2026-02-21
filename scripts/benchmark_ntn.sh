@@ -272,9 +272,12 @@ run_scenario() {
 
     apply_tc_full "$rate_a" "$netem_a" "$rate_b" "$netem_b"
 
-    for sched in minrtt wlb; do
-        local step
-        [ "$sched" = "minrtt" ] && step="1/2" || step="2/2"
+    local scheds=(minrtt wlb)
+    local total_s=${#scheds[@]}
+    local si=0
+    for sched in "${scheds[@]}"; do
+        si=$((si + 1))
+        local step="${si}/${total_s}"
 
         echo ""
         echo "    [${step}] ${sched}..."

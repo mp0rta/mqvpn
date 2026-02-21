@@ -79,9 +79,6 @@ struct cli_ctx_s {
 
     cli_conn_t          *conn;
 
-    /* WLB flow scheduler */
-    flow_sched_t         flow_sched;
-    struct event        *ev_sched_timer;
 };
 
 /* ---------- per-connection state ---------- */
@@ -514,13 +511,6 @@ cli_setup_tun(cli_ctx_t *ctx, const uint8_t *ip, uint8_t prefix)
 /* ================================================================
  *  TUN read handler (local apps → MASQUE datagram to server)
  * ================================================================ */
-
-static void
-cli_sched_timer_cb(int fd, short what, void *arg)
-{
-    (void)fd; (void)what;
-    /* WLB scheduling is now handled inside xquic — this timer is unused. */
-}
 
 static void
 cli_tun_resume_safety(int fd, short what, void *arg)
@@ -1275,7 +1265,6 @@ mqvpn_client_run(const mqvpn_client_cfg_t *cfg)
     g_cli.ev_path_recreate = event_new(g_cli.eb, -1, 0,
                                         cli_path_recreate_callback, &g_cli);
     g_cli.ev_tun_resume = evtimer_new(g_cli.eb, cli_tun_resume_safety, &g_cli);
-    g_cli.ev_sched_timer = evtimer_new(g_cli.eb, cli_sched_timer_cb, &g_cli);
     g_cli.ev_sigint = evsignal_new(g_cli.eb, SIGINT, cli_signal_event_callback, &g_cli);
     g_cli.ev_sigterm = evsignal_new(g_cli.eb, SIGTERM, cli_signal_event_callback, &g_cli);
     if (!g_cli.ev_sigint || !g_cli.ev_sigterm) {
@@ -1402,8 +1391,6 @@ mqvpn_client_run(const mqvpn_client_cfg_t *cfg)
     g_cli.path_mgr.paths[0].path_id = 0;
     g_cli.path_mgr.paths[0].in_use = 1;
 
-    /* Initialize flow scheduler (used for flow_hash_pkt only) */
-    flow_sched_init(&g_cli.flow_sched, cfg->scheduler);
     if (cfg->scheduler == MQVPN_SCHED_WLB) {
         LOG_INF("WLB scheduler enabled (xquic-internal)");
     }
@@ -1477,7 +1464,6 @@ mqvpn_client_run(const mqvpn_client_cfg_t *cfg)
     if (g_cli.ev_tun)            event_free(g_cli.ev_tun);
     if (g_cli.ev_tun_resume)     event_free(g_cli.ev_tun_resume);
     if (g_cli.ev_path_recreate)  event_free(g_cli.ev_path_recreate);
-    if (g_cli.ev_sched_timer)    event_free(g_cli.ev_sched_timer);
     if (g_cli.ev_engine)         event_free(g_cli.ev_engine);
     mqvpn_path_mgr_destroy(&g_cli.path_mgr);
     mqvpn_tun_destroy(&g_cli.tun);

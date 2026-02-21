@@ -66,9 +66,6 @@ struct svr_ctx_s {
     /* M1: single client — track the active conn for return traffic */
     svr_conn_t          *active_conn;
 
-    /* WLB flow scheduler */
-    flow_sched_t         flow_sched;
-    struct event        *ev_sched_timer;
 };
 
 /* ---------- per-connection state ---------- */
@@ -245,32 +242,6 @@ svr_socket_event_callback(int fd, short what, void *arg)
 }
 
 /* ================================================================
- *  WLB scheduler timer (1s interval)
- * ================================================================ */
-
-static void
-svr_sched_timer_cb(int fd, short what, void *arg)
-{
-    (void)fd; (void)what;
-    svr_ctx_t *ctx = (svr_ctx_t *)arg;
-    if (!ctx->active_conn || !ctx->flow_sched.enabled) return;
-
-    xqc_conn_stats_t stats = xqc_conn_get_stats(ctx->engine,
-                                                  &ctx->active_conn->cid);
-    int n = 0;
-    for (int i = 0; i < XQC_MAX_PATHS_COUNT; i++) {
-        if (stats.paths_info[i].path_id == UINT64_MAX) break;
-        n++;
-    }
-
-    flow_sched_update(&ctx->flow_sched, stats.paths_info, n);
-    flow_sched_expire(&ctx->flow_sched, mqvpn_now_us());
-
-    struct timeval tv = { .tv_sec = 1 };
-    evtimer_add(ctx->ev_sched_timer, &tv);
-}
-
-/* ================================================================
  *  TUN read handler (internet return traffic → MASQUE datagram to client)
  * ================================================================ */
 
@@ -320,7 +291,7 @@ svr_tun_read_handler(int fd, short what, void *arg)
         uint64_t dgram_id;
         /* Server has a single UDP socket — write_socket_ex ignores path_id,
          * so send_on_path() is meaningless.  Always use send() which lets
-         * xquic's internal MinRTT scheduler pick the best path. */
+         * xquic's internal scheduler (MinRTT or WLB) pick the best path. */
         xret = xqc_h3_ext_datagram_send(
             ctx->active_conn->h3_conn, frame_buf, frame_written,
             &dgram_id, XQC_DATA_QOS_HIGH);
@@ -1208,9 +1179,6 @@ mqvpn_server_run(const mqvpn_server_cfg_t *cfg)
                               svr_tun_read_handler, &g_svr);
     event_add(g_svr.ev_tun, NULL);
 
-    flow_sched_init(&g_svr.flow_sched, cfg->scheduler);
-    g_svr.ev_sched_timer = evtimer_new(g_svr.eb, svr_sched_timer_cb, &g_svr);
-
     LOG_INF("mqvpn server ready — listening on %s:%d, subnet %s",
             cfg->listen_addr ? cfg->listen_addr : "0.0.0.0",
             cfg->listen_port, cfg->subnet);
@@ -1224,7 +1192,6 @@ mqvpn_server_run(const mqvpn_server_cfg_t *cfg)
     if (g_svr.ev_sigint)  event_free(g_svr.ev_sigint);
     if (g_svr.ev_tun)          event_free(g_svr.ev_tun);
     if (g_svr.ev_tun_resume)  event_free(g_svr.ev_tun_resume);
-    if (g_svr.ev_sched_timer) event_free(g_svr.ev_sched_timer);
     if (g_svr.ev_socket)      event_free(g_svr.ev_socket);
     if (g_svr.ev_engine)      event_free(g_svr.ev_engine);
     if (g_svr.udp_fd >= 0) close(g_svr.udp_fd);

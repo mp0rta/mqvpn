@@ -82,7 +82,7 @@ Full report: [`docs/benchmarks_v2.md`](docs/benchmarks_v2.md)
 Key design points:
 - IP packets are carried as HTTP Datagrams with Context ID set to zero (full IP header, no parsing needed)
 - Server uses a single UDP socket; XQUIC can receive packets from multiple peer addresses on the same connection
-- XQUIC's MinRTT scheduler selects the lowest-latency path per packet
+- XQUIC's multipath scheduler (MinRTT or WLB) selects paths; WLB uses flow-affinity WRR for bandwidth aggregation
 - Failover is handled at the QUIC transport layer by XQUIC — mqvpn just provides sockets and forwards packets
 
 ## How It Works
@@ -150,19 +150,21 @@ With this setup, the client's default route points through the mqvpn tunnel. All
 ```
 mqvpn --mode client|server [options]
 
+Common options:
+  --scheduler minrtt|wlb Multipath scheduler (default: wlb)
+  --log-level LEVEL      debug|info|warn|error (default: info)
+
 Client options:
   --server HOST:PORT     Server address
   --path IFACE           Network interface (repeatable, for multipath)
   --insecure             Disable TLS certificate verification (testing only)
   --tun-name NAME        TUN device name (default: mqvpn0)
-  --log-level LEVEL      debug|info|warn|error (default: info)
 
 Server options:
   --listen BIND:PORT     Listen address (default: 0.0.0.0:443)
   --subnet CIDR          Client IP pool (default: 10.0.0.0/24)
   --cert PATH            TLS certificate file
   --key PATH             TLS private key file
-  --log-level LEVEL      debug|info|warn|error (default: info)
 ```
 
 Security note:
@@ -187,7 +189,7 @@ Security note:
 - [ ] Replace `ip` command with netlink API
 - [ ] Performance optimization (GSO/GRO, io_uring, batch send)
 - [ ] Interop testing with other MASQUE implementations (masque-go, Google QUICHE)
-- [ ] Bandwidth aggregation scheduler (try weighted round-robin by cwnd / BBR bandwidth estimate)
+- [x] Bandwidth aggregation scheduler (WLB: LATE-weighted flow-affinity WRR with BBR bandwidth estimates)
 - [ ] DATAGRAM Capsule fallback (RFC 9297 stream-based carriage when QUIC DATAGRAMs are unavailable)
 
 ## Protocol Standards
