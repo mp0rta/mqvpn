@@ -274,19 +274,23 @@ sudo scripts/run_multipath_test.sh
 - [x] Tunnel source IP validation (prevent IP spoofing through the tunnel)
 - [x] CI with GitHub Actions (build + netns smoke tests)
 - [x] Bandwidth aggregation scheduler (WLB: LATE-weighted flow-affinity WRR with BBR bandwidth estimates)
-
-### v0.2.0 — Multi-client, auth, DNS & config file
 - [x] Multi-client support (IP-offset indexed session table, O(1) routing)
 - [x] Pre-shared key authentication (Bearer token over HTTP/3 Extended CONNECT)
 - [x] Client-side DNS configuration (resolv.conf management with backup/restore)
 - [x] INI-style configuration file (`mqvpn --config /etc/mqvpn/client.conf`)
 - [x] `mqvpn --genkey` for PSK generation
 
+### v0.2.0 — Always-on & operational hardening
+- [ ] Automatic reconnection (reconnect on connection drop / network change)
+- [ ] Kill switch (prevent traffic leaking outside the tunnel)
+- [ ] systemd service unit (`mqvpn-server.service`, `mqvpn-client@.service`)
+- [ ] Let's Encrypt / ACME integration for TLS certificates
+- [ ] IPv6 support
+
 ### Future
 - [ ] Per-client token authentication
 - [ ] WiFi + LTE multipath testing
 - [ ] Android client (VpnService + WiFi/LTE handover)
-- [ ] IPv6 support
 - [ ] Replace `ip` command with netlink API
 - [ ] Performance optimization (GSO/GRO, io_uring, batch send)
 - [ ] Interop testing with other MASQUE implementations (masque-go, Google QUICHE)
