@@ -141,13 +141,13 @@ test_hash_rejects_non_ipv4(void)
 static void
 test_hash_udp(void)
 {
-    TEST(flow_hash_pkt UDP);
+    TEST(flow_hash_pkt UDP returns UNPINNED);
 
     uint8_t pkt[28];
     make_udp_pkt(pkt, "192.168.1.1", 5000, "8.8.8.8", 53);
 
     uint32_t h = flow_hash_pkt(pkt, 28);
-    ASSERT_NEQ(h, 0);
+    ASSERT_EQ(h, MQVPN_FLOW_HASH_UNPINNED);
 
     PASS();
 }
@@ -194,9 +194,10 @@ test_hash_each_field_matters(void)
     make_tcp_pkt(pkt, "10.0.0.1", 1234, "10.0.0.2", 443);
     ASSERT_NEQ(flow_hash_pkt(pkt, 40), h_base);
 
-    /* Change protocol (TCP→UDP, same IPs/ports) */
+    /* Change protocol (TCP→UDP) — UDP returns UNPINNED, not a 5-tuple hash */
     make_udp_pkt(pkt, "10.0.0.1", 1234, "10.0.0.2", 80);
-    ASSERT_NEQ(flow_hash_pkt(pkt, 28), h_base);
+    ASSERT_EQ(flow_hash_pkt(pkt, 28), MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_NEQ(MQVPN_FLOW_HASH_UNPINNED, h_base);
 
     PASS();
 }
@@ -204,7 +205,7 @@ test_hash_each_field_matters(void)
 static void
 test_hash_icmp_no_ports(void)
 {
-    TEST(flow_hash_pkt ICMP (no L4 ports));
+    TEST(flow_hash_pkt ICMP returns UNPINNED);
 
     uint8_t pkt[28];
     memset(pkt, 0, sizeof(pkt));
@@ -217,9 +218,9 @@ test_hash_icmp_no_ports(void)
     inet_pton(AF_INET, "10.0.0.2", &a);
     memcpy(pkt + 16, &a, 4);
 
-    /* Should hash on src_ip + dst_ip + proto only (no ports for ICMP) */
+    /* Non-TCP → UNPINNED (per-packet WRR, no flow pinning) */
     uint32_t h = flow_hash_pkt(pkt, 28);
-    ASSERT_NEQ(h, 0);
+    ASSERT_EQ(h, MQVPN_FLOW_HASH_UNPINNED);
 
     /* Deterministic */
     ASSERT_EQ(flow_hash_pkt(pkt, 28), h);
@@ -289,6 +290,28 @@ test_hash_distribution(void)
 }
 
 static void
+test_hash_tcp_pinned_udp_unpinned(void)
+{
+    TEST(flow_hash_pkt TCP pinned vs UDP unpinned);
+
+    uint8_t tcp[40], udp[28];
+    make_tcp_pkt(tcp, "10.0.0.1", 1234, "10.0.0.2", 80);
+    make_udp_pkt(udp, "10.0.0.1", 1234, "10.0.0.2", 80);
+
+    uint32_t h_tcp = flow_hash_pkt(tcp, 40);
+    uint32_t h_udp = flow_hash_pkt(udp, 28);
+
+    /* TCP gets a real flow hash (non-zero, non-UNPINNED) */
+    ASSERT_NEQ(h_tcp, 0);
+    ASSERT_NEQ(h_tcp, MQVPN_FLOW_HASH_UNPINNED);
+
+    /* UDP gets UNPINNED sentinel */
+    ASSERT_EQ(h_udp, MQVPN_FLOW_HASH_UNPINNED);
+
+    PASS();
+}
+
+static void
 test_sched_mode_constants(void)
 {
     TEST(scheduler mode constants);
@@ -317,6 +340,7 @@ main(void)
     test_hash_ip_header_only();
     test_hash_zero_length();
     test_hash_distribution();
+    test_hash_tcp_pinned_udp_unpinned();
     test_sched_mode_constants();
 
     printf("\n%d passed, %d failed\n", tests_passed, tests_failed);
