@@ -14,6 +14,9 @@ typedef struct mqvpn_client_cfg_s {
     const char  *path_ifaces[MQVPN_MAX_PATH_IFACES]; /* network interfaces for multipath */
     int          n_paths;       /* number of path interfaces (0 = single-path) */
     int          scheduler;     /* 0=minrtt, 1=wlb (default) */
+    const char  *auth_key;     /* PSK for server authentication (NULL = no auth) */
+    const char  *dns_servers[4]; /* DNS servers to configure (NULL = no DNS override) */
+    int          n_dns;        /* number of DNS servers */
 } mqvpn_client_cfg_t;
 
 /* Run the VPN client (blocks until shutdown). Returns 0 on clean exit. */

@@ -14,6 +14,8 @@ typedef struct mqvpn_server_cfg_s {
     const char  *key_file;      /* TLS private key path */
     int          log_level;     /* xquic log level */
     int          scheduler;     /* 0=minrtt, 1=wlb (default) */
+    const char  *auth_key;     /* PSK for client authentication (NULL = no auth) */
+    int          max_clients;   /* max concurrent clients (default 64) */
 } mqvpn_server_cfg_t;
 
 /* Run the VPN server (blocks until shutdown). Returns 0 on clean exit. */
