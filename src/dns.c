@@ -101,6 +101,10 @@ mqvpn_dns_apply(mqvpn_dns_t *dns)
     FILE *fp = fopen(dns->resolv_path, "w");
     if (!fp) {
         LOG_ERR("dns: cannot write %s: %m", dns->resolv_path);
+        if (dns->lock_fd >= 0) {
+            close(dns->lock_fd);
+            dns->lock_fd = -1;
+        }
         return -1;
     }
 
@@ -125,20 +129,21 @@ mqvpn_dns_restore(mqvpn_dns_t *dns)
     if (copy_file(dns->backup_path, dns->resolv_path) < 0) {
         LOG_ERR("dns: failed to restore %s from %s",
                 dns->resolv_path, dns->backup_path);
-        return;
+        /* Fall through to release lock — keeping it held would block
+         * future DNS operations in this process and any retry. */
+    } else {
+        unlink(dns->backup_path);
+        LOG_INF("dns: restored %s", dns->resolv_path);
     }
 
-    unlink(dns->backup_path);
     dns->active = 0;
 
-    /* Release lock */
+    /* Always release lock */
     if (dns->lock_fd >= 0) {
         close(dns->lock_fd);
         dns->lock_fd = -1;
         unlink(dns->lock_path);
     }
-
-    LOG_INF("dns: restored %s", dns->resolv_path);
 }
 
 int

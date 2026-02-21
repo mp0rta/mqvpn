@@ -254,6 +254,78 @@ static void test_lock_contention(void)
     unlink(lock_path);
 }
 
+static void test_apply_fopen_fail_releases_lock(void)
+{
+    /* apply() fails at fopen(resolv_path, "w") → lock must be released */
+    char lock_path[] = "/tmp/test_dns_lock4_XXXXXX";
+    int fd = mkstemp(lock_path); close(fd); unlink(lock_path);
+
+    mqvpn_dns_t dns;
+    mqvpn_dns_init(&dns);
+    dns.resolv_path = "/no/such/directory/resolv.conf";  /* fopen will fail */
+    dns.backup_path = "/tmp/test_dns_backup_dummy";
+    dns.lock_path   = lock_path;
+    mqvpn_dns_add_server(&dns, "1.1.1.1");
+
+    /* apply should fail */
+    ASSERT_TRUE(mqvpn_dns_apply(&dns) != 0, "apply fails on bad path");
+    ASSERT_EQ_INT(dns.active, 0, "not active after failed apply");
+    ASSERT_EQ_INT(dns.lock_fd, -1, "lock released after failed apply");
+
+    /* Verify lock is actually free — a second instance should succeed in locking */
+    int lfd = open(lock_path, O_CREAT | O_RDWR, 0644);
+    if (lfd >= 0) {
+        int got_lock = (flock(lfd, LOCK_EX | LOCK_NB) == 0);
+        ASSERT_TRUE(got_lock, "lock is free after failed apply");
+        close(lfd);
+    }
+
+    unlink(lock_path);
+}
+
+static void test_restore_fail_releases_lock(void)
+{
+    /* restore() fails at copy_file() → lock must still be released */
+    char resolv_path[] = "/tmp/test_dns_resolv5_XXXXXX";
+    char backup_path[] = "/tmp/test_dns_backup5_XXXXXX";
+    char lock_path[]   = "/tmp/test_dns_lock5_XXXXXX";
+    int fd1 = mkstemp(resolv_path); close(fd1);
+    int fd2 = mkstemp(backup_path); close(fd2); unlink(backup_path);
+    int fd3 = mkstemp(lock_path);   close(fd3); unlink(lock_path);
+
+    write_file(resolv_path, "nameserver 192.168.1.1\n");
+
+    mqvpn_dns_t dns;
+    mqvpn_dns_init(&dns);
+    dns.resolv_path = resolv_path;
+    dns.backup_path = backup_path;
+    dns.lock_path   = lock_path;
+    mqvpn_dns_add_server(&dns, "1.1.1.1");
+
+    /* Apply succeeds */
+    ASSERT_EQ_INT(mqvpn_dns_apply(&dns), 0, "apply ok before restore fail test");
+    ASSERT_TRUE(dns.lock_fd >= 0, "lock held after apply");
+
+    /* Delete backup to make restore's copy_file() fail */
+    unlink(backup_path);
+
+    /* Restore should fail but still release lock */
+    mqvpn_dns_restore(&dns);
+    ASSERT_EQ_INT(dns.active, 0, "not active after failed restore");
+    ASSERT_EQ_INT(dns.lock_fd, -1, "lock released after failed restore");
+
+    /* Verify lock is actually free */
+    int lfd = open(lock_path, O_CREAT | O_RDWR, 0644);
+    if (lfd >= 0) {
+        int got_lock = (flock(lfd, LOCK_EX | LOCK_NB) == 0);
+        ASSERT_TRUE(got_lock, "lock is free after failed restore");
+        close(lfd);
+    }
+
+    unlink(resolv_path);
+    unlink(lock_path);
+}
+
 int main(void)
 {
     test_init();
@@ -264,6 +336,8 @@ int main(void)
     test_restore_without_apply();
     test_stale_backup_detection();
     test_lock_contention();
+    test_apply_fopen_fail_releases_lock();
+    test_restore_fail_releases_lock();
 
     printf("\n=== test_dns: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
