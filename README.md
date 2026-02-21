@@ -233,7 +233,7 @@ Client:
   --path IFACE              Network interface for multipath (repeatable)
   --auth-key KEY            PSK for authentication
   --dns ADDR                DNS server (repeatable, max 4)
-  --insecure                Disable TLS cert verification (testing only)
+  --insecure                Accept untrusted certs (testing only)
 
 Server:
   --listen BIND:PORT        Listen address (default: 0.0.0.0:443)

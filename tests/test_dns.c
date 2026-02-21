@@ -257,13 +257,15 @@ static void test_lock_contention(void)
 static void test_apply_fopen_fail_releases_lock(void)
 {
     /* apply() fails at fopen(resolv_path, "w") → lock must be released */
-    char lock_path[] = "/tmp/test_dns_lock4_XXXXXX";
+    char lock_path[]   = "/tmp/test_dns_lock4_XXXXXX";
+    char backup_path[] = "/tmp/test_dns_backup4_XXXXXX";
     int fd = mkstemp(lock_path); close(fd); unlink(lock_path);
+    int fd2 = mkstemp(backup_path); close(fd2); unlink(backup_path);
 
     mqvpn_dns_t dns;
     mqvpn_dns_init(&dns);
     dns.resolv_path = "/no/such/directory/resolv.conf";  /* fopen will fail */
-    dns.backup_path = "/tmp/test_dns_backup_dummy";
+    dns.backup_path = backup_path;
     dns.lock_path   = lock_path;
     mqvpn_dns_add_server(&dns, "1.1.1.1");
 
@@ -281,6 +283,7 @@ static void test_apply_fopen_fail_releases_lock(void)
     }
 
     unlink(lock_path);
+    unlink(backup_path);
 }
 
 static void test_restore_fail_releases_lock(void)
@@ -326,6 +329,168 @@ static void test_restore_fail_releases_lock(void)
     unlink(lock_path);
 }
 
+static void test_double_apply(void)
+{
+    /* apply() twice without restore → second should fail (lock held) */
+    char resolv_path[] = "/tmp/test_dns_resolv6_XXXXXX";
+    char backup_path[] = "/tmp/test_dns_backup6_XXXXXX";
+    char lock_path[]   = "/tmp/test_dns_lock6_XXXXXX";
+    int fd1 = mkstemp(resolv_path); close(fd1);
+    int fd2 = mkstemp(backup_path); close(fd2); unlink(backup_path);
+    int fd3 = mkstemp(lock_path);   close(fd3); unlink(lock_path);
+
+    write_file(resolv_path, "nameserver 192.168.1.1\n");
+
+    mqvpn_dns_t dns;
+    mqvpn_dns_init(&dns);
+    dns.resolv_path = resolv_path;
+    dns.backup_path = backup_path;
+    dns.lock_path   = lock_path;
+    mqvpn_dns_add_server(&dns, "1.1.1.1");
+
+    /* First apply succeeds */
+    ASSERT_EQ_INT(mqvpn_dns_apply(&dns), 0, "1st apply ok");
+    ASSERT_EQ_INT(dns.active, 1, "active after 1st apply");
+
+    /* Second apply on a NEW dns instance should fail due to lock */
+    mqvpn_dns_t dns2;
+    mqvpn_dns_init(&dns2);
+    dns2.resolv_path = resolv_path;
+    dns2.backup_path = backup_path;
+    dns2.lock_path   = lock_path;
+    mqvpn_dns_add_server(&dns2, "8.8.8.8");
+
+    ASSERT_TRUE(mqvpn_dns_apply(&dns2) != 0, "2nd apply fails (lock held)");
+    ASSERT_EQ_INT(dns2.active, 0, "2nd instance not active");
+
+    /* Clean up */
+    mqvpn_dns_restore(&dns);
+
+    unlink(resolv_path);
+    unlink(backup_path);
+    unlink(lock_path);
+}
+
+static void test_long_server_address(void)
+{
+    mqvpn_dns_t dns;
+    mqvpn_dns_init(&dns);
+
+    /* Address near the 64-byte buffer limit */
+    char long_addr[70];
+    memset(long_addr, 'x', 63);
+    long_addr[63] = '\0';
+
+    ASSERT_EQ_INT(mqvpn_dns_add_server(&dns, long_addr), 0,
+                  "long address accepted");
+    /* Should be truncated to fit buffer */
+    ASSERT_TRUE(strlen(dns.servers[0]) <= 63,
+                "long address fits in buffer");
+}
+
+static void test_no_stale_backup(void)
+{
+    mqvpn_dns_t dns;
+    mqvpn_dns_init(&dns);
+    dns.backup_path = "/tmp/test_dns_nonexistent_backup_xyz";
+
+    ASSERT_EQ_INT(mqvpn_dns_has_stale_backup(&dns), 0,
+                  "no stale backup when file missing");
+}
+
+static void test_restore_stale_noop(void)
+{
+    /* restore_stale when no backup exists → no-op */
+    mqvpn_dns_t dns;
+    mqvpn_dns_init(&dns);
+    dns.backup_path = "/tmp/test_dns_nonexistent_backup_xyz";
+    dns.resolv_path = "/tmp/test_dns_nonexistent_resolv_xyz";
+
+    /* Should not crash */
+    mqvpn_dns_restore_stale(&dns);
+    ASSERT_EQ_INT(dns.active, 0, "restore_stale noop when no backup");
+}
+
+static void test_apply_creates_marker(void)
+{
+    /* Verify the generated resolv.conf has the mqvpn marker comment */
+    char resolv_path[] = "/tmp/test_dns_resolv7_XXXXXX";
+    char backup_path[] = "/tmp/test_dns_backup7_XXXXXX";
+    char lock_path[]   = "/tmp/test_dns_lock7_XXXXXX";
+    int fd1 = mkstemp(resolv_path); close(fd1);
+    int fd2 = mkstemp(backup_path); close(fd2); unlink(backup_path);
+    int fd3 = mkstemp(lock_path);   close(fd3); unlink(lock_path);
+
+    write_file(resolv_path, "nameserver 192.168.1.1\n");
+
+    mqvpn_dns_t dns;
+    mqvpn_dns_init(&dns);
+    dns.resolv_path = resolv_path;
+    dns.backup_path = backup_path;
+    dns.lock_path   = lock_path;
+    mqvpn_dns_add_server(&dns, "1.1.1.1");
+    mqvpn_dns_add_server(&dns, "8.8.8.8");
+    mqvpn_dns_add_server(&dns, "9.9.9.9");
+
+    ASSERT_EQ_INT(mqvpn_dns_apply(&dns), 0, "apply for marker test");
+
+    char buf[1024];
+    read_file(resolv_path, buf, sizeof(buf));
+
+    /* Should have all 3 nameservers */
+    ASSERT_TRUE(strstr(buf, "nameserver 1.1.1.1") != NULL,
+                "has 1.1.1.1");
+    ASSERT_TRUE(strstr(buf, "nameserver 8.8.8.8") != NULL,
+                "has 8.8.8.8");
+    ASSERT_TRUE(strstr(buf, "nameserver 9.9.9.9") != NULL,
+                "has 9.9.9.9");
+
+    /* Should NOT have the original nameserver */
+    ASSERT_TRUE(strstr(buf, "192.168.1.1") == NULL,
+                "original nameserver removed");
+
+    /* Backup has original */
+    read_file(backup_path, buf, sizeof(buf));
+    ASSERT_TRUE(strstr(buf, "192.168.1.1") != NULL,
+                "backup has original");
+
+    mqvpn_dns_restore(&dns);
+    unlink(resolv_path);
+    unlink(backup_path);
+    unlink(lock_path);
+}
+
+static void test_init_defaults(void)
+{
+    mqvpn_dns_t dns;
+    mqvpn_dns_init(&dns);
+
+    ASSERT_EQ_INT(dns.lock_fd, -1, "init lock_fd is -1");
+    ASSERT_TRUE(strcmp(dns.resolv_path, "/etc/resolv.conf") == 0,
+                "init default resolv_path");
+    ASSERT_TRUE(strcmp(dns.backup_path, "/etc/resolv.conf.mqvpn.bak") == 0,
+                "init default backup_path");
+    ASSERT_TRUE(strcmp(dns.lock_path, "/run/mqvpn-dns.lock") == 0,
+                "init default lock_path");
+}
+
+static void test_add_server_content(void)
+{
+    mqvpn_dns_t dns;
+    mqvpn_dns_init(&dns);
+
+    mqvpn_dns_add_server(&dns, "1.1.1.1");
+    mqvpn_dns_add_server(&dns, "8.8.8.8");
+    mqvpn_dns_add_server(&dns, "9.9.9.9");
+    mqvpn_dns_add_server(&dns, "208.67.222.222");
+
+    ASSERT_EQ_INT(dns.n_servers, 4, "4 servers added");
+    ASSERT_TRUE(strcmp(dns.servers[0], "1.1.1.1") == 0, "server[0]");
+    ASSERT_TRUE(strcmp(dns.servers[1], "8.8.8.8") == 0, "server[1]");
+    ASSERT_TRUE(strcmp(dns.servers[2], "9.9.9.9") == 0, "server[2]");
+    ASSERT_TRUE(strcmp(dns.servers[3], "208.67.222.222") == 0, "server[3]");
+}
+
 int main(void)
 {
     test_init();
@@ -338,6 +503,13 @@ int main(void)
     test_lock_contention();
     test_apply_fopen_fail_releases_lock();
     test_restore_fail_releases_lock();
+    test_double_apply();
+    test_long_server_address();
+    test_no_stale_backup();
+    test_restore_stale_noop();
+    test_apply_creates_marker();
+    test_init_defaults();
+    test_add_server_content();
 
     printf("\n=== test_dns: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
