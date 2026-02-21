@@ -246,7 +246,8 @@ Server:
 
 ### Security Notes
 
-- `--insecure` disables certificate verification and is intended for local/testing use only. For production, use a publicly trusted CA certificate.
+- By default, TLS certificate verification is strict — self-signed or untrusted CA certificates are **rejected**. Use a publicly trusted CA certificate (e.g. Let's Encrypt) for production.
+- `--insecure` disables all certificate verification including self-signed acceptance, and is intended for local/testing use only.
 - PSK authentication protects against unauthorized connections. The key is transmitted over QUIC's TLS 1.3 channel, so it is never exposed in plaintext on the wire.
 - When `--auth-key` is not set on the server, any client can connect without authentication.
 

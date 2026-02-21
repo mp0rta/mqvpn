@@ -1106,12 +1106,15 @@ static int
 cli_cert_verify_cb(const unsigned char *certs[], const size_t cert_len[],
                    size_t certs_len, void *conn_user_data)
 {
-    (void)certs; (void)cert_len; (void)certs_len; (void)conn_user_data;
-    /* xquic's internal xqc_ssl_cert_verify_cb already does BoringSSL chain +
-     * hostname verification before calling us.  This callback is only reached
-     * for UNABLE_TO_GET_ISSUER_CERT_LOCALLY or ALLOW_SELF_SIGNED cases.
-     * Accept: xquic already filtered fatal errors. */
-    return 0;
+    (void)certs; (void)cert_len; (void)certs_len;
+    /* This callback is reached when BoringSSL chain verification fails
+     * (e.g. self-signed cert, unknown CA).  Only accept in insecure mode. */
+    cli_conn_t *conn = (cli_conn_t *)conn_user_data;
+    if (conn && conn->ctx && conn->ctx->cfg && conn->ctx->cfg->insecure) {
+        return 0;   /* --insecure: accept any cert */
+    }
+    LOG_ERR("TLS certificate verification failed (use --insecure to skip)");
+    return -1;      /* reject */
 }
 
 static void
@@ -1459,9 +1462,10 @@ mqvpn_client_run(const mqvpn_client_cfg_t *cfg)
 
     xqc_conn_ssl_config_t conn_ssl_config;
     memset(&conn_ssl_config, 0, sizeof(conn_ssl_config));
-    if (!cfg->insecure) {
-        conn_ssl_config.cert_verify_flag = XQC_TLS_CERT_FLAG_NEED_VERIFY
-                                         | XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED;
+    if (cfg->insecure) {
+        conn_ssl_config.cert_verify_flag = XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED;
+    } else {
+        conn_ssl_config.cert_verify_flag = XQC_TLS_CERT_FLAG_NEED_VERIFY;
     }
 
     const xqc_cid_t *cid = xqc_h3_connect(

@@ -26,9 +26,12 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
     -keyout "${WORK_DIR}/server.key" -out "${WORK_DIR}/server.crt" \
     -days 365 -nodes -subj "/CN=mqvpn-test" 2>/dev/null
 
+CLIENT_STRICT_PID=""
+
 cleanup() {
     echo ""
     echo "Cleaning up..."
+    kill "$CLIENT_STRICT_PID" 2>/dev/null || true
     kill "$SERVER_PID" 2>/dev/null || true
     kill "$CLIENT_PID" 2>/dev/null || true
     sleep 1
@@ -114,7 +117,7 @@ echo "=== Routes in client namespace ==="
 ip netns exec vpn-client ip route show 2>/dev/null
 
 echo ""
-echo "=== Testing connectivity ==="
+echo "=== Test 1: Connectivity (--insecure) ==="
 if ip netns exec vpn-client ping -c 3 -W 2 10.0.0.1; then
     echo ""
     echo "=== PASS: VPN tunnel is working ==="
@@ -123,3 +126,42 @@ else
     echo "=== FAIL: Could not ping through VPN tunnel ==="
     exit 1
 fi
+
+# Stop client for next test
+kill "$CLIENT_PID" 2>/dev/null || true
+wait "$CLIENT_PID" 2>/dev/null || true
+CLIENT_PID=""
+sleep 2
+
+echo ""
+echo "=== Test 2: Self-signed cert rejected without --insecure ==="
+ip netns exec vpn-client "$MQVPN" \
+    --mode client \
+    --server 192.168.100.2:4433 \
+    --log-level debug > "${WORK_DIR}/client_strict.log" 2>&1 &
+CLIENT_STRICT_PID=$!
+
+# Wait for connection attempt — client should fail and exit
+sleep 5
+
+if kill -0 "$CLIENT_STRICT_PID" 2>/dev/null; then
+    # Still running — check if tunnel came up (it shouldn't)
+    if ip netns exec vpn-client ip addr show dev mqvpn0 >/dev/null 2>&1; then
+        echo "=== FAIL: Self-signed cert was accepted without --insecure ==="
+        kill "$CLIENT_STRICT_PID" 2>/dev/null || true
+        wait "$CLIENT_STRICT_PID" 2>/dev/null || true
+        exit 1
+    else
+        echo "OK: Client running but no tunnel (cert rejected)"
+        kill "$CLIENT_STRICT_PID" 2>/dev/null || true
+        wait "$CLIENT_STRICT_PID" 2>/dev/null || true
+    fi
+else
+    wait "$CLIENT_STRICT_PID" 2>/dev/null || true
+    echo "OK: Client exited (self-signed cert rejected)"
+fi
+
+if grep -q "certificate verification failed\|cert.*fail\|TLS.*fail" "${WORK_DIR}/client_strict.log" 2>/dev/null; then
+    echo "OK: Certificate rejection message found in log"
+fi
+echo "=== PASS: Self-signed cert correctly rejected without --insecure ==="
