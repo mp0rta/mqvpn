@@ -12,10 +12,14 @@ This is an independent personal project focused on an end-to-end standards-based
 
 ## Features
 
+- **Multi-client support** — Multiple clients connect simultaneously; IP-offset indexed session table for O(1) routing.
+- **PSK authentication** — Pre-shared key via `authorization: Bearer` header over TLS 1.3-encrypted QUIC.
 - **Seamless failover** — If one path goes down, the tunnel continues on another without reconnecting (Multipath QUIC).
 - **Multiple network paths** — Bind to two or more Linux interfaces (e.g. two ISP lines, WiFi + LTE) via XQUIC's Multipath QUIC.
+- **Bandwidth aggregation** — WLB scheduler combines bandwidth across paths using flow-affinity WRR with LATE-weighted estimates.
+- **Configuration file** — INI-style config file for all options; CLI arguments override config values.
+- **DNS override** — Client-side `/etc/resolv.conf` management with automatic backup and restore.
 - **Standards-based tunnel** — MASQUE CONNECT-IP (RFC 9484) with HTTP Datagrams (RFC 9297) over QUIC DATAGRAM frames (RFC 9221). No proprietary tunnel format.
-- **HTTP/3-native** — Runs over UDP/443 using standardized HTTP/3 + QUIC DATAGRAM mechanisms.
 
 ## Quick Start
 
@@ -27,17 +31,81 @@ cmake .. -DCMAKE_BUILD_TYPE=Release \
       -DXQUIC_BUILD_DIR=../third_party/xquic/build
 make -j$(nproc)
 
+# Generate a PSK
+./mqvpn --genkey
+# → e.g. mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
+
 # Server
 sudo ./mqvpn --mode server --listen 0.0.0.0:443 \
-    --cert server.crt --key server.key
+    --cert server.crt --key server.key \
+    --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
 
 # Client (single path)
-sudo ./mqvpn --mode client --server yourserver.com:443
+sudo ./mqvpn --mode client --server yourserver.com:443 \
+    --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
 
 # Client (multipath — two interfaces)
 sudo ./mqvpn --mode client --server yourserver.com:443 \
-    --path eth0 --path eth1
+    --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4= \
+    --path eth0 --path wlan0
+
+# Client (with DNS override)
+sudo ./mqvpn --mode client --server yourserver.com:443 \
+    --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4= \
+    --dns 1.1.1.1 --dns 8.8.8.8
 ```
+
+## Configuration File
+
+Instead of CLI flags, you can use an INI-style config file. CLI arguments override config file values.
+
+**Server (`/etc/mqvpn/server.conf`):**
+
+```ini
+[Interface]
+TunName = mqvpn0
+Listen = 0.0.0.0:443
+Subnet = 10.0.0.0/24
+LogLevel = info
+
+[TLS]
+Cert = /etc/mqvpn/server.crt
+Key = /etc/mqvpn/server.key
+
+[Auth]
+Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
+MaxClients = 64
+```
+
+**Client (`/etc/mqvpn/client.conf`):**
+
+```ini
+[Server]
+Address = yourserver.com:443
+Insecure = false
+
+[Auth]
+Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
+
+[Interface]
+TunName = mqvpn0
+DNS = 1.1.1.1, 8.8.8.8
+LogLevel = info
+
+[Multipath]
+Scheduler = wlb
+Path = eth0
+Path = wlan0
+```
+
+**Start with config file:**
+
+```bash
+sudo mqvpn --config /etc/mqvpn/server.conf
+sudo mqvpn --config /etc/mqvpn/client.conf
+```
+
+Mode is auto-detected from the config (`[Interface] Listen` → server, `[Server] Address` → client).
 
 ## Benchmarks
 
@@ -122,7 +190,8 @@ cd ../../../../..
 cd third_party/xquic
 mkdir -p build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
-      -DSSL_PATH=../third_party/boringssl ..
+      -DSSL_PATH=../third_party/boringssl \
+      -DXQC_ENABLE_BBR2=ON ..
 make -j$(nproc)
 cd ../../..
 
@@ -148,28 +217,55 @@ With this setup, the client's default route points through the mqvpn tunnel. All
 ## Usage
 
 ```
-mqvpn --mode client|server [options]
+mqvpn [--config PATH] --mode client|server [options]
 
-Common options:
-  --scheduler minrtt|wlb Multipath scheduler (default: wlb)
-  --log-level LEVEL      debug|info|warn|error (default: info)
+General:
+  --config PATH             INI config file (CLI args override config values)
+  --mode client|server      Operating mode (auto-detected from config)
+  --genkey                  Generate a random PSK and exit
+  --scheduler minrtt|wlb    Multipath scheduler (default: wlb)
+  --log-level LEVEL         debug|info|warn|error (default: info)
+  --tun-name NAME           TUN device name (default: mqvpn0)
+  --help                    Show help
 
-Client options:
-  --server HOST:PORT     Server address
-  --path IFACE           Network interface (repeatable, for multipath)
-  --insecure             Disable TLS certificate verification (testing only)
-  --tun-name NAME        TUN device name (default: mqvpn0)
+Client:
+  --server HOST:PORT        Server address
+  --path IFACE              Network interface for multipath (repeatable)
+  --auth-key KEY            PSK for authentication
+  --dns ADDR                DNS server (repeatable, max 4)
+  --insecure                Disable TLS cert verification (testing only)
 
-Server options:
-  --listen BIND:PORT     Listen address (default: 0.0.0.0:443)
-  --subnet CIDR          Client IP pool (default: 10.0.0.0/24)
-  --cert PATH            TLS certificate file
-  --key PATH             TLS private key file
+Server:
+  --listen BIND:PORT        Listen address (default: 0.0.0.0:443)
+  --subnet CIDR             Client IP pool (default: 10.0.0.0/24)
+  --cert PATH               TLS certificate file
+  --key PATH                TLS private key file
+  --auth-key KEY            PSK for client authentication
+  --max-clients N           Max concurrent clients (default: 64)
 ```
 
-Security note:
-- `--insecure` disables certificate verification and is intended for local/testing use only.
-- For production deployments, use a publicly trusted CA certificate or explicit certificate pinning.
+### Security Notes
+
+- `--insecure` disables certificate verification and is intended for local/testing use only. For production, use a publicly trusted CA certificate.
+- PSK authentication protects against unauthorized connections. The key is transmitted over QUIC's TLS 1.3 channel, so it is never exposed in plaintext on the wire.
+- When `--auth-key` is not set on the server, any client can connect without authentication.
+
+## Testing
+
+```bash
+# Unit tests
+cc -o tests/test_config tests/test_config.c src/config.c src/log.c -Isrc && ./tests/test_config
+cc -o tests/test_auth tests/test_auth.c src/auth.c src/log.c -Isrc && ./tests/test_auth
+cc -o tests/test_session tests/test_session.c src/addr_pool.c src/log.c -Isrc && ./tests/test_session
+cc -o tests/test_dns tests/test_dns.c src/dns.c src/log.c -Isrc && ./tests/test_dns
+cc -o tests/test_flow_sched tests/test_flow_sched.c src/flow_sched.c src/log.c -Isrc && ./tests/test_flow_sched
+
+# Integration test (requires root, uses network namespaces)
+sudo scripts/run_test.sh
+
+# Multipath integration test (2 paths, failover, recovery)
+sudo scripts/run_multipath_test.sh
+```
 
 ## Roadmap
 
@@ -177,19 +273,23 @@ Security note:
 - [x] TLS certificate verification by default (self-signed certs accepted; `--insecure` disables all checks)
 - [x] Tunnel source IP validation (prevent IP spoofing through the tunnel)
 - [x] CI with GitHub Actions (build + netns smoke tests)
+- [x] Bandwidth aggregation scheduler (WLB: LATE-weighted flow-affinity WRR with BBR bandwidth estimates)
 
-### v0.2.0 — Multi-client & auth
-- [ ] Multi-client support (per-connection session management)
-- [ ] Pre-shared key / token authentication
+### v0.2.0 — Multi-client, auth, DNS & config file
+- [x] Multi-client support (IP-offset indexed session table, O(1) routing)
+- [x] Pre-shared key authentication (Bearer token over HTTP/3 Extended CONNECT)
+- [x] Client-side DNS configuration (resolv.conf management with backup/restore)
+- [x] INI-style configuration file (`mqvpn --config /etc/mqvpn/client.conf`)
+- [x] `mqvpn --genkey` for PSK generation
 
 ### Future
+- [ ] Per-client token authentication
 - [ ] WiFi + LTE multipath testing
 - [ ] Android client (VpnService + WiFi/LTE handover)
 - [ ] IPv6 support
 - [ ] Replace `ip` command with netlink API
 - [ ] Performance optimization (GSO/GRO, io_uring, batch send)
 - [ ] Interop testing with other MASQUE implementations (masque-go, Google QUICHE)
-- [x] Bandwidth aggregation scheduler (WLB: LATE-weighted flow-affinity WRR with BBR bandwidth estimates)
 - [ ] DATAGRAM Capsule fallback (RFC 9297 stream-based carriage when QUIC DATAGRAMs are unavailable)
 
 ## Protocol Standards
