@@ -508,6 +508,66 @@ test_cold_start_uses_cwnd(void)
     PASS();
 }
 
+static void
+test_path_can_send_with_headroom(void)
+{
+    TEST(cwnd gating allows send with headroom);
+
+    flow_sched_t fs;
+    flow_sched_init(&fs, MQVPN_SCHED_WLB);
+    flow_sched_add_path(&fs, 0);
+    flow_sched_add_path(&fs, 1);
+
+    xqc_path_metrics_t metrics[2];
+    memset(metrics, 0, sizeof(metrics));
+
+    /* Path 0: plenty of cwnd headroom */
+    metrics[0].path_id = 0;
+    metrics[0].path_cwnd = 100000;
+    metrics[0].path_bytes_in_flight = 10000;
+    metrics[0].path_est_bw = 10000000;
+    metrics[0].path_srtt = 10000;
+    metrics[0].path_min_rtt = 10000;
+    metrics[0].path_pkt_send_count = 100;
+
+    /* Path 1: nearly full cwnd */
+    metrics[1].path_id = 1;
+    metrics[1].path_cwnd = 100000;
+    metrics[1].path_bytes_in_flight = 95000;
+    metrics[1].path_est_bw = 10000000;
+    metrics[1].path_srtt = 10000;
+    metrics[1].path_min_rtt = 10000;
+    metrics[1].path_pkt_send_count = 100;
+
+    flow_sched_update(&fs, metrics, 2);
+
+    /* Path 0 has headroom → can send */
+    ASSERT_EQ(flow_sched_path_can_send(&fs, 0, 1400), 1);
+
+    /* Path 1 is nearly full → cannot send (inflight + pkt + 25% headroom > cwnd) */
+    ASSERT_EQ(flow_sched_path_can_send(&fs, 1, 1400), 0);
+
+    /* Unknown path → cannot send */
+    ASSERT_EQ(flow_sched_path_can_send(&fs, 99, 1400), 0);
+
+    PASS();
+}
+
+static void
+test_path_can_send_zero_cwnd(void)
+{
+    TEST(cwnd gating rejects zero cwnd);
+
+    flow_sched_t fs;
+    flow_sched_init(&fs, MQVPN_SCHED_WLB);
+    flow_sched_add_path(&fs, 0);
+
+    /* No update called yet — cwnd=0 */
+    ASSERT_EQ(flow_sched_path_can_send(&fs, 0, 1400), 0);
+
+    PASS();
+}
+
 /* ── Main ── */
 
 int
@@ -532,6 +592,8 @@ main(void)
     test_path_removal_migrates_flows();
     test_flow_expiry();
     test_cold_start_uses_cwnd();
+    test_path_can_send_with_headroom();
+    test_path_can_send_zero_cwnd();
 
     printf("\n%d passed, %d failed\n", tests_passed, tests_failed);
     return tests_failed > 0 ? 1 : 0;

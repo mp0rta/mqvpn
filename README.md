@@ -153,7 +153,7 @@ mqvpn --mode client|server [options]
 Client options:
   --server HOST:PORT     Server address
   --path IFACE           Network interface (repeatable, for multipath)
-  --insecure             Skip TLS certificate verification (self-signed certs work without this)
+  --insecure             Disable TLS certificate verification (testing only)
   --tun-name NAME        TUN device name (default: mqvpn0)
   --log-level LEVEL      debug|info|warn|error (default: info)
 
@@ -164,6 +164,10 @@ Server options:
   --key PATH             TLS private key file
   --log-level LEVEL      debug|info|warn|error (default: info)
 ```
+
+Security note:
+- `--insecure` disables certificate verification and is intended for local/testing use only.
+- For production deployments, use a publicly trusted CA certificate or explicit certificate pinning.
 
 ## Roadmap
 

@@ -175,8 +175,8 @@ ip netns exec mp-server iperf3 -s -B 10.0.0.1 -1 &
 IPERF_SERVER_PID=$!
 sleep 1
 
-echo "Running iperf3 for 10 seconds..."
-IPERF_OUTPUT=$(ip netns exec mp-client iperf3 -c 10.0.0.1 -B 10.0.0.2 -t 10 2>&1) || true
+echo "Running iperf3 for 15 seconds (-P 4)..."
+IPERF_OUTPUT=$(ip netns exec mp-client iperf3 -c 10.0.0.1 -B 10.0.0.2 -P 4 -t 15 2>&1) || true
 IPERF_SERVER_PID=""
 
 echo ""
@@ -184,8 +184,11 @@ echo "--- iperf3 output ---"
 echo "$IPERF_OUTPUT"
 echo "--- end iperf3 output ---"
 
-# Extract receiver bandwidth (last "receiver" line, field before "Mbits/sec" or "Gbits/sec")
-BW_LINE=$(echo "$IPERF_OUTPUT" | grep -E '\[.*\].*receiver' | tail -1)
+# Extract receiver bandwidth — prefer [SUM] line for parallel flows, fall back to single flow
+BW_LINE=$(echo "$IPERF_OUTPUT" | grep -E '\[SUM\].*receiver' | tail -1)
+if [ -z "$BW_LINE" ]; then
+    BW_LINE=$(echo "$IPERF_OUTPUT" | grep -E '\[.*\].*receiver' | tail -1)
+fi
 if [ -n "$BW_LINE" ]; then
     BW_VALUE=$(echo "$BW_LINE" | awk '{for(i=1;i<=NF;i++) if($(i+1) ~ /bits\/sec/) {print $i; exit}}')
     BW_UNIT=$(echo "$BW_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /bits\/sec/) {print $i; exit}}')
@@ -240,8 +243,8 @@ ip netns exec mp-server iperf3 -s -B 10.0.0.1 -1 &
 IPERF_SERVER_PID=$!
 sleep 1
 
-# Start iperf3 client in background for 20 seconds
-ip netns exec mp-client iperf3 -c 10.0.0.1 -B 10.0.0.2 -t 20 > "${WORK_DIR}/failover_iperf.txt" 2>&1 &
+# Start iperf3 client in background for 20 seconds (-P 4 for parallel flows)
+ip netns exec mp-client iperf3 -c 10.0.0.1 -B 10.0.0.2 -P 4 -t 20 > "${WORK_DIR}/failover_iperf.txt" 2>&1 &
 IPERF_CLIENT_PID=$!
 echo "iperf3 started (PID $IPERF_CLIENT_PID), running for 20 seconds..."
 

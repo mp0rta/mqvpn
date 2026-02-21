@@ -318,16 +318,12 @@ svr_tun_read_handler(int fd, short what, void *arg)
         }
 
         uint64_t dgram_id;
-        uint64_t sched_path = flow_sched_get_path(&ctx->flow_sched, pkt, n);
-        if (sched_path != UINT64_MAX) {
-            xret = xqc_h3_ext_datagram_send_on_path(
-                ctx->active_conn->h3_conn, frame_buf, frame_written,
-                &dgram_id, XQC_DATA_QOS_HIGH, sched_path);
-        } else {
-            xret = xqc_h3_ext_datagram_send(
-                ctx->active_conn->h3_conn, frame_buf, frame_written,
-                &dgram_id, XQC_DATA_QOS_HIGH);
-        }
+        /* Server has a single UDP socket — write_socket_ex ignores path_id,
+         * so send_on_path() is meaningless.  Always use send() which lets
+         * xquic's internal MinRTT scheduler pick the best path. */
+        xret = xqc_h3_ext_datagram_send(
+            ctx->active_conn->h3_conn, frame_buf, frame_written,
+            &dgram_id, XQC_DATA_QOS_HIGH);
         if (xret == -XQC_EAGAIN) {
             /* QUIC send queue full — pause TUN reading */
             event_del(ctx->ev_tun);
@@ -394,7 +390,6 @@ svr_path_created(xqc_connection_t *conn, const xqc_cid_t *cid,
 {
     (void)conn; (void)cid; (void)conn_user_data;
     LOG_INF("new path created: path_id=%" PRIu64, path_id);
-    flow_sched_add_path(&g_svr.flow_sched, path_id);
     return 0;
 }
 
@@ -404,7 +399,6 @@ svr_path_removed(const xqc_cid_t *cid, uint64_t path_id,
 {
     (void)cid; (void)conn_user_data;
     LOG_INF("path removed: path_id=%" PRIu64, path_id);
-    flow_sched_remove_path(&g_svr.flow_sched, path_id);
 }
 
 /* ================================================================
@@ -427,9 +421,6 @@ svr_h3_conn_create_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
     xqc_h3_ext_datagram_set_user_data(h3_conn, svr_conn);
     xqc_h3_conn_get_peer_addr(h3_conn, (struct sockaddr *)&svr_conn->peer_addr,
                                sizeof(svr_conn->peer_addr), &svr_conn->peer_addrlen);
-
-    /* Register initial path 0 with flow scheduler */
-    flow_sched_add_path(&g_svr.flow_sched, 0);
 
     LOG_INF("H3 connection created");
     return 0;
@@ -1124,7 +1115,14 @@ mqvpn_server_run(const mqvpn_server_cfg_t *cfg)
     conn_settings.enable_multipath = 1;
     conn_settings.mp_ping_on = 1;
     conn_settings.pacing_on = 1;
-    conn_settings.cong_ctrl_callback = xqc_bbr_cb;
+    conn_settings.cong_ctrl_callback = xqc_bbr2_cb;
+    conn_settings.cc_params.cc_optimization_flags =
+        XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
+    if (cfg->scheduler == MQVPN_SCHED_WLB) {
+        conn_settings.scheduler_callback = xqc_wlb_scheduler_cb;
+    } else {
+        conn_settings.scheduler_callback = xqc_minrtt_scheduler_cb;
+    }
     conn_settings.sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
     conn_settings.so_sndbuf = 8 * 1024 * 1024;
     conn_settings.idle_time_out = 30000;       /* 30s idle timeout */
@@ -1210,14 +1208,8 @@ mqvpn_server_run(const mqvpn_server_cfg_t *cfg)
                               svr_tun_read_handler, &g_svr);
     event_add(g_svr.ev_tun, NULL);
 
-    /* Initialize flow scheduler */
     flow_sched_init(&g_svr.flow_sched, cfg->scheduler);
     g_svr.ev_sched_timer = evtimer_new(g_svr.eb, svr_sched_timer_cb, &g_svr);
-    if (cfg->scheduler == MQVPN_SCHED_WLB) {
-        LOG_INF("WLB flow scheduler enabled");
-        struct timeval tv = { .tv_sec = 1 };
-        evtimer_add(g_svr.ev_sched_timer, &tv);
-    }
 
     LOG_INF("mqvpn server ready — listening on %s:%d, subnet %s",
             cfg->listen_addr ? cfg->listen_addr : "0.0.0.0",

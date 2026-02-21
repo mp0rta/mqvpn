@@ -519,22 +519,7 @@ static void
 cli_sched_timer_cb(int fd, short what, void *arg)
 {
     (void)fd; (void)what;
-    cli_ctx_t *ctx = (cli_ctx_t *)arg;
-    if (!ctx->conn || !ctx->flow_sched.enabled) return;
-
-    xqc_conn_stats_t stats = xqc_conn_get_stats(ctx->engine, &ctx->conn->cid);
-
-    int n = 0;
-    for (int i = 0; i < XQC_MAX_PATHS_COUNT; i++) {
-        if (stats.paths_info[i].path_id == UINT64_MAX) break;
-        n++;
-    }
-
-    flow_sched_update(&ctx->flow_sched, stats.paths_info, n);
-    flow_sched_expire(&ctx->flow_sched, mqvpn_now_us());
-
-    struct timeval tv = { .tv_sec = 1 };
-    evtimer_add(ctx->ev_sched_timer, &tv);
+    /* WLB scheduling is now handled inside xquic — this timer is unused. */
 }
 
 static void
@@ -589,16 +574,13 @@ cli_tun_read_handler(int fd, short what, void *arg)
         }
 
         uint64_t dgram_id;
-        uint64_t sched_path = flow_sched_get_path(&ctx->flow_sched, pkt, n);
-        if (sched_path != UINT64_MAX) {
-            xret = xqc_h3_ext_datagram_send_on_path(
-                conn->h3_conn, frame_buf, frame_written,
-                &dgram_id, XQC_DATA_QOS_HIGH, sched_path);
-        } else {
-            xret = xqc_h3_ext_datagram_send(
-                conn->h3_conn, frame_buf, frame_written,
-                &dgram_id, XQC_DATA_QOS_HIGH);
-        }
+        /* Set flow hash for xquic's WLB scheduler (no-op if MinRTT) */
+        uint32_t fh = flow_hash_pkt(pkt, n);
+        xqc_conn_set_dgram_flow_hash(
+            xqc_h3_conn_get_xqc_conn(conn->h3_conn), fh);
+        xret = xqc_h3_ext_datagram_send(
+            conn->h3_conn, frame_buf, frame_written,
+            &dgram_id, XQC_DATA_QOS_HIGH);
         if (xret == -XQC_EAGAIN) {
             /* QUIC send queue full — pause TUN reading */
             event_del(ctx->ev_tun);
@@ -1166,7 +1148,6 @@ cli_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
 
         p->path_id = new_path_id;
         p->in_use = 1;
-        flow_sched_add_path(&ctx->flow_sched, new_path_id);
         LOG_INF("path[%d] created: path_id=%" PRIu64 " iface=%s",
                 i, new_path_id, p->iface);
     }
@@ -1421,13 +1402,10 @@ mqvpn_client_run(const mqvpn_client_cfg_t *cfg)
     g_cli.path_mgr.paths[0].path_id = 0;
     g_cli.path_mgr.paths[0].in_use = 1;
 
-    /* Initialize flow scheduler */
+    /* Initialize flow scheduler (used for flow_hash_pkt only) */
     flow_sched_init(&g_cli.flow_sched, cfg->scheduler);
-    flow_sched_add_path(&g_cli.flow_sched, 0);
     if (cfg->scheduler == MQVPN_SCHED_WLB) {
-        LOG_INF("WLB flow scheduler enabled");
-        struct timeval tv = { .tv_sec = 1 };
-        evtimer_add(g_cli.ev_sched_timer, &tv);
+        LOG_INF("WLB scheduler enabled (xquic-internal)");
     }
 
     /* ---- Create H3 connection ---- */
@@ -1448,9 +1426,16 @@ mqvpn_client_run(const mqvpn_client_cfg_t *cfg)
     conn_settings.enable_multipath = multipath;
     conn_settings.mp_ping_on = multipath;
     conn_settings.pacing_on = 1;
-    conn_settings.cong_ctrl_callback = xqc_bbr_cb;
+    conn_settings.cong_ctrl_callback = xqc_bbr2_cb;
+    conn_settings.cc_params.cc_optimization_flags =
+        XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
     conn_settings.sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
     conn_settings.so_sndbuf = 8 * 1024 * 1024;
+    if (cfg->scheduler == MQVPN_SCHED_WLB) {
+        conn_settings.scheduler_callback = xqc_wlb_scheduler_cb;
+    } else {
+        conn_settings.scheduler_callback = xqc_minrtt_scheduler_cb;
+    }
 
     xqc_conn_ssl_config_t conn_ssl_config;
     memset(&conn_ssl_config, 0, sizeof(conn_ssl_config));

@@ -207,9 +207,15 @@ flow_sched_update(flow_sched_t *fs,
         wp->prev_lost = metrics[i].path_lost_count;
         wp->prev_sent = metrics[i].path_pkt_send_count;
 
+        /* Store cwnd / inflight for cwnd-aware gating */
+        wp->cwnd = metrics[i].path_cwnd;
+        wp->bytes_in_flight = metrics[i].path_bytes_in_flight;
+
         LOG_DBG("WLB path %" PRIu64 ": est_bw=%" PRIu64
-                " loss=%.3f rtt_q=%.3f weight=%" PRIu64 " deficit=%" PRId64,
-                wp->path_id, est_bw, loss, rtt_q, wp->weight, wp->deficit);
+                " loss=%.3f rtt_q=%.3f weight=%" PRIu64
+                " deficit=%" PRId64 " cwnd=%" PRIu64 " inflight=%" PRIu64,
+                wp->path_id, est_bw, loss, rtt_q, wp->weight, wp->deficit,
+                wp->cwnd, wp->bytes_in_flight);
     }
 }
 
@@ -250,6 +256,23 @@ flow_sched_get_path(flow_sched_t *fs, const uint8_t *ip_pkt, int pkt_len)
 
     LOG_DBG("WLB: new flow 0x%08x → path %" PRIu64, h, fs->paths[best].path_id);
     return fs->paths[best].path_id;
+}
+
+int
+flow_sched_path_can_send(flow_sched_t *fs, uint64_t path_id, size_t pkt_size)
+{
+    wlb_path_t *wp = find_wlb_path(fs, path_id);
+    if (!wp || !wp->active || wp->cwnd == 0)
+        return 0;
+
+    /* Require at least 25% cwnd headroom beyond the packet itself.
+     * This is conservative: stale (1s-old) metrics mean the real
+     * inflight may be higher, so we leave a safety margin. */
+    uint64_t headroom = wp->cwnd / 4;
+    if (headroom < pkt_size)
+        headroom = pkt_size;
+
+    return (wp->bytes_in_flight + pkt_size + headroom) <= wp->cwnd;
 }
 
 void

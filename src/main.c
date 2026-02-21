@@ -26,7 +26,7 @@ usage(const char *prog)
         "  --key PATH                TLS private key (server mode)\n"
         "  --insecure                Skip TLS cert verification (client mode)\n"
         "  --path IFACE              Network interface for multipath (repeatable, client mode)\n"
-        "  --scheduler minrtt|wlb    Multipath scheduler (default minrtt)\n"
+        "  --scheduler minrtt|wlb    Multipath scheduler (default wlb)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
         "  --help                    Show this help\n",
         prog, prog);
@@ -81,7 +81,7 @@ main(int argc, char *argv[])
     const char *key_file    = "server.key";
     int         insecure    = 0;
     const char *log_level_str = "info";
-    const char *scheduler_str = "minrtt";
+    const char *scheduler_str = "wlb";
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES];
     int         n_paths = 0;
 

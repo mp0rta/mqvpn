@@ -13,7 +13,7 @@ typedef struct mqvpn_server_cfg_s {
     const char  *cert_file;     /* TLS certificate path */
     const char  *key_file;      /* TLS private key path */
     int          log_level;     /* xquic log level */
-    int          scheduler;     /* 0=minrtt (default), 1=wlb */
+    int          scheduler;     /* 0=minrtt, 1=wlb (default) */
 } mqvpn_server_cfg_t;
 
 /* Run the VPN server (blocks until shutdown). Returns 0 on clean exit. */

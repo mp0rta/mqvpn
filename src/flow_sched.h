@@ -43,6 +43,9 @@ typedef struct {
     /* Previous counters for delta-based loss rate */
     uint32_t  prev_lost;
     uint64_t  prev_sent;
+    /* Cwnd gating: only use send_on_path() when headroom exists */
+    uint64_t  cwnd;
+    uint64_t  bytes_in_flight;
 } wlb_path_t;
 
 typedef struct flow_sched_s {
@@ -70,6 +73,10 @@ void flow_sched_update(flow_sched_t *fs,
  * Returns path_id, or UINT64_MAX if scheduler disabled / single path. */
 uint64_t flow_sched_get_path(flow_sched_t *fs,
                              const uint8_t *ip_pkt, int pkt_len);
+
+/* Check if a path has cwnd headroom to accept a packet of pkt_size bytes.
+ * Returns 1 if send_on_path() is safe, 0 if caller should fall back to send(). */
+int flow_sched_path_can_send(flow_sched_t *fs, uint64_t path_id, size_t pkt_size);
 
 /* Expire stale flows older than FLOW_EXPIRE_US. */
 void flow_sched_expire(flow_sched_t *fs, uint64_t now_us);
