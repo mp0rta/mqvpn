@@ -289,6 +289,11 @@ svr_tun_read_handler(int fd, short what, void *arg)
         }
 
         uint64_t dgram_id;
+        /* Provide per-packet flow hint for xquic WLB (same as client side). */
+        uint32_t fh = flow_hash_pkt(pkt, n);
+        xqc_conn_set_dgram_flow_hash(
+            xqc_h3_conn_get_xqc_conn(ctx->active_conn->h3_conn), fh);
+
         /* Server has a single UDP socket — write_socket_ex ignores path_id,
          * so send_on_path() is meaningless.  Always use send() which lets
          * xquic's internal scheduler (MinRTT or WLB) pick the best path. */

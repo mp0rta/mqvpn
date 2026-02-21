@@ -9,19 +9,25 @@
 uint32_t
 flow_hash_pkt(const uint8_t *pkt, int len)
 {
-    if (len < 20 || (pkt[0] >> 4) != 4) {
+    if (!pkt || len < 20 || (pkt[0] >> 4) != 4) {
         return 0;
     }
 
     uint8_t proto = pkt[9];
+    int ihl = (pkt[0] & 0x0f) * 4;
+
+    if (ihl < 20 || ihl > len) {
+        return 0;
+    }
 
     /* Only TCP needs flow pinning (reordering breaks inner TCP).
      * UDP/QUIC handle reordering themselves → unpinned WRR. */
     if (proto != 6) {
         return MQVPN_FLOW_HASH_UNPINNED;
     }
-
-    int ihl = (pkt[0] & 0x0f) * 4;
+    if (len < ihl + 4) {
+        return MQVPN_FLOW_HASH_UNPINNED;
+    }
 
     /* src_ip (12..15), dst_ip (16..19), protocol, and TCP ports */
     uint32_t h = 2166136261u;
@@ -32,10 +38,8 @@ flow_hash_pkt(const uint8_t *pkt, int len)
 
     h = (h ^ proto) * 16777619u;
 
-    if (len >= ihl + 4) {
-        for (int i = ihl; i < ihl + 4; i++) {
-            h = (h ^ pkt[i]) * 16777619u;
-        }
+    for (int i = ihl; i < ihl + 4; i++) {
+        h = (h ^ pkt[i]) * 16777619u;
     }
 
     /* 0 means "no hash" in xquic's WLB flow table (empty-slot sentinel). */

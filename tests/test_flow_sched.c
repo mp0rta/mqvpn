@@ -245,9 +245,9 @@ test_hash_ip_header_only(void)
     inet_pton(AF_INET, "10.0.0.2", &a);
     memcpy(pkt + 16, &a, 4);
 
-    /* len < ihl + 4, so ports are skipped; still hashes IPs + proto */
+    /* No TCP ports available, so disable pinning for this packet. */
     uint32_t h = flow_hash_pkt(pkt, 20);
-    ASSERT_NEQ(h, 0);
+    ASSERT_EQ(h, MQVPN_FLOW_HASH_UNPINNED);
 
     PASS();
 }
@@ -260,6 +260,55 @@ test_hash_zero_length(void)
     uint8_t pkt[1] = {0x45};
     ASSERT_EQ(flow_hash_pkt(pkt, 0), 0);
     ASSERT_EQ(flow_hash_pkt(NULL, 0), 0);
+
+    PASS();
+}
+
+static void
+test_hash_null_pointer_nonzero_len(void)
+{
+    TEST(flow_hash_pkt NULL with nonzero len returns 0);
+
+    ASSERT_EQ(flow_hash_pkt(NULL, 40), 0);
+
+    PASS();
+}
+
+static void
+test_hash_invalid_ihl(void)
+{
+    TEST(flow_hash_pkt invalid IHL returns 0);
+
+    uint8_t pkt[40];
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x4f;  /* IPv4, IHL=15 (60 bytes) */
+    pkt[9] = 6;     /* TCP */
+
+    ASSERT_EQ(flow_hash_pkt(pkt, 40), 0);
+
+    pkt[0] = 0x40;  /* IPv4, IHL=0 */
+    ASSERT_EQ(flow_hash_pkt(pkt, 40), 0);
+
+    PASS();
+}
+
+static void
+test_hash_tcp_truncated_l4_unpinned(void)
+{
+    TEST(flow_hash_pkt truncated TCP L4 returns UNPINNED);
+
+    uint8_t pkt[20];
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x45;  /* IPv4, IHL=5 */
+    pkt[9] = 6;     /* TCP */
+
+    struct in_addr a;
+    inet_pton(AF_INET, "10.0.0.1", &a);
+    memcpy(pkt + 12, &a, 4);
+    inet_pton(AF_INET, "10.0.0.2", &a);
+    memcpy(pkt + 16, &a, 4);
+
+    ASSERT_EQ(flow_hash_pkt(pkt, 20), MQVPN_FLOW_HASH_UNPINNED);
 
     PASS();
 }
@@ -361,6 +410,9 @@ main(void)
     test_hash_icmp_no_ports();
     test_hash_ip_header_only();
     test_hash_zero_length();
+    test_hash_null_pointer_nonzero_len();
+    test_hash_invalid_ihl();
+    test_hash_tcp_truncated_l4_unpinned();
     test_hash_distribution();
     test_hash_never_returns_sentinels();
     test_hash_tcp_pinned_udp_unpinned();
