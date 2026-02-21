@@ -290,6 +290,28 @@ test_hash_distribution(void)
 }
 
 static void
+test_hash_never_returns_sentinels(void)
+{
+    TEST(flow_hash_pkt TCP never returns 0 or UNPINNED);
+
+    /* Hash many TCP flows — none should produce 0 or UNPINNED */
+    for (int i = 0; i < 10000; i++) {
+        uint8_t pkt[40];
+        uint16_t port = (uint16_t)(1000 + (i % 64000));
+        char src[16];
+        snprintf(src, sizeof(src), "%d.%d.%d.%d",
+                 10 + (i >> 24) % 200, (i >> 16) & 0xff,
+                 (i >> 8) & 0xff, i & 0xff);
+        make_tcp_pkt(pkt, src, port, "10.0.0.2", 80);
+        uint32_t h = flow_hash_pkt(pkt, 40);
+        ASSERT_NEQ(h, 0);
+        ASSERT_NEQ(h, MQVPN_FLOW_HASH_UNPINNED);
+    }
+
+    PASS();
+}
+
+static void
 test_hash_tcp_pinned_udp_unpinned(void)
 {
     TEST(flow_hash_pkt TCP pinned vs UDP unpinned);
@@ -340,6 +362,7 @@ main(void)
     test_hash_ip_header_only();
     test_hash_zero_length();
     test_hash_distribution();
+    test_hash_never_returns_sentinels();
     test_hash_tcp_pinned_udp_unpinned();
     test_sched_mode_constants();
 
