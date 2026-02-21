@@ -28,7 +28,7 @@ usage(const char *prog)
         "  --tun-name NAME           TUN device name (default mqvpn0)\n"
         "  --cert PATH               TLS certificate (server mode)\n"
         "  --key PATH                TLS private key (server mode)\n"
-        "  --insecure                Skip TLS cert verification (client mode)\n"
+        "  --insecure                Accept untrusted certs (client mode, testing only)\n"
         "  --auth-key KEY            PSK for authentication\n"
         "  --genkey                  Generate a random PSK and exit\n"
         "  --path IFACE              Network interface for multipath (repeatable, client mode)\n"
@@ -257,7 +257,7 @@ main(int argc, char *argv[])
         }
 
         if (eff_insecure) {
-            LOG_WRN("--insecure: TLS certificate verification disabled");
+            LOG_WRN("--insecure: accepting untrusted certificates");
         }
 
         mqvpn_client_cfg_t cfg = {
