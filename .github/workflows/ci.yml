@@ -47,13 +47,8 @@ jobs:
                 -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
           make -j$(nproc)
 
-      - name: Unit tests
-        run: |
-          cc -o tests/test_config tests/test_config.c src/config.c src/log.c -Isrc && ./tests/test_config
-          cc -o tests/test_auth tests/test_auth.c src/auth.c src/log.c -Isrc && ./tests/test_auth
-          cc -o tests/test_session tests/test_session.c src/addr_pool.c src/log.c -Isrc && ./tests/test_session
-          cc -o tests/test_dns tests/test_dns.c src/dns.c src/log.c -Isrc && ./tests/test_dns
-          cc -o tests/test_flow_sched tests/test_flow_sched.c src/flow_sched.c src/log.c -Isrc && ./tests/test_flow_sched
+      - name: Unit tests (ctest)
+        run: cd build && ctest --output-on-failure
 
       - name: Smoke test (netns)
         run: sudo scripts/run_test.sh
