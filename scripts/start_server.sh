@@ -6,6 +6,7 @@
 #   --subnet CIDR        Client IP pool (default: 10.0.0.0/24)
 #   --cert PATH          TLS certificate (default: certs/server.crt)
 #   --key PATH           TLS private key (default: certs/server.key)
+#   --auth-key KEY       Pre-shared key for client auth (default: auto-generated)
 #   --skip-nat           Skip NAT/forwarding setup
 
 set -e
@@ -17,6 +18,7 @@ LISTEN="0.0.0.0:443"
 SUBNET="10.0.0.0/24"
 CERT="$PROJECT_DIR/certs/server.crt"
 KEY="$PROJECT_DIR/certs/server.key"
+AUTH_KEY=""
 SKIP_NAT=0
 
 while [[ $# -gt 0 ]]; do
@@ -25,6 +27,7 @@ while [[ $# -gt 0 ]]; do
         --subnet)  SUBNET="$2"; shift 2 ;;
         --cert)    CERT="$2"; shift 2 ;;
         --key)     KEY="$2"; shift 2 ;;
+        --auth-key) AUTH_KEY="$2"; shift 2 ;;
         --skip-nat) SKIP_NAT=1; shift ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
@@ -66,7 +69,15 @@ if [ "$SKIP_NAT" -eq 0 ]; then
     fi
 fi
 
+# --- Generate PSK if not provided ---
+if [ -z "$AUTH_KEY" ]; then
+    AUTH_KEY=$("$MQVPN" --genkey 2>/dev/null)
+    echo "Generated auth key: $AUTH_KEY"
+    echo "Use this key on the client with: --auth-key \"$AUTH_KEY\""
+fi
+
 # --- Start server ---
 echo "Starting mqvpn server (listen=$LISTEN, subnet=$SUBNET)..."
 exec "$MQVPN" --mode server --listen "$LISTEN" \
-    --subnet "$SUBNET" --cert "$CERT" --key "$KEY"
+    --subnet "$SUBNET" --cert "$CERT" --key "$KEY" \
+    --auth-key "$AUTH_KEY"

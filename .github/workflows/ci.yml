@@ -47,5 +47,11 @@ jobs:
                 -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
           make -j$(nproc)
 
+      - name: Unit tests (ctest)
+        run: cd build && ctest --output-on-failure
+
       - name: Smoke test (netns)
         run: sudo scripts/run_test.sh
+
+      - name: Multi-client test (netns)
+        run: sudo scripts/test_multiclient.sh

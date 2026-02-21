@@ -2,6 +2,7 @@
 #include "path_mgr.h"
 #include "flow_sched.h"
 #include "tun.h"
+#include "dns.h"
 #include "log.h"
 
 #include <stdlib.h>
@@ -78,6 +79,8 @@ struct cli_ctx_s {
     char                 server_ip_str[INET_ADDRSTRLEN];
 
     cli_conn_t          *conn;
+
+    mqvpn_dns_t          dns;
 
 };
 
@@ -505,6 +508,11 @@ cli_setup_tun(cli_ctx_t *ctx, const uint8_t *ip, uint8_t prefix)
     /* Set up split tunneling routes */
     cli_setup_routes(ctx);
 
+    /* Apply DNS override if configured */
+    if (ctx->dns.n_servers > 0) {
+        mqvpn_dns_apply(&ctx->dns);
+    }
+
     return 0;
 }
 
@@ -649,7 +657,16 @@ cli_masque_start_tunnel(cli_conn_t *conn)
     snprintf(authority, sizeof(authority), "%s:%d",
              conn->ctx->cfg->server_addr, conn->ctx->cfg->server_port);
 
-    xqc_http_header_t hdrs[] = {
+    /* Prepare authorization header value if auth_key is set */
+    char auth_value[300];
+    int has_auth = (conn->ctx->cfg->auth_key &&
+                    conn->ctx->cfg->auth_key[0] != '\0');
+    if (has_auth) {
+        snprintf(auth_value, sizeof(auth_value), "Bearer %s",
+                 conn->ctx->cfg->auth_key);
+    }
+
+    xqc_http_header_t hdrs[7] = {
         { .name  = {.iov_base = ":method",   .iov_len = 7},
           .value = {.iov_base = "CONNECT",   .iov_len = 7},    .flags = 0 },
         { .name  = {.iov_base = ":protocol", .iov_len = 9},
@@ -663,10 +680,17 @@ cli_masque_start_tunnel(cli_conn_t *conn)
         { .name  = {.iov_base = "capsule-protocol", .iov_len = 16},
           .value = {.iov_base = "?1",        .iov_len = 2},    .flags = 0 },
     };
+    int hdr_count = 6;
+    if (has_auth) {
+        hdrs[hdr_count].name  = (struct iovec){.iov_base = "authorization", .iov_len = 13};
+        hdrs[hdr_count].value = (struct iovec){.iov_base = auth_value, .iov_len = strlen(auth_value)};
+        hdrs[hdr_count].flags = 0;
+        hdr_count++;
+    }
     xqc_http_headers_t headers = {
         .headers  = hdrs,
-        .count    = 6,
-        .capacity = 6,
+        .count    = hdr_count,
+        .capacity = 7,
     };
 
     ssize_t ret = xqc_h3_request_send_headers(req, &headers, 0);
@@ -1082,12 +1106,15 @@ static int
 cli_cert_verify_cb(const unsigned char *certs[], const size_t cert_len[],
                    size_t certs_len, void *conn_user_data)
 {
-    (void)certs; (void)cert_len; (void)certs_len; (void)conn_user_data;
-    /* xquic's internal xqc_ssl_cert_verify_cb already does BoringSSL chain +
-     * hostname verification before calling us.  This callback is only reached
-     * for UNABLE_TO_GET_ISSUER_CERT_LOCALLY or ALLOW_SELF_SIGNED cases.
-     * Accept: xquic already filtered fatal errors. */
-    return 0;
+    (void)certs; (void)cert_len; (void)certs_len;
+    /* This callback is reached when BoringSSL chain verification fails
+     * (e.g. self-signed cert, unknown CA).  Only accept in insecure mode. */
+    cli_conn_t *conn = (cli_conn_t *)conn_user_data;
+    if (conn && conn->ctx && conn->ctx->cfg && conn->ctx->cfg->insecure) {
+        return 0;   /* --insecure: accept any cert */
+    }
+    LOG_ERR("TLS certificate verification failed (use --insecure to skip)");
+    return -1;      /* reject */
 }
 
 static void
@@ -1253,6 +1280,15 @@ mqvpn_client_run(const mqvpn_client_cfg_t *cfg)
     memset(&g_cli, 0, sizeof(g_cli));
     g_cli.cfg = cfg;
     g_cli.tun.fd = -1;
+
+    /* Initialize DNS and check for stale backup */
+    mqvpn_dns_init(&g_cli.dns);
+    if (mqvpn_dns_has_stale_backup(&g_cli.dns)) {
+        mqvpn_dns_restore_stale(&g_cli.dns);
+    }
+    for (int i = 0; i < cfg->n_dns; i++) {
+        mqvpn_dns_add_server(&g_cli.dns, cfg->dns_servers[i]);
+    }
 
     /* Create event base */
     g_cli.eb = event_base_new();
@@ -1426,9 +1462,10 @@ mqvpn_client_run(const mqvpn_client_cfg_t *cfg)
 
     xqc_conn_ssl_config_t conn_ssl_config;
     memset(&conn_ssl_config, 0, sizeof(conn_ssl_config));
-    if (!cfg->insecure) {
-        conn_ssl_config.cert_verify_flag = XQC_TLS_CERT_FLAG_NEED_VERIFY
-                                         | XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED;
+    if (cfg->insecure) {
+        conn_ssl_config.cert_verify_flag = XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED;
+    } else {
+        conn_ssl_config.cert_verify_flag = XQC_TLS_CERT_FLAG_NEED_VERIFY;
     }
 
     const xqc_cid_t *cid = xqc_h3_connect(
@@ -1458,6 +1495,7 @@ mqvpn_client_run(const mqvpn_client_cfg_t *cfg)
 
     /* ---- Cleanup ---- */
     LOG_INF("client shutting down");
+    mqvpn_dns_restore(&g_cli.dns);
     cli_cleanup_routes(&g_cli);
     if (g_cli.ev_sigterm) event_free(g_cli.ev_sigterm);
     if (g_cli.ev_sigint)  event_free(g_cli.ev_sigint);

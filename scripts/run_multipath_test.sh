@@ -25,6 +25,10 @@ fi
 MQVPN="$(realpath "$MQVPN")"
 WORK_DIR="$(mktemp -d)"
 
+# Generate PSK
+PSK=$("$MQVPN" --genkey 2>/dev/null)
+echo "Generated PSK: ${PSK}"
+
 # Generate self-signed cert
 echo "Generating self-signed certificate..."
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
@@ -104,6 +108,7 @@ ip netns exec mp-server "$MQVPN" \
     --subnet 10.0.0.0/24 \
     --cert "${WORK_DIR}/server.crt" \
     --key "${WORK_DIR}/server.key" \
+    --auth-key "$PSK" \
     --log-level debug &
 SERVER_PID=$!
 sleep 2
@@ -120,6 +125,7 @@ ip netns exec mp-client "$MQVPN" \
     --mode client \
     --server 192.168.1.2:4433 \
     --path veth-a0 --path veth-b0 \
+    --auth-key "$PSK" \
     --insecure \
     --log-level debug &
 CLIENT_PID=$!

@@ -8,3 +8,7 @@ CMakeFiles/
 cmake_install.cmake
 Makefile
 tests/test_flow_sched
+tests/test_config
+tests/test_auth
+tests/test_session
+tests/test_dns

@@ -36,6 +36,9 @@ fi
 MQVPN="$(realpath "$MQVPN")"
 WORK_DIR="$(mktemp -d)"
 
+# Generate PSK
+PSK=$("$MQVPN" --genkey 2>/dev/null)
+
 IPERF_DURATION=15
 PARALLEL_COUNTS=(32 64)
 TUNNEL_WAIT=5
@@ -148,6 +151,7 @@ run_vpn() {
         --subnet 10.0.0.0/24 \
         --cert "${WORK_DIR}/server.crt" \
         --key "${WORK_DIR}/server.key" \
+        --auth-key "$PSK" \
         --scheduler "$scheduler" \
         --log-level info &
     SERVER_PID=$!
@@ -162,6 +166,7 @@ run_vpn() {
         --mode client \
         --server 192.168.10.2:4433 \
         --path fs-a0 --path fs-b0 \
+        --auth-key "$PSK" \
         --insecure \
         --scheduler "$scheduler" \
         --log-level info &

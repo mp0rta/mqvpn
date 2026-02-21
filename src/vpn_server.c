@@ -2,6 +2,7 @@
 #include "flow_sched.h"
 #include "tun.h"
 #include "addr_pool.h"
+#include "auth.h"
 #include "log.h"
 
 #include <stdlib.h>
@@ -63,8 +64,10 @@ struct svr_ctx_s {
     uint64_t             tun_drop_cnt;   /* TUN write failure counter */
     mqvpn_addr_pool_t    pool;
 
-    /* M1: single client — track the active conn for return traffic */
-    svr_conn_t          *active_conn;
+    /* Session table: indexed by IP offset (1-254) within the subnet */
+    svr_conn_t          *sessions[MQVPN_ADDR_POOL_MAX + 1];
+    int                  n_sessions;
+    int                  max_clients;
 
 };
 
@@ -263,7 +266,7 @@ svr_tun_read_handler(int fd, short what, void *arg)
     (void)fd; (void)what;
     svr_ctx_t *ctx = (svr_ctx_t *)arg;
 
-    if (!ctx->active_conn || !ctx->active_conn->tunnel_established) {
+    if (ctx->n_sessions == 0) {
         /* Drain the fd even if no active tunnel */
         uint8_t discard[PACKET_BUF_SIZE];
         while (mqvpn_tun_read(&ctx->tun, discard, sizeof(discard)) > 0)
@@ -278,11 +281,29 @@ svr_tun_read_handler(int fd, short what, void *arg)
         int n = mqvpn_tun_read(&ctx->tun, pkt, sizeof(pkt));
         if (n <= 0) break;
 
+        /* Need at least 20 bytes for IPv4 header with dst IP at offset 16 */
+        if (n < 20 || (pkt[0] >> 4) != 4) {
+            continue; /* not IPv4 — drop */
+        }
+
+        /* Extract destination IP and find session by IP offset */
+        struct in_addr dst_ip;
+        memcpy(&dst_ip.s_addr, pkt + 16, 4);
+        uint32_t offset = ntohl(dst_ip.s_addr) - ntohl(ctx->pool.base.s_addr);
+        if (offset == 0 || offset > MQVPN_ADDR_POOL_MAX) {
+            continue; /* out of range — drop */
+        }
+
+        svr_conn_t *target = ctx->sessions[offset];
+        if (!target || !target->tunnel_established) {
+            continue; /* no session for this IP — drop */
+        }
+
         /* Frame with quarter-stream-ID + context_id=0 */
         size_t frame_written = 0;
         xqc_int_t xret = xqc_h3_ext_masque_frame_udp(
             frame_buf, sizeof(frame_buf), &frame_written,
-            ctx->active_conn->masque_stream_id, pkt, (size_t)n);
+            target->masque_stream_id, pkt, (size_t)n);
         if (xret != XQC_OK) {
             LOG_ERR("masque_frame_udp: %d", xret);
             continue;
@@ -292,13 +313,10 @@ svr_tun_read_handler(int fd, short what, void *arg)
         /* Provide per-packet flow hint for xquic WLB (same as client side). */
         uint32_t fh = flow_hash_pkt(pkt, n);
         xqc_conn_set_dgram_flow_hash(
-            xqc_h3_conn_get_xqc_conn(ctx->active_conn->h3_conn), fh);
+            xqc_h3_conn_get_xqc_conn(target->h3_conn), fh);
 
-        /* Server has a single UDP socket — write_socket_ex ignores path_id,
-         * so send_on_path() is meaningless.  Always use send() which lets
-         * xquic's internal scheduler (MinRTT or WLB) pick the best path. */
         xret = xqc_h3_ext_datagram_send(
-            ctx->active_conn->h3_conn, frame_buf, frame_written,
+            target->h3_conn, frame_buf, frame_written,
             &dgram_id, XQC_DATA_QOS_HIGH);
         if (xret == -XQC_EAGAIN) {
             /* QUIC send queue full — pause TUN reading */
@@ -416,11 +434,19 @@ svr_h3_conn_close_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
             svr_conn->dgram_acked_cnt, svr_conn->dgram_lost_cnt);
 
     if (svr_conn->assigned_ip.s_addr) {
+        /* Remove from session table */
+        uint32_t offset = ntohl(svr_conn->assigned_ip.s_addr) -
+                          ntohl(svr_conn->ctx->pool.base.s_addr);
+        if (offset > 0 && offset <= MQVPN_ADDR_POOL_MAX &&
+            svr_conn->ctx->sessions[offset] == svr_conn) {
+            svr_conn->ctx->sessions[offset] = NULL;
+            svr_conn->ctx->n_sessions--;
+            char ip_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &svr_conn->assigned_ip, ip_str, sizeof(ip_str));
+            LOG_INF("session removed: %s (active=%d)", ip_str,
+                    svr_conn->ctx->n_sessions);
+        }
         mqvpn_addr_pool_release(&svr_conn->ctx->pool, &svr_conn->assigned_ip);
-    }
-
-    if (svr_conn->ctx->active_conn == svr_conn) {
-        svr_conn->ctx->active_conn = NULL;
     }
 
     LOG_INF("H3 connection closed");
@@ -441,18 +467,29 @@ svr_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *conn_user_data)
  * ================================================================ */
 
 static int
+svr_masque_send_403(xqc_h3_request_t *h3_request)
+{
+    xqc_http_header_t resp[] = {
+        { .name  = {.iov_base = ":status", .iov_len = 7},
+          .value = {.iov_base = "403",     .iov_len = 3}, .flags = 0 },
+    };
+    xqc_http_headers_t hdrs = { .headers = resp, .count = 1, .capacity = 1 };
+    return xqc_h3_request_send_headers(h3_request, &hdrs, 1) < 0 ? -1 : 0;
+}
+
+static int
 svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
 {
     svr_conn_t *conn = stream->conn;
     svr_ctx_t *ctx = conn->ctx;
     ssize_t ret;
 
-    /* If another client is tunneled, close the old connection first */
-    if (ctx->active_conn && ctx->active_conn != conn
-        && ctx->active_conn->tunnel_established) {
-        LOG_INF("closing previous connection for new client");
-        xqc_h3_conn_close(ctx->engine, &ctx->active_conn->cid);
-        /* conn_close_notify will free old conn and set active_conn=NULL */
+    /* Check max_clients limit */
+    if (ctx->n_sessions >= ctx->max_clients) {
+        LOG_WRN("max clients reached (%d), rejecting new connection",
+                ctx->max_clients);
+        svr_masque_send_403(h3_request);
+        return -1;
     }
 
     /* 1. Send 200 response headers (fin=0 to keep stream open) */
@@ -553,9 +590,16 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
     }
 
     conn->tunnel_established = 1;
-    ctx->active_conn = conn;
-    LOG_INF("MASQUE tunnel established (stream_id=%" PRIu64 ")",
-            conn->masque_stream_id);
+
+    /* Register in session table (indexed by IP offset) */
+    uint32_t ip_offset = ntohl(conn->assigned_ip.s_addr) -
+                         ntohl(ctx->pool.base.s_addr);
+    if (ip_offset > 0 && ip_offset <= MQVPN_ADDR_POOL_MAX) {
+        ctx->sessions[ip_offset] = conn;
+        ctx->n_sessions++;
+    }
+    LOG_INF("MASQUE tunnel established (stream_id=%" PRIu64 ", clients=%d)",
+            conn->masque_stream_id, ctx->n_sessions);
     return 0;
 }
 
@@ -609,6 +653,8 @@ svr_request_read_notify(xqc_h3_request_t *h3_request,
         /* Validate Extended CONNECT for connect-ip (RFC 9484 §4.5) */
         int is_connect = 0, is_connect_ip = 0;
         int has_scheme_https = 0, has_capsule_proto = 0, has_valid_path = 0;
+        const char *auth_token = NULL;
+        size_t auth_token_len = 0;
         for (int i = 0; i < (int)headers->count; i++) {
             xqc_http_header_t *h = &headers->headers[i];
             if (h->name.iov_len == 7
@@ -642,6 +688,15 @@ svr_request_read_notify(xqc_h3_request_t *h3_request,
                 && memcmp(h->value.iov_base, "?1", 2) == 0) {
                 has_capsule_proto = 1;
             }
+            if (h->name.iov_len == 13
+                && memcmp(h->name.iov_base, "authorization", 13) == 0) {
+                /* Expect "Bearer <token>" */
+                if (h->value.iov_len > 7
+                    && memcmp(h->value.iov_base, "Bearer ", 7) == 0) {
+                    auth_token = (const char *)h->value.iov_base + 7;
+                    auth_token_len = h->value.iov_len - 7;
+                }
+            }
         }
 
         if (is_connect && is_connect_ip) {
@@ -651,6 +706,21 @@ svr_request_read_notify(xqc_h3_request_t *h3_request,
                         has_scheme_https, has_valid_path, has_capsule_proto);
                 return -1;
             }
+
+            /* PSK authentication check */
+            const char *expected_key = stream->conn->ctx->cfg->auth_key;
+            if (expected_key && expected_key[0] != '\0') {
+                if (!auth_token ||
+                    mqvpn_auth_ct_compare(auth_token, auth_token_len,
+                                          expected_key,
+                                          strlen(expected_key)) != 0) {
+                    LOG_WRN("authentication failed: invalid or missing PSK");
+                    svr_masque_send_403(h3_request);
+                    return -1;
+                }
+                LOG_INF("client authenticated successfully");
+            }
+
             LOG_INF("Extended CONNECT for connect-ip received");
             svr_masque_send_response(h3_request, stream);
             return 0;
@@ -1017,6 +1087,7 @@ mqvpn_server_run(const mqvpn_server_cfg_t *cfg)
     memset(&g_svr, 0, sizeof(g_svr));
     g_svr.cfg = cfg;
     g_svr.tun.fd = -1;
+    g_svr.max_clients = cfg->max_clients > 0 ? cfg->max_clients : 64;
 
     /* Initialize address pool */
     if (mqvpn_addr_pool_init(&g_svr.pool, cfg->subnet) < 0) {

@@ -32,6 +32,11 @@ iptables -C FORWARD -o mqvpn0 -d $SUBNET -j ACCEPT 2>/dev/null || \
 
 echo "NAT configured: $SUBNET → $IFACE"
 
+# Generate PSK
+PSK=$($BUILD_DIR/mqvpn --genkey 2>/dev/null)
+echo "Generated PSK: ${PSK}"
+echo "Use this key on the client with: --auth-key \"${PSK}\""
+
 # Start server
 echo "Starting mqvpn server on port $PORT..."
 $BUILD_DIR/mqvpn --mode server \
@@ -39,4 +44,5 @@ $BUILD_DIR/mqvpn --mode server \
     --subnet $SUBNET \
     --cert "$CERT_DIR/server.crt" \
     --key "$CERT_DIR/server.key" \
+    --auth-key "$PSK" \
     --log-level debug 2>&1 | tee /root/mqvpn-server.log
