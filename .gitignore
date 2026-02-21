@@ -7,3 +7,4 @@ CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 Makefile
+tests/test_flow_sched
