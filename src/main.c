@@ -22,7 +22,7 @@ usage(const char *prog)
         "Options:\n"
         "  --config PATH             Configuration file (INI format)\n"
         "  --mode client|server      Operating mode (required if no config)\n"
-        "  --server HOST:PORT        Server address (client mode)\n"
+        "  --server HOST:PORT        Server address, IPv4 only (client mode)\n"
         "  --listen BIND:PORT        Listen address (server mode, default 0.0.0.0:443)\n"
         "  --subnet CIDR             Client IP pool (server mode, default 10.0.0.0/24)\n"
         "  --tun-name NAME           TUN device name (default mqvpn0)\n"

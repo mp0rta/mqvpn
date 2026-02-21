@@ -229,7 +229,7 @@ General:
   --help                    Show help
 
 Client:
-  --server HOST:PORT        Server address
+  --server HOST:PORT        Server address (IPv4 only; IPv6 planned for v0.2.0)
   --path IFACE              Network interface for multipath (repeatable)
   --auth-key KEY            PSK for authentication
   --dns ADDR                DNS server (repeatable, max 4)
@@ -292,6 +292,7 @@ sudo scripts/run_multipath_test.sh
 - [ ] Per-client token authentication
 - [ ] WiFi + LTE multipath testing
 - [ ] Android client (VpnService + WiFi/LTE handover)
+- [ ] resolvectl integration (systemd-resolved environments)
 - [ ] Replace `ip` command with netlink API
 - [ ] Performance optimization (GSO/GRO, io_uring, batch send)
 - [ ] Interop testing with other MASQUE implementations (masque-go, Google QUICHE)
