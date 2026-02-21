@@ -246,10 +246,10 @@ Server:
 
 ### Security Notes
 
-- By default, TLS certificate verification is strict — self-signed or untrusted CA certificates are **rejected**. Use a publicly trusted CA certificate (e.g. Let's Encrypt) for production.
+- By default, TLS certificate verification is strict — self-signed or untrusted CA certificates are rejected. Use a publicly trusted CA certificate (e.g. Let's Encrypt) for production.
 - `--insecure` disables all certificate verification including self-signed acceptance, and is intended for local/testing use only.
+- `--auth-key` is required for server mode. The server refuses to start without it. Generate one with `mqvpn --genkey`.
 - PSK authentication protects against unauthorized connections. The key is transmitted over QUIC's TLS 1.3 channel, so it is never exposed in plaintext on the wire.
-- When `--auth-key` is not set on the server, any client can connect without authentication.
 
 ## Testing
 

@@ -280,6 +280,13 @@ main(int argc, char *argv[])
         return mqvpn_client_run(&cfg);
 
     } else if (strcmp(eff_mode, "server") == 0) {
+        if (!eff_auth_key || eff_auth_key[0] == '\0') {
+            fprintf(stderr,
+                "error: --auth-key is required for server mode\n"
+                "       generate one with: mqvpn --genkey\n");
+            return 1;
+        }
+
         char bind_addr[256] = "0.0.0.0";
         int  bind_port = 443;
         if (parse_host_port(eff_listen, bind_addr, sizeof(bind_addr), &bind_port) < 0) {
