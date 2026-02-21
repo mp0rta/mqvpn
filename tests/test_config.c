@@ -315,6 +315,236 @@ static void test_empty_file(void)
     ASSERT_EQ_INT(rc, 0, "empty file ok");
 }
 
+static void test_malformed_section_header(void)
+{
+    /* Missing closing bracket → should warn and skip, not crash */
+    const char *ini =
+        "[Interface\n"
+        "TunName = broken\n"
+        "[Interface]\n"
+        "TunName = fixed\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "malformed section no error");
+    /* First TunName is under malformed section (skipped), second is valid */
+    ASSERT_EQ_STR(cfg.tun_name, "fixed", "valid section parsed after malformed");
+}
+
+static void test_malformed_line_no_equals(void)
+{
+    /* Line without '=' → should warn and skip */
+    const char *ini =
+        "[Interface]\n"
+        "TunName = good\n"
+        "this line has no equals\n"
+        "LogLevel = debug\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "no-equals line no error");
+    ASSERT_EQ_STR(cfg.tun_name, "good", "key before malformed parsed");
+    ASSERT_EQ_STR(cfg.log_level, "debug", "key after malformed parsed");
+}
+
+static void test_key_outside_section(void)
+{
+    /* Key=Value before any [Section] → should warn */
+    const char *ini =
+        "TunName = orphan\n"
+        "[Interface]\n"
+        "TunName = valid\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "key outside section no error");
+    ASSERT_EQ_STR(cfg.tun_name, "valid", "valid section key overrides orphan");
+}
+
+static void test_max_paths_exceeded(void)
+{
+    /* 5th path should be ignored (max 4) */
+    const char *ini =
+        "[Multipath]\n"
+        "Path = eth0\n"
+        "Path = eth1\n"
+        "Path = eth2\n"
+        "Path = eth3\n"
+        "Path = eth4\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "max paths exceeded no error");
+    ASSERT_EQ_INT(cfg.n_paths, 4, "capped at 4 paths");
+    ASSERT_EQ_STR(cfg.paths[3], "eth3", "4th path is eth3");
+}
+
+static void test_max_clients_edge_cases(void)
+{
+    /* MaxClients = 0 → should fallback to 64 */
+    const char *ini_zero =
+        "[Auth]\n"
+        "MaxClients = 0\n";
+
+    char *path = write_tmp(ini_zero);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.max_clients, 64, "MaxClients=0 → default 64");
+
+    /* MaxClients = -1 → should fallback to 64 */
+    const char *ini_neg =
+        "[Auth]\n"
+        "MaxClients = -1\n";
+
+    path = write_tmp(ini_neg);
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.max_clients, 64, "MaxClients=-1 → default 64");
+
+    /* MaxClients = abc → atoi returns 0 → fallback to 64 */
+    const char *ini_abc =
+        "[Auth]\n"
+        "MaxClients = abc\n";
+
+    path = write_tmp(ini_abc);
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.max_clients, 64, "MaxClients=abc → default 64");
+
+    /* MaxClients = 128 → valid */
+    const char *ini_valid =
+        "[Auth]\n"
+        "MaxClients = 128\n";
+
+    path = write_tmp(ini_valid);
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.max_clients, 128, "MaxClients=128 → 128");
+}
+
+static void test_empty_value(void)
+{
+    /* Key with empty value → empty string */
+    const char *ini =
+        "[Interface]\n"
+        "TunName = \n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_STR(cfg.tun_name, "", "empty value → empty string");
+}
+
+static void test_duplicate_keys_last_wins(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "TunName = first\n"
+        "TunName = second\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_STR(cfg.tun_name, "second", "duplicate key: last wins");
+}
+
+static void test_case_insensitive_section(void)
+{
+    /* Section names are case-insensitive */
+    const char *ini =
+        "[interface]\n"
+        "TunName = lower\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_STR(cfg.tun_name, "lower", "lowercase [interface] works");
+}
+
+static void test_unknown_section(void)
+{
+    /* Unknown section → keys under it should be warned, not crash */
+    const char *ini =
+        "[Unknown]\n"
+        "Foo = bar\n"
+        "[Interface]\n"
+        "TunName = after_unknown\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "unknown section no error");
+    ASSERT_EQ_STR(cfg.tun_name, "after_unknown", "key after unknown section parsed");
+}
+
+static void test_dns_empty_entries(void)
+{
+    /* Trailing comma, leading comma, double commas → no empty entries */
+    const char *ini =
+        "[Interface]\n"
+        "DNS = ,, 1.1.1.1 ,, 8.8.8.8 ,,\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.n_dns, 2, "empty DNS entries skipped");
+    ASSERT_EQ_STR(cfg.dns_servers[0], "1.1.1.1", "dns[0] after empty");
+    ASSERT_EQ_STR(cfg.dns_servers[1], "8.8.8.8", "dns[1] after empty");
+}
+
+static void test_semicolon_comment(void)
+{
+    const char *ini =
+        "; semicolon comment\n"
+        "[Interface]\n"
+        "; another comment\n"
+        "TunName = commented\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_STR(cfg.tun_name, "commented", "semicolon comments ignored");
+}
+
 int main(void)
 {
     test_defaults();
@@ -328,6 +558,17 @@ int main(void)
     test_boolean_parsing();
     test_mode_detection();
     test_empty_file();
+    test_malformed_section_header();
+    test_malformed_line_no_equals();
+    test_key_outside_section();
+    test_max_paths_exceeded();
+    test_max_clients_edge_cases();
+    test_empty_value();
+    test_duplicate_keys_last_wins();
+    test_case_insensitive_section();
+    test_unknown_section();
+    test_dns_empty_entries();
+    test_semicolon_comment();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
