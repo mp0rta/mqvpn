@@ -8,14 +8,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 
 void
 mqvpn_dns_init(mqvpn_dns_t *dns)
 {
     memset(dns, 0, sizeof(*dns));
+    dns->lock_fd     = -1;
     dns->resolv_path = "/etc/resolv.conf";
     dns->backup_path = "/etc/resolv.conf.mqvpn.bak";
+    dns->lock_path   = "/run/mqvpn-dns.lock";
 }
 
 int
@@ -60,6 +64,23 @@ mqvpn_dns_apply(mqvpn_dns_t *dns)
 {
     if (dns->n_servers == 0) {
         return 0; /* nothing to do */
+    }
+
+    /* Acquire exclusive lock — prevents multiple mqvpn instances from
+     * clobbering each other's resolv.conf backup.  flock() is automatically
+     * released by the kernel if the process dies. */
+    int lfd = open(dns->lock_path, O_CREAT | O_RDWR, 0644);
+    if (lfd >= 0) {
+        if (flock(lfd, LOCK_EX | LOCK_NB) < 0) {
+            LOG_ERR("dns: another mqvpn instance is managing DNS (lock: %s)",
+                    dns->lock_path);
+            close(lfd);
+            return -1;
+        }
+        dns->lock_fd = lfd;
+    } else {
+        LOG_WRN("dns: could not create lock file %s: %m (continuing without lock)",
+                dns->lock_path);
     }
 
     /* Check for systemd-resolved symlink */
@@ -109,6 +130,14 @@ mqvpn_dns_restore(mqvpn_dns_t *dns)
 
     unlink(dns->backup_path);
     dns->active = 0;
+
+    /* Release lock */
+    if (dns->lock_fd >= 0) {
+        close(dns->lock_fd);
+        dns->lock_fd = -1;
+        unlink(dns->lock_path);
+    }
+
     LOG_INF("dns: restored %s", dns->resolv_path);
 }
 

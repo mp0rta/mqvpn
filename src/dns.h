@@ -13,8 +13,10 @@ typedef struct {
     char        servers[MQVPN_DNS_MAX_SERVERS][64];
     int         n_servers;
     int         active;         /* 1 if DNS is currently overridden */
+    int         lock_fd;        /* flock fd, -1 if not held */
     const char *resolv_path;    /* default: /etc/resolv.conf */
     const char *backup_path;    /* default: /etc/resolv.conf.mqvpn.bak */
+    const char *lock_path;      /* default: /run/mqvpn-dns.lock */
 } mqvpn_dns_t;
 
 /* Initialize with defaults */

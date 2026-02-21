@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/file.h>
 
 static int g_pass = 0, g_fail = 0;
 
@@ -105,16 +107,23 @@ static void test_apply_and_restore(void)
     const char *original = "nameserver 192.168.1.1\nsearch local\n";
     write_file(resolv_path, original);
 
+    char lock_path[] = "/tmp/test_dns_lock_XXXXXX";
+    int fd3 = mkstemp(lock_path);
+    close(fd3);
+    unlink(lock_path);
+
     mqvpn_dns_t dns;
     mqvpn_dns_init(&dns);
     dns.resolv_path = resolv_path;
     dns.backup_path = backup_path;
+    dns.lock_path   = lock_path;
     mqvpn_dns_add_server(&dns, "1.1.1.1");
     mqvpn_dns_add_server(&dns, "8.8.8.8");
 
     /* Apply */
     ASSERT_EQ_INT(mqvpn_dns_apply(&dns), 0, "apply ok");
     ASSERT_EQ_INT(dns.active, 1, "active after apply");
+    ASSERT_TRUE(dns.lock_fd >= 0, "lock fd acquired");
 
     /* Check resolv.conf was replaced */
     char buf[512];
@@ -134,6 +143,7 @@ static void test_apply_and_restore(void)
     /* Restore */
     mqvpn_dns_restore(&dns);
     ASSERT_EQ_INT(dns.active, 0, "inactive after restore");
+    ASSERT_EQ_INT(dns.lock_fd, -1, "lock fd released after restore");
 
     /* Check resolv.conf was restored */
     read_file(resolv_path, buf, sizeof(buf));
@@ -142,6 +152,7 @@ static void test_apply_and_restore(void)
 
     unlink(resolv_path);
     unlink(backup_path);
+    unlink(lock_path);
 }
 
 static void test_no_servers_no_apply(void)
@@ -201,6 +212,48 @@ static void test_stale_backup_detection(void)
     unlink(backup_path);
 }
 
+static void test_lock_contention(void)
+{
+    char resolv_path[] = "/tmp/test_dns_resolv3_XXXXXX";
+    char backup_path[] = "/tmp/test_dns_backup3_XXXXXX";
+    char lock_path[]   = "/tmp/test_dns_lock3_XXXXXX";
+    int fd1 = mkstemp(resolv_path); close(fd1);
+    int fd2 = mkstemp(backup_path); close(fd2); unlink(backup_path);
+    int fd3 = mkstemp(lock_path);   close(fd3); unlink(lock_path);
+
+    write_file(resolv_path, "nameserver 192.168.1.1\n");
+
+    /* First instance acquires lock */
+    mqvpn_dns_t dns1;
+    mqvpn_dns_init(&dns1);
+    dns1.resolv_path = resolv_path;
+    dns1.backup_path = backup_path;
+    dns1.lock_path   = lock_path;
+    mqvpn_dns_add_server(&dns1, "1.1.1.1");
+    ASSERT_EQ_INT(mqvpn_dns_apply(&dns1), 0, "1st instance apply ok");
+
+    /* Second instance should fail to acquire lock */
+    mqvpn_dns_t dns2;
+    mqvpn_dns_init(&dns2);
+    dns2.resolv_path = resolv_path;
+    dns2.backup_path = backup_path;
+    dns2.lock_path   = lock_path;
+    mqvpn_dns_add_server(&dns2, "8.8.8.8");
+    ASSERT_TRUE(mqvpn_dns_apply(&dns2) != 0, "2nd instance blocked by lock");
+    ASSERT_EQ_INT(dns2.active, 0, "2nd instance not active");
+
+    /* Release first instance */
+    mqvpn_dns_restore(&dns1);
+
+    /* Now second instance should succeed */
+    ASSERT_EQ_INT(mqvpn_dns_apply(&dns2), 0, "2nd instance apply after release");
+    mqvpn_dns_restore(&dns2);
+
+    unlink(resolv_path);
+    unlink(backup_path);
+    unlink(lock_path);
+}
+
 int main(void)
 {
     test_init();
@@ -210,6 +263,7 @@ int main(void)
     test_no_servers_no_apply();
     test_restore_without_apply();
     test_stale_backup_detection();
+    test_lock_contention();
 
     printf("\n=== test_dns: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
