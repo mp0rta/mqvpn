@@ -13,7 +13,8 @@ This is an independent personal project focused on an end-to-end standards-based
 - **PSK authentication** — Pre-shared key via `authorization: Bearer` header over TLS 1.3-encrypted QUIC.
 - **Seamless failover** — If one path goes down, the tunnel continues on another without reconnecting (Multipath QUIC).
 - **Multiple network paths** — Bind to two or more Linux interfaces (e.g. two ISP lines, WiFi + LTE) via XQUIC's Multipath QUIC.
-- **Bandwidth aggregation** — WLB scheduler combines bandwidth across paths using flow-affinity WRR with LATE-weighted estimates.
+- **Bandwidth aggregation** — Implemented a bandwidth-aggregation scheduler for multipath QUIC datagrams (WLB), combining flow-affinity WRR with LATE-based bandwidth estimates.(implemented in our XQUIC fork)
+  - [Performance comparison: WLB vs. MinRTT scheduler](docs/benchmarks_netns.md#2-bandwidth-aggregation--wlb-vs-minrtt)
 - **Configuration file** — INI-style config file for all options; CLI arguments override config values.
 - **DNS override** — Client-side `/etc/resolv.conf` management with automatic backup and restore.
 - **Standards-based tunnel** — MASQUE CONNECT-IP (RFC 9484) with HTTP Datagrams (RFC 9297) over QUIC DATAGRAM frames (RFC 9221). No proprietary tunnel format.
