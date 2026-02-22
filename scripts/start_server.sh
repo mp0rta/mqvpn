@@ -35,9 +35,57 @@ done
 
 MQVPN="$PROJECT_DIR/build/mqvpn"
 if [ ! -x "$MQVPN" ]; then
-    echo "Error: $MQVPN not found. Run 'make' in build/ first."
+    echo "Error: $MQVPN not found. Run './build.sh' first."
     exit 1
 fi
+
+# --- Lock file (prevent concurrent instances) ---
+LOCKFILE="/var/run/mqvpn-start-server.lock"
+exec 9>"$LOCKFILE"
+if ! flock -n 9; then
+    echo "Error: another start_server.sh is already running (lock: $LOCKFILE)"
+    exit 1
+fi
+echo $$ >&9
+
+# --- Cleanup state (set early so partial setup is always cleaned up) ---
+ORIG_IP_FORWARD=""
+NAT_IFACE=""
+MQVPN_PID=""
+IPTABLES_COMMENT="mqvpn-start-server:$$"
+
+cleanup() {
+    echo ""
+    echo "Cleaning up..."
+
+    # Stop mqvpn server
+    if [ -n "$MQVPN_PID" ] && kill -0 "$MQVPN_PID" 2>/dev/null; then
+        kill "$MQVPN_PID" 2>/dev/null || true
+        wait "$MQVPN_PID" 2>/dev/null || true
+        echo "  mqvpn server stopped"
+    fi
+
+    # Remove all iptables rules tagged with our comment (handles duplicates)
+    if [ "$SKIP_NAT" -eq 0 ] && [ -n "$NAT_IFACE" ]; then
+        while iptables -t nat -D POSTROUTING -s "$SUBNET" -o "$NAT_IFACE" -j MASQUERADE \
+            -m comment --comment "$IPTABLES_COMMENT" 2>/dev/null; do :; done
+        while iptables -D FORWARD -i mqvpn0 -s "$SUBNET" -j ACCEPT \
+            -m comment --comment "$IPTABLES_COMMENT" 2>/dev/null; do :; done
+        while iptables -D FORWARD -o mqvpn0 -d "$SUBNET" -j ACCEPT \
+            -m comment --comment "$IPTABLES_COMMENT" 2>/dev/null; do :; done
+        echo "  iptables rules removed"
+    fi
+
+    # Restore ip_forward
+    if [ -n "$ORIG_IP_FORWARD" ]; then
+        sysctl -w net.ipv4.ip_forward="$ORIG_IP_FORWARD" >/dev/null
+        echo "  ip_forward restored to $ORIG_IP_FORWARD"
+    fi
+
+    echo "Done."
+}
+
+trap cleanup EXIT
 
 # --- Generate self-signed certificate if missing ---
 if [ ! -f "$CERT" ] || [ ! -f "$KEY" ]; then
@@ -52,20 +100,22 @@ fi
 
 # --- NAT setup ---
 if [ "$SKIP_NAT" -eq 0 ]; then
+    ORIG_IP_FORWARD=$(sysctl -n net.ipv4.ip_forward)
+
     echo "Enabling IP forwarding..."
     sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
-    IFACE=$(ip route get 8.8.8.8 2>/dev/null | grep -oP 'dev \K\S+' || true)
-    if [ -z "$IFACE" ]; then
+    NAT_IFACE=$(ip route get 8.8.8.8 2>/dev/null | grep -oP 'dev \K\S+' || true)
+    if [ -z "$NAT_IFACE" ]; then
         echo "Warning: could not detect default interface, skipping NAT"
     else
-        echo "Setting up NAT: $SUBNET → $IFACE"
-        iptables -t nat -C POSTROUTING -s "$SUBNET" -o "$IFACE" -j MASQUERADE 2>/dev/null \
-            || iptables -t nat -A POSTROUTING -s "$SUBNET" -o "$IFACE" -j MASQUERADE
-        iptables -C FORWARD -i mqvpn0 -s "$SUBNET" -j ACCEPT 2>/dev/null \
-            || iptables -I FORWARD -i mqvpn0 -s "$SUBNET" -j ACCEPT
-        iptables -C FORWARD -o mqvpn0 -d "$SUBNET" -j ACCEPT 2>/dev/null \
-            || iptables -I FORWARD -o mqvpn0 -d "$SUBNET" -j ACCEPT
+        echo "Setting up NAT: $SUBNET → $NAT_IFACE"
+        iptables -t nat -A POSTROUTING -s "$SUBNET" -o "$NAT_IFACE" -j MASQUERADE \
+            -m comment --comment "$IPTABLES_COMMENT"
+        iptables -I FORWARD -i mqvpn0 -s "$SUBNET" -j ACCEPT \
+            -m comment --comment "$IPTABLES_COMMENT"
+        iptables -I FORWARD -o mqvpn0 -d "$SUBNET" -j ACCEPT \
+            -m comment --comment "$IPTABLES_COMMENT"
     fi
 fi
 
@@ -78,6 +128,8 @@ fi
 
 # --- Start server ---
 echo "Starting mqvpn server (listen=$LISTEN, subnet=$SUBNET)..."
-exec "$MQVPN" --mode server --listen "$LISTEN" \
+"$MQVPN" --mode server --listen "$LISTEN" \
     --subnet "$SUBNET" --cert "$CERT" --key "$KEY" \
-    --auth-key "$AUTH_KEY"
+    --auth-key "$AUTH_KEY" &
+MQVPN_PID=$!
+wait $MQVPN_PID 2>/dev/null || true
