@@ -7,7 +7,7 @@ This project pins a forked `xquic` as a git submodule.
 - Submodule path: `third_party/xquic`
 - Fork repository: `https://github.com/mp0rta/xquic.git`
 - Branch: `feature/masque`
-- Pinned commit hash: `34e5beec0e1af4af8444384788289fd8d6738dbd`
+- Pinned commit hash: `0677b6c835c5f284ac167c89f8bc1622be47fa95`
 
 ## Reproducible Checkout
 
@@ -21,7 +21,7 @@ git submodule status
 Expected submodule status includes:
 
 ```text
-34e5beec0e1af4af8444384788289fd8d6738dbd third_party/xquic
+0677b6c835c5f284ac167c89f8bc1622be47fa95 third_party/xquic
 ```
 
 ## Update Policy

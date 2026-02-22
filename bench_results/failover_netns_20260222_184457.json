@@ -1,0 +1,506 @@
+{
+  "test": "failover",
+  "env": "netns",
+  "scheduler": "wlb",
+  "fault_path": "A",
+  "iperf_parallel_streams": 4,
+  "timestamp": "2026-02-22T18:44:57+09:00",
+  "netem": {
+    "path_a": {
+      "delay_ms": 10,
+      "rate_mbit": 300
+    },
+    "path_b": {
+      "delay_ms": 30,
+      "rate_mbit": 80
+    }
+  },
+  "duration_sec": 60,
+  "fault_inject_sec": 20,
+  "fault_recover_sec": 40,
+  "intervals": [
+    {
+      "time_sec": 0.5,
+      "mbps": 282.8
+    },
+    {
+      "time_sec": 1.0,
+      "mbps": 304.1
+    },
+    {
+      "time_sec": 1.5,
+      "mbps": 287.3
+    },
+    {
+      "time_sec": 2.0,
+      "mbps": 320.9
+    },
+    {
+      "time_sec": 2.5,
+      "mbps": 339.7
+    },
+    {
+      "time_sec": 3.0,
+      "mbps": 316.7
+    },
+    {
+      "time_sec": 3.5,
+      "mbps": 310.4
+    },
+    {
+      "time_sec": 4.0,
+      "mbps": 239.1
+    },
+    {
+      "time_sec": 4.5,
+      "mbps": 262.1
+    },
+    {
+      "time_sec": 5.0,
+      "mbps": 281.0
+    },
+    {
+      "time_sec": 5.5,
+      "mbps": 262.1
+    },
+    {
+      "time_sec": 6.0,
+      "mbps": 243.3
+    },
+    {
+      "time_sec": 6.5,
+      "mbps": 268.4
+    },
+    {
+      "time_sec": 7.0,
+      "mbps": 274.7
+    },
+    {
+      "time_sec": 7.5,
+      "mbps": 274.7
+    },
+    {
+      "time_sec": 8.0,
+      "mbps": 283.1
+    },
+    {
+      "time_sec": 8.5,
+      "mbps": 270.5
+    },
+    {
+      "time_sec": 9.0,
+      "mbps": 249.6
+    },
+    {
+      "time_sec": 9.5,
+      "mbps": 264.2
+    },
+    {
+      "time_sec": 10.0,
+      "mbps": 274.7
+    },
+    {
+      "time_sec": 10.5,
+      "mbps": 245.4
+    },
+    {
+      "time_sec": 11.0,
+      "mbps": 289.4
+    },
+    {
+      "time_sec": 11.5,
+      "mbps": 253.8
+    },
+    {
+      "time_sec": 12.0,
+      "mbps": 270.5
+    },
+    {
+      "time_sec": 12.5,
+      "mbps": 262.1
+    },
+    {
+      "time_sec": 13.0,
+      "mbps": 260.1
+    },
+    {
+      "time_sec": 13.5,
+      "mbps": 260.0
+    },
+    {
+      "time_sec": 14.0,
+      "mbps": 281.0
+    },
+    {
+      "time_sec": 14.5,
+      "mbps": 270.5
+    },
+    {
+      "time_sec": 15.0,
+      "mbps": 289.4
+    },
+    {
+      "time_sec": 15.5,
+      "mbps": 272.6
+    },
+    {
+      "time_sec": 16.0,
+      "mbps": 299.9
+    },
+    {
+      "time_sec": 16.5,
+      "mbps": 291.5
+    },
+    {
+      "time_sec": 17.0,
+      "mbps": 270.5
+    },
+    {
+      "time_sec": 17.5,
+      "mbps": 293.6
+    },
+    {
+      "time_sec": 18.0,
+      "mbps": 245.4
+    },
+    {
+      "time_sec": 18.5,
+      "mbps": 260.0
+    },
+    {
+      "time_sec": 19.0,
+      "mbps": 276.8
+    },
+    {
+      "time_sec": 19.5,
+      "mbps": 262.1
+    },
+    {
+      "time_sec": 20.0,
+      "mbps": 174.1
+    },
+    {
+      "time_sec": 20.5,
+      "mbps": 62.9
+    },
+    {
+      "time_sec": 21.0,
+      "mbps": 69.2
+    },
+    {
+      "time_sec": 21.5,
+      "mbps": 62.9
+    },
+    {
+      "time_sec": 22.0,
+      "mbps": 67.1
+    },
+    {
+      "time_sec": 22.5,
+      "mbps": 83.9
+    },
+    {
+      "time_sec": 23.0,
+      "mbps": 86.0
+    },
+    {
+      "time_sec": 23.5,
+      "mbps": 46.1
+    },
+    {
+      "time_sec": 24.0,
+      "mbps": 96.5
+    },
+    {
+      "time_sec": 24.5,
+      "mbps": 41.9
+    },
+    {
+      "time_sec": 25.0,
+      "mbps": 62.9
+    },
+    {
+      "time_sec": 25.5,
+      "mbps": 98.6
+    },
+    {
+      "time_sec": 26.0,
+      "mbps": 58.7
+    },
+    {
+      "time_sec": 26.5,
+      "mbps": 62.9
+    },
+    {
+      "time_sec": 27.0,
+      "mbps": 81.8
+    },
+    {
+      "time_sec": 27.5,
+      "mbps": 65.0
+    },
+    {
+      "time_sec": 28.0,
+      "mbps": 83.9
+    },
+    {
+      "time_sec": 28.5,
+      "mbps": 46.1
+    },
+    {
+      "time_sec": 29.0,
+      "mbps": 96.5
+    },
+    {
+      "time_sec": 29.5,
+      "mbps": 62.9
+    },
+    {
+      "time_sec": 30.0,
+      "mbps": 69.2
+    },
+    {
+      "time_sec": 30.5,
+      "mbps": 60.8
+    },
+    {
+      "time_sec": 31.0,
+      "mbps": 69.2
+    },
+    {
+      "time_sec": 31.5,
+      "mbps": 62.9
+    },
+    {
+      "time_sec": 32.0,
+      "mbps": 86.0
+    },
+    {
+      "time_sec": 32.5,
+      "mbps": 67.1
+    },
+    {
+      "time_sec": 33.0,
+      "mbps": 60.8
+    },
+    {
+      "time_sec": 33.5,
+      "mbps": 69.2
+    },
+    {
+      "time_sec": 34.0,
+      "mbps": 86.0
+    },
+    {
+      "time_sec": 34.5,
+      "mbps": 65.0
+    },
+    {
+      "time_sec": 35.0,
+      "mbps": 79.7
+    },
+    {
+      "time_sec": 35.5,
+      "mbps": 56.6
+    },
+    {
+      "time_sec": 36.0,
+      "mbps": 69.2
+    },
+    {
+      "time_sec": 36.5,
+      "mbps": 86.0
+    },
+    {
+      "time_sec": 37.0,
+      "mbps": 65.0
+    },
+    {
+      "time_sec": 37.5,
+      "mbps": 69.2
+    },
+    {
+      "time_sec": 38.0,
+      "mbps": 73.4
+    },
+    {
+      "time_sec": 38.5,
+      "mbps": 86.0
+    },
+    {
+      "time_sec": 39.0,
+      "mbps": 48.2
+    },
+    {
+      "time_sec": 39.5,
+      "mbps": 88.1
+    },
+    {
+      "time_sec": 40.0,
+      "mbps": 58.7
+    },
+    {
+      "time_sec": 40.5,
+      "mbps": 79.7
+    },
+    {
+      "time_sec": 41.0,
+      "mbps": 46.1
+    },
+    {
+      "time_sec": 41.5,
+      "mbps": 88.1
+    },
+    {
+      "time_sec": 42.0,
+      "mbps": 75.5
+    },
+    {
+      "time_sec": 42.5,
+      "mbps": 69.2
+    },
+    {
+      "time_sec": 43.0,
+      "mbps": 60.8
+    },
+    {
+      "time_sec": 43.5,
+      "mbps": 67.1
+    },
+    {
+      "time_sec": 44.0,
+      "mbps": 77.6
+    },
+    {
+      "time_sec": 44.5,
+      "mbps": 83.9
+    },
+    {
+      "time_sec": 45.0,
+      "mbps": 46.1
+    },
+    {
+      "time_sec": 45.5,
+      "mbps": 96.5
+    },
+    {
+      "time_sec": 46.0,
+      "mbps": 58.7
+    },
+    {
+      "time_sec": 46.5,
+      "mbps": 88.1
+    },
+    {
+      "time_sec": 47.0,
+      "mbps": 52.4
+    },
+    {
+      "time_sec": 47.5,
+      "mbps": 69.2
+    },
+    {
+      "time_sec": 48.0,
+      "mbps": 73.4
+    },
+    {
+      "time_sec": 48.5,
+      "mbps": 67.1
+    },
+    {
+      "time_sec": 49.0,
+      "mbps": 62.9
+    },
+    {
+      "time_sec": 49.5,
+      "mbps": 96.5
+    },
+    {
+      "time_sec": 50.0,
+      "mbps": 130.0
+    },
+    {
+      "time_sec": 50.5,
+      "mbps": 270.5
+    },
+    {
+      "time_sec": 51.0,
+      "mbps": 293.6
+    },
+    {
+      "time_sec": 51.5,
+      "mbps": 297.7
+    },
+    {
+      "time_sec": 52.0,
+      "mbps": 302.0
+    },
+    {
+      "time_sec": 52.5,
+      "mbps": 285.2
+    },
+    {
+      "time_sec": 53.0,
+      "mbps": 293.6
+    },
+    {
+      "time_sec": 53.5,
+      "mbps": 337.6
+    },
+    {
+      "time_sec": 54.0,
+      "mbps": 331.4
+    },
+    {
+      "time_sec": 54.5,
+      "mbps": 343.9
+    },
+    {
+      "time_sec": 55.0,
+      "mbps": 306.2
+    },
+    {
+      "time_sec": 55.5,
+      "mbps": 247.6
+    },
+    {
+      "time_sec": 56.0,
+      "mbps": 236.9
+    },
+    {
+      "time_sec": 56.5,
+      "mbps": 262.1
+    },
+    {
+      "time_sec": 57.0,
+      "mbps": 289.4
+    },
+    {
+      "time_sec": 57.5,
+      "mbps": 283.1
+    },
+    {
+      "time_sec": 58.0,
+      "mbps": 260.0
+    },
+    {
+      "time_sec": 58.5,
+      "mbps": 337.6
+    },
+    {
+      "time_sec": 59.0,
+      "mbps": 329.3
+    },
+    {
+      "time_sec": 59.5,
+      "mbps": 323.0
+    },
+    {
+      "time_sec": 60.0,
+      "mbps": 331.1
+    }
+  ],
+  "pre_fault_avg_mbps": 273.5,
+  "ttr_sec": 30.5,
+  "post_recover_avg_mbps": 198.9
+}

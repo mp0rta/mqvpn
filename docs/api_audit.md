@@ -2,7 +2,7 @@
 
 Audit date: 2026-02-21
 Branch: `mp0rta/xquic` `feature/masque`
-Pinned commit: `34e5beec0e1af4af8444384788289fd8d6738dbd`
+Pinned commit: `0677b6c835c5f284ac167c89f8bc1622be47fa95`
 
 ## Summary
 
