@@ -16,42 +16,40 @@ This is an independent personal project focused on an end-to-end standards-based
 - **Bandwidth aggregation** — Implemented a bandwidth-aggregation scheduler for multipath QUIC datagrams (WLB), combining flow-affinity WRR with LATE-based bandwidth estimates.(implemented in our XQUIC fork)
   - [Performance comparison: WLB vs. MinRTT scheduler](docs/benchmarks_netns.md#2-bandwidth-aggregation--wlb-vs-minrtt)
 - **Configuration file** — INI-style config file for all options; CLI arguments override config values.
-- **DNS override** — Client-side `/etc/resolv.conf` management with automatic backup and restore.
+- **DNS override** — Client-side `/etc/resolv.conf` management with automatic backup and restore. Prevents DNS leak by routing all queries through the tunnel.
 - **Standards-based tunnel** — MASQUE CONNECT-IP (RFC 9484) with HTTP Datagrams (RFC 9297) over QUIC DATAGRAM frames (RFC 9221). No proprietary tunnel format.
 
 ## Quick Start
 
 ```bash
-# Build (see "Building" section below for full steps including BoringSSL and xquic)
+# Build (BoringSSL + xquic + mqvpn)
 git clone --recurse-submodules https://github.com/mp0rta/mqvpn.git
-cd mqvpn && mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release \
-      -DXQUIC_BUILD_DIR=../third_party/xquic/build
-make -j$(nproc)
+cd mqvpn
+./build.sh
 
-# Generate a PSK
-./mqvpn --genkey
-# → e.g. mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
+# Server (generates certs, configures NAT, starts server)
+sudo scripts/start_server.sh
+# → Generated auth key: mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
 
-# Server
-sudo ./mqvpn --mode server --listen 0.0.0.0:443 \
-    --cert server.crt --key server.key \
-    --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
+# Or with custom listen address and subnet
+sudo scripts/start_server.sh --listen 0.0.0.0:4433 --subnet 10.0.0.0/24
 
 # Client (single path)
-sudo ./mqvpn --mode client --server yourserver.com:443 \
+sudo ./build/mqvpn --mode client --server yourserver.com:443 \
     --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
 
 # Client (multipath — two interfaces)
-sudo ./mqvpn --mode client --server yourserver.com:443 \
+sudo ./build/mqvpn --mode client --server yourserver.com:443 \
     --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4= \
     --path eth0 --path wlan0
 
 # Client (with DNS override)
-sudo ./mqvpn --mode client --server yourserver.com:443 \
+sudo ./build/mqvpn --mode client --server yourserver.com:443 \
     --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4= \
     --dns 1.1.1.1 --dns 8.8.8.8
 ```
+
+`start_server.sh` generates a self-signed certificate, configures NAT/forwarding, and starts the server. The client's default route points through the tunnel — all traffic flows: client app → TUN (mqvpn0) → QUIC tunnel → server → NAT → internet.
 
 ## Configuration File
 
@@ -166,7 +164,6 @@ The server side is simple: one UDP socket, one TUN device, NAT via iptables. It 
 - Linux (kernel 3.x+ for TUN support)
 - CMake 3.22+ (required for BoringSSL build)
 - GCC or Clang (C11)
-- Go (latest stable; needed when running BoringSSL tests)
 - libevent 2.x
 
 ### Build Steps
@@ -174,7 +171,16 @@ The server side is simple: one UDP socket, one TUN device, NAT via iptables. It 
 ```bash
 git clone --recurse-submodules https://github.com/mp0rta/mqvpn.git
 cd mqvpn
+./build.sh            # builds BoringSSL, xquic, and mqvpn
+./build.sh --clean    # full rebuild from scratch
+```
 
+The build script uses incremental builds — only recompiles changed files on subsequent runs.
+
+<details>
+<summary>Manual build steps</summary>
+
+```bash
 # 1. Build BoringSSL (required by xquic)
 cd third_party/xquic/third_party/boringssl
 mkdir -p build && cd build
@@ -198,17 +204,7 @@ cmake -DCMAKE_BUILD_TYPE=Release \
 make -j$(nproc)
 ```
 
-### Server Setup
-
-```bash
-# Generate certs, configure NAT, and start server
-sudo scripts/start_server.sh
-
-# Or with custom options
-sudo scripts/start_server.sh --listen 0.0.0.0:4433 --subnet 10.0.0.0/24
-```
-
-With this setup, the client's default route points through the mqvpn tunnel. All traffic flows: client app → TUN (mqvpn0) → QUIC tunnel → server → NAT → internet. The client automatically configures routing so that only the server address bypasses the tunnel.
+</details>
 
 ## Usage
 
@@ -251,11 +247,7 @@ Server:
 
 ```bash
 # Unit tests
-cc -o tests/test_config tests/test_config.c src/config.c src/log.c -Isrc && ./tests/test_config
-cc -o tests/test_auth tests/test_auth.c src/auth.c src/log.c -Isrc && ./tests/test_auth
-cc -o tests/test_session tests/test_session.c src/addr_pool.c src/log.c -Isrc && ./tests/test_session
-cc -o tests/test_dns tests/test_dns.c src/dns.c src/log.c -Isrc && ./tests/test_dns
-cc -o tests/test_flow_sched tests/test_flow_sched.c src/flow_sched.c src/log.c -Isrc && ./tests/test_flow_sched
+cd build && ctest --output-on-failure
 
 # Integration test (requires root, uses network namespaces)
 sudo scripts/run_test.sh
