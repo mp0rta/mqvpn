@@ -136,10 +136,9 @@ svr_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size,
                    void *engine_user_data)
 {
     (void)engine_user_data;
-    /* Route xquic logs through our logger at debug level */
-    if (lvl <= XQC_LOG_WARN) {
-        LOG_DBG("[xquic] %.*s", (int)size, (const char *)buf);
-    }
+    (void)lvl;
+    /* Route all xquic logs through our logger; app log level controls output. */
+    LOG_DBG("[xquic] %.*s", (int)size, (const char *)buf);
 }
 
 /* ================================================================

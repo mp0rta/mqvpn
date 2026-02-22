@@ -150,9 +150,8 @@ cli_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size,
                    void *engine_user_data)
 {
     (void)engine_user_data;
-    if (lvl <= XQC_LOG_WARN) {
-        LOG_DBG("[xquic] %.*s", (int)size, (const char *)buf);
-    }
+    (void)lvl;
+    LOG_DBG("[xquic] %.*s", (int)size, (const char *)buf);
 }
 
 /* ================================================================
