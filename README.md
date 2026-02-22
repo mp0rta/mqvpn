@@ -31,7 +31,7 @@ cd mqvpn
 sudo scripts/start_server.sh
 # → Generated auth key: mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
 
-# Or with custom listen address and subnet
+# Or with custom listen address and tunnel subnet (client IP pool)
 sudo scripts/start_server.sh --listen 0.0.0.0:4433 --subnet 10.0.0.0/24
 
 # Client (single path)
