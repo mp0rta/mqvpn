@@ -7,9 +7,6 @@ Optionally, it can use XQUIC's Multipath QUIC (I-D: [draft-ietf-quic-multipath](
 to keep a single tunnel alive across multiple interfaces.
 This is an independent personal project focused on an end-to-end standards-based implementation.
 
-<!-- TODO: 30-second demo GIF here -->
-<!-- ![Failover demo](docs/demo/failover.gif) -->
-
 ## Features
 
 - **Multi-client support** — Multiple clients connect simultaneously; IP-offset indexed session table for O(1) routing.
@@ -109,17 +106,15 @@ Mode is auto-detected from the config (`[Interface] Listen` → server, `[Server
 
 ## Benchmarks
 
-Measured over direct WAN between a Tokyo client (2 NICs: 10G + 1G) and an EC2 c6in.large instance.
-Full report: [`docs/benchmarks_v2.md`](docs/benchmarks_v2.md)
+Asymmetric dual-path test (Path A: 300M/10ms, Path B: 80M/30ms) using Linux network namespaces.
+Full report: [`docs/benchmarks_netns.md`](docs/benchmarks_netns.md)
 
-| Test | UL | DL |
-|------|----|----|
-| 1-path mqvpn (TCP) | 361 Mbps | 475 Mbps |
-| 2-path mqvpn (TCP) | 419 Mbps | 342 Mbps |
-| 1-path mqvpn (UDP, loss < 1%) | 700 Mbps | 700 Mbps |
-| 2-path mqvpn (UDP, loss < 1%) | 600 Mbps | 600 Mbps |
-| Failover (primary path down) | **PASS** — zero downtime | — |
-| Stability (1 h) | 382 Mbps avg | 482 Mbps avg |
+| Test | Result |
+|------|--------|
+| Failover (Path A down) | **0 downtime**, instant shift to Path B |
+| Failover (Path B down) | **0 downtime**, barely noticeable dip |
+| Bandwidth aggregation (WLB, 16 streams) | **319 Mbps** — 84% of theoretical max (380 Mbps) |
+| WLB vs MinRTT (16 streams) | WLB **+21%** over MinRTT |
 
 ## Architecture
 
