@@ -1,0 +1,54 @@
+{
+  "test": "aggregate",
+  "env": "netns",
+  "scheduler": "wlb",
+  "timestamp": "2026-02-22T19:19:59+09:00",
+  "netem": {
+    "path_a": {
+      "delay_ms": 10,
+      "rate_mbit": 300
+    },
+    "path_b": {
+      "delay_ms": 30,
+      "rate_mbit": 80
+    }
+  },
+  "theoretical_max_mbps": 380,
+  "results": [
+    {
+      "streams": 1,
+      "single_path_mbps": 259.9,
+      "multipath_mbps": 246.8
+    },
+    {
+      "streams": 2,
+      "single_path_mbps": 261.3,
+      "multipath_mbps": 247.8
+    },
+    {
+      "streams": 4,
+      "single_path_mbps": 261.7,
+      "multipath_mbps": 278.3
+    },
+    {
+      "streams": 8,
+      "single_path_mbps": 258.6,
+      "multipath_mbps": 296.5
+    },
+    {
+      "streams": 16,
+      "single_path_mbps": 261.4,
+      "multipath_mbps": 322.1
+    },
+    {
+      "streams": 32,
+      "single_path_mbps": 261.0,
+      "multipath_mbps": 313.2
+    },
+    {
+      "streams": 64,
+      "single_path_mbps": 260.2,
+      "multipath_mbps": 317.7
+    }
+  ]
+}
