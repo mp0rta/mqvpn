@@ -410,12 +410,26 @@ cli_setup_routes(cli_ctx_t *ctx)
         return -1;
     }
 
-    const char *const tun_default[] = {
-        "ip", "route", "replace", "default", "dev", ctx->tun.name,
-        "metric", "10", NULL
+    /* Add 0.0.0.0/1 + 128.0.0.0/1 instead of default route.
+     * These are more specific than 0.0.0.0/0, so they always win
+     * regardless of existing default route metrics (WireGuard/OpenVPN technique). */
+    const char *const tun_route_low[] = {
+        "ip", "route", "replace", "0.0.0.0/1", "dev", ctx->tun.name, NULL
     };
-    if (cli_run_ip_cmd(tun_default) < 0) {
-        LOG_WRN("failed to set default route via %s", ctx->tun.name);
+    const char *const tun_route_high[] = {
+        "ip", "route", "replace", "128.0.0.0/1", "dev", ctx->tun.name, NULL
+    };
+    if (cli_run_ip_cmd(tun_route_low) < 0 || cli_run_ip_cmd(tun_route_high) < 0) {
+        LOG_WRN("failed to set catch-all routes via %s", ctx->tun.name);
+        /* Clean up partial state */
+        const char *const undo_low[] = {
+            "ip", "route", "del", "0.0.0.0/1", "dev", ctx->tun.name, NULL
+        };
+        const char *const undo_high[] = {
+            "ip", "route", "del", "128.0.0.0/1", "dev", ctx->tun.name, NULL
+        };
+        (void)cli_run_ip_cmd(undo_low);
+        (void)cli_run_ip_cmd(undo_high);
         const char *const undo_pin[] = {
             "ip", "route", "del", host_cidr, "via", ctx->orig_gateway,
             "dev", ctx->orig_iface, NULL
@@ -434,11 +448,15 @@ cli_cleanup_routes(cli_ctx_t *ctx)
     if (!ctx->routing_configured)
         return;
 
-    /* Remove TUN default route */
-    const char *const del_default[] = {
-        "ip", "route", "del", "default", "dev", ctx->tun.name, NULL
+    /* Remove TUN catch-all routes */
+    const char *const del_low[] = {
+        "ip", "route", "del", "0.0.0.0/1", "dev", ctx->tun.name, NULL
     };
-    (void)cli_run_ip_cmd(del_default);
+    const char *const del_high[] = {
+        "ip", "route", "del", "128.0.0.0/1", "dev", ctx->tun.name, NULL
+    };
+    (void)cli_run_ip_cmd(del_low);
+    (void)cli_run_ip_cmd(del_high);
 
     /* Remove server IP pinned route */
     char host_cidr[INET_ADDRSTRLEN + 4];
