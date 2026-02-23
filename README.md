@@ -181,7 +181,8 @@ The build script uses incremental builds — only recompiles changed files on su
 <summary>Manual build steps</summary>
 
 ```bash
-# 1. Build BoringSSL (required by xquic)
+# 1. Clone and build BoringSSL (required by xquic)
+git clone https://github.com/google/boringssl.git third_party/xquic/third_party/boringssl
 cd third_party/xquic/third_party/boringssl
 mkdir -p build && cd build
 cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..

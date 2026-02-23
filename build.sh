@@ -20,7 +20,7 @@ fi
 # ---------- Dependency checks ----------
 
 err=0
-for cmd in cmake make cc; do
+for cmd in cmake make cc git; do
     if ! command -v "$cmd" &>/dev/null; then
         echo "ERROR: '$cmd' not found. Please install it."
         err=1
@@ -40,6 +40,12 @@ fi
 
 BSSL_DIR="$SCRIPT_DIR/third_party/xquic/third_party/boringssl"
 BSSL_BUILD="$BSSL_DIR/build"
+
+# Clone BoringSSL if not present (not a git submodule of xquic)
+if [ ! -f "$BSSL_DIR/CMakeLists.txt" ]; then
+    echo "=== Cloning BoringSSL ==="
+    git clone https://github.com/google/boringssl.git "$BSSL_DIR"
+fi
 
 echo "=== Building BoringSSL ==="
 mkdir -p "$BSSL_BUILD"
