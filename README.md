@@ -34,19 +34,20 @@ sudo scripts/start_server.sh
 # Or with custom listen address and tunnel subnet (client IP pool)
 sudo scripts/start_server.sh --listen 0.0.0.0:4433 --subnet 10.0.0.0/24
 
-# Client (single path)
-sudo ./build/mqvpn --mode client --server yourserver.com:443 \
-    --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
+# Client (single path, --insecure for self-signed cert)
+sudo ./build/mqvpn --mode client --server 203.0.113.1:443 \
+    --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4= \
+    --insecure
 
 # Client (multipath — two interfaces)
-sudo ./build/mqvpn --mode client --server yourserver.com:443 \
+sudo ./build/mqvpn --mode client --server 203.0.113.1:443 \
     --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4= \
-    --path eth0 --path wlan0
+    --path eth0 --path wlan0 --insecure
 
 # Client (with DNS override)
-sudo ./build/mqvpn --mode client --server yourserver.com:443 \
+sudo ./build/mqvpn --mode client --server 203.0.113.1:443 \
     --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4= \
-    --dns 1.1.1.1 --dns 8.8.8.8
+    --dns 1.1.1.1 --dns 8.8.8.8 --insecure
 ```
 
 `start_server.sh` generates a self-signed certificate, configures NAT/forwarding, and starts the server. The client's default route points through the tunnel — all traffic flows: client app → TUN (mqvpn0) → QUIC tunnel → server → NAT → internet.
@@ -77,7 +78,7 @@ MaxClients = 64
 
 ```ini
 [Server]
-Address = yourserver.com:443
+Address = 203.0.113.1:443
 Insecure = false
 
 [Auth]
@@ -222,7 +223,7 @@ General:
   --help                    Show help
 
 Client:
-  --server HOST:PORT        Server address (IPv4 only; IPv6 planned for v0.2.0)
+  --server IP:PORT          Server address (IPv4 address; hostname resolution planned for v0.2.0)
   --path IFACE              Network interface for multipath (repeatable)
   --auth-key KEY            PSK for authentication
   --dns ADDR                DNS server (repeatable, max 4)
@@ -271,6 +272,7 @@ sudo scripts/run_multipath_test.sh
 - [x] `mqvpn --genkey` for PSK generation
 
 ### v0.2.0 — Always-on & operational hardening
+- [ ] Hostname resolution for `--server` (currently IPv4 address only)
 - [ ] Automatic reconnection (reconnect on connection drop / network change)
 - [ ] Kill switch (prevent traffic leaking outside the tunnel)
 - [ ] systemd service unit (`mqvpn-server.service`, `mqvpn-client@.service`)
