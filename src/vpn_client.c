@@ -375,7 +375,7 @@ cli_discover_route(const char *server_ip, char *gateway, size_t gateway_len,
         }
     }
 
-    if (gateway[0] == '\0' || iface[0] == '\0') {
+    if (iface[0] == '\0') {
         return -1;
     }
     return 0;
@@ -391,23 +391,28 @@ cli_setup_routes(cli_ctx_t *ctx)
     /* Discover current gateway and interface for the server IP */
     if (cli_discover_route(ctx->server_ip_str, ctx->orig_gateway, sizeof(ctx->orig_gateway),
                             ctx->orig_iface, sizeof(ctx->orig_iface)) < 0) {
-        LOG_WRN("could not determine original gateway/iface for %s",
+        LOG_WRN("could not determine original iface for %s",
                 ctx->server_ip_str);
         return -1;
     }
 
-    LOG_INF("split tunnel: server %s via %s dev %s",
-            ctx->server_ip_str, ctx->orig_gateway, ctx->orig_iface);
-
     char host_cidr[INET_ADDRSTRLEN + 4];
     snprintf(host_cidr, sizeof(host_cidr), "%s/32", ctx->server_ip_str);
-    const char *const pin_route[] = {
-        "ip", "route", "replace", host_cidr, "via", ctx->orig_gateway,
-        "dev", ctx->orig_iface, NULL
-    };
-    if (cli_run_ip_cmd(pin_route) < 0) {
-        LOG_WRN("failed to pin server route");
-        return -1;
+
+    if (ctx->orig_gateway[0] != '\0') {
+        LOG_INF("split tunnel: server %s via %s dev %s",
+                ctx->server_ip_str, ctx->orig_gateway, ctx->orig_iface);
+        const char *const pin_route[] = {
+            "ip", "route", "replace", host_cidr, "via", ctx->orig_gateway,
+            "dev", ctx->orig_iface, NULL
+        };
+        if (cli_run_ip_cmd(pin_route) < 0) {
+            LOG_WRN("failed to pin server route");
+            return -1;
+        }
+    } else {
+        LOG_INF("split tunnel: server %s on-link dev %s (no pin route needed)",
+                ctx->server_ip_str, ctx->orig_iface);
     }
 
     /* Add 0.0.0.0/1 + 128.0.0.0/1 instead of default route.
@@ -430,11 +435,13 @@ cli_setup_routes(cli_ctx_t *ctx)
         };
         (void)cli_run_ip_cmd(undo_low);
         (void)cli_run_ip_cmd(undo_high);
-        const char *const undo_pin[] = {
-            "ip", "route", "del", host_cidr, "via", ctx->orig_gateway,
-            "dev", ctx->orig_iface, NULL
-        };
-        (void)cli_run_ip_cmd(undo_pin);
+        if (ctx->orig_gateway[0] != '\0') {
+            const char *const undo_pin[] = {
+                "ip", "route", "del", host_cidr, "via", ctx->orig_gateway,
+                "dev", ctx->orig_iface, NULL
+            };
+            (void)cli_run_ip_cmd(undo_pin);
+        }
         return -1;
     }
 
@@ -458,14 +465,16 @@ cli_cleanup_routes(cli_ctx_t *ctx)
     (void)cli_run_ip_cmd(del_low);
     (void)cli_run_ip_cmd(del_high);
 
-    /* Remove server IP pinned route */
-    char host_cidr[INET_ADDRSTRLEN + 4];
-    snprintf(host_cidr, sizeof(host_cidr), "%s/32", ctx->server_ip_str);
-    const char *const del_pin[] = {
-        "ip", "route", "del", host_cidr, "via", ctx->orig_gateway,
-        "dev", ctx->orig_iface, NULL
-    };
-    (void)cli_run_ip_cmd(del_pin);
+    /* Remove server IP pinned route (only if gateway was set) */
+    if (ctx->orig_gateway[0] != '\0') {
+        char host_cidr[INET_ADDRSTRLEN + 4];
+        snprintf(host_cidr, sizeof(host_cidr), "%s/32", ctx->server_ip_str);
+        const char *const del_pin[] = {
+            "ip", "route", "del", host_cidr, "via", ctx->orig_gateway,
+            "dev", ctx->orig_iface, NULL
+        };
+        (void)cli_run_ip_cmd(del_pin);
+    }
 
     ctx->routing_configured = 0;
     LOG_INF("split tunnel routes cleaned up");
