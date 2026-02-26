@@ -679,6 +679,81 @@ static void test_subnet6_config_parse(void)
     ASSERT_EQ_STR(cfg.subnet6, "fd00:abcd::/112", "subnet6 parsed");
 }
 
+static void test_subnet6_various_prefixes(void)
+{
+    /* /96 prefix */
+    const char *ini_96 =
+        "[Interface]\n"
+        "Listen = 0.0.0.0:443\n"
+        "Subnet6 = fd00:1234::/96\n";
+
+    char *path = write_tmp(ini_96);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_STR(cfg.subnet6, "fd00:1234::/96", "subnet6 /96 stored");
+
+    /* /126 prefix */
+    const char *ini_126 =
+        "[Interface]\n"
+        "Listen = 0.0.0.0:443\n"
+        "Subnet6 = fd00:abcd:ef01::/126\n";
+
+    path = write_tmp(ini_126);
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_STR(cfg.subnet6, "fd00:abcd:ef01::/126", "subnet6 /126 stored");
+}
+
+static void test_subnet6_whitespace_trimmed(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "Listen = 0.0.0.0:443\n"
+        "Subnet6 =   fd00:abcd::/112   \n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_STR(cfg.subnet6, "fd00:abcd::/112", "subnet6 whitespace trimmed");
+}
+
+static void test_subnet6_not_set(void)
+{
+    /* Server config without Subnet6 → subnet6 stays empty */
+    const char *ini =
+        "[Interface]\n"
+        "Listen = 0.0.0.0:443\n"
+        "Subnet = 10.0.0.0/24\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_STR(cfg.subnet6, "", "subnet6 empty when not set");
+}
+
+static void test_subnet6_duplicate_last_wins(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "Listen = 0.0.0.0:443\n"
+        "Subnet6 = fd00:1::/112\n"
+        "Subnet6 = fd00:2::/112\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_STR(cfg.subnet6, "fd00:2::/112", "subnet6 duplicate: last wins");
+}
+
 int main(void)
 {
     test_defaults();
@@ -718,6 +793,10 @@ int main(void)
     /* subnet6 tests */
     test_subnet6_default();
     test_subnet6_config_parse();
+    test_subnet6_various_prefixes();
+    test_subnet6_whitespace_trimmed();
+    test_subnet6_not_set();
+    test_subnet6_duplicate_last_wins();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
