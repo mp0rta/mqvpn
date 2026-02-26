@@ -33,6 +33,7 @@ usage(const char *prog)
         "  --genkey                  Generate a random PSK and exit\n"
         "  --path IFACE              Network interface for multipath (repeatable, client mode)\n"
         "  --dns ADDR                DNS server to use (repeatable, client mode, max 4)\n"
+        "  --no-reconnect            Disable automatic reconnection (client mode)\n"
         "  --scheduler minrtt|wlb    Multipath scheduler (default wlb)\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
@@ -83,6 +84,7 @@ main(int argc, char *argv[])
         {"scheduler",   required_argument, NULL, 'S'},
         {"max-clients", required_argument, NULL, 'M'},
         {"log-level",   required_argument, NULL, 'L'},
+        {"no-reconnect", no_argument,      NULL, 'R'},
         {"help",        no_argument,       NULL, 'h'},
         {NULL, 0, NULL, 0},
     };
@@ -105,6 +107,7 @@ main(int argc, char *argv[])
     int         n_paths = 0;
     const char *dns_servers[4];
     int         n_dns = 0;
+    int         no_reconnect = 0;
 
     int opt;
     while ((opt = getopt_long(argc, argv, "C:m:s:l:n:t:c:k:ia:Gp:d:S:M:L:h",
@@ -139,6 +142,7 @@ main(int argc, char *argv[])
             break;
         case 'S': scheduler_str = optarg; break;
         case 'M': max_clients = atoi(optarg); break;
+        case 'R': no_reconnect = 1; break;
         case 'L': log_level_str = optarg; break;
         case 'h':
             usage(argv[0]);
@@ -260,6 +264,8 @@ main(int argc, char *argv[])
             LOG_WRN("--insecure: accepting untrusted certificates");
         }
 
+        int eff_reconnect = no_reconnect ? 0 : file_cfg.reconnect;
+
         mqvpn_client_cfg_t cfg = {
             .server_addr = host,
             .server_port = port,
@@ -270,6 +276,8 @@ main(int argc, char *argv[])
             .scheduler   = scheduler,
             .auth_key    = eff_auth_key,
             .n_dns       = n_dns,
+            .reconnect   = eff_reconnect,
+            .reconnect_interval = file_cfg.reconnect_interval,
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];

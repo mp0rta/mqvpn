@@ -45,6 +45,10 @@ typedef struct mqvpn_config_s {
     int  n_paths;
     char scheduler[16];
 
+    /* [Interface] — client reconnection */
+    int  reconnect;             /* 1=auto-reconnect (default), 0=exit on disconnect */
+    int  reconnect_interval;    /* base interval in seconds (default 5) */
+
     /* Inferred mode: 1=server, 0=client */
     int  is_server;
 } mqvpn_config_t;

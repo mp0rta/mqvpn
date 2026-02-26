@@ -30,6 +30,7 @@
 #define PATH_RECREATE_MAX_RETRIES 6
 #define TUN_RESUME_SAFETY_MS      100
 #define XQC_SNDQ_MAX_PKTS         16384
+#define RECONNECT_BACKOFF_MAX_SEC 60
 
 static uint64_t
 mqvpn_now_us(void)
@@ -46,6 +47,8 @@ typedef struct cli_conn_s       cli_conn_t;
 typedef struct cli_stream_s     cli_stream_t;
 
 static void cli_tun_read_handler(int fd, short what, void *arg);
+static void cli_reconnect_callback(int fd, short what, void *arg);
+static int  cli_start_connection(cli_ctx_t *ctx);
 
 /* ---------- client context ---------- */
 
@@ -82,6 +85,10 @@ struct cli_ctx_s {
 
     mqvpn_dns_t          dns;
 
+    /* Reconnection state */
+    int                  shutting_down;   /* SIGINT/SIGTERM received */
+    struct event        *ev_reconnect;    /* reconnect timer */
+    int                  reconnect_attempts;
 };
 
 /* ---------- per-connection state ---------- */
@@ -138,6 +145,10 @@ cli_signal_event_callback(evutil_socket_t sig, short events, void *arg)
     (void)sig;
     (void)events;
     cli_ctx_t *ctx = (cli_ctx_t *)arg;
+    ctx->shutting_down = 1;
+    if (ctx->ev_reconnect) {
+        event_del(ctx->ev_reconnect);
+    }
     event_base_loopbreak(ctx->eb);
 }
 
@@ -627,6 +638,60 @@ cli_tun_read_handler(int fd, short what, void *arg)
  *  H3 connection callbacks
  * ================================================================ */
 
+/* ================================================================
+ *  Session teardown (reusable for reconnect and final cleanup)
+ * ================================================================ */
+
+static void
+cli_teardown_session(cli_ctx_t *ctx)
+{
+    /* Stop TUN read */
+    if (ctx->ev_tun) {
+        event_free(ctx->ev_tun);
+        ctx->ev_tun = NULL;
+    }
+    ctx->tun_paused = 0;
+
+    /* Remove routes and DNS */
+    cli_cleanup_routes(ctx);
+    mqvpn_dns_restore(&ctx->dns);
+
+    /* Destroy TUN device */
+    if (ctx->tun_up) {
+        mqvpn_tun_destroy(&ctx->tun);
+        ctx->tun.fd = -1;
+        ctx->tun_up = 0;
+    }
+
+    /* Free connection object */
+    if (ctx->conn) {
+        free(ctx->conn);
+        ctx->conn = NULL;
+    }
+}
+
+static void
+cli_schedule_reconnect(cli_ctx_t *ctx)
+{
+    /* Exponential backoff: base * 2^attempts, capped */
+    int base = ctx->cfg->reconnect_interval;
+    if (base <= 0) base = 5;
+    int delay = base;
+    for (int i = 0; i < ctx->reconnect_attempts && delay < RECONNECT_BACKOFF_MAX_SEC; i++) {
+        delay *= 2;
+    }
+    if (delay > RECONNECT_BACKOFF_MAX_SEC) {
+        delay = RECONNECT_BACKOFF_MAX_SEC;
+    }
+    ctx->reconnect_attempts++;
+
+    LOG_INF("reconnecting in %d seconds (attempt %d)...",
+            delay, ctx->reconnect_attempts);
+
+    struct timeval tv = { .tv_sec = delay };
+    event_add(ctx->ev_reconnect, &tv);
+}
+
 static int
 cli_h3_conn_create_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
                            void *user_data)
@@ -644,6 +709,7 @@ cli_h3_conn_close_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
 {
     (void)h3_conn; (void)cid;
     cli_conn_t *conn = (cli_conn_t *)user_data;
+    cli_ctx_t *ctx = conn->ctx;
     int err = xqc_h3_conn_get_errno(h3_conn);
     LOG_INF("connection closed (errno=%d)", err);
     cli_log_conn_stats("client conn stats",
@@ -651,8 +717,15 @@ cli_h3_conn_close_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
     LOG_INF("client dgram summary: acked=%" PRIu64 " lost=%" PRIu64,
             conn->dgram_acked_cnt, conn->dgram_lost_cnt);
 
-    if (conn->ctx->eb) {
-        event_base_loopbreak(conn->ctx->eb);
+    cli_teardown_session(ctx);
+
+    if (!ctx->shutting_down && ctx->cfg->reconnect) {
+        cli_schedule_reconnect(ctx);
+        return 0;
+    }
+
+    if (ctx->eb) {
+        event_base_loopbreak(ctx->eb);
     }
     return 0;
 }
@@ -926,6 +999,8 @@ cli_request_read_notify(xqc_h3_request_t *h3_request,
                 LOG_ERR("TUN setup failed after ADDRESS_ASSIGN");
                 return -1;
             }
+            /* Tunnel is up — reset reconnection backoff */
+            conn->ctx->reconnect_attempts = 0;
         }
     }
 
@@ -1299,6 +1374,114 @@ cli_resolve_server(cli_ctx_t *ctx)
 }
 
 /* ================================================================
+ *  Create a new QUIC/H3 connection (used for initial + reconnect)
+ * ================================================================ */
+
+static int
+cli_start_connection(cli_ctx_t *ctx)
+{
+    /* Re-resolve server address (hostname may have changed IP) */
+    if (cli_resolve_server(ctx) < 0) {
+        return -1;
+    }
+
+    cli_conn_t *conn = calloc(1, sizeof(*conn));
+    if (!conn) {
+        LOG_ERR("calloc conn");
+        return -1;
+    }
+    conn->ctx = ctx;
+    ctx->conn = conn;
+
+    int multipath = (ctx->cfg->n_paths > 1) ? 1 : 0;
+
+    xqc_conn_settings_t conn_settings;
+    memset(&conn_settings, 0, sizeof(conn_settings));
+    conn_settings.max_datagram_frame_size = 65535;
+    conn_settings.proto_version = XQC_VERSION_V1;
+    conn_settings.enable_multipath = multipath;
+    conn_settings.mp_ping_on = multipath;
+    conn_settings.pacing_on = 1;
+    conn_settings.cong_ctrl_callback = xqc_bbr2_cb;
+    conn_settings.cc_params.cc_optimization_flags =
+        XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
+    conn_settings.sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
+    conn_settings.so_sndbuf = 8 * 1024 * 1024;
+    if (ctx->cfg->scheduler == MQVPN_SCHED_WLB) {
+        conn_settings.scheduler_callback = xqc_wlb_scheduler_cb;
+    } else {
+        conn_settings.scheduler_callback = xqc_minrtt_scheduler_cb;
+    }
+
+    xqc_conn_ssl_config_t conn_ssl_config;
+    memset(&conn_ssl_config, 0, sizeof(conn_ssl_config));
+    if (ctx->cfg->insecure) {
+        conn_ssl_config.cert_verify_flag = XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED;
+    } else {
+        conn_ssl_config.cert_verify_flag = XQC_TLS_CERT_FLAG_NEED_VERIFY;
+    }
+
+    const xqc_cid_t *cid = xqc_h3_connect(
+        ctx->engine, &conn_settings,
+        NULL, 0,
+        ctx->cfg->server_addr, 0,
+        &conn_ssl_config,
+        (struct sockaddr *)&ctx->server_addr, ctx->server_addrlen,
+        conn);
+    if (!cid) {
+        LOG_ERR("xqc_h3_connect failed");
+        free(conn);
+        ctx->conn = NULL;
+        return -1;
+    }
+
+    memcpy(&conn->cid, cid, sizeof(*cid));
+    if (conn->h3_conn) {
+        xqc_h3_ext_datagram_set_user_data(conn->h3_conn, conn);
+    }
+
+    LOG_INF("connecting to %s:%d (multipath=%d, paths=%d) ...",
+            ctx->cfg->server_addr, ctx->cfg->server_port,
+            multipath, ctx->path_mgr.n_paths);
+    return 0;
+}
+
+/* ================================================================
+ *  Reconnect timer callback
+ * ================================================================ */
+
+static void
+cli_reconnect_callback(int fd, short what, void *arg)
+{
+    (void)fd; (void)what;
+    cli_ctx_t *ctx = (cli_ctx_t *)arg;
+
+    if (ctx->shutting_down) {
+        return;
+    }
+
+    LOG_INF("attempting reconnection (attempt %d)...", ctx->reconnect_attempts);
+
+    /* Reset path in_use flags so xquic creates fresh paths */
+    for (int i = 0; i < ctx->path_mgr.n_paths; i++) {
+        ctx->path_mgr.paths[i].in_use = 0;
+    }
+    ctx->path_recreate_retries = 0;
+
+    /* Mark primary path as in-use */
+    ctx->path_mgr.paths[0].path_id = 0;
+    ctx->path_mgr.paths[0].in_use = 1;
+
+    if (cli_start_connection(ctx) < 0) {
+        LOG_WRN("reconnection failed, will retry");
+        cli_schedule_reconnect(ctx);
+        return;
+    }
+
+    xqc_engine_main_logic(ctx->engine);
+}
+
+/* ================================================================
  *  Client main
  * ================================================================ */
 
@@ -1459,74 +1642,28 @@ mqvpn_client_run(const mqvpn_client_cfg_t *cfg)
         LOG_INF("WLB scheduler enabled (xquic-internal)");
     }
 
-    /* ---- Create H3 connection ---- */
-    cli_conn_t *conn = calloc(1, sizeof(*conn));
-    if (!conn) {
-        LOG_ERR("calloc conn");
+    /* ---- Reconnect timer ---- */
+    g_cli.ev_reconnect = event_new(g_cli.eb, -1, 0,
+                                    cli_reconnect_callback, &g_cli);
+
+    if (cfg->reconnect) {
+        LOG_INF("auto-reconnect enabled (base interval=%ds)", cfg->reconnect_interval);
+    }
+
+    /* ---- Initial connection ---- */
+    if (cli_start_connection(&g_cli) < 0) {
         return -1;
     }
-    conn->ctx = &g_cli;
-    g_cli.conn = conn;
-
-    int multipath = (cfg->n_paths > 1) ? 1 : 0;
-
-    xqc_conn_settings_t conn_settings;
-    memset(&conn_settings, 0, sizeof(conn_settings));
-    conn_settings.max_datagram_frame_size = 65535;
-    conn_settings.proto_version = XQC_VERSION_V1;
-    conn_settings.enable_multipath = multipath;
-    conn_settings.mp_ping_on = multipath;
-    conn_settings.pacing_on = 1;
-    conn_settings.cong_ctrl_callback = xqc_bbr2_cb;
-    conn_settings.cc_params.cc_optimization_flags =
-        XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
-    conn_settings.sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
-    conn_settings.so_sndbuf = 8 * 1024 * 1024;
-    if (cfg->scheduler == MQVPN_SCHED_WLB) {
-        conn_settings.scheduler_callback = xqc_wlb_scheduler_cb;
-    } else {
-        conn_settings.scheduler_callback = xqc_minrtt_scheduler_cb;
-    }
-
-    xqc_conn_ssl_config_t conn_ssl_config;
-    memset(&conn_ssl_config, 0, sizeof(conn_ssl_config));
-    if (cfg->insecure) {
-        conn_ssl_config.cert_verify_flag = XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED;
-    } else {
-        conn_ssl_config.cert_verify_flag = XQC_TLS_CERT_FLAG_NEED_VERIFY;
-    }
-
-    const xqc_cid_t *cid = xqc_h3_connect(
-        g_cli.engine, &conn_settings,
-        NULL, 0,                    /* no token for first connection */
-        cfg->server_addr, 0,        /* no_crypt = 0 */
-        &conn_ssl_config,
-        (struct sockaddr *)&g_cli.server_addr, g_cli.server_addrlen,
-        conn);
-    if (!cid) {
-        LOG_ERR("xqc_h3_connect failed");
-        free(conn);
-        return -1;
-    }
-
-    memcpy(&conn->cid, cid, sizeof(*cid));
-
-    if (conn->h3_conn) {
-        xqc_h3_ext_datagram_set_user_data(conn->h3_conn, conn);
-    }
-
-    LOG_INF("connecting to %s:%d (multipath=%d, paths=%d) ...",
-            cfg->server_addr, cfg->server_port, multipath, g_cli.path_mgr.n_paths);
 
     /* ---- Main event loop ---- */
     event_base_dispatch(g_cli.eb);
 
     /* ---- Cleanup ---- */
     LOG_INF("client shutting down");
-    mqvpn_dns_restore(&g_cli.dns);
-    cli_cleanup_routes(&g_cli);
-    if (g_cli.ev_sigterm) event_free(g_cli.ev_sigterm);
-    if (g_cli.ev_sigint)  event_free(g_cli.ev_sigint);
+    cli_teardown_session(&g_cli);
+    if (g_cli.ev_reconnect)      event_free(g_cli.ev_reconnect);
+    if (g_cli.ev_sigterm)        event_free(g_cli.ev_sigterm);
+    if (g_cli.ev_sigint)         event_free(g_cli.ev_sigint);
     if (g_cli.ev_tun)            event_free(g_cli.ev_tun);
     if (g_cli.ev_tun_resume)     event_free(g_cli.ev_tun_resume);
     if (g_cli.ev_path_recreate)  event_free(g_cli.ev_path_recreate);
@@ -1535,7 +1672,6 @@ mqvpn_client_run(const mqvpn_client_cfg_t *cfg)
     mqvpn_tun_destroy(&g_cli.tun);
     xqc_engine_destroy(g_cli.engine);
     event_base_free(g_cli.eb);
-    free(conn);
 
     return 0;
 }

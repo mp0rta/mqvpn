@@ -17,6 +17,8 @@ typedef struct mqvpn_client_cfg_s {
     const char  *auth_key;     /* PSK for server authentication (NULL = no auth) */
     const char  *dns_servers[4]; /* DNS servers to configure (NULL = no DNS override) */
     int          n_dns;        /* number of DNS servers */
+    int          reconnect;    /* 1=auto-reconnect on disconnect (default 1) */
+    int          reconnect_interval; /* base reconnect interval in seconds (default 5) */
 } mqvpn_client_cfg_t;
 
 /* Run the VPN client (blocks until shutdown). Returns 0 on clean exit. */

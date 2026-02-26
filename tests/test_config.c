@@ -545,6 +545,68 @@ static void test_semicolon_comment(void)
     ASSERT_EQ_STR(cfg.tun_name, "commented", "semicolon comments ignored");
 }
 
+/* ================================================================
+ *  Reconnect config tests
+ * ================================================================ */
+
+static void test_reconnect_defaults(void)
+{
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+
+    ASSERT_EQ_INT(cfg.reconnect, 1, "default reconnect enabled");
+    ASSERT_EQ_INT(cfg.reconnect_interval, 5, "default reconnect interval 5s");
+}
+
+static void test_reconnect_config_parse(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "Reconnect = false\n"
+        "ReconnectInterval = 10\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.reconnect, 0, "reconnect disabled from config");
+    ASSERT_EQ_INT(cfg.reconnect_interval, 10, "reconnect interval from config");
+}
+
+static void test_reconnect_config_true(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "Reconnect = true\n"
+        "ReconnectInterval = 30\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.reconnect, 1, "reconnect enabled from config");
+    ASSERT_EQ_INT(cfg.reconnect_interval, 30, "reconnect interval 30s");
+}
+
+static void test_reconnect_interval_invalid(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "ReconnectInterval = -5\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.reconnect_interval, 5, "negative interval → default 5");
+}
+
 int main(void)
 {
     test_defaults();
@@ -569,6 +631,12 @@ int main(void)
     test_unknown_section();
     test_dns_empty_entries();
     test_semicolon_comment();
+
+    /* reconnect tests */
+    test_reconnect_defaults();
+    test_reconnect_config_parse();
+    test_reconnect_config_true();
+    test_reconnect_interval_invalid();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
