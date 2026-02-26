@@ -546,6 +546,48 @@ static void test_semicolon_comment(void)
 }
 
 /* ================================================================
+ *  Kill switch config tests
+ * ================================================================ */
+
+static void test_killswitch_default_off(void)
+{
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+
+    ASSERT_EQ_INT(cfg.kill_switch, 0, "default kill_switch off");
+}
+
+static void test_killswitch_config_parse(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "KillSwitch = true\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.kill_switch, 1, "kill_switch enabled from config");
+}
+
+static void test_killswitch_config_false(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "KillSwitch = false\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.kill_switch, 0, "kill_switch disabled from config");
+}
+
+/* ================================================================
  *  Reconnect config tests
  * ================================================================ */
 
@@ -631,6 +673,11 @@ int main(void)
     test_unknown_section();
     test_dns_empty_entries();
     test_semicolon_comment();
+
+    /* kill switch tests */
+    test_killswitch_default_off();
+    test_killswitch_config_parse();
+    test_killswitch_config_false();
 
     /* reconnect tests */
     test_reconnect_defaults();

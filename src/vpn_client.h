@@ -19,6 +19,7 @@ typedef struct mqvpn_client_cfg_s {
     int          n_dns;        /* number of DNS servers */
     int          reconnect;    /* 1=auto-reconnect on disconnect (default 1) */
     int          reconnect_interval; /* base reconnect interval in seconds (default 5) */
+    int          kill_switch;  /* 1=block traffic outside tunnel (default 0) */
 } mqvpn_client_cfg_t;
 
 /* Run the VPN client (blocks until shutdown). Returns 0 on clean exit. */

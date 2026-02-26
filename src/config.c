@@ -102,6 +102,8 @@ handle_kv(mqvpn_config_t *cfg, int section, const char *key, const char *val,
             snprintf(cfg->log_level, sizeof(cfg->log_level), "%s", val);
         } else if (strcasecmp(key, "DNS") == 0) {
             parse_dns_list(cfg, val);
+        } else if (strcasecmp(key, "KillSwitch") == 0) {
+            cfg->kill_switch = parse_bool(val);
         } else if (strcasecmp(key, "Reconnect") == 0) {
             cfg->reconnect = parse_bool(val);
         } else if (strcasecmp(key, "ReconnectInterval") == 0) {

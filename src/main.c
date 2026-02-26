@@ -34,6 +34,7 @@ usage(const char *prog)
         "  --path IFACE              Network interface for multipath (repeatable, client mode)\n"
         "  --dns ADDR                DNS server to use (repeatable, client mode, max 4)\n"
         "  --no-reconnect            Disable automatic reconnection (client mode)\n"
+        "  --kill-switch             Block traffic outside the VPN tunnel (client mode)\n"
         "  --scheduler minrtt|wlb    Multipath scheduler (default wlb)\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
@@ -85,6 +86,7 @@ main(int argc, char *argv[])
         {"max-clients", required_argument, NULL, 'M'},
         {"log-level",   required_argument, NULL, 'L'},
         {"no-reconnect", no_argument,      NULL, 'R'},
+        {"kill-switch",  no_argument,      NULL, 'K'},
         {"help",        no_argument,       NULL, 'h'},
         {NULL, 0, NULL, 0},
     };
@@ -108,6 +110,7 @@ main(int argc, char *argv[])
     const char *dns_servers[4];
     int         n_dns = 0;
     int         no_reconnect = 0;
+    int         kill_switch  = -1;  /* -1 = not set by CLI */
 
     int opt;
     while ((opt = getopt_long(argc, argv, "C:m:s:l:n:t:c:k:ia:Gp:d:S:M:L:h",
@@ -143,6 +146,7 @@ main(int argc, char *argv[])
         case 'S': scheduler_str = optarg; break;
         case 'M': max_clients = atoi(optarg); break;
         case 'R': no_reconnect = 1; break;
+        case 'K': kill_switch = 1; break;
         case 'L': log_level_str = optarg; break;
         case 'h':
             usage(argv[0]);
@@ -278,6 +282,7 @@ main(int argc, char *argv[])
             .n_dns       = n_dns,
             .reconnect   = eff_reconnect,
             .reconnect_interval = file_cfg.reconnect_interval,
+            .kill_switch = kill_switch >= 0 ? kill_switch : file_cfg.kill_switch,
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];

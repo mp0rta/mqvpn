@@ -85,6 +85,10 @@ struct cli_ctx_s {
 
     mqvpn_dns_t          dns;
 
+    /* Kill switch state */
+    int                  killswitch_active;
+    char                 ks_comment[64];  /* iptables comment tag */
+
     /* Reconnection state */
     int                  shutting_down;   /* SIGINT/SIGTERM received */
     struct event        *ev_reconnect;    /* reconnect timer */
@@ -492,6 +496,122 @@ cli_cleanup_routes(cli_ctx_t *ctx)
 }
 
 /* ================================================================
+ *  Kill switch: iptables rules to prevent traffic leaking
+ * ================================================================ */
+
+static int
+cli_run_iptables_cmd(const char *const argv[])
+{
+    pid_t pid = fork();
+    if (pid < 0) {
+        LOG_WRN("fork for iptables command failed: %s", strerror(errno));
+        return -1;
+    }
+    if (pid == 0) {
+        execvp("iptables", (char * const *)argv);
+        _exit(127);
+    }
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR) {
+            continue;
+        }
+        LOG_WRN("waitpid failed: %s", strerror(errno));
+        return -1;
+    }
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static int
+cli_setup_killswitch(cli_ctx_t *ctx)
+{
+    if (!ctx->cfg->kill_switch || ctx->killswitch_active)
+        return 0;
+
+    snprintf(ctx->ks_comment, sizeof(ctx->ks_comment),
+             "mqvpn-ks:%d", (int)getpid());
+
+    /* Allow traffic through the VPN tunnel */
+    const char *allow_tun[] = {
+        "iptables", "-I", "OUTPUT", "-o", ctx->tun.name,
+        "-j", "ACCEPT", "-m", "comment", "--comment", ctx->ks_comment, NULL
+    };
+    /* Allow traffic to the VPN server (underlay) */
+    char server_cidr[INET_ADDRSTRLEN + 4];
+    snprintf(server_cidr, sizeof(server_cidr), "%s/32", ctx->server_ip_str);
+    const char *allow_server[] = {
+        "iptables", "-I", "OUTPUT", "-d", server_cidr,
+        "-o", ctx->orig_iface, "-j", "ACCEPT",
+        "-m", "comment", "--comment", ctx->ks_comment, NULL
+    };
+    /* Allow loopback */
+    const char *allow_lo[] = {
+        "iptables", "-I", "OUTPUT", "-o", "lo",
+        "-j", "ACCEPT", "-m", "comment", "--comment", ctx->ks_comment, NULL
+    };
+    /* Drop everything else */
+    const char *drop_all[] = {
+        "iptables", "-A", "OUTPUT", "-j", "DROP",
+        "-m", "comment", "--comment", ctx->ks_comment, NULL
+    };
+
+    if (cli_run_iptables_cmd(allow_tun) < 0 ||
+        cli_run_iptables_cmd(allow_server) < 0 ||
+        cli_run_iptables_cmd(allow_lo) < 0 ||
+        cli_run_iptables_cmd(drop_all) < 0) {
+        LOG_WRN("failed to set up kill switch iptables rules");
+        return -1;
+    }
+
+    ctx->killswitch_active = 1;
+    LOG_INF("kill switch enabled (comment=%s)", ctx->ks_comment);
+    return 0;
+}
+
+static void
+cli_cleanup_killswitch(cli_ctx_t *ctx)
+{
+    if (!ctx->killswitch_active)
+        return;
+
+    /* Remove all OUTPUT rules tagged with our comment */
+    const char *del_cmd[] = {
+        "iptables", "-D", "OUTPUT", "-o", ctx->tun.name,
+        "-j", "ACCEPT", "-m", "comment", "--comment", ctx->ks_comment, NULL
+    };
+    while (cli_run_iptables_cmd(del_cmd) == 0) {}
+
+    char server_cidr[INET_ADDRSTRLEN + 4];
+    snprintf(server_cidr, sizeof(server_cidr), "%s/32", ctx->server_ip_str);
+    const char *del_server[] = {
+        "iptables", "-D", "OUTPUT", "-d", server_cidr,
+        "-o", ctx->orig_iface, "-j", "ACCEPT",
+        "-m", "comment", "--comment", ctx->ks_comment, NULL
+    };
+    while (cli_run_iptables_cmd(del_server) == 0) {}
+
+    const char *del_lo[] = {
+        "iptables", "-D", "OUTPUT", "-o", "lo",
+        "-j", "ACCEPT", "-m", "comment", "--comment", ctx->ks_comment, NULL
+    };
+    while (cli_run_iptables_cmd(del_lo) == 0) {}
+
+    const char *del_drop[] = {
+        "iptables", "-D", "OUTPUT", "-j", "DROP",
+        "-m", "comment", "--comment", ctx->ks_comment, NULL
+    };
+    while (cli_run_iptables_cmd(del_drop) == 0) {}
+
+    ctx->killswitch_active = 0;
+    LOG_INF("kill switch rules removed");
+}
+
+/* ================================================================
  *  TUN device setup (called after ADDRESS_ASSIGN)
  * ================================================================ */
 
@@ -544,6 +664,9 @@ cli_setup_tun(cli_ctx_t *ctx, const uint8_t *ip, uint8_t prefix)
 
     /* Set up split tunneling routes */
     cli_setup_routes(ctx);
+
+    /* Enable kill switch if configured */
+    cli_setup_killswitch(ctx);
 
     /* Apply DNS override if configured */
     if (ctx->dns.n_servers > 0) {
@@ -652,7 +775,8 @@ cli_teardown_session(cli_ctx_t *ctx)
     }
     ctx->tun_paused = 0;
 
-    /* Remove routes and DNS */
+    /* Remove kill switch, routes and DNS */
+    cli_cleanup_killswitch(ctx);
     cli_cleanup_routes(ctx);
     mqvpn_dns_restore(&ctx->dns);
 

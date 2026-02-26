@@ -48,6 +48,7 @@ typedef struct mqvpn_config_s {
     /* [Interface] — client reconnection */
     int  reconnect;             /* 1=auto-reconnect (default), 0=exit on disconnect */
     int  reconnect_interval;    /* base interval in seconds (default 5) */
+    int  kill_switch;           /* 1=block traffic outside tunnel, 0=off (default) */
 
     /* Inferred mode: 1=server, 0=client */
     int  is_server;
