@@ -1285,14 +1285,16 @@ cli_path_removed(const xqc_cid_t *cid, uint64_t path_id,
 static int
 cli_resolve_server(cli_ctx_t *ctx)
 {
-    memset(&ctx->server_addr, 0, sizeof(ctx->server_addr));
-    ctx->server_addr.sin_family = AF_INET;
-    ctx->server_addr.sin_port = htons((uint16_t)ctx->cfg->server_port);
-    if (inet_pton(AF_INET, ctx->cfg->server_addr, &ctx->server_addr.sin_addr) != 1) {
-        LOG_ERR("invalid server address: %s", ctx->cfg->server_addr);
+    if (mqvpn_resolve_host(ctx->cfg->server_addr, &ctx->server_addr) < 0) {
+        LOG_ERR("failed to resolve server address: %s", ctx->cfg->server_addr);
         return -1;
     }
+    ctx->server_addr.sin_port = htons((uint16_t)ctx->cfg->server_port);
     ctx->server_addrlen = sizeof(ctx->server_addr);
+
+    char resolved[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &ctx->server_addr.sin_addr, resolved, sizeof(resolved));
+    LOG_INF("resolved server: %s → %s", ctx->cfg->server_addr, resolved);
     return 0;
 }
 

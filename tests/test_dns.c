@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/file.h>
+#include <arpa/inet.h>
 
 static int g_pass = 0, g_fail = 0;
 
@@ -491,6 +492,65 @@ static void test_add_server_content(void)
     ASSERT_TRUE(strcmp(dns.servers[3], "208.67.222.222") == 0, "server[3]");
 }
 
+/* ================================================================
+ *  mqvpn_resolve_host() tests
+ * ================================================================ */
+
+static void test_resolve_ipv4_literal(void)
+{
+    struct sockaddr_in out;
+    memset(&out, 0, sizeof(out));
+
+    ASSERT_EQ_INT(mqvpn_resolve_host("1.2.3.4", &out), 0,
+                  "resolve IPv4 literal");
+    ASSERT_EQ_INT(out.sin_family, AF_INET, "family is AF_INET");
+
+    char buf[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &out.sin_addr, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "1.2.3.4", "resolved address");
+}
+
+static void test_resolve_localhost(void)
+{
+    struct sockaddr_in out;
+    memset(&out, 0, sizeof(out));
+
+    ASSERT_EQ_INT(mqvpn_resolve_host("localhost", &out), 0,
+                  "resolve localhost");
+    ASSERT_EQ_INT(out.sin_family, AF_INET, "family is AF_INET");
+
+    char buf[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &out.sin_addr, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "127.0.0.1", "localhost resolves to 127.0.0.1");
+}
+
+static void test_resolve_invalid(void)
+{
+    struct sockaddr_in out;
+    memset(&out, 0, sizeof(out));
+
+    ASSERT_TRUE(mqvpn_resolve_host("nonexistent.invalid", &out) != 0,
+                "resolve invalid hostname fails");
+}
+
+static void test_resolve_empty(void)
+{
+    struct sockaddr_in out;
+    memset(&out, 0, sizeof(out));
+
+    ASSERT_TRUE(mqvpn_resolve_host("", &out) != 0,
+                "resolve empty string fails");
+}
+
+static void test_resolve_null(void)
+{
+    struct sockaddr_in out;
+    memset(&out, 0, sizeof(out));
+
+    ASSERT_TRUE(mqvpn_resolve_host(NULL, &out) != 0,
+                "resolve NULL fails");
+}
+
 int main(void)
 {
     test_init();
@@ -510,6 +570,13 @@ int main(void)
     test_apply_creates_marker();
     test_init_defaults();
     test_add_server_content();
+
+    /* resolve_host tests */
+    test_resolve_ipv4_literal();
+    test_resolve_localhost();
+    test_resolve_invalid();
+    test_resolve_empty();
+    test_resolve_null();
 
     printf("\n=== test_dns: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

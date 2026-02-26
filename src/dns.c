@@ -11,6 +11,42 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+
+int
+mqvpn_resolve_host(const char *host, struct sockaddr_in *out)
+{
+    if (!host || !host[0]) {
+        return -1;
+    }
+
+    /* Fast path: try IPv4 literal first */
+    struct in_addr addr;
+    if (inet_pton(AF_INET, host, &addr) == 1) {
+        memset(out, 0, sizeof(*out));
+        out->sin_family = AF_INET;
+        out->sin_addr = addr;
+        return 0;
+    }
+
+    /* Slow path: hostname resolution via getaddrinfo */
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+
+    int ret = getaddrinfo(host, NULL, &hints, &res);
+    if (ret != 0 || !res) {
+        LOG_WRN("dns: failed to resolve '%s': %s", host, gai_strerror(ret));
+        if (res) freeaddrinfo(res);
+        return -1;
+    }
+
+    memcpy(out, res->ai_addr, sizeof(*out));
+    freeaddrinfo(res);
+    return 0;
+}
 
 void
 mqvpn_dns_init(mqvpn_dns_t *dns)

@@ -7,6 +7,8 @@
 #ifndef MQVPN_DNS_H
 #define MQVPN_DNS_H
 
+#include <netinet/in.h>
+
 #define MQVPN_DNS_MAX_SERVERS 4
 
 typedef struct {
@@ -36,5 +38,10 @@ int  mqvpn_dns_has_stale_backup(const mqvpn_dns_t *dns);
 
 /* Restore from stale backup (startup recovery). */
 void mqvpn_dns_restore_stale(mqvpn_dns_t *dns);
+
+/* Resolve a hostname or IPv4 literal to a sockaddr_in.
+ * Tries inet_pton() first; falls back to getaddrinfo().
+ * Returns 0 on success, -1 on failure. */
+int mqvpn_resolve_host(const char *host, struct sockaddr_in *out);
 
 #endif /* MQVPN_DNS_H */
