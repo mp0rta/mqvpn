@@ -573,10 +573,14 @@ cli_setup_killswitch(cli_ctx_t *ctx)
     char server_cidr[INET6_ADDRSTRLEN + 5];
     snprintf(server_cidr, sizeof(server_cidr), "%s/%d", ctx->server_ip_str, prefix);
 
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%d", ctx->cfg->server_port);
+
     if (!is_v6) {
-        /* IPv4 server: allow underlay via iptables */
+        /* IPv4 server: allow only UDP to VPN port via iptables */
         const char *allow_server[] = {
-            "iptables", "-I", "OUTPUT", "-d", server_cidr,
+            "iptables", "-I", "OUTPUT", "-p", "udp",
+            "-d", server_cidr, "--dport", port_str,
             "-o", ctx->orig_iface, "-j", "ACCEPT",
             "-m", "comment", "--comment", ctx->ks_comment, NULL
         };
@@ -584,9 +588,10 @@ cli_setup_killswitch(cli_ctx_t *ctx)
             return -1;
         }
     } else {
-        /* IPv6 server: allow underlay via ip6tables + block IPv6 leaks */
+        /* IPv6 server: allow only UDP to VPN port via ip6tables + block IPv6 leaks */
         const char *v6_allow_server[] = {
-            "ip6tables", "-I", "OUTPUT", "-d", server_cidr,
+            "ip6tables", "-I", "OUTPUT", "-p", "udp",
+            "-d", server_cidr, "--dport", port_str,
             "-o", ctx->orig_iface, "-j", "ACCEPT",
             "-m", "comment", "--comment", ctx->ks_comment, NULL
         };
@@ -640,10 +645,14 @@ cli_cleanup_killswitch(cli_ctx_t *ctx)
     };
     while (cli_run_iptables_cmd(del_drop4) == 0) {}
 
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%d", ctx->cfg->server_port);
+
     if (!is_v6) {
         /* IPv4 server rule */
         const char *del_server[] = {
-            "iptables", "-D", "OUTPUT", "-d", server_cidr,
+            "iptables", "-D", "OUTPUT", "-p", "udp",
+            "-d", server_cidr, "--dport", port_str,
             "-o", ctx->orig_iface, "-j", "ACCEPT",
             "-m", "comment", "--comment", ctx->ks_comment, NULL
         };
@@ -651,7 +660,8 @@ cli_cleanup_killswitch(cli_ctx_t *ctx)
     } else {
         /* IPv6 server rules */
         const char *v6_del_server[] = {
-            "ip6tables", "-D", "OUTPUT", "-d", server_cidr,
+            "ip6tables", "-D", "OUTPUT", "-p", "udp",
+            "-d", server_cidr, "--dport", port_str,
             "-o", ctx->orig_iface, "-j", "ACCEPT",
             "-m", "comment", "--comment", ctx->ks_comment, NULL
         };
