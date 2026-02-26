@@ -10,7 +10,7 @@
 typedef struct {
     int                  fd;
     char                 iface[IFNAMSIZ];
-    struct sockaddr_in   local_addr;
+    struct sockaddr_storage local_addr;
     socklen_t            local_addrlen;
     uint64_t             path_id;
     int                  active;        /* socket created and registered */
@@ -30,7 +30,7 @@ void mqvpn_path_mgr_init(mqvpn_path_mgr_t *mgr);
  * peer_addr is the server address to connect-like setup.
  * Returns path index (>=0) on success, -1 on error. */
 int mqvpn_path_mgr_add(mqvpn_path_mgr_t *mgr, const char *iface,
-                        const struct sockaddr_in *peer_addr);
+                        const struct sockaddr_storage *peer_addr);
 
 /* Find path by socket fd. Returns NULL if not found. */
 mqvpn_path_t *mqvpn_path_mgr_find_by_fd(mqvpn_path_mgr_t *mgr, int fd);

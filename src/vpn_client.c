@@ -67,7 +67,7 @@ struct cli_ctx_s {
 
     /* Multipath: per-path UDP sockets */
     mqvpn_path_mgr_t     path_mgr;
-    struct sockaddr_in   server_addr;
+    struct sockaddr_storage server_addr;
     socklen_t            server_addrlen;
 
     mqvpn_tun_t          tun;
@@ -77,9 +77,9 @@ struct cli_ctx_s {
 
     /* Split tunneling state */
     int                  routing_configured;
-    char                 orig_gateway[INET_ADDRSTRLEN];
+    char                 orig_gateway[INET6_ADDRSTRLEN];
     char                 orig_iface[IFNAMSIZ];
-    char                 server_ip_str[INET_ADDRSTRLEN];
+    char                 server_ip_str[INET6_ADDRSTRLEN];
 
     cli_conn_t          *conn;
 
@@ -252,7 +252,7 @@ cli_socket_read_handler(cli_ctx_t *ctx, int sock_fd)
 
     /* Find local addr for this path's socket */
     mqvpn_path_t *path = mqvpn_path_mgr_find_by_fd(&ctx->path_mgr, sock_fd);
-    struct sockaddr_in local_addr;
+    struct sockaddr_storage local_addr;
     socklen_t local_addrlen = sizeof(local_addr);
     if (path) {
         memcpy(&local_addr, &path->local_addr, sizeof(local_addr));
@@ -323,7 +323,8 @@ cli_run_ip_cmd(const char *const argv[])
 }
 
 static int
-cli_discover_route(const char *server_ip, char *gateway, size_t gateway_len,
+cli_discover_route(const char *server_ip, sa_family_t af,
+                    char *gateway, size_t gateway_len,
                     char *iface, size_t iface_len)
 {
     int fds[2];
@@ -341,7 +342,9 @@ cli_discover_route(const char *server_ip, char *gateway, size_t gateway_len,
     }
 
     if (pid == 0) {
-        const char *const argv[] = {"ip", "-4", "route", "get", server_ip, NULL};
+        const char *const argv4[] = {"ip", "-4", "route", "get", server_ip, NULL};
+        const char *const argv6[] = {"ip", "-6", "route", "get", server_ip, NULL};
+        const char *const *argv = (af == AF_INET6) ? argv6 : argv4;
         close(fds[0]);
         if (dup2(fds[1], STDOUT_FILENO) < 0) {
             _exit(127);
@@ -399,26 +402,30 @@ cli_discover_route(const char *server_ip, char *gateway, size_t gateway_len,
 static int
 cli_setup_routes(cli_ctx_t *ctx)
 {
-    /* Extract server IP (without port) */
-    struct in_addr saddr = { .s_addr = ctx->server_addr.sin_addr.s_addr };
-    inet_ntop(AF_INET, &saddr, ctx->server_ip_str, sizeof(ctx->server_ip_str));
+    sa_family_t af = ctx->server_addr.ss_family;
+    int prefix = mqvpn_sa_host_prefix(&ctx->server_addr);
+
+    /* Extract server IP string */
+    mqvpn_sa_ntop(&ctx->server_addr, ctx->server_ip_str, sizeof(ctx->server_ip_str));
 
     /* Discover current gateway and interface for the server IP */
-    if (cli_discover_route(ctx->server_ip_str, ctx->orig_gateway, sizeof(ctx->orig_gateway),
+    if (cli_discover_route(ctx->server_ip_str, af,
+                            ctx->orig_gateway, sizeof(ctx->orig_gateway),
                             ctx->orig_iface, sizeof(ctx->orig_iface)) < 0) {
         LOG_WRN("could not determine original iface for %s",
                 ctx->server_ip_str);
         return -1;
     }
 
-    char host_cidr[INET_ADDRSTRLEN + 4];
-    snprintf(host_cidr, sizeof(host_cidr), "%s/32", ctx->server_ip_str);
+    char host_cidr[INET6_ADDRSTRLEN + 5];
+    snprintf(host_cidr, sizeof(host_cidr), "%s/%d", ctx->server_ip_str, prefix);
+    const char *ip_flag = (af == AF_INET6) ? "-6" : "-4";
 
     if (ctx->orig_gateway[0] != '\0') {
         LOG_INF("split tunnel: server %s via %s dev %s",
                 ctx->server_ip_str, ctx->orig_gateway, ctx->orig_iface);
         const char *const pin_route[] = {
-            "ip", "route", "replace", host_cidr, "via", ctx->orig_gateway,
+            "ip", ip_flag, "route", "replace", host_cidr, "via", ctx->orig_gateway,
             "dev", ctx->orig_iface, NULL
         };
         if (cli_run_ip_cmd(pin_route) < 0) {
@@ -432,7 +439,8 @@ cli_setup_routes(cli_ctx_t *ctx)
 
     /* Add 0.0.0.0/1 + 128.0.0.0/1 instead of default route.
      * These are more specific than 0.0.0.0/0, so they always win
-     * regardless of existing default route metrics (WireGuard/OpenVPN technique). */
+     * regardless of existing default route metrics (WireGuard/OpenVPN technique).
+     * Note: IPv4 catch-all only — data plane is IPv4. */
     const char *const tun_route_low[] = {
         "ip", "route", "replace", "0.0.0.0/1", "dev", ctx->tun.name, NULL
     };
@@ -452,7 +460,7 @@ cli_setup_routes(cli_ctx_t *ctx)
         (void)cli_run_ip_cmd(undo_high);
         if (ctx->orig_gateway[0] != '\0') {
             const char *const undo_pin[] = {
-                "ip", "route", "del", host_cidr, "via", ctx->orig_gateway,
+                "ip", ip_flag, "route", "del", host_cidr, "via", ctx->orig_gateway,
                 "dev", ctx->orig_iface, NULL
             };
             (void)cli_run_ip_cmd(undo_pin);
@@ -470,7 +478,7 @@ cli_cleanup_routes(cli_ctx_t *ctx)
     if (!ctx->routing_configured)
         return;
 
-    /* Remove TUN catch-all routes */
+    /* Remove TUN catch-all routes (always IPv4 — data plane) */
     const char *const del_low[] = {
         "ip", "route", "del", "0.0.0.0/1", "dev", ctx->tun.name, NULL
     };
@@ -482,10 +490,12 @@ cli_cleanup_routes(cli_ctx_t *ctx)
 
     /* Remove server IP pinned route (only if gateway was set) */
     if (ctx->orig_gateway[0] != '\0') {
-        char host_cidr[INET_ADDRSTRLEN + 4];
-        snprintf(host_cidr, sizeof(host_cidr), "%s/32", ctx->server_ip_str);
+        const char *ip_flag = (ctx->server_addr.ss_family == AF_INET6) ? "-6" : "-4";
+        int prefix = mqvpn_sa_host_prefix(&ctx->server_addr);
+        char host_cidr[INET6_ADDRSTRLEN + 5];
+        snprintf(host_cidr, sizeof(host_cidr), "%s/%d", ctx->server_ip_str, prefix);
         const char *const del_pin[] = {
-            "ip", "route", "del", host_cidr, "via", ctx->orig_gateway,
+            "ip", ip_flag, "route", "del", host_cidr, "via", ctx->orig_gateway,
             "dev", ctx->orig_iface, NULL
         };
         (void)cli_run_ip_cmd(del_pin);
@@ -508,7 +518,7 @@ cli_run_iptables_cmd(const char *const argv[])
         return -1;
     }
     if (pid == 0) {
-        execvp("iptables", (char * const *)argv);
+        execvp(argv[0], (char * const *)argv);
         _exit(127);
     }
 
@@ -536,36 +546,63 @@ cli_setup_killswitch(cli_ctx_t *ctx)
     snprintf(ctx->ks_comment, sizeof(ctx->ks_comment),
              "mqvpn-ks:%d", (int)getpid());
 
-    /* Allow traffic through the VPN tunnel */
+    int is_v6 = (ctx->server_addr.ss_family == AF_INET6);
+
+    /* IPv4 rules (always needed — TUN data plane is IPv4) */
     const char *allow_tun[] = {
         "iptables", "-I", "OUTPUT", "-o", ctx->tun.name,
         "-j", "ACCEPT", "-m", "comment", "--comment", ctx->ks_comment, NULL
     };
-    /* Allow traffic to the VPN server (underlay) */
-    char server_cidr[INET_ADDRSTRLEN + 4];
-    snprintf(server_cidr, sizeof(server_cidr), "%s/32", ctx->server_ip_str);
-    const char *allow_server[] = {
-        "iptables", "-I", "OUTPUT", "-d", server_cidr,
-        "-o", ctx->orig_iface, "-j", "ACCEPT",
-        "-m", "comment", "--comment", ctx->ks_comment, NULL
-    };
-    /* Allow loopback */
-    const char *allow_lo[] = {
+    const char *allow_lo4[] = {
         "iptables", "-I", "OUTPUT", "-o", "lo",
         "-j", "ACCEPT", "-m", "comment", "--comment", ctx->ks_comment, NULL
     };
-    /* Drop everything else */
-    const char *drop_all[] = {
+    const char *drop_all4[] = {
         "iptables", "-A", "OUTPUT", "-j", "DROP",
         "-m", "comment", "--comment", ctx->ks_comment, NULL
     };
 
     if (cli_run_iptables_cmd(allow_tun) < 0 ||
-        cli_run_iptables_cmd(allow_server) < 0 ||
-        cli_run_iptables_cmd(allow_lo) < 0 ||
-        cli_run_iptables_cmd(drop_all) < 0) {
-        LOG_WRN("failed to set up kill switch iptables rules");
+        cli_run_iptables_cmd(allow_lo4) < 0 ||
+        cli_run_iptables_cmd(drop_all4) < 0) {
+        LOG_WRN("failed to set up iptables kill switch rules");
         return -1;
+    }
+
+    int prefix = mqvpn_sa_host_prefix(&ctx->server_addr);
+    char server_cidr[INET6_ADDRSTRLEN + 5];
+    snprintf(server_cidr, sizeof(server_cidr), "%s/%d", ctx->server_ip_str, prefix);
+
+    if (!is_v6) {
+        /* IPv4 server: allow underlay via iptables */
+        const char *allow_server[] = {
+            "iptables", "-I", "OUTPUT", "-d", server_cidr,
+            "-o", ctx->orig_iface, "-j", "ACCEPT",
+            "-m", "comment", "--comment", ctx->ks_comment, NULL
+        };
+        if (cli_run_iptables_cmd(allow_server) < 0) {
+            return -1;
+        }
+    } else {
+        /* IPv6 server: allow underlay via ip6tables + block IPv6 leaks */
+        const char *v6_allow_server[] = {
+            "ip6tables", "-I", "OUTPUT", "-d", server_cidr,
+            "-o", ctx->orig_iface, "-j", "ACCEPT",
+            "-m", "comment", "--comment", ctx->ks_comment, NULL
+        };
+        const char *v6_allow_lo[] = {
+            "ip6tables", "-I", "OUTPUT", "-o", "lo",
+            "-j", "ACCEPT", "-m", "comment", "--comment", ctx->ks_comment, NULL
+        };
+        const char *v6_drop_all[] = {
+            "ip6tables", "-A", "OUTPUT", "-j", "DROP",
+            "-m", "comment", "--comment", ctx->ks_comment, NULL
+        };
+        if (cli_run_iptables_cmd(v6_allow_server) < 0 ||
+            cli_run_iptables_cmd(v6_allow_lo) < 0 ||
+            cli_run_iptables_cmd(v6_drop_all) < 0) {
+            return -1;
+        }
     }
 
     ctx->killswitch_active = 1;
@@ -579,33 +616,59 @@ cli_cleanup_killswitch(cli_ctx_t *ctx)
     if (!ctx->killswitch_active)
         return;
 
-    /* Remove all OUTPUT rules tagged with our comment */
-    const char *del_cmd[] = {
+    int is_v6 = (ctx->server_addr.ss_family == AF_INET6);
+    int prefix = mqvpn_sa_host_prefix(&ctx->server_addr);
+    char server_cidr[INET6_ADDRSTRLEN + 5];
+    snprintf(server_cidr, sizeof(server_cidr), "%s/%d", ctx->server_ip_str, prefix);
+
+    /* Remove IPv4 rules (always present) */
+    const char *del_tun[] = {
         "iptables", "-D", "OUTPUT", "-o", ctx->tun.name,
         "-j", "ACCEPT", "-m", "comment", "--comment", ctx->ks_comment, NULL
     };
-    while (cli_run_iptables_cmd(del_cmd) == 0) {}
+    while (cli_run_iptables_cmd(del_tun) == 0) {}
 
-    char server_cidr[INET_ADDRSTRLEN + 4];
-    snprintf(server_cidr, sizeof(server_cidr), "%s/32", ctx->server_ip_str);
-    const char *del_server[] = {
-        "iptables", "-D", "OUTPUT", "-d", server_cidr,
-        "-o", ctx->orig_iface, "-j", "ACCEPT",
-        "-m", "comment", "--comment", ctx->ks_comment, NULL
-    };
-    while (cli_run_iptables_cmd(del_server) == 0) {}
-
-    const char *del_lo[] = {
+    const char *del_lo4[] = {
         "iptables", "-D", "OUTPUT", "-o", "lo",
         "-j", "ACCEPT", "-m", "comment", "--comment", ctx->ks_comment, NULL
     };
-    while (cli_run_iptables_cmd(del_lo) == 0) {}
+    while (cli_run_iptables_cmd(del_lo4) == 0) {}
 
-    const char *del_drop[] = {
+    const char *del_drop4[] = {
         "iptables", "-D", "OUTPUT", "-j", "DROP",
         "-m", "comment", "--comment", ctx->ks_comment, NULL
     };
-    while (cli_run_iptables_cmd(del_drop) == 0) {}
+    while (cli_run_iptables_cmd(del_drop4) == 0) {}
+
+    if (!is_v6) {
+        /* IPv4 server rule */
+        const char *del_server[] = {
+            "iptables", "-D", "OUTPUT", "-d", server_cidr,
+            "-o", ctx->orig_iface, "-j", "ACCEPT",
+            "-m", "comment", "--comment", ctx->ks_comment, NULL
+        };
+        while (cli_run_iptables_cmd(del_server) == 0) {}
+    } else {
+        /* IPv6 server rules */
+        const char *v6_del_server[] = {
+            "ip6tables", "-D", "OUTPUT", "-d", server_cidr,
+            "-o", ctx->orig_iface, "-j", "ACCEPT",
+            "-m", "comment", "--comment", ctx->ks_comment, NULL
+        };
+        while (cli_run_iptables_cmd(v6_del_server) == 0) {}
+
+        const char *v6_del_lo[] = {
+            "ip6tables", "-D", "OUTPUT", "-o", "lo",
+            "-j", "ACCEPT", "-m", "comment", "--comment", ctx->ks_comment, NULL
+        };
+        while (cli_run_iptables_cmd(v6_del_lo) == 0) {}
+
+        const char *v6_del_drop[] = {
+            "ip6tables", "-D", "OUTPUT", "-j", "DROP",
+            "-m", "comment", "--comment", ctx->ks_comment, NULL
+        };
+        while (cli_run_iptables_cmd(v6_del_drop) == 0) {}
+    }
 
     ctx->killswitch_active = 0;
     LOG_INF("kill switch rules removed");
@@ -1484,16 +1547,18 @@ cli_path_removed(const xqc_cid_t *cid, uint64_t path_id,
 static int
 cli_resolve_server(cli_ctx_t *ctx)
 {
-    if (mqvpn_resolve_host(ctx->cfg->server_addr, &ctx->server_addr) < 0) {
+    socklen_t addrlen;
+    if (mqvpn_resolve_host(ctx->cfg->server_addr, &ctx->server_addr, &addrlen) < 0) {
         LOG_ERR("failed to resolve server address: %s", ctx->cfg->server_addr);
         return -1;
     }
-    ctx->server_addr.sin_port = htons((uint16_t)ctx->cfg->server_port);
-    ctx->server_addrlen = sizeof(ctx->server_addr);
+    mqvpn_sa_set_port(&ctx->server_addr, (uint16_t)ctx->cfg->server_port);
+    ctx->server_addrlen = addrlen;
 
-    char resolved[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &ctx->server_addr.sin_addr, resolved, sizeof(resolved));
-    LOG_INF("resolved server: %s → %s", ctx->cfg->server_addr, resolved);
+    char resolved[INET6_ADDRSTRLEN];
+    mqvpn_sa_ntop(&ctx->server_addr, resolved, sizeof(resolved));
+    LOG_INF("resolved server: %s -> %s (%s)", ctx->cfg->server_addr, resolved,
+            ctx->server_addr.ss_family == AF_INET6 ? "IPv6" : "IPv4");
     return 0;
 }
 

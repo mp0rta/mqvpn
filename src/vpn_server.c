@@ -56,7 +56,7 @@ struct svr_ctx_s {
     struct event        *ev_sigterm;
 
     int                  udp_fd;
-    struct sockaddr_in   local_addr;
+    struct sockaddr_storage local_addr;
     socklen_t            local_addrlen;
 
     mqvpn_tun_t          tun;
@@ -1036,7 +1036,22 @@ svr_dgram_mss_updated_notify(xqc_h3_conn_t *conn, size_t mss,
 static int
 svr_create_udp_socket(const char *addr, int port, svr_ctx_t *ctx)
 {
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    /* Detect address family from bind address */
+    sa_family_t af = AF_INET;
+    struct in_addr  addr4;
+    struct in6_addr addr6;
+    if (addr && addr[0]) {
+        if (inet_pton(AF_INET6, addr, &addr6) == 1) {
+            af = AF_INET6;
+        } else if (inet_pton(AF_INET, addr, &addr4) == 1) {
+            af = AF_INET;
+        } else {
+            LOG_ERR("invalid listen address: %s", addr);
+            return -1;
+        }
+    }
+
+    int fd = socket(af, SOCK_DGRAM, 0);
     if (fd < 0) {
         LOG_ERR("socket: %s", strerror(errno));
         return -1;
@@ -1055,24 +1070,43 @@ svr_create_udp_socket(const char *addr, int port, svr_ctx_t *ctx)
     setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
 
-    struct sockaddr_in *sin = &ctx->local_addr;
-    memset(sin, 0, sizeof(*sin));
-    sin->sin_family = AF_INET;
-    sin->sin_port = htons((uint16_t)port);
-    if (addr && addr[0]) {
-        sin->sin_addr.s_addr = inet_addr(addr);
-    } else {
-        sin->sin_addr.s_addr = htonl(INADDR_ANY);
-    }
-    ctx->local_addrlen = sizeof(*sin);
+    memset(&ctx->local_addr, 0, sizeof(ctx->local_addr));
 
-    if (bind(fd, (struct sockaddr *)sin, sizeof(*sin)) < 0) {
-        LOG_ERR("bind %s:%d: %s", addr ? addr : "0.0.0.0", port, strerror(errno));
+    if (af == AF_INET6) {
+        int v6only = 1;
+        setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+
+        struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&ctx->local_addr;
+        sin6->sin6_family = AF_INET6;
+        sin6->sin6_port = htons((uint16_t)port);
+        if (addr && addr[0]) {
+            sin6->sin6_addr = addr6;
+        } else {
+            sin6->sin6_addr = in6addr_any;
+        }
+        ctx->local_addrlen = sizeof(struct sockaddr_in6);
+    } else {
+        struct sockaddr_in *sin = (struct sockaddr_in *)&ctx->local_addr;
+        sin->sin_family = AF_INET;
+        sin->sin_port = htons((uint16_t)port);
+        if (addr && addr[0]) {
+            sin->sin_addr = addr4;
+        } else {
+            sin->sin_addr.s_addr = htonl(INADDR_ANY);
+        }
+        ctx->local_addrlen = sizeof(struct sockaddr_in);
+    }
+
+    if (bind(fd, (struct sockaddr *)&ctx->local_addr, ctx->local_addrlen) < 0) {
+        LOG_ERR("bind %s:%d: %s", addr ? addr : (af == AF_INET6 ? "::" : "0.0.0.0"),
+                port, strerror(errno));
         close(fd);
         return -1;
     }
 
-    LOG_INF("UDP socket bound to %s:%d", addr ? addr : "0.0.0.0", port);
+    LOG_INF("UDP socket bound to %s:%d (%s)",
+            addr ? addr : (af == AF_INET6 ? "::" : "0.0.0.0"),
+            port, af == AF_INET6 ? "IPv6" : "IPv4");
     return fd;
 }
 

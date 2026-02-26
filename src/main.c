@@ -22,7 +22,7 @@ usage(const char *prog)
         "Options:\n"
         "  --config PATH             Configuration file (INI format)\n"
         "  --mode client|server      Operating mode (required if no config)\n"
-        "  --server HOST:PORT        Server address, IPv4 only (client mode)\n"
+        "  --server HOST:PORT        Server address (client mode, [IPv6]:PORT for IPv6)\n"
         "  --listen BIND:PORT        Listen address (server mode, default 0.0.0.0:443)\n"
         "  --subnet CIDR             Client IP pool (server mode, default 10.0.0.0/24)\n"
         "  --tun-name NAME           TUN device name (default mqvpn0)\n"
@@ -47,17 +47,31 @@ usage(const char *prog)
 static int
 parse_host_port(const char *str, char *host, size_t host_len, int *port)
 {
-    /* Handle [host]:port or host:port */
-    const char *colon = strrchr(str, ':');
-    if (!colon) {
-        fprintf(stderr, "error: expected HOST:PORT, got '%s'\n", str);
-        return -1;
+    if (str[0] == '[') {
+        /* Bracket notation for IPv6: [host]:port */
+        const char *close = strchr(str, ']');
+        if (!close || close[1] != ':') {
+            fprintf(stderr, "error: expected [HOST]:PORT, got '%s'\n", str);
+            return -1;
+        }
+        size_t hlen = (size_t)(close - str - 1);
+        if (hlen >= host_len) hlen = host_len - 1;
+        memcpy(host, str + 1, hlen);
+        host[hlen] = '\0';
+        *port = atoi(close + 2);
+    } else {
+        /* Legacy: host:port (last colon) */
+        const char *colon = strrchr(str, ':');
+        if (!colon) {
+            fprintf(stderr, "error: expected HOST:PORT, got '%s'\n", str);
+            return -1;
+        }
+        size_t hlen = (size_t)(colon - str);
+        if (hlen >= host_len) hlen = host_len - 1;
+        memcpy(host, str, hlen);
+        host[hlen] = '\0';
+        *port = atoi(colon + 1);
     }
-    size_t hlen = (size_t)(colon - str);
-    if (hlen >= host_len) hlen = host_len - 1;
-    memcpy(host, str, hlen);
-    host[hlen] = '\0';
-    *port = atoi(colon + 1);
     if (*port <= 0 || *port > 65535) {
         fprintf(stderr, "error: invalid port in '%s'\n", str);
         return -1;

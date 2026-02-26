@@ -498,57 +498,143 @@ static void test_add_server_content(void)
 
 static void test_resolve_ipv4_literal(void)
 {
-    struct sockaddr_in out;
+    struct sockaddr_storage out;
+    socklen_t out_len = 0;
     memset(&out, 0, sizeof(out));
 
-    ASSERT_EQ_INT(mqvpn_resolve_host("1.2.3.4", &out), 0,
+    ASSERT_EQ_INT(mqvpn_resolve_host("1.2.3.4", &out, &out_len), 0,
                   "resolve IPv4 literal");
-    ASSERT_EQ_INT(out.sin_family, AF_INET, "family is AF_INET");
+    ASSERT_EQ_INT(out.ss_family, AF_INET, "family is AF_INET");
+    ASSERT_EQ_INT((int)out_len, (int)sizeof(struct sockaddr_in), "addrlen correct");
 
+    struct sockaddr_in *sin = (struct sockaddr_in *)&out;
     char buf[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &out.sin_addr, buf, sizeof(buf));
+    inet_ntop(AF_INET, &sin->sin_addr, buf, sizeof(buf));
     ASSERT_EQ_STR(buf, "1.2.3.4", "resolved address");
 }
 
 static void test_resolve_localhost(void)
 {
-    struct sockaddr_in out;
+    struct sockaddr_storage out;
+    socklen_t out_len = 0;
     memset(&out, 0, sizeof(out));
 
-    ASSERT_EQ_INT(mqvpn_resolve_host("localhost", &out), 0,
+    ASSERT_EQ_INT(mqvpn_resolve_host("localhost", &out, &out_len), 0,
                   "resolve localhost");
-    ASSERT_EQ_INT(out.sin_family, AF_INET, "family is AF_INET");
-
-    char buf[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &out.sin_addr, buf, sizeof(buf));
-    ASSERT_EQ_STR(buf, "127.0.0.1", "localhost resolves to 127.0.0.1");
+    /* May resolve to IPv4 or IPv6 depending on system config */
+    ASSERT_TRUE(out.ss_family == AF_INET || out.ss_family == AF_INET6,
+                "localhost resolves to IPv4 or IPv6");
 }
 
 static void test_resolve_invalid(void)
 {
-    struct sockaddr_in out;
+    struct sockaddr_storage out;
+    socklen_t out_len = 0;
     memset(&out, 0, sizeof(out));
 
-    ASSERT_TRUE(mqvpn_resolve_host("nonexistent.invalid", &out) != 0,
+    ASSERT_TRUE(mqvpn_resolve_host("nonexistent.invalid", &out, &out_len) != 0,
                 "resolve invalid hostname fails");
 }
 
 static void test_resolve_empty(void)
 {
-    struct sockaddr_in out;
+    struct sockaddr_storage out;
+    socklen_t out_len = 0;
     memset(&out, 0, sizeof(out));
 
-    ASSERT_TRUE(mqvpn_resolve_host("", &out) != 0,
+    ASSERT_TRUE(mqvpn_resolve_host("", &out, &out_len) != 0,
                 "resolve empty string fails");
 }
 
 static void test_resolve_null(void)
 {
-    struct sockaddr_in out;
+    struct sockaddr_storage out;
+    socklen_t out_len = 0;
     memset(&out, 0, sizeof(out));
 
-    ASSERT_TRUE(mqvpn_resolve_host(NULL, &out) != 0,
+    ASSERT_TRUE(mqvpn_resolve_host(NULL, &out, &out_len) != 0,
                 "resolve NULL fails");
+}
+
+static void test_resolve_ipv6_literal(void)
+{
+    struct sockaddr_storage out;
+    socklen_t out_len = 0;
+    memset(&out, 0, sizeof(out));
+
+    ASSERT_EQ_INT(mqvpn_resolve_host("::1", &out, &out_len), 0,
+                  "resolve IPv6 literal");
+    ASSERT_EQ_INT(out.ss_family, AF_INET6, "family is AF_INET6");
+    ASSERT_EQ_INT((int)out_len, (int)sizeof(struct sockaddr_in6), "addrlen correct");
+
+    struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&out;
+    char buf[INET6_ADDRSTRLEN];
+    inet_ntop(AF_INET6, &sin6->sin6_addr, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "::1", "resolved address");
+}
+
+static void test_resolve_ipv4_preserved(void)
+{
+    struct sockaddr_storage out;
+    socklen_t out_len = 0;
+    memset(&out, 0, sizeof(out));
+
+    ASSERT_EQ_INT(mqvpn_resolve_host("10.0.0.1", &out, &out_len), 0,
+                  "resolve IPv4 still works");
+    ASSERT_EQ_INT(out.ss_family, AF_INET, "IPv4 family preserved");
+    ASSERT_EQ_INT((int)out_len, (int)sizeof(struct sockaddr_in), "addrlen correct");
+}
+
+/* Test helper functions */
+static void test_sa_set_port(void)
+{
+    struct sockaddr_storage ss;
+    socklen_t len;
+
+    /* IPv4 */
+    memset(&ss, 0, sizeof(ss));
+    mqvpn_resolve_host("1.2.3.4", &ss, &len);
+    mqvpn_sa_set_port(&ss, 443);
+    ASSERT_EQ_INT(ntohs(((struct sockaddr_in *)&ss)->sin_port), 443,
+                  "set port on IPv4");
+
+    /* IPv6 */
+    memset(&ss, 0, sizeof(ss));
+    mqvpn_resolve_host("::1", &ss, &len);
+    mqvpn_sa_set_port(&ss, 8443);
+    ASSERT_EQ_INT(ntohs(((struct sockaddr_in6 *)&ss)->sin6_port), 8443,
+                  "set port on IPv6");
+}
+
+static void test_sa_ntop(void)
+{
+    struct sockaddr_storage ss;
+    socklen_t len;
+    char buf[INET6_ADDRSTRLEN];
+
+    /* IPv4 */
+    mqvpn_resolve_host("192.168.1.1", &ss, &len);
+    ASSERT_TRUE(mqvpn_sa_ntop(&ss, buf, sizeof(buf)) != NULL,
+                "ntop returns non-NULL for IPv4");
+    ASSERT_EQ_STR(buf, "192.168.1.1", "ntop IPv4");
+
+    /* IPv6 */
+    mqvpn_resolve_host("::1", &ss, &len);
+    ASSERT_TRUE(mqvpn_sa_ntop(&ss, buf, sizeof(buf)) != NULL,
+                "ntop returns non-NULL for IPv6");
+    ASSERT_EQ_STR(buf, "::1", "ntop IPv6");
+}
+
+static void test_sa_host_prefix(void)
+{
+    struct sockaddr_storage ss;
+    socklen_t len;
+
+    mqvpn_resolve_host("1.2.3.4", &ss, &len);
+    ASSERT_EQ_INT(mqvpn_sa_host_prefix(&ss), 32, "IPv4 host prefix");
+
+    mqvpn_resolve_host("::1", &ss, &len);
+    ASSERT_EQ_INT(mqvpn_sa_host_prefix(&ss), 128, "IPv6 host prefix");
 }
 
 int main(void)
@@ -577,6 +663,13 @@ int main(void)
     test_resolve_invalid();
     test_resolve_empty();
     test_resolve_null();
+    test_resolve_ipv6_literal();
+    test_resolve_ipv4_preserved();
+
+    /* sockaddr helper tests */
+    test_sa_set_port();
+    test_sa_ntop();
+    test_sa_host_prefix();
 
     printf("\n=== test_dns: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

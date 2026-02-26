@@ -39,9 +39,22 @@ int  mqvpn_dns_has_stale_backup(const mqvpn_dns_t *dns);
 /* Restore from stale backup (startup recovery). */
 void mqvpn_dns_restore_stale(mqvpn_dns_t *dns);
 
-/* Resolve a hostname or IPv4 literal to a sockaddr_in.
- * Tries inet_pton() first; falls back to getaddrinfo().
+/* Resolve a hostname or IP literal to a sockaddr_storage.
+ * Tries IPv4 literal, then IPv6 literal, then getaddrinfo(AF_UNSPEC).
+ * On success: *out is filled as sockaddr_in or sockaddr_in6,
+ *             *out_len is set to the correct sockaddr size.
  * Returns 0 on success, -1 on failure. */
-int mqvpn_resolve_host(const char *host, struct sockaddr_in *out);
+int mqvpn_resolve_host(const char *host, struct sockaddr_storage *out,
+                        socklen_t *out_len);
+
+/* Set port on a sockaddr_storage (works for AF_INET and AF_INET6). */
+void mqvpn_sa_set_port(struct sockaddr_storage *ss, uint16_t port);
+
+/* Format address from sockaddr_storage into buf. Returns buf, or NULL on error. */
+const char *mqvpn_sa_ntop(const struct sockaddr_storage *ss,
+                           char *buf, size_t buflen);
+
+/* Return host prefix length: 32 for IPv4, 128 for IPv6, 0 for unknown. */
+int mqvpn_sa_host_prefix(const struct sockaddr_storage *ss);
 
 #endif /* MQVPN_DNS_H */
