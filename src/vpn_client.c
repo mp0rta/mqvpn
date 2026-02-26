@@ -15,6 +15,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/time.h>
+#include <time.h>
 #include <net/if.h>
 #include <inttypes.h>
 #include <sys/wait.h>
@@ -792,10 +793,9 @@ cli_setup_tun(cli_ctx_t *ctx, const uint8_t *ip, uint8_t prefix)
     /* Set MTU based on QUIC datagram MSS minus MASQUE framing overhead.
      * IPv6 requires minimum link MTU of 1280 (RFC 8200 §5); the kernel
      * refuses to add IPv6 addresses on devices with smaller MTU and will
-     * remove existing ones if MTU drops below 1280.
-     *
-     * TODO(RFC 9484 §7.2): The 1280 clamp is a workaround — see the
-     * corresponding TODO in vpn_server.c (IPv6 ADDRESS_ASSIGN). */
+     * remove existing ones if MTU drops below 1280.  ICMP PTB (RFC 9484
+     * §10.1) handles packets exceeding actual tunnel capacity during the
+     * brief PMTUD convergence window. */
     int tun_mtu = 1280;
     if (ctx->conn && ctx->conn->dgram_mss > 0) {
         size_t udp_mss = xqc_h3_ext_masque_udp_mss(
@@ -867,6 +867,159 @@ cli_tun_resume_safety(int fd, short what, void *arg)
     }
 }
 
+/* ---- ICMP Packet Too Big (RFC 9484 §10.1) ---- */
+
+#define PTB_RATE_LIMIT  10  /* max PTB responses per second */
+
+static int     cli_ptb_tokens    = PTB_RATE_LIMIT;
+static int64_t cli_ptb_refill_ms = 0;
+
+static int
+cli_ptb_rate_allow(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t now_ms = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    if (now_ms - cli_ptb_refill_ms >= 1000) {
+        cli_ptb_tokens = PTB_RATE_LIMIT;
+        cli_ptb_refill_ms = now_ms;
+    }
+    if (cli_ptb_tokens > 0) {
+        cli_ptb_tokens--;
+        return 1;
+    }
+    return 0;
+}
+
+/*
+ * Send ICMP Destination Unreachable / Fragmentation Needed (type=3, code=4)
+ * back to the TUN device when a packet is too large for the QUIC tunnel.
+ */
+static void
+cli_send_icmp_ptb(cli_conn_t *conn, const uint8_t *orig_pkt, size_t orig_len,
+                   size_t tunnel_mtu)
+{
+    if (orig_len < 20 || !conn->addr_assigned) return;
+    if (!cli_ptb_rate_allow()) return;
+
+    size_t ihl = (orig_pkt[0] & 0x0F) * 4;
+    if (ihl < 20 || ihl > orig_len) return;
+    size_t icmp_data_len = ihl + 8;
+    if (icmp_data_len > orig_len) icmp_data_len = orig_len;
+
+    size_t total_len = 20 + 8 + icmp_data_len;
+    uint8_t pkt[128];
+    if (total_len > sizeof(pkt)) return;
+    memset(pkt, 0, total_len);
+
+    /* IP header: client assigned addr → original src */
+    pkt[0]  = 0x45;
+    pkt[1]  = 0xC0;                            /* DSCP=CS6 */
+    pkt[2]  = (total_len >> 8) & 0xFF;
+    pkt[3]  = total_len & 0xFF;
+    pkt[8]  = 64;                              /* TTL */
+    pkt[9]  = 1;                               /* ICMP */
+    memcpy(pkt + 12, conn->assigned_ip, 4);    /* src = client TUN */
+    memcpy(pkt + 16, orig_pkt + 12, 4);        /* dst = original src */
+
+    uint32_t cksum = 0;
+    for (int i = 0; i < 20; i += 2)
+        cksum += ((uint32_t)pkt[i] << 8) | pkt[i + 1];
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    uint16_t ip_cksum = ~(uint16_t)cksum;
+    pkt[10] = ip_cksum >> 8;
+    pkt[11] = ip_cksum & 0xFF;
+
+    /* ICMP: type=3 (Dest Unreachable), code=4 (Frag Needed) */
+    uint8_t *icmp = pkt + 20;
+    icmp[0] = 3;
+    icmp[1] = 4;
+    uint16_t mtu16 = (tunnel_mtu > 0xFFFF) ? 0xFFFF : (uint16_t)tunnel_mtu;
+    icmp[6] = mtu16 >> 8;
+    icmp[7] = mtu16 & 0xFF;
+    memcpy(icmp + 8, orig_pkt, icmp_data_len);
+
+    size_t icmp_total = 8 + icmp_data_len;
+    cksum = 0;
+    for (size_t i = 0; i < icmp_total; i += 2) {
+        cksum += ((uint32_t)icmp[i] << 8);
+        if (i + 1 < icmp_total)
+            cksum += icmp[i + 1];
+    }
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    uint16_t icmp_cksum = ~(uint16_t)cksum;
+    icmp[2] = icmp_cksum >> 8;
+    icmp[3] = icmp_cksum & 0xFF;
+
+    mqvpn_tun_write(&conn->ctx->tun, pkt, total_len);
+    LOG_DBG("sent ICMP Fragmentation Needed (mtu=%zu) to TUN", tunnel_mtu);
+}
+
+/*
+ * Send ICMPv6 Packet Too Big (type=2, code=0) back to the TUN device.
+ */
+static void
+cli_send_icmpv6_ptb(cli_conn_t *conn, const uint8_t *orig_pkt, size_t orig_len,
+                      size_t tunnel_mtu)
+{
+    if (orig_len < 40 || !conn->addr6_assigned) return;
+    if (!cli_ptb_rate_allow()) return;
+
+    size_t icmpv6_data_len = orig_len;
+    if (40 + 8 + icmpv6_data_len > 1280)
+        icmpv6_data_len = 1280 - 40 - 8;
+    size_t icmpv6_len = 8 + icmpv6_data_len;
+    size_t total_len = 40 + icmpv6_len;
+
+    uint8_t pkt[1280];
+    memset(pkt, 0, total_len);
+
+    /* IPv6 header */
+    pkt[0] = 0x60;
+    pkt[4] = (icmpv6_len >> 8) & 0xFF;
+    pkt[5] = icmpv6_len & 0xFF;
+    pkt[6] = 58;    /* next header: ICMPv6 */
+    pkt[7] = 64;    /* hop limit */
+    memcpy(pkt + 8, conn->assigned_ip6, 16);   /* src = client TUN */
+    memcpy(pkt + 24, orig_pkt + 8, 16);        /* dst = original src */
+
+    /* ICMPv6 Packet Too Big: type=2, code=0 */
+    uint8_t *icmp = pkt + 40;
+    icmp[0] = 2;
+    icmp[1] = 0;
+    uint32_t mtu32 = (uint32_t)tunnel_mtu;
+    icmp[4] = (mtu32 >> 24) & 0xFF;
+    icmp[5] = (mtu32 >> 16) & 0xFF;
+    icmp[6] = (mtu32 >>  8) & 0xFF;
+    icmp[7] = mtu32 & 0xFF;
+    memcpy(icmp + 8, orig_pkt, icmpv6_data_len);
+
+    /* ICMPv6 checksum with pseudo-header */
+    uint32_t cksum = 0;
+    for (int i = 0; i < 16; i += 2)
+        cksum += ((uint32_t)pkt[8 + i] << 8) | pkt[8 + i + 1];
+    for (int i = 0; i < 16; i += 2)
+        cksum += ((uint32_t)pkt[24 + i] << 8) | pkt[24 + i + 1];
+    cksum += (uint32_t)(icmpv6_len >> 16);
+    cksum += (uint32_t)(icmpv6_len & 0xFFFF);
+    cksum += 58;
+    for (size_t i = 0; i < icmpv6_len; i += 2) {
+        cksum += ((uint32_t)icmp[i] << 8);
+        if (i + 1 < icmpv6_len)
+            cksum += icmp[i + 1];
+    }
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    uint16_t icmp_cksum = ~(uint16_t)cksum;
+    icmp[2] = icmp_cksum >> 8;
+    icmp[3] = icmp_cksum & 0xFF;
+
+    mqvpn_tun_write(&conn->ctx->tun, pkt, total_len);
+    LOG_DBG("sent ICMPv6 Packet Too Big (mtu=%zu) to TUN", tunnel_mtu);
+}
+
 static void
 cli_tun_read_handler(int fd, short what, void *arg)
 {
@@ -902,6 +1055,19 @@ cli_tun_read_handler(int fd, short what, void *arg)
             }
         } else {
             continue;
+        }
+
+        /* RFC 9484 §10.1: if packet exceeds tunnel capacity, send ICMP PTB */
+        if (conn->dgram_mss > 0) {
+            size_t udp_mss = xqc_h3_ext_masque_udp_mss(
+                conn->dgram_mss, conn->masque_stream_id);
+            if ((size_t)n > udp_mss) {
+                if (ip_ver == 4)
+                    cli_send_icmp_ptb(conn, pkt, (size_t)n, udp_mss);
+                else
+                    cli_send_icmpv6_ptb(conn, pkt, (size_t)n, udp_mss);
+                continue;
+            }
         }
 
         size_t frame_written = 0;
