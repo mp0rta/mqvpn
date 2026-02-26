@@ -163,6 +163,58 @@ mqvpn_tun_up(mqvpn_tun_t *tun)
     return 0;
 }
 
+/* struct in6_ifreq may not be exposed by glibc headers — define locally */
+struct mqvpn_in6_ifreq {
+    struct in6_addr ifr6_addr;
+    uint32_t        ifr6_prefixlen;
+    int             ifr6_ifindex;
+};
+
+int
+mqvpn_tun_set_addr6(mqvpn_tun_t *tun, const char *addr6_str, int prefix_len)
+{
+    int sock = socket(AF_INET6, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        LOG_ERR("socket AF_INET6: %s", strerror(errno));
+        return -1;
+    }
+
+    struct in6_addr addr;
+    if (inet_pton(AF_INET6, addr6_str, &addr) != 1) {
+        LOG_ERR("invalid IPv6 address: %s", addr6_str);
+        close(sock);
+        return -1;
+    }
+
+    /* Get interface index */
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, tun->name, IFNAMSIZ - 1);
+    if (ioctl(sock, SIOCGIFINDEX, &ifr) < 0) {
+        LOG_ERR("ioctl SIOCGIFINDEX: %s", strerror(errno));
+        close(sock);
+        return -1;
+    }
+
+    struct mqvpn_in6_ifreq ifr6;
+    memset(&ifr6, 0, sizeof(ifr6));
+    memcpy(&ifr6.ifr6_addr, &addr, sizeof(addr));
+    ifr6.ifr6_prefixlen = (uint32_t)prefix_len;
+    ifr6.ifr6_ifindex = ifr.ifr_ifindex;
+
+    if (ioctl(sock, SIOCSIFADDR, &ifr6) < 0) {
+        LOG_ERR("ioctl SIOCSIFADDR (IPv6): %s", strerror(errno));
+        close(sock);
+        return -1;
+    }
+
+    tun->addr6 = addr;
+    tun->has_v6 = 1;
+    close(sock);
+    LOG_INF("TUN %s: IPv6 addr=%s/%d", tun->name, addr6_str, prefix_len);
+    return 0;
+}
+
 int
 mqvpn_tun_read(mqvpn_tun_t *tun, uint8_t *buf, size_t buf_len)
 {

@@ -98,6 +98,8 @@ handle_kv(mqvpn_config_t *cfg, int section, const char *key, const char *val,
             cfg->is_server = 1;
         } else if (strcasecmp(key, "Subnet") == 0) {
             snprintf(cfg->subnet, sizeof(cfg->subnet), "%s", val);
+        } else if (strcasecmp(key, "Subnet6") == 0) {
+            snprintf(cfg->subnet6, sizeof(cfg->subnet6), "%s", val);
         } else if (strcasecmp(key, "LogLevel") == 0) {
             snprintf(cfg->log_level, sizeof(cfg->log_level), "%s", val);
         } else if (strcasecmp(key, "DNS") == 0) {

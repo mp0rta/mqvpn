@@ -1,7 +1,7 @@
 /*
  * flow_sched.h
  *
- * Scheduler mode constants and IPv4 5-tuple flow hash utility.
+ * Scheduler mode constants and IPv4/IPv6 5-tuple flow hash utility.
  * Path selection is handled inside xquic scheduler callbacks
  * (minrtt/wlb).
  */
@@ -21,7 +21,7 @@
  * Compute flow hash for WLB scheduler hint.
  *   TCP (proto 6)  → FNV-1a 5-tuple hash (non-zero, flow-pinned)
  *   UDP/other      → MQVPN_FLOW_HASH_UNPINNED (WRR without pinning)
- *   non-IPv4/short → 0 (MinRTT fallback)
+ *   non-IP/short   → 0 (MinRTT fallback)
  */
 uint32_t flow_hash_pkt(const uint8_t *pkt, int len);
 

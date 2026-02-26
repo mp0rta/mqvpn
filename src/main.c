@@ -25,6 +25,7 @@ usage(const char *prog)
         "  --server HOST:PORT        Server address (client mode, [IPv6]:PORT for IPv6)\n"
         "  --listen BIND:PORT        Listen address (server mode, default 0.0.0.0:443)\n"
         "  --subnet CIDR             Client IP pool (server mode, default 10.0.0.0/24)\n"
+        "  --subnet6 CIDR            IPv6 client IP pool (server mode, e.g. fd00:vpn::/112)\n"
         "  --tun-name NAME           TUN device name (default mqvpn0)\n"
         "  --cert PATH               TLS certificate (server mode)\n"
         "  --key PATH                TLS private key (server mode)\n"
@@ -88,6 +89,7 @@ main(int argc, char *argv[])
         {"server",      required_argument, NULL, 's'},
         {"listen",      required_argument, NULL, 'l'},
         {"subnet",      required_argument, NULL, 'n'},
+        {"subnet6",     required_argument, NULL, '6'},
         {"tun-name",    required_argument, NULL, 't'},
         {"cert",        required_argument, NULL, 'c'},
         {"key",         required_argument, NULL, 'k'},
@@ -110,6 +112,7 @@ main(int argc, char *argv[])
     const char *server_str  = NULL;
     const char *listen_str  = NULL;   /* NULL means "not set by CLI" */
     const char *subnet      = NULL;
+    const char *subnet6     = NULL;
     const char *tun_name    = NULL;
     const char *cert_file   = NULL;
     const char *key_file    = NULL;
@@ -127,7 +130,7 @@ main(int argc, char *argv[])
     int         kill_switch  = -1;  /* -1 = not set by CLI */
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:t:c:k:ia:Gp:d:S:M:L:h",
+    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:ia:Gp:d:S:M:L:h",
                               long_opts, NULL)) != -1) {
         switch (opt) {
         case 'C': config_path = optarg; break;
@@ -135,6 +138,7 @@ main(int argc, char *argv[])
         case 's': server_str = optarg; break;
         case 'l': listen_str = optarg; break;
         case 'n': subnet = optarg; break;
+        case '6': subnet6 = optarg; break;
         case 't': tun_name = optarg; break;
         case 'c': cert_file = optarg; break;
         case 'k': key_file = optarg; break;
@@ -192,6 +196,8 @@ main(int argc, char *argv[])
     const char *eff_scheduler   = scheduler_str ? scheduler_str : file_cfg.scheduler;
     const char *eff_listen      = listen_str  ? listen_str  : file_cfg.listen;
     const char *eff_subnet      = subnet      ? subnet      : file_cfg.subnet;
+    const char *eff_subnet6     = subnet6     ? subnet6     :
+                                  (file_cfg.subnet6[0] ? file_cfg.subnet6 : NULL);
     const char *eff_cert        = cert_file   ? cert_file   : file_cfg.cert_file;
     const char *eff_key         = key_file    ? key_file    : file_cfg.key_file;
     int         eff_insecure    = insecure >= 0 ? insecure  : file_cfg.insecure;
@@ -324,6 +330,7 @@ main(int argc, char *argv[])
             .listen_addr = bind_addr,
             .listen_port = bind_port,
             .subnet      = eff_subnet,
+            .subnet6     = eff_subnet6,
             .tun_name    = eff_tun_name,
             .cert_file   = eff_cert,
             .key_file    = eff_key,

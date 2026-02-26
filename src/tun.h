@@ -14,6 +14,8 @@ typedef struct {
     char            name[IFNAMSIZ];
     struct in_addr  addr;
     struct in_addr  peer_addr;
+    struct in6_addr addr6;
+    int             has_v6;
     int             mtu;
 } mqvpn_tun_t;
 
@@ -35,6 +37,9 @@ int  mqvpn_tun_read(mqvpn_tun_t *tun, uint8_t *buf, size_t buf_len);
 
 /* Write a single IP packet to the TUN device. */
 int  mqvpn_tun_write(mqvpn_tun_t *tun, const uint8_t *buf, size_t len);
+
+/* Assign an IPv6 address to the TUN device. */
+int  mqvpn_tun_set_addr6(mqvpn_tun_t *tun, const char *addr6, int prefix_len);
 
 /* Close the TUN device. */
 void mqvpn_tun_destroy(mqvpn_tun_t *tun);

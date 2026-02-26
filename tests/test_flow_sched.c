@@ -124,16 +124,65 @@ test_hash_different_flows(void)
 }
 
 static void
-test_hash_rejects_non_ipv4(void)
+test_hash_rejects_unknown_version(void)
 {
-    TEST(flow_hash_pkt rejects non-IPv4);
+    TEST(flow_hash_pkt rejects unknown IP version);
 
+    /* Version 5 (invalid) → 0 */
     uint8_t pkt[40] = {0};
-    pkt[0] = 0x60;  /* IPv6 */
+    pkt[0] = 0x50;
     ASSERT_EQ(flow_hash_pkt(pkt, 40), 0);
 
-    /* Too short */
-    ASSERT_EQ(flow_hash_pkt(pkt, 10), 0);
+    /* Too short for any version */
+    ASSERT_EQ(flow_hash_pkt(pkt, 0), 0);
+
+    PASS();
+}
+
+static void
+test_hash_ipv6_tcp(void)
+{
+    TEST(flow_hash_pkt IPv6 TCP returns pinned hash);
+
+    uint8_t pkt[44] = {0};
+    pkt[0] = 0x60;   /* IPv6 */
+    pkt[6] = 6;      /* Next Header: TCP */
+    pkt[8] = 0xfd;   /* src IP */
+    pkt[24] = 0xfd;  /* dst IP */
+    pkt[39] = 0x02;
+    pkt[40] = 0x00; pkt[41] = 80;   /* src port */
+    pkt[42] = 0x01; pkt[43] = 0xBB; /* dst port 443 */
+
+    uint32_t h = flow_hash_pkt(pkt, 44);
+    ASSERT_NEQ(h, 0);
+    ASSERT_NEQ(h, MQVPN_FLOW_HASH_UNPINNED);
+
+    PASS();
+}
+
+static void
+test_hash_ipv6_udp_unpinned(void)
+{
+    TEST(flow_hash_pkt IPv6 UDP returns UNPINNED);
+
+    uint8_t pkt[44] = {0};
+    pkt[0] = 0x60;   /* IPv6 */
+    pkt[6] = 17;     /* Next Header: UDP */
+
+    ASSERT_EQ(flow_hash_pkt(pkt, 44), MQVPN_FLOW_HASH_UNPINNED);
+
+    PASS();
+}
+
+static void
+test_hash_ipv6_too_short(void)
+{
+    TEST(flow_hash_pkt IPv6 too short returns 0);
+
+    uint8_t pkt[39] = {0};
+    pkt[0] = 0x60;
+
+    ASSERT_EQ(flow_hash_pkt(pkt, 39), 0);
 
     PASS();
 }
@@ -403,7 +452,10 @@ main(void)
 
     test_hash_basic();
     test_hash_different_flows();
-    test_hash_rejects_non_ipv4();
+    test_hash_rejects_unknown_version();
+    test_hash_ipv6_tcp();
+    test_hash_ipv6_udp_unpinned();
+    test_hash_ipv6_too_short();
     test_hash_udp();
     test_hash_never_returns_zero();
     test_hash_each_field_matters();
