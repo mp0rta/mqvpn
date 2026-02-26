@@ -1849,7 +1849,15 @@ mqvpn_client_run(const mqvpn_client_cfg_t *cfg)
 
     /* ---- Cleanup ---- */
     LOG_INF("client shutting down");
+
+    /* Destroy xquic engine first — it may fire callbacks that access conn/paths */
+    xqc_engine_destroy(g_cli.engine);
+    g_cli.engine = NULL;
+
+    /* Now tear down session (routes, killswitch, TUN, conn) */
     cli_teardown_session(&g_cli);
+
+    /* Free remaining libevent objects */
     if (g_cli.ev_reconnect)      event_free(g_cli.ev_reconnect);
     if (g_cli.ev_sigterm)        event_free(g_cli.ev_sigterm);
     if (g_cli.ev_sigint)         event_free(g_cli.ev_sigint);
@@ -1858,8 +1866,6 @@ mqvpn_client_run(const mqvpn_client_cfg_t *cfg)
     if (g_cli.ev_path_recreate)  event_free(g_cli.ev_path_recreate);
     if (g_cli.ev_engine)         event_free(g_cli.ev_engine);
     mqvpn_path_mgr_destroy(&g_cli.path_mgr);
-    mqvpn_tun_destroy(&g_cli.tun);
-    xqc_engine_destroy(g_cli.engine);
     event_base_free(g_cli.eb);
 
     return 0;

@@ -85,16 +85,17 @@ ip link add veth-c6 type veth peer name veth-s6
 ip link set veth-c6 netns vpn-client6
 ip link set veth-s6 netns vpn-server6
 
-ip netns exec vpn-client6 ip addr add fd00::1/64 dev veth-c6
-ip netns exec vpn-server6 ip addr add fd00::2/64 dev veth-s6
+# Bring up interfaces and disable DAD before adding addresses
 ip netns exec vpn-client6 ip link set veth-c6 up
 ip netns exec vpn-server6 ip link set veth-s6 up
 ip netns exec vpn-client6 ip link set lo up
 ip netns exec vpn-server6 ip link set lo up
 
-# Disable DAD to avoid waiting for address resolution
 ip netns exec vpn-client6 sysctl -w net.ipv6.conf.veth-c6.accept_dad=0 >/dev/null
 ip netns exec vpn-server6 sysctl -w net.ipv6.conf.veth-s6.accept_dad=0 >/dev/null
+
+ip netns exec vpn-client6 ip addr add fd00::1/64 dev veth-c6 nodad
+ip netns exec vpn-server6 ip addr add fd00::2/64 dev veth-s6 nodad
 
 # veth pair 2: server <-> external (IPv4 WAN side)
 ip link add veth-wan-s6 type veth peer name veth-wan-e6
@@ -126,9 +127,12 @@ ip netns exec vpn-server6 iptables -I FORWARD -i mqvpn0 -s "$SUBNET" -j ACCEPT \
 ip netns exec vpn-server6 iptables -I FORWARD -o mqvpn0 -d "$SUBNET" -j ACCEPT \
     -m comment --comment "$IPTABLES_COMMENT"
 
+# Wait for IPv6 neighbor discovery
+sleep 1
+
 # Verify underlay connectivity
 echo "=== Verifying underlay connectivity ==="
-ip netns exec vpn-client6 ping6 -c 1 -W 2 fd00::2 >/dev/null
+ip netns exec vpn-client6 ping -6 -c 1 -W 2 fd00::2 >/dev/null
 echo "OK: client -> server underlay (IPv6)"
 ip netns exec vpn-server6 ping -c 1 -W 1 172.16.0.2 >/dev/null
 echo "OK: server -> external WAN (IPv4)"
