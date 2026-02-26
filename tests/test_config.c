@@ -649,6 +649,36 @@ static void test_reconnect_interval_invalid(void)
     ASSERT_EQ_INT(cfg.reconnect_interval, 5, "negative interval → default 5");
 }
 
+/* ================================================================
+ *  Subnet6 config tests
+ * ================================================================ */
+
+static void test_subnet6_default(void)
+{
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+
+    ASSERT_EQ_STR(cfg.subnet6, "", "default subnet6 empty");
+}
+
+static void test_subnet6_config_parse(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "Listen = 0.0.0.0:443\n"
+        "Subnet = 10.0.0.0/24\n"
+        "Subnet6 = fd00:abcd::/112\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "subnet6 config parse ok");
+    ASSERT_EQ_STR(cfg.subnet6, "fd00:abcd::/112", "subnet6 parsed");
+}
+
 int main(void)
 {
     test_defaults();
@@ -684,6 +714,10 @@ int main(void)
     test_reconnect_config_parse();
     test_reconnect_config_true();
     test_reconnect_interval_invalid();
+
+    /* subnet6 tests */
+    test_subnet6_default();
+    test_subnet6_config_parse();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

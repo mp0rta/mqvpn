@@ -379,6 +379,102 @@ static void test_prefix_boundary_30(void)
                 "/30 exhausted after 1 client");
 }
 
+/* ---- IPv6 pool tests ---- */
+
+static void test_ipv6_pool_init(void)
+{
+    mqvpn_addr_pool_t pool;
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/24"), 0,
+                  "v4 pool init for v6 test");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init6(&pool, "fd00:abcd::/112"), 0,
+                  "v6 pool init");
+    ASSERT_EQ_INT(pool.has_v6, 1, "has_v6 set");
+    ASSERT_EQ_INT(pool.prefix6, 112, "prefix6 is 112");
+}
+
+static void test_ipv6_pool_get6(void)
+{
+    mqvpn_addr_pool_t pool;
+    mqvpn_addr_pool_init(&pool, "10.0.0.0/24");
+    mqvpn_addr_pool_init6(&pool, "fd00:abcd::/112");
+
+    /* Server addr (offset=1) */
+    struct in6_addr srv6;
+    mqvpn_addr_pool_server_addr6(&pool, &srv6);
+    char str[INET6_ADDRSTRLEN];
+    inet_ntop(AF_INET6, &srv6, str, sizeof(str));
+    ASSERT_EQ_STR(str, "fd00:abcd::1", "server v6 addr is ::1");
+
+    /* Client offset=2 → fd00:abcd::2 */
+    struct in6_addr cli6;
+    mqvpn_addr_pool_get6(&pool, 2, &cli6);
+    inet_ntop(AF_INET6, &cli6, str, sizeof(str));
+    ASSERT_EQ_STR(str, "fd00:abcd::2", "offset 2 → ::2");
+
+    /* Client offset=100 → fd00:abcd::64 */
+    mqvpn_addr_pool_get6(&pool, 100, &cli6);
+    inet_ntop(AF_INET6, &cli6, str, sizeof(str));
+    ASSERT_EQ_STR(str, "fd00:abcd::64", "offset 100 → ::64");
+}
+
+static void test_ipv6_pool_offset6(void)
+{
+    mqvpn_addr_pool_t pool;
+    mqvpn_addr_pool_init(&pool, "10.0.0.0/24");
+    mqvpn_addr_pool_init6(&pool, "fd00:abcd::/112");
+
+    /* Round-trip: get6(offset) → offset6(addr) */
+    struct in6_addr addr;
+    mqvpn_addr_pool_get6(&pool, 42, &addr);
+    uint32_t off = mqvpn_addr_pool_offset6(&pool, &addr);
+    ASSERT_EQ_INT(off, 42, "offset6 round-trip for 42");
+
+    mqvpn_addr_pool_get6(&pool, 1, &addr);
+    off = mqvpn_addr_pool_offset6(&pool, &addr);
+    ASSERT_EQ_INT(off, 1, "offset6 round-trip for 1 (server)");
+
+    /* Out-of-range address → 0 */
+    struct in6_addr bad;
+    inet_pton(AF_INET6, "2001:db8::1", &bad);
+    off = mqvpn_addr_pool_offset6(&pool, &bad);
+    ASSERT_EQ_INT(off, 0, "out-of-range v6 addr → offset 0");
+}
+
+static void test_ipv6_pool_init_bad_prefix(void)
+{
+    mqvpn_addr_pool_t pool;
+    mqvpn_addr_pool_init(&pool, "10.0.0.0/24");
+
+    /* Too small prefix */
+    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::/64") < 0,
+                "/64 prefix rejected");
+
+    /* Too large prefix */
+    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::/127") < 0,
+                "/127 prefix rejected");
+
+    /* No slash */
+    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::1") < 0,
+                "no slash rejected");
+}
+
+static void test_ipv6_shared_offset(void)
+{
+    /* Verify IPv4 and IPv6 share the same offset */
+    mqvpn_addr_pool_t pool;
+    mqvpn_addr_pool_init(&pool, "10.0.0.0/24");
+    mqvpn_addr_pool_init6(&pool, "fd00:abcd::/112");
+
+    struct in_addr ip4;
+    mqvpn_addr_pool_alloc(&pool, &ip4); /* .2 → offset 2 */
+    uint32_t off4 = ntohl(ip4.s_addr) - ntohl(pool.base.s_addr);
+
+    struct in6_addr ip6;
+    mqvpn_addr_pool_get6(&pool, off4, &ip6);
+    uint32_t off6 = mqvpn_addr_pool_offset6(&pool, &ip6);
+    ASSERT_EQ_INT(off4, off6, "IPv4 and IPv6 share same offset");
+}
+
 int main(void)
 {
     test_offset_calculation();
@@ -397,6 +493,13 @@ int main(void)
     test_server_addr();
     test_prefix_boundary_16();
     test_prefix_boundary_30();
+
+    /* IPv6 pool tests */
+    test_ipv6_pool_init();
+    test_ipv6_pool_get6();
+    test_ipv6_pool_offset6();
+    test_ipv6_pool_init_bad_prefix();
+    test_ipv6_shared_offset();
 
     printf("\n=== test_session: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

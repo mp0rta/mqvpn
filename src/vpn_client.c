@@ -77,6 +77,7 @@ struct cli_ctx_s {
 
     /* Split tunneling state */
     int                  routing_configured;
+    int                  routing6_configured; /* IPv6 data plane routes */
     char                 orig_gateway[INET6_ADDRSTRLEN];
     char                 orig_iface[IFNAMSIZ];
     char                 server_ip_str[INET6_ADDRSTRLEN];
@@ -107,9 +108,12 @@ struct cli_conn_s {
     xqc_h3_request_t    *masque_request;
     uint64_t             masque_stream_id;
     int                  tunnel_ok;       /* 200 received */
-    int                  addr_assigned;   /* ADDRESS_ASSIGN received */
+    int                  addr_assigned;   /* IPv4 ADDRESS_ASSIGN received */
     uint8_t              assigned_ip[4];
     uint8_t              assigned_prefix;
+    int                  addr6_assigned;  /* IPv6 ADDRESS_ASSIGN received */
+    uint8_t              assigned_ip6[16];
+    uint8_t              assigned_prefix6;
     uint64_t             dgram_lost_cnt;
     uint64_t             dgram_acked_cnt;
 };
@@ -469,6 +473,23 @@ cli_setup_routes(cli_ctx_t *ctx)
     }
 
     ctx->routing_configured = 1;
+
+    /* Add IPv6 catch-all routes if IPv6 data plane is active */
+    if (ctx->conn && ctx->conn->addr6_assigned) {
+        const char *const tun6_low[] = {
+            "ip", "-6", "route", "replace", "::/1", "dev", ctx->tun.name, NULL
+        };
+        const char *const tun6_high[] = {
+            "ip", "-6", "route", "replace", "8000::/1", "dev", ctx->tun.name, NULL
+        };
+        if (cli_run_ip_cmd(tun6_low) == 0 && cli_run_ip_cmd(tun6_high) == 0) {
+            ctx->routing6_configured = 1;
+            LOG_INF("IPv6 catch-all routes set via %s", ctx->tun.name);
+        } else {
+            LOG_WRN("failed to set IPv6 catch-all routes (continuing IPv4-only)");
+        }
+    }
+
     return 0;
 }
 
@@ -478,7 +499,20 @@ cli_cleanup_routes(cli_ctx_t *ctx)
     if (!ctx->routing_configured)
         return;
 
-    /* Remove TUN catch-all routes (always IPv4 — data plane) */
+    /* Remove IPv6 catch-all routes if configured */
+    if (ctx->routing6_configured) {
+        const char *const del6_low[] = {
+            "ip", "-6", "route", "del", "::/1", "dev", ctx->tun.name, NULL
+        };
+        const char *const del6_high[] = {
+            "ip", "-6", "route", "del", "8000::/1", "dev", ctx->tun.name, NULL
+        };
+        (void)cli_run_ip_cmd(del6_low);
+        (void)cli_run_ip_cmd(del6_high);
+        ctx->routing6_configured = 0;
+    }
+
+    /* Remove IPv4 TUN catch-all routes */
     const char *const del_low[] = {
         "ip", "route", "del", "0.0.0.0/1", "dev", ctx->tun.name, NULL
     };
@@ -610,6 +644,29 @@ cli_setup_killswitch(cli_ctx_t *ctx)
         }
     }
 
+    /* IPv6 data plane: allow TUN for IPv6 traffic */
+    if (ctx->conn && ctx->conn->addr6_assigned) {
+        const char *v6_allow_tun[] = {
+            "ip6tables", "-I", "OUTPUT", "-o", ctx->tun.name,
+            "-j", "ACCEPT", "-m", "comment", "--comment", ctx->ks_comment, NULL
+        };
+        (void)cli_run_iptables_cmd(v6_allow_tun);
+
+        if (!is_v6) {
+            /* Server is IPv4 — need ip6tables lo/drop rules too */
+            const char *v6_allow_lo[] = {
+                "ip6tables", "-I", "OUTPUT", "-o", "lo",
+                "-j", "ACCEPT", "-m", "comment", "--comment", ctx->ks_comment, NULL
+            };
+            const char *v6_drop_all[] = {
+                "ip6tables", "-A", "OUTPUT", "-j", "DROP",
+                "-m", "comment", "--comment", ctx->ks_comment, NULL
+            };
+            (void)cli_run_iptables_cmd(v6_allow_lo);
+            (void)cli_run_iptables_cmd(v6_drop_all);
+        }
+    }
+
     ctx->killswitch_active = 1;
     LOG_INF("kill switch enabled (comment=%s)", ctx->ks_comment);
     return 0;
@@ -680,6 +737,30 @@ cli_cleanup_killswitch(cli_ctx_t *ctx)
         while (cli_run_iptables_cmd(v6_del_drop) == 0) {}
     }
 
+    /* Clean up IPv6 data plane TUN rule (added regardless of server family) */
+    {
+        const char *v6_del_tun[] = {
+            "ip6tables", "-D", "OUTPUT", "-o", ctx->tun.name,
+            "-j", "ACCEPT", "-m", "comment", "--comment", ctx->ks_comment, NULL
+        };
+        while (cli_run_iptables_cmd(v6_del_tun) == 0) {}
+    }
+
+    if (!is_v6) {
+        /* Server was IPv4 — clean up IPv6 data plane lo/drop rules */
+        const char *v6_del_lo[] = {
+            "ip6tables", "-D", "OUTPUT", "-o", "lo",
+            "-j", "ACCEPT", "-m", "comment", "--comment", ctx->ks_comment, NULL
+        };
+        while (cli_run_iptables_cmd(v6_del_lo) == 0) {}
+
+        const char *v6_del_drop[] = {
+            "ip6tables", "-D", "OUTPUT", "-j", "DROP",
+            "-m", "comment", "--comment", ctx->ks_comment, NULL
+        };
+        while (cli_run_iptables_cmd(v6_del_drop) == 0) {}
+    }
+
     ctx->killswitch_active = 0;
     LOG_INF("kill switch rules removed");
 }
@@ -708,7 +789,13 @@ cli_setup_tun(cli_ctx_t *ctx, const uint8_t *ip, uint8_t prefix)
     if (mqvpn_tun_set_addr(&ctx->tun, local_ip, peer_ip, 32) < 0) {
         return -1;
     }
-    /* Set MTU based on QUIC datagram MSS minus MASQUE framing overhead */
+    /* Set MTU based on QUIC datagram MSS minus MASQUE framing overhead.
+     * IPv6 requires minimum link MTU of 1280 (RFC 8200 §5); the kernel
+     * refuses to add IPv6 addresses on devices with smaller MTU and will
+     * remove existing ones if MTU drops below 1280.
+     *
+     * TODO(RFC 9484 §7.2): The 1280 clamp is a workaround — see the
+     * corresponding TODO in vpn_server.c (IPv6 ADDRESS_ASSIGN). */
     int tun_mtu = 1280;
     if (ctx->conn && ctx->conn->dgram_mss > 0) {
         size_t udp_mss = xqc_h3_ext_masque_udp_mss(
@@ -719,11 +806,26 @@ cli_setup_tun(cli_ctx_t *ctx, const uint8_t *ip, uint8_t prefix)
         LOG_INF("TUN MTU from dgram_mss=%zu masque_udp_mss=%zu → %d",
                 ctx->conn->dgram_mss, udp_mss, tun_mtu);
     }
+    if (ctx->conn && ctx->conn->addr6_assigned && tun_mtu < 1280) {
+        tun_mtu = 1280;
+    }
     if (mqvpn_tun_set_mtu(&ctx->tun, tun_mtu) < 0) {
         return -1;
     }
     if (mqvpn_tun_up(&ctx->tun) < 0) {
         return -1;
+    }
+
+    /* Set IPv6 address on TUN if assigned */
+    if (ctx->conn && ctx->conn->addr6_assigned) {
+        char v6str[INET6_ADDRSTRLEN];
+        struct in6_addr a6;
+        memcpy(&a6, ctx->conn->assigned_ip6, 16);
+        inet_ntop(AF_INET6, &a6, v6str, sizeof(v6str));
+        if (mqvpn_tun_set_addr6(&ctx->tun, v6str,
+                                 ctx->conn->assigned_prefix6) < 0) {
+            LOG_WRN("failed to set IPv6 address on TUN (continuing IPv4-only)");
+        }
     }
 
     /* Register TUN read event */
@@ -781,18 +883,25 @@ cli_tun_read_handler(int fd, short what, void *arg)
         int n = mqvpn_tun_read(&ctx->tun, pkt, sizeof(pkt));
         if (n <= 0) break;
 
-        /* Drop non-IPv4 packets (IPv6 not yet supported) */
-        if (n < 20 || (pkt[0] >> 4) != 4) {
-            LOG_DBG("dropping non-IPv4 outbound packet");
-            continue;
-        }
+        if (n < 1) continue;
+        uint8_t ip_ver = pkt[0] >> 4;
 
-        /* Validate source IP matches assigned address */
-        if (conn->addr_assigned) {
-            if (memcmp(pkt + 12, conn->assigned_ip, 4) != 0) {
-                LOG_DBG("dropping outbound packet: src IP mismatch");
+        if (ip_ver == 4) {
+            if (n < 20) continue;
+            /* Validate source IP matches assigned address */
+            if (conn->addr_assigned &&
+                memcmp(pkt + 12, conn->assigned_ip, 4) != 0) {
+                LOG_DBG("dropping outbound packet: src IPv4 mismatch");
                 continue;
             }
+        } else if (ip_ver == 6) {
+            if (n < 40 || !conn->addr6_assigned) continue;
+            if (memcmp(pkt + 8, conn->assigned_ip6, 16) != 0) {
+                LOG_DBG("dropping outbound packet: src IPv6 mismatch");
+                continue;
+            }
+        } else {
+            continue;
         }
 
         size_t frame_written = 0;
@@ -1098,12 +1207,23 @@ cli_process_capsules(cli_stream_t *stream)
                     memcpy(conn->assigned_ip, ip_addr, 4);
                     conn->assigned_prefix = prefix;
                     conn->addr_assigned = 1;
+                    LOG_INF("ADDRESS_ASSIGN: req_id=%" PRIu64 " IPv4 "
+                            "%d.%d.%d.%d/%d",
+                            req_id,
+                            ip_addr[0], ip_addr[1], ip_addr[2], ip_addr[3],
+                            prefix);
+                } else if (ip_ver == 6 && !conn->addr6_assigned) {
+                    memcpy(conn->assigned_ip6, ip_addr, 16);
+                    conn->assigned_prefix6 = prefix;
+                    conn->addr6_assigned = 1;
+                    char v6str[INET6_ADDRSTRLEN];
+                    inet_ntop(AF_INET6, ip_addr, v6str, sizeof(v6str));
+                    LOG_INF("ADDRESS_ASSIGN: req_id=%" PRIu64 " IPv6 "
+                            "%s/%d", req_id, v6str, prefix);
+                } else {
+                    LOG_INF("ADDRESS_ASSIGN: req_id=%" PRIu64 " ipv%d "
+                            "(duplicate, ignored)", req_id, ip_ver);
                 }
-                LOG_INF("ADDRESS_ASSIGN: req_id=%" PRIu64 " ipv%d "
-                        "%d.%d.%d.%d/%d",
-                        req_id, ip_ver,
-                        ip_addr[0], ip_addr[1], ip_addr[2], ip_addr[3],
-                        prefix);
                 ap += aa_consumed;
                 aremain -= aa_consumed;
             }
@@ -1275,6 +1395,62 @@ cli_send_icmp_time_exceeded(cli_conn_t *conn, const uint8_t *orig_pkt,
     LOG_DBG("sent ICMP Time Exceeded to local app");
 }
 
+/* Send ICMPv6 Time Exceeded (type=3, code=0) back to local app */
+static void
+cli_send_icmpv6_time_exceeded(cli_conn_t *conn, const uint8_t *orig_pkt,
+                               size_t orig_len)
+{
+    if (orig_len < 40 || !conn->addr6_assigned) return;
+
+    /* ICMPv6 payload: as much of original packet as fits in 1280 MTU */
+    size_t icmpv6_data_len = orig_len;
+    if (40 + 8 + icmpv6_data_len > 1280)
+        icmpv6_data_len = 1280 - 40 - 8;
+    size_t icmpv6_len = 8 + icmpv6_data_len;
+    size_t total_len = 40 + icmpv6_len;
+
+    uint8_t pkt[1280];
+    memset(pkt, 0, total_len);
+
+    /* IPv6 header */
+    pkt[0] = 0x60;
+    pkt[4] = (icmpv6_len >> 8) & 0xFF;
+    pkt[5] = icmpv6_len & 0xFF;
+    pkt[6] = 58;    /* next header: ICMPv6 */
+    pkt[7] = 64;    /* hop limit */
+    memcpy(pkt + 8, conn->assigned_ip6, 16);   /* src = client assigned */
+    memcpy(pkt + 24, orig_pkt + 8, 16);        /* dst = original src */
+
+    /* ICMPv6 Time Exceeded */
+    uint8_t *icmp = pkt + 40;
+    icmp[0] = 3;
+    icmp[1] = 0;
+    memcpy(icmp + 8, orig_pkt, icmpv6_data_len);
+
+    /* Checksum with pseudo-header */
+    uint32_t cksum = 0;
+    for (int i = 0; i < 16; i += 2)
+        cksum += ((uint32_t)pkt[8 + i] << 8) | pkt[8 + i + 1];
+    for (int i = 0; i < 16; i += 2)
+        cksum += ((uint32_t)pkt[24 + i] << 8) | pkt[24 + i + 1];
+    cksum += (uint32_t)(icmpv6_len >> 16);
+    cksum += (uint32_t)(icmpv6_len & 0xFFFF);
+    cksum += 58;
+    for (size_t i = 0; i < icmpv6_len; i += 2) {
+        cksum += ((uint32_t)icmp[i] << 8);
+        if (i + 1 < icmpv6_len)
+            cksum += icmp[i + 1];
+    }
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    uint16_t icmp_cksum = ~(uint16_t)cksum;
+    icmp[2] = icmp_cksum >> 8;
+    icmp[3] = icmp_cksum & 0xFF;
+
+    mqvpn_tun_write(&conn->ctx->tun, pkt, total_len);
+    LOG_DBG("sent ICMPv6 Time Exceeded to local app");
+}
+
 static void
 cli_dgram_read_notify(xqc_h3_conn_t *h3_conn, const void *data,
                        size_t data_len, void *user_data, uint64_t ts)
@@ -1298,28 +1474,41 @@ cli_dgram_read_notify(xqc_h3_conn_t *h3_conn, const void *data,
     /* Check IP version */
     if (payload_len < 1) return;
     uint8_t ip_ver = payload[0] >> 4;
-    if (ip_ver == 6) {
-        LOG_DBG("dropping IPv6 packet (not supported)");
-        return;
-    }
-    if (ip_ver != 4 || payload_len < 20) {
-        LOG_DBG("dropping non-IPv4 packet (version=%d len=%zu)", ip_ver, payload_len);
-        return;
-    }
-
-    /* Decrement TTL before forwarding (RFC 9484 §4.3 MUST) */
     uint8_t fwd_pkt[PACKET_BUF_SIZE];
-    memcpy(fwd_pkt, payload, payload_len);
-    if (fwd_pkt[8] <= 1) {
-        LOG_DBG("dropping packet: TTL expired");
-        cli_send_icmp_time_exceeded(conn, payload, payload_len);
+
+    if (ip_ver == 4) {
+        if (payload_len < 20) return;
+
+        /* Decrement TTL before forwarding (RFC 9484 §4.3 MUST) */
+        memcpy(fwd_pkt, payload, payload_len);
+        if (fwd_pkt[8] <= 1) {
+            LOG_DBG("dropping packet: TTL expired");
+            cli_send_icmp_time_exceeded(conn, payload, payload_len);
+            return;
+        }
+        fwd_pkt[8]--;
+        uint32_t sum = ((uint32_t)fwd_pkt[10] << 8 | fwd_pkt[11]) + 0x0100;
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        fwd_pkt[10] = (sum >> 8) & 0xFF;
+        fwd_pkt[11] = sum & 0xFF;
+
+    } else if (ip_ver == 6) {
+        if (payload_len < 40 || !conn->addr6_assigned) return;
+
+        /* Decrement Hop Limit (byte 7) before forwarding */
+        memcpy(fwd_pkt, payload, payload_len);
+        if (fwd_pkt[7] <= 1) {
+            LOG_DBG("dropping IPv6 packet: hop limit expired");
+            cli_send_icmpv6_time_exceeded(conn, payload, payload_len);
+            return;
+        }
+        fwd_pkt[7]--;
+        /* IPv6 has no header checksum */
+
+    } else {
+        LOG_DBG("dropping non-IP packet (version=%d len=%zu)", ip_ver, payload_len);
         return;
     }
-    fwd_pkt[8]--;
-    uint32_t sum = ((uint32_t)fwd_pkt[10] << 8 | fwd_pkt[11]) + 0x0100;
-    sum = (sum & 0xFFFF) + (sum >> 16);
-    fwd_pkt[10] = (sum >> 8) & 0xFF;
-    fwd_pkt[11] = sum & 0xFF;
 
     /* Write IP packet to TUN (delivered to local apps) */
     int wret = mqvpn_tun_write(&conn->ctx->tun, fwd_pkt, payload_len);
@@ -1391,7 +1580,10 @@ cli_dgram_mss_updated_notify(xqc_h3_conn_t *conn, size_t mss,
         size_t udp_mss = xqc_h3_ext_masque_udp_mss(
             mss, cli_conn->masque_stream_id);
         if (udp_mss >= 68) {
-            mqvpn_tun_set_mtu(&cli_conn->ctx->tun, (int)udp_mss);
+            int new_mtu = (int)udp_mss;
+            if (cli_conn->addr6_assigned && new_mtu < 1280)
+                new_mtu = 1280;
+            mqvpn_tun_set_mtu(&cli_conn->ctx->tun, new_mtu);
         }
     }
 }
