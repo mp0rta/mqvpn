@@ -19,6 +19,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 LISTEN="0.0.0.0:443"
 SUBNET="10.0.0.0/24"
+TUN_NAME="mqvpn0"
 CERT="$PROJECT_DIR/certs/server.crt"
 KEY="$PROJECT_DIR/certs/server.key"
 AUTH_KEY=""
@@ -75,6 +76,11 @@ if [ -n "$CONFIG" ]; then
     if [ -n "$cfg_subnet" ]; then
         SUBNET="$cfg_subnet"
     fi
+    # Extract TunName from config (used for FORWARD rules)
+    cfg_tun=$(sed -n 's/^[[:space:]]*TunName[[:space:]]*=[[:space:]]*\(.*\)/\1/p' "$CONFIG" | tail -1 | tr -d '[:space:]')
+    if [ -n "$cfg_tun" ]; then
+        TUN_NAME="$cfg_tun"
+    fi
 fi
 
 # --- Lock file (prevent concurrent instances) ---
@@ -107,9 +113,9 @@ cleanup() {
     if [ "$SKIP_NAT" -eq 0 ] && [ -n "$NAT_IFACE" ]; then
         while iptables -t nat -D POSTROUTING -s "$SUBNET" -o "$NAT_IFACE" -j MASQUERADE \
             -m comment --comment "$IPTABLES_COMMENT" 2>/dev/null; do :; done
-        while iptables -D FORWARD -i mqvpn0 -s "$SUBNET" -j ACCEPT \
+        while iptables -D FORWARD -i "$TUN_NAME" -s "$SUBNET" -j ACCEPT \
             -m comment --comment "$IPTABLES_COMMENT" 2>/dev/null; do :; done
-        while iptables -D FORWARD -o mqvpn0 -d "$SUBNET" -j ACCEPT \
+        while iptables -D FORWARD -o "$TUN_NAME" -d "$SUBNET" -j ACCEPT \
             -m comment --comment "$IPTABLES_COMMENT" 2>/dev/null; do :; done
         echo "  iptables rules removed"
     fi
@@ -152,9 +158,9 @@ if [ "$SKIP_NAT" -eq 0 ]; then
         echo "Setting up NAT: $SUBNET → $NAT_IFACE"
         iptables -t nat -A POSTROUTING -s "$SUBNET" -o "$NAT_IFACE" -j MASQUERADE \
             -m comment --comment "$IPTABLES_COMMENT"
-        iptables -I FORWARD -i mqvpn0 -s "$SUBNET" -j ACCEPT \
+        iptables -I FORWARD -i "$TUN_NAME" -s "$SUBNET" -j ACCEPT \
             -m comment --comment "$IPTABLES_COMMENT"
-        iptables -I FORWARD -o mqvpn0 -d "$SUBNET" -j ACCEPT \
+        iptables -I FORWARD -o "$TUN_NAME" -d "$SUBNET" -j ACCEPT \
             -m comment --comment "$IPTABLES_COMMENT"
     fi
 fi

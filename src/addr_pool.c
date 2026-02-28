@@ -13,6 +13,7 @@ mqvpn_addr_pool_init(mqvpn_addr_pool_t *pool, const char *cidr)
     /* Parse "10.0.0.0/24" */
     char buf[32];
     strncpy(buf, cidr, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
     char *slash = strchr(buf, '/');
     if (!slash) {
         LOG_ERR("addr_pool: invalid CIDR: %s", cidr);

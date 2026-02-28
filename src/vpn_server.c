@@ -735,13 +735,13 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
         addr_payload, addr_written);
     if (xret != XQC_OK) {
         LOG_ERR("capsule encode ADDRESS_ASSIGN: %d", xret);
-        return -1;
+        goto fail_release_ip;
     }
 
     ret = xqc_h3_request_send_body(h3_request, capsule_buf, cap_written, 0);
     if (ret < 0) {
         LOG_ERR("send ADDRESS_ASSIGN: %zd", ret);
-        return -1;
+        goto fail_release_ip;
     }
 
     char ip_str[INET_ADDRSTRLEN];
@@ -813,13 +813,13 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
         route_payload, rp_off);
     if (xret != XQC_OK) {
         LOG_ERR("capsule encode ROUTE_ADVERTISEMENT: %d", xret);
-        return -1;
+        goto fail_release_ip;
     }
 
     ret = xqc_h3_request_send_body(h3_request, route_capsule, rc_written, 0);
     if (ret < 0) {
         LOG_ERR("send ROUTE_ADVERTISEMENT: %zd", ret);
-        return -1;
+        goto fail_release_ip;
     }
 
     /* 4b. IPv6 ROUTE_ADVERTISEMENT (:: → ffff:...:ffff) */
@@ -857,6 +857,11 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
     LOG_INF("MASQUE tunnel established (stream_id=%" PRIu64 ", clients=%d)",
             conn->masque_stream_id, ctx->n_sessions);
     return 0;
+
+fail_release_ip:
+    mqvpn_addr_pool_release(&ctx->pool, &conn->assigned_ip);
+    memset(&conn->assigned_ip, 0, sizeof(conn->assigned_ip));
+    return -1;
 }
 
 /* ================================================================
@@ -978,7 +983,9 @@ svr_request_read_notify(xqc_h3_request_t *h3_request,
             }
 
             LOG_INF("Extended CONNECT for connect-ip received");
-            svr_masque_send_response(h3_request, stream);
+            if (svr_masque_send_response(h3_request, stream) < 0) {
+                return -1;
+            }
             return 0;
         }
     }
