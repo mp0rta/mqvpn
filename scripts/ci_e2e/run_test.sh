@@ -92,14 +92,14 @@ ip netns exec vpn-server "$MQVPN" \
     --cert "${WORK_DIR}/server.crt" \
     --key "${WORK_DIR}/server.key" \
     --auth-key "$PSK" \
-    --log-level "$LOG_LEVEL" &
+    --log-level "$LOG_LEVEL" > "${WORK_DIR}/server.log" 2>&1 &
 SERVER_PID=$!
 sleep 2
 
 # Check server is still running
 if ! kill -0 "$SERVER_PID" 2>/dev/null; then
     echo "=== FAIL: Server process died ==="
-    wait "$SERVER_PID" 2>/dev/null || true
+    cat "${WORK_DIR}/server.log"
     exit 1
 fi
 echo "Server running (PID $SERVER_PID)"
@@ -110,14 +110,19 @@ ip netns exec vpn-client "$MQVPN" \
     --server 192.168.100.2:4433 \
     --auth-key "$PSK" \
     --insecure \
-    --log-level "$LOG_LEVEL" &
+    --log-level "$LOG_LEVEL" > "${WORK_DIR}/client.log" 2>&1 &
 CLIENT_PID=$!
 sleep 3
 
 # Check client is still running
 if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
     echo "=== FAIL: Client process died ==="
-    wait "$CLIENT_PID" 2>/dev/null || true
+    echo ""
+    echo "--- Server log ---"
+    cat "${WORK_DIR}/server.log"
+    echo ""
+    echo "--- Client log ---"
+    cat "${WORK_DIR}/client.log"
     exit 1
 fi
 echo "Client running (PID $CLIENT_PID)"
@@ -140,6 +145,12 @@ if ip netns exec vpn-client ping -c 3 -W 2 10.0.0.1; then
 else
     echo ""
     echo "=== FAIL: Could not ping through VPN tunnel ==="
+    echo ""
+    echo "--- Server log ---"
+    cat "${WORK_DIR}/server.log"
+    echo ""
+    echo "--- Client log ---"
+    cat "${WORK_DIR}/client.log"
     exit 1
 fi
 
@@ -167,6 +178,12 @@ if kill -0 "$CLIENT_STRICT_PID" 2>/dev/null; then
         echo "=== FAIL: Self-signed cert was accepted without --insecure ==="
         kill "$CLIENT_STRICT_PID" 2>/dev/null || true
         wait "$CLIENT_STRICT_PID" 2>/dev/null || true
+        echo ""
+        echo "--- Server log ---"
+        cat "${WORK_DIR}/server.log"
+        echo ""
+        echo "--- Client strict log ---"
+        cat "${WORK_DIR}/client_strict.log"
         exit 1
     else
         echo "OK: Client running but no tunnel (cert rejected)"
