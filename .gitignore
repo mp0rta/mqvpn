@@ -12,3 +12,4 @@ tests/test_config
 tests/test_auth
 tests/test_session
 tests/test_dns
+client.conf

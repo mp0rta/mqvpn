@@ -296,7 +296,7 @@ Server:
 cd build && ctest --output-on-failure
 
 # Integration test (requires root, uses network namespaces)
-sudo scripts/run_test.sh
+sudo scripts/ci_e2e/run_test.sh
 
 # Multipath integration test (2 paths, failover, recovery)
 sudo scripts/run_multipath_test.sh
