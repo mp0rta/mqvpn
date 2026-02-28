@@ -1267,7 +1267,9 @@ cli_masque_start_tunnel(cli_conn_t *conn)
     ssize_t ret = xqc_h3_request_send_headers(req, &headers, 0);
     if (ret < 0) {
         LOG_ERR("send Extended CONNECT: %zd", ret);
-        free(stream);
+        conn->masque_request = NULL;
+        xqc_h3_request_close(req);
+        /* stream is freed in cli_request_close_notify callback */
         return -1;
     }
 
