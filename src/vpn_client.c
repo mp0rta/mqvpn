@@ -836,30 +836,57 @@ cli_setup_tun(cli_ctx_t *ctx, const uint8_t *ip, uint8_t prefix)
         }
     }
 
-    /* Register TUN read event */
-    ctx->ev_tun = event_new(ctx->eb, ctx->tun.fd,
-                             EV_READ | EV_PERSIST,
-                             cli_tun_read_handler, ctx);
-    event_add(ctx->ev_tun, NULL);
-    ctx->tun_up = 1;
-
     LOG_INF("TUN %s configured: %s → %s", ctx->tun.name, local_ip, peer_ip);
 
     /* Set up split tunneling routes */
-    cli_setup_routes(ctx);
+    if (cli_setup_routes(ctx) < 0) {
+        LOG_ERR("split tunnel route setup failed, aborting tunnel");
+        goto fail;
+    }
 
     /* Enable kill switch if configured */
     if (cli_setup_killswitch(ctx) < 0) {
         LOG_ERR("kill switch setup failed, aborting tunnel");
-        return -1;
+        goto fail;
     }
 
     /* Apply DNS override if configured */
     if (ctx->dns.n_servers > 0) {
-        mqvpn_dns_apply(&ctx->dns);
+        if (mqvpn_dns_apply(&ctx->dns) < 0) {
+            LOG_ERR("DNS override setup failed, aborting tunnel");
+            goto fail;
+        }
     }
 
+    /* Register TUN read event only after route/killswitch/DNS setup succeeds. */
+    ctx->ev_tun = event_new(ctx->eb, ctx->tun.fd,
+                             EV_READ | EV_PERSIST,
+                             cli_tun_read_handler, ctx);
+    if (!ctx->ev_tun) {
+        LOG_ERR("failed to create TUN event");
+        goto fail;
+    }
+    if (event_add(ctx->ev_tun, NULL) < 0) {
+        LOG_ERR("failed to register TUN event");
+        event_free(ctx->ev_tun);
+        ctx->ev_tun = NULL;
+        goto fail;
+    }
+    ctx->tun_up = 1;
+
     return 0;
+
+fail:
+    /* Fail-close: if setup steps fail, ensure no partial tunnel state remains. */
+    cli_cleanup_killswitch(ctx);
+    cli_cleanup_routes(ctx);
+    mqvpn_dns_restore(&ctx->dns);
+    if (ctx->tun.fd >= 0) {
+        mqvpn_tun_destroy(&ctx->tun);
+    }
+    ctx->tun.fd = -1;
+    ctx->tun_up = 0;
+    return -1;
 }
 
 /* ================================================================
