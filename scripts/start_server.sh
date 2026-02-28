@@ -2,12 +2,15 @@
 # start_server.sh — Generate certs, configure NAT, and start mqvpn server
 #
 # Usage: sudo ./scripts/start_server.sh [options]
+#   --config PATH        mqvpn config file (all settings read from config)
+#   --skip-nat           Skip NAT/forwarding setup (can be used with --config)
+#
+# Without --config:
 #   --listen ADDR:PORT   Listen address (default: 0.0.0.0:443)
 #   --subnet CIDR        Client IP pool (default: 10.0.0.0/24)
 #   --cert PATH          TLS certificate (default: certs/server.crt)
 #   --key PATH           TLS private key (default: certs/server.key)
 #   --auth-key KEY       Pre-shared key for client auth (default: auto-generated)
-#   --skip-nat           Skip NAT/forwarding setup
 
 set -e
 
@@ -19,24 +22,59 @@ SUBNET="10.0.0.0/24"
 CERT="$PROJECT_DIR/certs/server.crt"
 KEY="$PROJECT_DIR/certs/server.key"
 AUTH_KEY=""
+CONFIG=""
 SKIP_NAT=0
+HAS_LISTEN=0
+HAS_SUBNET=0
+HAS_CERT=0
+HAS_KEY=0
+HAS_AUTH_KEY=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --listen)  LISTEN="$2"; shift 2 ;;
-        --subnet)  SUBNET="$2"; shift 2 ;;
-        --cert)    CERT="$2"; shift 2 ;;
-        --key)     KEY="$2"; shift 2 ;;
-        --auth-key) AUTH_KEY="$2"; shift 2 ;;
+        --listen)  LISTEN="$2"; HAS_LISTEN=1; shift 2 ;;
+        --subnet)  SUBNET="$2"; HAS_SUBNET=1; shift 2 ;;
+        --cert)    CERT="$2"; HAS_CERT=1; shift 2 ;;
+        --key)     KEY="$2"; HAS_KEY=1; shift 2 ;;
+        --auth-key) AUTH_KEY="$2"; HAS_AUTH_KEY=1; shift 2 ;;
+        --config)  CONFIG="$2"; shift 2 ;;
         --skip-nat) SKIP_NAT=1; shift ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
 
+# --- Validate flag combinations ---
+if [ -n "$CONFIG" ]; then
+    CONFLICT=""
+    [ "$HAS_LISTEN" -eq 1 ] && CONFLICT="$CONFLICT --listen"
+    [ "$HAS_SUBNET" -eq 1 ] && CONFLICT="$CONFLICT --subnet"
+    [ "$HAS_CERT" -eq 1 ] && CONFLICT="$CONFLICT --cert"
+    [ "$HAS_KEY" -eq 1 ] && CONFLICT="$CONFLICT --key"
+    [ "$HAS_AUTH_KEY" -eq 1 ] && CONFLICT="$CONFLICT --auth-key"
+    if [ -n "$CONFLICT" ]; then
+        echo "Error: --config cannot be combined with:$CONFLICT"
+        echo "Only --skip-nat can be used with --config."
+        exit 1
+    fi
+fi
+
 MQVPN="$PROJECT_DIR/build/mqvpn"
 if [ ! -x "$MQVPN" ]; then
     echo "Error: $MQVPN not found. Run './build.sh' first."
     exit 1
+fi
+
+# --- Read values from config file if provided ---
+if [ -n "$CONFIG" ]; then
+    if [ ! -f "$CONFIG" ]; then
+        echo "Error: config file not found: $CONFIG"
+        exit 1
+    fi
+    # Extract Subnet from config (used for NAT setup)
+    cfg_subnet=$(sed -n 's/^[[:space:]]*Subnet[[:space:]]*=[[:space:]]*\(.*\)/\1/p' "$CONFIG" | tail -1 | tr -d '[:space:]')
+    if [ -n "$cfg_subnet" ]; then
+        SUBNET="$cfg_subnet"
+    fi
 fi
 
 # --- Lock file (prevent concurrent instances) ---
@@ -87,15 +125,17 @@ cleanup() {
 
 trap cleanup EXIT
 
-# --- Generate self-signed certificate if missing ---
-if [ ! -f "$CERT" ] || [ ! -f "$KEY" ]; then
-    echo "Generating self-signed certificate..."
-    mkdir -p "$(dirname "$CERT")"
-    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-        -keyout "$KEY" -out "$CERT" \
-        -days 365 -nodes -subj "/CN=mqvpn" 2>/dev/null
-    echo "  cert: $CERT"
-    echo "  key:  $KEY"
+# --- Generate self-signed certificate if missing (skip if --config) ---
+if [ -z "$CONFIG" ]; then
+    if [ ! -f "$CERT" ] || [ ! -f "$KEY" ]; then
+        echo "Generating self-signed certificate..."
+        mkdir -p "$(dirname "$CERT")"
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+            -keyout "$KEY" -out "$CERT" \
+            -days 365 -nodes -subj "/CN=mqvpn" 2>/dev/null
+        echo "  cert: $CERT"
+        echo "  key:  $KEY"
+    fi
 fi
 
 # --- NAT setup ---
@@ -119,17 +159,22 @@ if [ "$SKIP_NAT" -eq 0 ]; then
     fi
 fi
 
-# --- Generate PSK if not provided ---
-if [ -z "$AUTH_KEY" ]; then
+# --- Generate PSK if not provided (skip if --config) ---
+if [ -z "$CONFIG" ] && [ -z "$AUTH_KEY" ]; then
     AUTH_KEY=$("$MQVPN" --genkey 2>/dev/null)
     echo "Generated auth key: $AUTH_KEY"
     echo "Use this key on the client with: --auth-key \"$AUTH_KEY\""
 fi
 
 # --- Start server ---
-echo "Starting mqvpn server (listen=$LISTEN, subnet=$SUBNET)..."
-"$MQVPN" --mode server --listen "$LISTEN" \
-    --subnet "$SUBNET" --cert "$CERT" --key "$KEY" \
-    --auth-key "$AUTH_KEY" &
+if [ -n "$CONFIG" ]; then
+    echo "Starting mqvpn server (config=$CONFIG, subnet=$SUBNET)..."
+    "$MQVPN" --config "$CONFIG" &
+else
+    echo "Starting mqvpn server (listen=$LISTEN, subnet=$SUBNET)..."
+    "$MQVPN" --mode server --listen "$LISTEN" \
+        --subnet "$SUBNET" --cert "$CERT" --key "$KEY" \
+        --auth-key "$AUTH_KEY" &
+fi
 MQVPN_PID=$!
 wait $MQVPN_PID 2>/dev/null || true

@@ -124,16 +124,65 @@ test_hash_different_flows(void)
 }
 
 static void
-test_hash_rejects_non_ipv4(void)
+test_hash_rejects_unknown_version(void)
 {
-    TEST(flow_hash_pkt rejects non-IPv4);
+    TEST(flow_hash_pkt rejects unknown IP version);
 
+    /* Version 5 (invalid) → 0 */
     uint8_t pkt[40] = {0};
-    pkt[0] = 0x60;  /* IPv6 */
+    pkt[0] = 0x50;
     ASSERT_EQ(flow_hash_pkt(pkt, 40), 0);
 
-    /* Too short */
-    ASSERT_EQ(flow_hash_pkt(pkt, 10), 0);
+    /* Too short for any version */
+    ASSERT_EQ(flow_hash_pkt(pkt, 0), 0);
+
+    PASS();
+}
+
+static void
+test_hash_ipv6_tcp(void)
+{
+    TEST(flow_hash_pkt IPv6 TCP returns pinned hash);
+
+    uint8_t pkt[44] = {0};
+    pkt[0] = 0x60;   /* IPv6 */
+    pkt[6] = 6;      /* Next Header: TCP */
+    pkt[8] = 0xfd;   /* src IP */
+    pkt[24] = 0xfd;  /* dst IP */
+    pkt[39] = 0x02;
+    pkt[40] = 0x00; pkt[41] = 80;   /* src port */
+    pkt[42] = 0x01; pkt[43] = 0xBB; /* dst port 443 */
+
+    uint32_t h = flow_hash_pkt(pkt, 44);
+    ASSERT_NEQ(h, 0);
+    ASSERT_NEQ(h, MQVPN_FLOW_HASH_UNPINNED);
+
+    PASS();
+}
+
+static void
+test_hash_ipv6_udp_unpinned(void)
+{
+    TEST(flow_hash_pkt IPv6 UDP returns UNPINNED);
+
+    uint8_t pkt[44] = {0};
+    pkt[0] = 0x60;   /* IPv6 */
+    pkt[6] = 17;     /* Next Header: UDP */
+
+    ASSERT_EQ(flow_hash_pkt(pkt, 44), MQVPN_FLOW_HASH_UNPINNED);
+
+    PASS();
+}
+
+static void
+test_hash_ipv6_too_short(void)
+{
+    TEST(flow_hash_pkt IPv6 too short returns 0);
+
+    uint8_t pkt[39] = {0};
+    pkt[0] = 0x60;
+
+    ASSERT_EQ(flow_hash_pkt(pkt, 39), 0);
 
     PASS();
 }
@@ -394,6 +443,187 @@ test_sched_mode_constants(void)
     PASS();
 }
 
+/* ── Helper: build fake IPv6 packets ── */
+
+static int
+make_ipv6_tcp_pkt(uint8_t *buf, const uint8_t *src_ip, uint16_t src_port,
+                  const uint8_t *dst_ip, uint16_t dst_port)
+{
+    memset(buf, 0, 44);
+    buf[0] = 0x60;  /* IPv6 */
+    buf[6] = 6;     /* Next Header: TCP */
+    buf[7] = 64;    /* Hop Limit */
+
+    memcpy(buf + 8, src_ip, 16);
+    memcpy(buf + 24, dst_ip, 16);
+
+    /* TCP ports (network byte order) */
+    buf[40] = src_port >> 8;
+    buf[41] = src_port & 0xff;
+    buf[42] = dst_port >> 8;
+    buf[43] = dst_port & 0xff;
+
+    return 44;
+}
+
+/* ── IPv6 edge-case tests ── */
+
+static void
+test_hash_ipv6_icmpv6_unpinned(void)
+{
+    TEST(flow_hash_pkt IPv6 ICMPv6 returns UNPINNED);
+
+    uint8_t pkt[44] = {0};
+    pkt[0] = 0x60;   /* IPv6 */
+    pkt[6] = 58;     /* Next Header: ICMPv6 */
+
+    struct in6_addr src, dst;
+    inet_pton(AF_INET6, "fd00::1", &src);
+    inet_pton(AF_INET6, "fd00::2", &dst);
+    memcpy(pkt + 8, &src, 16);
+    memcpy(pkt + 24, &dst, 16);
+
+    ASSERT_EQ(flow_hash_pkt(pkt, 44), MQVPN_FLOW_HASH_UNPINNED);
+
+    PASS();
+}
+
+static void
+test_hash_ipv6_tcp_truncated_no_ports(void)
+{
+    TEST(flow_hash_pkt IPv6 TCP truncated (40 bytes, no ports) returns UNPINNED);
+
+    /* 40 bytes = IPv6 header only, TCP next header but no L4 data */
+    uint8_t pkt[40] = {0};
+    pkt[0] = 0x60;
+    pkt[6] = 6;  /* TCP */
+
+    struct in6_addr src, dst;
+    inet_pton(AF_INET6, "fd00::1", &src);
+    inet_pton(AF_INET6, "fd00::2", &dst);
+    memcpy(pkt + 8, &src, 16);
+    memcpy(pkt + 24, &dst, 16);
+
+    /* len=40: header present, but no TCP ports (need 44) → UNPINNED */
+    ASSERT_EQ(flow_hash_pkt(pkt, 40), MQVPN_FLOW_HASH_UNPINNED);
+
+    /* len=43: still not enough for 4 bytes of ports */
+    uint8_t pkt43[43] = {0};
+    memcpy(pkt43, pkt, 40);
+    ASSERT_EQ(flow_hash_pkt(pkt43, 43), MQVPN_FLOW_HASH_UNPINNED);
+
+    PASS();
+}
+
+static void
+test_hash_ipv6_each_field_matters(void)
+{
+    TEST(flow_hash_pkt IPv6 each field matters);
+
+    uint8_t src1[16], src2[16], dst1[16], dst2[16];
+    inet_pton(AF_INET6, "fd00::1", src1);
+    inet_pton(AF_INET6, "fd00::99", src2);
+    inet_pton(AF_INET6, "fd00::2", dst1);
+    inet_pton(AF_INET6, "fd00::88", dst2);
+
+    uint8_t base[44];
+    make_ipv6_tcp_pkt(base, src1, 1234, dst1, 80);
+    uint32_t h_base = flow_hash_pkt(base, 44);
+    ASSERT_NEQ(h_base, 0);
+    ASSERT_NEQ(h_base, MQVPN_FLOW_HASH_UNPINNED);
+
+    /* Change src IP */
+    uint8_t pkt[44];
+    make_ipv6_tcp_pkt(pkt, src2, 1234, dst1, 80);
+    ASSERT_NEQ(flow_hash_pkt(pkt, 44), h_base);
+
+    /* Change dst IP */
+    make_ipv6_tcp_pkt(pkt, src1, 1234, dst2, 80);
+    ASSERT_NEQ(flow_hash_pkt(pkt, 44), h_base);
+
+    /* Change src port */
+    make_ipv6_tcp_pkt(pkt, src1, 9999, dst1, 80);
+    ASSERT_NEQ(flow_hash_pkt(pkt, 44), h_base);
+
+    /* Change dst port */
+    make_ipv6_tcp_pkt(pkt, src1, 1234, dst1, 443);
+    ASSERT_NEQ(flow_hash_pkt(pkt, 44), h_base);
+
+    PASS();
+}
+
+static void
+test_hash_ipv6_tcp_never_returns_sentinels(void)
+{
+    TEST(flow_hash_pkt IPv6 TCP never returns 0 or UNPINNED);
+
+    uint8_t src[16], dst[16];
+    inet_pton(AF_INET6, "fd00::1", src);
+    inet_pton(AF_INET6, "fd00::2", dst);
+
+    for (int i = 0; i < 10000; i++) {
+        uint8_t pkt[44];
+        uint16_t port = (uint16_t)(1000 + (i % 64000));
+        /* Vary src address lower bytes */
+        src[15] = (uint8_t)(i & 0xff);
+        src[14] = (uint8_t)((i >> 8) & 0xff);
+        make_ipv6_tcp_pkt(pkt, src, port, dst, 80);
+        uint32_t h = flow_hash_pkt(pkt, 44);
+        ASSERT_NEQ(h, 0);
+        ASSERT_NEQ(h, MQVPN_FLOW_HASH_UNPINNED);
+    }
+
+    PASS();
+}
+
+static void
+test_hash_ipv6_extension_header_as_next(void)
+{
+    TEST(flow_hash_pkt IPv6 non-TCP next header returns UNPINNED);
+
+    uint8_t pkt[44] = {0};
+    pkt[0] = 0x60;
+
+    /* Hop-by-Hop (0) → not TCP → UNPINNED */
+    pkt[6] = 0;
+    ASSERT_EQ(flow_hash_pkt(pkt, 44), MQVPN_FLOW_HASH_UNPINNED);
+
+    /* Routing (43) → UNPINNED */
+    pkt[6] = 43;
+    ASSERT_EQ(flow_hash_pkt(pkt, 44), MQVPN_FLOW_HASH_UNPINNED);
+
+    /* Fragment (44) → UNPINNED */
+    pkt[6] = 44;
+    ASSERT_EQ(flow_hash_pkt(pkt, 44), MQVPN_FLOW_HASH_UNPINNED);
+
+    /* ESP (50) → UNPINNED */
+    pkt[6] = 50;
+    ASSERT_EQ(flow_hash_pkt(pkt, 44), MQVPN_FLOW_HASH_UNPINNED);
+
+    PASS();
+}
+
+static void
+test_hash_ipv6_deterministic(void)
+{
+    TEST(flow_hash_pkt IPv6 TCP deterministic);
+
+    uint8_t src[16], dst[16];
+    inet_pton(AF_INET6, "2001:db8::1", src);
+    inet_pton(AF_INET6, "2001:db8::2", dst);
+
+    uint8_t pkt[44];
+    make_ipv6_tcp_pkt(pkt, src, 443, dst, 50000);
+
+    uint32_t h1 = flow_hash_pkt(pkt, 44);
+    uint32_t h2 = flow_hash_pkt(pkt, 44);
+    uint32_t h3 = flow_hash_pkt(pkt, 44);
+    ASSERT_EQ(h1, h2);
+    ASSERT_EQ(h2, h3);
+
+    PASS();
+}
+
 /* ── Main ── */
 
 int
@@ -403,7 +633,10 @@ main(void)
 
     test_hash_basic();
     test_hash_different_flows();
-    test_hash_rejects_non_ipv4();
+    test_hash_rejects_unknown_version();
+    test_hash_ipv6_tcp();
+    test_hash_ipv6_udp_unpinned();
+    test_hash_ipv6_too_short();
     test_hash_udp();
     test_hash_never_returns_zero();
     test_hash_each_field_matters();
@@ -417,6 +650,14 @@ main(void)
     test_hash_never_returns_sentinels();
     test_hash_tcp_pinned_udp_unpinned();
     test_sched_mode_constants();
+
+    /* IPv6 edge cases */
+    test_hash_ipv6_icmpv6_unpinned();
+    test_hash_ipv6_tcp_truncated_no_ports();
+    test_hash_ipv6_each_field_matters();
+    test_hash_ipv6_tcp_never_returns_sentinels();
+    test_hash_ipv6_extension_header_as_next();
+    test_hash_ipv6_deterministic();
 
     printf("\n%d passed, %d failed\n", tests_passed, tests_failed);
     return tests_failed > 0 ? 1 : 0;

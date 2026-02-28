@@ -4,12 +4,22 @@
 # Creates two netns with 2 veth pairs (2 paths), runs mqvpn server and client
 # with --path options, verifies multipath negotiation and connectivity.
 #
-# Usage: sudo ./run_multipath_test.sh [path-to-mqvpn-binary]
+# Usage: sudo ./run_multipath_test.sh [path-to-mqvpn-binary] [--log-level LEVEL]
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MQVPN="${1:-${SCRIPT_DIR}/../build/mqvpn}"
+MQVPN=""
+LOG_LEVEL="debug"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --log-level) LOG_LEVEL="$2"; shift 2 ;;
+        *) [ -z "$MQVPN" ] && MQVPN="$1"; shift ;;
+    esac
+done
+
+MQVPN="${MQVPN:-${SCRIPT_DIR}/../build/mqvpn}"
 
 if [ ! -f "$MQVPN" ]; then
     echo "error: mqvpn binary not found at $MQVPN"
@@ -109,7 +119,7 @@ ip netns exec mp-server "$MQVPN" \
     --cert "${WORK_DIR}/server.crt" \
     --key "${WORK_DIR}/server.key" \
     --auth-key "$PSK" \
-    --log-level debug &
+    --log-level "$LOG_LEVEL" &
 SERVER_PID=$!
 sleep 2
 
@@ -127,7 +137,7 @@ ip netns exec mp-client "$MQVPN" \
     --path veth-a0 --path veth-b0 \
     --auth-key "$PSK" \
     --insecure \
-    --log-level debug &
+    --log-level "$LOG_LEVEL" &
 CLIENT_PID=$!
 sleep 4
 

@@ -21,7 +21,7 @@ mqvpn_path_mgr_init(mqvpn_path_mgr_t *mgr)
 
 int
 mqvpn_path_mgr_add(mqvpn_path_mgr_t *mgr, const char *iface,
-                    const struct sockaddr_in *peer_addr)
+                    const struct sockaddr_storage *peer_addr)
 {
     if (mgr->n_paths >= MQVPN_MAX_PATHS) {
         LOG_ERR("path_mgr: max paths (%d) reached", MQVPN_MAX_PATHS);
@@ -30,8 +30,9 @@ mqvpn_path_mgr_add(mqvpn_path_mgr_t *mgr, const char *iface,
 
     int idx = mgr->n_paths;
     mqvpn_path_t *p = &mgr->paths[idx];
+    sa_family_t af = peer_addr->ss_family;
 
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    int fd = socket(af, SOCK_DGRAM, 0);
     if (fd < 0) {
         LOG_ERR("path_mgr: socket: %s", strerror(errno));
         return -1;
@@ -60,11 +61,19 @@ mqvpn_path_mgr_add(mqvpn_path_mgr_t *mgr, const char *iface,
 
     /* Bind to any local address (ephemeral port) */
     memset(&p->local_addr, 0, sizeof(p->local_addr));
-    p->local_addr.sin_family = AF_INET;
-    p->local_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    p->local_addrlen = sizeof(p->local_addr);
+    if (af == AF_INET6) {
+        struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&p->local_addr;
+        sin6->sin6_family = AF_INET6;
+        sin6->sin6_addr = in6addr_any;
+        p->local_addrlen = sizeof(struct sockaddr_in6);
+    } else {
+        struct sockaddr_in *sin = (struct sockaddr_in *)&p->local_addr;
+        sin->sin_family = AF_INET;
+        sin->sin_addr.s_addr = htonl(INADDR_ANY);
+        p->local_addrlen = sizeof(struct sockaddr_in);
+    }
 
-    if (bind(fd, (struct sockaddr *)&p->local_addr, sizeof(p->local_addr)) < 0) {
+    if (bind(fd, (struct sockaddr *)&p->local_addr, p->local_addrlen) < 0) {
         LOG_ERR("path_mgr: bind(%s): %s", iface ? iface : "any", strerror(errno));
         close(fd);
         return -1;

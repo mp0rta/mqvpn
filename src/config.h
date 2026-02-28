@@ -20,6 +20,7 @@ typedef struct mqvpn_config_s {
     /* [Interface] — server */
     char listen[280];       /* "bind:port" */
     char subnet[32];
+    char subnet6[64];       /* IPv6 tunnel subnet CIDR (e.g. "fd00:vpn::/112") */
 
     /* [Interface] — client */
     char dns_servers[MQVPN_CONFIG_MAX_DNS][64];
@@ -44,6 +45,11 @@ typedef struct mqvpn_config_s {
     char paths[MQVPN_CONFIG_MAX_PATHS][32];
     int  n_paths;
     char scheduler[16];
+
+    /* [Interface] — client reconnection */
+    int  reconnect;             /* 1=auto-reconnect (default), 0=exit on disconnect */
+    int  reconnect_interval;    /* base interval in seconds (default 5) */
+    int  kill_switch;           /* 1=block traffic outside tunnel, 0=off (default) */
 
     /* Inferred mode: 1=server, 0=client */
     int  is_server;

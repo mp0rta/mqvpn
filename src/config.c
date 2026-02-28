@@ -98,10 +98,19 @@ handle_kv(mqvpn_config_t *cfg, int section, const char *key, const char *val,
             cfg->is_server = 1;
         } else if (strcasecmp(key, "Subnet") == 0) {
             snprintf(cfg->subnet, sizeof(cfg->subnet), "%s", val);
+        } else if (strcasecmp(key, "Subnet6") == 0) {
+            snprintf(cfg->subnet6, sizeof(cfg->subnet6), "%s", val);
         } else if (strcasecmp(key, "LogLevel") == 0) {
             snprintf(cfg->log_level, sizeof(cfg->log_level), "%s", val);
         } else if (strcasecmp(key, "DNS") == 0) {
             parse_dns_list(cfg, val);
+        } else if (strcasecmp(key, "KillSwitch") == 0) {
+            cfg->kill_switch = parse_bool(val);
+        } else if (strcasecmp(key, "Reconnect") == 0) {
+            cfg->reconnect = parse_bool(val);
+        } else if (strcasecmp(key, "ReconnectInterval") == 0) {
+            int v = atoi(val);
+            if (v > 0) cfg->reconnect_interval = v;
         } else {
             LOG_WRN("%s:%d: unknown key '%s' in [Interface]", path, lineno, key);
         }
@@ -180,6 +189,8 @@ mqvpn_config_defaults(mqvpn_config_t *cfg)
     snprintf(cfg->key_file, sizeof(cfg->key_file), "server.key");
     snprintf(cfg->scheduler, sizeof(cfg->scheduler), "wlb");
     cfg->max_clients = 64;
+    cfg->reconnect = 1;
+    cfg->reconnect_interval = 5;
 }
 
 int

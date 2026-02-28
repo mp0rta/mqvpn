@@ -97,3 +97,70 @@ mqvpn_addr_pool_server_addr(const mqvpn_addr_pool_t *pool, struct in_addr *out)
     uint32_t base_h = ntohl(pool->base.s_addr);
     out->s_addr = htonl(base_h + 1);
 }
+
+/* ---- IPv6 pool (shares offsets with IPv4) ---- */
+
+int
+mqvpn_addr_pool_init6(mqvpn_addr_pool_t *pool, const char *cidr6)
+{
+    char buf[64];
+    strncpy(buf, cidr6, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    char *slash = strchr(buf, '/');
+    if (!slash) {
+        LOG_ERR("addr_pool6: invalid CIDR: %s", cidr6);
+        return -1;
+    }
+    *slash = '\0';
+    char *endptr;
+    long plen = strtol(slash + 1, &endptr, 10);
+    if (endptr == slash + 1 || *endptr != '\0' || plen < 96 || plen > 126) {
+        LOG_ERR("addr_pool6: prefix length %ld out of range [96,126]", plen);
+        return -1;
+    }
+
+    if (inet_pton(AF_INET6, buf, &pool->base6) != 1) {
+        LOG_ERR("addr_pool6: invalid address: %s", buf);
+        return -1;
+    }
+
+    pool->prefix6 = (int)plen;
+    pool->has_v6 = 1;
+
+    char v6str[INET6_ADDRSTRLEN];
+    inet_ntop(AF_INET6, &pool->base6, v6str, sizeof(v6str));
+    LOG_INF("addr_pool6: %s/%d (sharing IPv4 offsets)", v6str, pool->prefix6);
+    return 0;
+}
+
+void
+mqvpn_addr_pool_get6(const mqvpn_addr_pool_t *pool, uint32_t offset,
+                      struct in6_addr *out)
+{
+    memcpy(out, &pool->base6, sizeof(*out));
+    /* Add offset to the low 32 bits (bytes 12-15) of the IPv6 address */
+    uint32_t low = ntohl(*(uint32_t *)&out->s6_addr[12]);
+    low += offset;
+    *(uint32_t *)&out->s6_addr[12] = htonl(low);
+}
+
+void
+mqvpn_addr_pool_server_addr6(const mqvpn_addr_pool_t *pool,
+                              struct in6_addr *out)
+{
+    mqvpn_addr_pool_get6(pool, 1, out);
+}
+
+uint32_t
+mqvpn_addr_pool_offset6(const mqvpn_addr_pool_t *pool,
+                         const struct in6_addr *addr)
+{
+    /* Verify the high 12 bytes match the base (valid for prefix >= /96) */
+    if (memcmp(addr->s6_addr, pool->base6.s6_addr, 12) != 0) {
+        return 0;
+    }
+    uint32_t addr_low = ntohl(*(const uint32_t *)&addr->s6_addr[12]);
+    uint32_t base_low = ntohl(*(const uint32_t *)&pool->base6.s6_addr[12]);
+    if (addr_low < base_low) return 0;
+    return addr_low - base_low;
+}

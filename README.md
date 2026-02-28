@@ -17,6 +17,7 @@ This is an independent personal project focused on an end-to-end standards-based
   - [Performance comparison: WLB vs. MinRTT scheduler](docs/benchmarks_netns.md#2-bandwidth-aggregation--wlb-vs-minrtt)
 - **Configuration file** — INI-style config file for all options; CLI arguments override config values.
 - **DNS override** — Client-side `/etc/resolv.conf` management with automatic backup and restore. Prevents DNS leak by routing all queries through the tunnel.
+- **Dual-stack tunnel** — IPv4 and IPv6 inside the tunnel (`--subnet6`). IPv6 address pool shares offsets with IPv4; no extra session table needed.
 - **Standards-based tunnel** — MASQUE CONNECT-IP (RFC 9484) with HTTP Datagrams (RFC 9297) over QUIC DATAGRAM frames (RFC 9221). No proprietary tunnel format.
 
 ## Quick Start
@@ -63,6 +64,7 @@ Instead of CLI flags, you can use an INI-style config file. CLI arguments overri
 TunName = mqvpn0
 Listen = 0.0.0.0:443
 Subnet = 10.0.0.0/24
+Subnet6 = fd00:vpn::/112
 LogLevel = info
 
 [TLS]
@@ -223,7 +225,7 @@ General:
   --help                    Show help
 
 Client:
-  --server IP:PORT          Server address (IPv4 address; hostname resolution planned for v0.2.0)
+  --server IP:PORT          Server address
   --path IFACE              Network interface for multipath (repeatable)
   --auth-key KEY            PSK for authentication
   --dns ADDR                DNS server (repeatable, max 4)
@@ -231,7 +233,8 @@ Client:
 
 Server:
   --listen BIND:PORT        Listen address (default: 0.0.0.0:443)
-  --subnet CIDR             Client IP pool (default: 10.0.0.0/24)
+  --subnet CIDR             Client IPv4 pool (default: 10.0.0.0/24)
+  --subnet6 CIDR            Client IPv6 pool (e.g. fd00:vpn::/112)
   --cert PATH               TLS certificate file
   --key PATH                TLS private key file
   --auth-key KEY            PSK for client authentication
@@ -272,12 +275,13 @@ sudo scripts/run_multipath_test.sh
 - [x] `mqvpn --genkey` for PSK generation
 
 ### v0.2.0 — Always-on & operational hardening
-- [ ] Hostname resolution for `--server` (currently IPv4 address only)
-- [ ] Automatic reconnection (reconnect on connection drop / network change)
-- [ ] Kill switch (prevent traffic leaking outside the tunnel)
+- [x] Hostname resolution for `--server`
+- [x] Automatic reconnection (reconnect on connection drop / network change)
+- [x] Kill switch (prevent traffic leaking outside the tunnel)
+- [x] IPv6 support (dual-stack tunnel with `--subnet6`, IPv6 QUIC transport)
+- [x] ICMP Packet Too Big responses (RFC 9484 §10.1)
 - [ ] systemd service unit (`mqvpn-server.service`, `mqvpn-client@.service`)
 - [ ] Let's Encrypt / ACME integration for TLS certificates
-- [ ] IPv6 support
 
 ### Future
 - [ ] Per-client token authentication

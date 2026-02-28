@@ -545,6 +545,215 @@ static void test_semicolon_comment(void)
     ASSERT_EQ_STR(cfg.tun_name, "commented", "semicolon comments ignored");
 }
 
+/* ================================================================
+ *  Kill switch config tests
+ * ================================================================ */
+
+static void test_killswitch_default_off(void)
+{
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+
+    ASSERT_EQ_INT(cfg.kill_switch, 0, "default kill_switch off");
+}
+
+static void test_killswitch_config_parse(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "KillSwitch = true\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.kill_switch, 1, "kill_switch enabled from config");
+}
+
+static void test_killswitch_config_false(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "KillSwitch = false\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.kill_switch, 0, "kill_switch disabled from config");
+}
+
+/* ================================================================
+ *  Reconnect config tests
+ * ================================================================ */
+
+static void test_reconnect_defaults(void)
+{
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+
+    ASSERT_EQ_INT(cfg.reconnect, 1, "default reconnect enabled");
+    ASSERT_EQ_INT(cfg.reconnect_interval, 5, "default reconnect interval 5s");
+}
+
+static void test_reconnect_config_parse(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "Reconnect = false\n"
+        "ReconnectInterval = 10\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.reconnect, 0, "reconnect disabled from config");
+    ASSERT_EQ_INT(cfg.reconnect_interval, 10, "reconnect interval from config");
+}
+
+static void test_reconnect_config_true(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "Reconnect = true\n"
+        "ReconnectInterval = 30\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.reconnect, 1, "reconnect enabled from config");
+    ASSERT_EQ_INT(cfg.reconnect_interval, 30, "reconnect interval 30s");
+}
+
+static void test_reconnect_interval_invalid(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "ReconnectInterval = -5\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.reconnect_interval, 5, "negative interval → default 5");
+}
+
+/* ================================================================
+ *  Subnet6 config tests
+ * ================================================================ */
+
+static void test_subnet6_default(void)
+{
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+
+    ASSERT_EQ_STR(cfg.subnet6, "", "default subnet6 empty");
+}
+
+static void test_subnet6_config_parse(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "Listen = 0.0.0.0:443\n"
+        "Subnet = 10.0.0.0/24\n"
+        "Subnet6 = fd00:abcd::/112\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "subnet6 config parse ok");
+    ASSERT_EQ_STR(cfg.subnet6, "fd00:abcd::/112", "subnet6 parsed");
+}
+
+static void test_subnet6_various_prefixes(void)
+{
+    /* /96 prefix */
+    const char *ini_96 =
+        "[Interface]\n"
+        "Listen = 0.0.0.0:443\n"
+        "Subnet6 = fd00:1234::/96\n";
+
+    char *path = write_tmp(ini_96);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_STR(cfg.subnet6, "fd00:1234::/96", "subnet6 /96 stored");
+
+    /* /126 prefix */
+    const char *ini_126 =
+        "[Interface]\n"
+        "Listen = 0.0.0.0:443\n"
+        "Subnet6 = fd00:abcd:ef01::/126\n";
+
+    path = write_tmp(ini_126);
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_STR(cfg.subnet6, "fd00:abcd:ef01::/126", "subnet6 /126 stored");
+}
+
+static void test_subnet6_whitespace_trimmed(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "Listen = 0.0.0.0:443\n"
+        "Subnet6 =   fd00:abcd::/112   \n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_STR(cfg.subnet6, "fd00:abcd::/112", "subnet6 whitespace trimmed");
+}
+
+static void test_subnet6_not_set(void)
+{
+    /* Server config without Subnet6 → subnet6 stays empty */
+    const char *ini =
+        "[Interface]\n"
+        "Listen = 0.0.0.0:443\n"
+        "Subnet = 10.0.0.0/24\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_STR(cfg.subnet6, "", "subnet6 empty when not set");
+}
+
+static void test_subnet6_duplicate_last_wins(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "Listen = 0.0.0.0:443\n"
+        "Subnet6 = fd00:1::/112\n"
+        "Subnet6 = fd00:2::/112\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_STR(cfg.subnet6, "fd00:2::/112", "subnet6 duplicate: last wins");
+}
+
 int main(void)
 {
     test_defaults();
@@ -569,6 +778,25 @@ int main(void)
     test_unknown_section();
     test_dns_empty_entries();
     test_semicolon_comment();
+
+    /* kill switch tests */
+    test_killswitch_default_off();
+    test_killswitch_config_parse();
+    test_killswitch_config_false();
+
+    /* reconnect tests */
+    test_reconnect_defaults();
+    test_reconnect_config_parse();
+    test_reconnect_config_true();
+    test_reconnect_interval_invalid();
+
+    /* subnet6 tests */
+    test_subnet6_default();
+    test_subnet6_config_parse();
+    test_subnet6_various_prefixes();
+    test_subnet6_whitespace_trimmed();
+    test_subnet6_not_set();
+    test_subnet6_duplicate_last_wins();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

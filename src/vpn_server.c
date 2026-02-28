@@ -15,6 +15,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/time.h>
+#include <time.h>
 #include <inttypes.h>
 
 #include <event2/event.h>
@@ -56,7 +57,7 @@ struct svr_ctx_s {
     struct event        *ev_sigterm;
 
     int                  udp_fd;
-    struct sockaddr_in   local_addr;
+    struct sockaddr_storage local_addr;
     socklen_t            local_addrlen;
 
     mqvpn_tun_t          tun;
@@ -83,7 +84,10 @@ struct svr_conn_s {
     /* MASQUE session */
     uint64_t              masque_stream_id;
     struct in_addr        assigned_ip;
+    struct in6_addr       assigned_ip6;
+    int                   has_v6;
     int                   tunnel_established;
+    size_t                dgram_mss;
     uint64_t              dgram_lost_cnt;
     uint64_t              dgram_acked_cnt;
 };
@@ -259,6 +263,175 @@ svr_tun_resume_safety(int fd, short what, void *arg)
     }
 }
 
+/* ---- ICMP Packet Too Big (RFC 9484 §10.1) ---- */
+
+#define PTB_RATE_LIMIT  10  /* max PTB responses per second */
+
+static int     svr_ptb_tokens    = PTB_RATE_LIMIT;
+static int64_t svr_ptb_refill_ms = 0;
+
+static int
+svr_ptb_rate_allow(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t now_ms = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    if (now_ms - svr_ptb_refill_ms >= 1000) {
+        svr_ptb_tokens = PTB_RATE_LIMIT;
+        svr_ptb_refill_ms = now_ms;
+    }
+    if (svr_ptb_tokens > 0) {
+        svr_ptb_tokens--;
+        return 1;
+    }
+    return 0;
+}
+
+/*
+ * Send ICMP Destination Unreachable / Fragmentation Needed (type=3, code=4)
+ * back to the TUN device when a packet is too large for the QUIC tunnel.
+ */
+static void
+svr_send_icmp_ptb(svr_ctx_t *ctx, const uint8_t *orig_pkt, size_t orig_len,
+                   size_t tunnel_mtu)
+{
+    if (orig_len < 20) return;
+    if (!svr_ptb_rate_allow()) return;
+
+    struct in_addr srv_addr;
+    mqvpn_addr_pool_server_addr(&ctx->pool, &srv_addr);
+
+    /* ICMP payload: original IP header + first 8 bytes of data */
+    size_t ihl = (orig_pkt[0] & 0x0F) * 4;
+    if (ihl < 20 || ihl > orig_len) return;
+    size_t icmp_data_len = ihl + 8;
+    if (icmp_data_len > orig_len) icmp_data_len = orig_len;
+
+    size_t total_len = 20 + 8 + icmp_data_len;
+    uint8_t pkt[128];
+    if (total_len > sizeof(pkt)) return;
+    memset(pkt, 0, total_len);
+
+    /* IP header: server TUN addr → original src */
+    pkt[0]  = 0x45;
+    pkt[1]  = 0xC0;                          /* DSCP=CS6 */
+    pkt[2]  = (total_len >> 8) & 0xFF;
+    pkt[3]  = total_len & 0xFF;
+    pkt[8]  = 64;                            /* TTL */
+    pkt[9]  = 1;                             /* ICMP */
+    memcpy(pkt + 12, &srv_addr.s_addr, 4);  /* src = server TUN */
+    memcpy(pkt + 16, orig_pkt + 12, 4);     /* dst = original src */
+
+    /* IP header checksum */
+    uint32_t cksum = 0;
+    for (int i = 0; i < 20; i += 2)
+        cksum += ((uint32_t)pkt[i] << 8) | pkt[i + 1];
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    uint16_t ip_cksum = ~(uint16_t)cksum;
+    pkt[10] = ip_cksum >> 8;
+    pkt[11] = ip_cksum & 0xFF;
+
+    /* ICMP: type=3 (Dest Unreachable), code=4 (Frag Needed) */
+    uint8_t *icmp = pkt + 20;
+    icmp[0] = 3;
+    icmp[1] = 4;
+    /* icmp[2..3] = checksum */
+    /* icmp[4..5] = unused (0) */
+    /* icmp[6..7] = next-hop MTU */
+    uint16_t mtu16 = (tunnel_mtu > 0xFFFF) ? 0xFFFF : (uint16_t)tunnel_mtu;
+    icmp[6] = mtu16 >> 8;
+    icmp[7] = mtu16 & 0xFF;
+    memcpy(icmp + 8, orig_pkt, icmp_data_len);
+
+    /* ICMP checksum */
+    size_t icmp_total = 8 + icmp_data_len;
+    cksum = 0;
+    for (size_t i = 0; i < icmp_total; i += 2) {
+        cksum += ((uint32_t)icmp[i] << 8);
+        if (i + 1 < icmp_total)
+            cksum += icmp[i + 1];
+    }
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    uint16_t icmp_cksum = ~(uint16_t)cksum;
+    icmp[2] = icmp_cksum >> 8;
+    icmp[3] = icmp_cksum & 0xFF;
+
+    mqvpn_tun_write(&ctx->tun, pkt, total_len);
+    LOG_DBG("sent ICMP Fragmentation Needed (mtu=%zu) to TUN", tunnel_mtu);
+}
+
+/*
+ * Send ICMPv6 Packet Too Big (type=2, code=0) back to the TUN device.
+ */
+static void
+svr_send_icmpv6_ptb(svr_ctx_t *ctx, const uint8_t *orig_pkt, size_t orig_len,
+                      size_t tunnel_mtu)
+{
+    if (orig_len < 40) return;
+    if (!ctx->pool.has_v6) return;
+    if (!svr_ptb_rate_allow()) return;
+
+    struct in6_addr srv_addr6;
+    mqvpn_addr_pool_server_addr6(&ctx->pool, &srv_addr6);
+
+    /* ICMPv6 payload: as much of original packet as fits in 1280 total */
+    size_t icmpv6_data_len = orig_len;
+    if (40 + 8 + icmpv6_data_len > 1280)
+        icmpv6_data_len = 1280 - 40 - 8;
+    size_t icmpv6_len = 8 + icmpv6_data_len;
+    size_t total_len = 40 + icmpv6_len;
+
+    uint8_t pkt[1280];
+    memset(pkt, 0, total_len);
+
+    /* IPv6 header */
+    pkt[0] = 0x60;
+    pkt[4] = (icmpv6_len >> 8) & 0xFF;
+    pkt[5] = icmpv6_len & 0xFF;
+    pkt[6] = 58;    /* next header: ICMPv6 */
+    pkt[7] = 64;    /* hop limit */
+    memcpy(pkt + 8, &srv_addr6, 16);        /* src = server TUN */
+    memcpy(pkt + 24, orig_pkt + 8, 16);     /* dst = original src */
+
+    /* ICMPv6 Packet Too Big: type=2, code=0 */
+    uint8_t *icmp = pkt + 40;
+    icmp[0] = 2;
+    icmp[1] = 0;
+    /* icmp[2..3] = checksum */
+    /* icmp[4..7] = MTU (network byte order) */
+    uint32_t mtu32 = (uint32_t)tunnel_mtu;
+    icmp[4] = (mtu32 >> 24) & 0xFF;
+    icmp[5] = (mtu32 >> 16) & 0xFF;
+    icmp[6] = (mtu32 >>  8) & 0xFF;
+    icmp[7] = mtu32 & 0xFF;
+    memcpy(icmp + 8, orig_pkt, icmpv6_data_len);
+
+    /* ICMPv6 checksum with pseudo-header */
+    uint32_t cksum = 0;
+    for (int i = 0; i < 16; i += 2)
+        cksum += ((uint32_t)pkt[8 + i] << 8) | pkt[8 + i + 1];
+    for (int i = 0; i < 16; i += 2)
+        cksum += ((uint32_t)pkt[24 + i] << 8) | pkt[24 + i + 1];
+    cksum += (uint32_t)(icmpv6_len >> 16);
+    cksum += (uint32_t)(icmpv6_len & 0xFFFF);
+    cksum += 58;
+    for (size_t i = 0; i < icmpv6_len; i += 2) {
+        cksum += ((uint32_t)icmp[i] << 8);
+        if (i + 1 < icmpv6_len)
+            cksum += icmp[i + 1];
+    }
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    uint16_t icmp_cksum = ~(uint16_t)cksum;
+    icmp[2] = icmp_cksum >> 8;
+    icmp[3] = icmp_cksum & 0xFF;
+
+    mqvpn_tun_write(&ctx->tun, pkt, total_len);
+    LOG_DBG("sent ICMPv6 Packet Too Big (mtu=%zu) to TUN", tunnel_mtu);
+}
+
 static void
 svr_tun_read_handler(int fd, short what, void *arg)
 {
@@ -280,22 +453,39 @@ svr_tun_read_handler(int fd, short what, void *arg)
         int n = mqvpn_tun_read(&ctx->tun, pkt, sizeof(pkt));
         if (n <= 0) break;
 
-        /* Need at least 20 bytes for IPv4 header with dst IP at offset 16 */
-        if (n < 20 || (pkt[0] >> 4) != 4) {
-            continue; /* not IPv4 — drop */
+        if (n < 1) continue;
+        uint8_t ip_ver = pkt[0] >> 4;
+        svr_conn_t *target = NULL;
+
+        if (ip_ver == 4 && n >= 20) {
+            struct in_addr dst_ip;
+            memcpy(&dst_ip.s_addr, pkt + 16, 4);
+            uint32_t offset = ntohl(dst_ip.s_addr) - ntohl(ctx->pool.base.s_addr);
+            if (offset == 0 || offset > MQVPN_ADDR_POOL_MAX) continue;
+            target = ctx->sessions[offset];
+        } else if (ip_ver == 6 && n >= 40 && ctx->pool.has_v6) {
+            struct in6_addr dst_ip6;
+            memcpy(&dst_ip6, pkt + 24, 16);
+            uint32_t offset = mqvpn_addr_pool_offset6(&ctx->pool, &dst_ip6);
+            if (offset == 0 || offset > MQVPN_ADDR_POOL_MAX) continue;
+            target = ctx->sessions[offset];
+        } else {
+            continue;
         }
 
-        /* Extract destination IP and find session by IP offset */
-        struct in_addr dst_ip;
-        memcpy(&dst_ip.s_addr, pkt + 16, 4);
-        uint32_t offset = ntohl(dst_ip.s_addr) - ntohl(ctx->pool.base.s_addr);
-        if (offset == 0 || offset > MQVPN_ADDR_POOL_MAX) {
-            continue; /* out of range — drop */
-        }
+        if (!target || !target->tunnel_established) continue;
 
-        svr_conn_t *target = ctx->sessions[offset];
-        if (!target || !target->tunnel_established) {
-            continue; /* no session for this IP — drop */
+        /* RFC 9484 §10.1: if packet exceeds tunnel capacity, send ICMP PTB */
+        if (target->dgram_mss > 0) {
+            size_t udp_mss = xqc_h3_ext_masque_udp_mss(
+                target->dgram_mss, target->masque_stream_id);
+            if ((size_t)n > udp_mss) {
+                if (ip_ver == 4)
+                    svr_send_icmp_ptb(ctx, pkt, (size_t)n, udp_mss);
+                else
+                    svr_send_icmpv6_ptb(ctx, pkt, (size_t)n, udp_mss);
+                continue;
+            }
         }
 
         /* Frame with quarter-stream-ID + context_id=0 */
@@ -558,6 +748,50 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
     inet_ntop(AF_INET, &conn->assigned_ip, ip_str, sizeof(ip_str));
     LOG_INF("ADDRESS_ASSIGN: client=%s/32", ip_str);
 
+    /*
+     * 3b. Send IPv6 ADDRESS_ASSIGN if configured.
+     *
+     * Note (RFC 9484 §7.2): At connection start the QUIC initial
+     * max_udp_payload is 1200 (RFC 9000 §14), giving an IP payload
+     * capacity of ~1182 — below the IPv6 minimum link MTU of 1280.
+     * The TUN MTU is clamped to 1280 so the kernel accepts IPv6
+     * addresses, and ICMP Packet Too Big (§10.1) is sent for packets
+     * exceeding the actual tunnel capacity.  Once PMTUD completes
+     * (typically within one RTT), the sender adjusts its MSS and
+     * full-size IPv6 packets flow normally.
+     */
+    if (ctx->pool.has_v6) {
+        uint32_t ip_offset = ntohl(conn->assigned_ip.s_addr) -
+                             ntohl(ctx->pool.base.s_addr);
+        mqvpn_addr_pool_get6(&ctx->pool, ip_offset, &conn->assigned_ip6);
+        conn->has_v6 = 1;
+
+        uint8_t a6_payload[32];
+        size_t a6_off = 0;
+        a6_payload[a6_off++] = 0x00;  /* request_id=0 */
+        a6_payload[a6_off++] = 6;     /* IPv6 */
+        memcpy(a6_payload + a6_off, &conn->assigned_ip6, 16);
+        a6_off += 16;
+        a6_payload[a6_off++] = (uint8_t)ctx->pool.prefix6;
+
+        uint8_t cap6_buf[64];
+        size_t cap6_written = 0;
+        xret = xqc_h3_ext_capsule_encode(
+            cap6_buf, sizeof(cap6_buf), &cap6_written,
+            XQC_H3_CAPSULE_ADDRESS_ASSIGN,
+            a6_payload, a6_off);
+        if (xret == XQC_OK) {
+            ret = xqc_h3_request_send_body(h3_request, cap6_buf, cap6_written, 0);
+            if (ret < 0) {
+                LOG_ERR("send ADDRESS_ASSIGN (IPv6): %zd", ret);
+            } else {
+                char v6str[INET6_ADDRSTRLEN];
+                inet_ntop(AF_INET6, &conn->assigned_ip6, v6str, sizeof(v6str));
+                LOG_INF("ADDRESS_ASSIGN: client=%s/%d", v6str, ctx->pool.prefix6);
+            }
+        }
+    }
+
     /* 4. Build and send ROUTE_ADVERTISEMENT capsule (0.0.0.0 → 255.255.255.255) */
     uint8_t route_payload[32];
     size_t rp_off = 0;
@@ -586,6 +820,29 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
     if (ret < 0) {
         LOG_ERR("send ROUTE_ADVERTISEMENT: %zd", ret);
         return -1;
+    }
+
+    /* 4b. IPv6 ROUTE_ADVERTISEMENT (:: → ffff:...:ffff) */
+    if (ctx->pool.has_v6) {
+        uint8_t r6_payload[48];
+        size_t r6_off = 0;
+        r6_payload[r6_off++] = 6;    /* IPv6 */
+        memset(r6_payload + r6_off, 0x00, 16);  /* start: :: */
+        r6_off += 16;
+        memset(r6_payload + r6_off, 0xFF, 16);  /* end: ffff:...:ffff */
+        r6_off += 16;
+        r6_payload[r6_off++] = 0;    /* protocol: any */
+
+        uint8_t r6_capsule[80];
+        size_t r6c_written = 0;
+        xret = xqc_h3_ext_capsule_encode(
+            r6_capsule, sizeof(r6_capsule), &r6c_written,
+            XQC_H3_CAPSULE_ROUTE_ADVERTISEMENT,
+            r6_payload, r6_off);
+        if (xret == XQC_OK) {
+            ret = xqc_h3_request_send_body(h3_request, r6_capsule, r6c_written, 0);
+            if (ret < 0) LOG_ERR("send ROUTE_ADVERTISEMENT (IPv6): %zd", ret);
+        }
     }
 
     conn->tunnel_established = 1;
@@ -897,6 +1154,83 @@ svr_send_icmp_time_exceeded(svr_conn_t *svr_conn, const uint8_t *orig_pkt,
     LOG_DBG("sent ICMP Time Exceeded to client");
 }
 
+/* Send ICMPv6 Time Exceeded (type=3, code=0) back through the tunnel */
+static void
+svr_send_icmpv6_time_exceeded(svr_conn_t *svr_conn, const uint8_t *orig_pkt,
+                               size_t orig_len)
+{
+    if (orig_len < 40) return;
+    if (!svr_conn->ctx->pool.has_v6) return;
+
+    struct in6_addr srv_addr6;
+    mqvpn_addr_pool_server_addr6(&svr_conn->ctx->pool, &srv_addr6);
+
+    /* ICMPv6 payload: as much of original packet as fits in 1280 MTU */
+    size_t icmpv6_data_len = orig_len;
+    if (40 + 8 + icmpv6_data_len > 1280)
+        icmpv6_data_len = 1280 - 40 - 8;
+    size_t icmpv6_len = 8 + icmpv6_data_len;  /* ICMPv6 header + data */
+    size_t total_len = 40 + icmpv6_len;        /* IPv6 header + ICMPv6 */
+
+    uint8_t pkt[1280];
+    memset(pkt, 0, total_len);
+
+    /* IPv6 header */
+    pkt[0] = 0x60;  /* version=6, traffic class=0, flow label=0 */
+    pkt[4] = (icmpv6_len >> 8) & 0xFF;
+    pkt[5] = icmpv6_len & 0xFF;
+    pkt[6] = 58;    /* next header: ICMPv6 */
+    pkt[7] = 64;    /* hop limit */
+    memcpy(pkt + 8, &srv_addr6, 16);     /* src = server */
+    memcpy(pkt + 24, orig_pkt + 8, 16);  /* dst = original src */
+
+    /* ICMPv6 Time Exceeded: type=3, code=0 */
+    uint8_t *icmp = pkt + 40;
+    icmp[0] = 3;   /* type: Time Exceeded */
+    icmp[1] = 0;   /* code: hop limit exceeded in transit */
+    /* icmp[2..3] = checksum (below) */
+    /* icmp[4..7] = unused (zeroed) */
+    memcpy(icmp + 8, orig_pkt, icmpv6_data_len);
+
+    /* ICMPv6 checksum with pseudo-header (RFC 4443 §2.3) */
+    uint32_t cksum = 0;
+    /* Pseudo-header: src addr (16 bytes) */
+    for (int i = 0; i < 16; i += 2)
+        cksum += ((uint32_t)pkt[8 + i] << 8) | pkt[8 + i + 1];
+    /* Pseudo-header: dst addr (16 bytes) */
+    for (int i = 0; i < 16; i += 2)
+        cksum += ((uint32_t)pkt[24 + i] << 8) | pkt[24 + i + 1];
+    /* Pseudo-header: upper-layer packet length (32-bit) */
+    cksum += (uint32_t)(icmpv6_len >> 16);
+    cksum += (uint32_t)(icmpv6_len & 0xFFFF);
+    /* Pseudo-header: next header = 58 */
+    cksum += 58;
+    /* ICMPv6 message */
+    for (size_t i = 0; i < icmpv6_len; i += 2) {
+        cksum += ((uint32_t)icmp[i] << 8);
+        if (i + 1 < icmpv6_len)
+            cksum += icmp[i + 1];
+    }
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    uint16_t icmp_cksum = ~(uint16_t)cksum;
+    icmp[2] = icmp_cksum >> 8;
+    icmp[3] = icmp_cksum & 0xFF;
+
+    /* Send back through tunnel as MASQUE datagram */
+    uint8_t frame_buf[1400];
+    size_t frame_written = 0;
+    xqc_int_t xret = xqc_h3_ext_masque_frame_udp(
+        frame_buf, sizeof(frame_buf), &frame_written,
+        svr_conn->masque_stream_id, pkt, total_len);
+    if (xret != XQC_OK) return;
+
+    uint64_t dgram_id;
+    xqc_h3_ext_datagram_send(svr_conn->h3_conn, frame_buf, frame_written,
+                              &dgram_id, XQC_DATA_QOS_LOW);
+    LOG_DBG("sent ICMPv6 Time Exceeded to client");
+}
+
 static void
 svr_dgram_read_notify(xqc_h3_conn_t *conn, const void *data,
                        size_t data_len, void *user_data, uint64_t ts)
@@ -922,37 +1256,62 @@ svr_dgram_read_notify(xqc_h3_conn_t *conn, const void *data,
     if (payload_len < 1) return;
     uint8_t ip_ver = payload[0] >> 4;
 
-    if (ip_ver == 6) {
-        /* IPv6 not yet supported — drop to prevent validation bypass */
-        LOG_DBG("dropping IPv6 packet (not supported)");
-        return;
-    }
-    if (ip_ver != 4 || payload_len < 20) {
-        LOG_DBG("dropping non-IPv4 packet (version=%d len=%zu)", ip_ver, payload_len);
-        return;
-    }
-
-    /* Validate source IP matches assigned address (prevent spoofing) */
-    if (memcmp(payload + 12, &svr_conn->assigned_ip.s_addr, 4) != 0) {
-        LOG_WRN("dropping packet: src IP mismatch (expected %s)",
-                inet_ntoa(svr_conn->assigned_ip));
-        return;
-    }
-
-    /* Decrement TTL before forwarding (RFC 9484 §4.3 MUST) */
     uint8_t fwd_pkt[PACKET_BUF_SIZE];
-    memcpy(fwd_pkt, payload, payload_len);
-    if (fwd_pkt[8] <= 1) {
-        LOG_DBG("dropping packet: TTL expired");
-        svr_send_icmp_time_exceeded(svr_conn, payload, payload_len);
+
+    if (ip_ver == 4) {
+        if (payload_len < 20) {
+            LOG_DBG("dropping short IPv4 packet (len=%zu)", payload_len);
+            return;
+        }
+
+        /* Validate source IP matches assigned address (prevent spoofing) */
+        if (memcmp(payload + 12, &svr_conn->assigned_ip.s_addr, 4) != 0) {
+            LOG_WRN("dropping packet: src IP mismatch (expected %s)",
+                    inet_ntoa(svr_conn->assigned_ip));
+            return;
+        }
+
+        /* Decrement TTL before forwarding (RFC 9484 §4.3 MUST) */
+        memcpy(fwd_pkt, payload, payload_len);
+        if (fwd_pkt[8] <= 1) {
+            LOG_DBG("dropping packet: TTL expired");
+            svr_send_icmp_time_exceeded(svr_conn, payload, payload_len);
+            return;
+        }
+        fwd_pkt[8]--;
+        /* Incremental IP header checksum update (RFC 1141) */
+        uint32_t sum = ((uint32_t)fwd_pkt[10] << 8 | fwd_pkt[11]) + 0x0100;
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        fwd_pkt[10] = (sum >> 8) & 0xFF;
+        fwd_pkt[11] = sum & 0xFF;
+
+    } else if (ip_ver == 6) {
+        if (payload_len < 40) {
+            LOG_DBG("dropping short IPv6 packet (len=%zu)", payload_len);
+            return;
+        }
+
+        /* Validate source IPv6 matches assigned address (prevent spoofing) */
+        if (!svr_conn->has_v6 ||
+            memcmp(payload + 8, &svr_conn->assigned_ip6, 16) != 0) {
+            LOG_WRN("dropping IPv6 packet: src IP mismatch");
+            return;
+        }
+
+        /* Decrement Hop Limit (byte 7) before forwarding */
+        memcpy(fwd_pkt, payload, payload_len);
+        if (fwd_pkt[7] <= 1) {
+            LOG_DBG("dropping IPv6 packet: hop limit expired");
+            svr_send_icmpv6_time_exceeded(svr_conn, payload, payload_len);
+            return;
+        }
+        fwd_pkt[7]--;
+        /* IPv6 has no header checksum */
+
+    } else {
+        LOG_DBG("dropping non-IP packet (version=%d len=%zu)", ip_ver, payload_len);
         return;
     }
-    fwd_pkt[8]--;
-    /* Incremental IP header checksum update (RFC 1141) */
-    uint32_t sum = ((uint32_t)fwd_pkt[10] << 8 | fwd_pkt[11]) + 0x0100;
-    sum = (sum & 0xFFFF) + (sum >> 16);
-    fwd_pkt[10] = (sum >> 8) & 0xFF;
-    fwd_pkt[11] = sum & 0xFF;
 
     /* Write IP packet to TUN (kernel routes to internet via NAT) */
     int wret = mqvpn_tun_write(&svr_conn->ctx->tun, fwd_pkt, payload_len);
@@ -1017,6 +1376,8 @@ svr_dgram_mss_updated_notify(xqc_h3_conn_t *conn, size_t mss,
 {
     (void)conn;
     svr_conn_t *svr_conn = (svr_conn_t *)user_data;
+    if (svr_conn)
+        svr_conn->dgram_mss = mss;
     LOG_INF("datagram MSS updated: %zu", mss);
 
     /* Update server TUN MTU based on QUIC datagram MSS */
@@ -1024,7 +1385,10 @@ svr_dgram_mss_updated_notify(xqc_h3_conn_t *conn, size_t mss,
         size_t udp_mss = xqc_h3_ext_masque_udp_mss(
             mss, svr_conn->masque_stream_id);
         if (udp_mss >= 68) {
-            mqvpn_tun_set_mtu(&svr_conn->ctx->tun, (int)udp_mss);
+            int new_mtu = (int)udp_mss;
+            if (g_svr.pool.has_v6 && new_mtu < 1280)
+                new_mtu = 1280;
+            mqvpn_tun_set_mtu(&svr_conn->ctx->tun, new_mtu);
         }
     }
 }
@@ -1036,7 +1400,22 @@ svr_dgram_mss_updated_notify(xqc_h3_conn_t *conn, size_t mss,
 static int
 svr_create_udp_socket(const char *addr, int port, svr_ctx_t *ctx)
 {
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    /* Detect address family from bind address */
+    sa_family_t af = AF_INET;
+    struct in_addr  addr4;
+    struct in6_addr addr6;
+    if (addr && addr[0]) {
+        if (inet_pton(AF_INET6, addr, &addr6) == 1) {
+            af = AF_INET6;
+        } else if (inet_pton(AF_INET, addr, &addr4) == 1) {
+            af = AF_INET;
+        } else {
+            LOG_ERR("invalid listen address: %s", addr);
+            return -1;
+        }
+    }
+
+    int fd = socket(af, SOCK_DGRAM, 0);
     if (fd < 0) {
         LOG_ERR("socket: %s", strerror(errno));
         return -1;
@@ -1055,24 +1434,43 @@ svr_create_udp_socket(const char *addr, int port, svr_ctx_t *ctx)
     setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
 
-    struct sockaddr_in *sin = &ctx->local_addr;
-    memset(sin, 0, sizeof(*sin));
-    sin->sin_family = AF_INET;
-    sin->sin_port = htons((uint16_t)port);
-    if (addr && addr[0]) {
-        sin->sin_addr.s_addr = inet_addr(addr);
-    } else {
-        sin->sin_addr.s_addr = htonl(INADDR_ANY);
-    }
-    ctx->local_addrlen = sizeof(*sin);
+    memset(&ctx->local_addr, 0, sizeof(ctx->local_addr));
 
-    if (bind(fd, (struct sockaddr *)sin, sizeof(*sin)) < 0) {
-        LOG_ERR("bind %s:%d: %s", addr ? addr : "0.0.0.0", port, strerror(errno));
+    if (af == AF_INET6) {
+        int v6only = 1;
+        setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+
+        struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&ctx->local_addr;
+        sin6->sin6_family = AF_INET6;
+        sin6->sin6_port = htons((uint16_t)port);
+        if (addr && addr[0]) {
+            sin6->sin6_addr = addr6;
+        } else {
+            sin6->sin6_addr = in6addr_any;
+        }
+        ctx->local_addrlen = sizeof(struct sockaddr_in6);
+    } else {
+        struct sockaddr_in *sin = (struct sockaddr_in *)&ctx->local_addr;
+        sin->sin_family = AF_INET;
+        sin->sin_port = htons((uint16_t)port);
+        if (addr && addr[0]) {
+            sin->sin_addr = addr4;
+        } else {
+            sin->sin_addr.s_addr = htonl(INADDR_ANY);
+        }
+        ctx->local_addrlen = sizeof(struct sockaddr_in);
+    }
+
+    if (bind(fd, (struct sockaddr *)&ctx->local_addr, ctx->local_addrlen) < 0) {
+        LOG_ERR("bind %s:%d: %s", addr ? addr : (af == AF_INET6 ? "::" : "0.0.0.0"),
+                port, strerror(errno));
         close(fd);
         return -1;
     }
 
-    LOG_INF("UDP socket bound to %s:%d", addr ? addr : "0.0.0.0", port);
+    LOG_INF("UDP socket bound to %s:%d (%s)",
+            addr ? addr : (af == AF_INET6 ? "::" : "0.0.0.0"),
+            port, af == AF_INET6 ? "IPv6" : "IPv4");
     return fd;
 }
 
@@ -1091,6 +1489,11 @@ mqvpn_server_run(const mqvpn_server_cfg_t *cfg)
     /* Initialize address pool */
     if (mqvpn_addr_pool_init(&g_svr.pool, cfg->subnet) < 0) {
         return -1;
+    }
+    if (cfg->subnet6 && cfg->subnet6[0]) {
+        if (mqvpn_addr_pool_init6(&g_svr.pool, cfg->subnet6) < 0) {
+            return -1;
+        }
     }
 
     /* Create event base */
@@ -1235,6 +1638,17 @@ mqvpn_server_run(const mqvpn_server_cfg_t *cfg)
     }
     if (mqvpn_tun_up(&g_svr.tun) < 0) {
         return -1;
+    }
+
+    /* Set IPv6 address on TUN if configured */
+    if (g_svr.pool.has_v6) {
+        struct in6_addr srv_addr6;
+        mqvpn_addr_pool_server_addr6(&g_svr.pool, &srv_addr6);
+        char srv_ip6[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, &srv_addr6, srv_ip6, sizeof(srv_ip6));
+        if (mqvpn_tun_set_addr6(&g_svr.tun, srv_ip6, g_svr.pool.prefix6) < 0) {
+            return -1;
+        }
     }
 
     /* ---- Create UDP socket ---- */

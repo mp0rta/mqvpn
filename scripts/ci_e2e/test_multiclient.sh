@@ -12,7 +12,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MQVPN="${1:-${SCRIPT_DIR}/../build/mqvpn}"
+MQVPN="${1:-${SCRIPT_DIR}/../../build/mqvpn}"
 
 if [ ! -f "$MQVPN" ]; then
     echo "error: mqvpn binary not found at $MQVPN"
@@ -179,6 +179,14 @@ done
 
 if [ "$PING_PASS" -eq 0 ]; then
     echo "=== FAIL: Not all clients can ping ==="
+    echo ""
+    echo "--- Server log ---"
+    cat "${WORK_DIR}/server.log"
+    for i in 1 2 3; do
+        echo ""
+        echo "--- Client ${i} log ---"
+        cat "${WORK_DIR}/client${i}.log"
+    done
     exit 1
 fi
 echo "=== PASS: All 3 clients can ping through tunnel ==="
@@ -213,6 +221,14 @@ done
 
 if [ "$SURVIVE_PASS" -eq 0 ]; then
     echo "=== FAIL: Other clients affected by client 2 disconnect ==="
+    echo ""
+    echo "--- Server log ---"
+    cat "${WORK_DIR}/server.log"
+    for i in 1 3; do
+        echo ""
+        echo "--- Client ${i} log ---"
+        cat "${WORK_DIR}/client${i}.log"
+    done
     exit 1
 fi
 echo "=== PASS: Other clients unaffected by disconnect ==="
@@ -278,6 +294,13 @@ if [ "$AUTH_PASS" -eq 1 ]; then
     echo "=== PASS: Wrong PSK rejected ==="
 else
     echo "=== FAIL: Wrong PSK was not rejected ==="
+    echo ""
+    echo "--- Server log ---"
+    cat "${WORK_DIR}/server.log"
+    echo ""
+    echo "--- Bad client log ---"
+    cat "${WORK_DIR}/client_bad.log"
+    exit 1
 fi
 
 # Verify good clients still work after bad client attempt
@@ -320,5 +343,12 @@ if [ "$SURVIVE_PASS" -eq 1 ] && [ "$AUTH_PASS" -eq 1 ] && [ "$FINAL_PASS" -eq 1 
 else
     echo ""
     echo "=== SOME TESTS FAILED ==="
+    echo ""
+    echo "--- Server log ---"
+    cat "${WORK_DIR}/server.log"
+    for i in 1 2 3; do
+        [ -f "${WORK_DIR}/client${i}.log" ] && echo "" && echo "--- Client ${i} log ---" && cat "${WORK_DIR}/client${i}.log"
+    done
+    [ -f "${WORK_DIR}/client_bad.log" ] && echo "" && echo "--- Bad client log ---" && cat "${WORK_DIR}/client_bad.log"
     exit 1
 fi

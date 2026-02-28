@@ -22,9 +22,10 @@ usage(const char *prog)
         "Options:\n"
         "  --config PATH             Configuration file (INI format)\n"
         "  --mode client|server      Operating mode (required if no config)\n"
-        "  --server HOST:PORT        Server address, IPv4 only (client mode)\n"
+        "  --server HOST:PORT        Server address (client mode, [IPv6]:PORT for IPv6)\n"
         "  --listen BIND:PORT        Listen address (server mode, default 0.0.0.0:443)\n"
         "  --subnet CIDR             Client IP pool (server mode, default 10.0.0.0/24)\n"
+        "  --subnet6 CIDR            IPv6 client IP pool (server mode, e.g. fd00:vpn::/112)\n"
         "  --tun-name NAME           TUN device name (default mqvpn0)\n"
         "  --cert PATH               TLS certificate (server mode)\n"
         "  --key PATH                TLS private key (server mode)\n"
@@ -33,6 +34,8 @@ usage(const char *prog)
         "  --genkey                  Generate a random PSK and exit\n"
         "  --path IFACE              Network interface for multipath (repeatable, client mode)\n"
         "  --dns ADDR                DNS server to use (repeatable, client mode, max 4)\n"
+        "  --no-reconnect            Disable automatic reconnection (client mode)\n"
+        "  --kill-switch             Block traffic outside the VPN tunnel (client mode)\n"
         "  --scheduler minrtt|wlb    Multipath scheduler (default wlb)\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
@@ -45,17 +48,31 @@ usage(const char *prog)
 static int
 parse_host_port(const char *str, char *host, size_t host_len, int *port)
 {
-    /* Handle [host]:port or host:port */
-    const char *colon = strrchr(str, ':');
-    if (!colon) {
-        fprintf(stderr, "error: expected HOST:PORT, got '%s'\n", str);
-        return -1;
+    if (str[0] == '[') {
+        /* Bracket notation for IPv6: [host]:port */
+        const char *close = strchr(str, ']');
+        if (!close || close[1] != ':') {
+            fprintf(stderr, "error: expected [HOST]:PORT, got '%s'\n", str);
+            return -1;
+        }
+        size_t hlen = (size_t)(close - str - 1);
+        if (hlen >= host_len) hlen = host_len - 1;
+        memcpy(host, str + 1, hlen);
+        host[hlen] = '\0';
+        *port = atoi(close + 2);
+    } else {
+        /* Legacy: host:port (last colon) */
+        const char *colon = strrchr(str, ':');
+        if (!colon) {
+            fprintf(stderr, "error: expected HOST:PORT, got '%s'\n", str);
+            return -1;
+        }
+        size_t hlen = (size_t)(colon - str);
+        if (hlen >= host_len) hlen = host_len - 1;
+        memcpy(host, str, hlen);
+        host[hlen] = '\0';
+        *port = atoi(colon + 1);
     }
-    size_t hlen = (size_t)(colon - str);
-    if (hlen >= host_len) hlen = host_len - 1;
-    memcpy(host, str, hlen);
-    host[hlen] = '\0';
-    *port = atoi(colon + 1);
     if (*port <= 0 || *port > 65535) {
         fprintf(stderr, "error: invalid port in '%s'\n", str);
         return -1;
@@ -72,6 +89,7 @@ main(int argc, char *argv[])
         {"server",      required_argument, NULL, 's'},
         {"listen",      required_argument, NULL, 'l'},
         {"subnet",      required_argument, NULL, 'n'},
+        {"subnet6",     required_argument, NULL, '6'},
         {"tun-name",    required_argument, NULL, 't'},
         {"cert",        required_argument, NULL, 'c'},
         {"key",         required_argument, NULL, 'k'},
@@ -83,6 +101,8 @@ main(int argc, char *argv[])
         {"scheduler",   required_argument, NULL, 'S'},
         {"max-clients", required_argument, NULL, 'M'},
         {"log-level",   required_argument, NULL, 'L'},
+        {"no-reconnect", no_argument,      NULL, 'R'},
+        {"kill-switch",  no_argument,      NULL, 'K'},
         {"help",        no_argument,       NULL, 'h'},
         {NULL, 0, NULL, 0},
     };
@@ -92,6 +112,7 @@ main(int argc, char *argv[])
     const char *server_str  = NULL;
     const char *listen_str  = NULL;   /* NULL means "not set by CLI" */
     const char *subnet      = NULL;
+    const char *subnet6     = NULL;
     const char *tun_name    = NULL;
     const char *cert_file   = NULL;
     const char *key_file    = NULL;
@@ -105,9 +126,11 @@ main(int argc, char *argv[])
     int         n_paths = 0;
     const char *dns_servers[4];
     int         n_dns = 0;
+    int         no_reconnect = 0;
+    int         kill_switch  = -1;  /* -1 = not set by CLI */
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:t:c:k:ia:Gp:d:S:M:L:h",
+    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:ia:Gp:d:S:M:L:h",
                               long_opts, NULL)) != -1) {
         switch (opt) {
         case 'C': config_path = optarg; break;
@@ -115,6 +138,7 @@ main(int argc, char *argv[])
         case 's': server_str = optarg; break;
         case 'l': listen_str = optarg; break;
         case 'n': subnet = optarg; break;
+        case '6': subnet6 = optarg; break;
         case 't': tun_name = optarg; break;
         case 'c': cert_file = optarg; break;
         case 'k': key_file = optarg; break;
@@ -139,6 +163,8 @@ main(int argc, char *argv[])
             break;
         case 'S': scheduler_str = optarg; break;
         case 'M': max_clients = atoi(optarg); break;
+        case 'R': no_reconnect = 1; break;
+        case 'K': kill_switch = 1; break;
         case 'L': log_level_str = optarg; break;
         case 'h':
             usage(argv[0]);
@@ -170,6 +196,8 @@ main(int argc, char *argv[])
     const char *eff_scheduler   = scheduler_str ? scheduler_str : file_cfg.scheduler;
     const char *eff_listen      = listen_str  ? listen_str  : file_cfg.listen;
     const char *eff_subnet      = subnet      ? subnet      : file_cfg.subnet;
+    const char *eff_subnet6     = subnet6     ? subnet6     :
+                                  (file_cfg.subnet6[0] ? file_cfg.subnet6 : NULL);
     const char *eff_cert        = cert_file   ? cert_file   : file_cfg.cert_file;
     const char *eff_key         = key_file    ? key_file    : file_cfg.key_file;
     int         eff_insecure    = insecure >= 0 ? insecure  : file_cfg.insecure;
@@ -260,6 +288,8 @@ main(int argc, char *argv[])
             LOG_WRN("--insecure: accepting untrusted certificates");
         }
 
+        int eff_reconnect = no_reconnect ? 0 : file_cfg.reconnect;
+
         mqvpn_client_cfg_t cfg = {
             .server_addr = host,
             .server_port = port,
@@ -270,6 +300,9 @@ main(int argc, char *argv[])
             .scheduler   = scheduler,
             .auth_key    = eff_auth_key,
             .n_dns       = n_dns,
+            .reconnect   = eff_reconnect,
+            .reconnect_interval = file_cfg.reconnect_interval,
+            .kill_switch = kill_switch >= 0 ? kill_switch : file_cfg.kill_switch,
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];
@@ -297,6 +330,7 @@ main(int argc, char *argv[])
             .listen_addr = bind_addr,
             .listen_port = bind_port,
             .subnet      = eff_subnet,
+            .subnet6     = eff_subnet6,
             .tun_name    = eff_tun_name,
             .cert_file   = eff_cert,
             .key_file    = eff_key,
