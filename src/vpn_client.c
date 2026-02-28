@@ -572,6 +572,8 @@ cli_run_iptables_cmd(const char *const argv[])
     return 0;
 }
 
+static void cli_cleanup_killswitch(cli_ctx_t *ctx);
+
 static int
 cli_setup_killswitch(cli_ctx_t *ctx)
 {
@@ -601,8 +603,14 @@ cli_setup_killswitch(cli_ctx_t *ctx)
         cli_run_iptables_cmd(allow_lo4) < 0 ||
         cli_run_iptables_cmd(drop_all4) < 0) {
         LOG_WRN("failed to set up iptables kill switch rules");
+        /* Rollback any partial rules */
+        ctx->killswitch_active = 1;
+        cli_cleanup_killswitch(ctx);
         return -1;
     }
+
+    /* Mark active so cleanup always runs from this point */
+    ctx->killswitch_active = 1;
 
     int prefix = mqvpn_sa_host_prefix(&ctx->server_addr);
     char server_cidr[INET6_ADDRSTRLEN + 5];
@@ -620,6 +628,7 @@ cli_setup_killswitch(cli_ctx_t *ctx)
             "-m", "comment", "--comment", ctx->ks_comment, NULL
         };
         if (cli_run_iptables_cmd(allow_server) < 0) {
+            cli_cleanup_killswitch(ctx);
             return -1;
         }
     } else {
@@ -641,6 +650,7 @@ cli_setup_killswitch(cli_ctx_t *ctx)
         if (cli_run_iptables_cmd(v6_allow_server) < 0 ||
             cli_run_iptables_cmd(v6_allow_lo) < 0 ||
             cli_run_iptables_cmd(v6_drop_all) < 0) {
+            cli_cleanup_killswitch(ctx);
             return -1;
         }
     }
@@ -667,8 +677,6 @@ cli_setup_killswitch(cli_ctx_t *ctx)
             (void)cli_run_iptables_cmd(v6_drop_all);
         }
     }
-
-    ctx->killswitch_active = 1;
     LOG_INF("kill switch enabled (comment=%s)", ctx->ks_comment);
     return 0;
 }
@@ -841,7 +849,10 @@ cli_setup_tun(cli_ctx_t *ctx, const uint8_t *ip, uint8_t prefix)
     cli_setup_routes(ctx);
 
     /* Enable kill switch if configured */
-    cli_setup_killswitch(ctx);
+    if (cli_setup_killswitch(ctx) < 0) {
+        LOG_ERR("kill switch setup failed, aborting tunnel");
+        return -1;
+    }
 
     /* Apply DNS override if configured */
     if (ctx->dns.n_servers > 0) {
