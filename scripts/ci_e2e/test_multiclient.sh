@@ -12,7 +12,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MQVPN="${1:-${SCRIPT_DIR}/../build/mqvpn}"
+MQVPN="${1:-${SCRIPT_DIR}/../../build/mqvpn}"
 
 if [ ! -f "$MQVPN" ]; then
     echo "error: mqvpn binary not found at $MQVPN"

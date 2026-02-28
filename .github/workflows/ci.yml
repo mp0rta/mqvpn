@@ -17,7 +17,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake libevent-dev golang
+          sudo apt-get install -y cmake libevent-dev golang iptables
 
       - name: Clone BoringSSL
         run: |
@@ -51,7 +51,28 @@ jobs:
         run: cd build && ctest --output-on-failure
 
       - name: Smoke test (netns)
-        run: sudo scripts/run_test.sh
+        run: sudo scripts/ci_e2e/run_test.sh
 
       - name: Multi-client test (netns)
-        run: sudo scripts/test_multiclient.sh
+        run: sudo scripts/ci_e2e/test_multiclient.sh
+
+      - name: NAT test (netns)
+        run: sudo scripts/ci_e2e/run_nat_test.sh
+
+      - name: Kill switch test (netns)
+        run: sudo scripts/ci_e2e/run_killswitch_test.sh
+
+      - name: Reconnect test (netns)
+        run: sudo scripts/ci_e2e/run_reconnect_test.sh
+
+      - name: IPv6 transport test (netns)
+        run: sudo scripts/ci_e2e/run_ipv6_transport_test.sh
+
+      - name: IPv6 data plane test (netns)
+        run: sudo scripts/ci_e2e/run_ipv6_dataplane_test.sh
+
+      - name: IPv6 multipath test (netns)
+        run: sudo scripts/ci_e2e/run_ipv6_multipath_test.sh
+
+      - name: IPv6 full multipath test (netns)
+        run: sudo scripts/ci_e2e/run_ipv6_full_multipath_test.sh

@@ -4,12 +4,22 @@
 # Creates two netns (vpn-client, vpn-server), runs mqvpn server and client,
 # and verifies connectivity with ping.
 #
-# Usage: sudo ./run_test.sh [path-to-mqvpn-binary]
+# Usage: sudo ./run_test.sh [path-to-mqvpn-binary] [--log-level LEVEL]
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MQVPN="${1:-${SCRIPT_DIR}/../build/mqvpn}"
+MQVPN=""
+LOG_LEVEL="debug"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --log-level) LOG_LEVEL="$2"; shift 2 ;;
+        *) [ -z "$MQVPN" ] && MQVPN="$1"; shift ;;
+    esac
+done
+
+MQVPN="${MQVPN:-${SCRIPT_DIR}/../../build/mqvpn}"
 
 if [ ! -f "$MQVPN" ]; then
     echo "error: mqvpn binary not found at $MQVPN"
@@ -82,7 +92,7 @@ ip netns exec vpn-server "$MQVPN" \
     --cert "${WORK_DIR}/server.crt" \
     --key "${WORK_DIR}/server.key" \
     --auth-key "$PSK" \
-    --log-level debug &
+    --log-level "$LOG_LEVEL" &
 SERVER_PID=$!
 sleep 2
 
@@ -100,7 +110,7 @@ ip netns exec vpn-client "$MQVPN" \
     --server 192.168.100.2:4433 \
     --auth-key "$PSK" \
     --insecure \
-    --log-level debug &
+    --log-level "$LOG_LEVEL" &
 CLIENT_PID=$!
 sleep 3
 
@@ -145,7 +155,7 @@ ip netns exec vpn-client "$MQVPN" \
     --mode client \
     --server 192.168.100.2:4433 \
     --auth-key "$PSK" \
-    --log-level debug > "${WORK_DIR}/client_strict.log" 2>&1 &
+    --log-level "$LOG_LEVEL" > "${WORK_DIR}/client_strict.log" 2>&1 &
 CLIENT_STRICT_PID=$!
 
 # Wait for connection attempt — client should fail and exit
