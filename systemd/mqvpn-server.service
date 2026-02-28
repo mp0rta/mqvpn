@@ -11,11 +11,14 @@ ExecStart=/usr/local/bin/mqvpn --config /etc/mqvpn/server.conf
 ExecStopPost=/usr/local/lib/mqvpn/mqvpn-server-nat.sh teardown /etc/mqvpn/server.conf
 Restart=on-failure
 RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 # Security hardening
 ProtectHome=true
 ProtectSystem=strict
 PrivateTmp=true
+ReadOnlyPaths=/etc/mqvpn
 ReadWritePaths=/dev/net/tun
 
 [Install]

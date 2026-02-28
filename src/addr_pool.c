@@ -139,9 +139,11 @@ mqvpn_addr_pool_get6(const mqvpn_addr_pool_t *pool, uint32_t offset,
 {
     memcpy(out, &pool->base6, sizeof(*out));
     /* Add offset to the low 32 bits (bytes 12-15) of the IPv6 address */
-    uint32_t low = ntohl(*(uint32_t *)&out->s6_addr[12]);
-    low += offset;
-    *(uint32_t *)&out->s6_addr[12] = htonl(low);
+    uint32_t low;
+    memcpy(&low, &out->s6_addr[12], sizeof(low));
+    low = ntohl(low) + offset;
+    low = htonl(low);
+    memcpy(&out->s6_addr[12], &low, sizeof(low));
 }
 
 void
@@ -159,8 +161,11 @@ mqvpn_addr_pool_offset6(const mqvpn_addr_pool_t *pool,
     if (memcmp(addr->s6_addr, pool->base6.s6_addr, 12) != 0) {
         return 0;
     }
-    uint32_t addr_low = ntohl(*(const uint32_t *)&addr->s6_addr[12]);
-    uint32_t base_low = ntohl(*(const uint32_t *)&pool->base6.s6_addr[12]);
+    uint32_t addr_low, base_low;
+    memcpy(&addr_low, &addr->s6_addr[12], sizeof(addr_low));
+    memcpy(&base_low, &pool->base6.s6_addr[12], sizeof(base_low));
+    addr_low = ntohl(addr_low);
+    base_low = ntohl(base_low);
     if (addr_low < base_low) return 0;
     return addr_low - base_low;
 }

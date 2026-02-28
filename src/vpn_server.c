@@ -999,7 +999,10 @@ svr_request_read_notify(xqc_h3_request_t *h3_request,
             }
             if (need > stream->capsule_cap) {
                 size_t new_cap = stream->capsule_cap ? stream->capsule_cap * 2 : 4096;
-                while (new_cap < need) new_cap *= 2;
+                while (new_cap < need) {
+                    if (new_cap > SIZE_MAX / 2) { new_cap = need; break; }
+                    new_cap *= 2;
+                }
                 uint8_t *new_buf = realloc(stream->capsule_buf, new_cap);
                 if (!new_buf) break;
                 stream->capsule_buf = new_buf;

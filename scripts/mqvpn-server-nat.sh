@@ -62,9 +62,21 @@ setup() {
 teardown() {
     echo "mqvpn-server-nat: teardown"
 
-    # Remove all rules tagged with our comment (handles duplicates)
-    while iptables -t nat -D POSTROUTING -m comment --comment "$COMMENT" -j MASQUERADE 2>/dev/null; do :; done
-    while iptables -D FORWARD -m comment --comment "$COMMENT" 2>/dev/null; do :; done
+    # Remove rules by line number (reverse order to avoid index shift)
+    # This handles any rule shape as long as it has our comment tag
+    delete_by_comment() {
+        local table="$1" chain="$2"
+        while true; do
+            local line
+            line=$(iptables -t "$table" -L "$chain" --line-numbers -n 2>/dev/null \
+                | grep "$COMMENT" | head -1 | awk '{print $1}')
+            [ -z "$line" ] && break
+            iptables -t "$table" -D "$chain" "$line" 2>/dev/null || break
+        done
+    }
+
+    delete_by_comment nat POSTROUTING
+    delete_by_comment filter FORWARD
 }
 
 case "$ACTION" in
