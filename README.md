@@ -279,6 +279,15 @@ Server:
 - `--insecure` accepts certificates that fail verification (self-signed, unknown CA, etc.) and is intended for local/testing use only.
 - `--auth-key` is required for server mode. The server refuses to start without it. Generate one with `mqvpn --genkey`.
 - PSK authentication protects against unauthorized connections. The key is transmitted over QUIC's TLS 1.3 channel, so it is never exposed in plaintext on the wire.
+- **TLS certificates** — Use an external tool like `certbot` to obtain and renew certificates. Point mqvpn to the certificate files in your config:
+  ```bash
+  sudo certbot certonly --standalone -d vpn.example.com
+  # In /etc/mqvpn/server.conf:
+  #   [TLS]
+  #   Cert = /etc/letsencrypt/live/vpn.example.com/fullchain.pem
+  #   Key = /etc/letsencrypt/live/vpn.example.com/privkey.pem
+  ```
+  certbot's systemd timer handles automatic renewal. Add a deploy hook to restart mqvpn: `certbot renew --deploy-hook "systemctl restart mqvpn-server"`.
 
 ## Testing
 
@@ -313,7 +322,6 @@ sudo scripts/run_multipath_test.sh
 - [x] IPv6 support (dual-stack tunnel with `--subnet6`, IPv6 QUIC transport)
 - [x] ICMP Packet Too Big responses (RFC 9484 §10.1)
 - [x] systemd service unit (`mqvpn-server.service`, `mqvpn-client@.service`)
-- [ ] Let's Encrypt / ACME integration for TLS certificates
 
 ### Future
 - [ ] Per-client token authentication
