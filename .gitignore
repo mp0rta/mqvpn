@@ -1,6 +1,8 @@
 build/
 impl_status.md
-benchmarks/
+benchmarks/*
+!benchmarks/*.sh
+!benchmarks/*.py
 *.o
 *.d
 CMakeCache.txt

@@ -1,0 +1,474 @@
+{
+  "test": "udp_sweep",
+  "env": "netns",
+  "timestamp": "2026-02-28T21:58:05+09:00",
+  "netem": {
+    "path_a": {
+      "delay_ms": 10,
+      "rate_mbit": 300
+    },
+    "path_b": {
+      "delay_ms": 30,
+      "rate_mbit": 80
+    }
+  },
+  "theoretical_max_mbps": 380,
+  "sweeps": [
+    {
+      "condition": "single_path",
+      "scheduler": "wlb",
+      "packet_size": 160,
+      "results": [
+        {
+          "target_mbps": 1,
+          "throughput_mbps": 1.0,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0073
+        },
+        {
+          "target_mbps": 5,
+          "throughput_mbps": 5.0,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.006
+        },
+        {
+          "target_mbps": 10,
+          "throughput_mbps": 10.0,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0092
+        },
+        {
+          "target_mbps": 20,
+          "throughput_mbps": 20.0,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0121
+        },
+        {
+          "target_mbps": 30,
+          "throughput_mbps": 30.0,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0083
+        },
+        {
+          "target_mbps": 50,
+          "throughput_mbps": 50.0,
+          "lost_percent": 0.1096,
+          "jitter_ms": 0.0089
+        },
+        {
+          "target_mbps": 75,
+          "throughput_mbps": 74.99,
+          "lost_percent": 0.0034,
+          "jitter_ms": 0.0076
+        },
+        {
+          "target_mbps": 100,
+          "throughput_mbps": 99.99,
+          "lost_percent": 0.3735,
+          "jitter_ms": 0.0067
+        },
+        {
+          "target_mbps": 150,
+          "throughput_mbps": 149.99,
+          "lost_percent": 33.0798,
+          "jitter_ms": 0.0061
+        },
+        {
+          "target_mbps": 200,
+          "throughput_mbps": 199.99,
+          "lost_percent": 51.9159,
+          "jitter_ms": 0.0164
+        }
+      ]
+    },
+    {
+      "condition": "multipath",
+      "scheduler": "wlb",
+      "packet_size": 160,
+      "results": [
+        {
+          "target_mbps": 1,
+          "throughput_mbps": 1.0,
+          "lost_percent": 0.0597,
+          "jitter_ms": 19.0039
+        },
+        {
+          "target_mbps": 5,
+          "throughput_mbps": 5.0,
+          "lost_percent": 0.0,
+          "jitter_ms": 1.2131
+        },
+        {
+          "target_mbps": 10,
+          "throughput_mbps": 10.0,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0455
+        },
+        {
+          "target_mbps": 20,
+          "throughput_mbps": 20.0,
+          "lost_percent": 0.1028,
+          "jitter_ms": 3.7467
+        },
+        {
+          "target_mbps": 30,
+          "throughput_mbps": 30.0,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0358
+        },
+        {
+          "target_mbps": 50,
+          "throughput_mbps": 50.0,
+          "lost_percent": 0.063,
+          "jitter_ms": 0.0319
+        },
+        {
+          "target_mbps": 75,
+          "throughput_mbps": 74.99,
+          "lost_percent": 0.2283,
+          "jitter_ms": 2.353
+        },
+        {
+          "target_mbps": 100,
+          "throughput_mbps": 99.99,
+          "lost_percent": 3.4268,
+          "jitter_ms": 2.5211
+        },
+        {
+          "target_mbps": 150,
+          "throughput_mbps": 149.99,
+          "lost_percent": 24.8969,
+          "jitter_ms": 0.0245
+        },
+        {
+          "target_mbps": 200,
+          "throughput_mbps": 199.99,
+          "lost_percent": 49.5175,
+          "jitter_ms": 0.0163
+        }
+      ]
+    },
+    {
+      "condition": "multipath",
+      "scheduler": "minrtt",
+      "packet_size": 160,
+      "results": [
+        {
+          "target_mbps": 1,
+          "throughput_mbps": 1.0,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0092
+        },
+        {
+          "target_mbps": 5,
+          "throughput_mbps": 5.0,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0072
+        },
+        {
+          "target_mbps": 10,
+          "throughput_mbps": 10.0,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0112
+        },
+        {
+          "target_mbps": 20,
+          "throughput_mbps": 20.0,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0109
+        },
+        {
+          "target_mbps": 30,
+          "throughput_mbps": 30.0,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0079
+        },
+        {
+          "target_mbps": 50,
+          "throughput_mbps": 50.0,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.01
+        },
+        {
+          "target_mbps": 75,
+          "throughput_mbps": 74.99,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0074
+        },
+        {
+          "target_mbps": 100,
+          "throughput_mbps": 99.99,
+          "lost_percent": 0.0317,
+          "jitter_ms": 0.0072
+        },
+        {
+          "target_mbps": 150,
+          "throughput_mbps": 149.99,
+          "lost_percent": 26.3945,
+          "jitter_ms": 1.6267
+        },
+        {
+          "target_mbps": 200,
+          "throughput_mbps": 199.99,
+          "lost_percent": 46.8773,
+          "jitter_ms": 0.0168
+        }
+      ]
+    },
+    {
+      "condition": "single_path",
+      "scheduler": "wlb",
+      "packet_size": 1100,
+      "results": [
+        {
+          "target_mbps": 10,
+          "throughput_mbps": 10.0,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0115
+        },
+        {
+          "target_mbps": 25,
+          "throughput_mbps": 25.0,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0378
+        },
+        {
+          "target_mbps": 50,
+          "throughput_mbps": 50.0,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0428
+        },
+        {
+          "target_mbps": 75,
+          "throughput_mbps": 74.99,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0445
+        },
+        {
+          "target_mbps": 100,
+          "throughput_mbps": 99.99,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0464
+        },
+        {
+          "target_mbps": 125,
+          "throughput_mbps": 124.99,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0465
+        },
+        {
+          "target_mbps": 150,
+          "throughput_mbps": 149.99,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0457
+        },
+        {
+          "target_mbps": 175,
+          "throughput_mbps": 174.99,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0434
+        },
+        {
+          "target_mbps": 200,
+          "throughput_mbps": 199.99,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0428
+        },
+        {
+          "target_mbps": 250,
+          "throughput_mbps": 249.98,
+          "lost_percent": 0.0547,
+          "jitter_ms": 0.0394
+        },
+        {
+          "target_mbps": 300,
+          "throughput_mbps": 299.98,
+          "lost_percent": 6.7119,
+          "jitter_ms": 0.0377
+        },
+        {
+          "target_mbps": 350,
+          "throughput_mbps": 349.97,
+          "lost_percent": 19.8,
+          "jitter_ms": 0.0595
+        },
+        {
+          "target_mbps": 380,
+          "throughput_mbps": 379.97,
+          "lost_percent": 26.2857,
+          "jitter_ms": 0.0338
+        }
+      ]
+    },
+    {
+      "condition": "multipath",
+      "scheduler": "wlb",
+      "packet_size": 1100,
+      "results": [
+        {
+          "target_mbps": 10,
+          "throughput_mbps": 10.0,
+          "lost_percent": 0.0587,
+          "jitter_ms": 14.0747
+        },
+        {
+          "target_mbps": 25,
+          "throughput_mbps": 25.0,
+          "lost_percent": 0.0821,
+          "jitter_ms": 11.7852
+        },
+        {
+          "target_mbps": 50,
+          "throughput_mbps": 50.0,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.316
+        },
+        {
+          "target_mbps": 75,
+          "throughput_mbps": 74.99,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.2097
+        },
+        {
+          "target_mbps": 100,
+          "throughput_mbps": 99.99,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.1727
+        },
+        {
+          "target_mbps": 125,
+          "throughput_mbps": 124.99,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.1839
+        },
+        {
+          "target_mbps": 150,
+          "throughput_mbps": 149.99,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.184
+        },
+        {
+          "target_mbps": 175,
+          "throughput_mbps": 174.99,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.1778
+        },
+        {
+          "target_mbps": 200,
+          "throughput_mbps": 199.99,
+          "lost_percent": 0.0587,
+          "jitter_ms": 10.0834
+        },
+        {
+          "target_mbps": 250,
+          "throughput_mbps": 249.98,
+          "lost_percent": 0.0472,
+          "jitter_ms": 10.1548
+        },
+        {
+          "target_mbps": 300,
+          "throughput_mbps": 299.98,
+          "lost_percent": 0.1572,
+          "jitter_ms": 31.8251
+        },
+        {
+          "target_mbps": 350,
+          "throughput_mbps": 349.97,
+          "lost_percent": 0.0139,
+          "jitter_ms": 0.1775
+        },
+        {
+          "target_mbps": 380,
+          "throughput_mbps": 379.97,
+          "lost_percent": 7.2739,
+          "jitter_ms": 30.8615
+        }
+      ]
+    },
+    {
+      "condition": "multipath",
+      "scheduler": "minrtt",
+      "packet_size": 1100,
+      "results": [
+        {
+          "target_mbps": 10,
+          "throughput_mbps": 10.0,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0118
+        },
+        {
+          "target_mbps": 25,
+          "throughput_mbps": 25.0,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0389
+        },
+        {
+          "target_mbps": 50,
+          "throughput_mbps": 50.0,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0445
+        },
+        {
+          "target_mbps": 75,
+          "throughput_mbps": 74.99,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0455
+        },
+        {
+          "target_mbps": 100,
+          "throughput_mbps": 99.99,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0469
+        },
+        {
+          "target_mbps": 125,
+          "throughput_mbps": 124.99,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0455
+        },
+        {
+          "target_mbps": 150,
+          "throughput_mbps": 149.99,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0457
+        },
+        {
+          "target_mbps": 175,
+          "throughput_mbps": 174.99,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0442
+        },
+        {
+          "target_mbps": 200,
+          "throughput_mbps": 199.98,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0426
+        },
+        {
+          "target_mbps": 250,
+          "throughput_mbps": 249.98,
+          "lost_percent": 0.0,
+          "jitter_ms": 0.0396
+        },
+        {
+          "target_mbps": 300,
+          "throughput_mbps": 299.98,
+          "lost_percent": 0.0428,
+          "jitter_ms": 0.0447
+        },
+        {
+          "target_mbps": 350,
+          "throughput_mbps": 349.97,
+          "lost_percent": 0.2682,
+          "jitter_ms": 35.8711
+        },
+        {
+          "target_mbps": 380,
+          "throughput_mbps": 379.97,
+          "lost_percent": 7.3708,
+          "jitter_ms": 24.7574
+        }
+      ]
+    }
+  ]
+}
