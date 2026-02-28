@@ -1,6 +1,8 @@
 build/
 impl_status.md
-benchmarks/
+benchmarks/*
+!benchmarks/*.sh
+!benchmarks/*.py
 *.o
 *.d
 CMakeCache.txt
@@ -12,3 +14,4 @@ tests/test_config
 tests/test_auth
 tests/test_session
 tests/test_dns
+client.conf

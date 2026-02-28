@@ -29,5 +29,5 @@ Expected submodule status includes:
 When updating xquic:
 
 1. Update `third_party/xquic` to a new tested commit in `feature/masque`.
-2. Run smoke and multipath tests (`scripts/run_test.sh`, `scripts/run_multipath_test.sh`).
+2. Run smoke and multipath tests (`scripts/ci_e2e/run_test.sh`, `scripts/run_multipath_test.sh`).
 3. Update this file with the new pinned commit hash.

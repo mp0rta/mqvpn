@@ -1,0 +1,21 @@
+# mqvpn server configuration
+# Copy to /etc/mqvpn/server.conf and edit as needed.
+
+[Interface]
+Listen = 0.0.0.0:443
+Subnet = 10.0.0.0/24
+# Subnet6 = fd00:vpn::/112
+TunName = mqvpn0
+LogLevel = info
+
+[TLS]
+Cert = /etc/mqvpn/server.crt
+Key = /etc/mqvpn/server.key
+
+[Auth]
+# Generate with: mqvpn --genkey
+Key = <YOUR_PSK_HERE>
+MaxClients = 64
+
+[Multipath]
+Scheduler = wlb

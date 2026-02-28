@@ -1,0 +1,23 @@
+[Unit]
+Description=mqvpn VPN Client (%i)
+After=network-online.target
+Wants=network-online.target
+Documentation=https://github.com/mp0rta/mqvpn
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mqvpn --config /etc/mqvpn/client-%i.conf
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+# Security hardening
+ProtectHome=true
+ProtectSystem=strict
+PrivateTmp=true
+ReadOnlyPaths=/etc/mqvpn
+ReadWritePaths=/dev/net/tun /etc/resolv.conf /etc/resolv.conf.mqvpn.bak
+
+[Install]
+WantedBy=multi-user.target
