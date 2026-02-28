@@ -106,6 +106,38 @@ sudo mqvpn --config /etc/mqvpn/client.conf
 
 Mode is auto-detected from the config (`[Interface] Listen` → server, `[Server] Address` → client).
 
+## systemd Service
+
+Systemd unit files are provided for production deployments.
+
+**Server:**
+
+```bash
+sudo mkdir -p /etc/mqvpn
+sudo cp systemd/server.conf.example /etc/mqvpn/server.conf
+# Edit server.conf: set cert, key, and auth-key
+sudo systemctl enable --now mqvpn-server
+```
+
+The server unit runs `mqvpn-server-nat.sh` as `ExecStartPre`/`ExecStopPost` to manage NAT rules and IP forwarding automatically.
+
+**Client:**
+
+```bash
+sudo cp systemd/client.conf.example /etc/mqvpn/client-home.conf
+# Edit client-home.conf: set server address and auth-key
+sudo systemctl enable --now mqvpn-client@home
+```
+
+The client unit is a template — the instance name maps to the config file: `mqvpn-client@home` reads `/etc/mqvpn/client-home.conf`.
+
+**Install unit files (via cmake):**
+
+```bash
+cd build && sudo cmake --install .
+sudo systemctl daemon-reload
+```
+
 ## Benchmarks
 
 Asymmetric dual-path test (Path A: 300M/10ms, Path B: 80M/30ms) using Linux network namespaces.
@@ -280,7 +312,7 @@ sudo scripts/run_multipath_test.sh
 - [x] Kill switch (prevent traffic leaking outside the tunnel)
 - [x] IPv6 support (dual-stack tunnel with `--subnet6`, IPv6 QUIC transport)
 - [x] ICMP Packet Too Big responses (RFC 9484 §10.1)
-- [ ] systemd service unit (`mqvpn-server.service`, `mqvpn-client@.service`)
+- [x] systemd service unit (`mqvpn-server.service`, `mqvpn-client@.service`)
 - [ ] Let's Encrypt / ACME integration for TLS certificates
 
 ### Future

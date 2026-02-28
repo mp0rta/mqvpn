@@ -1,0 +1,23 @@
+# mqvpn client configuration
+# Copy to /etc/mqvpn/client-<name>.conf and edit as needed.
+# Start with: systemctl start mqvpn-client@<name>
+
+[Server]
+Address = your-server.example.com:443
+# Insecure = false
+
+[Auth]
+Key = <YOUR_PSK_HERE>
+
+[Interface]
+TunName = mqvpn0
+DNS = 1.1.1.1, 8.8.8.8
+LogLevel = info
+# KillSwitch = false
+# Reconnect = true
+# ReconnectInterval = 5
+
+[Multipath]
+Scheduler = wlb
+# Path = eth0
+# Path = wlan0

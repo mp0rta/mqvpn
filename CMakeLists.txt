@@ -107,3 +107,7 @@ endif()
 
 # ---------- Install ----------
 install(TARGETS mqvpn DESTINATION bin)
+install(FILES systemd/mqvpn-server.service systemd/mqvpn-client@.service
+        DESTINATION lib/systemd/system)
+install(PROGRAMS scripts/mqvpn-server-nat.sh
+        DESTINATION lib/mqvpn)
