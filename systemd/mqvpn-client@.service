@@ -3,14 +3,15 @@ Description=mqvpn VPN Client (%i)
 After=network-online.target
 Wants=network-online.target
 Documentation=https://github.com/mp0rta/mqvpn
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
+ExecStartPre=-/usr/bin/touch /etc/resolv.conf.mqvpn.bak
 ExecStart=/usr/local/bin/mqvpn --config /etc/mqvpn/client-%i.conf
 Restart=on-failure
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=3
 
 # Security hardening
 ProtectHome=true
