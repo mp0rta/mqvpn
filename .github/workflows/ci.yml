@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  build-and-test:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +50,35 @@ jobs:
       - name: Unit tests (ctest)
         run: cd build && ctest --output-on-failure
 
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: |
+            build/mqvpn
+            build/cmake_install.cmake
+          retention-days: 1
+
+  netns-tests:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libevent-dev iptables
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build
+          path: build
+
+      - name: Make binary executable
+        run: chmod +x build/mqvpn
+
       - name: Smoke test (netns)
         run: sudo scripts/ci_e2e/run_test.sh
 
@@ -65,6 +94,26 @@ jobs:
       - name: Reconnect test (netns)
         run: sudo scripts/ci_e2e/run_reconnect_test.sh
 
+  ipv6-tests:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libevent-dev iptables
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build
+          path: build
+
+      - name: Make binary executable
+        run: chmod +x build/mqvpn
+
       - name: IPv6 transport test (netns)
         run: sudo scripts/ci_e2e/run_ipv6_transport_test.sh
 
@@ -76,6 +125,26 @@ jobs:
 
       - name: IPv6 full multipath test (netns)
         run: sudo scripts/ci_e2e/run_ipv6_full_multipath_test.sh
+
+  systemd-test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libevent-dev iptables
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build
+          path: build
+
+      - name: Make binary executable
+        run: chmod +x build/mqvpn
 
       - name: Install mqvpn (system-wide)
         run: cd build && sudo cmake --install . --prefix /usr/local
