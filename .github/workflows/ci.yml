@@ -9,6 +9,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -19,10 +20,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake libevent-dev golang iptables
 
-      - name: Clone BoringSSL
+      - name: Clone BoringSSL (pinned)
         run: |
-          git clone --depth 1 https://github.com/google/boringssl.git \
+          git clone https://github.com/google/boringssl.git \
             third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
 
       - name: Build BoringSSL
         run: |
@@ -62,6 +64,7 @@ jobs:
   netns-tests:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -97,6 +100,7 @@ jobs:
   ipv6-tests:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -129,6 +133,7 @@ jobs:
   systemd-test:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 

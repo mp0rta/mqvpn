@@ -1276,8 +1276,11 @@ svr_dgram_read_notify(xqc_h3_conn_t *conn, const void *data,
 
         /* Validate source IP matches assigned address (prevent spoofing) */
         if (memcmp(payload + 12, &svr_conn->assigned_ip.s_addr, 4) != 0) {
-            LOG_WRN("dropping packet: src IP mismatch (expected %s)",
-                    inet_ntoa(svr_conn->assigned_ip));
+            {
+            char expected_ip[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &svr_conn->assigned_ip, expected_ip, sizeof(expected_ip));
+            LOG_WRN("dropping packet: src IP mismatch (expected %s)", expected_ip);
+        }
             return;
         }
 
@@ -1517,8 +1520,9 @@ mqvpn_server_run(const mqvpn_server_cfg_t *cfg)
     g_svr.ev_tun_resume = evtimer_new(g_svr.eb, svr_tun_resume_safety, &g_svr);
     g_svr.ev_sigint = evsignal_new(g_svr.eb, SIGINT, svr_signal_event_callback, &g_svr);
     g_svr.ev_sigterm = evsignal_new(g_svr.eb, SIGTERM, svr_signal_event_callback, &g_svr);
-    if (!g_svr.ev_sigint || !g_svr.ev_sigterm) {
-        LOG_ERR("failed to create signal events");
+    if (!g_svr.ev_engine || !g_svr.ev_tun_resume ||
+        !g_svr.ev_sigint || !g_svr.ev_sigterm) {
+        LOG_ERR("failed to create libevent events");
         return -1;
     }
     event_add(g_svr.ev_sigint, NULL);
