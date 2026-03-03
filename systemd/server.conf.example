@@ -18,4 +18,5 @@ Key = <YOUR_PSK_HERE>
 MaxClients = 64
 
 [Multipath]
+# Scheduler: wlb (weighted load balancing) or minrtt (lowest RTT)
 Scheduler = wlb

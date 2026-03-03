@@ -1371,6 +1371,7 @@ cli_stream_append_capsules(cli_stream_t *stream, const uint8_t *buf, size_t len)
     if (need > stream->capsule_cap) {
         size_t new_cap = stream->capsule_cap ? stream->capsule_cap * 2 : 4096;
         while (new_cap < need) {
+            if (new_cap > SIZE_MAX / 2) { new_cap = need; break; }
             new_cap *= 2;
         }
         uint8_t *new_buf = realloc(stream->capsule_buf, new_cap);
@@ -1864,7 +1865,7 @@ cli_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
             ctx->engine, &conn->cid, &new_path_id, 0);
         if (ret < 0) {
             LOG_WRN("xqc_conn_create_path[%d]: %d", i, ret);
-            return;
+            continue;
         }
 
         p->path_id = new_path_id;
@@ -2123,8 +2124,9 @@ mqvpn_client_run(const mqvpn_client_cfg_t *cfg)
     g_cli.ev_tun_resume = evtimer_new(g_cli.eb, cli_tun_resume_safety, &g_cli);
     g_cli.ev_sigint = evsignal_new(g_cli.eb, SIGINT, cli_signal_event_callback, &g_cli);
     g_cli.ev_sigterm = evsignal_new(g_cli.eb, SIGTERM, cli_signal_event_callback, &g_cli);
-    if (!g_cli.ev_sigint || !g_cli.ev_sigterm) {
-        LOG_ERR("failed to create signal events");
+    if (!g_cli.ev_engine || !g_cli.ev_path_recreate || !g_cli.ev_tun_resume ||
+        !g_cli.ev_sigint || !g_cli.ev_sigterm) {
+        LOG_ERR("failed to create libevent events");
         return -1;
     }
     event_add(g_cli.ev_sigint, NULL);
