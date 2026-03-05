@@ -22,7 +22,4 @@ typedef struct mqvpn_client_cfg_s {
     int          kill_switch;  /* 1=block traffic outside tunnel (default 0) */
 } mqvpn_client_cfg_t;
 
-/* Run the VPN client (blocks until shutdown). Returns 0 on clean exit. */
-int mqvpn_client_run(const mqvpn_client_cfg_t *cfg);
-
 #endif /* MQVPN_VPN_CLIENT_H */

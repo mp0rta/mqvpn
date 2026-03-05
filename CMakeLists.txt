@@ -103,7 +103,6 @@ add_executable(mqvpn
     src/platform/linux/killswitch.c
     src/platform/linux/tun.c
     src/platform/linux/dns.c
-    src/vpn_client.c
     src/path_mgr.c
     src/config.c
 )
