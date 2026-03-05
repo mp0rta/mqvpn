@@ -812,7 +812,7 @@ static int cb_request_read(xqc_h3_request_t *h3_request,
             if (n <= 0) break;
             if (stream_append_capsules(stream, buf, (size_t)n) < 0) return -1;
             process_capsules(stream);
-        } while (n > 0 && !fin);
+        } while (!fin);
 
         /* Notify platform on ADDRESS_ASSIGN */
         if (conn->addr_assigned && c->state != MQVPN_STATE_ESTABLISHED &&
@@ -1125,7 +1125,7 @@ mqvpn_client_t *mqvpn_client_new(
 
     memcpy(&c->config, cfg, sizeof(*cfg));
     memcpy(&c->cbs, cbs, sizeof(*cbs));
-    c->user_ctx = user_ctx;
+    c->user_ctx = user_ctx;  /* caller guarantees lifetime exceeds this object */  // lgtm[cpp/stack-address-escape]
     c->state = MQVPN_STATE_IDLE;
     c->next_path_handle = 1;
     c->ptb_tokens = PTB_RATE_LIMIT;

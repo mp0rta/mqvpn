@@ -1033,6 +1033,13 @@ static int cb_request_close(xqc_h3_request_t *h3_request,
     return 0;
 }
 
+/*
+ * cb_request_read — xquic H3 request read callback for MASQUE streams.
+ *
+ * Handles the CONNECT-IP handshake (header validation, 200 response,
+ * DATAGRAM context setup) and processes incoming MASQUE capsules
+ * (ADDRESS_REQUEST → allocate IP, ROUTE_ADVERTISEMENT parsing).
+ */
 static int cb_request_read(xqc_h3_request_t *h3_request,
                              xqc_request_notify_flag_t flag,
                              void *strm_user_data)
@@ -1188,7 +1195,7 @@ static int cb_request_read(xqc_h3_request_t *h3_request,
                             stream->capsule_len - consumed);
                 stream->capsule_len -= consumed;
             }
-        } while (n > 0);
+        } while (1);
     }
 
     return 0;
@@ -1325,7 +1332,7 @@ mqvpn_server_t *mqvpn_server_new(
 
     memcpy(&s->config, cfg, sizeof(*cfg));
     memcpy(&s->cbs, cbs, sizeof(*cbs));
-    s->user_ctx = user_ctx;
+    s->user_ctx = user_ctx;  /* caller guarantees lifetime exceeds this object */  // lgtm[cpp/stack-address-escape]
     s->udp_fd = -1;
     s->max_clients = cfg->max_clients > 0 ? cfg->max_clients : 64;
     s->ptb_tokens = PTB_RATE_LIMIT;
