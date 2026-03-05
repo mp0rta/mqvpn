@@ -96,7 +96,9 @@ target_link_libraries(mqvpn_shared xquic ${SSL_LIB} ${CRYPTO_LIB} pthread)
 # Links libmqvpn for the library API; keeps platform-specific files separate.
 add_executable(mqvpn
     src/main.c
-    src/platform_linux.c
+    src/platform/linux/platform_linux.c
+    src/platform/linux/routing.c
+    src/platform/linux/killswitch.c
     src/tun.c
     src/vpn_client.c
     src/vpn_server.c
@@ -109,6 +111,8 @@ target_include_directories(mqvpn PRIVATE
     ${XQUIC_INCLUDE_DIR}
     ${EVENT_INCLUDE_DIR}
     ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/platform/linux
 )
 
 target_link_libraries(mqvpn
