@@ -35,6 +35,7 @@ typedef struct {
 
     /* TUN device */
     mqvpn_tun_t          tun;
+    char                 tun_name_cfg[IFNAMSIZ]; /* configured name, survives destroy */
     int                  tun_up;
 
     /* Server address */

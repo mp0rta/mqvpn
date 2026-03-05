@@ -45,9 +45,12 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
 {
     platform_ctx_t *p = (platform_ctx_t *)user_ctx;
 
-    /* Create TUN device */
-    const char *tun_name = p->tun.name[0] ? p->tun.name : "mqvpn0";
-    if (mqvpn_tun_create(&p->tun, tun_name) < 0) {
+    /* Clean up stale TUN event from previous connection (reconnect case) */
+    if (p->ev_tun) { event_del(p->ev_tun); event_free(p->ev_tun); p->ev_tun = NULL; }
+    if (p->tun.fd >= 0) { mqvpn_tun_destroy(&p->tun); p->tun.fd = -1; p->tun_up = 0; }
+
+    /* Create TUN device — use tun_name_cfg which survives destroy/recreate */
+    if (mqvpn_tun_create(&p->tun, p->tun_name_cfg) < 0) {
         LOG_ERR("TUN create failed");
         goto fail;
     }
@@ -142,8 +145,11 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
     const char *ns = (new_state < 7) ? names[new_state] : "?";
     LOG_INF("state: %s → %s", os, ns);
 
-    /* On CLOSED, clean up platform resources */
-    if (new_state == MQVPN_STATE_CLOSED) {
+    /* On RECONNECTING or CLOSED, tear down TUN and platform resources so
+     * that stale fd events don't fire ("tun read: Bad file descriptor").
+     * The TUN will be recreated in cb_tunnel_config_ready on reconnect. */
+    if (new_state == MQVPN_STATE_RECONNECTING ||
+        new_state == MQVPN_STATE_CLOSED) {
         cleanup_killswitch(p);
         cleanup_routes(p);
         mqvpn_dns_restore(&p->dns);
@@ -152,8 +158,9 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
             mqvpn_tun_destroy(&p->tun);
             p->tun.fd = -1;
             p->tun_up = 0;
+            mqvpn_client_set_tun_active(p->client, 0, -1);
         }
-        if (p->shutting_down)
+        if (new_state == MQVPN_STATE_CLOSED && p->shutting_down)
             event_base_loopbreak(p->eb);
     }
 }
@@ -311,9 +318,13 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     ctx.server_port = cfg->server_port;
     ctx.killswitch_enabled = cfg->kill_switch;
 
-    /* Pre-set TUN name */
-    if (cfg->tun_name)
+    /* Pre-set TUN name (save to tun_name_cfg too — survives TUN destroy/recreate) */
+    if (cfg->tun_name) {
         snprintf(ctx.tun.name, sizeof(ctx.tun.name), "%s", cfg->tun_name);
+        snprintf(ctx.tun_name_cfg, sizeof(ctx.tun_name_cfg), "%s", cfg->tun_name);
+    } else {
+        snprintf(ctx.tun_name_cfg, sizeof(ctx.tun_name_cfg), "mqvpn0");
+    }
 
     /* DNS setup */
     mqvpn_dns_init(&ctx.dns);
