@@ -33,11 +33,15 @@ else()
     add_subdirectory(third_party/xquic)
 endif()
 
-# ---------- libevent ----------
-find_path(EVENT_INCLUDE_DIR event2/event.h)
-find_library(EVENT_LIB event)
-if(NOT EVENT_LIB)
-    message(FATAL_ERROR "libevent not found. Install: apt install libevent-dev")
+# ---------- libevent (not needed for Android / library-only builds) ----------
+option(ANDROID_CROSS_COMPILE "Cross-compiling for Android (skip libevent + CLI)" OFF)
+
+if(NOT ANDROID_CROSS_COMPILE)
+    find_path(EVENT_INCLUDE_DIR event2/event.h)
+    find_library(EVENT_LIB event)
+    if(NOT EVENT_LIB)
+        message(FATAL_ERROR "libevent not found. Install: apt install libevent-dev")
+    endif()
 endif()
 
 # Prefer static xquic to avoid runtime library path issues
@@ -48,11 +52,24 @@ else()
 endif()
 
 # Find SSL libraries (same ones xquic links against)
-set(BORINGSSL_BUILD_DIR "${CMAKE_SOURCE_DIR}/third_party/xquic/third_party/boringssl/build")
-find_library(SSL_LIB ssl
-    HINTS ${BORINGSSL_BUILD_DIR} /usr/local/lib /usr/local/babassl/lib)
-find_library(CRYPTO_LIB crypto
-    HINTS ${BORINGSSL_BUILD_DIR} /usr/local/lib /usr/local/babassl/lib)
+if(NOT BORINGSSL_BUILD_DIR)
+    set(BORINGSSL_BUILD_DIR "${CMAKE_SOURCE_DIR}/third_party/xquic/third_party/boringssl/build")
+endif()
+if(ANDROID_CROSS_COMPILE)
+    # find_library doesn't work for cross-compile targets; set paths directly
+    if(EXISTS "${BORINGSSL_BUILD_DIR}/ssl/libssl.a")
+        set(SSL_LIB "${BORINGSSL_BUILD_DIR}/ssl/libssl.a")
+        set(CRYPTO_LIB "${BORINGSSL_BUILD_DIR}/crypto/libcrypto.a")
+    else()
+        set(SSL_LIB "${BORINGSSL_BUILD_DIR}/libssl.a")
+        set(CRYPTO_LIB "${BORINGSSL_BUILD_DIR}/libcrypto.a")
+    endif()
+else()
+    find_library(SSL_LIB ssl
+        HINTS ${BORINGSSL_BUILD_DIR} ${BORINGSSL_BUILD_DIR}/ssl /usr/local/lib /usr/local/babassl/lib)
+    find_library(CRYPTO_LIB crypto
+        HINTS ${BORINGSSL_BUILD_DIR} ${BORINGSSL_BUILD_DIR}/crypto /usr/local/lib /usr/local/babassl/lib)
+endif()
 
 # ---------- libmqvpn (static library — no libevent, no platform I/O) ----------
 add_library(mqvpn_lib STATIC
@@ -70,7 +87,15 @@ target_include_directories(mqvpn_lib
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
     PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR}
 )
-target_link_libraries(mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} pthread)
+if(ANDROID_CROSS_COMPILE)
+    # Android NDK: pthread is in libc, no separate -lpthread
+    target_link_libraries(mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB})
+else()
+    target_link_libraries(mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} pthread)
+endif()
+
+# Everything below requires libevent and Linux platform — skip for Android
+if(NOT ANDROID_CROSS_COMPILE)
 
 # Shared library variant
 add_library(mqvpn_shared SHARED
@@ -173,3 +198,5 @@ install(FILES systemd/mqvpn-server.service systemd/mqvpn-client@.service
         DESTINATION lib/systemd/system)
 install(PROGRAMS scripts/mqvpn-server-nat.sh
         DESTINATION lib/mqvpn)
+
+endif() # NOT ANDROID_CROSS_COMPILE

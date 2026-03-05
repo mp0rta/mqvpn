@@ -20,3 +20,6 @@ client.conf
 # Gradle build cache
 android/.gradle/
 
+# NDK cross-compile prebuilt libraries
+android/sdk-native/prebuilt/
+
