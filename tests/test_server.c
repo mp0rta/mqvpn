@@ -26,6 +26,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <poll.h>
 
 #include "libmqvpn.h"
 
@@ -447,6 +448,9 @@ static void drain_and_tick(mqvpn_server_t *svr, int svr_fd,
     mqvpn_client_tick(cli);
 }
 
+/* Note: all pump loops below use poll() instead of usleep() for CI robustness.
+ * This avoids timing issues on slow CI runners where QUIC PTO (1s+) can expire. */
+
 /* ── test_server_session tests ── */
 
 TEST(server_session_callbacks_registered)
@@ -636,11 +640,29 @@ TEST(server_session_quic_loopback)
     ASSERT_EQ(mqvpn_client_connect(cli), MQVPN_OK);
 
     /* ── Phase 1: QUIC handshake + MASQUE tunnel setup ── */
-    for (int i = 0; i < 500; i++) {
+    /* Use poll-based pump with 10s timeout for slow CI runners.
+     * QUIC retransmission PTO can be 1s+, so 500ms was too tight. */
+    for (int elapsed = 0; elapsed < 10000; elapsed++) {
         drain_and_tick(svr, svr_fd, cli, cli_fd, path_h);
         if (g_client_connected_called > 0 && g_cli_tunnel_ready_called > 0)
             break;
-        usleep(1000);
+
+        mqvpn_interest_t svr_int = {0}, cli_int = {0};
+        mqvpn_server_get_interest(svr, &svr_int);
+        mqvpn_client_get_interest(cli, &cli_int);
+        int wait_ms = 50;
+        if (svr_int.next_timer_ms > 0 && svr_int.next_timer_ms < wait_ms)
+            wait_ms = svr_int.next_timer_ms;
+        if (cli_int.next_timer_ms > 0 && cli_int.next_timer_ms < wait_ms)
+            wait_ms = cli_int.next_timer_ms;
+        if (wait_ms < 1) wait_ms = 1;
+
+        struct pollfd pfds[2] = {
+            { .fd = svr_fd, .events = POLLIN },
+            { .fd = cli_fd, .events = POLLIN },
+        };
+        poll(pfds, 2, wait_ms);
+        elapsed += wait_ms;
     }
 
     /* Verify: on_socket_recv() でクライアント接続 */
@@ -675,10 +697,15 @@ TEST(server_session_quic_loopback)
               MQVPN_OK);
 
     /* Pump to deliver the MASQUE DATAGRAM */
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < 5000; i++) {
         drain_and_tick(svr, svr_fd, cli, cli_fd, path_h);
         if (g_cli_tun_output_called > baseline) break;
-        usleep(1000);
+        struct pollfd pfds[2] = {
+            { .fd = svr_fd, .events = POLLIN },
+            { .fd = cli_fd, .events = POLLIN },
+        };
+        int w = poll(pfds, 2, 5);
+        i += (w == 0) ? 5 : 1;
     }
     ASSERT_EQ(g_cli_tun_output_called, baseline + 1);
 
@@ -699,9 +726,13 @@ TEST(server_session_quic_loopback)
     /* ICMP Time Exceeded should be sent via tun_output (not to client) */
     ASSERT_EQ(g_tun_output_called, tun_baseline + 1);
     /* Client should NOT receive the expired packet */
-    for (int i = 0; i < 20; i++) {
+    for (int i = 0; i < 30; i++) {
         drain_and_tick(svr, svr_fd, cli, cli_fd, path_h);
-        usleep(500);
+        struct pollfd pfds[2] = {
+            { .fd = svr_fd, .events = POLLIN },
+            { .fd = cli_fd, .events = POLLIN },
+        };
+        poll(pfds, 2, 2);
     }
     ASSERT_EQ(g_cli_tun_output_called, cli_baseline);
 
@@ -709,10 +740,15 @@ TEST(server_session_quic_loopback)
     mqvpn_client_disconnect(cli);
 
     /* Pump to deliver CONNECTION_CLOSE to server */
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < 5000; i++) {
         drain_and_tick(svr, svr_fd, cli, cli_fd, path_h);
         if (g_client_disconnected_called > 0) break;
-        usleep(1000);
+        struct pollfd pfds[2] = {
+            { .fd = svr_fd, .events = POLLIN },
+            { .fd = cli_fd, .events = POLLIN },
+        };
+        int w = poll(pfds, 2, 5);
+        i += (w == 0) ? 5 : 1;
     }
     ASSERT_EQ(g_client_disconnected_called, 1);
     ASSERT_EQ(g_last_disconnected_session_id, g_last_session_id);
