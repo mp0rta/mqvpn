@@ -263,6 +263,11 @@ MQVPN_API int mqvpn_config_set_reconnect(mqvpn_config_t *cfg,
 MQVPN_API int mqvpn_config_set_killswitch_hint(mqvpn_config_t *cfg,
                                                 int enable);
 
+/* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock) */
+typedef uint64_t (*mqvpn_clock_fn)(void *ctx);
+MQVPN_API int mqvpn_config_set_clock(mqvpn_config_t *cfg,
+                                      mqvpn_clock_fn clock_fn, void *clock_ctx);
+
 /* Server-only config */
 MQVPN_API int mqvpn_config_set_listen(mqvpn_config_t *cfg,
                                        const char *addr, int port);
