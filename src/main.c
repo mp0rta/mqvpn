@@ -3,6 +3,7 @@
 #include "auth.h"
 #include "vpn_client.h"
 #include "vpn_server.h"
+#include "platform_linux.h"
 #include "flow_sched.h"
 
 #include <stdio.h>
@@ -310,7 +311,7 @@ main(int argc, char *argv[])
         for (int i = 0; i < n_dns; i++) {
             cfg.dns_servers[i] = dns_servers[i];
         }
-        return mqvpn_client_run(&cfg);
+        return linux_platform_run_client(&cfg);
 
     } else if (strcmp(eff_mode, "server") == 0) {
         if (!eff_auth_key || eff_auth_key[0] == '\0') {
@@ -339,7 +340,7 @@ main(int argc, char *argv[])
             .auth_key    = eff_auth_key,
             .max_clients = eff_max_clients,
         };
-        return mqvpn_server_run(&cfg);
+        return linux_platform_run_server(&cfg);
 
     } else {
         fprintf(stderr, "error: --mode must be 'client' or 'server'\n");

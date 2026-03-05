@@ -4,12 +4,15 @@
 #include <stdio.h>
 #include <stdarg.h>
 
+#ifndef MQVPN_LOG_LEVEL_DEFINED
+#define MQVPN_LOG_LEVEL_DEFINED
 typedef enum {
     MQVPN_LOG_DEBUG = 0,
     MQVPN_LOG_INFO,
     MQVPN_LOG_WARN,
     MQVPN_LOG_ERROR,
 } mqvpn_log_level_t;
+#endif
 
 void mqvpn_log_set_level(mqvpn_log_level_t level);
 void mqvpn_log(mqvpn_log_level_t level, const char *fmt, ...)
