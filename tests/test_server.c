@@ -427,6 +427,7 @@ static void drain_and_tick(mqvpn_server_t *svr, int svr_fd,
     /* Drain server socket (packets from client) */
     for (;;) {
         from_len = sizeof(from);
+        // codeql[cpp/uncontrolled-allocation-size] buf bounded by sizeof(buf); xquic validates internally
         ssize_t n = recvfrom(svr_fd, buf, sizeof(buf), MSG_DONTWAIT,
                               (struct sockaddr *)&from, &from_len);
         if (n <= 0) break;
@@ -437,6 +438,7 @@ static void drain_and_tick(mqvpn_server_t *svr, int svr_fd,
     /* Drain client socket (packets from server) */
     for (;;) {
         from_len = sizeof(from);
+        // codeql[cpp/uncontrolled-allocation-size] buf bounded by sizeof(buf); xquic validates internally
         ssize_t n = recvfrom(cli_fd, buf, sizeof(buf), MSG_DONTWAIT,
                               (struct sockaddr *)&from, &from_len);
         if (n <= 0) break;

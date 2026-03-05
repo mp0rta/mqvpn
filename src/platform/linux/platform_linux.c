@@ -270,6 +270,7 @@ on_socket_read(evutil_socket_t fd, short what, void *arg)
     socklen_t peer_len = sizeof(peer);
 
     for (int i = 0; i < 64; i++) {
+        // codeql[cpp/uncontrolled-allocation-size] buf is stack-allocated and bounded by sizeof(buf); xquic validates internally
         ssize_t n = recvfrom(fd, buf, sizeof(buf), 0,
                              (struct sockaddr *)&peer, &peer_len);
         if (n <= 0 || (size_t)n > sizeof(buf)) break;
