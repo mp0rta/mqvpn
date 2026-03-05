@@ -192,9 +192,16 @@ jobs:
 
       - name: NDK cross-compile (arm64-v8a)
         if: steps.ndk-cache.outputs.cache-hit != 'true'
-        env:
-          ANDROID_NDK: ${{ env.ANDROID_NDK_HOME }}
-        run: scripts/build_android.sh --abi arm64-v8a
+        run: |
+          # Find NDK: ANDROID_NDK_HOME > ANDROID_HOME/ndk/<latest> > default
+          if [ -n "${ANDROID_NDK_HOME:-}" ]; then
+            NDK_PATH="$ANDROID_NDK_HOME"
+          elif [ -d "${ANDROID_HOME}/ndk" ]; then
+            NDK_PATH="$(ls -d ${ANDROID_HOME}/ndk/*/ 2>/dev/null | sort -V | tail -1)"
+            NDK_PATH="${NDK_PATH%/}"
+          fi
+          echo "Using NDK: ${NDK_PATH}"
+          scripts/build_android.sh --abi arm64-v8a --ndk "$NDK_PATH"
 
       - name: Verify prebuilt libraries
         run: |
