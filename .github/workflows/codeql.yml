@@ -38,7 +38,13 @@ jobs:
           cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
           make -j$(nproc) ssl crypto
 
-      - name: Build xquic
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: c-cpp
+          queries: security-and-quality
+
+      - name: Build xquic (CodeQL traced)
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
@@ -46,12 +52,6 @@ jobs:
                 -DXQC_ENABLE_BBR2=ON \
                 -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
           make -j$(nproc)
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
-        with:
-          languages: c-cpp
-          queries: security-and-quality
 
       - name: Build mqvpn (CodeQL traced)
         run: |
