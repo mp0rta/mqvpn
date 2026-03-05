@@ -223,9 +223,16 @@ _Static_assert(offsetof(mqvpn_client_callbacks_t, abi_version) == 0,
 typedef struct {
     uint32_t                        abi_version;
     uint32_t                        struct_size;
-    mqvpn_tun_output_fn             tun_output;      /* REQUIRED */
-    mqvpn_send_packet_fn            send_packet;     /* REQUIRED for server */
+
+    mqvpn_tun_output_fn             tun_output;          /* REQUIRED */
+    mqvpn_tunnel_config_ready_fn    tunnel_config_ready; /* REQUIRED */
+    mqvpn_send_packet_fn            send_packet;         /* NULL = fd-only mode */
+
     mqvpn_log_fn                    log;
+    void (*on_client_connected)(const mqvpn_tunnel_info_t *info,
+                                 uint32_t session_id, void *user_ctx);
+    void (*on_client_disconnected)(uint32_t session_id,
+                                    mqvpn_error_t reason, void *user_ctx);
 } mqvpn_server_callbacks_t;
 
 #define MQVPN_SERVER_CALLBACKS_INIT { \
@@ -329,7 +336,9 @@ MQVPN_API mqvpn_server_t *mqvpn_server_new(
 
 MQVPN_API void mqvpn_server_destroy(mqvpn_server_t *server);
 
-MQVPN_API int mqvpn_server_set_socket_fd(mqvpn_server_t *server, int fd);
+MQVPN_API int mqvpn_server_set_socket_fd(mqvpn_server_t *server, int fd,
+                                          const struct sockaddr *local_addr,
+                                          socklen_t local_addrlen);
 MQVPN_API int mqvpn_server_start(mqvpn_server_t *server);
 MQVPN_API int mqvpn_server_stop(mqvpn_server_t *server);
 
@@ -345,6 +354,9 @@ MQVPN_API int mqvpn_server_tick(mqvpn_server_t *server);
 
 MQVPN_API int mqvpn_server_get_stats(const mqvpn_server_t *server,
                                        mqvpn_stats_t *out);
+
+MQVPN_API int mqvpn_server_get_interest(const mqvpn_server_t *server,
+                                          mqvpn_interest_t *out);
 
 /* ─── Utility API ─── */
 

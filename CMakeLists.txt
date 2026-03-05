@@ -58,6 +58,7 @@ find_library(CRYPTO_LIB crypto
 add_library(mqvpn_lib STATIC
     src/mqvpn_config.c
     src/mqvpn_client.c
+    src/mqvpn_server.c
     src/mqvpn_util.c
     src/flow_sched.c
     src/addr_pool.c
@@ -75,6 +76,7 @@ target_link_libraries(mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} pthread)
 add_library(mqvpn_shared SHARED
     src/mqvpn_config.c
     src/mqvpn_client.c
+    src/mqvpn_server.c
     src/mqvpn_util.c
     src/flow_sched.c
     src/addr_pool.c
@@ -102,7 +104,6 @@ add_executable(mqvpn
     src/platform/linux/tun.c
     src/platform/linux/dns.c
     src/vpn_client.c
-    src/vpn_server.c
     src/path_mgr.c
     src/config.c
 )
@@ -151,6 +152,17 @@ if(BUILD_TESTING)
     target_include_directories(test_api PRIVATE ${CMAKE_SOURCE_DIR}/src)
     set_target_properties(test_api PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_api COMMAND test_api)
+
+    # Server API test (links libmqvpn + xquic)
+    add_executable(test_server tests/test_server.c)
+    target_link_libraries(test_server mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
+    target_include_directories(test_server PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_compile_definitions(test_server PRIVATE
+        TEST_CERT_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.crt"
+        TEST_KEY_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.key"
+    )
+    set_target_properties(test_server PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_server COMMAND test_server)
 endif()
 
 # ---------- Install ----------

@@ -3,7 +3,6 @@
 
 #include <stdint.h>
 #include <netinet/in.h>
-#include <event2/event.h>
 
 typedef struct mqvpn_server_cfg_s {
     const char  *listen_addr;   /* bind address (e.g. "0.0.0.0") */
@@ -18,8 +17,5 @@ typedef struct mqvpn_server_cfg_s {
     const char  *auth_key;     /* PSK for client authentication (NULL = no auth) */
     int          max_clients;   /* max concurrent clients (default 64) */
 } mqvpn_server_cfg_t;
-
-/* Run the VPN server (blocks until shutdown). Returns 0 on clean exit. */
-int mqvpn_server_run(const mqvpn_server_cfg_t *cfg);
 
 #endif /* MQVPN_VPN_SERVER_H */

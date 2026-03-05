@@ -20,6 +20,9 @@
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 
 /* ================================================================
  *  libmqvpn callbacks
@@ -458,11 +461,346 @@ cleanup:
 }
 
 /* ================================================================
- *  Server: delegate to existing implementation for now
+ *  Server platform layer
  * ================================================================ */
+
+typedef struct {
+    mqvpn_server_t     *server;
+    struct event_base  *eb;
+    struct event       *ev_tick;
+    struct event       *ev_tun;
+    struct event       *ev_socket;
+    struct event       *ev_sigint;
+    struct event       *ev_sigterm;
+    mqvpn_tun_t         tun;
+    int                 tun_up;
+    int                 udp_fd;
+    int                 shutting_down;
+} server_platform_ctx_t;
+
+static void svr_on_tick(evutil_socket_t fd, short what, void *arg);
+static void svr_on_tun_read(evutil_socket_t fd, short what, void *arg);
+
+static void
+svr_schedule_next_tick(server_platform_ctx_t *sp)
+{
+    mqvpn_interest_t interest;
+    mqvpn_server_get_interest(sp->server, &interest);
+
+    int ms = interest.next_timer_ms;
+    struct timeval tv = {
+        .tv_sec  = ms / 1000,
+        .tv_usec = (ms % 1000) * 1000,
+    };
+    event_add(sp->ev_tick, &tv);
+
+    /* Enable/disable TUN read based on interest */
+    if (sp->tun_up && sp->tun.fd >= 0 && sp->ev_tun) {
+        if (interest.tun_readable && !event_pending(sp->ev_tun, EV_READ, NULL))
+            event_add(sp->ev_tun, NULL);
+        else if (!interest.tun_readable && event_pending(sp->ev_tun, EV_READ, NULL))
+            event_del(sp->ev_tun);
+    }
+}
+
+static void
+svr_on_tick(evutil_socket_t fd, short what, void *arg)
+{
+    (void)fd; (void)what;
+    server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
+    mqvpn_server_tick(sp->server);
+    svr_schedule_next_tick(sp);
+}
+
+static void
+svr_cb_tun_output(const uint8_t *pkt, size_t len, void *user_ctx)
+{
+    server_platform_ctx_t *sp = (server_platform_ctx_t *)user_ctx;
+    if (sp->tun_up && sp->tun.fd >= 0)
+        mqvpn_tun_write(&sp->tun, pkt, len);
+}
+
+static void
+svr_cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
+{
+    server_platform_ctx_t *sp = (server_platform_ctx_t *)user_ctx;
+
+    /* Create TUN device */
+    const char *tun_name = sp->tun.name[0] ? sp->tun.name : "mqvpn0";
+    if (mqvpn_tun_create(&sp->tun, tun_name) < 0) {
+        LOG_ERR("TUN create failed");
+        return;
+    }
+
+    /* Set IPv4 address — server gets assigned_ip (the .1 address) */
+    char srv_ip[INET_ADDRSTRLEN], base_ip[INET_ADDRSTRLEN];
+    snprintf(srv_ip, sizeof(srv_ip), "%d.%d.%d.%d",
+             info->assigned_ip[0], info->assigned_ip[1],
+             info->assigned_ip[2], info->assigned_ip[3]);
+    snprintf(base_ip, sizeof(base_ip), "%d.%d.%d.%d",
+             info->server_ip[0], info->server_ip[1],
+             info->server_ip[2], info->server_ip[3]);
+
+    if (mqvpn_tun_set_addr(&sp->tun, srv_ip, base_ip,
+                            info->assigned_prefix) < 0) return;
+    if (mqvpn_tun_set_mtu(&sp->tun, info->mtu) < 0) return;
+    if (mqvpn_tun_up(&sp->tun) < 0) return;
+
+    /* IPv6 if available */
+    if (info->has_v6) {
+        char v6str[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, info->assigned_ip6, v6str, sizeof(v6str));
+        if (mqvpn_tun_set_addr6(&sp->tun, v6str, info->assigned_prefix6) < 0)
+            LOG_WRN("failed to set IPv6 on TUN (continuing IPv4-only)");
+    }
+
+    LOG_INF("TUN %s configured: %s (mtu=%d)", sp->tun.name, srv_ip, info->mtu);
+
+    /* Register TUN read event */
+    sp->ev_tun = event_new(sp->eb, sp->tun.fd, EV_READ | EV_PERSIST,
+                            svr_on_tun_read, sp);
+    if (sp->ev_tun) {
+        event_add(sp->ev_tun, NULL);
+        sp->tun_up = 1;
+    }
+}
+
+static void
+svr_cb_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
+{
+    (void)user_ctx;
+    switch (level) {
+    case MQVPN_LOG_DEBUG: LOG_DBG("[svr] %s", msg); break;
+    case MQVPN_LOG_INFO:  LOG_INF("[svr] %s", msg); break;
+    case MQVPN_LOG_WARN:  LOG_WRN("[svr] %s", msg); break;
+    case MQVPN_LOG_ERROR: LOG_ERR("[svr] %s", msg); break;
+    }
+}
+
+static void
+svr_on_tun_read(evutil_socket_t fd, short what, void *arg)
+{
+    (void)fd; (void)what;
+    server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
+    uint8_t buf[65536];
+
+    for (int i = 0; i < 64; i++) {
+        int n = mqvpn_tun_read(&sp->tun, buf, sizeof(buf));
+        if (n <= 0) break;
+
+        int ret = mqvpn_server_on_tun_packet(sp->server, buf, (size_t)n);
+        if (ret == MQVPN_ERR_AGAIN) {
+            /* Backpressure — stop reading TUN */
+            event_del(sp->ev_tun);
+            break;
+        }
+    }
+    mqvpn_server_tick(sp->server);
+    svr_schedule_next_tick(sp);
+}
+
+static void
+svr_on_socket_read(evutil_socket_t fd, short what, void *arg)
+{
+    (void)what;
+    server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
+    uint8_t buf[65536];
+    struct sockaddr_in6 peer;
+    socklen_t peer_len;
+
+    for (int i = 0; i < 64; i++) {
+        peer_len = sizeof(peer);
+        ssize_t n = recvfrom(fd, buf, sizeof(buf), 0,
+                             (struct sockaddr *)&peer, &peer_len);
+        if (n <= 0) break;
+
+        mqvpn_server_on_socket_recv(sp->server, buf, (size_t)n,
+                                     (struct sockaddr *)&peer, peer_len);
+    }
+    mqvpn_server_tick(sp->server);
+    svr_schedule_next_tick(sp);
+}
+
+static void
+svr_on_signal(evutil_socket_t sig, short what, void *arg)
+{
+    (void)sig; (void)what;
+    server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
+    LOG_INF("received signal, shutting down server...");
+    sp->shutting_down = 1;
+    event_base_loopbreak(sp->eb);
+}
+
+static int
+svr_create_udp_socket(const char *addr, int port,
+                       struct sockaddr_storage *out_addr,
+                       socklen_t *out_addrlen)
+{
+    sa_family_t af = AF_INET;
+    struct in_addr  addr4;
+    struct in6_addr addr6;
+    if (addr && addr[0]) {
+        if (inet_pton(AF_INET6, addr, &addr6) == 1)
+            af = AF_INET6;
+        else if (inet_pton(AF_INET, addr, &addr4) == 1)
+            af = AF_INET;
+        else {
+            LOG_ERR("invalid listen address: %s", addr);
+            return -1;
+        }
+    }
+
+    int fd = socket(af, SOCK_DGRAM, 0);
+    if (fd < 0) { LOG_ERR("socket: %s", strerror(errno)); return -1; }
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        LOG_ERR("fcntl: %s", strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    int optval = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+    int bufsize = 1 * 1024 * 1024;
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+
+    memset(out_addr, 0, sizeof(*out_addr));
+    if (af == AF_INET6) {
+        int v6only = 1;
+        setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+        struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)out_addr;
+        sin6->sin6_family = AF_INET6;
+        sin6->sin6_port = htons((uint16_t)port);
+        if (addr && addr[0]) sin6->sin6_addr = addr6;
+        else sin6->sin6_addr = in6addr_any;
+        *out_addrlen = sizeof(struct sockaddr_in6);
+    } else {
+        struct sockaddr_in *sin = (struct sockaddr_in *)out_addr;
+        sin->sin_family = AF_INET;
+        sin->sin_port = htons((uint16_t)port);
+        if (addr && addr[0]) sin->sin_addr = addr4;
+        else sin->sin_addr.s_addr = htonl(INADDR_ANY);
+        *out_addrlen = sizeof(struct sockaddr_in);
+    }
+
+    if (bind(fd, (struct sockaddr *)out_addr, *out_addrlen) < 0) {
+        LOG_ERR("bind %s:%d: %s",
+                addr ? addr : (af == AF_INET6 ? "::" : "0.0.0.0"),
+                port, strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    LOG_INF("UDP socket bound to %s:%d",
+            addr ? addr : (af == AF_INET6 ? "::" : "0.0.0.0"), port);
+    return fd;
+}
 
 int
 linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
 {
-    return mqvpn_server_run(cfg);
+    int rc = 1;
+    server_platform_ctx_t sp;
+    memset(&sp, 0, sizeof(sp));
+    sp.tun.fd = -1;
+    sp.udp_fd = -1;
+
+    if (cfg->tun_name)
+        snprintf(sp.tun.name, sizeof(sp.tun.name), "%s", cfg->tun_name);
+
+    /* Create libmqvpn config */
+    mqvpn_config_t *lib_cfg = mqvpn_config_new();
+    if (!lib_cfg) { LOG_ERR("failed to allocate config"); return 1; }
+
+    mqvpn_config_set_listen(lib_cfg, cfg->listen_addr, cfg->listen_port);
+    mqvpn_config_set_subnet(lib_cfg, cfg->subnet);
+    if (cfg->subnet6) mqvpn_config_set_subnet6(lib_cfg, cfg->subnet6);
+    if (cfg->cert_file && cfg->key_file)
+        mqvpn_config_set_tls_cert(lib_cfg, cfg->cert_file, cfg->key_file);
+    if (cfg->auth_key) mqvpn_config_set_auth_key(lib_cfg, cfg->auth_key);
+    mqvpn_config_set_max_clients(lib_cfg, cfg->max_clients);
+    mqvpn_config_set_scheduler(lib_cfg,
+        cfg->scheduler == 1 ? MQVPN_SCHED_WLB : MQVPN_SCHED_MINRTT);
+
+    mqvpn_log_level_t lib_log;
+    if (cfg->log_level >= 5) lib_log = MQVPN_LOG_DEBUG;
+    else if (cfg->log_level >= 3) lib_log = MQVPN_LOG_INFO;
+    else if (cfg->log_level >= 2) lib_log = MQVPN_LOG_WARN;
+    else lib_log = MQVPN_LOG_ERROR;
+    mqvpn_config_set_log_level(lib_cfg, lib_log);
+
+    /* Create server callbacks */
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = svr_cb_tun_output;
+    cbs.tunnel_config_ready = svr_cb_tunnel_config_ready;
+    cbs.send_packet = NULL;  /* fd-only mode */
+    cbs.log = svr_cb_log;
+
+    /* Create server */
+    sp.server = mqvpn_server_new(lib_cfg, &cbs, &sp);
+    mqvpn_config_free(lib_cfg);
+    if (!sp.server) {
+        LOG_ERR("failed to create mqvpn server");
+        return 1;
+    }
+
+    /* Create UDP socket */
+    struct sockaddr_storage local_addr;
+    socklen_t local_addrlen;
+    sp.udp_fd = svr_create_udp_socket(cfg->listen_addr, cfg->listen_port,
+                                       &local_addr, &local_addrlen);
+    if (sp.udp_fd < 0) goto cleanup;
+
+    mqvpn_server_set_socket_fd(sp.server, sp.udp_fd,
+                               (struct sockaddr *)&local_addr, local_addrlen);
+
+    /* Create event base */
+    sp.eb = event_base_new();
+    if (!sp.eb) { LOG_ERR("event_base_new failed"); goto cleanup; }
+
+    /* Start server (triggers tunnel_config_ready → TUN creation) */
+    if (mqvpn_server_start(sp.server) != MQVPN_OK) {
+        LOG_ERR("server start failed");
+        goto cleanup;
+    }
+
+    /* Register socket read event */
+    sp.ev_socket = event_new(sp.eb, sp.udp_fd, EV_READ | EV_PERSIST,
+                              svr_on_socket_read, &sp);
+    event_add(sp.ev_socket, NULL);
+
+    /* Signal handlers */
+    sp.ev_sigint  = evsignal_new(sp.eb, SIGINT,  svr_on_signal, &sp);
+    sp.ev_sigterm = evsignal_new(sp.eb, SIGTERM, svr_on_signal, &sp);
+    event_add(sp.ev_sigint, NULL);
+    event_add(sp.ev_sigterm, NULL);
+
+    /* Tick timer */
+    sp.ev_tick = event_new(sp.eb, -1, 0, svr_on_tick, &sp);
+    svr_schedule_next_tick(&sp);
+
+    LOG_INF("mqvpn server ready — listening on %s:%d, subnet %s",
+            cfg->listen_addr ? cfg->listen_addr : "0.0.0.0",
+            cfg->listen_port, cfg->subnet);
+
+    event_base_dispatch(sp.eb);
+    rc = 0;
+
+cleanup:
+    LOG_INF("server shutting down");
+    if (sp.tun_up) {
+        if (sp.ev_tun) { event_del(sp.ev_tun); event_free(sp.ev_tun); }
+        mqvpn_tun_destroy(&sp.tun);
+    }
+    if (sp.ev_socket)  { event_del(sp.ev_socket);  event_free(sp.ev_socket); }
+    if (sp.ev_tick)    { event_del(sp.ev_tick);    event_free(sp.ev_tick); }
+    if (sp.ev_sigint)  { event_del(sp.ev_sigint);  event_free(sp.ev_sigint); }
+    if (sp.ev_sigterm) { event_del(sp.ev_sigterm); event_free(sp.ev_sigterm); }
+    if (sp.udp_fd >= 0) close(sp.udp_fd);
+    mqvpn_server_destroy(sp.server);
+    if (sp.eb) event_base_free(sp.eb);
+
+    return rc;
 }

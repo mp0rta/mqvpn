@@ -17,6 +17,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <arpa/inet.h>
+#include <assert.h>
 #include <pthread.h>
 
 #include <xquic/xquic.h>
@@ -228,6 +229,9 @@ static void client_set_state(mqvpn_client_t *c, mqvpn_client_state_t new_state)
     if (!(c)->owner_thread_set) { \
         (c)->owner_thread = pthread_self(); \
         (c)->owner_thread_set = 1; \
+    } else { \
+        assert(pthread_equal((c)->owner_thread, pthread_self()) && \
+               "mqvpn_client: called from wrong thread"); \
     } \
 } while (0)
 #else
