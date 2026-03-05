@@ -679,7 +679,6 @@ static ssize_t cb_write_socket_ex(uint64_t path_id,
     return cb_write_socket(buf, size, peer, peerlen, conn_user_data);
 }
 
-/* For before-accept and stateless-reset: user_data = mqvpn_server_t * */
 static ssize_t cb_write_before_accept(const unsigned char *buf, size_t size,
                                         const struct sockaddr *peer,
                                         socklen_t peerlen,

@@ -570,22 +570,23 @@ TEST(server_session_quic_loopback)
 
     /* ── Create UDP sockets ── */
     int svr_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
-    assert(svr_fd >= 0);
+    ASSERT_NE(svr_fd, -1);
     int cli_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
-    assert(cli_fd >= 0);
+    ASSERT_NE(cli_fd, -1);
 
     struct sockaddr_in svr_addr, cli_addr;
     memset(&svr_addr, 0, sizeof(svr_addr));
     svr_addr.sin_family = AF_INET;
     svr_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     svr_addr.sin_port = htons(0); /* OS picks port */
-    assert(bind(svr_fd, (struct sockaddr *)&svr_addr, sizeof(svr_addr)) == 0);
+    /* Do NOT use assert() for calls with side effects — NDEBUG removes them */
+    ASSERT_EQ(bind(svr_fd, (struct sockaddr *)&svr_addr, sizeof(svr_addr)), 0);
 
     memset(&cli_addr, 0, sizeof(cli_addr));
     cli_addr.sin_family = AF_INET;
     cli_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     cli_addr.sin_port = htons(0);
-    assert(bind(cli_fd, (struct sockaddr *)&cli_addr, sizeof(cli_addr)) == 0);
+    ASSERT_EQ(bind(cli_fd, (struct sockaddr *)&cli_addr, sizeof(cli_addr)), 0);
 
     /* Get actual bound addresses */
     socklen_t alen = sizeof(svr_addr);
