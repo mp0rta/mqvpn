@@ -19,7 +19,6 @@ This is an independent personal project focused on an end-to-end standards-based
 - **DNS override** — Client-side `/etc/resolv.conf` management with automatic backup and restore. Prevents DNS leak by routing all queries through the tunnel.
 - **Dual-stack tunnel** — IPv4 and IPv6 inside the tunnel (`--subnet6`). IPv6 address pool shares offsets with IPv4; no extra session table needed.
 - **Standards-based tunnel** — MASQUE CONNECT-IP (RFC 9484) with HTTP Datagrams (RFC 9297) over QUIC DATAGRAM frames (RFC 9221). No proprietary tunnel format.
-- **Embeddable C library** — `libmqvpn` (static/shared) with a sans-I/O tick() API. No libevent dependency — platform provides the event loop.
 - **Android SDK** — Kotlin SDK wrapping libmqvpn via JNI. Handles VpnService, TUN I/O, network detection, and multipath path management. Apps implement only `onCreateTun()` and `onVpnStateChanged()`.
 
 ## Quick Start
@@ -407,11 +406,8 @@ cd android && ./gradlew test
 ### v0.3.0 — Library extraction & Android SDK
 - [x] Embeddable C library (`libmqvpn.a` / `libmqvpn.so`) with sans-I/O tick() API
 - [x] Platform abstraction (callbacks for TUN, routing, DNS, socket protection)
-- [x] Android Kotlin SDK (4 modules: sdk-native, sdk-runtime, sdk-network, sdk-core)
-- [x] JNI bridge with CLOCK_BOOTTIME injection (survives Android Doze)
+- [x] Android Kotlin SDK 
 - [x] Network detection + automatic multipath path management (WiFi/Cellular/Ethernet)
-- [x] TUN packet I/O with frame pooling and backpressure handling
-- [x] NDK cross-compile script + Android CI (GitHub Actions)
 
 ### Future
 - [ ] Per-client token authentication
