@@ -57,11 +57,14 @@ class MqvpnManager(private val context: Context) {
         val conn = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
                 val binder = service as? MqvpnVpnService.LocalBinder ?: return
-                boundService = binder.getService()
+                val svc = binder.getService()
+                boundService = svc
+                svc.manager = this@MqvpnManager
             }
 
             override fun onServiceDisconnected(name: ComponentName?) {
                 // Service crashed or was killed — reset state to prevent UI divergence
+                boundService?.manager = null
                 boundService = null
                 _vpnState.value = MqvpnState.Disconnected
                 _stats.value = VpnStats()
@@ -104,6 +107,7 @@ class MqvpnManager(private val context: Context) {
     }
 
     fun destroy() {
+        boundService?.manager = null
         serviceConnection?.let { conn ->
             try { context.unbindService(conn) } catch (_: Exception) {}
         }

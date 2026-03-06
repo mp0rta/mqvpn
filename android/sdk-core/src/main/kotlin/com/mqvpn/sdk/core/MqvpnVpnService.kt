@@ -45,6 +45,8 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
 
     override fun onBind(intent: Intent?): IBinder = binder
 
+    internal var manager: MqvpnManager? = null
+
     private lateinit var executor: MqvpnPoller
     private var tunnel: MqvpnTunnel? = null
     private var tunnelBridge: TunnelBridge? = null
@@ -60,7 +62,16 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
     override fun onCreate() {
         super.onCreate()
         executor = MqvpnPoller(scope,
-            tickFn = { tunnel?.tick() ?: 0 },
+            tickFn = {
+                val t = tunnel
+                val result = t?.tick() ?: 0
+                // Poll stats/paths and push to MqvpnManager on each tick
+                if (t != null) {
+                    manager?.updateStats(t.getStats())
+                    manager?.updatePaths(t.getPaths())
+                }
+                result
+            },
             interestFn = {
                 val i = tunnel?.getInterest()
                 if (i != null) intArrayOf(i.nextTimerMs, if (i.tunReadable) 1 else 0, if (i.isIdle) 1 else 0)
@@ -120,7 +131,7 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
                 scope.launch(Dispatchers.IO) { pm.handleEvent(event) }
             }
 
-            onVpnStateChanged(MqvpnState.Connecting)
+            emitState(MqvpnState.Connecting)
         }
     }
 
@@ -150,7 +161,7 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
         pathManager = null
         networkMonitor = null
         currentTunPfd = null
-        onVpnStateChanged(MqvpnState.Disconnected)
+        emitState(MqvpnState.Disconnected)
     }
 
     // --- TunnelCallbacks implementation ---
@@ -176,7 +187,7 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
             onCreateTun(info, currentConfig!!)
         } catch (e: Exception) {
             Log.e(TAG, "onCreateTun failed", e)
-            onVpnStateChanged(MqvpnState.Error(
+            emitState(MqvpnState.Error(
                 MqvpnError.TunCreationFailed(e.message ?: "VPN permission denied")))
             executor.enqueue { tunnel?.disconnect() }
             return
@@ -193,26 +204,26 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
         tunnelBridge?.startTunReader(tunPfd, mtu, scope)
         tunnelBridge?.startSender(scope)
 
-        onVpnStateChanged(MqvpnState.Connected(info))
+        emitState(MqvpnState.Connected(info))
     }
 
     override fun onNativeTunnelClosed(errorCode: Int) {
         if (errorCode != 0) {
-            onVpnStateChanged(MqvpnState.Error(MqvpnError.fromNativeCode(errorCode)))
+            emitState(MqvpnState.Error(MqvpnError.fromNativeCode(errorCode)))
         }
     }
 
     override fun onNativeStateChanged(oldState: Int, newState: Int) {
         // Map native states to MqvpnState
         when (newState) {
-            1, 2 -> onVpnStateChanged(MqvpnState.Connecting)
+            1, 2 -> emitState(MqvpnState.Connecting)
             5 -> {} // RECONNECTING — handled by onNativeReconnectScheduled
             6 -> {} // CLOSED — handled by onNativeTunnelClosed or cleanup
         }
     }
 
     override fun onNativePathEvent(pathHandle: Long, newStatus: Int) {
-        // Could emit to a paths StateFlow — apps can override onLog for now
+        // Path changes are picked up by stats/paths polling in tickFn
     }
 
     override fun onNativeLog(level: Int, message: String) {
@@ -220,8 +231,16 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
     }
 
     override fun onNativeReconnectScheduled(delaySec: Int) {
-        onVpnStateChanged(MqvpnState.Reconnecting(ReconnectInfo(delaySec)))
+        emitState(MqvpnState.Reconnecting(ReconnectInfo(delaySec)))
         onReconnectScheduled(delaySec)
+    }
+
+    /**
+     * Emit state to both Manager (StateFlow → UI) and app callback.
+     */
+    private fun emitState(newState: MqvpnState) {
+        manager?.updateState(newState)
+        onVpnStateChanged(newState)
     }
 
     // --- Abstract methods (app implements) ---
