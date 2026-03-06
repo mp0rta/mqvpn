@@ -12,16 +12,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.Row
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -40,15 +43,17 @@ fun ConnectScreen(
     val stats by viewModel.stats.collectAsStateWithLifecycle()
     val paths by viewModel.paths.collectAsStateWithLifecycle()
 
-    var serverAddress by rememberSaveable { mutableStateOf("") }
+    var serverAddress by rememberSaveable { mutableStateOf("160.251.143.149") }
     var serverPort by rememberSaveable { mutableStateOf("443") }
-    var authKey by rememberSaveable { mutableStateOf("") }
+    var authKey by rememberSaveable { mutableStateOf("tiiUC0/Fx51w5XuxAnpOgdRZb19SLqglwFdhxbbsbnM=") }
+    var insecure by rememberSaveable { mutableStateOf(true) }
+    var killSwitch by rememberSaveable { mutableStateOf(false) }
 
     val vpnPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
-            viewModel.connect(buildConfig(serverAddress, serverPort, authKey))
+            viewModel.connect(buildConfig(serverAddress, serverPort, authKey, insecure, killSwitch))
         }
     }
 
@@ -91,6 +96,22 @@ fun ConnectScreen(
             singleLine = true,
             visualTransformation = PasswordVisualTransformation(),
         )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Insecure (skip TLS verify)", modifier = Modifier.weight(1f))
+            Switch(checked = insecure, onCheckedChange = { insecure = it }, enabled = isDisconnected)
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Kill Switch", modifier = Modifier.weight(1f))
+            Switch(checked = killSwitch, onCheckedChange = { killSwitch = it }, enabled = isDisconnected)
+        }
         Spacer(modifier = Modifier.height(16.dp))
 
         // Connect/Disconnect button
@@ -107,7 +128,7 @@ fun ConnectScreen(
                             vpnPermissionLauncher.launch(prepareIntent)
                         } else {
                             viewModel.connect(
-                                buildConfig(serverAddress, serverPort, authKey)
+                                buildConfig(serverAddress, serverPort, authKey, insecure, killSwitch)
                             )
                         }
                     }
@@ -183,11 +204,19 @@ fun ConnectScreen(
     }
 }
 
-private fun buildConfig(address: String, port: String, key: String): MqvpnConfig {
+private fun buildConfig(
+    address: String,
+    port: String,
+    key: String,
+    insecure: Boolean,
+    killSwitch: Boolean,
+): MqvpnConfig {
     return MqvpnConfig(
         serverAddress = address.trim(),
         serverPort = port.trim().toIntOrNull() ?: 443,
         authKey = key.trim(),
+        insecure = insecure,
+        killSwitch = killSwitch,
     )
 }
 
