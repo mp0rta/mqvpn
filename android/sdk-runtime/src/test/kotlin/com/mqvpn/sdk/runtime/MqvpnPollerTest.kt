@@ -113,22 +113,22 @@ class MqvpnPollerTest {
 
     @Test
     fun `wakeup interrupts sleep`() = runBlocking {
-        val tickCount = AtomicInteger(0)
         val poller = MqvpnPoller(
             scope,
-            tickFn = { tickCount.incrementAndGet(); 0 },
+            tickFn = { 0 },
             interestFn = { intArrayOf(10_000, 0, 0) }, // 10s sleep
         )
         poller.start()
 
-        // Wait for initial tick
-        Thread.sleep(100)
-        val before = tickCount.get()
+        // Wait for initial tick to enter 10s sleep
+        Thread.sleep(200)
 
-        // enqueue should wake up the poller immediately
+        // call() should wake up the poller immediately, not wait 10s
+        val t0 = System.nanoTime()
         val result = withTimeout(5_000) { poller.call { "woke up" } }
+        val elapsedMs = (System.nanoTime() - t0) / 1_000_000
         assertEquals("woke up", result)
-        assertTrue("tick should have advanced", tickCount.get() > before)
+        assertTrue("call should complete quickly (<2s), took ${elapsedMs}ms", elapsedMs < 2_000)
 
         poller.stop()
     }
