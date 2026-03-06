@@ -22,17 +22,25 @@ private val CELLULAR_COLOR = Color(0xFFFF9800)   // orange
 fun BandwidthChart(paths: List<PathInfo>) {
     val wifiSamples = remember { mutableStateListOf<Long>() }
     val cellSamples = remember { mutableStateListOf<Long>() }
+    val prevWifi = remember { mutableStateListOf(0L) }
+    val prevCell = remember { mutableStateListOf(0L) }
 
     LaunchedEffect(paths) {
         val wifiBytes = paths
-            .filter { it.iface.startsWith("wlan") }
+            .filter { it.iface.startsWith("wifi") || it.iface.startsWith("wlan") }
             .sumOf { it.bytesTx + it.bytesRx }
         val cellBytes = paths
-            .filter { it.iface.startsWith("rmnet") || it.iface.startsWith("ccmni") }
+            .filter { it.iface.startsWith("cellular") || it.iface.startsWith("rmnet") || it.iface.startsWith("ccmni") }
             .sumOf { it.bytesTx + it.bytesRx }
 
-        wifiSamples.add(wifiBytes)
-        cellSamples.add(cellBytes)
+        // Store delta (bandwidth per tick) instead of cumulative
+        val dWifi = (wifiBytes - prevWifi[0]).coerceAtLeast(0)
+        val dCell = (cellBytes - prevCell[0]).coerceAtLeast(0)
+        prevWifi[0] = wifiBytes
+        prevCell[0] = cellBytes
+
+        wifiSamples.add(dWifi)
+        cellSamples.add(dCell)
         if (wifiSamples.size > MAX_SAMPLES) wifiSamples.removeAt(0)
         if (cellSamples.size > MAX_SAMPLES) cellSamples.removeAt(0)
     }

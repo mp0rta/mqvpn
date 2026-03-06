@@ -533,6 +533,7 @@ static ssize_t cb_write_socket(const unsigned char *buf, size_t size,
         return XQC_SOCKET_ERROR;
     }
     c->bytes_tx += (uint64_t)res;
+    if (c->n_paths > 0) c->paths[0].bytes_tx += (uint64_t)res;
     return res;
 }
 
@@ -553,6 +554,10 @@ static ssize_t cb_write_socket_ex(uint64_t path_id,
         return XQC_SOCKET_ERROR;
     }
     c->bytes_tx += (uint64_t)res;
+    {
+        path_entry_t *p = find_path_by_xqc_id(c, path_id);
+        if (p) p->bytes_tx += (uint64_t)res;
+    }
     return res;
 }
 
@@ -1455,9 +1460,12 @@ int mqvpn_client_on_socket_recv(
     memset(&local_addr, 0, sizeof(local_addr));
 
     path_entry_t *pe = find_path_by_handle(c, path);
-    if (pe && pe->local_addr_len > 0) {
-        memcpy(&local_addr, &pe->local_addr, pe->local_addr_len);
-        local_len = pe->local_addr_len;
+    if (pe) {
+        pe->bytes_rx += len;
+        if (pe->local_addr_len > 0) {
+            memcpy(&local_addr, &pe->local_addr, pe->local_addr_len);
+            local_len = pe->local_addr_len;
+        }
     }
 
     uint64_t recv_time = client_now_us(c);
@@ -1534,7 +1542,12 @@ int mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
     out->dgram_recv  = c->dgram_recv;
     out->dgram_lost  = c->dgram_lost;
     out->dgram_acked = c->dgram_acked;
-    out->srtt_ms     = c->srtt_ms;
+
+    /* Get connection-level SRTT from xquic (μs → ms) */
+    if (c->engine && c->conn) {
+        xqc_conn_stats_t xs = xqc_conn_get_stats(c->engine, &c->conn->cid);
+        out->srtt_ms = (int)(xs.srtt / 1000);
+    }
     return MQVPN_OK;
 }
 
@@ -1543,6 +1556,13 @@ int mqvpn_client_get_paths(const mqvpn_client_t *c,
                             int max_paths, int *n_paths)
 {
     if (!c || !out || !n_paths) return MQVPN_ERR_INVALID_ARG;
+
+    /* Query xquic per-path metrics for SRTT */
+    xqc_conn_stats_t xstats;
+    memset(&xstats, 0, sizeof(xstats));
+    if (c->engine && c->conn)
+        xstats = xqc_conn_get_stats(c->engine, &c->conn->cid);
+
     int count = c->n_paths < max_paths ? c->n_paths : max_paths;
     for (int i = 0; i < count; i++) {
         const path_entry_t *p = &c->paths[i];
@@ -1550,9 +1570,19 @@ int mqvpn_client_get_paths(const mqvpn_client_t *c,
         out[i].handle      = p->handle;
         out[i].status      = p->status;
         memcpy(out[i].name, p->name, sizeof(out[i].name));
-        out[i].srtt_ms     = p->srtt_ms;
         out[i].bytes_tx    = p->bytes_tx;
         out[i].bytes_rx    = p->bytes_rx;
+
+        /* Map SRTT from xquic path metrics (μs → ms) */
+        out[i].srtt_ms = 0;
+        if (p->in_use) {
+            for (int j = 0; j < XQC_MAX_PATHS_COUNT; j++) {
+                if (xstats.paths_info[j].path_id == p->xqc_path_id) {
+                    out[i].srtt_ms = (int)(xstats.paths_info[j].path_srtt / 1000);
+                    break;
+                }
+            }
+        }
     }
     *n_paths = count;
     return MQVPN_OK;

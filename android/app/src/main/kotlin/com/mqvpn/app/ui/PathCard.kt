@@ -31,8 +31,8 @@ private val PATH_STATUS_NAMES = mapOf(
 @Composable
 fun PathCard(path: PathInfo) {
     val icon = when {
-        path.iface.startsWith("wlan") -> Icons.Default.Wifi
-        path.iface.startsWith("rmnet") || path.iface.startsWith("ccmni") ->
+        path.iface.startsWith("wifi") || path.iface.startsWith("wlan") -> Icons.Default.Wifi
+        path.iface.startsWith("cellular") || path.iface.startsWith("rmnet") || path.iface.startsWith("ccmni") ->
             Icons.Default.SignalCellularAlt
         else -> Icons.Default.Cable
     }
