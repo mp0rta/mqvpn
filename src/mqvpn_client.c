@@ -187,6 +187,14 @@ static uint64_t now_us(void)
     return (uint64_t)tv.tv_sec * 1000000 + (uint64_t)tv.tv_usec;
 }
 
+/* Injectable clock: use config clock_fn if set, else default now_us() */
+static uint64_t client_now_us(const mqvpn_client_t *c)
+{
+    if (c->config.clock_fn)
+        return c->config.clock_fn(c->config.clock_ctx);
+    return now_us();
+}
+
 static int64_t now_ms_mono(void)
 {
     struct timespec ts;
@@ -603,7 +611,7 @@ static int cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
             delay *= 2;
         if (delay > RECONNECT_BACKOFF_MAX_SEC) delay = RECONNECT_BACKOFF_MAX_SEC;
         c->reconnect_attempts++;
-        c->reconnect_scheduled_us = now_us() + (uint64_t)delay * 1000000;
+        c->reconnect_scheduled_us = client_now_us(c) + (uint64_t)delay * 1000000;
         LOG_I(c, "reconnecting in %d seconds (attempt %d)...",
               delay, c->reconnect_attempts);
         client_set_state(c, MQVPN_STATE_RECONNECTING);
@@ -1404,7 +1412,7 @@ int mqvpn_client_on_socket_recv(
         local_len = pe->local_addr_len;
     }
 
-    uint64_t recv_time = now_us();
+    uint64_t recv_time = client_now_us(c);
     xqc_engine_packet_process(
         c->engine, pkt, len,
         (struct sockaddr *)&local_addr, local_len,
@@ -1426,7 +1434,7 @@ int mqvpn_client_tick(mqvpn_client_t *c)
 
     /* Reconnect timer check */
     if (c->state == MQVPN_STATE_RECONNECTING && c->reconnect_scheduled_us > 0) {
-        uint64_t t = now_us();
+        uint64_t t = client_now_us(c);
         if (t >= c->reconnect_scheduled_us) {
             c->reconnect_scheduled_us = 0;
             LOG_I(c, "attempting reconnection (attempt %d)...",
@@ -1447,7 +1455,7 @@ int mqvpn_client_tick(mqvpn_client_t *c)
                     delay *= 2;
                 if (delay > RECONNECT_BACKOFF_MAX_SEC) delay = RECONNECT_BACKOFF_MAX_SEC;
                 c->reconnect_attempts++;
-                c->reconnect_scheduled_us = now_us() + (uint64_t)delay * 1000000;
+                c->reconnect_scheduled_us = client_now_us(c) + (uint64_t)delay * 1000000;
             } else {
                 client_set_state(c, MQVPN_STATE_CONNECTING);
                 xqc_engine_main_logic(c->engine);
@@ -1511,7 +1519,7 @@ int mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
 
     /* During reconnect, wake up for the reconnect timer */
     if (c->state == MQVPN_STATE_RECONNECTING && c->reconnect_scheduled_us > 0) {
-        uint64_t t = now_us();
+        uint64_t t = client_now_us(c);
         if (c->reconnect_scheduled_us > t) {
             int rms = (int)((c->reconnect_scheduled_us - t) / 1000);
             if (ms <= 0 || rms < ms) ms = rms;

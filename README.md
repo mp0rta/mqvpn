@@ -19,6 +19,7 @@ This is an independent personal project focused on an end-to-end standards-based
 - **DNS override** — Client-side `/etc/resolv.conf` management with automatic backup and restore. Prevents DNS leak by routing all queries through the tunnel.
 - **Dual-stack tunnel** — IPv4 and IPv6 inside the tunnel (`--subnet6`). IPv6 address pool shares offsets with IPv4; no extra session table needed.
 - **Standards-based tunnel** — MASQUE CONNECT-IP (RFC 9484) with HTTP Datagrams (RFC 9297) over QUIC DATAGRAM frames (RFC 9221). No proprietary tunnel format.
+- **Android SDK** — Kotlin SDK wrapping libmqvpn via JNI. Handles VpnService, TUN I/O, network detection, and multipath path management. Apps implement only `onCreateTun()` and `onVpnStateChanged()`.
 
 ## Quick Start
 
@@ -284,6 +285,40 @@ make -j$(nproc)
 
 </details>
 
+### Android SDK
+
+The Android SDK is in `android/` with 4 library modules + 1 demo app.
+
+```bash
+# 1. Cross-compile C libraries for Android (requires Android NDK)
+scripts/build_android.sh --abi arm64-v8a
+
+# 2. Build SDK + run unit tests
+cd android
+./gradlew assembleDebug
+./gradlew test          # 48 Robolectric JVM tests
+```
+
+<details>
+<summary>SDK module structure</summary>
+
+```
+android/
+├── sdk-native/    # JNI bridge (mqvpn_jni.c) + prebuilt .a → libmqvpn_jni.so
+├── sdk-runtime/   # MqvpnExecutor, MqvpnPoller (tick-loop driver)
+├── sdk-network/   # NetworkMonitor, PathBinder (ConnectivityManager integration)
+├── sdk-core/      # Public API: MqvpnVpnService, MqvpnManager, TunnelBridge
+└── app/           # Demo app (Jetpack Compose)
+```
+
+Apps extend `MqvpnVpnService` and implement two methods:
+- `onCreateTun(info, config)` — create TUN fd via `VpnService.Builder`
+- `onVpnStateChanged(state)` — update UI on state transitions
+
+The SDK handles everything else: JNI lifecycle, packet I/O batching, per-path UDP readers, network detection, and multipath path management.
+
+</details>
+
 ## Usage
 
 ```
@@ -334,7 +369,7 @@ Server:
 ## Testing
 
 ```bash
-# Unit tests
+# C library unit tests
 cd build && ctest --output-on-failure
 
 # Integration test (requires root, uses network namespaces)
@@ -342,6 +377,9 @@ sudo scripts/ci_e2e/run_test.sh
 
 # Multipath integration test (2 paths, failover, recovery)
 sudo scripts/run_multipath_test.sh
+
+# Android SDK unit tests (48 tests, no device required)
+cd android && ./gradlew test
 ```
 
 ## Roadmap
@@ -365,10 +403,16 @@ sudo scripts/run_multipath_test.sh
 - [x] ICMP Packet Too Big responses (RFC 9484 §10.1)
 - [x] systemd service unit (`mqvpn-server.service`, `mqvpn-client@.service`)
 
+### v0.3.0 — Library extraction & Android SDK
+- [x] Embeddable C library (`libmqvpn.a` / `libmqvpn.so`) with sans-I/O tick() API
+- [x] Platform abstraction (callbacks for TUN, routing, DNS, socket protection)
+- [x] Android Kotlin SDK 
+- [x] Network detection + automatic multipath path management (WiFi/Cellular/Ethernet)
+
 ### Future
 - [ ] Per-client token authentication
-- [ ] WiFi + LTE multipath testing
-- [ ] Android client (VpnService + WiFi/LTE handover)
+- [ ] WiFi + LTE multipath testing on device
+- [ ] Android demo app (Jetpack Compose)
 - [ ] resolvectl integration (systemd-resolved environments)
 - [ ] Replace `ip` command with netlink API
 - [ ] Performance optimization (GSO/GRO, io_uring, batch send)

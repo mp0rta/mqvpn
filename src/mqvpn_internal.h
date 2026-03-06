@@ -28,6 +28,10 @@ struct mqvpn_config_s {
     int                 reconnect_interval_sec;
     int                 killswitch_hint;
 
+    /* Clock injection (Android: CLOCK_BOOTTIME) */
+    mqvpn_clock_fn      clock_fn;
+    void               *clock_ctx;
+
     /* Server-only fields */
     char    listen_addr[256];
     int     listen_port;

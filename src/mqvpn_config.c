@@ -103,6 +103,15 @@ int mqvpn_config_set_killswitch_hint(mqvpn_config_t *cfg, int enable)
     return MQVPN_OK;
 }
 
+int mqvpn_config_set_clock(mqvpn_config_t *cfg,
+                            mqvpn_clock_fn clock_fn, void *clock_ctx)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->clock_fn = clock_fn;
+    cfg->clock_ctx = clock_ctx;
+    return MQVPN_OK;
+}
+
 int mqvpn_config_set_listen(mqvpn_config_t *cfg, const char *addr, int port)
 {
     if (!cfg || !addr) return MQVPN_ERR_INVALID_ARG;

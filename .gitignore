@@ -16,3 +16,14 @@ tests/test_auth
 tests/test_session
 tests/test_dns
 client.conf
+
+# Gradle build cache
+android/.gradle/
+
+# NDK cross-compile prebuilt libraries
+android/sdk-native/prebuilt/
+
+# Android local build artifacts
+android/local.properties
+android/sdk-native/.cxx/
+

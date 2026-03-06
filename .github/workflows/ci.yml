@@ -159,3 +159,82 @@ jobs:
 
       - name: Systemd service integration test
         run: sudo scripts/ci_e2e/run_systemd_test.sh
+
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Compute NDK cache key
+        id: ndk-cache-key
+        run: |
+          XQUIC_SHA=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+')
+          echo "key=ndk-android-arm64-v8a-${{ hashFiles('scripts/build_android.sh', 'CMakeLists.txt', 'src/**/*.c', 'src/**/*.h', 'include/**/*.h') }}-${XQUIC_SHA}-bssl-9c95ec7" >> "$GITHUB_OUTPUT"
+
+      - name: Cache NDK prebuilt libraries
+        id: ndk-cache
+        uses: actions/cache@v4
+        with:
+          path: android/sdk-native/prebuilt
+          key: ${{ steps.ndk-cache-key.outputs.key }}
+
+      - name: Clone BoringSSL (pinned)
+        if: steps.ndk-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl
+          git fetch --depth 1 origin 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+
+      - name: NDK cross-compile (arm64-v8a)
+        if: steps.ndk-cache.outputs.cache-hit != 'true'
+        run: |
+          # Find NDK: ANDROID_NDK_HOME > ANDROID_HOME/ndk/<latest> > default
+          if [ -n "${ANDROID_NDK_HOME:-}" ]; then
+            NDK_PATH="$ANDROID_NDK_HOME"
+          elif [ -d "${ANDROID_HOME}/ndk" ]; then
+            NDK_PATH="$(ls -d ${ANDROID_HOME}/ndk/*/ 2>/dev/null | sort -V | tail -1)"
+            NDK_PATH="${NDK_PATH%/}"
+          fi
+          echo "Using NDK: ${NDK_PATH}"
+          scripts/build_android.sh --abi arm64-v8a --ndk "$NDK_PATH"
+
+      - name: Verify prebuilt libraries
+        run: |
+          for lib in libmqvpn.a libxquic.a libssl.a libcrypto.a; do
+            test -f "android/sdk-native/prebuilt/arm64-v8a/${lib}" \
+              || { echo "MISSING: ${lib}"; exit 1; }
+          done
+          ls -lh android/sdk-native/prebuilt/arm64-v8a/
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Gradle build
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Unit tests (48 tests)
+        working-directory: android
+        run: ./gradlew test --no-daemon --stacktrace
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-test-reports
+          path: |
+            android/sdk-core/build/reports/tests/
+            android/sdk-runtime/build/reports/tests/
+            android/sdk-network/build/reports/tests/
+          retention-days: 7
