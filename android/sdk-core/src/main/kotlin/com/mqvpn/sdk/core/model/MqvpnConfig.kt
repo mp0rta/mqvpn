@@ -18,6 +18,7 @@ data class MqvpnConfig(
     val reconnect: Boolean = true,
     val reconnectIntervalSec: Int = 5,
     val killSwitch: Boolean = false,
+    val dnsServers: List<String> = listOf("8.8.8.8", "1.1.1.1"),
 ) : Parcelable {
 
     @Serializable

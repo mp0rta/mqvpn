@@ -243,6 +243,8 @@ static void client_set_state(mqvpn_client_t *c, mqvpn_client_state_t new_state)
 {
     mqvpn_client_state_t old = c->state;
     if (old == new_state) return;
+    assert(mqvpn_state_transition_valid(old, new_state) &&
+           "mqvpn_client: invalid state transition");
     c->state = new_state;
     if (c->cbs.state_changed)
         c->cbs.state_changed(old, new_state, c->user_ctx);

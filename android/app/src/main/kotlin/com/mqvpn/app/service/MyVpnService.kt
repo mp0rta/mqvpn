@@ -62,8 +62,7 @@ class MyVpnService : MqvpnVpnService() {
             builder.addRoute("::", 0)
         }
 
-        builder.addDnsServer("8.8.8.8")
-        builder.addDnsServer("1.1.1.1")
+        config.dnsServers.forEach { builder.addDnsServer(it) }
 
         return builder.establish()
             ?: throw IllegalStateException("VPN permission denied")
