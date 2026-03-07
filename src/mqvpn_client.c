@@ -1326,10 +1326,22 @@ mqvpn_path_handle_t mqvpn_client_add_path_fd(
 {
     if (!c || fd < 0) return -1;
     ASSERT_TICK_THREAD(c);
-    if (c->n_paths >= MQVPN_MAX_PATHS) return -1;
 
-    int idx = c->n_paths++;
+    /* Reuse a CLOSED slot if available, otherwise append */
+    int idx = -1;
+    for (int i = 0; i < c->n_paths; i++) {
+        if (c->paths[i].status == MQVPN_PATH_CLOSED && !c->paths[i].active) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx < 0) {
+        if (c->n_paths >= MQVPN_MAX_PATHS) return -1;
+        idx = c->n_paths++;
+    }
+
     path_entry_t *p = &c->paths[idx];
+    memset(p, 0, sizeof(*p));
     p->handle = c->next_path_handle++;
     p->fd     = fd;
 
