@@ -136,6 +136,7 @@ struct mqvpn_client_s {
     path_entry_t    paths[MQVPN_MAX_PATHS];
     int             n_paths;
     int64_t         next_path_handle;
+    int             multipath_ready;  /* 1 after cb_ready_to_create_path */
 
     /* Reconnect */
     int         reconnect_attempts;
@@ -192,6 +193,21 @@ static uint64_t client_now_us(const mqvpn_client_t *c)
 {
     if (c->config.clock_fn)
         return c->config.clock_fn(c->config.clock_ctx);
+    return now_us();
+}
+
+/*
+ * xquic timestamp adapter.
+ * xqc_timestamp_pt is void→uint64_t (no user_ctx), so we use a global.
+ * Safe for single-client-per-process (Android VpnService model).
+ */
+static mqvpn_clock_fn s_xqc_clock_fn = NULL;
+static void *s_xqc_clock_ctx = NULL;
+
+static xqc_usec_t xqc_custom_timestamp(void)
+{
+    if (s_xqc_clock_fn)
+        return s_xqc_clock_fn(s_xqc_clock_ctx);
     return now_us();
 }
 
@@ -511,12 +527,13 @@ static ssize_t cb_write_socket(const unsigned char *buf, size_t size,
     if (fd < 0) return XQC_SOCKET_ERROR;
 
     ssize_t res;
-    do { res = sendto(fd, buf, size, 0, peer, peerlen); } while (res < 0 && errno == EINTR);
+    do { res = sendto(fd, buf, size, MSG_DONTWAIT, peer, peerlen); } while (res < 0 && errno == EINTR);
     if (res < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return XQC_SOCKET_EAGAIN;
         return XQC_SOCKET_ERROR;
     }
     c->bytes_tx += (uint64_t)res;
+    if (c->n_paths > 0) c->paths[0].bytes_tx += (uint64_t)res;
     return res;
 }
 
@@ -531,12 +548,16 @@ static ssize_t cb_write_socket_ex(uint64_t path_id,
     if (fd < 0) return XQC_SOCKET_ERROR;
 
     ssize_t res;
-    do { res = sendto(fd, buf, size, 0, peer, peerlen); } while (res < 0 && errno == EINTR);
+    do { res = sendto(fd, buf, size, MSG_DONTWAIT, peer, peerlen); } while (res < 0 && errno == EINTR);
     if (res < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return XQC_SOCKET_EAGAIN;
         return XQC_SOCKET_ERROR;
     }
     c->bytes_tx += (uint64_t)res;
+    {
+        path_entry_t *p = find_path_by_xqc_id(c, path_id);
+        if (p) p->bytes_tx += (uint64_t)res;
+    }
     return res;
 }
 
@@ -851,6 +872,14 @@ static int cb_request_read(xqc_h3_request_t *h3_request,
                 info.has_v6 = 1;
             }
 
+            /* Primary path is now active */
+            if (c->n_paths > 0 && c->paths[0].active) {
+                c->paths[0].status = MQVPN_PATH_ACTIVE;
+                if (c->cbs.path_event)
+                    c->cbs.path_event(c->paths[0].handle,
+                                      MQVPN_PATH_ACTIVE, c->user_ctx);
+            }
+
             client_set_state(c, MQVPN_STATE_TUNNEL_READY);
             c->cbs.tunnel_config_ready(&info, c->user_ctx);
             c->reconnect_attempts = 0;
@@ -970,6 +999,25 @@ static void cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
     }
 }
 
+/* ─── Multipath helpers ─── */
+
+/* Create an xquic path for a secondary path entry and mark it ACTIVE. */
+static void client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
+{
+    uint64_t new_id = 0;
+    xqc_int_t ret = xqc_conn_create_path(c->engine, &c->conn->cid, &new_id, 0);
+    if (ret < 0) {
+        LOG_W(c, "xqc_conn_create_path[%d]: %d", idx, ret);
+        return;
+    }
+    p->xqc_path_id = new_id;
+    p->in_use = 1;
+    p->status = MQVPN_PATH_ACTIVE;
+    LOG_I(c, "path[%d] activated: path_id=%" PRIu64 " iface=%s", idx, new_id, p->name);
+    if (c->cbs.path_event)
+        c->cbs.path_event(p->handle, MQVPN_PATH_ACTIVE, c->user_ctx);
+}
+
 /* ─── Multipath callbacks ─── */
 
 static void cb_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
@@ -978,25 +1026,13 @@ static void cb_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
     mqvpn_client_t *c = conn->client;
 
-    if (!c->config.multipath || c->n_paths <= 1) return;
+    c->multipath_ready = 1;
+    if (!c->config.multipath) return;
 
-    LOG_I(c, "ready_to_create_path: adding secondary paths");
     for (int i = 1; i < c->n_paths; i++) {
         path_entry_t *p = &c->paths[i];
         if (p->in_use || !p->active) continue;
-
-        uint64_t new_id = 0;
-        xqc_int_t ret = xqc_conn_create_path(c->engine, &conn->cid, &new_id, 0);
-        if (ret < 0) {
-            LOG_W(c, "xqc_conn_create_path[%d]: %d", i, ret);
-            continue;
-        }
-        p->xqc_path_id = new_id;
-        p->in_use = 1;
-        p->status = MQVPN_PATH_ACTIVE;
-        LOG_I(c, "path[%d] created: path_id=%" PRIu64 " iface=%s", i, new_id, p->name);
-        if (c->cbs.path_event)
-            c->cbs.path_event(p->handle, MQVPN_PATH_ACTIVE, c->user_ctx);
+        client_activate_path(c, p, i);
     }
 }
 
@@ -1053,7 +1089,7 @@ static int cli_start_connection(mqvpn_client_t *c)
     if (!conn) return -1;
     conn->client = c;
 
-    int multipath = (c->config.multipath && c->n_paths > 1) ? 1 : 0;
+    int multipath = c->config.multipath ? 1 : 0;
 
     xqc_conn_settings_t cs;
     memset(&cs, 0, sizeof(cs));
@@ -1151,6 +1187,17 @@ mqvpn_client_t *mqvpn_client_new(
             .xqc_log_write_stat = cb_xqc_log_write,
         },
     };
+
+    /* Inject custom clock into xquic engine — ensures xquic's internal
+     * timestamps match recv_time passed to xqc_engine_packet_process().
+     * Critical for Android: CLOCK_BOOTTIME vs gettimeofday mismatch
+     * causes immediate idle timeout without this. */
+    if (cfg->clock_fn) {
+        s_xqc_clock_fn = cfg->clock_fn;
+        s_xqc_clock_ctx = cfg->clock_ctx;
+        engine_cbs.realtime_ts = xqc_custom_timestamp;
+        engine_cbs.monotonic_ts = xqc_custom_timestamp;
+    }
 
     xqc_transport_callbacks_t tcbs = {
         .write_socket                = cb_write_socket,
@@ -1279,12 +1326,34 @@ mqvpn_path_handle_t mqvpn_client_add_path_fd(
 {
     if (!c || fd < 0) return -1;
     ASSERT_TICK_THREAD(c);
-    if (c->n_paths >= MQVPN_MAX_PATHS) return -1;
 
-    int idx = c->n_paths++;
+    /* Reuse a CLOSED slot if available, otherwise append */
+    int idx = -1;
+    for (int i = 0; i < c->n_paths; i++) {
+        if (c->paths[i].status == MQVPN_PATH_CLOSED && !c->paths[i].active) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx < 0) {
+        if (c->n_paths >= MQVPN_MAX_PATHS) return -1;
+        idx = c->n_paths++;
+    }
+
     path_entry_t *p = &c->paths[idx];
+    memset(p, 0, sizeof(*p));
     p->handle = c->next_path_handle++;
     p->fd     = fd;
+
+    /* Ensure adequate socket buffers for high-throughput UDP (ref: WireGuard) */
+    int bufsize = 7 * 1024 * 1024;  /* 7 MiB */
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+#ifdef SO_SNDBUFFORCE
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUFFORCE, &bufsize, sizeof(bufsize));
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, &bufsize, sizeof(bufsize));
+#endif
+
     p->status = MQVPN_PATH_PENDING;
     p->active = 1;
 
@@ -1297,6 +1366,12 @@ mqvpn_path_handle_t mqvpn_client_add_path_fd(
         p->platform_net_id = desc->platform_net_id;
         p->flags           = desc->flags;
     }
+
+    /* If multipath is already negotiated, activate immediately */
+    if (c->multipath_ready && c->config.multipath && c->conn) {
+        client_activate_path(c, p, idx);
+    }
+
     return p->handle;
 }
 
@@ -1407,9 +1482,12 @@ int mqvpn_client_on_socket_recv(
     memset(&local_addr, 0, sizeof(local_addr));
 
     path_entry_t *pe = find_path_by_handle(c, path);
-    if (pe && pe->local_addr_len > 0) {
-        memcpy(&local_addr, &pe->local_addr, pe->local_addr_len);
-        local_len = pe->local_addr_len;
+    if (pe) {
+        pe->bytes_rx += len;
+        if (pe->local_addr_len > 0) {
+            memcpy(&local_addr, &pe->local_addr, pe->local_addr_len);
+            local_len = pe->local_addr_len;
+        }
     }
 
     uint64_t recv_time = client_now_us(c);
@@ -1440,7 +1518,8 @@ int mqvpn_client_tick(mqvpn_client_t *c)
             LOG_I(c, "attempting reconnection (attempt %d)...",
                   c->reconnect_attempts);
 
-            /* Reset path in_use for fresh paths */
+            /* Reset path state for fresh connection */
+            c->multipath_ready = 0;
             for (int i = 0; i < c->n_paths; i++) {
                 c->paths[i].in_use = 0;
                 c->paths[i].xqc_path_id = 0;
@@ -1485,7 +1564,12 @@ int mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
     out->dgram_recv  = c->dgram_recv;
     out->dgram_lost  = c->dgram_lost;
     out->dgram_acked = c->dgram_acked;
-    out->srtt_ms     = c->srtt_ms;
+
+    /* Get connection-level SRTT from xquic (μs → ms) */
+    if (c->engine && c->conn) {
+        xqc_conn_stats_t xs = xqc_conn_get_stats(c->engine, &c->conn->cid);
+        out->srtt_ms = (int)(xs.srtt / 1000);
+    }
     return MQVPN_OK;
 }
 
@@ -1494,6 +1578,13 @@ int mqvpn_client_get_paths(const mqvpn_client_t *c,
                             int max_paths, int *n_paths)
 {
     if (!c || !out || !n_paths) return MQVPN_ERR_INVALID_ARG;
+
+    /* Query xquic per-path metrics for SRTT */
+    xqc_conn_stats_t xstats;
+    memset(&xstats, 0, sizeof(xstats));
+    if (c->engine && c->conn)
+        xstats = xqc_conn_get_stats(c->engine, &c->conn->cid);
+
     int count = c->n_paths < max_paths ? c->n_paths : max_paths;
     for (int i = 0; i < count; i++) {
         const path_entry_t *p = &c->paths[i];
@@ -1501,9 +1592,19 @@ int mqvpn_client_get_paths(const mqvpn_client_t *c,
         out[i].handle      = p->handle;
         out[i].status      = p->status;
         memcpy(out[i].name, p->name, sizeof(out[i].name));
-        out[i].srtt_ms     = p->srtt_ms;
         out[i].bytes_tx    = p->bytes_tx;
         out[i].bytes_rx    = p->bytes_rx;
+
+        /* Map SRTT from xquic path metrics (μs → ms) */
+        out[i].srtt_ms = 0;
+        if (p->in_use) {
+            for (int j = 0; j < XQC_MAX_PATHS_COUNT; j++) {
+                if (xstats.paths_info[j].path_id == p->xqc_path_id) {
+                    out[i].srtt_ms = (int)(xstats.paths_info[j].path_srtt / 1000);
+                    break;
+                }
+            }
+        }
     }
     *n_paths = count;
     return MQVPN_OK;

@@ -1,137 +1,82 @@
 # mqvpn
 
-L3VPN built on a [fork of XQUIC](https://github.com/mp0rta/xquic/tree/feature/masque).
-It implements [MASQUE CONNECT-IP (RFC 9484)](https://www.rfc-editor.org/rfc/rfc9484) over HTTP/3 using
-[HTTP Datagrams (RFC 9297)](https://www.rfc-editor.org/rfc/rfc9297) / [QUIC DATAGRAM frames (RFC 9221)](https://www.rfc-editor.org/rfc/rfc9221).
-Optionally, it can use XQUIC's Multipath QUIC (I-D: [draft-ietf-quic-multipath](https://datatracker.ietf.org/doc/draft-ietf-quic-multipath/))
-to keep a single tunnel alive across multiple interfaces.
-This is an independent personal project focused on an end-to-end standards-based implementation.
+Multipath QUIC VPN using [MASQUE CONNECT-IP (RFC 9484)](https://www.rfc-editor.org/rfc/rfc9484) over [HTTP Datagrams (RFC 9297)](https://www.rfc-editor.org/rfc/rfc9297) / [QUIC DATAGRAMs (RFC 9221)](https://www.rfc-editor.org/rfc/rfc9221), built on a [fork of XQUIC](https://github.com/mp0rta/xquic/tree/feature/masque) with [Multipath QUIC](https://datatracker.ietf.org/doc/draft-ietf-quic-multipath/).
 
 ## Features
 
-- **Multi-client support** — Multiple clients connect simultaneously; IP-offset indexed session table for O(1) routing.
-- **PSK authentication** — Pre-shared key via `authorization: Bearer` header over TLS 1.3-encrypted QUIC.
-- **Seamless failover** — If one path goes down, the tunnel continues on another without reconnecting (Multipath QUIC).
-- **Multiple network paths** — Bind to two or more Linux interfaces (e.g. two ISP lines, WiFi + LTE) via XQUIC's Multipath QUIC.
-- **Bandwidth aggregation** — Implemented a bandwidth-aggregation scheduler for multipath QUIC datagrams (WLB), combining flow-affinity WRR with LATE-based bandwidth estimates (implemented in our XQUIC fork).
-  - [Performance comparison: WLB vs. MinRTT scheduler](docs/benchmarks_netns.md#2-bandwidth-aggregation--wlb-vs-minrtt)
-- **Configuration file** — INI-style config file for all options; CLI arguments override config values.
-- **DNS override** — Client-side `/etc/resolv.conf` management with automatic backup and restore. Prevents DNS leak by routing all queries through the tunnel.
-- **Dual-stack tunnel** — IPv4 and IPv6 inside the tunnel (`--subnet6`). IPv6 address pool shares offsets with IPv4; no extra session table needed.
-- **Standards-based tunnel** — MASQUE CONNECT-IP (RFC 9484) with HTTP Datagrams (RFC 9297) over QUIC DATAGRAM frames (RFC 9221). No proprietary tunnel format.
-- **Android SDK** — Kotlin SDK wrapping libmqvpn via JNI. Handles VpnService, TUN I/O, network detection, and multipath path management. Apps implement only `onCreateTun()` and `onVpnStateChanged()`.
+- **Multipath** — Bind multiple interfaces (WiFi + LTE, dual ISP). Seamless failover and bandwidth aggregation via WLB scheduler.
+- **Standards-based** — MASQUE CONNECT-IP (RFC 9484), no proprietary tunnel format.
+- **Dual-stack** — IPv4 + IPv6 inside the tunnel.
+- **Android SDK** — Kotlin SDK via JNI. Apps implement `onCreateTun()` and `onVpnStateChanged()`.
+- **PSK auth** — Pre-shared key over TLS 1.3.
+- **DNS override** — Prevents DNS leak by routing queries through the tunnel.
 
 ## Quick Start
 
 ```bash
-# Build (BoringSSL + xquic + mqvpn)
 git clone --recurse-submodules https://github.com/mp0rta/mqvpn.git
-cd mqvpn
-./build.sh
+cd mqvpn && ./build.sh
 
-# Server (generates certs, configures NAT, starts server)
+# Server
 sudo scripts/start_server.sh
-# → Generated auth key: mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
+# → Generated auth key example: mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
 
-# Or with custom listen address and tunnel subnet (client IP pool)
-sudo scripts/start_server.sh --listen 0.0.0.0:4433 --subnet 10.0.0.0/24
-
-# Server (dual-stack — IPv4 + IPv6)
-sudo scripts/start_server.sh --subnet 10.0.0.0/24 --subnet6 fd00:abcd::/112
-
-# Client (single path, --insecure for self-signed cert)
+# Client (single path)
 sudo ./build/mqvpn --mode client --server 203.0.113.1:443 \
-    --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4= \
-    --insecure
+    --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4= --insecure
 
-# Client (multipath — two interfaces)
+# Client (multipath)
 sudo ./build/mqvpn --mode client --server 203.0.113.1:443 \
-    --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4= \
-    --path eth0 --path wlan0 --insecure
+    --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4= --path eth0 --path wlan0 --insecure
 
 # Client (with DNS override)
 sudo ./build/mqvpn --mode client --server 203.0.113.1:443 \
-    --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4= \
-    --dns 1.1.1.1 --dns 8.8.8.8 --insecure
-```
+    --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4= --dns 1.1.1.1 --dns 8.8.8.8 --insecure
 
-`start_server.sh` generates a self-signed certificate, configures NAT/forwarding, and starts the server. The client's default route points through the tunnel — all traffic flows: client app → TUN (mqvpn0) → QUIC tunnel → server → NAT → internet.
-
-<details>
-<summary>IPv6(dual stack) setup</summary>
-
-Add `--subnet6` to enable IPv6 inside the tunnel. The server assigns each client an IPv6 address from the specified ULA prefix alongside its IPv4 address. No special client-side flags are needed — the client automatically configures IPv6 when the server assigns an address.
-
-```bash
-# Server
+# Server (dual-stack — IPv4 + IPv6)
 sudo scripts/start_server.sh --subnet 10.0.0.0/24 --subnet6 fd00:abcd::/112
-
-# Client (same as IPv4-only — IPv6 is automatic)
-sudo ./build/mqvpn --mode client --server 203.0.113.1:443 \
-    --auth-key <KEY> --insecure
 ```
 
-`start_server.sh` automatically configures:
-- IPv6 forwarding (`net.ipv6.conf.all.forwarding=1`)
-- IPv6 FORWARD rules for the tunnel subnet
-- NAT66 (MASQUERADE) for ULA → internet traffic
+`start_server.sh` generates a self-signed certificate, configures NAT/forwarding, and starts the server. For dual-stack, `--subnet6` enables IPv6 inside the tunnel — the server automatically configures IPv6 forwarding and NAT66. No special client flags needed.
 
-**Verify IPv6 connectivity:**
+> **Notes:**
+> - `--insecure` skips TLS certificate verification (self-signed certs). For production, use a trusted certificate (e.g. Let's Encrypt) and omit `--insecure`.
+> - Without `--path`, the client uses the default interface (single path). Multipath requires two or more `--path` flags.
+> - The server needs its listen port open for UDP (default: 443, configurable with `--listen`). All client traffic is routed through the tunnel (default route via TUN device).
+> - Generate an auth key with `mqvpn --genkey`, or let `start_server.sh` generate one automatically.
 
-```bash
-# Check assigned addresses
-ip addr show mqvpn0
+## Configuration
 
-# Test IPv6 connectivity through the tunnel
-ping -6 -c 3 fd00:abcd::1   # ping the server's tunnel address
-```
-
-**Notes:**
-- ULA addresses (`fd00::/8`) are not globally routable, so NAT66 is required for internet access. This is handled automatically by `start_server.sh`.
-- The tunnel MTU is set to at least 1280 bytes (IPv6 minimum link MTU per RFC 8200).
-- `max_pkt_out_size=1400` is used to ensure sufficient QUIC payload capacity for IPv6, fitting within both standard Ethernet (1500) and PPPoE (1492) paths.
-</details>
-
-## Configuration File
-
-Instead of CLI flags, you can use an INI-style config file. CLI arguments override config file values.
-
-**Server (`/etc/mqvpn/server.conf`):**
+INI-style config file. CLI arguments override config values.
 
 ```ini
+# /etc/mqvpn/server.conf
 [Interface]
-TunName = mqvpn0
 Listen = 0.0.0.0:443
 Subnet = 10.0.0.0/24
 Subnet6 = 2001:db8:1::/112
-LogLevel = info
 
 [TLS]
 Cert = /etc/mqvpn/server.crt
-Key = /etc/mqvpn/server.key
+Key = /etc/mqvpn/server.key       # TLS private key (PEM file)
 
 [Auth]
-Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
-MaxClients = 64
+Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=   # PSK example (mqvpn --genkey)
 
 [Multipath]
 Scheduler = wlb
 ```
 
-**Client (`/etc/mqvpn/client.conf`):**
-
 ```ini
+# /etc/mqvpn/client.conf
 [Server]
 Address = 203.0.113.1:443
-Insecure = false
 
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
 
 [Interface]
-TunName = mqvpn0
 DNS = 1.1.1.1, 8.8.8.8
-LogLevel = info
 
 [Multipath]
 Scheduler = wlb
@@ -139,128 +84,66 @@ Path = eth0
 Path = wlan0
 ```
 
-**Start with config file:**
-
 ```bash
 sudo mqvpn --config /etc/mqvpn/server.conf
 sudo mqvpn --config /etc/mqvpn/client.conf
 ```
 
-Mode is auto-detected from the config (`[Interface] Listen` → server, `[Server] Address` → client).
-
-## systemd Service
-
-Systemd unit files are provided for production deployments.
-
-**Server:**
+## systemd
 
 ```bash
-sudo mkdir -p /etc/mqvpn
+# Server
 sudo cp systemd/server.conf.example /etc/mqvpn/server.conf
-# Edit server.conf: set cert, key, and auth-key
 sudo systemctl enable --now mqvpn-server
-```
 
-The server unit runs `mqvpn-server-nat.sh` as `ExecStartPre`/`ExecStopPost` to manage NAT rules and IP forwarding automatically.
-Always stop the service before changing the configuration, then apply changes with `systemctl restart mqvpn-server`.
-
-**Client:**
-
-```bash
+# Client (template — instance name maps to config file)
 sudo cp systemd/client.conf.example /etc/mqvpn/client-home.conf
-# Edit client-home.conf: set server address and auth-key
 sudo systemctl enable --now mqvpn-client@home
-```
-
-The client unit is a template — the instance name maps to the config file: `mqvpn-client@home` reads `/etc/mqvpn/client-home.conf`.
-
-**Install unit files (via cmake):**
-
-```bash
-cd build && sudo cmake --install .
-sudo systemctl daemon-reload
 ```
 
 ## Benchmarks
 
-Asymmetric dual-path test (Path A: 300M/10ms, Path B: 80M/30ms) using Linux network namespaces.
-Full report: [`docs/benchmarks_netns.md`](docs/benchmarks_netns.md)
+Asymmetric dual-path (300M/10ms + 80M/30ms) via network namespaces. Full report: [`docs/benchmarks_netns.md`](docs/benchmarks_netns.md)
 
 | Test | Result |
 |------|--------|
-| Failover (Path A down) | **0 downtime**, instant shift to Path B |
-| Failover (Path B down) | **0 downtime**, barely noticeable dip |
-| Bandwidth aggregation (WLB, 16 streams) | **319 Mbps** — 84% of theoretical max (380 Mbps) |
-| WLB vs MinRTT (16 streams) | WLB **+21%** over MinRTT |
+| Failover | **0 downtime** |
+| Bandwidth aggregation (WLB, 16 streams) | **319 Mbps** (84% of 380 Mbps theoretical) |
+| WLB vs MinRTT | WLB **+21%** |
 
 ## Architecture
 
 ```
 ┌─────────────────┐                          ┌─────────────────┐
 │   Application   │                          │    Internet     │
-│  (TCP/UDP/any)  │                          │                 │
 ├─────────────────┤                          ├─────────────────┤
-│   TUN device    │                          │   TUN device    │
-│   (mqvpn0)      │                          │   (mqvpn0)      │
+│   TUN (mqvpn0)  │                          │   TUN (mqvpn0)  │
 ├─────────────────┤                          ├─────────────────┤
 │  MASQUE         │    HTTP Datagrams        │  MASQUE         │
 │  CONNECT-IP     │◄──(Context ID = 0)──────►│  CONNECT-IP     │
-│  (RFC 9484)     │    full IP packets       │  (RFC 9484)     │
-├─────────────────┤                          ├─────────────────┤
-│  HTTP/3         │    Extended CONNECT      │  HTTP/3         │
-│                 │    :protocol=connect-ip  │                 │
 ├─────────────────┤                          ├─────────────────┤
 │  Multipath QUIC │◄── Path A ──────────────►│  QUIC           │
-│  (MP-QUIC)      │◄── Path B ──────────────►│  (single socket)│
+│                 │◄── Path B ──────────────►│                 │
 ├─────────────────┤                          ├─────────────────┤
-│  UDP  │  UDP    │                          │      UDP        │
-│ eth0  │ eth1    │                          │     eth0        │
-└───────┴─────────┘                          └─────────────────┘
+│  UDP (eth0/wlan)│                          │   UDP (eth0)    │
+└─────────────────┘                          └─────────────────┘
      Client                                      Server
 ```
 
-Key design points:
-- IP packets are carried as HTTP Datagrams with Context ID set to zero (full IP header, no parsing needed)
-- Server uses a single UDP socket; XQUIC can receive packets from multiple peer addresses on the same connection
-- XQUIC's multipath scheduler (MinRTT or WLB) selects paths; WLB uses flow-affinity WRR for bandwidth aggregation
-- Failover is handled at the QUIC transport layer by XQUIC — mqvpn just provides sockets and forwards packets
-
-## How It Works
-
-The [xquic fork](https://github.com/mp0rta/xquic/tree/feature/masque) adds MASQUE CONNECT-IP (RFC 9484) to XQUIC's QUIC/HTTP3 stack. mqvpn is the VPN application layer on top: TUN devices, routes, IP address assignment, and server-side NAT.
-
-On connection, the client sends an HTTP/3 Extended CONNECT request with `:protocol=connect-ip`. The server replies with control capsules (`ADDRESS_ASSIGN`, `ROUTE_ADVERTISEMENT`). mqvpn configures the TUN device and routing table with the assigned IP, then enters a forwarding loop: TUN reads become HTTP Datagrams, incoming datagrams get written back to the TUN.
-
-For multipath, mqvpn creates per-interface UDP sockets and registers them as additional QUIC paths via `xqc_conn_create_path()`. XQUIC handles path validation, packet scheduling, and failover transparently.
-
-The server side is simple: one UDP socket, one TUN device, NAT via iptables.— XQUIC sees packets arriving from different source addresses on the same connection.
-
 ## Building
 
-### Requirements
-
-- Linux (kernel 3.x+ for TUN support)
-- CMake 3.22+ (required for BoringSSL build)
-- GCC or Clang (C11)
-- libevent 2.x
-
-### Build Steps
+Requirements: Linux, CMake 3.22+, GCC/Clang (C11), libevent 2.x
 
 ```bash
-git clone --recurse-submodules https://github.com/mp0rta/mqvpn.git
-cd mqvpn
 ./build.sh            # builds BoringSSL, xquic, and mqvpn
-./build.sh --clean    # full rebuild from scratch
+./build.sh --clean    # full rebuild
 ```
-
-The build script uses incremental builds — only recompiles changed files on subsequent runs.
 
 <details>
 <summary>Manual build steps</summary>
 
 ```bash
-# 1. Clone and build BoringSSL (required by xquic)
-git clone https://github.com/google/boringssl.git third_party/xquic/third_party/boringssl
+# 1. Build BoringSSL
 cd third_party/xquic/third_party/boringssl
 mkdir -p build && cd build
 cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
@@ -287,156 +170,76 @@ make -j$(nproc)
 
 ### Android SDK
 
-The Android SDK is in `android/` with 4 library modules + 1 demo app.
-
 ```bash
-# 1. Cross-compile C libraries for Android (requires Android NDK)
-scripts/build_android.sh --abi arm64-v8a
-
-# 2. Build SDK + run unit tests
-cd android
-./gradlew assembleDebug
-./gradlew test          # 48 Robolectric JVM tests
+scripts/build_android.sh --abi arm64-v8a    # cross-compile C libs
+cd android && ./gradlew assembleDebug       # build SDK + demo app
 ```
 
 <details>
-<summary>SDK module structure</summary>
+<summary>Module structure</summary>
 
 ```
 android/
-├── sdk-native/    # JNI bridge (mqvpn_jni.c) + prebuilt .a → libmqvpn_jni.so
-├── sdk-runtime/   # MqvpnExecutor, MqvpnPoller (tick-loop driver)
-├── sdk-network/   # NetworkMonitor, PathBinder (ConnectivityManager integration)
-├── sdk-core/      # Public API: MqvpnVpnService, MqvpnManager, TunnelBridge
+├── sdk-native/    # JNI bridge → libmqvpn_jni.so
+├── sdk-runtime/   # MqvpnPoller (tick-loop)
+├── sdk-network/   # NetworkMonitor, PathBinder
+├── sdk-core/      # MqvpnVpnService, MqvpnManager, TunnelBridge
 └── app/           # Demo app (Jetpack Compose)
 ```
-
-Apps extend `MqvpnVpnService` and implement two methods:
-- `onCreateTun(info, config)` — create TUN fd via `VpnService.Builder`
-- `onVpnStateChanged(state)` — update UI on state transitions
-
-The SDK handles everything else: JNI lifecycle, packet I/O batching, per-path UDP readers, network detection, and multipath path management.
-
 </details>
+
+## Testing
+
+```bash
+cd build && ctest --output-on-failure       # C library unit tests
+sudo scripts/ci_e2e/run_test.sh             # E2E (netns, requires root)
+sudo scripts/run_multipath_test.sh          # multipath failover
+cd android && ./gradlew test                # Android SDK unit tests
+```
 
 ## Usage
 
 ```
 mqvpn [--config PATH] --mode client|server [options]
 
-General:
-  --config PATH             INI config file (CLI args override config values)
-  --mode client|server      Operating mode (auto-detected from config)
-  --genkey                  Generate a random PSK and exit
-  --scheduler minrtt|wlb    Multipath scheduler (default: wlb)
-  --log-level LEVEL         debug|info|warn|error (default: info)
-  --tun-name NAME           TUN device name (default: mqvpn0)
-  --help                    Show help
-
-Client:
-  --server IP:PORT          Server address
-  --path IFACE              Network interface for multipath (repeatable)
-  --auth-key KEY            PSK for authentication
-  --dns ADDR                DNS server (repeatable, max 4)
-  --insecure                Accept untrusted certs (testing only)
-
-Server:
-  --listen BIND:PORT        Listen address (default: 0.0.0.0:443)
-  --subnet CIDR             Client IPv4 pool (default: 10.0.0.0/24)
-  --subnet6 CIDR            Client IPv6 pool (e.g. 2001:db8:1::/112)
-  --cert PATH               TLS certificate file
-  --key PATH                TLS private key file
-  --auth-key KEY            PSK for client authentication
-  --max-clients N           Max concurrent clients (default: 64)
-```
-
-### Security Notes
-
-- By default, TLS certificate verification is strict — self-signed or untrusted CA certificates are rejected. Use a publicly trusted CA certificate (e.g. Let's Encrypt) for production.
-- `--insecure` accepts certificates that fail verification (self-signed, unknown CA, etc.) and is intended for local/testing use only.
-- `--auth-key` is required for server mode. The server refuses to start without it. Generate one with `mqvpn --genkey`.
-- PSK authentication protects against unauthorized connections. The key is transmitted over QUIC's TLS 1.3 channel, so it is never exposed in plaintext on the wire.
-- **TLS certificates** — Use an external tool like `certbot` to obtain and renew certificates. Point mqvpn to the certificate files in your config:
-  ```bash
-  sudo certbot certonly --standalone -d vpn.example.com
-  # In /etc/mqvpn/server.conf:
-  #   [TLS]
-  #   Cert = /etc/letsencrypt/live/vpn.example.com/fullchain.pem
-  #   Key = /etc/letsencrypt/live/vpn.example.com/privkey.pem
-  ```
-  certbot's systemd timer handles automatic renewal. Add a deploy hook to restart mqvpn: `certbot renew --deploy-hook "systemctl restart mqvpn-server"`.
-
-## Testing
-
-```bash
-# C library unit tests
-cd build && ctest --output-on-failure
-
-# Integration test (requires root, uses network namespaces)
-sudo scripts/ci_e2e/run_test.sh
-
-# Multipath integration test (2 paths, failover, recovery)
-sudo scripts/run_multipath_test.sh
-
-# Android SDK unit tests (48 tests, no device required)
-cd android && ./gradlew test
+  --server IP:PORT       Server address (client)
+  --path IFACE           Multipath interface (repeatable)
+  --auth-key KEY         PSK authentication
+  --dns ADDR             DNS server (repeatable)
+  --insecure             Accept untrusted certs (testing only)
+  --listen BIND:PORT     Listen address (server, default: 0.0.0.0:443)
+  --subnet CIDR          Client IPv4 pool (server)
+  --subnet6 CIDR         Client IPv6 pool (server)
+  --scheduler minrtt|wlb Multipath scheduler (default: wlb)
+  --genkey               Generate PSK and exit
+  --help                 Show all options
 ```
 
 ## Roadmap
 
-### v0.1.0 — First public release
-- [x] Strict TLS certificate verification by default (`--insecure` to accept untrusted certs)
-- [x] Tunnel source IP validation (prevent IP spoofing through the tunnel)
-- [x] CI with GitHub Actions (build + netns smoke tests)
-- [x] Bandwidth aggregation scheduler (WLB: LATE-weighted flow-affinity WRR with BBR bandwidth estimates)
-- [x] Multi-client support (IP-offset indexed session table, O(1) routing)
-- [x] Pre-shared key authentication (Bearer token over HTTP/3 Extended CONNECT)
-- [x] Client-side DNS configuration (resolv.conf management with backup/restore)
-- [x] INI-style configuration file (`mqvpn --config /etc/mqvpn/client.conf`)
-- [x] `mqvpn --genkey` for PSK generation
-
-### v0.2.0 — Always-on & operational hardening
-- [x] Hostname resolution for `--server`
-- [x] Automatic reconnection (reconnect on connection drop / network change)
-- [x] Kill switch (prevent traffic leaking outside the tunnel)
-- [x] IPv6 support (dual-stack tunnel with `--subnet6`, IPv6 QUIC transport)
-- [x] ICMP Packet Too Big responses (RFC 9484 §10.1)
-- [x] systemd service unit (`mqvpn-server.service`, `mqvpn-client@.service`)
-
-### v0.3.0 — Library extraction & Android SDK
-- [x] Embeddable C library (`libmqvpn.a` / `libmqvpn.so`) with sans-I/O tick() API
-- [x] Platform abstraction (callbacks for TUN, routing, DNS, socket protection)
-- [x] Android Kotlin SDK 
-- [x] Network detection + automatic multipath path management (WiFi/Cellular/Ethernet)
-
-### Future
-- [ ] Per-client token authentication
-- [ ] WiFi + LTE multipath testing on device
-- [ ] Android demo app (Jetpack Compose)
-- [ ] resolvectl integration (systemd-resolved environments)
-- [ ] Replace `ip` command with netlink API
-- [ ] Performance optimization (GSO/GRO, io_uring, batch send)
-- [ ] Interop testing with other MASQUE implementations (masque-go, Google QUICHE)
-- [ ] DATAGRAM Capsule fallback (RFC 9297 stream-based carriage when QUIC DATAGRAMs are unavailable)
+- [x] v0.1.0 — TLS verification, WLB scheduler, multi-client, PSK auth, DNS, config file
+- [x] v0.2.0 — Reconnection, kill switch, IPv6, ICMP PTB, systemd service
+- [x] v0.3.0 — libmqvpn (sans-I/O), Android Kotlin SDK, network detection
+- [ ] Per-client token auth
+- [ ] resolvectl / netlink API
+- [ ] Performance: GSO/GRO, sendmmsg, native Android I/O
+- [ ] Interop testing (masque-go, QUICHE)
 
 ## Protocol Standards
 
-| Protocol | Specification | Implemented by |
-|----------|--------------|----------------|
-| MASQUE CONNECT-IP | [RFC 9484](https://www.rfc-editor.org/rfc/rfc9484) | xquic fork |
-| HTTP Datagrams | [RFC 9297](https://www.rfc-editor.org/rfc/rfc9297) | xquic fork |
-| QUIC Datagrams | [RFC 9221](https://www.rfc-editor.org/rfc/rfc9221) | XQUIC |
-| Multipath QUIC | [draft-ietf-quic-multipath](https://datatracker.ietf.org/doc/draft-ietf-quic-multipath/) | XQUIC |
-| HTTP/3 | [RFC 9114](https://www.rfc-editor.org/rfc/rfc9114) | XQUIC |
+| Protocol | Spec |
+|----------|------|
+| MASQUE CONNECT-IP | [RFC 9484](https://www.rfc-editor.org/rfc/rfc9484) |
+| HTTP Datagrams | [RFC 9297](https://www.rfc-editor.org/rfc/rfc9297) |
+| QUIC Datagrams | [RFC 9221](https://www.rfc-editor.org/rfc/rfc9221) |
+| Multipath QUIC | [draft-ietf-quic-multipath](https://datatracker.ietf.org/doc/draft-ietf-quic-multipath/) |
+| HTTP/3 | [RFC 9114](https://www.rfc-editor.org/rfc/rfc9114) |
 
 ## License
 
-mqvpn is licensed under [Apache-2.0](LICENSE).
-Copyright (c) 2026 github.com/mp0rta.
-
-mqvpn uses a [fork of XQUIC](https://github.com/mp0rta/xquic/tree/feature/masque) (Apache-2.0) as a git submodule. The fork adds MASQUE CONNECT-IP (RFC 9484) and HTTP Datagrams (RFC 9297) on top of XQUIC's QUIC, HTTP/3, and Multipath QUIC transport. The MASQUE implementation is planned to be contributed upstream.
+Apache-2.0
 
 ## Acknowledgments
 
-- [XQUIC](https://github.com/alibaba/xquic) — QUIC, HTTP/3, and Multipath QUIC library by Alibaba
-- IETF QUIC and MASQUE working groups for defining the protocol specifications
+- [XQUIC](https://github.com/alibaba/xquic) by Alibaba
+- IETF QUIC and MASQUE working groups

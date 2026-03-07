@@ -17,6 +17,9 @@ class MqvpnTunnel internal constructor(
 ) {
     // --- Lifecycle ---
 
+    fun setServerAddr(host: String, port: Int): Int =
+        NativeBridge.clientSetServerAddr(clientHandle, host, port)
+
     fun connect(): Int = NativeBridge.clientConnect(clientHandle)
 
     fun disconnect(): Int = NativeBridge.clientDisconnect(clientHandle)

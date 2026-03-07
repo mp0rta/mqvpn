@@ -448,6 +448,60 @@ TEST(client_add_path)
     mqvpn_client_destroy(c);
 }
 
+TEST(path_initial_stats_zero)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_desc_t desc = {0};
+    desc.fd = 42;
+    snprintf(desc.iface, sizeof(desc.iface), "wlan0");
+    mqvpn_client_add_path_fd(c, 42, &desc);
+
+    mqvpn_path_info_t info[4];
+    int n = 0;
+    ASSERT_EQ(mqvpn_client_get_paths(c, info, 4, &n), MQVPN_OK);
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(info[0].bytes_tx, 0);
+    ASSERT_EQ(info[0].bytes_rx, 0);
+    ASSERT_EQ(info[0].srtt_ms, 0);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(path_stats_after_recv)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_desc_t desc = {0};
+    desc.fd = 42;
+    snprintf(desc.iface, sizeof(desc.iface), "wlan0");
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, &desc);
+
+    /* Feed some bytes — xquic won't parse this, but bytes_rx should count */
+    uint8_t pkt[100];
+    memset(pkt, 0xAB, sizeof(pkt));
+    mqvpn_client_on_socket_recv(c, h, pkt, sizeof(pkt), NULL, 0);
+
+    mqvpn_path_info_t info[4];
+    int n = 0;
+    ASSERT_EQ(mqvpn_client_get_paths(c, info, 4, &n), MQVPN_OK);
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(info[0].bytes_rx, 100);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(get_paths_null_safety)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_info_t info[4];
+    int n = 0;
+
+    ASSERT_EQ(mqvpn_client_get_paths(NULL, info, 4, &n), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_client_get_paths(c, NULL, 4, &n), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_client_get_paths(c, info, 4, NULL), MQVPN_ERR_INVALID_ARG);
+
+    mqvpn_client_destroy(c);
+}
+
 TEST(client_remove_path)
 {
     mqvpn_client_t *c = make_test_client();
@@ -579,6 +633,9 @@ int main(void)
 
     /* Path management tests */
     run_client_add_path();
+    run_path_initial_stats_zero();
+    run_path_stats_after_recv();
+    run_get_paths_null_safety();
     run_client_remove_path();
     run_client_add_path_max();
 

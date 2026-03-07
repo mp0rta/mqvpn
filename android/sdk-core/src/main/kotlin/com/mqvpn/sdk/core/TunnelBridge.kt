@@ -11,7 +11,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import java.io.FileDescriptor
 import java.io.FileInputStream
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -64,13 +63,14 @@ internal class TunnelBridge(
                     val first = frameChannel.receiveCatching().getOrNull() ?: break
                     batch.add(first)
 
-                    // Coalesce within window
-                    val deadline = System.nanoTime() + SEND_COALESCE_NS
-                    while (System.nanoTime() < deadline && batch.size < MAX_BATCH_SIZE) {
-                        val next = withTimeoutOrNull(1) {
-                            frameChannel.receiveCatching().getOrNull()
-                        } ?: break
-                        batch.add(next)
+                    // Drain all immediately available frames (no waiting)
+                    while (batch.size < MAX_BATCH_SIZE) {
+                        val result = frameChannel.tryReceive()
+                        if (result.isSuccess) {
+                            batch.add(result.getOrThrow())
+                        } else {
+                            break
+                        }
                     }
 
                     // Submit batch to executor
@@ -125,7 +125,6 @@ internal class TunnelBridge(
     companion object {
         private const val TAG = "TunnelBridge"
         private const val FRAME_POOL_CAPACITY = 192
-        private const val SEND_COALESCE_NS = 300_000L // 0.3ms
         private const val MAX_BATCH_SIZE = 64
     }
 }

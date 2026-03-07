@@ -110,14 +110,6 @@ class TunnelBridgeTest {
     }
 
     @Test
-    fun `SEND_COALESCE_NS is 300_000`() {
-        val field = TunnelBridge::class.java.getDeclaredField("SEND_COALESCE_NS").apply {
-            isAccessible = true
-        }
-        assertEquals(300_000L, field.get(null))
-    }
-
-    @Test
     fun `MAX_BATCH_SIZE is 64`() {
         val field = TunnelBridge::class.java.getDeclaredField("MAX_BATCH_SIZE").apply {
             isAccessible = true

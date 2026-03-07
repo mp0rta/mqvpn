@@ -86,6 +86,13 @@ object NativeBridge {
      */
     external fun clientSetTunActive(client: Long, active: Boolean, tunFd: Int): Int
 
+    /**
+     * mqvpn_client_set_server_addr(client, host, port).
+     * Resolves host:port and sets peer address on the client.
+     * Must be called before clientConnect().
+     */
+    external fun clientSetServerAddr(client: Long, host: String, port: Int): Int
+
     /** mqvpn_client_tick(client) */
     external fun clientTick(client: Long): Int
 

@@ -5,6 +5,7 @@ import android.system.Os
 import android.util.Log
 import com.mqvpn.sdk.core.MqvpnTunnel
 import com.mqvpn.sdk.network.NetworkEvent
+import com.mqvpn.sdk.network.NetworkMonitor
 import com.mqvpn.sdk.network.PathBinder
 import com.mqvpn.sdk.runtime.MqvpnExecutor
 
@@ -20,6 +21,7 @@ internal class PathManager(
     private val executor: MqvpnExecutor,
     private val tunnel: MqvpnTunnel,
     private val udpReaderPool: UdpReaderPool,
+    private val networkMonitor: NetworkMonitor,
     private val protector: (Int) -> Boolean,
     private val serverHost: String,
     private val serverPort: Int,
@@ -50,7 +52,8 @@ internal class PathManager(
             network, serverHost, serverPort, protector,
         )
         if (fd < 0) {
-            Log.e(TAG, "Failed to bind socket for $name")
+            Log.e(TAG, "Failed to bind socket for $name, will retry on next event")
+            networkMonitor.removeNetwork(network)
             return
         }
 
@@ -65,6 +68,7 @@ internal class PathManager(
             pathFds[h] = fd
 
             if (!connected) {
+                tunnel.setServerAddr(serverHost, serverPort)
                 tunnel.connect()
                 connected = true
             }

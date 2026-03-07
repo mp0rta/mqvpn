@@ -19,6 +19,8 @@
 #include <time.h>
 #include <errno.h>
 #include <sys/socket.h>
+#include <netdb.h>
+#include <netinet/in.h>
 #include <android/log.h>
 
 #include "libmqvpn.h"
@@ -561,6 +563,47 @@ JNI_FN(clientSetTunActive)(JNIEnv *env, jobject thiz, jlong client,
     return mqvpn_client_set_tun_active(c, active ? 1 : 0, tunFd);
 }
 
+/*
+ * clientSetServerAddr(client, host, port) → int
+ *
+ * Resolves host:port to a sockaddr and calls mqvpn_client_set_server_addr().
+ * Must be called before clientConnect() — xquic needs the peer address for
+ * sendto() in fd-only mode.
+ */
+JNIEXPORT jint JNICALL
+JNI_FN(clientSetServerAddr)(JNIEnv *env, jobject thiz, jlong client,
+                             jstring host, jint port)
+{
+    (void)thiz;
+    mqvpn_client_t *c = (mqvpn_client_t *)(intptr_t)client;
+    if (!c) return MQVPN_ERR_INVALID_ARG;
+
+    const char *h = (*env)->GetStringUTFChars(env, host, NULL);
+    if (!h) return MQVPN_ERR_NO_MEMORY;
+
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%d", (int)port);
+
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+
+    int gai_rc = getaddrinfo(h, port_str, &hints, &res);
+    (*env)->ReleaseStringUTFChars(env, host, h);
+
+    if (gai_rc != 0 || !res) {
+        LOGE("getaddrinfo failed: %s", gai_strerror(gai_rc));
+        if (res) freeaddrinfo(res);
+        return MQVPN_ERR_INVALID_ARG;
+    }
+
+    int rc = mqvpn_client_set_server_addr(c, res->ai_addr,
+                                            (socklen_t)res->ai_addrlen);
+    freeaddrinfo(res);
+    return rc;
+}
+
 /* clientTick(client) → int */
 JNIEXPORT jint JNICALL
 JNI_FN(clientTick)(JNIEnv *env, jobject thiz, jlong client)
@@ -592,6 +635,15 @@ JNI_FN(addPathFd)(JNIEnv *env, jobject thiz, jlong client, jint fd,
             snprintf(desc.iface, sizeof(desc.iface), "%s", name);
             (*env)->ReleaseStringUTFChars(env, iface, name);
         }
+    }
+
+    /* Populate local_addr via getsockname() — xquic needs correct local
+     * address size (16 for IPv4, 28 for IPv6), not sizeof(sockaddr_storage). */
+    struct sockaddr_storage ss;
+    socklen_t ss_len = sizeof(ss);
+    if (getsockname(fd, (struct sockaddr *)&ss, &ss_len) == 0) {
+        memcpy(desc.local_addr, &ss, ss_len);
+        desc.local_addr_len = ss_len;
     }
 
     return (jlong)mqvpn_client_add_path_fd(c, fd, &desc);
