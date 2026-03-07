@@ -1,8 +1,16 @@
 #ifndef MQVPN_PATH_MGR_H
 #define MQVPN_PATH_MGR_H
 
-#include <netinet/in.h>
-#include <net/if.h>
+#ifdef _WIN32
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#  ifndef IFNAMSIZ
+#    define IFNAMSIZ 256
+#  endif
+#else
+#  include <netinet/in.h>
+#  include <net/if.h>
+#endif
 #include <stdint.h>
 
 #define MQVPN_MAX_PATHS  4

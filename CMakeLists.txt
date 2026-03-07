@@ -18,15 +18,27 @@ set(XQUIC_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/third_party/xquic/include)
 if(XQUIC_BUILD_DIR)
     message(STATUS "Using pre-built xquic from: ${XQUIC_BUILD_DIR}")
     add_library(xquic SHARED IMPORTED)
-    set_target_properties(xquic PROPERTIES
-        IMPORTED_LOCATION "${XQUIC_BUILD_DIR}/libxquic.so"
-    )
-    # Also provide static option
-    if(EXISTS "${XQUIC_BUILD_DIR}/libxquic-static.a")
-        add_library(xquic-static STATIC IMPORTED)
-        set_target_properties(xquic-static PROPERTIES
-            IMPORTED_LOCATION "${XQUIC_BUILD_DIR}/libxquic-static.a"
+    if(WIN32)
+        set_target_properties(xquic PROPERTIES
+            IMPORTED_LOCATION "${XQUIC_BUILD_DIR}/xquic.dll"
+            IMPORTED_IMPLIB "${XQUIC_BUILD_DIR}/xquic.lib"
         )
+        if(EXISTS "${XQUIC_BUILD_DIR}/xquic-static.lib")
+            add_library(xquic-static STATIC IMPORTED)
+            set_target_properties(xquic-static PROPERTIES
+                IMPORTED_LOCATION "${XQUIC_BUILD_DIR}/xquic-static.lib"
+            )
+        endif()
+    else()
+        set_target_properties(xquic PROPERTIES
+            IMPORTED_LOCATION "${XQUIC_BUILD_DIR}/libxquic.so"
+        )
+        if(EXISTS "${XQUIC_BUILD_DIR}/libxquic-static.a")
+            add_library(xquic-static STATIC IMPORTED)
+            set_target_properties(xquic-static PROPERTIES
+                IMPORTED_LOCATION "${XQUIC_BUILD_DIR}/libxquic-static.a"
+            )
+        endif()
     endif()
 else()
     message(STATUS "Building xquic from source (requires SSL_PATH or SSL_DIR)")
@@ -37,10 +49,21 @@ endif()
 option(ANDROID_CROSS_COMPILE "Cross-compiling for Android (skip libevent + CLI)" OFF)
 
 if(NOT ANDROID_CROSS_COMPILE)
-    find_path(EVENT_INCLUDE_DIR event2/event.h)
-    find_library(EVENT_LIB event)
-    if(NOT EVENT_LIB)
-        message(FATAL_ERROR "libevent not found. Install: apt install libevent-dev")
+    if(WIN32)
+        find_package(Libevent CONFIG QUIET)
+        if(NOT Libevent_FOUND)
+            find_path(EVENT_INCLUDE_DIR event2/event.h)
+            find_library(EVENT_LIB event)
+            if(NOT EVENT_LIB)
+                message(FATAL_ERROR "libevent not found. Install via vcpkg: vcpkg install libevent")
+            endif()
+        endif()
+    else()
+        find_path(EVENT_INCLUDE_DIR event2/event.h)
+        find_library(EVENT_LIB event)
+        if(NOT EVENT_LIB)
+            message(FATAL_ERROR "libevent not found. Install: apt install libevent-dev")
+        endif()
     endif()
 endif()
 
@@ -90,12 +113,62 @@ target_include_directories(mqvpn_lib
 if(ANDROID_CROSS_COMPILE)
     # Android NDK: pthread is in libc, no separate -lpthread
     target_link_libraries(mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB})
+elseif(WIN32)
+    target_link_libraries(mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} ws2_32)
 else()
     target_link_libraries(mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} pthread)
 endif()
 
-# Everything below requires libevent and Linux platform — skip for Android
+# Everything below requires libevent and a platform layer — skip for Android
 if(NOT ANDROID_CROSS_COMPILE)
+
+if(WIN32)
+
+# ---------- Wintun SDK (header only — DLL loaded at runtime) ----------
+set(WINTUN_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/third_party/wintun)
+
+# ---------- mqvpn CLI binary (Windows) ----------
+add_executable(mqvpn
+    src/main.c
+    src/platform/windows/platform_windows.c
+    src/platform/windows/tun_wintun.c
+    src/platform/windows/routing.c
+    src/platform/windows/firewall.c
+    src/platform/windows/dns.c
+    src/path_mgr.c
+    src/config.c
+)
+
+target_include_directories(mqvpn PRIVATE
+    ${XQUIC_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/platform/windows
+    ${WINTUN_INCLUDE_DIR}
+)
+
+if(Libevent_FOUND)
+    target_link_libraries(mqvpn
+        mqvpn_lib
+        ${XQUIC_LIB}
+        libevent::core libevent::extra
+        ${SSL_LIB}
+        ${CRYPTO_LIB}
+        ws2_32 iphlpapi fwpuclnt ole32
+    )
+else()
+    target_include_directories(mqvpn PRIVATE ${EVENT_INCLUDE_DIR})
+    target_link_libraries(mqvpn
+        mqvpn_lib
+        ${XQUIC_LIB}
+        ${EVENT_LIB}
+        ${SSL_LIB}
+        ${CRYPTO_LIB}
+        ws2_32 iphlpapi fwpuclnt ole32
+    )
+endif()
+
+else() # NOT WIN32 — Linux
 
 # Shared library variant
 add_library(mqvpn_shared SHARED
@@ -198,5 +271,7 @@ install(FILES systemd/mqvpn-server.service systemd/mqvpn-client@.service
         DESTINATION lib/systemd/system)
 install(PROGRAMS scripts/mqvpn-server-nat.sh
         DESTINATION lib/mqvpn)
+
+endif() # WIN32 / Linux
 
 endif() # NOT ANDROID_CROSS_COMPILE

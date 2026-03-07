@@ -3,8 +3,14 @@
 #include "auth.h"
 #include "vpn_client.h"
 #include "vpn_server.h"
-#include "platform_linux.h"
 #include "flow_sched.h"
+
+#ifdef _WIN32
+#  include "platform_windows.h"
+#  include <winsock2.h>
+#else
+#  include "platform_linux.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -84,6 +90,14 @@ parse_host_port(const char *str, char *host, size_t host_len, int *port)
 int
 main(int argc, char *argv[])
 {
+#ifdef _WIN32
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        fprintf(stderr, "error: WSAStartup failed\n");
+        return 1;
+    }
+#endif
+
     static struct option long_opts[] = {
         {"config",      required_argument, NULL, 'C'},
         {"mode",        required_argument, NULL, 'm'},
@@ -311,7 +325,11 @@ main(int argc, char *argv[])
         for (int i = 0; i < n_dns; i++) {
             cfg.dns_servers[i] = dns_servers[i];
         }
+#ifdef _WIN32
+        return win_platform_run_client(&cfg);
+#else
         return linux_platform_run_client(&cfg);
+#endif
 
     } else if (strcmp(eff_mode, "server") == 0) {
         if (!eff_auth_key || eff_auth_key[0] == '\0') {
@@ -340,7 +358,11 @@ main(int argc, char *argv[])
             .auth_key    = eff_auth_key,
             .max_clients = eff_max_clients,
         };
+#ifdef _WIN32
+        return win_platform_run_server(&cfg);
+#else
         return linux_platform_run_server(&cfg);
+#endif
 
     } else {
         fprintf(stderr, "error: --mode must be 'client' or 'server'\n");
