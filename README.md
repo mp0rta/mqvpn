@@ -122,7 +122,7 @@ Asymmetric dual-path (300M/10ms + 80M/30ms) via network namespaces. Full report:
 │  MASQUE         │    HTTP Datagrams        │  MASQUE         │
 │  CONNECT-IP     │◄──(Context ID = 0)──────►│  CONNECT-IP     │
 ├─────────────────┤                          ├─────────────────┤
-│  Multipath QUIC │◄── Path A ──────────────►│  QUIC           │
+│  Multipath QUIC │◄── Path A ──────────────►│  Multipath QUIC │
 │                 │◄── Path B ──────────────►│                 │
 ├─────────────────┤                          ├─────────────────┤
 │  UDP (eth0/wlan)│                          │   UDP (eth0)    │
