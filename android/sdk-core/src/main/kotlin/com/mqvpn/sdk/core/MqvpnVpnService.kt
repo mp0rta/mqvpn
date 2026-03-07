@@ -117,16 +117,17 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
             val pool = UdpReaderPool(executor)
             udpReaderPool = pool
 
+            val monitor = NetworkMonitor(this)
+            networkMonitor = monitor
+
             val pm = PathManager(
-                executor, t, pool,
+                executor, t, pool, monitor,
                 protector = { fd -> protect(fd) },
                 serverHost = config.serverAddress,
                 serverPort = config.serverPort,
             )
             pathManager = pm
 
-            val monitor = NetworkMonitor(this)
-            networkMonitor = monitor
             monitor.start { event ->
                 scope.launch(Dispatchers.IO) { pm.handleEvent(event) }
             }

@@ -63,6 +63,11 @@ class NetworkMonitor(private val context: Context) {
         cm.registerNetworkCallback(request, cb)
     }
 
+    /** Remove a network so the next onCapabilitiesChanged treats it as new. */
+    fun removeNetwork(network: Network) {
+        _activeNetworks.remove(network)
+    }
+
     fun stop() {
         callback?.let { cm.unregisterNetworkCallback(it) }
         callback = null
