@@ -2,7 +2,12 @@
 #define MQVPN_ADDR_POOL_H
 
 #include <stdint.h>
-#include <netinet/in.h>
+#ifdef _WIN32
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#else
+#  include <netinet/in.h>
+#endif
 
 #define MQVPN_ADDR_POOL_MAX  254  /* /24 = 254 usable hosts */
 

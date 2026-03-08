@@ -35,7 +35,7 @@ add_route4(platform_win_ctx_t *p, const char *dst, int prefix,
            ULONG metric)
 {
     MIB_IPFORWARD_ROW2 row;
-    InitIpForwardEntry(&row);
+    InitializeIpForwardEntry(&row);
 
     row.InterfaceLuid = *luid;
     row.DestinationPrefix.Prefix.Ipv4.sin_family = AF_INET;
@@ -66,7 +66,7 @@ add_route6(platform_win_ctx_t *p, const char *dst, int prefix,
            const NET_LUID *luid, ULONG metric)
 {
     MIB_IPFORWARD_ROW2 row;
-    InitIpForwardEntry(&row);
+    InitializeIpForwardEntry(&row);
 
     row.InterfaceLuid = *luid;
     row.DestinationPrefix.Prefix.Ipv6.sin6_family = AF_INET6;

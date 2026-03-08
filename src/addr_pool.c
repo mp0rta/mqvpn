@@ -3,7 +3,12 @@
 
 #include <string.h>
 #include <stdlib.h>
-#include <arpa/inet.h>
+#ifdef _WIN32
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#else
+#  include <arpa/inet.h>
+#endif
 
 int
 mqvpn_addr_pool_init(mqvpn_addr_pool_t *pool, const char *cidr)

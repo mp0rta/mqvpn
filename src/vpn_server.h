@@ -2,7 +2,12 @@
 #define MQVPN_VPN_SERVER_H
 
 #include <stdint.h>
-#include <netinet/in.h>
+#ifdef _WIN32
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#else
+#  include <netinet/in.h>
+#endif
 
 typedef struct mqvpn_server_cfg_s {
     const char  *listen_addr;   /* bind address (e.g. "0.0.0.0") */

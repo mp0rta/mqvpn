@@ -13,7 +13,12 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <sys/socket.h>    /* socklen_t, struct sockaddr */
+#ifdef _WIN32
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#else
+#  include <sys/socket.h>    /* socklen_t, struct sockaddr */
+#endif
 
 #ifdef __cplusplus
 extern "C" {

@@ -9,6 +9,10 @@
 #include <string.h>
 #include <ctype.h>
 
+#ifdef _MSC_VER
+#  define strcasecmp _stricmp
+#endif
+
 /* ---- helpers ---- */
 
 /* Trim leading and trailing whitespace in-place, return pointer to start */

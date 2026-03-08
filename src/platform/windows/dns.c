@@ -18,6 +18,9 @@
  * We try to load it dynamically to allow compilation on older SDKs.
  */
 
+/* DNS_INTERFACE_SETTINGS is available in newer Windows SDKs (netioapi.h).
+ * Only define it ourselves when compiling with older SDKs. */
+#ifndef DNS_INTERFACE_SETTINGS_VERSION1
 typedef struct _DNS_INTERFACE_SETTINGS {
     ULONG Version;        /* DNS_INTERFACE_SETTINGS_VERSION1 = 1 */
     ULONG64 Flags;
@@ -33,6 +36,7 @@ typedef struct _DNS_INTERFACE_SETTINGS {
 
 #define DNS_INTERFACE_SETTINGS_VERSION1  1
 #define DNS_SETTING_NAMESERVER           0x0004
+#endif
 
 typedef DWORD (WINAPI *SetInterfaceDnsSettings_fn)(
     REFGUID InterfaceGuid,

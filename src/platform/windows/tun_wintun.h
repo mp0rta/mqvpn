@@ -20,9 +20,9 @@
 
 #include <event2/util.h>
 
-/* Wintun opaque handles */
-typedef void *WINTUN_ADAPTER_HANDLE;
-typedef void *WINTUN_SESSION_HANDLE;
+/* Forward-declare Wintun opaque handle types (same as wintun.h) */
+typedef struct _WINTUN_ADAPTER *WINTUN_ADAPTER_HANDLE;
+typedef struct _TUN_SESSION *WINTUN_SESSION_HANDLE;
 
 /* mqvpn_tun_write() returns this when the ring is full. */
 #define MQVPN_TUN_EAGAIN (-2)

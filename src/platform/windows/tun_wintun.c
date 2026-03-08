@@ -17,16 +17,16 @@
 
 /* ── Wintun function pointers (resolved at runtime) ── */
 
-static WINTUN_CREATE_ADAPTER_FUNC   WintunCreateAdapter;
-static WINTUN_CLOSE_ADAPTER_FUNC    WintunCloseAdapter;
-static WINTUN_GET_ADAPTER_LUID_FUNC WintunGetAdapterLUID;
-static WINTUN_START_SESSION_FUNC    WintunStartSession;
-static WINTUN_END_SESSION_FUNC      WintunEndSession;
-static WINTUN_GET_READ_WAIT_EVENT_FUNC WintunGetReadWaitEvent;
-static WINTUN_RECEIVE_PACKET_FUNC   WintunReceivePacket;
-static WINTUN_RELEASE_RECEIVE_PACKET_FUNC WintunReleaseReceivePacket;
-static WINTUN_ALLOCATE_SEND_PACKET_FUNC WintunAllocateSendPacket;
-static WINTUN_SEND_PACKET_FUNC      WintunSendPacket;
+static WINTUN_CREATE_ADAPTER_FUNC   *WintunCreateAdapter;
+static WINTUN_CLOSE_ADAPTER_FUNC    *WintunCloseAdapter;
+static WINTUN_GET_ADAPTER_LUID_FUNC *WintunGetAdapterLUID;
+static WINTUN_START_SESSION_FUNC    *WintunStartSession;
+static WINTUN_END_SESSION_FUNC      *WintunEndSession;
+static WINTUN_GET_READ_WAIT_EVENT_FUNC *WintunGetReadWaitEvent;
+static WINTUN_RECEIVE_PACKET_FUNC   *WintunReceivePacket;
+static WINTUN_RELEASE_RECEIVE_PACKET_FUNC *WintunReleaseReceivePacket;
+static WINTUN_ALLOCATE_SEND_PACKET_FUNC *WintunAllocateSendPacket;
+static WINTUN_SEND_PACKET_FUNC      *WintunSendPacket;
 
 static HMODULE g_wintun_dll = NULL;
 
@@ -123,6 +123,23 @@ mqvpn_tun_win_create(mqvpn_tun_win_t *tun, const char *dev_name)
     evutil_make_socket_nonblocking(tun->pipe_rd);
     evutil_make_socket_nonblocking(tun->pipe_wr);
 
+    /* Increase socketpair buffer to reduce packet drops under load */
+    {
+        int pipebuf = 7 * 1024 * 1024; /* 7 MB (aligned with WireGuard) */
+        setsockopt(tun->pipe_wr, SOL_SOCKET, SO_SNDBUF,
+                   (const char *)&pipebuf, sizeof(pipebuf));
+        setsockopt(tun->pipe_rd, SOL_SOCKET, SO_RCVBUF,
+                   (const char *)&pipebuf, sizeof(pipebuf));
+
+        int actual_snd = 0, actual_rcv = 0;
+        int optlen = sizeof(actual_snd);
+        getsockopt(tun->pipe_wr, SOL_SOCKET, SO_SNDBUF,
+                   (char *)&actual_snd, &optlen);
+        getsockopt(tun->pipe_rd, SOL_SOCKET, SO_RCVBUF,
+                   (char *)&actual_rcv, &optlen);
+        LOG_INF("TUN pipe buffers: SO_SNDBUF=%d SO_RCVBUF=%d", actual_snd, actual_rcv);
+    }
+
     LOG_INF("TUN %s created (if_index=%lu)", tun->name, (unsigned long)tun->if_index);
     return 0;
 }
@@ -205,6 +222,9 @@ static DWORD WINAPI
 tun_reader_thread(LPVOID arg)
 {
     mqvpn_tun_win_t *tun = (mqvpn_tun_win_t *)arg;
+    uint64_t drop_count = 0;
+    uint64_t drop_bytes = 0;
+    DWORD last_drop_log = 0;
 
     while (!InterlockedCompareExchange(&tun->stop, 0, 0)) {
         /* Wait for Wintun to signal data available */
@@ -231,9 +251,20 @@ tun_reader_thread(LPVOID arg)
                 frame[1] = (uint8_t)(pkt_size & 0xFF);
                 memcpy(frame + 2, pkt, pkt_size);
 
-                /* Best-effort send — if pipe is full, drop packet */
-                send(tun->pipe_wr, (const char *)frame,
-                     (int)(2 + pkt_size), 0);
+                int ret = send(tun->pipe_wr, (const char *)frame,
+                               (int)(2 + pkt_size), 0);
+                if (ret < 0) {
+                    drop_count++;
+                    drop_bytes += pkt_size;
+                    /* Log at most once per second */
+                    DWORD now = GetTickCount();
+                    if (now - last_drop_log >= 1000) {
+                        LOG_WRN("TUN pipe full: dropped %llu pkts (%llu bytes total)",
+                                (unsigned long long)drop_count,
+                                (unsigned long long)drop_bytes);
+                        last_drop_log = now;
+                    }
+                }
             }
 
             WintunReleaseReceivePacket(tun->session, pkt);

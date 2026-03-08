@@ -11,14 +11,27 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
-#include <unistd.h>
-#include <errno.h>
+#ifdef _WIN32
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#  include <windows.h>
+#  include <process.h>
+#  define EAGAIN        WSAEWOULDBLOCK
+#  define EWOULDBLOCK   WSAEWOULDBLOCK
+#  define EINTR         WSAEINTR
+#  define errno         WSAGetLastError()
+#else
+#  include <unistd.h>
+#  include <sys/time.h>
+#  include <arpa/inet.h>
+#  include <pthread.h>
+#endif
+#ifndef _WIN32
+#  include <errno.h>
+#endif
 #include <inttypes.h>
-#include <sys/time.h>
 #include <time.h>
-#include <arpa/inet.h>
 #include <assert.h>
-#include <pthread.h>
 
 #include <xquic/xquic.h>
 #include <xquic/xqc_http3.h>
@@ -112,7 +125,11 @@ struct mqvpn_server_s {
 
     /* Debug: tick thread assertion */
 #ifndef NDEBUG
+#ifdef _WIN32
+    DWORD                       owner_thread;
+#else
     pthread_t                   owner_thread;
+#endif
     int                         owner_thread_set;
 #endif
 };
@@ -121,21 +138,37 @@ struct mqvpn_server_s {
 
 static uint64_t now_us(void)
 {
+#ifdef _WIN32
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    uint64_t t = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    return t / 10 - 11644473600000000ULL;
+#else
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (uint64_t)tv.tv_sec * 1000000 + (uint64_t)tv.tv_usec;
+#endif
 }
 
 static int64_t now_ms_mono(void)
 {
+#ifdef _WIN32
+    LARGE_INTEGER freq, cnt;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&cnt);
+    return (int64_t)(cnt.QuadPart * 1000 / freq.QuadPart);
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
 }
 
+#ifndef _MSC_VER
 static void server_log(mqvpn_server_t *s, mqvpn_log_level_t level,
                         const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
+#endif
 
 static void server_log(mqvpn_server_t *s, mqvpn_log_level_t level,
                         const char *fmt, ...)
@@ -155,6 +188,17 @@ static void server_log(mqvpn_server_t *s, mqvpn_log_level_t level,
 #define LOG_E(s, ...) server_log(s, MQVPN_LOG_ERROR, __VA_ARGS__)
 
 #ifndef NDEBUG
+#ifdef _WIN32
+#define ASSERT_TICK_THREAD(s) do { \
+    if (!(s)->owner_thread_set) { \
+        (s)->owner_thread = GetCurrentThreadId(); \
+        (s)->owner_thread_set = 1; \
+    } else { \
+        assert((s)->owner_thread == GetCurrentThreadId() && \
+               "mqvpn_server: called from wrong thread"); \
+    } \
+} while (0)
+#else
 #define ASSERT_TICK_THREAD(s) do { \
     if (!(s)->owner_thread_set) { \
         (s)->owner_thread = pthread_self(); \
@@ -164,6 +208,7 @@ static void server_log(mqvpn_server_t *s, mqvpn_log_level_t level,
                "mqvpn_server: called from wrong thread"); \
     } \
 } while (0)
+#endif
 #else
 #define ASSERT_TICK_THREAD(s) ((void)0)
 #endif

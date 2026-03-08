@@ -105,7 +105,11 @@ add_library(mqvpn_lib STATIC
     src/auth.c
     src/log.c
 )
-set_target_properties(mqvpn_lib PROPERTIES OUTPUT_NAME mqvpn)
+if(WIN32)
+    set_target_properties(mqvpn_lib PROPERTIES OUTPUT_NAME mqvpn_lib)
+else()
+    set_target_properties(mqvpn_lib PROPERTIES OUTPUT_NAME mqvpn)
+endif()
 target_include_directories(mqvpn_lib
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
     PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR}
@@ -137,12 +141,14 @@ add_executable(mqvpn
     src/platform/windows/dns.c
     src/path_mgr.c
     src/config.c
+    src/compat/getopt.c
 )
 
 target_include_directories(mqvpn PRIVATE
     ${XQUIC_INCLUDE_DIR}
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/compat
     ${CMAKE_SOURCE_DIR}/src/platform/windows
     ${WINTUN_INCLUDE_DIR}
 )

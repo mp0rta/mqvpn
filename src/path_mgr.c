@@ -35,7 +35,11 @@ mqvpn_path_mgr_add(mqvpn_path_mgr_t *mgr, const char *iface,
 
     int idx = mgr->n_paths;
     mqvpn_path_t *p = &mgr->paths[idx];
+#ifdef _WIN32
+    ADDRESS_FAMILY af = peer_addr->ss_family;
+#else
     sa_family_t af = peer_addr->ss_family;
+#endif
 
     int fd = (int)socket(af, SOCK_DGRAM, 0);
     if (fd < 0) {
@@ -63,6 +67,16 @@ mqvpn_path_mgr_add(mqvpn_path_mgr_t *mgr, const char *iface,
     int bufsize = 1 * 1024 * 1024;
     setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (const char *)&bufsize, sizeof(bufsize));
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, (const char *)&bufsize, sizeof(bufsize));
+#ifdef _WIN32
+    {
+        int actual_snd = 0, actual_rcv = 0;
+        int optlen = sizeof(actual_snd);
+        getsockopt(fd, SOL_SOCKET, SO_SNDBUF, (char *)&actual_snd, &optlen);
+        getsockopt(fd, SOL_SOCKET, SO_RCVBUF, (char *)&actual_rcv, &optlen);
+        LOG_INF("path_mgr: UDP socket buffers: SO_SNDBUF=%d SO_RCVBUF=%d",
+                actual_snd, actual_rcv);
+    }
+#endif
 
     /* Bind to specific interface */
     if (iface && iface[0]) {
