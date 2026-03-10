@@ -94,5 +94,5 @@ flow_hash_pkt(const uint8_t *pkt, int len)
         return h;
     }
 
-    return 0;  /* Unknown IP version */
+    return 0; /* Unknown IP version */
 }

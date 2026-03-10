@@ -16,10 +16,10 @@
 #  include <ws2tcpip.h>
 #  include <windows.h>
 #  include <process.h>
-#  define EAGAIN        WSAEWOULDBLOCK
-#  define EWOULDBLOCK   WSAEWOULDBLOCK
-#  define EINTR         WSAEINTR
-#  define errno         WSAGetLastError()
+#  define EAGAIN      WSAEWOULDBLOCK
+#  define EWOULDBLOCK WSAEWOULDBLOCK
+#  define EINTR       WSAEINTR
+#  define errno       WSAGetLastError()
 #else
 #  include <unistd.h>
 #  include <sys/time.h>
@@ -42,101 +42,102 @@
 
 /* ─── Constants ─── */
 
-#define PACKET_BUF_SIZE      65536
-#define MASQUE_FRAME_BUF     (PACKET_BUF_SIZE + 16)
-#define MAX_CAPSULE_BUF      65536
-#define XQC_SNDQ_MAX_PKTS   16384
-#define PTB_RATE_LIMIT       10
+#define PACKET_BUF_SIZE   65536
+#define MASQUE_FRAME_BUF  (PACKET_BUF_SIZE + 16)
+#define MAX_CAPSULE_BUF   65536
+#define XQC_SNDQ_MAX_PKTS 16384
+#define PTB_RATE_LIMIT    10
 
 /* ─── Forward declarations ─── */
 
-typedef struct svr_conn_s    svr_conn_t;
-typedef struct svr_stream_s  svr_stream_t;
+typedef struct svr_conn_s svr_conn_t;
+typedef struct svr_stream_s svr_stream_t;
 
 /* ─── Internal types ─── */
 
 struct svr_conn_s {
-    mqvpn_server_t      *server;
-    xqc_h3_conn_t       *h3_conn;
-    xqc_cid_t            cid;
-    struct sockaddr_in6   peer_addr;
-    socklen_t             peer_addrlen;
+    mqvpn_server_t *server;
+    xqc_h3_conn_t *h3_conn;
+    xqc_cid_t cid;
+    struct sockaddr_in6 peer_addr;
+    socklen_t peer_addrlen;
 
     /* MASQUE session */
-    uint64_t              masque_stream_id;
-    struct in_addr        assigned_ip;
-    struct in6_addr       assigned_ip6;
-    int                   has_v6;
-    int                   tunnel_established;
-    size_t                dgram_mss;
-    uint64_t              dgram_lost_cnt;
-    uint64_t              dgram_acked_cnt;
+    uint64_t masque_stream_id;
+    struct in_addr assigned_ip;
+    struct in6_addr assigned_ip6;
+    int has_v6;
+    int tunnel_established;
+    size_t dgram_mss;
+    uint64_t dgram_lost_cnt;
+    uint64_t dgram_acked_cnt;
 };
 
 struct svr_stream_s {
-    svr_conn_t          *conn;
-    xqc_h3_request_t    *h3_request;
-    int                  header_sent;
-    uint8_t             *capsule_buf;
-    size_t               capsule_len;
-    size_t               capsule_cap;
+    svr_conn_t *conn;
+    xqc_h3_request_t *h3_request;
+    int header_sent;
+    uint8_t *capsule_buf;
+    size_t capsule_len;
+    size_t capsule_cap;
 };
 
 /* ─── Server handle (opaque mqvpn_server_t) ─── */
 
 struct mqvpn_server_s {
     /* Config (deep copy) */
-    mqvpn_config_t              config;
-    mqvpn_server_callbacks_t    cbs;
-    void                       *user_ctx;
+    mqvpn_config_t config;
+    mqvpn_server_callbacks_t cbs;
+    void *user_ctx;
 
     /* xquic engine */
-    xqc_engine_t               *engine;
+    xqc_engine_t *engine;
 
     /* UDP socket (provided by platform via set_socket_fd) */
-    int                         udp_fd;
-    struct sockaddr_storage     local_addr;
-    socklen_t                   local_addrlen;
+    int udp_fd;
+    struct sockaddr_storage local_addr;
+    socklen_t local_addrlen;
 
     /* Address pool */
-    mqvpn_addr_pool_t           pool;
+    mqvpn_addr_pool_t pool;
 
     /* Session table: indexed by IP offset (1-254) within subnet */
-    svr_conn_t                 *sessions[MQVPN_ADDR_POOL_MAX + 1];
-    int                         n_sessions;
-    int                         max_clients;
+    svr_conn_t *sessions[MQVPN_ADDR_POOL_MAX + 1];
+    int n_sessions;
+    int max_clients;
 
     /* Backpressure */
-    int                         tun_paused;
-    uint64_t                    tun_drop_cnt;
+    int tun_paused;
+    uint64_t tun_drop_cnt;
 
     /* Timer: next wake (from xquic set_event_timer) */
-    uint64_t                    next_wake_us;
+    uint64_t next_wake_us;
 
     /* ICMP PTB rate limit */
-    int                         ptb_tokens;
-    int64_t                     ptb_refill_ms;
+    int ptb_tokens;
+    int64_t ptb_refill_ms;
 
     /* Stats */
-    uint64_t                    bytes_tx;
-    uint64_t                    bytes_rx;
+    uint64_t bytes_tx;
+    uint64_t bytes_rx;
 
-    int                         started;
+    int started;
 
     /* Debug: tick thread assertion */
 #ifndef NDEBUG
-#ifdef _WIN32
-    DWORD                       owner_thread;
-#else
-    pthread_t                   owner_thread;
-#endif
-    int                         owner_thread_set;
+#  ifdef _WIN32
+    DWORD owner_thread;
+#  else
+    pthread_t owner_thread;
+#  endif
+    int owner_thread_set;
 #endif
 };
 
 /* ─── Helpers ─── */
 
-static uint64_t now_us(void)
+static uint64_t
+now_us(void)
 {
 #ifdef _WIN32
     FILETIME ft;
@@ -150,7 +151,8 @@ static uint64_t now_us(void)
 #endif
 }
 
-static int64_t now_ms_mono(void)
+static int64_t
+now_ms_mono(void)
 {
 #ifdef _WIN32
     LARGE_INTEGER freq, cnt;
@@ -165,13 +167,12 @@ static int64_t now_ms_mono(void)
 }
 
 #ifndef _MSC_VER
-static void server_log(mqvpn_server_t *s, mqvpn_log_level_t level,
-                        const char *fmt, ...)
+static void server_log(mqvpn_server_t *s, mqvpn_log_level_t level, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 #endif
 
-static void server_log(mqvpn_server_t *s, mqvpn_log_level_t level,
-                        const char *fmt, ...)
+static void
+server_log(mqvpn_server_t *s, mqvpn_log_level_t level, const char *fmt, ...)
 {
     if (!s->cbs.log) return;
     char buf[512];
@@ -183,53 +184,56 @@ static void server_log(mqvpn_server_t *s, mqvpn_log_level_t level,
 }
 
 #define LOG_D(s, ...) server_log(s, MQVPN_LOG_DEBUG, __VA_ARGS__)
-#define LOG_I(s, ...) server_log(s, MQVPN_LOG_INFO,  __VA_ARGS__)
-#define LOG_W(s, ...) server_log(s, MQVPN_LOG_WARN,  __VA_ARGS__)
+#define LOG_I(s, ...) server_log(s, MQVPN_LOG_INFO, __VA_ARGS__)
+#define LOG_W(s, ...) server_log(s, MQVPN_LOG_WARN, __VA_ARGS__)
 #define LOG_E(s, ...) server_log(s, MQVPN_LOG_ERROR, __VA_ARGS__)
 
 #ifndef NDEBUG
-#ifdef _WIN32
-#define ASSERT_TICK_THREAD(s) do { \
-    if (!(s)->owner_thread_set) { \
-        (s)->owner_thread = GetCurrentThreadId(); \
-        (s)->owner_thread_set = 1; \
-    } else { \
-        assert((s)->owner_thread == GetCurrentThreadId() && \
-               "mqvpn_server: called from wrong thread"); \
-    } \
-} while (0)
+#  ifdef _WIN32
+#    define ASSERT_TICK_THREAD(s)                                   \
+        do {                                                        \
+            if (!(s)->owner_thread_set) {                           \
+                (s)->owner_thread = GetCurrentThreadId();           \
+                (s)->owner_thread_set = 1;                          \
+            } else {                                                \
+                assert((s)->owner_thread == GetCurrentThreadId() && \
+                       "mqvpn_server: called from wrong thread");   \
+            }                                                       \
+        } while (0)
+#  else
+#    define ASSERT_TICK_THREAD(s)                                          \
+        do {                                                               \
+            if (!(s)->owner_thread_set) {                                  \
+                (s)->owner_thread = pthread_self();                        \
+                (s)->owner_thread_set = 1;                                 \
+            } else {                                                       \
+                assert(pthread_equal((s)->owner_thread, pthread_self()) && \
+                       "mqvpn_server: called from wrong thread");          \
+            }                                                              \
+        } while (0)
+#  endif
 #else
-#define ASSERT_TICK_THREAD(s) do { \
-    if (!(s)->owner_thread_set) { \
-        (s)->owner_thread = pthread_self(); \
-        (s)->owner_thread_set = 1; \
-    } else { \
-        assert(pthread_equal((s)->owner_thread, pthread_self()) && \
-               "mqvpn_server: called from wrong thread"); \
-    } \
-} while (0)
-#endif
-#else
-#define ASSERT_TICK_THREAD(s) ((void)0)
+#  define ASSERT_TICK_THREAD(s) ((void)0)
 #endif
 
-static void svr_log_conn_stats(mqvpn_server_t *s, const char *tag,
-                                 const xqc_cid_t *cid)
+static void
+svr_log_conn_stats(mqvpn_server_t *s, const char *tag, const xqc_cid_t *cid)
 {
     if (!s->engine || !cid) return;
     xqc_conn_stats_t st = xqc_conn_get_stats(s->engine, cid);
-    LOG_I(s, "%s: send=%u recv=%u lost=%u lost_dgram=%u srtt=%.2fms "
+    LOG_I(s,
+          "%s: send=%u recv=%u lost=%u lost_dgram=%u srtt=%.2fms "
           "min_rtt=%.2fms inflight=%" PRIu64 " app_bytes=%" PRIu64
           " standby_bytes=%" PRIu64 " mp_state=%d",
-          tag, st.send_count, st.recv_count, st.lost_count,
-          st.lost_dgram_count, (double)st.srtt / 1000.0,
-          (double)st.min_rtt / 1000.0, st.inflight_bytes,
+          tag, st.send_count, st.recv_count, st.lost_count, st.lost_dgram_count,
+          (double)st.srtt / 1000.0, (double)st.min_rtt / 1000.0, st.inflight_bytes,
           st.total_app_bytes, st.standby_path_app_bytes, st.mp_state);
 }
 
 /* ─── ICMP PTB rate limiter ─── */
 
-static int ptb_rate_allow(mqvpn_server_t *s)
+static int
+ptb_rate_allow(mqvpn_server_t *s)
 {
     int64_t ms = now_ms_mono();
     if (ms - s->ptb_refill_ms >= 1000) {
@@ -245,8 +249,9 @@ static int ptb_rate_allow(mqvpn_server_t *s)
 
 /* ─── ICMP Packet Too Big (IPv4) ─── */
 
-static void send_icmpv4_ptb(mqvpn_server_t *s, const uint8_t *orig,
-                              size_t orig_len, size_t tunnel_mtu)
+static void
+send_icmpv4_ptb(mqvpn_server_t *s, const uint8_t *orig, size_t orig_len,
+                size_t tunnel_mtu)
 {
     if (orig_len < 20) return;
     if (!ptb_rate_allow(s)) return;
@@ -263,23 +268,30 @@ static void send_icmpv4_ptb(mqvpn_server_t *s, const uint8_t *orig,
     if (total > sizeof(pkt)) return;
     memset(pkt, 0, total);
 
-    pkt[0] = 0x45; pkt[1] = 0xC0;
-    pkt[2] = (total >> 8) & 0xFF; pkt[3] = total & 0xFF;
-    pkt[8] = 64; pkt[9] = 1;
+    pkt[0] = 0x45;
+    pkt[1] = 0xC0;
+    pkt[2] = (total >> 8) & 0xFF;
+    pkt[3] = total & 0xFF;
+    pkt[8] = 64;
+    pkt[9] = 1;
     memcpy(pkt + 12, &srv_addr.s_addr, 4);
     memcpy(pkt + 16, orig + 12, 4);
 
     uint32_t cksum = 0;
     for (int i = 0; i < 20; i += 2)
         cksum += ((uint32_t)pkt[i] << 8) | pkt[i + 1];
-    while (cksum >> 16) cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
     uint16_t ip_ck = ~(uint16_t)cksum;
-    pkt[10] = ip_ck >> 8; pkt[11] = ip_ck & 0xFF;
+    pkt[10] = ip_ck >> 8;
+    pkt[11] = ip_ck & 0xFF;
 
     uint8_t *icmp = pkt + 20;
-    icmp[0] = 3; icmp[1] = 4;
+    icmp[0] = 3;
+    icmp[1] = 4;
     uint16_t m16 = (tunnel_mtu > 0xFFFF) ? 0xFFFF : (uint16_t)tunnel_mtu;
-    icmp[6] = m16 >> 8; icmp[7] = m16 & 0xFF;
+    icmp[6] = m16 >> 8;
+    icmp[7] = m16 & 0xFF;
     memcpy(icmp + 8, orig, icmp_data_len);
 
     size_t icmp_total = 8 + icmp_data_len;
@@ -288,9 +300,11 @@ static void send_icmpv4_ptb(mqvpn_server_t *s, const uint8_t *orig,
         cksum += ((uint32_t)icmp[i] << 8);
         if (i + 1 < icmp_total) cksum += icmp[i + 1];
     }
-    while (cksum >> 16) cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
     uint16_t ic = ~(uint16_t)cksum;
-    icmp[2] = ic >> 8; icmp[3] = ic & 0xFF;
+    icmp[2] = ic >> 8;
+    icmp[3] = ic & 0xFF;
 
     s->cbs.tun_output(pkt, total, s->user_ctx);
     LOG_D(s, "sent ICMP Fragmentation Needed (mtu=%zu) to TUN", tunnel_mtu);
@@ -298,8 +312,9 @@ static void send_icmpv4_ptb(mqvpn_server_t *s, const uint8_t *orig,
 
 /* ─── ICMPv6 Packet Too Big ─── */
 
-static void send_icmpv6_ptb(mqvpn_server_t *s, const uint8_t *orig,
-                              size_t orig_len, size_t tunnel_mtu)
+static void
+send_icmpv6_ptb(mqvpn_server_t *s, const uint8_t *orig, size_t orig_len,
+                size_t tunnel_mtu)
 {
     if (orig_len < 40 || !s->pool.has_v6) return;
     if (!ptb_rate_allow(s)) return;
@@ -315,16 +330,21 @@ static void send_icmpv6_ptb(mqvpn_server_t *s, const uint8_t *orig,
     memset(pkt, 0, total);
 
     pkt[0] = 0x60;
-    pkt[4] = (icmpv6_len >> 8) & 0xFF; pkt[5] = icmpv6_len & 0xFF;
-    pkt[6] = 58; pkt[7] = 64;
+    pkt[4] = (icmpv6_len >> 8) & 0xFF;
+    pkt[5] = icmpv6_len & 0xFF;
+    pkt[6] = 58;
+    pkt[7] = 64;
     memcpy(pkt + 8, &srv_addr6, 16);
     memcpy(pkt + 24, orig + 8, 16);
 
     uint8_t *icmp = pkt + 40;
-    icmp[0] = 2; icmp[1] = 0;
+    icmp[0] = 2;
+    icmp[1] = 0;
     uint32_t m32 = (uint32_t)tunnel_mtu;
-    icmp[4] = (m32 >> 24) & 0xFF; icmp[5] = (m32 >> 16) & 0xFF;
-    icmp[6] = (m32 >> 8) & 0xFF; icmp[7] = m32 & 0xFF;
+    icmp[4] = (m32 >> 24) & 0xFF;
+    icmp[5] = (m32 >> 16) & 0xFF;
+    icmp[6] = (m32 >> 8) & 0xFF;
+    icmp[7] = m32 & 0xFF;
     memcpy(icmp + 8, orig, icmpv6_data_len);
 
     uint32_t cksum = 0;
@@ -339,9 +359,11 @@ static void send_icmpv6_ptb(mqvpn_server_t *s, const uint8_t *orig,
         cksum += ((uint32_t)icmp[i] << 8);
         if (i + 1 < icmpv6_len) cksum += icmp[i + 1];
     }
-    while (cksum >> 16) cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
     uint16_t ic = ~(uint16_t)cksum;
-    icmp[2] = ic >> 8; icmp[3] = ic & 0xFF;
+    icmp[2] = ic >> 8;
+    icmp[3] = ic & 0xFF;
 
     s->cbs.tun_output(pkt, total, s->user_ctx);
     LOG_D(s, "sent ICMPv6 Packet Too Big (mtu=%zu) to TUN", tunnel_mtu);
@@ -349,8 +371,8 @@ static void send_icmpv6_ptb(mqvpn_server_t *s, const uint8_t *orig,
 
 /* ─── ICMP Destination Unreachable (IPv4) — sent to TUN ─── */
 
-static void send_icmpv4_dest_unreach(mqvpn_server_t *s, const uint8_t *orig,
-                                       size_t orig_len)
+static void
+send_icmpv4_dest_unreach(mqvpn_server_t *s, const uint8_t *orig, size_t orig_len)
 {
     if (orig_len < 20) return;
     if (!ptb_rate_allow(s)) return;
@@ -368,22 +390,28 @@ static void send_icmpv4_dest_unreach(mqvpn_server_t *s, const uint8_t *orig,
     memset(pkt, 0, total);
 
     /* IPv4 header */
-    pkt[0] = 0x45; pkt[1] = 0xC0;
-    pkt[2] = (total >> 8) & 0xFF; pkt[3] = total & 0xFF;
-    pkt[8] = 64; pkt[9] = 1;  /* TTL=64, proto=ICMP */
-    memcpy(pkt + 12, &srv_addr.s_addr, 4);   /* src = server */
-    memcpy(pkt + 16, orig + 12, 4);           /* dst = original src */
+    pkt[0] = 0x45;
+    pkt[1] = 0xC0;
+    pkt[2] = (total >> 8) & 0xFF;
+    pkt[3] = total & 0xFF;
+    pkt[8] = 64;
+    pkt[9] = 1;                            /* TTL=64, proto=ICMP */
+    memcpy(pkt + 12, &srv_addr.s_addr, 4); /* src = server */
+    memcpy(pkt + 16, orig + 12, 4);        /* dst = original src */
 
     uint32_t cksum = 0;
     for (int i = 0; i < 20; i += 2)
         cksum += ((uint32_t)pkt[i] << 8) | pkt[i + 1];
-    while (cksum >> 16) cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
     uint16_t ip_ck = ~(uint16_t)cksum;
-    pkt[10] = ip_ck >> 8; pkt[11] = ip_ck & 0xFF;
+    pkt[10] = ip_ck >> 8;
+    pkt[11] = ip_ck & 0xFF;
 
     /* ICMP: Type=3 (Dest Unreachable), Code=1 (Host Unreachable) */
     uint8_t *icmp = pkt + 20;
-    icmp[0] = 3; icmp[1] = 1;
+    icmp[0] = 3;
+    icmp[1] = 1;
     memcpy(icmp + 8, orig, icmp_data_len);
 
     size_t icmp_total = 8 + icmp_data_len;
@@ -392,9 +420,11 @@ static void send_icmpv4_dest_unreach(mqvpn_server_t *s, const uint8_t *orig,
         cksum += ((uint32_t)icmp[i] << 8);
         if (i + 1 < icmp_total) cksum += icmp[i + 1];
     }
-    while (cksum >> 16) cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
     uint16_t ic = ~(uint16_t)cksum;
-    icmp[2] = ic >> 8; icmp[3] = ic & 0xFF;
+    icmp[2] = ic >> 8;
+    icmp[3] = ic & 0xFF;
 
     s->cbs.tun_output(pkt, total, s->user_ctx);
     LOG_D(s, "sent ICMP Dest Unreachable to TUN");
@@ -402,8 +432,8 @@ static void send_icmpv4_dest_unreach(mqvpn_server_t *s, const uint8_t *orig,
 
 /* ─── ICMPv6 Destination Unreachable — sent to TUN ─── */
 
-static void send_icmpv6_dest_unreach(mqvpn_server_t *s, const uint8_t *orig,
-                                       size_t orig_len)
+static void
+send_icmpv6_dest_unreach(mqvpn_server_t *s, const uint8_t *orig, size_t orig_len)
 {
     if (orig_len < 40 || !s->pool.has_v6) return;
     if (!ptb_rate_allow(s)) return;
@@ -420,14 +450,17 @@ static void send_icmpv6_dest_unreach(mqvpn_server_t *s, const uint8_t *orig,
 
     /* IPv6 header */
     pkt[0] = 0x60;
-    pkt[4] = (icmpv6_len >> 8) & 0xFF; pkt[5] = icmpv6_len & 0xFF;
-    pkt[6] = 58; pkt[7] = 64;  /* next=ICMPv6, hop=64 */
-    memcpy(pkt + 8, &srv_addr6, 16);    /* src = server */
-    memcpy(pkt + 24, orig + 8, 16);     /* dst = original src */
+    pkt[4] = (icmpv6_len >> 8) & 0xFF;
+    pkt[5] = icmpv6_len & 0xFF;
+    pkt[6] = 58;
+    pkt[7] = 64;                     /* next=ICMPv6, hop=64 */
+    memcpy(pkt + 8, &srv_addr6, 16); /* src = server */
+    memcpy(pkt + 24, orig + 8, 16);  /* dst = original src */
 
     /* ICMPv6: Type=1 (Dest Unreachable), Code=3 (Address Unreachable) */
     uint8_t *icmp = pkt + 40;
-    icmp[0] = 1; icmp[1] = 3;
+    icmp[0] = 1;
+    icmp[1] = 3;
     memcpy(icmp + 8, orig, icmpv6_data_len);
 
     /* ICMPv6 checksum (pseudo-header + ICMPv6) */
@@ -443,9 +476,11 @@ static void send_icmpv6_dest_unreach(mqvpn_server_t *s, const uint8_t *orig,
         cksum += ((uint32_t)icmp[i] << 8);
         if (i + 1 < icmpv6_len) cksum += icmp[i + 1];
     }
-    while (cksum >> 16) cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
     uint16_t ic = ~(uint16_t)cksum;
-    icmp[2] = ic >> 8; icmp[3] = ic & 0xFF;
+    icmp[2] = ic >> 8;
+    icmp[3] = ic & 0xFF;
 
     s->cbs.tun_output(pkt, total, s->user_ctx);
     LOG_D(s, "sent ICMPv6 Dest Unreachable to TUN");
@@ -453,8 +488,9 @@ static void send_icmpv6_dest_unreach(mqvpn_server_t *s, const uint8_t *orig,
 
 /* ─── ICMP Time Exceeded (IPv4) — sent via tunnel to client ─── */
 
-static void send_icmpv4_time_exceeded(mqvpn_server_t *s, svr_conn_t *conn,
-                                        const uint8_t *orig, size_t orig_len)
+static void
+send_icmpv4_time_exceeded(mqvpn_server_t *s, svr_conn_t *conn, const uint8_t *orig,
+                          size_t orig_len)
 {
     if (orig_len < 20) return;
     if (!ptb_rate_allow(s)) return;
@@ -471,21 +507,27 @@ static void send_icmpv4_time_exceeded(mqvpn_server_t *s, svr_conn_t *conn,
     if (total > sizeof(pkt)) return;
     memset(pkt, 0, total);
 
-    pkt[0] = 0x45; pkt[1] = 0xC0;
-    pkt[2] = (total >> 8) & 0xFF; pkt[3] = total & 0xFF;
-    pkt[8] = 64; pkt[9] = 1;
+    pkt[0] = 0x45;
+    pkt[1] = 0xC0;
+    pkt[2] = (total >> 8) & 0xFF;
+    pkt[3] = total & 0xFF;
+    pkt[8] = 64;
+    pkt[9] = 1;
     memcpy(pkt + 12, &srv_addr.s_addr, 4);
     memcpy(pkt + 16, orig + 12, 4);
 
     uint32_t cksum = 0;
     for (int i = 0; i < 20; i += 2)
         cksum += ((uint32_t)pkt[i] << 8) | pkt[i + 1];
-    while (cksum >> 16) cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
     uint16_t ip_ck = ~(uint16_t)cksum;
-    pkt[10] = ip_ck >> 8; pkt[11] = ip_ck & 0xFF;
+    pkt[10] = ip_ck >> 8;
+    pkt[11] = ip_ck & 0xFF;
 
     uint8_t *icmp = pkt + 20;
-    icmp[0] = 11; icmp[1] = 0;
+    icmp[0] = 11;
+    icmp[1] = 0;
     memcpy(icmp + 8, orig, icmp_data_len);
 
     size_t icmp_total = 8 + icmp_data_len;
@@ -494,27 +536,29 @@ static void send_icmpv4_time_exceeded(mqvpn_server_t *s, svr_conn_t *conn,
         cksum += ((uint32_t)icmp[i] << 8);
         if (i + 1 < icmp_total) cksum += icmp[i + 1];
     }
-    while (cksum >> 16) cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
     uint16_t ic = ~(uint16_t)cksum;
-    icmp[2] = ic >> 8; icmp[3] = ic & 0xFF;
+    icmp[2] = ic >> 8;
+    icmp[3] = ic & 0xFF;
 
     /* Send via MASQUE datagram back to client */
     uint8_t frame_buf[256];
     size_t frame_written = 0;
     xqc_int_t xret = xqc_h3_ext_masque_frame_udp(
-        frame_buf, sizeof(frame_buf), &frame_written,
-        conn->masque_stream_id, pkt, total);
+        frame_buf, sizeof(frame_buf), &frame_written, conn->masque_stream_id, pkt, total);
     if (xret != XQC_OK) return;
     uint64_t dgram_id;
-    xqc_h3_ext_datagram_send(conn->h3_conn, frame_buf, frame_written,
-                              &dgram_id, XQC_DATA_QOS_LOW);
+    xqc_h3_ext_datagram_send(conn->h3_conn, frame_buf, frame_written, &dgram_id,
+                             XQC_DATA_QOS_LOW);
     LOG_D(s, "sent ICMP Time Exceeded to client");
 }
 
 /* ─── ICMPv6 Time Exceeded — sent via tunnel to client ─── */
 
-static void send_icmpv6_time_exceeded(mqvpn_server_t *s, svr_conn_t *conn,
-                                        const uint8_t *orig, size_t orig_len)
+static void
+send_icmpv6_time_exceeded(mqvpn_server_t *s, svr_conn_t *conn, const uint8_t *orig,
+                          size_t orig_len)
 {
     if (orig_len < 40 || !s->pool.has_v6) return;
     if (!ptb_rate_allow(s)) return;
@@ -530,13 +574,16 @@ static void send_icmpv6_time_exceeded(mqvpn_server_t *s, svr_conn_t *conn,
     memset(pkt, 0, total);
 
     pkt[0] = 0x60;
-    pkt[4] = (icmpv6_len >> 8) & 0xFF; pkt[5] = icmpv6_len & 0xFF;
-    pkt[6] = 58; pkt[7] = 64;
+    pkt[4] = (icmpv6_len >> 8) & 0xFF;
+    pkt[5] = icmpv6_len & 0xFF;
+    pkt[6] = 58;
+    pkt[7] = 64;
     memcpy(pkt + 8, &srv_addr6, 16);
     memcpy(pkt + 24, orig + 8, 16);
 
     uint8_t *icmp = pkt + 40;
-    icmp[0] = 3; icmp[1] = 0;
+    icmp[0] = 3;
+    icmp[1] = 0;
     memcpy(icmp + 8, orig, icmpv6_data_len);
 
     uint32_t cksum = 0;
@@ -551,26 +598,27 @@ static void send_icmpv6_time_exceeded(mqvpn_server_t *s, svr_conn_t *conn,
         cksum += ((uint32_t)icmp[i] << 8);
         if (i + 1 < icmpv6_len) cksum += icmp[i + 1];
     }
-    while (cksum >> 16) cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
     uint16_t ic = ~(uint16_t)cksum;
-    icmp[2] = ic >> 8; icmp[3] = ic & 0xFF;
+    icmp[2] = ic >> 8;
+    icmp[3] = ic & 0xFF;
 
     uint8_t frame_buf[1400];
     size_t frame_written = 0;
     xqc_int_t xret = xqc_h3_ext_masque_frame_udp(
-        frame_buf, sizeof(frame_buf), &frame_written,
-        conn->masque_stream_id, pkt, total);
+        frame_buf, sizeof(frame_buf), &frame_written, conn->masque_stream_id, pkt, total);
     if (xret != XQC_OK) return;
     uint64_t dgram_id;
-    xqc_h3_ext_datagram_send(conn->h3_conn, frame_buf, frame_written,
-                              &dgram_id, XQC_DATA_QOS_LOW);
+    xqc_h3_ext_datagram_send(conn->h3_conn, frame_buf, frame_written, &dgram_id,
+                             XQC_DATA_QOS_LOW);
     LOG_D(s, "sent ICMPv6 Time Exceeded to client");
 }
 
 /* ─── ICMP Time Exceeded — DL direction (sent via tun_output to source) ─── */
 
-static void send_icmpv4_time_exceeded_tun(mqvpn_server_t *s,
-                                            const uint8_t *orig, size_t orig_len)
+static void
+send_icmpv4_time_exceeded_tun(mqvpn_server_t *s, const uint8_t *orig, size_t orig_len)
 {
     if (orig_len < 20) return;
     if (!ptb_rate_allow(s)) return;
@@ -587,21 +635,27 @@ static void send_icmpv4_time_exceeded_tun(mqvpn_server_t *s,
     if (total > sizeof(pkt)) return;
     memset(pkt, 0, total);
 
-    pkt[0] = 0x45; pkt[1] = 0xC0;
-    pkt[2] = (total >> 8) & 0xFF; pkt[3] = total & 0xFF;
-    pkt[8] = 64; pkt[9] = 1;
+    pkt[0] = 0x45;
+    pkt[1] = 0xC0;
+    pkt[2] = (total >> 8) & 0xFF;
+    pkt[3] = total & 0xFF;
+    pkt[8] = 64;
+    pkt[9] = 1;
     memcpy(pkt + 12, &srv_addr.s_addr, 4);
-    memcpy(pkt + 16, orig + 12, 4);   /* dst = original src */
+    memcpy(pkt + 16, orig + 12, 4); /* dst = original src */
 
     uint32_t cksum = 0;
     for (int i = 0; i < 20; i += 2)
         cksum += ((uint32_t)pkt[i] << 8) | pkt[i + 1];
-    while (cksum >> 16) cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
     uint16_t ip_ck = ~(uint16_t)cksum;
-    pkt[10] = ip_ck >> 8; pkt[11] = ip_ck & 0xFF;
+    pkt[10] = ip_ck >> 8;
+    pkt[11] = ip_ck & 0xFF;
 
     uint8_t *icmp = pkt + 20;
-    icmp[0] = 11; icmp[1] = 0;
+    icmp[0] = 11;
+    icmp[1] = 0;
     memcpy(icmp + 8, orig, icmp_data_len);
 
     size_t icmp_total = 8 + icmp_data_len;
@@ -610,16 +664,18 @@ static void send_icmpv4_time_exceeded_tun(mqvpn_server_t *s,
         cksum += ((uint32_t)icmp[i] << 8);
         if (i + 1 < icmp_total) cksum += icmp[i + 1];
     }
-    while (cksum >> 16) cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
     uint16_t ic = ~(uint16_t)cksum;
-    icmp[2] = ic >> 8; icmp[3] = ic & 0xFF;
+    icmp[2] = ic >> 8;
+    icmp[3] = ic & 0xFF;
 
     s->cbs.tun_output(pkt, total, s->user_ctx);
     LOG_D(s, "sent ICMP Time Exceeded via TUN");
 }
 
-static void send_icmpv6_time_exceeded_tun(mqvpn_server_t *s,
-                                            const uint8_t *orig, size_t orig_len)
+static void
+send_icmpv6_time_exceeded_tun(mqvpn_server_t *s, const uint8_t *orig, size_t orig_len)
 {
     if (orig_len < 40 || !s->pool.has_v6) return;
     if (!ptb_rate_allow(s)) return;
@@ -635,13 +691,16 @@ static void send_icmpv6_time_exceeded_tun(mqvpn_server_t *s,
     memset(pkt, 0, total);
 
     pkt[0] = 0x60;
-    pkt[4] = (icmpv6_len >> 8) & 0xFF; pkt[5] = icmpv6_len & 0xFF;
-    pkt[6] = 58; pkt[7] = 64;
+    pkt[4] = (icmpv6_len >> 8) & 0xFF;
+    pkt[5] = icmpv6_len & 0xFF;
+    pkt[6] = 58;
+    pkt[7] = 64;
     memcpy(pkt + 8, &srv_addr6, 16);
-    memcpy(pkt + 24, orig + 8, 16);   /* dst = original src */
+    memcpy(pkt + 24, orig + 8, 16); /* dst = original src */
 
     uint8_t *icmp = pkt + 40;
-    icmp[0] = 3; icmp[1] = 0;
+    icmp[0] = 3;
+    icmp[1] = 0;
     memcpy(icmp + 8, orig, icmpv6_data_len);
 
     uint32_t cksum = 0;
@@ -656,9 +715,11 @@ static void send_icmpv6_time_exceeded_tun(mqvpn_server_t *s,
         cksum += ((uint32_t)icmp[i] << 8);
         if (i + 1 < icmpv6_len) cksum += icmp[i + 1];
     }
-    while (cksum >> 16) cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
     uint16_t ic = ~(uint16_t)cksum;
-    icmp[2] = ic >> 8; icmp[3] = ic & 0xFF;
+    icmp[2] = ic >> 8;
+    icmp[3] = ic & 0xFF;
 
     s->cbs.tun_output(pkt, total, s->user_ctx);
     LOG_D(s, "sent ICMPv6 Time Exceeded via TUN");
@@ -668,14 +729,15 @@ static void send_icmpv6_time_exceeded_tun(mqvpn_server_t *s,
  *  xquic engine callbacks
  * ================================================================ */
 
-static void cb_set_event_timer(xqc_usec_t wake_after, void *user_data)
+static void
+cb_set_event_timer(xqc_usec_t wake_after, void *user_data)
 {
     mqvpn_server_t *s = (mqvpn_server_t *)user_data;
     s->next_wake_us = wake_after;
 }
 
-static void cb_xqc_log_write(xqc_log_level_t lvl, const void *buf,
-                               size_t size, void *user_data)
+static void
+cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_data)
 {
     (void)lvl;
     mqvpn_server_t *s = (mqvpn_server_t *)user_data;
@@ -688,14 +750,15 @@ static void cb_xqc_log_write(xqc_log_level_t lvl, const void *buf,
 
 /* ─── UDP send helper ─── */
 
-static ssize_t svr_do_send(mqvpn_server_t *s, const unsigned char *buf,
-                             size_t size, const struct sockaddr *peer,
-                             socklen_t peerlen)
+static ssize_t
+svr_do_send(mqvpn_server_t *s, const unsigned char *buf, size_t size,
+            const struct sockaddr *peer, socklen_t peerlen)
 {
     if (s->udp_fd < 0) return XQC_SOCKET_ERROR;
     ssize_t res;
-    do { res = sendto(s->udp_fd, buf, size, 0, peer, peerlen); }
-    while (res < 0 && errno == EINTR);
+    do {
+        res = sendto(s->udp_fd, buf, size, 0, peer, peerlen);
+    } while (res < 0 && errno == EINTR);
     if (res < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return XQC_SOCKET_EAGAIN;
         LOG_E(s, "sendto: %s", strerror(errno));
@@ -707,76 +770,82 @@ static ssize_t svr_do_send(mqvpn_server_t *s, const unsigned char *buf,
 
 /* ─── xquic transport callbacks ─── */
 
-static ssize_t cb_write_socket(const unsigned char *buf, size_t size,
-                                const struct sockaddr *peer, socklen_t peerlen,
-                                void *conn_user_data)
+static ssize_t
+cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *peer,
+                socklen_t peerlen, void *conn_user_data)
 {
     svr_conn_t *conn = (svr_conn_t *)conn_user_data;
     return svr_do_send(conn->server, buf, size, peer, peerlen);
 }
 
-static ssize_t cb_write_socket_ex(uint64_t path_id,
-                                   const unsigned char *buf, size_t size,
-                                   const struct sockaddr *peer, socklen_t peerlen,
-                                   void *conn_user_data)
+static ssize_t
+cb_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
+                   const struct sockaddr *peer, socklen_t peerlen, void *conn_user_data)
 {
     (void)path_id;
     return cb_write_socket(buf, size, peer, peerlen, conn_user_data);
 }
 
-static ssize_t cb_write_before_accept(const unsigned char *buf, size_t size,
-                                        const struct sockaddr *peer,
-                                        socklen_t peerlen,
-                                        void *user_data)
+static ssize_t
+cb_write_before_accept(const unsigned char *buf, size_t size, const struct sockaddr *peer,
+                       socklen_t peerlen, void *user_data)
 {
     mqvpn_server_t *s = (mqvpn_server_t *)user_data;
     return svr_do_send(s, buf, size, peer, peerlen);
 }
 
-static int cb_accept(xqc_engine_t *engine, xqc_connection_t *conn,
-                      const xqc_cid_t *cid, void *user_data)
+static int
+cb_accept(xqc_engine_t *engine, xqc_connection_t *conn, const xqc_cid_t *cid,
+          void *user_data)
 {
-    (void)engine; (void)conn; (void)cid;
+    (void)engine;
+    (void)conn;
+    (void)cid;
     mqvpn_server_t *s = (mqvpn_server_t *)user_data;
     LOG_I(s, "connection accepted");
     return 0;
 }
 
-static void cb_refuse(xqc_engine_t *engine, xqc_connection_t *conn,
-                       const xqc_cid_t *cid, void *user_data)
+static void
+cb_refuse(xqc_engine_t *engine, xqc_connection_t *conn, const xqc_cid_t *cid,
+          void *user_data)
 {
-    (void)engine; (void)conn; (void)cid; (void)user_data;
+    (void)engine;
+    (void)conn;
+    (void)cid;
+    (void)user_data;
     /* No per-connection context is allocated in cb_accept.
      * svr_conn_t is allocated in cb_h3_conn_create and freed in cb_h3_conn_close.
      * If refuse fires before H3 setup, user_data is the engine user_data
      * (mqvpn_server_t *), which must NOT be freed. */
 }
 
-static ssize_t cb_stateless_reset(const unsigned char *buf, size_t size,
-                                    const struct sockaddr *peer,
-                                    socklen_t peerlen,
-                                    const struct sockaddr *local,
-                                    socklen_t locallen,
-                                    void *user_data)
+static ssize_t
+cb_stateless_reset(const unsigned char *buf, size_t size, const struct sockaddr *peer,
+                   socklen_t peerlen, const struct sockaddr *local, socklen_t locallen,
+                   void *user_data)
 {
-    (void)local; (void)locallen;
+    (void)local;
+    (void)locallen;
     mqvpn_server_t *s = (mqvpn_server_t *)user_data;
     return svr_do_send(s, buf, size, peer, peerlen);
 }
 
 /* ─── Multipath callbacks ─── */
 
-static int cb_path_created(xqc_connection_t *conn, const xqc_cid_t *cid,
-                             uint64_t path_id, void *conn_user_data)
+static int
+cb_path_created(xqc_connection_t *conn, const xqc_cid_t *cid, uint64_t path_id,
+                void *conn_user_data)
 {
-    (void)conn; (void)cid;
+    (void)conn;
+    (void)cid;
     svr_conn_t *sc = (svr_conn_t *)conn_user_data;
     LOG_I(sc->server, "new path created: path_id=%" PRIu64, path_id);
     return 0;
 }
 
-static void cb_path_removed(const xqc_cid_t *cid, uint64_t path_id,
-                              void *conn_user_data)
+static void
+cb_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data)
 {
     (void)cid;
     svr_conn_t *sc = (svr_conn_t *)conn_user_data;
@@ -787,8 +856,8 @@ static void cb_path_removed(const xqc_cid_t *cid, uint64_t path_id,
  *  H3 connection callbacks
  * ================================================================ */
 
-static int cb_h3_conn_create(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
-                               void *conn_user_data)
+static int
+cb_h3_conn_create(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_data)
 {
     /* For server-side connections, xquic passes engine_user_data
      * as conn_user_data initially (set during xqc_engine_create). */
@@ -803,14 +872,14 @@ static int cb_h3_conn_create(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
     xqc_h3_conn_set_user_data(h3_conn, conn);
     xqc_h3_ext_datagram_set_user_data(h3_conn, conn);
     xqc_h3_conn_get_peer_addr(h3_conn, (struct sockaddr *)&conn->peer_addr,
-                               sizeof(conn->peer_addr), &conn->peer_addrlen);
+                              sizeof(conn->peer_addr), &conn->peer_addrlen);
 
     LOG_I(s, "H3 connection created");
     return 0;
 }
 
-static int cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
-                              void *conn_user_data)
+static int
+cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_data)
 {
     (void)h3_conn;
     svr_conn_t *conn = (svr_conn_t *)conn_user_data;
@@ -822,10 +891,8 @@ static int cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
           conn->dgram_acked_cnt, conn->dgram_lost_cnt);
 
     if (conn->assigned_ip.s_addr) {
-        uint32_t offset = ntohl(conn->assigned_ip.s_addr) -
-                          ntohl(s->pool.base.s_addr);
-        if (offset > 0 && offset <= MQVPN_ADDR_POOL_MAX &&
-            s->sessions[offset] == conn) {
+        uint32_t offset = ntohl(conn->assigned_ip.s_addr) - ntohl(s->pool.base.s_addr);
+        if (offset > 0 && offset <= MQVPN_ADDR_POOL_MAX && s->sessions[offset] == conn) {
             s->sessions[offset] = NULL;
             s->n_sessions--;
             char ip_str[INET_ADDRSTRLEN];
@@ -833,8 +900,7 @@ static int cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
             LOG_I(s, "session removed: %s (active=%d)", ip_str, s->n_sessions);
 
             if (s->cbs.on_client_disconnected)
-                s->cbs.on_client_disconnected(offset, MQVPN_ERR_CLOSED,
-                                                s->user_ctx);
+                s->cbs.on_client_disconnected(offset, MQVPN_ERR_CLOSED, s->user_ctx);
         }
         mqvpn_addr_pool_release(&s->pool, &conn->assigned_ip);
     }
@@ -844,8 +910,8 @@ static int cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
     return 0;
 }
 
-static void cb_h3_handshake_finished(xqc_h3_conn_t *h3_conn,
-                                       void *conn_user_data)
+static void
+cb_h3_handshake_finished(xqc_h3_conn_t *h3_conn, void *conn_user_data)
 {
     (void)h3_conn;
     svr_conn_t *conn = (svr_conn_t *)conn_user_data;
@@ -856,18 +922,20 @@ static void cb_h3_handshake_finished(xqc_h3_conn_t *h3_conn,
  *  MASQUE session handling
  * ================================================================ */
 
-static int svr_masque_send_403(xqc_h3_request_t *h3_request)
+static int
+svr_masque_send_403(xqc_h3_request_t *h3_request)
 {
     xqc_http_header_t resp[] = {
-        { .name  = {.iov_base = ":status", .iov_len = 7},
-          .value = {.iov_base = "403",     .iov_len = 3}, .flags = 0 },
+        {.name = {.iov_base = ":status", .iov_len = 7},
+         .value = {.iov_base = "403", .iov_len = 3},
+         .flags = 0},
     };
-    xqc_http_headers_t hdrs = { .headers = resp, .count = 1, .capacity = 1 };
+    xqc_http_headers_t hdrs = {.headers = resp, .count = 1, .capacity = 1};
     return xqc_h3_request_send_headers(h3_request, &hdrs, 1) < 0 ? -1 : 0;
 }
 
-static int svr_masque_send_response(xqc_h3_request_t *h3_request,
-                                      svr_stream_t *stream)
+static int
+svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
 {
     svr_conn_t *conn = stream->conn;
     mqvpn_server_t *s = conn->server;
@@ -881,15 +949,17 @@ static int svr_masque_send_response(xqc_h3_request_t *h3_request,
 
     /* 1. Send 200 response headers */
     xqc_http_header_t resp_hdrs[] = {
-        { .name  = {.iov_base = ":status",          .iov_len = 7},
-          .value = {.iov_base = "200",               .iov_len = 3},
-          .flags = 0 },
-        { .name  = {.iov_base = "capsule-protocol",  .iov_len = 16},
-          .value = {.iov_base = "?1",                 .iov_len = 2},
-          .flags = 0 },
+        {.name = {.iov_base = ":status", .iov_len = 7},
+         .value = {.iov_base = "200", .iov_len = 3},
+         .flags = 0},
+        {.name = {.iov_base = "capsule-protocol", .iov_len = 16},
+         .value = {.iov_base = "?1", .iov_len = 2},
+         .flags = 0},
     };
     xqc_http_headers_t hdrs = {
-        .headers = resp_hdrs, .count = 2, .capacity = 2,
+        .headers = resp_hdrs,
+        .count = 2,
+        .capacity = 2,
     };
     ret = xqc_h3_request_send_headers(h3_request, &hdrs, 0);
     if (ret < 0) {
@@ -909,17 +979,17 @@ static int svr_masque_send_response(xqc_h3_request_t *h3_request,
     uint8_t addr_payload[64];
     uint8_t ip_bytes[4];
     memcpy(ip_bytes, &conn->assigned_ip.s_addr, 4);
-    addr_payload[0] = 0x00;  /* request_id=0 */
-    addr_payload[1] = 4;     /* IPv4 */
+    addr_payload[0] = 0x00; /* request_id=0 */
+    addr_payload[1] = 4;    /* IPv4 */
     memcpy(addr_payload + 2, ip_bytes, 4);
-    addr_payload[6] = 32;    /* /32 */
+    addr_payload[6] = 32; /* /32 */
     size_t addr_written = 7;
 
     uint8_t capsule_buf[128];
     size_t cap_written = 0;
     xqc_int_t xret = xqc_h3_ext_capsule_encode(
-        capsule_buf, sizeof(capsule_buf), &cap_written,
-        XQC_H3_CAPSULE_ADDRESS_ASSIGN, addr_payload, addr_written);
+        capsule_buf, sizeof(capsule_buf), &cap_written, XQC_H3_CAPSULE_ADDRESS_ASSIGN,
+        addr_payload, addr_written);
     if (xret != XQC_OK) {
         LOG_E(s, "capsule encode ADDRESS_ASSIGN: %d", xret);
         goto fail_release_ip;
@@ -936,8 +1006,7 @@ static int svr_masque_send_response(xqc_h3_request_t *h3_request,
 
     /* 3b. IPv6 ADDRESS_ASSIGN */
     if (s->pool.has_v6) {
-        uint32_t ip_offset = ntohl(conn->assigned_ip.s_addr) -
-                             ntohl(s->pool.base.s_addr);
+        uint32_t ip_offset = ntohl(conn->assigned_ip.s_addr) - ntohl(s->pool.base.s_addr);
         mqvpn_addr_pool_get6(&s->pool, ip_offset, &conn->assigned_ip6);
         conn->has_v6 = 1;
 
@@ -951,12 +1020,11 @@ static int svr_masque_send_response(xqc_h3_request_t *h3_request,
 
         uint8_t cap6_buf[64];
         size_t cap6_written = 0;
-        xret = xqc_h3_ext_capsule_encode(
-            cap6_buf, sizeof(cap6_buf), &cap6_written,
-            XQC_H3_CAPSULE_ADDRESS_ASSIGN, a6_payload, a6_off);
+        xret =
+            xqc_h3_ext_capsule_encode(cap6_buf, sizeof(cap6_buf), &cap6_written,
+                                      XQC_H3_CAPSULE_ADDRESS_ASSIGN, a6_payload, a6_off);
         if (xret == XQC_OK) {
-            ret = xqc_h3_request_send_body(h3_request, cap6_buf,
-                                            cap6_written, 0);
+            ret = xqc_h3_request_send_body(h3_request, cap6_buf, cap6_written, 0);
             if (ret < 0) {
                 LOG_E(s, "send ADDRESS_ASSIGN (IPv6): %zd", ret);
             } else {
@@ -971,15 +1039,17 @@ static int svr_masque_send_response(xqc_h3_request_t *h3_request,
     uint8_t route_payload[32];
     size_t rp_off = 0;
     route_payload[rp_off++] = 4;
-    memset(route_payload + rp_off, 0, 4); rp_off += 4;
-    memset(route_payload + rp_off, 0xFF, 4); rp_off += 4;
+    memset(route_payload + rp_off, 0, 4);
+    rp_off += 4;
+    memset(route_payload + rp_off, 0xFF, 4);
+    rp_off += 4;
     route_payload[rp_off++] = 0;
 
     uint8_t route_capsule[64];
     size_t rc_written = 0;
-    xret = xqc_h3_ext_capsule_encode(
-        route_capsule, sizeof(route_capsule), &rc_written,
-        XQC_H3_CAPSULE_ROUTE_ADVERTISEMENT, route_payload, rp_off);
+    xret = xqc_h3_ext_capsule_encode(route_capsule, sizeof(route_capsule), &rc_written,
+                                     XQC_H3_CAPSULE_ROUTE_ADVERTISEMENT, route_payload,
+                                     rp_off);
     if (xret != XQC_OK) {
         LOG_E(s, "capsule encode ROUTE_ADVERTISEMENT: %d", xret);
         goto fail_release_ip;
@@ -995,18 +1065,19 @@ static int svr_masque_send_response(xqc_h3_request_t *h3_request,
         uint8_t r6_payload[48];
         size_t r6_off = 0;
         r6_payload[r6_off++] = 6;
-        memset(r6_payload + r6_off, 0x00, 16); r6_off += 16;
-        memset(r6_payload + r6_off, 0xFF, 16); r6_off += 16;
+        memset(r6_payload + r6_off, 0x00, 16);
+        r6_off += 16;
+        memset(r6_payload + r6_off, 0xFF, 16);
+        r6_off += 16;
         r6_payload[r6_off++] = 0;
 
         uint8_t r6_capsule[80];
         size_t r6c_written = 0;
-        xret = xqc_h3_ext_capsule_encode(
-            r6_capsule, sizeof(r6_capsule), &r6c_written,
-            XQC_H3_CAPSULE_ROUTE_ADVERTISEMENT, r6_payload, r6_off);
+        xret = xqc_h3_ext_capsule_encode(r6_capsule, sizeof(r6_capsule), &r6c_written,
+                                         XQC_H3_CAPSULE_ROUTE_ADVERTISEMENT, r6_payload,
+                                         r6_off);
         if (xret == XQC_OK) {
-            ret = xqc_h3_request_send_body(h3_request, r6_capsule,
-                                            r6c_written, 0);
+            ret = xqc_h3_request_send_body(h3_request, r6_capsule, r6c_written, 0);
             if (ret < 0) LOG_E(s, "send ROUTE_ADVERTISEMENT (IPv6): %zd", ret);
         }
     }
@@ -1014,8 +1085,7 @@ static int svr_masque_send_response(xqc_h3_request_t *h3_request,
     conn->tunnel_established = 1;
 
     /* Register in session table */
-    uint32_t ip_off = ntohl(conn->assigned_ip.s_addr) -
-                      ntohl(s->pool.base.s_addr);
+    uint32_t ip_off = ntohl(conn->assigned_ip.s_addr) - ntohl(s->pool.base.s_addr);
     if (ip_off > 0 && ip_off <= MQVPN_ADDR_POOL_MAX) {
         s->sessions[ip_off] = conn;
         s->n_sessions++;
@@ -1051,8 +1121,8 @@ fail_release_ip:
  *  H3 request callbacks
  * ================================================================ */
 
-static int cb_request_create(xqc_h3_request_t *h3_request,
-                               void *strm_user_data)
+static int
+cb_request_create(xqc_h3_request_t *h3_request, void *strm_user_data)
 {
     (void)strm_user_data;
     svr_conn_t *conn = xqc_h3_get_conn_user_data_by_request(h3_request);
@@ -1065,8 +1135,8 @@ static int cb_request_create(xqc_h3_request_t *h3_request,
     return 0;
 }
 
-static int cb_request_close(xqc_h3_request_t *h3_request,
-                              void *strm_user_data)
+static int
+cb_request_close(xqc_h3_request_t *h3_request, void *strm_user_data)
 {
     (void)h3_request;
     svr_stream_t *stream = (svr_stream_t *)strm_user_data;
@@ -1085,17 +1155,16 @@ static int cb_request_close(xqc_h3_request_t *h3_request,
  * DATAGRAM context setup) and processes incoming MASQUE capsules
  * (ADDRESS_REQUEST → allocate IP, ROUTE_ADVERTISEMENT parsing).
  */
-static int cb_request_read(xqc_h3_request_t *h3_request,
-                             xqc_request_notify_flag_t flag,
-                             void *strm_user_data)
+static int
+cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
+                void *strm_user_data)
 {
     svr_stream_t *stream = (svr_stream_t *)strm_user_data;
     mqvpn_server_t *s = stream->conn->server;
     unsigned char fin = 0;
 
     if (flag & XQC_REQ_NOTIFY_READ_HEADER) {
-        xqc_http_headers_t *headers =
-            xqc_h3_request_recv_headers(h3_request, &fin);
+        xqc_http_headers_t *headers = xqc_h3_request_recv_headers(h3_request, &fin);
         if (!headers) return -1;
 
         int is_connect = 0, is_connect_ip = 0;
@@ -1105,36 +1174,27 @@ static int cb_request_read(xqc_h3_request_t *h3_request,
 
         for (int i = 0; i < (int)headers->count; i++) {
             xqc_http_header_t *h = &headers->headers[i];
-            if (h->name.iov_len == 7
-                && memcmp(h->name.iov_base, ":method", 7) == 0
-                && h->value.iov_len == 7
-                && memcmp(h->value.iov_base, "CONNECT", 7) == 0)
+            if (h->name.iov_len == 7 && memcmp(h->name.iov_base, ":method", 7) == 0 &&
+                h->value.iov_len == 7 && memcmp(h->value.iov_base, "CONNECT", 7) == 0)
                 is_connect = 1;
-            if (h->name.iov_len == 9
-                && memcmp(h->name.iov_base, ":protocol", 9) == 0
-                && h->value.iov_len == 10
-                && memcmp(h->value.iov_base, "connect-ip", 10) == 0)
+            if (h->name.iov_len == 9 && memcmp(h->name.iov_base, ":protocol", 9) == 0 &&
+                h->value.iov_len == 10 &&
+                memcmp(h->value.iov_base, "connect-ip", 10) == 0)
                 is_connect_ip = 1;
-            if (h->name.iov_len == 7
-                && memcmp(h->name.iov_base, ":scheme", 7) == 0
-                && h->value.iov_len == 5
-                && memcmp(h->value.iov_base, "https", 5) == 0)
+            if (h->name.iov_len == 7 && memcmp(h->name.iov_base, ":scheme", 7) == 0 &&
+                h->value.iov_len == 5 && memcmp(h->value.iov_base, "https", 5) == 0)
                 has_scheme_https = 1;
-            if (h->name.iov_len == 5
-                && memcmp(h->name.iov_base, ":path", 5) == 0
-                && h->value.iov_len >= 24
-                && memcmp(h->value.iov_base,
-                          "/.well-known/masque/ip/", 22) == 0)
+            if (h->name.iov_len == 5 && memcmp(h->name.iov_base, ":path", 5) == 0 &&
+                h->value.iov_len >= 24 &&
+                memcmp(h->value.iov_base, "/.well-known/masque/ip/", 22) == 0)
                 has_valid_path = 1;
-            if (h->name.iov_len == 16
-                && memcmp(h->name.iov_base, "capsule-protocol", 16) == 0
-                && h->value.iov_len == 2
-                && memcmp(h->value.iov_base, "?1", 2) == 0)
+            if (h->name.iov_len == 16 &&
+                memcmp(h->name.iov_base, "capsule-protocol", 16) == 0 &&
+                h->value.iov_len == 2 && memcmp(h->value.iov_base, "?1", 2) == 0)
                 has_capsule_proto = 1;
-            if (h->name.iov_len == 13
-                && memcmp(h->name.iov_base, "authorization", 13) == 0
-                && h->value.iov_len > 7
-                && memcmp(h->value.iov_base, "Bearer ", 7) == 0) {
+            if (h->name.iov_len == 13 &&
+                memcmp(h->name.iov_base, "authorization", 13) == 0 &&
+                h->value.iov_len > 7 && memcmp(h->value.iov_base, "Bearer ", 7) == 0) {
                 auth_token = (const char *)h->value.iov_base + 7;
                 auth_token_len = h->value.iov_len - 7;
             }
@@ -1142,7 +1202,8 @@ static int cb_request_read(xqc_h3_request_t *h3_request,
 
         if (is_connect && is_connect_ip) {
             if (!has_scheme_https || !has_valid_path || !has_capsule_proto) {
-                LOG_W(s, "rejecting CONNECT-IP: missing headers "
+                LOG_W(s,
+                      "rejecting CONNECT-IP: missing headers "
                       "(scheme=%d path=%d capsule=%d)",
                       has_scheme_https, has_valid_path, has_capsule_proto);
                 return -1;
@@ -1151,8 +1212,7 @@ static int cb_request_read(xqc_h3_request_t *h3_request,
             const char *expected_key = s->config.auth_key;
             if (expected_key[0] != '\0') {
                 if (!auth_token ||
-                    mqvpn_auth_ct_compare(auth_token, auth_token_len,
-                                          expected_key,
+                    mqvpn_auth_ct_compare(auth_token, auth_token_len, expected_key,
                                           strlen(expected_key)) != 0) {
                     LOG_W(s, "authentication failed: invalid or missing PSK");
                     svr_masque_send_403(h3_request);
@@ -1162,8 +1222,7 @@ static int cb_request_read(xqc_h3_request_t *h3_request,
             }
 
             LOG_I(s, "Extended CONNECT for connect-ip received");
-            if (svr_masque_send_response(h3_request, stream) < 0)
-                return -1;
+            if (svr_masque_send_response(h3_request, stream) < 0) return -1;
             return 0;
         }
     }
@@ -1182,10 +1241,12 @@ static int cb_request_read(xqc_h3_request_t *h3_request,
                 break;
             }
             if (need > stream->capsule_cap) {
-                size_t new_cap = stream->capsule_cap
-                    ? stream->capsule_cap * 2 : 4096;
+                size_t new_cap = stream->capsule_cap ? stream->capsule_cap * 2 : 4096;
                 while (new_cap < need) {
-                    if (new_cap > SIZE_MAX / 2) { new_cap = need; break; }
+                    if (new_cap > SIZE_MAX / 2) {
+                        new_cap = need;
+                        break;
+                    }
                     new_cap *= 2;
                 }
                 uint8_t *nb = realloc(stream->capsule_buf, new_cap);
@@ -1201,42 +1262,39 @@ static int cb_request_read(xqc_h3_request_t *h3_request,
                 const uint8_t *cap_payload;
                 size_t cap_len, consumed;
                 xqc_int_t xr = xqc_h3_ext_capsule_decode(
-                    stream->capsule_buf, stream->capsule_len,
-                    &cap_type, &cap_payload, &cap_len, &consumed);
+                    stream->capsule_buf, stream->capsule_len, &cap_type, &cap_payload,
+                    &cap_len, &consumed);
                 if (xr != XQC_OK) break;
 
-                if (cap_type == XQC_H3_CAPSULE_ADDRESS_REQUEST
-                    && stream->conn && stream->conn->tunnel_established) {
+                if (cap_type == XQC_H3_CAPSULE_ADDRESS_REQUEST && stream->conn &&
+                    stream->conn->tunnel_established) {
                     uint64_t req_id;
                     uint8_t ip_ver, ip_addr[16], prefix;
                     size_t ip_len = 16, aa_consumed;
                     xr = xqc_h3_ext_connectip_parse_address_assign(
-                        cap_payload, cap_len, &req_id, &ip_ver,
-                        ip_addr, &ip_len, &prefix, &aa_consumed);
+                        cap_payload, cap_len, &req_id, &ip_ver, ip_addr, &ip_len, &prefix,
+                        &aa_consumed);
                     if (xr == XQC_OK && req_id != 0) {
-                        LOG_I(s, "ADDRESS_REQUEST: req_id=%" PRIu64 " ipv%d",
-                              req_id, ip_ver);
+                        LOG_I(s, "ADDRESS_REQUEST: req_id=%" PRIu64 " ipv%d", req_id,
+                              ip_ver);
                         uint8_t resp_payload[64];
                         size_t resp_written = 0;
                         uint8_t resp_ip[4];
                         memcpy(resp_ip, &stream->conn->assigned_ip.s_addr, 4);
                         xqc_h3_ext_connectip_build_address_request(
-                            resp_payload, sizeof(resp_payload), &resp_written,
-                            req_id, 4, resp_ip, 32);
+                            resp_payload, sizeof(resp_payload), &resp_written, req_id, 4,
+                            resp_ip, 32);
                         uint8_t cap_buf[128];
                         size_t cap_w = 0;
-                        xqc_h3_ext_capsule_encode(
-                            cap_buf, sizeof(cap_buf), &cap_w,
-                            XQC_H3_CAPSULE_ADDRESS_ASSIGN,
-                            resp_payload, resp_written);
-                        xqc_h3_request_send_body(h3_request,
-                            cap_buf, cap_w, 0);
+                        xqc_h3_ext_capsule_encode(cap_buf, sizeof(cap_buf), &cap_w,
+                                                  XQC_H3_CAPSULE_ADDRESS_ASSIGN,
+                                                  resp_payload, resp_written);
+                        xqc_h3_request_send_body(h3_request, cap_buf, cap_w, 0);
                     }
                 }
 
                 if (consumed < stream->capsule_len)
-                    memmove(stream->capsule_buf,
-                            stream->capsule_buf + consumed,
+                    memmove(stream->capsule_buf, stream->capsule_buf + consumed,
                             stream->capsule_len - consumed);
                 stream->capsule_len -= consumed;
             }
@@ -1246,10 +1304,11 @@ static int cb_request_read(xqc_h3_request_t *h3_request,
     return 0;
 }
 
-static int cb_request_write(xqc_h3_request_t *h3_request,
-                              void *strm_user_data)
+static int
+cb_request_write(xqc_h3_request_t *h3_request, void *strm_user_data)
 {
-    (void)h3_request; (void)strm_user_data;
+    (void)h3_request;
+    (void)strm_user_data;
     return 0;
 }
 
@@ -1257,10 +1316,12 @@ static int cb_request_write(xqc_h3_request_t *h3_request,
  *  Datagram callbacks
  * ================================================================ */
 
-static void cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data,
-                            size_t data_len, void *user_data, uint64_t ts)
+static void
+cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *user_data,
+              uint64_t ts)
 {
-    (void)h3_conn; (void)ts;
+    (void)h3_conn;
+    (void)ts;
     svr_conn_t *conn = (svr_conn_t *)user_data;
     if (!conn || !conn->tunnel_established) return;
     mqvpn_server_t *s = conn->server;
@@ -1269,9 +1330,8 @@ static void cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data,
     const uint8_t *payload = NULL;
     size_t payload_len = 0;
 
-    xqc_int_t xret = xqc_h3_ext_masque_unframe_udp(
-        (const uint8_t *)data, data_len, &qsid, &ctx_id,
-        &payload, &payload_len);
+    xqc_int_t xret = xqc_h3_ext_masque_unframe_udp((const uint8_t *)data, data_len, &qsid,
+                                                   &ctx_id, &payload, &payload_len);
     if (xret != XQC_OK) return;
     if (payload_len < 1) return;
 
@@ -1296,8 +1356,7 @@ static void cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data,
         fwd_pkt[11] = sum & 0xFF;
     } else if (ip_ver == 6) {
         if (payload_len < 40) return;
-        if (!conn->has_v6 ||
-            memcmp(payload + 8, &conn->assigned_ip6, 16) != 0) {
+        if (!conn->has_v6 || memcmp(payload + 8, &conn->assigned_ip6, 16) != 0) {
             LOG_W(s, "dropping IPv6 packet: src IP mismatch");
             return;
         }
@@ -1315,7 +1374,8 @@ static void cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data,
     s->cbs.tun_output(fwd_pkt, payload_len, s->user_ctx);
 }
 
-static void cb_dgram_write(xqc_h3_conn_t *h3_conn, void *user_data)
+static void
+cb_dgram_write(xqc_h3_conn_t *h3_conn, void *user_data)
 {
     (void)h3_conn;
     svr_conn_t *conn = (svr_conn_t *)user_data;
@@ -1327,14 +1387,17 @@ static void cb_dgram_write(xqc_h3_conn_t *h3_conn, void *user_data)
     }
 }
 
-static void cb_dgram_acked(xqc_h3_conn_t *h, uint64_t id, void *ud)
+static void
+cb_dgram_acked(xqc_h3_conn_t *h, uint64_t id, void *ud)
 {
-    (void)h; (void)id;
+    (void)h;
+    (void)id;
     svr_conn_t *conn = (svr_conn_t *)ud;
     if (conn) conn->dgram_acked_cnt++;
 }
 
-static int cb_dgram_lost(xqc_h3_conn_t *h, uint64_t id, void *ud)
+static int
+cb_dgram_lost(xqc_h3_conn_t *h, uint64_t id, void *ud)
 {
     (void)h;
     svr_conn_t *conn = (svr_conn_t *)ud;
@@ -1342,16 +1405,17 @@ static int cb_dgram_lost(xqc_h3_conn_t *h, uint64_t id, void *ud)
     mqvpn_server_t *s = conn->server;
     conn->dgram_lost_cnt++;
     if ((conn->dgram_lost_cnt % 256) == 0) {
-        LOG_W(s, "datagram loss: lost=%" PRIu64 " acked=%" PRIu64
-              " (last_dgram_id=%" PRIu64 ")",
+        LOG_W(s,
+              "datagram loss: lost=%" PRIu64 " acked=%" PRIu64 " (last_dgram_id=%" PRIu64
+              ")",
               conn->dgram_lost_cnt, conn->dgram_acked_cnt, id);
         svr_log_conn_stats(s, "server loss checkpoint", &conn->cid);
     }
     return 0;
 }
 
-static void cb_dgram_mss_updated(xqc_h3_conn_t *h3_conn, size_t mss,
-                                   void *user_data)
+static void
+cb_dgram_mss_updated(xqc_h3_conn_t *h3_conn, size_t mss, void *user_data)
 {
     (void)h3_conn;
     svr_conn_t *conn = (svr_conn_t *)user_data;
@@ -1363,10 +1427,9 @@ static void cb_dgram_mss_updated(xqc_h3_conn_t *h3_conn, size_t mss,
  *  Public API — Lifecycle
  * ================================================================ */
 
-mqvpn_server_t *mqvpn_server_new(
-    const mqvpn_config_t *cfg,
-    const mqvpn_server_callbacks_t *cbs,
-    void *user_ctx)
+mqvpn_server_t *
+mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
+                 void *user_ctx)
 {
     if (!cfg || !cbs) return NULL;
     if (cbs->abi_version != MQVPN_CALLBACKS_ABI_VERSION) return NULL;
@@ -1377,7 +1440,8 @@ mqvpn_server_t *mqvpn_server_new(
 
     memcpy(&s->config, cfg, sizeof(*cfg));
     memcpy(&s->cbs, cbs, sizeof(*cbs));
-    s->user_ctx = user_ctx;  /* caller guarantees lifetime exceeds this object */  // lgtm[cpp/stack-address-escape]
+    s->user_ctx = user_ctx;
+        /* caller guarantees lifetime exceeds this object */ // lgtm[cpp/stack-address-escape]
     s->udp_fd = -1;
     s->max_clients = cfg->max_clients > 0 ? cfg->max_clients : 64;
     s->ptb_tokens = PTB_RATE_LIMIT;
@@ -1408,41 +1472,40 @@ mqvpn_server_t *mqvpn_server_new(
 
     xqc_engine_callback_t engine_cbs = {
         .set_event_timer = cb_set_event_timer,
-        .log_callbacks = {
-            .xqc_log_write_err  = cb_xqc_log_write,
-            .xqc_log_write_stat = cb_xqc_log_write,
-        },
+        .log_callbacks =
+            {
+                .xqc_log_write_err = cb_xqc_log_write,
+                .xqc_log_write_stat = cb_xqc_log_write,
+            },
     };
 
     xqc_transport_callbacks_t tcbs = {
-        .server_accept                  = cb_accept,
-        .server_refuse                  = cb_refuse,
-        .write_socket                   = cb_write_socket,
-        .write_socket_ex                = cb_write_socket_ex,
-        .stateless_reset                = cb_stateless_reset,
+        .server_accept = cb_accept,
+        .server_refuse = cb_refuse,
+        .write_socket = cb_write_socket,
+        .write_socket_ex = cb_write_socket_ex,
+        .stateless_reset = cb_stateless_reset,
         .conn_send_packet_before_accept = cb_write_before_accept,
-        .path_created_notify            = cb_path_created,
-        .path_removed_notify            = cb_path_removed,
+        .path_created_notify = cb_path_created,
+        .path_removed_notify = cb_path_removed,
     };
 
     int xqc_log_level;
     switch (cfg->log_level) {
     case MQVPN_LOG_DEBUG: xqc_log_level = 5; break;
-    case MQVPN_LOG_INFO:  xqc_log_level = 3; break;
-    case MQVPN_LOG_WARN:  xqc_log_level = 2; break;
+    case MQVPN_LOG_INFO: xqc_log_level = 3; break;
+    case MQVPN_LOG_WARN: xqc_log_level = 2; break;
     case MQVPN_LOG_ERROR: xqc_log_level = 1; break;
     default: xqc_log_level = 3; break;
     }
 
     xqc_config_t xconfig;
-    if (xqc_engine_get_default_config(&xconfig, XQC_ENGINE_SERVER) < 0)
-        goto cleanup;
+    if (xqc_engine_get_default_config(&xconfig, XQC_ENGINE_SERVER) < 0) goto cleanup;
     xconfig.cfg_log_level = (xqc_log_level_t)xqc_log_level;
 
-    s->engine = xqc_engine_create(XQC_ENGINE_SERVER, &xconfig,
-                                   &engine_ssl, &engine_cbs, &tcbs, s);
-    if (!s->engine)
-        goto cleanup;
+    s->engine = xqc_engine_create(XQC_ENGINE_SERVER, &xconfig, &engine_ssl, &engine_cbs,
+                                  &tcbs, s);
+    if (!s->engine) goto cleanup;
 
     /* Connection settings */
     xqc_conn_settings_t conn_settings;
@@ -1468,35 +1531,37 @@ mqvpn_server_t *mqvpn_server_new(
 
     /* H3 callbacks */
     xqc_h3_callbacks_t h3_cbs = {
-        .h3c_cbs = {
-            .h3_conn_create_notify      = cb_h3_conn_create,
-            .h3_conn_close_notify       = cb_h3_conn_close,
-            .h3_conn_handshake_finished = cb_h3_handshake_finished,
-        },
-        .h3r_cbs = {
-            .h3_request_create_notify = cb_request_create,
-            .h3_request_close_notify  = cb_request_close,
-            .h3_request_read_notify   = cb_request_read,
-            .h3_request_write_notify  = cb_request_write,
-        },
-        .h3_ext_dgram_cbs = {
-            .dgram_read_notify        = cb_dgram_read,
-            .dgram_write_notify       = cb_dgram_write,
-            .dgram_acked_notify       = cb_dgram_acked,
-            .dgram_lost_notify        = cb_dgram_lost,
-            .dgram_mss_updated_notify = cb_dgram_mss_updated,
-        },
+        .h3c_cbs =
+            {
+                .h3_conn_create_notify = cb_h3_conn_create,
+                .h3_conn_close_notify = cb_h3_conn_close,
+                .h3_conn_handshake_finished = cb_h3_handshake_finished,
+            },
+        .h3r_cbs =
+            {
+                .h3_request_create_notify = cb_request_create,
+                .h3_request_close_notify = cb_request_close,
+                .h3_request_read_notify = cb_request_read,
+                .h3_request_write_notify = cb_request_write,
+            },
+        .h3_ext_dgram_cbs =
+            {
+                .dgram_read_notify = cb_dgram_read,
+                .dgram_write_notify = cb_dgram_write,
+                .dgram_acked_notify = cb_dgram_acked,
+                .dgram_lost_notify = cb_dgram_lost,
+                .dgram_mss_updated_notify = cb_dgram_mss_updated,
+            },
     };
-    if (xqc_h3_ctx_init(s->engine, &h3_cbs) != XQC_OK)
-        goto cleanup;
+    if (xqc_h3_ctx_init(s->engine, &h3_cbs) != XQC_OK) goto cleanup;
 
     xqc_h3_conn_settings_t h3s = {
-        .max_field_section_size       = 32 * 1024,
-        .qpack_blocked_streams        = 64,
+        .max_field_section_size = 32 * 1024,
+        .qpack_blocked_streams = 64,
         .qpack_enc_max_table_capacity = 16 * 1024,
         .qpack_dec_max_table_capacity = 16 * 1024,
-        .enable_connect_protocol      = 1,
-        .h3_datagram                  = 1,
+        .enable_connect_protocol = 1,
+        .h3_datagram = 1,
     };
     xqc_h3_engine_set_local_settings(s->engine, &h3s);
 
@@ -1511,7 +1576,8 @@ cleanup:
     return NULL;
 }
 
-void mqvpn_server_destroy(mqvpn_server_t *s)
+void
+mqvpn_server_destroy(mqvpn_server_t *s)
 {
     if (!s) return;
 
@@ -1533,22 +1599,22 @@ void mqvpn_server_destroy(mqvpn_server_t *s)
     free(s);
 }
 
-int mqvpn_server_set_socket_fd(mqvpn_server_t *s, int fd,
-                                const struct sockaddr *local_addr,
-                                socklen_t local_addrlen)
+int
+mqvpn_server_set_socket_fd(mqvpn_server_t *s, int fd, const struct sockaddr *local_addr,
+                           socklen_t local_addrlen)
 {
     if (!s || fd < 0) return MQVPN_ERR_INVALID_ARG;
     s->udp_fd = fd;
     if (local_addr && local_addrlen > 0) {
-        if (local_addrlen > sizeof(s->local_addr))
-            local_addrlen = sizeof(s->local_addr);
+        if (local_addrlen > sizeof(s->local_addr)) local_addrlen = sizeof(s->local_addr);
         memcpy(&s->local_addr, local_addr, local_addrlen);
         s->local_addrlen = local_addrlen;
     }
     return MQVPN_OK;
 }
 
-int mqvpn_server_start(mqvpn_server_t *s)
+int
+mqvpn_server_start(mqvpn_server_t *s)
 {
     if (!s) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(s);
@@ -1578,12 +1644,13 @@ int mqvpn_server_start(mqvpn_server_t *s)
 
     s->cbs.tunnel_config_ready(&info, s->user_ctx);
 
-    LOG_I(s, "server started (subnet=%s, max_clients=%d)",
-          s->config.subnet, s->max_clients);
+    LOG_I(s, "server started (subnet=%s, max_clients=%d)", s->config.subnet,
+          s->max_clients);
     return MQVPN_OK;
 }
 
-int mqvpn_server_stop(mqvpn_server_t *s)
+int
+mqvpn_server_stop(mqvpn_server_t *s)
 {
     if (!s) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(s);
@@ -1593,10 +1660,9 @@ int mqvpn_server_stop(mqvpn_server_t *s)
 
 /* ─── I/O feed ─── */
 
-int mqvpn_server_on_socket_recv(
-    mqvpn_server_t *s,
-    const uint8_t *pkt, size_t len,
-    const struct sockaddr *peer, socklen_t peer_len)
+int
+mqvpn_server_on_socket_recv(mqvpn_server_t *s, const uint8_t *pkt, size_t len,
+                            const struct sockaddr *peer, socklen_t peer_len)
 {
     if (!s || !pkt || len == 0 || len > 65536) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(s);
@@ -1604,18 +1670,16 @@ int mqvpn_server_on_socket_recv(
 
     uint64_t recv_time = now_us();
     xqc_int_t ret = xqc_engine_packet_process(
-        s->engine, pkt, len,
-        (struct sockaddr *)&s->local_addr, s->local_addrlen,
-        peer, peer_len,
-        (xqc_usec_t)recv_time, s);
+        s->engine, pkt, len, (struct sockaddr *)&s->local_addr, s->local_addrlen, peer,
+        peer_len, (xqc_usec_t)recv_time, s);
     if (ret != XQC_OK) {
         LOG_D(s, "packet_process: %d", ret);
     }
     return MQVPN_OK;
 }
 
-int mqvpn_server_on_tun_packet(mqvpn_server_t *s,
-                                 const uint8_t *pkt, size_t len)
+int
+mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
 {
     if (!s || !pkt || len == 0) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(s);
@@ -1652,8 +1716,8 @@ int mqvpn_server_on_tun_packet(mqvpn_server_t *s,
 
     /* ICMP PTB if packet exceeds tunnel capacity */
     if (target->dgram_mss > 0) {
-        size_t udp_mss = xqc_h3_ext_masque_udp_mss(
-            target->dgram_mss, target->masque_stream_id);
+        size_t udp_mss =
+            xqc_h3_ext_masque_udp_mss(target->dgram_mss, target->masque_stream_id);
         if (len > udp_mss) {
             if (ip_ver == 4)
                 send_icmpv4_ptb(s, pkt, len, udp_mss);
@@ -1690,18 +1754,16 @@ int mqvpn_server_on_tun_packet(mqvpn_server_t *s,
     /* MASQUE frame and send */
     uint8_t frame_buf[MASQUE_FRAME_BUF];
     size_t frame_written = 0;
-    xqc_int_t xret = xqc_h3_ext_masque_frame_udp(
-        frame_buf, sizeof(frame_buf), &frame_written,
-        target->masque_stream_id, fwd_pkt, len);
+    xqc_int_t xret =
+        xqc_h3_ext_masque_frame_udp(frame_buf, sizeof(frame_buf), &frame_written,
+                                    target->masque_stream_id, fwd_pkt, len);
     if (xret != XQC_OK) return MQVPN_ERR_ENGINE;
 
     uint64_t dgram_id;
     uint32_t fh = flow_hash_pkt(pkt, (int)len);
-    xqc_conn_set_dgram_flow_hash(
-        xqc_h3_conn_get_xqc_conn(target->h3_conn), fh);
-    xret = xqc_h3_ext_datagram_send(
-        target->h3_conn, frame_buf, frame_written,
-        &dgram_id, XQC_DATA_QOS_HIGH);
+    xqc_conn_set_dgram_flow_hash(xqc_h3_conn_get_xqc_conn(target->h3_conn), fh);
+    xret = xqc_h3_ext_datagram_send(target->h3_conn, frame_buf, frame_written, &dgram_id,
+                                    XQC_DATA_QOS_HIGH);
 
     if (xret == -XQC_EAGAIN) {
         s->tun_paused = 1;
@@ -1717,20 +1779,21 @@ int mqvpn_server_on_tun_packet(mqvpn_server_t *s,
 
 /* ─── Tick ─── */
 
-int mqvpn_server_tick(mqvpn_server_t *s)
+int
+mqvpn_server_tick(mqvpn_server_t *s)
 {
     if (!s) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(s);
 
-    if (s->engine)
-        xqc_engine_main_logic(s->engine);
+    if (s->engine) xqc_engine_main_logic(s->engine);
 
     return MQVPN_OK;
 }
 
 /* ─── Query functions ─── */
 
-int mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *out)
+int
+mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *out)
 {
     if (!s || !out) return MQVPN_ERR_INVALID_ARG;
     memset(out, 0, sizeof(*out));
@@ -1740,7 +1803,8 @@ int mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *out)
     return MQVPN_OK;
 }
 
-int mqvpn_server_get_interest(const mqvpn_server_t *s, mqvpn_interest_t *out)
+int
+mqvpn_server_get_interest(const mqvpn_server_t *s, mqvpn_interest_t *out)
 {
     if (!s || !out) return MQVPN_ERR_INVALID_ARG;
     memset(out, 0, sizeof(*out));

@@ -3,16 +3,17 @@
  */
 #ifdef _MSC_VER
 
-#include "getopt.h"
-#include <string.h>
-#include <stdio.h>
+#  include "getopt.h"
+#  include <string.h>
+#  include <stdio.h>
 
 char *optarg = NULL;
-int   optind = 1;
-int   opterr = 1;
-int   optopt = '?';
+int optind = 1;
+int opterr = 1;
+int optopt = '?';
 
-int getopt(int argc, char *const argv[], const char *optstring)
+int
+getopt(int argc, char *const argv[], const char *optstring)
 {
     static int sp = 1;
     int c;
@@ -31,7 +32,10 @@ int getopt(int argc, char *const argv[], const char *optstring)
     cp = strchr(optstring, c);
     if (c == ':' || cp == NULL) {
         if (opterr) fprintf(stderr, "unknown option -%c\n", c);
-        if (argv[optind][++sp] == '\0') { optind++; sp = 1; }
+        if (argv[optind][++sp] == '\0') {
+            optind++;
+            sp = 1;
+        }
         return '?';
     }
 
@@ -47,22 +51,28 @@ int getopt(int argc, char *const argv[], const char *optstring)
         }
         sp = 1;
     } else {
-        if (argv[optind][++sp] == '\0') { optind++; sp = 1; }
+        if (argv[optind][++sp] == '\0') {
+            optind++;
+            sp = 1;
+        }
         optarg = NULL;
     }
     return c;
 }
 
-int getopt_long(int argc, char *const argv[], const char *optstring,
-                const struct option *longopts, int *longindex)
+int
+getopt_long(int argc, char *const argv[], const char *optstring,
+            const struct option *longopts, int *longindex)
 {
-    if (optind >= argc)
-        return -1;
+    if (optind >= argc) return -1;
 
     /* Handle "--" long options */
     if (argv[optind][0] == '-' && argv[optind][1] == '-') {
         const char *name = argv[optind] + 2;
-        if (*name == '\0') { optind++; return -1; }
+        if (*name == '\0') {
+            optind++;
+            return -1;
+        }
 
         /* Find matching long option */
         for (int i = 0; longopts[i].name; i++) {
@@ -78,7 +88,9 @@ int getopt_long(int argc, char *const argv[], const char *optstring,
                     } else if (optind < argc) {
                         optarg = argv[optind++];
                     } else {
-                        if (opterr) fprintf(stderr, "option --%s requires an argument\n", longopts[i].name);
+                        if (opterr)
+                            fprintf(stderr, "option --%s requires an argument\n",
+                                    longopts[i].name);
                         return '?';
                     }
                 } else if (longopts[i].has_arg == optional_argument) {

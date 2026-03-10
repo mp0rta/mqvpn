@@ -14,11 +14,10 @@
 int mqvpn_auth_genkey(void);
 
 /* Constant-time comparison. Returns 0 if equal, nonzero otherwise. */
-int mqvpn_auth_ct_compare(const char *a, size_t a_len,
-                           const char *b, size_t b_len);
+int mqvpn_auth_ct_compare(const char *a, size_t a_len, const char *b, size_t b_len);
 
 /* Base64 encode src into dst. Returns 0 on success, -1 if dst_len too small. */
-int mqvpn_auth_b64_encode(char *dst, size_t dst_len,
-                           const unsigned char *src, size_t src_len);
+int mqvpn_auth_b64_encode(char *dst, size_t dst_len, const unsigned char *src,
+                          size_t src_len);
 
 #endif /* MQVPN_AUTH_H */

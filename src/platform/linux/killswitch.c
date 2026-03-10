@@ -38,14 +38,15 @@ setup_killswitch(platform_ctx_t *p)
     int is_v6 = (p->server_addr.ss_family == AF_INET6);
 
     /* IPv4 rules (always needed) */
-    const char *at[] = {"iptables", "-I", "OUTPUT", "-o", p->tun.name,
-                        "-j", "ACCEPT", "-m", "comment", "--comment", p->ks_comment, NULL};
-    const char *al[] = {"iptables", "-I", "OUTPUT", "-o", "lo",
-                        "-j", "ACCEPT", "-m", "comment", "--comment", p->ks_comment, NULL};
-    const char *da[] = {"iptables", "-A", "OUTPUT", "-j", "DROP",
-                        "-m", "comment", "--comment", p->ks_comment, NULL};
+    const char *at[] = {"iptables", "-I", "OUTPUT",  "-o",        p->tun.name,   "-j",
+                        "ACCEPT",   "-m", "comment", "--comment", p->ks_comment, NULL};
+    const char *al[] = {"iptables", "-I", "OUTPUT",  "-o",        "lo",          "-j",
+                        "ACCEPT",   "-m", "comment", "--comment", p->ks_comment, NULL};
+    const char *da[] = {"iptables", "-A",      "OUTPUT",    "-j",          "DROP",
+                        "-m",       "comment", "--comment", p->ks_comment, NULL};
 
-    if (run_iptables_cmd(at) < 0 || run_iptables_cmd(al) < 0 || run_iptables_cmd(da) < 0) {
+    if (run_iptables_cmd(at) < 0 || run_iptables_cmd(al) < 0 ||
+        run_iptables_cmd(da) < 0) {
         LOG_WRN("failed to set up iptables kill switch rules");
         p->killswitch_active = 1;
         cleanup_killswitch(p);
@@ -60,18 +61,24 @@ setup_killswitch(platform_ctx_t *p)
     snprintf(ps, sizeof(ps), "%d", p->server_port);
 
     if (!is_v6) {
-        const char *as[] = {"iptables", "-I", "OUTPUT", "-p", "udp",
-                            "-d", sc, "--dport", ps, "-o", p->orig_iface,
-                            "-j", "ACCEPT", "-m", "comment", "--comment", p->ks_comment, NULL};
-        if (run_iptables_cmd(as) < 0) { cleanup_killswitch(p); return -1; }
+        const char *as[] = {
+            "iptables", "-I",      "OUTPUT",  "-p",        "udp",         "-d",
+            sc,         "--dport", ps,        "-o",        p->orig_iface, "-j",
+            "ACCEPT",   "-m",      "comment", "--comment", p->ks_comment, NULL};
+        if (run_iptables_cmd(as) < 0) {
+            cleanup_killswitch(p);
+            return -1;
+        }
     } else {
-        const char *v6s[] = {"ip6tables", "-I", "OUTPUT", "-p", "udp",
-                             "-d", sc, "--dport", ps, "-o", p->orig_iface,
-                             "-j", "ACCEPT", "-m", "comment", "--comment", p->ks_comment, NULL};
-        const char *v6l[] = {"ip6tables", "-I", "OUTPUT", "-o", "lo",
-                             "-j", "ACCEPT", "-m", "comment", "--comment", p->ks_comment, NULL};
-        const char *v6d[] = {"ip6tables", "-A", "OUTPUT", "-j", "DROP",
-                             "-m", "comment", "--comment", p->ks_comment, NULL};
+        const char *v6s[] = {
+            "ip6tables", "-I",      "OUTPUT",  "-p",        "udp",         "-d",
+            sc,          "--dport", ps,        "-o",        p->orig_iface, "-j",
+            "ACCEPT",    "-m",      "comment", "--comment", p->ks_comment, NULL};
+        const char *v6l[] = {"ip6tables", "-I",        "OUTPUT",      "-o",
+                             "lo",        "-j",        "ACCEPT",      "-m",
+                             "comment",   "--comment", p->ks_comment, NULL};
+        const char *v6d[] = {"ip6tables", "-A",      "OUTPUT",    "-j",          "DROP",
+                             "-m",        "comment", "--comment", p->ks_comment, NULL};
         if (run_iptables_cmd(v6s) < 0 || run_iptables_cmd(v6l) < 0 ||
             run_iptables_cmd(v6d) < 0) {
             cleanup_killswitch(p);
@@ -81,14 +88,17 @@ setup_killswitch(platform_ctx_t *p)
 
     /* IPv6 data plane TUN rule */
     if (p->has_v6) {
-        const char *v6t[] = {"ip6tables", "-I", "OUTPUT", "-o", p->tun.name,
-                             "-j", "ACCEPT", "-m", "comment", "--comment", p->ks_comment, NULL};
+        const char *v6t[] = {"ip6tables", "-I",        "OUTPUT",      "-o",
+                             p->tun.name, "-j",        "ACCEPT",      "-m",
+                             "comment",   "--comment", p->ks_comment, NULL};
         (void)run_iptables_cmd(v6t);
         if (!is_v6) {
-            const char *v6l[] = {"ip6tables", "-I", "OUTPUT", "-o", "lo",
-                                 "-j", "ACCEPT", "-m", "comment", "--comment", p->ks_comment, NULL};
-            const char *v6d[] = {"ip6tables", "-A", "OUTPUT", "-j", "DROP",
-                                 "-m", "comment", "--comment", p->ks_comment, NULL};
+            const char *v6l[] = {"ip6tables", "-I",        "OUTPUT",      "-o",
+                                 "lo",        "-j",        "ACCEPT",      "-m",
+                                 "comment",   "--comment", p->ks_comment, NULL};
+            const char *v6d[] = {"ip6tables",   "-A", "OUTPUT",  "-j",
+                                 "DROP",        "-m", "comment", "--comment",
+                                 p->ks_comment, NULL};
             (void)run_iptables_cmd(v6l);
             (void)run_iptables_cmd(v6d);
         }
@@ -110,45 +120,49 @@ cleanup_killswitch(platform_ctx_t *p)
     snprintf(ps, sizeof(ps), "%d", p->server_port);
 
     /* Remove IPv4 rules */
-    const char *dt[] = {"iptables", "-D", "OUTPUT", "-o", p->tun.name,
-                        "-j", "ACCEPT", "-m", "comment", "--comment", p->ks_comment, NULL};
+    const char *dt[] = {"iptables", "-D", "OUTPUT",  "-o",        p->tun.name,   "-j",
+                        "ACCEPT",   "-m", "comment", "--comment", p->ks_comment, NULL};
     while (run_iptables_cmd(dt) == 0) {}
-    const char *dl[] = {"iptables", "-D", "OUTPUT", "-o", "lo",
-                        "-j", "ACCEPT", "-m", "comment", "--comment", p->ks_comment, NULL};
+    const char *dl[] = {"iptables", "-D", "OUTPUT",  "-o",        "lo",          "-j",
+                        "ACCEPT",   "-m", "comment", "--comment", p->ks_comment, NULL};
     while (run_iptables_cmd(dl) == 0) {}
-    const char *dd[] = {"iptables", "-D", "OUTPUT", "-j", "DROP",
-                        "-m", "comment", "--comment", p->ks_comment, NULL};
+    const char *dd[] = {"iptables", "-D",      "OUTPUT",    "-j",          "DROP",
+                        "-m",       "comment", "--comment", p->ks_comment, NULL};
     while (run_iptables_cmd(dd) == 0) {}
 
     if (!is_v6) {
-        const char *ds[] = {"iptables", "-D", "OUTPUT", "-p", "udp",
-                            "-d", sc, "--dport", ps, "-o", p->orig_iface,
-                            "-j", "ACCEPT", "-m", "comment", "--comment", p->ks_comment, NULL};
+        const char *ds[] = {
+            "iptables", "-D",      "OUTPUT",  "-p",        "udp",         "-d",
+            sc,         "--dport", ps,        "-o",        p->orig_iface, "-j",
+            "ACCEPT",   "-m",      "comment", "--comment", p->ks_comment, NULL};
         while (run_iptables_cmd(ds) == 0) {}
     } else {
-        const char *v6s[] = {"ip6tables", "-D", "OUTPUT", "-p", "udp",
-                             "-d", sc, "--dport", ps, "-o", p->orig_iface,
-                             "-j", "ACCEPT", "-m", "comment", "--comment", p->ks_comment, NULL};
+        const char *v6s[] = {
+            "ip6tables", "-D",      "OUTPUT",  "-p",        "udp",         "-d",
+            sc,          "--dport", ps,        "-o",        p->orig_iface, "-j",
+            "ACCEPT",    "-m",      "comment", "--comment", p->ks_comment, NULL};
         while (run_iptables_cmd(v6s) == 0) {}
-        const char *v6l[] = {"ip6tables", "-D", "OUTPUT", "-o", "lo",
-                             "-j", "ACCEPT", "-m", "comment", "--comment", p->ks_comment, NULL};
+        const char *v6l[] = {"ip6tables", "-D",        "OUTPUT",      "-o",
+                             "lo",        "-j",        "ACCEPT",      "-m",
+                             "comment",   "--comment", p->ks_comment, NULL};
         while (run_iptables_cmd(v6l) == 0) {}
-        const char *v6d[] = {"ip6tables", "-D", "OUTPUT", "-j", "DROP",
-                             "-m", "comment", "--comment", p->ks_comment, NULL};
+        const char *v6d[] = {"ip6tables", "-D",      "OUTPUT",    "-j",          "DROP",
+                             "-m",        "comment", "--comment", p->ks_comment, NULL};
         while (run_iptables_cmd(v6d) == 0) {}
     }
 
     /* IPv6 data plane TUN rule */
-    const char *v6dt[] = {"ip6tables", "-D", "OUTPUT", "-o", p->tun.name,
-                          "-j", "ACCEPT", "-m", "comment", "--comment", p->ks_comment, NULL};
+    const char *v6dt[] = {"ip6tables", "-D", "OUTPUT",  "-o",        p->tun.name,   "-j",
+                          "ACCEPT",    "-m", "comment", "--comment", p->ks_comment, NULL};
     while (run_iptables_cmd(v6dt) == 0) {}
 
     if (!is_v6) {
-        const char *v6l2[] = {"ip6tables", "-D", "OUTPUT", "-o", "lo",
-                              "-j", "ACCEPT", "-m", "comment", "--comment", p->ks_comment, NULL};
+        const char *v6l2[] = {"ip6tables", "-D",        "OUTPUT",      "-o",
+                              "lo",        "-j",        "ACCEPT",      "-m",
+                              "comment",   "--comment", p->ks_comment, NULL};
         while (run_iptables_cmd(v6l2) == 0) {}
-        const char *v6d2[] = {"ip6tables", "-D", "OUTPUT", "-j", "DROP",
-                              "-m", "comment", "--comment", p->ks_comment, NULL};
+        const char *v6d2[] = {"ip6tables", "-D",      "OUTPUT",    "-j",          "DROP",
+                              "-m",        "comment", "--comment", p->ks_comment, NULL};
         while (run_iptables_cmd(v6d2) == 0) {}
     }
     p->killswitch_active = 0;

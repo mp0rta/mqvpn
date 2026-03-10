@@ -26,7 +26,7 @@ mqvpn_path_mgr_init(mqvpn_path_mgr_t *mgr)
 
 int
 mqvpn_path_mgr_add(mqvpn_path_mgr_t *mgr, const char *iface,
-                    const struct sockaddr_storage *peer_addr)
+                   const struct sockaddr_storage *peer_addr)
 {
     if (mgr->n_paths >= MQVPN_MAX_PATHS) {
         LOG_ERR("path_mgr: max paths (%d) reached", MQVPN_MAX_PATHS);
@@ -73,8 +73,8 @@ mqvpn_path_mgr_add(mqvpn_path_mgr_t *mgr, const char *iface,
         int optlen = sizeof(actual_snd);
         getsockopt(fd, SOL_SOCKET, SO_SNDBUF, (char *)&actual_snd, &optlen);
         getsockopt(fd, SOL_SOCKET, SO_RCVBUF, (char *)&actual_rcv, &optlen);
-        LOG_INF("path_mgr: UDP socket buffers: SO_SNDBUF=%d SO_RCVBUF=%d",
-                actual_snd, actual_rcv);
+        LOG_INF("path_mgr: UDP socket buffers: SO_SNDBUF=%d SO_RCVBUF=%d", actual_snd,
+                actual_rcv);
     }
 #endif
 
@@ -84,8 +84,7 @@ mqvpn_path_mgr_add(mqvpn_path_mgr_t *mgr, const char *iface,
         /* Windows: no SO_BINDTODEVICE — store iface name, actual binding
          * to interface-specific IP is done by the platform layer. */
 #else
-        if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE,
-                       iface, strlen(iface) + 1) < 0) {
+        if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, iface, strlen(iface) + 1) < 0) {
             LOG_ERR("path_mgr: SO_BINDTODEVICE(%s): %s", iface, strerror(errno));
             close(fd);
             return -1;
@@ -125,8 +124,7 @@ mqvpn_path_mgr_add(mqvpn_path_mgr_t *mgr, const char *iface,
     p->path_id = 0;
 
     mgr->n_paths++;
-    LOG_INF("path_mgr: path[%d] created on %s (fd=%d)",
-            idx, iface ? iface : "(any)", fd);
+    LOG_INF("path_mgr: path[%d] created on %s (fd=%d)", idx, iface ? iface : "(any)", fd);
     return idx;
 }
 
@@ -134,8 +132,7 @@ mqvpn_path_t *
 mqvpn_path_mgr_find_by_fd(mqvpn_path_mgr_t *mgr, int fd)
 {
     for (int i = 0; i < mgr->n_paths; i++) {
-        if (mgr->paths[i].fd == fd)
-            return &mgr->paths[i];
+        if (mgr->paths[i].fd == fd) return &mgr->paths[i];
     }
     return NULL;
 }
@@ -154,8 +151,7 @@ int
 mqvpn_path_mgr_get_fd(mqvpn_path_mgr_t *mgr, uint64_t path_id)
 {
     mqvpn_path_t *p = mqvpn_path_mgr_find_by_path_id(mgr, path_id);
-    if (p)
-        return p->fd;
+    if (p) return p->fd;
     /* Fallback to primary (path 0) */
     if (mgr->n_paths > 0) {
         LOG_WRN("path_mgr: path_id=%" PRIu64 " not found, falling back to path 0",

@@ -10,11 +10,11 @@
 
 #ifdef _WIN32
 
-#include "platform_internal_win.h"
-#include "log.h"
+#  include "platform_internal_win.h"
+#  include "log.h"
 
-#include <stdio.h>
-#include <string.h>
+#  include <stdio.h>
+#  include <string.h>
 
 /* Helper: store a route entry for later cleanup */
 static int
@@ -30,9 +30,8 @@ store_route(platform_win_ctx_t *p, const MIB_IPFORWARD_ROW2 *row)
 
 /* Helper: add a single IPv4 route */
 static int
-add_route4(platform_win_ctx_t *p, const char *dst, int prefix,
-           const NET_LUID *luid, const struct in_addr *nexthop,
-           ULONG metric)
+add_route4(platform_win_ctx_t *p, const char *dst, int prefix, const NET_LUID *luid,
+           const struct in_addr *nexthop, ULONG metric)
 {
     MIB_IPFORWARD_ROW2 row;
     InitializeIpForwardEntry(&row);
@@ -62,9 +61,8 @@ add_route4(platform_win_ctx_t *p, const char *dst, int prefix,
 
 /* Helper: add a single IPv6 route (nexthop may be NULL for on-link) */
 static int
-add_route6(platform_win_ctx_t *p, const char *dst, int prefix,
-           const NET_LUID *luid, const struct in6_addr *nexthop,
-           ULONG metric)
+add_route6(platform_win_ctx_t *p, const char *dst, int prefix, const NET_LUID *luid,
+           const struct in6_addr *nexthop, ULONG metric)
 {
     MIB_IPFORWARD_ROW2 row;
     InitializeIpForwardEntry(&row);
@@ -95,8 +93,7 @@ add_route6(platform_win_ctx_t *p, const char *dst, int prefix,
 int
 win_setup_routes(platform_win_ctx_t *p)
 {
-    if (p->routing_configured)
-        return 0;
+    if (p->routing_configured) return 0;
 
     p->n_installed_routes = 0;
 
@@ -112,12 +109,10 @@ win_setup_routes(platform_win_ctx_t *p)
 
     if (p->server_addr.ss_family == AF_INET) {
         dest_addr.Ipv4.sin_family = AF_INET;
-        dest_addr.Ipv4.sin_addr =
-            ((struct sockaddr_in *)&p->server_addr)->sin_addr;
+        dest_addr.Ipv4.sin_addr = ((struct sockaddr_in *)&p->server_addr)->sin_addr;
     } else {
         dest_addr.Ipv6.sin6_family = AF_INET6;
-        dest_addr.Ipv6.sin6_addr =
-            ((struct sockaddr_in6 *)&p->server_addr)->sin6_addr;
+        dest_addr.Ipv6.sin6_addr = ((struct sockaddr_in6 *)&p->server_addr)->sin6_addr;
     }
 
     DWORD err = GetBestRoute2(NULL, 0, NULL, &dest_addr, 0, &best, &best_src);
@@ -131,13 +126,11 @@ win_setup_routes(platform_win_ctx_t *p)
      */
     if (p->server_addr.ss_family == AF_INET) {
         struct in_addr gw = best.NextHop.Ipv4.sin_addr;
-        if (add_route4(p, p->server_ip_str, 32, &best.InterfaceLuid,
-                       &gw, 0) < 0)
+        if (add_route4(p, p->server_ip_str, 32, &best.InterfaceLuid, &gw, 0) < 0)
             return -1;
     } else if (p->server_addr.ss_family == AF_INET6) {
         struct in6_addr gw6 = best.NextHop.Ipv6.sin6_addr;
-        if (add_route6(p, p->server_ip_str, 128, &best.InterfaceLuid,
-                       &gw6, 0) < 0)
+        if (add_route6(p, p->server_ip_str, 128, &best.InterfaceLuid, &gw6, 0) < 0)
             return -1;
     }
 

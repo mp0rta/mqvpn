@@ -33,15 +33,18 @@ run_ip_cmd(const char *const argv[])
 }
 
 static int
-discover_route(const char *server_ip, sa_family_t af,
-               char *gateway, size_t gw_len,
+discover_route(const char *server_ip, sa_family_t af, char *gateway, size_t gw_len,
                char *iface, size_t if_len)
 {
     int fds[2];
     if (pipe(fds) < 0) return -1;
 
     pid_t pid = fork();
-    if (pid < 0) { close(fds[0]); close(fds[1]); return -1; }
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return -1;
+    }
 
     if (pid == 0) {
         const char *const a4[] = {"ip", "-4", "route", "get", server_ip, NULL};
@@ -88,8 +91,7 @@ setup_routes(platform_ctx_t *p)
     int prefix = mqvpn_sa_host_prefix(&p->server_addr);
     mqvpn_sa_ntop(&p->server_addr, p->server_ip_str, sizeof(p->server_ip_str));
 
-    if (discover_route(p->server_ip_str, af,
-                       p->orig_gateway, sizeof(p->orig_gateway),
+    if (discover_route(p->server_ip_str, af, p->orig_gateway, sizeof(p->orig_gateway),
                        p->orig_iface, sizeof(p->orig_iface)) < 0) {
         LOG_WRN("could not determine original iface for %s", p->server_ip_str);
         return -1;
@@ -100,30 +102,34 @@ setup_routes(platform_ctx_t *p)
     const char *ip_flag = (af == AF_INET6) ? "-6" : "-4";
 
     if (p->orig_gateway[0] != '\0') {
-        LOG_INF("split tunnel: server %s via %s dev %s",
-                p->server_ip_str, p->orig_gateway, p->orig_iface);
-        const char *const pin[] = {
-            "ip", ip_flag, "route", "replace", host_cidr, "via", p->orig_gateway,
-            "dev", p->orig_iface, NULL
-        };
+        LOG_INF("split tunnel: server %s via %s dev %s", p->server_ip_str,
+                p->orig_gateway, p->orig_iface);
+        const char *const pin[] = {"ip",          ip_flag, "route",         "replace",
+                                   host_cidr,     "via",   p->orig_gateway, "dev",
+                                   p->orig_iface, NULL};
         if (run_ip_cmd(pin) < 0) {
             LOG_WRN("failed to pin server route");
             return -1;
         }
     } else {
-        LOG_INF("split tunnel: server %s on-link dev %s", p->server_ip_str, p->orig_iface);
+        LOG_INF("split tunnel: server %s on-link dev %s", p->server_ip_str,
+                p->orig_iface);
     }
 
-    const char *const low[]  = {"ip", "route", "replace", "0.0.0.0/1", "dev", p->tun.name, NULL};
-    const char *const high[] = {"ip", "route", "replace", "128.0.0.0/1", "dev", p->tun.name, NULL};
+    const char *const low[] = {"ip",  "route",     "replace", "0.0.0.0/1",
+                               "dev", p->tun.name, NULL};
+    const char *const high[] = {"ip",  "route",     "replace", "128.0.0.0/1",
+                                "dev", p->tun.name, NULL};
     if (run_ip_cmd(low) < 0 || run_ip_cmd(high) < 0) {
         LOG_WRN("failed to set catch-all routes via %s", p->tun.name);
         const char *u1[] = {"ip", "route", "del", "0.0.0.0/1", "dev", p->tun.name, NULL};
-        const char *u2[] = {"ip", "route", "del", "128.0.0.0/1", "dev", p->tun.name, NULL};
-        (void)run_ip_cmd(u1); (void)run_ip_cmd(u2);
+        const char *u2[] = {"ip",  "route",     "del", "128.0.0.0/1",
+                            "dev", p->tun.name, NULL};
+        (void)run_ip_cmd(u1);
+        (void)run_ip_cmd(u2);
         if (p->orig_gateway[0]) {
-            const char *u3[] = {"ip", ip_flag, "route", "del", host_cidr,
-                                "via", p->orig_gateway, "dev", p->orig_iface, NULL};
+            const char *u3[] = {"ip",  ip_flag,         "route", "del",         host_cidr,
+                                "via", p->orig_gateway, "dev",   p->orig_iface, NULL};
             (void)run_ip_cmd(u3);
         }
         return -1;
@@ -132,8 +138,10 @@ setup_routes(platform_ctx_t *p)
 
     /* IPv6 catch-all routes */
     if (p->has_v6) {
-        const char *v6l[] = {"ip", "-6", "route", "replace", "::/1", "dev", p->tun.name, NULL};
-        const char *v6h[] = {"ip", "-6", "route", "replace", "8000::/1", "dev", p->tun.name, NULL};
+        const char *v6l[] = {"ip",   "-6",  "route",     "replace",
+                             "::/1", "dev", p->tun.name, NULL};
+        const char *v6h[] = {"ip",       "-6",  "route",     "replace",
+                             "8000::/1", "dev", p->tun.name, NULL};
         if (run_ip_cmd(v6l) == 0 && run_ip_cmd(v6h) == 0) {
             p->routing6_configured = 1;
             LOG_INF("IPv6 catch-all routes set via %s", p->tun.name);
@@ -151,22 +159,26 @@ cleanup_routes(platform_ctx_t *p)
 
     if (p->routing6_configured) {
         const char *d1[] = {"ip", "-6", "route", "del", "::/1", "dev", p->tun.name, NULL};
-        const char *d2[] = {"ip", "-6", "route", "del", "8000::/1", "dev", p->tun.name, NULL};
-        (void)run_ip_cmd(d1); (void)run_ip_cmd(d2);
+        const char *d2[] = {"ip",       "-6",  "route",     "del",
+                            "8000::/1", "dev", p->tun.name, NULL};
+        (void)run_ip_cmd(d1);
+        (void)run_ip_cmd(d2);
         p->routing6_configured = 0;
     }
 
     const char *d3[] = {"ip", "route", "del", "0.0.0.0/1", "dev", p->tun.name, NULL};
     const char *d4[] = {"ip", "route", "del", "128.0.0.0/1", "dev", p->tun.name, NULL};
-    (void)run_ip_cmd(d3); (void)run_ip_cmd(d4);
+    (void)run_ip_cmd(d3);
+    (void)run_ip_cmd(d4);
 
     if (p->orig_gateway[0]) {
         const char *fl = (p->server_addr.ss_family == AF_INET6) ? "-6" : "-4";
         int pfx = mqvpn_sa_host_prefix(&p->server_addr);
         char hc[INET6_ADDRSTRLEN + 5];
         snprintf(hc, sizeof(hc), "%s/%d", p->server_ip_str, pfx);
-        const char *d5[] = {"ip", fl, "route", "del", hc,
-                            "via", p->orig_gateway, "dev", p->orig_iface, NULL};
+        const char *d5[] = {
+            "ip",          fl,  "route", "del", hc, "via", p->orig_gateway, "dev",
+            p->orig_iface, NULL};
         (void)run_ip_cmd(d5);
     }
     p->routing_configured = 0;

@@ -8,33 +8,32 @@
 
 #ifdef _WIN32
 
-#include "tun_wintun.h"
-#include "log.h"
-#include "wintun.h"
+#  include "tun_wintun.h"
+#  include "log.h"
+#  include "wintun.h"
 
-#include <stdio.h>
-#include <string.h>
+#  include <stdio.h>
+#  include <string.h>
 
 /* ── Wintun function pointers (resolved at runtime) ── */
 
-static WINTUN_CREATE_ADAPTER_FUNC   *WintunCreateAdapter;
-static WINTUN_CLOSE_ADAPTER_FUNC    *WintunCloseAdapter;
+static WINTUN_CREATE_ADAPTER_FUNC *WintunCreateAdapter;
+static WINTUN_CLOSE_ADAPTER_FUNC *WintunCloseAdapter;
 static WINTUN_GET_ADAPTER_LUID_FUNC *WintunGetAdapterLUID;
-static WINTUN_START_SESSION_FUNC    *WintunStartSession;
-static WINTUN_END_SESSION_FUNC      *WintunEndSession;
+static WINTUN_START_SESSION_FUNC *WintunStartSession;
+static WINTUN_END_SESSION_FUNC *WintunEndSession;
 static WINTUN_GET_READ_WAIT_EVENT_FUNC *WintunGetReadWaitEvent;
-static WINTUN_RECEIVE_PACKET_FUNC   *WintunReceivePacket;
+static WINTUN_RECEIVE_PACKET_FUNC *WintunReceivePacket;
 static WINTUN_RELEASE_RECEIVE_PACKET_FUNC *WintunReleaseReceivePacket;
 static WINTUN_ALLOCATE_SEND_PACKET_FUNC *WintunAllocateSendPacket;
-static WINTUN_SEND_PACKET_FUNC      *WintunSendPacket;
+static WINTUN_SEND_PACKET_FUNC *WintunSendPacket;
 
 static HMODULE g_wintun_dll = NULL;
 
 int
 mqvpn_wintun_load(void)
 {
-    if (g_wintun_dll)
-        return 0;
+    if (g_wintun_dll) return 0;
 
     g_wintun_dll = LoadLibraryA("wintun.dll");
     if (!g_wintun_dll) {
@@ -42,10 +41,14 @@ mqvpn_wintun_load(void)
         return -1;
     }
 
-#define LOAD(name) do { \
-    *(FARPROC *)&name = GetProcAddress(g_wintun_dll, #name); \
-    if (!name) { LOG_ERR("wintun.dll missing: " #name); return -1; } \
-} while (0)
+#  define LOAD(name)                                               \
+      do {                                                         \
+          *(FARPROC *)&name = GetProcAddress(g_wintun_dll, #name); \
+          if (!name) {                                             \
+              LOG_ERR("wintun.dll missing: " #name);               \
+              return -1;                                           \
+          }                                                        \
+      } while (0)
 
     LOAD(WintunCreateAdapter);
     LOAD(WintunCloseAdapter);
@@ -57,7 +60,7 @@ mqvpn_wintun_load(void)
     LOAD(WintunReleaseReceivePacket);
     LOAD(WintunAllocateSendPacket);
     LOAD(WintunSendPacket);
-#undef LOAD
+#  undef LOAD
 
     return 0;
 }
@@ -72,8 +75,7 @@ mqvpn_tun_win_create(mqvpn_tun_win_t *tun, const char *dev_name)
     tun->pipe_wr = EVUTIL_INVALID_SOCKET;
     tun->mtu = 1400;
 
-    if (mqvpn_wintun_load() < 0)
-        return -1;
+    if (mqvpn_wintun_load() < 0) return -1;
 
     /* Convert adapter name to wide string */
     const char *name = dev_name ? dev_name : "mqvpn0";
@@ -126,17 +128,15 @@ mqvpn_tun_win_create(mqvpn_tun_win_t *tun, const char *dev_name)
     /* Increase socketpair buffer to reduce packet drops under load */
     {
         int pipebuf = 7 * 1024 * 1024; /* 7 MB (aligned with WireGuard) */
-        setsockopt(tun->pipe_wr, SOL_SOCKET, SO_SNDBUF,
-                   (const char *)&pipebuf, sizeof(pipebuf));
-        setsockopt(tun->pipe_rd, SOL_SOCKET, SO_RCVBUF,
-                   (const char *)&pipebuf, sizeof(pipebuf));
+        setsockopt(tun->pipe_wr, SOL_SOCKET, SO_SNDBUF, (const char *)&pipebuf,
+                   sizeof(pipebuf));
+        setsockopt(tun->pipe_rd, SOL_SOCKET, SO_RCVBUF, (const char *)&pipebuf,
+                   sizeof(pipebuf));
 
         int actual_snd = 0, actual_rcv = 0;
         int optlen = sizeof(actual_snd);
-        getsockopt(tun->pipe_wr, SOL_SOCKET, SO_SNDBUF,
-                   (char *)&actual_snd, &optlen);
-        getsockopt(tun->pipe_rd, SOL_SOCKET, SO_RCVBUF,
-                   (char *)&actual_rcv, &optlen);
+        getsockopt(tun->pipe_wr, SOL_SOCKET, SO_SNDBUF, (char *)&actual_snd, &optlen);
+        getsockopt(tun->pipe_rd, SOL_SOCKET, SO_RCVBUF, (char *)&actual_rcv, &optlen);
         LOG_INF("TUN pipe buffers: SO_SNDBUF=%d SO_RCVBUF=%d", actual_snd, actual_rcv);
     }
 
@@ -147,8 +147,8 @@ mqvpn_tun_win_create(mqvpn_tun_win_t *tun, const char *dev_name)
 /* ── IP address configuration ── */
 
 int
-mqvpn_tun_win_set_addr(mqvpn_tun_win_t *tun, const char *addr,
-                        const char *peer_addr, int prefix_len)
+mqvpn_tun_win_set_addr(mqvpn_tun_win_t *tun, const char *addr, const char *peer_addr,
+                       int prefix_len)
 {
     MIB_UNICASTIPADDRESS_ROW row;
     InitializeUnicastIpAddressEntry(&row);
@@ -204,8 +204,8 @@ set_iface_mtu(const NET_LUID *luid, ADDRESS_FAMILY family, ULONG mtu)
 
     DWORD err = GetIpInterfaceEntry(&row);
     if (err != NO_ERROR) {
-        LOG_WRN("GetIpInterfaceEntry(%s): error %lu",
-                family == AF_INET ? "v4" : "v6", err);
+        LOG_WRN("GetIpInterfaceEntry(%s): error %lu", family == AF_INET ? "v4" : "v6",
+                err);
         return -1;
     }
 
@@ -256,20 +256,16 @@ tun_reader_thread(LPVOID arg)
     while (!InterlockedCompareExchange(&tun->stop, 0, 0)) {
         /* Wait for Wintun to signal data available */
         DWORD wait = WaitForSingleObject(tun->read_event, 250);
-        if (wait == WAIT_TIMEOUT)
-            continue;
-        if (wait != WAIT_OBJECT_0)
-            break;
+        if (wait == WAIT_TIMEOUT) continue;
+        if (wait != WAIT_OBJECT_0) break;
 
         /* Drain all available packets */
         for (;;) {
-            if (InterlockedCompareExchange(&tun->stop, 0, 0))
-                goto done;
+            if (InterlockedCompareExchange(&tun->stop, 0, 0)) goto done;
 
             DWORD pkt_size = 0;
             BYTE *pkt = WintunReceivePacket(tun->session, &pkt_size);
-            if (!pkt)
-                break;
+            if (!pkt) break;
 
             if (pkt_size > 0 && pkt_size <= 65535) {
                 /* Frame: [2-byte length][payload] */
@@ -278,8 +274,7 @@ tun_reader_thread(LPVOID arg)
                 frame[1] = (uint8_t)(pkt_size & 0xFF);
                 memcpy(frame + 2, pkt, pkt_size);
 
-                int ret = send(tun->pipe_wr, (const char *)frame,
-                               (int)(2 + pkt_size), 0);
+                int ret = send(tun->pipe_wr, (const char *)frame, (int)(2 + pkt_size), 0);
                 if (ret < 0) {
                     drop_count++;
                     drop_bytes += pkt_size;
@@ -320,12 +315,10 @@ mqvpn_tun_win_start_reader(mqvpn_tun_win_t *tun)
 int
 mqvpn_tun_win_write(mqvpn_tun_win_t *tun, const uint8_t *buf, size_t len)
 {
-    if (!tun->session || len == 0 || len > 65535)
-        return -1;
+    if (!tun->session || len == 0 || len > 65535) return -1;
 
     BYTE *pkt = WintunAllocateSendPacket(tun->session, (DWORD)len);
-    if (!pkt)
-        return MQVPN_TUN_EAGAIN;
+    if (!pkt) return MQVPN_TUN_EAGAIN;
 
     memcpy(pkt, buf, len);
     WintunSendPacket(tun->session, pkt);
