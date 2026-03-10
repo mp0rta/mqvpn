@@ -160,6 +160,75 @@ jobs:
       - name: Systemd service integration test
         run: sudo scripts/ci_e2e/run_systemd_test.sh
 
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install NASM
+        uses: ilammy/setup-nasm@v1
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Install libevent via vcpkg
+        run: vcpkg install libevent:x64-windows-static
+
+      - name: Clone BoringSSL (pinned)
+        run: |
+          git clone https://github.com/google/boringssl.git `
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl
+          git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+
+      - name: Build BoringSSL
+        run: |
+          cd third_party/xquic/third_party/boringssl
+          mkdir build
+          cd build
+          cmake -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=0 ..
+          cmake --build . --target ssl --config Release
+          cmake --build . --target crypto --config Release
+
+      - name: Build xquic
+        run: |
+          cd third_party/xquic
+          mkdir build
+          cd build
+          cmake -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DSSL_TYPE=boringssl `
+            -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" `
+            -DXQC_ENABLE_BBR2=ON ..
+          cmake --build . --config Release
+
+      - name: Build mqvpn
+        run: |
+          mkdir build
+          cd build
+          cmake -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DXQUIC_BUILD_DIR="${{ github.workspace }}/third_party/xquic/build/Release" `
+            -DBORINGSSL_BUILD_DIR="${{ github.workspace }}/third_party/xquic/third_party/boringssl/build/Release" `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static ..
+          cmake --build . --config Release
+
+      - name: Verify binary
+        run: |
+          Test-Path build/Release/mqvpn.exe
+          Get-Item build/Release/mqvpn.exe | Select-Object Name, Length
+
   android:
     runs-on: ubuntu-latest
     timeout-minutes: 20

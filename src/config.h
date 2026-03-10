@@ -9,8 +9,8 @@
 #ifndef MQVPN_CONFIG_H
 #define MQVPN_CONFIG_H
 
-#define MQVPN_CONFIG_MAX_PATHS   4
-#define MQVPN_CONFIG_MAX_DNS     4
+#define MQVPN_CONFIG_MAX_PATHS 4
+#define MQVPN_CONFIG_MAX_DNS   4
 
 typedef struct mqvpn_config_s {
     /* [Interface] — common */
@@ -18,17 +18,17 @@ typedef struct mqvpn_config_s {
     char log_level[16];
 
     /* [Interface] — server */
-    char listen[280];       /* "bind:port" */
+    char listen[280]; /* "bind:port" */
     char subnet[32];
-    char subnet6[64];       /* IPv6 tunnel subnet CIDR (e.g. "2001:db8:1::/112") */
+    char subnet6[64]; /* IPv6 tunnel subnet CIDR (e.g. "2001:db8:1::/112") */
 
     /* [Interface] — client */
     char dns_servers[MQVPN_CONFIG_MAX_DNS][64];
-    int  n_dns;
+    int n_dns;
 
     /* [Server] — client */
-    char server_addr[280];  /* "host:port" */
-    int  insecure;
+    char server_addr[280]; /* "host:port" */
+    int insecure;
 
     /* [Auth] — client */
     char auth_key[256];
@@ -39,26 +39,26 @@ typedef struct mqvpn_config_s {
 
     /* [Auth] — server */
     char server_auth_key[256];
-    int  max_clients;
+    int max_clients;
 
     /* [Multipath] */
     char paths[MQVPN_CONFIG_MAX_PATHS][32];
-    int  n_paths;
+    int n_paths;
     char scheduler[16];
 
     /* [Interface] — client reconnection */
-    int  reconnect;             /* 1=auto-reconnect (default), 0=exit on disconnect */
-    int  reconnect_interval;    /* base interval in seconds (default 5) */
-    int  kill_switch;           /* 1=block traffic outside tunnel, 0=off (default) */
+    int reconnect;          /* 1=auto-reconnect (default), 0=exit on disconnect */
+    int reconnect_interval; /* base interval in seconds (default 5) */
+    int kill_switch;        /* 1=block traffic outside tunnel, 0=off (default) */
 
     /* Inferred mode: 1=server, 0=client */
-    int  is_server;
+    int is_server;
 } mqvpn_config_t;
 
 /* Fill cfg with default values */
 void mqvpn_config_defaults(mqvpn_config_t *cfg);
 
 /* Parse INI file at path into cfg. Returns 0 on success, -1 on error. */
-int  mqvpn_config_load(mqvpn_config_t *cfg, const char *path);
+int mqvpn_config_load(mqvpn_config_t *cfg, const char *path);
 
 #endif /* MQVPN_CONFIG_H */

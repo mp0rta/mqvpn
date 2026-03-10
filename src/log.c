@@ -1,14 +1,18 @@
 #include "log.h"
 
 #include <time.h>
-#include <sys/time.h>
+#ifdef _WIN32
+#  include <windows.h>
+#else
+#  include <sys/time.h>
+#endif
 
 static mqvpn_log_level_t g_log_level = MQVPN_LOG_INFO;
 
 static const char *level_str[] = {
     [MQVPN_LOG_DEBUG] = "DBG",
-    [MQVPN_LOG_INFO]  = "INF",
-    [MQVPN_LOG_WARN]  = "WRN",
+    [MQVPN_LOG_INFO] = "INF",
+    [MQVPN_LOG_WARN] = "WRN",
     [MQVPN_LOG_ERROR] = "ERR",
 };
 
@@ -25,14 +29,19 @@ mqvpn_log(mqvpn_log_level_t level, const char *fmt, ...)
         return;
     }
 
+#ifdef _WIN32
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    fprintf(stderr, "%02d:%02d:%02d.%03d [%s] ", st.wHour, st.wMinute, st.wSecond,
+            st.wMilliseconds, level_str[level]);
+#else
     struct timeval tv;
     gettimeofday(&tv, NULL);
     struct tm tm;
     localtime_r(&tv.tv_sec, &tm);
-
-    fprintf(stderr, "%02d:%02d:%02d.%03d [%s] ",
-            tm.tm_hour, tm.tm_min, tm.tm_sec,
+    fprintf(stderr, "%02d:%02d:%02d.%03d [%s] ", tm.tm_hour, tm.tm_min, tm.tm_sec,
             (int)(tv.tv_usec / 1000), level_str[level]);
+#endif
 
     va_list ap;
     va_start(ap, fmt);

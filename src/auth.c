@@ -14,8 +14,7 @@ static const char b64_table[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 int
-mqvpn_auth_b64_encode(char *dst, size_t dst_len,
-                       const unsigned char *src, size_t src_len)
+mqvpn_auth_b64_encode(char *dst, size_t dst_len, const unsigned char *src, size_t src_len)
 {
     size_t out_len = ((src_len + 2) / 3) * 4;
     if (dst_len < out_len + 1) {
@@ -24,9 +23,8 @@ mqvpn_auth_b64_encode(char *dst, size_t dst_len,
 
     size_t i = 0, j = 0;
     while (i + 2 < src_len) {
-        uint32_t triple = ((uint32_t)src[i] << 16) |
-                          ((uint32_t)src[i+1] << 8) |
-                          (uint32_t)src[i+2];
+        uint32_t triple =
+            ((uint32_t)src[i] << 16) | ((uint32_t)src[i + 1] << 8) | (uint32_t)src[i + 2];
         dst[j++] = b64_table[(triple >> 18) & 0x3F];
         dst[j++] = b64_table[(triple >> 12) & 0x3F];
         dst[j++] = b64_table[(triple >> 6) & 0x3F];
@@ -36,8 +34,7 @@ mqvpn_auth_b64_encode(char *dst, size_t dst_len,
 
     if (i < src_len) {
         uint32_t triple = (uint32_t)src[i] << 16;
-        if (i + 1 < src_len)
-            triple |= (uint32_t)src[i+1] << 8;
+        if (i + 1 < src_len) triple |= (uint32_t)src[i + 1] << 8;
 
         dst[j++] = b64_table[(triple >> 18) & 0x3F];
         dst[j++] = b64_table[(triple >> 12) & 0x3F];
@@ -57,11 +54,9 @@ mqvpn_auth_b64_encode(char *dst, size_t dst_len,
 /* ---- Constant-time comparison ---- */
 
 int
-mqvpn_auth_ct_compare(const char *a, size_t a_len,
-                       const char *b, size_t b_len)
+mqvpn_auth_ct_compare(const char *a, size_t a_len, const char *b, size_t b_len)
 {
-    if (a_len != b_len)
-        return 1;
+    if (a_len != b_len) return 1;
 
     volatile unsigned char result = 0;
     for (size_t i = 0; i < a_len; i++) {

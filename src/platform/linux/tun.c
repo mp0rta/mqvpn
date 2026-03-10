@@ -20,8 +20,7 @@ mqvpn_tun_create(mqvpn_tun_t *tun, const char *dev_name)
 {
     /* Copy dev_name before memset — caller may pass tun->name which aliases tun */
     char name_buf[IFNAMSIZ] = "";
-    if (dev_name && dev_name[0])
-        snprintf(name_buf, sizeof(name_buf), "%s", dev_name);
+    if (dev_name && dev_name[0]) snprintf(name_buf, sizeof(name_buf), "%s", dev_name);
 
     memset(tun, 0, sizeof(*tun));
     tun->fd = -1;
@@ -62,8 +61,8 @@ mqvpn_tun_create(mqvpn_tun_t *tun, const char *dev_name)
 }
 
 int
-mqvpn_tun_set_addr(mqvpn_tun_t *tun, const char *addr,
-                    const char *peer_addr, int prefix_len)
+mqvpn_tun_set_addr(mqvpn_tun_t *tun, const char *addr, const char *peer_addr,
+                   int prefix_len)
 {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
@@ -179,16 +178,14 @@ static unsigned int
 tun_ifindex(const char *ifname)
 {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0)
-        return 0;
+    if (sock < 0) return 0;
 
     struct ifreq ifr;
     memset(&ifr, 0, sizeof(ifr));
     strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
 
     unsigned int idx = 0;
-    if (ioctl(sock, SIOCGIFINDEX, &ifr) == 0)
-        idx = (unsigned int)ifr.ifr_ifindex;
+    if (ioctl(sock, SIOCGIFINDEX, &ifr) == 0) idx = (unsigned int)ifr.ifr_ifindex;
 
     close(sock);
     return idx;
@@ -207,8 +204,7 @@ tun_ifindex(const char *ifname)
  * We then disable ipv6 via procfs and retry.
  */
 static int
-tun_netlink_add_addr6(unsigned int ifindex, const struct in6_addr *addr,
-                      int prefix_len)
+tun_netlink_add_addr6(unsigned int ifindex, const struct in6_addr *addr, int prefix_len)
 {
     int fd = socket(AF_NETLINK, SOCK_DGRAM, NETLINK_ROUTE);
     if (fd < 0) {
@@ -231,36 +227,34 @@ tun_netlink_add_addr6(unsigned int ifindex, const struct in6_addr *addr,
      *   nlmsghdr + ifaddrmsg + RTA(IFA_LOCAL, 16 bytes) + RTA(IFA_ADDRESS, 16 bytes)
      */
     struct {
-        struct nlmsghdr  nlh;
+        struct nlmsghdr nlh;
         struct ifaddrmsg ifa;
         /* RTA_SPACE(16) for IFA_LOCAL + RTA_SPACE(16) for IFA_ADDRESS */
-        char             buf[RTA_SPACE(16) + RTA_SPACE(16)];
+        char buf[RTA_SPACE(16) + RTA_SPACE(16)];
     } req;
 
     memset(&req, 0, sizeof(req));
-    req.nlh.nlmsg_len   = NLMSG_LENGTH(sizeof(struct ifaddrmsg));
-    req.nlh.nlmsg_type  = RTM_NEWADDR;
+    req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifaddrmsg));
+    req.nlh.nlmsg_type = RTM_NEWADDR;
     req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
-    req.nlh.nlmsg_seq   = 1;
+    req.nlh.nlmsg_seq = 1;
 
-    req.ifa.ifa_family    = AF_INET6;
+    req.ifa.ifa_family = AF_INET6;
     req.ifa.ifa_prefixlen = (unsigned char)prefix_len;
-    req.ifa.ifa_index     = ifindex;
-    req.ifa.ifa_scope     = 0; /* RT_SCOPE_UNIVERSE */
+    req.ifa.ifa_index = ifindex;
+    req.ifa.ifa_scope = 0; /* RT_SCOPE_UNIVERSE */
 
     /* Append IFA_LOCAL attribute */
-    struct rtattr *rta = (struct rtattr *)
-        ((char *)&req + NLMSG_ALIGN(req.nlh.nlmsg_len));
+    struct rtattr *rta = (struct rtattr *)((char *)&req + NLMSG_ALIGN(req.nlh.nlmsg_len));
     rta->rta_type = IFA_LOCAL;
-    rta->rta_len  = RTA_LENGTH(16);
+    rta->rta_len = RTA_LENGTH(16);
     memcpy(RTA_DATA(rta), addr, 16);
     req.nlh.nlmsg_len = NLMSG_ALIGN(req.nlh.nlmsg_len) + RTA_SPACE(16);
 
     /* Append IFA_ADDRESS attribute */
-    rta = (struct rtattr *)
-        ((char *)&req + NLMSG_ALIGN(req.nlh.nlmsg_len));
+    rta = (struct rtattr *)((char *)&req + NLMSG_ALIGN(req.nlh.nlmsg_len));
     rta->rta_type = IFA_ADDRESS;
-    rta->rta_len  = RTA_LENGTH(16);
+    rta->rta_len = RTA_LENGTH(16);
     memcpy(RTA_DATA(rta), addr, 16);
     req.nlh.nlmsg_len = NLMSG_ALIGN(req.nlh.nlmsg_len) + RTA_SPACE(16);
 
@@ -288,8 +282,7 @@ tun_netlink_add_addr6(unsigned int ifindex, const struct in6_addr *addr,
     }
 
     struct nlmsgerr *nlerr = (struct nlmsgerr *)NLMSG_DATA(nlh);
-    if (nlerr->error == 0)
-        return 0;  /* success */
+    if (nlerr->error == 0) return 0; /* success */
 
     /* Return the negated errno (kernel sends negative errno) */
     errno = -nlerr->error;
@@ -303,8 +296,7 @@ static int
 tun_write_proc(const char *path, const char *value)
 {
     int fd = open(path, O_WRONLY);
-    if (fd < 0)
-        return -1;
+    if (fd < 0) return -1;
     ssize_t n = write(fd, value, strlen(value));
     close(fd);
     return (n > 0) ? 0 : -1;
@@ -334,14 +326,12 @@ mqvpn_tun_set_addr6(mqvpn_tun_t *tun, const char *addr6_str, int prefix_len)
     tun_write_proc("/proc/sys/net/ipv6/conf/default/disable_ipv6", "0");
 
     char path[128];
-    snprintf(path, sizeof(path),
-             "/proc/sys/net/ipv6/conf/%s/disable_ipv6", tun->name);
+    snprintf(path, sizeof(path), "/proc/sys/net/ipv6/conf/%s/disable_ipv6", tun->name);
     tun_write_proc(path, "0");
 
     /* Try to add the address via netlink */
     int rc = tun_netlink_add_addr6(ifindex, &addr, prefix_len);
-    if (rc == 0)
-        goto done;
+    if (rc == 0) goto done;
 
     /*
      * The first attempt may fail with EACCES if disable_ipv6 was 1,
@@ -359,12 +349,11 @@ mqvpn_tun_set_addr6(mqvpn_tun_t *tun, const char *addr6_str, int prefix_len)
         }
 
         rc = tun_netlink_add_addr6(ifindex, &addr, prefix_len);
-        if (rc == 0)
-            goto done;
+        if (rc == 0) goto done;
     }
 
-    LOG_ERR("netlink RTM_NEWADDR %s/%d dev %s: %s",
-            addr6_str, prefix_len, tun->name, strerror(errno));
+    LOG_ERR("netlink RTM_NEWADDR %s/%d dev %s: %s", addr6_str, prefix_len, tun->name,
+            strerror(errno));
     return -1;
 
 done:
