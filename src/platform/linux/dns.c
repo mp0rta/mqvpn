@@ -15,8 +15,7 @@
 #include <netdb.h>
 
 int
-mqvpn_resolve_host(const char *host, struct sockaddr_storage *out,
-                    socklen_t *out_len)
+mqvpn_resolve_host(const char *host, struct sockaddr_storage *out, socklen_t *out_len)
 {
     if (!host || !host[0]) {
         return -1;
@@ -77,11 +76,11 @@ const char *
 mqvpn_sa_ntop(const struct sockaddr_storage *ss, char *buf, size_t buflen)
 {
     if (ss->ss_family == AF_INET) {
-        return inet_ntop(AF_INET, &((const struct sockaddr_in *)ss)->sin_addr,
-                         buf, (socklen_t)buflen);
+        return inet_ntop(AF_INET, &((const struct sockaddr_in *)ss)->sin_addr, buf,
+                         (socklen_t)buflen);
     } else if (ss->ss_family == AF_INET6) {
-        return inet_ntop(AF_INET6, &((const struct sockaddr_in6 *)ss)->sin6_addr,
-                         buf, (socklen_t)buflen);
+        return inet_ntop(AF_INET6, &((const struct sockaddr_in6 *)ss)->sin6_addr, buf,
+                         (socklen_t)buflen);
     }
     return NULL;
 }
@@ -98,10 +97,10 @@ void
 mqvpn_dns_init(mqvpn_dns_t *dns)
 {
     memset(dns, 0, sizeof(*dns));
-    dns->lock_fd     = -1;
+    dns->lock_fd = -1;
     dns->resolv_path = "/etc/resolv.conf";
     dns->backup_path = "/etc/resolv.conf.mqvpn.bak";
-    dns->lock_path   = "/run/mqvpn-dns.lock";
+    dns->lock_path = "/run/mqvpn-dns.lock";
 }
 
 int
@@ -123,7 +122,10 @@ copy_file(const char *src, const char *dst)
     FILE *in = fopen(src, "r");
     if (!in) return -1;
     int out_fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (out_fd < 0) { fclose(in); return -1; }
+    if (out_fd < 0) {
+        fclose(in);
+        return -1;
+    }
     FILE *out = fdopen(out_fd, "w");
     if (!out) {
         close(out_fd);
@@ -172,13 +174,13 @@ mqvpn_dns_apply(mqvpn_dns_t *dns)
     struct stat st;
     if (lstat(dns->resolv_path, &st) == 0 && S_ISLNK(st.st_mode)) {
         LOG_WRN("dns: %s is a symlink (possibly systemd-resolved). "
-                "Overwriting anyway.", dns->resolv_path);
+                "Overwriting anyway.",
+                dns->resolv_path);
     }
 
     /* Backup original resolv.conf */
     if (copy_file(dns->resolv_path, dns->backup_path) < 0) {
-        LOG_WRN("dns: could not backup %s (file may not exist)",
-                dns->resolv_path);
+        LOG_WRN("dns: could not backup %s (file may not exist)", dns->resolv_path);
         /* Continue anyway — new installation may not have resolv.conf */
     }
 
@@ -186,7 +188,10 @@ mqvpn_dns_apply(mqvpn_dns_t *dns)
     int resolv_fd = open(dns->resolv_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (resolv_fd < 0) {
         LOG_ERR("dns: cannot open %s: %m", dns->resolv_path);
-        if (dns->lock_fd >= 0) { close(dns->lock_fd); dns->lock_fd = -1; }
+        if (dns->lock_fd >= 0) {
+            close(dns->lock_fd);
+            dns->lock_fd = -1;
+        }
         return -1;
     }
     FILE *fp = fdopen(resolv_fd, "w");
@@ -208,8 +213,8 @@ mqvpn_dns_apply(mqvpn_dns_t *dns)
     fclose(fp);
 
     dns->active = 1;
-    LOG_INF("dns: configured %d server(s), backed up to %s",
-            dns->n_servers, dns->backup_path);
+    LOG_INF("dns: configured %d server(s), backed up to %s", dns->n_servers,
+            dns->backup_path);
     return 0;
 }
 
@@ -219,8 +224,7 @@ mqvpn_dns_restore(mqvpn_dns_t *dns)
     if (!dns->active) return;
 
     if (copy_file(dns->backup_path, dns->resolv_path) < 0) {
-        LOG_ERR("dns: failed to restore %s from %s",
-                dns->resolv_path, dns->backup_path);
+        LOG_ERR("dns: failed to restore %s from %s", dns->resolv_path, dns->backup_path);
         /* Fall through to release lock — keeping it held would block
          * future DNS operations in this process and any retry. */
     } else {

@@ -36,8 +36,7 @@ static void
 cb_tun_output(const uint8_t *pkt, size_t len, void *user_ctx)
 {
     platform_ctx_t *p = (platform_ctx_t *)user_ctx;
-    if (p->tun_up && p->tun.fd >= 0)
-        mqvpn_tun_write(&p->tun, pkt, len);
+    if (p->tun_up && p->tun.fd >= 0) mqvpn_tun_write(&p->tun, pkt, len);
 }
 
 static void
@@ -46,8 +45,16 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     platform_ctx_t *p = (platform_ctx_t *)user_ctx;
 
     /* Clean up stale TUN event from previous connection (reconnect case) */
-    if (p->ev_tun) { event_del(p->ev_tun); event_free(p->ev_tun); p->ev_tun = NULL; }
-    if (p->tun.fd >= 0) { mqvpn_tun_destroy(&p->tun); p->tun.fd = -1; p->tun_up = 0; }
+    if (p->ev_tun) {
+        event_del(p->ev_tun);
+        event_free(p->ev_tun);
+        p->ev_tun = NULL;
+    }
+    if (p->tun.fd >= 0) {
+        mqvpn_tun_destroy(&p->tun);
+        p->tun.fd = -1;
+        p->tun_up = 0;
+    }
 
     /* Create TUN device — use tun_name_cfg which survives destroy/recreate */
     if (mqvpn_tun_create(&p->tun, p->tun_name_cfg) < 0) {
@@ -57,13 +64,11 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
 
     /* Set IPv4 address */
     char local_ip[INET_ADDRSTRLEN];
-    snprintf(local_ip, sizeof(local_ip), "%d.%d.%d.%d",
-             info->assigned_ip[0], info->assigned_ip[1],
-             info->assigned_ip[2], info->assigned_ip[3]);
+    snprintf(local_ip, sizeof(local_ip), "%d.%d.%d.%d", info->assigned_ip[0],
+             info->assigned_ip[1], info->assigned_ip[2], info->assigned_ip[3]);
     char peer_ip[INET_ADDRSTRLEN];
-    snprintf(peer_ip, sizeof(peer_ip), "%d.%d.%d.%d",
-             info->server_ip[0], info->server_ip[1],
-             info->server_ip[2], info->server_ip[3]);
+    snprintf(peer_ip, sizeof(peer_ip), "%d.%d.%d.%d", info->server_ip[0],
+             info->server_ip[1], info->server_ip[2], info->server_ip[3]);
 
     if (mqvpn_tun_set_addr(&p->tun, local_ip, peer_ip, 32) < 0) goto fail;
     if (mqvpn_tun_set_mtu(&p->tun, info->mtu) < 0) goto fail;
@@ -78,7 +83,8 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
             LOG_WRN("failed to set IPv6 address on TUN (continuing IPv4-only)");
     }
 
-    LOG_INF("TUN %s configured: %s → %s (mtu=%d)", p->tun.name, local_ip, peer_ip, info->mtu);
+    LOG_INF("TUN %s configured: %s → %s (mtu=%d)", p->tun.name, local_ip, peer_ip,
+            info->mtu);
 
     /* Set up routes, killswitch, DNS */
     if (setup_routes(p) < 0) {
@@ -95,8 +101,7 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     }
 
     /* Register TUN read event */
-    p->ev_tun = event_new(p->eb, p->tun.fd, EV_READ | EV_PERSIST,
-                           on_tun_read, p);
+    p->ev_tun = event_new(p->eb, p->tun.fd, EV_READ | EV_PERSIST, on_tun_read, p);
     if (!p->ev_tun) {
         LOG_ERR("failed to create TUN event");
         goto fail;
@@ -137,10 +142,9 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
                  void *user_ctx)
 {
     platform_ctx_t *p = (platform_ctx_t *)user_ctx;
-    static const char *names[] = {
-        "IDLE", "CONNECTING", "AUTHENTICATING",
-        "TUNNEL_READY", "ESTABLISHED", "RECONNECTING", "CLOSED"
-    };
+    static const char *names[] = {"IDLE",         "CONNECTING",  "AUTHENTICATING",
+                                  "TUNNEL_READY", "ESTABLISHED", "RECONNECTING",
+                                  "CLOSED"};
     const char *os = (old_state < 7) ? names[old_state] : "?";
     const char *ns = (new_state < 7) ? names[new_state] : "?";
     LOG_INF("state: %s → %s", os, ns);
@@ -148,13 +152,16 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
     /* On RECONNECTING or CLOSED, tear down TUN and platform resources so
      * that stale fd events don't fire ("tun read: Bad file descriptor").
      * The TUN will be recreated in cb_tunnel_config_ready on reconnect. */
-    if (new_state == MQVPN_STATE_RECONNECTING ||
-        new_state == MQVPN_STATE_CLOSED) {
+    if (new_state == MQVPN_STATE_RECONNECTING || new_state == MQVPN_STATE_CLOSED) {
         cleanup_killswitch(p);
         cleanup_routes(p);
         mqvpn_dns_restore(&p->dns);
         if (p->tun_up) {
-            if (p->ev_tun) { event_del(p->ev_tun); event_free(p->ev_tun); p->ev_tun = NULL; }
+            if (p->ev_tun) {
+                event_del(p->ev_tun);
+                event_free(p->ev_tun);
+                p->ev_tun = NULL;
+            }
             mqvpn_tun_destroy(&p->tun);
             p->tun.fd = -1;
             p->tun_up = 0;
@@ -178,8 +185,7 @@ static void
 cb_mtu_updated(int mtu, void *user_ctx)
 {
     platform_ctx_t *p = (platform_ctx_t *)user_ctx;
-    if (p->tun_up)
-        mqvpn_tun_set_mtu(&p->tun, mtu);
+    if (p->tun_up) mqvpn_tun_set_mtu(&p->tun, mtu);
     LOG_INF("TUN MTU updated to %d", mtu);
 }
 
@@ -189,8 +195,8 @@ cb_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
     (void)user_ctx;
     switch (level) {
     case MQVPN_LOG_DEBUG: LOG_DBG("[lib] %s", msg); break;
-    case MQVPN_LOG_INFO:  LOG_INF("[lib] %s", msg); break;
-    case MQVPN_LOG_WARN:  LOG_WRN("[lib] %s", msg); break;
+    case MQVPN_LOG_INFO: LOG_INF("[lib] %s", msg); break;
+    case MQVPN_LOG_WARN: LOG_WRN("[lib] %s", msg); break;
     case MQVPN_LOG_ERROR: LOG_ERR("[lib] %s", msg); break;
     }
 }
@@ -216,7 +222,7 @@ schedule_next_tick(platform_ctx_t *p)
 
     int ms = interest.next_timer_ms;
     struct timeval tv = {
-        .tv_sec  = ms / 1000,
+        .tv_sec = ms / 1000,
         .tv_usec = (ms % 1000) * 1000,
     };
     event_add(p->ev_tick, &tv);
@@ -233,7 +239,8 @@ schedule_next_tick(platform_ctx_t *p)
 static void
 on_tick_timer(evutil_socket_t fd, short what, void *arg)
 {
-    (void)fd; (void)what;
+    (void)fd;
+    (void)what;
     platform_ctx_t *p = (platform_ctx_t *)arg;
 
     mqvpn_client_tick(p->client);
@@ -243,7 +250,8 @@ on_tick_timer(evutil_socket_t fd, short what, void *arg)
 static void
 on_tun_read(evutil_socket_t fd, short what, void *arg)
 {
-    (void)fd; (void)what;
+    (void)fd;
+    (void)what;
     platform_ctx_t *p = (platform_ctx_t *)arg;
     uint8_t buf[65536];
 
@@ -270,9 +278,10 @@ on_socket_read(evutil_socket_t fd, short what, void *arg)
     socklen_t peer_len = sizeof(peer);
 
     for (int i = 0; i < 64; i++) {
-        // codeql[cpp/uncontrolled-allocation-size] buf is stack-allocated and bounded by sizeof(buf); xquic validates internally
-        ssize_t n = recvfrom(fd, buf, sizeof(buf), 0,
-                             (struct sockaddr *)&peer, &peer_len);
+        // codeql[cpp/uncontrolled-allocation-size] buf is stack-allocated and bounded by
+        // sizeof(buf); xquic validates internally
+        ssize_t n =
+            recvfrom(fd, buf, sizeof(buf), 0, (struct sockaddr *)&peer, &peer_len);
         if (n <= 0 || (size_t)n > sizeof(buf)) break;
 
         /* Find which library path handle matches this fd */
@@ -286,7 +295,7 @@ on_socket_read(evutil_socket_t fd, short what, void *arg)
         if (handle < 0) break;
 
         mqvpn_client_on_socket_recv(p->client, handle, buf, (size_t)n,
-                                     (struct sockaddr *)&peer, peer_len);
+                                    (struct sockaddr *)&peer, peer_len);
     }
     /* Drive engine after receiving packets */
     mqvpn_client_tick(p->client);
@@ -296,7 +305,8 @@ on_socket_read(evutil_socket_t fd, short what, void *arg)
 static void
 on_signal(evutil_socket_t sig, short what, void *arg)
 {
-    (void)sig; (void)what;
+    (void)sig;
+    (void)what;
     platform_ctx_t *p = (platform_ctx_t *)arg;
 
     LOG_INF("received signal, shutting down...");
@@ -341,38 +351,45 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
     /* Create libmqvpn config */
     mqvpn_config_t *lib_cfg = mqvpn_config_new();
-    if (!lib_cfg) { LOG_ERR("failed to allocate config"); return 1; }
+    if (!lib_cfg) {
+        LOG_ERR("failed to allocate config");
+        return 1;
+    }
 
     mqvpn_config_set_server(lib_cfg, cfg->server_addr, cfg->server_port);
     if (cfg->auth_key) mqvpn_config_set_auth_key(lib_cfg, cfg->auth_key);
     mqvpn_config_set_insecure(lib_cfg, cfg->insecure);
     mqvpn_config_set_multipath(lib_cfg, cfg->n_paths > 1 ? 1 : 0);
     mqvpn_config_set_reconnect(lib_cfg, cfg->reconnect,
-                                cfg->reconnect_interval > 0 ? cfg->reconnect_interval : 5);
+                               cfg->reconnect_interval > 0 ? cfg->reconnect_interval : 5);
     mqvpn_config_set_killswitch_hint(lib_cfg, cfg->kill_switch);
 
     /* Map xquic log level back to library log level */
     mqvpn_log_level_t lib_log;
-    if (cfg->log_level >= 5) lib_log = MQVPN_LOG_DEBUG;
-    else if (cfg->log_level >= 3) lib_log = MQVPN_LOG_INFO;
-    else if (cfg->log_level >= 2) lib_log = MQVPN_LOG_WARN;
-    else lib_log = MQVPN_LOG_ERROR;
+    if (cfg->log_level >= 5)
+        lib_log = MQVPN_LOG_DEBUG;
+    else if (cfg->log_level >= 3)
+        lib_log = MQVPN_LOG_INFO;
+    else if (cfg->log_level >= 2)
+        lib_log = MQVPN_LOG_WARN;
+    else
+        lib_log = MQVPN_LOG_ERROR;
     mqvpn_config_set_log_level(lib_cfg, lib_log);
 
-    mqvpn_config_set_scheduler(lib_cfg,
-        cfg->scheduler == 1 ? MQVPN_SCHED_WLB : MQVPN_SCHED_MINRTT);
+    mqvpn_config_set_scheduler(lib_cfg, cfg->scheduler == 1 ? MQVPN_SCHED_WLB
+                                                            : MQVPN_SCHED_MINRTT);
 
     /* Create callbacks */
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
-    cbs.tun_output          = cb_tun_output;
+    cbs.tun_output = cb_tun_output;
     cbs.tunnel_config_ready = cb_tunnel_config_ready;
-    cbs.send_packet         = NULL;  /* fd-only mode */
-    cbs.tunnel_closed       = cb_tunnel_closed;
-    cbs.ready_for_tun       = cb_ready_for_tun;
-    cbs.state_changed       = cb_state_changed;
-    cbs.path_event          = cb_path_event;
-    cbs.mtu_updated         = cb_mtu_updated;
-    cbs.log                 = cb_log;
+    cbs.send_packet = NULL; /* fd-only mode */
+    cbs.tunnel_closed = cb_tunnel_closed;
+    cbs.ready_for_tun = cb_ready_for_tun;
+    cbs.state_changed = cb_state_changed;
+    cbs.path_event = cb_path_event;
+    cbs.mtu_updated = cb_mtu_updated;
+    cbs.log = cb_log;
     cbs.reconnect_scheduled = cb_reconnect_scheduled;
 
     /* Create client */
@@ -384,12 +401,15 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     }
 
     /* Set server address on client */
-    mqvpn_client_set_server_addr(ctx.client,
-        (struct sockaddr *)&ctx.server_addr, ctx.server_addrlen);
+    mqvpn_client_set_server_addr(ctx.client, (struct sockaddr *)&ctx.server_addr,
+                                 ctx.server_addrlen);
 
     /* Create event base */
     ctx.eb = event_base_new();
-    if (!ctx.eb) { LOG_ERR("event_base_new failed"); goto cleanup; }
+    if (!ctx.eb) {
+        LOG_ERR("event_base_new failed");
+        goto cleanup;
+    }
 
     /* Create UDP sockets */
     mqvpn_path_mgr_init(&ctx.path_mgr);
@@ -418,13 +438,13 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
             goto cleanup;
         }
 
-        ctx.ev_udp[i] = event_new(ctx.eb, mp->fd, EV_READ | EV_PERSIST,
-                                   on_socket_read, &ctx);
+        ctx.ev_udp[i] =
+            event_new(ctx.eb, mp->fd, EV_READ | EV_PERSIST, on_socket_read, &ctx);
         event_add(ctx.ev_udp[i], NULL);
     }
 
     /* Signal handlers */
-    ctx.ev_sigint  = evsignal_new(ctx.eb, SIGINT,  on_signal, &ctx);
+    ctx.ev_sigint = evsignal_new(ctx.eb, SIGINT, on_signal, &ctx);
     ctx.ev_sigterm = evsignal_new(ctx.eb, SIGTERM, on_signal, &ctx);
     event_add(ctx.ev_sigint, NULL);
     event_add(ctx.ev_sigterm, NULL);
@@ -452,17 +472,32 @@ cleanup:
     mqvpn_dns_restore(&ctx.dns);
 
     if (ctx.tun_up) {
-        if (ctx.ev_tun) { event_del(ctx.ev_tun); event_free(ctx.ev_tun); }
+        if (ctx.ev_tun) {
+            event_del(ctx.ev_tun);
+            event_free(ctx.ev_tun);
+        }
         mqvpn_tun_destroy(&ctx.tun);
     }
 
     for (int i = 0; i < ctx.path_mgr.n_paths; i++) {
-        if (ctx.ev_udp[i]) { event_del(ctx.ev_udp[i]); event_free(ctx.ev_udp[i]); }
+        if (ctx.ev_udp[i]) {
+            event_del(ctx.ev_udp[i]);
+            event_free(ctx.ev_udp[i]);
+        }
     }
 
-    if (ctx.ev_tick)    { event_del(ctx.ev_tick);    event_free(ctx.ev_tick); }
-    if (ctx.ev_sigint)  { event_del(ctx.ev_sigint);  event_free(ctx.ev_sigint); }
-    if (ctx.ev_sigterm) { event_del(ctx.ev_sigterm); event_free(ctx.ev_sigterm); }
+    if (ctx.ev_tick) {
+        event_del(ctx.ev_tick);
+        event_free(ctx.ev_tick);
+    }
+    if (ctx.ev_sigint) {
+        event_del(ctx.ev_sigint);
+        event_free(ctx.ev_sigint);
+    }
+    if (ctx.ev_sigterm) {
+        event_del(ctx.ev_sigterm);
+        event_free(ctx.ev_sigterm);
+    }
 
     mqvpn_path_mgr_destroy(&ctx.path_mgr);
     mqvpn_client_destroy(ctx.client);
@@ -477,17 +512,17 @@ cleanup:
  * ================================================================ */
 
 typedef struct {
-    mqvpn_server_t     *server;
-    struct event_base  *eb;
-    struct event       *ev_tick;
-    struct event       *ev_tun;
-    struct event       *ev_socket;
-    struct event       *ev_sigint;
-    struct event       *ev_sigterm;
-    mqvpn_tun_t         tun;
-    int                 tun_up;
-    int                 udp_fd;
-    int                 shutting_down;
+    mqvpn_server_t *server;
+    struct event_base *eb;
+    struct event *ev_tick;
+    struct event *ev_tun;
+    struct event *ev_socket;
+    struct event *ev_sigint;
+    struct event *ev_sigterm;
+    mqvpn_tun_t tun;
+    int tun_up;
+    int udp_fd;
+    int shutting_down;
 } server_platform_ctx_t;
 
 static void svr_on_tick(evutil_socket_t fd, short what, void *arg);
@@ -501,7 +536,7 @@ svr_schedule_next_tick(server_platform_ctx_t *sp)
 
     int ms = interest.next_timer_ms;
     struct timeval tv = {
-        .tv_sec  = ms / 1000,
+        .tv_sec = ms / 1000,
         .tv_usec = (ms % 1000) * 1000,
     };
     event_add(sp->ev_tick, &tv);
@@ -518,7 +553,8 @@ svr_schedule_next_tick(server_platform_ctx_t *sp)
 static void
 svr_on_tick(evutil_socket_t fd, short what, void *arg)
 {
-    (void)fd; (void)what;
+    (void)fd;
+    (void)what;
     server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
     mqvpn_server_tick(sp->server);
     svr_schedule_next_tick(sp);
@@ -528,8 +564,7 @@ static void
 svr_cb_tun_output(const uint8_t *pkt, size_t len, void *user_ctx)
 {
     server_platform_ctx_t *sp = (server_platform_ctx_t *)user_ctx;
-    if (sp->tun_up && sp->tun.fd >= 0)
-        mqvpn_tun_write(&sp->tun, pkt, len);
+    if (sp->tun_up && sp->tun.fd >= 0) mqvpn_tun_write(&sp->tun, pkt, len);
 }
 
 static void
@@ -546,15 +581,12 @@ svr_cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
 
     /* Set IPv4 address — server gets assigned_ip (the .1 address) */
     char srv_ip[INET_ADDRSTRLEN], base_ip[INET_ADDRSTRLEN];
-    snprintf(srv_ip, sizeof(srv_ip), "%d.%d.%d.%d",
-             info->assigned_ip[0], info->assigned_ip[1],
-             info->assigned_ip[2], info->assigned_ip[3]);
-    snprintf(base_ip, sizeof(base_ip), "%d.%d.%d.%d",
-             info->server_ip[0], info->server_ip[1],
-             info->server_ip[2], info->server_ip[3]);
+    snprintf(srv_ip, sizeof(srv_ip), "%d.%d.%d.%d", info->assigned_ip[0],
+             info->assigned_ip[1], info->assigned_ip[2], info->assigned_ip[3]);
+    snprintf(base_ip, sizeof(base_ip), "%d.%d.%d.%d", info->server_ip[0],
+             info->server_ip[1], info->server_ip[2], info->server_ip[3]);
 
-    if (mqvpn_tun_set_addr(&sp->tun, srv_ip, base_ip,
-                            info->assigned_prefix) < 0) return;
+    if (mqvpn_tun_set_addr(&sp->tun, srv_ip, base_ip, info->assigned_prefix) < 0) return;
     if (mqvpn_tun_set_mtu(&sp->tun, info->mtu) < 0) return;
     if (mqvpn_tun_up(&sp->tun) < 0) return;
 
@@ -569,8 +601,7 @@ svr_cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     LOG_INF("TUN %s configured: %s (mtu=%d)", sp->tun.name, srv_ip, info->mtu);
 
     /* Register TUN read event */
-    sp->ev_tun = event_new(sp->eb, sp->tun.fd, EV_READ | EV_PERSIST,
-                            svr_on_tun_read, sp);
+    sp->ev_tun = event_new(sp->eb, sp->tun.fd, EV_READ | EV_PERSIST, svr_on_tun_read, sp);
     if (sp->ev_tun) {
         event_add(sp->ev_tun, NULL);
         sp->tun_up = 1;
@@ -583,8 +614,8 @@ svr_cb_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
     (void)user_ctx;
     switch (level) {
     case MQVPN_LOG_DEBUG: LOG_DBG("[svr] %s", msg); break;
-    case MQVPN_LOG_INFO:  LOG_INF("[svr] %s", msg); break;
-    case MQVPN_LOG_WARN:  LOG_WRN("[svr] %s", msg); break;
+    case MQVPN_LOG_INFO: LOG_INF("[svr] %s", msg); break;
+    case MQVPN_LOG_WARN: LOG_WRN("[svr] %s", msg); break;
     case MQVPN_LOG_ERROR: LOG_ERR("[svr] %s", msg); break;
     }
 }
@@ -592,7 +623,8 @@ svr_cb_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
 static void
 svr_on_tun_read(evutil_socket_t fd, short what, void *arg)
 {
-    (void)fd; (void)what;
+    (void)fd;
+    (void)what;
     server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
     uint8_t buf[65536];
 
@@ -622,13 +654,14 @@ svr_on_socket_read(evutil_socket_t fd, short what, void *arg)
 
     for (int i = 0; i < 64; i++) {
         peer_len = sizeof(peer);
-        // codeql[cpp/uncontrolled-allocation-size] buf is stack-allocated and bounded by sizeof(buf); xquic validates internally
-        ssize_t n = recvfrom(fd, buf, sizeof(buf), 0,
-                             (struct sockaddr *)&peer, &peer_len);
+        // codeql[cpp/uncontrolled-allocation-size] buf is stack-allocated and bounded by
+        // sizeof(buf); xquic validates internally
+        ssize_t n =
+            recvfrom(fd, buf, sizeof(buf), 0, (struct sockaddr *)&peer, &peer_len);
         if (n <= 0 || (size_t)n > sizeof(buf)) break;
 
-        mqvpn_server_on_socket_recv(sp->server, buf, (size_t)n,
-                                     (struct sockaddr *)&peer, peer_len);
+        mqvpn_server_on_socket_recv(sp->server, buf, (size_t)n, (struct sockaddr *)&peer,
+                                    peer_len);
     }
     mqvpn_server_tick(sp->server);
     svr_schedule_next_tick(sp);
@@ -637,7 +670,8 @@ svr_on_socket_read(evutil_socket_t fd, short what, void *arg)
 static void
 svr_on_signal(evutil_socket_t sig, short what, void *arg)
 {
-    (void)sig; (void)what;
+    (void)sig;
+    (void)what;
     server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
     LOG_INF("received signal, shutting down server...");
     sp->shutting_down = 1;
@@ -645,12 +679,11 @@ svr_on_signal(evutil_socket_t sig, short what, void *arg)
 }
 
 static int
-svr_create_udp_socket(const char *addr, int port,
-                       struct sockaddr_storage *out_addr,
-                       socklen_t *out_addrlen)
+svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_addr,
+                      socklen_t *out_addrlen)
 {
     sa_family_t af = AF_INET;
-    struct in_addr  addr4;
+    struct in_addr addr4;
     struct in6_addr addr6;
     if (addr && addr[0]) {
         if (inet_pton(AF_INET6, addr, &addr6) == 1)
@@ -664,7 +697,10 @@ svr_create_udp_socket(const char *addr, int port,
     }
 
     int fd = socket(af, SOCK_DGRAM, 0);
-    if (fd < 0) { LOG_ERR("socket: %s", strerror(errno)); return -1; }
+    if (fd < 0) {
+        LOG_ERR("socket: %s", strerror(errno));
+        return -1;
+    }
 
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
@@ -686,22 +722,25 @@ svr_create_udp_socket(const char *addr, int port,
         struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)out_addr;
         sin6->sin6_family = AF_INET6;
         sin6->sin6_port = htons((uint16_t)port);
-        if (addr && addr[0]) sin6->sin6_addr = addr6;
-        else sin6->sin6_addr = in6addr_any;
+        if (addr && addr[0])
+            sin6->sin6_addr = addr6;
+        else
+            sin6->sin6_addr = in6addr_any;
         *out_addrlen = sizeof(struct sockaddr_in6);
     } else {
         struct sockaddr_in *sin = (struct sockaddr_in *)out_addr;
         sin->sin_family = AF_INET;
         sin->sin_port = htons((uint16_t)port);
-        if (addr && addr[0]) sin->sin_addr = addr4;
-        else sin->sin_addr.s_addr = htonl(INADDR_ANY);
+        if (addr && addr[0])
+            sin->sin_addr = addr4;
+        else
+            sin->sin_addr.s_addr = htonl(INADDR_ANY);
         *out_addrlen = sizeof(struct sockaddr_in);
     }
 
     if (bind(fd, (struct sockaddr *)out_addr, *out_addrlen) < 0) {
-        LOG_ERR("bind %s:%d: %s",
-                addr ? addr : (af == AF_INET6 ? "::" : "0.0.0.0"),
-                port, strerror(errno));
+        LOG_ERR("bind %s:%d: %s", addr ? addr : (af == AF_INET6 ? "::" : "0.0.0.0"), port,
+                strerror(errno));
         close(fd);
         return -1;
     }
@@ -720,12 +759,14 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     sp.tun.fd = -1;
     sp.udp_fd = -1;
 
-    if (cfg->tun_name)
-        snprintf(sp.tun.name, sizeof(sp.tun.name), "%s", cfg->tun_name);
+    if (cfg->tun_name) snprintf(sp.tun.name, sizeof(sp.tun.name), "%s", cfg->tun_name);
 
     /* Create libmqvpn config */
     mqvpn_config_t *lib_cfg = mqvpn_config_new();
-    if (!lib_cfg) { LOG_ERR("failed to allocate config"); return 1; }
+    if (!lib_cfg) {
+        LOG_ERR("failed to allocate config");
+        return 1;
+    }
 
     mqvpn_config_set_listen(lib_cfg, cfg->listen_addr, cfg->listen_port);
     mqvpn_config_set_subnet(lib_cfg, cfg->subnet);
@@ -734,21 +775,25 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
         mqvpn_config_set_tls_cert(lib_cfg, cfg->cert_file, cfg->key_file);
     if (cfg->auth_key) mqvpn_config_set_auth_key(lib_cfg, cfg->auth_key);
     mqvpn_config_set_max_clients(lib_cfg, cfg->max_clients);
-    mqvpn_config_set_scheduler(lib_cfg,
-        cfg->scheduler == 1 ? MQVPN_SCHED_WLB : MQVPN_SCHED_MINRTT);
+    mqvpn_config_set_scheduler(lib_cfg, cfg->scheduler == 1 ? MQVPN_SCHED_WLB
+                                                            : MQVPN_SCHED_MINRTT);
 
     mqvpn_log_level_t lib_log;
-    if (cfg->log_level >= 5) lib_log = MQVPN_LOG_DEBUG;
-    else if (cfg->log_level >= 3) lib_log = MQVPN_LOG_INFO;
-    else if (cfg->log_level >= 2) lib_log = MQVPN_LOG_WARN;
-    else lib_log = MQVPN_LOG_ERROR;
+    if (cfg->log_level >= 5)
+        lib_log = MQVPN_LOG_DEBUG;
+    else if (cfg->log_level >= 3)
+        lib_log = MQVPN_LOG_INFO;
+    else if (cfg->log_level >= 2)
+        lib_log = MQVPN_LOG_WARN;
+    else
+        lib_log = MQVPN_LOG_ERROR;
     mqvpn_config_set_log_level(lib_cfg, lib_log);
 
     /* Create server callbacks */
     mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
     cbs.tun_output = svr_cb_tun_output;
     cbs.tunnel_config_ready = svr_cb_tunnel_config_ready;
-    cbs.send_packet = NULL;  /* fd-only mode */
+    cbs.send_packet = NULL; /* fd-only mode */
     cbs.log = svr_cb_log;
 
     /* Create server */
@@ -762,16 +807,19 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     /* Create UDP socket */
     struct sockaddr_storage local_addr;
     socklen_t local_addrlen;
-    sp.udp_fd = svr_create_udp_socket(cfg->listen_addr, cfg->listen_port,
-                                       &local_addr, &local_addrlen);
+    sp.udp_fd = svr_create_udp_socket(cfg->listen_addr, cfg->listen_port, &local_addr,
+                                      &local_addrlen);
     if (sp.udp_fd < 0) goto cleanup;
 
-    mqvpn_server_set_socket_fd(sp.server, sp.udp_fd,
-                               (struct sockaddr *)&local_addr, local_addrlen);
+    mqvpn_server_set_socket_fd(sp.server, sp.udp_fd, (struct sockaddr *)&local_addr,
+                               local_addrlen);
 
     /* Create event base */
     sp.eb = event_base_new();
-    if (!sp.eb) { LOG_ERR("event_base_new failed"); goto cleanup; }
+    if (!sp.eb) {
+        LOG_ERR("event_base_new failed");
+        goto cleanup;
+    }
 
     /* Start server (triggers tunnel_config_ready → TUN creation) */
     if (mqvpn_server_start(sp.server) != MQVPN_OK) {
@@ -780,12 +828,12 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     }
 
     /* Register socket read event */
-    sp.ev_socket = event_new(sp.eb, sp.udp_fd, EV_READ | EV_PERSIST,
-                              svr_on_socket_read, &sp);
+    sp.ev_socket =
+        event_new(sp.eb, sp.udp_fd, EV_READ | EV_PERSIST, svr_on_socket_read, &sp);
     event_add(sp.ev_socket, NULL);
 
     /* Signal handlers */
-    sp.ev_sigint  = evsignal_new(sp.eb, SIGINT,  svr_on_signal, &sp);
+    sp.ev_sigint = evsignal_new(sp.eb, SIGINT, svr_on_signal, &sp);
     sp.ev_sigterm = evsignal_new(sp.eb, SIGTERM, svr_on_signal, &sp);
     event_add(sp.ev_sigint, NULL);
     event_add(sp.ev_sigterm, NULL);
@@ -795,8 +843,8 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     svr_schedule_next_tick(&sp);
 
     LOG_INF("mqvpn server ready — listening on %s:%d, subnet %s",
-            cfg->listen_addr ? cfg->listen_addr : "0.0.0.0",
-            cfg->listen_port, cfg->subnet);
+            cfg->listen_addr ? cfg->listen_addr : "0.0.0.0", cfg->listen_port,
+            cfg->subnet);
 
     event_base_dispatch(sp.eb);
     rc = 0;
@@ -804,13 +852,28 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
 cleanup:
     LOG_INF("server shutting down");
     if (sp.tun_up) {
-        if (sp.ev_tun) { event_del(sp.ev_tun); event_free(sp.ev_tun); }
+        if (sp.ev_tun) {
+            event_del(sp.ev_tun);
+            event_free(sp.ev_tun);
+        }
         mqvpn_tun_destroy(&sp.tun);
     }
-    if (sp.ev_socket)  { event_del(sp.ev_socket);  event_free(sp.ev_socket); }
-    if (sp.ev_tick)    { event_del(sp.ev_tick);    event_free(sp.ev_tick); }
-    if (sp.ev_sigint)  { event_del(sp.ev_sigint);  event_free(sp.ev_sigint); }
-    if (sp.ev_sigterm) { event_del(sp.ev_sigterm); event_free(sp.ev_sigterm); }
+    if (sp.ev_socket) {
+        event_del(sp.ev_socket);
+        event_free(sp.ev_socket);
+    }
+    if (sp.ev_tick) {
+        event_del(sp.ev_tick);
+        event_free(sp.ev_tick);
+    }
+    if (sp.ev_sigint) {
+        event_del(sp.ev_sigint);
+        event_free(sp.ev_sigint);
+    }
+    if (sp.ev_sigterm) {
+        event_del(sp.ev_sigterm);
+        event_free(sp.ev_sigterm);
+    }
     if (sp.udp_fd >= 0) close(sp.udp_fd);
     mqvpn_server_destroy(sp.server);
     if (sp.eb) event_base_free(sp.eb);

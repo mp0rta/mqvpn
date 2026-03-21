@@ -12,29 +12,29 @@
 #define MQVPN_DNS_MAX_SERVERS 4
 
 typedef struct {
-    char        servers[MQVPN_DNS_MAX_SERVERS][64];
-    int         n_servers;
-    int         active;         /* 1 if DNS is currently overridden */
-    int         lock_fd;        /* flock fd, -1 if not held */
-    const char *resolv_path;    /* default: /etc/resolv.conf */
-    const char *backup_path;    /* default: /etc/resolv.conf.mqvpn.bak */
-    const char *lock_path;      /* default: /run/mqvpn-dns.lock */
+    char servers[MQVPN_DNS_MAX_SERVERS][64];
+    int n_servers;
+    int active;              /* 1 if DNS is currently overridden */
+    int lock_fd;             /* flock fd, -1 if not held */
+    const char *resolv_path; /* default: /etc/resolv.conf */
+    const char *backup_path; /* default: /etc/resolv.conf.mqvpn.bak */
+    const char *lock_path;   /* default: /run/mqvpn-dns.lock */
 } mqvpn_dns_t;
 
 /* Initialize with defaults */
 void mqvpn_dns_init(mqvpn_dns_t *dns);
 
 /* Add a DNS server address. Returns 0 on success, -1 if full. */
-int  mqvpn_dns_add_server(mqvpn_dns_t *dns, const char *addr);
+int mqvpn_dns_add_server(mqvpn_dns_t *dns, const char *addr);
 
 /* Apply DNS override: backup resolv.conf, write new one. Returns 0 on success. */
-int  mqvpn_dns_apply(mqvpn_dns_t *dns);
+int mqvpn_dns_apply(mqvpn_dns_t *dns);
 
 /* Restore original resolv.conf from backup. */
 void mqvpn_dns_restore(mqvpn_dns_t *dns);
 
 /* Check if a stale backup exists (e.g. from crash). */
-int  mqvpn_dns_has_stale_backup(const mqvpn_dns_t *dns);
+int mqvpn_dns_has_stale_backup(const mqvpn_dns_t *dns);
 
 /* Restore from stale backup (startup recovery). */
 void mqvpn_dns_restore_stale(mqvpn_dns_t *dns);
@@ -45,14 +45,13 @@ void mqvpn_dns_restore_stale(mqvpn_dns_t *dns);
  *             *out_len is set to the correct sockaddr size.
  * Returns 0 on success, -1 on failure. */
 int mqvpn_resolve_host(const char *host, struct sockaddr_storage *out,
-                        socklen_t *out_len);
+                       socklen_t *out_len);
 
 /* Set port on a sockaddr_storage (works for AF_INET and AF_INET6). */
 void mqvpn_sa_set_port(struct sockaddr_storage *ss, uint16_t port);
 
 /* Format address from sockaddr_storage into buf. Returns buf, or NULL on error. */
-const char *mqvpn_sa_ntop(const struct sockaddr_storage *ss,
-                           char *buf, size_t buflen);
+const char *mqvpn_sa_ntop(const struct sockaddr_storage *ss, char *buf, size_t buflen);
 
 /* Return host prefix length: 32 for IPv4, 128 for IPv6, 0 for unknown. */
 int mqvpn_sa_host_prefix(const struct sockaddr_storage *ss);

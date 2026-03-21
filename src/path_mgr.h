@@ -1,25 +1,33 @@
 #ifndef MQVPN_PATH_MGR_H
 #define MQVPN_PATH_MGR_H
 
-#include <netinet/in.h>
-#include <net/if.h>
+#ifdef _WIN32
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#  ifndef IFNAMSIZ
+#    define IFNAMSIZ 256
+#  endif
+#else
+#  include <netinet/in.h>
+#  include <net/if.h>
+#endif
 #include <stdint.h>
 
-#define MQVPN_MAX_PATHS  4
+#define MQVPN_MAX_PATHS 4
 
 typedef struct {
-    int                  fd;
-    char                 iface[IFNAMSIZ];
+    int fd;
+    char iface[IFNAMSIZ];
     struct sockaddr_storage local_addr;
-    socklen_t            local_addrlen;
-    uint64_t             path_id;
-    int                  active;        /* socket created and registered */
-    int                  in_use;        /* xquic path created */
+    socklen_t local_addrlen;
+    uint64_t path_id;
+    int active; /* socket created and registered */
+    int in_use; /* xquic path created */
 } mqvpn_path_t;
 
 typedef struct {
-    mqvpn_path_t    paths[MQVPN_MAX_PATHS];
-    int             n_paths;
+    mqvpn_path_t paths[MQVPN_MAX_PATHS];
+    int n_paths;
 } mqvpn_path_mgr_t;
 
 /* Initialize path manager (zeroes everything) */
@@ -29,14 +37,13 @@ void mqvpn_path_mgr_init(mqvpn_path_mgr_t *mgr);
  * peer_addr is the server address to connect-like setup.
  * Returns path index (>=0) on success, -1 on error. */
 int mqvpn_path_mgr_add(mqvpn_path_mgr_t *mgr, const char *iface,
-                        const struct sockaddr_storage *peer_addr);
+                       const struct sockaddr_storage *peer_addr);
 
 /* Find path by socket fd. Returns NULL if not found. */
 mqvpn_path_t *mqvpn_path_mgr_find_by_fd(mqvpn_path_mgr_t *mgr, int fd);
 
 /* Find path by xquic path_id. Returns NULL if not found. */
-mqvpn_path_t *mqvpn_path_mgr_find_by_path_id(mqvpn_path_mgr_t *mgr,
-                                               uint64_t path_id);
+mqvpn_path_t *mqvpn_path_mgr_find_by_path_id(mqvpn_path_mgr_t *mgr, uint64_t path_id);
 
 /* Get socket fd for path by xquic path_id. Returns primary fd if not found. */
 int mqvpn_path_mgr_get_fd(mqvpn_path_mgr_t *mgr, uint64_t path_id);

@@ -9,16 +9,22 @@
 #include <string.h>
 #include <ctype.h>
 
+#ifdef _MSC_VER
+#  define strcasecmp _stricmp
+#endif
+
 /* ---- helpers ---- */
 
 /* Trim leading and trailing whitespace in-place, return pointer to start */
 static char *
 trim(char *s)
 {
-    while (isspace((unsigned char)*s)) s++;
+    while (isspace((unsigned char)*s))
+        s++;
     if (*s == '\0') return s;
     char *end = s + strlen(s) - 1;
-    while (end > s && isspace((unsigned char)*end)) *end-- = '\0';
+    while (end > s && isspace((unsigned char)*end))
+        *end-- = '\0';
     return s;
 }
 
@@ -26,9 +32,7 @@ trim(char *s)
 static int
 parse_bool(const char *val)
 {
-    return (strcmp(val, "true") == 0 ||
-            strcmp(val, "yes") == 0 ||
-            strcmp(val, "1") == 0);
+    return (strcmp(val, "true") == 0 || strcmp(val, "yes") == 0 || strcmp(val, "1") == 0);
 }
 
 /* Section IDs */
@@ -45,9 +49,9 @@ static int
 parse_section(const char *name)
 {
     if (strcasecmp(name, "Interface") == 0) return SEC_INTERFACE;
-    if (strcasecmp(name, "Server") == 0)    return SEC_SERVER;
-    if (strcasecmp(name, "TLS") == 0)       return SEC_TLS;
-    if (strcasecmp(name, "Auth") == 0)      return SEC_AUTH;
+    if (strcasecmp(name, "Server") == 0) return SEC_SERVER;
+    if (strcasecmp(name, "TLS") == 0) return SEC_TLS;
+    if (strcasecmp(name, "Auth") == 0) return SEC_AUTH;
     if (strcasecmp(name, "Multipath") == 0) return SEC_MULTIPATH;
     return -1;
 }
@@ -60,34 +64,33 @@ parse_dns_list(mqvpn_config_t *cfg, const char *val)
     const char *p = val;
     while (*p && cfg->n_dns < MQVPN_CONFIG_MAX_DNS) {
         /* skip leading whitespace and commas */
-        while (*p == ',' || isspace((unsigned char)*p)) p++;
+        while (*p == ',' || isspace((unsigned char)*p))
+            p++;
         if (*p == '\0') break;
 
         const char *start = p;
-        while (*p && *p != ',') p++;
+        while (*p && *p != ',')
+            p++;
 
         /* copy and trim trailing whitespace */
         size_t len = (size_t)(p - start);
-        if (len >= sizeof(cfg->dns_servers[0]))
-            len = sizeof(cfg->dns_servers[0]) - 1;
+        if (len >= sizeof(cfg->dns_servers[0])) len = sizeof(cfg->dns_servers[0]) - 1;
         memcpy(cfg->dns_servers[cfg->n_dns], start, len);
         cfg->dns_servers[cfg->n_dns][len] = '\0';
 
         /* trim trailing whitespace from the copied entry */
         char *end = cfg->dns_servers[cfg->n_dns] + len - 1;
-        while (end >= cfg->dns_servers[cfg->n_dns] &&
-               isspace((unsigned char)*end))
+        while (end >= cfg->dns_servers[cfg->n_dns] && isspace((unsigned char)*end))
             *end-- = '\0';
 
-        if (cfg->dns_servers[cfg->n_dns][0] != '\0')
-            cfg->n_dns++;
+        if (cfg->dns_servers[cfg->n_dns][0] != '\0') cfg->n_dns++;
     }
 }
 
 /* Handle a key=value pair in the given section */
 static void
-handle_kv(mqvpn_config_t *cfg, int section, const char *key, const char *val,
-           int lineno, const char *path)
+handle_kv(mqvpn_config_t *cfg, int section, const char *key, const char *val, int lineno,
+          const char *path)
 {
     switch (section) {
     case SEC_INTERFACE:
@@ -141,8 +144,7 @@ handle_kv(mqvpn_config_t *cfg, int section, const char *key, const char *val,
             /* Context: [Auth] Key is server_auth_key if is_server,
              * else auth_key (client). We store in both and let the
              * caller use the right one based on is_server. */
-            snprintf(cfg->server_auth_key, sizeof(cfg->server_auth_key),
-                     "%s", val);
+            snprintf(cfg->server_auth_key, sizeof(cfg->server_auth_key), "%s", val);
             snprintf(cfg->auth_key, sizeof(cfg->auth_key), "%s", val);
         } else if (strcasecmp(key, "MaxClients") == 0) {
             cfg->max_clients = atoi(val);
@@ -157,21 +159,18 @@ handle_kv(mqvpn_config_t *cfg, int section, const char *key, const char *val,
             snprintf(cfg->scheduler, sizeof(cfg->scheduler), "%s", val);
         } else if (strcasecmp(key, "Path") == 0) {
             if (cfg->n_paths < MQVPN_CONFIG_MAX_PATHS) {
-                snprintf(cfg->paths[cfg->n_paths], sizeof(cfg->paths[0]),
-                         "%s", val);
+                snprintf(cfg->paths[cfg->n_paths], sizeof(cfg->paths[0]), "%s", val);
                 cfg->n_paths++;
             } else {
-                LOG_WRN("%s:%d: max %d paths supported, ignoring '%s'",
-                        path, lineno, MQVPN_CONFIG_MAX_PATHS, val);
+                LOG_WRN("%s:%d: max %d paths supported, ignoring '%s'", path, lineno,
+                        MQVPN_CONFIG_MAX_PATHS, val);
             }
         } else {
             LOG_WRN("%s:%d: unknown key '%s' in [Multipath]", path, lineno, key);
         }
         break;
 
-    default:
-        LOG_WRN("%s:%d: key '%s' outside any section", path, lineno, key);
-        break;
+    default: LOG_WRN("%s:%d: key '%s' outside any section", path, lineno, key); break;
     }
 }
 
@@ -211,8 +210,7 @@ mqvpn_config_load(mqvpn_config_t *cfg, const char *path)
         char *s = trim(line);
 
         /* Skip empty lines and comments */
-        if (*s == '\0' || *s == '#' || *s == ';')
-            continue;
+        if (*s == '\0' || *s == '#' || *s == ';') continue;
 
         /* Section header */
         if (*s == '[') {

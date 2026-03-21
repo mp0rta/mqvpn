@@ -1,0 +1,53 @@
+---
+# mqvpn code style — based on Linux kernel style with 4-space indent
+Language: Cpp
+BasedOnStyle: LLVM
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 90
+
+# Function definitions: return type on its own line
+AlwaysBreakAfterReturnType: AllDefinitions
+
+# Braces: Attach for control flow, next line for functions
+BreakBeforeBraces: Linux
+
+# Pointer/reference alignment: int *p (not int* p)
+PointerAlignment: Right
+
+# Includes
+SortIncludes: false
+IncludeBlocks: Preserve
+
+# Spaces
+SpaceAfterCStyleCast: false
+SpaceBeforeParens: ControlStatements
+SpacesInParentheses: false
+
+# Alignment
+AlignConsecutiveMacros: true
+AlignConsecutiveDeclarations: false
+AlignEscapedNewlines: Left
+AlignAfterOpenBracket: Align
+AlignOperands: true
+
+# Single-line
+AllowShortBlocksOnASingleLine: Empty
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: true
+
+# Indentation
+IndentCaseLabels: false
+IndentPPDirectives: AfterHash
+PPIndentWidth: 2
+
+# Misc
+BinPackArguments: true
+BinPackParameters: true
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 2
+...

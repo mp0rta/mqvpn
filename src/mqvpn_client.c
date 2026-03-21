@@ -11,14 +11,28 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
-#include <unistd.h>
-#include <errno.h>
+#ifdef _WIN32
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#  include <windows.h>
+#  include <process.h>
+#  define MSG_DONTWAIT 0
+#  define EAGAIN       WSAEWOULDBLOCK
+#  define EWOULDBLOCK  WSAEWOULDBLOCK
+#  define EINTR        WSAEINTR
+#  define errno        WSAGetLastError()
+#else
+#  include <unistd.h>
+#  include <sys/time.h>
+#  include <arpa/inet.h>
+#  include <pthread.h>
+#endif
+#ifndef _WIN32
+#  include <errno.h>
+#endif
 #include <inttypes.h>
-#include <sys/time.h>
 #include <time.h>
-#include <arpa/inet.h>
 #include <assert.h>
-#include <pthread.h>
 
 #include <xquic/xquic.h>
 #include <xquic/xqc_http3.h>
@@ -27,17 +41,17 @@
 
 /* ─── Constants ─── */
 
-#define PACKET_BUF_SIZE          65536
-#define MASQUE_FRAME_BUF         (PACKET_BUF_SIZE + 16)
-#define MAX_CAPSULE_BUF          65536
-#define XQC_SNDQ_MAX_PKTS       16384
+#define PACKET_BUF_SIZE           65536
+#define MASQUE_FRAME_BUF          (PACKET_BUF_SIZE + 16)
+#define MAX_CAPSULE_BUF           65536
+#define XQC_SNDQ_MAX_PKTS         16384
 #define RECONNECT_BACKOFF_MAX_SEC 60
-#define PTB_RATE_LIMIT           10
+#define PTB_RATE_LIMIT            10
 
 /* ─── Forward declarations ─── */
 
-typedef struct cli_conn_s    cli_conn_t;
-typedef struct cli_stream_s  cli_stream_t;
+typedef struct cli_conn_s cli_conn_t;
+typedef struct cli_stream_s cli_stream_t;
 
 static int cli_start_connection(mqvpn_client_t *c);
 
@@ -46,114 +60,118 @@ static int cli_start_connection(mqvpn_client_t *c);
 /* Per-path entry (Level 1 — survives reconnect) */
 typedef struct {
     mqvpn_path_handle_t handle;
-    int                 fd;
-    char                name[16];
+    int fd;
+    char name[16];
     mqvpn_path_status_t status;
-    int                 active;
+    int active;
     struct sockaddr_storage local_addr;
-    uint32_t            local_addr_len;
-    int64_t             platform_net_id;
-    uint32_t            flags;
-    uint64_t            xqc_path_id;
-    int                 in_use;
-    int                 srtt_ms;
-    uint64_t            bytes_tx;
-    uint64_t            bytes_rx;
+    uint32_t local_addr_len;
+    int64_t platform_net_id;
+    uint32_t flags;
+    uint64_t xqc_path_id;
+    int in_use;
+    int srtt_ms;
+    uint64_t bytes_tx;
+    uint64_t bytes_rx;
 } path_entry_t;
 
 /* Per-connection state (Level 2 — destroyed on reconnect) */
 struct cli_conn_s {
-    mqvpn_client_t      *client;
-    xqc_h3_conn_t       *h3_conn;
-    xqc_cid_t            cid;
-    size_t                dgram_mss;
-    xqc_h3_request_t    *masque_request;
-    uint64_t              masque_stream_id;
-    int                   tunnel_ok;
-    int                   addr_assigned;
-    uint8_t               assigned_ip[4];
-    uint8_t               assigned_prefix;
-    int                   addr6_assigned;
-    uint8_t               assigned_ip6[16];
-    uint8_t               assigned_prefix6;
-    uint64_t              dgram_lost_cnt;
-    uint64_t              dgram_acked_cnt;
+    mqvpn_client_t *client;
+    xqc_h3_conn_t *h3_conn;
+    xqc_cid_t cid;
+    size_t dgram_mss;
+    xqc_h3_request_t *masque_request;
+    uint64_t masque_stream_id;
+    int tunnel_ok;
+    int addr_assigned;
+    uint8_t assigned_ip[4];
+    uint8_t assigned_prefix;
+    int addr6_assigned;
+    uint8_t assigned_ip6[16];
+    uint8_t assigned_prefix6;
+    uint64_t dgram_lost_cnt;
+    uint64_t dgram_acked_cnt;
 };
 
 /* Per-stream state (Level 2) */
 struct cli_stream_s {
-    cli_conn_t          *conn;
-    xqc_h3_request_t    *h3_request;
-    uint8_t             *capsule_buf;
-    size_t               capsule_len;
-    size_t               capsule_cap;
+    cli_conn_t *conn;
+    xqc_h3_request_t *h3_request;
+    uint8_t *capsule_buf;
+    size_t capsule_len;
+    size_t capsule_cap;
 };
 
 /* ─── Client handle (opaque mqvpn_client_t) ─── */
 
 struct mqvpn_client_s {
     /* Config (deep copy, Level 1) */
-    mqvpn_config_t              config;
-    mqvpn_client_callbacks_t    cbs;
-    void                       *user_ctx;
+    mqvpn_config_t config;
+    mqvpn_client_callbacks_t cbs;
+    void *user_ctx;
 
     /* State machine */
-    mqvpn_client_state_t        state;
+    mqvpn_client_state_t state;
 
     /* xquic engine (Level 1) */
-    xqc_engine_t               *engine;
+    xqc_engine_t *engine;
 
     /* Connection (Level 2, NULL when disconnected) */
-    cli_conn_t                 *conn;
+    cli_conn_t *conn;
 
     /* Server address */
-    struct sockaddr_storage     server_addr;
-    socklen_t                   server_addrlen;
+    struct sockaddr_storage server_addr;
+    socklen_t server_addrlen;
 
     /* Tunnel info (after TUNNEL_READY) */
-    uint8_t     assigned_ip[4];
-    uint8_t     assigned_prefix;
-    uint8_t     server_ip[4];
-    uint8_t     server_prefix;
-    int         mtu;
-    uint8_t     assigned_ip6[16];
-    uint8_t     assigned_prefix6;
-    int         has_v6;
-    int         tun_active;
-    int         backpressure;
-    int         last_notified_mtu;
+    uint8_t assigned_ip[4];
+    uint8_t assigned_prefix;
+    uint8_t server_ip[4];
+    uint8_t server_prefix;
+    int mtu;
+    uint8_t assigned_ip6[16];
+    uint8_t assigned_prefix6;
+    int has_v6;
+    int tun_active;
+    int backpressure;
+    int last_notified_mtu;
 
     /* Stats */
-    uint64_t    bytes_tx;
-    uint64_t    bytes_rx;
-    uint64_t    dgram_sent;
-    uint64_t    dgram_recv;
-    uint64_t    dgram_lost;
-    uint64_t    dgram_acked;
-    int         srtt_ms;
+    uint64_t bytes_tx;
+    uint64_t bytes_rx;
+    uint64_t dgram_sent;
+    uint64_t dgram_recv;
+    uint64_t dgram_lost;
+    uint64_t dgram_acked;
+    int srtt_ms;
 
     /* Multipath (Level 1) */
-    path_entry_t    paths[MQVPN_MAX_PATHS];
-    int             n_paths;
-    int64_t         next_path_handle;
-    int             multipath_ready;  /* 1 after cb_ready_to_create_path */
+    path_entry_t paths[MQVPN_MAX_PATHS];
+    int n_paths;
+    int64_t next_path_handle;
+    int multipath_ready; /* 1 after cb_ready_to_create_path */
 
     /* Reconnect */
-    int         reconnect_attempts;
-    uint64_t    reconnect_scheduled_us;
-    int         shutting_down;
+    int reconnect_attempts;
+    uint64_t reconnect_scheduled_us;
+    int shutting_down;
 
     /* Timer: next wake (from xquic set_event_timer) */
-    uint64_t    next_wake_us;
+    uint64_t next_wake_us;
 
     /* ICMP PTB rate limit */
-    int         ptb_tokens;
-    int64_t     ptb_refill_ms;
+    int ptb_tokens;
+    int64_t ptb_refill_ms;
 
     /* Debug: tick thread assertion */
 #ifndef NDEBUG
-    pthread_t   owner_thread;
-    int         owner_thread_set;
+#  ifdef _WIN32
+    DWORD owner_thread;
+#  else
+    pthread_t owner_thread;
+#  endif
+    int owner_thread_set;
 #endif
 };
 
@@ -161,38 +179,45 @@ struct mqvpn_client_s {
 
 static const uint8_t state_transitions[MQVPN_STATE__COUNT][MQVPN_STATE__COUNT] = {
     /*                    IDLE CONN AUTH TREADY EST  RECON CLOSE */
-    /* IDLE           */ { 0,   1,   0,   0,     0,   0,    0 },
-    /* CONNECTING     */ { 0,   0,   1,   0,     0,   1,    1 },
-    /* AUTHENTICATING */ { 0,   0,   0,   1,     0,   1,    1 },
-    /* TUNNEL_READY   */ { 0,   0,   0,   0,     1,   0,    1 },
-    /* ESTABLISHED    */ { 0,   0,   0,   0,     0,   1,    1 },
-    /* RECONNECTING   */ { 0,   1,   0,   0,     0,   0,    1 },
-    /* CLOSED         */ { 0,   0,   0,   0,     0,   0,    0 },
+    /* IDLE           */ {0, 1, 0, 0, 0, 0, 0},
+    /* CONNECTING     */ {0, 0, 1, 0, 0, 1, 1},
+    /* AUTHENTICATING */ {0, 0, 0, 1, 0, 1, 1},
+    /* TUNNEL_READY   */ {0, 0, 0, 0, 1, 0, 1},
+    /* ESTABLISHED    */ {0, 0, 0, 0, 0, 1, 1},
+    /* RECONNECTING   */ {0, 1, 0, 0, 0, 0, 1},
+    /* CLOSED         */ {0, 0, 0, 0, 0, 0, 0},
 };
 
-int mqvpn_state_transition_valid(mqvpn_client_state_t from,
-                                  mqvpn_client_state_t to)
+int
+mqvpn_state_transition_valid(mqvpn_client_state_t from, mqvpn_client_state_t to)
 {
-    if (from < 0 || from >= MQVPN_STATE__COUNT ||
-        to   < 0 || to   >= MQVPN_STATE__COUNT)
+    if (from < 0 || from >= MQVPN_STATE__COUNT || to < 0 || to >= MQVPN_STATE__COUNT)
         return 0;
     return state_transitions[from][to];
 }
 
 /* ─── Helpers ─── */
 
-static uint64_t now_us(void)
+static uint64_t
+now_us(void)
 {
+#ifdef _WIN32
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    uint64_t t = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    return t / 10 - 11644473600000000ULL; /* FILETIME epoch → Unix epoch, in µs */
+#else
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (uint64_t)tv.tv_sec * 1000000 + (uint64_t)tv.tv_usec;
+#endif
 }
 
 /* Injectable clock: use config clock_fn if set, else default now_us() */
-static uint64_t client_now_us(const mqvpn_client_t *c)
+static uint64_t
+client_now_us(const mqvpn_client_t *c)
 {
-    if (c->config.clock_fn)
-        return c->config.clock_fn(c->config.clock_ctx);
+    if (c->config.clock_fn) return c->config.clock_fn(c->config.clock_ctx);
     return now_us();
 }
 
@@ -204,26 +229,35 @@ static uint64_t client_now_us(const mqvpn_client_t *c)
 static mqvpn_clock_fn s_xqc_clock_fn = NULL;
 static void *s_xqc_clock_ctx = NULL;
 
-static xqc_usec_t xqc_custom_timestamp(void)
+static xqc_usec_t
+xqc_custom_timestamp(void)
 {
-    if (s_xqc_clock_fn)
-        return s_xqc_clock_fn(s_xqc_clock_ctx);
+    if (s_xqc_clock_fn) return s_xqc_clock_fn(s_xqc_clock_ctx);
     return now_us();
 }
 
-static int64_t now_ms_mono(void)
+static int64_t
+now_ms_mono(void)
 {
+#ifdef _WIN32
+    LARGE_INTEGER freq, cnt;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&cnt);
+    return (int64_t)(cnt.QuadPart * 1000 / freq.QuadPart);
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
 }
 
-static void client_log(mqvpn_client_t *c, mqvpn_log_level_t level,
-                        const char *fmt, ...)
+#ifndef _MSC_VER
+static void client_log(mqvpn_client_t *c, mqvpn_log_level_t level, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
+#endif
 
-static void client_log(mqvpn_client_t *c, mqvpn_log_level_t level,
-                        const char *fmt, ...)
+static void
+client_log(mqvpn_client_t *c, mqvpn_log_level_t level, const char *fmt, ...)
 {
     if (!c->cbs.log) return;
     char buf[512];
@@ -235,37 +269,52 @@ static void client_log(mqvpn_client_t *c, mqvpn_log_level_t level,
 }
 
 #define LOG_D(c, ...) client_log(c, MQVPN_LOG_DEBUG, __VA_ARGS__)
-#define LOG_I(c, ...) client_log(c, MQVPN_LOG_INFO,  __VA_ARGS__)
-#define LOG_W(c, ...) client_log(c, MQVPN_LOG_WARN,  __VA_ARGS__)
+#define LOG_I(c, ...) client_log(c, MQVPN_LOG_INFO, __VA_ARGS__)
+#define LOG_W(c, ...) client_log(c, MQVPN_LOG_WARN, __VA_ARGS__)
 #define LOG_E(c, ...) client_log(c, MQVPN_LOG_ERROR, __VA_ARGS__)
 
-static void client_set_state(mqvpn_client_t *c, mqvpn_client_state_t new_state)
+static void
+client_set_state(mqvpn_client_t *c, mqvpn_client_state_t new_state)
 {
     mqvpn_client_state_t old = c->state;
     if (old == new_state) return;
     assert(mqvpn_state_transition_valid(old, new_state) &&
            "mqvpn_client: invalid state transition");
     c->state = new_state;
-    if (c->cbs.state_changed)
-        c->cbs.state_changed(old, new_state, c->user_ctx);
+    if (c->cbs.state_changed) c->cbs.state_changed(old, new_state, c->user_ctx);
 }
 
 #ifndef NDEBUG
-#define ASSERT_TICK_THREAD(c) do { \
-    if (!(c)->owner_thread_set) { \
-        (c)->owner_thread = pthread_self(); \
-        (c)->owner_thread_set = 1; \
-    } else { \
-        assert(pthread_equal((c)->owner_thread, pthread_self()) && \
-               "mqvpn_client: called from wrong thread"); \
-    } \
-} while (0)
+#  ifdef _WIN32
+#    define ASSERT_TICK_THREAD(c)                                   \
+        do {                                                        \
+            if (!(c)->owner_thread_set) {                           \
+                (c)->owner_thread = GetCurrentThreadId();           \
+                (c)->owner_thread_set = 1;                          \
+            } else {                                                \
+                assert((c)->owner_thread == GetCurrentThreadId() && \
+                       "mqvpn_client: called from wrong thread");   \
+            }                                                       \
+        } while (0)
+#  else
+#    define ASSERT_TICK_THREAD(c)                                          \
+        do {                                                               \
+            if (!(c)->owner_thread_set) {                                  \
+                (c)->owner_thread = pthread_self();                        \
+                (c)->owner_thread_set = 1;                                 \
+            } else {                                                       \
+                assert(pthread_equal((c)->owner_thread, pthread_self()) && \
+                       "mqvpn_client: called from wrong thread");          \
+            }                                                              \
+        } while (0)
+#  endif
 #else
-#define ASSERT_TICK_THREAD(c) ((void)0)
+#  define ASSERT_TICK_THREAD(c) ((void)0)
 #endif
 
 /* Find path by xquic path_id */
-static path_entry_t *find_path_by_xqc_id(mqvpn_client_t *c, uint64_t xqc_path_id)
+static path_entry_t *
+find_path_by_xqc_id(mqvpn_client_t *c, uint64_t xqc_path_id)
 {
     for (int i = 0; i < c->n_paths; i++) {
         if (c->paths[i].in_use && c->paths[i].xqc_path_id == xqc_path_id)
@@ -275,18 +324,18 @@ static path_entry_t *find_path_by_xqc_id(mqvpn_client_t *c, uint64_t xqc_path_id
 }
 
 /* Find path by handle */
-static path_entry_t *find_path_by_handle(mqvpn_client_t *c,
-                                           mqvpn_path_handle_t h)
+static path_entry_t *
+find_path_by_handle(mqvpn_client_t *c, mqvpn_path_handle_t h)
 {
     for (int i = 0; i < c->n_paths; i++) {
-        if (c->paths[i].handle == h)
-            return &c->paths[i];
+        if (c->paths[i].handle == h) return &c->paths[i];
     }
     return NULL;
 }
 
 /* Get fd for xquic path_id (primary fd fallback) */
-static int get_fd_for_path(mqvpn_client_t *c, uint64_t xqc_path_id)
+static int
+get_fd_for_path(mqvpn_client_t *c, uint64_t xqc_path_id)
 {
     path_entry_t *p = find_path_by_xqc_id(c, xqc_path_id);
     if (p) return p->fd;
@@ -297,7 +346,8 @@ static int get_fd_for_path(mqvpn_client_t *c, uint64_t xqc_path_id)
 
 /* ─── ICMP PTB rate limiter ─── */
 
-static int ptb_rate_allow(mqvpn_client_t *c)
+static int
+ptb_rate_allow(mqvpn_client_t *c)
 {
     int64_t ms = now_ms_mono();
     if (ms - c->ptb_refill_ms >= 1000) {
@@ -313,8 +363,9 @@ static int ptb_rate_allow(mqvpn_client_t *c)
 
 /* ─── ICMP Packet Too Big (IPv4) ─── */
 
-static void send_icmpv4_ptb(mqvpn_client_t *c, const uint8_t *orig,
-                              size_t orig_len, size_t tunnel_mtu)
+static void
+send_icmpv4_ptb(mqvpn_client_t *c, const uint8_t *orig, size_t orig_len,
+                size_t tunnel_mtu)
 {
     if (orig_len < 20 || !c->conn || !c->conn->addr_assigned) return;
     if (!ptb_rate_allow(c)) return;
@@ -328,23 +379,30 @@ static void send_icmpv4_ptb(mqvpn_client_t *c, const uint8_t *orig,
     if (total > sizeof(pkt)) return;
     memset(pkt, 0, total);
 
-    pkt[0] = 0x45; pkt[1] = 0xC0;
-    pkt[2] = (total >> 8) & 0xFF; pkt[3] = total & 0xFF;
-    pkt[8] = 64; pkt[9] = 1;
+    pkt[0] = 0x45;
+    pkt[1] = 0xC0;
+    pkt[2] = (total >> 8) & 0xFF;
+    pkt[3] = total & 0xFF;
+    pkt[8] = 64;
+    pkt[9] = 1;
     memcpy(pkt + 12, c->conn->assigned_ip, 4);
     memcpy(pkt + 16, orig + 12, 4);
 
     uint32_t cksum = 0;
     for (int i = 0; i < 20; i += 2)
         cksum += ((uint32_t)pkt[i] << 8) | pkt[i + 1];
-    while (cksum >> 16) cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
     uint16_t ip_ck = ~(uint16_t)cksum;
-    pkt[10] = ip_ck >> 8; pkt[11] = ip_ck & 0xFF;
+    pkt[10] = ip_ck >> 8;
+    pkt[11] = ip_ck & 0xFF;
 
     uint8_t *icmp = pkt + 20;
-    icmp[0] = 3; icmp[1] = 4;
+    icmp[0] = 3;
+    icmp[1] = 4;
     uint16_t m16 = (tunnel_mtu > 0xFFFF) ? 0xFFFF : (uint16_t)tunnel_mtu;
-    icmp[6] = m16 >> 8; icmp[7] = m16 & 0xFF;
+    icmp[6] = m16 >> 8;
+    icmp[7] = m16 & 0xFF;
     memcpy(icmp + 8, orig, icmp_data_len);
 
     size_t icmp_total = 8 + icmp_data_len;
@@ -353,17 +411,20 @@ static void send_icmpv4_ptb(mqvpn_client_t *c, const uint8_t *orig,
         cksum += ((uint32_t)icmp[i] << 8);
         if (i + 1 < icmp_total) cksum += icmp[i + 1];
     }
-    while (cksum >> 16) cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
     uint16_t ic = ~(uint16_t)cksum;
-    icmp[2] = ic >> 8; icmp[3] = ic & 0xFF;
+    icmp[2] = ic >> 8;
+    icmp[3] = ic & 0xFF;
 
     c->cbs.tun_output(pkt, total, c->user_ctx);
 }
 
 /* ─── ICMPv6 Packet Too Big ─── */
 
-static void send_icmpv6_ptb(mqvpn_client_t *c, const uint8_t *orig,
-                              size_t orig_len, size_t tunnel_mtu)
+static void
+send_icmpv6_ptb(mqvpn_client_t *c, const uint8_t *orig, size_t orig_len,
+                size_t tunnel_mtu)
 {
     if (orig_len < 40 || !c->conn || !c->conn->addr6_assigned) return;
     if (!ptb_rate_allow(c)) return;
@@ -376,23 +437,28 @@ static void send_icmpv6_ptb(mqvpn_client_t *c, const uint8_t *orig,
     memset(pkt, 0, total);
 
     pkt[0] = 0x60;
-    pkt[4] = (icmpv6_len >> 8) & 0xFF; pkt[5] = icmpv6_len & 0xFF;
-    pkt[6] = 58; pkt[7] = 64;
+    pkt[4] = (icmpv6_len >> 8) & 0xFF;
+    pkt[5] = icmpv6_len & 0xFF;
+    pkt[6] = 58;
+    pkt[7] = 64;
     memcpy(pkt + 8, c->conn->assigned_ip6, 16);
     memcpy(pkt + 24, orig + 8, 16);
 
     uint8_t *icmp = pkt + 40;
-    icmp[0] = 2; icmp[1] = 0;
+    icmp[0] = 2;
+    icmp[1] = 0;
     uint32_t m32 = (uint32_t)tunnel_mtu;
-    icmp[4] = (m32 >> 24) & 0xFF; icmp[5] = (m32 >> 16) & 0xFF;
-    icmp[6] = (m32 >> 8) & 0xFF; icmp[7] = m32 & 0xFF;
+    icmp[4] = (m32 >> 24) & 0xFF;
+    icmp[5] = (m32 >> 16) & 0xFF;
+    icmp[6] = (m32 >> 8) & 0xFF;
+    icmp[7] = m32 & 0xFF;
     memcpy(icmp + 8, orig, icmpv6_data_len);
 
     uint32_t cksum = 0;
     for (int i = 0; i < 16; i += 2)
-        cksum += ((uint32_t)pkt[8+i] << 8) | pkt[8+i+1];
+        cksum += ((uint32_t)pkt[8 + i] << 8) | pkt[8 + i + 1];
     for (int i = 0; i < 16; i += 2)
-        cksum += ((uint32_t)pkt[24+i] << 8) | pkt[24+i+1];
+        cksum += ((uint32_t)pkt[24 + i] << 8) | pkt[24 + i + 1];
     cksum += (uint32_t)(icmpv6_len >> 16);
     cksum += (uint32_t)(icmpv6_len & 0xFFFF);
     cksum += 58;
@@ -400,17 +466,19 @@ static void send_icmpv6_ptb(mqvpn_client_t *c, const uint8_t *orig,
         cksum += ((uint32_t)icmp[i] << 8);
         if (i + 1 < icmpv6_len) cksum += icmp[i + 1];
     }
-    while (cksum >> 16) cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
     uint16_t ic = ~(uint16_t)cksum;
-    icmp[2] = ic >> 8; icmp[3] = ic & 0xFF;
+    icmp[2] = ic >> 8;
+    icmp[3] = ic & 0xFF;
 
     c->cbs.tun_output(pkt, total, c->user_ctx);
 }
 
 /* ─── ICMP Time Exceeded (IPv4) ─── */
 
-static void send_icmpv4_time_exceeded(mqvpn_client_t *c, const uint8_t *orig,
-                                        size_t orig_len)
+static void
+send_icmpv4_time_exceeded(mqvpn_client_t *c, const uint8_t *orig, size_t orig_len)
 {
     if (orig_len < 20 || !c->conn || !c->conn->addr_assigned) return;
     size_t ihl = (orig[0] & 0x0F) * 4;
@@ -422,21 +490,27 @@ static void send_icmpv4_time_exceeded(mqvpn_client_t *c, const uint8_t *orig,
     if (total > sizeof(pkt)) return;
     memset(pkt, 0, total);
 
-    pkt[0] = 0x45; pkt[1] = 0xC0;
-    pkt[2] = (total >> 8) & 0xFF; pkt[3] = total & 0xFF;
-    pkt[8] = 64; pkt[9] = 1;
+    pkt[0] = 0x45;
+    pkt[1] = 0xC0;
+    pkt[2] = (total >> 8) & 0xFF;
+    pkt[3] = total & 0xFF;
+    pkt[8] = 64;
+    pkt[9] = 1;
     memcpy(pkt + 12, c->conn->assigned_ip, 4);
     memcpy(pkt + 16, orig + 12, 4);
 
     uint32_t cksum = 0;
     for (int i = 0; i < 20; i += 2)
         cksum += ((uint32_t)pkt[i] << 8) | pkt[i + 1];
-    while (cksum >> 16) cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
     uint16_t ip_ck = ~(uint16_t)cksum;
-    pkt[10] = ip_ck >> 8; pkt[11] = ip_ck & 0xFF;
+    pkt[10] = ip_ck >> 8;
+    pkt[11] = ip_ck & 0xFF;
 
     uint8_t *icmp = pkt + 20;
-    icmp[0] = 11; icmp[1] = 0;
+    icmp[0] = 11;
+    icmp[1] = 0;
     memcpy(icmp + 8, orig, data_len);
 
     size_t icmp_total = 8 + data_len;
@@ -445,17 +519,19 @@ static void send_icmpv4_time_exceeded(mqvpn_client_t *c, const uint8_t *orig,
         cksum += ((uint32_t)icmp[i] << 8);
         if (i + 1 < icmp_total) cksum += icmp[i + 1];
     }
-    while (cksum >> 16) cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
     uint16_t ic = ~(uint16_t)cksum;
-    icmp[2] = ic >> 8; icmp[3] = ic & 0xFF;
+    icmp[2] = ic >> 8;
+    icmp[3] = ic & 0xFF;
 
     c->cbs.tun_output(pkt, total, c->user_ctx);
 }
 
 /* ─── ICMPv6 Time Exceeded ─── */
 
-static void send_icmpv6_time_exceeded(mqvpn_client_t *c, const uint8_t *orig,
-                                        size_t orig_len)
+static void
+send_icmpv6_time_exceeded(mqvpn_client_t *c, const uint8_t *orig, size_t orig_len)
 {
     if (orig_len < 40 || !c->conn || !c->conn->addr6_assigned) return;
     size_t data_len = orig_len;
@@ -466,20 +542,23 @@ static void send_icmpv6_time_exceeded(mqvpn_client_t *c, const uint8_t *orig,
     memset(pkt, 0, total);
 
     pkt[0] = 0x60;
-    pkt[4] = (icmpv6_len >> 8) & 0xFF; pkt[5] = icmpv6_len & 0xFF;
-    pkt[6] = 58; pkt[7] = 64;
+    pkt[4] = (icmpv6_len >> 8) & 0xFF;
+    pkt[5] = icmpv6_len & 0xFF;
+    pkt[6] = 58;
+    pkt[7] = 64;
     memcpy(pkt + 8, c->conn->assigned_ip6, 16);
     memcpy(pkt + 24, orig + 8, 16);
 
     uint8_t *icmp = pkt + 40;
-    icmp[0] = 3; icmp[1] = 0;
+    icmp[0] = 3;
+    icmp[1] = 0;
     memcpy(icmp + 8, orig, data_len);
 
     uint32_t cksum = 0;
     for (int i = 0; i < 16; i += 2)
-        cksum += ((uint32_t)pkt[8+i] << 8) | pkt[8+i+1];
+        cksum += ((uint32_t)pkt[8 + i] << 8) | pkt[8 + i + 1];
     for (int i = 0; i < 16; i += 2)
-        cksum += ((uint32_t)pkt[24+i] << 8) | pkt[24+i+1];
+        cksum += ((uint32_t)pkt[24 + i] << 8) | pkt[24 + i + 1];
     cksum += (uint32_t)(icmpv6_len >> 16);
     cksum += (uint32_t)(icmpv6_len & 0xFFFF);
     cksum += 58;
@@ -487,9 +566,11 @@ static void send_icmpv6_time_exceeded(mqvpn_client_t *c, const uint8_t *orig,
         cksum += ((uint32_t)icmp[i] << 8);
         if (i + 1 < icmpv6_len) cksum += icmp[i + 1];
     }
-    while (cksum >> 16) cksum = (cksum & 0xFFFF) + (cksum >> 16);
+    while (cksum >> 16)
+        cksum = (cksum & 0xFFFF) + (cksum >> 16);
     uint16_t ic = ~(uint16_t)cksum;
-    icmp[2] = ic >> 8; icmp[3] = ic & 0xFF;
+    icmp[2] = ic >> 8;
+    icmp[3] = ic & 0xFF;
 
     c->cbs.tun_output(pkt, total, c->user_ctx);
 }
@@ -498,14 +579,15 @@ static void send_icmpv6_time_exceeded(mqvpn_client_t *c, const uint8_t *orig,
  *  xquic engine callbacks
  * ================================================================ */
 
-static void cb_set_event_timer(xqc_usec_t wake_after, void *user_data)
+static void
+cb_set_event_timer(xqc_usec_t wake_after, void *user_data)
 {
     mqvpn_client_t *c = (mqvpn_client_t *)user_data;
     c->next_wake_us = wake_after;
 }
 
-static void cb_xqc_log_write(xqc_log_level_t lvl, const void *buf,
-                               size_t size, void *user_data)
+static void
+cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_data)
 {
     (void)lvl;
     mqvpn_client_t *c = (mqvpn_client_t *)user_data;
@@ -519,9 +601,9 @@ static void cb_xqc_log_write(xqc_log_level_t lvl, const void *buf,
 
 /* ─── UDP write callback (xquic → network) ─── */
 
-static ssize_t cb_write_socket(const unsigned char *buf, size_t size,
-                                const struct sockaddr *peer, socklen_t peerlen,
-                                void *conn_user_data)
+static ssize_t
+cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *peer,
+                socklen_t peerlen, void *conn_user_data)
 {
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
     mqvpn_client_t *c = conn->client;
@@ -529,7 +611,9 @@ static ssize_t cb_write_socket(const unsigned char *buf, size_t size,
     if (fd < 0) return XQC_SOCKET_ERROR;
 
     ssize_t res;
-    do { res = sendto(fd, buf, size, MSG_DONTWAIT, peer, peerlen); } while (res < 0 && errno == EINTR);
+    do {
+        res = sendto(fd, buf, size, MSG_DONTWAIT, peer, peerlen);
+    } while (res < 0 && errno == EINTR);
     if (res < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return XQC_SOCKET_EAGAIN;
         return XQC_SOCKET_ERROR;
@@ -539,10 +623,9 @@ static ssize_t cb_write_socket(const unsigned char *buf, size_t size,
     return res;
 }
 
-static ssize_t cb_write_socket_ex(uint64_t path_id,
-                                   const unsigned char *buf, size_t size,
-                                   const struct sockaddr *peer, socklen_t peerlen,
-                                   void *conn_user_data)
+static ssize_t
+cb_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
+                   const struct sockaddr *peer, socklen_t peerlen, void *conn_user_data)
 {
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
     mqvpn_client_t *c = conn->client;
@@ -550,7 +633,9 @@ static ssize_t cb_write_socket_ex(uint64_t path_id,
     if (fd < 0) return XQC_SOCKET_ERROR;
 
     ssize_t res;
-    do { res = sendto(fd, buf, size, MSG_DONTWAIT, peer, peerlen); } while (res < 0 && errno == EINTR);
+    do {
+        res = sendto(fd, buf, size, MSG_DONTWAIT, peer, peerlen);
+    } while (res < 0 && errno == EINTR);
     if (res < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return XQC_SOCKET_EAGAIN;
         return XQC_SOCKET_ERROR;
@@ -565,30 +650,47 @@ static ssize_t cb_write_socket_ex(uint64_t path_id,
 
 /* ─── TLS callbacks ─── */
 
-static int cb_cert_verify(const unsigned char *certs[], const size_t cert_len[],
-                           size_t certs_len, void *conn_user_data)
+static int
+cb_cert_verify(const unsigned char *certs[], const size_t cert_len[], size_t certs_len,
+               void *conn_user_data)
 {
-    (void)certs; (void)cert_len; (void)certs_len;
+    (void)certs;
+    (void)cert_len;
+    (void)certs_len;
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
-    if (conn && conn->client->config.insecure)
-        return 0;
+    if (conn && conn->client->config.insecure) return 0;
     LOG_E(conn->client, "TLS certificate verification failed");
     return -1;
 }
 
-static void cb_save_token(const unsigned char *t, unsigned tl, void *u)
-{ (void)t; (void)tl; (void)u; }
-static void cb_save_session(const char *d, size_t dl, void *u)
-{ (void)d; (void)dl; (void)u; }
-static void cb_save_tp(const char *d, size_t dl, void *u)
-{ (void)d; (void)dl; (void)u; }
+static void
+cb_save_token(const unsigned char *t, unsigned tl, void *u)
+{
+    (void)t;
+    (void)tl;
+    (void)u;
+}
+static void
+cb_save_session(const char *d, size_t dl, void *u)
+{
+    (void)d;
+    (void)dl;
+    (void)u;
+}
+static void
+cb_save_tp(const char *d, size_t dl, void *u)
+{
+    (void)d;
+    (void)dl;
+    (void)u;
+}
 
 /* ─── H3 connection callbacks ─── */
 
 static int cli_masque_start_tunnel(cli_conn_t *conn);
 
-static int cb_h3_conn_create(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
-                               void *user_data)
+static int
+cb_h3_conn_create(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_data)
 {
     (void)cid;
     cli_conn_t *conn = (cli_conn_t *)user_data;
@@ -597,8 +699,8 @@ static int cb_h3_conn_create(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
     return 0;
 }
 
-static void cb_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn,
-                                            void *user_data)
+static void
+cb_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *user_data)
 {
     cli_conn_t *conn = (cli_conn_t *)user_data;
     conn->dgram_mss = xqc_h3_ext_datagram_get_mss(h3_conn);
@@ -609,10 +711,11 @@ static void cb_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn,
 
 static void cli_conn_destroy(mqvpn_client_t *c);
 
-static int cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
-                              void *user_data)
+static int
+cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_data)
 {
-    (void)h3_conn; (void)cid;
+    (void)h3_conn;
+    (void)cid;
     cli_conn_t *conn = (cli_conn_t *)user_data;
     mqvpn_client_t *c = conn->client;
 
@@ -620,8 +723,7 @@ static int cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
     LOG_I(c, "connection closed (errno=%d)", err);
 
     /* Notify platform */
-    if (c->cbs.tunnel_closed)
-        c->cbs.tunnel_closed(MQVPN_ERR_CLOSED, c->user_ctx);
+    if (c->cbs.tunnel_closed) c->cbs.tunnel_closed(MQVPN_ERR_CLOSED, c->user_ctx);
 
     cli_conn_destroy(c);
 
@@ -630,16 +732,16 @@ static int cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
         int base = c->config.reconnect_interval_sec;
         if (base <= 0) base = 5;
         int delay = base;
-        for (int i = 0; i < c->reconnect_attempts && delay < RECONNECT_BACKOFF_MAX_SEC; i++)
+        for (int i = 0; i < c->reconnect_attempts && delay < RECONNECT_BACKOFF_MAX_SEC;
+             i++)
             delay *= 2;
         if (delay > RECONNECT_BACKOFF_MAX_SEC) delay = RECONNECT_BACKOFF_MAX_SEC;
         c->reconnect_attempts++;
         c->reconnect_scheduled_us = client_now_us(c) + (uint64_t)delay * 1000000;
-        LOG_I(c, "reconnecting in %d seconds (attempt %d)...",
-              delay, c->reconnect_attempts);
+        LOG_I(c, "reconnecting in %d seconds (attempt %d)...", delay,
+              c->reconnect_attempts);
         client_set_state(c, MQVPN_STATE_RECONNECTING);
-        if (c->cbs.reconnect_scheduled)
-            c->cbs.reconnect_scheduled(delay, c->user_ctx);
+        if (c->cbs.reconnect_scheduled) c->cbs.reconnect_scheduled(delay, c->user_ctx);
         return 0;
     }
 
@@ -649,15 +751,15 @@ static int cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
 
 /* ─── MASQUE tunnel start ─── */
 
-static int cli_masque_start_tunnel(cli_conn_t *conn)
+static int
+cli_masque_start_tunnel(cli_conn_t *conn)
 {
     mqvpn_client_t *c = conn->client;
     cli_stream_t *stream = calloc(1, sizeof(*stream));
     if (!stream) return -1;
     stream->conn = conn;
 
-    xqc_h3_request_t *req = xqc_h3_request_create(
-        c->engine, &conn->cid, NULL, stream);
+    xqc_h3_request_t *req = xqc_h3_request_create(c->engine, &conn->cid, NULL, stream);
     if (!req) {
         LOG_E(c, "xqc_h3_request_create failed");
         free(stream);
@@ -667,8 +769,8 @@ static int cli_masque_start_tunnel(cli_conn_t *conn)
     conn->masque_request = req;
 
     char authority[280];
-    snprintf(authority, sizeof(authority), "%s:%d",
-             c->config.server_host, c->config.server_port);
+    snprintf(authority, sizeof(authority), "%s:%d", c->config.server_host,
+             c->config.server_port);
 
     char auth_value[300];
     int has_auth = (c->config.auth_key[0] != '\0');
@@ -676,27 +778,34 @@ static int cli_masque_start_tunnel(cli_conn_t *conn)
         snprintf(auth_value, sizeof(auth_value), "Bearer %s", c->config.auth_key);
 
     xqc_http_header_t hdrs[7] = {
-        { .name = {.iov_base = ":method",   .iov_len = 7},
-          .value = {.iov_base = "CONNECT",  .iov_len = 7},    .flags = 0 },
-        { .name = {.iov_base = ":protocol", .iov_len = 9},
-          .value = {.iov_base = "connect-ip",.iov_len = 10},  .flags = 0 },
-        { .name = {.iov_base = ":scheme",   .iov_len = 7},
-          .value = {.iov_base = "https",    .iov_len = 5},    .flags = 0 },
-        { .name = {.iov_base = ":authority",.iov_len = 10},
-          .value = {.iov_base = authority,  .iov_len = strlen(authority)}, .flags = 0 },
-        { .name = {.iov_base = ":path",     .iov_len = 5},
-          .value = {.iov_base = "/.well-known/masque/ip/*/*/", .iov_len = 27}, .flags = 0 },
-        { .name = {.iov_base = "capsule-protocol", .iov_len = 16},
-          .value = {.iov_base = "?1",       .iov_len = 2},    .flags = 0 },
+        {.name = {.iov_base = ":method", .iov_len = 7},
+         .value = {.iov_base = "CONNECT", .iov_len = 7},
+         .flags = 0},
+        {.name = {.iov_base = ":protocol", .iov_len = 9},
+         .value = {.iov_base = "connect-ip", .iov_len = 10},
+         .flags = 0},
+        {.name = {.iov_base = ":scheme", .iov_len = 7},
+         .value = {.iov_base = "https", .iov_len = 5},
+         .flags = 0},
+        {.name = {.iov_base = ":authority", .iov_len = 10},
+         .value = {.iov_base = authority, .iov_len = strlen(authority)},
+         .flags = 0},
+        {.name = {.iov_base = ":path", .iov_len = 5},
+         .value = {.iov_base = "/.well-known/masque/ip/*/*/", .iov_len = 27},
+         .flags = 0},
+        {.name = {.iov_base = "capsule-protocol", .iov_len = 16},
+         .value = {.iov_base = "?1", .iov_len = 2},
+         .flags = 0},
     };
     int hdr_count = 6;
     if (has_auth) {
-        hdrs[hdr_count].name  = (struct iovec){.iov_base = "authorization", .iov_len = 13};
-        hdrs[hdr_count].value = (struct iovec){.iov_base = auth_value, .iov_len = strlen(auth_value)};
+        hdrs[hdr_count].name = (struct iovec){.iov_base = "authorization", .iov_len = 13};
+        hdrs[hdr_count].value =
+            (struct iovec){.iov_base = auth_value, .iov_len = strlen(auth_value)};
         hdrs[hdr_count].flags = 0;
         hdr_count++;
     }
-    xqc_http_headers_t headers = { .headers = hdrs, .count = hdr_count, .capacity = 7 };
+    xqc_http_headers_t headers = {.headers = hdrs, .count = hdr_count, .capacity = 7};
 
     ssize_t ret = xqc_h3_request_send_headers(req, &headers, 0);
     if (ret < 0) {
@@ -713,24 +822,33 @@ static int cli_masque_start_tunnel(cli_conn_t *conn)
 
 /* ─── Capsule parsing ─── */
 
-static int stream_append_capsules(cli_stream_t *s, const uint8_t *buf, size_t len)
+static int
+stream_append_capsules(cli_stream_t *s, const uint8_t *buf, size_t len)
 {
     if (len == 0) return 0;
     size_t need = s->capsule_len + len;
     if (need > MAX_CAPSULE_BUF) return -1;
     if (need > s->capsule_cap) {
         size_t cap = s->capsule_cap ? s->capsule_cap * 2 : 4096;
-        while (cap < need) { if (cap > SIZE_MAX / 2) { cap = need; break; } cap *= 2; }
+        while (cap < need) {
+            if (cap > SIZE_MAX / 2) {
+                cap = need;
+                break;
+            }
+            cap *= 2;
+        }
         uint8_t *nb = realloc(s->capsule_buf, cap);
         if (!nb) return -1;
-        s->capsule_buf = nb; s->capsule_cap = cap;
+        s->capsule_buf = nb;
+        s->capsule_cap = cap;
     }
     memcpy(s->capsule_buf + s->capsule_len, buf, len);
     s->capsule_len += len;
     return 0;
 }
 
-static void process_capsules(cli_stream_t *stream)
+static void
+process_capsules(cli_stream_t *stream)
 {
     cli_conn_t *conn = stream->conn;
     mqvpn_client_t *c = conn->client;
@@ -740,9 +858,9 @@ static void process_capsules(cli_stream_t *stream)
         const uint8_t *payload;
         size_t cap_len, consumed;
 
-        xqc_int_t xret = xqc_h3_ext_capsule_decode(
-            stream->capsule_buf, stream->capsule_len,
-            &cap_type, &payload, &cap_len, &consumed);
+        xqc_int_t xret =
+            xqc_h3_ext_capsule_decode(stream->capsule_buf, stream->capsule_len, &cap_type,
+                                      &payload, &cap_len, &consumed);
         if (xret != XQC_OK) break;
 
         if (cap_type == XQC_H3_CAPSULE_ADDRESS_ASSIGN) {
@@ -753,8 +871,8 @@ static void process_capsules(cli_stream_t *stream)
                 uint8_t ip_ver, ip_addr[16], prefix;
                 size_t ip_len = 16, aa_consumed;
                 xret = xqc_h3_ext_connectip_parse_address_assign(
-                    ap, aremain, &req_id, &ip_ver,
-                    ip_addr, &ip_len, &prefix, &aa_consumed);
+                    ap, aremain, &req_id, &ip_ver, ip_addr, &ip_len, &prefix,
+                    &aa_consumed);
                 if (xret != XQC_OK) break;
 
                 if (ip_ver == 4 && !conn->addr_assigned) {
@@ -763,8 +881,8 @@ static void process_capsules(cli_stream_t *stream)
                     conn->addr_assigned = 1;
                     memcpy(c->assigned_ip, ip_addr, 4);
                     c->assigned_prefix = prefix;
-                    LOG_I(c, "ADDRESS_ASSIGN: IPv4 %d.%d.%d.%d/%d",
-                          ip_addr[0], ip_addr[1], ip_addr[2], ip_addr[3], prefix);
+                    LOG_I(c, "ADDRESS_ASSIGN: IPv4 %d.%d.%d.%d/%d", ip_addr[0],
+                          ip_addr[1], ip_addr[2], ip_addr[3], prefix);
                 } else if (ip_ver == 6 && !conn->addr6_assigned) {
                     memcpy(conn->assigned_ip6, ip_addr, 16);
                     conn->assigned_prefix6 = prefix;
@@ -780,8 +898,7 @@ static void process_capsules(cli_stream_t *stream)
                 aremain -= aa_consumed;
             }
         } else if (cap_type == XQC_H3_CAPSULE_ROUTE_ADVERTISEMENT) {
-            xret = xqc_h3_ext_connectip_validate_route_advertisement(
-                payload, cap_len);
+            xret = xqc_h3_ext_connectip_validate_route_advertisement(payload, cap_len);
             if (xret != XQC_OK) {
                 LOG_E(c, "ROUTE_ADVERTISEMENT validation failed");
                 xqc_h3_request_close(stream->h3_request);
@@ -799,7 +916,8 @@ static void process_capsules(cli_stream_t *stream)
 
 /* ─── H3 request callbacks ─── */
 
-static int cb_request_close(xqc_h3_request_t *h3_request, void *user_data)
+static int
+cb_request_close(xqc_h3_request_t *h3_request, void *user_data)
 {
     (void)h3_request;
     cli_stream_t *stream = (cli_stream_t *)user_data;
@@ -811,8 +929,9 @@ static int cb_request_close(xqc_h3_request_t *h3_request, void *user_data)
     return 0;
 }
 
-static int cb_request_read(xqc_h3_request_t *h3_request,
-                            xqc_request_notify_flag_t flag, void *user_data)
+static int
+cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
+                void *user_data)
 {
     cli_stream_t *stream = (cli_stream_t *)user_data;
     cli_conn_t *conn = stream->conn;
@@ -824,10 +943,8 @@ static int cb_request_read(xqc_h3_request_t *h3_request,
         if (headers) {
             for (int i = 0; i < (int)headers->count; i++) {
                 xqc_http_header_t *h = &headers->headers[i];
-                if (h->name.iov_len == 7
-                    && memcmp(h->name.iov_base, ":status", 7) == 0
-                    && h->value.iov_len == 3
-                    && memcmp(h->value.iov_base, "200", 3) == 0) {
+                if (h->name.iov_len == 7 && memcmp(h->name.iov_base, ":status", 7) == 0 &&
+                    h->value.iov_len == 3 && memcmp(h->value.iov_base, "200", 3) == 0) {
                     conn->tunnel_ok = 1;
                     LOG_I(c, "tunnel 200 OK");
                 }
@@ -851,8 +968,8 @@ static int cb_request_read(xqc_h3_request_t *h3_request,
             /* Compute MTU */
             int tun_mtu = 1280;
             if (conn->dgram_mss > 0) {
-                size_t udp_mss = xqc_h3_ext_masque_udp_mss(
-                    conn->dgram_mss, conn->masque_stream_id);
+                size_t udp_mss =
+                    xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
                 if (udp_mss >= 68) tun_mtu = (int)udp_mss;
             }
             if (conn->addr6_assigned && tun_mtu < 1280) tun_mtu = 1280;
@@ -878,8 +995,7 @@ static int cb_request_read(xqc_h3_request_t *h3_request,
             if (c->n_paths > 0 && c->paths[0].active) {
                 c->paths[0].status = MQVPN_PATH_ACTIVE;
                 if (c->cbs.path_event)
-                    c->cbs.path_event(c->paths[0].handle,
-                                      MQVPN_PATH_ACTIVE, c->user_ctx);
+                    c->cbs.path_event(c->paths[0].handle, MQVPN_PATH_ACTIVE, c->user_ctx);
             }
 
             client_set_state(c, MQVPN_STATE_TUNNEL_READY);
@@ -890,18 +1006,22 @@ static int cb_request_read(xqc_h3_request_t *h3_request,
     return 0;
 }
 
-static int cb_request_write(xqc_h3_request_t *h3_request, void *user_data)
+static int
+cb_request_write(xqc_h3_request_t *h3_request, void *user_data)
 {
-    (void)h3_request; (void)user_data;
+    (void)h3_request;
+    (void)user_data;
     return 0;
 }
 
 /* ─── Datagram callbacks ─── */
 
-static void cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data,
-                            size_t data_len, void *user_data, uint64_t ts)
+static void
+cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *user_data,
+              uint64_t ts)
 {
-    (void)h3_conn; (void)ts;
+    (void)h3_conn;
+    (void)ts;
     cli_conn_t *conn = (cli_conn_t *)user_data;
     if (!conn) return;
     mqvpn_client_t *c = conn->client;
@@ -911,9 +1031,8 @@ static void cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data,
     const uint8_t *payload = NULL;
     size_t payload_len = 0;
 
-    xqc_int_t xret = xqc_h3_ext_masque_unframe_udp(
-        (const uint8_t *)data, data_len, &qsid, &ctx_id,
-        &payload, &payload_len);
+    xqc_int_t xret = xqc_h3_ext_masque_unframe_udp((const uint8_t *)data, data_len, &qsid,
+                                                   &ctx_id, &payload, &payload_len);
     if (xret != XQC_OK) return;
     if (payload_len < 1) return;
 
@@ -949,7 +1068,8 @@ static void cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data,
     c->cbs.tun_output(fwd_pkt, payload_len, c->user_ctx);
 }
 
-static void cb_dgram_write(xqc_h3_conn_t *h3_conn, void *user_data)
+static void
+cb_dgram_write(xqc_h3_conn_t *h3_conn, void *user_data)
 {
     (void)h3_conn;
     cli_conn_t *conn = (cli_conn_t *)user_data;
@@ -958,27 +1078,37 @@ static void cb_dgram_write(xqc_h3_conn_t *h3_conn, void *user_data)
 
     if (c->backpressure) {
         c->backpressure = 0;
-        if (c->cbs.ready_for_tun)
-            c->cbs.ready_for_tun(c->user_ctx);
+        if (c->cbs.ready_for_tun) c->cbs.ready_for_tun(c->user_ctx);
     }
 }
 
-static void cb_dgram_acked(xqc_h3_conn_t *h, uint64_t id, void *ud)
+static void
+cb_dgram_acked(xqc_h3_conn_t *h, uint64_t id, void *ud)
 {
-    (void)h; (void)id;
+    (void)h;
+    (void)id;
     cli_conn_t *conn = (cli_conn_t *)ud;
-    if (conn) { conn->dgram_acked_cnt++; conn->client->dgram_acked++; }
+    if (conn) {
+        conn->dgram_acked_cnt++;
+        conn->client->dgram_acked++;
+    }
 }
 
-static int cb_dgram_lost(xqc_h3_conn_t *h, uint64_t id, void *ud)
+static int
+cb_dgram_lost(xqc_h3_conn_t *h, uint64_t id, void *ud)
 {
-    (void)h; (void)id;
+    (void)h;
+    (void)id;
     cli_conn_t *conn = (cli_conn_t *)ud;
-    if (conn) { conn->dgram_lost_cnt++; conn->client->dgram_lost++; }
+    if (conn) {
+        conn->dgram_lost_cnt++;
+        conn->client->dgram_lost++;
+    }
     return 0;
 }
 
-static void cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
+static void
+cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
 {
     (void)h;
     cli_conn_t *conn = (cli_conn_t *)ud;
@@ -994,8 +1124,7 @@ static void cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
             if (new_mtu != c->last_notified_mtu) {
                 c->mtu = new_mtu;
                 c->last_notified_mtu = new_mtu;
-                if (c->cbs.mtu_updated)
-                    c->cbs.mtu_updated(new_mtu, c->user_ctx);
+                if (c->cbs.mtu_updated) c->cbs.mtu_updated(new_mtu, c->user_ctx);
             }
         }
     }
@@ -1004,7 +1133,8 @@ static void cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
 /* ─── Multipath helpers ─── */
 
 /* Create an xquic path for a secondary path entry and mark it ACTIVE. */
-static void client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
+static void
+client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
 {
     uint64_t new_id = 0;
     xqc_int_t ret = xqc_conn_create_path(c->engine, &c->conn->cid, &new_id, 0);
@@ -1016,13 +1146,13 @@ static void client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
     p->in_use = 1;
     p->status = MQVPN_PATH_ACTIVE;
     LOG_I(c, "path[%d] activated: path_id=%" PRIu64 " iface=%s", idx, new_id, p->name);
-    if (c->cbs.path_event)
-        c->cbs.path_event(p->handle, MQVPN_PATH_ACTIVE, c->user_ctx);
+    if (c->cbs.path_event) c->cbs.path_event(p->handle, MQVPN_PATH_ACTIVE, c->user_ctx);
 }
 
 /* ─── Multipath callbacks ─── */
 
-static void cb_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
+static void
+cb_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
 {
     (void)cid;
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
@@ -1038,8 +1168,8 @@ static void cb_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
     }
 }
 
-static void cb_path_removed(const xqc_cid_t *cid, uint64_t path_id,
-                              void *conn_user_data)
+static void
+cb_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data)
 {
     (void)cid;
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
@@ -1058,7 +1188,8 @@ static void cb_path_removed(const xqc_cid_t *cid, uint64_t path_id,
 
 /* ─── Connection destroy (Level 2) ─── */
 
-static void cli_conn_destroy(mqvpn_client_t *c)
+static void
+cli_conn_destroy(mqvpn_client_t *c)
 {
     if (!c->conn) return;
 
@@ -1085,7 +1216,8 @@ static void cli_conn_destroy(mqvpn_client_t *c)
 
 /* ─── Start a QUIC/H3 connection ─── */
 
-static int cli_start_connection(mqvpn_client_t *c)
+static int
+cli_start_connection(mqvpn_client_t *c)
 {
     cli_conn_t *conn = calloc(1, sizeof(*conn));
     if (!conn) return -1;
@@ -1116,23 +1248,19 @@ static int cli_start_connection(mqvpn_client_t *c)
 
     xqc_conn_ssl_config_t ssl_cfg;
     memset(&ssl_cfg, 0, sizeof(ssl_cfg));
-    ssl_cfg.cert_verify_flag = c->config.insecure
-        ? XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED
-        : XQC_TLS_CERT_FLAG_NEED_VERIFY;
+    ssl_cfg.cert_verify_flag = c->config.insecure ? XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED
+                                                  : XQC_TLS_CERT_FLAG_NEED_VERIFY;
 
-    const xqc_cid_t *cid = xqc_h3_connect(
-        c->engine, &cs, NULL, 0,
-        c->config.server_host, 0, &ssl_cfg,
-        (struct sockaddr *)&c->server_addr, c->server_addrlen,
-        conn);
+    const xqc_cid_t *cid =
+        xqc_h3_connect(c->engine, &cs, NULL, 0, c->config.server_host, 0, &ssl_cfg,
+                       (struct sockaddr *)&c->server_addr, c->server_addrlen, conn);
     if (!cid) {
         LOG_E(c, "xqc_h3_connect failed");
         goto cleanup;
     }
 
     memcpy(&conn->cid, cid, sizeof(*cid));
-    if (conn->h3_conn)
-        xqc_h3_ext_datagram_set_user_data(conn->h3_conn, conn);
+    if (conn->h3_conn) xqc_h3_ext_datagram_set_user_data(conn->h3_conn, conn);
 
     /* Mark primary path */
     if (c->n_paths > 0) {
@@ -1140,12 +1268,11 @@ static int cli_start_connection(mqvpn_client_t *c)
         c->paths[0].in_use = 1;
     }
 
-    c->conn = conn;  /* ownership transfer — cleanup won't free */
+    c->conn = conn; /* ownership transfer — cleanup won't free */
     conn = NULL;
 
-    LOG_I(c, "connecting to %s:%d (multipath=%d, paths=%d)",
-          c->config.server_host, c->config.server_port,
-          multipath, c->n_paths);
+    LOG_I(c, "connecting to %s:%d (multipath=%d, paths=%d)", c->config.server_host,
+          c->config.server_port, multipath, c->n_paths);
     return 0;
 
 cleanup:
@@ -1157,10 +1284,9 @@ cleanup:
  *  Public API — Lifecycle
  * ================================================================ */
 
-mqvpn_client_t *mqvpn_client_new(
-    const mqvpn_config_t *cfg,
-    const mqvpn_client_callbacks_t *cbs,
-    void *user_ctx)
+mqvpn_client_t *
+mqvpn_client_new(const mqvpn_config_t *cfg, const mqvpn_client_callbacks_t *cbs,
+                 void *user_ctx)
 {
     if (!cfg || !cbs) return NULL;
     if (cbs->abi_version != MQVPN_CALLBACKS_ABI_VERSION) return NULL;
@@ -1171,7 +1297,8 @@ mqvpn_client_t *mqvpn_client_new(
 
     memcpy(&c->config, cfg, sizeof(*cfg));
     memcpy(&c->cbs, cbs, sizeof(*cbs));
-    c->user_ctx = user_ctx;  /* caller guarantees lifetime exceeds this object */  // lgtm[cpp/stack-address-escape]
+    c->user_ctx = user_ctx;
+        /* caller guarantees lifetime exceeds this object */ // lgtm[cpp/stack-address-escape]
     c->state = MQVPN_STATE_IDLE;
     c->next_path_handle = 1;
     c->ptb_tokens = PTB_RATE_LIMIT;
@@ -1180,14 +1307,15 @@ mqvpn_client_t *mqvpn_client_new(
     xqc_engine_ssl_config_t engine_ssl;
     memset(&engine_ssl, 0, sizeof(engine_ssl));
     engine_ssl.ciphers = XQC_TLS_CIPHERS;
-    engine_ssl.groups  = XQC_TLS_GROUPS;
+    engine_ssl.groups = XQC_TLS_GROUPS;
 
     xqc_engine_callback_t engine_cbs = {
         .set_event_timer = cb_set_event_timer,
-        .log_callbacks = {
-            .xqc_log_write_err  = cb_xqc_log_write,
-            .xqc_log_write_stat = cb_xqc_log_write,
-        },
+        .log_callbacks =
+            {
+                .xqc_log_write_err = cb_xqc_log_write,
+                .xqc_log_write_stat = cb_xqc_log_write,
+            },
     };
 
     /* Inject custom clock into xquic engine — ensures xquic's internal
@@ -1202,66 +1330,66 @@ mqvpn_client_t *mqvpn_client_new(
     }
 
     xqc_transport_callbacks_t tcbs = {
-        .write_socket                = cb_write_socket,
-        .write_socket_ex             = cb_write_socket_ex,
-        .save_token                  = cb_save_token,
-        .save_session_cb             = cb_save_session,
-        .save_tp_cb                  = cb_save_tp,
-        .cert_verify_cb              = cb_cert_verify,
+        .write_socket = cb_write_socket,
+        .write_socket_ex = cb_write_socket_ex,
+        .save_token = cb_save_token,
+        .save_session_cb = cb_save_session,
+        .save_tp_cb = cb_save_tp,
+        .cert_verify_cb = cb_cert_verify,
         .ready_to_create_path_notify = cb_ready_to_create_path,
-        .path_removed_notify         = cb_path_removed,
+        .path_removed_notify = cb_path_removed,
     };
 
     /* Map log level */
     int xqc_log_level;
     switch (cfg->log_level) {
     case MQVPN_LOG_DEBUG: xqc_log_level = 5; break;
-    case MQVPN_LOG_INFO:  xqc_log_level = 3; break;
-    case MQVPN_LOG_WARN:  xqc_log_level = 2; break;
+    case MQVPN_LOG_INFO: xqc_log_level = 3; break;
+    case MQVPN_LOG_WARN: xqc_log_level = 2; break;
     case MQVPN_LOG_ERROR: xqc_log_level = 1; break;
     default: xqc_log_level = 3; break;
     }
 
     xqc_config_t xconfig;
-    if (xqc_engine_get_default_config(&xconfig, XQC_ENGINE_CLIENT) < 0)
-        goto cleanup;
+    if (xqc_engine_get_default_config(&xconfig, XQC_ENGINE_CLIENT) < 0) goto cleanup;
     xconfig.cfg_log_level = (xqc_log_level_t)xqc_log_level;
 
-    c->engine = xqc_engine_create(XQC_ENGINE_CLIENT, &xconfig,
-                                   &engine_ssl, &engine_cbs, &tcbs, c);
-    if (!c->engine)
-        goto cleanup;
+    c->engine = xqc_engine_create(XQC_ENGINE_CLIENT, &xconfig, &engine_ssl, &engine_cbs,
+                                  &tcbs, c);
+    if (!c->engine) goto cleanup;
 
     /* H3 callbacks */
     xqc_h3_callbacks_t h3_cbs = {
-        .h3c_cbs = {
-            .h3_conn_create_notify      = cb_h3_conn_create,
-            .h3_conn_close_notify       = cb_h3_conn_close,
-            .h3_conn_handshake_finished = cb_h3_conn_handshake_finished,
-        },
-        .h3r_cbs = {
-            .h3_request_close_notify  = cb_request_close,
-            .h3_request_read_notify   = cb_request_read,
-            .h3_request_write_notify  = cb_request_write,
-        },
-        .h3_ext_dgram_cbs = {
-            .dgram_read_notify        = cb_dgram_read,
-            .dgram_write_notify       = cb_dgram_write,
-            .dgram_acked_notify       = cb_dgram_acked,
-            .dgram_lost_notify        = cb_dgram_lost,
-            .dgram_mss_updated_notify = cb_dgram_mss_updated,
-        },
+        .h3c_cbs =
+            {
+                .h3_conn_create_notify = cb_h3_conn_create,
+                .h3_conn_close_notify = cb_h3_conn_close,
+                .h3_conn_handshake_finished = cb_h3_conn_handshake_finished,
+            },
+        .h3r_cbs =
+            {
+                .h3_request_close_notify = cb_request_close,
+                .h3_request_read_notify = cb_request_read,
+                .h3_request_write_notify = cb_request_write,
+            },
+        .h3_ext_dgram_cbs =
+            {
+                .dgram_read_notify = cb_dgram_read,
+                .dgram_write_notify = cb_dgram_write,
+                .dgram_acked_notify = cb_dgram_acked,
+                .dgram_lost_notify = cb_dgram_lost,
+                .dgram_mss_updated_notify = cb_dgram_mss_updated,
+            },
     };
-    if (xqc_h3_ctx_init(c->engine, &h3_cbs) != XQC_OK)
-        goto cleanup;
+    if (xqc_h3_ctx_init(c->engine, &h3_cbs) != XQC_OK) goto cleanup;
 
     xqc_h3_conn_settings_t h3s = {
-        .max_field_section_size       = 32 * 1024,
-        .qpack_blocked_streams        = 64,
+        .max_field_section_size = 32 * 1024,
+        .qpack_blocked_streams = 64,
         .qpack_enc_max_table_capacity = 16 * 1024,
         .qpack_dec_max_table_capacity = 16 * 1024,
-        .enable_connect_protocol      = 1,
-        .h3_datagram                  = 1,
+        .enable_connect_protocol = 1,
+        .h3_datagram = 1,
     };
     xqc_h3_engine_set_local_settings(c->engine, &h3s);
 
@@ -1276,7 +1404,8 @@ cleanup:
     return NULL;
 }
 
-void mqvpn_client_destroy(mqvpn_client_t *client)
+void
+mqvpn_client_destroy(mqvpn_client_t *client)
 {
     if (!client) return;
 
@@ -1288,7 +1417,8 @@ void mqvpn_client_destroy(mqvpn_client_t *client)
     free(client);
 }
 
-int mqvpn_client_connect(mqvpn_client_t *c)
+int
+mqvpn_client_connect(mqvpn_client_t *c)
 {
     if (!c) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
@@ -1296,21 +1426,20 @@ int mqvpn_client_connect(mqvpn_client_t *c)
     if (!mqvpn_state_transition_valid(c->state, MQVPN_STATE_CONNECTING))
         return MQVPN_ERR_INVALID_ARG;
 
-    if (cli_start_connection(c) < 0)
-        return MQVPN_ERR_ENGINE;
+    if (cli_start_connection(c) < 0) return MQVPN_ERR_ENGINE;
 
     client_set_state(c, MQVPN_STATE_CONNECTING);
     /* Platform drives the engine via tick() — no main_logic here */
     return MQVPN_OK;
 }
 
-int mqvpn_client_disconnect(mqvpn_client_t *c)
+int
+mqvpn_client_disconnect(mqvpn_client_t *c)
 {
     if (!c) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
 
-    if (c->state == MQVPN_STATE_CLOSED || c->state == MQVPN_STATE_IDLE)
-        return MQVPN_OK;
+    if (c->state == MQVPN_STATE_CLOSED || c->state == MQVPN_STATE_IDLE) return MQVPN_OK;
 
     c->shutting_down = 1;
     if (c->conn && c->engine) {
@@ -1323,8 +1452,8 @@ int mqvpn_client_disconnect(mqvpn_client_t *c)
 
 /* ─── Path management ─── */
 
-mqvpn_path_handle_t mqvpn_client_add_path_fd(
-    mqvpn_client_t *c, int fd, const mqvpn_path_desc_t *desc)
+mqvpn_path_handle_t
+mqvpn_client_add_path_fd(mqvpn_client_t *c, int fd, const mqvpn_path_desc_t *desc)
 {
     if (!c || fd < 0) return -1;
     ASSERT_TICK_THREAD(c);
@@ -1345,10 +1474,10 @@ mqvpn_path_handle_t mqvpn_client_add_path_fd(
     path_entry_t *p = &c->paths[idx];
     memset(p, 0, sizeof(*p));
     p->handle = c->next_path_handle++;
-    p->fd     = fd;
+    p->fd = fd;
 
     /* Ensure adequate socket buffers for high-throughput UDP (ref: WireGuard) */
-    int bufsize = 7 * 1024 * 1024;  /* 7 MiB */
+    int bufsize = 7 * 1024 * 1024; /* 7 MiB */
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
     setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
 #ifdef SO_SNDBUFFORCE
@@ -1364,9 +1493,9 @@ mqvpn_path_handle_t mqvpn_client_add_path_fd(
         p->name[sizeof(p->name) - 1] = '\0';
         if (desc->local_addr_len > 0 && desc->local_addr_len <= sizeof(p->local_addr))
             memcpy(&p->local_addr, desc->local_addr, desc->local_addr_len);
-        p->local_addr_len  = desc->local_addr_len;
+        p->local_addr_len = desc->local_addr_len;
         p->platform_net_id = desc->platform_net_id;
-        p->flags           = desc->flags;
+        p->flags = desc->flags;
     }
 
     /* If multipath is already negotiated, activate immediately */
@@ -1377,7 +1506,8 @@ mqvpn_path_handle_t mqvpn_client_add_path_fd(
     return p->handle;
 }
 
-int mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
+int
+mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
 {
     if (!c) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
@@ -1392,7 +1522,8 @@ int mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
     return MQVPN_OK;
 }
 
-int mqvpn_client_set_tun_active(mqvpn_client_t *c, int active, int tun_fd)
+int
+mqvpn_client_set_tun_active(mqvpn_client_t *c, int active, int tun_fd)
 {
     if (!c) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
@@ -1407,8 +1538,8 @@ int mqvpn_client_set_tun_active(mqvpn_client_t *c, int active, int tun_fd)
 
 /* ─── I/O feed ─── */
 
-int mqvpn_client_on_tun_packet(mqvpn_client_t *c,
-                                const uint8_t *pkt, size_t len)
+int
+mqvpn_client_on_tun_packet(mqvpn_client_t *c, const uint8_t *pkt, size_t len)
 {
     if (!c || !pkt || len == 0) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
@@ -1422,22 +1553,23 @@ int mqvpn_client_on_tun_packet(mqvpn_client_t *c,
     if (ip_ver == 4) {
         if (len < 20) return MQVPN_ERR_INVALID_ARG;
         if (conn->addr_assigned && memcmp(pkt + 12, conn->assigned_ip, 4) != 0)
-            return MQVPN_OK;  /* silently drop: src mismatch */
+            return MQVPN_OK; /* silently drop: src mismatch */
     } else if (ip_ver == 6) {
         if (len < 40 || !conn->addr6_assigned) return MQVPN_OK;
-        if (memcmp(pkt + 8, conn->assigned_ip6, 16) != 0)
-            return MQVPN_OK;
+        if (memcmp(pkt + 8, conn->assigned_ip6, 16) != 0) return MQVPN_OK;
     } else {
         return MQVPN_OK;
     }
 
     /* ICMP PTB if packet exceeds tunnel capacity */
     if (conn->dgram_mss > 0) {
-        size_t udp_mss = xqc_h3_ext_masque_udp_mss(
-            conn->dgram_mss, conn->masque_stream_id);
+        size_t udp_mss =
+            xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
         if (len > udp_mss) {
-            if (ip_ver == 4) send_icmpv4_ptb(c, pkt, len, udp_mss);
-            else             send_icmpv6_ptb(c, pkt, len, udp_mss);
+            if (ip_ver == 4)
+                send_icmpv4_ptb(c, pkt, len, udp_mss);
+            else
+                send_icmpv6_ptb(c, pkt, len, udp_mss);
             return MQVPN_OK;
         }
     }
@@ -1446,17 +1578,14 @@ int mqvpn_client_on_tun_packet(mqvpn_client_t *c,
     uint8_t frame_buf[MASQUE_FRAME_BUF];
     size_t frame_written = 0;
     xqc_int_t xret = xqc_h3_ext_masque_frame_udp(
-        frame_buf, sizeof(frame_buf), &frame_written,
-        conn->masque_stream_id, pkt, len);
+        frame_buf, sizeof(frame_buf), &frame_written, conn->masque_stream_id, pkt, len);
     if (xret != XQC_OK) return MQVPN_ERR_ENGINE;
 
     uint64_t dgram_id;
     uint32_t fh = flow_hash_pkt(pkt, (int)len);
-    xqc_conn_set_dgram_flow_hash(
-        xqc_h3_conn_get_xqc_conn(conn->h3_conn), fh);
-    xret = xqc_h3_ext_datagram_send(
-        conn->h3_conn, frame_buf, frame_written,
-        &dgram_id, XQC_DATA_QOS_HIGH);
+    xqc_conn_set_dgram_flow_hash(xqc_h3_conn_get_xqc_conn(conn->h3_conn), fh);
+    xret = xqc_h3_ext_datagram_send(conn->h3_conn, frame_buf, frame_written, &dgram_id,
+                                    XQC_DATA_QOS_HIGH);
 
     if (xret == -XQC_EAGAIN) {
         c->backpressure = 1;
@@ -1469,10 +1598,10 @@ int mqvpn_client_on_tun_packet(mqvpn_client_t *c,
     return MQVPN_OK;
 }
 
-int mqvpn_client_on_socket_recv(
-    mqvpn_client_t *c, mqvpn_path_handle_t path,
-    const uint8_t *pkt, size_t len,
-    const struct sockaddr *peer, socklen_t peer_len)
+int
+mqvpn_client_on_socket_recv(mqvpn_client_t *c, mqvpn_path_handle_t path,
+                            const uint8_t *pkt, size_t len, const struct sockaddr *peer,
+                            socklen_t peer_len)
 {
     if (!c || !pkt || len == 0 || len > 65536) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
@@ -1493,32 +1622,28 @@ int mqvpn_client_on_socket_recv(
     }
 
     uint64_t recv_time = client_now_us(c);
-    xqc_engine_packet_process(
-        c->engine, pkt, len,
-        (struct sockaddr *)&local_addr, local_len,
-        peer, peer_len,
-        (xqc_usec_t)recv_time, NULL);
+    xqc_engine_packet_process(c->engine, pkt, len, (struct sockaddr *)&local_addr,
+                              local_len, peer, peer_len, (xqc_usec_t)recv_time, NULL);
 
     return MQVPN_OK;
 }
 
 /* ─── Tick ─── */
 
-int mqvpn_client_tick(mqvpn_client_t *c)
+int
+mqvpn_client_tick(mqvpn_client_t *c)
 {
     if (!c) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
 
-    if (c->engine)
-        xqc_engine_main_logic(c->engine);
+    if (c->engine) xqc_engine_main_logic(c->engine);
 
     /* Reconnect timer check */
     if (c->state == MQVPN_STATE_RECONNECTING && c->reconnect_scheduled_us > 0) {
         uint64_t t = client_now_us(c);
         if (t >= c->reconnect_scheduled_us) {
             c->reconnect_scheduled_us = 0;
-            LOG_I(c, "attempting reconnection (attempt %d)...",
-                  c->reconnect_attempts);
+            LOG_I(c, "attempting reconnection (attempt %d)...", c->reconnect_attempts);
 
             /* Reset path state for fresh connection */
             c->multipath_ready = 0;
@@ -1532,7 +1657,8 @@ int mqvpn_client_tick(mqvpn_client_t *c)
                 int base = c->config.reconnect_interval_sec;
                 if (base <= 0) base = 5;
                 int delay = base;
-                for (int i = 0; i < c->reconnect_attempts && delay < RECONNECT_BACKOFF_MAX_SEC; i++)
+                for (int i = 0;
+                     i < c->reconnect_attempts && delay < RECONNECT_BACKOFF_MAX_SEC; i++)
                     delay *= 2;
                 if (delay > RECONNECT_BACKOFF_MAX_SEC) delay = RECONNECT_BACKOFF_MAX_SEC;
                 c->reconnect_attempts++;
@@ -1549,22 +1675,24 @@ int mqvpn_client_tick(mqvpn_client_t *c)
 
 /* ─── Query functions ─── */
 
-mqvpn_client_state_t mqvpn_client_get_state(const mqvpn_client_t *c)
+mqvpn_client_state_t
+mqvpn_client_get_state(const mqvpn_client_t *c)
 {
     if (!c) return MQVPN_STATE_CLOSED;
     return c->state;
 }
 
-int mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
+int
+mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
 {
     if (!c || !out) return MQVPN_ERR_INVALID_ARG;
     memset(out, 0, sizeof(*out));
     out->struct_size = sizeof(*out);
-    out->bytes_tx    = c->bytes_tx;
-    out->bytes_rx    = c->bytes_rx;
-    out->dgram_sent  = c->dgram_sent;
-    out->dgram_recv  = c->dgram_recv;
-    out->dgram_lost  = c->dgram_lost;
+    out->bytes_tx = c->bytes_tx;
+    out->bytes_rx = c->bytes_rx;
+    out->dgram_sent = c->dgram_sent;
+    out->dgram_recv = c->dgram_recv;
+    out->dgram_lost = c->dgram_lost;
     out->dgram_acked = c->dgram_acked;
 
     /* Get connection-level SRTT from xquic (μs → ms) */
@@ -1575,27 +1703,26 @@ int mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
     return MQVPN_OK;
 }
 
-int mqvpn_client_get_paths(const mqvpn_client_t *c,
-                            mqvpn_path_info_t *out,
-                            int max_paths, int *n_paths)
+int
+mqvpn_client_get_paths(const mqvpn_client_t *c, mqvpn_path_info_t *out, int max_paths,
+                       int *n_paths)
 {
     if (!c || !out || !n_paths) return MQVPN_ERR_INVALID_ARG;
 
     /* Query xquic per-path metrics for SRTT */
     xqc_conn_stats_t xstats;
     memset(&xstats, 0, sizeof(xstats));
-    if (c->engine && c->conn)
-        xstats = xqc_conn_get_stats(c->engine, &c->conn->cid);
+    if (c->engine && c->conn) xstats = xqc_conn_get_stats(c->engine, &c->conn->cid);
 
     int count = c->n_paths < max_paths ? c->n_paths : max_paths;
     for (int i = 0; i < count; i++) {
         const path_entry_t *p = &c->paths[i];
         out[i].struct_size = sizeof(out[i]);
-        out[i].handle      = p->handle;
-        out[i].status      = p->status;
+        out[i].handle = p->handle;
+        out[i].status = p->status;
         memcpy(out[i].name, p->name, sizeof(out[i].name));
-        out[i].bytes_tx    = p->bytes_tx;
-        out[i].bytes_rx    = p->bytes_rx;
+        out[i].bytes_tx = p->bytes_tx;
+        out[i].bytes_rx = p->bytes_rx;
 
         /* Map SRTT from xquic path metrics (μs → ms) */
         out[i].srtt_ms = 0;
@@ -1612,7 +1739,8 @@ int mqvpn_client_get_paths(const mqvpn_client_t *c,
     return MQVPN_OK;
 }
 
-int mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
+int
+mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
 {
     if (!c || !out) return MQVPN_ERR_INVALID_ARG;
     memset(out, 0, sizeof(*out));
@@ -1627,7 +1755,7 @@ int mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
             int rms = (int)((c->reconnect_scheduled_us - t) / 1000);
             if (ms <= 0 || rms < ms) ms = rms;
         } else {
-            ms = 1;  /* reconnect is due */
+            ms = 1; /* reconnect is due */
         }
     }
 
@@ -1639,8 +1767,9 @@ int mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
 
 /* ─── Server address setup (called by platform before connect) ─── */
 
-int mqvpn_client_set_server_addr(mqvpn_client_t *c,
-                                  const struct sockaddr *addr, socklen_t addrlen)
+int
+mqvpn_client_set_server_addr(mqvpn_client_t *c, const struct sockaddr *addr,
+                             socklen_t addrlen)
 {
     if (!c || !addr) return MQVPN_ERR_INVALID_ARG;
     memcpy(&c->server_addr, addr, addrlen);
