@@ -3,7 +3,7 @@ import { DefaultTheme, LocaleSpecificConfig } from 'vitepress'
 export const en: LocaleSpecificConfig<DefaultTheme.Config> & { label: string; lang: string } = {
   label: 'English',
   lang: 'en',
-  description: 'Multipath QUIC VPN built on MASQUE CONNECT-IP',
+  description: 'Modern multipath VPN built on open standards',
 
   themeConfig: {
     nav: [

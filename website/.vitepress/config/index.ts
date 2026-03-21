@@ -7,6 +7,10 @@ export default defineConfig({
   lastUpdated: true,
   cleanUrls: true,
 
+  head: [
+    ['link', { rel: 'canonical', href: 'https://doc.mqvpn.org' }],
+  ],
+
   locales: {
     root: en,
     ja: ja,

@@ -3,7 +3,7 @@ import { DefaultTheme, LocaleSpecificConfig } from 'vitepress'
 export const ja: LocaleSpecificConfig<DefaultTheme.Config> & { label: string; lang: string } = {
   label: '日本語',
   lang: 'ja',
-  description: 'MASQUE CONNECT-IP ベースのマルチパス QUIC VPN',
+  description: 'オープン標準上に構築されたモダンなマルチパス VPN',
 
   themeConfig: {
     nav: [
