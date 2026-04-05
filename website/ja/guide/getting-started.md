@@ -99,6 +99,8 @@ mqvpn --mode client|server [options]
   --key PATH             TLS 秘密鍵（サーバー）
   --scheduler minrtt|wlb マルチパススケジューラ（デフォルト: wlb）
   --max-clients N        最大同時接続クライアント数（サーバー、デフォルト: 64）
+  --control-port PORT    Control API の TCP ポート（サーバー）
+  --control-addr ADDR    Control API のバインドアドレス（デフォルト: 127.0.0.1）
   --log-level LVL        ログレベル（debug|info|warn|error）
   --no-reconnect         自動再接続を無効化（クライアント）
   --kill-switch          VPN 外への通信を遮断（クライアント）

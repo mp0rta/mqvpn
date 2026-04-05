@@ -10,6 +10,11 @@ export const en: LocaleSpecificConfig<DefaultTheme.Config> & { label: string; la
       { text: 'Guide', link: '/guide/getting-started' },
     ],
 
+    footer: {
+      message: 'Released under the Apache License 2.0',
+      copyright: 'Provided "AS IS" without warranty of any kind. Use at your own risk.',
+    },
+
     sidebar: {
       '/guide/': [
         {
