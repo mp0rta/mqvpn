@@ -1,0 +1,14 @@
+{
+  "mode": "client",
+  "server_addr": "your-server.example.com:443",
+  "auth_key": "<YOUR_PSK_HERE>",
+  "insecure": false,
+  "tun_name": "mqvpn0",
+  "dns": ["1.1.1.1", "8.8.8.8"],
+  "log_level": "info",
+  "kill_switch": false,
+  "reconnect": true,
+  "reconnect_interval": 5,
+  "scheduler": "wlb",
+  "paths": ["eth0", "wlan0"]
+}

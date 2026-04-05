@@ -40,12 +40,15 @@ usage(const char *prog)
         "  --key PATH                TLS private key (server mode)\n"
         "  --insecure                Accept untrusted certs (client mode, testing only)\n"
         "  --auth-key KEY            PSK for authentication\n"
+        "  --user NAME:KEY           Add a server user credential (repeatable)\n"
         "  --genkey                  Generate a random PSK and exit\n"
         "  --path IFACE              Network interface for multipath (repeatable, client "
         "mode)\n"
         "  --dns ADDR                DNS server to use (repeatable, client mode, max 4)\n"
         "  --no-reconnect            Disable automatic reconnection (client mode)\n"
         "  --kill-switch             Block traffic outside the VPN tunnel (client mode)\n"
+        "  --control-port PORT       TCP port for JSON control API (server mode)\n"
+        "  --control-addr ADDR       Bind address for control API (default 127.0.0.1)\n"
         "  --scheduler minrtt|wlb    Multipath scheduler (default wlb)\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
@@ -90,6 +93,18 @@ parse_host_port(const char *str, char *host, size_t host_len, int *port)
     return 0;
 }
 
+static void
+copy_str(char *dst, size_t dst_len, const char *src)
+{
+    if (!dst || dst_len == 0) return;
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+    strncpy(dst, src, dst_len - 1);
+    dst[dst_len - 1] = '\0';
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -102,54 +117,62 @@ main(int argc, char *argv[])
 #endif
 
     static struct option long_opts[] = {
-        {"config", required_argument, NULL, 'C'},
-        {"mode", required_argument, NULL, 'm'},
-        {"server", required_argument, NULL, 's'},
-        {"listen", required_argument, NULL, 'l'},
-        {"subnet", required_argument, NULL, 'n'},
-        {"subnet6", required_argument, NULL, '6'},
-        {"tun-name", required_argument, NULL, 't'},
-        {"cert", required_argument, NULL, 'c'},
-        {"key", required_argument, NULL, 'k'},
-        {"insecure", no_argument, NULL, 'i'},
-        {"auth-key", required_argument, NULL, 'a'},
-        {"genkey", no_argument, NULL, 'G'},
-        {"path", required_argument, NULL, 'p'},
-        {"dns", required_argument, NULL, 'd'},
-        {"scheduler", required_argument, NULL, 'S'},
+        {"config",      required_argument, NULL, 'C'},
+        {"mode",        required_argument, NULL, 'm'},
+        {"server",      required_argument, NULL, 's'},
+        {"listen",      required_argument, NULL, 'l'},
+        {"subnet",      required_argument, NULL, 'n'},
+        {"subnet6",     required_argument, NULL, '6'},
+        {"tun-name",    required_argument, NULL, 't'},
+        {"cert",        required_argument, NULL, 'c'},
+        {"key",         required_argument, NULL, 'k'},
+        {"insecure",    no_argument,       NULL, 'i'},
+        {"auth-key",    required_argument, NULL, 'a'},
+        {"user",        required_argument, NULL, 'u'},
+        {"genkey",      no_argument,       NULL, 'G'},
+        {"path",        required_argument, NULL, 'p'},
+        {"dns",         required_argument, NULL, 'd'},
+        {"scheduler",   required_argument, NULL, 'S'},
         {"max-clients", required_argument, NULL, 'M'},
-        {"log-level", required_argument, NULL, 'L'},
-        {"no-reconnect", no_argument, NULL, 'R'},
-        {"kill-switch", no_argument, NULL, 'K'},
-        {"help", no_argument, NULL, 'h'},
+        {"log-level",   required_argument, NULL, 'L'},
+        {"no-reconnect",    no_argument,      NULL, 'R'},
+        {"kill-switch",     no_argument,      NULL, 'K'},
+        {"control-port",    required_argument, NULL, 'X'},
+        {"control-addr",    required_argument, NULL, 'x'},
+        {"help",            no_argument,       NULL, 'h'},
         {NULL, 0, NULL, 0},
     };
 
     const char *config_path = NULL;
-    const char *mode = NULL;
-    const char *server_str = NULL;
-    const char *listen_str = NULL; /* NULL means "not set by CLI" */
-    const char *subnet = NULL;
-    const char *subnet6 = NULL;
-    const char *tun_name = NULL;
-    const char *cert_file = NULL;
-    const char *key_file = NULL;
-    int insecure = -1; /* -1 means "not set by CLI" */
-    const char *auth_key = NULL;
-    int genkey = 0;
+    const char *mode        = NULL;
+    const char *server_str  = NULL;
+    const char *listen_str  = NULL;   /* NULL means "not set by CLI" */
+    const char *subnet      = NULL;
+    const char *subnet6     = NULL;
+    const char *tun_name    = NULL;
+    const char *cert_file   = NULL;
+    const char *key_file    = NULL;
+    int         insecure    = -1;     /* -1 means "not set by CLI" */
+    const char *auth_key    = NULL;
+    char        cli_user_names[MQVPN_CONFIG_MAX_USERS][64];
+    char        cli_user_keys[MQVPN_CONFIG_MAX_USERS][256];
+    int         n_cli_users = 0;
+    int         genkey      = 0;
     const char *log_level_str = NULL;
     const char *scheduler_str = NULL;
     int max_clients = -1; /* -1 means "not set by CLI" */
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES];
     int n_paths = 0;
     const char *dns_servers[4];
-    int n_dns = 0;
-    int no_reconnect = 0;
-    int kill_switch = -1; /* -1 = not set by CLI */
+    int         n_dns = 0;
+    int         no_reconnect = 0;
+    int         kill_switch  = -1;  /* -1 = not set by CLI */
+    int         control_port = 0;
+    const char *control_addr = NULL;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:ia:Gp:d:S:M:L:h", long_opts,
-                              NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:ia:u:Gp:d:S:M:L:X:x:h",
+                              long_opts, NULL)) != -1) {
         switch (opt) {
         case 'C': config_path = optarg; break;
         case 'm': mode = optarg; break;
@@ -162,6 +185,28 @@ main(int argc, char *argv[])
         case 'k': key_file = optarg; break;
         case 'i': insecure = 1; break;
         case 'a': auth_key = optarg; break;
+        case 'u': {
+            if (n_cli_users >= MQVPN_CONFIG_MAX_USERS) {
+                fprintf(stderr, "error: max %d users supported\n", MQVPN_CONFIG_MAX_USERS);
+                return 1;
+            }
+            char pair[360];
+            snprintf(pair, sizeof(pair), "%s", optarg);
+            char *sep = strchr(pair, ':');
+            if (!sep) {
+                fprintf(stderr, "error: --user must be NAME:KEY\n");
+                return 1;
+            }
+            *sep = '\0';
+            copy_str(cli_user_names[n_cli_users], sizeof(cli_user_names[n_cli_users]), pair);
+            copy_str(cli_user_keys[n_cli_users], sizeof(cli_user_keys[n_cli_users]), sep + 1);
+            if (cli_user_names[n_cli_users][0] == '\0' || cli_user_keys[n_cli_users][0] == '\0') {
+                fprintf(stderr, "error: --user must be NAME:KEY\n");
+                return 1;
+            }
+            n_cli_users++;
+            break;
+        }
         case 'G': genkey = 1; break;
         case 'p':
             if (n_paths < MQVPN_MAX_PATH_IFACES) {
@@ -183,6 +228,8 @@ main(int argc, char *argv[])
         case 'M': max_clients = atoi(optarg); break;
         case 'R': no_reconnect = 1; break;
         case 'K': kill_switch = 1; break;
+        case 'X': control_port = atoi(optarg); break;
+        case 'x': control_addr = optarg; break;
         case 'L': log_level_str = optarg; break;
         case 'h': usage(argv[0]); return 0;
         default: usage(argv[0]); return 1;
@@ -218,8 +265,26 @@ main(int argc, char *argv[])
     int eff_max_clients = max_clients >= 0 ? max_clients : file_cfg.max_clients;
 
     /* Auth key: CLI > config (use auth_key for client, server_auth_key for server) */
-    const char *eff_auth_key =
-        auth_key ? auth_key : (file_cfg.auth_key[0] ? file_cfg.auth_key : NULL);
+    const char *eff_auth_key = auth_key ? auth_key :
+                               (file_cfg.server_auth_key[0] ? file_cfg.server_auth_key :
+                               (file_cfg.auth_key[0] ? file_cfg.auth_key : NULL));
+
+    const char *eff_user_names[MQVPN_CONFIG_MAX_USERS];
+    const char *eff_user_keys[MQVPN_CONFIG_MAX_USERS];
+    int eff_n_users = 0;
+    if (n_cli_users > 0) {
+        eff_n_users = n_cli_users;
+        for (int i = 0; i < eff_n_users; i++) {
+            eff_user_names[i] = cli_user_names[i];
+            eff_user_keys[i] = cli_user_keys[i];
+        }
+    } else if (file_cfg.n_users > 0) {
+        eff_n_users = file_cfg.n_users;
+        for (int i = 0; i < eff_n_users; i++) {
+            eff_user_names[i] = file_cfg.user_names[i];
+            eff_user_keys[i] = file_cfg.user_keys[i];
+        }
+    }
 
     /* Determine mode: CLI > config file > error */
     const char *eff_mode = mode;
@@ -336,9 +401,10 @@ main(int argc, char *argv[])
 #endif
 
     } else if (strcmp(eff_mode, "server") == 0) {
-        if (!eff_auth_key || eff_auth_key[0] == '\0') {
-            fprintf(stderr, "error: --auth-key is required for server mode\n"
-                            "       generate one with: mqvpn --genkey\n");
+        if ((!eff_auth_key || eff_auth_key[0] == '\0') && eff_n_users == 0) {
+            fprintf(stderr,
+                "error: auth is required for server mode (--auth-key or --user)\n"
+                "       generate one with: mqvpn --genkey\n");
             return 1;
         }
 
@@ -351,16 +417,23 @@ main(int argc, char *argv[])
         mqvpn_server_cfg_t cfg = {
             .listen_addr = bind_addr,
             .listen_port = bind_port,
-            .subnet = eff_subnet,
-            .subnet6 = eff_subnet6,
-            .tun_name = eff_tun_name,
-            .cert_file = eff_cert,
-            .key_file = eff_key,
-            .log_level = xqc_log_level,
-            .scheduler = scheduler,
-            .auth_key = eff_auth_key,
-            .max_clients = eff_max_clients,
+            .subnet      = eff_subnet,
+            .subnet6     = eff_subnet6,
+            .tun_name    = eff_tun_name,
+            .cert_file   = eff_cert,
+            .key_file    = eff_key,
+            .log_level   = xqc_log_level,
+            .scheduler   = scheduler,
+            .auth_key       = eff_auth_key,
+            .n_users        = eff_n_users,
+            .max_clients    = eff_max_clients,
+            .control_addr   = control_addr,
+            .control_port   = control_port,
         };
+        for (int i = 0; i < eff_n_users; i++) {
+            cfg.user_names[i] = eff_user_names[i];
+            cfg.user_keys[i] = eff_user_keys[i];
+        }
 #ifdef _WIN32
         return win_platform_run_server(&cfg);
 #else

@@ -12,6 +12,7 @@
 
 #include "platform_internal.h"
 #include "platform_linux.h"
+#include "control_socket.h"
 #include "log.h"
 
 #include <stdio.h>
@@ -512,17 +513,18 @@ cleanup:
  * ================================================================ */
 
 typedef struct {
-    mqvpn_server_t *server;
-    struct event_base *eb;
-    struct event *ev_tick;
-    struct event *ev_tun;
-    struct event *ev_socket;
-    struct event *ev_sigint;
-    struct event *ev_sigterm;
-    mqvpn_tun_t tun;
-    int tun_up;
-    int udp_fd;
-    int shutting_down;
+    mqvpn_server_t     *server;
+    struct event_base  *eb;
+    struct event       *ev_tick;
+    struct event       *ev_tun;
+    struct event       *ev_socket;
+    struct event       *ev_sigint;
+    struct event       *ev_sigterm;
+    mqvpn_tun_t         tun;
+    int                 tun_up;
+    int                 udp_fd;
+    int                 shutting_down;
+    ctrl_socket_t      *ctrl;
 } server_platform_ctx_t;
 
 static void svr_on_tick(evutil_socket_t fd, short what, void *arg);
@@ -774,6 +776,11 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     if (cfg->cert_file && cfg->key_file)
         mqvpn_config_set_tls_cert(lib_cfg, cfg->cert_file, cfg->key_file);
     if (cfg->auth_key) mqvpn_config_set_auth_key(lib_cfg, cfg->auth_key);
+    for (int i = 0; i < cfg->n_users; i++) {
+        if (cfg->user_names[i] && cfg->user_keys[i]) {
+            mqvpn_config_add_user(lib_cfg, cfg->user_names[i], cfg->user_keys[i]);
+        }
+    }
     mqvpn_config_set_max_clients(lib_cfg, cfg->max_clients);
     mqvpn_config_set_scheduler(lib_cfg, cfg->scheduler == 1 ? MQVPN_SCHED_WLB
                                                             : MQVPN_SCHED_MINRTT);
@@ -842,6 +849,14 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     sp.ev_tick = event_new(sp.eb, -1, 0, svr_on_tick, &sp);
     svr_schedule_next_tick(&sp);
 
+    /* Control API (optional) */
+    if (cfg->control_port > 0) {
+        sp.ctrl = ctrl_socket_create(sp.eb, cfg->control_addr,
+                                     cfg->control_port, sp.server);
+        if (!sp.ctrl)
+            LOG_WRN("control API setup failed — continuing without it");
+    }
+
     LOG_INF("mqvpn server ready — listening on %s:%d, subnet %s",
             cfg->listen_addr ? cfg->listen_addr : "0.0.0.0", cfg->listen_port,
             cfg->subnet);
@@ -851,6 +866,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
 
 cleanup:
     LOG_INF("server shutting down");
+    ctrl_socket_destroy(sp.ctrl);
     if (sp.tun_up) {
         if (sp.ev_tun) {
             event_del(sp.ev_tun);

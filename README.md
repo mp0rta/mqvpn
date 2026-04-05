@@ -47,7 +47,7 @@ sudo scripts/start_server.sh --subnet 10.0.0.0/24 --subnet6 fd00:abcd::/112
 
 ## Configuration
 
-INI-style config file. CLI arguments override config values.
+Config files support both INI and JSON. CLI arguments override config values.
 
 ```ini
 # /etc/mqvpn/server.conf
@@ -62,6 +62,8 @@ Key = /etc/mqvpn/server.key       # TLS private key (PEM file)
 
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=   # PSK example (mqvpn --genkey)
+User = alice:alice-secret
+User = bob:bob-secret
 
 [Multipath]
 Scheduler = wlb
@@ -84,6 +86,52 @@ Path = eth0
 Path = wlan0
 ```
 
+### JSON config
+
+The loader auto-detects JSON files (first non-space char is `{`).
+
+Server example:
+
+```json
+{
+    "mode": "server",
+    "listen": "0.0.0.0:443",
+    "subnet": "10.0.0.0/24",
+    "subnet6": "fd00:abcd::/112",
+    "cert_file": "/etc/mqvpn/server.crt",
+    "key_file": "/etc/mqvpn/server.key",
+    "auth_key": "legacy-fallback-key",
+    "users": [
+        { "name": "alice", "key": "alice-secret" },
+        "bob:bob-secret"
+    ],
+    "max_clients": 64,
+    "scheduler": "wlb"
+}
+```
+
+Client example:
+
+```json
+{
+    "mode": "client",
+    "server_addr": "203.0.113.1:443",
+    "auth_key": "client-key",
+    "insecure": true,
+    "dns": ["1.1.1.1", "8.8.8.8"],
+    "paths": ["eth0", "wlan0"],
+    "reconnect": true,
+    "reconnect_interval": 5,
+    "kill_switch": false,
+    "scheduler": "wlb"
+}
+```
+
+Notes:
+- `users` is server-side auth and accepts either objects (`{"name","key"}`) or `"name:key"` strings.
+- `auth_key` remains supported as a single legacy/global key.
+- `mode` is optional if it can be inferred (`listen` implies server).
+
 ```bash
 sudo mqvpn --config /etc/mqvpn/server.conf
 sudo mqvpn --config /etc/mqvpn/client.conf
@@ -94,11 +142,93 @@ sudo mqvpn --config /etc/mqvpn/client.conf
 ```bash
 # Server
 sudo cp systemd/server.conf.example /etc/mqvpn/server.conf
+# JSON alternative
+sudo cp systemd/server.json.example /etc/mqvpn/server.json
 sudo systemctl enable --now mqvpn-server
 
 # Client (template — instance name maps to config file)
 sudo cp systemd/client.conf.example /etc/mqvpn/client-home.conf
+# JSON alternative
+sudo cp systemd/client.json.example /etc/mqvpn/client-home.json
 sudo systemctl enable --now mqvpn-client@home
+```
+
+## Control API
+
+A running server can be managed at runtime over a TCP port using newline-delimited JSON.
+
+### Enable
+
+```bash
+# CLI
+sudo mqvpn --mode server ... --control-port 9090
+
+# Bind to a specific address (default: 127.0.0.1)
+sudo mqvpn --mode server ... --control-port 9090 --control-addr 127.0.0.1
+```
+
+> **Security:** bind only to `127.0.0.1` (the default) unless the port is protected by a firewall or network policy. The control API has no authentication.
+
+### Commands
+
+#### Add a user
+
+```bash
+echo '{"cmd":"add_user","name":"carol","key":"carol-secret"}' | nc 127.0.0.1 9090
+```
+```json
+{"ok":true}
+```
+
+Calling `add_user` with an existing name updates the key in place.
+
+#### Remove a user
+
+```bash
+echo '{"cmd":"remove_user","name":"carol"}' | nc 127.0.0.1 9090
+```
+```json
+{"ok":true}
+```
+
+#### List users
+
+```bash
+echo '{"cmd":"list_users"}' | nc 127.0.0.1 9090
+```
+```json
+{"ok":true,"users":["alice","bob"]}
+```
+
+#### Get stats
+
+```bash
+echo '{"cmd":"get_stats"}' | nc 127.0.0.1 9090
+```
+```json
+{"ok":true,"n_clients":2,"bytes_tx":983040,"bytes_rx":458752}
+```
+
+#### Error response
+
+```json
+{"ok":false,"error":"user not found"}
+```
+
+### From code (Python example)
+
+```python
+import socket, json
+
+def ctrl(port, cmd):
+    with socket.create_connection(("127.0.0.1", port)) as s:
+        s.sendall((json.dumps(cmd) + "\n").encode())
+        return json.loads(s.makefile().readline())
+
+ctrl(9090, {"cmd": "add_user",    "name": "dave", "key": "dave-secret"})
+ctrl(9090, {"cmd": "remove_user", "name": "dave"})
+print(ctrl(9090, {"cmd": "list_users"}))   # {'ok': True, 'users': ['alice', 'bob']}
+print(ctrl(9090, {"cmd": "get_stats"}))    # {'ok': True, 'n_clients': 1, ...}
 ```
 
 ## Benchmarks
@@ -205,12 +335,15 @@ mqvpn [--config PATH] --mode client|server [options]
   --server IP:PORT       Server address (client)
   --path IFACE           Multipath interface (repeatable)
   --auth-key KEY         PSK authentication
+  --user NAME:KEY        Add server user credential (repeatable)
   --dns ADDR             DNS server (repeatable)
   --insecure             Accept untrusted certs (testing only)
   --listen BIND:PORT     Listen address (server, default: 0.0.0.0:443)
   --subnet CIDR          Client IPv4 pool (server)
   --subnet6 CIDR         Client IPv6 pool (server)
   --scheduler minrtt|wlb Multipath scheduler (default: wlb)
+  --control-port PORT    TCP port for JSON control API (server)
+  --control-addr ADDR    Bind address for control API (default: 127.0.0.1)
   --genkey               Generate PSK and exit
   --help                 Show all options
 ```

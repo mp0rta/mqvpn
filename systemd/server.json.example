@@ -1,0 +1,17 @@
+{
+  "mode": "server",
+  "listen": "0.0.0.0:443",
+  "subnet": "10.0.0.0/24",
+  "subnet6": "2001:db8:1::/112",
+  "tun_name": "mqvpn0",
+  "log_level": "info",
+  "cert_file": "/etc/mqvpn/server.crt",
+  "key_file": "/etc/mqvpn/server.key",
+  "auth_key": "<YOUR_PSK_HERE>",
+  "users": [
+    { "name": "alice", "key": "<ALICE_PSK_HERE>" },
+    "bob:<BOB_PSK_HERE>"
+  ],
+  "max_clients": 64,
+  "scheduler": "wlb"
+}

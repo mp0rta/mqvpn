@@ -203,6 +203,7 @@ target_link_libraries(mqvpn_shared xquic ${SSL_LIB} ${CRYPTO_LIB} pthread)
 add_executable(mqvpn
     src/main.c
     src/platform/linux/platform_linux.c
+    src/platform/linux/control_socket.c
     src/platform/linux/routing.c
     src/platform/linux/killswitch.c
     src/platform/linux/tun.c
@@ -275,6 +276,9 @@ install(TARGETS mqvpn_shared DESTINATION lib)
 install(FILES include/libmqvpn.h DESTINATION include)
 install(FILES systemd/mqvpn-server.service systemd/mqvpn-client@.service
         DESTINATION lib/systemd/system)
+install(FILES systemd/server.conf.example systemd/client.conf.example
+          systemd/server.json.example systemd/client.json.example
+    DESTINATION etc/mqvpn)
 install(PROGRAMS scripts/mqvpn-server-nat.sh
         DESTINATION lib/mqvpn)
 

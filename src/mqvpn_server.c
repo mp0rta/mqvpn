@@ -1209,15 +1209,36 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
                 return -1;
             }
 
-            const char *expected_key = s->config.auth_key;
-            if (expected_key[0] != '\0') {
-                if (!auth_token ||
-                    mqvpn_auth_ct_compare(auth_token, auth_token_len, expected_key,
-                                          strlen(expected_key)) != 0) {
+            int auth_required = (s->config.auth_key[0] != '\0') ||
+                                (s->config.n_users > 0);
+            if (auth_required) {
+                int authed = 0;
+
+                if (auth_token) {
+                    if (s->config.auth_key[0] != '\0' &&
+                        mqvpn_auth_ct_compare(auth_token, auth_token_len,
+                                              s->config.auth_key,
+                                              strlen(s->config.auth_key)) == 0) {
+                        authed = 1;
+                    }
+
+                    /* Always iterate all users to keep timing constant */
+                    for (int i = 0; i < s->config.n_users; i++) {
+                        const char *expected_key = s->config.user_keys[i];
+                        if (expected_key[0] == '\0') continue;
+                        authed |= (mqvpn_auth_ct_compare(
+                                       auth_token, auth_token_len,
+                                       expected_key,
+                                       strlen(expected_key)) == 0);
+                    }
+                }
+
+                if (!authed) {
                     LOG_W(s, "authentication failed: invalid or missing PSK");
                     svr_masque_send_403(h3_request);
                     return -1;
                 }
+
                 LOG_I(s, "client authenticated successfully");
             }
 
@@ -1803,8 +1824,66 @@ mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *out)
     return MQVPN_OK;
 }
 
-int
-mqvpn_server_get_interest(const mqvpn_server_t *s, mqvpn_interest_t *out)
+int mqvpn_server_get_n_clients(const mqvpn_server_t *s)
+{
+    if (!s) return 0;
+    return s->n_sessions;
+}
+
+int mqvpn_server_list_users(const mqvpn_server_t *s, char names[][64], int max)
+{
+    if (!s || !names || max <= 0) return 0;
+    int n = s->config.n_users < max ? s->config.n_users : max;
+    for (int i = 0; i < n; i++)
+        snprintf(names[i], 64, "%s", s->config.user_names[i]);
+    return n;
+}
+
+int mqvpn_server_add_user(mqvpn_server_t *s, const char *username, const char *key)
+{
+    if (!s || !username || !key || username[0] == '\0' || key[0] == '\0')
+        return MQVPN_ERR_INVALID_ARG;
+
+    for (int i = 0; i < s->config.n_users; i++) {
+        if (strcmp(s->config.user_names[i], username) == 0) {
+            snprintf(s->config.user_keys[i], sizeof(s->config.user_keys[i]),
+                     "%s", key);
+            return MQVPN_OK;
+        }
+    }
+
+    if (s->config.n_users >= MQVPN_MAX_USERS)
+        return MQVPN_ERR_MAX_CLIENTS;
+
+    snprintf(s->config.user_names[s->config.n_users],
+             sizeof(s->config.user_names[s->config.n_users]), "%s", username);
+    snprintf(s->config.user_keys[s->config.n_users],
+             sizeof(s->config.user_keys[s->config.n_users]), "%s", key);
+    s->config.n_users++;
+    return MQVPN_OK;
+}
+
+int mqvpn_server_remove_user(mqvpn_server_t *s, const char *username)
+{
+    if (!s || !username || username[0] == '\0')
+        return MQVPN_ERR_INVALID_ARG;
+
+    for (int i = 0; i < s->config.n_users; i++) {
+        if (strcmp(s->config.user_names[i], username) == 0) {
+            for (int j = i + 1; j < s->config.n_users; j++) {
+                memcpy(s->config.user_names[j - 1], s->config.user_names[j],
+                       sizeof(s->config.user_names[j - 1]));
+                memcpy(s->config.user_keys[j - 1], s->config.user_keys[j],
+                       sizeof(s->config.user_keys[j - 1]));
+            }
+            s->config.n_users--;
+            return MQVPN_OK;
+        }
+    }
+    return MQVPN_ERR_INVALID_ARG;
+}
+
+int mqvpn_server_get_interest(const mqvpn_server_t *s, mqvpn_interest_t *out)
 {
     if (!s || !out) return MQVPN_ERR_INVALID_ARG;
     memset(out, 0, sizeof(*out));

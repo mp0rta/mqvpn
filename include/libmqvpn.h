@@ -40,7 +40,12 @@ extern "C" {
 
 /* ─── ABI ─── */
 
-#define MQVPN_CALLBACKS_ABI_VERSION 2
+#define MQVPN_CALLBACKS_ABI_VERSION  2
+
+/* ─── Capacity constants ─── */
+
+#define MQVPN_MAX_USERS   64
+#define MQVPN_MAX_PATHS    4
 
 /* ─── Opaque handles ─── */
 
@@ -251,8 +256,17 @@ _Static_assert(offsetof(mqvpn_server_callbacks_t, abi_version) == 0,
 MQVPN_API mqvpn_config_t *mqvpn_config_new(void);
 MQVPN_API void mqvpn_config_free(mqvpn_config_t *cfg);
 
-MQVPN_API int mqvpn_config_set_server(mqvpn_config_t *cfg, const char *host, int port);
-MQVPN_API int mqvpn_config_set_auth_key(mqvpn_config_t *cfg, const char *key);
+MQVPN_API int mqvpn_config_set_server(mqvpn_config_t *cfg,
+                                       const char *host, int port);
+MQVPN_API int mqvpn_config_set_auth_key(mqvpn_config_t *cfg,
+                                         const char *key);
+MQVPN_API int mqvpn_config_add_user(mqvpn_config_t *cfg,
+                                     const char *username,
+                                     const char *key);
+MQVPN_API int mqvpn_config_remove_user(mqvpn_config_t *cfg,
+                                        const char *username);
+MQVPN_API int mqvpn_config_load_json(mqvpn_config_t *cfg,
+                                      const char *json_text);
 MQVPN_API int mqvpn_config_set_insecure(mqvpn_config_t *cfg, int insecure);
 MQVPN_API int mqvpn_config_set_scheduler(mqvpn_config_t *cfg, mqvpn_scheduler_t sched);
 MQVPN_API int mqvpn_config_set_log_level(mqvpn_config_t *cfg, mqvpn_log_level_t level);
@@ -347,6 +361,18 @@ MQVPN_API int mqvpn_server_get_stats(const mqvpn_server_t *server, mqvpn_stats_t
 
 MQVPN_API int mqvpn_server_get_interest(const mqvpn_server_t *server,
                                         mqvpn_interest_t *out);
+
+MQVPN_API int mqvpn_server_get_n_clients(const mqvpn_server_t *server);
+
+MQVPN_API int mqvpn_server_add_user(mqvpn_server_t *server,
+                                     const char *username, const char *key);
+
+MQVPN_API int mqvpn_server_remove_user(mqvpn_server_t *server,
+                                        const char *username);
+
+/* Fill names[0..max-1] with current user names. Returns the count. */
+MQVPN_API int mqvpn_server_list_users(const mqvpn_server_t *server,
+                                       char names[][64], int max);
 
 /* ─── Utility API ─── */
 

@@ -754,6 +754,158 @@ static void test_subnet6_duplicate_last_wins(void)
     ASSERT_EQ_STR(cfg.subnet6, "fd00:2::/112", "subnet6 duplicate: last wins");
 }
 
+static void test_auth_users_ini(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "Listen = 0.0.0.0:443\n"
+        "[Auth]\n"
+        "User = alice:alice-key\n"
+        "User = bob:bob-key\n"
+        "User = alice:alice-key-v2\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "auth users ini parse ok");
+    ASSERT_EQ_INT(cfg.n_users, 2, "2 users parsed");
+    ASSERT_EQ_STR(cfg.user_names[0], "alice", "user[0] name");
+    ASSERT_EQ_STR(cfg.user_keys[0], "alice-key-v2", "user[0] updated key");
+    ASSERT_EQ_STR(cfg.user_names[1], "bob", "user[1] name");
+}
+
+static void test_auth_users_ini_invalid_ignored(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "Listen = 0.0.0.0:443\n"
+        "[Auth]\n"
+        "User = invalid-without-colon\n"
+        "User = alice:alice-key\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "invalid auth user ignored");
+    ASSERT_EQ_INT(cfg.n_users, 1, "only valid user parsed");
+    ASSERT_EQ_STR(cfg.user_names[0], "alice", "valid user kept");
+}
+
+static void test_json_config_load(void)
+{
+    const char *json =
+        "{"
+        "\"mode\":\"server\","
+        "\"listen\":\"0.0.0.0:8443\","
+        "\"subnet\":\"10.20.0.0/24\","
+        "\"auth_key\":\"legacy\","
+        "\"max_clients\":120,"
+        "\"paths\":[\"eth0\",\"wlan0\"],"
+        "\"dns\":[\"1.1.1.1\",\"8.8.8.8\"],"
+        "\"users\":[{\"name\":\"alice\",\"key\":\"a1\"},\"bob:b2\"]"
+        "}";
+
+    char *path = write_tmp(json);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "json config parse ok");
+    ASSERT_EQ_INT(cfg.is_server, 1, "json mode server");
+    ASSERT_EQ_STR(cfg.listen, "0.0.0.0:8443", "json listen");
+    ASSERT_EQ_STR(cfg.subnet, "10.20.0.0/24", "json subnet");
+    ASSERT_EQ_INT(cfg.max_clients, 120, "json max clients");
+    ASSERT_EQ_INT(cfg.n_paths, 2, "json paths");
+    ASSERT_EQ_STR(cfg.paths[1], "wlan0", "json path[1]");
+    ASSERT_EQ_INT(cfg.n_dns, 2, "json dns");
+    ASSERT_EQ_INT(cfg.n_users, 2, "json users");
+    ASSERT_EQ_STR(cfg.user_names[0], "alice", "json user[0]");
+}
+
+static void test_json_client_config_load(void)
+{
+    const char *json =
+        "{"
+        "\"mode\":\"client\","
+        "\"server_addr\":\"vpn.example.com:443\","
+        "\"auth_key\":\"client-key\","
+        "\"insecure\":true,"
+        "\"tun_name\":\"mqvpn7\","
+        "\"log_level\":\"debug\","
+        "\"dns\":[\"1.1.1.1\",\"8.8.8.8\"],"
+        "\"paths\":[\"eth0\",\"wlan0\"],"
+        "\"reconnect\":false,"
+        "\"reconnect_interval\":9,"
+        "\"kill_switch\":true,"
+        "\"scheduler\":\"minrtt\""
+        "}";
+
+    char *path = write_tmp(json);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "json client config parse ok");
+    ASSERT_EQ_INT(cfg.is_server, 0, "json client mode");
+    ASSERT_EQ_STR(cfg.server_addr, "vpn.example.com:443", "json client server_addr");
+    ASSERT_EQ_STR(cfg.auth_key, "client-key", "json client auth_key");
+    ASSERT_EQ_INT(cfg.insecure, 1, "json client insecure");
+    ASSERT_EQ_STR(cfg.tun_name, "mqvpn7", "json client tun_name");
+    ASSERT_EQ_STR(cfg.log_level, "debug", "json client log_level");
+    ASSERT_EQ_INT(cfg.n_dns, 2, "json client dns count");
+    ASSERT_EQ_STR(cfg.dns_servers[1], "8.8.8.8", "json client dns[1]");
+    ASSERT_EQ_INT(cfg.n_paths, 2, "json client path count");
+    ASSERT_EQ_STR(cfg.paths[0], "eth0", "json client path[0]");
+    ASSERT_EQ_INT(cfg.reconnect, 0, "json client reconnect");
+    ASSERT_EQ_INT(cfg.reconnect_interval, 9, "json client reconnect interval");
+    ASSERT_EQ_INT(cfg.kill_switch, 1, "json client kill switch");
+    ASSERT_EQ_STR(cfg.scheduler, "minrtt", "json client scheduler");
+}
+
+static void test_json_duplicate_users_last_wins(void)
+{
+    const char *json =
+        "{"
+        "\"listen\":\"0.0.0.0:443\","
+        "\"users\":[\"alice:old\", {\"name\":\"alice\",\"key\":\"new\"}]"
+        "}";
+
+    char *path = write_tmp(json);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "json duplicate users parse ok");
+    ASSERT_EQ_INT(cfg.n_users, 1, "json duplicate users collapsed");
+    ASSERT_EQ_STR(cfg.user_keys[0], "new", "json duplicate user last wins");
+}
+
+static void test_json_invalid_users_error(void)
+{
+    const char *json =
+        "{"
+        "\"listen\":\"0.0.0.0:443\","
+        "\"users\":[{\"name\":\"alice\"}]"
+        "}";
+
+    char *path = write_tmp(json);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_TRUE(rc != 0, "json invalid users returns error");
+}
+
 int main(void)
 {
     test_defaults();
@@ -797,6 +949,12 @@ int main(void)
     test_subnet6_whitespace_trimmed();
     test_subnet6_not_set();
     test_subnet6_duplicate_last_wins();
+    test_auth_users_ini();
+    test_auth_users_ini_invalid_ignored();
+    test_json_config_load();
+    test_json_client_config_load();
+    test_json_duplicate_users_last_wins();
+    test_json_invalid_users_error();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

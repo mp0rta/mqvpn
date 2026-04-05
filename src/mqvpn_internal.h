@@ -10,16 +10,18 @@
 #include "libmqvpn.h"
 
 /* ─── Constants ─── */
-
-#define MQVPN_MAX_PATHS 4
+/* MQVPN_MAX_PATHS and MQVPN_MAX_USERS are defined in libmqvpn.h */
 
 /* ─── Config (opaque to callers) ─── */
 
 struct mqvpn_config_s {
-    char server_host[256];
-    int server_port;
-    char auth_key[256];
-    int insecure;
+    char    server_host[256];
+    int     server_port;
+    char    auth_key[256];
+    char    user_names[MQVPN_MAX_USERS][64];
+    char    user_keys[MQVPN_MAX_USERS][256];
+    int     n_users;
+    int     insecure;
 
     mqvpn_scheduler_t scheduler;
     mqvpn_log_level_t log_level;
