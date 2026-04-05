@@ -387,9 +387,7 @@ int mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
     char arr_paths[MQVPN_MAX_PATHS][32];
     int n_paths = 0;
     v = json_find_key(json_text, "paths");
-    if (v && json_read_string_array(v, arr_paths, MQVPN_MAX_PATHS, &n_paths) == MQVPN_OK) {
-        cfg->multipath = n_paths > 1 ? 1 : cfg->multipath;
-    }
+    (void)json_read_string_array(v, arr_paths, MQVPN_MAX_PATHS, &n_paths);
 
     v = json_find_key(json_text, "users");
     if (v && json_read_users(cfg, v) != MQVPN_OK) {
