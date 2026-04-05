@@ -260,6 +260,11 @@ ctrl_socket_create(struct event_base *eb, const char *addr, int port,
     if (!addr || addr[0] == '\0')
         addr = "127.0.0.1";
 
+    /* Warn if exposed beyond loopback — the control API has no auth */
+    if (strcmp(addr, "127.0.0.1") != 0 && strcmp(addr, "::1") != 0)
+        LOG_WRN("control API: binding to non-loopback address %s — "
+                "the control API has no authentication", addr);
+
     ctrl_socket_t *cs = calloc(1, sizeof(*cs));
     if (!cs) return NULL;
     cs->eb     = eb;

@@ -1222,14 +1222,14 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
                         authed = 1;
                     }
 
-                    for (int i = 0; !authed && i < s->config.n_users; i++) {
+                    /* Always iterate all users to keep timing constant */
+                    for (int i = 0; i < s->config.n_users; i++) {
                         const char *expected_key = s->config.user_keys[i];
                         if (expected_key[0] == '\0') continue;
-                        if (mqvpn_auth_ct_compare(auth_token, auth_token_len,
-                                                  expected_key,
-                                                  strlen(expected_key)) == 0) {
-                            authed = 1;
-                        }
+                        authed |= (mqvpn_auth_ct_compare(
+                                       auth_token, auth_token_len,
+                                       expected_key,
+                                       strlen(expected_key)) == 0);
                     }
                 }
 
