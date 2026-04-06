@@ -226,6 +226,6 @@ sudo systemctl enable --now mqvpn-client@home
 # /etc/mqvpn/client-home.conf を読み込みます
 ```
 
-::: tip
-デフォルトのユニットファイルは `.conf`（INI 形式）を読み込みます。JSON 形式を使用する場合は、ユニットファイルの `ExecStart` を編集して設定ファイルのパスを `.json` に変更してください。
+::: info
+systemd ユニットは INI 形式の `.conf` ファイルを前提としています。サーバーユニットの NAT ヘルパースクリプトも INI を直接パースするため、標準ユニットのままでは JSON は使用できません。
 :::

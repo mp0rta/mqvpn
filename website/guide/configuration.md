@@ -220,6 +220,6 @@ sudo systemctl enable --now mqvpn-client@home
 # This reads /etc/mqvpn/client-home.conf
 ```
 
-::: tip
-The default unit files expect INI `.conf` files. If you prefer JSON, update the `ExecStart` line in the unit file to point to your `.json` config path.
+::: info
+The systemd units expect INI `.conf` files. The server unit's NAT helper scripts also parse the INI config directly, so JSON cannot be used with the standard units as-is.
 :::
