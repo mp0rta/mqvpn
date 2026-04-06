@@ -18,7 +18,15 @@ How to build the mqvpn client on Windows using MSVC.
 
 ### Wintun
 
-The TUN device is provided by [Wintun](https://www.wintun.net/). The `wintun.dll` is loaded at runtime, so it is not required at build time. Place `wintun.dll` next to the executable or in your PATH before running mqvpn.
+The TUN device is provided by [Wintun](https://www.wintun.net/). `wintun.dll` is a **required runtime dependency** on Windows.
+
+You must install/provide `wintun.dll` before running mqvpn:
+
+1. Download the official Wintun release package from the Wintun website.
+2. Extract it and copy the x64 `wintun.dll` to the mqvpn executable directory (for example, `build\Release\`), or place it in a directory included in `PATH`.
+3. Verify it is discoverable (`build\Release\wintun.dll` exists, or `where wintun.dll` resolves it).
+
+`wintun.dll` is loaded dynamically at runtime, so build succeeds without it, but mqvpn client startup fails if it is missing.
 
 ## Build Steps
 

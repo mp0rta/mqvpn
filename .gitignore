@@ -16,6 +16,8 @@ tests/test_auth
 tests/test_session
 tests/test_dns
 client.conf
+mise.toml
+codeql-db/
 
 # Gradle build cache
 android/.gradle/
@@ -27,3 +29,7 @@ android/sdk-native/prebuilt/
 android/local.properties
 android/sdk-native/.cxx/
 
+# VitePress website
+website/node_modules/
+website/.vitepress/dist/
+website/.vitepress/cache/

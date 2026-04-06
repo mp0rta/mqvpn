@@ -262,7 +262,7 @@ Asymmetric dual-path (300M/10ms + 80M/30ms) via network namespaces. Full report:
 
 ## Building
 
-Requirements: Linux, CMake 3.22+, GCC/Clang (C11), libevent 2.x
+Requirements: Linux, CMake 3.10+, GCC/Clang (C11), libevent 2.x
 
 ```bash
 ./build.sh            # builds BoringSSL, xquic, and mqvpn
@@ -368,9 +368,17 @@ mqvpn [--config PATH] --mode client|server [options]
 | Multipath QUIC | [draft-ietf-quic-multipath](https://datatracker.ietf.org/doc/draft-ietf-quic-multipath/) |
 | HTTP/3 | [RFC 9114](https://www.rfc-editor.org/rfc/rfc9114) |
 
+## Disclaimer
+
+mqvpn is licensed under the Apache License 2.0 and is provided **"AS IS"**, without warranties or conditions of any kind.
+
+Use of mqvpn is at your own risk. Users are solely responsible for validating its suitability, security, and operational safety, especially in production or commercial environments.
+
 ## License
 
 Apache-2.0
+
+Copyright (c) 2026 mp0rta
 
 ## Acknowledgments
 
