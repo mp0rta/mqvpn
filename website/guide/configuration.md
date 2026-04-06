@@ -19,6 +19,8 @@ Key = /etc/mqvpn/server.key
 
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
+User = alice:<ALICE_PSK>
+User = bob:<BOB_PSK>
 
 [Multipath]
 Scheduler = wlb
@@ -55,6 +57,8 @@ JSON config is useful for structured management and automation tooling.
 {
   "mode": "server",
   "listen": "0.0.0.0:443",
+  "tun_name": "mqvpn0",
+  "log_level": "info",
   "subnet": "10.0.0.0/24",
   "subnet6": "2001:db8:1::/112",
   "cert_file": "/etc/mqvpn/server.crt",
@@ -75,6 +79,8 @@ JSON config is useful for structured management and automation tooling.
 {
   "mode": "client",
   "server_addr": "203.0.113.1:443",
+  "tun_name": "mqvpn0",
+  "log_level": "info",
   "auth_key": "<YOUR_PSK_HERE>",
   "insecure": false,
   "dns": ["1.1.1.1", "8.8.8.8"],
@@ -88,7 +94,7 @@ JSON config is useful for structured management and automation tooling.
 
 ## Multi-User Authentication
 
-The server can authenticate multiple users, each with their own PSK. Add a `users` array in the JSON config or use the [Control API](#control-api) to manage users at runtime.
+The server can authenticate multiple users, each with their own PSK. In JSON config, add a `users` array where each entry is either an object (`{"name":"alice","key":"..."}`) or a shorthand string (`"alice:key"`). In INI config, use repeatable `User = NAME:KEY` lines in the `[Auth]` section. You can also use the [Control API](#control-api) to manage users at runtime.
 
 When both `auth_key` (global key) and `users` are set, clients can authenticate with either. To restrict access to named users only, remove `auth_key` from the config.
 
@@ -118,6 +124,9 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `TunName` | TUN device name | `mqvpn0` |
 | `DNS` | DNS servers (comma-separated) | — |
 | `LogLevel` | Log level (`debug`, `info`, `warn`, `error`) | `info` |
+| `KillSwitch` | Block traffic outside the VPN tunnel (client only) | `false` |
+| `Reconnect` | Enable automatic reconnection (client only) | `true` |
+| `ReconnectInterval` | Seconds between reconnection attempts | `5` |
 
 ### `[TLS]` (server only)
 
@@ -131,6 +140,8 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | Key | Description | Default |
 |-----|-------------|---------|
 | `Key` | Pre-shared key (base64, generate with `mqvpn --genkey`) | Required |
+| `User` | Per-user PSK in `NAME:KEY` format (repeatable) | — |
+| `MaxClients` | Maximum concurrent clients (server only) | `64` |
 
 ### `[Multipath]`
 
@@ -179,7 +190,7 @@ Get stats:
 echo '{"cmd":"get_stats"}' | nc 127.0.0.1 9090
 ```
 
-All commands return a JSON response with an `"ok"` field.
+All commands return a JSON response with an `"ok"` field. Each connection handles one command, then the server closes the connection.
 
 ## systemd
 

@@ -19,6 +19,8 @@ Key = /etc/mqvpn/server.key
 
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
+User = alice:<ALICE_PSK>
+User = bob:<BOB_PSK>
 
 [Multipath]
 Scheduler = wlb
@@ -55,6 +57,8 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
 {
   "mode": "server",
   "listen": "0.0.0.0:443",
+  "tun_name": "mqvpn0",
+  "log_level": "info",
   "subnet": "10.0.0.0/24",
   "subnet6": "2001:db8:1::/112",
   "cert_file": "/etc/mqvpn/server.crt",
@@ -75,6 +79,8 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
 {
   "mode": "client",
   "server_addr": "203.0.113.1:443",
+  "tun_name": "mqvpn0",
+  "log_level": "info",
   "auth_key": "<YOUR_PSK_HERE>",
   "insecure": false,
   "dns": ["1.1.1.1", "8.8.8.8"],
@@ -88,7 +94,7 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
 
 ## マルチユーザー認証
 
-サーバーでは複数のユーザーをそれぞれ個別の PSK で認証できます。JSON config の `users` 配列で設定するか、[Control API](#control-api) を使って実行中にユーザーを管理できます。
+サーバーでは複数のユーザーをそれぞれ個別の PSK で認証できます。JSON config の `users` 配列で設定するか、[Control API](#control-api) を使って実行中にユーザーを管理できます。`users` 配列の各要素はオブジェクト形式（`{"name":"alice","key":"..."}`）または省略形の文字列（`"alice:key"`）のどちらでも指定可能です。
 
 `auth_key`（グローバルキー）と `users` を両方設定した場合、クライアントはどちらでも認証可能です。名前付きユーザーのみに制限するには、`auth_key` を設定から削除してください。
 
@@ -118,6 +124,9 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `TunName` | TUN デバイス名 | `mqvpn0` |
 | `DNS` | DNS サーバー（カンマ区切り） | — |
 | `LogLevel` | ログレベル（`debug`、`info`、`warn`、`error`） | `info` |
+| `KillSwitch` | VPN 外への通信を遮断（クライアントのみ） | `false` |
+| `Reconnect` | 自動再接続を有効化（クライアントのみ） | `true` |
+| `ReconnectInterval` | 再接続の間隔（秒） | `5` |
 
 ### `[TLS]`（サーバーのみ）
 
@@ -131,6 +140,8 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | キー | 説明 | デフォルト |
 |------|------|-----------|
 | `Key` | 事前共有鍵（base64、`mqvpn --genkey` で生成） | 必須 |
+| `User` | ユーザー個別の PSK（`NAME:KEY` 形式、複数指定可） | — |
+| `MaxClients` | 最大同時接続クライアント数（サーバーのみ） | `64` |
 
 ### `[Multipath]`
 
@@ -179,7 +190,7 @@ echo '{"cmd":"list_users"}' | nc 127.0.0.1 9090
 echo '{"cmd":"get_stats"}' | nc 127.0.0.1 9090
 ```
 
-すべてのコマンドは `"ok"` フィールドを含む JSON レスポンスを返します。
+すべてのコマンドは `"ok"` フィールドを含む JSON レスポンスを返します。各接続は 1 コマンドを処理するとサーバー側で切断されるため、コマンドごとに新しい接続を開いてください。
 
 ## systemd
 

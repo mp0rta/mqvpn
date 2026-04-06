@@ -18,7 +18,7 @@ features:
     details: パスの切り替わりにも接続を維持しながら、複数パスを束ねてパフォーマンスと安定性を向上させます。
   - icon: 🖥️
     title: マルチプラットフォーム
-    details: Linux、Windows、Android/Kotlin に対応。
+    details: Linux（クライアント・サーバー）、Windows（クライアント）、Android/Kotlin に対応。
   - icon: 🏗️
     title: QUIC + MASQUE ベース
     details: オープンなインターネット標準上に構築された、モダンな VPN アーキテクチャ。

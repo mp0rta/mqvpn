@@ -11,7 +11,7 @@ mqvpn は **[sans-I/O](https://sans-io.readthedocs.io/) C ライブラリ**（`l
 │  Platform Layer (owns I/O)                   │
 │  ┌──────────┐ ┌───────────┐ ┌───────────┐    │
 │  │ Linux CLI│ │ Android   │ │ Windows   │    │
-│  │ (poll)   │ │ (Handler) │ │ (IOCP)    │    │
+│  │(libevent)│ │ (Handler) │ │ (IOCP)    │    │
 │  └────┬─────┘ └─────┬─────┘ └─────┬─────┘    │
 │       │ tick()      │ tick()      │ tick()   │
 ├───────┴─────────────┴─────────────┴──────────┤

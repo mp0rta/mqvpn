@@ -262,7 +262,7 @@ Asymmetric dual-path (300M/10ms + 80M/30ms) via network namespaces. Full report:
 
 ## Building
 
-Requirements: Linux, CMake 3.22+, GCC/Clang (C11), libevent 2.x
+Requirements: Linux, CMake 3.10+, GCC/Clang (C11), libevent 2.x
 
 ```bash
 ./build.sh            # builds BoringSSL, xquic, and mqvpn

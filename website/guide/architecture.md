@@ -11,7 +11,7 @@ The library does not embed a platform event loop or device management. It is dri
 │  Platform Layer (owns I/O)                    │
 │  ┌──────────┐  ┌───────────┐  ┌───────────┐   │
 │  │ Linux CLI│  │ Android   │  │ Windows   │   │
-│  │ (poll)   │  │ (Handler) │  │ (IOCP)    │   │
+│  │(libevent)│  │ (Handler) │  │ (IOCP)    │   │
 │  └────┬─────┘  └─────┬─────┘  └─────┬─────┘   │
 │       │ tick()        │ tick()       │ tick() │
 ├───────┴───────────────┴──────────────┴────────┤

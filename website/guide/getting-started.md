@@ -7,6 +7,7 @@ mqvpn is a multipath QUIC VPN that uses MASQUE CONNECT-IP (RFC 9484) for standar
 - Linux (kernel 3.x+ with TUN support)
 - CMake 3.10+
 - GCC or Clang (C11)
+- Go 1.18+ (for BoringSSL)
 - libevent 2.x
 
 ## Quick Start
@@ -89,6 +90,7 @@ mqvpn --mode client|server [options]
   --server IP:PORT       Server address (client)
   --path IFACE           Multipath interface (repeatable)
   --auth-key KEY         PSK authentication
+  --user NAME:KEY        Per-user PSK (repeatable, server)
   --dns ADDR             DNS server (repeatable)
   --insecure             Accept untrusted certs (testing only)
   --tun-name NAME        TUN device name (default: mqvpn0)
