@@ -109,6 +109,14 @@ add_user_entry(mqvpn_config_t *cfg, const char *name, const char *key,
         return;
     }
 
+    /* Reject characters that would break JSON serialization in control API */
+    for (const char *p = name; *p; p++) {
+        if (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20) {
+            LOG_WRN("%s:%d: username contains invalid character", path, lineno);
+            return;
+        }
+    }
+
     for (int i = 0; i < cfg->n_users; i++) {
         if (strcmp(cfg->user_names[i], name) == 0) {
             snprintf(cfg->user_keys[i], sizeof(cfg->user_keys[i]), "%s", key);

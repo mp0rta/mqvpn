@@ -257,6 +257,12 @@ int mqvpn_config_add_user(mqvpn_config_t *cfg,
         return MQVPN_ERR_INVALID_ARG;
     }
 
+    /* Reject characters that would break JSON serialization in control API */
+    for (const char *p = username; *p; p++) {
+        if (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20)
+            return MQVPN_ERR_INVALID_ARG;
+    }
+
     for (int i = 0; i < cfg->n_users; i++) {
         if (strcmp(cfg->user_names[i], username) == 0) {
             snprintf(cfg->user_keys[i], sizeof(cfg->user_keys[i]), "%s", key);
