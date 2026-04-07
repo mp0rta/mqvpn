@@ -108,6 +108,7 @@ mqvpn --mode client|server [options]
   --max-clients N        最大同時接続クライアント数（サーバー、デフォルト: 64）
   --control-port PORT    Control API の TCP ポート（サーバー）
   --control-addr ADDR    Control API のバインドアドレス（デフォルト: 127.0.0.1）
+  --status               サーバーの稼働状況を Control API 経由で表示して終了
   --log-level LVL        ログレベル（debug|info|warn|error）
   --no-reconnect         自動再接続を無効化（クライアント）
   --kill-switch          VPN 外への通信を遮断（クライアント）

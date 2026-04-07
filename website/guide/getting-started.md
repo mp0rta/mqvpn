@@ -105,6 +105,7 @@ mqvpn --mode client|server [options]
   --max-clients N        Max concurrent clients (server, default: 64)
   --control-port PORT    TCP port for control API (server)
   --control-addr ADDR    Bind address for control API (default: 127.0.0.1)
+  --status               Query server status via control API and exit
   --log-level LVL        Log level (debug|info|warn|error)
   --no-reconnect         Disable automatic reconnection (client)
   --kill-switch          Block traffic outside the VPN tunnel (client)

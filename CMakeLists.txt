@@ -204,6 +204,7 @@ add_executable(mqvpn
     src/main.c
     src/platform/linux/platform_linux.c
     src/platform/linux/control_socket.c
+    src/platform/linux/status.c
     src/platform/linux/routing.c
     src/platform/linux/killswitch.c
     src/platform/linux/tun.c
@@ -243,8 +244,9 @@ if(BUILD_TESTING)
     add_executable(test_session tests/test_session.c src/addr_pool.c src/log.c)
     add_executable(test_dns     tests/test_dns.c     src/platform/linux/dns.c     src/log.c)
     add_executable(test_flow_sched tests/test_flow_sched.c src/flow_sched.c src/log.c)
+    add_executable(test_status tests/test_status.c)
 
-    foreach(t test_config test_auth test_session test_dns test_flow_sched)
+    foreach(t test_config test_auth test_session test_dns test_flow_sched test_status)
         target_include_directories(${t} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/platform/linux)
         set_target_properties(${t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
         add_test(NAME ${t} COMMAND ${t})
