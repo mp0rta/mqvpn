@@ -9,7 +9,7 @@ Multipath QUIC VPN using [MASQUE CONNECT-IP (RFC 9484)](https://www.rfc-editor.o
 - **Dual-stack** — IPv4 + IPv6 inside the tunnel.
 - **Android SDK** — Kotlin SDK via JNI. Apps implement `onCreateTun()` and `onVpnStateChanged()`.
 - **PSK auth** — Pre-shared key over TLS 1.3.
-- **DNS override** — Prevents DNS leak by routing queries through the tunnel.
+- **DNS override** — Prevents DNS leaks. Uses `resolvectl` on systemd-resolved systems, falls back to resolv.conf.
 
 ## Quick Start
 
@@ -354,7 +354,8 @@ mqvpn [--config PATH] --mode client|server [options]
 - [x] v0.2.0 — Reconnection, kill switch, IPv6, ICMP PTB, systemd service
 - [x] v0.3.0 — libmqvpn (sans-I/O), Android Kotlin SDK, network detection
 - [ ] Per-client token auth
-- [ ] resolvectl / netlink API
+- [x] resolvectl DNS support (with resolv.conf fallback)
+- [ ] netlink API for routing (replace fork+exec of `ip` command)
 - [ ] Performance: GSO/GRO, sendmmsg, native Android I/O
 - [ ] Interop testing (masque-go, QUICHE)
 

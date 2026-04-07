@@ -397,6 +397,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
     /* DNS setup */
     mqvpn_dns_init(&ctx.dns);
+    snprintf(ctx.dns.tun_name, sizeof(ctx.dns.tun_name), "%s", ctx.tun_name_cfg);
     for (int i = 0; i < cfg->n_dns; i++)
         mqvpn_dns_add_server(&ctx.dns, cfg->dns_servers[i]);
 
