@@ -16,6 +16,10 @@
 #include "log.h"
 
 #include <stdio.h>
+#include <inttypes.h>
+
+#define STATUS_INTERVAL_SEC 30
+static void status_log_cb(evutil_socket_t fd, short what, void *arg);
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -112,6 +116,14 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
 
     /* Tell library the TUN is active */
     mqvpn_client_set_tun_active(p->client, 1, p->tun.fd);
+
+    /* Start periodic status log */
+    if (!p->ev_status)
+        p->ev_status = evtimer_new(p->eb, status_log_cb, p);
+    if (p->ev_status) {
+        struct timeval tv = { .tv_sec = STATUS_INTERVAL_SEC };
+        event_add(p->ev_status, &tv);
+    }
     return;
 
 fail:
@@ -154,6 +166,8 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
      * that stale fd events don't fire ("tun read: Bad file descriptor").
      * The TUN will be recreated in cb_tunnel_config_ready on reconnect. */
     if (new_state == MQVPN_STATE_RECONNECTING || new_state == MQVPN_STATE_CLOSED) {
+        if (p->ev_status)
+            event_del(p->ev_status);  /* pause — reused on reconnect */
         cleanup_killswitch(p);
         cleanup_routes(p);
         mqvpn_dns_restore(&p->dns);
@@ -207,6 +221,49 @@ cb_reconnect_scheduled(int delay_sec, void *user_ctx)
 {
     (void)user_ctx;
     LOG_INF("reconnect scheduled in %d seconds", delay_sec);
+}
+
+static void
+status_log_cb(evutil_socket_t fd, short what, void *arg)
+{
+    (void)fd; (void)what;
+    platform_ctx_t *p = (platform_ctx_t *)arg;
+    if (!p->client) return;
+
+    mqvpn_client_state_t state = mqvpn_client_get_state(p->client);
+    if (state != MQVPN_STATE_ESTABLISHED) return;
+
+    mqvpn_stats_t stats;
+    if (mqvpn_client_get_stats(p->client, &stats) != MQVPN_OK) return;
+
+    mqvpn_path_info_t paths[MQVPN_MAX_PATHS];
+    int n_paths = 0;
+    mqvpn_client_get_paths(p->client, paths, MQVPN_MAX_PATHS, &n_paths);
+
+    LOG_INF("[STATUS] state=established paths=%d tx=%" PRIu64
+            " rx=%" PRIu64 " srtt=%dms dgram_lost=%" PRIu64,
+            n_paths, stats.bytes_tx, stats.bytes_rx,
+            stats.srtt_ms, stats.dgram_lost);
+
+    for (int i = 0; i < n_paths; i++) {
+        const char *st_str = "unknown";
+        switch (paths[i].status) {
+        case MQVPN_PATH_ACTIVE:  st_str = "active"; break;
+        case MQVPN_PATH_STANDBY: st_str = "standby"; break;
+        case MQVPN_PATH_CLOSED:  st_str = "closed"; break;
+        default: break;
+        }
+        LOG_INF("[STATUS]   path%d=%s srtt=%dms tx=%" PRIu64
+                " rx=%" PRIu64 " %s",
+                i, paths[i].name, paths[i].srtt_ms,
+                paths[i].bytes_tx, paths[i].bytes_rx, st_str);
+    }
+
+    /* Re-arm timer */
+    if (p->ev_status) {
+        struct timeval tv = { .tv_sec = STATUS_INTERVAL_SEC };
+        event_add(p->ev_status, &tv);
+    }
 }
 
 /* ================================================================
@@ -498,6 +555,10 @@ cleanup:
     if (ctx.ev_sigterm) {
         event_del(ctx.ev_sigterm);
         event_free(ctx.ev_sigterm);
+    }
+    if (ctx.ev_status) {
+        event_del(ctx.ev_status);
+        event_free(ctx.ev_status);
     }
 
     mqvpn_path_mgr_destroy(&ctx.path_mgr);

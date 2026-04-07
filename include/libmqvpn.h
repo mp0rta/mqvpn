@@ -151,6 +151,32 @@ typedef struct {
 
 typedef struct {
     uint32_t struct_size;
+    uint64_t path_id;
+    uint64_t srtt_us;
+    uint64_t min_rtt_us;
+    uint64_t cwnd;
+    uint64_t bytes_in_flight;
+    uint64_t bytes_tx;
+    uint64_t bytes_rx;
+    uint64_t pkt_sent;
+    uint64_t pkt_recv;
+    uint64_t pkt_lost;
+    uint8_t  state;
+} mqvpn_path_stats_t;
+
+typedef struct {
+    uint32_t struct_size;
+    char username[64];
+    char endpoint[64];
+    uint64_t connected_at_us;
+    uint64_t bytes_tx;
+    uint64_t bytes_rx;
+    mqvpn_path_stats_t paths[MQVPN_MAX_PATHS];
+    int n_paths;
+} mqvpn_client_info_t;
+
+typedef struct {
+    uint32_t struct_size;
     int next_timer_ms; /* ms until next tick() needed */
     int tun_readable;  /* 1 = accept on_tun_packet */
     int is_idle;       /* 1 = no active streams */
@@ -373,6 +399,11 @@ MQVPN_API int mqvpn_server_remove_user(mqvpn_server_t *server,
 /* Fill names[0..max-1] with current user names. Returns the count. */
 MQVPN_API int mqvpn_server_list_users(const mqvpn_server_t *server,
                                        char names[][64], int max);
+
+/* Fill out[0..max-1] with per-client info including per-path stats. */
+MQVPN_API int mqvpn_server_get_client_info(const mqvpn_server_t *server,
+                                            mqvpn_client_info_t *out,
+                                            int max_clients, int *n_clients);
 
 /* ─── Utility API ─── */
 

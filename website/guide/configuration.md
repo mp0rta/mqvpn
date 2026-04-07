@@ -192,6 +192,12 @@ Get stats:
 echo '{"cmd":"get_stats"}' | nc 127.0.0.1 9090
 ```
 
+Get detailed status (per-client, per-path):
+
+```bash
+echo '{"cmd":"get_status"}' | nc 127.0.0.1 9090
+```
+
 All commands return a JSON response with an `"ok"` field. Each connection handles one command, then the server closes the connection.
 
 ## systemd

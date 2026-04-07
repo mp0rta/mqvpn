@@ -701,6 +701,18 @@ TEST(generate_key)
     ASSERT_EQ(mqvpn_generate_key(NULL, 64), MQVPN_ERR_INVALID_ARG);
 }
 
+/* ── Server client info ── */
+
+TEST(server_get_client_info_null_safety)
+{
+    mqvpn_client_info_t info[4];
+    int n = 0;
+    ASSERT_EQ(mqvpn_server_get_client_info(NULL, info, 4, &n),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_get_client_info(NULL, NULL, 4, &n),
+              MQVPN_ERR_INVALID_ARG);
+}
+
 /* ── Main ── */
 
 int main(void)
@@ -770,6 +782,9 @@ int main(void)
     /* I/O feed tests */
     run_client_on_tun_packet_null();
     run_client_on_socket_recv_null();
+
+    /* Server info tests */
+    run_server_get_client_info_null_safety();
 
     /* Utility tests */
     run_generate_key();

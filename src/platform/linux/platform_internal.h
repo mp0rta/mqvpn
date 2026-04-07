@@ -27,6 +27,7 @@ typedef struct {
     struct event *ev_tun;
     struct event *ev_sigint;
     struct event *ev_sigterm;
+    struct event *ev_status;   /* periodic status log timer */
 
     /* Path manager (UDP sockets) */
     mqvpn_path_mgr_t path_mgr;

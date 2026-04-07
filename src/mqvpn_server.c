@@ -71,6 +71,10 @@ struct svr_conn_s {
     size_t dgram_mss;
     uint64_t dgram_lost_cnt;
     uint64_t dgram_acked_cnt;
+
+    /* Auth identity (set on CONNECT-IP auth success) */
+    char username[64];
+    uint64_t connected_at_us;
 };
 
 struct svr_stream_s {
@@ -1239,7 +1243,30 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
                     return -1;
                 }
 
-                LOG_I(s, "client authenticated successfully");
+                /* Record which user matched (second pass, not timing-sensitive) */
+                stream->conn->connected_at_us = now_us();
+                if (s->config.auth_key[0] != '\0' &&
+                    mqvpn_auth_ct_compare(auth_token, auth_token_len,
+                                          s->config.auth_key,
+                                          strlen(s->config.auth_key)) == 0) {
+                    snprintf(stream->conn->username,
+                             sizeof(stream->conn->username), "(global)");
+                } else {
+                    for (int i = 0; i < s->config.n_users; i++) {
+                        const char *ek = s->config.user_keys[i];
+                        if (ek[0] != '\0' &&
+                            mqvpn_auth_ct_compare(auth_token, auth_token_len,
+                                                  ek, strlen(ek)) == 0) {
+                            snprintf(stream->conn->username,
+                                     sizeof(stream->conn->username),
+                                     "%s", s->config.user_names[i]);
+                            break;
+                        }
+                    }
+                }
+
+                LOG_I(s, "client authenticated successfully (user=%s)",
+                      stream->conn->username);
             }
 
             LOG_I(s, "Extended CONNECT for connect-ip received");
@@ -1887,6 +1914,81 @@ int mqvpn_server_remove_user(mqvpn_server_t *s, const char *username)
         }
     }
     return MQVPN_ERR_INVALID_ARG;
+}
+
+int
+mqvpn_server_get_client_info(const mqvpn_server_t *server,
+                              mqvpn_client_info_t *out,
+                              int max_clients, int *n_clients)
+{
+    if (!server || !out || max_clients <= 0 || !n_clients)
+        return MQVPN_ERR_INVALID_ARG;
+
+    mqvpn_server_t *s = (mqvpn_server_t *)server;
+    int count = 0;
+
+    for (int i = 1; i <= MQVPN_ADDR_POOL_MAX && count < max_clients; i++) {
+        svr_conn_t *conn = s->sessions[i];
+        if (!conn || !conn->tunnel_established) continue;
+
+        mqvpn_client_info_t *ci = &out[count];
+        memset(ci, 0, sizeof(*ci));
+        ci->struct_size = sizeof(*ci);
+        snprintf(ci->username, sizeof(ci->username), "%s", conn->username);
+
+        /* Format endpoint */
+        char addr_str[INET6_ADDRSTRLEN] = {0};
+        uint16_t port = 0;
+        const struct sockaddr_in6 *s6 = &conn->peer_addr;
+        const uint8_t *b = s6->sin6_addr.s6_addr;
+        /* Detect IPv4-mapped IPv6 (::ffff:x.x.x.x) */
+        if (b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0 &&
+            b[4] == 0 && b[5] == 0 && b[6] == 0 && b[7] == 0 &&
+            b[8] == 0 && b[9] == 0 && b[10] == 0xff && b[11] == 0xff) {
+            struct in_addr v4;
+            memcpy(&v4, &b[12], 4);
+            inet_ntop(AF_INET, &v4, addr_str, sizeof(addr_str));
+        } else {
+            inet_ntop(AF_INET6, &s6->sin6_addr, addr_str, sizeof(addr_str));
+        }
+        port = ntohs(s6->sin6_port);
+        snprintf(ci->endpoint, sizeof(ci->endpoint), "%s:%u", addr_str, port);
+
+        ci->connected_at_us = conn->connected_at_us;
+
+        /* Get xquic per-path stats */
+        xqc_conn_stats_t st = xqc_conn_get_stats(s->engine, &conn->cid);
+        ci->bytes_tx = st.total_app_bytes;
+        ci->bytes_rx = 0;
+        for (int p = 0; p < XQC_MAX_PATHS_COUNT; p++)
+            ci->bytes_rx += st.paths_info[p].path_recv_bytes;
+
+        int np = 0;
+        for (int p = 0; p < XQC_MAX_PATHS_COUNT && np < MQVPN_MAX_PATHS; p++) {
+            xqc_path_metrics_t *pm = &st.paths_info[p];
+            if (pm->path_id == 0 && pm->path_pkt_send_count == 0) continue;
+
+            mqvpn_path_stats_t *ps = &ci->paths[np];
+            ps->struct_size = sizeof(*ps);
+            ps->path_id = pm->path_id;
+            ps->srtt_us = pm->path_srtt;
+            ps->min_rtt_us = pm->path_min_rtt;
+            ps->cwnd = pm->path_cwnd;
+            ps->bytes_in_flight = pm->path_bytes_in_flight;
+            ps->bytes_tx = pm->path_send_bytes;
+            ps->bytes_rx = pm->path_recv_bytes;
+            ps->pkt_sent = pm->path_pkt_send_count;
+            ps->pkt_recv = pm->path_pkt_recv_count;
+            ps->pkt_lost = pm->path_lost_count;
+            ps->state = pm->path_state;
+            np++;
+        }
+        ci->n_paths = np;
+        count++;
+    }
+
+    *n_clients = count;
+    return MQVPN_OK;
 }
 
 int mqvpn_server_get_interest(const mqvpn_server_t *s, mqvpn_interest_t *out)
