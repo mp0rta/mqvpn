@@ -32,8 +32,10 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
-#define CTRL_MAX_REQ  4096
-#define CTRL_MAX_RESP 4096
+#define CTRL_MAX_REQ   4096
+#define CTRL_MAX_RESP  4096
+#define CTRL_MAX_CONNS 8         /* max concurrent control connections */
+#define CTRL_READ_TIMEOUT_SEC 5  /* close idle connections after 5s */
 
 /* ── Minimal JSON helpers (same fixed escape logic as config.c) ─────────── */
 
@@ -93,6 +95,7 @@ struct ctrl_socket_s {
     struct event      *ev_accept;
     struct event_base *eb;
     mqvpn_server_t    *server;
+    int                n_conns;  /* active control connections */
 };
 
 /* ── Command dispatch ────────────────────────────────────────────────────── */
@@ -245,8 +248,17 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
 static void
 ctrl_on_read(evutil_socket_t fd, short what, void *arg)
 {
-    (void)what;
     ctrl_conn_t *conn = (ctrl_conn_t *)arg;
+
+    /* Idle timeout — close without processing */
+    if (what & EV_TIMEOUT) {
+        event_del(conn->ev);
+        event_free(conn->ev);
+        close(fd);
+        conn->cs->n_conns--;
+        free(conn);
+        return;
+    }
 
     /* Accumulate data until we have a complete request */
     while (conn->req_len < CTRL_MAX_REQ) {
@@ -285,6 +297,7 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
             event_del(conn->ev);
             event_free(conn->ev);
             close(fd);
+            conn->cs->n_conns--;
             free(conn);
             return;
         }
@@ -304,6 +317,7 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
     event_del(conn->ev);
     event_free(conn->ev);
     close(fd);
+    conn->cs->n_conns--;
     free(conn);
 }
 
@@ -314,6 +328,16 @@ ctrl_on_accept(evutil_socket_t fd, short what, void *arg)
 {
     (void)what;
     ctrl_socket_t *cs = (ctrl_socket_t *)arg;
+
+    if (cs->n_conns >= CTRL_MAX_CONNS) {
+        int cfd = accept(fd, NULL, NULL);
+        if (cfd >= 0) {
+            const char *msg = "{\"ok\":false,\"error\":\"too many connections\"}\n";
+            (void)write(cfd, msg, strlen(msg));
+            close(cfd);
+        }
+        return;
+    }
 
     int cfd = accept(fd, NULL, NULL);
     if (cfd < 0) return;
@@ -329,9 +353,12 @@ ctrl_on_accept(evutil_socket_t fd, short what, void *arg)
 
     conn->fd = cfd;
     conn->cs = cs;
-    conn->ev = event_new(cs->eb, cfd, EV_READ | EV_PERSIST, ctrl_on_read, conn);
+    conn->ev = event_new(cs->eb, cfd, EV_READ | EV_PERSIST | EV_TIMEOUT,
+                          ctrl_on_read, conn);
     if (!conn->ev) { free(conn); close(cfd); return; }
-    event_add(conn->ev, NULL);
+    struct timeval tv = { .tv_sec = CTRL_READ_TIMEOUT_SEC };
+    event_add(conn->ev, &tv);
+    cs->n_conns++;
 }
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
