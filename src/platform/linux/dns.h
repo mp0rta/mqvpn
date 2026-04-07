@@ -16,6 +16,8 @@ typedef struct {
     int n_servers;
     int active;              /* 1 if DNS is currently overridden */
     int lock_fd;             /* flock fd, -1 if not held */
+    int use_resolvectl;      /* 1 = use resolvectl, 0 = resolv.conf */
+    char tun_name[16];       /* TUN interface name for resolvectl */
     const char *resolv_path; /* default: /etc/resolv.conf */
     const char *backup_path; /* default: /etc/resolv.conf.mqvpn.bak */
     const char *lock_path;   /* default: /run/mqvpn-dns.lock */

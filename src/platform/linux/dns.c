@@ -11,6 +11,8 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <errno.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 
@@ -93,6 +95,80 @@ mqvpn_sa_host_prefix(const struct sockaddr_storage *ss)
     return 0;
 }
 
+/* Run an external command. Returns 0 on success (exit code 0), -1 otherwise. */
+static int
+run_cmd(const char *const argv[])
+{
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        execvp(argv[0], (char *const *)argv);
+        _exit(127);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0)
+        if (errno != EINTR) return -1;
+    return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
+}
+
+static int
+detect_resolvectl(void)
+{
+    const char *argv[] = {"resolvectl", "status", NULL};
+    return run_cmd(argv) == 0 ? 1 : 0;
+}
+
+static int
+apply_resolvectl(mqvpn_dns_t *dns)
+{
+    if (dns->tun_name[0] == '\0') {
+        LOG_ERR("dns: resolvectl requires TUN interface name");
+        return -1;
+    }
+
+    /* resolvectl dns <tun> <server1> [server2] ... */
+    const char *argv[MQVPN_DNS_MAX_SERVERS + 4];
+    int argc = 0;
+    argv[argc++] = "resolvectl";
+    argv[argc++] = "dns";
+    argv[argc++] = dns->tun_name;
+    for (int i = 0; i < dns->n_servers; i++)
+        argv[argc++] = dns->servers[i];
+    argv[argc] = NULL;
+
+    if (run_cmd(argv) < 0) {
+        LOG_ERR("dns: resolvectl dns failed");
+        return -1;
+    }
+
+    /* resolvectl default-route <tun> true */
+    const char *dr_argv[] = {"resolvectl", "default-route", dns->tun_name, "true", NULL};
+    if (run_cmd(dr_argv) < 0) {
+        LOG_WRN("dns: resolvectl default-route failed (continuing)");
+    }
+
+    LOG_INF("dns: configured %d server(s) via resolvectl on %s",
+            dns->n_servers, dns->tun_name);
+    return 0;
+}
+
+static void
+restore_resolvectl(mqvpn_dns_t *dns)
+{
+    if (dns->tun_name[0] == '\0') return;
+    const char *argv[] = {"resolvectl", "revert", dns->tun_name, NULL};
+    if (run_cmd(argv) < 0)
+        LOG_WRN("dns: resolvectl revert failed (interface may already be gone)");
+    else
+        LOG_INF("dns: reverted DNS via resolvectl on %s", dns->tun_name);
+}
+
 void
 mqvpn_dns_init(mqvpn_dns_t *dns)
 {
@@ -151,6 +227,18 @@ mqvpn_dns_apply(mqvpn_dns_t *dns)
 {
     if (dns->n_servers == 0) {
         return 0; /* nothing to do */
+    }
+
+    /* Try resolvectl first */
+    if (detect_resolvectl()) {
+        dns->use_resolvectl = 1;
+        int rc = apply_resolvectl(dns);
+        if (rc == 0) {
+            dns->active = 1;
+            return 0;
+        }
+        LOG_WRN("dns: resolvectl failed, falling back to resolv.conf");
+        dns->use_resolvectl = 0;
     }
 
     /* Acquire exclusive lock — prevents multiple mqvpn instances from
@@ -223,10 +311,14 @@ mqvpn_dns_restore(mqvpn_dns_t *dns)
 {
     if (!dns->active) return;
 
+    if (dns->use_resolvectl) {
+        restore_resolvectl(dns);
+        dns->active = 0;
+        return;
+    }
+
     if (copy_file(dns->backup_path, dns->resolv_path) < 0) {
         LOG_ERR("dns: failed to restore %s from %s", dns->resolv_path, dns->backup_path);
-        /* Fall through to release lock — keeping it held would block
-         * future DNS operations in this process and any retry. */
     } else {
         unlink(dns->backup_path);
         LOG_INF("dns: restored %s", dns->resolv_path);
