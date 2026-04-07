@@ -17,6 +17,12 @@ RestartSec=5
 ProtectHome=true
 ProtectSystem=strict
 PrivateTmp=true
+NoNewPrivileges=yes
+# Note: ProtectKernelTunables=yes is NOT set because the client writes to
+# /proc/sys/net/ipv6/conf/*/disable_ipv6 for IPv6 tunnel setup.
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
 ReadOnlyPaths=/etc/mqvpn
 ReadWritePaths=/dev/net/tun /etc/resolv.conf /etc/resolv.conf.mqvpn.bak
 

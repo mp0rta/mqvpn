@@ -18,6 +18,12 @@ RestartSec=5
 ProtectHome=true
 ProtectSystem=strict
 PrivateTmp=true
+NoNewPrivileges=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+# Note: ProtectKernelTunables=yes is NOT set because the NAT script
+# needs sysctl to enable IP forwarding.
 ReadOnlyPaths=/etc/mqvpn
 ReadWritePaths=/dev/net/tun
 RuntimeDirectory=mqvpn
