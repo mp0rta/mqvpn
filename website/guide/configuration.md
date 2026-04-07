@@ -98,7 +98,7 @@ The server can authenticate multiple users, each with their own PSK. In JSON con
 
 When both `auth_key` (global key) and `users` are set, clients can authenticate with either. To restrict access to named users only, remove `auth_key` from the config.
 
-Removing a user (via config change or the Control API) only prevents new connections. Existing sessions remain active until they disconnect or the server restarts.
+Removing a user via the Control API also disconnects any active sessions authenticated with that username.
 
 ## Running with Config Files
 
@@ -179,6 +179,8 @@ Remove a user:
 ```bash
 echo '{"cmd":"remove_user","name":"carol"}' | nc 127.0.0.1 9090
 ```
+
+Removing a user also disconnects any active sessions authenticated with that username.
 
 List users:
 

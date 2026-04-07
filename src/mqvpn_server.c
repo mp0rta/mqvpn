@@ -1901,6 +1901,7 @@ int mqvpn_server_remove_user(mqvpn_server_t *s, const char *username)
     if (!s || !username || username[0] == '\0')
         return MQVPN_ERR_INVALID_ARG;
 
+    int found = 0;
     for (int i = 0; i < s->config.n_users; i++) {
         if (strcmp(s->config.user_names[i], username) == 0) {
             for (int j = i + 1; j < s->config.n_users; j++) {
@@ -1910,10 +1911,23 @@ int mqvpn_server_remove_user(mqvpn_server_t *s, const char *username)
                        sizeof(s->config.user_keys[j - 1]));
             }
             s->config.n_users--;
-            return MQVPN_OK;
+            found = 1;
+            break;
         }
     }
-    return MQVPN_ERR_INVALID_ARG;
+    if (!found) return MQVPN_ERR_INVALID_ARG;
+
+    /* Disconnect active sessions for the removed user */
+    for (int i = 1; i <= MQVPN_ADDR_POOL_MAX; i++) {
+        svr_conn_t *conn = s->sessions[i];
+        if (!conn) continue;
+        if (strcmp(conn->username, username) == 0) {
+            LOG_I(s, "disconnecting session for removed user '%s'", username);
+            xqc_h3_conn_close(s->engine, &conn->cid);
+        }
+    }
+
+    return MQVPN_OK;
 }
 
 int
