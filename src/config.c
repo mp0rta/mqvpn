@@ -61,7 +61,7 @@ parse_section(const char *name)
 
 /* Split comma-separated DNS list into cfg->dns_servers[] */
 static void
-parse_dns_list(mqvpn_config_t *cfg, const char *val)
+parse_dns_list(mqvpn_file_config_t *cfg, const char *val)
 {
     cfg->n_dns = 0;
     const char *p = val;
@@ -92,7 +92,7 @@ parse_dns_list(mqvpn_config_t *cfg, const char *val)
 }
 
 static void
-add_user_entry(mqvpn_config_t *cfg, const char *name, const char *key,
+add_user_entry(mqvpn_file_config_t *cfg, const char *name, const char *key,
                int lineno, const char *path)
 {
     if (!name || !key || name[0] == '\0' || key[0] == '\0') {
@@ -129,7 +129,7 @@ add_user_entry(mqvpn_config_t *cfg, const char *name, const char *key,
 }
 
 static void
-parse_user_pair(mqvpn_config_t *cfg, const char *val, int lineno, const char *path)
+parse_user_pair(mqvpn_file_config_t *cfg, const char *val, int lineno, const char *path)
 {
     char pair[360];
     snprintf(pair, sizeof(pair), "%s", val);
@@ -179,7 +179,7 @@ static int json_read_string_array(const char *p,
     return 0;
 }
 
-static int json_read_users(mqvpn_config_t *cfg, const char *p)
+static int json_read_users(mqvpn_file_config_t *cfg, const char *p)
 {
     if (!cfg || !p || *p != '[') return -1;
     cfg->n_users = 0;
@@ -237,7 +237,7 @@ static int json_read_users(mqvpn_config_t *cfg, const char *p)
 
 /* Handle a key=value pair in the given section */
 static void
-handle_kv(mqvpn_config_t *cfg, int section, const char *key, const char *val, int lineno,
+handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *val, int lineno,
           const char *path)
 {
     switch (section) {
@@ -327,7 +327,7 @@ handle_kv(mqvpn_config_t *cfg, int section, const char *key, const char *val, in
 }
 
 int
-mqvpn_config_load_json_filecfg(mqvpn_config_t *cfg, const char *json_text)
+mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
 {
     if (!cfg || !json_text) return -1;
 
@@ -435,7 +435,7 @@ mqvpn_config_load_json_filecfg(mqvpn_config_t *cfg, const char *json_text)
 /* ---- public API ---- */
 
 void
-mqvpn_config_defaults(mqvpn_config_t *cfg)
+mqvpn_config_defaults(mqvpn_file_config_t *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
     snprintf(cfg->tun_name, sizeof(cfg->tun_name), "mqvpn0");
@@ -451,7 +451,7 @@ mqvpn_config_defaults(mqvpn_config_t *cfg)
 }
 
 int
-mqvpn_config_load(mqvpn_config_t *cfg, const char *path)
+mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
 {
     FILE *fp = fopen(path, "r");
     if (!fp) {

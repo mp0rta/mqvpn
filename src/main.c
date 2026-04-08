@@ -249,7 +249,7 @@ main(int argc, char *argv[])
 #endif
 
     /* Load config file (if given), then apply CLI overrides */
-    mqvpn_config_t file_cfg;
+    mqvpn_file_config_t file_cfg;
     mqvpn_config_defaults(&file_cfg);
 
     if (config_path) {

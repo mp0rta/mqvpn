@@ -42,7 +42,7 @@ static char *write_tmp(const char *content)
 
 static void test_defaults(void)
 {
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
 
     ASSERT_EQ_STR(cfg.tun_name, "mqvpn0", "default tun_name");
@@ -80,7 +80,7 @@ static void test_parse_server_config(void)
         "MaxClients = 32\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -117,7 +117,7 @@ static void test_parse_client_config(void)
         "Path = wlan0\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -149,7 +149,7 @@ static void test_comments_whitespace(void)
         "\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -166,7 +166,7 @@ static void test_unknown_key_warns(void)
         "UnknownKey = somevalue\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -178,7 +178,7 @@ static void test_unknown_key_warns(void)
 
 static void test_missing_file_error(void)
 {
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, "/tmp/nonexistent_config_file_12345.conf");
 
@@ -195,7 +195,7 @@ static void test_path_accumulation(void)
         "Path = lte0\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -215,7 +215,7 @@ static void test_dns_comma_split(void)
         "DNS = 1.1.1.1,8.8.8.8, 9.9.9.9 ,  208.67.222.222  \n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -237,7 +237,7 @@ static void test_boolean_parsing(void)
         "Insecure = true\n";
 
     char *path = write_tmp(ini_true);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -285,7 +285,7 @@ static void test_mode_detection(void)
         "Listen = 0.0.0.0:443\n";
 
     char *path = write_tmp(ini_server);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -307,7 +307,7 @@ static void test_empty_file(void)
 {
     const char *ini = "\n\n\n";
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -325,7 +325,7 @@ static void test_malformed_section_header(void)
         "TunName = fixed\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -345,7 +345,7 @@ static void test_malformed_line_no_equals(void)
         "LogLevel = debug\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -364,7 +364,7 @@ static void test_key_outside_section(void)
         "TunName = valid\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -385,7 +385,7 @@ static void test_max_paths_exceeded(void)
         "Path = eth4\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -403,7 +403,7 @@ static void test_max_clients_edge_cases(void)
         "MaxClients = 0\n";
 
     char *path = write_tmp(ini_zero);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -451,7 +451,7 @@ static void test_empty_value(void)
         "TunName = \n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -467,7 +467,7 @@ static void test_duplicate_keys_last_wins(void)
         "TunName = second\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -483,7 +483,7 @@ static void test_case_insensitive_section(void)
         "TunName = lower\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -501,7 +501,7 @@ static void test_unknown_section(void)
         "TunName = after_unknown\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -518,7 +518,7 @@ static void test_dns_empty_entries(void)
         "DNS = ,, 1.1.1.1 ,, 8.8.8.8 ,,\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -537,7 +537,7 @@ static void test_semicolon_comment(void)
         "TunName = commented\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -551,7 +551,7 @@ static void test_semicolon_comment(void)
 
 static void test_killswitch_default_off(void)
 {
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
 
     ASSERT_EQ_INT(cfg.kill_switch, 0, "default kill_switch off");
@@ -564,7 +564,7 @@ static void test_killswitch_config_parse(void)
         "KillSwitch = true\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -579,7 +579,7 @@ static void test_killswitch_config_false(void)
         "KillSwitch = false\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -593,7 +593,7 @@ static void test_killswitch_config_false(void)
 
 static void test_reconnect_defaults(void)
 {
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
 
     ASSERT_EQ_INT(cfg.reconnect, 1, "default reconnect enabled");
@@ -608,7 +608,7 @@ static void test_reconnect_config_parse(void)
         "ReconnectInterval = 10\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -625,7 +625,7 @@ static void test_reconnect_config_true(void)
         "ReconnectInterval = 30\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -641,7 +641,7 @@ static void test_reconnect_interval_invalid(void)
         "ReconnectInterval = -5\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -655,7 +655,7 @@ static void test_reconnect_interval_invalid(void)
 
 static void test_subnet6_default(void)
 {
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
 
     ASSERT_EQ_STR(cfg.subnet6, "", "default subnet6 empty");
@@ -670,7 +670,7 @@ static void test_subnet6_config_parse(void)
         "Subnet6 = fd00:abcd::/112\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -688,7 +688,7 @@ static void test_subnet6_various_prefixes(void)
         "Subnet6 = fd00:1234::/96\n";
 
     char *path = write_tmp(ini_96);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -715,7 +715,7 @@ static void test_subnet6_whitespace_trimmed(void)
         "Subnet6 =   fd00:abcd::/112   \n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -731,7 +731,7 @@ static void test_subnet6_not_set(void)
         "Subnet = 10.0.0.0/24\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -747,7 +747,7 @@ static void test_subnet6_duplicate_last_wins(void)
         "Subnet6 = fd00:2::/112\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -765,7 +765,7 @@ static void test_auth_users_ini(void)
         "User = alice:alice-key-v2\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -787,7 +787,7 @@ static void test_auth_users_ini_invalid_ignored(void)
         "User = alice:alice-key\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -812,7 +812,7 @@ static void test_json_config_load(void)
         "}";
 
     char *path = write_tmp(json);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -848,7 +848,7 @@ static void test_json_client_config_load(void)
         "}";
 
     char *path = write_tmp(json);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -879,7 +879,7 @@ static void test_json_duplicate_users_last_wins(void)
         "}";
 
     char *path = write_tmp(json);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -898,7 +898,7 @@ static void test_json_invalid_users_error(void)
         "}";
 
     char *path = write_tmp(json);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);

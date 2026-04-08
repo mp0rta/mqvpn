@@ -13,7 +13,7 @@
 #define MQVPN_CONFIG_MAX_DNS     4
 #define MQVPN_CONFIG_MAX_USERS   64
 
-typedef struct mqvpn_config_s {
+typedef struct mqvpn_file_config_s {
     /* [Interface] — common */
     char tun_name[32];
     char log_level[16];
@@ -57,15 +57,15 @@ typedef struct mqvpn_config_s {
 
     /* Inferred mode: 1=server, 0=client */
     int is_server;
-} mqvpn_config_t;
+} mqvpn_file_config_t;
 
 /* Fill cfg with default values */
-void mqvpn_config_defaults(mqvpn_config_t *cfg);
+void mqvpn_config_defaults(mqvpn_file_config_t *cfg);
 
 /* Parse INI file at path into cfg. Returns 0 on success, -1 on error. */
-int  mqvpn_config_load(mqvpn_config_t *cfg, const char *path);
+int  mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path);
 
 /* Parse JSON text into CLI cfg. Returns 0 on success, -1 on error. */
-int  mqvpn_config_load_json_filecfg(mqvpn_config_t *cfg, const char *json_text);
+int  mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text);
 
 #endif /* MQVPN_CONFIG_H */
