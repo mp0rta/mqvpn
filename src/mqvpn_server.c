@@ -871,7 +871,8 @@ cb_h3_conn_create(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_
     if (!conn) return -1;
     conn->server = s;
     conn->h3_conn = h3_conn;
-    memcpy(&conn->cid, cid, sizeof(*cid));
+    /* cid may be misaligned inside xquic's internal structures */
+    memcpy(&conn->cid, (const void *)cid, sizeof(conn->cid));
 
     xqc_h3_conn_set_user_data(h3_conn, conn);
     xqc_h3_ext_datagram_set_user_data(h3_conn, conn);
