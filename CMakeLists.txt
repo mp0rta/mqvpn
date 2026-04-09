@@ -7,10 +7,14 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # ---------- Options ----------
 option(XQUIC_BUILD_DIR "Path to pre-built xquic build directory" "")
 option(ENABLE_SANITIZERS "Enable ASan + UBSan" OFF)
+option(ENABLE_MSAN "Enable MemorySanitizer" OFF)
 
 if(ENABLE_SANITIZERS)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -Werror)
     add_link_options(-fsanitize=address,undefined)
+elseif(ENABLE_MSAN)
+    add_compile_options(-fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins)
+    add_link_options(-fsanitize=memory)
 endif()
 
 # ---------- xquic ----------

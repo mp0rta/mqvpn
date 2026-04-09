@@ -177,6 +177,71 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_ipv6_full_multipath_test.sh
 
+  msan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake golang iptables clang
+
+      - name: Build libevent from source (MSan)
+        run: |
+          git clone --depth 1 --branch release-2.1.12-stable https://github.com/libevent/libevent.git /tmp/libevent
+          cd /tmp/libevent && mkdir build && cd build
+          CC=clang cmake -DCMAKE_C_FLAGS="-fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins" \
+                -DCMAKE_BUILD_TYPE=Debug \
+                -DEVENT__DISABLE_OPENSSL=ON \
+                -DEVENT__DISABLE_BENCHMARK=ON \
+                -DEVENT__DISABLE_TESTS=ON \
+                -DEVENT__DISABLE_SAMPLES=ON \
+                -DCMAKE_INSTALL_PREFIX=/tmp/libevent-msan ..
+          make -j$(nproc) && make install
+
+      - name: Clone BoringSSL (pinned)
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+
+      - name: Build BoringSSL (clang + MSan)
+        run: |
+          cd third_party/xquic/third_party/boringssl
+          mkdir -p build && cd build
+          CC=clang CXX=clang++ cmake \
+            -DBUILD_SHARED_LIBS=0 \
+            -DCMAKE_C_FLAGS="-fPIC -fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins" \
+            -DCMAKE_CXX_FLAGS="-fPIC -fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins" ..
+          make -j$(nproc) ssl crypto
+
+      - name: Build xquic (clang + MSan)
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug -DSSL_TYPE=boringssl \
+                -DXQC_ENABLE_BBR2=ON \
+                -DCMAKE_C_FLAGS="-fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins -Wno-unknown-warning-option" ..
+          make -j$(nproc)
+
+      - name: Build mqvpn (clang + MSan)
+        run: |
+          mkdir -p build && cd build
+          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug \
+                -DENABLE_MSAN=ON \
+                -DXQUIC_BUILD_DIR=../third_party/xquic/build \
+                -DCMAKE_PREFIX_PATH=/tmp/libevent-msan ..
+          make -j$(nproc)
+
+      - name: Unit tests (MSan)
+        env:
+          MSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: cd build && ctest --output-on-failure
+
   netns-tests:
     needs: build
     runs-on: ubuntu-latest
