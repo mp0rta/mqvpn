@@ -1,4 +1,0 @@
-# LeakSanitizer suppressions for third-party code (xquic)
-# mqvpn's own leaks are NOT suppressed.
-leak:xqc_h3_ctx_create
-leak:xqc_h3_ctx_init
