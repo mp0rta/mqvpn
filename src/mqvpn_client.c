@@ -1259,7 +1259,8 @@ cli_start_connection(mqvpn_client_t *c)
         goto cleanup;
     }
 
-    memcpy(&conn->cid, cid, sizeof(*cid));
+    /* cid may be misaligned inside xquic's internal structures */
+    memcpy(&conn->cid, (const void *)cid, sizeof(conn->cid));
     if (conn->h3_conn) xqc_h3_ext_datagram_set_user_data(conn->h3_conn, conn);
 
     /* Mark primary path */
