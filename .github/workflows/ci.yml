@@ -110,70 +110,60 @@ jobs:
       - name: Unit tests (sanitizer)
         env:
           ASAN_OPTIONS: detect_leaks=1
-          LSAN_OPTIONS: suppressions=${{ github.workspace }}/lsan_suppressions.txt
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: cd build && ctest --output-on-failure
 
       - name: E2E smoke test (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
-          LSAN_OPTIONS: suppressions=${{ github.workspace }}/lsan_suppressions.txt
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_test.sh
 
       - name: E2E multi-client test (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
-          LSAN_OPTIONS: suppressions=${{ github.workspace }}/lsan_suppressions.txt
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/test_multiclient.sh
 
       - name: E2E NAT test (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
-          LSAN_OPTIONS: suppressions=${{ github.workspace }}/lsan_suppressions.txt
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_nat_test.sh
 
       - name: E2E kill switch test (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
-          LSAN_OPTIONS: suppressions=${{ github.workspace }}/lsan_suppressions.txt
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_killswitch_test.sh
 
       - name: E2E reconnect test (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
-          LSAN_OPTIONS: suppressions=${{ github.workspace }}/lsan_suppressions.txt
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_reconnect_test.sh
 
       - name: E2E IPv6 transport test (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
-          LSAN_OPTIONS: suppressions=${{ github.workspace }}/lsan_suppressions.txt
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_ipv6_transport_test.sh
 
       - name: E2E IPv6 data plane test (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
-          LSAN_OPTIONS: suppressions=${{ github.workspace }}/lsan_suppressions.txt
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_ipv6_dataplane_test.sh
 
       - name: E2E IPv6 multipath test (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
-          LSAN_OPTIONS: suppressions=${{ github.workspace }}/lsan_suppressions.txt
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_ipv6_multipath_test.sh
 
       - name: E2E IPv6 full multipath test (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
-          LSAN_OPTIONS: suppressions=${{ github.workspace }}/lsan_suppressions.txt
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_ipv6_full_multipath_test.sh
 
