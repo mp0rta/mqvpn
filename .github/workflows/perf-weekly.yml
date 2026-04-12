@@ -11,6 +11,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: perf-test
+  cancel-in-progress: false
+
 jobs:
   perf-weekly:
     runs-on: perf-test

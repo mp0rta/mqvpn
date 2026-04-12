@@ -12,8 +12,8 @@
 #   6. Parse iperf3 JSON intervals to calculate TTR
 #
 # TTR definition:
-#   "seconds from fault injection until throughput reaches 90% of
-#    pre-fault avg (fallback to surviving path)"
+#   "seconds from fault injection until throughput reaches 50% of
+#    surviving path capacity (fallback detection)"
 #
 # Output: ci_bench_results/failover_<timestamp>.json
 #

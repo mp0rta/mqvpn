@@ -29,7 +29,7 @@ MQVPN="${1:-${MQVPN}}"
 
 DURATION=15
 PARALLEL=4
-TUNNEL_TIMEOUT=20  # longer for high-RTT satellite paths
+TUNNEL_TIMEOUT=30  # longer for high-RTT satellite paths (GEO RTT ~600ms)
 
 # ── Preflight ──
 
