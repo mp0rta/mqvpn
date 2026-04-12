@@ -255,27 +255,21 @@ ci_bench_run_iperf() {
     local json_file
     json_file="$(mktemp)"
 
-    # Start iperf3 server
-    local iperf_server_ns iperf_client_ns iperf_bind
-    if [ "$dir" = "DL" ]; then
-        iperf_server_ns="$NS_SERVER"
-        iperf_client_ns="$NS_CLIENT"
-    else
-        iperf_server_ns="$NS_CLIENT"
-        iperf_client_ns="$NS_SERVER"
-    fi
-
-    ip netns exec "$iperf_server_ns" iperf3 -s -B "$TUNNEL_SERVER_IP" -1 &>/dev/null &
+    # iperf3 server always in NS_SERVER (bound to tunnel IP).
+    # iperf3 client always in NS_CLIENT.
+    # Direction controlled by -R flag:
+    #   DL (server→client): -R (reverse)
+    #   UL (client→server): no flag (default iperf3 direction)
+    ip netns exec "$NS_SERVER" iperf3 -s -B "$TUNNEL_SERVER_IP" -1 &>/dev/null &
     local iperf_srv_pid=$!
     sleep 1
 
-    # Build client args
     local args="-c $TUNNEL_SERVER_IP -t $duration -P $parallel --json"
     [ "$proto" = "UDP" ] && args="$args -u"
     [ -n "$target_bw" ] && args="$args -b $target_bw"
     [ "$dir" = "DL" ] && args="$args -R"
 
-    ip netns exec "$iperf_client_ns" iperf3 $args > "$json_file" 2>&1 || true
+    ip netns exec "$NS_CLIENT" iperf3 $args > "$json_file" 2>&1 || true
 
     wait "$iperf_srv_pid" 2>/dev/null || true
 
