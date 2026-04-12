@@ -102,7 +102,7 @@ onMounted(async () => {
 
 # ベンチマーク
 
-CI による自動ベンチマーク結果です。データはコミットごとに収集され `/perf-data/` に公開されます。
+CI による自動ベンチマーク結果です。
 
 <div v-if="loading">ベンチマーク結果を読み込み中...</div>
 <div v-else-if="error" style="color: red;">エラー: {{ error }}</div>

@@ -128,6 +128,10 @@ jobs:
           git pull --rebase origin main || true
           git push
 
+      - name: Trigger Cloudflare Pages deploy
+        if: success()
+        run: curl -sS -X POST "${{ secrets.CLOUDFLARE_DEPLOY_HOOK }}" || true
+
       - name: Post-job cleanup (root-owned files)
         if: always()
         run: sudo rm -rf ci_bench_results

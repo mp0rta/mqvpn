@@ -102,7 +102,7 @@ onMounted(async () => {
 
 # Benchmarks
 
-Automated benchmark results from CI. Data is collected per-commit and published to `/perf-data/`.
+Automated benchmark results from CI.
 
 <div v-if="loading">Loading...</div>
 <div v-else-if="error" style="color: red;">Error: {{ error }}</div>
