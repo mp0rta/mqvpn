@@ -51,16 +51,13 @@ onMounted(async () => {
       if (test === 'raw_throughput') {
         for (const dir of Object.keys(data.results || {})) {
           const r = data.results[dir]
-          const overhead = data.overhead_pct?.[dir]?.multipath_wlb
           rawRows.value.push({
             commit: fmtCommit(commit),
             date: fmtDate(timestamp),
             dir,
-            direct: fmtNum(r.direct_mbps),
             single: fmtNum(r.single_path_mbps),
             minrtt: fmtNum(r.multipath_minrtt_mbps),
             wlb: fmtNum(r.multipath_wlb_mbps),
-            overhead: fmtNum(overhead) + '%',
           })
         }
       } else if (test === 'failover') {
@@ -108,7 +105,10 @@ Automated benchmark results from CI.
 <div v-else-if="error" style="color: red;">Error: {{ error }}</div>
 <template v-else>
 
-## Raw Throughput (TCP)
+## VPN Throughput (Mbps, no emulation)
+
+Measures mqvpn throughput over veth pairs without bandwidth/delay emulation.
+Environment: Proxmox VM, i9-13900H, 4 vCPU (pinned), Ubuntu 24.04.
 
 <div v-if="rawRows.length === 0">No data yet.</div>
 <table v-else>
@@ -117,11 +117,9 @@ Automated benchmark results from CI.
       <th>Commit</th>
       <th>Date</th>
       <th>Dir</th>
-      <th>Direct</th>
-      <th>Single</th>
-      <th>MinRTT</th>
-      <th>WLB</th>
-      <th>Overhead</th>
+      <th>Single-path</th>
+      <th>Multipath (MinRTT)</th>
+      <th>Multipath (WLB)</th>
     </tr>
   </thead>
   <tbody>
@@ -129,11 +127,9 @@ Automated benchmark results from CI.
       <td><code>{{ r.commit }}</code></td>
       <td>{{ r.date }}</td>
       <td>{{ r.dir }}</td>
-      <td>{{ r.direct }}</td>
       <td>{{ r.single }}</td>
       <td>{{ r.minrtt }}</td>
       <td>{{ r.wlb }}</td>
-      <td>{{ r.overhead }}</td>
     </tr>
   </tbody>
 </table>

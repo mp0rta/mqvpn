@@ -51,16 +51,13 @@ onMounted(async () => {
       if (test === 'raw_throughput') {
         for (const dir of Object.keys(data.results || {})) {
           const r = data.results[dir]
-          const overhead = data.overhead_pct?.[dir]?.multipath_wlb
           rawRows.value.push({
             commit: fmtCommit(commit),
             date: fmtDate(timestamp),
             dir,
-            direct: fmtNum(r.direct_mbps),
             single: fmtNum(r.single_path_mbps),
             minrtt: fmtNum(r.multipath_minrtt_mbps),
             wlb: fmtNum(r.multipath_wlb_mbps),
-            overhead: fmtNum(overhead) + '%',
           })
         }
       } else if (test === 'failover') {
@@ -108,7 +105,10 @@ CI による自動ベンチマーク結果です。
 <div v-else-if="error" style="color: red;">エラー: {{ error }}</div>
 <template v-else>
 
-## スループット（TCP）
+## VPN スループット（Mbps、エミュレーションなし）
+
+帯域/遅延エミュレーションなしの veth ペアで mqvpn のスループットを計測。
+環境: Proxmox VM, i9-13900H, 4 vCPU（ピニング）, Ubuntu 24.04
 
 <div v-if="rawRows.length === 0">データがありません。</div>
 <table v-else>
@@ -117,11 +117,9 @@ CI による自動ベンチマーク結果です。
       <th>コミット</th>
       <th>日付</th>
       <th>方向</th>
-      <th>直接</th>
       <th>シングルパス</th>
-      <th>MinRTT</th>
-      <th>WLB</th>
-      <th>オーバーヘッド</th>
+      <th>マルチパス (MinRTT)</th>
+      <th>マルチパス (WLB)</th>
     </tr>
   </thead>
   <tbody>
@@ -129,11 +127,9 @@ CI による自動ベンチマーク結果です。
       <td><code>{{ r.commit }}</code></td>
       <td>{{ r.date }}</td>
       <td>{{ r.dir }}</td>
-      <td>{{ r.direct }}</td>
       <td>{{ r.single }}</td>
       <td>{{ r.minrtt }}</td>
       <td>{{ r.wlb }}</td>
-      <td>{{ r.overhead }}</td>
     </tr>
   </tbody>
 </table>
