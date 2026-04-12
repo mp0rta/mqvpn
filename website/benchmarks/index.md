@@ -62,8 +62,9 @@ Benchmarks run on every push to main.
   <div class="summary-card">
     <h3>Bandwidth Aggregation</h3>
     <div v-if="latestAggregate">
-      <div class="stat">{{ latestAggregate.gain }}</div>
-      <div class="label">Best gain ({{ latestAggregate.scheduler }}, {{ latestAggregate.streams }} streams)</div>
+      <div class="stat">{{ latestAggregate.multi }} <span class="unit">Mbps</span></div>
+      <div class="label">{{ latestAggregate.scheduler.toUpperCase() }}, {{ latestAggregate.streams }} streams &mdash; +{{ latestAggregate.gain }} vs single-path</div>
+      <div class="label">Paths: 300Mbps + 80Mbps (theoretical max 380Mbps)</div>
       <div class="meta"><code>{{ latestAggregate.commit }}</code> &middot; {{ latestAggregate.date }}</div>
     </div>
     <div v-else class="no-data">No data yet</div>

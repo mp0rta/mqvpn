@@ -59,8 +59,9 @@ main へのプッシュごとに実行されるベンチマーク。
   <div class="summary-card">
     <h3>帯域集約</h3>
     <div v-if="latestAggregate">
-      <div class="stat">{{ latestAggregate.gain }}</div>
-      <div class="label">最大ゲイン ({{ latestAggregate.scheduler }}, {{ latestAggregate.streams }} ストリーム)</div>
+      <div class="stat">{{ latestAggregate.multi }} <span class="unit">Mbps</span></div>
+      <div class="label">{{ latestAggregate.scheduler.toUpperCase() }}, {{ latestAggregate.streams }} ストリーム &mdash; +{{ latestAggregate.gain }} vs シングルパス</div>
+      <div class="label">回線: 300Mbps + 80Mbps（理論値 380Mbps）</div>
       <div class="meta"><code>{{ latestAggregate.commit }}</code> &middot; {{ latestAggregate.date }}</div>
     </div>
     <div v-else class="no-data">データがありません</div>
