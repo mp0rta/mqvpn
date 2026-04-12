@@ -18,6 +18,9 @@ jobs:
     runs-on: perf-test
     timeout-minutes: 30
     steps:
+      - name: Pre-checkout cleanup (root-owned files)
+        run: sudo rm -rf ci_bench_results bench_results
+
       - uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -31,7 +34,6 @@ jobs:
 
       - name: Clean previous build
         run: |
-          sudo rm -rf ci_bench_results bench_results
           rm -rf third_party/xquic/third_party/boringssl
           rm -rf third_party/xquic/build
           rm -rf build
@@ -77,3 +79,7 @@ jobs:
           name: perf-results-${{ github.sha }}
           path: ci_bench_results/*.json
           retention-days: 90
+
+      - name: Post-job cleanup (root-owned files)
+        if: always()
+        run: sudo rm -rf ci_bench_results
