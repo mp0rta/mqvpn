@@ -1,0 +1,191 @@
+name: Stress Tests
+
+on:
+  schedule:
+    - cron: '0 6 * * 0'  # Sunday 6:00 UTC (after perf-weekly at 3:00)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stress-test
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang libevent-dev golang iptables iproute2 iperf3
+
+      - name: Clone BoringSSL
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+
+      - name: Build BoringSSL
+        run: |
+          cd third_party/xquic/third_party/boringssl
+          mkdir -p build && cd build
+          CC=clang CXX=clang++ cmake -DBUILD_SHARED_LIBS=0 -DBUILD_TESTING=OFF \
+            -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+          make -j$(nproc) ssl crypto
+
+      - name: Build xquic
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug -DSSL_TYPE=boringssl \
+            -DXQC_ENABLE_BBR2=ON -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
+          make -j$(nproc)
+
+      - name: Build mqvpn (ASan + UBSan)
+        run: |
+          mkdir -p build && cd build
+          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug \
+            -DENABLE_SANITIZERS=ON \
+            -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
+          make -j$(nproc)
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-build
+          path: |
+            build/mqvpn
+            build/libmqvpn.a
+            third_party/xquic/build/libxquic.so*
+          retention-days: 1
+
+  long-running:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install runtime deps
+        run: sudo apt-get update && sudo apt-get install -y libevent-dev iptables iproute2 iperf3
+      - uses: actions/download-artifact@v4
+        with:
+          name: stress-build
+          path: build
+      - name: Restore shared libs
+        run: |
+          sudo cp build/third_party/xquic/build/libxquic.so* /usr/local/lib/ 2>/dev/null || true
+          sudo ldconfig
+      - name: Make executable
+        run: chmod +x build/mqvpn
+      - name: Long-running stress test (1h)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E bash scripts/ci_stress/ci_stress_long_running.sh build/mqvpn
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-long-running
+          path: ci_stress_results/
+          retention-days: 30
+
+  reconnect-storm:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install runtime deps
+        run: sudo apt-get update && sudo apt-get install -y libevent-dev iptables iproute2 iperf3
+      - uses: actions/download-artifact@v4
+        with:
+          name: stress-build
+          path: build
+      - name: Restore shared libs
+        run: |
+          sudo cp build/third_party/xquic/build/libxquic.so* /usr/local/lib/ 2>/dev/null || true
+          sudo ldconfig
+      - name: Make executable
+        run: chmod +x build/mqvpn
+      - name: Reconnect storm (500 cycles)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E bash scripts/ci_stress/ci_stress_reconnect.sh build/mqvpn
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-reconnect
+          path: ci_stress_results/
+          retention-days: 30
+
+  multi-client:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install runtime deps
+        run: sudo apt-get update && sudo apt-get install -y libevent-dev iptables iproute2 iperf3
+      - uses: actions/download-artifact@v4
+        with:
+          name: stress-build
+          path: build
+      - name: Restore shared libs
+        run: |
+          sudo cp build/third_party/xquic/build/libxquic.so* /usr/local/lib/ 2>/dev/null || true
+          sudo ldconfig
+      - name: Make executable
+        run: chmod +x build/mqvpn
+      - name: Multi-client stress (60 clients)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E bash scripts/ci_stress/ci_stress_multi_client.sh build/mqvpn
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-multi-client
+          path: ci_stress_results/
+          retention-days: 30
+
+  failover-storm:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install runtime deps
+        run: sudo apt-get update && sudo apt-get install -y libevent-dev iptables iproute2 iperf3
+      - uses: actions/download-artifact@v4
+        with:
+          name: stress-build
+          path: build
+      - name: Restore shared libs
+        run: |
+          sudo cp build/third_party/xquic/build/libxquic.so* /usr/local/lib/ 2>/dev/null || true
+          sudo ldconfig
+      - name: Make executable
+        run: chmod +x build/mqvpn
+      - name: Failover storm (100 cycles)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E bash scripts/ci_stress/ci_stress_failover.sh build/mqvpn
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-failover
+          path: ci_stress_results/
+          retention-days: 30
