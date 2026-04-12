@@ -1,0 +1,60 @@
+name: Performance Tests
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  perf-test:
+    runs-on: perf-test
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build BoringSSL
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          mkdir -p build && cd build
+          cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+          make -j$(nproc) ssl crypto
+
+      - name: Build xquic
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
+                -DXQC_ENABLE_BBR2=ON \
+                -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
+          make -j$(nproc)
+
+      - name: Build mqvpn (Release)
+        run: |
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
+          make -j$(nproc)
+
+      - name: Failover benchmark (WLB)
+        run: sudo benchmarks/bench_failover.sh -s wlb build/mqvpn
+
+      - name: Failover benchmark (MinRTT)
+        run: sudo benchmarks/bench_failover.sh -s minrtt build/mqvpn
+
+      - name: Aggregation benchmark (WLB)
+        run: sudo benchmarks/bench_aggregate.sh -s wlb -p 1,4,16,64 build/mqvpn
+
+      - name: Aggregation benchmark (MinRTT)
+        run: sudo benchmarks/bench_aggregate.sh -s minrtt -p 1,4,16,64 build/mqvpn
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results-${{ github.sha }}
+          path: bench_results/*.json
+          retention-days: 90
