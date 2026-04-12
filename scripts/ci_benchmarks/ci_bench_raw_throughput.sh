@@ -18,7 +18,7 @@ set -euo pipefail
 
 source "$(dirname "$0")/ci_bench_env.sh"
 
-MQVPN="${1:-${CI_BENCH_DIR}/../../build/mqvpn}"
+MQVPN="${1:-${MQVPN}}"
 
 DURATION=10
 PARALLEL=4

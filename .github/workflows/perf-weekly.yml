@@ -1,0 +1,93 @@
+name: Performance Tests (Weekly)
+
+# Full benchmark suite — runs every Sunday at 3:00 UTC.
+# Security: same restrictions as perf.yml (no PR trigger).
+
+on:
+  schedule:
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  perf-weekly:
+    runs-on: perf-test
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Cleanup stale state
+        run: |
+          sudo pkill -f 'mqvpn.*ci-bench' || true
+          sudo ip netns del ci-bench-server 2>/dev/null || true
+          sudo ip netns del ci-bench-client 2>/dev/null || true
+          sudo pkill -f 'iperf3' || true
+
+      - name: Clean previous build
+        run: |
+          sudo rm -rf ci_bench_results bench_results
+          rm -rf third_party/xquic/third_party/boringssl
+          rm -rf third_party/xquic/build
+          rm -rf build
+
+      - name: Build BoringSSL
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          mkdir -p build && cd build
+          cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+          make -j$(nproc) ssl crypto
+
+      - name: Build xquic
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
+                -DXQC_ENABLE_BBR2=ON \
+                -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
+          make -j$(nproc)
+
+      - name: Build mqvpn (Release)
+        run: |
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
+          make -j$(nproc)
+
+      # --- Core benchmarks (same as push-to-main) ---
+
+      - name: Raw throughput benchmark (TCP DL)
+        run: sudo bash scripts/ci_benchmarks/ci_bench_raw_throughput.sh build/mqvpn
+
+      - name: Failover benchmark (WLB + MinRTT)
+        run: sudo bash scripts/ci_benchmarks/ci_bench_failover.sh build/mqvpn
+
+      - name: Aggregation benchmark (WLB + MinRTT)
+        run: sudo bash scripts/ci_benchmarks/ci_bench_aggregate.sh build/mqvpn
+
+      # --- Extended benchmarks (weekly only) ---
+
+      - name: Multipath scheduler benchmark (8 scenarios)
+        run: sudo bash scripts/ci_benchmarks/ci_bench_multipath_scheduler.sh build/mqvpn
+
+      - name: Flow scaling benchmark
+        run: sudo bash scripts/ci_benchmarks/ci_bench_flow_scaling.sh build/mqvpn
+
+      - name: UDP scheduler benchmark
+        run: sudo bash scripts/ci_benchmarks/ci_bench_udp_scheduler.sh build/mqvpn
+
+      - name: NTN satellite benchmark
+        run: sudo bash scripts/ci_benchmarks/ci_bench_ntn.sh build/mqvpn
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-weekly-${{ github.sha }}
+          path: ci_bench_results/*.json
+          retention-days: 90
