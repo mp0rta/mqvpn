@@ -1,5 +1,15 @@
 [
   {
+    "commit": "fcd9495",
+    "timestamp": "2026-04-12T20:07:32Z",
+    "type": "push",
+    "files": [
+      "aggregate_20260412_200729.json",
+      "raw_throughput_20260412_200012.json",
+      "failover_20260412_200230.json"
+    ]
+  },
+  {
     "commit": "d249f25",
     "timestamp": "2026-04-12T18:06:45Z",
     "type": "weekly",
