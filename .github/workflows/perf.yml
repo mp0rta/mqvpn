@@ -1,9 +1,17 @@
 name: Performance Tests
 
+# Security: only push to main and manual trigger.
+# Never runs on PRs — prevents fork code execution on self-hosted runner.
+# Runner requires: cmake gcc make git libevent-dev golang iptables
+#                  iproute2 iperf3 python3 jq openssl
+
 on:
   push:
     branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   perf-test:
@@ -13,6 +21,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Cleanup stale benchmark state
+        run: |
+          sudo pkill -f 'mqvpn.*bench' || true
+          sudo pkill -f 'iperf3' || true
+          sudo ip netns del bench-server 2>/dev/null || true
+          sudo ip netns del bench-client 2>/dev/null || true
 
       - name: Clean previous build
         run: |
