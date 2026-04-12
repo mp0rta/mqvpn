@@ -46,16 +46,16 @@ jobs:
           make -j$(nproc)
 
       - name: Failover benchmark (WLB)
-        run: sudo benchmarks/bench_failover.sh -s wlb build/mqvpn
+        run: sudo bash benchmarks/bench_failover.sh -s wlb build/mqvpn
 
       - name: Failover benchmark (MinRTT)
-        run: sudo benchmarks/bench_failover.sh -s minrtt build/mqvpn
+        run: sudo bash benchmarks/bench_failover.sh -s minrtt build/mqvpn
 
       - name: Aggregation benchmark (WLB)
-        run: sudo benchmarks/bench_aggregate.sh -s wlb -p 1,4,16,64 build/mqvpn
+        run: sudo bash benchmarks/bench_aggregate.sh -s wlb -p 1,4,16,64 build/mqvpn
 
       - name: Aggregation benchmark (MinRTT)
-        run: sudo benchmarks/bench_aggregate.sh -s minrtt -p 1,4,16,64 build/mqvpn
+        run: sudo bash benchmarks/bench_aggregate.sh -s minrtt -p 1,4,16,64 build/mqvpn
 
       - name: Upload results
         if: always()
