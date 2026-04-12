@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   perf-weekly:
@@ -93,6 +93,44 @@ jobs:
           name: perf-weekly-${{ github.sha }}
           path: ci_bench_results/*.json
           retention-days: 90
+
+      - name: Publish results to website
+        if: success()
+        run: |
+          COMMIT_SHORT=$(git rev-parse --short HEAD)
+          TIMESTAMP=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+          cp ci_bench_results/*.json website/public/perf-data/ 2>/dev/null || true
+
+          cd website/public/perf-data
+          python3 -c "
+          import json, glob, os
+          with open('index.json') as f:
+              index = json.load(f)
+          existing_files = set()
+          for e in index:
+              existing_files.update(e.get('files', []))
+          new_files = [os.path.basename(f) for f in glob.glob('*.json')
+                       if os.path.basename(f) != 'index.json'
+                       and os.path.basename(f) not in existing_files]
+          if new_files:
+              index.insert(0, {
+                  'commit': '${COMMIT_SHORT}',
+                  'timestamp': '${TIMESTAMP}',
+                  'type': 'weekly',
+                  'files': new_files
+              })
+          index = index[:100]
+          with open('index.json', 'w') as f:
+              json.dump(index, f, indent=2)
+          "
+
+          cd $GITHUB_WORKSPACE
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add website/public/perf-data/
+          git diff --cached --quiet || git commit -m "perf: update weekly benchmark results (${COMMIT_SHORT}) [skip ci]"
+          git push
 
       - name: Post-job cleanup (root-owned files)
         if: always()

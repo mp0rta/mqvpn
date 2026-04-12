@@ -8,6 +8,7 @@ export const en: LocaleSpecificConfig<DefaultTheme.Config> & { label: string; la
   themeConfig: {
     nav: [
       { text: 'Guide', link: '/guide/getting-started' },
+      { text: 'Benchmarks', link: '/benchmarks' },
     ],
 
     footer: {
