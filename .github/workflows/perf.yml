@@ -31,9 +31,10 @@ jobs:
 
       - name: Clean previous build
         run: |
+          sudo rm -rf bench_results
           rm -rf third_party/xquic/third_party/boringssl
           rm -rf third_party/xquic/build
-          rm -rf build bench_results
+          rm -rf build
 
       - name: Build BoringSSL
         run: |
