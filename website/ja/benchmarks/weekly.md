@@ -71,7 +71,7 @@ const filteredUdpRows = computed(() => {
 <div v-if="failoverRows.length === 0">データなし。</div>
 <table v-else>
   <thead>
-    <tr><th>コミット</th><th>日付</th><th>WLB TTR</th><th>MinRTT TTR</th><th>WLB 障害前</th><th>WLB 復旧後</th><th>MinRTT 障害前</th><th>MinRTT 復旧後</th></tr>
+    <tr><th>コミット</th><th>日付</th><th>WLB TTR</th><th>MinRTT TTR</th><th>WLB 障害前 (A+B)</th><th>WLB 復旧後 (A+B)</th><th>MinRTT 障害前 (A+B)</th><th>MinRTT 復旧後 (A+B)</th></tr>
   </thead>
   <tbody>
     <tr v-for="(r, i) in failoverRows" :key="'fo-' + i">

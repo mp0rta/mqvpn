@@ -66,10 +66,10 @@ const filteredAggregateRows = computed(() => {
       <th>日付</th>
       <th>WLB TTR</th>
       <th>MinRTT TTR</th>
-      <th>WLB 障害前</th>
-      <th>WLB 復旧後</th>
-      <th>MinRTT 障害前</th>
-      <th>MinRTT 復旧後</th>
+      <th>WLB 障害前 (A+B)</th>
+      <th>WLB 復旧後 (A+B)</th>
+      <th>MinRTT 障害前 (A+B)</th>
+      <th>MinRTT 復旧後 (A+B)</th>
     </tr>
   </thead>
   <tbody>

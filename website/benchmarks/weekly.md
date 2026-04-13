@@ -91,10 +91,10 @@ const filteredUdpRows = computed(() => {
       <th>Date</th>
       <th>WLB TTR</th>
       <th>MinRTT TTR</th>
-      <th>WLB Pre-fault</th>
-      <th>WLB Post-recover</th>
-      <th>MinRTT Pre-fault</th>
-      <th>MinRTT Post-recover</th>
+      <th>WLB Pre-fault (A+B)</th>
+      <th>WLB Post-recover (A+B)</th>
+      <th>MinRTT Pre-fault (A+B)</th>
+      <th>MinRTT Post-recover (A+B)</th>
     </tr>
   </thead>
   <tbody>
