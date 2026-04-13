@@ -105,8 +105,10 @@ export function usePerfData(basePath: string, maxEntries = 10) {
         wlb_ttr: fmtNum(w.ttr_sec, 2),
         minrtt_ttr: fmtNum(m.ttr_sec, 2),
         wlb_pre: fmtNum(w.pre_fault_avg_mbps),
+        wlb_degraded: fmtNum(w.degraded_avg_mbps),
         wlb_post: fmtNum(w.post_recover_avg_mbps),
         minrtt_pre: fmtNum(m.pre_fault_avg_mbps),
+        minrtt_degraded: fmtNum(m.degraded_avg_mbps),
         minrtt_post: fmtNum(m.post_recover_avg_mbps),
       })
     }

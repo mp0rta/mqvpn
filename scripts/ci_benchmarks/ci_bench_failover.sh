@@ -26,7 +26,7 @@ source "${SCRIPT_DIR}/ci_bench_env.sh"
 
 MQVPN="${1:-${MQVPN}}"
 
-DURATION=60
+DURATION=75
 INTERVAL=0.5
 FAULT_INJECT_SEC=20
 FAULT_RECOVER_SEC=40
@@ -50,6 +50,7 @@ echo "================================================================"
 # ── Collect results for each scheduler ──
 
 declare -A RESULT_PRE_FAULT
+declare -A RESULT_DEGRADED
 declare -A RESULT_TTR
 declare -A RESULT_POST_RECOVER
 
@@ -132,14 +133,17 @@ for iv in raw.get('intervals', []):
 fault_inject = ${FAULT_INJECT_SEC}
 fault_recover = ${FAULT_RECOVER_SEC}
 
-# Pre-fault average (intervals before fault injection)
+# Pre-fault average (intervals before fault injection, both paths active)
 pre_fault = [iv['mbps'] for iv in intervals if iv['time_sec'] <= fault_inject]
 pre_fault_avg = sum(pre_fault) / len(pre_fault) if pre_fault else 0
 
+# Degraded average (during fault, surviving path only)
+degraded = [iv['mbps'] for iv in intervals
+            if iv['time_sec'] > fault_inject and iv['time_sec'] <= fault_recover]
+degraded_avg = sum(degraded) / len(degraded) if degraded else 0
+
 # TTR (fallback): time from fault injection until throughput stabilizes on
 # the surviving path. Threshold = 50% of Path B capacity (80 Mbps) = 40 Mbps.
-# Using surviving path capacity instead of pre-fault avg because pre-fault
-# includes both paths combined, which the surviving path alone cannot reach.
 surviving_path_mbps = 80  # Path B rate
 threshold = surviving_path_mbps * 0.5
 ttr = None
@@ -148,24 +152,29 @@ for iv in intervals:
         ttr = round(iv['time_sec'] - fault_inject, 2)
         break
 
-# Post-recover average (intervals after fault_recover + 2s settling)
-post_recover = [iv['mbps'] for iv in intervals if iv['time_sec'] > fault_recover + 2]
+# Post-recover average (last 10s of test — path revalidation takes ~10-15s)
+duration = ${DURATION}
+post_recover = [iv['mbps'] for iv in intervals if iv['time_sec'] > duration - 10]
 post_recover_avg = sum(post_recover) / len(post_recover) if post_recover else 0
 
 print(f'{pre_fault_avg:.1f}')
+print(f'{degraded_avg:.1f}')
 print(f'{ttr}')
 print(f'{post_recover_avg:.1f}')
 ")
 
     PRE_FAULT=$(echo "$PARSE_RESULT" | sed -n '1p')
-    TTR=$(echo "$PARSE_RESULT" | sed -n '2p')
-    POST_RECOVER=$(echo "$PARSE_RESULT" | sed -n '3p')
+    DEGRADED=$(echo "$PARSE_RESULT" | sed -n '2p')
+    TTR=$(echo "$PARSE_RESULT" | sed -n '3p')
+    POST_RECOVER=$(echo "$PARSE_RESULT" | sed -n '4p')
 
     echo "  Pre-fault avg:     ${PRE_FAULT} Mbps"
+    echo "  Degraded avg:      ${DEGRADED} Mbps"
     echo "  TTR:               ${TTR} sec"
     echo "  Post-recover avg:  ${POST_RECOVER} Mbps"
 
     RESULT_PRE_FAULT[$SCHED]="$PRE_FAULT"
+    RESULT_DEGRADED[$SCHED]="$DEGRADED"
     RESULT_TTR[$SCHED]="$TTR"
     RESULT_POST_RECOVER[$SCHED]="$POST_RECOVER"
 
@@ -203,11 +212,13 @@ result = {
     'results': {
         'wlb': {
             'pre_fault_avg_mbps': ${RESULT_PRE_FAULT[wlb]},
+            'degraded_avg_mbps': ${RESULT_DEGRADED[wlb]},
             'ttr_sec': ${ttr_wlb},
             'post_recover_avg_mbps': ${RESULT_POST_RECOVER[wlb]}
         },
         'minrtt': {
             'pre_fault_avg_mbps': ${RESULT_PRE_FAULT[minrtt]},
+            'degraded_avg_mbps': ${RESULT_DEGRADED[minrtt]},
             'ttr_sec': ${ttr_minrtt},
             'post_recover_avg_mbps': ${RESULT_POST_RECOVER[minrtt]}
         }
