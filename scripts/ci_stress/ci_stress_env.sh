@@ -180,10 +180,15 @@ ci_stress_start_client() {
     local paths="$1"
     local scheduler="${2:-wlb}"
 
-    # Kill previous client
+    # Kill previous client (capture exit code for sanitizer check)
     if [ -n "$_CS_CLIENT_PID" ] && kill -0 "$_CS_CLIENT_PID" 2>/dev/null; then
         kill "$_CS_CLIENT_PID" 2>/dev/null || true
-        wait "$_CS_CLIENT_PID" 2>/dev/null || true
+        local _exit=0
+        wait "$_CS_CLIENT_PID" 2>/dev/null || _exit=$?
+        if [ "$_exit" -ne 0 ] && [ "$_exit" -ne 143 ]; then
+            _CS_CLIENT_SANITIZER_FAIL=1
+            echo "WARN: previous VPN client (PID $_CS_CLIENT_PID) exited with code $_exit"
+        fi
         _CS_CLIENT_PID=""
         sleep 1
     fi
@@ -227,14 +232,20 @@ ci_stress_wait_tunnel() {
 
 # ── Stop VPN ──
 
-# Exit codes from VPN processes (ASan/UBSan set non-zero on errors)
-_CS_CLIENT_EXIT=0
-_CS_SERVER_EXIT=0
+# Sanitizer failure flags (set to 1 if any VPN process exits with ASan/UBSan error)
+_CS_CLIENT_SANITIZER_FAIL=0
+_CS_SERVER_SANITIZER_FAIL=0
 
 ci_stress_stop_client() {
     if [ -n "$_CS_CLIENT_PID" ] && kill -0 "$_CS_CLIENT_PID" 2>/dev/null; then
         kill "$_CS_CLIENT_PID" 2>/dev/null || true
-        wait "$_CS_CLIENT_PID" 2>/dev/null; _CS_CLIENT_EXIT=$?
+        local _exit=0
+        wait "$_CS_CLIENT_PID" 2>/dev/null || _exit=$?
+        # exit 143 = SIGTERM (normal kill), anything else is ASan/UBSan
+        if [ "$_exit" -ne 0 ] && [ "$_exit" -ne 143 ]; then
+            _CS_CLIENT_SANITIZER_FAIL=1
+            echo "WARN: VPN client (PID $_CS_CLIENT_PID) exited with code $_exit"
+        fi
         _CS_CLIENT_PID=""
         sleep 1
     fi
@@ -244,23 +255,31 @@ ci_stress_stop_vpn() {
     ci_stress_stop_client
     if [ -n "$_CS_SERVER_PID" ] && kill -0 "$_CS_SERVER_PID" 2>/dev/null; then
         kill "$_CS_SERVER_PID" 2>/dev/null || true
-        wait "$_CS_SERVER_PID" 2>/dev/null; _CS_SERVER_EXIT=$?
+        local _exit=0
+        wait "$_CS_SERVER_PID" 2>/dev/null || _exit=$?
+        if [ "$_exit" -ne 0 ] && [ "$_exit" -ne 143 ]; then
+            _CS_SERVER_SANITIZER_FAIL=1
+            echo "WARN: VPN server (PID $_CS_SERVER_PID) exited with code $_exit"
+        fi
         _CS_SERVER_PID=""
         sleep 1
     fi
 }
 
-# Check if ASan/UBSan reported errors (non-zero exit from VPN processes).
+# Check if ASan/UBSan reported errors (accumulated across all stop_client/stop_vpn calls).
 # Call after ci_stress_stop_vpn.
 ci_stress_check_sanitizer() {
     local failed=0
-    if [ "$_CS_SERVER_EXIT" -ne 0 ] && [ "$_CS_SERVER_EXIT" -ne 143 ]; then
-        echo "  FAIL: VPN server exited with code $_CS_SERVER_EXIT (ASan/UBSan error)"
+    if [ "$_CS_SERVER_SANITIZER_FAIL" -ne 0 ]; then
+        echo "  FAIL: VPN server reported ASan/UBSan error"
         failed=1
     fi
-    if [ "$_CS_CLIENT_EXIT" -ne 0 ] && [ "$_CS_CLIENT_EXIT" -ne 143 ]; then
-        echo "  FAIL: VPN client exited with code $_CS_CLIENT_EXIT (ASan/UBSan error)"
+    if [ "$_CS_CLIENT_SANITIZER_FAIL" -ne 0 ]; then
+        echo "  FAIL: VPN client reported ASan/UBSan error"
         failed=1
+    fi
+    if [ "$failed" -eq 0 ]; then
+        echo "  OK: no sanitizer errors"
     fi
     return $failed
 }

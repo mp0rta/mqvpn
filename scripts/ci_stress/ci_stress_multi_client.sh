@@ -316,7 +316,7 @@ CLIENT_SANITIZER_FAIL=0
 for i in $(seq 1 "$NUM_CLIENTS"); do
     pid="${CLIENT_PIDS[$((i - 1))]}"
     exit_code=0
-    wait "$pid" 2>/dev/null; exit_code=$?
+    wait "$pid" 2>/dev/null || exit_code=$?
     # exit 143 = SIGTERM (normal kill)
     if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 143 ]; then
         echo "  WARN: client $i (PID $pid) exited with code $exit_code"
@@ -334,7 +334,7 @@ echo "Stopping VPN server..."
 SERVER_EXIT=0
 if kill -0 "$SERVER_PID" 2>/dev/null; then
     kill "$SERVER_PID" 2>/dev/null || true
-    wait "$SERVER_PID" 2>/dev/null; SERVER_EXIT=$?
+    wait "$SERVER_PID" 2>/dev/null || SERVER_EXIT=$?
 fi
 echo "OK: server stopped (exit=$SERVER_EXIT)"
 
