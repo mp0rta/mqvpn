@@ -1,0 +1,35 @@
+{
+  "test": "failover",
+  "commit": "df0bf4cc3c131d8a993639412d74386a2090b10b",
+  "timestamp": "2026-04-13T12:53:11+00:00",
+  "netem": {
+    "path_a": {
+      "one_way_delay_ms": 10,
+      "rtt_ms": 20,
+      "rate_mbit": 300
+    },
+    "path_b": {
+      "one_way_delay_ms": 30,
+      "rtt_ms": 60,
+      "rate_mbit": 80
+    }
+  },
+  "results": {
+    "wlb": {
+      "pre_fault_avg_mbps": 266.3,
+      "degraded_avg_mbps": 70.7,
+      "ttf_sec": 0.5,
+      "ttr_sec": null,
+      "post_recover_avg_mbps": 72.2
+    },
+    "minrtt": {
+      "pre_fault_avg_mbps": 264.7,
+      "degraded_avg_mbps": 70.0,
+      "ttf_sec": 0.5,
+      "ttr_sec": null,
+      "post_recover_avg_mbps": 69.0
+    }
+  },
+  "ttf_definition": "seconds from fault injection until throughput reaches 50% of surviving path capacity (fallback detection)",
+  "ttr_definition": "seconds from fault recovery until throughput reaches 80% of pre-fault average (full recovery)"
+}
