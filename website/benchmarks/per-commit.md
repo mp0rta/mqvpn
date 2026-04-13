@@ -8,8 +8,8 @@ import { usePerfData } from '../.vitepress/theme/composables/usePerfData'
 
 const { loading, error, rawRows, failoverRows, aggregateRows } = usePerfData('/perf-data')
 
-const schedFilter = ref('')
-const streamsFilter = ref('')
+const schedFilter = ref('wlb')
+const streamsFilter = ref('64')
 
 const filteredAggregateRows = computed(() => {
   return aggregateRows.value.filter(r => {
@@ -28,7 +28,7 @@ const filteredAggregateRows = computed(() => {
 <div v-else-if="error" style="color: red;">Error: {{ error }}</div>
 <template v-else>
 
-## VPN Throughput (Mbps, no emulation)
+## VPN Throughput (no emulation, netns)
 
 <p class="section-desc">Measures mqvpn throughput over veth pairs without bandwidth/delay emulation.</p>
 
@@ -39,9 +39,9 @@ const filteredAggregateRows = computed(() => {
       <th>Commit</th>
       <th>Date</th>
       <th>Dir</th>
-      <th>Single-path</th>
-      <th>Multipath (MinRTT)</th>
-      <th>Multipath (WLB)</th>
+      <th>Single-path (Mbps)</th>
+      <th>Multipath MinRTT (Mbps)</th>
+      <th>Multipath WLB (Mbps)</th>
     </tr>
   </thead>
   <tbody>

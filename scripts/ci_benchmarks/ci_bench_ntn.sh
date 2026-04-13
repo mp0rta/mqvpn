@@ -86,6 +86,7 @@ echo "================================================================"
 
 # ── Per-scenario results ──
 
+declare -A RESULT_SINGLE
 declare -A RESULT_WLB
 declare -A RESULT_MINRTT
 
@@ -102,15 +103,46 @@ for ((i = 0; i < NUM_SCENARIOS; i++)); do
     echo "  Path B: ${netem_b}"
     echo "──────────────────────────────────────────────────────────────"
 
+    # Single-path baseline (Path A only)
+    echo ""
+    echo "  => Single-path (Path A)"
+
+    ci_bench_setup_netns
+    ci_bench_apply_netem "${netem_a}" "${netem_b}"
+
+    if ! ci_bench_start_server "wlb"; then
+        echo "    SKIP: VPN server failed for single"
+        RESULT_SINGLE[$name]="0.0"
+        ci_bench_stop_vpn
+        ci_bench_cleanup_stale
+    elif ! ci_bench_start_client "--path $VETH_A0" "wlb"; then
+        echo "    SKIP: VPN client failed for single"
+        RESULT_SINGLE[$name]="0.0"
+        ci_bench_stop_vpn
+        ci_bench_cleanup_stale
+    elif ! ci_bench_wait_tunnel "$TUNNEL_TIMEOUT"; then
+        echo "    SKIP: tunnel not established for single"
+        RESULT_SINGLE[$name]="0.0"
+        ci_bench_stop_vpn
+        ci_bench_cleanup_stale
+    else
+        iperf_json=$(ci_bench_run_iperf TCP DL "$DURATION" "$PARALLEL")
+        mbps=$(ci_bench_parse_throughput "$iperf_json")
+        rm -f "$iperf_json"
+        echo "    Throughput: ${mbps} Mbps"
+        RESULT_SINGLE[$name]="$mbps"
+        ci_bench_stop_vpn
+        ci_bench_cleanup_stale
+    fi
+
+    # Multipath (WLB + MinRTT)
     for sched in wlb minrtt; do
         echo ""
         echo "  => Scheduler: ${sched}"
 
-        # Full setup for each scenario+scheduler
         ci_bench_setup_netns
         ci_bench_apply_netem "${netem_a}" "${netem_b}"
 
-        # Start VPN
         if ! ci_bench_start_server "$sched"; then
             echo "    SKIP: VPN server failed for ${sched}"
             [ "$sched" = "wlb" ] && RESULT_WLB[$name]="0.0"
@@ -138,7 +170,6 @@ for ((i = 0; i < NUM_SCENARIOS; i++)); do
             continue
         fi
 
-        # Run iperf3 TCP DL
         iperf_json=$(ci_bench_run_iperf TCP DL "$DURATION" "$PARALLEL")
         mbps=$(ci_bench_parse_throughput "$iperf_json")
         rm -f "$iperf_json"
@@ -151,10 +182,7 @@ for ((i = 0; i < NUM_SCENARIOS; i++)); do
             RESULT_MINRTT[$name]="$mbps"
         fi
 
-        # Stop VPN between schedulers
         ci_bench_stop_vpn
-
-        # Full cleanup between runs
         ci_bench_cleanup_stale
     done
 done
@@ -178,6 +206,13 @@ scenario_descs = $(printf '%s\n' "${SCENARIO_DESCS[@]}" | python3 -c "import sys
 scenario_netem_a = $(printf '%s\n' "${SCENARIO_NETEM_A[@]}" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
 scenario_netem_b = $(printf '%s\n' "${SCENARIO_NETEM_B[@]}" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
 
+single_results = {
+$(for ((i = 0; i < NUM_SCENARIOS; i++)); do
+    name="${SCENARIO_NAMES[$i]}"
+    echo "    \"${name}\": ${RESULT_SINGLE[$name]:-0.0},"
+done)
+}
+
 wlb_results = {
 $(for ((i = 0; i < NUM_SCENARIOS; i++)); do
     name="${SCENARIO_NAMES[$i]}"
@@ -199,6 +234,7 @@ for i in range(len(scenario_names)):
         "description": scenario_descs[i],
         "netem_a": scenario_netem_a[i],
         "netem_b": scenario_netem_b[i],
+        "single_mbps": single_results.get(name, 0.0),
         "wlb_mbps": wlb_results.get(name, 0.0),
         "minrtt_mbps": minrtt_results.get(name, 0.0),
     })
@@ -227,14 +263,14 @@ echo "================================================================"
 echo "  NTN Benchmark Results"
 echo "================================================================"
 echo ""
-printf "  %-22s | %10s | %10s\n" "Scenario" "WLB (Mbps)" "MinRTT (Mbps)"
-echo "  ───────────────────────┼────────────┼──────────────"
+printf "  %-22s | %12s | %10s | %10s\n" "Scenario" "Single (Mbps)" "WLB (Mbps)" "MinRTT (Mbps)"
+echo "  ───────────────────────┼──────────────┼────────────┼──────────────"
 for ((i = 0; i < NUM_SCENARIOS; i++)); do
     name="${SCENARIO_NAMES[$i]}"
-    printf "  %-22s | %10s | %10s\n" \
-        "$name" "${RESULT_WLB[$name]:-N/A}" "${RESULT_MINRTT[$name]:-N/A}"
+    printf "  %-22s | %12s | %10s | %10s\n" \
+        "$name" "${RESULT_SINGLE[$name]:-N/A}" "${RESULT_WLB[$name]:-N/A}" "${RESULT_MINRTT[$name]:-N/A}"
 done
-echo "  ───────────────────────┴────────────┴──────────────"
+echo "  ───────────────────────┴──────────────┴────────────┴──────────────"
 
 echo ""
 echo "Result: ${OUTPUT_FILE}"

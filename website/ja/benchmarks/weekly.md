@@ -12,8 +12,8 @@ const {
   multipathSchedulerRows, flowScalingRows, udpSchedulerRows, ntnRows
 } = usePerfData('/perf-data/weekly')
 
-const aggSchedFilter = ref('')
-const aggStreamsFilter = ref('')
+const aggSchedFilter = ref('wlb')
+const aggStreamsFilter = ref('64')
 const filteredAggregateRows = computed(() => {
   return aggregateRows.value.filter(r => {
     if (aggSchedFilter.value && r.scheduler !== aggSchedFilter.value) return false
@@ -52,12 +52,12 @@ const filteredUdpRows = computed(() => {
 </div>
 <template v-else>
 
-## VPN スループット（Mbps、エミュレーションなし）
+## VPN スループット（エミュレーションなし、netns）
 
 <div v-if="rawRows.length === 0">データなし。</div>
 <table v-else>
   <thead>
-    <tr><th>コミット</th><th>日付</th><th>方向</th><th>シングルパス</th><th>マルチパス (MinRTT)</th><th>マルチパス (WLB)</th></tr>
+    <tr><th>コミット</th><th>日付</th><th>方向</th><th>シングルパス (Mbps)</th><th>マルチパス MinRTT (Mbps)</th><th>マルチパス WLB (Mbps)</th></tr>
   </thead>
   <tbody>
     <tr v-for="(r, i) in rawRows" :key="'raw-' + i">
@@ -100,16 +100,30 @@ const filteredUdpRows = computed(() => {
 
 ## マルチパススケジューラシナリオ
 
-<p class="section-desc">遅延・帯域・損失の異なる 8 つのネットワークシナリオで WLB と MinRTT スケジューラを比較。</p>
+<p class="section-desc">遅延・帯域・損失の異なる 8 つのネットワークシナリオで WLB と MinRTT スケジューラを比較。RTT = 片方向遅延 x 2。</p>
+
+<details class="scenario-details">
+<summary>シナリオ条件</summary>
+
+- **equal_paths** — A: 50Mbps/10ms, B: 50Mbps/10ms
+- **asymmetric_bandwidth** — A: 100Mbps/5ms, B: 50Mbps/20ms
+- **high_jitter** — A: 50Mbps/10ms±5ms, B: 50Mbps/10ms±5ms
+- **asymmetric_jitter** — A: 50Mbps/10ms（安定）, B: 50Mbps/10ms±8ms
+- **lossy_path** — A: 50Mbps/10ms, B: 50Mbps/10ms/1% ロス
+- **realistic_mixed** — A: 100Mbps/5ms, B: 50Mbps/20ms±5ms/0.5% ロス
+- **mobile_dual_lte** — A: 50Mbps/30ms±10ms/0.5% ロス, B: 30Mbps/50ms±15ms/1% ロス
+- **mobile_wifi_lte** — A: 80Mbps/5ms±2ms, B: 30Mbps/40ms±12ms/0.5% ロス
+
+</details>
 
 <div v-if="multipathSchedulerRows.length === 0">データなし。</div>
 <table v-else>
   <thead>
-    <tr><th>コミット</th><th>日付</th><th>シナリオ</th><th>WLB (Mbps)</th><th>MinRTT (Mbps)</th></tr>
+    <tr><th>コミット</th><th>日付</th><th>シナリオ</th><th>シングル (Mbps)</th><th>WLB (Mbps)</th><th>MinRTT (Mbps)</th></tr>
   </thead>
   <tbody>
     <tr v-for="(r, i) in multipathSchedulerRows" :key="'ms-' + i">
-      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.scenario }}</td><td>{{ r.wlb }}</td><td>{{ r.minrtt }}</td>
+      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.scenario }}</td><td>{{ r.single }}</td><td>{{ r.wlb }}</td><td>{{ r.minrtt }}</td>
     </tr>
   </tbody>
 </table>
@@ -155,16 +169,27 @@ const filteredUdpRows = computed(() => {
 
 ## NTN 衛星
 
-<p class="section-desc">3GPP NTN 仕様と Starlink 実測データに基づく衛星リンクプロファイルでのマルチパス性能テスト。</p>
+<p class="section-desc">3GPP NTN 仕様と Starlink 実測データに基づく衛星リンクプロファイルでのマルチパス性能テスト。RTT = 片方向遅延 x 2。</p>
+
+<details class="scenario-details">
+<summary>シナリオ条件</summary>
+
+- **lte_leo_starlink** — A: LTE 50Mbps/15ms±3ms/0.2% ロス, B: LEO 100Mbps/25ms±8ms/0.5% ロス
+- **lte_leo_high_orbit** — A: LTE 50Mbps/15ms±3ms/0.2% ロス, B: LEO 80Mbps/40ms±12ms/0.8% ロス
+- **lte_geo** — A: LTE 50Mbps/15ms±3ms/0.2% ロス, B: GEO 20Mbps/300ms±5ms/0.2% ロス
+- **wifi_leo** — A: WiFi 80Mbps/3ms±1ms, B: LEO 100Mbps/25ms±8ms/0.5% ロス
+- **dual_leo** — A: LEO 100Mbps/25ms±8ms/0.5% ロス, B: LEO 80Mbps/35ms±10ms/0.8% ロス
+
+</details>
 
 <div v-if="ntnRows.length === 0">データなし。</div>
 <table v-else>
   <thead>
-    <tr><th>コミット</th><th>日付</th><th>シナリオ</th><th>WLB (Mbps)</th><th>MinRTT (Mbps)</th></tr>
+    <tr><th>コミット</th><th>日付</th><th>シナリオ</th><th>シングル (Mbps)</th><th>WLB (Mbps)</th><th>MinRTT (Mbps)</th></tr>
   </thead>
   <tbody>
     <tr v-for="(r, i) in ntnRows" :key="'ntn-' + i">
-      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.scenario }}</td><td>{{ r.wlb }}</td><td>{{ r.minrtt }}</td>
+      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.scenario }}</td><td>{{ r.single }}</td><td>{{ r.wlb }}</td><td>{{ r.minrtt }}</td>
     </tr>
   </tbody>
 </table>

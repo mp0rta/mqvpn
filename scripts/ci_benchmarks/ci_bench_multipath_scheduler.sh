@@ -110,9 +110,42 @@ for scenario in "${SCENARIO_NAMES[@]}"; do
     ci_bench_setup_netns
     ci_bench_apply_netem "$netem_a" "$netem_b"
 
+    # Single-path baseline (Path A only)
+    echo ""
+    echo "    [single] Starting VPN..."
+
+    if ! ci_bench_start_server "wlb"; then
+        echo "    SKIP: server failed for single"
+        RESULT_MBPS["${scenario}_single"]="0.0"
+        ci_bench_stop_vpn
+        ci_bench_cleanup_stale
+    elif ! ci_bench_start_client "--path $VETH_A0" "wlb"; then
+        echo "    SKIP: client failed for single"
+        RESULT_MBPS["${scenario}_single"]="0.0"
+        ci_bench_stop_vpn
+        ci_bench_cleanup_stale
+    elif ! ci_bench_wait_tunnel; then
+        echo "    SKIP: tunnel failed for single"
+        RESULT_MBPS["${scenario}_single"]="0.0"
+        ci_bench_stop_vpn
+        ci_bench_cleanup_stale
+    else
+        iperf_json=$(ci_bench_run_iperf TCP DL "$DURATION" "$PARALLEL")
+        mbps=$(ci_bench_parse_throughput "$iperf_json")
+        rm -f "$iperf_json"
+        RESULT_MBPS["${scenario}_single"]="$mbps"
+        echo "    [single] ${mbps} Mbps"
+        ci_bench_stop_vpn
+        ci_bench_cleanup_stale
+    fi
+
+    # Multipath (WLB + MinRTT)
     for sched in wlb minrtt; do
         echo ""
         echo "    [${sched}] Starting VPN..."
+
+        ci_bench_setup_netns
+        ci_bench_apply_netem "$netem_a" "$netem_b"
 
         if ! ci_bench_start_server "$sched"; then
             echo "    SKIP: server failed for ${sched}"
@@ -161,6 +194,7 @@ mkdir -p "$CI_BENCH_RESULTS"
 # Build scenario JSON fragments
 SCENARIOS_JSON=""
 for scenario in "${SCENARIO_NAMES[@]}"; do
+    single_val="${RESULT_MBPS[${scenario}_single]:-0.0}"
     wlb_val="${RESULT_MBPS[${scenario}_wlb]:-0.0}"
     minrtt_val="${RESULT_MBPS[${scenario}_minrtt]:-0.0}"
     netem_a="${NETEM_A[$scenario]}"
@@ -169,7 +203,7 @@ for scenario in "${SCENARIO_NAMES[@]}"; do
     if [ -n "$SCENARIOS_JSON" ]; then
         SCENARIOS_JSON="${SCENARIOS_JSON},"
     fi
-    SCENARIOS_JSON="${SCENARIOS_JSON}{\"name\":\"${scenario}\",\"netem_a\":\"${netem_a}\",\"netem_b\":\"${netem_b}\",\"wlb_mbps\":${wlb_val},\"minrtt_mbps\":${minrtt_val}}"
+    SCENARIOS_JSON="${SCENARIOS_JSON}{\"name\":\"${scenario}\",\"netem_a\":\"${netem_a}\",\"netem_b\":\"${netem_b}\",\"single_mbps\":${single_val},\"wlb_mbps\":${wlb_val},\"minrtt_mbps\":${minrtt_val}}"
 done
 
 python3 <<PYEOF
@@ -189,6 +223,7 @@ for s in raw:
         "name": s["name"],
         "netem_a": s["netem_a"],
         "netem_b": s["netem_b"],
+        "single_mbps": s["single_mbps"],
         "wlb_mbps": s["wlb_mbps"],
         "minrtt_mbps": s["minrtt_mbps"]
     })

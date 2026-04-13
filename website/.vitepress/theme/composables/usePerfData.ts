@@ -149,6 +149,7 @@ export function usePerfData(basePath: string, maxEntries = 10) {
           scenario: s.name,
           netem_a: s.netem_a,
           netem_b: s.netem_b,
+          single: fmtNum(s.single_mbps),
           wlb: fmtNum(s.wlb_mbps),
           minrtt: fmtNum(s.minrtt_mbps),
         })
@@ -209,6 +210,7 @@ export function usePerfData(basePath: string, maxEntries = 10) {
           commit: fmtCommit(item.commit),
           date: fmtDate(item.timestamp),
           scenario: s.name || s.description,
+          single: fmtNum(s.single_mbps),
           wlb: fmtNum(s.wlb_mbps),
           minrtt: fmtNum(s.minrtt_mbps),
         })

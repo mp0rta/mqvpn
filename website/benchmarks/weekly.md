@@ -13,8 +13,8 @@ const {
 } = usePerfData('/perf-data/weekly')
 
 // Aggregation filters
-const aggSchedFilter = ref('')
-const aggStreamsFilter = ref('')
+const aggSchedFilter = ref('wlb')
+const aggStreamsFilter = ref('64')
 const filteredAggregateRows = computed(() => {
   return aggregateRows.value.filter(r => {
     if (aggSchedFilter.value && r.scheduler !== aggSchedFilter.value) return false
@@ -55,7 +55,7 @@ const filteredUdpRows = computed(() => {
 </div>
 <template v-else>
 
-## VPN Throughput (Mbps, no emulation)
+## VPN Throughput (no emulation, netns)
 
 <div v-if="rawRows.length === 0">No data.</div>
 <table v-else>
@@ -64,9 +64,9 @@ const filteredUdpRows = computed(() => {
       <th>Commit</th>
       <th>Date</th>
       <th>Dir</th>
-      <th>Single-path</th>
-      <th>Multipath (MinRTT)</th>
-      <th>Multipath (WLB)</th>
+      <th>Single-path (Mbps)</th>
+      <th>Multipath MinRTT (Mbps)</th>
+      <th>Multipath WLB (Mbps)</th>
     </tr>
   </thead>
   <tbody>
@@ -131,7 +131,21 @@ const filteredUdpRows = computed(() => {
 
 ## Multipath Scheduler Scenarios
 
-<p class="section-desc">Compares WLB and MinRTT schedulers across 8 network scenarios with different delay/bandwidth/loss profiles.</p>
+<p class="section-desc">Compares WLB and MinRTT schedulers across 8 network scenarios with different delay/bandwidth/loss profiles. RTT = 2x one-way delay.</p>
+
+<details class="scenario-details">
+<summary>Scenario conditions</summary>
+
+- **equal_paths** — A: 50Mbps/10ms, B: 50Mbps/10ms
+- **asymmetric_bandwidth** — A: 100Mbps/5ms, B: 50Mbps/20ms
+- **high_jitter** — A: 50Mbps/10ms±5ms, B: 50Mbps/10ms±5ms
+- **asymmetric_jitter** — A: 50Mbps/10ms (stable), B: 50Mbps/10ms±8ms
+- **lossy_path** — A: 50Mbps/10ms, B: 50Mbps/10ms/1% loss
+- **realistic_mixed** — A: 100Mbps/5ms, B: 50Mbps/20ms±5ms/0.5% loss
+- **mobile_dual_lte** — A: 50Mbps/30ms±10ms/0.5% loss, B: 30Mbps/50ms±15ms/1% loss
+- **mobile_wifi_lte** — A: 80Mbps/5ms±2ms, B: 30Mbps/40ms±12ms/0.5% loss
+
+</details>
 
 <div v-if="multipathSchedulerRows.length === 0">No data.</div>
 <table v-else>
@@ -140,6 +154,7 @@ const filteredUdpRows = computed(() => {
       <th>Commit</th>
       <th>Date</th>
       <th>Scenario</th>
+      <th>Single (Mbps)</th>
       <th>WLB (Mbps)</th>
       <th>MinRTT (Mbps)</th>
     </tr>
@@ -149,6 +164,7 @@ const filteredUdpRows = computed(() => {
       <td><code>{{ r.commit }}</code></td>
       <td>{{ r.date }}</td>
       <td>{{ r.scenario }}</td>
+      <td>{{ r.single }}</td>
       <td>{{ r.wlb }}</td>
       <td>{{ r.minrtt }}</td>
     </tr>
@@ -196,7 +212,18 @@ const filteredUdpRows = computed(() => {
 
 ## NTN Satellite
 
-<p class="section-desc">Tests multipath performance over Non-Terrestrial Network (satellite) link profiles based on 3GPP NTN specs and real-world Starlink measurements.</p>
+<p class="section-desc">Tests multipath performance over Non-Terrestrial Network (satellite) link profiles based on 3GPP NTN specs and real-world Starlink measurements. RTT = 2x one-way delay.</p>
+
+<details class="scenario-details">
+<summary>Scenario conditions</summary>
+
+- **lte_leo_starlink** — A: LTE 50Mbps/15ms±3ms/0.2% loss, B: LEO 100Mbps/25ms±8ms/0.5% loss
+- **lte_leo_high_orbit** — A: LTE 50Mbps/15ms±3ms/0.2% loss, B: LEO 80Mbps/40ms±12ms/0.8% loss
+- **lte_geo** — A: LTE 50Mbps/15ms±3ms/0.2% loss, B: GEO 20Mbps/300ms±5ms/0.2% loss
+- **wifi_leo** — A: WiFi 80Mbps/3ms±1ms, B: LEO 100Mbps/25ms±8ms/0.5% loss
+- **dual_leo** — A: LEO 100Mbps/25ms±8ms/0.5% loss, B: LEO 80Mbps/35ms±10ms/0.8% loss
+
+</details>
 
 <div v-if="ntnRows.length === 0">No data.</div>
 <table v-else>
@@ -205,6 +232,7 @@ const filteredUdpRows = computed(() => {
       <th>Commit</th>
       <th>Date</th>
       <th>Scenario</th>
+      <th>Single (Mbps)</th>
       <th>WLB (Mbps)</th>
       <th>MinRTT (Mbps)</th>
     </tr>
@@ -214,6 +242,7 @@ const filteredUdpRows = computed(() => {
       <td><code>{{ r.commit }}</code></td>
       <td>{{ r.date }}</td>
       <td>{{ r.scenario }}</td>
+      <td>{{ r.single }}</td>
       <td>{{ r.wlb }}</td>
       <td>{{ r.minrtt }}</td>
     </tr>
