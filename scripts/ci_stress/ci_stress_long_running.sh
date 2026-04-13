@@ -84,6 +84,8 @@ echo "Monitoring VPN client (PID $_CS_CLIENT_PID) -> $CLIENT_MON_LOG"
 
 echo "Waiting for iperf3 to complete (${DURATION}s)..."
 wait "$IPERF_CLIENT_PID" || true
+# Kill iperf3 server (it waits for next connection without -1)
+kill "$IPERF_SERVER_PID" 2>/dev/null || true
 wait "$IPERF_SERVER_PID" 2>/dev/null || true
 
 # ── Stop monitors and check resources ──
