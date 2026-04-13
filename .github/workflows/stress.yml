@@ -77,10 +77,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: stress-build
-          path: build
       - name: Restore shared libs
         run: |
-          sudo cp build/third_party/xquic/build/libxquic.so* /usr/local/lib/ 2>/dev/null || true
+          sudo cp third_party/xquic/build/libxquic.so* /usr/local/lib/ 2>/dev/null || true
           sudo ldconfig
       - name: Make executable
         run: chmod +x build/mqvpn
@@ -108,10 +107,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: stress-build
-          path: build
       - name: Restore shared libs
         run: |
-          sudo cp build/third_party/xquic/build/libxquic.so* /usr/local/lib/ 2>/dev/null || true
+          sudo cp third_party/xquic/build/libxquic.so* /usr/local/lib/ 2>/dev/null || true
           sudo ldconfig
       - name: Make executable
         run: chmod +x build/mqvpn
@@ -139,10 +137,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: stress-build
-          path: build
       - name: Restore shared libs
         run: |
-          sudo cp build/third_party/xquic/build/libxquic.so* /usr/local/lib/ 2>/dev/null || true
+          sudo cp third_party/xquic/build/libxquic.so* /usr/local/lib/ 2>/dev/null || true
           sudo ldconfig
       - name: Make executable
         run: chmod +x build/mqvpn
@@ -170,10 +167,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: stress-build
-          path: build
       - name: Restore shared libs
         run: |
-          sudo cp build/third_party/xquic/build/libxquic.so* /usr/local/lib/ 2>/dev/null || true
+          sudo cp third_party/xquic/build/libxquic.so* /usr/local/lib/ 2>/dev/null || true
           sudo ldconfig
       - name: Make executable
         run: chmod +x build/mqvpn
