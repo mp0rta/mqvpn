@@ -1,16 +1,17 @@
 #!/bin/bash
 # ci_stress_failover.sh — 100-cycle path fault/recover stress test
 #
-# Runs 100 fault/recover cycles on Path A while continuous iperf3 traffic flows
-# over the VPN tunnel. Each cycle: bring Path A down (2s), bring it back up (3s),
-# verify tunnel is still functional. Monitors RSS/fd for both VPN processes to
-# detect resource leaks during repeated failover events.
+# Runs 100 fault/recover cycles alternating Path A and Path B while continuous
+# iperf3 traffic flows over the VPN tunnel. Odd cycles fault Path A (surviving
+# path = B, 80Mbps), even cycles fault Path B (surviving path = A, 300Mbps).
+# Each cycle: bring path down (2s), bring it back up (3s), verify tunnel alive.
+# Monitors RSS/fd for both VPN processes to detect resource leaks.
 #
 # Flow:
 #   1. Setup dual-path netns with netem (Path A = 300Mbps/10ms, Path B = 80Mbps/30ms)
 #   2. Start VPN server (wlb) + multipath client
 #   3. Start long-running iperf3 transfer (-t 3600)
-#   4. Loop 100 times: fault Path A -> wait -> recover Path A -> verify tunnel
+#   4. Loop 100 times: alternate fault Path A / Path B -> wait -> recover -> verify
 #   5. Check for resource leaks after all cycles complete
 #   6. Output summary JSON to ci_stress_results/failover_storm_<timestamp>.json
 #
@@ -87,37 +88,54 @@ echo ""
 echo "Starting $NUM_CYCLES fault/recover cycles..."
 
 for ((i = 1; i <= NUM_CYCLES; i++)); do
+    # Alternate: odd cycles fault Path A, even cycles fault Path B
+    if (( i % 2 == 1 )); then
+        FAULT_VETH_C="$VETH_A0"
+        FAULT_VETH_S="$VETH_A1"
+        FAULT_IP_C="$IP_A_CLIENT"
+        FAULT_IP_S="$IP_A_SERVER"
+        FAULT_NETEM="$NETEM_A"
+        FAULT_LABEL="A"
+    else
+        FAULT_VETH_C="$VETH_B0"
+        FAULT_VETH_S="$VETH_B1"
+        FAULT_IP_C="$IP_B_CLIENT"
+        FAULT_IP_S="$IP_B_SERVER"
+        FAULT_NETEM="$NETEM_B"
+        FAULT_LABEL="B"
+    fi
+
     # (a) Let traffic flow
     sleep 3
 
-    # (b) FAULT: bring down Path A on both ends
-    ip netns exec "$NS_CLIENT" ip link set "$VETH_A0" down
-    ip netns exec "$NS_SERVER" ip link set "$VETH_A1" down
+    # (b) FAULT: bring down the selected path on both ends
+    ip netns exec "$NS_CLIENT" ip link set "$FAULT_VETH_C" down
+    ip netns exec "$NS_SERVER" ip link set "$FAULT_VETH_S" down
 
-    # (c) Traffic on Path B only
+    # (c) Traffic on surviving path only
     sleep 2
 
-    # (d) RECOVER: bring up Path A, re-add IPs (lost when link went down), re-apply netem
-    ip netns exec "$NS_CLIENT" ip link set "$VETH_A0" up
-    ip netns exec "$NS_SERVER" ip link set "$VETH_A1" up
-    ip netns exec "$NS_CLIENT" ip addr add "$IP_A_CLIENT" dev "$VETH_A0" 2>/dev/null || true
-    ip netns exec "$NS_SERVER" ip addr add "$IP_A_SERVER" dev "$VETH_A1" 2>/dev/null || true
-    ip netns exec "$NS_CLIENT" tc qdisc add dev "$VETH_A0" root netem delay 10ms rate 300mbit 2>/dev/null || true
-    ip netns exec "$NS_SERVER" tc qdisc add dev "$VETH_A1" root netem delay 10ms rate 300mbit 2>/dev/null || true
+    # (d) RECOVER: bring up, re-add IPs (lost when link went down), re-apply netem
+    ip netns exec "$NS_CLIENT" ip link set "$FAULT_VETH_C" up
+    ip netns exec "$NS_SERVER" ip link set "$FAULT_VETH_S" up
+    ip netns exec "$NS_CLIENT" ip addr add "$FAULT_IP_C" dev "$FAULT_VETH_C" 2>/dev/null || true
+    ip netns exec "$NS_SERVER" ip addr add "$FAULT_IP_S" dev "$FAULT_VETH_S" 2>/dev/null || true
+    ip netns exec "$NS_CLIENT" tc qdisc add dev "$FAULT_VETH_C" root netem ${FAULT_NETEM} 2>/dev/null || true
+    ip netns exec "$NS_SERVER" tc qdisc add dev "$FAULT_VETH_S" root netem ${FAULT_NETEM} 2>/dev/null || true
 
-    # (e) Let traffic recover
-    sleep 3
+    # (e) Let traffic recover (10s: QUIC path revalidation takes ~10-15s)
+    sleep 10
 
     # (f) Verify: iperf3 client still alive + tunnel ping
     CYCLE_OK=true
 
     if ! kill -0 "$IPERF_CLIENT_PID" 2>/dev/null; then
-        echo "  [cycle $i] FAIL: iperf3 client died"
+        echo "  [cycle $i Path $FAULT_LABEL] FAIL: iperf3 client died"
         CYCLE_OK=false
     fi
 
     if ! ip netns exec "$NS_CLIENT" ping -c 1 -W 2 "$TUNNEL_SERVER_IP" >/dev/null 2>&1; then
-        echo "  [cycle $i] FAIL: tunnel ping failed"
+        echo "  [cycle $i Path $FAULT_LABEL] FAIL: tunnel ping failed"
         CYCLE_OK=false
     fi
 
