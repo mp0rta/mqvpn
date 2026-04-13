@@ -55,11 +55,20 @@ echo ""
 echo "Starting ${TOTAL_CYCLES}-cycle reconnect loop..."
 echo ""
 
+IP_B_SERVER_ADDR="10.200.0.1"
+
 for i in $(seq 1 "$TOTAL_CYCLES"); do
     cycle_start=$(date +%s%N)
 
-    # Start client with multipath
-    if ! ci_stress_start_client "--path $VETH_A0 --path $VETH_B0" wlb 2>/dev/null; then
+    # Rotate path config: A only, B only, A+B multipath
+    case $((i % 3)) in
+        0) paths="--path $VETH_A0"; server_addr="${IP_A_SERVER_ADDR}" ;;
+        1) paths="--path $VETH_B0"; server_addr="${IP_B_SERVER_ADDR}" ;;
+        2) paths="--path $VETH_A0 --path $VETH_B0"; server_addr="${IP_A_SERVER_ADDR}" ;;
+    esac
+
+    # Start client
+    if ! ci_stress_start_client "$paths" wlb "$server_addr" 2>/dev/null; then
         cycles_failed=$((cycles_failed + 1))
         ci_stress_stop_client
         cycle_end=$(date +%s%N)

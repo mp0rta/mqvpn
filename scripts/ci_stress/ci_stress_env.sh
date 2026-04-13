@@ -179,6 +179,7 @@ ci_stress_start_server() {
 ci_stress_start_client() {
     local paths="$1"
     local scheduler="${2:-wlb}"
+    local server_addr="${3:-$IP_A_SERVER_ADDR}"
 
     # Kill previous client (capture exit code for sanitizer check)
     if [ -n "$_CS_CLIENT_PID" ] && kill -0 "$_CS_CLIENT_PID" 2>/dev/null; then
@@ -195,7 +196,7 @@ ci_stress_start_client() {
 
     ip netns exec "$NS_CLIENT" "$MQVPN" \
         --mode client \
-        --server "${IP_A_SERVER_ADDR}:${VPN_LISTEN_PORT}" \
+        --server "${server_addr}:${VPN_LISTEN_PORT}" \
         ${paths} \
         --auth-key "$_CS_PSK" \
         --scheduler "$scheduler" \
