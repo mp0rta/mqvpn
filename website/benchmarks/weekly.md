@@ -9,7 +9,7 @@ import { usePerfData } from '../.vitepress/theme/composables/usePerfData'
 const {
   loading, error,
   rawRows, failoverRows, aggregateRows,
-  multipathSchedulerRows, flowScalingRows, udpSchedulerRows, ntnRows
+  multipathSchedulerRows, flowScalingRows, udpSweepSummaryRows, udpSweepRows, ntnRows
 } = usePerfData('/perf-data/weekly')
 
 // Failover filter
@@ -44,9 +44,9 @@ const filteredFlowScalingRows = computed(() => {
 })
 
 // UDP scheduler filter
-const udpSchedFilter = ref('')
-const filteredUdpRows = computed(() => {
-  return udpSchedulerRows.value.filter(r => {
+const udpSchedFilter = ref('wlb')
+const filteredUdpSweepRows = computed(() => {
+  return udpSweepRows.value.filter(r => {
     if (udpSchedFilter.value && r.scheduler !== udpSchedFilter.value) return false
     return true
   })
@@ -187,23 +187,38 @@ const filteredUdpRows = computed(() => {
 </table>
 </template>
 
-## UDP Scheduler
+## UDP Rate Sweep
 
-<p class="section-desc">Tests UDP performance across different network scenarios. Measures throughput, jitter, and packet loss.</p>
+<p class="section-desc">Sweeps UDP send rate from 200-380 Mbps to find the saturation point (loss > 5%). Payload: 1100B, DL direction.</p>
 
-<div v-if="udpSchedulerRows.length === 0">No data.</div>
+<div v-if="udpSweepSummaryRows.length === 0">No data.</div>
 <template v-else>
-<div class="filter-bar">
-  <label>Scheduler: <select v-model="udpSchedFilter"><option value="">All</option><option value="wlb">WLB</option><option value="minrtt">MinRTT</option></select></label>
-</div>
+
+**Saturation Points**
+
 <table>
-  <thead><tr><th>Commit</th><th>Date</th><th>Scenario</th><th>Scheduler</th><th>Mbps</th><th>Jitter (ms)</th><th>Loss</th></tr></thead>
+  <thead><tr><th>Commit</th><th>Date</th><th>Single (Mbps)</th><th>WLB (Mbps)</th><th>MinRTT (Mbps)</th></tr></thead>
   <tbody>
-    <tr v-for="(r, i) in filteredUdpRows" :key="'udp-' + i">
-      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.scenario }}</td><td>{{ r.scheduler }}</td><td>{{ r.mbps }}</td><td>{{ r.jitter }}</td><td>{{ r.lost }}</td>
+    <tr v-for="(r, i) in udpSweepSummaryRows" :key="'udps-' + i">
+      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.single_saturation }}</td><td>{{ r.wlb_saturation }}</td><td>{{ r.minrtt_saturation }}</td>
     </tr>
   </tbody>
 </table>
+
+**Sweep Detail**
+
+<div class="filter-bar">
+  <label>Condition: <select v-model="udpSchedFilter"><option value="">All</option><option value="single">Single</option><option value="wlb">WLB</option><option value="minrtt">MinRTT</option></select></label>
+</div>
+<table>
+  <thead><tr><th>Commit</th><th>Rate (Mbps)</th><th>Throughput (Mbps)</th><th>Loss (%)</th><th>Jitter (ms)</th></tr></thead>
+  <tbody>
+    <tr v-for="(r, i) in filteredUdpSweepRows" :key="'udpd-' + i">
+      <td><code>{{ r.commit }}</code></td><td>{{ r.rate }}</td><td>{{ r.throughput }}</td><td>{{ r.loss }}</td><td>{{ r.jitter }}</td>
+    </tr>
+  </tbody>
+</table>
+
 </template>
 
 ## NTN Satellite

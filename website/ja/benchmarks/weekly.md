@@ -9,7 +9,7 @@ import { usePerfData } from '../../.vitepress/theme/composables/usePerfData'
 const {
   loading, error,
   rawRows, failoverRows, aggregateRows,
-  multipathSchedulerRows, flowScalingRows, udpSchedulerRows, ntnRows
+  multipathSchedulerRows, flowScalingRows, udpSweepSummaryRows, udpSweepRows, ntnRows
 } = usePerfData('/perf-data/weekly')
 
 const foSchedFilter = ref('wlb')
@@ -40,9 +40,9 @@ const filteredFlowScalingRows = computed(() => {
   })
 })
 
-const udpSchedFilter = ref('')
-const filteredUdpRows = computed(() => {
-  return udpSchedulerRows.value.filter(r => {
+const udpSchedFilter = ref('wlb')
+const filteredUdpSweepRows = computed(() => {
+  return udpSweepRows.value.filter(r => {
     if (udpSchedFilter.value && r.scheduler !== udpSchedFilter.value) return false
     return true
   })
@@ -159,23 +159,38 @@ const filteredUdpRows = computed(() => {
 </table>
 </template>
 
-## UDP スケジューラ
+## UDP レートスイープ
 
-<p class="section-desc">異なるネットワークシナリオでの UDP パフォーマンス。スループット、ジッタ、パケットロスを計測。</p>
+<p class="section-desc">UDP 送信レートを 200〜380 Mbps でスイープし、飽和点（ロス > 5%）を特定。ペイロード: 1100B、DL 方向。</p>
 
-<div v-if="udpSchedulerRows.length === 0">データなし。</div>
+<div v-if="udpSweepSummaryRows.length === 0">データなし。</div>
 <template v-else>
-<div class="filter-bar">
-  <label>スケジューラ: <select v-model="udpSchedFilter"><option value="">すべて</option><option value="wlb">WLB</option><option value="minrtt">MinRTT</option></select></label>
-</div>
+
+**飽和点**
+
 <table>
-  <thead><tr><th>コミット</th><th>日付</th><th>シナリオ</th><th>スケジューラ</th><th>Mbps</th><th>ジッタ (ms)</th><th>ロス</th></tr></thead>
+  <thead><tr><th>コミット</th><th>日付</th><th>シングル (Mbps)</th><th>WLB (Mbps)</th><th>MinRTT (Mbps)</th></tr></thead>
   <tbody>
-    <tr v-for="(r, i) in filteredUdpRows" :key="'udp-' + i">
-      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.scenario }}</td><td>{{ r.scheduler }}</td><td>{{ r.mbps }}</td><td>{{ r.jitter }}</td><td>{{ r.lost }}</td>
+    <tr v-for="(r, i) in udpSweepSummaryRows" :key="'udps-' + i">
+      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.single_saturation }}</td><td>{{ r.wlb_saturation }}</td><td>{{ r.minrtt_saturation }}</td>
     </tr>
   </tbody>
 </table>
+
+**スイープ詳細**
+
+<div class="filter-bar">
+  <label>条件: <select v-model="udpSchedFilter"><option value="">すべて</option><option value="single">シングル</option><option value="wlb">WLB</option><option value="minrtt">MinRTT</option></select></label>
+</div>
+<table>
+  <thead><tr><th>コミット</th><th>レート (Mbps)</th><th>スループット (Mbps)</th><th>ロス (%)</th><th>ジッタ (ms)</th></tr></thead>
+  <tbody>
+    <tr v-for="(r, i) in filteredUdpSweepRows" :key="'udpd-' + i">
+      <td><code>{{ r.commit }}</code></td><td>{{ r.rate }}</td><td>{{ r.throughput }}</td><td>{{ r.loss }}</td><td>{{ r.jitter }}</td>
+    </tr>
+  </tbody>
+</table>
+
 </template>
 
 ## NTN 衛星

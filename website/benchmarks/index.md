@@ -23,7 +23,7 @@ const latestAggregate = computed(() => {
 const latestNtn = computed(() => weekly.ntnRows.value[0] || null)
 const latestMultipath = computed(() => weekly.multipathSchedulerRows.value[0] || null)
 const latestFlowScaling = computed(() => weekly.flowScalingRows.value[0] || null)
-const latestUdp = computed(() => weekly.udpSchedulerRows.value[0] || null)
+const latestUdpSummary = computed(() => weekly.udpSweepSummaryRows.value[0] || null)
 </script>
 
 # Benchmarks
@@ -101,10 +101,11 @@ const latestUdp = computed(() => weekly.udpSchedulerRows.value[0] || null)
     <div class="label">{{ latestFlowScaling.scheduler }} &middot; {{ latestFlowScaling.streams }} streams</div>
   </div>
 
-  <div class="summary-card" v-if="latestUdp">
-    <h3>UDP Scheduler</h3>
-    <div class="stat">{{ latestUdp.mbps }} <span class="unit">Mbps</span></div>
-    <div class="label">{{ latestUdp.scheduler }} &middot; {{ latestUdp.scenario }}</div>
+  <div class="summary-card" v-if="latestUdpSummary">
+    <h3>UDP Saturation</h3>
+    <div class="stat">{{ latestUdpSummary.wlb_saturation }} <span class="unit">Mbps</span></div>
+    <div class="label">WLB (single: {{ latestUdpSummary.single_saturation }} Mbps)</div>
+    <div class="meta"><code>{{ latestUdpSummary.commit }}</code> &middot; {{ latestUdpSummary.date }}</div>
   </div>
 
   <div class="summary-card" v-if="latestNtn">

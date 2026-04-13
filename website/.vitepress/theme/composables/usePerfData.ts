@@ -180,21 +180,37 @@ export function usePerfData(basePath: string, maxEntries = 10) {
     return rows
   })
 
-  const udpSchedulerRows = computed(() => {
+  const udpSweepSummaryRows = computed(() => {
     const rows: any[] = []
     for (const item of items.value) {
-      if (item.data.test !== 'udp_scheduler') continue
-      for (const s of item.data.scenarios || []) {
-        for (const sched of ['wlb', 'minrtt']) {
-          const d = s[sched] || {}
+      if (item.data.test !== 'udp_sweep') continue
+      const r = item.data.results || {}
+      rows.push({
+        commit: fmtCommit(item.commit),
+        date: fmtDate(item.timestamp),
+        single_saturation: r.single?.saturation_mbps != null ? fmtNum(r.single.saturation_mbps, 0) : '-',
+        wlb_saturation: r.wlb?.saturation_mbps != null ? fmtNum(r.wlb.saturation_mbps, 0) : '-',
+        minrtt_saturation: r.minrtt?.saturation_mbps != null ? fmtNum(r.minrtt.saturation_mbps, 0) : '-',
+      })
+    }
+    return rows
+  })
+
+  const udpSweepRows = computed(() => {
+    const rows: any[] = []
+    for (const item of items.value) {
+      if (item.data.test !== 'udp_sweep') continue
+      for (const sched of ['single', 'wlb', 'minrtt']) {
+        const pts = item.data.results?.[sched]?.points || []
+        for (const p of pts) {
           rows.push({
             commit: fmtCommit(item.commit),
             date: fmtDate(item.timestamp),
-            scenario: s.name,
             scheduler: sched,
-            mbps: fmtNum(d.mbps),
-            jitter: fmtNum(d.jitter_ms, 2),
-            lost: fmtNum(d.lost_pct, 2) + '%',
+            rate: p.rate,
+            throughput: fmtNum(p.throughput),
+            loss: fmtNum(p.loss_pct, 2),
+            jitter: fmtNum(p.jitter_ms, 3),
           })
         }
       }
@@ -229,7 +245,8 @@ export function usePerfData(basePath: string, maxEntries = 10) {
     aggregateRows,
     multipathSchedulerRows,
     flowScalingRows,
-    udpSchedulerRows,
+    udpSweepSummaryRows,
+    udpSweepRows,
     ntnRows,
   }
 }

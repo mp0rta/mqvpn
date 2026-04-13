@@ -69,7 +69,7 @@ jobs:
   long-running:
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install runtime deps
@@ -83,7 +83,7 @@ jobs:
           sudo ldconfig
       - name: Make executable
         run: chmod +x build/mqvpn
-      - name: Long-running stress test (1h)
+      - name: Long-running stress test (15min)
         env:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1

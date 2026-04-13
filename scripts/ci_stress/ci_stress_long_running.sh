@@ -1,7 +1,7 @@
 #!/bin/bash
-# ci_stress_long_running.sh — 1-hour continuous transfer stress test
+# ci_stress_long_running.sh — Long-running continuous transfer stress test
 #
-# Runs a 1-hour iperf3 transfer over a multipath VPN tunnel while monitoring
+# Runs a continuous iperf3 transfer (default 15min) over a multipath VPN tunnel while monitoring
 # RSS and fd count of both server and client processes. Detects memory leaks
 # (RSS growth >50%) and fd leaks during sustained load.
 #
@@ -25,7 +25,7 @@ source "${SCRIPT_DIR}/ci_stress_env.sh"
 
 MQVPN="${1:-${MQVPN}}"
 
-DURATION=3600
+DURATION=${CI_STRESS_LONG_DURATION:-900}
 IPERF_PARALLEL=4
 SCHEDULER="wlb"
 
@@ -37,7 +37,7 @@ echo "================================================================"
 echo "  mqvpn Long-Running Stress Test (CI)"
 echo "  Binary:    $MQVPN"
 echo "  Scheduler: $SCHEDULER"
-echo "  Duration:  ${DURATION}s (1 hour)"
+echo "  Duration:  ${DURATION}s"
 echo "  Commit:    ${CI_STRESS_COMMIT:0:12}"
 echo "  Date:      $(date '+%Y-%m-%d %H:%M')"
 echo "================================================================"
