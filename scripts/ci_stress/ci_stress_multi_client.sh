@@ -2,15 +2,19 @@
 # ci_stress_multi_client.sh — 60-simultaneous-client stress test
 #
 # Validates that the VPN server can handle 60 concurrent clients without
-# resource leaks or stability issues. Uses a custom star topology: one
-# server netns and 60 client netns, all connected via the default netns
-# acting as a router.
+# resource leaks or stability issues. Uses a bridge topology: one server
+# netns with a Linux bridge, and 60 client netns each connected via veth
+# to the bridge. All on the same L2/L3 subnet — no default-ns routing needed.
 #
 # Topology:
-#   ci-stress-c1  (10.60.1.2) ──veth──┐
-#   ci-stress-c2  (10.60.2.2) ──veth──┤
-#   ...                                ├── default ns (router) ──veth── ci-stress-server (10.50.0.1)
-#   ci-stress-c60 (10.60.60.2)──veth──┘
+#   ci-stress-server (10.50.0.1/24 on br0)
+#          |
+#         br0 (bridge)
+#        / | \
+#     veth veth ... veth
+#       |    |        |
+#   ci-stress-c1   ci-stress-c2  ...  ci-stress-c60
+#   (10.50.0.2)    (10.50.0.3)        (10.50.0.61)
 #
 # Output: ci_stress_results/multi_client_<timestamp>.json
 #
@@ -30,12 +34,10 @@ fi
 
 NUM_CLIENTS=60
 
-# Subnet addressing
+# Subnet addressing (all on 10.50.0.0/24)
 SERVER_NS="ci-stress-server"
-SERVER_VETH_IN="ci-s-sv0"   # inside server netns
-SERVER_VETH_OUT="ci-s-sv1"  # in default netns
+BRIDGE_NAME="br0"
 SERVER_IP="10.50.0.1"
-ROUTER_SERVER_IP="10.50.0.254"
 
 # ── Custom cleanup ──
 
@@ -67,9 +69,8 @@ multi_client_cleanup() {
         ip link del "ci-s-c${i}a" 2>/dev/null || true
     done
 
-    # Delete server namespace and veth
+    # Delete server namespace (bridge + veths cleaned up with it)
     ip netns del "$SERVER_NS" 2>/dev/null || true
-    ip link del "$SERVER_VETH_OUT" 2>/dev/null || true
 
     # Clean up work dir
     [ -n "${WORK_DIR:-}" ] && rm -rf "$WORK_DIR" || true
@@ -93,7 +94,6 @@ for i in $(seq 1 "$NUM_CLIENTS"); do
     ip link del "ci-s-c${i}a" 2>/dev/null || true
 done
 ip netns del "$SERVER_NS" 2>/dev/null || true
-ip link del "$SERVER_VETH_OUT" 2>/dev/null || true
 
 echo "================================================================"
 echo "  mqvpn Multi-Client Stress Test (CI)"
@@ -104,26 +104,17 @@ echo "  Date:      $(date '+%Y-%m-%d %H:%M')"
 echo "================================================================"
 echo ""
 
-# ── Create server netns and veth pair ──
+# ── Create server netns with bridge ──
 
-echo "Creating server namespace..."
+echo "Creating server namespace with bridge..."
 
 ip netns add "$SERVER_NS"
-ip link add "$SERVER_VETH_IN" type veth peer name "$SERVER_VETH_OUT"
-ip link set "$SERVER_VETH_IN" netns "$SERVER_NS"
-
-ip netns exec "$SERVER_NS" ip addr add "${SERVER_IP}/24" dev "$SERVER_VETH_IN"
-ip netns exec "$SERVER_NS" ip link set "$SERVER_VETH_IN" up
 ip netns exec "$SERVER_NS" ip link set lo up
-ip netns exec "$SERVER_NS" sysctl -w net.ipv4.ip_forward=1 >/dev/null
+ip netns exec "$SERVER_NS" ip link add "$BRIDGE_NAME" type bridge
+ip netns exec "$SERVER_NS" ip addr add "${SERVER_IP}/24" dev "$BRIDGE_NAME"
+ip netns exec "$SERVER_NS" ip link set "$BRIDGE_NAME" up
 
-ip addr add "${ROUTER_SERVER_IP}/24" dev "$SERVER_VETH_OUT"
-ip link set "$SERVER_VETH_OUT" up
-
-# Server needs a route back to all clients via the router
-ip netns exec "$SERVER_NS" ip route add 10.60.0.0/16 via "$ROUTER_SERVER_IP"
-
-echo "OK: server netns created (${SERVER_IP})"
+echo "OK: server netns created (${SERVER_IP} on ${BRIDGE_NAME})"
 
 # ── Generate TLS cert + PSK ──
 
@@ -161,29 +152,31 @@ echo "VPN server running (PID $SERVER_PID)"
 SERVER_MONITOR_LOG="${CI_STRESS_RESULTS}/multi_client_server_monitor.log"
 ci_stress_monitor_start "$SERVER_PID" "$SERVER_MONITOR_LOG"
 
-# ── Create 60 client netns + veths ──
+# ── Create 60 client netns + veths bridged to server ──
 
 echo ""
 echo "Creating ${NUM_CLIENTS} client namespaces..."
 
 for i in $(seq 1 "$NUM_CLIENTS"); do
     client_ns="ci-stress-c${i}"
-    veth_in="ci-s-c${i}a"    # inside client netns
-    veth_out="ci-s-c${i}b"   # in default netns
+    veth_client="ci-s-c${i}a"   # inside client netns
+    veth_bridge="ci-s-c${i}b"   # inside server netns, attached to bridge
+    client_ip="10.50.0.$((i + 1))"
 
     ip netns add "$client_ns"
-    ip link add "$veth_in" type veth peer name "$veth_out"
-    ip link set "$veth_in" netns "$client_ns"
 
-    ip netns exec "$client_ns" ip addr add "10.60.${i}.2/24" dev "$veth_in"
-    ip netns exec "$client_ns" ip link set "$veth_in" up
+    # Create veth pair in server netns, move one end to client netns
+    ip netns exec "$SERVER_NS" ip link add "$veth_bridge" type veth peer name "$veth_client"
+    ip netns exec "$SERVER_NS" ip link set "$veth_client" netns "$client_ns"
+
+    # Attach bridge end to br0
+    ip netns exec "$SERVER_NS" ip link set "$veth_bridge" master "$BRIDGE_NAME"
+    ip netns exec "$SERVER_NS" ip link set "$veth_bridge" up
+
+    # Configure client end
+    ip netns exec "$client_ns" ip addr add "${client_ip}/24" dev "$veth_client"
+    ip netns exec "$client_ns" ip link set "$veth_client" up
     ip netns exec "$client_ns" ip link set lo up
-
-    ip addr add "10.60.${i}.1/24" dev "$veth_out"
-    ip link set "$veth_out" up
-
-    # Default route in client netns via the router end of veth
-    ip netns exec "$client_ns" ip route add default via "10.60.${i}.1"
 
     if [ $((i % 10)) -eq 0 ]; then
         echo "  created ${i}/${NUM_CLIENTS} client namespaces"
@@ -192,28 +185,14 @@ done
 
 echo "OK: ${NUM_CLIENTS} client namespaces created"
 
-# ── Enable IP forwarding in default netns ──
-
-sysctl -w net.ipv4.ip_forward=1 >/dev/null
-# Disable reverse path filtering on all interfaces used for routing
-# (rp_filter drops packets arriving on "unexpected" interfaces)
-sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null
-sysctl -w net.ipv4.conf."$SERVER_VETH_OUT".rp_filter=0 >/dev/null
-for i in $(seq 1 "$NUM_CLIENTS"); do
-    sysctl -w "net.ipv4.conf.ci-s-c${i}b.rp_filter=0" >/dev/null
-done
-echo "OK: ip_forward enabled, rp_filter disabled in default netns"
-
 # ── Verify basic connectivity ──
 
 echo "Verifying connectivity (client 1 -> server)..."
-if ! ip netns exec "ci-stress-c1" ping -c 1 -W 5 "$SERVER_IP"; then
+if ! ip netns exec "ci-stress-c1" ping -c 1 -W 5 "$SERVER_IP" >/dev/null; then
     echo "DEBUG: client 1 routes:"
     ip netns exec "ci-stress-c1" ip route
-    echo "DEBUG: default ns routes:"
-    ip route
-    echo "DEBUG: server ns routes:"
-    ip netns exec "$SERVER_NS" ip route
+    echo "DEBUG: server ns bridge:"
+    ip netns exec "$SERVER_NS" bridge link
     echo "ERROR: client 1 cannot reach server"
     exit 1
 fi
@@ -227,12 +206,12 @@ echo "Starting ${NUM_CLIENTS} VPN clients..."
 CLIENT_PIDS=()
 for i in $(seq 1 "$NUM_CLIENTS"); do
     client_ns="ci-stress-c${i}"
-    veth_in="ci-s-c${i}a"
+    veth_client="ci-s-c${i}a"
 
     ip netns exec "$client_ns" "$MQVPN" \
         --mode client \
         --server "${SERVER_IP}:${VPN_LISTEN_PORT}" \
-        --path "$veth_in" \
+        --path "$veth_client" \
         --auth-key "$PSK" \
         --insecure \
         --log-level "$CI_STRESS_LOG_LEVEL" &
