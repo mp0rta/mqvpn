@@ -1,19 +1,24 @@
 #!/bin/bash
-# ci_bench_failover.sh — CI failover TTR (Time-To-Recovery) benchmark
+# ci_bench_failover.sh — CI failover benchmark (TTF + TTR)
 #
-# Measures failover TTR for both WLB and MinRTT schedulers in a single run.
+# Measures failover TTF and TTR for both WLB and MinRTT schedulers.
 #
 # For each scheduler:
 #   1. Setup netns with netem: Path A = 300Mbps/10ms, Path B = 80Mbps/30ms
 #   2. Start VPN server + multipath client
-#   3. Run 60s iperf3 transfer (TCP, -P 4)
+#   3. Run 75s iperf3 transfer (TCP, -P 4)
 #   4. At t=20s: inject fault on Path A (ip link set down on both ends)
 #   5. At t=40s: recover Path A (ip link set up on both ends)
-#   6. Parse iperf3 JSON intervals to calculate TTR
+#   6. Parse iperf3 JSON intervals to calculate TTF, TTR, and phase averages
 #
-# TTR definition:
-#   "seconds from fault injection until throughput reaches 50% of
-#    surviving path capacity (fallback detection)"
+# Metrics:
+#   TTF (Time-To-Fallback): seconds from fault injection until throughput
+#       reaches 50% of surviving path capacity
+#   TTR (Time-To-Recovery): seconds from fault recovery until throughput
+#       reaches 90% of pre-fault average (path revalidation ~10-15s)
+#   Pre-fault avg:  t=0-20s  (both paths active)
+#   Degraded avg:   t=20-40s (surviving path only)
+#   Post-recover:   last 10s (t=65-75s, after path revalidation)
 #
 # Output: ci_bench_results/failover_<timestamp>.json
 #

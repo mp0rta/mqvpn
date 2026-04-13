@@ -49,7 +49,7 @@ const latestUdp = computed(() => weekly.udpSchedulerRows.value[0] || null)
   <div class="summary-card">
     <h3>フェイルオーバー TTF</h3>
     <div v-if="latestFailover">
-      <div class="stat">{{ latestFailover.wlb_ttf }}<span class="unit">s</span></div>
+      <div class="stat">{{ latestFailover.ttf }}<span class="unit">s</span></div>
       <div class="label">WLB フォールバック時間</div>
       <div class="meta"><code>{{ latestFailover.commit }}</code> &middot; {{ latestFailover.date }}</div>
     </div>
