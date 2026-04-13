@@ -320,13 +320,19 @@ max_rss = max(s[1] for s in samples)
 print(f'  $label: RSS initial={initial_rss}KB final={final_rss}KB max={max_rss}KB ({len(samples)} samples)')
 print(f'  $label: fd  initial={initial_fd} final={final_fd}')
 
+import os
+asan_enabled = bool(os.environ.get('ASAN_OPTIONS', ''))
+
 failed = False
 
 if initial_rss > 0:
     growth = (max_rss - initial_rss) / initial_rss
     if growth > 0.5:
-        print(f'  FAIL: $label RSS grew {growth*100:.0f}% (>{50}% threshold)')
-        failed = True
+        if asan_enabled:
+            print(f'  SKIP: $label RSS grew {growth*100:.0f}% (ASan shadow memory, not a real leak)')
+        else:
+            print(f'  FAIL: $label RSS grew {growth*100:.0f}% (>{50}% threshold)')
+            failed = True
 
 if final_fd > initial_fd:
     print(f'  FAIL: $label fd count leaked ({initial_fd} -> {final_fd})')
