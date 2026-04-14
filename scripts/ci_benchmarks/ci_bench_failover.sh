@@ -4,7 +4,7 @@
 # Tests both Path A and Path B fault/recovery in a single 100s run.
 #
 # For each scheduler:
-#   1. Setup netns with netem: Path A = 300Mbps/10ms, Path B = 80Mbps/30ms
+#   1. Setup netns with netem: Path A = 150Mbps/10ms, Path B = 150Mbps/30ms (symmetric BW)
 #   2. Start VPN server + multipath client
 #   3. Run 100s iperf3 transfer (TCP, -P 4)
 #   4. Cycle 1 — Path A fault:
@@ -17,9 +17,9 @@
 #
 # Timeline:
 #   t=0-20:   pre-fault         (A+B active)
-#   t=20-40:  degraded-A        (Path B only, surviving=80Mbps)
+#   t=20-40:  degraded-A        (Path B only, surviving=150Mbps)
 #   t=40-55:  Path A recovery   (A+B active)
-#   t=55-75:  degraded-B        (Path A only, surviving=300Mbps)
+#   t=55-75:  degraded-B        (Path A only, surviving=150Mbps)
 #   t=75-90:  Path B recovery   (A+B active)
 #   t=90-100: post-recover      (A+B active)
 #
@@ -85,9 +85,9 @@ for SCHED in $SCHEDULERS; do
     echo "  Scheduler: $SCHED"
     echo "────────────────────────────────────────"
 
-    # --- Setup netns + netem ---
+    # --- Setup netns + netem (symmetric bandwidth for failover) ---
     ci_bench_setup_netns
-    ci_bench_apply_netem
+    ci_bench_apply_netem "delay 10ms rate 150mbit" "delay 30ms rate 150mbit"
 
     # --- Start VPN ---
     ci_bench_start_server "$SCHED"
@@ -128,8 +128,8 @@ for SCHED in $SCHEDULERS; do
         ip netns exec "$NS_CLIENT" ip addr add "$IP_A_CLIENT" dev "$VETH_A0" 2>/dev/null || true
         ip netns exec "$NS_SERVER" ip addr add "$IP_A_SERVER" dev "$VETH_A1" 2>/dev/null || true
         # Re-apply netem on restored interfaces
-        ip netns exec "$NS_CLIENT" tc qdisc add dev "$VETH_A0" root netem delay 10ms rate 300mbit 2>/dev/null || true
-        ip netns exec "$NS_SERVER" tc qdisc add dev "$VETH_A1" root netem delay 10ms rate 300mbit 2>/dev/null || true
+        ip netns exec "$NS_CLIENT" tc qdisc add dev "$VETH_A0" root netem delay 10ms rate 150mbit 2>/dev/null || true
+        ip netns exec "$NS_SERVER" tc qdisc add dev "$VETH_A1" root netem delay 10ms rate 150mbit 2>/dev/null || true
     ) &
     FAULT_A_RECOVER_PID=$!
 
@@ -152,8 +152,8 @@ for SCHED in $SCHEDULERS; do
         ip netns exec "$NS_CLIENT" ip addr add "$IP_B_CLIENT" dev "$VETH_B0" 2>/dev/null || true
         ip netns exec "$NS_SERVER" ip addr add "$IP_B_SERVER" dev "$VETH_B1" 2>/dev/null || true
         # Re-apply netem on restored interfaces
-        ip netns exec "$NS_CLIENT" tc qdisc add dev "$VETH_B0" root netem delay 30ms rate 80mbit 2>/dev/null || true
-        ip netns exec "$NS_SERVER" tc qdisc add dev "$VETH_B1" root netem delay 30ms rate 80mbit 2>/dev/null || true
+        ip netns exec "$NS_CLIENT" tc qdisc add dev "$VETH_B0" root netem delay 30ms rate 150mbit 2>/dev/null || true
+        ip netns exec "$NS_SERVER" tc qdisc add dev "$VETH_B1" root netem delay 30ms rate 150mbit 2>/dev/null || true
     ) &
     FAULT_B_RECOVER_PID=$!
 
@@ -199,9 +199,9 @@ degraded_a = [iv['mbps'] for iv in intervals
               if iv['time_sec'] > fault_a_inject and iv['time_sec'] <= fault_a_recover]
 degraded_a_avg = sum(degraded_a) / len(degraded_a) if degraded_a else 0
 
-# TTF A: time from fault A injection until throughput >= 50% of surviving Path B (80*0.5=40)
+# TTF A: time from fault A injection until throughput >= 50% of surviving Path B (150*0.5=75)
 # Bounded to degraded-A window (20<t<=40) to avoid false match after recovery
-surviving_a_mbps = 80  # Path B rate
+surviving_a_mbps = 150  # Path B rate (symmetric)
 ttf_a_threshold = surviving_a_mbps * 0.5
 ttf_a = None
 for iv in intervals:
@@ -230,9 +230,9 @@ degraded_b = [iv['mbps'] for iv in intervals
               if iv['time_sec'] > fault_b_inject and iv['time_sec'] <= fault_b_recover]
 degraded_b_avg = sum(degraded_b) / len(degraded_b) if degraded_b else 0
 
-# TTF B: time from fault B injection until throughput >= 50% of surviving Path A (300*0.5=150)
+# TTF B: time from fault B injection until throughput >= 50% of surviving Path A (150*0.5=75)
 # Bounded to degraded-B window (55<t<=75)
-surviving_b_mbps = 300  # Path A rate
+surviving_b_mbps = 150  # Path A rate (symmetric)
 ttf_b_threshold = surviving_b_mbps * 0.5
 ttf_b = None
 for iv in intervals:
@@ -338,8 +338,8 @@ result = {
     'commit': '${CI_BENCH_COMMIT}',
     'timestamp': '${TIMESTAMP}',
     'netem': {
-        'path_a': {'one_way_delay_ms': 10, 'rtt_ms': 20, 'rate_mbit': 300},
-        'path_b': {'one_way_delay_ms': 30, 'rtt_ms': 60, 'rate_mbit': 80}
+        'path_a': {'one_way_delay_ms': 10, 'rtt_ms': 20, 'rate_mbit': 150},
+        'path_b': {'one_way_delay_ms': 30, 'rtt_ms': 60, 'rate_mbit': 150}
     },
     'results': {
         'wlb': {

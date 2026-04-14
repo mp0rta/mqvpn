@@ -70,6 +70,8 @@ const filteredAggregateRows = computed(() => {
 
 ## フェイルオーバー
 
+<p class="section-desc">対称帯域 (150Mbps + 150Mbps)、非対称遅延 (10ms + 30ms RTT)。Path A → Path B の順に障害注入。</p>
+
 <div v-if="failoverRows.length === 0">データがありません。</div>
 <template v-else>
 <div class="filter-bar">

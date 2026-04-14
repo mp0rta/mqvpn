@@ -84,6 +84,8 @@ const filteredUdpSweepRows = computed(() => {
 
 ## Failover
 
+<p class="section-desc">Symmetric bandwidth (150Mbps + 150Mbps), asymmetric delay (10ms + 30ms RTT). Path A fault then Path B fault in sequence.</p>
+
 <div v-if="failoverRows.length === 0">No data.</div>
 <template v-else>
 <div class="filter-bar">
