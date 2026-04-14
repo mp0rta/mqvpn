@@ -27,7 +27,7 @@
 #   TTF (Time-To-Fallback): seconds from fault injection until throughput
 #       reaches 50% of surviving path capacity
 #   TTR (Time-To-Recovery): seconds from fault recovery until throughput
-#       reaches 80% of pre-fault average
+#       reaches 90% of pre-fault average
 #
 # Output: ci_bench_results/failover_<timestamp>.json
 #
@@ -52,7 +52,7 @@ FAULT_B_INJECT_SEC=55
 FAULT_B_RECOVER_SEC=75
 
 TTF_DEFINITION="seconds from fault injection until throughput reaches 50% of surviving path capacity (fallback detection)"
-TTR_DEFINITION="seconds from fault recovery until throughput reaches 80% of pre-fault average (full recovery)"
+TTR_DEFINITION="seconds from fault recovery until throughput reaches 90% of pre-fault average (full recovery)"
 
 trap ci_bench_cleanup EXIT
 
@@ -211,9 +211,9 @@ for iv in intervals:
         ttf_a = round(iv['time_sec'] - fault_a_inject, 2)
         break
 
-# TTR A: time from fault A recovery until throughput >= 80% of pre-fault A average
+# TTR A: time from fault A recovery until throughput >= 90% of pre-fault A average
 # Bounded to recovery-A window (40<t<=55) to avoid contamination by Path B fault
-ttr_a_threshold = pre_fault_a_avg * 0.8
+ttr_a_threshold = pre_fault_a_avg * 0.9
 ttr_a = None
 for iv in intervals:
     if iv['time_sec'] > fault_a_recover and iv['time_sec'] <= fault_b_inject and iv['mbps'] >= ttr_a_threshold:
@@ -242,9 +242,9 @@ for iv in intervals:
         ttf_b = round(iv['time_sec'] - fault_b_inject, 2)
         break
 
-# TTR B: time from fault B recovery until throughput >= 80% of pre-fault B average
+# TTR B: time from fault B recovery until throughput >= 90% of pre-fault B average
 # Bounded to recovery-B window (75<t<=90)
-ttr_b_threshold = pre_fault_b_avg * 0.8
+ttr_b_threshold = pre_fault_b_avg * 0.9
 ttr_b = None
 for iv in intervals:
     if iv['time_sec'] > fault_b_recover and iv['time_sec'] <= 90 and iv['mbps'] >= ttr_b_threshold:

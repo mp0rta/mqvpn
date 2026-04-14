@@ -4,7 +4,7 @@
 # Runs a 75-second iperf3 transfer over multipath VPN, injects a path
 # failure at t=20s, recovers at t=40s, and measures:
 #   TTF: time from fault to surviving path reaching 50% capacity
-#   TTR: time from recovery to 80% of pre-fault throughput
+#   TTR: time from recovery to 90% of pre-fault throughput
 #   Degraded: average during fault (t=20-40)
 #   Post-recover: last 10s (t=65-75, after path revalidation)
 #
@@ -171,8 +171,8 @@ for iv in intervals:
         ttf = round(iv['time_sec'] - fault_inject, 2)
         break
 
-# TTR: time from recovery to 80% of pre-fault (path revalidation)
-ttr_threshold = pre_fault_avg * 0.8
+# TTR: time from recovery to 90% of pre-fault (path revalidation)
+ttr_threshold = pre_fault_avg * 0.9
 ttr = None
 for iv in intervals:
     if iv['time_sec'] > fault_recover and iv['mbps'] >= ttr_threshold:
