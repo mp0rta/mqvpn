@@ -200,19 +200,21 @@ degraded_a = [iv['mbps'] for iv in intervals
 degraded_a_avg = sum(degraded_a) / len(degraded_a) if degraded_a else 0
 
 # TTF A: time from fault A injection until throughput >= 50% of surviving Path B (80*0.5=40)
+# Bounded to degraded-A window (20<t<=40) to avoid false match after recovery
 surviving_a_mbps = 80  # Path B rate
 ttf_a_threshold = surviving_a_mbps * 0.5
 ttf_a = None
 for iv in intervals:
-    if iv['time_sec'] > fault_a_inject and iv['mbps'] >= ttf_a_threshold:
+    if iv['time_sec'] > fault_a_inject and iv['time_sec'] <= fault_a_recover and iv['mbps'] >= ttf_a_threshold:
         ttf_a = round(iv['time_sec'] - fault_a_inject, 2)
         break
 
 # TTR A: time from fault A recovery until throughput >= 80% of pre-fault A average
+# Bounded to recovery-A window (40<t<=55) to avoid contamination by Path B fault
 ttr_a_threshold = pre_fault_a_avg * 0.8
 ttr_a = None
 for iv in intervals:
-    if iv['time_sec'] > fault_a_recover and iv['mbps'] >= ttr_a_threshold:
+    if iv['time_sec'] > fault_a_recover and iv['time_sec'] <= fault_b_inject and iv['mbps'] >= ttr_a_threshold:
         ttr_a = round(iv['time_sec'] - fault_a_recover, 2)
         break
 
@@ -229,19 +231,21 @@ degraded_b = [iv['mbps'] for iv in intervals
 degraded_b_avg = sum(degraded_b) / len(degraded_b) if degraded_b else 0
 
 # TTF B: time from fault B injection until throughput >= 50% of surviving Path A (300*0.5=150)
+# Bounded to degraded-B window (55<t<=75)
 surviving_b_mbps = 300  # Path A rate
 ttf_b_threshold = surviving_b_mbps * 0.5
 ttf_b = None
 for iv in intervals:
-    if iv['time_sec'] > fault_b_inject and iv['mbps'] >= ttf_b_threshold:
+    if iv['time_sec'] > fault_b_inject and iv['time_sec'] <= fault_b_recover and iv['mbps'] >= ttf_b_threshold:
         ttf_b = round(iv['time_sec'] - fault_b_inject, 2)
         break
 
 # TTR B: time from fault B recovery until throughput >= 80% of pre-fault B average
+# Bounded to recovery-B window (75<t<=90)
 ttr_b_threshold = pre_fault_b_avg * 0.8
 ttr_b = None
 for iv in intervals:
-    if iv['time_sec'] > fault_b_recover and iv['mbps'] >= ttr_b_threshold:
+    if iv['time_sec'] > fault_b_recover and iv['time_sec'] <= 90 and iv['mbps'] >= ttr_b_threshold:
         ttr_b = round(iv['time_sec'] - fault_b_recover, 2)
         break
 
