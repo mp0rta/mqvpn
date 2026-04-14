@@ -8,6 +8,28 @@ on:
   workflow_dispatch:
 
 jobs:
+  format-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check clang-format
+        run: |
+          FILES=$(find src include tests -name '*.c' -o -name '*.h' | grep -v third_party)
+          FAIL=0
+          for f in $FILES; do
+            if ! clang-format --dry-run --Werror "$f" 2>/dev/null; then
+              echo "needs formatting: $f"
+              FAIL=1
+            fi
+          done
+          if [ "$FAIL" -ne 0 ]; then
+            echo ""
+            echo "Fix: find src include tests -name '*.c' -o -name '*.h' | xargs clang-format -i"
+            exit 1
+          fi
+
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
