@@ -86,14 +86,13 @@ parse_dns_list(mqvpn_file_config_t *cfg, const char *val)
         while (end >= cfg->dns_servers[cfg->n_dns] && isspace((unsigned char)*end))
             *end-- = '\0';
 
-        if (cfg->dns_servers[cfg->n_dns][0] != '\0')
-            cfg->n_dns++;
+        if (cfg->dns_servers[cfg->n_dns][0] != '\0') cfg->n_dns++;
     }
 }
 
 static void
-add_user_entry(mqvpn_file_config_t *cfg, const char *name, const char *key,
-               int lineno, const char *path)
+add_user_entry(mqvpn_file_config_t *cfg, const char *name, const char *key, int lineno,
+               const char *path)
 {
     if (!name || !key || name[0] == '\0' || key[0] == '\0') {
         LOG_WRN("%s:%d: invalid user entry", path, lineno);
@@ -116,15 +115,15 @@ add_user_entry(mqvpn_file_config_t *cfg, const char *name, const char *key,
     }
 
     if (cfg->n_users >= MQVPN_CONFIG_MAX_USERS) {
-        LOG_WRN("%s:%d: max %d users supported, ignoring '%s'",
-                path, lineno, MQVPN_CONFIG_MAX_USERS, name);
+        LOG_WRN("%s:%d: max %d users supported, ignoring '%s'", path, lineno,
+                MQVPN_CONFIG_MAX_USERS, name);
         return;
     }
 
-    snprintf(cfg->user_names[cfg->n_users], sizeof(cfg->user_names[cfg->n_users]),
-             "%s", name);
-    snprintf(cfg->user_keys[cfg->n_users], sizeof(cfg->user_keys[cfg->n_users]),
-             "%s", key);
+    snprintf(cfg->user_names[cfg->n_users], sizeof(cfg->user_names[cfg->n_users]), "%s",
+             name);
+    snprintf(cfg->user_keys[cfg->n_users], sizeof(cfg->user_keys[cfg->n_users]), "%s",
+             key);
     cfg->n_users++;
 }
 
@@ -148,10 +147,8 @@ parse_user_pair(mqvpn_file_config_t *cfg, const char *val, int lineno, const cha
 /* json_skip_ws, json_find_key, json_read_string, json_read_bool,
  * json_read_int are provided by json_mini.h */
 
-static int json_read_string_array(const char *p,
-                                  char out[][64],
-                                  int max_items,
-                                  int *n_items)
+static int
+json_read_string_array(const char *p, char out[][64], int max_items, int *n_items)
 {
     if (!p || !out || !n_items || *p != '[') return -1;
 
@@ -170,8 +167,10 @@ static int json_read_string_array(const char *p,
         p = json_skip_ws(e + 1);
         n++;
 
-        if (*p == ',') p = json_skip_ws(p + 1);
-        else if (*p != ']') return -1;
+        if (*p == ',')
+            p = json_skip_ws(p + 1);
+        else if (*p != ']')
+            return -1;
     }
 
     if (*p != ']') return -1;
@@ -179,7 +178,8 @@ static int json_read_string_array(const char *p,
     return 0;
 }
 
-static int json_read_users(mqvpn_file_config_t *cfg, const char *p)
+static int
+json_read_users(mqvpn_file_config_t *cfg, const char *p)
 {
     if (!cfg || !p || *p != '[') return -1;
     cfg->n_users = 0;
@@ -228,8 +228,10 @@ static int json_read_users(mqvpn_file_config_t *cfg, const char *p)
 
         add_user_entry(cfg, name, key, 0, "json");
 
-        if (*p == ',') p = json_skip_ws(p + 1);
-        else if (*p != ']') return -1;
+        if (*p == ',')
+            p = json_skip_ws(p + 1);
+        else if (*p != ']')
+            return -1;
     }
 
     return (*p == ']') ? 0 : -1;
@@ -237,8 +239,8 @@ static int json_read_users(mqvpn_file_config_t *cfg, const char *p)
 
 /* Handle a key=value pair in the given section */
 static void
-handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *val, int lineno,
-          const char *path)
+handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *val,
+          int lineno, const char *path)
 {
     switch (section) {
     case SEC_INTERFACE:
@@ -320,9 +322,7 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
         }
         break;
 
-    default:
-        LOG_WRN("%s:%d: key '%s' outside any section", path, lineno, key);
-        break;
+    default: LOG_WRN("%s:%d: key '%s' outside any section", path, lineno, key); break;
     }
 }
 
@@ -337,8 +337,10 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
 
     v = json_find_key(json_text, "mode");
     if (v && json_read_string(v, s32, sizeof(s32)) == 0) {
-        if (strcasecmp(s32, "server") == 0) cfg->is_server = 1;
-        else if (strcasecmp(s32, "client") == 0) cfg->is_server = 0;
+        if (strcasecmp(s32, "server") == 0)
+            cfg->is_server = 1;
+        else if (strcasecmp(s32, "client") == 0)
+            cfg->is_server = 0;
     }
 
     v = json_find_key(json_text, "tun_name");
@@ -408,8 +410,8 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     if (v && json_read_string_array(v, dns_buf, MQVPN_CONFIG_MAX_DNS, &n_dns) == 0) {
         cfg->n_dns = 0;
         for (int i = 0; i < n_dns; i++) {
-            mqvpn_copy_str(cfg->dns_servers[cfg->n_dns], sizeof(cfg->dns_servers[cfg->n_dns]),
-                     dns_buf[i]);
+            mqvpn_copy_str(cfg->dns_servers[cfg->n_dns],
+                           sizeof(cfg->dns_servers[cfg->n_dns]), dns_buf[i]);
             cfg->n_dns++;
         }
     }
@@ -421,7 +423,7 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
         cfg->n_paths = 0;
         for (int i = 0; i < n_paths; i++) {
             mqvpn_copy_str(cfg->paths[cfg->n_paths], sizeof(cfg->paths[cfg->n_paths]),
-                     path_buf[i]);
+                           path_buf[i]);
             cfg->n_paths++;
         }
     }
@@ -478,7 +480,8 @@ mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
     buf[got] = '\0';
 
     const char *s = buf;
-    while (*s && isspace((unsigned char)*s)) s++;
+    while (*s && isspace((unsigned char)*s))
+        s++;
 
     if (*s == '{') {
         int rc = mqvpn_config_load_json_filecfg(cfg, s);

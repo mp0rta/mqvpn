@@ -33,10 +33,10 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
-#define CTRL_MAX_REQ   4096
-#define CTRL_MAX_RESP  4096
-#define CTRL_MAX_CONNS 8         /* max concurrent control connections */
-#define CTRL_READ_TIMEOUT_SEC 5  /* close idle connections after 5s */
+#define CTRL_MAX_REQ          4096
+#define CTRL_MAX_RESP         4096
+#define CTRL_MAX_CONNS        8 /* max concurrent control connections */
+#define CTRL_READ_TIMEOUT_SEC 5 /* close idle connections after 5s */
 
 /* JSON helpers (json_find_key → json_find_key, json_read_string → json_read_string)
  * are provided by json_mini.h */
@@ -44,21 +44,21 @@
 /* ── Per-connection state ────────────────────────────────────────────────── */
 
 typedef struct {
-    int              fd;
-    struct event    *ev;
-    char             req[CTRL_MAX_REQ + 1];
-    size_t           req_len;
-    ctrl_socket_t   *cs;
+    int fd;
+    struct event *ev;
+    char req[CTRL_MAX_REQ + 1];
+    size_t req_len;
+    ctrl_socket_t *cs;
 } ctrl_conn_t;
 
 /* ── Server handle ───────────────────────────────────────────────────────── */
 
 struct ctrl_socket_s {
-    int                listen_fd;
-    struct event      *ev_accept;
+    int listen_fd;
+    struct event *ev_accept;
     struct event_base *eb;
-    mqvpn_server_t    *server;
-    int                n_conns;  /* active control connections */
+    mqvpn_server_t *server;
+    int n_conns; /* active control connections */
 };
 
 /* ── Command dispatch ────────────────────────────────────────────────────── */
@@ -75,8 +75,8 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
         char name[64] = {0}, key[256] = {0};
         const char *nv = json_find_key(req, "name");
         const char *kv = json_find_key(req, "key");
-        if (!nv || json_read_string(nv, name, sizeof(name)) < 0 ||
-            !kv || json_read_string(kv, key,  sizeof(key))  < 0)
+        if (!nv || json_read_string(nv, name, sizeof(name)) < 0 || !kv ||
+            json_read_string(kv, key, sizeof(key)) < 0)
             return snprintf(resp, resp_len,
                             "{\"ok\":false,\"error\":\"name and key required\"}");
 
@@ -90,8 +90,7 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
         char name[64] = {0};
         const char *nv = json_find_key(req, "name");
         if (!nv || json_read_string(nv, name, sizeof(name)) < 0)
-            return snprintf(resp, resp_len,
-                            "{\"ok\":false,\"error\":\"name required\"}");
+            return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"name required\"}");
 
         int rc = mqvpn_server_remove_user(server, name);
         if (rc != MQVPN_OK)
@@ -109,15 +108,15 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
         for (int i = 0; i < n_users; i++) {
             if (i > 0) users[pos++] = ',';
             /* Clamp pos to prevent underflow on sizeof(users) - pos */
-            int w = snprintf(users + pos, sizeof(users) - (size_t)pos,
-                             "\"%s\"", unames[i]);
+            int w =
+                snprintf(users + pos, sizeof(users) - (size_t)pos, "\"%s\"", unames[i]);
             if (w > 0 && (size_t)(pos + w) < sizeof(users))
                 pos += w;
             else
-                break;  /* truncated — stop appending */
+                break; /* truncated — stop appending */
         }
         users[pos++] = ']';
-        users[pos]   = '\0';
+        users[pos] = '\0';
         return snprintf(resp, resp_len, "{\"ok\":true,\"users\":%s}", users);
 
     } else if (strcmp(cmd, "get_stats") == 0) {
@@ -132,8 +131,7 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
     } else if (strcmp(cmd, "get_status") == 0) {
         mqvpn_client_info_t clients[MQVPN_MAX_USERS];
         int n_clients = 0;
-        mqvpn_server_get_client_info(server, clients, MQVPN_MAX_USERS,
-                                     &n_clients);
+        mqvpn_server_get_client_info(server, clients, MQVPN_MAX_USERS, &n_clients);
 
         uint64_t now = 0;
         struct timeval tv;
@@ -143,52 +141,45 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
         char buf[16384];
         int pos = 0;
         int w;
-        pos += snprintf(buf, sizeof(buf),
-                        "{\"ok\":true,\"n_clients\":%d,\"clients\":[",
+        pos += snprintf(buf, sizeof(buf), "{\"ok\":true,\"n_clients\":%d,\"clients\":[",
                         n_clients);
 
         for (int i = 0; i < n_clients; i++) {
             mqvpn_client_info_t *ci = &clients[i];
             uint64_t conn_sec = (ci->connected_at_us > 0 && now > ci->connected_at_us)
-                                ? (now - ci->connected_at_us) / 1000000 : 0;
+                                    ? (now - ci->connected_at_us) / 1000000
+                                    : 0;
 
             if (i > 0 && (size_t)pos < sizeof(buf)) buf[pos++] = ',';
             w = snprintf(buf + pos, sizeof(buf) - (size_t)pos,
-                "{\"user\":\"%s\",\"endpoint\":\"%s\","
-                "\"connected_sec\":%" PRIu64 ","
-                "\"bytes_tx\":%" PRIu64 ",\"bytes_rx\":%" PRIu64 ","
-                "\"paths\":[",
-                ci->username, ci->endpoint, conn_sec,
-                ci->bytes_tx, ci->bytes_rx);
-            if (w > 0 && (size_t)(pos + w) < sizeof(buf)) pos += w; else break;
+                         "{\"user\":\"%s\",\"endpoint\":\"%s\","
+                         "\"connected_sec\":%" PRIu64 ","
+                         "\"bytes_tx\":%" PRIu64 ",\"bytes_rx\":%" PRIu64 ","
+                         "\"paths\":[",
+                         ci->username, ci->endpoint, conn_sec, ci->bytes_tx,
+                         ci->bytes_rx);
+            if (w > 0 && (size_t)(pos + w) < sizeof(buf))
+                pos += w;
+            else
+                break;
 
             for (int p = 0; p < ci->n_paths; p++) {
                 mqvpn_path_stats_t *ps = &ci->paths[p];
                 if (p > 0 && (size_t)pos < sizeof(buf)) buf[pos++] = ',';
                 w = snprintf(buf + pos, sizeof(buf) - (size_t)pos,
-                    "{\"path_id\":%" PRIu64
-                    ",\"srtt_ms\":%" PRIu64
-                    ",\"min_rtt_ms\":%" PRIu64
-                    ",\"cwnd\":%" PRIu64
-                    ",\"in_flight\":%" PRIu64
-                    ",\"bytes_tx\":%" PRIu64
-                    ",\"bytes_rx\":%" PRIu64
-                    ",\"pkt_sent\":%" PRIu64
-                    ",\"pkt_recv\":%" PRIu64
-                    ",\"pkt_lost\":%" PRIu64
-                    ",\"state\":%u}",
-                    ps->path_id,
-                    ps->srtt_us / 1000,
-                    ps->min_rtt_us / 1000,
-                    ps->cwnd,
-                    ps->bytes_in_flight,
-                    ps->bytes_tx,
-                    ps->bytes_rx,
-                    ps->pkt_sent,
-                    ps->pkt_recv,
-                    ps->pkt_lost,
-                    ps->state);
-                if (w > 0 && (size_t)(pos + w) < sizeof(buf)) pos += w; else break;
+                             "{\"path_id\":%" PRIu64 ",\"srtt_ms\":%" PRIu64
+                             ",\"min_rtt_ms\":%" PRIu64 ",\"cwnd\":%" PRIu64
+                             ",\"in_flight\":%" PRIu64 ",\"bytes_tx\":%" PRIu64
+                             ",\"bytes_rx\":%" PRIu64 ",\"pkt_sent\":%" PRIu64
+                             ",\"pkt_recv\":%" PRIu64 ",\"pkt_lost\":%" PRIu64
+                             ",\"state\":%u}",
+                             ps->path_id, ps->srtt_us / 1000, ps->min_rtt_us / 1000,
+                             ps->cwnd, ps->bytes_in_flight, ps->bytes_tx, ps->bytes_rx,
+                             ps->pkt_sent, ps->pkt_recv, ps->pkt_lost, ps->state);
+                if (w > 0 && (size_t)(pos + w) < sizeof(buf))
+                    pos += w;
+                else
+                    break;
             }
 
             w = snprintf(buf + pos, sizeof(buf) - (size_t)pos, "]}");
@@ -201,8 +192,7 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
         return snprintf(resp, resp_len, "%.*s", pos, buf);
 
     } else {
-        return snprintf(resp, resp_len,
-                        "{\"ok\":false,\"error\":\"unknown cmd\"}");
+        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"unknown cmd\"}");
     }
 }
 
@@ -225,36 +215,44 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
 
     /* Accumulate data until we have a complete request */
     while (conn->req_len < CTRL_MAX_REQ) {
-        ssize_t n = read(fd, conn->req + conn->req_len,
-                         CTRL_MAX_REQ - conn->req_len);
+        ssize_t n = read(fd, conn->req + conn->req_len, CTRL_MAX_REQ - conn->req_len);
         if (n > 0) {
             conn->req_len += (size_t)n;
 
             /* Detect a complete JSON object by brace counting */
             const char *p = conn->req;
-            while (*p && isspace((unsigned char)*p)) p++;
+            while (*p && isspace((unsigned char)*p))
+                p++;
             if (*p == '{') {
                 int depth = 0, in_str = 0;
                 int complete = 0;
                 for (size_t i = (size_t)(p - conn->req); i < conn->req_len; i++) {
                     char c = conn->req[i];
                     if (in_str) {
-                        if (c == '\\') { i++; continue; }
-                        if (c == '"')  in_str = 0;
+                        if (c == '\\') {
+                            i++;
+                            continue;
+                        }
+                        if (c == '"') in_str = 0;
                     } else {
-                        if      (c == '"')  in_str = 1;
-                        else if (c == '{')  depth++;
-                        else if (c == '}' && --depth == 0) { complete = 1; break; }
+                        if (c == '"')
+                            in_str = 1;
+                        else if (c == '{')
+                            depth++;
+                        else if (c == '}' && --depth == 0) {
+                            complete = 1;
+                            break;
+                        }
                     }
                 }
                 if (!complete) continue;
             } else if (!memchr(conn->req, '\n', conn->req_len)) {
-                continue;  /* newline-terminated form: wait for more */
+                continue; /* newline-terminated form: wait for more */
             }
         } else if (n == 0) {
-            break;  /* EOF — process whatever we have */
+            break; /* EOF — process whatever we have */
         } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return;  /* wait for more data */
+            return; /* wait for more data */
         } else {
             /* read error — close connection */
             event_del(conn->ev);
@@ -272,7 +270,7 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
     char resp[16384];
     int rlen = dispatch(conn->req, resp, sizeof(resp) - 2, conn->cs->server);
     if (rlen > 0) {
-        resp[rlen]     = '\n';
+        resp[rlen] = '\n';
         resp[rlen + 1] = '\0';
         (void)write(fd, resp, (size_t)rlen + 1);
     }
@@ -312,14 +310,21 @@ ctrl_on_accept(evutil_socket_t fd, short what, void *arg)
     }
 
     ctrl_conn_t *conn = calloc(1, sizeof(*conn));
-    if (!conn) { close(cfd); return; }
+    if (!conn) {
+        close(cfd);
+        return;
+    }
 
     conn->fd = cfd;
     conn->cs = cs;
-    conn->ev = event_new(cs->eb, cfd, EV_READ | EV_PERSIST | EV_TIMEOUT,
-                          ctrl_on_read, conn);
-    if (!conn->ev) { free(conn); close(cfd); return; }
-    struct timeval tv = { .tv_sec = CTRL_READ_TIMEOUT_SEC };
+    conn->ev =
+        event_new(cs->eb, cfd, EV_READ | EV_PERSIST | EV_TIMEOUT, ctrl_on_read, conn);
+    if (!conn->ev) {
+        free(conn);
+        close(cfd);
+        return;
+    }
+    struct timeval tv = {.tv_sec = CTRL_READ_TIMEOUT_SEC};
     event_add(conn->ev, &tv);
     cs->n_conns++;
 }
@@ -332,32 +337,32 @@ ctrl_socket_create(struct event_base *eb, const char *addr, int port,
 {
     if (!eb || port <= 0 || port > 65535 || !server) return NULL;
 
-    if (!addr || addr[0] == '\0')
-        addr = "127.0.0.1";
+    if (!addr || addr[0] == '\0') addr = "127.0.0.1";
 
     /* Warn if exposed beyond loopback — the control API has no auth */
     if (strcmp(addr, "127.0.0.1") != 0 && strcmp(addr, "::1") != 0)
         LOG_WRN("control API: binding to non-loopback address %s — "
-                "the control API has no authentication", addr);
+                "the control API has no authentication",
+                addr);
 
     ctrl_socket_t *cs = calloc(1, sizeof(*cs));
     if (!cs) return NULL;
-    cs->eb     = eb;
+    cs->eb = eb;
     cs->server = server;
 
     /* Determine address family */
-    struct sockaddr_in  sin4;
+    struct sockaddr_in sin4;
     struct sockaddr_in6 sin6;
-    struct sockaddr    *sa;
-    socklen_t           sa_len;
+    struct sockaddr *sa;
+    socklen_t sa_len;
 
     memset(&sin4, 0, sizeof(sin4));
     memset(&sin6, 0, sizeof(sin6));
 
     if (inet_pton(AF_INET6, addr, &sin6.sin6_addr) == 1) {
         sin6.sin6_family = AF_INET6;
-        sin6.sin6_port   = htons((uint16_t)port);
-        sa     = (struct sockaddr *)&sin6;
+        sin6.sin6_port = htons((uint16_t)port);
+        sa = (struct sockaddr *)&sin6;
         sa_len = sizeof(sin6);
         cs->listen_fd = socket(AF_INET6, SOCK_STREAM, 0);
     } else {
@@ -367,8 +372,8 @@ ctrl_socket_create(struct event_base *eb, const char *addr, int port,
             return NULL;
         }
         sin4.sin_family = AF_INET;
-        sin4.sin_port   = htons((uint16_t)port);
-        sa     = (struct sockaddr *)&sin4;
+        sin4.sin_port = htons((uint16_t)port);
+        sa = (struct sockaddr *)&sin4;
         sa_len = sizeof(sin4);
         cs->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     }
@@ -399,8 +404,8 @@ ctrl_socket_create(struct event_base *eb, const char *addr, int port,
     int flags = fcntl(cs->listen_fd, F_GETFL, 0);
     fcntl(cs->listen_fd, F_SETFL, flags | O_NONBLOCK);
 
-    cs->ev_accept = event_new(eb, cs->listen_fd, EV_READ | EV_PERSIST,
-                               ctrl_on_accept, cs);
+    cs->ev_accept =
+        event_new(eb, cs->listen_fd, EV_READ | EV_PERSIST, ctrl_on_accept, cs);
     if (!cs->ev_accept) {
         close(cs->listen_fd);
         free(cs);
@@ -416,7 +421,10 @@ void
 ctrl_socket_destroy(ctrl_socket_t *cs)
 {
     if (!cs) return;
-    if (cs->ev_accept) { event_del(cs->ev_accept); event_free(cs->ev_accept); }
+    if (cs->ev_accept) {
+        event_del(cs->ev_accept);
+        event_free(cs->ev_accept);
+    }
     if (cs->listen_fd >= 0) close(cs->listen_fd);
     free(cs);
 }

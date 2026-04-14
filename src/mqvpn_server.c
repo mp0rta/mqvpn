@@ -1214,8 +1214,8 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
                 return -1;
             }
 
-            int auth_required = (s->config.auth_key[0] != '\0') ||
-                                (s->config.n_users > 0);
+            int auth_required =
+                (s->config.auth_key[0] != '\0') || (s->config.n_users > 0);
             if (auth_required) {
                 int authed = 0;
 
@@ -1231,10 +1231,9 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
                     for (int i = 0; i < s->config.n_users; i++) {
                         const char *expected_key = s->config.user_keys[i];
                         if (expected_key[0] == '\0') continue;
-                        authed |= (mqvpn_auth_ct_compare(
-                                       auth_token, auth_token_len,
-                                       expected_key,
-                                       strlen(expected_key)) == 0);
+                        authed |= (mqvpn_auth_ct_compare(auth_token, auth_token_len,
+                                                         expected_key,
+                                                         strlen(expected_key)) == 0);
                     }
                 }
 
@@ -1247,20 +1246,19 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
                 /* Record which user matched (second pass, not timing-sensitive) */
                 stream->conn->connected_at_us = now_us();
                 if (s->config.auth_key[0] != '\0' &&
-                    mqvpn_auth_ct_compare(auth_token, auth_token_len,
-                                          s->config.auth_key,
+                    mqvpn_auth_ct_compare(auth_token, auth_token_len, s->config.auth_key,
                                           strlen(s->config.auth_key)) == 0) {
-                    snprintf(stream->conn->username,
-                             sizeof(stream->conn->username), "(global)");
+                    snprintf(stream->conn->username, sizeof(stream->conn->username),
+                             "(global)");
                 } else {
                     for (int i = 0; i < s->config.n_users; i++) {
                         const char *ek = s->config.user_keys[i];
                         if (ek[0] != '\0' &&
-                            mqvpn_auth_ct_compare(auth_token, auth_token_len,
-                                                  ek, strlen(ek)) == 0) {
+                            mqvpn_auth_ct_compare(auth_token, auth_token_len, ek,
+                                                  strlen(ek)) == 0) {
                             snprintf(stream->conn->username,
-                                     sizeof(stream->conn->username),
-                                     "%s", s->config.user_names[i]);
+                                     sizeof(stream->conn->username), "%s",
+                                     s->config.user_names[i]);
                             break;
                         }
                     }
@@ -1490,7 +1488,7 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     memcpy(&s->config, cfg, sizeof(*cfg));
     memcpy(&s->cbs, cbs, sizeof(*cbs));
     s->user_ctx = user_ctx;
-        /* caller guarantees lifetime exceeds this object */ // lgtm[cpp/stack-address-escape]
+    /* caller guarantees lifetime exceeds this object */ // lgtm[cpp/stack-address-escape]
     s->udp_fd = -1;
     s->max_clients = cfg->max_clients > 0 ? cfg->max_clients : 64;
     s->ptb_tokens = PTB_RATE_LIMIT;
@@ -1852,13 +1850,15 @@ mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *out)
     return MQVPN_OK;
 }
 
-int mqvpn_server_get_n_clients(const mqvpn_server_t *s)
+int
+mqvpn_server_get_n_clients(const mqvpn_server_t *s)
 {
     if (!s) return 0;
     return s->n_sessions;
 }
 
-int mqvpn_server_list_users(const mqvpn_server_t *s, char names[][64], int max)
+int
+mqvpn_server_list_users(const mqvpn_server_t *s, char names[][64], int max)
 {
     if (!s || !names || max <= 0) return 0;
     int n = s->config.n_users < max ? s->config.n_users : max;
@@ -1867,7 +1867,8 @@ int mqvpn_server_list_users(const mqvpn_server_t *s, char names[][64], int max)
     return n;
 }
 
-int mqvpn_server_add_user(mqvpn_server_t *s, const char *username, const char *key)
+int
+mqvpn_server_add_user(mqvpn_server_t *s, const char *username, const char *key)
 {
     if (!s || !username || !key || username[0] == '\0' || key[0] == '\0')
         return MQVPN_ERR_INVALID_ARG;
@@ -1880,14 +1881,12 @@ int mqvpn_server_add_user(mqvpn_server_t *s, const char *username, const char *k
 
     for (int i = 0; i < s->config.n_users; i++) {
         if (strcmp(s->config.user_names[i], username) == 0) {
-            snprintf(s->config.user_keys[i], sizeof(s->config.user_keys[i]),
-                     "%s", key);
+            snprintf(s->config.user_keys[i], sizeof(s->config.user_keys[i]), "%s", key);
             return MQVPN_OK;
         }
     }
 
-    if (s->config.n_users >= MQVPN_MAX_USERS)
-        return MQVPN_ERR_MAX_CLIENTS;
+    if (s->config.n_users >= MQVPN_MAX_USERS) return MQVPN_ERR_MAX_CLIENTS;
 
     snprintf(s->config.user_names[s->config.n_users],
              sizeof(s->config.user_names[s->config.n_users]), "%s", username);
@@ -1897,10 +1896,10 @@ int mqvpn_server_add_user(mqvpn_server_t *s, const char *username, const char *k
     return MQVPN_OK;
 }
 
-int mqvpn_server_remove_user(mqvpn_server_t *s, const char *username)
+int
+mqvpn_server_remove_user(mqvpn_server_t *s, const char *username)
 {
-    if (!s || !username || username[0] == '\0')
-        return MQVPN_ERR_INVALID_ARG;
+    if (!s || !username || username[0] == '\0') return MQVPN_ERR_INVALID_ARG;
 
     int found = 0;
     for (int i = 0; i < s->config.n_users; i++) {
@@ -1932,12 +1931,10 @@ int mqvpn_server_remove_user(mqvpn_server_t *s, const char *username)
 }
 
 int
-mqvpn_server_get_client_info(const mqvpn_server_t *server,
-                              mqvpn_client_info_t *out,
-                              int max_clients, int *n_clients)
+mqvpn_server_get_client_info(const mqvpn_server_t *server, mqvpn_client_info_t *out,
+                             int max_clients, int *n_clients)
 {
-    if (!server || !out || max_clients <= 0 || !n_clients)
-        return MQVPN_ERR_INVALID_ARG;
+    if (!server || !out || max_clients <= 0 || !n_clients) return MQVPN_ERR_INVALID_ARG;
 
     mqvpn_server_t *s = (mqvpn_server_t *)server;
     int count = 0;
@@ -1957,9 +1954,9 @@ mqvpn_server_get_client_info(const mqvpn_server_t *server,
         const struct sockaddr_in6 *s6 = &conn->peer_addr;
         const uint8_t *b = s6->sin6_addr.s6_addr;
         /* Detect IPv4-mapped IPv6 (::ffff:x.x.x.x) */
-        if (b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0 &&
-            b[4] == 0 && b[5] == 0 && b[6] == 0 && b[7] == 0 &&
-            b[8] == 0 && b[9] == 0 && b[10] == 0xff && b[11] == 0xff) {
+        if (b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0 && b[4] == 0 && b[5] == 0 &&
+            b[6] == 0 && b[7] == 0 && b[8] == 0 && b[9] == 0 && b[10] == 0xff &&
+            b[11] == 0xff) {
             struct in_addr v4;
             memcpy(&v4, &b[12], 4);
             inet_ntop(AF_INET, &v4, addr_str, sizeof(addr_str));
@@ -2006,7 +2003,8 @@ mqvpn_server_get_client_info(const mqvpn_server_t *server,
     return MQVPN_OK;
 }
 
-int mqvpn_server_get_interest(const mqvpn_server_t *s, mqvpn_interest_t *out)
+int
+mqvpn_server_get_interest(const mqvpn_server_t *s, mqvpn_interest_t *out)
 {
     if (!s || !out) return MQVPN_ERR_INVALID_ARG;
     memset(out, 0, sizeof(*out));

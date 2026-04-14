@@ -153,8 +153,8 @@ apply_resolvectl(mqvpn_dns_t *dns)
         LOG_WRN("dns: resolvectl default-route failed (continuing)");
     }
 
-    LOG_INF("dns: configured %d server(s) via resolvectl on %s",
-            dns->n_servers, dns->tun_name);
+    LOG_INF("dns: configured %d server(s) via resolvectl on %s", dns->n_servers,
+            dns->tun_name);
     return 0;
 }
 

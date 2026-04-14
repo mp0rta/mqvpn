@@ -32,51 +32,54 @@
 
 /* ── Test infrastructure ── */
 
-static int g_tests_run    = 0;
+static int g_tests_run = 0;
 static int g_tests_passed = 0;
 
-#define TEST(name) \
+#define TEST(name)                 \
     static void test_##name(void); \
-    static void run_##name(void) { \
-        g_tests_run++; \
+    static void run_##name(void)   \
+    {                              \
+        g_tests_run++;             \
         printf("  %-50s ", #name); \
-        test_##name(); \
-        g_tests_passed++; \
-        printf("PASS\n"); \
-    } \
+        test_##name();             \
+        g_tests_passed++;          \
+        printf("PASS\n");          \
+    }                              \
     static void test_##name(void)
 
-#define ASSERT_EQ(a, b) do { \
-    if ((a) != (b)) { \
-        printf("FAIL\n    %s:%d: %s == %lld, expected %lld\n", \
-               __FILE__, __LINE__, #a, (long long)(a), (long long)(b)); \
-        exit(1); \
-    } \
-} while (0)
+#define ASSERT_EQ(a, b)                                                                \
+    do {                                                                               \
+        if ((a) != (b)) {                                                              \
+            printf("FAIL\n    %s:%d: %s == %lld, expected %lld\n", __FILE__, __LINE__, \
+                   #a, (long long)(a), (long long)(b));                                \
+            exit(1);                                                                   \
+        }                                                                              \
+    } while (0)
 
-#define ASSERT_NE(a, b) do { \
-    if ((a) == (b)) { \
-        printf("FAIL\n    %s:%d: %s == %s (unexpected)\n", \
-               __FILE__, __LINE__, #a, #b); \
-        exit(1); \
-    } \
-} while (0)
+#define ASSERT_NE(a, b)                                                                \
+    do {                                                                               \
+        if ((a) == (b)) {                                                              \
+            printf("FAIL\n    %s:%d: %s == %s (unexpected)\n", __FILE__, __LINE__, #a, \
+                   #b);                                                                \
+            exit(1);                                                                   \
+        }                                                                              \
+    } while (0)
 
-#define ASSERT_NULL(a) do { \
-    if ((a) != NULL) { \
-        printf("FAIL\n    %s:%d: %s is not NULL\n", \
-               __FILE__, __LINE__, #a); \
-        exit(1); \
-    } \
-} while (0)
+#define ASSERT_NULL(a)                                                           \
+    do {                                                                         \
+        if ((a) != NULL) {                                                       \
+            printf("FAIL\n    %s:%d: %s is not NULL\n", __FILE__, __LINE__, #a); \
+            exit(1);                                                             \
+        }                                                                        \
+    } while (0)
 
-#define ASSERT_NOT_NULL(a) do { \
-    if ((a) == NULL) { \
-        printf("FAIL\n    %s:%d: %s is NULL\n", \
-               __FILE__, __LINE__, #a); \
-        exit(1); \
-    } \
-} while (0)
+#define ASSERT_NOT_NULL(a)                                                   \
+    do {                                                                     \
+        if ((a) == NULL) {                                                   \
+            printf("FAIL\n    %s:%d: %s is NULL\n", __FILE__, __LINE__, #a); \
+            exit(1);                                                         \
+        }                                                                    \
+    } while (0)
 
 /* ── Mock callback state ── */
 
@@ -85,28 +88,34 @@ static int g_tunnel_config_ready_called = 0;
 static mqvpn_tunnel_info_t g_last_tunnel_info;
 static int g_log_called = 0;
 
-static void mock_tun_output(const uint8_t *pkt, size_t len, void *user_ctx)
+static void
+mock_tun_output(const uint8_t *pkt, size_t len, void *user_ctx)
 {
-    (void)pkt; (void)len; (void)user_ctx;
+    (void)pkt;
+    (void)len;
+    (void)user_ctx;
     g_tun_output_called++;
 }
 
-static void mock_tunnel_config_ready(const mqvpn_tunnel_info_t *info,
-                                       void *user_ctx)
+static void
+mock_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
 {
     (void)user_ctx;
     g_tunnel_config_ready_called++;
-    if (info)
-        memcpy(&g_last_tunnel_info, info, sizeof(g_last_tunnel_info));
+    if (info) memcpy(&g_last_tunnel_info, info, sizeof(g_last_tunnel_info));
 }
 
-static void mock_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
+static void
+mock_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
 {
-    (void)level; (void)msg; (void)user_ctx;
+    (void)level;
+    (void)msg;
+    (void)user_ctx;
     g_log_called++;
 }
 
-static void reset_mocks(void)
+static void
+reset_mocks(void)
 {
     g_tun_output_called = 0;
     g_tunnel_config_ready_called = 0;
@@ -116,7 +125,8 @@ static void reset_mocks(void)
 
 /* ── Helper: create a valid server config ── */
 
-static mqvpn_config_t *make_server_config(void)
+static mqvpn_config_t *
+make_server_config(void)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
     if (!cfg) return NULL;
@@ -302,9 +312,9 @@ TEST(server_set_socket_fd)
     mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
     mqvpn_config_free(cfg);
 
-    struct sockaddr_in laddr = { .sin_family = AF_INET };
-    ASSERT_EQ(mqvpn_server_set_socket_fd(s, 42,
-              (struct sockaddr *)&laddr, sizeof(laddr)), MQVPN_OK);
+    struct sockaddr_in laddr = {.sin_family = AF_INET};
+    ASSERT_EQ(mqvpn_server_set_socket_fd(s, 42, (struct sockaddr *)&laddr, sizeof(laddr)),
+              MQVPN_OK);
     ASSERT_EQ(mqvpn_server_set_socket_fd(s, -1, NULL, 0), MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_server_set_socket_fd(NULL, 42, NULL, 0), MQVPN_ERR_INVALID_ARG);
 
@@ -339,9 +349,10 @@ TEST(server_on_tun_packet_null)
 TEST(server_on_socket_recv_null)
 {
     uint8_t pkt[20];
-    struct sockaddr_in addr = { .sin_family = AF_INET };
-    ASSERT_EQ(mqvpn_server_on_socket_recv(NULL, pkt, 20,
-              (struct sockaddr *)&addr, sizeof(addr)), MQVPN_ERR_INVALID_ARG);
+    struct sockaddr_in addr = {.sin_family = AF_INET};
+    ASSERT_EQ(mqvpn_server_on_socket_recv(NULL, pkt, 20, (struct sockaddr *)&addr,
+                                          sizeof(addr)),
+              MQVPN_ERR_INVALID_ARG);
 }
 
 /* ── on_tun_packet with no sessions ── */
@@ -361,7 +372,7 @@ TEST(server_on_tun_packet_no_sessions)
     /* With no sessions, on_tun_packet should return OK (early return, no ICMP) */
     uint8_t pkt[40];
     memset(pkt, 0, sizeof(pkt));
-    pkt[0] = 0x45;  /* IPv4 */
+    pkt[0] = 0x45; /* IPv4 */
     ASSERT_EQ(mqvpn_server_on_tun_packet(s, pkt, 40), MQVPN_OK);
 
     mqvpn_server_destroy(s);
@@ -374,8 +385,9 @@ static uint32_t g_last_session_id = 0;
 static int g_client_disconnected_called = 0;
 static uint32_t g_last_disconnected_session_id = 0;
 
-static void mock_on_client_connected(const mqvpn_tunnel_info_t *info,
-                                       uint32_t session_id, void *user_ctx)
+static void
+mock_on_client_connected(const mqvpn_tunnel_info_t *info, uint32_t session_id,
+                         void *user_ctx)
 {
     (void)user_ctx;
     g_client_connected_called++;
@@ -385,10 +397,11 @@ static void mock_on_client_connected(const mqvpn_tunnel_info_t *info,
     }
 }
 
-static void mock_on_client_disconnected(uint32_t session_id,
-                                          mqvpn_error_t reason, void *user_ctx)
+static void
+mock_on_client_disconnected(uint32_t session_id, mqvpn_error_t reason, void *user_ctx)
 {
-    (void)reason; (void)user_ctx;
+    (void)reason;
+    (void)user_ctx;
     g_client_disconnected_called++;
     g_last_disconnected_session_id = session_id;
 }
@@ -399,26 +412,28 @@ static int g_cli_tun_output_called = 0;
 static int g_cli_tunnel_ready_called = 0;
 static mqvpn_tunnel_info_t g_cli_tunnel_info;
 
-static void mock_cli_tun_output(const uint8_t *pkt, size_t len, void *user_ctx)
+static void
+mock_cli_tun_output(const uint8_t *pkt, size_t len, void *user_ctx)
 {
-    (void)pkt; (void)len; (void)user_ctx;
+    (void)pkt;
+    (void)len;
+    (void)user_ctx;
     g_cli_tun_output_called++;
 }
 
-static void mock_cli_tunnel_ready(const mqvpn_tunnel_info_t *info,
-                                    void *user_ctx)
+static void
+mock_cli_tunnel_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
 {
     (void)user_ctx;
     g_cli_tunnel_ready_called++;
-    if (info)
-        memcpy(&g_cli_tunnel_info, info, sizeof(g_cli_tunnel_info));
+    if (info) memcpy(&g_cli_tunnel_info, info, sizeof(g_cli_tunnel_info));
 }
 
 /* ── Packet relay helper: drain sockets and tick both engines ── */
 
-static void drain_and_tick(mqvpn_server_t *svr, int svr_fd,
-                             mqvpn_client_t *cli, int cli_fd,
-                             mqvpn_path_handle_t path_h)
+static void
+drain_and_tick(mqvpn_server_t *svr, int svr_fd, mqvpn_client_t *cli, int cli_fd,
+               mqvpn_path_handle_t path_h)
 {
     uint8_t buf[65536];
     struct sockaddr_storage from;
@@ -427,23 +442,25 @@ static void drain_and_tick(mqvpn_server_t *svr, int svr_fd,
     /* Drain server socket (packets from client) */
     for (;;) {
         from_len = sizeof(from);
-        // codeql[cpp/uncontrolled-allocation-size] buf bounded by sizeof(buf); xquic validates internally
+        // codeql[cpp/uncontrolled-allocation-size] buf bounded by sizeof(buf); xquic
+        // validates internally
         ssize_t n = recvfrom(svr_fd, buf, sizeof(buf), MSG_DONTWAIT,
-                              (struct sockaddr *)&from, &from_len);
+                             (struct sockaddr *)&from, &from_len);
         if (n <= 0) break;
-        mqvpn_server_on_socket_recv(svr, buf, (size_t)n,
-                                      (struct sockaddr *)&from, from_len);
+        mqvpn_server_on_socket_recv(svr, buf, (size_t)n, (struct sockaddr *)&from,
+                                    from_len);
     }
 
     /* Drain client socket (packets from server) */
     for (;;) {
         from_len = sizeof(from);
-        // codeql[cpp/uncontrolled-allocation-size] buf bounded by sizeof(buf); xquic validates internally
+        // codeql[cpp/uncontrolled-allocation-size] buf bounded by sizeof(buf); xquic
+        // validates internally
         ssize_t n = recvfrom(cli_fd, buf, sizeof(buf), MSG_DONTWAIT,
-                              (struct sockaddr *)&from, &from_len);
+                             (struct sockaddr *)&from, &from_len);
         if (n <= 0) break;
-        mqvpn_client_on_socket_recv(cli, path_h, buf, (size_t)n,
-                                      (struct sockaddr *)&from, from_len);
+        mqvpn_client_on_socket_recv(cli, path_h, buf, (size_t)n, (struct sockaddr *)&from,
+                                    from_len);
     }
 
     mqvpn_server_tick(svr);
@@ -507,8 +524,8 @@ TEST(server_session_set_socket_with_addr)
     laddr.sin_port = htons(443);
     laddr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-    ASSERT_EQ(mqvpn_server_set_socket_fd(s, 42,
-              (struct sockaddr *)&laddr, sizeof(laddr)), MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_set_socket_fd(s, 42, (struct sockaddr *)&laddr, sizeof(laddr)),
+              MQVPN_OK);
 
     /* Verify NULL local_addr is also accepted */
     ASSERT_EQ(mqvpn_server_set_socket_fd(s, 43, NULL, 0), MQVPN_OK);
@@ -536,14 +553,17 @@ TEST(server_session_on_tun_v6_no_sessions)
     /* IPv6 packet to unknown dest within pool */
     uint8_t pkt6[60];
     memset(pkt6, 0, sizeof(pkt6));
-    pkt6[0] = 0x60;  /* IPv6 */
-    pkt6[4] = 0; pkt6[5] = 20;  /* payload length */
-    pkt6[6] = 59;  /* next header: no next */
-    pkt6[7] = 64;  /* hop limit */
+    pkt6[0] = 0x60; /* IPv6 */
+    pkt6[4] = 0;
+    pkt6[5] = 20; /* payload length */
+    pkt6[6] = 59; /* next header: no next */
+    pkt6[7] = 64; /* hop limit */
     /* src: fd00::100 */
-    pkt6[8] = 0xfd; pkt6[23] = 0x01;
+    pkt6[8] = 0xfd;
+    pkt6[23] = 0x01;
     /* dst: fd00::50 (no session) */
-    pkt6[24] = 0xfd; pkt6[39] = 0x32;
+    pkt6[24] = 0xfd;
+    pkt6[39] = 0x32;
 
     /* n_sessions == 0 → early return, no ICMP generated */
     ASSERT_EQ(mqvpn_server_on_tun_packet(s, pkt6, 60), MQVPN_OK);
@@ -608,8 +628,9 @@ TEST(server_session_quic_loopback)
     ASSERT_NOT_NULL(svr);
     mqvpn_config_free(svr_cfg);
 
-    ASSERT_EQ(mqvpn_server_set_socket_fd(svr, svr_fd,
-              (struct sockaddr *)&svr_addr, sizeof(svr_addr)), MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_set_socket_fd(svr, svr_fd, (struct sockaddr *)&svr_addr,
+                                         sizeof(svr_addr)),
+              MQVPN_OK);
     ASSERT_EQ(mqvpn_server_start(svr), MQVPN_OK);
 
     /* ── Client setup ── */
@@ -638,8 +659,7 @@ TEST(server_session_quic_loopback)
     ASSERT_NE(path_h, (mqvpn_path_handle_t)-1);
 
     /* Set server address and connect */
-    mqvpn_client_set_server_addr(cli,
-        (struct sockaddr *)&svr_addr, sizeof(svr_addr));
+    mqvpn_client_set_server_addr(cli, (struct sockaddr *)&svr_addr, sizeof(svr_addr));
     ASSERT_EQ(mqvpn_client_connect(cli), MQVPN_OK);
 
     /* ── Phase 1: QUIC handshake + MASQUE tunnel setup ── */
@@ -647,8 +667,7 @@ TEST(server_session_quic_loopback)
      * QUIC retransmission PTO can be 1s+, so 500ms was too tight. */
     for (int elapsed = 0; elapsed < 10000; elapsed++) {
         drain_and_tick(svr, svr_fd, cli, cli_fd, path_h);
-        if (g_client_connected_called > 0 && g_cli_tunnel_ready_called > 0)
-            break;
+        if (g_client_connected_called > 0 && g_cli_tunnel_ready_called > 0) break;
 
         mqvpn_interest_t svr_int = {0}, cli_int = {0};
         mqvpn_server_get_interest(svr, &svr_int);
@@ -661,8 +680,8 @@ TEST(server_session_quic_loopback)
         if (wait_ms < 1) wait_ms = 1;
 
         struct pollfd pfds[2] = {
-            { .fd = svr_fd, .events = POLLIN },
-            { .fd = cli_fd, .events = POLLIN },
+            {.fd = svr_fd, .events = POLLIN},
+            {.fd = cli_fd, .events = POLLIN},
         };
         poll(pfds, 2, wait_ms);
         elapsed += wait_ms;
@@ -686,26 +705,29 @@ TEST(server_session_quic_loopback)
     /* Build IPv4 packet destined for client's assigned IP */
     uint8_t tun_pkt[40];
     memset(tun_pkt, 0, sizeof(tun_pkt));
-    tun_pkt[0] = 0x45;                         /* IPv4, IHL=5 */
-    tun_pkt[2] = 0; tun_pkt[3] = 40;          /* total length = 40 */
-    tun_pkt[8] = 64;                           /* TTL */
-    tun_pkt[9] = 17;                           /* UDP */
+    tun_pkt[0] = 0x45; /* IPv4, IHL=5 */
+    tun_pkt[2] = 0;
+    tun_pkt[3] = 40; /* total length = 40 */
+    tun_pkt[8] = 64; /* TTL */
+    tun_pkt[9] = 17; /* UDP */
     /* Source: 8.8.8.8 */
-    tun_pkt[12] = 8; tun_pkt[13] = 8; tun_pkt[14] = 8; tun_pkt[15] = 8;
+    tun_pkt[12] = 8;
+    tun_pkt[13] = 8;
+    tun_pkt[14] = 8;
+    tun_pkt[15] = 8;
     /* Destination: client's assigned IP */
     memcpy(tun_pkt + 16, g_cli_tunnel_info.assigned_ip, 4);
 
     int baseline = g_cli_tun_output_called;
-    ASSERT_EQ(mqvpn_server_on_tun_packet(svr, tun_pkt, sizeof(tun_pkt)),
-              MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_on_tun_packet(svr, tun_pkt, sizeof(tun_pkt)), MQVPN_OK);
 
     /* Pump to deliver the MASQUE DATAGRAM */
     for (int i = 0; i < 5000; i++) {
         drain_and_tick(svr, svr_fd, cli, cli_fd, path_h);
         if (g_cli_tun_output_called > baseline) break;
         struct pollfd pfds[2] = {
-            { .fd = svr_fd, .events = POLLIN },
-            { .fd = cli_fd, .events = POLLIN },
+            {.fd = svr_fd, .events = POLLIN},
+            {.fd = cli_fd, .events = POLLIN},
         };
         int w = poll(pfds, 2, 5);
         i += (w == 0) ? 5 : 1;
@@ -716,24 +738,27 @@ TEST(server_session_quic_loopback)
     uint8_t ttl1_pkt[40];
     memset(ttl1_pkt, 0, sizeof(ttl1_pkt));
     ttl1_pkt[0] = 0x45;
-    ttl1_pkt[2] = 0; ttl1_pkt[3] = 40;
-    ttl1_pkt[8] = 1;  /* TTL = 1 → expires */
+    ttl1_pkt[2] = 0;
+    ttl1_pkt[3] = 40;
+    ttl1_pkt[8] = 1; /* TTL = 1 → expires */
     ttl1_pkt[9] = 17;
-    ttl1_pkt[12] = 8; ttl1_pkt[13] = 8; ttl1_pkt[14] = 8; ttl1_pkt[15] = 8;
+    ttl1_pkt[12] = 8;
+    ttl1_pkt[13] = 8;
+    ttl1_pkt[14] = 8;
+    ttl1_pkt[15] = 8;
     memcpy(ttl1_pkt + 16, g_cli_tunnel_info.assigned_ip, 4);
 
     int tun_baseline = g_tun_output_called;
     int cli_baseline = g_cli_tun_output_called;
-    ASSERT_EQ(mqvpn_server_on_tun_packet(svr, ttl1_pkt, sizeof(ttl1_pkt)),
-              MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_on_tun_packet(svr, ttl1_pkt, sizeof(ttl1_pkt)), MQVPN_OK);
     /* ICMP Time Exceeded should be sent via tun_output (not to client) */
     ASSERT_EQ(g_tun_output_called, tun_baseline + 1);
     /* Client should NOT receive the expired packet */
     for (int i = 0; i < 30; i++) {
         drain_and_tick(svr, svr_fd, cli, cli_fd, path_h);
         struct pollfd pfds[2] = {
-            { .fd = svr_fd, .events = POLLIN },
-            { .fd = cli_fd, .events = POLLIN },
+            {.fd = svr_fd, .events = POLLIN},
+            {.fd = cli_fd, .events = POLLIN},
         };
         poll(pfds, 2, 2);
     }
@@ -747,8 +772,8 @@ TEST(server_session_quic_loopback)
         drain_and_tick(svr, svr_fd, cli, cli_fd, path_h);
         if (g_client_disconnected_called > 0) break;
         struct pollfd pfds[2] = {
-            { .fd = svr_fd, .events = POLLIN },
-            { .fd = cli_fd, .events = POLLIN },
+            {.fd = svr_fd, .events = POLLIN},
+            {.fd = cli_fd, .events = POLLIN},
         };
         int w = poll(pfds, 2, 5);
         i += (w == 0) ? 5 : 1;
@@ -765,7 +790,8 @@ TEST(server_session_quic_loopback)
 
 /* ── Main ── */
 
-int main(void)
+int
+main(void)
 {
     printf("test_server: libmqvpn server API tests\n");
 

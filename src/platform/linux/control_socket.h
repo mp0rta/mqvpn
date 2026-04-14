@@ -21,9 +21,8 @@
 typedef struct ctrl_socket_s ctrl_socket_t;
 
 /* addr defaults to "127.0.0.1" when NULL. */
-ctrl_socket_t *ctrl_socket_create(struct event_base *eb,
-                                   const char *addr, int port,
-                                   mqvpn_server_t *server);
+ctrl_socket_t *ctrl_socket_create(struct event_base *eb, const char *addr, int port,
+                                  mqvpn_server_t *server);
 
 void ctrl_socket_destroy(ctrl_socket_t *cs);
 

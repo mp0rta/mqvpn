@@ -12,15 +12,13 @@
 #include <string.h>
 #include <stdio.h>
 
-int mqvpn_config_add_user(mqvpn_config_t *cfg,
-                          const char *username,
-                          const char *key);
+int mqvpn_config_add_user(mqvpn_config_t *cfg, const char *username, const char *key);
 
 /* json_skip_ws, mqvpn_copy_str, json_find_key, json_read_string, json_read_bool,
  * json_read_int are provided by json_mini.h */
 
-static int json_read_string_array(const char *p,
-                                  char out[][32], int max_items, int *n_items)
+static int
+json_read_string_array(const char *p, char out[][32], int max_items, int *n_items)
 {
     if (!p || !out || !n_items || *p != '[') return MQVPN_ERR_INVALID_ARG;
     p = json_skip_ws(p + 1);
@@ -54,7 +52,8 @@ static int json_read_string_array(const char *p,
     return MQVPN_OK;
 }
 
-static int json_read_users(mqvpn_config_t *cfg, const char *p)
+static int
+json_read_users(mqvpn_config_t *cfg, const char *p)
 {
     if (!cfg || !p || *p != '[') return MQVPN_ERR_INVALID_ARG;
     p = json_skip_ws(p + 1);
@@ -170,9 +169,8 @@ mqvpn_config_set_auth_key(mqvpn_config_t *cfg, const char *key)
     return MQVPN_OK;
 }
 
-int mqvpn_config_add_user(mqvpn_config_t *cfg,
-                          const char *username,
-                          const char *key)
+int
+mqvpn_config_add_user(mqvpn_config_t *cfg, const char *username, const char *key)
 {
     if (!cfg || !username || !key || username[0] == '\0' || key[0] == '\0') {
         return MQVPN_ERR_INVALID_ARG;
@@ -195,15 +193,16 @@ int mqvpn_config_add_user(mqvpn_config_t *cfg,
         return MQVPN_ERR_MAX_CLIENTS;
     }
 
-    snprintf(cfg->user_names[cfg->n_users], sizeof(cfg->user_names[cfg->n_users]),
-             "%s", username);
-    snprintf(cfg->user_keys[cfg->n_users], sizeof(cfg->user_keys[cfg->n_users]),
-             "%s", key);
+    snprintf(cfg->user_names[cfg->n_users], sizeof(cfg->user_names[cfg->n_users]), "%s",
+             username);
+    snprintf(cfg->user_keys[cfg->n_users], sizeof(cfg->user_keys[cfg->n_users]), "%s",
+             key);
     cfg->n_users++;
     return MQVPN_OK;
 }
 
-int mqvpn_config_remove_user(mqvpn_config_t *cfg, const char *username)
+int
+mqvpn_config_remove_user(mqvpn_config_t *cfg, const char *username)
 {
     if (!cfg || !username || username[0] == '\0') {
         return MQVPN_ERR_INVALID_ARG;
@@ -225,7 +224,8 @@ int mqvpn_config_remove_user(mqvpn_config_t *cfg, const char *username)
     return MQVPN_ERR_INVALID_ARG;
 }
 
-int mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
+int
+mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
 {
     if (!cfg || !json_text) return MQVPN_ERR_INVALID_ARG;
 
@@ -324,7 +324,8 @@ int mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
     return MQVPN_OK;
 }
 
-int mqvpn_config_set_insecure(mqvpn_config_t *cfg, int insecure)
+int
+mqvpn_config_set_insecure(mqvpn_config_t *cfg, int insecure)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     cfg->insecure = insecure;

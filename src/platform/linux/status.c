@@ -41,14 +41,13 @@ static void
 format_duration(uint64_t seconds, char *buf, size_t len)
 {
     if (seconds >= 86400)
-        snprintf(buf, len, "%" PRIu64 "d %" PRIu64 "h ago",
-                 seconds / 86400, (seconds % 86400) / 3600);
+        snprintf(buf, len, "%" PRIu64 "d %" PRIu64 "h ago", seconds / 86400,
+                 (seconds % 86400) / 3600);
     else if (seconds >= 3600)
-        snprintf(buf, len, "%" PRIu64 "h %" PRIu64 "m ago",
-                 seconds / 3600, (seconds % 3600) / 60);
+        snprintf(buf, len, "%" PRIu64 "h %" PRIu64 "m ago", seconds / 3600,
+                 (seconds % 3600) / 60);
     else if (seconds >= 60)
-        snprintf(buf, len, "%" PRIu64 "m %" PRIu64 "s ago",
-                 seconds / 60, seconds % 60);
+        snprintf(buf, len, "%" PRIu64 "m %" PRIu64 "s ago", seconds / 60, seconds % 60);
     else
         snprintf(buf, len, "%" PRIu64 "s ago", seconds);
 }
@@ -72,7 +71,10 @@ skip_json_value(const char *p)
     p = json_skip_ws(p);
     if (*p == '"') {
         p++;
-        while (*p && *p != '"') { if (*p == '\\' && p[1]) p++; p++; }
+        while (*p && *p != '"') {
+            if (*p == '\\' && p[1]) p++;
+            p++;
+        }
         return *p == '"' ? p + 1 : NULL;
     }
     if (*p == '{' || *p == '[') {
@@ -82,12 +84,17 @@ skip_json_value(const char *p)
         p++;
         while (*p && depth > 0) {
             if (in_str) {
-                if (*p == '\\' && p[1]) { p++; }
-                else if (*p == '"') in_str = 0;
+                if (*p == '\\' && p[1]) {
+                    p++;
+                } else if (*p == '"')
+                    in_str = 0;
             } else {
-                if (*p == '"') in_str = 1;
-                else if (*p == open) depth++;
-                else if (*p == close) depth--;
+                if (*p == '"')
+                    in_str = 1;
+                else if (*p == open)
+                    depth++;
+                else if (*p == close)
+                    depth--;
             }
             p++;
         }
@@ -139,7 +146,10 @@ print_client(const char *obj)
 
             size_t plen = (size_t)(end - p);
             char path_obj[512];
-            if (plen >= sizeof(path_obj)) { p = end; continue; }
+            if (plen >= sizeof(path_obj)) {
+                p = end;
+                continue;
+            }
             memcpy(path_obj, p, plen);
             path_obj[plen] = '\0';
 
@@ -158,8 +168,7 @@ print_client(const char *obj)
             case 4: state_str = "closed"; break;
             }
 
-            printf("  path %d: srtt=%" PRId64 "ms min_rtt=%" PRId64
-                   "ms cwnd=%s %s\n",
+            printf("  path %d: srtt=%" PRId64 "ms min_rtt=%" PRId64 "ms cwnd=%s %s\n",
                    idx, srtt, min_rtt, cwnd_str, state_str);
 
             p = end;
@@ -203,7 +212,7 @@ run_status(const char *addr, int port)
     }
 
     /* Set timeouts to avoid hanging on unresponsive server */
-    struct timeval tv = { .tv_sec = 5 };
+    struct timeval tv = {.tv_sec = 5};
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 

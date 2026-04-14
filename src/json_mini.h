@@ -15,7 +15,8 @@
 static inline const char *
 json_skip_ws(const char *p)
 {
-    while (*p && isspace((unsigned char)*p)) p++;
+    while (*p && isspace((unsigned char)*p))
+        p++;
     return p;
 }
 
@@ -68,8 +69,14 @@ static inline int
 json_read_bool(const char *p, int *out)
 {
     if (!p || !out) return -1;
-    if (strncmp(p, "true", 4) == 0)  { *out = 1; return 0; }
-    if (strncmp(p, "false", 5) == 0) { *out = 0; return 0; }
+    if (strncmp(p, "true", 4) == 0) {
+        *out = 1;
+        return 0;
+    }
+    if (strncmp(p, "false", 5) == 0) {
+        *out = 0;
+        return 0;
+    }
     return -1;
 }
 
@@ -98,7 +105,10 @@ static inline void
 mqvpn_copy_str(char *dst, size_t dst_len, const char *src)
 {
     if (!dst || dst_len == 0) return;
-    if (!src) { dst[0] = '\0'; return; }
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
     strncpy(dst, src, dst_len - 1);
     dst[dst_len - 1] = '\0';
 }

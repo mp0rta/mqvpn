@@ -13,32 +13,37 @@
 
 /* ── Test infrastructure ── */
 
-static int g_tests_run    = 0;
+static int g_tests_run = 0;
 static int g_tests_passed = 0;
 
-#define TEST(name) \
+#define TEST(name)                 \
     static void test_##name(void); \
-    static void run_##name(void) { \
-        g_tests_run++; \
+    static void run_##name(void)   \
+    {                              \
+        g_tests_run++;             \
         printf("  %-50s ", #name); \
-        test_##name(); \
-        g_tests_passed++; \
-        printf("PASS\n"); \
-    } \
+        test_##name();             \
+        g_tests_passed++;          \
+        printf("PASS\n");          \
+    }                              \
     static void test_##name(void)
 
-#define ASSERT_STR_EQ(a, b) \
-    do { if (strcmp((a), (b)) != 0) { \
-        printf("FAIL\n    %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, (a), (b)); \
-        exit(1); \
-    }} while (0)
+#define ASSERT_STR_EQ(a, b)                                                              \
+    do {                                                                                 \
+        if (strcmp((a), (b)) != 0) {                                                     \
+            printf("FAIL\n    %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, (a), (b)); \
+            exit(1);                                                                     \
+        }                                                                                \
+    } while (0)
 
-#define ASSERT_EQ(a, b) \
-    do { if ((a) != (b)) { \
-        printf("FAIL\n    %s:%d: %lld != %lld\n", __FILE__, __LINE__, \
-               (long long)(a), (long long)(b)); \
-        exit(1); \
-    }} while (0)
+#define ASSERT_EQ(a, b)                                                   \
+    do {                                                                  \
+        if ((a) != (b)) {                                                 \
+            printf("FAIL\n    %s:%d: %lld != %lld\n", __FILE__, __LINE__, \
+                   (long long)(a), (long long)(b));                       \
+            exit(1);                                                      \
+        }                                                                 \
+    } while (0)
 
 /* ── format_bytes tests ── */
 
@@ -234,7 +239,8 @@ TEST(skip_nested)
 
 /* ── Main ── */
 
-int main(void)
+int
+main(void)
 {
     printf("test_status:\n");
 

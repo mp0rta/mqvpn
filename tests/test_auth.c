@@ -11,22 +11,38 @@
 
 static int g_pass = 0, g_fail = 0;
 
-#define ASSERT_EQ_INT(a, b, msg) do { \
-    if ((a) == (b)) { g_pass++; } \
-    else { g_fail++; fprintf(stderr, "FAIL [%s]: %d != %d\n", msg, (int)(a), (int)(b)); } \
-} while(0)
+#define ASSERT_EQ_INT(a, b, msg)                                               \
+    do {                                                                       \
+        if ((a) == (b)) {                                                      \
+            g_pass++;                                                          \
+        } else {                                                               \
+            g_fail++;                                                          \
+            fprintf(stderr, "FAIL [%s]: %d != %d\n", msg, (int)(a), (int)(b)); \
+        }                                                                      \
+    } while (0)
 
-#define ASSERT_EQ_STR(a, b, msg) do { \
-    if (strcmp((a), (b)) == 0) { g_pass++; } \
-    else { g_fail++; fprintf(stderr, "FAIL [%s]: '%s' != '%s'\n", msg, (a), (b)); } \
-} while(0)
+#define ASSERT_EQ_STR(a, b, msg)                                         \
+    do {                                                                 \
+        if (strcmp((a), (b)) == 0) {                                     \
+            g_pass++;                                                    \
+        } else {                                                         \
+            g_fail++;                                                    \
+            fprintf(stderr, "FAIL [%s]: '%s' != '%s'\n", msg, (a), (b)); \
+        }                                                                \
+    } while (0)
 
-#define ASSERT_TRUE(cond, msg) do { \
-    if (cond) { g_pass++; } \
-    else { g_fail++; fprintf(stderr, "FAIL [%s]\n", msg); } \
-} while(0)
+#define ASSERT_TRUE(cond, msg)                   \
+    do {                                         \
+        if (cond) {                              \
+            g_pass++;                            \
+        } else {                                 \
+            g_fail++;                            \
+            fprintf(stderr, "FAIL [%s]\n", msg); \
+        }                                        \
+    } while (0)
 
-static void test_ct_compare_equal(void)
+static void
+test_ct_compare_equal(void)
 {
     const char *a = "mysecretkey123";
     const char *b = "mysecretkey123";
@@ -34,7 +50,8 @@ static void test_ct_compare_equal(void)
                   "ct_compare equal strings");
 }
 
-static void test_ct_compare_different(void)
+static void
+test_ct_compare_different(void)
 {
     const char *a = "mysecretkey123";
     const char *b = "mysecretkey124";
@@ -42,7 +59,8 @@ static void test_ct_compare_different(void)
                 "ct_compare different strings");
 }
 
-static void test_ct_compare_length_mismatch(void)
+static void
+test_ct_compare_length_mismatch(void)
 {
     const char *a = "short";
     const char *b = "longerstring";
@@ -50,21 +68,22 @@ static void test_ct_compare_length_mismatch(void)
                 "ct_compare length mismatch");
 }
 
-static void test_ct_compare_empty(void)
+static void
+test_ct_compare_empty(void)
 {
-    ASSERT_EQ_INT(mqvpn_auth_ct_compare("", 0, "", 0), 0,
-                  "ct_compare empty strings");
+    ASSERT_EQ_INT(mqvpn_auth_ct_compare("", 0, "", 0), 0, "ct_compare empty strings");
 }
 
-static void test_ct_compare_single_byte_diff(void)
+static void
+test_ct_compare_single_byte_diff(void)
 {
     const char *a = "AAAA";
     const char *b = "AABA";
-    ASSERT_TRUE(mqvpn_auth_ct_compare(a, 4, b, 4) != 0,
-                "ct_compare single byte diff");
+    ASSERT_TRUE(mqvpn_auth_ct_compare(a, 4, b, 4) != 0, "ct_compare single byte diff");
 }
 
-static void test_b64_encode_known_vectors(void)
+static void
+test_b64_encode_known_vectors(void)
 {
     char buf[128];
 
@@ -91,7 +110,8 @@ static void test_b64_encode_known_vectors(void)
     ASSERT_EQ_STR(buf, "Zm9vYmFy", "b64 'foobar'");
 }
 
-static void test_b64_encode_padding(void)
+static void
+test_b64_encode_padding(void)
 {
     char buf[128];
 
@@ -108,7 +128,8 @@ static void test_b64_encode_padding(void)
     ASSERT_EQ_STR(buf, "AQID", "b64 1 2 3");
 }
 
-static void test_b64_encode_buffer_limit(void)
+static void
+test_b64_encode_buffer_limit(void)
 {
     char buf[5]; /* Only room for 4 chars + NUL */
     int ret = mqvpn_auth_b64_encode(buf, sizeof(buf), (const unsigned char *)"foo", 3);
@@ -125,16 +146,24 @@ static void test_b64_encode_buffer_limit(void)
 /* Helper: redirect stdout to tmpfile, run genkey, restore stdout,
  * read output into buf.  Returns genkey's return value or -1 on
  * setup failure. */
-static int capture_genkey(char *buf, size_t bufsize)
+static int
+capture_genkey(char *buf, size_t bufsize)
 {
     char tmppath[] = "/tmp/test_auth_genkey_XXXXXX";
     int tmpfd = mkstemp(tmppath);
     if (tmpfd < 0) return -1;
 
     int saved = dup(STDOUT_FILENO);
-    if (saved < 0) { close(tmpfd); unlink(tmppath); return -1; }
+    if (saved < 0) {
+        close(tmpfd);
+        unlink(tmppath);
+        return -1;
+    }
     if (dup2(tmpfd, STDOUT_FILENO) < 0) {
-        close(tmpfd); close(saved); unlink(tmppath); return -1;
+        close(tmpfd);
+        close(saved);
+        unlink(tmppath);
+        return -1;
     }
     close(tmpfd);
 
@@ -147,8 +176,7 @@ static int capture_genkey(char *buf, size_t bufsize)
     buf[0] = '\0';
     FILE *fp = fopen(tmppath, "r");
     if (fp) {
-        if (fgets(buf, (int)bufsize, fp) == NULL)
-            buf[0] = '\0';
+        if (fgets(buf, (int)bufsize, fp) == NULL) buf[0] = '\0';
         fclose(fp);
     }
     unlink(tmppath);
@@ -160,9 +188,10 @@ static int capture_genkey(char *buf, size_t bufsize)
     return ret;
 }
 
-static int is_valid_b64(const char *s, size_t len)
+static int
+is_valid_b64(const char *s, size_t len)
 {
-    if (len % 4 != 0) return 0;    /* base64 output is always a multiple of 4 */
+    if (len % 4 != 0) return 0; /* base64 output is always a multiple of 4 */
 
     int pad_started = 0;
     for (size_t i = 0; i < len; i++) {
@@ -170,7 +199,7 @@ static int is_valid_b64(const char *s, size_t len)
         if (c == '=') {
             pad_started = 1;
         } else if (pad_started) {
-            return 0;               /* non-pad char after '=' */
+            return 0; /* non-pad char after '=' */
         } else if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
                      (c >= '0' && c <= '9') || c == '+' || c == '/')) {
             return 0;
@@ -178,11 +207,13 @@ static int is_valid_b64(const char *s, size_t len)
     }
     /* padding must be 0, 1, or 2 chars at the end */
     size_t pad = 0;
-    while (pad < len && s[len - 1 - pad] == '=') pad++;
+    while (pad < len && s[len - 1 - pad] == '=')
+        pad++;
     return pad <= 2;
 }
 
-static void test_genkey(void)
+static void
+test_genkey(void)
 {
     char buf[128];
     int ret = capture_genkey(buf, sizeof(buf));
@@ -201,11 +232,13 @@ static void test_genkey(void)
     ASSERT_TRUE(is_valid_b64(buf, len), "genkey output is valid base64");
 }
 
-static void test_b64_encode_32_bytes(void)
+static void
+test_b64_encode_32_bytes(void)
 {
     /* Simulate genkey: 32 raw bytes → 44 base64 chars */
     unsigned char raw[32];
-    for (int i = 0; i < 32; i++) raw[i] = (unsigned char)i;
+    for (int i = 0; i < 32; i++)
+        raw[i] = (unsigned char)i;
 
     char buf[64];
     int ret = mqvpn_auth_b64_encode(buf, sizeof(buf), raw, 32);
@@ -216,7 +249,8 @@ static void test_b64_encode_32_bytes(void)
     ASSERT_TRUE(buf[43] == '=', "b64 32 bytes has padding");
 }
 
-static void test_b64_encode_all_zeros(void)
+static void
+test_b64_encode_all_zeros(void)
 {
     unsigned char zeros[3] = {0, 0, 0};
     char buf[16];
@@ -225,7 +259,8 @@ static void test_b64_encode_all_zeros(void)
     ASSERT_EQ_STR(buf, "AAAA", "b64 all zeros");
 }
 
-static void test_b64_encode_all_ff(void)
+static void
+test_b64_encode_all_ff(void)
 {
     unsigned char ffs[3] = {0xff, 0xff, 0xff};
     char buf[16];
@@ -234,7 +269,8 @@ static void test_b64_encode_all_ff(void)
     ASSERT_EQ_STR(buf, "////", "b64 all 0xff");
 }
 
-static void test_ct_compare_long_strings(void)
+static void
+test_ct_compare_long_strings(void)
 {
     /* 256-byte strings */
     char a[256], b[256];
@@ -242,8 +278,7 @@ static void test_ct_compare_long_strings(void)
         a[i] = (char)(i & 0x7f);
         b[i] = (char)(i & 0x7f);
     }
-    ASSERT_EQ_INT(mqvpn_auth_ct_compare(a, 256, b, 256), 0,
-                  "ct_compare 256 bytes equal");
+    ASSERT_EQ_INT(mqvpn_auth_ct_compare(a, 256, b, 256), 0, "ct_compare 256 bytes equal");
 
     /* Differ at last byte */
     b[255] = (char)((b[255] + 1) & 0x7f);
@@ -251,7 +286,8 @@ static void test_ct_compare_long_strings(void)
                 "ct_compare 256 bytes differ at end");
 }
 
-static void test_ct_compare_one_side_empty(void)
+static void
+test_ct_compare_one_side_empty(void)
 {
     const char *a = "notempty";
     ASSERT_TRUE(mqvpn_auth_ct_compare(a, strlen(a), "", 0) != 0,
@@ -260,7 +296,8 @@ static void test_ct_compare_one_side_empty(void)
                 "ct_compare other side empty");
 }
 
-static void test_genkey_format_and_uniqueness(void)
+static void
+test_genkey_format_and_uniqueness(void)
 {
     /* Primary: both outputs have correct format (44-char valid base64).
      * Secondary (informational): they should differ.  Collision probability
@@ -287,11 +324,12 @@ static void test_genkey_format_and_uniqueness(void)
     /* Informational: keys should differ (not a hard failure) */
     if (strcmp(buf1, buf2) == 0) {
         fprintf(stderr, "INFO [genkey_uniqueness]: two keys matched "
-                "(p=2^-256, likely /dev/urandom issue)\n");
+                        "(p=2^-256, likely /dev/urandom issue)\n");
     }
 }
 
-int main(void)
+int
+main(void)
 {
     test_ct_compare_equal();
     test_ct_compare_different();

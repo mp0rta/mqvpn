@@ -9,9 +9,9 @@
 #ifndef MQVPN_CONFIG_H
 #define MQVPN_CONFIG_H
 
-#define MQVPN_CONFIG_MAX_PATHS   4
-#define MQVPN_CONFIG_MAX_DNS     4
-#define MQVPN_CONFIG_MAX_USERS   64
+#define MQVPN_CONFIG_MAX_PATHS 4
+#define MQVPN_CONFIG_MAX_DNS   4
+#define MQVPN_CONFIG_MAX_USERS 64
 
 typedef struct mqvpn_file_config_s {
     /* [Interface] — common */
@@ -42,8 +42,8 @@ typedef struct mqvpn_file_config_s {
     char server_auth_key[256];
     char user_names[MQVPN_CONFIG_MAX_USERS][64];
     char user_keys[MQVPN_CONFIG_MAX_USERS][256];
-    int  n_users;
-    int  max_clients;
+    int n_users;
+    int max_clients;
 
     /* [Multipath] */
     char paths[MQVPN_CONFIG_MAX_PATHS][32];
@@ -63,9 +63,9 @@ typedef struct mqvpn_file_config_s {
 void mqvpn_config_defaults(mqvpn_file_config_t *cfg);
 
 /* Parse INI file at path into cfg. Returns 0 on success, -1 on error. */
-int  mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path);
+int mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path);
 
 /* Parse JSON text into CLI cfg. Returns 0 on success, -1 on error. */
-int  mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text);
+int mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text);
 
 #endif /* MQVPN_CONFIG_H */

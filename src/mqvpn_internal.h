@@ -15,13 +15,13 @@
 /* ─── Config (opaque to callers) ─── */
 
 struct mqvpn_config_s {
-    char    server_host[256];
-    int     server_port;
-    char    auth_key[256];
-    char    user_names[MQVPN_MAX_USERS][64];
-    char    user_keys[MQVPN_MAX_USERS][256];
-    int     n_users;
-    int     insecure;
+    char server_host[256];
+    int server_port;
+    char auth_key[256];
+    char user_names[MQVPN_MAX_USERS][64];
+    char user_keys[MQVPN_MAX_USERS][256];
+    int n_users;
+    int insecure;
 
     mqvpn_scheduler_t scheduler;
     mqvpn_log_level_t log_level;

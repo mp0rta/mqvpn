@@ -20,35 +20,51 @@
 static int tests_passed = 0;
 static int tests_failed = 0;
 
-#define TEST(name) \
-    do { printf("  %-50s ", #name); } while(0)
+#define TEST(name)                 \
+    do {                           \
+        printf("  %-50s ", #name); \
+    } while (0)
 
-#define PASS() \
-    do { printf("PASS\n"); tests_passed++; } while(0)
+#define PASS()            \
+    do {                  \
+        printf("PASS\n"); \
+        tests_passed++;   \
+    } while (0)
 
-#define FAIL(msg) \
-    do { printf("FAIL: %s\n", msg); tests_failed++; } while(0)
+#define FAIL(msg)                  \
+    do {                           \
+        printf("FAIL: %s\n", msg); \
+        tests_failed++;            \
+    } while (0)
 
-#define ASSERT_EQ(a, b) \
-    do { if ((a) != (b)) { \
-        char _buf[128]; \
-        snprintf(_buf, sizeof(_buf), "expected %lld, got %lld", \
-                 (long long)(b), (long long)(a)); \
-        FAIL(_buf); return; \
-    }} while(0)
+#define ASSERT_EQ(a, b)                                                             \
+    do {                                                                            \
+        if ((a) != (b)) {                                                           \
+            char _buf[128];                                                         \
+            snprintf(_buf, sizeof(_buf), "expected %lld, got %lld", (long long)(b), \
+                     (long long)(a));                                               \
+            FAIL(_buf);                                                             \
+            return;                                                                 \
+        }                                                                           \
+    } while (0)
 
-#define ASSERT_NEQ(a, b) \
-    do { if ((a) == (b)) { FAIL("values should differ"); return; }} while(0)
+#define ASSERT_NEQ(a, b)                  \
+    do {                                  \
+        if ((a) == (b)) {                 \
+            FAIL("values should differ"); \
+            return;                       \
+        }                                 \
+    } while (0)
 
 /* ── Helper: build fake IPv4 packets ── */
 
 static int
-make_tcp_pkt(uint8_t *buf, const char *src_ip, uint16_t src_port,
-             const char *dst_ip, uint16_t dst_port)
+make_tcp_pkt(uint8_t *buf, const char *src_ip, uint16_t src_port, const char *dst_ip,
+             uint16_t dst_port)
 {
     memset(buf, 0, 40);
-    buf[0] = 0x45;  /* IPv4, IHL=5 */
-    buf[9] = 6;     /* TCP */
+    buf[0] = 0x45; /* IPv4, IHL=5 */
+    buf[9] = 6;    /* TCP */
 
     struct in_addr a;
     inet_pton(AF_INET, src_ip, &a);
@@ -62,16 +78,16 @@ make_tcp_pkt(uint8_t *buf, const char *src_ip, uint16_t src_port,
     buf[22] = dst_port >> 8;
     buf[23] = dst_port & 0xff;
 
-    return 40;  /* 20 IP + 20 TCP */
+    return 40; /* 20 IP + 20 TCP */
 }
 
 static int
-make_udp_pkt(uint8_t *buf, const char *src_ip, uint16_t src_port,
-             const char *dst_ip, uint16_t dst_port)
+make_udp_pkt(uint8_t *buf, const char *src_ip, uint16_t src_port, const char *dst_ip,
+             uint16_t dst_port)
 {
     memset(buf, 0, 28);
     buf[0] = 0x45;
-    buf[9] = 17;  /* UDP */
+    buf[9] = 17; /* UDP */
 
     struct in_addr a;
     inet_pton(AF_INET, src_ip, &a);
@@ -145,13 +161,15 @@ test_hash_ipv6_tcp(void)
     TEST(flow_hash_pkt IPv6 TCP returns pinned hash);
 
     uint8_t pkt[44] = {0};
-    pkt[0] = 0x60;   /* IPv6 */
-    pkt[6] = 6;      /* Next Header: TCP */
-    pkt[8] = 0xfd;   /* src IP */
-    pkt[24] = 0xfd;  /* dst IP */
+    pkt[0] = 0x60;  /* IPv6 */
+    pkt[6] = 6;     /* Next Header: TCP */
+    pkt[8] = 0xfd;  /* src IP */
+    pkt[24] = 0xfd; /* dst IP */
     pkt[39] = 0x02;
-    pkt[40] = 0x00; pkt[41] = 80;   /* src port */
-    pkt[42] = 0x01; pkt[43] = 0xBB; /* dst port 443 */
+    pkt[40] = 0x00;
+    pkt[41] = 80; /* src port */
+    pkt[42] = 0x01;
+    pkt[43] = 0xBB; /* dst port 443 */
 
     uint32_t h = flow_hash_pkt(pkt, 44);
     ASSERT_NEQ(h, 0);
@@ -166,8 +184,8 @@ test_hash_ipv6_udp_unpinned(void)
     TEST(flow_hash_pkt IPv6 UDP returns UNPINNED);
 
     uint8_t pkt[44] = {0};
-    pkt[0] = 0x60;   /* IPv6 */
-    pkt[6] = 17;     /* Next Header: UDP */
+    pkt[0] = 0x60; /* IPv6 */
+    pkt[6] = 17;   /* Next Header: UDP */
 
     ASSERT_EQ(flow_hash_pkt(pkt, 44), MQVPN_FLOW_HASH_UNPINNED);
 
@@ -220,7 +238,7 @@ test_hash_never_returns_zero(void)
 static void
 test_hash_each_field_matters(void)
 {
-    TEST(flow_hash_pkt each 5-tuple field matters);
+    TEST(flow_hash_pkt each 5 - tuple field matters);
 
     uint8_t base[40];
     make_tcp_pkt(base, "10.0.0.1", 1234, "10.0.0.2", 80);
@@ -258,8 +276,8 @@ test_hash_icmp_no_ports(void)
 
     uint8_t pkt[28];
     memset(pkt, 0, sizeof(pkt));
-    pkt[0] = 0x45;  /* IPv4, IHL=5 */
-    pkt[9] = 1;     /* ICMP */
+    pkt[0] = 0x45; /* IPv4, IHL=5 */
+    pkt[9] = 1;    /* ICMP */
 
     struct in_addr a;
     inet_pton(AF_INET, "10.0.0.1", &a);
@@ -280,13 +298,13 @@ test_hash_icmp_no_ports(void)
 static void
 test_hash_ip_header_only(void)
 {
-    TEST(flow_hash_pkt IP header only (len=20));
+    TEST(flow_hash_pkt IP header only(len = 20));
 
     /* Packet with exactly 20 bytes — no L4 data available */
     uint8_t pkt[20];
     memset(pkt, 0, sizeof(pkt));
-    pkt[0] = 0x45;  /* IPv4, IHL=5 */
-    pkt[9] = 6;     /* TCP */
+    pkt[0] = 0x45; /* IPv4, IHL=5 */
+    pkt[9] = 6;    /* TCP */
 
     struct in_addr a;
     inet_pton(AF_INET, "10.0.0.1", &a);
@@ -330,12 +348,12 @@ test_hash_invalid_ihl(void)
 
     uint8_t pkt[40];
     memset(pkt, 0, sizeof(pkt));
-    pkt[0] = 0x4f;  /* IPv4, IHL=15 (60 bytes) */
-    pkt[9] = 6;     /* TCP */
+    pkt[0] = 0x4f; /* IPv4, IHL=15 (60 bytes) */
+    pkt[9] = 6;    /* TCP */
 
     ASSERT_EQ(flow_hash_pkt(pkt, 40), 0);
 
-    pkt[0] = 0x40;  /* IPv4, IHL=0 */
+    pkt[0] = 0x40; /* IPv4, IHL=0 */
     ASSERT_EQ(flow_hash_pkt(pkt, 40), 0);
 
     PASS();
@@ -348,8 +366,8 @@ test_hash_tcp_truncated_l4_unpinned(void)
 
     uint8_t pkt[20];
     memset(pkt, 0, sizeof(pkt));
-    pkt[0] = 0x45;  /* IPv4, IHL=5 */
-    pkt[9] = 6;     /* TCP */
+    pkt[0] = 0x45; /* IPv4, IHL=5 */
+    pkt[9] = 6;    /* TCP */
 
     struct in_addr a;
     inet_pton(AF_INET, "10.0.0.1", &a);
@@ -377,7 +395,10 @@ test_hash_distribution(void)
         make_tcp_pkt(pkt, "10.0.0.1", 1000 + i, "10.0.0.2", 80);
         uint32_t h = flow_hash_pkt(pkt, 40);
         uint8_t low = h & 0xff;
-        if (!seen[low]) { seen[low] = 1; distinct++; }
+        if (!seen[low]) {
+            seen[low] = 1;
+            distinct++;
+        }
     }
 
     /* With 1000 hashes, expect close to 256 distinct low bytes.
@@ -397,8 +418,7 @@ test_hash_never_returns_sentinels(void)
         uint8_t pkt[40];
         uint16_t port = (uint16_t)(1000 + (i % 64000));
         char src[16];
-        snprintf(src, sizeof(src), "%d.%d.%d.%d",
-                 10 + (i >> 24) % 200, (i >> 16) & 0xff,
+        snprintf(src, sizeof(src), "%d.%d.%d.%d", 10 + (i >> 24) % 200, (i >> 16) & 0xff,
                  (i >> 8) & 0xff, i & 0xff);
         make_tcp_pkt(pkt, src, port, "10.0.0.2", 80);
         uint32_t h = flow_hash_pkt(pkt, 40);
@@ -450,9 +470,9 @@ make_ipv6_tcp_pkt(uint8_t *buf, const uint8_t *src_ip, uint16_t src_port,
                   const uint8_t *dst_ip, uint16_t dst_port)
 {
     memset(buf, 0, 44);
-    buf[0] = 0x60;  /* IPv6 */
-    buf[6] = 6;     /* Next Header: TCP */
-    buf[7] = 64;    /* Hop Limit */
+    buf[0] = 0x60; /* IPv6 */
+    buf[6] = 6;    /* Next Header: TCP */
+    buf[7] = 64;   /* Hop Limit */
 
     memcpy(buf + 8, src_ip, 16);
     memcpy(buf + 24, dst_ip, 16);
@@ -474,8 +494,8 @@ test_hash_ipv6_icmpv6_unpinned(void)
     TEST(flow_hash_pkt IPv6 ICMPv6 returns UNPINNED);
 
     uint8_t pkt[44] = {0};
-    pkt[0] = 0x60;   /* IPv6 */
-    pkt[6] = 58;     /* Next Header: ICMPv6 */
+    pkt[0] = 0x60; /* IPv6 */
+    pkt[6] = 58;   /* Next Header: ICMPv6 */
 
     struct in6_addr src, dst;
     inet_pton(AF_INET6, "fd00::1", &src);
@@ -491,12 +511,12 @@ test_hash_ipv6_icmpv6_unpinned(void)
 static void
 test_hash_ipv6_tcp_truncated_no_ports(void)
 {
-    TEST(flow_hash_pkt IPv6 TCP truncated (40 bytes, no ports) returns UNPINNED);
+    TEST(flow_hash_pkt IPv6 TCP truncated(40 bytes, no ports) returns UNPINNED);
 
     /* 40 bytes = IPv6 header only, TCP next header but no L4 data */
     uint8_t pkt[40] = {0};
     pkt[0] = 0x60;
-    pkt[6] = 6;  /* TCP */
+    pkt[6] = 6; /* TCP */
 
     struct in6_addr src, dst;
     inet_pton(AF_INET6, "fd00::1", &src);
@@ -579,7 +599,7 @@ test_hash_ipv6_tcp_never_returns_sentinels(void)
 static void
 test_hash_ipv6_extension_header_as_next(void)
 {
-    TEST(flow_hash_pkt IPv6 non-TCP next header returns UNPINNED);
+    TEST(flow_hash_pkt IPv6 non - TCP next header returns UNPINNED);
 
     uint8_t pkt[44] = {0};
     pkt[0] = 0x60;
