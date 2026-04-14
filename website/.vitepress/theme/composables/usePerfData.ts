@@ -159,27 +159,6 @@ export function usePerfData(basePath: string, maxEntries = 10) {
     return rows
   })
 
-  const flowScalingRows = computed(() => {
-    const rows: any[] = []
-    for (const item of items.value) {
-      if (item.data.test !== 'flow_scaling') continue
-      for (const sched of Object.keys(item.data.results || {})) {
-        const arr = item.data.results[sched]
-        if (!Array.isArray(arr)) continue
-        for (const r of arr) {
-          rows.push({
-            commit: fmtCommit(item.commit),
-            date: fmtDate(item.timestamp),
-            scheduler: sched,
-            streams: r.streams,
-            mbps: fmtNum(r.mbps),
-          })
-        }
-      }
-    }
-    return rows
-  })
-
   const udpSweepSummaryRows = computed(() => {
     const rows: any[] = []
     for (const item of items.value) {
@@ -244,7 +223,6 @@ export function usePerfData(basePath: string, maxEntries = 10) {
     failoverRows,
     aggregateRows,
     multipathSchedulerRows,
-    flowScalingRows,
     udpSweepSummaryRows,
     udpSweepRows,
     ntnRows,

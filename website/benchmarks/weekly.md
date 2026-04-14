@@ -9,7 +9,7 @@ import { usePerfData } from '../.vitepress/theme/composables/usePerfData'
 const {
   loading, error,
   rawRows, failoverRows, aggregateRows,
-  multipathSchedulerRows, flowScalingRows, udpSweepSummaryRows, udpSweepRows, ntnRows
+  multipathSchedulerRows, udpSweepSummaryRows, udpSweepRows, ntnRows
 } = usePerfData('/perf-data/weekly')
 
 // Failover filter
@@ -28,17 +28,6 @@ const filteredAggregateRows = computed(() => {
   return aggregateRows.value.filter(r => {
     if (aggSchedFilter.value && r.scheduler !== aggSchedFilter.value) return false
     if (aggStreamsFilter.value && String(r.streams) !== aggStreamsFilter.value) return false
-    return true
-  })
-})
-
-// Flow scaling filters
-const fsSchedFilter = ref('')
-const fsStreamsFilter = ref('')
-const filteredFlowScalingRows = computed(() => {
-  return flowScalingRows.value.filter(r => {
-    if (fsSchedFilter.value && r.scheduler !== fsSchedFilter.value) return false
-    if (fsStreamsFilter.value && String(r.streams) !== fsStreamsFilter.value) return false
     return true
   })
 })
@@ -166,26 +155,6 @@ const filteredUdpSweepRows = computed(() => {
     </tr>
   </tbody>
 </table>
-
-## Flow Scaling
-
-<p class="section-desc">Measures throughput as the number of parallel TCP streams increases.</p>
-
-<div v-if="flowScalingRows.length === 0">No data.</div>
-<template v-else>
-<div class="filter-bar">
-  <label>Scheduler: <select v-model="fsSchedFilter"><option value="">All</option><option value="wlb">WLB</option><option value="minrtt">MinRTT</option></select></label>
-  <label>Streams: <select v-model="fsStreamsFilter"><option value="">All</option><option value="1">1</option><option value="4">4</option><option value="16">16</option><option value="64">64</option></select></label>
-</div>
-<table>
-  <thead><tr><th>Commit</th><th>Date</th><th>Scheduler</th><th>Streams</th><th>Throughput (Mbps)</th></tr></thead>
-  <tbody>
-    <tr v-for="(r, i) in filteredFlowScalingRows" :key="'fs-' + i">
-      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.scheduler }}</td><td>{{ r.streams }}</td><td>{{ r.mbps }}</td>
-    </tr>
-  </tbody>
-</table>
-</template>
 
 ## UDP Rate Sweep
 

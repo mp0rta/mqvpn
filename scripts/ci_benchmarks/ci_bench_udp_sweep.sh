@@ -5,7 +5,7 @@
 # (where loss exceeds 5%) for single-path, WLB, and MinRTT.
 #
 # Netem: Path A = 300Mbps/10ms, Path B = 80Mbps/30ms
-# Payload: 1100B bulk (-l 1100)
+# Payload: 1100B bulk (-l 1100), single stream
 # Direction: DL (server→client)
 #
 # Output: ci_bench_results/udp_sweep_<timestamp>.json
@@ -20,7 +20,6 @@ source "${SCRIPT_DIR}/ci_bench_env.sh"
 MQVPN="${1:-${MQVPN}}"
 
 DURATION=15
-PARALLEL=4
 PACKET_SIZE=1100
 LOSS_THRESHOLD=5.0
 
@@ -37,7 +36,7 @@ echo "  mqvpn UDP Rate Sweep Benchmark (CI)"
 echo "  Binary:     $MQVPN"
 echo "  Sweep:      ${SWEEP_RATES[0]}-${SWEEP_RATES[-1]} Mbps (${#SWEEP_RATES[@]} points)"
 echo "  Conditions: ${CONDITIONS[*]}"
-echo "  Payload:    ${PACKET_SIZE}B, DL, -P ${PARALLEL}"
+echo "  Payload:    ${PACKET_SIZE}B, DL, single stream"
 echo "  Commit:     ${CI_BENCH_COMMIT:0:12}"
 echo "  Date:       $(date '+%Y-%m-%d %H:%M')"
 echo "================================================================"
@@ -77,7 +76,7 @@ for cond in "${CONDITIONS[@]}"; do
         IPERF_JSON="$(mktemp)"
         ip netns exec "$NS_CLIENT" iperf3 \
             -c "$TUNNEL_SERVER_IP" -u -b "${rate}M" -l "$PACKET_SIZE" \
-            -t "$DURATION" -P "$PARALLEL" -R --json \
+            -t "$DURATION" -R --json \
             > "$IPERF_JSON" 2>&1 || true
 
         wait "$IPERF_SRV_PID" 2>/dev/null || true

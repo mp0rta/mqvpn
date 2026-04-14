@@ -19,7 +19,6 @@ const latestAggregate = computed(() => {
 
 const latestNtn = computed(() => weekly.ntnRows.value[0] || null)
 const latestMultipath = computed(() => weekly.multipathSchedulerRows.value[0] || null)
-const latestFlowScaling = computed(() => weekly.flowScalingRows.value[0] || null)
 const latestUdpSummary = computed(() => weekly.udpSweepSummaryRows.value[0] || null)
 </script>
 
@@ -90,12 +89,6 @@ const latestUdpSummary = computed(() => weekly.udpSweepSummaryRows.value[0] || n
     <h3>マルチパススケジューラ</h3>
     <div class="stat">{{ latestMultipath.wlb }} <span class="unit">Mbps</span></div>
     <div class="label">WLB &middot; {{ latestMultipath.scenario }}</div>
-  </div>
-
-  <div class="summary-card" v-if="latestFlowScaling">
-    <h3>フロースケーリング</h3>
-    <div class="stat">{{ latestFlowScaling.mbps }} <span class="unit">Mbps</span></div>
-    <div class="label">{{ latestFlowScaling.scheduler }} &middot; {{ latestFlowScaling.streams }} ストリーム</div>
   </div>
 
   <div class="summary-card" v-if="latestUdpSummary">

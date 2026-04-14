@@ -81,9 +81,6 @@ jobs:
       - name: Multipath scheduler benchmark (8 scenarios)
         run: sudo bash scripts/ci_benchmarks/ci_bench_multipath_scheduler.sh build/mqvpn
 
-      - name: Flow scaling benchmark
-        run: sudo bash scripts/ci_benchmarks/ci_bench_flow_scaling.sh build/mqvpn
-
       - name: UDP rate sweep benchmark
         run: sudo bash scripts/ci_benchmarks/ci_bench_udp_sweep.sh build/mqvpn
 

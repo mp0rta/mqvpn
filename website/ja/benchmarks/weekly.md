@@ -9,7 +9,7 @@ import { usePerfData } from '../../.vitepress/theme/composables/usePerfData'
 const {
   loading, error,
   rawRows, failoverRows, aggregateRows,
-  multipathSchedulerRows, flowScalingRows, udpSweepSummaryRows, udpSweepRows, ntnRows
+  multipathSchedulerRows, udpSweepSummaryRows, udpSweepRows, ntnRows
 } = usePerfData('/perf-data/weekly')
 
 const foSchedFilter = ref('wlb')
@@ -26,16 +26,6 @@ const filteredAggregateRows = computed(() => {
   return aggregateRows.value.filter(r => {
     if (aggSchedFilter.value && r.scheduler !== aggSchedFilter.value) return false
     if (aggStreamsFilter.value && String(r.streams) !== aggStreamsFilter.value) return false
-    return true
-  })
-})
-
-const fsSchedFilter = ref('')
-const fsStreamsFilter = ref('')
-const filteredFlowScalingRows = computed(() => {
-  return flowScalingRows.value.filter(r => {
-    if (fsSchedFilter.value && r.scheduler !== fsSchedFilter.value) return false
-    if (fsStreamsFilter.value && String(r.streams) !== fsStreamsFilter.value) return false
     return true
   })
 })
@@ -138,26 +128,6 @@ const filteredUdpSweepRows = computed(() => {
     </tr>
   </tbody>
 </table>
-
-## フロースケーリング
-
-<p class="section-desc">並列 TCP ストリーム数を増やしたときのスループットを計測。</p>
-
-<div v-if="flowScalingRows.length === 0">データなし。</div>
-<template v-else>
-<div class="filter-bar">
-  <label>スケジューラ: <select v-model="fsSchedFilter"><option value="">すべて</option><option value="wlb">WLB</option><option value="minrtt">MinRTT</option></select></label>
-  <label>ストリーム数: <select v-model="fsStreamsFilter"><option value="">すべて</option><option value="1">1</option><option value="4">4</option><option value="16">16</option><option value="64">64</option></select></label>
-</div>
-<table>
-  <thead><tr><th>コミット</th><th>日付</th><th>スケジューラ</th><th>ストリーム数</th><th>スループット (Mbps)</th></tr></thead>
-  <tbody>
-    <tr v-for="(r, i) in filteredFlowScalingRows" :key="'fs-' + i">
-      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.scheduler }}</td><td>{{ r.streams }}</td><td>{{ r.mbps }}</td>
-    </tr>
-  </tbody>
-</table>
-</template>
 
 ## UDP レートスイープ
 
