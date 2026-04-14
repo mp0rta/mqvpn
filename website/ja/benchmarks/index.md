@@ -56,7 +56,7 @@ const latestAggregate = computed(() => {
     <h3>帯域集約</h3>
     <div v-if="latestAggregate">
       <div class="stat">{{ latestAggregate.multi }} <span class="unit">Mbps</span></div>
-      <div class="label">{{ latestAggregate.scheduler.toUpperCase() }}, {{ latestAggregate.streams }} ストリーム &mdash; +{{ latestAggregate.gain }} vs シングルパス</div>
+      <div class="label">{{ latestAggregate.scheduler.toUpperCase() }}, {{ latestAggregate.streams }} ストリーム &mdash; <strong>+{{ latestAggregate.gain }}</strong> vs シングルパス</div>
       <div class="label">回線: 300Mbps + 80Mbps（理論値 380Mbps）</div>
       <div class="meta"><code>{{ latestAggregate.commit }}</code> &middot; {{ latestAggregate.date }}</div>
     </div>
