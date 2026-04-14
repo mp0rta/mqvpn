@@ -48,6 +48,7 @@ const filteredUdpSweepRows = computed(() => {
 
 <p class="page-desc">Extended benchmark suite run every Sunday at 3:00 UTC.<br>Includes all per-commit tests plus additional scenario-based tests.</p>
 
+<ClientOnly>
 <div v-if="loading">Loading...</div>
 <div v-else-if="error && !error.includes('404')" style="color: red;">Error: {{ error }}</div>
 <div v-else-if="rawRows.length === 0 && multipathSchedulerRows.length === 0" class="no-data-block">
@@ -233,6 +234,7 @@ const filteredUdpSweepRows = computed(() => {
 </table>
 
 </template>
+</ClientOnly>
 
 <style scoped>
 .page-desc {

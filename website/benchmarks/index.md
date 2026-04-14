@@ -33,6 +33,7 @@ const latestUdpSummary = computed(() => weekly.udpSweepSummaryRows.value[0] || n
 
 <p class="section-desc">Benchmarks run on every push to main.</p>
 
+<ClientOnly>
 <div v-if="push.loading.value">Loading...</div>
 <div v-else-if="push.error.value" style="color: red;">{{ push.error.value }}</div>
 <template v-else>
@@ -112,6 +113,7 @@ const latestUdpSummary = computed(() => weekly.udpSweepSummaryRows.value[0] || n
 <p><a href="/benchmarks/weekly">View all weekly results &rarr;</a></p>
 
 </template>
+</ClientOnly>
 
 <style scoped>
 .page-desc {

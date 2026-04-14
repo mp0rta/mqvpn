@@ -30,6 +30,7 @@ const latestUdpSummary = computed(() => weekly.udpSweepSummaryRows.value[0] || n
 
 <p class="section-desc">main へのプッシュごとに実行されるベンチマーク。</p>
 
+<ClientOnly>
 <div v-if="push.loading.value">読み込み中...</div>
 <div v-else-if="push.error.value" style="color: red;">{{ push.error.value }}</div>
 <template v-else>
@@ -109,6 +110,7 @@ const latestUdpSummary = computed(() => weekly.udpSweepSummaryRows.value[0] || n
 <p><a href="/ja/benchmarks/weekly">すべて表示 &rarr;</a></p>
 
 </template>
+</ClientOnly>
 
 <style scoped>
 .page-desc {

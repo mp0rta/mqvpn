@@ -35,6 +35,7 @@ const filteredAggregateRows = computed(() => {
 
 <p class="page-desc">Benchmarks run on every push to main. Latest 10 results.<br>Environment: Proxmox VM, i9-13900H, 4 vCPU (pinned), Ubuntu 24.04.</p>
 
+<ClientOnly>
 <div v-if="loading">Loading...</div>
 <div v-else-if="error" style="color: red;">Error: {{ error }}</div>
 <template v-else>
@@ -169,6 +170,7 @@ const filteredAggregateRows = computed(() => {
 </template>
 
 </template>
+</ClientOnly>
 
 <style scoped>
 .page-desc {

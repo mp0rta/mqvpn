@@ -45,6 +45,7 @@ const filteredUdpSweepRows = computed(() => {
 
 <p class="page-desc">毎週日曜日 3:00 UTC に実行される拡張ベンチマーク。<br>コミットごとのテストに加え、シナリオベースのテストを含みます。</p>
 
+<ClientOnly>
 <div v-if="loading">読み込み中...</div>
 <div v-else-if="error && !error.includes('404')" style="color: red;">エラー: {{ error }}</div>
 <div v-else-if="rawRows.length === 0 && multipathSchedulerRows.length === 0" class="no-data-block">
@@ -194,6 +195,7 @@ const filteredUdpSweepRows = computed(() => {
 </table>
 
 </template>
+</ClientOnly>
 
 <style scoped>
 .page-desc {
