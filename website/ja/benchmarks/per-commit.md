@@ -124,6 +124,8 @@ const filteredAggregateRows = computed(() => {
 
 ## 帯域集約
 
+<p class="section-desc">Path A: 300Mbps/10ms, Path B: 80Mbps/30ms。理論値 380Mbps。</p>
+
 <div v-if="aggregateRows.length === 0">データがありません。</div>
 <template v-else>
 

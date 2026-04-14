@@ -7,7 +7,6 @@ import { computed } from 'vue'
 import { usePerfData } from '../.vitepress/theme/composables/usePerfData'
 
 const push = usePerfData('/perf-data', 1)
-const weekly = usePerfData('/perf-data/weekly', 1)
 
 const latestRaw = computed(() => push.rawRows.value[0] || null)
 const latestFailover = computed(() => push.failoverRows.value.find(r => r.fault_path === 'A') || null)
@@ -20,9 +19,6 @@ const latestAggregate = computed(() => {
   return best
 })
 
-const latestNtn = computed(() => weekly.ntnRows.value[0] || null)
-const latestMultipath = computed(() => weekly.multipathSchedulerRows.value[0] || null)
-const latestUdpSummary = computed(() => weekly.udpSweepSummaryRows.value[0] || null)
 </script>
 
 # Benchmarks
@@ -75,44 +71,6 @@ const latestUdpSummary = computed(() => weekly.udpSweepSummaryRows.value[0] || n
 
 </template>
 
-## Weekly Results
-
-<p class="section-desc">Extended benchmarks run every Sunday at 3:00 UTC.</p>
-
-<div v-if="weekly.loading.value">Loading...</div>
-<div v-else-if="weekly.error.value && !weekly.error.value.includes('404')" style="color: red;">{{ weekly.error.value }}</div>
-<template v-else>
-
-<div v-if="weekly.items.value.length === 0" class="no-data-block">
-  No weekly data available yet. Weekly benchmarks run every Sunday at 3:00 UTC.
-</div>
-
-<template v-else>
-<div class="summary-grid">
-  <div class="summary-card" v-if="latestMultipath">
-    <h3>Multipath Scheduler</h3>
-    <div class="stat">{{ latestMultipath.wlb }} <span class="unit">Mbps</span></div>
-    <div class="label">WLB &middot; {{ latestMultipath.scenario }}</div>
-  </div>
-
-  <div class="summary-card" v-if="latestUdpSummary">
-    <h3>UDP Saturation</h3>
-    <div class="stat">{{ latestUdpSummary.wlb_saturation }} <span class="unit">Mbps</span></div>
-    <div class="label">WLB (single: {{ latestUdpSummary.single_saturation }} Mbps)</div>
-    <div class="meta"><code>{{ latestUdpSummary.commit }}</code> &middot; {{ latestUdpSummary.date }}</div>
-  </div>
-
-  <div class="summary-card" v-if="latestNtn">
-    <h3>NTN Satellite</h3>
-    <div class="stat">{{ latestNtn.wlb }} <span class="unit">Mbps</span></div>
-    <div class="label">WLB &middot; {{ latestNtn.scenario }}</div>
-  </div>
-</div>
-</template>
-
-<p><a href="/benchmarks/weekly">View all weekly results &rarr;</a></p>
-
-</template>
 </ClientOnly>
 
 <style scoped>

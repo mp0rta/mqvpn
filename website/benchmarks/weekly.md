@@ -164,7 +164,7 @@ const filteredUdpSweepRows = computed(() => {
 
 ## UDP Rate Sweep
 
-<p class="section-desc">Sweeps UDP send rate from 200-380 Mbps to find the saturation point (loss > 5%). Payload: 1100B, DL direction.</p>
+<p class="section-desc">Path A: 300Mbps/10ms, Path B: 80Mbps/30ms. Sweeps UDP send rate from 200-380 Mbps to find the saturation point (loss > 5%). Payload: 1100B, DL direction.</p>
 
 <div v-if="udpSweepSummaryRows.length === 0">No data.</div>
 <template v-else>

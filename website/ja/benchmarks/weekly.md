@@ -137,7 +137,7 @@ const filteredUdpSweepRows = computed(() => {
 
 ## UDP レートスイープ
 
-<p class="section-desc">UDP 送信レートを 200〜380 Mbps でスイープし、飽和点（ロス > 5%）を特定。ペイロード: 1100B、DL 方向。</p>
+<p class="section-desc">Path A: 300Mbps/10ms, Path B: 80Mbps/30ms。UDP 送信レートを 200〜380 Mbps でスイープし、飽和点（ロス > 5%）を特定。ペイロード: 1100B、DL 方向。</p>
 
 <div v-if="udpSweepSummaryRows.length === 0">データなし。</div>
 <template v-else>
