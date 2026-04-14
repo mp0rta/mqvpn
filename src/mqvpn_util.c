@@ -28,6 +28,7 @@ mqvpn_error_string(mqvpn_error_t err)
     case MQVPN_ERR_CLOSED: return "connection closed";
     case MQVPN_ERR_ABI_MISMATCH: return "ABI mismatch";
     case MQVPN_ERR_TIMEOUT: return "connection timeout";
+    case MQVPN_ERR_INVALID_STATE: return "invalid state";
     }
     return "unknown error";
 }

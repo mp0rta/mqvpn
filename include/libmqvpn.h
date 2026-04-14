@@ -40,12 +40,12 @@ extern "C" {
 
 /* ─── ABI ─── */
 
-#define MQVPN_CALLBACKS_ABI_VERSION  2
+#define MQVPN_CALLBACKS_ABI_VERSION 2
 
 /* ─── Capacity constants ─── */
 
-#define MQVPN_MAX_USERS   64
-#define MQVPN_MAX_PATHS    4
+#define MQVPN_MAX_USERS 64
+#define MQVPN_MAX_PATHS 4
 
 /* ─── Opaque handles ─── */
 
@@ -61,16 +61,17 @@ typedef enum {
     MQVPN_OK = 0,
     MQVPN_ERR_INVALID_ARG = -1,
     MQVPN_ERR_NO_MEMORY = -2,
-    MQVPN_ERR_ENGINE = -3,        /* xquic engine error */
-    MQVPN_ERR_TLS = -4,           /* TLS handshake failure */
-    MQVPN_ERR_AUTH = -5,          /* PSK auth failure (403) */
-    MQVPN_ERR_PROTOCOL = -6,      /* MASQUE not supported */
-    MQVPN_ERR_POOL_FULL = -7,     /* server: IP pool exhausted */
-    MQVPN_ERR_MAX_CLIENTS = -8,   /* server: max clients reached */
-    MQVPN_ERR_AGAIN = -9,         /* back-pressure */
-    MQVPN_ERR_CLOSED = -10,       /* connection closed */
-    MQVPN_ERR_ABI_MISMATCH = -11, /* callback ABI version mismatch */
-    MQVPN_ERR_TIMEOUT = -12,      /* connection timeout */
+    MQVPN_ERR_ENGINE = -3,         /* xquic engine error */
+    MQVPN_ERR_TLS = -4,            /* TLS handshake failure */
+    MQVPN_ERR_AUTH = -5,           /* PSK auth failure (403) */
+    MQVPN_ERR_PROTOCOL = -6,       /* MASQUE not supported */
+    MQVPN_ERR_POOL_FULL = -7,      /* server: IP pool exhausted */
+    MQVPN_ERR_MAX_CLIENTS = -8,    /* server: max clients reached */
+    MQVPN_ERR_AGAIN = -9,          /* back-pressure */
+    MQVPN_ERR_CLOSED = -10,        /* connection closed */
+    MQVPN_ERR_ABI_MISMATCH = -11,  /* callback ABI version mismatch */
+    MQVPN_ERR_TIMEOUT = -12,       /* connection timeout */
+    MQVPN_ERR_INVALID_STATE = -13, /* operation not valid in current state */
 } mqvpn_error_t;
 
 /* ─── Enumerations ─── */
@@ -106,6 +107,17 @@ typedef enum {
     MQVPN_STATE__COUNT = 7,
 } mqvpn_client_state_t;
 
+/*
+ * Path lifecycle:
+ *   active  = platform owns this path slot, fd is valid
+ *   in_use  = xquic has a live QUIC path on this slot
+ *
+ *   PENDING   → add_path_fd() called, awaiting activation
+ *   ACTIVE    → xquic path created (validation async)
+ *   DEGRADED  → transport failed, library timer retries with backoff (5s→60s, max 6)
+ *   CLOSED    → retries exhausted (platform can still call reactivate_path if active==1)
+ *              OR explicitly removed via remove_path() (active==0, no recovery)
+ */
 typedef enum {
     MQVPN_PATH_PENDING = 0,
     MQVPN_PATH_ACTIVE = 1,
@@ -161,7 +173,7 @@ typedef struct {
     uint64_t pkt_sent;
     uint64_t pkt_recv;
     uint64_t pkt_lost;
-    uint8_t  state;
+    uint8_t state;
 } mqvpn_path_stats_t;
 
 typedef struct {
@@ -282,17 +294,12 @@ _Static_assert(offsetof(mqvpn_server_callbacks_t, abi_version) == 0,
 MQVPN_API mqvpn_config_t *mqvpn_config_new(void);
 MQVPN_API void mqvpn_config_free(mqvpn_config_t *cfg);
 
-MQVPN_API int mqvpn_config_set_server(mqvpn_config_t *cfg,
-                                       const char *host, int port);
-MQVPN_API int mqvpn_config_set_auth_key(mqvpn_config_t *cfg,
-                                         const char *key);
-MQVPN_API int mqvpn_config_add_user(mqvpn_config_t *cfg,
-                                     const char *username,
-                                     const char *key);
-MQVPN_API int mqvpn_config_remove_user(mqvpn_config_t *cfg,
-                                        const char *username);
-MQVPN_API int mqvpn_config_load_json(mqvpn_config_t *cfg,
-                                      const char *json_text);
+MQVPN_API int mqvpn_config_set_server(mqvpn_config_t *cfg, const char *host, int port);
+MQVPN_API int mqvpn_config_set_auth_key(mqvpn_config_t *cfg, const char *key);
+MQVPN_API int mqvpn_config_add_user(mqvpn_config_t *cfg, const char *username,
+                                    const char *key);
+MQVPN_API int mqvpn_config_remove_user(mqvpn_config_t *cfg, const char *username);
+MQVPN_API int mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text);
 MQVPN_API int mqvpn_config_set_insecure(mqvpn_config_t *cfg, int insecure);
 MQVPN_API int mqvpn_config_set_scheduler(mqvpn_config_t *cfg, mqvpn_scheduler_t sched);
 MQVPN_API int mqvpn_config_set_log_level(mqvpn_config_t *cfg, mqvpn_log_level_t level);
@@ -329,6 +336,22 @@ MQVPN_API mqvpn_path_handle_t mqvpn_client_add_path_fd(mqvpn_client_t *client, i
                                                        const mqvpn_path_desc_t *desc);
 
 MQVPN_API int mqvpn_client_remove_path(mqvpn_client_t *client, mqvpn_path_handle_t path);
+
+/*
+ * Re-activate a DEGRADED or CLOSED path using the existing fd.
+ * Called by the platform layer when it detects the path is viable again
+ * (e.g., netlink RTM_NEWADDR on Linux, ConnectivityManager on Android).
+ *
+ * Preconditions: !in_use && active && (DEGRADED || CLOSED).
+ * On success: xquic creates a new path (validation is async). The library
+ * recovery timer is cancelled. Retry counter resets after 30s stability.
+ *
+ * Returns MQVPN_OK, MQVPN_ERR_INVALID_ARG, MQVPN_ERR_INVALID_STATE, or
+ * MQVPN_ERR_ENGINE.
+ * Thread safety: must be called from the tick thread (same as all other APIs).
+ */
+MQVPN_API int mqvpn_client_reactivate_path(mqvpn_client_t *client,
+                                           mqvpn_path_handle_t path);
 
 MQVPN_API int mqvpn_client_set_tun_active(mqvpn_client_t *client, int active, int tun_fd);
 
@@ -390,20 +413,19 @@ MQVPN_API int mqvpn_server_get_interest(const mqvpn_server_t *server,
 
 MQVPN_API int mqvpn_server_get_n_clients(const mqvpn_server_t *server);
 
-MQVPN_API int mqvpn_server_add_user(mqvpn_server_t *server,
-                                     const char *username, const char *key);
+MQVPN_API int mqvpn_server_add_user(mqvpn_server_t *server, const char *username,
+                                    const char *key);
 
-MQVPN_API int mqvpn_server_remove_user(mqvpn_server_t *server,
-                                        const char *username);
+MQVPN_API int mqvpn_server_remove_user(mqvpn_server_t *server, const char *username);
 
 /* Fill names[0..max-1] with current user names. Returns the count. */
-MQVPN_API int mqvpn_server_list_users(const mqvpn_server_t *server,
-                                       char names[][64], int max);
+MQVPN_API int mqvpn_server_list_users(const mqvpn_server_t *server, char names[][64],
+                                      int max);
 
 /* Fill out[0..max-1] with per-client info including per-path stats. */
 MQVPN_API int mqvpn_server_get_client_info(const mqvpn_server_t *server,
-                                            mqvpn_client_info_t *out,
-                                            int max_clients, int *n_clients);
+                                           mqvpn_client_info_t *out, int max_clients,
+                                           int *n_clients);
 
 /* ─── Utility API ─── */
 

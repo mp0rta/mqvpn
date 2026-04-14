@@ -41,12 +41,16 @@
 
 /* ─── Constants ─── */
 
-#define PACKET_BUF_SIZE           65536
-#define MASQUE_FRAME_BUF          (PACKET_BUF_SIZE + 16)
-#define MAX_CAPSULE_BUF           65536
-#define XQC_SNDQ_MAX_PKTS         16384
-#define RECONNECT_BACKOFF_MAX_SEC 60
-#define PTB_RATE_LIMIT            10
+#define PACKET_BUF_SIZE            65536
+#define MASQUE_FRAME_BUF           (PACKET_BUF_SIZE + 16)
+#define MAX_CAPSULE_BUF            65536
+#define XQC_SNDQ_MAX_PKTS          16384
+#define RECONNECT_BACKOFF_MAX_SEC  60
+#define PTB_RATE_LIMIT             10
+#define PATH_RECREATE_DELAY_US     (5ULL * 1000000)  /* 5 sec initial */
+#define PATH_RECREATE_MAX_DELAY_US (60ULL * 1000000) /* 60 sec max backoff */
+#define PATH_RECREATE_MAX_RETRIES  6                 /* max consecutive failures */
+#define PATH_STABLE_THRESHOLD_US   (30ULL * 1000000) /* 30 sec to confirm stable */
 
 /* ─── Forward declarations ─── */
 
@@ -73,6 +77,9 @@ typedef struct {
     int srtt_ms;
     uint64_t bytes_tx;
     uint64_t bytes_rx;
+    uint64_t recreate_after_us;    /* 0 = no pending timer */
+    int recreate_retries;          /* consecutive failures, reset after 30s stable */
+    uint64_t path_stable_since_us; /* non-zero = awaiting stability confirmation */
 } path_entry_t;
 
 /* Per-connection state (Level 2 — destroyed on reconnect) */
@@ -1168,6 +1175,16 @@ cb_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
     }
 }
 
+static uint64_t
+path_recreate_backoff(int retries)
+{
+    uint64_t delay = PATH_RECREATE_DELAY_US;
+    for (int r = 1; r < retries && delay < PATH_RECREATE_MAX_DELAY_US; r++)
+        delay *= 2;
+    if (delay > PATH_RECREATE_MAX_DELAY_US) delay = PATH_RECREATE_MAX_DELAY_US;
+    return delay;
+}
+
 static void
 cb_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data)
 {
@@ -1180,9 +1197,31 @@ cb_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data)
         LOG_I(c, "path removed: path_id=%" PRIu64 " iface=%s", path_id, p->name);
         p->in_use = 0;
         p->xqc_path_id = 0;
-        p->status = MQVPN_PATH_CLOSED;
-        if (c->cbs.path_event)
-            c->cbs.path_event(p->handle, MQVPN_PATH_CLOSED, c->user_ctx);
+        p->path_stable_since_us = 0; /* validation failed before stability */
+
+        if (p->active) {
+            p->recreate_retries++;
+
+            if (p->recreate_retries < PATH_RECREATE_MAX_RETRIES) {
+                p->status = MQVPN_PATH_DEGRADED;
+                uint64_t delay = path_recreate_backoff(p->recreate_retries);
+                p->recreate_after_us = client_now_us(c) + delay;
+                LOG_I(c, "path degraded: %s (retry %d/%d in %ds)", p->name,
+                      p->recreate_retries, PATH_RECREATE_MAX_RETRIES,
+                      (int)(delay / 1000000));
+            } else {
+                p->status = MQVPN_PATH_CLOSED;
+                p->recreate_after_us = 0;
+                LOG_W(c,
+                      "path closed: %s (max retries %d exhausted, "
+                      "platform can still recover)",
+                      p->name, PATH_RECREATE_MAX_RETRIES);
+            }
+        } else {
+            p->status = MQVPN_PATH_CLOSED;
+        }
+
+        if (c->cbs.path_event) c->cbs.path_event(p->handle, p->status, c->user_ctx);
     }
 }
 
@@ -1299,7 +1338,7 @@ mqvpn_client_new(const mqvpn_config_t *cfg, const mqvpn_client_callbacks_t *cbs,
     memcpy(&c->config, cfg, sizeof(*cfg));
     memcpy(&c->cbs, cbs, sizeof(*cbs));
     c->user_ctx = user_ctx;
-        /* caller guarantees lifetime exceeds this object */ // lgtm[cpp/stack-address-escape]
+    /* caller guarantees lifetime exceeds this object */ // lgtm[cpp/stack-address-escape]
     c->state = MQVPN_STATE_IDLE;
     c->next_path_handle = 1;
     c->ptb_tokens = PTB_RATE_LIMIT;
@@ -1518,8 +1557,51 @@ mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
 
     p->status = MQVPN_PATH_CLOSED;
     p->active = 0;
+    p->recreate_after_us = 0;
+    p->recreate_retries = 0;
+    p->path_stable_since_us = 0;
     if (p->in_use && c->engine && c->conn)
         xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
+    return MQVPN_OK;
+}
+
+/* ─── Path re-activation (platform-triggered) ─── */
+
+int
+mqvpn_client_reactivate_path(mqvpn_client_t *c, mqvpn_path_handle_t handle)
+{
+    if (!c) return MQVPN_ERR_INVALID_ARG;
+    ASSERT_TICK_THREAD(c);
+
+    if (c->state != MQVPN_STATE_ESTABLISHED || !c->multipath_ready)
+        return MQVPN_ERR_INVALID_STATE;
+
+    /* Find path by handle */
+    int idx = -1;
+    path_entry_t *p = NULL;
+    for (int i = 0; i < c->n_paths; i++) {
+        if (c->paths[i].handle == handle) {
+            idx = i;
+            p = &c->paths[i];
+            break;
+        }
+    }
+    if (!p) return MQVPN_ERR_INVALID_ARG;
+
+    if (p->in_use) return MQVPN_ERR_INVALID_STATE;
+    if (!p->active) return MQVPN_ERR_INVALID_STATE;
+    if (p->status != MQVPN_PATH_DEGRADED && p->status != MQVPN_PATH_CLOSED)
+        return MQVPN_ERR_INVALID_STATE;
+
+    LOG_I(c, "platform reactivating path: %s (was %s)", p->name,
+          p->status == MQVPN_PATH_DEGRADED ? "degraded" : "closed");
+
+    client_activate_path(c, p, idx);
+    if (!p->in_use) return MQVPN_ERR_ENGINE;
+
+    /* Success: cancel library timer, start stability timer */
+    p->recreate_after_us = 0;
+    p->path_stable_since_us = client_now_us(c);
     return MQVPN_OK;
 }
 
@@ -1639,6 +1721,50 @@ mqvpn_client_tick(mqvpn_client_t *c)
 
     if (c->engine) xqc_engine_main_logic(c->engine);
 
+    /* Path recovery timer (exponential backoff) */
+    if (c->multipath_ready && c->state == MQVPN_STATE_ESTABLISHED) {
+        uint64_t now = client_now_us(c);
+        for (int i = 0; i < c->n_paths; i++) {
+            path_entry_t *p = &c->paths[i];
+
+            /* Recovery timer: attempt re-creation for DEGRADED paths */
+            if (p->status == MQVPN_PATH_DEGRADED && p->recreate_after_us > 0 &&
+                now >= p->recreate_after_us) {
+                p->recreate_after_us = 0;
+                LOG_I(c, "path recovery attempt: %s (retry %d/%d)", p->name,
+                      p->recreate_retries, PATH_RECREATE_MAX_RETRIES);
+                client_activate_path(c, p, i);
+
+                if (p->in_use) {
+                    /* Create succeeded — start stability timer.
+                     * xquic validates async. If fail, cb_path_removed fires. */
+                    p->path_stable_since_us = now;
+                } else {
+                    /* xqc_conn_create_path() failed synchronously */
+                    p->recreate_retries++;
+                    if (p->recreate_retries >= PATH_RECREATE_MAX_RETRIES) {
+                        p->status = MQVPN_PATH_CLOSED;
+                        p->recreate_after_us = 0;
+                        LOG_W(c, "path closed: %s (retries exhausted)", p->name);
+                        if (c->cbs.path_event)
+                            c->cbs.path_event(p->handle, MQVPN_PATH_CLOSED, c->user_ctx);
+                    } else {
+                        p->recreate_after_us =
+                            now + path_recreate_backoff(p->recreate_retries);
+                    }
+                }
+            }
+
+            /* Stability confirmation: reset retry budget after 30s stable */
+            if (p->path_stable_since_us > 0 && p->in_use &&
+                now - p->path_stable_since_us >= PATH_STABLE_THRESHOLD_US) {
+                LOG_I(c, "path %s: stable for 30s, resetting retry budget", p->name);
+                p->recreate_retries = 0;
+                p->path_stable_since_us = 0;
+            }
+        }
+    }
+
     /* Reconnect timer check */
     if (c->state == MQVPN_STATE_RECONNECTING && c->reconnect_scheduled_us > 0) {
         uint64_t t = client_now_us(c);
@@ -1651,6 +1777,9 @@ mqvpn_client_tick(mqvpn_client_t *c)
             for (int i = 0; i < c->n_paths; i++) {
                 c->paths[i].in_use = 0;
                 c->paths[i].xqc_path_id = 0;
+                c->paths[i].recreate_after_us = 0;
+                c->paths[i].recreate_retries = 0;
+                c->paths[i].path_stable_since_us = 0;
             }
 
             if (cli_start_connection(c) < 0) {
@@ -1757,6 +1886,33 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
             if (ms <= 0 || rms < ms) ms = rms;
         } else {
             ms = 1; /* reconnect is due */
+        }
+    }
+
+    /* Account for path recovery and stability timers */
+    if (c->multipath_ready && c->state == MQVPN_STATE_ESTABLISHED) {
+        uint64_t now_val = client_now_us(c);
+        for (int i = 0; i < c->n_paths; i++) {
+            const path_entry_t *p = &c->paths[i];
+            /* Recovery timer */
+            if (p->status == MQVPN_PATH_DEGRADED && p->recreate_after_us > 0) {
+                if (p->recreate_after_us > now_val) {
+                    int pms = (int)((p->recreate_after_us - now_val) / 1000);
+                    if (ms <= 0 || pms < ms) ms = pms;
+                } else {
+                    ms = 1;
+                }
+            }
+            /* Stability timer */
+            if (p->path_stable_since_us > 0 && p->in_use) {
+                uint64_t stable_at = p->path_stable_since_us + PATH_STABLE_THRESHOLD_US;
+                if (stable_at > now_val) {
+                    int sms = (int)((stable_at - now_val) / 1000);
+                    if (ms <= 0 || sms < ms) ms = sms;
+                } else {
+                    ms = 1;
+                }
+            }
         }
     }
 

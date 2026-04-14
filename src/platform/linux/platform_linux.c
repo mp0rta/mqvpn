@@ -28,6 +28,9 @@ static void status_log_cb(evutil_socket_t fd, short what, void *arg);
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
+#include <ifaddrs.h>
 
 /* ================================================================
  *  libmqvpn callbacks
@@ -118,10 +121,9 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     mqvpn_client_set_tun_active(p->client, 1, p->tun.fd);
 
     /* Start periodic status log */
-    if (!p->ev_status)
-        p->ev_status = evtimer_new(p->eb, status_log_cb, p);
+    if (!p->ev_status) p->ev_status = evtimer_new(p->eb, status_log_cb, p);
     if (p->ev_status) {
-        struct timeval tv = { .tv_sec = STATUS_INTERVAL_SEC };
+        struct timeval tv = {.tv_sec = STATUS_INTERVAL_SEC};
         event_add(p->ev_status, &tv);
     }
     return;
@@ -166,8 +168,9 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
      * that stale fd events don't fire ("tun read: Bad file descriptor").
      * The TUN will be recreated in cb_tunnel_config_ready on reconnect. */
     if (new_state == MQVPN_STATE_RECONNECTING || new_state == MQVPN_STATE_CLOSED) {
-        if (p->ev_status)
-            event_del(p->ev_status);  /* pause — reused on reconnect */
+        /* Reset netlink path recovery state */
+        memset(p->path_recoverable, 0, sizeof(p->path_recoverable));
+        if (p->ev_status) event_del(p->ev_status); /* pause — reused on reconnect */
         cleanup_killswitch(p);
         cleanup_routes(p);
         mqvpn_dns_restore(&p->dns);
@@ -190,10 +193,28 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
 static void
 cb_path_event(mqvpn_path_handle_t path, mqvpn_path_status_t status, void *user_ctx)
 {
-    (void)user_ctx;
+    platform_ctx_t *p = (platform_ctx_t *)user_ctx;
     static const char *snames[] = {"PENDING", "ACTIVE", "DEGRADED", "STANDBY", "CLOSED"};
     const char *sn = (status < 5) ? snames[status] : "?";
     LOG_INF("path %lld -> %s", (long long)path, sn);
+
+    /* Track recoverable paths for netlink-triggered reactivation */
+    for (int i = 0; i < p->path_mgr.n_paths; i++) {
+        if (p->lib_path_handles[i] == path) {
+            switch (status) {
+            case MQVPN_PATH_DEGRADED: p->path_recoverable[i] = 1; break;
+            case MQVPN_PATH_ACTIVE: p->path_recoverable[i] = 0; break;
+            case MQVPN_PATH_CLOSED:
+                /* CLOSED from retries exhausted (active==1): still recoverable.
+                 * CLOSED from remove_path (active==0): not recoverable.
+                 * Platform tracks its own remove_path calls. */
+                p->path_recoverable[i] = !p->path_removed_by_platform[i];
+                break;
+            default: break;
+            }
+            break;
+        }
+    }
 }
 
 static void
@@ -226,7 +247,8 @@ cb_reconnect_scheduled(int delay_sec, void *user_ctx)
 static void
 status_log_cb(evutil_socket_t fd, short what, void *arg)
 {
-    (void)fd; (void)what;
+    (void)fd;
+    (void)what;
     platform_ctx_t *p = (platform_ctx_t *)arg;
     if (!p->client) return;
 
@@ -240,28 +262,28 @@ status_log_cb(evutil_socket_t fd, short what, void *arg)
     int n_paths = 0;
     mqvpn_client_get_paths(p->client, paths, MQVPN_MAX_PATHS, &n_paths);
 
-    LOG_INF("[STATUS] state=established paths=%d tx=%" PRIu64
-            " rx=%" PRIu64 " srtt=%dms dgram_lost=%" PRIu64,
-            n_paths, stats.bytes_tx, stats.bytes_rx,
-            stats.srtt_ms, stats.dgram_lost);
+    LOG_INF("[STATUS] state=established paths=%d tx=%" PRIu64 " rx=%" PRIu64
+            " srtt=%dms dgram_lost=%" PRIu64,
+            n_paths, stats.bytes_tx, stats.bytes_rx, stats.srtt_ms, stats.dgram_lost);
 
     for (int i = 0; i < n_paths; i++) {
         const char *st_str = "unknown";
         switch (paths[i].status) {
-        case MQVPN_PATH_ACTIVE:  st_str = "active"; break;
+        case MQVPN_PATH_PENDING: st_str = "pending"; break;
+        case MQVPN_PATH_ACTIVE: st_str = "active"; break;
+        case MQVPN_PATH_DEGRADED: st_str = "degraded"; break;
         case MQVPN_PATH_STANDBY: st_str = "standby"; break;
-        case MQVPN_PATH_CLOSED:  st_str = "closed"; break;
+        case MQVPN_PATH_CLOSED: st_str = "closed"; break;
         default: break;
         }
-        LOG_INF("[STATUS]   path%d=%s srtt=%dms tx=%" PRIu64
-                " rx=%" PRIu64 " %s",
-                i, paths[i].name, paths[i].srtt_ms,
-                paths[i].bytes_tx, paths[i].bytes_rx, st_str);
+        LOG_INF("[STATUS]   path%d=%s srtt=%dms tx=%" PRIu64 " rx=%" PRIu64 " %s", i,
+                paths[i].name, paths[i].srtt_ms, paths[i].bytes_tx, paths[i].bytes_rx,
+                st_str);
     }
 
     /* Re-arm timer */
     if (p->ev_status) {
-        struct timeval tv = { .tv_sec = STATUS_INTERVAL_SEC };
+        struct timeval tv = {.tv_sec = STATUS_INTERVAL_SEC};
         event_add(p->ev_status, &tv);
     }
 }
@@ -374,6 +396,112 @@ on_signal(evutil_socket_t sig, short what, void *arg)
 }
 
 /* ================================================================
+ *  Netlink path recovery accelerator
+ * ================================================================ */
+
+/* Check if interface has an IP address (v4 or v6) */
+static int
+iface_has_ip(const char *ifname)
+{
+    struct ifaddrs *ifa_list = NULL, *ifa;
+    int found = 0;
+    if (getifaddrs(&ifa_list) < 0) return 0;
+    for (ifa = ifa_list; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr) continue;
+        if (strcmp(ifa->ifa_name, ifname) != 0) continue;
+        if (ifa->ifa_addr->sa_family == AF_INET || ifa->ifa_addr->sa_family == AF_INET6) {
+            found = 1;
+            break;
+        }
+    }
+    freeifaddrs(ifa_list);
+    return found;
+}
+
+static void
+try_reactivate_by_ifname(platform_ctx_t *p, const char *ifname)
+{
+    for (int i = 0; i < p->path_mgr.n_paths; i++) {
+        if (!p->path_recoverable[i]) continue;
+        if (strcmp(p->path_mgr.paths[i].iface, ifname) != 0) continue;
+
+        int ret = mqvpn_client_reactivate_path(p->client, p->lib_path_handles[i]);
+        if (ret == MQVPN_OK) {
+            LOG_INF("netlink: reactivated path %s", ifname);
+            p->path_recoverable[i] = 0;
+        } else if (ret == MQVPN_ERR_INVALID_STATE) {
+            /* Already in_use or not in right state — ignore */
+        } else {
+            LOG_WRN("netlink: reactivate %s failed: %s", ifname, mqvpn_error_string(ret));
+        }
+    }
+}
+
+static void
+on_netlink_event(evutil_socket_t fd, short what, void *arg)
+{
+    (void)what;
+    platform_ctx_t *p = (platform_ctx_t *)arg;
+    char buf[8192];
+
+    ssize_t len = recv(fd, buf, sizeof(buf), 0);
+    if (len <= 0) return;
+
+    for (struct nlmsghdr *nh = (struct nlmsghdr *)buf; NLMSG_OK(nh, (size_t)len);
+         nh = NLMSG_NEXT(nh, len)) {
+        if (nh->nlmsg_type == RTM_NEWADDR) {
+            struct ifaddrmsg *ifa = (struct ifaddrmsg *)NLMSG_DATA(nh);
+            char ifname[IFNAMSIZ];
+            if (if_indextoname(ifa->ifa_index, ifname))
+                try_reactivate_by_ifname(p, ifname);
+
+        } else if (nh->nlmsg_type == RTM_NEWLINK) {
+            struct ifinfomsg *ifi = (struct ifinfomsg *)NLMSG_DATA(nh);
+            if (!(ifi->ifi_flags & IFF_UP) || !(ifi->ifi_flags & IFF_RUNNING)) continue;
+            char ifname[IFNAMSIZ];
+            if (!if_indextoname(ifi->ifi_index, ifname)) continue;
+            /* Only reactivate if interface has an IP address */
+            if (iface_has_ip(ifname)) try_reactivate_by_ifname(p, ifname);
+        }
+    }
+}
+
+static int
+setup_netlink(platform_ctx_t *p)
+{
+    p->nl_fd =
+        socket(AF_NETLINK, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, NETLINK_ROUTE);
+    if (p->nl_fd < 0) {
+        LOG_WRN("netlink socket failed: %s (path recovery via timer only)",
+                strerror(errno));
+        return -1;
+    }
+
+    struct sockaddr_nl sa = {
+        .nl_family = AF_NETLINK,
+        .nl_groups = RTMGRP_LINK | RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR,
+    };
+    if (bind(p->nl_fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+        LOG_WRN("netlink bind failed: %s (path recovery via timer only)",
+                strerror(errno));
+        close(p->nl_fd);
+        p->nl_fd = -1;
+        return -1;
+    }
+
+    p->ev_netlink = event_new(p->eb, p->nl_fd, EV_READ | EV_PERSIST, on_netlink_event, p);
+    if (!p->ev_netlink) {
+        LOG_WRN("netlink event_new failed (OOM?)");
+        close(p->nl_fd);
+        p->nl_fd = -1;
+        return -1;
+    }
+    event_add(p->ev_netlink, NULL);
+    LOG_INF("netlink path recovery accelerator active");
+    return 0;
+}
+
+/* ================================================================
  *  Main entry point: linux_platform_run_client
  * ================================================================ */
 
@@ -384,6 +512,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     platform_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.tun.fd = -1;
+    ctx.nl_fd = -1;
     ctx.server_port = cfg->server_port;
     ctx.killswitch_enabled = cfg->kill_switch;
 
@@ -502,6 +631,9 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
         event_add(ctx.ev_udp[i], NULL);
     }
 
+    /* Netlink path recovery accelerator (non-fatal if fails) */
+    setup_netlink(&ctx);
+
     /* Signal handlers */
     ctx.ev_sigint = evsignal_new(ctx.eb, SIGINT, on_signal, &ctx);
     ctx.ev_sigterm = evsignal_new(ctx.eb, SIGTERM, on_signal, &ctx);
@@ -545,6 +677,12 @@ cleanup:
         }
     }
 
+    if (ctx.ev_netlink) {
+        event_del(ctx.ev_netlink);
+        event_free(ctx.ev_netlink);
+    }
+    if (ctx.nl_fd >= 0) close(ctx.nl_fd);
+
     if (ctx.ev_tick) {
         event_del(ctx.ev_tick);
         event_free(ctx.ev_tick);
@@ -575,18 +713,18 @@ cleanup:
  * ================================================================ */
 
 typedef struct {
-    mqvpn_server_t     *server;
-    struct event_base  *eb;
-    struct event       *ev_tick;
-    struct event       *ev_tun;
-    struct event       *ev_socket;
-    struct event       *ev_sigint;
-    struct event       *ev_sigterm;
-    mqvpn_tun_t         tun;
-    int                 tun_up;
-    int                 udp_fd;
-    int                 shutting_down;
-    ctrl_socket_t      *ctrl;
+    mqvpn_server_t *server;
+    struct event_base *eb;
+    struct event *ev_tick;
+    struct event *ev_tun;
+    struct event *ev_socket;
+    struct event *ev_sigint;
+    struct event *ev_sigterm;
+    mqvpn_tun_t tun;
+    int tun_up;
+    int udp_fd;
+    int shutting_down;
+    ctrl_socket_t *ctrl;
 } server_platform_ctx_t;
 
 static void svr_on_tick(evutil_socket_t fd, short what, void *arg);
@@ -913,10 +1051,9 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
 
     /* Control API (optional) */
     if (cfg->control_port > 0) {
-        sp.ctrl = ctrl_socket_create(sp.eb, cfg->control_addr,
-                                     cfg->control_port, sp.server);
-        if (!sp.ctrl)
-            LOG_WRN("control API setup failed — continuing without it");
+        sp.ctrl =
+            ctrl_socket_create(sp.eb, cfg->control_addr, cfg->control_port, sp.server);
+        if (!sp.ctrl) LOG_WRN("control API setup failed — continuing without it");
     }
 
     LOG_INF("mqvpn server ready — listening on %s:%d, subnet %s",

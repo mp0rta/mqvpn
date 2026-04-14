@@ -15,59 +15,62 @@
 
 /* ── Test infrastructure ── */
 
-static int g_tests_run    = 0;
+static int g_tests_run = 0;
 static int g_tests_passed = 0;
 
-#define TEST(name) \
+#define TEST(name)                 \
     static void test_##name(void); \
-    static void run_##name(void) { \
-        g_tests_run++; \
+    static void run_##name(void)   \
+    {                              \
+        g_tests_run++;             \
         printf("  %-50s ", #name); \
-        test_##name(); \
-        g_tests_passed++; \
-        printf("PASS\n"); \
-    } \
+        test_##name();             \
+        g_tests_passed++;          \
+        printf("PASS\n");          \
+    }                              \
     static void test_##name(void)
 
-#define ASSERT_EQ(a, b) do { \
-    if ((a) != (b)) { \
-        printf("FAIL\n    %s:%d: %s == %lld, expected %lld\n", \
-               __FILE__, __LINE__, #a, (long long)(a), (long long)(b)); \
-        exit(1); \
-    } \
-} while (0)
+#define ASSERT_EQ(a, b)                                                                \
+    do {                                                                               \
+        if ((a) != (b)) {                                                              \
+            printf("FAIL\n    %s:%d: %s == %lld, expected %lld\n", __FILE__, __LINE__, \
+                   #a, (long long)(a), (long long)(b));                                \
+            exit(1);                                                                   \
+        }                                                                              \
+    } while (0)
 
-#define ASSERT_NE(a, b) do { \
-    if ((a) == (b)) { \
-        printf("FAIL\n    %s:%d: %s == %s (unexpected)\n", \
-               __FILE__, __LINE__, #a, #b); \
-        exit(1); \
-    } \
-} while (0)
+#define ASSERT_NE(a, b)                                                                \
+    do {                                                                               \
+        if ((a) == (b)) {                                                              \
+            printf("FAIL\n    %s:%d: %s == %s (unexpected)\n", __FILE__, __LINE__, #a, \
+                   #b);                                                                \
+            exit(1);                                                                   \
+        }                                                                              \
+    } while (0)
 
-#define ASSERT_NULL(a) do { \
-    if ((a) != NULL) { \
-        printf("FAIL\n    %s:%d: %s is not NULL\n", \
-               __FILE__, __LINE__, #a); \
-        exit(1); \
-    } \
-} while (0)
+#define ASSERT_NULL(a)                                                           \
+    do {                                                                         \
+        if ((a) != NULL) {                                                       \
+            printf("FAIL\n    %s:%d: %s is not NULL\n", __FILE__, __LINE__, #a); \
+            exit(1);                                                             \
+        }                                                                        \
+    } while (0)
 
-#define ASSERT_NOT_NULL(a) do { \
-    if ((a) == NULL) { \
-        printf("FAIL\n    %s:%d: %s is NULL\n", \
-               __FILE__, __LINE__, #a); \
-        exit(1); \
-    } \
-} while (0)
+#define ASSERT_NOT_NULL(a)                                                   \
+    do {                                                                     \
+        if ((a) == NULL) {                                                   \
+            printf("FAIL\n    %s:%d: %s is NULL\n", __FILE__, __LINE__, #a); \
+            exit(1);                                                         \
+        }                                                                    \
+    } while (0)
 
-#define ASSERT_STR_EQ(a, b) do { \
-    if (strcmp((a), (b)) != 0) { \
-        printf("FAIL\n    %s:%d: \"%s\" != \"%s\"\n", \
-               __FILE__, __LINE__, (a), (b)); \
-        exit(1); \
-    } \
-} while (0)
+#define ASSERT_STR_EQ(a, b)                                                              \
+    do {                                                                                 \
+        if (strcmp((a), (b)) != 0) {                                                     \
+            printf("FAIL\n    %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, (a), (b)); \
+            exit(1);                                                                     \
+        }                                                                                \
+    } while (0)
 
 /* ── Config tests ── */
 
@@ -145,26 +148,25 @@ TEST(config_add_user_max_capacity)
 
 TEST(config_load_json)
 {
-    const char *json =
-        "{"
-        "\"server_host\":\"vpn.example.com\","
-        "\"server_port\":8443,"
-        "\"auth_key\":\"legacy-key\","
-        "\"insecure\":true,"
-        "\"multipath\":false,"
-        "\"reconnect_enable\":false,"
-        "\"reconnect_interval_sec\":11,"
-        "\"killswitch_hint\":true,"
-        "\"listen_addr\":\"0.0.0.0\","
-        "\"listen_port\":443,"
-        "\"subnet\":\"10.5.0.0/24\","
-        "\"subnet6\":\"fd00::/112\","
-        "\"tls_cert\":\"/tmp/cert.pem\","
-        "\"tls_key\":\"/tmp/key.pem\","
-        "\"max_clients\":99,"
-        "\"paths\":[\"eth0\",\"wlan0\"],"
-        "\"users\":[{\"name\":\"alice\",\"key\":\"a1\"},\"bob:b1\"]"
-        "}";
+    const char *json = "{"
+                       "\"server_host\":\"vpn.example.com\","
+                       "\"server_port\":8443,"
+                       "\"auth_key\":\"legacy-key\","
+                       "\"insecure\":true,"
+                       "\"multipath\":false,"
+                       "\"reconnect_enable\":false,"
+                       "\"reconnect_interval_sec\":11,"
+                       "\"killswitch_hint\":true,"
+                       "\"listen_addr\":\"0.0.0.0\","
+                       "\"listen_port\":443,"
+                       "\"subnet\":\"10.5.0.0/24\","
+                       "\"subnet6\":\"fd00::/112\","
+                       "\"tls_cert\":\"/tmp/cert.pem\","
+                       "\"tls_key\":\"/tmp/key.pem\","
+                       "\"max_clients\":99,"
+                       "\"paths\":[\"eth0\",\"wlan0\"],"
+                       "\"users\":[{\"name\":\"alice\",\"key\":\"a1\"},\"bob:b1\"]"
+                       "}";
 
     mqvpn_config_t *cfg = mqvpn_config_new();
     ASSERT_EQ(mqvpn_config_load_json(cfg, json), MQVPN_OK);
@@ -195,10 +197,9 @@ TEST(config_load_json)
 
 TEST(config_load_json_duplicate_users_last_wins)
 {
-    const char *json =
-        "{"
-        "\"users\":[\"alice:old\", {\"name\":\"alice\",\"key\":\"new\"}]"
-        "}";
+    const char *json = "{"
+                       "\"users\":[\"alice:old\", {\"name\":\"alice\",\"key\":\"new\"}]"
+                       "}";
 
     mqvpn_config_t *cfg = mqvpn_config_new();
     ASSERT_EQ(mqvpn_config_load_json(cfg, json), MQVPN_OK);
@@ -210,10 +211,9 @@ TEST(config_load_json_duplicate_users_last_wins)
 
 TEST(config_load_json_invalid_users)
 {
-    const char *json =
-        "{"
-        "\"users\":[{\"name\":\"alice\"}]"
-        "}";
+    const char *json = "{"
+                       "\"users\":[{\"name\":\"alice\"}]"
+                       "}";
 
     mqvpn_config_t *cfg = mqvpn_config_new();
     ASSERT_EQ(mqvpn_config_load_json(cfg, json), MQVPN_ERR_INVALID_ARG);
@@ -326,6 +326,7 @@ TEST(error_string)
     ASSERT_STR_EQ(mqvpn_error_string(MQVPN_ERR_ENGINE), "engine error");
     ASSERT_STR_EQ(mqvpn_error_string(MQVPN_ERR_AGAIN), "back-pressure");
     ASSERT_STR_EQ(mqvpn_error_string(MQVPN_ERR_ABI_MISMATCH), "ABI mismatch");
+    ASSERT_STR_EQ(mqvpn_error_string(MQVPN_ERR_INVALID_STATE), "invalid state");
     /* Unknown error code */
     ASSERT_NOT_NULL(mqvpn_error_string((mqvpn_error_t)-99));
 }
@@ -348,9 +349,22 @@ static int g_state_change_count = 0;
 static mqvpn_client_state_t g_last_old_state;
 static mqvpn_client_state_t g_last_new_state;
 
-static void dummy_tun_output(const uint8_t *p, size_t l, void *u) { (void)p; (void)l; (void)u; }
-static void dummy_config_ready(const mqvpn_tunnel_info_t *i, void *u) { (void)i; (void)u; }
-static void mock_state_changed(mqvpn_client_state_t old_s, mqvpn_client_state_t new_s, void *u) {
+static void
+dummy_tun_output(const uint8_t *p, size_t l, void *u)
+{
+    (void)p;
+    (void)l;
+    (void)u;
+}
+static void
+dummy_config_ready(const mqvpn_tunnel_info_t *i, void *u)
+{
+    (void)i;
+    (void)u;
+}
+static void
+mock_state_changed(mqvpn_client_state_t old_s, mqvpn_client_state_t new_s, void *u)
+{
     (void)u;
     g_state_change_count++;
     g_last_old_state = old_s;
@@ -358,7 +372,8 @@ static void mock_state_changed(mqvpn_client_state_t old_s, mqvpn_client_state_t 
 }
 
 /* Helper: create a valid client for lifecycle tests */
-static mqvpn_client_t *make_test_client(void)
+static mqvpn_client_t *
+make_test_client(void)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
     mqvpn_config_set_server(cfg, "1.2.3.4", 443);
@@ -415,7 +430,7 @@ TEST(client_new_abi_mismatch)
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
     cbs.tun_output = dummy_tun_output;
     cbs.tunnel_config_ready = dummy_config_ready;
-    cbs.abi_version = 99;  /* wrong version */
+    cbs.abi_version = 99; /* wrong version */
 
     ASSERT_NULL(mqvpn_client_new(cfg, &cbs, NULL));
 
@@ -701,21 +716,45 @@ TEST(generate_key)
     ASSERT_EQ(mqvpn_generate_key(NULL, 64), MQVPN_ERR_INVALID_ARG);
 }
 
+/* ── Path reactivation preconditions ── */
+
+TEST(reactivate_path_null_client)
+{
+    ASSERT_EQ(mqvpn_client_reactivate_path(NULL, 1), MQVPN_ERR_INVALID_ARG);
+}
+
+TEST(reactivate_path_not_established)
+{
+    mqvpn_client_t *c = make_test_client();
+    /* Client is in IDLE state — reactivate should fail */
+    ASSERT_EQ(mqvpn_client_get_state(c), MQVPN_STATE_IDLE);
+    ASSERT_EQ(mqvpn_client_reactivate_path(c, 1), MQVPN_ERR_INVALID_STATE);
+
+    /* Also fails with a real path handle — state check comes first */
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+    ASSERT_EQ(mqvpn_client_reactivate_path(c, h), MQVPN_ERR_INVALID_STATE);
+
+    /* Unknown handle 999 also fails with INVALID_STATE (not ESTABLISHED) */
+    ASSERT_EQ(mqvpn_client_reactivate_path(c, 999), MQVPN_ERR_INVALID_STATE);
+
+    mqvpn_client_destroy(c);
+}
+
 /* ── Server client info ── */
 
 TEST(server_get_client_info_null_safety)
 {
     mqvpn_client_info_t info[4];
     int n = 0;
-    ASSERT_EQ(mqvpn_server_get_client_info(NULL, info, 4, &n),
-              MQVPN_ERR_INVALID_ARG);
-    ASSERT_EQ(mqvpn_server_get_client_info(NULL, NULL, 4, &n),
-              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_get_client_info(NULL, info, 4, &n), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_get_client_info(NULL, NULL, 4, &n), MQVPN_ERR_INVALID_ARG);
 }
 
 /* ── Main ── */
 
-int main(void)
+int
+main(void)
 {
     printf("test_api:\n");
 
@@ -782,6 +821,10 @@ int main(void)
     /* I/O feed tests */
     run_client_on_tun_packet_null();
     run_client_on_socket_recv_null();
+
+    /* Path reactivation tests */
+    run_reactivate_path_null_client();
+    run_reactivate_path_not_established();
 
     /* Server info tests */
     run_server_get_client_info_null_safety();
