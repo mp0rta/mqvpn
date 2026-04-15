@@ -619,8 +619,9 @@ on_netlink_event(evutil_socket_t fd, short what, void *arg)
     ssize_t len = recv(fd, buf, sizeof(buf), 0);
     if (len <= 0) return;
 
-    for (struct nlmsghdr *nh = (struct nlmsghdr *)buf; NLMSG_OK(nh, (size_t)len);
-         nh = NLMSG_NEXT(nh, len)) {
+    int nlen = (int)len;
+    for (struct nlmsghdr *nh = (struct nlmsghdr *)buf; NLMSG_OK(nh, nlen);
+         nh = NLMSG_NEXT(nh, nlen)) {
         if (nh->nlmsg_type == RTM_NEWADDR) {
             struct ifaddrmsg *ifa = (struct ifaddrmsg *)NLMSG_DATA(nh);
             char ifname[IFNAMSIZ];
