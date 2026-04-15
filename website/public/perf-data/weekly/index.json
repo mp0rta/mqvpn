@@ -1,5 +1,18 @@
 [
   {
+    "commit": "0563c25",
+    "timestamp": "2026-04-15T02:03:11Z",
+    "type": "weekly",
+    "files": [
+      "ntn_20260415_020308.json",
+      "multipath_scheduler_20260415_014120.json",
+      "raw_throughput_20260415_012306.json",
+      "aggregate_20260415_013142.json",
+      "udp_sweep_20260415_015714.json",
+      "failover_20260415_012644.json"
+    ]
+  },
+  {
     "commit": "f90ca09",
     "timestamp": "2026-04-14T14:05:11Z",
     "type": "weekly",

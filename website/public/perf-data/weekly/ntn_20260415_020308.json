@@ -1,0 +1,52 @@
+{
+  "test": "ntn",
+  "commit": "0563c259572d4b32784612a325435c70f8963a99",
+  "timestamp": "2026-04-15T02:03:08Z",
+  "scenarios": [
+    {
+      "name": "lte_leo_starlink",
+      "description": "LTE + LEO (Starlink-like)",
+      "netem_a": "delay 15ms 3ms rate 50mbit loss 0.2%",
+      "netem_b": "delay 25ms 8ms rate 100mbit loss 0.5%",
+      "single_mbps": 30.2,
+      "wlb_mbps": 21.0,
+      "minrtt_mbps": 30.7
+    },
+    {
+      "name": "lte_leo_high_orbit",
+      "description": "LTE + LEO (high orbit)",
+      "netem_a": "delay 15ms 3ms rate 50mbit loss 0.2%",
+      "netem_b": "delay 40ms 12ms rate 80mbit loss 0.8%",
+      "single_mbps": 31.4,
+      "wlb_mbps": 17.1,
+      "minrtt_mbps": 31.0
+    },
+    {
+      "name": "lte_geo",
+      "description": "LTE + GEO",
+      "netem_a": "delay 15ms 3ms rate 50mbit loss 0.2%",
+      "netem_b": "delay 300ms 5ms rate 20mbit loss 0.2%",
+      "single_mbps": 31.2,
+      "wlb_mbps": 26.7,
+      "minrtt_mbps": 28.8
+    },
+    {
+      "name": "wifi_leo",
+      "description": "WiFi + LEO",
+      "netem_a": "delay 3ms 1ms rate 80mbit",
+      "netem_b": "delay 25ms 8ms rate 100mbit loss 0.5%",
+      "single_mbps": 71.4,
+      "wlb_mbps": 73.3,
+      "minrtt_mbps": 73.7
+    },
+    {
+      "name": "dual_leo",
+      "description": "Dual-LEO",
+      "netem_a": "delay 25ms 8ms rate 100mbit loss 0.5%",
+      "netem_b": "delay 35ms 10ms rate 80mbit loss 0.8%",
+      "single_mbps": 11.5,
+      "wlb_mbps": 9.7,
+      "minrtt_mbps": 12.7
+    }
+  ]
+}
