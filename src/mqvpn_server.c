@@ -282,13 +282,20 @@ cb_set_event_timer(xqc_usec_t wake_after, void *user_data)
 static void
 cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_data)
 {
-    (void)lvl;
     mqvpn_server_t *s = (mqvpn_server_t *)user_data;
-    if (s->cbs.log) {
-        char msg[512];
-        snprintf(msg, sizeof(msg), "[xquic] %.*s", (int)size, (const char *)buf);
-        s->cbs.log(MQVPN_LOG_DEBUG, msg, s->user_ctx);
+    if (!s->cbs.log) return;
+
+    mqvpn_log_level_t ml;
+    switch (lvl) {
+    case 1: ml = MQVPN_LOG_ERROR; break;
+    case 2: ml = MQVPN_LOG_WARN; break;
+    case 3: ml = MQVPN_LOG_INFO; break;
+    default: ml = MQVPN_LOG_DEBUG; break;
     }
+
+    char msg[512];
+    snprintf(msg, sizeof(msg), "[xquic] %.*s", (int)size, (const char *)buf);
+    s->cbs.log(ml, msg, s->user_ctx);
 }
 
 /* ─── UDP send helper ─── */

@@ -390,14 +390,21 @@ cb_set_event_timer(xqc_usec_t wake_after, void *user_data)
 static void
 cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_data)
 {
-    (void)lvl;
     mqvpn_client_t *c = (mqvpn_client_t *)user_data;
-    if (c->cbs.log) {
-        char msg[512];
-        int n = snprintf(msg, sizeof(msg), "[xquic] %.*s", (int)size, (const char *)buf);
-        (void)n;
-        c->cbs.log(MQVPN_LOG_DEBUG, msg, c->user_ctx);
+    if (!c->cbs.log) return;
+
+    /* Map xquic levels: 1=error, 2=warn, 3=info, 4+=debug */
+    mqvpn_log_level_t ml;
+    switch (lvl) {
+    case 1: ml = MQVPN_LOG_ERROR; break;
+    case 2: ml = MQVPN_LOG_WARN; break;
+    case 3: ml = MQVPN_LOG_INFO; break;
+    default: ml = MQVPN_LOG_DEBUG; break;
     }
+
+    char msg[512];
+    snprintf(msg, sizeof(msg), "[xquic] %.*s", (int)size, (const char *)buf);
+    c->cbs.log(ml, msg, c->user_ctx);
 }
 
 /* ─── UDP write callback (xquic → network) ─── */
@@ -1611,8 +1618,10 @@ mqvpn_client_tick(mqvpn_client_t *c)
                         if (c->cbs.path_event)
                             c->cbs.path_event(p->handle, MQVPN_PATH_CLOSED, c->user_ctx);
                     } else {
-                        p->recreate_after_us =
-                            now + path_recreate_backoff(p->recreate_retries);
+                        uint64_t backoff = path_recreate_backoff(p->recreate_retries);
+                        p->recreate_after_us = now + backoff;
+                        LOG_D(c, "path %s: scheduling retry in %ds", p->name,
+                              (int)(backoff / 1000000));
                     }
                 }
             }
