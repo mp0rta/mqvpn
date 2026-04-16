@@ -126,6 +126,8 @@ typedef enum {
     MQVPN_PATH_CLOSED = 4,
 } mqvpn_path_status_t;
 
+MQVPN_API const char *mqvpn_path_status_string(mqvpn_path_status_t status);
+
 /* ─── Data structures ─── */
 
 typedef struct {

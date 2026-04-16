@@ -19,6 +19,10 @@
 #include <inttypes.h>
 
 #define STATUS_INTERVAL_SEC 30
+#define BULK_READ_COUNT     64
+#define NETLINK_BUF_SIZE    8192
+#define TUN_BUF_SIZE        65536
+#define SOCK_BUF_SIZE       65536
 static void status_log_cb(evutil_socket_t fd, short what, void *arg);
 #include <stdlib.h>
 #include <string.h>
@@ -197,8 +201,7 @@ static void
 cb_path_event(mqvpn_path_handle_t path, mqvpn_path_status_t status, void *user_ctx)
 {
     platform_ctx_t *p = (platform_ctx_t *)user_ctx;
-    static const char *snames[] = {"PENDING", "ACTIVE", "DEGRADED", "STANDBY", "CLOSED"};
-    const char *sn = (status < 5) ? snames[status] : "?";
+    const char *sn = mqvpn_path_status_string(status);
     LOG_INF("path %lld -> %s", (long long)path, sn);
 
     /* Track recoverable paths for netlink-triggered reactivation */
@@ -270,15 +273,7 @@ status_log_cb(evutil_socket_t fd, short what, void *arg)
             n_paths, stats.bytes_tx, stats.bytes_rx, stats.srtt_ms, stats.dgram_lost);
 
     for (int i = 0; i < n_paths; i++) {
-        const char *st_str = "unknown";
-        switch (paths[i].status) {
-        case MQVPN_PATH_PENDING: st_str = "pending"; break;
-        case MQVPN_PATH_ACTIVE: st_str = "active"; break;
-        case MQVPN_PATH_DEGRADED: st_str = "degraded"; break;
-        case MQVPN_PATH_STANDBY: st_str = "standby"; break;
-        case MQVPN_PATH_CLOSED: st_str = "closed"; break;
-        default: break;
-        }
+        const char *st_str = mqvpn_path_status_string(paths[i].status);
         LOG_INF("[STATUS]   path%d=%s srtt=%dms tx=%" PRIu64 " rx=%" PRIu64 " %s", i,
                 paths[i].name, paths[i].srtt_ms, paths[i].bytes_tx, paths[i].bytes_rx,
                 st_str);
@@ -336,9 +331,9 @@ on_tun_read(evutil_socket_t fd, short what, void *arg)
     (void)fd;
     (void)what;
     platform_ctx_t *p = (platform_ctx_t *)arg;
-    uint8_t buf[65536];
+    uint8_t buf[TUN_BUF_SIZE];
 
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < BULK_READ_COUNT; i++) {
         int n = mqvpn_tun_read(&p->tun, buf, sizeof(buf));
         if (n <= 0) break;
 
@@ -356,11 +351,11 @@ on_socket_read(evutil_socket_t fd, short what, void *arg)
 {
     (void)what;
     platform_ctx_t *p = (platform_ctx_t *)arg;
-    uint8_t buf[65536];
+    uint8_t buf[SOCK_BUF_SIZE];
     struct sockaddr_storage peer;
     socklen_t peer_len = sizeof(peer);
 
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < BULK_READ_COUNT; i++) {
         // codeql[cpp/uncontrolled-allocation-size] buf is stack-allocated and bounded by
         // sizeof(buf); xquic validates internally
         ssize_t n =
@@ -619,7 +614,7 @@ on_netlink_event(evutil_socket_t fd, short what, void *arg)
 {
     (void)what;
     platform_ctx_t *p = (platform_ctx_t *)arg;
-    char buf[8192];
+    char buf[NETLINK_BUF_SIZE];
 
     for (;;) {
         ssize_t len = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
@@ -1024,9 +1019,9 @@ svr_on_tun_read(evutil_socket_t fd, short what, void *arg)
     (void)fd;
     (void)what;
     server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
-    uint8_t buf[65536];
+    uint8_t buf[TUN_BUF_SIZE];
 
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < BULK_READ_COUNT; i++) {
         int n = mqvpn_tun_read(&sp->tun, buf, sizeof(buf));
         if (n <= 0) break;
 
@@ -1046,11 +1041,11 @@ svr_on_socket_read(evutil_socket_t fd, short what, void *arg)
 {
     (void)what;
     server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
-    uint8_t buf[65536];
+    uint8_t buf[SOCK_BUF_SIZE];
     struct sockaddr_in6 peer;
     socklen_t peer_len;
 
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < BULK_READ_COUNT; i++) {
         peer_len = sizeof(peer);
         // codeql[cpp/uncontrolled-allocation-size] buf is stack-allocated and bounded by
         // sizeof(buf); xquic validates internally

@@ -103,3 +103,18 @@ mqvpn_generate_key(char *out, size_t out_len)
 
     return MQVPN_OK;
 }
+
+/* ─── Path status string ─── */
+
+const char *
+mqvpn_path_status_string(mqvpn_path_status_t status)
+{
+    switch (status) {
+    case MQVPN_PATH_PENDING: return "pending";
+    case MQVPN_PATH_ACTIVE: return "active";
+    case MQVPN_PATH_DEGRADED: return "degraded";
+    case MQVPN_PATH_STANDBY: return "standby";
+    case MQVPN_PATH_CLOSED: return "closed";
+    default: return "unknown";
+    }
+}

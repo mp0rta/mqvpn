@@ -114,6 +114,7 @@ set(MQVPN_LIB_SOURCES
     src/addr_pool.c
     src/auth.c
     src/log.c
+    src/icmp.c
 )
 
 # ---------- libmqvpn (static library — no libevent, no platform I/O) ----------

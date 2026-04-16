@@ -38,6 +38,7 @@
 #include <xquic/xqc_http3.h>
 
 #include "flow_sched.h"
+#include "icmp.h"
 
 /* ─── Constants ─── */
 
@@ -51,6 +52,7 @@
 #define PATH_RECREATE_MAX_DELAY_US (60ULL * 1000000) /* 60 sec max backoff */
 #define PATH_RECREATE_MAX_RETRIES  6                 /* max consecutive failures */
 #define PATH_STABLE_THRESHOLD_US   (30ULL * 1000000) /* 30 sec to confirm stable */
+#define SOCKET_BUF_SIZE            (7 * 1024 * 1024) /* 7 MiB socket buffer */
 
 /* ─── Forward declarations ─── */
 
@@ -164,6 +166,10 @@ struct mqvpn_client_s {
     uint64_t reconnect_scheduled_us;
     int shutting_down;
 
+    /* Log correlation */
+    uint32_t
+        conn_id; /* monotonic connection ID for log correlation, bumped on each connect */
+
     /* Timer: next wake (from xquic set_event_timer) */
     uint64_t next_wake_us;
 
@@ -268,9 +274,11 @@ client_log(mqvpn_client_t *c, mqvpn_log_level_t level, const char *fmt, ...)
 {
     if (!c->cbs.log) return;
     char buf[512];
+    int off = snprintf(buf, sizeof(buf), "[conn:%u] ", c->conn_id);
+    if (off < 0 || off >= (int)sizeof(buf)) off = 0;
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
+    vsnprintf(buf + off, sizeof(buf) - off, fmt, ap);
     va_end(ap);
     c->cbs.log(level, buf, c->user_ctx);
 }
@@ -368,220 +376,6 @@ ptb_rate_allow(mqvpn_client_t *c)
     return 0;
 }
 
-/* ─── ICMP Packet Too Big (IPv4) ─── */
-
-static void
-send_icmpv4_ptb(mqvpn_client_t *c, const uint8_t *orig, size_t orig_len,
-                size_t tunnel_mtu)
-{
-    if (orig_len < 20 || !c->conn || !c->conn->addr_assigned) return;
-    if (!ptb_rate_allow(c)) return;
-
-    size_t ihl = (orig[0] & 0x0F) * 4;
-    if (ihl < 20 || ihl > orig_len) return;
-    size_t icmp_data_len = ihl + 8;
-    if (icmp_data_len > orig_len) icmp_data_len = orig_len;
-    size_t total = 20 + 8 + icmp_data_len;
-    uint8_t pkt[128];
-    if (total > sizeof(pkt)) return;
-    memset(pkt, 0, total);
-
-    pkt[0] = 0x45;
-    pkt[1] = 0xC0;
-    pkt[2] = (total >> 8) & 0xFF;
-    pkt[3] = total & 0xFF;
-    pkt[8] = 64;
-    pkt[9] = 1;
-    memcpy(pkt + 12, c->conn->assigned_ip, 4);
-    memcpy(pkt + 16, orig + 12, 4);
-
-    uint32_t cksum = 0;
-    for (int i = 0; i < 20; i += 2)
-        cksum += ((uint32_t)pkt[i] << 8) | pkt[i + 1];
-    while (cksum >> 16)
-        cksum = (cksum & 0xFFFF) + (cksum >> 16);
-    uint16_t ip_ck = ~(uint16_t)cksum;
-    pkt[10] = ip_ck >> 8;
-    pkt[11] = ip_ck & 0xFF;
-
-    uint8_t *icmp = pkt + 20;
-    icmp[0] = 3;
-    icmp[1] = 4;
-    uint16_t m16 = (tunnel_mtu > 0xFFFF) ? 0xFFFF : (uint16_t)tunnel_mtu;
-    icmp[6] = m16 >> 8;
-    icmp[7] = m16 & 0xFF;
-    memcpy(icmp + 8, orig, icmp_data_len);
-
-    size_t icmp_total = 8 + icmp_data_len;
-    cksum = 0;
-    for (size_t i = 0; i < icmp_total; i += 2) {
-        cksum += ((uint32_t)icmp[i] << 8);
-        if (i + 1 < icmp_total) cksum += icmp[i + 1];
-    }
-    while (cksum >> 16)
-        cksum = (cksum & 0xFFFF) + (cksum >> 16);
-    uint16_t ic = ~(uint16_t)cksum;
-    icmp[2] = ic >> 8;
-    icmp[3] = ic & 0xFF;
-
-    c->cbs.tun_output(pkt, total, c->user_ctx);
-}
-
-/* ─── ICMPv6 Packet Too Big ─── */
-
-static void
-send_icmpv6_ptb(mqvpn_client_t *c, const uint8_t *orig, size_t orig_len,
-                size_t tunnel_mtu)
-{
-    if (orig_len < 40 || !c->conn || !c->conn->addr6_assigned) return;
-    if (!ptb_rate_allow(c)) return;
-
-    size_t icmpv6_data_len = orig_len;
-    if (40 + 8 + icmpv6_data_len > 1280) icmpv6_data_len = 1280 - 40 - 8;
-    size_t icmpv6_len = 8 + icmpv6_data_len;
-    size_t total = 40 + icmpv6_len;
-    uint8_t pkt[1280];
-    memset(pkt, 0, total);
-
-    pkt[0] = 0x60;
-    pkt[4] = (icmpv6_len >> 8) & 0xFF;
-    pkt[5] = icmpv6_len & 0xFF;
-    pkt[6] = 58;
-    pkt[7] = 64;
-    memcpy(pkt + 8, c->conn->assigned_ip6, 16);
-    memcpy(pkt + 24, orig + 8, 16);
-
-    uint8_t *icmp = pkt + 40;
-    icmp[0] = 2;
-    icmp[1] = 0;
-    uint32_t m32 = (uint32_t)tunnel_mtu;
-    icmp[4] = (m32 >> 24) & 0xFF;
-    icmp[5] = (m32 >> 16) & 0xFF;
-    icmp[6] = (m32 >> 8) & 0xFF;
-    icmp[7] = m32 & 0xFF;
-    memcpy(icmp + 8, orig, icmpv6_data_len);
-
-    uint32_t cksum = 0;
-    for (int i = 0; i < 16; i += 2)
-        cksum += ((uint32_t)pkt[8 + i] << 8) | pkt[8 + i + 1];
-    for (int i = 0; i < 16; i += 2)
-        cksum += ((uint32_t)pkt[24 + i] << 8) | pkt[24 + i + 1];
-    cksum += (uint32_t)(icmpv6_len >> 16);
-    cksum += (uint32_t)(icmpv6_len & 0xFFFF);
-    cksum += 58;
-    for (size_t i = 0; i < icmpv6_len; i += 2) {
-        cksum += ((uint32_t)icmp[i] << 8);
-        if (i + 1 < icmpv6_len) cksum += icmp[i + 1];
-    }
-    while (cksum >> 16)
-        cksum = (cksum & 0xFFFF) + (cksum >> 16);
-    uint16_t ic = ~(uint16_t)cksum;
-    icmp[2] = ic >> 8;
-    icmp[3] = ic & 0xFF;
-
-    c->cbs.tun_output(pkt, total, c->user_ctx);
-}
-
-/* ─── ICMP Time Exceeded (IPv4) ─── */
-
-static void
-send_icmpv4_time_exceeded(mqvpn_client_t *c, const uint8_t *orig, size_t orig_len)
-{
-    if (orig_len < 20 || !c->conn || !c->conn->addr_assigned) return;
-    size_t ihl = (orig[0] & 0x0F) * 4;
-    if (ihl < 20 || ihl > orig_len) return;
-    size_t data_len = ihl + 8;
-    if (data_len > orig_len) data_len = orig_len;
-    size_t total = 20 + 8 + data_len;
-    uint8_t pkt[128];
-    if (total > sizeof(pkt)) return;
-    memset(pkt, 0, total);
-
-    pkt[0] = 0x45;
-    pkt[1] = 0xC0;
-    pkt[2] = (total >> 8) & 0xFF;
-    pkt[3] = total & 0xFF;
-    pkt[8] = 64;
-    pkt[9] = 1;
-    memcpy(pkt + 12, c->conn->assigned_ip, 4);
-    memcpy(pkt + 16, orig + 12, 4);
-
-    uint32_t cksum = 0;
-    for (int i = 0; i < 20; i += 2)
-        cksum += ((uint32_t)pkt[i] << 8) | pkt[i + 1];
-    while (cksum >> 16)
-        cksum = (cksum & 0xFFFF) + (cksum >> 16);
-    uint16_t ip_ck = ~(uint16_t)cksum;
-    pkt[10] = ip_ck >> 8;
-    pkt[11] = ip_ck & 0xFF;
-
-    uint8_t *icmp = pkt + 20;
-    icmp[0] = 11;
-    icmp[1] = 0;
-    memcpy(icmp + 8, orig, data_len);
-
-    size_t icmp_total = 8 + data_len;
-    cksum = 0;
-    for (size_t i = 0; i < icmp_total; i += 2) {
-        cksum += ((uint32_t)icmp[i] << 8);
-        if (i + 1 < icmp_total) cksum += icmp[i + 1];
-    }
-    while (cksum >> 16)
-        cksum = (cksum & 0xFFFF) + (cksum >> 16);
-    uint16_t ic = ~(uint16_t)cksum;
-    icmp[2] = ic >> 8;
-    icmp[3] = ic & 0xFF;
-
-    c->cbs.tun_output(pkt, total, c->user_ctx);
-}
-
-/* ─── ICMPv6 Time Exceeded ─── */
-
-static void
-send_icmpv6_time_exceeded(mqvpn_client_t *c, const uint8_t *orig, size_t orig_len)
-{
-    if (orig_len < 40 || !c->conn || !c->conn->addr6_assigned) return;
-    size_t data_len = orig_len;
-    if (40 + 8 + data_len > 1280) data_len = 1280 - 40 - 8;
-    size_t icmpv6_len = 8 + data_len;
-    size_t total = 40 + icmpv6_len;
-    uint8_t pkt[1280];
-    memset(pkt, 0, total);
-
-    pkt[0] = 0x60;
-    pkt[4] = (icmpv6_len >> 8) & 0xFF;
-    pkt[5] = icmpv6_len & 0xFF;
-    pkt[6] = 58;
-    pkt[7] = 64;
-    memcpy(pkt + 8, c->conn->assigned_ip6, 16);
-    memcpy(pkt + 24, orig + 8, 16);
-
-    uint8_t *icmp = pkt + 40;
-    icmp[0] = 3;
-    icmp[1] = 0;
-    memcpy(icmp + 8, orig, data_len);
-
-    uint32_t cksum = 0;
-    for (int i = 0; i < 16; i += 2)
-        cksum += ((uint32_t)pkt[8 + i] << 8) | pkt[8 + i + 1];
-    for (int i = 0; i < 16; i += 2)
-        cksum += ((uint32_t)pkt[24 + i] << 8) | pkt[24 + i + 1];
-    cksum += (uint32_t)(icmpv6_len >> 16);
-    cksum += (uint32_t)(icmpv6_len & 0xFFFF);
-    cksum += 58;
-    for (size_t i = 0; i < icmpv6_len; i += 2) {
-        cksum += ((uint32_t)icmp[i] << 8);
-        if (i + 1 < icmpv6_len) cksum += icmp[i + 1];
-    }
-    while (cksum >> 16)
-        cksum = (cksum & 0xFFFF) + (cksum >> 16);
-    uint16_t ic = ~(uint16_t)cksum;
-    icmp[2] = ic >> 8;
-    icmp[3] = ic & 0xFF;
-
-    c->cbs.tun_output(pkt, total, c->user_ctx);
-}
-
 /* ================================================================
  *  xquic engine callbacks
  * ================================================================ */
@@ -596,14 +390,26 @@ cb_set_event_timer(xqc_usec_t wake_after, void *user_data)
 static void
 cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_data)
 {
-    (void)lvl;
     mqvpn_client_t *c = (mqvpn_client_t *)user_data;
-    if (c->cbs.log) {
-        char msg[512];
-        int n = snprintf(msg, sizeof(msg), "[xquic] %.*s", (int)size, (const char *)buf);
-        (void)n;
-        c->cbs.log(MQVPN_LOG_DEBUG, msg, c->user_ctx);
+    if (!c->cbs.log) return;
+
+    /* Map xquic levels (xqc_log_level_t): REPORT=0, FATAL=1, ERROR=2,
+     * WARN=3, STATS=4, INFO=5, DEBUG=6 */
+    mqvpn_log_level_t ml;
+    switch (lvl) {
+    case XQC_LOG_REPORT:
+    case XQC_LOG_FATAL:
+    case XQC_LOG_ERROR: ml = MQVPN_LOG_ERROR; break;
+    case XQC_LOG_WARN: ml = MQVPN_LOG_WARN; break;
+    case XQC_LOG_STATS:
+    case XQC_LOG_INFO: ml = MQVPN_LOG_INFO; break;
+    case XQC_LOG_DEBUG:
+    default: ml = MQVPN_LOG_DEBUG; break;
     }
+
+    char msg[512];
+    snprintf(msg, sizeof(msg), "[xquic] %.*s", (int)size, (const char *)buf);
+    c->cbs.log(ml, msg, c->user_ctx);
 }
 
 /* ─── UDP write callback (xquic → network) ─── */
@@ -973,13 +779,13 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
         if (conn->addr_assigned && c->state != MQVPN_STATE_ESTABLISHED &&
             c->state != MQVPN_STATE_TUNNEL_READY) {
             /* Compute MTU */
-            int tun_mtu = 1280;
+            int tun_mtu = IPV6_MIN_MTU;
             if (conn->dgram_mss > 0) {
                 size_t udp_mss =
                     xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
                 if (udp_mss >= 68) tun_mtu = (int)udp_mss;
             }
-            if (conn->addr6_assigned && tun_mtu < 1280) tun_mtu = 1280;
+            if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU) tun_mtu = IPV6_MIN_MTU;
             c->mtu = tun_mtu;
 
             /* Build tunnel info for callback */
@@ -1006,6 +812,7 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
             }
 
             client_set_state(c, MQVPN_STATE_TUNNEL_READY);
+            LOG_D(c, "firing tunnel_config_ready callback");
             c->cbs.tunnel_config_ready(&info, c->user_ctx);
             c->reconnect_attempts = 0;
         }
@@ -1040,17 +847,28 @@ cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *u
 
     xqc_int_t xret = xqc_h3_ext_masque_unframe_udp((const uint8_t *)data, data_len, &qsid,
                                                    &ctx_id, &payload, &payload_len);
-    if (xret != XQC_OK) return;
-    if (payload_len < 1) return;
+    if (xret != XQC_OK) {
+        LOG_D(c, "dgram: unframe failed (xret=%d, data_len=%zu)", xret, data_len);
+        return;
+    }
+    if (payload_len < 1) {
+        LOG_D(c, "dgram: empty payload");
+        return;
+    }
 
     uint8_t ip_ver = payload[0] >> 4;
     uint8_t fwd_pkt[PACKET_BUF_SIZE];
 
     if (ip_ver == 4) {
-        if (payload_len < 20) return;
+        if (payload_len < IPV4_MIN_HDR) {
+            LOG_D(c, "dgram: IPv4 too short (%zu bytes)", payload_len);
+            return;
+        }
         memcpy(fwd_pkt, payload, payload_len);
         if (fwd_pkt[8] <= 1) {
-            send_icmpv4_time_exceeded(c, payload, payload_len);
+            if (c->conn && c->conn->addr_assigned)
+                mqvpn_icmp_send_v4(c->cbs.tun_output, c->user_ctx, c->conn->assigned_ip,
+                                   11, 0, 0, payload, payload_len);
             return;
         }
         fwd_pkt[8]--;
@@ -1059,14 +877,20 @@ cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *u
         fwd_pkt[10] = (sum >> 8) & 0xFF;
         fwd_pkt[11] = sum & 0xFF;
     } else if (ip_ver == 6) {
-        if (payload_len < 40 || !conn->addr6_assigned) return;
+        if (payload_len < IPV6_MIN_HDR || !conn->addr6_assigned) {
+            LOG_D(c, "dgram: IPv6 too short or no addr6 (%zu bytes)", payload_len);
+            return;
+        }
         memcpy(fwd_pkt, payload, payload_len);
         if (fwd_pkt[7] <= 1) {
-            send_icmpv6_time_exceeded(c, payload, payload_len);
+            if (c->conn && c->conn->addr6_assigned)
+                mqvpn_icmp_send_v6(c->cbs.tun_output, c->user_ctx, c->conn->assigned_ip6,
+                                   3, 0, 0, payload, payload_len);
             return;
         }
         fwd_pkt[7]--;
     } else {
+        LOG_D(c, "dgram: unknown IP version %d", ip_ver);
         return;
     }
 
@@ -1127,7 +951,7 @@ cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
         size_t udp_mss = xqc_h3_ext_masque_udp_mss(mss, conn->masque_stream_id);
         if (udp_mss >= 68) {
             int new_mtu = (int)udp_mss;
-            if (conn->addr6_assigned && new_mtu < 1280) new_mtu = 1280;
+            if (conn->addr6_assigned && new_mtu < IPV6_MIN_MTU) new_mtu = IPV6_MIN_MTU;
             if (new_mtu != c->last_notified_mtu) {
                 c->mtu = new_mtu;
                 c->last_notified_mtu = new_mtu;
@@ -1260,6 +1084,7 @@ cli_conn_destroy(mqvpn_client_t *c)
 static int
 cli_start_connection(mqvpn_client_t *c)
 {
+    c->conn_id++;
     cli_conn_t *conn = calloc(1, sizeof(*conn));
     if (!conn) return -1;
     conn->client = c;
@@ -1326,6 +1151,19 @@ cleanup:
  *  Public API — Lifecycle
  * ================================================================ */
 
+static int
+map_log_level_to_xquic(mqvpn_log_level_t level)
+{
+    /* xqc_log_level_t: REPORT=0, FATAL=1, ERROR=2, WARN=3, STATS=4, INFO=5, DEBUG=6 */
+    switch (level) {
+    case MQVPN_LOG_DEBUG: return XQC_LOG_DEBUG;
+    case MQVPN_LOG_INFO: return XQC_LOG_INFO;
+    case MQVPN_LOG_WARN: return XQC_LOG_WARN;
+    case MQVPN_LOG_ERROR: return XQC_LOG_ERROR;
+    default: return XQC_LOG_INFO;
+    }
+}
+
 mqvpn_client_t *
 mqvpn_client_new(const mqvpn_config_t *cfg, const mqvpn_client_callbacks_t *cbs,
                  void *user_ctx)
@@ -1383,14 +1221,7 @@ mqvpn_client_new(const mqvpn_config_t *cfg, const mqvpn_client_callbacks_t *cbs,
     };
 
     /* Map log level */
-    int xqc_log_level;
-    switch (cfg->log_level) {
-    case MQVPN_LOG_DEBUG: xqc_log_level = 5; break;
-    case MQVPN_LOG_INFO: xqc_log_level = 3; break;
-    case MQVPN_LOG_WARN: xqc_log_level = 2; break;
-    case MQVPN_LOG_ERROR: xqc_log_level = 1; break;
-    default: xqc_log_level = 3; break;
-    }
+    int xqc_log_level = map_log_level_to_xquic(cfg->log_level);
 
     xqc_config_t xconfig;
     if (xqc_engine_get_default_config(&xconfig, XQC_ENGINE_CLIENT) < 0) goto cleanup;
@@ -1519,7 +1350,7 @@ mqvpn_client_add_path_fd(mqvpn_client_t *c, int fd, const mqvpn_path_desc_t *des
     p->fd = fd;
 
     /* Ensure adequate socket buffers for high-throughput UDP (ref: WireGuard) */
-    int bufsize = 7 * 1024 * 1024; /* 7 MiB */
+    int bufsize = SOCKET_BUF_SIZE;
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
     setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
 #ifdef SO_SNDBUFFORCE
@@ -1656,13 +1487,22 @@ mqvpn_client_on_tun_packet(mqvpn_client_t *c, const uint8_t *pkt, size_t len)
 
     uint8_t ip_ver = pkt[0] >> 4;
     if (ip_ver == 4) {
-        if (len < 20) return MQVPN_ERR_INVALID_ARG;
-        if (conn->addr_assigned && memcmp(pkt + 12, conn->assigned_ip, 4) != 0)
+        if (len < IPV4_MIN_HDR) return MQVPN_ERR_INVALID_ARG;
+        if (conn->addr_assigned && memcmp(pkt + 12, conn->assigned_ip, 4) != 0) {
+            LOG_D(c, "tun drop: IPv4 src mismatch (len=%zu)", len);
             return MQVPN_OK; /* silently drop: src mismatch */
+        }
     } else if (ip_ver == 6) {
-        if (len < 40 || !conn->addr6_assigned) return MQVPN_OK;
-        if (memcmp(pkt + 8, conn->assigned_ip6, 16) != 0) return MQVPN_OK;
+        if (len < IPV6_MIN_HDR || !conn->addr6_assigned) {
+            LOG_D(c, "tun drop: IPv6 too short or no addr6 (len=%zu)", len);
+            return MQVPN_OK;
+        }
+        if (memcmp(pkt + 8, conn->assigned_ip6, 16) != 0) {
+            LOG_D(c, "tun drop: IPv6 src mismatch (len=%zu)", len);
+            return MQVPN_OK;
+        }
     } else {
+        LOG_D(c, "tun drop: unknown IP version %d (len=%zu)", ip_ver, len);
         return MQVPN_OK;
     }
 
@@ -1671,10 +1511,17 @@ mqvpn_client_on_tun_packet(mqvpn_client_t *c, const uint8_t *pkt, size_t len)
         size_t udp_mss =
             xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
         if (len > udp_mss) {
-            if (ip_ver == 4)
-                send_icmpv4_ptb(c, pkt, len, udp_mss);
-            else
-                send_icmpv6_ptb(c, pkt, len, udp_mss);
+            if (ip_ver == 4) {
+                if (conn->addr_assigned && ptb_rate_allow(c))
+                    mqvpn_icmp_send_v4(
+                        c->cbs.tun_output, c->user_ctx, c->conn->assigned_ip, 3, 4,
+                        (udp_mss > 0xFFFF) ? 0xFFFF : (uint16_t)udp_mss, pkt, len);
+            } else {
+                if (conn->addr6_assigned && ptb_rate_allow(c))
+                    mqvpn_icmp_send_v6(c->cbs.tun_output, c->user_ctx,
+                                       c->conn->assigned_ip6, 2, 0, (uint32_t)udp_mss,
+                                       pkt, len);
+            }
             return MQVPN_OK;
         }
     }
@@ -1684,7 +1531,10 @@ mqvpn_client_on_tun_packet(mqvpn_client_t *c, const uint8_t *pkt, size_t len)
     size_t frame_written = 0;
     xqc_int_t xret = xqc_h3_ext_masque_frame_udp(
         frame_buf, sizeof(frame_buf), &frame_written, conn->masque_stream_id, pkt, len);
-    if (xret != XQC_OK) return MQVPN_ERR_ENGINE;
+    if (xret != XQC_OK) {
+        LOG_W(c, "masque frame failed: xret=%d", xret);
+        return MQVPN_ERR_ENGINE;
+    }
 
     uint64_t dgram_id;
     uint32_t fh = flow_hash_pkt(pkt, (int)len);
@@ -1697,7 +1547,10 @@ mqvpn_client_on_tun_packet(mqvpn_client_t *c, const uint8_t *pkt, size_t len)
         c->dgram_sent++;
         return MQVPN_ERR_AGAIN;
     }
-    if (xret < 0) return MQVPN_ERR_ENGINE;
+    if (xret < 0) {
+        LOG_W(c, "datagram send failed: xret=%d", xret);
+        return MQVPN_ERR_ENGINE;
+    }
 
     c->dgram_sent++;
     return MQVPN_OK;
@@ -1771,8 +1624,10 @@ mqvpn_client_tick(mqvpn_client_t *c)
                         if (c->cbs.path_event)
                             c->cbs.path_event(p->handle, MQVPN_PATH_CLOSED, c->user_ctx);
                     } else {
-                        p->recreate_after_us =
-                            now + path_recreate_backoff(p->recreate_retries);
+                        uint64_t backoff = path_recreate_backoff(p->recreate_retries);
+                        p->recreate_after_us = now + backoff;
+                        LOG_D(c, "path %s: scheduling retry in %ds", p->name,
+                              (int)(backoff / 1000000));
                     }
                 }
             }
