@@ -713,6 +713,56 @@ TEST(client_on_socket_recv_null)
               MQVPN_ERR_INVALID_ARG);
 }
 
+TEST(on_tun_packet_no_connection)
+{
+    mqvpn_client_t *c = make_test_client();
+    uint8_t ipv4_pkt[20];
+    memset(ipv4_pkt, 0, sizeof(ipv4_pkt));
+    ipv4_pkt[0] = 0x45;
+    ASSERT_EQ(mqvpn_client_on_tun_packet(c, ipv4_pkt, 20), MQVPN_ERR_INVALID_ARG);
+    mqvpn_client_destroy(c);
+}
+
+TEST(on_tun_packet_zero_length)
+{
+    mqvpn_client_t *c = make_test_client();
+    uint8_t pkt[1] = {0x45};
+    ASSERT_EQ(mqvpn_client_on_tun_packet(c, pkt, 0), MQVPN_ERR_INVALID_ARG);
+    mqvpn_client_destroy(c);
+}
+
+TEST(on_tun_packet_null_pkt)
+{
+    mqvpn_client_t *c = make_test_client();
+    ASSERT_EQ(mqvpn_client_on_tun_packet(c, NULL, 20), MQVPN_ERR_INVALID_ARG);
+    mqvpn_client_destroy(c);
+}
+
+TEST(on_socket_recv_zero_length)
+{
+    mqvpn_client_t *c = make_test_client();
+    uint8_t pkt[1] = {0};
+    ASSERT_EQ(mqvpn_client_on_socket_recv(c, 1, pkt, 0, NULL, 0), MQVPN_ERR_INVALID_ARG);
+    mqvpn_client_destroy(c);
+}
+
+TEST(on_socket_recv_too_large)
+{
+    mqvpn_client_t *c = make_test_client();
+    uint8_t pkt[1] = {0};
+    ASSERT_EQ(mqvpn_client_on_socket_recv(c, 1, pkt, 65537, NULL, 0),
+              MQVPN_ERR_INVALID_ARG);
+    mqvpn_client_destroy(c);
+}
+
+TEST(on_socket_recv_null_pkt)
+{
+    mqvpn_client_t *c = make_test_client();
+    ASSERT_EQ(mqvpn_client_on_socket_recv(c, 1, NULL, 100, NULL, 0),
+              MQVPN_ERR_INVALID_ARG);
+    mqvpn_client_destroy(c);
+}
+
 /* ── Key generation ── */
 
 TEST(generate_key)
@@ -870,6 +920,14 @@ main(void)
     /* I/O feed tests */
     run_client_on_tun_packet_null();
     run_client_on_socket_recv_null();
+
+    /* I/O error path tests */
+    run_on_tun_packet_no_connection();
+    run_on_tun_packet_zero_length();
+    run_on_tun_packet_null_pkt();
+    run_on_socket_recv_zero_length();
+    run_on_socket_recv_too_large();
+    run_on_socket_recv_null_pkt();
 
     /* Path drop tests */
     run_drop_path_null_client();
