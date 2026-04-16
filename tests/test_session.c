@@ -86,27 +86,28 @@ test_offset_boundary(void)
     ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/24"), 0,
                   "pool init for boundary test");
 
-    /* Server IP (.1) offset should be 1 */
     struct in_addr server_ip;
     mqvpn_addr_pool_server_addr(&pool, &server_ip);
     uint32_t server_offset = ntohl(server_ip.s_addr) - ntohl(pool.base.s_addr);
     ASSERT_EQ_INT(server_offset, 1, "server offset is 1");
 
-    /* Offset 0 = network address (out of range for sessions) */
-    /* Offset 255 = broadcast (out of range for sessions) */
-    /* Valid session offsets: 2-254 */
-
-    /* Allocate all IPs and verify offsets stay in range */
-    struct in_addr ips[253]; /* .2 through .254 */
+    uint8_t seen[255] = {0};
+    struct in_addr ip;
     int count = 0;
     for (int i = 0; i < 253; i++) {
-        if (mqvpn_addr_pool_alloc(&pool, &ips[i]) < 0) break;
-        uint32_t off = ntohl(ips[i].s_addr) - ntohl(pool.base.s_addr);
-        if (off >= 2 && off <= 254) count++;
+        ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip), 0, "alloc");
+        uint32_t off = ntohl(ip.s_addr) - ntohl(pool.base.s_addr);
+        ASSERT_TRUE(off >= 2 && off <= 254, "offset in valid range");
+        ASSERT_EQ_INT(seen[off], 0, "offset not seen before");
+        seen[off] = 1;
+        count++;
     }
-    ASSERT_EQ_INT(count, 253, "all 253 IPs have valid offsets (2-254)");
+    ASSERT_EQ_INT(count, 253, "all 253 IPs allocated");
 
-    /* Pool should be exhausted now */
+    for (int off = 2; off <= 254; off++) {
+        ASSERT_EQ_INT(seen[off], 1, "offset covered");
+    }
+
     struct in_addr extra;
     ASSERT_TRUE(mqvpn_addr_pool_alloc(&pool, &extra) < 0,
                 "pool exhausted after 253 allocs");
@@ -115,24 +116,26 @@ test_offset_boundary(void)
 static void
 test_release_and_realloc(void)
 {
+    /* Use /30: only 1 client slot (.2), so release + realloc MUST return same IP */
     mqvpn_addr_pool_t pool;
-    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "192.168.1.0/24"), 0,
-                  "pool init 192.168.1.0/24");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "192.168.1.0/30"), 0,
+                  "pool init 192.168.1.0/30");
 
-    struct in_addr ip1, ip2;
+    struct in_addr ip1;
     ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip1), 0, "alloc ip1");
-    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip2), 0, "alloc ip2");
 
-    /* Release ip1 */
+    uint32_t off1 = ntohl(ip1.s_addr) - ntohl(pool.base.s_addr);
+    ASSERT_TRUE(off1 >= 2 && off1 <= 254, "ip1 has valid offset");
+
+    /* Pool exhausted: only 1 client slot */
+    struct in_addr tmp;
+    ASSERT_TRUE(mqvpn_addr_pool_alloc(&pool, &tmp) < 0, "pool exhausted");
+
     mqvpn_addr_pool_release(&pool, &ip1);
 
-    /* Offset of released IP should still be calculable */
-    uint32_t off1 = ntohl(ip1.s_addr) - ntohl(pool.base.s_addr);
-    ASSERT_TRUE(off1 >= 2 && off1 <= 254, "released IP has valid offset");
-
-    /* Re-alloc should eventually give back ip1's offset */
-    struct in_addr ip3;
-    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip3), 0, "realloc after release");
+    struct in_addr ip2;
+    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip2), 0, "realloc after release");
+    ASSERT_EQ_INT(ip2.s_addr, ip1.s_addr, "realloc reuses released IP");
 }
 
 static void
@@ -265,43 +268,45 @@ static void
 test_release_outside_range(void)
 {
     mqvpn_addr_pool_t pool;
-    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/24"), 0,
-                  "pool init for release test");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/28"), 0, "pool init /28");
 
-    /* Release an IP that's outside the pool range → should be a no-op */
+    struct in_addr ip1;
+    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip1), 0, "alloc ip1");
+
+    uint8_t used_before[MQVPN_ADDR_POOL_MAX + 1];
+    memcpy(used_before, pool.used, sizeof(used_before));
+    uint32_t next_before = pool.next;
+
     struct in_addr outside;
-    inet_pton(AF_INET, "192.168.1.1", &outside);
-    mqvpn_addr_pool_release(&pool, &outside); /* should not crash */
+    inet_pton(AF_INET, "172.16.0.1", &outside);
+    mqvpn_addr_pool_release(&pool, &outside);
 
-    /* Release an IP below the base → underflow check */
-    struct in_addr below;
-    inet_pton(AF_INET, "9.255.255.255", &below);
-    mqvpn_addr_pool_release(&pool, &below); /* should not crash */
-
-    /* Pool should still work normally after bad releases */
-    struct in_addr ip;
-    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip), 0, "alloc works after bad releases");
+    ASSERT_EQ_INT(memcmp(pool.used, used_before, sizeof(used_before)), 0,
+                  "used bitmap unchanged after outside release");
+    ASSERT_EQ_INT(pool.next, next_before, "next pointer unchanged");
 }
 
 static void
 test_release_double_free(void)
 {
     mqvpn_addr_pool_t pool;
-    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/24"), 0,
-                  "pool init for double-free test");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/28"), 0, "pool init /28");
 
-    struct in_addr ip;
-    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip), 0, "alloc for double-free");
+    /* /28 = 16 addrs total; pool_size=14 usable (exclude .0 network, .15 broadcast) */
+    struct in_addr ip1, ip2;
+    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip1), 0, "alloc ip1");
+    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip2), 0, "alloc ip2");
 
-    /* Release once */
-    mqvpn_addr_pool_release(&pool, &ip);
+    mqvpn_addr_pool_release(&pool, &ip1);
+    mqvpn_addr_pool_release(&pool, &ip1); /* double free — should be no-op */
 
-    /* Release again → should not crash, just set used[off]=0 again */
-    mqvpn_addr_pool_release(&pool, &ip);
+    int remaining = 0;
+    struct in_addr tmp;
+    while (mqvpn_addr_pool_alloc(&pool, &tmp) == 0)
+        remaining++;
 
-    /* Verify pool still works: should be able to allocate the same IP */
-    struct in_addr ip2;
-    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip2), 0, "alloc after double release");
+    /* 13 client slots (offsets 2-14) - 1 (ip2 in use at offset 3) = 12 available */
+    ASSERT_EQ_INT(remaining, 12, "double free didn't create phantom slot");
 }
 
 static void
