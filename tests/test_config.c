@@ -966,7 +966,9 @@ test_reconnect_interval_overflow(void)
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, f);
-    ASSERT_TRUE(cfg.reconnect_interval > 0, "interval is positive");
+    /* atoi(999999999) succeeds and v > 0, so it's stored as-is */
+    ASSERT_EQ_INT(cfg.reconnect_interval, 999999999,
+                  "huge interval stored as-is (no upper clamp)");
     unlink(f);
 }
 

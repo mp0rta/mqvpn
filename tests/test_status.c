@@ -275,10 +275,10 @@ TEST(json_find_key_escaped_quotes)
 {
     const char *json = "{\"key\": \"hello\\\"world\"}";
     const char *val = json_find_key(json, "key");
-    if (val) {
-        char str[64];
-        ASSERT_EQ(json_read_string(val, str, sizeof(str)), 0);
-    }
+    /* json_find_key must find the key — escaped quotes in value don't break it */
+    ASSERT_EQ(val != NULL, 1);
+    char str[64];
+    ASSERT_EQ(json_read_string(val, str, sizeof(str)), 0);
 }
 
 TEST(json_find_key_empty_object)

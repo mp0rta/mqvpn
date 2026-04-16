@@ -798,8 +798,9 @@ TEST(server_max_clients_config)
     mqvpn_config_set_max_clients(cfg, 1);
     ASSERT_EQ(cfg->max_clients, 1);
 
+    /* Setter stores value as-is (no clamp) */
     mqvpn_config_set_max_clients(cfg, 0);
-    /* 0 should fallback to default or be rejected — verify no crash */
+    ASSERT_EQ(cfg->max_clients, 0);
 
     mqvpn_config_free(cfg);
 }

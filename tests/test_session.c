@@ -698,15 +698,19 @@ test_ipv6_large_offset_no_overflow(void)
 static void
 test_cidr_non_aligned(void)
 {
+    /* Non-aligned base 10.0.0.5/24 — init succeeds, base stored as-is (no mask) */
     mqvpn_addr_pool_t pool;
-    int ret = mqvpn_addr_pool_init(&pool, "10.0.0.5/24");
-    if (ret == 0) {
-        struct in_addr ip;
-        ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip), 0, "alloc from non-aligned");
-        uint32_t off = ntohl(ip.s_addr) - ntohl(pool.base.s_addr);
-        ASSERT_TRUE(off >= 2 && off <= 254, "offset valid from non-aligned CIDR");
-    }
-    /* If init rejects it, that's also acceptable — no crash */
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.5/24"), 0, "init non-aligned CIDR");
+
+    char base_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &pool.base, base_str, sizeof(base_str));
+    ASSERT_EQ_STR(base_str, "10.0.0.5", "base stored as-is without masking");
+
+    /* First alloc = base + 2 = 10.0.0.7 */
+    struct in_addr ip;
+    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip), 0, "alloc from non-aligned");
+    uint32_t off = ntohl(ip.s_addr) - ntohl(pool.base.s_addr);
+    ASSERT_EQ_INT(off, 2, "first alloc offset is 2");
 }
 
 int
