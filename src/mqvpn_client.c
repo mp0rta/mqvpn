@@ -800,6 +800,7 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
             }
 
             client_set_state(c, MQVPN_STATE_TUNNEL_READY);
+            LOG_D(c, "firing tunnel_config_ready callback");
             c->cbs.tunnel_config_ready(&info, c->user_ctx);
             c->reconnect_attempts = 0;
         }
@@ -834,14 +835,23 @@ cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *u
 
     xqc_int_t xret = xqc_h3_ext_masque_unframe_udp((const uint8_t *)data, data_len, &qsid,
                                                    &ctx_id, &payload, &payload_len);
-    if (xret != XQC_OK) return;
-    if (payload_len < 1) return;
+    if (xret != XQC_OK) {
+        LOG_D(c, "dgram: unframe failed (xret=%d, data_len=%zu)", xret, data_len);
+        return;
+    }
+    if (payload_len < 1) {
+        LOG_D(c, "dgram: empty payload");
+        return;
+    }
 
     uint8_t ip_ver = payload[0] >> 4;
     uint8_t fwd_pkt[PACKET_BUF_SIZE];
 
     if (ip_ver == 4) {
-        if (payload_len < IPV4_MIN_HDR) return;
+        if (payload_len < IPV4_MIN_HDR) {
+            LOG_D(c, "dgram: IPv4 too short (%zu bytes)", payload_len);
+            return;
+        }
         memcpy(fwd_pkt, payload, payload_len);
         if (fwd_pkt[8] <= 1) {
             if (c->conn && c->conn->addr_assigned)
@@ -855,7 +865,10 @@ cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *u
         fwd_pkt[10] = (sum >> 8) & 0xFF;
         fwd_pkt[11] = sum & 0xFF;
     } else if (ip_ver == 6) {
-        if (payload_len < IPV6_MIN_HDR || !conn->addr6_assigned) return;
+        if (payload_len < IPV6_MIN_HDR || !conn->addr6_assigned) {
+            LOG_D(c, "dgram: IPv6 too short or no addr6 (%zu bytes)", payload_len);
+            return;
+        }
         memcpy(fwd_pkt, payload, payload_len);
         if (fwd_pkt[7] <= 1) {
             if (c->conn && c->conn->addr6_assigned)
@@ -865,6 +878,7 @@ cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *u
         }
         fwd_pkt[7]--;
     } else {
+        LOG_D(c, "dgram: unknown IP version %d", ip_ver);
         return;
     }
 
@@ -1461,12 +1475,21 @@ mqvpn_client_on_tun_packet(mqvpn_client_t *c, const uint8_t *pkt, size_t len)
     uint8_t ip_ver = pkt[0] >> 4;
     if (ip_ver == 4) {
         if (len < IPV4_MIN_HDR) return MQVPN_ERR_INVALID_ARG;
-        if (conn->addr_assigned && memcmp(pkt + 12, conn->assigned_ip, 4) != 0)
+        if (conn->addr_assigned && memcmp(pkt + 12, conn->assigned_ip, 4) != 0) {
+            LOG_D(c, "tun drop: IPv4 src mismatch (len=%zu)", len);
             return MQVPN_OK; /* silently drop: src mismatch */
+        }
     } else if (ip_ver == 6) {
-        if (len < IPV6_MIN_HDR || !conn->addr6_assigned) return MQVPN_OK;
-        if (memcmp(pkt + 8, conn->assigned_ip6, 16) != 0) return MQVPN_OK;
+        if (len < IPV6_MIN_HDR || !conn->addr6_assigned) {
+            LOG_D(c, "tun drop: IPv6 too short or no addr6 (len=%zu)", len);
+            return MQVPN_OK;
+        }
+        if (memcmp(pkt + 8, conn->assigned_ip6, 16) != 0) {
+            LOG_D(c, "tun drop: IPv6 src mismatch (len=%zu)", len);
+            return MQVPN_OK;
+        }
     } else {
+        LOG_D(c, "tun drop: unknown IP version %d (len=%zu)", ip_ver, len);
         return MQVPN_OK;
     }
 
@@ -1495,7 +1518,10 @@ mqvpn_client_on_tun_packet(mqvpn_client_t *c, const uint8_t *pkt, size_t len)
     size_t frame_written = 0;
     xqc_int_t xret = xqc_h3_ext_masque_frame_udp(
         frame_buf, sizeof(frame_buf), &frame_written, conn->masque_stream_id, pkt, len);
-    if (xret != XQC_OK) return MQVPN_ERR_ENGINE;
+    if (xret != XQC_OK) {
+        LOG_W(c, "masque frame failed: xret=%d", xret);
+        return MQVPN_ERR_ENGINE;
+    }
 
     uint64_t dgram_id;
     uint32_t fh = flow_hash_pkt(pkt, (int)len);
@@ -1508,7 +1534,10 @@ mqvpn_client_on_tun_packet(mqvpn_client_t *c, const uint8_t *pkt, size_t len)
         c->dgram_sent++;
         return MQVPN_ERR_AGAIN;
     }
-    if (xret < 0) return MQVPN_ERR_ENGINE;
+    if (xret < 0) {
+        LOG_W(c, "datagram send failed: xret=%d", xret);
+        return MQVPN_ERR_ENGINE;
+    }
 
     c->dgram_sent++;
     return MQVPN_OK;
