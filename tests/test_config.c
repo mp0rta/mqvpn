@@ -923,6 +923,66 @@ test_json_invalid_users_error(void)
     ASSERT_TRUE(rc != 0, "json invalid users returns error");
 }
 
+/* ================================================================
+ *  Buffer boundary and edge case tests
+ * ================================================================ */
+
+static void
+test_tun_name_max_length(void)
+{
+    char long_name[64];
+    memset(long_name, 'A', 63);
+    long_name[63] = '\0';
+    char ini[256];
+    snprintf(ini, sizeof(ini), "[Interface]\nTunName = %s\n", long_name);
+    char *f = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, f), 0, "load long TunName");
+    ASSERT_TRUE(strlen(cfg.tun_name) < 32, "TunName truncated to buffer size");
+    unlink(f);
+}
+
+static void
+test_dns_exceeds_max(void)
+{
+    const char *ini = "[Interface]\n"
+                      "DNS = 1.1.1.1, 8.8.8.8, 8.8.4.4, 9.9.9.9, 208.67.222.222\n";
+    char *f = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, f);
+    ASSERT_EQ_INT(cfg.n_dns, 4, "DNS capped at 4");
+    unlink(f);
+}
+
+static void
+test_reconnect_interval_overflow(void)
+{
+    const char *ini = "[Interface]\n"
+                      "Reconnect = true\n"
+                      "ReconnectInterval = 999999999\n";
+    char *f = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, f);
+    ASSERT_TRUE(cfg.reconnect_interval > 0, "interval is positive");
+    unlink(f);
+}
+
+static void
+test_value_contains_equals(void)
+{
+    const char *ini = "[Auth]\n"
+                      "Key = abc=def=ghi\n";
+    char *f = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, f);
+    ASSERT_EQ_STR(cfg.auth_key, "abc=def=ghi", "value with = preserved");
+    unlink(f);
+}
+
 int
 main(void)
 {
@@ -973,6 +1033,12 @@ main(void)
     test_json_client_config_load();
     test_json_duplicate_users_last_wins();
     test_json_invalid_users_error();
+
+    /* buffer boundary and edge case tests */
+    test_tun_name_max_length();
+    test_dns_exceeds_max();
+    test_reconnect_interval_overflow();
+    test_value_contains_equals();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
