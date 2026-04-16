@@ -644,6 +644,34 @@ test_hash_ipv6_deterministic(void)
     PASS();
 }
 
+static void
+test_hash_ipv4_ihl_6_with_options(void)
+{
+    TEST(hash_ipv4_ihl_6_with_options);
+    uint8_t pkt[28] = {0};
+    pkt[0] = 0x46; /* IPv4, IHL=6 */
+    pkt[9] = 6;    /* TCP */
+    pkt[12] = 10;
+    pkt[13] = 0;
+    pkt[14] = 0;
+    pkt[15] = 1;
+    pkt[16] = 10;
+    pkt[17] = 0;
+    pkt[18] = 0;
+    pkt[19] = 2;
+    pkt[24] = 0x30;
+    pkt[25] = 0x39; /* src port 12345 */
+    pkt[26] = 0x00;
+    pkt[27] = 0x50; /* dst port 80 */
+
+    uint32_t h = flow_hash_pkt(pkt, sizeof(pkt));
+    if (h == 0 || h == MQVPN_FLOW_HASH_UNPINNED) {
+        FAIL("IHL=6 TCP should be pinned");
+        return;
+    }
+    PASS();
+}
+
 /* ── Main ── */
 
 int
@@ -678,6 +706,9 @@ main(void)
     test_hash_ipv6_tcp_never_returns_sentinels();
     test_hash_ipv6_extension_header_as_next();
     test_hash_ipv6_deterministic();
+
+    /* IPv4 IHL > 5 */
+    test_hash_ipv4_ihl_6_with_options();
 
     printf("\n%d passed, %d failed\n", tests_passed, tests_failed);
     return tests_failed > 0 ? 1 : 0;
