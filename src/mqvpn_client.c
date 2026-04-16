@@ -38,6 +38,7 @@
 #include <xquic/xqc_http3.h>
 
 #include "flow_sched.h"
+#include "icmp.h"
 
 /* ─── Constants ─── */
 
@@ -366,220 +367,6 @@ ptb_rate_allow(mqvpn_client_t *c)
         return 1;
     }
     return 0;
-}
-
-/* ─── ICMP Packet Too Big (IPv4) ─── */
-
-static void
-send_icmpv4_ptb(mqvpn_client_t *c, const uint8_t *orig, size_t orig_len,
-                size_t tunnel_mtu)
-{
-    if (orig_len < 20 || !c->conn || !c->conn->addr_assigned) return;
-    if (!ptb_rate_allow(c)) return;
-
-    size_t ihl = (orig[0] & 0x0F) * 4;
-    if (ihl < 20 || ihl > orig_len) return;
-    size_t icmp_data_len = ihl + 8;
-    if (icmp_data_len > orig_len) icmp_data_len = orig_len;
-    size_t total = 20 + 8 + icmp_data_len;
-    uint8_t pkt[128];
-    if (total > sizeof(pkt)) return;
-    memset(pkt, 0, total);
-
-    pkt[0] = 0x45;
-    pkt[1] = 0xC0;
-    pkt[2] = (total >> 8) & 0xFF;
-    pkt[3] = total & 0xFF;
-    pkt[8] = 64;
-    pkt[9] = 1;
-    memcpy(pkt + 12, c->conn->assigned_ip, 4);
-    memcpy(pkt + 16, orig + 12, 4);
-
-    uint32_t cksum = 0;
-    for (int i = 0; i < 20; i += 2)
-        cksum += ((uint32_t)pkt[i] << 8) | pkt[i + 1];
-    while (cksum >> 16)
-        cksum = (cksum & 0xFFFF) + (cksum >> 16);
-    uint16_t ip_ck = ~(uint16_t)cksum;
-    pkt[10] = ip_ck >> 8;
-    pkt[11] = ip_ck & 0xFF;
-
-    uint8_t *icmp = pkt + 20;
-    icmp[0] = 3;
-    icmp[1] = 4;
-    uint16_t m16 = (tunnel_mtu > 0xFFFF) ? 0xFFFF : (uint16_t)tunnel_mtu;
-    icmp[6] = m16 >> 8;
-    icmp[7] = m16 & 0xFF;
-    memcpy(icmp + 8, orig, icmp_data_len);
-
-    size_t icmp_total = 8 + icmp_data_len;
-    cksum = 0;
-    for (size_t i = 0; i < icmp_total; i += 2) {
-        cksum += ((uint32_t)icmp[i] << 8);
-        if (i + 1 < icmp_total) cksum += icmp[i + 1];
-    }
-    while (cksum >> 16)
-        cksum = (cksum & 0xFFFF) + (cksum >> 16);
-    uint16_t ic = ~(uint16_t)cksum;
-    icmp[2] = ic >> 8;
-    icmp[3] = ic & 0xFF;
-
-    c->cbs.tun_output(pkt, total, c->user_ctx);
-}
-
-/* ─── ICMPv6 Packet Too Big ─── */
-
-static void
-send_icmpv6_ptb(mqvpn_client_t *c, const uint8_t *orig, size_t orig_len,
-                size_t tunnel_mtu)
-{
-    if (orig_len < 40 || !c->conn || !c->conn->addr6_assigned) return;
-    if (!ptb_rate_allow(c)) return;
-
-    size_t icmpv6_data_len = orig_len;
-    if (40 + 8 + icmpv6_data_len > 1280) icmpv6_data_len = 1280 - 40 - 8;
-    size_t icmpv6_len = 8 + icmpv6_data_len;
-    size_t total = 40 + icmpv6_len;
-    uint8_t pkt[1280];
-    memset(pkt, 0, total);
-
-    pkt[0] = 0x60;
-    pkt[4] = (icmpv6_len >> 8) & 0xFF;
-    pkt[5] = icmpv6_len & 0xFF;
-    pkt[6] = 58;
-    pkt[7] = 64;
-    memcpy(pkt + 8, c->conn->assigned_ip6, 16);
-    memcpy(pkt + 24, orig + 8, 16);
-
-    uint8_t *icmp = pkt + 40;
-    icmp[0] = 2;
-    icmp[1] = 0;
-    uint32_t m32 = (uint32_t)tunnel_mtu;
-    icmp[4] = (m32 >> 24) & 0xFF;
-    icmp[5] = (m32 >> 16) & 0xFF;
-    icmp[6] = (m32 >> 8) & 0xFF;
-    icmp[7] = m32 & 0xFF;
-    memcpy(icmp + 8, orig, icmpv6_data_len);
-
-    uint32_t cksum = 0;
-    for (int i = 0; i < 16; i += 2)
-        cksum += ((uint32_t)pkt[8 + i] << 8) | pkt[8 + i + 1];
-    for (int i = 0; i < 16; i += 2)
-        cksum += ((uint32_t)pkt[24 + i] << 8) | pkt[24 + i + 1];
-    cksum += (uint32_t)(icmpv6_len >> 16);
-    cksum += (uint32_t)(icmpv6_len & 0xFFFF);
-    cksum += 58;
-    for (size_t i = 0; i < icmpv6_len; i += 2) {
-        cksum += ((uint32_t)icmp[i] << 8);
-        if (i + 1 < icmpv6_len) cksum += icmp[i + 1];
-    }
-    while (cksum >> 16)
-        cksum = (cksum & 0xFFFF) + (cksum >> 16);
-    uint16_t ic = ~(uint16_t)cksum;
-    icmp[2] = ic >> 8;
-    icmp[3] = ic & 0xFF;
-
-    c->cbs.tun_output(pkt, total, c->user_ctx);
-}
-
-/* ─── ICMP Time Exceeded (IPv4) ─── */
-
-static void
-send_icmpv4_time_exceeded(mqvpn_client_t *c, const uint8_t *orig, size_t orig_len)
-{
-    if (orig_len < 20 || !c->conn || !c->conn->addr_assigned) return;
-    size_t ihl = (orig[0] & 0x0F) * 4;
-    if (ihl < 20 || ihl > orig_len) return;
-    size_t data_len = ihl + 8;
-    if (data_len > orig_len) data_len = orig_len;
-    size_t total = 20 + 8 + data_len;
-    uint8_t pkt[128];
-    if (total > sizeof(pkt)) return;
-    memset(pkt, 0, total);
-
-    pkt[0] = 0x45;
-    pkt[1] = 0xC0;
-    pkt[2] = (total >> 8) & 0xFF;
-    pkt[3] = total & 0xFF;
-    pkt[8] = 64;
-    pkt[9] = 1;
-    memcpy(pkt + 12, c->conn->assigned_ip, 4);
-    memcpy(pkt + 16, orig + 12, 4);
-
-    uint32_t cksum = 0;
-    for (int i = 0; i < 20; i += 2)
-        cksum += ((uint32_t)pkt[i] << 8) | pkt[i + 1];
-    while (cksum >> 16)
-        cksum = (cksum & 0xFFFF) + (cksum >> 16);
-    uint16_t ip_ck = ~(uint16_t)cksum;
-    pkt[10] = ip_ck >> 8;
-    pkt[11] = ip_ck & 0xFF;
-
-    uint8_t *icmp = pkt + 20;
-    icmp[0] = 11;
-    icmp[1] = 0;
-    memcpy(icmp + 8, orig, data_len);
-
-    size_t icmp_total = 8 + data_len;
-    cksum = 0;
-    for (size_t i = 0; i < icmp_total; i += 2) {
-        cksum += ((uint32_t)icmp[i] << 8);
-        if (i + 1 < icmp_total) cksum += icmp[i + 1];
-    }
-    while (cksum >> 16)
-        cksum = (cksum & 0xFFFF) + (cksum >> 16);
-    uint16_t ic = ~(uint16_t)cksum;
-    icmp[2] = ic >> 8;
-    icmp[3] = ic & 0xFF;
-
-    c->cbs.tun_output(pkt, total, c->user_ctx);
-}
-
-/* ─── ICMPv6 Time Exceeded ─── */
-
-static void
-send_icmpv6_time_exceeded(mqvpn_client_t *c, const uint8_t *orig, size_t orig_len)
-{
-    if (orig_len < 40 || !c->conn || !c->conn->addr6_assigned) return;
-    size_t data_len = orig_len;
-    if (40 + 8 + data_len > 1280) data_len = 1280 - 40 - 8;
-    size_t icmpv6_len = 8 + data_len;
-    size_t total = 40 + icmpv6_len;
-    uint8_t pkt[1280];
-    memset(pkt, 0, total);
-
-    pkt[0] = 0x60;
-    pkt[4] = (icmpv6_len >> 8) & 0xFF;
-    pkt[5] = icmpv6_len & 0xFF;
-    pkt[6] = 58;
-    pkt[7] = 64;
-    memcpy(pkt + 8, c->conn->assigned_ip6, 16);
-    memcpy(pkt + 24, orig + 8, 16);
-
-    uint8_t *icmp = pkt + 40;
-    icmp[0] = 3;
-    icmp[1] = 0;
-    memcpy(icmp + 8, orig, data_len);
-
-    uint32_t cksum = 0;
-    for (int i = 0; i < 16; i += 2)
-        cksum += ((uint32_t)pkt[8 + i] << 8) | pkt[8 + i + 1];
-    for (int i = 0; i < 16; i += 2)
-        cksum += ((uint32_t)pkt[24 + i] << 8) | pkt[24 + i + 1];
-    cksum += (uint32_t)(icmpv6_len >> 16);
-    cksum += (uint32_t)(icmpv6_len & 0xFFFF);
-    cksum += 58;
-    for (size_t i = 0; i < icmpv6_len; i += 2) {
-        cksum += ((uint32_t)icmp[i] << 8);
-        if (i + 1 < icmpv6_len) cksum += icmp[i + 1];
-    }
-    while (cksum >> 16)
-        cksum = (cksum & 0xFFFF) + (cksum >> 16);
-    uint16_t ic = ~(uint16_t)cksum;
-    icmp[2] = ic >> 8;
-    icmp[3] = ic & 0xFF;
-
-    c->cbs.tun_output(pkt, total, c->user_ctx);
 }
 
 /* ================================================================
@@ -1050,7 +837,9 @@ cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *u
         if (payload_len < 20) return;
         memcpy(fwd_pkt, payload, payload_len);
         if (fwd_pkt[8] <= 1) {
-            send_icmpv4_time_exceeded(c, payload, payload_len);
+            if (c->conn && c->conn->addr_assigned)
+                mqvpn_icmp_send_v4(c->cbs.tun_output, c->user_ctx, c->conn->assigned_ip,
+                                   11, 0, 0, payload, payload_len);
             return;
         }
         fwd_pkt[8]--;
@@ -1062,7 +851,9 @@ cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *u
         if (payload_len < 40 || !conn->addr6_assigned) return;
         memcpy(fwd_pkt, payload, payload_len);
         if (fwd_pkt[7] <= 1) {
-            send_icmpv6_time_exceeded(c, payload, payload_len);
+            if (c->conn && c->conn->addr6_assigned)
+                mqvpn_icmp_send_v6(c->cbs.tun_output, c->user_ctx, c->conn->assigned_ip6,
+                                   3, 0, 0, payload, payload_len);
             return;
         }
         fwd_pkt[7]--;
@@ -1676,10 +1467,17 @@ mqvpn_client_on_tun_packet(mqvpn_client_t *c, const uint8_t *pkt, size_t len)
         size_t udp_mss =
             xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
         if (len > udp_mss) {
-            if (ip_ver == 4)
-                send_icmpv4_ptb(c, pkt, len, udp_mss);
-            else
-                send_icmpv6_ptb(c, pkt, len, udp_mss);
+            if (ip_ver == 4) {
+                if (conn->addr_assigned && ptb_rate_allow(c))
+                    mqvpn_icmp_send_v4(
+                        c->cbs.tun_output, c->user_ctx, c->conn->assigned_ip, 3, 4,
+                        (udp_mss > 0xFFFF) ? 0xFFFF : (uint16_t)udp_mss, pkt, len);
+            } else {
+                if (conn->addr6_assigned && ptb_rate_allow(c))
+                    mqvpn_icmp_send_v6(c->cbs.tun_output, c->user_ctx,
+                                       c->conn->assigned_ip6, 2, 0, (uint32_t)udp_mss,
+                                       pkt, len);
+            }
             return MQVPN_OK;
         }
     }
