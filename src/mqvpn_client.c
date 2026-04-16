@@ -393,12 +393,17 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
     mqvpn_client_t *c = (mqvpn_client_t *)user_data;
     if (!c->cbs.log) return;
 
-    /* Map xquic levels: 1=error, 2=warn, 3=info, 4+=debug */
+    /* Map xquic levels (xqc_log_level_t): REPORT=0, FATAL=1, ERROR=2,
+     * WARN=3, STATS=4, INFO=5, DEBUG=6 */
     mqvpn_log_level_t ml;
     switch (lvl) {
-    case 1: ml = MQVPN_LOG_ERROR; break;
-    case 2: ml = MQVPN_LOG_WARN; break;
-    case 3: ml = MQVPN_LOG_INFO; break;
+    case XQC_LOG_REPORT:
+    case XQC_LOG_FATAL:
+    case XQC_LOG_ERROR: ml = MQVPN_LOG_ERROR; break;
+    case XQC_LOG_WARN: ml = MQVPN_LOG_WARN; break;
+    case XQC_LOG_STATS:
+    case XQC_LOG_INFO: ml = MQVPN_LOG_INFO; break;
+    case XQC_LOG_DEBUG:
     default: ml = MQVPN_LOG_DEBUG; break;
     }
 
@@ -1149,12 +1154,13 @@ cleanup:
 static int
 map_log_level_to_xquic(mqvpn_log_level_t level)
 {
+    /* xqc_log_level_t: REPORT=0, FATAL=1, ERROR=2, WARN=3, STATS=4, INFO=5, DEBUG=6 */
     switch (level) {
-    case MQVPN_LOG_DEBUG: return 5;
-    case MQVPN_LOG_INFO: return 3;
-    case MQVPN_LOG_WARN: return 2;
-    case MQVPN_LOG_ERROR: return 1;
-    default: return 3;
+    case MQVPN_LOG_DEBUG: return XQC_LOG_DEBUG;
+    case MQVPN_LOG_INFO: return XQC_LOG_INFO;
+    case MQVPN_LOG_WARN: return XQC_LOG_WARN;
+    case MQVPN_LOG_ERROR: return XQC_LOG_ERROR;
+    default: return XQC_LOG_INFO;
     }
 }
 

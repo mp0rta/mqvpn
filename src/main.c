@@ -101,12 +101,13 @@ parse_host_port(const char *str, char *host, size_t host_len, int *port)
 static int
 map_log_level_to_xquic(mqvpn_log_level_t level)
 {
+    /* xqc_log_level_t: REPORT=0, FATAL=1, ERROR=2, WARN=3, STATS=4, INFO=5, DEBUG=6 */
     switch (level) {
-    case MQVPN_LOG_DEBUG: return 5;
-    case MQVPN_LOG_INFO: return 3;
-    case MQVPN_LOG_WARN: return 2;
-    case MQVPN_LOG_ERROR: return 1;
-    default: return 3;
+    case MQVPN_LOG_DEBUG: return 6;
+    case MQVPN_LOG_INFO: return 5;
+    case MQVPN_LOG_WARN: return 3;
+    case MQVPN_LOG_ERROR: return 2;
+    default: return 5;
     }
 }
 
