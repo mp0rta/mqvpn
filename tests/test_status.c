@@ -237,6 +237,57 @@ TEST(skip_nested)
     ASSERT_EQ(*end, ',');
 }
 
+/* ── format_bytes threshold tests ── */
+
+TEST(format_bytes_thresholds)
+{
+    char buf[32];
+    format_bytes(1023, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "1023 B");
+    format_bytes(1024, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "1.0 KiB");
+    format_bytes(1048575, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "1024.0 KiB");
+    format_bytes(1048576, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "1.0 MiB");
+}
+
+/* ── format_duration threshold tests ── */
+
+TEST(format_duration_thresholds)
+{
+    char buf[32];
+    format_duration(59, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "59s ago");
+    format_duration(60, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "1m 0s ago");
+    format_duration(3599, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "59m 59s ago");
+    format_duration(3600, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "1h 0m ago");
+    format_duration(86400, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "1d 0h ago");
+}
+
+/* ── JSON edge case tests ── */
+
+TEST(json_find_key_escaped_quotes)
+{
+    const char *json = "{\"key\": \"hello\\\"world\"}";
+    const char *val = json_find_key(json, "key");
+    if (val) {
+        char str[64];
+        ASSERT_EQ(json_read_string(val, str, sizeof(str)), 0);
+    }
+}
+
+TEST(json_find_key_empty_object)
+{
+    const char *json = "{}";
+    const char *val = json_find_key(json, "key");
+    ASSERT_EQ((long long)(uintptr_t)val, 0);
+}
+
 /* ── Main ── */
 
 int
@@ -278,6 +329,14 @@ main(void)
     run_skip_array();
     run_skip_number();
     run_skip_nested();
+
+    /* threshold boundary tests */
+    run_format_bytes_thresholds();
+    run_format_duration_thresholds();
+
+    /* JSON edge case tests */
+    run_json_find_key_escaped_quotes();
+    run_json_find_key_empty_object();
 
     printf("\n  %d/%d tests passed\n", g_tests_passed, g_tests_run);
     return g_tests_passed == g_tests_run ? 0 : 1;
