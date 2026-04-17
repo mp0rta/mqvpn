@@ -126,6 +126,9 @@ struct mqvpn_server_s {
     uint64_t bytes_tx;
     uint64_t bytes_rx;
 
+    /* Log filtering */
+    mqvpn_log_level_t log_level;
+
     int started;
 
     /* Debug: tick thread assertion */
@@ -179,7 +182,7 @@ static void server_log(mqvpn_server_t *s, mqvpn_log_level_t level, const char *f
 static void
 server_log(mqvpn_server_t *s, mqvpn_log_level_t level, const char *fmt, ...)
 {
-    if (!s->cbs.log) return;
+    if (!s->cbs.log || level < s->log_level) return;
     char buf[512];
     va_list ap;
     va_start(ap, fmt);
@@ -298,6 +301,8 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
     case XQC_LOG_DEBUG:
     default: ml = MQVPN_LOG_DEBUG; break;
     }
+
+    if (ml < s->log_level) return;
 
     char msg[512];
     snprintf(msg, sizeof(msg), "[xquic] %.*s", (int)size, (const char *)buf);
@@ -1053,6 +1058,7 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     memcpy(&s->config, cfg, sizeof(*cfg));
     memcpy(&s->cbs, cbs, sizeof(*cbs));
     s->user_ctx = user_ctx;
+    s->log_level = cfg->log_level;
     /* caller guarantees lifetime exceeds this object */ // lgtm[cpp/stack-address-escape]
     s->udp_fd = -1;
     s->max_clients = cfg->max_clients > 0 ? cfg->max_clients : 64;
