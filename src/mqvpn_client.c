@@ -166,9 +166,10 @@ struct mqvpn_client_s {
     uint64_t reconnect_scheduled_us;
     int shutting_down;
 
-    /* Log correlation */
-    uint32_t
-        conn_id; /* monotonic connection ID for log correlation, bumped on each connect */
+    /* Log correlation + filtering */
+    uint32_t conn_id; /* monotonic, bumped on each connect */
+    mqvpn_log_level_t
+        log_level; /* cached for early filtering in client_log/cb_xqc_log_write */
 
     /* Timer: next wake (from xquic set_event_timer) */
     uint64_t next_wake_us;
@@ -272,7 +273,7 @@ static void client_log(mqvpn_client_t *c, mqvpn_log_level_t level, const char *f
 static void
 client_log(mqvpn_client_t *c, mqvpn_log_level_t level, const char *fmt, ...)
 {
-    if (!c->cbs.log) return;
+    if (!c->cbs.log || level < c->log_level) return;
     char buf[512];
     int off = snprintf(buf, sizeof(buf), "[conn:%u] ", c->conn_id);
     if (off < 0 || off >= (int)sizeof(buf)) off = 0;
@@ -406,6 +407,9 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
     case XQC_LOG_DEBUG:
     default: ml = MQVPN_LOG_DEBUG; break;
     }
+
+    /* Early filter: skip snprintf for messages below configured level */
+    if (ml < c->log_level) return;
 
     char msg[512];
     snprintf(msg, sizeof(msg), "[xquic] %.*s", (int)size, (const char *)buf);
@@ -1178,6 +1182,8 @@ mqvpn_client_new(const mqvpn_config_t *cfg, const mqvpn_client_callbacks_t *cbs,
     memcpy(&c->config, cfg, sizeof(*cfg));
     memcpy(&c->cbs, cbs, sizeof(*cbs));
     c->user_ctx = user_ctx;
+    c->log_level =
+        cfg->log_level; /* cache for early filtering in client_log/cb_xqc_log_write */
     /* caller guarantees lifetime exceeds this object */ // lgtm[cpp/stack-address-escape]
     c->state = MQVPN_STATE_IDLE;
     c->next_path_handle = 1;
