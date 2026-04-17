@@ -1,0 +1,71 @@
+{
+  "test": "multipath_scheduler",
+  "commit": "d7b7008da28640a863958309ef4e4c32e5eb721b",
+  "timestamp": "2026-04-17T18:51:28Z",
+  "scenarios": [
+    {
+      "name": "equal_paths",
+      "netem_a": "delay 10ms rate 50mbit",
+      "netem_b": "delay 10ms rate 50mbit",
+      "single_mbps": 44.6,
+      "wlb_mbps": 88.0,
+      "minrtt_mbps": 85.6
+    },
+    {
+      "name": "asymmetric_bandwidth",
+      "netem_a": "delay 5ms rate 100mbit",
+      "netem_b": "delay 20ms rate 50mbit",
+      "single_mbps": 89.5,
+      "wlb_mbps": 130.4,
+      "minrtt_mbps": 89.5
+    },
+    {
+      "name": "high_jitter",
+      "netem_a": "delay 10ms 5ms rate 50mbit",
+      "netem_b": "delay 10ms 5ms rate 50mbit",
+      "single_mbps": 44.7,
+      "wlb_mbps": 85.8,
+      "minrtt_mbps": 85.2
+    },
+    {
+      "name": "asymmetric_jitter",
+      "netem_a": "delay 10ms rate 50mbit",
+      "netem_b": "delay 10ms 8ms rate 50mbit",
+      "single_mbps": 44.6,
+      "wlb_mbps": 86.7,
+      "minrtt_mbps": 52.0
+    },
+    {
+      "name": "lossy_path",
+      "netem_a": "delay 10ms rate 50mbit",
+      "netem_b": "delay 10ms rate 50mbit loss 1%",
+      "single_mbps": 44.6,
+      "wlb_mbps": 56.1,
+      "minrtt_mbps": 26.2
+    },
+    {
+      "name": "realistic_mixed",
+      "netem_a": "delay 5ms rate 100mbit",
+      "netem_b": "delay 20ms 5ms rate 50mbit loss 0.5%",
+      "single_mbps": 89.2,
+      "wlb_mbps": 94.9,
+      "minrtt_mbps": 90.7
+    },
+    {
+      "name": "mobile_dual_lte",
+      "netem_a": "delay 30ms 10ms rate 50mbit loss 0.5%",
+      "netem_b": "delay 50ms 15ms rate 30mbit loss 1%",
+      "single_mbps": 9.7,
+      "wlb_mbps": 6.1,
+      "minrtt_mbps": 11.5
+    },
+    {
+      "name": "mobile_wifi_lte",
+      "netem_a": "delay 5ms 2ms rate 80mbit",
+      "netem_b": "delay 40ms 12ms rate 30mbit loss 0.5%",
+      "single_mbps": 70.9,
+      "wlb_mbps": 71.2,
+      "minrtt_mbps": 65.6
+    }
+  ]
+}

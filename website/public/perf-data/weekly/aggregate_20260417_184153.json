@@ -1,0 +1,72 @@
+{
+  "test": "aggregate",
+  "commit": "d7b7008da28640a863958309ef4e4c32e5eb721b",
+  "timestamp": "2026-04-17T18:41:53+00:00",
+  "netem": {
+    "path_a": {
+      "one_way_delay_ms": 10,
+      "rtt_ms": 20,
+      "rate_mbit": 300
+    },
+    "path_b": {
+      "one_way_delay_ms": 30,
+      "rtt_ms": 60,
+      "rate_mbit": 80
+    }
+  },
+  "theoretical_max_mbps": 380,
+  "results": {
+    "wlb": [
+      {
+        "streams": 1,
+        "single_path_mbps": 261.6,
+        "multipath_mbps": 253.1,
+        "gain_pct": -3.2
+      },
+      {
+        "streams": 4,
+        "single_path_mbps": 266.2,
+        "multipath_mbps": 284.0,
+        "gain_pct": 6.7
+      },
+      {
+        "streams": 16,
+        "single_path_mbps": 265.7,
+        "multipath_mbps": 319.7,
+        "gain_pct": 20.3
+      },
+      {
+        "streams": 64,
+        "single_path_mbps": 250.1,
+        "multipath_mbps": 309.3,
+        "gain_pct": 23.7
+      }
+    ],
+    "minrtt": [
+      {
+        "streams": 1,
+        "single_path_mbps": 264.1,
+        "multipath_mbps": 262.6,
+        "gain_pct": -0.6
+      },
+      {
+        "streams": 4,
+        "single_path_mbps": 266.0,
+        "multipath_mbps": 275.2,
+        "gain_pct": 3.5
+      },
+      {
+        "streams": 16,
+        "single_path_mbps": 265.4,
+        "multipath_mbps": 292.3,
+        "gain_pct": 10.1
+      },
+      {
+        "streams": 64,
+        "single_path_mbps": 254.3,
+        "multipath_mbps": 286.4,
+        "gain_pct": 12.6
+      }
+    ]
+  }
+}

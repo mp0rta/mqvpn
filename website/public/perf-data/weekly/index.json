@@ -1,5 +1,18 @@
 [
   {
+    "commit": "d7b7008",
+    "timestamp": "2026-04-17T19:13:20Z",
+    "type": "weekly",
+    "files": [
+      "failover_20260417_183655.json",
+      "ntn_20260417_191317.json",
+      "udp_sweep_20260417_190721.json",
+      "multipath_scheduler_20260417_185128.json",
+      "aggregate_20260417_184153.json",
+      "raw_throughput_20260417_183317.json"
+    ]
+  },
+  {
     "commit": "11f8e80",
     "timestamp": "2026-04-17T08:38:28Z",
     "type": "weekly",

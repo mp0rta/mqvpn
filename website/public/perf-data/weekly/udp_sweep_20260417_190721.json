@@ -1,0 +1,397 @@
+{
+  "test": "udp_sweep",
+  "commit": "d7b7008da28640a863958309ef4e4c32e5eb721b",
+  "timestamp": "2026-04-17T19:07:21Z",
+  "netem": {
+    "path_a": {
+      "delay_ms": 10,
+      "rate_mbit": 300
+    },
+    "path_b": {
+      "delay_ms": 30,
+      "rate_mbit": 80
+    }
+  },
+  "theoretical_max_mbps": 380,
+  "packet_size_bytes": 1100,
+  "sweep_rates_mbps": [
+    200,
+    210,
+    220,
+    230,
+    240,
+    250,
+    260,
+    270,
+    280,
+    290,
+    300,
+    310,
+    320,
+    330,
+    340,
+    350,
+    360,
+    370,
+    380
+  ],
+  "results": {
+    "single": {
+      "saturation_mbps": 290,
+      "points": [
+        {
+          "rate": 200,
+          "throughput": 200.0,
+          "loss_pct": 0.01,
+          "jitter_ms": 0.043
+        },
+        {
+          "rate": 210,
+          "throughput": 210.0,
+          "loss_pct": 0.0,
+          "jitter_ms": 0.075
+        },
+        {
+          "rate": 220,
+          "throughput": 220.0,
+          "loss_pct": 0.0,
+          "jitter_ms": 0.06
+        },
+        {
+          "rate": 230,
+          "throughput": 230.0,
+          "loss_pct": 0.0,
+          "jitter_ms": 0.059
+        },
+        {
+          "rate": 240,
+          "throughput": 240.0,
+          "loss_pct": 0.0,
+          "jitter_ms": 0.091
+        },
+        {
+          "rate": 250,
+          "throughput": 250.0,
+          "loss_pct": 0.0,
+          "jitter_ms": 0.086
+        },
+        {
+          "rate": 260,
+          "throughput": 260.0,
+          "loss_pct": 0.0,
+          "jitter_ms": 0.042
+        },
+        {
+          "rate": 270,
+          "throughput": 270.0,
+          "loss_pct": 0.0,
+          "jitter_ms": 0.064
+        },
+        {
+          "rate": 280,
+          "throughput": 280.0,
+          "loss_pct": 0.0,
+          "jitter_ms": 0.092
+        },
+        {
+          "rate": 290,
+          "throughput": 290.0,
+          "loss_pct": 3.9,
+          "jitter_ms": 0.049
+        },
+        {
+          "rate": 300,
+          "throughput": 300.0,
+          "loss_pct": 7.16,
+          "jitter_ms": 0.065
+        },
+        {
+          "rate": 310,
+          "throughput": 310.0,
+          "loss_pct": 9.89,
+          "jitter_ms": 0.07
+        },
+        {
+          "rate": 320,
+          "throughput": 320.0,
+          "loss_pct": 12.78,
+          "jitter_ms": 0.058
+        },
+        {
+          "rate": 330,
+          "throughput": 330.0,
+          "loss_pct": 15.66,
+          "jitter_ms": 0.048
+        },
+        {
+          "rate": 340,
+          "throughput": 340.0,
+          "loss_pct": 17.84,
+          "jitter_ms": 0.044
+        },
+        {
+          "rate": 350,
+          "throughput": 350.0,
+          "loss_pct": 19.98,
+          "jitter_ms": 0.037
+        },
+        {
+          "rate": 360,
+          "throughput": 360.0,
+          "loss_pct": 22.17,
+          "jitter_ms": 0.068
+        },
+        {
+          "rate": 370,
+          "throughput": 370.0,
+          "loss_pct": 24.04,
+          "jitter_ms": 0.04
+        },
+        {
+          "rate": 380,
+          "throughput": 380.0,
+          "loss_pct": 25.95,
+          "jitter_ms": 0.077
+        }
+      ]
+    },
+    "wlb": {
+      "saturation_mbps": 360,
+      "points": [
+        {
+          "rate": 200,
+          "throughput": 200.0,
+          "loss_pct": 0.1,
+          "jitter_ms": 11.813
+        },
+        {
+          "rate": 210,
+          "throughput": 210.0,
+          "loss_pct": 0.09,
+          "jitter_ms": 10.001
+        },
+        {
+          "rate": 220,
+          "throughput": 220.0,
+          "loss_pct": 0.16,
+          "jitter_ms": 17.195
+        },
+        {
+          "rate": 230,
+          "throughput": 230.0,
+          "loss_pct": 0.03,
+          "jitter_ms": 9.655
+        },
+        {
+          "rate": 240,
+          "throughput": 240.0,
+          "loss_pct": 0.12,
+          "jitter_ms": 13.48
+        },
+        {
+          "rate": 250,
+          "throughput": 250.0,
+          "loss_pct": 0.08,
+          "jitter_ms": 8.066
+        },
+        {
+          "rate": 260,
+          "throughput": 260.0,
+          "loss_pct": 0.14,
+          "jitter_ms": 28.552
+        },
+        {
+          "rate": 270,
+          "throughput": 270.0,
+          "loss_pct": 0.15,
+          "jitter_ms": 26.517
+        },
+        {
+          "rate": 280,
+          "throughput": 280.0,
+          "loss_pct": 0.1,
+          "jitter_ms": 24.905
+        },
+        {
+          "rate": 290,
+          "throughput": 290.0,
+          "loss_pct": 0.11,
+          "jitter_ms": 14.112
+        },
+        {
+          "rate": 300,
+          "throughput": 300.0,
+          "loss_pct": 0.22,
+          "jitter_ms": 25.148
+        },
+        {
+          "rate": 310,
+          "throughput": 310.0,
+          "loss_pct": 0.08,
+          "jitter_ms": 22.785
+        },
+        {
+          "rate": 320,
+          "throughput": 320.0,
+          "loss_pct": 0.23,
+          "jitter_ms": 38.198
+        },
+        {
+          "rate": 330,
+          "throughput": 330.0,
+          "loss_pct": 0.56,
+          "jitter_ms": 38.921
+        },
+        {
+          "rate": 340,
+          "throughput": 340.0,
+          "loss_pct": 0.75,
+          "jitter_ms": 3.723
+        },
+        {
+          "rate": 350,
+          "throughput": 350.0,
+          "loss_pct": 3.18,
+          "jitter_ms": 33.055
+        },
+        {
+          "rate": 360,
+          "throughput": 360.0,
+          "loss_pct": 3.32,
+          "jitter_ms": 24.896
+        },
+        {
+          "rate": 370,
+          "throughput": 370.0,
+          "loss_pct": 5.67,
+          "jitter_ms": 33.658
+        },
+        {
+          "rate": 380,
+          "throughput": 380.0,
+          "loss_pct": 7.88,
+          "jitter_ms": 26.9
+        }
+      ]
+    },
+    "minrtt": {
+      "saturation_mbps": 370,
+      "points": [
+        {
+          "rate": 200,
+          "throughput": 200.0,
+          "loss_pct": 0.0,
+          "jitter_ms": 0.084
+        },
+        {
+          "rate": 210,
+          "throughput": 210.0,
+          "loss_pct": 0.0,
+          "jitter_ms": 0.085
+        },
+        {
+          "rate": 220,
+          "throughput": 220.0,
+          "loss_pct": 0.0,
+          "jitter_ms": 0.053
+        },
+        {
+          "rate": 230,
+          "throughput": 230.0,
+          "loss_pct": 0.0,
+          "jitter_ms": 0.043
+        },
+        {
+          "rate": 240,
+          "throughput": 240.0,
+          "loss_pct": 0.0,
+          "jitter_ms": 0.088
+        },
+        {
+          "rate": 250,
+          "throughput": 250.0,
+          "loss_pct": 0.0,
+          "jitter_ms": 0.045
+        },
+        {
+          "rate": 260,
+          "throughput": 260.0,
+          "loss_pct": 0.0,
+          "jitter_ms": 0.058
+        },
+        {
+          "rate": 270,
+          "throughput": 270.0,
+          "loss_pct": 0.0,
+          "jitter_ms": 0.055
+        },
+        {
+          "rate": 280,
+          "throughput": 280.0,
+          "loss_pct": 0.01,
+          "jitter_ms": 0.054
+        },
+        {
+          "rate": 290,
+          "throughput": 290.0,
+          "loss_pct": 0.0,
+          "jitter_ms": 0.127
+        },
+        {
+          "rate": 300,
+          "throughput": 300.0,
+          "loss_pct": 0.07,
+          "jitter_ms": 0.041
+        },
+        {
+          "rate": 310,
+          "throughput": 310.0,
+          "loss_pct": 0.09,
+          "jitter_ms": 7.32
+        },
+        {
+          "rate": 320,
+          "throughput": 320.0,
+          "loss_pct": 0.0,
+          "jitter_ms": 0.635
+        },
+        {
+          "rate": 330,
+          "throughput": 330.0,
+          "loss_pct": 0.1,
+          "jitter_ms": 0.394
+        },
+        {
+          "rate": 340,
+          "throughput": 340.0,
+          "loss_pct": 0.02,
+          "jitter_ms": 0.309
+        },
+        {
+          "rate": 350,
+          "throughput": 350.0,
+          "loss_pct": 0.3,
+          "jitter_ms": 35.21
+        },
+        {
+          "rate": 360,
+          "throughput": 360.0,
+          "loss_pct": 2.17,
+          "jitter_ms": 34.566
+        },
+        {
+          "rate": 370,
+          "throughput": 370.0,
+          "loss_pct": 4.8,
+          "jitter_ms": 48.234
+        },
+        {
+          "rate": 380,
+          "throughput": 380.0,
+          "loss_pct": 7.27,
+          "jitter_ms": 45.82
+        }
+      ]
+    }
+  }
+}
