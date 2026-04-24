@@ -1,5 +1,5 @@
 [Unit]
-Description=mqvpn VPN Server
+Description=mqvpn VPN Client (%i)
 After=network-online.target
 Wants=network-online.target
 Documentation=https://github.com/mp0rta/mqvpn
@@ -8,9 +8,8 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-ExecStartPre=/usr/local/lib/mqvpn/mqvpn-server-nat.sh setup /etc/mqvpn/server.conf
-ExecStart=/usr/local/bin/mqvpn --config /etc/mqvpn/server.conf
-ExecStopPost=/usr/local/lib/mqvpn/mqvpn-server-nat.sh teardown /etc/mqvpn/server.conf
+ExecStartPre=-/usr/bin/touch /etc/resolv.conf.mqvpn.bak
+ExecStart=@CMAKE_INSTALL_PREFIX@/bin/mqvpn --config /etc/mqvpn/client-%i.conf
 Restart=on-failure
 RestartSec=5
 
@@ -19,14 +18,13 @@ ProtectHome=true
 ProtectSystem=strict
 PrivateTmp=true
 NoNewPrivileges=yes
+# Note: ProtectKernelTunables=yes is NOT set because the client writes to
+# /proc/sys/net/ipv6/conf/*/disable_ipv6 for IPv6 tunnel setup.
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
-# Note: ProtectKernelTunables=yes is NOT set because the NAT script
-# needs sysctl to enable IP forwarding.
 ReadOnlyPaths=/etc/mqvpn
-ReadWritePaths=/dev/net/tun
-RuntimeDirectory=mqvpn
+ReadWritePaths=/dev/net/tun /etc/resolv.conf /etc/resolv.conf.mqvpn.bak
 
 [Install]
 WantedBy=multi-user.target

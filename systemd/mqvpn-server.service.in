@@ -1,0 +1,32 @@
+[Unit]
+Description=mqvpn VPN Server
+After=network-online.target
+Wants=network-online.target
+Documentation=https://github.com/mp0rta/mqvpn
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStartPre=@CMAKE_INSTALL_PREFIX@/lib/mqvpn/mqvpn-server-nat.sh setup /etc/mqvpn/server.conf
+ExecStart=@CMAKE_INSTALL_PREFIX@/bin/mqvpn --config /etc/mqvpn/server.conf
+ExecStopPost=@CMAKE_INSTALL_PREFIX@/lib/mqvpn/mqvpn-server-nat.sh teardown /etc/mqvpn/server.conf
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+ProtectHome=true
+ProtectSystem=strict
+PrivateTmp=true
+NoNewPrivileges=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+# Note: ProtectKernelTunables=yes is NOT set because the NAT script
+# needs sysctl to enable IP forwarding.
+ReadOnlyPaths=/etc/mqvpn
+ReadWritePaths=/dev/net/tun
+RuntimeDirectory=mqvpn
+
+[Install]
+WantedBy=multi-user.target
