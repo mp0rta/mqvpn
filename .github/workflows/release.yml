@@ -83,7 +83,7 @@ jobs:
         run: |
           mkdir -p build-tarball && cd build-tarball
           cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local \
-                   -DXQUIC_BUILD_DIR=../third_party/xquic/build 2>/dev/null
+                   -DXQUIC_BUILD_DIR=../third_party/xquic/build
           # Only need the generated systemd files, not a full build
 
       - name: Create tarball
@@ -113,6 +113,7 @@ jobs:
             mqvpn_*_${{ matrix.arch }}.tar.gz
 
   publish-release:
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: build-release
     runs-on: ubuntu-latest
     timeout-minutes: 5
