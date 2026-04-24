@@ -26,13 +26,15 @@ jobs:
 
       - name: Verify tag matches CMake version
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
           CMAKE_VERSION=$(grep -oP 'project\(mqvpn VERSION \K[0-9.]+' CMakeLists.txt)
-          if [ "$TAG_VERSION" != "$CMAKE_VERSION" ]; then
-            echo "ERROR: Tag $TAG_VERSION != CMakeLists.txt $CMAKE_VERSION"
-            exit 1
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+            if [ "$TAG_VERSION" != "$CMAKE_VERSION" ]; then
+              echo "ERROR: Tag $TAG_VERSION != CMakeLists.txt $CMAKE_VERSION"
+              exit 1
+            fi
           fi
-          echo "VERSION=$TAG_VERSION" >> "$GITHUB_ENV"
+          echo "VERSION=$CMAKE_VERSION" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         run: |
