@@ -101,12 +101,15 @@ jobs:
           tar czf "mqvpn_${VERSION}_${{ matrix.arch }}.tar.gz" -C "$STAGING" .
           rm -rf "$STAGING" build-tarball
 
+      - name: Stage release artifacts
+        run: cp build/mqvpn_*.deb .
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.arch }}
           path: |
-            build/mqvpn_*.deb
+            mqvpn_*.deb
             mqvpn_*_${{ matrix.arch }}.tar.gz
 
   publish-release:
