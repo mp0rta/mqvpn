@@ -1,0 +1,140 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Verify tag matches CMake version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CMAKE_VERSION=$(grep -oP 'project\(mqvpn VERSION \K[0-9.]+' CMakeLists.txt)
+          if [ "$TAG_VERSION" != "$CMAKE_VERSION" ]; then
+            echo "ERROR: Tag $TAG_VERSION != CMakeLists.txt $CMAKE_VERSION"
+            exit 1
+          fi
+          echo "VERSION=$TAG_VERSION" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libevent-dev golang iptables
+
+      - name: Clone BoringSSL (pinned)
+        run: |
+          BSSL_DIR=third_party/xquic/third_party/boringssl
+          if [ ! -f "$BSSL_DIR/CMakeLists.txt" ]; then
+            git clone https://github.com/google/boringssl.git "$BSSL_DIR"
+          fi
+          cd "$BSSL_DIR" && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+
+      - name: Build BoringSSL
+        run: |
+          cd third_party/xquic/third_party/boringssl
+          mkdir -p build && cd build
+          cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+          make -j$(nproc) ssl crypto
+
+      - name: Build xquic
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
+                -DXQC_ENABLE_BBR2=ON \
+                -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
+          make -j$(nproc)
+
+      - name: Build mqvpn
+        run: |
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX=/usr \
+                -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
+          make -j$(nproc)
+
+      - name: Unit tests
+        run: cd build && ctest --output-on-failure
+
+      - name: Build deb package
+        run: cd build && cpack -G DEB
+
+      - name: Generate tarball service files
+        run: |
+          mkdir -p build-tarball && cd build-tarball
+          cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local \
+                   -DXQUIC_BUILD_DIR=../third_party/xquic/build 2>/dev/null
+          # Only need the generated systemd files, not a full build
+
+      - name: Create tarball
+        run: |
+          STAGING="mqvpn_${VERSION}_${{ matrix.arch }}"
+          mkdir -p "$STAGING"/{bin,lib/mqvpn,systemd,etc/mqvpn}
+          cp build/mqvpn "$STAGING/bin/"
+          cp build/libmqvpn.so* "$STAGING/lib/" 2>/dev/null || true
+          cp third_party/xquic/build/libxquic.so "$STAGING/lib/"
+          cp scripts/mqvpn-server-nat.sh "$STAGING/lib/mqvpn/"
+          cp build-tarball/systemd/mqvpn-server.service "$STAGING/systemd/"
+          cp build-tarball/systemd/mqvpn-client@.service "$STAGING/systemd/"
+          cp systemd/server.conf.example "$STAGING/etc/mqvpn/"
+          cp systemd/client.conf.example "$STAGING/etc/mqvpn/"
+          tar czf "mqvpn_${VERSION}_${{ matrix.arch }}.tar.gz" -C "$STAGING" .
+          rm -rf "$STAGING" build-tarball
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}
+          path: |
+            build/mqvpn_*.deb
+            mqvpn_*_${{ matrix.arch }}.tar.gz
+
+  publish-release:
+    needs: build-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd artifacts
+          sha256sum mqvpn_*.tar.gz mqvpn_*.deb > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            --title "mqvpn v${VERSION}" \
+            --generate-notes \
+            artifacts/mqvpn_*.tar.gz \
+            artifacts/mqvpn_*.deb \
+            artifacts/SHA256SUMS \
+            scripts/install.sh

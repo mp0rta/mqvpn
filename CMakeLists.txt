@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(mqvpn C)
+project(mqvpn VERSION 0.5.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -280,14 +280,48 @@ endif()
 install(TARGETS mqvpn DESTINATION bin)
 install(TARGETS mqvpn_lib DESTINATION lib)
 install(TARGETS mqvpn_shared DESTINATION lib)
+# Bundle xquic shared library (no standalone deb exists)
+if(XQUIC_BUILD_DIR)
+    if(IS_ABSOLUTE "${XQUIC_BUILD_DIR}")
+        set(_XQUIC_BUILD_ABS "${XQUIC_BUILD_DIR}")
+    else()
+        get_filename_component(_XQUIC_BUILD_ABS
+            "${CMAKE_BINARY_DIR}/${XQUIC_BUILD_DIR}" REALPATH)
+    endif()
+    install(FILES ${_XQUIC_BUILD_ABS}/libxquic.so DESTINATION lib)
+endif()
 install(FILES include/libmqvpn.h DESTINATION include)
-install(FILES systemd/mqvpn-server.service systemd/mqvpn-client@.service
+configure_file(systemd/mqvpn-server.service.in
+    ${CMAKE_BINARY_DIR}/systemd/mqvpn-server.service @ONLY)
+configure_file(systemd/mqvpn-client@.service.in
+    ${CMAKE_BINARY_DIR}/systemd/mqvpn-client@.service @ONLY)
+install(FILES ${CMAKE_BINARY_DIR}/systemd/mqvpn-server.service
+              ${CMAKE_BINARY_DIR}/systemd/mqvpn-client@.service
         DESTINATION lib/systemd/system)
 install(FILES systemd/server.conf.example systemd/client.conf.example
           systemd/server.json.example systemd/client.json.example
-    DESTINATION etc/mqvpn)
+    DESTINATION /etc/mqvpn)
 install(PROGRAMS scripts/mqvpn-server-nat.sh
         DESTINATION lib/mqvpn)
+
+# ---------- CPack deb packaging (only when dpkg is available) ----------
+find_program(DPKG_CMD dpkg)
+if(DPKG_CMD)
+    execute_process(COMMAND ${DPKG_CMD} --print-architecture
+        OUTPUT_VARIABLE DPKG_ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
+
+    set(CPACK_GENERATOR "DEB")
+    set(CPACK_DEBIAN_PACKAGE_NAME "mqvpn")
+    set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+    set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "${DPKG_ARCH}")
+    set(CPACK_DEBIAN_FILE_NAME "mqvpn_${PROJECT_VERSION}_${DPKG_ARCH}.deb")
+    set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+    set(CPACK_DEBIAN_PACKAGE_DESCRIPTION "Multipath QUIC VPN using MASQUE CONNECT-IP (RFC 9484)")
+    set(CPACK_DEBIAN_PACKAGE_MAINTAINER "mp0rta")
+    set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA
+        "${CMAKE_SOURCE_DIR}/packaging/postinst;${CMAKE_SOURCE_DIR}/packaging/postrm")
+    include(CPack)
+endif()
 
 endif() # WIN32 / Linux
 

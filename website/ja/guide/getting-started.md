@@ -2,80 +2,81 @@
 
 mqvpn は MASQUE CONNECT-IP (RFC 9484) を使用し、Multipath QUIC 上で標準準拠の IP トンネリングを実現するマルチパス QUIC VPN です。
 
-## 前提条件
+## インストール
 
-- Linux（カーネル 3.x 以降、TUN サポートあり）
-- Git
-- CMake 3.10+
-- Make（GNU Make）
-- GCC または Clang（C11）
-- libevent 2.x
+### サーバー（ワンクリックセットアップ）
 
-::: info
-初回ビルド時に BoringSSL のソースを GitHub からクローンするため、インターネット接続が必要です。
+Ubuntu/Debian の VPS で以下を実行すると、バイナリのインストールから証明書・認証キー・設定ファイルの生成までを一括で行います。
+
+```bash
+curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh | sudo bash
+```
+
+`--start` を付けると、サーバーの起動と OS 起動時の自動起動登録も同時に行います。
+
+```bash
+curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
+    | sudo bash -s -- --start
+```
+
+ポートやサブネットのカスタマイズもオプションで指定できます。
+
+```bash
+curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
+    | sudo bash -s -- --start --port 10020 --subnet 10.8.0.0/24
+```
+
+アンインストールするには `--uninstall` を付けて再実行します（`--purge` で設定ファイルも削除）。
+
+::: warning
+install.sh は自己署名証明書を生成します。クライアント接続時には `--insecure` が必要です。本番環境では Let's Encrypt などの信頼された証明書に置き換え、`--insecure` を省略してください。
 :::
+
+### クライアント（deb パッケージ）
+
+[Releases](https://github.com/mp0rta/mqvpn/releases/latest) から `.deb` をダウンロードしてインストールします。
+
+```bash
+# VERSION と ARCH は環境に合わせて置き換えてください（例: 0.5.0, amd64）
+curl -LO https://github.com/mp0rta/mqvpn/releases/latest/download/mqvpn_VERSION_ARCH.deb
+sudo dpkg -i mqvpn_*.deb
+```
+
+### ソースからビルド
+
+ソースからビルドする場合は[ビルド](./building)を参照してください。
 
 ## クイックスタート
 
-### 1. ビルド
-
-```bash
-git clone --recurse-submodules https://github.com/mp0rta/mqvpn.git
-cd mqvpn && ./build.sh
-```
-
-詳しい手順や他のプラットフォームについては[ビルド](./building)を参照してください。
-
-### 2. サーバーの起動
-
-```bash
-sudo scripts/start_server.sh
-# → Generated auth key example: mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
-```
-
-`start_server.sh` は自己署名証明書を生成し、NAT/フォワーディングを設定してサーバーを起動します。
-
-::: warning
-サーバーは UDP で待受ポートを開放する必要があります（デフォルト: 443、`--listen` で変更可能）。クライアントのすべてのトラフィックはトンネル経由でルーティングされます（TUN デバイスによるデフォルトルート）。
-:::
-
-デュアルスタック（IPv4 + IPv6）の場合：
-
-```bash
-sudo scripts/start_server.sh --subnet 10.0.0.0/24 --subnet6 fd00:abcd::/112
-```
-
-### 3. クライアントの接続
+インストールが済んだら、クライアントからサーバーに接続します。サーバーの install.sh 出力に表示された認証キーとアドレスを使います。
 
 シングルパス：
 
 ```bash
-sudo ./build/mqvpn --mode client --server 203.0.113.1:443 \
-    --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4= --insecure
+sudo mqvpn --mode client --server YOUR_SERVER:443 \
+    --auth-key YOUR_AUTH_KEY --insecure
 ```
 
-マルチパス（2つのインターフェース）：
+マルチパス（複数インターフェース）：
 
 ```bash
-sudo ./build/mqvpn --mode client --server 203.0.113.1:443 \
-    --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4= \
-    --path eth0 --path wlan0 --insecure
+sudo mqvpn --mode client --server YOUR_SERVER:443 \
+    --auth-key YOUR_AUTH_KEY --path eth0 --path wlan0 --insecure
 ```
 
 DNS オーバーライド付き（DNS リーク防止）：
 
 ```bash
-sudo ./build/mqvpn --mode client --server 203.0.113.1:443 \
-    --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4= \
-    --dns 1.1.1.1 --dns 8.8.8.8 --insecure
+sudo mqvpn --mode client --server YOUR_SERVER:443 \
+    --auth-key YOUR_AUTH_KEY --dns 1.1.1.1 --dns 8.8.8.8 --insecure
 ```
 
 ::: tip
-`--insecure` は TLS 証明書検証をスキップします（自己署名証明書用）。本番環境では信頼された証明書（例: Let's Encrypt）を使用し、`--insecure` を省略してください。
+`--path` を指定しない場合、クライアントはデフォルトインターフェースを使います（シングルパス）。マルチパスには2つ以上の `--path` が必要です。詳しくは[マルチパス](./multipath)を参照してください。
 :::
 
-::: tip
-`--path` を指定しない場合、クライアントはデフォルトインターフェースを使用します（シングルパスモード）。マルチパスには2つ以上の `--path` フラグが必要です。詳しくは[マルチパス](./multipath)を参照してください。
+::: warning
+サーバーは UDP ポート（デフォルト: 443）を開放する必要があります。クライアントのすべてのトラフィックはトンネル経由でルーティングされます。
 :::
 
 ## 認証キーの生成
@@ -84,7 +85,7 @@ sudo ./build/mqvpn --mode client --server 203.0.113.1:443 \
 mqvpn --genkey
 ```
 
-または `start_server.sh` に自動生成させることもできます。
+install.sh や `start_server.sh` を使う場合は自動生成されます。
 
 ## CLI リファレンス
 

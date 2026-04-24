@@ -75,6 +75,9 @@ jobs:
       - name: Unit tests (ctest)
         run: cd build && ctest --output-on-failure
 
+      - name: Stage artifacts
+        run: cp third_party/xquic/build/libxquic.so build/
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -83,7 +86,9 @@ jobs:
             build/mqvpn
             build/libmqvpn.a
             build/libmqvpn.so*
+            build/libxquic.so
             build/cmake_install.cmake
+            build/systemd/
           retention-days: 1
 
   sanitizer:
@@ -353,6 +358,11 @@ jobs:
 
       - name: Make binary executable
         run: chmod +x build/mqvpn
+
+      - name: Restore libxquic.so for cmake install
+        run: |
+          mkdir -p third_party/xquic/build
+          cp build/libxquic.so third_party/xquic/build/
 
       - name: Install mqvpn (system-wide)
         run: cd build && sudo cmake --install . --prefix /usr/local

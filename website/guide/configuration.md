@@ -210,7 +210,7 @@ All commands return a JSON response with an `"ok"` field. Each connection handle
 
 ## systemd
 
-Install the binary and unit files first (one-time setup):
+If you installed via the deb package or install.sh, the systemd units are already in place. For source builds, install manually:
 
 ```bash
 sudo cmake --install build --prefix /usr/local
@@ -218,9 +218,11 @@ sudo cmake --install build --prefix /usr/local
 
 ### Server
 
+If you used install.sh, `/etc/mqvpn/server.conf` is already generated. To configure manually, copy the example:
+
 ```bash
-sudo cp systemd/server.conf.example /etc/mqvpn/server.conf
-# Edit /etc/mqvpn/server.conf with your settings
+sudo cp /etc/mqvpn/server.conf.example /etc/mqvpn/server.conf
+sudo vi /etc/mqvpn/server.conf   # edit cert paths, auth key, etc.
 sudo systemctl enable --now mqvpn-server
 ```
 
@@ -229,9 +231,10 @@ sudo systemctl enable --now mqvpn-server
 The client uses a template unit — the instance name maps to the config file:
 
 ```bash
-sudo cp systemd/client.conf.example /etc/mqvpn/client-home.conf
+sudo cp /etc/mqvpn/client.conf.example /etc/mqvpn/client-home.conf
+sudo vi /etc/mqvpn/client-home.conf   # edit server address, auth key, etc.
 sudo systemctl enable --now mqvpn-client@home
-# This reads /etc/mqvpn/client-home.conf
+# → reads /etc/mqvpn/client-home.conf
 ```
 
 ::: info

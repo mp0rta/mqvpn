@@ -210,7 +210,7 @@ mqvpn --status --control-port 9090
 
 ## systemd
 
-先にバイナリとユニットファイルをインストールします（初回のみ）：
+deb パッケージや install.sh でインストール済みの場合、systemd ユニットは自動的に配置されます。ソースからビルドした場合は手動でインストールします：
 
 ```bash
 sudo cmake --install build --prefix /usr/local
@@ -218,9 +218,11 @@ sudo cmake --install build --prefix /usr/local
 
 ### サーバー
 
+install.sh を使った場合は `/etc/mqvpn/server.conf` が自動生成されています。手動で設定する場合はサンプルをコピーします：
+
 ```bash
-sudo cp systemd/server.conf.example /etc/mqvpn/server.conf
-# /etc/mqvpn/server.conf を編集
+sudo cp /etc/mqvpn/server.conf.example /etc/mqvpn/server.conf
+sudo vi /etc/mqvpn/server.conf   # 証明書パス、認証キーなどを編集
 sudo systemctl enable --now mqvpn-server
 ```
 
@@ -229,9 +231,10 @@ sudo systemctl enable --now mqvpn-server
 クライアントはテンプレートユニットを使用します。インスタンス名が設定ファイル名に対応します：
 
 ```bash
-sudo cp systemd/client.conf.example /etc/mqvpn/client-home.conf
+sudo cp /etc/mqvpn/client.conf.example /etc/mqvpn/client-home.conf
+sudo vi /etc/mqvpn/client-home.conf   # サーバーアドレス、認証キーなどを編集
 sudo systemctl enable --now mqvpn-client@home
-# /etc/mqvpn/client-home.conf を読み込みます
+# → /etc/mqvpn/client-home.conf を読み込みます
 ```
 
 ::: info
