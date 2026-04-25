@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — One-click mqvpn server setup for Ubuntu/Debian
+# install.sh — mqvpn server setup for Ubuntu/Debian
 #
 # Usage:
 #   curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh | sudo bash

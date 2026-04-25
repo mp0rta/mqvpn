@@ -4,7 +4,7 @@ mqvpn is a multipath QUIC VPN that uses MASQUE CONNECT-IP (RFC 9484) for standar
 
 ## Installation
 
-### Server (one-click setup)
+### Server
 
 On an Ubuntu/Debian VPS, run the following to install the binary and generate a certificate, auth key, and server config.
 
