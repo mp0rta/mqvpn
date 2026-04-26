@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(mqvpn VERSION 0.3.1 LANGUAGES C)
+project(mqvpn VERSION 0.3.2 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
