@@ -1,0 +1,55 @@
+{
+  "test": "failover",
+  "commit": "a341fffddaace6abcc64342273eab36918d66175",
+  "timestamp": "2026-04-28T17:43:30+00:00",
+  "netem": {
+    "path_a": {
+      "one_way_delay_ms": 10,
+      "rtt_ms": 20,
+      "rate_mbit": 150
+    },
+    "path_b": {
+      "one_way_delay_ms": 30,
+      "rtt_ms": 60,
+      "rate_mbit": 150
+    }
+  },
+  "results": {
+    "wlb": {
+      "fault_a": {
+        "pre_fault_avg_mbps": 193.0,
+        "degraded_avg_mbps": 132.4,
+        "ttf_sec": 0.5,
+        "ttr_sec": 1.0,
+        "recovery_avg_mbps": 251.1
+      },
+      "fault_b": {
+        "pre_fault_avg_mbps": 251.1,
+        "degraded_avg_mbps": 132.2,
+        "ttf_sec": 0.5,
+        "ttr_sec": 1.0,
+        "recovery_avg_mbps": 218.5
+      },
+      "post_recover_avg_mbps": 223.3
+    },
+    "minrtt": {
+      "fault_a": {
+        "pre_fault_avg_mbps": 176.6,
+        "degraded_avg_mbps": 127.3,
+        "ttf_sec": 1.0,
+        "ttr_sec": 0.5,
+        "recovery_avg_mbps": 224.7
+      },
+      "fault_b": {
+        "pre_fault_avg_mbps": 224.7,
+        "degraded_avg_mbps": 135.7,
+        "ttf_sec": 0.5,
+        "ttr_sec": 1.0,
+        "recovery_avg_mbps": 179.7
+      },
+      "post_recover_avg_mbps": 178.6
+    }
+  },
+  "ttf_definition": "seconds from fault injection until throughput reaches 50% of surviving path capacity (fallback detection)",
+  "ttr_definition": "seconds from fault recovery until throughput reaches 90% of pre-fault average (full recovery)"
+}
