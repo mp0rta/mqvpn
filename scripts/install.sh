@@ -14,6 +14,12 @@ INSTALL_PREFIX="/usr/local"
 DEFAULT_PORT=443
 DEFAULT_SUBNET="10.0.0.0/24"
 
+# --- Helpers ---
+info()  { echo "[*] $*"; }
+ok()    { echo "[+] $*"; }
+warn()  { echo "[!] $*" >&2; }
+err()   { echo "[!] $*" >&2; exit 1; }
+
 # Generate a per-install ULA prefix per RFC 4193: fd + 40 random bits, /112.
 # /112 keeps the 16-bit host pool (matches IPv4 /24) and stays within the
 # [96,126] range required by mqvpn_addr_pool_init6.
@@ -21,6 +27,17 @@ gen_subnet6() {
     local hex
     hex=$(openssl rand -hex 5)
     printf 'fd%s:%s:%s::/112' "${hex:0:2}" "${hex:2:4}" "${hex:6:4}"
+}
+
+# Probe whether IPv6 is usable on this host. Skipping Subnet6 generation when
+# the kernel has IPv6 disabled (ipv6.disable=1) or ip6tables is unavailable
+# avoids breaking IPv4-only deployments — mqvpn-server-nat.sh runs sysctl /
+# ip6tables under set -e and would otherwise fail ExecStartPre.
+probe_ipv6() {
+    [ -d /proc/sys/net/ipv6 ] || return 1
+    [ -w /proc/sys/net/ipv6/conf/all/forwarding ] || return 1
+    ip6tables -L FORWARD >/dev/null 2>&1 || return 1
+    return 0
 }
 
 # --- Parse arguments ---
@@ -31,11 +48,13 @@ UNINSTALL=0
 PURGE=0
 START=0
 
+require_arg() { [ "$1" -ge 2 ] || err "$2 requires an argument"; }
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --port)    PORT="$2"; shift 2 ;;
-        --subnet)  SUBNET="$2"; shift 2 ;;
-        --subnet6) SUBNET6="$2"; shift 2 ;;
+        --port)    require_arg "$#" --port;    PORT="$2";    shift 2 ;;
+        --subnet)  require_arg "$#" --subnet;  SUBNET="$2";  shift 2 ;;
+        --subnet6) require_arg "$#" --subnet6; SUBNET6="$2"; shift 2 ;;
         --start)   START=1; shift ;;
         --uninstall) UNINSTALL=1; shift ;;
         --purge)   PURGE=1; UNINSTALL=1; shift ;;
@@ -45,11 +64,6 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
-
-# --- Helpers ---
-info()  { echo "[*] $*"; }
-ok()    { echo "[+] $*"; }
-err()   { echo "[!] $*" >&2; exit 1; }
 
 # --- Uninstall ---
 do_uninstall() {
@@ -154,7 +168,7 @@ ok "Installed to $INSTALL_PREFIX"
 info "[4/6] Generating TLS certificate..."
 
 mkdir -p /etc/mqvpn
-if [ ! -f /etc/mqvpn/server.crt ]; then
+if [ ! -f /etc/mqvpn/server.crt ] || [ ! -f /etc/mqvpn/server.key ]; then
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
         -keyout /etc/mqvpn/server.key -out /etc/mqvpn/server.crt \
         -days 365 -nodes -subj "/CN=mqvpn" 2>/dev/null
@@ -173,27 +187,35 @@ if [ ! -f /etc/mqvpn/server.conf ]; then
     AUTH_KEY=$("$INSTALL_PREFIX/bin/mqvpn" --genkey) || err "Failed to generate auth key"
     [ -n "$AUTH_KEY" ] || err "Empty auth key generated"
 
-    [ -n "$SUBNET6" ] || SUBNET6=$(gen_subnet6)
+    # Auto-generate Subnet6 only when IPv6 is usable. Explicit --subnet6 is
+    # honored regardless (the caller takes responsibility).
+    if [ -z "$SUBNET6" ]; then
+        if probe_ipv6; then
+            SUBNET6=$(gen_subnet6)
+        else
+            warn "IPv6 unavailable (kernel disabled or ip6tables missing); skipping Subnet6"
+        fi
+    fi
 
-    cat > /etc/mqvpn/server.conf <<CONF
-[Interface]
-Listen = 0.0.0.0:$PORT
-Subnet = $SUBNET
-Subnet6 = $SUBNET6
-TunName = mqvpn0
-LogLevel = info
-
-[TLS]
-Cert = /etc/mqvpn/server.crt
-Key = /etc/mqvpn/server.key
-
-[Auth]
-Key = $AUTH_KEY
-MaxClients = 64
-
-[Multipath]
-Scheduler = wlb
-CONF
+    {
+        echo "[Interface]"
+        echo "Listen = 0.0.0.0:$PORT"
+        echo "Subnet = $SUBNET"
+        [ -n "$SUBNET6" ] && echo "Subnet6 = $SUBNET6"
+        echo "TunName = mqvpn0"
+        echo "LogLevel = info"
+        echo
+        echo "[TLS]"
+        echo "Cert = /etc/mqvpn/server.crt"
+        echo "Key = /etc/mqvpn/server.key"
+        echo
+        echo "[Auth]"
+        echo "Key = $AUTH_KEY"
+        echo "MaxClients = 64"
+        echo
+        echo "[Multipath]"
+        echo "Scheduler = wlb"
+    } > /etc/mqvpn/server.conf
     chmod 600 /etc/mqvpn/server.conf
     ok "Generated /etc/mqvpn/server.conf"
 else
