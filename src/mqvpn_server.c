@@ -233,10 +233,12 @@ svr_log_conn_stats(mqvpn_server_t *s, const char *tag, const xqc_cid_t *cid)
     LOG_I(s,
           "%s: send=%u recv=%u lost=%u lost_dgram=%u srtt=%.2fms "
           "min_rtt=%.2fms inflight=%" PRIu64 " app_bytes=%" PRIu64
-          " standby_bytes=%" PRIu64 " mp_state=%d",
+          " standby_bytes=%" PRIu64 " mp_state=%d "
+          "fec_enable=%u fec_send=%u fec_recover=%u",
           tag, st.send_count, st.recv_count, st.lost_count, st.lost_dgram_count,
           (double)st.srtt / 1000.0, (double)st.min_rtt / 1000.0, st.inflight_bytes,
-          st.total_app_bytes, st.standby_path_app_bytes, st.mp_state);
+          st.total_app_bytes, st.standby_path_app_bytes, st.mp_state, st.enable_fec,
+          st.send_fec_cnt, st.fec_recover_pkt_cnt);
 }
 
 /* ─── ICMP PTB rate limiter ─── */
@@ -1424,7 +1426,7 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
     uint32_t fh = flow_hash_pkt(pkt, (int)len);
     xqc_conn_set_dgram_flow_hash(xqc_h3_conn_get_xqc_conn(target->h3_conn), fh);
     xret = xqc_h3_ext_datagram_send(target->h3_conn, frame_buf, frame_written, &dgram_id,
-                                    XQC_DATA_QOS_HIGH);
+                                    mqvpn_dgram_qos_level(s->config.scheduler));
 
     if (xret == -XQC_EAGAIN) {
         s->tun_paused = 1;

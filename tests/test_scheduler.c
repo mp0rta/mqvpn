@@ -127,6 +127,24 @@ test_minrtt_zero_paths_no_warn(void)
     return 0;
 }
 
+#if defined(XQC_ENABLE_FEC) && defined(XQC_ENABLE_XOR)
+static int
+test_dgram_qos_for_backup_fec(void)
+{
+    ASSERT_EQ(mqvpn_dgram_qos_level(MQVPN_SCHED_BACKUP_FEC), XQC_DATA_QOS_NORMAL);
+    return 0;
+}
+#endif
+
+static int
+test_dgram_qos_for_other_schedulers(void)
+{
+    ASSERT_EQ(mqvpn_dgram_qos_level(MQVPN_SCHED_MINRTT), XQC_DATA_QOS_HIGH);
+    ASSERT_EQ(mqvpn_dgram_qos_level(MQVPN_SCHED_WLB), XQC_DATA_QOS_HIGH);
+    ASSERT_EQ(mqvpn_dgram_qos_level((mqvpn_scheduler_t)999), XQC_DATA_QOS_HIGH);
+    return 0;
+}
+
 int
 main(void)
 {
@@ -141,6 +159,10 @@ main(void)
     failed += test_unknown_falls_back_to_minrtt();
     failed += test_backup_fec_single_path_needs_warn();
     failed += test_backup_fec_two_paths_no_warn();
+#if defined(XQC_ENABLE_FEC) && defined(XQC_ENABLE_XOR)
+    failed += test_dgram_qos_for_backup_fec();
+#endif
+    failed += test_dgram_qos_for_other_schedulers();
     failed += test_wlb_single_path_no_warn();
     failed += test_minrtt_zero_paths_no_warn();
     if (failed) {

@@ -8,6 +8,12 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 option(XQUIC_BUILD_DIR "Path to pre-built xquic build directory" "")
 option(ENABLE_SANITIZERS "Enable ASan + UBSan" OFF)
 option(ENABLE_MSAN "Enable MemorySanitizer" OFF)
+option(MQVPN_DEBUG_QOS_OVERRIDE
+       "Enable MQVPN_DGRAM_QOS_OVERRIDE env var for FEC ablation testing — debug only"
+       OFF)
+if(MQVPN_DEBUG_QOS_OVERRIDE)
+    add_compile_definitions(MQVPN_DEBUG_QOS_OVERRIDE)
+endif()
 
 if(ENABLE_SANITIZERS)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -Werror)
