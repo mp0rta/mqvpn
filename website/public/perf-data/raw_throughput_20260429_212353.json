@@ -1,0 +1,26 @@
+{
+  "test": "raw_throughput",
+  "commit": "7f9f614f7a5dd1ef93088567f492cf524cb876f1",
+  "timestamp": "2026-04-29T21:23:53Z",
+  "protocol": "tcp",
+  "directions": [
+    "DL"
+  ],
+  "duration_sec": 10,
+  "parallel_streams": 4,
+  "results": {
+    "DL": {
+      "direct_mbps": 269560.8,
+      "single_path_mbps": 2362.1,
+      "multipath_minrtt_mbps": 2380.0,
+      "multipath_wlb_mbps": 2298.1
+    }
+  },
+  "overhead_pct": {
+    "DL": {
+      "single_path": 99.1,
+      "multipath_minrtt": 99.1,
+      "multipath_wlb": 99.1
+    }
+  }
+}
