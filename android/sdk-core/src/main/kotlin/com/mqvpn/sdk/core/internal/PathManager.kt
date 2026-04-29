@@ -25,6 +25,10 @@ internal class PathManager(
     private val protector: (Int) -> Boolean,
     private val serverHost: String,
     private val serverPort: Int,
+    private val bindUdp: (Network, String, Int, (Int) -> Boolean) -> Int =
+        { network, host, port, prot ->
+            PathBinder.bindAndDetachUdp(network, host, port, prot)
+        },
 ) {
     private var connected = false
     private val pathHandles = mutableMapOf<Network, Long>()  // network → pathHandle
@@ -48,9 +52,7 @@ internal class PathManager(
         val name = event.path.name
 
         // Step 1: Create socket (blocking I/O, runs on IO thread)
-        val fd = PathBinder.bindAndDetachUdp(
-            network, serverHost, serverPort, protector,
-        )
+        val fd = bindUdp(network, serverHost, serverPort, protector)
         if (fd < 0) {
             Log.e(TAG, "Failed to bind socket for $name, will retry on next event")
             networkMonitor.removeNetwork(network)
@@ -59,6 +61,14 @@ internal class PathManager(
 
         // Step 2: Add path + connect via executor (thread-safe)
         val handle = executor.call {
+            // onLost can fire on a binder thread while bind was running on IO.
+            // If the network is no longer in NetworkMonitor's active set, abort
+            // — adding a path bound to an already-dead Network would leak a slot
+            // (Lost wouldn't fire again for this Network).
+            if (!networkMonitor.activeNetworks.containsKey(network)) {
+                Log.i(TAG, "Network $name lost during bind, discarding fd")
+                return@call ABORT_LOST_DURING_BIND
+            }
             val h = tunnel.addPathFd(fd, name)
             if (h < 0) {
                 Log.e(TAG, "addPathFd failed for $name: $h")
@@ -131,5 +141,13 @@ internal class PathManager(
 
     companion object {
         private const val TAG = "PathManager"
+
+        /**
+         * Sentinel returned from the executor block in [handleAvailable] when
+         * the network was lost during the IO bind step. Must not collide with
+         * any negative error code returned by [MqvpnTunnel.addPathFd] (xquic /
+         * JNI errors are small negatives in the 0..-32 range).
+         */
+        private const val ABORT_LOST_DURING_BIND = -1000L
     }
 }

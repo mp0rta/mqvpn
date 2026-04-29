@@ -352,7 +352,15 @@ MQVPN_API int mqvpn_client_drop_path(mqvpn_client_t *client, mqvpn_path_handle_t
 /*
  * Re-activate a DEGRADED or CLOSED path using the existing fd.
  * Called by the platform layer when it detects the path is viable again
- * (e.g., netlink RTM_NEWADDR on Linux, ConnectivityManager on Android).
+ * (e.g., netlink RTM_NEWADDR on Linux, NotifyUnicastIpAddressChange on
+ * Windows keyed by NET_LUID, NWPathMonitor on macOS for Wi-Fi/Ethernet flap).
+ *
+ * NOT applicable to platforms whose APIs invalidate path identity on loss
+ * and deliver a fresh handle on recovery (Android ConnectivityManager Network,
+ * iOS NEPacketTunnelProvider where socket-to-interface bindings are invalidated
+ * when the underlying interface re-attaches, e.g. cellular handoff). Those
+ * platforms should call remove_path() + a new add_path_fd() with a fresh fd
+ * instead.
  *
  * Preconditions: !in_use && active && (DEGRADED || CLOSED).
  * On success: xquic creates a new path (validation is async). The library
