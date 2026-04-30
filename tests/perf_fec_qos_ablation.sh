@@ -15,7 +15,8 @@
 #
 # Output:
 #   - CSV to stdout
-#   - docs/superpowers/2026-04-27-pr1-fec-qos-results.md (markdown table)
+#   - markdown table at $RESULTS (default /tmp/mqvpn-fec-grid-results.md;
+#     override with the RESULTS env var to write elsewhere)
 
 set -e
 
@@ -33,7 +34,7 @@ tc qdisc del dev lo root 2>/dev/null || true
 MQVPN="${1:-${MQVPN}}"
 LOG_DIR="$(mktemp -d)"
 ALL_WORK_DIRS=()
-RESULTS="${SCRIPT_DIR}/../docs/superpowers/2026-04-27-pr1-fec-qos-results.md"
+RESULTS="${RESULTS:-/tmp/mqvpn-fec-grid-results.md}"
 trap 'bench_cleanup; for d in "${ALL_WORK_DIRS[@]}"; do rm -rf "$d"; done; rm -rf "$LOG_DIR"' EXIT
 
 QOS_LEVELS=("high" "normal")
