@@ -1485,6 +1485,38 @@ mqvpn_server_scheduler_label(const mqvpn_server_t *s)
 }
 
 int
+mqvpn_server_get_client_fec_stats(const mqvpn_server_t *s, const char *user,
+                                  mqvpn_internal_fec_stats_t *out)
+{
+    if (!s || !user || !out) return 0;
+    memset(out, 0, sizeof(*out));
+
+#ifndef XQC_ENABLE_FEC
+    (void)s;
+    (void)user;
+    return -1;
+#else
+    /* sessions[] is a sparse pointer array; iterate non-null slots. */
+    for (int i = 1; i <= MQVPN_ADDR_POOL_MAX; i++) {
+        svr_conn_t *conn = s->sessions[i];
+        if (!conn) continue;
+        if (strncmp(conn->username, user, sizeof(conn->username)) != 0) continue;
+
+        xqc_conn_stats_t st = xqc_conn_get_stats(s->engine, &conn->cid);
+        out->enable_fec = (uint8_t)st.enable_fec;
+        out->mp_state = (uint8_t)st.mp_state;
+        out->fec_send_cnt = (uint64_t)st.send_fec_cnt;
+        out->fec_recover_cnt = (uint64_t)st.fec_recover_pkt_cnt;
+        out->lost_dgram_cnt = (uint64_t)st.lost_dgram_count;
+        out->total_app_bytes = st.total_app_bytes;
+        out->standby_app_bytes = st.standby_path_app_bytes;
+        return 1;
+    }
+    return 0;
+#endif
+}
+
+int
 mqvpn_server_get_n_clients(const mqvpn_server_t *s)
 {
     if (!s) return 0;
