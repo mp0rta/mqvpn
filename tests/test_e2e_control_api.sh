@@ -116,17 +116,22 @@ PY
 # jget <field>: read top-level field from stdin JSON.
 # Booleans → 'true'/'false' (lowercase, NOT Python's 'True'/'False').
 # Numbers and strings → bare value. Missing field → empty string.
+# Field must be a scalar; nested dicts/lists are printed as Python repr,
+# which won't match clean string comparisons — fine for current wire shape
+# where all top-level fields are scalars.
+# The field name is passed via sys.argv (not string-interpolated) to avoid
+# shell injection if a caller ever feeds it a dynamic value.
 jget() {
     python3 -c "
 import sys, json
-v = json.loads(sys.stdin.read()).get('$1', '')
+v = json.loads(sys.stdin.read()).get(sys.argv[1], '')
 if isinstance(v, bool):
     print('true' if v else 'false')
 elif v is None:
     print('')
 else:
     print(v)
-"
+" -- "$1"
 }
 
 # assert_json_users_eq <response> <comma-separated user list>  → ignores order
@@ -988,6 +993,9 @@ test_phase_f_scheduler_smoke() {
 }
 
 test_phase_g_new_commands() {
+    # Reuses the server left running by an earlier phase (no per-phase
+    # teardown). If `ctrl_local` returns "server may be dead" here, fix the
+    # phase ordering rather than this test.
     echo "--- Phase G: get_build_info ---"
     local RESP
     RESP=$(ctrl_local '{"cmd":"get_build_info"}')
@@ -1061,6 +1069,8 @@ test_phase_g_new_commands() {
     RESP=$(ctrl_local '{"cmd":"get_fec_stats"}')
     [[ "$(echo "$RESP" | jget error)" == "user required" ]] \
         || { echo "FAIL H' missing-arg: got $RESP"; return 1; }
+
+    return 0
 }
 
 # --- Main runner ---
