@@ -33,10 +33,9 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
-#define CTRL_MAX_REQ          4096
-#define CTRL_MAX_RESP         4096
-#define CTRL_MAX_CONNS        8 /* max concurrent control connections */
-#define CTRL_READ_TIMEOUT_SEC 5 /* close idle connections after 5s */
+#define CTRL_MAX_REQ          4096 /* per-connection request buffer */
+#define CTRL_MAX_CONNS        8    /* max concurrent control connections */
+#define CTRL_READ_TIMEOUT_SEC 5    /* close idle connections after 5s */
 /* Maximum response size. Worst-case get_status with MQVPN_MAX_USERS=64 and
  * MQVPN_MAX_PATHS=4 produces ~105 KB; round up to 128 KB and re-check the
  * math if either limit grows. */
