@@ -77,8 +77,10 @@ typedef struct {
 
 /* Returns:
  *   1  -> out filled with the user's FEC stats
- *   0  -> user has no active session
- *  -1  -> mqvpn was built without XQC_ENABLE_FEC (out is zeroed) */
+ *   0  -> user has no active (tunnel-established) session
+ *  -1  -> mqvpn was built without XQC_ENABLE_FEC, OR a NULL arg was passed
+ *        (caller-bug case is folded into "unavailable" so 0 always means
+ *         "user not found", never "internal error") */
 int mqvpn_server_get_client_fec_stats(const mqvpn_server_t *s, const char *user,
                                       mqvpn_internal_fec_stats_t *out);
 

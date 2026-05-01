@@ -1488,7 +1488,9 @@ int
 mqvpn_server_get_client_fec_stats(const mqvpn_server_t *s, const char *user,
                                   mqvpn_internal_fec_stats_t *out)
 {
-    if (!s || !user || !out) return 0;
+    /* NULL args are caller bugs. Map to -1 so the caller doesn't confuse them
+     * with the legitimate "user not found" sentinel (0). */
+    if (!s || !user || !out) return -1;
     memset(out, 0, sizeof(*out));
 
 #ifndef XQC_ENABLE_FEC
@@ -1496,10 +1498,14 @@ mqvpn_server_get_client_fec_stats(const mqvpn_server_t *s, const char *user,
     (void)user;
     return -1;
 #else
-    /* sessions[] is a sparse pointer array; iterate non-null slots. */
+    /* sessions[] is a sparse pointer array; iterate non-null slots. Skip
+     * connections that haven't completed the MASQUE tunnel — xqc_conn_get_stats
+     * returns zeroed counters for half-attached conns, which would falsely
+     * report (1, all-zero) and pollute the Prometheus output. Same guard as
+     * mqvpn_server_get_client_info. */
     for (int i = 1; i <= MQVPN_ADDR_POOL_MAX; i++) {
         svr_conn_t *conn = s->sessions[i];
-        if (!conn) continue;
+        if (!conn || !conn->tunnel_established) continue;
         if (strncmp(conn->username, user, sizeof(conn->username)) != 0) continue;
 
         xqc_conn_stats_t st = xqc_conn_get_stats(s->engine, &conn->cid);
