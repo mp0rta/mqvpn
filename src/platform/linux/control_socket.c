@@ -37,6 +37,10 @@
 #define CTRL_MAX_RESP         4096
 #define CTRL_MAX_CONNS        8 /* max concurrent control connections */
 #define CTRL_READ_TIMEOUT_SEC 5 /* close idle connections after 5s */
+/* Maximum response size. Worst-case get_status with MQVPN_MAX_USERS=64 and
+ * MQVPN_MAX_PATHS=4 produces ~105 KB; round up to 128 KB and re-check the
+ * math if either limit grows. */
+#define CTRL_MAX_RESP_BYTES (128 * 1024)
 
 /* JSON helpers (json_find_key → json_find_key, json_read_string → json_read_string)
  * are provided by json_mini.h */
@@ -138,7 +142,7 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
         if (gettimeofday(&tv, NULL) == 0)
             now = (uint64_t)tv.tv_sec * 1000000 + (uint64_t)tv.tv_usec;
 
-        char buf[16384];
+        char buf[CTRL_MAX_RESP_BYTES];
         int pos = 0;
         int w;
         pos += snprintf(buf, sizeof(buf), "{\"ok\":true,\"n_clients\":%d,\"clients\":[",
@@ -267,9 +271,20 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
 
     conn->req[conn->req_len] = '\0';
 
-    char resp[16384];
+    char resp[CTRL_MAX_RESP_BYTES];
     int rlen = dispatch(conn->req, resp, sizeof(resp) - 2, conn->cs->server);
-    if (rlen > 0) {
+    if (rlen <= 0) {
+        /* dispatch failed to format anything — close silently. */
+    } else if ((size_t)rlen >= sizeof(resp) - 2) {
+        /* snprintf would have truncated. Send a small error JSON instead so the
+         * client doesn't see a malformed body, and emit a warning. */
+        static const char too_large[] =
+            "{\"ok\":false,\"error\":\"response too large\"}\n";
+        (void)write(fd, too_large, sizeof(too_large) - 1);
+        LOG_WRN(
+            "control: dispatch response truncated (would have been %d bytes, max %zu)",
+            rlen, sizeof(resp) - 2);
+    } else {
         resp[rlen] = '\n';
         resp[rlen + 1] = '\0';
         (void)write(fd, resp, (size_t)rlen + 1);
