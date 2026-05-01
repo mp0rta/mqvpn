@@ -145,6 +145,17 @@ struct mqvpn_server_s {
 
 /* ─── Helpers ─── */
 
+static const char *
+mqvpn_scheduler_label(int s)
+{
+    switch (s) {
+    case MQVPN_SCHED_MINRTT: return "minrtt";
+    case MQVPN_SCHED_WLB: return "wlb";
+    case MQVPN_SCHED_BACKUP_FEC: return "backup_fec";
+    default: return "unknown";
+    }
+}
+
 static uint64_t
 now_us(void)
 {
@@ -1464,6 +1475,13 @@ mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *out)
     out->bytes_tx = s->bytes_tx;
     out->bytes_rx = s->bytes_rx;
     return MQVPN_OK;
+}
+
+const char *
+mqvpn_server_scheduler_label(const mqvpn_server_t *s)
+{
+    if (!s) return "unknown";
+    return mqvpn_scheduler_label(s->config.scheduler);
 }
 
 int
