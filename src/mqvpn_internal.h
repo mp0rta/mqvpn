@@ -62,6 +62,9 @@ bool mqvpn_check_scheduler_preconditions(mqvpn_scheduler_t scheduler, int n_path
  * string, do not free. Used by control_socket.c for get_build_info JSON. */
 const char *mqvpn_server_scheduler_label(const mqvpn_server_t *s);
 
+/* Seconds since the server was booted (mqvpn_server_create). */
+uint64_t mqvpn_server_uptime_seconds(const mqvpn_server_t *s);
+
 /* Snapshot of FEC / multipath counters for one client.
  * INTERNAL — not in public libmqvpn.h. Field widths chosen to safely accept
  * either uint32_t or uint64_t xquic counters now or in the future. */

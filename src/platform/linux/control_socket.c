@@ -15,7 +15,9 @@
  *   {"ok":true}
  *   {"ok":false,"error":"<reason>"}
  *   {"ok":true,"users":["alice","bob"]}
- *   {"ok":true,"n_clients":2,"bytes_tx":12345,"bytes_rx":6789}
+ *   {"ok":true,"n_clients":N,"bytes_tx":X,"bytes_rx":Y,
+ *    "dgram_sent":S,"dgram_recv":R,"dgram_lost":L,"dgram_acked":A,
+ *    "uptime_sec":U}
  *   {"ok":true,"version":"0.4.0","scheduler":"backup_fec","fec_enabled":1}
  *   {"ok":true,"user":"alice","enable_fec":1,"mp_state":1,
  *    "fec_send_cnt":142,"fec_recover_cnt":17,"lost_dgram_cnt":23,
@@ -132,13 +134,19 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
         return snprintf(resp, resp_len, "{\"ok\":true,\"users\":%s}", users);
 
     } else if (strcmp(cmd, "get_stats") == 0) {
-        mqvpn_stats_t st;
+        mqvpn_stats_t st = {0};
+        st.struct_size = sizeof(st);
         mqvpn_server_get_stats(server, &st);
         int nc = mqvpn_server_get_n_clients(server);
+        uint64_t uptime = mqvpn_server_uptime_seconds(server);
         return snprintf(resp, resp_len,
                         "{\"ok\":true,\"n_clients\":%d,"
-                        "\"bytes_tx\":%" PRIu64 ",\"bytes_rx\":%" PRIu64 "}",
-                        nc, st.bytes_tx, st.bytes_rx);
+                        "\"bytes_tx\":%" PRIu64 ",\"bytes_rx\":%" PRIu64 ","
+                        "\"dgram_sent\":%" PRIu64 ",\"dgram_recv\":%" PRIu64 ","
+                        "\"dgram_lost\":%" PRIu64 ",\"dgram_acked\":%" PRIu64 ","
+                        "\"uptime_sec\":%" PRIu64 "}",
+                        nc, st.bytes_tx, st.bytes_rx, st.dgram_sent, st.dgram_recv,
+                        st.dgram_lost, st.dgram_acked, uptime);
 
     } else if (strcmp(cmd, "get_status") == 0) {
         mqvpn_client_info_t clients[MQVPN_MAX_USERS];
