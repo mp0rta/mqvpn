@@ -230,6 +230,12 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
             return snprintf(resp, resp_len,
                             "{\"ok\":false,\"error\":\"user not found\"}");
 
+        /* `user` is echoed without explicit JSON-escape: mqvpn_server_add_user
+         * and add_user_entry reject quote, backslash, and control bytes at
+         * intake (src/auth.c), so any user that survived to the sessions[]
+         * table cannot produce JSON-unsafe output here. If a future code path
+         * registers users via an unvalidated source (e.g., LDAP bridge), this
+         * point must add a JSON-safe escape pass. */
         return snprintf(resp, resp_len,
                         "{\"ok\":true,\"user\":\"%s\","
                         "\"enable_fec\":%u,\"mp_state\":%u,"
