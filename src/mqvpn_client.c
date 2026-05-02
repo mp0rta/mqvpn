@@ -361,9 +361,9 @@ find_path_by_handle(mqvpn_client_t *c, mqvpn_path_handle_t h)
  * slot wins.
  *
  * Exported (non-static) so tests can verify the selection without
- * driving xquic.  Test-only — not part of the libmqvpn public ABI;
- * marked `hidden` so it does not show up in libmqvpn.so's dynamic
- * symbol table, and gets a `_for_test` suffix + no public header. */
+ * driving xquic.  Marked `hidden` so it does not show up in
+ * libmqvpn.so's dynamic symbol table — not part of the public ABI,
+ * and intentionally absent from libmqvpn.h. */
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((visibility("hidden")))
 #endif
