@@ -199,18 +199,23 @@ jobs:
         if: matrix.os == 'windows'
         shell: pwsh
         run: |
-          $vsArch = if ($env:MATRIX_ARCH -eq 'amd64') { 'x64' } else { 'ARM64' }
           # Windows ARM64: BoringSSL's CMake mis-routes ASM source selection
           # and tries to link x86_64-apple ASM objects into the ARM64 build
           # (LNK1181 on aes-gcm-avx2-x86_64-apple.obj). Disabling ASM
           # (OPENSSL_NO_ASM=1) sidesteps the broken selection. Slower but
           # functionally complete; revisit when BoringSSL's ARM64-Windows
           # support stabilizes.
-          $extraArgs = if ($env:MATRIX_ARCH -eq 'arm64') { @('-DOPENSSL_NO_ASM=1') } else { @() }
+          # NOTE: split into explicit if/else rather than PowerShell splat
+          # (`@extraArgs`) — splat to native exes splits `-DKEY=VAL` tokens
+          # on Windows ARM64 pwsh, breaking the cmake invocation.
           Push-Location third_party/xquic/third_party/boringssl
           mkdir build -Force | Out-Null
           Push-Location build
-          cmake -G "Visual Studio 17 2022" -A $vsArch -DBUILD_SHARED_LIBS=0 @extraArgs ..
+          if ($env:MATRIX_ARCH -eq 'arm64') {
+            cmake -G "Visual Studio 17 2022" -A ARM64 -DBUILD_SHARED_LIBS=0 -DOPENSSL_NO_ASM=1 ..
+          } else {
+            cmake -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=0 ..
+          }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build . --target ssl --config Release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
