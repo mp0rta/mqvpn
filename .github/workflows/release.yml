@@ -145,8 +145,16 @@ jobs:
         if: matrix.os == 'windows'
         run: vcpkg install libevent:${{ matrix.arch == 'amd64' && 'x64-windows-static' || 'arm64-windows-static' }}
 
-      - name: Fetch and verify wintun (Windows)
+      - name: Cache wintun
         if: matrix.os == 'windows'
+        id: cache-wintun
+        uses: actions/cache@v4
+        with:
+          path: wintun-extract
+          key: wintun-${{ env.WINTUN_VER }}-${{ env.WINTUN_SHA256 }}
+
+      - name: Fetch and verify wintun (Windows)
+        if: matrix.os == 'windows' && steps.cache-wintun.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           $zip = "wintun-${env:WINTUN_VER}.zip"
