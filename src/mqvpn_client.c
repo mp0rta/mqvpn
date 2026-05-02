@@ -1063,6 +1063,12 @@ cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
 
 /* ─── Multipath helpers ─── */
 
+/* Forward declarations — apply_path_activation_failure() is used by
+ * client_activate_path() below but defined further down next to its other
+ * retry-related siblings (path_recreate_backoff, etc.). */
+static void apply_path_activation_failure(mqvpn_client_t *c, path_entry_t *p,
+                                          uint64_t now_us);
+
 /* Create an xquic path for a secondary path entry and mark it ACTIVE.
  *
  * For MQVPN_SCHED_BACKUP_FEC the secondary path must be created in STANDBY
@@ -1077,6 +1083,20 @@ client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
     xqc_int_t ret = xqc_conn_create_path(c->engine, &c->conn->cid, &new_id, path_status);
     if (ret < 0) {
         LOG_W(c, "xqc_conn_create_path[%d]: %d", idx, ret);
+        /* Schedule a retry so the path is not stuck in PENDING/ACTIVE
+         * forever — the tick recovery loop only services DEGRADED slots
+         * with a non-zero recreate_after_us.  Common trigger: the server
+         * has not yet distributed enough CIDs for additional paths
+         * (-XQC_EMP_NO_AVAIL_PATH_ID).  Backport of Ysurac 86c275c
+         * (issue Ysurac/openmptcprouter#4271 Bug 1). */
+        apply_path_activation_failure(c, p, client_now_us(c));
+        if (p->status == MQVPN_PATH_CLOSED) {
+            LOG_W(c, "path closed: %s (retries exhausted at activation)", p->name);
+        } else {
+            LOG_I(c, "path degraded: %s (retry %d/%d in %ds)", p->name,
+                  p->recreate_retries, PATH_RECREATE_MAX_RETRIES,
+                  (int)((p->recreate_after_us - client_now_us(c)) / 1000000));
+        }
         return;
     }
     LOG_I(c, "path[%d] created (id=%llu, app_path_status=%s)", idx,
@@ -1115,6 +1135,51 @@ path_recreate_backoff(int retries)
         delay *= 2;
     if (delay > PATH_RECREATE_MAX_DELAY_US) delay = PATH_RECREATE_MAX_DELAY_US;
     return delay;
+}
+
+/* Apply a synchronous path-creation failure to slot `p` at time `now_us`.
+ *
+ * Bumps the retry counter, transitions the path to MQVPN_PATH_DEGRADED with
+ * an exponential-backoff `recreate_after_us` so tick_recover_degraded_path()
+ * will retry it; or transitions to MQVPN_PATH_CLOSED once
+ * PATH_RECREATE_MAX_RETRIES is reached.  Always emits the path_event
+ * callback if registered.
+ *
+ * Without this, a path whose xqc_conn_create_path() fails synchronously
+ * (e.g. `-XQC_EMP_NO_AVAIL_PATH_ID` because the server has not yet
+ * distributed CIDs for additional paths) sits in PENDING forever — the
+ * tick recovery loop only acts on DEGRADED slots with a non-zero
+ * recreate_after_us, so PENDING/ACTIVE paths with failed activation are
+ * invisible to it.  Issue Ysurac/openmptcprouter#4271 (Bug 1). */
+static void
+apply_path_activation_failure(mqvpn_client_t *c, path_entry_t *p, uint64_t now_us)
+{
+    p->recreate_retries++;
+    if (p->recreate_retries >= PATH_RECREATE_MAX_RETRIES) {
+        p->status = MQVPN_PATH_CLOSED;
+        p->recreate_after_us = 0;
+    } else {
+        p->status = MQVPN_PATH_DEGRADED;
+        p->recreate_after_us = now_us + path_recreate_backoff(p->recreate_retries);
+    }
+    if (c->cbs.path_event) c->cbs.path_event(p->handle, p->status, c->user_ctx);
+}
+
+/* Test-only wrapper: drives apply_path_activation_failure() by handle so
+ * test_api can verify the state transition without a live engine.  Hidden
+ * from libmqvpn.so's dynamic export table (not part of public ABI). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_apply_path_activation_failure(mqvpn_client_t *c, mqvpn_path_handle_t handle,
+                                           uint64_t now_us)
+{
+    if (!c) return -1;
+    path_entry_t *p = find_path_by_handle(c, handle);
+    if (!p) return -1;
+    apply_path_activation_failure(c, p, now_us);
+    return 0;
 }
 
 static void
