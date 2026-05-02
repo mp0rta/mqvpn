@@ -1,10 +1,12 @@
 #!/bin/bash
 # test_e2e_control_api.sh — end-to-end test for the v0.4.0 server control API.
 #
-# Verifies all 5 control commands (add_user / remove_user / list_users / get_stats /
-# get_status), the --status CLI, security boundaries (bind addr, malformed input,
-# max-users, max-conns), restart resilience, and a scheduler smoke pass across
-# minrtt / wlb / backup_fec.
+# Verifies all 7 control commands (add_user / remove_user / list_users / get_stats /
+# get_status / get_build_info / get_fec_stats), the --status CLI, security
+# boundaries (bind addr, malformed input, max-users, max-conns), restart
+# resilience, a scheduler smoke pass across minrtt / wlb / backup_fec, and
+# the extended get_stats wire format (dgram_*, uptime_sec) plus get_fec_stats
+# 3-outcome tolerance.
 #
 # REQUIRES:
 #   - root (TUN + netns)
