@@ -1,0 +1,30 @@
+[extend]
+useDefault = true
+
+# mqvpn PSK = base64-encoded 32 bytes (output of `mqvpn --genkey`).
+# 43 base64 chars + '=' padding, inside a quoted string literal.
+[[rules]]
+id = "mqvpn-psk"
+description = "Hardcoded mqvpn PSK (32-byte base64 string literal)"
+regex = '''["']([A-Za-z0-9+/]{43}=)["']'''
+keywords = []
+
+[allowlist]
+description = "mqvpn allowlist"
+
+paths = [
+  '''^third_party/''',
+  '''^tests/certs/''',
+  '''^docs/superpowers/''',
+  '''^codeql-db/''',
+  '''^build/''',
+  '''^build-.*/''',
+  '''^android/sdk-native/prebuilt/''',
+]
+
+# Canonical mqvpn test PSK. Used as the documented example in README and as the
+# default value in the Android demo (ConnectScreen.kt). Treated as public.
+regexes = [
+  '''tiiUC0/Fx51w5XuxAnpOgdRZb19SLqglwFdhxbbsbnM=''',
+  '''mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=''',
+]
