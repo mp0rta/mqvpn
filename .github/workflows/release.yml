@@ -143,35 +143,7 @@ jobs:
 
       - name: Install libevent via vcpkg (Windows)
         if: matrix.os == 'windows'
-        shell: pwsh
-        run: |
-          $triplet = if ($env:MATRIX_ARCH -eq 'amd64') { 'x64-windows-static' } else { 'arm64-windows-static' }
-          # Diagnostic: log which vcpkg we're using and where it resolves its
-          # installed-packages root, then prove libevent's import lib actually
-          # lands on disk where the cmake toolchain step (below) will look.
-          # When this assertion fails, the next step's mqvpn cmake will fail
-          # with "libevent not found" — fail here instead so root cause is
-          # readable in the log.
-          Write-Host "vcpkg path: $((Get-Command vcpkg).Source)"
-          Write-Host "VCPKG_INSTALLATION_ROOT = $env:VCPKG_INSTALLATION_ROOT"
-          vcpkg install "libevent:$triplet"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $libDir = "$env:VCPKG_INSTALLATION_ROOT/installed/$triplet/lib"
-          Write-Host "Triplet lib dir: $libDir"
-          if (-not (Test-Path $libDir)) {
-            Write-Error "libevent install completed but '$libDir' does not exist; vcpkg install root differs from VCPKG_INSTALLATION_ROOT"
-            exit 1
-          }
-          $eventLibs = Get-ChildItem -Path $libDir -Filter 'event*.lib' -ErrorAction SilentlyContinue
-          if (-not $eventLibs) {
-            Write-Error "libevent install reported success but no event*.lib in $libDir; contents:"
-            Get-ChildItem $libDir | ForEach-Object { Write-Host "  $($_.Name)" }
-            exit 1
-          }
-          Write-Host "Found libevent libs:"
-          $eventLibs | ForEach-Object { Write-Host "  $($_.Name)" }
-        env:
-          MATRIX_ARCH: ${{ matrix.arch }}
+        run: vcpkg install libevent:${{ matrix.arch == 'amd64' && 'x64-windows-static' || 'arm64-windows-static' }}
 
       - name: Fetch and verify wintun (Windows)
         if: matrix.os == 'windows'
@@ -204,90 +176,43 @@ jobs:
 
       - name: Build BoringSSL (Windows)
         if: matrix.os == 'windows'
-        shell: pwsh
         run: |
-          # Windows ARM64: BoringSSL's CMake mis-routes ASM source selection
-          # and tries to link x86_64-apple ASM objects into the ARM64 build
-          # (LNK1181 on aes-gcm-avx2-x86_64-apple.obj). Disabling ASM
-          # (OPENSSL_NO_ASM=1) sidesteps the broken selection.
-          # TODO: this is a symptom-fix. The pinned BoringSSL commit
-          # (BORINGSSL_COMMIT in env block, May 2024) predates solid
-          # Windows-ARM64 ASM support. Revisit by either bumping the pin or
-          # passing a more specific arch hint, then drop OPENSSL_NO_ASM=1.
-          # Perf cost: ARM64 crypto runs without hand-tuned SHA/AES — ~2-3x
-          # slower TLS handshake throughput on this arch only. Acceptable
-          # for client use; not acceptable if/when we ship Windows server.
-          # NOTE: split into explicit if/else rather than PowerShell splat
-          # (`@extraArgs`) — splat to native exes splits `-DKEY=VAL` tokens
-          # on Windows ARM64 pwsh, breaking the cmake invocation.
-          Push-Location third_party/xquic/third_party/boringssl
-          mkdir build -Force | Out-Null
-          Push-Location build
-          if ($env:MATRIX_ARCH -eq 'arm64') {
-            cmake -G "Visual Studio 17 2022" -A ARM64 -DBUILD_SHARED_LIBS=0 -DOPENSSL_NO_ASM=1 ..
-          } else {
-            cmake -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=0 ..
-          }
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cd third_party/xquic/third_party/boringssl
+          mkdir build
+          cd build
+          cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
+            -DBUILD_SHARED_LIBS=0 `
+            ${{ matrix.arch == 'arm64' && '-DOPENSSL_NO_ASM=1' || '' }} ..
           cmake --build . --target ssl --config Release
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build . --target crypto --config Release
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Pop-Location; Pop-Location
-        env:
-          MATRIX_ARCH: ${{ matrix.arch }}
 
       - name: Build xquic (Windows)
         if: matrix.os == 'windows'
-        shell: pwsh
         run: |
-          $vsArch = if ($env:MATRIX_ARCH -eq 'amd64') { 'x64' } else { 'ARM64' }
-          # Use ${{ github.workspace }} forward-slash path (matches ci.yml:432).
-          Push-Location third_party/xquic
-          mkdir build -Force | Out-Null
-          Push-Location build
-          cmake -G "Visual Studio 17 2022" -A $vsArch `
+          cd third_party/xquic
+          mkdir build
+          cd build
+          cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
             -DCMAKE_BUILD_TYPE=Release `
             -DSSL_TYPE=boringssl `
             -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" `
             -DXQC_ENABLE_BBR2=ON `
             -DXQC_ENABLE_FEC=ON `
             -DXQC_ENABLE_XOR=ON ..
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build . --config Release
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Pop-Location; Pop-Location
-        env:
-          MATRIX_ARCH: ${{ matrix.arch }}
 
       - name: Build mqvpn (Windows)
         if: matrix.os == 'windows'
-        shell: pwsh
         run: |
-          $vsArch = if ($env:MATRIX_ARCH -eq 'amd64') { 'x64' } else { 'ARM64' }
-          $triplet = if ($env:MATRIX_ARCH -eq 'amd64') { 'x64-windows-static' } else { 'arm64-windows-static' }
-          # Diagnostic: prove the toolchain file is where we're going to point
-          # cmake. If this assertion fails we're done before invoking cmake.
-          $tc = "$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
-          Write-Host "Toolchain file: $tc (exists: $(Test-Path $tc))"
-          if (-not (Test-Path $tc)) {
-            Write-Error "vcpkg toolchain file missing — VCPKG_INSTALLATION_ROOT='$env:VCPKG_INSTALLATION_ROOT'"
-            exit 1
-          }
-          mkdir build -Force | Out-Null
-          Push-Location build
-          cmake -G "Visual Studio 17 2022" -A $vsArch `
+          mkdir build
+          cd build
+          cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
             -DCMAKE_BUILD_TYPE=Release `
             -DXQUIC_BUILD_DIR="${{ github.workspace }}/third_party/xquic/build/Release" `
             -DBORINGSSL_BUILD_DIR="${{ github.workspace }}/third_party/xquic/third_party/boringssl/build/Release" `
-            -DCMAKE_TOOLCHAIN_FILE="$tc" `
-            -DVCPKG_TARGET_TRIPLET=$triplet ..
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=${{ matrix.arch == 'amd64' && 'x64-windows-static' || 'arm64-windows-static' }} ..
           cmake --build . --config Release
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Pop-Location
-        env:
-          MATRIX_ARCH: ${{ matrix.arch }}
 
       - name: Smoke test mqvpn.exe (Windows)
         if: matrix.os == 'windows'
