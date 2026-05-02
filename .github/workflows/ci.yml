@@ -291,7 +291,7 @@ jobs:
           sudo apt-get install -y libevent-dev iptables
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: build
           path: build
@@ -330,7 +330,7 @@ jobs:
           sudo apt-get install -y libevent-dev iptables
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: build
           path: build
@@ -363,7 +363,7 @@ jobs:
           sudo apt-get install -y cmake libevent-dev iptables
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: build
           path: build
