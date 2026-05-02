@@ -216,8 +216,8 @@ datagram counters and uptime.
 | `n_clients`  | integer | Number of currently connected clients                          |
 | `bytes_tx`   | uint64  | Total bytes written to the TUN interface (server → clients)    |
 | `bytes_rx`   | uint64  | Total bytes read from the TUN interface (clients → server)     |
-| `dgram_sent` | uint64  | Total QUIC datagrams sent, all sessions                        |
-| `dgram_recv` | uint64  | Total QUIC datagrams received, all sessions                    |
+| `dgram_sent` | uint64  | QUIC datagrams the server successfully sent (xret == XQC_OK), all sessions |
+| `dgram_recv` | uint64  | QUIC datagrams the server forwarded to the TUN interface, all sessions. Excludes datagrams dropped before forwarding (TTL ≤ 1 → ICMP Time Exceeded, source-IP mismatch, malformed frame). |
 | `dgram_lost` | uint64  | Total QUIC datagrams declared lost, all sessions               |
 | `dgram_acked`| uint64  | Total QUIC datagrams acknowledged, all sessions                |
 | `uptime_sec` | uint64  | Seconds since `mqvpn_server_create` was called                 |
