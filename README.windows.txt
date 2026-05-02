@@ -10,10 +10,12 @@ Files in this archive (keep them together in one directory):
   wintun.dll             TUN device driver, runtime-loaded by mqvpn.exe
   LICENSE.wintun.txt     wintun's license terms
   README.windows.txt     this file
-  client.conf.example    sample client configuration
 
 Quick verification:
   .\mqvpn.exe --help
+
+Configuration example: see systemd/client.conf.example in the repo
+  https://github.com/mp0rta/mqvpn/blob/main/systemd/client.conf.example
 
 Note: only the client is supported on Windows. The server is Linux-only.
 

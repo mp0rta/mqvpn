@@ -289,7 +289,6 @@ jobs:
           Copy-Item "wintun-extract/wintun/bin/${env:MATRIX_ARCH}/wintun.dll" "$staging/"
           Copy-Item "wintun-extract/wintun/LICENSE.txt" "$staging/LICENSE.wintun.txt"
           Copy-Item "README.windows.txt" "$staging/"
-          Copy-Item "windows/client.conf.example" "$staging/"
           # Use explicit file list, NOT $staging/* glob. Compress-Archive's glob
           # behavior varies subtly across PowerShell versions and has historically
           # produced ZIPs with unexpected directory entries or dropped files near
@@ -299,8 +298,7 @@ jobs:
             "$staging/xquic.dll",
             "$staging/wintun.dll",
             "$staging/LICENSE.wintun.txt",
-            "$staging/README.windows.txt",
-            "$staging/client.conf.example"
+            "$staging/README.windows.txt"
           )
           Compress-Archive -Path $files -DestinationPath "mqvpn_${env:VERSION}_windows_${env:MATRIX_ARCH}.zip"
           Remove-Item -Recurse $staging
