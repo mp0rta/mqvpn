@@ -8,15 +8,20 @@ on:
 permissions:
   contents: write
 
+env:
+  WINTUN_VER: "0.14.1"
+  # Filled in Chunk 2; placeholder here lets Chunk 1 stand alone without
+  # blocking syntax-check, but Chunk 2 MUST replace it before any Windows run.
+  WINTUN_SHA256: "TODO_FILL_IN_CHUNK_2"
+  BORINGSSL_COMMIT: "9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c"
+
 jobs:
   build-release:
     strategy:
       matrix:
         include:
-          - arch: amd64
-            runner: ubuntu-latest
-          - arch: arm64
-            runner: ubuntu-24.04-arm
+          - { os: linux, arch: amd64, runner: ubuntu-latest }
+          - { os: linux, arch: arm64, runner: ubuntu-24.04-arm }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
@@ -25,6 +30,7 @@ jobs:
           submodules: recursive
 
       - name: Verify tag matches CMake version
+        shell: bash
         run: |
           CMAKE_VERSION=$(grep -oP 'project\(mqvpn VERSION \K[0-9.]+' CMakeLists.txt)
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
@@ -37,19 +43,22 @@ jobs:
           echo "VERSION=$CMAKE_VERSION" >> "$GITHUB_ENV"
 
       - name: Install dependencies
+        if: matrix.os == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake libevent-dev golang iptables
 
       - name: Clone BoringSSL (pinned)
+        if: matrix.os == 'linux'
         run: |
           BSSL_DIR=third_party/xquic/third_party/boringssl
           if [ ! -f "$BSSL_DIR/CMakeLists.txt" ]; then
             git clone https://github.com/google/boringssl.git "$BSSL_DIR"
           fi
-          cd "$BSSL_DIR" && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          cd "$BSSL_DIR" && git checkout ${{ env.BORINGSSL_COMMIT }}
 
       - name: Build BoringSSL
+        if: matrix.os == 'linux'
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
@@ -57,6 +66,7 @@ jobs:
           make -j$(nproc) ssl crypto
 
       - name: Build xquic
+        if: matrix.os == 'linux'
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
@@ -68,6 +78,7 @@ jobs:
           make -j$(nproc)
 
       - name: Build mqvpn
+        if: matrix.os == 'linux'
         run: |
           mkdir -p build && cd build
           cmake -DCMAKE_BUILD_TYPE=Release \
@@ -76,12 +87,15 @@ jobs:
           make -j$(nproc)
 
       - name: Unit tests
+        if: matrix.os == 'linux'
         run: cd build && ctest --output-on-failure
 
       - name: Build deb package
+        if: matrix.os == 'linux'
         run: cd build && cpack -G DEB
 
       - name: Generate tarball service files
+        if: matrix.os == 'linux'
         run: |
           mkdir -p build-tarball && cd build-tarball
           cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local \
@@ -89,6 +103,7 @@ jobs:
           # Only need the generated systemd files, not a full build
 
       - name: Create tarball
+        if: matrix.os == 'linux'
         run: |
           STAGING="mqvpn_${VERSION}_${{ matrix.arch }}"
           mkdir -p "$STAGING"/{bin,lib/mqvpn,systemd,etc/mqvpn}
@@ -104,6 +119,7 @@ jobs:
           rm -rf "$STAGING" build-tarball
 
       - name: Stage release artifacts
+        if: matrix.os == 'linux'
         run: cp build/mqvpn_*.deb .
 
       - name: Upload artifacts
