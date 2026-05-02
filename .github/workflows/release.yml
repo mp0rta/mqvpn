@@ -298,14 +298,21 @@ jobs:
       - name: Generate SHA256SUMS
         run: |
           cd artifacts
-          sha256sum mqvpn_*.tar.gz mqvpn_*.deb > SHA256SUMS
+          # nullglob so missing pattern → empty rather than the literal pattern
+          # passed to sha256sum (would fail "No such file or directory").
+          shopt -s nullglob
+          sha256sum mqvpn_*.tar.gz mqvpn_*.deb mqvpn_*.zip > SHA256SUMS
           cat SHA256SUMS
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          shopt -s nullglob
           VERSION="${GITHUB_REF_NAME#v}"
+          TARS=(artifacts/mqvpn_*.tar.gz)
+          DEBS=(artifacts/mqvpn_*.deb)
+          ZIPS=(artifacts/mqvpn_*.zip)
           # Body intentionally left empty — auto-generated notes are too noisy
           # (auto-sync upstream PRs, perf bench commits, etc. clutter the changelog).
           # Edit release notes manually after publish via GitHub UI or:
@@ -313,7 +320,6 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "mqvpn v${VERSION}" \
             --notes "" \
-            artifacts/mqvpn_*.tar.gz \
-            artifacts/mqvpn_*.deb \
+            "${TARS[@]}" "${DEBS[@]}" "${ZIPS[@]}" \
             artifacts/SHA256SUMS \
             scripts/install.sh
