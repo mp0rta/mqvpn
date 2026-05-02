@@ -145,13 +145,31 @@ jobs:
         if: matrix.os == 'windows'
         shell: pwsh
         run: |
-          # Match ci.yml line 407 verbatim: rely on `vcpkg` being on PATH (the
-          # runner image puts it there), no $env:VCPKG_INSTALLATION_ROOT
-          # qualifier. Mixing both has caused install-vs-find mismatch where
-          # vcpkg installed to one root but the toolchain file resolved a
-          # different one. Triplet matches ci.yml: x64-windows-static (/MT).
           $triplet = if ($env:MATRIX_ARCH -eq 'amd64') { 'x64-windows-static' } else { 'arm64-windows-static' }
+          # Diagnostic: log which vcpkg we're using and where it resolves its
+          # installed-packages root, then prove libevent's import lib actually
+          # lands on disk where the cmake toolchain step (below) will look.
+          # When this assertion fails, the next step's mqvpn cmake will fail
+          # with "libevent not found" — fail here instead so root cause is
+          # readable in the log.
+          Write-Host "vcpkg path: $((Get-Command vcpkg).Source)"
+          Write-Host "VCPKG_INSTALLATION_ROOT = $env:VCPKG_INSTALLATION_ROOT"
           vcpkg install "libevent:$triplet"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $libDir = "$env:VCPKG_INSTALLATION_ROOT/installed/$triplet/lib"
+          Write-Host "Triplet lib dir: $libDir"
+          if (-not (Test-Path $libDir)) {
+            Write-Error "libevent install completed but '$libDir' does not exist; vcpkg install root differs from VCPKG_INSTALLATION_ROOT"
+            exit 1
+          }
+          $eventLibs = Get-ChildItem -Path $libDir -Filter 'event*.lib' -ErrorAction SilentlyContinue
+          if (-not $eventLibs) {
+            Write-Error "libevent install reported success but no event*.lib in $libDir; contents:"
+            Get-ChildItem $libDir | ForEach-Object { Write-Host "  $($_.Name)" }
+            exit 1
+          }
+          Write-Host "Found libevent libs:"
+          $eventLibs | ForEach-Object { Write-Host "  $($_.Name)" }
         env:
           MATRIX_ARCH: ${{ matrix.arch }}
 
@@ -248,13 +266,21 @@ jobs:
         run: |
           $vsArch = if ($env:MATRIX_ARCH -eq 'amd64') { 'x64' } else { 'ARM64' }
           $triplet = if ($env:MATRIX_ARCH -eq 'amd64') { 'x64-windows-static' } else { 'arm64-windows-static' }
+          # Diagnostic: prove the toolchain file is where we're going to point
+          # cmake. If this assertion fails we're done before invoking cmake.
+          $tc = "$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          Write-Host "Toolchain file: $tc (exists: $(Test-Path $tc))"
+          if (-not (Test-Path $tc)) {
+            Write-Error "vcpkg toolchain file missing — VCPKG_INSTALLATION_ROOT='$env:VCPKG_INSTALLATION_ROOT'"
+            exit 1
+          }
           mkdir build -Force | Out-Null
           Push-Location build
           cmake -G "Visual Studio 17 2022" -A $vsArch `
             -DCMAKE_BUILD_TYPE=Release `
             -DXQUIC_BUILD_DIR="${{ github.workspace }}/third_party/xquic/build/Release" `
             -DBORINGSSL_BUILD_DIR="${{ github.workspace }}/third_party/xquic/third_party/boringssl/build/Release" `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DCMAKE_TOOLCHAIN_FILE="$tc" `
             -DVCPKG_TARGET_TRIPLET=$triplet ..
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build . --config Release
