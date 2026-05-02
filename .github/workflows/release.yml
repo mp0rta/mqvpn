@@ -145,24 +145,13 @@ jobs:
         if: matrix.os == 'windows'
         shell: pwsh
         run: |
-          # Diagnostic: VCPKG_INSTALLATION_ROOT is documented to be C:\vcpkg on
-          # the GitHub-hosted Windows runner image, but actions/runner-images
-          # issue #9269 records cases where it points at a VS-embedded vcpkg
-          # instead. Print the value so first-run failures are immediately
-          # readable.
-          Write-Host "VCPKG_INSTALLATION_ROOT = $env:VCPKG_INSTALLATION_ROOT"
-          if (-not (Test-Path "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe")) {
-            Write-Error "vcpkg.exe not found under $env:VCPKG_INSTALLATION_ROOT"
-            exit 1
-          }
-          # Match the existing .github/workflows/ci.yml triplet: x64-windows-static
-          # (and arm64-windows-static for ARM). These build libs against /MT
-          # (static CRT). The existing ci.yml has been working with this for
-          # the windows-latest test path, so divergence here would add
-          # gratuitous risk. Cost: the resulting mqvpn.exe is /MT (self-
-          # contained, no VC++ Redist needed) — README reflects this below.
+          # Match ci.yml line 407 verbatim: rely on `vcpkg` being on PATH (the
+          # runner image puts it there), no $env:VCPKG_INSTALLATION_ROOT
+          # qualifier. Mixing both has caused install-vs-find mismatch where
+          # vcpkg installed to one root but the toolchain file resolved a
+          # different one. Triplet matches ci.yml: x64-windows-static (/MT).
           $triplet = if ($env:MATRIX_ARCH -eq 'amd64') { 'x64-windows-static' } else { 'arm64-windows-static' }
-          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg" install "libevent:$triplet"
+          vcpkg install "libevent:$triplet"
         env:
           MATRIX_ARCH: ${{ matrix.arch }}
 
