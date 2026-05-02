@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
 
@@ -74,7 +74,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install runtime deps
         run: sudo apt-get update && sudo apt-get install -y libevent-dev iptables iproute2 iperf3
       - uses: actions/download-artifact@v8
@@ -104,7 +104,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install runtime deps
         run: sudo apt-get update && sudo apt-get install -y libevent-dev iptables iproute2 iperf3
       - uses: actions/download-artifact@v8
@@ -134,7 +134,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install runtime deps
         run: sudo apt-get update && sudo apt-get install -y libevent-dev iptables iproute2 iperf3
       - uses: actions/download-artifact@v8
@@ -164,7 +164,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install runtime deps
         run: sudo apt-get update && sudo apt-get install -y libevent-dev iptables iproute2 iperf3
       - uses: actions/download-artifact@v8
