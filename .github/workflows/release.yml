@@ -243,12 +243,34 @@ jobs:
         shell: pwsh
         run: |
           $staging = "mqvpn_${env:VERSION}_windows_${env:MATRIX_ARCH}"
+          $tpl = "$staging/THIRD_PARTY_LICENSES"
           New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          New-Item -ItemType Directory -Force -Path $tpl | Out-Null
+
           Copy-Item "build/Release/mqvpn.exe" "$staging/"
           Copy-Item "third_party/xquic/build/Release/xquic.dll" "$staging/"
           Copy-Item "wintun-extract/wintun/bin/${env:MATRIX_ARCH}/wintun.dll" "$staging/"
-          Copy-Item "wintun-extract/wintun/LICENSE.txt" "$staging/LICENSE.wintun.txt"
-          Copy-Item "README.windows.txt" "$staging/"
+          Copy-Item "packaging/windows/README.txt" "$staging/"
+
+          # Apache 2.0 §4(a) requires the License text to accompany binary
+          # distributions. mqvpn.exe (Apache 2.0) and xquic.dll (Apache 2.0,
+          # statically linking BoringSSL [Apache 2.0/ISC] and libevent
+          # [BSD-3-Clause]) all need their license text bundled. Wintun has
+          # its own license (separate copyright holder, WireGuard LLC).
+          # Neither xquic nor BoringSSL ship a NOTICE file upstream, so
+          # Apache 2.0 §4(d) NOTICE propagation is not triggered.
+          Copy-Item "LICENSE" "$staging/LICENSE"
+          Copy-Item "third_party/xquic/LICENSE" "$tpl/xquic.txt"
+          Copy-Item "third_party/xquic/third_party/boringssl/LICENSE" "$tpl/boringssl.txt"
+          Copy-Item "wintun-extract/wintun/LICENSE.txt" "$tpl/wintun.txt"
+          $triplet = if ($env:MATRIX_ARCH -eq 'amd64') { 'x64-windows-static' } else { 'arm64-windows-static' }
+          $libevent_lic = "$env:VCPKG_INSTALLATION_ROOT/installed/$triplet/share/libevent/copyright"
+          if (-not (Test-Path $libevent_lic)) {
+            Write-Error "libevent copyright not found at $libevent_lic — vcpkg layout may have changed"
+            exit 1
+          }
+          Copy-Item $libevent_lic "$tpl/libevent.txt"
+
           # Use explicit file list, NOT $staging/* glob. Compress-Archive's glob
           # behavior varies subtly across PowerShell versions and has historically
           # produced ZIPs with unexpected directory entries or dropped files near
@@ -257,8 +279,9 @@ jobs:
             "$staging/mqvpn.exe",
             "$staging/xquic.dll",
             "$staging/wintun.dll",
-            "$staging/LICENSE.wintun.txt",
-            "$staging/README.windows.txt"
+            "$staging/README.txt",
+            "$staging/LICENSE",
+            "$staging/THIRD_PARTY_LICENSES"
           )
           Compress-Archive -Path $files -DestinationPath "mqvpn_${env:VERSION}_windows_${env:MATRIX_ARCH}.zip"
           Remove-Item -Recurse $staging

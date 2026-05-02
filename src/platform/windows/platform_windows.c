@@ -23,6 +23,80 @@
 /* ── Global for Ctrl+C handler (single-instance) ── */
 static platform_win_ctx_t *g_signal_ctx = NULL;
 
+/*
+ * Pin a UDP socket's egress to a specific NIC by FriendlyName.
+ *
+ * Windows lacks SO_BINDTODEVICE; the equivalent is IP_UNICAST_IF (v4) /
+ * IPV6_UNICAST_IF (v6), which forces outbound packets through a given
+ * interface index. The OS then auto-selects the source IP from that NIC,
+ * and reply packets to that source land back on this socket via the same
+ * NIC, giving QUIC a unique 4-tuple per path.
+ *
+ * Returns 0 on success, -1 on any failure (caller logs and falls back to
+ * default route-table behavior — same as pre-implementation behavior).
+ *
+ * Byte-order quirk (MSDN): IP_UNICAST_IF takes the index in NETWORK byte
+ * order; IPV6_UNICAST_IF takes it in HOST byte order. This is asymmetric
+ * by design, not a bug — be careful when refactoring.
+ *
+ * FriendlyName is assumed to be UTF-8. Win11's default UTF-8 console
+ * passes Japanese names like "イーサネット" through correctly. CP932-only
+ * legacy consoles may garble non-ASCII names; in practice users on such
+ * setups should rename adapters to ASCII or use the GUID form.
+ */
+static int
+win_pin_socket_to_iface(int fd, const char *friendly_name, ADDRESS_FAMILY af)
+{
+    wchar_t wname[256];
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, friendly_name, -1, wname,
+                                   (int)(sizeof(wname) / sizeof(wname[0])));
+    if (wlen <= 0) {
+        LOG_WRN("MultiByteToWideChar('%s') failed: %lu", friendly_name, GetLastError());
+        return -1;
+    }
+
+    NET_LUID luid;
+    DWORD err = ConvertInterfaceAliasToLuid(wname, &luid);
+    if (err != NO_ERROR) {
+        LOG_WRN("ConvertInterfaceAliasToLuid('%s') failed: %lu (check "
+                "FriendlyName via Get-NetAdapter)",
+                friendly_name, err);
+        return -1;
+    }
+
+    NET_IFINDEX ifindex;
+    err = ConvertInterfaceLuidToIndex(&luid, &ifindex);
+    if (err != NO_ERROR) {
+        LOG_WRN("ConvertInterfaceLuidToIndex('%s') failed: %lu", friendly_name, err);
+        return -1;
+    }
+
+    if (af == AF_INET) {
+        DWORD ifindex_n = htonl((u_long)ifindex);
+        if (setsockopt((SOCKET)fd, IPPROTO_IP, IP_UNICAST_IF, (const char *)&ifindex_n,
+                       sizeof(ifindex_n)) != 0) {
+            LOG_WRN("setsockopt(IP_UNICAST_IF, '%s'/%lu): %d", friendly_name,
+                    (unsigned long)ifindex, WSAGetLastError());
+            return -1;
+        }
+    } else if (af == AF_INET6) {
+        DWORD ifindex_h = (DWORD)ifindex;
+        if (setsockopt((SOCKET)fd, IPPROTO_IPV6, IPV6_UNICAST_IF,
+                       (const char *)&ifindex_h, sizeof(ifindex_h)) != 0) {
+            LOG_WRN("setsockopt(IPV6_UNICAST_IF, '%s'/%lu): %d", friendly_name,
+                    (unsigned long)ifindex, WSAGetLastError());
+            return -1;
+        }
+    } else {
+        LOG_WRN("win_pin_socket_to_iface: unsupported family %d", (int)af);
+        return -1;
+    }
+
+    LOG_INF("path: pinned fd=%d to iface '%s' (ifindex=%lu)", fd, friendly_name,
+            (unsigned long)ifindex);
+    return 0;
+}
+
 /* ================================================================
  *  libmqvpn callbacks
  * ================================================================ */
@@ -387,6 +461,13 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     ctx.server_port = cfg->server_port;
     ctx.killswitch_enabled = cfg->kill_switch;
 
+    if (cfg->n_paths == 0) {
+        LOG_ERR("--path is required on Windows: specify at least one adapter "
+                "FriendlyName (e.g. --path \"Ethernet\"). "
+                "Run 'Get-NetAdapter' in PowerShell to list available adapters.");
+        return 1;
+    }
+
     /* TUN name */
     if (cfg->tun_name) {
         snprintf(ctx.tun_name_cfg, sizeof(ctx.tun_name_cfg), "%s", cfg->tun_name);
@@ -494,6 +575,17 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     /* Register paths with library and create socket events */
     for (int i = 0; i < ctx.path_mgr.n_paths; i++) {
         mqvpn_path_t *mp = &ctx.path_mgr.paths[i];
+
+        if (mp->iface[0]) {
+            if (win_pin_socket_to_iface(mp->fd, mp->iface, mp->local_addr.ss_family) <
+                0) {
+                LOG_WRN("path[%d] iface pin failed for '%s'; falling back to "
+                        "default route selection (multipath may not split "
+                        "across NICs)",
+                        i, mp->iface);
+            }
+        }
+
         mqvpn_path_desc_t desc = {0};
         desc.struct_size = sizeof(desc);
         desc.fd = mp->fd;

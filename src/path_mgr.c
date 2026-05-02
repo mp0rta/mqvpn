@@ -81,8 +81,10 @@ mqvpn_path_mgr_add(mqvpn_path_mgr_t *mgr, const char *iface,
     /* Bind to specific interface */
     if (iface && iface[0]) {
 #ifdef _WIN32
-        /* Windows: no SO_BINDTODEVICE — store iface name, actual binding
-         * to interface-specific IP is done by the platform layer. */
+        /* Windows: no SO_BINDTODEVICE. The iface name is stored here as a
+         * label; the platform layer (platform_windows.c) applies
+         * IP_UNICAST_IF / IPV6_UNICAST_IF after this returns to pin egress
+         * to the named NIC. */
 #else
         if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, iface, strlen(iface) + 1) < 0) {
             LOG_ERR("path_mgr: SO_BINDTODEVICE(%s): %s", iface, strerror(errno));
