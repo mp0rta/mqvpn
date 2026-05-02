@@ -47,7 +47,7 @@ static platform_win_ctx_t *g_signal_ctx = NULL;
 static int
 win_pin_socket_to_iface(int fd, const char *friendly_name, ADDRESS_FAMILY af)
 {
-    wchar_t wname[256];
+    wchar_t wname[IF_MAX_STRING_SIZE + 1];
     int wlen = MultiByteToWideChar(CP_UTF8, 0, friendly_name, -1, wname,
                                    (int)(sizeof(wname) / sizeof(wname[0])));
     if (wlen <= 0) {

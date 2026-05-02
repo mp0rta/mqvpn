@@ -149,10 +149,6 @@ jobs:
         if: matrix.os == 'windows'
         shell: pwsh
         run: |
-          if (-not $env:WINTUN_SHA256 -or $env:WINTUN_SHA256 -eq 'TODO_FILL_IN_CHUNK_2') {
-            Write-Error "WINTUN_SHA256 env var unset or still placeholder — fill in env block before running"
-            exit 1
-          }
           $zip = "wintun-${env:WINTUN_VER}.zip"
           Invoke-WebRequest -Uri "https://www.wintun.net/builds/$zip" -OutFile $zip
           $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
@@ -180,6 +176,11 @@ jobs:
           cd third_party/xquic/third_party/boringssl
           mkdir build
           cd build
+          # OPENSSL_NO_ASM=1 on ARM64: works around BoringSSL CMake bug at
+          # the pinned commit that mis-routes ASM source selection on
+          # Windows ARM64 (pulls in x86_64-apple obj → LNK1181). Trade-off:
+          # ARM64 falls back to C crypto, measurably slower than amd64 for
+          # AES-GCM / SHA. Revisit when bumping BORINGSSL_COMMIT.
           cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
             -DBUILD_SHARED_LIBS=0 `
             ${{ matrix.arch == 'arm64' && '-DOPENSSL_NO_ASM=1' || '' }} ..
