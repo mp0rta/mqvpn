@@ -850,6 +850,55 @@ TEST(drop_path_double_drop)
     mqvpn_client_destroy(c);
 }
 
+/* Internal accessor — used to verify the active-path fallback that
+ * cb_write_socket / get_fd_for_path rely on when the current primary
+ * slot has been dropped. */
+extern int mqvpn_client_first_active_fd(const mqvpn_client_t *c);
+
+TEST(first_active_fd_with_no_paths_is_minus_one)
+{
+    mqvpn_client_t *c = make_test_client();
+    ASSERT_EQ(mqvpn_client_first_active_fd(c), -1);
+    mqvpn_client_destroy(c);
+}
+
+TEST(first_active_fd_returns_only_path)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_desc_t d0 = {0};
+    snprintf(d0.iface, sizeof(d0.iface), "eth0");
+    mqvpn_path_handle_t h0 = mqvpn_client_add_path_fd(c, 10, &d0);
+    ASSERT_NE(h0, (mqvpn_path_handle_t)-1);
+    ASSERT_EQ(mqvpn_client_first_active_fd(c), 10);
+    mqvpn_client_destroy(c);
+}
+
+TEST(first_active_fd_skips_dropped_primary)
+{
+    mqvpn_client_t *c = make_test_client();
+
+    /* Two healthy paths */
+    mqvpn_path_desc_t d0 = {0};
+    snprintf(d0.iface, sizeof(d0.iface), "eth0");
+    mqvpn_path_handle_t h0 = mqvpn_client_add_path_fd(c, 10, &d0);
+    ASSERT_NE(h0, (mqvpn_path_handle_t)-1);
+
+    mqvpn_path_desc_t d1 = {0};
+    snprintf(d1.iface, sizeof(d1.iface), "wlan0");
+    mqvpn_path_handle_t h1 = mqvpn_client_add_path_fd(c, 11, &d1);
+    ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
+
+    /* Sanity: before drop, slot 0 is the answer */
+    ASSERT_EQ(mqvpn_client_first_active_fd(c), 10);
+
+    /* Drop the primary — its fd becomes stale.  The fallback must skip
+     * it and return the still-active slot's fd, NOT paths[0].fd. */
+    ASSERT_EQ(mqvpn_client_drop_path(c, h0), MQVPN_OK);
+    ASSERT_EQ(mqvpn_client_first_active_fd(c), 11);
+
+    mqvpn_client_destroy(c);
+}
+
 /* ── Path reactivation preconditions ── */
 
 TEST(reactivate_path_null_client)
@@ -969,6 +1018,9 @@ main(void)
     run_drop_path_invalid_handle();
     run_drop_path_sets_closed();
     run_drop_path_double_drop();
+    run_first_active_fd_with_no_paths_is_minus_one();
+    run_first_active_fd_returns_only_path();
+    run_first_active_fd_skips_dropped_primary();
 
     /* Path reactivation tests */
     run_reactivate_path_null_client();

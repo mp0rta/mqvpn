@@ -351,15 +351,38 @@ find_path_by_handle(mqvpn_client_t *c, mqvpn_path_handle_t h)
     return NULL;
 }
 
-/* Get fd for xquic path_id (primary fd fallback) */
+/* Returns the fd of the first active path slot, or -1 if none.
+ *
+ * cb_write_socket() (no path_id) and get_fd_for_path()'s fallback both
+ * use this when xquic asks for a write socket but the slot indexed by
+ * path_id is not currently usable.  The naive `paths[0].fd` fallback
+ * would otherwise hand back the fd of a path that was just dropped (see
+ * ysurac/mqvpn 654f598).  We search instead so a still-active sibling
+ * slot wins.
+ *
+ * Exported (non-static) so tests can verify the selection without
+ * driving xquic.  Test-only — not part of the libmqvpn public ABI;
+ * marked `hidden` so it does not show up in libmqvpn.so's dynamic
+ * symbol table, and gets a `_for_test` suffix + no public header. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_first_active_fd(const mqvpn_client_t *c)
+{
+    if (!c) return -1;
+    for (int i = 0; i < c->n_paths; i++)
+        if (c->paths[i].active) return c->paths[i].fd;
+    return -1;
+}
+
+/* Get fd for xquic path_id, falling back to the first active slot. */
 static int
 get_fd_for_path(mqvpn_client_t *c, uint64_t xqc_path_id)
 {
     path_entry_t *p = find_path_by_xqc_id(c, xqc_path_id);
     if (p) return p->fd;
-    /* Fallback to primary path */
-    if (c->n_paths > 0) return c->paths[0].fd;
-    return -1;
+    return mqvpn_client_first_active_fd(c);
 }
 
 /* ─── ICMP PTB rate limiter ─── */
@@ -497,7 +520,18 @@ cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *pe
 {
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
     mqvpn_client_t *c = conn->client;
-    int fd = (c->n_paths > 0) ? c->paths[0].fd : -1;
+    /* Pick the first still-active slot.  A naive `paths[0].fd` fallback
+     * would hand back the fd of a path that was just dropped (the
+     * platform may have already closed the descriptor or moved it onto a
+     * doomed interface). */
+    int active_idx = -1;
+    for (int i = 0; i < c->n_paths; i++) {
+        if (c->paths[i].active) {
+            active_idx = i;
+            break;
+        }
+    }
+    int fd = (active_idx >= 0) ? c->paths[active_idx].fd : -1;
     if (fd < 0) return XQC_SOCKET_ERROR;
 
     ssize_t res;
@@ -509,7 +543,7 @@ cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *pe
         return XQC_SOCKET_ERROR;
     }
     c->bytes_tx += (uint64_t)res;
-    if (c->n_paths > 0) c->paths[0].bytes_tx += (uint64_t)res;
+    c->paths[active_idx].bytes_tx += (uint64_t)res;
     return res;
 }
 
