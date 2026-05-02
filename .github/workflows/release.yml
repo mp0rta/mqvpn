@@ -32,7 +32,10 @@ jobs:
       - name: Verify tag matches CMake version
         shell: bash
         run: |
-          CMAKE_VERSION=$(grep -oP 'project\(mqvpn VERSION \K[0-9.]+' CMakeLists.txt)
+          # Use sed (BRE) instead of `grep -oP` because Git for Windows' grep
+          # rejects -P with the runner's default locale ("supports only unibyte
+          # and UTF-8 locales"). sed avoids the PCRE dependency entirely.
+          CMAKE_VERSION=$(sed -n 's/^project(mqvpn VERSION \([0-9.][0-9.]*\).*/\1/p' CMakeLists.txt)
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             TAG_VERSION="${GITHUB_REF_NAME#v}"
             if [ "$TAG_VERSION" != "$CMAKE_VERSION" ]; then
