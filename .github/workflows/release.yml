@@ -10,9 +10,7 @@ permissions:
 
 env:
   WINTUN_VER: "0.14.1"
-  # Filled in Chunk 2; placeholder here lets Chunk 1 stand alone without
-  # blocking syntax-check, but Chunk 2 MUST replace it before any Windows run.
-  WINTUN_SHA256: "TODO_FILL_IN_CHUNK_2"
+  WINTUN_SHA256: "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
   BORINGSSL_COMMIT: "9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c"
 
 jobs:
@@ -20,10 +18,12 @@ jobs:
     strategy:
       matrix:
         include:
-          - { os: linux, arch: amd64, runner: ubuntu-latest }
-          - { os: linux, arch: arm64, runner: ubuntu-24.04-arm }
+          - { os: linux,   arch: amd64, runner: ubuntu-latest    }
+          - { os: linux,   arch: arm64, runner: ubuntu-24.04-arm }
+          - { os: windows, arch: amd64, runner: windows-latest   }
+          - { os: windows, arch: arm64, runner: windows-11-arm   }
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -122,7 +122,200 @@ jobs:
         if: matrix.os == 'linux'
         run: cp build/mqvpn_*.deb .
 
+      - name: Setup MSVC dev environment (Windows)
+        if: matrix.os == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch == 'amd64' && 'x64' || 'arm64' }}
+
+      - name: Install NASM (Windows)
+        if: matrix.os == 'windows'
+        uses: ilammy/setup-nasm@v1
+
+      - name: Setup Go (Windows, BoringSSL build)
+        if: matrix.os == 'windows'
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Install libevent via vcpkg (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          # Diagnostic: VCPKG_INSTALLATION_ROOT is documented to be C:\vcpkg on
+          # the GitHub-hosted Windows runner image, but actions/runner-images
+          # issue #9269 records cases where it points at a VS-embedded vcpkg
+          # instead. Print the value so first-run failures are immediately
+          # readable.
+          Write-Host "VCPKG_INSTALLATION_ROOT = $env:VCPKG_INSTALLATION_ROOT"
+          if (-not (Test-Path "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe")) {
+            Write-Error "vcpkg.exe not found under $env:VCPKG_INSTALLATION_ROOT"
+            exit 1
+          }
+          # Match the existing .github/workflows/ci.yml triplet: x64-windows-static
+          # (and arm64-windows-static for ARM). These build libs against /MT
+          # (static CRT). The existing ci.yml has been working with this for
+          # the windows-latest test path, so divergence here would add
+          # gratuitous risk. Cost: the resulting mqvpn.exe is /MT (self-
+          # contained, no VC++ Redist needed) — README reflects this below.
+          $triplet = if ($env:MATRIX_ARCH -eq 'amd64') { 'x64-windows-static' } else { 'arm64-windows-static' }
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg" install "libevent:$triplet"
+        env:
+          MATRIX_ARCH: ${{ matrix.arch }}
+
+      - name: Fetch and verify wintun (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          if (-not $env:WINTUN_SHA256 -or $env:WINTUN_SHA256 -eq 'TODO_FILL_IN_CHUNK_2') {
+            Write-Error "WINTUN_SHA256 env var unset or still placeholder — fill in env block before running"
+            exit 1
+          }
+          $zip = "wintun-${env:WINTUN_VER}.zip"
+          Invoke-WebRequest -Uri "https://www.wintun.net/builds/$zip" -OutFile $zip
+          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $env:WINTUN_SHA256.ToLower()) {
+            Write-Error "wintun.zip sha256 mismatch: got $actual want $env:WINTUN_SHA256"
+            exit 1
+          }
+          Expand-Archive $zip -DestinationPath wintun-extract
+
+      - name: Clone BoringSSL (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $bssl = "third_party/xquic/third_party/boringssl"
+          if (-not (Test-Path "$bssl/CMakeLists.txt")) {
+            git clone https://github.com/google/boringssl.git $bssl
+          }
+          Push-Location $bssl
+          git checkout ${{ env.BORINGSSL_COMMIT }}
+          Pop-Location
+
+      - name: Build BoringSSL (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $vsArch = if ($env:MATRIX_ARCH -eq 'amd64') { 'x64' } else { 'ARM64' }
+          Push-Location third_party/xquic/third_party/boringssl
+          mkdir build -Force | Out-Null
+          Push-Location build
+          cmake -G "Visual Studio 17 2022" -A $vsArch -DBUILD_SHARED_LIBS=0 ..
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build . --target ssl --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build . --target crypto --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location; Pop-Location
+        env:
+          MATRIX_ARCH: ${{ matrix.arch }}
+
+      - name: Build xquic (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $vsArch = if ($env:MATRIX_ARCH -eq 'amd64') { 'x64' } else { 'ARM64' }
+          # Use ${{ github.workspace }} forward-slash path (matches ci.yml:432).
+          # Resolve-Path returns Windows-style backslashes, which cmake's
+          # downstream string operations sometimes mis-parse.
+          Push-Location third_party/xquic
+          mkdir build -Force | Out-Null
+          Push-Location build
+          cmake -G "Visual Studio 17 2022" -A $vsArch `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DSSL_TYPE=boringssl `
+            -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" `
+            -DXQC_ENABLE_BBR2=ON `
+            -DXQC_ENABLE_FEC=ON `
+            -DXQC_ENABLE_XOR=ON ..
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build . --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location; Pop-Location
+        env:
+          MATRIX_ARCH: ${{ matrix.arch }}
+
+      - name: Build mqvpn (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $vsArch = if ($env:MATRIX_ARCH -eq 'amd64') { 'x64' } else { 'ARM64' }
+          $triplet = if ($env:MATRIX_ARCH -eq 'amd64') { 'x64-windows-static' } else { 'arm64-windows-static' }
+          mkdir build -Force | Out-Null
+          Push-Location build
+          cmake -G "Visual Studio 17 2022" -A $vsArch `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DXQUIC_BUILD_DIR="${{ github.workspace }}/third_party/xquic/build/Release" `
+            -DBORINGSSL_BUILD_DIR="${{ github.workspace }}/third_party/xquic/third_party/boringssl/build/Release" `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=$triplet ..
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build . --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+        env:
+          MATRIX_ARCH: ${{ matrix.arch }}
+
+      - name: Unit tests + smoke (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          Push-Location build
+          ctest -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+          # ctest on Windows currently registers only the unit tests that
+          # Chunk 2's CMakeLists.txt change pulls out of the Linux-only branch.
+          # Guard against a regression where ctest passes vacuously by also
+          # running mqvpn.exe --help as a smoke step. Exit non-zero → fail.
+          $out = & "build/Release/mqvpn.exe" --help 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "mqvpn.exe --help exited $LASTEXITCODE; output: $out"
+            exit 1
+          }
+          if (-not ($out -match 'mqvpn')) {
+            Write-Error "mqvpn.exe --help output unexpected: $out"
+            exit 1
+          }
+
+      - name: Stage Windows release artifact
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $staging = "mqvpn_${env:VERSION}_windows_${env:MATRIX_ARCH}"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item "build/Release/mqvpn.exe" "$staging/"
+          Copy-Item "third_party/xquic/build/Release/xquic.dll" "$staging/"
+          Copy-Item "wintun-extract/wintun/bin/${env:MATRIX_ARCH}/wintun.dll" "$staging/"
+          Copy-Item "wintun-extract/wintun/LICENSE.txt" "$staging/LICENSE.wintun.txt"
+          Copy-Item "README.windows.txt" "$staging/"
+          Copy-Item "windows/client.conf.example" "$staging/"
+          # Use explicit file list, NOT $staging/* glob. Compress-Archive's glob
+          # behavior varies subtly across PowerShell versions and has historically
+          # produced ZIPs with unexpected directory entries or dropped files near
+          # path-length limits. Explicit list also serves as a manifest.
+          $files = @(
+            "$staging/mqvpn.exe",
+            "$staging/xquic.dll",
+            "$staging/wintun.dll",
+            "$staging/LICENSE.wintun.txt",
+            "$staging/README.windows.txt",
+            "$staging/client.conf.example"
+          )
+          Compress-Archive -Path $files -DestinationPath "mqvpn_${env:VERSION}_windows_${env:MATRIX_ARCH}.zip"
+          Remove-Item -Recurse $staging
+        env:
+          MATRIX_ARCH: ${{ matrix.arch }}
+
+      - name: Upload Windows artifacts
+        if: matrix.os == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-${{ matrix.arch }}
+          path: mqvpn_*_windows_${{ matrix.arch }}.zip
+
       - name: Upload artifacts
+        if: matrix.os == 'linux'
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.arch }}
