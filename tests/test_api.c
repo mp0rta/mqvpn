@@ -899,6 +899,79 @@ TEST(first_active_fd_skips_dropped_primary)
     mqvpn_client_destroy(c);
 }
 
+/* Internal helper — drives the state transition that client_activate_path()
+ * applies when xqc_conn_create_path() fails synchronously.  Without this
+ * the path stays in PENDING forever and tick_recover_degraded_path() never
+ * picks it up (issue #4271 Bug 1, ysurac/mqvpn 86c275c).
+ *
+ * Returns 0 on success, -1 if handle is not found. */
+extern int mqvpn_client_apply_path_activation_failure(mqvpn_client_t *c,
+                                                      mqvpn_path_handle_t handle,
+                                                      uint64_t now_us);
+
+TEST(activation_failure_first_retry_marks_degraded)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    /* Sanity: freshly added paths are PENDING. */
+    mqvpn_path_info_t info[2];
+    int n = 0;
+    mqvpn_client_get_paths(c, info, 2, &n);
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(info[0].status, MQVPN_PATH_PENDING);
+
+    /* Synthesise a synchronous activation failure. */
+    ASSERT_EQ(mqvpn_client_apply_path_activation_failure(c, h, 1000000), 0);
+
+    /* Path must transition to DEGRADED so tick_recover_degraded_path()
+     * can retry it; otherwise it would be stuck in PENDING forever. */
+    mqvpn_client_get_paths(c, info, 2, &n);
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(info[0].status, MQVPN_PATH_DEGRADED);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(activation_failure_invalid_handle_returns_error)
+{
+    mqvpn_client_t *c = make_test_client();
+    ASSERT_EQ(mqvpn_client_apply_path_activation_failure(c, 99999, 0), -1);
+    mqvpn_client_destroy(c);
+}
+
+TEST(activation_failure_eventually_closes_path)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    /* Hammer the failure path until the retry budget is exhausted.  We
+     * don't want the test to encode the exact PATH_RECREATE_MAX_RETRIES
+     * value, so we call enough times to overshoot any reasonable cap. */
+    mqvpn_path_info_t info[2];
+    int n = 0;
+    int closed = 0;
+    for (int i = 0; i < 32; i++) {
+        ASSERT_EQ(mqvpn_client_apply_path_activation_failure(c, h, 1000000), 0);
+        mqvpn_client_get_paths(c, info, 2, &n);
+        ASSERT_EQ(n, 1);
+        if (info[0].status == MQVPN_PATH_CLOSED) {
+            closed = 1;
+            break;
+        }
+        ASSERT_EQ(info[0].status, MQVPN_PATH_DEGRADED);
+    }
+    if (!closed) {
+        printf("FAIL\n    %s:%d: path never reached CLOSED after 32 failures\n", __FILE__,
+               __LINE__);
+        exit(1);
+    }
+
+    mqvpn_client_destroy(c);
+}
+
 /* ── Path reactivation preconditions ── */
 
 TEST(reactivate_path_null_client)
@@ -1021,6 +1094,9 @@ main(void)
     run_first_active_fd_with_no_paths_is_minus_one();
     run_first_active_fd_returns_only_path();
     run_first_active_fd_skips_dropped_primary();
+    run_activation_failure_first_retry_marks_degraded();
+    run_activation_failure_invalid_handle_returns_error();
+    run_activation_failure_eventually_closes_path();
 
     /* Path reactivation tests */
     run_reactivate_path_null_client();
