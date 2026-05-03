@@ -101,15 +101,19 @@ parse_host_port(const char *str, char *host, size_t host_len, int *port)
 
 /* mqvpn_copy_str is provided by json_mini.h as mqvpn_copy_str */
 
+/* xquic INFO emits per-packet logs (effectively DEBUG-grade noise that
+ * also tanks throughput on slow consoles like Windows PowerShell). Map
+ * mqvpn INFO -> xquic WARN so --log-level info shows mqvpn state without
+ * the per-packet flood; users who want xquic detail use --log-level debug. */
 static int
 map_log_level_to_xquic(mqvpn_log_level_t level)
 {
     switch (level) {
     case MQVPN_LOG_DEBUG: return XQC_LOG_DEBUG;
-    case MQVPN_LOG_INFO: return XQC_LOG_INFO;
+    case MQVPN_LOG_INFO: return XQC_LOG_WARN;
     case MQVPN_LOG_WARN: return XQC_LOG_WARN;
     case MQVPN_LOG_ERROR: return XQC_LOG_ERROR;
-    default: return XQC_LOG_INFO;
+    default: return XQC_LOG_WARN;
     }
 }
 
