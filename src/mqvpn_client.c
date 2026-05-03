@@ -1266,10 +1266,16 @@ cleanup:
 static int
 map_log_level_to_xquic(mqvpn_log_level_t level)
 {
-    /* xqc_log_level_t: REPORT=0, FATAL=1, ERROR=2, WARN=3, STATS=4, INFO=5, DEBUG=6 */
+    /* xqc_log_level_t: REPORT=0, FATAL=1, ERROR=2, WARN=3, STATS=4, INFO=5, DEBUG=6
+     *
+     * mqvpn INFO is intentionally mapped to xquic WARN (one tier lower).
+     * xquic INFO emits per-packet logs (effectively DEBUG-grade), which
+     * tanks throughput on slow consoles like Windows PowerShell. Shifting
+     * keeps --log-level info usable; users who want xquic detail use
+     * --log-level debug. Do not restore the 1:1 mapping. */
     switch (level) {
     case MQVPN_LOG_DEBUG: return XQC_LOG_DEBUG;
-    case MQVPN_LOG_INFO: return XQC_LOG_INFO;
+    case MQVPN_LOG_INFO: return XQC_LOG_WARN;
     case MQVPN_LOG_WARN: return XQC_LOG_WARN;
     case MQVPN_LOG_ERROR: return XQC_LOG_ERROR;
     default: return XQC_LOG_INFO;
