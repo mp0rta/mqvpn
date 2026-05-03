@@ -216,7 +216,18 @@ jobs:
             -DXQC_ENABLE_BBR2=ON `
             -DXQC_ENABLE_FEC=ON `
             -DXQC_ENABLE_XOR=ON ..
-          cmake --build . --config Release
+          # /verbosity:normal so cl.exe command lines appear in the log;
+          # tee for post-build inspection.
+          cmake --build . --config Release -- /verbosity:normal *>&1 | Tee-Object -FilePath build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Hard-fail if /std:c11 didn't reach the compiler. Without it MSVC
+          # silently truncates the 64-bit transport-param enum and multipath
+          # negotiation breaks at runtime — better to fail the build loud.
+          if (-not (Select-String -Path build.log -Pattern '/std:c11' -Quiet)) {
+            Write-Error "/std:c11 not detected in xquic build output — CMake C_STANDARD=11 did not propagate to MSVC. Multipath transport-param enum truncation will recur."
+            exit 1
+          }
+          Write-Host "OK: /std:c11 detected in xquic build"
 
       - name: Build mqvpn (Windows)
         if: matrix.os == 'windows'
