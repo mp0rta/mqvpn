@@ -221,7 +221,7 @@ jobs:
             -T ClangCL `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_C_STANDARD=11 `
-            -DCMAKE_C_FLAGS="-Wno-error=unknown-argument -Wno-error=unused-command-line-argument" `
+            -DCMAKE_C_FLAGS="-Wno-error=unknown-argument -Wno-error=unused-command-line-argument -Wno-error=unknown-warning-option" `
             -DSSL_TYPE=boringssl `
             -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" `
             -DXQC_ENABLE_BBR2=ON `
