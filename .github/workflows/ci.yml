@@ -427,8 +427,13 @@ jobs:
           cd third_party/xquic
           mkdir build
           cd build
+          # CMAKE_C_STANDARD=11: xquic's MSVC enum-truncation patch uses
+          # _Static_assert (C11), and xquic upstream targets gnu11. Without
+          # /std:c11 cl.exe falls back to its pre-C11 dialect and the
+          # _Static_assert lines fail to compile.
           cmake -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_STANDARD=11 `
             -DSSL_TYPE=boringssl `
             -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" `
             -DXQC_ENABLE_BBR2=ON `
@@ -440,8 +445,10 @@ jobs:
         run: |
           mkdir build
           cd build
+          # Same C11 reasoning as the xquic build, kept consistent.
           cmake -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_STANDARD=11 `
             -DXQUIC_BUILD_DIR="${{ github.workspace }}/third_party/xquic/build/Release" `
             -DBORINGSSL_BUILD_DIR="${{ github.workspace }}/third_party/xquic/third_party/boringssl/build/Release" `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
