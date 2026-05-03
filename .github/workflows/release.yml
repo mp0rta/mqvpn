@@ -210,6 +210,8 @@ jobs:
           # is MSVC-ABI compatible but follows C11 enum-widening, so xquic
           # internals see the full 64-bit values. BoringSSL stays on cl.exe
           # (kept for its ASM toolchain), linkage is fine across toolsets.
+          # Fallback if this approach proves fragile: see fork branch
+          # mp0rta/xquic fix/msvc-enum-truncation (header patch).
           #
           # CMAKE_C_FLAGS workaround for xquic's GCC-only flags:
           # mqvpn's Linux clang sanitizer CI (ci.yml) needs only
@@ -232,14 +234,16 @@ jobs:
           # tee for post-build inspection.
           cmake --build . --config Release -- /verbosity:normal *>&1 | Tee-Object -FilePath build.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # Hard-fail if /std:c11 didn't reach the compiler. Without it MSVC
+          # Hard-fail if C11 didn't reach the compiler. Without it MSVC
           # silently truncates the 64-bit transport-param enum and multipath
           # negotiation breaks at runtime — better to fail the build loud.
-          if (-not (Select-String -Path build.log -Pattern '/std:c11' -Quiet)) {
-            Write-Error "/std:c11 not detected in xquic build output — CMake C_STANDARD=11 did not propagate to MSVC. Multipath transport-param enum truncation will recur."
+          # Accept either /std:c11 (MSVC syntax) or -std=c11 (GCC syntax)
+          # since clang-cl may log either form depending on driver mode.
+          if (-not (Select-String -Path build.log -Pattern '(/std:c11|-std=c11)' -Quiet)) {
+            Write-Error "C11 standard not detected in xquic build output — CMake C_STANDARD=11 did not propagate. Multipath transport-param enum truncation will recur."
             exit 1
           }
-          Write-Host "OK: /std:c11 detected in xquic build"
+          Write-Host "OK: C11 standard detected in xquic build"
 
       - name: Build mqvpn (Windows)
         if: matrix.os == 'windows'
@@ -247,7 +251,9 @@ jobs:
           mkdir build
           cd build
           # ClangCL: same reasoning as the xquic build — keep toolset
-          # consistent with the xquic.dll we link against.
+          # consistent with the xquic.dll we link against. No CMAKE_C_FLAGS
+          # workaround needed here: only xquic's CMakeLists injects GCC-only
+          # flags; mqvpn's own CMakeLists is clang-cl-clean.
           cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
             -T ClangCL `
             -DCMAKE_BUILD_TYPE=Release `
