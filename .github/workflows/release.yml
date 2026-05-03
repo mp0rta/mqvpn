@@ -206,8 +206,15 @@ jobs:
           cd third_party/xquic
           mkdir build
           cd build
+          # CMAKE_C_STANDARD=11: xquic upstream targets gnu11 (CMakeLists adds
+          # -std=gnu11 for GCC/Clang). cl.exe ignores that GCC-style flag, so
+          # we explicitly request /std:c11 to match the intended dialect.
+          # Does not fix the 64-bit enum issue (cl.exe always uses int as
+          # enum underlying type regardless of /std:c11) — that's handled by
+          # the xquic submodule patch (see fix/msvc-enum-truncation).
           cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
             -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_STANDARD=11 `
             -DSSL_TYPE=boringssl `
             -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" `
             -DXQC_ENABLE_BBR2=ON `
@@ -220,8 +227,11 @@ jobs:
         run: |
           mkdir build
           cd build
+          # Same C11 reasoning as the xquic build, kept consistent across
+          # the two CMake invocations.
           cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
             -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_STANDARD=11 `
             -DXQUIC_BUILD_DIR="${{ github.workspace }}/third_party/xquic/build/Release" `
             -DBORINGSSL_BUILD_DIR="${{ github.workspace }}/third_party/xquic/third_party/boringssl/build/Release" `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
