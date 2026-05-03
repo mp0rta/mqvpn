@@ -216,18 +216,24 @@ jobs:
           # Fallback if this approach proves fragile: see fork branch
           # mp0rta/xquic fix/msvc-enum-truncation (header patch).
           #
-          # CMAKE_C_FLAGS=-Wno-error: xquic injects -Werror into CMAKE_C_FLAGS
-          # for its own CI's strict-build intent. clang-cl is more pedantic
-          # than cl.exe (reserved-macro-identifier, language-extension-token,
-          # nonportable-system-include-path, microsoft-enum-value, etc.) so
-          # those would all become hard errors. We're a downstream consumer,
-          # not xquic's QA; cancel -Werror entirely for this build. Real C
-          # standard still comes from CMAKE_C_STANDARD=11.
+          # CMAKE_C_FLAGS workaround: xquic injects -Werror into CMAKE_C_FLAGS
+          # for its own CI's strict-build intent. clang-cl is far more pedantic
+          # than cl.exe so we have to demote each warning category xquic's
+          # source/flags trip. -Wno-error=X (specific override) is used rather
+          # than -Wno-error (blanket): the latter is order-dependent and our
+          # flags come BEFORE xquic's appended -Werror, which then re-enables
+          # globally. Specific -Wno-error=X overrides survive that.
+          # Categories below cover xquic's GCC-flag use AND content-level
+          # Clang strictness (reserved names, MSVC extensions, etc.).
+          # Note: microsoft-enum-value is the warning that fires when a >int
+          # enum value forces underlying-type widening — we WANT it to fire
+          # (proves the multipath transport-param IDs are widened) just not
+          # to be fatal. Real C standard comes from CMAKE_C_STANDARD=11.
           cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
             -T ClangCL `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_C_STANDARD=11 `
-            -DCMAKE_C_FLAGS="-Wno-error" `
+            -DCMAKE_C_FLAGS="-Wno-error=unknown-argument -Wno-error=unknown-warning-option -Wno-error=unused-command-line-argument -Wno-error=reserved-macro-identifier -Wno-error=microsoft-enum-value -Wno-error=language-extension-token -Wno-error=nonportable-system-include-path -Wno-error=documentation -Wno-error=macro-redefined" `
             -DSSL_TYPE=boringssl `
             -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" `
             -DXQC_ENABLE_BBR2=ON `
