@@ -82,7 +82,8 @@ mqvpn_tun_win_create(mqvpn_tun_win_t *tun, const char *dev_name)
     snprintf(tun->name, sizeof(tun->name), "%s", name);
 
     WCHAR wname[256];
-    MultiByteToWideChar(CP_UTF8, 0, name, -1, wname, 256);
+    /* argv is in system ANSI code page (CP_ACP); see platform_windows.c. */
+    MultiByteToWideChar(CP_ACP, 0, name, -1, wname, 256);
 
     /* Create adapter */
     GUID guid;

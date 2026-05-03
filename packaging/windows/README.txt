@@ -77,9 +77,6 @@ Notes and limitations
 ---------------------
   - Only the client is supported on Windows. The server is Linux-only.
   - --path is required on Windows (specify at least one adapter).
-  - On legacy CP932-only consoles, non-ASCII adapter names may be garbled
-    during interface lookup; rename the adapter to ASCII or run from a
-    UTF-8 capable terminal (Windows Terminal / PowerShell 7+).
   - ARM64 builds use software-only crypto (BoringSSL ASM disabled due to
     an upstream CMake issue at the pinned version). VPN throughput on
     ARM64 may be lower than on amd64 for AES-heavy workloads.

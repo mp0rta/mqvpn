@@ -39,10 +39,11 @@ static platform_win_ctx_t *g_signal_ctx = NULL;
  * order; IPV6_UNICAST_IF takes it in HOST byte order. This is asymmetric
  * by design, not a bug — be careful when refactoring.
  *
- * FriendlyName is assumed to be UTF-8. Win11's default UTF-8 console
- * passes Japanese names like "イーサネット" through correctly. CP932-only
- * legacy consoles may garble non-ASCII names; in practice users on such
- * setups should rename adapters to ASCII or use the GUID form.
+ * FriendlyName comes from argv; MSVC's CRT gives argv strings in the
+ * system ANSI code page (CP_ACP), not UTF-8. CP_ACP also equals CP_UTF8
+ * when "Use Unicode UTF-8 for worldwide language support" is enabled in
+ * Region settings, so this works in both default JP/CN/etc systems and
+ * UTF-8-enabled systems.
  *
  * Internal log level is WRN; the caller decides whether failure is fatal.
  */
@@ -50,7 +51,7 @@ static int
 win_pin_socket_to_iface(int fd, const char *friendly_name, ADDRESS_FAMILY af)
 {
     wchar_t wname[IF_MAX_STRING_SIZE + 1];
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, friendly_name, -1, wname,
+    int wlen = MultiByteToWideChar(CP_ACP, 0, friendly_name, -1, wname,
                                    (int)(sizeof(wname) / sizeof(wname[0])));
     if (wlen <= 0) {
         LOG_WRN("MultiByteToWideChar('%s') failed: %lu", friendly_name, GetLastError());
