@@ -211,17 +211,18 @@ jobs:
           # internals see the full 64-bit values. BoringSSL stays on cl.exe
           # (kept for its ASM toolchain), linkage is fine across toolsets.
           #
-          # CMAKE_C_FLAGS workaround: xquic CMakeLists unconditionally adds
-          # GCC-style flags (-std=gnu11 etc.) without checking for clang-cl
-          # MSVC-driver mode. clang-cl rejects unknown args as warnings, and
-          # xquic also injects -Werror, turning them into hard errors. Demote
-          # unknown-argument to non-error so the build proceeds; the actual
-          # C standard comes from CMAKE_C_STANDARD=11 (MSVC-style /std:c11).
+          # CMAKE_C_FLAGS workaround for xquic's GCC-only flags:
+          # mqvpn's Linux clang sanitizer CI (ci.yml) needs only
+          # -Wno-unknown-warning-option to handle xquic's -Wno-dangling-pointer.
+          # On clang-cl (MSVC-driver mode) we additionally need:
+          #   -Wno-unknown-argument            for -std=gnu11
+          #   -Wno-unused-command-line-argument for -O2 vs /O2 redundancy
+          # Real C standard comes from CMAKE_C_STANDARD=11 (clang-cl /std:c11).
           cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
             -T ClangCL `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_C_STANDARD=11 `
-            -DCMAKE_C_FLAGS="-Wno-error=unknown-argument -Wno-error=unused-command-line-argument -Wno-error=unknown-warning-option" `
+            -DCMAKE_C_FLAGS="-Wno-unknown-warning-option -Wno-unknown-argument -Wno-unused-command-line-argument" `
             -DSSL_TYPE=boringssl `
             -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" `
             -DXQC_ENABLE_BBR2=ON `
