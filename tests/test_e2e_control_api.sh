@@ -1,10 +1,12 @@
 #!/bin/bash
 # test_e2e_control_api.sh — end-to-end test for the v0.4.0 server control API.
 #
-# Verifies all 5 control commands (add_user / remove_user / list_users / get_stats /
-# get_status), the --status CLI, security boundaries (bind addr, malformed input,
-# max-users, max-conns), restart resilience, and a scheduler smoke pass across
-# minrtt / wlb / backup_fec.
+# Verifies all 7 control commands (add_user / remove_user / list_users / get_stats /
+# get_status / get_build_info / get_fec_stats), the --status CLI, security
+# boundaries (bind addr, malformed input, max-users, max-conns), restart
+# resilience, a scheduler smoke pass across minrtt / wlb / backup_fec, and
+# the extended get_stats wire format (dgram_*, uptime_sec) plus get_fec_stats
+# 3-outcome tolerance.
 #
 # REQUIRES:
 #   - root (TUN + netns)
@@ -111,6 +113,27 @@ except Exception:
     sys.exit(1)
 sys.exit(0 if d.get(sys.argv[2]) == expected else 1)
 PY
+}
+
+# jget <field>: read top-level field from stdin JSON.
+# Booleans → 'true'/'false' (lowercase, NOT Python's 'True'/'False').
+# Numbers and strings → bare value. Missing field → empty string.
+# Field must be a scalar; nested dicts/lists are printed as Python repr,
+# which won't match clean string comparisons — fine for current wire shape
+# where all top-level fields are scalars.
+# The field name is passed via sys.argv (not string-interpolated) to avoid
+# shell injection if a caller ever feeds it a dynamic value.
+jget() {
+    python3 -c "
+import sys, json
+v = json.loads(sys.stdin.read()).get(sys.argv[1], '')
+if isinstance(v, bool):
+    print('true' if v else 'false')
+elif v is None:
+    print('')
+else:
+    print(v)
+" -- "$1"
 }
 
 # assert_json_users_eq <response> <comma-separated user list>  → ignores order
@@ -971,6 +994,87 @@ test_phase_f_scheduler_smoke() {
     return 0
 }
 
+test_phase_g_new_commands() {
+    # Reuses the server left running by an earlier phase (no per-phase
+    # teardown). If `ctrl_local` returns "server may be dead" here, fix the
+    # phase ordering rather than this test.
+    echo "--- Phase G: get_build_info ---"
+    local RESP
+    RESP=$(ctrl_local '{"cmd":"get_build_info"}')
+    assert_json_field "$RESP" ok true        || { echo "FAIL G: ok"; return 1; }
+    local VER SCHED FECE
+    VER=$(echo "$RESP" | jget version)
+    SCHED=$(echo "$RESP" | jget scheduler)
+    FECE=$(echo "$RESP" | jget fec_enabled)
+    [[ -n "$VER" ]]                          || { echo "FAIL G: empty version"; return 1; }
+    case "$SCHED" in minrtt|wlb|backup_fec|unknown) ;; *)
+        echo "FAIL G: unexpected scheduler=$SCHED"; return 1 ;;
+    esac
+    case "$FECE" in 0|1) ;; *) echo "FAIL G: fec_enabled=$FECE"; return 1 ;; esac
+
+    echo "--- Phase G': get_stats extended fields ---"
+    RESP=$(ctrl_local '{"cmd":"get_stats"}')
+    assert_json_field "$RESP" ok true        || { echo "FAIL G': ok"; return 1; }
+    for k in n_clients bytes_tx bytes_rx dgram_sent dgram_recv dgram_lost dgram_acked uptime_sec; do
+        local v
+        v=$(echo "$RESP" | jget "$k")
+        [[ -n "$v" ]] || { echo "FAIL G': missing $k in $RESP"; return 1; }
+    done
+    # If a client is connected (any earlier phase that left an active session),
+    # traffic has been driven, so dgram_sent and dgram_recv should be non-zero.
+    # This catches the "fields present but always 0" regression class.
+    local NC DSENT DRECV UP
+    NC=$(echo "$RESP"    | jget n_clients)
+    DSENT=$(echo "$RESP" | jget dgram_sent)
+    DRECV=$(echo "$RESP" | jget dgram_recv)
+    UP=$(echo "$RESP"    | jget uptime_sec)
+    if [[ "$NC" -gt 0 ]]; then
+        [[ "$DSENT" -gt 0 ]] || { echo "FAIL G': dgram_sent=0 with $NC clients connected ($RESP)"; return 1; }
+        [[ "$DRECV" -gt 0 ]] || { echo "FAIL G': dgram_recv=0 with $NC clients connected ($RESP)"; return 1; }
+    fi
+    [[ "$UP" -gt 0 ]] || { echo "FAIL G': uptime_sec=0 ($RESP)"; return 1; }
+
+    echo "--- Phase H: get_fec_stats — accept all three valid outcomes ---"
+    # Order-independent test. Acceptable outcomes for user="alice":
+    #   1. ok=true with all fields  (alice connected, FEC built)
+    #   2. error="user not found"   (alice disconnected, FEC built)
+    #   3. error="fec not built"    (FEC missing from build)
+    RESP=$(ctrl_local '{"cmd":"get_fec_stats","user":"alice"}')
+    local OK ERR
+    OK=$(echo "$RESP" | jget ok)
+    ERR=$(echo "$RESP" | jget error)
+    if [[ "$OK" == "true" ]]; then
+        local k v
+        for k in user enable_fec mp_state fec_send_cnt fec_recover_cnt \
+                 lost_dgram_cnt total_app_bytes standby_app_bytes; do
+            v=$(echo "$RESP" | jget "$k")
+            [[ -n "$v" ]] || { echo "FAIL H: missing $k in $RESP"; return 1; }
+        done
+        [[ "$(echo "$RESP" | jget user)" == "alice" ]] \
+            || { echo "FAIL H: user mismatch in $RESP"; return 1; }
+    elif [[ "$ERR" == "user not found" || "$ERR" == "fec not built" ]]; then
+        echo "INFO H: $ERR (ok-path not exercised this run)"
+    else
+        echo "FAIL H: unexpected response $RESP"; return 1
+    fi
+
+    echo "--- Phase H': error paths ---"
+    # Always-known-invalid user → "user not found" or "fec not built"
+    RESP=$(ctrl_local '{"cmd":"get_fec_stats","user":"definitely-not-a-user-zzz"}')
+    ERR=$(echo "$RESP" | jget error)
+    case "$ERR" in
+        "user not found"|"fec not built") ;;
+        *) echo "FAIL H' nobody: got $RESP"; return 1 ;;
+    esac
+
+    # Missing user arg → always "user required"
+    RESP=$(ctrl_local '{"cmd":"get_fec_stats"}')
+    [[ "$(echo "$RESP" | jget error)" == "user required" ]] \
+        || { echo "FAIL H' missing-arg: got $RESP"; return 1; }
+
+    return 0
+}
+
 # --- Main runner ---
 
 # (empty for this chunk; phases will be wired in their own chunks)
@@ -989,6 +1093,7 @@ run_test "phase_c user lifecycle (immediate-revoke)" test_phase_c_lifecycle
 run_test "phase_d security & robustness" test_phase_d_security
 run_test "phase_e restart resilience" test_phase_e_restart
 run_test "phase_f scheduler matrix smoke" test_phase_f_scheduler_smoke
+run_test "phase_g new commands (build_info + extended get_stats + fec_stats)" test_phase_g_new_commands
 
 echo ""
 echo "================================================================"

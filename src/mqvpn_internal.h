@@ -56,4 +56,49 @@ int mqvpn_state_transition_valid(mqvpn_client_state_t from, mqvpn_client_state_t
  * level filtering and connection-id prefixing consistent. */
 bool mqvpn_check_scheduler_preconditions(mqvpn_scheduler_t scheduler, int n_paths);
 
+/* ── Internal accessors (NOT in public libmqvpn.h) ────────────────── */
+
+/* MQVPN_INTERNAL marks symbols that are shared across translation units in
+ * libmqvpn but MUST NOT be exported in libmqvpn.so's dynamic symbol table.
+ * Compilers that support visibility attributes (gcc/clang on ELF) hide them;
+ * other toolchains fall back to default linkage (acceptable: such builds
+ * would not have a symbols-file ABI contract anyway). Keeping these out of
+ * the export table prevents Debian dpkg-gensymbols (and similar) from
+ * picking them up as part of libmqvpn0's stable ABI. */
+#if defined(__GNUC__) || defined(__clang__)
+#  define MQVPN_INTERNAL __attribute__((visibility("hidden")))
+#else
+#  define MQVPN_INTERNAL
+#endif
+
+/* Returns "minrtt" / "wlb" / "backup_fec" / "unknown" — caller-owned static
+ * string, do not free. Used by control_socket.c for get_build_info JSON. */
+MQVPN_INTERNAL const char *mqvpn_server_scheduler_label(const mqvpn_server_t *s);
+
+/* Seconds since the server was booted (mqvpn_server_create). */
+MQVPN_INTERNAL uint64_t mqvpn_server_uptime_seconds(const mqvpn_server_t *s);
+
+/* Snapshot of FEC / multipath counters for one client.
+ * INTERNAL — not in public libmqvpn.h. Field widths chosen to safely accept
+ * either uint32_t or uint64_t xquic counters now or in the future. */
+typedef struct {
+    uint8_t enable_fec;
+    uint8_t mp_state;
+    uint64_t fec_send_cnt;    /* widened from xquic uint32_t */
+    uint64_t fec_recover_cnt; /* widened from xquic uint32_t */
+    uint64_t lost_dgram_cnt;  /* widened from xquic uint32_t */
+    uint64_t total_app_bytes;
+    uint64_t standby_app_bytes;
+} mqvpn_internal_fec_stats_t;
+
+/* Returns:
+ *   1  -> out filled with the user's FEC stats
+ *   0  -> user has no active (tunnel-established) session
+ *  -1  -> mqvpn was built without XQC_ENABLE_FEC, OR a NULL arg was passed
+ *        (caller-bug case is folded into "unavailable" so 0 always means
+ *         "user not found", never "internal error") */
+MQVPN_INTERNAL int mqvpn_server_get_client_fec_stats(const mqvpn_server_t *s,
+                                                     const char *user,
+                                                     mqvpn_internal_fec_stats_t *out);
+
 #endif /* MQVPN_INTERNAL_H */

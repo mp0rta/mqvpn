@@ -8,17 +8,28 @@
  *   {"cmd":"list_users"}
  *   {"cmd":"get_stats"}
  *   {"cmd":"get_status"}
+ *   {"cmd":"get_build_info"}
+ *   {"cmd":"get_fec_stats","user":"alice"}
  *
  * Responses:
  *   {"ok":true}
  *   {"ok":false,"error":"<reason>"}
  *   {"ok":true,"users":["alice","bob"]}
- *   {"ok":true,"n_clients":2,"bytes_tx":12345,"bytes_rx":6789}
+ *   {"ok":true,"n_clients":N,"bytes_tx":X,"bytes_rx":Y,
+ *    "dgram_sent":S,"dgram_recv":R,"dgram_lost":L,"dgram_acked":A,
+ *    "uptime_sec":U}
+ *   {"ok":true,"version":"0.4.0","scheduler":"backup_fec","fec_enabled":1}
+ *   {"ok":true,"user":"alice","enable_fec":1,"mp_state":1,
+ *    "fec_send_cnt":142,"fec_recover_cnt":17,"lost_dgram_cnt":23,
+ *    "total_app_bytes":9123456,"standby_app_bytes":421337}
  */
 
 #include "control_socket.h"
 #include "json_mini.h"
 #include "log.h"
+#include "mqvpn_internal.h" /* mqvpn_server_scheduler_label,
+                               mqvpn_internal_fec_stats_t,
+                               mqvpn_server_get_client_fec_stats */
 
 #include <stdlib.h>
 #include <string.h>
@@ -33,10 +44,13 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
-#define CTRL_MAX_REQ          4096
-#define CTRL_MAX_RESP         4096
-#define CTRL_MAX_CONNS        8 /* max concurrent control connections */
-#define CTRL_READ_TIMEOUT_SEC 5 /* close idle connections after 5s */
+#define CTRL_MAX_REQ          4096 /* per-connection request buffer */
+#define CTRL_MAX_CONNS        8    /* max concurrent control connections */
+#define CTRL_READ_TIMEOUT_SEC 5    /* close idle connections after 5s */
+/* Maximum response size. Worst-case get_status with MQVPN_MAX_USERS=64 and
+ * MQVPN_MAX_PATHS=4 produces ~105 KB; round up to 128 KB and re-check the
+ * math if either limit grows. */
+#define CTRL_MAX_RESP_BYTES (128 * 1024)
 
 /* JSON helpers (json_find_key → json_find_key, json_read_string → json_read_string)
  * are provided by json_mini.h */
@@ -120,13 +134,19 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
         return snprintf(resp, resp_len, "{\"ok\":true,\"users\":%s}", users);
 
     } else if (strcmp(cmd, "get_stats") == 0) {
-        mqvpn_stats_t st;
+        mqvpn_stats_t st = {0};
+        st.struct_size = sizeof(st);
         mqvpn_server_get_stats(server, &st);
         int nc = mqvpn_server_get_n_clients(server);
+        uint64_t uptime = mqvpn_server_uptime_seconds(server);
         return snprintf(resp, resp_len,
                         "{\"ok\":true,\"n_clients\":%d,"
-                        "\"bytes_tx\":%" PRIu64 ",\"bytes_rx\":%" PRIu64 "}",
-                        nc, st.bytes_tx, st.bytes_rx);
+                        "\"bytes_tx\":%" PRIu64 ",\"bytes_rx\":%" PRIu64 ","
+                        "\"dgram_sent\":%" PRIu64 ",\"dgram_recv\":%" PRIu64 ","
+                        "\"dgram_lost\":%" PRIu64 ",\"dgram_acked\":%" PRIu64 ","
+                        "\"uptime_sec\":%" PRIu64 "}",
+                        nc, st.bytes_tx, st.bytes_rx, st.dgram_sent, st.dgram_recv,
+                        st.dgram_lost, st.dgram_acked, uptime);
 
     } else if (strcmp(cmd, "get_status") == 0) {
         mqvpn_client_info_t clients[MQVPN_MAX_USERS];
@@ -138,7 +158,7 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
         if (gettimeofday(&tv, NULL) == 0)
             now = (uint64_t)tv.tv_sec * 1000000 + (uint64_t)tv.tv_usec;
 
-        char buf[16384];
+        char buf[CTRL_MAX_RESP_BYTES];
         int pos = 0;
         int w;
         pos += snprintf(buf, sizeof(buf), "{\"ok\":true,\"n_clients\":%d,\"clients\":[",
@@ -190,6 +210,50 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
         if (w > 0 && (size_t)(pos + w) < sizeof(buf)) pos += w;
 
         return snprintf(resp, resp_len, "%.*s", pos, buf);
+
+    } else if (strcmp(cmd, "get_build_info") == 0) {
+        const char *ver = mqvpn_version_string();
+        const char *sched = mqvpn_server_scheduler_label(server);
+#ifdef XQC_ENABLE_FEC
+        int fec_enabled = 1;
+#else
+        int fec_enabled = 0;
+#endif
+        return snprintf(resp, resp_len,
+                        "{\"ok\":true,\"version\":\"%s\","
+                        "\"scheduler\":\"%s\",\"fec_enabled\":%d}",
+                        ver ? ver : "unknown", sched, fec_enabled);
+
+    } else if (strcmp(cmd, "get_fec_stats") == 0) {
+        char user[64] = {0};
+        const char *uv = json_find_key(req, "user");
+        if (!uv || json_read_string(uv, user, sizeof(user)) < 0)
+            return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"user required\"}");
+
+        mqvpn_internal_fec_stats_t fs;
+        int rc = mqvpn_server_get_client_fec_stats(server, user, &fs);
+        if (rc < 0)
+            return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"fec not built\"}");
+        if (rc == 0)
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"user not found\"}");
+
+        /* `user` is echoed without explicit JSON-escape: mqvpn_server_add_user
+         * and add_user_entry reject quote, backslash, and control bytes at
+         * intake (src/auth.c), so any user that survived to the sessions[]
+         * table cannot produce JSON-unsafe output here. If a future code path
+         * registers users via an unvalidated source (e.g., LDAP bridge), this
+         * point must add a JSON-safe escape pass. */
+        return snprintf(resp, resp_len,
+                        "{\"ok\":true,\"user\":\"%s\","
+                        "\"enable_fec\":%u,\"mp_state\":%u,"
+                        "\"fec_send_cnt\":%" PRIu64 ",\"fec_recover_cnt\":%" PRIu64 ","
+                        "\"lost_dgram_cnt\":%" PRIu64 ","
+                        "\"total_app_bytes\":%" PRIu64 ","
+                        "\"standby_app_bytes\":%" PRIu64 "}",
+                        user, (unsigned)fs.enable_fec, (unsigned)fs.mp_state,
+                        fs.fec_send_cnt, fs.fec_recover_cnt, fs.lost_dgram_cnt,
+                        fs.total_app_bytes, fs.standby_app_bytes);
 
     } else {
         return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"unknown cmd\"}");
@@ -267,9 +331,20 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
 
     conn->req[conn->req_len] = '\0';
 
-    char resp[16384];
+    char resp[CTRL_MAX_RESP_BYTES];
     int rlen = dispatch(conn->req, resp, sizeof(resp) - 2, conn->cs->server);
-    if (rlen > 0) {
+    if (rlen <= 0) {
+        /* dispatch failed to format anything — close silently. */
+    } else if ((size_t)rlen >= sizeof(resp) - 2) {
+        /* snprintf would have truncated. Send a small error JSON instead so the
+         * client doesn't see a malformed body, and emit a warning. */
+        static const char too_large[] =
+            "{\"ok\":false,\"error\":\"response too large\"}\n";
+        (void)write(fd, too_large, sizeof(too_large) - 1);
+        LOG_WRN(
+            "control: dispatch response truncated (would have been %d bytes, max %zu)",
+            rlen, sizeof(resp) - 2);
+    } else {
         resp[rlen] = '\n';
         resp[rlen + 1] = '\0';
         (void)write(fd, resp, (size_t)rlen + 1);

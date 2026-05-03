@@ -179,6 +179,8 @@ sudo systemctl enable --now mqvpn-client@home
 
 A running server can be managed at runtime over a TCP port using newline-delimited JSON.
 
+Control API: see [docs/control-api.md](docs/control-api.md) for the full wire-protocol reference (all 7 commands, request/response schemas, error strings).
+
 ### Enable
 
 ```bash

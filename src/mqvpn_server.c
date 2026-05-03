@@ -127,6 +127,15 @@ struct mqvpn_server_s {
     uint64_t bytes_tx;
     uint64_t bytes_rx;
 
+    /* Server-wide datagram counters (aggregated across all sessions). */
+    uint64_t dgram_sent;
+    uint64_t dgram_recv;
+    uint64_t dgram_lost;
+    uint64_t dgram_acked;
+    /* Set ONCE in mqvpn_server_create after calloc; never re-written.
+     * mqvpn_server_uptime_seconds() uses (now_us() - boot_us) / 1e6. */
+    uint64_t boot_us;
+
     /* Log filtering */
     mqvpn_log_level_t log_level;
 
@@ -144,6 +153,17 @@ struct mqvpn_server_s {
 };
 
 /* ─── Helpers ─── */
+
+static const char *
+mqvpn_scheduler_label(int s)
+{
+    switch (s) {
+    case MQVPN_SCHED_MINRTT: return "minrtt";
+    case MQVPN_SCHED_WLB: return "wlb";
+    case MQVPN_SCHED_BACKUP_FEC: return "backup_fec";
+    default: return "unknown";
+    }
+}
 
 static uint64_t
 now_us(void)
@@ -270,7 +290,9 @@ send_icmp_via_datagram(const uint8_t *pkt, size_t len, void *ctx)
                                                  conn->masque_stream_id, pkt, len);
     if (xret == XQC_OK) {
         uint64_t dgram_id;
-        xqc_h3_ext_datagram_send(conn->h3_conn, frame, fw, &dgram_id, XQC_DATA_QOS_LOW);
+        xqc_int_t sret = xqc_h3_ext_datagram_send(conn->h3_conn, frame, fw, &dgram_id,
+                                                  XQC_DATA_QOS_LOW);
+        if (sret == XQC_OK) conn->server->dgram_sent++;
     }
 }
 
@@ -991,6 +1013,7 @@ cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *u
     }
 
     s->bytes_rx += payload_len;
+    s->dgram_recv++;
     s->cbs.tun_output(fwd_pkt, payload_len, s->user_ctx);
 }
 
@@ -1013,7 +1036,10 @@ cb_dgram_acked(xqc_h3_conn_t *h, uint64_t id, void *ud)
     (void)h;
     (void)id;
     svr_conn_t *conn = (svr_conn_t *)ud;
-    if (conn) conn->dgram_acked_cnt++;
+    if (conn) {
+        conn->dgram_acked_cnt++;
+        conn->server->dgram_acked++;
+    }
 }
 
 static int
@@ -1024,6 +1050,7 @@ cb_dgram_lost(xqc_h3_conn_t *h, uint64_t id, void *ud)
     if (!conn) return 0;
     mqvpn_server_t *s = conn->server;
     conn->dgram_lost_cnt++;
+    conn->server->dgram_lost++;
     if ((conn->dgram_lost_cnt % 256) == 0) {
         LOG_W(s,
               "datagram loss: lost=%" PRIu64 " acked=%" PRIu64 " (last_dgram_id=%" PRIu64
@@ -1066,6 +1093,7 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     s->udp_fd = -1;
     s->max_clients = cfg->max_clients > 0 ? cfg->max_clients : 64;
     s->ptb_tokens = PTB_RATE_LIMIT;
+    s->boot_us = now_us();
 
     /* Initialize address pool */
     if (cfg->subnet[0] == '\0') {
@@ -1433,6 +1461,7 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
         LOG_D(s, "TUN read paused (QUIC backpressure)");
         return MQVPN_ERR_AGAIN;
     }
+    if (xret == XQC_OK) s->dgram_sent++;
     if (xret < 0) {
         LOG_D(s, "datagram_send: %d", xret);
     }
@@ -1463,7 +1492,65 @@ mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *out)
     out->struct_size = sizeof(*out);
     out->bytes_tx = s->bytes_tx;
     out->bytes_rx = s->bytes_rx;
+    out->dgram_sent = s->dgram_sent;
+    out->dgram_recv = s->dgram_recv;
+    out->dgram_lost = s->dgram_lost;
+    out->dgram_acked = s->dgram_acked;
     return MQVPN_OK;
+}
+
+uint64_t
+mqvpn_server_uptime_seconds(const mqvpn_server_t *s)
+{
+    if (!s) return 0;
+    uint64_t cur = now_us();
+    if (cur <= s->boot_us) return 0;
+    return (cur - s->boot_us) / 1000000;
+}
+
+const char *
+mqvpn_server_scheduler_label(const mqvpn_server_t *s)
+{
+    if (!s) return "unknown";
+    return mqvpn_scheduler_label(s->config.scheduler);
+}
+
+int
+mqvpn_server_get_client_fec_stats(const mqvpn_server_t *s, const char *user,
+                                  mqvpn_internal_fec_stats_t *out)
+{
+    /* NULL args are caller bugs. Map to -1 so the caller doesn't confuse them
+     * with the legitimate "user not found" sentinel (0). */
+    if (!s || !user || !out) return -1;
+    memset(out, 0, sizeof(*out));
+
+#ifndef XQC_ENABLE_FEC
+    (void)s;
+    (void)user;
+    return -1;
+#else
+    /* sessions[] is a sparse pointer array; iterate non-null slots. Skip
+     * connections that haven't completed the MASQUE tunnel — xqc_conn_get_stats
+     * returns zeroed counters for half-attached conns, which would falsely
+     * report (1, all-zero) and pollute the Prometheus output. Same guard as
+     * mqvpn_server_get_client_info. */
+    for (int i = 1; i <= MQVPN_ADDR_POOL_MAX; i++) {
+        svr_conn_t *conn = s->sessions[i];
+        if (!conn || !conn->tunnel_established) continue;
+        if (strncmp(conn->username, user, sizeof(conn->username)) != 0) continue;
+
+        xqc_conn_stats_t st = xqc_conn_get_stats(s->engine, &conn->cid);
+        out->enable_fec = (uint8_t)st.enable_fec;
+        out->mp_state = (uint8_t)st.mp_state;
+        out->fec_send_cnt = (uint64_t)st.send_fec_cnt;
+        out->fec_recover_cnt = (uint64_t)st.fec_recover_pkt_cnt;
+        out->lost_dgram_cnt = (uint64_t)st.lost_dgram_count;
+        out->total_app_bytes = st.total_app_bytes;
+        out->standby_app_bytes = st.standby_path_app_bytes;
+        return 1;
+    }
+    return 0;
+#endif
 }
 
 int
