@@ -203,8 +203,14 @@ jobs:
           cd third_party/xquic
           mkdir build
           cd build
+          # C11 required: xquic's transport-param enum holds 64-bit IDs
+          # (e.g. XQC_TRANSPORT_PARAM_INIT_MAX_PATH_ID_V10=0x0f739bbc1b666d09).
+          # MSVC's default (pre-C11) mode truncates enum constants to int,
+          # which breaks multipath_version negotiation. C11 forces standard-
+          # compliant enum-type widening.
           cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
             -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_STANDARD=11 `
             -DSSL_TYPE=boringssl `
             -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" `
             -DXQC_ENABLE_BBR2=ON `
