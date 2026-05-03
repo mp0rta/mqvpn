@@ -196,6 +196,12 @@ fail:
     win_cleanup_dns(p);
     if (p->tun.adapter) mqvpn_tun_win_destroy(&p->tun);
     p->tun_up = 0;
+    /* Tunnel-setup failures here (TUN create, addr/MTU, routes, killswitch,
+     * reader thread, event registration) are local-side problems that
+     * reconnecting won't fix. Mark fatal so the event loop exits non-zero
+     * once the disconnect-induced state change reaches CLOSED. */
+    p->fatal_error = 1;
+    p->shutting_down = 1;
     mqvpn_client_disconnect(p->client);
 }
 
@@ -624,7 +630,7 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
     LOG_INF("entering event loop...");
     event_base_dispatch(ctx.eb);
-    rc = 0;
+    rc = ctx.fatal_error ? 1 : 0;
 
 cleanup:
     SetConsoleCtrlHandler(console_ctrl_handler, FALSE);

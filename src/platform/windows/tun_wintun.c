@@ -89,7 +89,13 @@ mqvpn_tun_win_create(mqvpn_tun_win_t *tun, const char *dev_name)
     CoCreateGuid(&guid);
     tun->adapter = WintunCreateAdapter(wname, L"mqvpn", &guid);
     if (!tun->adapter) {
-        LOG_ERR("WintunCreateAdapter failed (error %lu)", GetLastError());
+        DWORD err = GetLastError();
+        const char *hint = "";
+        if (err == ERROR_ACCESS_DENIED) {
+            hint = " — run as Administrator (right-click PowerShell -> Run as "
+                   "Administrator)";
+        }
+        LOG_ERR("WintunCreateAdapter failed (error %lu)%s", err, hint);
         return -1;
     }
 
