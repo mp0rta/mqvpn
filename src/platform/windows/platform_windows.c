@@ -43,6 +43,8 @@ static platform_win_ctx_t *g_signal_ctx = NULL;
  * passes Japanese names like "イーサネット" through correctly. CP932-only
  * legacy consoles may garble non-ASCII names; in practice users on such
  * setups should rename adapters to ASCII or use the GUID form.
+ *
+ * Internal log level is WRN; the caller decides whether failure is fatal.
  */
 static int
 win_pin_socket_to_iface(int fd, const char *friendly_name, ADDRESS_FAMILY af)

@@ -145,6 +145,8 @@ jobs:
         if: matrix.os == 'windows'
         run: vcpkg install libevent:${{ matrix.arch == 'amd64' && 'x64-windows-static' || 'arm64-windows-static' }}
 
+      # Cache key includes WINTUN_SHA256, so a hit implies the verified
+      # bytes — no re-verify on hit (trusts GitHub Actions cache integrity).
       - name: Cache wintun
         if: matrix.os == 'windows'
         id: cache-wintun
