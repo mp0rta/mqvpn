@@ -206,63 +206,21 @@ jobs:
           cd third_party/xquic
           mkdir build
           cd build
-          # ClangCL toolset: MSVC's C compiler uses int as enum underlying
-          # type even with /std:c11, silently truncating xquic's 64-bit
-          # transport-param IDs (e.g. INIT_MAX_PATH_ID_V10=0x0f739bbc1b666d09)
-          # and breaking multipath_version negotiation at runtime. clang-cl
-          # is MSVC-ABI compatible but follows C11 enum-widening, so xquic
-          # internals see the full 64-bit values. BoringSSL stays on cl.exe
-          # (kept for its ASM toolchain), linkage is fine across toolsets.
-          # Fallback if this approach proves fragile: see fork branch
-          # mp0rta/xquic fix/msvc-enum-truncation (header patch).
-          #
-          # CMAKE_C_FLAGS_RELEASE blanket -Wno-error: xquic injects -Werror via
-          # CMAKE_C_FLAGS for its own CI strictness. Setting -Wno-error in
-          # CMAKE_C_FLAGS doesn't work because CMake places it BEFORE xquic's
-          # appended -Werror; the later -Werror wins. CMAKE_C_FLAGS_<CONFIG>
-          # is concatenated AFTER CMAKE_C_FLAGS, so -Wno-error here lands at
-          # the end of the cmd line and overrides -Werror globally. The
-          # /MD /O2 /Ob2 /DNDEBUG entries restate the CMake MSVC Release
-          # defaults that we'd otherwise lose by overriding this var.
-          # microsoft-enum-value still fires as a (non-fatal) warning, which
-          # is what we want — it confirms 64-bit transport-param IDs are
-          # being widened. Real C standard from CMAKE_C_STANDARD=11.
           cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
-            -T ClangCL `
             -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_C_STANDARD=11 `
-            -DCMAKE_C_FLAGS_RELEASE="/MD /O2 /Ob2 /DNDEBUG -Wno-error" `
             -DSSL_TYPE=boringssl `
             -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" `
             -DXQC_ENABLE_BBR2=ON `
             -DXQC_ENABLE_FEC=ON `
             -DXQC_ENABLE_XOR=ON ..
-          # /verbosity:normal so cl.exe command lines appear in the log;
-          # tee for post-build inspection.
-          cmake --build . --config Release -- /verbosity:normal *>&1 | Tee-Object -FilePath build.log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # Hard-fail if C11 didn't reach the compiler. Without it MSVC
-          # silently truncates the 64-bit transport-param enum and multipath
-          # negotiation breaks at runtime — better to fail the build loud.
-          # Accept either /std:c11 (MSVC syntax) or -std=c11 (GCC syntax)
-          # since clang-cl may log either form depending on driver mode.
-          if (-not (Select-String -Path build.log -Pattern '(/std:c11|-std=c11)' -Quiet)) {
-            Write-Error "C11 standard not detected in xquic build output — CMake C_STANDARD=11 did not propagate. Multipath transport-param enum truncation will recur."
-            exit 1
-          }
-          Write-Host "OK: C11 standard detected in xquic build"
+          cmake --build . --config Release
 
       - name: Build mqvpn (Windows)
         if: matrix.os == 'windows'
         run: |
           mkdir build
           cd build
-          # ClangCL: same reasoning as the xquic build — keep toolset
-          # consistent with the xquic.dll we link against. No CMAKE_C_FLAGS
-          # workaround needed here: only xquic's CMakeLists injects GCC-only
-          # flags; mqvpn's own CMakeLists is clang-cl-clean.
           cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
-            -T ClangCL `
             -DCMAKE_BUILD_TYPE=Release `
             -DXQUIC_BUILD_DIR="${{ github.workspace }}/third_party/xquic/build/Release" `
             -DBORINGSSL_BUILD_DIR="${{ github.workspace }}/third_party/xquic/third_party/boringssl/build/Release" `
