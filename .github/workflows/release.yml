@@ -216,24 +216,22 @@ jobs:
           # Fallback if this approach proves fragile: see fork branch
           # mp0rta/xquic fix/msvc-enum-truncation (header patch).
           #
-          # CMAKE_C_FLAGS workaround: xquic injects -Werror into CMAKE_C_FLAGS
-          # for its own CI's strict-build intent. clang-cl is far more pedantic
-          # than cl.exe so we have to demote each warning category xquic's
-          # source/flags trip. -Wno-error=X (specific override) is used rather
-          # than -Wno-error (blanket): the latter is order-dependent and our
-          # flags come BEFORE xquic's appended -Werror, which then re-enables
-          # globally. Specific -Wno-error=X overrides survive that.
-          # Categories below cover xquic's GCC-flag use AND content-level
-          # Clang strictness (reserved names, MSVC extensions, etc.).
-          # Note: microsoft-enum-value is the warning that fires when a >int
-          # enum value forces underlying-type widening — we WANT it to fire
-          # (proves the multipath transport-param IDs are widened) just not
-          # to be fatal. Real C standard comes from CMAKE_C_STANDARD=11.
+          # CMAKE_C_FLAGS_RELEASE blanket -Wno-error: xquic injects -Werror via
+          # CMAKE_C_FLAGS for its own CI strictness. Setting -Wno-error in
+          # CMAKE_C_FLAGS doesn't work because CMake places it BEFORE xquic's
+          # appended -Werror; the later -Werror wins. CMAKE_C_FLAGS_<CONFIG>
+          # is concatenated AFTER CMAKE_C_FLAGS, so -Wno-error here lands at
+          # the end of the cmd line and overrides -Werror globally. The
+          # /MD /O2 /Ob2 /DNDEBUG entries restate the CMake MSVC Release
+          # defaults that we'd otherwise lose by overriding this var.
+          # microsoft-enum-value still fires as a (non-fatal) warning, which
+          # is what we want — it confirms 64-bit transport-param IDs are
+          # being widened. Real C standard from CMAKE_C_STANDARD=11.
           cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
             -T ClangCL `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_C_STANDARD=11 `
-            -DCMAKE_C_FLAGS="-Wno-error=unknown-argument -Wno-error=unknown-warning-option -Wno-error=unused-command-line-argument -Wno-error=reserved-macro-identifier -Wno-error=microsoft-enum-value -Wno-error=language-extension-token -Wno-error=nonportable-system-include-path -Wno-error=documentation -Wno-error=macro-redefined" `
+            -DCMAKE_C_FLAGS_RELEASE="/MD /O2 /Ob2 /DNDEBUG -Wno-error" `
             -DSSL_TYPE=boringssl `
             -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" `
             -DXQC_ENABLE_BBR2=ON `
