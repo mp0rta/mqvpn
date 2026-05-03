@@ -585,10 +585,10 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
         if (mp->iface[0]) {
             if (win_pin_socket_to_iface(mp->fd, mp->iface, mp->local_addr.ss_family) <
                 0) {
-                LOG_WRN("path[%d] iface pin failed for '%s'; falling back to "
-                        "default route selection (multipath may not split "
-                        "across NICs)",
+                LOG_ERR("path[%d] iface pin failed for '%s'; --path values must be "
+                        "valid adapter FriendlyNames as listed by Get-NetAdapter",
                         i, mp->iface);
+                goto cleanup;
             }
         }
 
