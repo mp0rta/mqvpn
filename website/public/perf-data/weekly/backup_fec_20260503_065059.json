@@ -1,0 +1,50 @@
+{
+  "test": "backup_fec",
+  "metadata": {
+    "commit": "31880ecbe19d5163daa790db80004e856b5204ad",
+    "kernel": "6.8.0-110-generic",
+    "date": "2026-05-03T06:50:59+00:00"
+  },
+  "results": [
+    {
+      "scheduler": "wlb",
+      "loss_pct": 1,
+      "throughput_mbps_median": 104.9
+    },
+    {
+      "scheduler": "wlb",
+      "loss_pct": 3,
+      "throughput_mbps_median": 97.0
+    },
+    {
+      "scheduler": "wlb",
+      "loss_pct": 5,
+      "throughput_mbps_median": 106.7
+    },
+    {
+      "scheduler": "wlb",
+      "loss_pct": 10,
+      "throughput_mbps_median": 91.2
+    },
+    {
+      "scheduler": "backup_fec",
+      "loss_pct": 1,
+      "throughput_mbps_median": 85.6
+    },
+    {
+      "scheduler": "backup_fec",
+      "loss_pct": 3,
+      "throughput_mbps_median": 60.5
+    },
+    {
+      "scheduler": "backup_fec",
+      "loss_pct": 5,
+      "throughput_mbps_median": 36.8
+    },
+    {
+      "scheduler": "backup_fec",
+      "loss_pct": 10,
+      "throughput_mbps_median": 17.2
+    }
+  ]
+}
