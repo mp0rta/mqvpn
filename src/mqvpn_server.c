@@ -291,8 +291,14 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
     mqvpn_server_t *s = (mqvpn_server_t *)user_data;
     if (!s->cbs.log) return;
 
-    /* Map xquic levels (xqc_log_level_t): REPORT=0, FATAL=1, ERROR=2,
-     * WARN=3, STATS=4, INFO=5, DEBUG=6 */
+    /* Reverse map: xquic→mqvpn for display severity. xquic enum is
+     * REPORT=0, FATAL=1, ERROR=2, WARN=3, STATS=4, INFO=5, DEBUG=6.
+     * This is intentionally NOT the inverse of the forward map below
+     * (the engine-threshold setting near the bottom of this file) — the
+     * forward map shifts INFO→WARN to suppress xquic's per-packet noise
+     * at the engine level; this reverse map keeps incoming severity
+     * honest so a real xquic warning is shown as a warning, not
+     * relabelled as INFO. Don't symmetrize the two. */
     mqvpn_log_level_t ml;
     switch (lvl) {
     case XQC_LOG_REPORT:
