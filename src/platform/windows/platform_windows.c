@@ -23,6 +23,83 @@
 /* ── Global for Ctrl+C handler (single-instance) ── */
 static platform_win_ctx_t *g_signal_ctx = NULL;
 
+/*
+ * Pin a UDP socket's egress to a specific NIC by FriendlyName.
+ *
+ * Windows lacks SO_BINDTODEVICE; the equivalent is IP_UNICAST_IF (v4) /
+ * IPV6_UNICAST_IF (v6), which forces outbound packets through a given
+ * interface index. The OS then auto-selects the source IP from that NIC,
+ * and reply packets to that source land back on this socket via the same
+ * NIC, giving QUIC a unique 4-tuple per path.
+ *
+ * Returns 0 on success, -1 on any failure (caller logs and falls back to
+ * default route-table behavior — same as pre-implementation behavior).
+ *
+ * Byte-order quirk (MSDN): IP_UNICAST_IF takes the index in NETWORK byte
+ * order; IPV6_UNICAST_IF takes it in HOST byte order. This is asymmetric
+ * by design, not a bug — be careful when refactoring.
+ *
+ * FriendlyName comes from argv; MSVC's CRT gives argv strings in the
+ * system ANSI code page (CP_ACP), not UTF-8. CP_ACP also equals CP_UTF8
+ * when "Use Unicode UTF-8 for worldwide language support" is enabled in
+ * Region settings, so this works in both default JP/CN/etc systems and
+ * UTF-8-enabled systems.
+ *
+ * Internal log level is WRN; the caller decides whether failure is fatal.
+ */
+static int
+win_pin_socket_to_iface(int fd, const char *friendly_name, ADDRESS_FAMILY af)
+{
+    wchar_t wname[IF_MAX_STRING_SIZE + 1];
+    int wlen = MultiByteToWideChar(CP_ACP, 0, friendly_name, -1, wname,
+                                   (int)(sizeof(wname) / sizeof(wname[0])));
+    if (wlen <= 0) {
+        LOG_WRN("MultiByteToWideChar('%s') failed: %lu", friendly_name, GetLastError());
+        return -1;
+    }
+
+    NET_LUID luid;
+    DWORD err = ConvertInterfaceAliasToLuid(wname, &luid);
+    if (err != NO_ERROR) {
+        LOG_WRN("ConvertInterfaceAliasToLuid('%s') failed: %lu (check "
+                "FriendlyName via Get-NetAdapter)",
+                friendly_name, err);
+        return -1;
+    }
+
+    NET_IFINDEX ifindex;
+    err = ConvertInterfaceLuidToIndex(&luid, &ifindex);
+    if (err != NO_ERROR) {
+        LOG_WRN("ConvertInterfaceLuidToIndex('%s') failed: %lu", friendly_name, err);
+        return -1;
+    }
+
+    if (af == AF_INET) {
+        DWORD ifindex_n = htonl((u_long)ifindex);
+        if (setsockopt((SOCKET)fd, IPPROTO_IP, IP_UNICAST_IF, (const char *)&ifindex_n,
+                       sizeof(ifindex_n)) != 0) {
+            LOG_WRN("setsockopt(IP_UNICAST_IF, '%s'/%lu): %d", friendly_name,
+                    (unsigned long)ifindex, WSAGetLastError());
+            return -1;
+        }
+    } else if (af == AF_INET6) {
+        DWORD ifindex_h = (DWORD)ifindex;
+        if (setsockopt((SOCKET)fd, IPPROTO_IPV6, IPV6_UNICAST_IF,
+                       (const char *)&ifindex_h, sizeof(ifindex_h)) != 0) {
+            LOG_WRN("setsockopt(IPV6_UNICAST_IF, '%s'/%lu): %d", friendly_name,
+                    (unsigned long)ifindex, WSAGetLastError());
+            return -1;
+        }
+    } else {
+        LOG_WRN("win_pin_socket_to_iface: unsupported family %d", (int)af);
+        return -1;
+    }
+
+    LOG_INF("path: pinned fd=%d to iface '%s' (ifindex=%lu)", fd, friendly_name,
+            (unsigned long)ifindex);
+    return 0;
+}
+
 /* ================================================================
  *  libmqvpn callbacks
  * ================================================================ */
@@ -122,6 +199,12 @@ fail:
     win_cleanup_dns(p);
     if (p->tun.adapter) mqvpn_tun_win_destroy(&p->tun);
     p->tun_up = 0;
+    /* Tunnel-setup failures here (TUN create, addr/MTU, routes, killswitch,
+     * reader thread, event registration) are local-side problems that
+     * reconnecting won't fix. Mark fatal so the event loop exits non-zero
+     * once the disconnect-induced state change reaches CLOSED. */
+    p->fatal_error = 1;
+    p->shutting_down = 1;
     mqvpn_client_disconnect(p->client);
 }
 
@@ -387,6 +470,13 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     ctx.server_port = cfg->server_port;
     ctx.killswitch_enabled = cfg->kill_switch;
 
+    if (cfg->n_paths == 0) {
+        LOG_ERR("--path is required on Windows: specify at least one adapter "
+                "FriendlyName (e.g. --path \"Ethernet\"). "
+                "Run 'Get-NetAdapter' in PowerShell to list available adapters.");
+        return 1;
+    }
+
     /* TUN name */
     if (cfg->tun_name) {
         snprintf(ctx.tun_name_cfg, sizeof(ctx.tun_name_cfg), "%s", cfg->tun_name);
@@ -432,16 +522,7 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
                                cfg->reconnect_interval > 0 ? cfg->reconnect_interval : 5);
     mqvpn_config_set_killswitch_hint(lib_cfg, cfg->kill_switch);
 
-    mqvpn_log_level_t lib_log;
-    if (cfg->log_level >= 5)
-        lib_log = MQVPN_LOG_DEBUG;
-    else if (cfg->log_level >= 3)
-        lib_log = MQVPN_LOG_INFO;
-    else if (cfg->log_level >= 2)
-        lib_log = MQVPN_LOG_WARN;
-    else
-        lib_log = MQVPN_LOG_ERROR;
-    mqvpn_config_set_log_level(lib_cfg, lib_log);
+    mqvpn_config_set_log_level(lib_cfg, (mqvpn_log_level_t)cfg->log_level);
 
     mqvpn_scheduler_t lib_sched;
     switch (cfg->scheduler) {
@@ -494,6 +575,17 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     /* Register paths with library and create socket events */
     for (int i = 0; i < ctx.path_mgr.n_paths; i++) {
         mqvpn_path_t *mp = &ctx.path_mgr.paths[i];
+
+        if (mp->iface[0]) {
+            if (win_pin_socket_to_iface(mp->fd, mp->iface, mp->local_addr.ss_family) <
+                0) {
+                LOG_ERR("path[%d] iface pin failed for '%s'; --path values must be "
+                        "valid adapter FriendlyNames as listed by Get-NetAdapter",
+                        i, mp->iface);
+                goto cleanup;
+            }
+        }
+
         mqvpn_path_desc_t desc = {0};
         desc.struct_size = sizeof(desc);
         desc.fd = mp->fd;
@@ -532,7 +624,7 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
     LOG_INF("entering event loop...");
     event_base_dispatch(ctx.eb);
-    rc = 0;
+    rc = ctx.fatal_error ? 1 : 0;
 
 cleanup:
     SetConsoleCtrlHandler(console_ctrl_handler, FALSE);

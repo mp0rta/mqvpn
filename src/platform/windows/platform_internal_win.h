@@ -76,6 +76,7 @@ typedef struct {
 
     /* Shutdown */
     int shutting_down;
+    int fatal_error; /* set by tunnel-setup failures to force exit code != 0 */
 } platform_win_ctx_t;
 
 /* routing.c */

@@ -98,10 +98,10 @@ static int
 set_dns_netsh(const char *adapter_name, const char **servers, int n)
 {
     WCHAR wname[256], waddr[64], args[512];
-    MultiByteToWideChar(CP_UTF8, 0, adapter_name, -1, wname, 256);
+    MultiByteToWideChar(CP_ACP, 0, adapter_name, -1, wname, 256);
 
     /* Set primary DNS */
-    MultiByteToWideChar(CP_UTF8, 0, servers[0], -1, waddr, 64);
+    MultiByteToWideChar(CP_ACP, 0, servers[0], -1, waddr, 64);
     _snwprintf(args, 512, L"interface ip set dnsservers \"%s\" static %s primary", wname,
                waddr);
     if (run_netsh(args) != 0) {
@@ -111,7 +111,7 @@ set_dns_netsh(const char *adapter_name, const char **servers, int n)
 
     /* Add secondary DNS servers */
     for (int i = 1; i < n; i++) {
-        MultiByteToWideChar(CP_UTF8, 0, servers[i], -1, waddr, 64);
+        MultiByteToWideChar(CP_ACP, 0, servers[i], -1, waddr, 64);
         _snwprintf(args, 512, L"interface ip add dnsservers \"%s\" %s index=%d", wname,
                    waddr, i + 1);
         run_netsh(args);
@@ -125,7 +125,7 @@ static void
 clear_dns_netsh(const char *adapter_name)
 {
     WCHAR wname[256], args[512];
-    MultiByteToWideChar(CP_UTF8, 0, adapter_name, -1, wname, 256);
+    MultiByteToWideChar(CP_ACP, 0, adapter_name, -1, wname, 256);
     _snwprintf(args, 512, L"interface ip set dnsservers \"%s\" dhcp", wname);
     run_netsh(args);
 }
@@ -143,7 +143,7 @@ win_setup_dns(platform_win_ctx_t *p)
         int off = 0;
         for (int i = 0; i < p->n_dns; i++) {
             WCHAR addr[64];
-            MultiByteToWideChar(CP_UTF8, 0, p->dns_servers[i], -1, addr, 64);
+            MultiByteToWideChar(CP_ACP, 0, p->dns_servers[i], -1, addr, 64);
             if (i > 0) ns[off++] = L',';
             int len = (int)wcslen(addr);
             memcpy(ns + off, addr, len * sizeof(WCHAR));

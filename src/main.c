@@ -6,7 +6,7 @@
 #include "vpn_server.h"
 #include "flow_sched.h"
 
-#include <xquic/xquic.h> /* for XQC_LOG_* constants */
+#include <xquic/xquic.h> /* for XQC_ENABLE_* compile-time defines */
 
 #ifdef _WIN32
 #  include "platform_windows.h"
@@ -100,18 +100,6 @@ parse_host_port(const char *str, char *host, size_t host_len, int *port)
 }
 
 /* mqvpn_copy_str is provided by json_mini.h as mqvpn_copy_str */
-
-static int
-map_log_level_to_xquic(mqvpn_log_level_t level)
-{
-    switch (level) {
-    case MQVPN_LOG_DEBUG: return XQC_LOG_DEBUG;
-    case MQVPN_LOG_INFO: return XQC_LOG_INFO;
-    case MQVPN_LOG_WARN: return XQC_LOG_WARN;
-    case MQVPN_LOG_ERROR: return XQC_LOG_ERROR;
-    default: return XQC_LOG_INFO;
-    }
-}
 
 int
 main(int argc, char *argv[])
@@ -366,9 +354,6 @@ main(int argc, char *argv[])
         return 1;
     }
 
-    /* Map our log level to xquic log level (roughly) */
-    int xqc_log_level = map_log_level_to_xquic(log_level);
-
     /* Paths: CLI paths override config paths entirely */
     if (n_paths == 0 && file_cfg.n_paths > 0) {
         n_paths = file_cfg.n_paths;
@@ -408,7 +393,7 @@ main(int argc, char *argv[])
             .server_port = port,
             .tun_name = eff_tun_name,
             .insecure = eff_insecure,
-            .log_level = xqc_log_level,
+            .log_level = log_level,
             .n_paths = n_paths,
             .scheduler = scheduler,
             .auth_key = eff_auth_key,
@@ -451,7 +436,7 @@ main(int argc, char *argv[])
             .tun_name = eff_tun_name,
             .cert_file = eff_cert,
             .key_file = eff_key,
-            .log_level = xqc_log_level,
+            .log_level = log_level,
             .scheduler = scheduler,
             .auth_key = eff_auth_key,
             .n_users = eff_n_users,

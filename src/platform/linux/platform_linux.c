@@ -743,17 +743,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
                                cfg->reconnect_interval > 0 ? cfg->reconnect_interval : 5);
     mqvpn_config_set_killswitch_hint(lib_cfg, cfg->kill_switch);
 
-    /* Map xquic log level back to library log level */
-    mqvpn_log_level_t lib_log;
-    if (cfg->log_level >= 5)
-        lib_log = MQVPN_LOG_DEBUG;
-    else if (cfg->log_level >= 3)
-        lib_log = MQVPN_LOG_INFO;
-    else if (cfg->log_level >= 2)
-        lib_log = MQVPN_LOG_WARN;
-    else
-        lib_log = MQVPN_LOG_ERROR;
-    mqvpn_config_set_log_level(lib_cfg, lib_log);
+    mqvpn_config_set_log_level(lib_cfg, (mqvpn_log_level_t)cfg->log_level);
 
     mqvpn_scheduler_t lib_sched;
     switch (cfg->scheduler) {
@@ -1186,16 +1176,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     }
     mqvpn_config_set_scheduler(lib_cfg, lib_sched);
 
-    mqvpn_log_level_t lib_log;
-    if (cfg->log_level >= 5)
-        lib_log = MQVPN_LOG_DEBUG;
-    else if (cfg->log_level >= 3)
-        lib_log = MQVPN_LOG_INFO;
-    else if (cfg->log_level >= 2)
-        lib_log = MQVPN_LOG_WARN;
-    else
-        lib_log = MQVPN_LOG_ERROR;
-    mqvpn_config_set_log_level(lib_cfg, lib_log);
+    mqvpn_config_set_log_level(lib_cfg, (mqvpn_log_level_t)cfg->log_level);
 
     /* Create server callbacks */
     mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;

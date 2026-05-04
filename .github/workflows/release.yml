@@ -8,25 +8,34 @@ on:
 permissions:
   contents: write
 
+env:
+  WINTUN_VER: "0.14.1"
+  WINTUN_SHA256: "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
+  BORINGSSL_COMMIT: "9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c"
+
 jobs:
   build-release:
     strategy:
       matrix:
         include:
-          - arch: amd64
-            runner: ubuntu-latest
-          - arch: arm64
-            runner: ubuntu-24.04-arm
+          - { os: linux,   arch: amd64, runner: ubuntu-latest    }
+          - { os: linux,   arch: arm64, runner: ubuntu-24.04-arm }
+          - { os: windows, arch: amd64, runner: windows-latest   }
+          - { os: windows, arch: arm64, runner: windows-11-arm   }
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
 
       - name: Verify tag matches CMake version
+        shell: bash
         run: |
-          CMAKE_VERSION=$(grep -oP 'project\(mqvpn VERSION \K[0-9.]+' CMakeLists.txt)
+          # Use sed (BRE) instead of `grep -oP` because Git for Windows' grep
+          # rejects -P with the runner's default locale ("supports only unibyte
+          # and UTF-8 locales"). sed avoids the PCRE dependency entirely.
+          CMAKE_VERSION=$(sed -n 's/^project(mqvpn VERSION \([0-9.][0-9.]*\).*/\1/p' CMakeLists.txt)
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             TAG_VERSION="${GITHUB_REF_NAME#v}"
             if [ "$TAG_VERSION" != "$CMAKE_VERSION" ]; then
@@ -37,19 +46,22 @@ jobs:
           echo "VERSION=$CMAKE_VERSION" >> "$GITHUB_ENV"
 
       - name: Install dependencies
+        if: matrix.os == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake libevent-dev golang iptables
 
       - name: Clone BoringSSL (pinned)
+        if: matrix.os == 'linux'
         run: |
           BSSL_DIR=third_party/xquic/third_party/boringssl
           if [ ! -f "$BSSL_DIR/CMakeLists.txt" ]; then
             git clone https://github.com/google/boringssl.git "$BSSL_DIR"
           fi
-          cd "$BSSL_DIR" && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          cd "$BSSL_DIR" && git checkout ${{ env.BORINGSSL_COMMIT }}
 
       - name: Build BoringSSL
+        if: matrix.os == 'linux'
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
@@ -57,6 +69,7 @@ jobs:
           make -j$(nproc) ssl crypto
 
       - name: Build xquic
+        if: matrix.os == 'linux'
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
@@ -68,6 +81,7 @@ jobs:
           make -j$(nproc)
 
       - name: Build mqvpn
+        if: matrix.os == 'linux'
         run: |
           mkdir -p build && cd build
           cmake -DCMAKE_BUILD_TYPE=Release \
@@ -76,12 +90,15 @@ jobs:
           make -j$(nproc)
 
       - name: Unit tests
+        if: matrix.os == 'linux'
         run: cd build && ctest --output-on-failure
 
       - name: Build deb package
+        if: matrix.os == 'linux'
         run: cd build && cpack -G DEB
 
       - name: Generate tarball service files
+        if: matrix.os == 'linux'
         run: |
           mkdir -p build-tarball && cd build-tarball
           cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local \
@@ -89,6 +106,7 @@ jobs:
           # Only need the generated systemd files, not a full build
 
       - name: Create tarball
+        if: matrix.os == 'linux'
         run: |
           STAGING="mqvpn_${VERSION}_${{ matrix.arch }}"
           mkdir -p "$STAGING"/{bin,lib/mqvpn,systemd,etc/mqvpn}
@@ -104,9 +122,202 @@ jobs:
           rm -rf "$STAGING" build-tarball
 
       - name: Stage release artifacts
+        if: matrix.os == 'linux'
         run: cp build/mqvpn_*.deb .
 
+      - name: Setup MSVC dev environment (Windows)
+        if: matrix.os == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch == 'amd64' && 'x64' || 'arm64' }}
+
+      - name: Install NASM (Windows)
+        if: matrix.os == 'windows'
+        uses: ilammy/setup-nasm@v1
+
+      - name: Setup Go (Windows, BoringSSL build)
+        if: matrix.os == 'windows'
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Install libevent via vcpkg (Windows)
+        if: matrix.os == 'windows'
+        run: vcpkg install libevent:${{ matrix.arch == 'amd64' && 'x64-windows-static' || 'arm64-windows-static' }}
+
+      # Cache key includes WINTUN_SHA256, so a hit implies the verified
+      # bytes — no re-verify on hit (trusts GitHub Actions cache integrity).
+      - name: Cache wintun
+        if: matrix.os == 'windows'
+        id: cache-wintun
+        uses: actions/cache@v4
+        with:
+          path: wintun-extract
+          key: wintun-${{ env.WINTUN_VER }}-${{ env.WINTUN_SHA256 }}
+
+      - name: Fetch and verify wintun (Windows)
+        if: matrix.os == 'windows' && steps.cache-wintun.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $zip = "wintun-${env:WINTUN_VER}.zip"
+          Invoke-WebRequest -Uri "https://www.wintun.net/builds/$zip" -OutFile $zip
+          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $env:WINTUN_SHA256.ToLower()) {
+            Write-Error "wintun.zip sha256 mismatch: got $actual want $env:WINTUN_SHA256"
+            exit 1
+          }
+          Expand-Archive $zip -DestinationPath wintun-extract
+
+      - name: Clone BoringSSL (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $bssl = "third_party/xquic/third_party/boringssl"
+          if (-not (Test-Path "$bssl/CMakeLists.txt")) {
+            git clone https://github.com/google/boringssl.git $bssl
+          }
+          Push-Location $bssl
+          git checkout ${{ env.BORINGSSL_COMMIT }}
+          Pop-Location
+
+      - name: Build BoringSSL (Windows)
+        if: matrix.os == 'windows'
+        run: |
+          cd third_party/xquic/third_party/boringssl
+          mkdir build
+          cd build
+          # OPENSSL_NO_ASM=1 on ARM64: works around BoringSSL CMake bug at
+          # the pinned commit that mis-routes ASM source selection on
+          # Windows ARM64 (pulls in x86_64-apple obj → LNK1181). Trade-off:
+          # ARM64 falls back to C crypto, measurably slower than amd64 for
+          # AES-GCM / SHA. Revisit when bumping BORINGSSL_COMMIT.
+          cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
+            -DBUILD_SHARED_LIBS=0 `
+            ${{ matrix.arch == 'arm64' && '-DOPENSSL_NO_ASM=1' || '' }} ..
+          cmake --build . --target ssl --config Release
+          cmake --build . --target crypto --config Release
+
+      - name: Build xquic (Windows)
+        if: matrix.os == 'windows'
+        run: |
+          cd third_party/xquic
+          mkdir build
+          cd build
+          # CMAKE_C_STANDARD=11: xquic upstream targets gnu11 (CMakeLists adds
+          # -std=gnu11 for GCC/Clang). cl.exe ignores that GCC-style flag, so
+          # we explicitly request /std:c11 to match the intended dialect.
+          # Does not fix the 64-bit enum issue (cl.exe always uses int as
+          # enum underlying type regardless of /std:c11) — that's handled by
+          # the xquic submodule patch (see fix/msvc-enum-truncation).
+          cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_STANDARD=11 `
+            -DSSL_TYPE=boringssl `
+            -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" `
+            -DXQC_ENABLE_BBR2=ON `
+            -DXQC_ENABLE_FEC=ON `
+            -DXQC_ENABLE_XOR=ON ..
+          cmake --build . --config Release
+
+      - name: Build mqvpn (Windows)
+        if: matrix.os == 'windows'
+        run: |
+          mkdir build
+          cd build
+          # Same C11 reasoning as the xquic build, kept consistent across
+          # the two CMake invocations.
+          cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_STANDARD=11 `
+            -DXQUIC_BUILD_DIR="${{ github.workspace }}/third_party/xquic/build/Release" `
+            -DBORINGSSL_BUILD_DIR="${{ github.workspace }}/third_party/xquic/third_party/boringssl/build/Release" `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=${{ matrix.arch == 'amd64' && 'x64-windows-static' || 'arm64-windows-static' }} ..
+          cmake --build . --config Release
+
+      - name: Smoke test mqvpn.exe (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          # ctest is intentionally skipped on Windows: the registered tests
+          # (test_auth, test_config, test_dns, test_session) include POSIX
+          # headers / Linux-only platform sources, so they cannot be built
+          # under MSVC. CMakeLists.txt:197 guards the test block with
+          # `else()  # NOT WIN32 — Linux`, meaning ctest on Windows would
+          # silently pass on zero tests. Skipping makes that explicit.
+          # The smoke step below is the actual Windows build verification.
+          $out = & "build/Release/mqvpn.exe" --help 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "mqvpn.exe --help exited $LASTEXITCODE; output: $out"
+            exit 1
+          }
+          # Match the literal "Usage:" header that main.c:29 prints. Just
+          # matching "mqvpn" would be too loose (paths, runner output noise
+          # could match accidentally).
+          if (-not ($out -match '(?m)^Usage:')) {
+            Write-Error "mqvpn.exe --help did not print expected 'Usage:' banner; output: $out"
+            exit 1
+          }
+
+      - name: Stage Windows release artifact
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $staging = "mqvpn_${env:VERSION}_windows_${env:MATRIX_ARCH}"
+          $tpl = "$staging/THIRD_PARTY_LICENSES"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          New-Item -ItemType Directory -Force -Path $tpl | Out-Null
+
+          Copy-Item "build/Release/mqvpn.exe" "$staging/"
+          Copy-Item "third_party/xquic/build/Release/xquic.dll" "$staging/"
+          Copy-Item "wintun-extract/wintun/bin/${env:MATRIX_ARCH}/wintun.dll" "$staging/"
+          Copy-Item "packaging/windows/README.txt" "$staging/"
+
+          # Apache 2.0 §4(a) requires the License text to accompany binary
+          # distributions. mqvpn.exe (Apache 2.0) and xquic.dll (Apache 2.0,
+          # statically linking BoringSSL [Apache 2.0/ISC] and libevent
+          # [BSD-3-Clause]) all need their license text bundled. Wintun has
+          # its own license (separate copyright holder, WireGuard LLC).
+          # Neither xquic nor BoringSSL ship a NOTICE file upstream, so
+          # Apache 2.0 §4(d) NOTICE propagation is not triggered.
+          Copy-Item "LICENSE" "$staging/LICENSE"
+          Copy-Item "third_party/xquic/LICENSE" "$tpl/xquic.txt"
+          Copy-Item "third_party/xquic/third_party/boringssl/LICENSE" "$tpl/boringssl.txt"
+          Copy-Item "wintun-extract/wintun/LICENSE.txt" "$tpl/wintun.txt"
+          $triplet = if ($env:MATRIX_ARCH -eq 'amd64') { 'x64-windows-static' } else { 'arm64-windows-static' }
+          $libevent_lic = "$env:VCPKG_INSTALLATION_ROOT/installed/$triplet/share/libevent/copyright"
+          if (-not (Test-Path $libevent_lic)) {
+            Write-Error "libevent copyright not found at $libevent_lic — vcpkg layout may have changed"
+            exit 1
+          }
+          Copy-Item $libevent_lic "$tpl/libevent.txt"
+
+          # Use explicit file list, NOT $staging/* glob. Compress-Archive's glob
+          # behavior varies subtly across PowerShell versions and has historically
+          # produced ZIPs with unexpected directory entries or dropped files near
+          # path-length limits. Explicit list also serves as a manifest.
+          $files = @(
+            "$staging/mqvpn.exe",
+            "$staging/xquic.dll",
+            "$staging/wintun.dll",
+            "$staging/README.txt",
+            "$staging/LICENSE",
+            "$staging/THIRD_PARTY_LICENSES"
+          )
+          Compress-Archive -Path $files -DestinationPath "mqvpn_${env:VERSION}_windows_${env:MATRIX_ARCH}.zip"
+          Remove-Item -Recurse $staging
+        env:
+          MATRIX_ARCH: ${{ matrix.arch }}
+
+      - name: Upload Windows artifacts
+        if: matrix.os == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-${{ matrix.arch }}
+          path: mqvpn_*_windows_${{ matrix.arch }}.zip
+
       - name: Upload artifacts
+        if: matrix.os == 'linux'
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.arch }}
@@ -131,14 +342,21 @@ jobs:
       - name: Generate SHA256SUMS
         run: |
           cd artifacts
-          sha256sum mqvpn_*.tar.gz mqvpn_*.deb > SHA256SUMS
+          # nullglob so missing pattern → empty rather than the literal pattern
+          # passed to sha256sum (would fail "No such file or directory").
+          shopt -s nullglob
+          sha256sum mqvpn_*.tar.gz mqvpn_*.deb mqvpn_*.zip > SHA256SUMS
           cat SHA256SUMS
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          shopt -s nullglob
           VERSION="${GITHUB_REF_NAME#v}"
+          TARS=(artifacts/mqvpn_*.tar.gz)
+          DEBS=(artifacts/mqvpn_*.deb)
+          ZIPS=(artifacts/mqvpn_*.zip)
           # Body intentionally left empty — auto-generated notes are too noisy
           # (auto-sync upstream PRs, perf bench commits, etc. clutter the changelog).
           # Edit release notes manually after publish via GitHub UI or:
@@ -146,7 +364,6 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "mqvpn v${VERSION}" \
             --notes "" \
-            artifacts/mqvpn_*.tar.gz \
-            artifacts/mqvpn_*.deb \
+            "${TARS[@]}" "${DEBS[@]}" "${ZIPS[@]}" \
             artifacts/SHA256SUMS \
             scripts/install.sh

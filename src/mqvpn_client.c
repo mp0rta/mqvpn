@@ -467,8 +467,13 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
     mqvpn_client_t *c = (mqvpn_client_t *)user_data;
     if (!c->cbs.log) return;
 
-    /* Map xquic levels (xqc_log_level_t): REPORT=0, FATAL=1, ERROR=2,
-     * WARN=3, STATS=4, INFO=5, DEBUG=6 */
+    /* Reverse map: xquic→mqvpn for display severity. xquic enum is
+     * REPORT=0, FATAL=1, ERROR=2, WARN=3, STATS=4, INFO=5, DEBUG=6.
+     * This is intentionally NOT the inverse of map_log_level_to_xquic
+     * below — the forward map shifts INFO→WARN to suppress xquic's
+     * per-packet noise at the engine level; this reverse map keeps
+     * incoming severity honest so a real xquic warning is shown as a
+     * warning, not relabelled as INFO. Don't symmetrize the two. */
     mqvpn_log_level_t ml;
     switch (lvl) {
     case XQC_LOG_REPORT:
@@ -1266,13 +1271,19 @@ cleanup:
 static int
 map_log_level_to_xquic(mqvpn_log_level_t level)
 {
-    /* xqc_log_level_t: REPORT=0, FATAL=1, ERROR=2, WARN=3, STATS=4, INFO=5, DEBUG=6 */
+    /* xqc_log_level_t: REPORT=0, FATAL=1, ERROR=2, WARN=3, STATS=4, INFO=5, DEBUG=6
+     *
+     * mqvpn INFO is intentionally mapped to xquic WARN (one tier lower).
+     * xquic INFO emits per-packet logs (effectively DEBUG-grade), which
+     * tanks throughput on slow consoles like Windows PowerShell. Shifting
+     * keeps --log-level info usable; users who want xquic detail use
+     * --log-level debug. Do not restore the 1:1 mapping. */
     switch (level) {
     case MQVPN_LOG_DEBUG: return XQC_LOG_DEBUG;
-    case MQVPN_LOG_INFO: return XQC_LOG_INFO;
+    case MQVPN_LOG_INFO: return XQC_LOG_WARN;
     case MQVPN_LOG_WARN: return XQC_LOG_WARN;
     case MQVPN_LOG_ERROR: return XQC_LOG_ERROR;
-    default: return XQC_LOG_INFO;
+    default: return XQC_LOG_WARN;
     }
 }
 

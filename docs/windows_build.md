@@ -88,10 +88,20 @@ On success, the binary is at `build\Release\mqvpn.exe`.
 
 ## Usage Examples
 
+On Windows, `--path` is required (one or more). Pass the adapter
+**FriendlyName** as shown in `Get-NetAdapter` (PowerShell) or `ncpa.cpl`,
+e.g. `Ethernet`, `Wi-Fi`, `イーサネット 3`. Quote names that contain
+spaces.
+
+```powershell
+Get-NetAdapter | Where-Object Status -eq 'Up' | Select Name, InterfaceDescription
+```
+
 Single path:
 
 ```
-mqvpn.exe --mode client --server 203.0.113.1:443 --auth-key <key>
+mqvpn.exe --mode client --server 203.0.113.1:443 --auth-key <key> ^
+  --path "Ethernet"
 ```
 
 Multipath (multiple NICs):
