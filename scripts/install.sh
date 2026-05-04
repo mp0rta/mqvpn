@@ -150,11 +150,20 @@ ok "Downloaded mqvpn v$VERSION"
 info "[3/6] Installing to $INSTALL_PREFIX/..."
 
 cd "$WORK_DIR"
-grep "$TARBALL" SHA256SUMS | sha256sum -c --quiet || err "Checksum verification failed"
+# sha256sum format is "HASH<2 spaces>FILENAME". Use -F + leading "  " anchor
+# so a tarball name doesn't accidentally match a similarly-prefixed file
+# (e.g. "mqvpn_X.Y.Z_amd64.tar.gz.sig"). --strict makes malformed lines fatal.
+grep -F "  ${TARBALL}" SHA256SUMS | sha256sum -c --quiet --strict \
+    || err "Checksum verification failed"
 tar xzf "$TARBALL"
 
 install -m 755 bin/mqvpn "$INSTALL_PREFIX/bin/mqvpn"
-install -m 644 lib/libmqvpn.so.* "$INSTALL_PREFIX/lib/" 2>/dev/null || true
+shopt -s nullglob
+libmqvpn_files=(lib/libmqvpn.so.*)
+shopt -u nullglob
+if [ ${#libmqvpn_files[@]} -gt 0 ]; then
+    install -m 644 "${libmqvpn_files[@]}" "$INSTALL_PREFIX/lib/"
+fi
 install -m 644 lib/libxquic.so "$INSTALL_PREFIX/lib/"
 mkdir -p "$INSTALL_PREFIX/lib/mqvpn"
 install -m 755 lib/mqvpn/mqvpn-server-nat.sh "$INSTALL_PREFIX/lib/mqvpn/"
@@ -168,14 +177,26 @@ ok "Installed to $INSTALL_PREFIX"
 info "[4/6] Generating TLS certificate..."
 
 mkdir -p /etc/mqvpn
-if [ ! -f /etc/mqvpn/server.crt ] || [ ! -f /etc/mqvpn/server.key ]; then
+# Generate self-signed cert ONLY when neither file (or symlink) exists.
+# `-e` so symlinks pointing at certbot/letsencrypt are honored as "exists".
+# - both present: admin set them up (own CA, certbot symlinks, etc.) — skip
+# - neither present: bootstrap with self-signed for first-run convenience
+# - only one present: admin is mid-setup — don't clobber, just warn and let
+#   mqvpn-server fail loudly at startup if the missing one isn't placed
+crt_exists=0; key_exists=0
+[ -e /etc/mqvpn/server.crt ] && crt_exists=1
+[ -e /etc/mqvpn/server.key ] && key_exists=1
+if [ "$crt_exists" -eq 1 ] && [ "$key_exists" -eq 1 ]; then
+    ok "Certificate already in place, skipping (managed by admin / certbot / etc.)"
+elif [ "$crt_exists" -eq 0 ] && [ "$key_exists" -eq 0 ]; then
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
         -keyout /etc/mqvpn/server.key -out /etc/mqvpn/server.crt \
         -days 365 -nodes -subj "/CN=mqvpn" 2>/dev/null
     chmod 600 /etc/mqvpn/server.key /etc/mqvpn/server.crt
     ok "Generated self-signed certificate"
 else
-    ok "Certificate already exists, skipping"
+    missing=$([ "$crt_exists" -eq 0 ] && echo server.crt || echo server.key)
+    warn "Only one of /etc/mqvpn/server.{crt,key} is present ($missing missing); leaving as-is. Place the missing file before starting mqvpn-server."
 fi
 
 # --- Step 5: Configure NAT ---
