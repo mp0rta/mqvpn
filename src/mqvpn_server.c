@@ -1111,13 +1111,18 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         .path_removed_notify = cb_path_removed,
     };
 
+    /* xquic INFO emits per-packet logs (effectively DEBUG-grade noise that
+     * also tanks throughput on slow consoles like Windows PowerShell). Map
+     * mqvpn INFO -> xquic WARN so --log-level info shows mqvpn state without
+     * the per-packet flood; users who want xquic detail use --log-level debug.
+     * Mirrors the client-side mapping in mqvpn_client.c. */
     int xqc_log_level;
     switch (cfg->log_level) {
-    case MQVPN_LOG_DEBUG: xqc_log_level = 5; break;
-    case MQVPN_LOG_INFO: xqc_log_level = 3; break;
-    case MQVPN_LOG_WARN: xqc_log_level = 2; break;
-    case MQVPN_LOG_ERROR: xqc_log_level = 1; break;
-    default: xqc_log_level = 3; break;
+    case MQVPN_LOG_DEBUG: xqc_log_level = XQC_LOG_DEBUG; break;
+    case MQVPN_LOG_INFO: xqc_log_level = XQC_LOG_WARN; break;
+    case MQVPN_LOG_WARN: xqc_log_level = XQC_LOG_WARN; break;
+    case MQVPN_LOG_ERROR: xqc_log_level = XQC_LOG_ERROR; break;
+    default: xqc_log_level = XQC_LOG_WARN; break;
     }
 
     xqc_config_t xconfig;
