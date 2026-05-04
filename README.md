@@ -36,6 +36,10 @@ curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
 ```
 
 Uninstall: re-run the install script with `--uninstall`.
+```bash
+curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
+    | sudo bash -s -- --uninstall
+```
 
 ### Client (deb package)
 
