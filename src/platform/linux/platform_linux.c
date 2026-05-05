@@ -18,12 +18,14 @@
 #include <stdio.h>
 #include <inttypes.h>
 
-#define STATUS_INTERVAL_SEC 30
-#define BULK_READ_COUNT     64
-#define NETLINK_BUF_SIZE    8192
-#define TUN_BUF_SIZE        65536
-#define SOCK_BUF_SIZE       65536
+#define STATUS_INTERVAL_SEC  30
+#define RECOVER_INTERVAL_SEC 3
+#define BULK_READ_COUNT      64
+#define NETLINK_BUF_SIZE     8192
+#define TUN_BUF_SIZE         65536
+#define SOCK_BUF_SIZE        65536
 static void status_log_cb(evutil_socket_t fd, short what, void *arg);
+static void recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg);
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -35,6 +37,7 @@ static void status_log_cb(evutil_socket_t fd, short what, void *arg);
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <ifaddrs.h>
+#include <sys/ioctl.h>
 
 /* ================================================================
  *  Socket pinning to a specific egress interface
@@ -149,6 +152,18 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
         struct timeval tv = {.tv_sec = STATUS_INTERVAL_SEC};
         event_add(p->ev_status, &tv);
     }
+
+    /* Start periodic dropped-path re-add timer. Carrier-up netlink events
+     * fire only once and `try_readd_removed_path()` can fail synchronously
+     * (e.g. xqc_conn_create_path returning -XQC_EMP_NO_AVAIL_PATH_ID before
+     * the server has distributed enough CIDs). Without this timer the slot
+     * would stay path_removed_by_platform=1 forever — no further netlink
+     * event arrives because IP and link state never change again. */
+    if (!p->ev_recover) p->ev_recover = evtimer_new(p->eb, recover_dropped_paths_cb, p);
+    if (p->ev_recover) {
+        struct timeval tv = {.tv_sec = RECOVER_INTERVAL_SEC};
+        event_add(p->ev_recover, &tv);
+    }
     return;
 
 fail:
@@ -196,7 +211,8 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
          * physical interface absence (RTM_DELLINK), which persists across
          * reconnects. Only cleared when the interface reappears. */
         memset(p->path_recoverable, 0, sizeof(p->path_recoverable));
-        if (p->ev_status) event_del(p->ev_status); /* pause — reused on reconnect */
+        if (p->ev_status) event_del(p->ev_status);   /* pause — reused on reconnect */
+        if (p->ev_recover) event_del(p->ev_recover); /* pause — reused on reconnect */
         cleanup_killswitch(p);
         cleanup_routes(p);
         mqvpn_dns_restore(&p->dns);
@@ -466,6 +482,23 @@ remove_path_by_index(platform_ctx_t *p, int idx, const char *reason)
     p->path_recoverable[idx] = 0;
 }
 
+/* Check whether `ifname` is admin-up AND has carrier (IFF_UP & IFF_RUNNING).
+ * Used by the periodic recovery timer to skip retries on a still-down link. */
+static int
+iface_is_up_and_running(const char *ifname)
+{
+    int s = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (s < 0) return 0;
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
+    int ok = 0;
+    if (ioctl(s, SIOCGIFFLAGS, &ifr) == 0)
+        ok = (ifr.ifr_flags & IFF_UP) && (ifr.ifr_flags & IFF_RUNNING);
+    close(s);
+    return ok;
+}
+
 /* Check if interface has an IP address (v4 or v6) */
 static int
 iface_has_ip(const char *ifname)
@@ -629,6 +662,45 @@ try_readd_removed_path(platform_ctx_t *p, const char *ifname)
         return 1;
     }
     return 0;
+}
+
+/* Periodically re-add paths that were dropped by the platform (RTM_DELLINK or
+ * carrier loss) but whose interface is now back up.
+ *
+ * Why this exists: on carrier loss/restore the kernel emits a single
+ * RTM_NEWLINK with IFF_RUNNING toggled — IP and admin state don't change, so
+ * no RTM_NEWADDR follows. If the one-shot try_readd_removed_path() driven by
+ * that RTM_NEWLINK fails (e.g. xqc_conn_create_path() returns
+ * -XQC_EMP_NO_AVAIL_PATH_ID because the server hasn't distributed CIDs yet,
+ * or the old path hasn't been released yet), there is no further event to
+ * retry on. This timer makes carrier-restore failures recoverable.
+ *
+ * Pre-filters on link state + IP so we don't burn syscalls (socket/bind/pin)
+ * when the interface is still down. */
+static void
+recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
+{
+    (void)fd;
+    (void)what;
+    platform_ctx_t *p = (platform_ctx_t *)arg;
+
+    for (int i = 0; i < p->path_mgr.n_paths; i++) {
+        if (!p->path_removed_by_platform[i]) continue;
+        const char *ifname = p->path_mgr.paths[i].iface;
+        if (!iface_is_up_and_running(ifname)) continue;
+        if (!iface_has_ip(ifname)) continue;
+        /* try_readd_removed_path() walks all matching slots, so one call
+         * per ifname is enough — break out of the per-slot scan. */
+        if (try_readd_removed_path(p, ifname))
+            LOG_INF("netlink: timer re-added path %s after carrier-up failure", ifname);
+        break;
+    }
+
+    /* Re-arm */
+    if (p->ev_recover) {
+        struct timeval tv = {.tv_sec = RECOVER_INTERVAL_SEC};
+        event_add(p->ev_recover, &tv);
+    }
 }
 
 static void
@@ -944,6 +1016,10 @@ cleanup:
     if (ctx.ev_status) {
         event_del(ctx.ev_status);
         event_free(ctx.ev_status);
+    }
+    if (ctx.ev_recover) {
+        event_del(ctx.ev_recover);
+        event_free(ctx.ev_recover);
     }
 
     mqvpn_path_mgr_destroy(&ctx.path_mgr);
