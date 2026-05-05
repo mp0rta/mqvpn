@@ -34,6 +34,7 @@ static void recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg);
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <linux/if.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <ifaddrs.h>
@@ -446,10 +447,25 @@ nlmsg_get_ifname(struct nlmsghdr *nh)
     return NULL;
 }
 
+/* Extract IFLA_OPERSTATE (RFC 2863 operational state) from a netlink message.
+ * Returns the IF_OPER_* enum value (0..7), or -1 if the attribute is missing. */
+static int
+nlmsg_get_operstate(struct nlmsghdr *nh)
+{
+    struct ifinfomsg *ifi = (struct ifinfomsg *)NLMSG_DATA(nh);
+    struct rtattr *rta = IFLA_RTA(ifi);
+    int rtl = (int)IFLA_PAYLOAD(nh);
+    for (; RTA_OK(rta, rtl); rta = RTA_NEXT(rta, rtl)) {
+        if (rta->rta_type == IFLA_OPERSTATE && RTA_PAYLOAD(rta) >= 1)
+            return *(const uint8_t *)RTA_DATA(rta);
+    }
+    return -1;
+}
+
 /* Remove a path because the kernel says it's no longer usable.
- * Two callers: RTM_DELLINK (interface gone) and RTM_NEWLINK with IFF_RUNNING
- * cleared (carrier lost — cable unplugged etc). Both share cleanup; only the
- * log message differs.
+ * Two callers: RTM_DELLINK (interface gone) and RTM_NEWLINK with IFLA_OPERSTATE
+ * = IF_OPER_DOWN / IF_OPER_LOWERLAYERDOWN (carrier lost — cable unplugged etc).
+ * Both share cleanup; only the log message differs.
  *
  * Cleans up: library path, libevent, fd. Preserves iface name for re-add. */
 static void
@@ -738,17 +754,26 @@ on_netlink_event(evutil_socket_t fd, short what, void *arg)
                 const char *ifname = nlmsg_get_ifname(nh);
                 if (!ifname) continue;
 
-                /* Carrier loss (cable unplugged / link down): admin up but
-                 * !running. Drop the path so the library doesn't burn through
-                 * xquic's path_id budget (XQC_MAX_PATHS_COUNT) via the
-                 * auto-recreate retry loop on a path that can never receive.
+                /* Carrier loss: drop the path so the library doesn't burn
+                 * through xquic's path_id budget (XQC_MAX_PATHS_COUNT) via
+                 * the auto-recreate retry loop on a path that can never
+                 * receive.
                  *
-                 * IFF_RUNNING is also cleared during wifi association /
-                 * dormant transitions, so a wifi roam will trigger a spurious
-                 * drop+readd. For Ethernet (the original repro) this is fine.
-                 * Upgrade to IFLA_OPERSTATE if wifi roams become problematic
-                 * in practice. */
-                if ((ifi->ifi_flags & IFF_UP) && !(ifi->ifi_flags & IFF_RUNNING)) {
+                 * Gate on IFLA_OPERSTATE rather than !IFF_RUNNING. IFF_RUNNING
+                 * also clears during wifi association / dormant transitions,
+                 * so an !IFF_RUNNING-based gate would burn one path_id slot
+                 * per wifi roam — defeating the very budget the drop is meant
+                 * to preserve. We drop only on a definite operational-down
+                 * report (RFC 2863): IF_OPER_DOWN (link admin/peer down) or
+                 * IF_OPER_LOWERLAYERDOWN (e.g. underlying ethernet of a
+                 * vlan/bridge went away). IF_OPER_DORMANT (wifi associating),
+                 * IF_OPER_UNKNOWN (driver doesn't report; common on virtual
+                 * interfaces) and IF_OPER_TESTING are tolerated — the
+                 * carrier-up handler / recovery timer will still re-add once
+                 * IFF_RUNNING + has_ip become true. */
+                int operstate = nlmsg_get_operstate(nh);
+                if ((ifi->ifi_flags & IFF_UP) &&
+                    (operstate == IF_OPER_DOWN || operstate == IF_OPER_LOWERLAYERDOWN)) {
                     for (int i = 0; i < p->path_mgr.n_paths; i++) {
                         if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0)
                             remove_path_by_index(p, i, "carrier lost");
