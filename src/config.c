@@ -448,6 +448,61 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     return 0;
 }
 
+/* Split "host:port" or "[host]:port" (IPv6 bracket form). Pure — no I/O.
+ * Returns 0 on success, -1 on malformed input.
+ */
+static int
+split_addr_port(const char *str, char *host, size_t host_len, int *port)
+{
+    if (!str || !host || !port || host_len == 0) return -1;
+    if (str[0] == '[') {
+        const char *close = strchr(str, ']');
+        if (!close || close[1] != ':') return -1;
+        size_t hlen = (size_t)(close - str - 1);
+        if (hlen == 0 || hlen >= host_len) return -1;
+        memcpy(host, str + 1, hlen);
+        host[hlen] = '\0';
+        *port = atoi(close + 2);
+    } else {
+        const char *colon = strrchr(str, ':');
+        if (!colon || colon == str) return -1;
+        size_t hlen = (size_t)(colon - str);
+        if (hlen >= host_len) return -1;
+        memcpy(host, str, hlen);
+        host[hlen] = '\0';
+        *port = atoi(colon + 1);
+    }
+    if (*port <= 0 || *port > 65535) return -1;
+    return 0;
+}
+
+int
+mqvpn_resolve_control_endpoint(const char *file_listen, const char *cli_addr,
+                               int cli_port, int cli_port_set, char *addr_buf,
+                               size_t addr_buf_len, const char **out_addr, int *out_port)
+{
+    if (!addr_buf || addr_buf_len == 0 || !out_addr || !out_port) return -1;
+    *out_addr = NULL;
+    *out_port = 0;
+    addr_buf[0] = '\0';
+
+    /* Step 1: INI base. */
+    if (file_listen && file_listen[0] != '\0') {
+        int port_buf = 0;
+        if (split_addr_port(file_listen, addr_buf, addr_buf_len, &port_buf) < 0) {
+            return -1;
+        }
+        *out_addr = addr_buf;
+        *out_port = port_buf;
+    }
+
+    /* Step 2: per-field CLI overrides. */
+    if (cli_addr != NULL) *out_addr = cli_addr;
+    if (cli_port_set) *out_port = cli_port; /* 0 means explicit disable */
+
+    return 0;
+}
+
 /* ---- public API ---- */
 
 void
