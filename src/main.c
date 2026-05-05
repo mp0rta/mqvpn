@@ -165,6 +165,7 @@ main(int argc, char *argv[])
     int no_reconnect = 0;
     int kill_switch = -1; /* -1 = not set by CLI */
     int control_port = 0;
+    int control_port_set = 0; /* 1 iff --control-port was passed explicitly */
     const char *control_addr = NULL;
     int status_mode = 0;
 
@@ -230,7 +231,10 @@ main(int argc, char *argv[])
         case 'M': max_clients = atoi(optarg); break;
         case 'R': no_reconnect = 1; break;
         case 'K': kill_switch = 1; break;
-        case 'X': control_port = atoi(optarg); break;
+        case 'X':
+            control_port = atoi(optarg);
+            control_port_set = 1;
+            break;
         case 'x': control_addr = optarg; break;
         case 'T': status_mode = 1; break;
         case 'L': log_level_str = optarg; break;
@@ -428,6 +432,18 @@ main(int argc, char *argv[])
             return 1;
         }
 
+        char eff_control_addr_buf[256] = {0};
+        const char *eff_control_addr = NULL;
+        int eff_control_port = 0;
+        if (mqvpn_resolve_control_endpoint(
+                file_cfg.control_listen, control_addr, control_port, control_port_set,
+                eff_control_addr_buf, sizeof(eff_control_addr_buf), &eff_control_addr,
+                &eff_control_port) < 0) {
+            fprintf(stderr, "error: invalid [Control] Listen = '%s'\n",
+                    file_cfg.control_listen);
+            return 1;
+        }
+
         mqvpn_server_cfg_t cfg = {
             .listen_addr = bind_addr,
             .listen_port = bind_port,
@@ -441,8 +457,8 @@ main(int argc, char *argv[])
             .auth_key = eff_auth_key,
             .n_users = eff_n_users,
             .max_clients = eff_max_clients,
-            .control_addr = control_addr,
-            .control_port = control_port,
+            .control_addr = eff_control_addr,
+            .control_port = eff_control_port,
         };
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];
