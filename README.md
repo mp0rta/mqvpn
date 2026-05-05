@@ -208,7 +208,9 @@ Listen = 127.0.0.1:9090
 #### From JSON (`/etc/mqvpn/server.json`)
 
 ```json
-"control_listen": "127.0.0.1:9090"
+{
+  "control_listen": "127.0.0.1:9090"
+}
 ```
 
 #### From CLI (per-field override of the config file)
