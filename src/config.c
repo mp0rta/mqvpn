@@ -46,6 +46,7 @@ enum {
     SEC_TLS,
     SEC_AUTH,
     SEC_MULTIPATH,
+    SEC_CONTROL,
 };
 
 static int
@@ -56,6 +57,7 @@ parse_section(const char *name)
     if (strcasecmp(name, "TLS") == 0) return SEC_TLS;
     if (strcasecmp(name, "Auth") == 0) return SEC_AUTH;
     if (strcasecmp(name, "Multipath") == 0) return SEC_MULTIPATH;
+    if (strcasecmp(name, "Control") == 0) return SEC_CONTROL;
     return -1;
 }
 
@@ -319,6 +321,14 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
             }
         } else {
             LOG_WRN("%s:%d: unknown key '%s' in [Multipath]", path, lineno, key);
+        }
+        break;
+
+    case SEC_CONTROL:
+        if (strcasecmp(key, "Listen") == 0) {
+            snprintf(cfg->control_listen, sizeof(cfg->control_listen), "%s", val);
+        } else {
+            LOG_WRN("%s:%d: unknown key '%s' in [Control]", path, lineno, key);
         }
         break;
 

@@ -1008,6 +1008,39 @@ test_value_contains_equals(void)
     unlink(f);
 }
 
+static void
+test_parse_control_section(void)
+{
+    const char *ini = "[Interface]\n"
+                      "Listen = 0.0.0.0:443\n"
+                      "\n"
+                      "[Control]\n"
+                      "Listen = 127.0.0.1:9090\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "[Control] parse ok");
+    ASSERT_EQ_STR(cfg.control_listen, "127.0.0.1:9090", "control_listen");
+}
+
+static void
+test_parse_control_absent(void)
+{
+    const char *ini = "[Interface]\n"
+                      "Listen = 0.0.0.0:443\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "no [Control] is ok");
+    ASSERT_EQ_STR(cfg.control_listen, "", "control_listen empty when section absent");
+}
+
 int
 main(void)
 {
@@ -1065,6 +1098,10 @@ main(void)
     test_dns_exceeds_max();
     test_reconnect_interval_overflow();
     test_value_contains_equals();
+
+    /* [Control] section tests */
+    test_parse_control_section();
+    test_parse_control_absent();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
