@@ -80,3 +80,40 @@ def test_caps_index_at_100_entries(tmp_path):
     # The oldest (index 99 in original = old0099) was dropped
     assert "raw_throughput_old_99.json" in orphans
     assert "raw_throughput_new.json" not in orphans
+
+
+def test_no_new_files_means_no_insert_no_orphans(tmp_path):
+    """Workflow ran but produced no JSON files (e.g. all bench scripts skipped).
+
+    Should be idempotent: index unchanged, no orphans.
+    """
+    existing = [{
+        "commit": "abc",
+        "timestamp": "2026-05-04T00:00:00Z",
+        "type": "push",
+        "files": ["raw_throughput_20260504.json"],
+    }]
+    new_index, orphans = run_updater(
+        tmp_path,
+        index=existing,
+        new_files=[],
+        commit="newcomm",
+        ts="2026-05-05T00:00:00Z",
+        run_type="push",
+    )
+    assert new_index == existing
+    assert orphans == []
+
+
+def test_index_json_in_new_files_dir_is_ignored(tmp_path):
+    """If a stray index.json appears in ci_bench_results, it must not be registered."""
+    new_index, orphans = run_updater(
+        tmp_path,
+        index=[],
+        new_files=["index.json", "raw_throughput_20260505.json"],
+        commit="abc",
+        ts="2026-05-05T00:00:00Z",
+        run_type="push",
+    )
+    assert new_index[0]["files"] == ["raw_throughput_20260505.json"]
+    assert orphans == []
