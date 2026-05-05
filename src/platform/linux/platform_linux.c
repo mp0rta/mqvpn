@@ -525,12 +525,6 @@ try_readd_removed_path(platform_ctx_t *p, const char *ifname)
 
         /* Socket buffers are set by mqvpn_client_add_path_fd() (7 MiB) */
 
-        if (linux_pin_socket_to_iface(fd, ifname) < 0) {
-            LOG_WRN("netlink: iface pin for re-add %s failed", ifname);
-            close(fd);
-            return 0;
-        }
-
         /* Bind to ephemeral port */
         mqvpn_path_t *mp = &p->path_mgr.paths[i];
         memset(&mp->local_addr, 0, sizeof(mp->local_addr));
@@ -547,6 +541,13 @@ try_readd_removed_path(platform_ctx_t *p, const char *ifname)
         }
         if (bind(fd, (struct sockaddr *)&mp->local_addr, mp->local_addrlen) < 0) {
             LOG_WRN("netlink: bind() for re-add %s: %s", ifname, strerror(errno));
+            close(fd);
+            return 0;
+        }
+
+        /* Pin AFTER bind, matching startup-loop order. */
+        if (linux_pin_socket_to_iface(fd, ifname) < 0) {
+            LOG_WRN("netlink: iface pin for re-add %s failed", ifname);
             close(fd);
             return 0;
         }
