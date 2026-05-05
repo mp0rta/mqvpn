@@ -54,3 +54,29 @@ def test_inserts_new_entry_into_empty_index(tmp_path):
         "failover_20260505_120100.json",
     ])
     assert orphans == []
+
+
+def test_caps_index_at_100_entries(tmp_path):
+    """When existing index already has 100 entries, oldest is dropped after insert."""
+    existing_entries = [
+        {
+            "commit": f"old{i:04d}",
+            "timestamp": f"2026-01-{(i % 28) + 1:02d}T00:00:00Z",
+            "type": "push",
+            "files": [f"raw_throughput_old_{i}.json"],
+        }
+        for i in range(100)
+    ]
+    new_index, orphans = run_updater(
+        tmp_path,
+        index=existing_entries,
+        new_files=["raw_throughput_new.json"],
+        commit="newcomm",
+        ts="2026-05-05T12:00:00Z",
+        run_type="push",
+    )
+    assert len(new_index) == 100
+    assert new_index[0]["commit"] == "newcomm"
+    # The oldest (index 99 in original = old0099) was dropped
+    assert "raw_throughput_old_99.json" in orphans
+    assert "raw_throughput_new.json" not in orphans
