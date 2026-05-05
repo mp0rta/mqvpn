@@ -60,18 +60,14 @@ export function usePerfData(subPath: string, maxEntries = 10) {
       const index: IndexEntry[] = await fetchJson(`${basePath}/index.json`)
       const entries = index.slice(0, maxEntries)
 
-      const result: BenchmarkItem[] = []
-      for (const entry of entries) {
-        for (const file of entry.files || []) {
-          const data = await fetchJson(`${basePath}/${file}`)
-          result.push({
-            commit: entry.commit,
-            timestamp: entry.timestamp,
-            data,
-          })
-        }
-      }
-      items.value = result
+      const tasks = entries.flatMap(entry =>
+        (entry.files || []).map(async file => ({
+          commit: entry.commit,
+          timestamp: entry.timestamp,
+          data: await fetchJson(`${basePath}/${file}`),
+        }))
+      )
+      items.value = await Promise.all(tasks)
     } catch (e: any) {
       error.value = e.message || 'Failed to load benchmark data.'
     } finally {
