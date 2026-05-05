@@ -1,18 +1,13 @@
 #include "path_mgr.h"
 #include "log.h"
+#include "compat/socket_compat.h"
 
+#include <stdio.h>
 #include <string.h>
-#include <errno.h>
 #include <inttypes.h>
 
-#ifdef _WIN32
-#  include <winsock2.h>
-#  include <ws2tcpip.h>
-#else
-#  include <unistd.h>
-#  include <fcntl.h>
-#  include <sys/socket.h>
-#  include <arpa/inet.h>
+#ifndef _WIN32
+#  include <arpa/inet.h> /* htonl */
 #endif
 
 void
@@ -35,34 +30,19 @@ mqvpn_path_mgr_add(mqvpn_path_mgr_t *mgr, const char *iface,
 
     int idx = mgr->n_paths;
     mqvpn_path_t *p = &mgr->paths[idx];
-#ifdef _WIN32
-    ADDRESS_FAMILY af = peer_addr->ss_family;
-#else
-    sa_family_t af = peer_addr->ss_family;
-#endif
+    int af = peer_addr->ss_family;
 
     int fd = (int)socket(af, SOCK_DGRAM, 0);
     if (fd < 0) {
-        LOG_ERR("path_mgr: socket: %s", strerror(errno));
+        LOG_ERR("path_mgr: socket: %s", mqvpn_socket_strerror());
         return -1;
     }
 
-#ifdef _WIN32
-    {
-        u_long nonblock = 1;
-        if (ioctlsocket((SOCKET)fd, FIONBIO, &nonblock) != 0) {
-            LOG_ERR("path_mgr: ioctlsocket: %d", WSAGetLastError());
-            closesocket((SOCKET)fd);
-            return -1;
-        }
-    }
-#else
-    if (fcntl(fd, F_SETFL, O_NONBLOCK) < 0) {
-        LOG_ERR("path_mgr: fcntl: %s", strerror(errno));
-        close(fd);
+    if (mqvpn_socket_set_nonblock(fd) < 0) {
+        LOG_ERR("path_mgr: set_nonblock: %s", mqvpn_socket_strerror());
+        mqvpn_socket_close(fd);
         return -1;
     }
-#endif
 
     int bufsize = 1 * 1024 * 1024;
     setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (const char *)&bufsize, sizeof(bufsize));
@@ -78,20 +58,10 @@ mqvpn_path_mgr_add(mqvpn_path_mgr_t *mgr, const char *iface,
     }
 #endif
 
-    /* Bind to specific interface */
+    /* Store iface label only. Pinning egress to the named interface is
+     * the platform layer's responsibility (linux_pin_socket_to_iface /
+     * win_pin_socket_to_iface), called after this returns. */
     if (iface && iface[0]) {
-#ifdef _WIN32
-        /* Windows: no SO_BINDTODEVICE. The iface name is stored here as a
-         * label; the platform layer (platform_windows.c) applies
-         * IP_UNICAST_IF / IPV6_UNICAST_IF after this returns to pin egress
-         * to the named NIC. */
-#else
-        if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, iface, strlen(iface) + 1) < 0) {
-            LOG_ERR("path_mgr: SO_BINDTODEVICE(%s): %s", iface, strerror(errno));
-            close(fd);
-            return -1;
-        }
-#endif
         snprintf(p->iface, sizeof(p->iface), "%s", iface);
     }
 
@@ -110,13 +80,8 @@ mqvpn_path_mgr_add(mqvpn_path_mgr_t *mgr, const char *iface,
     }
 
     if (bind(fd, (struct sockaddr *)&p->local_addr, p->local_addrlen) < 0) {
-#ifdef _WIN32
-        LOG_ERR("path_mgr: bind(%s): %d", iface ? iface : "any", WSAGetLastError());
-        closesocket((SOCKET)fd);
-#else
-        LOG_ERR("path_mgr: bind(%s): %s", iface ? iface : "any", strerror(errno));
-        close(fd);
-#endif
+        LOG_ERR("path_mgr: bind(%s): %s", iface ? iface : "any", mqvpn_socket_strerror());
+        mqvpn_socket_close(fd);
         return -1;
     }
 
@@ -167,14 +132,8 @@ void
 mqvpn_path_mgr_destroy(mqvpn_path_mgr_t *mgr)
 {
     for (int i = 0; i < mgr->n_paths; i++) {
-        if (mgr->paths[i].fd >= 0) {
-#ifdef _WIN32
-            closesocket((SOCKET)mgr->paths[i].fd);
-#else
-            close(mgr->paths[i].fd);
-#endif
-            mgr->paths[i].fd = -1;
-        }
+        mqvpn_socket_close(mgr->paths[i].fd);
+        mgr->paths[i].fd = -1;
     }
     mgr->n_paths = 0;
 }

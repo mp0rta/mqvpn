@@ -37,6 +37,25 @@ static void status_log_cb(evutil_socket_t fd, short what, void *arg);
 #include <ifaddrs.h>
 
 /* ================================================================
+ *  Socket pinning to a specific egress interface
+ * ================================================================ */
+
+/* Pin an outgoing UDP socket to the given interface via SO_BINDTODEVICE.
+ * Symmetric to win_pin_socket_to_iface() in platform_windows.c.
+ * Returns 0 on success, -1 on failure. The caller decides whether
+ * failure is fatal. */
+static int
+linux_pin_socket_to_iface(int fd, const char *ifname)
+{
+    if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, ifname,
+                   (socklen_t)(strlen(ifname) + 1)) < 0) {
+        LOG_WRN("setsockopt(SO_BINDTODEVICE, '%s'): %s", ifname, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+/* ================================================================
  *  libmqvpn callbacks
  * ================================================================ */
 
@@ -506,10 +525,8 @@ try_readd_removed_path(platform_ctx_t *p, const char *ifname)
 
         /* Socket buffers are set by mqvpn_client_add_path_fd() (7 MiB) */
 
-        if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, ifname,
-                       (socklen_t)(strlen(ifname) + 1)) < 0) {
-            LOG_WRN("netlink: SO_BINDTODEVICE(%s) for re-add: %s", ifname,
-                    strerror(errno));
+        if (linux_pin_socket_to_iface(fd, ifname) < 0) {
+            LOG_WRN("netlink: iface pin for re-add %s failed", ifname);
             close(fd);
             return 0;
         }
@@ -788,15 +805,34 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     /* Create UDP sockets */
     mqvpn_path_mgr_init(&ctx.path_mgr);
     if (cfg->n_paths > 0) {
-        for (int i = 0; i < cfg->n_paths; i++)
-            mqvpn_path_mgr_add(&ctx.path_mgr, cfg->path_ifaces[i], &ctx.server_addr);
+        for (int i = 0; i < cfg->n_paths; i++) {
+            if (mqvpn_path_mgr_add(&ctx.path_mgr, cfg->path_ifaces[i], &ctx.server_addr) <
+                0) {
+                LOG_ERR("failed to create UDP socket for path[%d] '%s'", i,
+                        cfg->path_ifaces[i]);
+                goto cleanup;
+            }
+        }
     } else {
-        mqvpn_path_mgr_add(&ctx.path_mgr, NULL, &ctx.server_addr);
+        if (mqvpn_path_mgr_add(&ctx.path_mgr, NULL, &ctx.server_addr) < 0) {
+            LOG_ERR("failed to create UDP socket");
+            goto cleanup;
+        }
     }
 
     /* Register paths with library and create socket events */
     for (int i = 0; i < ctx.path_mgr.n_paths; i++) {
         mqvpn_path_t *mp = &ctx.path_mgr.paths[i];
+
+        if (mp->iface[0]) {
+            if (linux_pin_socket_to_iface(mp->fd, mp->iface) < 0) {
+                LOG_ERR("path[%d] iface pin failed for '%s'; --path values must "
+                        "be valid interface names (see `ip link`)",
+                        i, mp->iface);
+                goto cleanup;
+            }
+        }
+
         mqvpn_path_desc_t desc = {0};
         desc.struct_size = sizeof(desc);
         desc.fd = mp->fd;

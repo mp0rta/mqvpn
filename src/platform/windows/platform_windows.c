@@ -566,10 +566,19 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     /* Create UDP sockets */
     mqvpn_path_mgr_init(&ctx.path_mgr);
     if (cfg->n_paths > 0) {
-        for (int i = 0; i < cfg->n_paths; i++)
-            mqvpn_path_mgr_add(&ctx.path_mgr, cfg->path_ifaces[i], &ctx.server_addr);
+        for (int i = 0; i < cfg->n_paths; i++) {
+            if (mqvpn_path_mgr_add(&ctx.path_mgr, cfg->path_ifaces[i], &ctx.server_addr) <
+                0) {
+                LOG_ERR("failed to create UDP socket for path[%d] '%s'", i,
+                        cfg->path_ifaces[i]);
+                goto cleanup;
+            }
+        }
     } else {
-        mqvpn_path_mgr_add(&ctx.path_mgr, NULL, &ctx.server_addr);
+        if (mqvpn_path_mgr_add(&ctx.path_mgr, NULL, &ctx.server_addr) < 0) {
+            LOG_ERR("failed to create UDP socket");
+            goto cleanup;
+        }
     }
 
     /* Register paths with library and create socket events */
