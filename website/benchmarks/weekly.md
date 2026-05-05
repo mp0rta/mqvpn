@@ -11,7 +11,7 @@ const {
   rawRows, failoverRows, aggregateRows,
   multipathSchedulerRows, udpSweepSummaryRows, udpSweepRows, ntnRows,
   backupFecRows
-} = usePerfData('/perf-data/weekly')
+} = usePerfData('/weekly')
 
 // Failover filter
 const foSchedFilter = ref('wlb')

@@ -11,7 +11,7 @@ const {
   rawRows, failoverRows, aggregateRows,
   multipathSchedulerRows, udpSweepSummaryRows, udpSweepRows, ntnRows,
   backupFecRows
-} = usePerfData('/perf-data/weekly')
+} = usePerfData('/weekly')
 
 const foSchedFilter = ref('wlb')
 const foPathFilter = ref('A')

@@ -6,7 +6,7 @@ layout: doc
 import { computed } from 'vue'
 import { usePerfData } from '../.vitepress/theme/composables/usePerfData'
 
-const push = usePerfData('/perf-data', 1)
+const push = usePerfData('', 1)
 
 const latestRaw = computed(() => push.rawRows.value[0] || null)
 const latestFailover = computed(() => push.failoverRows.value.find(r => r.fault_path === 'A') || null)

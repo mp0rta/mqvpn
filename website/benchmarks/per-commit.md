@@ -6,7 +6,7 @@ layout: doc
 import { ref, computed } from 'vue'
 import { usePerfData } from '../.vitepress/theme/composables/usePerfData'
 
-const { loading, error, rawRows, failoverRows, aggregateRows } = usePerfData('/perf-data')
+const { loading, error, rawRows, failoverRows, aggregateRows } = usePerfData('')
 
 const foSchedFilter = ref('wlb')
 const foPathFilter = ref('A')
