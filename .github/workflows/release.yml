@@ -393,23 +393,26 @@ jobs:
       - name: Generate ephemeral release keystore
         run: |
           KEYSTORE="$RUNNER_TEMP/release.jks"
-          STOREPASS=$(openssl rand -base64 24)
-          KEYPASS=$(openssl rand -base64 24)
+          # Single password for both store and key entry. JDK 9+ defaults
+          # keytool to PKCS12, which silently ignores a distinct -keypass
+          # during -genkeypair and encrypts the key with the storePassword
+          # — a separate keyPass would later trip BadPaddingException at
+          # APK-signing time. Using one password matches PKCS12 conventions.
+          PASS=$(openssl rand -base64 24)
           keytool -genkeypair -v \
             -keystore "$KEYSTORE" \
-            -storepass "$STOREPASS" \
-            -keypass "$KEYPASS" \
+            -storepass "$PASS" \
+            -keypass "$PASS" \
             -alias mqvpn-release \
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=mqvpn sample, O=mqvpn, C=JP" >/dev/null
-          # Mask passwords in workflow logs; passwords are written only to
-          # the per-job env file ($GITHUB_ENV) which is scoped to this run.
-          echo "::add-mask::$STOREPASS"
-          echo "::add-mask::$KEYPASS"
+          # Mask password in workflow logs; value is written only to the
+          # per-job env file ($GITHUB_ENV) which is scoped to this run.
+          echo "::add-mask::$PASS"
           echo "MQVPN_KEYSTORE_PATH=$KEYSTORE" >> "$GITHUB_ENV"
-          echo "MQVPN_KEYSTORE_PASSWORD=$STOREPASS" >> "$GITHUB_ENV"
+          echo "MQVPN_KEYSTORE_PASSWORD=$PASS" >> "$GITHUB_ENV"
           echo "MQVPN_KEY_ALIAS=mqvpn-release" >> "$GITHUB_ENV"
-          echo "MQVPN_KEY_PASSWORD=$KEYPASS" >> "$GITHUB_ENV"
+          echo "MQVPN_KEY_PASSWORD=$PASS" >> "$GITHUB_ENV"
 
       - name: Build signed release APK
         working-directory: android
