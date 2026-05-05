@@ -20,3 +20,9 @@ MaxClients = 64
 [Multipath]
 # Scheduler: wlb (weighted load balancing) or minrtt (lowest RTT)
 Scheduler = wlb
+
+# [Control]
+# Local-only TCP control/admin API (add/remove users, query stats).
+# Uncomment to enable. No authentication — bind 127.0.0.1 only unless you
+# place it behind a reverse proxy / SSH tunnel / firewall.
+# Listen = 127.0.0.1:9090
