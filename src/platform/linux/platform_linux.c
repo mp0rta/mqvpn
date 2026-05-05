@@ -705,11 +705,13 @@ recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
         const char *ifname = p->path_mgr.paths[i].iface;
         if (!iface_is_up_and_running(ifname)) continue;
         if (!iface_has_ip(ifname)) continue;
-        /* try_readd_removed_path() walks all matching slots, so one call
-         * per ifname is enough — break out of the per-slot scan. */
+        /* Don't break: distinct ifnames (eth0 + wlan0 + ...) may be down
+         * simultaneously. try_readd_removed_path() flips path_removed_by_platform
+         * to 0 on success, so subsequent loop iterations skip the now-restored
+         * slot. The duplicated work for two slots sharing one ifname is one
+         * early-return scan inside try_readd_removed_path(), which is cheap. */
         if (try_readd_removed_path(p, ifname))
             LOG_INF("netlink: timer re-added path %s after carrier-up failure", ifname);
-        break;
     }
 
     /* Re-arm */
