@@ -86,18 +86,9 @@ jobs:
           path: ci_bench_results/*.json
           retention-days: 90
 
-      - name: Install aws-cli (if missing)
+      - name: Verify aws-cli is installed on runner
         if: success()
-        run: |
-          if ! command -v aws >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y curl unzip
-            curl -sL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
-            unzip -q /tmp/awscliv2.zip -d /tmp
-            sudo /tmp/aws/install
-            rm -rf /tmp/awscliv2.zip /tmp/aws
-          fi
-          aws --version
+        run: aws --version
 
       - name: Publish results to R2
         if: success()
