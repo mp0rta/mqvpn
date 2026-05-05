@@ -377,6 +377,10 @@ static int g_state_change_count = 0;
 static mqvpn_client_state_t g_last_old_state;
 static mqvpn_client_state_t g_last_new_state;
 
+static int g_path_event_count = 0;
+static mqvpn_path_handle_t g_last_path_event_handle;
+static mqvpn_path_status_t g_last_path_event_status;
+
 static void
 dummy_tun_output(const uint8_t *p, size_t l, void *u)
 {
@@ -398,6 +402,14 @@ mock_state_changed(mqvpn_client_state_t old_s, mqvpn_client_state_t new_s, void 
     g_last_old_state = old_s;
     g_last_new_state = new_s;
 }
+static void
+mock_path_event(mqvpn_path_handle_t h, mqvpn_path_status_t s, void *u)
+{
+    (void)u;
+    g_path_event_count++;
+    g_last_path_event_handle = h;
+    g_last_path_event_status = s;
+}
 
 /* Helper: create a valid client for lifecycle tests */
 static mqvpn_client_t *
@@ -410,6 +422,7 @@ make_test_client(void)
     cbs.tun_output = dummy_tun_output;
     cbs.tunnel_config_ready = dummy_config_ready;
     cbs.state_changed = mock_state_changed;
+    cbs.path_event = mock_path_event;
 
     mqvpn_client_t *c = mqvpn_client_new(cfg, &cbs, NULL);
     mqvpn_config_free(cfg);
@@ -972,6 +985,90 @@ TEST(activation_failure_eventually_closes_path)
     mqvpn_client_destroy(c);
 }
 
+/* ── path_event close-out semantics ──
+ *
+ * remove_path / drop_path transition a non-CLOSED slot to CLOSED. The
+ * path_event callback must fire so observers (Android SDK / control-plane
+ * API) see the handle's lifecycle terminate. Without this, a slot rolled
+ * back from PENDING/DEGRADED leaves the observer with a dangling handle. */
+
+TEST(remove_path_emits_closed_event_when_active)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_desc_t desc = {0};
+    snprintf(desc.iface, sizeof(desc.iface), "eth0");
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, &desc);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    /* Reset counter to ignore any setup-side events from add_path_fd. */
+    g_path_event_count = 0;
+
+    ASSERT_EQ(mqvpn_client_remove_path(c, h), MQVPN_OK);
+
+    ASSERT_EQ(g_path_event_count, 1);
+    ASSERT_EQ(g_last_path_event_handle, h);
+    ASSERT_EQ(g_last_path_event_status, MQVPN_PATH_CLOSED);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(remove_path_does_not_emit_when_already_closed)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_desc_t desc = {0};
+    snprintf(desc.iface, sizeof(desc.iface), "eth0");
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, &desc);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    /* First remove transitions PENDING → CLOSED; event fires (verified
+     * separately). */
+    ASSERT_EQ(mqvpn_client_remove_path(c, h), MQVPN_OK);
+
+    /* Second remove on already-CLOSED path must be a path_event no-op so
+     * observers don't see redundant CLOSED events. */
+    g_path_event_count = 0;
+    ASSERT_EQ(mqvpn_client_remove_path(c, h), MQVPN_OK);
+    ASSERT_EQ(g_path_event_count, 0);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(drop_path_emits_closed_event_when_active)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_desc_t desc = {0};
+    snprintf(desc.iface, sizeof(desc.iface), "eth0");
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, &desc);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    g_path_event_count = 0;
+
+    ASSERT_EQ(mqvpn_client_drop_path(c, h), MQVPN_OK);
+
+    ASSERT_EQ(g_path_event_count, 1);
+    ASSERT_EQ(g_last_path_event_handle, h);
+    ASSERT_EQ(g_last_path_event_status, MQVPN_PATH_CLOSED);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(drop_path_does_not_emit_when_already_closed)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_desc_t desc = {0};
+    snprintf(desc.iface, sizeof(desc.iface), "eth0");
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, &desc);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    ASSERT_EQ(mqvpn_client_drop_path(c, h), MQVPN_OK);
+
+    g_path_event_count = 0;
+    ASSERT_EQ(mqvpn_client_drop_path(c, h), MQVPN_OK);
+    ASSERT_EQ(g_path_event_count, 0);
+
+    mqvpn_client_destroy(c);
+}
+
 /* ── Path reactivation preconditions ── */
 
 TEST(reactivate_path_null_client)
@@ -1097,6 +1194,12 @@ main(void)
     run_activation_failure_first_retry_marks_degraded();
     run_activation_failure_invalid_handle_returns_error();
     run_activation_failure_eventually_closes_path();
+
+    /* path_event close-out semantics */
+    run_remove_path_emits_closed_event_when_active();
+    run_remove_path_does_not_emit_when_already_closed();
+    run_drop_path_emits_closed_event_when_active();
+    run_drop_path_does_not_emit_when_already_closed();
 
     /* Path reactivation tests */
     run_reactivate_path_null_client();

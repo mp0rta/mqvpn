@@ -1628,6 +1628,7 @@ mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
     path_entry_t *p = find_path_by_handle(c, path);
     if (!p) return MQVPN_ERR_INVALID_ARG;
 
+    int was_closed = (p->status == MQVPN_PATH_CLOSED);
     p->status = MQVPN_PATH_CLOSED;
     p->active = 0;
     p->recreate_after_us = 0;
@@ -1635,6 +1636,11 @@ mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
     p->path_stable_since_us = 0;
     if (p->in_use && c->engine && c->conn)
         xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
+    /* Emit close-out event so observers (Android SDK / control-plane) see
+     * the handle's lifecycle terminate. Idempotent: a second remove on an
+     * already-CLOSED slot does not re-fire. */
+    if (!was_closed && c->cbs.path_event)
+        c->cbs.path_event(p->handle, MQVPN_PATH_CLOSED, c->user_ctx);
     return MQVPN_OK;
 }
 
@@ -1650,11 +1656,14 @@ mqvpn_client_drop_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
     /* Free the slot but do NOT call xqc_conn_close_path().
      * xquic will detect the dead fd via sendto() errors and remove
      * the path through its normal PTO-based failure detection. */
+    int was_closed = (p->status == MQVPN_PATH_CLOSED);
     p->status = MQVPN_PATH_CLOSED;
     p->active = 0;
     p->recreate_after_us = 0;
     p->recreate_retries = 0;
     p->path_stable_since_us = 0;
+    if (!was_closed && c->cbs.path_event)
+        c->cbs.path_event(p->handle, MQVPN_PATH_CLOSED, c->user_ctx);
     return MQVPN_OK;
 }
 
