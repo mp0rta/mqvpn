@@ -1161,6 +1161,17 @@ path_recreate_backoff(int retries)
 static void
 apply_path_activation_failure(mqvpn_client_t *c, path_entry_t *p, uint64_t now_us)
 {
+    /* Defensive: clear connection-bound state. Today the only callers
+     * (client_activate_path on synchronous xqc_conn_create_path failure;
+     * the test wrapper) cannot have set in_use/xqc_path_id/path_stable_since_us
+     * to non-zero, but consolidating with cb_path_removed's bookkeeping makes
+     * this function safe regardless of caller invariants and avoids a stale
+     * xqc_path_id surviving a future refactor that moved successful state
+     * mutation earlier in client_activate_path. */
+    p->in_use = 0;
+    p->xqc_path_id = 0;
+    p->path_stable_since_us = 0;
+
     p->recreate_retries++;
     if (p->recreate_retries >= PATH_RECREATE_MAX_RETRIES) {
         p->status = MQVPN_PATH_CLOSED;
