@@ -1069,6 +1069,40 @@ TEST(drop_path_does_not_emit_when_already_closed)
     mqvpn_client_destroy(c);
 }
 
+/* Reproduce the try_readd_removed_path rollback flow at unit level: a
+ * synchronously-failed activation transitions the slot PENDING → DEGRADED
+ * (firing path_event(DEGRADED)), and the platform's subsequent rollback
+ * via remove_path must close it out with path_event(CLOSED). Without the
+ * close-out emission, observers (Android SDK / control-plane) would see
+ * the handle stuck at DEGRADED forever, since the next re-add allocates
+ * a fresh next_path_handle++. */
+TEST(rollback_after_activation_failure_emits_degraded_then_closed)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_desc_t desc = {0};
+    snprintf(desc.iface, sizeof(desc.iface), "eth0");
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, &desc);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    /* Reset counter to ignore any setup-side events. */
+    g_path_event_count = 0;
+
+    /* Step 1: synchronous activation failure transitions PENDING → DEGRADED. */
+    ASSERT_EQ(mqvpn_client_apply_path_activation_failure(c, h, 1000000), 0);
+    ASSERT_EQ(g_path_event_count, 1);
+    ASSERT_EQ(g_last_path_event_handle, h);
+    ASSERT_EQ(g_last_path_event_status, MQVPN_PATH_DEGRADED);
+
+    /* Step 2: platform rolls back by calling remove_path on the DEGRADED
+     * slot. This must emit the close-out event. */
+    ASSERT_EQ(mqvpn_client_remove_path(c, h), MQVPN_OK);
+    ASSERT_EQ(g_path_event_count, 2);
+    ASSERT_EQ(g_last_path_event_handle, h);
+    ASSERT_EQ(g_last_path_event_status, MQVPN_PATH_CLOSED);
+
+    mqvpn_client_destroy(c);
+}
+
 /* ── Path reactivation preconditions ── */
 
 TEST(reactivate_path_null_client)
@@ -1200,6 +1234,7 @@ main(void)
     run_remove_path_does_not_emit_when_already_closed();
     run_drop_path_emits_closed_event_when_active();
     run_drop_path_does_not_emit_when_already_closed();
+    run_rollback_after_activation_failure_emits_degraded_then_closed();
 
     /* Path reactivation tests */
     run_reactivate_path_null_client();
