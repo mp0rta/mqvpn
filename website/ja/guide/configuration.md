@@ -170,6 +170,25 @@ sudo mqvpn --mode server ... --control-port 9090
 
 デフォルトでは `127.0.0.1` にバインドされます。認証機能はないため、信頼できるインターフェースのみにバインドしてください。
 
+### 設定ファイルから有効化する
+
+Control API は `/etc/mqvpn/server.conf` からも有効化できます：
+
+```ini
+[Control]
+Listen = 127.0.0.1:9090
+```
+
+JSON 設定の場合：
+
+```json
+{
+  "control_listen": "127.0.0.1:9090"
+}
+```
+
+CLI フラグ（`--control-port`, `--control-addr`）は設定ファイルの値を**フィールド単位**で上書きします。`--control-port 0` を指定すると、`[Control] Listen` が設定ファイルに書かれていても明示的に無効化できます。
+
 ### コマンド
 
 ユーザーの追加：

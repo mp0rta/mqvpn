@@ -170,6 +170,25 @@ sudo mqvpn --mode server ... --control-port 9090
 
 The control API binds to `127.0.0.1` by default. It has no authentication, so only bind to trusted interfaces.
 
+### Enable from config file
+
+The control API can also be enabled from `/etc/mqvpn/server.conf`:
+
+```ini
+[Control]
+Listen = 127.0.0.1:9090
+```
+
+…or from the JSON equivalent:
+
+```json
+{
+  "control_listen": "127.0.0.1:9090"
+}
+```
+
+CLI flags (`--control-port`, `--control-addr`) override the config-file values per field. `--control-port 0` explicitly disables the API even if `[Control] Listen` is set in the config.
+
 ### Commands
 
 Add a user:
