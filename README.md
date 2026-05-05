@@ -183,6 +183,33 @@ sudo vi /etc/mqvpn/client-home.conf   # edit server address, auth key, etc.
 sudo systemctl enable --now mqvpn-client@home
 ```
 
+### Enabling the server control API
+
+The control API exposes runtime user management and stats over a localhost
+TCP+JSON interface. It is **disabled by default**.
+
+#### From `install.sh`
+
+    sudo bash install.sh --enable-control            # port 9090
+    sudo bash install.sh --enable-control 9091
+
+#### From INI (`/etc/mqvpn/server.conf`)
+
+    [Control]
+    Listen = 127.0.0.1:9090
+
+#### From JSON (`/etc/mqvpn/server.json`)
+
+    "control_listen": "127.0.0.1:9090"
+
+#### From CLI (per-field override of the config file)
+
+    mqvpn --config /etc/mqvpn/server.conf --control-port 9090
+
+The control API has no built-in authentication. Bind to 127.0.0.1 only,
+unless you have placed it behind a reverse proxy, SSH tunnel, or
+firewall-restricted listener.
+
 ## Control API
 
 A running server can be managed at runtime over a TCP port using newline-delimited JSON.
