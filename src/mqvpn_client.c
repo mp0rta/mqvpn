@@ -351,6 +351,16 @@ find_path_by_handle(mqvpn_client_t *c, mqvpn_path_handle_t h)
     return NULL;
 }
 
+/* Returns the index of the first active path slot, or -1 if none. */
+static int
+first_active_idx(const mqvpn_client_t *c)
+{
+    if (!c) return -1;
+    for (int i = 0; i < c->n_paths; i++)
+        if (c->paths[i].active) return i;
+    return -1;
+}
+
 /* Returns the fd of the first active path slot, or -1 if none.
  *
  * cb_write_socket() (no path_id) and get_fd_for_path()'s fallback both
@@ -370,10 +380,8 @@ __attribute__((visibility("hidden")))
 int
 mqvpn_client_first_active_fd(const mqvpn_client_t *c)
 {
-    if (!c) return -1;
-    for (int i = 0; i < c->n_paths; i++)
-        if (c->paths[i].active) return c->paths[i].fd;
-    return -1;
+    int idx = first_active_idx(c);
+    return idx >= 0 ? c->paths[idx].fd : -1;
 }
 
 /* Get fd for xquic path_id, falling back to the first active slot. */
@@ -529,13 +537,7 @@ cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *pe
      * would hand back the fd of a path that was just dropped (the
      * platform may have already closed the descriptor or moved it onto a
      * doomed interface). */
-    int active_idx = -1;
-    for (int i = 0; i < c->n_paths; i++) {
-        if (c->paths[i].active) {
-            active_idx = i;
-            break;
-        }
-    }
+    int active_idx = first_active_idx(c);
     int fd = (active_idx >= 0) ? c->paths[active_idx].fd : -1;
     if (fd < 0) return XQC_SOCKET_ERROR;
 
