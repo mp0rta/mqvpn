@@ -38,12 +38,19 @@ async function fetchJson(url: string) {
   return res.json()
 }
 
+// PERF_DATA_BASE includes the bucket prefix `perf-data/` so subPath '' reaches
+// the per-commit index. The R2 custom domain is bound to bucket root, hence the
+// duplicated "perf-data" segment (subdomain + prefix) in the URL.
+const PERF_DATA_BASE = (import.meta as any).env?.VITE_PERF_DATA_BASE
+  ?? 'https://perf-data.mqvpn.org/perf-data'
+
 /**
- * Fetch benchmark data from a perf-data directory.
- * @param basePath - e.g. '/perf-data' or '/perf-data/weekly'
+ * Fetch benchmark data from R2.
+ * @param subPath - '' for per-commit, '/weekly' for weekly
  * @param maxEntries - how many index entries to load (default 10)
  */
-export function usePerfData(basePath: string, maxEntries = 10) {
+export function usePerfData(subPath: string, maxEntries = 10) {
+  const basePath = `${PERF_DATA_BASE}${subPath}`
   const loading = ref(true)
   const error = ref('')
   const items: Ref<BenchmarkItem[]> = ref([])
