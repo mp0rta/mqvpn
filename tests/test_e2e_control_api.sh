@@ -217,6 +217,37 @@ start_server_with_flags() {
     return 0
 }
 
+# --- Launch-only server helper ---
+#
+# Kills any existing _BENCH_SERVER_PID and starts a new mqvpn inside $NS_SERVER
+# with the supplied CLI args. Does NOT call bench_start_vpn_server — the caller
+# must already have seeded $_BENCH_WORK_DIR/server.crt|key and $_BENCH_PSK
+# (typically by calling bench_start_vpn_server once at the start of the phase
+# and then killing its server).
+#
+# Used by phase_g (--config-driven server) where calling bench_start_vpn_server
+# inside the helper would re-roll _BENCH_PSK and invalidate any INI that already
+# embedded the prior PSK.
+relaunch_server_in_ns() {
+    local server_log="$1"
+    shift
+
+    kill "$_BENCH_SERVER_PID" 2>/dev/null || true
+    wait "$_BENCH_SERVER_PID" 2>/dev/null || true
+
+    ip netns exec "$NS_SERVER" "$MQVPN" "$@" \
+        >"$server_log" 2>&1 &
+    _BENCH_SERVER_PID=$!
+    sleep 1
+
+    if ! kill -0 "$_BENCH_SERVER_PID" 2>/dev/null; then
+        echo "  ERROR: server failed to start; tail of $server_log:" >&2
+        tail -20 "$server_log" >&2
+        return 1
+    fi
+    return 0
+}
+
 # --- Client launcher with a custom auth-key ---
 #
 # bench_start_vpn_client always uses $_BENCH_PSK; we need to authenticate as
@@ -971,6 +1002,107 @@ test_phase_f_scheduler_smoke() {
     return 0
 }
 
+# ── Phase G: INI-driven control-API enablement (control-plane only) ───────
+#
+# Locks two contracts introduced by file_cfg → main.c integration:
+#   1. INI [Control] Listen alone enables the API (no CLI --control-port)
+#   2. Per-field merge: INI port + CLI --control-addr → CLI addr, INI port
+#
+# This is control-plane only — no client connection, no data plane traffic.
+# Runs LAST so it doesn't disrupt the alice/bob server chain that Phases A→F
+# rely on (Phase B explicitly reuses Phase A's server).
+test_phase_g_ini_config() {
+    local server_log_a="${LOG_DIR}/phase_g_ini_a_server.log"
+    local server_log_b="${LOG_DIR}/phase_g_ini_b_server.log"
+    local ini_port_a=19090
+    local ini_port_b=19091
+
+    # Phase F's last iteration leaves a server+client+netns alive. Mirror the
+    # _phase_f_one pattern: tear down everything before binding 4433 again.
+    echo "  G: tear down prior phase residue and re-create netns"
+    bench_cleanup
+    bench_setup_netns
+
+    # Seed artifacts ONCE. bench_start_vpn_server populates _BENCH_PSK, server.crt,
+    # server.key under a FRESH _BENCH_WORK_DIR (it does mktemp -d at the top), and
+    # starts a server we'll tear down before re-launching with --config. Subsequent
+    # relaunches in this phase use relaunch_server_in_ns, which does NOT re-seed
+    # (re-seeding would invalidate the INI we wrote with the prior PSK and would
+    # also produce a different _BENCH_WORK_DIR).
+    echo "  G: seeding cert/key/PSK"
+    if ! bench_start_vpn_server >"${server_log_a}.bringup" 2>&1; then
+        echo "  bench_start_vpn_server failed for phase G; tail of bringup:" >&2
+        tail -20 "${server_log_a}.bringup" >&2
+        return 1
+    fi
+
+    # _BENCH_WORK_DIR is now valid — compute INI paths AFTER the seed call.
+    local ini_a="$_BENCH_WORK_DIR/phase_g_ini_a.conf"
+    local ini_b="$_BENCH_WORK_DIR/phase_g_ini_b.conf"
+
+    # ── G.1: INI-only enablement (no --control-port on CLI)
+    echo "  G.1: [Control] Listen in INI alone enables the API"
+
+    cat > "$ini_a" <<EOF
+[Interface]
+Listen = 0.0.0.0:${VPN_LISTEN_PORT}
+Subnet = 10.0.0.0/24
+TunName = mqvpn-e2e-g-ini
+LogLevel = ${BENCH_LOG_LEVEL}
+
+[TLS]
+Cert = ${_BENCH_WORK_DIR}/server.crt
+Key  = ${_BENCH_WORK_DIR}/server.key
+
+[Auth]
+Key = ${_BENCH_PSK}
+
+[Control]
+Listen = 127.0.0.1:${ini_port_a}
+EOF
+
+    if ! relaunch_server_in_ns "$server_log_a" --config "$ini_a"; then
+        return 1
+    fi
+
+    local resp_a
+    resp_a=$(ctrl_send "$NS_SERVER" 127.0.0.1 "$ini_port_a" '{"cmd":"get_status"}')
+    if [[ -z "$resp_a" ]]; then
+        echo "  G.1: empty response from INI-driven control API" >&2
+        return 1
+    fi
+    if ! assert_json_field "$resp_a" ok true; then
+        echo "  G.1: INI-enabled API did not respond ok=true: $resp_a" >&2
+        return 1
+    fi
+    echo "  G.1: OK"
+
+    # ── G.2: per-field merge — INI port + CLI --control-addr override
+    echo "  G.2: per-field merge — INI port preserved when CLI overrides addr"
+
+    sed "s|${ini_port_a}|${ini_port_b}|g" "$ini_a" > "$ini_b"
+
+    if ! relaunch_server_in_ns "$server_log_b" \
+            --config "$ini_b" --control-addr 127.0.0.1; then
+        return 1
+    fi
+
+    local resp_b
+    resp_b=$(ctrl_send "$NS_SERVER" 127.0.0.1 "$ini_port_b" '{"cmd":"get_status"}')
+    if [[ -z "$resp_b" ]]; then
+        echo "  G.2: empty response — per-field merge regression?" >&2
+        return 1
+    fi
+    if ! assert_json_field "$resp_b" ok true; then
+        echo "  G.2: per-field merge did not respond ok=true: $resp_b" >&2
+        return 1
+    fi
+    echo "  G.2: OK"
+
+    # Cleanup is handled by bench_cleanup at script exit.
+    return 0
+}
+
 # --- Main runner ---
 
 # (empty for this chunk; phases will be wired in their own chunks)
@@ -989,6 +1121,7 @@ run_test "phase_c user lifecycle (immediate-revoke)" test_phase_c_lifecycle
 run_test "phase_d security & robustness" test_phase_d_security
 run_test "phase_e restart resilience" test_phase_e_restart
 run_test "phase_f scheduler matrix smoke" test_phase_f_scheduler_smoke
+run_test "phase_g INI-driven control-API config" test_phase_g_ini_config   # NEW — must be LAST
 
 echo ""
 echo "================================================================"
