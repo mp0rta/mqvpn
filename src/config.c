@@ -414,6 +414,10 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     v = json_find_key(json_text, "kill_switch");
     if (v && json_read_bool(v, &iv) == 0) cfg->kill_switch = iv;
 
+    v = json_find_key(json_text, "control_listen");
+    if (v && json_read_string(v, s280, sizeof(s280)) == 0)
+        mqvpn_copy_str(cfg->control_listen, sizeof(cfg->control_listen), s280);
+
     char dns_buf[MQVPN_CONFIG_MAX_DNS][64];
     int n_dns = 0;
     v = json_find_key(json_text, "dns");

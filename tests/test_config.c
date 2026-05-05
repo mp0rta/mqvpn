@@ -1041,6 +1041,22 @@ test_parse_control_absent(void)
     ASSERT_EQ_STR(cfg.control_listen, "", "control_listen empty when section absent");
 }
 
+static void
+test_parse_control_json(void)
+{
+    const char *json = "{ \"mode\": \"server\","
+                       "  \"listen\": \"0.0.0.0:443\","
+                       "  \"control_listen\": \"1.2.3.4:9091\" }";
+    char *path = write_tmp(json);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "JSON control_listen parse ok");
+    ASSERT_EQ_STR(cfg.control_listen, "1.2.3.4:9091", "JSON control_listen");
+}
+
 int
 main(void)
 {
@@ -1102,6 +1118,7 @@ main(void)
     /* [Control] section tests */
     test_parse_control_section();
     test_parse_control_absent();
+    test_parse_control_json();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
