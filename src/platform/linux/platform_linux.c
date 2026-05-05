@@ -430,15 +430,19 @@ nlmsg_get_ifname(struct nlmsghdr *nh)
     return NULL;
 }
 
-/* Remove a path that was destroyed by the kernel (RTM_DELLINK).
+/* Remove a path because the kernel says it's no longer usable.
+ * Two callers: RTM_DELLINK (interface gone) and RTM_NEWLINK with IFF_RUNNING
+ * cleared (carrier lost — cable unplugged etc). Both share cleanup; only the
+ * log message differs.
+ *
  * Cleans up: library path, libevent, fd. Preserves iface name for re-add. */
 static void
-remove_path_by_index(platform_ctx_t *p, int idx)
+remove_path_by_index(platform_ctx_t *p, int idx, const char *reason)
 {
     if (p->path_mgr.paths[idx].fd < 0) return; /* already removed */
 
-    LOG_WRN("netlink: interface %s removed, closing path %d",
-            p->path_mgr.paths[idx].iface, idx);
+    LOG_WRN("netlink: interface %s %s, closing path %d", p->path_mgr.paths[idx].iface,
+            reason, idx);
 
     /* Use drop_path (not remove_path) — frees the library slot without
      * calling xqc_conn_close_path(). xquic detects the dead fd naturally
@@ -654,15 +658,34 @@ on_netlink_event(evutil_socket_t fd, short what, void *arg)
                 if (!ifname) continue;
                 for (int i = 0; i < p->path_mgr.n_paths; i++) {
                     if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0)
-                        remove_path_by_index(p, i);
+                        remove_path_by_index(p, i, "removed");
                 }
 
             } else if (nh->nlmsg_type == RTM_NEWLINK) {
                 struct ifinfomsg *ifi = (struct ifinfomsg *)NLMSG_DATA(nh);
-                if (!(ifi->ifi_flags & IFF_UP) || !(ifi->ifi_flags & IFF_RUNNING))
-                    continue;
                 const char *ifname = nlmsg_get_ifname(nh);
                 if (!ifname) continue;
+
+                /* Carrier loss (cable unplugged / link down): admin up but
+                 * !running. Drop the path so the library doesn't burn through
+                 * xquic's path_id budget (XQC_MAX_PATHS_COUNT) via the
+                 * auto-recreate retry loop on a path that can never receive.
+                 *
+                 * IFF_RUNNING is also cleared during wifi association /
+                 * dormant transitions, so a wifi roam will trigger a spurious
+                 * drop+readd. For Ethernet (the original repro) this is fine.
+                 * Upgrade to IFLA_OPERSTATE if wifi roams become problematic
+                 * in practice. */
+                if ((ifi->ifi_flags & IFF_UP) && !(ifi->ifi_flags & IFF_RUNNING)) {
+                    for (int i = 0; i < p->path_mgr.n_paths; i++) {
+                        if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0)
+                            remove_path_by_index(p, i, "carrier lost");
+                    }
+                    continue;
+                }
+
+                if (!(ifi->ifi_flags & IFF_UP) || !(ifi->ifi_flags & IFF_RUNNING))
+                    continue;
                 if (!iface_has_ip(ifname)) continue;
 
                 /* First: try to re-add paths removed by RTM_DELLINK (dead fd) */
