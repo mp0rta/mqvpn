@@ -61,6 +61,9 @@ while [[ $# -gt 0 ]]; do
             ENABLE_CONTROL=1
             # Optional positional numeric argument
             if [ $# -ge 2 ] && [[ "$2" =~ ^[0-9]+$ ]]; then
+                if [ "$2" -lt 1 ] || [ "$2" -gt 65535 ]; then
+                    err "--enable-control PORT must be 1..65535 (got: $2)"
+                fi
                 CONTROL_PORT="$2"; shift 2
             else
                 shift
