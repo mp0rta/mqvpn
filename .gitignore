@@ -36,3 +36,6 @@ website/.vitepress/cache/
 
 # Bench data is published to R2 (perf-data.mqvpn.org), not committed.
 website/public/perf-data/
+
+# Git worktrees
+.worktrees/
