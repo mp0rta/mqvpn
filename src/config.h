@@ -45,6 +45,9 @@ typedef struct mqvpn_file_config_s {
     int n_users;
     int max_clients;
 
+    /* [Control] — server */
+    char control_listen[280]; /* "addr:port" — empty string when control API disabled */
+
     /* [Multipath] */
     char paths[MQVPN_CONFIG_MAX_PATHS][32];
     int n_paths;
