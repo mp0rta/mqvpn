@@ -268,6 +268,52 @@ else
     SUBNET6=$(sed -n 's/^[[:space:]]*Subnet6[[:space:]]*=[[:space:]]*\([^[:space:]].*\)/\1/p' /etc/mqvpn/server.conf | head -1 | tr -d '[:space:]')
     PORT="${PORT:-443}"
     SUBNET="${SUBNET:-10.0.0.0/24}"
+
+    if [ "$ENABLE_CONTROL" -eq 1 ]; then
+        CONF=/etc/mqvpn/server.conf
+
+        if grep -qE '^[[:space:]]*\[Control\][[:space:]]*$' "$CONF"; then
+            warn "[Control] section is already active in $CONF — not modified."
+
+        elif awk -v port="$CONTROL_PORT" '
+            BEGIN { replaced = 0 }
+            {
+                if (!replaced && prev == "# [Control]" \
+                    && $0 == "# Listen = 127.0.0.1:9090") {
+                    print "[Control]"
+                    print "Listen = 127.0.0.1:" port
+                    replaced = 1
+                    prev = ""
+                    next
+                }
+                if (NR > 1) print prev
+                prev = $0
+            }
+            END {
+                if (prev != "") print prev
+                exit (replaced ? 0 : 1)
+            }
+        ' "$CONF" > "$CONF.new"; then
+            chmod --reference="$CONF" "$CONF.new"
+            chown --reference="$CONF" "$CONF.new"
+            mv "$CONF.new" "$CONF"
+            ok "Uncommented [Control] stub in $CONF (port $CONTROL_PORT)."
+
+        else
+            rm -f "$CONF.new"
+            if grep -qE '^[[:space:]]*#[[:space:]]*\[Control\]' "$CONF"; then
+                warn "Found admin-edited commented [Control] in $CONF — not modified."
+                warn "Edit it manually: uncomment '[Control]' and 'Listen = ...'."
+            else
+                {
+                    echo
+                    echo "[Control]"
+                    echo "Listen = 127.0.0.1:$CONTROL_PORT"
+                } >> "$CONF"
+                ok "Appended [Control] block to $CONF."
+            fi
+        fi
+    fi
 fi
 
 # --- Step 6: Start or show next steps ---
