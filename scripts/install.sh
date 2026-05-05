@@ -247,6 +247,14 @@ if [ ! -f /etc/mqvpn/server.conf ]; then
         echo
         echo "[Multipath]"
         echo "Scheduler = wlb"
+        echo
+        if [ "$ENABLE_CONTROL" -eq 1 ]; then
+            echo "[Control]"
+            echo "Listen = 127.0.0.1:$CONTROL_PORT"
+        else
+            echo "# [Control]"
+            echo "# Listen = 127.0.0.1:9090"
+        fi
     } > /etc/mqvpn/server.conf
     chmod 600 /etc/mqvpn/server.conf
     ok "Generated /etc/mqvpn/server.conf"
