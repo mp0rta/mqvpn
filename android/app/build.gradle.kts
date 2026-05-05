@@ -14,8 +14,44 @@ android {
         applicationId = "com.mqvpn.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "0.4.0"
+        // arm64-v8a only: must match sdk-native's abiFilters. Adding ABIs here
+        // without updating sdk-native produces APKs that crash with
+        // UnsatisfiedLinkError on those ABIs (no .so packaged).
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
+    }
+
+    // Release signing config reads from env vars set by CI. When unset
+    // (local `assembleRelease` without env), Gradle leaves the variant
+    // unsigned and the build produces an unsigned APK that zipalign can
+    // sign later — fine for local inspection.
+    val ksPath = System.getenv("MQVPN_KEYSTORE_PATH")
+    val ksPass = System.getenv("MQVPN_KEYSTORE_PASSWORD")
+    val keyAlias = System.getenv("MQVPN_KEY_ALIAS")
+    val keyPass = System.getenv("MQVPN_KEY_PASSWORD")
+    val haveSigning = !ksPath.isNullOrBlank() && !ksPass.isNullOrBlank() &&
+        !keyAlias.isNullOrBlank() && !keyPass.isNullOrBlank()
+    if (haveSigning) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(ksPath!!)
+                storePassword = ksPass
+                this.keyAlias = keyAlias
+                keyPassword = keyPass
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            if (haveSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
     }
 
     buildFeatures {

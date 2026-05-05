@@ -325,9 +325,107 @@ jobs:
             mqvpn_*.deb
             mqvpn_*_${{ matrix.arch }}.tar.gz
 
+  build-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Resolve version from CMakeLists.txt
+        run: |
+          CMAKE_VERSION=$(sed -n 's/^project(mqvpn VERSION \([0-9.][0-9.]*\).*/\1/p' CMakeLists.txt)
+          echo "VERSION=$CMAKE_VERSION" >> "$GITHUB_ENV"
+
+      - name: Clone BoringSSL (pinned)
+        run: |
+          BSSL_DIR=third_party/xquic/third_party/boringssl
+          if [ ! -f "$BSSL_DIR/CMakeLists.txt" ]; then
+            git clone https://github.com/google/boringssl.git "$BSSL_DIR"
+          fi
+          cd "$BSSL_DIR" && git checkout ${{ env.BORINGSSL_COMMIT }}
+
+      - name: Locate NDK
+        id: ndk
+        run: |
+          if [ -n "${ANDROID_NDK_HOME:-}" ]; then
+            NDK_PATH="$ANDROID_NDK_HOME"
+          elif [ -d "${ANDROID_HOME}/ndk" ]; then
+            NDK_PATH="$(ls -d ${ANDROID_HOME}/ndk/*/ 2>/dev/null | sort -V | tail -1)"
+            NDK_PATH="${NDK_PATH%/}"
+          fi
+          test -d "$NDK_PATH" || { echo "ERROR: NDK not found"; exit 1; }
+          echo "ndk_path=$NDK_PATH" >> "$GITHUB_OUTPUT"
+
+      # arm64-v8a only: matches sdk-native's abiFilters. APK will not run in
+      # x86_64 emulators — sample is for real-device evaluation. Expanding
+      # ABIs requires updating android/sdk-native/build.gradle.kts in lockstep.
+      - name: NDK cross-compile (arm64-v8a)
+        run: |
+          scripts/build_android.sh --abi arm64-v8a --ndk "${{ steps.ndk.outputs.ndk_path }}"
+
+      - name: Verify prebuilt libraries
+        run: |
+          for lib in libmqvpn.a libxquic.a libssl.a libcrypto.a; do
+            test -f "android/sdk-native/prebuilt/arm64-v8a/${lib}" \
+              || { echo "MISSING: arm64-v8a/${lib}"; exit 1; }
+          done
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Ephemeral release keystore: generated fresh per CI run, so each
+      # release is signed with a different key. Acceptable for the sample
+      # APK (clearly labelled as demo); upgrades require uninstall+reinstall.
+      # If we later switch to a stable keystore, replace this step with one
+      # that decodes a base64 secret into release.jks instead.
+      - name: Generate ephemeral release keystore
+        run: |
+          KEYSTORE="$RUNNER_TEMP/release.jks"
+          STOREPASS=$(openssl rand -base64 24)
+          KEYPASS=$(openssl rand -base64 24)
+          keytool -genkeypair -v \
+            -keystore "$KEYSTORE" \
+            -storepass "$STOREPASS" \
+            -keypass "$KEYPASS" \
+            -alias mqvpn-release \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=mqvpn sample, O=mqvpn, C=JP" >/dev/null
+          # Mask passwords in workflow logs; passwords are written only to
+          # the per-job env file ($GITHUB_ENV) which is scoped to this run.
+          echo "::add-mask::$STOREPASS"
+          echo "::add-mask::$KEYPASS"
+          echo "MQVPN_KEYSTORE_PATH=$KEYSTORE" >> "$GITHUB_ENV"
+          echo "MQVPN_KEYSTORE_PASSWORD=$STOREPASS" >> "$GITHUB_ENV"
+          echo "MQVPN_KEY_ALIAS=mqvpn-release" >> "$GITHUB_ENV"
+          echo "MQVPN_KEY_PASSWORD=$KEYPASS" >> "$GITHUB_ENV"
+
+      - name: Build signed release APK
+        working-directory: android
+        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Stage Android release artifact
+        run: |
+          SRC=android/app/build/outputs/apk/release/app-release.apk
+          test -f "$SRC" || { echo "APK not found at $SRC"; ls -R android/app/build/outputs/apk/ || true; exit 1; }
+          cp "$SRC" "mqvpn-sample_${VERSION}_android.apk"
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-android
+          path: mqvpn-sample_*_android.apk
+
   publish-release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build-release
+    needs: [build-release, build-android]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -345,7 +443,7 @@ jobs:
           # nullglob so missing pattern → empty rather than the literal pattern
           # passed to sha256sum (would fail "No such file or directory").
           shopt -s nullglob
-          sha256sum mqvpn_*.tar.gz mqvpn_*.deb mqvpn_*.zip > SHA256SUMS
+          sha256sum mqvpn_*.tar.gz mqvpn_*.deb mqvpn_*.zip mqvpn-sample_*_android.apk > SHA256SUMS
           cat SHA256SUMS
 
       - name: Create GitHub Release
@@ -357,6 +455,7 @@ jobs:
           TARS=(artifacts/mqvpn_*.tar.gz)
           DEBS=(artifacts/mqvpn_*.deb)
           ZIPS=(artifacts/mqvpn_*.zip)
+          APKS=(artifacts/mqvpn-sample_*_android.apk)
           # Body intentionally left empty — auto-generated notes are too noisy
           # (auto-sync upstream PRs, perf bench commits, etc. clutter the changelog).
           # Edit release notes manually after publish via GitHub UI or:
@@ -364,6 +463,6 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "mqvpn v${VERSION}" \
             --notes "" \
-            "${TARS[@]}" "${DEBS[@]}" "${ZIPS[@]}" \
+            "${TARS[@]}" "${DEBS[@]}" "${ZIPS[@]}" "${APKS[@]}" \
             artifacts/SHA256SUMS \
             scripts/install.sh
