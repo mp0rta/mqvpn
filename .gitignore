@@ -33,3 +33,6 @@ android/sdk-native/.cxx/
 website/node_modules/
 website/.vitepress/dist/
 website/.vitepress/cache/
+
+# Bench data is published to R2 (perf-data.mqvpn.org), not committed.
+website/public/perf-data/
