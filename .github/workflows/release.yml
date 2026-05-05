@@ -349,13 +349,17 @@ jobs:
       - name: Locate NDK
         id: ndk
         run: |
+          NDK_PATH=""
           if [ -n "${ANDROID_NDK_HOME:-}" ]; then
             NDK_PATH="$ANDROID_NDK_HOME"
-          elif [ -d "${ANDROID_HOME}/ndk" ]; then
+          elif [ -d "${ANDROID_HOME:-}/ndk" ]; then
             NDK_PATH="$(ls -d ${ANDROID_HOME}/ndk/*/ 2>/dev/null | sort -V | tail -1)"
             NDK_PATH="${NDK_PATH%/}"
           fi
-          test -d "$NDK_PATH" || { echo "ERROR: NDK not found"; exit 1; }
+          if [ -z "$NDK_PATH" ] || [ ! -d "$NDK_PATH" ]; then
+            echo "ERROR: NDK not found (ANDROID_NDK_HOME='${ANDROID_NDK_HOME:-}', ANDROID_HOME='${ANDROID_HOME:-}')"
+            exit 1
+          fi
           echo "ndk_path=$NDK_PATH" >> "$GITHUB_OUTPUT"
 
       # arm64-v8a only: matches sdk-native's abiFilters. APK will not run in
