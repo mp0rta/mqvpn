@@ -1057,6 +1057,24 @@ test_parse_control_json(void)
     ASSERT_EQ_STR(cfg.control_listen, "1.2.3.4:9091", "JSON control_listen");
 }
 
+static void
+test_parse_control_unknown_key(void)
+{
+    const char *ini = "[Interface]\n"
+                      "Listen = 0.0.0.0:443\n"
+                      "\n"
+                      "[Control]\n"
+                      "Foo = bar\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "[Control] unknown key is non-fatal");
+    ASSERT_EQ_STR(cfg.control_listen, "", "control_listen unchanged on unknown key");
+}
+
 int
 main(void)
 {
@@ -1119,6 +1137,7 @@ main(void)
     test_parse_control_section();
     test_parse_control_absent();
     test_parse_control_json();
+    test_parse_control_unknown_key();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
