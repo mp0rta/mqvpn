@@ -47,6 +47,8 @@ SUBNET6=""
 UNINSTALL=0
 PURGE=0
 START=0
+ENABLE_CONTROL=0
+CONTROL_PORT=9090
 
 require_arg() { [ "$1" -ge 2 ] || err "$2 requires an argument"; }
 
@@ -55,11 +57,20 @@ while [[ $# -gt 0 ]]; do
         --port)    require_arg "$#" --port;    PORT="$2";    shift 2 ;;
         --subnet)  require_arg "$#" --subnet;  SUBNET="$2";  shift 2 ;;
         --subnet6) require_arg "$#" --subnet6; SUBNET6="$2"; shift 2 ;;
+        --enable-control)
+            ENABLE_CONTROL=1
+            # Optional positional numeric argument
+            if [ $# -ge 2 ] && [[ "$2" =~ ^[0-9]+$ ]]; then
+                CONTROL_PORT="$2"; shift 2
+            else
+                shift
+            fi
+            ;;
         --start)   START=1; shift ;;
         --uninstall) UNINSTALL=1; shift ;;
         --purge)   PURGE=1; UNINSTALL=1; shift ;;
         --help|-h)
-            echo "Usage: install.sh [--port PORT] [--subnet CIDR] [--subnet6 CIDR6] [--start] [--uninstall] [--purge]"
+            echo "Usage: install.sh [--port PORT] [--subnet CIDR] [--subnet6 CIDR6] [--enable-control [PORT]] [--start] [--uninstall] [--purge]"
             exit 0 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
