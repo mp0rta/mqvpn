@@ -985,6 +985,67 @@ TEST(activation_failure_eventually_closes_path)
     mqvpn_client_destroy(c);
 }
 
+/* ── Permanent path-create failure (xquic budget exhausted / OOM) ──
+ *
+ * When xqc_conn_create_path() returns -XQC_EMP_CREATE_PATH (652), retrying
+ * within the same connection cannot succeed — XQC_MAX_PATHS_COUNT is
+ * structural, and OOM in xqc_path_create's xqc_calloc is similarly
+ * unrecoverable in-conn. The slot must transition straight to CLOSED
+ * (no DEGRADED retry path) so the recovery timer / tick recovery loop
+ * stop busy-looping on calls that will never succeed. */
+
+extern int
+mqvpn_client_test_apply_path_create_permanent_failure(mqvpn_client_t *c,
+                                                      mqvpn_path_handle_t handle);
+
+TEST(path_create_permanent_failure_marks_closed_immediately)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    /* Slot is freshly added: status=PENDING, active=1. */
+    mqvpn_path_info_t info[2];
+    int n = 0;
+    mqvpn_client_get_paths(c, info, 2, &n);
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(info[0].status, MQVPN_PATH_PENDING);
+
+    ASSERT_EQ(mqvpn_client_test_apply_path_create_permanent_failure(c, h), 0);
+
+    /* MUST be CLOSED — not DEGRADED — so tick_recover_degraded_path doesn't
+     * pick it up. */
+    mqvpn_client_get_paths(c, info, 2, &n);
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(info[0].status, MQVPN_PATH_CLOSED);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(path_create_permanent_failure_emits_closed_event)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    g_path_event_count = 0;
+    ASSERT_EQ(mqvpn_client_test_apply_path_create_permanent_failure(c, h), 0);
+
+    /* path_event(handle, CLOSED) must fire so observers see lifecycle end. */
+    ASSERT_EQ(g_path_event_count, 1);
+    ASSERT_EQ(g_last_path_event_handle, h);
+    ASSERT_EQ(g_last_path_event_status, MQVPN_PATH_CLOSED);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(path_create_permanent_failure_invalid_handle_returns_error)
+{
+    mqvpn_client_t *c = make_test_client();
+    ASSERT_EQ(mqvpn_client_test_apply_path_create_permanent_failure(c, 99999), -1);
+    mqvpn_client_destroy(c);
+}
+
 /* ── path_event close-out semantics ──
  *
  * remove_path / drop_path transition a non-CLOSED slot to CLOSED. The
@@ -1348,6 +1409,11 @@ main(void)
     run_get_fd_prefers_rotated_primary_when_active();
     run_get_fd_falls_back_to_first_active_when_primary_dropped();
     run_client_next_primary_idx_skips_closed_and_inactive();
+
+    /* Permanent path-create failure (XQC_EMP_CREATE_PATH) */
+    run_path_create_permanent_failure_marks_closed_immediately();
+    run_path_create_permanent_failure_emits_closed_event();
+    run_path_create_permanent_failure_invalid_handle_returns_error();
 
     /* Path reactivation tests */
     run_reactivate_path_null_client();

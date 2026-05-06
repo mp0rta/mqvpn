@@ -1153,6 +1153,7 @@ cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
  * retry-related siblings (path_recreate_backoff, etc.). */
 static void apply_path_activation_failure(mqvpn_client_t *c, path_entry_t *p,
                                           uint64_t now_us);
+static void apply_path_create_permanent_failure(mqvpn_client_t *c, path_entry_t *p);
 
 /* Create an xquic path for a secondary path entry and mark it ACTIVE.
  *
@@ -1168,12 +1169,26 @@ client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
     xqc_int_t ret = xqc_conn_create_path(c->engine, &c->conn->cid, &new_id, path_status);
     if (ret < 0) {
         LOG_W(c, "xqc_conn_create_path[%d]: %d", idx, ret);
-        /* Schedule a retry so the path is not stuck in PENDING/ACTIVE
-         * forever — the tick recovery loop only services DEGRADED slots
-         * with a non-zero recreate_after_us.  Common trigger: the server
-         * has not yet distributed enough CIDs for additional paths
-         * (-XQC_EMP_NO_AVAIL_PATH_ID).  Backport of Ysurac 86c275c
-         * (issue Ysurac/openmptcprouter#4271 Bug 1). */
+        if (ret == -XQC_EMP_CREATE_PATH) {
+            /* Permanent failure on this connection. Two triggers:
+             *   1. XQC_MAX_PATHS_COUNT cap hit (`xqc_path_create|too many paths`)
+             *   2. xqc_calloc OOM inside xqc_path_create
+             * Both are unrecoverable in-conn — the path_id namespace only
+             * resets on Level-2 reconnect. Skip the DEGRADED retry path so
+             * neither tick_recover_degraded_path nor the platform's 3s
+             * recovery timer busy-loops on calls that will never succeed. */
+            apply_path_create_permanent_failure(c, p);
+            LOG_W(c,
+                  "path closed: %s (xquic path budget exhausted/OOM, requires reconnect)",
+                  p->name);
+            return;
+        }
+        /* Other errors (e.g. -XQC_EMP_NO_AVAIL_PATH_ID — server hasn't
+         * distributed enough CIDs yet) are transient. Schedule a retry so
+         * the path is not stuck in PENDING/ACTIVE forever — the tick
+         * recovery loop only services DEGRADED slots with non-zero
+         * recreate_after_us. Backport of Ysurac 86c275c (issue
+         * Ysurac/openmptcprouter#4271 Bug 1). */
         apply_path_activation_failure(c, p, client_now_us(c));
         if (p->status == MQVPN_PATH_CLOSED) {
             LOG_W(c, "path closed: %s (retries exhausted at activation)", p->name);
@@ -1277,6 +1292,40 @@ mqvpn_client_apply_path_activation_failure(mqvpn_client_t *c, mqvpn_path_handle_
     path_entry_t *p = find_path_by_handle(c, handle);
     if (!p) return -1;
     apply_path_activation_failure(c, p, now_us);
+    return 0;
+}
+
+/* Apply a permanent (non-retryable) path-creation failure — used when
+ * xqc_conn_create_path() returns -XQC_EMP_CREATE_PATH (XQC_MAX_PATHS_COUNT
+ * cap hit, or xqc_calloc OOM). Marks the slot CLOSED and clears retry
+ * scheduling so neither tick_recover_degraded_path nor the platform's
+ * recovery timer attempt to retry. Recovery requires a Level-2 reconnect
+ * which resets xquic's path_id namespace. */
+static void
+apply_path_create_permanent_failure(mqvpn_client_t *c, path_entry_t *p)
+{
+    p->in_use = 0;
+    p->xqc_path_id = 0;
+    p->path_stable_since_us = 0;
+    p->status = MQVPN_PATH_CLOSED;
+    p->recreate_after_us = 0;
+    p->recreate_retries = 0;
+    if (c->cbs.path_event) c->cbs.path_event(p->handle, MQVPN_PATH_CLOSED, c->user_ctx);
+}
+
+/* Test-only wrapper: drives apply_path_create_permanent_failure() by
+ * handle. Hidden from libmqvpn.so's dynamic export table. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_apply_path_create_permanent_failure(mqvpn_client_t *c,
+                                                      mqvpn_path_handle_t handle)
+{
+    if (!c) return -1;
+    path_entry_t *p = find_path_by_handle(c, handle);
+    if (!p) return -1;
+    apply_path_create_permanent_failure(c, p);
     return 0;
 }
 

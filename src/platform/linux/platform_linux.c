@@ -635,37 +635,58 @@ try_readd_removed_path(platform_ctx_t *p, const char *ifname)
 
         /* Verify activation. cb_path_event(ACTIVE) already fired inside
          * add_path_fd() but couldn't match our slot (lib_path_handles[i]
-         * wasn't stored yet). Query path status explicitly instead. */
+         * wasn't stored yet). Query path status explicitly instead.
+         *
+         * Three observable outcomes:
+         *   ACTIVE   — happy path, take the success branch below.
+         *   DEGRADED — apply_path_activation_failure scheduled a retry on
+         *              transient errors (e.g. -XQC_EMP_NO_AVAIL_PATH_ID
+         *              when CIDs not yet distributed). Roll back and let
+         *              the 3s recovery timer try again.
+         *   CLOSED   — apply_path_create_permanent_failure ran, meaning
+         *              xqc_conn_create_path returned -XQC_EMP_CREATE_PATH
+         *              (XQC_MAX_PATHS_COUNT cap or OOM). Retrying within
+         *              this connection cannot succeed — clear the timer
+         *              eligibility flag so we stop busy-looping. */
         mqvpn_path_info_t pinfo[MQVPN_MAX_PATHS];
         int n_info = 0;
         mqvpn_client_get_paths(p->client, pinfo, MQVPN_MAX_PATHS, &n_info);
         int activated = 0;
+        int permanent_closed = 0;
         for (int j = 0; j < n_info; j++) {
-            if (pinfo[j].handle == handle && pinfo[j].status == MQVPN_PATH_ACTIVE) {
+            if (pinfo[j].handle != handle) continue;
+            if (pinfo[j].status == MQVPN_PATH_ACTIVE)
                 activated = 1;
-                break;
-            }
+            else if (pinfo[j].status == MQVPN_PATH_CLOSED)
+                permanent_closed = 1;
+            break;
         }
 
         if (!activated) {
-            /* Activation failed (xqc_conn_create_path error) — slot is
-             * DEGRADED + active=1 + in_use=0 (apply_path_activation_failure
-             * transitioned PENDING → DEGRADED and explicitly cleared
-             * in_use/xqc_path_id/path_stable_since_us). Undo everything so
-             * the platform's path_removed_by_platform=1 retry loop owns
-             * recovery instead of the library's tick recovery
-             * (path_removed_by_platform stays 1, fd reverts to -1).
+            /* Roll back so the next attempt (timer or netlink event) starts
+             * from a clean slate.
              *
              * Safe ordering: remove_path() first, then close(fd). The
-             * in_use=0 invariant (enforced by apply_path_activation_failure)
-             * makes remove_path() skip xqc_conn_close_path(), so xquic
-             * never touches this fd during teardown. Do NOT remove that
-             * defensive clear — it's what makes this rollback safe. */
+             * in_use=0 invariant (enforced by apply_path_activation_failure
+             * / apply_path_create_permanent_failure) makes remove_path()
+             * skip xqc_conn_close_path(), so xquic never touches this fd
+             * during teardown. Do NOT remove that defensive clear — it's
+             * what makes this rollback safe. */
             LOG_WRN("netlink: re-add %s not activated, will retry", ifname);
             mqvpn_client_remove_path(p->client, handle);
             close(fd);
             mp->fd = -1;
             mp->active = 0;
+            if (permanent_closed) {
+                /* xquic budget exhausted — disable the 3s recovery timer
+                 * for this slot. The path stays in path_removed_by_platform
+                 * = 0 until either a new netlink event reactivates it or
+                 * a Level-2 reconnect resets the path_id namespace. */
+                p->path_removed_by_platform[i] = 0;
+                LOG_WRN("netlink: path %s recovery abandoned (xquic budget "
+                        "exhausted; reconnect required)",
+                        ifname);
+            }
             return 0;
         }
 
