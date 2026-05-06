@@ -1158,6 +1158,23 @@ test_resolve_malformed_ini(void)
     ASSERT_EQ_INT(rc, -1, "malformed INI returns -1");
 }
 
+static void
+test_resolve_trailing_garbage_port(void)
+{
+    /* "9090garbage" must NOT silently parse as 9090 — strtol contract. */
+    char buf[256] = {0};
+    const char *out_addr = NULL;
+    int out_port = -1;
+    int rc = mqvpn_resolve_control_endpoint("127.0.0.1:9090garbage", NULL, 0, 0, buf,
+                                            sizeof(buf), &out_addr, &out_port);
+    ASSERT_EQ_INT(rc, -1, "trailing garbage in port returns -1");
+
+    /* Same for IPv6 bracket form. */
+    rc = mqvpn_resolve_control_endpoint("[::1]:9090garbage", NULL, 0, 0, buf, sizeof(buf),
+                                        &out_addr, &out_port);
+    ASSERT_EQ_INT(rc, -1, "trailing garbage in v6 port returns -1");
+}
+
 int
 main(void)
 {
@@ -1229,6 +1246,7 @@ main(void)
     test_resolve_explicit_disable();
     test_resolve_no_input();
     test_resolve_malformed_ini();
+    test_resolve_trailing_garbage_port();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

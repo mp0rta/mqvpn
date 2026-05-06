@@ -455,6 +455,7 @@ static int
 split_addr_port(const char *str, char *host, size_t host_len, int *port)
 {
     if (!str || !host || !port || host_len == 0) return -1;
+    const char *port_start;
     if (str[0] == '[') {
         const char *close = strchr(str, ']');
         if (!close || close[1] != ':') return -1;
@@ -462,7 +463,7 @@ split_addr_port(const char *str, char *host, size_t host_len, int *port)
         if (hlen == 0 || hlen >= host_len) return -1;
         memcpy(host, str + 1, hlen);
         host[hlen] = '\0';
-        *port = atoi(close + 2);
+        port_start = close + 2;
     } else {
         const char *colon = strrchr(str, ':');
         if (!colon || colon == str) return -1;
@@ -470,9 +471,12 @@ split_addr_port(const char *str, char *host, size_t host_len, int *port)
         if (hlen >= host_len) return -1;
         memcpy(host, str, hlen);
         host[hlen] = '\0';
-        *port = atoi(colon + 1);
+        port_start = colon + 1;
     }
-    if (*port <= 0 || *port > 65535) return -1;
+    char *end;
+    long p = strtol(port_start, &end, 10);
+    if (*end != '\0' || end == port_start || p <= 0 || p > 65535) return -1;
+    *port = (int)p;
     return 0;
 }
 

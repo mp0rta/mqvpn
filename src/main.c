@@ -56,6 +56,8 @@ usage(const char *prog)
         "                            (also configurable via [Control] Listen in INI / "
         "control_listen in JSON)\n"
         "  --status                  Query server status via control API and exit\n"
+        "                            (uses --control-port, or [Control] Listen from "
+        "--config)\n"
         "  --scheduler minrtt|wlb|backup_fec\n"
         "                            Multipath scheduler (default wlb)\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
@@ -250,18 +252,9 @@ main(int argc, char *argv[])
         return mqvpn_auth_genkey() < 0 ? 1 : 0;
     }
 
-#ifndef _WIN32
-    /* --status: query control API and exit */
-    if (status_mode) {
-        if (control_port <= 0) {
-            fprintf(stderr, "error: --status requires --control-port\n");
-            return 1;
-        }
-        return run_status(control_addr, control_port);
-    }
-#endif
-
-    /* Load config file (if given), then apply CLI overrides */
+    /* Load config file (if given), then apply CLI overrides.
+     * Hoisted above --status so [Control] Listen in the INI/JSON config
+     * can satisfy --status without requiring --control-port on the CLI. */
     mqvpn_file_config_t file_cfg;
     mqvpn_config_defaults(&file_cfg);
 
@@ -270,6 +263,38 @@ main(int argc, char *argv[])
             return 1;
         }
     }
+
+    /* Resolve effective control endpoint (INI base + per-field CLI overrides).
+     * Used by both --status (below) and the server-mode listener (further down). */
+    char eff_control_addr_buf[256] = {0};
+    const char *eff_control_addr = NULL;
+    int eff_control_port = 0;
+    if (mqvpn_resolve_control_endpoint(file_cfg.control_listen, control_addr,
+                                       control_port, control_port_set,
+                                       eff_control_addr_buf, sizeof(eff_control_addr_buf),
+                                       &eff_control_addr, &eff_control_port) < 0) {
+        fprintf(stderr, "error: invalid [Control] Listen = '%s'\n",
+                file_cfg.control_listen);
+        return 1;
+    }
+    /* --control-addr without a port is a silent-disable trap: warn so admins
+     * notice the missing --control-port / [Control] Listen. */
+    if (eff_control_addr != NULL && eff_control_port == 0) {
+        LOG_WRN("--control-addr ignored: no port configured (use --control-port "
+                "or [Control] Listen)");
+    }
+
+#ifndef _WIN32
+    /* --status: query control API and exit */
+    if (status_mode) {
+        if (eff_control_port <= 0) {
+            fprintf(stderr, "error: --status requires --control-port or "
+                            "[Control] Listen in config\n");
+            return 1;
+        }
+        return run_status(eff_control_addr, eff_control_port);
+    }
+#endif
 
     /* CLI overrides config file values */
     const char *eff_tun_name = tun_name ? tun_name : file_cfg.tun_name;
@@ -431,18 +456,6 @@ main(int argc, char *argv[])
         char bind_addr[256] = "0.0.0.0";
         int bind_port = 443;
         if (parse_host_port(eff_listen, bind_addr, sizeof(bind_addr), &bind_port) < 0) {
-            return 1;
-        }
-
-        char eff_control_addr_buf[256] = {0};
-        const char *eff_control_addr = NULL;
-        int eff_control_port = 0;
-        if (mqvpn_resolve_control_endpoint(
-                file_cfg.control_listen, control_addr, control_port, control_port_set,
-                eff_control_addr_buf, sizeof(eff_control_addr_buf), &eff_control_addr,
-                &eff_control_port) < 0) {
-            fprintf(stderr, "error: invalid [Control] Listen = '%s'\n",
-                    file_cfg.control_listen);
             return 1;
         }
 
