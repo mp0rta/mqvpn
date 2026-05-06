@@ -21,8 +21,8 @@ typedef struct {
     struct sockaddr_storage local_addr;
     socklen_t local_addrlen;
     uint64_t path_id;
-    int active; /* socket created and registered */
-    int in_use; /* xquic path created */
+    int platform_attached; /* platform owns this slot; fd lifecycle is platform-side */
+    int xquic_path_live;   /* xquic engine has a live path for this slot */
 } mqvpn_path_t;
 
 typedef struct {

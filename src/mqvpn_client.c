@@ -75,13 +75,13 @@ typedef struct {
     int fd;
     char name[16];
     mqvpn_path_status_t status;
-    int active;
+    int platform_attached; /* platform owns this slot; fd lifecycle is platform-side */
     struct sockaddr_storage local_addr;
     uint32_t local_addr_len;
     int64_t platform_net_id;
     uint32_t flags;
     uint64_t xqc_path_id;
-    int in_use;
+    int xquic_path_live; /* xquic engine has a live path for this slot */
     int srtt_ms;
     uint64_t bytes_tx;
     uint64_t bytes_rx;
@@ -362,7 +362,7 @@ static path_entry_t *
 find_path_by_xqc_id(mqvpn_client_t *c, uint64_t xqc_path_id)
 {
     for (int i = 0; i < c->n_paths; i++) {
-        if (c->paths[i].in_use && c->paths[i].xqc_path_id == xqc_path_id)
+        if (c->paths[i].xquic_path_live && c->paths[i].xqc_path_id == xqc_path_id)
             return &c->paths[i];
     }
     return NULL;
@@ -384,7 +384,7 @@ first_active_idx(const mqvpn_client_t *c)
 {
     if (!c) return -1;
     for (int i = 0; i < c->n_paths; i++)
-        if (c->paths[i].active) return i;
+        if (c->paths[i].platform_attached) return i;
     return -1;
 }
 
@@ -428,7 +428,7 @@ get_fd_for_path(mqvpn_client_t *c, uint64_t xqc_path_id)
     path_entry_t *p = find_path_by_xqc_id(c, xqc_path_id);
     if (p) return p->fd;
     int pidx = c->primary_path_idx;
-    if (pidx < c->n_paths && c->paths[pidx].active) return c->paths[pidx].fd;
+    if (pidx < c->n_paths && c->paths[pidx].platform_attached) return c->paths[pidx].fd;
     return mqvpn_client_first_active_fd(c);
 }
 
@@ -443,7 +443,7 @@ client_next_primary_idx(const mqvpn_client_t *c, int from_idx)
     int i = start;
     do {
         const path_entry_t *p = &c->paths[i];
-        if (p->active && p->status != MQVPN_PATH_CLOSED) return i;
+        if (p->platform_attached && p->status != MQVPN_PATH_CLOSED) return i;
         i = (i + 1) % c->n_paths;
     } while (i != start);
     return from_idx;
@@ -576,7 +576,7 @@ client_destroy_engine(mqvpn_client_t *c)
 static void
 client_reset_path_runtime(path_entry_t *p)
 {
-    p->in_use = 0;
+    p->xquic_path_live = 0;
     p->xqc_path_id = 0;
     p->recreate_after_us = 0;
     p->recreate_retries = 0;
@@ -676,7 +676,7 @@ cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *pe
      * primary mid-session would sendto via a dead fd / EBADF. */
     int active_idx = -1;
     int pidx = c->primary_path_idx;
-    if (pidx < c->n_paths && c->paths[pidx].active)
+    if (pidx < c->n_paths && c->paths[pidx].platform_attached)
         active_idx = pidx;
     else
         active_idx = first_active_idx(c);
@@ -1055,7 +1055,7 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
 
             /* Primary path is now active */
             int pidx = c->primary_path_idx;
-            if (c->n_paths > 0 && pidx < c->n_paths && c->paths[pidx].active) {
+            if (c->n_paths > 0 && pidx < c->n_paths && c->paths[pidx].platform_attached) {
                 c->paths[pidx].status = MQVPN_PATH_ACTIVE;
                 if (c->cbs.path_event)
                     c->cbs.path_event(c->paths[pidx].handle, MQVPN_PATH_ACTIVE,
@@ -1268,7 +1268,7 @@ client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
     LOG_I(c, "path[%d] created (id=%llu, app_path_status=%s)", idx,
           (unsigned long long)new_id, path_status == 1 ? "STANDBY" : "AVAILABLE");
     p->xqc_path_id = new_id;
-    p->in_use = 1;
+    p->xquic_path_live = 1;
     p->status = MQVPN_PATH_ACTIVE;
     LOG_I(c, "path[%d] activated: path_id=%" PRIu64 " iface=%s", idx, new_id, p->name);
     if (c->cbs.path_event) c->cbs.path_event(p->handle, MQVPN_PATH_ACTIVE, c->user_ctx);
@@ -1287,10 +1287,10 @@ cb_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
     if (!c->config.multipath) return;
 
     /* Start from 0 — the primary path may be at any index after rotation;
-     * the in_use check below skips whichever slot is already in use. */
+     * the xquic_path_live check below skips whichever slot already has a live path. */
     for (int i = 0; i < c->n_paths; i++) {
         path_entry_t *p = &c->paths[i];
-        if (p->in_use || !p->active) continue;
+        if (p->xquic_path_live || !p->platform_attached) continue;
         client_activate_path(c, p, i);
     }
 }
@@ -1324,12 +1324,12 @@ apply_path_activation_failure(mqvpn_client_t *c, path_entry_t *p, uint64_t now_u
 {
     /* Defensive: clear connection-bound state. Today the only callers
      * (client_activate_path on synchronous xqc_conn_create_path failure;
-     * the test wrapper) cannot have set in_use/xqc_path_id/path_stable_since_us
+     * the test wrapper) cannot have set xquic_path_live/xqc_path_id/path_stable_since_us
      * to non-zero, but consolidating with cb_path_removed's bookkeeping makes
      * this function safe regardless of caller invariants and avoids a stale
      * xqc_path_id surviving a future refactor that moved successful state
      * mutation earlier in client_activate_path. */
-    p->in_use = 0;
+    p->xquic_path_live = 0;
     p->xqc_path_id = 0;
     p->path_stable_since_us = 0;
 
@@ -1370,7 +1370,7 @@ mqvpn_client_apply_path_activation_failure(mqvpn_client_t *c, mqvpn_path_handle_
 static void
 apply_path_create_permanent_failure(mqvpn_client_t *c, path_entry_t *p)
 {
-    p->in_use = 0;
+    p->xquic_path_live = 0;
     p->xqc_path_id = 0;
     p->path_stable_since_us = 0;
     p->status = MQVPN_PATH_CLOSED;
@@ -1405,11 +1405,11 @@ cb_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data)
     path_entry_t *p = find_path_by_xqc_id(c, path_id);
     if (p) {
         LOG_I(c, "path removed: path_id=%" PRIu64 " iface=%s", path_id, p->name);
-        p->in_use = 0;
+        p->xquic_path_live = 0;
         p->xqc_path_id = 0;
         p->path_stable_since_us = 0; /* validation failed before stability */
 
-        if (p->active) {
+        if (p->platform_attached) {
             /* Increment first, then check against max.  Uses >= for
              * consistency with the tick() recovery path. */
             p->recreate_retries++;
@@ -1556,7 +1556,7 @@ cli_start_connection(mqvpn_client_t *c)
     /* Mark primary path */
     if (c->n_paths > 0 && c->primary_path_idx < c->n_paths) {
         c->paths[c->primary_path_idx].xqc_path_id = 0;
-        c->paths[c->primary_path_idx].in_use = 1;
+        c->paths[c->primary_path_idx].xquic_path_live = 1;
     }
 
     c->conn = conn; /* ownership transfer — cleanup won't free */
@@ -1780,7 +1780,7 @@ mqvpn_client_add_path_fd(mqvpn_client_t *c, int fd, const mqvpn_path_desc_t *des
     /* Reuse a CLOSED slot if available, otherwise append */
     int idx = -1;
     for (int i = 0; i < c->n_paths; i++) {
-        if (c->paths[i].status == MQVPN_PATH_CLOSED && !c->paths[i].active) {
+        if (c->paths[i].status == MQVPN_PATH_CLOSED && !c->paths[i].platform_attached) {
             idx = i;
             break;
         }
@@ -1805,7 +1805,7 @@ mqvpn_client_add_path_fd(mqvpn_client_t *c, int fd, const mqvpn_path_desc_t *des
 #endif
 
     p->status = MQVPN_PATH_PENDING;
-    p->active = 1;
+    p->platform_attached = 1;
 
     if (desc) {
         memcpy(p->name, desc->iface, sizeof(p->name));
@@ -1836,11 +1836,11 @@ mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
 
     int was_closed = (p->status == MQVPN_PATH_CLOSED);
     p->status = MQVPN_PATH_CLOSED;
-    p->active = 0;
+    p->platform_attached = 0;
     p->recreate_after_us = 0;
     p->recreate_retries = 0;
     p->path_stable_since_us = 0;
-    if (p->in_use && c->engine && c->conn)
+    if (p->xquic_path_live && c->engine && c->conn)
         xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
     /* Emit close-out event so observers (Android SDK / control-plane) see
      * the handle's lifecycle terminate. Idempotent: a second remove on an
@@ -1864,7 +1864,7 @@ mqvpn_client_drop_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
      * the path through its normal PTO-based failure detection. */
     int was_closed = (p->status == MQVPN_PATH_CLOSED);
     p->status = MQVPN_PATH_CLOSED;
-    p->active = 0;
+    p->platform_attached = 0;
     p->recreate_after_us = 0;
     p->recreate_retries = 0;
     p->path_stable_since_us = 0;
@@ -1896,8 +1896,8 @@ mqvpn_client_reactivate_path(mqvpn_client_t *c, mqvpn_path_handle_t handle)
     }
     if (!p) return MQVPN_ERR_INVALID_ARG;
 
-    if (p->in_use) return MQVPN_ERR_INVALID_STATE;
-    if (!p->active) return MQVPN_ERR_INVALID_STATE;
+    if (p->xquic_path_live) return MQVPN_ERR_INVALID_STATE;
+    if (!p->platform_attached) return MQVPN_ERR_INVALID_STATE;
     if (p->status != MQVPN_PATH_DEGRADED && p->status != MQVPN_PATH_CLOSED)
         return MQVPN_ERR_INVALID_STATE;
 
@@ -1905,7 +1905,7 @@ mqvpn_client_reactivate_path(mqvpn_client_t *c, mqvpn_path_handle_t handle)
           p->status == MQVPN_PATH_DEGRADED ? "degraded" : "closed");
 
     client_activate_path(c, p, idx);
-    if (!p->in_use) return MQVPN_ERR_ENGINE;
+    if (!p->xquic_path_live) return MQVPN_ERR_ENGINE;
 
     /* Success: cancel library timer, start stability timer */
     p->recreate_after_us = 0;
@@ -2055,7 +2055,7 @@ tick_recover_degraded_path(mqvpn_client_t *c, path_entry_t *p, int idx, uint64_t
           PATH_RECREATE_MAX_RETRIES);
     client_activate_path(c, p, idx);
 
-    if (p->in_use) {
+    if (p->xquic_path_live) {
         /* Create succeeded — start stability timer.
          * xquic validates async. If fail, cb_path_removed fires. */
         p->path_stable_since_us = now;
@@ -2070,7 +2070,7 @@ tick_recover_degraded_path(mqvpn_client_t *c, path_entry_t *p, int idx, uint64_t
 static void
 tick_confirm_stable_path(mqvpn_client_t *c, path_entry_t *p, uint64_t now)
 {
-    if (p->path_stable_since_us == 0 || !p->in_use ||
+    if (p->path_stable_since_us == 0 || !p->xquic_path_live ||
         now - p->path_stable_since_us < PATH_STABLE_THRESHOLD_US)
         return;
 
@@ -2223,7 +2223,7 @@ mqvpn_client_get_paths(const mqvpn_client_t *c, mqvpn_path_info_t *out, int max_
 
         /* Map SRTT from xquic path metrics (μs → ms) */
         out[i].srtt_ms = 0;
-        if (p->in_use) {
+        if (p->xquic_path_live) {
             for (int j = 0; j < XQC_MAX_PATHS_COUNT; j++) {
                 if (xstats.paths_info[j].path_id == p->xqc_path_id) {
                     out[i].srtt_ms = (int)(xstats.paths_info[j].path_srtt / 1000);
@@ -2282,7 +2282,7 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
                 }
             }
             /* Stability timer */
-            if (p->path_stable_since_us > 0 && p->in_use) {
+            if (p->path_stable_since_us > 0 && p->xquic_path_live) {
                 uint64_t stable_at = p->path_stable_since_us + PATH_STABLE_THRESHOLD_US;
                 if (stable_at > now_val) {
                     int sms = (int)((stable_at - now_val) / 1000);

@@ -253,9 +253,9 @@ cb_path_event(mqvpn_path_handle_t path, mqvpn_path_status_t status, void *user_c
             case MQVPN_PATH_DEGRADED: p->path_recoverable[i] = 1; break;
             case MQVPN_PATH_ACTIVE: p->path_recoverable[i] = 0; break;
             case MQVPN_PATH_CLOSED:
-                /* CLOSED from retries exhausted (active==1): still recoverable.
-                 * CLOSED from remove_path (active==0): not recoverable.
-                 * Platform tracks its own remove_path calls. */
+                /* CLOSED from retries exhausted (platform_attached==1): still
+                 * recoverable. CLOSED from remove_path (platform_attached==0): not
+                 * recoverable. Platform tracks its own remove_path calls. */
                 p->path_recoverable[i] = !p->path_removed_by_platform[i];
                 break;
             default: break;
@@ -497,7 +497,7 @@ remove_path_by_index(platform_ctx_t *p, int idx, const char *reason)
     /* Close dead socket */
     close(p->path_mgr.paths[idx].fd);
     p->path_mgr.paths[idx].fd = -1;
-    p->path_mgr.paths[idx].active = 0;
+    p->path_mgr.paths[idx].platform_attached = 0;
 
     /* Mark as removed by platform — prevents library timer recovery on stale fd */
     p->path_removed_by_platform[idx] = 1;
@@ -552,7 +552,7 @@ try_reactivate_by_ifname(platform_ctx_t *p, const char *ifname)
             LOG_INF("netlink: reactivated path %s", ifname);
             p->path_recoverable[i] = 0;
         } else if (ret == MQVPN_ERR_INVALID_STATE) {
-            /* Already in_use or not in right state — ignore */
+            /* Already xquic_path_live or not in right state — ignore */
         } else {
             LOG_WRN("netlink: reactivate %s failed: %s", ifname, mqvpn_error_string(ret));
         }
@@ -687,7 +687,7 @@ recovery_rollback(platform_ctx_t *p, int slot, readd_activation_t outcome)
     mqvpn_client_remove_path(p->client, p->lib_path_handles[slot]);
     close(mp->fd);
     mp->fd = -1;
-    mp->active = 0;
+    mp->platform_attached = 0;
 
     if (outcome == READD_PERMANENT_FAIL) {
         /* xquic budget exhausted — disable the 3s recovery timer for this
@@ -744,8 +744,8 @@ try_readd_removed_path(platform_ctx_t *p, const char *ifname)
 
         /* Update path_mgr slot in-place (n_paths unchanged, slot reuse) */
         mp->fd = fd;
-        mp->active = 1;
-        mp->in_use = 0;
+        mp->platform_attached = 1;
+        mp->xquic_path_live = 0;
         mp->path_id = 0;
 
         mqvpn_path_handle_t handle = recovery_register_with_lib(p, i, fd, ifname);
@@ -756,7 +756,7 @@ try_readd_removed_path(platform_ctx_t *p, const char *ifname)
              * on that stale handle. */
             close(fd);
             mp->fd = -1;
-            mp->active = 0;
+            mp->platform_attached = 0;
             return 0;
         }
 

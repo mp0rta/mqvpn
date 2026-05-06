@@ -111,14 +111,15 @@ typedef enum {
 
 /*
  * Path lifecycle:
- *   active  = platform owns this path slot, fd is valid
- *   in_use  = xquic has a live QUIC path on this slot
+ *   platform_attached = platform owns this path slot, fd is valid
+ *   xquic_path_live   = xquic has a live QUIC path on this slot
  *
  *   PENDING   → add_path_fd() called, awaiting activation
  *   ACTIVE    → xquic path created (validation async)
  *   DEGRADED  → transport failed, library timer retries with backoff (5s→60s, max 6)
- *   CLOSED    → retries exhausted (platform can still call reactivate_path if active==1)
- *              OR explicitly removed via remove_path() (active==0, no recovery)
+ *   CLOSED    → retries exhausted (platform can still call reactivate_path if
+ * platform_attached==1) OR explicitly removed via remove_path() (platform_attached==0, no
+ * recovery)
  */
 typedef enum {
     MQVPN_PATH_PENDING = 0,
@@ -377,7 +378,7 @@ MQVPN_API int mqvpn_client_drop_path(mqvpn_client_t *client, mqvpn_path_handle_t
  * platforms should call remove_path() + a new add_path_fd() with a fresh fd
  * instead.
  *
- * Preconditions: !in_use && active && (DEGRADED || CLOSED).
+ * Preconditions: !xquic_path_live && platform_attached && (DEGRADED || CLOSED).
  * On success: xquic creates a new path (validation is async). The library
  * recovery timer is cancelled. Retry counter resets after 30s stability.
  *
