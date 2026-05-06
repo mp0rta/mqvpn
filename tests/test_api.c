@@ -1272,6 +1272,145 @@ TEST(client_next_primary_idx_skips_closed_and_inactive)
     mqvpn_client_destroy(c);
 }
 
+/* ── Handshake stall watchdog ──
+ *
+ * If the QUIC handshake doesn't progress past CONNECTING within
+ * HANDSHAKE_STALL_TIMEOUT_MS (10s), the watchdog forces close → reconnect →
+ * primary_path_idx rotates (issue #46 mechanism), so a dead first-listed path
+ * recovers in ~15s instead of waiting 120s for xquic's idle_time_out. */
+
+extern uint64_t mqvpn_client_test_get_handshake_started_us(const mqvpn_client_t *c);
+extern int mqvpn_client_test_set_handshake_started_us(mqvpn_client_t *c, uint64_t us);
+extern int mqvpn_client_test_handshake_stalled(const mqvpn_client_t *c, uint64_t now_us);
+extern int mqvpn_client_test_force_state(mqvpn_client_t *c, mqvpn_client_state_t s);
+
+#define STALL_THRESHOLD_US ((uint64_t)5 * 1000 * 1000)
+
+TEST(handshake_stall_not_triggered_when_idle)
+{
+    mqvpn_client_t *c = make_test_client();
+    /* IDLE: no handshake in progress, started_us=0 */
+    ASSERT_EQ(mqvpn_client_test_handshake_stalled(c, STALL_THRESHOLD_US * 10), 0);
+    mqvpn_client_destroy(c);
+}
+
+TEST(handshake_stall_not_triggered_within_threshold)
+{
+    mqvpn_client_t *c = make_test_client();
+    ASSERT_EQ(mqvpn_client_test_force_state(c, MQVPN_STATE_CONNECTING), 0);
+
+    uint64_t started = 1000000; /* arbitrary, deterministic */
+    ASSERT_EQ(mqvpn_client_test_set_handshake_started_us(c, started), 0);
+
+    /* now = started + 4s : below 5s threshold */
+    uint64_t now = started + 4 * 1000000;
+    ASSERT_EQ(mqvpn_client_test_handshake_stalled(c, now), 0);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(handshake_stall_triggered_after_threshold)
+{
+    mqvpn_client_t *c = make_test_client();
+    ASSERT_EQ(mqvpn_client_test_force_state(c, MQVPN_STATE_CONNECTING), 0);
+
+    uint64_t started = 1000000;
+    ASSERT_EQ(mqvpn_client_test_set_handshake_started_us(c, started), 0);
+
+    /* now = started + 6s : exceeds 5s threshold */
+    uint64_t now = started + 6 * 1000000;
+    ASSERT_EQ(mqvpn_client_test_handshake_stalled(c, now), 1);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(handshake_stall_only_in_connecting_state)
+{
+    mqvpn_client_t *c = make_test_client();
+
+    /* Walk through valid transitions to AUTHENTICATING and verify the
+     * watchdog does NOT fire there — AUTHENTICATING means the QUIC handshake
+     * already succeeded; subsequent stalls are a different failure mode and
+     * out of scope for this watchdog. */
+    ASSERT_EQ(mqvpn_client_test_force_state(c, MQVPN_STATE_CONNECTING), 0);
+    ASSERT_EQ(mqvpn_client_test_force_state(c, MQVPN_STATE_AUTHENTICATING), 0);
+
+    uint64_t now = 1000000 + 30 * 1000000;
+    /* Even with a (stale) started_us deeply in the past, AUTHENTICATING
+     * must not be flagged as stalled. */
+    ASSERT_EQ(mqvpn_client_test_set_handshake_started_us(c, 1000000), 0);
+    ASSERT_EQ(mqvpn_client_test_handshake_stalled(c, now), 0);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(client_set_state_to_connecting_records_handshake_start)
+{
+    mqvpn_client_t *c = make_test_client();
+    ASSERT_EQ(mqvpn_client_test_get_handshake_started_us(c), 0u);
+
+    ASSERT_EQ(mqvpn_client_test_force_state(c, MQVPN_STATE_CONNECTING), 0);
+    /* Real wall clock used (no clock_fn injected on test client) — we can
+     * only assert non-zero, not a specific value. */
+    ASSERT_NE(mqvpn_client_test_get_handshake_started_us(c), 0u);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(client_set_state_leaving_connecting_clears_handshake_start)
+{
+    mqvpn_client_t *c = make_test_client();
+
+    ASSERT_EQ(mqvpn_client_test_force_state(c, MQVPN_STATE_CONNECTING), 0);
+    ASSERT_NE(mqvpn_client_test_get_handshake_started_us(c), 0u);
+
+    /* AUTHENTICATING means handshake succeeded — clear the watchdog. */
+    ASSERT_EQ(mqvpn_client_test_force_state(c, MQVPN_STATE_AUTHENTICATING), 0);
+    ASSERT_EQ(mqvpn_client_test_get_handshake_started_us(c), 0u);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(client_set_state_reconnecting_clears_handshake_start)
+{
+    mqvpn_client_t *c = make_test_client();
+
+    ASSERT_EQ(mqvpn_client_test_force_state(c, MQVPN_STATE_CONNECTING), 0);
+    ASSERT_NE(mqvpn_client_test_get_handshake_started_us(c), 0u);
+
+    /* RECONNECTING is the path the watchdog itself triggers (via
+     * cb_h3_conn_close); clearing here prevents a stale started_us from
+     * being mistaken as "still in CONNECTING for a long time" if we later
+     * re-enter CONNECTING and the new attempt should restart the timer. */
+    ASSERT_EQ(mqvpn_client_test_force_state(c, MQVPN_STATE_RECONNECTING), 0);
+    ASSERT_EQ(mqvpn_client_test_get_handshake_started_us(c), 0u);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(get_interest_includes_handshake_stall_deadline)
+{
+    mqvpn_client_t *c = make_test_client();
+
+    ASSERT_EQ(mqvpn_client_test_force_state(c, MQVPN_STATE_CONNECTING), 0);
+    /* started_us=0 sentinel means "no active stall watch" — get_interest
+     * must not be misled by an explicitly cleared timer. We instead trust
+     * the value just set by client_set_state. */
+    uint64_t started = mqvpn_client_test_get_handshake_started_us(c);
+    ASSERT_NE(started, 0u);
+
+    mqvpn_interest_t i = {0};
+    i.struct_size = sizeof(i);
+    ASSERT_EQ(mqvpn_client_get_interest(c, &i), MQVPN_OK);
+
+    /* Watchdog fires no later than 5s from started_us. next_timer_ms must
+     * not exceed that, else the platform's libevent timer would not wake the
+     * client to run the watchdog before idle_time_out (120s) takes over. */
+    ASSERT_EQ(i.next_timer_ms <= 5000, 1);
+
+    mqvpn_client_destroy(c);
+}
+
 /* ── Path reactivation preconditions ── */
 
 TEST(reactivate_path_null_client)
@@ -1414,6 +1553,16 @@ main(void)
     run_path_create_permanent_failure_marks_closed_immediately();
     run_path_create_permanent_failure_emits_closed_event();
     run_path_create_permanent_failure_invalid_handle_returns_error();
+
+    /* Handshake stall watchdog */
+    run_handshake_stall_not_triggered_when_idle();
+    run_handshake_stall_not_triggered_within_threshold();
+    run_handshake_stall_triggered_after_threshold();
+    run_handshake_stall_only_in_connecting_state();
+    run_client_set_state_to_connecting_records_handshake_start();
+    run_client_set_state_leaving_connecting_clears_handshake_start();
+    run_client_set_state_reconnecting_clears_handshake_start();
+    run_get_interest_includes_handshake_stall_deadline();
 
     /* Path reactivation tests */
     run_reactivate_path_null_client();
