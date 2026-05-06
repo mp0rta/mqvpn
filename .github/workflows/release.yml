@@ -38,7 +38,12 @@ jobs:
           CMAKE_VERSION=$(sed -n 's/^project(mqvpn VERSION \([0-9.][0-9.]*\).*/\1/p' CMakeLists.txt)
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             TAG_VERSION="${GITHUB_REF_NAME#v}"
-            if [ "$TAG_VERSION" != "$CMAKE_VERSION" ]; then
+            # Skip the strict tag/CMake match for SemVer pre-release tags
+            # (e.g. v0.4.0-beta1) — CMake project(VERSION) only accepts
+            # numeric x.y.z, so the suffix is intentionally not in CMake.
+            if [[ "$TAG_VERSION" == *-* ]]; then
+              echo "Pre-release tag $TAG_VERSION — skipping strict version match"
+            elif [ "$TAG_VERSION" != "$CMAKE_VERSION" ]; then
               echo "ERROR: Tag $TAG_VERSION != CMakeLists.txt $CMAKE_VERSION"
               exit 1
             fi
@@ -463,6 +468,13 @@ jobs:
           DEBS=(artifacts/mqvpn_*.deb)
           ZIPS=(artifacts/mqvpn_*.zip)
           APKS=(artifacts/mqvpn-sample_*_android.apk)
+          # SemVer pre-release identifier (anything after '-') → mark as
+          # pre-release so it does not become the "Latest" release.
+          # e.g. v0.4.0-beta1, v0.4.0-rc.1 → pre-release; v0.4.0 → latest.
+          PRERELEASE_FLAG=""
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
           # Body intentionally left empty — auto-generated notes are too noisy
           # (auto-sync upstream PRs, perf bench commits, etc. clutter the changelog).
           # Edit release notes manually after publish via GitHub UI or:
@@ -470,6 +482,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "mqvpn v${VERSION}" \
             --notes "" \
+            $PRERELEASE_FLAG \
             "${TARS[@]}" "${DEBS[@]}" "${ZIPS[@]}" "${APKS[@]}" \
             artifacts/SHA256SUMS \
             scripts/install.sh
