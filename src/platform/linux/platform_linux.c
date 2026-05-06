@@ -648,16 +648,19 @@ try_readd_removed_path(platform_ctx_t *p, const char *ifname)
         }
 
         if (!activated) {
-            /* Activation failed (xqc_conn_create_path error) — path is
-             * PENDING + active=1 + in_use=0, unreachable by
-             * reactivate_path(). Undo everything so the next netlink
-             * event can retry cleanly (path_removed_by_platform stays 1,
-             * fd reverts to -1).
+            /* Activation failed (xqc_conn_create_path error) — slot is
+             * DEGRADED + active=1 + in_use=0 (apply_path_activation_failure
+             * transitioned PENDING → DEGRADED and explicitly cleared
+             * in_use/xqc_path_id/path_stable_since_us). Undo everything so
+             * the platform's path_removed_by_platform=1 retry loop owns
+             * recovery instead of the library's tick recovery
+             * (path_removed_by_platform stays 1, fd reverts to -1).
              *
-             * Safe ordering: remove_path() first, then close(fd).
-             * Because the path is PENDING (not ACTIVE) and in_use=0,
-             * remove_path() skips xqc_conn_close_path() — xquic never
-             * touches this fd during teardown. */
+             * Safe ordering: remove_path() first, then close(fd). The
+             * in_use=0 invariant (enforced by apply_path_activation_failure)
+             * makes remove_path() skip xqc_conn_close_path(), so xquic
+             * never touches this fd during teardown. Do NOT remove that
+             * defensive clear — it's what makes this rollback safe. */
             LOG_WRN("netlink: re-add %s not activated, will retry", ifname);
             mqvpn_client_remove_path(p->client, handle);
             close(fd);

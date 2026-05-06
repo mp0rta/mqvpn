@@ -226,6 +226,21 @@ typedef void (*mqvpn_ready_for_tun_fn)(void *user_ctx);
 typedef void (*mqvpn_state_changed_fn)(mqvpn_client_state_t old_state,
                                        mqvpn_client_state_t new_state, void *user_ctx);
 
+/* Path lifecycle observer.
+ *
+ * Fires on every state transition: PENDING → ACTIVE, ACTIVE → DEGRADED,
+ * DEGRADED → CLOSED, etc. Observers should treat this as the authoritative
+ * source of truth for a handle's lifecycle.
+ *
+ * RE-ENTRANCY CONTRACT: this callback MAY be invoked synchronously from
+ * inside `mqvpn_client_add_path_fd()`, `mqvpn_client_remove_path()`,
+ * `mqvpn_client_drop_path()` and `mqvpn_client_reactivate_path()` —
+ * i.e. the event can fire BEFORE the call returns, and for `add_path_fd`
+ * even before the caller receives the handle. Callers that store
+ * handle → observer mappings must therefore either (a) ignore events
+ * for handles they have not yet recorded (works for `add_path_fd`),
+ * or (b) snapshot status via `mqvpn_client_get_paths()` after the call
+ * returns (works for all four entry points). */
 typedef void (*mqvpn_path_event_fn)(mqvpn_path_handle_t path, mqvpn_path_status_t status,
                                     void *user_ctx);
 
