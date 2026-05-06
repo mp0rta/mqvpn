@@ -1,6 +1,7 @@
 /* src/path_state_machine.c — Phase 1 observability helpers. */
 
 #include "path_state_machine.h"
+#include <assert.h>
 
 const char *
 mqvpn_path_status_name(mqvpn_path_status_t s)
@@ -32,11 +33,58 @@ mqvpn_path_transition_reason_name(path_transition_reason_t r)
     return "UNKNOWN";
 }
 
-/* Other helpers stubbed; will be filled in B6/B7/B10. */
+/* Other helpers stubbed; will be filled in B7/B10. */
 void
 path_invariant_check_legacy(const path_entry_t *p)
 {
+#ifndef NDEBUG
+    int fd_valid = (p->fd >= 0);
+    switch (p->status) {
+    case MQVPN_PATH_PENDING:
+        assert(p->platform_attached == 1);
+        assert(p->xquic_path_live == 0);
+        assert(fd_valid);
+        assert(p->xqc_path_id == 0);
+        assert(p->recreate_after_us == 0); /* PENDING is not retry-armed */
+        assert(p->path_stable_since_us == 0);
+        break;
+    case MQVPN_PATH_ACTIVE:
+    case MQVPN_PATH_STANDBY:
+        assert(p->platform_attached == 1);
+        assert(p->xquic_path_live == 1);
+        assert(fd_valid);
+        assert(p->xqc_path_id != 0);
+        assert(p->recreate_after_us == 0); /* usable states have no pending retry */
+        break;
+    case MQVPN_PATH_DEGRADED:
+        assert(p->platform_attached == 1);
+        assert(p->xquic_path_live == 0);
+        assert(fd_valid);
+        assert(p->xqc_path_id == 0);
+        assert(p->recreate_after_us != 0); /* DEGRADED MUST be retry-armed */
+        assert(p->path_stable_since_us == 0);
+        break;
+    case MQVPN_PATH_CLOSED:
+        /* Two legal sub-cases (recoverable vs dropped), distinguished
+         * by platform_attached. Fields beyond platform_attached are
+         * lazy in the dropped case. */
+        if (p->platform_attached == 1) {
+            /* CLOSED_RECOVERABLE: retry exhausted, fd still valid */
+            assert(p->xquic_path_live == 0);
+            assert(fd_valid);
+            assert(p->xqc_path_id == 0);
+            assert(p->recreate_after_us == 0); /* retry NOT re-armed */
+            assert(p->path_stable_since_us == 0);
+        } else {
+            /* CLOSED_DROPPED: cleanup may be lazy */
+            assert(p->recreate_after_us == 0);
+            assert(p->path_stable_since_us == 0);
+        }
+        break;
+    }
+#else
     (void)p;
+#endif
 }
 
 void

@@ -11,10 +11,8 @@
 #define MQVPN_PATH_STATE_MACHINE_H
 
 #include "libmqvpn.h"
+#include "path_entry_internal.h"
 #include <stdint.h>
-
-/* Forward decl — internal type defined in mqvpn_client.c. */
-typedef struct path_entry_s path_entry_t;
 
 /* Reason tag for transition logs. Phase 4 will extend this. */
 typedef enum {

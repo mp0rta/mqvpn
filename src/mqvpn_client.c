@@ -69,28 +69,10 @@ static void cli_conn_destroy(mqvpn_client_t *c);
 
 /* ─── Internal types ─── */
 
-/* Per-path entry (Level 1 — survives reconnect) */
-typedef struct path_entry_s {
-    mqvpn_path_handle_t handle;
-    int fd;
-    char name[16];
-    mqvpn_path_status_t status;
-    int platform_attached; /* platform owns this slot; fd lifecycle is platform-side */
-    struct sockaddr_storage local_addr;
-    uint32_t local_addr_len;
-    int64_t platform_net_id;
-    uint32_t flags;
-    uint64_t xqc_path_id;
-    int xquic_path_live; /* xquic engine has a live path for this slot */
-    int srtt_ms;
-    uint64_t bytes_tx;
-    uint64_t bytes_rx;
-    uint64_t recreate_after_us;         /* 0 = no pending timer */
-    int recreate_retries;               /* consecutive failures, reset after 30s stable */
-    uint64_t path_stable_since_us;      /* non-zero = awaiting stability confirmation */
-    uint64_t state_entered_at_us;       /* PR1 — Phase 1 observability */
-    uint64_t last_residence_warn_at_us; /* PR1 — residence-warn debounce, used in B10 */
-} path_entry_t;
+/* Per-path entry (Level 1 — survives reconnect).
+ * Definition lives in path_entry_internal.h so that path_state_machine.c
+ * and test_path_state_machine can construct slots directly. */
+#include "path_entry_internal.h"
 
 /* Per-connection state (Level 2 — destroyed on reconnect) */
 struct cli_conn_s {
