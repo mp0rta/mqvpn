@@ -473,9 +473,12 @@ split_addr_port(const char *str, char *host, size_t host_len, int *port)
         host[hlen] = '\0';
         port_start = colon + 1;
     }
+    /* Reject leading whitespace and sign prefix that strtol would otherwise
+     * silently accept. Port must be a bare unsigned decimal. */
+    if (!isdigit((unsigned char)*port_start)) return -1;
     char *end;
     long p = strtol(port_start, &end, 10);
-    if (*end != '\0' || end == port_start || p <= 0 || p > 65535) return -1;
+    if (*end != '\0' || p <= 0 || p > 65535) return -1;
     *port = (int)p;
     return 0;
 }

@@ -1175,6 +1175,31 @@ test_resolve_trailing_garbage_port(void)
     ASSERT_EQ_INT(rc, -1, "trailing garbage in v6 port returns -1");
 }
 
+static void
+test_resolve_port_leading_junk(void)
+{
+    /* Port must be a bare unsigned decimal — no leading whitespace, no sign. */
+    char buf[256] = {0};
+    const char *out_addr = NULL;
+    int out_port = -1;
+
+    int rc = mqvpn_resolve_control_endpoint("127.0.0.1: 9090", NULL, 0, 0, buf,
+                                            sizeof(buf), &out_addr, &out_port);
+    ASSERT_EQ_INT(rc, -1, "leading whitespace in port returns -1");
+
+    rc = mqvpn_resolve_control_endpoint("127.0.0.1:+9090", NULL, 0, 0, buf, sizeof(buf),
+                                        &out_addr, &out_port);
+    ASSERT_EQ_INT(rc, -1, "leading + sign in port returns -1");
+
+    rc = mqvpn_resolve_control_endpoint("127.0.0.1:-9090", NULL, 0, 0, buf, sizeof(buf),
+                                        &out_addr, &out_port);
+    ASSERT_EQ_INT(rc, -1, "leading - sign in port returns -1");
+
+    rc = mqvpn_resolve_control_endpoint("127.0.0.1:", NULL, 0, 0, buf, sizeof(buf),
+                                        &out_addr, &out_port);
+    ASSERT_EQ_INT(rc, -1, "empty port returns -1");
+}
+
 int
 main(void)
 {
@@ -1247,6 +1272,7 @@ main(void)
     test_resolve_no_input();
     test_resolve_malformed_ini();
     test_resolve_trailing_garbage_port();
+    test_resolve_port_leading_junk();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
