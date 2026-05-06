@@ -51,6 +51,20 @@ void path_mark_state_entry(path_entry_t *p, uint64_t now_us);
  * mqvpn_client_t. */
 int path_should_warn_residence(const path_entry_t *p, uint64_t now_us);
 
+/* Pure boolean: is a status assignment from `old` to `new_status` a real
+ * transition (1) or a self-loop to suppress (0)?
+ *
+ * Self-loops are only suppressed when state_entered_at_us has already been
+ * recorded — first entry to a fresh slot (memset zero-init leaves both
+ * status==PENDING==0 and state_entered_at_us==0) MUST be treated as a real
+ * transition so path_mark_state_entry runs and the residence-warn timer
+ * starts ticking.
+ *
+ * Pure helper used by mqvpn_client.c's set_path_status_with_log wrapper —
+ * extracted so the decision can be unit-tested without a mqvpn_client_t. */
+int path_is_real_transition(mqvpn_path_status_t old, mqvpn_path_status_t new_status,
+                            uint64_t state_entered_at_us);
+
 /* Residence thresholds (microseconds). */
 #define PATH_RESIDENCE_PENDING_WARN_US   ((uint64_t)30 * 1000 * 1000)
 #define PATH_RESIDENCE_DEGRADED_GRACE_US ((uint64_t)60 * 1000 * 1000)

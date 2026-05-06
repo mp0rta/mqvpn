@@ -53,7 +53,10 @@ path_invariant_check_legacy(const path_entry_t *p)
         assert(p->platform_attached == 1);
         assert(p->xquic_path_live == 1);
         assert(fd_valid);
-        assert(p->xqc_path_id != 0);
+        /* xqc_path_id == 0 is legal for the primary path (initial QUIC
+         * connection path); secondary paths always receive a non-zero ID
+         * from xqc_conn_create_path(). No per-slot "is_primary" flag
+         * exists in Phase 1, so we cannot tighten this further here. */
         assert(p->recreate_after_us == 0); /* usable states have no pending retry */
         break;
     case MQVPN_PATH_DEGRADED:
@@ -90,14 +93,41 @@ path_invariant_check_legacy(const path_entry_t *p)
 void
 path_mark_state_entry(path_entry_t *p, uint64_t now_us)
 {
-    (void)p;
-    (void)now_us;
+    p->state_entered_at_us = now_us;
+    p->last_residence_warn_at_us = 0; /* clear residence warn debounce */
+}
+
+int
+path_is_real_transition(mqvpn_path_status_t old, mqvpn_path_status_t new_status,
+                        uint64_t state_entered_at_us)
+{
+    /* Different states → always a real transition. */
+    if (old != new_status) return 1;
+
+    /* Same state, but state_entered_at_us not yet recorded → first entry
+     * to a fresh slot (zero-init pattern). MUST run path_mark_state_entry
+     * so the residence-warn timer can fire later. */
+    if (state_entered_at_us == 0) return 1;
+
+    /* Same state, already recorded → idempotent self-loop, suppress. */
+    return 0;
 }
 
 int
 path_should_warn_residence(const path_entry_t *p, uint64_t now_us)
 {
-    (void)p;
-    (void)now_us;
-    return 0;
+    if (p->state_entered_at_us == 0) return 0;
+
+    uint64_t anchor = p->last_residence_warn_at_us != 0 ? p->last_residence_warn_at_us
+                                                        : p->state_entered_at_us;
+    uint64_t since_anchor = now_us - anchor;
+
+    switch (p->status) {
+    case MQVPN_PATH_PENDING: return since_anchor > PATH_RESIDENCE_PENDING_WARN_US;
+    case MQVPN_PATH_DEGRADED:
+        return p->recreate_after_us != 0 &&
+               now_us > p->recreate_after_us + PATH_RESIDENCE_DEGRADED_GRACE_US &&
+               since_anchor > PATH_RESIDENCE_DEGRADED_GRACE_US;
+    default: return 0;
+    }
 }
