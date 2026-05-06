@@ -104,7 +104,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake libevent-dev golang iptables clang
+          sudo apt-get install -y cmake libevent-dev golang iptables clang iperf3
 
       - name: Clone BoringSSL (pinned)
         run: |
@@ -209,6 +209,15 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_ipv6_full_multipath_test.sh
+
+      - name: E2E control API test (netns) — control plane only
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          # Skip data-plane-heavy phases (iperf3 throughput, scheduler matrix)
+          # in CI; phases A/C/D/E/G cover the control-API contracts deterministically.
+          MQVPN_E2E_SKIP_PHASES: "B F"
+        run: sudo -E scripts/ci_e2e/run_control_api_test.sh
 
   msan:
     runs-on: ubuntu-latest

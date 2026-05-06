@@ -1,32 +1,39 @@
 #!/bin/bash
-# test_e2e_control_api.sh — end-to-end test for the v0.4.0 server control API.
+# run_control_api_test.sh — end-to-end test for the v0.4.0 server control API.
 #
 # Verifies all 5 control commands (add_user / remove_user / list_users / get_stats /
 # get_status), the --status CLI, security boundaries (bind addr, malformed input,
-# max-users, max-conns), restart resilience, and a scheduler smoke pass across
-# minrtt / wlb / backup_fec.
+# max-users, max-conns), restart resilience, a scheduler smoke pass across
+# minrtt / wlb / backup_fec, and INI-driven config (Phase G).
 #
 # REQUIRES:
 #   - root (TUN + netns)
 #   - GNU netcat (`nc` with the `-q` flag)
 #   - python3
-#   - iperf3 (Phase B only)
+#   - iperf3 (used by Phase B; preflight requires it unconditionally)
 #   - openssl (used transitively via bench_env_setup.sh for cert generation)
 #   - mqvpn binary built with FEC + XOR enabled (Phase F backup_fec iteration);
 #     when built without FEC the script skips that iteration with a clear
 #     diagnostic (preflight probes for support).
 #
 # Run manually:
-#   sudo bash tests/test_e2e_control_api.sh [path/to/mqvpn]
+#   sudo bash scripts/ci_e2e/run_control_api_test.sh [path/to/mqvpn]
 #
-# Exit code: 0 if all phases pass, 1 if any phase fails. No SKIP path.
+# Skip phases (CI / fast local runs):
+#   MQVPN_E2E_SKIP_PHASES="B F" sudo -E bash scripts/ci_e2e/run_control_api_test.sh
+#
+# Exit code: 0 if all run phases pass, 1 if any fails.
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "${SCRIPT_DIR}/../benchmarks/bench_env_setup.sh"
+source "${SCRIPT_DIR}/../../benchmarks/bench_env_setup.sh"
 
-MQVPN="${1:-${MQVPN}}"
+# Phase opt-out for CI: space-separated list of phase letters (e.g. "B F").
+SKIP_PHASES=" ${MQVPN_E2E_SKIP_PHASES:-} "
+
+# Default MQVPN to ../../build/mqvpn so sibling ci_e2e scripts' convention works.
+MQVPN="${1:-${MQVPN:-${SCRIPT_DIR}/../../build/mqvpn}}"
 LOG_DIR="$(mktemp -d)"
 CTRL_PORT=9090
 
@@ -1115,13 +1122,25 @@ echo " Server control API E2E"
 echo " Binary: $MQVPN"
 echo "================================================================"
 
-run_test "phase_a basic command coverage" test_phase_a_basic
-run_test "phase_b active session" test_phase_b_active_session
-run_test "phase_c user lifecycle (immediate-revoke)" test_phase_c_lifecycle
-run_test "phase_d security & robustness" test_phase_d_security
-run_test "phase_e restart resilience" test_phase_e_restart
-run_test "phase_f scheduler matrix smoke" test_phase_f_scheduler_smoke
-run_test "phase_g INI-driven control-API config" test_phase_g_ini_config   # NEW — must be LAST
+# Skip a phase if its letter appears in MQVPN_E2E_SKIP_PHASES.
+# Phase G must remain last (re-creates netns, tears down prior state).
+maybe_run() {
+    local label="$1" phase_id="$2"
+    shift 2
+    if [[ "$SKIP_PHASES" == *" $phase_id "* ]]; then
+        echo "SKIP phase_${phase_id} ($label) — MQVPN_E2E_SKIP_PHASES"
+        return 0
+    fi
+    run_test "$label" "$@"
+}
+
+maybe_run "phase_a basic command coverage"         A test_phase_a_basic
+maybe_run "phase_b active session"                 B test_phase_b_active_session
+maybe_run "phase_c user lifecycle (immediate-revoke)" C test_phase_c_lifecycle
+maybe_run "phase_d security & robustness"          D test_phase_d_security
+maybe_run "phase_e restart resilience"             E test_phase_e_restart
+maybe_run "phase_f scheduler matrix smoke"         F test_phase_f_scheduler_smoke
+maybe_run "phase_g INI-driven control-API config"  G test_phase_g_ini_config   # must be LAST
 
 echo ""
 echo "================================================================"
