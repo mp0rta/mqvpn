@@ -70,7 +70,7 @@ static void cli_conn_destroy(mqvpn_client_t *c);
 /* ─── Internal types ─── */
 
 /* Per-path entry (Level 1 — survives reconnect) */
-typedef struct {
+typedef struct path_entry_s {
     mqvpn_path_handle_t handle;
     int fd;
     char name[16];
@@ -85,9 +85,11 @@ typedef struct {
     int srtt_ms;
     uint64_t bytes_tx;
     uint64_t bytes_rx;
-    uint64_t recreate_after_us;    /* 0 = no pending timer */
-    int recreate_retries;          /* consecutive failures, reset after 30s stable */
-    uint64_t path_stable_since_us; /* non-zero = awaiting stability confirmation */
+    uint64_t recreate_after_us;         /* 0 = no pending timer */
+    int recreate_retries;               /* consecutive failures, reset after 30s stable */
+    uint64_t path_stable_since_us;      /* non-zero = awaiting stability confirmation */
+    uint64_t state_entered_at_us;       /* PR1 — Phase 1 observability */
+    uint64_t last_residence_warn_at_us; /* PR1 — residence-warn debounce, used in B10 */
 } path_entry_t;
 
 /* Per-connection state (Level 2 — destroyed on reconnect) */
