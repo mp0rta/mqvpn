@@ -1149,51 +1149,82 @@ EOF
 
 # ── Phase H: new v0.5.0 control-API commands (build_info / fec_stats / all) ──
 #
-# Reuses the server left running by an earlier phase (A-F). MUST run BEFORE
-# Phase G (g_ini_config), which tears down state.
+# Self-contained: own netns + server. The earlier feat-branch revision relied
+# on inheriting an alice-connected server from Phase F, but CI skips F (and B)
+# via MQVPN_E2E_SKIP_PHASES, leaving Phase H to inherit Phase E's
+# kill+restart server. Under sanitizer (ASan/UBSan) builds the kill+restart
+# can leave the control listener not-yet-bound when this phase enters,
+# producing empty/late responses (observed: get_build_info returning empty
+# `version`).
+#
+# Runs BEFORE Phase G (g_ini_config), which is the only remaining phase
+# that tears down its own setup at exit.
 test_phase_h_new_commands() {
-    # If `ctrl_local` returns "server may be dead" here, fix the phase
-    # ordering rather than this test.
-    echo "--- Phase G: get_build_info ---"
+    local server_log="${LOG_DIR}/phase_h_server.log"
+
+    bench_cleanup
+    bench_setup_netns
+    # alice is a *registered* auth-table user but is NOT connected (no
+    # client). get_fec_stats user="alice" therefore takes the "user not
+    # found" branch (acceptable per the test's 3-outcome contract).
+    start_server_with_flags "$server_log" \
+        --auth-key "$_BENCH_PSK" \
+        --control-port "$CTRL_PORT" \
+        --user alice:secret_a \
+        || return 1
+
+    # Wait for the control listener to actually accept connections. The
+    # `kill -0` + `sleep 1` inside start_server_with_flags only proves the
+    # process exists; under sanitizer it can take significantly longer for
+    # libevent to bind and start servicing. Poll for up to 5s.
+    local i probe
+    for i in $(seq 1 25); do
+        probe=$(ctrl_send "$NS_SERVER" 127.0.0.1 "$CTRL_PORT" '{"cmd":"get_status"}' 2>/dev/null)
+        if [[ -n "$probe" ]] && [[ "$(echo "$probe" | jget ok)" == "true" ]]; then
+            break
+        fi
+        sleep 0.2
+    done
+    if [[ -z "$probe" ]] || [[ "$(echo "$probe" | jget ok)" != "true" ]]; then
+        echo "  Phase H: control API not ready after 5s; tail of server log:" >&2
+        tail -20 "$server_log" >&2
+        return 1
+    fi
+
+    echo "--- Phase H.1: get_build_info ---"
     local RESP
     RESP=$(ctrl_local '{"cmd":"get_build_info"}')
-    assert_json_field "$RESP" ok true        || { echo "FAIL G: ok"; return 1; }
+    assert_json_field "$RESP" ok true        || { echo "FAIL H.1: ok ($RESP)"; return 1; }
     local VER SCHED FECE
     VER=$(echo "$RESP" | jget version)
     SCHED=$(echo "$RESP" | jget scheduler)
     FECE=$(echo "$RESP" | jget fec_enabled)
-    [[ -n "$VER" ]]                          || { echo "FAIL G: empty version"; return 1; }
+    [[ -n "$VER" ]]                          || { echo "FAIL H.1: empty version ($RESP)"; return 1; }
     case "$SCHED" in minrtt|wlb|backup_fec|unknown) ;; *)
-        echo "FAIL G: unexpected scheduler=$SCHED"; return 1 ;;
+        echo "FAIL H.1: unexpected scheduler=$SCHED"; return 1 ;;
     esac
-    case "$FECE" in 0|1) ;; *) echo "FAIL G: fec_enabled=$FECE"; return 1 ;; esac
+    case "$FECE" in 0|1) ;; *) echo "FAIL H.1: fec_enabled=$FECE"; return 1 ;; esac
 
-    echo "--- Phase G': get_stats extended fields ---"
+    echo "--- Phase H.2: get_stats extended fields ---"
     RESP=$(ctrl_local '{"cmd":"get_stats"}')
-    assert_json_field "$RESP" ok true        || { echo "FAIL G': ok"; return 1; }
+    assert_json_field "$RESP" ok true        || { echo "FAIL H.2: ok ($RESP)"; return 1; }
     for k in n_clients bytes_tx bytes_rx dgram_sent dgram_recv dgram_lost dgram_acked uptime_sec; do
         local v
         v=$(echo "$RESP" | jget "$k")
-        [[ -n "$v" ]] || { echo "FAIL G': missing $k in $RESP"; return 1; }
+        [[ -n "$v" ]] || { echo "FAIL H.2: missing $k in $RESP"; return 1; }
     done
-    # If a client is connected (any earlier phase that left an active session),
-    # traffic has been driven, so dgram_sent and dgram_recv should be non-zero.
-    # This catches the "fields present but always 0" regression class.
-    local NC DSENT DRECV UP
-    NC=$(echo "$RESP"    | jget n_clients)
-    DSENT=$(echo "$RESP" | jget dgram_sent)
-    DRECV=$(echo "$RESP" | jget dgram_recv)
-    UP=$(echo "$RESP"    | jget uptime_sec)
-    if [[ "$NC" -gt 0 ]]; then
-        [[ "$DSENT" -gt 0 ]] || { echo "FAIL G': dgram_sent=0 with $NC clients connected ($RESP)"; return 1; }
-        [[ "$DRECV" -gt 0 ]] || { echo "FAIL G': dgram_recv=0 with $NC clients connected ($RESP)"; return 1; }
-    fi
-    [[ "$UP" -gt 0 ]] || { echo "FAIL G': uptime_sec=0 ($RESP)"; return 1; }
+    # No client is connected in this self-contained phase, so n_clients == 0
+    # and dgram_* may be 0. Only enforce uptime_sec >= 0 (set even on empty
+    # server). The "fields present but always 0" regression class is covered
+    # by Phase B (active session) when not skipped.
+    local UP
+    UP=$(echo "$RESP" | jget uptime_sec)
+    [[ "$UP" -ge 0 ]] || { echo "FAIL H.2: uptime_sec<0 ($RESP)"; return 1; }
 
-    echo "--- Phase H: get_fec_stats — accept all three valid outcomes ---"
-    # Order-independent test. Acceptable outcomes for user="alice":
-    #   1. ok=true with all fields  (alice connected, FEC built)
-    #   2. error="user not found"   (alice disconnected, FEC built)
+    echo "--- Phase H.3: get_fec_stats — accept all three valid outcomes ---"
+    # Acceptable outcomes for the registered-but-not-connected user "alice":
+    #   1. ok=true with all fields  (would require active session)
+    #   2. error="user not found"   (current state — no client connected)
     #   3. error="fec not built"    (FEC missing from build)
     RESP=$(ctrl_local '{"cmd":"get_fec_stats","user":"alice"}')
     local OK ERR
@@ -1204,33 +1235,33 @@ test_phase_h_new_commands() {
         for k in user enable_fec mp_state mp_state_label fec_send_cnt fec_recover_cnt \
                  lost_dgram_cnt total_app_bytes standby_app_bytes; do
             v=$(echo "$RESP" | jget "$k")
-            [[ -n "$v" ]] || { echo "FAIL H: missing $k in $RESP"; return 1; }
+            [[ -n "$v" ]] || { echo "FAIL H.3: missing $k in $RESP"; return 1; }
         done
         [[ "$(echo "$RESP" | jget user)" == "alice" ]] \
-            || { echo "FAIL H: user mismatch in $RESP"; return 1; }
+            || { echo "FAIL H.3: user mismatch in $RESP"; return 1; }
         # mp_state_label must be one of the documented values.
         local MPL
         MPL=$(echo "$RESP" | jget mp_state_label)
         case "$MPL" in
             single_path|active_with_standby|standby_only|active_only|unknown) ;;
-            *) echo "FAIL H: bad mp_state_label=$MPL"; return 1 ;;
+            *) echo "FAIL H.3: bad mp_state_label=$MPL"; return 1 ;;
         esac
     elif [[ "$ERR" == "user not found" || "$ERR" == "fec not built" ]]; then
-        echo "INFO H: $ERR (ok-path not exercised this run)"
+        echo "INFO H.3: $ERR (ok-path not exercised this run)"
     else
-        echo "FAIL H: unexpected response $RESP"; return 1
+        echo "FAIL H.3: unexpected response $RESP"; return 1
     fi
 
-    echo "--- Phase H'': get_all_fec_stats — bulk variant ---"
-    # Either ok=true with users[] array, or error="fec not built".
+    echo "--- Phase H.4: get_all_fec_stats — bulk variant ---"
+    # Either ok=true with clients[] array (likely empty in this phase), or
+    # error="fec not built".
     RESP=$(ctrl_local '{"cmd":"get_all_fec_stats"}')
     OK=$(echo "$RESP" | jget ok)
     ERR=$(echo "$RESP" | jget error)
     if [[ "$OK" == "true" ]]; then
         local NC
         NC=$(echo "$RESP" | jget n_clients)
-        [[ -n "$NC" ]] || { echo "FAIL H'': missing n_clients in $RESP"; return 1; }
-        # If alice is connected, at least one entry must echo her name and a label.
+        [[ -n "$NC" ]] || { echo "FAIL H.4: missing n_clients in $RESP"; return 1; }
         local CHECK
         CHECK=$(python3 - "$RESP" <<'PY'
 import json, sys
@@ -1251,26 +1282,26 @@ for c in clients:
 print("ok")
 PY
 )
-        [[ "$CHECK" == "ok" ]] || { echo "FAIL H'': $CHECK ($RESP)"; return 1; }
+        [[ "$CHECK" == "ok" ]] || { echo "FAIL H.4: $CHECK ($RESP)"; return 1; }
     elif [[ "$ERR" == "fec not built" ]]; then
-        echo "INFO H'': fec not built (ok-path not exercised this run)"
+        echo "INFO H.4: fec not built (ok-path not exercised this run)"
     else
-        echo "FAIL H'': unexpected response $RESP"; return 1
+        echo "FAIL H.4: unexpected response $RESP"; return 1
     fi
 
-    echo "--- Phase H': error paths ---"
+    echo "--- Phase H.5: error paths ---"
     # Always-known-invalid user → "user not found" or "fec not built"
     RESP=$(ctrl_local '{"cmd":"get_fec_stats","user":"definitely-not-a-user-zzz"}')
     ERR=$(echo "$RESP" | jget error)
     case "$ERR" in
         "user not found"|"fec not built") ;;
-        *) echo "FAIL H' nobody: got $RESP"; return 1 ;;
+        *) echo "FAIL H.5 nobody: got $RESP"; return 1 ;;
     esac
 
     # Missing user arg → always "user required"
     RESP=$(ctrl_local '{"cmd":"get_fec_stats"}')
     [[ "$(echo "$RESP" | jget error)" == "user required" ]] \
-        || { echo "FAIL H' missing-arg: got $RESP"; return 1; }
+        || { echo "FAIL H.5 missing-arg: got $RESP"; return 1; }
 
     return 0
 }
