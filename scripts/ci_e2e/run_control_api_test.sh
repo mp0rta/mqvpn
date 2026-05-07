@@ -1,10 +1,14 @@
 #!/bin/bash
-# run_control_api_test.sh — end-to-end test for the v0.4.0 server control API.
+# run_control_api_test.sh — end-to-end test for the v0.5.0 server control API.
 #
-# Verifies all 5 control commands (add_user / remove_user / list_users / get_stats /
-# get_status), the --status CLI, security boundaries (bind addr, malformed input,
-# max-users, max-conns), restart resilience, a scheduler smoke pass across
-# minrtt / wlb / backup_fec, and INI-driven config (Phase G).
+# Verifies all 8 control commands (add_user / remove_user / list_users / get_stats /
+# get_status / get_build_info / get_fec_stats / get_all_fec_stats), the
+# --status CLI, security boundaries (bind addr, malformed input, max-users,
+# max-conns), restart resilience, a scheduler smoke pass across
+# minrtt / wlb / backup_fec, INI-driven config (Phase G), the extended
+# get_stats wire format (dgram_*, uptime_sec), get_fec_stats 3-outcome
+# tolerance, and the new state_label / mp_state_label string fields plus
+# the bulk get_all_fec_stats variant.
 #
 # REQUIRES:
 #   - root (TUN + netns)
@@ -118,6 +122,32 @@ except Exception:
     sys.exit(1)
 sys.exit(0 if d.get(sys.argv[2]) == expected else 1)
 PY
+}
+
+# jget <field>: read top-level field from stdin JSON.
+# Booleans → 'true'/'false' (lowercase, NOT Python's 'True'/'False').
+# Numbers and strings → bare value. Missing field → empty string.
+# Field must be a scalar; nested dicts/lists are printed as Python repr,
+# which won't match clean string comparisons — fine for current wire shape
+# where all top-level fields are scalars.
+# The field name is passed via sys.argv (not string-interpolated) to avoid
+# shell injection if a caller ever feeds it a dynamic value.
+jget() {
+    # NOTE: do NOT pass `-- "$1"`. With `python3 -c "code"`, Python sets
+    # `sys.argv = ['-c', '--', "$1"]` — the `--` becomes argv[1], so
+    # `sys.argv[1]` is "--" instead of the field name, and every lookup
+    # silently returns "". Pass the field name as the first positional
+    # arg to make it argv[1].
+    python3 -c "
+import sys, json
+v = json.loads(sys.stdin.read()).get(sys.argv[1], '')
+if isinstance(v, bool):
+    print('true' if v else 'false')
+elif v is None:
+    print('')
+else:
+    print(v)
+" "$1"
 }
 
 # assert_json_users_eq <response> <comma-separated user list>  → ignores order
@@ -476,6 +506,12 @@ if not paths:
 total_pkt_sent = sum(p.get("pkt_sent", 0) for p in paths)
 if total_pkt_sent <= 0:
     print(f"total pkt_sent across paths = {total_pkt_sent}"); sys.exit(1)
+# state_label was added in v0.5.0 — every path must carry one.
+ALLOWED_STATES = {"init", "validating", "active", "closing", "closed", "unknown"}
+for p in paths:
+    sl = p.get("state_label")
+    if sl not in ALLOWED_STATES:
+        print(f"bad state_label={sl!r}"); sys.exit(1)
 print("ok")
 PY
 )
@@ -966,6 +1002,12 @@ if not paths:
 total_pkt_sent = sum(p.get("pkt_sent", 0) for p in paths)
 if total_pkt_sent <= 0:
     print(f"total pkt_sent across paths = {total_pkt_sent}"); sys.exit(1)
+# state_label was added in v0.5.0 — every path must carry one.
+ALLOWED_STATES = {"init", "validating", "active", "closing", "closed", "unknown"}
+for p in paths:
+    sl = p.get("state_label")
+    if sl not in ALLOWED_STATES:
+        print(f"bad state_label={sl!r}"); sys.exit(1)
 print("ok")
 PY
 )
@@ -1110,6 +1152,194 @@ EOF
     return 0
 }
 
+# ── Phase H: new v0.5.0 control-API commands (build_info / fec_stats / all) ──
+#
+# Self-contained: own netns + server. The earlier feat-branch revision relied
+# on inheriting an alice-connected server from Phase F, but CI skips F (and B)
+# via MQVPN_E2E_SKIP_PHASES, leaving Phase H to inherit Phase E's
+# kill+restart server. Under sanitizer (ASan/UBSan) builds the kill+restart
+# can leave the control listener not-yet-bound when this phase enters,
+# producing empty/late responses (observed: get_build_info returning empty
+# `version`).
+#
+# Runs BEFORE Phase G (g_ini_config), which is the only remaining phase
+# that tears down its own setup at exit.
+test_phase_h_new_commands() {
+    local server_log="${LOG_DIR}/phase_h_server.log"
+
+    bench_cleanup
+    bench_setup_netns
+
+    # Mirror phase_g_ini_config's pattern (which passes CI) instead of
+    # start_server_with_flags: seed cert/key/PSK via bench_start_vpn_server,
+    # then relaunch with our explicit flags via relaunch_server_in_ns.
+    # alice is a *registered* auth-table user but is NOT connected (no
+    # client). get_fec_stats user="alice" therefore takes the "user not
+    # found" branch (acceptable per the 3-outcome contract).
+    if ! bench_start_vpn_server >"${server_log}.bringup" 2>&1; then
+        echo "  Phase H: bench_start_vpn_server failed; tail of bringup:" >&2
+        tail -20 "${server_log}.bringup" >&2
+        return 1
+    fi
+
+    if ! relaunch_server_in_ns "$server_log" \
+            --mode server \
+            --listen "0.0.0.0:${VPN_LISTEN_PORT}" \
+            --subnet 10.0.0.0/24 \
+            --cert "${_BENCH_WORK_DIR}/server.crt" \
+            --key "${_BENCH_WORK_DIR}/server.key" \
+            --auth-key "$_BENCH_PSK" \
+            --control-port "$CTRL_PORT" \
+            --user alice:secret_a; then
+        return 1
+    fi
+
+    # Wait for the control listener to actually accept connections. The
+    # `kill -0` + `sleep 1` inside relaunch_server_in_ns only proves the
+    # process exists; under sanitizer it can take significantly longer for
+    # libevent to bind and start servicing. Poll for up to 5s.
+    #
+    # Use a direct substring match instead of jget — the previous version
+    # called `python3 -c '...' | jget ok` per iteration and at least under
+    # CI sanitizer the subshell composition produced `==` comparisons that
+    # never matched even when the probe clearly contained "ok":true. The
+    # control server's response key order is fixed by control_socket.c, so
+    # a literal substring match is sufficient and avoids the subshell.
+    local i probe ready=0
+    for i in $(seq 1 25); do
+        probe=$(ctrl_send "$NS_SERVER" 127.0.0.1 "$CTRL_PORT" '{"cmd":"get_status"}' 2>/dev/null)
+        if [[ "$probe" == *'"ok":true'* ]]; then
+            ready=1
+            break
+        fi
+        sleep 0.2
+    done
+    if (( ready != 1 )); then
+        echo "  Phase H: control API not ready after 5s" >&2
+        echo "  Phase H: last probe response: [$probe]" >&2
+        echo "  Phase H: server PID alive? $(kill -0 "$_BENCH_SERVER_PID" 2>/dev/null && echo yes || echo no)" >&2
+        echo "  Phase H: ss listeners inside $NS_SERVER:" >&2
+        ip netns exec "$NS_SERVER" ss -tlnp 2>&1 | head -10 >&2 || true
+        echo "  Phase H: tail of server log:" >&2
+        tail -30 "$server_log" >&2
+        return 1
+    fi
+
+    echo "--- Phase H.1: get_build_info ---"
+    local RESP
+    RESP=$(ctrl_local '{"cmd":"get_build_info"}')
+    assert_json_field "$RESP" ok true        || { echo "FAIL H.1: ok ($RESP)"; return 1; }
+    local VER SCHED FECE
+    VER=$(echo "$RESP" | jget version)
+    SCHED=$(echo "$RESP" | jget scheduler)
+    FECE=$(echo "$RESP" | jget fec_enabled)
+    [[ -n "$VER" ]]                          || { echo "FAIL H.1: empty version ($RESP)"; return 1; }
+    case "$SCHED" in minrtt|wlb|backup_fec|unknown) ;; *)
+        echo "FAIL H.1: unexpected scheduler=$SCHED"; return 1 ;;
+    esac
+    case "$FECE" in 0|1) ;; *) echo "FAIL H.1: fec_enabled=$FECE"; return 1 ;; esac
+
+    echo "--- Phase H.2: get_stats extended fields ---"
+    RESP=$(ctrl_local '{"cmd":"get_stats"}')
+    assert_json_field "$RESP" ok true        || { echo "FAIL H.2: ok ($RESP)"; return 1; }
+    for k in n_clients bytes_tx bytes_rx dgram_sent dgram_recv dgram_lost dgram_acked uptime_sec; do
+        local v
+        v=$(echo "$RESP" | jget "$k")
+        [[ -n "$v" ]] || { echo "FAIL H.2: missing $k in $RESP"; return 1; }
+    done
+    # No client is connected in this self-contained phase, so n_clients == 0
+    # and dgram_* may be 0. Only enforce uptime_sec >= 0 (set even on empty
+    # server). The "fields present but always 0" regression class is covered
+    # by Phase B (active session) when not skipped.
+    local UP
+    UP=$(echo "$RESP" | jget uptime_sec)
+    [[ "$UP" -ge 0 ]] || { echo "FAIL H.2: uptime_sec<0 ($RESP)"; return 1; }
+
+    echo "--- Phase H.3: get_fec_stats — accept all three valid outcomes ---"
+    # Acceptable outcomes for the registered-but-not-connected user "alice":
+    #   1. ok=true with all fields  (would require active session)
+    #   2. error="user not found"   (current state — no client connected)
+    #   3. error="fec not built"    (FEC missing from build)
+    RESP=$(ctrl_local '{"cmd":"get_fec_stats","user":"alice"}')
+    local OK ERR
+    OK=$(echo "$RESP" | jget ok)
+    ERR=$(echo "$RESP" | jget error)
+    if [[ "$OK" == "true" ]]; then
+        local k v
+        for k in user enable_fec mp_state mp_state_label fec_send_cnt fec_recover_cnt \
+                 lost_dgram_cnt total_app_bytes standby_app_bytes; do
+            v=$(echo "$RESP" | jget "$k")
+            [[ -n "$v" ]] || { echo "FAIL H.3: missing $k in $RESP"; return 1; }
+        done
+        [[ "$(echo "$RESP" | jget user)" == "alice" ]] \
+            || { echo "FAIL H.3: user mismatch in $RESP"; return 1; }
+        # mp_state_label must be one of the documented values.
+        local MPL
+        MPL=$(echo "$RESP" | jget mp_state_label)
+        case "$MPL" in
+            single_path|active_with_standby|standby_only|active_only|unknown) ;;
+            *) echo "FAIL H.3: bad mp_state_label=$MPL"; return 1 ;;
+        esac
+    elif [[ "$ERR" == "user not found" || "$ERR" == "fec not built" ]]; then
+        echo "INFO H.3: $ERR (ok-path not exercised this run)"
+    else
+        echo "FAIL H.3: unexpected response $RESP"; return 1
+    fi
+
+    echo "--- Phase H.4: get_all_fec_stats — bulk variant ---"
+    # Either ok=true with clients[] array (likely empty in this phase), or
+    # error="fec not built".
+    RESP=$(ctrl_local '{"cmd":"get_all_fec_stats"}')
+    OK=$(echo "$RESP" | jget ok)
+    ERR=$(echo "$RESP" | jget error)
+    if [[ "$OK" == "true" ]]; then
+        local NC
+        NC=$(echo "$RESP" | jget n_clients)
+        [[ -n "$NC" ]] || { echo "FAIL H.4: missing n_clients in $RESP"; return 1; }
+        local CHECK
+        CHECK=$(python3 - "$RESP" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1])
+clients = d.get("clients") or []
+ALLOWED = {"single_path","active_with_standby","standby_only","active_only","unknown"}
+for c in clients:
+    if c.get("mp_state_label") not in ALLOWED:
+        print(f"bad mp_state_label={c.get('mp_state_label')}"); sys.exit(1)
+    # mp_state is the raw xquic value; only 0/1/2 are produced today.
+    ms = c.get("mp_state")
+    if ms not in (0, 1, 2):
+        print(f"unexpected mp_state={ms}"); sys.exit(1)
+    for k in ("user","enable_fec","mp_state","fec_send_cnt","fec_recover_cnt",
+              "lost_dgram_cnt","total_app_bytes","standby_app_bytes"):
+        if k not in c:
+            print(f"missing {k} in {c}"); sys.exit(1)
+print("ok")
+PY
+)
+        [[ "$CHECK" == "ok" ]] || { echo "FAIL H.4: $CHECK ($RESP)"; return 1; }
+    elif [[ "$ERR" == "fec not built" ]]; then
+        echo "INFO H.4: fec not built (ok-path not exercised this run)"
+    else
+        echo "FAIL H.4: unexpected response $RESP"; return 1
+    fi
+
+    echo "--- Phase H.5: error paths ---"
+    # Always-known-invalid user → "user not found" or "fec not built"
+    RESP=$(ctrl_local '{"cmd":"get_fec_stats","user":"definitely-not-a-user-zzz"}')
+    ERR=$(echo "$RESP" | jget error)
+    case "$ERR" in
+        "user not found"|"fec not built") ;;
+        *) echo "FAIL H.5 nobody: got $RESP"; return 1 ;;
+    esac
+
+    # Missing user arg → always "user required"
+    RESP=$(ctrl_local '{"cmd":"get_fec_stats"}')
+    [[ "$(echo "$RESP" | jget error)" == "user required" ]] \
+        || { echo "FAIL H.5 missing-arg: got $RESP"; return 1; }
+
+    return 0
+}
+
 # --- Main runner ---
 
 # (empty for this chunk; phases will be wired in their own chunks)
@@ -1123,7 +1353,9 @@ echo " Binary: $MQVPN"
 echo "================================================================"
 
 # Skip a phase if its letter appears in MQVPN_E2E_SKIP_PHASES.
-# Phase G must remain last (re-creates netns, tears down prior state).
+# phase_g_ini_config must run LAST (re-creates netns, tears down prior state).
+# phase_h_new_commands must run BEFORE g (it reuses the running server that
+# g would otherwise tear down).
 maybe_run() {
     local label="$1" phase_id="$2"
     shift 2
@@ -1140,6 +1372,7 @@ maybe_run "phase_c user lifecycle (immediate-revoke)" C test_phase_c_lifecycle
 maybe_run "phase_d security & robustness"          D test_phase_d_security
 maybe_run "phase_e restart resilience"             E test_phase_e_restart
 maybe_run "phase_f scheduler matrix smoke"         F test_phase_f_scheduler_smoke
+maybe_run "phase_h new commands (build_info + extended get_stats + fec_stats + all_fec_stats)" H test_phase_h_new_commands
 maybe_run "phase_g INI-driven control-API config"  G test_phase_g_ini_config   # must be LAST
 
 echo ""
