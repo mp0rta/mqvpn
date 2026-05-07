@@ -133,6 +133,11 @@ PY
 # The field name is passed via sys.argv (not string-interpolated) to avoid
 # shell injection if a caller ever feeds it a dynamic value.
 jget() {
+    # NOTE: do NOT pass `-- "$1"`. With `python3 -c "code"`, Python sets
+    # `sys.argv = ['-c', '--', "$1"]` — the `--` becomes argv[1], so
+    # `sys.argv[1]` is "--" instead of the field name, and every lookup
+    # silently returns "". Pass the field name as the first positional
+    # arg to make it argv[1].
     python3 -c "
 import sys, json
 v = json.loads(sys.stdin.read()).get(sys.argv[1], '')
@@ -142,7 +147,7 @@ elif v is None:
     print('')
 else:
     print(v)
-" -- "$1"
+" "$1"
 }
 
 # assert_json_users_eq <response> <comma-separated user list>  → ignores order
