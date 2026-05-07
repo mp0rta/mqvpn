@@ -1193,15 +1193,23 @@ test_phase_h_new_commands() {
     # `kill -0` + `sleep 1` inside relaunch_server_in_ns only proves the
     # process exists; under sanitizer it can take significantly longer for
     # libevent to bind and start servicing. Poll for up to 5s.
-    local i probe
+    #
+    # Use a direct substring match instead of jget — the previous version
+    # called `python3 -c '...' | jget ok` per iteration and at least under
+    # CI sanitizer the subshell composition produced `==` comparisons that
+    # never matched even when the probe clearly contained "ok":true. The
+    # control server's response key order is fixed by control_socket.c, so
+    # a literal substring match is sufficient and avoids the subshell.
+    local i probe ready=0
     for i in $(seq 1 25); do
         probe=$(ctrl_send "$NS_SERVER" 127.0.0.1 "$CTRL_PORT" '{"cmd":"get_status"}' 2>/dev/null)
-        if [[ -n "$probe" ]] && [[ "$(echo "$probe" | jget ok)" == "true" ]]; then
+        if [[ "$probe" == *'"ok":true'* ]]; then
+            ready=1
             break
         fi
         sleep 0.2
     done
-    if [[ -z "$probe" ]] || [[ "$(echo "$probe" | jget ok)" != "true" ]]; then
+    if (( ready != 1 )); then
         echo "  Phase H: control API not ready after 5s" >&2
         echo "  Phase H: last probe response: [$probe]" >&2
         echo "  Phase H: server PID alive? $(kill -0 "$_BENCH_SERVER_PID" 2>/dev/null && echo yes || echo no)" >&2
