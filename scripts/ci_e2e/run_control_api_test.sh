@@ -1164,17 +1164,33 @@ test_phase_h_new_commands() {
 
     bench_cleanup
     bench_setup_netns
+
+    # Mirror phase_g_ini_config's pattern (which passes CI) instead of
+    # start_server_with_flags: seed cert/key/PSK via bench_start_vpn_server,
+    # then relaunch with our explicit flags via relaunch_server_in_ns.
     # alice is a *registered* auth-table user but is NOT connected (no
     # client). get_fec_stats user="alice" therefore takes the "user not
-    # found" branch (acceptable per the test's 3-outcome contract).
-    start_server_with_flags "$server_log" \
-        --auth-key "$_BENCH_PSK" \
-        --control-port "$CTRL_PORT" \
-        --user alice:secret_a \
-        || return 1
+    # found" branch (acceptable per the 3-outcome contract).
+    if ! bench_start_vpn_server >"${server_log}.bringup" 2>&1; then
+        echo "  Phase H: bench_start_vpn_server failed; tail of bringup:" >&2
+        tail -20 "${server_log}.bringup" >&2
+        return 1
+    fi
+
+    if ! relaunch_server_in_ns "$server_log" \
+            --mode server \
+            --listen "0.0.0.0:${VPN_LISTEN_PORT}" \
+            --subnet 10.0.0.0/24 \
+            --cert "${_BENCH_WORK_DIR}/server.crt" \
+            --key "${_BENCH_WORK_DIR}/server.key" \
+            --auth-key "$_BENCH_PSK" \
+            --control-port "$CTRL_PORT" \
+            --user alice:secret_a; then
+        return 1
+    fi
 
     # Wait for the control listener to actually accept connections. The
-    # `kill -0` + `sleep 1` inside start_server_with_flags only proves the
+    # `kill -0` + `sleep 1` inside relaunch_server_in_ns only proves the
     # process exists; under sanitizer it can take significantly longer for
     # libevent to bind and start servicing. Poll for up to 5s.
     local i probe
@@ -1186,8 +1202,13 @@ test_phase_h_new_commands() {
         sleep 0.2
     done
     if [[ -z "$probe" ]] || [[ "$(echo "$probe" | jget ok)" != "true" ]]; then
-        echo "  Phase H: control API not ready after 5s; tail of server log:" >&2
-        tail -20 "$server_log" >&2
+        echo "  Phase H: control API not ready after 5s" >&2
+        echo "  Phase H: last probe response: [$probe]" >&2
+        echo "  Phase H: server PID alive? $(kill -0 "$_BENCH_SERVER_PID" 2>/dev/null && echo yes || echo no)" >&2
+        echo "  Phase H: ss listeners inside $NS_SERVER:" >&2
+        ip netns exec "$NS_SERVER" ss -tlnp 2>&1 | head -10 >&2 || true
+        echo "  Phase H: tail of server log:" >&2
+        tail -30 "$server_log" >&2
         return 1
     fi
 
