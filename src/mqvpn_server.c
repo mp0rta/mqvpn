@@ -599,12 +599,12 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
 
     /* 3b. IPv6 ADDRESS_ASSIGN
      *
-     * Treat encode/send failure as fatal (matching IPv4 above): if the H3
-     * stream is broken or buffer sizing is wrong, partial-state recovery
-     * isn't reachable from here — the client already got v4 ADDRESS_ASSIGN
-     * but won't be able to use it once we tear down the conn. has_v6 is set
-     * only AFTER the capsule is successfully sent so fail_release_ip doesn't
-     * have to reason about half-set v6 state. */
+     * Treat encode/send failure as fatal (matching IPv4 above): a send_body
+     * failure here means the same H3 stream that just succeeded for v4 is
+     * now broken, so "fall back to v4-only" isn't reachable — the next
+     * ROUTE_ADV v4 send would also fail. has_v6 is assigned only AFTER the
+     * capsule is successfully sent so fail_release_ip doesn't have to
+     * reason about half-set v6 state. */
     if (s->pool.has_v6) {
         struct in6_addr v6;
         uint32_t ip_offset = ntohl(conn->assigned_ip.s_addr) - ntohl(s->pool.base.s_addr);
@@ -726,11 +726,11 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
 fail_release_ip:
     mqvpn_addr_pool_release(&s->pool, &conn->assigned_ip);
     memset(&conn->assigned_ip, 0, sizeof(conn->assigned_ip));
-    /* Defense in depth: has_v6 is only set after successful v6 capsule send,
-     * so on the goto path it should already be 0 — clear anyway in case a
-     * future edit moves the assignment. */
+    /* Always 0/zero on the goto paths today; reset for safety against
+     * future edits that move the assignments above. */
     conn->has_v6 = 0;
     memset(&conn->assigned_ip6, 0, sizeof(conn->assigned_ip6));
+    conn->masque_stream_id = 0;
     return -1;
 }
 
