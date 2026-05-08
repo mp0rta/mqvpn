@@ -61,7 +61,7 @@ struct svr_conn_s {
     mqvpn_server_t *server;
     xqc_h3_conn_t *h3_conn;
     xqc_cid_t cid;
-    struct sockaddr_in6 peer_addr;
+    struct sockaddr_storage peer_addr;
     socklen_t peer_addrlen;
 
     /* MASQUE session */
@@ -1778,22 +1778,30 @@ mqvpn_server_get_client_info(const mqvpn_server_t *server, mqvpn_client_info_t *
         ci->struct_size = sizeof(*ci);
         snprintf(ci->username, sizeof(ci->username), "%s", conn->username);
 
-        /* Format endpoint */
+        /* Format endpoint. peer_addr is sockaddr_storage because xquic may
+         * deliver either sockaddr_in (IPv4 socket → 16 B) or sockaddr_in6
+         * (IPv6 socket → 28 B). Dispatch by ss_family; for IPv6 also unwrap
+         * IPv4-mapped (::ffff:x.x.x.x) so the dashboard shows the real v4. */
         char addr_str[INET6_ADDRSTRLEN] = {0};
         uint16_t port = 0;
-        const struct sockaddr_in6 *s6 = &conn->peer_addr;
-        const uint8_t *b = s6->sin6_addr.s6_addr;
-        /* Detect IPv4-mapped IPv6 (::ffff:x.x.x.x) */
-        if (b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0 && b[4] == 0 && b[5] == 0 &&
-            b[6] == 0 && b[7] == 0 && b[8] == 0 && b[9] == 0 && b[10] == 0xff &&
-            b[11] == 0xff) {
-            struct in_addr v4;
-            memcpy(&v4, &b[12], 4);
-            inet_ntop(AF_INET, &v4, addr_str, sizeof(addr_str));
-        } else {
-            inet_ntop(AF_INET6, &s6->sin6_addr, addr_str, sizeof(addr_str));
+        if (conn->peer_addr.ss_family == AF_INET) {
+            const struct sockaddr_in *s4 = (const struct sockaddr_in *)&conn->peer_addr;
+            inet_ntop(AF_INET, &s4->sin_addr, addr_str, sizeof(addr_str));
+            port = ntohs(s4->sin_port);
+        } else if (conn->peer_addr.ss_family == AF_INET6) {
+            const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)&conn->peer_addr;
+            const uint8_t *b = s6->sin6_addr.s6_addr;
+            if (b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0 && b[4] == 0 &&
+                b[5] == 0 && b[6] == 0 && b[7] == 0 && b[8] == 0 && b[9] == 0 &&
+                b[10] == 0xff && b[11] == 0xff) {
+                struct in_addr v4;
+                memcpy(&v4, &b[12], 4);
+                inet_ntop(AF_INET, &v4, addr_str, sizeof(addr_str));
+            } else {
+                inet_ntop(AF_INET6, &s6->sin6_addr, addr_str, sizeof(addr_str));
+            }
+            port = ntohs(s6->sin6_port);
         }
-        port = ntohs(s6->sin6_port);
         snprintf(ci->endpoint, sizeof(ci->endpoint), "%s:%u", addr_str, port);
 
         ci->connected_at_us = conn->connected_at_us;
