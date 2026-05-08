@@ -527,6 +527,31 @@ svr_masque_send_403(xqc_h3_request_t *h3_request)
     return xqc_h3_request_send_headers(h3_request, &hdrs, 1) < 0 ? -1 : 0;
 }
 
+/* Encode a capsule of `cap_type` from `payload` and send it on the H3 request.
+ * Returns 0 on success, -1 on failure (already logged). `label` is used in
+ * error messages — typically the capsule mnemonic plus IPv4/IPv6 marker. */
+static int
+svr_send_capsule(mqvpn_server_t *s, xqc_h3_request_t *h3_request, uint64_t cap_type,
+                 const char *label, const uint8_t *payload, size_t payload_len)
+{
+    /* Sized for the largest capsule we send today: IPv6 ROUTE_ADVERTISEMENT
+     * with 34-byte payload + capsule header < 64. 128 leaves headroom. */
+    uint8_t buf[128];
+    size_t written = 0;
+    xqc_int_t xret = xqc_h3_ext_capsule_encode(buf, sizeof(buf), &written, cap_type,
+                                               payload, payload_len);
+    if (xret != XQC_OK) {
+        LOG_E(s, "capsule encode %s: %d", label, xret);
+        return -1;
+    }
+    ssize_t ret = xqc_h3_request_send_body(h3_request, buf, written, 0);
+    if (ret < 0) {
+        LOG_E(s, "send %s: %zd", label, ret);
+        return -1;
+    }
+    return 0;
+}
+
 static int
 svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
 {
@@ -569,29 +594,14 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
     }
 
     /* 3. ADDRESS_ASSIGN capsule */
-    uint8_t addr_payload[64];
-    uint8_t ip_bytes[4];
-    memcpy(ip_bytes, &conn->assigned_ip.s_addr, 4);
+    uint8_t addr_payload[7];
     addr_payload[0] = 0x00; /* request_id=0 */
     addr_payload[1] = 4;    /* IPv4 */
-    memcpy(addr_payload + 2, ip_bytes, 4);
+    memcpy(addr_payload + 2, &conn->assigned_ip.s_addr, 4);
     addr_payload[6] = 32; /* /32 */
-    size_t addr_written = 7;
-
-    uint8_t capsule_buf[128];
-    size_t cap_written = 0;
-    xqc_int_t xret = xqc_h3_ext_capsule_encode(
-        capsule_buf, sizeof(capsule_buf), &cap_written, XQC_H3_CAPSULE_ADDRESS_ASSIGN,
-        addr_payload, addr_written);
-    if (xret != XQC_OK) {
-        LOG_E(s, "capsule encode ADDRESS_ASSIGN: %d", xret);
+    if (svr_send_capsule(s, h3_request, XQC_H3_CAPSULE_ADDRESS_ASSIGN, "ADDRESS_ASSIGN",
+                         addr_payload, sizeof(addr_payload)) < 0)
         goto fail_release_ip;
-    }
-    ret = xqc_h3_request_send_body(h3_request, capsule_buf, cap_written, 0);
-    if (ret < 0) {
-        LOG_E(s, "send ADDRESS_ASSIGN: %zd", ret);
-        goto fail_release_ip;
-    }
 
     char ip_str[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &conn->assigned_ip, ip_str, sizeof(ip_str));
@@ -610,28 +620,14 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
         uint32_t ip_offset = ntohl(conn->assigned_ip.s_addr) - ntohl(s->pool.base.s_addr);
         mqvpn_addr_pool_get6(&s->pool, ip_offset, &v6);
 
-        uint8_t a6_payload[32];
-        size_t a6_off = 0;
-        a6_payload[a6_off++] = 0x00;
-        a6_payload[a6_off++] = 6;
-        memcpy(a6_payload + a6_off, &v6, 16);
-        a6_off += 16;
-        a6_payload[a6_off++] = (uint8_t)s->pool.prefix6;
-
-        uint8_t cap6_buf[64];
-        size_t cap6_written = 0;
-        xret =
-            xqc_h3_ext_capsule_encode(cap6_buf, sizeof(cap6_buf), &cap6_written,
-                                      XQC_H3_CAPSULE_ADDRESS_ASSIGN, a6_payload, a6_off);
-        if (xret != XQC_OK) {
-            LOG_E(s, "capsule encode ADDRESS_ASSIGN (IPv6): %d", xret);
+        uint8_t a6_payload[19];
+        a6_payload[0] = 0x00;
+        a6_payload[1] = 6;
+        memcpy(a6_payload + 2, &v6, 16);
+        a6_payload[18] = (uint8_t)s->pool.prefix6;
+        if (svr_send_capsule(s, h3_request, XQC_H3_CAPSULE_ADDRESS_ASSIGN,
+                             "ADDRESS_ASSIGN (IPv6)", a6_payload, sizeof(a6_payload)) < 0)
             goto fail_release_ip;
-        }
-        ret = xqc_h3_request_send_body(h3_request, cap6_buf, cap6_written, 0);
-        if (ret < 0) {
-            LOG_E(s, "send ADDRESS_ASSIGN (IPv6): %zd", ret);
-            goto fail_release_ip;
-        }
 
         conn->assigned_ip6 = v6;
         conn->has_v6 = 1;
@@ -642,56 +638,27 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
     }
 
     /* 4. ROUTE_ADVERTISEMENT (0.0.0.0 — 255.255.255.255) */
-    uint8_t route_payload[32];
-    size_t rp_off = 0;
-    route_payload[rp_off++] = 4;
-    memset(route_payload + rp_off, 0, 4);
-    rp_off += 4;
-    memset(route_payload + rp_off, 0xFF, 4);
-    rp_off += 4;
-    route_payload[rp_off++] = 0;
-
-    uint8_t route_capsule[64];
-    size_t rc_written = 0;
-    xret = xqc_h3_ext_capsule_encode(route_capsule, sizeof(route_capsule), &rc_written,
-                                     XQC_H3_CAPSULE_ROUTE_ADVERTISEMENT, route_payload,
-                                     rp_off);
-    if (xret != XQC_OK) {
-        LOG_E(s, "capsule encode ROUTE_ADVERTISEMENT: %d", xret);
+    uint8_t route_payload[10];
+    route_payload[0] = 4;
+    memset(route_payload + 1, 0, 4);
+    memset(route_payload + 5, 0xFF, 4);
+    route_payload[9] = 0;
+    if (svr_send_capsule(s, h3_request, XQC_H3_CAPSULE_ROUTE_ADVERTISEMENT,
+                         "ROUTE_ADVERTISEMENT", route_payload, sizeof(route_payload)) < 0)
         goto fail_release_ip;
-    }
-    ret = xqc_h3_request_send_body(h3_request, route_capsule, rc_written, 0);
-    if (ret < 0) {
-        LOG_E(s, "send ROUTE_ADVERTISEMENT: %zd", ret);
-        goto fail_release_ip;
-    }
 
     /* 4b. IPv6 ROUTE_ADVERTISEMENT — only sent if v6 ADDRESS_ASSIGN succeeded,
      * so guard on conn->has_v6 (not s->pool.has_v6) for consistency. */
     if (conn->has_v6) {
-        uint8_t r6_payload[48];
-        size_t r6_off = 0;
-        r6_payload[r6_off++] = 6;
-        memset(r6_payload + r6_off, 0x00, 16);
-        r6_off += 16;
-        memset(r6_payload + r6_off, 0xFF, 16);
-        r6_off += 16;
-        r6_payload[r6_off++] = 0;
-
-        uint8_t r6_capsule[80];
-        size_t r6c_written = 0;
-        xret = xqc_h3_ext_capsule_encode(r6_capsule, sizeof(r6_capsule), &r6c_written,
-                                         XQC_H3_CAPSULE_ROUTE_ADVERTISEMENT, r6_payload,
-                                         r6_off);
-        if (xret != XQC_OK) {
-            LOG_E(s, "capsule encode ROUTE_ADVERTISEMENT (IPv6): %d", xret);
+        uint8_t r6_payload[34];
+        r6_payload[0] = 6;
+        memset(r6_payload + 1, 0x00, 16);
+        memset(r6_payload + 17, 0xFF, 16);
+        r6_payload[33] = 0;
+        if (svr_send_capsule(s, h3_request, XQC_H3_CAPSULE_ROUTE_ADVERTISEMENT,
+                             "ROUTE_ADVERTISEMENT (IPv6)", r6_payload,
+                             sizeof(r6_payload)) < 0)
             goto fail_release_ip;
-        }
-        ret = xqc_h3_request_send_body(h3_request, r6_capsule, r6c_written, 0);
-        if (ret < 0) {
-            LOG_E(s, "send ROUTE_ADVERTISEMENT (IPv6): %zd", ret);
-            goto fail_release_ip;
-        }
     }
 
     conn->tunnel_established = 1;
