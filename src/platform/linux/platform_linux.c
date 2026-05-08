@@ -650,7 +650,11 @@ recovery_register_with_lib(platform_ctx_t *p, int slot, int fd, const char *ifna
  *   CLOSED   — apply_path_create_permanent_failure ran, meaning
  *              xqc_conn_create_path returned -XQC_EMP_CREATE_PATH
  *              (XQC_MAX_PATHS_COUNT cap or OOM). Retrying within this
- *              connection cannot succeed. */
+ *              connection cannot succeed.
+ *
+ * Handle not present in pinfo[] is also collapsed to TRANSIENT_FAIL — implies
+ * the lib reaped the slot between add_path_fd() and get_paths() (race we
+ * shouldn't see in practice, but rollback re-frees our fd cleanly either way). */
 static readd_activation_t
 recovery_check_activation(mqvpn_client_t *client, mqvpn_path_handle_t handle)
 {
@@ -721,7 +725,11 @@ recovery_rollback(platform_ctx_t *p, int slot, readd_activation_t outcome)
  * the 3s timer + every netlink event, this becomes a busy-loop with handle
  * leak. PATH_RECOVER_FAILURE_LIMIT consecutive failures disables this slot
  * until a successful re-add or Level-2 reconnect re-arms it. Will be
- * subsumed by spec §6.6 / PR4 path_on_event path-classification. */
+ * subsumed by spec §6.6 / PR4 path_on_event path-classification.
+ *
+ * Only post-add activation failures (recovery_check_activation != ACTIVATED)
+ * count toward the budget — socket/bind/pin or add_path_fd failures are OS-
+ * side transient errors and do not consume the counter. */
 static int
 try_readd_removed_path(platform_ctx_t *p, const char *ifname)
 {
@@ -742,6 +750,10 @@ try_readd_removed_path(platform_ctx_t *p, const char *ifname)
 
         mqvpn_path_handle_t handle = recovery_register_with_lib(p, i, fd, ifname);
         if (handle < 0) {
+            /* Don't call recovery_rollback() here: handle was never stored, so
+             * lib_path_handles[i] still holds the stale handle from the prior
+             * incarnation. Rolling back would call mqvpn_client_remove_path()
+             * on that stale handle. */
             close(fd);
             mp->fd = -1;
             mp->active = 0;
@@ -811,8 +823,8 @@ recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
 }
 
 /* RTM_NEWADDR: an interface gained an IP address.
- * Try to re-add a previously removed path; failing that, reactivate any
- * degraded slot for this iface. */
+ * Try re-add first because RTM_DELLINK invalidates the fd; only fall back
+ * to reactivate if this slot wasn't fully dropped (fd still valid). */
 static void
 handle_rtm_newaddr(platform_ctx_t *p, struct nlmsghdr *nh)
 {
@@ -822,7 +834,9 @@ handle_rtm_newaddr(platform_ctx_t *p, struct nlmsghdr *nh)
     if (!try_readd_removed_path(p, ifname)) try_reactivate_by_ifname(p, ifname);
 }
 
-/* RTM_DELLINK: interface gone. Tear down every path bound to it. */
+/* RTM_DELLINK: interface gone. remove_path_by_index() uses drop_path
+ * semantics (not orderly close) so surviving paths aren't blocked by
+ * xquic shutdown handshakes. */
 static void
 handle_rtm_dellink(platform_ctx_t *p, struct nlmsghdr *nh)
 {
