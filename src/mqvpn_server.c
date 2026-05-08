@@ -597,17 +597,24 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
     inet_ntop(AF_INET, &conn->assigned_ip, ip_str, sizeof(ip_str));
     LOG_I(s, "ADDRESS_ASSIGN: client=%s/32", ip_str);
 
-    /* 3b. IPv6 ADDRESS_ASSIGN */
+    /* 3b. IPv6 ADDRESS_ASSIGN
+     *
+     * Treat encode/send failure as fatal (matching IPv4 above): a send_body
+     * failure here means the same H3 stream that just succeeded for v4 is
+     * now broken, so "fall back to v4-only" isn't reachable — the next
+     * ROUTE_ADV v4 send would also fail. has_v6 is assigned only AFTER the
+     * capsule is successfully sent so fail_release_ip doesn't have to
+     * reason about half-set v6 state. */
     if (s->pool.has_v6) {
+        struct in6_addr v6;
         uint32_t ip_offset = ntohl(conn->assigned_ip.s_addr) - ntohl(s->pool.base.s_addr);
-        mqvpn_addr_pool_get6(&s->pool, ip_offset, &conn->assigned_ip6);
-        conn->has_v6 = 1;
+        mqvpn_addr_pool_get6(&s->pool, ip_offset, &v6);
 
         uint8_t a6_payload[32];
         size_t a6_off = 0;
         a6_payload[a6_off++] = 0x00;
         a6_payload[a6_off++] = 6;
-        memcpy(a6_payload + a6_off, &conn->assigned_ip6, 16);
+        memcpy(a6_payload + a6_off, &v6, 16);
         a6_off += 16;
         a6_payload[a6_off++] = (uint8_t)s->pool.prefix6;
 
@@ -616,16 +623,22 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
         xret =
             xqc_h3_ext_capsule_encode(cap6_buf, sizeof(cap6_buf), &cap6_written,
                                       XQC_H3_CAPSULE_ADDRESS_ASSIGN, a6_payload, a6_off);
-        if (xret == XQC_OK) {
-            ret = xqc_h3_request_send_body(h3_request, cap6_buf, cap6_written, 0);
-            if (ret < 0) {
-                LOG_E(s, "send ADDRESS_ASSIGN (IPv6): %zd", ret);
-            } else {
-                char v6str[INET6_ADDRSTRLEN];
-                inet_ntop(AF_INET6, &conn->assigned_ip6, v6str, sizeof(v6str));
-                LOG_I(s, "ADDRESS_ASSIGN: client=%s/%d", v6str, s->pool.prefix6);
-            }
+        if (xret != XQC_OK) {
+            LOG_E(s, "capsule encode ADDRESS_ASSIGN (IPv6): %d", xret);
+            goto fail_release_ip;
         }
+        ret = xqc_h3_request_send_body(h3_request, cap6_buf, cap6_written, 0);
+        if (ret < 0) {
+            LOG_E(s, "send ADDRESS_ASSIGN (IPv6): %zd", ret);
+            goto fail_release_ip;
+        }
+
+        conn->assigned_ip6 = v6;
+        conn->has_v6 = 1;
+
+        char v6str[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, &conn->assigned_ip6, v6str, sizeof(v6str));
+        LOG_I(s, "ADDRESS_ASSIGN: client=%s/%d", v6str, s->pool.prefix6);
     }
 
     /* 4. ROUTE_ADVERTISEMENT (0.0.0.0 — 255.255.255.255) */
@@ -653,8 +666,9 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
         goto fail_release_ip;
     }
 
-    /* 4b. IPv6 ROUTE_ADVERTISEMENT */
-    if (s->pool.has_v6) {
+    /* 4b. IPv6 ROUTE_ADVERTISEMENT — only sent if v6 ADDRESS_ASSIGN succeeded,
+     * so guard on conn->has_v6 (not s->pool.has_v6) for consistency. */
+    if (conn->has_v6) {
         uint8_t r6_payload[48];
         size_t r6_off = 0;
         r6_payload[r6_off++] = 6;
@@ -669,9 +683,14 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
         xret = xqc_h3_ext_capsule_encode(r6_capsule, sizeof(r6_capsule), &r6c_written,
                                          XQC_H3_CAPSULE_ROUTE_ADVERTISEMENT, r6_payload,
                                          r6_off);
-        if (xret == XQC_OK) {
-            ret = xqc_h3_request_send_body(h3_request, r6_capsule, r6c_written, 0);
-            if (ret < 0) LOG_E(s, "send ROUTE_ADVERTISEMENT (IPv6): %zd", ret);
+        if (xret != XQC_OK) {
+            LOG_E(s, "capsule encode ROUTE_ADVERTISEMENT (IPv6): %d", xret);
+            goto fail_release_ip;
+        }
+        ret = xqc_h3_request_send_body(h3_request, r6_capsule, r6c_written, 0);
+        if (ret < 0) {
+            LOG_E(s, "send ROUTE_ADVERTISEMENT (IPv6): %zd", ret);
+            goto fail_release_ip;
         }
     }
 
@@ -707,6 +726,11 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
 fail_release_ip:
     mqvpn_addr_pool_release(&s->pool, &conn->assigned_ip);
     memset(&conn->assigned_ip, 0, sizeof(conn->assigned_ip));
+    /* Always 0/zero on the goto paths today; reset for safety against
+     * future edits that move the assignments above. */
+    conn->has_v6 = 0;
+    memset(&conn->assigned_ip6, 0, sizeof(conn->assigned_ip6));
+    conn->masque_stream_id = 0;
     return -1;
 }
 
