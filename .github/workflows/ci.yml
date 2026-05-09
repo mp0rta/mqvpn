@@ -31,6 +31,11 @@ jobs:
           fi
 
   build:
+    # Cache key conventions for BoringSSL / xquic / libevent-msan in this
+    # workflow: keys carry a trailing `-vN`. Bump that suffix in *every*
+    # affected job whenever you change CMake flags, configure commands, or
+    # compiler versions for the cached artifact — otherwise stale build
+    # outputs from a different configuration will be silently restored.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
