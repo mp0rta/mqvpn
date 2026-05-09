@@ -31,6 +31,11 @@ jobs:
           fi
 
   build:
+    # Cache key conventions for BoringSSL / xquic / libevent-msan in this
+    # workflow: keys carry a trailing `-vN`. Bump that suffix in *every*
+    # affected job whenever you change CMake flags, configure commands, or
+    # compiler versions for the cached artifact — otherwise stale build
+    # outputs from a different configuration will be silently restored.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -43,20 +48,41 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake libevent-dev golang iptables
 
+      - name: Compute xquic SHA
+        id: xqsha
+        run: echo "sha=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+-')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache BoringSSL (gcc fPIC)
+        id: bssl-cache
+        uses: actions/cache@v4
+        with:
+          path: third_party/xquic/third_party/boringssl
+          key: bssl-9c95ec7-linux-gcc-fpic-v1
+
       - name: Clone BoringSSL (pinned)
+        if: steps.bssl-cache.outputs.cache-hit != 'true'
         run: |
           git clone https://github.com/google/boringssl.git \
             third_party/xquic/third_party/boringssl
           cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
 
       - name: Build BoringSSL
+        if: steps.bssl-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
           cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
           make -j$(nproc) ssl crypto
 
+      - name: Cache xquic (Release)
+        id: xquic-cache
+        uses: actions/cache@v4
+        with:
+          path: third_party/xquic/build
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-gcc-release-bssl-9c95ec7-v1
+
       - name: Build xquic
+        if: steps.xquic-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
@@ -106,20 +132,41 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake libevent-dev golang iptables clang iperf3
 
+      - name: Compute xquic SHA
+        id: xqsha
+        run: echo "sha=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+-')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache BoringSSL (clang fPIC)
+        id: bssl-cache
+        uses: actions/cache@v4
+        with:
+          path: third_party/xquic/third_party/boringssl
+          key: bssl-9c95ec7-linux-clang-fpic-v1
+
       - name: Clone BoringSSL (pinned)
+        if: steps.bssl-cache.outputs.cache-hit != 'true'
         run: |
           git clone https://github.com/google/boringssl.git \
             third_party/xquic/third_party/boringssl
           cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
 
       - name: Build BoringSSL (clang)
+        if: steps.bssl-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
           CC=clang CXX=clang++ cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
           make -j$(nproc) ssl crypto
 
+      - name: Cache xquic (clang Debug)
+        id: xquic-cache
+        uses: actions/cache@v4
+        with:
+          path: third_party/xquic/build
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-9c95ec7-v1
+
       - name: Build xquic (clang)
+        if: steps.xquic-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
@@ -232,7 +279,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake golang iptables clang
 
+      - name: Compute xquic SHA
+        id: xqsha
+        run: echo "sha=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+-')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache libevent (MSan)
+        id: libevent-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/libevent-msan
+          key: libevent-2.1.12-linux-clang-msan-v1
+
       - name: Build libevent from source (MSan)
+        if: steps.libevent-cache.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 --branch release-2.1.12-stable https://github.com/libevent/libevent.git /tmp/libevent
           cd /tmp/libevent && mkdir build && cd build
@@ -245,13 +304,22 @@ jobs:
                 -DCMAKE_INSTALL_PREFIX=/tmp/libevent-msan ..
           make -j$(nproc) && make install
 
+      - name: Cache BoringSSL (clang MSan)
+        id: bssl-cache
+        uses: actions/cache@v4
+        with:
+          path: third_party/xquic/third_party/boringssl
+          key: bssl-9c95ec7-linux-clang-msan-v1
+
       - name: Clone BoringSSL (pinned)
+        if: steps.bssl-cache.outputs.cache-hit != 'true'
         run: |
           git clone https://github.com/google/boringssl.git \
             third_party/xquic/third_party/boringssl
           cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
 
       - name: Build BoringSSL (clang + MSan)
+        if: steps.bssl-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
@@ -262,7 +330,15 @@ jobs:
             -DCMAKE_CXX_FLAGS="-fPIC -fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins -Wno-error=frame-larger-than" ..
           make -j$(nproc) ssl crypto
 
+      - name: Cache xquic (clang MSan)
+        id: xquic-cache
+        uses: actions/cache@v4
+        with:
+          path: third_party/xquic/build
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-msan-bssl-9c95ec7-v1
+
       - name: Build xquic (clang + MSan)
+        if: steps.xquic-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
@@ -415,7 +491,20 @@ jobs:
       - name: Install libevent via vcpkg
         run: vcpkg install libevent:x64-windows-static
 
+      - name: Compute xquic SHA
+        id: xqsha
+        shell: bash
+        run: echo "sha=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+-')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache BoringSSL (MSVC)
+        id: bssl-cache
+        uses: actions/cache@v4
+        with:
+          path: third_party/xquic/third_party/boringssl
+          key: bssl-9c95ec7-windows-msvc-v1
+
       - name: Clone BoringSSL (pinned)
+        if: steps.bssl-cache.outputs.cache-hit != 'true'
         run: |
           git clone https://github.com/google/boringssl.git `
             third_party/xquic/third_party/boringssl
@@ -423,6 +512,7 @@ jobs:
           git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
 
       - name: Build BoringSSL
+        if: steps.bssl-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir build
@@ -431,7 +521,15 @@ jobs:
           cmake --build . --target ssl --config Release
           cmake --build . --target crypto --config Release
 
+      - name: Cache xquic (MSVC Release)
+        id: xquic-cache
+        uses: actions/cache@v4
+        with:
+          path: third_party/xquic/build
+          key: xquic-${{ steps.xqsha.outputs.sha }}-windows-msvc-release-bssl-9c95ec7-v1
+
       - name: Build xquic
+        if: steps.xquic-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic
           mkdir build
