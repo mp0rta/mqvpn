@@ -54,7 +54,7 @@ jobs:
 
       - name: Cache BoringSSL (gcc fPIC)
         id: bssl-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: third_party/xquic/third_party/boringssl
           key: bssl-9c95ec7-linux-gcc-fpic-v1
@@ -76,7 +76,7 @@ jobs:
 
       - name: Cache xquic (Release)
         id: xquic-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: third_party/xquic/build
           key: xquic-${{ steps.xqsha.outputs.sha }}-linux-gcc-release-bssl-9c95ec7-v2
@@ -138,7 +138,7 @@ jobs:
 
       - name: Cache BoringSSL (clang fPIC)
         id: bssl-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: third_party/xquic/third_party/boringssl
           key: bssl-9c95ec7-linux-clang-fpic-v1
@@ -160,7 +160,7 @@ jobs:
 
       - name: Cache xquic (clang Debug)
         id: xquic-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: third_party/xquic/build
           key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-9c95ec7-v2
@@ -285,7 +285,7 @@ jobs:
 
       - name: Cache libevent (MSan)
         id: libevent-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/libevent-msan
           key: libevent-2.1.12-linux-clang-msan-v1
@@ -306,7 +306,7 @@ jobs:
 
       - name: Cache BoringSSL (clang MSan)
         id: bssl-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: third_party/xquic/third_party/boringssl
           key: bssl-9c95ec7-linux-clang-msan-v1
@@ -332,7 +332,7 @@ jobs:
 
       - name: Cache xquic (clang MSan)
         id: xquic-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: third_party/xquic/build
           key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-msan-bssl-9c95ec7-v2
@@ -498,7 +498,7 @@ jobs:
 
       - name: Cache BoringSSL (MSVC)
         id: bssl-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: third_party/xquic/third_party/boringssl
           key: bssl-9c95ec7-windows-msvc-v1
@@ -523,7 +523,7 @@ jobs:
 
       - name: Cache xquic (MSVC Release)
         id: xquic-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: third_party/xquic/build
           key: xquic-${{ steps.xqsha.outputs.sha }}-windows-msvc-release-bssl-9c95ec7-v2
@@ -583,7 +583,7 @@ jobs:
 
       - name: Cache NDK prebuilt libraries
         id: ndk-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: android/sdk-native/prebuilt
           key: ${{ steps.ndk-cache-key.outputs.key }}
