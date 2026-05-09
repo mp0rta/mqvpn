@@ -163,6 +163,13 @@ Notes:
 - `users` is server-side auth and accepts either objects (`{"name","key"}`) or `"name:key"` strings.
 - `auth_key` remains supported as a single legacy/global key.
 - `mode` is optional if it can be inferred (`listen` implies server).
+- **Monitoring requires per-user keys.** Sharing a single `auth_key` across
+  multiple clients works for the VPN data plane, but the control API
+  surfaces those sessions as `user="(global)"` and the Prometheus exporter
+  cannot distinguish them — series labels collide and the scrape is
+  dropped. For multi-client deployments register each client under `users`
+  (or via `add_user` over the control API) so each gets a distinct `user`
+  label.
 
 ```bash
 sudo mqvpn --config /etc/mqvpn/server.conf

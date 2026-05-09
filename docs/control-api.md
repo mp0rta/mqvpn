@@ -233,6 +233,19 @@ Notes:
 
 Return per-client and per-path detail for all currently connected clients.
 
+> **Monitoring caveat — per-user keys required for multi-client setups.**
+> The `user` field reports the auth identity that matched. Clients
+> authenticating with the server's global `auth_key` are reported as
+> `"(global)"`. If multiple clients share a single key, every session is
+> emitted with `user="(global)"`, so any consumer that uses `user` as a
+> series label (Prometheus exporter, Grafana JSON datasource) cannot tell
+> them apart and the duplicate label set typically drops the entire scrape.
+>
+> For multi-client monitoring give each client its own entry under
+> `users` in `server.conf`, or register them at runtime via `add_user`
+> (§5.1). Sharing one `auth_key` across multiple clients still works for
+> the VPN data plane but is not supported by the monitoring path.
+
 **Request**
 
 ```json
