@@ -396,7 +396,7 @@ jobs:
           java-version: 21
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       # Ephemeral release keystore: generated fresh per CI run, so each
       # release is signed with a different key. Acceptable for the sample
