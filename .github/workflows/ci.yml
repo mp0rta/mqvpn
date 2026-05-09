@@ -79,7 +79,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: third_party/xquic/build
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-gcc-release-bssl-9c95ec7-v1
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-gcc-release-bssl-9c95ec7-v2
 
       - name: Build xquic
         if: steps.xquic-cache.outputs.cache-hit != 'true'
@@ -163,7 +163,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: third_party/xquic/build
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-9c95ec7-v1
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-9c95ec7-v2
 
       - name: Build xquic (clang)
         if: steps.xquic-cache.outputs.cache-hit != 'true'
@@ -335,7 +335,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: third_party/xquic/build
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-msan-bssl-9c95ec7-v1
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-msan-bssl-9c95ec7-v2
 
       - name: Build xquic (clang + MSan)
         if: steps.xquic-cache.outputs.cache-hit != 'true'
@@ -526,7 +526,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: third_party/xquic/build
-          key: xquic-${{ steps.xqsha.outputs.sha }}-windows-msvc-release-bssl-9c95ec7-v1
+          key: xquic-${{ steps.xqsha.outputs.sha }}-windows-msvc-release-bssl-9c95ec7-v2
 
       - name: Build xquic
         if: steps.xquic-cache.outputs.cache-hit != 'true'
