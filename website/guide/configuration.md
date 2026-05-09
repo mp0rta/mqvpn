@@ -100,6 +100,10 @@ When both `auth_key` (global key) and `users` are set, clients can authenticate 
 
 Removing a user via the Control API also disconnects any active sessions authenticated with that username.
 
+::: warning Monitoring requires per-user keys
+Sharing a single `auth_key` across multiple clients works for the VPN data plane, but the Control API and the Prometheus exporter identify clients by their `user` label. Sessions authenticated with the global `auth_key` are reported as `user="(global)"`, so multiple clients collide on the same label and the Prometheus scrape is dropped. For multi-client monitoring give each client its own entry under `users` (or register them at runtime via `add_user`).
+:::
+
 ## Running with Config Files
 
 ```bash
