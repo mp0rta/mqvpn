@@ -1840,7 +1840,13 @@ mqvpn_server_get_client_info(const mqvpn_server_t *server, mqvpn_client_info_t *
         int np = 0;
         for (int p = 0; p < XQC_MAX_PATHS_COUNT && np < MQVPN_MAX_PATHS; p++) {
             xqc_path_metrics_t *pm = &st.paths_info[p];
-            if (pm->path_id == 0 && pm->path_pkt_send_count == 0) continue;
+            /* Skip the unfilled-slot sentinel xquic writes for unused entries
+             * (xqc_conn.c:3723: paths_info[i].path_id = XQC_MAX_UINT64_VALUE).
+             * Same predicate is already used at the active/standby summary
+             * loop above. The previous filter (path_id==0 && pkt_send==0)
+             * neither caught the sentinel nor was correct for a real path 0
+             * that hasn't sent yet (post-handshake before any data). */
+            if (pm->path_id == UINT64_MAX) break;
 
             mqvpn_path_stats_t *ps = &ci->paths[np];
             ps->struct_size = sizeof(*ps);
