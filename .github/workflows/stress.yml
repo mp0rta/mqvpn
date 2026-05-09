@@ -60,8 +60,12 @@ jobs:
         id: xquic-cache
         uses: actions/cache@v5
         with:
-          path: third_party/xquic/build
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-9c95ec7-stress-v2
+          # See ci.yml "Cache xquic (Release)" comment re: xqc_configure.h
+          # — committed FEC=OFF default in source tree must travel with build/.
+          path: |
+            third_party/xquic/build
+            third_party/xquic/include/xquic/xqc_configure.h
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-9c95ec7-stress-v3
 
       - name: Build xquic
         if: steps.xquic-cache.outputs.cache-hit != 'true'
