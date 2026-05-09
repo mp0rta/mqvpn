@@ -324,14 +324,14 @@ jobs:
 
       - name: Upload Windows artifacts
         if: matrix.os == 'windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-windows-${{ matrix.arch }}
           path: mqvpn_*_windows_${{ matrix.arch }}.zip
 
       - name: Upload artifacts
         if: matrix.os == 'linux'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.arch }}
           path: |
@@ -438,7 +438,7 @@ jobs:
           cp "$SRC" "mqvpn-sample_${VERSION}_android.apk"
 
       - name: Upload Android artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-android
           path: mqvpn-sample_*_android.apk
