@@ -84,7 +84,7 @@ jobs:
           make -j$(nproc)
 
       - name: Upload build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: stress-build
           path: |
@@ -117,7 +117,7 @@ jobs:
         run: sudo -E bash scripts/ci_stress/ci_stress_long_running.sh build/mqvpn
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: stress-long-running
           path: ci_stress_results/
@@ -147,7 +147,7 @@ jobs:
         run: sudo -E bash scripts/ci_stress/ci_stress_reconnect.sh build/mqvpn
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: stress-reconnect
           path: ci_stress_results/
@@ -177,7 +177,7 @@ jobs:
         run: sudo -E bash scripts/ci_stress/ci_stress_multi_client.sh build/mqvpn
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: stress-multi-client
           path: ci_stress_results/
@@ -207,7 +207,7 @@ jobs:
         run: sudo -E bash scripts/ci_stress/ci_stress_failover.sh build/mqvpn
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: stress-failover
           path: ci_stress_results/
