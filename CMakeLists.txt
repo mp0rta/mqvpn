@@ -263,7 +263,11 @@ if(BUILD_TESTING)
     )
 
     foreach(t test_config test_auth test_session test_dns test_flow_sched test_status test_path_state_machine)
-        target_include_directories(${t} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/platform/linux)
+        target_include_directories(${t} PRIVATE
+            ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/src/platform/linux
+            ${CMAKE_SOURCE_DIR}/include
+        )
         set_target_properties(${t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
         add_test(NAME ${t} COMMAND ${t})
     endforeach()
