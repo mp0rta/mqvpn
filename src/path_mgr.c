@@ -86,8 +86,8 @@ mqvpn_path_mgr_add(mqvpn_path_mgr_t *mgr, const char *iface,
     }
 
     p->fd = fd;
-    p->active = 1;
-    p->in_use = 0;
+    p->platform_attached = 1;
+    p->xquic_path_live = 0;
     p->path_id = 0;
 
     mgr->n_paths++;
@@ -108,7 +108,7 @@ mqvpn_path_t *
 mqvpn_path_mgr_find_by_path_id(mqvpn_path_mgr_t *mgr, uint64_t path_id)
 {
     for (int i = 0; i < mgr->n_paths; i++) {
-        if (mgr->paths[i].in_use && mgr->paths[i].path_id == path_id)
+        if (mgr->paths[i].xquic_path_live && mgr->paths[i].path_id == path_id)
             return &mgr->paths[i];
     }
     return NULL;

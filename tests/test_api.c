@@ -1046,6 +1046,42 @@ TEST(path_create_permanent_failure_invalid_handle_returns_error)
     mqvpn_client_destroy(c);
 }
 
+/* The Beta1 trigger was a recovery loop calling client_activate_path once
+ * per 3s tick on a slot whose budget had already exhausted. The fix keeps
+ * the slot CLOSED so the loop can no longer pick it up — but if a buggy
+ * caller re-enters apply_path_create_permanent_failure on the same slot
+ * (e.g. a future try_readd_removed_path retry that observes CLOSED but
+ * still calls through), the function MUST stay idempotent: state stays
+ * CLOSED, and a fresh path_event(CLOSED) fires on each call. The latter
+ * matters because if a future "optimization" early-returned on
+ * status==CLOSED, observer state machines that dedupe per-handle would
+ * miss the retry-equivalent signal — verify the event-per-call shape so
+ * that path is pinned. */
+
+TEST(path_create_permanent_failure_idempotent)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    g_path_event_count = 0;
+    ASSERT_EQ(mqvpn_client_test_apply_path_create_permanent_failure(c, h), 0);
+    /* Second invocation on the same (now CLOSED) slot must also return OK,
+     * stay CLOSED, and emit a second path_event(CLOSED). */
+    ASSERT_EQ(mqvpn_client_test_apply_path_create_permanent_failure(c, h), 0);
+    ASSERT_EQ(g_path_event_count, 2);
+    ASSERT_EQ(g_last_path_event_handle, h);
+    ASSERT_EQ(g_last_path_event_status, MQVPN_PATH_CLOSED);
+
+    mqvpn_path_info_t info[2];
+    int n = 0;
+    mqvpn_client_get_paths(c, info, 2, &n);
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(info[0].status, MQVPN_PATH_CLOSED);
+
+    mqvpn_client_destroy(c);
+}
+
 /* ── path_event close-out semantics ──
  *
  * remove_path / drop_path transition a non-CLOSED slot to CLOSED. The
@@ -1553,6 +1589,7 @@ main(void)
     run_path_create_permanent_failure_marks_closed_immediately();
     run_path_create_permanent_failure_emits_closed_event();
     run_path_create_permanent_failure_invalid_handle_returns_error();
+    run_path_create_permanent_failure_idempotent();
 
     /* Handshake stall watchdog */
     run_handshake_stall_not_triggered_when_idle();
