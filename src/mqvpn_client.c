@@ -290,22 +290,18 @@ client_log(mqvpn_client_t *c, mqvpn_log_level_t level, const char *fmt, ...)
 
 /* ─── Path observability helpers ─── */
 
-/* Log a state-change transition. Must be called AFTER p->status is updated
- * so that mqvpn_path_status_name(p->status) reflects the new state. */
-static void
-path_log_state_change_legacy(mqvpn_client_t *c, const path_entry_t *p,
-                             mqvpn_path_status_t old_status,
-                             path_transition_reason_t reason)
+/* PR2 — transition log emitter using internal 7-state names.
+ * Declared in path_state_machine.h. Implemented here because it needs
+ * client_log (static helper with conn-id prefix, level filtering, etc.). */
+void
+path_log_state_change(mqvpn_client_t *c, const path_entry_t *p,
+                      path_lifecycle_t old_state, path_transition_reason_t reason)
 {
-    if (old_status == p->status) {
-        /* same-state self-loop — no transition log per spec §8.3 */
-        return;
-    }
     LOG_D(c,
           "path[handle=%lld name=%s] %s -> %s reason=%s "
           "retries=%d fd=%d xqc_path_id=%llu",
-          (long long)p->handle, p->name, mqvpn_path_status_name(old_status),
-          mqvpn_path_status_name(p->status), mqvpn_path_transition_reason_name(reason),
+          (long long)p->handle, p->name, path_lifecycle_name(old_state),
+          path_lifecycle_name(p->state), mqvpn_path_transition_reason_name(reason),
           p->recreate_retries, p->fd, (unsigned long long)p->xqc_path_id);
 }
 
@@ -325,7 +321,6 @@ set_path_state_with_log(mqvpn_client_t *c, path_entry_t *p, path_lifecycle_t new
                         path_transition_reason_t reason)
 {
     path_lifecycle_t old_state = p->state;
-    mqvpn_path_status_t old_status = p->status;
     int real = (old_state != new_state) || (p->state_entered_at_us == 0);
 
     /* Single-write: store both fields once. */
@@ -334,7 +329,7 @@ set_path_state_with_log(mqvpn_client_t *c, path_entry_t *p, path_lifecycle_t new
 
     if (!real) return;
     path_mark_state_entry(p, client_now_us(c));
-    path_log_state_change_legacy(c, p, old_status, reason);
+    path_log_state_change(c, p, old_state, reason);
 }
 
 /* Wrapper: check if path p has been in its current state too long, and if so

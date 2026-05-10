@@ -1,10 +1,17 @@
 /*
- * path_state_machine.h — Observability helpers for path lifecycle (Phase 1)
+ * path_state_machine.h — Path lifecycle internal state machine.
  *
- * Phase 1 provides invariant checks, transition logging support, and
- * state-residence timers for the legacy 5-value `mqvpn_path_status_t`
- * model. Future phases will introduce an internal multi-state lifecycle
- * and consolidate transitions through a single aggregator.
+ * PR1 (Phase 1) introduced invariant checks, transition logging, and
+ * state-residence timers against the legacy 5-value `mqvpn_path_status_t`.
+ * PR2 added the internal 7-value `path_lifecycle_t` (defined in
+ * `path_entry_internal.h`) that splits MQVPN_PATH_CLOSED into
+ * RECOVERABLE / DROPPED / FREE, with `path_invariant_check()` enforcing
+ * the per-state field constraints + the denormalization invariant
+ * `status == path_public_status_from_lifecycle(state)`.
+ *
+ * PR3 will further split PENDING into PENDING / CREATE_WAIT / VALIDATING.
+ * PR4 will consolidate transitions through a single `path_on_event()`
+ * aggregator and forbid direct field assignment via CI lint.
  */
 
 #ifndef MQVPN_PATH_STATE_MACHINE_H
@@ -53,6 +60,11 @@ const char *mqvpn_path_status_name(mqvpn_path_status_t s);
 
 /* Reason tag → string. */
 const char *mqvpn_path_transition_reason_name(path_transition_reason_t r);
+
+/* PR2 — transition log emitter using internal 7-state names.
+ * Implemented in mqvpn_client.c (needs client_log). */
+void path_log_state_change(mqvpn_client_t *c, const path_entry_t *p,
+                           path_lifecycle_t old_state, path_transition_reason_t reason);
 
 /* Debug-build invariant check for the legacy 5-state model.
  * Asserts that the (status, platform_attached, xquic_path_live,
