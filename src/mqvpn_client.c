@@ -291,9 +291,8 @@ client_log(mqvpn_client_t *c, mqvpn_log_level_t level, const char *fmt, ...)
 /* ─── Path observability helpers ─── */
 
 /* PR2 — transition log emitter using internal 7-state names.
- * Declared in path_state_machine.h. Implemented here because it needs
- * client_log (static helper with conn-id prefix, level filtering, etc.). */
-void
+ * static here because it needs client_log (which is local to this file). */
+static void
 path_log_state_change(mqvpn_client_t *c, const path_entry_t *p,
                       path_lifecycle_t old_state, path_transition_reason_t reason)
 {
@@ -323,11 +322,9 @@ set_path_state_with_log(mqvpn_client_t *c, path_entry_t *p, path_lifecycle_t new
     path_lifecycle_t old_state = p->state;
     int real = (old_state != new_state) || (p->state_entered_at_us == 0);
 
-    /* Single-write: store both fields once. */
+    if (!real) return; /* self-loop: both fields already correct, skip timer+log */
     p->status = path_public_status_from_lifecycle(new_state);
     p->state = new_state;
-
-    if (!real) return;
     path_mark_state_entry(p, client_now_us(c));
     path_log_state_change(c, p, old_state, reason);
 }

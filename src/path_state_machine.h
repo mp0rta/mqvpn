@@ -61,11 +61,6 @@ const char *mqvpn_path_status_name(mqvpn_path_status_t s);
 /* Reason tag → string. */
 const char *mqvpn_path_transition_reason_name(path_transition_reason_t r);
 
-/* PR2 — transition log emitter using internal 7-state names.
- * Implemented in mqvpn_client.c (needs client_log). */
-void path_log_state_change(mqvpn_client_t *c, const path_entry_t *p,
-                           path_lifecycle_t old_state, path_transition_reason_t reason);
-
 /* Debug-build invariant check for the legacy 5-state model.
  * Asserts that the (status, platform_attached, xquic_path_live,
  * fd_valid, xqc_path_id, recreate_after_us, path_stable_since_us)

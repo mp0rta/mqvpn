@@ -153,7 +153,10 @@ path_invariant_check(const path_entry_t *p)
         assert(p->platform_attached == 1);
         assert(p->xquic_path_live == 1);
         assert(fd_valid);
-        assert(p->xqc_path_id != 0);
+        /* xqc_path_id == 0 is legal for the primary path (initial QUIC
+         * connection path); secondary paths always receive a non-zero ID
+         * from xqc_conn_create_path(). No per-slot "is_primary" flag
+         * exists yet, so we cannot tighten this further here. */
         assert(p->recreate_after_us == 0);
         break;
     case PATH_LC_DEGRADED:
