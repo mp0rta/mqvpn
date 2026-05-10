@@ -326,6 +326,19 @@ test_should_warn_degraded_rewarn_after_debounce(void)
     assert(path_should_warn_residence(&p, 1000 + 135ULL * 1000000) == 1);
 }
 
+/* ─── PR2: state field zero-init + denormalization invariant ─── */
+
+static void
+test_state_field_zero_init(void)
+{
+    path_entry_t p = {0};
+    assert(p.state == PATH_LC_PENDING);
+    assert(p.status == MQVPN_PATH_PENDING);
+    /* Denormalization invariant on a fresh slot. */
+    assert(p.status == path_public_status_from_lifecycle(p.state));
+    printf("  test_state_field_zero_init: OK\n");
+}
+
 /* ─── path_is_real_transition: self-loop suppression + first-entry exception ─── */
 
 static void
@@ -418,6 +431,7 @@ main(void)
     test_is_real_transition_self_loop_after_entry();
     test_is_real_transition_first_entry_zero_init();
     test_should_warn_state_entered_zero_is_silent();
+    test_state_field_zero_init();
     printf("PASS\n");
     return 0;
 }
