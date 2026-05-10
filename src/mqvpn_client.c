@@ -1442,9 +1442,10 @@ apply_path_create_permanent_failure(mqvpn_client_t *c, path_entry_t *p)
     p->xquic_path_live = 0;
     p->xqc_path_id = 0;
     p->path_stable_since_us = 0;
-    p->status = MQVPN_PATH_CLOSED;
     p->recreate_after_us = 0;
     p->recreate_retries = 0;
+    set_path_status_with_log(c, p, MQVPN_PATH_CLOSED, PATH_REASON_ACTIVATE_FAILED);
+    path_invariant_check_legacy(p);
     if (c->cbs.path_event) c->cbs.path_event(p->handle, MQVPN_PATH_CLOSED, c->user_ctx);
 }
 
@@ -1625,7 +1626,16 @@ cli_start_connection(mqvpn_client_t *c)
     memcpy(&conn->cid, (const void *)cid, sizeof(conn->cid));
     if (conn->h3_conn) xqc_h3_ext_datagram_set_user_data(conn->h3_conn, conn);
 
-    /* Mark primary path */
+    /* Mark primary path.
+     *
+     * Phase 1 FSM caveat: this enters a transient PENDING + xquic_path_live=1
+     * window that violates the strict PENDING invariant (which expects
+     * xquic_path_live=0). The slot is upgraded to ACTIVE in cb_path_ready
+     * before any external observer queries it. Do NOT add
+     * path_invariant_check_legacy here — it would false-positive. The
+     * invariant model is reconciled in PR3 (pre-ACTIVE split: PENDING /
+     * CREATE_WAIT / VALIDATING) where this bootstrap window becomes
+     * VALIDATING. */
     if (c->n_paths > 0 && c->primary_path_idx < c->n_paths) {
         c->paths[c->primary_path_idx].xqc_path_id = 0;
         c->paths[c->primary_path_idx].xquic_path_live = 1;

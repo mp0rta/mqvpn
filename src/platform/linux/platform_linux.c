@@ -672,11 +672,11 @@ recovery_check_activation(mqvpn_client_t *client, mqvpn_path_handle_t handle)
 
 /* Roll back a failed re-add so the next attempt starts from a clean slate.
  *
- * Safe ordering: remove_path() first, then close(fd). The in_use=0 invariant
- * (enforced by apply_path_activation_failure / apply_path_create_permanent_failure)
- * makes remove_path() skip xqc_conn_close_path(), so xquic never touches this
- * fd during teardown. Do NOT remove that defensive clear — it's what makes
- * this rollback safe. */
+ * Safe ordering: remove_path() first, then close(fd). The xquic_path_live=0
+ * invariant (enforced by apply_path_activation_failure /
+ * apply_path_create_permanent_failure) makes remove_path() skip
+ * xqc_conn_close_path(), so xquic never touches this fd during teardown.
+ * Do NOT remove that defensive clear — it's what makes this rollback safe. */
 static void
 recovery_rollback(platform_ctx_t *p, int slot, readd_activation_t outcome)
 {
