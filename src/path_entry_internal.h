@@ -16,7 +16,12 @@
 
 #include "libmqvpn.h"
 #include <stdint.h>
-#include <sys/socket.h>
+#ifdef _WIN32
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#else
+#  include <sys/socket.h>
+#endif
 
 typedef struct path_entry_s {
     mqvpn_path_handle_t handle;
