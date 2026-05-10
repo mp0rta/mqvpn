@@ -326,6 +326,139 @@ test_should_warn_degraded_rewarn_after_debounce(void)
     assert(path_should_warn_residence(&p, 1000 + 135ULL * 1000000) == 1);
 }
 
+/* ─── PR2: state field zero-init + denormalization invariant ─── */
+
+static void
+test_state_field_zero_init(void)
+{
+    path_entry_t p = {0};
+    assert(p.state == PATH_LC_PENDING);
+    assert(p.status == MQVPN_PATH_PENDING);
+    /* Denormalization invariant on a fresh slot. */
+    assert(p.status == path_public_status_from_lifecycle(p.state));
+    printf("  test_state_field_zero_init: OK\n");
+}
+
+static void
+test_public_status_mapping(void)
+{
+    struct {
+        path_lifecycle_t internal;
+        mqvpn_path_status_t public_;
+    } cases[] = {
+        {PATH_LC_PENDING, MQVPN_PATH_PENDING},
+        {PATH_LC_ACTIVE, MQVPN_PATH_ACTIVE},
+        {PATH_LC_STANDBY, MQVPN_PATH_STANDBY},
+        {PATH_LC_DEGRADED, MQVPN_PATH_DEGRADED},
+        {PATH_LC_CLOSED_RECOVERABLE, MQVPN_PATH_CLOSED},
+        {PATH_LC_CLOSED_DROPPED, MQVPN_PATH_CLOSED},
+        {PATH_LC_CLOSED_FREE, MQVPN_PATH_CLOSED},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        mqvpn_path_status_t got = path_public_status_from_lifecycle(cases[i].internal);
+        assert(got == cases[i].public_);
+    }
+    printf("  test_public_status_mapping: OK (7 cases)\n");
+}
+
+/* ─── PR2 Chunk 4: 7-state path_invariant_check ─── */
+
+static void
+test_invariant_pending_pass(void)
+{
+    path_entry_t p = {0};
+    p.state = PATH_LC_PENDING;
+    p.status = MQVPN_PATH_PENDING;
+    p.platform_attached = 1;
+    p.xquic_path_live = 0;
+    p.fd = 42;
+    p.xqc_path_id = 0;
+    p.recreate_after_us = 0;
+    p.path_stable_since_us = 0;
+    path_invariant_check(&p);
+    printf("  test_invariant_pending_pass: OK\n");
+}
+
+static void
+test_invariant_active_pass(void)
+{
+    path_entry_t p = {0};
+    p.state = PATH_LC_ACTIVE;
+    p.status = MQVPN_PATH_ACTIVE;
+    p.platform_attached = 1;
+    p.xquic_path_live = 1;
+    p.fd = 42;
+    p.xqc_path_id = 7;
+    p.recreate_after_us = 0;
+    path_invariant_check(&p);
+    printf("  test_invariant_active_pass: OK\n");
+}
+
+static void
+test_invariant_degraded_pass(void)
+{
+    path_entry_t p = {0};
+    p.state = PATH_LC_DEGRADED;
+    p.status = MQVPN_PATH_DEGRADED;
+    p.platform_attached = 1;
+    p.xquic_path_live = 0;
+    p.fd = 42;
+    p.xqc_path_id = 0;
+    p.recreate_after_us = 1234567; /* must be != 0 */
+    p.path_stable_since_us = 0;
+    path_invariant_check(&p);
+    printf("  test_invariant_degraded_pass: OK\n");
+}
+
+static void
+test_invariant_closed_recoverable_pass(void)
+{
+    path_entry_t p = {0};
+    p.state = PATH_LC_CLOSED_RECOVERABLE;
+    p.status = MQVPN_PATH_CLOSED;
+    p.platform_attached = 1; /* fd retained, manual reactivate possible */
+    p.xquic_path_live = 0;
+    p.fd = 42;
+    p.xqc_path_id = 0;
+    p.recreate_after_us = 0; /* retry NOT re-armed */
+    p.path_stable_since_us = 0;
+    path_invariant_check(&p);
+    printf("  test_invariant_closed_recoverable_pass: OK\n");
+}
+
+static void
+test_invariant_closed_dropped_lazy_pass(void)
+{
+    path_entry_t p = {0};
+    p.state = PATH_LC_CLOSED_DROPPED;
+    p.status = MQVPN_PATH_CLOSED;
+    p.platform_attached = 0; /* required */
+    p.recreate_after_us = 0;
+    p.path_stable_since_us = 0;
+    /* lazy fields can be non-zero */
+    p.fd = 42;
+    p.xquic_path_live = 1;
+    p.xqc_path_id = 5;
+    path_invariant_check(&p);
+    printf("  test_invariant_closed_dropped_lazy_pass: OK\n");
+}
+
+static void
+test_invariant_closed_free_strict_pass(void)
+{
+    path_entry_t p = {0};
+    p.state = PATH_LC_CLOSED_FREE;
+    p.status = MQVPN_PATH_CLOSED;
+    p.platform_attached = 0;
+    p.xquic_path_live = 0;
+    p.fd = -1;
+    p.xqc_path_id = 0;
+    p.recreate_after_us = 0;
+    p.path_stable_since_us = 0;
+    path_invariant_check(&p);
+    printf("  test_invariant_closed_free_strict_pass: OK\n");
+}
+
 /* ─── path_is_real_transition: self-loop suppression + first-entry exception ─── */
 
 static void
@@ -418,6 +551,14 @@ main(void)
     test_is_real_transition_self_loop_after_entry();
     test_is_real_transition_first_entry_zero_init();
     test_should_warn_state_entered_zero_is_silent();
+    test_state_field_zero_init();
+    test_public_status_mapping();
+    test_invariant_pending_pass();
+    test_invariant_active_pass();
+    test_invariant_degraded_pass();
+    test_invariant_closed_recoverable_pass();
+    test_invariant_closed_dropped_lazy_pass();
+    test_invariant_closed_free_strict_pass();
     printf("PASS\n");
     return 0;
 }

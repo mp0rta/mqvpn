@@ -113,6 +113,107 @@ path_is_real_transition(mqvpn_path_status_t old, mqvpn_path_status_t new_status,
     return 0;
 }
 
+mqvpn_path_status_t
+path_public_status_from_lifecycle(path_lifecycle_t s)
+{
+    switch (s) {
+    case PATH_LC_PENDING: return MQVPN_PATH_PENDING;
+    case PATH_LC_ACTIVE: return MQVPN_PATH_ACTIVE;
+    case PATH_LC_STANDBY: return MQVPN_PATH_STANDBY;
+    case PATH_LC_DEGRADED: return MQVPN_PATH_DEGRADED;
+    case PATH_LC_CLOSED_RECOVERABLE:
+    case PATH_LC_CLOSED_DROPPED:
+    case PATH_LC_CLOSED_FREE: return MQVPN_PATH_CLOSED;
+    }
+    /* unreachable; keep the compiler happy */
+    return MQVPN_PATH_CLOSED;
+}
+
+void
+path_invariant_check(const path_entry_t *p)
+{
+#ifndef NDEBUG
+    /* Denormalization invariant: status must always be the public projection
+     * of state. Drift is a bug. */
+    assert(p->status == path_public_status_from_lifecycle(p->state));
+
+    int fd_valid = (p->fd >= 0);
+
+    switch (p->state) {
+    case PATH_LC_PENDING:
+        assert(p->platform_attached == 1);
+        assert(p->xquic_path_live == 0);
+        assert(fd_valid);
+        assert(p->xqc_path_id == 0);
+        assert(p->recreate_after_us == 0);
+        assert(p->path_stable_since_us == 0);
+        break;
+    case PATH_LC_ACTIVE:
+    case PATH_LC_STANDBY:
+        assert(p->platform_attached == 1);
+        assert(p->xquic_path_live == 1);
+        assert(fd_valid);
+        /* xqc_path_id == 0 is legal for the primary path (initial QUIC
+         * connection path); secondary paths always receive a non-zero ID
+         * from xqc_conn_create_path(). No per-slot "is_primary" flag
+         * exists yet, so we cannot tighten this further here. */
+        assert(p->recreate_after_us == 0);
+        break;
+    case PATH_LC_DEGRADED:
+        assert(p->platform_attached == 1);
+        assert(p->xquic_path_live == 0);
+        assert(fd_valid);
+        assert(p->xqc_path_id == 0);
+        assert(p->recreate_after_us != 0);
+        assert(p->path_stable_since_us == 0);
+        break;
+    case PATH_LC_CLOSED_RECOVERABLE:
+        assert(p->platform_attached == 1);
+        assert(p->xquic_path_live == 0);
+        assert(fd_valid);
+        assert(p->xqc_path_id == 0);
+        assert(p->recreate_after_us == 0);
+        assert(p->path_stable_since_us == 0);
+        break;
+    case PATH_LC_CLOSED_DROPPED:
+        /* Lazy: only enforce platform_attached=0 + recreate_after_us=0 +
+         * path_stable_since_us=0. Other fields may carry over from prior
+         * state until xquic-removed and fd-closed events finish cleanup
+         * (PR3 spec §5.1). */
+        assert(p->platform_attached == 0);
+        assert(p->recreate_after_us == 0);
+        assert(p->path_stable_since_us == 0);
+        break;
+    case PATH_LC_CLOSED_FREE:
+        /* All zero — slot reusable. */
+        assert(p->platform_attached == 0);
+        assert(p->xquic_path_live == 0);
+        assert(p->fd < 0);
+        assert(p->xqc_path_id == 0);
+        assert(p->recreate_after_us == 0);
+        assert(p->path_stable_since_us == 0);
+        break;
+    }
+#else
+    (void)p;
+#endif
+}
+
+const char *
+path_lifecycle_name(path_lifecycle_t s)
+{
+    switch (s) {
+    case PATH_LC_PENDING: return "PENDING";
+    case PATH_LC_ACTIVE: return "ACTIVE";
+    case PATH_LC_STANDBY: return "STANDBY";
+    case PATH_LC_DEGRADED: return "DEGRADED";
+    case PATH_LC_CLOSED_RECOVERABLE: return "CLOSED_RECOVERABLE";
+    case PATH_LC_CLOSED_DROPPED: return "CLOSED_DROPPED";
+    case PATH_LC_CLOSED_FREE: return "CLOSED_FREE";
+    }
+    return "UNKNOWN";
+}
+
 int
 path_should_warn_residence(const path_entry_t *p, uint64_t now_us)
 {

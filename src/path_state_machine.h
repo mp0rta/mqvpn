@@ -1,10 +1,17 @@
 /*
- * path_state_machine.h — Observability helpers for path lifecycle (Phase 1)
+ * path_state_machine.h — Path lifecycle internal state machine.
  *
- * Phase 1 provides invariant checks, transition logging support, and
- * state-residence timers for the legacy 5-value `mqvpn_path_status_t`
- * model. Future phases will introduce an internal multi-state lifecycle
- * and consolidate transitions through a single aggregator.
+ * PR1 (Phase 1) introduced invariant checks, transition logging, and
+ * state-residence timers against the legacy 5-value `mqvpn_path_status_t`.
+ * PR2 added the internal 7-value `path_lifecycle_t` (defined in
+ * `path_entry_internal.h`) that splits MQVPN_PATH_CLOSED into
+ * RECOVERABLE / DROPPED / FREE, with `path_invariant_check()` enforcing
+ * the per-state field constraints + the denormalization invariant
+ * `status == path_public_status_from_lifecycle(state)`.
+ *
+ * PR3 will further split PENDING into PENDING / CREATE_WAIT / VALIDATING.
+ * PR4 will consolidate transitions through a single `path_on_event()`
+ * aggregator and forbid direct field assignment via CI lint.
  */
 
 #ifndef MQVPN_PATH_STATE_MACHINE_H
@@ -26,6 +33,27 @@ typedef enum {
     PATH_REASON_CONN_RESET,
     PATH_REASON_RETRY_RESET,
 } path_transition_reason_t;
+
+/* Phase 2 (PR2): internal 7-state lifecycle helpers.
+ * The enum `path_lifecycle_t` is defined in path_entry_internal.h to avoid
+ * a circular include (path_state_machine.h includes path_entry_internal.h
+ * for path_entry_t, which contains a path_lifecycle_t field).
+ *
+ * PR3 will further split PENDING into PENDING / CREATE_WAIT / VALIDATING
+ * (→ 9 states total). */
+
+/* Map internal lifecycle → public 5-state. Pure function. */
+mqvpn_path_status_t path_public_status_from_lifecycle(path_lifecycle_t s);
+
+/* Human-readable name (for logs). */
+const char *path_lifecycle_name(path_lifecycle_t s);
+
+/* Debug-build 7-state invariant check. Asserts the (state, platform_attached,
+ * xquic_path_live, fd_valid, xqc_path_id, recreate_after_us,
+ * path_stable_since_us) tuple is legal AND that p->status ==
+ * path_public_status_from_lifecycle(p->state) (denormalization invariant).
+ * No-op in release builds. */
+void path_invariant_check(const path_entry_t *p);
 
 /* Human-readable name of an mqvpn_path_status_t value. */
 const char *mqvpn_path_status_name(mqvpn_path_status_t s);
