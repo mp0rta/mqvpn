@@ -113,6 +113,37 @@ path_is_real_transition(mqvpn_path_status_t old, mqvpn_path_status_t new_status,
     return 0;
 }
 
+mqvpn_path_status_t
+path_public_status_from_lifecycle(path_lifecycle_t s)
+{
+    switch (s) {
+    case PATH_LC_PENDING: return MQVPN_PATH_PENDING;
+    case PATH_LC_ACTIVE: return MQVPN_PATH_ACTIVE;
+    case PATH_LC_STANDBY: return MQVPN_PATH_STANDBY;
+    case PATH_LC_DEGRADED: return MQVPN_PATH_DEGRADED;
+    case PATH_LC_CLOSED_RECOVERABLE:
+    case PATH_LC_CLOSED_DROPPED:
+    case PATH_LC_CLOSED_FREE: return MQVPN_PATH_CLOSED;
+    }
+    /* unreachable; keep the compiler happy */
+    return MQVPN_PATH_CLOSED;
+}
+
+const char *
+path_lifecycle_name(path_lifecycle_t s)
+{
+    switch (s) {
+    case PATH_LC_PENDING: return "PENDING";
+    case PATH_LC_ACTIVE: return "ACTIVE";
+    case PATH_LC_STANDBY: return "STANDBY";
+    case PATH_LC_DEGRADED: return "DEGRADED";
+    case PATH_LC_CLOSED_RECOVERABLE: return "CLOSED_RECOVERABLE";
+    case PATH_LC_CLOSED_DROPPED: return "CLOSED_DROPPED";
+    case PATH_LC_CLOSED_FREE: return "CLOSED_FREE";
+    }
+    return "UNKNOWN";
+}
+
 int
 path_should_warn_residence(const path_entry_t *p, uint64_t now_us)
 {

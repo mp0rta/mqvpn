@@ -339,6 +339,28 @@ test_state_field_zero_init(void)
     printf("  test_state_field_zero_init: OK\n");
 }
 
+static void
+test_public_status_mapping(void)
+{
+    struct {
+        path_lifecycle_t internal;
+        mqvpn_path_status_t public_;
+    } cases[] = {
+        {PATH_LC_PENDING, MQVPN_PATH_PENDING},
+        {PATH_LC_ACTIVE, MQVPN_PATH_ACTIVE},
+        {PATH_LC_STANDBY, MQVPN_PATH_STANDBY},
+        {PATH_LC_DEGRADED, MQVPN_PATH_DEGRADED},
+        {PATH_LC_CLOSED_RECOVERABLE, MQVPN_PATH_CLOSED},
+        {PATH_LC_CLOSED_DROPPED, MQVPN_PATH_CLOSED},
+        {PATH_LC_CLOSED_FREE, MQVPN_PATH_CLOSED},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        mqvpn_path_status_t got = path_public_status_from_lifecycle(cases[i].internal);
+        assert(got == cases[i].public_);
+    }
+    printf("  test_public_status_mapping: OK (7 cases)\n");
+}
+
 /* ─── path_is_real_transition: self-loop suppression + first-entry exception ─── */
 
 static void
@@ -432,6 +454,7 @@ main(void)
     test_is_real_transition_first_entry_zero_init();
     test_should_warn_state_entered_zero_is_silent();
     test_state_field_zero_init();
+    test_public_status_mapping();
     printf("PASS\n");
     return 0;
 }
