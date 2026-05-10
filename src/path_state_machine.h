@@ -27,6 +27,27 @@ typedef enum {
     PATH_REASON_RETRY_RESET,
 } path_transition_reason_t;
 
+/* Phase 2 (PR2): internal 7-state lifecycle helpers.
+ * The enum `path_lifecycle_t` is defined in path_entry_internal.h to avoid
+ * a circular include (path_state_machine.h includes path_entry_internal.h
+ * for path_entry_t, which contains a path_lifecycle_t field).
+ *
+ * PR3 will further split PENDING into PENDING / CREATE_WAIT / VALIDATING
+ * (→ 9 states total). */
+
+/* Map internal lifecycle → public 5-state. Pure function. */
+mqvpn_path_status_t path_public_status_from_lifecycle(path_lifecycle_t s);
+
+/* Human-readable name (for logs). */
+const char *path_lifecycle_name(path_lifecycle_t s);
+
+/* Debug-build 7-state invariant check. Asserts the (state, platform_attached,
+ * xquic_path_live, fd_valid, xqc_path_id, recreate_after_us,
+ * path_stable_since_us) tuple is legal AND that p->status ==
+ * path_public_status_from_lifecycle(p->state) (denormalization invariant).
+ * No-op in release builds. */
+void path_invariant_check(const path_entry_t *p);
+
 /* Human-readable name of an mqvpn_path_status_t value. */
 const char *mqvpn_path_status_name(mqvpn_path_status_t s);
 
