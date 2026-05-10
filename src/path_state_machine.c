@@ -165,6 +165,7 @@ path_invariant_check(const path_entry_t *p)
         assert(fd_valid);
         assert(p->xqc_path_id == 0);
         assert(p->recreate_after_us != 0);
+        assert(p->path_stable_since_us == 0);
         break;
     case PATH_LC_CLOSED_RECOVERABLE:
         assert(p->platform_attached == 1);
