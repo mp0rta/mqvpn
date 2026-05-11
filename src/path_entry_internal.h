@@ -23,16 +23,19 @@
 #  include <sys/socket.h>
 #endif
 
-/* PR2 — internal 7-state lifecycle. Public ABI continues to use
+/* PR3 split done — internal 9-state lifecycle. Public ABI continues to use
  * `mqvpn_path_status_t` (5 values, see libmqvpn.h). The mapping internal →
  * public is in `path_public_status_from_lifecycle()` (path_state_machine.h).
  *
  * PR2 split rationale: the legacy MQVPN_PATH_CLOSED collapses 3 distinct
  * semantics (retry exhausted but slot reusable, platform dropped pending
- * cleanup, fully free). PR3 will further split PENDING into PENDING /
- * CREATE_WAIT / VALIDATING (→ 9 states total). */
+ * cleanup, fully free). PR3 splits PENDING into PENDING / CREATE_WAIT /
+ * VALIDATING to distinguish "never tried" / "retry timer armed" / "xqc path
+ * created, awaiting validation". */
 typedef enum {
     PATH_LC_PENDING = 0,
+    PATH_LC_CREATE_WAIT, /* PR3 — current attempt failed; auto retry timer armed */
+    PATH_LC_VALIDATING,  /* PR3 — xqc_conn_create_path ok; awaiting validation */
     PATH_LC_ACTIVE,
     PATH_LC_STANDBY,
     PATH_LC_DEGRADED,
