@@ -662,3 +662,13 @@ jobs:
             android/sdk-runtime/build/reports/tests/
             android/sdk-network/build/reports/tests/
           retention-days: 7
+
+  lint-lifecycle-writes:
+    name: Lint - lifecycle field writes (spec §3.3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run check_lifecycle_field_writes.sh
+        env:
+          LINT_MODE: fail
+        run: bash scripts/lint/check_lifecycle_field_writes.sh
