@@ -1540,6 +1540,132 @@ TEST(reactivate_path_not_established)
     mqvpn_client_destroy(c);
 }
 
+/* PR3 regression: mqvpn_client_reactivate_path's slot-eligibility gate must
+ * accept PATH_LC_CREATE_WAIT. Pre-PR3 the only retry-pending state was
+ * DEGRADED; PR3 split out CREATE_WAIT for sync-create-failure / post-
+ * VALIDATING-removal slots, both of which map to the public PENDING status.
+ * The original gate `status != DEGRADED && status != CLOSED` continued
+ * rejecting these — so platform-driven reactivation on iface-up was a no-op,
+ * forcing recovery into the slow library backoff loop. With backoff retries
+ * each burning a unique xqc path_id, XQC_MAX_PATHS_COUNT (=8) was exhausted
+ * within seconds and the connection collapsed when the surviving path also
+ * faulted. Seen in ci_bench_failover.sh on commit 3956522. */
+extern int mqvpn_client_test_reactivate_slot_eligible(mqvpn_client_t *c,
+                                                      mqvpn_path_handle_t handle);
+
+TEST(reactivate_slot_eligible_create_wait)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    /* Drive the slot into CREATE_WAIT (validating then xquic-side remove). */
+    ASSERT_EQ(mqvpn_client_test_force_validating_then_remove(c, h, 99), 0);
+    const char *name = mqvpn_client_test_get_path_state_name(c, h, NULL);
+    ASSERT_NE(name, NULL);
+    ASSERT_EQ(strcmp(name, "CREATE_WAIT"), 0);
+
+    /* The slot-eligibility gate MUST accept CREATE_WAIT. */
+    ASSERT_EQ(mqvpn_client_test_reactivate_slot_eligible(c, h), MQVPN_OK);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(reactivate_slot_eligible_rejects_validating)
+{
+    /* The complement: a slot that's still in VALIDATING (xquic_path_live==1,
+     * waiting on async PATH_CHALLENGE validation) must NOT be eligible —
+     * reactivating it would burn a fresh xqc path_id while the existing one
+     * is still alive. */
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    /* PENDING (freshly added) is also rejected: the cb_ready_to_create_path
+     * drain owns first activation. */
+    ASSERT_EQ(mqvpn_client_test_reactivate_slot_eligible(c, h), MQVPN_ERR_INVALID_STATE);
+
+    mqvpn_client_destroy(c);
+}
+
+/* PR3 regression #2: platform_linux.c::recovery_check_activation() called by
+ * try_readd_removed_path() (on RTM_NEWLINK carrier-up after a previous drop)
+ * checked `status == MQVPN_PATH_ACTIVE` to confirm activate succeeded.
+ *
+ * Pre-PR3 client_activate_path landed at PATH_LC_ACTIVE directly, so the
+ * check hit. PR3 changed activate to land at PATH_LC_VALIDATING (status
+ * projection: MQVPN_PATH_PENDING) and rely on async validation via
+ * tick_check_all_validations. The platform check then saw PENDING, returned
+ * READD_TRANSIENT_FAIL, and recovery_rollback removed the just-allocated xqc
+ * path. With path_removed_by_platform left set, the 3s recover_dropped_paths
+ * timer + subsequent RTM_NEWADDR events repeated the cycle, burning a
+ * unique xqc path_id each iteration until XQC_MAX_PATHS_COUNT (=8) was
+ * exhausted. Seen in ci_bench_failover.sh on commit 3956522.
+ *
+ * Fix: distinguish VALIDATING (xquic_path_live==1, activation succeeded,
+ * validation pending) from CREATE_WAIT / true PENDING (xquic_path_live==0)
+ * via mqvpn_client_path_is_xquic_live(). The former should be treated as
+ * READD_ACTIVATED. This test pins the helper's behavior. */
+extern int mqvpn_client_path_is_xquic_live(mqvpn_client_t *c, mqvpn_path_handle_t handle);
+
+TEST(path_is_xquic_live_returns_zero_for_pending)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    /* Freshly added slot: PENDING, xquic_path_live=0. */
+    ASSERT_EQ(mqvpn_client_path_is_xquic_live(c, h), 0);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(path_is_xquic_live_distinguishes_validating_from_create_wait)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    /* Drive the slot into CREATE_WAIT (validating then xquic-side remove).
+     * Both VALIDATING and CREATE_WAIT map to public PENDING status, but
+     * only VALIDATING has xquic_path_live==1. The helper must return 0
+     * here, allowing recovery_check_activation to correctly distinguish
+     * the sync-failed state and trigger rollback. */
+    ASSERT_EQ(mqvpn_client_test_force_validating_then_remove(c, h, 99), 0);
+    const char *name = mqvpn_client_test_get_path_state_name(c, h, NULL);
+    ASSERT_NE(name, NULL);
+    ASSERT_EQ(strcmp(name, "CREATE_WAIT"), 0);
+
+    /* CREATE_WAIT: xquic_path_live must be 0 (no live xqc path). */
+    ASSERT_EQ(mqvpn_client_path_is_xquic_live(c, h), 0);
+
+    mqvpn_client_destroy(c);
+}
+
+extern int mqvpn_client_test_force_validating(mqvpn_client_t *c,
+                                              mqvpn_path_handle_t handle,
+                                              uint64_t xqc_path_id);
+
+TEST(path_is_xquic_live_returns_one_for_validating)
+{
+    /* The positive case: VALIDATING (xquic_path_live==1) is the state
+     * recovery_check_activation must treat as READD_ACTIVATED. Without
+     * this distinction, every recovery on PR3 would roll back the just-
+     * allocated xqc path and burn budget. */
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    ASSERT_EQ(mqvpn_client_test_force_validating(c, h, 7), 0);
+    const char *name = mqvpn_client_test_get_path_state_name(c, h, NULL);
+    ASSERT_NE(name, NULL);
+    ASSERT_EQ(strcmp(name, "VALIDATING"), 0);
+
+    ASSERT_EQ(mqvpn_client_path_is_xquic_live(c, h), 1);
+
+    mqvpn_client_destroy(c);
+}
+
 /* ── Server client info ── */
 
 TEST(server_get_client_info_null_safety)
@@ -1674,6 +1800,11 @@ main(void)
     /* Path reactivation tests */
     run_reactivate_path_null_client();
     run_reactivate_path_not_established();
+    run_reactivate_slot_eligible_create_wait();
+    run_reactivate_slot_eligible_rejects_validating();
+    run_path_is_xquic_live_returns_zero_for_pending();
+    run_path_is_xquic_live_distinguishes_validating_from_create_wait();
+    run_path_is_xquic_live_returns_one_for_validating();
 
     /* Server info tests */
     run_server_get_client_info_null_safety();

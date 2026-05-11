@@ -640,17 +640,27 @@ recovery_register_with_lib(platform_ctx_t *p, int slot, int fd, const char *ifna
     return handle;
 }
 
+/* Library-internal helper exposed by mqvpn_client.c (hidden visibility).
+ * Returns 1 if the slot has a live xqc path (xquic_path_live==1). */
+extern int mqvpn_client_path_is_xquic_live(mqvpn_client_t *c, mqvpn_path_handle_t handle);
+
 /* Query path status to confirm what the synchronous activation produced.
  *
- * Three observable outcomes:
- *   ACTIVE   — apply_path_activation_success ran. Happy path.
- *   DEGRADED — apply_path_activation_failure scheduled a retry on
- *              transient errors (e.g. -XQC_EMP_NO_AVAIL_PATH_ID when CIDs
- *              not yet distributed). Roll back and let the 3s timer retry.
- *   CLOSED   — apply_path_create_permanent_failure ran, meaning
- *              xqc_conn_create_path returned -XQC_EMP_CREATE_PATH
- *              (XQC_MAX_PATHS_COUNT cap or OOM). Retrying within this
- *              connection cannot succeed.
+ * Observable outcomes:
+ *   ACTIVE / STANDBY    — fully validated. Happy path.
+ *   PENDING + xqc-live  — PR3 PATH_LC_VALIDATING: xqc_conn_create_path
+ *                         succeeded synchronously; PATH_CHALLENGE validation
+ *                         is in flight. Treat as activated — tick_check_all
+ *                         _validations will promote to ACTIVE/STANDBY on
+ *                         PATH_RESPONSE. Pre-PR3 this state was indistinguish-
+ *                         able from sync success because activate set ACTIVE
+ *                         directly; the new VALIDATING projects to PENDING.
+ *   PENDING + !xqc-live — PATH_LC_CREATE_WAIT (sync activate failure) or
+ *                         true PATH_LC_PENDING (multipath_ready not yet
+ *                         negotiated). Roll back and let the 3s timer retry.
+ *   CLOSED              — apply_path_create_permanent_failure ran, meaning
+ *                         xqc_conn_create_path returned -XQC_EMP_CREATE_PATH
+ *                         (XQC_MAX_PATHS_COUNT cap or OOM). Reconnect needed.
  *
  * Handle not present in pinfo[] is also collapsed to TRANSIENT_FAIL — implies
  * the lib reaped the slot between add_path_fd() and get_paths() (race we
@@ -663,8 +673,12 @@ recovery_check_activation(mqvpn_client_t *client, mqvpn_path_handle_t handle)
     mqvpn_client_get_paths(client, pinfo, MQVPN_MAX_PATHS, &n_info);
     for (int j = 0; j < n_info; j++) {
         if (pinfo[j].handle != handle) continue;
-        if (pinfo[j].status == MQVPN_PATH_ACTIVE) return READD_ACTIVATED;
+        if (pinfo[j].status == MQVPN_PATH_ACTIVE || pinfo[j].status == MQVPN_PATH_STANDBY)
+            return READD_ACTIVATED;
         if (pinfo[j].status == MQVPN_PATH_CLOSED) return READD_PERMANENT_FAIL;
+        if (pinfo[j].status == MQVPN_PATH_PENDING &&
+            mqvpn_client_path_is_xquic_live(client, handle))
+            return READD_ACTIVATED;
         return READD_TRANSIENT_FAIL;
     }
     return READD_TRANSIENT_FAIL;
