@@ -559,13 +559,6 @@ try_reactivate_by_ifname(platform_ctx_t *p, const char *ifname)
     }
 }
 
-/* Result of activation check after add_path_fd(). */
-typedef enum {
-    READD_ACTIVATED,      /* path is ACTIVE — happy path */
-    READD_TRANSIENT_FAIL, /* DEGRADED / unknown — retry via 3s timer */
-    READD_PERMANENT_FAIL, /* CLOSED — xquic budget exhausted, reconnect required */
-} readd_activation_t;
-
 /* Create a UDP socket bound to the wildcard address and pinned to ifname.
  * Updates mp->local_addr / mp->local_addrlen on success.
  * Returns the new fd, or -1 (already logged). */
@@ -613,12 +606,13 @@ fail:
     return -1;
 }
 
-/* Register a freshly-created socket with the library. add_path_fd() may
- * synchronously fire cb_path_event(ACTIVE) before we store the handle —
- * recovery_check_activation() compensates by querying status afterwards.
- * Returns the new handle, or -1 (already logged). */
+/* Register a freshly-created socket with the library and capture the
+ * synchronous activation outcome via the with_outcome API. Returns the
+ * new handle and writes *outcome (MQVPN_ADD_PATH_OK / TRANSIENT / PERMANENT);
+ * returns -1 on handle-allocation failure (already logged). */
 static mqvpn_path_handle_t
-recovery_register_with_lib(platform_ctx_t *p, int slot, int fd, const char *ifname)
+recovery_register_with_lib(platform_ctx_t *p, int slot, int fd, const char *ifname,
+                           mqvpn_add_path_outcome_t *outcome)
 {
     mqvpn_path_t *mp = &p->path_mgr.paths[slot];
 
@@ -631,57 +625,14 @@ recovery_register_with_lib(platform_ctx_t *p, int slot, int fd, const char *ifna
         desc.local_addr_len = mp->local_addrlen;
     }
 
-    mqvpn_path_handle_t handle = mqvpn_client_add_path_fd(p->client, fd, &desc);
+    mqvpn_path_handle_t handle =
+        mqvpn_client_add_path_fd_with_outcome(p->client, fd, &desc, outcome);
     if (handle < 0) {
         LOG_WRN("netlink: add_path_fd() for re-add %s failed", ifname);
         return -1;
     }
     p->lib_path_handles[slot] = handle;
     return handle;
-}
-
-/* Library-internal helper exposed by mqvpn_client.c (hidden visibility).
- * Returns 1 if the slot has a live xqc path (xquic_path_live==1). */
-extern int mqvpn_client_path_is_xquic_live(mqvpn_client_t *c, mqvpn_path_handle_t handle);
-
-/* Query path status to confirm what the synchronous activation produced.
- *
- * Observable outcomes:
- *   ACTIVE / STANDBY    — fully validated. Happy path.
- *   PENDING + xqc-live  — PR3 PATH_LC_VALIDATING: xqc_conn_create_path
- *                         succeeded synchronously; PATH_CHALLENGE validation
- *                         is in flight. Treat as activated — tick_check_all
- *                         _validations will promote to ACTIVE/STANDBY on
- *                         PATH_RESPONSE. Pre-PR3 this state was indistinguish-
- *                         able from sync success because activate set ACTIVE
- *                         directly; the new VALIDATING projects to PENDING.
- *   PENDING + !xqc-live — PATH_LC_CREATE_WAIT (sync activate failure) or
- *                         true PATH_LC_PENDING (multipath_ready not yet
- *                         negotiated). Roll back and let the 3s timer retry.
- *   CLOSED              — apply_path_create_permanent_failure ran, meaning
- *                         xqc_conn_create_path returned -XQC_EMP_CREATE_PATH
- *                         (XQC_MAX_PATHS_COUNT cap or OOM). Reconnect needed.
- *
- * Handle not present in pinfo[] is also collapsed to TRANSIENT_FAIL — implies
- * the lib reaped the slot between add_path_fd() and get_paths() (race we
- * shouldn't see in practice, but rollback re-frees our fd cleanly either way). */
-static readd_activation_t
-recovery_check_activation(mqvpn_client_t *client, mqvpn_path_handle_t handle)
-{
-    mqvpn_path_info_t pinfo[MQVPN_MAX_PATHS];
-    int n_info = 0;
-    mqvpn_client_get_paths(client, pinfo, MQVPN_MAX_PATHS, &n_info);
-    for (int j = 0; j < n_info; j++) {
-        if (pinfo[j].handle != handle) continue;
-        if (pinfo[j].status == MQVPN_PATH_ACTIVE || pinfo[j].status == MQVPN_PATH_STANDBY)
-            return READD_ACTIVATED;
-        if (pinfo[j].status == MQVPN_PATH_CLOSED) return READD_PERMANENT_FAIL;
-        if (pinfo[j].status == MQVPN_PATH_PENDING &&
-            mqvpn_client_path_is_xquic_live(client, handle))
-            return READD_ACTIVATED;
-        return READD_TRANSIENT_FAIL;
-    }
-    return READD_TRANSIENT_FAIL;
 }
 
 /* Roll back a failed re-add so the next attempt starts from a clean slate.
@@ -692,7 +643,7 @@ recovery_check_activation(mqvpn_client_t *client, mqvpn_path_handle_t handle)
  * xqc_conn_close_path(), so xquic never touches this fd during teardown.
  * Do NOT remove that defensive clear — it's what makes this rollback safe. */
 static void
-recovery_rollback(platform_ctx_t *p, int slot, readd_activation_t outcome)
+recovery_rollback(platform_ctx_t *p, int slot, mqvpn_add_path_outcome_t outcome)
 {
     mqvpn_path_t *mp = &p->path_mgr.paths[slot];
     const char *ifname = mp->iface;
@@ -703,7 +654,7 @@ recovery_rollback(platform_ctx_t *p, int slot, readd_activation_t outcome)
     mp->fd = -1;
     mp->platform_attached = 0;
 
-    if (outcome == READD_PERMANENT_FAIL) {
+    if (outcome == MQVPN_ADD_PATH_PERMANENT_FAIL) {
         /* xquic budget exhausted — disable the 3s recovery timer for this
          * slot. The path stays in path_removed_by_platform=0 until either
          * a new netlink event reactivates it or a Level-2 reconnect resets
@@ -741,9 +692,9 @@ recovery_rollback(platform_ctx_t *p, int slot, readd_activation_t outcome)
  * until a successful re-add or Level-2 reconnect re-arms it. Will be
  * subsumed by spec §6.6 / PR4 path_on_event path-classification.
  *
- * Only post-add activation failures (recovery_check_activation != ACTIVATED)
- * count toward the budget — socket/bind/pin or add_path_fd failures are OS-
- * side transient errors and do not consume the counter. */
+ * Only post-add activation failures (outcome != MQVPN_ADD_PATH_OK) count
+ * toward the budget — socket/bind/pin or handle-allocation failures are
+ * OS-side transient errors and do not consume the counter. */
 static int
 try_readd_removed_path(platform_ctx_t *p, const char *ifname)
 {
@@ -762,7 +713,9 @@ try_readd_removed_path(platform_ctx_t *p, const char *ifname)
         mp->xquic_path_live = 0;
         mp->path_id = 0;
 
-        mqvpn_path_handle_t handle = recovery_register_with_lib(p, i, fd, ifname);
+        mqvpn_add_path_outcome_t outcome = MQVPN_ADD_PATH_OK;
+        mqvpn_path_handle_t handle =
+            recovery_register_with_lib(p, i, fd, ifname, &outcome);
         if (handle < 0) {
             /* Don't call recovery_rollback() here: handle was never stored, so
              * lib_path_handles[i] still holds the stale handle from the prior
@@ -774,8 +727,7 @@ try_readd_removed_path(platform_ctx_t *p, const char *ifname)
             return 0;
         }
 
-        readd_activation_t outcome = recovery_check_activation(p->client, handle);
-        if (outcome != READD_ACTIVATED) {
+        if (outcome != MQVPN_ADD_PATH_OK) {
             recovery_rollback(p, i, outcome);
             return 0;
         }

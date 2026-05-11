@@ -1959,8 +1959,60 @@ mqvpn_client_disconnect(mqvpn_client_t *c)
 
 /* ─── Path management ─── */
 
+/* Map the slot's lifecycle state after the synchronous activation half of
+ * mqvpn_client_add_path_fd_with_outcome to the public add-path outcome.
+ *
+ * Called only when activation was attempted (multipath_ready was true).
+ *
+ * @invariant post-activate: s ∈ {
+ *     VALIDATING, ACTIVE, STANDBY,    // sync success (xqc path live)
+ *     CREATE_WAIT,                     // sync transient failure
+ *     CLOSED_RECOVERABLE               // sync permanent failure (budget/OOM)
+ * }
+ * activate_pending_paths -> client_activate_path always lands the slot in
+ * one of these 5 states. The other 4 (PENDING, DEGRADED, CLOSED_DROPPED,
+ * CLOSED_FREE) only occur if an upstream invariant is violated — fail
+ * loud in debug/ASAN builds, fall back to OK in release so a freshly-
+ * added handle still reports "stored, will activate later" semantics
+ * rather than misclassifying as a hard failure. */
+static mqvpn_add_path_outcome_t
+add_path_outcome_from_state(path_lifecycle_t s)
+{
+    /* Compile-time pin: if path_lifecycle_t grows (or CLOSED_FREE is
+     * reordered) this assert breaks so the author has to revisit the
+     * switch + invariant comment. Catches FSM additions that forget to
+     * teach the platform-recovery caller about the new state. */
+    _Static_assert(PATH_LC_CLOSED_FREE == 8, "path_lifecycle_t shape changed - review "
+                                             "add_path_outcome_from_state");
+
+    switch (s) {
+    case PATH_LC_VALIDATING:
+    case PATH_LC_ACTIVE:
+    case PATH_LC_STANDBY: return MQVPN_ADD_PATH_OK;
+    case PATH_LC_CREATE_WAIT: return MQVPN_ADD_PATH_TRANSIENT_FAIL;
+    case PATH_LC_CLOSED_RECOVERABLE: return MQVPN_ADD_PATH_PERMANENT_FAIL;
+    case PATH_LC_PENDING:
+    case PATH_LC_DEGRADED:
+    case PATH_LC_CLOSED_DROPPED:
+    case PATH_LC_CLOSED_FREE:
+        /* Unreachable per the post-activate invariant above. Asserts
+         * trip in debug / ASAN / UBSan so FSM regressions surface in CI
+         * rather than silently degrading bench numbers. */
+        assert(0 && "add_path_outcome_from_state: lifecycle invariant violated");
+        return MQVPN_ADD_PATH_OK;
+    }
+    /* Unreachable: compiler exhaustiveness (-Wswitch-enum) + the
+     * _Static_assert above cover every path_lifecycle_t value. Kept as
+     * a last-resort runtime guard in case either guard is locally
+     * disabled. */
+    assert(0 && "add_path_outcome_from_state: unknown lifecycle value");
+    return MQVPN_ADD_PATH_OK;
+}
+
 mqvpn_path_handle_t
-mqvpn_client_add_path_fd(mqvpn_client_t *c, int fd, const mqvpn_path_desc_t *desc)
+mqvpn_client_add_path_fd_with_outcome(mqvpn_client_t *c, int fd,
+                                      const mqvpn_path_desc_t *desc,
+                                      mqvpn_add_path_outcome_t *outcome)
 {
     if (!c || fd < 0) return -1;
     ASSERT_TICK_THREAD(c);
@@ -2010,14 +2062,25 @@ mqvpn_client_add_path_fd(mqvpn_client_t *c, int fd, const mqvpn_path_desc_t *des
     set_path_state_with_log(c, p, PATH_LC_PENDING, PATH_REASON_ADD_FD);
     path_invariant_check(p);
 
+    /* Default outcome: OK (deferred until cb_ready_to_create_path drains
+     * PENDING slots). Will be overwritten if activation runs synchronously. */
+    if (outcome) *outcome = MQVPN_ADD_PATH_OK;
+
     /* If multipath is already negotiated, activate immediately. Use the
      * translator: any other PENDING slot (rare — usually drained by the
      * ready_to_create_path callback) should have been activated too. */
     if (c->multipath_ready && c->config.multipath && c->conn) {
         activate_pending_paths(c);
+        if (outcome) *outcome = add_path_outcome_from_state(p->state);
     }
 
     return p->handle;
+}
+
+mqvpn_path_handle_t
+mqvpn_client_add_path_fd(mqvpn_client_t *c, int fd, const mqvpn_path_desc_t *desc)
+{
+    return mqvpn_client_add_path_fd_with_outcome(c, fd, desc, NULL);
 }
 
 int
@@ -2145,27 +2208,6 @@ mqvpn_client_test_reactivate_slot_eligible(mqvpn_client_t *c, mqvpn_path_handle_
     path_entry_t *p = find_path_by_handle(c, handle);
     if (!p) return MQVPN_ERR_INVALID_ARG;
     return reactivate_slot_eligible(p);
-}
-
-/* Platform-internal: returns 1 if the slot has a live xquic-side path
- * (xquic_path_live==1), 0 otherwise. Used by the Linux platform layer's
- * recovery_check_activation() to distinguish post-PR3 PATH_LC_VALIDATING
- * (xqc path created, async PATH_CHALLENGE validation pending) from
- * PATH_LC_CREATE_WAIT (synchronous activate failed). Both project to
- * MQVPN_PATH_PENDING in the public 5-state, so status alone cannot
- * tell them apart — but try_readd_removed_path needs to: the former is
- * a successful activation that should NOT be rolled back, the latter
- * should be. Hidden from libmqvpn.so's dynamic export table. */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
-int
-mqvpn_client_path_is_xquic_live(mqvpn_client_t *c, mqvpn_path_handle_t handle)
-{
-    if (!c) return 0;
-    path_entry_t *p = find_path_by_handle(c, handle);
-    if (!p) return 0;
-    return p->xquic_path_live ? 1 : 0;
 }
 
 int
