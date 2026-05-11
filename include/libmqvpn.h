@@ -131,6 +131,50 @@ typedef enum {
 
 MQVPN_API const char *mqvpn_path_status_string(mqvpn_path_status_t status);
 
+/*
+ * Outcome of the synchronous half of mqvpn_client_add_path_fd_with_outcome().
+ *
+ * After add_path_fd, the slot has been registered and (if multipath is
+ * already negotiated) activation has been attempted in the same call. The
+ * outcome reports what that synchronous attempt produced:
+ *
+ *   OK              — handle stored. Either activation succeeded (xqc path
+ *                     created; PATH_CHALLENGE validation will complete async
+ *                     and the slot will land in ACTIVE/STANDBY when xquic
+ *                     reports XQC_PATH_STATE_ACTIVE), OR multipath wasn't
+ *                     ready yet and activation will fire from
+ *                     cb_ready_to_create_path when handshake completes.
+ *                     In both cases the caller should keep the fd.
+ *
+ *   TRANSIENT_FAIL  — xqc_conn_create_path returned a recoverable error
+ *                     (e.g. -XQC_EMP_NO_AVAIL_PATH_ID — server hasn't
+ *                     distributed CIDs yet). The library's tick recovery
+ *                     loop will retry with exponential backoff. The
+ *                     platform layer typically rolls back the fd here
+ *                     so a fresh re-add starts from a clean state.
+ *
+ *   PERMANENT_FAIL  — xqc_conn_create_path returned -XQC_EMP_CREATE_PATH
+ *                     (XQC_MAX_PATHS_COUNT cap hit or OOM). The slot is
+ *                     marked CLOSED; recovery requires a Level-2 reconnect
+ *                     that resets the path_id namespace.
+ *
+ * The legacy add_path_fd() always succeeds at the handle layer (returning
+ * the handle) and silently swallows TRANSIENT_FAIL / PERMANENT_FAIL; the
+ * caller has to poll status via mqvpn_client_get_paths to discover them.
+ * The with_outcome variant exists because that poll loses information:
+ * PR3's PATH_LC_VALIDATING and PATH_LC_CREATE_WAIT both project to
+ * MQVPN_PATH_PENDING, so status alone cannot tell sync success from
+ * sync transient failure. Platform recovery (RTM_NEWLINK after a
+ * carrier-loss drop_path) needs this distinction to avoid rolling back
+ * a successful activation and burning xqc path_id budget — see
+ * platform_linux::try_readd_removed_path().
+ */
+typedef enum {
+    MQVPN_ADD_PATH_OK = 0,
+    MQVPN_ADD_PATH_TRANSIENT_FAIL = 1,
+    MQVPN_ADD_PATH_PERMANENT_FAIL = 2,
+} mqvpn_add_path_outcome_t;
+
 /* ─── Data structures ─── */
 
 typedef struct {
@@ -354,6 +398,31 @@ MQVPN_API int mqvpn_client_disconnect(mqvpn_client_t *client);
 
 MQVPN_API mqvpn_path_handle_t mqvpn_client_add_path_fd(mqvpn_client_t *client, int fd,
                                                        const mqvpn_path_desc_t *desc);
+
+/*
+ * Same as mqvpn_client_add_path_fd() but reports the outcome of the
+ * synchronous activation attempt via *outcome. See mqvpn_add_path_outcome_t
+ * for the three outcomes. If `outcome` is NULL, behaves identically to
+ * mqvpn_client_add_path_fd().
+ *
+ * Returns the path handle (>= 0) on success, or -1 if the slot table is
+ * full / args are invalid (in which case *outcome is not written).
+ *
+ * Use this in platform recovery paths (RTM_NEWLINK / NotifyUnicastIpAddress
+ * Change / NWPathMonitor) where the caller needs to distinguish:
+ *   - sync activation succeeded → keep the fd
+ *   - sync transient failure → close fd, let the recovery timer retry
+ *   - permanent failure (xqc path budget exhausted) → give up on this conn
+ *
+ * Because PATH_LC_VALIDATING (xqc path created, async validation pending)
+ * and PATH_LC_CREATE_WAIT (sync activate failed transiently) both project
+ * to MQVPN_PATH_PENDING in the public 5-state status, querying status
+ * via mqvpn_client_get_paths after add_path_fd cannot make this
+ * distinction — this API does.
+ */
+MQVPN_API mqvpn_path_handle_t mqvpn_client_add_path_fd_with_outcome(
+    mqvpn_client_t *client, int fd, const mqvpn_path_desc_t *desc,
+    mqvpn_add_path_outcome_t *outcome);
 
 MQVPN_API int mqvpn_client_remove_path(mqvpn_client_t *client, mqvpn_path_handle_t path);
 
