@@ -1022,7 +1022,7 @@ TEST(activation_failure_eventually_closes_path)
     mqvpn_client_destroy(c);
 }
 
-/* PR3 — pin the cb_path_removed_apply VALIDATING -> CREATE_WAIT dispatch.
+/* PR4 — pin the PATH_EVENT_XQUIC_REMOVED VALIDATING -> CREATE_WAIT dispatch.
  * This is the path xquic takes when validation fails after we entered
  * VALIDATING. ACTIVE/STANDBY (validated) must instead go to DEGRADED;
  * VALIDATING (never validated) starts retry from CREATE_WAIT. */
@@ -1037,7 +1037,7 @@ TEST(cb_path_removed_validating_to_create_wait)
     ASSERT_NE(h, (mqvpn_path_handle_t)-1);
 
     /* Wrapper forces state=VALIDATING with xqc_path_id=42, retries=0,
-     * then invokes cb_path_removed_apply. Expected landing: CREATE_WAIT
+     * then dispatches path_on_event(XQUIC_REMOVED). Expected landing: CREATE_WAIT
      * with recreate_retries=1 (no validated experience -> CREATE_WAIT,
      * not DEGRADED). */
     ASSERT_EQ(mqvpn_client_test_force_validating_then_remove(c, h, 42), 0);
@@ -1114,15 +1114,13 @@ TEST(path_create_permanent_failure_invalid_handle_returns_error)
 
 /* The Beta1 trigger was a recovery loop calling client_activate_path once
  * per 3s tick on a slot whose budget had already exhausted. The fix keeps
- * the slot CLOSED so the loop can no longer pick it up — but if a buggy
- * caller re-enters apply_path_create_permanent_failure on the same slot
- * (e.g. a future try_readd_removed_path retry that observes CLOSED but
- * still calls through), the function MUST stay idempotent: state stays
- * CLOSED, and a fresh path_event(CLOSED) fires on each call. The latter
- * matters because if a future "optimization" early-returned on
- * status==CLOSED, observer state machines that dedupe per-handle would
- * miss the retry-equivalent signal — verify the event-per-call shape so
- * that path is pinned. */
+ * the slot CLOSED so the loop can no longer pick it up.
+ *
+ * PR4 event-driven model: path_event fires on state TRANSITION (not per
+ * invocation). A repeat call on an already-CLOSED slot is a no-op self-loop
+ * — state stays CLOSED, no extra event fires. This is stronger than the
+ * pre-PR4 "event per call" contract since duplicate events on a sticky
+ * state were never useful signal for observers. */
 
 TEST(path_create_permanent_failure_idempotent)
 {
@@ -1132,12 +1130,15 @@ TEST(path_create_permanent_failure_idempotent)
 
     g_path_event_count = 0;
     ASSERT_EQ(mqvpn_client_test_apply_path_create_permanent_failure(c, h), 0);
-    /* Second invocation on the same (now CLOSED) slot must also return OK,
-     * stay CLOSED, and emit a second path_event(CLOSED). */
-    ASSERT_EQ(mqvpn_client_test_apply_path_create_permanent_failure(c, h), 0);
-    ASSERT_EQ(g_path_event_count, 2);
+    /* First call: PENDING -> CLOSED_RECOVERABLE, fires one event. */
+    ASSERT_EQ(g_path_event_count, 1);
     ASSERT_EQ(g_last_path_event_handle, h);
     ASSERT_EQ(g_last_path_event_status, MQVPN_PATH_CLOSED);
+
+    /* Second call on already-CLOSED slot is a no-op (event-driven FSM
+     * suppresses self-loop transitions). State stays CLOSED. */
+    ASSERT_EQ(mqvpn_client_test_apply_path_create_permanent_failure(c, h), 0);
+    ASSERT_EQ(g_path_event_count, 1);
 
     mqvpn_path_info_t info[2];
     int n = 0;

@@ -54,11 +54,9 @@
  * rotation, issue #46) rather than waiting for xquic's idle_time_out (120s). */
 #define HANDSHAKE_STALL_TIMEOUT_MS 5000
 #define PTB_RATE_LIMIT             10
-#define PATH_RECREATE_DELAY_US     (5ULL * 1000000)  /* 5 sec initial */
-#define PATH_RECREATE_MAX_DELAY_US (60ULL * 1000000) /* 60 sec max backoff */
-#define PATH_RECREATE_MAX_RETRIES  6                 /* max consecutive failures */
-#define PATH_STABLE_THRESHOLD_US   (30ULL * 1000000) /* 30 sec to confirm stable */
-#define SOCKET_BUF_SIZE            (7 * 1024 * 1024) /* 7 MiB socket buffer */
+/* PATH_RECREATE_* and PATH_STABLE_THRESHOLD_US relocated to path_state_machine.h
+ * for PR4 — shared with path_state_machine.c. */
+#define SOCKET_BUF_SIZE (7 * 1024 * 1024) /* 7 MiB socket buffer */
 
 /* ─── Forward declarations ─── */
 
@@ -226,8 +224,10 @@ now_us(void)
 #endif
 }
 
-/* Injectable clock: use config clock_fn if set, else default now_us() */
-static uint64_t
+/* Injectable clock: use config clock_fn if set, else default now_us().
+ * PR4 — non-static + visibility hidden so path_state_machine.c can call it
+ * without exporting from libmqvpn.so. */
+__attribute__((visibility("hidden"))) uint64_t
 client_now_us(const mqvpn_client_t *c)
 {
     if (c->config.clock_fn) return c->config.clock_fn(c->config.clock_ctx);
@@ -265,11 +265,14 @@ now_ms_mono(void)
 }
 
 #ifndef _MSC_VER
-static void client_log(mqvpn_client_t *c, mqvpn_log_level_t level, const char *fmt, ...)
+__attribute__((visibility("hidden"))) void
+client_log(mqvpn_client_t *c, mqvpn_log_level_t level, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 #endif
 
-static void
+/* PR4 — non-static + visibility hidden so path_state_machine.c can call it
+ * without exporting from libmqvpn.so. */
+__attribute__((visibility("hidden"))) void
 client_log(mqvpn_client_t *c, mqvpn_log_level_t level, const char *fmt, ...)
 {
     if (!c->cbs.log || level < c->log_level) return;
@@ -283,6 +286,13 @@ client_log(mqvpn_client_t *c, mqvpn_log_level_t level, const char *fmt, ...)
     c->cbs.log(level, buf, c->user_ctx);
 }
 
+/* PR4 - Fire public path_event callback from FSM body. */
+__attribute__((visibility("hidden"))) void
+path_fsm_fire_path_event(mqvpn_client_t *c, const path_entry_t *p)
+{
+    if (c->cbs.path_event) c->cbs.path_event(p->handle, p->status, c->user_ctx);
+}
+
 #define LOG_D(c, ...) client_log(c, MQVPN_LOG_DEBUG, __VA_ARGS__)
 #define LOG_I(c, ...) client_log(c, MQVPN_LOG_INFO, __VA_ARGS__)
 #define LOG_W(c, ...) client_log(c, MQVPN_LOG_WARN, __VA_ARGS__)
@@ -290,44 +300,9 @@ client_log(mqvpn_client_t *c, mqvpn_log_level_t level, const char *fmt, ...)
 
 /* ─── Path observability helpers ─── */
 
-/* PR2 — transition log emitter using internal 7-state names.
- * static here because it needs client_log (which is local to this file). */
-static void
-path_log_state_change(mqvpn_client_t *c, const path_entry_t *p,
-                      path_lifecycle_t old_state, path_transition_reason_t reason)
-{
-    LOG_D(c,
-          "path[handle=%lld name=%s] %s -> %s reason=%s "
-          "retries=%d fd=%d xqc_path_id=%llu",
-          (long long)p->handle, p->name, path_lifecycle_name(old_state),
-          path_lifecycle_name(p->state), mqvpn_path_transition_reason_name(reason),
-          p->recreate_retries, p->fd, (unsigned long long)p->xqc_path_id);
-}
-
-/* PR2 — internal helper. Updates both `status` (public ABI projection) and
- * `state` (internal 7-state lifecycle) atomically. Maintains the
- * denormalization invariant `status == path_public_status_from_lifecycle(state)`
- * at every transition exit.
- *
- * Real-transition detection uses the LIFECYCLE pair (old_state, new_state),
- * not the public status pair. Without this, internal-only CLOSED→CLOSED
- * transitions (e.g. CLOSED_RECOVERABLE → CLOSED_DROPPED on remove_path
- * after retry exhausted) would be silently suppressed as self-loops:
- * the state field would update but no transition log fires and
- * path_mark_state_entry never re-anchors the residence timer. */
-static void
-set_path_state_with_log(mqvpn_client_t *c, path_entry_t *p, path_lifecycle_t new_state,
-                        path_transition_reason_t reason)
-{
-    path_lifecycle_t old_state = p->state;
-    int real = (old_state != new_state) || (p->state_entered_at_us == 0);
-
-    if (!real) return; /* self-loop: both fields already correct, skip timer+log */
-    p->status = path_public_status_from_lifecycle(new_state);
-    p->state = new_state;
-    path_mark_state_entry(p, client_now_us(c));
-    path_log_state_change(c, p, old_state, reason);
-}
+/* PR4 — set_path_state_with_log / path_log_state_change relocated to
+ * path_state_machine.c (declarations in path_state_machine.h). The bodies
+ * still call client_log/client_now_us via the non-static accessors. */
 
 /* Wrapper: check if path p has been in its current state too long, and if so
  * emit a LOG_W and debounce the next warning. */
@@ -625,23 +600,15 @@ client_reset_path_runtime(mqvpn_client_t *c, path_entry_t *p)
 {
     /* Pre-reconnect cleanup: a slot that was ACTIVE/STANDBY/DEGRADED before
      * reconnect must drop xquic-side state and fall back to PENDING so the
-     * legacy 5-state invariant holds. Without this, status=ACTIVE with
-     * xquic_path_live=0 (the post-reset shape) would violate the ACTIVE
-     * invariant if anything called path_invariant_check_legacy on it.
-     *
-     * Use the transition wrapper so state_entered_at_us is recorded and the
-     * residence-warn timer can fire on a stuck-PENDING re-arm. */
-    p->xquic_path_live = 0;
-    p->xqc_path_id = 0;
-    p->recreate_after_us = 0;
-    p->recreate_retries = 0;
-    p->path_stable_since_us = 0;
-    /* Drop residence-warn debounce so the next stuck-PENDING window can warn. */
+     * lifecycle invariant holds. Dispatched via PATH_EVENT_CONN_RESET which
+     * centralises the field clearing + state transition in path_on_conn_reset. */
+
+    /* Observability state (not §3.3 lifecycle field) — clear directly so the
+     * next stuck-PENDING window can warn. */
     p->last_residence_warn_at_us = 0;
-    if (p->platform_attached) {
-        set_path_state_with_log(c, p, PATH_LC_PENDING, PATH_REASON_CONN_RESET);
-    }
-    path_invariant_check(p);
+
+    path_event_ctx_t ctx = {.now_us = client_now_us(c)};
+    path_on_event(c, p, PATH_EVENT_CONN_RESET, &ctx);
 }
 
 static void
@@ -1114,14 +1081,20 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
                 info.has_v6 = 1;
             }
 
-            /* Primary path is now active */
+            /* Primary path is now validated by handshake — drive
+             * VALIDATING -> ACTIVE via the standard event. tick_check_all_validations
+             * may also fire VALIDATION_OK if it polls between now and the next
+             * tick boundary; path_on_validation_ok's `if (state != VALIDATING)`
+             * guard makes the second dispatch a LOG_D no-op. */
             int pidx = c->primary_path_idx;
-            if (c->n_paths > 0 && pidx < c->n_paths && c->paths[pidx].platform_attached) {
+            if (c->n_paths > 0 && pidx < c->n_paths && c->paths[pidx].platform_attached &&
+                c->paths[pidx].state == PATH_LC_VALIDATING) {
                 path_entry_t *pp = &c->paths[pidx];
-                set_path_state_with_log(c, pp, PATH_LC_ACTIVE, PATH_REASON_ACTIVATE_OK);
-                path_invariant_check(pp);
-                if (c->cbs.path_event)
-                    c->cbs.path_event(pp->handle, MQVPN_PATH_ACTIVE, c->user_ctx);
+                path_event_ctx_t v_ctx = {
+                    .validated_target = PATH_LC_ACTIVE,
+                    .now_us = client_now_us(c),
+                };
+                path_on_event(c, pp, PATH_EVENT_VALIDATION_OK, &v_ctx);
             }
 
             client_set_state(c, MQVPN_STATE_TUNNEL_READY);
@@ -1276,65 +1249,48 @@ cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
 
 /* ─── Multipath helpers ─── */
 
-/* Forward declarations — apply_path_activation_failure() is used by
- * client_activate_path() below but defined further down next to its other
- * retry-related siblings (path_recreate_backoff, etc.). */
-static void apply_path_activation_failure(mqvpn_client_t *c, path_entry_t *p,
-                                          uint64_t now_us);
-static void apply_path_create_permanent_failure(mqvpn_client_t *c, path_entry_t *p);
+/* PR4 — Call xqc_conn_create_path() and classify per spec §6.6.
+ * On OK, *out_path_id receives the new xqc-side path_id; on fail it is 0.
+ * The caller passes the classification + path_id into path_on_event()'s
+ * ctx (ACTIVATE_REQUESTED / RETRY_TIMER / MANUAL_REACTIVATE). */
+static activate_result_t
+activate_via_xquic_classify(mqvpn_client_t *c, uint64_t *out_path_id)
+{
+    int path_status = (c->config.scheduler == MQVPN_SCHED_BACKUP_FEC) ? 1 : 0;
+    *out_path_id = 0;
+    xqc_int_t ret =
+        xqc_conn_create_path(c->engine, &c->conn->cid, out_path_id, path_status);
+    if (ret == 0) return ACTIVATE_OK;
+    if (ret == -XQC_EMP_CREATE_PATH) return ACTIVATE_PERMANENT_FAIL;
+    return ACTIVATE_TRANSIENT_FAIL;
+}
 
-/* Create an xquic path for a secondary path entry and mark it ACTIVE.
+/* Create an xquic path for a secondary path entry. Thin caller — all state
+ * mutation happens inside path_on_event(ACTIVATE_REQUESTED) per spec §6.6.
  *
- * For MQVPN_SCHED_BACKUP_FEC the secondary path must be created in STANDBY
+ * For MQVPN_SCHED_BACKUP_FEC the secondary path is created in STANDBY
  * (path_status=1) so that xquic's backup_fec scheduler routes only FEC repair
  * symbols to it, while the primary path stays AVAILABLE. Per xquic's public
  * API: 1 = STANDBY, anything else = AVAILABLE (xquic.h L2210). */
 static void
 client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
 {
+    if (p->xquic_path_live) return;
+
     uint64_t new_id = 0;
-    int path_status = (c->config.scheduler == MQVPN_SCHED_BACKUP_FEC) ? 1 : 0;
-    xqc_int_t ret = xqc_conn_create_path(c->engine, &c->conn->cid, &new_id, path_status);
-    if (ret < 0) {
-        LOG_W(c, "xqc_conn_create_path[%d]: %d", idx, ret);
-        if (ret == -XQC_EMP_CREATE_PATH) {
-            /* Permanent failure on this connection. Two triggers:
-             *   1. XQC_MAX_PATHS_COUNT cap hit (`xqc_path_create|too many paths`)
-             *   2. xqc_calloc OOM inside xqc_path_create
-             * Both are unrecoverable in-conn — the path_id namespace only
-             * resets on Level-2 reconnect. Skip the DEGRADED retry path so
-             * neither tick_drive_retry_timer nor the platform's 3s
-             * recovery timer busy-loops on calls that will never succeed. */
-            apply_path_create_permanent_failure(c, p);
-            LOG_W(c,
-                  "path closed: %s (xquic path budget exhausted/OOM, requires reconnect)",
-                  p->name);
-            return;
-        }
-        /* Other errors (e.g. -XQC_EMP_NO_AVAIL_PATH_ID — server hasn't
-         * distributed enough CIDs yet) are transient. Schedule a retry so
-         * the path is not stuck in PENDING/ACTIVE forever — the tick
-         * recovery loop (tick_drive_retry_timer) services CREATE_WAIT and
-         * DEGRADED slots with non-zero recreate_after_us. Backport of
-         * Ysurac 86c275c (issue
-         * Ysurac/openmptcprouter#4271 Bug 1). */
-        apply_path_activation_failure(c, p, client_now_us(c));
-        if (p->status == MQVPN_PATH_CLOSED) {
-            LOG_W(c, "path closed: %s (retries exhausted at activation)", p->name);
-        } else {
-            LOG_I(c, "path %s: %s (retry %d/%d in %ds)", path_lifecycle_name(p->state),
-                  p->name, p->recreate_retries, PATH_RECREATE_MAX_RETRIES,
-                  (int)((p->recreate_after_us - client_now_us(c)) / 1000000));
-        }
-        return;
-    }
-    LOG_I(c, "path[%d] created (id=%llu, app_path_status=%s)", idx,
-          (unsigned long long)new_id, path_status == 1 ? "STANDBY" : "AVAILABLE");
-    p->xqc_path_id = new_id;
-    p->xquic_path_live = 1;
-    set_path_state_with_log(c, p, PATH_LC_VALIDATING, PATH_REASON_ACTIVATE_OK);
-    path_invariant_check(p);
-    LOG_I(c, "path[%d] validating: path_id=%" PRIu64 " iface=%s", idx, new_id, p->name);
+    activate_result_t r = activate_via_xquic_classify(c, &new_id);
+    LOG_I(c, "path[%d] activate: result=%s id=%llu", idx,
+          r == ACTIVATE_OK               ? "OK"
+          : r == ACTIVATE_PERMANENT_FAIL ? "PERMANENT"
+                                         : "TRANSIENT",
+          (unsigned long long)new_id);
+
+    path_event_ctx_t ctx = {
+        .result = r,
+        .new_xqc_path_id = new_id,
+        .now_us = client_now_us(c),
+    };
+    path_on_event(c, p, PATH_EVENT_ACTIVATE_REQUESTED, &ctx);
 }
 
 /* Activate every path currently in PATH_LC_PENDING.
@@ -1368,64 +1324,14 @@ cb_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
     activate_pending_paths(c);
 }
 
-static uint64_t
-path_recreate_backoff(int retries)
-{
-    uint64_t delay = PATH_RECREATE_DELAY_US;
-    for (int r = 1; r < retries && delay < PATH_RECREATE_MAX_DELAY_US; r++)
-        delay *= 2;
-    if (delay > PATH_RECREATE_MAX_DELAY_US) delay = PATH_RECREATE_MAX_DELAY_US;
-    return delay;
-}
+/* PR4 — path_recreate_backoff relocated to path_state_machine.c
+ * (declaration in path_state_machine.h). */
 
-/* Apply a synchronous path-creation failure to slot `p` at time `now_us`.
- *
- * Bumps the retry counter, transitions the path to PATH_LC_CREATE_WAIT with
- * an exponential-backoff `recreate_after_us` so tick_drive_retry_timer()
- * will retry it; or transitions to PATH_LC_CLOSED_RECOVERABLE once
- * PATH_RECREATE_MAX_RETRIES is reached.  Always emits the path_event
- * callback if registered.
- *
- * Without this, a path whose xqc_conn_create_path() fails synchronously
- * (e.g. `-XQC_EMP_NO_AVAIL_PATH_ID` because the server has not yet
- * distributed CIDs for additional paths) sits in PENDING forever — the
- * tick recovery loop only acts on CREATE_WAIT/DEGRADED slots with a
- * non-zero recreate_after_us, so PENDING/ACTIVE paths with failed
- * activation are invisible to it.  Issue Ysurac/openmptcprouter#4271
- * (Bug 1). */
-static void
-apply_path_activation_failure(mqvpn_client_t *c, path_entry_t *p, uint64_t now_us)
-{
-    /* Defensive: clear connection-bound state. Today the only callers
-     * (client_activate_path on synchronous xqc_conn_create_path failure;
-     * the test wrapper) cannot have set xquic_path_live/xqc_path_id/path_stable_since_us
-     * to non-zero, but consolidating with cb_path_removed's bookkeeping makes
-     * this function safe regardless of caller invariants and avoids a stale
-     * xqc_path_id surviving a future refactor that moved successful state
-     * mutation earlier in client_activate_path. */
-    p->xquic_path_live = 0;
-    p->xqc_path_id = 0;
-    p->path_stable_since_us = 0;
-
-    p->recreate_retries++;
-    if (p->recreate_retries >= PATH_RECREATE_MAX_RETRIES) {
-        p->recreate_after_us = 0;
-        set_path_state_with_log(c, p, PATH_LC_CLOSED_RECOVERABLE,
-                                PATH_REASON_ACTIVATE_FAILED);
-    } else {
-        p->recreate_after_us = now_us + path_recreate_backoff(p->recreate_retries);
-        /* PR3 — synchronous create_path failure means the slot never reached
-         * VALIDATING; its retry slot is CREATE_WAIT (no validated experience),
-         * not DEGRADED. Spec §5.1. */
-        set_path_state_with_log(c, p, PATH_LC_CREATE_WAIT, PATH_REASON_ACTIVATE_FAILED);
-    }
-    path_invariant_check(p);
-    if (c->cbs.path_event) c->cbs.path_event(p->handle, p->status, c->user_ctx);
-}
-
-/* Test-only wrapper: drives apply_path_activation_failure() by handle so
- * test_api can verify the state transition without a live engine.  Hidden
- * from libmqvpn.so's dynamic export table (not part of public ABI). */
+/* Test-only wrapper: drives the synchronous activation failure path via
+ * path_on_event(). Hidden from libmqvpn.so's dynamic export table (not
+ * part of public ABI). The event chosen depends on current state — fresh
+ * PENDING slots take ACTIVATE_REQUESTED, retry-armed slots (CREATE_WAIT /
+ * DEGRADED) take RETRY_TIMER. */
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((visibility("hidden")))
 #endif
@@ -1436,32 +1342,15 @@ mqvpn_client_apply_path_activation_failure(mqvpn_client_t *c, mqvpn_path_handle_
     if (!c) return -1;
     path_entry_t *p = find_path_by_handle(c, handle);
     if (!p) return -1;
-    apply_path_activation_failure(c, p, now_us);
+    path_event_ctx_t ctx = {.result = ACTIVATE_TRANSIENT_FAIL, .now_us = now_us};
+    path_event_t ev = (p->state == PATH_LC_PENDING) ? PATH_EVENT_ACTIVATE_REQUESTED
+                                                    : PATH_EVENT_RETRY_TIMER;
+    path_on_event(c, p, ev, &ctx);
     return 0;
 }
 
-/* Apply a permanent (non-retryable) path-creation failure — used when
- * xqc_conn_create_path() returns -XQC_EMP_CREATE_PATH (XQC_MAX_PATHS_COUNT
- * cap hit, or xqc_calloc OOM). Marks the slot CLOSED and clears retry
- * scheduling so neither tick_drive_retry_timer nor the platform's
- * recovery timer attempt to retry. Recovery requires a Level-2 reconnect
- * which resets xquic's path_id namespace. */
-static void
-apply_path_create_permanent_failure(mqvpn_client_t *c, path_entry_t *p)
-{
-    p->xquic_path_live = 0;
-    p->xqc_path_id = 0;
-    p->path_stable_since_us = 0;
-    p->recreate_after_us = 0;
-    p->recreate_retries = 0;
-    set_path_state_with_log(c, p, PATH_LC_CLOSED_RECOVERABLE,
-                            PATH_REASON_ACTIVATE_FAILED);
-    path_invariant_check(p);
-    if (c->cbs.path_event) c->cbs.path_event(p->handle, MQVPN_PATH_CLOSED, c->user_ctx);
-}
-
-/* Test-only wrapper: drives apply_path_create_permanent_failure() by
- * handle. Hidden from libmqvpn.so's dynamic export table. */
+/* Test-only wrapper: drives the permanent path-create failure path via
+ * path_on_event(). Hidden from libmqvpn.so's dynamic export table. */
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((visibility("hidden")))
 #endif
@@ -1472,13 +1361,21 @@ mqvpn_client_test_apply_path_create_permanent_failure(mqvpn_client_t *c,
     if (!c) return -1;
     path_entry_t *p = find_path_by_handle(c, handle);
     if (!p) return -1;
-    apply_path_create_permanent_failure(c, p);
+    path_event_ctx_t ctx = {.result = ACTIVATE_PERMANENT_FAIL,
+                            .now_us = client_now_us(c)};
+    path_event_t ev = (p->state == PATH_LC_PENDING) ? PATH_EVENT_ACTIVATE_REQUESTED
+                                                    : PATH_EVENT_RETRY_TIMER;
+    path_on_event(c, p, ev, &ctx);
     return 0;
 }
 
 /* PR3 test-only wrapper: forces a slot into VALIDATING with the given
  * xqc_path_id (so find_path_by_xqc_id can resolve later). Hidden from
- * libmqvpn.so's dynamic export table. */
+ * libmqvpn.so's dynamic export table.
+ *
+ * §7.1 visibility=hidden test wrapper: seed VALIDATING-shape invariants
+ * directly so tests can pin transitions without spinning up xquic. Each
+ * direct write carries a LINT-ALLOW trailer for check_lifecycle_field_writes.sh. */
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((visibility("hidden")))
 #endif
@@ -1492,19 +1389,19 @@ mqvpn_client_test_force_validating(mqvpn_client_t *c, mqvpn_path_handle_t handle
     /* Force the slot into VALIDATING — the invariants for VALIDATING
      * require platform_attached=1, xquic_path_live=1, fd>=0,
      * recreate_after_us=0 (see path_invariant_check in path_state_machine.c). */
-    p->platform_attached = 1;
-    p->xquic_path_live = 1;
-    p->xqc_path_id = xqc_path_id;
-    p->recreate_after_us = 0;
-    p->path_stable_since_us = 0;
-    p->recreate_retries = 0;
+    p->platform_attached = 1;     /* LINT-ALLOW: test wrapper seed */
+    p->xquic_path_live = 1;       /* LINT-ALLOW: test wrapper seed */
+    p->xqc_path_id = xqc_path_id; /* LINT-ALLOW: test wrapper seed */
+    p->recreate_after_us = 0;     /* LINT-ALLOW: test wrapper seed */
+    p->path_stable_since_us = 0;  /* LINT-ALLOW: test wrapper seed */
+    p->recreate_retries = 0;      /* LINT-ALLOW: test wrapper seed */
     set_path_state_with_log(c, p, PATH_LC_VALIDATING, PATH_REASON_ACTIVATE_OK);
     path_invariant_check(p);
     return 0;
 }
 
-/* PR3 test-only wrapper: forces a slot into VALIDATING then calls
- * cb_path_removed_apply directly. Used by test_api to pin the
+/* PR3 test-only wrapper: forces a slot into VALIDATING then dispatches
+ * path_on_event(XQUIC_REMOVED). Used by test_api to pin the
  * VALIDATING -> CREATE_WAIT dispatch without spinning up a live xquic
  * engine. Hidden from libmqvpn.so's dynamic export table. */
 #if defined(__GNUC__) || defined(__clang__)
@@ -1518,7 +1415,8 @@ mqvpn_client_test_force_validating_then_remove(mqvpn_client_t *c,
     if (mqvpn_client_test_force_validating(c, handle, xqc_path_id) < 0) return -1;
     path_entry_t *p = find_path_by_handle(c, handle);
     if (!p) return -1;
-    cb_path_removed_apply(c, p);
+    path_event_ctx_t ctx = {.now_us = client_now_us(c)};
+    path_on_event(c, p, PATH_EVENT_XQUIC_REMOVED, &ctx);
     return 0;
 }
 
@@ -1542,58 +1440,10 @@ mqvpn_client_test_get_path_state_name(mqvpn_client_t *c, mqvpn_path_handle_t han
     return path_lifecycle_name(p->state);
 }
 
-/* PR3 — extracted from cb_path_removed for state-aware dispatch + test access.
- * Non-static (declared in path_state_machine.h). Caller (cb_path_removed)
- * filters out CLOSED_DROPPED re-entries; this function assumes p->state is
- * one of the live states (PENDING/CREATE_WAIT/VALIDATING/ACTIVE/STANDBY/
- * DEGRADED/CLOSED_RECOVERABLE) and that the slot is real (find_path_by_xqc_id
- * succeeded). */
-void
-cb_path_removed_apply(mqvpn_client_t *c, path_entry_t *p)
-{
-    LOG_I(c, "path removed: path_id=%" PRIu64 " iface=%s", p->xqc_path_id, p->name);
-
-    path_lifecycle_t prior = p->state;
-    p->xquic_path_live = 0;
-    p->xqc_path_id = 0;
-    p->path_stable_since_us = 0; /* validation failed before stability */
-
-    if (!p->platform_attached) {
-        set_path_state_with_log(c, p, PATH_LC_CLOSED_DROPPED, PATH_REASON_XQUIC_REMOVED);
-        path_invariant_check(p);
-        if (c->cbs.path_event) c->cbs.path_event(p->handle, p->status, c->user_ctx);
-        return;
-    }
-
-    /* Increment first, then check against max.  Uses >= for
-     * consistency with the tick() recovery path. */
-    p->recreate_retries++;
-
-    if (p->recreate_retries >= PATH_RECREATE_MAX_RETRIES) {
-        p->recreate_after_us = 0;
-        set_path_state_with_log(c, p, PATH_LC_CLOSED_RECOVERABLE,
-                                PATH_REASON_XQUIC_REMOVED);
-        LOG_W(c,
-              "path closed: %s (max retries %d exhausted, "
-              "platform can still recover)",
-              p->name, PATH_RECREATE_MAX_RETRIES);
-    } else {
-        uint64_t delay = path_recreate_backoff(p->recreate_retries);
-        p->recreate_after_us = client_now_us(c) + delay;
-        /* PR3 — state-aware: VALIDATING never reached validated, so retry
-         * starts back at CREATE_WAIT (no prior validated experience).
-         * ACTIVE/STANDBY were validated, so retry path is DEGRADED. */
-        path_lifecycle_t target =
-            (prior == PATH_LC_VALIDATING) ? PATH_LC_CREATE_WAIT : PATH_LC_DEGRADED;
-        set_path_state_with_log(c, p, target, PATH_REASON_XQUIC_REMOVED);
-        LOG_I(c, "path %s: %s (retry %d/%d in %ds)", path_lifecycle_name(target), p->name,
-              p->recreate_retries, PATH_RECREATE_MAX_RETRIES, (int)(delay / 1000000));
-    }
-
-    path_invariant_check(p);
-    if (c->cbs.path_event) c->cbs.path_event(p->handle, p->status, c->user_ctx);
-}
-
+/* PR4 — cb_path_removed is a thin caller that dispatches
+ * PATH_EVENT_XQUIC_REMOVED. State-aware retry-target dispatch (VALIDATING ->
+ * CREATE_WAIT, ACTIVE/STANDBY -> DEGRADED, CLOSED_DROPPED -> FREE on cleanup)
+ * is centralised in path_on_xquic_removed in path_state_machine.c. */
 static void
 cb_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data)
 {
@@ -1602,18 +1452,16 @@ cb_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data)
     mqvpn_client_t *c = conn->client;
 
     path_entry_t *p = find_path_by_xqc_id(c, path_id);
-    if (!p) return;
-
-    /* CLOSED_DROPPED re-entry is idempotent (review C2): _apply's
-     * !platform_attached branch handles this correctly and field state was
-     * already set on the original CLOSED_DROPPED entry. Just LOG and return;
-     * do not double-write fields here. */
-    if (p->state == PATH_LC_CLOSED_DROPPED) {
-        LOG_D(c, "cb_path_removed re-entry on CLOSED_DROPPED: path_id=%" PRIu64, path_id);
+    if (!p) {
+        LOG_D(c, "cb_path_removed: no slot for path_id=%" PRIu64, path_id);
         return;
     }
 
-    cb_path_removed_apply(c, p);
+    LOG_I(c, "xquic removed path: path_id=%" PRIu64 " iface=%s state=%s", path_id,
+          p->name, path_lifecycle_name(p->state));
+
+    path_event_ctx_t ctx = {.now_us = client_now_us(c)};
+    path_on_event(c, p, PATH_EVENT_XQUIC_REMOVED, &ctx);
 }
 
 /* ─── Connection destroy (Level 2) ─── */
@@ -1732,19 +1580,17 @@ cli_start_connection(mqvpn_client_t *c)
     memcpy(&conn->cid, (const void *)cid, sizeof(conn->cid));
     if (conn->h3_conn) xqc_h3_ext_datagram_set_user_data(conn->h3_conn, conn);
 
-    /* Mark primary path.
-     *
-     * Phase 1 FSM caveat: this enters a transient PENDING + xquic_path_live=1
-     * window that violates the strict PENDING invariant (which expects
-     * xquic_path_live=0). The slot is upgraded to ACTIVE in cb_path_ready
-     * before any external observer queries it. Do NOT add
-     * path_invariant_check_legacy here — it would false-positive. The
-     * invariant model is reconciled in PR3 (pre-ACTIVE split: PENDING /
-     * CREATE_WAIT / VALIDATING) where this bootstrap window becomes
-     * VALIDATING. */
+    /* Primary path: xquic synchronously creates path_id 0 as part of conn
+     * creation. PR4 transitions PENDING -> VALIDATING via direct write
+     * (LINT-ALLOW marker) since no xqc_conn_create_path() is called and
+     * EVENT_ACTIVATE_REQUESTED would be a semantic mismatch (no activation
+     * attempt was made). Spec §8.1 "special invariant site". */
     if (c->n_paths > 0 && c->primary_path_idx < c->n_paths) {
-        c->paths[c->primary_path_idx].xqc_path_id = 0;
-        c->paths[c->primary_path_idx].xquic_path_live = 1;
+        path_entry_t *pp = &c->paths[c->primary_path_idx];
+        pp->xqc_path_id = 0;     /* LINT-ALLOW: primary bootstrap */
+        pp->xquic_path_live = 1; /* LINT-ALLOW: primary bootstrap */
+        set_path_state_with_log(c, pp, PATH_LC_VALIDATING, PATH_REASON_ACTIVATE_OK);
+        path_invariant_check(pp);
     }
 
     c->conn = conn; /* ownership transfer — cleanup won't free */
@@ -1978,12 +1824,9 @@ mqvpn_client_disconnect(mqvpn_client_t *c)
 static mqvpn_add_path_outcome_t
 add_path_outcome_from_state(path_lifecycle_t s)
 {
-    /* Compile-time pin: if path_lifecycle_t grows (or CLOSED_FREE is
-     * reordered) this assert breaks so the author has to revisit the
-     * switch + invariant comment. Catches FSM additions that forget to
-     * teach the platform-recovery caller about the new state. */
-    _Static_assert(PATH_LC_CLOSED_FREE == 8, "path_lifecycle_t shape changed - review "
-                                             "add_path_outcome_from_state");
+    /* PR4 — function-local _Static_assert removed; the equivalent
+     * compile-time pin now lives at file scope in path_state_machine.h
+     * (consolidated to header). */
 
     switch (s) {
     case PATH_LC_VALIDATING:
@@ -2031,7 +1874,11 @@ mqvpn_client_add_path_fd_with_outcome(mqvpn_client_t *c, int fd,
     }
 
     path_entry_t *p = &c->paths[idx];
-    memset(p, 0, sizeof(*p));
+    /* Slot init (§7.1 file-scope allow — slot has no prior state to preserve).
+     * path_entry_init leaves p->state at PATH_LC_CLOSED_FREE so EVENT_ADD_FD
+     * transitions cleanly to PENDING and the platform_attached=1 field is
+     * applied inside path_on_add_fd. */
+    path_entry_init(p);
     p->handle = c->next_path_handle++;
     p->fd = fd;
 
@@ -2044,8 +1891,6 @@ mqvpn_client_add_path_fd_with_outcome(mqvpn_client_t *c, int fd,
     setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, &bufsize, sizeof(bufsize));
 #endif
 
-    p->platform_attached = 1;
-
     if (desc) {
         memcpy(p->name, desc->iface, sizeof(p->name));
         p->name[sizeof(p->name) - 1] = '\0';
@@ -2056,19 +1901,18 @@ mqvpn_client_add_path_fd_with_outcome(mqvpn_client_t *c, int fd,
         p->flags = desc->flags;
     }
 
-    /* Assign PENDING status via the observability wrapper so state_entered_at_us
-     * is recorded. All coupled fields (fd, platform_attached, desc) are set
-     * above; memset already zeroed recreate_after_us, path_stable_since_us. */
-    set_path_state_with_log(c, p, PATH_LC_PENDING, PATH_REASON_ADD_FD);
-    path_invariant_check(p);
+    /* CLOSED_FREE -> PENDING via EVENT_ADD_FD. path_on_add_fd handler sets
+     * platform_attached=1 and emits the transition log. */
+    path_event_ctx_t add_ctx = {.now_us = client_now_us(c)};
+    path_on_event(c, p, PATH_EVENT_ADD_FD, &add_ctx);
 
     /* Default outcome: OK (deferred until cb_ready_to_create_path drains
      * PENDING slots). Will be overwritten if activation runs synchronously. */
     if (outcome) *outcome = MQVPN_ADD_PATH_OK;
 
-    /* If multipath is already negotiated, activate immediately. Use the
-     * translator: any other PENDING slot (rare — usually drained by the
-     * ready_to_create_path callback) should have been activated too. */
+    /* If multipath is already negotiated, activate immediately. Any other
+     * PENDING slot (rare — usually drained by the ready_to_create_path
+     * callback) should have been activated too. */
     if (c->multipath_ready && c->config.multipath && c->conn) {
         activate_pending_paths(c);
         if (outcome) *outcome = add_path_outcome_from_state(p->state);
@@ -2091,21 +1935,15 @@ mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
 
     path_entry_t *p = find_path_by_handle(c, path);
     if (!p) return MQVPN_ERR_INVALID_ARG;
+    if (p->state == PATH_LC_CLOSED_FREE) return MQVPN_OK;
 
-    int was_closed = (p->status == MQVPN_PATH_CLOSED);
-    p->platform_attached = 0;
-    p->recreate_after_us = 0;
-    p->recreate_retries = 0;
-    p->path_stable_since_us = 0;
-    if (p->xquic_path_live && c->engine && c->conn)
+    /* Spec §5.0: REMOVE_API allows orderly xquic close. Issue before
+     * dispatch so the FSM stays xquic-API-free (avoids layer leak). */
+    if (p->xquic_path_live && p->xqc_path_id != 0 && c->engine && c->conn)
         xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
-    set_path_state_with_log(c, p, PATH_LC_CLOSED_DROPPED, PATH_REASON_REMOVE_API);
-    path_invariant_check(p);
-    /* Emit close-out event so observers (Android SDK / control-plane) see
-     * the handle's lifecycle terminate. Idempotent: a second remove on an
-     * already-CLOSED slot does not re-fire. */
-    if (!was_closed && c->cbs.path_event)
-        c->cbs.path_event(p->handle, MQVPN_PATH_CLOSED, c->user_ctx);
+
+    path_event_ctx_t ctx = {.now_us = client_now_us(c)};
+    path_on_event(c, p, PATH_EVENT_REMOVE_API, &ctx);
     return MQVPN_OK;
 }
 
@@ -2118,18 +1956,12 @@ mqvpn_client_drop_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
     path_entry_t *p = find_path_by_handle(c, path);
     if (!p) return MQVPN_ERR_INVALID_ARG;
 
-    /* Free the slot but do NOT call xqc_conn_close_path().
-     * xquic will detect the dead fd via sendto() errors and remove
-     * the path through its normal PTO-based failure detection. */
-    int was_closed = (p->status == MQVPN_PATH_CLOSED);
-    p->platform_attached = 0;
-    p->recreate_after_us = 0;
-    p->recreate_retries = 0;
-    p->path_stable_since_us = 0;
-    set_path_state_with_log(c, p, PATH_LC_CLOSED_DROPPED, PATH_REASON_PLATFORM_DROPPED);
-    path_invariant_check(p);
-    if (!was_closed && c->cbs.path_event)
-        c->cbs.path_event(p->handle, MQVPN_PATH_CLOSED, c->user_ctx);
+    /* Spec §5.0: PLATFORM_DROP does NOT call xqc_conn_close_path (lazy
+     * natural death — fd may be dead already). xquic will detect the dead
+     * fd via sendto() errors and remove the path through PTO-based failure
+     * detection. */
+    path_event_ctx_t ctx = {.now_us = client_now_us(c)};
+    path_on_event(c, p, PATH_EVENT_PLATFORM_DROP, &ctx);
     return MQVPN_OK;
 }
 
@@ -2161,35 +1993,34 @@ mqvpn_client_reactivate_path(mqvpn_client_t *c, mqvpn_path_handle_t handle)
     if (!c) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
 
+    /* Conn-level guards (preserved from main 433272f). */
     if (c->state != MQVPN_STATE_ESTABLISHED || !c->multipath_ready)
         return MQVPN_ERR_INVALID_STATE;
 
-    /* Find path by handle */
-    int idx = -1;
-    path_entry_t *p = NULL;
-    for (int i = 0; i < c->n_paths; i++) {
-        if (c->paths[i].handle == handle) {
-            idx = i;
-            p = &c->paths[i];
-            break;
-        }
-    }
+    path_entry_t *p = find_path_by_handle(c, handle);
     if (!p) return MQVPN_ERR_INVALID_ARG;
 
+    /* Per-slot eligibility: DEGRADED / CREATE_WAIT / CLOSED_RECOVERABLE only.
+     * Entry gate (live regression follow-up — main 433272f). Defense in depth
+     * with path_on_manual_reactivate's own 3-state check. */
     int gate = reactivate_slot_eligible(p);
     if (gate != MQVPN_OK) return gate;
 
-    LOG_I(c, "platform reactivating path: %s (was %s)", p->name,
+    LOG_I(c, "platform reactivating path: %s (state=%s)", p->name,
           path_lifecycle_name(p->state));
 
-    /* Clear retry timer before activation so the ACTIVE invariant holds
-     * inside client_activate_path (matches tick_drive_retry_timer ordering). */
-    p->recreate_after_us = 0;
-    client_activate_path(c, p, idx);
-    if (!p->xquic_path_live) return MQVPN_ERR_ENGINE;
+    uint64_t new_id = 0;
+    activate_result_t r = activate_via_xquic_classify(c, &new_id);
+    path_event_ctx_t ctx = {
+        .result = r,
+        .new_xqc_path_id = new_id,
+        .now_us = client_now_us(c),
+    };
+    path_on_event(c, p, PATH_EVENT_MANUAL_REACTIVATE, &ctx);
 
-    /* Success: start stability timer */
-    p->path_stable_since_us = client_now_us(c);
+    /* path_on_event(MANUAL_REACTIVATE) lands the slot in VALIDATING on OK,
+     * or leaves state unchanged on TRANSIENT/PERMANENT. */
+    if (p->state != PATH_LC_VALIDATING) return MQVPN_ERR_ENGINE;
     return MQVPN_OK;
 }
 
@@ -2340,31 +2171,35 @@ mqvpn_client_on_socket_recv(mqvpn_client_t *c, mqvpn_path_handle_t path,
 
 /* ─── Tick: path recovery ─── */
 
-/* PR3 — drive retry timer for both CREATE_WAIT (never validated) and
+/* PR4 — drive retry timer for both CREATE_WAIT (never validated) and
  * DEGRADED (was validated). Spec §5.1 / §6.1: shared retry counter, shared
- * backoff, shared activation entrypoint. Renamed from
- * tick_recover_degraded_path. */
+ * backoff, shared activation entrypoint. Dispatches PATH_EVENT_RETRY_TIMER;
+ * path_on_retry_timer in path_state_machine.c handles the state-aware
+ * retry_target dispatch + retry counter bookkeeping. */
 static void
 tick_drive_retry_timer(mqvpn_client_t *c, path_entry_t *p, int idx, uint64_t now)
 {
     if (p->state != PATH_LC_DEGRADED && p->state != PATH_LC_CREATE_WAIT) return;
     if (p->recreate_after_us == 0 || now < p->recreate_after_us) return;
 
-    p->recreate_after_us = 0;
-    LOG_I(c, "path recovery attempt: %s (retry %d/%d)", p->name, p->recreate_retries,
-          PATH_RECREATE_MAX_RETRIES);
-    client_activate_path(c, p, idx);
+    uint64_t new_id = 0;
+    activate_result_t r = activate_via_xquic_classify(c, &new_id);
+    LOG_I(c, "path[%d] retry: result=%s retries=%d/%d", idx,
+          r == ACTIVATE_OK               ? "OK"
+          : r == ACTIVATE_PERMANENT_FAIL ? "PERMANENT"
+                                         : "TRANSIENT",
+          p->recreate_retries, PATH_RECREATE_MAX_RETRIES);
 
-    if (p->xquic_path_live) {
-        /* Create succeeded — start stability timer.
-         * xquic validates async. If fail, cb_path_removed fires. */
-        p->path_stable_since_us = now;
-    }
-    /* On synchronous failure, client_activate_path() already invoked
-     * apply_path_activation_failure(): retries++, status transitioned to
-     * DEGRADED with backoff (or CLOSED on PATH_RECREATE_MAX_RETRIES), and
-     * path_event fired. Duplicating that bookkeeping here would
-     * double-count retries and emit path_event twice. */
+    path_event_ctx_t ctx = {
+        .result = r,
+        .new_xqc_path_id = new_id,
+        .now_us = now,
+    };
+    path_on_event(c, p, PATH_EVENT_RETRY_TIMER, &ctx);
+    /* Note: the old code set p->path_stable_since_us to `now` after success
+     * here, but that violated the VALIDATING invariant (path_stable_since_us
+     * must be 0 in VALIDATING). The stability-timer anchor is now set on
+     * VALIDATION_OK in path_on_validation_ok. */
 }
 
 /* Detect xquic-side path validation completion. xquic does not expose a
@@ -2414,14 +2249,14 @@ tick_check_all_validations(mqvpn_client_t *c, uint64_t now)
             /* Branch on connection-scoped scheduler config — secondary paths
              * created under backup_fec are STANDBY (spec §10.1.1). Scheduler
              * is immutable per-connection so the result is stable for the
-             * lifetime of this path. */
+             * lifetime of this path. Dispatched via VALIDATION_OK; the
+             * handler sets path_stable_since_us = now and transitions to
+             * the carried target. */
             path_lifecycle_t target = (c->config.scheduler == MQVPN_SCHED_BACKUP_FEC)
                                           ? PATH_LC_STANDBY
                                           : PATH_LC_ACTIVE;
-            set_path_state_with_log(c, p, target, PATH_REASON_ACTIVATE_OK);
-            p->path_stable_since_us = now;
-            path_invariant_check(p);
-            if (c->cbs.path_event) c->cbs.path_event(p->handle, p->status, c->user_ctx);
+            path_event_ctx_t v_ctx = {.validated_target = target, .now_us = now};
+            path_on_event(c, p, PATH_EVENT_VALIDATION_OK, &v_ctx);
             LOG_I(c, "path[%d] activated: path_id=%" PRIu64 " iface=%s state=%s", i,
                   p->xqc_path_id, p->name, path_lifecycle_name(target));
             break;
@@ -2429,18 +2264,9 @@ tick_check_all_validations(mqvpn_client_t *c, uint64_t now)
     }
 }
 
-static void
-tick_confirm_stable_path(mqvpn_client_t *c, path_entry_t *p, uint64_t now)
-{
-    if (p->state != PATH_LC_ACTIVE && p->state != PATH_LC_STANDBY) return;
-    if (p->path_stable_since_us == 0 || !p->xquic_path_live ||
-        now - p->path_stable_since_us < PATH_STABLE_THRESHOLD_US)
-        return;
-
-    LOG_I(c, "path %s: stable for 30s, resetting retry budget", p->name);
-    p->recreate_retries = 0;
-    p->path_stable_since_us = 0;
-}
+/* PR4 — tick_confirm_stable_path relocated to path_state_machine.c as
+ * path_fsm_tick_confirm_stable() (§7.1 file-scope allow for path_stable_since_us
+ * and recreate_retries direct writes). */
 
 static void
 tick_path_recovery(mqvpn_client_t *c)
@@ -2453,7 +2279,7 @@ tick_path_recovery(mqvpn_client_t *c)
         path_entry_t *p = &c->paths[i];
         client_path_residence_check(c, p, now);
         tick_drive_retry_timer(c, p, i, now);
-        tick_confirm_stable_path(c, p, now);
+        path_fsm_tick_confirm_stable(c, p, now);
     }
 }
 
