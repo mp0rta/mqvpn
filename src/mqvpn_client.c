@@ -1971,13 +1971,20 @@ mqvpn_client_disconnect(mqvpn_client_t *c)
  * }
  * activate_pending_paths -> client_activate_path always lands the slot in
  * one of these 5 states. The other 4 (PENDING, DEGRADED, CLOSED_DROPPED,
- * and any future intermediate) only occur if an upstream invariant is
- * violated — fail loud in debug/ASAN builds, fall back to OK in release
- * so a freshly-added handle still reports "stored, will activate later"
- * semantics rather than misclassifying as a hard failure. */
+ * CLOSED_FREE) only occur if an upstream invariant is violated — fail
+ * loud in debug/ASAN builds, fall back to OK in release so a freshly-
+ * added handle still reports "stored, will activate later" semantics
+ * rather than misclassifying as a hard failure. */
 static mqvpn_add_path_outcome_t
 add_path_outcome_from_state(path_lifecycle_t s)
 {
+    /* Compile-time pin: if path_lifecycle_t grows (or CLOSED_FREE is
+     * reordered) this assert breaks so the author has to revisit the
+     * switch + invariant comment. Catches FSM additions that forget to
+     * teach the platform-recovery caller about the new state. */
+    _Static_assert(PATH_LC_CLOSED_FREE == 8, "path_lifecycle_t shape changed - review "
+                                             "add_path_outcome_from_state");
+
     switch (s) {
     case PATH_LC_VALIDATING:
     case PATH_LC_ACTIVE:
@@ -1987,14 +1994,17 @@ add_path_outcome_from_state(path_lifecycle_t s)
     case PATH_LC_PENDING:
     case PATH_LC_DEGRADED:
     case PATH_LC_CLOSED_DROPPED:
+    case PATH_LC_CLOSED_FREE:
         /* Unreachable per the post-activate invariant above. Asserts
          * trip in debug / ASAN / UBSan so FSM regressions surface in CI
          * rather than silently degrading bench numbers. */
         assert(0 && "add_path_outcome_from_state: lifecycle invariant violated");
         return MQVPN_ADD_PATH_OK;
     }
-    /* Unreachable per compiler exhaustiveness, but kept for forward compat
-     * if path_lifecycle_t grows new values: same defensive fallback. */
+    /* Unreachable: compiler exhaustiveness (-Wswitch-enum) + the
+     * _Static_assert above cover every path_lifecycle_t value. Kept as
+     * a last-resort runtime guard in case either guard is locally
+     * disabled. */
     assert(0 && "add_path_outcome_from_state: unknown lifecycle value");
     return MQVPN_ADD_PATH_OK;
 }
