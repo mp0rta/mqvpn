@@ -1337,6 +1337,22 @@ client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
     LOG_I(c, "path[%d] validating: path_id=%" PRIu64 " iface=%s", idx, new_id, p->name);
 }
 
+/* Activate every path currently in PATH_LC_PENDING.
+ *
+ * PR3 translator: the legacy predicate (xquic_path_live=0 && platform_attached=1)
+ * is now expressed by the PENDING lifecycle state. CREATE_WAIT slots (also
+ * have xquic_path_live=0) are correctly skipped — they wait for their retry
+ * timer in tick(), not for re-activation here. */
+static void
+activate_pending_paths(mqvpn_client_t *c)
+{
+    for (int i = 0; i < c->n_paths; i++) {
+        path_entry_t *p = &c->paths[i];
+        if (p->state != PATH_LC_PENDING) continue;
+        client_activate_path(c, p, i);
+    }
+}
+
 /* ─── Multipath callbacks ─── */
 
 static void
@@ -1349,13 +1365,7 @@ cb_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
     c->multipath_ready = 1;
     if (!c->config.multipath) return;
 
-    /* Start from 0 — the primary path may be at any index after rotation;
-     * the xquic_path_live check below skips whichever slot already has a live path. */
-    for (int i = 0; i < c->n_paths; i++) {
-        path_entry_t *p = &c->paths[i];
-        if (p->xquic_path_live || !p->platform_attached) continue;
-        client_activate_path(c, p, i);
-    }
+    activate_pending_paths(c);
 }
 
 static uint64_t
@@ -1985,9 +1995,11 @@ mqvpn_client_add_path_fd(mqvpn_client_t *c, int fd, const mqvpn_path_desc_t *des
     set_path_state_with_log(c, p, PATH_LC_PENDING, PATH_REASON_ADD_FD);
     path_invariant_check(p);
 
-    /* If multipath is already negotiated, activate immediately */
+    /* If multipath is already negotiated, activate immediately. Use the
+     * translator: any other PENDING slot (rare — usually drained by the
+     * ready_to_create_path callback) should have been activated too. */
     if (c->multipath_ready && c->config.multipath && c->conn) {
-        client_activate_path(c, p, idx);
+        activate_pending_paths(c);
     }
 
     return p->handle;
