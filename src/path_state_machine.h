@@ -93,6 +93,11 @@ int path_should_warn_residence(const path_entry_t *p, uint64_t now_us);
 int path_is_real_transition(mqvpn_path_status_t old, mqvpn_path_status_t new_status,
                             uint64_t state_entered_at_us);
 
+/* PR3 — non-static for test access (tests/test_api.c calls this directly).
+ * The body is defined in mqvpn_client.c next to its sibling cb_path_removed
+ * callback. Drives the state-aware dispatch on xquic-side path removal. */
+void cb_path_removed_apply(mqvpn_client_t *c, path_entry_t *p);
+
 /* Residence thresholds (microseconds). */
 #define PATH_RESIDENCE_PENDING_WARN_US   ((uint64_t)30 * 1000 * 1000)
 #define PATH_RESIDENCE_DEGRADED_GRACE_US ((uint64_t)60 * 1000 * 1000)
