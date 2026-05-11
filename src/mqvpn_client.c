@@ -1963,23 +1963,40 @@ mqvpn_client_disconnect(mqvpn_client_t *c)
  * mqvpn_client_add_path_fd_with_outcome to the public add-path outcome.
  *
  * Called only when activation was attempted (multipath_ready was true).
- * The slot can be in one of these states post-activate:
- *   VALIDATING / ACTIVE / STANDBY — sync activate succeeded, xqc path live
- *   CREATE_WAIT                   — sync activate failed transiently
- *   CLOSED_RECOVERABLE            — sync activate failed permanently
- *                                    (path budget exhausted or OOM)
- * PENDING here would be a bug (we just left activate_pending_paths which
- * is guaranteed to consume the PENDING state); fall through to OK to
- * preserve forward compat with future lifecycle changes.
- */
+ *
+ * @invariant post-activate: s ∈ {
+ *     VALIDATING, ACTIVE, STANDBY,    // sync success (xqc path live)
+ *     CREATE_WAIT,                     // sync transient failure
+ *     CLOSED_RECOVERABLE               // sync permanent failure (budget/OOM)
+ * }
+ * activate_pending_paths -> client_activate_path always lands the slot in
+ * one of these 5 states. The other 4 (PENDING, DEGRADED, CLOSED_DROPPED,
+ * and any future intermediate) only occur if an upstream invariant is
+ * violated — fail loud in debug/ASAN builds, fall back to OK in release
+ * so a freshly-added handle still reports "stored, will activate later"
+ * semantics rather than misclassifying as a hard failure. */
 static mqvpn_add_path_outcome_t
 add_path_outcome_from_state(path_lifecycle_t s)
 {
     switch (s) {
+    case PATH_LC_VALIDATING:
+    case PATH_LC_ACTIVE:
+    case PATH_LC_STANDBY: return MQVPN_ADD_PATH_OK;
     case PATH_LC_CREATE_WAIT: return MQVPN_ADD_PATH_TRANSIENT_FAIL;
     case PATH_LC_CLOSED_RECOVERABLE: return MQVPN_ADD_PATH_PERMANENT_FAIL;
-    default: return MQVPN_ADD_PATH_OK;
+    case PATH_LC_PENDING:
+    case PATH_LC_DEGRADED:
+    case PATH_LC_CLOSED_DROPPED:
+        /* Unreachable per the post-activate invariant above. Asserts
+         * trip in debug / ASAN / UBSan so FSM regressions surface in CI
+         * rather than silently degrading bench numbers. */
+        assert(0 && "add_path_outcome_from_state: lifecycle invariant violated");
+        return MQVPN_ADD_PATH_OK;
     }
+    /* Unreachable per compiler exhaustiveness, but kept for forward compat
+     * if path_lifecycle_t grows new values: same defensive fallback. */
+    assert(0 && "add_path_outcome_from_state: unknown lifecycle value");
+    return MQVPN_ADD_PATH_OK;
 }
 
 mqvpn_path_handle_t
