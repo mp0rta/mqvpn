@@ -347,6 +347,8 @@ test_public_status_mapping(void)
         mqvpn_path_status_t public_;
     } cases[] = {
         {PATH_LC_PENDING, MQVPN_PATH_PENDING},
+        {PATH_LC_CREATE_WAIT, MQVPN_PATH_PENDING},
+        {PATH_LC_VALIDATING, MQVPN_PATH_PENDING},
         {PATH_LC_ACTIVE, MQVPN_PATH_ACTIVE},
         {PATH_LC_STANDBY, MQVPN_PATH_STANDBY},
         {PATH_LC_DEGRADED, MQVPN_PATH_DEGRADED},
@@ -358,7 +360,7 @@ test_public_status_mapping(void)
         mqvpn_path_status_t got = path_public_status_from_lifecycle(cases[i].internal);
         assert(got == cases[i].public_);
     }
-    printf("  test_public_status_mapping: OK (7 cases)\n");
+    printf("  test_public_status_mapping: OK (9 cases)\n");
 }
 
 /* ─── PR2 Chunk 4: 7-state path_invariant_check ─── */
@@ -377,6 +379,38 @@ test_invariant_pending_pass(void)
     p.path_stable_since_us = 0;
     path_invariant_check(&p);
     printf("  test_invariant_pending_pass: OK\n");
+}
+
+static void
+test_invariant_create_wait_pass(void)
+{
+    path_entry_t p = {0};
+    p.state = PATH_LC_CREATE_WAIT;
+    p.status = MQVPN_PATH_PENDING;
+    p.platform_attached = 1;
+    p.xquic_path_live = 0;
+    p.fd = 42;
+    /* xqc_path_id NOT pinned (see comment in invariant) */
+    p.recreate_after_us = 100;
+    p.path_stable_since_us = 0;
+    path_invariant_check(&p);
+    printf("  test_invariant_create_wait_pass: OK\n");
+}
+
+static void
+test_invariant_validating_pass(void)
+{
+    path_entry_t p = {0};
+    p.state = PATH_LC_VALIDATING;
+    p.status = MQVPN_PATH_PENDING;
+    p.platform_attached = 1;
+    p.xquic_path_live = 1;
+    p.fd = 42;
+    p.xqc_path_id = 0; /* primary path keeps id=0 (PR2 carryover) */
+    p.recreate_after_us = 0;
+    p.path_stable_since_us = 0;
+    path_invariant_check(&p);
+    printf("  test_invariant_validating_pass: OK\n");
 }
 
 static void
@@ -554,6 +588,8 @@ main(void)
     test_state_field_zero_init();
     test_public_status_mapping();
     test_invariant_pending_pass();
+    test_invariant_create_wait_pass();
+    test_invariant_validating_pass();
     test_invariant_active_pass();
     test_invariant_degraded_pass();
     test_invariant_closed_recoverable_pass();

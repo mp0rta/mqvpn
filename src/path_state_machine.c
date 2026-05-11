@@ -117,7 +117,9 @@ mqvpn_path_status_t
 path_public_status_from_lifecycle(path_lifecycle_t s)
 {
     switch (s) {
-    case PATH_LC_PENDING: return MQVPN_PATH_PENDING;
+    case PATH_LC_PENDING:
+    case PATH_LC_CREATE_WAIT:
+    case PATH_LC_VALIDATING: return MQVPN_PATH_PENDING;
     case PATH_LC_ACTIVE: return MQVPN_PATH_ACTIVE;
     case PATH_LC_STANDBY: return MQVPN_PATH_STANDBY;
     case PATH_LC_DEGRADED: return MQVPN_PATH_DEGRADED;
@@ -147,6 +149,24 @@ path_invariant_check(const path_entry_t *p)
         assert(p->xqc_path_id == 0);
         assert(p->recreate_after_us == 0);
         assert(p->path_stable_since_us == 0);
+        break;
+    case PATH_LC_CREATE_WAIT:
+        assert(p->platform_attached == 1);
+        assert(!p->xquic_path_live);
+        assert(fd_valid);
+        /* xqc_path_id is intentionally NOT asserted: a CREATE_WAIT entered
+         * after a previous validation cycle on the primary path may still
+         * carry id=0. Same exception as PR2 ACTIVE/STANDBY (commit e4d5dc6)
+         * and VALIDATING. */
+        assert(p->recreate_after_us != 0);
+        break;
+    case PATH_LC_VALIDATING:
+        assert(p->platform_attached == 1);
+        assert(p->xquic_path_live == 1);
+        assert(fd_valid);
+        /* xqc_path_id is intentionally NOT asserted: primary path keeps id=0
+         * through validation. Same exception as PR2 ACTIVE/STANDBY. */
+        assert(p->recreate_after_us == 0);
         break;
     case PATH_LC_ACTIVE:
     case PATH_LC_STANDBY:
@@ -204,6 +224,8 @@ path_lifecycle_name(path_lifecycle_t s)
 {
     switch (s) {
     case PATH_LC_PENDING: return "PENDING";
+    case PATH_LC_CREATE_WAIT: return "CREATE_WAIT";
+    case PATH_LC_VALIDATING: return "VALIDATING";
     case PATH_LC_ACTIVE: return "ACTIVE";
     case PATH_LC_STANDBY: return "STANDBY";
     case PATH_LC_DEGRADED: return "DEGRADED";
