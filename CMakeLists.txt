@@ -267,7 +267,6 @@ if(BUILD_TESTING)
             ${CMAKE_SOURCE_DIR}/src
             ${CMAKE_SOURCE_DIR}/src/platform/linux
             ${CMAKE_SOURCE_DIR}/include
-            ${XQUIC_INCLUDE_DIR}
         )
         set_target_properties(${t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
         add_test(NAME ${t} COMMAND ${t})
