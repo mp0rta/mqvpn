@@ -1477,17 +1477,14 @@ mqvpn_client_test_apply_path_create_permanent_failure(mqvpn_client_t *c,
 }
 
 /* PR3 test-only wrapper: forces a slot into VALIDATING with the given
- * xqc_path_id (so find_path_by_xqc_id can resolve later) then calls
- * cb_path_removed_apply directly. Used by test_api to pin the
- * VALIDATING -> CREATE_WAIT dispatch without spinning up a live xquic
- * engine. Hidden from libmqvpn.so's dynamic export table. */
+ * xqc_path_id (so find_path_by_xqc_id can resolve later). Hidden from
+ * libmqvpn.so's dynamic export table. */
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((visibility("hidden")))
 #endif
 int
-mqvpn_client_test_force_validating_then_remove(mqvpn_client_t *c,
-                                               mqvpn_path_handle_t handle,
-                                               uint64_t xqc_path_id)
+mqvpn_client_test_force_validating(mqvpn_client_t *c, mqvpn_path_handle_t handle,
+                                   uint64_t xqc_path_id)
 {
     if (!c) return -1;
     path_entry_t *p = find_path_by_handle(c, handle);
@@ -1503,6 +1500,24 @@ mqvpn_client_test_force_validating_then_remove(mqvpn_client_t *c,
     p->recreate_retries = 0;
     set_path_state_with_log(c, p, PATH_LC_VALIDATING, PATH_REASON_ACTIVATE_OK);
     path_invariant_check(p);
+    return 0;
+}
+
+/* PR3 test-only wrapper: forces a slot into VALIDATING then calls
+ * cb_path_removed_apply directly. Used by test_api to pin the
+ * VALIDATING -> CREATE_WAIT dispatch without spinning up a live xquic
+ * engine. Hidden from libmqvpn.so's dynamic export table. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_force_validating_then_remove(mqvpn_client_t *c,
+                                               mqvpn_path_handle_t handle,
+                                               uint64_t xqc_path_id)
+{
+    if (mqvpn_client_test_force_validating(c, handle, xqc_path_id) < 0) return -1;
+    path_entry_t *p = find_path_by_handle(c, handle);
+    if (!p) return -1;
     cb_path_removed_apply(c, p);
     return 0;
 }
@@ -2057,6 +2072,26 @@ mqvpn_client_drop_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
 
 /* ─── Path re-activation (platform-triggered) ─── */
 
+/* Per-slot eligibility for platform-driven reactivation. Returns MQVPN_OK
+ * if the slot is in a state where the next action would be a retry — i.e.
+ * xquic-side dead and waiting (DEGRADED, CREATE_WAIT) or fully closed but
+ * platform-restorable (CLOSED_RECOVERABLE). VALIDATING is excluded by the
+ * xquic_path_live==1 check; PENDING (never tried) is excluded so the normal
+ * cb_ready_to_create_path drain remains authoritative on first activation.
+ *
+ * CREATE_WAIT was added by PR3 as the post-VALIDATING-fail state; before
+ * that split the same slot would have been in DEGRADED. */
+static int
+reactivate_slot_eligible(const path_entry_t *p)
+{
+    if (p->xquic_path_live) return MQVPN_ERR_INVALID_STATE;
+    if (!p->platform_attached) return MQVPN_ERR_INVALID_STATE;
+    if (p->state != PATH_LC_DEGRADED && p->state != PATH_LC_CREATE_WAIT &&
+        p->state != PATH_LC_CLOSED_RECOVERABLE)
+        return MQVPN_ERR_INVALID_STATE;
+    return MQVPN_OK;
+}
+
 int
 mqvpn_client_reactivate_path(mqvpn_client_t *c, mqvpn_path_handle_t handle)
 {
@@ -2078,13 +2113,11 @@ mqvpn_client_reactivate_path(mqvpn_client_t *c, mqvpn_path_handle_t handle)
     }
     if (!p) return MQVPN_ERR_INVALID_ARG;
 
-    if (p->xquic_path_live) return MQVPN_ERR_INVALID_STATE;
-    if (!p->platform_attached) return MQVPN_ERR_INVALID_STATE;
-    if (p->status != MQVPN_PATH_DEGRADED && p->status != MQVPN_PATH_CLOSED)
-        return MQVPN_ERR_INVALID_STATE;
+    int gate = reactivate_slot_eligible(p);
+    if (gate != MQVPN_OK) return gate;
 
     LOG_I(c, "platform reactivating path: %s (was %s)", p->name,
-          p->status == MQVPN_PATH_DEGRADED ? "degraded" : "closed");
+          path_lifecycle_name(p->state));
 
     /* Clear retry timer before activation so the ACTIVE invariant holds
      * inside client_activate_path (matches tick_drive_retry_timer ordering). */
@@ -2095,6 +2128,44 @@ mqvpn_client_reactivate_path(mqvpn_client_t *c, mqvpn_path_handle_t handle)
     /* Success: start stability timer */
     p->path_stable_since_us = client_now_us(c);
     return MQVPN_OK;
+}
+
+/* PR3 test-only helper: runs only the per-slot eligibility gate of
+ * mqvpn_client_reactivate_path. Bypasses the c->state==ESTABLISHED +
+ * multipath_ready guard and the live activation call so tests can pin
+ * the gate without a real engine/conn. Hidden from libmqvpn.so's
+ * dynamic export table. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_reactivate_slot_eligible(mqvpn_client_t *c, mqvpn_path_handle_t handle)
+{
+    if (!c) return MQVPN_ERR_INVALID_ARG;
+    path_entry_t *p = find_path_by_handle(c, handle);
+    if (!p) return MQVPN_ERR_INVALID_ARG;
+    return reactivate_slot_eligible(p);
+}
+
+/* Platform-internal: returns 1 if the slot has a live xquic-side path
+ * (xquic_path_live==1), 0 otherwise. Used by the Linux platform layer's
+ * recovery_check_activation() to distinguish post-PR3 PATH_LC_VALIDATING
+ * (xqc path created, async PATH_CHALLENGE validation pending) from
+ * PATH_LC_CREATE_WAIT (synchronous activate failed). Both project to
+ * MQVPN_PATH_PENDING in the public 5-state, so status alone cannot
+ * tell them apart — but try_readd_removed_path needs to: the former is
+ * a successful activation that should NOT be rolled back, the latter
+ * should be. Hidden from libmqvpn.so's dynamic export table. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_path_is_xquic_live(mqvpn_client_t *c, mqvpn_path_handle_t handle)
+{
+    if (!c) return 0;
+    path_entry_t *p = find_path_by_handle(c, handle);
+    if (!p) return 0;
+    return p->xquic_path_live ? 1 : 0;
 }
 
 int
