@@ -2473,21 +2473,37 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
         uint64_t now_val = client_now_us(c);
         for (int i = 0; i < c->n_paths; i++) {
             const path_entry_t *p = &c->paths[i];
-            /* Recovery timer */
+            /* Recovery timer.
+             *
+             * Only shorten `ms`, never extend. The previous `ms <= 0 || pms < ms`
+             * form extended `ms` from 0 (xquic-requested wake unset) to several
+             * seconds, causing schedule_next_tick (platform_linux.c) to set
+             * a multi-second libevent timeout. Default `ms = 0` correctly
+             * leaves next_timer_ms = 1 via the `ms > 0 ? ms : 1` fallback
+             * a few lines below. Libevent fires recovery via the next tick
+             * anyway; this block exists only to bring the wake forward when
+             * something else already scheduled a later one. */
             if (p->status == MQVPN_PATH_DEGRADED && p->recreate_after_us > 0) {
                 if (p->recreate_after_us > now_val) {
                     int pms = (int)((p->recreate_after_us - now_val) / 1000);
-                    if (ms <= 0 || pms < ms) ms = pms;
+                    if (ms > 0 && pms < ms) ms = pms;
                 } else {
                     ms = 1;
                 }
             }
-            /* Stability timer */
+            /* Stability timer — same shape as Recovery timer above. The
+             * earlier `ms <= 0 || sms < ms` form was a latent bug: when
+             * `path_stable_since_us` is set (PR3+ starts doing this on
+             * VALIDATING -> ACTIVE), this block extended `ms` from 0 to
+             * ~30000 (PATH_STABLE_THRESHOLD_US in ms), pinning the next
+             * libevent tick 30 seconds out. Without periodic ticks, BBR
+             * pacing stalled between I/O events, tanking multipath
+             * throughput ~3-4x in the WLB aggregate bench. */
             if (p->path_stable_since_us > 0 && p->xquic_path_live) {
                 uint64_t stable_at = p->path_stable_since_us + PATH_STABLE_THRESHOLD_US;
                 if (stable_at > now_val) {
                     int sms = (int)((stable_at - now_val) / 1000);
-                    if (ms <= 0 || sms < ms) ms = sms;
+                    if (ms > 0 && sms < ms) ms = sms;
                 } else {
                     ms = 1;
                 }
