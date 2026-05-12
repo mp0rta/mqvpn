@@ -223,7 +223,7 @@ echo "=== Test 1: Interface removal — surviving path continues ==="
 
 ip netns exec "$NS_CLIENT" ip link del "$VETH_A0"
 
-if ! wait_for_log "${WORK_DIR}/client.log" "path.*removed.*veth-a0" 20; then
+if ! wait_for_log "${WORK_DIR}/client.log" "netlink: interface ${VETH_A0}.*closing path" 20; then
     echo "WARNING: Path A closure not detected in log within 20s"
 fi
 sleep 2
