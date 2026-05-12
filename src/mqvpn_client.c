@@ -1870,10 +1870,19 @@ mqvpn_client_add_path_fd_with_outcome(mqvpn_client_t *c, int fd,
     if (!c || fd < 0) return -1;
     ASSERT_TICK_THREAD(c);
 
-    /* Reuse a CLOSED slot if available, otherwise append */
+    /* Reuse a CLOSED slot if available, otherwise append.
+     *
+     * Tighten the predicate with `!xquic_path_live`: a slot in CLOSED_DROPPED
+     * whose xquic-side path hasn't drained yet (xquic_path_live=1 with a
+     * pending cb_path_removed) carries a live xqc_path_id binding. Reusing
+     * the slot now zeroes that binding via path_entry_init() — when the
+     * delayed cb_path_removed fires it can no longer find_path_by_xqc_id,
+     * leaving xquic's removal accounting unreconciled with the lib slot.
+     * Waiting for xquic-side cleanup (xquic_path_live=0) is the natural fence. */
     int idx = -1;
     for (int i = 0; i < c->n_paths; i++) {
-        if (c->paths[i].status == MQVPN_PATH_CLOSED && !c->paths[i].platform_attached) {
+        if (c->paths[i].status == MQVPN_PATH_CLOSED && !c->paths[i].platform_attached &&
+            !c->paths[i].xquic_path_live) {
             idx = i;
             break;
         }

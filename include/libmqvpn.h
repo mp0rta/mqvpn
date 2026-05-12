@@ -488,8 +488,15 @@ mqvpn_client_on_platform_path_dropped(mqvpn_client_t *client, mqvpn_path_handle_
  * Platform reports that the fd for the given path has been closed.
  *
  * Library sets p->fd = -1 and re-evaluates the CLOSED_DROPPED ->
- * CLOSED_FREE cleanup completion. Idempotent on slots not in
- * CLOSED_DROPPED (logs at debug and returns OK).
+ * CLOSED_FREE cleanup completion.
+ *
+ * Returns:
+ *   MQVPN_OK              - handle found; FSM dispatched. Late-arrival on
+ *                           a slot already past CLOSED_DROPPED is treated
+ *                           as a benign race (LOG_D + no state change).
+ *   MQVPN_ERR_INVALID_ARG - client is NULL, or handle is unknown to the
+ *                           library (caller bug: handle freed and reused,
+ *                           or never registered).
  *
  * Call this AFTER mqvpn_client_on_platform_path_dropped() (or the legacy
  * mqvpn_client_drop_path()), AFTER your close(fd). */

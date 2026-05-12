@@ -27,12 +27,20 @@ typedef struct {
     struct event *ev_tun;
     struct event *ev_sigint;
     struct event *ev_sigterm;
-    struct event *ev_status; /* periodic status log timer */
+    struct event *ev_status;  /* periodic status log timer */
+    struct event *ev_recover; /* periodic dropped-path re-add timer (3s) */
 
     /* Path manager (UDP sockets) */
     mqvpn_path_mgr_t path_mgr;
     mqvpn_path_handle_t lib_path_handles[MQVPN_MAX_PATHS];
     struct event *ev_udp[MQVPN_MAX_PATHS];
+
+    /* Per-slot consecutive re-add failure counter. Pure backpressure,
+     * NOT a state mirror — lifecycle state is queried via
+     * mqvpn_client_get_paths(). Bounds the busy-loop on transient xquic
+     * errors (e.g. -XQC_EMP_NO_AVAIL_PATH_ID during WiFi reassoc CID
+     * lag). Reset on success or Level-2 reconnect. */
+    int path_recover_failures[MQVPN_MAX_PATHS];
 
     /* TUN device */
     mqvpn_tun_t tun;
