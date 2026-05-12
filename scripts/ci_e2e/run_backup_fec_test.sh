@@ -162,10 +162,10 @@ start_server() {
 
 start_client() {
     local sched="$1"
-    # Force at least info level so the "app_path_status=" log line emitted
-    # at LOG_I in mqvpn_client.c (see client_activate_path) is captured.
-    # Without this, --log-level warn/error would silently fail the STANDBY
-    # assertion below even on a correctly built binary.
+    # Force at least info level so the "path[N] activated: ... state=STANDBY"
+    # log line emitted at LOG_I in mqvpn_client.c (tick_check_all_validations)
+    # is captured. Without this, --log-level warn/error would silently fail
+    # the STANDBY assertion below even on a correctly built binary.
     local client_log_level="$LOG_LEVEL"
     case "$client_log_level" in
         warn|error) client_log_level="info" ;;
@@ -241,8 +241,14 @@ run_test() {
     # as STANDBY (e.g. someone changes the path_status arg back to 0).
     # Without this, ping-only check would still pass via Path A even if
     # FEC repair traffic never gets a STANDBY destination.
+    #
+    # PR4 changed the log marker: pre-PR4 client_activate_path emitted
+    # "path[%d] created ... app_path_status=STANDBY" (xquic-side app status).
+    # PR4 moved this into tick_check_all_validations which emits
+    # "path[%d] activated: path_id=N iface=X state=STANDBY"
+    # (internal lifecycle name). Grep the new marker.
     if [ "$expect_standby" = "yes" ]; then
-        if ! grep -qE "path\[[0-9]+\] created.*app_path_status=STANDBY" \
+        if ! grep -qE "path\[[0-9]+\] activated.*state=STANDBY" \
                 "${WORK_DIR}/client.log"; then
             echo "  FAIL: secondary path not created as STANDBY"
             echo "  --- client.log (last 30 lines) ---"
