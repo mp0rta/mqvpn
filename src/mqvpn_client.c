@@ -1870,10 +1870,19 @@ mqvpn_client_add_path_fd_with_outcome(mqvpn_client_t *c, int fd,
     if (!c || fd < 0) return -1;
     ASSERT_TICK_THREAD(c);
 
-    /* Reuse a CLOSED slot if available, otherwise append */
+    /* Reuse a CLOSED slot if available, otherwise append.
+     *
+     * Tighten the predicate with `!xquic_path_live`: a slot in CLOSED_DROPPED
+     * whose xquic-side path hasn't drained yet (xquic_path_live=1 with a
+     * pending cb_path_removed) carries a live xqc_path_id binding. Reusing
+     * the slot now zeroes that binding via path_entry_init() — when the
+     * delayed cb_path_removed fires it can no longer find_path_by_xqc_id,
+     * leaving xquic's removal accounting unreconciled with the lib slot.
+     * Waiting for xquic-side cleanup (xquic_path_live=0) is the natural fence. */
     int idx = -1;
     for (int i = 0; i < c->n_paths; i++) {
-        if (c->paths[i].status == MQVPN_PATH_CLOSED && !c->paths[i].platform_attached) {
+        if (c->paths[i].status == MQVPN_PATH_CLOSED && !c->paths[i].platform_attached &&
+            !c->paths[i].xquic_path_live) {
             idx = i;
             break;
         }
@@ -1958,20 +1967,44 @@ mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
 }
 
 int
-mqvpn_client_drop_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
+mqvpn_client_drop_path(mqvpn_client_t *c, mqvpn_path_handle_t handle)
+{
+    /* PR5: thin wrapper of mqvpn_client_on_platform_path_dropped() with
+     * NULL info (no diagnostic context). Preserved for ABI compat. */
+    return mqvpn_client_on_platform_path_dropped(c, handle, NULL);
+}
+
+int
+mqvpn_client_on_platform_path_dropped(mqvpn_client_t *c, mqvpn_path_handle_t handle,
+                                      const mqvpn_platform_path_event_info_t *info)
 {
     if (!c) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
-
-    path_entry_t *p = find_path_by_handle(c, path);
+    path_entry_t *p = find_path_by_handle(c, handle);
     if (!p) return MQVPN_ERR_INVALID_ARG;
 
-    /* Spec §5.0: PLATFORM_DROP does NOT call xqc_conn_close_path (lazy
-     * natural death — fd may be dead already). xquic will detect the dead
-     * fd via sendto() errors and remove the path through PTO-based failure
-     * detection. */
+    /* NULL info case is silent (preserve pre-PR5 drop_path log-free behavior).
+     * Only log when caller provided diagnostic context. */
+    if (info && info->iface[0]) {
+        LOG_I(c, "platform path dropped: handle=%lld iface=%s reason=%d",
+              (long long)handle, info->iface, (int)info->reason);
+    }
+
     path_event_ctx_t ctx = {.now_us = client_now_us(c)};
     path_on_event(c, p, PATH_EVENT_PLATFORM_DROP, &ctx);
+    return MQVPN_OK;
+}
+
+int
+mqvpn_client_on_platform_fd_closed(mqvpn_client_t *c, mqvpn_path_handle_t handle)
+{
+    if (!c) return MQVPN_ERR_INVALID_ARG;
+    ASSERT_TICK_THREAD(c);
+    path_entry_t *p = find_path_by_handle(c, handle);
+    if (!p) return MQVPN_ERR_INVALID_ARG;
+
+    path_event_ctx_t ctx = {.now_us = client_now_us(c)};
+    path_on_event(c, p, PATH_EVENT_FD_CLOSED, &ctx);
     return MQVPN_OK;
 }
 

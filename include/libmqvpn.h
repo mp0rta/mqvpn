@@ -175,6 +175,39 @@ typedef enum {
     MQVPN_ADD_PATH_PERMANENT_FAIL = 2,
 } mqvpn_add_path_outcome_t;
 
+/*
+ * Optional info accompanying a platform path event notification.
+ *
+ * Fields:
+ *   iface  - interface name (NUL-terminated, may be empty if N/A).
+ *            Diagnostic only - library does not parse this.
+ *   reason - platform-specific reason code. Currently only
+ *            MQVPN_PLATFORM_REASON_RTM_DELLINK is emitted (Linux PR5).
+ *            Library does not branch on this - log only.
+ *            More values added when concrete emitter ships (CARRIER_LOST,
+ *            NM_IFDOWN, iOS variants etc) - ABI-additive.
+ *
+ * Future: `platform_net_id` (Android Network handle) is intentionally NOT
+ * included now. Android path management uses existing
+ * `mqvpn_client_add_path_fd` / `mqvpn_client_remove_path` per spec sec 3.4 /
+ * sec 10.2, so this struct's caller is currently Linux-only.
+ *
+ * Caller may pass NULL info to mqvpn_client_on_platform_path_dropped() for
+ * "drop with no diagnostic context" (legacy mqvpn_client_drop_path()
+ * semantic). */
+typedef enum {
+    MQVPN_PLATFORM_REASON_UNKNOWN = 0,
+    MQVPN_PLATFORM_REASON_RTM_DELLINK = 1,
+    /* extend ABI-additively when concrete emitter ships:
+     * MQVPN_PLATFORM_REASON_CARRIER_LOST = 2,
+     * MQVPN_PLATFORM_REASON_NM_IFDOWN    = 3, ... */
+} mqvpn_platform_reason_t;
+
+typedef struct {
+    char iface[16]; /* iface name, "" if N/A */
+    mqvpn_platform_reason_t reason;
+} mqvpn_platform_path_event_info_t;
+
 /* ─── Data structures ─── */
 
 typedef struct {
@@ -433,6 +466,42 @@ MQVPN_API int mqvpn_client_remove_path(mqvpn_client_t *client, mqvpn_path_handle
  * (same as link-down). This frees the slot for re-use by add_path_fd().
  */
 MQVPN_API int mqvpn_client_drop_path(mqvpn_client_t *client, mqvpn_path_handle_t path);
+
+/*
+ * Platform reports that a path is no longer reachable via its current fd
+ * (carrier loss, RTM_DELLINK, NotifyIpInterfaceChange ifDown, etc).
+ *
+ * Library transitions the slot to PATH_CLOSED_DROPPED (via EVENT_PLATFORM_DROP).
+ * The fd is left for the platform to close; call
+ * mqvpn_client_on_platform_fd_closed() after close() to drive the lazy
+ * CLOSED_DROPPED -> CLOSED_FREE cleanup.
+ *
+ * info may be NULL - in that case behaves identically to
+ * mqvpn_client_drop_path() with no diagnostic context.
+ *
+ * Returns MQVPN_OK on success, MQVPN_ERR_INVALID_ARG on bad client/handle. */
+MQVPN_API int
+mqvpn_client_on_platform_path_dropped(mqvpn_client_t *client, mqvpn_path_handle_t handle,
+                                      const mqvpn_platform_path_event_info_t *info);
+
+/*
+ * Platform reports that the fd for the given path has been closed.
+ *
+ * Library sets p->fd = -1 and re-evaluates the CLOSED_DROPPED ->
+ * CLOSED_FREE cleanup completion.
+ *
+ * Returns:
+ *   MQVPN_OK              - handle found; FSM dispatched. Late-arrival on
+ *                           a slot already past CLOSED_DROPPED is treated
+ *                           as a benign race (LOG_D + no state change).
+ *   MQVPN_ERR_INVALID_ARG - client is NULL, or handle is unknown to the
+ *                           library (caller bug: handle freed and reused,
+ *                           or never registered).
+ *
+ * Call this AFTER mqvpn_client_on_platform_path_dropped() (or the legacy
+ * mqvpn_client_drop_path()), AFTER your close(fd). */
+MQVPN_API int mqvpn_client_on_platform_fd_closed(mqvpn_client_t *client,
+                                                 mqvpn_path_handle_t handle);
 
 /*
  * Re-activate a DEGRADED or CLOSED path using the existing fd.
