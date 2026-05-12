@@ -2446,6 +2446,13 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
 
     int ms = (int)(c->next_wake_us / 1000);
 
+    /* RECONNECTING / CONNECTING blocks below legitimately extend `ms`
+     * when xquic hasn't requested a wake (`ms <= 0`): the tunnel is not
+     * live in those states, there is no pacing to protect, and we MUST
+     * wake at the reconnect / handshake-stall deadline or the FSM stalls.
+     * The Recovery / Stability blocks further down are different — there
+     * the tunnel is live and extending `ms` would starve BBR pacing. */
+
     /* During reconnect, wake up for the reconnect timer */
     if (c->state == MQVPN_STATE_RECONNECTING && c->reconnect_scheduled_us > 0) {
         uint64_t t = client_now_us(c);
@@ -2473,16 +2480,10 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
         uint64_t now_val = client_now_us(c);
         for (int i = 0; i < c->n_paths; i++) {
             const path_entry_t *p = &c->paths[i];
-            /* Recovery timer.
-             *
-             * Only shorten `ms`, never extend. The previous `ms <= 0 || pms < ms`
-             * form extended `ms` from 0 (xquic-requested wake unset) to several
-             * seconds, causing schedule_next_tick (platform_linux.c) to set
-             * a multi-second libevent timeout. Default `ms = 0` correctly
-             * leaves next_timer_ms = 1 via the `ms > 0 ? ms : 1` fallback
-             * a few lines below. Libevent fires recovery via the next tick
-             * anyway; this block exists only to bring the wake forward when
-             * something else already scheduled a later one. */
+            /* Recovery timer — shorten `ms` only, never extend. Same shape as
+             * Stability timer below. Unlike the RECONNECTING / CONNECTING
+             * blocks above, the tunnel is live here and BBR pacing depends
+             * on near-term ticks. */
             if (p->status == MQVPN_PATH_DEGRADED && p->recreate_after_us > 0) {
                 if (p->recreate_after_us > now_val) {
                     int pms = (int)((p->recreate_after_us - now_val) / 1000);
