@@ -238,6 +238,12 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_dellink_test.sh
 
+      - name: E2E carrier-flap test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_carrier_flap_test.sh
+
       - name: E2E backup_fec scheduler test (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
@@ -415,6 +421,9 @@ jobs:
 
       - name: RTM_DELLINK test (netns)
         run: sudo scripts/ci_e2e/run_dellink_test.sh
+
+      - name: Carrier-flap test (netns)
+        run: sudo scripts/ci_e2e/run_carrier_flap_test.sh
 
   ipv6-tests:
     needs: build
