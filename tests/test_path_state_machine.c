@@ -3,8 +3,35 @@
 #include "path_state_machine.h"
 #include "libmqvpn.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+
+/* PR4 — path_state_machine.c now references three accessors that
+ * mqvpn_client.c normally provides. Stubs keep this standalone unit-test
+ * binary linkable without dragging in the full client. The struct is
+ * declared opaquely (mqvpn_client.c owns the full definition), so the
+ * stubs can ignore *c entirely. */
+struct mqvpn_client_s;
+uint64_t
+client_now_us(const struct mqvpn_client_s *c)
+{
+    (void)c;
+    return 0;
+}
+void
+client_log(struct mqvpn_client_s *c, mqvpn_log_level_t level, const char *fmt, ...)
+{
+    (void)c;
+    (void)level;
+    (void)fmt;
+}
+void
+path_fsm_fire_path_event(struct mqvpn_client_s *c, const path_entry_t *p)
+{
+    (void)c;
+    (void)p;
+}
 
 static path_entry_t
 make_slot(void)
@@ -554,6 +581,202 @@ test_should_warn_state_entered_zero_is_silent(void)
     assert(path_should_warn_residence(&p, 1000 + 3600ULL * 1000000) == 0);
 }
 
+/* ─── PR4: path_on_event() dispatch table coverage ───
+ *
+ * Pins the 9-state × 9-event matrix at the entry points that matter for
+ * Chunk 4 callsite migration. Each case seeds a `path_entry_t p` with
+ * stack-local `p.field = ...` (dot, NOT arrow — the lint regex looks for
+ * arrow only, so these seeds don't trip check_lifecycle_field_writes.sh).
+ * After path_on_event, asserts on out_state + recreate_retries delta. */
+
+typedef struct {
+    const char *name;
+    path_lifecycle_t in_state;
+    int in_platform_attached;
+    int in_xquic_path_live;
+    uint64_t in_recreate_after_us;
+    uint64_t in_path_stable_since_us;
+    int in_recreate_retries;
+    uint64_t in_xqc_path_id;
+    path_event_t ev;
+    path_event_ctx_t ctx;
+    path_lifecycle_t out_state;
+    int out_retries_delta;
+} dispatch_case_t;
+
+static void
+run_dispatch_case(const dispatch_case_t *tc)
+{
+    path_entry_t p = {0};
+    p.fd = 7;
+    p.platform_attached = tc->in_platform_attached;
+    p.xquic_path_live = tc->in_xquic_path_live;
+    p.xqc_path_id = tc->in_xqc_path_id;
+    p.recreate_after_us = tc->in_recreate_after_us;
+    p.path_stable_since_us = tc->in_path_stable_since_us;
+    p.recreate_retries = tc->in_recreate_retries;
+    p.state = tc->in_state;
+    p.status = path_public_status_from_lifecycle(tc->in_state);
+
+    int in_retries = p.recreate_retries;
+    path_on_event(NULL, &p, tc->ev, &tc->ctx);
+
+    if (p.state != tc->out_state) {
+        printf("FAIL\n    %s: expected state %s, got %s\n", tc->name,
+               path_lifecycle_name(tc->out_state), path_lifecycle_name(p.state));
+        exit(1);
+    }
+    int delta = p.recreate_retries - in_retries;
+    if (delta != tc->out_retries_delta) {
+        printf("FAIL\n    %s: expected retries_delta %d, got %d (in=%d out=%d)\n",
+               tc->name, tc->out_retries_delta, delta, in_retries, p.recreate_retries);
+        exit(1);
+    }
+}
+
+static void
+test_dispatch_table(void)
+{
+    /* Each case starts from a legal input shape so path_invariant_check
+     * succeeds at the end of path_on_event. */
+    const dispatch_case_t cases[] = {
+        /* 1: permanent classification — retries unchanged */
+        {"PENDING + ACTIVATE_REQ(PERMANENT)",
+         PATH_LC_PENDING,
+         /*pa=*/1,
+         /*xpl=*/0,
+         /*rec_after=*/0,
+         /*pss=*/0,
+         /*retries=*/0,
+         /*xqc=*/0,
+         PATH_EVENT_ACTIVATE_REQUESTED,
+         {.result = ACTIVATE_PERMANENT_FAIL, .now_us = 1000},
+         PATH_LC_CLOSED_RECOVERABLE,
+         0},
+        /* 2: DEGRADED + RETRY_TIMER(PERMANENT) */
+        {"DEGRADED + RETRY_TIMER(PERMANENT)",
+         PATH_LC_DEGRADED,
+         /*pa=*/1,
+         /*xpl=*/0,
+         /*rec_after=*/1000,
+         /*pss=*/0,
+         /*retries=*/2,
+         /*xqc=*/0,
+         PATH_EVENT_RETRY_TIMER,
+         {.result = ACTIVATE_PERMANENT_FAIL, .now_us = 2000},
+         PATH_LC_CLOSED_RECOVERABLE,
+         0},
+        /* 3: MAX guard — CREATE_WAIT retries=5 + RETRY_TIMER(TRANSIENT) */
+        {"CREATE_WAIT retries=5 + RETRY_TIMER(TRANSIENT) -> MAX",
+         PATH_LC_CREATE_WAIT,
+         /*pa=*/1,
+         /*xpl=*/0,
+         /*rec_after=*/1000,
+         /*pss=*/0,
+         /*retries=*/5,
+         /*xqc=*/0,
+         PATH_EVENT_RETRY_TIMER,
+         {.result = ACTIVATE_TRANSIENT_FAIL, .now_us = 2000},
+         PATH_LC_CLOSED_RECOVERABLE,
+         +1},
+        /* 4: VALIDATING + XQUIC_REMOVED → CREATE_WAIT */
+        {"VALIDATING + XQUIC_REMOVED -> CREATE_WAIT",
+         PATH_LC_VALIDATING,
+         /*pa=*/1,
+         /*xpl=*/1,
+         /*rec_after=*/0,
+         /*pss=*/0,
+         /*retries=*/0,
+         /*xqc=*/42,
+         PATH_EVENT_XQUIC_REMOVED,
+         {.now_us = 1000},
+         PATH_LC_CREATE_WAIT,
+         +1},
+        /* 5: ACTIVE + XQUIC_REMOVED → DEGRADED */
+        {"ACTIVE + XQUIC_REMOVED -> DEGRADED",
+         PATH_LC_ACTIVE,
+         /*pa=*/1,
+         /*xpl=*/1,
+         /*rec_after=*/0,
+         /*pss=*/0,
+         /*retries=*/0,
+         /*xqc=*/42,
+         PATH_EVENT_XQUIC_REMOVED,
+         {.now_us = 1000},
+         PATH_LC_DEGRADED,
+         +1},
+        /* 6: CLOSED_RECOVERABLE + MANUAL(OK) → VALIDATING (retries unchanged) */
+        {"CLOSED_RECOVERABLE + MANUAL(OK) -> VALIDATING",
+         PATH_LC_CLOSED_RECOVERABLE,
+         /*pa=*/1,
+         /*xpl=*/0,
+         /*rec_after=*/0,
+         /*pss=*/0,
+         /*retries=*/3,
+         /*xqc=*/0,
+         PATH_EVENT_MANUAL_REACTIVATE,
+         {.result = ACTIVATE_OK, .new_xqc_path_id = 99, .now_us = 1000},
+         PATH_LC_VALIDATING,
+         0},
+        /* 7: rev5 — CREATE_WAIT + MANUAL(OK) → VALIDATING */
+        {"CREATE_WAIT + MANUAL(OK) -> VALIDATING (rev5)",
+         PATH_LC_CREATE_WAIT,
+         /*pa=*/1,
+         /*xpl=*/0,
+         /*rec_after=*/1000,
+         /*pss=*/0,
+         /*retries=*/2,
+         /*xqc=*/0,
+         PATH_EVENT_MANUAL_REACTIVATE,
+         {.result = ACTIVATE_OK, .new_xqc_path_id = 99, .now_us = 2000},
+         PATH_LC_VALIDATING,
+         0},
+        /* 8: rev5 — DEGRADED + MANUAL(OK) → VALIDATING */
+        {"DEGRADED + MANUAL(OK) -> VALIDATING (rev5)",
+         PATH_LC_DEGRADED,
+         /*pa=*/1,
+         /*xpl=*/0,
+         /*rec_after=*/1000,
+         /*pss=*/0,
+         /*retries=*/4,
+         /*xqc=*/0,
+         PATH_EVENT_MANUAL_REACTIVATE,
+         {.result = ACTIVATE_OK, .new_xqc_path_id = 99, .now_us = 2000},
+         PATH_LC_VALIDATING,
+         0},
+        /* 9: ACTIVE + CONN_RESET (platform_attached, retries reset to 0) */
+        {"ACTIVE + CONN_RESET (platform_attached)",
+         PATH_LC_ACTIVE,
+         /*pa=*/1,
+         /*xpl=*/1,
+         /*rec_after=*/0,
+         /*pss=*/0,
+         /*retries=*/2,
+         /*xqc=*/42,
+         PATH_EVENT_CONN_RESET,
+         {.now_us = 1000},
+         PATH_LC_PENDING,
+         -2},
+        /* 10: CLOSED_DROPPED + CONN_RESET (!platform_attached, retries cleared) */
+        {"CLOSED_DROPPED + CONN_RESET (!platform_attached)",
+         PATH_LC_CLOSED_DROPPED,
+         /*pa=*/0,
+         /*xpl=*/0,
+         /*rec_after=*/0,
+         /*pss=*/0,
+         /*retries=*/1,
+         /*xqc=*/0,
+         PATH_EVENT_CONN_RESET,
+         {.now_us = 1000},
+         PATH_LC_CLOSED_DROPPED,
+         -1},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        run_dispatch_case(&cases[i]);
+    }
+    printf("  test_dispatch_table: OK (%zu cases)\n", sizeof(cases) / sizeof(cases[0]));
+}
+
 int
 main(void)
 {
@@ -595,6 +818,7 @@ main(void)
     test_invariant_closed_recoverable_pass();
     test_invariant_closed_dropped_lazy_pass();
     test_invariant_closed_free_strict_pass();
+    test_dispatch_table();
     printf("PASS\n");
     return 0;
 }

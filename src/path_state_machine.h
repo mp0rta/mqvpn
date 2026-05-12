@@ -21,6 +21,72 @@
 #include "path_entry_internal.h"
 #include <stdint.h>
 
+/* PR4: Event-driven transition API.
+ *
+ * Caller passes (path_entry_t*, event, ctx); path_on_event() resolves the
+ * next state per spec §5.1/§5.1.1, mutates all lifecycle fields atomically,
+ * fires residence-timer hooks, logs the transition, and emits the public
+ * path_event callback. Direct field assignment from outside
+ * path_state_machine.c is forbidden (lint enforced — spec §7.1).
+ *
+ * EVENT_FD_CLOSED is intentionally absent — spec §7.2 (PR5) introduces both
+ * the event and its emitter together.
+ */
+typedef enum {
+    PATH_EVENT_ACTIVATE_REQUESTED = 0,
+    PATH_EVENT_RETRY_TIMER,
+    PATH_EVENT_VALIDATION_OK,
+    PATH_EVENT_XQUIC_REMOVED,
+    PATH_EVENT_MANUAL_REACTIVATE,
+    PATH_EVENT_PLATFORM_DROP,
+    PATH_EVENT_REMOVE_API,
+    PATH_EVENT_ADD_FD,
+    PATH_EVENT_CONN_RESET,
+} path_event_t;
+
+/* Activation attempt classification (spec §6.6). */
+typedef enum {
+    ACTIVATE_OK = 0,
+    ACTIVATE_TRANSIENT_FAIL, /* retry counter consumed */
+    ACTIVATE_PERMANENT_FAIL, /* CLOSED_RECOVERABLE direct, retries unchanged */
+} activate_result_t;
+
+/* Per-event context. Members valid by event type:
+ *   ACTIVATE_REQUESTED / RETRY_TIMER / MANUAL_REACTIVATE:
+ *     result, new_xqc_path_id (OK only), now_us
+ *   VALIDATION_OK:
+ *     validated_target (ACTIVE or STANDBY per initial_app_status), now_us
+ *   XQUIC_REMOVED / PLATFORM_DROP / REMOVE_API / ADD_FD / CONN_RESET:
+ *     now_us only
+ *
+ * Caller MUST always populate now_us (FSM does not call client_now_us()
+ * internally so the clock stays injectable for tests). */
+typedef struct {
+    activate_result_t result;
+    uint64_t new_xqc_path_id;
+    path_lifecycle_t validated_target;
+    uint64_t now_us;
+} path_event_ctx_t;
+
+struct mqvpn_client_s; /* forward decl - full type lives in mqvpn_client.c */
+
+/* PR4 - Event-driven transition aggregator. Spec §5.0-§5.3, §6. */
+void path_on_event(struct mqvpn_client_s *c, path_entry_t *p, path_event_t ev,
+                   const path_event_ctx_t *ctx);
+
+const char *path_event_name(path_event_t ev);
+
+/* PR4 - Compile-time pin for FSM design shape (rev5 / bc1fa8d pattern).
+ * If path_lifecycle_t grows a new state, or CLOSED_FREE is reordered, this
+ * assert breaks so the author must revisit every switch-on-lifecycle site
+ * (add_path_outcome_from_state, path_on_event handlers, etc.). Same logic
+ * pins path_event_t to catch unannounced event-list expansion.
+ * ASCII-only message for MSVC compatibility. */
+_Static_assert(PATH_LC_CLOSED_FREE == 8,
+               "path_lifecycle_t shape changed - review all FSM switches");
+_Static_assert(PATH_EVENT_CONN_RESET == 8,
+               "path_event_t shape changed - review path_on_event dispatch");
+
 /* Reason tag for transition logs. Phase 4 will extend this. */
 typedef enum {
     PATH_REASON_ADD_FD = 0,
@@ -93,13 +159,40 @@ int path_should_warn_residence(const path_entry_t *p, uint64_t now_us);
 int path_is_real_transition(mqvpn_path_status_t old, mqvpn_path_status_t new_status,
                             uint64_t state_entered_at_us);
 
-/* PR3 — non-static for test access (tests/test_api.c calls this directly).
- * The body is defined in mqvpn_client.c next to its sibling cb_path_removed
- * callback. Drives the state-aware dispatch on xquic-side path removal. */
-void cb_path_removed_apply(mqvpn_client_t *c, path_entry_t *p);
+/* PR4 - Path retry/stability constants (relocated from mqvpn_client.c).
+ * Both mqvpn_client.c (for logging) and path_state_machine.c (for retry
+ * helper + stable timer) need these. */
+#define PATH_RECREATE_DELAY_US     (5ULL * 1000000)  /* 5 sec initial */
+#define PATH_RECREATE_MAX_DELAY_US (60ULL * 1000000) /* 60 sec max backoff */
+#define PATH_RECREATE_MAX_RETRIES  6                 /* max consecutive failures */
+#define PATH_STABLE_THRESHOLD_US   (30ULL * 1000000) /* 30 sec to confirm stable */
+
+/* PR4 - Relocated from mqvpn_client.c (originally static). path_on_event()
+ * body and the residual callsites that still emit explicit reason tags
+ * share these entries. */
+void set_path_state_with_log(struct mqvpn_client_s *c, path_entry_t *p,
+                             path_lifecycle_t new_state, path_transition_reason_t reason);
+void path_log_state_change(struct mqvpn_client_s *c, const path_entry_t *p,
+                           path_lifecycle_t old, path_transition_reason_t reason);
+uint64_t path_recreate_backoff(int retries);
+void path_entry_init(path_entry_t *p);
 
 /* Residence thresholds (microseconds). */
 #define PATH_RESIDENCE_PENDING_WARN_US   ((uint64_t)30 * 1000 * 1000)
 #define PATH_RESIDENCE_DEGRADED_GRACE_US ((uint64_t)60 * 1000 * 1000)
+
+/* PR4 - Accessors used by path_on_event() in path_state_machine.c to talk
+ * back to the owning mqvpn_client_t. Implementations live in mqvpn_client.c
+ * with __attribute__((visibility("hidden"))) so libmqvpn.so does not export
+ * them. */
+uint64_t client_now_us(const struct mqvpn_client_s *c);
+void client_log(struct mqvpn_client_s *c, mqvpn_log_level_t level, const char *fmt, ...);
+void path_fsm_fire_path_event(struct mqvpn_client_s *c, const path_entry_t *p);
+
+/* PR4 - Per-tick stable-budget reset (relocated from mqvpn_client.c for
+ * §7.1 file-scope allow on path_stable_since_us / recreate_retries writes).
+ * Called per path slot from tick_path_recovery. */
+void path_fsm_tick_confirm_stable(struct mqvpn_client_s *c, path_entry_t *p,
+                                  uint64_t now_us);
 
 #endif /* MQVPN_PATH_STATE_MACHINE_H */
