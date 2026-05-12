@@ -2479,6 +2479,13 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
 
     int ms = (int)(c->next_wake_us / 1000);
 
+    /* RECONNECTING / CONNECTING blocks below legitimately extend `ms`
+     * when xquic hasn't requested a wake (`ms <= 0`): the tunnel is not
+     * live in those states, there is no pacing to protect, and we MUST
+     * wake at the reconnect / handshake-stall deadline or the FSM stalls.
+     * The Recovery / Stability blocks further down are different — there
+     * the tunnel is live and extending `ms` would starve BBR pacing. */
+
     /* During reconnect, wake up for the reconnect timer */
     if (c->state == MQVPN_STATE_RECONNECTING && c->reconnect_scheduled_us > 0) {
         uint64_t t = client_now_us(c);
@@ -2506,21 +2513,31 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
         uint64_t now_val = client_now_us(c);
         for (int i = 0; i < c->n_paths; i++) {
             const path_entry_t *p = &c->paths[i];
-            /* Recovery timer */
+            /* Recovery timer — shorten `ms` only, never extend. Same shape as
+             * Stability timer below. Unlike the RECONNECTING / CONNECTING
+             * blocks above, the tunnel is live here and BBR pacing depends
+             * on near-term ticks. */
             if (p->status == MQVPN_PATH_DEGRADED && p->recreate_after_us > 0) {
                 if (p->recreate_after_us > now_val) {
                     int pms = (int)((p->recreate_after_us - now_val) / 1000);
-                    if (ms <= 0 || pms < ms) ms = pms;
+                    if (ms > 0 && pms < ms) ms = pms;
                 } else {
                     ms = 1;
                 }
             }
-            /* Stability timer */
+            /* Stability timer — same shape as Recovery timer above. The
+             * earlier `ms <= 0 || sms < ms` form was a latent bug: when
+             * `path_stable_since_us` is set (PR3+ starts doing this on
+             * VALIDATING -> ACTIVE), this block extended `ms` from 0 to
+             * ~30000 (PATH_STABLE_THRESHOLD_US in ms), pinning the next
+             * libevent tick 30 seconds out. Without periodic ticks, BBR
+             * pacing stalled between I/O events, tanking multipath
+             * throughput ~3-4x in the WLB aggregate bench. */
             if (p->path_stable_since_us > 0 && p->xquic_path_live) {
                 uint64_t stable_at = p->path_stable_since_us + PATH_STABLE_THRESHOLD_US;
                 if (stable_at > now_val) {
                     int sms = (int)((stable_at - now_val) / 1000);
-                    if (ms <= 0 || sms < ms) ms = sms;
+                    if (ms > 0 && sms < ms) ms = sms;
                 } else {
                     ms = 1;
                 }

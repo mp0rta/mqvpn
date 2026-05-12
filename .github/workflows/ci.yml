@@ -393,7 +393,7 @@ jobs:
       - name: Install runtime dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libevent-dev iptables
+          sudo apt-get install -y libevent-dev iptables iperf3
 
       - name: Download build artifacts
         uses: actions/download-artifact@v8
@@ -424,6 +424,9 @@ jobs:
 
       - name: Carrier-flap test (netns)
         run: sudo scripts/ci_e2e/run_carrier_flap_test.sh
+
+      - name: Throughput-floor regression test (netns)
+        run: sudo scripts/ci_e2e/run_throughput_floor_test.sh
 
   ipv6-tests:
     needs: build
