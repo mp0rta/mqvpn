@@ -1958,20 +1958,44 @@ mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
 }
 
 int
-mqvpn_client_drop_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
+mqvpn_client_drop_path(mqvpn_client_t *c, mqvpn_path_handle_t handle)
+{
+    /* PR5: thin wrapper of mqvpn_client_on_platform_path_dropped() with
+     * NULL info (no diagnostic context). Preserved for ABI compat. */
+    return mqvpn_client_on_platform_path_dropped(c, handle, NULL);
+}
+
+int
+mqvpn_client_on_platform_path_dropped(mqvpn_client_t *c, mqvpn_path_handle_t handle,
+                                      const mqvpn_platform_path_event_info_t *info)
 {
     if (!c) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
-
-    path_entry_t *p = find_path_by_handle(c, path);
+    path_entry_t *p = find_path_by_handle(c, handle);
     if (!p) return MQVPN_ERR_INVALID_ARG;
 
-    /* Spec §5.0: PLATFORM_DROP does NOT call xqc_conn_close_path (lazy
-     * natural death — fd may be dead already). xquic will detect the dead
-     * fd via sendto() errors and remove the path through PTO-based failure
-     * detection. */
+    /* NULL info case is silent (preserve pre-PR5 drop_path log-free behavior).
+     * Only log when caller provided diagnostic context. */
+    if (info && info->iface[0]) {
+        LOG_I(c, "platform path dropped: handle=%lld iface=%s reason=%d",
+              (long long)handle, info->iface, (int)info->reason);
+    }
+
     path_event_ctx_t ctx = {.now_us = client_now_us(c)};
     path_on_event(c, p, PATH_EVENT_PLATFORM_DROP, &ctx);
+    return MQVPN_OK;
+}
+
+int
+mqvpn_client_on_platform_fd_closed(mqvpn_client_t *c, mqvpn_path_handle_t handle)
+{
+    if (!c) return MQVPN_ERR_INVALID_ARG;
+    ASSERT_TICK_THREAD(c);
+    path_entry_t *p = find_path_by_handle(c, handle);
+    if (!p) return MQVPN_ERR_INVALID_ARG;
+
+    path_event_ctx_t ctx = {.now_us = client_now_us(c)};
+    path_on_event(c, p, PATH_EVENT_FD_CLOSED, &ctx);
     return MQVPN_OK;
 }
 

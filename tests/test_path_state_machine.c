@@ -87,6 +87,8 @@ test_reason_name_full_table(void)
                   "REACTIVATE") == 0);
     assert(strcmp(mqvpn_path_transition_reason_name(PATH_REASON_CONN_RESET),
                   "CONN_RESET") == 0);
+    assert(strcmp(mqvpn_path_transition_reason_name(PATH_REASON_FD_CLOSED),
+                  "FD_CLOSED") == 0);
 }
 
 static void
@@ -608,7 +610,8 @@ static void
 run_dispatch_case(const dispatch_case_t *tc)
 {
     path_entry_t p = {0};
-    p.fd = 7;
+    /* CLOSED_FREE strict invariant requires fd<0; all other states accept fd>=0. */
+    p.fd = (tc->in_state == PATH_LC_CLOSED_FREE) ? -1 : 7;
     p.platform_attached = tc->in_platform_attached;
     p.xquic_path_live = tc->in_xquic_path_live;
     p.xqc_path_id = tc->in_xqc_path_id;
@@ -770,11 +773,88 @@ test_dispatch_table(void)
          {.now_us = 1000},
          PATH_LC_CLOSED_DROPPED,
          -1},
+        /* PR5: EVENT_FD_CLOSED handler - spec sec 5.1 + sec 8.4 ordering combos.
+         * Using designated initializers because the existing dispatch_case_t has
+         * 12 fields (mixed int/uint64) and positional truncation lands on the
+         * wrong field. The case name documents the intent. */
+        {.name = "CLOSED_DROPPED + FD_CLOSED (xquic still live) -> self",
+         .in_state = PATH_LC_CLOSED_DROPPED,
+         .in_platform_attached = 0, /* CLOSED_DROPPED invariant */
+         .in_xquic_path_live = 1,   /* xquic still live - cleanup incomplete */
+         .in_xqc_path_id = 42,
+         .ev = PATH_EVENT_FD_CLOSED,
+         .ctx = {.now_us = 1000},
+         .out_state = PATH_LC_CLOSED_DROPPED,
+         .out_retries_delta = 0},
+        {.name = "CLOSED_DROPPED + FD_CLOSED (xquic gone, id=0) -> CLOSED_FREE",
+         .in_state = PATH_LC_CLOSED_DROPPED,
+         .in_platform_attached = 0,
+         .in_xquic_path_live = 0,
+         .in_xqc_path_id = 0,
+         .ev = PATH_EVENT_FD_CLOSED,
+         .ctx = {.now_us = 1000},
+         .out_state = PATH_LC_CLOSED_FREE,
+         .out_retries_delta = 0},
+        {.name = "CLOSED_FREE + FD_CLOSED (idempotent late race) -> CLOSED_FREE",
+         .in_state = PATH_LC_CLOSED_FREE,
+         .in_platform_attached = 0,
+         .in_xquic_path_live = 0,
+         .in_xqc_path_id = 0,
+         .ev = PATH_EVENT_FD_CLOSED,
+         .ctx = {.now_us = 1000},
+         .out_state = PATH_LC_CLOSED_FREE,
+         .out_retries_delta = 0},
+        {.name = "ACTIVE + FD_CLOSED (late async race) -> ACTIVE (no-op)",
+         .in_state = PATH_LC_ACTIVE,
+         .in_platform_attached = 1,
+         .in_xquic_path_live = 1,
+         .in_xqc_path_id = 42,
+         .ev = PATH_EVENT_FD_CLOSED,
+         .ctx = {.now_us = 1000},
+         .out_state = PATH_LC_ACTIVE,
+         .out_retries_delta = 0},
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         run_dispatch_case(&cases[i]);
     }
     printf("  test_dispatch_table: OK (%zu cases)\n", sizeof(cases) / sizeof(cases[0]));
+}
+
+/* PR5: spec sec 8.4 explicitly requires multi-event ordering tests.
+ * Validates the full CLOSED_DROPPED -> CLOSED_FREE path through both
+ * XQUIC_REMOVED and FD_CLOSED in sequence. */
+static void
+test_fd_closed_sequence_to_free(void)
+{
+    /* mqvpn_client_t is opaque; the stubs above ignore the client pointer
+     * entirely, so passing NULL through the FSM is safe in this unit-test
+     * harness (same pattern as run_dispatch_case). */
+    path_entry_t p = {0};
+    p.state = PATH_LC_ACTIVE;
+    p.status = MQVPN_PATH_ACTIVE;
+    p.platform_attached = 1;
+    p.xquic_path_live = 1;
+    p.xqc_path_id = 42;
+    p.fd = 7;
+
+    /* Step 1: PLATFORM_DROP -> CLOSED_DROPPED */
+    path_event_ctx_t ctx = {.now_us = 1000};
+    path_on_event(NULL, &p, PATH_EVENT_PLATFORM_DROP, &ctx);
+    assert(p.state == PATH_LC_CLOSED_DROPPED);
+    assert(p.platform_attached == 0);
+    /* xquic-side still live (lazy invariant) */
+    assert(p.xquic_path_live == 1);
+
+    /* Step 2: XQUIC_REMOVED -> still CLOSED_DROPPED (fd not yet closed) */
+    path_on_event(NULL, &p, PATH_EVENT_XQUIC_REMOVED, &ctx);
+    assert(p.state == PATH_LC_CLOSED_DROPPED);
+    assert(p.xquic_path_live == 0);
+    assert(p.xqc_path_id == 0);
+
+    /* Step 3: FD_CLOSED -> CLOSED_FREE (all cleanup conditions met) */
+    p.fd = -1; /* simulate caller close(fd) */
+    path_on_event(NULL, &p, PATH_EVENT_FD_CLOSED, &ctx);
+    assert(p.state == PATH_LC_CLOSED_FREE);
 }
 
 int
@@ -819,6 +899,8 @@ main(void)
     test_invariant_closed_dropped_lazy_pass();
     test_invariant_closed_free_strict_pass();
     test_dispatch_table();
+    test_fd_closed_sequence_to_free();
+    printf("  test_fd_closed_sequence_to_free: OK\n");
     printf("PASS\n");
     return 0;
 }

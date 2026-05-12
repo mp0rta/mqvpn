@@ -27,8 +27,7 @@ typedef struct {
     struct event *ev_tun;
     struct event *ev_sigint;
     struct event *ev_sigterm;
-    struct event *ev_status;  /* periodic status log timer */
-    struct event *ev_recover; /* periodic dropped-path re-add timer */
+    struct event *ev_status; /* periodic status log timer */
 
     /* Path manager (UDP sockets) */
     mqvpn_path_mgr_t path_mgr;
@@ -67,14 +66,6 @@ typedef struct {
     /* Netlink path recovery */
     int nl_fd; /* netlink socket, -1 if unavailable */
     struct event *ev_netlink;
-    int path_recoverable[MQVPN_MAX_PATHS];         /* 1 = reactivate on netlink event */
-    int path_removed_by_platform[MQVPN_MAX_PATHS]; /* 1 = interface removed (RTM_DELLINK),
-                                                      cleared after verified re-add */
-    /* Consecutive try_readd activation failures (bounded by
-     * PATH_RECOVER_FAILURE_LIMIT). Prevents busy-loop on transient xquic errors
-     * (e.g. -XQC_EMP_NO_AVAIL_PATH_ID during WiFi reassoc burst when server
-     * can't replenish CIDs fast enough). Reset on success or Level-2 reconnect. */
-    int path_recover_failures[MQVPN_MAX_PATHS];
 } platform_ctx_t;
 
 /* routing.c */

@@ -30,6 +30,7 @@ mqvpn_path_transition_reason_name(path_transition_reason_t r)
     case PATH_REASON_REACTIVATE: return "REACTIVATE";
     case PATH_REASON_CONN_RESET: return "CONN_RESET";
     case PATH_REASON_RETRY_RESET: return "RETRY_RESET";
+    case PATH_REASON_FD_CLOSED: return "FD_CLOSED";
     }
     return "UNKNOWN";
 }
@@ -269,6 +270,7 @@ path_event_name(path_event_t ev)
     case PATH_EVENT_REMOVE_API: return "REMOVE_API";
     case PATH_EVENT_ADD_FD: return "ADD_FD";
     case PATH_EVENT_CONN_RESET: return "CONN_RESET";
+    case PATH_EVENT_FD_CLOSED: return "FD_CLOSED";
     }
     return "?";
 }
@@ -388,6 +390,7 @@ static void path_on_remove_api(mqvpn_client_t *, path_entry_t *,
 static void path_on_add_fd(mqvpn_client_t *, path_entry_t *, const path_event_ctx_t *);
 static void path_on_conn_reset(mqvpn_client_t *, path_entry_t *,
                                const path_event_ctx_t *);
+static void path_on_fd_closed(mqvpn_client_t *, path_entry_t *, const path_event_ctx_t *);
 static void maybe_transition_dropped_to_free(mqvpn_client_t *, path_entry_t *,
                                              path_transition_reason_t);
 
@@ -413,6 +416,7 @@ path_on_event(mqvpn_client_t *c, path_entry_t *p, path_event_t ev,
     case PATH_EVENT_REMOVE_API: path_on_remove_api(c, p, ctx); break;
     case PATH_EVENT_ADD_FD: path_on_add_fd(c, p, ctx); break;
     case PATH_EVENT_CONN_RESET: path_on_conn_reset(c, p, ctx); break;
+    case PATH_EVENT_FD_CLOSED: path_on_fd_closed(c, p, ctx); break;
     }
 
     /* Single invariant + path_event emission point. */
@@ -637,6 +641,25 @@ path_on_conn_reset(mqvpn_client_t *c, path_entry_t *p, const path_event_ctx_t *c
     }
     /* else: state unchanged (CLOSED_DROPPED/CLOSED_FREE lazy invariants permit
      * pre-cleared xquic-side fields). */
+}
+
+static void
+path_on_fd_closed(mqvpn_client_t *c, path_entry_t *p, const path_event_ctx_t *ctx)
+{
+    (void)ctx;
+    /* Spec sec 5.1 CLOSED_DROPPED:
+     *   [EVENT_FD_CLOSED] -> self (set fd=-1; re-evaluate cleanup)
+     * Other states: late async race - LOG_D + no-op (spec sec 5.1 tail
+     * "Late async callback no atsukai"). CLOSED_FREE also late-event
+     * idempotent (state unchanged, cleanup already complete). */
+    if (p->state != PATH_LC_CLOSED_DROPPED) {
+        client_log(c, MQVPN_LOG_DEBUG, "path[%s] FD_CLOSED (late) in state %s, ignoring",
+                   p->name, path_lifecycle_name(p->state));
+        return;
+    }
+    /* fd is NOT in spec sec 3.3 lifecycle field list - direct write allowed. */
+    p->fd = -1;
+    maybe_transition_dropped_to_free(c, p, PATH_REASON_FD_CLOSED);
 }
 
 static void

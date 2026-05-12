@@ -42,6 +42,7 @@ typedef enum {
     PATH_EVENT_REMOVE_API,
     PATH_EVENT_ADD_FD,
     PATH_EVENT_CONN_RESET,
+    PATH_EVENT_FD_CLOSED, /* PR5 - platform reports fd close completion */
 } path_event_t;
 
 /* Activation attempt classification (spec §6.6). */
@@ -86,6 +87,9 @@ _Static_assert(PATH_LC_CLOSED_FREE == 8,
                "path_lifecycle_t shape changed - review all FSM switches");
 _Static_assert(PATH_EVENT_CONN_RESET == 8,
                "path_event_t shape changed - review path_on_event dispatch");
+_Static_assert(PATH_EVENT_FD_CLOSED == 9,
+               "path_event_t shape changed - review path_on_event dispatch + "
+               "path_on_fd_closed handler");
 
 /* Reason tag for transition logs. Phase 4 will extend this. */
 typedef enum {
@@ -98,6 +102,7 @@ typedef enum {
     PATH_REASON_REACTIVATE,
     PATH_REASON_CONN_RESET,
     PATH_REASON_RETRY_RESET,
+    PATH_REASON_FD_CLOSED, /* PR5 - symmetric with PATH_REASON_XQUIC_REMOVED */
 } path_transition_reason_t;
 
 /* Phase 2 (PR2): internal 7-state lifecycle helpers.

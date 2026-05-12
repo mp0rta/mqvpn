@@ -18,15 +18,12 @@
 #include <stdio.h>
 #include <inttypes.h>
 
-#define STATUS_INTERVAL_SEC        30
-#define RECOVER_INTERVAL_SEC       3
-#define PATH_RECOVER_FAILURE_LIMIT 5
-#define BULK_READ_COUNT            64
-#define NETLINK_BUF_SIZE           8192
-#define TUN_BUF_SIZE               65536
-#define SOCK_BUF_SIZE              65536
+#define STATUS_INTERVAL_SEC 30
+#define BULK_READ_COUNT     64
+#define NETLINK_BUF_SIZE    8192
+#define TUN_BUF_SIZE        65536
+#define SOCK_BUF_SIZE       65536
 static void status_log_cb(evutil_socket_t fd, short what, void *arg);
-static void recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg);
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -155,17 +152,6 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
         event_add(p->ev_status, &tv);
     }
 
-    /* Start periodic dropped-path re-add timer. Carrier-up netlink events
-     * fire only once and `try_readd_removed_path()` can fail synchronously
-     * (e.g. xqc_conn_create_path returning -XQC_EMP_NO_AVAIL_PATH_ID before
-     * the server has distributed enough CIDs). Without this timer the slot
-     * would stay path_removed_by_platform=1 forever — no further netlink
-     * event arrives because IP and link state never change again. */
-    if (!p->ev_recover) p->ev_recover = evtimer_new(p->eb, recover_dropped_paths_cb, p);
-    if (p->ev_recover) {
-        struct timeval tv = {.tv_sec = RECOVER_INTERVAL_SEC};
-        event_add(p->ev_recover, &tv);
-    }
     return;
 
 fail:
@@ -208,18 +194,9 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
      * that stale fd events don't fire ("tun read: Bad file descriptor").
      * The TUN will be recreated in cb_tunnel_config_ready on reconnect. */
     if (new_state == MQVPN_STATE_RECONNECTING || new_state == MQVPN_STATE_CLOSED) {
-        /* Reset netlink path recovery state.
-         * path_removed_by_platform is intentionally NOT reset — it tracks
-         * physical interface absence (RTM_DELLINK), which persists across
-         * reconnects. Only cleared when the interface reappears.
-         * path_recover_failures IS reset — Level-2 reconnect creates a fresh
-         * xquic conn with fresh path_id namespace, so previous activation
-         * failures (e.g. -XQC_EMP_NO_AVAIL_PATH_ID due to CID lag) shouldn't
-         * count against the new connection's retry budget. */
-        memset(p->path_recoverable, 0, sizeof(p->path_recoverable));
-        memset(p->path_recover_failures, 0, sizeof(p->path_recover_failures));
-        if (p->ev_status) event_del(p->ev_status);   /* pause — reused on reconnect */
-        if (p->ev_recover) event_del(p->ev_recover); /* pause — reused on reconnect */
+        /* PR5: path lifecycle state is owned by libmqvpn — no platform state
+         * to reset here. Library handles slot recycling across reconnects. */
+        if (p->ev_status) event_del(p->ev_status); /* pause — reused on reconnect */
         cleanup_killswitch(p);
         cleanup_routes(p);
         mqvpn_dns_restore(&p->dns);
@@ -242,27 +219,12 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
 static void
 cb_path_event(mqvpn_path_handle_t path, mqvpn_path_status_t status, void *user_ctx)
 {
-    platform_ctx_t *p = (platform_ctx_t *)user_ctx;
+    (void)user_ctx;
+    /* PR5: path lifecycle state is owned entirely by libmqvpn. Platform
+     * no longer mirrors recoverable / removed state — try_reactivate_by_ifname
+     * queries lib state directly via mqvpn_client_get_paths(). */
     const char *sn = mqvpn_path_status_string(status);
     LOG_INF("path %lld -> %s", (long long)path, sn);
-
-    /* Track recoverable paths for netlink-triggered reactivation */
-    for (int i = 0; i < p->path_mgr.n_paths; i++) {
-        if (p->lib_path_handles[i] == path) {
-            switch (status) {
-            case MQVPN_PATH_DEGRADED: p->path_recoverable[i] = 1; break;
-            case MQVPN_PATH_ACTIVE: p->path_recoverable[i] = 0; break;
-            case MQVPN_PATH_CLOSED:
-                /* CLOSED from retries exhausted (platform_attached==1): still
-                 * recoverable. CLOSED from remove_path (platform_attached==0): not
-                 * recoverable. Platform tracks its own remove_path calls. */
-                p->path_recoverable[i] = !p->path_removed_by_platform[i];
-                break;
-            default: break;
-            }
-            break;
-        }
-    }
 }
 
 static void
@@ -482,10 +444,13 @@ remove_path_by_index(platform_ctx_t *p, int idx, const char *reason)
     LOG_WRN("netlink: interface %s %s, closing path %d", p->path_mgr.paths[idx].iface,
             reason, idx);
 
-    /* Use drop_path (not remove_path) — frees the library slot without
-     * calling xqc_conn_close_path(). xquic detects the dead fd naturally
-     * via sendto() errors, same as ip link set down. */
-    mqvpn_client_drop_path(p->client, p->lib_path_handles[idx]);
+    /* PR5: emit PLATFORM_DROP via new public API with diagnostic info.
+     * Library transitions slot to CLOSED_DROPPED; fd close is reported
+     * via mqvpn_client_on_platform_fd_closed() below. */
+    mqvpn_platform_path_event_info_t info = {0};
+    snprintf(info.iface, sizeof(info.iface), "%s", p->path_mgr.paths[idx].iface);
+    info.reason = MQVPN_PLATFORM_REASON_RTM_DELLINK;
+    mqvpn_client_on_platform_path_dropped(p->client, p->lib_path_handles[idx], &info);
 
     /* Remove libevent watcher */
     if (p->ev_udp[idx]) {
@@ -494,31 +459,12 @@ remove_path_by_index(platform_ctx_t *p, int idx, const char *reason)
         p->ev_udp[idx] = NULL;
     }
 
-    /* Close dead socket */
+    /* Close dead socket + notify lib so CLOSED_DROPPED -> CLOSED_FREE
+     * cleanup can complete (once xquic-side also clears). */
     close(p->path_mgr.paths[idx].fd);
     p->path_mgr.paths[idx].fd = -1;
     p->path_mgr.paths[idx].platform_attached = 0;
-
-    /* Mark as removed by platform — prevents library timer recovery on stale fd */
-    p->path_removed_by_platform[idx] = 1;
-    p->path_recoverable[idx] = 0;
-}
-
-/* Check whether `ifname` is admin-up AND has carrier (IFF_UP & IFF_RUNNING).
- * Used by the periodic recovery timer to skip retries on a still-down link. */
-static int
-iface_is_up_and_running(const char *ifname)
-{
-    int s = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-    if (s < 0) return 0;
-    struct ifreq ifr;
-    memset(&ifr, 0, sizeof(ifr));
-    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
-    int ok = 0;
-    if (ioctl(s, SIOCGIFFLAGS, &ifr) == 0)
-        ok = (ifr.ifr_flags & IFF_UP) && (ifr.ifr_flags & IFF_RUNNING);
-    close(s);
-    return ok;
+    mqvpn_client_on_platform_fd_closed(p->client, p->lib_path_handles[idx]);
 }
 
 /* Check if interface has an IP address (v4 or v6) */
@@ -543,16 +489,39 @@ iface_has_ip(const char *ifname)
 static void
 try_reactivate_by_ifname(platform_ctx_t *p, const char *ifname)
 {
-    for (int i = 0; i < p->path_mgr.n_paths; i++) {
-        if (!p->path_recoverable[i]) continue;
-        if (strcmp(p->path_mgr.paths[i].iface, ifname) != 0) continue;
+    /* PR5: query lib state instead of platform-tracked path_recoverable[].
+     * Reactivate is valid for slots in DEGRADED / CREATE_WAIT /
+     * CLOSED_RECOVERABLE (per lib's reactivate_slot_eligible gate added
+     * in 433272f). Public projection collapses these to MQVPN_PATH_DEGRADED
+     * (for DEGRADED+CREATE_WAIT) and MQVPN_PATH_CLOSED (for CLOSED_RECOVERABLE),
+     * so both warrant attempting reactivate. The lib's gate rejects bad
+     * states with MQVPN_ERR_INVALID_STATE which we silently swallow. */
+    mqvpn_path_info_t pinfo[MQVPN_MAX_PATHS];
+    int n = 0;
+    if (mqvpn_client_get_paths(p->client, pinfo, MQVPN_MAX_PATHS, &n) != MQVPN_OK) return;
 
-        int ret = mqvpn_client_reactivate_path(p->client, p->lib_path_handles[i]);
+    for (int i = 0; i < p->path_mgr.n_paths; i++) {
+        if (strcmp(p->path_mgr.paths[i].iface, ifname) != 0) continue;
+        mqvpn_path_handle_t h = p->lib_path_handles[i];
+        if (h < 0) continue;
+
+        int found = 0;
+        mqvpn_path_status_t st = MQVPN_PATH_PENDING;
+        for (int j = 0; j < n; j++) {
+            if (pinfo[j].handle == h) {
+                found = 1;
+                st = pinfo[j].status;
+                break;
+            }
+        }
+        if (!found) continue;
+        if (st != MQVPN_PATH_DEGRADED && st != MQVPN_PATH_CLOSED) continue;
+
+        int ret = mqvpn_client_reactivate_path(p->client, h);
         if (ret == MQVPN_OK) {
             LOG_INF("netlink: reactivated path %s", ifname);
-            p->path_recoverable[i] = 0;
         } else if (ret == MQVPN_ERR_INVALID_STATE) {
-            /* Already xquic_path_live or not in right state — ignore */
+            /* slot not in 3-state acceptance window (e.g. already VALIDATING) */
         } else {
             LOG_WRN("netlink: reactivate %s failed: %s", ifname, mqvpn_error_string(ret));
         }
@@ -648,79 +617,65 @@ recovery_rollback(platform_ctx_t *p, int slot, mqvpn_add_path_outcome_t outcome)
     mqvpn_path_t *mp = &p->path_mgr.paths[slot];
     const char *ifname = mp->iface;
 
-    LOG_WRN("netlink: re-add %s not activated, will retry", ifname);
     mqvpn_client_remove_path(p->client, p->lib_path_handles[slot]);
     close(mp->fd);
     mp->fd = -1;
     mp->platform_attached = 0;
 
     if (outcome == MQVPN_ADD_PATH_PERMANENT_FAIL) {
-        /* xquic budget exhausted — disable the 3s recovery timer for this
-         * slot. The path stays in path_removed_by_platform=0 until either
-         * a new netlink event reactivates it or a Level-2 reconnect resets
-         * the path_id namespace. */
-        p->path_removed_by_platform[slot] = 0;
-        LOG_WRN("netlink: path %s recovery abandoned (xquic budget "
-                "exhausted; reconnect required)",
+        LOG_WRN("netlink: path %s recovery abandoned (xquic budget exhausted; "
+                "reconnect required)",
                 ifname);
         return;
     }
-
-    /* Transient failure (most commonly -XQC_EMP_NO_AVAIL_PATH_ID — server
-     * can't replenish CIDs fast enough during burst carrier flap). Bump the
-     * consecutive-failure counter; if we exhaust the limit, disable retry
-     * for this slot until Level-2 reconnect re-arms it. */
-    p->path_recover_failures[slot]++;
-    if (p->path_recover_failures[slot] >= PATH_RECOVER_FAILURE_LIMIT) {
-        p->path_removed_by_platform[slot] = 0;
-        LOG_WRN("netlink: path %s recovery abandoned after %d "
-                "consecutive failures (will resume on reconnect)",
-                ifname, PATH_RECOVER_FAILURE_LIMIT);
-    }
+    LOG_WRN("netlink: re-add %s not activated, will retry on next netlink event", ifname);
 }
 
-/* Re-add a path whose interface was previously removed (RTM_DELLINK or
- * carrier loss). Creates a new UDP socket, registers with library, and
- * confirms activation. Returns 1 if a path was re-added and activated, 0
- * otherwise.
- *
- * Why bound retries: -XQC_EMP_NO_AVAIL_PATH_ID during WiFi reassoc burst
- * (server can't replenish CIDs fast enough) makes the library tick recovery
- * reset its retry budget on each rollback, never converging. Combined with
- * the 3s timer + every netlink event, this becomes a busy-loop with handle
- * leak. PATH_RECOVER_FAILURE_LIMIT consecutive failures disables this slot
- * until a successful re-add or Level-2 reconnect re-arms it. Will be
- * subsumed by spec §6.6 / PR4 path_on_event path-classification.
- *
- * Only post-add activation failures (outcome != MQVPN_ADD_PATH_OK) count
- * toward the budget — socket/bind/pin or handle-allocation failures are
- * OS-side transient errors and do not consume the counter. */
+/* PR5: replace path_removed_by_platform[] polling with lib state query.
+ * The slot is considered "ready for re-add" if its public status is
+ * MQVPN_PATH_CLOSED — i.e., lib has fully cleaned up the previous incarnation
+ * (CLOSED_FREE) OR is mid-cleanup (CLOSED_DROPPED with all xquic-side fields
+ * drained). add_path_fd_with_outcome will refuse to reuse a non-CLOSED slot;
+ * if cleanup hasn't completed we get TRANSIENT_FAIL and bail — next netlink
+ * event will retry. */
 static int
 try_readd_removed_path(platform_ctx_t *p, const char *ifname)
 {
+    mqvpn_path_info_t pinfo[MQVPN_MAX_PATHS];
+    int n = 0;
+    if (mqvpn_client_get_paths(p->client, pinfo, MQVPN_MAX_PATHS, &n) != MQVPN_OK)
+        return 0;
+
     for (int i = 0; i < p->path_mgr.n_paths; i++) {
-        if (!p->path_removed_by_platform[i]) continue;
         if (strcmp(p->path_mgr.paths[i].iface, ifname) != 0) continue;
-        if (p->path_recover_failures[i] >= PATH_RECOVER_FAILURE_LIMIT) continue;
+        mqvpn_path_handle_t h = p->lib_path_handles[i];
+
+        int found = 0;
+        mqvpn_path_status_t st = MQVPN_PATH_PENDING;
+        for (int j = 0; j < n; j++) {
+            if (pinfo[j].handle == h) {
+                found = 1;
+                st = pinfo[j].status;
+                break;
+            }
+        }
+        /* Re-add candidate: slot exists in lib as CLOSED (DROPPED or FREE),
+         * or slot was never tracked (handle invalid / removed before lib saw it). */
+        if (found && st != MQVPN_PATH_CLOSED) continue;
 
         mqvpn_path_t *mp = &p->path_mgr.paths[i];
         int fd = recovery_socket_create(p->server_addr.ss_family, ifname, mp);
         if (fd < 0) return 0;
 
-        /* Update path_mgr slot in-place (n_paths unchanged, slot reuse) */
         mp->fd = fd;
         mp->platform_attached = 1;
         mp->xquic_path_live = 0;
         mp->path_id = 0;
 
         mqvpn_add_path_outcome_t outcome = MQVPN_ADD_PATH_OK;
-        mqvpn_path_handle_t handle =
+        mqvpn_path_handle_t new_h =
             recovery_register_with_lib(p, i, fd, ifname, &outcome);
-        if (handle < 0) {
-            /* Don't call recovery_rollback() here: handle was never stored, so
-             * lib_path_handles[i] still holds the stale handle from the prior
-             * incarnation. Rolling back would call mqvpn_client_remove_path()
-             * on that stale handle. */
+        if (new_h < 0) {
             close(fd);
             mp->fd = -1;
             mp->platform_attached = 0;
@@ -732,60 +687,15 @@ try_readd_removed_path(platform_ctx_t *p, const char *ifname)
             return 0;
         }
 
-        /* Activation confirmed — register libevent and clear flags */
+        /* Activation confirmed — register libevent so packets are read from
+         * the new socket. */
         p->ev_udp[i] = event_new(p->eb, fd, EV_READ | EV_PERSIST, on_socket_read, p);
         event_add(p->ev_udp[i], NULL);
 
-        p->path_removed_by_platform[i] = 0;
-        p->path_recoverable[i] = 0;
-        p->path_recover_failures[i] = 0; /* success resets the budget */
-
-        LOG_INF("netlink: interface %s re-appeared, path %d re-added (fd=%d)", ifname, i,
-                fd);
+        LOG_INF("netlink: path %s re-added (handle=%lld)", ifname, (long long)new_h);
         return 1;
     }
     return 0;
-}
-
-/* Periodically re-add paths that were dropped by the platform (RTM_DELLINK or
- * carrier loss) but whose interface is now back up.
- *
- * Why this exists: on carrier loss/restore the kernel emits a single
- * RTM_NEWLINK with IFF_RUNNING toggled — IP and admin state don't change, so
- * no RTM_NEWADDR follows. If the one-shot try_readd_removed_path() driven by
- * that RTM_NEWLINK fails (e.g. xqc_conn_create_path() returns
- * -XQC_EMP_NO_AVAIL_PATH_ID because the server hasn't distributed CIDs yet,
- * or the old path hasn't been released yet), there is no further event to
- * retry on. This timer makes carrier-restore failures recoverable.
- *
- * Pre-filters on link state + IP so we don't burn syscalls (socket/bind/pin)
- * when the interface is still down. */
-static void
-recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
-{
-    (void)fd;
-    (void)what;
-    platform_ctx_t *p = (platform_ctx_t *)arg;
-
-    for (int i = 0; i < p->path_mgr.n_paths; i++) {
-        if (!p->path_removed_by_platform[i]) continue;
-        const char *ifname = p->path_mgr.paths[i].iface;
-        if (!iface_is_up_and_running(ifname)) continue;
-        if (!iface_has_ip(ifname)) continue;
-        /* Don't break: distinct ifnames (eth0 + wlan0 + ...) may be down
-         * simultaneously. try_readd_removed_path() flips path_removed_by_platform
-         * to 0 on success, so subsequent loop iterations skip the now-restored
-         * slot. The duplicated work for two slots sharing one ifname is one
-         * early-return scan inside try_readd_removed_path(), which is cheap. */
-        if (try_readd_removed_path(p, ifname))
-            LOG_INF("netlink: timer re-added path %s after carrier-up failure", ifname);
-    }
-
-    /* Re-arm */
-    if (p->ev_recover) {
-        struct timeval tv = {.tv_sec = RECOVER_INTERVAL_SEC};
-        event_add(p->ev_recover, &tv);
-    }
 }
 
 /* RTM_NEWADDR: an interface gained an IP address.
@@ -1129,10 +1039,6 @@ cleanup:
     if (ctx.ev_status) {
         event_del(ctx.ev_status);
         event_free(ctx.ev_status);
-    }
-    if (ctx.ev_recover) {
-        event_del(ctx.ev_recover);
-        event_free(ctx.ev_recover);
     }
 
     mqvpn_path_mgr_destroy(&ctx.path_mgr);
