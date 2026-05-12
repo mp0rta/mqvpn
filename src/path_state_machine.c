@@ -673,11 +673,11 @@ maybe_transition_dropped_to_free(mqvpn_client_t *c, path_entry_t *p,
     set_path_state_with_log(c, p, PATH_LC_CLOSED_FREE, reason);
 }
 
-/* PR4 — Relocated from mqvpn_client.c for §7.1 file-scope allow. The
- * §6.3 re-arm semantic (path_stable_since_us = now after reset) is
- * deliberately NOT fixed here — that is a separate spec-compliance bug
- * fix scheduled for a follow-up PR. PR4 preserves the current
- * `path_stable_since_us = 0` behavior to keep the diff mechanical. */
+/* Spec sec 6.3 re-arm semantic: after firing the 30s reset, set
+ * `path_stable_since_us = now` so the next 30s window starts counting
+ * from now (NOT 0, which would disarm the timer until the path drops
+ * back through VALIDATING and returns to ACTIVE/STANDBY). A path that
+ * stays usable for 60s+ thus experiences 2 resets. */
 void
 path_fsm_tick_confirm_stable(mqvpn_client_t *c, path_entry_t *p, uint64_t now)
 {
@@ -689,5 +689,5 @@ path_fsm_tick_confirm_stable(mqvpn_client_t *c, path_entry_t *p, uint64_t now)
     client_log(c, MQVPN_LOG_INFO, "path %s: stable for 30s, resetting retry budget",
                p->name);
     p->recreate_retries = 0;
-    p->path_stable_since_us = 0; /* §6.3 spec divergence — see Out of Scope */
+    p->path_stable_since_us = now; /* sec 6.3 re-arm: next 30s window starts now */
 }

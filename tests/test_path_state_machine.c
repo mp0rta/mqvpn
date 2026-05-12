@@ -857,6 +857,63 @@ test_fd_closed_sequence_to_free(void)
     assert(p.state == PATH_LC_CLOSED_FREE);
 }
 
+/* Spec sec 6.3: after 30s ACTIVE/STANDBY residency triggers the retry-reset,
+ * the timer MUST re-arm to `now` so subsequent 30s windows continue to fire.
+ * Pre-fix code wrote `path_stable_since_us = 0` which disarmed the timer
+ * until the path bounced back through VALIDATING. Resulting bug: a path
+ * flapping multiple times within 60s+ would burn retry budget unnecessarily.
+ *
+ * This test pins the re-arm by running two consecutive 30s windows and
+ * verifying both fire. */
+static void
+test_stable_reset_rearms_timer(void)
+{
+    path_entry_t p = {0};
+    p.state = PATH_LC_ACTIVE;
+    p.status = MQVPN_PATH_ACTIVE;
+    p.platform_attached = 1;
+    p.xquic_path_live = 1;
+    p.xqc_path_id = 42;
+    p.fd = 7;
+    p.path_stable_since_us = 0;
+    p.recreate_retries = 3;
+
+    const uint64_t t0 = 1000;
+    const uint64_t window = PATH_STABLE_THRESHOLD_US;
+
+    /* Slot reached ACTIVE at t0; tick_check_all_validations would set
+     * path_stable_since_us = t0 (we set it here directly). */
+    p.path_stable_since_us = t0;
+
+    /* Before 30s elapses, tick should NOT reset. */
+    path_fsm_tick_confirm_stable(NULL, &p, t0 + window - 1);
+    assert(p.recreate_retries == 3);
+    assert(p.path_stable_since_us == t0);
+
+    /* At t0 + 30s, tick fires the reset AND re-arms the timer. */
+    uint64_t t1 = t0 + window;
+    path_fsm_tick_confirm_stable(NULL, &p, t1);
+    assert(p.recreate_retries == 0);
+    assert(p.path_stable_since_us == t1); /* re-armed at t1 (NOT 0) */
+
+    /* Simulate a subsequent flap event that pushed retries back up. The
+     * path stays ACTIVE (e.g. quick xquic recovery without state transition
+     * is unusual but we are testing the reset cadence; in practice retries
+     * would only increment on EVENT_XQUIC_REMOVED which leaves ACTIVE).
+     * Force the counter to exercise the second reset path. */
+    p.recreate_retries = 2;
+
+    /* Before second 30s window, no reset. */
+    path_fsm_tick_confirm_stable(NULL, &p, t1 + window - 1);
+    assert(p.recreate_retries == 2);
+
+    /* At t1 + 30s (= t0 + 60s), second reset fires and re-arms again. */
+    uint64_t t2 = t1 + window;
+    path_fsm_tick_confirm_stable(NULL, &p, t2);
+    assert(p.recreate_retries == 0);
+    assert(p.path_stable_since_us == t2);
+}
+
 int
 main(void)
 {
@@ -901,6 +958,8 @@ main(void)
     test_dispatch_table();
     test_fd_closed_sequence_to_free();
     printf("  test_fd_closed_sequence_to_free: OK\n");
+    test_stable_reset_rearms_timer();
+    printf("  test_stable_reset_rearms_timer: OK\n");
     printf("PASS\n");
     return 0;
 }
