@@ -206,18 +206,28 @@ fi
 echo "OK: dual-path active"
 
 # =================================================================
-#  Test 1: ip link set down → carrier lost, surviving path continues
+#  Test 1: peer-side link down → carrier lost, surviving path continues
 # =================================================================
+#
+# Take the SERVER-side end of the veth pair down — this causes the
+# client-side veth to lose carrier (operstate IF_OPER_LOWERLAYERDOWN)
+# while admin IFF_UP stays 1. That's what `is_carrier_loss()` in
+# platform_linux.c gates on (it ignores admin-down events to avoid
+# treating intentional `ip link set down` as a transient flap).
+#
+# Doing `ip link set <local> down` would clear IFF_UP and be filtered
+# out by the carrier-loss gate — that's by design, so test the
+# real-world case.
 
 echo ""
-echo "=== Test 1: Carrier loss (ip link set down) — Path B survives ==="
+echo "=== Test 1: Carrier loss (peer-side ip link set down) — Path B survives ==="
 
-ip netns exec "$NS_CLIENT" ip link set "$VETH_A0" down
+ip netns exec "$NS_SERVER" ip link set "$VETH_A1" down
 
-# After RTM_NEWLINK(IFF_UP=0), handle_rtm_newlink should treat this as a
-# carrier-loss event and invoke remove_path_by_index → public APIs
+# After RTM_NEWLINK with operstate=LOWERLAYERDOWN, handle_rtm_newlink
+# should call remove_path_by_index → public APIs
 # (on_platform_path_dropped + on_platform_fd_closed). Log marker:
-#   "netlink: interface veth-a0-cf .* closing path"
+#   "netlink: interface veth-a0-cf carrier lost, closing path"
 if ! wait_for_log "${WORK_DIR}/client.log" "netlink: interface ${VETH_A0}.*closing path" 15; then
     echo "=== FAIL: Carrier-loss event not handled ==="
     cat "${WORK_DIR}/client.log"
@@ -237,15 +247,15 @@ else
 fi
 
 # =================================================================
-#  Test 2: ip link set up → carrier restored, path re-added
+#  Test 2: peer-side link up → carrier restored, path re-added
 #  (via netlink event OR 3s recovery timer)
 # =================================================================
 
 echo ""
-echo "=== Test 2: Carrier restore (ip link set up) — path re-added ==="
+echo "=== Test 2: Carrier restore (peer-side ip link set up) — path re-added ==="
 
-ip netns exec "$NS_CLIENT" ip link set "$VETH_A0" up
-# The peer side stays up; this re-enables carrier on the client end.
+ip netns exec "$NS_SERVER" ip link set "$VETH_A1" up
+# Client-side veth-a0-cf was never admin-downed, so this restores carrier.
 
 # Allow up to 20s — the recovery timer fires every 3s, so even if the
 # RTM_NEWLINK-driven try_readd_removed_path() fails synchronously, the
