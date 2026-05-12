@@ -226,8 +226,11 @@ now_us(void)
 
 /* Injectable clock: use config clock_fn if set, else default now_us().
  * PR4 — non-static + visibility hidden so path_state_machine.c can call it
- * without exporting from libmqvpn.so. */
-__attribute__((visibility("hidden"))) uint64_t
+ * without exporting from libmqvpn.so. MSVC ignores visibility(). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+uint64_t
 client_now_us(const mqvpn_client_t *c)
 {
     if (c->config.clock_fn) return c->config.clock_fn(c->config.clock_ctx);
@@ -264,15 +267,18 @@ now_ms_mono(void)
 #endif
 }
 
-#ifndef _MSC_VER
+#if defined(__GNUC__) || defined(__clang__)
 __attribute__((visibility("hidden"))) void
 client_log(mqvpn_client_t *c, mqvpn_log_level_t level, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 #endif
 
 /* PR4 — non-static + visibility hidden so path_state_machine.c can call it
- * without exporting from libmqvpn.so. */
-__attribute__((visibility("hidden"))) void
+ * without exporting from libmqvpn.so. MSVC ignores visibility(). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+void
 client_log(mqvpn_client_t *c, mqvpn_log_level_t level, const char *fmt, ...)
 {
     if (!c->cbs.log || level < c->log_level) return;
@@ -286,8 +292,12 @@ client_log(mqvpn_client_t *c, mqvpn_log_level_t level, const char *fmt, ...)
     c->cbs.log(level, buf, c->user_ctx);
 }
 
-/* PR4 - Fire public path_event callback from FSM body. */
-__attribute__((visibility("hidden"))) void
+/* PR4 - Fire public path_event callback from FSM body.
+ * MSVC ignores visibility(). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+void
 path_fsm_fire_path_event(mqvpn_client_t *c, const path_entry_t *p)
 {
     if (c->cbs.path_event) c->cbs.path_event(p->handle, p->status, c->user_ctx);
