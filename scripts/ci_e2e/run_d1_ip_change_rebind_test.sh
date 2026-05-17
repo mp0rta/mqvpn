@@ -16,7 +16,11 @@
 # Middle does SNAT --to-source 10.61.0.10 -> rotates to 10.61.0.20 to trigger
 # the IP-change carve-out.
 #
+# Scheduler coverage: minrtt + wlb. backup_fec is skipped — it requires >=2
+# paths, but this topology has a single client path through NAT.
+#
 # Usage: sudo ./run_d1_ip_change_rebind_test.sh [mqvpn-binary] [--log-level LEVEL]
+#   Override schedulers via env: SCHEDULERS_LIST="minrtt" ./run_...
 
 set -e
 
@@ -59,6 +63,9 @@ fi
 
 WORK_DIR="$(mktemp -d)"
 
+# backup_fec needs >=2 paths; D1 single-path-via-NAT topology incompatible.
+SCHEDULERS_LIST="${SCHEDULERS_LIST:-minrtt wlb}"
+
 NS_SERVER="vpn-server-d1ip"
 NS_MIDDLE="vpn-middle-d1ip"
 NS_CLIENT="vpn-client-d1ip"
@@ -92,15 +99,19 @@ cleanup_processes() {
     sleep 1
 }
 
-cleanup() {
-    echo ""
-    echo "Cleaning up..."
-    cleanup_processes
+teardown_topology() {
     ip netns del "$NS_SERVER" 2>/dev/null || true
     ip netns del "$NS_MIDDLE" 2>/dev/null || true
     ip netns del "$NS_CLIENT" 2>/dev/null || true
     ip link del "$VETH_C0" 2>/dev/null || true
     ip link del "$VETH_M1" 2>/dev/null || true
+}
+
+cleanup() {
+    echo ""
+    echo "Cleaning up..."
+    cleanup_processes
+    teardown_topology
     rm -rf "$WORK_DIR"
     if [ "$SANITIZER_FAIL" -ne 0 ]; then
         echo "FAIL: sanitizer errors detected"
@@ -109,146 +120,160 @@ cleanup() {
 }
 trap cleanup EXIT
 
-ip netns del "$NS_SERVER" 2>/dev/null || true
-ip netns del "$NS_MIDDLE" 2>/dev/null || true
-ip netns del "$NS_CLIENT" 2>/dev/null || true
-ip link del "$VETH_C0" 2>/dev/null || true
-ip link del "$VETH_M1" 2>/dev/null || true
+teardown_topology
 
 PSK=$("$MQVPN" --genkey 2>/dev/null)
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
     -keyout "${WORK_DIR}/server.key" -out "${WORK_DIR}/server.crt" \
     -days 365 -nodes -subj "/CN=mqvpn-d1ip-test" 2>/dev/null
 
-ip netns add "$NS_SERVER"
-ip netns add "$NS_MIDDLE"
-ip netns add "$NS_CLIENT"
+setup_topology() {
+    ip netns add "$NS_SERVER"
+    ip netns add "$NS_MIDDLE"
+    ip netns add "$NS_CLIENT"
 
-# client <-> middle
-ip link add "$VETH_C0" type veth peer name "$VETH_C1"
-ip link set "$VETH_C0" netns "$NS_CLIENT"
-ip link set "$VETH_C1" netns "$NS_MIDDLE"
-ip netns exec "$NS_CLIENT" ip addr add "$IP_CLIENT" dev "$VETH_C0"
-ip netns exec "$NS_MIDDLE" ip addr add "$IP_MIDDLE_IN" dev "$VETH_C1"
-ip netns exec "$NS_CLIENT" ip link set "$VETH_C0" up
-ip netns exec "$NS_MIDDLE" ip link set "$VETH_C1" up
+    # client <-> middle
+    ip link add "$VETH_C0" type veth peer name "$VETH_C1"
+    ip link set "$VETH_C0" netns "$NS_CLIENT"
+    ip link set "$VETH_C1" netns "$NS_MIDDLE"
+    ip netns exec "$NS_CLIENT" ip addr add "$IP_CLIENT" dev "$VETH_C0"
+    ip netns exec "$NS_MIDDLE" ip addr add "$IP_MIDDLE_IN" dev "$VETH_C1"
+    ip netns exec "$NS_CLIENT" ip link set "$VETH_C0" up
+    ip netns exec "$NS_MIDDLE" ip link set "$VETH_C1" up
 
-# middle <-> server
-ip link add "$VETH_M1" type veth peer name "$VETH_S0"
-ip link set "$VETH_M1" netns "$NS_MIDDLE"
-ip link set "$VETH_S0" netns "$NS_SERVER"
-ip netns exec "$NS_MIDDLE" ip addr add "$IP_MIDDLE_OUT" dev "$VETH_M1"
-ip netns exec "$NS_SERVER" ip addr add "$IP_SERVER" dev "$VETH_S0"
-ip netns exec "$NS_MIDDLE" ip link set "$VETH_M1" up
-ip netns exec "$NS_SERVER" ip link set "$VETH_S0" up
+    # middle <-> server
+    ip link add "$VETH_M1" type veth peer name "$VETH_S0"
+    ip link set "$VETH_M1" netns "$NS_MIDDLE"
+    ip link set "$VETH_S0" netns "$NS_SERVER"
+    ip netns exec "$NS_MIDDLE" ip addr add "$IP_MIDDLE_OUT" dev "$VETH_M1"
+    ip netns exec "$NS_SERVER" ip addr add "$IP_SERVER" dev "$VETH_S0"
+    ip netns exec "$NS_MIDDLE" ip link set "$VETH_M1" up
+    ip netns exec "$NS_SERVER" ip link set "$VETH_S0" up
 
-ip netns exec "$NS_CLIENT" ip link set lo up
-ip netns exec "$NS_MIDDLE" ip link set lo up
-ip netns exec "$NS_SERVER" ip link set lo up
+    ip netns exec "$NS_CLIENT" ip link set lo up
+    ip netns exec "$NS_MIDDLE" ip link set lo up
+    ip netns exec "$NS_SERVER" ip link set lo up
 
-# middle is a router with SNAT
-ip netns exec "$NS_MIDDLE" sysctl -w net.ipv4.ip_forward=1 >/dev/null
+    # middle is a router with SNAT
+    ip netns exec "$NS_MIDDLE" sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
-# Client route to server via middle
-ip netns exec "$NS_CLIENT" ip route add default via 10.51.0.1
-# Server route back to NAT pool via middle
-ip netns exec "$NS_SERVER" ip route add 10.61.0.0/24 dev "$VETH_S0" || true
-# Allow middle to source from both SNAT IPs (alias)
-ip netns exec "$NS_MIDDLE" ip addr add "${SNAT_IP_INITIAL}/24" dev "$VETH_M1" || true
-ip netns exec "$NS_MIDDLE" ip addr add "${SNAT_IP_AFTER}/24" dev "$VETH_M1" || true
+    # Client route to server via middle
+    ip netns exec "$NS_CLIENT" ip route add default via 10.51.0.1
+    # Server route back to NAT pool via middle
+    ip netns exec "$NS_SERVER" ip route add 10.61.0.0/24 dev "$VETH_S0" || true
+    # Allow middle to source from both SNAT IPs (alias)
+    ip netns exec "$NS_MIDDLE" ip addr add "${SNAT_IP_INITIAL}/24" dev "$VETH_M1" || true
+    ip netns exec "$NS_MIDDLE" ip addr add "${SNAT_IP_AFTER}/24" dev "$VETH_M1" || true
 
-# Initial SNAT rule
-ip netns exec "$NS_MIDDLE" iptables -t nat -A POSTROUTING -o "$VETH_M1" \
-    -s 10.51.0.0/24 -j SNAT --to-source "$SNAT_IP_INITIAL"
+    # Initial SNAT rule
+    ip netns exec "$NS_MIDDLE" iptables -t nat -A POSTROUTING -o "$VETH_M1" \
+        -s 10.51.0.0/24 -j SNAT --to-source "$SNAT_IP_INITIAL"
 
-# Connectivity check
-ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$SERVER_ADDR" >/dev/null || {
-    echo "SKIP: pre-flight ping via NAT failed"
-    exit 0
+    # Connectivity check
+    ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$SERVER_ADDR" >/dev/null
 }
 
-ip netns exec "$NS_SERVER" "$MQVPN" \
-    --mode server \
-    --listen "0.0.0.0:4433" \
-    --subnet 10.0.0.0/24 \
-    --cert "${WORK_DIR}/server.crt" \
-    --key "${WORK_DIR}/server.key" \
-    --auth-key "$PSK" \
-    --scheduler minrtt \
-    --log-level "$LOG_LEVEL" > "${WORK_DIR}/server.log" 2>&1 &
-SERVER_PID=$!
-sleep 2
+run_one_scheduler() {
+    local sched="$1"
 
-if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-    echo "  FAIL: server died"; cat "${WORK_DIR}/server.log"; FAIL=$((FAIL + 1))
-else
+    ip netns exec "$NS_SERVER" "$MQVPN" \
+        --mode server \
+        --listen "0.0.0.0:4433" \
+        --subnet 10.0.0.0/24 \
+        --cert "${WORK_DIR}/server.crt" \
+        --key "${WORK_DIR}/server.key" \
+        --auth-key "$PSK" \
+        --scheduler "$sched" \
+        --log-level "$LOG_LEVEL" > "${WORK_DIR}/server.log" 2>&1 &
+    SERVER_PID=$!
+    sleep 2
+
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "  FAIL: server died"; cat "${WORK_DIR}/server.log"; return 1
+    fi
+
     ip netns exec "$NS_CLIENT" "$MQVPN" \
         --mode client \
         --server "${SERVER_ADDR}:4433" \
         --path "$VETH_C0" \
         --auth-key "$PSK" \
         --insecure \
-        --scheduler minrtt \
+        --scheduler "$sched" \
         --log-level "$LOG_LEVEL" > "${WORK_DIR}/client.log" 2>&1 &
     CLIENT_PID=$!
     sleep 3
 
     if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
-        echo "  FAIL: client died"; cat "${WORK_DIR}/client.log"; FAIL=$((FAIL + 1))
-    else
-        TUNNEL_OK=0
-        for i in $(seq 1 30); do
-            if ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$TUNNEL_IP" >/dev/null 2>&1; then
-                TUNNEL_OK=1; break
-            fi
-            sleep 1
-        done
-
-        if [ "$TUNNEL_OK" -ne 1 ]; then
-            echo "  FAIL: tunnel never reachable"
-            tail -40 "${WORK_DIR}/client.log"
-            FAIL=$((FAIL + 1))
-        else
-            echo "=== Test: D1 §9.4 ¶1 cwnd/RTT reset on peer IP change ==="
-
-            # Rotate the SNAT source IP. Flush conntrack to force a fresh
-            # 5-tuple so the server actually sees the new src IP.
-            ip netns exec "$NS_MIDDLE" iptables -t nat -F
-            ip netns exec "$NS_MIDDLE" iptables -t nat -A POSTROUTING -o "$VETH_M1" \
-                -s 10.51.0.0/24 -j SNAT --to-source "$SNAT_IP_AFTER"
-            # conntrack tool guaranteed available (checked upfront)
-            ip netns exec "$NS_MIDDLE" conntrack -F 2>/dev/null || true
-
-            # Keep traffic flowing so the server actually receives a packet
-            # from the new source IP and starts NAT rebinding probe.
-            ( for i in $(seq 1 10); do
-                ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$TUNNEL_IP" >/dev/null 2>&1 || true
-                sleep 1
-              done ) &
-            POKER=$!
-
-            RESET_OK=0
-            for i in $(seq 1 10); do
-                if grep -qE "MIGRATION\|cwnd_rtt_reset" "${WORK_DIR}/server.log"; then
-                    RESET_OK=1; break
-                fi
-                sleep 1
-            done
-            kill "$POKER" 2>/dev/null || true
-            wait "$POKER" 2>/dev/null || true
-
-            if [ "$RESET_OK" -eq 1 ]; then
-                echo "  PASS: server logged MIGRATION|cwnd_rtt_reset on src IP change"
-                PASS=$((PASS + 1))
-            else
-                echo "  FAIL: cwnd_rtt_reset not observed within 10s"
-                echo "  --- server.log (last 100 lines) ---"
-                tail -100 "${WORK_DIR}/server.log"
-                FAIL=$((FAIL + 1))
-            fi
-        fi
+        echo "  FAIL: client died"; cat "${WORK_DIR}/client.log"; return 1
     fi
-fi
+
+    local TUNNEL_OK=0
+    for i in $(seq 1 30); do
+        if ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$TUNNEL_IP" >/dev/null 2>&1; then
+            TUNNEL_OK=1; break
+        fi
+        sleep 1
+    done
+
+    if [ "$TUNNEL_OK" -ne 1 ]; then
+        echo "  FAIL: tunnel never reachable"
+        tail -40 "${WORK_DIR}/client.log"
+        return 1
+    fi
+
+    # Rotate the SNAT source IP. Flush conntrack to force a fresh
+    # 5-tuple so the server actually sees the new src IP.
+    ip netns exec "$NS_MIDDLE" iptables -t nat -F
+    ip netns exec "$NS_MIDDLE" iptables -t nat -A POSTROUTING -o "$VETH_M1" \
+        -s 10.51.0.0/24 -j SNAT --to-source "$SNAT_IP_AFTER"
+    ip netns exec "$NS_MIDDLE" conntrack -F 2>/dev/null || true
+
+    # Keep traffic flowing so the server actually receives a packet
+    # from the new source IP and starts NAT rebinding probe.
+    ( for i in $(seq 1 10); do
+        ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$TUNNEL_IP" >/dev/null 2>&1 || true
+        sleep 1
+      done ) &
+    local POKER=$!
+
+    local RESET_OK=0
+    for i in $(seq 1 10); do
+        if grep -qE "MIGRATION\|cwnd_rtt_reset" "${WORK_DIR}/server.log"; then
+            RESET_OK=1; break
+        fi
+        sleep 1
+    done
+    kill "$POKER" 2>/dev/null || true
+    wait "$POKER" 2>/dev/null || true
+
+    if [ "$RESET_OK" -eq 1 ]; then
+        echo "  PASS: server logged MIGRATION|cwnd_rtt_reset on src IP change"
+        return 0
+    fi
+
+    echo "  FAIL: cwnd_rtt_reset not observed within 10s"
+    echo "  --- server.log (last 100 lines) ---"
+    tail -100 "${WORK_DIR}/server.log"
+    return 1
+}
+
+for sched in $SCHEDULERS_LIST; do
+    echo ""
+    echo "=== Test: D1 §9.4 ¶1 cwnd/RTT reset on peer IP change (scheduler=$sched) ==="
+    setup_topology || {
+        echo "SKIP: pre-flight ping via NAT failed (scheduler=$sched)"
+        cleanup_processes
+        teardown_topology
+        continue
+    }
+    if run_one_scheduler "$sched"; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    cleanup_processes
+    teardown_topology
+done
 
 echo ""
 echo "================================================="

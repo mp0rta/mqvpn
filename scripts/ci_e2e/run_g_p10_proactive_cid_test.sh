@@ -6,9 +6,11 @@
 # not just path_id=0. The client log should show MP NEW_CID frames received
 # for path_id 0 AND >=1 within ~2 seconds of handshake.
 #
-# Topology: standard dual-path veth (-gp10 suffix).
+# Topology: standard dual-path veth (-gp10 suffix). 2-path topology supports
+# all 3 schedulers (minrtt / wlb / backup_fec — the last requires >=2 paths).
 #
 # Usage: sudo ./run_g_p10_proactive_cid_test.sh [mqvpn-binary] [--log-level LEVEL]
+#   Override schedulers via env: SCHEDULERS_LIST="minrtt wlb" ./run_...
 
 set -e
 
@@ -29,6 +31,8 @@ MQVPN="${MQVPN:-${SCRIPT_DIR}/../../build/mqvpn}"
 [ -f "$MQVPN" ] || { echo "error: mqvpn binary not found at $MQVPN"; exit 1; }
 MQVPN="$(realpath "$MQVPN")"
 WORK_DIR="$(mktemp -d)"
+
+SCHEDULERS_LIST="${SCHEDULERS_LIST:-minrtt wlb backup_fec}"
 
 NS_SERVER="vpn-server-gp10"
 NS_CLIENT="vpn-client-gp10"
@@ -58,14 +62,18 @@ cleanup_processes() {
     sleep 1
 }
 
-cleanup() {
-    echo ""
-    echo "Cleaning up..."
-    cleanup_processes
+teardown_topology() {
     ip netns del "$NS_SERVER" 2>/dev/null || true
     ip netns del "$NS_CLIENT" 2>/dev/null || true
     ip link del "$VETH_A0" 2>/dev/null || true
     ip link del "$VETH_B0" 2>/dev/null || true
+}
+
+cleanup() {
+    echo ""
+    echo "Cleaning up..."
+    cleanup_processes
+    teardown_topology
     rm -rf "$WORK_DIR"
     if [ "$SANITIZER_FAIL" -ne 0 ]; then
         echo "FAIL: sanitizer errors detected"
@@ -74,10 +82,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-ip netns del "$NS_SERVER" 2>/dev/null || true
-ip netns del "$NS_CLIENT" 2>/dev/null || true
-ip link del "$VETH_A0" 2>/dev/null || true
-ip link del "$VETH_B0" 2>/dev/null || true
+teardown_topology
 
 PSK=$("$MQVPN" --genkey 2>/dev/null)
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
@@ -111,6 +116,7 @@ setup_topology() {
 }
 
 start_server() {
+    local sched="$1"
     ip netns exec "$NS_SERVER" "$MQVPN" \
         --mode server \
         --listen "0.0.0.0:4433" \
@@ -118,7 +124,7 @@ start_server() {
         --cert "${WORK_DIR}/server.crt" \
         --key "${WORK_DIR}/server.key" \
         --auth-key "$PSK" \
-        --scheduler minrtt \
+        --scheduler "$sched" \
         --log-level "$LOG_LEVEL" > "${WORK_DIR}/server.log" 2>&1 &
     SERVER_PID=$!
     sleep 2
@@ -126,13 +132,14 @@ start_server() {
 }
 
 start_client() {
+    local sched="$1"
     ip netns exec "$NS_CLIENT" "$MQVPN" \
         --mode client \
         --server "${SERVER_ADDR}:4433" \
         --path "$VETH_A0" --path "$VETH_B0" \
         --auth-key "$PSK" \
         --insecure \
-        --scheduler minrtt \
+        --scheduler "$sched" \
         --log-level "$LOG_LEVEL" > "${WORK_DIR}/client.log" 2>&1 &
     CLIENT_PID=$!
     sleep 3
@@ -151,21 +158,24 @@ wait_tunnel() {
     return 1
 }
 
-echo "=== Test: G-P10 proactive per-path CID issuance ==="
-setup_topology
-if ! start_server; then
-    echo "  FAIL: server did not start"
-    cat "${WORK_DIR}/server.log"
-    FAIL=$((FAIL + 1))
-elif ! start_client; then
-    echo "  FAIL: client did not start"
-    cat "${WORK_DIR}/client.log"
-    FAIL=$((FAIL + 1))
-elif ! wait_tunnel 30; then
-    echo "  FAIL: tunnel not reachable within 30s"
-    tail -40 "${WORK_DIR}/client.log"
-    FAIL=$((FAIL + 1))
-else
+run_one_scheduler() {
+    local sched="$1"
+    if ! start_server "$sched"; then
+        echo "  FAIL: server did not start"
+        cat "${WORK_DIR}/server.log"
+        return 1
+    fi
+    if ! start_client "$sched"; then
+        echo "  FAIL: client did not start"
+        cat "${WORK_DIR}/client.log"
+        return 1
+    fi
+    if ! wait_tunnel 30; then
+        echo "  FAIL: tunnel not reachable within 30s"
+        tail -40 "${WORK_DIR}/client.log"
+        return 1
+    fi
+
     # Allow ~2s for post-handshake proactive issuance + alt-path propagation.
     sleep 2
 
@@ -176,19 +186,33 @@ else
     # path_id=0 is always issued (pre-G-P10 behaviour); G-P10 adds path_id>=1.
     # Note: the client-side receipt log "|new_conn_id|<cid>|sr_token:..."
     # does NOT carry path_id, so we must check server.log for emission.
-    PATH_ID_GE_1_COUNT=$(grep -cE '\|path_id:[1-9][0-9]*\|cid:[0-9a-f]+\|sr_token:' "${WORK_DIR}/server.log" || true)
-    echo "  observed server emissions for path_id>=1: ${PATH_ID_GE_1_COUNT}"
+    local count
+    count=$(grep -cE '\|path_id:[1-9][0-9]*\|cid:[0-9a-f]+\|sr_token:' "${WORK_DIR}/server.log" || true)
+    echo "  observed server emissions for path_id>=1: ${count}"
 
-    if [ "$PATH_ID_GE_1_COUNT" -lt 1 ]; then
+    if [ "$count" -lt 1 ]; then
         echo "  FAIL: no MP NEW_CID emission for path_id>=1 (G-P10 proactive issuance)"
         echo "  --- server.log (last 80 lines) ---"
         tail -80 "${WORK_DIR}/server.log"
-        FAIL=$((FAIL + 1))
-    else
-        echo "  PASS: proactive CID issuance observed for path_id>=1"
-        PASS=$((PASS + 1))
+        return 1
     fi
-fi
+    return 0
+}
+
+for sched in $SCHEDULERS_LIST; do
+    echo ""
+    echo "=== Test: G-P10 proactive per-path CID issuance (scheduler=$sched) ==="
+    setup_topology
+    if run_one_scheduler "$sched"; then
+        echo "  PASS: $sched"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL: $sched"
+        FAIL=$((FAIL + 1))
+    fi
+    cleanup_processes
+    teardown_topology
+done
 
 echo ""
 echo "================================================="
