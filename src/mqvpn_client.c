@@ -320,6 +320,29 @@ path_fsm_fire_path_event(mqvpn_client_t *c, const path_entry_t *p)
     if (c->cbs.path_event) c->cbs.path_event(p->handle, p->status, c->user_ctx);
 }
 
+/* G-P15 (draft-21 §3.3 ¶6): emit PATH_STATUS to peer when local lifecycle
+ * demotes. app_status: 1=STANDBY, 2=AVAILABLE, 3=FROZEN (xqc_typedef.h).
+ * No-op if engine or conn is missing (e.g. during reconnect, or for
+ * pre-handshake transitions); path-status will be re-asserted by the
+ * caller when the conn is re-established and the lifecycle moves again. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+void
+client_notify_xqc_path_state(mqvpn_client_t *c, const path_entry_t *p, int app_status)
+{
+    if (!c || !c->engine || !c->conn) return;
+    if (!p->xquic_path_live) return;
+    const xqc_cid_t *cid = &c->conn->cid;
+    uint64_t pid = p->xqc_path_id;
+    switch (app_status) {
+    case 1: xqc_conn_mark_path_standby(c->engine, cid, pid); break;
+    case 2: xqc_conn_mark_path_available(c->engine, cid, pid); break;
+    case 3: xqc_conn_mark_path_frozen(c->engine, cid, pid); break;
+    default: break;
+    }
+}
+
 #define LOG_D(c, ...) client_log(c, MQVPN_LOG_DEBUG, __VA_ARGS__)
 #define LOG_I(c, ...) client_log(c, MQVPN_LOG_INFO, __VA_ARGS__)
 #define LOG_W(c, ...) client_log(c, MQVPN_LOG_WARN, __VA_ARGS__)

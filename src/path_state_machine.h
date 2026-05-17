@@ -194,6 +194,15 @@ uint64_t client_now_us(const struct mqvpn_client_s *c);
 void client_log(struct mqvpn_client_s *c, mqvpn_log_level_t level, const char *fmt, ...);
 void path_fsm_fire_path_event(struct mqvpn_client_s *c, const path_entry_t *p);
 
+/* G-P15 (draft-21 §3.3 ¶6): mirror local lifecycle demotions onto the
+ * xquic conn via xqc_conn_mark_path_{standby,available,frozen}. The
+ * caller passes the xquic app_status int (XQC_APP_PATH_STATUS_STANDBY=1,
+ * AVAILABLE=2, FROZEN=3); the accessor dispatches to the right xquic
+ * API. Implementation in mqvpn_client.c (needs the full client struct
+ * for c->engine and c->conn->cid). No-op when engine/conn missing. */
+void client_notify_xqc_path_state(struct mqvpn_client_s *c, const path_entry_t *p,
+                                  int app_status);
+
 /* PR4 - Per-tick stable-budget reset (relocated from mqvpn_client.c for
  * §7.1 file-scope allow on path_stable_since_us / recreate_retries writes).
  * Called per path slot from tick_path_recovery. */
