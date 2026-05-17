@@ -45,6 +45,18 @@ if ! command -v iptables >/dev/null 2>&1; then
     exit 0
 fi
 
+# Graceful skip if conntrack not available — the existing UDP flow's
+# conntrack entry holds the original SNAT mapping; without `conntrack -F`
+# after the iptables rule swap, the active flow keeps using the old SNAT
+# source IP and the server never observes a peer address change → no
+# rebinding probe → test would silently FAIL on an otherwise-correct
+# binary.
+if ! command -v conntrack >/dev/null 2>&1; then
+    echo "SKIP: conntrack tool not available; IP-change test requires conntrack flush"
+    echo "      to force the existing UDP flow to pick up the new SNAT rule."
+    exit 0
+fi
+
 WORK_DIR="$(mktemp -d)"
 
 NS_SERVER="vpn-server-d1ip"
@@ -204,8 +216,8 @@ else
             ip netns exec "$NS_MIDDLE" iptables -t nat -F
             ip netns exec "$NS_MIDDLE" iptables -t nat -A POSTROUTING -o "$VETH_M1" \
                 -s 10.51.0.0/24 -j SNAT --to-source "$SNAT_IP_AFTER"
-            command -v conntrack >/dev/null 2>&1 && \
-                ip netns exec "$NS_MIDDLE" conntrack -F 2>/dev/null || true
+            # conntrack tool guaranteed available (checked upfront)
+            ip netns exec "$NS_MIDDLE" conntrack -F 2>/dev/null || true
 
             # Keep traffic flowing so the server actually receives a packet
             # from the new source IP and starts NAT rebinding probe.
