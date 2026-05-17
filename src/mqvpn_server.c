@@ -259,6 +259,7 @@ svr_log_conn_stats(mqvpn_server_t *s, const char *tag, const xqc_cid_t *cid)
           (double)st.srtt / 1000.0, (double)st.min_rtt / 1000.0, st.inflight_bytes,
           st.total_app_bytes, st.standby_path_app_bytes, st.mp_state, st.enable_fec,
           st.send_fec_cnt, st.fec_recover_pkt_cnt);
+    free(st.paths_info);
 }
 
 /* ─── ICMP PTB rate limiter ─── */
@@ -1595,13 +1596,10 @@ derive_mp_state_label(const xqc_conn_stats_t *st)
     if (!st) return "unknown";
 
     int available = 0, standby = 0;
-    for (int i = 0; i < XQC_MAX_PATHS_COUNT; i++) {
+    /* paths_info is now dynamically allocated (xquic PR3 §4.3 Rev 4);
+     * iterate by paths_info_count. paths_info may be NULL when count==0. */
+    for (uint32_t i = 0; st->paths_info && i < st->paths_info_count; i++) {
         const xqc_path_metrics_t *p = &st->paths_info[i];
-        /* Sentinel xquic writes for unfilled slots: see xqc_conn.c:3723
-         * (`paths_info[i].path_id = XQC_MAX_UINT64_VALUE`). That xquic
-         * private constant equals UINT64_MAX, which is in <stdint.h> and
-         * does not require a private xquic header. */
-        if (p->path_id == UINT64_MAX) break;
         /* Only count paths in XQC_PATH_STATE_ACTIVE (=2); paths that are
          * still validating, closing, or already closed should not influence
          * the operator-facing label. */
@@ -1660,6 +1658,7 @@ mqvpn_server_get_client_fec_stats(const mqvpn_server_t *s, const char *user,
         out->lost_dgram_cnt = (uint64_t)st.lost_dgram_count;
         out->total_app_bytes = st.total_app_bytes;
         out->standby_app_bytes = st.standby_path_app_bytes;
+        free(st.paths_info);
         return 1;
     }
     return 0;
@@ -1698,6 +1697,7 @@ mqvpn_server_get_all_fec_stats(const mqvpn_server_t *s, mqvpn_internal_fec_entry
         e->stats.lost_dgram_cnt = (uint64_t)st.lost_dgram_count;
         e->stats.total_app_bytes = st.total_app_bytes;
         e->stats.standby_app_bytes = st.standby_path_app_bytes;
+        free(st.paths_info);
         n++;
     }
     return n;
@@ -1830,23 +1830,18 @@ mqvpn_server_get_client_info(const mqvpn_server_t *server, mqvpn_client_info_t *
 
         ci->connected_at_us = conn->connected_at_us;
 
-        /* Get xquic per-path stats */
+        /* Get xquic per-path stats. paths_info is dynamically allocated
+         * (xquic PR3 §4.3 Rev 4); caller must free(). */
         xqc_conn_stats_t st = xqc_conn_get_stats(s->engine, &conn->cid);
         ci->bytes_tx = st.total_app_bytes;
         ci->bytes_rx = 0;
-        for (int p = 0; p < XQC_MAX_PATHS_COUNT; p++)
+        for (uint32_t p = 0; st.paths_info && p < st.paths_info_count; p++)
             ci->bytes_rx += st.paths_info[p].path_recv_bytes;
 
         int np = 0;
-        for (int p = 0; p < XQC_MAX_PATHS_COUNT && np < MQVPN_MAX_PATHS; p++) {
+        for (uint32_t p = 0;
+             st.paths_info && p < st.paths_info_count && np < MQVPN_MAX_PATHS; p++) {
             xqc_path_metrics_t *pm = &st.paths_info[p];
-            /* Skip the unfilled-slot sentinel xquic writes for unused entries
-             * (xqc_conn.c:3723: paths_info[i].path_id = XQC_MAX_UINT64_VALUE).
-             * Same predicate is already used at the active/standby summary
-             * loop above. The previous filter (path_id==0 && pkt_send==0)
-             * neither caught the sentinel nor was correct for a real path 0
-             * that hasn't sent yet (post-handshake before any data). */
-            if (pm->path_id == UINT64_MAX) break;
 
             mqvpn_path_stats_t *ps = &ci->paths[np];
             ps->struct_size = sizeof(*ps);
@@ -1864,6 +1859,7 @@ mqvpn_server_get_client_info(const mqvpn_server_t *server, mqvpn_client_info_t *
             np++;
         }
         ci->n_paths = np;
+        free(st.paths_info);
         count++;
     }
 

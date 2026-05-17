@@ -68,21 +68,16 @@ static void cli_conn_destroy(mqvpn_client_t *c);
 
 /* Look up xquic per-path metrics by path_id in a stats snapshot.
  *
- * xqc_conn_stats_t.paths_info[] is a fixed-size array of XQC_MAX_PATHS_COUNT
- * entries; entries beyond the populated set carry the sentinel
- * `path_id == XQC_MAX_UINT64_VALUE` (xqc_conn.c:3723), which equals
- * UINT64_MAX from <stdint.h>. Iterating past that sentinel reads stale /
- * uninitialized fields, so every caller MUST bail on it.
- *
- * Returns NULL if path_id is not found (slot not populated, or stats
- * snapshot pre-dates the path's creation). Read-only — caller may
- * inspect any pm->* field but must not write through the pointer. */
+ * xqc_conn_stats_t.paths_info is a dynamically allocated buffer of
+ * paths_info_count entries (xquic PR3 §4.3 Rev 4). Returns NULL if
+ * path_id is not found. Read-only — caller may inspect any pm->* field
+ * but must not write through the pointer. */
 static inline const xqc_path_metrics_t *
 xqc_find_path_metrics(const xqc_conn_stats_t *stats, uint64_t path_id)
 {
-    for (int j = 0; j < XQC_MAX_PATHS_COUNT; j++) {
+    if (stats->paths_info == NULL) return NULL;
+    for (uint32_t j = 0; j < stats->paths_info_count; j++) {
         const xqc_path_metrics_t *pm = &stats->paths_info[j];
-        if (pm->path_id == UINT64_MAX) return NULL; /* sentinel */
         if (pm->path_id == path_id) return pm;
     }
     return NULL;
@@ -2323,6 +2318,7 @@ tick_check_all_validations(mqvpn_client_t *c, uint64_t now)
         LOG_I(c, "path[%d] activated: path_id=%" PRIu64 " iface=%s state=%s", i,
               p->xqc_path_id, p->name, path_lifecycle_name(target));
     }
+    free(st.paths_info);
 }
 
 /* PR4 — tick_confirm_stable_path relocated to path_state_machine.c as
@@ -2448,6 +2444,7 @@ mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
     if (c->engine && c->conn) {
         xqc_conn_stats_t xs = xqc_conn_get_stats(c->engine, &c->conn->cid);
         out->srtt_ms = (int)(xs.srtt / 1000);
+        free(xs.paths_info);
     }
     return MQVPN_OK;
 }
@@ -2481,6 +2478,7 @@ mqvpn_client_get_paths(const mqvpn_client_t *c, mqvpn_path_info_t *out, int max_
         }
     }
     *n_paths = count;
+    free(xstats.paths_info);
     return MQVPN_OK;
 }
 
