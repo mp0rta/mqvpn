@@ -138,7 +138,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake libevent-dev golang iptables clang iperf3
+          sudo apt-get install -y cmake libevent-dev golang iptables conntrack clang iperf3
 
       - name: Compute xquic SHA
         id: xqsha
@@ -249,6 +249,36 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_backup_fec_test.sh
+
+      - name: E2E G-P10 proactive CID issuance (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_g_p10_proactive_cid_test.sh
+
+      - name: E2E G-P14 PATH_ABANDON alt-path (netns, SKIP)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_g_p14_path_abandon_altpath_test.sh
+
+      - name: E2E G-P15 STANDBY signal (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_g_p15_standby_signal_test.sh
+
+      - name: E2E D1 IP-change cwnd/RTT reset (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_d1_ip_change_rebind_test.sh
+
+      - name: E2E D1 port-only retain (negative, netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_d1_port_only_retain_test.sh
 
       - name: E2E IPv6 transport test (netns)
         env:

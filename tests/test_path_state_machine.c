@@ -33,6 +33,25 @@ path_fsm_fire_path_event(struct mqvpn_client_s *c, const path_entry_t *p)
     (void)p;
 }
 
+/* G-P15 (draft-21 §3.3 ¶6): mqvpn-side spy for xquic path-status glue.
+ * client_notify_xqc_path_state is the new accessor that path_state_machine.c
+ * calls from set_path_state_with_log to mirror local lifecycle demotions
+ * onto the xquic conn via xqc_conn_mark_path_{standby,available,frozen}.
+ * The accessor is implemented in mqvpn_client.c (translates app_status to
+ * the right xqc_conn_mark_path_* call); here we record invocations. */
+static int g_p15_call_count;
+static int g_p15_last_app_status;
+static uint64_t g_p15_last_path_id;
+void
+client_notify_xqc_path_state(struct mqvpn_client_s *c, const path_entry_t *p,
+                             int app_status)
+{
+    (void)c;
+    g_p15_call_count++;
+    g_p15_last_app_status = app_status;
+    g_p15_last_path_id = p->xqc_path_id;
+}
+
 static path_entry_t
 make_slot(void)
 {
@@ -914,6 +933,55 @@ test_stable_reset_rearms_timer(void)
     assert(p.path_stable_since_us == t2);
 }
 
+/* G-P15: each local lifecycle demotion must fire the corresponding
+ * xquic mark_path API. STANDBY=1, AVAILABLE=2, FROZEN=3 (xqc_typedef.h). */
+static void
+test_g_p15_lifecycle_notifies_xquic(void)
+{
+    path_entry_t p = {0};
+    p.fd = 7;
+    p.xqc_path_id = 42;
+    p.xquic_path_live = 1;
+    p.platform_attached = 1;
+
+    /* ACTIVE -> STANDBY emits STANDBY (1) */
+    p.state = PATH_LC_ACTIVE;
+    p.status = MQVPN_PATH_ACTIVE;
+    p.state_entered_at_us = 100;
+    g_p15_call_count = 0;
+    set_path_state_with_log(NULL, &p, PATH_LC_STANDBY, PATH_REASON_ACTIVATE_OK);
+    assert(g_p15_call_count == 1);
+    assert(g_p15_last_app_status == 1); /* XQC_APP_PATH_STATUS_STANDBY */
+    assert(g_p15_last_path_id == 42);
+
+    /* STANDBY -> ACTIVE emits AVAILABLE (2) */
+    g_p15_call_count = 0;
+    set_path_state_with_log(NULL, &p, PATH_LC_ACTIVE, PATH_REASON_ACTIVATE_OK);
+    assert(g_p15_call_count == 1);
+    assert(g_p15_last_app_status == 2); /* XQC_APP_PATH_STATUS_AVAILABLE */
+
+    /* ACTIVE -> DEGRADED emits FROZEN (3) */
+    g_p15_call_count = 0;
+    set_path_state_with_log(NULL, &p, PATH_LC_DEGRADED, PATH_REASON_XQUIC_REMOVED);
+    assert(g_p15_call_count == 1);
+    assert(g_p15_last_app_status == 3); /* XQC_APP_PATH_STATUS_FROZEN */
+
+    /* DEGRADED -> CLOSED_RECOVERABLE: no xquic call (closing path) */
+    g_p15_call_count = 0;
+    set_path_state_with_log(NULL, &p, PATH_LC_CLOSED_RECOVERABLE,
+                            PATH_REASON_XQUIC_REMOVED);
+    assert(g_p15_call_count == 0);
+
+    /* STANDBY -> DEGRADED emits FROZEN (3) */
+    p.state = PATH_LC_STANDBY;
+    p.status = MQVPN_PATH_STANDBY;
+    p.state_entered_at_us = 100;
+    g_p15_call_count = 0;
+    set_path_state_with_log(NULL, &p, PATH_LC_DEGRADED, PATH_REASON_XQUIC_REMOVED);
+    assert(g_p15_call_count == 1);
+    assert(g_p15_last_app_status == 3);
+}
+
 int
 main(void)
 {
@@ -960,6 +1028,8 @@ main(void)
     printf("  test_fd_closed_sequence_to_free: OK\n");
     test_stable_reset_rearms_timer();
     printf("  test_stable_reset_rearms_timer: OK\n");
+    test_g_p15_lifecycle_notifies_xquic();
+    printf("  test_g_p15_lifecycle_notifies_xquic: OK\n");
     printf("PASS\n");
     return 0;
 }
