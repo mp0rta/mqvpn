@@ -143,6 +143,12 @@ ip netns exec "$NS_MIDDLE" ip addr add "${SNAT_IP}/24" dev "$VETH_M1" || true
 ip netns exec "$NS_MIDDLE" iptables -t nat -A POSTROUTING -o "$VETH_M1" \
     -s 10.52.0.0/24 -p udp -j SNAT --to-source "${SNAT_IP}:40000-40050"
 
+# Companion SNAT for non-UDP traffic (ICMP pre-flight ping, etc.) so the
+# pre-flight check can validate L3 connectivity. Port-only rotation below
+# only swaps the -p udp rule; this rule stays unchanged.
+ip netns exec "$NS_MIDDLE" iptables -t nat -A POSTROUTING -o "$VETH_M1" \
+    -s 10.52.0.0/24 ! -p udp -j SNAT --to-source "$SNAT_IP"
+
 ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$SERVER_ADDR" >/dev/null || {
     echo "SKIP: pre-flight ping via NAT failed"
     exit 0
@@ -196,6 +202,10 @@ else
             ip netns exec "$NS_MIDDLE" iptables -t nat -F
             ip netns exec "$NS_MIDDLE" iptables -t nat -A POSTROUTING -o "$VETH_M1" \
                 -s 10.52.0.0/24 -p udp -j SNAT --to-source "${SNAT_IP}:50000-50050"
+            # Re-add non-UDP SNAT (was flushed above) to keep ICMP / control
+            # traffic working through middle.
+            ip netns exec "$NS_MIDDLE" iptables -t nat -A POSTROUTING -o "$VETH_M1" \
+                -s 10.52.0.0/24 ! -p udp -j SNAT --to-source "$SNAT_IP"
             ip netns exec "$NS_MIDDLE" conntrack -F 2>/dev/null || true
 
             ( for i in $(seq 1 10); do
