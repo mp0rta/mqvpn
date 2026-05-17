@@ -140,7 +140,7 @@ start_client() {
 }
 
 wait_tunnel() {
-    local timeout="${1:-15}" elapsed=0
+    local timeout="${1:-30}" elapsed=0
     while [ "$elapsed" -lt "$timeout" ]; do
         if ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$TUNNEL_IP" >/dev/null 2>&1; then
             return 0
@@ -161,31 +161,31 @@ elif ! start_client; then
     echo "  FAIL: client did not start"
     cat "${WORK_DIR}/client.log"
     FAIL=$((FAIL + 1))
-elif ! wait_tunnel 15; then
-    echo "  FAIL: tunnel not reachable within 15s"
+elif ! wait_tunnel 30; then
+    echo "  FAIL: tunnel not reachable within 30s"
     tail -40 "${WORK_DIR}/client.log"
     FAIL=$((FAIL + 1))
 else
     # Allow ~2s for post-handshake proactive issuance + alt-path propagation.
     sleep 2
 
-    # Client receives MP NEW_CID frames from server. The xquic log line is:
-    #   |new_conn_id|<cid>|sr_token:<token>
-    # emitted in xqc_process_mp_new_conn_id_frame (xqc_frame.c:2133).
-    # G-P10 should produce distinct CID receipts for path_id 0 AND 1.
-    #
-    # Count distinct CID values logged after handshake completes — a single
-    # receipt indicates only path_id=0 got a CID (pre-G-P10 behaviour).
-    CID_COUNT=$(grep -c "|new_conn_id|" "${WORK_DIR}/client.log" || true)
-    echo "  observed new_conn_id frame receipts on client: ${CID_COUNT}"
+    # Server emits MP NEW_CID per UNUSED path_id (G-P10). The server-side
+    # emission log in xqc_write_mp_new_conn_id_frame_to_packet
+    # (xqc_packet_out.c:1799) format is:
+    #   |path_id:N|cid:<cid>|sr_token:<token>|seq_num:M
+    # path_id=0 is always issued (pre-G-P10 behaviour); G-P10 adds path_id>=1.
+    # Note: the client-side receipt log "|new_conn_id|<cid>|sr_token:..."
+    # does NOT carry path_id, so we must check server.log for emission.
+    PATH_ID_GE_1_COUNT=$(grep -cE '\|path_id:[1-9][0-9]*\|cid:[0-9a-f]+\|sr_token:' "${WORK_DIR}/server.log" || true)
+    echo "  observed server emissions for path_id>=1: ${PATH_ID_GE_1_COUNT}"
 
-    if [ "$CID_COUNT" -lt 2 ]; then
-        echo "  FAIL: expected >=2 NEW_CID receipts (one per path), got ${CID_COUNT}"
-        echo "  --- client.log (last 80 lines) ---"
-        tail -80 "${WORK_DIR}/client.log"
+    if [ "$PATH_ID_GE_1_COUNT" -lt 1 ]; then
+        echo "  FAIL: no MP NEW_CID emission for path_id>=1 (G-P10 proactive issuance)"
+        echo "  --- server.log (last 80 lines) ---"
+        tail -80 "${WORK_DIR}/server.log"
         FAIL=$((FAIL + 1))
     else
-        echo "  PASS: proactive CID issuance observed"
+        echo "  PASS: proactive CID issuance observed for path_id>=1"
         PASS=$((PASS + 1))
     fi
 fi

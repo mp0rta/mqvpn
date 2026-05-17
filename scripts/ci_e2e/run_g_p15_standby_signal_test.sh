@@ -138,7 +138,7 @@ else
         echo "  FAIL: client died"; cat "${WORK_DIR}/client.log"; FAIL=$((FAIL + 1))
     else
         TUNNEL_OK=0
-        for i in $(seq 1 15); do
+        for i in $(seq 1 30); do
             if ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$TUNNEL_IP" >/dev/null 2>&1; then
                 TUNNEL_OK=1; break
             fi

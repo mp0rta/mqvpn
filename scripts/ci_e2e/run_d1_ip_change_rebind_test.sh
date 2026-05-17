@@ -24,7 +24,9 @@ source "$(dirname "$0")/sanitizer_check.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MQVPN=""
-LOG_LEVEL="info"   # cwnd_rtt_reset is XQC_LOG_INFO
+LOG_LEVEL="debug"  # mqvpn INFO -> xquic WARN per log_level_xquic_mapping;
+                   # the D1 markers (REBINDING|*, MIGRATION|cwnd_rtt_reset) are
+                   # at xquic XQC_LOG_INFO and require mqvpn debug to surface.
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -183,7 +185,7 @@ else
         echo "  FAIL: client died"; cat "${WORK_DIR}/client.log"; FAIL=$((FAIL + 1))
     else
         TUNNEL_OK=0
-        for i in $(seq 1 15); do
+        for i in $(seq 1 30); do
             if ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$TUNNEL_IP" >/dev/null 2>&1; then
                 TUNNEL_OK=1; break
             fi

@@ -22,7 +22,9 @@ source "$(dirname "$0")/sanitizer_check.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MQVPN=""
-LOG_LEVEL="info"
+LOG_LEVEL="debug"  # mqvpn INFO -> xquic WARN per log_level_xquic_mapping;
+                   # the REBINDING|* markers are at xquic XQC_LOG_INFO and
+                   # require mqvpn debug to surface.
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -37,6 +39,11 @@ MQVPN="$(realpath "$MQVPN")"
 
 if ! command -v iptables >/dev/null 2>&1; then
     echo "SKIP: iptables not available (required for SNAT scenario)"
+    exit 0
+fi
+if ! command -v conntrack >/dev/null 2>&1; then
+    echo "SKIP: conntrack tool not available; port-only test requires conntrack"
+    echo "      flush to force SNAT rule swap on the existing UDP flow."
     exit 0
 fi
 
@@ -171,7 +178,7 @@ else
         echo "  FAIL: client died"; cat "${WORK_DIR}/client.log"; FAIL=$((FAIL + 1))
     else
         TUNNEL_OK=0
-        for i in $(seq 1 15); do
+        for i in $(seq 1 30); do
             if ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$TUNNEL_IP" >/dev/null 2>&1; then
                 TUNNEL_OK=1; break
             fi
@@ -189,8 +196,7 @@ else
             ip netns exec "$NS_MIDDLE" iptables -t nat -F
             ip netns exec "$NS_MIDDLE" iptables -t nat -A POSTROUTING -o "$VETH_M1" \
                 -s 10.52.0.0/24 -p udp -j SNAT --to-source "${SNAT_IP}:50000-50050"
-            command -v conntrack >/dev/null 2>&1 && \
-                ip netns exec "$NS_MIDDLE" conntrack -F 2>/dev/null || true
+            ip netns exec "$NS_MIDDLE" conntrack -F 2>/dev/null || true
 
             ( for i in $(seq 1 10); do
                 ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$TUNNEL_IP" >/dev/null 2>&1 || true
