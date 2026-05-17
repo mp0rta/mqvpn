@@ -118,7 +118,7 @@ start_server() {
         --cert "${WORK_DIR}/server.crt" \
         --key "${WORK_DIR}/server.key" \
         --auth-key "$PSK" \
-        --scheduler min_srtt \
+        --scheduler minrtt \
         --log-level "$LOG_LEVEL" > "${WORK_DIR}/server.log" 2>&1 &
     SERVER_PID=$!
     sleep 2
@@ -132,7 +132,7 @@ start_client() {
         --path "$VETH_A0" --path "$VETH_B0" \
         --auth-key "$PSK" \
         --insecure \
-        --scheduler min_srtt \
+        --scheduler minrtt \
         --log-level "$LOG_LEVEL" > "${WORK_DIR}/client.log" 2>&1 &
     CLIENT_PID=$!
     sleep 3
