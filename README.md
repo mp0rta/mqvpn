@@ -7,7 +7,7 @@ Multipath QUIC VPN using [MASQUE CONNECT-IP (RFC 9484)](https://www.rfc-editor.o
 - **Multipath** — Bind multiple interfaces (WiFi + LTE, dual ISP). Seamless failover and bandwidth aggregation via WLB scheduler.
 - **Standards-based** — MASQUE CONNECT-IP (RFC 9484), no proprietary tunnel format.
 - **Dual-stack** — IPv4 + IPv6 inside the tunnel.
-- **Android SDK** — Kotlin SDK via JNI. Apps implement `onCreateTun()` and `onVpnStateChanged()`.
+- **Multi-Platform** — Available on Linux (server/client), Windows (client only) and Android (client only) support.
 - **PSK auth** — Pre-shared key over TLS 1.3.
 - **DNS override** — Prevents DNS leaks. Uses `resolvectl` on systemd-resolved systems, falls back to resolv.conf.
 
@@ -163,7 +163,7 @@ Notes:
 - `users` is server-side auth and accepts either objects (`{"name","key"}`) or `"name:key"` strings.
 - `auth_key` remains supported as a single legacy/global key.
 - `mode` is optional if it can be inferred (`listen` implies server).
-- **Monitoring requires per-user keys.** Sharing a single `auth_key` across
+- **[mqvpn-prometheus-exporter](https://github.com/mp0rta/mqvpn-prometheus-exporter) requires per-user keys.** Using mqvpn-prometheus-exporter, you can correct and visualize mqvpn metrics. If you use it, sharing a single `auth_key` across
   multiple clients works for the VPN data plane, but the control API
   surfaces those sessions as `user="(global)"` and the Prometheus exporter
   cannot distinguish them — series labels collide and the scrape is
