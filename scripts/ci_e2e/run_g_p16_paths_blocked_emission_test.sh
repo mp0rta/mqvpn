@@ -15,21 +15,12 @@
 #   1. mqvpn client adds path -> xquic Stage 1 reject (path_id > cap)
 #   2. xquic G-P16 send-side emits PATHS_BLOCKED toward server
 #      (log marker: "|PATHS_BLOCKED sent|")
-#   3. xquic server PR7 auto-grant path observes PATHS_BLOCKED and
-#      MAY emit a MAX_PATH_ID grant if the operator has opted in via
-#      conn_settings.max_path_id_grant_max_value > 0 (default 0 =
-#      disabled). When enabled, log marker:
-#          "|MAX_PATH_ID auto-grant|new_local_max:..."
+#   3. xquic server PR7 auto-grant observes PATHS_BLOCKED and emits
+#      MAX_PATH_ID grant (mqvpn-server enables this via
+#      conn_settings.max_path_id_grant_max_value = 64 since PR8).
+#      Log marker: "|MAX_PATH_ID auto-grant|new_local_max:..."
 #   4. Client recv processes MAX_PATH_ID, next path creation
 #      succeeds, tunnel stays alive.
-#
-# NOTE on the A2 assertion (server-side grant log):
-#   mqvpn server today does NOT set conn_settings.max_path_id_grant_max_value,
-#   so the auto-grant gate is closed by default. A2 is therefore
-#   treated as INFORMATIONAL (warn-not-fail) — the script reports
-#   PASS / SKIP / WARN for A2 without failing overall. A1 (client
-#   emit) and A3 (tunnel-alive) are the load-bearing PR8 send-side
-#   assertions and remain hard.
 #
 # Topology (dual-path multipath; mirrors run_carrier_flap_test.sh):
 #   vpn-client                   vpn-server
@@ -260,7 +251,6 @@ echo ""
 echo "=== Assertions ==="
 PASS=0
 FAIL=0
-WARN=0
 
 # A1 (hard) — G-P16 client-side PATHS_BLOCKED emission. The exact
 # substring is load-bearing per xquic L5e Task 1.4 log wording at
@@ -276,21 +266,18 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# A2 (informational) — server-side MAX_PATH_ID auto-grant.
+# A2 (hard) — server-side MAX_PATH_ID auto-grant (PR7 receive-side
+# closed-loop counterpart). mqvpn-server enables this in PR8 via
+# conn_settings.max_path_id_grant_max_value = 64 (mqvpn_server.c).
 # Log wording at xqc_frame.c:2440:
 #   "|MAX_PATH_ID auto-grant|new_local_max:%ui|"
-# Today mqvpn server does NOT opt in to auto-grant
-# (conn_settings.max_path_id_grant_max_value is left at default 0),
-# so this assertion is WARN-not-FAIL. Once mqvpn server enables the
-# opt-in, this should be promoted to a hard assertion.
 if grep -q '|MAX_PATH_ID auto-grant|' "${WORK_DIR}/server.log"; then
     echo "A2 PASS: server PR7 MAX_PATH_ID auto-grant fired"
     PASS=$((PASS + 1))
 else
-    echo "A2 WARN: '|MAX_PATH_ID auto-grant|' not in server.log"
-    echo "  (Expected today — mqvpn server has not enabled"
-    echo "   max_path_id_grant_max_value; treated as informational.)"
-    WARN=$((WARN + 1))
+    echo "A2 FAIL: '|MAX_PATH_ID auto-grant|' not in server.log"
+    echo "  (PR7 auto-grant should fire after client PATHS_BLOCKED.)"
+    FAIL=$((FAIL + 1))
 fi
 
 # A3 (hard) — tunnel must survive the entire flap storm.
@@ -305,7 +292,7 @@ else
 fi
 
 echo ""
-echo "=== Summary: PASS=${PASS} FAIL=${FAIL} WARN=${WARN} ==="
+echo "=== Summary: PASS=${PASS} FAIL=${FAIL} ==="
 
 if [ "$FAIL" -ne 0 ]; then
     exit 1

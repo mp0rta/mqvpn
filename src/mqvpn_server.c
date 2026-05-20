@@ -1215,6 +1215,9 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     conn_settings.so_sndbuf = 8 * 1024 * 1024;
     conn_settings.idle_time_out = 120000;
     conn_settings.init_idle_time_out = 10000;
+    /* draft-21 §3.2.1 ¶7 auto-grant MAX_PATH_ID on PATHS_BLOCKED receipt.
+     * 64 mirrors the failover_storm quick-win precedent. */
+    conn_settings.max_path_id_grant_max_value = 64;
     xqc_server_set_conn_settings(s->engine, &conn_settings);
 
     /* H3 callbacks */
