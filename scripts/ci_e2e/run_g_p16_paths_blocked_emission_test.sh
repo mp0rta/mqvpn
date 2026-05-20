@@ -35,7 +35,11 @@ source "$(dirname "$0")/sanitizer_check.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MQVPN=""
-LOG_LEVEL="info"
+# debug required: mqvpn INFO -> xquic WARN per project_log_level_xquic_mapping.md,
+# so xquic XQC_LOG_INFO markers ("|PATHS_BLOCKED sent|", "|MAX_PATH_ID auto-grant|")
+# are filtered out unless mqvpn runs at debug. Per-packet log flood cliff (5x
+# Windows perf hit) does not apply under Linux netns CI.
+LOG_LEVEL="debug"
 
 while [ $# -gt 0 ]; do
     case "$1" in
