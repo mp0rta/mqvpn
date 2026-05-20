@@ -268,6 +268,12 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_g_p15_standby_signal_test.sh
 
+      - name: E2E G-P16 PATHS_BLOCKED emission (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_g_p16_paths_blocked_emission_test.sh
+
       - name: E2E D1 IP-change cwnd/RTT reset (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
