@@ -311,6 +311,14 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
     case SEC_MULTIPATH:
         if (strcasecmp(key, "Scheduler") == 0) {
             snprintf(cfg->scheduler, sizeof(cfg->scheduler), "%s", val);
+        } else if (strcasecmp(key, "InitMaxPathId") == 0) {
+            char *end = NULL;
+            unsigned long long v = strtoull(val, &end, 10);
+            if (!end || *end != '\0') {
+                LOG_WRN("%s:%d: invalid InitMaxPathId '%s'", path, lineno, val);
+            } else {
+                cfg->init_max_path_id = v;
+            }
         } else if (strcasecmp(key, "Path") == 0) {
             if (cfg->n_paths < MQVPN_CONFIG_MAX_PATHS) {
                 snprintf(cfg->paths[cfg->n_paths], sizeof(cfg->paths[0]), "%s", val);
@@ -404,6 +412,10 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     v = json_find_key(json_text, "scheduler");
     if (v && json_read_string(v, s32, sizeof(s32)) == 0)
         mqvpn_copy_str(cfg->scheduler, sizeof(cfg->scheduler), s32);
+
+    v = json_find_key(json_text, "init_max_path_id");
+    if (v && json_read_int(v, &iv) == 0 && iv >= 0)
+        cfg->init_max_path_id = (unsigned long long)iv;
 
     v = json_find_key(json_text, "reconnect");
     if (v && json_read_bool(v, &iv) == 0) cfg->reconnect = iv;

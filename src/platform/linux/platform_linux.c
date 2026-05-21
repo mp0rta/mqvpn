@@ -1015,6 +1015,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     default: lib_sched = MQVPN_SCHED_MINRTT; break;
     }
     mqvpn_config_set_scheduler(lib_cfg, lib_sched);
+    mqvpn_config_set_init_max_path_id(lib_cfg, cfg->init_max_path_id);
 
     /* Create callbacks */
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
@@ -1461,6 +1462,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     default: lib_sched = MQVPN_SCHED_MINRTT; break;
     }
     mqvpn_config_set_scheduler(lib_cfg, lib_sched);
+    mqvpn_config_set_init_max_path_id(lib_cfg, cfg->init_max_path_id);
 
     mqvpn_config_set_log_level(lib_cfg, (mqvpn_log_level_t)cfg->log_level);
 

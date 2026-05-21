@@ -137,6 +137,7 @@ mqvpn_config_new(void)
     cfg->reconnect_interval_sec = 5;
     cfg->max_clients = 64;
     cfg->listen_port = 443;
+    cfg->init_max_path_id = 0; /* 0 = use xquic default (8) */
 
     return cfg;
 }
@@ -308,6 +309,11 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
         cfg->killswitch_hint = iv;
     }
 
+    v = json_find_key(json_text, "init_max_path_id");
+    if (v && json_read_int(v, &iv) == MQVPN_OK && iv >= 0) {
+        cfg->init_max_path_id = (uint64_t)iv;
+    }
+
     /* "paths" sets the multipath flag; individual interface names are not stored
      * in the opaque config — callers must configure interface binding separately
      * via the platform layer. */
@@ -337,6 +343,14 @@ mqvpn_config_set_scheduler(mqvpn_config_t *cfg, mqvpn_scheduler_t sched)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     cfg->scheduler = sched;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_init_max_path_id(mqvpn_config_t *cfg, uint64_t v)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->init_max_path_id = v;
     return MQVPN_OK;
 }
 

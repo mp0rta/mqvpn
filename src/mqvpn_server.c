@@ -1220,6 +1220,11 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
      * is the active path creator in mqvpn architecture, so server-only enable
      * suffices (client.c intentionally does not set this). */
     conn_settings.max_path_id_grant_max_value = 64;
+    /* draft-21 §4.6: optionally cap initial path-id space (e.g. =2 for the
+     * G-P16 PATHS_BLOCKED closed-loop e2e). 0 = leave xquic default (8). */
+    if (cfg->init_max_path_id > 0) {
+        conn_settings.init_max_path_id = cfg->init_max_path_id;
+    }
     xqc_server_set_conn_settings(s->engine, &conn_settings);
 
     /* H3 callbacks */
