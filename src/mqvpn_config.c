@@ -310,8 +310,10 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
     }
 
     v = json_find_key(json_text, "init_max_path_id");
-    if (v && json_read_int(v, &iv) == MQVPN_OK && iv >= 0) {
-        cfg->init_max_path_id = (uint64_t)iv;
+    if (v) {
+        /* uint64 field; use int64 reader to match INI strtoull width */
+        int64_t iv64 = json_read_int64(v);
+        if (iv64 >= 0) cfg->init_max_path_id = (uint64_t)iv64;
     }
 
     /* "paths" sets the multipath flag; individual interface names are not stored

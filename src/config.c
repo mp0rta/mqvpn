@@ -414,8 +414,11 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
         mqvpn_copy_str(cfg->scheduler, sizeof(cfg->scheduler), s32);
 
     v = json_find_key(json_text, "init_max_path_id");
-    if (v && json_read_int(v, &iv) == 0 && iv >= 0)
-        cfg->init_max_path_id = (unsigned long long)iv;
+    if (v) {
+        /* uint64 field; use int64 reader to match INI strtoull width */
+        int64_t iv64 = json_read_int64(v);
+        if (iv64 >= 0) cfg->init_max_path_id = (unsigned long long)iv64;
+    }
 
     v = json_find_key(json_text, "reconnect");
     if (v && json_read_bool(v, &iv) == 0) cfg->reconnect = iv;

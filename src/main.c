@@ -17,6 +17,7 @@
 #  include "status.h"
 #endif
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -243,9 +244,17 @@ main(int argc, char *argv[])
             break;
         case 'S': scheduler_str = optarg; break;
         case 0x100: {
+            /* Reject leading '-' explicitly: strtoull silently wraps "-1" to
+             * UINT64_MAX rather than failing. */
+            if (optarg[0] == '-' || optarg[0] == '\0') {
+                fprintf(stderr, "error: --init-max-path-id must be a non-negative "
+                                "integer\n");
+                return 1;
+            }
             char *end = NULL;
+            errno = 0;
             unsigned long long v = strtoull(optarg, &end, 10);
-            if (!end || *end != '\0') {
+            if (!end || *end != '\0' || errno == ERANGE) {
                 fprintf(stderr, "error: --init-max-path-id must be a non-negative "
                                 "integer\n");
                 return 1;
