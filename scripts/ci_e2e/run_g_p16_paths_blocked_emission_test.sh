@@ -1,31 +1,43 @@
 #!/bin/bash
 # run_g_p16_paths_blocked_emission_test.sh — E2E test for the
 # PR7 (receive auto-grant) + PR8 (G-P16 PATHS_BLOCKED send-side)
-# closed loop, exercised via a carrier-flap stress scenario.
+# closed loop, exercised via a deterministic 4-path startup scenario
+# (Option E: low init_max_path_id).
 #
 # Background
 # ----------
-# Per draft-21 §4.5, abandoned path_ids are NEVER recycled. mqvpn
-# allocates the next unused path_id every time a path is added. The
-# xquic default init_max_path_id is 8 (XQC_DEFAULT_INIT_MAX_PATH_ID),
-# so after enough alternating carrier flaps the next requested
-# path_id will exceed the cap and Stage 1 reject fires.
+# xquic Stage 1 reject in xqc_path_create:
+#   if (path_id > conn->remote_settings.init_max_path_id
+#       && path_id > conn->local_max_path_id) { reject + G-P16 fire }
+#
+# This is an AND condition: the effective accept-cap is
+#   max(remote_init_max_path_id, local_max_path_id).
+# To trigger G-P16 deterministically in a mqvpn-only scenario, BOTH
+# endpoints must advertise init_max_path_id = 2. With both = 2:
+#   - path_id 0,1,2 → accept
+#   - path_id 3     → 3 > 2 && 3 > 2 → Stage 1 reject → G-P16 fires
+#
+# 2 is the only value that works within MQVPN_MAX_PATHS=4: it lets
+# the first 3 paths succeed and traps the 4th at startup, no carrier
+# flap timing required.
 #
 # The closed loop being validated:
-#   1. mqvpn client adds path -> xquic Stage 1 reject (path_id > cap)
+#   1. mqvpn client adds path_id 3 → xquic Stage 1 reject
 #   2. xquic G-P16 send-side emits PATHS_BLOCKED toward server
 #      (log marker: "|PATHS_BLOCKED sent|")
 #   3. xquic server PR7 auto-grant observes PATHS_BLOCKED and emits
 #      MAX_PATH_ID grant (mqvpn-server enables this via
 #      conn_settings.max_path_id_grant_max_value = 64 since PR8).
 #      Log marker: "|MAX_PATH_ID auto-grant|new_local_max:..."
-#   4. Client recv processes MAX_PATH_ID, next path creation
-#      succeeds, tunnel stays alive.
+#   4. Client recv processes MAX_PATH_ID; tunnel remains alive on
+#      paths 0..2 and (eventually) path 3 succeeds on retry.
 #
-# Topology (dual-path multipath; mirrors run_carrier_flap_test.sh):
+# Topology (4 paths, 2 netns):
 #   vpn-client                   vpn-server
-#     veth-a0 ─────────────────── veth-a1       Path A (10.100.0.0/24)
-#     veth-b0 ─────────────────── veth-b1       Path B (10.200.0.0/24)
+#     veth-a0 ─────────────────── veth-a1       Path A (10.10.0.0/24)
+#     veth-b0 ─────────────────── veth-b1       Path B (10.20.0.0/24)
+#     veth-c0 ─────────────────── veth-c1       Path C (10.30.0.0/24)
+#     veth-d0 ─────────────────── veth-d1       Path D (10.40.0.0/24)
 #
 # Usage: sudo ./run_g_p16_paths_blocked_emission_test.sh [path-to-mqvpn-binary] [--log-level LEVEL]
 
@@ -66,12 +78,16 @@ VETH_A0="veth-a0-gp16"
 VETH_A1="veth-a1-gp16"
 VETH_B0="veth-b0-gp16"
 VETH_B1="veth-b1-gp16"
+VETH_C0="veth-c0-gp16"
+VETH_C1="veth-c1-gp16"
+VETH_D0="veth-d0-gp16"
+VETH_D1="veth-d1-gp16"
 
-IP_A_CLIENT="10.100.0.2/24"
-IP_A_SERVER="10.100.0.1/24"
-IP_B_CLIENT="10.200.0.2/24"
-IP_B_SERVER="10.200.0.1/24"
-SERVER_ADDR="10.100.0.1"
+IP_A_CLIENT="10.10.0.2/24"; IP_A_SERVER="10.10.0.1/24"
+IP_B_CLIENT="10.20.0.2/24"; IP_B_SERVER="10.20.0.1/24"
+IP_C_CLIENT="10.30.0.2/24"; IP_C_SERVER="10.30.0.1/24"
+IP_D_CLIENT="10.40.0.2/24"; IP_D_SERVER="10.40.0.1/24"
+SERVER_ADDR="10.10.0.1"
 TUNNEL_IP="10.0.0.1"
 
 SERVER_PID=""
@@ -90,6 +106,8 @@ cleanup() {
     ip netns del "$NS_CLIENT" 2>/dev/null || true
     ip link del "$VETH_A0" 2>/dev/null || true
     ip link del "$VETH_B0" 2>/dev/null || true
+    ip link del "$VETH_C0" 2>/dev/null || true
+    ip link del "$VETH_D0" 2>/dev/null || true
     rm -rf "$WORK_DIR"
     if [ "$SANITIZER_FAIL" -ne 0 ]; then
         echo "FAIL: sanitizer errors detected"
@@ -103,6 +121,8 @@ ip netns del "$NS_SERVER" 2>/dev/null || true
 ip netns del "$NS_CLIENT" 2>/dev/null || true
 ip link del "$VETH_A0" 2>/dev/null || true
 ip link del "$VETH_B0" 2>/dev/null || true
+ip link del "$VETH_C0" 2>/dev/null || true
+ip link del "$VETH_D0" 2>/dev/null || true
 
 wait_for_log() {
     local log_file="$1" pattern="$2" timeout="${3:-15}"
@@ -126,33 +146,41 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
 ip netns add "$NS_SERVER"
 ip netns add "$NS_CLIENT"
 
-ip link add "$VETH_A0" type veth peer name "$VETH_A1"
-ip link set "$VETH_A0" netns "$NS_CLIENT"
-ip link set "$VETH_A1" netns "$NS_SERVER"
-ip netns exec "$NS_CLIENT" ip addr add "$IP_A_CLIENT" dev "$VETH_A0"
-ip netns exec "$NS_SERVER" ip addr add "$IP_A_SERVER" dev "$VETH_A1"
-ip netns exec "$NS_CLIENT" ip link set "$VETH_A0" up
-ip netns exec "$NS_SERVER" ip link set "$VETH_A1" up
+# Create 4 veth pairs
+add_veth() {
+    local v0="$1" v1="$2" ipc="$3" ips="$4"
+    ip link add "$v0" type veth peer name "$v1"
+    ip link set "$v0" netns "$NS_CLIENT"
+    ip link set "$v1" netns "$NS_SERVER"
+    ip netns exec "$NS_CLIENT" ip addr add "$ipc" dev "$v0"
+    ip netns exec "$NS_SERVER" ip addr add "$ips" dev "$v1"
+    ip netns exec "$NS_CLIENT" ip link set "$v0" up
+    ip netns exec "$NS_SERVER" ip link set "$v1" up
+}
 
-ip link add "$VETH_B0" type veth peer name "$VETH_B1"
-ip link set "$VETH_B0" netns "$NS_CLIENT"
-ip link set "$VETH_B1" netns "$NS_SERVER"
-ip netns exec "$NS_CLIENT" ip addr add "$IP_B_CLIENT" dev "$VETH_B0"
-ip netns exec "$NS_SERVER" ip addr add "$IP_B_SERVER" dev "$VETH_B1"
-ip netns exec "$NS_CLIENT" ip link set "$VETH_B0" up
-ip netns exec "$NS_SERVER" ip link set "$VETH_B1" up
+add_veth "$VETH_A0" "$VETH_A1" "$IP_A_CLIENT" "$IP_A_SERVER"
+add_veth "$VETH_B0" "$VETH_B1" "$IP_B_CLIENT" "$IP_B_SERVER"
+add_veth "$VETH_C0" "$VETH_C1" "$IP_C_CLIENT" "$IP_C_SERVER"
+add_veth "$VETH_D0" "$VETH_D1" "$IP_D_CLIENT" "$IP_D_SERVER"
 
 ip netns exec "$NS_CLIENT" ip link set lo up
 ip netns exec "$NS_SERVER" ip link set lo up
 
 ip netns exec "$NS_SERVER" sysctl -w net.ipv4.ip_forward=1 >/dev/null
 ip netns exec "$NS_SERVER" ip addr add "${SERVER_ADDR}/32" dev lo
-ip netns exec "$NS_CLIENT" ip route add 10.100.0.0/24 via 10.200.0.1 dev "$VETH_B0" metric 200
+
+# Non-primary paths reach the server via their own subnet → server lo.
+# Path A is the primary (server bind/connect addr), so no extra route needed.
+ip netns exec "$NS_CLIENT" ip route add 10.10.0.0/24 via 10.20.0.1 dev "$VETH_B0" metric 200
+ip netns exec "$NS_CLIENT" ip route add 10.10.0.0/24 via 10.30.0.1 dev "$VETH_C0" metric 300
+ip netns exec "$NS_CLIENT" ip route add 10.10.0.0/24 via 10.40.0.1 dev "$VETH_D0" metric 400
 
 ip netns exec "$NS_CLIENT" ping -c 1 -W 2 "$SERVER_ADDR" >/dev/null
-ip netns exec "$NS_CLIENT" ping -c 1 -W 2 10.200.0.1 >/dev/null
+ip netns exec "$NS_CLIENT" ping -c 1 -W 2 10.20.0.1 >/dev/null
+ip netns exec "$NS_CLIENT" ping -c 1 -W 2 10.30.0.1 >/dev/null
+ip netns exec "$NS_CLIENT" ping -c 1 -W 2 10.40.0.1 >/dev/null
 
-# ─── Server ───
+# ─── Server (init_max_path_id=2: caps Stage 1 at path_id 2) ───
 ip netns exec "$NS_SERVER" "$MQVPN" \
     --mode server \
     --listen "0.0.0.0:4433" \
@@ -161,6 +189,7 @@ ip netns exec "$NS_SERVER" "$MQVPN" \
     --key "${WORK_DIR}/server.key" \
     --auth-key "$PSK" \
     --scheduler wlb \
+    --init-max-path-id 2 \
     --log-level "$LOG_LEVEL" >"${WORK_DIR}/server.log" 2>&1 &
 SERVER_PID=$!
 sleep 2
@@ -170,14 +199,15 @@ if ! kill -0 "$SERVER_PID" 2>/dev/null; then
     exit 1
 fi
 
-# ─── Client ───
+# ─── Client (4 paths, init_max_path_id=2: path_id 3 trips G-P16) ───
 ip netns exec "$NS_CLIENT" "$MQVPN" \
     --mode client \
     --server "${SERVER_ADDR}:4433" \
-    --path "$VETH_A0" --path "$VETH_B0" \
+    --path "$VETH_A0" --path "$VETH_B0" --path "$VETH_C0" --path "$VETH_D0" \
     --auth-key "$PSK" \
     --insecure \
     --scheduler wlb \
+    --init-max-path-id 2 \
     --log-level "$LOG_LEVEL" >"${WORK_DIR}/client.log" 2>&1 &
 CLIENT_PID=$!
 sleep 3
@@ -187,7 +217,7 @@ if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
     exit 1
 fi
 
-# Wait for tunnel up
+# Wait for tunnel up on the primary path
 ELAPSED=0
 while [ "$ELAPSED" -lt 15 ]; do
     if ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$TUNNEL_IP" >/dev/null 2>&1; then
@@ -203,49 +233,16 @@ if [ "$ELAPSED" -ge 15 ]; then
 fi
 echo "OK: tunnel up (${ELAPSED}s)"
 
-echo "Waiting for dual-path activation..."
-if ! wait_for_log "${WORK_DIR}/client.log" "path.*activated|state=ACTIVE" 15; then
-    echo "=== FAIL: Secondary path not activated within 15s ==="
-    cat "${WORK_DIR}/client.log"
-    exit 1
-fi
-echo "OK: dual-path active"
-
-# =================================================================
-#  Stress loop: 8 alternating carrier flaps (server-side veth)
-#
-#  Each flap = path drop + path re-add, consuming one new path_id
-#  (draft-21 §4.5: path_ids are never recycled). With xquic default
-#  init_max_path_id = 8, by ~cycle 7-8 the next requested path_id
-#  reaches the cap, triggering G-P16 PATHS_BLOCKED send-side.
-#
-#  We toggle the SERVER end of the veth pair (mirrors
-#  run_carrier_flap_test.sh) so client-side observes the carrier
-#  drop / restore path that is_carrier_loss() in platform_linux.c
-#  gates on.
-# =================================================================
-
-echo ""
-echo "=== Stress: 8 alternating carrier flaps to exhaust path_id space ==="
-
-for cycle in $(seq 1 8); do
-    if [ $((cycle % 2)) -eq 1 ]; then
-        PATH_END="$VETH_A1"
-        LABEL="A"
-    else
-        PATH_END="$VETH_B1"
-        LABEL="B"
-    fi
-    echo "  cycle ${cycle}/8: flap ${LABEL} (${PATH_END})"
-    ip netns exec "$NS_SERVER" ip link set "$PATH_END" down
-    sleep 2
-    ip netns exec "$NS_SERVER" ip link set "$PATH_END" up
-    sleep 3
-done
-
-# Allow time for the final PATHS_BLOCKED emit + optional grant
-# round-trip to settle into the log file.
-sleep 5
+# Wait for the closed-loop markers to settle. We don't strictly require
+# all 4 paths to be ACTIVE — what we want is:
+#   - path_id 3 attempted on the client (Stage 1 reject)
+#   - PATHS_BLOCKED emitted (A1)
+#   - MAX_PATH_ID auto-grant emitted on server (A2)
+# Give the engines ~12s to round-trip these.
+echo "Waiting up to 12s for PATHS_BLOCKED closed loop..."
+wait_for_log "${WORK_DIR}/client.log" '\|PATHS_BLOCKED sent\|' 12 || true
+wait_for_log "${WORK_DIR}/server.log" '\|MAX_PATH_ID auto-grant\|' 5 || true
+sleep 2  # final settle
 
 # =================================================================
 #  Assertions — the closed loop
@@ -264,9 +261,10 @@ if grep -q '|PATHS_BLOCKED sent|' "${WORK_DIR}/client.log"; then
     PASS=$((PASS + 1))
 else
     echo "A1 FAIL: '|PATHS_BLOCKED sent|' not found in client.log"
-    echo "  (This may indicate the 8 flaps did not exhaust the path_id"
-    echo "   space, e.g. recovery timer did not re-add every dropped slot,"
-    echo "   or the 3s/cycle pacing was too tight.)"
+    echo "  (Expected: client tries path_id 3 with init_max_path_id=2 cap"
+    echo "   → Stage 1 reject → PATHS_BLOCKED emit.)"
+    echo "--- last 80 lines of client.log ---"
+    tail -n 80 "${WORK_DIR}/client.log" || true
     FAIL=$((FAIL + 1))
 fi
 
@@ -281,15 +279,19 @@ if grep -q '|MAX_PATH_ID auto-grant|' "${WORK_DIR}/server.log"; then
 else
     echo "A2 FAIL: '|MAX_PATH_ID auto-grant|' not in server.log"
     echo "  (PR7 auto-grant should fire after client PATHS_BLOCKED.)"
+    echo "--- last 80 lines of server.log ---"
+    tail -n 80 "${WORK_DIR}/server.log" || true
     FAIL=$((FAIL + 1))
 fi
 
-# A3 (hard) — tunnel must survive the entire flap storm.
+# A3 (hard) — tunnel must stay alive throughout the closed loop.
+# Auto-grant closes the loop; even if path_id 3 stays PENDING, paths
+# 0..2 carry the data plane and the tunnel ping must succeed.
 if ip netns exec "$NS_CLIENT" ping -c 3 -W 2 "$TUNNEL_IP" >/dev/null 2>&1; then
-    echo "A3 PASS: tunnel still reachable after 8-flap stress"
+    echo "A3 PASS: tunnel still reachable after auto-grant"
     PASS=$((PASS + 1))
 else
-    echo "A3 FAIL: tunnel ping failed after 8-flap stress"
+    echo "A3 FAIL: tunnel ping failed after closed-loop sequence"
     echo "--- last 60 lines of client.log ---"
     tail -n 60 "${WORK_DIR}/client.log" || true
     FAIL=$((FAIL + 1))
