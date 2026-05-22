@@ -1550,42 +1550,7 @@ mqvpn_check_scheduler_preconditions(mqvpn_scheduler_t scheduler, int n_paths)
     return scheduler == MQVPN_SCHED_BACKUP_FEC && n_paths < 2;
 }
 
-/* mqvpn_apply_scheduler() impl moved to src/mqvpn_conn_settings.c —
- * declaration stays in mqvpn_scheduler.h. */
-
-/* ─── Diff-test scaffolding (commit 1 only) ─────────────────────────────
- *
- * _v0_client preserves the pre-extraction inline construction verbatim.
- * tests/test_conn_settings.c memcmps the output of this against
- * mqvpn_build_conn_settings(..., is_server=false, ...) to prove the
- * extraction is byte-identical. Deleted in the follow-up commit that
- * replaces the inline block at cli_start_connection. Takes
- * mqvpn_config_t* (not mqvpn_client_t*) so the test TU can call it. */
 #include "mqvpn_conn_settings.h"
-void
-mqvpn_build_conn_settings_v0_client(const mqvpn_config_t *cfg, xqc_conn_settings_t *cs)
-{
-    int multipath = cfg->multipath ? 1 : 0;
-    memset(cs, 0, sizeof(*cs));
-    cs->max_datagram_frame_size = 65535;
-    cs->proto_version = XQC_VERSION_V1;
-    cs->enable_multipath = multipath;
-    cs->ping_on = 1;
-    cs->mp_ping_on = multipath;
-    cs->pacing_on = 1;
-    cs->max_pkt_out_size = 1400;
-    cs->cong_ctrl_callback = xqc_bbr2_cb;
-    cs->cc_params.cc_optimization_flags =
-        XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
-    cs->sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
-    cs->so_sndbuf = 8 * 1024 * 1024;
-    cs->idle_time_out = 120000;
-    cs->init_idle_time_out = 10000;
-    mqvpn_apply_scheduler(cs, cfg->scheduler);
-    if (cfg->init_max_path_id > 0) {
-        cs->init_max_path_id = cfg->init_max_path_id;
-    }
-}
 
 /* ─── Start a QUIC/H3 connection ─── */
 
@@ -1599,28 +1564,15 @@ cli_start_connection(mqvpn_client_t *c)
 
     int multipath = c->config.multipath ? 1 : 0;
 
+    /* Connection settings — see src/mqvpn_conn_settings.c for the full body. */
     xqc_conn_settings_t cs;
-    memset(&cs, 0, sizeof(cs));
-    cs.max_datagram_frame_size = 65535;
-    cs.proto_version = XQC_VERSION_V1;
-    cs.enable_multipath = multipath;
-    cs.ping_on = 1;
-    cs.mp_ping_on = multipath;
-    cs.pacing_on = 1;
-    cs.max_pkt_out_size = 1400;
-    cs.cong_ctrl_callback = xqc_bbr2_cb;
-    cs.cc_params.cc_optimization_flags =
-        XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
-    cs.sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
-    cs.so_sndbuf = 8 * 1024 * 1024;
-    cs.idle_time_out = 120000;
-    cs.init_idle_time_out = 10000;
-    mqvpn_apply_scheduler(&cs, c->config.scheduler);
-    /* draft-21 §4.6: optionally cap initial path-id space (e.g. =2 for the
-     * G-P16 PATHS_BLOCKED closed-loop e2e). 0 = leave xquic default (8). */
-    if (c->config.init_max_path_id > 0) {
-        cs.init_max_path_id = c->config.init_max_path_id;
-    }
+    mqvpn_conn_settings_input_t cs_input = {
+        .is_server = false,
+        .enable_multipath = (multipath != 0),
+        .scheduler = c->config.scheduler,
+        .init_max_path_id = c->config.init_max_path_id,
+    };
+    mqvpn_build_conn_settings(&cs_input, &cs);
 
     xqc_conn_ssl_config_t ssl_cfg;
     memset(&ssl_cfg, 0, sizeof(ssl_cfg));

@@ -1,20 +1,14 @@
 /*
  * test_conn_settings.c — pins mqvpn_build_conn_settings() shape.
  *
- * Two responsibilities, both essential to gap #d:
+ * Pins the caller-facing contract: scheduler & init_max_path_id propagate;
+ * the four asymmetric fields (ping_on, enable_multipath, mp_ping_on,
+ * max_path_id_grant_max_value) take the documented per-side values.
  *
- *   (1) Diff tests (commit 1 only, deleted in the follow-up commit)
- *       memcmp the v0 hoist of each pre-extraction inline block against
- *       the new helper to prove byte-identical behaviour. Why memcmp is
- *       safe within one process: xqc_*_cb globals are EXTERN const,
- *       linked once from libxquic, so struct copies are bit-equal;
- *       memset(0) + sequential assignment leaves padding deterministic.
- *
- *   (2) Propagation / asymmetry tests
- *       Pin the caller-facing contract: scheduler & init_max_path_id
- *       propagate; the four asymmetric fields (ping_on, enable_multipath,
- *       mp_ping_on, max_path_id_grant_max_value) take the documented
- *       per-side values. These survive the commit-2 v0 deletion.
+ * The behaviour-preservation diff against the pre-extraction inline blocks
+ * lived in the previous commit (5750d84) as `test_diff_*` cases against
+ * `_v0_client` / `_v0_server` hoists in mqvpn_client.c / mqvpn_server.c —
+ * deleted now that the callsites have been replaced.
  */
 
 #include "libmqvpn.h"
@@ -27,14 +21,6 @@
 
 #include <xquic/xquic.h>
 
-/* Forward decls of the v0 hoists. Bodies live next to the original
- * inline blocks (src/mqvpn_client.c / src/mqvpn_server.c) so a future
- * grep for "v0" lands at the production code being preserved. */
-void mqvpn_build_conn_settings_v0_client(const mqvpn_config_t *cfg,
-                                         xqc_conn_settings_t *cs);
-void mqvpn_build_conn_settings_v0_server(const mqvpn_config_t *cfg,
-                                         xqc_conn_settings_t *cs);
-
 #define FAIL(fmt, ...)                                                               \
     do {                                                                             \
         fprintf(stderr, "FAIL %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__); \
@@ -46,73 +32,6 @@ void mqvpn_build_conn_settings_v0_server(const mqvpn_config_t *cfg,
         if ((a) != (b))                                                              \
             FAIL("%s != %s (%lld != %lld)", #a, #b, (long long)(a), (long long)(b)); \
     } while (0)
-
-/* ─── Diff tests (commit 1 only) ─────────────────────────────────────── */
-
-static int
-diff_case(const char *name, const mqvpn_config_t *cfg,
-          const mqvpn_conn_settings_input_t *in,
-          void (*v0)(const mqvpn_config_t *, xqc_conn_settings_t *))
-{
-    xqc_conn_settings_t old_cs, new_cs;
-    v0(cfg, &old_cs);
-    mqvpn_build_conn_settings(in, &new_cs);
-    if (memcmp(&old_cs, &new_cs, sizeof(old_cs)) != 0) {
-        FAIL("%s: v0 vs new diverged", name);
-    }
-    return 0;
-}
-
-static int
-test_diff_server_default(void)
-{
-    mqvpn_config_t cfg = {0};
-    cfg.scheduler = MQVPN_SCHED_WLB;
-    cfg.init_max_path_id = 0;
-    mqvpn_conn_settings_input_t in = {
-        .is_server = true,
-        .enable_multipath = true,
-        .scheduler = MQVPN_SCHED_WLB,
-        .init_max_path_id = 0,
-    };
-    return diff_case("server_default", &cfg, &in, mqvpn_build_conn_settings_v0_server);
-}
-
-static int
-test_diff_client_mp_on_default(void)
-{
-    mqvpn_config_t cfg = {0};
-    cfg.multipath = 1;
-    cfg.scheduler = MQVPN_SCHED_WLB;
-    cfg.init_max_path_id = 0;
-    mqvpn_conn_settings_input_t in = {
-        .is_server = false,
-        .enable_multipath = true,
-        .scheduler = MQVPN_SCHED_WLB,
-        .init_max_path_id = 0,
-    };
-    return diff_case("client_mp_on_default", &cfg, &in,
-                     mqvpn_build_conn_settings_v0_client);
-}
-
-static int
-test_diff_client_mp_off_backup_fec(void)
-{
-    mqvpn_config_t cfg = {0};
-    cfg.multipath = 0;
-    cfg.scheduler = MQVPN_SCHED_BACKUP_FEC;
-    cfg.init_max_path_id = 0;
-    mqvpn_conn_settings_input_t in = {
-        .is_server = false,
-        .enable_multipath = false,
-        .scheduler = MQVPN_SCHED_BACKUP_FEC,
-        .init_max_path_id = 0,
-    };
-    return diff_case("client_mp_off_backup_fec", &cfg, &in,
-                     mqvpn_build_conn_settings_v0_client);
-}
-
-/* ─── Propagation / asymmetry tests (survive commit 2) ───────────────── */
 
 static int
 test_asymmetry_server_vs_client(void)
@@ -210,9 +129,6 @@ int
 main(void)
 {
     int failed = 0;
-    failed += test_diff_server_default();
-    failed += test_diff_client_mp_on_default();
-    failed += test_diff_client_mp_off_backup_fec();
     failed += test_asymmetry_server_vs_client();
     failed += test_propagation_scheduler();
     failed += test_propagation_init_max_path_id();
