@@ -55,6 +55,9 @@ typedef struct mqvpn_file_config_s {
     int n_paths;
     char scheduler[16];
 
+    /* draft-21 §4.6 initial Maximum Path Identifier TP, 0 = use xquic default 8 */
+    unsigned long long init_max_path_id;
+
     /* [Interface] — client reconnection */
     int reconnect;          /* 1=auto-reconnect (default), 0=exit on disconnect */
     int reconnect_interval; /* base interval in seconds (default 5) */

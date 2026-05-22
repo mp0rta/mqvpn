@@ -405,6 +405,11 @@ MQVPN_API int mqvpn_config_set_reconnect(mqvpn_config_t *cfg, int enable,
                                          int interval_sec);
 MQVPN_API int mqvpn_config_set_killswitch_hint(mqvpn_config_t *cfg, int enable);
 
+/* draft-21 §4.6: set the initial Maximum Path Identifier advertised in TP.
+ * 0 = use xquic default (XQC_DEFAULT_INIT_MAX_PATH_ID = 8). Set lower
+ * (e.g. 2) to deterministically trigger G-P16 PATHS_BLOCKED. */
+MQVPN_API int mqvpn_config_set_init_max_path_id(mqvpn_config_t *cfg, uint64_t v);
+
 /* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock) */
 typedef uint64_t (*mqvpn_clock_fn)(void *ctx);
 MQVPN_API int mqvpn_config_set_clock(mqvpn_config_t *cfg, mqvpn_clock_fn clock_fn,

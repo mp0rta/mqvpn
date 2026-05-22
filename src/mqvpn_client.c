@@ -1612,6 +1612,11 @@ cli_start_connection(mqvpn_client_t *c)
     cs.idle_time_out = 120000;
     cs.init_idle_time_out = 10000;
     mqvpn_apply_scheduler(&cs, c->config.scheduler);
+    /* draft-21 §4.6: optionally cap initial path-id space (e.g. =2 for the
+     * G-P16 PATHS_BLOCKED closed-loop e2e). 0 = leave xquic default (8). */
+    if (c->config.init_max_path_id > 0) {
+        cs.init_max_path_id = c->config.init_max_path_id;
+    }
 
     xqc_conn_ssl_config_t ssl_cfg;
     memset(&ssl_cfg, 0, sizeof(ssl_cfg));

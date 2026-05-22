@@ -17,6 +17,7 @@
 #  include "status.h"
 #endif
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,6 +62,10 @@ usage(const char *prog)
         "--config)\n"
         "  --scheduler minrtt|wlb|backup_fec\n"
         "                            Multipath scheduler (default wlb)\n"
+        "  --init-max-path-id N      Initial max path identifier TP value (default = "
+        "xquic\n"
+        "                            default 8, set lower e.g. 2 to test G-P16 "
+        "trigger).\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
         "  --version                 Show version and exit\n"
@@ -135,6 +140,7 @@ main(int argc, char *argv[])
         {"path", required_argument, NULL, 'p'},
         {"dns", required_argument, NULL, 'd'},
         {"scheduler", required_argument, NULL, 'S'},
+        {"init-max-path-id", required_argument, NULL, 0x100},
         {"max-clients", required_argument, NULL, 'M'},
         {"log-level", required_argument, NULL, 'L'},
         {"no-reconnect", no_argument, NULL, 'R'},
@@ -164,6 +170,8 @@ main(int argc, char *argv[])
     int genkey = 0;
     const char *log_level_str = NULL;
     const char *scheduler_str = NULL;
+    uint64_t init_max_path_id = 0; /* 0 = unset → xquic default (8) */
+    int init_max_path_id_set = 0;
     int max_clients = -1; /* -1 means "not set by CLI" */
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES];
     int n_paths = 0;
@@ -235,6 +243,26 @@ main(int argc, char *argv[])
             }
             break;
         case 'S': scheduler_str = optarg; break;
+        case 0x100: {
+            /* Reject leading '-' explicitly: strtoull silently wraps "-1" to
+             * UINT64_MAX rather than failing. */
+            if (optarg[0] == '-' || optarg[0] == '\0') {
+                fprintf(stderr, "error: --init-max-path-id must be a non-negative "
+                                "integer\n");
+                return 1;
+            }
+            char *end = NULL;
+            errno = 0;
+            unsigned long long v = strtoull(optarg, &end, 10);
+            if (!end || *end != '\0' || errno == ERANGE) {
+                fprintf(stderr, "error: --init-max-path-id must be a non-negative "
+                                "integer\n");
+                return 1;
+            }
+            init_max_path_id = (uint64_t)v;
+            init_max_path_id_set = 1;
+            break;
+        }
         case 'M': max_clients = atoi(optarg); break;
         case 'R': no_reconnect = 1; break;
         case 'K': kill_switch = 1; break;
@@ -304,6 +332,8 @@ main(int argc, char *argv[])
     const char *eff_tun_name = tun_name ? tun_name : file_cfg.tun_name;
     const char *eff_log_level = log_level_str ? log_level_str : file_cfg.log_level;
     const char *eff_scheduler = scheduler_str ? scheduler_str : file_cfg.scheduler;
+    uint64_t eff_init_max_path_id =
+        init_max_path_id_set ? init_max_path_id : (uint64_t)file_cfg.init_max_path_id;
     const char *eff_listen = listen_str ? listen_str : file_cfg.listen;
     const char *eff_subnet = subnet ? subnet : file_cfg.subnet;
     const char *eff_subnet6 =
@@ -436,6 +466,7 @@ main(int argc, char *argv[])
             .reconnect = eff_reconnect,
             .reconnect_interval = file_cfg.reconnect_interval,
             .kill_switch = kill_switch >= 0 ? kill_switch : file_cfg.kill_switch,
+            .init_max_path_id = eff_init_max_path_id,
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];
@@ -478,6 +509,7 @@ main(int argc, char *argv[])
             .max_clients = eff_max_clients,
             .control_addr = eff_control_addr,
             .control_port = eff_control_port,
+            .init_max_path_id = eff_init_max_path_id,
         };
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];
