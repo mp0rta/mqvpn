@@ -115,6 +115,7 @@ set(MQVPN_LIB_SOURCES
     src/mqvpn_config.c
     src/mqvpn_client.c
     src/mqvpn_server.c
+    src/mqvpn_conn_settings.c
     src/mqvpn_util.c
     src/path_state_machine.c
     src/flow_sched.c
@@ -296,6 +297,12 @@ if(BUILD_TESTING)
     target_include_directories(test_scheduler PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
     set_target_properties(test_scheduler PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_scheduler COMMAND test_scheduler)
+
+    add_executable(test_conn_settings tests/test_conn_settings.c)
+    target_link_libraries(test_conn_settings mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
+    target_include_directories(test_conn_settings PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
+    set_target_properties(test_conn_settings PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_conn_settings COMMAND test_conn_settings)
 endif()
 
 # ---------- Install ----------

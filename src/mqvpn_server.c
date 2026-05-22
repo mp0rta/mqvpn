@@ -200,6 +200,41 @@ static void server_log(mqvpn_server_t *s, mqvpn_log_level_t level, const char *f
     __attribute__((format(printf, 3, 4)));
 #endif
 
+/* ─── Diff-test scaffolding (commit 1 only) ─────────────────────────────
+ *
+ * _v0_server preserves the pre-extraction inline construction verbatim
+ * (mqvpn_server.c::serve before mqvpn_build_conn_settings extraction).
+ * tests/test_conn_settings.c memcmps this against
+ * mqvpn_build_conn_settings(..., is_server=true, ...) to prove byte-
+ * identical preservation. Deleted in the follow-up commit that replaces
+ * the inline block in serve(). The FEC warn block at the original site
+ * is intentionally NOT included here — it uses LOG_W(s, ...) which
+ * requires mqvpn_server_t*, and warns are logging not settings. */
+#include "mqvpn_conn_settings.h"
+void
+mqvpn_build_conn_settings_v0_server(const mqvpn_config_t *cfg, xqc_conn_settings_t *cs)
+{
+    memset(cs, 0, sizeof(*cs));
+    cs->max_datagram_frame_size = 65535;
+    cs->proto_version = XQC_VERSION_V1;
+    cs->enable_multipath = 1;
+    cs->mp_ping_on = 1;
+    cs->pacing_on = 1;
+    cs->max_pkt_out_size = 1400;
+    cs->cong_ctrl_callback = xqc_bbr2_cb;
+    cs->cc_params.cc_optimization_flags =
+        XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
+    mqvpn_apply_scheduler(cs, cfg->scheduler);
+    cs->sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
+    cs->so_sndbuf = 8 * 1024 * 1024;
+    cs->idle_time_out = 120000;
+    cs->init_idle_time_out = 10000;
+    cs->max_path_id_grant_max_value = 64;
+    if (cfg->init_max_path_id > 0) {
+        cs->init_max_path_id = cfg->init_max_path_id;
+    }
+}
+
 static void
 server_log(mqvpn_server_t *s, mqvpn_log_level_t level, const char *fmt, ...)
 {
