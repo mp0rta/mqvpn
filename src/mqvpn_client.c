@@ -47,7 +47,6 @@
 #define PACKET_BUF_SIZE           65536
 #define MASQUE_FRAME_BUF          (PACKET_BUF_SIZE + 16)
 #define MAX_CAPSULE_BUF           65536
-#define XQC_SNDQ_MAX_PKTS         16384
 #define RECONNECT_BACKOFF_MAX_SEC 60
 /* Force-close the QUIC handshake if it doesn't progress past CONNECTING within
  * this window, so a dead first-listed path triggers reconnect (and primary_path_idx

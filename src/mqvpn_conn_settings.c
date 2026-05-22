@@ -1,12 +1,6 @@
 /*
- * mqvpn_conn_settings.c — implementation of mqvpn_build_conn_settings()
- * and the scheduler/FEC dispatch helper used by both client and server.
- *
- * Behaviour MUST stay bit-for-bit identical to the previous client/server
- * inline construction blocks (mqvpn_client.c::cli_start_connection and
- * mqvpn_server.c::serve, both around line 1196/1598 before extraction).
- * `tests/test_conn_settings.c` pins this with a memcmp against private
- * `_v0_*` helpers retained in the original .c files during commit 1.
+ * mqvpn_conn_settings.c — implementation. See mqvpn_conn_settings.h for
+ * the contract; tests/test_conn_settings.c pins the asymmetric fields.
  */
 
 #include "mqvpn_conn_settings.h"

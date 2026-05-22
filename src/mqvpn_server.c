@@ -44,11 +44,10 @@
 
 /* ─── Constants ─── */
 
-#define PACKET_BUF_SIZE   65536
-#define MASQUE_FRAME_BUF  (PACKET_BUF_SIZE + 16)
-#define MAX_CAPSULE_BUF   65536
-#define XQC_SNDQ_MAX_PKTS 16384
-#define PTB_RATE_LIMIT    10
+#define PACKET_BUF_SIZE  65536
+#define MASQUE_FRAME_BUF (PACKET_BUF_SIZE + 16)
+#define MAX_CAPSULE_BUF  65536
+#define PTB_RATE_LIMIT   10
 
 /* ─── Forward declarations ─── */
 

@@ -1,14 +1,8 @@
 /*
- * test_conn_settings.c — pins mqvpn_build_conn_settings() shape.
- *
- * Pins the caller-facing contract: scheduler & init_max_path_id propagate;
- * the four asymmetric fields (ping_on, enable_multipath, mp_ping_on,
- * max_path_id_grant_max_value) take the documented per-side values.
- *
- * The behaviour-preservation diff against the pre-extraction inline blocks
- * lived in the previous commit (5750d84) as `test_diff_*` cases against
- * `_v0_client` / `_v0_server` hoists in mqvpn_client.c / mqvpn_server.c —
- * deleted now that the callsites have been replaced.
+ * test_conn_settings.c — pins mqvpn_build_conn_settings() caller contract:
+ * scheduler / init_max_path_id propagate and the four asymmetric fields
+ * (ping_on, enable_multipath, mp_ping_on, max_path_id_grant_max_value)
+ * take the documented per-side values.
  */
 
 #include "libmqvpn.h"
