@@ -44,11 +44,10 @@
 
 /* ─── Constants ─── */
 
-#define PACKET_BUF_SIZE   65536
-#define MASQUE_FRAME_BUF  (PACKET_BUF_SIZE + 16)
-#define MAX_CAPSULE_BUF   65536
-#define XQC_SNDQ_MAX_PKTS 16384
-#define PTB_RATE_LIMIT    10
+#define PACKET_BUF_SIZE  65536
+#define MASQUE_FRAME_BUF (PACKET_BUF_SIZE + 16)
+#define MAX_CAPSULE_BUF  65536
+#define PTB_RATE_LIMIT   10
 
 /* ─── Forward declarations ─── */
 
@@ -199,6 +198,8 @@ now_ms_mono(void)
 static void server_log(mqvpn_server_t *s, mqvpn_log_level_t level, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 #endif
+
+#include "mqvpn_conn_settings.h"
 
 static void
 server_log(mqvpn_server_t *s, mqvpn_log_level_t level, const char *fmt, ...)
@@ -1192,39 +1193,21 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
                                   &tcbs, s);
     if (!s->engine) goto cleanup;
 
-    /* Connection settings */
-    xqc_conn_settings_t conn_settings;
-    memset(&conn_settings, 0, sizeof(conn_settings));
-    conn_settings.max_datagram_frame_size = 65535;
-    conn_settings.proto_version = XQC_VERSION_V1;
-    conn_settings.enable_multipath = 1;
-    conn_settings.mp_ping_on = 1;
-    conn_settings.pacing_on = 1;
-    conn_settings.max_pkt_out_size = 1400;
-    conn_settings.cong_ctrl_callback = xqc_bbr2_cb;
-    conn_settings.cc_params.cc_optimization_flags =
-        XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
+        /* Connection settings — see src/mqvpn_conn_settings.c for the full body. */
 #if !defined(XQC_ENABLE_FEC) || !defined(XQC_ENABLE_XOR)
     if (cfg->scheduler == MQVPN_SCHED_BACKUP_FEC) {
         LOG_W(s, "backup_fec scheduler requested but library built without FEC "
                  "support (XQC_ENABLE_FEC/XQC_ENABLE_XOR); downgrading to minrtt");
     }
 #endif
-    mqvpn_apply_scheduler(&conn_settings, cfg->scheduler);
-    conn_settings.sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
-    conn_settings.so_sndbuf = 8 * 1024 * 1024;
-    conn_settings.idle_time_out = 120000;
-    conn_settings.init_idle_time_out = 10000;
-    /* draft-21 §3.2.1 ¶7 auto-grant MAX_PATH_ID on PATHS_BLOCKED receipt.
-     * 64 mirrors the failover_storm quick-win precedent. Asymmetric: client
-     * is the active path creator in mqvpn architecture, so server-only enable
-     * suffices (client.c intentionally does not set this). */
-    conn_settings.max_path_id_grant_max_value = 64;
-    /* draft-21 §4.6: optionally cap initial path-id space (e.g. =2 for the
-     * G-P16 PATHS_BLOCKED closed-loop e2e). 0 = leave xquic default (8). */
-    if (cfg->init_max_path_id > 0) {
-        conn_settings.init_max_path_id = cfg->init_max_path_id;
-    }
+    xqc_conn_settings_t conn_settings;
+    mqvpn_conn_settings_input_t cs_input = {
+        .is_server = true,
+        .enable_multipath = true, /* server: always on, see mqvpn_conn_settings.c */
+        .scheduler = cfg->scheduler,
+        .init_max_path_id = cfg->init_max_path_id,
+    };
+    mqvpn_build_conn_settings(&cs_input, &conn_settings);
     xqc_server_set_conn_settings(s->engine, &conn_settings);
 
     /* H3 callbacks */

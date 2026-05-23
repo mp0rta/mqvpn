@@ -47,7 +47,6 @@
 #define PACKET_BUF_SIZE           65536
 #define MASQUE_FRAME_BUF          (PACKET_BUF_SIZE + 16)
 #define MAX_CAPSULE_BUF           65536
-#define XQC_SNDQ_MAX_PKTS         16384
 #define RECONNECT_BACKOFF_MAX_SEC 60
 /* Force-close the QUIC handshake if it doesn't progress past CONNECTING within
  * this window, so a dead first-listed path triggers reconnect (and primary_path_idx
@@ -1550,38 +1549,7 @@ mqvpn_check_scheduler_preconditions(mqvpn_scheduler_t scheduler, int n_paths)
     return scheduler == MQVPN_SCHED_BACKUP_FEC && n_paths < 2;
 }
 
-/* ─── Scheduler dispatch helper (shared with mqvpn_server.c) ─── */
-
-void
-mqvpn_apply_scheduler(xqc_conn_settings_t *cs, mqvpn_scheduler_t sched)
-{
-    switch (sched) {
-    case MQVPN_SCHED_WLB: cs->scheduler_callback = xqc_wlb_scheduler_cb; break;
-    case MQVPN_SCHED_BACKUP_FEC:
-#if defined(XQC_ENABLE_FEC) && defined(XQC_ENABLE_XOR)
-        cs->scheduler_callback = xqc_backup_fec_scheduler_cb;
-        cs->enable_encode_fec = 1;
-        cs->enable_decode_fec = 1;
-        cs->fec_params.fec_encoder_schemes_num = 1;
-        cs->fec_params.fec_encoder_schemes[0] = MQVPN_FEC_SCHEME;
-        cs->fec_params.fec_decoder_schemes_num = 1;
-        cs->fec_params.fec_decoder_schemes[0] = MQVPN_FEC_SCHEME;
-        cs->fec_params.fec_code_rate = MQVPN_FEC_CODE_RATE;
-        cs->fec_params.fec_max_symbol_num_per_block = MQVPN_FEC_BLOCK_SIZE;
-        cs->fec_params.fec_mp_mode = XQC_FEC_MP_USE_STB;
-        /* fec_callback intentionally left zero — xqc_set_valid_*_scheme_cb()
-           fills it after FEC scheme negotiation completes. */
-#else
-        /* Built without FEC — silently degrade to MINRTT. main.c parser
-           also rejects "backup_fec" at the CLI surface in this case, so this
-           branch only protects against direct API callers. */
-        cs->scheduler_callback = xqc_minrtt_scheduler_cb;
-#endif
-        break;
-    case MQVPN_SCHED_MINRTT:
-    default: cs->scheduler_callback = xqc_minrtt_scheduler_cb; break;
-    }
-}
+#include "mqvpn_conn_settings.h"
 
 /* ─── Start a QUIC/H3 connection ─── */
 
@@ -1595,28 +1563,15 @@ cli_start_connection(mqvpn_client_t *c)
 
     int multipath = c->config.multipath ? 1 : 0;
 
+    /* Connection settings — see src/mqvpn_conn_settings.c for the full body. */
     xqc_conn_settings_t cs;
-    memset(&cs, 0, sizeof(cs));
-    cs.max_datagram_frame_size = 65535;
-    cs.proto_version = XQC_VERSION_V1;
-    cs.enable_multipath = multipath;
-    cs.ping_on = 1;
-    cs.mp_ping_on = multipath;
-    cs.pacing_on = 1;
-    cs.max_pkt_out_size = 1400;
-    cs.cong_ctrl_callback = xqc_bbr2_cb;
-    cs.cc_params.cc_optimization_flags =
-        XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
-    cs.sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
-    cs.so_sndbuf = 8 * 1024 * 1024;
-    cs.idle_time_out = 120000;
-    cs.init_idle_time_out = 10000;
-    mqvpn_apply_scheduler(&cs, c->config.scheduler);
-    /* draft-21 §4.6: optionally cap initial path-id space (e.g. =2 for the
-     * G-P16 PATHS_BLOCKED closed-loop e2e). 0 = leave xquic default (8). */
-    if (c->config.init_max_path_id > 0) {
-        cs.init_max_path_id = c->config.init_max_path_id;
-    }
+    mqvpn_conn_settings_input_t cs_input = {
+        .is_server = false,
+        .enable_multipath = (multipath != 0),
+        .scheduler = c->config.scheduler,
+        .init_max_path_id = c->config.init_max_path_id,
+    };
+    mqvpn_build_conn_settings(&cs_input, &cs);
 
     xqc_conn_ssl_config_t ssl_cfg;
     memset(&ssl_cfg, 0, sizeof(ssl_cfg));
