@@ -27,6 +27,14 @@
             FAIL("%s != %s (%lld != %lld)", #a, #b, (long long)(a), (long long)(b)); \
     } while (0)
 
+/* Function-pointer comparison: skips the (long long) cast that ASSERT_EQ
+ * uses for its diagnostic so callers can compare pointer-typed fields
+ * without -Wint-conversion noise. */
+#define ASSERT_PTR_EQ(a, b)                                          \
+    do {                                                             \
+        if ((a) != (b)) FAIL("%s != %s (pointer mismatch)", #a, #b); \
+    } while (0)
+
 static int
 test_asymmetry_server_vs_client(void)
 {
@@ -82,19 +90,17 @@ test_propagation_scheduler(void)
         .init_max_path_id = 0,
     };
 
+    /* Use a representative field-pointer rather than a whole-struct memcmp:
+     * struct layout / future-padding portability matches test_scheduler.c. */
     in.scheduler = MQVPN_SCHED_MINRTT;
     mqvpn_build_conn_settings(&in, &cs);
-    if (memcmp(&cs.scheduler_callback, &xqc_minrtt_scheduler_cb,
-               sizeof(xqc_minrtt_scheduler_cb)) != 0) {
-        FAIL("scheduler MINRTT did not propagate");
-    }
+    ASSERT_PTR_EQ(cs.scheduler_callback.xqc_scheduler_get_path,
+                  xqc_minrtt_scheduler_cb.xqc_scheduler_get_path);
 
     in.scheduler = MQVPN_SCHED_WLB;
     mqvpn_build_conn_settings(&in, &cs);
-    if (memcmp(&cs.scheduler_callback, &xqc_wlb_scheduler_cb,
-               sizeof(xqc_wlb_scheduler_cb)) != 0) {
-        FAIL("scheduler WLB did not propagate");
-    }
+    ASSERT_PTR_EQ(cs.scheduler_callback.xqc_scheduler_get_path,
+                  xqc_wlb_scheduler_cb.xqc_scheduler_get_path);
     return 0;
 }
 
