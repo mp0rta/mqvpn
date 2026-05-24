@@ -659,9 +659,9 @@ path_on_conn_reset(mqvpn_client_t *c, path_entry_t *p, const path_event_ctx_t *c
 
     if (p->platform_attached) {
         set_path_state_with_log(c, p, PATH_LC_PENDING, PATH_REASON_CONN_RESET);
+    } else {
+        maybe_transition_dropped_to_free(c, p, PATH_REASON_CONN_RESET);
     }
-    /* else: state unchanged (CLOSED_DROPPED/CLOSED_FREE lazy invariants permit
-     * pre-cleared xquic-side fields). */
 }
 
 static void
