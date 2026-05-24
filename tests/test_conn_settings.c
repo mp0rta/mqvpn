@@ -63,7 +63,7 @@ test_asymmetry_server_vs_client(void)
     /* Server side: MP always on, grant capped at 64, ping_on absent. */
     ASSERT_EQ(srv.enable_multipath, 1);
     ASSERT_EQ(srv.mp_ping_on, 1);
-    ASSERT_EQ(srv.max_path_id_grant_max_value, 64);
+    ASSERT_EQ(srv.max_path_id_grant_max_value, 128);
     ASSERT_EQ(srv.ping_on, 0);
 
     /* Client side mp-on: MP gated, ping_on set, no grant cap. */

@@ -76,7 +76,7 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
          * client is the active path creator. */
         out->enable_multipath = 1;
         out->mp_ping_on = 1;
-        out->max_path_id_grant_max_value = 64;
+        out->max_path_id_grant_max_value = 128;
     } else {
         /* client carries the keep-alive role (ping_on=1) and gates MP on
          * cfg->multipath. */
