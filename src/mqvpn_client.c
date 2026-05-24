@@ -1563,6 +1563,17 @@ cli_start_connection(mqvpn_client_t *c)
 
     int multipath = c->config.multipath ? 1 : 0;
 
+    /* Guard: primary path must be platform-attached before we create the
+     * xquic connection (avoids leaking an xquic conn on early bail-out). */
+    if (c->n_paths > 0 && c->primary_path_idx < c->n_paths) {
+        path_entry_t *pp = &c->paths[c->primary_path_idx];
+        if (!pp->platform_attached || pp->fd < 0) {
+            LOG_W(c, "primary path[%s] not ready (attached=%d fd=%d state=%s)", pp->name,
+                  pp->platform_attached, pp->fd, path_lifecycle_name(pp->state));
+            goto cleanup;
+        }
+    }
+
     /* Connection settings — see src/mqvpn_conn_settings.c for the full body. */
     xqc_conn_settings_t cs;
     mqvpn_conn_settings_input_t cs_input = {
@@ -1989,6 +2000,13 @@ mqvpn_client_on_platform_path_dropped(mqvpn_client_t *c, mqvpn_path_handle_t han
         LOG_I(c, "platform path dropped: handle=%lld iface=%s reason=%d",
               (long long)handle, info->iface, (int)info->reason);
     }
+
+    /* Draft-21 PATH_ABANDON: tell xquic to abandon the dead path so its
+     * CID/path_id slot is released for reuse. Non-blocking (queues frame
+     * on an alternate path). Fails gracefully if this is the only active
+     * path or if the connection is already closing. */
+    if (p->xquic_path_live && c->engine && c->conn)
+        xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
 
     path_event_ctx_t ctx = {.now_us = client_now_us(c)};
     path_on_event(c, p, PATH_EVENT_PLATFORM_DROP, &ctx);
