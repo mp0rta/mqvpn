@@ -409,6 +409,7 @@ MQVPN_API int mqvpn_config_set_killswitch_hint(mqvpn_config_t *cfg, int enable);
  * 0 = use xquic default (XQC_DEFAULT_INIT_MAX_PATH_ID = 8). Set lower
  * (e.g. 2) to deterministically trigger G-P16 PATHS_BLOCKED. */
 MQVPN_API int mqvpn_config_set_init_max_path_id(mqvpn_config_t *cfg, uint64_t v);
+/* TUN MTU cap: 0 = auto (MSS-derived), 1280..65535 = upper bound. */
 MQVPN_API int mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu);
 
 /* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock) */

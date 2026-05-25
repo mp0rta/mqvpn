@@ -690,6 +690,64 @@ test_reconnect_interval_invalid(void)
 }
 
 /* ================================================================
+ *  MTU config tests
+ * ================================================================ */
+
+static void
+test_mtu_default(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(cfg.tun_mtu, 0, "default tun_mtu is 0 (auto)");
+}
+
+static void
+test_mtu_config_parse(void)
+{
+    const char *ini = "[Interface]\nMTU = 1350\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.tun_mtu, 1350, "MTU 1350 parsed");
+}
+
+static void
+test_mtu_below_floor_ignored(void)
+{
+    const char *ini = "[Interface]\nMTU = 500\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.tun_mtu, 0, "MTU < 1280 ignored → stays 0");
+}
+
+static void
+test_mtu_above_ceiling_ignored(void)
+{
+    const char *ini = "[Interface]\nMTU = 70000\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.tun_mtu, 0, "MTU > 65535 ignored → stays 0");
+}
+
+static void
+test_mtu_json_parse(void)
+{
+    const char *json = "{\"mtu\": 1400}";
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load_json_filecfg(&cfg, json);
+    ASSERT_EQ_INT(cfg.tun_mtu, 1400, "JSON MTU 1400 parsed");
+}
+
+/* ================================================================
  *  Subnet6 config tests
  * ================================================================ */
 
@@ -1237,6 +1295,13 @@ main(void)
     test_reconnect_config_parse();
     test_reconnect_config_true();
     test_reconnect_interval_invalid();
+
+    /* MTU tests */
+    test_mtu_default();
+    test_mtu_config_parse();
+    test_mtu_below_floor_ignored();
+    test_mtu_above_ceiling_ignored();
+    test_mtu_json_parse();
 
     /* subnet6 tests */
     test_subnet6_default();
