@@ -12,6 +12,7 @@ mqvpn は INI と JSON の両方の設定ファイルに対応しています。
 Listen = 0.0.0.0:443
 Subnet = 10.0.0.0/24
 Subnet6 = 2001:db8:1::/112
+# MTU = 1280
 
 [TLS]
 Cert = /etc/mqvpn/server.crt
@@ -40,6 +41,7 @@ Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
 TunName = mqvpn0
 DNS = 1.1.1.1, 8.8.8.8
 LogLevel = info
+# MTU = 1280
 
 [Multipath]
 Scheduler = wlb
@@ -69,7 +71,8 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
     { "name": "bob", "key": "<BOB_PSK>" }
   ],
   "max_clients": 64,
-  "scheduler": "wlb"
+  "scheduler": "wlb",
+  "mtu": 1280
 }
 ```
 
@@ -88,7 +91,8 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
   "reconnect": true,
   "reconnect_interval": 5,
   "scheduler": "wlb",
-  "paths": ["eth0", "wlan0"]
+  "paths": ["eth0", "wlan0"],
+  "mtu": 1280
 }
 ```
 
@@ -133,6 +137,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `KillSwitch` | VPN 外への通信を遮断（クライアントのみ） | `false` |
 | `Reconnect` | 自動再接続を有効化（クライアントのみ） | `true` |
 | `ReconnectInterval` | 再接続の間隔（秒） | `5` |
+| `MTU` | TUN デバイスの MTU 上限（1280–9000）。ネゴシエーションで決まる MTU のほうが小さい場合はそちらが使われる。 | auto |
 
 ### `[TLS]`（サーバーのみ）
 
@@ -161,6 +166,75 @@ sudo mqvpn --config /etc/mqvpn/server.json
 > `backup_fec` は実験的機能で、両ピアが mqvpn 0.4.0 以降かつ FEC ビルド
 > (`-DXQC_ENABLE_FEC=ON -DXQC_ENABLE_XOR=ON`) を有効にしている必要があります。
 > 詳細は[マルチパス](./multipath#backup-fec-experimental)を参照。
+
+## MTU ガイドライン
+
+### TUN MTU の決定方法
+
+mqvpn は接続確立時に QUIC DATAGRAM の Maximum Segment Size（MSS）から TUN MTU を算出します。デフォルトの `max_pkt_out_size` 1400 の場合、オーバーヘッドの内訳は以下の通りです：
+
+```
+max_pkt_out_size           1400 bytes（QUIC plaintext 予算）
+ − QUIC short header         13 bytes（1 + DCID 8 + pktno 4）
+ − DATAGRAM frame header      3 bytes（type 1 + length 2）
+ − MASQUE capsule header       2 bytes（quarter-stream-id 1 + context-id 1）
+                           ─────────
+ = TUN MTU                  1382 bytes
+```
+
+AEAD（16 bytes）と ACK スペース（16 bytes）は plaintext 予算の外側にあるため、TUN MTU を減少させません。
+
+config で `MTU` を設定した場合、`min(config MTU, ネゴシエーション MTU)` が使用されます。config 値がネゴシエーション値を超える場合は warning ログが出力されます。
+
+### デフォルト（auto）— ほとんどの環境
+
+通常は `MTU` を設定する必要はありません。自動ネゴシエーション値（~1382）は標準的な Ethernet（1500）、PPPoE（1492）、モバイルネットワークで問題なく動作します。
+
+### mqvpn の中で他のトンネルを使う場合
+
+mqvpn トンネル内で別のトンネルプロトコル（WireGuard、IPsec、GRE など）を使う場合、内側トンネルのオーバーヘッド分だけ有効 MTU が減少します。内側プロトコルの最低要件を満たすか確認してください。
+
+**例：mqvpn の中で WireGuard を使う**
+
+```
+mqvpn TUN MTU                    1382 bytes
+ − WireGuard オーバーヘッド（IPv6）  80 bytes（IPv6 40 + UDP 8 + WG ヘッダ 32）
+                                 ─────────
+ = WireGuard 内側 MTU            1302 bytes
+   → IPv6 最小 MTU（1280）          ✓
+   → QUIC/HTTP3 UDP ペイロード
+     （1302 − IPv6 40 − UDP 8）   1254 bytes > 1200  ✓
+```
+
+両レイヤで IPv6 を使っても、有効 MTU（1302）は IPv6 最小 MTU（1280）と QUIC 最小 UDP ペイロード（1200、RFC 9000 §14）の両方をクリアします。
+
+**例：mqvpn の中で IPsec（ESP トンネルモード）を使う**
+
+ESP のオーバーヘッドは暗号方式により異なりますが、一般的な AES-GCM 構成で約 57 bytes（IPv6）または約 37 bytes（IPv4）です。mqvpn TUN MTU 1382 の場合：
+
+- IPv6：1382 − 57 = 1325 > 1280 ✓
+- IPv4：1382 − 37 = 1345 ✓
+
+### MTU を明示的に設定する場合
+
+| シナリオ | 推奨設定 |
+|----------|----------|
+| 標準的な Ethernet / モバイル | 未設定のまま（auto ~1382） |
+| クライアント↔サーバー間で MTU を揃えたい場合 | 両側で `MTU = 1280` を設定 |
+| 深くネストしたトンネル（mqvpn → WG → 別トンネル） | 残り MTU を計算し、1280 に近い場合は明示設定 |
+
+### 制約一覧
+
+| 制約 | 値 | 根拠 |
+|------|-----|------|
+| config 下限 | 1280 | IPv6 最小 MTU（RFC 8200） |
+| config 上限 | 9000 | ジャンボフレーム MTU |
+| QUIC 最小 UDP ペイロード | 1200 | RFC 9000 §14（ハンドシェイク要件） |
+| ネゴシエーション上限 | ~1382 | `max_pkt_out_size`（1400）から導出 |
+
+::: tip
+`MTU` をネゴシエーション値（~1382）より大きく設定しても効果はありません。常にネゴシエーション値が上限として使用されます。この場合は warning ログが出力されます。
+:::
 
 ## Control API
 
