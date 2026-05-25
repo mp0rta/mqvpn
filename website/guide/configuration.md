@@ -167,6 +167,75 @@ See [Multipath](./multipath) for scheduler details.
 > with FEC build enabled (`-DXQC_ENABLE_FEC=ON -DXQC_ENABLE_XOR=ON`).
 > See [Multipath](./multipath#backup-fec-experimental).
 
+## MTU Guidelines
+
+### How mqvpn determines TUN MTU
+
+mqvpn negotiates the TUN MTU from the QUIC DATAGRAM Maximum Segment Size (MSS) at connection time. With the default `max_pkt_out_size` of 1400, the overhead breakdown is:
+
+```
+max_pkt_out_size           1400 bytes (QUIC plaintext budget)
+ − QUIC short header         13 bytes (1 + DCID 8 + pktno 4)
+ − DATAGRAM frame header      3 bytes (type 1 + length 2)
+ − MASQUE capsule header       2 bytes (quarter-stream-id 1 + context-id 1)
+                           ─────────
+ = TUN MTU                  1382 bytes
+```
+
+AEAD (16 bytes) and ACK space (16 bytes) are outside the plaintext budget, so they do not reduce the TUN MTU.
+
+If `MTU` is set in the config, mqvpn uses `min(config MTU, negotiated MTU)`. A warning is logged when the config value exceeds the negotiated value.
+
+### Default (auto) — most deployments
+
+For most setups, leave `MTU` unset. The auto-negotiated value (~1382) works on standard Ethernet (1500), PPPoE (1492), and mobile networks.
+
+### Running other tunnels inside mqvpn
+
+When running a tunnel protocol (WireGuard, IPsec, GRE, etc.) inside the mqvpn tunnel, the inner tunnel's overhead reduces the effective MTU. Verify that the remaining MTU meets the inner protocol's requirements.
+
+**Example: WireGuard inside mqvpn**
+
+```
+mqvpn TUN MTU                    1382 bytes
+ − WireGuard overhead (IPv6)        80 bytes (IPv6 40 + UDP 8 + WG hdr 32)
+                                 ─────────
+ = WireGuard inner MTU            1302 bytes
+   → IPv6 minimum (1280)            ✓
+   → QUIC/HTTP3 UDP payload
+     (1302 − IPv6 40 − UDP 8)     1254 bytes > 1200  ✓
+```
+
+Even with IPv6 on both layers, the effective MTU (1302) clears both the IPv6 minimum (1280) and the QUIC minimum UDP payload (1200, RFC 9000 §14).
+
+**Example: IPsec (ESP tunnel mode) inside mqvpn**
+
+ESP overhead varies by cipher, but a typical AES-GCM setup adds ~57 bytes (IPv6) or ~37 bytes (IPv4). With mqvpn TUN MTU 1382:
+
+- IPv6: 1382 − 57 = 1325 > 1280 ✓
+- IPv4: 1382 − 37 = 1345 ✓
+
+### When to set MTU explicitly
+
+| Scenario | Recommendation |
+|----------|----------------|
+| Standard Ethernet / mobile | Leave unset (auto ~1382) |
+| Symmetric client↔server MTU | Set `MTU = 1280` on both sides |
+| Deeply nested tunnels (mqvpn → WG → another tunnel) | Calculate remaining MTU; set if near 1280 |
+
+### Constraints
+
+| Constraint | Value | Source |
+|------------|-------|--------|
+| Config minimum | 1280 | IPv6 minimum MTU (RFC 8200) |
+| Config maximum | 9000 | Jumbo frame MTU |
+| QUIC minimum UDP payload | 1200 | RFC 9000 §14 (handshake requirement) |
+| Negotiated upper bound | ~1382 | Derived from `max_pkt_out_size` (1400) |
+
+::: tip
+Setting `MTU` above the negotiated value (~1382) has no effect — the negotiated value is always used as the upper bound. A warning is logged in this case.
+:::
+
 ## Control API
 
 A running server can be managed at runtime over a local TCP socket using JSON commands. This is useful for adding or removing users without restarting the server.
