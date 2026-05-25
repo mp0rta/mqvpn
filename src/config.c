@@ -268,8 +268,8 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
             if (v > 0) cfg->reconnect_interval = v;
         } else if (strcasecmp(key, "MTU") == 0) {
             int v = atoi(val);
-            if (v != 0 && (v < 1280 || v > 65535)) {
-                LOG_WRN("%s:%d: MTU must be 1280..65535, got %d; ignoring", path, lineno,
+            if (v != 0 && (v < 1280 || v > 9000)) {
+                LOG_WRN("%s:%d: MTU must be 1280..9000, got %d; ignoring", path, lineno,
                         v);
             } else {
                 cfg->tun_mtu = v;
@@ -440,7 +440,7 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     v = json_find_key(json_text, "mtu");
     if (v && json_read_int(v, &iv) == 0) {
         if (iv != 0 && (iv < 1280 || iv > 65535)) {
-            LOG_WRN("JSON: MTU must be 1280..65535, got %d; ignoring", iv);
+            LOG_WRN("JSON: MTU must be 1280..9000, got %d; ignoring", iv);
         } else {
             cfg->tun_mtu = iv;
         }

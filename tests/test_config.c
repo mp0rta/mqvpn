@@ -728,13 +728,13 @@ test_mtu_below_floor_ignored(void)
 static void
 test_mtu_above_ceiling_ignored(void)
 {
-    const char *ini = "[Interface]\nMTU = 70000\n";
+    const char *ini = "[Interface]\nMTU = 9001\n";
     char *path = write_tmp(ini);
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
-    ASSERT_EQ_INT(cfg.tun_mtu, 0, "MTU > 65535 ignored → stays 0");
+    ASSERT_EQ_INT(cfg.tun_mtu, 0, "MTU > 9000 ignored → stays 0");
 }
 
 static void

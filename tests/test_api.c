@@ -239,10 +239,10 @@ TEST(config_set_tun_mtu)
     ASSERT_EQ(cfg->tun_mtu, 1280);
     ASSERT_EQ(mqvpn_config_set_tun_mtu(cfg, 1350), MQVPN_OK);
     ASSERT_EQ(cfg->tun_mtu, 1350);
-    ASSERT_EQ(mqvpn_config_set_tun_mtu(cfg, 65535), MQVPN_OK);
-    ASSERT_EQ(cfg->tun_mtu, 65535);
+    ASSERT_EQ(mqvpn_config_set_tun_mtu(cfg, 9000), MQVPN_OK);
+    ASSERT_EQ(cfg->tun_mtu, 9000);
     ASSERT_EQ(mqvpn_config_set_tun_mtu(cfg, 1279), MQVPN_ERR_INVALID_ARG);
-    ASSERT_EQ(mqvpn_config_set_tun_mtu(cfg, 65536), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_tun_mtu(cfg, 9001), MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_config_set_tun_mtu(cfg, -1), MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_config_set_tun_mtu(NULL, 1400), MQVPN_ERR_INVALID_ARG);
     mqvpn_config_free(cfg);
