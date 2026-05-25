@@ -12,6 +12,7 @@ mqvpn supports both INI and JSON config files. If the file content starts with `
 Listen = 0.0.0.0:443
 Subnet = 10.0.0.0/24
 Subnet6 = 2001:db8:1::/112
+# MTU = 1280
 
 [TLS]
 Cert = /etc/mqvpn/server.crt
@@ -40,6 +41,7 @@ Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
 TunName = mqvpn0
 DNS = 1.1.1.1, 8.8.8.8
 LogLevel = info
+# MTU = 1280
 
 [Multipath]
 Scheduler = wlb
@@ -69,7 +71,8 @@ JSON config is useful for structured management and automation tooling.
     { "name": "bob", "key": "<BOB_PSK>" }
   ],
   "max_clients": 64,
-  "scheduler": "wlb"
+  "scheduler": "wlb",
+  "mtu": 1280
 }
 ```
 
@@ -88,7 +91,8 @@ JSON config is useful for structured management and automation tooling.
   "reconnect": true,
   "reconnect_interval": 5,
   "scheduler": "wlb",
-  "paths": ["eth0", "wlan0"]
+  "paths": ["eth0", "wlan0"],
+  "mtu": 1280
 }
 ```
 
@@ -133,6 +137,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `KillSwitch` | Block traffic outside the VPN tunnel (client only) | `false` |
 | `Reconnect` | Enable automatic reconnection (client only) | `true` |
 | `ReconnectInterval` | Seconds between reconnection attempts | `5` |
+| `MTU` | TUN device MTU cap (1280–9000). If the negotiated MTU is lower, the negotiated value is used. | auto |
 
 ### `[TLS]` (server only)
 

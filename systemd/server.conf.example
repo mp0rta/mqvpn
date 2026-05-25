@@ -7,7 +7,7 @@ Subnet = 10.0.0.0/24
 # Subnet6 = 2001:db8:1::/112
 TunName = mqvpn0
 LogLevel = info
-# MTU = 1280
+# MTU = 1280                   # TUN MTU cap (1280–9000, default: auto)
 
 [TLS]
 Cert = /etc/mqvpn/server.crt
