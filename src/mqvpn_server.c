@@ -725,6 +725,7 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
             if (udp_mss >= 68) client_mtu = (int)udp_mss;
         }
         if (s->tun_mtu > 0 && client_mtu > s->tun_mtu) {
+            LOG_D(s, "capping client MTU %d to TUN MTU %d", client_mtu, s->tun_mtu);
             client_mtu = s->tun_mtu;
         }
         client_info.mtu = client_mtu;
