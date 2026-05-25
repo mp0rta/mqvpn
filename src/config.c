@@ -439,7 +439,7 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
 
     v = json_find_key(json_text, "mtu");
     if (v && json_read_int(v, &iv) == 0) {
-        if (iv != 0 && (iv < 1280 || iv > 9000)) {
+        if (iv != 0 && (iv < 1280 || iv > 65535)) {
             LOG_WRN("JSON: MTU must be 1280..9000, got %d; ignoring", iv);
         } else {
             cfg->tun_mtu = iv;
