@@ -260,6 +260,28 @@ TEST(server_lifecycle)
     mqvpn_server_destroy(s);
 }
 
+TEST(server_lifecycle_with_tun_mtu)
+{
+    reset_mocks();
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_config_set_tun_mtu(cfg, 1350);
+
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    cbs.log = mock_log;
+
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    ASSERT_NOT_NULL(s);
+    mqvpn_config_free(cfg);
+
+    ASSERT_EQ(mqvpn_server_start(s), MQVPN_OK);
+    ASSERT_EQ(g_last_tunnel_info.mtu, 1350);
+
+    mqvpn_server_stop(s);
+    mqvpn_server_destroy(s);
+}
+
 TEST(server_lifecycle_with_v6)
 {
     reset_mocks();
@@ -823,6 +845,7 @@ main(void)
 
     /* Lifecycle */
     run_server_lifecycle();
+    run_server_lifecycle_with_tun_mtu();
     run_server_lifecycle_with_v6();
     run_server_double_start();
 
