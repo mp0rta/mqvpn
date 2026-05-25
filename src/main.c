@@ -467,6 +467,7 @@ main(int argc, char *argv[])
             .reconnect_interval = file_cfg.reconnect_interval,
             .kill_switch = kill_switch >= 0 ? kill_switch : file_cfg.kill_switch,
             .init_max_path_id = eff_init_max_path_id,
+            .tun_mtu = file_cfg.tun_mtu,
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];
@@ -510,6 +511,7 @@ main(int argc, char *argv[])
             .control_addr = eff_control_addr,
             .control_port = eff_control_port,
             .init_max_path_id = eff_init_max_path_id,
+            .tun_mtu = file_cfg.tun_mtu,
         };
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];

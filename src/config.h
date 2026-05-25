@@ -63,6 +63,8 @@ typedef struct mqvpn_file_config_s {
     int reconnect_interval; /* base interval in seconds (default 5) */
     int kill_switch;        /* 1=block traffic outside tunnel, 0=off (default) */
 
+    int tun_mtu; /* [Interface] MTU — 0=auto, >0=cap (floor 1280) */
+
     /* Inferred mode: 1=server, 0=client */
     int is_server;
 } mqvpn_file_config_t;

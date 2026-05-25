@@ -230,6 +230,24 @@ TEST(config_set_insecure)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_set_tun_mtu)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_set_tun_mtu(cfg, 0), MQVPN_OK);
+    ASSERT_EQ(cfg->tun_mtu, 0);
+    ASSERT_EQ(mqvpn_config_set_tun_mtu(cfg, 1280), MQVPN_OK);
+    ASSERT_EQ(cfg->tun_mtu, 1280);
+    ASSERT_EQ(mqvpn_config_set_tun_mtu(cfg, 1350), MQVPN_OK);
+    ASSERT_EQ(cfg->tun_mtu, 1350);
+    ASSERT_EQ(mqvpn_config_set_tun_mtu(cfg, 9000), MQVPN_OK);
+    ASSERT_EQ(cfg->tun_mtu, 9000);
+    ASSERT_EQ(mqvpn_config_set_tun_mtu(cfg, 1279), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_tun_mtu(cfg, 9001), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_tun_mtu(cfg, -1), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_tun_mtu(NULL, 1400), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
 TEST(config_set_scheduler)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
@@ -1677,6 +1695,7 @@ main(void)
     run_config_load_json_duplicate_users_last_wins();
     run_config_load_json_invalid_users();
     run_config_set_insecure();
+    run_config_set_tun_mtu();
     run_config_set_scheduler();
     run_config_set_log_level();
     run_config_set_reconnect();

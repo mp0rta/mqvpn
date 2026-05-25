@@ -439,3 +439,12 @@ mqvpn_config_set_max_clients(mqvpn_config_t *cfg, int max)
     cfg->max_clients = max;
     return MQVPN_OK;
 }
+
+int
+mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    if (mtu != 0 && (mtu < 1280 || mtu > 9000)) return MQVPN_ERR_INVALID_ARG;
+    cfg->tun_mtu = mtu;
+    return MQVPN_OK;
+}

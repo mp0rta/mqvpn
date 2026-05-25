@@ -1069,6 +1069,21 @@ cb_request_close(xqc_h3_request_t *h3_request, void *user_data)
 }
 
 static int
+apply_mtu_cap(int cfg_mtu, int negotiated, mqvpn_client_t *c)
+{
+    if (cfg_mtu > 0) {
+        if (cfg_mtu < negotiated) {
+            return cfg_mtu;
+        }
+        if (cfg_mtu > negotiated) {
+            LOG_W(c, "config MTU %d exceeds negotiated MTU %d, using %d", cfg_mtu,
+                  negotiated, negotiated);
+        }
+    }
+    return negotiated;
+}
+
+static int
 cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
                 void *user_data)
 {
@@ -1112,6 +1127,7 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
                 if (udp_mss >= 68) tun_mtu = (int)udp_mss;
             }
             if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU) tun_mtu = IPV6_MIN_MTU;
+            tun_mtu = apply_mtu_cap(c->config.tun_mtu, tun_mtu, c);
             c->mtu = tun_mtu;
 
             /* Build tunnel info for callback */
@@ -1287,6 +1303,7 @@ cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
         if (udp_mss >= 68) {
             int new_mtu = (int)udp_mss;
             if (conn->addr6_assigned && new_mtu < IPV6_MIN_MTU) new_mtu = IPV6_MIN_MTU;
+            new_mtu = apply_mtu_cap(c->config.tun_mtu, new_mtu, c);
             if (new_mtu != c->last_notified_mtu) {
                 c->mtu = new_mtu;
                 c->last_notified_mtu = new_mtu;

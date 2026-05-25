@@ -715,7 +715,21 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
         client_info.assigned_prefix = 32;
         memcpy(client_info.server_ip, &s->pool.base.s_addr, 4);
         client_info.server_prefix = (uint8_t)s->pool.prefix_len;
-        client_info.mtu = 1280;
+        int client_mtu = IPV6_MIN_MTU;
+        if (conn->dgram_mss > 0) {
+            size_t udp_mss =
+                xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
+            if (udp_mss >= 68) client_mtu = (int)udp_mss;
+        }
+        if (s->config.tun_mtu > 0) {
+            if (s->config.tun_mtu < client_mtu) {
+                client_mtu = s->config.tun_mtu;
+            } else if (s->config.tun_mtu > client_mtu) {
+                LOG_W(s, "config MTU %d exceeds negotiated MTU %d, using %d",
+                      s->config.tun_mtu, client_mtu, client_mtu);
+            }
+        }
+        client_info.mtu = client_mtu;
         if (conn->has_v6) {
             memcpy(client_info.assigned_ip6, &conn->assigned_ip6, 16);
             client_info.assigned_prefix6 = (uint8_t)s->pool.prefix6;
@@ -1313,7 +1327,7 @@ mqvpn_server_start(mqvpn_server_t *s)
     info.assigned_prefix = (uint8_t)s->pool.prefix_len;
     memcpy(info.server_ip, &s->pool.base.s_addr, 4);
     info.server_prefix = (uint8_t)s->pool.prefix_len;
-    info.mtu = 1280;
+    info.mtu = s->config.tun_mtu > 0 ? s->config.tun_mtu : IPV6_MIN_MTU;
 
     if (s->pool.has_v6) {
         struct in6_addr srv_addr6;
