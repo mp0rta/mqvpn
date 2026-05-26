@@ -539,7 +539,7 @@ test_max_clients_edge_cases(void)
     unlink(path);
     ASSERT_EQ_INT(cfg.max_clients, 64, "MaxClients=-1 → default 64");
 
-    /* MaxClients = abc → atoi returns 0 → fallback to 64 */
+    /* MaxClients = abc → invalid, fallback to 64 */
     const char *ini_abc = "[Auth]\n"
                           "MaxClients = abc\n";
 
@@ -766,6 +766,21 @@ test_reconnect_interval_invalid(void)
     unlink(path);
 
     ASSERT_EQ_INT(cfg.reconnect_interval, 5, "negative interval → default 5");
+}
+
+static void
+test_reconnect_interval_invalid_string(void)
+{
+    const char *ini = "[Interface]\n"
+                      "ReconnectInterval = abc\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.reconnect_interval, 5, "invalid interval → default 5");
 }
 
 /* ================================================================
@@ -1138,7 +1153,6 @@ test_reconnect_interval_overflow(void)
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, f);
-    /* atoi(999999999) succeeds and v > 0, so it's stored as-is */
     ASSERT_EQ_INT(cfg.reconnect_interval, 999999999,
                   "huge interval stored as-is (no upper clamp)");
     unlink(f);
@@ -1390,6 +1404,7 @@ main(void)
     test_reconnect_config_parse();
     test_reconnect_config_true();
     test_reconnect_interval_invalid();
+    test_reconnect_interval_invalid_string();
 
     /* MTU tests */
     test_mtu_default();

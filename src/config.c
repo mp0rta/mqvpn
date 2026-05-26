@@ -324,8 +324,13 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
         } else if (strcasecmp(key, "Reconnect") == 0) {
             cfg->reconnect = parse_bool(val);
         } else if (strcasecmp(key, "ReconnectInterval") == 0) {
-            int v = atoi(val);
-            if (v > 0) cfg->reconnect_interval = v;
+            int v = 0;
+            if (parse_int_strict(val, &v) < 0 || v <= 0) {
+                LOG_WRN("%s:%d: invalid ReconnectInterval '%s'; ignoring", path, lineno,
+                        val);
+            } else {
+                cfg->reconnect_interval = v;
+            }
         } else if (strcasecmp(key, "MTU") == 0) {
             int v = 0;
             if (parse_int_strict(val, &v) < 0) {
@@ -373,8 +378,14 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
         } else if (strcasecmp(key, "User") == 0) {
             parse_user_pair(cfg, val, lineno, path);
         } else if (strcasecmp(key, "MaxClients") == 0) {
-            cfg->max_clients = atoi(val);
-            if (cfg->max_clients <= 0) cfg->max_clients = 64;
+            int v = 0;
+            if (parse_int_strict(val, &v) < 0 || v <= 0) {
+                LOG_WRN("%s:%d: invalid MaxClients '%s'; using default 64", path, lineno,
+                        val);
+                cfg->max_clients = 64;
+            } else {
+                cfg->max_clients = v;
+            }
         } else {
             LOG_WRN("%s:%d: unknown key '%s' in [Auth]", path, lineno, key);
         }
