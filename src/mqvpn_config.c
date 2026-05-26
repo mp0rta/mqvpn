@@ -8,8 +8,6 @@
 #include "mqvpn_internal.h"
 #include "json_mini.h"
 
-#include <errno.h>
-#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -120,50 +118,6 @@ json_read_users(mqvpn_config_t *cfg, const char *p)
     }
 
     return (*p == ']') ? MQVPN_OK : MQVPN_ERR_INVALID_ARG;
-}
-
-static int
-json_value_has_valid_end(const char *p)
-{
-    p = json_skip_ws(p);
-    return *p == '\0' || *p == ',' || *p == '}' || *p == ']';
-}
-
-static int
-json_read_u64_strict(const char *p, uint64_t *out)
-{
-    if (!p || !out) return MQVPN_ERR_INVALID_ARG;
-    p = json_skip_ws(p);
-    if (*p < '0' || *p > '9') return MQVPN_ERR_INVALID_ARG;
-
-    errno = 0;
-    char *end = NULL;
-    unsigned long long v = strtoull(p, &end, 10);
-    if (end == p || errno == ERANGE || !json_value_has_valid_end(end)) {
-        return MQVPN_ERR_INVALID_ARG;
-    }
-
-    *out = (uint64_t)v;
-    return MQVPN_OK;
-}
-
-static int
-json_read_int_strict(const char *p, int *out)
-{
-    if (!p || !out) return MQVPN_ERR_INVALID_ARG;
-    p = json_skip_ws(p);
-    if (*p != '-' && (*p < '0' || *p > '9')) return MQVPN_ERR_INVALID_ARG;
-
-    errno = 0;
-    char *end = NULL;
-    long v = strtol(p, &end, 10);
-    if (end == p || errno == ERANGE || v < INT_MIN || v > INT_MAX ||
-        !json_value_has_valid_end(end)) {
-        return MQVPN_ERR_INVALID_ARG;
-    }
-
-    *out = (int)v;
-    return MQVPN_OK;
 }
 
 static int

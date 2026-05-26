@@ -73,31 +73,6 @@ parse_u64_strict(const char *val, unsigned long long *out)
     return 0;
 }
 
-static int
-json_value_has_valid_end(const char *p)
-{
-    p = json_skip_ws(p);
-    return *p == '\0' || *p == ',' || *p == '}' || *p == ']';
-}
-
-static int
-json_read_u64_strict(const char *p, unsigned long long *out)
-{
-    if (!p || !out) return -1;
-    p = json_skip_ws(p);
-    if (*p < '0' || *p > '9') return -1;
-
-    errno = 0;
-    char *end = NULL;
-    unsigned long long v = strtoull(p, &end, 10);
-    if (end == p || errno == ERANGE || !json_value_has_valid_end(end)) {
-        return -1;
-    }
-
-    *out = v;
-    return 0;
-}
-
 /* Section IDs */
 enum {
     SEC_NONE = 0,
@@ -503,7 +478,7 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
 
     v = json_find_key(json_text, "init_max_path_id");
     if (v) {
-        unsigned long long uv = 0;
+        uint64_t uv = 0;
         if (json_read_u64_strict(v, &uv) == 0 && uv <= MQVPN_INIT_MAX_PATH_ID_MAX) {
             cfg->init_max_path_id = uv;
         } else {

@@ -7,10 +7,12 @@
 #ifndef MQVPN_JSON_MINI_H
 #define MQVPN_JSON_MINI_H
 
-#include <string.h>
-#include <stdlib.h>
-#include <stdint.h>
 #include <ctype.h>
+#include <errno.h>
+#include <limits.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
 static inline const char *
 json_skip_ws(const char *p)
@@ -98,6 +100,53 @@ json_read_int64(const char *p)
 {
     if (!p) return 0;
     return strtoll(p, NULL, 10);
+}
+
+/* True when a parsed JSON scalar stops before a legal delimiter. */
+static inline int
+json_value_has_valid_end(const char *p)
+{
+    p = json_skip_ws(p);
+    return *p == '\0' || *p == ',' || *p == '}' || *p == ']';
+}
+
+/* Strict JSON integer reader: rejects non-numeric prefixes, overflow, and
+ * trailing junk such as `123abc`. */
+static inline int
+json_read_int_strict(const char *p, int *out)
+{
+    if (!p || !out) return -1;
+    p = json_skip_ws(p);
+    if (*p != '-' && (*p < '0' || *p > '9')) return -1;
+
+    errno = 0;
+    char *end = NULL;
+    long v = strtol(p, &end, 10);
+    if (end == p || errno == ERANGE || v < INT_MIN || v > INT_MAX ||
+        !json_value_has_valid_end(end)) {
+        return -1;
+    }
+
+    *out = (int)v;
+    return 0;
+}
+
+static inline int
+json_read_u64_strict(const char *p, uint64_t *out)
+{
+    if (!p || !out) return -1;
+    p = json_skip_ws(p);
+    if (*p < '0' || *p > '9') return -1;
+
+    errno = 0;
+    char *end = NULL;
+    unsigned long long v = strtoull(p, &end, 10);
+    if (end == p || errno == ERANGE || !json_value_has_valid_end(end)) {
+        return -1;
+    }
+
+    *out = (uint64_t)v;
+    return 0;
 }
 
 /* Safe string copy with NUL termination. */
