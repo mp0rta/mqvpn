@@ -386,7 +386,7 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
     v = json_find_key(json_text, "init_max_path_id");
     if (v) {
         uint64_t uv = 0;
-        if (json_read_u64_strict(v, &uv) != MQVPN_OK || uv > MQVPN_INIT_MAX_PATH_ID_MAX) {
+        if (json_read_u64_strict(v, &uv) != 0 || uv > MQVPN_INIT_MAX_PATH_ID_MAX) {
             return MQVPN_ERR_INVALID_ARG;
         }
         cfg->init_max_path_id = uv;
@@ -394,8 +394,7 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
 
     v = json_find_key(json_text, "mtu");
     if (v) {
-        if (json_read_int_strict(v, &iv) != MQVPN_OK ||
-            (iv != 0 && (iv < 1280 || iv > 9000))) {
+        if (json_read_int_strict(v, &iv) != 0 || (iv != 0 && (iv < 1280 || iv > 9000))) {
             return MQVPN_ERR_INVALID_ARG;
         }
         cfg->tun_mtu = iv;
@@ -403,8 +402,7 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
 
     v = json_find_key(json_text, "tun_mtu");
     if (v) {
-        if (json_read_int_strict(v, &iv) != MQVPN_OK ||
-            (iv != 0 && (iv < 1280 || iv > 9000))) {
+        if (json_read_int_strict(v, &iv) != 0 || (iv != 0 && (iv < 1280 || iv > 9000))) {
             return MQVPN_ERR_INVALID_ARG;
         }
         cfg->tun_mtu = iv;

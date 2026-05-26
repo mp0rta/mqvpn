@@ -110,8 +110,8 @@ json_value_has_valid_end(const char *p)
     return *p == '\0' || *p == ',' || *p == '}' || *p == ']';
 }
 
-/* Strict JSON integer reader: rejects non-numeric prefixes, overflow, and
- * trailing junk such as `123abc`. */
+/* Strict JSON integer reader: returns 0 on success, -1 on error. Rejects
+ * non-numeric prefixes, overflow, and trailing junk such as `123abc`. */
 static inline int
 json_read_int_strict(const char *p, int *out)
 {
