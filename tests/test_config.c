@@ -76,6 +76,7 @@ test_defaults(void)
     ASSERT_EQ_INT(cfg.n_paths, 0, "default n_paths");
     ASSERT_EQ_INT(cfg.n_dns, 0, "default n_dns");
     ASSERT_EQ_STR(cfg.scheduler, "wlb", "default scheduler");
+    ASSERT_EQ_STR(cfg.cc, "bbr2", "default cc");
     ASSERT_EQ_INT(cfg.is_server, 0, "default is_server");
     ASSERT_EQ_STR(cfg.server_addr, "", "default server_addr");
     ASSERT_EQ_STR(cfg.auth_key, "", "default auth_key");
@@ -178,6 +179,33 @@ test_parse_scheduler_backup_fec(void)
 
     ASSERT_EQ_INT(rc, 0, "scheduler backup_fec config parse ok");
     ASSERT_EQ_STR(cfg.scheduler, "backup_fec", "scheduler backup_fec");
+}
+
+static void
+test_parse_cc_ini(void)
+{
+    const char *ini = "[Multipath]\n"
+                      "CC = bbr\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "cc ini parse ok");
+    ASSERT_EQ_STR(cfg.cc, "bbr", "cc bbr from INI");
+}
+
+static void
+test_parse_cc_json(void)
+{
+    const char *json = "{\"cc\": \"cubic\"}";
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load_json_filecfg(&cfg, json);
+
+    ASSERT_EQ_INT(rc, 0, "cc json parse ok");
+    ASSERT_EQ_STR(cfg.cc, "cubic", "cc cubic from JSON");
 }
 
 static void
@@ -1265,6 +1293,8 @@ main(void)
     test_parse_server_config();
     test_parse_client_config();
     test_parse_scheduler_backup_fec();
+    test_parse_cc_ini();
+    test_parse_cc_json();
     test_comments_whitespace();
     test_unknown_key_warns();
     test_missing_file_error();

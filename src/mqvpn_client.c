@@ -1598,6 +1598,7 @@ cli_start_connection(mqvpn_client_t *c)
         .is_server = false,
         .enable_multipath = (multipath != 0),
         .scheduler = c->config.scheduler,
+        .cc = c->config.cc,
         .init_max_path_id = c->config.init_max_path_id,
     };
     mqvpn_build_conn_settings(&cs_input, &cs);

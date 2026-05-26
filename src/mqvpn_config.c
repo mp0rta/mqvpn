@@ -349,6 +349,14 @@ mqvpn_config_set_scheduler(mqvpn_config_t *cfg, mqvpn_scheduler_t sched)
 }
 
 int
+mqvpn_config_set_cc(mqvpn_config_t *cfg, mqvpn_cc_t cc)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->cc = cc;
+    return MQVPN_OK;
+}
+
+int
 mqvpn_config_set_init_max_path_id(mqvpn_config_t *cfg, uint64_t v)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;

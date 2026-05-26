@@ -54,6 +54,7 @@ typedef struct mqvpn_file_config_s {
     char paths[MQVPN_CONFIG_MAX_PATHS][32];
     int n_paths;
     char scheduler[16];
+    char cc[16]; /* congestion control: bbr2 (default), bbr, cubic, none */
 
     /* draft-21 §4.6 initial Maximum Path Identifier TP, 0 = use xquic default 8 */
     unsigned long long init_max_path_id;

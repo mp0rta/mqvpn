@@ -105,6 +105,49 @@ test_propagation_scheduler(void)
 }
 
 static int
+test_propagation_cc(void)
+{
+    xqc_conn_settings_t cs;
+    mqvpn_conn_settings_input_t in = {
+        .is_server = false,
+        .enable_multipath = true,
+        .scheduler = MQVPN_SCHED_WLB,
+        .cc = MQVPN_CC_BBR2,
+        .init_max_path_id = 0,
+    };
+
+    /* default: BBR2 — also verify optimization flags are set */
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_PTR_EQ(cs.cong_ctrl_callback.xqc_cong_ctl_init, xqc_bbr2_cb.xqc_cong_ctl_init);
+    ASSERT_EQ(cs.cc_params.cc_optimization_flags,
+              XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE);
+
+    /* BBR — no optimization flags */
+    in.cc = MQVPN_CC_BBR;
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_PTR_EQ(cs.cong_ctrl_callback.xqc_cong_ctl_init, xqc_bbr_cb.xqc_cong_ctl_init);
+    ASSERT_EQ(cs.cc_params.cc_optimization_flags, 0);
+
+    /* CUBIC — no optimization flags */
+    in.cc = MQVPN_CC_CUBIC;
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_PTR_EQ(cs.cong_ctrl_callback.xqc_cong_ctl_init,
+                  xqc_cubic_cb.xqc_cong_ctl_init);
+    ASSERT_EQ(cs.cc_params.cc_optimization_flags, 0);
+
+#ifdef XQC_ENABLE_UNLIMITED
+    /* NONE (unlimited) — no optimization flags */
+    in.cc = MQVPN_CC_NONE;
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_PTR_EQ(cs.cong_ctrl_callback.xqc_cong_ctl_init,
+                  xqc_unlimited_cc_cb.xqc_cong_ctl_init);
+    ASSERT_EQ(cs.cc_params.cc_optimization_flags, 0);
+#endif
+
+    return 0;
+}
+
+static int
 test_propagation_init_max_path_id(void)
 {
     xqc_conn_settings_t cs;
@@ -131,6 +174,7 @@ main(void)
     int failed = 0;
     failed += test_asymmetry_server_vs_client();
     failed += test_propagation_scheduler();
+    failed += test_propagation_cc();
     failed += test_propagation_init_max_path_id();
     if (failed) {
         fprintf(stderr, "test_conn_settings: %d FAILED\n", failed);
