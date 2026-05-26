@@ -6,7 +6,7 @@
 #ifndef MQVPN_SCHEDULER_H
 #define MQVPN_SCHEDULER_H
 
-#include "libmqvpn.h"
+#include "mqvpn_internal.h"
 #include <xquic/xquic.h> /* brings in xqc_configure.h with XQC_ENABLE_* defines */
 #include <stdlib.h>      /* getenv */
 #include <string.h>      /* strcmp */
@@ -35,7 +35,8 @@
 
 /* Apply scheduler-specific xquic conn settings (callback + FEC params).
  * Used by both client (mqvpn_client.c) and server (mqvpn_server.c). */
-void mqvpn_apply_scheduler(xqc_conn_settings_t *cs, mqvpn_scheduler_t sched);
+MQVPN_INTERNAL void mqvpn_apply_scheduler(xqc_conn_settings_t *cs,
+                                          mqvpn_scheduler_t sched);
 
 /* Map scheduler choice → DATAGRAM send-time QoS level.
  *

@@ -333,7 +333,7 @@ support was compiled in.
 **Response**
 
 ```json
-{"ok":true,"version":"0.5.0","scheduler":"backup_fec","fec_enabled":1}
+{"ok":true,"version":"0.6.0","scheduler":"backup_fec","fec_enabled":1}
 ```
 
 | Field        | Type    | Description                                                    |

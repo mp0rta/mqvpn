@@ -19,7 +19,7 @@
  *   {"ok":true,"n_clients":N,"bytes_tx":X,"bytes_rx":Y,
  *    "dgram_sent":S,"dgram_recv":R,"dgram_lost":L,"dgram_acked":A,
  *    "uptime_sec":U}
- *   {"ok":true,"version":"0.5.0","scheduler":"backup_fec","fec_enabled":1}
+ *   {"ok":true,"version":"0.6.0","scheduler":"backup_fec","fec_enabled":1}
  *   {"ok":true,"user":"alice","enable_fec":1,"mp_state":1,
  *    "mp_state_label":"active_with_standby",
  *    "fec_send_cnt":142,"fec_recover_cnt":17,"lost_dgram_cnt":23,

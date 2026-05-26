@@ -8,6 +8,8 @@
 #include "mqvpn_internal.h"
 #include "json_mini.h"
 
+#include <errno.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -118,6 +120,106 @@ json_read_users(mqvpn_config_t *cfg, const char *p)
     }
 
     return (*p == ']') ? MQVPN_OK : MQVPN_ERR_INVALID_ARG;
+}
+
+static int
+json_value_has_valid_end(const char *p)
+{
+    p = json_skip_ws(p);
+    return *p == '\0' || *p == ',' || *p == '}' || *p == ']';
+}
+
+static int
+json_read_u64_strict(const char *p, uint64_t *out)
+{
+    if (!p || !out) return MQVPN_ERR_INVALID_ARG;
+    p = json_skip_ws(p);
+    if (*p < '0' || *p > '9') return MQVPN_ERR_INVALID_ARG;
+
+    errno = 0;
+    char *end = NULL;
+    unsigned long long v = strtoull(p, &end, 10);
+    if (end == p || errno == ERANGE || !json_value_has_valid_end(end)) {
+        return MQVPN_ERR_INVALID_ARG;
+    }
+
+    *out = (uint64_t)v;
+    return MQVPN_OK;
+}
+
+static int
+json_read_int_strict(const char *p, int *out)
+{
+    if (!p || !out) return MQVPN_ERR_INVALID_ARG;
+    p = json_skip_ws(p);
+    if (*p != '-' && (*p < '0' || *p > '9')) return MQVPN_ERR_INVALID_ARG;
+
+    errno = 0;
+    char *end = NULL;
+    long v = strtol(p, &end, 10);
+    if (end == p || errno == ERANGE || v < INT_MIN || v > INT_MAX ||
+        !json_value_has_valid_end(end)) {
+        return MQVPN_ERR_INVALID_ARG;
+    }
+
+    *out = (int)v;
+    return MQVPN_OK;
+}
+
+static int
+parse_scheduler_name(const char *s, mqvpn_scheduler_t *out)
+{
+    if (!s || !out) return MQVPN_ERR_INVALID_ARG;
+    if (strcmp(s, "minrtt") == 0) {
+        *out = MQVPN_SCHED_MINRTT;
+        return MQVPN_OK;
+    }
+    if (strcmp(s, "wlb") == 0) {
+        *out = MQVPN_SCHED_WLB;
+        return MQVPN_OK;
+    }
+    if (strcmp(s, "backup_fec") == 0) {
+        *out = MQVPN_SCHED_BACKUP_FEC;
+        return MQVPN_OK;
+    }
+    return MQVPN_ERR_INVALID_ARG;
+}
+
+static int
+parse_cc_name(const char *s, mqvpn_cc_t *out)
+{
+    if (!s || !out) return MQVPN_ERR_INVALID_ARG;
+    if (strcmp(s, "bbr2") == 0) {
+        *out = MQVPN_CC_BBR2;
+        return MQVPN_OK;
+    }
+    if (strcmp(s, "bbr") == 0) {
+        *out = MQVPN_CC_BBR;
+        return MQVPN_OK;
+    }
+    if (strcmp(s, "cubic") == 0) {
+        *out = MQVPN_CC_CUBIC;
+        return MQVPN_OK;
+    }
+    if (strcmp(s, "none") == 0) {
+        *out = MQVPN_CC_NONE;
+        return MQVPN_OK;
+    }
+    return MQVPN_ERR_INVALID_ARG;
+}
+
+static int
+is_valid_scheduler(mqvpn_scheduler_t sched)
+{
+    return sched == MQVPN_SCHED_MINRTT || sched == MQVPN_SCHED_WLB ||
+           sched == MQVPN_SCHED_BACKUP_FEC;
+}
+
+static int
+is_valid_cc(mqvpn_cc_t cc)
+{
+    return cc == MQVPN_CC_BBR2 || cc == MQVPN_CC_BBR || cc == MQVPN_CC_CUBIC ||
+           cc == MQVPN_CC_NONE;
 }
 
 /* ─── Config new/free ─── */
@@ -294,6 +396,24 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
         cfg->multipath = iv;
     }
 
+    v = json_find_key(json_text, "scheduler");
+    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+        mqvpn_scheduler_t sched = MQVPN_SCHED_WLB;
+        if (parse_scheduler_name(tmp, &sched) != MQVPN_OK) {
+            return MQVPN_ERR_INVALID_ARG;
+        }
+        cfg->scheduler = sched;
+    }
+
+    v = json_find_key(json_text, "cc");
+    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+        mqvpn_cc_t cc = MQVPN_CC_BBR2;
+        if (parse_cc_name(tmp, &cc) != MQVPN_OK) {
+            return MQVPN_ERR_INVALID_ARG;
+        }
+        cfg->cc = cc;
+    }
+
     v = json_find_key(json_text, "reconnect_enable");
     if (v && json_read_bool(v, &iv) == MQVPN_OK) {
         cfg->reconnect_enable = iv;
@@ -311,9 +431,29 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
 
     v = json_find_key(json_text, "init_max_path_id");
     if (v) {
-        /* uint64 field; use int64 reader to match INI strtoull width */
-        int64_t iv64 = json_read_int64(v);
-        if (iv64 >= 0) cfg->init_max_path_id = (uint64_t)iv64;
+        uint64_t uv = 0;
+        if (json_read_u64_strict(v, &uv) != MQVPN_OK || uv > MQVPN_INIT_MAX_PATH_ID_MAX) {
+            return MQVPN_ERR_INVALID_ARG;
+        }
+        cfg->init_max_path_id = uv;
+    }
+
+    v = json_find_key(json_text, "mtu");
+    if (v) {
+        if (json_read_int_strict(v, &iv) != MQVPN_OK ||
+            (iv != 0 && (iv < 1280 || iv > 9000))) {
+            return MQVPN_ERR_INVALID_ARG;
+        }
+        cfg->tun_mtu = iv;
+    }
+
+    v = json_find_key(json_text, "tun_mtu");
+    if (v) {
+        if (json_read_int_strict(v, &iv) != MQVPN_OK ||
+            (iv != 0 && (iv < 1280 || iv > 9000))) {
+            return MQVPN_ERR_INVALID_ARG;
+        }
+        cfg->tun_mtu = iv;
     }
 
     /* "paths" sets the multipath flag; individual interface names are not stored
@@ -344,6 +484,7 @@ int
 mqvpn_config_set_scheduler(mqvpn_config_t *cfg, mqvpn_scheduler_t sched)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    if (!is_valid_scheduler(sched)) return MQVPN_ERR_INVALID_ARG;
     cfg->scheduler = sched;
     return MQVPN_OK;
 }
@@ -352,6 +493,7 @@ int
 mqvpn_config_set_cc(mqvpn_config_t *cfg, mqvpn_cc_t cc)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    if (!is_valid_cc(cc)) return MQVPN_ERR_INVALID_ARG;
     cfg->cc = cc;
     return MQVPN_OK;
 }
@@ -360,6 +502,7 @@ int
 mqvpn_config_set_init_max_path_id(mqvpn_config_t *cfg, uint64_t v)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    if (v > MQVPN_INIT_MAX_PATH_ID_MAX) return MQVPN_ERR_INVALID_ARG;
     cfg->init_max_path_id = v;
     return MQVPN_OK;
 }

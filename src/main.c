@@ -18,6 +18,7 @@
 #endif
 
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -254,16 +255,15 @@ main(int argc, char *argv[])
             /* Reject leading '-' explicitly: strtoull silently wraps "-1" to
              * UINT64_MAX rather than failing. */
             if (optarg[0] == '-' || optarg[0] == '\0') {
-                fprintf(stderr, "error: --init-max-path-id must be a non-negative "
-                                "integer\n");
+                fprintf(stderr, "error: --init-max-path-id must be 0..4294967295\n");
                 return 1;
             }
             char *end = NULL;
             errno = 0;
             unsigned long long v = strtoull(optarg, &end, 10);
-            if (!end || *end != '\0' || errno == ERANGE) {
-                fprintf(stderr, "error: --init-max-path-id must be a non-negative "
-                                "integer\n");
+            if (!end || *end != '\0' || errno == ERANGE ||
+                v > MQVPN_INIT_MAX_PATH_ID_MAX) {
+                fprintf(stderr, "error: --init-max-path-id must be 0..4294967295\n");
                 return 1;
             }
             init_max_path_id = (uint64_t)v;
@@ -271,9 +271,17 @@ main(int argc, char *argv[])
             break;
         }
         case 0x102: {
-            int v = atoi(optarg);
+            char *end = NULL;
+            errno = 0;
+            long lv = strtol(optarg, &end, 10);
+            if (end == optarg || !end || *end != '\0' || errno == ERANGE ||
+                lv < INT_MIN || lv > INT_MAX) {
+                fprintf(stderr, "error: --mtu must be 0 or 1280..9000\n");
+                return 1;
+            }
+            int v = (int)lv;
             if (v != 0 && (v < 1280 || v > 9000)) {
-                fprintf(stderr, "error: --mtu must be 1280..9000\n");
+                fprintf(stderr, "error: --mtu must be 0 or 1280..9000\n");
                 return 1;
             }
             cli_mtu = v;

@@ -37,7 +37,7 @@ install.sh は自己署名証明書を生成します。クライアント接続
 [Releases](https://github.com/mp0rta/mqvpn/releases/latest) から `.deb` をダウンロードしてインストールします。
 
 ```bash
-# VERSION と ARCH は環境に合わせて置き換えてください（例: 0.5.0, amd64）
+# VERSION と ARCH は環境に合わせて置き換えてください（例: 0.6.0, amd64）
 curl -LO https://github.com/mp0rta/mqvpn/releases/latest/download/mqvpn_VERSION_ARCH.deb
 sudo dpkg -i mqvpn_*.deb
 ```
