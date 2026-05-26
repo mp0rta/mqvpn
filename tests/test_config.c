@@ -21,6 +21,17 @@ static int g_pass = 0, g_fail = 0;
         }                                                                      \
     } while (0)
 
+#define ASSERT_EQ_ULL(a, b, msg)                                                       \
+    do {                                                                               \
+        if ((a) == (b)) {                                                              \
+            g_pass++;                                                                  \
+        } else {                                                                       \
+            g_fail++;                                                                  \
+            fprintf(stderr, "FAIL [%s]: %llu != %llu\n", msg, (unsigned long long)(a), \
+                    (unsigned long long)(b));                                          \
+        }                                                                              \
+    } while (0)
+
 #define ASSERT_EQ_STR(a, b, msg)                                         \
     do {                                                                 \
         if (strcmp((a), (b)) == 0) {                                     \
@@ -76,6 +87,7 @@ test_defaults(void)
     ASSERT_EQ_INT(cfg.n_paths, 0, "default n_paths");
     ASSERT_EQ_INT(cfg.n_dns, 0, "default n_dns");
     ASSERT_EQ_STR(cfg.scheduler, "wlb", "default scheduler");
+    ASSERT_EQ_STR(cfg.cc, "bbr2", "default cc");
     ASSERT_EQ_INT(cfg.is_server, 0, "default is_server");
     ASSERT_EQ_STR(cfg.server_addr, "", "default server_addr");
     ASSERT_EQ_STR(cfg.auth_key, "", "default auth_key");
@@ -178,6 +190,73 @@ test_parse_scheduler_backup_fec(void)
 
     ASSERT_EQ_INT(rc, 0, "scheduler backup_fec config parse ok");
     ASSERT_EQ_STR(cfg.scheduler, "backup_fec", "scheduler backup_fec");
+}
+
+static void
+test_parse_cc_ini(void)
+{
+    const char *ini = "[Multipath]\n"
+                      "CC = bbr\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "cc ini parse ok");
+    ASSERT_EQ_STR(cfg.cc, "bbr", "cc bbr from INI");
+}
+
+static void
+test_parse_cc_json(void)
+{
+    const char *json = "{\"cc\": \"cubic\"}";
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load_json_filecfg(&cfg, json);
+
+    ASSERT_EQ_INT(rc, 0, "cc json parse ok");
+    ASSERT_EQ_STR(cfg.cc, "cubic", "cc cubic from JSON");
+}
+
+static void
+test_parse_init_max_path_id_bounds(void)
+{
+    const char *ini_ok = "[Multipath]\n"
+                         "InitMaxPathId = 4294967295\n";
+    char *path = write_tmp(ini_ok);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "InitMaxPathId max parse ok");
+    ASSERT_EQ_ULL(cfg.init_max_path_id, 4294967295ULL, "InitMaxPathId max stored");
+
+    const char *ini_bad = "[Multipath]\n"
+                          "InitMaxPathId = 4294967296\n";
+    path = write_tmp(ini_bad);
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "InitMaxPathId overflow is warning-only");
+    ASSERT_EQ_ULL(cfg.init_max_path_id, 0, "InitMaxPathId overflow ignored");
+}
+
+static void
+test_parse_init_max_path_id_json_bounds(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load_json_filecfg(&cfg, "{\"init_max_path_id\":4294967295}");
+    ASSERT_EQ_INT(rc, 0, "JSON init_max_path_id max parse ok");
+    ASSERT_EQ_ULL(cfg.init_max_path_id, 4294967295ULL, "JSON init_max_path_id max");
+
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load_json_filecfg(&cfg, "{\"init_max_path_id\":4294967296}");
+    ASSERT_EQ_INT(rc, 0, "JSON init_max_path_id overflow is warning-only");
+    ASSERT_EQ_ULL(cfg.init_max_path_id, 0, "JSON init_max_path_id overflow ignored");
 }
 
 static void
@@ -460,7 +539,7 @@ test_max_clients_edge_cases(void)
     unlink(path);
     ASSERT_EQ_INT(cfg.max_clients, 64, "MaxClients=-1 → default 64");
 
-    /* MaxClients = abc → atoi returns 0 → fallback to 64 */
+    /* MaxClients = abc → invalid, fallback to 64 */
     const char *ini_abc = "[Auth]\n"
                           "MaxClients = abc\n";
 
@@ -689,6 +768,21 @@ test_reconnect_interval_invalid(void)
     ASSERT_EQ_INT(cfg.reconnect_interval, 5, "negative interval → default 5");
 }
 
+static void
+test_reconnect_interval_invalid_string(void)
+{
+    const char *ini = "[Interface]\n"
+                      "ReconnectInterval = abc\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.reconnect_interval, 5, "invalid interval → default 5");
+}
+
 /* ================================================================
  *  MTU config tests
  * ================================================================ */
@@ -735,6 +829,18 @@ test_mtu_above_ceiling_ignored(void)
     mqvpn_config_load(&cfg, path);
     unlink(path);
     ASSERT_EQ_INT(cfg.tun_mtu, 0, "MTU > 9000 ignored → stays 0");
+}
+
+static void
+test_mtu_invalid_string_ignored(void)
+{
+    const char *ini = "[Interface]\nMTU = abc\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.tun_mtu, 0, "invalid MTU string ignored");
 }
 
 static void
@@ -1047,7 +1153,6 @@ test_reconnect_interval_overflow(void)
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, f);
-    /* atoi(999999999) succeeds and v > 0, so it's stored as-is */
     ASSERT_EQ_INT(cfg.reconnect_interval, 999999999,
                   "huge interval stored as-is (no upper clamp)");
     unlink(f);
@@ -1265,6 +1370,10 @@ main(void)
     test_parse_server_config();
     test_parse_client_config();
     test_parse_scheduler_backup_fec();
+    test_parse_cc_ini();
+    test_parse_cc_json();
+    test_parse_init_max_path_id_bounds();
+    test_parse_init_max_path_id_json_bounds();
     test_comments_whitespace();
     test_unknown_key_warns();
     test_missing_file_error();
@@ -1295,12 +1404,14 @@ main(void)
     test_reconnect_config_parse();
     test_reconnect_config_true();
     test_reconnect_interval_invalid();
+    test_reconnect_interval_invalid_string();
 
     /* MTU tests */
     test_mtu_default();
     test_mtu_config_parse();
     test_mtu_below_floor_ignored();
     test_mtu_above_ceiling_ignored();
+    test_mtu_invalid_string_ignored();
     test_mtu_json_parse();
 
     /* subnet6 tests */

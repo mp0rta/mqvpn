@@ -46,7 +46,7 @@ curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
 Download the latest `.deb` from [Releases](https://github.com/mp0rta/mqvpn/releases/latest):
 
 ```bash
-# Replace VERSION and ARCH as needed (e.g., 0.5.0, amd64)
+# Replace VERSION and ARCH as needed (e.g., 0.6.0, amd64)
 curl -LO https://github.com/mp0rta/mqvpn/releases/latest/download/mqvpn_VERSION_ARCH.deb
 sudo dpkg -i mqvpn_*.deb
 ```

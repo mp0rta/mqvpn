@@ -157,6 +157,11 @@ TEST(config_load_json)
                        "\"reconnect_enable\":false,"
                        "\"reconnect_interval_sec\":11,"
                        "\"killswitch_hint\":true,"
+                       "\"scheduler\":\"minrtt\","
+                       "\"cc\":\"cubic\","
+                       "\"init_max_path_id\":16,"
+                       "\"mtu\":1400,"
+                       "\"tun_mtu\":1350,"
                        "\"listen_addr\":\"0.0.0.0\","
                        "\"listen_port\":443,"
                        "\"subnet\":\"10.5.0.0/24\","
@@ -178,6 +183,10 @@ TEST(config_load_json)
     ASSERT_EQ(cfg->reconnect_enable, 0);
     ASSERT_EQ(cfg->reconnect_interval_sec, 11);
     ASSERT_EQ(cfg->killswitch_hint, 1);
+    ASSERT_EQ(cfg->scheduler, MQVPN_SCHED_MINRTT);
+    ASSERT_EQ(cfg->cc, MQVPN_CC_CUBIC);
+    ASSERT_EQ(cfg->init_max_path_id, 16);
+    ASSERT_EQ(cfg->tun_mtu, 1350);
     ASSERT_STR_EQ(cfg->listen_addr, "0.0.0.0");
     ASSERT_EQ(cfg->listen_port, 443);
     ASSERT_STR_EQ(cfg->subnet, "10.5.0.0/24");
@@ -220,6 +229,16 @@ TEST(config_load_json_invalid_users)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_load_json_invalid_tuning)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"init_max_path_id\":4294967296}"),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"cc\":\"reno\"}"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"mtu\":\"bad\"}"), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
 TEST(config_set_insecure)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
@@ -256,7 +275,39 @@ TEST(config_set_scheduler)
     ASSERT_EQ(cfg->scheduler, MQVPN_SCHED_WLB);
     ASSERT_EQ(mqvpn_config_set_scheduler(cfg, MQVPN_SCHED_BACKUP_FEC), MQVPN_OK);
     ASSERT_EQ(cfg->scheduler, MQVPN_SCHED_BACKUP_FEC);
+    ASSERT_EQ(mqvpn_config_set_scheduler(cfg, (mqvpn_scheduler_t)99),
+              MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_config_set_scheduler(NULL, MQVPN_SCHED_WLB), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_set_cc)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_set_cc(cfg, MQVPN_CC_BBR2), MQVPN_OK);
+    ASSERT_EQ(cfg->cc, MQVPN_CC_BBR2);
+    ASSERT_EQ(mqvpn_config_set_cc(cfg, MQVPN_CC_BBR), MQVPN_OK);
+    ASSERT_EQ(cfg->cc, MQVPN_CC_BBR);
+    ASSERT_EQ(mqvpn_config_set_cc(cfg, MQVPN_CC_CUBIC), MQVPN_OK);
+    ASSERT_EQ(cfg->cc, MQVPN_CC_CUBIC);
+    ASSERT_EQ(mqvpn_config_set_cc(cfg, MQVPN_CC_NONE), MQVPN_OK);
+    ASSERT_EQ(cfg->cc, MQVPN_CC_NONE);
+    ASSERT_EQ(mqvpn_config_set_cc(cfg, (mqvpn_cc_t)99), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_cc(NULL, MQVPN_CC_BBR2), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_set_init_max_path_id)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_set_init_max_path_id(cfg, 0), MQVPN_OK);
+    ASSERT_EQ(cfg->init_max_path_id, 0);
+    ASSERT_EQ(mqvpn_config_set_init_max_path_id(cfg, MQVPN_INIT_MAX_PATH_ID_MAX),
+              MQVPN_OK);
+    ASSERT_EQ(cfg->init_max_path_id, MQVPN_INIT_MAX_PATH_ID_MAX);
+    ASSERT_EQ(mqvpn_config_set_init_max_path_id(cfg, MQVPN_INIT_MAX_PATH_ID_MAX + 1),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_init_max_path_id(NULL, 1), MQVPN_ERR_INVALID_ARG);
     mqvpn_config_free(cfg);
 }
 
@@ -379,12 +430,17 @@ TEST(error_string)
 
 /* ── Version string test ── */
 
+#define STRINGIFY2(x) #x
+#define STRINGIFY(x)  STRINGIFY2(x)
+#define EXPECTED_VERSION           \
+    STRINGIFY(MQVPN_VERSION_MAJOR) \
+    "." STRINGIFY(MQVPN_VERSION_MINOR) "." STRINGIFY(MQVPN_VERSION_PATCH)
+
 TEST(version_string)
 {
     const char *v = mqvpn_version_string();
     ASSERT_NOT_NULL(v);
-    /* Should contain major.minor.patch */
-    ASSERT_NOT_NULL(strstr(v, "0.5.0"));
+    ASSERT_NOT_NULL(strstr(v, EXPECTED_VERSION));
 }
 
 /* ── Client lifecycle (without xquic — expects NULL due to engine init failure) ── */
@@ -1694,9 +1750,12 @@ main(void)
     run_config_load_json();
     run_config_load_json_duplicate_users_last_wins();
     run_config_load_json_invalid_users();
+    run_config_load_json_invalid_tuning();
     run_config_set_insecure();
     run_config_set_tun_mtu();
     run_config_set_scheduler();
+    run_config_set_cc();
+    run_config_set_init_max_path_id();
     run_config_set_log_level();
     run_config_set_reconnect();
     run_config_set_killswitch_hint();

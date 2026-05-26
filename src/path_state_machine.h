@@ -17,7 +17,7 @@
 #ifndef MQVPN_PATH_STATE_MACHINE_H
 #define MQVPN_PATH_STATE_MACHINE_H
 
-#include "libmqvpn.h"
+#include "mqvpn_internal.h"
 #include "path_entry_internal.h"
 #include <stdint.h>
 
@@ -72,10 +72,10 @@ typedef struct {
 struct mqvpn_client_s; /* forward decl - full type lives in mqvpn_client.c */
 
 /* PR4 - Event-driven transition aggregator. Spec §5.0-§5.3, §6. */
-void path_on_event(struct mqvpn_client_s *c, path_entry_t *p, path_event_t ev,
-                   const path_event_ctx_t *ctx);
+MQVPN_INTERNAL void path_on_event(struct mqvpn_client_s *c, path_entry_t *p,
+                                  path_event_t ev, const path_event_ctx_t *ctx);
 
-const char *path_event_name(path_event_t ev);
+MQVPN_INTERNAL const char *path_event_name(path_event_t ev);
 
 /* PR4 - Compile-time pin for FSM design shape (rev5 / bc1fa8d pattern).
  * If path_lifecycle_t grows a new state, or CLOSED_FREE is reordered, this
@@ -114,23 +114,23 @@ typedef enum {
  * (→ 9 states total). */
 
 /* Map internal lifecycle → public 5-state. Pure function. */
-mqvpn_path_status_t path_public_status_from_lifecycle(path_lifecycle_t s);
+MQVPN_INTERNAL mqvpn_path_status_t path_public_status_from_lifecycle(path_lifecycle_t s);
 
 /* Human-readable name (for logs). */
-const char *path_lifecycle_name(path_lifecycle_t s);
+MQVPN_INTERNAL const char *path_lifecycle_name(path_lifecycle_t s);
 
 /* Debug-build 7-state invariant check. Asserts the (state, platform_attached,
  * xquic_path_live, fd_valid, xqc_path_id, recreate_after_us,
  * path_stable_since_us) tuple is legal AND that p->status ==
  * path_public_status_from_lifecycle(p->state) (denormalization invariant).
  * No-op in release builds. */
-void path_invariant_check(const path_entry_t *p);
+MQVPN_INTERNAL void path_invariant_check(const path_entry_t *p);
 
 /* Human-readable name of an mqvpn_path_status_t value. */
-const char *mqvpn_path_status_name(mqvpn_path_status_t s);
+MQVPN_INTERNAL const char *mqvpn_path_status_name(mqvpn_path_status_t s);
 
 /* Reason tag → string. */
-const char *mqvpn_path_transition_reason_name(path_transition_reason_t r);
+MQVPN_INTERNAL const char *mqvpn_path_transition_reason_name(path_transition_reason_t r);
 
 /* Debug-build invariant check for the legacy 5-state model.
  * Asserts that the (status, platform_attached, xquic_path_live,
@@ -138,17 +138,17 @@ const char *mqvpn_path_transition_reason_name(path_transition_reason_t r);
  * tuple is in a known-legal combination. No-op in release builds
  * (uses assert()). MUST be called only after all coupled field
  * updates of a transition are complete — never mid-mutation. */
-void path_invariant_check_legacy(const path_entry_t *p);
+MQVPN_INTERNAL void path_invariant_check_legacy(const path_entry_t *p);
 
 /* Set state_entered_at_us = now_us; reset last_residence_warn_at_us = 0.
  * Call after every transition that changes status. */
-void path_mark_state_entry(path_entry_t *p, uint64_t now_us);
+MQVPN_INTERNAL void path_mark_state_entry(path_entry_t *p, uint64_t now_us);
 
 /* Pure boolean: should the residence-warn fire for `p` at `now_us`?
  * No logging side effect, no field mutation. Wrapper in mqvpn_client.c
  * combines this with LOG_W. Exposed for unit testing without a
  * mqvpn_client_t. */
-int path_should_warn_residence(const path_entry_t *p, uint64_t now_us);
+MQVPN_INTERNAL int path_should_warn_residence(const path_entry_t *p, uint64_t now_us);
 
 /* Pure boolean: is a status assignment from `old` to `new_status` a real
  * transition (1) or a self-loop to suppress (0)?
@@ -161,8 +161,9 @@ int path_should_warn_residence(const path_entry_t *p, uint64_t now_us);
  *
  * Pure helper used by mqvpn_client.c's set_path_status_with_log wrapper —
  * extracted so the decision can be unit-tested without a mqvpn_client_t. */
-int path_is_real_transition(mqvpn_path_status_t old, mqvpn_path_status_t new_status,
-                            uint64_t state_entered_at_us);
+MQVPN_INTERNAL int path_is_real_transition(mqvpn_path_status_t old,
+                                           mqvpn_path_status_t new_status,
+                                           uint64_t state_entered_at_us);
 
 /* PR4 - Path retry/stability constants (relocated from mqvpn_client.c).
  * Both mqvpn_client.c (for logging) and path_state_machine.c (for retry
@@ -175,12 +176,14 @@ int path_is_real_transition(mqvpn_path_status_t old, mqvpn_path_status_t new_sta
 /* PR4 - Relocated from mqvpn_client.c (originally static). path_on_event()
  * body and the residual callsites that still emit explicit reason tags
  * share these entries. */
-void set_path_state_with_log(struct mqvpn_client_s *c, path_entry_t *p,
-                             path_lifecycle_t new_state, path_transition_reason_t reason);
-void path_log_state_change(struct mqvpn_client_s *c, const path_entry_t *p,
-                           path_lifecycle_t old, path_transition_reason_t reason);
-uint64_t path_recreate_backoff(int retries);
-void path_entry_init(path_entry_t *p);
+MQVPN_INTERNAL void set_path_state_with_log(struct mqvpn_client_s *c, path_entry_t *p,
+                                            path_lifecycle_t new_state,
+                                            path_transition_reason_t reason);
+MQVPN_INTERNAL void path_log_state_change(struct mqvpn_client_s *c, const path_entry_t *p,
+                                          path_lifecycle_t old,
+                                          path_transition_reason_t reason);
+MQVPN_INTERNAL uint64_t path_recreate_backoff(int retries);
+MQVPN_INTERNAL void path_entry_init(path_entry_t *p);
 
 /* Residence thresholds (microseconds). */
 #define PATH_RESIDENCE_PENDING_WARN_US   ((uint64_t)30 * 1000 * 1000)
@@ -190,9 +193,11 @@ void path_entry_init(path_entry_t *p);
  * back to the owning mqvpn_client_t. Implementations live in mqvpn_client.c
  * with __attribute__((visibility("hidden"))) so libmqvpn.so does not export
  * them. */
-uint64_t client_now_us(const struct mqvpn_client_s *c);
-void client_log(struct mqvpn_client_s *c, mqvpn_log_level_t level, const char *fmt, ...);
-void path_fsm_fire_path_event(struct mqvpn_client_s *c, const path_entry_t *p);
+MQVPN_INTERNAL uint64_t client_now_us(const struct mqvpn_client_s *c);
+MQVPN_INTERNAL void client_log(struct mqvpn_client_s *c, mqvpn_log_level_t level,
+                               const char *fmt, ...);
+MQVPN_INTERNAL void path_fsm_fire_path_event(struct mqvpn_client_s *c,
+                                             const path_entry_t *p);
 
 /* G-P15 (draft-21 §3.3 ¶6): mirror local lifecycle demotions onto the
  * xquic conn via xqc_conn_mark_path_{standby,available,frozen}. The
@@ -200,13 +205,13 @@ void path_fsm_fire_path_event(struct mqvpn_client_s *c, const path_entry_t *p);
  * AVAILABLE=2, FROZEN=3); the accessor dispatches to the right xquic
  * API. Implementation in mqvpn_client.c (needs the full client struct
  * for c->engine and c->conn->cid). No-op when engine/conn missing. */
-void client_notify_xqc_path_state(struct mqvpn_client_s *c, const path_entry_t *p,
-                                  int app_status);
+MQVPN_INTERNAL void client_notify_xqc_path_state(struct mqvpn_client_s *c,
+                                                 const path_entry_t *p, int app_status);
 
 /* PR4 - Per-tick stable-budget reset (relocated from mqvpn_client.c for
  * §7.1 file-scope allow on path_stable_since_us / recreate_retries writes).
  * Called per path slot from tick_path_recovery. */
-void path_fsm_tick_confirm_stable(struct mqvpn_client_s *c, path_entry_t *p,
-                                  uint64_t now_us);
+MQVPN_INTERNAL void path_fsm_tick_confirm_stable(struct mqvpn_client_s *c,
+                                                 path_entry_t *p, uint64_t now_us);
 
 #endif /* MQVPN_PATH_STATE_MACHINE_H */

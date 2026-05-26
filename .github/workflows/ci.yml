@@ -87,7 +87,7 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-gcc-release-bssl-9c95ec7-v3
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-gcc-release-bssl-9c95ec7-v4
 
       - name: Build xquic
         if: steps.xquic-cache.outputs.cache-hit != 'true'
@@ -96,6 +96,7 @@ jobs:
           mkdir -p build && cd build
           cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
                 -DXQC_ENABLE_BBR2=ON \
+                -DXQC_ENABLE_UNLIMITED=ON \
                 -DXQC_ENABLE_FEC=ON \
                 -DXQC_ENABLE_XOR=ON \
                 -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
@@ -174,7 +175,7 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-9c95ec7-v3
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-9c95ec7-v4
 
       - name: Build xquic (clang)
         if: steps.xquic-cache.outputs.cache-hit != 'true'
@@ -183,6 +184,7 @@ jobs:
           mkdir -p build && cd build
           CC=clang cmake -DCMAKE_BUILD_TYPE=Debug -DSSL_TYPE=boringssl \
                 -DXQC_ENABLE_BBR2=ON \
+                -DXQC_ENABLE_UNLIMITED=ON \
                 -DXQC_ENABLE_FEC=ON \
                 -DXQC_ENABLE_XOR=ON \
                 -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
@@ -391,7 +393,7 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-msan-bssl-9c95ec7-v3
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-msan-bssl-9c95ec7-v4
 
       - name: Build xquic (clang + MSan)
         if: steps.xquic-cache.outputs.cache-hit != 'true'
@@ -400,6 +402,7 @@ jobs:
           mkdir -p build && cd build
           CC=clang cmake -DCMAKE_BUILD_TYPE=Debug -DSSL_TYPE=boringssl \
                 -DXQC_ENABLE_BBR2=ON \
+                -DXQC_ENABLE_UNLIMITED=ON \
                 -DXQC_ENABLE_FEC=ON \
                 -DXQC_ENABLE_XOR=ON \
                 -DCMAKE_C_FLAGS="-fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins -Wno-unknown-warning-option" ..
@@ -591,7 +594,7 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-windows-msvc-release-bssl-9c95ec7-v3
+          key: xquic-${{ steps.xqsha.outputs.sha }}-windows-msvc-release-bssl-9c95ec7-v4
 
       - name: Build xquic
         if: steps.xquic-cache.outputs.cache-hit != 'true'
@@ -609,6 +612,7 @@ jobs:
             -DSSL_TYPE=boringssl `
             -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" `
             -DXQC_ENABLE_BBR2=ON `
+            -DXQC_ENABLE_UNLIMITED=ON `
             -DXQC_ENABLE_FEC=ON `
             -DXQC_ENABLE_XOR=ON ..
           cmake --build . --config Release

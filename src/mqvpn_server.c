@@ -118,6 +118,9 @@ struct mqvpn_server_s {
     /* Timer: next wake (from xquic set_event_timer) */
     uint64_t next_wake_us;
 
+    /* Actual TUN device MTU (set at startup) */
+    int tun_mtu;
+
     /* ICMP PTB rate limit */
     int ptb_tokens;
     int64_t ptb_refill_ms;
@@ -721,13 +724,9 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
                 xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
             if (udp_mss >= 68) client_mtu = (int)udp_mss;
         }
-        if (s->config.tun_mtu > 0) {
-            if (s->config.tun_mtu < client_mtu) {
-                client_mtu = s->config.tun_mtu;
-            } else if (s->config.tun_mtu > client_mtu) {
-                LOG_W(s, "config MTU %d exceeds negotiated MTU %d, using %d",
-                      s->config.tun_mtu, client_mtu, client_mtu);
-            }
+        if (s->tun_mtu > 0 && client_mtu > s->tun_mtu) {
+            LOG_D(s, "capping client MTU %d to TUN MTU %d", client_mtu, s->tun_mtu);
+            client_mtu = s->tun_mtu;
         }
         client_info.mtu = client_mtu;
         if (conn->has_v6) {
@@ -1219,6 +1218,7 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         .is_server = true,
         .enable_multipath = true, /* server: always on, see mqvpn_conn_settings.c */
         .scheduler = cfg->scheduler,
+        .cc = cfg->cc,
         .init_max_path_id = cfg->init_max_path_id,
     };
     mqvpn_build_conn_settings(&cs_input, &conn_settings);
@@ -1327,7 +1327,8 @@ mqvpn_server_start(mqvpn_server_t *s)
     info.assigned_prefix = (uint8_t)s->pool.prefix_len;
     memcpy(info.server_ip, &s->pool.base.s_addr, 4);
     info.server_prefix = (uint8_t)s->pool.prefix_len;
-    info.mtu = s->config.tun_mtu > 0 ? s->config.tun_mtu : IPV6_MIN_MTU;
+    s->tun_mtu = s->config.tun_mtu > 0 ? s->config.tun_mtu : IPV6_MIN_MTU;
+    info.mtu = s->tun_mtu;
 
     if (s->pool.has_v6) {
         struct in6_addr srv_addr6;

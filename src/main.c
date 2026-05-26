@@ -18,6 +18,7 @@
 #endif
 
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,12 +61,15 @@ usage(const char *prog)
         "  --status                  Query server status via control API and exit\n"
         "                            (uses --control-port, or [Control] Listen from "
         "--config)\n"
+        "  --cc bbr2|bbr|cubic|none  Congestion control algorithm (default bbr2)\n"
         "  --scheduler minrtt|wlb|backup_fec\n"
         "                            Multipath scheduler (default wlb)\n"
-        "  --init-max-path-id N      Initial max path identifier TP value (default = "
-        "xquic\n"
-        "                            default 8, set lower e.g. 2 to test G-P16 "
-        "trigger).\n"
+        "  --init-max-path-id N      MP-QUIC draft-21 test knob: initial path-id "
+        "credit\n"
+        "                            TP (default = xquic default 8; set lower, "
+        "e.g. 2,\n"
+        "                            to exercise G-P16 PATHS_BLOCKED).\n"
+        "  --mtu N                   TUN device MTU cap (1280–9000, default: auto)\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
         "  --version                 Show version and exit\n"
@@ -140,7 +144,9 @@ main(int argc, char *argv[])
         {"path", required_argument, NULL, 'p'},
         {"dns", required_argument, NULL, 'd'},
         {"scheduler", required_argument, NULL, 'S'},
+        {"cc", required_argument, NULL, 0x101},
         {"init-max-path-id", required_argument, NULL, 0x100},
+        {"mtu", required_argument, NULL, 0x102},
         {"max-clients", required_argument, NULL, 'M'},
         {"log-level", required_argument, NULL, 'L'},
         {"no-reconnect", no_argument, NULL, 'R'},
@@ -170,8 +176,10 @@ main(int argc, char *argv[])
     int genkey = 0;
     const char *log_level_str = NULL;
     const char *scheduler_str = NULL;
+    const char *cc_str = NULL;
     uint64_t init_max_path_id = 0; /* 0 = unset → xquic default (8) */
     int init_max_path_id_set = 0;
+    int cli_mtu = -1;     /* -1 means "not set by CLI" */
     int max_clients = -1; /* -1 means "not set by CLI" */
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES];
     int n_paths = 0;
@@ -243,24 +251,41 @@ main(int argc, char *argv[])
             }
             break;
         case 'S': scheduler_str = optarg; break;
+        case 0x101: cc_str = optarg; break;
         case 0x100: {
             /* Reject leading '-' explicitly: strtoull silently wraps "-1" to
              * UINT64_MAX rather than failing. */
             if (optarg[0] == '-' || optarg[0] == '\0') {
-                fprintf(stderr, "error: --init-max-path-id must be a non-negative "
-                                "integer\n");
+                fprintf(stderr, "error: --init-max-path-id must be 0..4294967295\n");
                 return 1;
             }
             char *end = NULL;
             errno = 0;
             unsigned long long v = strtoull(optarg, &end, 10);
-            if (!end || *end != '\0' || errno == ERANGE) {
-                fprintf(stderr, "error: --init-max-path-id must be a non-negative "
-                                "integer\n");
+            if (!end || *end != '\0' || errno == ERANGE ||
+                v > MQVPN_INIT_MAX_PATH_ID_MAX) {
+                fprintf(stderr, "error: --init-max-path-id must be 0..4294967295\n");
                 return 1;
             }
             init_max_path_id = (uint64_t)v;
             init_max_path_id_set = 1;
+            break;
+        }
+        case 0x102: {
+            char *end = NULL;
+            errno = 0;
+            long lv = strtol(optarg, &end, 10);
+            if (end == optarg || !end || *end != '\0' || errno == ERANGE ||
+                lv < INT_MIN || lv > INT_MAX) {
+                fprintf(stderr, "error: --mtu must be 0 or 1280..9000\n");
+                return 1;
+            }
+            int v = (int)lv;
+            if (v != 0 && (v < 1280 || v > 9000)) {
+                fprintf(stderr, "error: --mtu must be 0 or 1280..9000\n");
+                return 1;
+            }
+            cli_mtu = v;
             break;
         }
         case 'M': max_clients = atoi(optarg); break;
@@ -332,6 +357,7 @@ main(int argc, char *argv[])
     const char *eff_tun_name = tun_name ? tun_name : file_cfg.tun_name;
     const char *eff_log_level = log_level_str ? log_level_str : file_cfg.log_level;
     const char *eff_scheduler = scheduler_str ? scheduler_str : file_cfg.scheduler;
+    const char *eff_cc = cc_str ? cc_str : file_cfg.cc;
     uint64_t eff_init_max_path_id =
         init_max_path_id_set ? init_max_path_id : (uint64_t)file_cfg.init_max_path_id;
     const char *eff_listen = listen_str ? listen_str : file_cfg.listen;
@@ -342,6 +368,7 @@ main(int argc, char *argv[])
     const char *eff_key = key_file ? key_file : file_cfg.key_file;
     int eff_insecure = insecure >= 0 ? insecure : file_cfg.insecure;
     int eff_max_clients = max_clients >= 0 ? max_clients : file_cfg.max_clients;
+    int eff_tun_mtu = cli_mtu >= 0 ? cli_mtu : file_cfg.tun_mtu;
 
     /* Auth key: CLI > config (use auth_key for client, server_auth_key for server) */
     const char *eff_auth_key =
@@ -419,6 +446,25 @@ main(int argc, char *argv[])
         return 1;
     }
 
+    /* Parse congestion control */
+    int cc = MQVPN_CC_BBR2;
+    if (strcmp(eff_cc, "bbr") == 0) {
+        cc = MQVPN_CC_BBR;
+    } else if (strcmp(eff_cc, "cubic") == 0) {
+        cc = MQVPN_CC_CUBIC;
+    } else if (strcmp(eff_cc, "none") == 0) {
+#ifdef XQC_ENABLE_UNLIMITED
+        cc = MQVPN_CC_NONE;
+#else
+        fprintf(stderr, "error: --cc 'none' requires rebuild with "
+                        "-DXQC_ENABLE_UNLIMITED=ON in xquic\n");
+        return 1;
+#endif
+    } else if (strcmp(eff_cc, "bbr2") != 0) {
+        fprintf(stderr, "error: --cc must be 'bbr2', 'bbr', 'cubic', or 'none'\n");
+        return 1;
+    }
+
     /* Paths: CLI paths override config paths entirely */
     if (n_paths == 0 && file_cfg.n_paths > 0) {
         n_paths = file_cfg.n_paths;
@@ -467,7 +513,8 @@ main(int argc, char *argv[])
             .reconnect_interval = file_cfg.reconnect_interval,
             .kill_switch = kill_switch >= 0 ? kill_switch : file_cfg.kill_switch,
             .init_max_path_id = eff_init_max_path_id,
-            .tun_mtu = file_cfg.tun_mtu,
+            .tun_mtu = eff_tun_mtu,
+            .cc = cc,
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];
@@ -511,7 +558,8 @@ main(int argc, char *argv[])
             .control_addr = eff_control_addr,
             .control_port = eff_control_port,
             .init_max_path_id = eff_init_max_path_id,
-            .tun_mtu = file_cfg.tun_mtu,
+            .tun_mtu = eff_tun_mtu,
+            .cc = cc,
         };
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];

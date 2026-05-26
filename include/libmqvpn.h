@@ -2,7 +2,7 @@
  * libmqvpn — Multipath QUIC VPN library
  *
  * Public API header (single file).
- * Version: 0.5.0 (ABI version 2)
+ * Version: 0.6.0 (ABI version 2)
  *
  * Thread safety: All functions must be called from a single thread
  * (the "tick thread"). Debug builds assert this via MQVPN_ASSERT_TICK_THREAD.
@@ -35,7 +35,7 @@ extern "C" {
 /* ─── Version ─── */
 
 #define MQVPN_VERSION_MAJOR 0
-#define MQVPN_VERSION_MINOR 5
+#define MQVPN_VERSION_MINOR 6
 #define MQVPN_VERSION_PATCH 0
 
 /* ─── ABI ─── */
@@ -44,8 +44,9 @@ extern "C" {
 
 /* ─── Capacity constants ─── */
 
-#define MQVPN_MAX_USERS 64
-#define MQVPN_MAX_PATHS 4
+#define MQVPN_MAX_USERS            64
+#define MQVPN_MAX_PATHS            4
+#define MQVPN_INIT_MAX_PATH_ID_MAX UINT64_C(0xffffffff)
 
 /* ─── Opaque handles ─── */
 
@@ -97,6 +98,13 @@ typedef enum {
     MQVPN_SCHED_BACKUP_FEC =
         2, /* FEC repair on standby path. Requires XQC_ENABLE_FEC build. */
 } mqvpn_scheduler_t;
+
+typedef enum {
+    MQVPN_CC_BBR2 = 0, /* default */
+    MQVPN_CC_BBR = 1,
+    MQVPN_CC_CUBIC = 2,
+    MQVPN_CC_NONE = 3, /* unlimited / no congestion control */
+} mqvpn_cc_t;
 
 typedef enum {
     MQVPN_STATE_IDLE = 0,
@@ -399,6 +407,7 @@ MQVPN_API int mqvpn_config_remove_user(mqvpn_config_t *cfg, const char *username
 MQVPN_API int mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text);
 MQVPN_API int mqvpn_config_set_insecure(mqvpn_config_t *cfg, int insecure);
 MQVPN_API int mqvpn_config_set_scheduler(mqvpn_config_t *cfg, mqvpn_scheduler_t sched);
+MQVPN_API int mqvpn_config_set_cc(mqvpn_config_t *cfg, mqvpn_cc_t cc);
 MQVPN_API int mqvpn_config_set_log_level(mqvpn_config_t *cfg, mqvpn_log_level_t level);
 MQVPN_API int mqvpn_config_set_multipath(mqvpn_config_t *cfg, int enable);
 MQVPN_API int mqvpn_config_set_reconnect(mqvpn_config_t *cfg, int enable,
@@ -406,8 +415,9 @@ MQVPN_API int mqvpn_config_set_reconnect(mqvpn_config_t *cfg, int enable,
 MQVPN_API int mqvpn_config_set_killswitch_hint(mqvpn_config_t *cfg, int enable);
 
 /* draft-21 §4.6: set the initial Maximum Path Identifier advertised in TP.
- * 0 = use xquic default (XQC_DEFAULT_INIT_MAX_PATH_ID = 8). Set lower
- * (e.g. 2) to deterministically trigger G-P16 PATHS_BLOCKED. */
+ * 0 = use xquic default (XQC_DEFAULT_INIT_MAX_PATH_ID = 8). Valid explicit
+ * values are 1..MQVPN_INIT_MAX_PATH_ID_MAX. Set lower (e.g. 2) to
+ * deterministically trigger G-P16 PATHS_BLOCKED. */
 MQVPN_API int mqvpn_config_set_init_max_path_id(mqvpn_config_t *cfg, uint64_t v);
 /* TUN MTU cap: 0 = auto (MSS-derived), 1280..9000 = upper bound. */
 MQVPN_API int mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu);

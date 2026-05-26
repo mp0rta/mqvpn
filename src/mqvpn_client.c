@@ -1073,6 +1073,7 @@ apply_mtu_cap(int cfg_mtu, int negotiated, mqvpn_client_t *c)
 {
     if (cfg_mtu > 0) {
         if (cfg_mtu < negotiated) {
+            LOG_D(c, "capping MTU %d to config MTU %d", negotiated, cfg_mtu);
             return cfg_mtu;
         }
         if (cfg_mtu > negotiated) {
@@ -1597,6 +1598,7 @@ cli_start_connection(mqvpn_client_t *c)
         .is_server = false,
         .enable_multipath = (multipath != 0),
         .scheduler = c->config.scheduler,
+        .cc = c->config.cc,
         .init_max_path_id = c->config.init_max_path_id,
     };
     mqvpn_build_conn_settings(&cs_input, &cs);

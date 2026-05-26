@@ -52,18 +52,30 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
 {
     memset(out, 0, sizeof(*out));
 
-    /* --- shared hardcoded fields (11) --- */
+    /* --- shared hardcoded fields --- */
     out->max_datagram_frame_size = 65535;
     out->proto_version = XQC_VERSION_V1;
     out->pacing_on = 1;
     out->max_pkt_out_size = 1400;
-    out->cong_ctrl_callback = xqc_bbr2_cb;
-    out->cc_params.cc_optimization_flags =
-        XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
     out->sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
     out->so_sndbuf = 8 * 1024 * 1024;
     out->idle_time_out = 120000;
     out->init_idle_time_out = 10000;
+
+    /* --- congestion control --- */
+    switch (in->cc) {
+    case MQVPN_CC_BBR: out->cong_ctrl_callback = xqc_bbr_cb; break;
+    case MQVPN_CC_CUBIC: out->cong_ctrl_callback = xqc_cubic_cb; break;
+#ifdef XQC_ENABLE_UNLIMITED
+    case MQVPN_CC_NONE: out->cong_ctrl_callback = xqc_unlimited_cc_cb; break;
+#endif
+    case MQVPN_CC_BBR2:
+    default:
+        out->cong_ctrl_callback = xqc_bbr2_cb;
+        out->cc_params.cc_optimization_flags =
+            XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
+        break;
+    }
 
     /* --- intentional client/server asymmetry (4) ---
      * Each branch documents why these fields differ between sides. Do not

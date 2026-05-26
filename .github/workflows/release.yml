@@ -88,6 +88,7 @@ jobs:
           mkdir -p build && cd build
           cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
                 -DXQC_ENABLE_BBR2=ON \
+                -DXQC_ENABLE_UNLIMITED=ON \
                 -DXQC_ENABLE_FEC=ON \
                 -DXQC_ENABLE_XOR=ON \
                 -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
@@ -228,6 +229,7 @@ jobs:
             -DSSL_TYPE=boringssl `
             -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" `
             -DXQC_ENABLE_BBR2=ON `
+            -DXQC_ENABLE_UNLIMITED=ON `
             -DXQC_ENABLE_FEC=ON `
             -DXQC_ENABLE_XOR=ON ..
           cmake --build . --config Release

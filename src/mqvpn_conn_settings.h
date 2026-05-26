@@ -7,7 +7,7 @@
 #ifndef MQVPN_CONN_SETTINGS_H
 #define MQVPN_CONN_SETTINGS_H
 
-#include "libmqvpn.h" /* mqvpn_scheduler_t */
+#include "mqvpn_internal.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <xquic/xquic.h>
@@ -18,12 +18,13 @@ typedef struct {
     bool is_server;
     bool enable_multipath; /* server callers pass true */
     mqvpn_scheduler_t scheduler;
+    mqvpn_cc_t cc;             /* congestion control algorithm */
     uint64_t init_max_path_id; /* 0 = leave xquic default */
 } mqvpn_conn_settings_input_t;
 
 /* Populates *out with mqvpn-canonical xquic conn settings. Always begins
  * with memset(0), so the caller is not required to zero `out` first. */
-void mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in,
-                               xqc_conn_settings_t *out);
+MQVPN_INTERNAL void mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in,
+                                              xqc_conn_settings_t *out);
 
 #endif /* MQVPN_CONN_SETTINGS_H */
