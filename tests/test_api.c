@@ -159,7 +159,6 @@ TEST(config_load_json)
                        "\"killswitch_hint\":true,"
                        "\"scheduler\":\"minrtt\","
                        "\"cc\":\"cubic\","
-                       "\"init_max_path_id\":16,"
                        "\"mtu\":1400,"
                        "\"tun_mtu\":1350,"
                        "\"listen_addr\":\"0.0.0.0\","
@@ -185,7 +184,6 @@ TEST(config_load_json)
     ASSERT_EQ(cfg->killswitch_hint, 1);
     ASSERT_EQ(cfg->scheduler, MQVPN_SCHED_MINRTT);
     ASSERT_EQ(cfg->cc, MQVPN_CC_CUBIC);
-    ASSERT_EQ(cfg->init_max_path_id, 16);
     ASSERT_EQ(cfg->tun_mtu, 1350);
     ASSERT_STR_EQ(cfg->listen_addr, "0.0.0.0");
     ASSERT_EQ(cfg->listen_port, 443);
@@ -232,8 +230,6 @@ TEST(config_load_json_invalid_users)
 TEST(config_load_json_invalid_tuning)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
-    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"init_max_path_id\":4294967296}"),
-              MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"cc\":\"reno\"}"), MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"mtu\":\"bad\"}"), MQVPN_ERR_INVALID_ARG);
     mqvpn_config_free(cfg);
@@ -294,20 +290,6 @@ TEST(config_set_cc)
     ASSERT_EQ(cfg->cc, MQVPN_CC_NONE);
     ASSERT_EQ(mqvpn_config_set_cc(cfg, (mqvpn_cc_t)99), MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_config_set_cc(NULL, MQVPN_CC_BBR2), MQVPN_ERR_INVALID_ARG);
-    mqvpn_config_free(cfg);
-}
-
-TEST(config_set_init_max_path_id)
-{
-    mqvpn_config_t *cfg = mqvpn_config_new();
-    ASSERT_EQ(mqvpn_config_set_init_max_path_id(cfg, 0), MQVPN_OK);
-    ASSERT_EQ(cfg->init_max_path_id, 0);
-    ASSERT_EQ(mqvpn_config_set_init_max_path_id(cfg, MQVPN_INIT_MAX_PATH_ID_MAX),
-              MQVPN_OK);
-    ASSERT_EQ(cfg->init_max_path_id, MQVPN_INIT_MAX_PATH_ID_MAX);
-    ASSERT_EQ(mqvpn_config_set_init_max_path_id(cfg, MQVPN_INIT_MAX_PATH_ID_MAX + 1),
-              MQVPN_ERR_INVALID_ARG);
-    ASSERT_EQ(mqvpn_config_set_init_max_path_id(NULL, 1), MQVPN_ERR_INVALID_ARG);
     mqvpn_config_free(cfg);
 }
 
@@ -1755,7 +1737,6 @@ main(void)
     run_config_set_tun_mtu();
     run_config_set_scheduler();
     run_config_set_cc();
-    run_config_set_init_max_path_id();
     run_config_set_log_level();
     run_config_set_reconnect();
     run_config_set_killswitch_hint();

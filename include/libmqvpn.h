@@ -44,9 +44,8 @@ extern "C" {
 
 /* ─── Capacity constants ─── */
 
-#define MQVPN_MAX_USERS            64
-#define MQVPN_MAX_PATHS            4
-#define MQVPN_INIT_MAX_PATH_ID_MAX UINT64_C(0xffffffff)
+#define MQVPN_MAX_USERS 64
+#define MQVPN_MAX_PATHS 4
 
 /* ─── Opaque handles ─── */
 
@@ -414,11 +413,6 @@ MQVPN_API int mqvpn_config_set_reconnect(mqvpn_config_t *cfg, int enable,
                                          int interval_sec);
 MQVPN_API int mqvpn_config_set_killswitch_hint(mqvpn_config_t *cfg, int enable);
 
-/* draft-21 §4.6: set the initial Maximum Path Identifier advertised in TP.
- * 0 = use xquic default (XQC_DEFAULT_INIT_MAX_PATH_ID = 8). Valid explicit
- * values are 1..MQVPN_INIT_MAX_PATH_ID_MAX. Set lower (e.g. 2) to
- * deterministically trigger G-P16 PATHS_BLOCKED. */
-MQVPN_API int mqvpn_config_set_init_max_path_id(mqvpn_config_t *cfg, uint64_t v);
 /* TUN MTU cap: 0 = auto (MSS-derived), 1280..9000 = upper bound. */
 MQVPN_API int mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu);
 

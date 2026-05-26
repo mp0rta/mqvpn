@@ -18,8 +18,7 @@ typedef struct {
     bool is_server;
     bool enable_multipath; /* server callers pass true */
     mqvpn_scheduler_t scheduler;
-    mqvpn_cc_t cc;             /* congestion control algorithm */
-    uint64_t init_max_path_id; /* 0 = leave xquic default */
+    mqvpn_cc_t cc; /* congestion control algorithm */
 } mqvpn_conn_settings_input_t;
 
 /* Populates *out with mqvpn-canonical xquic conn settings. Always begins

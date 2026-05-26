@@ -64,10 +64,6 @@ usage(const char *prog)
         "  --cc bbr2|bbr|cubic|none  Congestion control algorithm (default bbr2)\n"
         "  --scheduler minrtt|wlb|backup_fec\n"
         "                            Multipath scheduler (default wlb)\n"
-        "  --init-max-path-id N      Initial max path identifier TP value (default = "
-        "xquic\n"
-        "                            default 8, set lower e.g. 2 to test G-P16 "
-        "trigger).\n"
         "  --mtu N                   TUN device MTU cap (1280–9000, default: auto)\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
@@ -144,7 +140,6 @@ main(int argc, char *argv[])
         {"dns", required_argument, NULL, 'd'},
         {"scheduler", required_argument, NULL, 'S'},
         {"cc", required_argument, NULL, 0x101},
-        {"init-max-path-id", required_argument, NULL, 0x100},
         {"mtu", required_argument, NULL, 0x102},
         {"max-clients", required_argument, NULL, 'M'},
         {"log-level", required_argument, NULL, 'L'},
@@ -176,8 +171,6 @@ main(int argc, char *argv[])
     const char *log_level_str = NULL;
     const char *scheduler_str = NULL;
     const char *cc_str = NULL;
-    uint64_t init_max_path_id = 0; /* 0 = unset → xquic default (8) */
-    int init_max_path_id_set = 0;
     int cli_mtu = -1;     /* -1 means "not set by CLI" */
     int max_clients = -1; /* -1 means "not set by CLI" */
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES];
@@ -251,25 +244,6 @@ main(int argc, char *argv[])
             break;
         case 'S': scheduler_str = optarg; break;
         case 0x101: cc_str = optarg; break;
-        case 0x100: {
-            /* Reject leading '-' explicitly: strtoull silently wraps "-1" to
-             * UINT64_MAX rather than failing. */
-            if (optarg[0] == '-' || optarg[0] == '\0') {
-                fprintf(stderr, "error: --init-max-path-id must be 0..4294967295\n");
-                return 1;
-            }
-            char *end = NULL;
-            errno = 0;
-            unsigned long long v = strtoull(optarg, &end, 10);
-            if (!end || *end != '\0' || errno == ERANGE ||
-                v > MQVPN_INIT_MAX_PATH_ID_MAX) {
-                fprintf(stderr, "error: --init-max-path-id must be 0..4294967295\n");
-                return 1;
-            }
-            init_max_path_id = (uint64_t)v;
-            init_max_path_id_set = 1;
-            break;
-        }
         case 0x102: {
             char *end = NULL;
             errno = 0;
@@ -357,8 +331,6 @@ main(int argc, char *argv[])
     const char *eff_log_level = log_level_str ? log_level_str : file_cfg.log_level;
     const char *eff_scheduler = scheduler_str ? scheduler_str : file_cfg.scheduler;
     const char *eff_cc = cc_str ? cc_str : file_cfg.cc;
-    uint64_t eff_init_max_path_id =
-        init_max_path_id_set ? init_max_path_id : (uint64_t)file_cfg.init_max_path_id;
     const char *eff_listen = listen_str ? listen_str : file_cfg.listen;
     const char *eff_subnet = subnet ? subnet : file_cfg.subnet;
     const char *eff_subnet6 =
@@ -511,7 +483,6 @@ main(int argc, char *argv[])
             .reconnect = eff_reconnect,
             .reconnect_interval = file_cfg.reconnect_interval,
             .kill_switch = kill_switch >= 0 ? kill_switch : file_cfg.kill_switch,
-            .init_max_path_id = eff_init_max_path_id,
             .tun_mtu = eff_tun_mtu,
             .cc = cc,
         };
@@ -556,7 +527,6 @@ main(int argc, char *argv[])
             .max_clients = eff_max_clients,
             .control_addr = eff_control_addr,
             .control_port = eff_control_port,
-            .init_max_path_id = eff_init_max_path_id,
             .tun_mtu = eff_tun_mtu,
             .cc = cc,
         };

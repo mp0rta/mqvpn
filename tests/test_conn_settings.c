@@ -1,8 +1,8 @@
 /*
  * test_conn_settings.c — pins mqvpn_build_conn_settings() caller contract:
- * scheduler / init_max_path_id propagate and the four asymmetric fields
- * (ping_on, enable_multipath, mp_ping_on, max_path_id_grant_max_value)
- * take the documented per-side values.
+ * scheduler / congestion control propagate and the four asymmetric fields
+ * (ping_on, enable_multipath, mp_ping_on, max_path_id_grant_max_value) take the
+ * documented per-side values.
  */
 
 #include "libmqvpn.h"
@@ -44,7 +44,6 @@ test_asymmetry_server_vs_client(void)
         .is_server = true,
         .enable_multipath = true,
         .scheduler = MQVPN_SCHED_WLB,
-        .init_max_path_id = 0,
     };
     mqvpn_build_conn_settings(&s, &srv);
 
@@ -52,7 +51,6 @@ test_asymmetry_server_vs_client(void)
         .is_server = false,
         .enable_multipath = true,
         .scheduler = MQVPN_SCHED_WLB,
-        .init_max_path_id = 0,
     };
     mqvpn_build_conn_settings(&c_on, &cli_mp_on);
 
@@ -87,7 +85,6 @@ test_propagation_scheduler(void)
         .is_server = false,
         .enable_multipath = true,
         .scheduler = MQVPN_SCHED_MINRTT,
-        .init_max_path_id = 0,
     };
 
     /* Use a representative field-pointer rather than a whole-struct memcmp:
@@ -113,7 +110,6 @@ test_propagation_cc(void)
         .enable_multipath = true,
         .scheduler = MQVPN_SCHED_WLB,
         .cc = MQVPN_CC_BBR2,
-        .init_max_path_id = 0,
     };
 
     /* default: BBR2 — also verify optimization flags are set */
@@ -147,27 +143,6 @@ test_propagation_cc(void)
     return 0;
 }
 
-static int
-test_propagation_init_max_path_id(void)
-{
-    xqc_conn_settings_t cs;
-    mqvpn_conn_settings_input_t in = {
-        .is_server = true,
-        .enable_multipath = true,
-        .scheduler = MQVPN_SCHED_WLB,
-        .init_max_path_id = 0,
-    };
-
-    /* 0 -> field stays 0 (xquic default applies inside xqc_server_set_conn_settings) */
-    mqvpn_build_conn_settings(&in, &cs);
-    ASSERT_EQ(cs.init_max_path_id, 0);
-
-    in.init_max_path_id = 16;
-    mqvpn_build_conn_settings(&in, &cs);
-    ASSERT_EQ(cs.init_max_path_id, 16);
-    return 0;
-}
-
 int
 main(void)
 {
@@ -175,7 +150,6 @@ main(void)
     failed += test_asymmetry_server_vs_client();
     failed += test_propagation_scheduler();
     failed += test_propagation_cc();
-    failed += test_propagation_init_max_path_id();
     if (failed) {
         fprintf(stderr, "test_conn_settings: %d FAILED\n", failed);
         return 1;
