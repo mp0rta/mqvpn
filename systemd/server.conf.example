@@ -21,6 +21,7 @@ MaxClients = 64
 [Multipath]
 # Scheduler: wlb (weighted load balancing) or minrtt (lowest RTT)
 Scheduler = wlb
+# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
 
 # [Control]
 # Local-only TCP control/admin API (add/remove users, query stats).

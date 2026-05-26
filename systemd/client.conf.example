@@ -20,5 +20,6 @@ LogLevel = info
 
 [Multipath]
 Scheduler = wlb
+# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
 # Path = eth0
 # Path = wlan0

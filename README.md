@@ -100,6 +100,7 @@ User = bob:bob-secret
 
 [Multipath]
 Scheduler = wlb
+# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
 ```
 
 ```ini
@@ -116,6 +117,7 @@ DNS = 1.1.1.1, 8.8.8.8
 
 [Multipath]
 Scheduler = wlb
+# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
 Path = eth0
 Path = wlan0
 ```
@@ -141,6 +143,7 @@ Server example:
     ],
     "max_clients": 64,
     "scheduler": "wlb",
+    "cc": "bbr2",
     "mtu": 1280
 }
 ```
@@ -159,6 +162,7 @@ Client example:
     "reconnect_interval": 5,
     "kill_switch": false,
     "scheduler": "wlb",
+    "cc": "bbr2",
     "mtu": 1280
 }
 ```
@@ -415,6 +419,8 @@ mqvpn [--config PATH] --mode client|server [options]
   --subnet6 CIDR         Client IPv6 pool (server)
   --scheduler minrtt|wlb|backup_fec
                          Multipath scheduler (default: wlb)
+  --cc bbr2|bbr|cubic|none
+                         Congestion control algorithm (default: bbr2)
   --control-port PORT    TCP port for JSON control API (server)
   --control-addr ADDR    Bind address for control API (default: 127.0.0.1)
   --genkey               Generate PSK and exit

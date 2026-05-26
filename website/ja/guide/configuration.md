@@ -25,6 +25,7 @@ User = bob:<BOB_PSK>
 
 [Multipath]
 Scheduler = wlb
+# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
 ```
 
 ### クライアント
@@ -45,6 +46,7 @@ LogLevel = info
 
 [Multipath]
 Scheduler = wlb
+# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
 Path = eth0
 Path = wlan0
 ```
@@ -72,6 +74,7 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
   ],
   "max_clients": 64,
   "scheduler": "wlb",
+  "cc": "bbr2",
   "mtu": 1280
 }
 ```
@@ -91,6 +94,7 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
   "reconnect": true,
   "reconnect_interval": 5,
   "scheduler": "wlb",
+  "cc": "bbr2",
   "paths": ["eth0", "wlan0"],
   "mtu": 1280
 }
@@ -159,6 +163,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | キー | 説明 | デフォルト |
 |------|------|-----------|
 | `Scheduler` | スケジューラアルゴリズム（`minrtt`, `wlb`, または `backup_fec`） | `wlb` |
+| `CC` | 輻輳制御アルゴリズム（`bbr2`, `bbr`, `cubic`, または `none`） | `bbr2` |
 | `Path` | バインドするネットワークインターフェース（複数指定可） | デフォルトインターフェース |
 
 スケジューラの詳細は[マルチパス](./multipath)を参照してください。
@@ -166,6 +171,8 @@ sudo mqvpn --config /etc/mqvpn/server.json
 > `backup_fec` は実験的機能で、両ピアが mqvpn 0.4.0 以降かつ FEC ビルド
 > (`-DXQC_ENABLE_FEC=ON -DXQC_ENABLE_XOR=ON`) を有効にしている必要があります。
 > 詳細は[マルチパス](./multipath#backup-fec-experimental)を参照。
+
+> `none`（無制限）は xquic を `-DXQC_ENABLE_UNLIMITED=ON` でビルドする必要があります。
 
 ## MTU ガイドライン
 
