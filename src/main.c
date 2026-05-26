@@ -66,6 +66,7 @@ usage(const char *prog)
         "xquic\n"
         "                            default 8, set lower e.g. 2 to test G-P16 "
         "trigger).\n"
+        "  --mtu N                   TUN device MTU cap (1280–9000, default: auto)\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
         "  --version                 Show version and exit\n"
@@ -141,6 +142,7 @@ main(int argc, char *argv[])
         {"dns", required_argument, NULL, 'd'},
         {"scheduler", required_argument, NULL, 'S'},
         {"init-max-path-id", required_argument, NULL, 0x100},
+        {"mtu", required_argument, NULL, 0x102},
         {"max-clients", required_argument, NULL, 'M'},
         {"log-level", required_argument, NULL, 'L'},
         {"no-reconnect", no_argument, NULL, 'R'},
@@ -172,6 +174,7 @@ main(int argc, char *argv[])
     const char *scheduler_str = NULL;
     uint64_t init_max_path_id = 0; /* 0 = unset → xquic default (8) */
     int init_max_path_id_set = 0;
+    int cli_mtu = -1;     /* -1 means "not set by CLI" */
     int max_clients = -1; /* -1 means "not set by CLI" */
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES];
     int n_paths = 0;
@@ -263,6 +266,15 @@ main(int argc, char *argv[])
             init_max_path_id_set = 1;
             break;
         }
+        case 0x102: {
+            int v = atoi(optarg);
+            if (v != 0 && (v < 1280 || v > 9000)) {
+                fprintf(stderr, "error: --mtu must be 1280..9000\n");
+                return 1;
+            }
+            cli_mtu = v;
+            break;
+        }
         case 'M': max_clients = atoi(optarg); break;
         case 'R': no_reconnect = 1; break;
         case 'K': kill_switch = 1; break;
@@ -342,6 +354,7 @@ main(int argc, char *argv[])
     const char *eff_key = key_file ? key_file : file_cfg.key_file;
     int eff_insecure = insecure >= 0 ? insecure : file_cfg.insecure;
     int eff_max_clients = max_clients >= 0 ? max_clients : file_cfg.max_clients;
+    int eff_tun_mtu = cli_mtu >= 0 ? cli_mtu : file_cfg.tun_mtu;
 
     /* Auth key: CLI > config (use auth_key for client, server_auth_key for server) */
     const char *eff_auth_key =
@@ -467,7 +480,7 @@ main(int argc, char *argv[])
             .reconnect_interval = file_cfg.reconnect_interval,
             .kill_switch = kill_switch >= 0 ? kill_switch : file_cfg.kill_switch,
             .init_max_path_id = eff_init_max_path_id,
-            .tun_mtu = file_cfg.tun_mtu,
+            .tun_mtu = eff_tun_mtu,
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];
@@ -511,7 +524,7 @@ main(int argc, char *argv[])
             .control_addr = eff_control_addr,
             .control_port = eff_control_port,
             .init_max_path_id = eff_init_max_path_id,
-            .tun_mtu = file_cfg.tun_mtu,
+            .tun_mtu = eff_tun_mtu,
         };
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];
