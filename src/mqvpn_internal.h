@@ -45,6 +45,10 @@ struct mqvpn_config_s {
     char tls_key[256];
     int max_clients;
 
+    /* draft-21 §4.6: initial Maximum Path Identifier we advertise in TP.
+     * 0 = use xquic default (XQC_DEFAULT_INIT_MAX_PATH_ID = 8). */
+    uint64_t init_max_path_id;
+
     int tun_mtu; /* 0 = auto (negotiated), >0 = cap */
 };
 

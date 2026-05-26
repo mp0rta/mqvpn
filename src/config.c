@@ -3,6 +3,7 @@
  */
 #include "config.h"
 #include "json_mini.h"
+#include "libmqvpn.h"
 #include "log.h"
 
 #include <errno.h>
@@ -53,6 +54,47 @@ parse_int_strict(const char *val, int *out)
     }
 
     *out = (int)v;
+    return 0;
+}
+
+static int
+parse_u64_strict(const char *val, unsigned long long *out)
+{
+    if (!val || !out || *val < '0' || *val > '9') return -1;
+
+    errno = 0;
+    char *end = NULL;
+    unsigned long long v = strtoull(val, &end, 10);
+    if (end == val || *end != '\0' || errno == ERANGE) {
+        return -1;
+    }
+
+    *out = v;
+    return 0;
+}
+
+static int
+json_value_has_valid_end(const char *p)
+{
+    p = json_skip_ws(p);
+    return *p == '\0' || *p == ',' || *p == '}' || *p == ']';
+}
+
+static int
+json_read_u64_strict(const char *p, unsigned long long *out)
+{
+    if (!p || !out) return -1;
+    p = json_skip_ws(p);
+    if (*p < '0' || *p > '9') return -1;
+
+    errno = 0;
+    char *end = NULL;
+    unsigned long long v = strtoull(p, &end, 10);
+    if (end == p || errno == ERANGE || !json_value_has_valid_end(end)) {
+        return -1;
+    }
+
+    *out = v;
     return 0;
 }
 
@@ -343,6 +385,13 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
             snprintf(cfg->scheduler, sizeof(cfg->scheduler), "%s", val);
         } else if (strcasecmp(key, "CC") == 0) {
             snprintf(cfg->cc, sizeof(cfg->cc), "%s", val);
+        } else if (strcasecmp(key, "InitMaxPathId") == 0) {
+            unsigned long long v = 0;
+            if (parse_u64_strict(val, &v) < 0 || v > MQVPN_INIT_MAX_PATH_ID_MAX) {
+                LOG_WRN("%s:%d: invalid InitMaxPathId '%s'", path, lineno, val);
+            } else {
+                cfg->init_max_path_id = v;
+            }
         } else if (strcasecmp(key, "Path") == 0) {
             if (cfg->n_paths < MQVPN_CONFIG_MAX_PATHS) {
                 snprintf(cfg->paths[cfg->n_paths], sizeof(cfg->paths[0]), "%s", val);
@@ -440,6 +489,16 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     v = json_find_key(json_text, "cc");
     if (v && json_read_string(v, s32, sizeof(s32)) == 0)
         mqvpn_copy_str(cfg->cc, sizeof(cfg->cc), s32);
+
+    v = json_find_key(json_text, "init_max_path_id");
+    if (v) {
+        unsigned long long uv = 0;
+        if (json_read_u64_strict(v, &uv) == 0 && uv <= MQVPN_INIT_MAX_PATH_ID_MAX) {
+            cfg->init_max_path_id = uv;
+        } else {
+            LOG_WRN("JSON: invalid init_max_path_id; ignoring");
+        }
+    }
 
     v = json_find_key(json_text, "reconnect");
     if (v && json_read_bool(v, &iv) == 0) cfg->reconnect = iv;

@@ -130,6 +130,24 @@ json_value_has_valid_end(const char *p)
 }
 
 static int
+json_read_u64_strict(const char *p, uint64_t *out)
+{
+    if (!p || !out) return MQVPN_ERR_INVALID_ARG;
+    p = json_skip_ws(p);
+    if (*p < '0' || *p > '9') return MQVPN_ERR_INVALID_ARG;
+
+    errno = 0;
+    char *end = NULL;
+    unsigned long long v = strtoull(p, &end, 10);
+    if (end == p || errno == ERANGE || !json_value_has_valid_end(end)) {
+        return MQVPN_ERR_INVALID_ARG;
+    }
+
+    *out = (uint64_t)v;
+    return MQVPN_OK;
+}
+
+static int
 json_read_int_strict(const char *p, int *out)
 {
     if (!p || !out) return MQVPN_ERR_INVALID_ARG;
@@ -221,6 +239,7 @@ mqvpn_config_new(void)
     cfg->reconnect_interval_sec = 5;
     cfg->max_clients = 64;
     cfg->listen_port = 443;
+    cfg->init_max_path_id = 0; /* 0 = use xquic default (8) */
 
     return cfg;
 }
@@ -410,6 +429,15 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
         cfg->killswitch_hint = iv;
     }
 
+    v = json_find_key(json_text, "init_max_path_id");
+    if (v) {
+        uint64_t uv = 0;
+        if (json_read_u64_strict(v, &uv) != MQVPN_OK || uv > MQVPN_INIT_MAX_PATH_ID_MAX) {
+            return MQVPN_ERR_INVALID_ARG;
+        }
+        cfg->init_max_path_id = uv;
+    }
+
     v = json_find_key(json_text, "mtu");
     if (v) {
         if (json_read_int_strict(v, &iv) != MQVPN_OK ||
@@ -467,6 +495,15 @@ mqvpn_config_set_cc(mqvpn_config_t *cfg, mqvpn_cc_t cc)
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     if (!is_valid_cc(cc)) return MQVPN_ERR_INVALID_ARG;
     cfg->cc = cc;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_init_max_path_id(mqvpn_config_t *cfg, uint64_t v)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    if (v > MQVPN_INIT_MAX_PATH_ID_MAX) return MQVPN_ERR_INVALID_ARG;
+    cfg->init_max_path_id = v;
     return MQVPN_OK;
 }
 

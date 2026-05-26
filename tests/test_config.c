@@ -21,6 +21,17 @@ static int g_pass = 0, g_fail = 0;
         }                                                                      \
     } while (0)
 
+#define ASSERT_EQ_ULL(a, b, msg)                                                       \
+    do {                                                                               \
+        if ((a) == (b)) {                                                              \
+            g_pass++;                                                                  \
+        } else {                                                                       \
+            g_fail++;                                                                  \
+            fprintf(stderr, "FAIL [%s]: %llu != %llu\n", msg, (unsigned long long)(a), \
+                    (unsigned long long)(b));                                          \
+        }                                                                              \
+    } while (0)
+
 #define ASSERT_EQ_STR(a, b, msg)                                         \
     do {                                                                 \
         if (strcmp((a), (b)) == 0) {                                     \
@@ -206,6 +217,46 @@ test_parse_cc_json(void)
 
     ASSERT_EQ_INT(rc, 0, "cc json parse ok");
     ASSERT_EQ_STR(cfg.cc, "cubic", "cc cubic from JSON");
+}
+
+static void
+test_parse_init_max_path_id_bounds(void)
+{
+    const char *ini_ok = "[Multipath]\n"
+                         "InitMaxPathId = 4294967295\n";
+    char *path = write_tmp(ini_ok);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "InitMaxPathId max parse ok");
+    ASSERT_EQ_ULL(cfg.init_max_path_id, 4294967295ULL, "InitMaxPathId max stored");
+
+    const char *ini_bad = "[Multipath]\n"
+                          "InitMaxPathId = 4294967296\n";
+    path = write_tmp(ini_bad);
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "InitMaxPathId overflow is warning-only");
+    ASSERT_EQ_ULL(cfg.init_max_path_id, 0, "InitMaxPathId overflow ignored");
+}
+
+static void
+test_parse_init_max_path_id_json_bounds(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load_json_filecfg(&cfg, "{\"init_max_path_id\":4294967295}");
+    ASSERT_EQ_INT(rc, 0, "JSON init_max_path_id max parse ok");
+    ASSERT_EQ_ULL(cfg.init_max_path_id, 4294967295ULL, "JSON init_max_path_id max");
+
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load_json_filecfg(&cfg, "{\"init_max_path_id\":4294967296}");
+    ASSERT_EQ_INT(rc, 0, "JSON init_max_path_id overflow is warning-only");
+    ASSERT_EQ_ULL(cfg.init_max_path_id, 0, "JSON init_max_path_id overflow ignored");
 }
 
 static void
@@ -1307,6 +1358,8 @@ main(void)
     test_parse_scheduler_backup_fec();
     test_parse_cc_ini();
     test_parse_cc_json();
+    test_parse_init_max_path_id_bounds();
+    test_parse_init_max_path_id_json_bounds();
     test_comments_whitespace();
     test_unknown_key_warns();
     test_missing_file_error();

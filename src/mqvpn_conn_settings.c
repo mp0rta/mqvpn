@@ -99,4 +99,10 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
 
     /* --- scheduler / FEC params --- */
     mqvpn_apply_scheduler(out, in->scheduler);
+
+    /* --- init_max_path_id: 0 = keep xquic default (XQC_DEFAULT_INIT_MAX_PATH_ID=8) ---
+     */
+    if (in->init_max_path_id > 0) {
+        out->init_max_path_id = in->init_max_path_id;
+    }
 }

@@ -1219,6 +1219,7 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         .enable_multipath = true, /* server: always on, see mqvpn_conn_settings.c */
         .scheduler = cfg->scheduler,
         .cc = cfg->cc,
+        .init_max_path_id = cfg->init_max_path_id,
     };
     mqvpn_build_conn_settings(&cs_input, &conn_settings);
     xqc_server_set_conn_settings(s->engine, &conn_settings);
