@@ -3,8 +3,11 @@
  */
 #include "config.h"
 #include "json_mini.h"
+#include "libmqvpn.h"
 #include "log.h"
 
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,6 +39,38 @@ static int
 parse_bool(const char *val)
 {
     return (strcmp(val, "true") == 0 || strcmp(val, "yes") == 0 || strcmp(val, "1") == 0);
+}
+
+static int
+parse_int_strict(const char *val, int *out)
+{
+    if (!val || !out || *val == '\0') return -1;
+
+    errno = 0;
+    char *end = NULL;
+    long v = strtol(val, &end, 10);
+    if (end == val || *end != '\0' || errno == ERANGE || v < INT_MIN || v > INT_MAX) {
+        return -1;
+    }
+
+    *out = (int)v;
+    return 0;
+}
+
+static int
+parse_u64_strict(const char *val, unsigned long long *out)
+{
+    if (!val || !out || *val < '0' || *val > '9') return -1;
+
+    errno = 0;
+    char *end = NULL;
+    unsigned long long v = strtoull(val, &end, 10);
+    if (end == val || *end != '\0' || errno == ERANGE) {
+        return -1;
+    }
+
+    *out = v;
+    return 0;
 }
 
 /* Section IDs */
@@ -264,10 +299,19 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
         } else if (strcasecmp(key, "Reconnect") == 0) {
             cfg->reconnect = parse_bool(val);
         } else if (strcasecmp(key, "ReconnectInterval") == 0) {
-            int v = atoi(val);
-            if (v > 0) cfg->reconnect_interval = v;
+            int v = 0;
+            if (parse_int_strict(val, &v) < 0 || v <= 0) {
+                LOG_WRN("%s:%d: invalid ReconnectInterval '%s'; ignoring", path, lineno,
+                        val);
+            } else {
+                cfg->reconnect_interval = v;
+            }
         } else if (strcasecmp(key, "MTU") == 0) {
-            int v = atoi(val);
+            int v = 0;
+            if (parse_int_strict(val, &v) < 0) {
+                LOG_WRN("%s:%d: invalid MTU '%s'; ignoring", path, lineno, val);
+                break;
+            }
             if (v != 0 && (v < 1280 || v > 9000)) {
                 LOG_WRN("%s:%d: MTU must be 1280..9000, got %d; ignoring", path, lineno,
                         v);
@@ -309,8 +353,14 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
         } else if (strcasecmp(key, "User") == 0) {
             parse_user_pair(cfg, val, lineno, path);
         } else if (strcasecmp(key, "MaxClients") == 0) {
-            cfg->max_clients = atoi(val);
-            if (cfg->max_clients <= 0) cfg->max_clients = 64;
+            int v = 0;
+            if (parse_int_strict(val, &v) < 0 || v <= 0) {
+                LOG_WRN("%s:%d: invalid MaxClients '%s'; using default 64", path, lineno,
+                        val);
+                cfg->max_clients = 64;
+            } else {
+                cfg->max_clients = v;
+            }
         } else {
             LOG_WRN("%s:%d: unknown key '%s' in [Auth]", path, lineno, key);
         }
@@ -322,9 +372,8 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
         } else if (strcasecmp(key, "CC") == 0) {
             snprintf(cfg->cc, sizeof(cfg->cc), "%s", val);
         } else if (strcasecmp(key, "InitMaxPathId") == 0) {
-            char *end = NULL;
-            unsigned long long v = strtoull(val, &end, 10);
-            if (!end || *end != '\0') {
+            unsigned long long v = 0;
+            if (parse_u64_strict(val, &v) < 0 || v > MQVPN_INIT_MAX_PATH_ID_MAX) {
                 LOG_WRN("%s:%d: invalid InitMaxPathId '%s'", path, lineno, val);
             } else {
                 cfg->init_max_path_id = v;
@@ -429,9 +478,12 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
 
     v = json_find_key(json_text, "init_max_path_id");
     if (v) {
-        /* uint64 field; use int64 reader to match INI strtoull width */
-        int64_t iv64 = json_read_int64(v);
-        if (iv64 >= 0) cfg->init_max_path_id = (unsigned long long)iv64;
+        uint64_t uv = 0;
+        if (json_read_u64_strict(v, &uv) == 0 && uv <= MQVPN_INIT_MAX_PATH_ID_MAX) {
+            cfg->init_max_path_id = uv;
+        } else {
+            LOG_WRN("JSON: invalid init_max_path_id; ignoring");
+        }
     }
 
     v = json_find_key(json_text, "reconnect");

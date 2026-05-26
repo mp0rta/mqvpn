@@ -18,6 +18,7 @@
 #endif
 
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -63,10 +64,11 @@ usage(const char *prog)
         "  --cc bbr2|bbr|cubic|none  Congestion control algorithm (default bbr2)\n"
         "  --scheduler minrtt|wlb|backup_fec\n"
         "                            Multipath scheduler (default wlb)\n"
-        "  --init-max-path-id N      Initial max path identifier TP value (default = "
-        "xquic\n"
-        "                            default 8, set lower e.g. 2 to test G-P16 "
-        "trigger).\n"
+        "  --init-max-path-id N      MP-QUIC draft-21 test knob: initial path-id "
+        "credit\n"
+        "                            TP (default = xquic default 8; set lower, "
+        "e.g. 2,\n"
+        "                            to exercise G-P16 PATHS_BLOCKED).\n"
         "  --mtu N                   TUN device MTU cap (1280–9000, default: auto)\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
@@ -254,16 +256,15 @@ main(int argc, char *argv[])
             /* Reject leading '-' explicitly: strtoull silently wraps "-1" to
              * UINT64_MAX rather than failing. */
             if (optarg[0] == '-' || optarg[0] == '\0') {
-                fprintf(stderr, "error: --init-max-path-id must be a non-negative "
-                                "integer\n");
+                fprintf(stderr, "error: --init-max-path-id must be 0..4294967295\n");
                 return 1;
             }
             char *end = NULL;
             errno = 0;
             unsigned long long v = strtoull(optarg, &end, 10);
-            if (!end || *end != '\0' || errno == ERANGE) {
-                fprintf(stderr, "error: --init-max-path-id must be a non-negative "
-                                "integer\n");
+            if (!end || *end != '\0' || errno == ERANGE ||
+                v > MQVPN_INIT_MAX_PATH_ID_MAX) {
+                fprintf(stderr, "error: --init-max-path-id must be 0..4294967295\n");
                 return 1;
             }
             init_max_path_id = (uint64_t)v;
@@ -271,9 +272,17 @@ main(int argc, char *argv[])
             break;
         }
         case 0x102: {
-            int v = atoi(optarg);
+            char *end = NULL;
+            errno = 0;
+            long lv = strtol(optarg, &end, 10);
+            if (end == optarg || !end || *end != '\0' || errno == ERANGE ||
+                lv < INT_MIN || lv > INT_MAX) {
+                fprintf(stderr, "error: --mtu must be 0 or 1280..9000\n");
+                return 1;
+            }
+            int v = (int)lv;
             if (v != 0 && (v < 1280 || v > 9000)) {
-                fprintf(stderr, "error: --mtu must be 1280..9000\n");
+                fprintf(stderr, "error: --mtu must be 0 or 1280..9000\n");
                 return 1;
             }
             cli_mtu = v;
