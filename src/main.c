@@ -60,6 +60,7 @@ usage(const char *prog)
         "  --status                  Query server status via control API and exit\n"
         "                            (uses --control-port, or [Control] Listen from "
         "--config)\n"
+        "  --cc bbr2|bbr|cubic|none  Congestion control algorithm (default bbr2)\n"
         "  --scheduler minrtt|wlb|backup_fec\n"
         "                            Multipath scheduler (default wlb)\n"
         "  --init-max-path-id N      Initial max path identifier TP value (default = "
@@ -141,6 +142,7 @@ main(int argc, char *argv[])
         {"path", required_argument, NULL, 'p'},
         {"dns", required_argument, NULL, 'd'},
         {"scheduler", required_argument, NULL, 'S'},
+        {"cc", required_argument, NULL, 0x101},
         {"init-max-path-id", required_argument, NULL, 0x100},
         {"mtu", required_argument, NULL, 0x102},
         {"max-clients", required_argument, NULL, 'M'},
@@ -172,6 +174,7 @@ main(int argc, char *argv[])
     int genkey = 0;
     const char *log_level_str = NULL;
     const char *scheduler_str = NULL;
+    const char *cc_str = NULL;
     uint64_t init_max_path_id = 0; /* 0 = unset → xquic default (8) */
     int init_max_path_id_set = 0;
     int cli_mtu = -1;     /* -1 means "not set by CLI" */
@@ -246,6 +249,7 @@ main(int argc, char *argv[])
             }
             break;
         case 'S': scheduler_str = optarg; break;
+        case 0x101: cc_str = optarg; break;
         case 0x100: {
             /* Reject leading '-' explicitly: strtoull silently wraps "-1" to
              * UINT64_MAX rather than failing. */
@@ -344,6 +348,7 @@ main(int argc, char *argv[])
     const char *eff_tun_name = tun_name ? tun_name : file_cfg.tun_name;
     const char *eff_log_level = log_level_str ? log_level_str : file_cfg.log_level;
     const char *eff_scheduler = scheduler_str ? scheduler_str : file_cfg.scheduler;
+    const char *eff_cc = cc_str ? cc_str : file_cfg.cc;
     uint64_t eff_init_max_path_id =
         init_max_path_id_set ? init_max_path_id : (uint64_t)file_cfg.init_max_path_id;
     const char *eff_listen = listen_str ? listen_str : file_cfg.listen;
@@ -432,6 +437,25 @@ main(int argc, char *argv[])
         return 1;
     }
 
+    /* Parse congestion control */
+    int cc = MQVPN_CC_BBR2;
+    if (strcmp(eff_cc, "bbr") == 0) {
+        cc = MQVPN_CC_BBR;
+    } else if (strcmp(eff_cc, "cubic") == 0) {
+        cc = MQVPN_CC_CUBIC;
+    } else if (strcmp(eff_cc, "none") == 0) {
+#ifdef XQC_ENABLE_UNLIMITED
+        cc = MQVPN_CC_NONE;
+#else
+        fprintf(stderr, "error: --cc 'none' requires rebuild with "
+                        "-DXQC_ENABLE_UNLIMITED=ON in xquic\n");
+        return 1;
+#endif
+    } else if (strcmp(eff_cc, "bbr2") != 0) {
+        fprintf(stderr, "error: --cc must be 'bbr2', 'bbr', 'cubic', or 'none'\n");
+        return 1;
+    }
+
     /* Paths: CLI paths override config paths entirely */
     if (n_paths == 0 && file_cfg.n_paths > 0) {
         n_paths = file_cfg.n_paths;
@@ -481,6 +505,7 @@ main(int argc, char *argv[])
             .kill_switch = kill_switch >= 0 ? kill_switch : file_cfg.kill_switch,
             .init_max_path_id = eff_init_max_path_id,
             .tun_mtu = eff_tun_mtu,
+            .cc = cc,
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];
@@ -525,6 +550,7 @@ main(int argc, char *argv[])
             .control_port = eff_control_port,
             .init_max_path_id = eff_init_max_path_id,
             .tun_mtu = eff_tun_mtu,
+            .cc = cc,
         };
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];

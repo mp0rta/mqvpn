@@ -531,6 +531,7 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     default: lib_sched = MQVPN_SCHED_MINRTT; break;
     }
     mqvpn_config_set_scheduler(lib_cfg, lib_sched);
+    mqvpn_config_set_cc(lib_cfg, (mqvpn_cc_t)cfg->cc);
     mqvpn_config_set_tun_mtu(lib_cfg, cfg->tun_mtu);
 
     /* Create callbacks */

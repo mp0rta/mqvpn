@@ -319,6 +319,8 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
     case SEC_MULTIPATH:
         if (strcasecmp(key, "Scheduler") == 0) {
             snprintf(cfg->scheduler, sizeof(cfg->scheduler), "%s", val);
+        } else if (strcasecmp(key, "CC") == 0) {
+            snprintf(cfg->cc, sizeof(cfg->cc), "%s", val);
         } else if (strcasecmp(key, "InitMaxPathId") == 0) {
             char *end = NULL;
             unsigned long long v = strtoull(val, &end, 10);
@@ -420,6 +422,10 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     v = json_find_key(json_text, "scheduler");
     if (v && json_read_string(v, s32, sizeof(s32)) == 0)
         mqvpn_copy_str(cfg->scheduler, sizeof(cfg->scheduler), s32);
+
+    v = json_find_key(json_text, "cc");
+    if (v && json_read_string(v, s32, sizeof(s32)) == 0)
+        mqvpn_copy_str(cfg->cc, sizeof(cfg->cc), s32);
 
     v = json_find_key(json_text, "init_max_path_id");
     if (v) {
@@ -555,6 +561,7 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
     snprintf(cfg->cert_file, sizeof(cfg->cert_file), "server.crt");
     snprintf(cfg->key_file, sizeof(cfg->key_file), "server.key");
     snprintf(cfg->scheduler, sizeof(cfg->scheduler), "wlb");
+    snprintf(cfg->cc, sizeof(cfg->cc), "bbr2");
     cfg->max_clients = 64;
     cfg->reconnect = 1;
     cfg->reconnect_interval = 5;

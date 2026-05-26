@@ -22,6 +22,7 @@ typedef struct mqvpn_client_cfg_s {
     int kill_switch;            /* 1=block traffic outside tunnel (default 0) */
     uint64_t init_max_path_id;  /* draft-21 §4.6 TP cap, 0=use xquic default 8 */
     int tun_mtu;                /* 0=auto (MSS-derived), >0=cap (floor 1280) */
+    int cc;                     /* mqvpn_cc_t: congestion control algorithm */
 } mqvpn_client_cfg_t;
 
 #endif /* MQVPN_VPN_CLIENT_H */
