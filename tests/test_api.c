@@ -379,12 +379,17 @@ TEST(error_string)
 
 /* ── Version string test ── */
 
+#define STRINGIFY2(x) #x
+#define STRINGIFY(x)  STRINGIFY2(x)
+#define EXPECTED_VERSION           \
+    STRINGIFY(MQVPN_VERSION_MAJOR) \
+    "." STRINGIFY(MQVPN_VERSION_MINOR) "." STRINGIFY(MQVPN_VERSION_PATCH)
+
 TEST(version_string)
 {
     const char *v = mqvpn_version_string();
     ASSERT_NOT_NULL(v);
-    /* Should contain major.minor.patch */
-    ASSERT_NOT_NULL(strstr(v, "0.5.0"));
+    ASSERT_NOT_NULL(strstr(v, EXPECTED_VERSION));
 }
 
 /* ── Client lifecycle (without xquic — expects NULL due to engine init failure) ── */
