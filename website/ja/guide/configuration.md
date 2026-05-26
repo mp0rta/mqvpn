@@ -172,7 +172,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 > (`-DXQC_ENABLE_FEC=ON -DXQC_ENABLE_XOR=ON`) を有効にしている必要があります。
 > 詳細は[マルチパス](./multipath#backup-fec-experimental)を参照。
 
-> `none`（無制限）は xquic を `-DXQC_ENABLE_UNLIMITED=ON` でビルドする必要があります。
+> `CC = none`（輻輳制御なし）は xquic を `-DXQC_ENABLE_UNLIMITED=ON` でビルドする必要があります。
 
 ## MTU ガイドライン
 

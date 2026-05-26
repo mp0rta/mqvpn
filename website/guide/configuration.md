@@ -172,7 +172,7 @@ See [Multipath](./multipath) for scheduler details.
 > with FEC build enabled (`-DXQC_ENABLE_FEC=ON -DXQC_ENABLE_XOR=ON`).
 > See [Multipath](./multipath#backup-fec-experimental).
 
-> `none` (unlimited) requires xquic built with `-DXQC_ENABLE_UNLIMITED=ON`.
+> `CC = none` (no congestion control) requires xquic built with `-DXQC_ENABLE_UNLIMITED=ON`.
 
 ## MTU Guidelines
 
