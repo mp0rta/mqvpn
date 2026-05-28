@@ -1495,7 +1495,7 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
     if (xret != XQC_OK) return MQVPN_ERR_ENGINE;
 
     uint64_t dgram_id;
-    uint32_t fh = flow_hash_pkt(pkt, (int)len);
+    uint32_t fh = flow_hash_pkt(pkt, (int)len, false);
     xqc_conn_set_dgram_flow_hash(xqc_h3_conn_get_xqc_conn(target->h3_conn), fh);
     xret = xqc_h3_ext_datagram_send(target->h3_conn, frame_buf, frame_written, &dgram_id,
                                     mqvpn_dgram_qos_level(s->config.scheduler));

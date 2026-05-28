@@ -9,21 +9,22 @@
 #define MQVPN_FLOW_SCHED_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
-/* Scheduler mode (mirrors mqvpn_scheduler_t in include/libmqvpn.h) */
-#define MQVPN_SCHED_MINRTT     0
-#define MQVPN_SCHED_WLB        1 /* WLB with flow-affinity WRR (default) */
-#define MQVPN_SCHED_BACKUP_FEC 2 /* FEC repair on standby path (experimental) */
+/* Scheduler mode (mirrors mqvpn_scheduler_t in include/libmqvpn.h).
+ * Keep in sync — referenced by tests that include only flow_sched.h. */
+#define MQVPN_SCHED_MINRTT      0
+#define MQVPN_SCHED_WLB         1
+#define MQVPN_SCHED_BACKUP_FEC  2
+#define MQVPN_SCHED_WLB_UDP_PIN 3
 
-/* Sentinel: WRR without flow pinning (for UDP/QUIC — no reordering concern) */
 #define MQVPN_FLOW_HASH_UNPINNED 0xFFFFFFFFU
 
-/*
- * Compute flow hash for WLB scheduler hint.
- *   TCP (proto 6)  → FNV-1a 5-tuple hash (non-zero, flow-pinned)
- *   UDP/other      → MQVPN_FLOW_HASH_UNPINNED (WRR without pinning)
- *   non-IP/short   → 0 (MinRTT fallback)
- */
-uint32_t flow_hash_pkt(const uint8_t *pkt, int len);
+/* Returns flow hash for xquic WLB scheduler hint.
+ *   TCP                        → FNV-1a 5-tuple hash
+ *   UDP, udp_pin=true          → FNV-1a 5-tuple hash (used by wlb_udp_pin)
+ *   UDP, udp_pin=false / ICMP  → MQVPN_FLOW_HASH_UNPINNED (per-packet WRR)
+ *   malformed / unknown        → 0 (xquic falls back to MinRTT) */
+uint32_t flow_hash_pkt(const uint8_t *pkt, int len, bool udp_pin);
 
 #endif /* MQVPN_FLOW_SCHED_H */

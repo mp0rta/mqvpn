@@ -7,7 +7,7 @@
 #include "flow_sched.h"
 
 uint32_t
-flow_hash_pkt(const uint8_t *pkt, int len)
+flow_hash_pkt(const uint8_t *pkt, int len, bool udp_pin)
 {
     if (!pkt || len < 1) {
         return 0;
@@ -26,9 +26,11 @@ flow_hash_pkt(const uint8_t *pkt, int len)
             return 0;
         }
 
-        /* Only TCP needs flow pinning (reordering breaks inner TCP).
-         * UDP/QUIC handle reordering themselves → unpinned WRR. */
-        if (proto != 6) {
+        /* TCP always pinned (reordering breaks inner TCP).
+         * UDP pinned only when udp_pin=true (wlb_udp_pin scheduler).
+         * Other (ICMP, etc.) → unpinned WRR. */
+        bool should_pin = (proto == 6) || (proto == 17 && udp_pin);
+        if (!should_pin) {
             return MQVPN_FLOW_HASH_UNPINNED;
         }
         if (len < ihl + 4) {
@@ -64,8 +66,9 @@ flow_hash_pkt(const uint8_t *pkt, int len)
 
         uint8_t next_hdr = pkt[6];
 
-        /* Only TCP needs flow pinning */
-        if (next_hdr != 6) {
+        /* TCP always pinned; UDP pinned only when udp_pin=true. */
+        bool should_pin = (next_hdr == 6) || (next_hdr == 17 && udp_pin);
+        if (!should_pin) {
             return MQVPN_FLOW_HASH_UNPINNED;
         }
         if (len < 44) {
