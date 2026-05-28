@@ -31,7 +31,7 @@ Without any `--path` flags or `Path` entries, mqvpn uses the default interface (
 
 ## Schedulers
 
-The scheduler decides how to distribute packets across paths. mqvpn supports two schedulers:
+The scheduler decides how to distribute packets across paths. mqvpn supports the following schedulers:
 
 ### WLB (Weighted Load Balancing) — Default
 
@@ -46,6 +46,29 @@ WLB combines path weighting and flow-aware scheduling for QUIC datagrams:
 ```bash
 --scheduler wlb
 ```
+
+### WLB UDP Pin (`wlb_udp_pin`)
+
+A variant of WLB that also pins inner UDP flows by 5-tuple hash, in addition to
+inner TCP flows. Use this when tunneling inner protocols with a single packet-
+number space (QUIC, SRT, WireGuard, MASQUE-inner QUIC), where the outer scheduler
+striping packets across asymmetric-RTT paths triggers spurious retransmits and a
+kPacketThreshold-driven cwnd collapse — the same failure mode TCP would suffer.
+
+```bash
+--scheduler wlb_udp_pin
+```
+
+**When to use**: inner QUIC, SRT, WireGuard, or any UDP protocol that runs its
+own congestion control over a single sequence space.
+
+**When NOT to use**: workloads with very high short-flow UDP churn (high-rate
+DNS, mDNS bursts). The xquic WLB flow table is a fixed 4096-entry open-addressed
+structure with 60s idle eviction; high churn under probe-region pressure can
+evict longer-lived inner flows. `wlb_udp_pin` is intended for tunnels carrying a
+small-to-moderate set of long-lived inner UDP flows. For media-heavy workloads
+(WebRTC/SRTP, gaming, DNS) where the application tolerates reorder, plain `wlb`
+gives better aggregation.
 
 ### MinRTT (Minimum Round-Trip Time)
 
@@ -91,6 +114,7 @@ throughput vs WLB across loss rates 1%–10%.
 | Scenario | Recommended |
 |----------|-------------|
 | General use, bandwidth aggregation | **WLB** |
+| Inner QUIC / SRT / WireGuard tunnels | **`wlb_udp_pin`** |
 | Latency-sensitive applications | MinRTT |
 | Asymmetric paths (different speeds) | **WLB** |
 | Similar-speed paths | Either works well |

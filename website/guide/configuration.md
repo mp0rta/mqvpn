@@ -162,7 +162,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 
 | Key | Description | Default |
 |-----|-------------|---------|
-| `Scheduler` | Scheduler algorithm (`minrtt`, `wlb`, or `backup_fec`) | `wlb` |
+| `Scheduler` | Scheduler algorithm (`minrtt`, `wlb`, `wlb_udp_pin`, or `backup_fec`) | `wlb` |
 | `CC` | Congestion control algorithm (`bbr2`, `bbr`, `cubic`, or `none`) | `bbr2` |
 | `Path` | Network interface to bind (repeatable) | Default interface |
 

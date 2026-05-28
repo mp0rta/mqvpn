@@ -162,7 +162,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 
 | キー | 説明 | デフォルト |
 |------|------|-----------|
-| `Scheduler` | スケジューラアルゴリズム（`minrtt`, `wlb`, または `backup_fec`） | `wlb` |
+| `Scheduler` | スケジューラアルゴリズム（`minrtt`, `wlb`, `wlb_udp_pin`, または `backup_fec`） | `wlb` |
 | `CC` | 輻輳制御アルゴリズム（`bbr2`, `bbr`, `cubic`, または `none`） | `bbr2` |
 | `Path` | バインドするネットワークインターフェース（複数指定可） | デフォルトインターフェース |
 
