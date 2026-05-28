@@ -48,6 +48,8 @@ class MqvpnConfigTest {
     fun `scheduler native values are correct`() {
         assertEquals(0, MqvpnConfig.Scheduler.MIN_RTT.native)
         assertEquals(1, MqvpnConfig.Scheduler.WLB.native)
+        assertEquals(2, MqvpnConfig.Scheduler.BACKUP_FEC.native)
+        assertEquals(3, MqvpnConfig.Scheduler.WLB_UDP_PIN.native)
     }
 
     @Test

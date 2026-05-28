@@ -26,6 +26,7 @@ data class MqvpnConfig(
         MIN_RTT(0),
         WLB(1),
         BACKUP_FEC(2),
+        WLB_UDP_PIN(3),
     }
 
     @Serializable
