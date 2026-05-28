@@ -744,6 +744,96 @@ test_udp_pin_ipv6_gate(void)
     PASS();
 }
 
+static void
+test_udp_pin_tcp_unchanged(void)
+{
+    TEST(flow_hash_pkt TCP hash unchanged regardless of udp_pin);
+
+    uint8_t pkt[40];
+    make_tcp_pkt(pkt, "10.0.0.1", 12345, "8.8.8.8", 80);
+
+    uint32_t h_false = flow_hash_pkt(pkt, 40, false);
+    uint32_t h_true = flow_hash_pkt(pkt, 40, true);
+
+    ASSERT_NEQ(h_false, 0);
+    ASSERT_NEQ(h_false, MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(h_false, h_true);
+
+    /* IPv6 TCP — same invariant */
+    uint8_t pkt6[44];
+    memset(pkt6, 0, sizeof(pkt6));
+    pkt6[0] = 0x60;
+    pkt6[6] = 6;
+    pkt6[8] = 0x20;
+    pkt6[24] = 0x20;
+    pkt6[40] = 0x12;
+    pkt6[41] = 0x34;
+    pkt6[42] = 0x00;
+    pkt6[43] = 0x50;
+
+    uint32_t h6_false = flow_hash_pkt(pkt6, 44, false);
+    uint32_t h6_true = flow_hash_pkt(pkt6, 44, true);
+    ASSERT_NEQ(h6_false, 0);
+    ASSERT_NEQ(h6_false, MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(h6_false, h6_true);
+
+    PASS();
+}
+
+static void
+test_udp_pin_ipv4_truncated(void)
+{
+    TEST(flow_hash_pkt IPv4 UDP truncated under udp_pin returns UNPINNED);
+
+    /* IPv4 header only (20 bytes), no UDP ports — len < ihl + 4 */
+    uint8_t pkt[20];
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x45;
+    pkt[9] = 17;
+    pkt[12] = 10;
+    pkt[16] = 8;
+
+    ASSERT_EQ(flow_hash_pkt(pkt, 20, true), MQVPN_FLOW_HASH_UNPINNED);
+
+    /* Just barely truncated — 23 bytes, still len < ihl + 4 */
+    uint8_t pkt23[23];
+    memset(pkt23, 0, sizeof(pkt23));
+    pkt23[0] = 0x45;
+    pkt23[9] = 17;
+    pkt23[12] = 10;
+    pkt23[16] = 8;
+
+    ASSERT_EQ(flow_hash_pkt(pkt23, 23, true), MQVPN_FLOW_HASH_UNPINNED);
+
+    PASS();
+}
+
+static void
+test_udp_pin_ipv6_extension_headers(void)
+{
+    TEST(flow_hash_pkt IPv6 extension header under udp_pin returns UNPINNED);
+
+    uint8_t pkt[44];
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x60;
+    pkt[8] = 0x20;
+    pkt[24] = 0x20;
+    pkt[40] = 0x12;
+    pkt[41] = 0x34;
+    pkt[42] = 0x00;
+    pkt[43] = 0x35;
+
+    /* next_hdr ∈ {0=Hop-by-Hop, 43=Routing, 44=Fragment, 50=ESP} —
+     * none are TCP/UDP, so should be UNPINNED even with udp_pin=true. */
+    uint8_t ext_hdrs[] = {0, 43, 44, 50};
+    for (size_t i = 0; i < sizeof(ext_hdrs) / sizeof(ext_hdrs[0]); i++) {
+        pkt[6] = ext_hdrs[i];
+        ASSERT_EQ(flow_hash_pkt(pkt, 44, true), MQVPN_FLOW_HASH_UNPINNED);
+    }
+
+    PASS();
+}
+
 /* ── Main ── */
 
 int
@@ -785,6 +875,9 @@ main(void)
     /* UDP pin gate (Chunk 1) */
     test_udp_pin_ipv4_gate();
     test_udp_pin_ipv6_gate();
+    test_udp_pin_tcp_unchanged();
+    test_udp_pin_ipv4_truncated();
+    test_udp_pin_ipv6_extension_headers();
 
     printf("\n%d passed, %d failed\n", tests_passed, tests_failed);
     return tests_failed > 0 ? 1 : 0;
