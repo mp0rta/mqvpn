@@ -528,6 +528,7 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     switch (cfg->scheduler) {
     case 1: lib_sched = MQVPN_SCHED_WLB; break;
     case 2: lib_sched = MQVPN_SCHED_BACKUP_FEC; break;
+    case 3: lib_sched = MQVPN_SCHED_WLB_UDP_PIN; break;
     default: lib_sched = MQVPN_SCHED_MINRTT; break;
     }
     mqvpn_config_set_scheduler(lib_cfg, lib_sched);
