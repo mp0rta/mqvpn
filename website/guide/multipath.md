@@ -49,26 +49,33 @@ WLB combines path weighting and flow-aware scheduling for QUIC datagrams:
 
 ### WLB UDP Pin (`wlb_udp_pin`)
 
-A variant of WLB that also pins inner UDP flows by 5-tuple hash, in addition to
-inner TCP flows. Use this when tunneling inner protocols with a single packet-
-number space (QUIC, SRT, WireGuard, MASQUE-inner QUIC), where the outer scheduler
-striping packets across asymmetric-RTT paths triggers spurious retransmits and a
-kPacketThreshold-driven cwnd collapse — the same failure mode TCP would suffer.
+A variant of WLB that keeps each UDP connection on a single path, on top of the
+TCP pinning that plain WLB already does.
 
 ```bash
 --scheduler wlb_udp_pin
 ```
 
-**When to use**: inner QUIC, SRT, WireGuard, or any UDP protocol that runs its
-own congestion control over a single sequence space.
+**Use this when** you're tunneling traffic that runs another QUIC connection
+inside the tunnel — HTTP/3 to a cloud service, video over SRT, a WireGuard
+session, and similar. Protocols of this kind are sensitive to packet
+reordering: if mqvpn spreads their packets across multiple paths with
+different latencies, the inner protocol mistakes the reorder for packet loss,
+slows itself down, and throughput drops sharply. Pinning each connection to
+one path avoids that pitfall.
 
-**When NOT to use**: workloads with very high short-flow UDP churn (high-rate
-DNS, mDNS bursts). The xquic WLB flow table is a fixed 4096-entry open-addressed
-structure with 60s idle eviction; high churn under probe-region pressure can
-evict longer-lived inner flows. `wlb_udp_pin` is intended for tunnels carrying a
-small-to-moderate set of long-lived inner UDP flows. For media-heavy workloads
-(WebRTC/SRTP, gaming, DNS) where the application tolerates reorder, plain `wlb`
-gives better aggregation.
+**Stick with plain `wlb`** for everyday traffic that mixes many small UDP flows
+— video calls (WebRTC), online games, normal web browsing, DNS lookups. These
+applications already tolerate some reorder, and letting mqvpn spread packets
+across paths gives you better combined bandwidth. There's also a practical
+limit: mqvpn tracks UDP connections in a fixed-size table, so if your traffic
+creates thousands of short-lived UDP flows per second (e.g. a DNS-heavy
+server), `wlb_udp_pin` can lose track of older flows and the pinning becomes
+unreliable. For those cases plain `wlb` is safer.
+
+In short: pick `wlb_udp_pin` when most of your tunnel traffic is a small
+number of long-lived connections that themselves care about packet ordering.
+Otherwise leave it on `wlb`.
 
 ### MinRTT (Minimum Round-Trip Time)
 
