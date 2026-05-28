@@ -56,13 +56,21 @@ TCP pinning that plain WLB already does.
 --scheduler wlb_udp_pin
 ```
 
-**Use this when** you're tunneling traffic that runs another QUIC connection
-inside the tunnel — HTTP/3 to a cloud service, video over SRT, a WireGuard
-session, and similar. Protocols of this kind are sensitive to packet
-reordering: if mqvpn spreads their packets across multiple paths with
+**Use this when** you're tunneling traffic that runs another connection-oriented
+protocol inside the tunnel — HTTP/3 to a cloud service, video over SRT, a
+WireGuard session, and similar. These protocols run their own ordering and
+congestion control over UDP, so when mqvpn spreads packets across paths with
 different latencies, the inner protocol mistakes the reorder for packet loss,
-slows itself down, and throughput drops sharply. Pinning each connection to
-one path avoids that pitfall.
+slows itself down, and throughput drops sharply. `wlb_udp_pin` keeps the
+packets of each connection on one path, so this reorder doesn't happen.
+
+Note that with a single inner connection (which is typical for SRT, WireGuard,
+or a single QUIC session) `wlb_udp_pin` is capped at one path's bandwidth.
+As long as the inner protocol runs over a single sequence space, you cannot
+aggregate bandwidth across paths without the inner protocol itself going
+multipath (e.g. multipath QUIC). The point of `wlb_udp_pin` here is to give
+you a steady "one path's worth" of throughput, rather than the per-packet
+striping under plain `wlb` collapsing to less than one path under reorder.
 
 **Stick with plain `wlb`** for everyday traffic that mixes many small UDP flows
 — video calls (WebRTC), online games, normal web browsing, DNS lookups. These
