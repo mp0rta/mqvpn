@@ -62,7 +62,7 @@ usage(const char *prog)
         "                            (uses --control-port, or [Control] Listen from "
         "--config)\n"
         "  --cc bbr2|bbr|cubic|none  Congestion control algorithm (default bbr2)\n"
-        "  --scheduler minrtt|wlb|backup_fec\n"
+        "  --scheduler minrtt|wlb|wlb_udp_pin|backup_fec\n"
         "                            Multipath scheduler (default wlb)\n"
         "  --init-max-path-id N      MP-QUIC draft-21 test knob: initial path-id "
         "credit\n"
@@ -433,6 +433,8 @@ main(int argc, char *argv[])
     int scheduler = MQVPN_SCHED_MINRTT;
     if (strcmp(eff_scheduler, "wlb") == 0) {
         scheduler = MQVPN_SCHED_WLB;
+    } else if (strcmp(eff_scheduler, "wlb_udp_pin") == 0) {
+        scheduler = MQVPN_SCHED_WLB_UDP_PIN;
     } else if (strcmp(eff_scheduler, "backup_fec") == 0) {
 #if defined(XQC_ENABLE_FEC) && defined(XQC_ENABLE_XOR)
         scheduler = MQVPN_SCHED_BACKUP_FEC;
@@ -442,7 +444,8 @@ main(int argc, char *argv[])
         return 1;
 #endif
     } else if (strcmp(eff_scheduler, "minrtt") != 0) {
-        fprintf(stderr, "error: --scheduler must be 'minrtt', 'wlb', or 'backup_fec'\n");
+        fprintf(stderr, "error: --scheduler must be 'minrtt', 'wlb', 'wlb_udp_pin', or "
+                        "'backup_fec'\n");
         return 1;
     }
 

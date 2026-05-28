@@ -20,7 +20,8 @@ void
 mqvpn_apply_scheduler(xqc_conn_settings_t *cs, mqvpn_scheduler_t sched)
 {
     switch (sched) {
-    case MQVPN_SCHED_WLB: cs->scheduler_callback = xqc_wlb_scheduler_cb; break;
+    case MQVPN_SCHED_WLB:
+    case MQVPN_SCHED_WLB_UDP_PIN: cs->scheduler_callback = xqc_wlb_scheduler_cb; break;
     case MQVPN_SCHED_BACKUP_FEC:
 #if defined(XQC_ENABLE_FEC) && defined(XQC_ENABLE_XOR)
         cs->scheduler_callback = xqc_backup_fec_scheduler_cb;
