@@ -116,7 +116,7 @@ DNS = 1.1.1.1, 8.8.8.8
 # MTU = 1280                   # TUN MTU cap (1280–9000, default: auto)
 
 [Multipath]
-# For tunnels carrying inner QUIC/SRT/WireGuard, prefer wlb_udp_pin:
+# Use wlb_udp_pin to keep each UDP connection on a single path:
 # Scheduler = wlb_udp_pin
 Scheduler = wlb
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
@@ -188,19 +188,21 @@ sudo mqvpn --config /etc/mqvpn/client.conf
 
 ## Schedulers
 
-| Scheduler       | TCP        | UDP        | Typical inner workload                          |
+| Scheduler       | TCP        | UDP        | Typical use                                     |
 |-----------------|------------|------------|-------------------------------------------------|
-| `minrtt`        | min RTT    | min RTT    | latency-sensitive (SRT, realtime)               |
-| `wlb` (default) | flow pin   | unpinned   | media-heavy: WebRTC, gaming, DNS                |
-| `wlb_udp_pin`   | flow pin   | flow pin   | inner QUIC, SRT, WireGuard, MASQUE-inner QUIC   |
+| `minrtt`        | min RTT    | min RTT    | latency-first                                   |
+| `wlb` (default) | flow pin   | unpinned   | general use; UDP packets distributed per-packet |
+| `wlb_udp_pin`   | flow pin   | flow pin   | each UDP connection kept on a single path       |
 | `backup_fec`    | redundant  | redundant  | resilience-first (requires XQC_ENABLE_FEC)      |
 
-**Choosing wlb vs wlb_udp_pin:** Inner UDP protocols with a single packet-number
-space (QUIC, SRT, WireGuard) trigger spurious retransmits when the outer scheduler
-stripes packets across asymmetric-RTT paths — same kPacketThreshold-driven cwnd
-collapse as TCP would suffer. Pick `wlb_udp_pin` when tunneling these. Pick `wlb`
-for media-heavy workloads (WebRTC/SRTP, gaming, DNS) where the application
-tolerates reorder and unpinned WRR gives better aggregation.
+**Choosing wlb vs wlb_udp_pin:** Plain `wlb` distributes UDP packets across
+paths per-packet, which gives better aggregate throughput when the inner
+protocol tolerates reorder. Some inner UDP protocols, however, maintain their
+own packet ordering and may treat reorder as packet loss — under asymmetric-RTT
+paths this can slow them down and throughput drops. `wlb_udp_pin` keeps each
+UDP connection on a single path to avoid that case. If you observe degraded UDP
+throughput under `wlb`, try `wlb_udp_pin`; otherwise `wlb` is the better
+default.
 
 **Trade-off note (`wlb_udp_pin`):** the xquic WLB flow table is a fixed 4096-entry
 open-addressed structure with 60s idle eviction. Workloads with very high

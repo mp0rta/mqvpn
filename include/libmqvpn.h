@@ -97,8 +97,7 @@ typedef enum {
     MQVPN_SCHED_WLB = 1,
     MQVPN_SCHED_BACKUP_FEC =
         2, /* FEC repair on standby path. Requires XQC_ENABLE_FEC build. */
-    MQVPN_SCHED_WLB_UDP_PIN =
-        3, /* WLB + 5-tuple pin for UDP flows (inner QUIC/SRT/WireGuard). */
+    MQVPN_SCHED_WLB_UDP_PIN = 3, /* WLB + 5-tuple pin for UDP flows. */
 } mqvpn_scheduler_t;
 
 typedef enum {
