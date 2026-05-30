@@ -132,6 +132,8 @@ jobs:
           cp build-tarball/systemd/mqvpn-client@.service "$STAGING/systemd/"
           cp systemd/server.conf.example "$STAGING/etc/mqvpn/"
           cp systemd/client.conf.example "$STAGING/etc/mqvpn/"
+          cp LICENSE "$STAGING/"
+          cp NOTICE  "$STAGING/"
           tar czf "mqvpn_${VERSION}_${{ matrix.arch }}.tar.gz" -C "$STAGING" .
           rm -rf "$STAGING" build-tarball
 
