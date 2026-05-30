@@ -728,6 +728,30 @@ test_killswitch_config_false(void)
     ASSERT_EQ_INT(cfg.kill_switch, 0, "kill_switch disabled from config");
 }
 
+static void
+test_manage_routes_default_on(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+
+    ASSERT_EQ_INT(cfg.manage_routes, 1, "default manage_routes on");
+}
+
+static void
+test_manage_routes_ini_false(void)
+{
+    const char *ini = "[Interface]\n"
+                      "ManageRoutes = false\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.manage_routes, 0, "manage_routes disabled from INI");
+}
+
 /* ================================================================
  *  Reconnect config tests
  * ================================================================ */
@@ -1071,6 +1095,7 @@ test_json_client_config_load(void)
                        "\"reconnect\":false,"
                        "\"reconnect_interval\":9,"
                        "\"kill_switch\":true,"
+                       "\"manage_routes\":false,"
                        "\"scheduler\":\"minrtt\""
                        "}";
 
@@ -1094,6 +1119,7 @@ test_json_client_config_load(void)
     ASSERT_EQ_INT(cfg.reconnect, 0, "json client reconnect");
     ASSERT_EQ_INT(cfg.reconnect_interval, 9, "json client reconnect interval");
     ASSERT_EQ_INT(cfg.kill_switch, 1, "json client kill switch");
+    ASSERT_EQ_INT(cfg.manage_routes, 0, "json client manage_routes");
     ASSERT_EQ_STR(cfg.scheduler, "minrtt", "json client scheduler");
 }
 
@@ -1442,6 +1468,10 @@ main(void)
     test_killswitch_default_off();
     test_killswitch_config_parse();
     test_killswitch_config_false();
+
+    /* manage_routes tests */
+    test_manage_routes_default_on();
+    test_manage_routes_ini_false();
 
     /* reconnect tests */
     test_reconnect_defaults();

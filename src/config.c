@@ -296,6 +296,8 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
             parse_dns_list(cfg, val);
         } else if (strcasecmp(key, "KillSwitch") == 0) {
             cfg->kill_switch = parse_bool(val);
+        } else if (strcasecmp(key, "ManageRoutes") == 0) {
+            cfg->manage_routes = parse_bool(val);
         } else if (strcasecmp(key, "Reconnect") == 0) {
             cfg->reconnect = parse_bool(val);
         } else if (strcasecmp(key, "ReconnectInterval") == 0) {
@@ -495,6 +497,9 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     v = json_find_key(json_text, "kill_switch");
     if (v && json_read_bool(v, &iv) == 0) cfg->kill_switch = iv;
 
+    v = json_find_key(json_text, "manage_routes");
+    if (v && json_read_bool(v, &iv) == 0) cfg->manage_routes = iv;
+
     v = json_find_key(json_text, "mtu");
     if (v && json_read_int(v, &iv) == 0) {
         if (iv != 0 && (iv < 1280 || iv > 9000)) {
@@ -617,6 +622,7 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
     cfg->max_clients = 64;
     cfg->reconnect = 1;
     cfg->reconnect_interval = 5;
+    cfg->manage_routes = 1;
 }
 
 int
