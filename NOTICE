@@ -1,0 +1,16 @@
+mqvpn
+Copyright (c) 2026 mp0rta and contributors
+
+This product includes software developed as part of the mqvpn project
+(https://github.com/mp0rta/mqvpn). Licensed under the Apache License,
+Version 2.0; see the LICENSE file.
+
+Third-party software included:
+
+  * xquic (mp0rta fork of alibaba/xquic)
+    Copyright (c) 2022, Alibaba Group Holding Limited
+    Apache License 2.0 — see third_party/xquic/LICENSE
+
+  * Wintun userspace header (https://www.wintun.net)
+    Copyright (C) 2018-2021 WireGuard LLC
+    MIT License — see third_party/wintun/LICENSE

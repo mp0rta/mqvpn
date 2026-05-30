@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and contributors
+
 #ifndef MQVPN_PATH_MGR_H
 #define MQVPN_PATH_MGR_H
 

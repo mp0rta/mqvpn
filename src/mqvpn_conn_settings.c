@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and contributors
+
 /*
  * mqvpn_conn_settings.c — implementation. See mqvpn_conn_settings.h for
  * the contract; tests/test_conn_settings.c pins the asymmetric fields.

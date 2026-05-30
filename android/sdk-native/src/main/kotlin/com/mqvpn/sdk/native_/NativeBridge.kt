@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and contributors
+
 @file:Suppress("FunctionName")
 
 package com.mqvpn.sdk.native_

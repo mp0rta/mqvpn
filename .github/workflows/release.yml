@@ -111,6 +111,26 @@ jobs:
         if: matrix.os == 'linux'
         run: cd build && cpack -G DEB
 
+      - name: Verify license files in deb
+        if: matrix.os == 'linux'
+        # OPTIONAL install rules in CMakeLists.txt silently skip missing
+        # third-party LICENSE files (needed for systemd-test which lacks
+        # submodules). This step is the release-side gate that confirms
+        # release builds — which DO check out submodules — actually bundle
+        # the four required files into the deb.
+        run: |
+          set -e
+          deb=$(ls build/mqvpn_*.deb)
+          expected=4
+          found=$(dpkg-deb -c "$deb" \
+                  | grep -cE 'usr/share/doc/mqvpn/(LICENSE|NOTICE|third-party/(xquic|boringssl)\.txt)$' \
+                  || true)
+          if [ "$found" -ne "$expected" ]; then
+            echo "::error::deb missing license files (found $found of $expected)"
+            dpkg-deb -c "$deb" | grep -E 'usr/share/doc/mqvpn|third-party' || echo "  (none found)"
+            exit 1
+          fi
+
       - name: Generate tarball service files
         if: matrix.os == 'linux'
         run: |
@@ -132,8 +152,28 @@ jobs:
           cp build-tarball/systemd/mqvpn-client@.service "$STAGING/systemd/"
           cp systemd/server.conf.example "$STAGING/etc/mqvpn/"
           cp systemd/client.conf.example "$STAGING/etc/mqvpn/"
+          cp LICENSE "$STAGING/"
+          cp NOTICE  "$STAGING/"
+          mkdir -p "$STAGING/third-party"
+          cp third_party/xquic/LICENSE                       "$STAGING/third-party/xquic.txt"
+          cp third_party/xquic/third_party/boringssl/LICENSE "$STAGING/third-party/boringssl.txt"
           tar czf "mqvpn_${VERSION}_${{ matrix.arch }}.tar.gz" -C "$STAGING" .
           rm -rf "$STAGING" build-tarball
+
+      - name: Verify license files in tarball
+        if: matrix.os == 'linux'
+        run: |
+          set -e
+          tarball=$(ls mqvpn_*.tar.gz)
+          expected=4
+          found=$(tar tzf "$tarball" \
+                  | grep -cE '^\./(LICENSE|NOTICE|third-party/(xquic|boringssl)\.txt)$' \
+                  || true)
+          if [ "$found" -ne "$expected" ]; then
+            echo "::error::tarball missing license files (found $found of $expected)"
+            tar tzf "$tarball" | grep -E 'LICENSE|NOTICE|third-party' || echo "  (none found)"
+            exit 1
+          fi
 
       - name: Stage release artifacts
         if: matrix.os == 'linux'
@@ -293,9 +333,12 @@ jobs:
           # statically linking BoringSSL [Apache 2.0/ISC] and libevent
           # [BSD-3-Clause]) all need their license text bundled. Wintun has
           # its own license (separate copyright holder, WireGuard LLC).
-          # Neither xquic nor BoringSSL ship a NOTICE file upstream, so
-          # Apache 2.0 §4(d) NOTICE propagation is not triggered.
+          # mqvpn's NOTICE (root-level) carries attribution for xquic and
+          # Wintun. BoringSSL is documented only via the bundled
+          # THIRD_PARTY_LICENSES/boringssl.txt (its per-file copyrights are
+          # numerous and live in source headers, not a project NOTICE).
           Copy-Item "LICENSE" "$staging/LICENSE"
+          Copy-Item "NOTICE"  "$staging/NOTICE"
           Copy-Item "third_party/xquic/LICENSE" "$tpl/xquic.txt"
           Copy-Item "third_party/xquic/third_party/boringssl/LICENSE" "$tpl/boringssl.txt"
           Copy-Item "wintun-extract/wintun/LICENSE.txt" "$tpl/wintun.txt"
@@ -317,12 +360,43 @@ jobs:
             "$staging/wintun.dll",
             "$staging/README.txt",
             "$staging/LICENSE",
+            "$staging/NOTICE",
             "$staging/THIRD_PARTY_LICENSES"
           )
           Compress-Archive -Path $files -DestinationPath "mqvpn_${env:VERSION}_windows_${env:MATRIX_ARCH}.zip"
           Remove-Item -Recurse $staging
         env:
           MATRIX_ARCH: ${{ matrix.arch }}
+
+      - name: Verify license files in Windows zip
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem "mqvpn_*_windows_*.zip" | Select-Object -First 1
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName)
+          $entries = @($archive.Entries | ForEach-Object { $_.FullName })
+          $archive.Dispose()
+          # Compress-Archive -Path with a file list emits flat entries
+          # (no staging-dir prefix). Anchor to ^ for precision.
+          $expected = @(
+            '^LICENSE$',
+            '^NOTICE$',
+            '^THIRD_PARTY_LICENSES/xquic\.txt$',
+            '^THIRD_PARTY_LICENSES/boringssl\.txt$',
+            '^THIRD_PARTY_LICENSES/wintun\.txt$',
+            '^THIRD_PARTY_LICENSES/libevent\.txt$'
+          )
+          $missing = @()
+          foreach ($pat in $expected) {
+            if (-not ($entries -match $pat)) { $missing += $pat }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Output "::error::Windows zip missing license files: $($missing -join ', ')"
+            Write-Output "entries:"
+            $entries | ForEach-Object { Write-Output "  $_" }
+            exit 1
+          }
 
       - name: Upload Windows artifacts
         if: matrix.os == 'windows'
@@ -429,6 +503,18 @@ jobs:
           echo "MQVPN_KEY_ALIAS=mqvpn-release" >> "$GITHUB_ENV"
           echo "MQVPN_KEY_PASSWORD=$PASS" >> "$GITHUB_ENV"
 
+      # Stage license texts as assets/ before APK build. Android Gradle Plugin
+      # auto-includes src/main/assets/ in the produced APK. Required by
+      # Apache-2.0 §4(a) since the APK statically links xquic and BoringSSL.
+      - name: Stage license assets for APK
+        run: |
+          ASSETS=android/app/src/main/assets
+          mkdir -p "$ASSETS/third-party"
+          cp LICENSE                                         "$ASSETS/LICENSE"
+          cp NOTICE                                          "$ASSETS/NOTICE"
+          cp third_party/xquic/LICENSE                       "$ASSETS/third-party/xquic.txt"
+          cp third_party/xquic/third_party/boringssl/LICENSE "$ASSETS/third-party/boringssl.txt"
+
       - name: Build signed release APK
         working-directory: android
         run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
@@ -438,6 +524,20 @@ jobs:
           SRC=android/app/build/outputs/apk/release/app-release.apk
           test -f "$SRC" || { echo "APK not found at $SRC"; ls -R android/app/build/outputs/apk/ || true; exit 1; }
           cp "$SRC" "mqvpn-sample_${VERSION}_android.apk"
+
+      - name: Verify license assets in APK
+        run: |
+          set -e
+          apk=$(ls mqvpn-sample_*_android.apk)
+          expected=4
+          found=$(unzip -l "$apk" \
+                  | grep -cE 'assets/(LICENSE|NOTICE|third-party/(xquic|boringssl)\.txt)$' \
+                  || true)
+          if [ "$found" -ne "$expected" ]; then
+            echo "::error::APK missing license assets (found $found of $expected)"
+            unzip -l "$apk" | grep -E 'assets/' || echo "  (none found)"
+            exit 1
+          fi
 
       - name: Upload Android artifact
         uses: actions/upload-artifact@v7
@@ -495,4 +595,6 @@ jobs:
             $PRERELEASE_FLAG \
             "${TARS[@]}" "${DEBS[@]}" "${ZIPS[@]}" "${APKS[@]}" \
             artifacts/SHA256SUMS \
-            scripts/install.sh
+            scripts/install.sh \
+            LICENSE \
+            NOTICE

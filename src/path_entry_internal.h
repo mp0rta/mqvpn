@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and contributors
+
 /* src/path_entry_internal.h — Internal-only path slot definition.
  *
  * Shared between mqvpn_client.c, path_state_machine.c, and the

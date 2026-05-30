@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and contributors
+
 /*
  * mqvpn_server.c — Server lifecycle, xquic engine, MASQUE CONNECT-IP (server)
  *

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and contributors
+
 /*
  * status.c — mqvpn --status: query control API and display server status
  */

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and contributors
+
 /*
  * mqvpn_conn_settings.h — single source of truth for mqvpn's xquic
  * connection settings construction. To add a knob, extend the input

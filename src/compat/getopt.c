@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and contributors
+
 /*
  * getopt.c — Minimal getopt/getopt_long implementation for MSVC
  */

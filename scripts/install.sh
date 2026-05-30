@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and contributors
+#
 # install.sh — mqvpn server setup for Ubuntu/Debian
 #
 # Usage:
@@ -90,6 +93,7 @@ do_uninstall() {
     rm -f "$INSTALL_PREFIX/lib/libmqvpn.so"*
     rm -f "$INSTALL_PREFIX/lib/libxquic.so"
     rm -rf "$INSTALL_PREFIX/lib/mqvpn"
+    rm -rf "$INSTALL_PREFIX/share/doc/mqvpn"
     rm -f /lib/systemd/system/mqvpn-server.service
     rm -f /lib/systemd/system/mqvpn-client@.service
     systemctl daemon-reload 2>/dev/null || true
@@ -183,6 +187,14 @@ mkdir -p "$INSTALL_PREFIX/lib/mqvpn"
 install -m 755 lib/mqvpn/mqvpn-server-nat.sh "$INSTALL_PREFIX/lib/mqvpn/"
 install -m 644 systemd/mqvpn-server.service /lib/systemd/system/
 install -m 644 systemd/mqvpn-client@.service /lib/systemd/system/
+
+# Install license and third-party attribution files (Apache-2.0 §4(a)).
+mkdir -p "$INSTALL_PREFIX/share/doc/mqvpn/third-party"
+install -m 644 LICENSE                "$INSTALL_PREFIX/share/doc/mqvpn/LICENSE"
+install -m 644 NOTICE                 "$INSTALL_PREFIX/share/doc/mqvpn/NOTICE"
+install -m 644 third-party/xquic.txt     "$INSTALL_PREFIX/share/doc/mqvpn/third-party/xquic.txt"
+install -m 644 third-party/boringssl.txt "$INSTALL_PREFIX/share/doc/mqvpn/third-party/boringssl.txt"
+
 ldconfig
 
 ok "Installed to $INSTALL_PREFIX"

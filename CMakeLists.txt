@@ -335,6 +335,32 @@ install(FILES systemd/server.conf.example systemd/client.conf.example
 install(PROGRAMS scripts/mqvpn-server-nat.sh
         DESTINATION lib/mqvpn)
 
+# Bundle the project license and NOTICE in /usr/share/doc/mqvpn/ inside the
+# generated deb (and any tarball that runs `cmake --install`). Required by
+# Apache-2.0 §4(a) for binary redistributions.
+install(FILES
+    "${CMAKE_SOURCE_DIR}/LICENSE"
+    "${CMAKE_SOURCE_DIR}/NOTICE"
+    DESTINATION share/doc/mqvpn)
+
+# Bundle third-party LICENSE files for components statically/dynamically
+# linked into the shipped binaries (xquic, BoringSSL). libevent is a system
+# dependency (apt install libevent-dev) on Linux, so its LICENSE is not
+# bundled here. Wintun is Windows-only.
+#
+# OPTIONAL: CI jobs that exercise install rules without checking out the
+# xquic submodule (e.g., ci.yml systemd-test) skip these silently. Release
+# jobs check out submodules; release.yml's "Verify license files in deb"
+# step confirms presence post-build.
+install(FILES
+    "${CMAKE_SOURCE_DIR}/third_party/xquic/LICENSE"
+    DESTINATION share/doc/mqvpn/third-party RENAME xquic.txt
+    OPTIONAL)
+install(FILES
+    "${CMAKE_SOURCE_DIR}/third_party/xquic/third_party/boringssl/LICENSE"
+    DESTINATION share/doc/mqvpn/third-party RENAME boringssl.txt
+    OPTIONAL)
+
 # ---------- CPack deb packaging (only when dpkg is available) ----------
 find_program(DPKG_CMD dpkg)
 if(DPKG_CMD)

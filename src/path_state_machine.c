@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and contributors
+
 /* src/path_state_machine.c — Phase 1 observability helpers. */
 
 #include "path_state_machine.h"
