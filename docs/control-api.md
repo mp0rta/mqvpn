@@ -339,7 +339,7 @@ support was compiled in.
 | Field        | Type    | Description                                                    |
 |--------------|---------|----------------------------------------------------------------|
 | `version`    | string  | Version string from `mqvpn_version_string()`                   |
-| `scheduler`  | string  | Active multipath scheduler: `minrtt`, `wlb`, `backup_fec`, or `unknown` |
+| `scheduler`  | string  | Active multipath scheduler: `minrtt`, `wlb`, `wlb_udp_pin`, `backup_fec`, or `unknown` |
 | `fec_enabled`| integer | `1` if built with `XQC_ENABLE_FEC`; `0` otherwise             |
 
 ---

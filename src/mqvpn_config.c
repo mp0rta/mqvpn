@@ -132,6 +132,10 @@ parse_scheduler_name(const char *s, mqvpn_scheduler_t *out)
         *out = MQVPN_SCHED_WLB;
         return MQVPN_OK;
     }
+    if (strcmp(s, "wlb_udp_pin") == 0) {
+        *out = MQVPN_SCHED_WLB_UDP_PIN;
+        return MQVPN_OK;
+    }
     if (strcmp(s, "backup_fec") == 0) {
         *out = MQVPN_SCHED_BACKUP_FEC;
         return MQVPN_OK;
@@ -166,7 +170,7 @@ static int
 is_valid_scheduler(mqvpn_scheduler_t sched)
 {
     return sched == MQVPN_SCHED_MINRTT || sched == MQVPN_SCHED_WLB ||
-           sched == MQVPN_SCHED_BACKUP_FEC;
+           sched == MQVPN_SCHED_BACKUP_FEC || sched == MQVPN_SCHED_WLB_UDP_PIN;
 }
 
 static int

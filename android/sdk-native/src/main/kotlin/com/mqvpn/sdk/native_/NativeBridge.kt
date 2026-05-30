@@ -34,7 +34,7 @@ object NativeBridge {
     /** mqvpn_config_set_insecure(cfg, insecure) */
     external fun configSetInsecure(cfg: Long, insecure: Boolean): Int
 
-    /** mqvpn_config_set_scheduler(cfg, scheduler: 0=MINRTT, 1=WLB) */
+    /** mqvpn_config_set_scheduler(cfg, scheduler: 0=MINRTT, 1=WLB, 2=BACKUP_FEC, 3=WLB_UDP_PIN) */
     external fun configSetScheduler(cfg: Long, scheduler: Int): Int
 
     /** mqvpn_config_set_log_level(cfg, level: 0=DEBUG..3=ERROR) */

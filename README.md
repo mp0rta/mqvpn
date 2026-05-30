@@ -116,6 +116,8 @@ DNS = 1.1.1.1, 8.8.8.8
 # MTU = 1280                   # TUN MTU cap (1280–9000, default: auto)
 
 [Multipath]
+# Use wlb_udp_pin to keep each UDP connection on a single path:
+# Scheduler = wlb_udp_pin
 Scheduler = wlb
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
 Path = eth0
@@ -183,6 +185,31 @@ Notes:
 sudo mqvpn --config /etc/mqvpn/server.conf
 sudo mqvpn --config /etc/mqvpn/client.conf
 ```
+
+## Schedulers
+
+| Scheduler       | TCP        | UDP        | Typical use                                     |
+|-----------------|------------|------------|-------------------------------------------------|
+| `minrtt`        | min RTT    | min RTT    | latency-first                                   |
+| `wlb` (default) | flow pin   | unpinned   | general use; UDP packets distributed per-packet |
+| `wlb_udp_pin`   | flow pin   | flow pin   | each UDP connection kept on a single path       |
+| `backup_fec`    | redundant  | redundant  | resilience-first (requires XQC_ENABLE_FEC)      |
+
+**Choosing wlb vs wlb_udp_pin:** Plain `wlb` distributes UDP packets across
+paths per-packet, which gives better aggregate throughput when the inner
+protocol tolerates reorder. Some inner UDP protocols, however, maintain their
+own packet ordering and may treat reorder as packet loss — under asymmetric-RTT
+paths this can slow them down and throughput drops. `wlb_udp_pin` keeps each
+UDP connection on a single path to avoid that case. If you observe degraded UDP
+throughput under `wlb`, try `wlb_udp_pin`; otherwise `wlb` is the better
+default.
+
+**Trade-off note (`wlb_udp_pin`):** the xquic WLB flow table is a fixed 4096-entry
+open-addressed structure with 60s idle eviction. Workloads with very high
+short-flow UDP churn (e.g. high-rate DNS, mDNS bursts) may evict longer-lived
+inner flows under probe-region pressure. `wlb_udp_pin` is intended for tunnels
+carrying a small-to-moderate set of long-lived inner UDP flows; high-churn UDP
+profiles are better served by `wlb`.
 
 ## systemd
 
@@ -417,7 +444,7 @@ mqvpn [--config PATH] --mode client|server [options]
   --listen BIND:PORT     Listen address (server, default: 0.0.0.0:443)
   --subnet CIDR          Client IPv4 pool (server)
   --subnet6 CIDR         Client IPv6 pool (server)
-  --scheduler minrtt|wlb|backup_fec
+  --scheduler minrtt|wlb|wlb_udp_pin|backup_fec
                          Multipath scheduler (default: wlb)
   --cc bbr2|bbr|cubic|none
                          Congestion control algorithm (default: bbr2)

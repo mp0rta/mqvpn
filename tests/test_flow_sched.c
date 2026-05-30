@@ -103,6 +103,38 @@ make_udp_pkt(uint8_t *buf, const char *src_ip, uint16_t src_port, const char *ds
     return 28;
 }
 
+static void
+set_ipv4_fragment_fields(uint8_t *buf, uint16_t ident, uint16_t frag_field)
+{
+    buf[4] = ident >> 8;
+    buf[5] = ident & 0xff;
+    buf[6] = frag_field >> 8;
+    buf[7] = frag_field & 0xff;
+}
+
+static int
+make_ipv4_fragment(uint8_t *buf, size_t len, uint8_t proto, const char *src_ip,
+                   const char *dst_ip, uint16_t ident, uint16_t frag_field,
+                   uint8_t payload_seed)
+{
+    memset(buf, 0, len);
+    buf[0] = 0x45; /* IPv4, IHL=5 */
+    buf[9] = proto;
+    set_ipv4_fragment_fields(buf, ident, frag_field);
+
+    struct in_addr a;
+    inet_pton(AF_INET, src_ip, &a);
+    memcpy(buf + 12, &a, 4);
+    inet_pton(AF_INET, dst_ip, &a);
+    memcpy(buf + 16, &a, 4);
+
+    for (size_t i = 20; i < len; i++) {
+        buf[i] = (uint8_t)(payload_seed + i);
+    }
+
+    return (int)len;
+}
+
 /* ── Tests ── */
 
 static void
@@ -113,11 +145,11 @@ test_hash_basic(void)
     uint8_t pkt[40];
     make_tcp_pkt(pkt, "10.0.0.1", 12345, "10.0.0.2", 80);
 
-    uint32_t h = flow_hash_pkt(pkt, 40);
+    uint32_t h = flow_hash_pkt(pkt, 40, false);
     ASSERT_NEQ(h, 0);
 
     /* Same packet → same hash */
-    uint32_t h2 = flow_hash_pkt(pkt, 40);
+    uint32_t h2 = flow_hash_pkt(pkt, 40, false);
     ASSERT_EQ(h, h2);
 
     PASS();
@@ -132,8 +164,8 @@ test_hash_different_flows(void)
     make_tcp_pkt(pkt1, "10.0.0.1", 12345, "10.0.0.2", 80);
     make_tcp_pkt(pkt2, "10.0.0.1", 12346, "10.0.0.2", 80);
 
-    uint32_t h1 = flow_hash_pkt(pkt1, 40);
-    uint32_t h2 = flow_hash_pkt(pkt2, 40);
+    uint32_t h1 = flow_hash_pkt(pkt1, 40, false);
+    uint32_t h2 = flow_hash_pkt(pkt2, 40, false);
     ASSERT_NEQ(h1, h2);
 
     PASS();
@@ -147,10 +179,10 @@ test_hash_rejects_unknown_version(void)
     /* Version 5 (invalid) → 0 */
     uint8_t pkt[40] = {0};
     pkt[0] = 0x50;
-    ASSERT_EQ(flow_hash_pkt(pkt, 40), 0);
+    ASSERT_EQ(flow_hash_pkt(pkt, 40, false), 0);
 
     /* Too short for any version */
-    ASSERT_EQ(flow_hash_pkt(pkt, 0), 0);
+    ASSERT_EQ(flow_hash_pkt(pkt, 0, false), 0);
 
     PASS();
 }
@@ -171,7 +203,7 @@ test_hash_ipv6_tcp(void)
     pkt[42] = 0x01;
     pkt[43] = 0xBB; /* dst port 443 */
 
-    uint32_t h = flow_hash_pkt(pkt, 44);
+    uint32_t h = flow_hash_pkt(pkt, 44, false);
     ASSERT_NEQ(h, 0);
     ASSERT_NEQ(h, MQVPN_FLOW_HASH_UNPINNED);
 
@@ -187,7 +219,7 @@ test_hash_ipv6_udp_unpinned(void)
     pkt[0] = 0x60; /* IPv6 */
     pkt[6] = 17;   /* Next Header: UDP */
 
-    ASSERT_EQ(flow_hash_pkt(pkt, 44), MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(flow_hash_pkt(pkt, 44, false), MQVPN_FLOW_HASH_UNPINNED);
 
     PASS();
 }
@@ -200,7 +232,7 @@ test_hash_ipv6_too_short(void)
     uint8_t pkt[39] = {0};
     pkt[0] = 0x60;
 
-    ASSERT_EQ(flow_hash_pkt(pkt, 39), 0);
+    ASSERT_EQ(flow_hash_pkt(pkt, 39, false), 0);
 
     PASS();
 }
@@ -213,7 +245,7 @@ test_hash_udp(void)
     uint8_t pkt[28];
     make_udp_pkt(pkt, "192.168.1.1", 5000, "8.8.8.8", 53);
 
-    uint32_t h = flow_hash_pkt(pkt, 28);
+    uint32_t h = flow_hash_pkt(pkt, 28, false);
     ASSERT_EQ(h, MQVPN_FLOW_HASH_UNPINNED);
 
     PASS();
@@ -228,7 +260,7 @@ test_hash_never_returns_zero(void)
     for (int i = 0; i < 1000; i++) {
         uint8_t pkt[40];
         make_tcp_pkt(pkt, "10.0.0.1", 1000 + i, "10.0.0.2", 80);
-        uint32_t h = flow_hash_pkt(pkt, 40);
+        uint32_t h = flow_hash_pkt(pkt, 40, false);
         ASSERT_NEQ(h, 0);
     }
 
@@ -242,28 +274,28 @@ test_hash_each_field_matters(void)
 
     uint8_t base[40];
     make_tcp_pkt(base, "10.0.0.1", 1234, "10.0.0.2", 80);
-    uint32_t h_base = flow_hash_pkt(base, 40);
+    uint32_t h_base = flow_hash_pkt(base, 40, false);
 
     /* Change src_ip */
     uint8_t pkt[40];
     make_tcp_pkt(pkt, "10.0.0.99", 1234, "10.0.0.2", 80);
-    ASSERT_NEQ(flow_hash_pkt(pkt, 40), h_base);
+    ASSERT_NEQ(flow_hash_pkt(pkt, 40, false), h_base);
 
     /* Change dst_ip */
     make_tcp_pkt(pkt, "10.0.0.1", 1234, "10.0.0.99", 80);
-    ASSERT_NEQ(flow_hash_pkt(pkt, 40), h_base);
+    ASSERT_NEQ(flow_hash_pkt(pkt, 40, false), h_base);
 
     /* Change src_port */
     make_tcp_pkt(pkt, "10.0.0.1", 9999, "10.0.0.2", 80);
-    ASSERT_NEQ(flow_hash_pkt(pkt, 40), h_base);
+    ASSERT_NEQ(flow_hash_pkt(pkt, 40, false), h_base);
 
     /* Change dst_port */
     make_tcp_pkt(pkt, "10.0.0.1", 1234, "10.0.0.2", 443);
-    ASSERT_NEQ(flow_hash_pkt(pkt, 40), h_base);
+    ASSERT_NEQ(flow_hash_pkt(pkt, 40, false), h_base);
 
     /* Change protocol (TCP→UDP) — UDP returns UNPINNED, not a 5-tuple hash */
     make_udp_pkt(pkt, "10.0.0.1", 1234, "10.0.0.2", 80);
-    ASSERT_EQ(flow_hash_pkt(pkt, 28), MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(flow_hash_pkt(pkt, 28, false), MQVPN_FLOW_HASH_UNPINNED);
     ASSERT_NEQ(MQVPN_FLOW_HASH_UNPINNED, h_base);
 
     PASS();
@@ -286,11 +318,11 @@ test_hash_icmp_no_ports(void)
     memcpy(pkt + 16, &a, 4);
 
     /* Non-TCP → UNPINNED (per-packet WRR, no flow pinning) */
-    uint32_t h = flow_hash_pkt(pkt, 28);
+    uint32_t h = flow_hash_pkt(pkt, 28, false);
     ASSERT_EQ(h, MQVPN_FLOW_HASH_UNPINNED);
 
     /* Deterministic */
-    ASSERT_EQ(flow_hash_pkt(pkt, 28), h);
+    ASSERT_EQ(flow_hash_pkt(pkt, 28, false), h);
 
     PASS();
 }
@@ -313,7 +345,7 @@ test_hash_ip_header_only(void)
     memcpy(pkt + 16, &a, 4);
 
     /* No TCP ports available, so disable pinning for this packet. */
-    uint32_t h = flow_hash_pkt(pkt, 20);
+    uint32_t h = flow_hash_pkt(pkt, 20, false);
     ASSERT_EQ(h, MQVPN_FLOW_HASH_UNPINNED);
 
     PASS();
@@ -325,8 +357,8 @@ test_hash_zero_length(void)
     TEST(flow_hash_pkt zero length returns 0);
 
     uint8_t pkt[1] = {0x45};
-    ASSERT_EQ(flow_hash_pkt(pkt, 0), 0);
-    ASSERT_EQ(flow_hash_pkt(NULL, 0), 0);
+    ASSERT_EQ(flow_hash_pkt(pkt, 0, false), 0);
+    ASSERT_EQ(flow_hash_pkt(NULL, 0, false), 0);
 
     PASS();
 }
@@ -336,7 +368,7 @@ test_hash_null_pointer_nonzero_len(void)
 {
     TEST(flow_hash_pkt NULL with nonzero len returns 0);
 
-    ASSERT_EQ(flow_hash_pkt(NULL, 40), 0);
+    ASSERT_EQ(flow_hash_pkt(NULL, 40, false), 0);
 
     PASS();
 }
@@ -351,10 +383,10 @@ test_hash_invalid_ihl(void)
     pkt[0] = 0x4f; /* IPv4, IHL=15 (60 bytes) */
     pkt[9] = 6;    /* TCP */
 
-    ASSERT_EQ(flow_hash_pkt(pkt, 40), 0);
+    ASSERT_EQ(flow_hash_pkt(pkt, 40, false), 0);
 
     pkt[0] = 0x40; /* IPv4, IHL=0 */
-    ASSERT_EQ(flow_hash_pkt(pkt, 40), 0);
+    ASSERT_EQ(flow_hash_pkt(pkt, 40, false), 0);
 
     PASS();
 }
@@ -375,7 +407,7 @@ test_hash_tcp_truncated_l4_unpinned(void)
     inet_pton(AF_INET, "10.0.0.2", &a);
     memcpy(pkt + 16, &a, 4);
 
-    ASSERT_EQ(flow_hash_pkt(pkt, 20), MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(flow_hash_pkt(pkt, 20, false), MQVPN_FLOW_HASH_UNPINNED);
 
     PASS();
 }
@@ -393,7 +425,7 @@ test_hash_distribution(void)
     for (int i = 0; i < 1000; i++) {
         uint8_t pkt[40];
         make_tcp_pkt(pkt, "10.0.0.1", 1000 + i, "10.0.0.2", 80);
-        uint32_t h = flow_hash_pkt(pkt, 40);
+        uint32_t h = flow_hash_pkt(pkt, 40, false);
         uint8_t low = h & 0xff;
         if (!seen[low]) {
             seen[low] = 1;
@@ -421,7 +453,7 @@ test_hash_never_returns_sentinels(void)
         snprintf(src, sizeof(src), "%d.%d.%d.%d", 10 + (i >> 24) % 200, (i >> 16) & 0xff,
                  (i >> 8) & 0xff, i & 0xff);
         make_tcp_pkt(pkt, src, port, "10.0.0.2", 80);
-        uint32_t h = flow_hash_pkt(pkt, 40);
+        uint32_t h = flow_hash_pkt(pkt, 40, false);
         ASSERT_NEQ(h, 0);
         ASSERT_NEQ(h, MQVPN_FLOW_HASH_UNPINNED);
     }
@@ -438,8 +470,8 @@ test_hash_tcp_pinned_udp_unpinned(void)
     make_tcp_pkt(tcp, "10.0.0.1", 1234, "10.0.0.2", 80);
     make_udp_pkt(udp, "10.0.0.1", 1234, "10.0.0.2", 80);
 
-    uint32_t h_tcp = flow_hash_pkt(tcp, 40);
-    uint32_t h_udp = flow_hash_pkt(udp, 28);
+    uint32_t h_tcp = flow_hash_pkt(tcp, 40, false);
+    uint32_t h_udp = flow_hash_pkt(udp, 28, false);
 
     /* TCP gets a real flow hash (non-zero, non-UNPINNED) */
     ASSERT_NEQ(h_tcp, 0);
@@ -458,6 +490,8 @@ test_sched_mode_constants(void)
 
     ASSERT_EQ(MQVPN_SCHED_MINRTT, 0);
     ASSERT_EQ(MQVPN_SCHED_WLB, 1);
+    ASSERT_EQ(MQVPN_SCHED_BACKUP_FEC, 2);
+    ASSERT_EQ(MQVPN_SCHED_WLB_UDP_PIN, 3);
     ASSERT_NEQ(MQVPN_SCHED_MINRTT, MQVPN_SCHED_WLB);
 
     PASS();
@@ -503,7 +537,7 @@ test_hash_ipv6_icmpv6_unpinned(void)
     memcpy(pkt + 8, &src, 16);
     memcpy(pkt + 24, &dst, 16);
 
-    ASSERT_EQ(flow_hash_pkt(pkt, 44), MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(flow_hash_pkt(pkt, 44, false), MQVPN_FLOW_HASH_UNPINNED);
 
     PASS();
 }
@@ -525,12 +559,12 @@ test_hash_ipv6_tcp_truncated_no_ports(void)
     memcpy(pkt + 24, &dst, 16);
 
     /* len=40: header present, but no TCP ports (need 44) → UNPINNED */
-    ASSERT_EQ(flow_hash_pkt(pkt, 40), MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(flow_hash_pkt(pkt, 40, false), MQVPN_FLOW_HASH_UNPINNED);
 
     /* len=43: still not enough for 4 bytes of ports */
     uint8_t pkt43[43] = {0};
     memcpy(pkt43, pkt, 40);
-    ASSERT_EQ(flow_hash_pkt(pkt43, 43), MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(flow_hash_pkt(pkt43, 43, false), MQVPN_FLOW_HASH_UNPINNED);
 
     PASS();
 }
@@ -548,26 +582,26 @@ test_hash_ipv6_each_field_matters(void)
 
     uint8_t base[44];
     make_ipv6_tcp_pkt(base, src1, 1234, dst1, 80);
-    uint32_t h_base = flow_hash_pkt(base, 44);
+    uint32_t h_base = flow_hash_pkt(base, 44, false);
     ASSERT_NEQ(h_base, 0);
     ASSERT_NEQ(h_base, MQVPN_FLOW_HASH_UNPINNED);
 
     /* Change src IP */
     uint8_t pkt[44];
     make_ipv6_tcp_pkt(pkt, src2, 1234, dst1, 80);
-    ASSERT_NEQ(flow_hash_pkt(pkt, 44), h_base);
+    ASSERT_NEQ(flow_hash_pkt(pkt, 44, false), h_base);
 
     /* Change dst IP */
     make_ipv6_tcp_pkt(pkt, src1, 1234, dst2, 80);
-    ASSERT_NEQ(flow_hash_pkt(pkt, 44), h_base);
+    ASSERT_NEQ(flow_hash_pkt(pkt, 44, false), h_base);
 
     /* Change src port */
     make_ipv6_tcp_pkt(pkt, src1, 9999, dst1, 80);
-    ASSERT_NEQ(flow_hash_pkt(pkt, 44), h_base);
+    ASSERT_NEQ(flow_hash_pkt(pkt, 44, false), h_base);
 
     /* Change dst port */
     make_ipv6_tcp_pkt(pkt, src1, 1234, dst1, 443);
-    ASSERT_NEQ(flow_hash_pkt(pkt, 44), h_base);
+    ASSERT_NEQ(flow_hash_pkt(pkt, 44, false), h_base);
 
     PASS();
 }
@@ -588,7 +622,7 @@ test_hash_ipv6_tcp_never_returns_sentinels(void)
         src[15] = (uint8_t)(i & 0xff);
         src[14] = (uint8_t)((i >> 8) & 0xff);
         make_ipv6_tcp_pkt(pkt, src, port, dst, 80);
-        uint32_t h = flow_hash_pkt(pkt, 44);
+        uint32_t h = flow_hash_pkt(pkt, 44, false);
         ASSERT_NEQ(h, 0);
         ASSERT_NEQ(h, MQVPN_FLOW_HASH_UNPINNED);
     }
@@ -606,19 +640,19 @@ test_hash_ipv6_extension_header_as_next(void)
 
     /* Hop-by-Hop (0) → not TCP → UNPINNED */
     pkt[6] = 0;
-    ASSERT_EQ(flow_hash_pkt(pkt, 44), MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(flow_hash_pkt(pkt, 44, false), MQVPN_FLOW_HASH_UNPINNED);
 
     /* Routing (43) → UNPINNED */
     pkt[6] = 43;
-    ASSERT_EQ(flow_hash_pkt(pkt, 44), MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(flow_hash_pkt(pkt, 44, false), MQVPN_FLOW_HASH_UNPINNED);
 
     /* Fragment (44) → UNPINNED */
     pkt[6] = 44;
-    ASSERT_EQ(flow_hash_pkt(pkt, 44), MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(flow_hash_pkt(pkt, 44, false), MQVPN_FLOW_HASH_UNPINNED);
 
     /* ESP (50) → UNPINNED */
     pkt[6] = 50;
-    ASSERT_EQ(flow_hash_pkt(pkt, 44), MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(flow_hash_pkt(pkt, 44, false), MQVPN_FLOW_HASH_UNPINNED);
 
     PASS();
 }
@@ -635,9 +669,9 @@ test_hash_ipv6_deterministic(void)
     uint8_t pkt[44];
     make_ipv6_tcp_pkt(pkt, src, 443, dst, 50000);
 
-    uint32_t h1 = flow_hash_pkt(pkt, 44);
-    uint32_t h2 = flow_hash_pkt(pkt, 44);
-    uint32_t h3 = flow_hash_pkt(pkt, 44);
+    uint32_t h1 = flow_hash_pkt(pkt, 44, false);
+    uint32_t h2 = flow_hash_pkt(pkt, 44, false);
+    uint32_t h3 = flow_hash_pkt(pkt, 44, false);
     ASSERT_EQ(h1, h2);
     ASSERT_EQ(h2, h3);
 
@@ -664,11 +698,180 @@ test_hash_ipv4_ihl_6_with_options(void)
     pkt[26] = 0x00;
     pkt[27] = 0x50; /* dst port 80 */
 
-    uint32_t h = flow_hash_pkt(pkt, sizeof(pkt));
+    uint32_t h = flow_hash_pkt(pkt, sizeof(pkt), false);
     if (h == 0 || h == MQVPN_FLOW_HASH_UNPINNED) {
         FAIL("IHL=6 TCP should be pinned");
         return;
     }
+    PASS();
+}
+
+static void
+test_hash_ipv4_tcp_fragments_use_identification(void)
+{
+    TEST(flow_hash_pkt IPv4 TCP fragments use Identification);
+
+    uint8_t first[40];
+    make_tcp_pkt(first, "10.0.0.1", 12345, "10.0.0.2", 80);
+    set_ipv4_fragment_fields(first, 0x1234, 0x2000); /* MF=1, offset=0 */
+
+    uint8_t later[28];
+    make_ipv4_fragment(later, sizeof(later), 6, "10.0.0.1", "10.0.0.2", 0x1234, 0x0001,
+                       0xaa); /* offset=8 bytes, no TCP ports */
+
+    uint32_t h_first = flow_hash_pkt(first, sizeof(first), false);
+    uint32_t h_later = flow_hash_pkt(later, sizeof(later), false);
+    ASSERT_NEQ(h_first, 0);
+    ASSERT_NEQ(h_first, MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(h_later, h_first);
+
+    later[20] ^= 0xff; /* payload bytes must not affect fragment hash */
+    ASSERT_EQ(flow_hash_pkt(later, sizeof(later), false), h_first);
+
+    uint8_t other_id[28];
+    make_ipv4_fragment(other_id, sizeof(other_id), 6, "10.0.0.1", "10.0.0.2", 0x1235,
+                       0x0001, 0xaa);
+    ASSERT_NEQ(flow_hash_pkt(other_id, sizeof(other_id), false), h_first);
+
+    PASS();
+}
+
+static void
+test_hash_ipv4_udp_fragments_respect_udp_pin(void)
+{
+    TEST(flow_hash_pkt IPv4 UDP fragments respect udp_pin);
+
+    uint8_t first[28];
+    make_udp_pkt(first, "10.0.0.1", 12345, "10.0.0.2", 53);
+    set_ipv4_fragment_fields(first, 0xbeef, 0x2000); /* MF=1, offset=0 */
+
+    uint8_t later[28];
+    make_ipv4_fragment(later, sizeof(later), 17, "10.0.0.1", "10.0.0.2", 0xbeef, 0x0001,
+                       0x11); /* offset=8 bytes, no UDP ports */
+
+    ASSERT_EQ(flow_hash_pkt(first, sizeof(first), false), MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(flow_hash_pkt(later, sizeof(later), false), MQVPN_FLOW_HASH_UNPINNED);
+
+    uint32_t h_first = flow_hash_pkt(first, sizeof(first), true);
+    uint32_t h_later = flow_hash_pkt(later, sizeof(later), true);
+    ASSERT_NEQ(h_first, 0);
+    ASSERT_NEQ(h_first, MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(h_later, h_first);
+
+    later[20] ^= 0xff; /* payload bytes must not affect fragment hash */
+    ASSERT_EQ(flow_hash_pkt(later, sizeof(later), true), h_first);
+
+    uint8_t other_id[28];
+    make_ipv4_fragment(other_id, sizeof(other_id), 17, "10.0.0.1", "10.0.0.2", 0xbef0,
+                       0x0001, 0x11);
+    ASSERT_NEQ(flow_hash_pkt(other_id, sizeof(other_id), true), h_first);
+
+    PASS();
+}
+
+/* ── UDP pin gate tests ── */
+
+static void
+test_udp_pin_ipv4_gate(void)
+{
+    TEST(flow_hash_pkt IPv4 UDP gate);
+
+    uint8_t pkt[28];
+    make_udp_pkt(pkt, "10.0.0.1", 0x1234, "8.8.8.8", 53);
+
+    /* udp_pin=true → real FNV hash */
+    uint32_t h = flow_hash_pkt(pkt, 28, true);
+    ASSERT_NEQ(h, 0);
+    ASSERT_NEQ(h, MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(flow_hash_pkt(pkt, 28, true), h); /* deterministic */
+
+    /* udp_pin=false → legacy UNPINNED preserved */
+    ASSERT_EQ(flow_hash_pkt(pkt, 28, false), MQVPN_FLOW_HASH_UNPINNED);
+
+    /* each 5-tuple field changes the hash (under udp_pin=true) */
+    uint8_t alt[28];
+    make_udp_pkt(alt, "10.0.0.2", 0x1234, "8.8.8.8", 53); /* src IP */
+    ASSERT_NEQ(flow_hash_pkt(alt, 28, true), h);
+    make_udp_pkt(alt, "10.0.0.1", 0x9999, "8.8.8.8", 53); /* src port */
+    ASSERT_NEQ(flow_hash_pkt(alt, 28, true), h);
+    make_udp_pkt(alt, "10.0.0.1", 0x1234, "8.8.4.4", 53); /* dst IP */
+    ASSERT_NEQ(flow_hash_pkt(alt, 28, true), h);
+    make_udp_pkt(alt, "10.0.0.1", 0x1234, "8.8.8.8", 80); /* dst port */
+    ASSERT_NEQ(flow_hash_pkt(alt, 28, true), h);
+
+    /* ICMP under udp_pin=true still UNPINNED (only UDP is gated) */
+    uint8_t icmp[28];
+    memset(icmp, 0, sizeof(icmp));
+    icmp[0] = 0x45;
+    icmp[9] = 1;
+    icmp[12] = 10;
+    icmp[16] = 8;
+    ASSERT_EQ(flow_hash_pkt(icmp, 28, true), MQVPN_FLOW_HASH_UNPINNED);
+
+    PASS();
+}
+
+static void
+test_udp_pin_ipv6_gate(void)
+{
+    TEST(flow_hash_pkt IPv6 UDP gate);
+
+    uint8_t pkt[44];
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x60; /* IPv6 */
+    pkt[6] = 17;   /* next_hdr UDP */
+    pkt[8] = 0x20;
+    pkt[24] = 0x20;
+    pkt[40] = 0x12;
+    pkt[41] = 0x34;
+    pkt[42] = 0x00;
+    pkt[43] = 0x35;
+
+    uint32_t h = flow_hash_pkt(pkt, 44, true);
+    ASSERT_NEQ(h, 0);
+    ASSERT_NEQ(h, MQVPN_FLOW_HASH_UNPINNED);
+
+    ASSERT_EQ(flow_hash_pkt(pkt, 44, false), MQVPN_FLOW_HASH_UNPINNED);
+
+    /* truncated (< 44 bytes) under udp_pin=true → UNPINNED */
+    ASSERT_EQ(flow_hash_pkt(pkt, 43, true), MQVPN_FLOW_HASH_UNPINNED);
+
+    PASS();
+}
+
+static void
+test_udp_pin_tcp_unchanged(void)
+{
+    TEST(flow_hash_pkt TCP hash unchanged regardless of udp_pin);
+
+    uint8_t pkt[40];
+    make_tcp_pkt(pkt, "10.0.0.1", 12345, "8.8.8.8", 80);
+    ASSERT_EQ(flow_hash_pkt(pkt, 40, false), flow_hash_pkt(pkt, 40, true));
+
+    uint8_t pkt6[44];
+    uint8_t src6[16] = {0x20, 0x01};
+    uint8_t dst6[16] = {0x20, 0x02};
+    make_ipv6_tcp_pkt(pkt6, src6, 12345, dst6, 80);
+    ASSERT_EQ(flow_hash_pkt(pkt6, 44, false), flow_hash_pkt(pkt6, 44, true));
+
+    PASS();
+}
+
+static void
+test_udp_pin_ipv4_truncated(void)
+{
+    TEST(flow_hash_pkt IPv4 UDP truncated under udp_pin returns UNPINNED);
+
+    /* 23 bytes — just below the ihl + 4 = 24 boundary */
+    uint8_t pkt[23];
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x45;
+    pkt[9] = 17;
+    pkt[12] = 10;
+    pkt[16] = 8;
+
+    ASSERT_EQ(flow_hash_pkt(pkt, 23, true), MQVPN_FLOW_HASH_UNPINNED);
+
     PASS();
 }
 
@@ -709,6 +912,16 @@ main(void)
 
     /* IPv4 IHL > 5 */
     test_hash_ipv4_ihl_6_with_options();
+
+    /* IPv4 fragments */
+    test_hash_ipv4_tcp_fragments_use_identification();
+    test_hash_ipv4_udp_fragments_respect_udp_pin();
+
+    /* UDP pin gate (Chunk 1) */
+    test_udp_pin_ipv4_gate();
+    test_udp_pin_ipv6_gate();
+    test_udp_pin_tcp_unchanged();
+    test_udp_pin_ipv4_truncated();
 
     printf("\n%d passed, %d failed\n", tests_passed, tests_failed);
     return tests_failed > 0 ? 1 : 0;

@@ -163,6 +163,7 @@ mqvpn_scheduler_label(int s)
     case MQVPN_SCHED_MINRTT: return "minrtt";
     case MQVPN_SCHED_WLB: return "wlb";
     case MQVPN_SCHED_BACKUP_FEC: return "backup_fec";
+    case MQVPN_SCHED_WLB_UDP_PIN: return "wlb_udp_pin";
     default: return "unknown";
     }
 }
@@ -1495,7 +1496,8 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
     if (xret != XQC_OK) return MQVPN_ERR_ENGINE;
 
     uint64_t dgram_id;
-    uint32_t fh = flow_hash_pkt(pkt, (int)len);
+    uint32_t fh =
+        flow_hash_pkt(pkt, (int)len, s->config.scheduler == MQVPN_SCHED_WLB_UDP_PIN);
     xqc_conn_set_dgram_flow_hash(xqc_h3_conn_get_xqc_conn(target->h3_conn), fh);
     xret = xqc_h3_ext_datagram_send(target->h3_conn, frame_buf, frame_written, &dgram_id,
                                     mqvpn_dgram_qos_level(s->config.scheduler));

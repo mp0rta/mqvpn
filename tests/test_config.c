@@ -193,6 +193,29 @@ test_parse_scheduler_backup_fec(void)
 }
 
 static void
+test_parse_scheduler_wlb_udp_pin(void)
+{
+    const char *ini = "[Server]\n"
+                      "Address = vpn.example.com:443\n"
+                      "\n"
+                      "[Auth]\n"
+                      "Key = myclientkey\n"
+                      "\n"
+                      "[Multipath]\n"
+                      "Scheduler = wlb_udp_pin\n"
+                      "Path = eth0\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "scheduler wlb_udp_pin config parse ok");
+    ASSERT_EQ_STR(cfg.scheduler, "wlb_udp_pin", "scheduler wlb_udp_pin");
+}
+
+static void
 test_parse_cc_ini(void)
 {
     const char *ini = "[Multipath]\n"
@@ -1075,6 +1098,26 @@ test_json_client_config_load(void)
 }
 
 static void
+test_parse_json_scheduler_wlb_udp_pin(void)
+{
+    const char *json = "{"
+                       "\"mode\":\"client\","
+                       "\"server_addr\":\"vpn.example.com:443\","
+                       "\"auth_key\":\"k\","
+                       "\"paths\":[\"eth0\"],"
+                       "\"scheduler\":\"wlb_udp_pin\""
+                       "}";
+    char *path = write_tmp(json);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "json scheduler wlb_udp_pin parse ok");
+    ASSERT_EQ_STR(cfg.scheduler, "wlb_udp_pin", "json scheduler wlb_udp_pin");
+}
+
+static void
 test_json_duplicate_users_last_wins(void)
 {
     const char *json = "{"
@@ -1370,6 +1413,7 @@ main(void)
     test_parse_server_config();
     test_parse_client_config();
     test_parse_scheduler_backup_fec();
+    test_parse_scheduler_wlb_udp_pin();
     test_parse_cc_ini();
     test_parse_cc_json();
     test_parse_init_max_path_id_bounds();
@@ -1425,6 +1469,7 @@ main(void)
     test_auth_users_ini_invalid_ignored();
     test_json_config_load();
     test_json_client_config_load();
+    test_parse_json_scheduler_wlb_udp_pin();
     test_json_duplicate_users_last_wins();
     test_json_invalid_users_error();
 
