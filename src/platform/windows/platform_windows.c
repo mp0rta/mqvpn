@@ -159,7 +159,20 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     LOG_INF("TUN %s configured: %s -> %s (mtu=%d)", p->tun.name, local_ip, peer_ip,
             info->mtu);
 
-    /* Set up routes, killswitch, DNS */
+    /* Set up routes, killswitch, DNS.
+     *
+     * manage_routes=false skips win_setup_routes() entirely. TUN
+     * (Wintun) is still created + addressed + UP and Windows auto-adds
+     * the connected route for the tunnel subnet.
+     *
+     * Skipped: server-pin route via the original adapter + catch-all
+     * 0.0.0.0/1 + 128.0.0.0/1 split-default into the TUN (via
+     * CreateIpForwardEntry2). Without these, traffic outside the
+     * tunnel subnet uses the existing default route — the integrator
+     * must add IP Helper / netsh routes externally (router/embedded
+     * use case). killswitch (WFP) and DNS overrides remain
+     * independently controllable.
+     */
     if (p->manage_routes) {
         if (win_setup_routes(p) < 0) {
             LOG_ERR("route setup failed, aborting tunnel");
