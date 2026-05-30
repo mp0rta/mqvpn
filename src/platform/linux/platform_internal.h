@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright (c) 2026 mp0rta and contributors
+// Copyright (c) 2026 mp0rta and mqvpn contributors
 
 /*
  * platform_internal.h — Shared types for Linux platform layer
