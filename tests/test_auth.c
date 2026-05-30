@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright (c) 2026 mp0rta and contributors
+// Copyright (c) 2026 mp0rta and mqvpn contributors
 
 /*
  * test_auth.c — unit tests for auth utilities (constant-time compare, base64)

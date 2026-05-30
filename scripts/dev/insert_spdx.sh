@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 mp0rta and contributors
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 #
 # insert_spdx.sh — prepend SPDX-License-Identifier and Copyright lines to
 # all first-party C and Kotlin source files that don't already have them.
@@ -11,7 +11,7 @@
 set -euo pipefail
 
 SPDX_LINE='SPDX-License-Identifier: Apache-2.0'
-COPYRIGHT_LINE='Copyright (c) 2026 mp0rta and contributors'
+COPYRIGHT_LINE='Copyright (c) 2026 mp0rta and mqvpn contributors'
 
 # C / C++ / header files: first-party only (not third_party/), all under
 # src/, include/, tests/, and android/sdk-native/src/main/jni/.
