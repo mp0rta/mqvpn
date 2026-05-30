@@ -377,13 +377,15 @@ jobs:
           $archive = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName)
           $entries = @($archive.Entries | ForEach-Object { $_.FullName })
           $archive.Dispose()
+          # Compress-Archive -Path with a file list emits flat entries
+          # (no staging-dir prefix). Anchor to ^ for precision.
           $expected = @(
-            '/LICENSE$',
-            '/NOTICE$',
-            '/THIRD_PARTY_LICENSES/xquic\.txt$',
-            '/THIRD_PARTY_LICENSES/boringssl\.txt$',
-            '/THIRD_PARTY_LICENSES/wintun\.txt$',
-            '/THIRD_PARTY_LICENSES/libevent\.txt$'
+            '^LICENSE$',
+            '^NOTICE$',
+            '^THIRD_PARTY_LICENSES/xquic\.txt$',
+            '^THIRD_PARTY_LICENSES/boringssl\.txt$',
+            '^THIRD_PARTY_LICENSES/wintun\.txt$',
+            '^THIRD_PARTY_LICENSES/libevent\.txt$'
           )
           $missing = @()
           foreach ($pat in $expected) {
