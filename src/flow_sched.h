@@ -24,7 +24,14 @@
  *   TCP                        → FNV-1a 5-tuple hash
  *   UDP, udp_pin=true          → FNV-1a 5-tuple hash (used by wlb_udp_pin)
  *   UDP, udp_pin=false / ICMP  → MQVPN_FLOW_HASH_UNPINNED (per-packet WRR)
- *   malformed / unknown        → 0 (xquic falls back to MinRTT) */
+ *   malformed / unknown        → 0 (xquic falls back to MinRTT)
+ *
+ * IPv4 fragments for pinned TCP, and for UDP when udp_pin=true, use
+ * src/dst IP + protocol + IPv4 Identification because non-first fragments do
+ * not carry TCP/UDP ports. UDP fragments remain unpinned when udp_pin=false.
+ *
+ * IPv6 extension headers are intentionally out of scope for now; IPv6 pinning
+ * only recognizes packets whose base header points directly at TCP or UDP. */
 uint32_t flow_hash_pkt(const uint8_t *pkt, int len, bool udp_pin);
 
 #endif /* MQVPN_FLOW_SCHED_H */

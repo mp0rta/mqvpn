@@ -103,6 +103,38 @@ make_udp_pkt(uint8_t *buf, const char *src_ip, uint16_t src_port, const char *ds
     return 28;
 }
 
+static void
+set_ipv4_fragment_fields(uint8_t *buf, uint16_t ident, uint16_t frag_field)
+{
+    buf[4] = ident >> 8;
+    buf[5] = ident & 0xff;
+    buf[6] = frag_field >> 8;
+    buf[7] = frag_field & 0xff;
+}
+
+static int
+make_ipv4_fragment(uint8_t *buf, size_t len, uint8_t proto, const char *src_ip,
+                   const char *dst_ip, uint16_t ident, uint16_t frag_field,
+                   uint8_t payload_seed)
+{
+    memset(buf, 0, len);
+    buf[0] = 0x45; /* IPv4, IHL=5 */
+    buf[9] = proto;
+    set_ipv4_fragment_fields(buf, ident, frag_field);
+
+    struct in_addr a;
+    inet_pton(AF_INET, src_ip, &a);
+    memcpy(buf + 12, &a, 4);
+    inet_pton(AF_INET, dst_ip, &a);
+    memcpy(buf + 16, &a, 4);
+
+    for (size_t i = 20; i < len; i++) {
+        buf[i] = (uint8_t)(payload_seed + i);
+    }
+
+    return (int)len;
+}
+
 /* ── Tests ── */
 
 static void
@@ -674,6 +706,69 @@ test_hash_ipv4_ihl_6_with_options(void)
     PASS();
 }
 
+static void
+test_hash_ipv4_tcp_fragments_use_identification(void)
+{
+    TEST(flow_hash_pkt IPv4 TCP fragments use Identification);
+
+    uint8_t first[40];
+    make_tcp_pkt(first, "10.0.0.1", 12345, "10.0.0.2", 80);
+    set_ipv4_fragment_fields(first, 0x1234, 0x2000); /* MF=1, offset=0 */
+
+    uint8_t later[28];
+    make_ipv4_fragment(later, sizeof(later), 6, "10.0.0.1", "10.0.0.2", 0x1234, 0x0001,
+                       0xaa); /* offset=8 bytes, no TCP ports */
+
+    uint32_t h_first = flow_hash_pkt(first, sizeof(first), false);
+    uint32_t h_later = flow_hash_pkt(later, sizeof(later), false);
+    ASSERT_NEQ(h_first, 0);
+    ASSERT_NEQ(h_first, MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(h_later, h_first);
+
+    later[20] ^= 0xff; /* payload bytes must not affect fragment hash */
+    ASSERT_EQ(flow_hash_pkt(later, sizeof(later), false), h_first);
+
+    uint8_t other_id[28];
+    make_ipv4_fragment(other_id, sizeof(other_id), 6, "10.0.0.1", "10.0.0.2", 0x1235,
+                       0x0001, 0xaa);
+    ASSERT_NEQ(flow_hash_pkt(other_id, sizeof(other_id), false), h_first);
+
+    PASS();
+}
+
+static void
+test_hash_ipv4_udp_fragments_respect_udp_pin(void)
+{
+    TEST(flow_hash_pkt IPv4 UDP fragments respect udp_pin);
+
+    uint8_t first[28];
+    make_udp_pkt(first, "10.0.0.1", 12345, "10.0.0.2", 53);
+    set_ipv4_fragment_fields(first, 0xbeef, 0x2000); /* MF=1, offset=0 */
+
+    uint8_t later[28];
+    make_ipv4_fragment(later, sizeof(later), 17, "10.0.0.1", "10.0.0.2", 0xbeef, 0x0001,
+                       0x11); /* offset=8 bytes, no UDP ports */
+
+    ASSERT_EQ(flow_hash_pkt(first, sizeof(first), false), MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(flow_hash_pkt(later, sizeof(later), false), MQVPN_FLOW_HASH_UNPINNED);
+
+    uint32_t h_first = flow_hash_pkt(first, sizeof(first), true);
+    uint32_t h_later = flow_hash_pkt(later, sizeof(later), true);
+    ASSERT_NEQ(h_first, 0);
+    ASSERT_NEQ(h_first, MQVPN_FLOW_HASH_UNPINNED);
+    ASSERT_EQ(h_later, h_first);
+
+    later[20] ^= 0xff; /* payload bytes must not affect fragment hash */
+    ASSERT_EQ(flow_hash_pkt(later, sizeof(later), true), h_first);
+
+    uint8_t other_id[28];
+    make_ipv4_fragment(other_id, sizeof(other_id), 17, "10.0.0.1", "10.0.0.2", 0xbef0,
+                       0x0001, 0x11);
+    ASSERT_NEQ(flow_hash_pkt(other_id, sizeof(other_id), true), h_first);
+
+    PASS();
+}
+
 /* ── UDP pin gate tests ── */
 
 static void
@@ -817,6 +912,10 @@ main(void)
 
     /* IPv4 IHL > 5 */
     test_hash_ipv4_ihl_6_with_options();
+
+    /* IPv4 fragments */
+    test_hash_ipv4_tcp_fragments_use_identification();
+    test_hash_ipv4_udp_fragments_respect_udp_pin();
 
     /* UDP pin gate (Chunk 1) */
     test_udp_pin_ipv4_gate();
