@@ -12,6 +12,7 @@ mqvpn supports both INI and JSON config files. If the file content starts with `
 Listen = 0.0.0.0:443
 Subnet = 10.0.0.0/24
 Subnet6 = 2001:db8:1::/112
+# MTU = 1280
 
 [TLS]
 Cert = /etc/mqvpn/server.crt
@@ -24,6 +25,7 @@ User = bob:<BOB_PSK>
 
 [Multipath]
 Scheduler = wlb
+# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
 ```
 
 ### Client
@@ -40,9 +42,11 @@ Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
 TunName = mqvpn0
 DNS = 1.1.1.1, 8.8.8.8
 LogLevel = info
+# MTU = 1280
 
 [Multipath]
 Scheduler = wlb
+# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
 Path = eth0
 Path = wlan0
 ```
@@ -69,7 +73,9 @@ JSON config is useful for structured management and automation tooling.
     { "name": "bob", "key": "<BOB_PSK>" }
   ],
   "max_clients": 64,
-  "scheduler": "wlb"
+  "scheduler": "wlb",
+  "cc": "bbr2",
+  "mtu": 1280
 }
 ```
 
@@ -88,7 +94,9 @@ JSON config is useful for structured management and automation tooling.
   "reconnect": true,
   "reconnect_interval": 5,
   "scheduler": "wlb",
-  "paths": ["eth0", "wlan0"]
+  "cc": "bbr2",
+  "paths": ["eth0", "wlan0"],
+  "mtu": 1280
 }
 ```
 
@@ -133,6 +141,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `KillSwitch` | Block traffic outside the VPN tunnel (client only) | `false` |
 | `Reconnect` | Enable automatic reconnection (client only) | `true` |
 | `ReconnectInterval` | Seconds between reconnection attempts | `5` |
+| `MTU` | TUN device MTU cap (1280–9000). If the negotiated MTU is lower, the negotiated value is used. | auto |
 
 ### `[TLS]` (server only)
 
@@ -154,6 +163,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | Key | Description | Default |
 |-----|-------------|---------|
 | `Scheduler` | Scheduler algorithm (`minrtt`, `wlb`, or `backup_fec`) | `wlb` |
+| `CC` | Congestion control algorithm (`bbr2`, `bbr`, `cubic`, or `none`) | `bbr2` |
 | `Path` | Network interface to bind (repeatable) | Default interface |
 
 See [Multipath](./multipath) for scheduler details.
@@ -161,6 +171,65 @@ See [Multipath](./multipath) for scheduler details.
 > `backup_fec` is experimental and requires both peers to run mqvpn ≥ 0.4.0
 > with FEC build enabled (`-DXQC_ENABLE_FEC=ON -DXQC_ENABLE_XOR=ON`).
 > See [Multipath](./multipath#backup-fec-experimental).
+
+> `CC = none` (no congestion control) requires xquic built with `-DXQC_ENABLE_UNLIMITED=ON`.
+
+## MTU Guidelines
+
+### Default (auto) — most deployments
+
+For most setups, leave `MTU` unset. The auto-negotiated value (~1382) works on standard Ethernet (1500), PPPoE (1492), and mobile networks.
+
+### When to set MTU explicitly
+
+| Scenario | Recommendation |
+|----------|----------------|
+| Standard Ethernet / mobile | Leave unset (auto ~1382) |
+| Symmetric client↔server MTU | Set `MTU = 1280` on both sides |
+| Deeply nested tunnels (mqvpn → WG → another tunnel) | Calculate remaining MTU; set if near 1280 |
+
+If `MTU` is set in the config, mqvpn uses `min(config MTU, negotiated MTU)`. A warning is logged when the config value exceeds the negotiated value.
+
+::: tip
+Setting `MTU` above the negotiated value (~1382) has no effect — the negotiated value is always used as the upper bound.
+:::
+
+### How mqvpn determines TUN MTU
+
+mqvpn negotiates the TUN MTU from the QUIC DATAGRAM Maximum Segment Size (MSS) at connection time. With the default `max_pkt_out_size` of 1400, the overhead breakdown is:
+
+```
+max_pkt_out_size           1400 bytes
+ − QUIC short header         13 bytes
+ − DATAGRAM frame header      3 bytes
+ − MASQUE datagram header      2 bytes
+                           ─────────
+ = TUN MTU                  1382 bytes
+```
+
+### Running other tunnels inside mqvpn
+
+When running a tunnel protocol (WireGuard, IPsec, GRE, etc.) inside the mqvpn tunnel, the inner tunnel's overhead reduces the effective MTU. Verify that the remaining MTU meets the inner protocol's requirements.
+
+**Example: WireGuard inside mqvpn**
+
+```
+mqvpn TUN MTU                    1382 bytes
+ − WireGuard overhead (IPv6)        80 bytes
+                                 ─────────
+ = WireGuard inner MTU            1302 bytes
+   → IPv6 minimum (1280)            ✓
+   → QUIC/HTTP3 UDP payload        1254 bytes > 1200  ✓
+```
+
+### Constraints
+
+| Constraint | Value | Source |
+|------------|-------|--------|
+| Config minimum | 1280 | IPv6 minimum MTU (RFC 8200) |
+| Config maximum | 9000 | Jumbo frame MTU |
+| QUIC minimum UDP payload | 1200 | RFC 9000 §14 (handshake requirement) |
+| Negotiated upper bound | ~1382 | Derived from `max_pkt_out_size` (1400) |
 
 ## Control API
 

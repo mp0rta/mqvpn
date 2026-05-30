@@ -87,6 +87,7 @@ Config files support both INI and JSON. CLI arguments override config values.
 Listen = 0.0.0.0:443
 Subnet = 10.0.0.0/24
 Subnet6 = 2001:db8:1::/112
+# MTU = 1280                   # TUN MTU cap (1280–9000, default: auto)
 
 [TLS]
 Cert = /etc/mqvpn/server.crt
@@ -99,6 +100,7 @@ User = bob:bob-secret
 
 [Multipath]
 Scheduler = wlb
+# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
 ```
 
 ```ini
@@ -111,9 +113,11 @@ Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
 
 [Interface]
 DNS = 1.1.1.1, 8.8.8.8
+# MTU = 1280                   # TUN MTU cap (1280–9000, default: auto)
 
 [Multipath]
 Scheduler = wlb
+# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
 Path = eth0
 Path = wlan0
 ```
@@ -138,7 +142,9 @@ Server example:
         "bob:bob-secret"
     ],
     "max_clients": 64,
-    "scheduler": "wlb"
+    "scheduler": "wlb",
+    "cc": "bbr2",
+    "mtu": 1280
 }
 ```
 
@@ -155,7 +161,9 @@ Client example:
     "reconnect": true,
     "reconnect_interval": 5,
     "kill_switch": false,
-    "scheduler": "wlb"
+    "scheduler": "wlb",
+    "cc": "bbr2",
+    "mtu": 1280
 }
 ```
 
@@ -411,6 +419,8 @@ mqvpn [--config PATH] --mode client|server [options]
   --subnet6 CIDR         Client IPv6 pool (server)
   --scheduler minrtt|wlb|backup_fec
                          Multipath scheduler (default: wlb)
+  --cc bbr2|bbr|cubic|none
+                         Congestion control algorithm (default: bbr2)
   --control-port PORT    TCP port for JSON control API (server)
   --control-addr ADDR    Bind address for control API (default: 127.0.0.1)
   --genkey               Generate PSK and exit
