@@ -298,8 +298,10 @@ jobs:
           # statically linking BoringSSL [Apache 2.0/ISC] and libevent
           # [BSD-3-Clause]) all need their license text bundled. Wintun has
           # its own license (separate copyright holder, WireGuard LLC).
-          # mqvpn ships its own NOTICE (root-level), which carries the
-          # required §4(d) attribution for xquic, BoringSSL, and Wintun.
+          # mqvpn's NOTICE (root-level) carries attribution for xquic and
+          # Wintun. BoringSSL is documented only via the bundled
+          # THIRD_PARTY_LICENSES/boringssl.txt (its per-file copyrights are
+          # numerous and live in source headers, not a project NOTICE).
           Copy-Item "LICENSE" "$staging/LICENSE"
           Copy-Item "NOTICE"  "$staging/NOTICE"
           Copy-Item "third_party/xquic/LICENSE" "$tpl/xquic.txt"
