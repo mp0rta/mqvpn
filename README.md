@@ -174,7 +174,7 @@ Notes:
 - `users` is server-side auth and accepts either objects (`{"name","key"}`) or `"name:key"` strings.
 - `auth_key` remains supported as a single legacy/global key.
 - `mode` is optional if it can be inferred (`listen` implies server).
-- `manage_routes` defaults to `true`; set it to `false` on router/embedded integrations where an external orchestrator (e.g. OpenWrt, custom netifd, mwan3) owns the host routing table and mqvpn should only bring up the TUN.
+- `manage_routes` defaults to `true`; set it to `false` on router/embedded integrations where an external orchestrator owns the host routing table and mqvpn should only bring up the TUN.
 - **[mqvpn-prometheus-exporter](https://github.com/mp0rta/mqvpn-prometheus-exporter) requires per-user keys.** Using mqvpn-prometheus-exporter, you can correct and visualize mqvpn metrics. If you use it, sharing a single `auth_key` across
   multiple clients works for the VPN data plane, but the control API
   surfaces those sessions as `user="(global)"` and the Prometheus exporter

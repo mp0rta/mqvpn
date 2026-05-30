@@ -132,9 +132,8 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
      * redirect (0.0.0.0/1 + 128.0.0.0/1 + IPv6 ::/1 + 8000::/1 into
      * mqvpn0). Without these, traffic outside the tunnel subnet uses
      * the existing default route — the integrator must add `ip route`
-     * / `ip rule` externally (router/embedded use case, e.g. OpenWrt
-     * policy routing). killswitch and DNS overrides remain independently
-     * controllable.
+     * / `ip rule` externally (router/embedded use case). killswitch
+     * and DNS overrides remain independently controllable.
      */
     if (p->manage_routes) {
         if (setup_routes(p) < 0) {
