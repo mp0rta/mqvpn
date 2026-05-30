@@ -134,6 +134,9 @@ jobs:
           cp systemd/client.conf.example "$STAGING/etc/mqvpn/"
           cp LICENSE "$STAGING/"
           cp NOTICE  "$STAGING/"
+          mkdir -p "$STAGING/third-party"
+          cp third_party/xquic/LICENSE                       "$STAGING/third-party/xquic.txt"
+          cp third_party/xquic/third_party/boringssl/LICENSE "$STAGING/third-party/boringssl.txt"
           tar czf "mqvpn_${VERSION}_${{ matrix.arch }}.tar.gz" -C "$STAGING" .
           rm -rf "$STAGING" build-tarball
 
