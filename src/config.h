@@ -63,6 +63,7 @@ typedef struct mqvpn_file_config_s {
     int reconnect;          /* 1=auto-reconnect (default), 0=exit on disconnect */
     int reconnect_interval; /* base interval in seconds (default 5) */
     int kill_switch;        /* 1=block traffic outside tunnel, 0=off (default) */
+    int manage_routes; /* 1=manage host routes (default), 0=skip routing table setup */
 
     int tun_mtu; /* [Interface] MTU — 0=auto, >0=cap (floor 1280) */
 

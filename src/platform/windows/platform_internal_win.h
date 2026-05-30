@@ -52,6 +52,7 @@ typedef struct {
     socklen_t server_addrlen;
 
     /* Split tunneling state */
+    int manage_routes; /* 1=run win_setup_routes/win_cleanup_routes */
     int routing_configured;
     int routing6_configured;
     MIB_IPFORWARD_ROW2 installed_routes[MAX_INSTALLED_ROUTES];

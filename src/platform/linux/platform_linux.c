@@ -122,10 +122,26 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     LOG_INF("TUN %s configured: %s → %s (mtu=%d)", p->tun.name, local_ip, peer_ip,
             info->mtu);
 
-    /* Set up routes, killswitch, DNS */
-    if (setup_routes(p) < 0) {
-        LOG_ERR("route setup failed, aborting tunnel");
-        goto fail;
+    /* Set up routes, killswitch, DNS.
+     *
+     * manage_routes=false skips setup_routes() entirely. TUN is still
+     * created + addressed + UP and the kernel auto-adds the connected
+     * route for the tunnel subnet (e.g. 10.0.0.0/24 dev mqvpn0).
+     *
+     * Skipped: server-pin (<server_ip>/32 via orig gateway) + catch-all
+     * redirect (0.0.0.0/1 + 128.0.0.0/1 + IPv6 ::/1 + 8000::/1 into
+     * mqvpn0). Without these, traffic outside the tunnel subnet uses
+     * the existing default route — the integrator must add `ip route`
+     * / `ip rule` externally (router/embedded use case). killswitch
+     * and DNS overrides remain independently controllable.
+     */
+    if (p->manage_routes) {
+        if (setup_routes(p) < 0) {
+            LOG_ERR("route setup failed, aborting tunnel");
+            goto fail;
+        }
+    } else {
+        LOG_INF("manage_routes=off: host routing table left untouched");
     }
     if (setup_killswitch(p) < 0) {
         LOG_ERR("killswitch setup failed, aborting tunnel");
@@ -173,7 +189,7 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
 
 fail:
     cleanup_killswitch(p);
-    cleanup_routes(p);
+    if (p->manage_routes) cleanup_routes(p);
     mqvpn_dns_restore(&p->dns);
     if (p->tun.fd >= 0) mqvpn_tun_destroy(&p->tun);
     p->tun.fd = -1;
@@ -221,7 +237,7 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
         if (p->ev_status) event_del(p->ev_status); /* pause — reused on reconnect */
         if (p->ev_recover) event_del(p->ev_recover);
         cleanup_killswitch(p);
-        cleanup_routes(p);
+        if (p->manage_routes) cleanup_routes(p);
         mqvpn_dns_restore(&p->dns);
         if (p->tun_up) {
             if (p->ev_tun) {
@@ -969,6 +985,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     ctx.nl_fd = -1;
     ctx.server_port = cfg->server_port;
     ctx.killswitch_enabled = cfg->kill_switch;
+    ctx.manage_routes = cfg->manage_routes;
 
     /* Pre-set TUN name (save to tun_name_cfg too — survives TUN destroy/recreate) */
     if (cfg->tun_name) {
@@ -1131,7 +1148,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
 cleanup:
     /* Clean up platform resources */
     cleanup_killswitch(&ctx);
-    cleanup_routes(&ctx);
+    if (ctx.manage_routes) cleanup_routes(&ctx);
     mqvpn_dns_restore(&ctx.dns);
 
     if (ctx.tun_up) {
