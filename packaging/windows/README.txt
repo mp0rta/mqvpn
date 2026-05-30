@@ -16,6 +16,7 @@ Files in this archive (keep them together in one directory)
   wintun.dll                      TUN device driver, runtime-loaded
   README.txt                      this file
   LICENSE                         mqvpn license (Apache 2.0)
+  NOTICE                          mqvpn and third-party attribution notices
   THIRD_PARTY_LICENSES/
     xquic.txt                     xquic (Apache 2.0)
     boringssl.txt                 BoringSSL (Apache 2.0 / ISC), linked into xquic.dll
