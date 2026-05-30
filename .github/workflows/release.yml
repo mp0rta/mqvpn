@@ -111,6 +111,26 @@ jobs:
         if: matrix.os == 'linux'
         run: cd build && cpack -G DEB
 
+      - name: Verify license files in deb
+        if: matrix.os == 'linux'
+        # OPTIONAL install rules in CMakeLists.txt silently skip missing
+        # third-party LICENSE files (needed for systemd-test which lacks
+        # submodules). This step is the release-side gate that confirms
+        # release builds — which DO check out submodules — actually bundle
+        # the four required files into the deb.
+        run: |
+          set -e
+          deb=$(ls build/mqvpn_*.deb)
+          expected=4
+          found=$(dpkg-deb -c "$deb" \
+                  | grep -cE 'usr/share/doc/mqvpn/(LICENSE|NOTICE|third-party/(xquic|boringssl)\.txt)$' \
+                  || true)
+          if [ "$found" -ne "$expected" ]; then
+            echo "::error::deb missing license files (found $found of $expected)"
+            dpkg-deb -c "$deb" | grep -E 'usr/share/doc/mqvpn|third-party' || echo "  (none found)"
+            exit 1
+          fi
+
       - name: Generate tarball service files
         if: matrix.os == 'linux'
         run: |
@@ -139,6 +159,21 @@ jobs:
           cp third_party/xquic/third_party/boringssl/LICENSE "$STAGING/third-party/boringssl.txt"
           tar czf "mqvpn_${VERSION}_${{ matrix.arch }}.tar.gz" -C "$STAGING" .
           rm -rf "$STAGING" build-tarball
+
+      - name: Verify license files in tarball
+        if: matrix.os == 'linux'
+        run: |
+          set -e
+          tarball=$(ls mqvpn_*.tar.gz)
+          expected=4
+          found=$(tar tzf "$tarball" \
+                  | grep -cE '^\./(LICENSE|NOTICE|third-party/(xquic|boringssl)\.txt)$' \
+                  || true)
+          if [ "$found" -ne "$expected" ]; then
+            echo "::error::tarball missing license files (found $found of $expected)"
+            tar tzf "$tarball" | grep -E 'LICENSE|NOTICE|third-party' || echo "  (none found)"
+            exit 1
+          fi
 
       - name: Stage release artifacts
         if: matrix.os == 'linux'
@@ -333,6 +368,34 @@ jobs:
         env:
           MATRIX_ARCH: ${{ matrix.arch }}
 
+      - name: Verify license files in Windows zip
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem "mqvpn_*_windows_*.zip" | Select-Object -First 1
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName)
+          $entries = @($archive.Entries | ForEach-Object { $_.FullName })
+          $archive.Dispose()
+          $expected = @(
+            '/LICENSE$',
+            '/NOTICE$',
+            '/THIRD_PARTY_LICENSES/xquic\.txt$',
+            '/THIRD_PARTY_LICENSES/boringssl\.txt$',
+            '/THIRD_PARTY_LICENSES/wintun\.txt$',
+            '/THIRD_PARTY_LICENSES/libevent\.txt$'
+          )
+          $missing = @()
+          foreach ($pat in $expected) {
+            if (-not ($entries -match $pat)) { $missing += $pat }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Output "::error::Windows zip missing license files: $($missing -join ', ')"
+            Write-Output "entries:"
+            $entries | ForEach-Object { Write-Output "  $_" }
+            exit 1
+          }
+
       - name: Upload Windows artifacts
         if: matrix.os == 'windows'
         uses: actions/upload-artifact@v7
@@ -459,6 +522,20 @@ jobs:
           SRC=android/app/build/outputs/apk/release/app-release.apk
           test -f "$SRC" || { echo "APK not found at $SRC"; ls -R android/app/build/outputs/apk/ || true; exit 1; }
           cp "$SRC" "mqvpn-sample_${VERSION}_android.apk"
+
+      - name: Verify license assets in APK
+        run: |
+          set -e
+          apk=$(ls mqvpn-sample_*_android.apk)
+          expected=4
+          found=$(unzip -l "$apk" \
+                  | grep -cE 'assets/(LICENSE|NOTICE|third-party/(xquic|boringssl)\.txt)$' \
+                  || true)
+          if [ "$found" -ne "$expected" ]; then
+            echo "::error::APK missing license assets (found $found of $expected)"
+            unzip -l "$apk" | grep -E 'assets/' || echo "  (none found)"
+            exit 1
+          fi
 
       - name: Upload Android artifact
         uses: actions/upload-artifact@v7

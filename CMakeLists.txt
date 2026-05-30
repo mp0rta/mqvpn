@@ -349,8 +349,9 @@ install(FILES
 # bundled here. Wintun is Windows-only.
 #
 # OPTIONAL: CI jobs that exercise install rules without checking out the
-# xquic submodule (e.g., systemd-test) skip these silently. Release jobs
-# check out submodules and verify presence via `dpkg-deb -c` post-build.
+# xquic submodule (e.g., ci.yml systemd-test) skip these silently. Release
+# jobs check out submodules; release.yml's "Verify license files in deb"
+# step confirms presence post-build.
 install(FILES
     "${CMAKE_SOURCE_DIR}/third_party/xquic/LICENSE"
     DESTINATION share/doc/mqvpn/third-party RENAME xquic.txt
