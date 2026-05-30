@@ -335,6 +335,14 @@ install(FILES systemd/server.conf.example systemd/client.conf.example
 install(PROGRAMS scripts/mqvpn-server-nat.sh
         DESTINATION lib/mqvpn)
 
+# Bundle the project license and NOTICE in /usr/share/doc/mqvpn/ inside the
+# generated deb (and any tarball that runs `cmake --install`). Required by
+# Apache-2.0 §4(a) for binary redistributions.
+install(FILES
+    "${CMAKE_SOURCE_DIR}/LICENSE"
+    "${CMAKE_SOURCE_DIR}/NOTICE"
+    DESTINATION share/doc/mqvpn)
+
 # ---------- CPack deb packaging (only when dpkg is available) ----------
 find_program(DPKG_CMD dpkg)
 if(DPKG_CMD)
