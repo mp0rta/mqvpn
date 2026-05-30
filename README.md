@@ -100,7 +100,7 @@ User = bob:bob-secret
 
 [Multipath]
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none, default: bbr2)
 ```
 
 ```ini
@@ -116,10 +116,8 @@ DNS = 1.1.1.1, 8.8.8.8
 # MTU = 1280                   # TUN MTU cap (1280–9000, default: auto)
 
 [Multipath]
-# Use wlb_udp_pin to keep each UDP connection on a single path:
-# Scheduler = wlb_udp_pin
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none, default: bbr2)
 Path = eth0
 Path = wlan0
 ```
