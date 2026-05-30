@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and contributors
+
 /*
  * test_conn_settings.c — pins mqvpn_build_conn_settings() caller contract:
  * scheduler / init_max_path_id propagate and the four asymmetric fields

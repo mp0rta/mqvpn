@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and contributors
+
 /*
  * test_flow_sched.c — Unit tests for flow_hash_pkt (FNV-1a 5-tuple hash)
  *
