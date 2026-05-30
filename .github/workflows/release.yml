@@ -436,6 +436,18 @@ jobs:
           echo "MQVPN_KEY_ALIAS=mqvpn-release" >> "$GITHUB_ENV"
           echo "MQVPN_KEY_PASSWORD=$PASS" >> "$GITHUB_ENV"
 
+      # Stage license texts as assets/ before APK build. Android Gradle Plugin
+      # auto-includes src/main/assets/ in the produced APK. Required by
+      # Apache-2.0 §4(a) since the APK statically links xquic and BoringSSL.
+      - name: Stage license assets for APK
+        run: |
+          ASSETS=android/app/src/main/assets
+          mkdir -p "$ASSETS/third-party"
+          cp LICENSE                                         "$ASSETS/LICENSE"
+          cp NOTICE                                          "$ASSETS/NOTICE"
+          cp third_party/xquic/LICENSE                       "$ASSETS/third-party/xquic.txt"
+          cp third_party/xquic/third_party/boringssl/LICENSE "$ASSETS/third-party/boringssl.txt"
+
       - name: Build signed release APK
         working-directory: android
         run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
