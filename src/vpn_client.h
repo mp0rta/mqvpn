@@ -20,9 +20,10 @@ typedef struct mqvpn_client_cfg_s {
     int reconnect;              /* 1=auto-reconnect on disconnect (default 1) */
     int reconnect_interval;     /* base reconnect interval in seconds (default 5) */
     int kill_switch;            /* 1=block traffic outside tunnel (default 0) */
-    uint64_t init_max_path_id;  /* draft-21 §4.6 TP cap, 0=use xquic default 8 */
-    int tun_mtu;                /* 0=auto (MSS-derived), >0=cap (floor 1280) */
-    int cc;                     /* mqvpn_cc_t: congestion control algorithm */
+    int manage_routes; /* 1=manage host routes (default 1), 0=skip routing setup */
+    uint64_t init_max_path_id; /* draft-21 §4.6 TP cap, 0=use xquic default 8 */
+    int tun_mtu;               /* 0=auto (MSS-derived), >0=cap (floor 1280) */
+    int cc;                    /* mqvpn_cc_t: congestion control algorithm */
 } mqvpn_client_cfg_t;
 
 #endif /* MQVPN_VPN_CLIENT_H */

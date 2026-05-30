@@ -160,9 +160,13 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
             info->mtu);
 
     /* Set up routes, killswitch, DNS */
-    if (win_setup_routes(p) < 0) {
-        LOG_ERR("route setup failed, aborting tunnel");
-        goto fail;
+    if (p->manage_routes) {
+        if (win_setup_routes(p) < 0) {
+            LOG_ERR("route setup failed, aborting tunnel");
+            goto fail;
+        }
+    } else {
+        LOG_INF("manage_routes=off: host routing table left untouched");
     }
     if (win_setup_killswitch(p) < 0) {
         LOG_ERR("killswitch setup failed, aborting tunnel");
@@ -195,7 +199,7 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
 
 fail:
     win_cleanup_killswitch(p);
-    win_cleanup_routes(p);
+    if (p->manage_routes) win_cleanup_routes(p);
     win_cleanup_dns(p);
     if (p->tun.adapter) mqvpn_tun_win_destroy(&p->tun);
     p->tun_up = 0;
@@ -235,7 +239,7 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
 
     if (new_state == MQVPN_STATE_RECONNECTING || new_state == MQVPN_STATE_CLOSED) {
         win_cleanup_killswitch(p);
-        win_cleanup_routes(p);
+        if (p->manage_routes) win_cleanup_routes(p);
         win_cleanup_dns(p);
         if (p->tun_up) {
             if (p->ev_tun) {
@@ -469,6 +473,7 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     memset(&ctx, 0, sizeof(ctx));
     ctx.server_port = cfg->server_port;
     ctx.killswitch_enabled = cfg->kill_switch;
+    ctx.manage_routes = cfg->manage_routes;
 
     if (cfg->n_paths == 0) {
         LOG_ERR("--path is required on Windows: specify at least one adapter "
@@ -643,7 +648,7 @@ cleanup:
     g_signal_ctx = NULL;
 
     win_cleanup_killswitch(&ctx);
-    win_cleanup_routes(&ctx);
+    if (ctx.manage_routes) win_cleanup_routes(&ctx);
     win_cleanup_dns(&ctx);
 
     if (ctx.tun_up) {

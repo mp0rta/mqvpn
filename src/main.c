@@ -54,6 +54,8 @@ usage(const char *prog)
         "  --dns ADDR                DNS server to use (repeatable, client mode, max 4)\n"
         "  --no-reconnect            Disable automatic reconnection (client mode)\n"
         "  --kill-switch             Block traffic outside the VPN tunnel (client mode)\n"
+        "  --no-manage-routes        Do not modify the host routing table "
+        "(router/embedded integration)\n"
         "  --control-port PORT       TCP port for JSON control API (server mode)\n"
         "  --control-addr ADDR       Bind address for control API (default 127.0.0.1)\n"
         "                            (also configurable via [Control] Listen in INI / "
@@ -151,6 +153,7 @@ main(int argc, char *argv[])
         {"log-level", required_argument, NULL, 'L'},
         {"no-reconnect", no_argument, NULL, 'R'},
         {"kill-switch", no_argument, NULL, 'K'},
+        {"no-manage-routes", no_argument, NULL, 0x103},
         {"control-port", required_argument, NULL, 'X'},
         {"control-addr", required_argument, NULL, 'x'},
         {"status", no_argument, NULL, 'T'},
@@ -186,7 +189,8 @@ main(int argc, char *argv[])
     const char *dns_servers[4];
     int n_dns = 0;
     int no_reconnect = 0;
-    int kill_switch = -1; /* -1 = not set by CLI */
+    int kill_switch = -1;   /* -1 = not set by CLI */
+    int manage_routes = -1; /* -1 = not set by CLI */
     int control_port = 0;
     int control_port_set = 0; /* 1 iff --control-port was passed explicitly */
     const char *control_addr = NULL;
@@ -291,6 +295,7 @@ main(int argc, char *argv[])
         case 'M': max_clients = atoi(optarg); break;
         case 'R': no_reconnect = 1; break;
         case 'K': kill_switch = 1; break;
+        case 0x103: manage_routes = 0; break; /* --no-manage-routes */
         case 'X':
             control_port = atoi(optarg);
             control_port_set = 1;
@@ -515,6 +520,7 @@ main(int argc, char *argv[])
             .reconnect = eff_reconnect,
             .reconnect_interval = file_cfg.reconnect_interval,
             .kill_switch = kill_switch >= 0 ? kill_switch : file_cfg.kill_switch,
+            .manage_routes = manage_routes >= 0 ? manage_routes : file_cfg.manage_routes,
             .init_max_path_id = eff_init_max_path_id,
             .tun_mtu = eff_tun_mtu,
             .cc = cc,

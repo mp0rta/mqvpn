@@ -54,6 +54,7 @@ typedef struct {
     /* Split tunneling state */
     int routing_configured;
     int routing6_configured;
+    int manage_routes; /* 1=run setup_routes/cleanup_routes (default 1) */
     char orig_gateway[INET6_ADDRSTRLEN];
     char orig_iface[IFNAMSIZ];
     char server_ip_str[INET6_ADDRSTRLEN];
