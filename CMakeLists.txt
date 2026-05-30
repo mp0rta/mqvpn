@@ -347,12 +347,20 @@ install(FILES
 # linked into the shipped binaries (xquic, BoringSSL). libevent is a system
 # dependency (apt install libevent-dev) on Linux, so its LICENSE is not
 # bundled here. Wintun is Windows-only.
-install(FILES
-    "${CMAKE_SOURCE_DIR}/third_party/xquic/LICENSE"
-    DESTINATION share/doc/mqvpn/third-party RENAME xquic.txt)
-install(FILES
-    "${CMAKE_SOURCE_DIR}/third_party/xquic/third_party/boringssl/LICENSE"
-    DESTINATION share/doc/mqvpn/third-party RENAME boringssl.txt)
+#
+# EXISTS-guarded: CI jobs that exercise install rules without checking out
+# the xquic submodule (e.g., systemd-test) skip these. Release jobs check
+# out submodules and verify presence via `dpkg-deb -c` post-build.
+if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/xquic/LICENSE")
+    install(FILES
+        "${CMAKE_SOURCE_DIR}/third_party/xquic/LICENSE"
+        DESTINATION share/doc/mqvpn/third-party RENAME xquic.txt)
+endif()
+if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/xquic/third_party/boringssl/LICENSE")
+    install(FILES
+        "${CMAKE_SOURCE_DIR}/third_party/xquic/third_party/boringssl/LICENSE"
+        DESTINATION share/doc/mqvpn/third-party RENAME boringssl.txt)
+endif()
 
 # ---------- CPack deb packaging (only when dpkg is available) ----------
 find_program(DPKG_CMD dpkg)
