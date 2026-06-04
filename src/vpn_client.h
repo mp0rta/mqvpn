@@ -6,7 +6,7 @@
 
 #include <stdint.h>
 
-#define MQVPN_MAX_PATH_IFACES 4
+#define MQVPN_MAX_PATH_IFACES 8
 
 typedef struct mqvpn_client_cfg_s {
     const char *server_addr;                        /* server address (e.g. "1.2.3.4") */

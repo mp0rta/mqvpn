@@ -14,7 +14,7 @@
 
 #include <stddef.h> /* size_t */
 
-#define MQVPN_CONFIG_MAX_PATHS 4
+#define MQVPN_CONFIG_MAX_PATHS 8
 #define MQVPN_CONFIG_MAX_DNS   4
 #define MQVPN_CONFIG_MAX_USERS 64
 

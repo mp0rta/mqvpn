@@ -760,7 +760,7 @@ JNIEXPORT jobjectArray JNICALL
 JNI_FN(getPaths)(JNIEnv *env, jobject thiz, jlong client)
 {
     (void)thiz;
-    enum { MAX_PATHS = 4 };
+    enum { MAX_PATHS = 8 };
     mqvpn_path_info_t paths[MAX_PATHS];
     int n_paths = 0;
 

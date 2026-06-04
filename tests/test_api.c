@@ -771,12 +771,12 @@ TEST(client_remove_path)
 TEST(client_add_path_max)
 {
     mqvpn_client_t *c = make_test_client();
-    /* Add MQVPN_MAX_PATHS (4) paths */
-    for (int i = 0; i < 4; i++) {
+    /* Add MQVPN_MAX_PATHS paths */
+    for (int i = 0; i < MQVPN_MAX_PATHS; i++) {
         mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 10 + i, NULL);
         ASSERT_NE(h, (mqvpn_path_handle_t)-1);
     }
-    /* 5th path should fail */
+    /* one more path should fail */
     ASSERT_EQ(mqvpn_client_add_path_fd(c, 99, NULL), (mqvpn_path_handle_t)-1);
 
     mqvpn_client_destroy(c);

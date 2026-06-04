@@ -522,13 +522,17 @@ test_key_outside_section(void)
 static void
 test_max_paths_exceeded(void)
 {
-    /* 5th path should be ignored (max 4) */
+    /* (MQVPN_CONFIG_MAX_PATHS + 1)th path should be ignored */
     const char *ini = "[Multipath]\n"
                       "Path = eth0\n"
                       "Path = eth1\n"
                       "Path = eth2\n"
                       "Path = eth3\n"
-                      "Path = eth4\n";
+                      "Path = eth4\n"
+                      "Path = eth5\n"
+                      "Path = eth6\n"
+                      "Path = eth7\n"
+                      "Path = eth8\n";
 
     char *path = write_tmp(ini);
     mqvpn_file_config_t cfg;
@@ -537,8 +541,9 @@ test_max_paths_exceeded(void)
     unlink(path);
 
     ASSERT_EQ_INT(rc, 0, "max paths exceeded no error");
-    ASSERT_EQ_INT(cfg.n_paths, 4, "capped at 4 paths");
-    ASSERT_EQ_STR(cfg.paths[3], "eth3", "4th path is eth3");
+    ASSERT_EQ_INT(cfg.n_paths, MQVPN_CONFIG_MAX_PATHS, "capped at MAX paths");
+    ASSERT_EQ_STR(cfg.paths[MQVPN_CONFIG_MAX_PATHS - 1], "eth7",
+                  "last accepted path is eth7");
 }
 
 static void
