@@ -6,7 +6,11 @@
 
 #include <stdint.h>
 
+#include "libmqvpn.h" /* for MQVPN_MAX_PATHS */
+
 #define MQVPN_MAX_PATH_IFACES 8
+_Static_assert(MQVPN_MAX_PATH_IFACES == MQVPN_MAX_PATHS,
+               "CLI path cap must equal library cap (libmqvpn.h)");
 
 typedef struct mqvpn_client_cfg_s {
     const char *server_addr;                        /* server address (e.g. "1.2.3.4") */

@@ -547,6 +547,27 @@ test_max_paths_exceeded(void)
 }
 
 static void
+test_max_paths_exceeded_json(void)
+{
+    /* JSON path array exceeding cap must be silently capped (parity with INI). */
+    const char *json = "{"
+                       "\"mode\":\"client\","
+                       "\"server\":\"1.2.3.4:443\","
+                       "\"paths\":[\"eth0\",\"eth1\",\"eth2\",\"eth3\","
+                       "\"eth4\",\"eth5\",\"eth6\",\"eth7\",\"eth8\"]"
+                       "}";
+
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load_json_filecfg(&cfg, json);
+
+    ASSERT_EQ_INT(rc, 0, "JSON max paths exceeded no error");
+    ASSERT_EQ_INT(cfg.n_paths, MQVPN_CONFIG_MAX_PATHS, "JSON capped at MAX paths");
+    ASSERT_EQ_STR(cfg.paths[MQVPN_CONFIG_MAX_PATHS - 1], "eth7",
+                  "JSON last accepted path is eth7");
+}
+
+static void
 test_max_clients_edge_cases(void)
 {
     /* MaxClients = 0 → should fallback to 64 */
@@ -1464,6 +1485,7 @@ main(void)
     test_malformed_line_no_equals();
     test_key_outside_section();
     test_max_paths_exceeded();
+    test_max_paths_exceeded_json();
     test_max_clients_edge_cases();
     test_empty_value();
     test_duplicate_keys_last_wins();

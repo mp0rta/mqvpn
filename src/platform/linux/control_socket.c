@@ -56,10 +56,8 @@
 #define CTRL_MAX_REQ          4096 /* per-connection request buffer */
 #define CTRL_MAX_CONNS        8    /* max concurrent control connections */
 #define CTRL_READ_TIMEOUT_SEC 5    /* close idle connections after 5s */
-/* Maximum response size. Worst-case get_status with MQVPN_MAX_USERS=64 and
- * MQVPN_MAX_PATHS=8 produces ~210 KB; round up to 256 KB and re-check the
- * math if either limit grows. */
-#define CTRL_MAX_RESP_BYTES (256 * 1024)
+/* CTRL_MAX_RESP_BYTES moved to control_socket.h so test_control_response_bound
+ * can verify the worst-case JSON size fits. */
 
 /* JSON helpers (json_find_key → json_find_key, json_read_string → json_read_string)
  * are provided by json_mini.h */

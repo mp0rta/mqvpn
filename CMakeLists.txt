@@ -264,8 +264,9 @@ if(BUILD_TESTING)
         tests/test_path_state_machine.c
         src/path_state_machine.c
     )
+    add_executable(test_control_response_bound tests/test_control_response_bound.c)
 
-    foreach(t test_config test_auth test_session test_dns test_flow_sched test_status test_path_state_machine)
+    foreach(t test_config test_auth test_session test_dns test_flow_sched test_status test_path_state_machine test_control_response_bound)
         target_include_directories(${t} PRIVATE
             ${CMAKE_SOURCE_DIR}/src
             ${CMAKE_SOURCE_DIR}/src/platform/linux
@@ -305,6 +306,10 @@ if(BUILD_TESTING)
     target_include_directories(test_conn_settings PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
     set_target_properties(test_conn_settings PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_conn_settings COMMAND test_conn_settings)
+
+    # CLI argv overflow shell test (runs the built mqvpn binary)
+    add_test(NAME test_cli_path_argv
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_cli_path_argv.sh $<TARGET_FILE:mqvpn>)
 endif()
 
 # ---------- Install ----------

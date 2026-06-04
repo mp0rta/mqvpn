@@ -14,9 +14,15 @@
 
 #include <stddef.h> /* size_t */
 
+#include "libmqvpn.h" /* for MQVPN_MAX_PATHS, MQVPN_MAX_USERS */
+
 #define MQVPN_CONFIG_MAX_PATHS 8
 #define MQVPN_CONFIG_MAX_DNS   4
 #define MQVPN_CONFIG_MAX_USERS 64
+_Static_assert(MQVPN_CONFIG_MAX_PATHS == MQVPN_MAX_PATHS,
+               "Config path cap must equal library cap (libmqvpn.h)");
+_Static_assert(MQVPN_CONFIG_MAX_USERS == MQVPN_MAX_USERS,
+               "Config user cap must equal library cap (libmqvpn.h)");
 
 typedef struct mqvpn_file_config_s {
     /* [Interface] — common */
