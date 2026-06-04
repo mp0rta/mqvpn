@@ -34,6 +34,8 @@
 #include "control_socket.h"
 #include "json_mini.h"
 #include "log.h"
+
+#include <event2/event.h>
 #include "mqvpn_internal.h" /* mqvpn_server_scheduler_label,
                                mqvpn_path_state_label,
                                mqvpn_internal_fec_stats_t (carries mp_state_label),
