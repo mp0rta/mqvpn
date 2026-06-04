@@ -98,13 +98,16 @@ else
     echo "PASS: get_status response is valid JSON"
 fi
 
-nonzero_srtt=$(echo "$status_p2" | jq -r \
-    '[.clients[0].paths[] | select(.srtt_ms > 0)] | length' 2>/dev/null || echo 0)
-if [ "$nonzero_srtt" -lt 1 ]; then
-    echo "FAIL: no path reports srtt_ms > 0 (traffic may not have flowed)"
-    fail=1
+# Verify traffic actually flowed during Phase 2 by checking the per-client
+# total grew. srtt_ms / per-path srtt aren't reliable here: in netns
+# localhost RTT is sub-ms and truncates to 0 in the JSON's ms field.
+tx_p1=$(echo "$status_p1" | jq '.clients[0].bytes_tx // 0')
+tx_p2=$(echo "$status_p2" | jq '.clients[0].bytes_tx // 0')
+if [ "$tx_p2" -gt "$tx_p1" ]; then
+    echo "PASS: client bytes_tx grew $tx_p1 → $tx_p2 across Phase 2 ping load"
 else
-    echo "PASS: $nonzero_srtt of $N_PATHS paths report srtt_ms > 0"
+    echo "FAIL: client bytes_tx did not grow ($tx_p1 → $tx_p2)"
+    fail=1
 fi
 
 if [ "$fail" -ne 0 ]; then
