@@ -139,7 +139,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake libevent-dev golang iptables conntrack clang iperf3
+          sudo apt-get install -y cmake libevent-dev golang iptables conntrack clang iperf3 jq netcat-openbsd
 
       - name: Compute xquic SHA
         id: xqsha
@@ -239,6 +239,12 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_dellink_test.sh
+
+      - name: E2E 8-path dellink at MQVPN_MAX_PATHS cap (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_8paths_dellink_test.sh
 
       - name: E2E carrier-flap test (netns)
         env:

@@ -16,7 +16,7 @@
 #endif
 #include <stdint.h>
 
-#define MQVPN_MAX_PATHS 4
+#include "libmqvpn.h" /* MQVPN_MAX_PATHS — canonical definition */
 
 typedef struct {
     int fd;

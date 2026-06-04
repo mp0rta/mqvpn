@@ -522,13 +522,17 @@ test_key_outside_section(void)
 static void
 test_max_paths_exceeded(void)
 {
-    /* 5th path should be ignored (max 4) */
+    /* (MQVPN_CONFIG_MAX_PATHS + 1)th path should be ignored */
     const char *ini = "[Multipath]\n"
                       "Path = eth0\n"
                       "Path = eth1\n"
                       "Path = eth2\n"
                       "Path = eth3\n"
-                      "Path = eth4\n";
+                      "Path = eth4\n"
+                      "Path = eth5\n"
+                      "Path = eth6\n"
+                      "Path = eth7\n"
+                      "Path = eth8\n";
 
     char *path = write_tmp(ini);
     mqvpn_file_config_t cfg;
@@ -537,8 +541,30 @@ test_max_paths_exceeded(void)
     unlink(path);
 
     ASSERT_EQ_INT(rc, 0, "max paths exceeded no error");
-    ASSERT_EQ_INT(cfg.n_paths, 4, "capped at 4 paths");
-    ASSERT_EQ_STR(cfg.paths[3], "eth3", "4th path is eth3");
+    ASSERT_EQ_INT(cfg.n_paths, MQVPN_CONFIG_MAX_PATHS, "capped at MAX paths");
+    ASSERT_EQ_STR(cfg.paths[MQVPN_CONFIG_MAX_PATHS - 1], "eth7",
+                  "last accepted path is eth7");
+}
+
+static void
+test_max_paths_exceeded_json(void)
+{
+    /* JSON path array exceeding cap must be silently capped (parity with INI). */
+    const char *json = "{"
+                       "\"mode\":\"client\","
+                       "\"server\":\"1.2.3.4:443\","
+                       "\"paths\":[\"eth0\",\"eth1\",\"eth2\",\"eth3\","
+                       "\"eth4\",\"eth5\",\"eth6\",\"eth7\",\"eth8\"]"
+                       "}";
+
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load_json_filecfg(&cfg, json);
+
+    ASSERT_EQ_INT(rc, 0, "JSON max paths exceeded no error");
+    ASSERT_EQ_INT(cfg.n_paths, MQVPN_CONFIG_MAX_PATHS, "JSON capped at MAX paths");
+    ASSERT_EQ_STR(cfg.paths[MQVPN_CONFIG_MAX_PATHS - 1], "eth7",
+                  "JSON last accepted path is eth7");
 }
 
 static void
@@ -1459,6 +1485,7 @@ main(void)
     test_malformed_line_no_equals();
     test_key_outside_section();
     test_max_paths_exceeded();
+    test_max_paths_exceeded_json();
     test_max_clients_edge_cases();
     test_empty_value();
     test_duplicate_keys_last_wins();

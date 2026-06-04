@@ -187,6 +187,8 @@ parse_user_pair(mqvpn_file_config_t *cfg, const char *val, int lineno, const cha
 /* json_skip_ws, json_find_key, json_read_string, json_read_bool,
  * json_read_int are provided by json_mini.h */
 
+/* Parse JSON string array, silently capping at max_items (parity with INI
+ * Path=/DNS= lists). Extra entries are parsed syntactically but not copied. */
 static int
 json_read_string_array(const char *p, char out[][64], int max_items, int *n_items)
 {
@@ -194,9 +196,16 @@ json_read_string_array(const char *p, char out[][64], int max_items, int *n_item
 
     p = json_skip_ws(p + 1);
     int n = 0;
+    int dropped = 0;
     while (*p && *p != ']') {
-        if (*p != '"' || n >= max_items) return -1;
-        if (json_read_string(p, out[n], sizeof(out[n])) < 0) return -1;
+        if (*p != '"') return -1;
+
+        if (n < max_items) {
+            if (json_read_string(p, out[n], sizeof(out[n])) < 0) return -1;
+            n++;
+        } else {
+            dropped++;
+        }
 
         const char *e = p + 1;
         while (*e && *e != '"') {
@@ -205,7 +214,6 @@ json_read_string_array(const char *p, char out[][64], int max_items, int *n_item
         }
         if (*e != '"') return -1;
         p = json_skip_ws(e + 1);
-        n++;
 
         if (*p == ',')
             p = json_skip_ws(p + 1);
@@ -214,6 +222,8 @@ json_read_string_array(const char *p, char out[][64], int max_items, int *n_item
     }
 
     if (*p != ']') return -1;
+    if (dropped)
+        LOG_WRN("JSON: array capped at %d items, dropped %d", max_items, dropped);
     *n_items = n;
     return 0;
 }

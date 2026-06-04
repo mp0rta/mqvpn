@@ -22,7 +22,7 @@
  *   {"ok":true,"n_clients":N,"bytes_tx":X,"bytes_rx":Y,
  *    "dgram_sent":S,"dgram_recv":R,"dgram_lost":L,"dgram_acked":A,
  *    "uptime_sec":U}
- *   {"ok":true,"version":"0.6.0","scheduler":"backup_fec","fec_enabled":1}
+ *   {"ok":true,"version":"0.7.0","scheduler":"backup_fec","fec_enabled":1}
  *   {"ok":true,"user":"alice","enable_fec":1,"mp_state":1,
  *    "mp_state_label":"active_with_standby",
  *    "fec_send_cnt":142,"fec_recover_cnt":17,"lost_dgram_cnt":23,
@@ -34,6 +34,8 @@
 #include "control_socket.h"
 #include "json_mini.h"
 #include "log.h"
+
+#include <event2/event.h>
 #include "mqvpn_internal.h" /* mqvpn_server_scheduler_label,
                                mqvpn_path_state_label,
                                mqvpn_internal_fec_stats_t (carries mp_state_label),
@@ -56,10 +58,8 @@
 #define CTRL_MAX_REQ          4096 /* per-connection request buffer */
 #define CTRL_MAX_CONNS        8    /* max concurrent control connections */
 #define CTRL_READ_TIMEOUT_SEC 5    /* close idle connections after 5s */
-/* Maximum response size. Worst-case get_status with MQVPN_MAX_USERS=64 and
- * MQVPN_MAX_PATHS=4 produces ~105 KB; round up to 128 KB and re-check the
- * math if either limit grows. */
-#define CTRL_MAX_RESP_BYTES (128 * 1024)
+/* CTRL_MAX_RESP_BYTES moved to control_socket.h so test_control_response_bound
+ * can verify the worst-case JSON size fits. */
 
 /* JSON helpers (json_find_key → json_find_key, json_read_string → json_read_string)
  * are provided by json_mini.h */
@@ -199,8 +199,9 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
             APPEND("{\"user\":\"%s\",\"endpoint\":\"%s\","
                    "\"connected_sec\":%" PRIu64 ","
                    "\"bytes_tx\":%" PRIu64 ",\"bytes_rx\":%" PRIu64 ","
-                   "\"paths\":[",
-                   ci->username, ci->endpoint, conn_sec, ci->bytes_tx, ci->bytes_rx);
+                   "\"n_paths\":%d,\"paths\":[",
+                   ci->username, ci->endpoint, conn_sec, ci->bytes_tx, ci->bytes_rx,
+                   ci->n_paths);
 
             for (int p = 0; p < ci->n_paths; p++) {
                 mqvpn_path_stats_t *ps = &ci->paths[p];
@@ -226,7 +227,7 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
 #undef APPEND
         if (truncated) {
             /* The envelope is 41 bytes — well under any plausible resp_len
-             * (callers pass CTRL_MAX_RESP_BYTES - 2 = 128 KB - 2). The same
+             * (callers pass CTRL_MAX_RESP_BYTES - 2 = 256 KB - 2). The same
              * guard exists at the connection layer as defence in depth. */
             return snprintf(resp, resp_len,
                             "{\"ok\":false,\"error\":\"response too large\"}");

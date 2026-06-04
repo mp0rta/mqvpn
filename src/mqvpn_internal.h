@@ -74,7 +74,7 @@ bool mqvpn_check_scheduler_preconditions(mqvpn_scheduler_t scheduler, int n_path
  * other toolchains fall back to default linkage (acceptable: such builds
  * would not have a symbols-file ABI contract anyway). Keeping these out of
  * the export table prevents Debian dpkg-gensymbols (and similar) from
- * picking them up as part of libmqvpn0's stable ABI. */
+ * picking them up as part of libmqvpn's stable ABI. */
 #if defined(__GNUC__) || defined(__clang__)
 #  define MQVPN_INTERNAL __attribute__((visibility("hidden")))
 #else
