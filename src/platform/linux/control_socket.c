@@ -197,8 +197,9 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
             APPEND("{\"user\":\"%s\",\"endpoint\":\"%s\","
                    "\"connected_sec\":%" PRIu64 ","
                    "\"bytes_tx\":%" PRIu64 ",\"bytes_rx\":%" PRIu64 ","
-                   "\"paths\":[",
-                   ci->username, ci->endpoint, conn_sec, ci->bytes_tx, ci->bytes_rx);
+                   "\"n_paths\":%d,\"paths\":[",
+                   ci->username, ci->endpoint, conn_sec, ci->bytes_tx, ci->bytes_rx,
+                   ci->n_paths);
 
             for (int p = 0; p < ci->n_paths; p++) {
                 mqvpn_path_stats_t *ps = &ci->paths[p];

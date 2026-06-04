@@ -14,6 +14,7 @@
 #include "control_socket.h" /* CTRL_MAX_RESP_BYTES */
 
 #include <inttypes.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -50,8 +51,8 @@ per_user_envelope_bytes(int paths_inner_bytes)
     int env = snprintf(NULL, 0,
                        ",{\"user\":\"%s\",\"endpoint\":\"%s\","
                        "\"connected_sec\":%" PRIu64 ",\"bytes_tx\":%" PRIu64
-                       ",\"bytes_rx\":%" PRIu64 ",\"paths\":[]}",
-                       username, endpoint, UINT64_MAX, UINT64_MAX, UINT64_MAX);
+                       ",\"bytes_rx\":%" PRIu64 ",\"n_paths\":%d,\"paths\":[]}",
+                       username, endpoint, UINT64_MAX, UINT64_MAX, UINT64_MAX, INT_MAX);
     return env + paths_inner_bytes;
 }
 
