@@ -188,7 +188,7 @@ For most setups, leave `MTU` unset. The auto-negotiated value (~1382) works on s
 On the client, if `MTU` is set, mqvpn uses `min(config MTU, negotiated MTU)`; a warning is logged when the config value exceeds the negotiated value. On the server, `MTU` sets the TUN MTU directly (default 1382).
 
 ::: tip
-On the client, setting `MTU` above the negotiated value (~1382) has no effect — the negotiated value is always the upper bound. On the server, the configured value is applied to the TUN device as-is; packets exceeding a client's negotiated MSS are answered with ICMP Packet Too Big.
+On the client, setting `MTU` above the negotiated value (~1382) has no effect — the negotiated value is always the upper bound. On the server, the configured value is applied to the TUN device as-is; packets exceeding a client's negotiated MSS are answered with ICMP Packet Too Big so that the sender's Path MTU Discovery can adjust.
 :::
 
 ### How mqvpn determines TUN MTU
@@ -204,7 +204,7 @@ max_pkt_out_size           1400 bytes
  = TUN MTU                  1382 bytes
 ```
 
-This negotiation happens at connection time on the **client**, and the client TUN MTU follows it. The **server** sets its TUN MTU once at startup (1382 by default, or the configured value); clients that negotiated a lower MSS are handled per-client with ICMP Packet Too Big rather than by shrinking the server TUN MTU.
+This negotiation happens at connection time on the **client**, and the client TUN MTU follows it. The **server** sets its TUN MTU once at startup (1382 by default, or the configured value). When a packet exceeds a particular client's negotiated MSS, the server returns ICMP Packet Too Big to the original sender, carrying that client's MSS as the MTU value; the sender's Path MTU Discovery then lowers its packet size. The shared server TUN MTU never needs to shrink for individual clients.
 
 ### Running other tunnels inside mqvpn
 
