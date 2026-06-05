@@ -140,6 +140,14 @@ echo "=== TUN devices ==="
 ip netns exec vpn-server ip addr show dev mqvpn0 2>/dev/null || echo "(server TUN not found)"
 ip netns exec vpn-client ip addr show dev mqvpn0 2>/dev/null || echo "(client TUN not found)"
 
+# Server auto TUN MTU must be 1382 (MQVPN_TUN_MTU_AUTO); guards the default
+SRV_MTU=$(ip netns exec vpn-server cat /sys/class/net/mqvpn0/mtu 2>/dev/null || echo 0)
+if [ "$SRV_MTU" != "1382" ]; then
+    echo "=== FAIL: server TUN MTU is ${SRV_MTU}, expected 1382 ==="
+    exit 1
+fi
+echo "OK: server TUN MTU = 1382"
+
 echo ""
 echo "=== Routes in client namespace ==="
 ip netns exec vpn-client ip route show 2>/dev/null

@@ -241,7 +241,7 @@ TEST(server_lifecycle)
     ASSERT_EQ(g_last_tunnel_info.assigned_ip[1], 0);
     ASSERT_EQ(g_last_tunnel_info.assigned_ip[2], 0);
     ASSERT_EQ(g_last_tunnel_info.assigned_ip[3], 1);
-    ASSERT_EQ(g_last_tunnel_info.mtu, 1280);
+    ASSERT_EQ(g_last_tunnel_info.mtu, 1382);
 
     /* tick() should succeed */
     ASSERT_EQ(mqvpn_server_tick(s), MQVPN_OK);

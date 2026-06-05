@@ -87,7 +87,7 @@ Config files support both INI and JSON. CLI arguments override config values.
 Listen = 0.0.0.0:443
 Subnet = 10.0.0.0/24
 Subnet6 = 2001:db8:1::/112
-# MTU = 1280                   # TUN MTU cap (1280–9000, default: auto)
+# MTU = 1280                   # TUN MTU (1280–9000, default: auto = ~1382)
 
 [TLS]
 Cert = /etc/mqvpn/server.crt
@@ -113,7 +113,7 @@ Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
 
 [Interface]
 DNS = 1.1.1.1, 8.8.8.8
-# MTU = 1280                   # TUN MTU cap (1280–9000, default: auto)
+# MTU = 1280                   # TUN MTU (1280–9000, default: auto = ~1382)
 
 [Multipath]
 Scheduler = wlb
@@ -143,8 +143,7 @@ Server example:
     ],
     "max_clients": 64,
     "scheduler": "wlb",
-    "cc": "bbr2",
-    "mtu": 1280
+    "cc": "bbr2"
 }
 ```
 
@@ -163,8 +162,7 @@ Client example:
     "kill_switch": false,
     "manage_routes": false,
     "scheduler": "wlb",
-    "cc": "bbr2",
-    "mtu": 1280
+    "cc": "bbr2"
 }
 ```
 

@@ -74,8 +74,7 @@ JSON config is useful for structured management and automation tooling.
   ],
   "max_clients": 64,
   "scheduler": "wlb",
-  "cc": "bbr2",
-  "mtu": 1280
+  "cc": "bbr2"
 }
 ```
 
@@ -95,8 +94,7 @@ JSON config is useful for structured management and automation tooling.
   "reconnect_interval": 5,
   "scheduler": "wlb",
   "cc": "bbr2",
-  "paths": ["eth0", "wlan0"],
-  "mtu": 1280
+  "paths": ["eth0", "wlan0"]
 }
 ```
 
@@ -141,7 +139,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `KillSwitch` | Block traffic outside the VPN tunnel (client only) | `false` |
 | `Reconnect` | Enable automatic reconnection (client only) | `true` |
 | `ReconnectInterval` | Seconds between reconnection attempts | `5` |
-| `MTU` | TUN device MTU cap (1280–9000). If the negotiated MTU is lower, the negotiated value is used. | auto |
+| `MTU` | TUN MTU (1280–9000). Client: cap — if the negotiated MTU is lower, the negotiated value is used. Server: sets the TUN MTU directly. | auto (client ~1382 negotiated, server 1382) |
 
 ### `[TLS]` (server only)
 
@@ -185,13 +183,12 @@ For most setups, leave `MTU` unset. The auto-negotiated value (~1382) works on s
 | Scenario | Recommendation |
 |----------|----------------|
 | Standard Ethernet / mobile | Leave unset (auto ~1382) |
-| Symmetric client↔server MTU | Set `MTU = 1280` on both sides |
 | Deeply nested tunnels (mqvpn → WG → another tunnel) | Calculate remaining MTU; set if near 1280 |
 
-If `MTU` is set in the config, mqvpn uses `min(config MTU, negotiated MTU)`. A warning is logged when the config value exceeds the negotiated value.
+On the client, if `MTU` is set, mqvpn uses `min(config MTU, negotiated MTU)`; a warning is logged when the config value exceeds the negotiated value. On the server, `MTU` sets the TUN MTU directly (default 1382).
 
 ::: tip
-Setting `MTU` above the negotiated value (~1382) has no effect — the negotiated value is always used as the upper bound.
+On the client, setting `MTU` above the negotiated value (~1382) has no effect — the negotiated value is always the upper bound. On the server, the configured value is applied to the TUN device as-is; packets exceeding a client's negotiated MSS are answered with ICMP Packet Too Big so that the sender's Path MTU Discovery can adjust.
 :::
 
 ### How mqvpn determines TUN MTU
@@ -206,6 +203,8 @@ max_pkt_out_size           1400 bytes
                            ─────────
  = TUN MTU                  1382 bytes
 ```
+
+This negotiation happens at connection time on the **client**, and the client TUN MTU follows it. The **server** sets its TUN MTU once at startup (1382 by default, or the configured value). When a packet exceeds a particular client's negotiated MSS, the server returns ICMP Packet Too Big to the original sender, carrying that client's MSS as the MTU value; the sender's Path MTU Discovery then lowers its packet size. The shared server TUN MTU never needs to shrink for individual clients.
 
 ### Running other tunnels inside mqvpn
 
@@ -229,7 +228,7 @@ mqvpn TUN MTU                    1382 bytes
 | Config minimum | 1280 | IPv6 minimum MTU (RFC 8200) |
 | Config maximum | 9000 | Jumbo frame MTU |
 | QUIC minimum UDP payload | 1200 | RFC 9000 §14 (handshake requirement) |
-| Negotiated upper bound | ~1382 | Derived from `max_pkt_out_size` (1400) |
+| Auto value | ~1382 (client: negotiated; server: fixed default) | Derived from `max_pkt_out_size` (1400) |
 
 ## Control API
 
