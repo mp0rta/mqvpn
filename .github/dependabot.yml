@@ -30,7 +30,9 @@ updates:
         update-types: [minor, patch]
     ignore:
       # Hilt 2.59.x bundles kotlin-metadata-jvm that reads metadata <= 2.3.0,
-      # so Kotlin 2.4.x breaks :app:hiltJavaCompileDebug. Remove once a Hilt
-      # release supports Kotlin 2.4.
+      # so Kotlin 2.4.x breaks :app:hiltJavaCompileDebug.
+      # Lift trigger: when the next Hilt bump PR arrives, try removing this
+      # ignore in the same PR. Upper bound 2.5 is a safety valve so a future
+      # Kotlin minor gets re-proposed even if this is forgotten.
       - dependency-name: "org.jetbrains.kotlin.plugin.*"
-        versions: ["[2.4,)"]
+        versions: ["[2.4,2.5)"]
