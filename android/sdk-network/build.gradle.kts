@@ -4,7 +4,7 @@ plugins {
 
 android {
     namespace = "com.mqvpn.sdk.network"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         minSdk = 26

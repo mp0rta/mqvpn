@@ -28,3 +28,9 @@ updates:
       android-deps:
         patterns: ["*"]
         update-types: [minor, patch]
+    ignore:
+      # Hilt 2.59.x bundles kotlin-metadata-jvm that reads metadata <= 2.3.0,
+      # so Kotlin 2.4.x breaks :app:hiltJavaCompileDebug. Remove once a Hilt
+      # release supports Kotlin 2.4.
+      - dependency-name: "org.jetbrains.kotlin.plugin.*"
+        versions: ["[2.4,)"]

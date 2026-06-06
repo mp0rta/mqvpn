@@ -7,7 +7,7 @@ plugins {
 
 android {
     namespace = "com.mqvpn.app"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.mqvpn.app"
