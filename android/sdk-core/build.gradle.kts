@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "com.mqvpn.sdk.core"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         minSdk = 26
@@ -29,7 +29,7 @@ dependencies {
     implementation(project(":sdk-native"))
     implementation(project(":sdk-runtime"))
     implementation(project(":sdk-network"))
-    implementation("androidx.core:core-ktx:1.18.0")
+    implementation("androidx.core:core-ktx:1.19.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
 
