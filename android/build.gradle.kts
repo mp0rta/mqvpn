@@ -3,8 +3,7 @@ plugins {
     id("com.android.library") version "9.2.1" apply false
     // Kotlin 2.4.x is blocked on Hilt: dagger 2.59.2 bundles kotlin-metadata-jvm
     // that reads metadata <= 2.3.0, so :app:hiltJavaCompileDebug fails on 2.4.0
-    // output. Bump together with a Hilt release that supports Kotlin 2.4, and
-    // drop the matching ignore rule in .github/dependabot.yml.
+    // output. Bump together with a Hilt release that supports Kotlin 2.4.
     id("org.jetbrains.kotlin.plugin.serialization") version "2.3.21" apply false
     id("org.jetbrains.kotlin.plugin.parcelize") version "2.3.21" apply false
     id("org.jetbrains.kotlin.plugin.compose") version "2.3.21" apply false
