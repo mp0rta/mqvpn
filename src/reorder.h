@@ -12,6 +12,8 @@
  * unit-tested and linked into both the library and platform layers.
  *
  *   - wire header v1 codec + self-describing type dispatch (§8.1/§8.2/§8.3, §7)
+ *   - flow identity: 5-tuple key, compare, and keyed hash (§6)
+ *   - phase-1 config struct, defaults, and validation (§16)
  */
 
 #include <stddef.h>
@@ -124,6 +126,13 @@ typedef struct {
     uint8_t dst_ip[16];
 } mqvpn_flow_key_t;
 
+/* mqvpn_flow_key_hash() reads the raw struct bytes, so the layout must be free
+ * of interior padding (1 + 1 + 2 + 2 + 16 + 16 = 38). Pin it: any padding would
+ * feed indeterminate bytes into the hash. */
+_Static_assert(
+    sizeof(mqvpn_flow_key_t) == 38,
+    "mqvpn_flow_key_t must be padding-free: flow_key_hash reads raw struct bytes");
+
 /* Returns 1 if the two 5-tuples are identical, 0 otherwise (§6.3: logical flow
  * distinction is a full 5-tuple compare). */
 static inline int
@@ -139,6 +148,11 @@ mqvpn_flow_key_eq(const mqvpn_flow_key_t *a, const mqvpn_flow_key_t *b)
  * Keyed hash over the 5-tuple, seeded with a per-process value (§6.2). v1 uses
  * FNV-1a over the struct bytes mixed with the seed; a SipHash upgrade is future
  * work. Same key + same seed always yields the same hash.
+ *
+ * This reads the raw struct bytes via memcpy-equivalent pointer access, so it
+ * relies on mqvpn_flow_key_t being padding-free (pinned by the _Static_assert
+ * above). Note that flow_key_eq() deliberately compares field-by-field instead —
+ * the two functions intentionally differ in how they treat the struct layout.
  */
 static inline uint64_t
 mqvpn_flow_key_hash(const mqvpn_flow_key_t *k, uint64_t seed)

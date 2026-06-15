@@ -167,6 +167,23 @@ test_flowkey_hash_stable(void)
     ASSERT_EQ_U64(h1, h2, "flowkey_hash stable same key+seed");
 }
 
+static void
+test_flowkey_hash_distinct(void)
+{
+    mqvpn_flow_key_t a = make_v4_key(0x0A000001, 0x0A000002, 1111, 443);
+    mqvpn_flow_key_t b =
+        make_v4_key(0x0A000001, 0x0A000002, 1111, 444); /* dst_port differs */
+    uint64_t seed = 0x1234567890ABCDEFULL;
+
+    /* Different keys, same seed -> different hashes. */
+    ASSERT_TRUE(mqvpn_flow_key_hash(&a, seed) != mqvpn_flow_key_hash(&b, seed),
+                "flowkey_hash distinct keys same seed differ");
+
+    /* Same key, different seeds -> different hashes (seed is actually mixed in). */
+    ASSERT_TRUE(mqvpn_flow_key_hash(&a, seed) != mqvpn_flow_key_hash(&a, seed ^ 0x1ULL),
+                "flowkey_hash same key different seeds differ");
+}
+
 /* ─────────────────────── Task 1.3: config struct ──────────────────────────── */
 
 static void
@@ -232,6 +249,7 @@ main(void)
     test_flowkey_eq();
     test_flowkey_v4_v6_distinct();
     test_flowkey_hash_stable();
+    test_flowkey_hash_distinct();
 
     test_cfg_defaults();
     test_cfg_validate_idle_order();
