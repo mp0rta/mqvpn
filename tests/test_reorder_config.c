@@ -440,6 +440,205 @@ test_ini_rule_out_of_range_keeps_defaults(void)
     ASSERT_EQ_INT(cfg.reorder.rules[0].port, 4242, "valid port applied");
 }
 
+/* ──────────────────────── Task: JSON parsing ──────────────────────────────
+ *
+ * The JSON loader (mqvpn_config_load_json_filecfg) must populate
+ * file_cfg.reorder identically to the INI parser, reusing the same value
+ * mappers (parse_reorder_enabled/proto/profile). JSON keys are snake_case;
+ * the reorder object holds the 13 scalar knobs and "reorder_rules" is an array
+ * of {proto, port, profile} objects. */
+
+static void
+test_json_reorder_basic(void)
+{
+    const char *json = "{\n"
+                       "  \"mode\": \"client\",\n"
+                       "  \"reorder\": {\n"
+                       "    \"enabled\": \"on\",\n"
+                       "    \"max_wait_ms\": 40,\n"
+                       "    \"cap_packets\": 2048,\n"
+                       "    \"max_bytes_per_flow\": 3145728,\n"
+                       "    \"classify_window\": 96,\n"
+                       "    \"ack_demote_max_large\": 4,\n"
+                       "    \"small_packet_threshold\": 220,\n"
+                       "    \"reset_mark_packets\": 6,\n"
+                       "    \"reset_idle_grace_ms\": 9000,\n"
+                       "    \"max_flows\": 32768,\n"
+                       "    \"global_max_bytes\": 134217728,\n"
+                       "    \"ingress_idle_sec\": 25,\n"
+                       "    \"egress_idle_sec\": 250\n"
+                       "  }\n"
+                       "}\n";
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load_json_filecfg(&cfg, json);
+
+    ASSERT_EQ_INT(rc, 0, "json parse ok");
+    ASSERT_EQ_INT(cfg.reorder.mode, MQVPN_REORDER_ON, "json enabled=on → ON");
+    ASSERT_EQ_INT(cfg.reorder.max_wait_ms, 40, "json max_wait_ms");
+    ASSERT_EQ_INT(cfg.reorder.cap_packets_per_flow, 2048, "json cap_packets");
+    ASSERT_TRUE(cfg.reorder.max_buffer_bytes_per_flow == 3145728ULL,
+                "json max_bytes_per_flow");
+    ASSERT_EQ_INT(cfg.reorder.classify_window, 96, "json classify_window");
+    ASSERT_EQ_INT(cfg.reorder.ack_demote_max_large_packets, 4,
+                  "json ack_demote_max_large");
+    ASSERT_EQ_INT(cfg.reorder.small_packet_threshold_bytes, 220,
+                  "json small_packet_threshold");
+    ASSERT_EQ_INT(cfg.reorder.reset_mark_packets, 6, "json reset_mark_packets");
+    ASSERT_EQ_INT(cfg.reorder.reset_idle_grace_ms, 9000, "json reset_idle_grace_ms");
+    ASSERT_EQ_INT(cfg.reorder.max_flows, 32768, "json max_flows");
+    ASSERT_TRUE(cfg.reorder.global_max_buffer_bytes == 134217728ULL,
+                "json global_max_bytes");
+    ASSERT_EQ_INT(cfg.reorder.ingress_idle_timeout_sec, 25, "json ingress_idle_sec");
+    ASSERT_EQ_INT(cfg.reorder.egress_idle_timeout_sec, 250, "json egress_idle_sec");
+    ASSERT_EQ_INT(mqvpn_reorder_config_validate(&cfg.reorder), 0, "json config valid");
+}
+
+static void
+test_json_reorder_enabled_mapping(void)
+{
+    struct {
+        const char *val;
+        mqvpn_reorder_mode_t want;
+    } cases[] = {
+        {"off", MQVPN_REORDER_OFF}, {"false", MQVPN_REORDER_OFF},
+        {"on", MQVPN_REORDER_ON},   {"true", MQVPN_REORDER_ON},
+        {"auto", MQVPN_REORDER_ON}, /* §16 scope: auto → ON + LOG_WRN, same as INI */
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char json[128];
+        snprintf(json, sizeof(json), "{\"reorder\":{\"enabled\":\"%s\"}}", cases[i].val);
+        mqvpn_file_config_t cfg;
+        mqvpn_config_defaults(&cfg);
+        int rc = mqvpn_config_load_json_filecfg(&cfg, json);
+        ASSERT_EQ_INT(rc, 0, "json parse ok");
+        ASSERT_EQ_INT(cfg.reorder.mode, cases[i].want, cases[i].val);
+    }
+}
+
+static void
+test_json_reorder_rules(void)
+{
+    const char *json =
+        "{\n"
+        "  \"reorder\": { \"enabled\": \"on\" },\n"
+        "  \"reorder_rules\": [\n"
+        "    { \"proto\": \"udp\", \"port\": 443, \"profile\": \"quic_bulk\" },\n"
+        "    { \"proto\": \"udp\", \"port\": 53, \"profile\": \"low_latency\" }\n"
+        "  ]\n"
+        "}\n";
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load_json_filecfg(&cfg, json);
+
+    ASSERT_EQ_INT(rc, 0, "json parse ok");
+    ASSERT_EQ_INT(cfg.reorder.mode, MQVPN_REORDER_ON, "json enabled ON");
+    ASSERT_EQ_INT(cfg.reorder.n_rules, 2, "two rules in order");
+    ASSERT_EQ_INT(cfg.reorder.rules[0].proto, 17, "rule0 proto udp");
+    ASSERT_EQ_INT(cfg.reorder.rules[0].port, 443, "rule0 port 443");
+    ASSERT_EQ_INT(cfg.reorder.rules[0].profile, MQVPN_RPROF_QUIC_BULK, "rule0 quic_bulk");
+    ASSERT_EQ_INT(cfg.reorder.rules[1].port, 53, "rule1 port 53");
+    ASSERT_EQ_INT(cfg.reorder.rules[1].profile, MQVPN_RPROF_LOW_LATENCY,
+                  "rule1 low_latency");
+}
+
+static void
+test_json_reorder_rules_over_cap(void)
+{
+    /* Emit MQVPN_REORDER_MAX_RULES + 1 rule objects with distinct ports.
+     * The over-cap rule must be dropped: n_rules stays at the cap AND the last
+     * accepted rule keeps its own port (not clobbered by the over-cap one). */
+    char json[4096];
+    int n = 0;
+    n += snprintf(json + n, sizeof(json) - n,
+                  "{ \"reorder\": {\"enabled\":\"on\"}, \"reorder_rules\": [");
+    for (int i = 0; i <= MQVPN_REORDER_MAX_RULES; i++) {
+        n += snprintf(json + n, sizeof(json) - n,
+                      "%s{\"proto\":\"udp\",\"port\":%d,\"profile\":\"quic_bulk\"}",
+                      i ? "," : "", 8000 + i);
+    }
+    n += snprintf(json + n, sizeof(json) - n, "] }");
+
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load_json_filecfg(&cfg, json);
+
+    ASSERT_EQ_INT(rc, 0, "json parse ok despite over-cap rule");
+    ASSERT_EQ_INT(cfg.reorder.n_rules, MQVPN_REORDER_MAX_RULES, "n_rules at cap");
+    ASSERT_EQ_INT(cfg.reorder.rules[MQVPN_REORDER_MAX_RULES - 1].port,
+                  8000 + MQVPN_REORDER_MAX_RULES - 1, "last accepted rule not clobbered");
+}
+
+static void
+test_json_reorder_absent(void)
+{
+    /* JSON without a reorder object → reorder stays at defaults (mode OFF). */
+    const char *json = "{ \"mode\": \"client\", \"server_addr\": \"host:443\" }";
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load_json_filecfg(&cfg, json);
+
+    ASSERT_EQ_INT(rc, 0, "json parse ok");
+    ASSERT_EQ_INT(cfg.reorder.mode, MQVPN_REORDER_OFF, "absent → OFF");
+    ASSERT_EQ_INT(cfg.reorder.max_wait_ms, 30, "absent → default wait");
+    ASSERT_EQ_INT(cfg.reorder.n_rules, 0, "absent → no rules");
+}
+
+/* JSON and INI must produce an identical mqvpn_reorder_config_t for equivalent
+ * inputs — proving the shared mappers give the two surfaces parity. */
+static void
+test_json_ini_parity(void)
+{
+    const char *ini = "[Reorder]\n"
+                      "Enabled = on\n"
+                      "MaxWaitMs = 40\n"
+                      "CapPackets = 2048\n"
+                      "MaxBytesPerFlow = 3145728\n"
+                      "ClassifyWindow = 96\n"
+                      "AckDemoteMaxLarge = 4\n"
+                      "SmallPacketThreshold = 220\n"
+                      "ResetMarkPackets = 6\n"
+                      "ResetIdleGraceMs = 9000\n"
+                      "MaxFlows = 32768\n"
+                      "GlobalMaxBytes = 134217728\n"
+                      "IngressIdleSec = 25\n"
+                      "EgressIdleSec = 250\n"
+                      "[ReorderRule]\n"
+                      "Proto = udp\nPort = 443\nProfile = quic_bulk\n"
+                      "[ReorderRule]\n"
+                      "Proto = udp\nPort = 53\nProfile = low_latency\n";
+    const char *json =
+        "{\n"
+        "  \"reorder\": {\n"
+        "    \"enabled\": \"on\", \"max_wait_ms\": 40, \"cap_packets\": 2048,\n"
+        "    \"max_bytes_per_flow\": 3145728, \"classify_window\": 96,\n"
+        "    \"ack_demote_max_large\": 4, \"small_packet_threshold\": 220,\n"
+        "    \"reset_mark_packets\": 6, \"reset_idle_grace_ms\": 9000,\n"
+        "    \"max_flows\": 32768, \"global_max_bytes\": 134217728,\n"
+        "    \"ingress_idle_sec\": 25, \"egress_idle_sec\": 250\n"
+        "  },\n"
+        "  \"reorder_rules\": [\n"
+        "    {\"proto\":\"udp\",\"port\":443,\"profile\":\"quic_bulk\"},\n"
+        "    {\"proto\":\"udp\",\"port\":53,\"profile\":\"low_latency\"}\n"
+        "  ]\n"
+        "}\n";
+
+    mqvpn_file_config_t icfg, jcfg;
+    mqvpn_config_defaults(&icfg);
+    mqvpn_config_defaults(&jcfg);
+
+    char *path = write_tmp(ini);
+    int irc = mqvpn_config_load(&icfg, path);
+    if (path) unlink(path);
+    int jrc = mqvpn_config_load_json_filecfg(&jcfg, json);
+
+    ASSERT_EQ_INT(irc, 0, "ini parse ok");
+    ASSERT_EQ_INT(jrc, 0, "json parse ok");
+    /* The reorder sub-structs must be byte-identical. */
+    ASSERT_EQ_INT(memcmp(&icfg.reorder, &jcfg.reorder, sizeof(icfg.reorder)), 0,
+                  "INI and JSON reorder configs identical");
+}
+
 /* ──────────────── Bridge: INI file_cfg.reorder → libmqvpn config ──────────────
  *
  * The CLI path copies mqvpn_file_config_t.reorder into the platform cfg, and the
@@ -510,6 +709,14 @@ main(void)
     test_ini_validate_rejects_idle_inversion();
     test_ini_over_cap_rule_rejected();
     test_ini_rule_out_of_range_keeps_defaults();
+
+    /* JSON parsing */
+    test_json_reorder_basic();
+    test_json_reorder_enabled_mapping();
+    test_json_reorder_rules();
+    test_json_reorder_rules_over_cap();
+    test_json_reorder_absent();
+    test_json_ini_parity();
 
     /* Bridge: INI → file_cfg → libmqvpn config (apply_reorder translation) */
     test_bridge_ini_reaches_libmqvpn_config();

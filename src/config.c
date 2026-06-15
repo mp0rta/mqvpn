@@ -291,6 +291,17 @@ json_read_users(mqvpn_file_config_t *cfg, const char *p)
     return (*p == ']') ? 0 : -1;
 }
 
+/* Parse the "reorder_rules" JSON array of {proto, port, profile} objects into
+ * cfg->reorder.rules[], mirroring json_read_users(). Reuses the same value
+ * mappers (parse_reorder_proto/parse_reorder_profile) and the same per-rule
+ * begin/cap/no-clobber discipline as the INI [ReorderRule] path: each accepted
+ * object is seeded with begin-time defaults (proto UDP, profile QUIC_BULK) and
+ * over-cap objects are dropped without touching the last accepted rule. An
+ * invalid proto/profile/port warns but keeps the begin-time default (the rule
+ * is still added), exactly as the INI parser does. Returns 0 on success, -1 on
+ * malformed JSON. Declared here; defined after the reorder mappers below. */
+static int json_read_reorder_rules(mqvpn_file_config_t *cfg, const char *p);
+
 /* §16.1 [Reorder] Enabled mapping: off/false→OFF, on/true→ON, auto→ON+warn
  * (adaptive is a later phase; v1 treats auto as ON). Returns 0 on a recognized
  * value (and writes *out), -1 otherwise. */
@@ -375,6 +386,77 @@ reorder_rule_begin(mqvpn_file_config_t *cfg, int lineno, const char *path)
     r->profile = MQVPN_RPROF_QUIC_BULK;
     cfg->reorder.n_rules++;
     return 0;
+}
+
+static int
+json_read_reorder_rules(mqvpn_file_config_t *cfg, const char *p)
+{
+    if (!cfg || !p || *p != '[') return -1;
+    p = json_skip_ws(p + 1);
+
+    while (*p && *p != ']') {
+        if (*p != '{') return -1;
+        const char *end = strchr(p, '}');
+        if (!end) return -1;
+
+        char obj[256];
+        size_t len = (size_t)(end - p + 1);
+        if (len >= sizeof(obj)) return -1;
+        memcpy(obj, p, len);
+        obj[len] = '\0';
+
+        /* Push a default-initialized slot (proto UDP, profile QUIC_BULK, port 0);
+         * over-cap rules are dropped without clobbering the last accepted one.
+         * lineno 0 / path "json" mirror the synthetic context used by the
+         * users array (LOG_WRN only). */
+        if (reorder_rule_begin(cfg, 0, "json") == 0) {
+            mqvpn_reorder_rule_t *rule = &cfg->reorder.rules[cfg->reorder.n_rules - 1];
+
+            const char *proto_v = json_find_key(obj, "proto");
+            if (proto_v) {
+                char s[32];
+                if (json_read_string(proto_v, s, sizeof(s)) == 0) {
+                    uint8_t pr = 0;
+                    if (parse_reorder_proto(s, &pr) == 0)
+                        rule->proto = pr;
+                    else
+                        LOG_WRN("JSON: invalid reorder rule proto '%s'; keeping default",
+                                s);
+                }
+            }
+
+            const char *port_v = json_find_key(obj, "port");
+            if (port_v) {
+                int pv = 0;
+                if (json_read_int_strict(port_v, &pv) == 0 && pv >= 0 && pv <= 0xffff)
+                    rule->port = (uint16_t)pv;
+                else
+                    LOG_WRN("JSON: invalid reorder rule port; keeping default");
+            }
+
+            const char *prof_v = json_find_key(obj, "profile");
+            if (prof_v) {
+                char s[32];
+                if (json_read_string(prof_v, s, sizeof(s)) == 0) {
+                    mqvpn_reorder_profile_t prof = MQVPN_RPROF_QUIC_BULK;
+                    if (parse_reorder_profile(s, &prof) == 0)
+                        rule->profile = prof;
+                    else
+                        LOG_WRN(
+                            "JSON: invalid reorder rule profile '%s'; keeping default",
+                            s);
+                }
+            }
+        }
+
+        p = json_skip_ws(end + 1);
+        if (*p == ',')
+            p = json_skip_ws(p + 1);
+        else if (*p != ']')
+            return -1;
+    }
+
+    return (*p == ']') ? 0 : -1;
 }
 
 /* Handle a key=value pair in the given section */
@@ -765,6 +847,86 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
 
     v = json_find_key(json_text, "users");
     if (v && json_read_users(cfg, v) < 0) return -1;
+
+    /* [Reorder] equivalent: a "reorder" object with the same 13 scalar knobs as
+     * the INI section (snake_case), plus a "reorder_rules" array of
+     * {proto, port, profile} objects. The Enabled string and rule proto/profile
+     * go through the SAME mappers (parse_reorder_enabled/proto/profile) as the
+     * INI path so the two surfaces produce identical mqvpn_reorder_config_t.
+     * Numeric ranges mirror the INI parser; the cross-side invariants
+     * (cap power-of-two, ingress < egress) are enforced by
+     * mqvpn_reorder_config_validate() at apply time, not here. Unknown sub-keys
+     * are simply not found (forward-compat). eval_force_no_demotion is
+     * deliberately NOT parseable (internal/test knob, same as INI). */
+    const char *ro = json_find_key(json_text, "reorder");
+    if (ro && *ro == '{') {
+        mqvpn_reorder_config_t *r = &cfg->reorder;
+        const char *kv;
+
+        kv = json_find_key(ro, "enabled");
+        if (kv && json_read_string(kv, s32, sizeof(s32)) == 0) {
+            mqvpn_reorder_mode_t m = MQVPN_REORDER_OFF;
+            if (parse_reorder_enabled(s32, &m) == 0)
+                r->mode = m;
+            else
+                LOG_WRN("JSON: invalid reorder enabled '%s'; ignoring", s32);
+        }
+
+        kv = json_find_key(ro, "max_wait_ms");
+        if (kv && json_read_int_strict(kv, &iv) == 0 && iv >= 0)
+            r->max_wait_ms = (uint32_t)iv;
+
+        kv = json_find_key(ro, "cap_packets");
+        if (kv && json_read_int_strict(kv, &iv) == 0 && iv >= 0)
+            r->cap_packets_per_flow = (uint32_t)iv;
+
+        kv = json_find_key(ro, "max_bytes_per_flow");
+        if (kv) {
+            uint64_t uv = 0;
+            if (json_read_u64_strict(kv, &uv) == 0) r->max_buffer_bytes_per_flow = uv;
+        }
+
+        kv = json_find_key(ro, "classify_window");
+        if (kv && json_read_int_strict(kv, &iv) == 0 && iv >= 0 && iv <= 0xffff)
+            r->classify_window = (uint16_t)iv;
+
+        kv = json_find_key(ro, "ack_demote_max_large");
+        if (kv && json_read_int_strict(kv, &iv) == 0 && iv >= 0 && iv <= 0xffff)
+            r->ack_demote_max_large_packets = (uint16_t)iv;
+
+        kv = json_find_key(ro, "small_packet_threshold");
+        if (kv && json_read_int_strict(kv, &iv) == 0 && iv >= 0)
+            r->small_packet_threshold_bytes = (uint32_t)iv;
+
+        kv = json_find_key(ro, "reset_mark_packets");
+        if (kv && json_read_int_strict(kv, &iv) == 0 && iv >= 0)
+            r->reset_mark_packets = (uint32_t)iv;
+
+        kv = json_find_key(ro, "reset_idle_grace_ms");
+        if (kv && json_read_int_strict(kv, &iv) == 0 && iv >= 0)
+            r->reset_idle_grace_ms = (uint32_t)iv;
+
+        kv = json_find_key(ro, "max_flows");
+        if (kv && json_read_int_strict(kv, &iv) == 0 && iv >= 0)
+            r->max_flows = (uint32_t)iv;
+
+        kv = json_find_key(ro, "global_max_bytes");
+        if (kv) {
+            uint64_t uv = 0;
+            if (json_read_u64_strict(kv, &uv) == 0) r->global_max_buffer_bytes = uv;
+        }
+
+        kv = json_find_key(ro, "ingress_idle_sec");
+        if (kv && json_read_int_strict(kv, &iv) == 0 && iv >= 0)
+            r->ingress_idle_timeout_sec = (uint32_t)iv;
+
+        kv = json_find_key(ro, "egress_idle_sec");
+        if (kv && json_read_int_strict(kv, &iv) == 0 && iv >= 0)
+            r->egress_idle_timeout_sec = (uint32_t)iv;
+    }
+
+    v = json_find_key(json_text, "reorder_rules");
+    if (v && json_read_reorder_rules(cfg, v) < 0) return -1;
 
     return 0;
 }
