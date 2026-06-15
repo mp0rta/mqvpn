@@ -493,7 +493,7 @@ cb_h3_conn_create(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_
     /* §5: create the reorder shim engines when locally enabled. TX stamping
      * stays gated on peer_reorder_supported (set when the client advertises in
      * its CONNECT-IP request), so until then everything is sent RAW. The hash
-     * seeds need not match the peer (§6.2); derive from the monotonic clock. */
+     * seeds need not match the peer (§6.2); derive from wall-clock time. */
     if (s->config.reorder.mode != MQVPN_REORDER_OFF) {
         uint64_t seed_base = now_us();
         conn->reorder_tx = mqvpn_reorder_tx_new(&s->config.reorder, seed_base);
@@ -514,6 +514,27 @@ cb_h3_conn_create(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_
 
     LOG_I(s, "H3 connection created");
     return 0;
+}
+
+/* Full per-conn teardown: free the reorder shim engines (allocated in
+ * cb_h3_conn_create) and the svr_conn_t itself. Shared by cb_h3_conn_close and
+ * the mqvpn_server_destroy defensive sweep so the two sites cannot drift and
+ * leak the reorder engines. Does NOT touch the session table / addr pool /
+ * disconnect callback — that bookkeeping is close-callback-specific and runs
+ * before this is called. */
+static void
+svr_conn_free(svr_conn_t *conn)
+{
+    if (!conn) return;
+    if (conn->reorder_tx) {
+        mqvpn_reorder_tx_free(conn->reorder_tx);
+        conn->reorder_tx = NULL;
+    }
+    if (conn->reorder_rx) {
+        mqvpn_reorder_rx_free(conn->reorder_rx);
+        conn->reorder_rx = NULL;
+    }
+    free(conn);
 }
 
 static int
@@ -543,17 +564,8 @@ cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_d
         mqvpn_addr_pool_release(&s->pool, &conn->assigned_ip);
     }
 
-    if (conn->reorder_tx) {
-        mqvpn_reorder_tx_free(conn->reorder_tx);
-        conn->reorder_tx = NULL;
-    }
-    if (conn->reorder_rx) {
-        mqvpn_reorder_rx_free(conn->reorder_rx);
-        conn->reorder_rx = NULL;
-    }
-
     LOG_I(s, "H3 connection closed");
-    free(conn);
+    svr_conn_free(conn);
     return 0;
 }
 
@@ -1397,10 +1409,12 @@ mqvpn_server_destroy(mqvpn_server_t *s)
         s->engine = NULL;
     }
 
-    /* Step 2: Defensive sweep — free any sessions not freed by engine callbacks */
+    /* Step 2: Defensive sweep — free any sessions not freed by engine callbacks.
+     * Uses svr_conn_free so the reorder engines are freed here too (the close
+     * callback that would normally free them did not fire for these conns). */
     for (int i = 1; i <= MQVPN_ADDR_POOL_MAX; i++) {
         if (s->sessions[i]) {
-            free(s->sessions[i]);
+            svr_conn_free(s->sessions[i]);
             s->sessions[i] = NULL;
         }
     }

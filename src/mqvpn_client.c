@@ -1728,7 +1728,7 @@ cli_start_connection(mqvpn_client_t *c)
      * stays gated on peer_reorder_supported (set later by negotiation), so until
      * then everything is sent RAW. RX is created so we can accept stamped
      * datagrams as soon as the peer advertises support. The hash seeds need not
-     * match the peer (§6.2); derive them from the monotonic clock + conn_id. */
+     * match the peer (§6.2); derive them from wall-clock time + conn_id. */
     if (c->config.reorder.mode != MQVPN_REORDER_OFF) {
         uint64_t seed_base = client_now_us(c) ^ ((uint64_t)c->conn_id << 32);
         conn->reorder_tx = mqvpn_reorder_tx_new(&c->config.reorder, seed_base);
