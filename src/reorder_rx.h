@@ -61,4 +61,11 @@ void mqvpn_reorder_rx_on_packet(mqvpn_reorder_rx_t *rx, const uint8_t *payload,
  */
 void mqvpn_reorder_rx_tick(mqvpn_reorder_rx_t *rx, uint64_t now_us);
 
+/*
+ * INTERNAL eval knob (§24 determinism): when set, the ACK-direction classifier
+ * never demotes a flow, so reorder behaviour is deterministic under evaluation.
+ * Deliberately NOT a public MQVPN_API and NOT exposed via INI/JSON config.
+ */
+void mqvpn_reorder_rx_set_force_no_demotion(mqvpn_reorder_rx_t *rx, int force);
+
 #endif /* MQVPN_REORDER_RX_H */

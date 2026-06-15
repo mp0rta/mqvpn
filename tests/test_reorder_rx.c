@@ -238,17 +238,25 @@ only_flow(mqvpn_reorder_rx_t *rx)
     return NULL;
 }
 
-/* §11.1 invariant check: gap_timer_active ⟺ buffer non-empty, over all flows. */
+/* §11.1 invariant check: gap_timer_active ⟺ buffer non-empty, over all flows.
+ * Hardening item 3: also assert pool_bytes_used == Σ over flows of buffer.bytes,
+ * which catches any charge/release asymmetry that ASan cannot see (the bytes are
+ * still individually malloc'd, so a mis-charge leaks accounting, not memory). */
 static int
 invariant_holds(mqvpn_reorder_rx_t *rx)
 {
+    uint64_t sum_bytes = 0;
     for (uint32_t i = 0; i < rx->n_buckets; i++) {
         for (mqvpn_reorder_flow_t *f = rx->buckets[i]; f; f = f->next) {
             int nonempty = !ring_empty(&f->buffer);
             if (f->gap_timer_active != nonempty) {
                 return 0;
             }
+            sum_bytes += f->buffer.bytes;
         }
+    }
+    if (rx->pool_bytes_used != sum_bytes) {
+        return 0;
     }
     return 1;
 }
@@ -958,6 +966,338 @@ test_rx_backstop_recovery(void)
     mqvpn_reorder_rx_free(rx);
 }
 
+/* ─────────── Task 3.5: ACK demotion + 2-mode pass-through ─────────── */
+
+/* Full §17 accounting identity (all five terminators): closed periods end in
+ * filled / timeout / overflow / demote / reset; one open (armed) period adds +1.
+ * §24.9 line 1119 full form. */
+static int
+accounting_holds_full(mqvpn_reorder_flow_t *f)
+{
+    uint64_t closed = f->stats.gap_filled_count + f->stats.gap_timeout_count +
+                      f->stats.gap_overflow_count + f->stats.gap_demote_count +
+                      f->stats.gap_reset_count;
+    uint64_t open = f->gap_timer_active ? 1u : 0u;
+    return f->stats.gap_count == closed + open;
+}
+
+/* A small-classify-window cfg so demotion is reachable in a few packets. */
+static mqvpn_reorder_config_t
+rx_cfg_demote(uint16_t window, uint16_t max_large)
+{
+    mqvpn_reorder_config_t c;
+    mqvpn_reorder_config_default(&c);
+    c.mode = MQVPN_REORDER_ON;
+    c.classify_window = window;
+    c.ack_demote_max_large_packets = max_large;
+    c.small_packet_threshold_bytes = 200; /* inner UDP payload >= 200 → large */
+    return c;
+}
+
+static void
+test_rx_ack_demote_small_flow(void)
+{
+    /* §11.6: a flow whose first classify_window packets are (nearly) all small →
+     * demoted to pass_through; subsequent packets delivered immediately even if
+     * out of order. */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg_demote(4, 1); /* window 4, allow <=1 large */
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+
+    /* 4 small (payload 50 < 200) in-order packets → window closes → demote. */
+    for (uint64_t s = 0; s < 4; s++) {
+        size_t n = build_reorder_dgram(buf, 0, s, (uint16_t)(s + 1), 5000, 443, 50);
+        mqvpn_reorder_rx_on_packet(rx, buf, n, s + 1);
+        ASSERT_TRUE(invariant_holds(rx), "invariant during small-flow classify");
+    }
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_TRUE(f->pass_through, "flow demoted to pass_through after small window");
+    ASSERT_EQ_INT(f->stats.ack_demote_count, 1, "ack_demote_count == 1");
+    ASSERT_TRUE(f->buffer.slots == NULL, "ring freed on demote");
+
+    /* now an out-of-order packet must be delivered immediately (no reorder). */
+    int before = rec.n;
+    size_t n = build_reorder_dgram(buf, 0, 99, 99, 5000, 443, 50); /* far ahead */
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 100);
+    ASSERT_EQ_INT(rec.n, before + 1, "pass_through delivers out-of-order immediately");
+    ASSERT_EQ_INT(rec.tags[rec.n - 1], 99, "delivered the pass-through packet");
+    ASSERT_TRUE(invariant_holds(rx), "invariant after pass-through delivery");
+    ASSERT_TRUE(accounting_holds_full(f), "accounting after demote");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_demote_tolerates_initial_large(void)
+{
+    /* §11.6 count threshold: 1-2 large (client Initial) among small still demotes. */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg_demote(5, 2); /* allow up to 2 large */
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[2048];
+
+    /* packet 0: large (payload 1200 >= 200), packets 1..4: small. large count=1<=2 */
+    size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 443, 1200);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1);
+    for (uint64_t s = 1; s < 5; s++) {
+        n = build_reorder_dgram(buf, 0, s, (uint16_t)(s + 1), 5000, 443, 50);
+        mqvpn_reorder_rx_on_packet(rx, buf, n, s + 1);
+    }
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_EQ_INT(f->classify_large, 1, "exactly one large counted");
+    ASSERT_TRUE(f->pass_through, "demoted despite one large (count threshold)");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_demote_payload_len_is_udp(void)
+{
+    /* §11.6 should-fix 2 / §24.9 line 1125: classification length is the inner UDP
+     * payload (IP+UDP headers EXCLUDED). Craft packets where header inclusion
+     * would flip the verdict: payload 190, threshold 200. With headers (20 IP +
+     * 8 UDP = 28) the total inner len is 218 >= 200 (would count as LARGE);
+     * with UDP-payload-only it is 190 < 200 (SMALL). Correct impl → all small →
+     * demote. */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg_demote(3, 0); /* allow ZERO large → strict */
+    c.small_packet_threshold_bytes = 200;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[512];
+
+    for (uint64_t s = 0; s < 3; s++) {
+        size_t n = build_reorder_dgram(buf, 0, s, (uint16_t)(s + 1), 5000, 443, 190);
+        mqvpn_reorder_rx_on_packet(rx, buf, n, s + 1);
+    }
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_EQ_INT(f->classify_large, 0,
+                  "UDP-payload 190 < 200 counted small (headers excluded)");
+    ASSERT_TRUE(f->pass_through, "demoted: UDP-payload length used, not inner-IP length");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_anomalous_drop_not_demote(void)
+{
+    /* §24.9 line 1122: the classify-window-FINAL packet being an anomalous drop
+     * (here too_far_ahead) must NOT demote; a late drop in that slot DOES count.
+     * Two sub-cases. */
+
+    /* sub-case A: final packet is too_far_ahead → not counted → window not closed
+     * → no demote. */
+    {
+        recorder_t rec = {0};
+        mqvpn_reorder_config_t c =
+            rx_cfg_demote(3, 3); /* allow all large; demote-friendly */
+        c.cap_packets_per_flow = 8;
+        mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+        uint8_t buf[256];
+
+        /* two small in-order (classify_seen=2). */
+        size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 443, 50);
+        mqvpn_reorder_rx_on_packet(rx, buf, n, 1);
+        n = build_reorder_dgram(buf, 0, 1, 2, 5000, 443, 50);
+        mqvpn_reorder_rx_on_packet(rx, buf, n, 2);
+        mqvpn_reorder_flow_t *f = only_flow(rx);
+        ASSERT_EQ_INT(f->classify_seen, 2, "two real packets counted");
+
+        /* third packet is far-ahead (seq 100, cap 8) → anomalous drop, NOT
+         * counted, NOT demote, classify_seen stays 2. */
+        n = build_reorder_dgram(buf, 0, 100, 3, 5000, 443, 50);
+        mqvpn_reorder_rx_on_packet(rx, buf, n, 3);
+        ASSERT_EQ_INT(f->classify_seen, 2, "anomalous drop not counted toward classify");
+        ASSERT_TRUE(!f->pass_through, "anomalous final packet did NOT demote");
+        ASSERT_EQ_INT(f->stats.too_far_ahead_drop_count, 1, "far-ahead drop recorded");
+        mqvpn_reorder_rx_free(rx);
+    }
+
+    /* sub-case B: final packet is a LATE drop → DOES count (real traffic) → demote. */
+    {
+        recorder_t rec = {0};
+        mqvpn_reorder_config_t c = rx_cfg_demote(3, 3);
+        mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+        uint8_t buf[256];
+
+        /* cold-start seq 10 (classify_seen=1), in-order seq 11 (=2). */
+        size_t n = build_reorder_dgram(buf, 0, 10, 1, 5000, 443, 50);
+        mqvpn_reorder_rx_on_packet(rx, buf, n, 1);
+        n = build_reorder_dgram(buf, 0, 11, 2, 5000, 443, 50);
+        mqvpn_reorder_rx_on_packet(rx, buf, n, 2);
+        mqvpn_reorder_flow_t *f = only_flow(rx);
+        ASSERT_EQ_INT(f->classify_seen, 2, "two counted");
+
+        /* third packet is late (seq 5 < expected 12) → late drop, COUNTS → window
+         * closes → demote. */
+        n = build_reorder_dgram(buf, 0, 5, 3, 5000, 443, 50);
+        mqvpn_reorder_rx_on_packet(rx, buf, n, 3);
+        ASSERT_EQ_INT(f->classify_seen, 3, "late drop counted toward classify");
+        ASSERT_TRUE(f->pass_through, "late drop in final slot DID demote");
+        ASSERT_EQ_INT(f->stats.too_late_drop_count, 1, "late drop recorded");
+        mqvpn_reorder_rx_free(rx);
+    }
+}
+
+static void
+test_rx_demote_current_gapfiller_order(void)
+{
+    /* §24.9 line 1127 (must-fix v2.4): the demote-triggering current packet that
+     * is a gap-filler (seq==expected) is delivered BEFORE the buffered packets.
+     * Build a buffer with a gap, then have the window-closing packet fill the gap
+     * AND trigger demote; the gap-filler + drained run must come out in order. */
+    recorder_t rec = {0};
+    /* window 3 so the 3rd real packet closes it. allow up to 3 large so payload
+     * size doesn't matter. */
+    mqvpn_reorder_config_t c = rx_cfg_demote(3, 3);
+    c.max_wait_ms = 1000000; /* no timeout during the test */
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[512];
+
+    /* p0: cold-start seq 0 (delivered, classify_seen=1), expected=1. */
+    size_t n = build_reorder_dgram(buf, 0, 0, 10, 5000, 443, 300);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1);
+    /* p1: seq 2 ahead → buffered (classify_seen=2). gap at 1. */
+    n = build_reorder_dgram(buf, 0, 2, 12, 5000, 443, 300);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 2);
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_EQ_INT(rec.n, 1, "only seq0 delivered so far");
+    ASSERT_EQ_INT(f->classify_seen, 2, "two classified");
+
+    /* p2: seq 1 fills the gap → step3 delivers seq1 (tag11), drains seq2 (tag12);
+     * classify_seen=3 → window closes → DEMOTE. Buffer now empty, but the order
+     * must be tag11 then tag12 (gap-filler before drained run). */
+    n = build_reorder_dgram(buf, 0, 1, 11, 5000, 443, 300);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 3);
+    ASSERT_TRUE(f->pass_through, "demoted on gap-filler window close");
+    ASSERT_EQ_INT(rec.n, 3, "seq0,1,2 all delivered");
+    ASSERT_EQ_INT(rec.tags[0], 10, "order: seq0 (tag10)");
+    ASSERT_EQ_INT(rec.tags[1], 11, "order: gap-filler seq1 (tag11) BEFORE buffered");
+    ASSERT_EQ_INT(rec.tags[2], 12, "order: drained seq2 (tag12)");
+    ASSERT_TRUE(invariant_holds(rx), "invariant after gap-filler demote");
+    ASSERT_TRUE(accounting_holds_full(f), "accounting after gap-filler demote");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_demote_current_ahead_order(void)
+{
+    /* §24.9 line 1128: the demote-triggering current packet that is AHEAD is
+     * delivered via the buffer flush in ascending seq order. */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg_demote(3, 3);
+    c.max_wait_ms = 1000000;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[512];
+
+    /* p0: cold-start seq 0 delivered (classify_seen=1), expected=1. */
+    size_t n = build_reorder_dgram(buf, 0, 0, 10, 5000, 443, 300);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1);
+    /* p1: seq 3 ahead → buffered (classify_seen=2). gap at 1,2. */
+    n = build_reorder_dgram(buf, 0, 3, 13, 5000, 443, 300);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 2);
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+
+    /* p2: seq 2 ahead → buffered (classify_seen=3) → window closes → DEMOTE.
+     * Flush delivers remaining buffer ascending: seq2 (tag12) then seq3 (tag13). */
+    n = build_reorder_dgram(buf, 0, 2, 12, 5000, 443, 300);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 3);
+    ASSERT_TRUE(f->pass_through, "demoted on ahead window close");
+    ASSERT_EQ_INT(rec.n, 3, "seq0 + flushed seq2,seq3");
+    ASSERT_EQ_INT(rec.tags[0], 10, "seq0 first");
+    ASSERT_EQ_INT(rec.tags[1], 12, "flush ascending: seq2 (tag12)");
+    ASSERT_EQ_INT(rec.tags[2], 13, "flush ascending: seq3 (tag13)");
+    ASSERT_TRUE(invariant_holds(rx), "invariant after ahead demote");
+    ASSERT_TRUE(accounting_holds_full(f), "accounting after ahead demote");
+    /* this demote ended an ACTIVE period (timer was armed) → gap_demote_count++. */
+    ASSERT_EQ_INT(f->stats.gap_demote_count, 1, "demote flush ended active period");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_passthrough_A_no_state(void)
+{
+    /* §11.5 mode A / §24.9 line 1126: policy wait_ms==0 → NO flow state created,
+     * immediate delivery, FLOW_RESET and seq ignored. */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c;
+    mqvpn_reorder_config_default(&c);
+    c.mode = MQVPN_REORDER_ON;
+    c.max_wait_ms = 0; /* mode A */
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+
+    /* out-of-order + FLOW_RESET should all be delivered immediately, in arrival
+     * order, with NO flow created. */
+    size_t n = build_reorder_dgram(buf, 0, 5, 1, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1);
+    n = build_reorder_dgram(buf, 0, 2, 2, 5000, 443,
+                            100); /* "out of order" but delivered */
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 2);
+    n = build_reorder_dgram(buf, MQVPN_REORDER_FLAG_RESET, 0, 3, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 3);
+
+    ASSERT_EQ_INT(rec.n, 3, "all 3 delivered immediately (mode A)");
+    ASSERT_EQ_INT(rec.tags[0], 1, "arrival order 1");
+    ASSERT_EQ_INT(rec.tags[1], 2, "arrival order 2 (seq ignored)");
+    ASSERT_EQ_INT(rec.tags[2], 3, "arrival order 3 (FLOW_RESET ignored)");
+    ASSERT_TRUE(only_flow(rx) == NULL, "no flow state created in mode A");
+    ASSERT_EQ_INT((long long)rx->n_flows, 0, "n_flows == 0 in mode A");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_passthrough_B_undemote_on_reset(void)
+{
+    /* §11.5 mode B / §24.9 lines 1126,1129: a demoted (B) flow keeps its struct;
+     * an idle-grace FLOW_RESET (step 1, before pass_through step 2) un-demotes +
+     * reinits the classifier. */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg_demote(3, 3);
+    c.reset_idle_grace_ms = 10000;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+
+    /* demote via 3 in-order packets at t≈1s. */
+    for (uint64_t s = 0; s < 3; s++) {
+        size_t n = build_reorder_dgram(buf, 0, s, (uint16_t)(s + 1), 5000, 443, 50);
+        mqvpn_reorder_rx_on_packet(rx, buf, n, 1000000 + s);
+    }
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_TRUE(f->pass_through, "flow demoted");
+    ASSERT_TRUE(f != NULL, "struct retained in mode B");
+
+    /* idle-grace FLOW_RESET 20s later → honored (step 1 runs before pass_through):
+     * un-demotes, reinits classifier, reanchors expected. */
+    size_t n = build_reorder_dgram(buf, MQVPN_REORDER_FLAG_RESET, 0, 77, 5000, 443, 50);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000000 + 20000000ULL);
+    ASSERT_TRUE(!f->pass_through, "un-demoted by idle-grace reset");
+    ASSERT_EQ_INT(f->classify_seen, 0, "classifier reinitialized");
+    ASSERT_EQ_INT(f->classify_large, 0, "classify_large reset");
+    ASSERT_EQ_INT(f->expected, 1, "expected reanchored to seq+1");
+    ASSERT_EQ_INT(rec.tags[rec.n - 1], 77, "reset packet delivered after un-demote");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_eval_force_no_demotion(void)
+{
+    /* §24 determinism: with the internal force-no-demotion flag set, no demote
+     * ever, regardless of an all-small flow. */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg_demote(3, 3);
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    mqvpn_reorder_rx_set_force_no_demotion(rx, 1);
+    uint8_t buf[256];
+
+    for (uint64_t s = 0; s < 10; s++) {
+        size_t n = build_reorder_dgram(buf, 0, s, (uint16_t)(s + 1), 5000, 443, 50);
+        mqvpn_reorder_rx_on_packet(rx, buf, n, s + 1);
+    }
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_TRUE(!f->pass_through, "no demote with force-no-demotion set");
+    ASSERT_EQ_INT(f->classify_seen, 0, "classifier never advanced (no-op)");
+    ASSERT_EQ_INT(f->stats.ack_demote_count, 0, "ack_demote_count stays 0");
+    mqvpn_reorder_rx_free(rx);
+}
+
 int
 main(void)
 {
@@ -994,6 +1334,17 @@ main(void)
     test_rx_short_flow_reset();
     test_rx_reset_discard_not_deliver();
     test_rx_backstop_recovery();
+
+    /* Task 3.5: ACK demotion + 2-mode pass-through */
+    test_rx_ack_demote_small_flow();
+    test_rx_demote_tolerates_initial_large();
+    test_rx_demote_payload_len_is_udp();
+    test_rx_anomalous_drop_not_demote();
+    test_rx_demote_current_gapfiller_order();
+    test_rx_demote_current_ahead_order();
+    test_rx_passthrough_A_no_state();
+    test_rx_passthrough_B_undemote_on_reset();
+    test_rx_eval_force_no_demotion();
 
     fprintf(stderr, "test_reorder_rx: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

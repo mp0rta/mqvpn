@@ -323,6 +323,33 @@ typedef struct {
     int n_rules;
 } mqvpn_reorder_config_t;
 
+/* ─────────────────────────── §17: RX statistics ───────────────────────────
+ *
+ * Per-flow receiver counters (§17). Lives here (not in reorder_rx.c) so the RX
+ * snapshot accessor (mqvpn_reorder_rx_get_stats) can return it across the TU
+ * boundary. wait period 1 回 = arm_gap_timer 1 回; each period ends in exactly
+ * one of filled / timeout / overflow / demote / reset, giving the §17 identity:
+ *
+ *   gap_count = gap_filled_count + gap_timeout_count + gap_overflow_count
+ *             + gap_demote_count  + gap_reset_count
+ */
+typedef struct {
+    uint64_t delivered_count;
+    uint64_t too_late_drop_count;
+    uint64_t too_far_ahead_drop_count;
+    uint64_t duplicate_drop_count;
+    uint64_t per_flow_limit_drop_count;
+    uint64_t pool_drop_count;
+    uint64_t reset_discard_count; /* §17: old-epoch buffered packets discarded on reset */
+    uint64_t gap_count;           /* gap episodes opened (buffer went empty→nonempty) */
+    uint64_t gap_filled_count;    /* gap episodes closed by the missing seq arriving */
+    uint64_t gap_timeout_count;   /* §17: periods ended by timeout skip (§12.1) */
+    uint64_t gap_overflow_count;  /* §17: periods ended by overflow_flush (§12.3) */
+    uint64_t gap_demote_count;    /* §17: periods ended by ACK demote flush (§11.6) */
+    uint64_t gap_reset_count;     /* §17: periods ended by FLOW_RESET discard (§11.6) */
+    uint64_t ack_demote_count;    /* §17: flows demoted to pass-through (§11.6) */
+} mqvpn_reorder_stats_t;
+
 /* Populate cfg with the §16.1 default values. */
 static inline void
 mqvpn_reorder_config_default(mqvpn_reorder_config_t *cfg)

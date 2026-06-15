@@ -202,6 +202,9 @@ ring_remove(struct ring *r, uint64_t seq, uint16_t *out_len)
 static uint64_t
 ring_lowest_seq(const struct ring *r, uint64_t expected)
 {
+    if (r->slots == NULL) {
+        return expected; /* self-defensive: never grown → empty (match contains/remove) */
+    }
     for (uint32_t i = 0; i < r->size; i++) {
         uint64_t seq = expected + i;
         const struct slot *s = &r->slots[RING_IDX(r, seq)];
@@ -220,21 +223,8 @@ ring_lowest_seq(const struct ring *r, uint64_t expected)
  * part B; for part A each buffered slot owns its own malloc'd copy.
  */
 
-/* §17 RX statistics (subset implemented in part A/B; the rest land in part C). */
-typedef struct {
-    uint64_t delivered_count;
-    uint64_t too_late_drop_count;
-    uint64_t too_far_ahead_drop_count;
-    uint64_t duplicate_drop_count;
-    uint64_t per_flow_limit_drop_count;
-    uint64_t pool_drop_count;
-    uint64_t reset_discard_count; /* §17: old-epoch buffered packets discarded on reset */
-    uint64_t gap_count;           /* gap episodes opened (buffer went empty→nonempty) */
-    uint64_t gap_filled_count;    /* gap episodes closed by the missing seq arriving */
-    uint64_t gap_timeout_count;   /* §17: periods ended by timeout skip (§12.1) */
-    uint64_t gap_overflow_count;  /* §17: periods ended by overflow_flush (§12.3) */
-    uint64_t gap_reset_count;     /* §17: periods ended by FLOW_RESET discard (§11.6) */
-} mqvpn_reorder_stats_t;
+/* §17 RX statistics: mqvpn_reorder_stats_t now lives in reorder.h so the public
+ * snapshot accessor can return it across the TU boundary. */
 
 typedef struct mqvpn_reorder_flow {
     mqvpn_flow_key_t key;
@@ -250,7 +240,9 @@ typedef struct mqvpn_reorder_flow {
     uint64_t last_seen_us;     /* observation time (stats) */
     uint64_t last_progress_us; /* deliver/buffer/advance time (eviction) */
 
-    /* ACK-direction demotion (§11.6) — INERT in part A (see ACK demotion seam). */
+    /* ACK-direction demotion (§11.6). pass_through: demoted → reorder bypassed,
+     * deliver immediately (ring freed). classify_seen/large: rolling count over
+     * the first classify_window real-traffic packets. */
     int pass_through;
     uint16_t classify_seen;
     uint16_t classify_large;
@@ -526,6 +518,115 @@ reset_reorder_flow(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f)
     f->classify_large = 0;
 }
 
+/* ───────────────── §11.6: ACK-direction demotion classifier ───────────────
+ *
+ * A cheap rolling classifier observes the first `classify_window` real-traffic
+ * packets of a flow. The judgment length is the INNER UDP PAYLOAD length (§11.6
+ * "udp_payload_len" / should-fix 2): IP + UDP headers excluded, so IPv4/IPv6
+ * header-length differences and the 8-byte UDP header do not skew the verdict.
+ * After the window, large <= ack_demote_max_large_packets (a COUNT threshold,
+ * tolerating 1-2 client-Initial large packets) ⇒ ACK direction ⇒ demote.
+ */
+
+typedef enum {
+    CLASSIFY_UNCHANGED,
+    CLASSIFY_DEMOTED, /* demote decided; pass_through/flush handled by caller (§11.3 step
+                         4) */
+} classify_result;
+
+/* §11.6 udp_payload_len: inner UDP payload length of a bare inner IP packet
+ * (IP header + 8-byte UDP header excluded). The packet has already been
+ * 5-tuple-parsed (so it is a well-formed IPv4/IPv6 UDP packet); we recompute the
+ * header span here to subtract it. Returns 0 if the packet is too short for a
+ * UDP payload (defensive — should not happen post-parse). */
+static uint32_t
+inner_udp_payload_len(const uint8_t *pkt, uint16_t len)
+{
+    if (len < 1) {
+        return 0;
+    }
+    uint8_t version = (uint8_t)(pkt[0] >> 4);
+    size_t hdr = 0;
+    if (version == 4) {
+        if (len < 20) {
+            return 0;
+        }
+        hdr = (size_t)(pkt[0] & 0x0f) * 4; /* IHL words → bytes */
+    } else if (version == 6) {
+        /* The 5-tuple parser already walked any extension headers; for the
+         * classifier we use the fixed 40-byte IPv6 header. Extension headers are
+         * rare on inner UDP and would only make the payload appear slightly
+         * larger, never flipping a small ACK to large. */
+        hdr = 40;
+    } else {
+        return 0;
+    }
+    size_t l4 = hdr + 8; /* + UDP header */
+    if ((size_t)len <= l4) {
+        return 0;
+    }
+    return (uint32_t)((size_t)len - l4);
+}
+
+/* §11.6 classify_update: JUDGMENT ONLY. Observes one real-traffic packet, counts
+ * it as large iff its inner UDP payload >= small_packet_threshold_bytes, and on
+ * the window-closing packet returns CLASSIFY_DEMOTED iff the large count is at or
+ * below ack_demote_max_large_packets. Never touches pass_through or the buffer —
+ * the caller (step 4) owns that. A no-op once the window has closed, and when the
+ * eval force-no-demotion knob is set (§24 determinism). */
+static classify_result
+classify_update(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, const uint8_t *pkt,
+                uint16_t len)
+{
+    if (rx->cfg.eval_force_no_demotion) {
+        return CLASSIFY_UNCHANGED; /* §24 eval determinism: never demote */
+    }
+    if (f->classify_seen >= rx->cfg.classify_window) {
+        return CLASSIFY_UNCHANGED; /* already judged */
+    }
+    f->classify_seen++;
+    if (inner_udp_payload_len(pkt, len) >= rx->cfg.small_packet_threshold_bytes) {
+        f->classify_large++;
+    }
+    if (f->classify_seen == rx->cfg.classify_window) {
+        if (f->classify_large <= rx->cfg.ack_demote_max_large_packets) {
+            return CLASSIFY_DEMOTED; /* nearly all small → ACK direction */
+        }
+    }
+    return CLASSIFY_UNCHANGED;
+}
+
+/* §11.6 flush_buffer_for_demote: the flow has been judged ACK-direction; move to
+ * pass-through within the SAME seq space. Deliver every remaining buffered packet
+ * in ascending seq order (skipping gaps — we no longer wait), then free the ring
+ * and stop the timer. Distinct from overflow_flush (advances one period) and from
+ * discard_buffer_for_reset (drops, new epoch). The current packet was already
+ * handled by step 3, so this flushes only the REMAINING buffer.
+ *
+ * §17 accounting: charge gap_demote_count only when this ends an ACTIVE armed
+ * period (gap_timer_active), keeping the §17 identity exact. */
+static void
+flush_buffer_for_demote(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t now_us)
+{
+    if (f->gap_timer_active) {
+        f->stats.gap_demote_count++; /* §17: armed period ended by demote flush */
+    }
+    while (!ring_empty(&f->buffer)) {
+        uint64_t lowest = ring_lowest_seq(&f->buffer, f->expected);
+        f->expected = lowest; /* skip the gap; ascending delivery from here */
+        uint16_t plen = 0;
+        void *pkt;
+        while ((pkt = ring_remove(&f->buffer, f->expected, &plen)) != NULL) {
+            deliver_pkt(rx, (const uint8_t *)pkt, plen, f);
+            pool_release(rx, pkt, plen);
+            f->expected++;
+        }
+    }
+    f->last_progress_us = now_us;
+    stop_gap_timer(f);
+    ring_free(&f->buffer); /* pass-through: ring no longer needed */
+}
+
 /* ─────────────────────── §11.3 buffer_admit + process ─────────────────────
  */
 
@@ -705,10 +806,10 @@ process_reorder_packet(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t
 }
 
 /* §11.3 on_reordered dispatch. Step ordering is fixed by the spec:
- *   1. FLOW_RESET honor   — WIRED (§11.3 step 1, idle-grace + reset)
- *   2. pass_through        — part C seam (INERT; never set in parts A/B)
- *   3. process_reorder_packet (fully implemented here)
- *   4. classify + demote   — part C seam (INERT no-op here)
+ *   1. FLOW_RESET honor       (idle-grace; reset_reorder_flow un-demotes + reclassifies)
+ *   2. pass_through fast path  (ACK demotion mode B: deliver immediately, ring freed)
+ *   3. process_reorder_packet  (cold-start / in-order+drain / late / ahead / dup)
+ *   4. classify + demote       (real traffic only; judgment-only classifier)
  */
 static void
 on_reordered(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t seq, uint8_t flags,
@@ -724,7 +825,10 @@ on_reordered(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t seq, uint
      *    becoming a late drop if seq < expected, with no rollback (§14.2(a)). */
     if (flags & MQVPN_REORDER_FLAG_RESET) {
         uint64_t grace_us = (uint64_t)rx->cfg.reset_idle_grace_ms * 1000ULL;
-        if (!f->initialized || (now_us - f->last_progress_us) > grace_us) {
+        /* wrap-safe: a backwards-clock blip (now_us < last_progress) must NOT
+         * spuriously satisfy idle-grace and discard live data (§11.3). */
+        if (!f->initialized ||
+            (now_us > f->last_progress_us && (now_us - f->last_progress_us) > grace_us)) {
             reset_reorder_flow(rx, f); /* discard old buffer (NOT deliver) + reinit */
             f->initialized = 1;
             f->expected = seq;
@@ -736,16 +840,34 @@ on_reordered(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t seq, uint
         /* idle-grace not met → ignore the flag and fall through to normal path. */
     }
 
-    /* 2. pass_through (ACK demotion fast path): part C.
-     *    pass_through is never set in parts A/B, so this branch is structurally
-     *    unreachable; left unwired (not a half-branch) per the seam contract. */
+    /* 2. pass_through (ACK demotion mode B, §11.5): demoted flows keep their
+     *    struct (for FLOW_RESET un-demote above + idle eviction) but the ring is
+     *    freed; deliver immediately without looking at seq. Evaluated AFTER step 1
+     *    so an idle-grace reset un-demotes + reclassifies the flow. */
+    if (f->pass_through) {
+        deliver_pkt(rx, pkt, len, f);
+        f->last_progress_us = now_us;
+        return;
+    }
 
     /* 3. process the current packet through the normal reorder logic. */
-    process_reorder_packet(rx, f, seq, pkt, len, now_us);
+    reorder_process_result res = process_reorder_packet(rx, f, seq, pkt, len, now_us);
 
-    /* 4. ACK demotion: part C
-     *    classify_update + flush_buffer_for_demote on real traffic (DELIVERED /
-     *    BUFFERED / DROPPED_LATE) is added in part C. */
+    /* 4. ACK demotion (§11.6). Only real traffic (delivered / buffered / late)
+     *    feeds the classifier; anomalous drops (too_far_ahead / limit / pool /
+     *    duplicate) neither count nor trigger demote (§24.9 line 1122).
+     *    classify_update returns a JUDGMENT only; on CLASSIFY_DEMOTED the caller
+     *    flushes the REMAINING buffer (the current packet was already handled by
+     *    step 3, so a gap-filler current is delivered first and an ahead current
+     *    is flushed in ascending order, §24.9 lines 1127-1128). */
+    if (res == REORDER_DELIVERED || res == REORDER_BUFFERED ||
+        res == REORDER_DROPPED_LATE) {
+        if (classify_update(rx, f, pkt, len) == CLASSIFY_DEMOTED) {
+            flush_buffer_for_demote(rx, f, now_us);
+            f->pass_through = 1;
+            f->stats.ack_demote_count++;
+        }
+    }
 }
 
 /* ───────────────────────────── public API ─────────────────────────────── */
@@ -810,6 +932,16 @@ mqvpn_reorder_rx_on_packet(mqvpn_reorder_rx_t *rx, const uint8_t *payload, size_
         return; /* nothing to deliver / oversized */
     }
 
+    /* §11.5 mode A (policy wait_ms == 0): complete pass-through with NO flow
+     * state. The receiver never looks at seq, FLOW_RESET, or the classifier — it
+     * delivers the inner packet immediately. Distinct from mode B (runtime ACK
+     * demotion), which keeps a flow struct. v1 wait is the fixed cfg.max_wait_ms,
+     * so wait_ms == 0 is decided once here, before any flow is created. */
+    if (rx->cfg.max_wait_ms == 0) {
+        rx->deliver(inner, inner_len, rx->deliver_ctx);
+        return;
+    }
+
     /* §6: flow key is the inner-IP 5-tuple. If the inner packet is not a
      * parseable UDP 5-tuple it should not have been stamped REORDERED; drop. */
     mqvpn_flow_key_t key;
@@ -845,7 +977,10 @@ mqvpn_reorder_rx_tick(mqvpn_reorder_rx_t *rx, uint64_t now_us)
         mqvpn_reorder_flow_t **pp = &rx->buckets[i];
         while (*pp != NULL) {
             mqvpn_reorder_flow_t *f = *pp;
-            if ((now_us - f->last_progress_us) > idle_us) {
+            /* wrap-safe: a backwards-clock blip must NOT spuriously evict a live
+             * flow (§14 / §14.2(c)). */
+            if (now_us > f->last_progress_us &&
+                (now_us - f->last_progress_us) > idle_us) {
                 *pp = f->next; /* unlink from the chain */
                 flow_destroy(rx, f);
                 rx->n_flows--;
@@ -853,5 +988,13 @@ mqvpn_reorder_rx_tick(mqvpn_reorder_rx_t *rx, uint64_t now_us)
                 pp = &f->next;
             }
         }
+    }
+}
+
+void
+mqvpn_reorder_rx_set_force_no_demotion(mqvpn_reorder_rx_t *rx, int force)
+{
+    if (rx) {
+        rx->cfg.eval_force_no_demotion = force ? 1 : 0; /* §24 eval determinism */
     }
 }
