@@ -73,12 +73,21 @@ bench_check_test_deps nc jq
 # ── Generate the reorder INI (config mechanism: --config base + CLI override) ──
 # Keys/values cross-checked against src/config.c:
 #   [Reorder] Enabled  on/off   -> parse_reorder_enabled (config.c:298)
+#   [Reorder] MaxWaitMs <ms>     -> config.c (SEC_REORDER)
 #   [ReorderRule] Proto udp      -> parse_reorder_proto   (config.c:319)
 #   [ReorderRule] Port  <P>      -> config.c:612
 #   [ReorderRule] Profile quic_bulk -> parse_reorder_profile (config.c:336)
+#
+# MaxWaitMs = 60 is chosen ABOVE the 40ms path-B spread (netem below) on purpose:
+# the late packet from the slow path then arrives WITHIN the reorder wait window,
+# so the buffered gap actually FILLS (gap_filled_count>0) instead of timing out.
+# This lets Phase B prove the engine genuinely re-orders packets, not merely that
+# it activates. (With the default 30ms wait < 40ms spread, every period would
+# time out — the §24 H5 "wait < RTT spread" regime where the shim only adds cost.)
 cat >"$INI_ON" <<EOF
 [Reorder]
 Enabled = on
+MaxWaitMs = 60
 
 [ReorderRule]
 Proto = udp
@@ -252,9 +261,21 @@ if [ "$WORKLOAD_KIND" = "iperf3" ]; then
         echo "      flow actually striped across the RTT-spread paths? raw=$reorder_stats"
         fail=1
     fi
+    # Stronger evidence: the engine did not just activate, it actually RE-ORDERED.
+    # MaxWaitMs=60 > the 40ms path-B spread, so the late packet arrives inside the
+    # wait window and the buffered gap fills. gap_filled>0 proves real in-tunnel
+    # order correction (the feature delivering value), not merely detection.
+    if [ "${gap_filled:-0}" -gt 0 ]; then
+        echo "PASS: reorder engine corrected ordering in-tunnel (gap_filled=$gap_filled)"
+    else
+        echo "FAIL: no gaps filled (gap_filled=$gap_filled) despite MaxWaitMs(60) >"
+        echo "      path-B spread(40ms) — late packets should arrive within the wait."
+        echo "      raw=$reorder_stats"
+        fail=1
+    fi
 else
-    echo "SKIP: engine-fired (gap_count>0) check needs iperf3; ping fallback is too"
-    echo "      low-rate to guarantee reordering. gap_count=$gap_count (informational)."
+    echo "SKIP: engine-fired/filled checks need iperf3; ping fallback is too low-rate"
+    echo "      to guarantee reordering. gap_count=$gap_count gap_filled=$gap_filled (info)."
 fi
 
 # Non-fatal breakdown for the human reading the run. Whether a gap closes by
