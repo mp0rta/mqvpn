@@ -265,8 +265,9 @@ if(BUILD_TESTING)
         src/path_state_machine.c
     )
     add_executable(test_control_response_bound tests/test_control_response_bound.c)
+    add_executable(test_reorder_common tests/test_reorder_common.c)
 
-    foreach(t test_config test_auth test_session test_dns test_flow_sched test_status test_path_state_machine test_control_response_bound)
+    foreach(t test_config test_auth test_session test_dns test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common)
         target_include_directories(${t} PRIVATE
             ${CMAKE_SOURCE_DIR}/src
             ${CMAKE_SOURCE_DIR}/src/platform/linux
