@@ -85,6 +85,8 @@ enum {
     SEC_AUTH,
     SEC_MULTIPATH,
     SEC_CONTROL,
+    SEC_REORDER,
+    SEC_REORDER_RULE,
 };
 
 static int
@@ -96,6 +98,8 @@ parse_section(const char *name)
     if (strcasecmp(name, "Auth") == 0) return SEC_AUTH;
     if (strcasecmp(name, "Multipath") == 0) return SEC_MULTIPATH;
     if (strcasecmp(name, "Control") == 0) return SEC_CONTROL;
+    if (strcasecmp(name, "Reorder") == 0) return SEC_REORDER;
+    if (strcasecmp(name, "ReorderRule") == 0) return SEC_REORDER_RULE;
     return -1;
 }
 
@@ -287,6 +291,92 @@ json_read_users(mqvpn_file_config_t *cfg, const char *p)
     return (*p == ']') ? 0 : -1;
 }
 
+/* §16.1 [Reorder] Enabled mapping: off/false→OFF, on/true→ON, auto→ON+warn
+ * (adaptive is a later phase; v1 treats auto as ON). Returns 0 on a recognized
+ * value (and writes *out), -1 otherwise. */
+static int
+parse_reorder_enabled(const char *val, mqvpn_reorder_mode_t *out)
+{
+    if (strcasecmp(val, "off") == 0 || strcasecmp(val, "false") == 0) {
+        *out = MQVPN_REORDER_OFF;
+        return 0;
+    }
+    if (strcasecmp(val, "on") == 0 || strcasecmp(val, "true") == 0) {
+        *out = MQVPN_REORDER_ON;
+        return 0;
+    }
+    if (strcasecmp(val, "auto") == 0) {
+        LOG_WRN("[Reorder] Enabled=auto: adaptive is Phase 3; treating as ON");
+        *out = MQVPN_REORDER_ON;
+        return 0;
+    }
+    return -1;
+}
+
+/* Parse an L4 protocol token for [ReorderRule] Proto. v1 only handles UDP
+ * (the only eligible protocol, §4); a bare numeric value is also accepted. */
+static int
+parse_reorder_proto(const char *val, uint8_t *out)
+{
+    if (strcasecmp(val, "udp") == 0) {
+        *out = MQVPN_IPPROTO_UDP;
+        return 0;
+    }
+    int v = 0;
+    if (parse_int_strict(val, &v) == 0 && v >= 0 && v <= 255) {
+        *out = (uint8_t)v;
+        return 0;
+    }
+    return -1;
+}
+
+static int
+parse_reorder_profile(const char *val, mqvpn_reorder_profile_t *out)
+{
+    if (strcasecmp(val, "quic_bulk") == 0) {
+        *out = MQVPN_RPROF_QUIC_BULK;
+        return 0;
+    }
+    if (strcasecmp(val, "low_latency") == 0) {
+        *out = MQVPN_RPROF_LOW_LATENCY;
+        return 0;
+    }
+    if (strcasecmp(val, "default_udp") == 0) {
+        *out = MQVPN_RPROF_DEFAULT_UDP;
+        return 0;
+    }
+    return -1;
+}
+
+/* u32 helper sharing parse_u64_strict's strictness, with a range clamp. */
+static int
+parse_u32_strict(const char *val, uint32_t *out)
+{
+    unsigned long long v = 0;
+    if (parse_u64_strict(val, &v) < 0 || v > 0xffffffffULL) return -1;
+    *out = (uint32_t)v;
+    return 0;
+}
+
+/* Begin a new [ReorderRule] instance: push a default-initialized rule slot that
+ * subsequent Proto/Port/Profile keys fill in (mirrors [Multipath] Path= cap
+ * handling). Returns 0 on success, -1 if the rule cap is hit (already warned). */
+static int
+reorder_rule_begin(mqvpn_file_config_t *cfg, int lineno, const char *path)
+{
+    if (cfg->reorder.n_rules >= MQVPN_REORDER_MAX_RULES) {
+        LOG_WRN("%s:%d: max %d reorder rules supported, ignoring [ReorderRule]", path,
+                lineno, MQVPN_REORDER_MAX_RULES);
+        return -1;
+    }
+    mqvpn_reorder_rule_t *r = &cfg->reorder.rules[cfg->reorder.n_rules];
+    r->proto = MQVPN_IPPROTO_UDP; /* v1 default: UDP */
+    r->port = 0;                  /* match-any until Port= sets it */
+    r->profile = MQVPN_RPROF_QUIC_BULK;
+    cfg->reorder.n_rules++;
+    return 0;
+}
+
 /* Handle a key=value pair in the given section */
 static void
 handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *val,
@@ -413,6 +503,127 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
             LOG_WRN("%s:%d: unknown key '%s' in [Control]", path, lineno, key);
         }
         break;
+
+    case SEC_REORDER: {
+        /* All numeric keys store the raw value; cross-side invariants (cap
+         * power-of-two, ingress < egress) are enforced by
+         * mqvpn_reorder_config_validate() when the config is applied. */
+        mqvpn_reorder_config_t *r = &cfg->reorder;
+        if (strcasecmp(key, "Enabled") == 0) {
+            mqvpn_reorder_mode_t m = MQVPN_REORDER_OFF;
+            if (parse_reorder_enabled(val, &m) < 0) {
+                LOG_WRN("%s:%d: invalid [Reorder] Enabled '%s'; ignoring", path, lineno,
+                        val);
+            } else {
+                r->mode = m;
+            }
+        } else if (strcasecmp(key, "MaxWaitMs") == 0) {
+            uint32_t v = 0;
+            if (parse_u32_strict(val, &v) < 0)
+                LOG_WRN("%s:%d: invalid MaxWaitMs '%s'", path, lineno, val);
+            else
+                r->max_wait_ms = v;
+        } else if (strcasecmp(key, "CapPackets") == 0) {
+            uint32_t v = 0;
+            if (parse_u32_strict(val, &v) < 0)
+                LOG_WRN("%s:%d: invalid CapPackets '%s'", path, lineno, val);
+            else
+                r->cap_packets_per_flow = v;
+        } else if (strcasecmp(key, "MaxBytesPerFlow") == 0) {
+            unsigned long long v = 0;
+            if (parse_u64_strict(val, &v) < 0)
+                LOG_WRN("%s:%d: invalid MaxBytesPerFlow '%s'", path, lineno, val);
+            else
+                r->max_buffer_bytes_per_flow = v;
+        } else if (strcasecmp(key, "ClassifyWindow") == 0) {
+            uint32_t v = 0;
+            if (parse_u32_strict(val, &v) < 0 || v > 0xffff)
+                LOG_WRN("%s:%d: invalid ClassifyWindow '%s'", path, lineno, val);
+            else
+                r->classify_window = (uint16_t)v;
+        } else if (strcasecmp(key, "AckDemoteMaxLarge") == 0) {
+            uint32_t v = 0;
+            if (parse_u32_strict(val, &v) < 0 || v > 0xffff)
+                LOG_WRN("%s:%d: invalid AckDemoteMaxLarge '%s'", path, lineno, val);
+            else
+                r->ack_demote_max_large_packets = (uint16_t)v;
+        } else if (strcasecmp(key, "SmallPacketThreshold") == 0) {
+            uint32_t v = 0;
+            if (parse_u32_strict(val, &v) < 0)
+                LOG_WRN("%s:%d: invalid SmallPacketThreshold '%s'", path, lineno, val);
+            else
+                r->small_packet_threshold_bytes = v;
+        } else if (strcasecmp(key, "ResetMarkPackets") == 0) {
+            uint32_t v = 0;
+            if (parse_u32_strict(val, &v) < 0)
+                LOG_WRN("%s:%d: invalid ResetMarkPackets '%s'", path, lineno, val);
+            else
+                r->reset_mark_packets = v;
+        } else if (strcasecmp(key, "ResetIdleGraceMs") == 0) {
+            uint32_t v = 0;
+            if (parse_u32_strict(val, &v) < 0)
+                LOG_WRN("%s:%d: invalid ResetIdleGraceMs '%s'", path, lineno, val);
+            else
+                r->reset_idle_grace_ms = v;
+        } else if (strcasecmp(key, "MaxFlows") == 0) {
+            uint32_t v = 0;
+            if (parse_u32_strict(val, &v) < 0)
+                LOG_WRN("%s:%d: invalid MaxFlows '%s'", path, lineno, val);
+            else
+                r->max_flows = v;
+        } else if (strcasecmp(key, "GlobalMaxBytes") == 0) {
+            unsigned long long v = 0;
+            if (parse_u64_strict(val, &v) < 0)
+                LOG_WRN("%s:%d: invalid GlobalMaxBytes '%s'", path, lineno, val);
+            else
+                r->global_max_buffer_bytes = v;
+        } else if (strcasecmp(key, "IngressIdleSec") == 0) {
+            uint32_t v = 0;
+            if (parse_u32_strict(val, &v) < 0)
+                LOG_WRN("%s:%d: invalid IngressIdleSec '%s'", path, lineno, val);
+            else
+                r->ingress_idle_timeout_sec = v;
+        } else if (strcasecmp(key, "EgressIdleSec") == 0) {
+            uint32_t v = 0;
+            if (parse_u32_strict(val, &v) < 0)
+                LOG_WRN("%s:%d: invalid EgressIdleSec '%s'", path, lineno, val);
+            else
+                r->egress_idle_timeout_sec = v;
+        } else {
+            LOG_WRN("%s:%d: unknown key '%s' in [Reorder]", path, lineno, key);
+        }
+        break;
+    }
+
+    case SEC_REORDER_RULE: {
+        /* Keys fill the rule slot pushed by reorder_rule_begin() on section
+         * entry. If the rule cap was hit, n_rules did not grow and we have no
+         * slot to write — drop the keys silently (the cap warning already fired). */
+        if (cfg->reorder.n_rules == 0) break;
+        mqvpn_reorder_rule_t *rule = &cfg->reorder.rules[cfg->reorder.n_rules - 1];
+        if (strcasecmp(key, "Proto") == 0) {
+            uint8_t p = 0;
+            if (parse_reorder_proto(val, &p) < 0)
+                LOG_WRN("%s:%d: invalid [ReorderRule] Proto '%s'", path, lineno, val);
+            else
+                rule->proto = p;
+        } else if (strcasecmp(key, "Port") == 0) {
+            uint32_t v = 0;
+            if (parse_u32_strict(val, &v) < 0 || v > 0xffff)
+                LOG_WRN("%s:%d: invalid [ReorderRule] Port '%s'", path, lineno, val);
+            else
+                rule->port = (uint16_t)v;
+        } else if (strcasecmp(key, "Profile") == 0) {
+            mqvpn_reorder_profile_t prof = MQVPN_RPROF_QUIC_BULK;
+            if (parse_reorder_profile(val, &prof) < 0)
+                LOG_WRN("%s:%d: invalid [ReorderRule] Profile '%s'", path, lineno, val);
+            else
+                rule->profile = prof;
+        } else {
+            LOG_WRN("%s:%d: unknown key '%s' in [ReorderRule]", path, lineno, key);
+        }
+        break;
+    }
 
     default: LOG_WRN("%s:%d: key '%s' outside any section", path, lineno, key); break;
     }
@@ -636,6 +847,7 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
     cfg->reconnect = 1;
     cfg->reconnect_interval = 5;
     cfg->manage_routes = 1;
+    mqvpn_reorder_config_default(&cfg->reorder); /* §16: reorder defaults (mode OFF) */
 }
 
 int
@@ -701,6 +913,11 @@ mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
                 section = SEC_NONE;
             } else {
                 section = sec;
+                /* Each [ReorderRule] occurrence pushes a fresh rule slot that
+                 * its keys then fill (mirrors WireGuard repeated [Peer]). */
+                if (section == SEC_REORDER_RULE) {
+                    reorder_rule_begin(cfg, lineno, path);
+                }
             }
             line = strtok(NULL, "\n");
             continue;
