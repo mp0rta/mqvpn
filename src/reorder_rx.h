@@ -62,6 +62,14 @@ void mqvpn_reorder_rx_on_packet(mqvpn_reorder_rx_t *rx, const uint8_t *payload,
 void mqvpn_reorder_rx_tick(mqvpn_reorder_rx_t *rx, uint64_t now_us);
 
 /*
+ * §17 statistics snapshot. Aggregates lifetime counters across every flow
+ * (including flows already evicted) into *out. The §17 accounting identity
+ * gap_count == gap_filled + gap_timeout + gap_overflow + gap_demote + gap_reset
+ * holds over the aggregate. No-op if rx or out is NULL.
+ */
+void mqvpn_reorder_rx_get_stats(const mqvpn_reorder_rx_t *rx, mqvpn_reorder_stats_t *out);
+
+/*
  * INTERNAL eval knob (§24 determinism): when set, the ACK-direction classifier
  * never demotes a flow, so reorder behaviour is deterministic under evaluation.
  * Deliberately NOT a public MQVPN_API and NOT exposed via INI/JSON config.

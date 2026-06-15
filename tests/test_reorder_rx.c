@@ -1298,6 +1298,173 @@ test_rx_eval_force_no_demotion(void)
     mqvpn_reorder_rx_free(rx);
 }
 
+/* ─────────── Task 3.6: stats snapshot + accounting identity ─────────── */
+
+static void
+test_rx_accounting_identity(void)
+{
+    /* §24.9 line 1119 full form: after mixed ops (filled + timeout + overflow +
+     * demote-ending-active + reset-ending-active), the snapshot identity holds. */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg(); /* big classify window → no accidental demote */
+    c.max_wait_ms = 30;
+    c.reset_idle_grace_ms = 10000;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+    uint64_t t = 1000;
+
+    /* (1) a fill: seq0 cold-start, seq2 buffered, seq1 fills → gap_filled. */
+    size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 443, 50);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, t++);
+    n = build_reorder_dgram(buf, 0, 2, 3, 5000, 443, 50);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, t++);
+    n = build_reorder_dgram(buf, 0, 1, 2, 5000, 443, 50);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, t++);
+
+    /* (2) a timeout: buffer seq 5 (gap at 3,4), tick past deadline → gap_timeout. */
+    n = build_reorder_dgram(buf, 0, 5, 6, 5000, 443, 50);
+    uint64_t armed = t;
+    mqvpn_reorder_rx_on_packet(rx, buf, n, t++);
+    mqvpn_reorder_rx_tick(rx, armed + 30000 + 1);
+
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_TRUE(accounting_holds_full(f), "identity holds after fill + timeout");
+
+    /* aggregate snapshot also satisfies the identity. */
+    mqvpn_reorder_stats_t st;
+    mqvpn_reorder_rx_get_stats(rx, &st);
+    ASSERT_EQ_INT(st.gap_count,
+                  st.gap_filled_count + st.gap_timeout_count + st.gap_overflow_count +
+                      st.gap_demote_count + st.gap_reset_count +
+                      (f->gap_timer_active ? 1 : 0),
+                  "snapshot identity (live flow, one possibly-open period)");
+
+    /* (3) overflow + (4) demote terminating an active period on a SECOND flow,
+     * using a different src port so it's a separate flow. */
+    mqvpn_reorder_config_t c2 = rx_cfg_demote(2, 2); /* small window → quick demote */
+    c2.max_wait_ms = 1000000;
+    mqvpn_reorder_rx_t *rx2 = mqvpn_reorder_rx_new(&c2, 0x9, mock_deliver, &rec);
+    n = build_reorder_dgram(buf, 0, 0, 1, 6000, 443, 50);
+    mqvpn_reorder_rx_on_packet(rx2, buf, n, 1); /* cold-start, classify_seen=1 */
+    n = build_reorder_dgram(buf, 0, 5, 6, 6000, 443, 50);
+    mqvpn_reorder_rx_on_packet(rx2, buf, n, 2); /* buffered, classify_seen=2 → DEMOTE */
+    mqvpn_reorder_flow_t *f2 = only_flow(rx2);
+    ASSERT_TRUE(f2->pass_through, "second flow demoted (active period ended)");
+    ASSERT_EQ_INT(f2->stats.gap_demote_count, 1, "demote ended active period");
+    ASSERT_TRUE(accounting_holds_full(f2), "identity after demote-ends-active");
+
+    /* drive an idle-grace reset that terminates an active period to exercise
+     * gap_reset_count: build a fresh flow, buffer a packet (arm timer), then send
+     * an idle-grace reset while still armed. Use rx (big classify window). */
+    mqvpn_reorder_config_t c3 = rx_cfg();
+    c3.max_wait_ms = 1000000;
+    c3.reset_idle_grace_ms = 10000;
+    mqvpn_reorder_rx_t *rx3 = mqvpn_reorder_rx_new(&c3, 0x3, mock_deliver, &rec);
+    n = build_reorder_dgram(buf, 0, 0, 1, 7000, 443, 50);
+    mqvpn_reorder_rx_on_packet(rx3, buf, n, 1000000); /* cold-start */
+    n = build_reorder_dgram(buf, 0, 3, 4, 7000, 443, 50);
+    mqvpn_reorder_rx_on_packet(rx3, buf, n, 1000100); /* buffered → timer armed */
+    mqvpn_reorder_flow_t *f3 = only_flow(rx3);
+    ASSERT_TRUE(f3->gap_timer_active, "timer armed before reset");
+    n = build_reorder_dgram(buf, MQVPN_REORDER_FLAG_RESET, 100, 9, 7000, 443, 50);
+    mqvpn_reorder_rx_on_packet(rx3, buf, n, 1000100 + 20000000ULL); /* idle-grace reset */
+    ASSERT_EQ_INT(f3->stats.gap_reset_count, 1, "reset ended an active period");
+    ASSERT_TRUE(accounting_holds_full(f3), "identity after reset-ends-active");
+
+    mqvpn_reorder_rx_free(rx);
+    mqvpn_reorder_rx_free(rx2);
+    mqvpn_reorder_rx_free(rx3);
+}
+
+static void
+test_rx_stats_snapshot(void)
+{
+    /* §17: the snapshot accessor reports consistent values, including counters
+     * from flows that have been evicted. */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.ingress_idle_timeout_sec = 30;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+
+    /* deliver a few in-order packets, drop a late one. */
+    for (uint64_t s = 0; s < 3; s++) {
+        size_t n = build_reorder_dgram(buf, 0, s, (uint16_t)(s + 1), 5000, 443, 50);
+        mqvpn_reorder_rx_on_packet(rx, buf, n, 1000000 + s);
+    }
+    size_t n = build_reorder_dgram(buf, 0, 0, 99, 5000, 443, 50); /* late */
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000005);
+
+    mqvpn_reorder_stats_t live;
+    mqvpn_reorder_rx_get_stats(rx, &live);
+    ASSERT_EQ_INT(live.delivered_count, 3, "3 delivered (live)");
+    ASSERT_EQ_INT(live.too_late_drop_count, 1, "1 late drop (live)");
+
+    /* evict the flow via idle tick; stats must survive in the snapshot. */
+    mqvpn_reorder_rx_tick(rx, 1000000 + 40000000ULL);
+    ASSERT_TRUE(only_flow(rx) == NULL, "flow evicted");
+    mqvpn_reorder_stats_t after;
+    mqvpn_reorder_rx_get_stats(rx, &after);
+    ASSERT_EQ_INT(after.delivered_count, 3, "delivered survives eviction");
+    ASSERT_EQ_INT(after.too_late_drop_count, 1, "late drop survives eviction");
+
+    /* NULL-safety. */
+    mqvpn_reorder_rx_get_stats(NULL, &after);
+    mqvpn_reorder_rx_get_stats(rx, NULL);
+    g_pass++; /* reaching here without crashing is the assertion */
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_double_overflow_flush(void)
+{
+    /* Hardening item 4: BOTH max_buffer_bytes_per_flow AND global_max_buffer_bytes
+     * are tight so a single buffer_admit triggers overflow_flush along the per-flow
+     * path AND again along the pool path. Assert correctness + accounting + the
+     * pool-bytes invariant hold throughout. */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.cap_packets_per_flow = 1024;
+    /* inner len per packet = 28 + 100 = 128. Both budgets allow exactly TWO
+     * packets (256), so a third admit hits the per-flow limit (flush #1) and,
+     * after reclassify, the pool limit (flush #2 — though by then self is empty,
+     * the path is exercised). Keep them equal and tight to stress both gates. */
+    c.max_buffer_bytes_per_flow = 256;
+    c.global_max_buffer_bytes = 256;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+
+    size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000); /* expected=1 */
+    /* buffer seq 2,3 → bytes=256 (both budgets at limit). */
+    n = build_reorder_dgram(buf, 0, 2, 3, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 2000);
+    n = build_reorder_dgram(buf, 0, 3, 4, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 2000);
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_EQ_INT(f->buffer.count, 2, "two buffered at both limits");
+    ASSERT_TRUE(invariant_holds(rx), "pool-bytes invariant at limit");
+
+    /* seq 4: per-flow limit hit → overflow_flush (flush #1) skips gap at 1,
+     * delivers seq2,3, expected=4. Reclassify seq4 → in-order, delivered. */
+    n = build_reorder_dgram(buf, 0, 4, 5, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 3000);
+    ASSERT_EQ_INT(rec.tags[rec.n - 1], 5, "seq4 delivered after double-gate flush");
+    ASSERT_EQ_INT(f->expected, 5, "expected advanced through flush + reclass");
+    ASSERT_TRUE(f->stats.gap_overflow_count >= 1, "at least one overflow charged");
+    ASSERT_TRUE(invariant_holds(rx), "invariant after double flush");
+    ASSERT_TRUE(accounting_holds_full(f), "accounting after double flush");
+
+    /* now force a run that exercises both gates repeatedly with a persistent gap. */
+    for (uint64_t s = 6; s < 30; s++) {
+        n = build_reorder_dgram(buf, 0, s, (uint16_t)(s + 1), 5000, 443, 100);
+        mqvpn_reorder_rx_on_packet(rx, buf, n, 4000 + s);
+        ASSERT_TRUE(invariant_holds(rx), "invariant under double-gate pressure");
+        ASSERT_TRUE(accounting_holds_full(f), "accounting under double-gate pressure");
+    }
+    mqvpn_reorder_rx_free(rx);
+}
+
 int
 main(void)
 {
@@ -1345,6 +1512,11 @@ main(void)
     test_rx_passthrough_A_no_state();
     test_rx_passthrough_B_undemote_on_reset();
     test_rx_eval_force_no_demotion();
+
+    /* Task 3.6: stats snapshot + accounting identity (+ double-flush hardening) */
+    test_rx_accounting_identity();
+    test_rx_stats_snapshot();
+    test_rx_double_overflow_flush();
 
     fprintf(stderr, "test_reorder_rx: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

@@ -275,7 +275,34 @@ struct mqvpn_reorder_rx {
      * charged against this counter and rejected when it would exceed
      * cfg.global_max_buffer_bytes (pool exhaustion). */
     uint64_t pool_bytes_used;
+
+    /* §17 stats of flows that have been destroyed (idle eviction / teardown).
+     * Folded in here so mqvpn_reorder_rx_get_stats reports lifetime totals that
+     * survive eviction, not just the stats of currently-live flows. */
+    mqvpn_reorder_stats_t evicted_stats;
 };
+
+/* Accumulate every §17 counter of `src` into `dst` (used to fold an evicted
+ * flow's stats into the rx-level lifetime accumulator, and to aggregate live
+ * flows into a snapshot). */
+static void
+stats_accumulate(mqvpn_reorder_stats_t *dst, const mqvpn_reorder_stats_t *src)
+{
+    dst->delivered_count += src->delivered_count;
+    dst->too_late_drop_count += src->too_late_drop_count;
+    dst->too_far_ahead_drop_count += src->too_far_ahead_drop_count;
+    dst->duplicate_drop_count += src->duplicate_drop_count;
+    dst->per_flow_limit_drop_count += src->per_flow_limit_drop_count;
+    dst->pool_drop_count += src->pool_drop_count;
+    dst->reset_discard_count += src->reset_discard_count;
+    dst->gap_count += src->gap_count;
+    dst->gap_filled_count += src->gap_filled_count;
+    dst->gap_timeout_count += src->gap_timeout_count;
+    dst->gap_overflow_count += src->gap_overflow_count;
+    dst->gap_demote_count += src->gap_demote_count;
+    dst->gap_reset_count += src->gap_reset_count;
+    dst->ack_demote_count += src->ack_demote_count;
+}
 
 /* ─────────────────────────── flow table (§14.1) ───────────────────────────
  *
@@ -377,6 +404,7 @@ pool_release(mqvpn_reorder_rx_t *rx, void *pkt, uint16_t len)
 static void
 flow_destroy(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f)
 {
+    stats_accumulate(&rx->evicted_stats, &f->stats); /* §17: preserve lifetime totals */
     if (f->buffer.slots != NULL) {
         for (uint32_t j = 0; j < f->buffer.size; j++) {
             if (f->buffer.slots[j].pkt != NULL) {
@@ -987,6 +1015,22 @@ mqvpn_reorder_rx_tick(mqvpn_reorder_rx_t *rx, uint64_t now_us)
             } else {
                 pp = &f->next;
             }
+        }
+    }
+}
+
+void
+mqvpn_reorder_rx_get_stats(const mqvpn_reorder_rx_t *rx, mqvpn_reorder_stats_t *out)
+{
+    if (!rx || !out) {
+        return;
+    }
+    /* §17 lifetime snapshot: evicted-flow totals + every currently-live flow.
+     * The §17 identity holds over the sum because it holds per-flow. */
+    *out = rx->evicted_stats;
+    for (uint32_t i = 0; i < rx->n_buckets; i++) {
+        for (const mqvpn_reorder_flow_t *f = rx->buckets[i]; f; f = f->next) {
+            stats_accumulate(out, &f->stats);
         }
     }
 }
