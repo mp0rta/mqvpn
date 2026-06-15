@@ -44,6 +44,9 @@
 #include "flow_sched.h"
 #include "icmp.h"
 #include "path_state_machine.h"
+#include "reorder.h"
+#include "reorder_rx.h"
+#include "reorder_tx.h"
 
 /* ─── Constants ─── */
 
@@ -109,6 +112,14 @@ struct cli_conn_s {
     uint8_t assigned_prefix6;
     uint64_t dgram_lost_cnt;
     uint64_t dgram_acked_cnt;
+
+    /* Flow-aware reorder shim (§5). Created on connect when
+     * cfg.reorder.mode != OFF, freed on conn teardown. peer_reorder_supported
+     * gates TX stamping (§19.3/§19.4): set once negotiation confirms the peer
+     * advertised mqvpn-reorder. */
+    mqvpn_reorder_tx_t *reorder_tx;
+    mqvpn_reorder_rx_t *reorder_rx;
+    int peer_reorder_supported;
 };
 
 /* Per-stream state (Level 2) */
@@ -1132,6 +1143,15 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
             }
             if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU) tun_mtu = IPV6_MIN_MTU;
             tun_mtu = apply_mtu_cap(c->config.tun_mtu, tun_mtu, c);
+            /* §9: when the reorder shim is locally enabled, each stamped inner
+             * packet carries an 8-byte header, so the usable inner MTU shrinks
+             * by 8. Apply ONCE to the resolved inner MTU (after auto-MSS / cap).
+             * Floor at IPV6_MIN_MTU when v6 is in play. */
+            if (c->config.reorder.mode != MQVPN_REORDER_OFF) {
+                tun_mtu -= MQVPN_REORDER_HDR_LEN;
+                if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU)
+                    tun_mtu = IPV6_MIN_MTU;
+            }
             c->mtu = tun_mtu;
 
             /* Build tunnel info for callback */
@@ -1185,6 +1205,71 @@ cb_request_write(xqc_h3_request_t *h3_request, void *user_data)
 
 /* ─── Datagram callbacks ─── */
 
+/*
+ * forward_inner_ip — post-process one de-stamped inner IP packet and hand it to
+ * TUN. Shared by the RAW dispatch in cb_dgram_read AND the reorder RX deliver()
+ * callback, so reordered packets get identical TTL/hop-limit + ICMP handling
+ * (§5: both paths MUST be semantically identical). `pkt[0..len)` is the bare
+ * inner IP packet (no reorder header).
+ */
+static void
+forward_inner_ip(cli_conn_t *conn, const uint8_t *pkt, size_t len)
+{
+    mqvpn_client_t *c = conn->client;
+    if (len < 1) return;
+
+    uint8_t ip_ver = pkt[0] >> 4;
+    uint8_t fwd_pkt[PACKET_BUF_SIZE];
+    if (len > sizeof(fwd_pkt)) return;
+
+    if (ip_ver == 4) {
+        if (len < IPV4_MIN_HDR) {
+            LOG_D(c, "dgram: IPv4 too short (%zu bytes)", len);
+            return;
+        }
+        memcpy(fwd_pkt, pkt, len);
+        if (fwd_pkt[8] <= 1) {
+            if (c->conn && c->conn->addr_assigned)
+                mqvpn_icmp_send_v4(c->cbs.tun_output, c->user_ctx, c->conn->assigned_ip,
+                                   11, 0, 0, pkt, len);
+            return;
+        }
+        fwd_pkt[8]--;
+        uint32_t sum = ((uint32_t)fwd_pkt[10] << 8 | fwd_pkt[11]) + 0x0100;
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        fwd_pkt[10] = (sum >> 8) & 0xFF;
+        fwd_pkt[11] = sum & 0xFF;
+    } else if (ip_ver == 6) {
+        if (len < IPV6_MIN_HDR || !conn->addr6_assigned) {
+            LOG_D(c, "dgram: IPv6 too short or no addr6 (%zu bytes)", len);
+            return;
+        }
+        memcpy(fwd_pkt, pkt, len);
+        if (fwd_pkt[7] <= 1) {
+            if (c->conn && c->conn->addr6_assigned)
+                mqvpn_icmp_send_v6(c->cbs.tun_output, c->user_ctx, c->conn->assigned_ip6,
+                                   3, 0, 0, pkt, len);
+            return;
+        }
+        fwd_pkt[7]--;
+    } else {
+        LOG_D(c, "dgram: unknown IP version %d", ip_ver);
+        return;
+    }
+
+    c->dgram_recv++;
+    c->bytes_rx += len;
+    c->cbs.tun_output(fwd_pkt, len, c->user_ctx);
+}
+
+/* Reorder RX deliver() trampoline: routes in-order packets from the reorder
+ * engine through the same forward_inner_ip post-processing. */
+static void
+cli_reorder_deliver(const uint8_t *pkt, size_t len, void *ctx)
+{
+    forward_inner_ip((cli_conn_t *)ctx, pkt, len);
+}
+
 static void
 cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *user_data,
               uint64_t ts)
@@ -1211,47 +1296,19 @@ cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *u
         return;
     }
 
-    uint8_t ip_ver = payload[0] >> 4;
-    uint8_t fwd_pkt[PACKET_BUF_SIZE];
-
-    if (ip_ver == 4) {
-        if (payload_len < IPV4_MIN_HDR) {
-            LOG_D(c, "dgram: IPv4 too short (%zu bytes)", payload_len);
-            return;
+    /* §5/§8.1 self-describing dispatch on payload[0]. */
+    switch (mqvpn_reorder_classify_byte(payload[0])) {
+    case MQVPN_REORDER_KIND_RAW: forward_inner_ip(conn, payload, payload_len); return;
+    case MQVPN_REORDER_KIND_REORDER_V1:
+        if (conn->reorder_rx) {
+            mqvpn_reorder_rx_on_packet(conn->reorder_rx, payload, payload_len,
+                                       client_now_us(c));
+        } else {
+            LOG_D(c, "dgram: reorder packet but rx engine off; dropping");
         }
-        memcpy(fwd_pkt, payload, payload_len);
-        if (fwd_pkt[8] <= 1) {
-            if (c->conn && c->conn->addr_assigned)
-                mqvpn_icmp_send_v4(c->cbs.tun_output, c->user_ctx, c->conn->assigned_ip,
-                                   11, 0, 0, payload, payload_len);
-            return;
-        }
-        fwd_pkt[8]--;
-        uint32_t sum = ((uint32_t)fwd_pkt[10] << 8 | fwd_pkt[11]) + 0x0100;
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        fwd_pkt[10] = (sum >> 8) & 0xFF;
-        fwd_pkt[11] = sum & 0xFF;
-    } else if (ip_ver == 6) {
-        if (payload_len < IPV6_MIN_HDR || !conn->addr6_assigned) {
-            LOG_D(c, "dgram: IPv6 too short or no addr6 (%zu bytes)", payload_len);
-            return;
-        }
-        memcpy(fwd_pkt, payload, payload_len);
-        if (fwd_pkt[7] <= 1) {
-            if (c->conn && c->conn->addr6_assigned)
-                mqvpn_icmp_send_v6(c->cbs.tun_output, c->user_ctx, c->conn->assigned_ip6,
-                                   3, 0, 0, payload, payload_len);
-            return;
-        }
-        fwd_pkt[7]--;
-    } else {
-        LOG_D(c, "dgram: unknown IP version %d", ip_ver);
         return;
+    default: LOG_D(c, "dgram: unknown reorder type 0x%02x; dropping", payload[0]); return;
     }
-
-    c->dgram_recv++;
-    c->bytes_rx += payload_len;
-    c->cbs.tun_output(fwd_pkt, payload_len, c->user_ctx);
 }
 
 static void
@@ -1558,6 +1615,15 @@ cli_conn_destroy(mqvpn_client_t *c)
     conn->addr_assigned = 0;
     conn->addr6_assigned = 0;
 
+    if (conn->reorder_tx) {
+        mqvpn_reorder_tx_free(conn->reorder_tx);
+        conn->reorder_tx = NULL;
+    }
+    if (conn->reorder_rx) {
+        mqvpn_reorder_rx_free(conn->reorder_rx);
+        conn->reorder_rx = NULL;
+    }
+
     free(conn);
     c->conn = NULL;
 }
@@ -1637,6 +1703,30 @@ cli_start_connection(mqvpn_client_t *c)
     }
 
     c->conn = conn; /* ownership transfer — cleanup won't free */
+
+    /* §5: create the reorder shim engines when locally enabled. TX stamping
+     * stays gated on peer_reorder_supported (set later by negotiation), so until
+     * then everything is sent RAW. RX is created so we can accept stamped
+     * datagrams as soon as the peer advertises support. The hash seeds need not
+     * match the peer (§6.2); derive them from the monotonic clock + conn_id. */
+    if (c->config.reorder.mode != MQVPN_REORDER_OFF) {
+        uint64_t seed_base = client_now_us(c) ^ ((uint64_t)c->conn_id << 32);
+        conn->reorder_tx = mqvpn_reorder_tx_new(&c->config.reorder, seed_base);
+        conn->reorder_rx = mqvpn_reorder_rx_new(
+            &c->config.reorder, seed_base ^ 0x9e3779b9, cli_reorder_deliver, conn);
+        if (!conn->reorder_tx || !conn->reorder_rx) {
+            LOG_W(c, "reorder engine alloc failed; falling back to RAW");
+            if (conn->reorder_tx) {
+                mqvpn_reorder_tx_free(conn->reorder_tx);
+                conn->reorder_tx = NULL;
+            }
+            if (conn->reorder_rx) {
+                mqvpn_reorder_rx_free(conn->reorder_rx);
+                conn->reorder_rx = NULL;
+            }
+        }
+    }
+
     conn = NULL;
 
     LOG_I(c, "connecting to %s:%d (multipath=%d, paths=%d)", c->config.server_host,
@@ -2172,10 +2262,50 @@ mqvpn_client_on_tun_packet(mqvpn_client_t *c, const uint8_t *pkt, size_t len)
         return MQVPN_OK;
     }
 
-    /* ICMP PTB if packet exceeds tunnel capacity */
-    if (conn->dgram_mss > 0) {
-        size_t udp_mss =
-            xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
+    /* §5/§9: reorder gating decides STAMP vs RAW vs DROP_MTU. Stamping is
+     * additionally gated on peer support (§19.3/§19.4): until the peer advertises
+     * mqvpn-reorder, everything stays RAW (wire-compatible with non-reorder
+     * peers). udp_mss is the max inner IP that fits the DATAGRAM; with reorder a
+     * STAMP consumes 8 of those bytes (§9), so the peek uses udp_mss as the
+     * "max inner without reorder" budget. */
+    size_t udp_mss = 0;
+    if (conn->dgram_mss > 0)
+        udp_mss = xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
+
+    mqvpn_reorder_tx_peek_t peek = {0};
+    int do_stamp = 0;
+    if (conn->reorder_tx && conn->peer_reorder_supported &&
+        c->config.reorder.mode != MQVPN_REORDER_OFF && udp_mss > 0) {
+        mqvpn_reorder_tx_action_t act = mqvpn_reorder_tx_peek(
+            conn->reorder_tx, pkt, len, client_now_us(c), (uint32_t)udp_mss, &peek);
+        if (act == MQVPN_REORDER_TX_STAMP) {
+            do_stamp = 1;
+        } else if (act == MQVPN_REORDER_TX_DROP_MTU) {
+            /* 8 + len exceeds the DATAGRAM payload: emit ICMP PTB advertising the
+             * reorder-reduced effective MTU (udp_mss - 8) and drop, mirroring the
+             * RAW MTU-too-big handling below. */
+            size_t eff_mtu =
+                udp_mss > MQVPN_REORDER_HDR_LEN ? udp_mss - MQVPN_REORDER_HDR_LEN : 0;
+            if (ip_ver == 4) {
+                if (conn->addr_assigned && ptb_rate_allow(c))
+                    mqvpn_icmp_send_v4(
+                        c->cbs.tun_output, c->user_ctx, c->conn->assigned_ip, 3, 4,
+                        (eff_mtu > 0xFFFF) ? 0xFFFF : (uint16_t)eff_mtu, pkt, len);
+            } else {
+                if (conn->addr6_assigned && ptb_rate_allow(c))
+                    mqvpn_icmp_send_v6(c->cbs.tun_output, c->user_ctx,
+                                       c->conn->assigned_ip6, 2, 0, (uint32_t)eff_mtu,
+                                       pkt, len);
+            }
+            return MQVPN_OK;
+        }
+        /* MQVPN_REORDER_TX_RAW falls through to the RAW path. */
+    }
+
+    /* ICMP PTB if a RAW packet exceeds tunnel capacity. (When stamping, the
+     * §9 MTU reduction already keeps len within budget; the peek's DROP_MTU
+     * branch above covers the stamped over-MTU case.) */
+    if (!do_stamp && udp_mss > 0) {
         if (len > udp_mss) {
             if (ip_ver == 4) {
                 if (conn->addr_assigned && ptb_rate_allow(c))
@@ -2192,11 +2322,25 @@ mqvpn_client_on_tun_packet(mqvpn_client_t *c, const uint8_t *pkt, size_t len)
         }
     }
 
+    /* On STAMP, prepend the 8-byte reorder header to the inner IP packet; the
+     * framed payload is then [hdr || pkt]. On RAW, frame the bare packet. */
+    const uint8_t *frame_src = pkt;
+    size_t frame_src_len = len;
+    uint8_t stamped[MQVPN_REORDER_HDR_LEN + PACKET_BUF_SIZE];
+    if (do_stamp) {
+        if (len > PACKET_BUF_SIZE) return MQVPN_ERR_INVALID_ARG;
+        memcpy(stamped, peek.hdr, MQVPN_REORDER_HDR_LEN);
+        memcpy(stamped + MQVPN_REORDER_HDR_LEN, pkt, len);
+        frame_src = stamped;
+        frame_src_len = len + MQVPN_REORDER_HDR_LEN;
+    }
+
     /* MASQUE frame and send */
     uint8_t frame_buf[MASQUE_FRAME_BUF];
     size_t frame_written = 0;
-    xqc_int_t xret = xqc_h3_ext_masque_frame_udp(
-        frame_buf, sizeof(frame_buf), &frame_written, conn->masque_stream_id, pkt, len);
+    xqc_int_t xret =
+        xqc_h3_ext_masque_frame_udp(frame_buf, sizeof(frame_buf), &frame_written,
+                                    conn->masque_stream_id, frame_src, frame_src_len);
     if (xret != XQC_OK) {
         LOG_W(c, "masque frame failed: xret=%d", xret);
         return MQVPN_ERR_ENGINE;
@@ -2218,6 +2362,9 @@ mqvpn_client_on_tun_packet(mqvpn_client_t *c, const uint8_t *pkt, size_t len)
         LOG_W(c, "datagram send failed: xret=%d", xret);
         return MQVPN_ERR_ENGINE;
     }
+
+    /* §10.3: only advance the send_flow sequence on a successful datagram. */
+    if (do_stamp) mqvpn_reorder_tx_commit(conn->reorder_tx, &peek, client_now_us(c));
 
     c->dgram_sent++;
     return MQVPN_OK;
@@ -2438,6 +2585,10 @@ mqvpn_client_tick(mqvpn_client_t *c)
     if (c->engine) xqc_engine_main_logic(c->engine);
     tick_path_recovery(c);
     tick_reconnect(c);
+
+    /* §5/§11.1: drive reorder RX gap timeouts + idle eviction. */
+    if (c->conn && c->conn->reorder_rx)
+        mqvpn_reorder_rx_tick(c->conn->reorder_rx, client_now_us(c));
 
     return MQVPN_OK;
 }

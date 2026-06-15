@@ -123,6 +123,8 @@ set(MQVPN_LIB_SOURCES
     src/auth.c
     src/log.c
     src/icmp.c
+    src/reorder_tx.c
+    src/reorder_rx.c
 )
 
 # ---------- libmqvpn (static library — no libevent, no platform I/O) ----------
