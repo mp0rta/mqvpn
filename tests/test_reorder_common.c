@@ -167,6 +167,57 @@ test_flowkey_hash_stable(void)
     ASSERT_EQ_U64(h1, h2, "flowkey_hash stable same key+seed");
 }
 
+/* ─────────────────────── Task 1.3: config struct ──────────────────────────── */
+
+static void
+test_cfg_defaults(void)
+{
+    mqvpn_reorder_config_t c;
+    mqvpn_reorder_config_default(&c);
+    ASSERT_EQ_INT(c.max_wait_ms, 30, "cfg max_wait_ms");
+    ASSERT_EQ_INT(c.cap_packets_per_flow, 1024, "cfg cap_packets_per_flow");
+    ASSERT_EQ_INT(c.classify_window, 64, "cfg classify_window");
+    ASSERT_EQ_INT(c.ack_demote_max_large_packets, 3, "cfg ack_demote_max_large");
+    ASSERT_EQ_INT(c.small_packet_threshold_bytes, 200, "cfg small_threshold");
+    ASSERT_EQ_INT(c.reset_mark_packets, 8, "cfg reset_mark_packets");
+    ASSERT_EQ_INT(c.reset_idle_grace_ms, 10000, "cfg reset_idle_grace_ms");
+    ASSERT_EQ_INT(c.max_flows, 65536, "cfg max_flows");
+    ASSERT_EQ_U64(c.global_max_buffer_bytes, 67108864ULL, "cfg global_max_bytes");
+    ASSERT_EQ_INT(c.ingress_idle_timeout_sec, 30, "cfg ingress_idle");
+    ASSERT_EQ_INT(c.egress_idle_timeout_sec, 300, "cfg egress_idle");
+    ASSERT_EQ_U64(c.max_buffer_bytes_per_flow, 1572864ULL, "cfg max_bytes_per_flow");
+    ASSERT_EQ_INT(c.mode, MQVPN_REORDER_OFF, "cfg mode off");
+    ASSERT_EQ_INT(c.n_rules, 0, "cfg n_rules");
+    ASSERT_EQ_INT(c.eval_force_no_demotion, 0, "cfg eval_force_no_demotion");
+}
+
+static void
+test_cfg_validate_idle_order(void)
+{
+    mqvpn_reorder_config_t c;
+    mqvpn_reorder_config_default(&c);
+    c.ingress_idle_timeout_sec = c.egress_idle_timeout_sec; /* >= */
+    ASSERT_EQ_INT(mqvpn_reorder_config_validate(&c), -1,
+                  "cfg validate ingress>=egress -> -1");
+}
+
+static void
+test_cfg_validate_cap_pow2(void)
+{
+    mqvpn_reorder_config_t c;
+    mqvpn_reorder_config_default(&c);
+    c.cap_packets_per_flow = 1000; /* not a power of two */
+    ASSERT_EQ_INT(mqvpn_reorder_config_validate(&c), -1, "cfg validate cap !pow2 -> -1");
+}
+
+static void
+test_cfg_validate_ok(void)
+{
+    mqvpn_reorder_config_t c;
+    mqvpn_reorder_config_default(&c);
+    ASSERT_EQ_INT(mqvpn_reorder_config_validate(&c), 0, "cfg validate default ok");
+}
+
 int
 main(void)
 {
@@ -181,6 +232,11 @@ main(void)
     test_flowkey_eq();
     test_flowkey_v4_v6_distinct();
     test_flowkey_hash_stable();
+
+    test_cfg_defaults();
+    test_cfg_validate_idle_order();
+    test_cfg_validate_cap_pow2();
+    test_cfg_validate_ok();
 
     fprintf(stderr, "test_reorder_common: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

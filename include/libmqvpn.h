@@ -103,6 +103,20 @@ typedef enum {
     MQVPN_SCHED_WLB_UDP_PIN = 3, /* WLB + 5-tuple pin for UDP flows. */
 } mqvpn_scheduler_t;
 
+/* Flow-aware reorder-only datagram delivery (see reorder design spec).
+ * AUTO is deferred to a later phase and will be appended as = 2. */
+typedef enum {
+    MQVPN_REORDER_OFF = 0,
+    MQVPN_REORDER_ON = 1,
+} mqvpn_reorder_mode_t;
+
+/* Per-rule reorder profile (§16.1). v1 is a fixed 3-value enum. */
+typedef enum {
+    MQVPN_RPROF_QUIC_BULK = 0,
+    MQVPN_RPROF_LOW_LATENCY = 1,
+    MQVPN_RPROF_DEFAULT_UDP = 2,
+} mqvpn_reorder_profile_t;
+
 typedef enum {
     MQVPN_CC_BBR2 = 0, /* default */
     MQVPN_CC_BBR = 1,

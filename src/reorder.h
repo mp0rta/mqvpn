@@ -16,6 +16,11 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
+
+/* Public ABI enums (mqvpn_reorder_mode_t, mqvpn_reorder_profile_t) are owned by
+ * the public header so config setters can take them. Do not redefine here. */
+#include "libmqvpn.h"
 
 /* ─────────────────────────── §8: wire format ──────────────────────────────
  *
@@ -146,6 +151,91 @@ mqvpn_flow_key_hash(const mqvpn_flow_key_t *k, uint64_t seed)
         h *= fnv_prime;
     }
     return h;
+}
+
+/* ───────────────────────────── §16: config ────────────────────────────────
+ *
+ * Phase-1 configuration. Values and semantics follow §16.1 / §16.2. The struct
+ * is consumed by the library; surfaces (builder API / INI / JSON) translate
+ * into it.
+ */
+
+#define MQVPN_REORDER_MAX_RULES 16
+
+/* A single port/protocol → profile rule (§15.1 / §16.1 repeated [ReorderRule]). */
+typedef struct {
+    uint8_t proto; /* L4 protocol (UDP = 17) */
+    uint16_t port; /* matched against src or dst (host order) */
+    mqvpn_reorder_profile_t profile;
+} mqvpn_reorder_rule_t;
+
+typedef struct {
+    mqvpn_reorder_mode_t mode; /* master gate (§16.2 enabled) */
+
+    /* receiver-side (§16.2) */
+    uint32_t max_wait_ms;                  /* v1 fixed gap wait */
+    uint32_t cap_packets_per_flow;         /* ring.cap, must be power of two */
+    uint64_t max_buffer_bytes_per_flow;    /* per-flow byte limit */
+    uint16_t classify_window;              /* ACK-direction classify window */
+    uint16_t ack_demote_max_large_packets; /* demote threshold (count) */
+    uint32_t small_packet_threshold_bytes; /* inner UDP payload small/large split */
+
+    /* sender + receiver reset coordination (§10.5 / §14.2) */
+    uint32_t reset_mark_packets;  /* K: FLOW_RESET marks on new flow */
+    uint32_t reset_idle_grace_ms; /* honor FLOW_RESET when idle > this */
+
+    /* table + pool limits (§13.5 / §14) */
+    uint32_t max_flows;                /* per-table cap (both sides) */
+    uint64_t global_max_buffer_bytes;  /* shared pool limit */
+    uint32_t ingress_idle_timeout_sec; /* inbound (receiver) idle eviction */
+    uint32_t egress_idle_timeout_sec;  /* outbound (sender) idle eviction */
+
+    /* internal/test knob — not exposed via any public setter */
+    int eval_force_no_demotion;
+
+    mqvpn_reorder_rule_t rules[MQVPN_REORDER_MAX_RULES];
+    int n_rules;
+} mqvpn_reorder_config_t;
+
+/* Populate cfg with the §16.1 default values. */
+static inline void
+mqvpn_reorder_config_default(mqvpn_reorder_config_t *cfg)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->mode = MQVPN_REORDER_OFF;
+    cfg->max_wait_ms = 30;
+    cfg->cap_packets_per_flow = 1024;
+    cfg->max_buffer_bytes_per_flow = 1572864ULL;
+    cfg->classify_window = 64;
+    cfg->ack_demote_max_large_packets = 3;
+    cfg->small_packet_threshold_bytes = 200;
+    cfg->reset_mark_packets = 8;
+    cfg->reset_idle_grace_ms = 10000;
+    cfg->max_flows = 65536;
+    cfg->global_max_buffer_bytes = 67108864ULL;
+    cfg->ingress_idle_timeout_sec = 30;
+    cfg->egress_idle_timeout_sec = 300;
+    cfg->eval_force_no_demotion = 0;
+    cfg->n_rules = 0;
+}
+
+/*
+ * Validate cross-side invariants. Returns 0 if valid, -1 otherwise.
+ *   - ingress_idle must be strictly less than egress_idle (§14.2: receiver idle
+ *     eviction must fire before the sender's, so the reset backstop holds).
+ *   - cap_packets_per_flow must be a non-zero power of two (§13.1 ring index).
+ */
+static inline int
+mqvpn_reorder_config_validate(const mqvpn_reorder_config_t *cfg)
+{
+    if (cfg->ingress_idle_timeout_sec >= cfg->egress_idle_timeout_sec) {
+        return -1;
+    }
+    uint32_t cap = cfg->cap_packets_per_flow;
+    if (!(cap && !(cap & (cap - 1)))) {
+        return -1;
+    }
+    return 0;
 }
 
 #endif /* MQVPN_REORDER_H */
