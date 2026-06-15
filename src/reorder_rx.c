@@ -379,6 +379,23 @@ pool_release(mqvpn_reorder_rx_t *rx, void *pkt, uint16_t len)
     free(pkt);
 }
 
+/* Release all resources owned by a reorder_flow (buffered copies + slots), then
+ * free the flow itself. Pool bytes are uncharged via pool_release. Used by both
+ * idle eviction (§14) and teardown. */
+static void
+flow_destroy(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f)
+{
+    if (f->buffer.slots != NULL) {
+        for (uint32_t j = 0; j < f->buffer.size; j++) {
+            if (f->buffer.slots[j].pkt != NULL) {
+                pool_release(rx, f->buffer.slots[j].pkt, f->buffer.slots[j].len);
+            }
+        }
+    }
+    ring_free(&f->buffer);
+    free(f);
+}
+
 /* Deliver every contiguously-buffered packet starting at flow->expected,
  * advancing expected and releasing each delivered heap copy (§11.3 drain). */
 static void
@@ -461,6 +478,52 @@ overflow_flush(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t now_us)
     /* else: buffer still non-empty → the anchored period continues unbroken (no
      * rearm, no terminator); the §11.1 invariant is held by the timer staying
      * active. */
+}
+
+/* ─────────────────── §11.6: FLOW_RESET buffer discard + reset ──────────────
+ *
+ * FLOW_RESET is a seq-space discontinuity: the old epoch's buffered packets must
+ * NOT be delivered (their seqs are meaningless in the new epoch). This is
+ * distinct from overflow_flush (same seq space, advances one period) and from
+ * the part-C demote flush (delivers ascending then stops reordering). Here we
+ * DISCARD (drop + free) the old buffer.
+ */
+
+/* §11.6 discard_buffer_for_reset: drop every old-epoch buffered packet (count
+ * them via reset_discard_count), charging gap_reset_count if an armed period is
+ * being ended, then free the ring and stop the timer. Normally the buffer is
+ * already empty at a genuine reset (the gap timer drained it long ago), so this
+ * usually does nothing beyond stopping an inactive timer. */
+static void
+discard_buffer_for_reset(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f)
+{
+    if (f->gap_timer_active) {
+        f->stats.gap_reset_count++; /* §17: armed period ended by reset (usually 0) */
+    }
+    if (f->buffer.slots != NULL) {
+        for (uint32_t i = 0; i < f->buffer.size; i++) {
+            struct slot *s = &f->buffer.slots[i];
+            if (s->pkt != NULL) {
+                pool_release(rx, s->pkt, s->len); /* drop, NOT deliver (§11.6) */
+                f->stats.reset_discard_count++;
+                s->pkt = NULL;
+            }
+        }
+    }
+    stop_gap_timer(f);
+    ring_free(&f->buffer); /* frees slots, zeroes size/count/bytes; cap preserved */
+}
+
+/* §11.6 reset_reorder_flow: discard the old epoch buffer and reinitialize the
+ * classifier / pass_through state (reused 5-tuple / epoch reset re-classify).
+ * expected / initialized are set by the caller (§11.3 step 1). */
+static void
+reset_reorder_flow(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f)
+{
+    discard_buffer_for_reset(rx, f);
+    f->pass_through = 0;
+    f->classify_seen = 0;
+    f->classify_large = 0;
 }
 
 /* ─────────────────────── §11.3 buffer_admit + process ─────────────────────
@@ -642,8 +705,8 @@ process_reorder_packet(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t
 }
 
 /* §11.3 on_reordered dispatch. Step ordering is fixed by the spec:
- *   1. FLOW_RESET honor   — part B seam (INERT no-op here)
- *   2. pass_through        — part C seam (INERT; never set in part A)
+ *   1. FLOW_RESET honor   — WIRED (§11.3 step 1, idle-grace + reset)
+ *   2. pass_through        — part C seam (INERT; never set in parts A/B)
  *   3. process_reorder_packet (fully implemented here)
  *   4. classify + demote   — part C seam (INERT no-op here)
  */
@@ -653,14 +716,28 @@ on_reordered(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t seq, uint
 {
     f->last_seen_us = now_us;
 
-    /* 1. FLOW_RESET honor: part B
-     *    (flags & MQVPN_REORDER_FLAG_RESET handling — idle-grace + reset, §11.3
-     *    step 1 — is added in part B). For now the flag is ignored and the
-     *    packet falls through to the normal reorder path. */
-    (void)flags;
+    /* 1. FLOW_RESET honor (§11.3 step 1 / §14.2(a)). Honor only when the flow is
+     *    uninitialized OR has been idle longer than the idle-grace window: a
+     *    genuine sender-eviction reset arrives after egress_idle silence so the
+     *    receiver's last_progress is stale; an intra-burst late packet of a fresh
+     *    epoch (now - last_progress < grace) is NOT honored and falls through —
+     *    becoming a late drop if seq < expected, with no rollback (§14.2(a)). */
+    if (flags & MQVPN_REORDER_FLAG_RESET) {
+        uint64_t grace_us = (uint64_t)rx->cfg.reset_idle_grace_ms * 1000ULL;
+        if (!f->initialized || (now_us - f->last_progress_us) > grace_us) {
+            reset_reorder_flow(rx, f); /* discard old buffer (NOT deliver) + reinit */
+            f->initialized = 1;
+            f->expected = seq;
+            deliver_pkt(rx, pkt, len, f);
+            f->expected++;
+            f->last_progress_us = now_us;
+            return;
+        }
+        /* idle-grace not met → ignore the flag and fall through to normal path. */
+    }
 
     /* 2. pass_through (ACK demotion fast path): part C.
-     *    pass_through is never set in part A, so this branch is structurally
+     *    pass_through is never set in parts A/B, so this branch is structurally
      *    unreachable; left unwired (not a half-branch) per the seam contract. */
 
     /* 3. process the current packet through the normal reorder logic. */
@@ -707,16 +784,7 @@ mqvpn_reorder_rx_free(mqvpn_reorder_rx_t *rx)
         mqvpn_reorder_flow_t *f = rx->buckets[i];
         while (f) {
             mqvpn_reorder_flow_t *next = f->next;
-            /* free any buffered heap copies still owned by the ring. */
-            if (f->buffer.slots) {
-                for (uint32_t j = 0; j < f->buffer.size; j++) {
-                    if (f->buffer.slots[j].pkt) {
-                        pool_release(rx, f->buffer.slots[j].pkt, f->buffer.slots[j].len);
-                    }
-                }
-            }
-            ring_free(&f->buffer);
-            free(f);
+            flow_destroy(rx, f);
             f = next;
         }
     }
@@ -759,12 +827,30 @@ mqvpn_reorder_rx_on_packet(mqvpn_reorder_rx_t *rx, const uint8_t *payload, size_
 void
 mqvpn_reorder_rx_tick(mqvpn_reorder_rx_t *rx, uint64_t now_us)
 {
-    /* §12.1/§14: drive (a) gap timeouts and (b) idle eviction. Idle eviction
-     * (§14, last_progress backstop) lands in 3.4; for now only gap timeouts. */
+    /* §12.1: (a) fire gap timeouts for flows whose deadline has passed. */
     for (uint32_t i = 0; i < rx->n_buckets; i++) {
         for (mqvpn_reorder_flow_t *f = rx->buckets[i]; f; f = f->next) {
             if (f->gap_timer_active && f->gap_deadline_us <= now_us) {
                 on_gap_timeout(rx, f, now_us);
+            }
+        }
+    }
+
+    /* §14 / §14.2(c): (b) idle eviction sweep on last_progress_us. A flow that
+     * makes no progress (e.g. all K reset packets lost → stuck blackhole) goes
+     * stale and is evicted here; its next packet re-inits via cold-start
+     * (first-observed). This is the guaranteed reset backstop. */
+    uint64_t idle_us = (uint64_t)rx->cfg.ingress_idle_timeout_sec * 1000000ULL;
+    for (uint32_t i = 0; i < rx->n_buckets; i++) {
+        mqvpn_reorder_flow_t **pp = &rx->buckets[i];
+        while (*pp != NULL) {
+            mqvpn_reorder_flow_t *f = *pp;
+            if ((now_us - f->last_progress_us) > idle_us) {
+                *pp = f->next; /* unlink from the chain */
+                flow_destroy(rx, f);
+                rx->n_flows--;
+            } else {
+                pp = &f->next;
             }
         }
     }

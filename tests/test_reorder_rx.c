@@ -779,6 +779,185 @@ test_rx_overflow_does_not_halt(void)
     mqvpn_reorder_rx_free(rx);
 }
 
+/* ──────────── Task 3.4: FLOW_RESET honor + last_progress backstop ────────── */
+
+/* §17 partial accounting (terms defined through 3.4): closed periods end in
+ * filled / timeout / overflow / reset; one open (armed) period adds +1. */
+static int
+accounting_holds_34(mqvpn_reorder_flow_t *f)
+{
+    uint64_t closed = f->stats.gap_filled_count + f->stats.gap_timeout_count +
+                      f->stats.gap_overflow_count + f->stats.gap_reset_count;
+    uint64_t open = f->gap_timer_active ? 1u : 0u;
+    return f->stats.gap_count == closed + open;
+}
+
+static void
+test_rx_reset_reinit(void)
+{
+    /* §11.3 step 1 / §14.2(a): FLOW_RESET with idle-grace satisfied (stale
+     * last_progress) → reinit expected=seq, deliver. */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.reset_idle_grace_ms = 10000; /* 10s grace */
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+
+    /* establish epoch: cold-start seq 100, expected=101, last_progress=1_000_000. */
+    size_t n = build_reorder_dgram(buf, 0, 100, 1, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000000);
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_EQ_INT(f->expected, 101, "epoch established expected=101");
+
+    /* FLOW_RESET seq=0 arrives 20s later (> 10s grace) → honored: expected=0,
+     * deliver, expected=1. */
+    n = build_reorder_dgram(buf, MQVPN_REORDER_FLAG_RESET, 0, 50, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000000 + 20000000ULL);
+    ASSERT_EQ_INT(rec.n, 2, "reset packet delivered");
+    ASSERT_EQ_INT(rec.tags[1], 50, "delivered the reset-epoch packet");
+    ASSERT_EQ_INT(f->expected, 1, "expected reinit to seq+1 = 1");
+    ASSERT_TRUE(invariant_holds(rx), "invariant after reset reinit");
+    ASSERT_TRUE(accounting_holds_34(f), "accounting after reset reinit");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_reset_burst_no_rollback(void)
+{
+    /* §14.2(a): establish epoch with seq=3 (cold-start), then a FLOW_RESET seq=0
+     * arrives WITHIN grace (now - last_progress < grace) → NOT honored → seq<expected
+     * → late drop, NO rollback. */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.reset_idle_grace_ms = 10000; /* 10s */
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+
+    /* cold-start seq=3 at t=1_000_000 → expected=4 (new epoch first-observed). */
+    size_t n = build_reorder_dgram(buf, MQVPN_REORDER_FLAG_RESET, 3, 30, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000000);
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_EQ_INT(f->expected, 4, "epoch anchored at seq=3 → expected=4");
+    ASSERT_EQ_INT(rec.n, 1, "seq3 delivered (cold-start honor)");
+
+    /* seq=0 reset-burst packet arrives 1ms later (< 10s grace) → NOT honored,
+     * falls through → seq 0 < expected 4 → late drop, no rollback. */
+    n = build_reorder_dgram(buf, MQVPN_REORDER_FLAG_RESET, 0, 99, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000000 + 1000ULL);
+    ASSERT_EQ_INT(rec.n, 1, "late reset-burst packet NOT delivered");
+    ASSERT_EQ_INT(f->expected, 4, "no rollback: expected still 4");
+    ASSERT_EQ_INT(f->stats.too_late_drop_count, 1, "counted as late drop");
+    ASSERT_EQ_INT(f->stats.reset_discard_count, 0, "no discard (not honored)");
+    ASSERT_TRUE(invariant_holds(rx), "invariant after reset-burst late drop");
+    ASSERT_TRUE(accounting_holds_34(f), "accounting after reset-burst late drop");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_short_flow_reset(void)
+{
+    /* §14.2(a): a flow with small expected still resets correctly via idle-grace
+     * (honor condition is time-based, NOT seq magnitude — fixes v2's broken
+     * RESET_THRESHOLD on short flows). */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.reset_idle_grace_ms = 10000;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+
+    /* short flow: cold-start seq 0,1 then idle. expected=2 (small). */
+    size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000000);
+    n = build_reorder_dgram(buf, 0, 1, 2, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000100);
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_EQ_INT(f->expected, 2, "short flow expected=2");
+
+    /* reset seq=0 after grace → honored even though expected (2) is tiny and the
+     * magnitude gap (2-0=2) is small. */
+    n = build_reorder_dgram(buf, MQVPN_REORDER_FLAG_RESET, 0, 77, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000100 + 20000000ULL);
+    ASSERT_EQ_INT(rec.tags[rec.n - 1], 77, "short-flow reset honored & delivered");
+    ASSERT_EQ_INT(f->expected, 1, "short flow reinit to seq+1 = 1");
+    ASSERT_TRUE(accounting_holds_34(f), "accounting after short flow reset");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_reset_discard_not_deliver(void)
+{
+    /* §24.9 line 1121 (must-fix): on honor, old buffered packets are DISCARDED,
+     * not delivered (reset_discard_count). */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.reset_idle_grace_ms = 10000;
+    c.max_wait_ms = 1000000; /* huge wait so the timer never fires during the test */
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+
+    /* cold-start seq 0 (expected=1), then buffer seq 2 and 3 (old epoch). */
+    size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000000);
+    n = build_reorder_dgram(buf, 0, 2, 20, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000100);
+    n = build_reorder_dgram(buf, 0, 3, 30, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000100);
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_EQ_INT(f->buffer.count, 2, "two old-epoch packets buffered");
+    int delivered_before = rec.n; /* = 1 (only seq0) */
+
+    /* genuine reset arrives after grace: old buffer (seq2,3) must be DISCARDED. */
+    n = build_reorder_dgram(buf, MQVPN_REORDER_FLAG_RESET, 0, 55, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000100 + 20000000ULL);
+    ASSERT_EQ_INT(rec.n, delivered_before + 1, "only the reset packet delivered (tag55)");
+    ASSERT_EQ_INT(rec.tags[rec.n - 1], 55,
+                  "delivered tag is the reset packet, not old buffer");
+    ASSERT_EQ_INT(f->stats.reset_discard_count, 2, "two old packets discarded");
+    ASSERT_TRUE(ring_empty(&f->buffer), "old buffer freed");
+    ASSERT_TRUE(!f->gap_timer_active, "timer stopped after discard");
+    ASSERT_TRUE(invariant_holds(rx), "invariant after reset discard");
+    ASSERT_TRUE(accounting_holds_34(f), "accounting after reset discard");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_backstop_recovery(void)
+{
+    /* §14.2(c) / §24.9 line 1111: all K reset packets "lost" (flow stuck, no
+     * progress) → after ingress_idle, tick evicts the stale flow → next packet
+     * cold-starts (re-init). */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.ingress_idle_timeout_sec = 30; /* 30s idle eviction */
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+
+    /* establish epoch: cold-start seq 1000, expected=1001, last_progress=1s. */
+    size_t n = build_reorder_dgram(buf, 0, 1000, 1, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000000);
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_EQ_INT(f->expected, 1001, "epoch established");
+
+    /* Sender evicted + restarted at seq 0, but all K reset packets are lost (no
+     * packet reaches us). The flow makes no progress. tick at +40s (> 30s idle)
+     * must evict the stale flow. */
+    mqvpn_reorder_rx_tick(rx, 1000000 + 40000000ULL);
+    ASSERT_TRUE(only_flow(rx) == NULL, "stale flow evicted by backstop");
+    ASSERT_EQ_INT((long long)rx->n_flows, 0, "n_flows back to 0");
+
+    /* next packet (new epoch seq 0, FLOW_RESET lost) cold-starts via first-observed
+     * → re-init, delivered (recovery). */
+    n = build_reorder_dgram(buf, 0, 0, 2, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000000 + 41000000ULL);
+    ASSERT_EQ_INT(rec.n, 2, "next packet cold-started and delivered (recovered)");
+    ASSERT_EQ_INT(rec.tags[1], 2, "delivered the new-epoch first-observed");
+    mqvpn_reorder_flow_t *f2 = only_flow(rx);
+    ASSERT_TRUE(f2 != NULL, "new flow created on cold start");
+    ASSERT_EQ_INT(f2->expected, 1, "cold-start anchored expected=1 (seq0+1)");
+    ASSERT_TRUE(invariant_holds(rx), "invariant after backstop recovery");
+    mqvpn_reorder_rx_free(rx);
+}
+
 int
 main(void)
 {
@@ -808,6 +987,13 @@ main(void)
     test_rx_per_flow_limit_drop_when_empty();
     test_rx_pool_drop_when_empty();
     test_rx_overflow_does_not_halt();
+
+    /* Task 3.4: FLOW_RESET honor + last_progress backstop */
+    test_rx_reset_reinit();
+    test_rx_reset_burst_no_rollback();
+    test_rx_short_flow_reset();
+    test_rx_reset_discard_not_deliver();
+    test_rx_backstop_recovery();
 
     fprintf(stderr, "test_reorder_rx: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
