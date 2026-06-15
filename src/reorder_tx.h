@@ -42,7 +42,8 @@ typedef struct {
 
 /* TX-owned statistics (§17). Separate from the RX stats struct. */
 typedef struct {
-    uint64_t forced_evict_count; /* idle<egress_idle send_flow force-evicted (~0) */
+    uint64_t forced_evict_count; /* reserved tripwire: structurally never incremented
+                                  * (active flows are never force-evicted, §14.2(a')) */
     uint64_t flows_created;
     uint64_t idle_evict_count; /* idle>egress_idle send_flow evicted on full */
     uint64_t table_full_raw;   /* full + no idle victim → new flow sent RAW */

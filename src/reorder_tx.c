@@ -7,7 +7,6 @@
  */
 
 #include "reorder_tx.h"
-#include "log.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -32,7 +31,10 @@ struct mqvpn_reorder_tx {
     mqvpn_reorder_tx_stats_t stats;
 };
 
-/* Power-of-two bucket count chosen from max_flows (load factor ~1). */
+/* Power-of-two bucket count chosen from max_flows (load factor ~1).
+ * Capped at 2^20 buckets: beyond that we intentionally accept load factor >1
+ * (chains lengthen) rather than growing — max_flows bounds the table anyway,
+ * so the cap is deliberate, not an oversight. No runtime resize. */
 static uint32_t
 pick_buckets(uint32_t max_flows)
 {
