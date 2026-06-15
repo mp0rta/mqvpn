@@ -1915,6 +1915,43 @@ mqvpn_server_get_all_fec_stats(const mqvpn_server_t *s, mqvpn_internal_fec_entry
 }
 
 int
+mqvpn_server_get_reorder_stats(const mqvpn_server_t *s, mqvpn_reorder_stats_t *out)
+{
+    if (!s || !out) return -1;
+    memset(out, 0, sizeof(*out));
+
+    /* Sum the per-conn RX snapshots across every live session that built a
+     * reorder engine. reorder_rx is NULL on conns where reorder mode is OFF or
+     * engine alloc failed (RAW fallback) — skip those. Unlike the FEC getters
+     * we don't gate on tunnel_established: reorder_rx is only created during
+     * accept and only ever fed post-tunnel, so a non-NULL reorder_rx already
+     * implies an attached conn; its counters are zero until traffic flows. */
+    for (int i = 1; i <= MQVPN_ADDR_POOL_MAX; i++) {
+        svr_conn_t *conn = s->sessions[i];
+        if (!conn || !conn->reorder_rx) continue;
+
+        mqvpn_reorder_stats_t st;
+        mqvpn_reorder_rx_get_stats(conn->reorder_rx, &st);
+
+        out->delivered_count += st.delivered_count;
+        out->too_late_drop_count += st.too_late_drop_count;
+        out->too_far_ahead_drop_count += st.too_far_ahead_drop_count;
+        out->duplicate_drop_count += st.duplicate_drop_count;
+        out->per_flow_limit_drop_count += st.per_flow_limit_drop_count;
+        out->pool_drop_count += st.pool_drop_count;
+        out->reset_discard_count += st.reset_discard_count;
+        out->gap_count += st.gap_count;
+        out->gap_filled_count += st.gap_filled_count;
+        out->gap_timeout_count += st.gap_timeout_count;
+        out->gap_overflow_count += st.gap_overflow_count;
+        out->gap_demote_count += st.gap_demote_count;
+        out->gap_reset_count += st.gap_reset_count;
+        out->ack_demote_count += st.ack_demote_count;
+    }
+    return 0;
+}
+
+int
 mqvpn_server_get_n_clients(const mqvpn_server_t *s)
 {
     if (!s) return 0;

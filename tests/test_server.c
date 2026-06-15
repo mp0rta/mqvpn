@@ -381,6 +381,59 @@ TEST(server_on_socket_recv_null)
               MQVPN_ERR_INVALID_ARG);
 }
 
+/* ── reorder stats getter ── */
+
+TEST(server_get_reorder_stats_null)
+{
+    mqvpn_reorder_stats_t rs;
+    /* NULL server and NULL out both map to the -1 caller-bug sentinel. */
+    ASSERT_EQ(mqvpn_server_get_reorder_stats(NULL, &rs), -1);
+
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(mqvpn_server_get_reorder_stats(s, NULL), -1);
+    mqvpn_server_destroy(s);
+}
+
+TEST(server_get_reorder_stats_no_conns)
+{
+    /* A live server with no connection (hence no reorder_rx engine) aggregates
+     * to all-zero and returns 0 (success, not error). This pins the empty-sum
+     * contract the control API and e2e rely on; the gap_count>0 evidence the
+     * e2e asserts can only come from real in-tunnel out-of-order delivery,
+     * which is exercised by tests/test_e2e_reorder.sh (needs sudo/netns) and
+     * by the unit tests in tests/test_reorder_rx.c. */
+    reset_mocks();
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(mqvpn_server_start(s), MQVPN_OK);
+
+    /* Pre-dirty the struct to confirm the getter zero-inits before summing. */
+    mqvpn_reorder_stats_t rs;
+    memset(&rs, 0xAB, sizeof(rs));
+    ASSERT_EQ(mqvpn_server_get_reorder_stats(s, &rs), 0);
+    ASSERT_EQ((long long)rs.gap_count, 0);
+    ASSERT_EQ((long long)rs.gap_filled_count, 0);
+    ASSERT_EQ((long long)rs.gap_timeout_count, 0);
+    ASSERT_EQ((long long)rs.ack_demote_count, 0);
+    ASSERT_EQ((long long)rs.delivered_count, 0);
+    ASSERT_EQ((long long)rs.too_late_drop_count, 0);
+    ASSERT_EQ((long long)rs.duplicate_drop_count, 0);
+    ASSERT_EQ((long long)rs.pool_drop_count, 0);
+
+    mqvpn_server_destroy(s);
+}
+
 /* ── on_tun_packet with no sessions ── */
 
 TEST(server_on_tun_packet_no_sessions)
@@ -861,6 +914,10 @@ main(void)
     run_server_tick_null();
     run_server_on_tun_packet_null();
     run_server_on_socket_recv_null();
+
+    /* reorder stats getter (aggregate; empty-sum contract) */
+    run_server_get_reorder_stats_null();
+    run_server_get_reorder_stats_no_conns();
 
     /* TUN packet with no sessions */
     run_server_on_tun_packet_no_sessions();

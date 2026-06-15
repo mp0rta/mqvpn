@@ -178,4 +178,21 @@ MQVPN_INTERNAL int mqvpn_server_get_all_fec_stats(const mqvpn_server_t *s,
                                                   mqvpn_internal_fec_entry_t *out,
                                                   int max);
 
+/* Aggregate reorder-shim RX statistics across every live connection that has a
+ * reorder engine (cfg.reorder.mode != OFF). Zero-inits *out, then SUMs each
+ * mqvpn_reorder_stats_t counter (mqvpn_reorder_rx_get_stats) over all such
+ * conns. A server with no reorder-enabled conn leaves *out all-zero — that is a
+ * valid result, not an error. mqvpn_reorder_stats_t is defined in reorder.h
+ * (already included above).
+ *
+ * Returns:
+ *    0  -> *out filled (possibly all-zero)
+ *   -1  -> a NULL arg was passed
+ *
+ * Used by control_socket.c::get_reorder_stats. Aggregate-only (no per-conn
+ * breakdown): the e2e/exporter only needs the engine-fired evidence
+ * (gap_count > 0), and per-conn detail is not required at this layer. */
+MQVPN_INTERNAL int mqvpn_server_get_reorder_stats(const mqvpn_server_t *s,
+                                                  mqvpn_reorder_stats_t *out);
+
 #endif /* MQVPN_INTERNAL_H */

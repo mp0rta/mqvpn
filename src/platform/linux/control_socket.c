@@ -14,6 +14,7 @@
  *   {"cmd":"get_build_info"}
  *   {"cmd":"get_fec_stats","user":"alice"}
  *   {"cmd":"get_all_fec_stats"}
+ *   {"cmd":"get_reorder_stats"}
  *
  * Responses:
  *   {"ok":true}
@@ -29,6 +30,11 @@
  *    "total_app_bytes":9123456,"standby_app_bytes":421337}
  *   {"ok":true,"n_clients":N,"clients":[{"user":"alice","enable_fec":1,
  *    "mp_state":1,"mp_state_label":"active_with_standby", ...}, ...]}
+ *   {"ok":true,"reorder":{"gap_count":N,"gap_filled_count":N,
+ *    "gap_timeout_count":N,"gap_overflow_count":N,"gap_demote_count":N,
+ *    "gap_reset_count":N,"ack_demote_count":N,"too_late_drop_count":N,
+ *    "too_far_ahead_drop_count":N,"duplicate_drop_count":N,"pool_drop_count":N,
+ *    "per_flow_limit_drop_count":N,"delivered_count":N}}
  */
 
 #include "control_socket.h"
@@ -40,7 +46,9 @@
                                mqvpn_path_state_label,
                                mqvpn_internal_fec_stats_t (carries mp_state_label),
                                mqvpn_server_get_client_fec_stats,
-                               mqvpn_server_get_all_fec_stats */
+                               mqvpn_server_get_all_fec_stats,
+                               mqvpn_server_get_reorder_stats,
+                               mqvpn_reorder_stats_t (via reorder.h) */
 
 #include <stdlib.h>
 #include <string.h>
@@ -334,6 +342,34 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
                             "{\"ok\":false,\"error\":\"response too large\"}");
         }
         return snprintf(resp, resp_len, "%.*s", pos, buf);
+
+    } else if (strcmp(cmd, "get_reorder_stats") == 0) {
+        /* Aggregate reorder-shim RX counters across all live conns (§17). One
+         * fixed-shape object, no per-conn array, so a single snprintf with a
+         * bounded resp_len is sufficient — no APPEND/truncation dance needed.
+         * The getter zero-fills when no conn has reorder enabled, so the JSON
+         * is always well-formed (all-zero counters). */
+        mqvpn_reorder_stats_t rs;
+        if (mqvpn_server_get_reorder_stats(server, &rs) < 0)
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"internal error\"}");
+
+        return snprintf(
+            resp, resp_len,
+            "{\"ok\":true,\"reorder\":{"
+            "\"gap_count\":%" PRIu64 ",\"gap_filled_count\":%" PRIu64 ","
+            "\"gap_timeout_count\":%" PRIu64 ",\"gap_overflow_count\":%" PRIu64 ","
+            "\"gap_demote_count\":%" PRIu64 ",\"gap_reset_count\":%" PRIu64 ","
+            "\"ack_demote_count\":%" PRIu64 ",\"too_late_drop_count\":%" PRIu64 ","
+            "\"too_far_ahead_drop_count\":%" PRIu64 ",\"duplicate_drop_count\":%" PRIu64
+            ","
+            "\"pool_drop_count\":%" PRIu64 ",\"per_flow_limit_drop_count\":%" PRIu64 ","
+            "\"delivered_count\":%" PRIu64 "}}",
+            rs.gap_count, rs.gap_filled_count, rs.gap_timeout_count,
+            rs.gap_overflow_count, rs.gap_demote_count, rs.gap_reset_count,
+            rs.ack_demote_count, rs.too_late_drop_count, rs.too_far_ahead_drop_count,
+            rs.duplicate_drop_count, rs.pool_drop_count, rs.per_flow_limit_drop_count,
+            rs.delivered_count);
 
     } else {
         return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"unknown cmd\"}");
