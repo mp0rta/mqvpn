@@ -440,6 +440,53 @@ test_ini_rule_out_of_range_keeps_defaults(void)
     ASSERT_EQ_INT(cfg.reorder.rules[0].port, 4242, "valid port applied");
 }
 
+/* ──────────────── Bridge: INI file_cfg.reorder → libmqvpn config ──────────────
+ *
+ * The CLI path copies mqvpn_file_config_t.reorder into the platform cfg, and the
+ * platform builder calls mqvpn_config_apply_reorder() to translate it into the
+ * libmqvpn config via the public setters. This exercises that exact translation
+ * function on a config parsed from INI, proving [Reorder]/[ReorderRule] reaches
+ * the engine config (mode ON + rule present) rather than being silently ignored. */
+static void
+test_bridge_ini_reaches_libmqvpn_config(void)
+{
+    const char *ini = "[Reorder]\n"
+                      "Enabled = on\n"
+                      "MaxWaitMs = 45\n"
+                      "CapPackets = 2048\n"
+                      "ClassifyWindow = 80\n"
+                      "[ReorderRule]\n"
+                      "Proto = udp\n"
+                      "Port = 443\n"
+                      "Profile = quic_bulk\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t fc;
+    mqvpn_config_defaults(&fc);
+    int rc = mqvpn_config_load(&fc, path);
+    if (path) unlink(path);
+    ASSERT_EQ_INT(rc, 0, "parse ok");
+
+    /* Fresh libmqvpn config starts at the OFF default; the bridge must flip it. */
+    mqvpn_config_t *lib = mqvpn_config_new();
+    ASSERT_TRUE(lib != NULL, "config_new");
+    ASSERT_EQ_INT(lib->reorder.mode, MQVPN_REORDER_OFF, "lib starts OFF");
+
+    mqvpn_config_apply_reorder(lib, &fc.reorder);
+
+    ASSERT_EQ_INT(lib->reorder.mode, MQVPN_REORDER_ON, "bridge: mode ON reaches lib");
+    ASSERT_EQ_INT(lib->reorder.max_wait_ms, 45, "bridge: max_wait_ms");
+    ASSERT_EQ_INT(lib->reorder.cap_packets_per_flow, 2048, "bridge: cap");
+    ASSERT_EQ_INT(lib->reorder.classify_window, 80, "bridge: classify_window");
+    ASSERT_EQ_INT(lib->reorder.n_rules, 1, "bridge: rule present in lib");
+    ASSERT_EQ_INT(lib->reorder.rules[0].proto, MQVPN_IPPROTO_UDP, "bridge: rule proto");
+    ASSERT_EQ_INT(lib->reorder.rules[0].port, 443, "bridge: rule port");
+    ASSERT_EQ_INT(lib->reorder.rules[0].profile, MQVPN_RPROF_QUIC_BULK,
+                  "bridge: rule profile");
+    ASSERT_EQ_INT(mqvpn_reorder_config_validate(&lib->reorder), 0, "bridge: lib valid");
+
+    mqvpn_config_free(lib);
+}
+
 int
 main(void)
 {
@@ -463,6 +510,9 @@ main(void)
     test_ini_validate_rejects_idle_inversion();
     test_ini_over_cap_rule_rejected();
     test_ini_rule_out_of_range_keeps_defaults();
+
+    /* Bridge: INI → file_cfg → libmqvpn config (apply_reorder translation) */
+    test_bridge_ini_reaches_libmqvpn_config();
 
     fprintf(stderr, "test_reorder_config: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

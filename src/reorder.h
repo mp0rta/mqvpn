@@ -327,10 +327,10 @@ typedef struct {
     mqvpn_reorder_mode_t mode; /* master gate (§16.2 enabled) */
 
     /* receiver-side (§16.2) */
-    uint32_t max_wait_ms;                  /* v1 fixed gap wait */
-    uint32_t cap_packets_per_flow;         /* ring.cap, must be power of two */
-    uint64_t max_buffer_bytes_per_flow;    /* per-flow byte limit */
-    uint16_t classify_window;              /* ACK-direction classify window */
+    uint32_t max_wait_ms;               /* v1 fixed gap wait */
+    uint32_t cap_packets_per_flow;      /* ring.cap, must be power of two */
+    uint64_t max_buffer_bytes_per_flow; /* per-flow byte limit */
+    uint16_t classify_window; /* ACK-direction classify window; 0 = demotion disabled */
     uint16_t ack_demote_max_large_packets; /* demote threshold (count) */
     uint32_t small_packet_threshold_bytes; /* inner UDP payload small/large split */
 

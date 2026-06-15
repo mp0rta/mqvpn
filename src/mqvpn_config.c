@@ -653,3 +653,26 @@ mqvpn_config_add_reorder_rule(mqvpn_config_t *cfg, uint8_t proto, uint16_t port,
     cfg->reorder.n_rules++;
     return MQVPN_OK;
 }
+
+void
+mqvpn_config_apply_reorder(mqvpn_config_t *cfg, const mqvpn_reorder_config_t *src)
+{
+    if (!cfg || !src) return;
+    mqvpn_config_set_reorder_enabled(cfg, src->mode);
+    mqvpn_config_set_reorder_wait(cfg, src->max_wait_ms);
+    mqvpn_config_set_reorder_cap(cfg, src->cap_packets_per_flow,
+                                 src->max_buffer_bytes_per_flow);
+    mqvpn_config_set_reorder_classify(cfg, src->classify_window,
+                                      src->ack_demote_max_large_packets,
+                                      src->small_packet_threshold_bytes);
+    mqvpn_config_set_reorder_reset(cfg, src->reset_mark_packets,
+                                   src->reset_idle_grace_ms);
+    mqvpn_config_set_reorder_limits(cfg, src->max_flows, src->global_max_buffer_bytes,
+                                    src->ingress_idle_timeout_sec,
+                                    src->egress_idle_timeout_sec);
+    /* eval_force_no_demotion is internal-only and intentionally not bridged. */
+    for (int i = 0; i < src->n_rules; i++) {
+        mqvpn_config_add_reorder_rule(cfg, src->rules[i].proto, src->rules[i].port,
+                                      src->rules[i].profile);
+    }
+}

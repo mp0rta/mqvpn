@@ -1426,9 +1426,11 @@ test_rx_double_overflow_flush(void)
     mqvpn_reorder_config_t c = rx_cfg();
     c.cap_packets_per_flow = 1024;
     /* inner len per packet = 28 + 100 = 128. Both budgets allow exactly TWO
-     * packets (256), so a third admit hits the per-flow limit (flush #1) and,
-     * after reclassify, the pool limit (flush #2 — though by then self is empty,
-     * the path is exercised). Keep them equal and tight to stress both gates. */
+     * packets (256), so a third admit hits the per-flow limit (flush #1). After
+     * reclassify the packet lands in-order and drains, so the buffer is empty by
+     * the time the pool gate is reached: that gate takes the ring_empty drop
+     * branch and does NOT call overflow_flush on an empty buffer. Keep the
+     * budgets equal and tight to exercise both gates back-to-back. */
     c.max_buffer_bytes_per_flow = 256;
     c.global_max_buffer_bytes = 256;
     mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);

@@ -12,6 +12,8 @@
 #  include <netinet/in.h>
 #endif
 
+#include "reorder.h" /* mqvpn_reorder_config_t (INI [Reorder] bridge) */
+
 typedef struct mqvpn_server_cfg_s {
     const char *listen_addr; /* bind address (e.g. "0.0.0.0") */
     int listen_port;         /* bind port (e.g. 443) */
@@ -32,6 +34,8 @@ typedef struct mqvpn_server_cfg_s {
     uint64_t init_max_path_id; /* draft-21 §4.6 TP cap, 0=use xquic default 8 */
     int tun_mtu;               /* 0=auto (1382 at startup), >0=override (floor 1280) */
     int cc;                    /* mqvpn_cc_t: congestion control algorithm */
+    mqvpn_reorder_config_t
+        reorder; /* INI [Reorder]/[ReorderRule] (mode OFF by default) */
 } mqvpn_server_cfg_t;
 
 #endif /* MQVPN_VPN_SERVER_H */

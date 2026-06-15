@@ -75,6 +75,14 @@ struct mqvpn_config_s {
 
 int mqvpn_state_transition_valid(mqvpn_client_state_t from, mqvpn_client_state_t to);
 
+/* ─── Reorder config bridge (§16) ─── */
+
+/* Translate a parsed/built reorder config (e.g. from INI [Reorder]/[ReorderRule]
+ * via mqvpn_file_config_t) into `cfg` using the public builder setters. Shared by
+ * the platform layers so every surface honors reorder config identically. The
+ * internal-only eval_force_no_demotion knob is intentionally NOT bridged. */
+void mqvpn_config_apply_reorder(mqvpn_config_t *cfg, const mqvpn_reorder_config_t *src);
+
 /* ─── Scheduler precondition predicate ─── */
 
 /* Returns true if the scheduler+path combination warrants a warning.
