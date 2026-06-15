@@ -235,6 +235,170 @@ test_cfg_validate_ok(void)
     ASSERT_EQ_INT(mqvpn_reorder_config_validate(&c), 0, "cfg validate default ok");
 }
 
+/* ──────────────── Task 2 (shared): inner-IP 5-tuple parser ─────────────────
+ *
+ * mqvpn_reorder_parse_5tuple() lives in reorder.h and is used by both tx and rx,
+ * so its unit tests live here with the other reorder.h coverage.
+ */
+
+/* Build a minimal IPv4 UDP packet into buf; returns total length. */
+static size_t
+build_v4_udp(uint8_t *buf, uint16_t sport, uint16_t dport, uint16_t frag_field,
+             uint8_t proto)
+{
+    memset(buf, 0, 28);
+    buf[0] = 0x45; /* version 4, IHL 5 */
+    buf[6] = (uint8_t)(frag_field >> 8);
+    buf[7] = (uint8_t)(frag_field);
+    buf[9] = proto; /* protocol */
+    buf[12] = 10;
+    buf[13] = 0;
+    buf[14] = 0;
+    buf[15] = 1; /* src 10.0.0.1 */
+    buf[16] = 10;
+    buf[17] = 0;
+    buf[18] = 0;
+    buf[19] = 2; /* dst 10.0.0.2 */
+    buf[20] = (uint8_t)(sport >> 8);
+    buf[21] = (uint8_t)(sport); /* UDP sport */
+    buf[22] = (uint8_t)(dport >> 8);
+    buf[23] = (uint8_t)(dport); /* UDP dport */
+    return 28;
+}
+
+static void
+test_parse_v4_udp(void)
+{
+    uint8_t buf[64];
+    size_t n = build_v4_udp(buf, 1111, 443, 0, 17);
+    mqvpn_flow_key_t k;
+    int rc = mqvpn_reorder_parse_5tuple(buf, n, &k);
+    ASSERT_EQ_INT(rc, 0, "parse v4 udp rc");
+    ASSERT_EQ_INT(k.ip_version, 4, "parse v4 version");
+    ASSERT_EQ_INT(k.proto, 17, "parse v4 proto");
+    ASSERT_EQ_INT(k.src_port, 1111, "parse v4 sport");
+    ASSERT_EQ_INT(k.dst_port, 443, "parse v4 dport");
+    ASSERT_EQ_INT(k.src_ip[3], 1, "parse v4 src ip");
+    ASSERT_EQ_INT(k.dst_ip[3], 2, "parse v4 dst ip");
+}
+
+static void
+test_parse_v4_fragment_fails(void)
+{
+    uint8_t buf[64];
+    mqvpn_flow_key_t k;
+    /* MF bit set */
+    size_t n = build_v4_udp(buf, 1111, 443, 0x2000, 17);
+    ASSERT_EQ_INT(mqvpn_reorder_parse_5tuple(buf, n, &k), -1, "parse v4 MF fails");
+    /* fragment offset != 0 */
+    n = build_v4_udp(buf, 1111, 443, 0x0001, 17);
+    ASSERT_EQ_INT(mqvpn_reorder_parse_5tuple(buf, n, &k), -1, "parse v4 offset fails");
+}
+
+static void
+test_parse_v4_tcp_fails(void)
+{
+    uint8_t buf[64];
+    mqvpn_flow_key_t k;
+    size_t n = build_v4_udp(buf, 1111, 443, 0, 6 /* TCP */);
+    ASSERT_EQ_INT(mqvpn_reorder_parse_5tuple(buf, n, &k), -1, "parse v4 tcp fails");
+}
+
+static void
+test_parse_v4_truncated_fails(void)
+{
+    uint8_t buf[64];
+    mqvpn_flow_key_t k;
+    build_v4_udp(buf, 1111, 443, 0, 17);
+    /* 20-byte IP header present but UDP header truncated */
+    ASSERT_EQ_INT(mqvpn_reorder_parse_5tuple(buf, 22, &k), -1,
+                  "parse v4 truncated fails");
+    ASSERT_EQ_INT(mqvpn_reorder_parse_5tuple(buf, 5, &k), -1, "parse v4 too short fails");
+}
+
+static void
+test_parse_v6_udp(void)
+{
+    uint8_t buf[64];
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 0x60; /* version 6 */
+    buf[6] = 17;   /* next header = UDP */
+    buf[8] = 0x20;
+    buf[9] = 0x01; /* src starts 2001:... */
+    buf[24] = 0x20;
+    buf[25] = 0x02;
+    buf[40] = (uint8_t)(2222 >> 8);
+    buf[41] = (uint8_t)(2222); /* sport */
+    buf[42] = (uint8_t)(443 >> 8);
+    buf[43] = (uint8_t)(443); /* dport */
+    mqvpn_flow_key_t k;
+    int rc = mqvpn_reorder_parse_5tuple(buf, 48, &k);
+    ASSERT_EQ_INT(rc, 0, "parse v6 udp rc");
+    ASSERT_EQ_INT(k.ip_version, 6, "parse v6 version");
+    ASSERT_EQ_INT(k.src_port, 2222, "parse v6 sport");
+    ASSERT_EQ_INT(k.dst_port, 443, "parse v6 dport");
+    ASSERT_EQ_INT(k.src_ip[0], 0x20, "parse v6 src ip");
+}
+
+static void
+test_parse_v6_with_hopopts_udp(void)
+{
+    uint8_t buf[80];
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 0x60;
+    buf[6] = 0; /* next header = Hop-by-Hop Options */
+    /* Hop-by-Hop ext header at offset 40: next=UDP, hdr_ext_len=0 → 8 bytes */
+    buf[40] = 17; /* next header = UDP */
+    buf[41] = 0;  /* hdr_ext_len: 8 bytes total */
+    /* UDP header at offset 48 */
+    buf[48] = (uint8_t)(3333 >> 8);
+    buf[49] = (uint8_t)(3333);
+    buf[50] = (uint8_t)(443 >> 8);
+    buf[51] = (uint8_t)(443);
+    mqvpn_flow_key_t k;
+    int rc = mqvpn_reorder_parse_5tuple(buf, 56, &k);
+    ASSERT_EQ_INT(rc, 0, "parse v6 hopopts udp rc");
+    ASSERT_EQ_INT(k.src_port, 3333, "parse v6 hopopts sport");
+    ASSERT_EQ_INT(k.dst_port, 443, "parse v6 hopopts dport");
+}
+
+static void
+test_parse_v6_fragment_fails(void)
+{
+    uint8_t buf[64];
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 0x60;
+    buf[6] = 44; /* next header = Fragment */
+    mqvpn_flow_key_t k;
+    ASSERT_EQ_INT(mqvpn_reorder_parse_5tuple(buf, 48, &k), -1, "parse v6 fragment fails");
+}
+
+static void
+test_parse_v6_tcp_fails(void)
+{
+    uint8_t buf[64];
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 0x60;
+    buf[6] = 6; /* TCP */
+    mqvpn_flow_key_t k;
+    ASSERT_EQ_INT(mqvpn_reorder_parse_5tuple(buf, 48, &k), -1, "parse v6 tcp fails");
+}
+
+static void
+test_parse_v6_truncated_fails(void)
+{
+    uint8_t buf[64];
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 0x60;
+    buf[6] = 17; /* UDP */
+    mqvpn_flow_key_t k;
+    /* fixed v6 header present but UDP header truncated */
+    ASSERT_EQ_INT(mqvpn_reorder_parse_5tuple(buf, 42, &k), -1,
+                  "parse v6 truncated fails");
+    ASSERT_EQ_INT(mqvpn_reorder_parse_5tuple(buf, 10, &k), -1,
+                  "parse v6 too short fails");
+}
+
 int
 main(void)
 {
@@ -255,6 +419,16 @@ main(void)
     test_cfg_validate_idle_order();
     test_cfg_validate_cap_pow2();
     test_cfg_validate_ok();
+
+    test_parse_v4_udp();
+    test_parse_v4_fragment_fails();
+    test_parse_v4_tcp_fails();
+    test_parse_v4_truncated_fails();
+    test_parse_v6_udp();
+    test_parse_v6_with_hopopts_udp();
+    test_parse_v6_fragment_fails();
+    test_parse_v6_tcp_fails();
+    test_parse_v6_truncated_fails();
 
     fprintf(stderr, "test_reorder_common: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

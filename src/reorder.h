@@ -167,6 +167,118 @@ mqvpn_flow_key_hash(const mqvpn_flow_key_t *k, uint64_t seed)
     return h;
 }
 
+/* ─────────────────── §4 / §10.2: inner-IP 5-tuple parser ───────────────────
+ *
+ * mqvpn_reorder_parse_5tuple() extracts the inner 5-tuple from a bare inner IP
+ * packet, for both the TX gating path (§10.2) and the RX dispatch. It returns 0
+ * only for a parseable, non-fragmented UDP packet; -1 for anything that must be
+ * sent RAW (§4 / §4.1): too short, not IPv4/IPv6, fragmented, non-UDP, or an
+ * IPv6 chain we cannot walk to a UDP header.
+ *
+ * On success out->{ip_version, proto=17, src/dst_ip, src/dst_port(host order)}
+ * are filled (v4 addresses in [0..3], rest zero, per §6.1).
+ */
+#define MQVPN_IPPROTO_UDP 17
+
+/* IPv6 extension headers we walk through to reach the UDP header (§4.1). */
+#define MQVPN_IP6_HOPOPTS  0  /* Hop-by-Hop Options */
+#define MQVPN_IP6_ROUTING  43 /* Routing */
+#define MQVPN_IP6_FRAGMENT 44 /* Fragment → not eligible (§4.1) */
+#define MQVPN_IP6_DSTOPTS  60 /* Destination Options */
+
+static inline int
+mqvpn_reorder_parse_5tuple(const uint8_t *pkt, size_t len, mqvpn_flow_key_t *out)
+{
+    if (len < 1) {
+        return -1;
+    }
+    uint8_t version = (uint8_t)(pkt[0] >> 4);
+
+    if (version == 4) {
+        /* IPv4: need at least the 20-byte fixed header. */
+        if (len < 20) {
+            return -1;
+        }
+        uint8_t ihl = (uint8_t)(pkt[0] & 0x0f);
+        size_t hdr_len = (size_t)ihl * 4;
+        if (ihl < 5 || len < hdr_len) {
+            return -1;
+        }
+        /* §4.1: MF set or fragment offset != 0 → RAW (port not visible / order
+         * across fragments breaks). flags+frag-offset is the 16-bit field at
+         * offset 6; bit 13 (0x2000) = MF, low 13 bits = offset. */
+        uint16_t frag = (uint16_t)((pkt[6] << 8) | pkt[7]);
+        if (frag & 0x3fff) {
+            return -1;
+        }
+        if (pkt[9] != MQVPN_IPPROTO_UDP) {
+            return -1;
+        }
+        /* UDP header (8 bytes) must fit after the IP header. */
+        if (len < hdr_len + 8) {
+            return -1;
+        }
+        memset(out, 0, sizeof(*out));
+        out->ip_version = 4;
+        out->proto = MQVPN_IPPROTO_UDP;
+        memcpy(out->src_ip, pkt + 12, 4);
+        memcpy(out->dst_ip, pkt + 16, 4);
+        out->src_port = (uint16_t)((pkt[hdr_len] << 8) | pkt[hdr_len + 1]);
+        out->dst_port = (uint16_t)((pkt[hdr_len + 2] << 8) | pkt[hdr_len + 3]);
+        return 0;
+    }
+
+    if (version == 6) {
+        /* IPv6: 40-byte fixed header, then walk the extension-header chain. */
+        if (len < 40) {
+            return -1;
+        }
+        uint8_t next = pkt[6];
+        size_t off = 40;
+        /* Bound the walk: each ext header is >= 8 bytes, so the chain length is
+         * bounded by len; cap iterations defensively regardless. */
+        for (int i = 0; i < 16; i++) {
+            if (next == MQVPN_IPPROTO_UDP) {
+                if (len < off + 8) {
+                    return -1;
+                }
+                memset(out, 0, sizeof(*out));
+                out->ip_version = 6;
+                out->proto = MQVPN_IPPROTO_UDP;
+                memcpy(out->src_ip, pkt + 8, 16);
+                memcpy(out->dst_ip, pkt + 24, 16);
+                out->src_port = (uint16_t)((pkt[off] << 8) | pkt[off + 1]);
+                out->dst_port = (uint16_t)((pkt[off + 2] << 8) | pkt[off + 3]);
+                return 0;
+            }
+            if (next == MQVPN_IP6_FRAGMENT) {
+                return -1; /* §4.1: fragmented → RAW */
+            }
+            if (next == MQVPN_IP6_HOPOPTS || next == MQVPN_IP6_ROUTING ||
+                next == MQVPN_IP6_DSTOPTS) {
+                /* Each of these ext headers: next(1) + hdr_ext_len(1, in 8-octet
+                 * units excluding the first 8) + ... */
+                if (len < off + 2) {
+                    return -1;
+                }
+                uint8_t hdr_ext_len = pkt[off + 1];
+                size_t ext_bytes = (size_t)(hdr_ext_len + 1) * 8;
+                next = pkt[off];
+                off += ext_bytes;
+                if (off > len) {
+                    return -1;
+                }
+                continue;
+            }
+            /* Unknown / unsupported next-header (incl. TCP, ICMPv6) → RAW. */
+            return -1;
+        }
+        return -1; /* chain too long */
+    }
+
+    return -1; /* not IPv4 or IPv6 */
+}
+
 /* ───────────────────────────── §16: config ────────────────────────────────
  *
  * Phase-1 configuration. Values and semantics follow §16.1 / §16.2. The struct
