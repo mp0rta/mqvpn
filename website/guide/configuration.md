@@ -172,6 +172,48 @@ See [Multipath](./multipath) for scheduler details.
 
 > `CC = none` (no congestion control) requires xquic built with `-DXQC_ENABLE_UNLIMITED=ON`.
 
+### `[Reorder]`
+
+A flow-aware reorder buffer for inner UDP traffic. It targets a single inner connection (e.g. inner QUIC) that is itself spread across multiple paths by mqvpn's multipath aggregation: by holding briefly out-of-order datagrams and delivering them in order, it reduces the reordering the inner endpoint sees. Disabled by default (`Enabled = off`); when off the section has no effect and packets are forwarded unchanged.
+
+| Key | Description | Default |
+|-----|-------------|---------|
+| `Enabled` | Master switch (`on` / `off`) | `off` |
+| `MaxWaitMs` | How long to hold a gap before skipping the missing datagram (ms) | `30` |
+| `CapPackets` | Max buffered datagrams per flow (power of two) | `1024` |
+| `MaxBytesPerFlow` | Max buffered bytes per flow | `1572864` |
+| `ClassifyWindow` | Datagrams observed to classify a flow's direction (`0` disables ACK-direction demotion) | `64` |
+| `AckDemoteMaxLarge` | Large-packet count at or below which a flow is judged ACK-direction | `3` |
+| `SmallPacketThreshold` | Inner payload bytes splitting small vs. large | `200` |
+| `ResetMarkPackets` | FLOW_RESET marks emitted when a flow restarts | `8` |
+| `ResetIdleGraceMs` | Honor a FLOW_RESET only after the flow has been idle this long (ms) | `10000` |
+| `MaxFlows` | Max tracked flows | `65536` |
+| `GlobalMaxBytes` | Shared buffer byte budget across all flows | `67108864` |
+| `IngressIdleSec` | Receiver idle eviction timeout (must be `< EgressIdleSec`) | `30` |
+| `EgressIdleSec` | Sender idle eviction timeout | `300` |
+
+Demotion in the ACK direction is automatic: a flow that looks like an ACK/control stream (mostly small packets) is moved to pass-through so it is never delayed. This is internal behaviour, not a configurable knob — tune it indirectly via `ClassifyWindow` / `AckDemoteMaxLarge` / `SmallPacketThreshold`.
+
+Per-port profiles can be set with repeatable `[ReorderRule]` sections:
+
+```ini
+[Reorder]
+Enabled = on
+
+[ReorderRule]
+Proto = udp
+Port = 443
+Profile = quic_bulk
+```
+
+### `[ReorderRule]` (repeatable)
+
+| Key | Description | Default |
+|-----|-------------|---------|
+| `Proto` | Matched L4 protocol (`udp`) | `udp` |
+| `Port` | Matched port (source or destination) | — |
+| `Profile` | `quic_bulk`, `low_latency`, or `default_udp` | `quic_bulk` |
+
 ## MTU Guidelines
 
 ### Default (auto) — most deployments
