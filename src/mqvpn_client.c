@@ -930,7 +930,7 @@ cli_masque_start_tunnel(cli_conn_t *conn)
     if (has_auth)
         snprintf(auth_value, sizeof(auth_value), "Bearer %s", c->config.auth_key);
 
-    xqc_http_header_t hdrs[7] = {
+    xqc_http_header_t hdrs[8] = {
         {.name = {.iov_base = ":method", .iov_len = 7},
          .value = {.iov_base = "CONNECT", .iov_len = 7},
          .flags = 0},
@@ -958,7 +958,20 @@ cli_masque_start_tunnel(cli_conn_t *conn)
         hdrs[hdr_count].flags = 0;
         hdr_count++;
     }
-    xqc_http_headers_t headers = {.headers = hdrs, .count = hdr_count, .capacity = 7};
+    /* §19.2: advertise the reorder capability when locally enabled. The peer
+     * stamps only after it sees this (§19.3); we stamp only after we see the
+     * server echo it back (peer_reorder_supported, set in cb_request_read). */
+    if (c->config.reorder.mode != MQVPN_REORDER_OFF) {
+        hdrs[hdr_count].name =
+            (struct iovec){.iov_base = MQVPN_REORDER_HDR_NAME,
+                           .iov_len = sizeof(MQVPN_REORDER_HDR_NAME) - 1};
+        hdrs[hdr_count].value =
+            (struct iovec){.iov_base = MQVPN_REORDER_HDR_VALUE,
+                           .iov_len = sizeof(MQVPN_REORDER_HDR_VALUE) - 1};
+        hdrs[hdr_count].flags = 0;
+        hdr_count++;
+    }
+    xqc_http_headers_t headers = {.headers = hdrs, .count = hdr_count, .capacity = 8};
 
     ssize_t ret = xqc_h3_request_send_headers(req, &headers, 0);
     if (ret < 0) {
@@ -1116,6 +1129,13 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
                     h->value.iov_len == 3 && memcmp(h->value.iov_base, "200", 3) == 0) {
                     conn->tunnel_ok = 1;
                     LOG_I(c, "tunnel 200 OK");
+                }
+                /* §19.3: server echoed mqvpn-reorder → it supports the shim, so
+                 * we may now stamp (gated below by cfg.reorder.mode != OFF). */
+                if (mqvpn_reorder_header_match(h->name.iov_base, h->name.iov_len,
+                                               h->value.iov_base, h->value.iov_len)) {
+                    conn->peer_reorder_supported = 1;
+                    LOG_I(c, "peer advertised mqvpn-reorder; TX stamping enabled");
                 }
             }
         }

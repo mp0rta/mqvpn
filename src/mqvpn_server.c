@@ -595,7 +595,7 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
     }
 
     /* 1. Send 200 response headers */
-    xqc_http_header_t resp_hdrs[] = {
+    xqc_http_header_t resp_hdrs[3] = {
         {.name = {.iov_base = ":status", .iov_len = 7},
          .value = {.iov_base = "200", .iov_len = 3},
          .flags = 0},
@@ -603,10 +603,24 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
          .value = {.iov_base = "?1", .iov_len = 2},
          .flags = 0},
     };
+    int resp_count = 2;
+    /* §19.2: echo mqvpn-reorder only when the server has it enabled AND the
+     * client advertised (peer_reorder_supported set in cb_request_read). This is
+     * the client's signal to start stamping (§19.3). */
+    if (s->config.reorder.mode != MQVPN_REORDER_OFF && conn->peer_reorder_supported) {
+        resp_hdrs[resp_count].name =
+            (struct iovec){.iov_base = MQVPN_REORDER_HDR_NAME,
+                           .iov_len = sizeof(MQVPN_REORDER_HDR_NAME) - 1};
+        resp_hdrs[resp_count].value =
+            (struct iovec){.iov_base = MQVPN_REORDER_HDR_VALUE,
+                           .iov_len = sizeof(MQVPN_REORDER_HDR_VALUE) - 1};
+        resp_hdrs[resp_count].flags = 0;
+        resp_count++;
+    }
     xqc_http_headers_t hdrs = {
         .headers = resp_hdrs,
-        .count = 2,
-        .capacity = 2,
+        .count = resp_count,
+        .capacity = 3,
     };
     ret = xqc_h3_request_send_headers(h3_request, &hdrs, 0);
     if (ret < 0) {
@@ -885,6 +899,12 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
                 h->value.iov_len > 7 && memcmp(h->value.iov_base, "Bearer ", 7) == 0) {
                 auth_token = (const char *)h->value.iov_base + 7;
                 auth_token_len = h->value.iov_len - 7;
+            }
+            /* §19.3: client advertised mqvpn-reorder → it supports the shim. */
+            if (mqvpn_reorder_header_match(h->name.iov_base, h->name.iov_len,
+                                           h->value.iov_base, h->value.iov_len)) {
+                stream->conn->peer_reorder_supported = 1;
+                LOG_I(s, "client advertised mqvpn-reorder");
             }
         }
 

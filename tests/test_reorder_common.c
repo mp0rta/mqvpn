@@ -399,6 +399,41 @@ test_parse_v6_truncated_fails(void)
                   "parse v6 too short fails");
 }
 
+/* ─────────────────── §19: mqvpn-reorder header match ─────────────────── */
+
+static void
+test_header_match_ok(void)
+{
+    /* Canonical lowercase name + "v1" value matches. */
+    ASSERT_EQ_INT(mqvpn_reorder_header_match("mqvpn-reorder", 13, "v1", 2), 1,
+                  "header match canonical");
+    /* The constants the senders use must produce a match too. */
+    ASSERT_EQ_INT(mqvpn_reorder_header_match(
+                      MQVPN_REORDER_HDR_NAME, sizeof(MQVPN_REORDER_HDR_NAME) - 1,
+                      MQVPN_REORDER_HDR_VALUE, sizeof(MQVPN_REORDER_HDR_VALUE) - 1),
+                  1, "header match via constants");
+}
+
+static void
+test_header_match_rejects(void)
+{
+    /* Wrong value. */
+    ASSERT_EQ_INT(mqvpn_reorder_header_match("mqvpn-reorder", 13, "v2", 2), 0,
+                  "header reject wrong value");
+    /* Wrong name. */
+    ASSERT_EQ_INT(mqvpn_reorder_header_match("mqvpn-reordr", 12, "v1", 2), 0,
+                  "header reject wrong name");
+    /* Uppercase name must NOT match (wire name is lowercase, §19.2). */
+    ASSERT_EQ_INT(mqvpn_reorder_header_match("MQVPN-REORDER", 13, "v1", 2), 0,
+                  "header reject uppercase name");
+    /* Length mismatch (prefix of value). */
+    ASSERT_EQ_INT(mqvpn_reorder_header_match("mqvpn-reorder", 13, "v", 1), 0,
+                  "header reject short value");
+    /* Name length mismatch even if prefix equal. */
+    ASSERT_EQ_INT(mqvpn_reorder_header_match("mqvpn-reorder-x", 15, "v1", 2), 0,
+                  "header reject long name");
+}
+
 int
 main(void)
 {
@@ -429,6 +464,9 @@ main(void)
     test_parse_v6_fragment_fails();
     test_parse_v6_tcp_fails();
     test_parse_v6_truncated_fails();
+
+    test_header_match_ok();
+    test_header_match_rejects();
 
     fprintf(stderr, "test_reorder_common: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

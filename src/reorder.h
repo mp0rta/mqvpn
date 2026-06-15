@@ -105,6 +105,34 @@ mqvpn_reorder_wire_decode(const uint8_t *in, size_t len, uint8_t *type, uint8_t 
     return 0;
 }
 
+/* ─────────────────── §19: capability negotiation (mqvpn-reorder) ───────────
+ *
+ * §19.2: the capability is advertised as an HTTP header on the CONNECT-IP
+ * exchange. Wire name is lowercase "mqvpn-reorder" with value "v1". The client
+ * sends it in its request when reorder is locally enabled; the server echoes it
+ * in its 200 response only when it also has reorder enabled AND the client
+ * advertised. §19.3: a sender MUST observe the peer's advertisement before it
+ * stamps any datagram (pre-negotiation traffic is RAW, §19.4).
+ */
+#define MQVPN_REORDER_HDR_NAME  "mqvpn-reorder"
+#define MQVPN_REORDER_HDR_VALUE "v1"
+
+/*
+ * Returns 1 iff (name[0..name_len), value[0..value_len)) is a well-formed
+ * mqvpn-reorder advertisement: lowercase name "mqvpn-reorder" and value "v1".
+ * Used by both the client (response header) and server (request header) parse
+ * sites so the match rule is defined in exactly one place. Unit-tested.
+ */
+static inline int
+mqvpn_reorder_header_match(const void *name, size_t name_len, const void *value,
+                           size_t value_len)
+{
+    const size_t n = sizeof(MQVPN_REORDER_HDR_NAME) - 1;  /* 13 */
+    const size_t v = sizeof(MQVPN_REORDER_HDR_VALUE) - 1; /* 2 */
+    return name_len == n && memcmp(name, MQVPN_REORDER_HDR_NAME, n) == 0 &&
+           value_len == v && memcmp(value, MQVPN_REORDER_HDR_VALUE, v) == 0;
+}
+
 /* ─────────────────────────── §6: flow identity ────────────────────────────
  *
  * Flow identity is the inner 5-tuple (§6.1). Addresses/ports are NOT
