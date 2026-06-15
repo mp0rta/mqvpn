@@ -220,7 +220,7 @@ ring_lowest_seq(const struct ring *r, uint64_t expected)
  * part B; for part A each buffered slot owns its own malloc'd copy.
  */
 
-/* §17 RX statistics (subset implemented in part A; the rest land in part B/C). */
+/* §17 RX statistics (subset implemented in part A/B; the rest land in part C). */
 typedef struct {
     uint64_t delivered_count;
     uint64_t too_late_drop_count;
@@ -228,8 +228,12 @@ typedef struct {
     uint64_t duplicate_drop_count;
     uint64_t per_flow_limit_drop_count;
     uint64_t pool_drop_count;
-    uint64_t gap_count;        /* gap episodes opened (buffer went empty→nonempty) */
-    uint64_t gap_filled_count; /* gap episodes closed by the missing seq arriving */
+    uint64_t reset_discard_count; /* §17: old-epoch buffered packets discarded on reset */
+    uint64_t gap_count;           /* gap episodes opened (buffer went empty→nonempty) */
+    uint64_t gap_filled_count;    /* gap episodes closed by the missing seq arriving */
+    uint64_t gap_timeout_count;   /* §17: periods ended by timeout skip (§12.1) */
+    uint64_t gap_overflow_count;  /* §17: periods ended by overflow_flush (§12.3) */
+    uint64_t gap_reset_count;     /* §17: periods ended by FLOW_RESET discard (§11.6) */
 } mqvpn_reorder_stats_t;
 
 typedef struct mqvpn_reorder_flow {
@@ -273,6 +277,12 @@ struct mqvpn_reorder_rx {
     mqvpn_reorder_flow_t **buckets;
     uint32_t n_buckets;
     uint32_t n_flows;
+
+    /* §13.2 shared packet pool: a global byte budget enforced across all flows.
+     * Buffered packets are still individually heap-allocated, but every admit is
+     * charged against this counter and rejected when it would exceed
+     * cfg.global_max_buffer_bytes (pool exhaustion). */
+    uint64_t pool_bytes_used;
 };
 
 /* ─────────────────────────── flow table (§14.1) ───────────────────────────
@@ -356,8 +366,21 @@ deliver_pkt(mqvpn_reorder_rx_t *rx, const uint8_t *pkt, size_t len,
     f->stats.delivered_count++;
 }
 
+/* §13.2 pool accounting: a buffered heap copy is leaving the ring (delivered or
+ * discarded). Uncharge its bytes from the shared pool and free the copy. */
+static void
+pool_release(mqvpn_reorder_rx_t *rx, void *pkt, uint16_t len)
+{
+    if (rx->pool_bytes_used >= len) {
+        rx->pool_bytes_used -= len;
+    } else {
+        rx->pool_bytes_used = 0; /* defensive: never underflow */
+    }
+    free(pkt);
+}
+
 /* Deliver every contiguously-buffered packet starting at flow->expected,
- * advancing expected and freeing each delivered heap copy (§11.3 drain). */
+ * advancing expected and releasing each delivered heap copy (§11.3 drain). */
 static void
 drain_contiguous(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f)
 {
@@ -365,33 +388,118 @@ drain_contiguous(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f)
     void *pkt;
     while ((pkt = ring_remove(&f->buffer, f->expected, &len)) != NULL) {
         deliver_pkt(rx, (const uint8_t *)pkt, len, f);
-        free(pkt);
+        pool_release(rx, pkt, len);
         f->expected++;
     }
+}
+
+/* ───────────────── §12: timeout handler + overflow flush ───────────────────
+ *
+ * Both share the same skip-then-drain core: jump `expected` to the lowest
+ * occupied seq (§13.3 bounded scan), deliver the now-contiguous run, and update
+ * last_progress. They differ only in (a) which §17 period counter they charge
+ * and (b) whether they rearm the timer afterwards.
+ */
+
+/* Skip the current gap: advance expected to the lowest buffered seq, then drain
+ * the contiguous run from there. Caller guarantees buffer non-empty. */
+static void
+skip_to_lowest_and_drain(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t now_us)
+{
+    uint64_t lowest = ring_lowest_seq(&f->buffer, f->expected);
+    if (lowest > f->expected) {
+        f->expected = lowest; /* O(1) skip past the missing seq(s) */
+    }
+    drain_contiguous(rx, f);
+    f->last_progress_us = now_us;
+}
+
+/* §12.1 gap-timeout handler. Precondition: timer armed (⟺ buffer non-empty,
+ * §11.1). Skip the missing seq, drain, then either stop (buffer drained) or
+ * rearm (timeout-skip advanced expected → a fresh period may start, §12.2). */
+static void
+on_gap_timeout(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t now_us)
+{
+    if (ring_empty(&f->buffer)) { /* §12.1: invariant says unreachable; defensive */
+        stop_gap_timer(f);
+        return;
+    }
+    f->stats.gap_timeout_count++; /* §17: this period ends by timeout */
+
+    skip_to_lowest_and_drain(rx, f, now_us);
+
+    if (ring_empty(&f->buffer)) {
+        stop_gap_timer(f);
+    } else {
+        /* §12.2: timeout-skip made forward progress, so a new period may arm. */
+        arm_gap_timer(f, now_us, f->wait_ms);
+        f->stats.gap_count++;
+    }
+}
+
+/* §12.3 overflow_flush: force-skip the current gap to free buffer space without
+ * halting processing. Precondition: buffer non-empty (§11.3/§13.5 — empty-buffer
+ * limit/pool exhaustion is a drop, never a flush).
+ *
+ * §17 accounting: gap_overflow_count is charged only when the flush actually
+ * ENDS the armed period — i.e. it drains the buffer to empty and stops the
+ * timer. A partial flush that leaves a higher gap exposed keeps the SAME
+ * anchored period alive (no rearm, §12.3 unlike §12.1), so it has not ended a
+ * period and must not be counted; counting it would make the §17 identity
+ * gap_count = filled + timeout + overflow (+ open) over-count by one. */
+static void
+overflow_flush(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t now_us)
+{
+    int was_armed = f->gap_timer_active;
+    skip_to_lowest_and_drain(rx, f, now_us);
+    if (ring_empty(&f->buffer)) {
+        if (was_armed) {
+            f->stats.gap_overflow_count++; /* §17: period ended by this flush */
+        }
+        stop_gap_timer(f);
+    }
+    /* else: buffer still non-empty → the anchored period continues unbroken (no
+     * rearm, no terminator); the §11.1 invariant is held by the timer staying
+     * active. */
 }
 
 /* ─────────────────────── §11.3 buffer_admit + process ─────────────────────
  */
 
-/* §11.3 buffer_admit: the current packet is ahead and in-window. Duplicate →
- * drop (no replace). Otherwise heap-copy into the ring, arming the gap timer on
- * the empty→non-empty transition. Per-flow byte limit + global pool + overflow
- * flush are part B (see overflow seam); part A enforces only the duplicate and
- * count==cap-equivalent already handled by the far-ahead gate. */
-static reorder_process_result
-buffer_admit(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t seq,
-             const uint8_t *pkt, uint16_t len, uint64_t now_us)
+/* §13.5 per-flow limit predicate: would admitting `len` more bytes push the flow
+ * past its packet-count cap or byte budget? count == cap is the §13.5 packet
+ * limit (the window already bounds span via the far-ahead gate; this bounds
+ * occupancy). bytes is checked against max_buffer_bytes_per_flow. */
+static int
+would_exceed_per_flow_limits(const mqvpn_reorder_rx_t *rx, const mqvpn_reorder_flow_t *f,
+                             uint16_t len)
 {
-    if (ring_contains(&f->buffer, seq)) { /* duplicate */
-        f->stats.duplicate_drop_count++;
-        return REORDER_DROPPED_LIMIT; /* believe the first arrival; not classified */
+    if (f->buffer.count >= f->buffer.cap) {
+        return 1;
     }
+    if (f->buffer.bytes + len > rx->cfg.max_buffer_bytes_per_flow) {
+        return 1;
+    }
+    return 0;
+}
 
-    /* per-flow byte limit + global pool accounting + overflow_flush: part B */
+/* §13.2 global pool: would charging `len` bytes exceed the shared byte budget? */
+static int
+pool_would_exhaust(const mqvpn_reorder_rx_t *rx, uint16_t len)
+{
+    return rx->pool_bytes_used + len > rx->cfg.global_max_buffer_bytes;
+}
+
+/* Commit an in-window, non-duplicate, within-limits ahead packet to the ring:
+ * heap-copy, charge the pool, insert, arm the gap timer on empty→non-empty
+ * (§11.1/§11.3). Returns REORDER_BUFFERED, or REORDER_DROPPED_LIMIT on a
+ * (defensive) copy/insert allocation failure. */
+static reorder_process_result
+buffer_insert_committed(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t seq,
+                        const uint8_t *pkt, uint16_t len, uint64_t now_us)
+{
     void *copy = malloc(len);
     if (!copy) {
-        /* Treat allocation failure as a pool drop (real shared-pool accounting +
-         * overflow_flush is part B). */
         f->stats.pool_drop_count++;
         return REORDER_DROPPED_LIMIT;
     }
@@ -403,12 +511,94 @@ buffer_admit(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t seq,
         f->stats.pool_drop_count++;
         return REORDER_DROPPED_LIMIT;
     }
+    rx->pool_bytes_used += len; /* §13.2 charge after a successful insert */
     f->last_progress_us = now_us;
     if (was_empty) {
         arm_gap_timer(f, now_us, f->wait_ms);
         f->stats.gap_count++;
     }
     return REORDER_BUFFERED;
+}
+
+/* §11.3 reclassify after an overflow_flush moved `expected`: the current packet
+ * must be re-checked against the new window (late / in-order+drain / far-ahead /
+ * duplicate). Returns the post-flush result. Caller has already flushed. */
+static reorder_process_result
+reclassify_after_flush(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t seq,
+                       const uint8_t *pkt, uint16_t len, uint64_t now_us)
+{
+    if (seq < f->expected) {
+        f->stats.too_late_drop_count++;
+        return REORDER_DROPPED_LATE;
+    }
+    if (seq == f->expected) {
+        deliver_pkt(rx, pkt, len, f);
+        f->expected++;
+        f->last_progress_us = now_us;
+        drain_contiguous(rx, f);
+        if (ring_empty(&f->buffer) && f->gap_timer_active) {
+            stop_gap_timer(f);
+            f->stats.gap_filled_count++;
+        }
+        return REORDER_DELIVERED;
+    }
+    if (ring_far_ahead(&f->buffer, seq, f->expected)) {
+        f->stats.too_far_ahead_drop_count++;
+        return REORDER_DROPPED_FAR_AHEAD;
+    }
+    if (ring_contains(&f->buffer, seq)) {
+        f->stats.duplicate_drop_count++;
+        return REORDER_DROPPED_LIMIT;
+    }
+    return REORDER_BUFFERED; /* caller falls through to a fresh limit/pool admit */
+}
+
+/* §11.3 buffer_admit: the current packet is ahead and in-window. Duplicate →
+ * drop (no replace, §11.3). Otherwise enforce the per-flow limit and global pool
+ * (§13.2/§13.5): on a limit/pool hit with a NON-empty buffer, overflow_flush to
+ * free space then RECLASSIFY the packet against the advanced window; with an
+ * EMPTY buffer there is nothing to flush, so drop (per_flow_limit / pool). */
+static reorder_process_result
+buffer_admit(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t seq,
+             const uint8_t *pkt, uint16_t len, uint64_t now_us)
+{
+    if (ring_contains(&f->buffer, seq)) { /* duplicate */
+        f->stats.duplicate_drop_count++;
+        return REORDER_DROPPED_LIMIT; /* believe the first arrival; not classified */
+    }
+
+    /* --- per-flow limit (count / bytes), §13.5 --- */
+    if (would_exceed_per_flow_limits(rx, f, len)) {
+        if (ring_empty(&f->buffer)) { /* overflow_flush needs a non-empty buffer */
+            f->stats.per_flow_limit_drop_count++;
+            return REORDER_DROPPED_LIMIT;
+        }
+        overflow_flush(rx, f, now_us);
+        reorder_process_result r = reclassify_after_flush(rx, f, seq, pkt, len, now_us);
+        if (r != REORDER_BUFFERED) {
+            return r; /* late / in-order+drain / far-ahead / duplicate resolved it */
+        }
+        /* still an in-window ahead packet → fall through to pool + insert below */
+    }
+
+    /* --- global pool (§13.2) --- */
+    if (pool_would_exhaust(rx, len)) {
+        if (ring_empty(&f->buffer)) { /* no room to free by flushing self */
+            f->stats.pool_drop_count++;
+            return REORDER_DROPPED_LIMIT;
+        }
+        overflow_flush(rx, f, now_us); /* collapse self to free pool → reclassify */
+        reorder_process_result r = reclassify_after_flush(rx, f, seq, pkt, len, now_us);
+        if (r != REORDER_BUFFERED) {
+            return r;
+        }
+        if (pool_would_exhaust(rx, len)) { /* still no space → drop */
+            f->stats.pool_drop_count++;
+            return REORDER_DROPPED_LIMIT;
+        }
+    }
+
+    return buffer_insert_committed(rx, f, seq, pkt, len, now_us);
 }
 
 /* §11.3 process_reorder_packet: cold-start init / in-order + drain / late drop /
@@ -521,7 +711,7 @@ mqvpn_reorder_rx_free(mqvpn_reorder_rx_t *rx)
             if (f->buffer.slots) {
                 for (uint32_t j = 0; j < f->buffer.size; j++) {
                     if (f->buffer.slots[j].pkt) {
-                        free(f->buffer.slots[j].pkt);
+                        pool_release(rx, f->buffer.slots[j].pkt, f->buffer.slots[j].len);
                     }
                 }
             }
@@ -569,9 +759,13 @@ mqvpn_reorder_rx_on_packet(mqvpn_reorder_rx_t *rx, const uint8_t *payload, size_
 void
 mqvpn_reorder_rx_tick(mqvpn_reorder_rx_t *rx, uint64_t now_us)
 {
-    /* STUB (part A). The real gap-timeout handler (§12.1) + idle/LRU eviction
-     * (§14) land in part B. Kept as a no-op so callers can wire the driver now
-     * without behaviour change; the §11.1 invariant is unaffected. */
-    (void)rx;
-    (void)now_us;
+    /* §12.1/§14: drive (a) gap timeouts and (b) idle eviction. Idle eviction
+     * (§14, last_progress backstop) lands in 3.4; for now only gap timeouts. */
+    for (uint32_t i = 0; i < rx->n_buckets; i++) {
+        for (mqvpn_reorder_flow_t *f = rx->buckets[i]; f; f = f->next) {
+            if (f->gap_timer_active && f->gap_deadline_us <= now_us) {
+                on_gap_timeout(rx, f, now_us);
+            }
+        }
+    }
 }
