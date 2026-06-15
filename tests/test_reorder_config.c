@@ -473,25 +473,14 @@ test_json_reorder_basic(void)
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load_json_filecfg(&cfg, json);
 
+    /* Smoke test: parses, validates, and a few representative fields land. The
+     * exhaustive per-field check (and full INI↔JSON equality) is covered by
+     * test_json_ini_parity. */
     ASSERT_EQ_INT(rc, 0, "json parse ok");
+    ASSERT_EQ_INT(mqvpn_reorder_config_validate(&cfg.reorder), 0, "json config valid");
     ASSERT_EQ_INT(cfg.reorder.mode, MQVPN_REORDER_ON, "json enabled=on → ON");
     ASSERT_EQ_INT(cfg.reorder.max_wait_ms, 40, "json max_wait_ms");
     ASSERT_EQ_INT(cfg.reorder.cap_packets_per_flow, 2048, "json cap_packets");
-    ASSERT_TRUE(cfg.reorder.max_buffer_bytes_per_flow == 3145728ULL,
-                "json max_bytes_per_flow");
-    ASSERT_EQ_INT(cfg.reorder.classify_window, 96, "json classify_window");
-    ASSERT_EQ_INT(cfg.reorder.ack_demote_max_large_packets, 4,
-                  "json ack_demote_max_large");
-    ASSERT_EQ_INT(cfg.reorder.small_packet_threshold_bytes, 220,
-                  "json small_packet_threshold");
-    ASSERT_EQ_INT(cfg.reorder.reset_mark_packets, 6, "json reset_mark_packets");
-    ASSERT_EQ_INT(cfg.reorder.reset_idle_grace_ms, 9000, "json reset_idle_grace_ms");
-    ASSERT_EQ_INT(cfg.reorder.max_flows, 32768, "json max_flows");
-    ASSERT_TRUE(cfg.reorder.global_max_buffer_bytes == 134217728ULL,
-                "json global_max_bytes");
-    ASSERT_EQ_INT(cfg.reorder.ingress_idle_timeout_sec, 25, "json ingress_idle_sec");
-    ASSERT_EQ_INT(cfg.reorder.egress_idle_timeout_sec, 250, "json egress_idle_sec");
-    ASSERT_EQ_INT(mqvpn_reorder_config_validate(&cfg.reorder), 0, "json config valid");
 }
 
 static void
@@ -514,32 +503,6 @@ test_json_reorder_enabled_mapping(void)
         ASSERT_EQ_INT(rc, 0, "json parse ok");
         ASSERT_EQ_INT(cfg.reorder.mode, cases[i].want, cases[i].val);
     }
-}
-
-static void
-test_json_reorder_rules(void)
-{
-    const char *json =
-        "{\n"
-        "  \"reorder\": { \"enabled\": \"on\" },\n"
-        "  \"reorder_rules\": [\n"
-        "    { \"proto\": \"udp\", \"port\": 443, \"profile\": \"quic_bulk\" },\n"
-        "    { \"proto\": \"udp\", \"port\": 53, \"profile\": \"low_latency\" }\n"
-        "  ]\n"
-        "}\n";
-    mqvpn_file_config_t cfg;
-    mqvpn_config_defaults(&cfg);
-    int rc = mqvpn_config_load_json_filecfg(&cfg, json);
-
-    ASSERT_EQ_INT(rc, 0, "json parse ok");
-    ASSERT_EQ_INT(cfg.reorder.mode, MQVPN_REORDER_ON, "json enabled ON");
-    ASSERT_EQ_INT(cfg.reorder.n_rules, 2, "two rules in order");
-    ASSERT_EQ_INT(cfg.reorder.rules[0].proto, 17, "rule0 proto udp");
-    ASSERT_EQ_INT(cfg.reorder.rules[0].port, 443, "rule0 port 443");
-    ASSERT_EQ_INT(cfg.reorder.rules[0].profile, MQVPN_RPROF_QUIC_BULK, "rule0 quic_bulk");
-    ASSERT_EQ_INT(cfg.reorder.rules[1].port, 53, "rule1 port 53");
-    ASSERT_EQ_INT(cfg.reorder.rules[1].profile, MQVPN_RPROF_LOW_LATENCY,
-                  "rule1 low_latency");
 }
 
 static void
@@ -599,7 +562,11 @@ test_json_ini_parity(void)
                       "SmallPacketThreshold = 220\n"
                       "ResetMarkPackets = 6\n"
                       "ResetIdleGraceMs = 9000\n"
-                      "MaxFlows = 32768\n"
+                      /* Above INT_MAX (0x7fffffff) but below 2^32: exercises the
+                       * u32 range parity between INI (parse_u32_strict, accepts up
+                       * to 0xffffffff) and JSON. max_flows has no upper-bound
+                       * validation, so 3e9 survives validate(). */
+                      "MaxFlows = 3000000000\n"
                       "GlobalMaxBytes = 134217728\n"
                       "IngressIdleSec = 25\n"
                       "EgressIdleSec = 250\n"
@@ -614,7 +581,7 @@ test_json_ini_parity(void)
         "    \"max_bytes_per_flow\": 3145728, \"classify_window\": 96,\n"
         "    \"ack_demote_max_large\": 4, \"small_packet_threshold\": 220,\n"
         "    \"reset_mark_packets\": 6, \"reset_idle_grace_ms\": 9000,\n"
-        "    \"max_flows\": 32768, \"global_max_bytes\": 134217728,\n"
+        "    \"max_flows\": 3000000000, \"global_max_bytes\": 134217728,\n"
         "    \"ingress_idle_sec\": 25, \"egress_idle_sec\": 250\n"
         "  },\n"
         "  \"reorder_rules\": [\n"
@@ -713,7 +680,6 @@ main(void)
     /* JSON parsing */
     test_json_reorder_basic();
     test_json_reorder_enabled_mapping();
-    test_json_reorder_rules();
     test_json_reorder_rules_over_cap();
     test_json_reorder_absent();
     test_json_ini_parity();

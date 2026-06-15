@@ -862,7 +862,15 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     if (ro && *ro == '{') {
         mqvpn_reorder_config_t *r = &cfg->reorder;
         const char *kv;
+        uint64_t uv;
 
+        /* u32 scalars use json_read_u64_strict + a <= 0xffffffff clamp to match
+         * the INI path's parse_u32_strict exactly (which accepts up to 2^32-1,
+         * not just INT_MAX) — otherwise values in (2^31, 2^32) would parse on INI
+         * but be silently rejected on JSON. u16 fields keep the <= 0xffff clamp
+         * (same as INI). Each numeric scalar warns when the key is PRESENT but
+         * fails to parse/range-check, mirroring the INI per-key LOG_WRN and the
+         * JSON enabled warning; absent keys are silent (forward-compat). */
         kv = json_find_key(ro, "enabled");
         if (kv && json_read_string(kv, s32, sizeof(s32)) == 0) {
             mqvpn_reorder_mode_t m = MQVPN_REORDER_OFF;
@@ -873,56 +881,100 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
         }
 
         kv = json_find_key(ro, "max_wait_ms");
-        if (kv && json_read_int_strict(kv, &iv) == 0 && iv >= 0)
-            r->max_wait_ms = (uint32_t)iv;
+        if (kv) {
+            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffffffffULL)
+                r->max_wait_ms = (uint32_t)uv;
+            else
+                LOG_WRN("JSON: invalid reorder max_wait_ms; keeping default");
+        }
 
         kv = json_find_key(ro, "cap_packets");
-        if (kv && json_read_int_strict(kv, &iv) == 0 && iv >= 0)
-            r->cap_packets_per_flow = (uint32_t)iv;
+        if (kv) {
+            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffffffffULL)
+                r->cap_packets_per_flow = (uint32_t)uv;
+            else
+                LOG_WRN("JSON: invalid reorder cap_packets; keeping default");
+        }
 
         kv = json_find_key(ro, "max_bytes_per_flow");
         if (kv) {
-            uint64_t uv = 0;
-            if (json_read_u64_strict(kv, &uv) == 0) r->max_buffer_bytes_per_flow = uv;
+            if (json_read_u64_strict(kv, &uv) == 0)
+                r->max_buffer_bytes_per_flow = uv;
+            else
+                LOG_WRN("JSON: invalid reorder max_bytes_per_flow; keeping default");
         }
 
         kv = json_find_key(ro, "classify_window");
-        if (kv && json_read_int_strict(kv, &iv) == 0 && iv >= 0 && iv <= 0xffff)
-            r->classify_window = (uint16_t)iv;
+        if (kv) {
+            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffff)
+                r->classify_window = (uint16_t)uv;
+            else
+                LOG_WRN("JSON: invalid reorder classify_window; keeping default");
+        }
 
         kv = json_find_key(ro, "ack_demote_max_large");
-        if (kv && json_read_int_strict(kv, &iv) == 0 && iv >= 0 && iv <= 0xffff)
-            r->ack_demote_max_large_packets = (uint16_t)iv;
+        if (kv) {
+            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffff)
+                r->ack_demote_max_large_packets = (uint16_t)uv;
+            else
+                LOG_WRN("JSON: invalid reorder ack_demote_max_large; keeping default");
+        }
 
         kv = json_find_key(ro, "small_packet_threshold");
-        if (kv && json_read_int_strict(kv, &iv) == 0 && iv >= 0)
-            r->small_packet_threshold_bytes = (uint32_t)iv;
+        if (kv) {
+            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffffffffULL)
+                r->small_packet_threshold_bytes = (uint32_t)uv;
+            else
+                LOG_WRN("JSON: invalid reorder small_packet_threshold; keeping default");
+        }
 
         kv = json_find_key(ro, "reset_mark_packets");
-        if (kv && json_read_int_strict(kv, &iv) == 0 && iv >= 0)
-            r->reset_mark_packets = (uint32_t)iv;
+        if (kv) {
+            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffffffffULL)
+                r->reset_mark_packets = (uint32_t)uv;
+            else
+                LOG_WRN("JSON: invalid reorder reset_mark_packets; keeping default");
+        }
 
         kv = json_find_key(ro, "reset_idle_grace_ms");
-        if (kv && json_read_int_strict(kv, &iv) == 0 && iv >= 0)
-            r->reset_idle_grace_ms = (uint32_t)iv;
+        if (kv) {
+            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffffffffULL)
+                r->reset_idle_grace_ms = (uint32_t)uv;
+            else
+                LOG_WRN("JSON: invalid reorder reset_idle_grace_ms; keeping default");
+        }
 
         kv = json_find_key(ro, "max_flows");
-        if (kv && json_read_int_strict(kv, &iv) == 0 && iv >= 0)
-            r->max_flows = (uint32_t)iv;
+        if (kv) {
+            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffffffffULL)
+                r->max_flows = (uint32_t)uv;
+            else
+                LOG_WRN("JSON: invalid reorder max_flows; keeping default");
+        }
 
         kv = json_find_key(ro, "global_max_bytes");
         if (kv) {
-            uint64_t uv = 0;
-            if (json_read_u64_strict(kv, &uv) == 0) r->global_max_buffer_bytes = uv;
+            if (json_read_u64_strict(kv, &uv) == 0)
+                r->global_max_buffer_bytes = uv;
+            else
+                LOG_WRN("JSON: invalid reorder global_max_bytes; keeping default");
         }
 
         kv = json_find_key(ro, "ingress_idle_sec");
-        if (kv && json_read_int_strict(kv, &iv) == 0 && iv >= 0)
-            r->ingress_idle_timeout_sec = (uint32_t)iv;
+        if (kv) {
+            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffffffffULL)
+                r->ingress_idle_timeout_sec = (uint32_t)uv;
+            else
+                LOG_WRN("JSON: invalid reorder ingress_idle_sec; keeping default");
+        }
 
         kv = json_find_key(ro, "egress_idle_sec");
-        if (kv && json_read_int_strict(kv, &iv) == 0 && iv >= 0)
-            r->egress_idle_timeout_sec = (uint32_t)iv;
+        if (kv) {
+            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffffffffULL)
+                r->egress_idle_timeout_sec = (uint32_t)uv;
+            else
+                LOG_WRN("JSON: invalid reorder egress_idle_sec; keeping default");
+        }
     }
 
     v = json_find_key(json_text, "reorder_rules");
