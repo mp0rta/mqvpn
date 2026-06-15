@@ -181,6 +181,126 @@ test_tx_evict_only_idle(void)
     mqvpn_reorder_tx_free(tx);
 }
 
+/* ─────────────────────────── Task 2.2: stamping ───────────────────────── */
+
+static uint64_t
+hdr_seq(const uint8_t *h)
+{
+    return ((uint64_t)h[2] << 40) | ((uint64_t)h[3] << 32) | ((uint64_t)h[4] << 24) |
+           ((uint64_t)h[5] << 16) | ((uint64_t)h[6] << 8) | ((uint64_t)h[7]);
+}
+
+static void
+test_tx_peek_commit_success(void)
+{
+    mqvpn_reorder_config_t c = base_cfg();
+    mqvpn_reorder_tx_t *tx = mqvpn_reorder_tx_new(&c, 0x1);
+    uint8_t pkt[256];
+    size_t n = build_v4_udp(pkt, 5000, 443, 100);
+    mqvpn_reorder_tx_peek_t p;
+
+    ASSERT_EQ_INT(mqvpn_reorder_tx_peek(tx, pkt, n, 1, 1400, &p), MQVPN_REORDER_TX_STAMP,
+                  "peek1 STAMP");
+    ASSERT_EQ_INT(hdr_seq(p.hdr), 0, "peek1 seq 0");
+    mqvpn_reorder_tx_commit(tx, &p, 1);
+
+    ASSERT_EQ_INT(mqvpn_reorder_tx_peek(tx, pkt, n, 2, 1400, &p), MQVPN_REORDER_TX_STAMP,
+                  "peek2 STAMP");
+    ASSERT_EQ_INT(hdr_seq(p.hdr), 1, "peek2 seq 1 after commit");
+    mqvpn_reorder_tx_free(tx);
+}
+
+static void
+test_tx_peek_commit_failure(void)
+{
+    mqvpn_reorder_config_t c = base_cfg();
+    mqvpn_reorder_tx_t *tx = mqvpn_reorder_tx_new(&c, 0x1);
+    uint8_t pkt[256];
+    size_t n = build_v4_udp(pkt, 5000, 443, 100);
+    mqvpn_reorder_tx_peek_t p;
+
+    mqvpn_reorder_tx_peek(tx, pkt, n, 1, 1400, &p);
+    ASSERT_EQ_INT(hdr_seq(p.hdr), 0, "peek seq 0");
+    /* Simulate send failure: do NOT commit. */
+    mqvpn_reorder_tx_peek(tx, pkt, n, 2, 1400, &p);
+    ASSERT_EQ_INT(hdr_seq(p.hdr), 0, "no artificial gap: still seq 0");
+    mqvpn_reorder_tx_free(tx);
+}
+
+static void
+test_tx_reset_marks_on_success_only(void)
+{
+    mqvpn_reorder_config_t c = base_cfg();
+    c.reset_mark_packets = 3;
+    mqvpn_reorder_tx_t *tx = mqvpn_reorder_tx_new(&c, 0x1);
+    uint8_t pkt[256];
+    size_t n = build_v4_udp(pkt, 5000, 443, 100);
+    mqvpn_reorder_tx_peek_t p;
+
+    /* Peek K times WITHOUT committing → reset_marks_left unchanged. */
+    for (int i = 0; i < 5; i++) {
+        mqvpn_reorder_tx_peek(tx, pkt, n, 1, 1400, &p);
+        ASSERT_EQ_INT(mqvpn_reorder_tx_flow_reset_marks_left(p.flow), 3,
+                      "reset_marks unchanged on peek-only");
+    }
+    /* One commit → decrement to 2. */
+    mqvpn_reorder_tx_peek(tx, pkt, n, 1, 1400, &p);
+    mqvpn_reorder_tx_commit(tx, &p, 1);
+    ASSERT_EQ_INT(mqvpn_reorder_tx_flow_reset_marks_left(p.flow), 2,
+                  "reset_marks decremented on commit");
+    mqvpn_reorder_tx_free(tx);
+}
+
+static void
+test_tx_first_k_have_reset_flag(void)
+{
+    mqvpn_reorder_config_t c = base_cfg();
+    c.reset_mark_packets = 2; /* first 2 committed get FLOW_RESET */
+    mqvpn_reorder_tx_t *tx = mqvpn_reorder_tx_new(&c, 0x1);
+    uint8_t pkt[256];
+    size_t n = build_v4_udp(pkt, 5000, 443, 100);
+    mqvpn_reorder_tx_peek_t p;
+
+    /* packet 1 */
+    mqvpn_reorder_tx_peek(tx, pkt, n, 1, 1400, &p);
+    ASSERT_TRUE(p.hdr[1] & MQVPN_REORDER_FLAG_RESET, "pkt1 has FLOW_RESET");
+    mqvpn_reorder_tx_commit(tx, &p, 1);
+    /* packet 2 */
+    mqvpn_reorder_tx_peek(tx, pkt, n, 2, 1400, &p);
+    ASSERT_TRUE(p.hdr[1] & MQVPN_REORDER_FLAG_RESET, "pkt2 has FLOW_RESET");
+    mqvpn_reorder_tx_commit(tx, &p, 2);
+    /* packet 3 → no FLOW_RESET */
+    mqvpn_reorder_tx_peek(tx, pkt, n, 3, 1400, &p);
+    ASSERT_TRUE(!(p.hdr[1] & MQVPN_REORDER_FLAG_RESET), "pkt3 no FLOW_RESET");
+    mqvpn_reorder_tx_free(tx);
+}
+
+static void
+test_tx_mtu_guard_boundary(void)
+{
+    mqvpn_reorder_config_t c = base_cfg();
+    mqvpn_reorder_tx_t *tx = mqvpn_reorder_tx_new(&c, 0x1);
+    uint8_t pkt[2048];
+    mqvpn_reorder_tx_peek_t p;
+    uint32_t N = 200; /* max_inner_without_reorder */
+
+    /* inner length N-8 → 8+(N-8)==N, not > N → STAMP. */
+    size_t n = (size_t)(N - 8);
+    /* total inner IP packet length must equal `n`; payload = n - 28. */
+    size_t built = build_v4_udp(pkt, 5000, 443, n - 28);
+    ASSERT_EQ_INT(built, n, "built == N-8");
+    ASSERT_EQ_INT(mqvpn_reorder_tx_peek(tx, pkt, built, 1, N, &p), MQVPN_REORDER_TX_STAMP,
+                  "inner N-8 fits (no double -8)");
+
+    /* inner length N-7 → 8+(N-7) > N → DROP_MTU. */
+    n = (size_t)(N - 7);
+    built = build_v4_udp(pkt, 5000, 443, n - 28);
+    ASSERT_EQ_INT(built, n, "built == N-7");
+    ASSERT_EQ_INT(mqvpn_reorder_tx_peek(tx, pkt, built, 1, N, &p),
+                  MQVPN_REORDER_TX_DROP_MTU, "inner N-7 exceeds MTU");
+    mqvpn_reorder_tx_free(tx);
+}
+
 int
 main(void)
 {
@@ -189,6 +309,12 @@ main(void)
     test_tx_eligibility_dns_ineligible();
     test_tx_eligibility_unknown_ineligible();
     test_tx_evict_only_idle();
+
+    test_tx_peek_commit_success();
+    test_tx_peek_commit_failure();
+    test_tx_reset_marks_on_success_only();
+    test_tx_first_k_have_reset_flag();
+    test_tx_mtu_guard_boundary();
 
     fprintf(stderr, "test_reorder_tx: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
