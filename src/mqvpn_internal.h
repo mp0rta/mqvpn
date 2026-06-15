@@ -11,6 +11,7 @@
 #define MQVPN_INTERNAL_H
 
 #include "libmqvpn.h"
+#include "reorder.h" /* mqvpn_reorder_config_t embedded in the builder config */
 #include <stdbool.h>
 
 /* ─── Constants ─── */
@@ -63,6 +64,11 @@ struct mqvpn_config_s {
 
     int tun_mtu; /* 0 = auto (client: negotiated; server: 1382), >0 = client cap / server
                     TUN MTU */
+
+    /* Flow-aware reorder shim config (§16). Seeded with
+     * mqvpn_reorder_config_default() in mqvpn_config_new(); the library
+     * consumer reads cfg->reorder. */
+    mqvpn_reorder_config_t reorder;
 };
 
 /* ─── State transition validation (M0-5) ─── */
