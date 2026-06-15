@@ -114,6 +114,59 @@ test_wire_decode_short(void)
     ASSERT_EQ_INT(rc, -1, "wire_decode_short rc");
 }
 
+/* ─────────────────────── Task 1.2: 5-tuple flow key ───────────────────────── */
+
+static mqvpn_flow_key_t
+make_v4_key(uint32_t saddr, uint32_t daddr, uint16_t sport, uint16_t dport)
+{
+    mqvpn_flow_key_t k;
+    memset(&k, 0, sizeof(k));
+    k.ip_version = 4;
+    k.proto = 17;
+    k.src_port = sport;
+    k.dst_port = dport;
+    k.src_ip[0] = (uint8_t)(saddr >> 24);
+    k.src_ip[1] = (uint8_t)(saddr >> 16);
+    k.src_ip[2] = (uint8_t)(saddr >> 8);
+    k.src_ip[3] = (uint8_t)(saddr);
+    k.dst_ip[0] = (uint8_t)(daddr >> 24);
+    k.dst_ip[1] = (uint8_t)(daddr >> 16);
+    k.dst_ip[2] = (uint8_t)(daddr >> 8);
+    k.dst_ip[3] = (uint8_t)(daddr);
+    return k;
+}
+
+static void
+test_flowkey_eq(void)
+{
+    mqvpn_flow_key_t a = make_v4_key(0x0A000001, 0x0A000002, 1111, 443);
+    mqvpn_flow_key_t b = make_v4_key(0x0A000001, 0x0A000002, 1111, 443);
+    ASSERT_EQ_INT(mqvpn_flow_key_eq(&a, &b), 1, "flowkey_eq identical");
+
+    /* swap src/dst (addr + port): forward vs reverse must be distinct */
+    mqvpn_flow_key_t rev = make_v4_key(0x0A000002, 0x0A000001, 443, 1111);
+    ASSERT_EQ_INT(mqvpn_flow_key_eq(&a, &rev), 0, "flowkey_eq reversed unequal");
+}
+
+static void
+test_flowkey_v4_v6_distinct(void)
+{
+    mqvpn_flow_key_t a = make_v4_key(0x0A000001, 0x0A000002, 1111, 443);
+    mqvpn_flow_key_t b = a;
+    b.ip_version = 6; /* same ports, different ip_version */
+    ASSERT_EQ_INT(mqvpn_flow_key_eq(&a, &b), 0, "flowkey v4 vs v6 distinct");
+}
+
+static void
+test_flowkey_hash_stable(void)
+{
+    mqvpn_flow_key_t a = make_v4_key(0x0A000001, 0x0A000002, 1111, 443);
+    uint64_t seed = 0x1234567890ABCDEFULL;
+    uint64_t h1 = mqvpn_flow_key_hash(&a, seed);
+    uint64_t h2 = mqvpn_flow_key_hash(&a, seed);
+    ASSERT_EQ_U64(h1, h2, "flowkey_hash stable same key+seed");
+}
+
 int
 main(void)
 {
@@ -124,6 +177,10 @@ main(void)
     test_wire_dispatch_reorder();
     test_wire_dispatch_unknown();
     test_wire_decode_short();
+
+    test_flowkey_eq();
+    test_flowkey_v4_v6_distinct();
+    test_flowkey_hash_stable();
 
     fprintf(stderr, "test_reorder_common: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

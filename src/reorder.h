@@ -98,4 +98,54 @@ mqvpn_reorder_wire_decode(const uint8_t *in, size_t len, uint8_t *type, uint8_t 
     return 0;
 }
 
+/* ─────────────────────────── §6: flow identity ────────────────────────────
+ *
+ * Flow identity is the inner 5-tuple (§6.1). Addresses/ports are NOT
+ * normalized: forward and reverse directions are distinct flows, and IPv4 and
+ * IPv6 are distinct flows. The key is never put on the wire (§6.2); each
+ * endpoint keys its local hash table by the full 5-tuple and may mix in a
+ * per-process random seed for hash-flooding resistance (the seed need not
+ * match the peer's).
+ *
+ * ports are stored in host byte order. IPv4 addresses use the first 4 bytes of
+ * the 16-byte arrays with the remainder zeroed.
+ */
+typedef struct {
+    uint8_t ip_version; /* 4 or 6 */
+    uint8_t proto;      /* L4 protocol (UDP = 17) */
+    uint16_t src_port;  /* host order */
+    uint16_t dst_port;  /* host order */
+    uint8_t src_ip[16]; /* v4 in [0..3], rest zero */
+    uint8_t dst_ip[16];
+} mqvpn_flow_key_t;
+
+/* Returns 1 if the two 5-tuples are identical, 0 otherwise (§6.3: logical flow
+ * distinction is a full 5-tuple compare). */
+static inline int
+mqvpn_flow_key_eq(const mqvpn_flow_key_t *a, const mqvpn_flow_key_t *b)
+{
+    return a->ip_version == b->ip_version && a->proto == b->proto &&
+           a->src_port == b->src_port && a->dst_port == b->dst_port &&
+           memcmp(a->src_ip, b->src_ip, sizeof(a->src_ip)) == 0 &&
+           memcmp(a->dst_ip, b->dst_ip, sizeof(a->dst_ip)) == 0;
+}
+
+/*
+ * Keyed hash over the 5-tuple, seeded with a per-process value (§6.2). v1 uses
+ * FNV-1a over the struct bytes mixed with the seed; a SipHash upgrade is future
+ * work. Same key + same seed always yields the same hash.
+ */
+static inline uint64_t
+mqvpn_flow_key_hash(const mqvpn_flow_key_t *k, uint64_t seed)
+{
+    const uint64_t fnv_prime = 1099511628211ULL;
+    uint64_t h = 14695981039346656037ULL ^ seed;
+    const uint8_t *p = (const uint8_t *)k;
+    for (size_t i = 0; i < sizeof(*k); i++) {
+        h ^= p[i];
+        h *= fnv_prime;
+    }
+    return h;
+}
+
 #endif /* MQVPN_REORDER_H */
