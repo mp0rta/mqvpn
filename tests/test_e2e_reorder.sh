@@ -206,6 +206,51 @@ else
     fail=1
 fi
 
+# ── Prove the reorder ENGINE actually fired in-tunnel (not just that the
+#    capability was negotiated). The inner UDP flow is striped across the
+#    1ms vs 40ms paths, so packets MUST arrive out of order at the server's
+#    RX engine; every reorder period it arms increments gap_count. A non-zero
+#    gap_count is therefore the load-bearing evidence that the engine observed
+#    and acted on real in-tunnel reordering.
+#
+#    JSON shape (control_socket.c get_reorder_stats):
+#      {"ok":true,"reorder":{"gap_count":N,"gap_filled_count":N,
+#       "gap_timeout_count":N,...,"ack_demote_count":N,"delivered_count":N}}
+#    The server aggregates RX stats across all live conns (mqvpn_server.c
+#    mqvpn_server_get_reorder_stats), so .reorder.* is the whole-server sum.
+reorder_stats="$(bench_query_control "$CTRL_PORT" get_reorder_stats)"
+gap_count=$(echo "$reorder_stats"      | jq '.reorder.gap_count // 0'        2>/dev/null || echo 0)
+gap_filled=$(echo "$reorder_stats"     | jq '.reorder.gap_filled_count // 0'  2>/dev/null || echo 0)
+gap_timeout=$(echo "$reorder_stats"    | jq '.reorder.gap_timeout_count // 0' 2>/dev/null || echo 0)
+delivered=$(echo "$reorder_stats"      | jq '.reorder.delivered_count // 0'   2>/dev/null || echo 0)
+ack_demote=$(echo "$reorder_stats"     | jq '.reorder.ack_demote_count // 0'  2>/dev/null || echo 0)
+
+# HARD assertion: the engine armed at least one reorder period in-tunnel.
+if [ "${gap_count:-0}" -gt 0 ]; then
+    echo "PASS: reorder engine fired in-tunnel (gap_count=$gap_count)"
+else
+    echo "FAIL: reorder engine never armed (gap_count=$gap_count) — was the inner"
+    echo "      flow actually striped across the RTT-spread paths? raw=$reorder_stats"
+    fail=1
+fi
+
+# Non-fatal breakdown for the human reading the run. Whether a gap closes by
+# the missing seq arriving (gap_filled) vs the wait expiring (gap_timeout)
+# depends on the 40ms path-B one-way delay vs the 30ms default max_wait_ms —
+# either outcome still counts toward gap_count, which is why the hard assertion
+# is on gap_count, not gap_filled. Narrow path B below max_wait (e.g. 20ms) if
+# you want to bias toward gap_filled.
+echo "INFO: reorder breakdown — gap_filled=$gap_filled gap_timeout=$gap_timeout delivered=$delivered"
+
+# ACK demotion is intentionally NOT asserted here. iperf3 -u is a one-directional
+# client→server data flow: there is no small-packet ACK/return direction for the
+# ACK-direction classifier to observe, so ack_demote_count is expected to stay 0
+# in this harness. Demotion requires a bidirectional asymmetric inner flow (a
+# real inner QUIC/TCP session), which is the §24 eval-harness scope; its
+# correctness is covered by the unit test test_rx_ack_demote_small_flow
+# (tests/test_reorder_rx.c). Surface it as INFO only.
+echo "INFO: ack_demote_count=$ack_demote (expected 0 under one-directional iperf3 -u; see comment)"
+
 # Tear down the ON run before the OFF regression run (fresh server+client).
 bench_stop_vpn
 
