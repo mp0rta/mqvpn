@@ -382,6 +382,64 @@ test_ini_validate_rejects_idle_inversion(void)
                 "validate rejects ingress >= egress");
 }
 
+static void
+test_ini_over_cap_rule_rejected(void)
+{
+    /* Emit MQVPN_REORDER_MAX_RULES + 1 [ReorderRule] sections with distinct
+     * ports (8000..8000+cap). The over-cap section must be dropped entirely:
+     * n_rules stays at the cap AND the last accepted rule (rules[cap-1]) keeps
+     * its own port (8000 + cap - 1), NOT the over-cap section's port. A
+     * regression where the over-cap keys land on rules[cap-1] would clobber it
+     * to 8000 + cap (the 17th port). */
+    char ini[2048];
+    int n = 0;
+    n += snprintf(ini + n, sizeof(ini) - n, "[Reorder]\nEnabled = on\n");
+    for (int i = 0; i <= MQVPN_REORDER_MAX_RULES; i++) {
+        n += snprintf(ini + n, sizeof(ini) - n,
+                      "[ReorderRule]\nProto = udp\nPort = %d\nProfile = quic_bulk\n",
+                      8000 + i);
+    }
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    if (path) unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "parse ok despite over-cap rule");
+    ASSERT_EQ_INT(cfg.reorder.n_rules, MQVPN_REORDER_MAX_RULES, "n_rules at cap");
+    /* The last accepted rule must keep its own port, not the over-cap one. */
+    ASSERT_EQ_INT(cfg.reorder.rules[MQVPN_REORDER_MAX_RULES - 1].port,
+                  8000 + MQVPN_REORDER_MAX_RULES - 1, "last accepted rule not clobbered");
+}
+
+static void
+test_ini_rule_out_of_range_keeps_defaults(void)
+{
+    /* A [ReorderRule] with an invalid Profile and an out-of-range Proto must
+     * warn (not fail); the rule keeps its begin-time defaults (proto UDP,
+     * profile QUIC_BULK). */
+    const char *ini = "[Reorder]\n"
+                      "Enabled = on\n"
+                      "[ReorderRule]\n"
+                      "Proto = 999\n"
+                      "Profile = bogus\n"
+                      "Port = 4242\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    if (path) unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "parse ok despite invalid profile/proto");
+    ASSERT_EQ_INT(cfg.reorder.n_rules, 1, "rule still added");
+    ASSERT_EQ_INT(cfg.reorder.rules[0].proto, MQVPN_IPPROTO_UDP,
+                  "proto keeps UDP default");
+    ASSERT_EQ_INT(cfg.reorder.rules[0].profile, MQVPN_RPROF_QUIC_BULK,
+                  "profile keeps QUIC_BULK default");
+    /* The valid Port= still applies. */
+    ASSERT_EQ_INT(cfg.reorder.rules[0].port, 4242, "valid port applied");
+}
+
 int
 main(void)
 {
@@ -403,6 +461,8 @@ main(void)
     test_ini_reorder_rules();
     test_ini_unknown_key_warns_no_fail();
     test_ini_validate_rejects_idle_inversion();
+    test_ini_over_cap_rule_rejected();
+    test_ini_rule_out_of_range_keeps_defaults();
 
     fprintf(stderr, "test_reorder_config: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

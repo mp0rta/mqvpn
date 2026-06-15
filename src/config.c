@@ -597,8 +597,10 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
 
     case SEC_REORDER_RULE: {
         /* Keys fill the rule slot pushed by reorder_rule_begin() on section
-         * entry. If the rule cap was hit, n_rules did not grow and we have no
-         * slot to write — drop the keys silently (the cap warning already fired). */
+         * entry. An over-cap [ReorderRule] is demoted to SEC_NONE at section
+         * entry, so its keys never reach this case. This n_rules==0 guard only
+         * defends against a [ReorderRule] key arriving with no slot ever pushed
+         * (e.g. a key before the first section header). */
         if (cfg->reorder.n_rules == 0) break;
         mqvpn_reorder_rule_t *rule = &cfg->reorder.rules[cfg->reorder.n_rules - 1];
         if (strcasecmp(key, "Proto") == 0) {
@@ -916,7 +918,12 @@ mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
                 /* Each [ReorderRule] occurrence pushes a fresh rule slot that
                  * its keys then fill (mirrors WireGuard repeated [Peer]). */
                 if (section == SEC_REORDER_RULE) {
-                    reorder_rule_begin(cfg, lineno, path);
+                    /* On over-cap the slot push fails; drop the section so its
+                     * keys fall through to SEC_NONE handling instead of writing
+                     * to the last accepted rule slot. */
+                    if (reorder_rule_begin(cfg, lineno, path) < 0) {
+                        section = SEC_NONE;
+                    }
                 }
             }
             line = strtok(NULL, "\n");
