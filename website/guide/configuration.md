@@ -176,6 +176,8 @@ See [Multipath](./multipath) for scheduler details.
 
 A flow-aware reorder buffer for inner UDP traffic. It targets a single inner connection (e.g. inner QUIC) that is itself spread across multiple paths by mqvpn's multipath aggregation: by holding briefly out-of-order datagrams and delivering them in order, it reduces the reordering the inner endpoint sees. Disabled by default (`Enabled = off`); when off the section has no effect and packets are forwarded unchanged.
 
+> **Scope:** the reorder buffer currently applies to **inner UDP flows only. Inner TCP is not yet handled by the reorder buffer (TODO).** Inner TCP instead relies on the scheduler's flow-pinning (`wlb` / `wlb_udp_pin`), which keeps a TCP flow on a single path, plus TCP's own reordering tolerance (RACK/SACK).
+
 | Key | Description | Default |
 |-----|-------------|---------|
 | `Enabled` | Master switch (`on` / `off`) | `off` |
@@ -204,6 +206,31 @@ Enabled = on
 Proto = udp
 Port = 443
 Profile = quic_bulk
+```
+
+…or from the JSON equivalent. The `reorder` object uses snake_case keys mapping 1:1 to the INI keys above, and `reorder_rules` is an array of `{proto, port, profile}` objects:
+
+```json
+{
+  "reorder": {
+    "enabled": "on",
+    "max_wait_ms": 30,
+    "cap_packets": 1024,
+    "max_bytes_per_flow": 1572864,
+    "classify_window": 64,
+    "ack_demote_max_large": 3,
+    "small_packet_threshold": 200,
+    "reset_mark_packets": 8,
+    "reset_idle_grace_ms": 10000,
+    "max_flows": 65536,
+    "global_max_bytes": 67108864,
+    "ingress_idle_sec": 30,
+    "egress_idle_sec": 300
+  },
+  "reorder_rules": [
+    { "proto": "udp", "port": 443, "profile": "quic_bulk" }
+  ]
+}
 ```
 
 ### `[ReorderRule]` (repeatable)
