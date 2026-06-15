@@ -127,6 +127,11 @@ extract_client_mtu() {
 # Run an inner UDP workload on the ReorderRule port across the tunnel. iperf3
 # server binds inside NS_SERVER on the tunnel IP; client drives it from
 # NS_CLIENT. Returns 0 if the transfer completed (or fell back to ping OK).
+# Sets WORKLOAD_KIND to "iperf3" (high-rate UDP, reliably exercises the reorder
+# engine) or "ping" (low-rate fallback that may NOT generate enough in-flight
+# packets to arm a reorder period) so the caller can decide whether the
+# "engine fired" (gap_count>0) check is a hard assertion or informational.
+WORKLOAD_KIND=""
 run_inner_udp_workload() {
     if command -v iperf3 >/dev/null 2>&1; then
         ip netns exec "$NS_SERVER" iperf3 -s -p "$INNER_UDP_PORT" -1 -D \
@@ -138,6 +143,7 @@ run_inner_udp_workload() {
                 -p "$INNER_UDP_PORT" -u -b 20M -l 1200 -t 6 >/dev/null 2>&1; then
             kill "$(cat /tmp/iperf3-reorder.pid 2>/dev/null)" 2>/dev/null || true
             rm -f /tmp/iperf3-reorder.pid
+            WORKLOAD_KIND="iperf3"
             return 0
         fi
         kill "$(cat /tmp/iperf3-reorder.pid 2>/dev/null)" 2>/dev/null || true
@@ -147,6 +153,7 @@ run_inner_udp_workload() {
         echo "  (iperf3 not installed; falling back to tunnel ping)" >&2
     fi
     # Fallback: prove inner data still flows across the RTT-spread paths.
+    WORKLOAD_KIND="ping"
     ip netns exec "$NS_CLIENT" ping -c 10 -i 0.2 -W 2 "$TUNNEL_SERVER_IP" \
         >/dev/null 2>&1
 }
@@ -225,13 +232,29 @@ gap_timeout=$(echo "$reorder_stats"    | jq '.reorder.gap_timeout_count // 0' 2>
 delivered=$(echo "$reorder_stats"      | jq '.reorder.delivered_count // 0'   2>/dev/null || echo 0)
 ack_demote=$(echo "$reorder_stats"     | jq '.reorder.ack_demote_count // 0'  2>/dev/null || echo 0)
 
-# HARD assertion: the engine armed at least one reorder period in-tunnel.
-if [ "${gap_count:-0}" -gt 0 ]; then
-    echo "PASS: reorder engine fired in-tunnel (gap_count=$gap_count)"
+echo "INFO: reorder stats — gap_filled=$gap_filled gap_timeout=$gap_timeout delivered=$delivered ack_demote=$ack_demote"
+# ack_demote not asserted: the iperf3 -u workload is one-directional (client->
+# server data, all large packets), so there is no small-packet ACK/return
+# direction for the classifier to demote. ACK-direction demotion needs a
+# bidirectional asymmetric inner flow (real inner QUIC = §24 eval-harness
+# scope); its correctness is covered by the unit test test_rx_ack_demote_small_flow.
+
+# The "engine fired" (gap_count>0) check is a HARD assertion only under the
+# high-rate iperf3 workload, which reliably produces concurrent in-flight
+# packets across the 1ms vs 40ms paths. The ping fallback (-c 10 -i 0.2) is
+# too low-rate/serialized to guarantee a reorder period, so there it is
+# informational only (don't fail a host that merely lacks iperf3).
+if [ "$WORKLOAD_KIND" = "iperf3" ]; then
+    if [ "${gap_count:-0}" -gt 0 ]; then
+        echo "PASS: reorder engine fired in-tunnel (gap_count=$gap_count)"
+    else
+        echo "FAIL: reorder engine never armed (gap_count=$gap_count) — was the inner"
+        echo "      flow actually striped across the RTT-spread paths? raw=$reorder_stats"
+        fail=1
+    fi
 else
-    echo "FAIL: reorder engine never armed (gap_count=$gap_count) — was the inner"
-    echo "      flow actually striped across the RTT-spread paths? raw=$reorder_stats"
-    fail=1
+    echo "SKIP: engine-fired (gap_count>0) check needs iperf3; ping fallback is too"
+    echo "      low-rate to guarantee reordering. gap_count=$gap_count (informational)."
 fi
 
 # Non-fatal breakdown for the human reading the run. Whether a gap closes by

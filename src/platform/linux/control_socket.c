@@ -364,12 +364,12 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
             "\"too_far_ahead_drop_count\":%" PRIu64 ",\"duplicate_drop_count\":%" PRIu64
             ","
             "\"pool_drop_count\":%" PRIu64 ",\"per_flow_limit_drop_count\":%" PRIu64 ","
-            "\"delivered_count\":%" PRIu64 "}}",
+            "\"reset_discard_count\":%" PRIu64 ",\"delivered_count\":%" PRIu64 "}}",
             rs.gap_count, rs.gap_filled_count, rs.gap_timeout_count,
             rs.gap_overflow_count, rs.gap_demote_count, rs.gap_reset_count,
             rs.ack_demote_count, rs.too_late_drop_count, rs.too_far_ahead_drop_count,
             rs.duplicate_drop_count, rs.pool_drop_count, rs.per_flow_limit_drop_count,
-            rs.delivered_count);
+            rs.reset_discard_count, rs.delivered_count);
 
     } else {
         return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"unknown cmd\"}");
