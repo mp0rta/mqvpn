@@ -22,6 +22,7 @@
 #include "mqvpn_internal.h"
 #include "reorder.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -210,6 +211,33 @@ test_builder_add_rule_overflow(void)
 
 /* ──────────────────────── Task 4.2: INI parsing ───────────────────────────── */
 
+/* Safe accumulating append for the config-string builders below. Manages the
+ * running offset internally so the size argument can never be derived from a
+ * prior snprintf return value (which would underflow `bufsz - *n` once a write
+ * truncates). On truncation it fails an assertion and stops appending — that
+ * means the fixed test buffer is too small for the case (a test-setup bug), not
+ * a silent overflow. */
+static void cfg_append(char *buf, size_t bufsz, size_t *n, const char *fmt, ...)
+    __attribute__((__format__(__printf__, 4, 5)));
+
+static void
+cfg_append(char *buf, size_t bufsz, size_t *n, const char *fmt, ...)
+{
+    if (*n >= bufsz) {
+        ASSERT_TRUE(0, "cfg_append: buffer already full");
+        return;
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    int w = vsnprintf(buf + *n, bufsz - *n, fmt, ap);
+    va_end(ap);
+    if (w < 0 || (size_t)w >= bufsz - *n) {
+        ASSERT_TRUE(0, "cfg_append: append truncated (test buffer too small)");
+        return;
+    }
+    *n += (size_t)w;
+}
+
 static char *
 write_tmp(const char *content)
 {
@@ -392,12 +420,12 @@ test_ini_over_cap_rule_rejected(void)
      * regression where the over-cap keys land on rules[cap-1] would clobber it
      * to 8000 + cap (the 17th port). */
     char ini[2048];
-    int n = 0;
-    n += snprintf(ini + n, sizeof(ini) - n, "[Reorder]\nEnabled = on\n");
+    size_t n = 0;
+    cfg_append(ini, sizeof(ini), &n, "[Reorder]\nEnabled = on\n");
     for (int i = 0; i <= MQVPN_REORDER_MAX_RULES; i++) {
-        n += snprintf(ini + n, sizeof(ini) - n,
-                      "[ReorderRule]\nProto = udp\nPort = %d\nProfile = quic_bulk\n",
-                      8000 + i);
+        cfg_append(ini, sizeof(ini), &n,
+                   "[ReorderRule]\nProto = udp\nPort = %d\nProfile = quic_bulk\n",
+                   8000 + i);
     }
     char *path = write_tmp(ini);
     mqvpn_file_config_t cfg;
@@ -512,15 +540,15 @@ test_json_reorder_rules_over_cap(void)
      * The over-cap rule must be dropped: n_rules stays at the cap AND the last
      * accepted rule keeps its own port (not clobbered by the over-cap one). */
     char json[4096];
-    int n = 0;
-    n += snprintf(json + n, sizeof(json) - n,
-                  "{ \"reorder\": {\"enabled\":\"on\"}, \"reorder_rules\": [");
+    size_t n = 0;
+    cfg_append(json, sizeof(json), &n,
+               "{ \"reorder\": {\"enabled\":\"on\"}, \"reorder_rules\": [");
     for (int i = 0; i <= MQVPN_REORDER_MAX_RULES; i++) {
-        n += snprintf(json + n, sizeof(json) - n,
-                      "%s{\"proto\":\"udp\",\"port\":%d,\"profile\":\"quic_bulk\"}",
-                      i ? "," : "", 8000 + i);
+        cfg_append(json, sizeof(json), &n,
+                   "%s{\"proto\":\"udp\",\"port\":%d,\"profile\":\"quic_bulk\"}",
+                   i ? "," : "", 8000 + i);
     }
-    n += snprintf(json + n, sizeof(json) - n, "] }");
+    cfg_append(json, sizeof(json), &n, "] }");
 
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
