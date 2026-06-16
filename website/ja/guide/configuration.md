@@ -172,6 +172,75 @@ sudo mqvpn --config /etc/mqvpn/server.json
 
 > `CC = none`（輻輳制御なし）は xquic を `-DXQC_ENABLE_UNLIMITED=ON` でビルドする必要があります。
 
+### `[Reorder]`
+
+内側 UDP トラフィック向けの、フロー単位の並べ替えバッファです。mqvpn のマルチパス集約によって複数経路に分散される単一の内側コネクション（例: 内側 QUIC）を対象とし、順序が乱れたデータグラムを短時間だけ保持して順序どおりに配送することで、内側エンドポイントが見る並べ替えを軽減します。デフォルトは無効（`Enabled = off`）で、無効時はこのセクションは効果を持たず、パケットはそのまま転送されます。
+
+> **対象範囲:** 並べ替えバッファは現在 **内側 UDP フローのみ** に適用されます。**内側 TCP はまだ並べ替えバッファでは扱いません（TODO）。** 内側 TCP は代わりに、TCP フローを単一経路に固定するスケジューラのフローピン留め（`wlb` / `wlb_udp_pin`）と、TCP 自身の並べ替え耐性（RACK/SACK）に依存します。
+
+| キー | 説明 | デフォルト |
+|------|------|-----------|
+| `Enabled` | マスタースイッチ（`on` / `off`） | `off` |
+| `MaxWaitMs` | 欠落データグラムをスキップするまで、ギャップを保持する時間（ms） | `30` |
+| `CapPackets` | フローあたりの最大バッファデータグラム数（2 のべき乗） | `1024` |
+| `MaxBytesPerFlow` | フローあたりの最大バッファバイト数 | `1572864` |
+| `ClassifyWindow` | フローの方向を判定するために観測するデータグラム数（`0` で ACK 方向のデモートを無効化） | `64` |
+| `AckDemoteMaxLarge` | この値以下の大パケット数であればフローを ACK 方向と判定する | `3` |
+| `SmallPacketThreshold` | small / large を分ける内側ペイロードのバイト数 | `200` |
+| `ResetMarkPackets` | フロー再開時に送出する FLOW_RESET マーク数 | `8` |
+| `ResetIdleGraceMs` | フローがこの時間以上アイドルだった場合のみ FLOW_RESET を尊重する（ms） | `10000` |
+| `MaxFlows` | 追跡する最大フロー数 | `65536` |
+| `GlobalMaxBytes` | 全フロー共有のバッファバイト予算 | `67108864` |
+| `IngressIdleSec` | 受信側のアイドル退避タイムアウト（`EgressIdleSec` より小さい必要あり） | `30` |
+| `EgressIdleSec` | 送信側のアイドル退避タイムアウト | `300` |
+
+ACK 方向のデモートは自動です。ACK / 制御ストリームのように見える（ほとんどが小さいパケットの）フローはパススルーへ移され、遅延されることがなくなります。これは内部的な挙動であり設定可能なつまみではありません — `ClassifyWindow` / `AckDemoteMaxLarge` / `SmallPacketThreshold` を通じて間接的に調整します。
+
+ポートごとのプロファイルは、繰り返し指定できる `[ReorderRule]` セクションで設定します:
+
+```ini
+[Reorder]
+Enabled = on
+
+[ReorderRule]
+Proto = udp
+Port = 443
+Profile = quic_bulk
+```
+
+…または JSON でも同様に設定できます。`reorder` オブジェクトは上記 INI キーに 1:1 で対応する snake_case キーを使い、`reorder_rules` は `{proto, port, profile}` オブジェクトの配列です:
+
+```json
+{
+  "reorder": {
+    "enabled": "on",
+    "max_wait_ms": 30,
+    "cap_packets": 1024,
+    "max_bytes_per_flow": 1572864,
+    "classify_window": 64,
+    "ack_demote_max_large": 3,
+    "small_packet_threshold": 200,
+    "reset_mark_packets": 8,
+    "reset_idle_grace_ms": 10000,
+    "max_flows": 65536,
+    "global_max_bytes": 67108864,
+    "ingress_idle_sec": 30,
+    "egress_idle_sec": 300
+  },
+  "reorder_rules": [
+    { "proto": "udp", "port": 443, "profile": "quic_bulk" }
+  ]
+}
+```
+
+### `[ReorderRule]`（繰り返し可）
+
+| キー | 説明 | デフォルト |
+|------|------|-----------|
+| `Proto` | マッチする L4 プロトコル（`udp`） | `udp` |
+| `Port` | マッチするポート（送信元または宛先） | — |
+| `Profile` | `quic_bulk`, `low_latency`, または `default_udp` | `quic_bulk` |
+
 ## MTU ガイドライン
 
 ### デフォルト（auto）— 通常はそのままで OK
