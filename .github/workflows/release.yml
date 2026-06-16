@@ -28,7 +28,10 @@ jobs:
           # those. arm64 stays on 24.04 because GitHub has no 22.04 ARM runner.
           - { os: linux,   arch: amd64, runner: ubuntu-22.04     }
           - { os: linux,   arch: arm64, runner: ubuntu-24.04-arm }
-          - { os: windows, arch: amd64, runner: windows-latest   }
+          # amd64 pinned to windows-2022 (VS 2022): windows-latest migrated to
+          # VS 2026 in June 2026, breaking the hardcoded "Visual Studio 17 2022"
+          # generator. Revisit (bump generator / Ninja) before windows-2022 retires.
+          - { os: windows, arch: amd64, runner: windows-2022     }
           - { os: windows, arch: arm64, runner: windows-11-arm   }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
