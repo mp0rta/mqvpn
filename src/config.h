@@ -15,6 +15,7 @@
 #include <stddef.h> /* size_t */
 
 #include "libmqvpn.h" /* for MQVPN_MAX_PATHS, MQVPN_MAX_USERS */
+#include "reorder.h"  /* for embedded mqvpn_reorder_config_t (§16.1 INI) */
 
 #define MQVPN_CONFIG_MAX_PATHS 8
 #define MQVPN_CONFIG_MAX_DNS   4
@@ -75,6 +76,10 @@ typedef struct mqvpn_file_config_s {
     int manage_routes; /* 1=manage host routes (default), 0=skip routing table setup */
 
     int tun_mtu; /* [Interface] MTU — 0=auto, >0=cap (floor 1280) */
+
+    /* [Reorder] / repeated [ReorderRule] — flow-aware reorder shim (§16.1).
+     * Seeded with mqvpn_reorder_config_default() in mqvpn_config_defaults(). */
+    mqvpn_reorder_config_t reorder;
 
     /* Inferred mode: 1=server, 0=client */
     int is_server;

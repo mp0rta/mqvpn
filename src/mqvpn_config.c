@@ -202,6 +202,9 @@ mqvpn_config_new(void)
     cfg->listen_port = 443;
     cfg->init_max_path_id = 0; /* 0 = use xquic default (8) */
 
+    /* §16: reorder shim defaults (mode OFF until explicitly enabled). */
+    mqvpn_reorder_config_default(&cfg->reorder);
+
     return cfg;
 }
 
@@ -557,4 +560,119 @@ mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu)
     if (mtu != 0 && (mtu < 1280 || mtu > 9000)) return MQVPN_ERR_INVALID_ARG;
     cfg->tun_mtu = mtu;
     return MQVPN_OK;
+}
+
+/* ─── Reorder setters (§16.1) ───
+ *
+ * These write the corresponding field(s) of the embedded reorder config. They
+ * do NOT enforce cross-side invariants (ingress < egress, cap power-of-two);
+ * that is mqvpn_reorder_config_validate()'s job, run by the consumer when the
+ * config is applied. AUTO and eval_force_no_demotion are intentionally not
+ * exposed (AUTO is a later phase; eval_force_no_demotion is an internal test
+ * knob). */
+
+int
+mqvpn_config_set_reorder_enabled(mqvpn_config_t *cfg, mqvpn_reorder_mode_t mode)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    if (mode != MQVPN_REORDER_OFF && mode != MQVPN_REORDER_ON) {
+        return MQVPN_ERR_INVALID_ARG;
+    }
+    cfg->reorder.mode = mode;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_reorder_wait(mqvpn_config_t *cfg, uint32_t max_wait_ms)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->reorder.max_wait_ms = max_wait_ms;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_reorder_cap(mqvpn_config_t *cfg, uint32_t cap_packets,
+                             uint64_t max_bytes_per_flow)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->reorder.cap_packets_per_flow = cap_packets;
+    cfg->reorder.max_buffer_bytes_per_flow = max_bytes_per_flow;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_reorder_classify(mqvpn_config_t *cfg, uint16_t window,
+                                  uint16_t max_large, uint32_t small_threshold)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->reorder.classify_window = window;
+    cfg->reorder.ack_demote_max_large_packets = max_large;
+    cfg->reorder.small_packet_threshold_bytes = small_threshold;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_reorder_reset(mqvpn_config_t *cfg, uint32_t mark_packets,
+                               uint32_t idle_grace_ms)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->reorder.reset_mark_packets = mark_packets;
+    cfg->reorder.reset_idle_grace_ms = idle_grace_ms;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_reorder_limits(mqvpn_config_t *cfg, uint32_t max_flows,
+                                uint64_t global_max_bytes, uint32_t ingress_idle_sec,
+                                uint32_t egress_idle_sec)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->reorder.max_flows = max_flows;
+    cfg->reorder.global_max_buffer_bytes = global_max_bytes;
+    cfg->reorder.ingress_idle_timeout_sec = ingress_idle_sec;
+    cfg->reorder.egress_idle_timeout_sec = egress_idle_sec;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_add_reorder_rule(mqvpn_config_t *cfg, uint8_t proto, uint16_t port,
+                              mqvpn_reorder_profile_t profile)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    if (profile != MQVPN_RPROF_QUIC_BULK && profile != MQVPN_RPROF_LOW_LATENCY &&
+        profile != MQVPN_RPROF_DEFAULT_UDP) {
+        return MQVPN_ERR_INVALID_ARG;
+    }
+    if (cfg->reorder.n_rules >= MQVPN_REORDER_MAX_RULES) {
+        return MQVPN_ERR_INVALID_ARG;
+    }
+    mqvpn_reorder_rule_t *r = &cfg->reorder.rules[cfg->reorder.n_rules];
+    r->proto = proto;
+    r->port = port;
+    r->profile = profile;
+    cfg->reorder.n_rules++;
+    return MQVPN_OK;
+}
+
+void
+mqvpn_config_apply_reorder(mqvpn_config_t *cfg, const mqvpn_reorder_config_t *src)
+{
+    if (!cfg || !src) return;
+    mqvpn_config_set_reorder_enabled(cfg, src->mode);
+    mqvpn_config_set_reorder_wait(cfg, src->max_wait_ms);
+    mqvpn_config_set_reorder_cap(cfg, src->cap_packets_per_flow,
+                                 src->max_buffer_bytes_per_flow);
+    mqvpn_config_set_reorder_classify(cfg, src->classify_window,
+                                      src->ack_demote_max_large_packets,
+                                      src->small_packet_threshold_bytes);
+    mqvpn_config_set_reorder_reset(cfg, src->reset_mark_packets,
+                                   src->reset_idle_grace_ms);
+    mqvpn_config_set_reorder_limits(cfg, src->max_flows, src->global_max_buffer_bytes,
+                                    src->ingress_idle_timeout_sec,
+                                    src->egress_idle_timeout_sec);
+    /* eval_force_no_demotion is internal-only and intentionally not bridged. */
+    for (int i = 0; i < src->n_rules; i++) {
+        mqvpn_config_add_reorder_rule(cfg, src->rules[i].proto, src->rules[i].port,
+                                      src->rules[i].profile);
+    }
 }

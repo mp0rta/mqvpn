@@ -172,6 +172,75 @@ See [Multipath](./multipath) for scheduler details.
 
 > `CC = none` (no congestion control) requires xquic built with `-DXQC_ENABLE_UNLIMITED=ON`.
 
+### `[Reorder]`
+
+A flow-aware reorder buffer for inner UDP traffic. It targets a single inner connection (e.g. inner QUIC) that is itself spread across multiple paths by mqvpn's multipath aggregation: by holding briefly out-of-order datagrams and delivering them in order, it reduces the reordering the inner endpoint sees. Disabled by default (`Enabled = off`); when off the section has no effect and packets are forwarded unchanged.
+
+> **Scope:** the reorder buffer currently applies to **inner UDP flows only. Inner TCP is not yet handled by the reorder buffer (TODO).** Inner TCP instead relies on the scheduler's flow-pinning (`wlb` / `wlb_udp_pin`), which keeps a TCP flow on a single path, plus TCP's own reordering tolerance (RACK/SACK).
+
+| Key | Description | Default |
+|-----|-------------|---------|
+| `Enabled` | Master switch (`on` / `off`) | `off` |
+| `MaxWaitMs` | How long to hold a gap before skipping the missing datagram (ms) | `30` |
+| `CapPackets` | Max buffered datagrams per flow (power of two) | `1024` |
+| `MaxBytesPerFlow` | Max buffered bytes per flow | `1572864` |
+| `ClassifyWindow` | Datagrams observed to classify a flow's direction (`0` disables ACK-direction demotion) | `64` |
+| `AckDemoteMaxLarge` | Large-packet count at or below which a flow is judged ACK-direction | `3` |
+| `SmallPacketThreshold` | Inner payload bytes splitting small vs. large | `200` |
+| `ResetMarkPackets` | FLOW_RESET marks emitted when a flow restarts | `8` |
+| `ResetIdleGraceMs` | Honor a FLOW_RESET only after the flow has been idle this long (ms) | `10000` |
+| `MaxFlows` | Max tracked flows | `65536` |
+| `GlobalMaxBytes` | Shared buffer byte budget across all flows | `67108864` |
+| `IngressIdleSec` | Receiver idle eviction timeout (must be `< EgressIdleSec`) | `30` |
+| `EgressIdleSec` | Sender idle eviction timeout | `300` |
+
+Demotion in the ACK direction is automatic: a flow that looks like an ACK/control stream (mostly small packets) is moved to pass-through so it is never delayed. This is internal behaviour, not a configurable knob — tune it indirectly via `ClassifyWindow` / `AckDemoteMaxLarge` / `SmallPacketThreshold`.
+
+Per-port profiles can be set with repeatable `[ReorderRule]` sections:
+
+```ini
+[Reorder]
+Enabled = on
+
+[ReorderRule]
+Proto = udp
+Port = 443
+Profile = quic_bulk
+```
+
+…or from the JSON equivalent. The `reorder` object uses snake_case keys mapping 1:1 to the INI keys above, and `reorder_rules` is an array of `{proto, port, profile}` objects:
+
+```json
+{
+  "reorder": {
+    "enabled": "on",
+    "max_wait_ms": 30,
+    "cap_packets": 1024,
+    "max_bytes_per_flow": 1572864,
+    "classify_window": 64,
+    "ack_demote_max_large": 3,
+    "small_packet_threshold": 200,
+    "reset_mark_packets": 8,
+    "reset_idle_grace_ms": 10000,
+    "max_flows": 65536,
+    "global_max_bytes": 67108864,
+    "ingress_idle_sec": 30,
+    "egress_idle_sec": 300
+  },
+  "reorder_rules": [
+    { "proto": "udp", "port": 443, "profile": "quic_bulk" }
+  ]
+}
+```
+
+### `[ReorderRule]` (repeatable)
+
+| Key | Description | Default |
+|-----|-------------|---------|
+| `Proto` | Matched L4 protocol (`udp`) | `udp` |
+| `Port` | Matched port (source or destination) | — |
+| `Profile` | `quic_bulk`, `low_latency`, or `default_udp` | `quic_bulk` |
+
 ## MTU Guidelines
 
 ### Default (auto) — most deployments

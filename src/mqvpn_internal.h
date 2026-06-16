@@ -11,6 +11,7 @@
 #define MQVPN_INTERNAL_H
 
 #include "libmqvpn.h"
+#include "reorder.h" /* mqvpn_reorder_config_t embedded in the builder config */
 #include <stdbool.h>
 
 /* ─── Constants ─── */
@@ -63,11 +64,24 @@ struct mqvpn_config_s {
 
     int tun_mtu; /* 0 = auto (client: negotiated; server: 1382), >0 = client cap / server
                     TUN MTU */
+
+    /* Flow-aware reorder shim config (§16). Seeded with
+     * mqvpn_reorder_config_default() in mqvpn_config_new(); the library
+     * consumer reads cfg->reorder. */
+    mqvpn_reorder_config_t reorder;
 };
 
 /* ─── State transition validation (M0-5) ─── */
 
 int mqvpn_state_transition_valid(mqvpn_client_state_t from, mqvpn_client_state_t to);
+
+/* ─── Reorder config bridge (§16) ─── */
+
+/* Translate a parsed/built reorder config (e.g. from INI [Reorder]/[ReorderRule]
+ * via mqvpn_file_config_t) into `cfg` using the public builder setters. Shared by
+ * the platform layers so every surface honors reorder config identically. The
+ * internal-only eval_force_no_demotion knob is intentionally NOT bridged. */
+void mqvpn_config_apply_reorder(mqvpn_config_t *cfg, const mqvpn_reorder_config_t *src);
 
 /* ─── Scheduler precondition predicate ─── */
 
@@ -163,5 +177,22 @@ typedef struct {
 MQVPN_INTERNAL int mqvpn_server_get_all_fec_stats(const mqvpn_server_t *s,
                                                   mqvpn_internal_fec_entry_t *out,
                                                   int max);
+
+/* Aggregate reorder-shim RX statistics across every live connection that has a
+ * reorder engine (cfg.reorder.mode != OFF). Zero-inits *out, then SUMs each
+ * mqvpn_reorder_stats_t counter (mqvpn_reorder_rx_get_stats) over all such
+ * conns. A server with no reorder-enabled conn leaves *out all-zero — that is a
+ * valid result, not an error. mqvpn_reorder_stats_t is defined in reorder.h
+ * (already included above).
+ *
+ * Returns:
+ *    0  -> *out filled (possibly all-zero)
+ *   -1  -> a NULL arg was passed
+ *
+ * Used by control_socket.c::get_reorder_stats. Aggregate-only (no per-conn
+ * breakdown): the e2e/exporter only needs the engine-fired evidence
+ * (gap_count > 0), and per-conn detail is not required at this layer. */
+MQVPN_INTERNAL int mqvpn_server_get_reorder_stats(const mqvpn_server_t *s,
+                                                  mqvpn_reorder_stats_t *out);
 
 #endif /* MQVPN_INTERNAL_H */
