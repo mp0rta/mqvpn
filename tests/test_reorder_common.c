@@ -434,6 +434,21 @@ test_header_match_rejects(void)
                   "header reject long name");
 }
 
+/* Codex review fix: a side must advertise mqvpn-reorder only when it can actually
+ * RECEIVE reordered packets — reorder enabled AND the rx engine allocated. A NULL
+ * engine that still advertised would make the peer stamp into a drop (blackhole). */
+static void
+test_should_advertise(void)
+{
+    int dummy_engine = 0; /* stand-in non-NULL rx engine pointer */
+    ASSERT_EQ_INT(mqvpn_reorder_should_advertise(MQVPN_REORDER_ON, &dummy_engine), 1,
+                  "advertise when enabled + engine present");
+    ASSERT_EQ_INT(mqvpn_reorder_should_advertise(MQVPN_REORDER_ON, NULL), 0,
+                  "no advertise when engine NULL (alloc failed)");
+    ASSERT_EQ_INT(mqvpn_reorder_should_advertise(MQVPN_REORDER_OFF, &dummy_engine), 0,
+                  "no advertise when disabled");
+}
+
 int
 main(void)
 {
@@ -467,6 +482,7 @@ main(void)
 
     test_header_match_ok();
     test_header_match_rejects();
+    test_should_advertise();
 
     fprintf(stderr, "test_reorder_common: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

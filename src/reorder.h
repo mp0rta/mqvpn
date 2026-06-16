@@ -133,6 +133,19 @@ mqvpn_reorder_header_match(const void *name, size_t name_len, const void *value,
            value_len == v && memcmp(value, MQVPN_REORDER_HDR_VALUE, v) == 0;
 }
 
+/* §19.3: a side advertises/echoes mqvpn-reorder only when it can actually RECEIVE
+ * reordered packets — reorder enabled AND the local rx engine allocated. If the
+ * engine is NULL (config validation failure / OOM) but we still advertised, the
+ * peer would stamp packets that we then drop (reorder_rx == NULL) → a one-way
+ * blackhole. Gating both the client advertise and the server echo on this keeps
+ * negotiation honest (a failed engine cleanly falls back to RAW on both ends).
+ * `rx_engine` is the opaque mqvpn_reorder_rx_t* (void* to avoid the type here). */
+static inline int
+mqvpn_reorder_should_advertise(mqvpn_reorder_mode_t mode, const void *rx_engine)
+{
+    return mode != MQVPN_REORDER_OFF && rx_engine != NULL;
+}
+
 /* ─────────────────────────── §6: flow identity ────────────────────────────
  *
  * Flow identity is the inner 5-tuple (§6.1). Addresses/ports are NOT

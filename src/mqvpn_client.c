@@ -958,10 +958,10 @@ cli_masque_start_tunnel(cli_conn_t *conn)
         hdrs[hdr_count].flags = 0;
         hdr_count++;
     }
-    /* §19.2: advertise the reorder capability when locally enabled. The peer
-     * stamps only after it sees this (§19.3); we stamp only after we see the
-     * server echo it back (peer_reorder_supported, set in cb_request_read). */
-    if (c->config.reorder.mode != MQVPN_REORDER_OFF) {
+    /* §19.2/§19.3: advertise the reorder capability only when locally enabled AND
+     * the rx engine actually allocated — advertising with a NULL engine would make
+     * the server stamp packets we then drop (one-way blackhole). */
+    if (mqvpn_reorder_should_advertise(c->config.reorder.mode, conn->reorder_rx)) {
         hdrs[hdr_count].name =
             (struct iovec){.iov_base = MQVPN_REORDER_HDR_NAME,
                            .iov_len = sizeof(MQVPN_REORDER_HDR_NAME) - 1};

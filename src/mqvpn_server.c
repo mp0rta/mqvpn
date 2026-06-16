@@ -616,10 +616,11 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
          .flags = 0},
     };
     int resp_count = 2;
-    /* §19.2: echo mqvpn-reorder only when the server has it enabled AND the
-     * client advertised (peer_reorder_supported set in cb_request_read). This is
-     * the client's signal to start stamping (§19.3). */
-    if (s->config.reorder.mode != MQVPN_REORDER_OFF && conn->peer_reorder_supported) {
+    /* §19.2/§19.3: echo mqvpn-reorder only when the server has it enabled, the rx
+     * engine actually allocated, AND the client advertised. Echoing with a NULL
+     * engine would tell the client to stamp packets we then drop (blackhole). */
+    if (mqvpn_reorder_should_advertise(s->config.reorder.mode, conn->reorder_rx) &&
+        conn->peer_reorder_supported) {
         resp_hdrs[resp_count].name =
             (struct iovec){.iov_base = MQVPN_REORDER_HDR_NAME,
                            .iov_len = sizeof(MQVPN_REORDER_HDR_NAME) - 1};
