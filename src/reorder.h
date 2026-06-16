@@ -72,6 +72,16 @@ mqvpn_reorder_classify_byte(uint8_t b0)
 /*
  * Encode an 8-byte reorder header into out8. Only the low 48 bits of seq are
  * emitted (big-endian into out8[2..7]); higher bits are ignored (§7).
+ *
+ * §7 DESIGN INVARIANT — per-flow lifetime < 2^48 packets: the wire seq space is
+ * NOT reconstructed mod 2^48 on RX (expected is a monotone uint64_t that tracks
+ * raw wire values). A single 5-tuple flow that sent 2^48 (~2.8e14) packets would
+ * wrap the wire seq to 0 while RX expected sits at 2^48, late-dropping everything
+ * after. This is intentionally unhandled: at realistic single-flow VPN rates that
+ * is years-to-decades of continuous saturation, far beyond any flow's idle-evict
+ * lifetime. Flows are reset (FLOW_RESET, seq→0) long before approaching 2^48, so
+ * the wire seq never actually wraps in practice. If a use case ever sustains a
+ * single flow past this bound, add QUIC-style windowed seq reconstruction on RX.
  */
 static inline void
 mqvpn_reorder_wire_encode(uint8_t *out8, uint8_t type, uint8_t flags, uint64_t seq)

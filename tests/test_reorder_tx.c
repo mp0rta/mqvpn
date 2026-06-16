@@ -181,6 +181,40 @@ test_tx_evict_only_idle(void)
     mqvpn_reorder_tx_free(tx);
 }
 
+/* §14.2(c): a backwards-clock blip (now_us < a flow's last_activity_us) must NOT
+ * make the unsigned (now_us - last_activity_us) underflow to a huge value and
+ * spuriously evict a live flow. Mirrors the RX-side wrap-safe guard. */
+static void
+test_tx_evict_backwards_clock_no_evict(void)
+{
+    mqvpn_reorder_config_t c = base_cfg();
+    c.max_flows = 2;
+    c.egress_idle_timeout_sec = 10; /* idle threshold = 10s */
+    mqvpn_reorder_tx_t *tx = mqvpn_reorder_tx_new(&c, 0x1);
+    uint8_t pkt[256];
+    mqvpn_reorder_tx_peek_t p;
+
+    uint64_t t0 = 100ULL * 1000ULL * 1000ULL; /* 100s in us */
+    /* Two active flows established at t0. */
+    size_t n = build_v4_udp(pkt, 1001, 443, 100);
+    mqvpn_reorder_tx_peek(tx, pkt, n, t0, 1400, &p);
+    mqvpn_reorder_tx_commit(tx, &p, t0);
+    n = build_v4_udp(pkt, 1002, 443, 100);
+    mqvpn_reorder_tx_peek(tx, pkt, n, t0, 1400, &p);
+    mqvpn_reorder_tx_commit(tx, &p, t0);
+
+    /* A new flow arrives with now_us BEFORE t0 (clock went backwards). The two
+     * existing flows are NOT idle; the underflow must not evict them → RAW. */
+    uint64_t t_back = t0 - 5ULL * 1000ULL * 1000ULL; /* 5s before t0 */
+    n = build_v4_udp(pkt, 1003, 443, 100);
+    ASSERT_EQ_INT(mqvpn_reorder_tx_peek(tx, pkt, n, t_back, 1400, &p),
+                  MQVPN_REORDER_TX_RAW,
+                  "backwards clock must not evict live flow -> RAW");
+    ASSERT_EQ_INT(mqvpn_reorder_tx_stats(tx)->idle_evict_count, 0,
+                  "no idle eviction on backwards-clock blip");
+    mqvpn_reorder_tx_free(tx);
+}
+
 /* ─────────────────────────── Task 2.2: stamping ───────────────────────── */
 
 static uint64_t
@@ -309,6 +343,7 @@ main(void)
     test_tx_eligibility_dns_ineligible();
     test_tx_eligibility_unknown_ineligible();
     test_tx_evict_only_idle();
+    test_tx_evict_backwards_clock_no_evict();
 
     test_tx_peek_commit_success();
     test_tx_peek_commit_failure();

@@ -135,7 +135,10 @@ evict_one_idle(mqvpn_reorder_tx_t *tx, uint64_t now_us)
     for (uint32_t b = 0; b < tx->n_buckets; b++) {
         mqvpn_send_flow_t **link = &tx->buckets[b];
         for (mqvpn_send_flow_t *f = *link; f; link = &f->next, f = f->next) {
-            if (now_us - f->last_activity_us > idle_us) {
+            /* §14.2(c) wrap-safe: a backwards-clock blip (now_us <
+             * last_activity_us) must NOT underflow and spuriously evict a live
+             * flow. Mirrors the RX-side guard. */
+            if (now_us > f->last_activity_us && now_us - f->last_activity_us > idle_us) {
                 if (!oldest || f->last_activity_us < oldest->last_activity_us) {
                     oldest = f;
                     oldest_link = link;
