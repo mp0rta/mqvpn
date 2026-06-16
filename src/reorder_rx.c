@@ -328,6 +328,35 @@ flow_lookup(mqvpn_reorder_rx_t *rx, const mqvpn_flow_key_t *key, uint32_t *out_i
     return NULL;
 }
 
+static void flow_destroy(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f);
+
+/* §13.5: bound the RX flow table. Evict the LRU flow (oldest last_progress_us)
+ * so a peer flooding distinct inner 5-tuples cannot grow the table without bound
+ * (the per-flow structs live outside the packet-pool byte budget). An evicted RX
+ * flow simply re-inits first-observed on its next packet, so eviction is free —
+ * unlike the TX side, which must never force-evict an active flow. Linear scan;
+ * only walked on the rare at-cap creation path. */
+static void
+evict_lru_flow(mqvpn_reorder_rx_t *rx)
+{
+    mqvpn_reorder_flow_t **victim_pp = NULL;
+    uint64_t oldest = UINT64_MAX;
+    for (uint32_t i = 0; i < rx->n_buckets; i++) {
+        for (mqvpn_reorder_flow_t **pp = &rx->buckets[i]; *pp; pp = &(*pp)->next) {
+            if ((*pp)->last_progress_us <= oldest) {
+                oldest = (*pp)->last_progress_us;
+                victim_pp = pp;
+            }
+        }
+    }
+    if (victim_pp != NULL) {
+        mqvpn_reorder_flow_t *victim = *victim_pp;
+        *victim_pp = victim->next; /* unlink before destroy */
+        flow_destroy(rx, victim);
+        rx->n_flows--;
+    }
+}
+
 /* Find or create the reorder_flow for `key`. New flows have ring.cap initialized
  * from config (§13.2) but uninitialized seq state (cold-start on first packet,
  * §11.3). Returns NULL on OOM. */
@@ -338,6 +367,12 @@ flow_get_or_create(mqvpn_reorder_rx_t *rx, const mqvpn_flow_key_t *key)
     mqvpn_reorder_flow_t *f = flow_lookup(rx, key, &idx);
     if (f) {
         return f;
+    }
+    /* §13.5: enforce the flow-table cap before creating (idx stays valid — it is
+     * the hash bucket for `key`, unaffected by which flow is evicted; the prepend
+     * below re-reads rx->buckets[idx] after eviction). max_flows == 0 = no cap. */
+    if (rx->cfg.max_flows > 0 && rx->n_flows >= rx->cfg.max_flows) {
+        evict_lru_flow(rx);
     }
     f = (mqvpn_reorder_flow_t *)calloc(1, sizeof(*f));
     if (!f) {

@@ -1467,6 +1467,29 @@ test_rx_double_overflow_flush(void)
     mqvpn_reorder_rx_free(rx);
 }
 
+/* Codex review fix: the RX flow table must be bounded by cfg.max_flows (§13.5).
+ * A peer flooding distinct inner 5-tuples must not grow the table without bound. */
+static void
+test_rx_max_flows_cap(void)
+{
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.max_flows = 4;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+
+    /* 10 distinct 5-tuples (distinct src port) => 10 would-be fresh flows. */
+    for (uint16_t i = 0; i < 10; i++) {
+        size_t n = build_reorder_dgram(buf, 0, 0, (uint16_t)(i + 1), (uint16_t)(6000 + i),
+                                       443, 100);
+        mqvpn_reorder_rx_on_packet(rx, buf, n, (uint64_t)(i + 1));
+        ASSERT_TRUE(rx->n_flows <= c.max_flows, "n_flows bounded by max_flows");
+        ASSERT_TRUE(invariant_holds(rx), "invariant during flow flood");
+    }
+    ASSERT_EQ_INT((int)rx->n_flows, (int)c.max_flows, "table saturated at cap");
+    mqvpn_reorder_rx_free(rx);
+}
+
 int
 main(void)
 {
@@ -1519,6 +1542,9 @@ main(void)
     test_rx_accounting_identity();
     test_rx_stats_snapshot();
     test_rx_double_overflow_flush();
+
+    /* Codex review fixes */
+    test_rx_max_flows_cap();
 
     fprintf(stderr, "test_reorder_rx: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
