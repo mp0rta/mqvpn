@@ -407,7 +407,9 @@ TEST(server_get_reorder_stats_no_conns)
      * contract the control API and e2e rely on; the gap_count>0 evidence the
      * e2e asserts can only come from real in-tunnel out-of-order delivery,
      * which is exercised by tests/test_e2e_reorder.sh (needs sudo/netns) and
-     * by the unit tests in tests/test_reorder_rx.c. */
+     * by the unit tests in tests/test_reorder_rx.c. The cross-conn fold itself
+     * now delegates to mqvpn_reorder_stats_accumulate(), pinned to carry the
+     * residence histogram by test_stats_accumulate_carries_residence(). */
     reset_mocks();
     mqvpn_config_t *cfg = make_server_config();
     mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
@@ -430,6 +432,11 @@ TEST(server_get_reorder_stats_no_conns)
     ASSERT_EQ((long long)rs.too_late_drop_count, 0);
     ASSERT_EQ((long long)rs.duplicate_drop_count, 0);
     ASSERT_EQ((long long)rs.pool_drop_count, 0);
+    /* residence histogram + max are part of the snapshot too: confirm the getter
+     * zero-inits the tail fields (0xAB pre-dirty above must not survive). */
+    ASSERT_EQ((long long)rs.residence_bucket[0], 0);
+    ASSERT_EQ((long long)rs.residence_bucket[MQVPN_REORDER_LAT_BUCKETS - 1], 0);
+    ASSERT_EQ((long long)rs.residence_max_us, 0);
 
     mqvpn_server_destroy(s);
 }

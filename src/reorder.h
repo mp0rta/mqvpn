@@ -417,6 +417,12 @@ double mqvpn_reorder_latency_percentile(const mqvpn_reorder_stats_t *st, double 
 double mqvpn_reorder_latency_buffered_percentile(const mqvpn_reorder_stats_t *st,
                                                  double q);
 
+/* Fold every counter of `src` (including the residence histogram + max) into
+ * `dst`. Public so the server-side cross-conn aggregator reuses ONE accumulation
+ * path instead of a hand-rolled field list that silently drops new fields. */
+void mqvpn_reorder_stats_accumulate(mqvpn_reorder_stats_t *dst,
+                                    const mqvpn_reorder_stats_t *src);
+
 /* Populate cfg with the §16.1 default values. */
 static inline void
 mqvpn_reorder_config_default(mqvpn_reorder_config_t *cfg)

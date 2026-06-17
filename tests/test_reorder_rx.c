@@ -1589,6 +1589,35 @@ test_latency_overflow_boundary_and_max(void)
                 "overflow-only p99 -> exact max");
 }
 
+/* Pin that the public accumulator carries the residence histogram + max. This is
+ * the SINGLE fold path the server-side cross-conn aggregator
+ * (mqvpn_server_get_reorder_stats) now reuses, so this is the regression guard
+ * for the bug where the server hand-rolled a 14-field copy that silently dropped
+ * residence_bucket[]/residence_max_us — making the control API report 0 latency. */
+static void
+test_stats_accumulate_carries_residence(void)
+{
+    mqvpn_reorder_stats_t a, b;
+    memset(&a, 0, sizeof a);
+    memset(&b, 0, sizeof b);
+    a.delivered_count = 3;
+    a.residence_bucket[0] = 2;
+    a.residence_bucket[4] = 1;
+    a.residence_max_us = 5000;
+    b.delivered_count = 1;
+    b.residence_bucket[4] = 1;
+    b.residence_bucket[7] = 1;
+    b.residence_max_us = 60000;
+
+    mqvpn_reorder_stats_accumulate(&a, &b);
+
+    ASSERT_EQ_INT((int)a.delivered_count, 4, "scalar counter summed");
+    ASSERT_EQ_INT((int)a.residence_bucket[0], 2, "bucket0 carried");
+    ASSERT_EQ_INT((int)a.residence_bucket[4], 2, "bucket4 summed");
+    ASSERT_EQ_INT((int)a.residence_bucket[7], 1, "bucket7 carried");
+    ASSERT_TRUE(a.residence_max_us == 60000, "max takes the larger");
+}
+
 int
 main(void)
 {
@@ -1650,6 +1679,7 @@ main(void)
     test_rx_residence_buffered_and_percentile();
     test_latency_percentile_from_buckets();
     test_latency_overflow_boundary_and_max();
+    test_stats_accumulate_carries_residence();
 
     fprintf(stderr, "test_reorder_rx: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

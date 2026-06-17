@@ -299,10 +299,14 @@ struct mqvpn_reorder_rx {
 };
 
 /* Accumulate every §17 counter of `src` into `dst` (used to fold an evicted
- * flow's stats into the rx-level lifetime accumulator, and to aggregate live
- * flows into a snapshot). */
-static void
-stats_accumulate(mqvpn_reorder_stats_t *dst, const mqvpn_reorder_stats_t *src)
+ * flow's stats into the rx-level lifetime accumulator, to aggregate live flows
+ * into a snapshot, AND by the server-side cross-conn aggregator). Public so the
+ * server reuses ONE accumulation path — a newly added stats field can't silently
+ * fall off a hand-rolled field-by-field copy (cf. mqvpn_server_get_reorder_stats,
+ * where the residence histogram originally did). */
+void
+mqvpn_reorder_stats_accumulate(mqvpn_reorder_stats_t *dst,
+                               const mqvpn_reorder_stats_t *src)
 {
     dst->delivered_count += src->delivered_count;
     dst->too_late_drop_count += src->too_late_drop_count;
@@ -518,7 +522,8 @@ pool_release(mqvpn_reorder_rx_t *rx, void *pkt, uint16_t len)
 static void
 flow_destroy(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f)
 {
-    stats_accumulate(&rx->evicted_stats, &f->stats); /* §17: preserve lifetime totals */
+    mqvpn_reorder_stats_accumulate(&rx->evicted_stats,
+                                   &f->stats); /* §17: preserve lifetime totals */
     if (f->buffer.slots != NULL) {
         for (uint32_t j = 0; j < f->buffer.size; j++) {
             if (f->buffer.slots[j].pkt != NULL) {
@@ -1146,7 +1151,7 @@ mqvpn_reorder_rx_get_stats(const mqvpn_reorder_rx_t *rx, mqvpn_reorder_stats_t *
     *out = rx->evicted_stats;
     for (uint32_t i = 0; i < rx->n_buckets; i++) {
         for (const mqvpn_reorder_flow_t *f = rx->buckets[i]; f; f = f->next) {
-            stats_accumulate(out, &f->stats);
+            mqvpn_reorder_stats_accumulate(out, &f->stats);
         }
     }
 }
