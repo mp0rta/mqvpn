@@ -94,7 +94,7 @@ DEFAULT_CHOSEN_WAIT=30
 N_PATHS=2
 CTRL_PORT="${CTRL_PORT:-9097}"
 PICO_PORT="${PICO_PORT:-5401}"   # ReorderRule Port == picoquicdemo UDP port
-PICO_FILE_BYTES="${PICO_FILE_BYTES:-52428800}"   # 50 MiB bulk GET
+PICO_FILE_BYTES="${PICO_FILE_BYTES:-20971520}"   # 20 MiB bulk GET (override for slow/collapsed regimes)
 # Hard wall-clock cap for the inner GET. A reorder-heavy / lossy / asymmetric
 # path can stall or crawl the inner QUIC; without a cap the cell would hang
 # (picoquic's own 30s idle timer never fires while bytes still trickle). On
@@ -140,7 +140,7 @@ usage: sudo PICOQUICDEMO=<path> $0 [options]
                        the median over all samples per (env,wait,cap)). Use to
                        re-test; otherwise the resume cache skips done cells.
 Environments: ${!ENV_NETEM[*]}
-Env knobs: REPEATS (default 3), PICO_FILE_BYTES (default 50MiB), PICO_TIMEOUT (90s)
+Env knobs: REPEATS (default 3), PICO_FILE_BYTES (default 20MiB), PICO_TIMEOUT (90s)
 EOF
     exit 2
 }
@@ -271,7 +271,7 @@ write_ini() {
 #   * "/<bytes>"        scenario: the demo H3 server GENERATES <bytes> bytes for a
 #                       numeric path on the fly — no -w web root / sized file needed.
 #   * -n <sni>          SNI is mandatory; a NULL SNI makes the H3 GET fail.
-#   * -D                no-disk on both ends (don't write the 50 MiB to disk).
+#   * -D                no-disk on both ends (don't write the payload to disk).
 #   * qlog/binlog/text log are OFF by simply omitting -q/-b/-l.
 #   * goodput line (client stdout): "Received <N> bytes in <T> seconds, <X> Mbps."
 #     NOTE the client ALSO prints a "Sent ... Mbps." line (upload), so we must
