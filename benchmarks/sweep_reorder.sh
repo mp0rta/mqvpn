@@ -278,7 +278,7 @@ run_inner_http3() {
     sleep 1
     if ! kill -0 "$pico_svr_pid" 2>/dev/null; then
         echo "  (picoquicdemo server failed to start; see $PICO_SVR_LOG)" >&2
-        echo "0"
+        echo "NA"
         return 1
     fi
 
@@ -307,10 +307,13 @@ run_inner_http3() {
         gp="$(awk '
             /received/ && /bytes/ { for (i=1;i<=NF;i++) if ($i ~ /^[0-9]+$/) b=$i }
             /[0-9]+(\.[0-9]+)? *(s|sec|seconds)/ { for (i=1;i<=NF;i++) if ($i ~ /^[0-9]+(\.[0-9]+)?$/) t=$i }
-            END { if (b>0 && t>0) printf "%.3f", (b*8)/(t*1000000); else print "0" }
-        ' "$PICO_CLI_LOG" 2>/dev/null || echo 0)"
+            END { if (b>0 && t>0) printf "%.3f", (b*8)/(t*1000000); else print "" }
+        ' "$PICO_CLI_LOG" 2>/dev/null || true)"
     fi
-    [ -z "$gp" ] && gp="0"
+    # Unparseable goodput (parse regex still TODO(picoquic-flags)) is reported as
+    # the sentinel "NA" — NOT 0 — so the downstream analyzer can filter it instead
+    # of mistaking it for a true zero-throughput measurement.
+    [ -z "$gp" ] && gp="NA"
     echo "$gp"
 }
 
@@ -320,6 +323,14 @@ run_inner_http3() {
 harvest_reorder_stats() {
     local rs p99 maxl bufp99 gap gfill gto gov deliv
     rs="$(bench_query_control "$CTRL_PORT" get_reorder_stats)"
+    # An empty control response (control timeout / server died) is NOT valid data:
+    # `echo "" | jq '... // 0'` exits 0 with EMPTY output, so the `// 0` default
+    # never fires and the CSV cell would silently become "" (looks like, but is
+    # not, a measurement). Reject empty / non-JSON responses as a failed cell.
+    if [ -z "$rs" ] || ! echo "$rs" | jq -e . >/dev/null 2>&1; then
+        echo "ERR: empty or invalid control response for cell" >&2
+        return 1
+    fi
     p99=$(echo "$rs"    | jq '.reorder.added_latency_p99_ms // 0'           2>/dev/null || echo 0)
     maxl=$(echo "$rs"   | jq '.reorder.added_latency_max_ms // 0'           2>/dev/null || echo 0)
     bufp99=$(echo "$rs" | jq '.reorder.added_latency_buffered_p99_ms // 0'  2>/dev/null || echo 0)
@@ -328,7 +339,8 @@ harvest_reorder_stats() {
     gto=$(echo "$rs"    | jq '.reorder.gap_timeout_count // 0'              2>/dev/null || echo 0)
     gov=$(echo "$rs"    | jq '.reorder.gap_overflow_count // 0'             2>/dev/null || echo 0)
     deliv=$(echo "$rs"  | jq '.reorder.delivered_count // 0'                2>/dev/null || echo 0)
-    echo "${p99},${maxl},${bufp99},${gap},${gfill},${gto},${gov},${deliv}"
+    # Belt-and-suspenders: never emit an empty field even if a parse slips through.
+    echo "${p99:-0},${maxl:-0},${bufp99:-0},${gap:-0},${gfill:-0},${gto:-0},${gov:-0},${deliv:-0}"
 }
 
 # ─── Lifecycle helper: start a fresh server+client for the current INI ───────
@@ -350,9 +362,19 @@ start_tunnel() {
 declare -A DONE_KEYS=()
 load_done_keys() {
     [ -f "$OUT" ] || return 0
-    # CSV columns: 1=ts 2=env 3=axis 4=wait 5=cap 6=repeat ...
-    local line env wait cap rep
-    while IFS=, read -r _ env _ wait cap rep _; do
+    # CSV columns: 1=ts 2=env 3=axis 4=wait 5=cap 6=repeat ... (CSV_HEADER fields).
+    local line raw env wait cap rep nfields
+    # Expected field count = number of columns in CSV_HEADER.
+    local want_fields=$(( $(echo "$CSV_HEADER" | tr ',' '\n' | wc -l) ))
+    # `|| [ -n "$raw" ]` keeps the final newline-less line (a row half-written when
+    # a prior run was killed) instead of having `read` silently drop it.
+    while IFS= read -r raw || [ -n "$raw" ]; do
+        [ -z "$raw" ] && continue
+        # Validate field count: ignore a short/truncated tail row (e.g. a row cut
+        # off mid-write) rather than registering a partial — incomplete key.
+        nfields=$(( $(echo "$raw" | tr ',' '\n' | wc -l) ))
+        [ "$nfields" -ne "$want_fields" ] && continue
+        IFS=, read -r _ env _ wait cap rep _ <<<"$raw"
         [ "$env" = "env_name" ] && continue   # header
         [ -z "$env" ] && continue
         DONE_KEYS["${env}|${wait}|${cap}|${rep}"]=1
@@ -397,14 +419,25 @@ run_one_cell() {
         return 0
     fi
 
+    # Goodput parse is still a TODO(picoquic-flags) placeholder. run_inner_http3
+    # already emits the sentinel "NA" (not "0") on workload/parse failure, so a
+    # truly-zero throughput stays distinguishable from "not measured" downstream.
     local goodput
     goodput="$(run_inner_http3)" || {
-        echo "  (inner workload failed; recording goodput=0)" >&2
-        goodput="0"
+        echo "  (inner workload failed; recording goodput=NA)" >&2
+        goodput="NA"
     }
+    [ -z "$goodput" ] && goodput="NA"
 
+    # Harvest reorder stats. If the control response is empty/invalid, the cell's
+    # reorder data is unreliable: skip the row (don't write blank/zero stats) so
+    # the cell remains un-recorded and gets retried on the next resume run.
     local stats_tail
-    stats_tail="$(harvest_reorder_stats)"
+    if ! stats_tail="$(harvest_reorder_stats)"; then
+        echo "  (reorder-stats harvest failed for env=$env wait=$wait cap=$cap rep=$rep; skipping row, will retry on resume)" >&2
+        bench_stop_vpn
+        return 0
+    fi
 
     local ts
     ts="$(date -u +%FT%TZ)"
@@ -497,6 +530,10 @@ run_perf_sweep() {
 # are. picoquic-specific multi-flow is left as a TODO.
 scale_launch_concurrent_udp() {
     local nflows="$1" dur="${2:-8}" i
+    # Only wait on the flow PIDs we spawn here — a bare `wait` would also block on
+    # the long-lived VPN server+client background jobs (started with & by
+    # bench_start_vpn_server/_client), which never exit, hanging scale mode.
+    local flow_pids=()
     # TODO(picoquic-flags): replace this iperf3/nc multiplex with N concurrent
     # picoquicdemo H3 GETs on distinct client src ports once flags are pinned.
     if command -v iperf3 >/dev/null 2>&1; then
@@ -507,8 +544,9 @@ scale_launch_concurrent_udp() {
             ip netns exec "$NS_CLIENT" iperf3 -c "$TUNNEL_SERVER_IP" \
                 -p "$PICO_PORT" -u -b 5M -l 1200 -t "$dur" \
                 --cport "$(( 40000 + i ))" >/dev/null 2>&1 &
+            flow_pids+=("$!")
         done
-        wait
+        [ "${#flow_pids[@]}" -gt 0 ] && wait "${flow_pids[@]}"
         kill "$(cat /tmp/sweep-reorder-iperf3.pid 2>/dev/null)" 2>/dev/null || true
         rm -f /tmp/sweep-reorder-iperf3.pid
     else
@@ -517,8 +555,9 @@ scale_launch_concurrent_udp() {
             ip netns exec "$NS_CLIENT" bash -c \
                 "head -c 1000000 /dev/zero | timeout ${dur} nc -u -p $(( 40000 + i )) -w 1 ${TUNNEL_SERVER_IP} ${PICO_PORT}" \
                 >/dev/null 2>&1 &
+            flow_pids+=("$!")
         done
-        wait
+        [ "${#flow_pids[@]}" -gt 0 ] && wait "${flow_pids[@]}"
     fi
 }
 
