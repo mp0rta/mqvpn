@@ -41,6 +41,9 @@ struct slot {
  * bound[11]==UINT64_MAX is the >512ms overflow bucket. */
 static const uint64_t reorder_lat_bound_us[MQVPN_REORDER_LAT_BUCKETS] = {
     0, 1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000, 256000, 512000, UINT64_MAX};
+_Static_assert(sizeof(reorder_lat_bound_us) / sizeof(reorder_lat_bound_us[0]) ==
+                   MQVPN_REORDER_LAT_BUCKETS,
+               "lat bound table size must match bucket count");
 
 struct ring {
     struct slot *slots; /* `size` entries, lazily allocated */
@@ -434,8 +437,12 @@ stop_gap_timer(mqvpn_reorder_flow_t *f)
  * enqueue_us for a buffered packet). Pure observability — never affects delivery
  * or ordering. */
 static void
-record_residence(mqvpn_reorder_flow_t *f, uint64_t residence_us)
+record_residence(mqvpn_reorder_flow_t *f, uint64_t now_us, uint64_t enq_us)
 {
+    /* wrap-safe: a backwards-clock blip (now_us < enq_us) must not produce a
+     * garbage residence that corrupts the histogram / max (cf. the idle-grace
+     * guard in this file). */
+    uint64_t residence_us = (now_us > enq_us) ? (now_us - enq_us) : 0;
     unsigned i = 0;
     while (i < MQVPN_REORDER_LAT_BUCKETS - 1 && residence_us > reorder_lat_bound_us[i])
         i++;
@@ -455,9 +462,10 @@ lat_percentile(const mqvpn_reorder_stats_t *st, double q, unsigned lo_bucket)
     for (unsigned i = lo_bucket; i < MQVPN_REORDER_LAT_BUCKETS; i++)
         total += st->residence_bucket[i];
     if (total == 0) return 0.0;
-    uint64_t target =
-        (uint64_t)(q * (double)total + 0.999999); /* ceil for non-integers */
-    if (target == 0) target = 1;
+    /* approximate ceil; exact integer precision not required for a coarse
+     * histogram percentile */
+    uint64_t target = (uint64_t)(q * (double)total + 0.999999);
+    if (target == 0) target = 1; /* guards q==0 callers */
     uint64_t cum = 0;
     for (unsigned i = lo_bucket; i < MQVPN_REORDER_LAT_BUCKETS; i++) {
         cum += st->residence_bucket[i];
@@ -484,11 +492,11 @@ mqvpn_reorder_latency_buffered_percentile(const mqvpn_reorder_stats_t *st, doubl
 
 static void
 deliver_pkt(mqvpn_reorder_rx_t *rx, const uint8_t *pkt, size_t len,
-            mqvpn_reorder_flow_t *f, uint64_t residence_us)
+            mqvpn_reorder_flow_t *f, uint64_t now_us, uint64_t enq_us)
 {
     rx->deliver(pkt, len, rx->deliver_ctx);
     f->stats.delivered_count++;
-    record_residence(f, residence_us);
+    record_residence(f, now_us, enq_us);
 }
 
 /* §13.2 pool accounting: a buffered heap copy is leaving the ring (delivered or
@@ -531,7 +539,7 @@ drain_contiguous(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t now_u
     uint64_t enq = 0;
     void *pkt;
     while ((pkt = ring_remove(&f->buffer, f->expected, &len, &enq)) != NULL) {
-        deliver_pkt(rx, (const uint8_t *)pkt, len, f, now_us - enq);
+        deliver_pkt(rx, (const uint8_t *)pkt, len, f, now_us, enq);
         pool_release(rx, pkt, len);
         f->expected++;
     }
@@ -753,7 +761,7 @@ flush_buffer_for_demote(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_
         uint64_t enq = 0;
         void *pkt;
         while ((pkt = ring_remove(&f->buffer, f->expected, &plen, &enq)) != NULL) {
-            deliver_pkt(rx, (const uint8_t *)pkt, plen, f, now_us - enq);
+            deliver_pkt(rx, (const uint8_t *)pkt, plen, f, now_us, enq);
             pool_release(rx, pkt, plen);
             f->expected++;
         }
@@ -832,7 +840,7 @@ reclassify_after_flush(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t
         return REORDER_DROPPED_LATE;
     }
     if (seq == f->expected) {
-        deliver_pkt(rx, pkt, len, f, 0);
+        deliver_pkt(rx, pkt, len, f, now_us, now_us);
         f->expected++;
         f->last_progress_us = now_us;
         drain_contiguous(rx, f, now_us);
@@ -910,14 +918,14 @@ process_reorder_packet(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t
     if (!f->initialized) { /* cold start (FLOW_RESET-all-loss fallback) */
         f->initialized = 1;
         f->expected = seq;
-        deliver_pkt(rx, pkt, len, f, 0);
+        deliver_pkt(rx, pkt, len, f, now_us, now_us);
         f->expected++;
         f->last_progress_us = now_us;
         return REORDER_DELIVERED;
     }
 
     if (seq == f->expected) { /* in-order */
-        deliver_pkt(rx, pkt, len, f, 0);
+        deliver_pkt(rx, pkt, len, f, now_us, now_us);
         f->expected++;
         f->last_progress_us = now_us;
         drain_contiguous(rx, f, now_us);
@@ -968,7 +976,7 @@ on_reordered(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t seq, uint
             reset_reorder_flow(rx, f); /* discard old buffer (NOT deliver) + reinit */
             f->initialized = 1;
             f->expected = seq;
-            deliver_pkt(rx, pkt, len, f, 0);
+            deliver_pkt(rx, pkt, len, f, now_us, now_us);
             f->expected++;
             f->last_progress_us = now_us;
             return;
@@ -981,7 +989,7 @@ on_reordered(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t seq, uint
      *    freed; deliver immediately without looking at seq. Evaluated AFTER step 1
      *    so an idle-grace reset un-demotes + reclassifies the flow. */
     if (f->pass_through) {
-        deliver_pkt(rx, pkt, len, f, 0);
+        deliver_pkt(rx, pkt, len, f, now_us, now_us);
         f->last_progress_us = now_us;
         return;
     }

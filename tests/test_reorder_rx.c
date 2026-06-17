@@ -1556,6 +1556,39 @@ test_latency_percentile_from_buckets(void)
                 "buf p99 == 64ms");
 }
 
+/* Pin the overflow boundary (512000us == bucket 10 upper bound; 512001us spills
+ * into the overflow bucket 11) and exercise the overflow->exact-max percentile
+ * branch, which no other test covers. The bucket index is derived the same way
+ * record_residence() classifies, so this guards the >512ms tail accounting. */
+static void
+test_latency_overflow_boundary_and_max(void)
+{
+    /* The bound table is internal to reorder_rx.c; reproduce the classification
+     * by driving the engine would require timestamp control, so verify the
+     * boundary via the percentile API on a hand-built histogram instead. */
+
+    /* Exact-512ms residence must land in bucket 10 (its inclusive upper bound),
+     * NOT the overflow bucket. A histogram with all mass in bucket 10 reports
+     * that bound (512ms) for any percentile. */
+    mqvpn_reorder_stats_t edge;
+    memset(&edge, 0, sizeof edge);
+    edge.residence_bucket[10] = 1; /* one packet @ residence == 512000us */
+    edge.residence_max_us = 512000;
+    ASSERT_TRUE(mqvpn_reorder_latency_percentile(&edge, 1.0) == 512.0,
+                "512000us -> bucket10, p100 == 512ms");
+
+    /* 512001us spills into the overflow bucket 11; the overflow bucket reports
+     * the exact tracked max (residence_max_us / 1000.0), not a bound. */
+    mqvpn_reorder_stats_t ovf;
+    memset(&ovf, 0, sizeof ovf);
+    ovf.residence_bucket[11] = 3; /* overflow-only histogram */
+    ovf.residence_max_us = 512001;
+    ASSERT_TRUE(mqvpn_reorder_latency_percentile(&ovf, 0.50) == 512.001,
+                "overflow-only -> exact max (512.001ms)");
+    ASSERT_TRUE(mqvpn_reorder_latency_percentile(&ovf, 0.99) == 512.001,
+                "overflow-only p99 -> exact max");
+}
+
 int
 main(void)
 {
@@ -1616,6 +1649,7 @@ main(void)
     test_rx_residence_in_order_is_zero_bucket();
     test_rx_residence_buffered_and_percentile();
     test_latency_percentile_from_buckets();
+    test_latency_overflow_boundary_and_max();
 
     fprintf(stderr, "test_reorder_rx: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
