@@ -95,6 +95,11 @@ N_PATHS=2
 CTRL_PORT="${CTRL_PORT:-9097}"
 PICO_PORT="${PICO_PORT:-5401}"   # ReorderRule Port == picoquicdemo UDP port
 PICO_FILE_BYTES="${PICO_FILE_BYTES:-52428800}"   # 50 MiB bulk GET
+# Hard wall-clock cap for the inner GET. A reorder-heavy / lossy / asymmetric
+# path can stall or crawl the inner QUIC; without a cap the cell would hang
+# (picoquic's own 30s idle timer never fires while bytes still trickle). On
+# timeout the cell records goodput=NA and the sweep moves on (resumable).
+PICO_TIMEOUT="${PICO_TIMEOUT:-90}"   # seconds
 # picoquicdemo TLS material + SNI. The vendored tree ships test certs under
 # certs/; the demo H3 server generates a file of N bytes for the numeric path
 # "/N" (no -w web root needed). SNI must be non-empty or H3 GET is rejected.
@@ -286,8 +291,12 @@ run_inner_http3() {
     fi
 
     # Client: bulk GET of a generated PICO_FILE_BYTES object over the tunnel.
+    # Wrapped in `timeout` so a stalled/crawling transfer caps at PICO_TIMEOUT
+    # (then goodput parses as NA) instead of hanging the whole sweep. -k 5 sends
+    # SIGKILL if picoquicdemo ignores the initial SIGTERM.
     local scenario="/${PICO_FILE_BYTES}"
-    ip netns exec "$NS_CLIENT" "$PICOQUICDEMO" \
+    timeout -k 5 "$PICO_TIMEOUT" \
+        ip netns exec "$NS_CLIENT" "$PICOQUICDEMO" \
         -G bbr -D -n "$PICO_SNI" \
         "$TUNNEL_SERVER_IP" "$PICO_PORT" "$scenario" \
         >"$PICO_CLI_LOG" 2>&1 || true
