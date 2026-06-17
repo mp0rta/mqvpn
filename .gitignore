@@ -3,6 +3,14 @@ build-*/
 ref/
 benchmarks/*
 !benchmarks/*.sh
+!benchmarks/sweep_reorder_analyze.py
+
+# local-only picoquic build for reorder sweep / interop (not vendored as a submodule)
+/third_party/picoquic/
+# local sweep / bench results (never committed)
+/ci_sweep_results/
+/ci_bench_results/
+/ci_stress_results/
 !benchmarks/*.py
 *.o
 *.d
