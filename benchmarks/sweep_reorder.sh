@@ -199,7 +199,10 @@ require_picoquic() {
     # picoquic_pin: best-effort identity of the binary used, recorded per row so
     # results stay attributable across rebuilds (no stable --version flag known).
     PICO_PIN="$(cd "${REPO_ROOT}/third_party/picoquic" 2>/dev/null && git rev-parse --short HEAD 2>/dev/null || true)"
-    [ -z "$PICO_PIN" ] && PICO_PIN="$(basename "$PICOQUICDEMO")"
+    [ -n "$PICO_PIN" ] || PICO_PIN="$(basename "$PICOQUICDEMO")"
+    # Must return 0: a trailing `[ test ] && cmd` that evaluates false would make
+    # this function return 1, tripping `set -e` at the call site.
+    return 0
 }
 
 # ─── Temp files + trap ───────────────────────────────────────────────────────
@@ -438,6 +441,7 @@ run_one_cell() {
     echo "  -> goodput=${goodput} Mbps  reorder=[${stats_tail}]"
 
     bench_stop_vpn
+    return 0   # don't let bench_stop_vpn's exit status fail the cell under set -e
 }
 
 # ─── Environment selection ───────────────────────────────────────────────────
@@ -555,6 +559,7 @@ scale_launch_concurrent_udp() {
         done
         [ "${#flow_pids[@]}" -gt 0 ] && wait "${flow_pids[@]}"
     fi
+    return 0   # a failed flow's wait status must not fail the run under set -e
 }
 
 run_scale_mode() {
