@@ -384,6 +384,11 @@ typedef struct {
  *   gap_count = gap_filled_count + gap_timeout_count + gap_overflow_count
  *             + gap_demote_count  + gap_reset_count
  */
+
+/* added-latency histogram: smallest i with residence_us <= bound[i].
+ * bucket[0] == residence 0 (in-order pass-through). bucket[11] == overflow (>512ms). */
+#define MQVPN_REORDER_LAT_BUCKETS 12
+
 typedef struct {
     uint64_t delivered_count;
     uint64_t too_late_drop_count;
@@ -399,7 +404,18 @@ typedef struct {
     uint64_t gap_demote_count;    /* §17: periods ended by ACK demote flush (§11.6) */
     uint64_t gap_reset_count;     /* §17: periods ended by FLOW_RESET discard (§11.6) */
     uint64_t ack_demote_count;    /* §17: flows demoted to pass-through (§11.6) */
+    uint64_t residence_bucket[MQVPN_REORDER_LAT_BUCKETS]; /* added-latency histogram */
+    uint64_t residence_max_us;                            /* exact max residence */
 } mqvpn_reorder_stats_t;
+
+/* Added-latency percentiles over the residence histogram (non-static so the
+ * control API can link them). _percentile spans all buckets (includes the
+ * residence-0 in-order packets); _buffered_percentile starts at bucket 1 so it
+ * reflects only packets that actually waited in the reorder buffer. Both return
+ * milliseconds. */
+double mqvpn_reorder_latency_percentile(const mqvpn_reorder_stats_t *st, double q);
+double mqvpn_reorder_latency_buffered_percentile(const mqvpn_reorder_stats_t *st,
+                                                 double q);
 
 /* Populate cfg with the §16.1 default values. */
 static inline void

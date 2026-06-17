@@ -34,7 +34,9 @@
  *    "gap_timeout_count":N,"gap_overflow_count":N,"gap_demote_count":N,
  *    "gap_reset_count":N,"ack_demote_count":N,"too_late_drop_count":N,
  *    "too_far_ahead_drop_count":N,"duplicate_drop_count":N,"pool_drop_count":N,
- *    "per_flow_limit_drop_count":N,"delivered_count":N}}
+ *    "per_flow_limit_drop_count":N,"delivered_count":N,
+ *    "added_latency_p99_ms":F,"added_latency_max_ms":F,
+ *    "added_latency_buffered_p99_ms":F}}
  */
 
 #include "control_socket.h"
@@ -364,12 +366,18 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
             "\"too_far_ahead_drop_count\":%" PRIu64 ",\"duplicate_drop_count\":%" PRIu64
             ","
             "\"pool_drop_count\":%" PRIu64 ",\"per_flow_limit_drop_count\":%" PRIu64 ","
-            "\"reset_discard_count\":%" PRIu64 ",\"delivered_count\":%" PRIu64 "}}",
+            "\"reset_discard_count\":%" PRIu64 ",\"delivered_count\":%" PRIu64 ","
+            "\"added_latency_p99_ms\":%.3f,\"added_latency_max_ms\":%.3f,"
+            "\"added_latency_buffered_p99_ms\":%.3f"
+            "}}",
             rs.gap_count, rs.gap_filled_count, rs.gap_timeout_count,
             rs.gap_overflow_count, rs.gap_demote_count, rs.gap_reset_count,
             rs.ack_demote_count, rs.too_late_drop_count, rs.too_far_ahead_drop_count,
             rs.duplicate_drop_count, rs.pool_drop_count, rs.per_flow_limit_drop_count,
-            rs.reset_discard_count, rs.delivered_count);
+            rs.reset_discard_count, rs.delivered_count,
+            mqvpn_reorder_latency_percentile(&rs, 0.99),
+            (double)rs.residence_max_us / 1000.0,
+            mqvpn_reorder_latency_buffered_percentile(&rs, 0.99));
 
     } else {
         return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"unknown cmd\"}");
