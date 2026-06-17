@@ -5,8 +5,10 @@ benchmarks/*
 !benchmarks/*.sh
 !benchmarks/sweep_reorder_analyze.py
 
-# local-only picoquic build for reorder sweep / interop (not vendored as a submodule)
+# local-only picoquic build for reorder sweep / interop (not vendored as a submodule).
+# picotls is picoquic's sibling TLS dependency, cloned + built next to it.
 /third_party/picoquic/
+/third_party/picotls/
 # local sweep / bench results (never committed)
 /ci_sweep_results/
 /ci_bench_results/
