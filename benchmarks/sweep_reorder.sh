@@ -123,6 +123,7 @@ SEL_ENV=""
 SEL_AXIS=""
 SEL_STAGE=""   # empty = both stages
 QUICK=0
+FORCE=0        # --force: re-run cells already in the CSV (append fresh samples)
 
 usage() {
     cat >&2 <<EOF
@@ -134,7 +135,12 @@ usage: sudo PICOQUICDEMO=<path> $0 [options]
   --mode <perf|scale>  perf (default) or scale-mode exercise
   --quick              alias: REPEATS=1 + --axis rtt (smoke). With --mode scale,
                        this is the scale-mode smoke.
+  --force              re-run cells already recorded in the CSV instead of
+                       skipping them (appends fresh samples; the analyzer takes
+                       the median over all samples per (env,wait,cap)). Use to
+                       re-test; otherwise the resume cache skips done cells.
 Environments: ${!ENV_NETEM[*]}
+Env knobs: REPEATS (default 3), PICO_FILE_BYTES (default 50MiB), PICO_TIMEOUT (90s)
 EOF
     exit 2
 }
@@ -147,6 +153,7 @@ while [ $# -gt 0 ]; do
         --stage) SEL_STAGE="${2:?--stage needs 1|2}"; shift 2 ;;
         --mode)  MODE="${2:?--mode needs perf|scale}"; shift 2 ;;
         --quick) QUICK=1; shift ;;
+        --force) FORCE=1; shift ;;
         -h|--help) usage ;;
         *) echo "error: unknown argument '$1'" >&2; usage ;;
     esac
@@ -401,8 +408,8 @@ run_one_cell() {
     local env="$1" wait="$2" cap="$3" rep="$4" axis="$5"
     local key="${env}|${wait}|${cap}|${rep}"
 
-    if [ -n "${DONE_KEYS[$key]:-}" ]; then
-        echo "[skip] env=$env wait=$wait cap=$cap rep=$rep (already in CSV)"
+    if [ "$FORCE" -eq 0 ] && [ -n "${DONE_KEYS[$key]:-}" ]; then
+        echo "[skip] env=$env wait=$wait cap=$cap rep=$rep (already in CSV; --force to re-run)"
         return 0
     fi
 
