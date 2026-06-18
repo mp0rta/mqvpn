@@ -418,6 +418,40 @@ mqvpn_reorder_match_rule(const mqvpn_reorder_config_t *cfg, const mqvpn_flow_key
     return NULL;
 }
 
+/* Resolve each rule's effective (wait,cap): rule-explicit > global-explicit >
+ * profile-preset > builtin. Idempotent. Run AFTER full config parse (rule- and
+ * global-explicit arrive in separate sections). Tiers 2 & 4 intentionally read
+ * the same storage (cfg->max_wait_ms holds the builtin default when not explicit;
+ * has_explicit_* only lets a global value punch through a preset). resolved_cap
+ * is forced to a non-zero power of two (defends against a bad explicit cap that
+ * slipped parse). */
+static inline void
+mqvpn_reorder_config_finalize(mqvpn_reorder_config_t *cfg)
+{
+    for (int i = 0; i < cfg->n_rules; i++) {
+        mqvpn_reorder_rule_t *r = &cfg->rules[i];
+        uint32_t pw = 0, pc = 0;
+        int has_preset = mqvpn_reorder_profile_preset(r->profile, &pw, &pc);
+        r->resolved_wait_ms = r->explicit_wait_ms      ? r->explicit_wait_ms
+                              : cfg->has_explicit_wait ? cfg->max_wait_ms
+                              : has_preset             ? pw
+                                                       : cfg->max_wait_ms;
+        /* An invalid (non-pow2 / zero) per-rule explicit_cap is treated as UNSET
+         * so precedence falls through correctly (global-explicit > preset >
+         * builtin) instead of skipping the global tier. */
+        uint32_t rcap = r->explicit_cap;
+        if (rcap == 0 || (rcap & (rcap - 1))) rcap = 0;
+        uint32_t cap = rcap                    ? rcap
+                       : cfg->has_explicit_cap ? cfg->cap_packets_per_flow
+                       : has_preset            ? pc
+                                               : cfg->cap_packets_per_flow;
+        /* Defensive: chosen tier should already be pow2 (global cap is validated
+         * pre-finalize; presets are pow2). Clamp the impossible case to builtin. */
+        if (cap == 0 || (cap & (cap - 1))) cap = 1024;
+        r->resolved_cap = cap;
+    }
+}
+
 /* ─────────────────────────── §17: RX statistics ───────────────────────────
  *
  * Per-flow receiver counters (§17). Lives here (not in reorder_rx.c) so the RX

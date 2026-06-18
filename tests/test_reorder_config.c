@@ -779,6 +779,77 @@ test_profile_preset(void)
     ASSERT_EQ_INT(cap, 9, "default_udp cap untouched");
 }
 
+/* ──────────────────── Task 2.2: finalize precedence ─────────────────────── */
+
+static void
+test_param_precedence(void)
+{
+    mqvpn_reorder_config_t cfg;
+
+    /* fiber_lte preset → 50 / 2048 when nothing else overrides. */
+    mqvpn_reorder_config_default(&cfg);
+    cfg.n_rules = 1;
+    cfg.rules[0].profile = MQVPN_RPROF_FIBER_LTE;
+    mqvpn_reorder_config_finalize(&cfg);
+    ASSERT_EQ_INT(cfg.rules[0].resolved_wait_ms, 50, "fiber_lte preset wait");
+    ASSERT_EQ_INT(cfg.rules[0].resolved_cap, 2048, "fiber_lte preset cap");
+
+    /* rule-explicit wait=80 wins over the preset. */
+    mqvpn_reorder_config_default(&cfg);
+    cfg.n_rules = 1;
+    cfg.rules[0].profile = MQVPN_RPROF_FIBER_LTE;
+    cfg.rules[0].explicit_wait_ms = 80;
+    mqvpn_reorder_config_finalize(&cfg);
+    ASSERT_EQ_INT(cfg.rules[0].resolved_wait_ms, 80, "rule-explicit wait beats preset");
+    ASSERT_EQ_INT(cfg.rules[0].resolved_cap, 2048, "cap still from preset");
+
+    /* default_udp (no preset) → builtin 30 / 1024. */
+    mqvpn_reorder_config_default(&cfg);
+    cfg.n_rules = 1;
+    cfg.rules[0].profile = MQVPN_RPROF_DEFAULT_UDP;
+    mqvpn_reorder_config_finalize(&cfg);
+    ASSERT_EQ_INT(cfg.rules[0].resolved_wait_ms, 30, "default_udp builtin wait");
+    ASSERT_EQ_INT(cfg.rules[0].resolved_cap, 1024, "default_udp builtin cap");
+
+    /* global-explicit wait masks the preset, but rule-explicit still wins. */
+    mqvpn_reorder_config_default(&cfg);
+    cfg.has_explicit_wait = 1;
+    cfg.max_wait_ms = 120;
+    cfg.n_rules = 2;
+    cfg.rules[0].profile = MQVPN_RPROF_FIBER_LTE; /* no rule-explicit */
+    cfg.rules[1].profile = MQVPN_RPROF_FIBER_LTE;
+    cfg.rules[1].explicit_wait_ms = 80; /* rule-explicit still wins */
+    mqvpn_reorder_config_finalize(&cfg);
+    ASSERT_EQ_INT(cfg.rules[0].resolved_wait_ms, 120, "global-explicit masks preset");
+    ASSERT_EQ_INT(cfg.rules[1].resolved_wait_ms, 80, "rule-explicit beats global");
+}
+
+static void
+test_resolved_cap_pow2(void)
+{
+    mqvpn_reorder_config_t cfg;
+
+    /* (i) invalid explicit_cap=1000 + global-explicit cap=2048 → global tier. */
+    mqvpn_reorder_config_default(&cfg);
+    cfg.has_explicit_cap = 1;
+    cfg.cap_packets_per_flow = 2048;
+    cfg.n_rules = 1;
+    cfg.rules[0].profile = MQVPN_RPROF_FIBER_LTE;
+    cfg.rules[0].explicit_cap = 1000; /* non-pow2, parser would reject; bypass */
+    mqvpn_reorder_config_finalize(&cfg);
+    ASSERT_EQ_INT(cfg.rules[0].resolved_cap, 2048,
+                  "bad rule cap falls through to global tier");
+
+    /* (ii) invalid explicit_cap=1000 + NO global-explicit + fiber_lte → preset. */
+    mqvpn_reorder_config_default(&cfg);
+    cfg.n_rules = 1;
+    cfg.rules[0].profile = MQVPN_RPROF_FIBER_LTE;
+    cfg.rules[0].explicit_cap = 1000;
+    mqvpn_reorder_config_finalize(&cfg);
+    ASSERT_EQ_INT(cfg.rules[0].resolved_cap, 2048,
+                  "bad rule cap falls through to preset tier");
+}
+
 int
 main(void)
 {
@@ -817,6 +888,10 @@ main(void)
 
     /* Chunk 1: profile→preset helper */
     test_profile_preset();
+
+    /* Task 2.2: finalize precedence + cap pow2 defense */
+    test_param_precedence();
+    test_resolved_cap_pow2();
 
     fprintf(stderr, "test_reorder_config: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
