@@ -681,6 +681,52 @@ test_bridge_ini_reaches_libmqvpn_config(void)
     mqvpn_config_free(lib);
 }
 
+/* ──────────────────── Chunk 1: profile→preset helper ─────────────────────── */
+
+static void
+test_profile_preset(void)
+{
+    uint32_t wait_ms = 0, cap = 0;
+
+    /* quic_bulk & cellular_bond → 50 / 1024 */
+    wait_ms = 0;
+    cap = 0;
+    ASSERT_EQ_INT(mqvpn_reorder_profile_preset(MQVPN_RPROF_QUIC_BULK, &wait_ms, &cap), 1,
+                  "quic_bulk has preset");
+    ASSERT_EQ_INT(wait_ms, 50, "quic_bulk wait");
+    ASSERT_EQ_INT(cap, 1024, "quic_bulk cap");
+
+    wait_ms = 0;
+    cap = 0;
+    ASSERT_EQ_INT(mqvpn_reorder_profile_preset(MQVPN_RPROF_CELLULAR_BOND, &wait_ms, &cap),
+                  1, "cellular_bond has preset");
+    ASSERT_EQ_INT(wait_ms, 50, "cellular_bond wait");
+    ASSERT_EQ_INT(cap, 1024, "cellular_bond cap");
+
+    /* fiber_lte → 50 / 2048 */
+    wait_ms = 0;
+    cap = 0;
+    ASSERT_EQ_INT(mqvpn_reorder_profile_preset(MQVPN_RPROF_FIBER_LTE, &wait_ms, &cap), 1,
+                  "fiber_lte has preset");
+    ASSERT_EQ_INT(wait_ms, 50, "fiber_lte wait");
+    ASSERT_EQ_INT(cap, 2048, "fiber_lte cap");
+
+    /* low_latency & default_udp → return 0, outputs untouched */
+    wait_ms = 7;
+    cap = 9;
+    ASSERT_EQ_INT(mqvpn_reorder_profile_preset(MQVPN_RPROF_LOW_LATENCY, &wait_ms, &cap),
+                  0, "low_latency no preset");
+    ASSERT_EQ_INT(wait_ms, 7, "low_latency wait untouched");
+    ASSERT_EQ_INT(cap, 9, "low_latency cap untouched");
+
+    wait_ms = 7;
+    cap = 9;
+    ASSERT_EQ_INT(mqvpn_reorder_profile_preset(MQVPN_RPROF_DEFAULT_UDP, &wait_ms, &cap),
+                  0, "default_udp no preset");
+    ASSERT_EQ_INT(wait_ms, 7, "default_udp wait untouched");
+    ASSERT_EQ_INT(cap, 9, "default_udp cap untouched");
+}
+
 int
 main(void)
 {
@@ -714,6 +760,9 @@ main(void)
 
     /* Bridge: INI → file_cfg → libmqvpn config (apply_reorder translation) */
     test_bridge_ini_reaches_libmqvpn_config();
+
+    /* Chunk 1: profile→preset helper */
+    test_profile_preset();
 
     fprintf(stderr, "test_reorder_config: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

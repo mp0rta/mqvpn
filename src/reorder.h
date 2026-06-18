@@ -346,6 +346,27 @@ typedef struct {
     mqvpn_reorder_profile_t profile;
 } mqvpn_reorder_rule_t;
 
+/* Map a profile to its (wait_ms, cap) preset. Returns 1 and writes both outputs
+ * when the profile carries a preset; returns 0 and leaves outputs untouched for
+ * profiles with no preset (low_latency / default_udp). */
+static inline int
+mqvpn_reorder_profile_preset(mqvpn_reorder_profile_t profile, uint32_t *wait_ms,
+                             uint32_t *cap)
+{
+    switch (profile) {
+    case MQVPN_RPROF_QUIC_BULK:
+    case MQVPN_RPROF_CELLULAR_BOND:
+        *wait_ms = 50;
+        *cap = 1024;
+        return 1;
+    case MQVPN_RPROF_FIBER_LTE:
+        *wait_ms = 50;
+        *cap = 2048;
+        return 1;
+    default: return 0; /* low_latency / default_udp: no preset */
+    }
+}
+
 typedef struct {
     mqvpn_reorder_mode_t mode; /* master gate (§16.2 enabled) */
 
