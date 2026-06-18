@@ -525,7 +525,7 @@ test_ini_rule_out_of_range_keeps_defaults(void)
  * The JSON loader (mqvpn_config_load_json_filecfg) must populate
  * file_cfg.reorder identically to the INI parser, reusing the same value
  * mappers (parse_reorder_enabled/proto/profile). JSON keys are snake_case;
- * the reorder object holds the 13 scalar knobs and "reorder_rules" is an array
+ * the reorder object holds the flat scalar knobs and "reorder_rules" is an array
  * of {proto, port, profile} objects. */
 
 static void
@@ -625,6 +625,68 @@ test_json_reorder_absent(void)
     ASSERT_EQ_INT(cfg.reorder.mode, MQVPN_REORDER_OFF, "absent → OFF");
     ASSERT_EQ_INT(cfg.reorder.max_wait_ms, 30, "absent → default wait");
     ASSERT_EQ_INT(cfg.reorder.n_rules, 0, "absent → no rules");
+}
+
+/* Regression: a reorder object larger than the old 512-byte stack buffer must
+ * NOT be silently dropped. The object below — every scalar key, with generous
+ * indentation/whitespace — measures ~720 bytes (well over 512). Before the
+ * span-based bound (json_object_end), the whole object was ignored and the
+ * scalars/has_explicit_* flags stayed at defaults. The sibling reorder_rules
+ * array carries its OWN max_wait_ms (77) that must NOT leak into the global
+ * has_explicit_wait/max_wait_ms — proving the bound still stops at the object's
+ * closing brace. */
+static void
+test_json_reorder_large_object_not_dropped(void)
+{
+    const char *json =
+        "{\n"
+        "  \"mode\"            : \"client\",\n"
+        "  \"reorder\"        : {\n"
+        "      \"enabled\"                 : \"on\"        ,\n"
+        "      \"max_wait_ms\"             : 44          ,\n"
+        "      \"cap_packets\"             : 4096        ,\n"
+        "      \"max_bytes_per_flow\"      : 3145728     ,\n"
+        "      \"classify_window\"         : 96          ,\n"
+        "      \"ack_demote_max_large\"    : 4           ,\n"
+        "      \"small_packet_threshold\"  : 220         ,\n"
+        "      \"reset_mark_packets\"      : 6           ,\n"
+        "      \"reset_idle_grace_ms\"     : 9000        ,\n"
+        "      \"max_flows\"               : 32768       ,\n"
+        "      \"global_max_bytes\"        : 134217728   ,\n"
+        "      \"ingress_idle_sec\"        : 25          ,\n"
+        "      \"egress_idle_sec\"         : 250\n"
+        "  },\n"
+        "  \"reorder_rules\"  : [\n"
+        "      { \"proto\": \"udp\", \"port\": 4433, \"profile\": \"quic_bulk\","
+        " \"max_wait_ms\": 77 }\n"
+        "  ]\n"
+        "}\n";
+    /* Pin the >512 precondition so the regression can't be neutered by a future
+     * whitespace trim that shrinks the object back under the old cliff. */
+    const char *ro = strstr(json, "\"reorder\"");
+    const char *brace = ro ? strchr(ro, '{') : NULL;
+    const char *close = brace ? strchr(brace, '}') : NULL;
+    ASSERT_TRUE(close && (size_t)(close - brace + 1) > 512,
+                "test reorder object exceeds 512 bytes");
+
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load_json_filecfg(&cfg, json);
+
+    ASSERT_EQ_INT(rc, 0, "json parse ok");
+    /* Global scalars must be parsed, NOT silently dropped. */
+    ASSERT_EQ_INT(cfg.reorder.mode, MQVPN_REORDER_ON, "large obj: enabled parsed");
+    ASSERT_EQ_INT(cfg.reorder.max_wait_ms, 44, "large obj: max_wait_ms parsed");
+    ASSERT_EQ_INT(cfg.reorder.has_explicit_wait, 1, "large obj: has_explicit_wait set");
+    ASSERT_EQ_INT(cfg.reorder.cap_packets_per_flow, 4096, "large obj: cap parsed");
+    ASSERT_EQ_INT(cfg.reorder.has_explicit_cap, 1, "large obj: has_explicit_cap set");
+    ASSERT_EQ_INT(cfg.reorder.egress_idle_timeout_sec, 250,
+                  "large obj: last scalar parsed");
+    /* Bounding still works: the sibling rule's max_wait_ms (77) did not bleed
+     * into the global max_wait_ms (44). */
+    ASSERT_TRUE(cfg.reorder.max_wait_ms != 77, "sibling rule max_wait_ms did not leak");
+    ASSERT_EQ_INT(cfg.reorder.n_rules, 1, "rule parsed");
+    ASSERT_EQ_INT(cfg.reorder.rules[0].explicit_wait_ms, 77, "rule's own max_wait_ms");
 }
 
 /* JSON and INI must produce an identical mqvpn_reorder_config_t for equivalent
@@ -1083,6 +1145,7 @@ main(void)
     test_json_reorder_enabled_mapping();
     test_json_reorder_rules_over_cap();
     test_json_reorder_absent();
+    test_json_reorder_large_object_not_dropped();
     test_json_ini_parity();
 
     /* Bridge: INI → file_cfg → libmqvpn config (apply_reorder translation) */
