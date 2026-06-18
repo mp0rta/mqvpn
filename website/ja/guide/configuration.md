@@ -196,16 +196,21 @@ sudo mqvpn --config /etc/mqvpn/server.json
 
 ACK 方向のデモートは自動です。ACK / 制御ストリームのように見える（ほとんどが小さいパケットの）フローはパススルーへ移され、遅延されることがなくなります。これは内部的な挙動であり設定可能なつまみではありません — `ClassifyWindow` / `AckDemoteMaxLarge` / `SmallPacketThreshold` を通じて間接的に調整します。
 
-ポートごとのプロファイルは、繰り返し指定できる `[ReorderRule]` セクションで設定します:
+reorder はスループットとレイテンシのトレードオフで、bulk 転送には効きますが、対象になるすべてのフローに最大 `MaxWaitMs` の遅延を上乗せします。1 本のトンネルは通常その両方のトラフィックを運ぶため、ポート単位の `[ReorderRule]` で、効く所（bulk な内側 QUIC）だけ有効にし、低遅延トラフィック（DNS, NTP, リアルタイム UDP）はパススルーさせられます。マッチしない UDP はデフォルトでパススルーなので、reorder したいポートだけルールを書けば済みます:
 
 ```ini
 [Reorder]
 Enabled = on
 
-[ReorderRule]
+[ReorderRule]          # bulk な内側 QUIC: reorder 有効
 Proto = udp
 Port = 443
-Profile = quic_bulk
+Profile = fiber_lte
+
+[ReorderRule]          # DNS: 遅延を絶対に足さない
+Proto = udp
+Port = 53
+Profile = default_udp
 ```
 
 …または JSON でも同様に設定できます。`reorder` オブジェクトは上記 INI キーに 1:1 で対応する snake_case キーを使い、`reorder_rules` は `{proto, port, profile}` オブジェクトの配列です（各ルールには任意で `max_wait_ms` / `cap_packets` のオーバーライドを付けられます）:
