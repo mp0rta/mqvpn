@@ -395,6 +395,19 @@ typedef struct {
     int n_rules;
 } mqvpn_reorder_config_t;
 
+/* First rule whose proto matches and port == src or dst; NULL if none. Shared by
+ * TX (eligibility) and RX (per-flow wait/cap) so the match is identical. */
+static inline const mqvpn_reorder_rule_t *
+mqvpn_reorder_match_rule(const mqvpn_reorder_config_t *cfg, const mqvpn_flow_key_t *key)
+{
+    for (int i = 0; i < cfg->n_rules; i++) {
+        const mqvpn_reorder_rule_t *r = &cfg->rules[i];
+        if (r->proto != key->proto) continue;
+        if (r->port == key->src_port || r->port == key->dst_port) return r;
+    }
+    return NULL;
+}
+
 /* ─────────────────────────── §17: RX statistics ───────────────────────────
  *
  * Per-flow receiver counters (§17). Lives here (not in reorder_rx.c) so the RX

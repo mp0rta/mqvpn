@@ -143,6 +143,48 @@ test_tx_eligibility_unknown_ineligible(void)
 }
 
 static void
+test_tx_eligibility_preset_profiles(void)
+{
+    /* cellular_bond and fiber_lte carry presets → matching flows are eligible;
+     * default_udp and low_latency carry no preset → RAW. */
+    mqvpn_reorder_config_t c = base_cfg();
+    c.rules[0].port = 443;
+    c.rules[0].profile = MQVPN_RPROF_CELLULAR_BOND;
+    c.rules[1].proto = 17;
+    c.rules[1].port = 8443;
+    c.rules[1].profile = MQVPN_RPROF_FIBER_LTE;
+    c.rules[2].proto = 17;
+    c.rules[2].port = 5000;
+    c.rules[2].profile = MQVPN_RPROF_DEFAULT_UDP;
+    c.rules[3].proto = 17;
+    c.rules[3].port = 6000;
+    c.rules[3].profile = MQVPN_RPROF_LOW_LATENCY;
+    c.n_rules = 4;
+
+    mqvpn_reorder_tx_t *tx = mqvpn_reorder_tx_new(&c, 0x1);
+    uint8_t pkt[256];
+    mqvpn_reorder_tx_peek_t p;
+
+    size_t n = build_v4_udp(pkt, 5001, 443, 100);
+    ASSERT_EQ_INT(mqvpn_reorder_tx_peek(tx, pkt, n, 1, 1400, &p), MQVPN_REORDER_TX_STAMP,
+                  "cellular_bond eligible");
+
+    n = build_v4_udp(pkt, 5002, 8443, 100);
+    ASSERT_EQ_INT(mqvpn_reorder_tx_peek(tx, pkt, n, 1, 1400, &p), MQVPN_REORDER_TX_STAMP,
+                  "fiber_lte eligible");
+
+    n = build_v4_udp(pkt, 5003, 5000, 100);
+    ASSERT_EQ_INT(mqvpn_reorder_tx_peek(tx, pkt, n, 1, 1400, &p), MQVPN_REORDER_TX_RAW,
+                  "default_udp ineligible -> RAW");
+
+    n = build_v4_udp(pkt, 5004, 6000, 100);
+    ASSERT_EQ_INT(mqvpn_reorder_tx_peek(tx, pkt, n, 1, 1400, &p), MQVPN_REORDER_TX_RAW,
+                  "low_latency ineligible -> RAW");
+
+    mqvpn_reorder_tx_free(tx);
+}
+
+static void
 test_tx_evict_only_idle(void)
 {
     mqvpn_reorder_config_t c = base_cfg();
@@ -342,6 +384,7 @@ main(void)
     test_tx_eligibility_443_bidir();
     test_tx_eligibility_dns_ineligible();
     test_tx_eligibility_unknown_ineligible();
+    test_tx_eligibility_preset_profiles();
     test_tx_evict_only_idle();
     test_tx_evict_backwards_clock_no_evict();
 
