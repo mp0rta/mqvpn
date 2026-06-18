@@ -418,6 +418,13 @@ mqvpn_reorder_match_rule(const mqvpn_reorder_config_t *cfg, const mqvpn_flow_key
     return NULL;
 }
 
+/* A per-flow ring cap must be a non-zero power of two (ring index masking). */
+static inline int
+mqvpn_reorder_cap_is_valid(uint32_t cap)
+{
+    return cap != 0 && (cap & (cap - 1)) == 0;
+}
+
 /* Resolve each rule's effective (wait,cap): rule-explicit > global-explicit >
  * profile-preset > builtin. Idempotent. Run AFTER full config parse (rule- and
  * global-explicit arrive in separate sections). Tiers 2 & 4 intentionally read
@@ -446,14 +453,14 @@ mqvpn_reorder_config_finalize(mqvpn_reorder_config_t *cfg)
          * so precedence falls through correctly (global-explicit > preset >
          * builtin) instead of skipping the global tier. */
         uint32_t rcap = r->explicit_cap;
-        if (rcap == 0 || (rcap & (rcap - 1))) rcap = 0;
+        if (!mqvpn_reorder_cap_is_valid(rcap)) rcap = 0;
         uint32_t cap = rcap                    ? rcap
                        : cfg->has_explicit_cap ? cfg->cap_packets_per_flow
                        : has_preset            ? pc
                                                : cfg->cap_packets_per_flow;
         /* Defensive: chosen tier should already be pow2 (global cap is validated
          * pre-finalize; presets are pow2). Clamp the impossible case to builtin. */
-        if (cap == 0 || (cap & (cap - 1))) cap = 1024;
+        if (!mqvpn_reorder_cap_is_valid(cap)) cap = 1024;
         r->resolved_cap = cap;
     }
 }
@@ -543,8 +550,7 @@ mqvpn_reorder_config_validate(const mqvpn_reorder_config_t *cfg)
     if (cfg->ingress_idle_timeout_sec >= cfg->egress_idle_timeout_sec) {
         return -1;
     }
-    uint32_t cap = cfg->cap_packets_per_flow;
-    if (!(cap && !(cap & (cap - 1)))) {
+    if (!mqvpn_reorder_cap_is_valid(cfg->cap_packets_per_flow)) {
         return -1;
     }
     return 0;

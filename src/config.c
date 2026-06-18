@@ -480,7 +480,7 @@ json_read_reorder_rules(mqvpn_file_config_t *cfg, const char *p)
                 uint64_t cv = 0;
                 if (json_read_u64_strict(cap_v, &cv) != 0 || cv > 0xffffffffULL)
                     LOG_WRN("JSON: invalid reorder rule cap_packets; ignoring");
-                else if (cv == 0 || (cv & (cv - 1)))
+                else if (!mqvpn_reorder_cap_is_valid((uint32_t)cv))
                     LOG_WRN("JSON: reorder rule cap_packets must be a non-zero power "
                             "of two; ignoring");
                 else
@@ -763,7 +763,7 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
             if (parse_u32_strict(val, &v) < 0)
                 LOG_WRN("%s:%d: invalid [ReorderRule] CapPackets '%s'", path, lineno,
                         val);
-            else if (v == 0 || (v & (v - 1)))
+            else if (!mqvpn_reorder_cap_is_valid(v))
                 LOG_WRN("%s:%d: [ReorderRule] CapPackets '%s' must be a non-zero power "
                         "of two; ignoring",
                         path, lineno, val);
