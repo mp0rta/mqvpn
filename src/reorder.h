@@ -344,6 +344,10 @@ typedef struct {
     uint8_t proto; /* L4 protocol (UDP = 17) */
     uint16_t port; /* matched against src or dst (host order) */
     mqvpn_reorder_profile_t profile;
+    uint32_t explicit_wait_ms; /* per-rule override; 0 = unset */
+    uint32_t explicit_cap;     /* per-rule override; 0 = unset */
+    uint32_t resolved_wait_ms; /* filled by finalize */
+    uint32_t resolved_cap;     /* filled by finalize */
 } mqvpn_reorder_rule_t;
 
 /* Map a profile to its (wait_ms, cap) preset. Returns 1 and writes both outputs
@@ -390,6 +394,12 @@ typedef struct {
 
     /* internal/test knob — not exposed via any public setter */
     int eval_force_no_demotion;
+
+    /* per-rule param resolution: set when a global MaxWaitMs/CapPackets was
+     * explicitly provided, letting that global value punch through a profile
+     * preset (tier 2 precedence in mqvpn_reorder_config_finalize). */
+    uint8_t has_explicit_wait;
+    uint8_t has_explicit_cap;
 
     mqvpn_reorder_rule_t rules[MQVPN_REORDER_MAX_RULES];
     int n_rules;
@@ -476,6 +486,8 @@ mqvpn_reorder_config_default(mqvpn_reorder_config_t *cfg)
     cfg->ingress_idle_timeout_sec = 30;
     cfg->egress_idle_timeout_sec = 300;
     cfg->eval_force_no_demotion = 0;
+    cfg->has_explicit_wait = 0;
+    cfg->has_explicit_cap = 0;
     cfg->n_rules = 0;
 }
 
