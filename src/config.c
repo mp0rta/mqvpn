@@ -392,6 +392,13 @@ reorder_rule_begin(mqvpn_file_config_t *cfg, int lineno, const char *path)
     r->proto = MQVPN_IPPROTO_UDP; /* v1 default: UDP */
     r->port = 0;                  /* match-any until Port= sets it */
     r->profile = MQVPN_RPROF_QUIC_BULK;
+    /* Explicitly zero the per-rule param fields (= unset): finalize's precedence
+     * depends on them being 0. Don't rely on a prior whole-struct memset
+     * surviving into a reused config. */
+    r->explicit_wait_ms = 0;
+    r->explicit_cap = 0;
+    r->resolved_wait_ms = 0;
+    r->resolved_cap = 0;
     cfg->reorder.n_rules++;
     return 0;
 }
