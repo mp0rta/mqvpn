@@ -20,6 +20,9 @@
  */
 #include "reorder_rx.c" /* pulls in static ring + process internals */
 
+#include "libmqvpn.h" /* Chunk 3: composed builder bridge (config_new/add_rule/apply) */
+#include "mqvpn_internal.h" /* struct mqvpn_config_s: read the embedded .reorder out */
+
 #include <stdio.h>
 #include <string.h>
 
@@ -1298,6 +1301,226 @@ test_rx_eval_force_no_demotion(void)
     mqvpn_reorder_rx_free(rx);
 }
 
+/* ─────────── Chunk 3: per-rule wait/cap resolution at the RX engine ─────────
+ *
+ * The RX engine must resolve a new flow's (wait,cap) from the matching rule
+ * (after mqvpn_reorder_config_finalize, which rx_new now runs), falling back to
+ * the global max_wait_ms / cap_packets_per_flow when no rule matches. The
+ * wait==0 pass-through decision is now PER-FLOW, not a single global gate. */
+
+static void
+test_rx_perrule_wait_cap_from_fiber_lte(void)
+{
+    /* (a) a fiber_lte rule for the flow's port → new RX flow inherits the preset
+     * wait_ms==50, ring cap==2048. A flow with NO matching rule (different port)
+     * falls back to the global max_wait_ms / cap_packets_per_flow. */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.max_wait_ms = 30;            /* global default */
+    c.cap_packets_per_flow = 1024; /* global default */
+    /* fiber_lte rule on UDP port 443. */
+    c.rules[0].proto = MQVPN_IPPROTO_UDP;
+    c.rules[0].port = 443;
+    c.rules[0].profile = MQVPN_RPROF_FIBER_LTE;
+    c.n_rules = 1;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    ASSERT_TRUE(rx != NULL, "rx_new ok with a rule");
+    uint8_t buf[256];
+
+    /* flow on dst_port 443 → matches the fiber_lte rule. */
+    size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1);
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_TRUE(f != NULL, "matched flow created");
+    ASSERT_EQ_INT(f->wait_ms, 50, "fiber_lte preset wait_ms==50");
+    ASSERT_EQ_INT(f->buffer.cap, 2048, "fiber_lte preset ring cap==2048");
+
+    /* a second flow on a NON-matching port (1234) → global fallback. */
+    n = build_reorder_dgram(buf, 0, 0, 1, 6000, 1234, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 2);
+    mqvpn_reorder_flow_t *g = NULL;
+    for (uint32_t i = 0; i < rx->n_buckets; i++) {
+        for (mqvpn_reorder_flow_t *p = rx->buckets[i]; p; p = p->next) {
+            if (p != f) g = p;
+        }
+    }
+    ASSERT_TRUE(g != NULL, "unmatched flow created");
+    ASSERT_EQ_INT(g->wait_ms, 30, "unmatched flow gets global wait_ms");
+    ASSERT_EQ_INT(g->buffer.cap, 1024, "unmatched flow gets global cap");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_perrule_zero_global_wait_rule_buffers(void)
+{
+    /* (b) the case this rewrite protects: global max_wait_ms==0 (with
+     * has_explicit_wait so it survives finalize), AND a rule with a RULE-EXPLICIT
+     * MaxWaitMs=50 for the port. After finalize resolved_wait_ms==50, so a
+     * reordered packet for that port must be BUFFERED, not pre-empted by the old
+     * global wait==0 fast-path. */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.max_wait_ms = 0;       /* global mode-A would fire under the OLD code */
+    c.has_explicit_wait = 1; /* global 0 is explicit */
+    c.rules[0].proto = MQVPN_IPPROTO_UDP;
+    c.rules[0].port = 443;
+    c.rules[0].profile = MQVPN_RPROF_CELLULAR_BOND;
+    c.rules[0].explicit_wait_ms = 50; /* rule-explicit beats global-explicit */
+    c.n_rules = 1;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    ASSERT_TRUE(rx != NULL, "rx_new ok");
+    /* finalize ran in rx_new: rule resolves to 50. */
+    ASSERT_EQ_INT(rx->cfg.rules[0].resolved_wait_ms, 50,
+                  "rule-explicit wait survives global 0");
+    uint8_t buf[256];
+
+    /* cold-start seq 0 on port 443 → delivered, expected=1, flow created w/ wait 50. */
+    size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1);
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_TRUE(f != NULL, "flow created (NOT pre-empted by global fast-path)");
+    ASSERT_EQ_INT(f->wait_ms, 50, "flow wait_ms==50 from rule");
+    ASSERT_EQ_INT(rec.n, 1, "cold-start delivered");
+
+    /* seq 2 ahead on port 443 → BUFFERED, not delivered (reorder active). */
+    n = build_reorder_dgram(buf, 0, 2, 3, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 2);
+    ASSERT_EQ_INT(rec.n, 1, "ahead packet buffered, NOT delivered");
+    ASSERT_TRUE(f->gap_timer_active, "gap timer armed (reordering)");
+    ASSERT_EQ_INT(f->buffer.count, 1, "one buffered");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_perrule_zero_global_wait_preset_passes(void)
+{
+    /* (b2) precedence consistency: global max_wait_ms==0 (explicit) AND a
+     * fiber_lte rule with NO rule-explicit wait → global-explicit beats the preset,
+     * so resolved_wait_ms==0 → the packet is PASSED THROUGH. Both the per-flow
+     * check and flow_get_or_create must agree on 0 (here: no flow buffers it). */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.max_wait_ms = 0;
+    c.has_explicit_wait = 1;
+    c.rules[0].proto = MQVPN_IPPROTO_UDP;
+    c.rules[0].port = 443;
+    c.rules[0].profile = MQVPN_RPROF_FIBER_LTE; /* preset wait 50, but no rule-explicit */
+    c.n_rules = 1;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    ASSERT_TRUE(rx != NULL, "rx_new ok");
+    ASSERT_EQ_INT(rx->cfg.rules[0].resolved_wait_ms, 0,
+                  "global-explicit 0 beats fiber_lte preset");
+    uint8_t buf[256];
+
+    /* out-of-order packets on port 443 → pass-through, NO flow state. */
+    size_t n = build_reorder_dgram(buf, 0, 7, 1, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1);
+    n = build_reorder_dgram(buf, 0, 2, 2, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 2);
+    ASSERT_EQ_INT(rec.n, 2, "both delivered immediately (per-flow wait==0)");
+    ASSERT_EQ_INT(rec.tags[0], 1, "arrival order preserved (1)");
+    ASSERT_EQ_INT(rec.tags[1], 2, "arrival order preserved (2)");
+    ASSERT_TRUE(only_flow(rx) == NULL, "no flow state created (mode A per-flow)");
+    ASSERT_EQ_INT((long long)rx->n_flows, 0, "n_flows == 0");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_perrule_default_udp_passes_through(void)
+{
+    /* default_udp is the OFF class: a matched flow must PASS THROUGH on RX even
+     * though the global builtin wait (30) is non-zero and not explicitly set.
+     * Before the finalize fix, default_udp fell through to the builtin wait and
+     * RX would buffer reordered packets / create flow state. Mirrors TX, which
+     * never stamps a default_udp-matched packet. */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg(); /* mode ON, global max_wait_ms==30 (builtin) */
+    c.rules[0].proto = MQVPN_IPPROTO_UDP;
+    c.rules[0].port = 443;
+    c.rules[0].profile = MQVPN_RPROF_DEFAULT_UDP;
+    c.n_rules = 1;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    ASSERT_TRUE(rx != NULL, "rx_new ok");
+    ASSERT_EQ_INT(rx->cfg.rules[0].resolved_wait_ms, 0,
+                  "default_udp resolves to 0 (OFF) despite builtin global wait");
+    uint8_t buf[256];
+
+    /* reordered packets on port 443 → pass-through, NO flow state buffered. */
+    size_t n = build_reorder_dgram(buf, 0, 7, 1, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1);
+    n = build_reorder_dgram(buf, 0, 2, 2, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 2);
+    ASSERT_EQ_INT(rec.n, 2, "both delivered immediately (default_udp OFF)");
+    ASSERT_EQ_INT(rec.tags[0], 1, "arrival order preserved (1)");
+    ASSERT_EQ_INT(rec.tags[1], 2, "arrival order preserved (2)");
+    ASSERT_TRUE(only_flow(rx) == NULL, "no flow state created (default_udp OFF)");
+    ASSERT_EQ_INT((long long)rx->n_flows, 0, "n_flows == 0");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_perrule_mode_a_preserved_no_rules(void)
+{
+    /* (b3) the global mode-A short-circuit stays green: max_wait_ms==0 with
+     * n_rules==0 → global pass-through, no flow state, no 5-tuple parse needed. */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c;
+    mqvpn_reorder_config_default(&c);
+    c.mode = MQVPN_REORDER_ON;
+    c.max_wait_ms = 0;
+    c.n_rules = 0;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+
+    size_t n = build_reorder_dgram(buf, 0, 9, 1, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1);
+    n = build_reorder_dgram(buf, 0, 3, 2, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 2);
+    ASSERT_EQ_INT(rec.n, 2, "global mode-A delivers immediately");
+    ASSERT_TRUE(only_flow(rx) == NULL, "no flow state (global mode A)");
+    ASSERT_EQ_INT((long long)rx->n_flows, 0, "n_flows == 0 (global mode A)");
+    mqvpn_reorder_rx_free(rx);
+}
+
+/* Step 4: composed builder end-to-end. Drive the PUBLIC builder API
+ * (mqvpn_config_new + mqvpn_config_add_reorder_rule), bridge the embedded
+ * reorder config into a lib reorder cfg, hand it to rx_new, and assert the
+ * created flow inherits the cellular_bond preset (wait 50, cap 1024). */
+static void
+test_rx_builder_composed_cellular_bond(void)
+{
+    recorder_t rec = {0};
+    mqvpn_config_t *bcfg = mqvpn_config_new();
+    ASSERT_TRUE(bcfg != NULL, "config_new");
+    ASSERT_EQ_INT(mqvpn_config_set_reorder_enabled(bcfg, MQVPN_REORDER_ON), MQVPN_OK,
+                  "enable reorder");
+    /* cellular_bond rule on UDP port 4500. */
+    ASSERT_EQ_INT(mqvpn_config_add_reorder_rule(bcfg, MQVPN_IPPROTO_UDP, 4500,
+                                                MQVPN_RPROF_CELLULAR_BOND),
+                  MQVPN_OK, "add cellular_bond rule");
+
+    /* Bridge the embedded reorder config OUT into a standalone lib cfg. The
+     * struct is visible here via mqvpn_internal.h. */
+    mqvpn_reorder_config_t lib = bcfg->reorder;
+    /* big classify window so demotion never fires in this part-A test. */
+    lib.classify_window = 60000;
+
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&lib, 0x1, mock_deliver, &rec);
+    ASSERT_TRUE(rx != NULL, "rx_new from builder-bridged cfg");
+    uint8_t buf[256];
+
+    /* a REORDERED packet on port 4500 → flow inherits cellular_bond preset. */
+    size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 4500, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1);
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_TRUE(f != NULL, "flow created on port 4500");
+    ASSERT_EQ_INT(f->wait_ms, 50, "cellular_bond preset wait_ms==50");
+    ASSERT_EQ_INT(f->buffer.cap, 1024, "cellular_bond preset cap==1024");
+
+    mqvpn_reorder_rx_free(rx);
+    mqvpn_config_free(bcfg);
+}
+
 /* ─────────── Task 3.6: stats snapshot + accounting identity ─────────── */
 
 static void
@@ -1665,6 +1888,14 @@ main(void)
     test_rx_passthrough_A_no_state();
     test_rx_passthrough_B_undemote_on_reset();
     test_rx_eval_force_no_demotion();
+
+    /* Chunk 3: per-rule wait/cap resolution + per-flow zero-wait */
+    test_rx_perrule_wait_cap_from_fiber_lte();
+    test_rx_perrule_zero_global_wait_rule_buffers();
+    test_rx_perrule_zero_global_wait_preset_passes();
+    test_rx_perrule_default_udp_passes_through();
+    test_rx_perrule_mode_a_preserved_no_rules();
+    test_rx_builder_composed_cellular_bond();
 
     /* Task 3.6: stats snapshot + accounting identity (+ double-flush hardening) */
     test_rx_accounting_identity();

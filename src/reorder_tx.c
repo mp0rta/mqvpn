@@ -85,22 +85,15 @@ mqvpn_reorder_tx_free(mqvpn_reorder_tx_t *tx)
 }
 
 /* §15.1: eligibility is port/proto rule only, evaluated bidirectionally (src OR
- * dst port match), cached at flow creation. Only QUIC_BULK → eligible. */
+ * dst port match), cached at flow creation. A flow is eligible iff the first
+ * matching rule's profile carries a reorder preset (shared matcher + preset
+ * helper keep TX/RX in lockstep). */
 static uint8_t
 compute_eligible(const mqvpn_reorder_config_t *cfg, const mqvpn_flow_key_t *key)
 {
-    for (int i = 0; i < cfg->n_rules; i++) {
-        const mqvpn_reorder_rule_t *r = &cfg->rules[i];
-        if (r->proto != key->proto) {
-            continue;
-        }
-        if (r->port == key->src_port || r->port == key->dst_port) {
-            /* First matching rule wins; only quic_bulk enables reorder. */
-            return r->profile == MQVPN_RPROF_QUIC_BULK ? 1u : 0u;
-        }
-    }
-    /* No matching rule → default_udp → ineligible in v1 (§15.1). */
-    return 0;
+    const mqvpn_reorder_rule_t *r = mqvpn_reorder_match_rule(cfg, key);
+    uint32_t w, c;
+    return (r && mqvpn_reorder_profile_preset(r->profile, &w, &c)) ? 1u : 0u;
 }
 
 static mqvpn_send_flow_t *

@@ -404,8 +404,17 @@ flow_get_or_create(mqvpn_reorder_rx_t *rx, const mqvpn_flow_key_t *key)
     }
     f->key = *key;
     f->initialized = 0;
-    ring_init(&f->buffer, rx->cfg.cap_packets_per_flow);
-    f->wait_ms = rx->cfg.max_wait_ms;
+    /* Per-rule (wait,cap): resolve from the SAME matcher the wait==0 pass-through
+     * check uses, so the two never disagree. resolved_* are filled by
+     * mqvpn_reorder_config_finalize in rx_new; fall back to the global config when
+     * no rule matches. */
+    {
+        const mqvpn_reorder_rule_t *r = mqvpn_reorder_match_rule(&rx->cfg, key);
+        uint32_t cap = r ? r->resolved_cap : rx->cfg.cap_packets_per_flow;
+        uint32_t wait_ms = r ? r->resolved_wait_ms : rx->cfg.max_wait_ms;
+        ring_init(&f->buffer, cap);
+        f->wait_ms = wait_ms;
+    }
     f->next = rx->buckets[idx];
     rx->buckets[idx] = f;
     rx->n_flows++;
@@ -1033,6 +1042,13 @@ mqvpn_reorder_rx_new(const mqvpn_reorder_config_t *cfg, uint64_t hash_seed,
         return NULL;
     }
     rx->cfg = *cfg;
+    /* Resolve each rule's effective (wait,cap) AFTER the global validate above and
+     * the cfg copy. validate is global-only and runs pre-finalize (it would see
+     * resolved_cap==0 otherwise); finalize fills resolved_wait_ms/resolved_cap with
+     * rule-explicit > global-explicit > preset > builtin precedence. This is the
+     * single production finalize site — rx_new is always built (INI/JSON/builder
+     * all flow through here), so per-flow resolution below can rely on it. */
+    mqvpn_reorder_config_finalize(&rx->cfg);
     rx->hash_seed = hash_seed;
     rx->deliver = deliver;
     rx->deliver_ctx = deliver_ctx;
@@ -1081,21 +1097,40 @@ mqvpn_reorder_rx_on_packet(mqvpn_reorder_rx_t *rx, const uint8_t *payload, size_
         return; /* nothing to deliver / oversized */
     }
 
-    /* §11.5 mode A (policy wait_ms == 0): complete pass-through with NO flow
-     * state. The receiver never looks at seq, FLOW_RESET, or the classifier — it
-     * delivers the inner packet immediately. Distinct from mode B (runtime ACK
-     * demotion), which keeps a flow struct. v1 wait is the fixed cfg.max_wait_ms,
-     * so wait_ms == 0 is decided once here, before any flow is created. */
-    if (rx->cfg.max_wait_ms == 0) {
+    /* §11.5 mode A: wait==0 → immediate pass-through, no flow state. Under
+     * per-rule profiles this is a per-flow decision (a global MaxWaitMs=0 must
+     * NOT pre-empt a rule whose resolved wait is non-zero). Keep the cheap
+     * global short-circuit only when there are no rules to consult. */
+    if (rx->cfg.max_wait_ms == 0 && rx->cfg.n_rules == 0) {
         rx->deliver(inner, inner_len, rx->deliver_ctx);
         return;
     }
 
-    /* §6: flow key is the inner-IP 5-tuple. If the inner packet is not a
-     * parseable UDP 5-tuple it should not have been stamped REORDERED; drop. */
+    /* §6: flow key is the inner-IP 5-tuple. Parsed ONCE here and threaded through
+     * to the per-flow wait decision AND flow_get_or_create (no double-parse). If
+     * the inner packet is not a parseable UDP 5-tuple it should not have been
+     * stamped REORDERED; drop.
+     *
+     * Behavior delta (intended, not a regression): with n_rules>0 and global
+     * wait==0, a packet that fails this parse is now dropped here rather than
+     * delivered by the old global short-circuit. An unparseable inner packet
+     * should never have been REORDERED-stamped, so this is correct. */
     mqvpn_flow_key_t key;
     if (mqvpn_reorder_parse_5tuple(inner, inner_len, &key) != 0) {
         return;
+    }
+
+    /* §11.5 mode A, per-flow: resolve the effective wait from the matching rule
+     * (resolved_wait_ms, filled by finalize in rx_new) or the global default, and
+     * pass through immediately when it is 0 — consistent with the cap/wait
+     * flow_get_or_create resolves below for non-zero waits. */
+    {
+        const mqvpn_reorder_rule_t *r = mqvpn_reorder_match_rule(&rx->cfg, &key);
+        uint32_t wait_ms = r ? r->resolved_wait_ms : rx->cfg.max_wait_ms;
+        if (wait_ms == 0) {
+            rx->deliver(inner, inner_len, rx->deliver_ctx);
+            return;
+        }
     }
 
     mqvpn_reorder_flow_t *f = flow_get_or_create(rx, &key);

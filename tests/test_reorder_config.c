@@ -365,6 +365,58 @@ test_ini_reorder_rules(void)
 }
 
 static void
+test_ini_reorder_profile_names(void)
+{
+    /* cellular_bond / fiber_lte profile names parse into the new enum values. */
+    const char *ini = "[Reorder]\n"
+                      "Enabled = on\n"
+                      "[ReorderRule]\n"
+                      "Proto = udp\n"
+                      "Port = 443\n"
+                      "Profile = cellular_bond\n"
+                      "[ReorderRule]\n"
+                      "Proto = udp\n"
+                      "Port = 8443\n"
+                      "Profile = fiber_lte\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    if (path) unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "parse ok");
+    ASSERT_EQ_INT(cfg.reorder.n_rules, 2, "two rules");
+    ASSERT_EQ_INT(cfg.reorder.rules[0].port, 443, "rule0 port 443");
+    ASSERT_EQ_INT(cfg.reorder.rules[0].profile, MQVPN_RPROF_CELLULAR_BOND,
+                  "rule0 cellular_bond");
+    ASSERT_EQ_INT(cfg.reorder.rules[1].port, 8443, "rule1 port 8443");
+    ASSERT_EQ_INT(cfg.reorder.rules[1].profile, MQVPN_RPROF_FIBER_LTE, "rule1 fiber_lte");
+}
+
+static void
+test_ini_reorder_invalid_profile_keeps_quic_bulk(void)
+{
+    /* A typo'd profile name warns (no hard error) and the rule keeps its
+     * begin-time default MQVPN_RPROF_QUIC_BULK (still reorder-eligible). */
+    const char *ini = "[Reorder]\n"
+                      "Enabled = on\n"
+                      "[ReorderRule]\n"
+                      "Proto = udp\n"
+                      "Port = 443\n"
+                      "Profile = celluar_bond\n"; /* typo */
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    if (path) unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "parse ok despite typo profile");
+    ASSERT_EQ_INT(cfg.reorder.n_rules, 1, "rule still added");
+    ASSERT_EQ_INT(cfg.reorder.rules[0].profile, MQVPN_RPROF_QUIC_BULK,
+                  "typo keeps QUIC_BULK default");
+}
+
+static void
 test_ini_unknown_key_warns_no_fail(void)
 {
     /* Unknown keys in [Reorder] / [ReorderRule] warn but do not fail (forward
@@ -473,7 +525,7 @@ test_ini_rule_out_of_range_keeps_defaults(void)
  * The JSON loader (mqvpn_config_load_json_filecfg) must populate
  * file_cfg.reorder identically to the INI parser, reusing the same value
  * mappers (parse_reorder_enabled/proto/profile). JSON keys are snake_case;
- * the reorder object holds the 13 scalar knobs and "reorder_rules" is an array
+ * the reorder object holds the flat scalar knobs and "reorder_rules" is an array
  * of {proto, port, profile} objects. */
 
 static void
@@ -573,6 +625,68 @@ test_json_reorder_absent(void)
     ASSERT_EQ_INT(cfg.reorder.mode, MQVPN_REORDER_OFF, "absent → OFF");
     ASSERT_EQ_INT(cfg.reorder.max_wait_ms, 30, "absent → default wait");
     ASSERT_EQ_INT(cfg.reorder.n_rules, 0, "absent → no rules");
+}
+
+/* Regression: a reorder object larger than the old 512-byte stack buffer must
+ * NOT be silently dropped. The object below — every scalar key, with generous
+ * indentation/whitespace — measures ~720 bytes (well over 512). Before the
+ * span-based bound (json_object_end), the whole object was ignored and the
+ * scalars/has_explicit_* flags stayed at defaults. The sibling reorder_rules
+ * array carries its OWN max_wait_ms (77) that must NOT leak into the global
+ * has_explicit_wait/max_wait_ms — proving the bound still stops at the object's
+ * closing brace. */
+static void
+test_json_reorder_large_object_not_dropped(void)
+{
+    const char *json =
+        "{\n"
+        "  \"mode\"            : \"client\",\n"
+        "  \"reorder\"        : {\n"
+        "      \"enabled\"                 : \"on\"        ,\n"
+        "      \"max_wait_ms\"             : 44          ,\n"
+        "      \"cap_packets\"             : 4096        ,\n"
+        "      \"max_bytes_per_flow\"      : 3145728     ,\n"
+        "      \"classify_window\"         : 96          ,\n"
+        "      \"ack_demote_max_large\"    : 4           ,\n"
+        "      \"small_packet_threshold\"  : 220         ,\n"
+        "      \"reset_mark_packets\"      : 6           ,\n"
+        "      \"reset_idle_grace_ms\"     : 9000        ,\n"
+        "      \"max_flows\"               : 32768       ,\n"
+        "      \"global_max_bytes\"        : 134217728   ,\n"
+        "      \"ingress_idle_sec\"        : 25          ,\n"
+        "      \"egress_idle_sec\"         : 250\n"
+        "  },\n"
+        "  \"reorder_rules\"  : [\n"
+        "      { \"proto\": \"udp\", \"port\": 4433, \"profile\": \"quic_bulk\","
+        " \"max_wait_ms\": 77 }\n"
+        "  ]\n"
+        "}\n";
+    /* Pin the >512 precondition so the regression can't be neutered by a future
+     * whitespace trim that shrinks the object back under the old cliff. */
+    const char *ro = strstr(json, "\"reorder\"");
+    const char *brace = ro ? strchr(ro, '{') : NULL;
+    const char *close = brace ? strchr(brace, '}') : NULL;
+    ASSERT_TRUE(close && (size_t)(close - brace + 1) > 512,
+                "test reorder object exceeds 512 bytes");
+
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load_json_filecfg(&cfg, json);
+
+    ASSERT_EQ_INT(rc, 0, "json parse ok");
+    /* Global scalars must be parsed, NOT silently dropped. */
+    ASSERT_EQ_INT(cfg.reorder.mode, MQVPN_REORDER_ON, "large obj: enabled parsed");
+    ASSERT_EQ_INT(cfg.reorder.max_wait_ms, 44, "large obj: max_wait_ms parsed");
+    ASSERT_EQ_INT(cfg.reorder.has_explicit_wait, 1, "large obj: has_explicit_wait set");
+    ASSERT_EQ_INT(cfg.reorder.cap_packets_per_flow, 4096, "large obj: cap parsed");
+    ASSERT_EQ_INT(cfg.reorder.has_explicit_cap, 1, "large obj: has_explicit_cap set");
+    ASSERT_EQ_INT(cfg.reorder.egress_idle_timeout_sec, 250,
+                  "large obj: last scalar parsed");
+    /* Bounding still works: the sibling rule's max_wait_ms (77) did not bleed
+     * into the global max_wait_ms (44). */
+    ASSERT_TRUE(cfg.reorder.max_wait_ms != 77, "sibling rule max_wait_ms did not leak");
+    ASSERT_EQ_INT(cfg.reorder.n_rules, 1, "rule parsed");
+    ASSERT_EQ_INT(cfg.reorder.rules[0].explicit_wait_ms, 77, "rule's own max_wait_ms");
 }
 
 /* JSON and INI must produce an identical mqvpn_reorder_config_t for equivalent
@@ -681,6 +795,339 @@ test_bridge_ini_reaches_libmqvpn_config(void)
     mqvpn_config_free(lib);
 }
 
+/* ──────────────────── Chunk 1: profile→preset helper ─────────────────────── */
+
+static void
+test_profile_preset(void)
+{
+    uint32_t wait_ms = 0, cap = 0;
+
+    /* quic_bulk & cellular_bond → 50 / 1024 */
+    wait_ms = 0;
+    cap = 0;
+    ASSERT_EQ_INT(mqvpn_reorder_profile_preset(MQVPN_RPROF_QUIC_BULK, &wait_ms, &cap), 1,
+                  "quic_bulk has preset");
+    ASSERT_EQ_INT(wait_ms, 50, "quic_bulk wait");
+    ASSERT_EQ_INT(cap, 1024, "quic_bulk cap");
+
+    wait_ms = 0;
+    cap = 0;
+    ASSERT_EQ_INT(mqvpn_reorder_profile_preset(MQVPN_RPROF_CELLULAR_BOND, &wait_ms, &cap),
+                  1, "cellular_bond has preset");
+    ASSERT_EQ_INT(wait_ms, 50, "cellular_bond wait");
+    ASSERT_EQ_INT(cap, 1024, "cellular_bond cap");
+
+    /* fiber_lte → 50 / 2048 */
+    wait_ms = 0;
+    cap = 0;
+    ASSERT_EQ_INT(mqvpn_reorder_profile_preset(MQVPN_RPROF_FIBER_LTE, &wait_ms, &cap), 1,
+                  "fiber_lte has preset");
+    ASSERT_EQ_INT(wait_ms, 50, "fiber_lte wait");
+    ASSERT_EQ_INT(cap, 2048, "fiber_lte cap");
+
+    /* low_latency & default_udp → return 0, outputs untouched */
+    wait_ms = 7;
+    cap = 9;
+    ASSERT_EQ_INT(mqvpn_reorder_profile_preset(MQVPN_RPROF_LOW_LATENCY, &wait_ms, &cap),
+                  0, "low_latency no preset");
+    ASSERT_EQ_INT(wait_ms, 7, "low_latency wait untouched");
+    ASSERT_EQ_INT(cap, 9, "low_latency cap untouched");
+
+    wait_ms = 7;
+    cap = 9;
+    ASSERT_EQ_INT(mqvpn_reorder_profile_preset(MQVPN_RPROF_DEFAULT_UDP, &wait_ms, &cap),
+                  0, "default_udp no preset");
+    ASSERT_EQ_INT(wait_ms, 7, "default_udp wait untouched");
+    ASSERT_EQ_INT(cap, 9, "default_udp cap untouched");
+}
+
+/* ──────────────────── Task 2.2: finalize precedence ─────────────────────── */
+
+static void
+test_param_precedence(void)
+{
+    mqvpn_reorder_config_t cfg;
+
+    /* fiber_lte preset → 50 / 2048 when nothing else overrides. */
+    mqvpn_reorder_config_default(&cfg);
+    cfg.n_rules = 1;
+    cfg.rules[0].profile = MQVPN_RPROF_FIBER_LTE;
+    mqvpn_reorder_config_finalize(&cfg);
+    ASSERT_EQ_INT(cfg.rules[0].resolved_wait_ms, 50, "fiber_lte preset wait");
+    ASSERT_EQ_INT(cfg.rules[0].resolved_cap, 2048, "fiber_lte preset cap");
+
+    /* rule-explicit wait=80 wins over the preset. */
+    mqvpn_reorder_config_default(&cfg);
+    cfg.n_rules = 1;
+    cfg.rules[0].profile = MQVPN_RPROF_FIBER_LTE;
+    cfg.rules[0].explicit_wait_ms = 80;
+    mqvpn_reorder_config_finalize(&cfg);
+    ASSERT_EQ_INT(cfg.rules[0].resolved_wait_ms, 80, "rule-explicit wait beats preset");
+    ASSERT_EQ_INT(cfg.rules[0].resolved_cap, 2048, "cap still from preset");
+
+    /* default_udp is the OFF class: resolved wait is 0 (pass-through) even
+     * with no overrides. cap is don't-care when wait==0 but stays builtin
+     * 1024 (kept pow2-valid by the defensive clamp). */
+    mqvpn_reorder_config_default(&cfg);
+    cfg.n_rules = 1;
+    cfg.rules[0].profile = MQVPN_RPROF_DEFAULT_UDP;
+    mqvpn_reorder_config_finalize(&cfg);
+    ASSERT_EQ_INT(cfg.rules[0].resolved_wait_ms, 0, "default_udp OFF pass-through wait");
+    ASSERT_EQ_INT(cfg.rules[0].resolved_cap, 1024,
+                  "default_udp builtin cap (don't-care)");
+
+    /* default_udp stays OFF even when a global explicit wait is set — the OFF
+     * class wins outright (mirrors TX unconditional ineligibility). */
+    mqvpn_reorder_config_default(&cfg);
+    cfg.has_explicit_wait = 1;
+    cfg.max_wait_ms = 120;
+    cfg.n_rules = 1;
+    cfg.rules[0].profile = MQVPN_RPROF_DEFAULT_UDP;
+    mqvpn_reorder_config_finalize(&cfg);
+    ASSERT_EQ_INT(cfg.rules[0].resolved_wait_ms, 0,
+                  "default_udp OFF survives global explicit wait");
+
+    /* global-explicit wait masks the preset, but rule-explicit still wins. */
+    mqvpn_reorder_config_default(&cfg);
+    cfg.has_explicit_wait = 1;
+    cfg.max_wait_ms = 120;
+    cfg.n_rules = 2;
+    cfg.rules[0].profile = MQVPN_RPROF_FIBER_LTE; /* no rule-explicit */
+    cfg.rules[1].profile = MQVPN_RPROF_FIBER_LTE;
+    cfg.rules[1].explicit_wait_ms = 80; /* rule-explicit still wins */
+    mqvpn_reorder_config_finalize(&cfg);
+    ASSERT_EQ_INT(cfg.rules[0].resolved_wait_ms, 120, "global-explicit masks preset");
+    ASSERT_EQ_INT(cfg.rules[1].resolved_wait_ms, 80, "rule-explicit beats global");
+}
+
+static void
+test_resolved_cap_pow2(void)
+{
+    mqvpn_reorder_config_t cfg;
+
+    /* (i) invalid explicit_cap=1000 + global-explicit cap=2048 → global tier. */
+    mqvpn_reorder_config_default(&cfg);
+    cfg.has_explicit_cap = 1;
+    cfg.cap_packets_per_flow = 2048;
+    cfg.n_rules = 1;
+    cfg.rules[0].profile = MQVPN_RPROF_FIBER_LTE;
+    cfg.rules[0].explicit_cap = 1000; /* non-pow2, parser would reject; bypass */
+    mqvpn_reorder_config_finalize(&cfg);
+    ASSERT_EQ_INT(cfg.rules[0].resolved_cap, 2048,
+                  "bad rule cap falls through to global tier");
+
+    /* (ii) invalid explicit_cap=1000 + NO global-explicit + fiber_lte → preset. */
+    mqvpn_reorder_config_default(&cfg);
+    cfg.n_rules = 1;
+    cfg.rules[0].profile = MQVPN_RPROF_FIBER_LTE;
+    cfg.rules[0].explicit_cap = 1000;
+    mqvpn_reorder_config_finalize(&cfg);
+    ASSERT_EQ_INT(cfg.rules[0].resolved_cap, 2048,
+                  "bad rule cap falls through to preset tier");
+}
+
+/* ──────────────── Task 2.3: INI per-rule params + global explicit ──────────── */
+
+static void
+test_ini_rule_profile_only_resolves_preset(void)
+{
+    /* (a) Profile=fiber_lte, no explicit keys → preset 50/2048 after finalize. */
+    const char *ini = "[Reorder]\n"
+                      "Enabled = on\n"
+                      "[ReorderRule]\n"
+                      "Proto = udp\n"
+                      "Port = 443\n"
+                      "Profile = fiber_lte\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    if (path) unlink(path);
+    ASSERT_EQ_INT(rc, 0, "parse ok");
+    mqvpn_reorder_config_finalize(&cfg.reorder);
+    ASSERT_EQ_INT(cfg.reorder.rules[0].resolved_wait_ms, 50, "(a) fiber_lte wait");
+    ASSERT_EQ_INT(cfg.reorder.rules[0].resolved_cap, 2048, "(a) fiber_lte cap");
+}
+
+static void
+test_ini_global_explicit_beats_preset(void)
+{
+    /* (b) harness-compat: global MaxWaitMs=30 sets has_explicit_wait and masks
+     * the quic_bulk preset (50). Pins benchmarks/sweep_reorder.sh. */
+    const char *ini = "[Reorder]\n"
+                      "Enabled = on\n"
+                      "MaxWaitMs = 30\n"
+                      "CapPackets = 1024\n"
+                      "[ReorderRule]\n"
+                      "Profile = quic_bulk\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    if (path) unlink(path);
+    ASSERT_EQ_INT(rc, 0, "parse ok");
+    ASSERT_EQ_INT(cfg.reorder.has_explicit_wait, 1, "(b) global wait explicit flag");
+    mqvpn_reorder_config_finalize(&cfg.reorder);
+    ASSERT_EQ_INT(cfg.reorder.rules[0].resolved_wait_ms, 30,
+                  "(b) global-explicit beats quic_bulk preset");
+}
+
+static void
+test_ini_rule_explicit_wait(void)
+{
+    /* (c) per-rule MaxWaitMs=80 → explicit_wait_ms set, resolves to 80. */
+    const char *ini = "[Reorder]\n"
+                      "Enabled = on\n"
+                      "[ReorderRule]\n"
+                      "Profile = cellular_bond\n"
+                      "MaxWaitMs = 80\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    if (path) unlink(path);
+    ASSERT_EQ_INT(rc, 0, "parse ok");
+    ASSERT_EQ_INT(cfg.reorder.rules[0].explicit_wait_ms, 80, "(c) rule explicit_wait_ms");
+    mqvpn_reorder_config_finalize(&cfg.reorder);
+    ASSERT_EQ_INT(cfg.reorder.rules[0].resolved_wait_ms, 80, "(c) resolved 80");
+}
+
+static void
+test_ini_rule_cap_nonpow2_rejected(void)
+{
+    /* (d) per-rule CapPackets=1000 (non-pow2) → warns, explicit_cap stays 0,
+     * resolves to a pow2 preset/builtin. */
+    const char *ini = "[Reorder]\n"
+                      "Enabled = on\n"
+                      "[ReorderRule]\n"
+                      "Profile = fiber_lte\n"
+                      "CapPackets = 1000\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    if (path) unlink(path);
+    ASSERT_EQ_INT(rc, 0, "parse ok despite non-pow2 cap");
+    ASSERT_EQ_INT(cfg.reorder.rules[0].explicit_cap, 0, "(d) non-pow2 cap rejected");
+    mqvpn_reorder_config_finalize(&cfg.reorder);
+    ASSERT_EQ_INT(cfg.reorder.rules[0].resolved_cap, 2048, "(d) resolves to preset pow2");
+}
+
+static void
+test_ini_rule_wait_zero_rejected(void)
+{
+    /* (e) per-rule MaxWaitMs=0 → warns, explicit_wait_ms stays 0 (unset),
+     * resolves to profile/global/builtin, NOT 0. */
+    const char *ini = "[Reorder]\n"
+                      "Enabled = on\n"
+                      "[ReorderRule]\n"
+                      "Profile = fiber_lte\n"
+                      "MaxWaitMs = 0\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    if (path) unlink(path);
+    ASSERT_EQ_INT(rc, 0, "parse ok despite per-rule wait=0");
+    ASSERT_EQ_INT(cfg.reorder.rules[0].explicit_wait_ms, 0, "(e) wait=0 left unset");
+    mqvpn_reorder_config_finalize(&cfg.reorder);
+    ASSERT_EQ_INT(cfg.reorder.rules[0].resolved_wait_ms, 50,
+                  "(e) resolves to preset, not 0");
+}
+
+/* ──────────────── Task 2.4: JSON per-rule + builder + bridge ──────────────── */
+
+static void
+test_json_rule_params_and_parity(void)
+{
+    /* (a) JSON per-rule max_wait_ms/cap_packets parse into explicit_*, and
+     * JSON↔INI parity for these keys. */
+    const char *ini = "[Reorder]\n"
+                      "Enabled = on\n"
+                      "[ReorderRule]\n"
+                      "Proto = udp\nPort = 443\nProfile = fiber_lte\n"
+                      "MaxWaitMs = 80\nCapPackets = 2048\n";
+    const char *json = "{\n"
+                       "  \"reorder\": {\"enabled\":\"on\"},\n"
+                       "  \"reorder_rules\": [\n"
+                       "    {\"proto\":\"udp\",\"port\":443,\"profile\":\"fiber_lte\",\n"
+                       "     \"max_wait_ms\":80,\"cap_packets\":2048}\n"
+                       "  ]\n"
+                       "}\n";
+    mqvpn_file_config_t icfg, jcfg;
+    mqvpn_config_defaults(&icfg);
+    mqvpn_config_defaults(&jcfg);
+    char *path = write_tmp(ini);
+    int irc = mqvpn_config_load(&icfg, path);
+    if (path) unlink(path);
+    int jrc = mqvpn_config_load_json_filecfg(&jcfg, json);
+    ASSERT_EQ_INT(irc, 0, "ini parse ok");
+    ASSERT_EQ_INT(jrc, 0, "json parse ok");
+    ASSERT_EQ_INT(jcfg.reorder.rules[0].explicit_wait_ms, 80, "(a) json rule wait");
+    ASSERT_EQ_INT(jcfg.reorder.rules[0].explicit_cap, 2048, "(a) json rule cap");
+    ASSERT_EQ_INT(memcmp(&icfg.reorder, &jcfg.reorder, sizeof(icfg.reorder)), 0,
+                  "(a) JSON↔INI per-rule param parity");
+}
+
+static void
+test_json_global_explicit_flag(void)
+{
+    /* (b) JSON global max_wait_ms sets has_explicit_wait. */
+    const char *json = "{\"reorder\":{\"enabled\":\"on\",\"max_wait_ms\":40}}";
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load_json_filecfg(&cfg, json);
+    ASSERT_EQ_INT(rc, 0, "json parse ok");
+    ASSERT_EQ_INT(cfg.reorder.has_explicit_wait, 1, "(b) json global wait explicit");
+}
+
+static void
+test_builder_add_rule_new_profiles(void)
+{
+    /* (c) builder accepts the new fiber_lte profile (was rejected by 0..2 guard). */
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    if (!cfg) return;
+    ASSERT_EQ_INT(mqvpn_config_add_reorder_rule(cfg, 17, 443, MQVPN_RPROF_FIBER_LTE),
+                  MQVPN_OK, "(c) add fiber_lte rule");
+    ASSERT_EQ_INT(cfg->reorder.rules[0].profile, MQVPN_RPROF_FIBER_LTE,
+                  "(c) profile set");
+    ASSERT_EQ_INT(mqvpn_config_add_reorder_rule(cfg, 17, 53, MQVPN_RPROF_CELLULAR_BOND),
+                  MQVPN_OK, "(c) add cellular_bond rule");
+    mqvpn_config_free(cfg);
+}
+
+static void
+test_bridge_struct_copy_carries_params(void)
+{
+    /* (d) struct-copy bridge carries profile, explicit_wait_ms, and has_explicit_*. */
+    mqvpn_reorder_config_t src;
+    mqvpn_reorder_config_default(&src);
+    src.mode = MQVPN_REORDER_ON;
+    src.n_rules = 2;
+    src.rules[0].proto = MQVPN_IPPROTO_UDP;
+    src.rules[0].port = 443;
+    src.rules[0].profile = MQVPN_RPROF_FIBER_LTE;
+    src.rules[1].proto = MQVPN_IPPROTO_UDP;
+    src.rules[1].port = 53;
+    src.rules[1].profile = MQVPN_RPROF_CELLULAR_BOND;
+    src.rules[1].explicit_wait_ms = 80;
+    /* has_explicit_* deliberately left 0 to prove they aren't falsely set. */
+
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    if (!cfg) return;
+    mqvpn_config_apply_reorder(cfg, &src);
+
+    ASSERT_EQ_INT(cfg->reorder.n_rules, 2, "(d) n_rules bridged");
+    ASSERT_EQ_INT(cfg->reorder.rules[0].profile, MQVPN_RPROF_FIBER_LTE,
+                  "(d) rule0 profile");
+    ASSERT_EQ_INT(cfg->reorder.rules[1].profile, MQVPN_RPROF_CELLULAR_BOND,
+                  "(d) rule1 profile");
+    ASSERT_EQ_INT(cfg->reorder.rules[1].explicit_wait_ms, 80, "(d) rule1 explicit_wait");
+    ASSERT_EQ_INT(cfg->reorder.has_explicit_wait, 0, "(d) has_explicit_wait matches src");
+    ASSERT_EQ_INT(cfg->reorder.has_explicit_cap, 0, "(d) has_explicit_cap matches src");
+    mqvpn_config_free(cfg);
+}
+
 int
 main(void)
 {
@@ -700,6 +1147,8 @@ main(void)
     test_ini_reorder_full();
     test_ini_enabled_mapping();
     test_ini_reorder_rules();
+    test_ini_reorder_profile_names();
+    test_ini_reorder_invalid_profile_keeps_quic_bulk();
     test_ini_unknown_key_warns_no_fail();
     test_ini_validate_rejects_idle_inversion();
     test_ini_over_cap_rule_rejected();
@@ -710,10 +1159,31 @@ main(void)
     test_json_reorder_enabled_mapping();
     test_json_reorder_rules_over_cap();
     test_json_reorder_absent();
+    test_json_reorder_large_object_not_dropped();
     test_json_ini_parity();
 
     /* Bridge: INI → file_cfg → libmqvpn config (apply_reorder translation) */
     test_bridge_ini_reaches_libmqvpn_config();
+
+    /* Chunk 1: profile→preset helper */
+    test_profile_preset();
+
+    /* Task 2.2: finalize precedence + cap pow2 defense */
+    test_param_precedence();
+    test_resolved_cap_pow2();
+
+    /* Task 2.3: INI per-rule params + global explicit flag */
+    test_ini_rule_profile_only_resolves_preset();
+    test_ini_global_explicit_beats_preset();
+    test_ini_rule_explicit_wait();
+    test_ini_rule_cap_nonpow2_rejected();
+    test_ini_rule_wait_zero_rejected();
+
+    /* Task 2.4: JSON per-rule + builder guard + struct-copy bridge */
+    test_json_rule_params_and_parity();
+    test_json_global_explicit_flag();
+    test_builder_add_rule_new_profiles();
+    test_bridge_struct_copy_carries_params();
 
     fprintf(stderr, "test_reorder_config: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

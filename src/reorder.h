@@ -344,7 +344,32 @@ typedef struct {
     uint8_t proto; /* L4 protocol (UDP = 17) */
     uint16_t port; /* matched against src or dst (host order) */
     mqvpn_reorder_profile_t profile;
+    uint32_t explicit_wait_ms; /* per-rule override; 0 = unset */
+    uint32_t explicit_cap;     /* per-rule override; 0 = unset */
+    uint32_t resolved_wait_ms; /* filled by finalize */
+    uint32_t resolved_cap;     /* filled by finalize */
 } mqvpn_reorder_rule_t;
+
+/* Map a profile to its (wait_ms, cap) preset. Returns 1 and writes both outputs
+ * when the profile carries a preset; returns 0 and leaves outputs untouched for
+ * profiles with no preset (low_latency / default_udp). */
+static inline int
+mqvpn_reorder_profile_preset(mqvpn_reorder_profile_t profile, uint32_t *wait_ms,
+                             uint32_t *cap)
+{
+    switch (profile) {
+    case MQVPN_RPROF_QUIC_BULK:
+    case MQVPN_RPROF_CELLULAR_BOND:
+        *wait_ms = 50;
+        *cap = 1024;
+        return 1;
+    case MQVPN_RPROF_FIBER_LTE:
+        *wait_ms = 50;
+        *cap = 2048;
+        return 1;
+    default: return 0; /* low_latency / default_udp: no preset */
+    }
+}
 
 typedef struct {
     mqvpn_reorder_mode_t mode; /* master gate (§16.2 enabled) */
@@ -370,9 +395,75 @@ typedef struct {
     /* internal/test knob — not exposed via any public setter */
     int eval_force_no_demotion;
 
+    /* per-rule param resolution: set when a global MaxWaitMs/CapPackets was
+     * explicitly provided, letting that global value punch through a profile
+     * preset (tier 2 precedence in mqvpn_reorder_config_finalize). */
+    uint8_t has_explicit_wait;
+    uint8_t has_explicit_cap;
+
     mqvpn_reorder_rule_t rules[MQVPN_REORDER_MAX_RULES];
     int n_rules;
 } mqvpn_reorder_config_t;
+
+/* First rule whose proto matches and port == src or dst; NULL if none. Shared by
+ * TX (eligibility) and RX (per-flow wait/cap) so the match is identical. */
+static inline const mqvpn_reorder_rule_t *
+mqvpn_reorder_match_rule(const mqvpn_reorder_config_t *cfg, const mqvpn_flow_key_t *key)
+{
+    for (int i = 0; i < cfg->n_rules; i++) {
+        const mqvpn_reorder_rule_t *r = &cfg->rules[i];
+        if (r->proto != key->proto) continue;
+        if (r->port == key->src_port || r->port == key->dst_port) return r;
+    }
+    return NULL;
+}
+
+/* A per-flow ring cap must be a non-zero power of two (ring index masking). */
+static inline int
+mqvpn_reorder_cap_is_valid(uint32_t cap)
+{
+    return cap != 0 && (cap & (cap - 1)) == 0;
+}
+
+/* Resolve each rule's effective (wait,cap): rule-explicit > global-explicit >
+ * profile-preset > builtin. Idempotent. Run AFTER full config parse (rule- and
+ * global-explicit arrive in separate sections). Tiers 2 & 4 intentionally read
+ * the same storage (cfg->max_wait_ms holds the builtin default when not explicit;
+ * has_explicit_* only lets a global value punch through a preset). resolved_cap
+ * is forced to a non-zero power of two (defends against a bad explicit cap that
+ * slipped parse). */
+static inline void
+mqvpn_reorder_config_finalize(mqvpn_reorder_config_t *cfg)
+{
+    for (int i = 0; i < cfg->n_rules; i++) {
+        mqvpn_reorder_rule_t *r = &cfg->rules[i];
+        uint32_t pw = 0, pc = 0;
+        int has_preset = mqvpn_reorder_profile_preset(r->profile, &pw, &pc);
+        r->resolved_wait_ms =
+            /* default_udp is the OFF class: never reorder, mirroring TX's
+             * unconditional ineligibility. wait==0 makes RX pass the flow
+             * through without allocating any ring. An explicit or global wait
+             * must NOT turn it on, so this branch wins outright. */
+            r->profile == MQVPN_RPROF_DEFAULT_UDP ? 0u
+            : r->explicit_wait_ms                 ? r->explicit_wait_ms
+            : cfg->has_explicit_wait              ? cfg->max_wait_ms
+            : has_preset                          ? pw
+                                                  : cfg->max_wait_ms;
+        /* An invalid (non-pow2 / zero) per-rule explicit_cap is treated as UNSET
+         * so precedence falls through correctly (global-explicit > preset >
+         * builtin) instead of skipping the global tier. */
+        uint32_t rcap = r->explicit_cap;
+        if (!mqvpn_reorder_cap_is_valid(rcap)) rcap = 0;
+        uint32_t cap = rcap                    ? rcap
+                       : cfg->has_explicit_cap ? cfg->cap_packets_per_flow
+                       : has_preset            ? pc
+                                               : cfg->cap_packets_per_flow;
+        /* Defensive: chosen tier should already be pow2 (global cap is validated
+         * pre-finalize; presets are pow2). Clamp the impossible case to builtin. */
+        if (!mqvpn_reorder_cap_is_valid(cap)) cap = 1024;
+        r->resolved_cap = cap;
+    }
+}
 
 /* ─────────────────────────── §17: RX statistics ───────────────────────────
  *
@@ -442,6 +533,8 @@ mqvpn_reorder_config_default(mqvpn_reorder_config_t *cfg)
     cfg->ingress_idle_timeout_sec = 30;
     cfg->egress_idle_timeout_sec = 300;
     cfg->eval_force_no_demotion = 0;
+    cfg->has_explicit_wait = 0;
+    cfg->has_explicit_cap = 0;
     cfg->n_rules = 0;
 }
 
@@ -457,8 +550,7 @@ mqvpn_reorder_config_validate(const mqvpn_reorder_config_t *cfg)
     if (cfg->ingress_idle_timeout_sec >= cfg->egress_idle_timeout_sec) {
         return -1;
     }
-    uint32_t cap = cfg->cap_packets_per_flow;
-    if (!(cap && !(cap & (cap - 1)))) {
+    if (!mqvpn_reorder_cap_is_valid(cfg->cap_packets_per_flow)) {
         return -1;
     }
     return 0;

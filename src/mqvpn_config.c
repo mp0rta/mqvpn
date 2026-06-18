@@ -587,6 +587,7 @@ mqvpn_config_set_reorder_wait(mqvpn_config_t *cfg, uint32_t max_wait_ms)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     cfg->reorder.max_wait_ms = max_wait_ms;
+    cfg->reorder.has_explicit_wait = 1;
     return MQVPN_OK;
 }
 
@@ -597,6 +598,7 @@ mqvpn_config_set_reorder_cap(mqvpn_config_t *cfg, uint32_t cap_packets,
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     cfg->reorder.cap_packets_per_flow = cap_packets;
     cfg->reorder.max_buffer_bytes_per_flow = max_bytes_per_flow;
+    cfg->reorder.has_explicit_cap = 1;
     return MQVPN_OK;
 }
 
@@ -639,14 +641,19 @@ mqvpn_config_add_reorder_rule(mqvpn_config_t *cfg, uint8_t proto, uint16_t port,
                               mqvpn_reorder_profile_t profile)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
-    if (profile != MQVPN_RPROF_QUIC_BULK && profile != MQVPN_RPROF_LOW_LATENCY &&
-        profile != MQVPN_RPROF_DEFAULT_UDP) {
+    /* Bound BOTH ends: the lower bound rejects a negative enum-cast, the upper
+     * bound the last valid profile. A single (<= FIBER_LTE) test would admit
+     * negatives. */
+    if (profile < MQVPN_RPROF_QUIC_BULK || profile > MQVPN_RPROF_FIBER_LTE) {
         return MQVPN_ERR_INVALID_ARG;
     }
     if (cfg->reorder.n_rules >= MQVPN_REORDER_MAX_RULES) {
         return MQVPN_ERR_INVALID_ARG;
     }
     mqvpn_reorder_rule_t *r = &cfg->reorder.rules[cfg->reorder.n_rules];
+    /* Zero every field first (per-rule params = unset; finalize's precedence
+     * depends on explicit_*==0), then set the caller's intent fields. */
+    memset(r, 0, sizeof(*r));
     r->proto = proto;
     r->port = port;
     r->profile = profile;
@@ -658,21 +665,7 @@ void
 mqvpn_config_apply_reorder(mqvpn_config_t *cfg, const mqvpn_reorder_config_t *src)
 {
     if (!cfg || !src) return;
-    mqvpn_config_set_reorder_enabled(cfg, src->mode);
-    mqvpn_config_set_reorder_wait(cfg, src->max_wait_ms);
-    mqvpn_config_set_reorder_cap(cfg, src->cap_packets_per_flow,
-                                 src->max_buffer_bytes_per_flow);
-    mqvpn_config_set_reorder_classify(cfg, src->classify_window,
-                                      src->ack_demote_max_large_packets,
-                                      src->small_packet_threshold_bytes);
-    mqvpn_config_set_reorder_reset(cfg, src->reset_mark_packets,
-                                   src->reset_idle_grace_ms);
-    mqvpn_config_set_reorder_limits(cfg, src->max_flows, src->global_max_buffer_bytes,
-                                    src->ingress_idle_timeout_sec,
-                                    src->egress_idle_timeout_sec);
-    /* eval_force_no_demotion is internal-only and intentionally not bridged. */
-    for (int i = 0; i < src->n_rules; i++) {
-        mqvpn_config_add_reorder_rule(cfg, src->rules[i].proto, src->rules[i].port,
-                                      src->rules[i].profile);
-    }
+    int eval = cfg->reorder.eval_force_no_demotion; /* internal-only, not bridged */
+    cfg->reorder = *src; /* scalars, has_explicit_*, rules incl. explicit_*, n_rules */
+    cfg->reorder.eval_force_no_demotion = eval;
 }

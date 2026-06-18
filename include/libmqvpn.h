@@ -110,11 +110,14 @@ typedef enum {
     MQVPN_REORDER_ON = 1,
 } mqvpn_reorder_mode_t;
 
-/* Per-rule reorder profile (§16.1). v1 is a fixed 3-value enum. */
+/* Per-rule reorder profile (§16.1). Values 0/1/2 are ABI-fixed; presets are
+ * appended (cellular_bond/fiber_lte) so the enum is no longer 3-valued. */
 typedef enum {
-    MQVPN_RPROF_QUIC_BULK = 0,
-    MQVPN_RPROF_LOW_LATENCY = 1,
-    MQVPN_RPROF_DEFAULT_UDP = 2,
+    MQVPN_RPROF_QUIC_BULK = 0,     /* back-compat alias of CELLULAR_BOND preset */
+    MQVPN_RPROF_LOW_LATENCY = 1,   /* reserved; no preset in v1 (inert) */
+    MQVPN_RPROF_DEFAULT_UDP = 2,   /* matched but no reorder (OFF class) */
+    MQVPN_RPROF_CELLULAR_BOND = 3, /* preset: wait=50ms cap=1024 */
+    MQVPN_RPROF_FIBER_LTE = 4,     /* preset: wait=50ms cap=2048 */
 } mqvpn_reorder_profile_t;
 
 typedef enum {

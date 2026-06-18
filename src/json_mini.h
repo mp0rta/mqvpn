@@ -52,6 +52,42 @@ json_find_key(const char *json, const char *key)
     return NULL;
 }
 
+/* Pointer to the '}' that closes the object beginning at `obj` (must point at
+ * '{'), accounting for nesting and braces inside string literals. NULL if
+ * unterminated. */
+static inline const char *
+json_object_end(const char *obj)
+{
+    if (!obj || *obj != '{') return NULL;
+    int depth = 0, in_str = 0;
+    for (const char *p = obj; *p; p++) {
+        if (in_str) {
+            if (*p == '\\' && p[1]) {
+                p++;
+                continue;
+            }
+            if (*p == '"') in_str = 0;
+            continue;
+        }
+        if (*p == '"')
+            in_str = 1;
+        else if (*p == '{')
+            depth++;
+        else if (*p == '}' && --depth == 0)
+            return p;
+    }
+    return NULL;
+}
+
+/* json_find_key bounded to [obj, obj_end): returns the value pointer only if it
+ * lies before obj_end (i.e. belongs to this object, not a sibling). */
+static inline const char *
+json_find_key_bounded(const char *obj, const char *obj_end, const char *key)
+{
+    const char *v = json_find_key(obj, key);
+    return (v && obj_end && v < obj_end) ? v : NULL;
+}
+
 /* Read a JSON string value. Returns 0 on success, -1 on error. */
 static inline int
 json_read_string(const char *p, char *out, size_t out_len)

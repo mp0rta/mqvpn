@@ -208,7 +208,7 @@ Port = 443
 Profile = quic_bulk
 ```
 
-…or from the JSON equivalent. The `reorder` object uses snake_case keys mapping 1:1 to the INI keys above, and `reorder_rules` is an array of `{proto, port, profile}` objects:
+…or from the JSON equivalent. The `reorder` object uses snake_case keys mapping 1:1 to the INI keys above, and `reorder_rules` is an array of `{proto, port, profile}` objects (each rule may also carry optional `max_wait_ms` / `cap_packets` overrides):
 
 ```json
 {
@@ -228,10 +228,39 @@ Profile = quic_bulk
     "egress_idle_sec": 300
   },
   "reorder_rules": [
-    { "proto": "udp", "port": 443, "profile": "quic_bulk" }
+    { "proto": "udp", "port": 443, "profile": "cellular_bond" },
+    { "proto": "udp", "port": 4500, "profile": "fiber_lte", "max_wait_ms": 50, "cap_packets": 2048 }
   ]
 }
 ```
+
+### Profile presets
+
+Each profile carries an empirically-tuned `(MaxWaitMs, CapPackets)` preset. The values were chosen from a multipath `netem` sweep across 16 link environments — full methodology and per-environment data are in the [reorder-only multipath report](https://github.com/mp0rta/mqvpn/blob/main/docs/report/2026-06-18-reorder-only-datagram-multipath-connect-ip-en.md):
+
+| Profile | `MaxWaitMs` | `CapPackets` | Notes |
+|---------|------------:|-------------:|-------|
+| `cellular_bond` | `50` | `1024` | Cellular bonding (e.g. dual-LTE) |
+| `fiber_lte` | `50` | `2048` | Mixed fiber + LTE; larger cap for higher BDP |
+| `quic_bulk` | `50` | `1024` | Back-compat alias of `cellular_bond` |
+| `low_latency` | — | — | Reserved; no preset (inert) |
+| `default_udp` | — | — | Matched but **not** reordered (pass-through / OFF) |
+
+**Precedence** for a rule's effective `(MaxWaitMs, CapPackets)`, highest first:
+
+1. The rule's own explicit `MaxWaitMs` / `CapPackets` key.
+2. A global `[Reorder]` explicit `MaxWaitMs` / `CapPackets`.
+3. The rule's profile preset (above).
+4. The builtin default (`MaxWaitMs = 30`, `CapPackets = 1024`).
+
+In short, a number written explicitly always beats the profile. This is why a config that sets a global `[Reorder] MaxWaitMs` alongside `Profile = quic_bulk` keeps using the explicit global value unchanged.
+
+### When to enable reorder
+
+Reorder is **off by default** and is meant to be opt-in only within its useful range. Empirically that range is an RTT spread of roughly **15–100 ms**, paths with jitter, or **asymmetric bandwidth**.
+
+- **Strong bandwidth asymmetry (≳ 8:1):** consider raising `MaxWaitMs` to `150`–`200` (unverified — treat as a follow-up to validate on your link).
+- **Extreme RTT spread (≥ 285 ms, GEO-satellite class):** reorder is a net loss here; leave it off for that traffic with `Profile = default_udp`.
 
 ### `[ReorderRule]` (repeatable)
 
@@ -239,7 +268,9 @@ Profile = quic_bulk
 |-----|-------------|---------|
 | `Proto` | Matched L4 protocol (`udp`) | `udp` |
 | `Port` | Matched port (source or destination) | — |
-| `Profile` | `quic_bulk`, `low_latency`, or `default_udp` | `quic_bulk` |
+| `Profile` | `cellular_bond`, `fiber_lte`, `quic_bulk`, `low_latency`, or `default_udp` | `quic_bulk` |
+| `MaxWaitMs` | Per-rule override of the hold time (ms). `0` is rejected with a warning — to pass a port through untouched use `Profile = default_udp` instead | profile preset |
+| `CapPackets` | Per-rule override of the per-flow buffer cap. Must be a non-zero power of two, or it is rejected with a warning | profile preset |
 
 ## MTU Guidelines
 
