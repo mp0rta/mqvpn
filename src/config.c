@@ -611,14 +611,18 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
             uint32_t v = 0;
             if (parse_u32_strict(val, &v) < 0)
                 LOG_WRN("%s:%d: invalid MaxWaitMs '%s'", path, lineno, val);
-            else
+            else {
                 r->max_wait_ms = v;
+                r->has_explicit_wait = 1;
+            }
         } else if (strcasecmp(key, "CapPackets") == 0) {
             uint32_t v = 0;
             if (parse_u32_strict(val, &v) < 0)
                 LOG_WRN("%s:%d: invalid CapPackets '%s'", path, lineno, val);
-            else
+            else {
                 r->cap_packets_per_flow = v;
+                r->has_explicit_cap = 1;
+            }
         } else if (strcasecmp(key, "MaxBytesPerFlow") == 0) {
             unsigned long long v = 0;
             if (parse_u64_strict(val, &v) < 0)
@@ -711,6 +715,29 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
                 LOG_WRN("%s:%d: invalid [ReorderRule] Profile '%s'", path, lineno, val);
             else
                 rule->profile = prof;
+        } else if (strcasecmp(key, "MaxWaitMs") == 0) {
+            uint32_t v = 0;
+            if (parse_u32_strict(val, &v) < 0)
+                LOG_WRN("%s:%d: invalid [ReorderRule] MaxWaitMs '%s'", path, lineno, val);
+            else if (v == 0)
+                /* per-rule wait=0 is unsupported; pass-through is expressed via
+                 * Profile=default_udp. Leave explicit_wait_ms unset. */
+                LOG_WRN("%s:%d: [ReorderRule] MaxWaitMs=0 unsupported; use "
+                        "Profile=default_udp for pass-through; ignoring",
+                        path, lineno);
+            else
+                rule->explicit_wait_ms = v;
+        } else if (strcasecmp(key, "CapPackets") == 0) {
+            uint32_t v = 0;
+            if (parse_u32_strict(val, &v) < 0)
+                LOG_WRN("%s:%d: invalid [ReorderRule] CapPackets '%s'", path, lineno,
+                        val);
+            else if (v == 0 || (v & (v - 1)))
+                LOG_WRN("%s:%d: [ReorderRule] CapPackets '%s' must be a non-zero power "
+                        "of two; ignoring",
+                        path, lineno, val);
+            else
+                rule->explicit_cap = v;
         } else {
             LOG_WRN("%s:%d: unknown key '%s' in [ReorderRule]", path, lineno, key);
         }
@@ -890,17 +917,19 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
 
         kv = json_find_key(ro, "max_wait_ms");
         if (kv) {
-            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffffffffULL)
+            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffffffffULL) {
                 r->max_wait_ms = (uint32_t)uv;
-            else
+                r->has_explicit_wait = 1;
+            } else
                 LOG_WRN("JSON: invalid reorder max_wait_ms; keeping default");
         }
 
         kv = json_find_key(ro, "cap_packets");
         if (kv) {
-            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffffffffULL)
+            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffffffffULL) {
                 r->cap_packets_per_flow = (uint32_t)uv;
-            else
+                r->has_explicit_cap = 1;
+            } else
                 LOG_WRN("JSON: invalid reorder cap_packets; keeping default");
         }
 
