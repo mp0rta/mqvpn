@@ -365,6 +365,58 @@ test_ini_reorder_rules(void)
 }
 
 static void
+test_ini_reorder_profile_names(void)
+{
+    /* cellular_bond / fiber_lte profile names parse into the new enum values. */
+    const char *ini = "[Reorder]\n"
+                      "Enabled = on\n"
+                      "[ReorderRule]\n"
+                      "Proto = udp\n"
+                      "Port = 443\n"
+                      "Profile = cellular_bond\n"
+                      "[ReorderRule]\n"
+                      "Proto = udp\n"
+                      "Port = 8443\n"
+                      "Profile = fiber_lte\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    if (path) unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "parse ok");
+    ASSERT_EQ_INT(cfg.reorder.n_rules, 2, "two rules");
+    ASSERT_EQ_INT(cfg.reorder.rules[0].port, 443, "rule0 port 443");
+    ASSERT_EQ_INT(cfg.reorder.rules[0].profile, MQVPN_RPROF_CELLULAR_BOND,
+                  "rule0 cellular_bond");
+    ASSERT_EQ_INT(cfg.reorder.rules[1].port, 8443, "rule1 port 8443");
+    ASSERT_EQ_INT(cfg.reorder.rules[1].profile, MQVPN_RPROF_FIBER_LTE, "rule1 fiber_lte");
+}
+
+static void
+test_ini_reorder_invalid_profile_keeps_quic_bulk(void)
+{
+    /* A typo'd profile name warns (no hard error) and the rule keeps its
+     * begin-time default MQVPN_RPROF_QUIC_BULK (still reorder-eligible). */
+    const char *ini = "[Reorder]\n"
+                      "Enabled = on\n"
+                      "[ReorderRule]\n"
+                      "Proto = udp\n"
+                      "Port = 443\n"
+                      "Profile = celluar_bond\n"; /* typo */
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    if (path) unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "parse ok despite typo profile");
+    ASSERT_EQ_INT(cfg.reorder.n_rules, 1, "rule still added");
+    ASSERT_EQ_INT(cfg.reorder.rules[0].profile, MQVPN_RPROF_QUIC_BULK,
+                  "typo keeps QUIC_BULK default");
+}
+
+static void
 test_ini_unknown_key_warns_no_fail(void)
 {
     /* Unknown keys in [Reorder] / [ReorderRule] warn but do not fail (forward
@@ -746,6 +798,8 @@ main(void)
     test_ini_reorder_full();
     test_ini_enabled_mapping();
     test_ini_reorder_rules();
+    test_ini_reorder_profile_names();
+    test_ini_reorder_invalid_profile_keeps_quic_bulk();
     test_ini_unknown_key_warns_no_fail();
     test_ini_validate_rejects_idle_inversion();
     test_ini_over_cap_rule_rejected();

@@ -356,6 +356,14 @@ parse_reorder_profile(const char *val, mqvpn_reorder_profile_t *out)
         *out = MQVPN_RPROF_DEFAULT_UDP;
         return 0;
     }
+    if (strcasecmp(val, "cellular_bond") == 0) {
+        *out = MQVPN_RPROF_CELLULAR_BOND;
+        return 0;
+    }
+    if (strcasecmp(val, "fiber_lte") == 0) {
+        *out = MQVPN_RPROF_FIBER_LTE;
+        return 0;
+    }
     return -1;
 }
 
