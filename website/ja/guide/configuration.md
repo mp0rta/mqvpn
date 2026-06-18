@@ -208,7 +208,7 @@ Port = 443
 Profile = quic_bulk
 ```
 
-…または JSON でも同様に設定できます。`reorder` オブジェクトは上記 INI キーに 1:1 で対応する snake_case キーを使い、`reorder_rules` は `{proto, port, profile}` オブジェクトの配列です:
+…または JSON でも同様に設定できます。`reorder` オブジェクトは上記 INI キーに 1:1 で対応する snake_case キーを使い、`reorder_rules` は `{proto, port, profile}` オブジェクトの配列です（各ルールには任意で `max_wait_ms` / `cap_packets` のオーバーライドを付けられます）:
 
 ```json
 {
@@ -228,10 +228,39 @@ Profile = quic_bulk
     "egress_idle_sec": 300
   },
   "reorder_rules": [
-    { "proto": "udp", "port": 443, "profile": "quic_bulk" }
+    { "proto": "udp", "port": 443, "profile": "cellular_bond" },
+    { "proto": "udp", "port": 4500, "profile": "fiber_lte", "max_wait_ms": 50, "cap_packets": 2048 }
   ]
 }
 ```
+
+### プロファイルプリセット
+
+各プロファイルは、実測でチューニングした `(MaxWaitMs, CapPackets)` のプリセットを持ちます:
+
+| プロファイル | `MaxWaitMs` | `CapPackets` | 備考 |
+|--------------|------------:|-------------:|------|
+| `cellular_bond` | `50` | `1024` | セルラーボンディング（例: デュアル LTE） |
+| `fiber_lte` | `50` | `2048` | 光 + LTE の混在。BDP が大きいため cap を拡大 |
+| `quic_bulk` | `50` | `1024` | `cellular_bond` の後方互換エイリアス |
+| `low_latency` | — | — | 予約済み。プリセットなし（無効） |
+| `default_udp` | — | — | マッチするが並べ替え**しない**（パススルー / OFF） |
+
+ルールの実効 `(MaxWaitMs, CapPackets)` の**優先順位**（高い順）:
+
+1. ルール自身に明示された `MaxWaitMs` / `CapPackets` キー。
+2. グローバルな `[Reorder]` に明示された `MaxWaitMs` / `CapPackets`。
+3. ルールのプロファイルプリセット（上表）。
+4. ビルトインのデフォルト（`MaxWaitMs = 30`、`CapPackets = 1024`）。
+
+つまり、数値が明示されていれば常にプロファイルより優先されます。グローバルな `[Reorder] MaxWaitMs` を `Profile = quic_bulk` と併用している設定が、明示したグローバル値をそのまま使い続けるのはこのためです。
+
+### 並べ替えを有効にすべきとき
+
+並べ替えは**デフォルトで無効**であり、有効な範囲の中でのみ opt-in で使うことを想定しています。実測では、その範囲はおおむね RTT のばらつきが **15〜100 ms**、ジッタのある経路、または**帯域が非対称**なケースです。
+
+- **帯域の非対称が強い場合（おおむね 8:1 以上）:** `MaxWaitMs` を `150`〜`200` まで上げることを検討してください（未検証 — 実回線での検証を要するフォローアップとして扱ってください）。
+- **RTT のばらつきが極端な場合（285 ms 以上、静止衛星クラス）:** ここでは並べ替えは差し引きで損失になります。その種のトラフィックでは `Profile = default_udp` で無効のままにしてください。
 
 ### `[ReorderRule]`（繰り返し可）
 
@@ -239,7 +268,9 @@ Profile = quic_bulk
 |------|------|-----------|
 | `Proto` | マッチする L4 プロトコル（`udp`） | `udp` |
 | `Port` | マッチするポート（送信元または宛先） | — |
-| `Profile` | `quic_bulk`, `low_latency`, または `default_udp` | `quic_bulk` |
+| `Profile` | `cellular_bond`, `fiber_lte`, `quic_bulk`, `low_latency`, または `default_udp` | `quic_bulk` |
+| `MaxWaitMs` | このルールのみの保持時間（ms）のオーバーライド。`0` は警告付きで拒否されます — ポートを素通しさせたい場合は代わりに `Profile = default_udp` を使ってください | プロファイルプリセット |
+| `CapPackets` | このルールのみのフローあたりバッファ上限のオーバーライド。0 以外の 2 のべき乗である必要があり、そうでなければ警告付きで拒否されます | プロファイルプリセット |
 
 ## MTU ガイドライン
 
