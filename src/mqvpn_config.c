@@ -651,16 +651,12 @@ mqvpn_config_add_reorder_rule(mqvpn_config_t *cfg, uint8_t proto, uint16_t port,
         return MQVPN_ERR_INVALID_ARG;
     }
     mqvpn_reorder_rule_t *r = &cfg->reorder.rules[cfg->reorder.n_rules];
+    /* Zero every field first (per-rule params = unset; finalize's precedence
+     * depends on explicit_*==0), then set the caller's intent fields. */
+    memset(r, 0, sizeof(*r));
     r->proto = proto;
     r->port = port;
     r->profile = profile;
-    /* Explicitly zero the per-rule param fields (= unset): finalize's precedence
-     * depends on them being 0. Don't rely on a prior whole-struct memset
-     * surviving into a reused config. */
-    r->explicit_wait_ms = 0;
-    r->explicit_cap = 0;
-    r->resolved_wait_ms = 0;
-    r->resolved_cap = 0;
     cfg->reorder.n_rules++;
     return MQVPN_OK;
 }
