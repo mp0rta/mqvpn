@@ -236,7 +236,7 @@ Profile = quic_bulk
 
 ### Profile presets
 
-Each profile carries an empirically-tuned `(MaxWaitMs, CapPackets)` preset:
+Each profile carries an empirically-tuned `(MaxWaitMs, CapPackets)` preset. The values were chosen from a multipath `netem` sweep across 16 link environments — full methodology and per-environment data are in the [reorder-only multipath report](https://github.com/mp0rta/mqvpn/blob/main/docs/report/2026-06-18-reorder-only-datagram-multipath-connect-ip-en.md):
 
 | Profile | `MaxWaitMs` | `CapPackets` | Notes |
 |---------|------------:|-------------:|-------|
