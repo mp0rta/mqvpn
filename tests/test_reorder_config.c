@@ -959,6 +959,99 @@ test_ini_rule_wait_zero_rejected(void)
                   "(e) resolves to preset, not 0");
 }
 
+/* ──────────────── Task 2.4: JSON per-rule + builder + bridge ──────────────── */
+
+static void
+test_json_rule_params_and_parity(void)
+{
+    /* (a) JSON per-rule max_wait_ms/cap_packets parse into explicit_*, and
+     * JSON↔INI parity for these keys. */
+    const char *ini = "[Reorder]\n"
+                      "Enabled = on\n"
+                      "[ReorderRule]\n"
+                      "Proto = udp\nPort = 443\nProfile = fiber_lte\n"
+                      "MaxWaitMs = 80\nCapPackets = 2048\n";
+    const char *json = "{\n"
+                       "  \"reorder\": {\"enabled\":\"on\"},\n"
+                       "  \"reorder_rules\": [\n"
+                       "    {\"proto\":\"udp\",\"port\":443,\"profile\":\"fiber_lte\",\n"
+                       "     \"max_wait_ms\":80,\"cap_packets\":2048}\n"
+                       "  ]\n"
+                       "}\n";
+    mqvpn_file_config_t icfg, jcfg;
+    mqvpn_config_defaults(&icfg);
+    mqvpn_config_defaults(&jcfg);
+    char *path = write_tmp(ini);
+    int irc = mqvpn_config_load(&icfg, path);
+    if (path) unlink(path);
+    int jrc = mqvpn_config_load_json_filecfg(&jcfg, json);
+    ASSERT_EQ_INT(irc, 0, "ini parse ok");
+    ASSERT_EQ_INT(jrc, 0, "json parse ok");
+    ASSERT_EQ_INT(jcfg.reorder.rules[0].explicit_wait_ms, 80, "(a) json rule wait");
+    ASSERT_EQ_INT(jcfg.reorder.rules[0].explicit_cap, 2048, "(a) json rule cap");
+    ASSERT_EQ_INT(memcmp(&icfg.reorder, &jcfg.reorder, sizeof(icfg.reorder)), 0,
+                  "(a) JSON↔INI per-rule param parity");
+}
+
+static void
+test_json_global_explicit_flag(void)
+{
+    /* (b) JSON global max_wait_ms sets has_explicit_wait. */
+    const char *json = "{\"reorder\":{\"enabled\":\"on\",\"max_wait_ms\":40}}";
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load_json_filecfg(&cfg, json);
+    ASSERT_EQ_INT(rc, 0, "json parse ok");
+    ASSERT_EQ_INT(cfg.reorder.has_explicit_wait, 1, "(b) json global wait explicit");
+}
+
+static void
+test_builder_add_rule_new_profiles(void)
+{
+    /* (c) builder accepts the new fiber_lte profile (was rejected by 0..2 guard). */
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    if (!cfg) return;
+    ASSERT_EQ_INT(mqvpn_config_add_reorder_rule(cfg, 17, 443, MQVPN_RPROF_FIBER_LTE),
+                  MQVPN_OK, "(c) add fiber_lte rule");
+    ASSERT_EQ_INT(cfg->reorder.rules[0].profile, MQVPN_RPROF_FIBER_LTE,
+                  "(c) profile set");
+    ASSERT_EQ_INT(mqvpn_config_add_reorder_rule(cfg, 17, 53, MQVPN_RPROF_CELLULAR_BOND),
+                  MQVPN_OK, "(c) add cellular_bond rule");
+    mqvpn_config_free(cfg);
+}
+
+static void
+test_bridge_struct_copy_carries_params(void)
+{
+    /* (d) struct-copy bridge carries profile, explicit_wait_ms, and has_explicit_*. */
+    mqvpn_reorder_config_t src;
+    mqvpn_reorder_config_default(&src);
+    src.mode = MQVPN_REORDER_ON;
+    src.n_rules = 2;
+    src.rules[0].proto = MQVPN_IPPROTO_UDP;
+    src.rules[0].port = 443;
+    src.rules[0].profile = MQVPN_RPROF_FIBER_LTE;
+    src.rules[1].proto = MQVPN_IPPROTO_UDP;
+    src.rules[1].port = 53;
+    src.rules[1].profile = MQVPN_RPROF_CELLULAR_BOND;
+    src.rules[1].explicit_wait_ms = 80;
+    /* has_explicit_* deliberately left 0 to prove they aren't falsely set. */
+
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    if (!cfg) return;
+    mqvpn_config_apply_reorder(cfg, &src);
+
+    ASSERT_EQ_INT(cfg->reorder.n_rules, 2, "(d) n_rules bridged");
+    ASSERT_EQ_INT(cfg->reorder.rules[0].profile, MQVPN_RPROF_FIBER_LTE,
+                  "(d) rule0 profile");
+    ASSERT_EQ_INT(cfg->reorder.rules[1].profile, MQVPN_RPROF_CELLULAR_BOND,
+                  "(d) rule1 profile");
+    ASSERT_EQ_INT(cfg->reorder.rules[1].explicit_wait_ms, 80, "(d) rule1 explicit_wait");
+    ASSERT_EQ_INT(cfg->reorder.has_explicit_wait, 0, "(d) has_explicit_wait matches src");
+    ASSERT_EQ_INT(cfg->reorder.has_explicit_cap, 0, "(d) has_explicit_cap matches src");
+    mqvpn_config_free(cfg);
+}
+
 int
 main(void)
 {
@@ -1008,6 +1101,12 @@ main(void)
     test_ini_rule_explicit_wait();
     test_ini_rule_cap_nonpow2_rejected();
     test_ini_rule_wait_zero_rejected();
+
+    /* Task 2.4: JSON per-rule + builder guard + struct-copy bridge */
+    test_json_rule_params_and_parity();
+    test_json_global_explicit_flag();
+    test_builder_add_rule_new_profiles();
+    test_bridge_struct_copy_carries_params();
 
     fprintf(stderr, "test_reorder_config: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

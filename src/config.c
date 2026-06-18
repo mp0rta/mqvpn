@@ -455,6 +455,33 @@ json_read_reorder_rules(mqvpn_file_config_t *cfg, const char *p)
                             s);
                 }
             }
+
+            /* per-rule param overrides, validated exactly like the INI path:
+             * max_wait_ms==0 is rejected (use profile default_udp), cap must be
+             * a non-zero power of two; rejected values stay unset (explicit_*==0). */
+            const char *wait_v = json_find_key(obj, "max_wait_ms");
+            if (wait_v) {
+                uint64_t wv = 0;
+                if (json_read_u64_strict(wait_v, &wv) != 0 || wv > 0xffffffffULL)
+                    LOG_WRN("JSON: invalid reorder rule max_wait_ms; ignoring");
+                else if (wv == 0)
+                    LOG_WRN("JSON: reorder rule max_wait_ms=0 unsupported; use "
+                            "profile=default_udp for pass-through; ignoring");
+                else
+                    rule->explicit_wait_ms = (uint32_t)wv;
+            }
+
+            const char *cap_v = json_find_key(obj, "cap_packets");
+            if (cap_v) {
+                uint64_t cv = 0;
+                if (json_read_u64_strict(cap_v, &cv) != 0 || cv > 0xffffffffULL)
+                    LOG_WRN("JSON: invalid reorder rule cap_packets; ignoring");
+                else if (cv == 0 || (cv & (cv - 1)))
+                    LOG_WRN("JSON: reorder rule cap_packets must be a non-zero power "
+                            "of two; ignoring");
+                else
+                    rule->explicit_cap = (uint32_t)cv;
+            }
         }
 
         p = json_skip_ws(end + 1);
@@ -893,8 +920,26 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
      * mqvpn_reorder_config_validate() at apply time, not here. Unknown sub-keys
      * are simply not found (forward-compat). eval_force_no_demotion is
      * deliberately NOT parseable (internal/test knob, same as INI). */
-    const char *ro = json_find_key(json_text, "reorder");
-    if (ro && *ro == '{') {
+    const char *ro_raw = json_find_key(json_text, "reorder");
+    /* Bound the search to the reorder object itself. json_find_key() does not
+     * stop at the object's closing brace, so an unbounded search would leak into
+     * sibling keys (e.g. reorder_rules' max_wait_ms) and falsely set
+     * has_explicit_*. The reorder object holds only flat scalars (no nested
+     * objects), so copying up to the first '}' yields the exact object. */
+    char ro_buf[512];
+    const char *ro = NULL;
+    if (ro_raw && *ro_raw == '{') {
+        const char *ro_end = strchr(ro_raw, '}');
+        if (ro_end) {
+            size_t ro_len = (size_t)(ro_end - ro_raw + 1);
+            if (ro_len < sizeof(ro_buf)) {
+                memcpy(ro_buf, ro_raw, ro_len);
+                ro_buf[ro_len] = '\0';
+                ro = ro_buf;
+            }
+        }
+    }
+    if (ro) {
         mqvpn_reorder_config_t *r = &cfg->reorder;
         const char *kv;
         uint64_t uv;
