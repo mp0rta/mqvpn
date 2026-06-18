@@ -432,10 +432,16 @@ mqvpn_reorder_config_finalize(mqvpn_reorder_config_t *cfg)
         mqvpn_reorder_rule_t *r = &cfg->rules[i];
         uint32_t pw = 0, pc = 0;
         int has_preset = mqvpn_reorder_profile_preset(r->profile, &pw, &pc);
-        r->resolved_wait_ms = r->explicit_wait_ms      ? r->explicit_wait_ms
-                              : cfg->has_explicit_wait ? cfg->max_wait_ms
-                              : has_preset             ? pw
-                                                       : cfg->max_wait_ms;
+        r->resolved_wait_ms =
+            /* default_udp is the OFF class: never reorder, mirroring TX's
+             * unconditional ineligibility. wait==0 makes RX pass the flow
+             * through without allocating any ring. An explicit or global wait
+             * must NOT turn it on, so this branch wins outright. */
+            r->profile == MQVPN_RPROF_DEFAULT_UDP ? 0u
+            : r->explicit_wait_ms                 ? r->explicit_wait_ms
+            : cfg->has_explicit_wait              ? cfg->max_wait_ms
+            : has_preset                          ? pw
+                                                  : cfg->max_wait_ms;
         /* An invalid (non-pow2 / zero) per-rule explicit_cap is treated as UNSET
          * so precedence falls through correctly (global-explicit > preset >
          * builtin) instead of skipping the global tier. */

@@ -1426,6 +1426,39 @@ test_rx_perrule_zero_global_wait_preset_passes(void)
 }
 
 static void
+test_rx_perrule_default_udp_passes_through(void)
+{
+    /* default_udp is the OFF class: a matched flow must PASS THROUGH on RX even
+     * though the global builtin wait (30) is non-zero and not explicitly set.
+     * Before the finalize fix, default_udp fell through to the builtin wait and
+     * RX would buffer reordered packets / create flow state. Mirrors TX, which
+     * never stamps a default_udp-matched packet. */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg(); /* mode ON, global max_wait_ms==30 (builtin) */
+    c.rules[0].proto = MQVPN_IPPROTO_UDP;
+    c.rules[0].port = 443;
+    c.rules[0].profile = MQVPN_RPROF_DEFAULT_UDP;
+    c.n_rules = 1;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    ASSERT_TRUE(rx != NULL, "rx_new ok");
+    ASSERT_EQ_INT(rx->cfg.rules[0].resolved_wait_ms, 0,
+                  "default_udp resolves to 0 (OFF) despite builtin global wait");
+    uint8_t buf[256];
+
+    /* reordered packets on port 443 → pass-through, NO flow state buffered. */
+    size_t n = build_reorder_dgram(buf, 0, 7, 1, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1);
+    n = build_reorder_dgram(buf, 0, 2, 2, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 2);
+    ASSERT_EQ_INT(rec.n, 2, "both delivered immediately (default_udp OFF)");
+    ASSERT_EQ_INT(rec.tags[0], 1, "arrival order preserved (1)");
+    ASSERT_EQ_INT(rec.tags[1], 2, "arrival order preserved (2)");
+    ASSERT_TRUE(only_flow(rx) == NULL, "no flow state created (default_udp OFF)");
+    ASSERT_EQ_INT((long long)rx->n_flows, 0, "n_flows == 0");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
 test_rx_perrule_mode_a_preserved_no_rules(void)
 {
     /* (b3) the global mode-A short-circuit stays green: max_wait_ms==0 with
@@ -1860,6 +1893,7 @@ main(void)
     test_rx_perrule_wait_cap_from_fiber_lte();
     test_rx_perrule_zero_global_wait_rule_buffers();
     test_rx_perrule_zero_global_wait_preset_passes();
+    test_rx_perrule_default_udp_passes_through();
     test_rx_perrule_mode_a_preserved_no_rules();
     test_rx_builder_composed_cellular_bond();
 

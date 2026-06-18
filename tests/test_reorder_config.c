@@ -865,13 +865,27 @@ test_param_precedence(void)
     ASSERT_EQ_INT(cfg.rules[0].resolved_wait_ms, 80, "rule-explicit wait beats preset");
     ASSERT_EQ_INT(cfg.rules[0].resolved_cap, 2048, "cap still from preset");
 
-    /* default_udp (no preset) → builtin 30 / 1024. */
+    /* default_udp is the OFF class: resolved wait is 0 (pass-through) even
+     * with no overrides. cap is don't-care when wait==0 but stays builtin
+     * 1024 (kept pow2-valid by the defensive clamp). */
     mqvpn_reorder_config_default(&cfg);
     cfg.n_rules = 1;
     cfg.rules[0].profile = MQVPN_RPROF_DEFAULT_UDP;
     mqvpn_reorder_config_finalize(&cfg);
-    ASSERT_EQ_INT(cfg.rules[0].resolved_wait_ms, 30, "default_udp builtin wait");
-    ASSERT_EQ_INT(cfg.rules[0].resolved_cap, 1024, "default_udp builtin cap");
+    ASSERT_EQ_INT(cfg.rules[0].resolved_wait_ms, 0, "default_udp OFF pass-through wait");
+    ASSERT_EQ_INT(cfg.rules[0].resolved_cap, 1024,
+                  "default_udp builtin cap (don't-care)");
+
+    /* default_udp stays OFF even when a global explicit wait is set — the OFF
+     * class wins outright (mirrors TX unconditional ineligibility). */
+    mqvpn_reorder_config_default(&cfg);
+    cfg.has_explicit_wait = 1;
+    cfg.max_wait_ms = 120;
+    cfg.n_rules = 1;
+    cfg.rules[0].profile = MQVPN_RPROF_DEFAULT_UDP;
+    mqvpn_reorder_config_finalize(&cfg);
+    ASSERT_EQ_INT(cfg.rules[0].resolved_wait_ms, 0,
+                  "default_udp OFF survives global explicit wait");
 
     /* global-explicit wait masks the preset, but rule-explicit still wins. */
     mqvpn_reorder_config_default(&cfg);
