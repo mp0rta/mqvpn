@@ -16,11 +16,11 @@
 # --config alongside the harness's --listen/--server/--path/--auth-key flags.
 #
 # Inner workload: picoquicdemo HTTP/3 bulk GET (a real inner QUIC flow), which
-# is what genuinely exercises the reorder engine end-to-end. The exact
-# picoquicdemo flags are NOT yet pinned (discovered by the user running
-# scripts/ci_interop/build_picoquic.sh then 'picoquicdemo -h'); every
-# picoquic-flag-specific line is marked TODO(picoquic-flags) and the script
-# degrades loudly (non-zero exit) if PICOQUICDEMO is unset/not found.
+# is what genuinely exercises the reorder engine end-to-end. The picoquicdemo
+# flags are pinned against picoquic master (v1.1.50) built by
+# scripts/ci_interop/build_picoquic.sh; see run_inner_http3() for the exact
+# invocation. The script degrades loudly (non-zero exit) if PICOQUICDEMO is
+# unset/not found.
 #
 # Two modes:
 #   perf  (default) — sweep added-latency / goodput, write the optimal-value CSV.
@@ -94,7 +94,18 @@ DEFAULT_CHOSEN_WAIT=30
 N_PATHS=2
 CTRL_PORT="${CTRL_PORT:-9097}"
 PICO_PORT="${PICO_PORT:-5401}"   # ReorderRule Port == picoquicdemo UDP port
-PICO_FILE_BYTES="${PICO_FILE_BYTES:-52428800}"   # 50 MiB bulk GET
+PICO_FILE_BYTES="${PICO_FILE_BYTES:-20971520}"   # 20 MiB bulk GET (override for slow/collapsed regimes)
+# Hard wall-clock cap for the inner GET. A reorder-heavy / lossy / asymmetric
+# path can stall or crawl the inner QUIC; without a cap the cell would hang
+# (picoquic's own 30s idle timer never fires while bytes still trickle). On
+# timeout the cell records goodput=NA and the sweep moves on (resumable).
+PICO_TIMEOUT="${PICO_TIMEOUT:-90}"   # seconds
+# picoquicdemo TLS material + SNI. The vendored tree ships test certs under
+# certs/; the demo H3 server generates a file of N bytes for the numeric path
+# "/N" (no -w web root needed). SNI must be non-empty or H3 GET is rejected.
+PICO_CERT="${PICO_CERT:-${REPO_ROOT}/third_party/picoquic/certs/cert.pem}"
+PICO_KEY="${PICO_KEY:-${REPO_ROOT}/third_party/picoquic/certs/key.pem}"
+PICO_SNI="${PICO_SNI:-test}"
 STAGE1_CAP=1024   # Stage 1 holds cap fixed at 1024 while sweeping wait
 
 # Scale-mode knobs (perf-mode ignores these). IngressIdleSec < EgressIdleSec is
@@ -112,6 +123,7 @@ SEL_ENV=""
 SEL_AXIS=""
 SEL_STAGE=""   # empty = both stages
 QUICK=0
+FORCE=0        # --force: re-run cells already in the CSV (append fresh samples)
 
 usage() {
     cat >&2 <<EOF
@@ -123,7 +135,12 @@ usage: sudo PICOQUICDEMO=<path> $0 [options]
   --mode <perf|scale>  perf (default) or scale-mode exercise
   --quick              alias: REPEATS=1 + --axis rtt (smoke). With --mode scale,
                        this is the scale-mode smoke.
+  --force              re-run cells already recorded in the CSV instead of
+                       skipping them (appends fresh samples; the analyzer takes
+                       the median over all samples per (env,wait,cap)). Use to
+                       re-test; otherwise the resume cache skips done cells.
 Environments: ${!ENV_NETEM[*]}
+Env knobs: REPEATS (default 3), PICO_FILE_BYTES (default 20MiB), PICO_TIMEOUT (90s)
 EOF
     exit 2
 }
@@ -136,6 +153,7 @@ while [ $# -gt 0 ]; do
         --stage) SEL_STAGE="${2:?--stage needs 1|2}"; shift 2 ;;
         --mode)  MODE="${2:?--mode needs perf|scale}"; shift 2 ;;
         --quick) QUICK=1; shift ;;
+        --force) FORCE=1; shift ;;
         -h|--help) usage ;;
         *) echo "error: unknown argument '$1'" >&2; usage ;;
     esac
@@ -193,7 +211,10 @@ require_picoquic() {
     # picoquic_pin: best-effort identity of the binary used, recorded per row so
     # results stay attributable across rebuilds (no stable --version flag known).
     PICO_PIN="$(cd "${REPO_ROOT}/third_party/picoquic" 2>/dev/null && git rev-parse --short HEAD 2>/dev/null || true)"
-    [ -z "$PICO_PIN" ] && PICO_PIN="$(basename "$PICOQUICDEMO")"
+    [ -n "$PICO_PIN" ] || PICO_PIN="$(basename "$PICOQUICDEMO")"
+    # Must return 0: a trailing `[ test ] && cmd` that evaluates false would make
+    # this function return 1, tripping `set -e` at the call site.
+    return 0
 }
 
 # ─── Temp files + trap ───────────────────────────────────────────────────────
@@ -202,7 +223,6 @@ CLIENT_LOG="$(mktemp)"
 INI_FILE="$(mktemp --suffix=.ini)"
 PICO_SVR_LOG="$(mktemp)"
 PICO_CLI_LOG="$(mktemp)"
-PICO_WWW_DIR="$(mktemp -d)"
 
 cleanup_all() {
     # Stop any inner picoquic processes inside the benchmark netns first.
@@ -210,7 +230,6 @@ cleanup_all() {
     ip netns exec "$NS_CLIENT" pkill -f picoquicdemo 2>/dev/null || true
     bench_cleanup
     rm -f "$SERVER_LOG" "$CLIENT_LOG" "$INI_FILE" "$PICO_SVR_LOG" "$PICO_CLI_LOG"
-    rm -rf "$PICO_WWW_DIR"
 }
 trap cleanup_all EXIT
 
@@ -245,34 +264,30 @@ write_ini() {
 # Port) and a client in NS_CLIENT doing a fixed-size bulk GET, parsing goodput
 # (Mbps) from the client output. Echoes the goodput (float, "0" on failure).
 #
-# TODO(picoquic-flags): confirm via 'picoquicdemo -h' after running
-#   scripts/ci_interop/build_picoquic.sh — the exact flag spelling for:
-#     * BBR congestion control (best guess: -G bbr)
-#     * the bulk scenario / requested object size (best guess: '*N:/N;' scenario
-#       string, or serving a sized file from a www root)
-#     * qlog OFF (default; do NOT pass -q)
-#     * the goodput-line format the client prints (the awk/grep below is a
-#       placeholder that looks for "Mbps" / "received ... bytes").
+# Flags pinned against picoquicdemo v1.1.50 (picoquic master, built by
+# scripts/ci_interop/build_picoquic.sh):
+#   * -G bbr            BBR congestion control (also the build default; -h lists
+#                       bbr among newreno/cubic/dcubic/fast/bbr/prague/bbr1/c4).
+#   * "/<bytes>"        scenario: the demo H3 server GENERATES <bytes> bytes for a
+#                       numeric path on the fly — no -w web root / sized file needed.
+#   * -n <sni>          SNI is mandatory; a NULL SNI makes the H3 GET fail.
+#   * -D                no-disk on both ends (don't write the payload to disk).
+#   * qlog/binlog/text log are OFF by simply omitting -q/-b/-l.
+#   * goodput line (client stdout): "Received <N> bytes in <T> seconds, <X> Mbps."
+#     NOTE the client ALSO prints a "Sent ... Mbps." line (upload), so we must
+#     extract the RECEIVED (download) line specifically, not the last Mbps token.
 run_inner_http3() {
     require_picoquic || return 1
-
-    # Provision a sized object for the GET. picoquicdemo's H3 server serves files
-    # from a www root by path; we name it by its byte size so the scenario can
-    # request "/<bytes>".
-    # TODO(picoquic-flags): if the build uses the synthetic "*N:/N;" scenario
-    # (server generates N bytes on the fly) this file is unnecessary — drop it.
-    local obj="${PICO_WWW_DIR}/${PICO_FILE_BYTES}"
-    head -c "$PICO_FILE_BYTES" /dev/zero >"$obj" 2>/dev/null || true
 
     : >"$PICO_SVR_LOG"
     : >"$PICO_CLI_LOG"
 
-    # TODO(picoquic-flags): server invocation. Best guess below; confirm flags.
-    #   picoquicdemo -p <port> -G bbr -w <wwwroot>   (server mode = no target host)
+    # Server: serves the generated object; -1 closes after one connection (one
+    # cell == one bulk GET), -D = no disk.
     ip netns exec "$NS_SERVER" "$PICOQUICDEMO" \
         -p "$PICO_PORT" \
-        -G bbr \
-        -w "$PICO_WWW_DIR" \
+        -c "$PICO_CERT" -k "$PICO_KEY" \
+        -G bbr -1 -D \
         >"$PICO_SVR_LOG" 2>&1 &
     local pico_svr_pid=$!
     sleep 1
@@ -282,37 +297,33 @@ run_inner_http3() {
         return 1
     fi
 
-    # TODO(picoquic-flags): client invocation. Best guess below; confirm flags.
-    #   picoquicdemo -G bbr <server-ip> <port> <scenario>
-    #   scenario requesting PICO_FILE_BYTES bytes once. Common picoquic syntax is
-    #   '*1:N:/<bytes>;' or '/<bytes>'; confirm via -h.
+    # Client: bulk GET of a generated PICO_FILE_BYTES object over the tunnel.
+    # Wrapped in `timeout` so a stalled/crawling transfer caps at PICO_TIMEOUT
+    # (then goodput parses as NA) instead of hanging the whole sweep. -k 5 sends
+    # SIGKILL if picoquicdemo ignores the initial SIGTERM.
     local scenario="/${PICO_FILE_BYTES}"
-    ip netns exec "$NS_CLIENT" "$PICOQUICDEMO" \
-        -G bbr \
+    timeout -k 5 "$PICO_TIMEOUT" \
+        ip netns exec "$NS_CLIENT" "$PICOQUICDEMO" \
+        -G bbr -D -n "$PICO_SNI" \
         "$TUNNEL_SERVER_IP" "$PICO_PORT" "$scenario" \
         >"$PICO_CLI_LOG" 2>&1 || true
 
     kill "$pico_svr_pid" 2>/dev/null || true
     wait "$pico_svr_pid" 2>/dev/null || true
 
-    # TODO(picoquic-flags): goodput parse. picoquicdemo typically prints a
-    # summary line; the patterns below are placeholders. Confirm the real format
-    # and tighten this once 'picoquicdemo -h' / a sample run is available.
+    # Parse the RECEIVED (download) goodput. The line is:
+    #   "Received <N> bytes in <T> seconds, <X> Mbps."
+    # Pick the token immediately before "Mbps" on the Received line only (the Sent
+    # line carries the upload Mbps and must NOT be matched).
     local gp
-    gp="$(grep -oiE '[0-9]+(\.[0-9]+)?[[:space:]]*Mbps' "$PICO_CLI_LOG" 2>/dev/null \
-            | grep -oE '[0-9]+(\.[0-9]+)?' | tail -1 || true)"
-    if [ -z "$gp" ]; then
-        # Fallback: derive Mbps from "received <bytes>" + elapsed if present.
-        # Still a placeholder until the real output format is pinned.
-        gp="$(awk '
-            /received/ && /bytes/ { for (i=1;i<=NF;i++) if ($i ~ /^[0-9]+$/) b=$i }
-            /[0-9]+(\.[0-9]+)? *(s|sec|seconds)/ { for (i=1;i<=NF;i++) if ($i ~ /^[0-9]+(\.[0-9]+)?$/) t=$i }
-            END { if (b>0 && t>0) printf "%.3f", (b*8)/(t*1000000); else print "" }
-        ' "$PICO_CLI_LOG" 2>/dev/null || true)"
-    fi
-    # Unparseable goodput (parse regex still TODO(picoquic-flags)) is reported as
-    # the sentinel "NA" — NOT 0 — so the downstream analyzer can filter it instead
-    # of mistaking it for a true zero-throughput measurement.
+    gp="$(awk '
+        /^Received [0-9]+ bytes in .* Mbps/ {
+            for (i = 1; i <= NF; i++)
+                if ($i == "Mbps" || $i == "Mbps.") { print $(i - 1); break }
+        }' "$PICO_CLI_LOG" 2>/dev/null | tail -1 || true)"
+    # Unparseable / failed transfer is reported as the sentinel "NA" — NOT 0 — so
+    # the downstream analyzer filters it instead of mistaking it for a true
+    # zero-throughput measurement.
     [ -z "$gp" ] && gp="NA"
     echo "$gp"
 }
@@ -397,8 +408,8 @@ run_one_cell() {
     local env="$1" wait="$2" cap="$3" rep="$4" axis="$5"
     local key="${env}|${wait}|${cap}|${rep}"
 
-    if [ -n "${DONE_KEYS[$key]:-}" ]; then
-        echo "[skip] env=$env wait=$wait cap=$cap rep=$rep (already in CSV)"
+    if [ "$FORCE" -eq 0 ] && [ -n "${DONE_KEYS[$key]:-}" ]; then
+        echo "[skip] env=$env wait=$wait cap=$cap rep=$rep (already in CSV; --force to re-run)"
         return 0
     fi
 
@@ -419,9 +430,9 @@ run_one_cell() {
         return 0
     fi
 
-    # Goodput parse is still a TODO(picoquic-flags) placeholder. run_inner_http3
-    # already emits the sentinel "NA" (not "0") on workload/parse failure, so a
-    # truly-zero throughput stays distinguishable from "not measured" downstream.
+    # run_inner_http3 emits the sentinel "NA" (not "0") on workload/parse failure,
+    # so a truly-zero throughput stays distinguishable from "not measured"
+    # downstream (the analyzer filters NA rows).
     local goodput
     goodput="$(run_inner_http3)" || {
         echo "  (inner workload failed; recording goodput=NA)" >&2
@@ -446,6 +457,7 @@ run_one_cell() {
     echo "  -> goodput=${goodput} Mbps  reorder=[${stats_tail}]"
 
     bench_stop_vpn
+    return 0   # don't let bench_stop_vpn's exit status fail the cell under set -e
 }
 
 # ─── Environment selection ───────────────────────────────────────────────────
@@ -534,8 +546,12 @@ scale_launch_concurrent_udp() {
     # the long-lived VPN server+client background jobs (started with & by
     # bench_start_vpn_server/_client), which never exit, hanging scale mode.
     local flow_pids=()
-    # TODO(picoquic-flags): replace this iperf3/nc multiplex with N concurrent
-    # picoquicdemo H3 GETs on distinct client src ports once flags are pinned.
+    # Scale mode stresses FLOW-TABLE capacity, so it only needs N distinct reorder
+    # flows — each iperf3 client uses a distinct --cport, giving a distinct inner
+    # UDP 4-tuple == a distinct reorder flow key. That is sufficient to exercise
+    # MaxFlows / per_flow_limit_drop, so we keep the lightweight iperf3/nc multiplex
+    # here rather than N concurrent picoquicdemo processes (perf mode already uses
+    # real H3; N-flow picoquic is optional extra realism, deferred).
     if command -v iperf3 >/dev/null 2>&1; then
         ip netns exec "$NS_SERVER" iperf3 -s -p "$PICO_PORT" -D \
             --pidfile /tmp/sweep-reorder-iperf3.pid >/dev/null 2>&1 || true
@@ -559,6 +575,7 @@ scale_launch_concurrent_udp() {
         done
         [ "${#flow_pids[@]}" -gt 0 ] && wait "${flow_pids[@]}"
     fi
+    return 0   # a failed flow's wait status must not fail the run under set -e
 }
 
 run_scale_mode() {
@@ -615,10 +632,10 @@ concurrent=${SCALE_CONCURRENT_FLOWS} report: ${SCALE_MD}"
         if [ "${per_flow_drop:-0}" -gt 0 ]; then
             echo "- RESULT: **PASS** — flow-capacity limit observed"
         else
-            echo "- RESULT: INCONCLUSIVE — no per-flow drops seen (workload may not have"
-            echo "  multiplexed enough distinct 4-tuples through the ReorderRule; if using"
-            echo "  the iperf3/nc fallback rather than picoquic, distinct src ports may not"
-            echo "  map to distinct reorder flows — see TODO(picoquic-flags))."
+            echo "- RESULT: INCONCLUSIVE — no per-flow drops seen. Raise"
+            echo "  SCALE_CONCURRENT_FLOWS above MaxFlows (${SCALE_MAX_FLOWS}), or confirm the"
+            echo "  flows reached the engine (each --cport is a distinct inner 4-tuple ="
+            echo "  a distinct reorder flow; check the tunnel actually carried them)."
         fi
         echo ""
     } >>"$SCALE_MD"
