@@ -15,7 +15,7 @@ As a result, **datagrams spread across paths with different delays arrive reorde
 
 mqvpn uses CONNECT-IP, i.e. DATAGRAMs, so it is directly exposed to the above.
 
-I therefore added a **buffer at the tunnel egress that re-orders datagrams** (within the implementation latitude RFC 9221 §5.1 grants). This report quantifies, per network environment, the configuration an mqvpn operator should use: single path, multipath with the buffer off, or multipath with the buffer on. The buffer's operating envelope turns out to be narrow but well-defined; for many environments (asymmetric bandwidth, large RTT spread) the correct configuration is not multipath at all.
+I therefore added a **buffer at the tunnel egress that re-orders datagrams** (within the implementation latitude RFC 9221 §5.1 grants). This report quantifies, per network environment, which configuration maximises **bandwidth-aggregation throughput**: single path, multipath with the buffer off, or multipath with the buffer on. The buffer's operating envelope turns out to be narrow but well-defined; for many environments (asymmetric bandwidth, large RTT spread) multipath provides little throughput benefit and the better single path is faster — though multipath retains independent value for failover, which this report does not measure (§2).
 
 ### 1.1 Why QUIC is the inner flow under test — out-of-order tolerance is a MAY in the RFC (implementation-defined)
 
@@ -41,6 +41,7 @@ A per-flow reordering buffer at the tunnel egress. Disciplines:
 - **Per-flow:** an independent buffer per inner 4-tuple, bounded by `max_wait_ms` / `cap`.
 - **Default OFF, opt-in:** because in some environments it is a net loss (§4).
 - **Non-goals:** FEC, retransmission, and inner TCP are out of scope. This is an optional shim for bandwidth aggregation, not a general reliability layer.
+- **Out of scope (for this report):** failover behaviour — multipath's ability to keep the connection alive when one path degrades or drops — is a separate use case not measured here. The configuration guidance in §4 is keyed on bandwidth-aggregation throughput only; an operator who values failover resilience may still prefer multipath even where §4.1.C says single-path is faster under stable conditions.
 
 ## 3. Experiment
 
@@ -142,7 +143,7 @@ inner picoquicdemo: server `picoquicdemo -p 5401 -c <cert> -k <key> -G bbr -1 -D
 
 ## 4. Results and configuration guidance
 
-For each network environment, this section answers the operator-facing question: **single path, multipath with reorder OFF, or multipath with reorder ON?** Of the sixteen tested environments, only six benefit from multipath at all; the reorder buffer is the right choice in only three.
+For each network environment, this section answers the operator-facing question: **single path, multipath with reorder OFF, or multipath with reorder ON?** The measurement is throughput-only (§2): of the sixteen tested environments, only six see a bandwidth-aggregation benefit from multipath; the reorder buffer is the right choice in only three. The remaining ten reach higher throughput with the better single path — failover use of multipath there is a separate decision the operator can still make.
 
 ### 4.1 Three-way comparison: single path vs multipath (OFF / ON)
 
@@ -172,7 +173,7 @@ These are the envs where the inner picoquic's fixed `kPacketThreshold = 3` (§1.
 
 Symmetric, zero RTT spread, no jitter. Aggregation works without a buffer (the inner doesn't see meaningful cross-path reordering), and enabling the buffer actively hurts: Δ best-ON vs OFF is negative for all three envs (15–26 % regression). **The shipping default of reorder OFF is the correct choice here.**
 
-#### 4.1.C 🔴 Single path beats both — multipath strictly hurts (10 envs)
+#### 4.1.C 🔴 Single path beats both — multipath does not aggregate (10 envs)
 
 | env | RTT spread [ms] | Path A [Mbps] | Path B [Mbps] | best single [Mbps] | OFF (mp) [Mbps] | best-ON (mp) [Mbps] | best-ON wait / cap | Δ best-ON vs OFF [%] | Δ best-ON vs best-single [%] |
 |---|--:|--:|--:|--:|--:|--:|---|--:|--:|
@@ -189,7 +190,7 @@ Symmetric, zero RTT spread, no jitter. Aggregation works without a buffer (the i
 
 In every §4.1.C env, Path A is the higher-bandwidth or lower-RTT side (see §3.3 for the netem strings) and is therefore the path to use when configuring mqvpn for single-path operation. — in `OFF (mp)` = the multipath OFF baseline didn't finish the 20 MiB transfer within the 5-minute hard cap. Reorder ON does complete the transfer in those cells (`lte_starlink` / `congested`), where the buffer's "rescue from collapse" effect is clearest. But **even with ON, multipath is still slower than just using Path A**.
 
-The unifying property: either path bandwidth is asymmetric (≥ 2× ratio), or RTT spread is ≥ 50 ms, or both. In all such cases the scheduler is forced to push some traffic onto the slow path; the reorder buffer can rescue the multipath stack from outright collapse but cannot beat the better single path. **Operator action: configure mqvpn with the better single path; do not multipath in these environments.**
+The unifying property: either path bandwidth is asymmetric (≥ 2× ratio), or RTT spread is ≥ 50 ms, or both. In all such cases the scheduler is forced to push some traffic onto the slow path; the reorder buffer can rescue the multipath stack from outright collapse but cannot beat the better single path. **For bandwidth-aggregation goals, multipath provides little benefit in these environments; configuring mqvpn with the better single path is faster.** (Multipath remains useful for failover — keeping the connection alive when one path degrades — which is out of scope here; see §2.)
 
 ### 4.2 Sensitivity: optimal `max_wait_ms` vs RTT spread
 
@@ -211,21 +212,24 @@ High-BDP paths (fiber, ~300 mbit) need **`cap ≥ 2048`** when reorder is enable
 
 ### 4.3 Configuration decision tree
 
-Six questions, in order. Stop at the first match.
+Six questions, in order. Stop at the first match. The tree optimises for
+**bandwidth-aggregation throughput**; if you also value failover (multipath
+keeping the connection alive when one path degrades, see §2), the "use
+single path" verdicts below may still be acceptable to override.
 
 ```
 1. Are path bandwidths asymmetric (faster / slower ≥ 2×)?
    → use the faster path alone (single path).
      [fiber_lte, bw_10to1, bw_4to1, dual_lte, lte_starlink, lte_geo]
      Why: the slow path drags the multipath stack below the fast path alone,
-     even with reorder. Multipath strictly hurts.
+     even with reorder. Multipath provides no bandwidth benefit here.
 
 2. Is RTT spread ≥ 50 ms?
    → use the lower-RTT single path.
      [rtt_70, rtt_120, rtt_320]
      Why: the buffer can only mask reorder up to ~50 ms wait; beyond that it
      either times out (gap unfilled) or waits longer than the aggregation
-     gain saves. Single path with the smaller RTT wins.
+     gain saves. Single path with the smaller RTT delivers higher throughput.
 
 3. Per-path loss ≥ 0.5 % on otherwise symmetric paths?
    → multipath, reorder OFF.
@@ -246,12 +250,13 @@ Six questions, in order. Stop at the first match.
      Why: clean aggregation, no cross-path reorder to fix.
 
 6. Congested (per-path loss > 1 % with jitter)?
-   → use the single path with least loss; no good multipath option.
+   → use the single path with least loss; multipath does not aggregate.
      [congested]
-     Why: multipath does not recover; reorder ON only narrows the gap by ~10 %.
+     Why: multipath does not recover throughput; reorder ON only narrows
+     the gap by ~10 %.
 ```
 
-The shipping default — multipath enabled, `[Reorder] Enabled = off` — is correct for the §4.1.B environments. For the §4.1.A environments the operator opts in via `[Reorder] Enabled = on` and the per-rule `MaxWaitMs` from §4.2. For the §4.1.C environments — the largest bucket at 10 of 16 — the operator should configure mqvpn with a single path: multipathing in these environments slows the connection down even with the buffer enabled.
+The shipping default — multipath enabled, `[Reorder] Enabled = off` — is correct for the §4.1.B environments. For the §4.1.A environments the operator opts in via `[Reorder] Enabled = on` and the per-rule `MaxWaitMs` from §4.2. For the §4.1.C environments — the largest bucket at 10 of 16 — multipath provides no bandwidth-aggregation benefit; configuring mqvpn with the better single path delivers higher throughput. An operator who runs multipath in these environments for failover resilience (out of scope here; see §2) trades some peak throughput for that resilience.
 
 ## 5. References
 
