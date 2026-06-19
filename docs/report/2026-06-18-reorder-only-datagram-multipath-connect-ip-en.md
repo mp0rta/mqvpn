@@ -154,7 +154,7 @@ Three buckets emerge:
 
 #### 4.1.A ✅ Multipath + reorder ON — buffer earns its keep (3 envs)
 
-| env | RTT spread [ms] | Path A [Mbps] | Path B [Mbps] | best single [Mbps] | OFF (mp) [Mbps] | best-ON (mp) [Mbps] | best-ON wait / cap | Δ vs OFF [%] | Δ vs best-single [%] |
+| env | RTT spread [ms] | Path A [Mbps] | Path B [Mbps] | best single [Mbps] | OFF (mp) [Mbps] | best-ON (mp) [Mbps] | best-ON wait / cap | Δ best-ON vs OFF [%] | Δ best-ON vs best-single [%] |
 |---|--:|--:|--:|--:|--:|--:|---|--:|--:|
 | `rtt_40` | 20 | 40.5 | 37.9 | **40.5** | 0.85 | **49.0** | wait=200, cap=1024 | **+5666** | **+21** |
 | `jit_5` | 0 | 38.3 | 38.8 | **38.8** | 3.38 | **61.4** | wait=120, cap=1024 | +1716 | **+58** |
