@@ -15,7 +15,7 @@ As a result, **datagrams spread across paths with different delays arrive reorde
 
 mqvpn uses CONNECT-IP, i.e. DATAGRAMs, so it is directly exposed to the above.
 
-I therefore added a **buffer at the tunnel egress that re-orders datagrams** (within the implementation latitude RFC 9221 §5.1 grants). This report quantifies **where it helps and how to tune it**.
+I therefore added a **buffer at the tunnel egress that re-orders datagrams** (within the implementation latitude RFC 9221 §5.1 grants). This report quantifies **where multipath + reorder beats both multipath without it AND the better single path** — comparing against single-path is what reveals that for many environments (asymmetric bandwidth, large RTT spread) the correct configuration is not multipath at all, regardless of reorder. The buffer's operating envelope turns out to be narrow but well-defined.
 
 ### 1.1 Why QUIC is the inner flow under test — out-of-order tolerance is a MAY in the RFC (implementation-defined)
 
@@ -119,11 +119,22 @@ sudo MQVPN="$PWD/build-lib/mqvpn" \
      PICO_TIMEOUT=300 \
      ./benchmarks/sweep_reorder.sh --reorder off --out ci_sweep_results/reorder_off.csv
 
-# analysis (after fixing root ownership)
+# Single-path baseline: 16 envs × 2 legs × 3 repeats = 96 cells. For each env,
+# run the inner workload over a SINGLE path carrying the env's path A netem,
+# then again carrying the env's path B netem. Reorder is disabled (single path
+# has no cross-path reordering for the buffer to fix). Together with the OFF
+# and ON sweeps, this enables the 3-way comparison in §4.1.
+sudo MQVPN="$PWD/build-lib/mqvpn" \
+     PICOQUICDEMO="$PWD/third_party/picoquic/build/picoquicdemo" \
+     PICO_TIMEOUT=300 \
+     ./benchmarks/sweep_single_path.sh --out ci_sweep_results/reorder_single.csv
+
+# analysis (after fixing root ownership). --single-csv adds the 3-way table.
 sudo chown -R "$(id -un):$(id -gn)" ci_sweep_results
 python3 benchmarks/sweep_reorder_analyze.py \
   --csv ci_sweep_results/reorder_full.csv \
   --off-csv ci_sweep_results/reorder_off.csv \
+  --single-csv ci_sweep_results/reorder_single.csv \
   --out ci_sweep_results/reorder_optimal.md
 ```
 
@@ -131,55 +142,132 @@ inner picoquicdemo: server `picoquicdemo -p 5401 -c <cert> -k <key> -G bbr -1 -D
 
 ## 4. Results and configuration guidance
 
-### 4.1 ON vs OFF net benefit (which environments to enable in)
+The previous version of this section compared reorder ON vs OFF only and concluded multipath + reorder is the right choice in 9 of 16 environments. Adding a single-path baseline (this version) changes that — for many of those 9 envs, the **better single path beats multipath + reorder**, sometimes dramatically (`fiber_lte`: 212 Mbps single vs 77 Mbps multipath). The corrected picture below replaces those recommendations.
 
-`Δ = (best-ON − OFF) / OFF`; best-ON = the max-goodput frontier point.
+### 4.1 Three-way comparison: single path vs multipath (OFF / ON)
 
-**✅ Enable (real cross-path reordering occurs)**
+Prior multipath-VPN benchmarks (Speedify white papers, OpenMPTCProuter, glorytun) typically compare reorder buffer ON vs OFF on a multipath topology and report Δ%. That omits the prior question: *should you multipath at all?* For asymmetric or high-spread paths the answer is often no — the slow path drags both legs of the multipath stack below the better single path.
 
-| env | RTT spread | OFF [Mbps] | best-ON [Mbps] | Δ | recommended |
-|-----|------:|-----------:|---------------:|----:|---------|
-| rtt_40 | 20 | 0.85 | 49.0 | **+5687%** | wait=50 |
-| rtt_70 | 50 | 1.25 | 36.5 | **+2808%** | wait=50 |
-| rtt_120 | 100 | 7.05 | 28.2 | +299% | wait=50 |
-| jit_20 | 0 | 0.93 | 37.6 | **+3932%** | wait=50 |
-| jit_5 | 0 | 3.38 | 61.4 | +1719% | wait=10 |
-| dual_lte | 15 | 0.91 | 21.8 | +2280% | wait=30 |
-| fiber_lte | 32 | 4.94 | 77.3 | +1467% | **wait=50, cap=2048** |
-| bw_4to1 | 0 | 15.6 | 26.1 | +67% | wait=50 |
-| bw_10to1 | 0 | 13.3 | 21.0 | +58% | wait=200 |
+Each row below compares three configurations on the **same netem**: single path (leg A or leg B = the env's path A or path B netem applied to a lone path), multipath with reorder OFF (RAW pass-through), and multipath with reorder at its best-goodput tuning. The recommendation picks the simplest configuration whose median goodput is within 5% of the winner (priority: single > multipath OFF > multipath + reorder ON).
 
-**🔴 Keep OFF (no reordering / waiting is wasted = net loss)**
+Three buckets emerge:
 
-| env | RTT spread | OFF [Mbps] | best-ON [Mbps] | Δ | reason |
-|-----|------:|-----------:|---------------:|----:|------|
-| baseline | 0 | 73.9 | 58.0 | −21.5% | no reordering, only buffer overhead |
-| loss_05 | 0 | 70.7 | 52.7 | −25.5% | pure loss, no gaps to fill |
-| loss_2 | 0 | 29.0 | 24.5 | −15.7% | same |
-| lte_geo | 285 | 31.1 | 27.3 | −12.3% | extreme spread; waiting for the slow path backfires |
-| rtt_320 | 300 | 40.1 | 35.7 | −10.8% | same |
+#### 4.1.A ✅ Multipath + reorder ON — buffer earns its keep (3 envs)
 
-**⚠️ Reorder is essential:** `congested` / `lte_starlink` could not finish the 20 MiB transfer even in 5 minutes with reorder OFF (< 0.55 Mbps), whereas ON reached 5.7 / 17 Mbps. In the harshest environments where RAW pass-through breaks down, the reorder buffer is what makes the transfer complete at all.
+| env | RTT spread | leg A | leg B | best single | OFF (mp) | best-ON (mp) | Δ best-ON vs best-single | rec config |
+|---|--:|--:|--:|--:|--:|--:|--:|---|
+| `rtt_40` | 20 | 40.5 | 37.9 | **40.5** | 0.85 | **49.0** | **+21%** | wait=50 |
+| `jit_5` | 0 | 38.3 | 38.8 | **38.8** | 3.38 | **61.4** | **+58%** | wait=10 |
+| `jit_20` | 0 | 17.4 | 11.0 | **17.4** | 0.93 | **37.6** | **+115%** | wait=50 |
 
-### 4.2 Sensitivity: optimal max_wait vs RTT spread
+These are the envs where the inner picoquic's fixed `kPacketThreshold = 3` (§1.1) collapses on the multipath OFF baseline AND where reorder ON recovers enough to genuinely exceed the better single path. They share: low RTT spread (0–20 ms), no bandwidth asymmetry, and jitter or small per-path spread.
+
+#### 4.1.B ✅ Multipath, reorder OFF — clean aggregation (3 envs)
+
+| env | RTT spread | leg A | leg B | best single | OFF (mp) | best-ON (mp) | Δ OFF vs best-single | rec config |
+|---|--:|--:|--:|--:|--:|--:|--:|---|
+| `baseline` | 0 | 40.6 | 40.3 | **40.6** | **73.9** | 58.0 | **+82%** | reorder OFF |
+| `loss_05` | 0 | 29.6 | 32.2 | **32.2** | **70.7** | 52.7 | **+119%** | reorder OFF |
+| `loss_2` | 0 | 16.1 | 16.3 | **16.3** | **29.0** | 24.5 | **+78%** | reorder OFF |
+
+Symmetric, zero RTT spread, no jitter. Aggregation works without a buffer (the inner doesn't see meaningful cross-path reordering), and the buffer's added latency actively hurts the ON config by ~15–25%. **The shipping default of reorder OFF is the correct choice here.**
+
+#### 4.1.C 🔴 Single path beats both — multipath strictly hurts (10 envs)
+
+| env | RTT spread | leg A | leg B | best single | OFF (mp) | best-ON (mp) | Δ best-ON vs best-single | use leg |
+|---|--:|--:|--:|--:|--:|--:|--:|---|
+| `fiber_lte` | 32 | **212.4** | 22.0 | **212.4** | 4.94 | 77.3 | **−64%** | leg A (fiber) |
+| `bw_10to1` | 0 | **74.2** | 8.6 | **74.2** | 13.3 | 21.0 | **−72%** | leg A (fast) |
+| `bw_4to1` | 0 | **40.6** | 10.3 | **40.6** | 15.6 | 26.1 | −36% | leg A (fast) |
+| `rtt_120` | 100 | **40.7** | 27.5 | **40.7** | 7.05 | 28.2 | −31% | leg A (low-RTT) |
+| `rtt_320` | 300 | **40.3** | 9.2 | **40.3** | 40.1 | 35.7 | −11% | leg A (low-RTT) |
+| `lte_geo` | 285 | **31.7** | 6.0 | **31.7** | 31.1 | 27.3 | −14% | leg A (LTE) |
+| `lte_starlink` | 15 | **29.6** | 8.9 | **29.6** | — | 17.1 | −42% | leg A |
+| `dual_lte` | 15 | **29.6** | 18.8 | **29.6** | 0.91 | 21.8 | −27% | leg A |
+| `rtt_70` | 50 | **40.6** | 33.7 | **40.6** | 1.25 | 36.5 | −10% | leg A (low-RTT) |
+| `congested` | 10 | **6.4** | 5.7 | **6.4** | — | 5.7 | −11% | leg A (lose less) |
+
+(— = the multipath OFF baseline didn't finish the 20 MiB transfer within the 5-minute hard cap; the ON column does, which is what the previous report version flagged as ⚠️ "reorder essential". But **even with ON, multipath is still slower than just using leg A**.)
+
+The unifying property: either path bandwidth is asymmetric (≥2× ratio), or RTT spread is ≥50 ms, or both. In all such cases the scheduler is forced to push some traffic onto the slow path; reorder buffer can rescue the multipath stack from outright collapse but cannot beat the better single path. The previous report's ⚠️ "reorder is essential" verdict was correct that **without reorder multipath would have failed**, but incorrect that **reorder makes multipath the right choice** — the right choice is to not multipath in the first place.
+
+#### 4.1.D Correction notice — envs misclassified in the previous version
+
+The previous §4.1 "✅ Enable" list recommended multipath + reorder for the following envs based on ON vs OFF Δ%. The single-path baseline shows the better single path is the correct configuration:
+
+| env | previous Δ vs OFF | actual Δ vs best-single | corrected recommendation |
+|---|--:|--:|---|
+| `fiber_lte` | +1467% | **−64%** | single path (leg A, fiber) |
+| `bw_10to1` | +58% | −72% | single path (leg A, fast) |
+| `bw_4to1` | +67% | −36% | single path (leg A, fast) |
+| `dual_lte` | +2280% | −27% | single path (leg A) |
+| `rtt_120` | +299% | −31% | single path (leg A) |
+| `rtt_70` | +2808% | −10% | single path (leg A) |
+| `lte_starlink` | (ON-only, "essential") | −42% | single path (leg A) |
+
+The ON vs OFF Δ in the old report measured "how much does the buffer recover from the OFF baseline's collapse" — not "is multipath worth using". A "+5687%" gain from a 0.85 Mbps collapsed baseline still leaves goodput below the better single path's 40 Mbps. We retain the rtt_40 / jit_5 / jit_20 / baseline / loss_05 / loss_2 verdicts from the previous version — those six remain net-positive when re-measured against best single.
+
+### 4.2 Sensitivity: optimal `max_wait_ms` vs RTT spread
+
+For the envs where multipath + reorder is recommended (§4.1.A), the knee — smallest `max_wait_ms` reaching ≥ 90 % of peak goodput — tracks the spread cleanly:
 
 | env | spread [ms] | knee wait [ms] | knee goodput | peak wait | peak goodput |
-|-----|----------:|-------------:|-----------:|-----------:|---------------:|
+|---|--:|--:|--:|--:|--:|
 | baseline | 0 | 10 | 57.9 | 30 | 58.0 |
 | rtt_40 | 20 | 50 | 45.7 | 200 | 49.0 |
 | rtt_70 | 50 | 50 | 34.2 | 300 | 36.5 |
 | rtt_120 | 100 | 50 | 28.2 | 50 | 28.2 |
 | rtt_320 | 300 | 10 | 35.7 | 10 | 35.7 |
 
-- spread 20–50 ms: the knee tracks the spread (when wait ≪ spread, gaps never fill, everything times out, and goodput collapses to ~1 Mbps).
-- spread ≥100 ms: the knee plateaus at 50 ms.
-- spread ≥285 ms: the smallest wait is best = reorder is counterproductive (the cost of waiting for the slow path exceeds the aggregation gain).
+- spread 20–50 ms: knee tracks the spread (when wait ≪ spread, gaps never fill, everything times out, goodput collapses to ~1 Mbps).
+- spread ≥ 100 ms: the knee plateaus at 50 ms — but as §4.1.C shows, the resulting goodput is already below single-path; tuning the wait further does not change that.
+- spread ≥ 285 ms: the smallest wait wins = the buffer is counterproductive (cost of waiting for the slow path exceeds the aggregation gain), but again single-path wins outright.
 
-### 4.3 Configuration guidance (for users)
+High-BDP paths (fiber, ~300 mbit) need **`cap ≥ 2048`** when reorder is enabled; 1024 is too small and 256/512 collapse. For low-BDP paths cap is irrelevant. Cap matters only inside the §4.1.A envelope — outside it, the right answer is "don't enable the buffer", so cap is moot.
 
-- **Enable when:** RTT spread ≈ **15–100 ms** / jitter present / asymmetric bandwidth. `max_wait_ms ≈ 50 ms` is the knee across the broad useful range. High-BDP paths (fiber, ~300 mbit) need **`cap ≥ 2048`** (1024 too small, 256/512 collapse). For low BDP, cap is irrelevant.
-- **Keep OFF when:** near-symmetric with spread ≈ 0 and loss-dominated (−16% to −26% net loss), or extreme spread (≥285 ms, GEO-satellite class; counterproductive).
-- The default OFF is sound; opt in only within the useful range above.
+### 4.3 Configuration decision tree
+
+Six questions, in order. Stop at the first match.
+
+```
+1. Are path bandwidths asymmetric (faster / slower ≥ 2×)?
+   → use the faster path alone (single path).
+     [fiber_lte, bw_10to1, bw_4to1, dual_lte, lte_starlink, lte_geo]
+     Why: the slow path drags the multipath stack below the fast path alone,
+     even with reorder. Multipath strictly hurts.
+
+2. Is RTT spread ≥ 50 ms?
+   → use the lower-RTT single path.
+     [rtt_70, rtt_120, rtt_320]
+     Why: the buffer can only mask reorder up to ~50 ms wait; beyond that it
+     either times out (gap unfilled) or waits longer than the aggregation
+     gain saves. Single path with the smaller RTT wins.
+
+3. Per-path loss ≥ 0.5 % on otherwise symmetric paths?
+   → multipath, reorder OFF.
+     [loss_05, loss_2]
+     Why: pure loss is uncorrelated between paths; aggregation doubles
+     effective bandwidth without producing reorder gaps for the buffer
+     to fill. The buffer's added latency only hurts.
+
+4. Symmetric paths with jitter (per-path ≥ 5 ms) OR small spread (≤ 30 ms)?
+   → multipath + reorder ON, wait = 50 ms (cap = 2048 if BDP > 1 MB).
+     [jit_5, jit_20, rtt_40]
+     Why: this is the buffer's sweet spot. OFF collapses to ~1 Mbps due to
+     spurious-loss; ON recovers and exceeds the better single path.
+
+5. Symmetric, clean (no jitter, no per-path loss, zero spread)?
+   → multipath, reorder OFF.
+     [baseline]
+     Why: clean aggregation, no cross-path reorder to fix.
+
+6. Congested (per-path loss > 1 % with jitter)?
+   → use the single path with least loss; no good multipath option.
+     [congested]
+     Why: multipath does not recover; reorder ON only narrows the gap by ~10 %.
+```
+
+The shipping default (reorder OFF, multipath enabled) is correct for §4.1.B envs (3 of 16). For the §4.1.A envs (3 of 16) reorder must be opted in. For the §4.1.C envs (10 of 16) **multipath itself should be disabled** — the operator should configure mqvpn with a single path. This is the single biggest lesson of the 3-way comparison and the one the OFF-vs-ON-only methodology of the previous report version missed entirely.
 
 ## 5. References
 
@@ -193,4 +281,4 @@ inner picoquicdemo: server `picoquicdemo -p 5401 -c <cert> -k <key> -G bbr -1 -D
 - picoquic `e652e454`: `loss_recovery.c#L562` (fixed `delta_seq >= 3`) / `frames.c#L2652` (telemetry)
 - Google QUICHE `f001eed`: `general_loss_algorithm.h#L124` (`use_adaptive_reordering_threshold_ = true`) / `quic_constants.h#L285` (`kDefaultPacketReorderingThreshold = 3`)
 - Implementation: `src/reorder.h` / `src/reorder_tx.c` / `src/reorder_rx.c` (merged to main in PR #153, default OFF)
-- Harness: `benchmarks/sweep_reorder.sh` / `benchmarks/sweep_reorder_analyze.py`; output `ci_sweep_results/reorder_optimal.md`
+- Harness: `benchmarks/sweep_reorder.sh` (perf + OFF baseline), `benchmarks/sweep_single_path.sh` (single-path baseline for the 3-way comparison in §4.1), `benchmarks/sweep_reorder_analyze.py` (Pareto + ON/OFF + 3-way table); shared netem profile table `BENCH_ENV_NETEM` in `benchmarks/bench_env_setup.sh`; output `ci_sweep_results/reorder_optimal.md`
