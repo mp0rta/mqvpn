@@ -154,40 +154,40 @@ Three buckets emerge:
 
 #### 4.1.A ✅ Multipath + reorder ON — buffer earns its keep (3 envs)
 
-| env | RTT spread [ms] | Path A [Mbps] | Path B [Mbps] | best single [Mbps] | OFF (mp) [Mbps] | best-ON (mp) [Mbps] | Δ best-ON vs best-single | rec config |
-|---|--:|--:|--:|--:|--:|--:|--:|---|
-| `rtt_40` | 20 | 40.5 | 37.9 | **40.5** | 0.85 | **49.0** | **+21%** | wait=50 |
-| `jit_5` | 0 | 38.3 | 38.8 | **38.8** | 3.38 | **61.4** | **+58%** | wait=10 |
-| `jit_20` | 0 | 17.4 | 11.0 | **17.4** | 0.93 | **37.6** | **+115%** | wait=50 |
+| env | RTT spread [ms] | Path A [Mbps] | Path B [Mbps] | best single [Mbps] | OFF (mp) [Mbps] | best-ON (mp) [Mbps] | best-ON wait / cap | Δ vs OFF [%] | Δ vs best-single [%] |
+|---|--:|--:|--:|--:|--:|--:|---|--:|--:|
+| `rtt_40` | 20 | 40.5 | 37.9 | **40.5** | 0.85 | **49.0** | wait=200, cap=1024 | **+5666** | **+21** |
+| `jit_5` | 0 | 38.3 | 38.8 | **38.8** | 3.38 | **61.4** | wait=120, cap=1024 | +1716 | **+58** |
+| `jit_20` | 0 | 17.4 | 11.0 | **17.4** | 0.93 | **37.6** | wait=50, cap=1024 | **+3943** | **+115** |
 
-These are the envs where the inner picoquic's fixed `kPacketThreshold = 3` (§1.1) collapses on the multipath OFF baseline AND where reorder ON recovers enough to genuinely exceed the better single path. They share: low RTT spread (0–20 ms), no bandwidth asymmetry, and jitter or small per-path spread.
+These are the envs where the inner picoquic's fixed `kPacketThreshold = 3` (§1.1) collapses on the multipath OFF baseline AND where reorder ON recovers enough to genuinely exceed the better single path. They share: low RTT spread (0–20 ms), no bandwidth asymmetry, and jitter or small per-path spread. `best-ON wait / cap` is the goodput-peak configuration; the latency-bounded shipping default (the goodput knee, typically `wait=50 ms`) reaches ≥ 90 % of these numbers — see §4.2.
 
 #### 4.1.B ✅ Multipath, reorder OFF — clean aggregation (3 envs)
 
-| env | RTT spread [ms] | Path A [Mbps] | Path B [Mbps] | best single [Mbps] | OFF (mp) [Mbps] | best-ON (mp) [Mbps] | Δ OFF vs best-single | rec config |
-|---|--:|--:|--:|--:|--:|--:|--:|---|
-| `baseline` | 0 | 40.6 | 40.3 | **40.6** | **73.9** | 58.0 | **+82%** | reorder OFF |
-| `loss_05` | 0 | 29.6 | 32.2 | **32.2** | **70.7** | 52.7 | **+119%** | reorder OFF |
-| `loss_2` | 0 | 16.1 | 16.3 | **16.3** | **29.0** | 24.5 | **+78%** | reorder OFF |
+| env | RTT spread [ms] | Path A [Mbps] | Path B [Mbps] | best single [Mbps] | OFF (mp) [Mbps] | best-ON (mp) [Mbps] | best-ON wait / cap | Δ best-ON vs OFF [%] | Δ OFF vs best-single [%] |
+|---|--:|--:|--:|--:|--:|--:|---|--:|--:|
+| `baseline` | 0 | 40.6 | 40.3 | **40.6** | **73.9** | 58.0 | wait=30, cap=2048 | −21.5 | **+82** |
+| `loss_05` | 0 | 29.6 | 32.2 | **32.2** | **70.7** | 52.7 | wait=10, cap=1024 | −25.5 | **+119** |
+| `loss_2` | 0 | 16.1 | 16.3 | **16.3** | **29.0** | 24.5 | wait=10, cap=1024 | −15.5 | **+78** |
 
-Symmetric, zero RTT spread, no jitter. Aggregation works without a buffer (the inner doesn't see meaningful cross-path reordering), and the buffer's added latency actively hurts the ON config by ~15–25%. **The shipping default of reorder OFF is the correct choice here.**
+Symmetric, zero RTT spread, no jitter. Aggregation works without a buffer (the inner doesn't see meaningful cross-path reordering), and enabling the buffer actively hurts: Δ best-ON vs OFF is negative for all three envs (15–26 % regression). **The shipping default of reorder OFF is the correct choice here.**
 
 #### 4.1.C 🔴 Single path beats both — multipath strictly hurts (10 envs)
 
-| env | RTT spread [ms] | Path A [Mbps] | Path B [Mbps] | best single [Mbps] | OFF (mp) [Mbps] | best-ON (mp) [Mbps] | Δ best-ON vs best-single | use Path |
-|---|--:|--:|--:|--:|--:|--:|--:|---|
-| `fiber_lte` | 32 | **212.4** | 22.0 | **212.4** | 4.94 | 77.3 | **−64%** | Path A (fiber) |
-| `bw_10to1` | 0 | **74.2** | 8.6 | **74.2** | 13.3 | 21.0 | **−72%** | Path A (fast) |
-| `bw_4to1` | 0 | **40.6** | 10.3 | **40.6** | 15.6 | 26.1 | −36% | Path A (fast) |
-| `rtt_120` | 100 | **40.7** | 27.5 | **40.7** | 7.05 | 28.2 | −31% | Path A (low-RTT) |
-| `rtt_320` | 300 | **40.3** | 9.2 | **40.3** | 40.1 | 35.7 | −11% | Path A (low-RTT) |
-| `lte_geo` | 285 | **31.7** | 6.0 | **31.7** | 31.1 | 27.3 | −14% | Path A (LTE) |
-| `lte_starlink` | 15 | **29.6** | 8.9 | **29.6** | — | 17.1 | −42% | Path A |
-| `dual_lte` | 15 | **29.6** | 18.8 | **29.6** | 0.91 | 21.8 | −27% | Path A |
-| `rtt_70` | 50 | **40.6** | 33.7 | **40.6** | 1.25 | 36.5 | −10% | Path A (low-RTT) |
-| `congested` | 10 | **6.4** | 5.7 | **6.4** | — | 5.7 | −11% | Path A (lose less) |
+| env | RTT spread [ms] | Path A [Mbps] | Path B [Mbps] | best single [Mbps] | OFF (mp) [Mbps] | best-ON (mp) [Mbps] | best-ON wait / cap | Δ best-ON vs OFF [%] | Δ best-ON vs best-single [%] | use Path |
+|---|--:|--:|--:|--:|--:|--:|---|--:|--:|---|
+| `fiber_lte` | 32 | **212.4** | 22.0 | **212.4** | 4.94 | 77.3 | wait=50, cap=2048 | +1465 | **−64** | Path A (fiber) |
+| `bw_10to1` | 0 | **74.2** | 8.6 | **74.2** | 13.3 | 21.0 | wait=200, cap=1024 | +58 | **−72** | Path A (fast) |
+| `bw_4to1` | 0 | **40.6** | 10.3 | **40.6** | 15.6 | 26.1 | wait=300, cap=1024 | +67 | −36 | Path A (fast) |
+| `rtt_120` | 100 | **40.7** | 27.5 | **40.7** | 7.05 | 28.2 | wait=50, cap=1024 | +300 | −31 | Path A (low-RTT) |
+| `rtt_320` | 300 | **40.3** | 9.2 | **40.3** | 40.1 | 35.7 | wait=10, cap=1024 | −11 | −11 | Path A (low-RTT) |
+| `lte_geo` | 285 | **31.7** | 6.0 | **31.7** | 31.1 | 27.3 | wait=10, cap=1024 | −12 | −14 | Path A (LTE) |
+| `lte_starlink` | 15 | **29.6** | 8.9 | **29.6** | — | 17.1 | wait=50, cap=1024 | n/a (OFF collapsed) | −42 | Path A |
+| `dual_lte` | 15 | **29.6** | 18.8 | **29.6** | 0.91 | 21.8 | wait=50, cap=4096 | +2295 | −27 | Path A |
+| `rtt_70` | 50 | **40.6** | 33.7 | **40.6** | 1.25 | 36.5 | wait=300, cap=1024 | +2820 | −10 | Path A (low-RTT) |
+| `congested` | 10 | **6.4** | 5.7 | **6.4** | — | 5.7 | wait=30, cap=1024 | n/a (OFF collapsed) | −11 | Path A (lose less) |
 
-(— = the multipath OFF baseline didn't finish the 20 MiB transfer within the 5-minute hard cap. Reorder ON does complete the transfer, but **even so, multipath is slower than just using Path A**.)
+(— in `OFF (mp)` = the multipath OFF baseline didn't finish the 20 MiB transfer within the 5-minute hard cap. Reorder ON does complete the transfer in those cells — `lte_starlink` / `congested` — and the buffer's "rescue from collapse" effect is clearest there. But **even with ON, multipath is still slower than just using Path A**.)
 
 The unifying property: either path bandwidth is asymmetric (≥ 2× ratio), or RTT spread is ≥ 50 ms, or both. In all such cases the scheduler is forced to push some traffic onto the slow path; the reorder buffer can rescue the multipath stack from outright collapse but cannot beat the better single path. **Operator action: configure mqvpn with the better single path; do not multipath in these environments.**
 
