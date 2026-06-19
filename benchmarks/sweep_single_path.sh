@@ -6,18 +6,19 @@
 #
 # Companion to sweep_reorder.sh. For each environment in the ENV_NETEM table
 # (sourced verbatim so the two sweeps stay in lockstep), runs the inner
-# picoquicdemo bulk GET over a SINGLE veth path using that environment's leg-A
-# netem, then again using its leg-B netem. The result answers a question the
-# OFF-vs-ON table cannot: "is multipath + reorder actually faster than just
-# picking the better single path?" If best-single >> best-ON, the right
-# recommendation is "don't multipath", not "tune the reorder buffer".
+# picoquicdemo bulk GET over a SINGLE veth path using that environment's
+# Path A netem, then again using its Path B netem. The result answers a
+# question the OFF-vs-ON table cannot: "is multipath + reorder actually
+# faster than just picking the better single path?" If best-single >>
+# best-ON, the right recommendation is "don't multipath", not "tune the
+# reorder buffer".
 #
 # Differences from sweep_reorder.sh:
 #   * N_PATHS=1 (only veth-a0/veth-a1 exist).
 #   * No reorder-param sweep — [Reorder] Enabled=off (a single path has no
 #     cross-path reordering for the buffer to fix).
-#   * Per env, two cells: leg=A applies the env's pathA netem, leg=B applies its
-#     pathB netem. Both to the same lone veth pair.
+#   * Per env, two cells: the CSV `leg` column carries A for Path A's netem
+#     and B for Path B's netem, both applied to the same lone veth pair.
 #
 # CSV schema (header row):
 #   timestamp,env_name,leg,repeat,goodput_mbps,picoquic_pin

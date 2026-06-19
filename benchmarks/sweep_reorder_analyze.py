@@ -32,7 +32,7 @@ given environment.
 
 With --single-csv (the CSV from `sweep_single_path.sh`) added, a 3-way
 comparison table is also produced: OFF (multipath, reorder OFF) vs best-ON
-(multipath + reorder, ceiling) vs best-single (max of leg A / leg B over the
+(multipath + reorder, ceiling) vs best-single (max of Path A / Path B over the
 SAME netem). The recommended config column picks the simplest option whose
 median goodput is within 5% of the winner, with priority single > mp-OFF >
 mp-ON. This is the answer to "should the user multipath at all in this env?"
@@ -599,7 +599,7 @@ def pick_recommendation(best_single, best_single_leg, off_mp, best_on_mp,
     candidates = []  # (priority, label, value, leg)
     # Lower priority number == simpler == preferred on ties.
     if best_single is not None:
-        leg_label = f"single path (leg {best_single_leg})" if best_single_leg else "single path"
+        leg_label = f"single path (Path {best_single_leg})" if best_single_leg else "single path"
         candidates.append((0, leg_label, best_single, best_single_leg))
     if off_mp is not None:
         candidates.append((1, "multipath, reorder OFF", off_mp, None))
@@ -627,7 +627,7 @@ def build_three_way_comparison(rows_on, off_rows, single_rows,
     Per env present in the single-path CSV, compare:
       - OFF (multipath, RAW pass-through) median goodput
       - best-ON (multipath + reorder, max-goodput frontier point)
-      - leg A median, leg B median (both single path; same netem as the
+      - Path A median, Path B median (both single path; same netem as the
         corresponding leg in the multipath setup)
 
     Then call pick_recommendation() to decide what to tell the user.
@@ -656,7 +656,7 @@ def build_three_way_comparison(rows_on, off_rows, single_rows,
 
     md.append(
         "Each row compares three configs on the SAME netem: single path "
-        "(leg A / B = the env's path A / B netem applied to a lone path), "
+        "(Path A / Path B = the env's path A / path B netem applied to a lone path), "
         "multipath with reorder OFF (RAW pass-through), and multipath with "
         "reorder at its best-goodput frontier point. The recommendation column "
         "picks the SIMPLEST config whose median goodput is within "
@@ -664,8 +664,8 @@ def build_three_way_comparison(rows_on, off_rows, single_rows,
         "This is the user-facing answer to 'should I multipath in this env?'"
     )
     md.append("")
-    md.append("| env | rtt spread (ms) | leg A Mbps | leg B Mbps | best single Mbps | "
-              "OFF (mp) Mbps | best-ON (mp) Mbps | Δ best-ON vs best-single % | recommendation |")
+    md.append("| env | RTT spread [ms] | Path A [Mbps] | Path B [Mbps] | best single [Mbps] | "
+              "OFF (mp) [Mbps] | best-ON (mp) [Mbps] | Δ best-ON vs best-single [%] | recommendation |")
     md.append("|:--|---:|---:|---:|---:|---:|---:|---:|:--|")
 
     for env in sorted(single.keys()):
@@ -702,9 +702,9 @@ def build_three_way_comparison(rows_on, off_rows, single_rows,
             f"{_fmt(d_on_vs_single, 1)} | **{label}** |"
         )
     md.append("")
-    md.append("- leg A / leg B = single-path goodput with the env's path A / "
-              "path B netem applied (median over repeats).")
-    md.append("- best single = max(leg A, leg B); the better single-path "
+    md.append("- Path A / Path B = single-path goodput [Mbps] with the env's "
+              "path A / path B netem applied (median over repeats).")
+    md.append("- best single = max(Path A, Path B); the better single-path "
               "option a user could pick if not multipathing.")
     md.append("- Δ best-ON vs best-single: positive ⇒ multipath + reorder "
               "actually aggregates beyond the better single path. Near-zero "
@@ -865,13 +865,13 @@ assert _off_rec is None and "numeric" in _off_note, (_off_rec, _off_note)
 # pick_recommendation: simplest config within tol wins; clear winner overrides.
 # (a) single barely beats mp-OFF & mp-ON -> single recommended (simplest tier).
 _lab, _leg = pick_recommendation(50.0, "A", 49.0, 49.5)
-assert _lab == "single path (leg A)" and _leg == "A", (_lab, _leg)
+assert _lab == "single path (Path A)" and _leg == "A", (_lab, _leg)
 # (b) multipath ON clearly aggregates above single -> mp-ON wins.
 _lab, _leg = pick_recommendation(50.0, "A", 60.0, 100.0)
 assert _lab == "multipath + reorder ON" and _leg is None, (_lab, _leg)
 # (c) Ties prefer simpler: single == mp-OFF within tol, single wins.
 _lab, _leg = pick_recommendation(50.0, "B", 50.5, 30.0)
-assert _lab == "single path (leg B)" and _leg == "B", (_lab, _leg)
+assert _lab == "single path (Path B)" and _leg == "B", (_lab, _leg)
 # (d) Missing single (None): mp-OFF and mp-ON compete; mp-OFF wins on tie.
 _lab, _leg = pick_recommendation(None, None, 50.0, 49.5)
 assert _lab == "multipath, reorder OFF", (_lab, _leg)
@@ -880,7 +880,7 @@ _lab, _leg = pick_recommendation(None, None, None, None)
 assert _lab == "no data", (_lab, _leg)
 # (f) leg-B-wins case threads the leg label through.
 _lab, _leg = pick_recommendation(60.0, "B", 40.0, 50.0)
-assert _lab == "single path (leg B)" and _leg == "B", (_lab, _leg)
+assert _lab == "single path (Path B)" and _leg == "B", (_lab, _leg)
 
 
 if __name__ == "__main__":
