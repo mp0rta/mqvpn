@@ -27,11 +27,20 @@
 #   scale           — exercise MaxFlows / ResetMarkPackets / EgressIdleSec idle
 #                     eviction, write a human .md report (NOT the CSV).
 #
+# Reorder ON vs OFF (--reorder on|off):
+#   The "is reorder net-positive?" follow-up. --reorder off runs each selected
+#   environment ONCE per repeat with [Reorder] Enabled=off (pure RAW
+#   pass-through; MaxWaitMs/CapPackets are irrelevant so the wait/cap sweep is
+#   skipped) and writes a baseline CSV (default reorder_off_DATE.csv). The ON
+#   data is reused from the main perf sweep; sweep_reorder_analyze.py --off-csv
+#   then prints a per-env OFF-goodput vs best-ON-goodput delta table. Default is
+#   --reorder on (the existing perf/scale sweep, unchanged).
+#
 # Requires: root (netns), netcat-openbsd, jq, picoquicdemo (PICOQUICDEMO=<path>).
 # Usage:
 #   sudo PICOQUICDEMO=<path> ./sweep_reorder.sh [--out CSV] [--env NAME]
 #        [--axis rtt|jitter|loss|bw|profiles] [--stage 1|2]
-#        [--mode perf|scale] [--quick]
+#        [--mode perf|scale] [--reorder on|off] [--quick]
 #   Env overrides: REPEATS, MQVPN, PICOQUICDEMO, PICO_FILE_BYTES.
 
 set -euo pipefail
@@ -42,25 +51,12 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/bench_env_setup.sh"
 
 # ─── Sweep tables ────────────────────────────────────────────────────────────
-# Each value is "<pathA netem>|<pathB netem>" (split on '|' for bench_apply_netem).
-declare -A ENV_NETEM=(
-  [baseline]="delay 20ms rate 50mbit|delay 20ms rate 50mbit"
-  [rtt_40]="delay 20ms rate 50mbit|delay 40ms rate 50mbit"
-  [rtt_70]="delay 20ms rate 50mbit|delay 70ms rate 50mbit"
-  [rtt_120]="delay 20ms rate 50mbit|delay 120ms rate 50mbit"
-  [rtt_320]="delay 20ms rate 50mbit|delay 320ms rate 50mbit"
-  [jit_5]="delay 20ms jitter 5ms rate 50mbit|delay 20ms jitter 5ms rate 50mbit"
-  [jit_20]="delay 20ms jitter 20ms rate 50mbit|delay 20ms jitter 20ms rate 50mbit"
-  [loss_05]="delay 20ms loss 0.5% rate 50mbit|delay 20ms loss 0.5% rate 50mbit"
-  [loss_2]="delay 20ms loss 2% rate 50mbit|delay 20ms loss 2% rate 50mbit"
-  [bw_4to1]="delay 20ms rate 50mbit|delay 20ms rate 12mbit"
-  [bw_10to1]="delay 20ms rate 100mbit|delay 20ms rate 10mbit"
-  [dual_lte]="delay 30ms jitter 5ms loss 0.5% rate 40mbit|delay 45ms jitter 8ms loss 0.5% rate 25mbit"
-  [fiber_lte]="delay 8ms rate 300mbit|delay 40ms jitter 8ms loss 0.5% rate 30mbit"
-  [lte_starlink]="delay 35ms jitter 8ms rate 40mbit|delay 50ms jitter 25ms loss 1% rate 100mbit"
-  [lte_geo]="delay 35ms rate 40mbit|delay 320ms jitter 20ms loss 0.5% rate 20mbit"
-  [congested]="delay 50ms jitter 20ms loss 2% rate 20mbit|delay 60ms jitter 25ms loss 2% rate 15mbit"
-)
+# ENV_NETEM lives in bench_env_setup.sh (BENCH_ENV_NETEM) — single source of
+# truth shared with sweep_single_path.sh so the 3-way comparison can rely on
+# both CSVs being measured under identical netem per env. We bind a local
+# nameref so the existing call sites (${ENV_NETEM[...]}, ${!ENV_NETEM[@]})
+# read from the shared table unchanged.
+declare -n ENV_NETEM=BENCH_ENV_NETEM
 
 # axis -> which env keys belong to each OFAT (one-factor-at-a-time) axis.
 declare -A AXIS_ENVS=(
@@ -124,6 +120,7 @@ SEL_AXIS=""
 SEL_STAGE=""   # empty = both stages
 QUICK=0
 FORCE=0        # --force: re-run cells already in the CSV (append fresh samples)
+REORDER_MODE="on"   # --reorder on|off: off = RAW-baseline sweep (no wait/cap loop)
 
 usage() {
     cat >&2 <<EOF
@@ -133,6 +130,12 @@ usage: sudo PICOQUICDEMO=<path> $0 [options]
   --axis <a>           restrict to an OFAT axis: rtt|jitter|loss|bw|profiles
   --stage <1|2>        restrict to Stage 1 (wait sweep) or Stage 2 (cap sweep)
   --mode <perf|scale>  perf (default) or scale-mode exercise
+  --reorder <on|off>   on (default) = the normal perf/scale sweep. off = RAW
+                       baseline: each env once per repeat with [Reorder]
+                       Enabled=off, no wait/cap loop, default out reorder_off_*.csv
+                       (feed it to sweep_reorder_analyze.py --off-csv). Keep the
+                       OFF CSV separate from the ON sweep — do NOT reuse the ON
+                       run's --out, or the off/off rows mix into one file.
   --quick              alias: REPEATS=1 + --axis rtt (smoke). With --mode scale,
                        this is the scale-mode smoke.
   --force              re-run cells already recorded in the CSV instead of
@@ -152,6 +155,7 @@ while [ $# -gt 0 ]; do
         --axis)  SEL_AXIS="${2:?--axis needs a name}"; shift 2 ;;
         --stage) SEL_STAGE="${2:?--stage needs 1|2}"; shift 2 ;;
         --mode)  MODE="${2:?--mode needs perf|scale}"; shift 2 ;;
+        --reorder) REORDER_MODE="${2:?--reorder needs on|off}"; shift 2 ;;
         --quick) QUICK=1; shift ;;
         --force) FORCE=1; shift ;;
         -h|--help) usage ;;
@@ -170,6 +174,19 @@ case "$MODE" in
     *) echo "error: --mode must be perf or scale (got '$MODE')" >&2; usage ;;
 esac
 
+case "$REORDER_MODE" in
+    on|off) ;;
+    *) echo "error: --reorder must be on or off (got '$REORDER_MODE')" >&2; usage ;;
+esac
+
+# scale mode stresses the reorder flow table; it is meaningless with reorder OFF
+# (the whole engine is bypassed). Reject the combination loudly rather than
+# silently producing an all-RAW scale report.
+if [ "$REORDER_MODE" = "off" ] && [ "$MODE" = "scale" ]; then
+    echo "error: --reorder off is incompatible with --mode scale" >&2
+    exit 2
+fi
+
 if [ -n "$SEL_AXIS" ] && [ -z "${AXIS_ENVS[$SEL_AXIS]:-}" ]; then
     echo "error: unknown --axis '$SEL_AXIS' (valid: ${!AXIS_ENVS[*]})" >&2
     exit 2
@@ -187,7 +204,13 @@ fi
 RESULTS_SWEEP_DIR="${REPO_ROOT}/ci_sweep_results"
 mkdir -p "$RESULTS_SWEEP_DIR"
 DATE_TAG="$(date +%Y%m%d)"
-[ -z "$OUT" ] && OUT="${RESULTS_SWEEP_DIR}/reorder_sweep_${DATE_TAG}.csv"
+if [ -z "$OUT" ]; then
+    if [ "$REORDER_MODE" = "off" ]; then
+        OUT="${RESULTS_SWEEP_DIR}/reorder_off_${DATE_TAG}.csv"
+    else
+        OUT="${RESULTS_SWEEP_DIR}/reorder_sweep_${DATE_TAG}.csv"
+    fi
+fi
 SCALE_MD="${RESULTS_SWEEP_DIR}/reorder_scale_${DATE_TAG}.md"
 
 CSV_HEADER="timestamp,env_name,axis,max_wait_ms,cap_pkts,repeat,goodput_mbps,added_p99_ms,added_max_ms,added_buffered_p99_ms,gap_count,gap_filled,gap_timeout,gap_overflow,delivered,picoquic_pin"
@@ -239,6 +262,16 @@ trap cleanup_all EXIT
 # [ReorderRule]. CapPackets is the cap key (NOT CapPacketsPerFlow).
 write_ini() {
     local wait="$1" cap="$2"
+    # --reorder off: emit a minimal RAW-baseline INI. Enabled=off bypasses the
+    # whole engine, so MaxWaitMs/CapPackets/[ReorderRule] are irrelevant — omit
+    # them rather than write the "off" sentinel wait/cap into numeric keys.
+    if [ "$REORDER_MODE" = "off" ]; then
+        {
+            echo "[Reorder]"
+            echo "Enabled = off"
+        } >"$INI_FILE"
+        return 0
+    fi
     {
         echo "[Reorder]"
         echo "Enabled = on"
@@ -531,6 +564,36 @@ run_perf_sweep() {
     echo "[perf] done. CSV: $OUT"
 }
 
+# ─── reorder-OFF baseline sweep (--reorder off) ──────────────────────────────
+# Each selected env once per repeat with [Reorder] Enabled=off. No wait/cap
+# loop (RAW pass-through ignores them), so the row carries the "off" sentinel in
+# the max_wait_ms/cap_pkts columns and all-zero reorder counters (the OFF engine
+# emits zeroed stats). Honors --env / --axis subsetting via select_envs; default
+# is every environment. Feed the resulting CSV to sweep_reorder_analyze.py
+# --off-csv against the ON perf CSV for the net-benefit table.
+run_off_sweep() {
+    require_picoquic   # fail loudly up front before any netns work
+    ensure_csv_header
+    load_done_keys
+
+    local envs rep env
+    envs="$(select_envs)"
+    echo "[off] RAW baseline (Enabled=off); envs: ${envs}"
+    echo "[off] repeats: ${REPEATS}  out: ${OUT}"
+
+    for env in $envs; do
+        local axis; axis="$(axis_of_env "$env")"
+        for (( rep=1; rep<=REPEATS; rep++ )); do
+            # wait/cap are meaningless under RAW; the sentinel "off" keeps these
+            # rows out of the ON Pareto grouping (analyzer reads them via --off-csv).
+            run_one_cell "$env" "off" "off" "$rep" "$axis"
+        done
+    done
+
+    echo ""
+    echo "[off] done. CSV: $OUT"
+}
+
 # ─── scale-mode workloads ────────────────────────────────────────────────────
 # (a) Multi-flow run: several concurrent inner flows on distinct src ports under
 #     a LOW MaxFlows, expecting per_flow_limit_drop_count / evictions to appear.
@@ -674,13 +737,15 @@ concurrent=${SCALE_CONCURRENT_FLOWS} report: ${SCALE_MD}"
 }
 
 # ─── Main ────────────────────────────────────────────────────────────────────
-echo "[sweep_reorder] mode=$MODE binary=$MQVPN ctrl-port=$CTRL_PORT pico-port=$PICO_PORT"
+echo "[sweep_reorder] mode=$MODE reorder=$REORDER_MODE binary=$MQVPN ctrl-port=$CTRL_PORT pico-port=$PICO_PORT"
 bench_check_test_deps nc jq
 
 bench_setup_netns_n "$N_PATHS"
 bench_add_server_host_routes "$N_PATHS"
 
-if [ "$MODE" = "scale" ]; then
+if [ "$REORDER_MODE" = "off" ]; then
+    run_off_sweep
+elif [ "$MODE" = "scale" ]; then
     run_scale_mode
 else
     run_perf_sweep
