@@ -174,20 +174,20 @@ Symmetric, zero RTT spread, no jitter. Aggregation works without a buffer (the i
 
 #### 4.1.C 🔴 Single path beats both — multipath strictly hurts (10 envs)
 
-| env | RTT spread [ms] | Path A [Mbps] | Path B [Mbps] | best single [Mbps] | OFF (mp) [Mbps] | best-ON (mp) [Mbps] | best-ON wait / cap | Δ best-ON vs OFF [%] | Δ best-ON vs best-single [%] | use Path |
-|---|--:|--:|--:|--:|--:|--:|---|--:|--:|---|
-| `fiber_lte` | 32 | **212.4** | 22.0 | **212.4** | 4.94 | 77.3 | wait=50, cap=2048 | +1465 | **−64** | Path A (fiber) |
-| `bw_10to1` | 0 | **74.2** | 8.6 | **74.2** | 13.3 | 21.0 | wait=200, cap=1024 | +58 | **−72** | Path A (fast) |
-| `bw_4to1` | 0 | **40.6** | 10.3 | **40.6** | 15.6 | 26.1 | wait=300, cap=1024 | +67 | −36 | Path A (fast) |
-| `rtt_120` | 100 | **40.7** | 27.5 | **40.7** | 7.05 | 28.2 | wait=50, cap=1024 | +300 | −31 | Path A (low-RTT) |
-| `rtt_320` | 300 | **40.3** | 9.2 | **40.3** | 40.1 | 35.7 | wait=10, cap=1024 | −11 | −11 | Path A (low-RTT) |
-| `lte_geo` | 285 | **31.7** | 6.0 | **31.7** | 31.1 | 27.3 | wait=10, cap=1024 | −12 | −14 | Path A (LTE) |
-| `lte_starlink` | 15 | **29.6** | 8.9 | **29.6** | — | 17.1 | wait=50, cap=1024 | n/a (OFF collapsed) | −42 | Path A |
-| `dual_lte` | 15 | **29.6** | 18.8 | **29.6** | 0.91 | 21.8 | wait=50, cap=4096 | +2295 | −27 | Path A |
-| `rtt_70` | 50 | **40.6** | 33.7 | **40.6** | 1.25 | 36.5 | wait=300, cap=1024 | +2820 | −10 | Path A (low-RTT) |
-| `congested` | 10 | **6.4** | 5.7 | **6.4** | — | 5.7 | wait=30, cap=1024 | n/a (OFF collapsed) | −11 | Path A (lose less) |
+| env | RTT spread [ms] | Path A [Mbps] | Path B [Mbps] | best single [Mbps] | OFF (mp) [Mbps] | best-ON (mp) [Mbps] | best-ON wait / cap | Δ best-ON vs OFF [%] | Δ best-ON vs best-single [%] |
+|---|--:|--:|--:|--:|--:|--:|---|--:|--:|
+| `fiber_lte` | 32 | **212.4** | 22.0 | **212.4** | 4.94 | 77.3 | wait=50, cap=2048 | +1465 | **−64** |
+| `bw_10to1` | 0 | **74.2** | 8.6 | **74.2** | 13.3 | 21.0 | wait=200, cap=1024 | +58 | **−72** |
+| `bw_4to1` | 0 | **40.6** | 10.3 | **40.6** | 15.6 | 26.1 | wait=300, cap=1024 | +67 | −36 |
+| `rtt_120` | 100 | **40.7** | 27.5 | **40.7** | 7.05 | 28.2 | wait=50, cap=1024 | +300 | −31 |
+| `rtt_320` | 300 | **40.3** | 9.2 | **40.3** | 40.1 | 35.7 | wait=10, cap=1024 | −11 | −11 |
+| `lte_geo` | 285 | **31.7** | 6.0 | **31.7** | 31.1 | 27.3 | wait=10, cap=1024 | −12 | −14 |
+| `lte_starlink` | 15 | **29.6** | 8.9 | **29.6** | — | 17.1 | wait=50, cap=1024 | n/a (OFF collapsed) | −42 |
+| `dual_lte` | 15 | **29.6** | 18.8 | **29.6** | 0.91 | 21.8 | wait=50, cap=4096 | +2295 | −27 |
+| `rtt_70` | 50 | **40.6** | 33.7 | **40.6** | 1.25 | 36.5 | wait=300, cap=1024 | +2820 | −10 |
+| `congested` | 10 | **6.4** | 5.7 | **6.4** | — | 5.7 | wait=30, cap=1024 | n/a (OFF collapsed) | −11 |
 
-(— in `OFF (mp)` = the multipath OFF baseline didn't finish the 20 MiB transfer within the 5-minute hard cap. Reorder ON does complete the transfer in those cells — `lte_starlink` / `congested` — and the buffer's "rescue from collapse" effect is clearest there. But **even with ON, multipath is still slower than just using Path A**.)
+In every §4.1.C env, Path A is the higher-bandwidth or lower-RTT side (see §3.3 for the netem strings) and is therefore the path to use when configuring mqvpn for single-path operation. — in `OFF (mp)` = the multipath OFF baseline didn't finish the 20 MiB transfer within the 5-minute hard cap. Reorder ON does complete the transfer in those cells (`lte_starlink` / `congested`), where the buffer's "rescue from collapse" effect is clearest. But **even with ON, multipath is still slower than just using Path A**.
 
 The unifying property: either path bandwidth is asymmetric (≥ 2× ratio), or RTT spread is ≥ 50 ms, or both. In all such cases the scheduler is forced to push some traffic onto the slow path; the reorder buffer can rescue the multipath stack from outright collapse but cannot beat the better single path. **Operator action: configure mqvpn with the better single path; do not multipath in these environments.**
 
