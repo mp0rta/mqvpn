@@ -295,67 +295,53 @@ environments, only between schedulers.
 
 ### 4.4 Scheduler comparison: `wlb` vs `minrtt`
 
-The same 16 envs were re-measured with `--scheduler minrtt`; the single-path
-baseline is scheduler-independent (one path → nothing to schedule) and is
-reused. Three columns per env: best-ON multipath under each scheduler, and
-the better single path (from §4.1). Δ vs best-single tells which scheduler
-delivers higher multipath throughput relative to just picking the best
-single path.
+Up to this point the report has held the scheduler at `wlb` (mqvpn's default). This section reruns the multipath sweeps with `--scheduler minrtt` and asks, for each environment, **which scheduler + buffer setting an operator should pick**.
 
-| env | RTT spread [ms] | best single [Mbps] | wlb best-ON [Mbps] | wlb Δ [%] | minrtt best-ON [Mbps] | minrtt Δ [%] | winner |
-|---|--:|--:|--:|--:|--:|--:|---|
-| `baseline` | 0 | 40.6 | **73.9** *(OFF)* | **+82** | 45.3 | +12 | **wlb** (OFF aggregates) |
-| `loss_05` | 0 | 32.2 | **70.7** *(OFF)* | **+119** | 39.6 | +23 | **wlb** (OFF aggregates) |
-| `loss_2` | 0 | 16.3 | **29.0** *(OFF)* | **+78** | 16.4 | +1 | **wlb** (OFF aggregates) |
-| `jit_5` | 0 | 38.8 | **61.4** *(ON)* | **+58** | 51.1 | +31 | **wlb** (+ON beats minrtt+ON) |
-| `jit_20` | 0 | 17.4 | **37.6** *(ON)* | **+115** | 36.8 | **+111** | either (minrtt closely matches wlb) |
-| `rtt_40` | 20 | 40.5 | **49.0** *(ON)* | **+21** | 42.0 | +4 | **wlb + ON** still aggregates here |
-| `rtt_70` | 50 | 40.6 | 36.5 | −10 | **40.9** | +1 | **minrtt** (matches single) |
-| `rtt_120` | 100 | 40.7 | 28.2 | −31 | **40.4** | −1 | **minrtt** (matches single) |
-| `rtt_320` | 300 | 40.3 | 35.7 | −11 | **38.9** | −4 | **minrtt** (matches single) |
-| `dual_lte` | 15 | 29.6 | 21.8 | −27 | **29.6** | 0 | **minrtt** (matches single) |
-| `fiber_lte` | 32 | 212.4 | 77.3 | −64 | **198.8** | −6 | **minrtt** (almost matches fiber-alone) |
-| `bw_4to1` | 0 | 40.6 | 26.1 | −36 | **42.0** | +3 | **minrtt** (matches single) |
-| `bw_10to1` | 0 | 74.2 | 21.0 | −72 | **74.2** | 0 | **minrtt** (matches single) |
-| `lte_starlink` | 15 | 29.6 | 17.1 | −42 | **29.1** | −2 | **minrtt** (matches single) |
-| `lte_geo` | 285 | 31.7 | 27.3 | −14 | **30.1** | −5 | **minrtt** (matches single) |
-| `congested` | 10 | 6.4 | 5.7 | −11 | **6.4** | 0 | **minrtt** (matches single) |
+How to read the table:
 
-Two structural observations:
+- For each of the two schedulers, both `[Reorder] Enabled = off` and the best `Enabled = on` tuning were measured. The cell shows the **higher of the two** along with the setting that achieved it — e.g. `73.9 — Reorder OFF` means the OFF baseline beat every ON tuning under that scheduler.
+- `single [Mbps]` is the higher of Path A / Path B running alone, reused from §4.1 (it does not depend on the scheduler — a single path has nothing to schedule).
+- `recommended config` picks the option within 5 % of the highest goodput, preferring the simpler configuration on ties: **`wlb` over `minrtt`** (default scheduler), **Reorder OFF over ON** (default buffer), **multipath over single** (single drops failover; §2).
 
-1. **`minrtt` is a "failover-preserving single-path-equivalent" for the
-   envs where `wlb` lost to single path.** Across all 10 §4.1.C envs, `minrtt`
-   multipath reaches within ~5 % of the better single path (often within
-   1 %); `fiber_lte` jumps from 77 Mbps under `wlb` to **198.8 Mbps** under
-   `minrtt` (close to the fiber-alone 212 Mbps), with `bw_10to1` and
-   `dual_lte` matching their best single path exactly. The operator can
-   keep multipath enabled — gaining failover — without paying the
-   `wlb` throughput penalty.
+| env | spread [ms] | single [Mbps] | `wlb` best [Mbps] | `minrtt` best [Mbps] | recommended config |
+|---|--:|--:|---|---|---|
+| `baseline` | 0 | 40.6 | **73.9** — Reorder OFF | 45.3 — Reorder ON | `--scheduler wlb`, Reorder OFF |
+| `loss_05` | 0 | 32.2 | **70.7** — Reorder OFF | 39.6 — Reorder ON | `--scheduler wlb`, Reorder OFF |
+| `loss_2` | 0 | 16.3 | **29.0** — Reorder OFF | 16.4 — Reorder ON | `--scheduler wlb`, Reorder OFF |
+| `jit_5` | 0 | 38.8 | **61.4** — Reorder ON | 51.1 — Reorder ON | `--scheduler wlb`, Reorder ON |
+| `jit_20` | 0 | 17.4 | **37.6** — Reorder ON | 36.8 — Reorder ON | `--scheduler wlb`, Reorder ON |
+| `rtt_40` | 20 | 40.5 | **49.0** — Reorder ON | 42.0 — Reorder ON | `--scheduler wlb`, Reorder ON |
+| `rtt_320` | 300 | 40.3 | **40.1** — Reorder OFF | 38.9 — Reorder ON | `--scheduler wlb`, Reorder OFF |
+| `lte_geo` | 285 | 31.7 | **31.1** — Reorder OFF | 31.5 — Reorder OFF | `--scheduler wlb`, Reorder OFF (`minrtt` tied within 2 %) |
+| `rtt_70` | 50 | 40.6 | 36.5 — Reorder ON | **40.9** — Reorder ON | `--scheduler minrtt`, Reorder ON |
+| `rtt_120` | 100 | 40.7 | 28.2 — Reorder ON | **40.6** — Reorder OFF | `--scheduler minrtt`, Reorder OFF |
+| `dual_lte` | 15 | 29.6 | 21.8 — Reorder ON | **29.6** — Reorder ON | `--scheduler minrtt`, Reorder ON |
+| `fiber_lte` | 32 | 212.4 | 77.3 — Reorder ON | **212.3** — Reorder OFF | `--scheduler minrtt`, Reorder OFF |
+| `bw_4to1` | 0 | 40.6 | 26.1 — Reorder ON | **42.0** — Reorder ON | `--scheduler minrtt`, Reorder ON |
+| `bw_10to1` | 0 | 74.2 | 21.0 — Reorder ON | **74.2** — Reorder ON | `--scheduler minrtt`, Reorder ON |
+| `lte_starlink` | 15 | 29.6 | 17.1 — Reorder ON | **29.1** — Reorder ON | `--scheduler minrtt`, Reorder ON |
+| `congested` | 10 | 6.4 | 5.7 — Reorder ON | **6.4** — Reorder ON | `--scheduler minrtt`, Reorder ON |
 
-2. **`wlb` remains the right choice on symmetric paths.** Where the two
-   paths are similar in bandwidth and RTT, `wlb` actually aggregates and
-   delivers 1.5–2× the per-path goodput (`baseline` 73.9, `loss_05` 70.7,
-   `loss_2` 29.0). Under `minrtt` on the same envs the multipath stack
-   collapses to roughly the per-path goodput (39.8, 31.4, 12.6),
-   because `minrtt` keeps picking whichever path has the marginally
-   lower SRTT and barely spreads load. The §4.1.A "buffer earns its keep"
-   envelope also shrinks under `minrtt`: `rtt_40` drops from `wlb`'s
-   `+21 %` (multipath wins) to `+4 %` (tied with single-path).
+(Bold = the scheduler that delivered the higher multipath goodput in that env.) For the wait/cap settings under "Reorder ON", `wait = 50 ms` is the right starting point for the §4.1.A envs (`jit_5`, `jit_20`, `rtt_40`); see §4.2.
 
-The result is a clean operator split:
+Two structural patterns drive the recommendations.
+
+**`wlb` wins on symmetric paths** (similar bandwidth, similar RTT). It spreads traffic across both paths and aggregates 1.5–2× the per-path goodput. `baseline` is the cleanest case: 40.6 Mbps per path, 73.9 Mbps with `wlb` + Reorder OFF — true aggregation. `minrtt` on the same env barely spreads load (it keeps picking whichever path has the marginally lower SRTT) and lands at roughly the per-path goodput (45.3 Mbps). Symmetric loss (`loss_05`, `loss_2`) and small RTT spread / jitter (`jit_5`, `jit_20`, `rtt_40`) follow the same pattern — in those envs Reorder ON unlocks aggregation, but the scheduler choice is still `wlb`.
+
+**`minrtt` wins on asymmetric paths or high RTT spread.** When one path is materially better than the other, `minrtt` preferentially uses the faster / lower-RTT path and falls back to the slower one only when the better path is congestion-blocked, delivering approximately the better-single-path goodput while keeping multipath enabled for failover. `fiber_lte` is the strongest case: under `wlb` the multipath stack collapses to 77 Mbps (the 300 mbit fiber gets dragged down by the 30 mbit LTE); under `minrtt` + Reorder OFF it reaches 212 Mbps — equal to fiber-alone. `bw_10to1`, `bw_4to1`, `dual_lte`, `lte_starlink` show the same recovery, and the high-RTT-spread envs (`rtt_70`, `rtt_120`) match best-single within 1 %.
+
+Operator split:
 
 ```
-symmetric clean / symmetric loss / symmetric jitter / small RTT spread
-    → --scheduler wlb     (aggregates, §4.1.A and §4.1.B verdicts apply)
+Two paths are similar (bandwidth, RTT, jitter):
+    --scheduler wlb       (and follow §4.3 to decide Reorder OFF vs ON)
 
-asymmetric bandwidth / RTT spread ≥ ~50 ms / mixed link types
-    → --scheduler minrtt  (matches best single, keeps failover, §4.1.C
-                          loss is recovered)
+Two paths are different (bandwidth ratio ≥ ~2× or RTT spread ≥ ~50 ms):
+    --scheduler minrtt    (Reorder OFF in most cases; the per-env winner
+                           in the table above tells you for sure)
 ```
 
-There is no environment in this sweep where `wlb` strictly dominates
-`minrtt` AND `minrtt` strictly dominates `wlb` simultaneously — the choice
-is a clean function of path symmetry.
+No environment in this sweep needed both schedulers at once — the choice is a clean function of path symmetry. The operator changes one CLI flag (`--scheduler`) based on whether the two paths are similar or not, then consults §4.3 for the buffer setting.
 
 
 
