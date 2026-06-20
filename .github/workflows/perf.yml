@@ -25,7 +25,7 @@ jobs:
       - name: Pre-checkout cleanup (root-owned files)
         run: sudo rm -rf ci_bench_results bench_results
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
