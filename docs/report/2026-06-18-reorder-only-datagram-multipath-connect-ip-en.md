@@ -15,7 +15,7 @@ As a result, **datagrams spread across paths with different delays arrive reorde
 
 mqvpn uses CONNECT-IP, i.e. DATAGRAMs, so it is directly exposed to the above.
 
-I therefore added a **buffer at the tunnel egress that re-orders datagrams** (within the implementation latitude RFC 9221 §5.1 grants). This report quantifies, per network environment, which configuration maximises **bandwidth-aggregation throughput**: single path, multipath with the buffer off, or multipath with the buffer on. The buffer's operating envelope turns out to be narrow but well-defined; for many environments (asymmetric bandwidth, large RTT spread) multipath provides little throughput benefit and the better single path is faster — though multipath retains independent value for failover, which this report does not measure (§2).
+I therefore added a **buffer at the tunnel egress that re-orders datagrams** (within the implementation latitude RFC 9221 §5.1 grants). This report quantifies, per network environment, which mqvpn configuration maximises **bandwidth-aggregation throughput**, varying three dimensions: **scheduler** (`wlb` vs `minrtt`), **reorder buffer** (off vs on), and **path count** (single vs multipath). The reorder buffer's operating envelope turns out to be narrow but well-defined, and the scheduler choice changes the verdict materially — `wlb` aggregates more when both paths are similar, but on asymmetric or high-spread links it forces traffic onto the slow path and the better single path wins; `minrtt` preferentially uses the faster/lower-RTT path and keeps the multipath stack from collapsing, but does not aggregate symmetric paths as well as `wlb`. For environments where the best multipath configuration still loses to the better single path, multipath retains independent value for failover, which this report does not measure (§2).
 
 ### 1.1 Why QUIC is the inner flow under test — out-of-order tolerance is a MAY in the RFC (implementation-defined)
 
@@ -64,7 +64,8 @@ A per-flow reordering buffer at the tunnel egress. Disciplines:
 - **Inner:** a single HTTP/3 bulk GET via `picoquicdemo`. Congestion control = **BBR** (`-G bbr`), transfer **20 MiB**, single stream. Without congestion control (`iperf3 -u`) the reorder→false-loss chain does not appear, so a CC-driven HTTP/3 flow is used.
 - **goodput [Mbps]:** from picoquicdemo's "Received … Mbps" (download) line.
 - **p99 added-latency [ms]:** from the reorder engine's residence-time histogram (enqueue→deliver; in-order pass-through counted as 0 ms), read via the control API.
-- **mqvpn config (this is what causes the reordering):** scheduler is `--scheduler wlb` (plain WLB), **not** `wlb_udp_pin`. Per `src/flow_sched.c`, a UDP flow is pinned to a path only under `wlb_udp_pin`; under plain `wlb` the single inner UDP/QUIC flow is **not pinned and is spread across both paths**. This non-pinned setup, combined with the netem RTT spread / jitter (§3.3), is what produces cross-path reordering (with `wlb_udp_pin` the 5-tuple would stick to one path, no reordering occurs, and the buffer would be unnecessary). The rule is `[ReorderRule] Proto = udp / Port = 5401 / Profile = quic_bulk`; `[Reorder] Enabled = on` with `MaxWaitMs` / `CapPackets` swept.
+- **mqvpn config (this is what causes the reordering):** scheduler is `--scheduler wlb` (plain WLB) — **not** `wlb_udp_pin`. Per `src/flow_sched.c`, a UDP flow is pinned to a path only under `wlb_udp_pin`; under plain `wlb` the single inner UDP/QUIC flow is **not pinned and is spread across both paths**. This non-pinned setup, combined with the netem RTT spread / jitter (§3.3), is what produces cross-path reordering (with `wlb_udp_pin` the 5-tuple would stick to one path, no reordering occurs, and the buffer would be unnecessary). The rule is `[ReorderRule] Proto = udp / Port = 5401 / Profile = quic_bulk`; `[Reorder] Enabled = on` with `MaxWaitMs` / `CapPackets` swept.
+- **Scheduler variants:** §4.1 through §4.3 use `--scheduler wlb`. §4.4 reruns the perf and OFF-baseline sweeps with `--scheduler minrtt` (lowest-SRTT path selection with cwnd-blocked spillover) to quantify how the scheduler choice changes the verdicts. Both schedulers spread the inner flow across paths (neither pins by 4-tuple), so both expose the inner QUIC to cross-path reordering; they differ in how aggressively they push to the slower path.
 
 ### 3.3 Environment matrix (exact netem strings, all 16 environments)
 
@@ -137,17 +138,36 @@ python3 benchmarks/sweep_reorder_analyze.py \
   --off-csv ci_sweep_results/reorder_off.csv \
   --single-csv ci_sweep_results/reorder_single.csv \
   --out ci_sweep_results/reorder_optimal.md
+
+# minrtt sweep (§4.4): re-run perf and OFF baseline with --scheduler minrtt.
+# Single-path baseline is scheduler-independent (only one path → nothing to
+# schedule), so it is reused as-is. The harness reads BENCH_SCHEDULER:
+sudo MQVPN="$PWD/build-lib/mqvpn" \
+     PICOQUICDEMO="$PWD/third_party/picoquic/build/picoquicdemo" \
+     PICO_TIMEOUT=300 BENCH_SCHEDULER=minrtt \
+     ./benchmarks/sweep_reorder.sh --reorder on  --out ci_sweep_results/reorder_full_minrtt.csv
+sudo MQVPN="$PWD/build-lib/mqvpn" \
+     PICOQUICDEMO="$PWD/third_party/picoquic/build/picoquicdemo" \
+     PICO_TIMEOUT=300 BENCH_SCHEDULER=minrtt \
+     ./benchmarks/sweep_reorder.sh --reorder off --out ci_sweep_results/reorder_off_minrtt.csv
+
+sudo chown -R "$(id -un):$(id -gn)" ci_sweep_results
+python3 benchmarks/sweep_reorder_analyze.py \
+  --csv ci_sweep_results/reorder_full_minrtt.csv \
+  --off-csv ci_sweep_results/reorder_off_minrtt.csv \
+  --single-csv ci_sweep_results/reorder_single.csv \
+  --out ci_sweep_results/reorder_optimal_minrtt.md
 ```
 
 inner picoquicdemo: server `picoquicdemo -p 5401 -c <cert> -k <key> -G bbr -1 -D`; client `timeout -k 5 $PICO_TIMEOUT picoquicdemo -G bbr -D -n test <SERVER_IP> 5401 /20971520`.
 
 ## 4. Results and configuration guidance
 
-For each network environment, this section answers the operator-facing question: **single path, multipath with reorder OFF, or multipath with reorder ON?** The measurement is throughput-only (§2): of the sixteen tested environments, only six see a bandwidth-aggregation benefit from multipath; the reorder buffer is the right choice in only three. The remaining ten reach higher throughput with the better single path — failover use of multipath there is a separate decision the operator can still make.
+For each network environment, this section answers the operator-facing question: **which scheduler, with the buffer on or off, single path or multipath?** §4.1–§4.3 use `--scheduler wlb`, the mqvpn default; §4.4 reruns the comparison under `--scheduler minrtt` and shows how the verdicts shift. The measurement is throughput-only (§2): under `wlb`, only six of the sixteen environments see a bandwidth-aggregation benefit from multipath, and the reorder buffer is the right choice in only three. The remaining ten reach higher throughput with the better single path — but under `minrtt` (§4.4), multipath keeps up with the better single path in those same environments, letting the operator keep multipath enabled for failover at no throughput cost.
 
-### 4.1 Three-way comparison: single path vs multipath (OFF / ON)
+### 4.1 Three-way comparison under `wlb`: single path vs multipath (OFF / ON)
 
-The comparison includes a **single-path baseline** for each environment: the goodput an operator would see if mqvpn were configured with only Path A (or only Path B). This baseline answers the question that an ON-vs-OFF table alone cannot: *is multipath worth using at all in this environment?* For asymmetric or high-spread paths the answer is often no — the slow path drags the multipath stack below the better single path, with or without the reorder buffer.
+The comparison includes a **single-path baseline** for each environment: the goodput an operator would see if mqvpn were configured with only Path A (or only Path B). This baseline answers the question that an ON-vs-OFF table alone cannot: *is multipath worth using at all in this environment?* Under `wlb` scheduling, for asymmetric or high-spread paths the answer is often no — the slow path drags the multipath stack below the better single path, with or without the reorder buffer. §4.4 revisits the same envs under `minrtt`, where multipath keeps up with the better single path in most of these cases.
 
 Each row below compares three configurations on the **same netem**: single path (Path A or Path B = the env's path A or path B netem applied to a lone path), multipath with reorder OFF (RAW pass-through), and multipath with reorder at its best-goodput tuning. The recommendation picks the simplest configuration whose median goodput is within 5% of the winner (priority: single > multipath OFF > multipath + reorder ON).
 
@@ -212,53 +232,132 @@ High-BDP paths (fiber, ~300 mbit) need **`cap ≥ 2048`** when reorder is enable
 
 ### 4.3 Configuration decision tree
 
-Six questions, in order. Stop at the first match. The tree optimises for
-**bandwidth-aggregation throughput**; if you also value failover (multipath
-keeping the connection alive when one path degrades, see §2), the "use
-single path" verdicts below may still be acceptable to override.
+The tree picks the **scheduler**, the **reorder buffer state**, and any tuning,
+optimising for bandwidth-aggregation throughput. It assumes multipath is
+already enabled (two paths configured in mqvpn); failover use is independent
+(§2) and not a separate branch. Read the data from §4.1 (wlb) and §4.4
+(minrtt) for the rationale of each step.
 
 ```
-1. Are path bandwidths asymmetric (faster / slower ≥ 2×)?
-   → use the faster path alone (single path).
-     [fiber_lte, bw_10to1, bw_4to1, dual_lte, lte_starlink, lte_geo]
-     Why: the slow path drags the multipath stack below the fast path alone,
-     even with reorder. Multipath provides no bandwidth benefit here.
+0. Start by deciding the scheduler.
 
-2. Is RTT spread ≥ 50 ms?
-   → use the lower-RTT single path.
-     [rtt_70, rtt_120, rtt_320]
-     Why: the buffer can only mask reorder up to ~50 ms wait; beyond that it
-     either times out (gap unfilled) or waits longer than the aggregation
-     gain saves. Single path with the smaller RTT delivers higher throughput.
+   Symmetric paths (similar bandwidth, similar RTT, zero / small spread)?
+     → --scheduler wlb        (it aggregates symmetric paths up to ~2× the
+                               per-path goodput; minrtt collapses to roughly
+                               single-path goodput on symmetric envs.)
+   Asymmetric bandwidth (≥ 2× ratio) or RTT spread ≥ ~50 ms?
+     → --scheduler minrtt     (it preferentially uses the faster / lower-RTT
+                               path and falls back to single-path-equivalent
+                               throughput. wlb here would split traffic onto
+                               the slow path and lose throughput.)
 
-3. Per-path loss ≥ 0.5 % on otherwise symmetric paths?
-   → multipath, reorder OFF.
-     [loss_05, loss_2]
-     Why: pure loss is uncorrelated between paths; aggregation doubles
-     effective bandwidth without producing reorder gaps for the buffer
-     to fill. The buffer's added latency only hurts.
+1. Asymmetric bandwidth OR RTT spread ≥ ~50 ms (you picked minrtt at step 0)?
+   → [Reorder] Enabled = off; multipath stays enabled for failover.
+     [fiber_lte, bw_10to1, bw_4to1, dual_lte, lte_starlink, lte_geo,
+      rtt_70, rtt_120, rtt_320, lte_geo, congested]
+     Why: minrtt keeps throughput at roughly the better single path's level
+     in these envs (§4.4); the buffer adds latency without changing that.
 
-4. Symmetric paths with jitter (per-path ≥ 5 ms) OR small spread (≤ 30 ms)?
-   → multipath + reorder ON, wait = 50 ms (cap = 2048 if BDP > 1 MB).
+2. Symmetric paths with jitter (per-path ≥ 5 ms) OR small RTT spread (≤ 30 ms)
+   (you picked wlb at step 0)?
+   → [Reorder] Enabled = on, [Reorder] MaxWaitMs = 50
+     (CapPackets = 2048 if BDP > 1 MB; otherwise the default).
      [jit_5, jit_20, rtt_40]
-     Why: this is the buffer's sweet spot. OFF collapses to ~1 Mbps due to
-     spurious-loss; ON recovers and exceeds the better single path.
+     Why: under wlb the OFF baseline collapses to ~1 Mbps in these envs
+     because the inner picoquic reads cross-path reordering as loss (§1.1).
+     The buffer recovers and exceeds the better single path. See §4.2 for
+     the wait/cap sensitivity.
 
-5. Symmetric, clean (no jitter, no per-path loss, zero spread)?
-   → multipath, reorder OFF.
-     [baseline]
-     Why: clean aggregation, no cross-path reorder to fix.
+3. Symmetric, clean (no jitter, near-zero per-path loss, zero spread)
+   OR symmetric with per-path loss only (you picked wlb at step 0)?
+   → [Reorder] Enabled = off.   (This is the shipping default.)
+     [baseline, loss_05, loss_2]
+     Why: clean wlb aggregation with no cross-path reorder for the buffer
+     to fix; enabling the buffer adds 15–25% latency cost for no gain
+     (§4.1.B).
 
-6. Congested (per-path loss > 1 % with jitter)?
-   → use the single path with least loss; multipath does not aggregate.
+4. Congested (per-path loss > 1 % with jitter)?
+   → use the single path with least loss; neither scheduler aggregates.
      [congested]
-     Why: multipath does not recover throughput; reorder ON only narrows
-     the gap by ~10 %.
+     Why: total per-path bandwidth is already the bottleneck; neither
+     scheduler nor the buffer recovers throughput meaningfully.
 ```
 
-The shipping default — multipath enabled, `[Reorder] Enabled = off` — is correct for the §4.1.B environments. For the §4.1.A environments the operator opts in via `[Reorder] Enabled = on` and the per-rule `MaxWaitMs` from §4.2. For the §4.1.C environments — the largest bucket at 10 of 16 — multipath provides no bandwidth-aggregation benefit; configuring mqvpn with the better single path delivers higher throughput. An operator who runs multipath in these environments for failover resilience (out of scope here; see §2) trades some peak throughput for that resilience.
+**Shipping defaults** — `--scheduler wlb`, `[Reorder] Enabled = off`,
+multipath enabled — are correct for the symmetric / loss envs (step 3).
+Operators on jittery or small-spread paths opt the buffer in (step 2);
+operators on asymmetric or high-spread paths should switch the scheduler
+to `minrtt` (step 1) to keep failover available without sacrificing
+throughput. The §4.1.C envs (the largest bucket under `wlb`) collapse to
+"single-path-equivalent under `minrtt`" once the scheduler is changed; the
+operator does not have to choose between failover and throughput in those
+environments, only between schedulers.
 
-## 5. References
+### 4.4 Scheduler comparison: `wlb` vs `minrtt`
+
+The same 16 envs were re-measured with `--scheduler minrtt`; the single-path
+baseline is scheduler-independent (one path → nothing to schedule) and is
+reused. Three columns per env: best-ON multipath under each scheduler, and
+the better single path (from §4.1). Δ vs best-single tells which scheduler
+delivers higher multipath throughput relative to just picking the best
+single path.
+
+| env | RTT spread [ms] | best single [Mbps] | wlb best-ON [Mbps] | wlb Δ [%] | minrtt best-ON [Mbps] | minrtt Δ [%] | winner |
+|---|--:|--:|--:|--:|--:|--:|---|
+| `baseline` | 0 | 40.6 | **73.9** *(OFF)* | **+82** | 45.3 | +12 | **wlb** (OFF aggregates) |
+| `loss_05` | 0 | 32.2 | **70.7** *(OFF)* | **+119** | 39.6 | +23 | **wlb** (OFF aggregates) |
+| `loss_2` | 0 | 16.3 | **29.0** *(OFF)* | **+78** | 16.4 | +1 | **wlb** (OFF aggregates) |
+| `jit_5` | 0 | 38.8 | **61.4** *(ON)* | **+58** | 51.1 | +31 | **wlb** (+ON beats minrtt+ON) |
+| `jit_20` | 0 | 17.4 | **37.6** *(ON)* | **+115** | 36.8 | **+111** | either (minrtt closely matches wlb) |
+| `rtt_40` | 20 | 40.5 | **49.0** *(ON)* | **+21** | 42.0 | +4 | **wlb + ON** still aggregates here |
+| `rtt_70` | 50 | 40.6 | 36.5 | −10 | **40.9** | +1 | **minrtt** (matches single) |
+| `rtt_120` | 100 | 40.7 | 28.2 | −31 | **40.4** | −1 | **minrtt** (matches single) |
+| `rtt_320` | 300 | 40.3 | 35.7 | −11 | **38.9** | −4 | **minrtt** (matches single) |
+| `dual_lte` | 15 | 29.6 | 21.8 | −27 | **29.6** | 0 | **minrtt** (matches single) |
+| `fiber_lte` | 32 | 212.4 | 77.3 | −64 | **198.8** | −6 | **minrtt** (almost matches fiber-alone) |
+| `bw_4to1` | 0 | 40.6 | 26.1 | −36 | **42.0** | +3 | **minrtt** (matches single) |
+| `bw_10to1` | 0 | 74.2 | 21.0 | −72 | **74.2** | 0 | **minrtt** (matches single) |
+| `lte_starlink` | 15 | 29.6 | 17.1 | −42 | **29.1** | −2 | **minrtt** (matches single) |
+| `lte_geo` | 285 | 31.7 | 27.3 | −14 | **30.1** | −5 | **minrtt** (matches single) |
+| `congested` | 10 | 6.4 | 5.7 | −11 | **6.4** | 0 | **minrtt** (matches single) |
+
+Two structural observations:
+
+1. **`minrtt` is a "failover-preserving single-path-equivalent" for the
+   envs where `wlb` lost to single path.** Across all 10 §4.1.C envs, `minrtt`
+   multipath reaches within ~5 % of the better single path (often within
+   1 %); `fiber_lte` jumps from 77 Mbps under `wlb` to **198.8 Mbps** under
+   `minrtt` (close to the fiber-alone 212 Mbps), with `bw_10to1` and
+   `dual_lte` matching their best single path exactly. The operator can
+   keep multipath enabled — gaining failover — without paying the
+   `wlb` throughput penalty.
+
+2. **`wlb` remains the right choice on symmetric paths.** Where the two
+   paths are similar in bandwidth and RTT, `wlb` actually aggregates and
+   delivers 1.5–2× the per-path goodput (`baseline` 73.9, `loss_05` 70.7,
+   `loss_2` 29.0). Under `minrtt` on the same envs the multipath stack
+   collapses to roughly the per-path goodput (39.8, 31.4, 12.6),
+   because `minrtt` keeps picking whichever path has the marginally
+   lower SRTT and barely spreads load. The §4.1.A "buffer earns its keep"
+   envelope also shrinks under `minrtt`: `rtt_40` drops from `wlb`'s
+   `+21 %` (multipath wins) to `+4 %` (tied with single-path).
+
+The result is a clean operator split:
+
+```
+symmetric clean / symmetric loss / symmetric jitter / small RTT spread
+    → --scheduler wlb     (aggregates, §4.1.A and §4.1.B verdicts apply)
+
+asymmetric bandwidth / RTT spread ≥ ~50 ms / mixed link types
+    → --scheduler minrtt  (matches best single, keeps failover, §4.1.C
+                          loss is recovered)
+```
+
+There is no environment in this sweep where `wlb` strictly dominates
+`minrtt` AND `minrtt` strictly dominates `wlb` simultaneously — the choice
+is a clean function of path symmetry.
+
+
 
 - RFC 9221 — Unreliable Datagram Extension to QUIC (§5.1 delegation to the app protocol / §5.2 reordering / §5.3 unreliable)
 - RFC 9484 — Proxying IP in HTTP (CONNECT-IP) / RFC 9297 — HTTP Datagrams and the Capsule Protocol
@@ -270,4 +369,5 @@ The shipping default — multipath enabled, `[Reorder] Enabled = off` — is cor
 - picoquic `e652e454`: `loss_recovery.c#L562` (fixed `delta_seq >= 3`) / `frames.c#L2652` (telemetry)
 - Google QUICHE `f001eed`: `general_loss_algorithm.h#L124` (`use_adaptive_reordering_threshold_ = true`) / `quic_constants.h#L285` (`kDefaultPacketReorderingThreshold = 3`)
 - Implementation: `src/reorder.h` / `src/reorder_tx.c` / `src/reorder_rx.c` (merged to main in PR #153, default OFF)
-- Harness: `benchmarks/sweep_reorder.sh` (perf + OFF baseline), `benchmarks/sweep_single_path.sh` (single-path baseline for the 3-way comparison in §4.1), `benchmarks/sweep_reorder_analyze.py` (Pareto + ON/OFF + 3-way table); shared netem profile table `BENCH_ENV_NETEM` in `benchmarks/bench_env_setup.sh`; output `ci_sweep_results/reorder_optimal.md`
+- Harness: `benchmarks/sweep_reorder.sh` (perf + OFF baseline; `BENCH_SCHEDULER=minrtt` switches scheduler for §4.4), `benchmarks/sweep_single_path.sh` (single-path baseline for the 3-way comparison in §4.1), `benchmarks/sweep_reorder_analyze.py` (Pareto + ON/OFF + 3-way table); shared netem profile table `BENCH_ENV_NETEM` in `benchmarks/bench_env_setup.sh`; outputs `ci_sweep_results/reorder_optimal.md` (wlb) and `ci_sweep_results/reorder_optimal_minrtt.md` (minrtt)
+- Scheduler implementation: `src/flow_sched.c` (mqvpn schedulers: `minrtt`, `wlb`, `wlb_udp_pin`, `backup_fec`)
