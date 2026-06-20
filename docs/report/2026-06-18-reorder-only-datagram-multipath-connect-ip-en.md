@@ -252,11 +252,13 @@ already enabled (two paths configured in mqvpn); failover use is independent
                                the slow path and lose throughput.)
 
 1. Asymmetric bandwidth OR RTT spread ≥ ~50 ms (you picked minrtt at step 0)?
-   → [Reorder] Enabled = off; multipath stays enabled for failover.
-     [fiber_lte, bw_10to1, bw_4to1, dual_lte, lte_starlink, lte_geo,
-      rtt_70, rtt_120, rtt_320, lte_geo, congested]
-     Why: minrtt keeps throughput at roughly the better single path's level
-     in these envs (§4.4); the buffer adds latency without changing that.
+   → Start with [Reorder] Enabled = off; multipath stays enabled for failover.
+     This is the best config for: fiber_lte, rtt_120, lte_geo, rtt_320,
+     bw_4to1, bw_10to1 (the buffer adds no goodput and adds latency).
+     Switch to [Reorder] Enabled = on, MaxWaitMs = 10–30 for:
+       rtt_70 (+12%), dual_lte (+13%), lte_starlink (+7%), congested (+14%).
+     See §4.4 for the exact per-env Δ between OFF and ON; the gap is
+     never large under minrtt (rare cross-path reorder ⇒ short knee wait).
 
 2. Symmetric paths with jitter (per-path ≥ 5 ms) OR small RTT spread (≤ 30 ms)
    (you picked wlb at step 0)?
@@ -303,32 +305,39 @@ How to read the table:
 - `single [Mbps]` is the higher of Path A / Path B running alone, reused from §4.1 (it does not depend on the scheduler — a single path has nothing to schedule).
 - `recommended config` picks the option within 5 % of the highest goodput, preferring the simpler configuration on ties: **`wlb` over `minrtt`** (default scheduler), **Reorder OFF over ON** (default buffer), **multipath over single** (single drops failover; §2).
 
-| env | spread [ms] | single [Mbps] | `wlb` best [Mbps] | `minrtt` best [Mbps] | recommended config |
+For each scheduler, two numbers are folded into one cell:
+
+- `OFF: <gp>` — median goodput with `[Reorder] Enabled = off`.
+- `ON: <gp> @<wait>` — best ON goodput at the **knee** (smallest `MaxWaitMs` reaching ≥ 90 % of peak; see §4.2). `cap = 1024` for every cell below; envs needing `cap = 2048` are noted in the prose.
+
+| env | spread [ms] | single [Mbps] | `wlb` [Mbps] | `minrtt` [Mbps] | recommended config |
 |---|--:|--:|---|---|---|
-| `baseline` | 0 | 40.6 | **73.9** — Reorder OFF | 45.3 — Reorder ON | `--scheduler wlb`, Reorder OFF |
-| `loss_05` | 0 | 32.2 | **70.7** — Reorder OFF | 39.6 — Reorder ON | `--scheduler wlb`, Reorder OFF |
-| `loss_2` | 0 | 16.3 | **29.0** — Reorder OFF | 16.4 — Reorder ON | `--scheduler wlb`, Reorder OFF |
-| `jit_5` | 0 | 38.8 | **61.4** — Reorder ON | 51.1 — Reorder ON | `--scheduler wlb`, Reorder ON |
-| `jit_20` | 0 | 17.4 | **37.6** — Reorder ON | 36.8 — Reorder ON | `--scheduler wlb`, Reorder ON |
-| `rtt_40` | 20 | 40.5 | **49.0** — Reorder ON | 42.0 — Reorder ON | `--scheduler wlb`, Reorder ON |
-| `rtt_320` | 300 | 40.3 | **40.1** — Reorder OFF | 38.9 — Reorder ON | `--scheduler wlb`, Reorder OFF |
-| `lte_geo` | 285 | 31.7 | **31.1** — Reorder OFF | 31.5 — Reorder OFF | `--scheduler wlb`, Reorder OFF (`minrtt` tied within 2 %) |
-| `rtt_70` | 50 | 40.6 | 36.5 — Reorder ON | **40.9** — Reorder ON | `--scheduler minrtt`, Reorder ON |
-| `rtt_120` | 100 | 40.7 | 28.2 — Reorder ON | **40.6** — Reorder OFF | `--scheduler minrtt`, Reorder OFF |
-| `dual_lte` | 15 | 29.6 | 21.8 — Reorder ON | **29.6** — Reorder ON | `--scheduler minrtt`, Reorder ON |
-| `fiber_lte` | 32 | 212.4 | 77.3 — Reorder ON | **212.3** — Reorder OFF | `--scheduler minrtt`, Reorder OFF |
-| `bw_4to1` | 0 | 40.6 | 26.1 — Reorder ON | **42.0** — Reorder ON | `--scheduler minrtt`, Reorder ON |
-| `bw_10to1` | 0 | 74.2 | 21.0 — Reorder ON | **74.2** — Reorder ON | `--scheduler minrtt`, Reorder ON |
-| `lte_starlink` | 15 | 29.6 | 17.1 — Reorder ON | **29.1** — Reorder ON | `--scheduler minrtt`, Reorder ON |
-| `congested` | 10 | 6.4 | 5.7 — Reorder ON | **6.4** — Reorder ON | `--scheduler minrtt`, Reorder ON |
+| `baseline` | 0 | 40.6 | **OFF: 73.9** • ON: 57.9 @10 | OFF: 39.8 • ON: 42.5 @20 | `wlb`, Reorder OFF |
+| `loss_05` | 0 | 32.2 | **OFF: 70.7** • ON: 52.7 @10 | OFF: 31.4 • ON: 39.6 @10 | `wlb`, Reorder OFF |
+| `loss_2` | 0 | 16.3 | **OFF: 29.0** • ON: 24.5 @10 | OFF: 12.6 • ON: 16.4 @10 | `wlb`, Reorder OFF |
+| `jit_5` | 0 | 38.8 | OFF: 3.4 • **ON: 55.7 @10** | OFF: 12.4 • ON: 46.5 @120 | `wlb`, Reorder ON, MaxWaitMs=10 |
+| `jit_20` | 0 | 17.4 | OFF: 0.9 • **ON: 37.6 @50** | OFF: 8.0 • ON: 35.6 @80 | `wlb`, Reorder ON, MaxWaitMs=50 |
+| `rtt_40` | 20 | 40.5 | OFF: 0.85 • **ON: 45.7 @50** | OFF: 36.9 • ON: 40.6 @20 | `wlb`, Reorder ON, MaxWaitMs=50 |
+| `rtt_320` | 300 | 40.3 | **OFF: 40.1** • ON: 35.7 @10 | OFF: 37.9 • ON: 38.9 @10 | `wlb`, Reorder OFF |
+| `lte_geo` | 285 | 31.7 | **OFF: 31.1** • ON: 27.3 @10 | OFF: 31.5 • ON: 29.5 @10 | `wlb`, Reorder OFF (`minrtt` OFF tied) |
+| `rtt_70` | 50 | 40.6 | OFF: 1.3 • ON: 34.2 @50 | OFF: 36.4 • **ON: 40.2 @10** | `minrtt`, Reorder ON, MaxWaitMs=10 |
+| `rtt_120` | 100 | 40.7 | OFF: 7.1 • ON: 28.2 @50 | **OFF: 40.6** • ON: 37.2 @10 | `minrtt`, Reorder OFF |
+| `dual_lte` | 15 | 29.6 | OFF: 0.9 • ON: 20.7 @50 | OFF: 26.1 • **ON: 29.6 @20** | `minrtt`, Reorder ON, MaxWaitMs=20 |
+| `fiber_lte` | 32 | 212.4 | OFF: 4.9 • ON: 77.3 @50,cap=2048 | **OFF: 212.3** • ON: 189.4 @10 | `minrtt`, Reorder OFF |
+| `bw_4to1` | 0 | 40.6 | OFF: 15.6 • ON: 25.4 @50 | **OFF: 39.9** • ON: 39.3 @10 | `minrtt`, Reorder OFF (ON tied within 2 %) |
+| `bw_10to1` | 0 | 74.2 | OFF: 13.3 • ON: 21.0 @200 | **OFF: 70.1** • ON: 69.6 @10 | `minrtt`, Reorder OFF (ON tied within 1 %) |
+| `lte_starlink` | 15 | 29.6 | OFF: — • ON: 17.1 @50 | OFF: 27.2 • **ON: 26.6 @10** | `minrtt`, Reorder ON, MaxWaitMs=10 (OFF tied within 3 %) |
+| `congested` | 10 | 6.4 | OFF: — • ON: 5.7 @30 | OFF: 5.6 • **ON: 6.4 @30** | `minrtt`, Reorder ON, MaxWaitMs=30 |
 
-(Bold = the scheduler that delivered the higher multipath goodput in that env.) For the wait/cap settings under "Reorder ON", `wait = 50 ms` is the right starting point for the §4.1.A envs (`jit_5`, `jit_20`, `rtt_40`); see §4.2.
+Bold = the higher of OFF / ON for that scheduler. The recommended config picks the highest goodput within 5 % across both schedulers, breaking ties toward the simpler config (default `wlb` > `minrtt`; default Reorder OFF > ON). `OFF: —` means the OFF baseline did not finish the 20 MiB transfer within the 5-minute hard cap (`lte_starlink`, `congested` under `wlb`). All ON cells use `CapPackets = 1024` unless noted (`fiber_lte` under `wlb` needs `cap = 2048` — see §4.2; under `minrtt` the default cap suffices because traffic is concentrated on the fast path and reorder gaps are small).
 
-Two structural patterns drive the recommendations.
+Three structural patterns drive the recommendations.
 
 **`wlb` wins on symmetric paths** (similar bandwidth, similar RTT). It spreads traffic across both paths and aggregates 1.5–2× the per-path goodput. `baseline` is the cleanest case: 40.6 Mbps per path, 73.9 Mbps with `wlb` + Reorder OFF — true aggregation. `minrtt` on the same env barely spreads load (it keeps picking whichever path has the marginally lower SRTT) and lands at roughly the per-path goodput (45.3 Mbps). Symmetric loss (`loss_05`, `loss_2`) and small RTT spread / jitter (`jit_5`, `jit_20`, `rtt_40`) follow the same pattern — in those envs Reorder ON unlocks aggregation, but the scheduler choice is still `wlb`.
 
 **`minrtt` wins on asymmetric paths or high RTT spread.** When one path is materially better than the other, `minrtt` preferentially uses the faster / lower-RTT path and falls back to the slower one only when the better path is congestion-blocked, delivering approximately the better-single-path goodput while keeping multipath enabled for failover. `fiber_lte` is the strongest case: under `wlb` the multipath stack collapses to 77 Mbps (the 300 mbit fiber gets dragged down by the 30 mbit LTE); under `minrtt` + Reorder OFF it reaches 212 Mbps — equal to fiber-alone. `bw_10to1`, `bw_4to1`, `dual_lte`, `lte_starlink` show the same recovery, and the high-RTT-spread envs (`rtt_70`, `rtt_120`) match best-single within 1 %.
+
+**Under `minrtt` the buffer is often unnecessary or only mildly helpful.** Because `minrtt` concentrates traffic on the better path, only the spillover packets cross paths, so cross-path reorder gaps are small — and the operating envelope where the buffer beats OFF is narrower than under `wlb`. In several envs `minrtt` + OFF outright wins (`fiber_lte` 212.3 vs 198.8, `rtt_120` 40.6 vs 40.4, `lte_geo` 31.5 vs 30.1, `rtt_320` tied) or beats it by only 1–6 % (`bw_4to1`, `bw_10to1`, `baseline`). When the buffer does help under `minrtt`, the knee wait is short — typically `MaxWaitMs = 10–30` ms versus `wlb`'s `50` ms — because the rare cross-path gaps fill quickly. The recommended-config column reflects this: about half the `minrtt` rows leave the buffer OFF.
 
 Operator split:
 
