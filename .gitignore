@@ -13,6 +13,8 @@ benchmarks/*
 /ci_sweep_results/
 /ci_bench_results/
 /ci_stress_results/
+# scratch drafts / abandoned scaffolds — kept on disk, never published
+/docs/tbd/
 !benchmarks/*.py
 *.o
 *.d
