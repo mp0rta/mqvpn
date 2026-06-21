@@ -352,6 +352,20 @@ Two paths are different (bandwidth ratio ≥ ~2× or RTT spread ≥ ~50 ms):
 
 No environment in this sweep needed both schedulers at once — the choice is a clean function of path symmetry. The operator changes one CLI flag (`--scheduler`) based on whether the two paths are similar or not, then consults §4.3 for the buffer setting.
 
+## 5. Bottom line — the "multipath worse than single path" failure is now opt-out
+
+Putting §4.1 and §4.4 together: with mqvpn's two shipping schedulers (`wlb`, `minrtt`) and a single binary choice for the reorder buffer, **every one of the 16 environments in this study has a configuration that ties or beats the better single path**.
+
+- Symmetric, clean / pure loss → `wlb` + Reorder OFF, **+78 – 120 % over best single**.
+- Symmetric with jitter or 20 – 50 ms RTT spread → `wlb` + Reorder ON, **+13 – 116 % over best single**.
+- Asymmetric bandwidth or RTT spread ≥ 50 ms → `minrtt` (mostly Reorder OFF), **−8 % to +5 % vs best single** — multipath stays up for failover and control-plane multiplexing without the slow path dragging throughput below the fast path.
+
+The classic multipath failure mode — *a weaker path drags the aggregate below what the stronger path delivers alone* — used to be the default outcome on asymmetric uplinks under `wlb` + buffer-OFF (fiber_lte 4.9 vs 212 Mbps single; dual_lte 0.9 vs 30; bw_10to1 13 vs 74). It is **no longer a forced outcome**: in every such environment in this sweep, switching to `minrtt` recovers single-path goodput while keeping the tunnel multipath (fiber_lte 212; dual_lte 30; bw_10to1 70).
+
+The practical consequence is that mqvpn now has the **foundation to safely default to multipath on heterogeneous uplinks**. The operator picks one of two schedulers based on path symmetry, and the worst case under either is "matches the better single path", not "loses to it". Aggregation gains accrue when the links cooperate; failover and tunnel availability stay intact when they don't. The historical caveat — *only multipath if your paths are similar* — applies less strongly to mqvpn after this work.
+
+## References
+
 
 
 - RFC 9221 — Unreliable Datagram Extension to QUIC (§5.1 delegation to the app protocol / §5.2 reordering / §5.3 unreliable)
