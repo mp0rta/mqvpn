@@ -5,7 +5,9 @@
 
 ## Abstract
 
-MASQUE CONNECT-IP carries inner IP packets inside QUIC DATAGRAM frames (RFC 9221), which have no in-order delivery layer. Across multiple paths with different delays the inner congestion-controlled flow mistakes the resulting cross-path reordering for loss and can collapse below the throughput of a single path. This report introduces a per-flow reorder-only buffer at the tunnel egress and sweeps its parameters across 16 netem profiles, under two mqvpn schedulers (`wlb`, `minrtt`), against a single-path baseline. The principal finding: across all 16 profiles, mqvpn has a (scheduler, buffer) configuration that ties or beats the better single path. `wlb` aggregates symmetric paths at +13–120 % over best single (the buffer is the enabler under jitter); on asymmetric paths `wlb` collapses, but `minrtt` recovers single-path-equivalent throughput while keeping multipath enabled. The "multipath is worse than single path" failure mode is configuration-avoidable rather than forced.
+The throughput regression where bonded / multipath links deliver lower aggregate goodput than the better single path under heterogeneous-quality paths is a well-documented structural property of naive multipath scheduling — observed across the MPTCP literature (BLEST 2016, ECF 2017, QAware 2018, D-OLIA 2021, Dimopoulos et al. 2025), recognised in multipath QUIC (draft-ietf-quic-multipath §5.5), and worked around in commercial SD-WAN by defaulting to per-flow, bandwidth-weighted steering (Versa Networks). Almost all that prior work assumes a TCP inner with **adaptive** reordering tolerance (RACK-TLP / SACK / DSACK, RFC 8985 / 2018 / 2883), where the inner is structurally forgiving of cross-path reordering.
+
+This report measures the regression in the harder case: a QUIC inner (picoquic, `kPacketThreshold = 3` fixed, no adaptive expansion — RFC 9002 §6.1.1 leaves adaptation a MAY) carrying a single HTTP/3 bulk transfer over MASQUE CONNECT-IP. mqvpn ships a per-flow reorder buffer at the tunnel egress and two schedulers (`wlb`, `minrtt`). Across 16 netem profiles, mqvpn's `(scheduler, reorder-buffer)` configuration space contains a setting that ties or beats the better single path in every one: `wlb` aggregates symmetric paths at +13–120 % over best single (the buffer is the enabler under jitter); on asymmetric paths `wlb` collapses, but `minrtt` recovers single-path-equivalent throughput within ±5–8 % while keeping multipath enabled. The empirical contribution is that the standard multipath-mitigation principle — scheduler aware of path heterogeneity, plus a tunnel-side reorder buffer — generalises to a QUIC inner without adaptive loss detection, a regime where the underlying problem is strictly harder than the MPTCP setting that prior schedulers (BLEST / ECF / QAware) were designed for.
 
 ## 1. Background — why a tunnel-side reorder buffer
 
@@ -16,6 +18,8 @@ In-order delivery in QUIC is the job of the **STREAM layer** (reassembly by conn
 Consequence: datagrams spread across paths with different delays arrive reordered at the egress, with no layer inside QUIC to put them back in order. When the inner traffic is a single congestion-controlled flow (inner QUIC / TCP that cannot be flow-split), the inner stack misreads this cross-path reordering as loss, shrinks its congestion window, and the multipath aggregation benefit is lost — in the worst case, throughput collapses below that of a single path.
 
 mqvpn uses CONNECT-IP, i.e. DATAGRAMs, so it is directly exposed to the above. A buffer at the tunnel egress that re-orders datagrams (within the implementation latitude RFC 9221 §5.1 grants) is therefore added. This report quantifies its operating envelope.
+
+The regression — multipath worse than the better single path under heterogeneous links — is not specific to mqvpn or to DATAGRAM transport. It is a structural property of naive multipath scheduling, documented continuously across MPTCP (BLEST [Ferlin 2016], ECF [Lim 2017], QAware [Shreedhar 2018], D-OLIA [2021], LLHD [2022], Dimopoulos et al. [2025 preprint]), recognised in multipath QUIC (draft-ietf-quic-multipath §5.5), and worked around in commercial SD-WAN by defaulting to per-flow, bandwidth-weighted steering (Versa Networks). The mechanism — slow-path packets head-of-line-blocking faster-path packets at the receiver, plus the inner congestion controller misreading reordering as loss — applies to any reliable-ordered multipath transport. What this report adds is empirical demonstration that the mitigation principle works under a QUIC inner with **non-adaptive** loss detection (§1.1), which is structurally harder than the TCP-with-RACK/SACK/DSACK inner that the MPTCP scheduler literature assumes.
 
 ### 1.1 Out-of-order tolerance of the inner flow is a MAY at the RFC level (implementation-defined)
 
@@ -31,7 +35,7 @@ Whether the inner stack adapts is implementation-dependent:
 - **picoquic (the inner of this study, `e652e454`) — no dynamic expansion.** Fixed `delta_seq >= 3` ([`loss_recovery.c#L562`](https://github.com/private-octopus/picoquic/blob/e652e454b40ff94d7a0372d537fdf176d55b61f1/picoquic/loss_recovery.c#L562)). Spurious retransmissions are only recorded as telemetry (`max_reorder_gap`, [`frames.c#L2652`](https://github.com/private-octopus/picoquic/blob/e652e454b40ff94d7a0372d537fdf176d55b61f1/picoquic/frames.c#L2652)) and never fed back into the threshold. The collapses in §4 are this behaviour.
 - **Google QUICHE (Chrome / Cronet) — dynamic expansion.** `use_adaptive_reordering_threshold_ = true` by default ([`general_loss_algorithm.h#L124`](https://github.com/google/quiche/blob/f001eed73bcff9389be32a36047e8945fba32553/quiche/quic/core/congestion_control/general_loss_algorithm.h#L124)); `SpuriousLossDetected()` grows `reordering_threshold_` on each spurious detection. Initial value `kDefaultPacketReorderingThreshold = 3` ([`quic_constants.h#L285`](https://github.com/google/quiche/blob/f001eed73bcff9389be32a36047e8945fba32553/quiche/quic/core/quic_constants.h#L285)).
 
-This study measures the non-adaptive picoquic case (the RFC default tolerance). Residual benefit when the inner stack is adaptive (QUICHE) is future work.
+This study measures the non-adaptive picoquic case (the RFC default tolerance). It is therefore structurally harder than the MPTCP scheduler literature, where the TCP inner adapts via RACK/SACK/DSACK and absorbs more reordering before the multipath aggregation collapses. Residual benefit when the inner stack is adaptive (QUICHE) is future work.
 
 ## 2. Design of the reorder-only buffer
 
@@ -282,7 +286,9 @@ Shipping defaults (`--scheduler wlb`, `[Reorder] Enabled = off`) are correct for
 
 ## 5. Conclusion
 
-Across the 16 environments swept, mqvpn has a configuration that ties or beats the better single path in every one. The matrix is:
+The bandwidth-aggregation regression where multipath delivers lower throughput than the better single path under heterogeneous-quality links is a long-known structural property of naive multipath scheduling, documented continuously from BLEST (Ferlin et al., 2016) and ECF (Lim et al., 2017) through QAware (Shreedhar et al., 2018), D-OLIA (2021), LLHD (2022), and Dimopoulos et al. (2025). The mechanism — head-of-line blocking at the receiver, stale-RTT mis-scheduling, and the inner congestion controller misreading reordering as loss — applies to MPTCP, multipath QUIC (draft-ietf-quic-multipath §5.5), and RoCEv2 alike; commercial SD-WAN (Versa) avoids it at the cost of giving up packet-level aggregation by defaulting to per-flow, bandwidth-weighted steering.
+
+The contribution of this report is empirical: the same mitigation principle — a scheduler aware of path heterogeneity plus a tunnel-side reorder buffer — works under a QUIC inner with **non-adaptive** loss detection (`kPacketThreshold = 3` fixed, the RFC 9002 §6.1.1 default; the MAY for RACK-style expansion is not implemented in picoquic). This is structurally harder than the TCP-with-RACK/SACK/DSACK inner that the MPTCP scheduler literature assumes, since the inner stack does not absorb cross-path reordering on its own. Across the 16 netem profiles, mqvpn's existing `(scheduler, reorder-buffer)` configuration space contains a setting that ties or beats the better single path in every one:
 
 | Path topology | Scheduler | Reorder | Δ vs best single |
 |---|:--|:--|---:|
@@ -290,9 +296,11 @@ Across the 16 environments swept, mqvpn has a configuration that ties or beats t
 | Symmetric, jittery or 20–50 ms spread | `wlb` | ON, wait = 50 ms | +13 to +116 % |
 | Asymmetric bandwidth or spread ≥ 50 ms | `minrtt` | mostly OFF | −8 to +5 % |
 
-The worst case under the right scheduler is "matches the better single path"; the historical multipath caveat *only multipath if your paths are similar* applies less strongly to mqvpn after this work. The reorder buffer's narrow but well-defined operating envelope (symmetric paths with cross-path reordering) is what enables the +13 to +120 % regime; outside it, scheduler choice — not buffer tuning — is the load-bearing decision.
+The worst case under the right scheduler is "matches the better single path within ~5–8 %", not "loses to it"; the historical multipath caveat *only multipath if your paths are similar* applies less strongly to mqvpn after this work. The reorder buffer's narrow but well-defined operating envelope (symmetric paths with cross-path reordering caused by jitter or small RTT spread) is what enables the +13–120 % regime under `wlb`; outside that envelope, scheduler choice — not buffer tuning — is the load-bearing decision.
 
 ## References
+
+**Standards**
 
 - RFC 9221 — Unreliable Datagram Extension to QUIC (§5.1 delegation to the app protocol / §5.2 reordering / §5.3 unreliable)
 - RFC 9484 — Proxying IP in HTTP (CONNECT-IP) / RFC 9297 — HTTP Datagrams and the Capsule Protocol
@@ -301,6 +309,20 @@ The worst case under the right scheduler is "matches the better single path"; th
 - RFC 8985 — RACK-TLP / RFC 2018 — SACK / RFC 2883 — DSACK (dynamic growth of the reordering window)
 - draft-ietf-quic-multipath (per-path packet number space / §5.5 stream HoL)
 - draft-amend-iccrg-multipath-reordering (aggregation-node reorder buffering, prior art)
+
+**Prior art — multipath schedulers and the heterogeneous-path regression**
+
+- S. Ferlin, Ö. Alay, O. Mehani, R. Boreli. "BLEST: Blocking Estimation-based MPTCP Scheduler for Heterogeneous Networks." IFIP Networking 2016. `dl.ifip.org/db/conf/networking/networking2016/1570234725.pdf`
+- Y.-S. Lim, E. M. Nahum, D. Towsley, R. J. Gibbens. "ECF: An MPTCP Path Scheduler to Manage Heterogeneous Paths." ACM CoNEXT 2017.
+- T. Shreedhar et al. "QAware: A Cross-Layer Approach to MPTCP Scheduling." IFIP Networking 2018. `dl.ifip.org/db/conf/networking/networking2018/3B2-1570422213.pdf`
+- D-OLIA: published in *Sensors* 2021 (PMC8433826) — coupled CC (LIA/OLIA) shown insufficient for heterogeneous paths.
+- LLHD scheduler: PMC9782081 (2022).
+- N. Dimopoulos, A. Salkintzis, A. Tsolkas, N. Passas, L. Merakos. "Evaluating the Impact of Packet Scheduling and Congestion Control Algorithms on MPTCP Performance over Heterogeneous Networks." arXiv:2511.14550, Nov 2025 (**preprint, not peer-reviewed**).
+- Q. De Coninck, O. Bonaventure. "Tuning Multipath QUIC at the Sender Side." ACM CoNEXT 2017. `multipath-quic.org/conext17-deconinck.pdf`
+- Versa Networks. SD-WAN Configuration — Traffic Steering (default = per-flow, weighted round-robin proportional to per-path bandwidth). `docs.versa-networks.com/Secure_SD-WAN/01_Configuration_from_Director/SD-WAN_Configuration/Advanced_SD-WAN_Configuration/Configure_SD-WAN_Traffic_Steering`
+
+**Implementations referenced**
+
 - picoquic `e652e454`: `loss_recovery.c#L562` (fixed `delta_seq >= 3`) / `frames.c#L2652` (telemetry)
 - Google QUICHE `f001eed`: `general_loss_algorithm.h#L124` (`use_adaptive_reordering_threshold_ = true`) / `quic_constants.h#L285` (`kDefaultPacketReorderingThreshold = 3`)
 - Implementation: `src/reorder.h` / `src/reorder_tx.c` / `src/reorder_rx.c` (merged to main in PR #153, default OFF)
