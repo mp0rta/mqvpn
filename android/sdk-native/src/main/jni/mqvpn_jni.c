@@ -27,6 +27,8 @@
 #include <android/log.h>
 
 #include "libmqvpn.h"
+#include "mqvpn_internal.h"
+#include "reorder.h"
 
 #define LOG_TAG   "mqvpn_jni"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -415,6 +417,29 @@ JNI_FN(configSetKillswitchHint)(JNIEnv *env, jobject thiz, jlong cfg, jboolean e
     (void)thiz;
     return mqvpn_config_set_killswitch_hint((mqvpn_config_t *)(intptr_t)cfg,
                                             enable ? 1 : 0);
+}
+
+/* configSetReorderEnabled(cfg, mode) → int */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetReorderEnabled)(JNIEnv *env, jobject thiz, jlong cfg, jint mode)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_config_set_reorder_enabled((mqvpn_config_t *)(intptr_t)cfg,
+                                            (mqvpn_reorder_mode_t)mode);
+}
+
+/* configAddReorderRule(cfg, proto, port, profile) → int */
+JNIEXPORT jint JNICALL
+JNI_FN(configAddReorderRule)(JNIEnv *env, jobject thiz, jlong cfg, jint proto, jint port,
+                             jint profile)
+{
+    (void)env;
+    (void)thiz;
+    if (port < 1 || port > 65535) return -1;
+    return mqvpn_config_add_reorder_rule((mqvpn_config_t *)(intptr_t)cfg, (uint8_t)proto,
+                                         (uint16_t)port,
+                                         (mqvpn_reorder_profile_t)profile);
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -839,6 +864,34 @@ JNI_FN(getInterest)(JNIEnv *env, jobject thiz, jlong client)
 
     jintArray arr = (*env)->NewIntArray(env, 3);
     if (arr) (*env)->SetIntArrayRegion(env, arr, 0, 3, values);
+    return arr;
+}
+
+/*
+ * getReorderStats(client) → LongArray:
+ * [deliveredCount, gapCount, gapFilledCount, gapTimeoutCount,
+ *  ackDemoteCount, p50Ms, p99Ms]
+ */
+JNIEXPORT jlongArray JNICALL
+JNI_FN(getReorderStats)(JNIEnv *env, jobject thiz, jlong client)
+{
+    (void)thiz;
+    mqvpn_reorder_stats_t st;
+    if (mqvpn_client_get_reorder_stats((const mqvpn_client_t *)(intptr_t)client, &st) !=
+        0)
+        return NULL;
+
+    double p50 = mqvpn_reorder_latency_buffered_percentile(&st, 0.50);
+    double p99 = mqvpn_reorder_latency_buffered_percentile(&st, 0.99);
+
+    jlong values[7] = {
+        (jlong)st.delivered_count,  (jlong)st.gap_count,
+        (jlong)st.gap_filled_count, (jlong)st.gap_timeout_count,
+        (jlong)st.ack_demote_count, (jlong)(p50 + 0.5),
+        (jlong)(p99 + 0.5),
+    };
+    jlongArray arr = (*env)->NewLongArray(env, 7);
+    if (arr) (*env)->SetLongArrayRegion(env, arr, 0, 7, values);
     return arr;
 }
 

@@ -3,9 +3,13 @@
 
 package com.mqvpn.sdk.core
 
+import android.util.Log
+import com.mqvpn.sdk.core.internal.ReorderPlan
 import com.mqvpn.sdk.core.internal.TunnelCallbacks
+import com.mqvpn.sdk.core.internal.planReorder
 import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.PathInfo
+import com.mqvpn.sdk.core.model.ReorderStats
 import com.mqvpn.sdk.core.model.VpnStats
 import com.mqvpn.sdk.native_.NativeBridge
 
@@ -57,6 +61,11 @@ class MqvpnTunnel internal constructor(
     // --- Query ---
 
     fun getState(): Int = NativeBridge.getState(clientHandle)
+
+    fun getReorderStats(): ReorderStats {
+        val a = NativeBridge.getReorderStats(clientHandle) ?: return ReorderStats()
+        return ReorderStats(a[0], a[1], a[2], a[3], a[4], a[5], a[6])
+    }
 
     fun getStats(): VpnStats {
         val arr = NativeBridge.getStats(clientHandle) ?: return VpnStats()
@@ -111,7 +120,18 @@ class MqvpnTunnel internal constructor(
     }
 
     companion object {
+        private const val TAG = "MqvpnTunnel"
         const val ERR_AGAIN = -9
+
+        private fun applyReorder(cfg: Long, plan: ReorderPlan) {
+            plan.warnings.forEach { Log.w(TAG, it) }
+            if (!plan.enabled) return
+            NativeBridge.configSetReorderEnabled(cfg, 1)
+            plan.rules.forEach { r ->
+                val rc = NativeBridge.configAddReorderRule(cfg, r.proto, r.port, r.profile)
+                if (rc != 0) Log.w(TAG, "configAddReorderRule failed for port ${r.port} (rc=$rc)")
+            }
+        }
 
         internal fun create(config: MqvpnConfig, callbacks: TunnelCallbacks): MqvpnTunnel {
             val cfg = NativeBridge.configNew()
@@ -124,7 +144,7 @@ class MqvpnTunnel internal constructor(
             NativeBridge.configSetReconnect(cfg, config.reconnect, config.reconnectIntervalSec)
             NativeBridge.configSetKillswitchHint(cfg, config.killSwitch)
             NativeBridge.configSetAndroidClock(cfg)
-
+            applyReorder(cfg, planReorder(config))
             val handle = NativeBridge.clientNew(cfg, callbacks)
             check(handle != 0L) { "mqvpn_client_new failed" }
             return MqvpnTunnel(handle, cfg)

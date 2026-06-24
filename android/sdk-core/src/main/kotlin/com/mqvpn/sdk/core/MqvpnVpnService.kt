@@ -72,6 +72,7 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
                 if (t != null) {
                     manager?.updateStats(t.getStats())
                     manager?.updatePaths(t.getPaths())
+                    manager?.updateReorderStats(t.getReorderStats())
                 }
                 result
             },

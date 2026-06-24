@@ -677,6 +677,32 @@ TEST(client_get_interest)
     mqvpn_client_destroy(c);
 }
 
+TEST(client_get_reorder_stats_null_args)
+{
+    mqvpn_reorder_stats_t st;
+    ASSERT_EQ(mqvpn_client_get_reorder_stats(NULL, &st), -1);
+    mqvpn_client_t *c = make_test_client();
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(mqvpn_client_get_reorder_stats(c, NULL), -1);
+    mqvpn_client_destroy(c);
+}
+
+TEST(client_get_reorder_stats_zero_fill_when_unconnected)
+{
+    mqvpn_client_t *c = make_test_client();
+    ASSERT_NOT_NULL(c);
+
+    mqvpn_reorder_stats_t st;
+    memset(&st, 0xAB, sizeof(st));
+    ASSERT_EQ(mqvpn_client_get_reorder_stats(c, &st), 0);
+    ASSERT_EQ(st.delivered_count, 0u);
+    ASSERT_EQ(st.gap_count, 0u);
+    ASSERT_EQ(st.gap_filled_count, 0u);
+    ASSERT_EQ(st.residence_max_us, 0u);
+
+    mqvpn_client_destroy(c);
+}
+
 /* ── Path management ── */
 
 TEST(client_add_path)
@@ -1794,6 +1820,8 @@ main(void)
     /* Query tests */
     run_client_get_state_null();
     run_client_get_stats();
+    run_client_get_reorder_stats_null_args();
+    run_client_get_reorder_stats_zero_fill_when_unconnected();
     run_client_get_interest();
 
     /* Path management tests */

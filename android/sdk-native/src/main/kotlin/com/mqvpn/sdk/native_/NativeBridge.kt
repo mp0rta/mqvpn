@@ -64,6 +64,19 @@ object NativeBridge {
     /** mqvpn_config_set_killswitch_hint(cfg, enable) */
     external fun configSetKillswitchHint(cfg: Long, enable: Boolean): Int
 
+    /** mqvpn_config_set_reorder_enabled(cfg, mode: 0=OFF, 1=ON) */
+    external fun configSetReorderEnabled(cfg: Long, mode: Int): Int
+
+    /** mqvpn_config_add_reorder_rule(cfg, proto, port, profile) */
+    external fun configAddReorderRule(cfg: Long, proto: Int, port: Int, profile: Int): Int
+
+    /**
+     * mqvpn_client_get_reorder_stats(client) → LongArray:
+     * [deliveredCount, gapCount, gapFilledCount, gapTimeoutCount,
+     *  ackDemoteCount, p50Ms, p99Ms]
+     */
+    external fun getReorderStats(client: Long): LongArray?
+
     // ---- Client lifecycle ----
 
     /**

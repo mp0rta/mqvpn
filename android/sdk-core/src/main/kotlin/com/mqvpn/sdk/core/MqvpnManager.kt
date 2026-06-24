@@ -13,6 +13,7 @@ import android.util.Log
 import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.PathInfo
+import com.mqvpn.sdk.core.model.ReorderStats
 import com.mqvpn.sdk.core.model.VpnStats
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -34,6 +35,9 @@ class MqvpnManager(private val context: Context) {
 
     private val _paths = MutableStateFlow<List<PathInfo>>(emptyList())
     val paths: StateFlow<List<PathInfo>> = _paths.asStateFlow()
+
+    private val _reorderStats = MutableStateFlow(ReorderStats())
+    val reorderStats: StateFlow<ReorderStats> = _reorderStats.asStateFlow()
 
     private var boundService: MqvpnVpnService? = null
     private var serviceConnection: ServiceConnection? = null
@@ -70,8 +74,7 @@ class MqvpnManager(private val context: Context) {
                 boundService?.manager = null
                 boundService = null
                 _vpnState.value = MqvpnState.Disconnected
-                _stats.value = VpnStats()
-                _paths.value = emptyList()
+                resetMetrics()
             }
         }
         serviceConnection = conn
@@ -107,6 +110,16 @@ class MqvpnManager(private val context: Context) {
     /** Update paths (called from VpnService). */
     internal fun updatePaths(p: List<PathInfo>) {
         _paths.value = p
+    }
+
+    /** Update reorder stats (called from VpnService). */
+    internal fun updateReorderStats(s: ReorderStats) { _reorderStats.value = s }
+
+    /** Reset all metric flows to zero (called on service disconnect). */
+    internal fun resetMetrics() {
+        _stats.value = VpnStats()
+        _paths.value = emptyList()
+        _reorderStats.value = ReorderStats()
     }
 
     fun destroy() {
