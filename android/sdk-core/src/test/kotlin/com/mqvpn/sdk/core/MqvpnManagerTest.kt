@@ -7,6 +7,7 @@ import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.MqvpnError
 import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.PathInfo
+import com.mqvpn.sdk.core.model.ReorderStats
 import com.mqvpn.sdk.core.model.TunnelInfo
 import com.mqvpn.sdk.core.model.VpnStats
 import org.junit.Assert.assertEquals
@@ -120,5 +121,31 @@ class MqvpnManagerTest {
         manager.destroy()
         // Should not throw
         manager.destroy() // idempotent
+    }
+
+    @Test
+    fun reorderStats_initialValueIsAllZero() {
+        val mgr = MqvpnManager(RuntimeEnvironment.getApplication())
+        assertEquals(ReorderStats(), mgr.reorderStats.value)
+    }
+
+    @Test
+    fun updateReorderStats_emitsToFlow() {
+        val mgr = MqvpnManager(RuntimeEnvironment.getApplication())
+        val s = ReorderStats(delivered = 10, gapFilled = 3)
+        mgr.updateReorderStats(s)
+        assertEquals(s, mgr.reorderStats.value)
+    }
+
+    @Test
+    fun resetMetrics_clearsAllFlows() {
+        val mgr = MqvpnManager(RuntimeEnvironment.getApplication())
+        mgr.updateStats(VpnStats(bytesTx = 1))
+        mgr.updatePaths(listOf(PathInfo(handle = 1, status = 1, iface = "wlan0", bytesTx = 500, bytesRx = 1000, srttMs = 30)))
+        mgr.updateReorderStats(ReorderStats(delivered = 5))
+        mgr.resetMetrics()
+        assertEquals(VpnStats(), mgr.stats.value)
+        assertEquals(emptyList<PathInfo>(), mgr.paths.value)
+        assertEquals(ReorderStats(), mgr.reorderStats.value)
     }
 }

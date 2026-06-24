@@ -3,12 +3,16 @@
 
 package com.mqvpn.sdk.core
 
+import android.os.Parcel
 import com.mqvpn.sdk.core.model.MqvpnConfig
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 
+@RunWith(RobolectricTestRunner::class)
 class MqvpnConfigTest {
 
     @Test
@@ -61,5 +65,45 @@ class MqvpnConfigTest {
         assertEquals(1, MqvpnConfig.LogLevel.INFO.native)
         assertEquals(2, MqvpnConfig.LogLevel.WARN.native)
         assertEquals(3, MqvpnConfig.LogLevel.ERROR.native)
+    }
+
+    @Test
+    fun reorderFields_defaultsAreOff() {
+        val c = MqvpnConfig(serverAddress = "h", authKey = "k")
+        assertFalse(c.reorderEnabled)
+        assertEquals(MqvpnConfig.ReorderProfile.CELLULAR_BOND, c.reorderProfile)
+        assertTrue(c.reorderPorts.isEmpty())
+    }
+
+    @Test
+    fun reorderFields_jsonRoundTrip() {
+        val c = MqvpnConfig(serverAddress = "h", authKey = "k",
+            reorderEnabled = true, reorderProfile = MqvpnConfig.ReorderProfile.FIBER_LTE,
+            reorderPorts = listOf(443, 853))
+        val back = MqvpnConfig.fromJson(c.toJson())
+        assertEquals(c, back)
+        assertEquals(4, back.reorderProfile.native)
+    }
+
+    @Test
+    fun oldJsonWithoutReorderFields_decodesWithDefaults() {
+        val oldJson = """{"serverAddress":"h","authKey":"k"}"""
+        val c = MqvpnConfig.fromJson(oldJson)
+        assertFalse(c.reorderEnabled)
+        assertTrue(c.reorderPorts.isEmpty())
+    }
+
+    @Test
+    fun reorderFields_parcelRoundTrip() {
+        val c = MqvpnConfig(serverAddress = "h", authKey = "k",
+            reorderEnabled = true, reorderProfile = MqvpnConfig.ReorderProfile.FIBER_LTE,
+            reorderPorts = listOf(443, 853))
+        val p = Parcel.obtain()
+        p.writeParcelable(c, 0)
+        p.setDataPosition(0)
+        @Suppress("DEPRECATION")
+        val back = p.readParcelable<MqvpnConfig>(MqvpnConfig::class.java.classLoader)
+        p.recycle()
+        assertEquals(c, back)
     }
 }

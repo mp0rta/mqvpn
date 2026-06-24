@@ -22,6 +22,9 @@ data class MqvpnConfig(
     val reconnectIntervalSec: Int = 5,
     val killSwitch: Boolean = false,
     val dnsServers: List<String> = listOf("8.8.8.8", "1.1.1.1"),
+    val reorderEnabled: Boolean = false,
+    val reorderProfile: ReorderProfile = ReorderProfile.CELLULAR_BOND,
+    val reorderPorts: List<Int> = emptyList(),
 ) : Parcelable {
 
     @Serializable
@@ -38,6 +41,12 @@ data class MqvpnConfig(
         INFO(1),
         WARN(2),
         ERROR(3),
+    }
+
+    @Serializable
+    enum class ReorderProfile(val native: Int) {
+        CELLULAR_BOND(3),   // preset: wait=50ms cap=1024
+        FIBER_LTE(4),       // preset: wait=50ms cap=2048
     }
 
     fun toJson(): String = Json.encodeToString(serializer(), this)

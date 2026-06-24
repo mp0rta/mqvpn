@@ -2645,6 +2645,18 @@ mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
 }
 
 int
+mqvpn_client_get_reorder_stats(const mqvpn_client_t *c, mqvpn_reorder_stats_t *out)
+{
+    if (!c || !out) return -1;
+    if (c->conn && c->conn->reorder_rx) {
+        mqvpn_reorder_rx_get_stats(c->conn->reorder_rx, out);
+    } else {
+        memset(out, 0, sizeof(*out));
+    }
+    return 0;
+}
+
+int
 mqvpn_client_get_paths(const mqvpn_client_t *c, mqvpn_path_info_t *out, int max_paths,
                        int *n_paths)
 {

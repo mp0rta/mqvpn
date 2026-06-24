@@ -194,5 +194,7 @@ MQVPN_INTERNAL int mqvpn_server_get_all_fec_stats(const mqvpn_server_t *s,
  * (gap_count > 0), and per-conn detail is not required at this layer. */
 MQVPN_INTERNAL int mqvpn_server_get_reorder_stats(const mqvpn_server_t *s,
                                                   mqvpn_reorder_stats_t *out);
+MQVPN_INTERNAL int mqvpn_client_get_reorder_stats(const mqvpn_client_t *c,
+                                                  mqvpn_reorder_stats_t *out);
 
 #endif /* MQVPN_INTERNAL_H */
