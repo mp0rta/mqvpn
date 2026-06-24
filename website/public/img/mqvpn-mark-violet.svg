@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 64 64" role="img" aria-label="mqvpn">
+<defs><linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#8b5cf6"></stop><stop offset="100%" stop-color="#5b21b6"></stop></linearGradient></defs>
+<rect x="0" y="0" width="64" height="64" rx="14.08" ry="14.08" fill="#e9e1fb"></rect>
+<rect x="8" y="14" width="34" height="14" rx="7" fill="#b8a3f6"></rect>
+<rect x="22" y="36" width="34" height="14" rx="7" fill="url(#g1)"></rect>
+<circle cx="32" cy="32" r="4" fill="#fbfaff"></circle>
+</svg>

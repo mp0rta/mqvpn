@@ -17,6 +17,11 @@ export default defineConfig({
   },
 
   themeConfig: {
+    logo: {
+      light: '/img/mqvpn-lockup-violet.svg',
+      dark: '/img/mqvpn-lockup-violet-dark.svg',
+    },
+    siteTitle: false,
     socialLinks: [
       { icon: 'github', link: 'https://github.com/mp0rta/mqvpn' },
     ],

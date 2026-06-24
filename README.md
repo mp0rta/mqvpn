@@ -1,4 +1,6 @@
-# mqvpn
+<p align="center">
+  <img src="website/public/img/mqvpn-lockup-violet-light.svg" alt="mqvpn" width="400">
+</p>
 
 Multipath QUIC VPN using [MASQUE CONNECT-IP (RFC 9484)](https://www.rfc-editor.org/rfc/rfc9484) over [HTTP Datagrams (RFC 9297)](https://www.rfc-editor.org/rfc/rfc9297) / [QUIC DATAGRAMs (RFC 9221)](https://www.rfc-editor.org/rfc/rfc9221), built on a [fork of XQUIC](https://github.com/mp0rta/xquic/tree/mqvpn-main) with [Multipath QUIC](https://datatracker.ietf.org/doc/draft-ietf-quic-multipath/).
 

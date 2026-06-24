@@ -4,6 +4,10 @@ layout: home
 hero:
   name: mqvpn
   text: Modern multipath VPN built on open standards
+  image:
+    light: /img/mqvpn-lockup-violet.svg
+    dark: /img/mqvpn-lockup-violet-dark.svg
+    alt: mqvpn
   actions:
     - theme: brand
       text: Get Started

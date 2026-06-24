@@ -1,0 +1,9 @@
+.VPHero .VPImage {
+  max-width: 420px;
+  max-height: 420px;
+}
+
+.VPNavBarTitle .logo {
+  height: 60px;
+  width: auto;
+}

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 594.9333333333334 216" width="594.9333333333334" height="216" role="img" aria-label="mqvpn">
+<svg x="44" y="44" width="128" height="128" viewBox="0 0 64 64">
+  <defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#8b5cf6"></stop><stop offset="100%" stop-color="#5b21b6"></stop></linearGradient></defs>
+  <rect x="0" y="0" width="64" height="64" rx="14.08" fill="#e9e1fb"></rect>
+  <rect x="8" y="14" width="34" height="14" rx="7" fill="#b8a3f6"></rect>
+  <rect x="22" y="36" width="34" height="14" rx="7" fill="url(#g)"></rect>
+  <circle cx="32" cy="32" r="4" fill="#fbfaff"></circle>
+</svg>
+<svg x="200" y="55.77777777777778" width="350.93333333333334" height="94" viewBox="0 0 336 90" color="#ffffff">
+<g transform="translate(4 0)"><path d="M4,68 V32 Q4,18 14,18 H42 Q52,18 52,32 V68" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"></path><line x1="28" y1="32" x2="28" y2="60" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"></line></g>
+<g transform="translate(72 0)"><circle cx="28" cy="43" r="25" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"></circle><line x1="48" y1="58" x2="52" y2="82" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"></line><circle cx="28" cy="50" r="4.5" fill="#5b21b6"></circle></g>
+<g transform="translate(140 0)"><polyline points="4,18 28,68 52,18" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"></polyline></g>
+<g transform="translate(208 0)"><line x1="6" y1="18" x2="6" y2="68" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"></line><path d="M6,18 H34 Q52,18 52,33 Q52,48 34,48 H6" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"></path></g>
+<g transform="translate(276 0)"><path d="M4,68 V32 Q4,18 14,18 H42 Q52,18 52,32 V68" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"></path></g>
+</svg>
+</svg>

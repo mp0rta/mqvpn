@@ -4,6 +4,10 @@ layout: home
 hero:
   name: mqvpn
   text: オープン標準上に構築されたモダンなマルチパス VPN
+  image:
+    light: /img/mqvpn-lockup-violet.svg
+    dark: /img/mqvpn-lockup-violet-dark.svg
+    alt: mqvpn
   actions:
     - theme: brand
       text: はじめる
