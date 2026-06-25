@@ -5,6 +5,7 @@ package com.mqvpn.sdk.core.internal
 
 import android.net.Network
 import com.mqvpn.sdk.core.MqvpnTunnel
+import com.mqvpn.sdk.core.TestReflection
 import com.mqvpn.sdk.network.NetworkEvent
 import com.mqvpn.sdk.network.NetworkMonitor
 import com.mqvpn.sdk.network.NetworkPath
@@ -118,15 +119,7 @@ class PathManagerRaceTest {
         return ctor.newInstance(netId)
     }
 
-    private fun createDummyTunnel(): MqvpnTunnel {
-        val ctor = MqvpnTunnel::class.java.getDeclaredConstructor(
-            Long::class.javaPrimitiveType,
-            Long::class.javaPrimitiveType,
-            Boolean::class.javaPrimitiveType,
-        )
-        ctor.isAccessible = true
-        return ctor.newInstance(0L, 0L, false) as MqvpnTunnel
-    }
+    private fun createDummyTunnel(): MqvpnTunnel = TestReflection.createDummyTunnel()
 
     @Suppress("UNCHECKED_CAST")
     private fun readPathHandles(pm: PathManager): Map<Network, Long> {
