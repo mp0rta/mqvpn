@@ -135,9 +135,11 @@ class TunnelBridgeTest {
         // Use reflection to construct with mock values.
         val constructor = TunnelBridge::class.java.declaredConstructors.first()
         constructor.isAccessible = true
-        // MqvpnTunnel(clientHandle=0, cfgHandle=0, reorderEnabled=false)
-        val tunnelConstructor = MqvpnTunnel::class.java.declaredConstructors
-            .maxByOrNull { it.parameterCount }!!
+        val tunnelConstructor = MqvpnTunnel::class.java.getDeclaredConstructor(
+            Long::class.javaPrimitiveType,
+            Long::class.javaPrimitiveType,
+            Boolean::class.javaPrimitiveType,
+        )
         tunnelConstructor.isAccessible = true
         val mockTunnel = tunnelConstructor.newInstance(0L, 0L, false) as MqvpnTunnel
         return constructor.newInstance(executor, mockTunnel) as TunnelBridge
