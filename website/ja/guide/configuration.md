@@ -34,6 +34,7 @@ Scheduler = wlb
 # /etc/mqvpn/client.conf
 [Server]
 Address = 203.0.113.1:443
+# ServerName = vpn.example.com  # TLS SNI / 証明書検証名（デフォルト: Address のホスト部）
 
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
@@ -84,6 +85,7 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
 {
   "mode": "client",
   "server_addr": "203.0.113.1:443",
+  "tls_server_name": "vpn.example.com",
   "tun_name": "mqvpn0",
   "log_level": "info",
   "auth_key": "<YOUR_PSK_HERE>",
@@ -124,6 +126,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | キー | 説明 | デフォルト |
 |------|------|-----------|
 | `Address` | サーバーアドレス（`HOST:PORT`、IPv6 は `[2001:db8::1]:443` 形式） | 必須 |
+| `ServerName` | TLS SNI および証明書検証名。IP 直接接続でドメイン証明書を検証する場合に使用 | Address のホスト部 |
 | `Insecure` | TLS 証明書検証をスキップ | `false` |
 
 ### `[Interface]`

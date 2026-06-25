@@ -109,6 +109,7 @@ Scheduler = wlb
 # /etc/mqvpn/client.conf
 [Server]
 Address = 203.0.113.1:443
+# ServerName = vpn.example.com  # TLS SNI / cert verify name (default: use Address host)
 
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
@@ -155,8 +156,9 @@ Client example:
 {
     "mode": "client",
     "server_addr": "203.0.113.1:443",
+    "tls_server_name": "vpn.example.com",
     "auth_key": "client-key",
-    "insecure": true,
+    "insecure": false,
     "dns": ["1.1.1.1", "8.8.8.8"],
     "paths": ["eth0", "wlan0"],
     "reconnect": true,
