@@ -102,6 +102,7 @@ mqvpn --mode client|server [options]
   --auth-key KEY         PSK authentication
   --user NAME:KEY        Per-user PSK (repeatable, server)
   --dns ADDR             DNS server (repeatable)
+  --tls-server-name NAME TLS SNI / cert verify name (client)
   --insecure             Accept untrusted certs (testing only)
   --tun-name NAME        TUN device name (default: mqvpn0)
   --listen BIND:PORT     Listen address (server, default: 0.0.0.0:443)
