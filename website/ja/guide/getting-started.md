@@ -102,6 +102,7 @@ mqvpn --mode client|server [options]
   --auth-key KEY         PSK 認証
   --user NAME:KEY        ユーザー個別の PSK（複数指定可、サーバー）
   --dns ADDR             DNS サーバー（複数指定可）
+  --tls-server-name NAME TLS SNI / 証明書検証名（クライアント）
   --insecure             信頼されていない証明書を受け入れる（テスト用）
   --tun-name NAME        TUN デバイス名（デフォルト: mqvpn0）
   --listen BIND:PORT     リッスンアドレス（サーバー、デフォルト: 0.0.0.0:443）

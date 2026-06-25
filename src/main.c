@@ -48,6 +48,7 @@ usage(const char *prog)
         "  --tun-name NAME           TUN device name (default mqvpn0)\n"
         "  --cert PATH               TLS certificate (server mode)\n"
         "  --key PATH                TLS private key (server mode)\n"
+        "  --tls-server-name NAME    TLS SNI / cert verify name (client mode)\n"
         "  --insecure                Accept untrusted certs (client mode, testing only)\n"
         "  --auth-key KEY            PSK for authentication\n"
         "  --user NAME:KEY           Add a server user credential (repeatable)\n"
@@ -158,6 +159,7 @@ main(int argc, char *argv[])
         {"no-reconnect", no_argument, NULL, 'R'},
         {"kill-switch", no_argument, NULL, 'K'},
         {"no-manage-routes", no_argument, NULL, 0x103},
+        {"tls-server-name", required_argument, NULL, 0x104},
         {"control-port", required_argument, NULL, 'X'},
         {"control-addr", required_argument, NULL, 'x'},
         {"status", no_argument, NULL, 'T'},
@@ -176,6 +178,7 @@ main(int argc, char *argv[])
     const char *cert_file = NULL;
     const char *key_file = NULL;
     int insecure = -1; /* -1 means "not set by CLI" */
+    const char *tls_server_name = NULL;
     const char *auth_key = NULL;
     char cli_user_names[MQVPN_CONFIG_MAX_USERS][64];
     char cli_user_keys[MQVPN_CONFIG_MAX_USERS][256];
@@ -300,6 +303,7 @@ main(int argc, char *argv[])
         case 'R': no_reconnect = 1; break;
         case 'K': kill_switch = 1; break;
         case 0x103: manage_routes = 0; break; /* --no-manage-routes */
+        case 0x104: tls_server_name = optarg; break;
         case 'X':
             control_port = atoi(optarg);
             control_port_set = 1;
@@ -511,8 +515,10 @@ main(int argc, char *argv[])
 
         int eff_reconnect = no_reconnect ? 0 : file_cfg.reconnect;
 
-        const char *eff_tls_name =
-            file_cfg.tls_server_name[0] ? file_cfg.tls_server_name : NULL;
+        const char *eff_tls_name = tls_server_name ? tls_server_name
+                                   : file_cfg.tls_server_name[0]
+                                       ? file_cfg.tls_server_name
+                                       : NULL;
 
         mqvpn_client_cfg_t cfg = {
             .server_addr = host,
