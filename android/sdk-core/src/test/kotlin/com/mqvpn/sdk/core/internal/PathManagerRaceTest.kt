@@ -119,9 +119,10 @@ class PathManagerRaceTest {
     }
 
     private fun createDummyTunnel(): MqvpnTunnel {
-        val ctor = MqvpnTunnel::class.java.declaredConstructors.first()
+        val ctor = MqvpnTunnel::class.java.declaredConstructors
+            .maxByOrNull { it.parameterCount }!!
         ctor.isAccessible = true
-        return ctor.newInstance(0L, 0L) as MqvpnTunnel
+        return ctor.newInstance(0L, 0L, false) as MqvpnTunnel
     }
 
     @Suppress("UNCHECKED_CAST")
