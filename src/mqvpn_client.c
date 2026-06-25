@@ -1697,8 +1697,11 @@ cli_start_connection(mqvpn_client_t *c)
     ssl_cfg.cert_verify_flag = c->config.insecure ? XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED
                                                   : XQC_TLS_CERT_FLAG_NEED_VERIFY;
 
+    const char *sni =
+        c->config.tls_server_name[0] ? c->config.tls_server_name : c->config.server_host;
+
     const xqc_cid_t *cid =
-        xqc_h3_connect(c->engine, &cs, NULL, 0, c->config.server_host, 0, &ssl_cfg,
+        xqc_h3_connect(c->engine, &cs, NULL, 0, sni, 0, &ssl_cfg,
                        (struct sockaddr *)&c->server_addr, c->server_addrlen, conn);
     if (!cid) {
         LOG_E(c, "xqc_h3_connect failed");

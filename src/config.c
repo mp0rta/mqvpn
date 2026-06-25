@@ -548,6 +548,8 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
     case SEC_SERVER:
         if (strcasecmp(key, "Address") == 0) {
             snprintf(cfg->server_addr, sizeof(cfg->server_addr), "%s", val);
+        } else if (strcasecmp(key, "ServerName") == 0) {
+            snprintf(cfg->tls_server_name, sizeof(cfg->tls_server_name), "%s", val);
         } else if (strcasecmp(key, "Insecure") == 0) {
             cfg->insecure = parse_bool(val);
         } else {
@@ -817,6 +819,10 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     v = json_find_key(json_text, "server_addr");
     if (v && json_read_string(v, s280, sizeof(s280)) == 0)
         mqvpn_copy_str(cfg->server_addr, sizeof(cfg->server_addr), s280);
+
+    v = json_find_key(json_text, "tls_server_name");
+    if (v && json_read_string(v, s256, sizeof(s256)) == 0)
+        mqvpn_copy_str(cfg->tls_server_name, sizeof(cfg->tls_server_name), s256);
 
     v = json_find_key(json_text, "insecure");
     if (v && json_read_bool(v, &iv) == 0) cfg->insecure = iv;

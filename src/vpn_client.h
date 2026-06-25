@@ -14,11 +14,12 @@ _Static_assert(MQVPN_MAX_PATH_IFACES == MQVPN_MAX_PATHS,
                "CLI path cap must equal library cap (libmqvpn.h)");
 
 typedef struct mqvpn_client_cfg_s {
-    const char *server_addr;                        /* server address (e.g. "1.2.3.4") */
-    int server_port;                                /* server port (e.g. 443) */
-    const char *tun_name;                           /* TUN device name */
-    int insecure;                                   /* skip TLS cert verification */
-    int log_level;                                  /* mqvpn_log_level_t */
+    const char *server_addr;     /* server address (e.g. "1.2.3.4") */
+    int server_port;             /* server port (e.g. 443) */
+    const char *tls_server_name; /* SNI / cert verify name (NULL = use server_addr) */
+    const char *tun_name;        /* TUN device name */
+    int insecure;                /* skip TLS cert verification */
+    int log_level;               /* mqvpn_log_level_t */
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES]; /* network interfaces for multipath */
     int n_paths;          /* number of path interfaces (0 = single-path) */
     int scheduler;        /* 0=minrtt, 1=wlb (default), 2=backup_fec, 3=wlb_udp_pin */

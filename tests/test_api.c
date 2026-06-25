@@ -154,6 +154,7 @@ TEST(config_load_json)
     const char *json = "{"
                        "\"server_host\":\"vpn.example.com\","
                        "\"server_port\":8443,"
+                       "\"tls_server_name\":\"sni.example.com\","
                        "\"auth_key\":\"legacy-key\","
                        "\"insecure\":true,"
                        "\"multipath\":false,"
@@ -180,6 +181,7 @@ TEST(config_load_json)
     ASSERT_EQ(mqvpn_config_load_json(cfg, json), MQVPN_OK);
     ASSERT_STR_EQ(cfg->server_host, "vpn.example.com");
     ASSERT_EQ(cfg->server_port, 8443);
+    ASSERT_STR_EQ(cfg->tls_server_name, "sni.example.com");
     ASSERT_STR_EQ(cfg->auth_key, "legacy-key");
     ASSERT_EQ(cfg->insecure, 1);
     ASSERT_EQ(cfg->multipath, 0);
@@ -239,6 +241,18 @@ TEST(config_load_json_invalid_tuning)
               MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"cc\":\"reno\"}"), MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"mtu\":\"bad\"}"), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_set_tls_server_name)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(cfg->tls_server_name[0], '\0');
+    ASSERT_EQ(mqvpn_config_set_tls_server_name(cfg, "vpn.example.com"), MQVPN_OK);
+    ASSERT_STR_EQ(cfg->tls_server_name, "vpn.example.com");
+    ASSERT_EQ(mqvpn_config_set_tls_server_name(cfg, NULL), MQVPN_OK);
+    ASSERT_EQ(cfg->tls_server_name[0], '\0');
+    ASSERT_EQ(mqvpn_config_set_tls_server_name(NULL, "x"), MQVPN_ERR_INVALID_ARG);
     mqvpn_config_free(cfg);
 }
 
@@ -1780,6 +1794,7 @@ main(void)
     run_config_load_json_duplicate_users_last_wins();
     run_config_load_json_invalid_users();
     run_config_load_json_invalid_tuning();
+    run_config_set_tls_server_name();
     run_config_set_insecure();
     run_config_set_tun_mtu();
     run_config_set_scheduler();

@@ -30,6 +30,7 @@
 
 struct mqvpn_config_s {
     char server_host[256];
+    char tls_server_name[256];
     int server_port;
     char auth_key[256];
     char user_names[MQVPN_MAX_USERS][64];

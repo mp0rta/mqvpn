@@ -511,9 +511,13 @@ main(int argc, char *argv[])
 
         int eff_reconnect = no_reconnect ? 0 : file_cfg.reconnect;
 
+        const char *eff_tls_name =
+            file_cfg.tls_server_name[0] ? file_cfg.tls_server_name : NULL;
+
         mqvpn_client_cfg_t cfg = {
             .server_addr = host,
             .server_port = port,
+            .tls_server_name = eff_tls_name,
             .tun_name = eff_tun_name,
             .insecure = eff_insecure,
             .log_level = log_level,
