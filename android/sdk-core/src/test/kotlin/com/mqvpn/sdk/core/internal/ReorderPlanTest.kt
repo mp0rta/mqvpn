@@ -43,6 +43,13 @@ class ReorderPlanTest {
         assertEquals(1, p.rules.size)
     }
 
+    @Test fun duplicateInvalidPorts_singleWarning() {
+        val p = planReorder(cfg(true, listOf(0, 0, 0, 443)))
+        assertEquals(1, p.rules.size)
+        assertEquals(443, p.rules[0].port)
+        assertEquals(1, p.warnings.count { it.contains("out of range") })
+    }
+
     @Test fun tooManyPorts_cappedAtMaxRules() {
         val p = planReorder(cfg(true, (1..20).toList()))
         assertEquals(16, p.rules.size)

@@ -436,6 +436,7 @@ JNI_FN(configAddReorderRule)(JNIEnv *env, jobject thiz, jlong cfg, jint proto, j
 {
     (void)env;
     (void)thiz;
+    if (proto < 0 || proto > 255) return -1;
     if (port < 1 || port > 65535) return -1;
     return mqvpn_config_add_reorder_rule((mqvpn_config_t *)(intptr_t)cfg, (uint8_t)proto,
                                          (uint16_t)port,

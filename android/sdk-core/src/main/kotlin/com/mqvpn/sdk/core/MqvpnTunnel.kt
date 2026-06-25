@@ -21,6 +21,7 @@ import com.mqvpn.sdk.native_.NativeBridge
 class MqvpnTunnel internal constructor(
     private val clientHandle: Long,
     private val cfgHandle: Long,
+    private val reorderEnabled: Boolean = false,
 ) {
     // --- Lifecycle ---
 
@@ -63,7 +64,9 @@ class MqvpnTunnel internal constructor(
     fun getState(): Int = NativeBridge.getState(clientHandle)
 
     fun getReorderStats(): ReorderStats {
+        if (!reorderEnabled) return ReorderStats()
         val a = NativeBridge.getReorderStats(clientHandle) ?: return ReorderStats()
+        if (a.size < REORDER_STATS_FIELDS) return ReorderStats()
         return ReorderStats(a[0], a[1], a[2], a[3], a[4], a[5], a[6])
     }
 
@@ -121,6 +124,7 @@ class MqvpnTunnel internal constructor(
 
     companion object {
         private const val TAG = "MqvpnTunnel"
+        private const val REORDER_STATS_FIELDS = 7
         const val ERR_AGAIN = -9
 
         private fun applyReorder(cfg: Long, plan: ReorderPlan) {
@@ -144,10 +148,11 @@ class MqvpnTunnel internal constructor(
             NativeBridge.configSetReconnect(cfg, config.reconnect, config.reconnectIntervalSec)
             NativeBridge.configSetKillswitchHint(cfg, config.killSwitch)
             NativeBridge.configSetAndroidClock(cfg)
-            applyReorder(cfg, planReorder(config))
+            val plan = planReorder(config)
+            applyReorder(cfg, plan)
             val handle = NativeBridge.clientNew(cfg, callbacks)
             check(handle != 0L) { "mqvpn_client_new failed" }
-            return MqvpnTunnel(handle, cfg)
+            return MqvpnTunnel(handle, cfg, plan.enabled)
         }
     }
 }
