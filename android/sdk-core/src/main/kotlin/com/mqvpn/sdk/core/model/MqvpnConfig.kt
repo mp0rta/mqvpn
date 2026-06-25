@@ -13,6 +13,7 @@ import kotlinx.serialization.json.Json
 data class MqvpnConfig(
     val serverAddress: String,
     val serverPort: Int = 443,
+    val tlsServerName: String? = null,
     val authKey: String,
     val insecure: Boolean = false,
     val multipathEnabled: Boolean = true,

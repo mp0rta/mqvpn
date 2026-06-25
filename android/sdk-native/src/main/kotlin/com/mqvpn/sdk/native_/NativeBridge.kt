@@ -31,6 +31,9 @@ object NativeBridge {
     /** mqvpn_config_set_server(cfg, host, port) */
     external fun configSetServer(cfg: Long, host: String, port: Int): Int
 
+    /** mqvpn_config_set_tls_server_name(cfg, name) */
+    external fun configSetTlsServerName(cfg: Long, name: String): Int
+
     /** mqvpn_config_set_auth_key(cfg, key) */
     external fun configSetAuthKey(cfg: Long, key: String): Int
 

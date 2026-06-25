@@ -421,6 +421,7 @@ MQVPN_API mqvpn_config_t *mqvpn_config_new(void);
 MQVPN_API void mqvpn_config_free(mqvpn_config_t *cfg);
 
 MQVPN_API int mqvpn_config_set_server(mqvpn_config_t *cfg, const char *host, int port);
+MQVPN_API int mqvpn_config_set_tls_server_name(mqvpn_config_t *cfg, const char *name);
 MQVPN_API int mqvpn_config_set_auth_key(mqvpn_config_t *cfg, const char *key);
 MQVPN_API int mqvpn_config_add_user(mqvpn_config_t *cfg, const char *username,
                                     const char *key);

@@ -34,6 +34,7 @@ Scheduler = wlb
 # /etc/mqvpn/client.conf
 [Server]
 Address = 203.0.113.1:443
+# ServerName = vpn.example.com  # TLS SNI / cert verify name (default: use Address host)
 
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
@@ -84,6 +85,7 @@ JSON config is useful for structured management and automation tooling.
 {
   "mode": "client",
   "server_addr": "203.0.113.1:443",
+  "tls_server_name": "vpn.example.com",
   "tun_name": "mqvpn0",
   "log_level": "info",
   "auth_key": "<YOUR_PSK_HERE>",
@@ -124,6 +126,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | Key | Description | Default |
 |-----|-------------|---------|
 | `Address` | Server address (`HOST:PORT`, e.g. `[2001:db8::1]:443` for IPv6) | Required |
+| `ServerName` | TLS SNI and certificate verification name. Use when connecting by IP but verifying against a domain certificate | Address host |
 | `Insecure` | Skip TLS certificate verification | `false` |
 
 ### `[Interface]`

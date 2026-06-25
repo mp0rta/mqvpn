@@ -314,6 +314,19 @@ JNI_FN(configSetServer)(JNIEnv *env, jobject thiz, jlong cfg, jstring host, jint
     return rc;
 }
 
+/* configSetTlsServerName(cfg, name) → int */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetTlsServerName)(JNIEnv *env, jobject thiz, jlong cfg, jstring name)
+{
+    (void)thiz;
+    const char *n = (*env)->GetStringUTFChars(env, name, NULL);
+    if (!n) return MQVPN_ERR_NO_MEMORY;
+
+    int rc = mqvpn_config_set_tls_server_name((mqvpn_config_t *)(intptr_t)cfg, n);
+    (*env)->ReleaseStringUTFChars(env, name, n);
+    return rc;
+}
+
 /* configSetAuthKey(cfg, key) → int */
 JNIEXPORT jint JNICALL
 JNI_FN(configSetAuthKey)(JNIEnv *env, jobject thiz, jlong cfg, jstring key)

@@ -228,6 +228,17 @@ mqvpn_config_set_server(mqvpn_config_t *cfg, const char *host, int port)
 }
 
 int
+mqvpn_config_set_tls_server_name(mqvpn_config_t *cfg, const char *name)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    if (name)
+        snprintf(cfg->tls_server_name, sizeof(cfg->tls_server_name), "%s", name);
+    else
+        cfg->tls_server_name[0] = '\0';
+    return MQVPN_OK;
+}
+
+int
 mqvpn_config_set_auth_key(mqvpn_config_t *cfg, const char *key)
 {
     if (!cfg || !key) return MQVPN_ERR_INVALID_ARG;
@@ -308,6 +319,11 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
     v = json_find_key(json_text, "server_port");
     if (v && json_read_int(v, &iv) == MQVPN_OK) {
         cfg->server_port = iv;
+    }
+
+    v = json_find_key(json_text, "tls_server_name");
+    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+        mqvpn_copy_str(cfg->tls_server_name, sizeof(cfg->tls_server_name), tmp);
     }
 
     v = json_find_key(json_text, "auth_key");
