@@ -22,6 +22,7 @@ class MqvpnConfigTest {
             authKey = "test-key",
         )
         assertEquals(443, config.serverPort)
+        assertEquals(null, config.tlsServerName)
         assertFalse(config.insecure)
         assertTrue(config.multipathEnabled)
         assertEquals(MqvpnConfig.Scheduler.MIN_RTT, config.scheduler)
@@ -36,6 +37,7 @@ class MqvpnConfigTest {
         val config = MqvpnConfig(
             serverAddress = "10.0.0.1",
             serverPort = 8443,
+            tlsServerName = "vpn.example.com",
             authKey = "secret-key-123",
             insecure = true,
             multipathEnabled = false,

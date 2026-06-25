@@ -136,6 +136,7 @@ class MqvpnTunnel internal constructor(
         internal fun create(config: MqvpnConfig, callbacks: TunnelCallbacks): MqvpnTunnel {
             val cfg = NativeBridge.configNew()
             NativeBridge.configSetServer(cfg, config.serverAddress, config.serverPort)
+            config.tlsServerName?.let { NativeBridge.configSetTlsServerName(cfg, it) }
             NativeBridge.configSetAuthKey(cfg, config.authKey)
             NativeBridge.configSetInsecure(cfg, config.insecure)
             NativeBridge.configSetScheduler(cfg, config.scheduler.native)
