@@ -128,20 +128,8 @@ class TunnelBridgeTest {
         assertEquals(192, field.get(null))
     }
 
-    // Helper to create a TunnelBridge with mocked tunnel via reflection
-    private fun createBridge(executor: FakeExecutor, fakeTunnel: FakeTunnel): TunnelBridge {
-        // TunnelBridge takes MqvpnExecutor and MqvpnTunnel
-        // MqvpnTunnel requires native handles which we can't create in unit tests.
-        // Use reflection to construct with mock values.
-        val constructor = TunnelBridge::class.java.declaredConstructors.first()
-        constructor.isAccessible = true
-        // MqvpnTunnel(clientHandle=0, cfgHandle=0, reorderEnabled=false)
-        val tunnelConstructor = MqvpnTunnel::class.java.declaredConstructors
-            .maxByOrNull { it.parameterCount }!!
-        tunnelConstructor.isAccessible = true
-        val mockTunnel = tunnelConstructor.newInstance(0L, 0L, false) as MqvpnTunnel
-        return constructor.newInstance(executor, mockTunnel) as TunnelBridge
-    }
+    private fun createBridge(executor: FakeExecutor, fakeTunnel: FakeTunnel): TunnelBridge =
+        TestReflection.createBridge(executor, TestReflection.createDummyTunnel())
 
     private fun getMethod(name: String, vararg paramTypes: Class<*>): Method {
         return TunnelBridge::class.java.getDeclaredMethod(name, *paramTypes).apply {
