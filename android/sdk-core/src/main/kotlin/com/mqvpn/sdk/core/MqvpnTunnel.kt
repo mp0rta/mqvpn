@@ -66,6 +66,7 @@ class MqvpnTunnel internal constructor(
     fun getReorderStats(): ReorderStats {
         if (!reorderEnabled) return ReorderStats()
         val a = NativeBridge.getReorderStats(clientHandle) ?: return ReorderStats()
+        if (a.size < REORDER_STATS_FIELDS) return ReorderStats()
         return ReorderStats(a[0], a[1], a[2], a[3], a[4], a[5], a[6])
     }
 
@@ -123,6 +124,7 @@ class MqvpnTunnel internal constructor(
 
     companion object {
         private const val TAG = "MqvpnTunnel"
+        private const val REORDER_STATS_FIELDS = 7
         const val ERR_AGAIN = -9
 
         private fun applyReorder(cfg: Long, plan: ReorderPlan) {
