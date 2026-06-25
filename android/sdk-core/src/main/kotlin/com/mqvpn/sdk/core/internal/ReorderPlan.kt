@@ -18,9 +18,9 @@ internal data class ReorderPlan(
 internal fun planReorder(config: MqvpnConfig, maxRules: Int = MQVPN_REORDER_MAX_RULES): ReorderPlan {
     if (!config.reorderEnabled) return ReorderPlan(false, emptyList(), emptyList())
     val warnings = mutableListOf<String>()
-    val valid = config.reorderPorts.filter { p ->
+    val valid = config.reorderPorts.distinct().filter { p ->
         (p in 1..65535).also { if (!it) warnings += "reorder port out of range: $p (ignored)" }
-    }.distinct()
+    }
     val capped = if (valid.size > maxRules) {
         warnings += "reorder ports exceed $maxRules; dropping ${valid.size - maxRules}"
         valid.take(maxRules)
