@@ -35,7 +35,7 @@ jobs:
 
       - name: Cache BoringSSL (clang fPIC, stress)
         id: bssl-cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: third_party/xquic/third_party/boringssl
           key: bssl-9c95ec7-linux-clang-fpic-stress-v1
@@ -58,7 +58,7 @@ jobs:
 
       - name: Cache xquic (clang Debug, stress)
         id: xquic-cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           # See ci.yml "Cache xquic (Release)" comment re: xqc_configure.h
           # — committed FEC=OFF default in source tree must travel with build/.
