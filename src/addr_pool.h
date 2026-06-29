@@ -30,7 +30,7 @@ typedef struct {
 /* Initialize pool from CIDR string (e.g. "10.0.0.0/24"). */
 int mqvpn_addr_pool_init(mqvpn_addr_pool_t *pool, const char *cidr);
 
-/* Initialize IPv6 pool from CIDR string (e.g. "2001:db8:1::/112").
+/* Initialize IPv6 pool from CIDR string (e.g. "fd00:abcd::/112").
  * Call after mqvpn_addr_pool_init(). Shares offsets with IPv4 pool. */
 int mqvpn_addr_pool_init6(mqvpn_addr_pool_t *pool, const char *cidr6);
 
