@@ -15,6 +15,9 @@
 #include <stdint.h>
 #include <xquic/xquic.h>
 
+#define MQVPN_IDLE_TIMEOUT_MS      120000
+#define MQVPN_INIT_IDLE_TIMEOUT_MS 10000
+
 /* Caller-driven inputs. The bools are parameterised (not a single
  * `is_server` flag) so each call site documents its intent. */
 typedef struct {

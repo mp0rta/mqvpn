@@ -63,8 +63,8 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     out->max_pkt_out_size = 1400;
     out->sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
     out->so_sndbuf = 8 * 1024 * 1024;
-    out->idle_time_out = 120000;
-    out->init_idle_time_out = 10000;
+    out->idle_time_out = MQVPN_IDLE_TIMEOUT_MS;
+    out->init_idle_time_out = MQVPN_INIT_IDLE_TIMEOUT_MS;
 
     /* --- congestion control --- */
     switch (in->cc) {
