@@ -87,13 +87,16 @@ mqvpn_reorder_tx_free(mqvpn_reorder_tx_t *tx)
 /* §15.1: eligibility is port/proto rule only, evaluated bidirectionally (src OR
  * dst port match), cached at flow creation. A flow is eligible iff the first
  * matching rule's profile carries a reorder preset (shared matcher + preset
- * helper keep TX/RX in lockstep). */
+ * helper keep TX/RX in lockstep). When no rules are defined (n_rules == 0) and
+ * the master gate is not OFF, all flows are implicitly eligible — matching the
+ * RX side's fallback to global max_wait_ms. */
 static uint8_t
 compute_eligible(const mqvpn_reorder_config_t *cfg, const mqvpn_flow_key_t *key)
 {
     const mqvpn_reorder_rule_t *r = mqvpn_reorder_match_rule(cfg, key);
+    if (!r) return cfg->n_rules == 0 && cfg->mode != MQVPN_REORDER_OFF;
     uint32_t w, c;
-    return (r && mqvpn_reorder_profile_preset(r->profile, &w, &c)) ? 1u : 0u;
+    return mqvpn_reorder_profile_preset(r->profile, &w, &c) ? 1u : 0u;
 }
 
 static mqvpn_send_flow_t *

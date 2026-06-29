@@ -377,6 +377,38 @@ test_tx_mtu_guard_boundary(void)
     mqvpn_reorder_tx_free(tx);
 }
 
+/* n_rules==0, mode==ON → all UDP flows implicitly eligible (§15.1 fallback). */
+static void
+test_tx_no_rules_enabled_eligible(void)
+{
+    mqvpn_reorder_config_t c;
+    mqvpn_reorder_config_default(&c);
+    c.mode = MQVPN_REORDER_ON;
+    mqvpn_reorder_tx_t *tx = mqvpn_reorder_tx_new(&c, 0x1);
+    uint8_t pkt[256];
+    mqvpn_reorder_tx_peek_t p;
+    size_t n = build_v4_udp(pkt, 5000, 443, 100);
+    ASSERT_EQ_INT(mqvpn_reorder_tx_peek(tx, pkt, n, 1, 1400, &p), MQVPN_REORDER_TX_STAMP,
+                  "n_rules==0 mode==ON -> eligible STAMP");
+    mqvpn_reorder_tx_free(tx);
+}
+
+/* n_rules==0, mode==OFF → master gate returns RAW. */
+static void
+test_tx_no_rules_disabled_raw(void)
+{
+    mqvpn_reorder_config_t c;
+    mqvpn_reorder_config_default(&c);
+    /* mode stays OFF (default). */
+    mqvpn_reorder_tx_t *tx = mqvpn_reorder_tx_new(&c, 0x1);
+    uint8_t pkt[256];
+    mqvpn_reorder_tx_peek_t p;
+    size_t n = build_v4_udp(pkt, 5000, 443, 100);
+    ASSERT_EQ_INT(mqvpn_reorder_tx_peek(tx, pkt, n, 1, 1400, &p), MQVPN_REORDER_TX_RAW,
+                  "n_rules==0 mode==OFF -> RAW");
+    mqvpn_reorder_tx_free(tx);
+}
+
 int
 main(void)
 {
@@ -393,6 +425,8 @@ main(void)
     test_tx_reset_marks_on_success_only();
     test_tx_first_k_have_reset_flag();
     test_tx_mtu_guard_boundary();
+    test_tx_no_rules_enabled_eligible();
+    test_tx_no_rules_disabled_raw();
 
     fprintf(stderr, "test_reorder_tx: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
