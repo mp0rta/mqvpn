@@ -11,6 +11,7 @@ import com.mqvpn.sdk.core.MqvpnManager
 import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.PathInfo
+import com.mqvpn.sdk.core.model.ReorderStats
 import com.mqvpn.sdk.core.model.VpnStats
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
@@ -31,6 +32,9 @@ class MqvpnViewModel @Inject constructor(
 
     val paths: StateFlow<List<PathInfo>> = manager.paths
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val reorderStats: StateFlow<ReorderStats> = manager.reorderStats
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), ReorderStats())
 
     fun connect(config: MqvpnConfig) {
         manager.connect(config, MyVpnService::class.java)

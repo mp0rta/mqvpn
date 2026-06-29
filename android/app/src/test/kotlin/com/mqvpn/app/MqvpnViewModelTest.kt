@@ -9,6 +9,7 @@ import com.mqvpn.sdk.core.MqvpnManager
 import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.PathInfo
+import com.mqvpn.sdk.core.model.ReorderStats
 import com.mqvpn.sdk.core.model.TunnelInfo
 import com.mqvpn.sdk.core.model.VpnStats
 import io.mockk.every
@@ -37,11 +38,13 @@ class MqvpnViewModelTest {
     private val stateFlow = MutableStateFlow<MqvpnState>(MqvpnState.Disconnected)
     private val statsFlow = MutableStateFlow(VpnStats())
     private val pathsFlow = MutableStateFlow<List<PathInfo>>(emptyList())
+    private val reorderStatsFlow = MutableStateFlow(ReorderStats())
 
     private val mockManager = mockk<MqvpnManager>(relaxed = true).also {
         every { it.vpnState } returns stateFlow
         every { it.stats } returns statsFlow
         every { it.paths } returns pathsFlow
+        every { it.reorderStats } returns reorderStatsFlow
     }
 
     private lateinit var viewModel: MqvpnViewModel
@@ -141,6 +144,23 @@ class MqvpnViewModelTest {
 
         assertEquals(1, viewModel.paths.value.size)
         assertEquals("wlan0", viewModel.paths.value[0].iface)
+        job.cancel()
+    }
+
+    @Test
+    fun `reorderStats updates propagate`() = runTest(testDispatcher) {
+        val job = launch { viewModel.reorderStats.collect {} }
+        advanceUntilIdle()
+
+        reorderStatsFlow.value = ReorderStats(
+            delivered = 500, gapCount = 10, gapFilled = 8,
+            gapTimeout = 2, ackDemote = 0, bufferedP50Ms = 5, bufferedP99Ms = 22,
+        )
+        advanceUntilIdle()
+
+        assertEquals(500L, viewModel.reorderStats.value.delivered)
+        assertEquals(10L, viewModel.reorderStats.value.gapCount)
+        assertEquals(8L, viewModel.reorderStats.value.gapFilled)
         job.cancel()
     }
 

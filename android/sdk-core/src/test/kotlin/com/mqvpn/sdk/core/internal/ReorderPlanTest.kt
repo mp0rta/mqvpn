@@ -26,10 +26,10 @@ class ReorderPlanTest {
         assertEquals(setOf(443, 853), p.rules.map { it.port }.toSet())
     }
 
-    @Test fun enabledNoValidPorts_collapsesToDisabledWithWarning() {
+    @Test fun enabledNoValidPorts_enablesGlobalReorder() {
         val p = planReorder(cfg(true, emptyList()))
-        assertFalse(p.enabled); assertTrue(p.rules.isEmpty())
-        assertEquals(1, p.warnings.size)
+        assertTrue(p.enabled); assertTrue(p.rules.isEmpty())
+        assertTrue(p.warnings.isEmpty())
     }
 
     @Test fun outOfRangePorts_filteredWithWarning() {
