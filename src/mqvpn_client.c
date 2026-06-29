@@ -699,7 +699,7 @@ static int
 client_reconnect_delay_sec(const mqvpn_client_t *c)
 {
     int base = c->config.reconnect_interval_sec;
-    if (base <= 0) base = 5;
+    if (base <= 0) base = 1;
 
     int delay = base;
     for (int i = 0; i < c->reconnect_attempts && delay < RECONNECT_BACKOFF_MAX_SEC; i++)

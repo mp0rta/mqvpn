@@ -197,7 +197,7 @@ mqvpn_config_new(void)
     cfg->log_level = MQVPN_LOG_INFO;
     cfg->multipath = 1;
     cfg->reconnect_enable = 1;
-    cfg->reconnect_interval_sec = 5;
+    cfg->reconnect_interval_sec = 1;
     cfg->max_clients = 64;
     cfg->listen_port = 443;
     cfg->init_max_path_id = 0; /* 0 = use xquic default (8) */
@@ -506,7 +506,7 @@ mqvpn_config_set_reconnect(mqvpn_config_t *cfg, int enable, int interval_sec)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     cfg->reconnect_enable = enable;
-    cfg->reconnect_interval_sec = interval_sec > 0 ? interval_sec : 5;
+    cfg->reconnect_interval_sec = interval_sec > 0 ? interval_sec : 1;
     return MQVPN_OK;
 }
 
