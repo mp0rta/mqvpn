@@ -2,7 +2,7 @@
   "mode": "server",
   "listen": "0.0.0.0:443",
   "subnet": "10.0.0.0/24",
-  "subnet6": "2001:db8:1::/112",
+  "subnet6": "fd00:abcd::/112",
   "tun_name": "mqvpn0",
   "log_level": "info",
   "cert_file": "/etc/mqvpn/server.crt",

@@ -4,7 +4,7 @@
 [Interface]
 Listen = 0.0.0.0:443
 Subnet = 10.0.0.0/24
-# Subnet6 = 2001:db8:1::/112
+# Subnet6 = fd00:abcd::/112
 TunName = mqvpn0
 LogLevel = info
 # MTU = 1280                   # TUN MTU (1280–9000, default: auto = ~1382)
