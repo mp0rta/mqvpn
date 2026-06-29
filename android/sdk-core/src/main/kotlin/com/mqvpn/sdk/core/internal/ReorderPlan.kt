@@ -26,8 +26,7 @@ internal fun planReorder(config: MqvpnConfig, maxRules: Int = MQVPN_REORDER_MAX_
         valid.take(maxRules)
     } else valid
     if (capped.isEmpty()) {
-        warnings += "reorderEnabled=true but no valid reorderPorts; reorder is a no-op"
-        return ReorderPlan(false, emptyList(), warnings)
+        return ReorderPlan(enabled = true, rules = emptyList(), warnings)
     }
     val profile = config.reorderProfile.native
     return ReorderPlan(true, capped.map { ReorderRuleSpec(REORDER_PROTO_UDP, it, profile) }, warnings)

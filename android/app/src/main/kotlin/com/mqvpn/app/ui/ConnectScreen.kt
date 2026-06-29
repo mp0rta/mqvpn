@@ -7,6 +7,7 @@ import android.app.Activity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -15,9 +16,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.layout.Row
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuAnchorType
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
@@ -25,6 +30,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -36,7 +42,9 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.MqvpnState
+import com.mqvpn.sdk.core.model.ReorderStats
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConnectScreen(
     modifier: Modifier = Modifier,
@@ -45,18 +53,32 @@ fun ConnectScreen(
     val state by viewModel.vpnState.collectAsStateWithLifecycle()
     val stats by viewModel.stats.collectAsStateWithLifecycle()
     val paths by viewModel.paths.collectAsStateWithLifecycle()
+    val reorderStats by viewModel.reorderStats.collectAsStateWithLifecycle()
 
     var serverAddress by rememberSaveable { mutableStateOf("160.251.143.149") }
     var serverPort by rememberSaveable { mutableStateOf("443") }
     var authKey by rememberSaveable { mutableStateOf("tiiUC0/Fx51w5XuxAnpOgdRZb19SLqglwFdhxbbsbnM=") }
     var insecure by rememberSaveable { mutableStateOf(true) }
     var killSwitch by rememberSaveable { mutableStateOf(false) }
+    var reorderEnabled by rememberSaveable { mutableStateOf(false) }
+    var reorderProfileName by rememberSaveable {
+        mutableStateOf(MqvpnConfig.ReorderProfile.CELLULAR_BOND.name)
+    }
+    val reorderProfile = MqvpnConfig.ReorderProfile.entries.firstOrNull {
+        it.name == reorderProfileName
+    } ?: MqvpnConfig.ReorderProfile.CELLULAR_BOND
+    var reorderPorts by rememberSaveable { mutableStateOf("") }
 
     val vpnPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
-            viewModel.connect(buildConfig(serverAddress, serverPort, authKey, insecure, killSwitch))
+            viewModel.connect(
+                buildConfig(
+                    serverAddress, serverPort, authKey, insecure, killSwitch,
+                    reorderEnabled, reorderProfile, reorderPorts,
+                )
+            )
         }
     }
 
@@ -115,6 +137,63 @@ fun ConnectScreen(
             Text("Kill Switch", modifier = Modifier.weight(1f))
             Switch(checked = killSwitch, onCheckedChange = { killSwitch = it }, enabled = isDisconnected)
         }
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Reorder buffer settings
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Reorder Buffer", modifier = Modifier.weight(1f))
+            Switch(
+                checked = reorderEnabled,
+                onCheckedChange = { reorderEnabled = it },
+                enabled = isDisconnected,
+            )
+        }
+        if (reorderEnabled) {
+            Spacer(modifier = Modifier.height(8.dp))
+            var profileExpanded by remember { mutableStateOf(false) }
+            ExposedDropdownMenuBox(
+                expanded = profileExpanded,
+                onExpandedChange = { if (isDisconnected) profileExpanded = it },
+            ) {
+                OutlinedTextField(
+                    value = reorderProfile.name.replace("_", " "),
+                    onValueChange = {},
+                    label = { Text("Reorder Profile") },
+                    readOnly = true,
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = profileExpanded) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
+                    enabled = isDisconnected,
+                )
+                ExposedDropdownMenu(
+                    expanded = profileExpanded,
+                    onDismissRequest = { profileExpanded = false },
+                ) {
+                    MqvpnConfig.ReorderProfile.entries.forEach { profile ->
+                        DropdownMenuItem(
+                            text = { Text(profile.name.replace("_", " ")) },
+                            onClick = {
+                                reorderProfileName = profile.name
+                                profileExpanded = false
+                            },
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            OutlinedTextField(
+                value = reorderPorts,
+                onValueChange = { reorderPorts = it },
+                label = { Text("Reorder Ports (comma-separated, e.g. 443,8443)") },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = isDisconnected,
+                singleLine = true,
+            )
+        }
         Spacer(modifier = Modifier.height(16.dp))
 
         // Connect/Disconnect button
@@ -131,7 +210,10 @@ fun ConnectScreen(
                             vpnPermissionLauncher.launch(prepareIntent)
                         } else {
                             viewModel.connect(
-                                buildConfig(serverAddress, serverPort, authKey, insecure, killSwitch)
+                                buildConfig(
+                                    serverAddress, serverPort, authKey, insecure, killSwitch,
+                                    reorderEnabled, reorderProfile, reorderPorts,
+                                )
                             )
                         }
                     }
@@ -186,6 +268,11 @@ fun ConnectScreen(
                     Spacer(modifier = Modifier.height(4.dp))
                     paths.forEach { path -> PathCard(path) }
                 }
+
+                if (reorderStats.delivered > 0 || reorderStats.gapCount > 0) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    ReorderStatsCard(reorderStats)
+                }
             }
 
             is MqvpnState.Reconnecting -> {
@@ -207,12 +294,37 @@ fun ConnectScreen(
     }
 }
 
+@Composable
+private fun ReorderStatsCard(rs: ReorderStats) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text("Reorder Buffer", style = MaterialTheme.typography.titleSmall)
+            Spacer(modifier = Modifier.height(4.dp))
+            val fillRate = if (rs.gapCount > 0) {
+                "%.1f%%".format(rs.gapFilled * 100.0 / rs.gapCount)
+            } else "—"
+            Text("Delivered: ${rs.delivered} | Gaps: ${rs.gapCount} (filled $fillRate)")
+            Text(
+                "Timeout: ${rs.gapTimeout} | ACK demote: ${rs.ackDemote}",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                "Buffered latency: p50=${rs.bufferedP50Ms}ms p99=${rs.bufferedP99Ms}ms",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
 private fun buildConfig(
     address: String,
     port: String,
     key: String,
     insecure: Boolean,
     killSwitch: Boolean,
+    reorderEnabled: Boolean,
+    reorderProfile: MqvpnConfig.ReorderProfile,
+    reorderPorts: String,
 ): MqvpnConfig {
     return MqvpnConfig(
         serverAddress = address.trim(),
@@ -220,6 +332,11 @@ private fun buildConfig(
         authKey = key.trim(),
         insecure = insecure,
         killSwitch = killSwitch,
+        reorderEnabled = reorderEnabled,
+        reorderProfile = reorderProfile,
+        reorderPorts = reorderPorts.split(",")
+            .mapNotNull { it.trim().toIntOrNull() }
+            .filter { it in 1..65535 },
     )
 }
 
