@@ -2,3 +2,7 @@
 	path = third_party/xquic
 	url = https://github.com/mp0rta/xquic.git
 	branch = mqvpn-main
+[submodule "third_party/lwip"]
+	path = third_party/lwip
+	url = https://github.com/mp0rta/heiher-lwip.git
+	branch = mqvpn-main
