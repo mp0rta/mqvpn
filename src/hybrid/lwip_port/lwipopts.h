@@ -75,8 +75,8 @@
 /* MEMP_NUM_TCP_SEG is a GLOBAL pool shared by all flows: 2048 segments
  * covers only ~2 flows at full TCP_SND_BUF (2 MB / 8960-byte MSS ~ 234
  * segs each x safety factor). tcp_write() returns ERR_MEM on pool
- * exhaustion — Task 4's glue MUST handle that as backpressure (retry on
- * sent-callback), it is not optional. */
+ * exhaustion — the TCP-lane relay (tcp_lane.c) MUST handle that as
+ * backpressure (retry on sent-callback), it is not optional. */
 #define MEMP_NUM_TCP_SEG 2048
 /* PBUF_POOL_SIZE: must hold a full receive window of queued data —
  * init.c's sanity check enforces TCP_WND <= PBUF_POOL_SIZE *
@@ -89,8 +89,9 @@
  * MTU ~1382 the global 256-pbuf pool holds only ~350 KB of real payload —
  * far below the 2 MB window advertised PER FLOW. A single backpressured
  * flow queuing ooseq/refused data can exhaust the global pool and stall RX
- * for ALL flows. Task 4's glue must handle this (runtime rcv_wnd reduction
- * to match the real MTU budget, or PBUF_RAM-allocated ingress). */
+ * for ALL flows. The TCP-lane relay (tcp_lane.c) must handle this (runtime
+ * rcv_wnd reduction to match the real MTU budget, or PBUF_RAM-allocated
+ * ingress). */
 #define PBUF_POOL_SIZE    256
 #define PBUF_POOL_BUFSIZE LWIP_MEM_ALIGN_SIZE(TCP_MSS + 40 + PBUF_LINK_ENCAPSULATION_HLEN)
 

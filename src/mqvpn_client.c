@@ -2930,16 +2930,19 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
     }
 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
-    /* H2: lwIP TCP-lane timer (retransmits, TIME-WAIT reaping). Unlike the
-     * Recovery / Stability blocks above, this one MAY fill in a wake where
-     * xquic asked for none (`ms <= 0`): a lone TCP-lane flow's retransmit
-     * timer must fire even when xquic is fully idle, else the flow stalls.
-     * BBR-pacing starvation doesn't apply — we only shorten `ms` or fill
-     * an empty slot, never extend. Returns -1 when no lwIP timer is
-     * pending, which leaves `ms` untouched (no forced wakeup when idle). */
+    /* H2: lwIP TCP-lane timer (retransmits, TIME-WAIT reaping). Shorten-only,
+     * same shape as the Recovery / Stability blocks above: `ms <= 0` here
+     * means xquic requested a SUB-MILLISECOND wake (next_wake_us/1000
+     * truncates to 0), which the final `ms > 0 ? ms : 1` clamp below
+     * services in 1ms — overwriting it with up to 250ms (TCP_TMR_INTERVAL)
+     * would delay that imminent pacing wake, the exact BBR stall the
+     * Stability comment above records. The lone-TCP-flow-while-xquic-quiet
+     * case is covered by that same clamp (ms <= 0 always yields a 1ms
+     * wake), so shorten-only is sufficient AND protects pacing. Returns -1
+     * when no lwIP timer is pending, leaving `ms` untouched. */
     if (c->conn && c->conn->lwip_ctx) {
         int lwip_ms = mqvpn_lwip_next_timeout_ms(c->conn->lwip_ctx);
-        if (lwip_ms >= 0 && (ms <= 0 || lwip_ms < ms)) ms = lwip_ms;
+        if (lwip_ms >= 0 && ms > 0 && lwip_ms < ms) ms = lwip_ms;
     }
 #endif
 

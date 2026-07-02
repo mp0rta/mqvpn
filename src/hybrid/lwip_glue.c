@@ -157,9 +157,15 @@ mqvpn_lwip_ctx_new(mqvpn_lwip_clock_fn clock_fn, void *clock_ctx,
     }
     netif_set_up(&ctx->netif);
     netif_set_link_up(&ctx->netif);
-    /* Accepted pcbs inherit the listener's netif_idx (tcp_in.c) and route
-     * directly, but RSTs for unmatched segments go through ip_route() —
-     * which needs a default netif to resolve arbitrary inner addresses. */
+    /* Load-bearing for MSS derivation: at accept time tcp_in.c sets
+     * npcb->mss = tcp_eff_send_mss(...), which expands to
+     * tcp_eff_send_mss_netif(sendmss, ip_route(src, dest), dest)
+     * (tcp_priv.h) — and ip_route() can only resolve the arbitrary inner
+     * addresses via the default netif (the /32 placeholder above matches
+     * nothing). Without it the per-pcb MSS would not derive from
+     * netif->mtu. RSTs for unmatched segments do NOT need this: the fork
+     * sends those via tcp_rst_netif(ip_data.current_input_netif, ...)
+     * (tcp_in.c), no ip_route() involved. */
     netif_set_default(&ctx->netif);
 
     ctx->listen_pcb = tcp_new_ip_type(IPADDR_TYPE_V4);
