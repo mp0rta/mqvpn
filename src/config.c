@@ -456,7 +456,9 @@ typedef struct {
 
 _Static_assert(sizeof(unsigned long long) == sizeof(uint64_t),
                "CFGK_U64 stores through a single 8-byte write");
-_Static_assert(sizeof(((mqvpn_file_config_t *)0)->listen) <= 280,
+_Static_assert(sizeof(((mqvpn_file_config_t *)0)->listen) <= 280 &&
+                   sizeof(((mqvpn_file_config_t *)0)->server_addr) <= 280 &&
+                   sizeof(((mqvpn_file_config_t *)0)->control_listen) <= 280,
                "cfg_key_apply_json sbuf must cover the largest CFGK_STR field");
 
 /* int_ok gates */
