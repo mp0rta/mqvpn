@@ -24,7 +24,9 @@ typedef uintptr_t mem_ptr_t;
 
 /* Little/big endian: mqvpn builds only target little-endian dev/CI hosts
  * today (x86_64/aarch64 Linux); revisit if a big-endian target appears. */
-#define BYTE_ORDER LITTLE_ENDIAN
+#ifndef BYTE_ORDER
+#  define BYTE_ORDER LITTLE_ENDIAN
+#endif
 
 /* No packed-struct pragma needed; lwIP's own PACK_STRUCT_* macros default
  * to GCC/Clang __attribute__((packed)) when left undefined, which is what
