@@ -34,7 +34,7 @@
  *    "gap_timeout_count":N,"gap_overflow_count":N,"gap_demote_count":N,
  *    "gap_reset_count":N,"ack_demote_count":N,"too_late_drop_count":N,
  *    "too_far_ahead_drop_count":N,"duplicate_drop_count":N,"pool_drop_count":N,
- *    "per_flow_limit_drop_count":N,"delivered_count":N,
+ *    "per_flow_limit_drop_count":N,"reset_discard_count":N,"delivered_count":N,
  *    "added_latency_p99_ms":F,"added_latency_max_ms":F,
  *    "added_latency_buffered_p99_ms":F}}
  */
@@ -402,6 +402,7 @@ ctrl_cmd_get_reorder_stats(const char *req, char *resp, size_t resp_len,
 typedef int (*ctrl_cmd_fn)(const char *req, char *resp, size_t resp_len,
                            mqvpn_server_t *server);
 
+/* Keep in sync (and in order) with the file-header command list. */
 static const struct {
     const char *name;
     ctrl_cmd_fn fn;
