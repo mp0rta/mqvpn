@@ -1233,7 +1233,10 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
          * resolved (lwIP derives each pcb's MSS from netif->mtu at accept
          * time). Gate mirrors the classifier's TCP-lane rule: enabled &&
          * tcp mode != raw. Alloc failure degrades to RAW (lwip_ctx stays
-         * NULL), same policy as the reorder engines above. */
+         * NULL), same policy as the reorder engines above. The !lwip_ctx
+         * guard's stale-MTU case is unreachable today: this block only
+         * re-fires for a NEW conn (reconnect destroys the old conn — and
+         * its lwip_ctx — first), never twice on the same conn. */
         if (!conn->lwip_ctx && c->config.hybrid.enabled &&
             c->config.hybrid.tcp_mode != MQVPN_HYBRID_TCP_RAW) {
             conn->lwip_ctx = mqvpn_lwip_ctx_new(cli_lwip_clock_wrapper, c,

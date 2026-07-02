@@ -25,9 +25,11 @@
 
 #include "log.h"
 
-/* Upper bound for one lwIP-emitted IP packet: 9216 (project MTU ceiling,
- * see MTU config docs) + slack. ip4_output never emits more than
- * netif->mtu bytes, and ctx_new clamps the mtu to 16 bits anyway. */
+/* Upper bound for one lwIP-emitted IP packet — a true invariant via two
+ * independent bounds: ctx_new clamps netif->mtu to 9216 (the project's
+ * documented jumbo ceiling; ip4_output never emits more than netif->mtu),
+ * and TCP segments are additionally capped by compile-time TCP_MSS 8960
+ * (~9000-byte IP packet). 9500 covers both with slack. */
 #define MQVPN_LWIP_OUT_BUF 9500
 
 struct mqvpn_lwip_ctx {
@@ -126,7 +128,9 @@ mqvpn_lwip_ctx_new(mqvpn_lwip_clock_fn clock_fn, void *clock_ctx,
     ctx->output_fn = output_fn;
     ctx->output_ctx = output_ctx;
     if (tun_mtu < 576) tun_mtu = 576; /* sane TCP floor; caller passes >= 68 */
-    if (tun_mtu > 0xFFFF) tun_mtu = 0xFFFF;
+    if (tun_mtu > 9216)
+        tun_mtu = 9216; /* project jumbo ceiling — also what
+                         * makes MQVPN_LWIP_OUT_BUF a bound */
     ctx->mtu = (u16_t)tun_mtu;
     s_lwip_ctx_for_sys_now = ctx; /* before lwip_init so sys_now() works */
 
@@ -213,6 +217,12 @@ void
 mqvpn_lwip_ctx_free(mqvpn_lwip_ctx_t *ctx)
 {
     if (!ctx) return;
+    /* Teardown-ordering guard: the tcp_lane owns every accepted pcb and
+     * must abort them all before freeing the glue ctx — a pcb surviving
+     * past here references a removed netif. Warn so the mistake surfaces
+     * immediately instead of as a later use-after-remove. */
+    if (tcp_active_pcbs)
+        LOG_WRN("lwip: ctx_free with active pcbs — tcp_lane must abort flows first");
     if (ctx->listen_pcb) {
         tcp_close(ctx->listen_pcb); /* LISTEN pcb: closes + frees */
         ctx->listen_pcb = NULL;
