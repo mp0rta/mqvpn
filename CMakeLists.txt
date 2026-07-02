@@ -173,7 +173,9 @@ target_include_directories(lwip_core PUBLIC
     ${LWIP_ROOT}/src/include
     ${LWIP_PORT_DIR}
 )
-target_compile_definitions(lwip_core PRIVATE LWIP_NOASSERT=$<CONFIG:Release>)
+# debug.h gates on #ifndef LWIP_NOASSERT — the macro must be entirely absent
+# in Debug (defining it =0 would still disable asserts), present in Release.
+target_compile_definitions(lwip_core PRIVATE $<$<CONFIG:Release>:LWIP_NOASSERT>)
 # mqvpn_shared (a SHARED target) links this static lib below — its objects
 # must be position-independent, same reason xquic-static is unusable there.
 set_target_properties(lwip_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
