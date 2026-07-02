@@ -600,10 +600,16 @@ cfg_key_store(mqvpn_file_config_t *cfg, const cfg_key_desc_t *d, const char *v_s
               int v_int, unsigned long long v_ull)
 {
     char *base = (char *)cfg + d->offset;
+    /* memcpy for sub-int/64-bit/enum fields avoids alignment+aliasing questions;
+     * int fields store via *(int *) since the offset names a real int member. */
     switch (d->type) {
     case CFGK_STR: snprintf(base, d->size, "%s", v_str); break;
     case CFGK_BOOL: *(int *)base = v_int; break;
     case CFGK_INT:
+        if (v_int == INT_MIN) { /* forced-invalid sentinel from the walkers */
+            if (d->has_invalid_fallback) *(int *)base = d->invalid_fallback;
+            return -1;
+        }
         if (d->int_ok && !d->int_ok(v_int)) {
             if (d->has_invalid_fallback) *(int *)base = d->invalid_fallback;
             return -1;
@@ -685,6 +691,68 @@ cfg_key_apply_ini(mqvpn_file_config_t *cfg, int section, const char *key, const 
         return 1;
     }
     return 0;
+}
+
+/* JSON-side walker: applies every table row that has a json_key. SEC_REORDER
+ * rows are searched inside [ro_raw, ro_end) (the bounded "reorder" object);
+ * everything else at top level. Absent keys are silent (forward-compat);
+ * present-but-invalid keys warn. */
+static void
+cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *ro_raw,
+                   const char *ro_end)
+{
+    char sbuf[280];
+    for (size_t i = 0; i < sizeof(cfg_keys) / sizeof(cfg_keys[0]); i++) {
+        const cfg_key_desc_t *d = &cfg_keys[i];
+        if (!d->json_key) continue;
+
+        const char *v;
+        if (d->section == SEC_REORDER) {
+            if (!ro_raw || !ro_end) continue;
+            v = json_find_key_bounded(ro_raw, ro_end, d->json_key);
+        } else {
+            v = json_find_key(json_text, d->json_key);
+        }
+        if (!v) continue;
+
+        int rc = 0;
+        switch (d->type) {
+        case CFGK_STR:
+        case CFGK_REORDER_MODE:
+            if (json_read_string(v, sbuf, sizeof(sbuf)) < 0)
+                rc = -1;
+            else
+                rc = cfg_key_store(cfg, d, sbuf, 0, 0);
+            break;
+        case CFGK_BOOL: {
+            int iv = 0;
+            rc = (json_read_bool(v, &iv) < 0) ? -1 : cfg_key_store(cfg, d, NULL, iv, 0);
+            break;
+        }
+        case CFGK_INT: {
+            int iv = 0;
+            if (json_read_int(v, &iv) < 0)
+                rc = d->has_invalid_fallback ? cfg_key_store(cfg, d, NULL, INT_MIN, 0)
+                                             : -1;
+            else
+                rc = cfg_key_store(cfg, d, NULL, iv, 0);
+            break;
+        }
+        case CFGK_U32:
+        case CFGK_U16:
+        case CFGK_U64: {
+            /* u64 lexing + table bound == INI parse_u32_strict semantics for
+             * u32 fields (accepts (2^31, 2^32); regression pin deb2115). */
+            uint64_t uv = 0;
+            rc = (json_read_u64_strict(v, &uv) < 0) ? -1
+                                                    : cfg_key_store(cfg, d, NULL, 0, uv);
+            break;
+        }
+        }
+        if (rc < 0)
+            LOG_WRN("JSON: invalid %s%s; %s", d->section == SEC_REORDER ? "reorder " : "",
+                    d->json_key, d->has_invalid_fallback ? "using default" : "ignoring");
+    }
 }
 
 static int
@@ -885,9 +953,9 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     if (!cfg || !json_text) return -1;
 
     const char *v = NULL;
-    int iv;
-    char s32[32], s64[64], s256[256], s280[280];
+    char s32[32];
 
+    /* Mode has no INI counterpart (INI infers from Listen/Address). */
     v = json_find_key(json_text, "mode");
     if (v && json_read_string(v, s32, sizeof(s32)) == 0) {
         if (strcasecmp(s32, "server") == 0)
@@ -896,100 +964,27 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
             cfg->is_server = 0;
     }
 
-    v = json_find_key(json_text, "tun_name");
-    if (v && json_read_string(v, s32, sizeof(s32)) == 0)
-        mqvpn_copy_str(cfg->tun_name, sizeof(cfg->tun_name), s32);
+    /* [Reorder] equivalent: a "reorder" object holding the same flat scalar
+     * knobs as the INI section (snake_case), plus a "reorder_rules" array of
+     * {proto, port, profile} objects. The Enabled string and rule proto/profile
+     * go through the SAME mappers (parse_reorder_enabled/proto/profile) as the
+     * INI path so the two surfaces produce identical mqvpn_reorder_config_t.
+     * Numeric ranges mirror the INI parser; the cross-side invariants
+     * (cap power-of-two, ingress < egress) are enforced by
+     * mqvpn_reorder_config_validate() at apply time, not here. Unknown sub-keys
+     * are simply not found (forward-compat). eval_force_no_demotion is
+     * deliberately NOT parseable (internal/test knob, same as INI). */
+    const char *ro_raw = json_find_key(json_text, "reorder");
+    /* Bound every sub-key search to the reorder object's span. json_find_key()
+     * does not stop at the object's closing brace, so an unbounded search would
+     * leak into sibling keys (e.g. reorder_rules' max_wait_ms) and falsely set
+     * has_explicit_*. json_object_end() returns the matching '}' (no fixed-size
+     * copy, so arbitrarily large objects are handled); a malformed/unterminated
+     * object yields ro_end == NULL and the block is skipped (same as absent). */
+    const char *ro_end = (ro_raw && *ro_raw == '{') ? json_object_end(ro_raw) : NULL;
 
-    v = json_find_key(json_text, "log_level");
-    if (v && json_read_string(v, s32, sizeof(s32)) == 0)
-        mqvpn_copy_str(cfg->log_level, sizeof(cfg->log_level), s32);
-
-    v = json_find_key(json_text, "listen");
-    if (v && json_read_string(v, s280, sizeof(s280)) == 0) {
-        mqvpn_copy_str(cfg->listen, sizeof(cfg->listen), s280);
-        cfg->is_server = 1;
-    }
-
-    v = json_find_key(json_text, "subnet");
-    if (v && json_read_string(v, s64, sizeof(s64)) == 0)
-        mqvpn_copy_str(cfg->subnet, sizeof(cfg->subnet), s64);
-
-    v = json_find_key(json_text, "subnet6");
-    if (v && json_read_string(v, s64, sizeof(s64)) == 0)
-        mqvpn_copy_str(cfg->subnet6, sizeof(cfg->subnet6), s64);
-
-    v = json_find_key(json_text, "server_addr");
-    if (v && json_read_string(v, s280, sizeof(s280)) == 0)
-        mqvpn_copy_str(cfg->server_addr, sizeof(cfg->server_addr), s280);
-
-    v = json_find_key(json_text, "tls_server_name");
-    if (v && json_read_string(v, s256, sizeof(s256)) == 0)
-        mqvpn_copy_str(cfg->tls_server_name, sizeof(cfg->tls_server_name), s256);
-
-    v = json_find_key(json_text, "insecure");
-    if (v && json_read_bool(v, &iv) == 0) cfg->insecure = iv;
-
-    v = json_find_key(json_text, "auth_key");
-    if (v && json_read_string(v, s256, sizeof(s256)) == 0)
-        mqvpn_copy_str(cfg->auth_key, sizeof(cfg->auth_key), s256);
-
-    v = json_find_key(json_text, "server_auth_key");
-    if (v && json_read_string(v, s256, sizeof(s256)) == 0)
-        mqvpn_copy_str(cfg->server_auth_key, sizeof(cfg->server_auth_key), s256);
-
-    v = json_find_key(json_text, "cert_file");
-    if (v && json_read_string(v, s256, sizeof(s256)) == 0)
-        mqvpn_copy_str(cfg->cert_file, sizeof(cfg->cert_file), s256);
-
-    v = json_find_key(json_text, "key_file");
-    if (v && json_read_string(v, s256, sizeof(s256)) == 0)
-        mqvpn_copy_str(cfg->key_file, sizeof(cfg->key_file), s256);
-
-    v = json_find_key(json_text, "max_clients");
-    if (v && json_read_int(v, &iv) == 0) cfg->max_clients = iv > 0 ? iv : 64;
-
-    v = json_find_key(json_text, "scheduler");
-    if (v && json_read_string(v, s32, sizeof(s32)) == 0)
-        mqvpn_copy_str(cfg->scheduler, sizeof(cfg->scheduler), s32);
-
-    v = json_find_key(json_text, "cc");
-    if (v && json_read_string(v, s32, sizeof(s32)) == 0)
-        mqvpn_copy_str(cfg->cc, sizeof(cfg->cc), s32);
-
-    v = json_find_key(json_text, "init_max_path_id");
-    if (v) {
-        uint64_t uv = 0;
-        if (json_read_u64_strict(v, &uv) == 0 && uv <= MQVPN_INIT_MAX_PATH_ID_MAX) {
-            cfg->init_max_path_id = uv;
-        } else {
-            LOG_WRN("JSON: invalid init_max_path_id; ignoring");
-        }
-    }
-
-    v = json_find_key(json_text, "reconnect");
-    if (v && json_read_bool(v, &iv) == 0) cfg->reconnect = iv;
-
-    v = json_find_key(json_text, "reconnect_interval");
-    if (v && json_read_int(v, &iv) == 0 && iv > 0) cfg->reconnect_interval = iv;
-
-    v = json_find_key(json_text, "kill_switch");
-    if (v && json_read_bool(v, &iv) == 0) cfg->kill_switch = iv;
-
-    v = json_find_key(json_text, "manage_routes");
-    if (v && json_read_bool(v, &iv) == 0) cfg->manage_routes = iv;
-
-    v = json_find_key(json_text, "mtu");
-    if (v && json_read_int(v, &iv) == 0) {
-        if (iv != 0 && (iv < 1280 || iv > 9000)) {
-            LOG_WRN("JSON: MTU must be 1280..9000, got %d; ignoring", iv);
-        } else {
-            cfg->tun_mtu = iv;
-        }
-    }
-
-    v = json_find_key(json_text, "control_listen");
-    if (v && json_read_string(v, s280, sizeof(s280)) == 0)
-        mqvpn_copy_str(cfg->control_listen, sizeof(cfg->control_listen), s280);
+    /* All scalar keys — one walk of the shared descriptor table. */
+    cfg_key_apply_json(cfg, json_text, ro_raw, ro_end);
 
     char dns_buf[MQVPN_CONFIG_MAX_DNS][64];
     int n_dns = 0;
@@ -1017,144 +1012,6 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
 
     v = json_find_key(json_text, "users");
     if (v && json_read_users(cfg, v) < 0) return -1;
-
-    /* [Reorder] equivalent: a "reorder" object holding the same flat scalar
-     * knobs as the INI section (snake_case), plus a "reorder_rules" array of
-     * {proto, port, profile} objects. The Enabled string and rule proto/profile
-     * go through the SAME mappers (parse_reorder_enabled/proto/profile) as the
-     * INI path so the two surfaces produce identical mqvpn_reorder_config_t.
-     * Numeric ranges mirror the INI parser; the cross-side invariants
-     * (cap power-of-two, ingress < egress) are enforced by
-     * mqvpn_reorder_config_validate() at apply time, not here. Unknown sub-keys
-     * are simply not found (forward-compat). eval_force_no_demotion is
-     * deliberately NOT parseable (internal/test knob, same as INI). */
-    const char *ro_raw = json_find_key(json_text, "reorder");
-    /* Bound every sub-key search to the reorder object's span. json_find_key()
-     * does not stop at the object's closing brace, so an unbounded search would
-     * leak into sibling keys (e.g. reorder_rules' max_wait_ms) and falsely set
-     * has_explicit_*. json_object_end() returns the matching '}' (no fixed-size
-     * copy, so arbitrarily large objects are handled); a malformed/unterminated
-     * object yields ro_end == NULL and the block is skipped (same as absent). */
-    const char *ro_end = (ro_raw && *ro_raw == '{') ? json_object_end(ro_raw) : NULL;
-    if (ro_raw && ro_end) {
-        mqvpn_reorder_config_t *r = &cfg->reorder;
-        const char *kv;
-        uint64_t uv;
-
-        /* u32 scalars use json_read_u64_strict + a <= 0xffffffff clamp to match
-         * the INI path's parse_u32_strict exactly (which accepts up to 2^32-1,
-         * not just INT_MAX) — otherwise values in (2^31, 2^32) would parse on INI
-         * but be silently rejected on JSON. u16 fields keep the <= 0xffff clamp
-         * (same as INI). Each numeric scalar warns when the key is PRESENT but
-         * fails to parse/range-check, mirroring the INI per-key LOG_WRN and the
-         * JSON enabled warning; absent keys are silent (forward-compat). */
-        kv = json_find_key_bounded(ro_raw, ro_end, "enabled");
-        if (kv && json_read_string(kv, s32, sizeof(s32)) == 0) {
-            mqvpn_reorder_mode_t m = MQVPN_REORDER_OFF;
-            if (parse_reorder_enabled(s32, &m) == 0)
-                r->mode = m;
-            else
-                LOG_WRN("JSON: invalid reorder enabled '%s'; ignoring", s32);
-        }
-
-        kv = json_find_key_bounded(ro_raw, ro_end, "max_wait_ms");
-        if (kv) {
-            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffffffffULL) {
-                r->max_wait_ms = (uint32_t)uv;
-                r->has_explicit_wait = 1;
-            } else
-                LOG_WRN("JSON: invalid reorder max_wait_ms; keeping default");
-        }
-
-        kv = json_find_key_bounded(ro_raw, ro_end, "cap_packets");
-        if (kv) {
-            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffffffffULL) {
-                r->cap_packets_per_flow = (uint32_t)uv;
-                r->has_explicit_cap = 1;
-            } else
-                LOG_WRN("JSON: invalid reorder cap_packets; keeping default");
-        }
-
-        kv = json_find_key_bounded(ro_raw, ro_end, "max_bytes_per_flow");
-        if (kv) {
-            if (json_read_u64_strict(kv, &uv) == 0)
-                r->max_buffer_bytes_per_flow = uv;
-            else
-                LOG_WRN("JSON: invalid reorder max_bytes_per_flow; keeping default");
-        }
-
-        kv = json_find_key_bounded(ro_raw, ro_end, "classify_window");
-        if (kv) {
-            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffff)
-                r->classify_window = (uint16_t)uv;
-            else
-                LOG_WRN("JSON: invalid reorder classify_window; keeping default");
-        }
-
-        kv = json_find_key_bounded(ro_raw, ro_end, "ack_demote_max_large");
-        if (kv) {
-            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffff)
-                r->ack_demote_max_large_packets = (uint16_t)uv;
-            else
-                LOG_WRN("JSON: invalid reorder ack_demote_max_large; keeping default");
-        }
-
-        kv = json_find_key_bounded(ro_raw, ro_end, "small_packet_threshold");
-        if (kv) {
-            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffffffffULL)
-                r->small_packet_threshold_bytes = (uint32_t)uv;
-            else
-                LOG_WRN("JSON: invalid reorder small_packet_threshold; keeping default");
-        }
-
-        kv = json_find_key_bounded(ro_raw, ro_end, "reset_mark_packets");
-        if (kv) {
-            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffffffffULL)
-                r->reset_mark_packets = (uint32_t)uv;
-            else
-                LOG_WRN("JSON: invalid reorder reset_mark_packets; keeping default");
-        }
-
-        kv = json_find_key_bounded(ro_raw, ro_end, "reset_idle_grace_ms");
-        if (kv) {
-            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffffffffULL)
-                r->reset_idle_grace_ms = (uint32_t)uv;
-            else
-                LOG_WRN("JSON: invalid reorder reset_idle_grace_ms; keeping default");
-        }
-
-        kv = json_find_key_bounded(ro_raw, ro_end, "max_flows");
-        if (kv) {
-            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffffffffULL)
-                r->max_flows = (uint32_t)uv;
-            else
-                LOG_WRN("JSON: invalid reorder max_flows; keeping default");
-        }
-
-        kv = json_find_key_bounded(ro_raw, ro_end, "global_max_bytes");
-        if (kv) {
-            if (json_read_u64_strict(kv, &uv) == 0)
-                r->global_max_buffer_bytes = uv;
-            else
-                LOG_WRN("JSON: invalid reorder global_max_bytes; keeping default");
-        }
-
-        kv = json_find_key_bounded(ro_raw, ro_end, "ingress_idle_sec");
-        if (kv) {
-            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffffffffULL)
-                r->ingress_idle_timeout_sec = (uint32_t)uv;
-            else
-                LOG_WRN("JSON: invalid reorder ingress_idle_sec; keeping default");
-        }
-
-        kv = json_find_key_bounded(ro_raw, ro_end, "egress_idle_sec");
-        if (kv) {
-            if (json_read_u64_strict(kv, &uv) == 0 && uv <= 0xffffffffULL)
-                r->egress_idle_timeout_sec = (uint32_t)uv;
-            else
-                LOG_WRN("JSON: invalid reorder egress_idle_sec; keeping default");
-        }
-    }
 
     v = json_find_key(json_text, "reorder_rules");
     if (v && json_read_reorder_rules(cfg, v) < 0) return -1;
