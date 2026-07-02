@@ -5,14 +5,16 @@
 #define LWIP_TIMERS          0 /* mqvpn drives tcp_tmr()/ip_reass_tmr() manually from tick() */
 #define SYS_LIGHTWEIGHT_PROT 0 /* single-threaded, all lwIP calls on the tick thread */
 
-#define LWIP_NETCONN 0
-#define LWIP_SOCKET  0
-#define LWIP_DHCP    0
-#define LWIP_DNS     0
-#define LWIP_AUTOIP  0
-#define LWIP_IGMP    0
-#define PPP_SUPPORT  0
-#define LWIP_UDP     0 /* v1: TCP lane only; UDP stays on the DATAGRAM lane */
+#define LWIP_NETCONN  0
+#define LWIP_SOCKET   0
+#define LWIP_DHCP     0
+#define LWIP_DNS      0
+#define LWIP_AUTOIP   0
+#define LWIP_IGMP     0
+#define PPP_SUPPORT   0
+#define LWIP_ARP      0 /* TUN is raw-IP L3 — no Ethernet machinery */
+#define LWIP_ETHERNET 0
+#define LWIP_UDP      0 /* v1: TCP lane only; UDP stays on the DATAGRAM lane */
 
 #define LWIP_IPV4 1
 #define LWIP_IPV6 0 /* v1 non-goal: IPv6 TCP termination — IPv6 TCP goes RAW */
@@ -30,13 +32,15 @@
 #define MEM_LIBC_MALLOC 1
 #define MEMP_MEM_MALLOC 0
 
-/* TCP_MSS is set at runtime from the actual TUN MTU (spec: TUN MTU - 40);
- * this compile-time value is the worst-case upper bound used to size
- * TCP_WND/TCP_SND_BUF below (9000 MTU ceiling per project's MTU config docs
- * — actual MSS is clamped lower via tcp_mss() at connection accept time if
- * the real TUN MTU is smaller; verify the pinned lwIP version exposes a
- * per-pcb MSS override — if not, this becomes a compile-time-only bound and the runtime
- * TUN MTU must not exceed it). */
+/* TCP_MSS here is the compile-time worst-case UPPER BOUND (9000 MTU
+ * ceiling per project's MTU config docs), used to size TCP_WND/TCP_SND_BUF
+ * below. There is no per-pcb MSS setter in the vendored tree — tcp_mss(pcb)
+ * (tcp.h) is a read-only accessor. Instead lwIP derives each pcb's MSS
+ * automatically at connect/accept time via tcp_eff_send_mss_netif() from
+ * the netif's MTU, and clamps the peer's advertised MSS option to TCP_MSS
+ * (tcp_in.c). So Task 4's glue MUST set the lwIP netif->mtu from the real
+ * TUN MTU; the effective per-pcb MSS then becomes
+ * min(TCP_MSS, netif->mtu - 40, peer-advertised MSS). */
 #define TCP_MSS 8960 /* 9000 - 40 */
 
 #define LWIP_WND_SCALE 1
@@ -59,25 +63,34 @@
  * check (8960 < 0xFFFF - 4*8960 = 29695, and < TCP_SND_BUF). */
 #define TCP_SNDLOWAT     (TCP_MSS)
 #define TCP_SND_QUEUELEN ((4 * (TCP_SND_BUF) + (TCP_MSS - 1)) / (TCP_MSS))
-#define LWIP_TCP_SACK_OUT                                 \
-    1 /* only if the vendored fork supports it — verify \
-       * TCP_SACK-related symbols exist before enabling;  \
-       * if absent, drop this line (compile error is      \
-       * the correct signal, do not silently no-op). */
+/* SACK-out: vendored lwIP 2.2.1 implements it (opt.h option, generation in
+ * tcp_out.c, tracking in tcp_in.c) — verified. */
+#define LWIP_TCP_SACK_OUT 1
 
-#define MEMP_NUM_TCP_PCB                               \
-    512 /* mqvpn's tcp_max_flows default is 256; this  \
-         * pool is the hard lwIP-side cap, sized above \
-         * the config default with headroom — the    \
-         * hybrid.tcp_max_flows check in tcp_lane.c is \
-         * the real enforcement point (spec: on reject \
-         * → tcp_abort, do NOT silently fall to RAW). */
+/* mqvpn's tcp_max_flows default is 256; this pool is the hard lwIP-side
+ * cap, sized above the config default with headroom — the
+ * hybrid.tcp_max_flows check in tcp_lane.c is the real enforcement point
+ * (spec: on reject → tcp_abort, do NOT silently fall to RAW). */
+#define MEMP_NUM_TCP_PCB 512
+/* MEMP_NUM_TCP_SEG is a GLOBAL pool shared by all flows: 2048 segments
+ * covers only ~2 flows at full TCP_SND_BUF (2 MB / 8960-byte MSS ~ 234
+ * segs each x safety factor). tcp_write() returns ERR_MEM on pool
+ * exhaustion — Task 4's glue MUST handle that as backpressure (retry on
+ * sent-callback), it is not optional. */
 #define MEMP_NUM_TCP_SEG 2048
 /* PBUF_POOL_SIZE: must hold a full receive window of queued data —
  * init.c's sanity check enforces TCP_WND <= PBUF_POOL_SIZE *
  * (PBUF_POOL_BUFSIZE - protocol headers). With TCP_WND ~2 MB and ~8946
  * usable bytes per pool pbuf (9000 - 54 header bytes), 128 pbufs
- * (~1.1 MB) is too small; 256 gives ~2.29 MB >= 2,097,120. */
+ * (~1.1 MB) is too small; 256 gives ~2.29 MB >= 2,097,120.
+ *
+ * CAUTION (bites at the real ~1382 tunnel MTU): each ingress packet
+ * occupies one full-size pool pbuf regardless of its actual length, so at
+ * MTU ~1382 the global 256-pbuf pool holds only ~350 KB of real payload —
+ * far below the 2 MB window advertised PER FLOW. A single backpressured
+ * flow queuing ooseq/refused data can exhaust the global pool and stall RX
+ * for ALL flows. Task 4's glue must handle this (runtime rcv_wnd reduction
+ * to match the real MTU budget, or PBUF_RAM-allocated ingress). */
 #define PBUF_POOL_SIZE    256
 #define PBUF_POOL_BUFSIZE LWIP_MEM_ALIGN_SIZE(TCP_MSS + 40 + PBUF_LINK_ENCAPSULATION_HLEN)
 

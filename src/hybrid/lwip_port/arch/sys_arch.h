@@ -1,4 +1,4 @@
-/* src/hybrid/lwip_port/arch/sys_arch.h (path per Step 1's grep result) */
+/* src/hybrid/lwip_port/arch/sys_arch.h */
 #ifndef MQVPN_LWIP_SYS_ARCH_H
 #define MQVPN_LWIP_SYS_ARCH_H
 /* NO_SYS=1: lwIP's sys_arch.h contract shrinks to almost nothing — no

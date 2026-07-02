@@ -22,8 +22,11 @@ typedef uintptr_t mem_ptr_t;
 #define S32_F PRId32
 #define X32_F PRIx32
 
-/* Little/big endian: mqvpn builds only target little-endian dev/CI hosts
- * today (x86_64/aarch64 Linux); revisit if a big-endian target appears. */
+/* lwIP's arch.h already auto-detects byte order via __BYTE_ORDER__ on
+ * GCC/Clang, and glibc's endian.h (pulled in via stdlib.h above) defines
+ * BYTE_ORDER itself. This #ifndef-guarded define therefore only matters
+ * for compilers lacking __BYTE_ORDER__ (e.g. MSVC, for the future Windows
+ * port), where little-endian is correct on all supported targets. */
 #ifndef BYTE_ORDER
 #  define BYTE_ORDER LITTLE_ENDIAN
 #endif
@@ -35,7 +38,11 @@ typedef uintptr_t mem_ptr_t;
 /* Route lwIP's internal LWIP_PLATFORM_DIAG through mqvpn's logger. Declared
  * here, defined in lwip_glue.c (must not pull src/log.h into every lwIP
  * translation unit — keeps the port layer decoupled from mqvpn's log macros). */
-void mqvpn_lwip_platform_diag(const char *fmt, ...);
+#if defined(__GNUC__)
+__attribute__((format(printf, 1, 2)))
+#endif
+void
+mqvpn_lwip_platform_diag(const char *fmt, ...);
 #define LWIP_PLATFORM_DIAG(x) mqvpn_lwip_platform_diag x
 
 #define LWIP_PLATFORM_ASSERT(x)                                                          \
