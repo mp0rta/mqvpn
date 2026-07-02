@@ -122,10 +122,18 @@ struct cli_conn_s {
     int peer_reorder_supported;
 };
 
+/* Role of an H3 request stream. v0.8 has exactly one role; hybrid mode's
+ * connect-tcp streams add more. Body/header handling in cb_request_read
+ * dispatches on this. */
+typedef enum {
+    STREAM_ROLE_CONNECT_IP = 0,
+} cli_stream_role_t;
+
 /* Per-stream state (Level 2) */
 struct cli_stream_s {
     cli_conn_t *conn;
     xqc_h3_request_t *h3_request;
+    cli_stream_role_t role;
     uint8_t *capsule_buf;
     size_t capsule_len;
     size_t capsule_cap;
@@ -911,6 +919,7 @@ cli_masque_start_tunnel(cli_conn_t *conn)
     cli_stream_t *stream = calloc(1, sizeof(*stream));
     if (!stream) return -1;
     stream->conn = conn;
+    stream->role = STREAM_ROLE_CONNECT_IP;
 
     xqc_h3_request_t *req = xqc_h3_request_create(c->engine, &conn->cid, NULL, stream);
     if (!req) {
@@ -1111,107 +1120,130 @@ apply_mtu_cap(int cfg_mtu, int negotiated, mqvpn_client_t *c)
     return negotiated;
 }
 
+/* CONNECT-IP tunnel stream: response headers (:status 200 → tunnel_ok,
+ * mqvpn-reorder echo → peer_reorder_supported). */
+static void
+cli_connect_ip_on_headers(cli_stream_t *stream, xqc_h3_request_t *h3_request)
+{
+    cli_conn_t *conn = stream->conn;
+    mqvpn_client_t *c = conn->client;
+    unsigned char fin = 0;
+
+    xqc_http_headers_t *headers = xqc_h3_request_recv_headers(h3_request, &fin);
+    if (headers) {
+        for (int i = 0; i < (int)headers->count; i++) {
+            xqc_http_header_t *h = &headers->headers[i];
+            if (h->name.iov_len == 7 && memcmp(h->name.iov_base, ":status", 7) == 0 &&
+                h->value.iov_len == 3 && memcmp(h->value.iov_base, "200", 3) == 0) {
+                conn->tunnel_ok = 1;
+                LOG_I(c, "tunnel 200 OK");
+            }
+            /* §19.3: server echoed mqvpn-reorder → it supports the shim, so
+             * we may now stamp (gated below by cfg.reorder.mode != OFF). */
+            if (mqvpn_reorder_header_match(h->name.iov_base, h->name.iov_len,
+                                           h->value.iov_base, h->value.iov_len)) {
+                conn->peer_reorder_supported = 1;
+                LOG_I(c, "peer advertised mqvpn-reorder; TX stamping enabled");
+            }
+        }
+    }
+}
+
+/* CONNECT-IP tunnel stream: capsule body + ADDRESS_ASSIGN → tunnel_config_ready.
+ * Returns -1 on capsule buffer failure. */
+static int
+cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
+{
+    cli_conn_t *conn = stream->conn;
+    mqvpn_client_t *c = conn->client;
+    unsigned char fin = 0;
+
+    unsigned char buf[4096];
+    ssize_t n;
+    do {
+        n = xqc_h3_request_recv_body(h3_request, buf, sizeof(buf), &fin);
+        if (n <= 0) break;
+        if (stream_append_capsules(stream, buf, (size_t)n) < 0) return -1;
+        process_capsules(stream);
+    } while (!fin);
+
+    /* Notify platform on ADDRESS_ASSIGN */
+    if (conn->addr_assigned && c->state != MQVPN_STATE_ESTABLISHED &&
+        c->state != MQVPN_STATE_TUNNEL_READY) {
+        /* Compute MTU */
+        int tun_mtu = IPV6_MIN_MTU;
+        if (conn->dgram_mss > 0) {
+            size_t udp_mss =
+                xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
+            if (udp_mss >= 68) tun_mtu = (int)udp_mss;
+        }
+        if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU) tun_mtu = IPV6_MIN_MTU;
+        tun_mtu = apply_mtu_cap(c->config.tun_mtu, tun_mtu, c);
+        /* §9: when the reorder shim is locally enabled, each stamped inner
+         * packet carries an 8-byte header, so the usable inner MTU shrinks
+         * by 8. Apply ONCE to the resolved inner MTU (after auto-MSS / cap).
+         * Floor at IPV6_MIN_MTU when v6 is in play. */
+        if (c->config.reorder.mode != MQVPN_REORDER_OFF) {
+            tun_mtu -= MQVPN_REORDER_HDR_LEN;
+            if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU) tun_mtu = IPV6_MIN_MTU;
+        }
+        c->mtu = tun_mtu;
+
+        /* Build tunnel info for callback */
+        mqvpn_tunnel_info_t info = {0};
+        info.struct_size = sizeof(info);
+        memcpy(info.assigned_ip, conn->assigned_ip, 4);
+        info.assigned_prefix = conn->assigned_prefix;
+        /* Server IP is .1 in same subnet */
+        memcpy(info.server_ip, conn->assigned_ip, 3);
+        info.server_ip[3] = 1;
+        info.server_prefix = conn->assigned_prefix;
+        info.mtu = tun_mtu;
+        if (conn->addr6_assigned) {
+            memcpy(info.assigned_ip6, conn->assigned_ip6, 16);
+            info.assigned_prefix6 = conn->assigned_prefix6;
+            info.has_v6 = 1;
+        }
+
+        /* Primary path is now validated by handshake — drive
+         * VALIDATING -> ACTIVE via the standard event. tick_check_all_validations
+         * may also fire VALIDATION_OK if it polls between now and the next
+         * tick boundary; path_on_validation_ok's `if (state != VALIDATING)`
+         * guard makes the second dispatch a LOG_D no-op. */
+        int pidx = c->primary_path_idx;
+        if (c->n_paths > 0 && pidx < c->n_paths && c->paths[pidx].platform_attached &&
+            c->paths[pidx].state == PATH_LC_VALIDATING) {
+            path_entry_t *pp = &c->paths[pidx];
+            path_event_ctx_t v_ctx = {
+                .validated_target = PATH_LC_ACTIVE,
+                .now_us = client_now_us(c),
+            };
+            path_on_event(c, pp, PATH_EVENT_VALIDATION_OK, &v_ctx);
+        }
+
+        client_set_state(c, MQVPN_STATE_TUNNEL_READY);
+        LOG_D(c, "firing tunnel_config_ready callback");
+        c->cbs.tunnel_config_ready(&info, c->user_ctx);
+        c->reconnect_attempts = 0;
+    }
+    return 0;
+}
+
 static int
 cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
                 void *user_data)
 {
     cli_stream_t *stream = (cli_stream_t *)user_data;
-    cli_conn_t *conn = stream->conn;
-    mqvpn_client_t *c = conn->client;
-    unsigned char fin = 0;
 
-    if (flag & XQC_REQ_NOTIFY_READ_HEADER) {
-        xqc_http_headers_t *headers = xqc_h3_request_recv_headers(h3_request, &fin);
-        if (headers) {
-            for (int i = 0; i < (int)headers->count; i++) {
-                xqc_http_header_t *h = &headers->headers[i];
-                if (h->name.iov_len == 7 && memcmp(h->name.iov_base, ":status", 7) == 0 &&
-                    h->value.iov_len == 3 && memcmp(h->value.iov_base, "200", 3) == 0) {
-                    conn->tunnel_ok = 1;
-                    LOG_I(c, "tunnel 200 OK");
-                }
-                /* §19.3: server echoed mqvpn-reorder → it supports the shim, so
-                 * we may now stamp (gated below by cfg.reorder.mode != OFF). */
-                if (mqvpn_reorder_header_match(h->name.iov_base, h->name.iov_len,
-                                               h->value.iov_base, h->value.iov_len)) {
-                    conn->peer_reorder_supported = 1;
-                    LOG_I(c, "peer advertised mqvpn-reorder; TX stamping enabled");
-                }
-            }
-        }
+    switch (stream->role) {
+    case STREAM_ROLE_CONNECT_IP:
+        if (flag & XQC_REQ_NOTIFY_READ_HEADER)
+            cli_connect_ip_on_headers(stream, h3_request);
+        if (flag & XQC_REQ_NOTIFY_READ_BODY)
+            return cli_connect_ip_on_body(stream, h3_request);
+        return 0;
     }
-
-    if (flag & XQC_REQ_NOTIFY_READ_BODY) {
-        unsigned char buf[4096];
-        ssize_t n;
-        do {
-            n = xqc_h3_request_recv_body(h3_request, buf, sizeof(buf), &fin);
-            if (n <= 0) break;
-            if (stream_append_capsules(stream, buf, (size_t)n) < 0) return -1;
-            process_capsules(stream);
-        } while (!fin);
-
-        /* Notify platform on ADDRESS_ASSIGN */
-        if (conn->addr_assigned && c->state != MQVPN_STATE_ESTABLISHED &&
-            c->state != MQVPN_STATE_TUNNEL_READY) {
-            /* Compute MTU */
-            int tun_mtu = IPV6_MIN_MTU;
-            if (conn->dgram_mss > 0) {
-                size_t udp_mss =
-                    xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
-                if (udp_mss >= 68) tun_mtu = (int)udp_mss;
-            }
-            if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU) tun_mtu = IPV6_MIN_MTU;
-            tun_mtu = apply_mtu_cap(c->config.tun_mtu, tun_mtu, c);
-            /* §9: when the reorder shim is locally enabled, each stamped inner
-             * packet carries an 8-byte header, so the usable inner MTU shrinks
-             * by 8. Apply ONCE to the resolved inner MTU (after auto-MSS / cap).
-             * Floor at IPV6_MIN_MTU when v6 is in play. */
-            if (c->config.reorder.mode != MQVPN_REORDER_OFF) {
-                tun_mtu -= MQVPN_REORDER_HDR_LEN;
-                if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU)
-                    tun_mtu = IPV6_MIN_MTU;
-            }
-            c->mtu = tun_mtu;
-
-            /* Build tunnel info for callback */
-            mqvpn_tunnel_info_t info = {0};
-            info.struct_size = sizeof(info);
-            memcpy(info.assigned_ip, conn->assigned_ip, 4);
-            info.assigned_prefix = conn->assigned_prefix;
-            /* Server IP is .1 in same subnet */
-            memcpy(info.server_ip, conn->assigned_ip, 3);
-            info.server_ip[3] = 1;
-            info.server_prefix = conn->assigned_prefix;
-            info.mtu = tun_mtu;
-            if (conn->addr6_assigned) {
-                memcpy(info.assigned_ip6, conn->assigned_ip6, 16);
-                info.assigned_prefix6 = conn->assigned_prefix6;
-                info.has_v6 = 1;
-            }
-
-            /* Primary path is now validated by handshake — drive
-             * VALIDATING -> ACTIVE via the standard event. tick_check_all_validations
-             * may also fire VALIDATION_OK if it polls between now and the next
-             * tick boundary; path_on_validation_ok's `if (state != VALIDATING)`
-             * guard makes the second dispatch a LOG_D no-op. */
-            int pidx = c->primary_path_idx;
-            if (c->n_paths > 0 && pidx < c->n_paths && c->paths[pidx].platform_attached &&
-                c->paths[pidx].state == PATH_LC_VALIDATING) {
-                path_entry_t *pp = &c->paths[pidx];
-                path_event_ctx_t v_ctx = {
-                    .validated_target = PATH_LC_ACTIVE,
-                    .now_us = client_now_us(c),
-                };
-                path_on_event(c, pp, PATH_EVENT_VALIDATION_OK, &v_ctx);
-            }
-
-            client_set_state(c, MQVPN_STATE_TUNNEL_READY);
-            LOG_D(c, "firing tunnel_config_ready callback");
-            c->cbs.tunnel_config_ready(&info, c->user_ctx);
-            c->reconnect_attempts = 0;
-        }
-    }
+    /* No default: -Wswitch-ready shape; unknown roles intentionally no-op. */
     return 0;
 }
 
