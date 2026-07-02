@@ -11,6 +11,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -101,6 +102,22 @@ parse_section(const char *name)
     if (strcasecmp(name, "Reorder") == 0) return SEC_REORDER;
     if (strcasecmp(name, "ReorderRule") == 0) return SEC_REORDER_RULE;
     return -1;
+}
+
+static const char *
+section_name(int section)
+{
+    switch (section) {
+    case SEC_INTERFACE: return "Interface";
+    case SEC_SERVER: return "Server";
+    case SEC_TLS: return "TLS";
+    case SEC_AUTH: return "Auth";
+    case SEC_MULTIPATH: return "Multipath";
+    case SEC_CONTROL: return "Control";
+    case SEC_REORDER: return "Reorder";
+    case SEC_REORDER_RULE: return "ReorderRule";
+    default: return "?";
+    }
 }
 
 /* Split comma-separated DNS list into cfg->dns_servers[] */
@@ -399,6 +416,277 @@ reorder_rule_begin(mqvpn_file_config_t *cfg, int lineno, const char *path)
     return 0;
 }
 
+/* ── Scalar config key descriptor table ──────────────────────────────────
+ * ONE row per scalar key, walked by BOTH the INI parser (handle_kv) and the
+ * JSON parser (mqvpn_config_load_json_filecfg). Complex keys (DNS, User,
+ * Path, ReorderRule, JSON "mode") stay hand-written in their parsers.
+ * Adding a scalar key = adding one row here.
+ */
+
+typedef enum {
+    CFGK_STR,          /* char[]: snprintf copy, silent truncation          */
+    CFGK_BOOL,         /* int: parse_bool / json_read_bool                  */
+    CFGK_INT,          /* int: int_ok() gate; optional fallback on invalid  */
+    CFGK_U32,          /* uint32_t: inclusive max bound                     */
+    CFGK_U16,          /* uint16_t: max 0xffff                              */
+    CFGK_U64,          /* 64-bit unsigned: inclusive max bound              */
+    CFGK_REORDER_MODE, /* mqvpn_reorder_mode_t via parse_reorder_enabled    */
+} cfg_key_type_t;
+
+typedef struct {
+    uint8_t section;      /* SEC_*: INI section; SEC_REORDER doubles as
+                             "inside the JSON reorder object" scope         */
+    const char *ini_key;  /* NULL = JSON-only key                           */
+    const char *json_key; /* NULL = INI-only key                           */
+    cfg_key_type_t type;
+    size_t offset;            /* offsetof(mqvpn_file_config_t, field)    */
+    size_t size;              /* CFGK_STR only: sizeof(field)            */
+    unsigned long long max;   /* CFGK_U32/U16/U64: inclusive upper bound */
+    int (*int_ok)(int v);     /* CFGK_INT: NULL = accept any parsed      */
+    int has_invalid_fallback; /* CFGK_INT: write fallback when invalid   */
+    int invalid_fallback;
+    void (*post_set)(mqvpn_file_config_t *cfg); /* side effect, NULL = none */
+} cfg_key_desc_t;
+
+_Static_assert(sizeof(unsigned long long) == sizeof(uint64_t),
+               "CFGK_U64 stores through a single 8-byte write");
+
+/* int_ok gates */
+static int
+cfgk_int_positive(int v)
+{
+    return v > 0;
+}
+
+static int
+cfgk_int_mtu(int v)
+{
+    return v == 0 || (v >= 1280 && v <= 9000);
+}
+
+/* post_set hooks */
+static void
+cfgk_post_mark_server(mqvpn_file_config_t *cfg)
+{
+    cfg->is_server = 1;
+}
+
+static void
+cfgk_post_mirror_auth_key(mqvpn_file_config_t *cfg)
+{
+    /* INI [Auth] Key is mode-agnostic: mirror into server_auth_key. */
+    snprintf(cfg->server_auth_key, sizeof(cfg->server_auth_key), "%s", cfg->auth_key);
+}
+
+static void
+cfgk_post_explicit_wait(mqvpn_file_config_t *cfg)
+{
+    cfg->reorder.has_explicit_wait = 1;
+}
+
+static void
+cfgk_post_explicit_cap(mqvpn_file_config_t *cfg)
+{
+    cfg->reorder.has_explicit_cap = 1;
+}
+
+#define CFGK_OFF(field) offsetof(mqvpn_file_config_t, field)
+
+/* Row helpers keep the table readable; positional init otherwise. */
+#define CFG_STR(sec, ik, jk, field)                                        \
+    {                                                                      \
+        (sec), (ik), (jk), CFGK_STR, CFGK_OFF(field),                      \
+            sizeof(((mqvpn_file_config_t *)0)->field), 0, NULL, 0, 0, NULL \
+    }
+#define CFG_STR_POST(sec, ik, jk, field, post)                               \
+    {                                                                        \
+        (sec), (ik), (jk), CFGK_STR, CFGK_OFF(field),                        \
+            sizeof(((mqvpn_file_config_t *)0)->field), 0, NULL, 0, 0, (post) \
+    }
+#define CFG_BOOL(sec, ik, jk, field)                                          \
+    {                                                                         \
+        (sec), (ik), (jk), CFGK_BOOL, CFGK_OFF(field), 0, 0, NULL, 0, 0, NULL \
+    }
+#define CFG_INT(sec, ik, jk, field, okfn)                                      \
+    {                                                                          \
+        (sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 0, 0, NULL \
+    }
+#define CFG_INT_FB(sec, ik, jk, field, okfn, fb)                                  \
+    {                                                                             \
+        (sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 1, (fb), NULL \
+    }
+#define CFG_U32(sec, ik, jk, field)                                                      \
+    {                                                                                    \
+        (sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, NULL \
+    }
+#define CFG_U32_POST(sec, ik, jk, field, post)                                      \
+    {                                                                               \
+        (sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, \
+            (post)                                                                  \
+    }
+#define CFG_U16(sec, ik, jk, field)                                                  \
+    {                                                                                \
+        (sec), (ik), (jk), CFGK_U16, CFGK_OFF(field), 0, 0xffffULL, NULL, 0, 0, NULL \
+    }
+#define CFG_U64(sec, ik, jk, field, maxv)                                         \
+    {                                                                             \
+        (sec), (ik), (jk), CFGK_U64, CFGK_OFF(field), 0, (maxv), NULL, 0, 0, NULL \
+    }
+
+static const cfg_key_desc_t cfg_keys[] = {
+    /* [Interface] */
+    CFG_STR(SEC_INTERFACE, "TunName", "tun_name", tun_name),
+    CFG_STR_POST(SEC_INTERFACE, "Listen", "listen", listen, cfgk_post_mark_server),
+    CFG_STR(SEC_INTERFACE, "Subnet", "subnet", subnet),
+    CFG_STR(SEC_INTERFACE, "Subnet6", "subnet6", subnet6),
+    CFG_STR(SEC_INTERFACE, "LogLevel", "log_level", log_level),
+    CFG_BOOL(SEC_INTERFACE, "KillSwitch", "kill_switch", kill_switch),
+    CFG_BOOL(SEC_INTERFACE, "ManageRoutes", "manage_routes", manage_routes),
+    CFG_BOOL(SEC_INTERFACE, "Reconnect", "reconnect", reconnect),
+    CFG_INT(SEC_INTERFACE, "ReconnectInterval", "reconnect_interval", reconnect_interval,
+            cfgk_int_positive),
+    CFG_INT(SEC_INTERFACE, "MTU", "mtu", tun_mtu, cfgk_int_mtu),
+    /* [Server] */
+    CFG_STR(SEC_SERVER, "Address", "server_addr", server_addr),
+    CFG_STR(SEC_SERVER, "ServerName", "tls_server_name", tls_server_name),
+    CFG_BOOL(SEC_SERVER, "Insecure", "insecure", insecure),
+    /* [TLS] */
+    CFG_STR(SEC_TLS, "Cert", "cert_file", cert_file),
+    CFG_STR(SEC_TLS, "Key", "key_file", key_file),
+    /* [Auth] — INI Key is mode-agnostic dual-write; JSON has two keys */
+    CFG_STR_POST(SEC_AUTH, "Key", NULL, auth_key, cfgk_post_mirror_auth_key),
+    CFG_STR(SEC_AUTH, NULL, "auth_key", auth_key),
+    CFG_STR(SEC_AUTH, NULL, "server_auth_key", server_auth_key),
+    CFG_INT_FB(SEC_AUTH, "MaxClients", "max_clients", max_clients, cfgk_int_positive, 64),
+    /* [Control] */
+    CFG_STR(SEC_CONTROL, "Listen", "control_listen", control_listen),
+    /* [Multipath] */
+    CFG_STR(SEC_MULTIPATH, "Scheduler", "scheduler", scheduler),
+    CFG_STR(SEC_MULTIPATH, "CC", "cc", cc),
+    CFG_U64(SEC_MULTIPATH, "InitMaxPathId", "init_max_path_id", init_max_path_id,
+            MQVPN_INIT_MAX_PATH_ID_MAX),
+    /* [Reorder] — JSON side lives inside the bounded "reorder" object */
+    {SEC_REORDER, "Enabled", "enabled", CFGK_REORDER_MODE, CFGK_OFF(reorder.mode), 0, 0,
+     NULL, 0, 0, NULL},
+    CFG_U32_POST(SEC_REORDER, "MaxWaitMs", "max_wait_ms", reorder.max_wait_ms,
+                 cfgk_post_explicit_wait),
+    CFG_U32_POST(SEC_REORDER, "CapPackets", "cap_packets", reorder.cap_packets_per_flow,
+                 cfgk_post_explicit_cap),
+    CFG_U64(SEC_REORDER, "MaxBytesPerFlow", "max_bytes_per_flow",
+            reorder.max_buffer_bytes_per_flow, 0xffffffffffffffffULL),
+    CFG_U16(SEC_REORDER, "ClassifyWindow", "classify_window", reorder.classify_window),
+    CFG_U16(SEC_REORDER, "AckDemoteMaxLarge", "ack_demote_max_large",
+            reorder.ack_demote_max_large_packets),
+    CFG_U32(SEC_REORDER, "SmallPacketThreshold", "small_packet_threshold",
+            reorder.small_packet_threshold_bytes),
+    CFG_U32(SEC_REORDER, "ResetMarkPackets", "reset_mark_packets",
+            reorder.reset_mark_packets),
+    CFG_U32(SEC_REORDER, "ResetIdleGraceMs", "reset_idle_grace_ms",
+            reorder.reset_idle_grace_ms),
+    CFG_U32(SEC_REORDER, "MaxFlows", "max_flows", reorder.max_flows),
+    CFG_U64(SEC_REORDER, "GlobalMaxBytes", "global_max_bytes",
+            reorder.global_max_buffer_bytes, 0xffffffffffffffffULL),
+    CFG_U32(SEC_REORDER, "IngressIdleSec", "ingress_idle_sec",
+            reorder.ingress_idle_timeout_sec),
+    CFG_U32(SEC_REORDER, "EgressIdleSec", "egress_idle_sec",
+            reorder.egress_idle_timeout_sec),
+};
+
+/* Shared typed store. Returns 0 on success, -1 on invalid value (caller
+ * warns per-surface). `v_ull` carries U32/U16/U64 payloads, `v_int` carries
+ * BOOL/INT, `v_str` carries STR/REORDER_MODE. */
+static int
+cfg_key_store(mqvpn_file_config_t *cfg, const cfg_key_desc_t *d, const char *v_str,
+              int v_int, unsigned long long v_ull)
+{
+    char *base = (char *)cfg + d->offset;
+    switch (d->type) {
+    case CFGK_STR: snprintf(base, d->size, "%s", v_str); break;
+    case CFGK_BOOL: *(int *)base = v_int; break;
+    case CFGK_INT:
+        if (d->int_ok && !d->int_ok(v_int)) {
+            if (d->has_invalid_fallback) *(int *)base = d->invalid_fallback;
+            return -1;
+        }
+        *(int *)base = v_int;
+        break;
+    case CFGK_U32: {
+        if (v_ull > d->max) return -1;
+        uint32_t u = (uint32_t)v_ull;
+        memcpy(base, &u, sizeof(u));
+        break;
+    }
+    case CFGK_U16: {
+        if (v_ull > d->max) return -1;
+        uint16_t u = (uint16_t)v_ull;
+        memcpy(base, &u, sizeof(u));
+        break;
+    }
+    case CFGK_U64: {
+        if (v_ull > d->max) return -1;
+        memcpy(base, &v_ull, sizeof(v_ull));
+        break;
+    }
+    case CFGK_REORDER_MODE: {
+        mqvpn_reorder_mode_t m = MQVPN_REORDER_OFF;
+        if (parse_reorder_enabled(v_str, &m) < 0) return -1;
+        memcpy(base, &m, sizeof(m));
+        break;
+    }
+    }
+    if (d->post_set) d->post_set(cfg);
+    return 0;
+}
+
+/* INI-side walker: returns 1 if (section,key) matched a table row (value
+ * applied or warned), 0 if the key is unknown to the table. */
+static int
+cfg_key_apply_ini(mqvpn_file_config_t *cfg, int section, const char *key, const char *val,
+                  int lineno, const char *path)
+{
+    for (size_t i = 0; i < sizeof(cfg_keys) / sizeof(cfg_keys[0]); i++) {
+        const cfg_key_desc_t *d = &cfg_keys[i];
+        if (d->section != section || !d->ini_key || strcasecmp(d->ini_key, key) != 0)
+            continue;
+
+        int rc = 0;
+        switch (d->type) {
+        case CFGK_STR:
+        case CFGK_REORDER_MODE: rc = cfg_key_store(cfg, d, val, 0, 0); break;
+        case CFGK_BOOL: rc = cfg_key_store(cfg, d, NULL, parse_bool(val), 0); break;
+        case CFGK_INT: {
+            /* INT_MIN sentinel: forced-invalid marker so an unparseable value
+             * takes the same fallback path as a parsed-but-rejected one
+             * (cfgk_int_positive(INT_MIN)==0; cfgk_int_mtu is never paired
+             * with a fallback). */
+            int v = 0;
+            if (parse_int_strict(val, &v) < 0)
+                rc = d->has_invalid_fallback ? cfg_key_store(cfg, d, NULL, INT_MIN, 0)
+                                             : -1;
+            else
+                rc = cfg_key_store(cfg, d, NULL, v, 0);
+            break;
+        }
+        case CFGK_U32:
+        case CFGK_U16: {
+            uint32_t v = 0;
+            rc = (parse_u32_strict(val, &v) < 0) ? -1 : cfg_key_store(cfg, d, NULL, 0, v);
+            break;
+        }
+        case CFGK_U64: {
+            unsigned long long v = 0;
+            rc = (parse_u64_strict(val, &v) < 0) ? -1 : cfg_key_store(cfg, d, NULL, 0, v);
+            break;
+        }
+        }
+        if (rc < 0)
+            LOG_WRN("%s:%d: invalid %s '%s'; %s", path, lineno, d->ini_key, val,
+                    d->has_invalid_fallback ? "using default" : "ignoring");
+        return 1;
+    }
+    return 0;
+}
+
 static int
 json_read_reorder_rules(mqvpn_file_config_t *cfg, const char *p)
 {
@@ -499,110 +787,22 @@ static void
 handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *val,
           int lineno, const char *path)
 {
+    /* Complex keys first (lists / repeated keys / rule slots). */
     switch (section) {
     case SEC_INTERFACE:
-        if (strcasecmp(key, "TunName") == 0) {
-            snprintf(cfg->tun_name, sizeof(cfg->tun_name), "%s", val);
-        } else if (strcasecmp(key, "Listen") == 0) {
-            snprintf(cfg->listen, sizeof(cfg->listen), "%s", val);
-            cfg->is_server = 1;
-        } else if (strcasecmp(key, "Subnet") == 0) {
-            snprintf(cfg->subnet, sizeof(cfg->subnet), "%s", val);
-        } else if (strcasecmp(key, "Subnet6") == 0) {
-            snprintf(cfg->subnet6, sizeof(cfg->subnet6), "%s", val);
-        } else if (strcasecmp(key, "LogLevel") == 0) {
-            snprintf(cfg->log_level, sizeof(cfg->log_level), "%s", val);
-        } else if (strcasecmp(key, "DNS") == 0) {
+        if (strcasecmp(key, "DNS") == 0) {
             parse_dns_list(cfg, val);
-        } else if (strcasecmp(key, "KillSwitch") == 0) {
-            cfg->kill_switch = parse_bool(val);
-        } else if (strcasecmp(key, "ManageRoutes") == 0) {
-            cfg->manage_routes = parse_bool(val);
-        } else if (strcasecmp(key, "Reconnect") == 0) {
-            cfg->reconnect = parse_bool(val);
-        } else if (strcasecmp(key, "ReconnectInterval") == 0) {
-            int v = 0;
-            if (parse_int_strict(val, &v) < 0 || v <= 0) {
-                LOG_WRN("%s:%d: invalid ReconnectInterval '%s'; ignoring", path, lineno,
-                        val);
-            } else {
-                cfg->reconnect_interval = v;
-            }
-        } else if (strcasecmp(key, "MTU") == 0) {
-            int v = 0;
-            if (parse_int_strict(val, &v) < 0) {
-                LOG_WRN("%s:%d: invalid MTU '%s'; ignoring", path, lineno, val);
-                break;
-            }
-            if (v != 0 && (v < 1280 || v > 9000)) {
-                LOG_WRN("%s:%d: MTU must be 1280..9000, got %d; ignoring", path, lineno,
-                        v);
-            } else {
-                cfg->tun_mtu = v;
-            }
-        } else {
-            LOG_WRN("%s:%d: unknown key '%s' in [Interface]", path, lineno, key);
+            return;
         }
         break;
-
-    case SEC_SERVER:
-        if (strcasecmp(key, "Address") == 0) {
-            snprintf(cfg->server_addr, sizeof(cfg->server_addr), "%s", val);
-        } else if (strcasecmp(key, "ServerName") == 0) {
-            snprintf(cfg->tls_server_name, sizeof(cfg->tls_server_name), "%s", val);
-        } else if (strcasecmp(key, "Insecure") == 0) {
-            cfg->insecure = parse_bool(val);
-        } else {
-            LOG_WRN("%s:%d: unknown key '%s' in [Server]", path, lineno, key);
-        }
-        break;
-
-    case SEC_TLS:
-        if (strcasecmp(key, "Cert") == 0) {
-            snprintf(cfg->cert_file, sizeof(cfg->cert_file), "%s", val);
-        } else if (strcasecmp(key, "Key") == 0) {
-            snprintf(cfg->key_file, sizeof(cfg->key_file), "%s", val);
-        } else {
-            LOG_WRN("%s:%d: unknown key '%s' in [TLS]", path, lineno, key);
-        }
-        break;
-
     case SEC_AUTH:
-        if (strcasecmp(key, "Key") == 0) {
-            /* Context: [Auth] Key is server_auth_key if is_server,
-             * else auth_key (client). We store in both and let the
-             * caller use the right one based on is_server. */
-            snprintf(cfg->server_auth_key, sizeof(cfg->server_auth_key), "%s", val);
-            snprintf(cfg->auth_key, sizeof(cfg->auth_key), "%s", val);
-        } else if (strcasecmp(key, "User") == 0) {
+        if (strcasecmp(key, "User") == 0) {
             parse_user_pair(cfg, val, lineno, path);
-        } else if (strcasecmp(key, "MaxClients") == 0) {
-            int v = 0;
-            if (parse_int_strict(val, &v) < 0 || v <= 0) {
-                LOG_WRN("%s:%d: invalid MaxClients '%s'; using default 64", path, lineno,
-                        val);
-                cfg->max_clients = 64;
-            } else {
-                cfg->max_clients = v;
-            }
-        } else {
-            LOG_WRN("%s:%d: unknown key '%s' in [Auth]", path, lineno, key);
+            return;
         }
         break;
-
     case SEC_MULTIPATH:
-        if (strcasecmp(key, "Scheduler") == 0) {
-            snprintf(cfg->scheduler, sizeof(cfg->scheduler), "%s", val);
-        } else if (strcasecmp(key, "CC") == 0) {
-            snprintf(cfg->cc, sizeof(cfg->cc), "%s", val);
-        } else if (strcasecmp(key, "InitMaxPathId") == 0) {
-            unsigned long long v = 0;
-            if (parse_u64_strict(val, &v) < 0 || v > MQVPN_INIT_MAX_PATH_ID_MAX) {
-                LOG_WRN("%s:%d: invalid InitMaxPathId '%s'", path, lineno, val);
-            } else {
-                cfg->init_max_path_id = v;
-            }
-        } else if (strcasecmp(key, "Path") == 0) {
+        if (strcasecmp(key, "Path") == 0) {
             if (cfg->n_paths < MQVPN_CONFIG_MAX_PATHS) {
                 snprintf(cfg->paths[cfg->n_paths], sizeof(cfg->paths[0]), "%s", val);
                 cfg->n_paths++;
@@ -610,121 +810,16 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
                 LOG_WRN("%s:%d: max %d paths supported, ignoring '%s'", path, lineno,
                         MQVPN_CONFIG_MAX_PATHS, val);
             }
-        } else {
-            LOG_WRN("%s:%d: unknown key '%s' in [Multipath]", path, lineno, key);
+            return;
         }
         break;
-
-    case SEC_CONTROL:
-        if (strcasecmp(key, "Listen") == 0) {
-            snprintf(cfg->control_listen, sizeof(cfg->control_listen), "%s", val);
-        } else {
-            LOG_WRN("%s:%d: unknown key '%s' in [Control]", path, lineno, key);
-        }
-        break;
-
-    case SEC_REORDER: {
-        /* All numeric keys store the raw value; cross-side invariants (cap
-         * power-of-two, ingress < egress) are enforced by
-         * mqvpn_reorder_config_validate() when the config is applied. */
-        mqvpn_reorder_config_t *r = &cfg->reorder;
-        if (strcasecmp(key, "Enabled") == 0) {
-            mqvpn_reorder_mode_t m = MQVPN_REORDER_OFF;
-            if (parse_reorder_enabled(val, &m) < 0) {
-                LOG_WRN("%s:%d: invalid [Reorder] Enabled '%s'; ignoring", path, lineno,
-                        val);
-            } else {
-                r->mode = m;
-            }
-        } else if (strcasecmp(key, "MaxWaitMs") == 0) {
-            uint32_t v = 0;
-            if (parse_u32_strict(val, &v) < 0)
-                LOG_WRN("%s:%d: invalid MaxWaitMs '%s'", path, lineno, val);
-            else {
-                r->max_wait_ms = v;
-                r->has_explicit_wait = 1;
-            }
-        } else if (strcasecmp(key, "CapPackets") == 0) {
-            uint32_t v = 0;
-            if (parse_u32_strict(val, &v) < 0)
-                LOG_WRN("%s:%d: invalid CapPackets '%s'", path, lineno, val);
-            else {
-                r->cap_packets_per_flow = v;
-                r->has_explicit_cap = 1;
-            }
-        } else if (strcasecmp(key, "MaxBytesPerFlow") == 0) {
-            unsigned long long v = 0;
-            if (parse_u64_strict(val, &v) < 0)
-                LOG_WRN("%s:%d: invalid MaxBytesPerFlow '%s'", path, lineno, val);
-            else
-                r->max_buffer_bytes_per_flow = v;
-        } else if (strcasecmp(key, "ClassifyWindow") == 0) {
-            uint32_t v = 0;
-            if (parse_u32_strict(val, &v) < 0 || v > 0xffff)
-                LOG_WRN("%s:%d: invalid ClassifyWindow '%s'", path, lineno, val);
-            else
-                r->classify_window = (uint16_t)v;
-        } else if (strcasecmp(key, "AckDemoteMaxLarge") == 0) {
-            uint32_t v = 0;
-            if (parse_u32_strict(val, &v) < 0 || v > 0xffff)
-                LOG_WRN("%s:%d: invalid AckDemoteMaxLarge '%s'", path, lineno, val);
-            else
-                r->ack_demote_max_large_packets = (uint16_t)v;
-        } else if (strcasecmp(key, "SmallPacketThreshold") == 0) {
-            uint32_t v = 0;
-            if (parse_u32_strict(val, &v) < 0)
-                LOG_WRN("%s:%d: invalid SmallPacketThreshold '%s'", path, lineno, val);
-            else
-                r->small_packet_threshold_bytes = v;
-        } else if (strcasecmp(key, "ResetMarkPackets") == 0) {
-            uint32_t v = 0;
-            if (parse_u32_strict(val, &v) < 0)
-                LOG_WRN("%s:%d: invalid ResetMarkPackets '%s'", path, lineno, val);
-            else
-                r->reset_mark_packets = v;
-        } else if (strcasecmp(key, "ResetIdleGraceMs") == 0) {
-            uint32_t v = 0;
-            if (parse_u32_strict(val, &v) < 0)
-                LOG_WRN("%s:%d: invalid ResetIdleGraceMs '%s'", path, lineno, val);
-            else
-                r->reset_idle_grace_ms = v;
-        } else if (strcasecmp(key, "MaxFlows") == 0) {
-            uint32_t v = 0;
-            if (parse_u32_strict(val, &v) < 0)
-                LOG_WRN("%s:%d: invalid MaxFlows '%s'", path, lineno, val);
-            else
-                r->max_flows = v;
-        } else if (strcasecmp(key, "GlobalMaxBytes") == 0) {
-            unsigned long long v = 0;
-            if (parse_u64_strict(val, &v) < 0)
-                LOG_WRN("%s:%d: invalid GlobalMaxBytes '%s'", path, lineno, val);
-            else
-                r->global_max_buffer_bytes = v;
-        } else if (strcasecmp(key, "IngressIdleSec") == 0) {
-            uint32_t v = 0;
-            if (parse_u32_strict(val, &v) < 0)
-                LOG_WRN("%s:%d: invalid IngressIdleSec '%s'", path, lineno, val);
-            else
-                r->ingress_idle_timeout_sec = v;
-        } else if (strcasecmp(key, "EgressIdleSec") == 0) {
-            uint32_t v = 0;
-            if (parse_u32_strict(val, &v) < 0)
-                LOG_WRN("%s:%d: invalid EgressIdleSec '%s'", path, lineno, val);
-            else
-                r->egress_idle_timeout_sec = v;
-        } else {
-            LOG_WRN("%s:%d: unknown key '%s' in [Reorder]", path, lineno, key);
-        }
-        break;
-    }
-
     case SEC_REORDER_RULE: {
         /* Keys fill the rule slot pushed by reorder_rule_begin() on section
          * entry. An over-cap [ReorderRule] is demoted to SEC_NONE at section
          * entry, so its keys never reach this case. This n_rules==0 guard only
          * defends against a [ReorderRule] key arriving with no slot ever pushed
          * (e.g. a key before the first section header). */
-        if (cfg->reorder.n_rules == 0) break;
+        if (cfg->reorder.n_rules == 0) return;
         mqvpn_reorder_rule_t *rule = &cfg->reorder.rules[cfg->reorder.n_rules - 1];
         if (strcasecmp(key, "Proto") == 0) {
             uint8_t p = 0;
@@ -770,11 +865,18 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
         } else {
             LOG_WRN("%s:%d: unknown key '%s' in [ReorderRule]", path, lineno, key);
         }
-        break;
+        return;
+    }
+    case SEC_NONE:
+        LOG_WRN("%s:%d: key '%s' outside any section", path, lineno, key);
+        return;
+    default: break;
     }
 
-    default: LOG_WRN("%s:%d: key '%s' outside any section", path, lineno, key); break;
-    }
+    /* Scalar keys via the descriptor table. */
+    if (cfg_key_apply_ini(cfg, section, key, val, lineno, path)) return;
+
+    LOG_WRN("%s:%d: unknown key '%s' in [%s]", path, lineno, key, section_name(section));
 }
 
 int
