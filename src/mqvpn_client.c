@@ -126,7 +126,7 @@ struct cli_conn_s {
  * connect-tcp streams add more. Body/header handling in cb_request_read
  * dispatches on this. */
 typedef enum {
-    STREAM_ROLE_CONNECT_IP = 0,
+    CLI_STREAM_ROLE_CONNECT_IP = 0,
 } cli_stream_role_t;
 
 /* Per-stream state (Level 2) */
@@ -919,7 +919,7 @@ cli_masque_start_tunnel(cli_conn_t *conn)
     cli_stream_t *stream = calloc(1, sizeof(*stream));
     if (!stream) return -1;
     stream->conn = conn;
-    stream->role = STREAM_ROLE_CONNECT_IP;
+    stream->role = CLI_STREAM_ROLE_CONNECT_IP;
 
     xqc_h3_request_t *req = xqc_h3_request_create(c->engine, &conn->cid, NULL, stream);
     if (!req) {
@@ -1236,7 +1236,7 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
     cli_stream_t *stream = (cli_stream_t *)user_data;
 
     switch (stream->role) {
-    case STREAM_ROLE_CONNECT_IP:
+    case CLI_STREAM_ROLE_CONNECT_IP:
         if (flag & XQC_REQ_NOTIFY_READ_HEADER)
             cli_connect_ip_on_headers(stream, h3_request);
         if (flag & XQC_REQ_NOTIFY_READ_BODY)
