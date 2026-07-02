@@ -139,6 +139,9 @@ struct cli_conn_s {
  * dispatches on this. */
 typedef enum {
     CLI_STREAM_ROLE_CONNECT_IP = 0,
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    CLI_STREAM_ROLE_CONNECT_TCP,
+#endif
 } cli_stream_role_t;
 
 /* Per-stream state (Level 2) */

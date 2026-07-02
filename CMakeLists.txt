@@ -85,7 +85,7 @@ endif()
 
 # ---------- Hybrid mode TCP lane (lwIP, Linux-only in v1) ----------
 option(MQVPN_ENABLE_HYBRID_TCP_LANE
-       "Build the hybrid-mode lwIP TCP lane (Linux-only in v1)" OFF)
+       "Build the hybrid-mode lwIP TCP lane (Linux-only in v1)" ON)
 if(MQVPN_ENABLE_HYBRID_TCP_LANE AND NOT WIN32 AND NOT ANDROID_CROSS_COMPILE)
     set(MQVPN_HYBRID_TCP_LANE_BUILD ON)
 else()
@@ -367,8 +367,15 @@ if(BUILD_TESTING)
     add_executable(test_reorder_rx tests/test_reorder_rx.c src/mqvpn_config.c src/log.c)
     add_executable(test_reorder_config tests/test_reorder_config.c src/mqvpn_config.c src/config.c src/log.c)
     add_executable(test_classifier tests/test_classifier.c src/hybrid/classifier.c)
+    # test_tcp_lane #include's src/hybrid/tcp_lane.c to reach the file-local
+    # flow table (mirrors test_reorder_rx's idiom); do NOT also list
+    # tcp_lane.c here (it would compile the TU twice). Ungated by
+    # MQVPN_HYBRID_TCP_LANE_BUILD: tcp_lane.c has no lwIP dependency yet
+    # (only a forward-declared struct tcp_pcb pointer), same as
+    # test_classifier above.
+    add_executable(test_tcp_lane tests/test_tcp_lane.c)
 
-    foreach(t test_config test_auth test_session test_dns test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_classifier)
+    foreach(t test_config test_auth test_session test_dns test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_classifier test_tcp_lane)
         target_include_directories(${t} PRIVATE
             ${CMAKE_SOURCE_DIR}/src
             ${CMAKE_SOURCE_DIR}/src/platform/linux
