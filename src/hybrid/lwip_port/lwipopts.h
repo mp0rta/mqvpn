@@ -39,10 +39,25 @@
  * TUN MTU must not exceed it). */
 #define TCP_MSS 8960 /* 9000 - 40 */
 
-#define LWIP_WND_SCALE   1
-#define TCP_RCV_SCALE    5       /* 2^5 = 32x scale; TCP_WND * 32 covers 2 MB window */
-#define TCP_WND          (65535) /* combined with TCP_RCV_SCALE: effective ~2 MB */
-#define TCP_SND_BUF      (2 * 1024 * 1024)
+#define LWIP_WND_SCALE 1
+#define TCP_RCV_SCALE  5 /* shift count for the wire encoding, range [0..14] */
+/* Per opt.h: "when using TCP_RCV_SCALE, TCP_WND is the total size WITH
+ * scaling applied" — i.e. TCP_WND is the effective receive window in bytes
+ * (post-scaling total) and the 16-bit header field advertises
+ * TCP_WND >> TCP_RCV_SCALE (tcp_out.c). The effective ~2 MB window must
+ * therefore be encoded in TCP_WND itself; the scale factor only widens the
+ * wire encoding. 65535 << 5 = 2,097,120 (~2 MB effective; header advertises
+ * 65535, the 16-bit max). tcpwnd_size_t is u32_t when LWIP_WND_SCALE==1
+ * (tcpbase.h), so this fits. */
+#define TCP_WND     (65535 << TCP_RCV_SCALE)
+#define TCP_SND_BUF (2 * 1024 * 1024)
+/* TCP_SNDLOWAT: only consumed by the netconn/sockets layer (api_msg.c),
+ * which is compiled out here (LWIP_NETCONN=0, LWIP_SOCKET=0) — but opt.h's
+ * default formula (TCP_SND_BUF/2 = 1 MB) trips init.c's unconditional
+ * sanity check "TCP_SNDLOWAT must at least be 4*MSS below u16_t overflow".
+ * Pin it to one MSS: functionally inert in this config, satisfies the
+ * check (8960 < 0xFFFF - 4*8960 = 29695, and < TCP_SND_BUF). */
+#define TCP_SNDLOWAT     (TCP_MSS)
 #define TCP_SND_QUEUELEN ((4 * (TCP_SND_BUF) + (TCP_MSS - 1)) / (TCP_MSS))
 #define LWIP_TCP_SACK_OUT                                 \
     1 /* only if the vendored fork supports it — verify \
@@ -57,8 +72,13 @@
          * hybrid.tcp_max_flows check in tcp_lane.c is \
          * the real enforcement point (spec: on reject \
          * → tcp_abort, do NOT silently fall to RAW). */
-#define MEMP_NUM_TCP_SEG  2048
-#define PBUF_POOL_SIZE    128
+#define MEMP_NUM_TCP_SEG 2048
+/* PBUF_POOL_SIZE: must hold a full receive window of queued data —
+ * init.c's sanity check enforces TCP_WND <= PBUF_POOL_SIZE *
+ * (PBUF_POOL_BUFSIZE - protocol headers). With TCP_WND ~2 MB and ~8946
+ * usable bytes per pool pbuf (9000 - 54 header bytes), 128 pbufs
+ * (~1.1 MB) is too small; 256 gives ~2.29 MB >= 2,097,120. */
+#define PBUF_POOL_SIZE    256
 #define PBUF_POOL_BUFSIZE LWIP_MEM_ALIGN_SIZE(TCP_MSS + 40 + PBUF_LINK_ENCAPSULATION_HLEN)
 
 /* Checksums: keep ON in v1 (fuzz safety per spec Notes) — this is a known
@@ -74,6 +94,8 @@
 
 #define MEM_ALIGNMENT 8
 #define LWIP_STATS    0
-#define LWIP_DEBUG    0 /* flip on ad hoc for local debugging only */
+/* LWIP_DEBUG intentionally left undefined — lwIP gates on #ifdef, not
+ * value (debug.h), so `#define LWIP_DEBUG 0` would still compile the debug
+ * machinery in. Define it (any value) ad hoc for local debugging. */
 
 #endif /* MQVPN_LWIPOPTS_H */
