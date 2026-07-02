@@ -7,9 +7,10 @@
 # empirically (2026-07-03 dry run): the lwIP wildcard listener intercepts
 # the SYN to 10.99.0.2:5201 before any real server could see it, so
 # `iperf3 -s` never receives traffic, and `iperf3 -c` stalls forever in its
-# control-channel handshake against a pure sink (it sends its 37-byte
-# cookie, then blocks waiting for the server's PARAM_EXCHANGE byte that a
-# byte sink can never produce). The gate metric is unchanged: sustained
+# control-channel handshake against a pure sink (it sends its control
+# opener — 38 bytes: the 37-byte cookie plus one control byte — then blocks
+# waiting for the server's PARAM_EXCHANGE byte that a byte sink can never
+# produce). The gate metric is unchanged: sustained
 # bytes/sec through classifier + lwIP termination at MTU 8500, measured on
 # the receiver (harness) side between first and last payload byte.
 #
@@ -27,6 +28,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# NOTE: the default Debug build clears the 10 Gbit/s gate with only ~5%
+# headroom on the reference box (Ryzen 9 5950X) — point HARNESS at a
+# Release build (-O3) for margin if re-running on a slower machine.
 HARNESS="${HARNESS:-${SCRIPT_DIR}/../../build-debug/tcp_lane_microbench}"
 TUN=tunbench0
 DUR="${DUR:-10}"
@@ -61,8 +65,15 @@ ERR="$(mktemp)"
 # 10.99.0.2 flows into the TUN where lwIP's wildcard listener intercepts it.
 "$HARNESS" "$TUN" 10.99.0.1 24 8500 > "$OUT" 2> "$ERR" &
 HARNESS_PID=$!
-trap 'kill "$HARNESS_PID" 2>/dev/null || true' EXIT
+trap 'kill "$HARNESS_PID" 2>/dev/null || true; rm -f "$OUT" "$ERR"' EXIT
 sleep 0.5
+# Surface harness startup failures (TUNSETIFF EPERM, missing /dev/net/tun)
+# with the harness's own perror instead of an opaque sender traceback.
+kill -0 "$HARNESS_PID" 2>/dev/null || {
+    echo "harness died:" >&2
+    cat "$ERR" >&2
+    exit 1
+}
 
 python3 - 10.99.0.2 5201 "$DUR" <<'PYEOF'
 import socket, sys, time

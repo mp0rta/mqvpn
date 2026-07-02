@@ -58,9 +58,13 @@ kernel, no virtualization overhead, an isolated netns exactly like the
 ip-netns flow:
 
 ```
-docker build -t mqvpn-h2a-bench:local .   # ubuntu:24.04 + iproute2 iperf3 python3
+# image: ubuntu:24.04 + python3, all run.sh needs in-container:
+#   FROM ubuntu:24.04
+#   RUN apt-get update && apt-get install -y --no-install-recommends python3
+# (the actual bench image also carried iperf3/iproute2, used only for the
+#  §2.2 dry-run diagnostics)
 docker run --rm --network none --cap-add NET_ADMIN --device /dev/net/tun \
-  -v <repo>:<repo>:ro -e MQVPN_BENCH_IN_NS=1 mqvpn-h2a-bench:local \
+  -v <repo>:<repo>:ro -e MQVPN_BENCH_IN_NS=1 <image> \
   bash <repo>/benchmarks/tcp_lane_microbench/run.sh
 ```
 
@@ -81,9 +85,10 @@ confirmed both halves cannot work against a termination sink:
   and is terminated by lwIP's wildcard listener — no packet can ever reach a
   real server socket.
 - `iperf3 -c` **stalls**: it completed the TCP handshake against lwIP and
-  sent only its control-channel opener (harness sank exactly 38 bytes — the
-  cookie exchange), then blocked forever waiting for the server's
-  `PARAM_EXCHANGE` state byte — which a pure sink never sends.
+  sent only its control-channel opener — the harness sank exactly 38 bytes,
+  the 37-byte cookie plus one control byte — then blocked forever waiting
+  for the server's `PARAM_EXCHANGE` state byte, which a pure sink never
+  sends.
   The client died only via `timeout` (exit 124) after transferring nothing.
 
 `run.sh` therefore uses a plain python bulk sender (blocking `send()` of
