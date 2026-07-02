@@ -72,11 +72,11 @@ bench_check_test_deps nc jq
 
 # ── Generate the reorder INI (config mechanism: --config base + CLI override) ──
 # Keys/values cross-checked against src/config.c:
-#   [Reorder] Enabled  on/off   -> parse_reorder_enabled (config.c:298)
-#   [Reorder] MaxWaitMs <ms>     -> config.c (SEC_REORDER)
-#   [ReorderRule] Proto udp      -> parse_reorder_proto   (config.c:319)
-#   [ReorderRule] Port  <P>      -> config.c:612
-#   [ReorderRule] Profile quic_bulk -> parse_reorder_profile (config.c:336)
+#   [Reorder] Enabled  on/off   -> parse_reorder_enabled
+#   [Reorder] MaxWaitMs <ms>     -> cfg_keys[] (SEC_REORDER row)
+#   [ReorderRule] Proto udp      -> parse_reorder_proto
+#   [ReorderRule] Port  <P>      -> handle_kv SEC_REORDER_RULE arm
+#   [ReorderRule] Profile quic_bulk -> parse_reorder_profile
 #
 # MaxWaitMs = 60 is chosen ABOVE the 40ms path-B spread (netem below) on purpose:
 # the late packet from the slow path then arrives WITHIN the reorder wait window,
