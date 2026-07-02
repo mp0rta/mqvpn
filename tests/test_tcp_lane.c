@@ -136,6 +136,47 @@ test_cap_rejection(void)
     mqvpn_tcp_lane_get_stats(lane, &stats);
     ASSERT_EQ_INT(stats.flows_rejected_cap, 1, "flows_rejected_cap == 1");
 
+    /* Split-cap: a sticky-RAW marker is NOT blocked by the (full) TCP flow
+     * cap and does not count as a TCP-lane rejection. */
+    mqvpn_flow_key_t k3 = make_key(5002, 80);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k3, 0), 0,
+                  "sticky-RAW marker succeeds at full tcp flow cap");
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_rejected_cap, 1,
+                  "marker insert did not bump flows_rejected_cap");
+    ASSERT_EQ_INT(stats.raw_markers_active, 1, "raw_markers_active == 1");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_markers_dont_consume_tcp_budget(void)
+{
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.tcp_max_flows = 1;
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0x9abcULL, NULL);
+    ASSERT_TRUE(lane != NULL, "lane_new succeeds");
+
+    /* Several sticky-RAW markers first... */
+    for (uint16_t i = 0; i < 8; i++) {
+        mqvpn_flow_key_t k = make_key((uint16_t)(6000 + i), 80);
+        ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 0), 0,
+                      "sticky-RAW marker succeeds");
+    }
+
+    /* ...then a TCP-lane flow still fits: markers spent none of the budget. */
+    mqvpn_flow_key_t kt = make_key(7000, 443);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &kt, 1), 0,
+                  "to_tcp still succeeds after markers (separate budgets)");
+
+    mqvpn_tcp_lane_stats_t stats;
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_active, 1, "flows_active == 1");
+    ASSERT_EQ_INT(stats.raw_markers_active, 8, "raw_markers_active == 8");
+    ASSERT_EQ_INT(stats.flows_rejected_cap, 0, "no cap rejections");
+    ASSERT_EQ_INT(stats.flows_total, 9, "flows_total counts both kinds");
+
     mqvpn_tcp_lane_free(lane);
 }
 
@@ -145,6 +186,7 @@ main(void)
     test_new_flow_and_lookup();
     test_sticky_raw();
     test_cap_rejection();
+    test_markers_dont_consume_tcp_budget();
 
     fprintf(stderr, "test_tcp_lane: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

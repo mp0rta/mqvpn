@@ -20,6 +20,16 @@
  * convention as src/hybrid/lwip_glue.h). */
 struct tcp_pcb;
 
+/* Sticky-RAW markers are capped separately from tcp_max_flows: they are
+ * never idle-evicted (Task 13 sweeps TCP-lane flows only), so counting
+ * them against tcp_max_flows would let a tcp=auto client on a single path
+ * permanently exhaust the TCP lane with markers — exactly the scenario
+ * tcp=auto exists for. This cap only bounds memory: a marker entry is one
+ * mqvpn_tcp_flow_t (~120 B, key 38 B) so 4096 markers ≈ 0.5 MB worst
+ * case; the keys alone are 38 B × 4096 ≈ 156 KB. On cap hit the flow just
+ * stays unsticky and re-evaluates per SYN (harmless per Task 7). */
+#define TCP_LANE_RAW_MARKER_CAP 4096u
+
 typedef enum {
     TCP_FLOW_STICKY_RAW,     /* SYN-time verdict was RAW; remembered so
                               * later packets on this 5-tuple skip
@@ -57,7 +67,9 @@ struct mqvpn_tcp_lane {
     void *client_ctx;
     mqvpn_tcp_flow_t **buckets;
     uint32_t n_buckets;
-    uint32_t n_flows;
+    uint32_t n_tcp_flows;   /* to_tcp=1 entries; capped by cfg.tcp_max_flows */
+    uint32_t n_raw_markers; /* sticky-RAW entries; capped by
+                             * TCP_LANE_RAW_MARKER_CAP */
     mqvpn_tcp_lane_stats_t stats;
 };
 
@@ -154,9 +166,18 @@ mqvpn_tcp_lane_on_syn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, int t
     if (!lane || !key) {
         return -1;
     }
-    if (lane->n_flows >= lane->cfg.tcp_max_flows) {
-        lane->stats.flows_rejected_cap++;
-        return -1;
+    if (to_tcp) {
+        /* Reject-before-side-effect: this runs BEFORE lwIP sees the SYN. */
+        if (lane->n_tcp_flows >= lane->cfg.tcp_max_flows) {
+            lane->stats.flows_rejected_cap++;
+            return -1;
+        }
+    } else {
+        /* Marker-cap hit is NOT a TCP-lane rejection (no flows_rejected_cap):
+         * the flow simply stays unsticky and re-evaluates on each SYN. */
+        if (lane->n_raw_markers >= TCP_LANE_RAW_MARKER_CAP) {
+            return -1;
+        }
     }
     uint32_t bucket =
         (uint32_t)(mqvpn_flow_key_hash(key, lane->hash_seed) & (lane->n_buckets - 1));
@@ -170,10 +191,13 @@ mqvpn_tcp_lane_on_syn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, int t
 
     f->next = lane->buckets[bucket];
     lane->buckets[bucket] = f;
-    lane->n_flows++;
     lane->stats.flows_total++;
     if (to_tcp) {
+        lane->n_tcp_flows++;
         lane->stats.flows_active++;
+    } else {
+        lane->n_raw_markers++;
+        lane->stats.raw_markers_active++;
     }
     return 0;
 }
