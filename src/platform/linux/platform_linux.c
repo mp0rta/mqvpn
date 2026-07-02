@@ -316,8 +316,10 @@ status_log_cb(evutil_socket_t fd, short what, void *arg)
     mqvpn_client_get_paths(p->client, paths, MQVPN_MAX_PATHS, &n_paths);
 
     LOG_INF("[STATUS] state=established paths=%d tx=%" PRIu64 " rx=%" PRIu64
-            " srtt=%dms dgram_lost=%" PRIu64,
-            n_paths, stats.bytes_tx, stats.bytes_rx, stats.srtt_ms, stats.dgram_lost);
+            " srtt=%dms dgram_lost=%" PRIu64 " lanes tcp/dgram/raw=%" PRIu64 "/%" PRIu64
+            "/%" PRIu64,
+            n_paths, stats.bytes_tx, stats.bytes_rx, stats.srtt_ms, stats.dgram_lost,
+            stats.pkts_lane_tcp, stats.pkts_lane_dgram, stats.pkts_lane_raw);
 
     for (int i = 0; i < n_paths; i++) {
         const char *st_str = mqvpn_path_status_string(paths[i].status);
@@ -1044,6 +1046,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     mqvpn_config_set_tun_mtu(lib_cfg, cfg->tun_mtu);
     mqvpn_config_apply_reorder(lib_cfg,
                                &cfg->reorder); /* INI [Reorder]/[ReorderRule] bridge */
+    mqvpn_config_apply_hybrid(lib_cfg, &cfg->hybrid); /* INI [Hybrid] bridge */
 
     /* Create callbacks */
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
@@ -1496,6 +1499,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     mqvpn_config_set_tun_mtu(lib_cfg, cfg->tun_mtu);
     mqvpn_config_apply_reorder(lib_cfg,
                                &cfg->reorder); /* INI [Reorder]/[ReorderRule] bridge */
+    mqvpn_config_apply_hybrid(lib_cfg, &cfg->hybrid); /* INI [Hybrid] bridge */
 
     mqvpn_config_set_log_level(lib_cfg, (mqvpn_log_level_t)cfg->log_level);
 

@@ -95,9 +95,19 @@ struct svr_conn_s {
  * callbacks) — referenced earlier in cb_h3_conn_create when engines are made. */
 static void svr_reorder_deliver(const uint8_t *pkt, size_t len, void *ctx);
 
+/* Role of an inbound H3 request stream, decided at header parse. v0.8 has
+ * exactly one recognized role; unrecognized requests keep ROLE_UNKNOWN and
+ * retain the historical fall-through behavior (hybrid's connect-tcp stage
+ * replaces that with a 501). */
+typedef enum {
+    SVR_STREAM_ROLE_UNKNOWN = 0,
+    SVR_STREAM_ROLE_CONNECT_IP,
+} svr_stream_role_t;
+
 struct svr_stream_s {
     svr_conn_t *conn;
     xqc_h3_request_t *h3_request;
+    svr_stream_role_t role;
     int header_sent;
     uint8_t *capsule_buf;
     size_t capsule_len;
@@ -842,6 +852,7 @@ cb_request_create(xqc_h3_request_t *h3_request, void *strm_user_data)
     (void)strm_user_data;
     svr_conn_t *conn = xqc_h3_get_conn_user_data_by_request(h3_request);
 
+    /* calloc zero-inits role to SVR_STREAM_ROLE_UNKNOWN. */
     svr_stream_t *stream = calloc(1, sizeof(*stream));
     if (!stream) return -1;
     stream->conn = conn;
@@ -863,12 +874,232 @@ cb_request_close(xqc_h3_request_t *h3_request, void *strm_user_data)
     return 0;
 }
 
+/* Parsed request headers relevant to dispatch/auth. Values live only for
+ * the callback invocation. */
+typedef struct {
+    int is_connect;
+    int is_connect_ip;
+    int has_scheme_https;
+    int has_capsule_proto;
+    int has_valid_path;
+    const char *auth_token; /* Bearer payload, not NUL-terminated */
+    size_t auth_token_len;
+} svr_req_headers_t;
+
+/* Walks the header list; also sets conn->peer_reorder_supported on the
+ * mqvpn-reorder echo (deliberate side effect). */
+static void
+svr_parse_request_headers(mqvpn_server_t *s, svr_stream_t *stream,
+                          xqc_http_headers_t *headers, svr_req_headers_t *out)
+{
+    memset(out, 0, sizeof(*out));
+
+    for (int i = 0; i < (int)headers->count; i++) {
+        xqc_http_header_t *h = &headers->headers[i];
+        if (h->name.iov_len == 7 && memcmp(h->name.iov_base, ":method", 7) == 0 &&
+            h->value.iov_len == 7 && memcmp(h->value.iov_base, "CONNECT", 7) == 0)
+            out->is_connect = 1;
+        if (h->name.iov_len == 9 && memcmp(h->name.iov_base, ":protocol", 9) == 0 &&
+            h->value.iov_len == 10 && memcmp(h->value.iov_base, "connect-ip", 10) == 0)
+            out->is_connect_ip = 1;
+        if (h->name.iov_len == 7 && memcmp(h->name.iov_base, ":scheme", 7) == 0 &&
+            h->value.iov_len == 5 && memcmp(h->value.iov_base, "https", 5) == 0)
+            out->has_scheme_https = 1;
+        if (h->name.iov_len == 5 && memcmp(h->name.iov_base, ":path", 5) == 0 &&
+            h->value.iov_len >= 24 &&
+            memcmp(h->value.iov_base, "/.well-known/masque/ip/", 22) == 0)
+            out->has_valid_path = 1;
+        if (h->name.iov_len == 16 &&
+            memcmp(h->name.iov_base, "capsule-protocol", 16) == 0 &&
+            h->value.iov_len == 2 && memcmp(h->value.iov_base, "?1", 2) == 0)
+            out->has_capsule_proto = 1;
+        if (h->name.iov_len == 13 && memcmp(h->name.iov_base, "authorization", 13) == 0 &&
+            h->value.iov_len > 7 && memcmp(h->value.iov_base, "Bearer ", 7) == 0) {
+            out->auth_token = (const char *)h->value.iov_base + 7;
+            out->auth_token_len = h->value.iov_len - 7;
+        }
+        /* §19.3: client advertised mqvpn-reorder → it supports the shim. */
+        if (mqvpn_reorder_header_match(h->name.iov_base, h->name.iov_len,
+                                       h->value.iov_base, h->value.iov_len)) {
+            stream->conn->peer_reorder_supported = 1;
+            LOG_I(s, "client advertised mqvpn-reorder");
+        }
+    }
+}
+
+/* Credential check shared by every authenticated request type (CONNECT-IP
+ * today; connect-tcp later). Constant-time over the global PSK and ALL
+ * configured users regardless of early match. Returns 0 and writes the
+ * matched identity ("(global)" or the user name) into out_username on
+ * success; -1 on failure. Does NOT touch conn state and does NOT log —
+ * the caller records username/connected_at_us, logs, and sends the 403.
+ * Precondition: caller has already determined auth is required; with no
+ * credentials configured this always returns -1. */
+static int
+svr_auth_check(const mqvpn_server_t *s, const char *auth_token, size_t auth_token_len,
+               char *out_username, size_t username_cap)
+{
+    int authed = 0;
+
+    if (username_cap > 0) out_username[0] = '\0';
+
+    if (auth_token) {
+        if (s->config.auth_key[0] != '\0' &&
+            mqvpn_auth_ct_compare(auth_token, auth_token_len, s->config.auth_key,
+                                  strlen(s->config.auth_key)) == 0) {
+            authed = 1;
+        }
+
+        /* Always iterate all users to keep timing constant */
+        for (int i = 0; i < s->config.n_users; i++) {
+            const char *expected_key = s->config.user_keys[i];
+            if (expected_key[0] == '\0') continue;
+            authed |= (mqvpn_auth_ct_compare(auth_token, auth_token_len, expected_key,
+                                             strlen(expected_key)) == 0);
+        }
+    }
+
+    if (!authed) return -1;
+
+    /* Record which user matched (second pass, not timing-sensitive) */
+    if (s->config.auth_key[0] != '\0' &&
+        mqvpn_auth_ct_compare(auth_token, auth_token_len, s->config.auth_key,
+                              strlen(s->config.auth_key)) == 0) {
+        snprintf(out_username, username_cap, "(global)");
+    } else {
+        for (int i = 0; i < s->config.n_users; i++) {
+            const char *ek = s->config.user_keys[i];
+            if (ek[0] != '\0' &&
+                mqvpn_auth_ct_compare(auth_token, auth_token_len, ek, strlen(ek)) == 0) {
+                snprintf(out_username, username_cap, "%s", s->config.user_names[i]);
+                break;
+            }
+        }
+    }
+
+    return 0;
+}
+
+/* CONNECT-IP request: header-phase handling (validate, auth, 200 response).
+ * Returns 0 on success, -1 to reset the stream. */
+static int
+svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
+                          xqc_h3_request_t *h3_request, const svr_req_headers_t *hdrs)
+{
+    if (!hdrs->has_scheme_https || !hdrs->has_valid_path || !hdrs->has_capsule_proto) {
+        LOG_W(s,
+              "rejecting CONNECT-IP: missing headers "
+              "(scheme=%d path=%d capsule=%d)",
+              hdrs->has_scheme_https, hdrs->has_valid_path, hdrs->has_capsule_proto);
+        return -1;
+    }
+
+    int auth_required = (s->config.auth_key[0] != '\0') || (s->config.n_users > 0);
+    if (auth_required) {
+        char username[sizeof(stream->conn->username)];
+
+        if (svr_auth_check(s, hdrs->auth_token, hdrs->auth_token_len, username,
+                           sizeof(username)) != 0) {
+            LOG_W(s, "authentication failed: invalid or missing PSK");
+            svr_masque_send_403(h3_request);
+            return -1;
+        }
+
+        stream->conn->connected_at_us = now_us();
+        snprintf(stream->conn->username, sizeof(stream->conn->username), "%s", username);
+
+        LOG_I(s, "client authenticated successfully (user=%s)", stream->conn->username);
+    }
+
+    LOG_I(s, "Extended CONNECT for connect-ip received");
+    if (svr_masque_send_response(h3_request, stream) < 0) return -1;
+    return 0;
+}
+
+/* CONNECT-IP stream body: capsule reassembly + ADDRESS_REQUEST handling. */
+static int
+svr_connect_ip_on_body(mqvpn_server_t *s, svr_stream_t *stream,
+                       xqc_h3_request_t *h3_request)
+{
+    unsigned char fin = 0;
+    unsigned char buf[4096];
+    ssize_t n;
+    do {
+        n = xqc_h3_request_recv_body(h3_request, buf, sizeof(buf), &fin);
+        if (n <= 0) break;
+
+        size_t need = stream->capsule_len + (size_t)n;
+        if (need > MAX_CAPSULE_BUF) {
+            LOG_E(s, "server capsule buffer overflow");
+            break;
+        }
+        if (need > stream->capsule_cap) {
+            size_t new_cap = stream->capsule_cap ? stream->capsule_cap * 2 : 4096;
+            while (new_cap < need) {
+                if (new_cap > SIZE_MAX / 2) {
+                    new_cap = need;
+                    break;
+                }
+                new_cap *= 2;
+            }
+            uint8_t *nb = realloc(stream->capsule_buf, new_cap);
+            if (!nb) break;
+            stream->capsule_buf = nb;
+            stream->capsule_cap = new_cap;
+        }
+        memcpy(stream->capsule_buf + stream->capsule_len, buf, (size_t)n);
+        stream->capsule_len += (size_t)n;
+
+        while (stream->capsule_len > 0) {
+            uint64_t cap_type;
+            const uint8_t *cap_payload;
+            size_t cap_len, consumed;
+            xqc_int_t xr =
+                xqc_h3_ext_capsule_decode(stream->capsule_buf, stream->capsule_len,
+                                          &cap_type, &cap_payload, &cap_len, &consumed);
+            if (xr != XQC_OK) break;
+
+            if (cap_type == XQC_H3_CAPSULE_ADDRESS_REQUEST && stream->conn &&
+                stream->conn->tunnel_established) {
+                uint64_t req_id;
+                uint8_t ip_ver, ip_addr[16], prefix;
+                size_t ip_len = 16, aa_consumed;
+                xr = xqc_h3_ext_connectip_parse_address_assign(
+                    cap_payload, cap_len, &req_id, &ip_ver, ip_addr, &ip_len, &prefix,
+                    &aa_consumed);
+                if (xr == XQC_OK && req_id != 0) {
+                    LOG_I(s, "ADDRESS_REQUEST: req_id=%" PRIu64 " ipv%d", req_id, ip_ver);
+                    uint8_t resp_payload[64];
+                    size_t resp_written = 0;
+                    uint8_t resp_ip[4];
+                    memcpy(resp_ip, &stream->conn->assigned_ip.s_addr, 4);
+                    xqc_h3_ext_connectip_build_address_request(
+                        resp_payload, sizeof(resp_payload), &resp_written, req_id, 4,
+                        resp_ip, 32);
+                    uint8_t cap_buf[128];
+                    size_t cap_w = 0;
+                    xqc_h3_ext_capsule_encode(cap_buf, sizeof(cap_buf), &cap_w,
+                                              XQC_H3_CAPSULE_ADDRESS_ASSIGN, resp_payload,
+                                              resp_written);
+                    xqc_h3_request_send_body(h3_request, cap_buf, cap_w, 0);
+                }
+            }
+
+            if (consumed < stream->capsule_len)
+                memmove(stream->capsule_buf, stream->capsule_buf + consumed,
+                        stream->capsule_len - consumed);
+            stream->capsule_len -= consumed;
+        }
+    } while (1);
+
+    return 0;
+}
+
 /*
  * cb_request_read — xquic H3 request read callback for MASQUE streams.
  *
- * Handles the CONNECT-IP handshake (header validation, 200 response,
- * DATAGRAM context setup) and processes incoming MASQUE capsules
- * (ADDRESS_REQUEST → allocate IP, ROUTE_ADVERTISEMENT parsing).
+ * Parses request headers, tags the stream's role, and dispatches to the
+ * role's handlers (header phase and body phase).
  */
 static int
 cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
@@ -882,186 +1113,30 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
         xqc_http_headers_t *headers = xqc_h3_request_recv_headers(h3_request, &fin);
         if (!headers) return -1;
 
-        int is_connect = 0, is_connect_ip = 0;
-        int has_scheme_https = 0, has_capsule_proto = 0, has_valid_path = 0;
-        const char *auth_token = NULL;
-        size_t auth_token_len = 0;
+        svr_req_headers_t hdrs;
+        svr_parse_request_headers(s, stream, headers, &hdrs);
 
-        for (int i = 0; i < (int)headers->count; i++) {
-            xqc_http_header_t *h = &headers->headers[i];
-            if (h->name.iov_len == 7 && memcmp(h->name.iov_base, ":method", 7) == 0 &&
-                h->value.iov_len == 7 && memcmp(h->value.iov_base, "CONNECT", 7) == 0)
-                is_connect = 1;
-            if (h->name.iov_len == 9 && memcmp(h->name.iov_base, ":protocol", 9) == 0 &&
-                h->value.iov_len == 10 &&
-                memcmp(h->value.iov_base, "connect-ip", 10) == 0)
-                is_connect_ip = 1;
-            if (h->name.iov_len == 7 && memcmp(h->name.iov_base, ":scheme", 7) == 0 &&
-                h->value.iov_len == 5 && memcmp(h->value.iov_base, "https", 5) == 0)
-                has_scheme_https = 1;
-            if (h->name.iov_len == 5 && memcmp(h->name.iov_base, ":path", 5) == 0 &&
-                h->value.iov_len >= 24 &&
-                memcmp(h->value.iov_base, "/.well-known/masque/ip/", 22) == 0)
-                has_valid_path = 1;
-            if (h->name.iov_len == 16 &&
-                memcmp(h->name.iov_base, "capsule-protocol", 16) == 0 &&
-                h->value.iov_len == 2 && memcmp(h->value.iov_base, "?1", 2) == 0)
-                has_capsule_proto = 1;
-            if (h->name.iov_len == 13 &&
-                memcmp(h->name.iov_base, "authorization", 13) == 0 &&
-                h->value.iov_len > 7 && memcmp(h->value.iov_base, "Bearer ", 7) == 0) {
-                auth_token = (const char *)h->value.iov_base + 7;
-                auth_token_len = h->value.iov_len - 7;
-            }
-            /* §19.3: client advertised mqvpn-reorder → it supports the shim. */
-            if (mqvpn_reorder_header_match(h->name.iov_base, h->name.iov_len,
-                                           h->value.iov_base, h->value.iov_len)) {
-                stream->conn->peer_reorder_supported = 1;
-                LOG_I(s, "client advertised mqvpn-reorder");
-            }
+        if (hdrs.is_connect && hdrs.is_connect_ip) {
+            /* Role is tagged even though the handler may still fail with -1
+             * (stream reset); harmless — a reset stream's role is never
+             * consulted again. */
+            stream->role = SVR_STREAM_ROLE_CONNECT_IP;
+            return svr_connect_ip_on_request(s, stream, h3_request, &hdrs);
         }
-
-        if (is_connect && is_connect_ip) {
-            if (!has_scheme_https || !has_valid_path || !has_capsule_proto) {
-                LOG_W(s,
-                      "rejecting CONNECT-IP: missing headers "
-                      "(scheme=%d path=%d capsule=%d)",
-                      has_scheme_https, has_valid_path, has_capsule_proto);
-                return -1;
-            }
-
-            int auth_required =
-                (s->config.auth_key[0] != '\0') || (s->config.n_users > 0);
-            if (auth_required) {
-                int authed = 0;
-
-                if (auth_token) {
-                    if (s->config.auth_key[0] != '\0' &&
-                        mqvpn_auth_ct_compare(auth_token, auth_token_len,
-                                              s->config.auth_key,
-                                              strlen(s->config.auth_key)) == 0) {
-                        authed = 1;
-                    }
-
-                    /* Always iterate all users to keep timing constant */
-                    for (int i = 0; i < s->config.n_users; i++) {
-                        const char *expected_key = s->config.user_keys[i];
-                        if (expected_key[0] == '\0') continue;
-                        authed |= (mqvpn_auth_ct_compare(auth_token, auth_token_len,
-                                                         expected_key,
-                                                         strlen(expected_key)) == 0);
-                    }
-                }
-
-                if (!authed) {
-                    LOG_W(s, "authentication failed: invalid or missing PSK");
-                    svr_masque_send_403(h3_request);
-                    return -1;
-                }
-
-                /* Record which user matched (second pass, not timing-sensitive) */
-                stream->conn->connected_at_us = now_us();
-                if (s->config.auth_key[0] != '\0' &&
-                    mqvpn_auth_ct_compare(auth_token, auth_token_len, s->config.auth_key,
-                                          strlen(s->config.auth_key)) == 0) {
-                    snprintf(stream->conn->username, sizeof(stream->conn->username),
-                             "(global)");
-                } else {
-                    for (int i = 0; i < s->config.n_users; i++) {
-                        const char *ek = s->config.user_keys[i];
-                        if (ek[0] != '\0' &&
-                            mqvpn_auth_ct_compare(auth_token, auth_token_len, ek,
-                                                  strlen(ek)) == 0) {
-                            snprintf(stream->conn->username,
-                                     sizeof(stream->conn->username), "%s",
-                                     s->config.user_names[i]);
-                            break;
-                        }
-                    }
-                }
-
-                LOG_I(s, "client authenticated successfully (user=%s)",
-                      stream->conn->username);
-            }
-
-            LOG_I(s, "Extended CONNECT for connect-ip received");
-            if (svr_masque_send_response(h3_request, stream) < 0) return -1;
-            return 0;
-        }
+        /* Unrecognized request: role stays UNKNOWN; historical behavior
+         * (fall through, body treated as capsules) preserved until the
+         * hybrid connect-tcp stage lands a 501. */
     }
 
-    /* Parse capsule traffic (ADDRESS_REQUEST) */
     if (flag & XQC_REQ_NOTIFY_READ_BODY) {
-        unsigned char buf[4096];
-        ssize_t n;
-        do {
-            n = xqc_h3_request_recv_body(h3_request, buf, sizeof(buf), &fin);
-            if (n <= 0) break;
-
-            size_t need = stream->capsule_len + (size_t)n;
-            if (need > MAX_CAPSULE_BUF) {
-                LOG_E(s, "server capsule buffer overflow");
-                break;
-            }
-            if (need > stream->capsule_cap) {
-                size_t new_cap = stream->capsule_cap ? stream->capsule_cap * 2 : 4096;
-                while (new_cap < need) {
-                    if (new_cap > SIZE_MAX / 2) {
-                        new_cap = need;
-                        break;
-                    }
-                    new_cap *= 2;
-                }
-                uint8_t *nb = realloc(stream->capsule_buf, new_cap);
-                if (!nb) break;
-                stream->capsule_buf = nb;
-                stream->capsule_cap = new_cap;
-            }
-            memcpy(stream->capsule_buf + stream->capsule_len, buf, (size_t)n);
-            stream->capsule_len += (size_t)n;
-
-            while (stream->capsule_len > 0) {
-                uint64_t cap_type;
-                const uint8_t *cap_payload;
-                size_t cap_len, consumed;
-                xqc_int_t xr = xqc_h3_ext_capsule_decode(
-                    stream->capsule_buf, stream->capsule_len, &cap_type, &cap_payload,
-                    &cap_len, &consumed);
-                if (xr != XQC_OK) break;
-
-                if (cap_type == XQC_H3_CAPSULE_ADDRESS_REQUEST && stream->conn &&
-                    stream->conn->tunnel_established) {
-                    uint64_t req_id;
-                    uint8_t ip_ver, ip_addr[16], prefix;
-                    size_t ip_len = 16, aa_consumed;
-                    xr = xqc_h3_ext_connectip_parse_address_assign(
-                        cap_payload, cap_len, &req_id, &ip_ver, ip_addr, &ip_len, &prefix,
-                        &aa_consumed);
-                    if (xr == XQC_OK && req_id != 0) {
-                        LOG_I(s, "ADDRESS_REQUEST: req_id=%" PRIu64 " ipv%d", req_id,
-                              ip_ver);
-                        uint8_t resp_payload[64];
-                        size_t resp_written = 0;
-                        uint8_t resp_ip[4];
-                        memcpy(resp_ip, &stream->conn->assigned_ip.s_addr, 4);
-                        xqc_h3_ext_connectip_build_address_request(
-                            resp_payload, sizeof(resp_payload), &resp_written, req_id, 4,
-                            resp_ip, 32);
-                        uint8_t cap_buf[128];
-                        size_t cap_w = 0;
-                        xqc_h3_ext_capsule_encode(cap_buf, sizeof(cap_buf), &cap_w,
-                                                  XQC_H3_CAPSULE_ADDRESS_ASSIGN,
-                                                  resp_payload, resp_written);
-                        xqc_h3_request_send_body(h3_request, cap_buf, cap_w, 0);
-                    }
-                }
-
-                if (consumed < stream->capsule_len)
-                    memmove(stream->capsule_buf, stream->capsule_buf + consumed,
-                            stream->capsule_len - consumed);
-                stream->capsule_len -= consumed;
-            }
-        } while (1);
+        switch (stream->role) {
+        case SVR_STREAM_ROLE_CONNECT_IP:
+        case SVR_STREAM_ROLE_UNKNOWN:
+            /* Historical: unknown-role bodies are treated as capsules until
+             * the connect-tcp stage lands a 501. */
+            return svr_connect_ip_on_body(s, stream, h3_request);
+        }
+        return 0;
     }
 
     return 0;

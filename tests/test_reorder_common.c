@@ -399,6 +399,166 @@ test_parse_v6_truncated_fails(void)
                   "parse v6 too short fails");
 }
 
+/* ──────────────── H1 Task 6: generalized L3/L4 parse verdict ────────────────
+ *
+ * mqvpn_parse_l3l4() is the generalized walk behind mqvpn_reorder_parse_5tuple()
+ * (which stays a contract-identical wrapper). The hybrid classifier consumes the
+ * verdict directly.
+ */
+
+/* Build a minimal IPv4 TCP packet (20 IP + 20 TCP = 40 bytes). Distinct shape
+ * from the 28-byte UDP builder on purpose: the parser requires the full fixed
+ * TCP header to fit. */
+static size_t
+build_v4_tcp(uint8_t *buf, uint16_t sport, uint16_t dport, uint16_t frag_field)
+{
+    memset(buf, 0, 40);
+    buf[0] = 0x45; /* version 4, IHL 5 */
+    buf[6] = (uint8_t)(frag_field >> 8);
+    buf[7] = (uint8_t)(frag_field);
+    buf[9] = 6; /* protocol = TCP */
+    buf[12] = 10;
+    buf[13] = 0;
+    buf[14] = 0;
+    buf[15] = 1; /* src 10.0.0.1 */
+    buf[16] = 10;
+    buf[17] = 0;
+    buf[18] = 0;
+    buf[19] = 2; /* dst 10.0.0.2 */
+    buf[20] = (uint8_t)(sport >> 8);
+    buf[21] = (uint8_t)(sport); /* TCP sport */
+    buf[22] = (uint8_t)(dport >> 8);
+    buf[23] = (uint8_t)(dport); /* TCP dport */
+    buf[32] = 0x50;             /* data offset = 5 (20-byte TCP header) */
+    return 40;
+}
+
+static void
+test_parse_l3l4(void)
+{
+    uint8_t buf[80];
+    mqvpn_flow_key_t k;
+
+    /* IPv4 UDP happy path → UDP verdict, key filled like the 5-tuple parser. */
+    size_t n = build_v4_udp(buf, 1111, 443, 0, 17);
+    memset(&k, 0xAA, sizeof(k));
+    ASSERT_EQ_INT(mqvpn_parse_l3l4(buf, n, &k), MQVPN_L4_UDP, "l3l4 v4 udp verdict");
+    ASSERT_EQ_INT(k.proto, 17, "l3l4 v4 udp proto");
+    ASSERT_EQ_INT(k.src_port, 1111, "l3l4 v4 udp sport host-order");
+    ASSERT_EQ_INT(k.dst_port, 443, "l3l4 v4 udp dport host-order");
+
+    /* IPv4 TCP happy path (full 40-byte packet). */
+    n = build_v4_tcp(buf, 2222, 80, 0);
+    memset(&k, 0xAA, sizeof(k));
+    ASSERT_EQ_INT(mqvpn_parse_l3l4(buf, n, &k), MQVPN_L4_TCP, "l3l4 v4 tcp verdict");
+    ASSERT_EQ_INT(k.ip_version, 4, "l3l4 v4 tcp version");
+    ASSERT_EQ_INT(k.proto, 6, "l3l4 v4 tcp proto");
+    ASSERT_EQ_INT(k.src_port, 2222, "l3l4 v4 tcp sport");
+    ASSERT_EQ_INT(k.dst_port, 80, "l3l4 v4 tcp dport");
+    ASSERT_EQ_INT(k.src_ip[3], 1, "l3l4 v4 tcp src ip");
+    ASSERT_EQ_INT(k.dst_ip[3], 2, "l3l4 v4 tcp dst ip");
+
+    /* IPv4 MF=1 fragment carrying TCP → FRAGMENT (checked before proto). */
+    n = build_v4_tcp(buf, 2222, 80, 0x2000);
+    ASSERT_EQ_INT(mqvpn_parse_l3l4(buf, n, &k), MQVPN_L4_FRAGMENT, "l3l4 v4 MF fragment");
+
+    /* IPv4 non-first fragment (offset != 0). */
+    n = build_v4_tcp(buf, 2222, 80, 0x0001);
+    ASSERT_EQ_INT(mqvpn_parse_l3l4(buf, n, &k), MQVPN_L4_FRAGMENT,
+                  "l3l4 v4 offset fragment");
+
+    /* IPv4 ICMP (proto 1) → OTHER. */
+    n = build_v4_udp(buf, 0, 0, 0, 1);
+    ASSERT_EQ_INT(mqvpn_parse_l3l4(buf, n, &k), MQVPN_L4_OTHER, "l3l4 v4 icmp other");
+
+    /* IPv4 truncated below the fixed header → MALFORMED. */
+    build_v4_udp(buf, 1111, 443, 0, 17);
+    ASSERT_EQ_INT(mqvpn_parse_l3l4(buf, 10, &k), MQVPN_L4_MALFORMED,
+                  "l3l4 v4 truncated malformed");
+
+    /* IPv4 TCP with len < ihl+20 (full fixed TCP header must fit). */
+    build_v4_tcp(buf, 2222, 80, 0);
+    ASSERT_EQ_INT(mqvpn_parse_l3l4(buf, 28, &k), MQVPN_L4_MALFORMED,
+                  "l3l4 v4 tcp short malformed");
+
+    /* IPv6 UDP after a Hop-by-Hop ext header → UDP. */
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 0x60;
+    buf[6] = 0;   /* next header = Hop-by-Hop Options */
+    buf[40] = 17; /* ext: next header = UDP */
+    buf[41] = 0;  /* hdr_ext_len: 8 bytes total */
+    buf[48] = (uint8_t)(3333 >> 8);
+    buf[49] = (uint8_t)(3333);
+    buf[50] = (uint8_t)(443 >> 8);
+    buf[51] = (uint8_t)(443);
+    ASSERT_EQ_INT(mqvpn_parse_l3l4(buf, 56, &k), MQVPN_L4_UDP, "l3l4 v6 hopopts udp");
+    ASSERT_EQ_INT(k.src_port, 3333, "l3l4 v6 hopopts udp sport");
+
+    /* IPv6 TCP (direct next-header) → TCP, ip_version 6. */
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 0x60;
+    buf[6] = 6; /* next header = TCP */
+    buf[8] = 0x20;
+    buf[9] = 0x01; /* src starts 2001:... */
+    buf[40] = (uint8_t)(4444 >> 8);
+    buf[41] = (uint8_t)(4444);
+    buf[42] = (uint8_t)(8080 >> 8);
+    buf[43] = (uint8_t)(8080);
+    buf[52] = 0x50; /* data offset = 5 */
+    memset(&k, 0xAA, sizeof(k));
+    ASSERT_EQ_INT(mqvpn_parse_l3l4(buf, 60, &k), MQVPN_L4_TCP, "l3l4 v6 tcp verdict");
+    ASSERT_EQ_INT(k.ip_version, 6, "l3l4 v6 tcp version");
+    ASSERT_EQ_INT(k.proto, 6, "l3l4 v6 tcp proto");
+    ASSERT_EQ_INT(k.src_port, 4444, "l3l4 v6 tcp sport");
+    ASSERT_EQ_INT(k.dst_port, 8080, "l3l4 v6 tcp dport");
+    ASSERT_EQ_INT(k.src_ip[0], 0x20, "l3l4 v6 tcp src ip");
+
+    /* IPv6 TCP with len < off+20 → MALFORMED (48 < 40+20). */
+    ASSERT_EQ_INT(mqvpn_parse_l3l4(buf, 48, &k), MQVPN_L4_MALFORMED,
+                  "l3l4 v6 tcp short malformed");
+
+    /* IPv6 Fragment ext header → FRAGMENT. */
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 0x60;
+    buf[6] = 44; /* next header = Fragment */
+    ASSERT_EQ_INT(mqvpn_parse_l3l4(buf, 48, &k), MQVPN_L4_FRAGMENT, "l3l4 v6 fragment");
+
+    /* IPv6 unknown next-header (58 = ICMPv6) → OTHER. */
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 0x60;
+    buf[6] = 58;
+    ASSERT_EQ_INT(mqvpn_parse_l3l4(buf, 48, &k), MQVPN_L4_OTHER, "l3l4 v6 icmpv6 other");
+
+    /* Version nibble 5 → MALFORMED (not IPv4/IPv6). */
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 0x50;
+    ASSERT_EQ_INT(mqvpn_parse_l3l4(buf, 40, &k), MQVPN_L4_MALFORMED,
+                  "l3l4 version 5 malformed");
+}
+
+/* WRAPPER REGRESSION: mqvpn_reorder_parse_5tuple() keeps its exact contract —
+ * 0 + key only for parseable non-fragmented UDP, -1 for everything else. */
+static void
+test_parse_5tuple_wrapper_regression(void)
+{
+    uint8_t buf[64];
+    mqvpn_flow_key_t k;
+
+    /* TCP is still -1 through the wrapper. */
+    size_t n = build_v4_tcp(buf, 2222, 80, 0);
+    ASSERT_EQ_INT(mqvpn_reorder_parse_5tuple(buf, n, &k), -1, "wrapper v4 tcp -1");
+
+    /* UDP is still 0 and the key matches a direct l3l4 parse byte-for-byte. */
+    n = build_v4_udp(buf, 1111, 443, 0, 17);
+    mqvpn_flow_key_t direct;
+    ASSERT_EQ_INT(mqvpn_parse_l3l4(buf, n, &direct), MQVPN_L4_UDP,
+                  "wrapper baseline direct udp");
+    memset(&k, 0xAA, sizeof(k));
+    ASSERT_EQ_INT(mqvpn_reorder_parse_5tuple(buf, n, &k), 0, "wrapper v4 udp 0");
+    ASSERT_EQ_INT(mqvpn_flow_key_eq(&k, &direct), 1, "wrapper key identical");
+    ASSERT_EQ_INT(memcmp(&k, &direct, sizeof(k)), 0, "wrapper key byte-identical");
+}
+
 /* ─────────────────── §19: mqvpn-reorder header match ─────────────────── */
 
 static void
@@ -479,6 +639,9 @@ main(void)
     test_parse_v6_fragment_fails();
     test_parse_v6_tcp_fails();
     test_parse_v6_truncated_fails();
+
+    test_parse_l3l4();
+    test_parse_5tuple_wrapper_regression();
 
     test_header_match_ok();
     test_header_match_rejects();

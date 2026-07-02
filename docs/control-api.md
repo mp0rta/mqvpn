@@ -207,6 +207,9 @@ datagram counters and uptime.
   "bytes_tx":12345678,"bytes_rx":9876543,
   "dgram_sent":89012,"dgram_recv":84551,
   "dgram_lost":421,"dgram_acked":88341,
+  "pkts_lane_tcp":0,"pkts_lane_dgram":0,
+  "pkts_lane_raw":0,"tcp_flows_active":0,
+  "tcp_flows_total":0,"tcp_flows_rejected":0,
   "uptime_sec":3601
 }
 ```
@@ -220,12 +223,21 @@ datagram counters and uptime.
 | `dgram_recv` | uint64  | QUIC datagrams the server forwarded to the TUN interface, all sessions. Excludes datagrams dropped before forwarding (TTL ≤ 1 → ICMP Time Exceeded, source-IP mismatch, malformed frame). |
 | `dgram_lost` | uint64  | Total QUIC datagrams declared lost, all sessions               |
 | `dgram_acked`| uint64  | Total QUIC datagrams acknowledged, all sessions                |
+| `pkts_lane_tcp`   | uint64 | Hybrid mode: inner packets classified into the TCP stream lane |
+| `pkts_lane_dgram` | uint64 | Hybrid mode: inner packets classified into the datagram lane   |
+| `pkts_lane_raw`   | uint64 | Hybrid mode: inner packets classified into the raw CONNECT-IP lane |
+| `tcp_flows_active`   | uint64 | Hybrid mode: currently open TCP-lane flows (future tcp_lane)  |
+| `tcp_flows_total`    | uint64 | Hybrid mode: TCP-lane flows opened since start (future tcp_lane) |
+| `tcp_flows_rejected` | uint64 | Hybrid mode: TCP-lane flows rejected, e.g. cap reached (future tcp_lane) |
 | `uptime_sec` | uint64  | Seconds since `mqvpn_server_create` was called                 |
 
 Notes:
 - `bytes_tx`/`bytes_rx` are post-tunnel (TUN-layer) byte counts, not raw UDP
   wire bytes.
 - `dgram_*` counters are server-wide aggregates across all active sessions.
+- The six hybrid-mode fields (`pkts_lane_*`, `tcp_flows_*`) are additive: the
+  server-side values are 0 until hybrid mode's server stage lands, and stay 0
+  whenever the hybrid classifier is disabled.
 
 ---
 
@@ -481,6 +493,14 @@ mqvpn follows semantic versioning for the control API:
 - `get_stats` was extended in v0.5.0 with `dgram_sent`, `dgram_recv`,
   `dgram_lost`, `dgram_acked`, and `uptime_sec`. Consumers that only read
   `n_clients`, `bytes_tx`, and `bytes_rx` remain unaffected.
+- `get_stats` was extended again (unreleased, post-v0.8.0) with the hybrid-mode lane/flow counters
+  (`pkts_lane_tcp`, `pkts_lane_dgram`, `pkts_lane_raw`, `tcp_flows_active`,
+  `tcp_flows_total`, `tcp_flows_rejected`). Existing JSON consumers remain
+  unaffected. Note for C API consumers: this is the first time
+  `mqvpn_stats_t` has grown since its introduction — the struct producers
+  write `sizeof(mqvpn_stats_t)` bytes, so binaries linked against the
+  shared library must be recompiled against the new header (the next
+  release must bump the library SOVERSION to 2).
 - `get_status` paths gained a `state_label` string in v0.5.0 alongside the
   existing numeric `state`; `get_fec_stats` gained `mp_state_label` similarly.
   Consumers that only read the numeric fields remain unaffected, but new code

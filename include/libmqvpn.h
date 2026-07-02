@@ -260,6 +260,13 @@ typedef struct {
     uint64_t dgram_lost;
     uint64_t dgram_acked;
     int srtt_ms;
+    /* Hybrid-mode per-lane counters (0 unless hybrid classifier active). */
+    uint64_t pkts_lane_tcp;
+    uint64_t pkts_lane_dgram;
+    uint64_t pkts_lane_raw;
+    uint64_t tcp_flows_active;   /* future tcp_lane; 0 for now */
+    uint64_t tcp_flows_total;    /* future tcp_lane; 0 for now */
+    uint64_t tcp_flows_rejected; /* future tcp_lane; 0 for now */
 } mqvpn_stats_t;
 
 typedef struct {
@@ -470,6 +477,21 @@ MQVPN_API int mqvpn_config_set_reorder_limits(mqvpn_config_t *cfg, uint32_t max_
 MQVPN_API int mqvpn_config_add_reorder_rule(mqvpn_config_t *cfg, uint8_t proto,
                                             uint16_t port,
                                             mqvpn_reorder_profile_t profile);
+
+/* ─── Hybrid-mode config (H1) ───
+ *
+ * Hybrid mode classifies inner TUN packets into per-lane transports (TCP
+ * stream lane / datagram lane / raw CONNECT-IP lane). Disabled by default.
+ * The TCP mode enum stays internal; the setter takes a plain int:
+ * 0 = stream (always use the TCP stream lane), 1 = raw (never), 2 = auto
+ * (per-flow decision at SYN time, the default). */
+MQVPN_API int mqvpn_config_set_hybrid_enabled(mqvpn_config_t *cfg, int enabled);
+/* mode: 0=stream 1=raw 2=auto. Other values → MQVPN_ERR_INVALID_ARG. */
+MQVPN_API int mqvpn_config_set_hybrid_tcp_mode(mqvpn_config_t *cfg, int mode);
+/* Limits for the future tcp_lane. tcp_max_flows must be > 0 (defaults:
+ * 256 flows, 300 s idle timeout). */
+MQVPN_API int mqvpn_config_set_hybrid_limits(mqvpn_config_t *cfg, uint32_t tcp_max_flows,
+                                             uint32_t tcp_idle_timeout_sec);
 
 /* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock) */
 typedef uint64_t (*mqvpn_clock_fn)(void *ctx);

@@ -541,6 +541,9 @@ main(int argc, char *argv[])
             /* INI [Reorder]/[ReorderRule]; always valid (mqvpn_config_defaults
              * seeds mode OFF even with no [Reorder] section). No CLI flags in v1. */
             .reorder = file_cfg.reorder,
+            /* INI [Hybrid]; always valid (mqvpn_config_defaults seeds the
+             * disabled defaults even with no [Hybrid] section). */
+            .hybrid = file_cfg.hybrid,
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];
@@ -589,6 +592,9 @@ main(int argc, char *argv[])
             /* INI [Reorder]/[ReorderRule]; always valid (mqvpn_config_defaults
              * seeds mode OFF even with no [Reorder] section). No CLI flags in v1. */
             .reorder = file_cfg.reorder,
+            /* INI [Hybrid]; always valid (mqvpn_config_defaults seeds the
+             * disabled defaults even with no [Hybrid] section). */
+            .hybrid = file_cfg.hybrid,
         };
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];

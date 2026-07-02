@@ -205,6 +205,9 @@ mqvpn_config_new(void)
     /* §16: reorder shim defaults (mode OFF until explicitly enabled). */
     mqvpn_reorder_config_default(&cfg->reorder);
 
+    /* H1: hybrid classifier defaults (disabled until explicitly enabled). */
+    mqvpn_hybrid_config_default(&cfg->hybrid);
+
     return cfg;
 }
 
@@ -684,4 +687,50 @@ mqvpn_config_apply_reorder(mqvpn_config_t *cfg, const mqvpn_reorder_config_t *sr
     int eval = cfg->reorder.eval_force_no_demotion; /* internal-only, not bridged */
     cfg->reorder = *src; /* scalars, has_explicit_*, rules incl. explicit_*, n_rules */
     cfg->reorder.eval_force_no_demotion = eval;
+}
+
+/* ─── Hybrid setters (H1) ───
+ *
+ * The public setters take plain int/uint32_t so libmqvpn.h stays free of the
+ * internal hybrid/classifier.h enum. The 0/1/2 ↔ enum mapping is pinned below. */
+
+_Static_assert(MQVPN_HYBRID_TCP_STREAM == 0 && MQVPN_HYBRID_TCP_RAW == 1 &&
+                   MQVPN_HYBRID_TCP_AUTO == 2,
+               "public setter doc pins tcp mode values 0=stream 1=raw 2=auto");
+
+int
+mqvpn_config_set_hybrid_enabled(mqvpn_config_t *cfg, int enabled)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->hybrid.enabled = enabled ? 1 : 0;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_hybrid_tcp_mode(mqvpn_config_t *cfg, int mode)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    /* Range-check the raw int BEFORE casting to the internal enum. */
+    if (mode < 0 || mode > (int)MQVPN_HYBRID_TCP_AUTO) return MQVPN_ERR_INVALID_ARG;
+    cfg->hybrid.tcp_mode = (mqvpn_hybrid_tcp_mode_t)mode;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_hybrid_limits(mqvpn_config_t *cfg, uint32_t tcp_max_flows,
+                               uint32_t tcp_idle_timeout_sec)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    /* mqvpn_hybrid_config_validate semantics: max_flows == 0 is invalid. */
+    if (tcp_max_flows == 0) return MQVPN_ERR_INVALID_ARG;
+    cfg->hybrid.tcp_max_flows = tcp_max_flows;
+    cfg->hybrid.tcp_idle_timeout_sec = tcp_idle_timeout_sec;
+    return MQVPN_OK;
+}
+
+void
+mqvpn_config_apply_hybrid(mqvpn_config_t *cfg, const mqvpn_hybrid_config_t *src)
+{
+    if (!cfg || !src) return;
+    cfg->hybrid = *src;
 }
