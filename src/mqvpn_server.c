@@ -927,6 +927,59 @@ svr_parse_request_headers(mqvpn_server_t *s, svr_stream_t *stream,
     }
 }
 
+/* Credential check shared by every authenticated request type (CONNECT-IP
+ * today; connect-tcp later). Constant-time over the global PSK and ALL
+ * configured users regardless of early match. Returns 0 and writes the
+ * matched identity ("(global)" or the user name) into out_username on
+ * success; -1 on failure. Does NOT touch conn state and does NOT log —
+ * the caller records username/connected_at_us, logs, and sends the 403.
+ * Precondition: caller has already determined auth is required; with no
+ * credentials configured this always returns -1. */
+static int
+svr_auth_check(const mqvpn_server_t *s, const char *auth_token, size_t auth_token_len,
+               char *out_username, size_t username_cap)
+{
+    int authed = 0;
+
+    if (username_cap > 0) out_username[0] = '\0';
+
+    if (auth_token) {
+        if (s->config.auth_key[0] != '\0' &&
+            mqvpn_auth_ct_compare(auth_token, auth_token_len, s->config.auth_key,
+                                  strlen(s->config.auth_key)) == 0) {
+            authed = 1;
+        }
+
+        /* Always iterate all users to keep timing constant */
+        for (int i = 0; i < s->config.n_users; i++) {
+            const char *expected_key = s->config.user_keys[i];
+            if (expected_key[0] == '\0') continue;
+            authed |= (mqvpn_auth_ct_compare(auth_token, auth_token_len, expected_key,
+                                             strlen(expected_key)) == 0);
+        }
+    }
+
+    if (!authed) return -1;
+
+    /* Record which user matched (second pass, not timing-sensitive) */
+    if (s->config.auth_key[0] != '\0' &&
+        mqvpn_auth_ct_compare(auth_token, auth_token_len, s->config.auth_key,
+                              strlen(s->config.auth_key)) == 0) {
+        snprintf(out_username, username_cap, "(global)");
+    } else {
+        for (int i = 0; i < s->config.n_users; i++) {
+            const char *ek = s->config.user_keys[i];
+            if (ek[0] != '\0' &&
+                mqvpn_auth_ct_compare(auth_token, auth_token_len, ek, strlen(ek)) == 0) {
+                snprintf(out_username, username_cap, "%s", s->config.user_names[i]);
+                break;
+            }
+        }
+    }
+
+    return 0;
+}
+
 /* CONNECT-IP request: header-phase handling (validate, auth, 200 response).
  * Returns 0 on success, -1 to reset the stream. */
 static int
@@ -943,50 +996,17 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
 
     int auth_required = (s->config.auth_key[0] != '\0') || (s->config.n_users > 0);
     if (auth_required) {
-        int authed = 0;
+        char username[sizeof(stream->conn->username)];
 
-        if (hdrs->auth_token) {
-            if (s->config.auth_key[0] != '\0' &&
-                mqvpn_auth_ct_compare(hdrs->auth_token, hdrs->auth_token_len,
-                                      s->config.auth_key,
-                                      strlen(s->config.auth_key)) == 0) {
-                authed = 1;
-            }
-
-            /* Always iterate all users to keep timing constant */
-            for (int i = 0; i < s->config.n_users; i++) {
-                const char *expected_key = s->config.user_keys[i];
-                if (expected_key[0] == '\0') continue;
-                authed |=
-                    (mqvpn_auth_ct_compare(hdrs->auth_token, hdrs->auth_token_len,
-                                           expected_key, strlen(expected_key)) == 0);
-            }
-        }
-
-        if (!authed) {
+        if (svr_auth_check(s, hdrs->auth_token, hdrs->auth_token_len, username,
+                           sizeof(username)) != 0) {
             LOG_W(s, "authentication failed: invalid or missing PSK");
             svr_masque_send_403(h3_request);
             return -1;
         }
 
-        /* Record which user matched (second pass, not timing-sensitive) */
         stream->conn->connected_at_us = now_us();
-        if (s->config.auth_key[0] != '\0' &&
-            mqvpn_auth_ct_compare(hdrs->auth_token, hdrs->auth_token_len,
-                                  s->config.auth_key, strlen(s->config.auth_key)) == 0) {
-            snprintf(stream->conn->username, sizeof(stream->conn->username), "(global)");
-        } else {
-            for (int i = 0; i < s->config.n_users; i++) {
-                const char *ek = s->config.user_keys[i];
-                if (ek[0] != '\0' &&
-                    mqvpn_auth_ct_compare(hdrs->auth_token, hdrs->auth_token_len, ek,
-                                          strlen(ek)) == 0) {
-                    snprintf(stream->conn->username, sizeof(stream->conn->username), "%s",
-                             s->config.user_names[i]);
-                    break;
-                }
-            }
-        }
+        snprintf(stream->conn->username, sizeof(stream->conn->username), "%s", username);
 
         LOG_I(s, "client authenticated successfully (user=%s)", stream->conn->username);
     }
