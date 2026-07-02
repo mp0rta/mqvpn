@@ -166,9 +166,14 @@ ctrl_cmd_get_stats(const char *req, char *resp, size_t resp_len, mqvpn_server_t 
                     "\"bytes_tx\":%" PRIu64 ",\"bytes_rx\":%" PRIu64 ","
                     "\"dgram_sent\":%" PRIu64 ",\"dgram_recv\":%" PRIu64 ","
                     "\"dgram_lost\":%" PRIu64 ",\"dgram_acked\":%" PRIu64 ","
+                    "\"pkts_lane_tcp\":%" PRIu64 ",\"pkts_lane_dgram\":%" PRIu64 ","
+                    "\"pkts_lane_raw\":%" PRIu64 ",\"tcp_flows_active\":%" PRIu64 ","
+                    "\"tcp_flows_total\":%" PRIu64 ",\"tcp_flows_rejected\":%" PRIu64 ","
                     "\"uptime_sec\":%" PRIu64 "}",
                     nc, st.bytes_tx, st.bytes_rx, st.dgram_sent, st.dgram_recv,
-                    st.dgram_lost, st.dgram_acked, uptime);
+                    st.dgram_lost, st.dgram_acked, st.pkts_lane_tcp, st.pkts_lane_dgram,
+                    st.pkts_lane_raw, st.tcp_flows_active, st.tcp_flows_total,
+                    st.tcp_flows_rejected, uptime);
 }
 
 static int

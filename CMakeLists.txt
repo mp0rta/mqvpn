@@ -125,6 +125,7 @@ set(MQVPN_LIB_SOURCES
     src/icmp.c
     src/reorder_tx.c
     src/reorder_rx.c
+    src/hybrid/classifier.c
 )
 
 # ---------- libmqvpn (static library — no libevent, no platform I/O) ----------
@@ -274,8 +275,9 @@ if(BUILD_TESTING)
     # mqvpn_config.c is linked (separate TU) for the composed-builder bridge test.
     add_executable(test_reorder_rx tests/test_reorder_rx.c src/mqvpn_config.c src/log.c)
     add_executable(test_reorder_config tests/test_reorder_config.c src/mqvpn_config.c src/config.c src/log.c)
+    add_executable(test_classifier tests/test_classifier.c src/hybrid/classifier.c)
 
-    foreach(t test_config test_auth test_session test_dns test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config)
+    foreach(t test_config test_auth test_session test_dns test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_classifier)
         target_include_directories(${t} PRIVATE
             ${CMAKE_SOURCE_DIR}/src
             ${CMAKE_SOURCE_DIR}/src/platform/linux

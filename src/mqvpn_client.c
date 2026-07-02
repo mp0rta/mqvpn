@@ -42,6 +42,7 @@
 #include <xquic/xqc_http3.h>
 
 #include "flow_sched.h"
+#include "hybrid/classifier.h"
 #include "icmp.h"
 #include "path_state_machine.h"
 #include "reorder.h"
@@ -180,6 +181,11 @@ struct mqvpn_client_s {
     uint64_t dgram_recv;
     uint64_t dgram_lost;
     uint64_t dgram_acked;
+    /* Hybrid-mode per-lane TX counters (H1). Stay 0 unless hybrid is
+     * enabled; tcp_flows_* live in the future tcp_lane. */
+    uint64_t pkts_lane_tcp;
+    uint64_t pkts_lane_dgram;
+    uint64_t pkts_lane_raw;
     int srtt_ms;
 
     /* Multipath (Level 1) */
@@ -2329,6 +2335,20 @@ static tun_ingress_verdict_t
 tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t len,
                 uint8_t ip_ver, int *do_stamp, mqvpn_reorder_tx_peek_t *peek)
 {
+    /* Hybrid H1: classify for counters only. The TCP lane has no transport
+     * yet; candidates fall through to RAW. DGRAM verdicts fall through to
+     * the existing reorder STAMP/RAW gating unchanged. Skipped entirely
+     * when hybrid is disabled (default) — zero hot-path cost. */
+    if (c->config.hybrid.enabled) {
+        switch (mqvpn_hybrid_classify(pkt, len, &c->config.hybrid, NULL)) {
+        case MQVPN_LANE_TCP:
+            c->pkts_lane_tcp++; /* falls through to RAW in H1 */
+            break;
+        case MQVPN_LANE_DGRAM: c->pkts_lane_dgram++; break;
+        case MQVPN_LANE_RAW: c->pkts_lane_raw++; break;
+        }
+    }
+
     /* §5/§9: reorder gating decides STAMP vs RAW vs DROP_MTU. Stamping is
      * additionally gated on peer support (§19.3/§19.4): until the peer advertises
      * mqvpn-reorder, everything stays RAW (wire-compatible with non-reorder
@@ -2715,6 +2735,10 @@ mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
     out->dgram_recv = c->dgram_recv;
     out->dgram_lost = c->dgram_lost;
     out->dgram_acked = c->dgram_acked;
+    out->pkts_lane_tcp = c->pkts_lane_tcp;
+    out->pkts_lane_dgram = c->pkts_lane_dgram;
+    out->pkts_lane_raw = c->pkts_lane_raw;
+    /* tcp_flows_active/total/rejected stay 0 (memset above) until tcp_lane. */
 
     /* Get connection-level SRTT from xquic (μs → ms) */
     if (c->engine && c->conn) {
