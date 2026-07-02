@@ -3,6 +3,11 @@
 
 /*
  * config.c — INI/JSON configuration file parser for mqvpn
+ *
+ * Scalar keys are described ONCE in cfg_keys[]; both the INI and JSON
+ * parsers walk that table. To add a scalar key: add one table row (and a
+ * test in tests/test_config.c). Complex keys (DNS/User/Path/ReorderRule)
+ * are hand-written in both parsers.
  */
 #include "config.h"
 #include "json_mini.h"
@@ -417,9 +422,10 @@ reorder_rule_begin(mqvpn_file_config_t *cfg, int lineno, const char *path)
 }
 
 /* ── Scalar config key descriptor table ──────────────────────────────────
- * ONE row per scalar key, walked by BOTH the INI parser (handle_kv) and the
- * JSON parser (mqvpn_config_load_json_filecfg). Complex keys (DNS, User,
- * Path, ReorderRule, JSON "mode") stay hand-written in their parsers.
+ * ONE row per scalar key, walked by BOTH the INI parser (cfg_key_apply_ini,
+ * called from handle_kv) and the JSON parser (cfg_key_apply_json, called
+ * from mqvpn_config_load_json_filecfg). Complex keys (DNS, User, Path,
+ * ReorderRule, JSON "mode") stay hand-written in their parsers.
  * Adding a scalar key = adding one row here.
  */
 
@@ -450,6 +456,8 @@ typedef struct {
 
 _Static_assert(sizeof(unsigned long long) == sizeof(uint64_t),
                "CFGK_U64 stores through a single 8-byte write");
+_Static_assert(sizeof(((mqvpn_file_config_t *)0)->listen) <= 280,
+               "cfg_key_apply_json sbuf must cover the largest CFGK_STR field");
 
 /* int_ok gates */
 static int
@@ -606,7 +614,11 @@ cfg_key_store(mqvpn_file_config_t *cfg, const cfg_key_desc_t *d, const char *v_s
     case CFGK_STR: snprintf(base, d->size, "%s", v_str); break;
     case CFGK_BOOL: *(int *)base = v_int; break;
     case CFGK_INT:
-        if (v_int == INT_MIN) { /* forced-invalid sentinel from the walkers */
+        /* forced-invalid sentinel from the walkers. Note: a genuine input of
+         * -2147483648 collides with this sentinel and is rejected too;
+         * acceptable since no legal config int is INT_MIN, but a future
+         * gate-less signed row author must know. */
+        if (v_int == INT_MIN) {
             if (d->has_invalid_fallback) *(int *)base = d->invalid_fallback;
             return -1;
         }
@@ -663,8 +675,7 @@ cfg_key_apply_ini(mqvpn_file_config_t *cfg, int section, const char *key, const 
         case CFGK_INT: {
             /* INT_MIN sentinel: forced-invalid marker so an unparseable value
              * takes the same fallback path as a parsed-but-rejected one
-             * (cfgk_int_positive(INT_MIN)==0; cfgk_int_mtu is never paired
-             * with a fallback). */
+             * (cfg_key_store recognizes the sentinel explicitly). */
             int v = 0;
             if (parse_int_strict(val, &v) < 0)
                 rc = d->has_invalid_fallback ? cfg_key_store(cfg, d, NULL, INT_MIN, 0)
@@ -701,6 +712,9 @@ static void
 cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *ro_raw,
                    const char *ro_end)
 {
+    /* Must cover the largest CFGK_STR destination (listen/server_addr/
+     * control_listen, all char[280]) or JSON strings would truncate
+     * shorter than INI ones. */
     char sbuf[280];
     for (size_t i = 0; i < sizeof(cfg_keys) / sizeof(cfg_keys[0]); i++) {
         const cfg_key_desc_t *d = &cfg_keys[i];
