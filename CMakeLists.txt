@@ -83,6 +83,20 @@ if(NOT ANDROID_CROSS_COMPILE)
     endif()
 endif()
 
+# ---------- Hybrid mode TCP lane (lwIP, Linux-only in v1) ----------
+option(MQVPN_ENABLE_HYBRID_TCP_LANE
+       "Build the hybrid-mode lwIP TCP lane (Linux-only in v1)" OFF)
+if(MQVPN_ENABLE_HYBRID_TCP_LANE AND NOT WIN32 AND NOT ANDROID_CROSS_COMPILE)
+    set(MQVPN_HYBRID_TCP_LANE_BUILD ON)
+else()
+    if(MQVPN_ENABLE_HYBRID_TCP_LANE)
+        message(WARNING "MQVPN_ENABLE_HYBRID_TCP_LANE requested but target "
+                         "is Windows/Android — hybrid TCP lane is Linux-only "
+                         "in v1, ignoring.")
+    endif()
+    set(MQVPN_HYBRID_TCP_LANE_BUILD OFF)
+endif()
+
 # Prefer static xquic to avoid runtime library path issues
 if(TARGET xquic-static)
     set(XQUIC_LIB xquic-static)
@@ -128,6 +142,50 @@ set(MQVPN_LIB_SOURCES
     src/hybrid/classifier.c
 )
 
+# ─── lwIP (hybrid mode TCP lane, Linux-only v1 — see MQVPN_HYBRID_TCP_LANE_BUILD) ───
+if(MQVPN_HYBRID_TCP_LANE_BUILD)
+set(LWIP_ROOT ${CMAKE_SOURCE_DIR}/third_party/lwip)
+set(LWIP_PORT_DIR ${CMAKE_SOURCE_DIR}/src/hybrid/lwip_port)
+
+set(LWIP_CORE_SOURCES
+    ${LWIP_ROOT}/src/core/def.c
+    ${LWIP_ROOT}/src/core/init.c
+    ${LWIP_ROOT}/src/core/inet_chksum.c
+    ${LWIP_ROOT}/src/core/ip.c
+    ${LWIP_ROOT}/src/core/mem.c
+    ${LWIP_ROOT}/src/core/memp.c
+    ${LWIP_ROOT}/src/core/netif.c
+    ${LWIP_ROOT}/src/core/pbuf.c
+    ${LWIP_ROOT}/src/core/stats.c
+    ${LWIP_ROOT}/src/core/sys.c
+    ${LWIP_ROOT}/src/core/tcp.c
+    ${LWIP_ROOT}/src/core/tcp_in.c
+    ${LWIP_ROOT}/src/core/tcp_out.c
+    ${LWIP_ROOT}/src/core/timeouts.c
+    ${LWIP_ROOT}/src/core/ipv4/ip4.c
+    ${LWIP_ROOT}/src/core/ipv4/ip4_addr.c
+    ${LWIP_ROOT}/src/core/ipv4/ip4_frag.c
+    ${LWIP_ROOT}/src/core/ipv4/icmp.c
+)
+
+add_library(lwip_core STATIC ${LWIP_CORE_SOURCES})
+target_include_directories(lwip_core PUBLIC
+    ${LWIP_ROOT}/src/include
+    ${LWIP_PORT_DIR}
+)
+target_compile_definitions(lwip_core PRIVATE LWIP_NOASSERT=$<CONFIG:Release>)
+# mqvpn_shared (a SHARED target) links this static lib below — its objects
+# must be position-independent, same reason xquic-static is unusable there.
+set_target_properties(lwip_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+set(LWIP_LIB lwip_core)
+
+# Registered into the SAME shared list classifier.c (H1) already lives in.
+# Must happen here, before MQVPN_LIB_SOURCES is consumed by add_library()
+# below (mqvpn_lib) and further down (mqvpn_shared) — variable expansion in
+# add_library() is immediate, not deferred.
+list(APPEND MQVPN_LIB_SOURCES ${CMAKE_SOURCE_DIR}/src/hybrid/lwip_glue.c)
+endif() # MQVPN_HYBRID_TCP_LANE_BUILD
+
 # ---------- libmqvpn (static library — no libevent, no platform I/O) ----------
 add_library(mqvpn_lib STATIC ${MQVPN_LIB_SOURCES})
 if(WIN32)
@@ -146,6 +204,10 @@ elseif(WIN32)
     target_link_libraries(mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} ws2_32)
 else()
     target_link_libraries(mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} pthread)
+endif()
+if(MQVPN_HYBRID_TCP_LANE_BUILD)
+    target_link_libraries(mqvpn_lib ${LWIP_LIB})
+    target_compile_definitions(mqvpn_lib PRIVATE MQVPN_HYBRID_TCP_LANE_ENABLED)
 endif()
 
 # Everything below requires libevent and a platform layer — skip for Android
@@ -215,6 +277,10 @@ target_include_directories(mqvpn_shared
 )
 # Shared lib needs shared xquic (static .a lacks -fPIC)
 target_link_libraries(mqvpn_shared xquic ${SSL_LIB} ${CRYPTO_LIB} pthread)
+if(MQVPN_HYBRID_TCP_LANE_BUILD)
+    target_link_libraries(mqvpn_shared ${LWIP_LIB})
+    target_compile_definitions(mqvpn_shared PRIVATE MQVPN_HYBRID_TCP_LANE_ENABLED)
+endif()
 
 # ---------- mqvpn CLI binary ----------
 # Links libmqvpn for the library API; keeps platform-specific files separate.
