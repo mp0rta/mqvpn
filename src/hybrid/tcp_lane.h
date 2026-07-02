@@ -11,14 +11,16 @@
 typedef struct mqvpn_tcp_lane mqvpn_tcp_lane_t;
 
 typedef struct {
-    uint64_t flows_active;
+    uint64_t flows_active; /* gauge: derived from the live TCP-flow count at
+                            * snapshot time (never tracked in parallel) */
     uint64_t flows_total;
     uint64_t flows_rejected_cap;
     uint64_t flows_rejected_other;
     uint64_t flows_idle_evicted;
-    uint64_t raw_markers_active; /* sticky-RAW markers currently in the table
-                                  * (visibility into marker accumulation for
-                                  * Task 24's counter wiring) */
+    uint64_t raw_markers_active; /* gauge, same derivation: sticky-RAW markers
+                                  * currently in the table (visibility into
+                                  * marker accumulation for Task 24's counter
+                                  * wiring) */
 } mqvpn_tcp_lane_stats_t;
 
 /* client_ctx is opaque to tcp_lane.c's callers outside mqvpn_client.c; it is
@@ -36,12 +38,19 @@ int mqvpn_tcp_lane_lookup(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key,
 
 /* Commit a brand-new flow's lane decision at SYN time. to_tcp=0 records a
  * sticky-RAW marker. to_tcp=1 inserts a pending-accept entry AND is the
- * caller's cue to feed the SYN into lwIP (Task 7). Returns 0 on success,
- * -1 on cap. The two kinds are capped INDEPENDENTLY:
+ * caller's cue to feed the SYN into lwIP (Task 7). Returns 0 on success;
+ * -1 on cap, on NULL args, on allocation failure, or on a duplicate key
+ * (a key already in the table is a caller bug — the protocol is
+ * lookup-then-commit; alloc failure and duplicates are counted in
+ * flows_rejected_other). The two kinds are capped INDEPENDENTLY:
  *   - to_tcp=1: capped by cfg.tcp_max_flows, counted in flows_rejected_cap.
  *     The check happens BEFORE lwIP sees the packet —
- *     reject-before-side-effect; the OTHER rejection point, inside the
- *     lwIP accept callback, is Task 8's.
+ *     reject-before-side-effect. On -1 HERE the caller may safely fall the
+ *     flow back to RAW, ONLY because lwIP never saw the SYN (no half-built
+ *     pcb state to contradict later packets). Once lwIP HAS seen the SYN —
+ *     Task 8's rejection point inside the lwIP accept callback — RAW
+ *     fallback is forbidden: the flow must be rejected explicitly (abort),
+ *     never silently rerouted.
  *   - to_tcp=0: capped by an internal marker cap (memory bound only, see
  *     TCP_LANE_RAW_MARKER_CAP in tcp_lane.c), NOT counted in
  *     flows_rejected_cap — the flow just stays unsticky and re-evaluates

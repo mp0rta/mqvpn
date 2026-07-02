@@ -15,6 +15,10 @@
  * MQVPN_ENABLE_HYBRID_TCP_LANE — tcp_lane.c has no lwIP dependency yet
  * (only a forward-declared struct tcp_pcb pointer), same as test_classifier.
  */
+/* Shrink the sticky-RAW marker cap (production default 4096) so the
+ * marker-cap branch is testable without 4096 inserts. Must precede the
+ * #include of the TU. */
+#define TCP_LANE_RAW_MARKER_CAP 4u
 #include "hybrid/tcp_lane.c"
 
 #include <stdio.h>
@@ -88,6 +92,14 @@ test_new_flow_and_lookup(void)
     ASSERT_EQ_INT(stats.flows_active, 1, "flows_active == 1");
     ASSERT_EQ_INT(stats.flows_total, 1, "flows_total == 1");
 
+    /* Duplicate commit is a caller bug (protocol: lookup-then-commit) —
+     * refused, counted in flows_rejected_other, no shadowing insert. */
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 1), -1, "duplicate on_syn refused");
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_rejected_other, 1,
+                  "duplicate counted in flows_rejected_other");
+    ASSERT_EQ_INT(stats.flows_total, 1, "no shadowing duplicate inserted");
+
     mqvpn_tcp_lane_free(lane);
 }
 
@@ -131,6 +143,9 @@ test_cap_rejection(void)
     mqvpn_flow_key_t k2 = make_key(5001, 80);
     ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k2, 1), -1,
                   "second on_syn rejected at cap");
+    /* Rejection means NO insertion: the rejected key must stay absent. */
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k2, NULL), 0,
+                  "rejected key not inserted (lookup miss)");
 
     mqvpn_tcp_lane_stats_t stats;
     mqvpn_tcp_lane_get_stats(lane, &stats);
@@ -158,8 +173,8 @@ test_markers_dont_consume_tcp_budget(void)
     mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0x9abcULL, NULL);
     ASSERT_TRUE(lane != NULL, "lane_new succeeds");
 
-    /* Several sticky-RAW markers first... */
-    for (uint16_t i = 0; i < 8; i++) {
+    /* Fill the (test-shrunk) marker cap with sticky-RAW markers first... */
+    for (uint16_t i = 0; i < TCP_LANE_RAW_MARKER_CAP; i++) {
         mqvpn_flow_key_t k = make_key((uint16_t)(6000 + i), 80);
         ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 0), 0,
                       "sticky-RAW marker succeeds");
@@ -173,9 +188,47 @@ test_markers_dont_consume_tcp_budget(void)
     mqvpn_tcp_lane_stats_t stats;
     mqvpn_tcp_lane_get_stats(lane, &stats);
     ASSERT_EQ_INT(stats.flows_active, 1, "flows_active == 1");
-    ASSERT_EQ_INT(stats.raw_markers_active, 8, "raw_markers_active == 8");
+    ASSERT_EQ_INT(stats.raw_markers_active, TCP_LANE_RAW_MARKER_CAP,
+                  "raw_markers_active == marker cap");
     ASSERT_EQ_INT(stats.flows_rejected_cap, 0, "no cap rejections");
-    ASSERT_EQ_INT(stats.flows_total, 9, "flows_total counts both kinds");
+    ASSERT_EQ_INT(stats.flows_total, TCP_LANE_RAW_MARKER_CAP + 1,
+                  "flows_total counts both kinds");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_marker_cap(void)
+{
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg); /* tcp_max_flows = 256 (not the limit) */
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xdef0ULL, NULL);
+    ASSERT_TRUE(lane != NULL, "lane_new succeeds");
+
+    /* Fill the (test-shrunk) marker cap. */
+    for (uint16_t i = 0; i < TCP_LANE_RAW_MARKER_CAP; i++) {
+        mqvpn_flow_key_t k = make_key((uint16_t)(8000 + i), 80);
+        ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 0), 0, "marker succeeds below cap");
+    }
+
+    /* Next marker is refused: -1, silent (no flows_rejected_cap), no insert. */
+    mqvpn_flow_key_t kx = make_key(8999, 80);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &kx, 0), -1,
+                  "marker rejected at marker cap");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &kx, NULL), 0,
+                  "rejected marker key not inserted (lookup miss)");
+
+    mqvpn_tcp_lane_stats_t stats;
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_rejected_cap, 0,
+                  "marker-cap hit is not a TCP-lane rejection");
+    ASSERT_EQ_INT(stats.raw_markers_active, TCP_LANE_RAW_MARKER_CAP,
+                  "raw_markers_active stays at cap");
+
+    /* TCP-lane commits are unaffected by the full marker table. */
+    mqvpn_flow_key_t kt = make_key(9000, 443);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &kt, 1), 0,
+                  "to_tcp still succeeds at full marker cap");
 
     mqvpn_tcp_lane_free(lane);
 }
@@ -187,6 +240,7 @@ main(void)
     test_sticky_raw();
     test_cap_rejection();
     test_markers_dont_consume_tcp_budget();
+    test_marker_cap();
 
     fprintf(stderr, "test_tcp_lane: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

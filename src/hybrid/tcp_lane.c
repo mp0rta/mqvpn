@@ -27,8 +27,11 @@ struct tcp_pcb;
  * tcp=auto exists for. This cap only bounds memory: a marker entry is one
  * mqvpn_tcp_flow_t (~120 B, key 38 B) so 4096 markers ≈ 0.5 MB worst
  * case; the keys alone are 38 B × 4096 ≈ 156 KB. On cap hit the flow just
- * stays unsticky and re-evaluates per SYN (harmless per Task 7). */
-#define TCP_LANE_RAW_MARKER_CAP 4096u
+ * stays unsticky and re-evaluates per SYN (harmless per Task 7).
+ * #ifndef so tests can override it small to exercise the cap branch. */
+#ifndef TCP_LANE_RAW_MARKER_CAP
+#  define TCP_LANE_RAW_MARKER_CAP 4096u
+#endif
 
 typedef enum {
     TCP_FLOW_STICKY_RAW,     /* SYN-time verdict was RAW; remembered so
@@ -73,8 +76,9 @@ struct mqvpn_tcp_lane {
     mqvpn_tcp_lane_stats_t stats;
 };
 
-/* Power-of-two bucket count from tcp_max_flows (load factor ~1), capped at
- * 2^20 buckets. Identical to reorder_tx.c's pick_buckets — kept as a
+/* Power-of-two bucket count from the table's total capacity (load factor
+ * ~1), capped at 2^20 buckets. Identical to reorder_tx.c's pick_buckets —
+ * kept as a
  * separate copy deliberately: TX/RX/TCP-lane have DIFFERENT eviction
  * policies (idle-only / LRU / cap+idle+abort respectively), so the
  * surrounding structs diverge even though this helper doesn't. */
@@ -101,7 +105,11 @@ mqvpn_tcp_lane_new(const mqvpn_hybrid_config_t *cfg, uint64_t hash_seed, void *c
     lane->cfg = *cfg;
     lane->hash_seed = hash_seed;
     lane->client_ctx = client_ctx;
-    lane->n_buckets = pick_buckets(cfg->tcp_max_flows ? cfg->tcp_max_flows : 16);
+    /* Size for BOTH populations sharing the table: up to tcp_max_flows
+     * TCP-lane flows plus up to TCP_LANE_RAW_MARKER_CAP sticky-RAW markers
+     * (which are exactly what accumulates in the tcp=auto single-path hot
+     * case). Defaults: 256 + 4096 → 8192 buckets = 64 KB of pointers. */
+    lane->n_buckets = pick_buckets(cfg->tcp_max_flows + TCP_LANE_RAW_MARKER_CAP);
     lane->buckets = calloc(lane->n_buckets, sizeof(*lane->buckets));
     if (!lane->buckets) {
         free(lane);
@@ -179,8 +187,14 @@ mqvpn_tcp_lane_on_syn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, int t
             return -1;
         }
     }
-    uint32_t bucket =
-        (uint32_t)(mqvpn_flow_key_hash(key, lane->hash_seed) & (lane->n_buckets - 1));
+    uint32_t bucket;
+    if (find_flow(lane, key, &bucket)) {
+        /* Duplicate commit is a caller bug: the protocol is lookup-then-
+         * commit, so on_syn must only ever see brand-new keys. Refuse
+         * rather than insert a shadowing duplicate. */
+        lane->stats.flows_rejected_other++;
+        return -1;
+    }
     mqvpn_tcp_flow_t *f = calloc(1, sizeof(*f));
     if (!f) {
         lane->stats.flows_rejected_other++;
@@ -194,10 +208,8 @@ mqvpn_tcp_lane_on_syn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, int t
     lane->stats.flows_total++;
     if (to_tcp) {
         lane->n_tcp_flows++;
-        lane->stats.flows_active++;
     } else {
         lane->n_raw_markers++;
-        lane->stats.raw_markers_active++;
     }
     return 0;
 }
@@ -217,4 +229,9 @@ mqvpn_tcp_lane_get_stats(const mqvpn_tcp_lane_t *lane, mqvpn_tcp_lane_stats_t *o
         return;
     }
     *out = lane->stats;
+    /* Gauges are DERIVED from the live counters, not tracked in parallel:
+     * removal sites (Tasks 12/13) only maintain n_tcp_flows/n_raw_markers
+     * and can never leave the stats snapshot out of sync. */
+    out->flows_active = lane->n_tcp_flows;
+    out->raw_markers_active = lane->n_raw_markers;
 }
