@@ -190,7 +190,10 @@ set_target_properties(lwip_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # Must happen here, before MQVPN_LIB_SOURCES is consumed by add_library()
 # below (mqvpn_lib) and further down (mqvpn_shared) — variable expansion in
 # add_library() is immediate, not deferred.
-list(APPEND MQVPN_LIB_SOURCES ${CMAKE_SOURCE_DIR}/src/hybrid/lwip_glue.c)
+list(APPEND MQVPN_LIB_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/hybrid/lwip_glue.c
+    ${CMAKE_SOURCE_DIR}/src/hybrid/tcp_lane.c
+)
 
 # H2a micro-benchmark rig (Chunk 1 gate): TUN → classifier → lwIP → byte
 # sink, NO QUIC. Standalone executable, deliberately NOT part of mqvpn_lib —

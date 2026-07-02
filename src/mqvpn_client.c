@@ -45,6 +45,7 @@
 #include "hybrid/classifier.h"
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
 #  include "hybrid/lwip_glue.h"
+#  include "hybrid/tcp_lane.h"
 #endif
 #include "icmp.h"
 #include "path_state_machine.h"
@@ -131,6 +132,12 @@ struct cli_conn_s {
      * teardown. This struct is private to this TU, so gating the field on
      * the build flag is ODR-safe. */
     mqvpn_lwip_ctx_t *lwip_ctx;
+    /* H2: sticky per-flow lane table. Created ONLY when lwip_ctx creation
+     * succeeded (the ingress fast path guards on tcp_lane alone and feeds
+     * lwip_ctx, so the two must be coherent: both live or both NULL). Freed
+     * BEFORE lwip_ctx on teardown — tcp_lane will eventually own pcb aborts
+     * against the still-live stack. */
+    mqvpn_tcp_lane_t *tcp_lane;
 #endif
 };
 
@@ -195,11 +202,16 @@ struct mqvpn_client_s {
     uint64_t dgram_recv;
     uint64_t dgram_lost;
     uint64_t dgram_acked;
-    /* Hybrid-mode per-lane TX counters (H1). Stay 0 unless hybrid is
-     * enabled; tcp_flows_* live in the future tcp_lane. */
+    /* Hybrid-mode per-lane TX counters. Stay 0 unless hybrid is enabled.
+     * tcp_flows_rejected counts SYNs that wanted the TCP lane but hit the
+     * tcp_max_flows cap (fell back to RAW, safe pre-lwIP); tcp_lane keeps
+     * its own finer-grained stats (Task 24 wires everything into
+     * get_stats). pkts_lane_tcp_dropped counts packets lwIP refused. */
     uint64_t pkts_lane_tcp;
     uint64_t pkts_lane_dgram;
     uint64_t pkts_lane_raw;
+    uint64_t tcp_flows_rejected;
+    uint64_t pkts_lane_tcp_dropped;
     int srtt_ms;
 
     /* Multipath (Level 1) */
@@ -1247,6 +1259,21 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
             if (!conn->lwip_ctx)
                 LOG_W(c, "lwIP ctx create failed; TCP lane disabled (RAW fallback)");
         }
+        /* Flow table rides the same lifecycle. Coherence rule: tcp_lane is
+         * created only when lwip_ctx exists, and a tcp_lane alloc failure
+         * tears lwip_ctx back down — the ingress path guards on tcp_lane
+         * alone and dereferences lwip_ctx. Hash seed mirrors the reorder
+         * engines' per-conn derivation (wall clock ^ conn_id; §6.2 needs no
+         * peer agreement). */
+        if (conn->lwip_ctx && !conn->tcp_lane) {
+            uint64_t lane_seed = client_now_us(c) ^ ((uint64_t)c->conn_id << 32);
+            conn->tcp_lane = mqvpn_tcp_lane_new(&c->config.hybrid, lane_seed, c);
+            if (!conn->tcp_lane) {
+                LOG_W(c, "tcp_lane alloc failed; TCP lane disabled (RAW fallback)");
+                mqvpn_lwip_ctx_free(conn->lwip_ctx);
+                conn->lwip_ctx = NULL;
+            }
+        }
 #endif
 
         /* Build tunnel info for callback */
@@ -1737,6 +1764,12 @@ cli_conn_destroy(mqvpn_client_t *c)
     }
 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* Teardown contract: tcp_lane BEFORE lwip_ctx — flow teardown will
+     * eventually abort pcbs, which needs the stack still alive. */
+    if (conn->tcp_lane) {
+        mqvpn_tcp_lane_free(conn->tcp_lane);
+        conn->tcp_lane = NULL;
+    }
     if (conn->lwip_ctx) {
         mqvpn_lwip_ctx_free(conn->lwip_ctx);
         conn->lwip_ctx = NULL;
@@ -2388,6 +2421,38 @@ tun_validate_src(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t
     return TUN_INGRESS_PROCEED;
 }
 
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+/* Paths a new TCP-lane flow could actually be striped across right now.
+ * Same slot array mqvpn_client_get_paths() aggregates; only PATH_LC_ACTIVE
+ * counts — VALIDATING/STANDBY/DEGRADED paths carry no scheduled traffic,
+ * so they don't justify the TCP-lane detour under tcp=auto. */
+static int
+active_paths_count(const mqvpn_client_t *c)
+{
+    int n = 0;
+    for (int i = 0; i < c->n_paths; i++)
+        if (c->paths[i].state == PATH_LC_ACTIVE) n++;
+    return n;
+}
+
+/* SYN-time lane verdict (spec: snapshot at flow creation, never
+ * re-evaluated mid-flow — callers invoke this exactly once per new flow,
+ * right before mqvpn_tcp_lane_on_syn commits it). Returns 1 = TCP lane,
+ * 0 = sticky RAW. */
+static int
+hybrid_tcp_syn_policy(const mqvpn_client_t *c)
+{
+    switch (c->config.hybrid.tcp_mode) {
+    case MQVPN_HYBRID_TCP_STREAM: return 1;
+    case MQVPN_HYBRID_TCP_RAW:
+        return 0; /* unreachable: classifier never
+                   * yields LANE_TCP under tcp=raw */
+    case MQVPN_HYBRID_TCP_AUTO: break;
+    }
+    return active_paths_count(c) >= 2;
+}
+#endif /* MQVPN_HYBRID_TCP_LANE_ENABLED */
+
 /* Reorder STAMP/RAW/DROP_MTU decision + both ICMP PTB paths (stamped
  * over-MTU and RAW over-MTU). Computes udp_mss internally. Fills *do_stamp
  * and *peek. Caller must zero-initialize *do_stamp and *peek; they are
@@ -2396,14 +2461,59 @@ static tun_ingress_verdict_t
 tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t len,
                 uint8_t ip_ver, int *do_stamp, mqvpn_reorder_tx_peek_t *peek)
 {
-    /* Hybrid H1: classify for counters only. The TCP lane has no transport
-     * yet; candidates fall through to RAW. DGRAM verdicts fall through to
-     * the existing reorder STAMP/RAW gating unchanged. Skipped entirely
-     * when hybrid is disabled (default) — zero hot-path cost. */
+    /* Hybrid H2: classify, then route TCP-lane candidates through the
+     * sticky per-flow table — feed lwIP or fall to RAW. `break` out of the
+     * switch IS the RAW fallthrough (continues to the reorder gating
+     * below). DGRAM verdicts fall through to the existing reorder
+     * STAMP/RAW gating unchanged. Skipped entirely when hybrid is
+     * disabled (default) — zero hot-path cost. */
     if (c->config.hybrid.enabled) {
-        switch (mqvpn_hybrid_classify(pkt, len, &c->config.hybrid, NULL)) {
-        case MQVPN_LANE_TCP:
-            c->pkts_lane_tcp++; /* falls through to RAW in H1 */
+        mqvpn_flow_key_t flow_key;
+        switch (mqvpn_hybrid_classify(pkt, len, &c->config.hybrid, &flow_key)) {
+        case MQVPN_LANE_TCP: c->pkts_lane_tcp++;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+            if (conn->tcp_lane) { /* implies lwip_ctx != NULL (coherence
+                                   * rule at the creation site) */
+                int is_raw = 0;
+                int is_syn = (ip_ver == 4) && mqvpn_tcp_syn_flag(pkt, len);
+                int found = mqvpn_tcp_lane_lookup(conn->tcp_lane, &flow_key, &is_raw);
+
+                if (!found) {
+                    if (!is_syn) {
+                        /* Non-SYN for an unknown flow: evicted, mid-stream
+                         * (hybrid just enabled), or inbound-connection
+                         * traffic (SYN|ACK is deliberately not
+                         * flow-starting — see mqvpn_tcp_syn_flag). No
+                         * sticky decision to honor — RAW. Do NOT call
+                         * on_syn: committing a NEW flow is a SYN-only
+                         * action. */
+                        break;
+                    }
+                    int want_tcp = hybrid_tcp_syn_policy(c);
+                    if (mqvpn_tcp_lane_on_syn(conn->tcp_lane, &flow_key, want_tcp) < 0) {
+                        /* Cap hit BEFORE lwIP saw the SYN — safe RAW
+                         * fallback (on_syn contract in tcp_lane.h; Task 8's
+                         * post-accept rejection point must abort instead).
+                         * A want_tcp=0 refusal is just the marker cap: the
+                         * flow stays unsticky, not a TCP-lane rejection. */
+                        if (want_tcp) c->tcp_flows_rejected++;
+                        break;
+                    }
+                    if (!want_tcp) break; /* sticky-RAW just recorded */
+                    /* want_tcp: fall through to feed lwIP */
+                } else if (is_raw) {
+                    break; /* sticky RAW from a prior SYN */
+                }
+
+                if (mqvpn_lwip_input(conn->lwip_ctx, pkt, len) < 0)
+                    c->pkts_lane_tcp_dropped++;
+                /* Consumed by lwIP. MUST be an explicit TUN_INGRESS_DROP:
+                 * proceeding would ALSO send the packet RAW via
+                 * tun_send_datagram (double-processing). */
+                return TUN_INGRESS_DROP;
+            }
+#endif
+            /* No tcp_lane (build flag off or alloc failed): RAW, as H1. */
             break;
         case MQVPN_LANE_DGRAM: c->pkts_lane_dgram++; break;
         case MQVPN_LANE_RAW: c->pkts_lane_raw++; break;
@@ -2804,7 +2914,8 @@ mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
     out->pkts_lane_tcp = c->pkts_lane_tcp;
     out->pkts_lane_dgram = c->pkts_lane_dgram;
     out->pkts_lane_raw = c->pkts_lane_raw;
-    /* tcp_flows_active/total/rejected stay 0 (memset above) until tcp_lane. */
+    /* tcp_flows_active/total/rejected stay 0 (memset above) until Task 24
+     * wires the live c->tcp_flows_rejected / tcp_lane stats through. */
 
     /* Get connection-level SRTT from xquic (μs → ms) */
     if (c->engine && c->conn) {

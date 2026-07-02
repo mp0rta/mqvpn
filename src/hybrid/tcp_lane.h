@@ -10,6 +10,38 @@
 
 typedef struct mqvpn_tcp_lane mqvpn_tcp_lane_t;
 
+/* Flow-starting SYN test for TUN-ingress lane policy (IPv4 only — the
+ * classifier routes IPv6 TCP to RAW in v1). Re-parses the one flags byte
+ * at the IHL-derived offset DELIBERATELY instead of extending reorder.h's
+ * parser: the spec scopes mqvpn_parse_l3l4 to classifier needs (5-tuple),
+ * and flags are a lane-policy concern only.
+ *
+ * Returns 1 only for a pure SYN (SYN set, ACK clear). SYN|ACK is
+ * intentionally NOT flow-starting: on the client's TUN ingress a SYN|ACK
+ * for an unknown 5-tuple is the inner OS answering an INBOUND connection
+ * that arrived via the RAW downlink. Committing it to the TCP lane would
+ * feed lwIP a SYN|ACK with no matching pcb — lwIP RSTs it and the inbound
+ * connection dies. Not committing keeps the whole inbound flow on RAW
+ * (every packet re-evaluates as unknown non-SYN → RAW), which is correct:
+ * only client-originated outbound flows enter the TCP lane.
+ *
+ * Bounds-checked: needs len >= IHL + 14 to reach the flags byte at
+ * tcp_off + 13. Truncated/garbage packets return 0 (treated as non-SYN;
+ * unknown-flow non-SYN falls to RAW where existing paths handle it). */
+static inline int
+mqvpn_tcp_syn_flag(const uint8_t *pkt, size_t len)
+{
+    if (len < 20 || (pkt[0] >> 4) != 4) {
+        return 0;
+    }
+    size_t ihl = (size_t)(pkt[0] & 0x0F) * 4;
+    if (ihl < 20 || len < ihl + 14) {
+        return 0;
+    }
+    uint8_t flags = pkt[ihl + 13];
+    return (flags & 0x12) == 0x02; /* SYN set, ACK clear */
+}
+
 typedef struct {
     uint64_t flows_active; /* gauge: derived from the live TCP-flow count at
                             * snapshot time (never tracked in parallel) */
