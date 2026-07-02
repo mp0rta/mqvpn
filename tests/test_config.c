@@ -1465,6 +1465,229 @@ test_resolve_port_leading_junk(void)
     ASSERT_EQ_INT(rc, -1, "empty port returns -1");
 }
 
+/* ── INI ↔ JSON scalar-key parity (pins the descriptor-table refactor) ──── */
+
+static void
+test_ini_json_scalar_parity(void)
+{
+    /* Every scalar key, non-default value. Complex keys (DNS/User/Path/
+     * ReorderRule) are deliberately absent so both structs keep defaults
+     * there and whole-struct memcmp is meaningful. */
+    const char *ini = "[Interface]\n"
+                      "TunName = tparity0\n"
+                      "Listen = 192.0.2.1:8443\n"
+                      "Subnet = 10.99.0.0/24\n"
+                      "Subnet6 = fd00:beef::/112\n"
+                      "LogLevel = debug\n"
+                      "KillSwitch = true\n"
+                      "ManageRoutes = false\n"
+                      "Reconnect = false\n"
+                      "ReconnectInterval = 17\n"
+                      "MTU = 1420\n"
+                      "[Server]\n"
+                      "Address = vpn.parity.test:4433\n"
+                      "ServerName = sni.parity.test\n"
+                      "Insecure = true\n"
+                      "[TLS]\n"
+                      "Cert = /tmp/parity.crt\n"
+                      "Key = /tmp/parity.key\n"
+                      "[Auth]\n"
+                      "MaxClients = 120\n"
+                      "[Control]\n"
+                      "Listen = 127.0.0.2:9091\n"
+                      "[Multipath]\n"
+                      "Scheduler = min_srtt\n"
+                      "CC = cubic\n"
+                      "InitMaxPathId = 16\n"
+                      "[Reorder]\n"
+                      "Enabled = on\n"
+                      "MaxWaitMs = 55\n"
+                      "CapPackets = 256\n"
+                      "MaxBytesPerFlow = 5000000\n"
+                      "ClassifyWindow = 33\n"
+                      "AckDemoteMaxLarge = 7\n"
+                      "SmallPacketThreshold = 333\n"
+                      "ResetMarkPackets = 9\n"
+                      "ResetIdleGraceMs = 400\n"
+                      "MaxFlows = 77\n"
+                      "GlobalMaxBytes = 9000000\n"
+                      "IngressIdleSec = 11\n"
+                      "EgressIdleSec = 22\n";
+    /* NOTE: [Auth] Key is INI-only dual-write (auth_key + server_auth_key);
+     * mirror it in JSON by setting BOTH json keys to the same value. */
+    const char *ini_auth_extra = "[Auth]\nKey = parity-secret\n";
+    const char *json = "{"
+                       "\"tun_name\":\"tparity0\","
+                       "\"listen\":\"192.0.2.1:8443\","
+                       "\"subnet\":\"10.99.0.0/24\","
+                       "\"subnet6\":\"fd00:beef::/112\","
+                       "\"log_level\":\"debug\","
+                       "\"kill_switch\":true,"
+                       "\"manage_routes\":false,"
+                       "\"reconnect\":false,"
+                       "\"reconnect_interval\":17,"
+                       "\"mtu\":1420,"
+                       "\"server_addr\":\"vpn.parity.test:4433\","
+                       "\"tls_server_name\":\"sni.parity.test\","
+                       "\"insecure\":true,"
+                       "\"cert_file\":\"/tmp/parity.crt\","
+                       "\"key_file\":\"/tmp/parity.key\","
+                       "\"auth_key\":\"parity-secret\","
+                       "\"server_auth_key\":\"parity-secret\","
+                       "\"max_clients\":120,"
+                       "\"control_listen\":\"127.0.0.2:9091\","
+                       "\"scheduler\":\"min_srtt\","
+                       "\"cc\":\"cubic\","
+                       "\"init_max_path_id\":16,"
+                       "\"reorder\":{"
+                       "\"enabled\":\"on\","
+                       "\"max_wait_ms\":55,"
+                       "\"cap_packets\":256,"
+                       "\"max_bytes_per_flow\":5000000,"
+                       "\"classify_window\":33,"
+                       "\"ack_demote_max_large\":7,"
+                       "\"small_packet_threshold\":333,"
+                       "\"reset_mark_packets\":9,"
+                       "\"reset_idle_grace_ms\":400,"
+                       "\"max_flows\":77,"
+                       "\"global_max_bytes\":9000000,"
+                       "\"ingress_idle_sec\":11,"
+                       "\"egress_idle_sec\":22"
+                       "}"
+                       "}";
+
+    mqvpn_file_config_t a, b;
+
+    /* INI side: concat base + auth extra into one temp file. */
+    char ini_full[4096];
+    snprintf(ini_full, sizeof(ini_full), "%s%s", ini, ini_auth_extra);
+    char *path = write_tmp(ini_full);
+    mqvpn_config_defaults(&a);
+    int rc = mqvpn_config_load(&a, path);
+    unlink(path);
+    ASSERT_EQ_INT(rc, 0, "parity ini load ok");
+
+    mqvpn_config_defaults(&b);
+    rc = mqvpn_config_load_json_filecfg(&b, json);
+    ASSERT_EQ_INT(rc, 0, "parity json load ok");
+
+    /* Spot asserts first — memcmp failure alone is undebuggable. */
+    ASSERT_EQ_STR(a.tun_name, b.tun_name, "parity tun_name");
+    ASSERT_EQ_INT(a.is_server, b.is_server, "parity is_server");
+    ASSERT_EQ_INT(a.tun_mtu, b.tun_mtu, "parity mtu");
+    ASSERT_EQ_INT(a.max_clients, b.max_clients, "parity max_clients");
+    ASSERT_EQ_INT((int)a.init_max_path_id, (int)b.init_max_path_id,
+                  "parity init_max_path_id");
+    ASSERT_EQ_STR(a.auth_key, b.auth_key, "parity auth_key");
+    ASSERT_EQ_STR(a.server_auth_key, b.server_auth_key, "parity server_auth_key");
+    ASSERT_EQ_INT(a.reorder.mode, b.reorder.mode, "parity reorder mode");
+    ASSERT_EQ_INT((int)a.reorder.max_wait_ms, (int)b.reorder.max_wait_ms,
+                  "parity reorder max_wait_ms");
+    ASSERT_EQ_INT(a.reorder.has_explicit_wait, b.reorder.has_explicit_wait,
+                  "parity has_explicit_wait");
+    ASSERT_EQ_INT(a.reorder.has_explicit_cap, b.reorder.has_explicit_cap,
+                  "parity has_explicit_cap");
+    ASSERT_EQ_INT((int)a.reorder.classify_window, (int)b.reorder.classify_window,
+                  "parity classify_window");
+
+    /* Non-default guards: prove these asserts pass because the value was
+     * actually parsed, not because it silently failed to parse on BOTH
+     * sides and both structs just kept the (equal) default. */
+    ASSERT_EQ_INT(a.tun_mtu, 1420, "parity mtu is non-default");
+    ASSERT_EQ_INT((int)a.reorder.max_flows, 77,
+                  "parity reorder max_flows is non-default");
+    ASSERT_EQ_INT((int)a.reorder.classify_window, 33,
+                  "parity classify_window is non-default");
+    ASSERT_EQ_INT((int)a.reorder.small_packet_threshold_bytes, 333,
+                  "guard small_packet_threshold parsed");
+
+    /* Both structs were memset by mqvpn_config_defaults → padding is zero
+     * → whole-struct compare is deterministic. */
+    ASSERT_EQ_INT(memcmp(&a, &b, sizeof(a)), 0, "parity full-struct memcmp");
+}
+
+static void
+test_ini_json_invalid_scalar_parity(void)
+{
+    /* Invalid values must leave the same struct outcome on both surfaces.
+     * (Warnings differ historically; only the resulting struct is pinned.)
+     * Every INI load must return 0: invalid scalars warn-and-continue, they
+     * never fail the load. */
+    mqvpn_file_config_t a, b;
+    int rc;
+
+    /* MTU out of range → keep default (0) on both sides */
+    char *p = write_tmp("[Interface]\nMTU = 100\n");
+    mqvpn_config_defaults(&a);
+    rc = mqvpn_config_load(&a, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "invalid mtu ini load rc 0");
+    mqvpn_config_defaults(&b);
+    mqvpn_config_load_json_filecfg(&b, "{\"mtu\":100}");
+    ASSERT_EQ_INT(a.tun_mtu, 0, "invalid mtu ini keeps default");
+    ASSERT_EQ_INT(b.tun_mtu, 0, "invalid mtu json keeps default");
+
+    /* MaxClients invalid → 64 on both sides */
+    p = write_tmp("[Auth]\nMaxClients = -3\n");
+    mqvpn_config_defaults(&a);
+    rc = mqvpn_config_load(&a, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "invalid max_clients ini load rc 0");
+    mqvpn_config_defaults(&b);
+    mqvpn_config_load_json_filecfg(&b, "{\"max_clients\":-3}");
+    ASSERT_EQ_INT(a.max_clients, 64, "invalid max_clients ini -> 64");
+    ASSERT_EQ_INT(b.max_clients, 64, "invalid max_clients json -> 64");
+
+    /* MaxClients PARSE-FAIL → 64 on both sides. NOTE: on the JSON side this
+     * passes against pre-refactor code for a coincidental reason (old code
+     * silently skips the write and the default happens to be 64); after A3
+     * the table writes the 64 fallback explicitly + warns (accepted
+     * deviation (2) in the plan background). The struct outcome is pinned
+     * either way, so this block stays in the A1 listing unconditionally. */
+    p = write_tmp("[Auth]\nMaxClients = abc\n");
+    mqvpn_config_defaults(&a);
+    rc = mqvpn_config_load(&a, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "parse-fail max_clients ini load rc 0");
+    mqvpn_config_defaults(&b);
+    mqvpn_config_load_json_filecfg(&b, "{\"max_clients\":\"abc\"}");
+    ASSERT_EQ_INT(a.max_clients, 64, "parse-fail max_clients ini -> 64");
+    ASSERT_EQ_INT(b.max_clients, 64, "parse-fail max_clients json -> 64");
+
+    /* InitMaxPathId over bound → keep default 0 on both sides */
+    p = write_tmp("[Multipath]\nInitMaxPathId = 4294967296\n");
+    mqvpn_config_defaults(&a);
+    rc = mqvpn_config_load(&a, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "over-bound impid ini load rc 0");
+    mqvpn_config_defaults(&b);
+    mqvpn_config_load_json_filecfg(&b, "{\"init_max_path_id\":4294967296}");
+    ASSERT_EQ_INT((int)a.init_max_path_id, 0, "over-bound impid ini keeps 0");
+    ASSERT_EQ_INT((int)b.init_max_path_id, 0, "over-bound impid json keeps 0");
+
+    /* Reorder u16 over 0xffff → keep default on both sides */
+    p = write_tmp("[Reorder]\nClassifyWindow = 70000\n");
+    mqvpn_config_defaults(&a);
+    rc = mqvpn_config_load(&a, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "over-bound classify_window ini load rc 0");
+    mqvpn_config_defaults(&b);
+    mqvpn_config_load_json_filecfg(&b, "{\"reorder\":{\"classify_window\":70000}}");
+    ASSERT_EQ_INT((int)a.reorder.classify_window, (int)b.reorder.classify_window,
+                  "over-bound classify_window parity");
+
+    /* Reorder u32 in (2^31, 2^32) must parse on BOTH sides (deb2115 pin) */
+    p = write_tmp("[Reorder]\nMaxFlows = 3000000000\n");
+    mqvpn_config_defaults(&a);
+    rc = mqvpn_config_load(&a, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "u32 high ini load rc 0");
+    mqvpn_config_defaults(&b);
+    mqvpn_config_load_json_filecfg(&b, "{\"reorder\":{\"max_flows\":3000000000}}");
+    ASSERT_EQ_INT(a.reorder.max_flows == 3000000000u, 1, "u32 high ini");
+    ASSERT_EQ_INT(b.reorder.max_flows == 3000000000u, 1, "u32 high json");
+}
+
 int
 main(void)
 {
@@ -1558,6 +1781,10 @@ main(void)
     test_resolve_malformed_ini();
     test_resolve_trailing_garbage_port();
     test_resolve_port_leading_junk();
+
+    /* INI/JSON scalar-key parity */
+    test_ini_json_scalar_parity();
+    test_ini_json_invalid_scalar_parity();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
