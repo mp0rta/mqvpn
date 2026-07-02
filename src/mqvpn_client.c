@@ -43,6 +43,9 @@
 
 #include "flow_sched.h"
 #include "hybrid/classifier.h"
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+#  include "hybrid/lwip_glue.h"
+#endif
 #include "icmp.h"
 #include "path_state_machine.h"
 #include "reorder.h"
@@ -121,6 +124,14 @@ struct cli_conn_s {
     mqvpn_reorder_tx_t *reorder_tx;
     mqvpn_reorder_rx_t *reorder_rx;
     int peer_reorder_supported;
+
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* H2: lwIP TCP-lane stack. Created at tunnel-ready (needs the resolved
+     * inner MTU) when hybrid is enabled and tcp mode != raw; freed on conn
+     * teardown. This struct is private to this TU, so gating the field on
+     * the build flag is ODR-safe. */
+    mqvpn_lwip_ctx_t *lwip_ctx;
+#endif
 };
 
 /* Role of an H3 request stream. v0.8 has exactly one role; hybrid mode's
@@ -295,6 +306,28 @@ xqc_custom_timestamp(void)
     if (s_xqc_clock_fn) return s_xqc_clock_fn(s_xqc_clock_ctx);
     return now_us();
 }
+
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+/* lwIP glue shims (H2). Clock: same injected-clock rules as client_now_us. */
+static uint64_t
+cli_lwip_clock_wrapper(void *clock_ctx)
+{
+    return client_now_us((const mqvpn_client_t *)clock_ctx);
+}
+
+/* lwIP-generated packets (SYN-ACK, ACKs, downlink data) are locally
+ * originated by the stack, not tunnel-forwarded — hand them straight to
+ * cbs.tun_output (the same sink every other lane's TUN delivery ends at)
+ * WITHOUT forward_inner_ip's TTL decrement / dgram stats, which are
+ * forwarding semantics. */
+static void
+cli_lwip_output_wrapper(const uint8_t *pkt, size_t len, void *output_ctx)
+{
+    mqvpn_client_t *c = (mqvpn_client_t *)output_ctx;
+    if (!c->tun_active) return;
+    c->cbs.tun_output(pkt, len, c->user_ctx);
+}
+#endif /* MQVPN_HYBRID_TCP_LANE_ENABLED */
 
 static int64_t
 now_ms_mono(void)
@@ -1195,6 +1228,21 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
         }
         c->mtu = tun_mtu;
 
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+        /* H2: bring up the lwIP TCP-lane stack now that the inner MTU is
+         * resolved (lwIP derives each pcb's MSS from netif->mtu at accept
+         * time). Gate mirrors the classifier's TCP-lane rule: enabled &&
+         * tcp mode != raw. Alloc failure degrades to RAW (lwip_ctx stays
+         * NULL), same policy as the reorder engines above. */
+        if (!conn->lwip_ctx && c->config.hybrid.enabled &&
+            c->config.hybrid.tcp_mode != MQVPN_HYBRID_TCP_RAW) {
+            conn->lwip_ctx = mqvpn_lwip_ctx_new(cli_lwip_clock_wrapper, c,
+                                                cli_lwip_output_wrapper, c, tun_mtu);
+            if (!conn->lwip_ctx)
+                LOG_W(c, "lwIP ctx create failed; TCP lane disabled (RAW fallback)");
+        }
+#endif
+
         /* Build tunnel info for callback */
         mqvpn_tunnel_info_t info = {0};
         info.struct_size = sizeof(info);
@@ -1681,6 +1729,13 @@ cli_conn_destroy(mqvpn_client_t *c)
         mqvpn_reorder_rx_free(conn->reorder_rx);
         conn->reorder_rx = NULL;
     }
+
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    if (conn->lwip_ctx) {
+        mqvpn_lwip_ctx_free(conn->lwip_ctx);
+        conn->lwip_ctx = NULL;
+    }
+#endif
 
     free(conn);
     c->conn = NULL;
@@ -2711,6 +2766,11 @@ mqvpn_client_tick(mqvpn_client_t *c)
     if (c->conn && c->conn->reorder_rx)
         mqvpn_reorder_rx_tick(c->conn->reorder_rx, client_now_us(c));
 
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* H2: drive lwIP's manual timers (tcp_tmr cadence lives in the glue). */
+    if (c->conn && c->conn->lwip_ctx) mqvpn_lwip_tick(c->conn->lwip_ctx);
+#endif
+
     return MQVPN_OK;
 }
 
@@ -2868,6 +2928,20 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
             }
         }
     }
+
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* H2: lwIP TCP-lane timer (retransmits, TIME-WAIT reaping). Unlike the
+     * Recovery / Stability blocks above, this one MAY fill in a wake where
+     * xquic asked for none (`ms <= 0`): a lone TCP-lane flow's retransmit
+     * timer must fire even when xquic is fully idle, else the flow stalls.
+     * BBR-pacing starvation doesn't apply — we only shorten `ms` or fill
+     * an empty slot, never extend. Returns -1 when no lwIP timer is
+     * pending, which leaves `ms` untouched (no forced wakeup when idle). */
+    if (c->conn && c->conn->lwip_ctx) {
+        int lwip_ms = mqvpn_lwip_next_timeout_ms(c->conn->lwip_ctx);
+        if (lwip_ms >= 0 && (ms <= 0 || lwip_ms < ms)) ms = lwip_ms;
+    }
+#endif
 
     out->next_timer_ms = ms > 0 ? ms : 1;
     out->tun_readable = (c->tun_active && !c->backpressure) ? 1 : 0;
