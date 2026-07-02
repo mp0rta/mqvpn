@@ -195,8 +195,9 @@ mqvpn_lwip_ctx_new(mqvpn_lwip_clock_fn clock_fn, void *clock_ctx,
         goto fail_pcb; /* on failure the original pcb is untouched */
     }
     ctx->listen_pcb = lpcb;
-    /* tcp_accept() registration happens in the tcp_lane task — the glue
-     * stays free of flow-table types. */
+    /* tcp_accept() registration is the caller's move (via
+     * mqvpn_lwip_ctx_set_accept_cb below) — the glue stays free of
+     * flow-table types. */
 
     ctx->tcp_tmr_last_ms = sys_now();
     ctx->ip_reass_last_ms = ctx->tcp_tmr_last_ms;
@@ -230,6 +231,15 @@ mqvpn_lwip_ctx_free(mqvpn_lwip_ctx_t *ctx)
     netif_remove(&ctx->netif);
     if (s_lwip_ctx_for_sys_now == ctx) s_lwip_ctx_for_sys_now = NULL;
     free(ctx);
+}
+
+void
+mqvpn_lwip_ctx_set_accept_cb(mqvpn_lwip_ctx_t *ctx, mqvpn_lwip_accept_fn cb, void *arg)
+{
+    /* listen_pcb is the tcp_listen()-swapped LISTEN pcb; tcp_arg/tcp_accept
+     * both operate on it (accepted pcbs inherit the arg at accept time). */
+    tcp_arg(ctx->listen_pcb, arg);
+    tcp_accept(ctx->listen_pcb, cb);
 }
 
 int

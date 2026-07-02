@@ -191,6 +191,24 @@ set_target_properties(lwip_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # below (mqvpn_lib) and further down (mqvpn_shared) — variable expansion in
 # add_library() is immediate, not deferred.
 list(APPEND MQVPN_LIB_SOURCES ${CMAKE_SOURCE_DIR}/src/hybrid/lwip_glue.c)
+
+# H2a micro-benchmark rig (Chunk 1 gate): TUN → classifier → lwIP → byte
+# sink, NO QUIC. Standalone executable, deliberately NOT part of mqvpn_lib —
+# links the hybrid sources directly. Driven by
+# benchmarks/tcp_lane_microbench/run.sh (gate: >= 10 Gbit/s).
+add_executable(tcp_lane_microbench
+    benchmarks/tcp_lane_microbench/harness.c
+    src/hybrid/classifier.c
+    src/hybrid/lwip_glue.c
+    src/log.c
+)
+target_link_libraries(tcp_lane_microbench lwip_core)
+target_include_directories(tcp_lane_microbench PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/include
+)
+set_target_properties(tcp_lane_microbench PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 endif() # MQVPN_HYBRID_TCP_LANE_BUILD
 
 # ---------- libmqvpn (static library — no libevent, no platform I/O) ----------

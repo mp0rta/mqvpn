@@ -10,6 +10,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* err_t only — tcp_accept_fn's exact return/param type (an arch-dependent
+ * signed-char typedef; redefining it here would risk a silent mismatch).
+ * struct tcp_pcb stays a forward declaration: callers that only pass pcbs
+ * through need no lwIP internals. This keeps lwIP types out of the PUBLIC
+ * header (include/libmqvpn.h) — lwip_glue.h itself is internal to
+ * src/hybrid/ and its consumers already build against lwip_core. */
+#include "lwip/err.h"
+struct tcp_pcb;
+
 typedef struct mqvpn_lwip_ctx mqvpn_lwip_ctx_t;
 
 /* clock_us: matches client_now_us()'s signature shape (microseconds);
@@ -48,6 +57,15 @@ void mqvpn_lwip_ctx_free(mqvpn_lwip_ctx_t *ctx);
  * dst). Returns 0 on success, <0 if pbuf alloc failed (caller drops the
  * packet). */
 int mqvpn_lwip_input(mqvpn_lwip_ctx_t *ctx, const uint8_t *pkt, size_t len);
+
+/* Register the accept callback + its arg on the glue-owned wildcard
+ * listener. Signature matches lwIP's tcp_accept_fn exactly; newpcb is the
+ * freshly accepted connection pcb (its local_ip/local_port are the original
+ * inner destination — wildcard intercept). Callers: tcp_lane.c (flow table)
+ * and the H2a micro-benchmark harness (byte sink). */
+typedef err_t (*mqvpn_lwip_accept_fn)(void *arg, struct tcp_pcb *newpcb, err_t err);
+void mqvpn_lwip_ctx_set_accept_cb(mqvpn_lwip_ctx_t *ctx, mqvpn_lwip_accept_fn cb,
+                                  void *arg);
 
 /* Drive lwIP's manual timers (LWIP_TIMERS=0: the sys_timeout wheel is
  * compiled out; the glue calls tcp_tmr()/ip_reass_tmr() itself on their
