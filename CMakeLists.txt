@@ -142,7 +142,10 @@ set(MQVPN_LIB_SOURCES
     src/hybrid/classifier.c
 )
 
-# ─── lwIP (hybrid mode TCP lane, Linux-only v1 — see MQVPN_HYBRID_TCP_LANE_BUILD) ───
+# ---------- lwIP (hybrid mode TCP lane — see MQVPN_HYBRID_TCP_LANE_BUILD) ----------
+# Deliberately single-mode: no pre-built LWIP_BUILD_DIR variant (unlike
+# xquic's two-mode pattern above) — lwIP is a handful of .c files, always
+# built from source. YAGNI; add a pre-built mode only if a real need appears.
 if(MQVPN_HYBRID_TCP_LANE_BUILD)
 set(LWIP_ROOT ${CMAKE_SOURCE_DIR}/third_party/lwip)
 set(LWIP_PORT_DIR ${CMAKE_SOURCE_DIR}/src/hybrid/lwip_port)
@@ -176,10 +179,12 @@ target_include_directories(lwip_core PUBLIC
 # debug.h gates on #ifndef LWIP_NOASSERT — the macro must be entirely absent
 # in Debug (defining it =0 would still disable asserts), present in Release.
 target_compile_definitions(lwip_core PRIVATE $<$<CONFIG:Release>:LWIP_NOASSERT>)
+# Vendored third-party code — not held to -Werror (ENABLE_SANITIZERS adds it
+# at directory scope; clang trips on lwIP's tautological-compare warnings).
+target_compile_options(lwip_core PRIVATE -Wno-error)
 # mqvpn_shared (a SHARED target) links this static lib below — its objects
 # must be position-independent, same reason xquic-static is unusable there.
 set_target_properties(lwip_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
-set(LWIP_LIB lwip_core)
 
 # Registered into the SAME shared list classifier.c (H1) already lives in.
 # Must happen here, before MQVPN_LIB_SOURCES is consumed by add_library()
@@ -208,7 +213,7 @@ else()
     target_link_libraries(mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} pthread)
 endif()
 if(MQVPN_HYBRID_TCP_LANE_BUILD)
-    target_link_libraries(mqvpn_lib ${LWIP_LIB})
+    target_link_libraries(mqvpn_lib lwip_core)
     target_compile_definitions(mqvpn_lib PRIVATE MQVPN_HYBRID_TCP_LANE_ENABLED)
 endif()
 
@@ -280,7 +285,7 @@ target_include_directories(mqvpn_shared
 # Shared lib needs shared xquic (static .a lacks -fPIC)
 target_link_libraries(mqvpn_shared xquic ${SSL_LIB} ${CRYPTO_LIB} pthread)
 if(MQVPN_HYBRID_TCP_LANE_BUILD)
-    target_link_libraries(mqvpn_shared ${LWIP_LIB})
+    target_link_libraries(mqvpn_shared lwip_core)
     target_compile_definitions(mqvpn_shared PRIVATE MQVPN_HYBRID_TCP_LANE_ENABLED)
 endif()
 
