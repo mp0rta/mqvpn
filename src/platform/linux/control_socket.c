@@ -97,95 +97,102 @@ struct ctrl_socket_s {
 /* ── Command dispatch ────────────────────────────────────────────────────── */
 
 static int
-dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
+ctrl_cmd_add_user(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
 {
-    char cmd[32] = {0};
-    const char *v = json_find_key(req, "cmd");
-    if (!v || json_read_string(v, cmd, sizeof(cmd)) < 0)
-        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"missing cmd\"}");
-
-    if (strcmp(cmd, "add_user") == 0) {
-        char name[64] = {0}, key[256] = {0};
-        const char *nv = json_find_key(req, "name");
-        const char *kv = json_find_key(req, "key");
-        if (!nv || json_read_string(nv, name, sizeof(name)) < 0 || !kv ||
-            json_read_string(kv, key, sizeof(key)) < 0)
-            return snprintf(resp, resp_len,
-                            "{\"ok\":false,\"error\":\"name and key required\"}");
-
-        int rc = mqvpn_server_add_user(server, name, key);
-        if (rc != MQVPN_OK)
-            return snprintf(resp, resp_len,
-                            "{\"ok\":false,\"error\":\"add_user failed (%d)\"}", rc);
-        return snprintf(resp, resp_len, "{\"ok\":true}");
-
-    } else if (strcmp(cmd, "remove_user") == 0) {
-        char name[64] = {0};
-        const char *nv = json_find_key(req, "name");
-        if (!nv || json_read_string(nv, name, sizeof(name)) < 0)
-            return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"name required\"}");
-
-        int rc = mqvpn_server_remove_user(server, name);
-        if (rc != MQVPN_OK)
-            return snprintf(resp, resp_len,
-                            "{\"ok\":false,\"error\":\"user not found\"}");
-        return snprintf(resp, resp_len, "{\"ok\":true}");
-
-    } else if (strcmp(cmd, "list_users") == 0) {
-        char unames[MQVPN_MAX_USERS][64];
-        int n_users = mqvpn_server_list_users(server, unames, MQVPN_MAX_USERS);
-
-        char users[MQVPN_MAX_USERS * 68 + 8];
-        int pos = 0;
-        users[pos++] = '[';
-        for (int i = 0; i < n_users; i++) {
-            if (i > 0) users[pos++] = ',';
-            /* Clamp pos to prevent underflow on sizeof(users) - pos */
-            int w =
-                snprintf(users + pos, sizeof(users) - (size_t)pos, "\"%s\"", unames[i]);
-            if (w > 0 && (size_t)(pos + w) < sizeof(users))
-                pos += w;
-            else
-                break; /* truncated — stop appending */
-        }
-        users[pos++] = ']';
-        users[pos] = '\0';
-        return snprintf(resp, resp_len, "{\"ok\":true,\"users\":%s}", users);
-
-    } else if (strcmp(cmd, "get_stats") == 0) {
-        mqvpn_stats_t st = {0};
-        st.struct_size = sizeof(st);
-        mqvpn_server_get_stats(server, &st);
-        int nc = mqvpn_server_get_n_clients(server);
-        uint64_t uptime = mqvpn_server_uptime_seconds(server);
+    char name[64] = {0}, key[256] = {0};
+    const char *nv = json_find_key(req, "name");
+    const char *kv = json_find_key(req, "key");
+    if (!nv || json_read_string(nv, name, sizeof(name)) < 0 || !kv ||
+        json_read_string(kv, key, sizeof(key)) < 0)
         return snprintf(resp, resp_len,
-                        "{\"ok\":true,\"n_clients\":%d,"
-                        "\"bytes_tx\":%" PRIu64 ",\"bytes_rx\":%" PRIu64 ","
-                        "\"dgram_sent\":%" PRIu64 ",\"dgram_recv\":%" PRIu64 ","
-                        "\"dgram_lost\":%" PRIu64 ",\"dgram_acked\":%" PRIu64 ","
-                        "\"uptime_sec\":%" PRIu64 "}",
-                        nc, st.bytes_tx, st.bytes_rx, st.dgram_sent, st.dgram_recv,
-                        st.dgram_lost, st.dgram_acked, uptime);
+                        "{\"ok\":false,\"error\":\"name and key required\"}");
 
-    } else if (strcmp(cmd, "get_status") == 0) {
-        mqvpn_client_info_t clients[MQVPN_MAX_USERS];
-        int n_clients = 0;
-        mqvpn_server_get_client_info(server, clients, MQVPN_MAX_USERS, &n_clients);
+    int rc = mqvpn_server_add_user(server, name, key);
+    if (rc != MQVPN_OK)
+        return snprintf(resp, resp_len,
+                        "{\"ok\":false,\"error\":\"add_user failed (%d)\"}", rc);
+    return snprintf(resp, resp_len, "{\"ok\":true}");
+}
 
-        uint64_t now = 0;
-        struct timeval tv;
-        if (gettimeofday(&tv, NULL) == 0)
-            now = (uint64_t)tv.tv_sec * 1000000 + (uint64_t)tv.tv_usec;
+static int
+ctrl_cmd_remove_user(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
+{
+    char name[64] = {0};
+    const char *nv = json_find_key(req, "name");
+    if (!nv || json_read_string(nv, name, sizeof(name)) < 0)
+        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"name required\"}");
 
-        /* Truncation discipline: any append that would not fit sets
-         * `truncated = 1`. After both loops we check the flag once and
-         * substitute a small "response too large" envelope so a malformed
-         * inner JSON never escapes. The caller-side guard is now defence
-         * in depth, not the only line of defence. */
-        char buf[CTRL_MAX_RESP_BYTES];
-        int pos = 0;
-        int truncated = 0;
-        int w;
+    int rc = mqvpn_server_remove_user(server, name);
+    if (rc != MQVPN_OK)
+        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"user not found\"}");
+    return snprintf(resp, resp_len, "{\"ok\":true}");
+}
+
+static int
+ctrl_cmd_list_users(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
+{
+    (void)req;
+    char unames[MQVPN_MAX_USERS][64];
+    int n_users = mqvpn_server_list_users(server, unames, MQVPN_MAX_USERS);
+
+    char users[MQVPN_MAX_USERS * 68 + 8];
+    int pos = 0;
+    users[pos++] = '[';
+    for (int i = 0; i < n_users; i++) {
+        if (i > 0) users[pos++] = ',';
+        /* Clamp pos to prevent underflow on sizeof(users) - pos */
+        int w = snprintf(users + pos, sizeof(users) - (size_t)pos, "\"%s\"", unames[i]);
+        if (w > 0 && (size_t)(pos + w) < sizeof(users))
+            pos += w;
+        else
+            break; /* truncated — stop appending */
+    }
+    users[pos++] = ']';
+    users[pos] = '\0';
+    return snprintf(resp, resp_len, "{\"ok\":true,\"users\":%s}", users);
+}
+
+static int
+ctrl_cmd_get_stats(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
+{
+    (void)req;
+    mqvpn_stats_t st = {0};
+    st.struct_size = sizeof(st);
+    mqvpn_server_get_stats(server, &st);
+    int nc = mqvpn_server_get_n_clients(server);
+    uint64_t uptime = mqvpn_server_uptime_seconds(server);
+    return snprintf(resp, resp_len,
+                    "{\"ok\":true,\"n_clients\":%d,"
+                    "\"bytes_tx\":%" PRIu64 ",\"bytes_rx\":%" PRIu64 ","
+                    "\"dgram_sent\":%" PRIu64 ",\"dgram_recv\":%" PRIu64 ","
+                    "\"dgram_lost\":%" PRIu64 ",\"dgram_acked\":%" PRIu64 ","
+                    "\"uptime_sec\":%" PRIu64 "}",
+                    nc, st.bytes_tx, st.bytes_rx, st.dgram_sent, st.dgram_recv,
+                    st.dgram_lost, st.dgram_acked, uptime);
+}
+
+static int
+ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
+{
+    (void)req;
+    mqvpn_client_info_t clients[MQVPN_MAX_USERS];
+    int n_clients = 0;
+    mqvpn_server_get_client_info(server, clients, MQVPN_MAX_USERS, &n_clients);
+
+    uint64_t now = 0;
+    struct timeval tv;
+    if (gettimeofday(&tv, NULL) == 0)
+        now = (uint64_t)tv.tv_sec * 1000000 + (uint64_t)tv.tv_usec;
+
+    /* Truncation discipline: any append that would not fit sets
+     * `truncated = 1`. After both loops we check the flag once and
+     * substitute a small "response too large" envelope so a malformed
+     * inner JSON never escapes. The caller-side guard is now defence
+     * in depth, not the only line of defence. */
+    char buf[CTRL_MAX_RESP_BYTES];
+    int pos = 0;
+    int truncated = 0;
+    int w;
 
 #define APPEND(...)                                                      \
     do {                                                                 \
@@ -197,113 +204,124 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
         pos += w;                                                        \
     } while (0)
 
-        APPEND("{\"ok\":true,\"n_clients\":%d,\"clients\":[", n_clients);
+    APPEND("{\"ok\":true,\"n_clients\":%d,\"clients\":[", n_clients);
 
-        for (int i = 0; i < n_clients; i++) {
-            mqvpn_client_info_t *ci = &clients[i];
-            uint64_t conn_sec = (ci->connected_at_us > 0 && now > ci->connected_at_us)
-                                    ? (now - ci->connected_at_us) / 1000000
-                                    : 0;
+    for (int i = 0; i < n_clients; i++) {
+        mqvpn_client_info_t *ci = &clients[i];
+        uint64_t conn_sec = (ci->connected_at_us > 0 && now > ci->connected_at_us)
+                                ? (now - ci->connected_at_us) / 1000000
+                                : 0;
 
-            if (i > 0) APPEND(",");
-            APPEND("{\"user\":\"%s\",\"endpoint\":\"%s\","
-                   "\"connected_sec\":%" PRIu64 ","
-                   "\"bytes_tx\":%" PRIu64 ",\"bytes_rx\":%" PRIu64 ","
-                   "\"n_paths\":%d,\"paths\":[",
-                   ci->username, ci->endpoint, conn_sec, ci->bytes_tx, ci->bytes_rx,
-                   ci->n_paths);
+        if (i > 0) APPEND(",");
+        APPEND("{\"user\":\"%s\",\"endpoint\":\"%s\","
+               "\"connected_sec\":%" PRIu64 ","
+               "\"bytes_tx\":%" PRIu64 ",\"bytes_rx\":%" PRIu64 ","
+               "\"n_paths\":%d,\"paths\":[",
+               ci->username, ci->endpoint, conn_sec, ci->bytes_tx, ci->bytes_rx,
+               ci->n_paths);
 
-            for (int p = 0; p < ci->n_paths; p++) {
-                mqvpn_path_stats_t *ps = &ci->paths[p];
-                if (p > 0) APPEND(",");
-                APPEND("{\"path_id\":%" PRIu64 ",\"srtt_ms\":%" PRIu64
-                       ",\"min_rtt_ms\":%" PRIu64 ",\"cwnd\":%" PRIu64
-                       ",\"in_flight\":%" PRIu64 ",\"bytes_tx\":%" PRIu64
-                       ",\"bytes_rx\":%" PRIu64 ",\"pkt_sent\":%" PRIu64
-                       ",\"pkt_recv\":%" PRIu64 ",\"pkt_lost\":%" PRIu64
-                       ",\"state\":%u,\"state_label\":\"%s\"}",
-                       ps->path_id, ps->srtt_us / 1000, ps->min_rtt_us / 1000, ps->cwnd,
-                       ps->bytes_in_flight, ps->bytes_tx, ps->bytes_rx, ps->pkt_sent,
-                       ps->pkt_recv, ps->pkt_lost, ps->state,
-                       mqvpn_path_state_label(ps->state));
-            }
-
-            APPEND("]}");
+        for (int p = 0; p < ci->n_paths; p++) {
+            mqvpn_path_stats_t *ps = &ci->paths[p];
+            if (p > 0) APPEND(",");
+            APPEND(
+                "{\"path_id\":%" PRIu64 ",\"srtt_ms\":%" PRIu64 ",\"min_rtt_ms\":%" PRIu64
+                ",\"cwnd\":%" PRIu64 ",\"in_flight\":%" PRIu64 ",\"bytes_tx\":%" PRIu64
+                ",\"bytes_rx\":%" PRIu64 ",\"pkt_sent\":%" PRIu64 ",\"pkt_recv\":%" PRIu64
+                ",\"pkt_lost\":%" PRIu64 ",\"state\":%u,\"state_label\":\"%s\"}",
+                ps->path_id, ps->srtt_us / 1000, ps->min_rtt_us / 1000, ps->cwnd,
+                ps->bytes_in_flight, ps->bytes_tx, ps->bytes_rx, ps->pkt_sent,
+                ps->pkt_recv, ps->pkt_lost, ps->state, mqvpn_path_state_label(ps->state));
         }
 
         APPEND("]}");
+    }
 
-    get_status_done:
+    APPEND("]}");
+
+get_status_done:
 #undef APPEND
-        if (truncated) {
-            /* The envelope is 41 bytes — well under any plausible resp_len
-             * (callers pass CTRL_MAX_RESP_BYTES - 2 = 256 KB - 2). The same
-             * guard exists at the connection layer as defence in depth. */
-            return snprintf(resp, resp_len,
-                            "{\"ok\":false,\"error\":\"response too large\"}");
-        }
-        return snprintf(resp, resp_len, "%.*s", pos, buf);
+    if (truncated) {
+        /* The envelope is 41 bytes — well under any plausible resp_len
+         * (callers pass CTRL_MAX_RESP_BYTES - 2 = 256 KB - 2). The same
+         * guard exists at the connection layer as defence in depth. */
+        return snprintf(resp, resp_len,
+                        "{\"ok\":false,\"error\":\"response too large\"}");
+    }
+    return snprintf(resp, resp_len, "%.*s", pos, buf);
+}
 
-    } else if (strcmp(cmd, "get_build_info") == 0) {
-        const char *ver = mqvpn_version_string();
-        const char *sched = mqvpn_server_scheduler_label(server);
+static int
+ctrl_cmd_get_build_info(const char *req, char *resp, size_t resp_len,
+                        mqvpn_server_t *server)
+{
+    (void)req;
+    const char *ver = mqvpn_version_string();
+    const char *sched = mqvpn_server_scheduler_label(server);
 #ifdef XQC_ENABLE_FEC
-        int fec_enabled = 1;
+    int fec_enabled = 1;
 #else
-        int fec_enabled = 0;
+    int fec_enabled = 0;
 #endif
-        return snprintf(resp, resp_len,
-                        "{\"ok\":true,\"version\":\"%s\","
-                        "\"scheduler\":\"%s\",\"fec_enabled\":%d}",
-                        ver ? ver : "unknown", sched, fec_enabled);
+    return snprintf(resp, resp_len,
+                    "{\"ok\":true,\"version\":\"%s\","
+                    "\"scheduler\":\"%s\",\"fec_enabled\":%d}",
+                    ver ? ver : "unknown", sched, fec_enabled);
+}
 
-    } else if (strcmp(cmd, "get_fec_stats") == 0) {
-        char user[64] = {0};
-        const char *uv = json_find_key(req, "user");
-        if (!uv || json_read_string(uv, user, sizeof(user)) < 0)
-            return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"user required\"}");
+static int
+ctrl_cmd_get_fec_stats(const char *req, char *resp, size_t resp_len,
+                       mqvpn_server_t *server)
+{
+    char user[64] = {0};
+    const char *uv = json_find_key(req, "user");
+    if (!uv || json_read_string(uv, user, sizeof(user)) < 0)
+        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"user required\"}");
 
-        mqvpn_internal_fec_stats_t fs;
-        int rc = mqvpn_server_get_client_fec_stats(server, user, &fs);
-        if (rc < 0)
-            return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"fec not built\"}");
-        if (rc == 0)
-            return snprintf(resp, resp_len,
-                            "{\"ok\":false,\"error\":\"user not found\"}");
+    mqvpn_internal_fec_stats_t fs;
+    int rc = mqvpn_server_get_client_fec_stats(server, user, &fs);
+    if (rc < 0)
+        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"fec not built\"}");
+    if (rc == 0)
+        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"user not found\"}");
 
-        /* `user` is echoed without explicit JSON-escape: mqvpn_server_add_user
-         * and add_user_entry reject quote, backslash, and control bytes at
-         * intake (src/auth.c), so any user that survived to the sessions[]
-         * table cannot produce JSON-unsafe output here. If a future code path
-         * registers users via an unvalidated source (e.g., LDAP bridge), this
-         * point must add a JSON-safe escape pass. */
-        return snprintf(resp, resp_len,
-                        "{\"ok\":true,\"user\":\"%s\","
-                        "\"enable_fec\":%u,\"mp_state\":%u,"
-                        "\"mp_state_label\":\"%s\","
-                        "\"fec_send_cnt\":%" PRIu64 ",\"fec_recover_cnt\":%" PRIu64 ","
-                        "\"lost_dgram_cnt\":%" PRIu64 ","
-                        "\"total_app_bytes\":%" PRIu64 ","
-                        "\"standby_app_bytes\":%" PRIu64 "}",
-                        user, (unsigned)fs.enable_fec, (unsigned)fs.mp_state,
-                        fs.mp_state_label ? fs.mp_state_label : "unknown",
-                        fs.fec_send_cnt, fs.fec_recover_cnt, fs.lost_dgram_cnt,
-                        fs.total_app_bytes, fs.standby_app_bytes);
+    /* `user` is echoed without explicit JSON-escape: mqvpn_server_add_user
+     * and add_user_entry reject quote, backslash, and control bytes at
+     * intake (src/auth.c), so any user that survived to the sessions[]
+     * table cannot produce JSON-unsafe output here. If a future code path
+     * registers users via an unvalidated source (e.g., LDAP bridge), this
+     * point must add a JSON-safe escape pass. */
+    return snprintf(resp, resp_len,
+                    "{\"ok\":true,\"user\":\"%s\","
+                    "\"enable_fec\":%u,\"mp_state\":%u,"
+                    "\"mp_state_label\":\"%s\","
+                    "\"fec_send_cnt\":%" PRIu64 ",\"fec_recover_cnt\":%" PRIu64 ","
+                    "\"lost_dgram_cnt\":%" PRIu64 ","
+                    "\"total_app_bytes\":%" PRIu64 ","
+                    "\"standby_app_bytes\":%" PRIu64 "}",
+                    user, (unsigned)fs.enable_fec, (unsigned)fs.mp_state,
+                    fs.mp_state_label ? fs.mp_state_label : "unknown", fs.fec_send_cnt,
+                    fs.fec_recover_cnt, fs.lost_dgram_cnt, fs.total_app_bytes,
+                    fs.standby_app_bytes);
+}
 
-    } else if (strcmp(cmd, "get_all_fec_stats") == 0) {
-        /* Bulk variant collapsing the per-user N+1 RPC pattern in scrapers
-         * (Prometheus exporter) to a single call. Same XQC_ENABLE_FEC guard
-         * as get_fec_stats — we surface "fec not built" so the consumer can
-         * stop probing for the rest of the scrape. */
-        mqvpn_internal_fec_entry_t entries[MQVPN_MAX_USERS];
-        int n = mqvpn_server_get_all_fec_stats(server, entries, MQVPN_MAX_USERS);
-        if (n < 0)
-            return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"fec not built\"}");
+static int
+ctrl_cmd_get_all_fec_stats(const char *req, char *resp, size_t resp_len,
+                           mqvpn_server_t *server)
+{
+    (void)req;
+    /* Bulk variant collapsing the per-user N+1 RPC pattern in scrapers
+     * (Prometheus exporter) to a single call. Same XQC_ENABLE_FEC guard
+     * as get_fec_stats — we surface "fec not built" so the consumer can
+     * stop probing for the rest of the scrape. */
+    mqvpn_internal_fec_entry_t entries[MQVPN_MAX_USERS];
+    int n = mqvpn_server_get_all_fec_stats(server, entries, MQVPN_MAX_USERS);
+    if (n < 0)
+        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"fec not built\"}");
 
-        char buf[CTRL_MAX_RESP_BYTES];
-        int pos = 0;
-        int truncated = 0;
-        int w;
+    char buf[CTRL_MAX_RESP_BYTES];
+    int pos = 0;
+    int truncated = 0;
+    int w;
 
 #define APPEND(...)                                                      \
     do {                                                                 \
@@ -315,73 +333,103 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
         pos += w;                                                        \
     } while (0)
 
-        /* Field name parity with get_status: "n_clients" + "clients[]". A
-         * connected user IS a client in mqvpn nomenclature; "users" is used
-         * by list_users for the registered auth-table users (a superset). */
-        APPEND("{\"ok\":true,\"n_clients\":%d,\"clients\":[", n);
-        for (int i = 0; i < n; i++) {
-            mqvpn_internal_fec_entry_t *e = &entries[i];
-            if (i > 0) APPEND(",");
-            APPEND("{\"user\":\"%s\","
-                   "\"enable_fec\":%u,\"mp_state\":%u,"
-                   "\"mp_state_label\":\"%s\","
-                   "\"fec_send_cnt\":%" PRIu64 ",\"fec_recover_cnt\":%" PRIu64 ","
-                   "\"lost_dgram_cnt\":%" PRIu64 ","
-                   "\"total_app_bytes\":%" PRIu64 ","
-                   "\"standby_app_bytes\":%" PRIu64 "}",
-                   e->user, (unsigned)e->stats.enable_fec, (unsigned)e->stats.mp_state,
-                   e->stats.mp_state_label ? e->stats.mp_state_label : "unknown",
-                   e->stats.fec_send_cnt, e->stats.fec_recover_cnt,
-                   e->stats.lost_dgram_cnt, e->stats.total_app_bytes,
-                   e->stats.standby_app_bytes);
-        }
-        APPEND("]}");
-
-    get_all_fec_done:
-#undef APPEND
-        if (truncated) {
-            return snprintf(resp, resp_len,
-                            "{\"ok\":false,\"error\":\"response too large\"}");
-        }
-        return snprintf(resp, resp_len, "%.*s", pos, buf);
-
-    } else if (strcmp(cmd, "get_reorder_stats") == 0) {
-        /* Aggregate reorder-shim RX counters across all live conns (§17). One
-         * fixed-shape object, no per-conn array, so a single snprintf with a
-         * bounded resp_len is sufficient — no APPEND/truncation dance needed.
-         * The getter zero-fills when no conn has reorder enabled, so the JSON
-         * is always well-formed (all-zero counters). */
-        mqvpn_reorder_stats_t rs;
-        if (mqvpn_server_get_reorder_stats(server, &rs) < 0)
-            return snprintf(resp, resp_len,
-                            "{\"ok\":false,\"error\":\"internal error\"}");
-
-        return snprintf(
-            resp, resp_len,
-            "{\"ok\":true,\"reorder\":{"
-            "\"gap_count\":%" PRIu64 ",\"gap_filled_count\":%" PRIu64 ","
-            "\"gap_timeout_count\":%" PRIu64 ",\"gap_overflow_count\":%" PRIu64 ","
-            "\"gap_demote_count\":%" PRIu64 ",\"gap_reset_count\":%" PRIu64 ","
-            "\"ack_demote_count\":%" PRIu64 ",\"too_late_drop_count\":%" PRIu64 ","
-            "\"too_far_ahead_drop_count\":%" PRIu64 ",\"duplicate_drop_count\":%" PRIu64
-            ","
-            "\"pool_drop_count\":%" PRIu64 ",\"per_flow_limit_drop_count\":%" PRIu64 ","
-            "\"reset_discard_count\":%" PRIu64 ",\"delivered_count\":%" PRIu64 ","
-            "\"added_latency_p99_ms\":%.3f,\"added_latency_max_ms\":%.3f,"
-            "\"added_latency_buffered_p99_ms\":%.3f"
-            "}}",
-            rs.gap_count, rs.gap_filled_count, rs.gap_timeout_count,
-            rs.gap_overflow_count, rs.gap_demote_count, rs.gap_reset_count,
-            rs.ack_demote_count, rs.too_late_drop_count, rs.too_far_ahead_drop_count,
-            rs.duplicate_drop_count, rs.pool_drop_count, rs.per_flow_limit_drop_count,
-            rs.reset_discard_count, rs.delivered_count,
-            mqvpn_reorder_latency_percentile(&rs, 0.99),
-            (double)rs.residence_max_us / 1000.0,
-            mqvpn_reorder_latency_buffered_percentile(&rs, 0.99));
-
-    } else {
-        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"unknown cmd\"}");
+    /* Field name parity with get_status: "n_clients" + "clients[]". A
+     * connected user IS a client in mqvpn nomenclature; "users" is used
+     * by list_users for the registered auth-table users (a superset). */
+    APPEND("{\"ok\":true,\"n_clients\":%d,\"clients\":[", n);
+    for (int i = 0; i < n; i++) {
+        mqvpn_internal_fec_entry_t *e = &entries[i];
+        if (i > 0) APPEND(",");
+        APPEND("{\"user\":\"%s\","
+               "\"enable_fec\":%u,\"mp_state\":%u,"
+               "\"mp_state_label\":\"%s\","
+               "\"fec_send_cnt\":%" PRIu64 ",\"fec_recover_cnt\":%" PRIu64 ","
+               "\"lost_dgram_cnt\":%" PRIu64 ","
+               "\"total_app_bytes\":%" PRIu64 ","
+               "\"standby_app_bytes\":%" PRIu64 "}",
+               e->user, (unsigned)e->stats.enable_fec, (unsigned)e->stats.mp_state,
+               e->stats.mp_state_label ? e->stats.mp_state_label : "unknown",
+               e->stats.fec_send_cnt, e->stats.fec_recover_cnt, e->stats.lost_dgram_cnt,
+               e->stats.total_app_bytes, e->stats.standby_app_bytes);
     }
+    APPEND("]}");
+
+get_all_fec_done:
+#undef APPEND
+    if (truncated) {
+        return snprintf(resp, resp_len,
+                        "{\"ok\":false,\"error\":\"response too large\"}");
+    }
+    return snprintf(resp, resp_len, "%.*s", pos, buf);
+}
+
+static int
+ctrl_cmd_get_reorder_stats(const char *req, char *resp, size_t resp_len,
+                           mqvpn_server_t *server)
+{
+    (void)req;
+    /* Aggregate reorder-shim RX counters across all live conns (§17). One
+     * fixed-shape object, no per-conn array, so a single snprintf with a
+     * bounded resp_len is sufficient — no APPEND/truncation dance needed.
+     * The getter zero-fills when no conn has reorder enabled, so the JSON
+     * is always well-formed (all-zero counters). */
+    mqvpn_reorder_stats_t rs;
+    if (mqvpn_server_get_reorder_stats(server, &rs) < 0)
+        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"internal error\"}");
+
+    return snprintf(
+        resp, resp_len,
+        "{\"ok\":true,\"reorder\":{"
+        "\"gap_count\":%" PRIu64 ",\"gap_filled_count\":%" PRIu64 ","
+        "\"gap_timeout_count\":%" PRIu64 ",\"gap_overflow_count\":%" PRIu64 ","
+        "\"gap_demote_count\":%" PRIu64 ",\"gap_reset_count\":%" PRIu64 ","
+        "\"ack_demote_count\":%" PRIu64 ",\"too_late_drop_count\":%" PRIu64 ","
+        "\"too_far_ahead_drop_count\":%" PRIu64 ",\"duplicate_drop_count\":%" PRIu64 ","
+        "\"pool_drop_count\":%" PRIu64 ",\"per_flow_limit_drop_count\":%" PRIu64 ","
+        "\"reset_discard_count\":%" PRIu64 ",\"delivered_count\":%" PRIu64 ","
+        "\"added_latency_p99_ms\":%.3f,\"added_latency_max_ms\":%.3f,"
+        "\"added_latency_buffered_p99_ms\":%.3f"
+        "}}",
+        rs.gap_count, rs.gap_filled_count, rs.gap_timeout_count, rs.gap_overflow_count,
+        rs.gap_demote_count, rs.gap_reset_count, rs.ack_demote_count,
+        rs.too_late_drop_count, rs.too_far_ahead_drop_count, rs.duplicate_drop_count,
+        rs.pool_drop_count, rs.per_flow_limit_drop_count, rs.reset_discard_count,
+        rs.delivered_count, mqvpn_reorder_latency_percentile(&rs, 0.99),
+        (double)rs.residence_max_us / 1000.0,
+        mqvpn_reorder_latency_buffered_percentile(&rs, 0.99));
+}
+
+typedef int (*ctrl_cmd_fn)(const char *req, char *resp, size_t resp_len,
+                           mqvpn_server_t *server);
+
+static const struct {
+    const char *name;
+    ctrl_cmd_fn fn;
+} ctrl_cmds[] = {
+    {"add_user", ctrl_cmd_add_user},
+    {"remove_user", ctrl_cmd_remove_user},
+    {"list_users", ctrl_cmd_list_users},
+    {"get_stats", ctrl_cmd_get_stats},
+    {"get_status", ctrl_cmd_get_status},
+    {"get_build_info", ctrl_cmd_get_build_info},
+    {"get_fec_stats", ctrl_cmd_get_fec_stats},
+    {"get_all_fec_stats", ctrl_cmd_get_all_fec_stats},
+    {"get_reorder_stats", ctrl_cmd_get_reorder_stats},
+};
+
+static int
+dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
+{
+    char cmd[32] = {0};
+    const char *v = json_find_key(req, "cmd");
+    if (!v || json_read_string(v, cmd, sizeof(cmd)) < 0)
+        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"missing cmd\"}");
+
+    for (size_t i = 0; i < sizeof(ctrl_cmds) / sizeof(ctrl_cmds[0]); i++)
+        if (strcmp(cmd, ctrl_cmds[i].name) == 0)
+            return ctrl_cmds[i].fn(req, resp, resp_len, server);
+
+    return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"unknown cmd\"}");
 }
 
 /* ── Connection read handler ─────────────────────────────────────────────── */
