@@ -1026,7 +1026,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     mqvpn_config_set_insecure(lib_cfg, cfg->insecure);
     mqvpn_config_set_multipath(lib_cfg, cfg->n_paths > 1 ? 1 : 0);
     mqvpn_config_set_reconnect(lib_cfg, cfg->reconnect,
-                               cfg->reconnect_interval > 0 ? cfg->reconnect_interval : 5);
+                               cfg->reconnect_interval > 0 ? cfg->reconnect_interval : 1);
     mqvpn_config_set_killswitch_hint(lib_cfg, cfg->kill_switch);
 
     mqvpn_config_set_log_level(lib_cfg, (mqvpn_log_level_t)cfg->log_level);
