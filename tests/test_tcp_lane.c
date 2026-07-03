@@ -2402,6 +2402,211 @@ test_removal_updates_stats(void)
     mqvpn_tcp_lane_free(lane);
 }
 
+/* ─── Idle-timeout eviction sweep (Task 13) ───
+ *
+ * All tests here use a small tcp_idle_timeout_sec (5s) instead of the 300s
+ * default so the clock-advance math stays readable; g_fake_now starts at
+ * relay_reset's fixed 12345 baseline in every test. */
+
+static void
+test_idle_eviction_basic(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.tcp_idle_timeout_sec = 5;
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xf001ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 9001, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    mqvpn_flow_key_t k = mk_std_key(9001);
+    int out_raw = -1;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 1,
+                  "flow present before sweep");
+
+    g_fake_now += (uint64_t)(cfg.tcp_idle_timeout_sec + 1) * 1000000ULL;
+    mqvpn_tcp_lane_tick(lane, g_fake_now);
+
+    mqvpn_tcp_lane_stats_t stats;
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_idle_evicted, 1, "idle flow evicted");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 0,
+                  "lookup miss after eviction");
+    ASSERT_EQ_INT(g_tcp_abort_calls, 1, "teardown funnel aborted the pcb");
+    ASSERT_EQ_INT(g_h3_close_calls, 1, "teardown funnel closed the h3 request");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_idle_eviction_fresh_survives(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.tcp_idle_timeout_sec = 5;
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xf002ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 9002, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    g_fake_now += 1ULL * 1000000ULL; /* well under the 5s timeout */
+    mqvpn_tcp_lane_tick(lane, g_fake_now);
+
+    mqvpn_tcp_lane_stats_t stats;
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_idle_evicted, 0, "fresh flow survives the sweep");
+    mqvpn_flow_key_t k = mk_std_key(9002);
+    int out_raw = -1;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 1, "flow still present");
+    ASSERT_EQ_INT(g_tcp_abort_calls, 0, "no teardown fired");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_idle_eviction_sticky_raw_survives(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.tcp_idle_timeout_sec = 5;
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xf003ULL, NULL, fake_clock, NULL);
+
+    mqvpn_flow_key_t k = make_key(4100, 80);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 0), 0, "sticky-RAW marker committed");
+
+    g_fake_now += 1000ULL * 1000000ULL; /* ancient by any timeout */
+    mqvpn_tcp_lane_tick(lane, g_fake_now);
+
+    mqvpn_tcp_lane_stats_t stats;
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_idle_evicted, 0,
+                  "sticky-RAW marker never idle-evicted, however ancient");
+    int out_raw = -1;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 1, "marker still present");
+    ASSERT_EQ_INT(out_raw, 1, "still sticky-RAW");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_idle_eviction_timeout_zero_never_evicts(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.tcp_idle_timeout_sec = 0; /* opt-out: never evict */
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xf004ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 9004, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    g_fake_now += 1000000ULL * 1000000ULL; /* absurdly far in the future */
+    mqvpn_tcp_lane_tick(lane, g_fake_now);
+
+    mqvpn_tcp_lane_stats_t stats;
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_idle_evicted, 0, "timeout=0 disables the sweep entirely");
+    mqvpn_flow_key_t k = mk_std_key(9004);
+    int out_raw = -1;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 1, "flow untouched");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+/* Pins fix B: a to_tcp=1 flow committed by on_syn but never fed through the
+ * lwIP accept callback (PENDING_ACCEPT, no pcb, no h3_request) must be
+ * stamped at creation time, not carry the calloc'd last_activity_us == 0
+ * that would otherwise make it evictable on the very first sweep. */
+static void
+test_idle_eviction_pending_accept_stamped(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.tcp_idle_timeout_sec = 5;
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xf005ULL, NULL, fake_clock, NULL);
+
+    mqvpn_flow_key_t k = make_key(4200, 80);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 1), 0,
+                  "to_tcp flow committed, PENDING_ACCEPT");
+
+    g_fake_now += 1ULL * 1000000ULL; /* well under the 5s timeout */
+    mqvpn_tcp_lane_tick(lane, g_fake_now);
+
+    mqvpn_tcp_lane_stats_t stats;
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_idle_evicted, 0,
+                  "PENDING_ACCEPT survives a sweep within the timeout");
+    int out_raw = -1;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 1,
+                  "flow still pending-accept");
+
+    g_fake_now += (uint64_t)(cfg.tcp_idle_timeout_sec + 1) * 1000000ULL;
+    mqvpn_tcp_lane_tick(lane, g_fake_now);
+
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_idle_evicted, 1,
+                  "PENDING_ACCEPT evicted once truly idle from its creation stamp");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 0,
+                  "lookup miss after eviction");
+    ASSERT_EQ_INT(g_tcp_abort_calls, 0, "no pcb existed to abort (never reached accept)");
+    ASSERT_EQ_INT(g_h3_close_calls, 0, "no h3 request existed to close (never bound)");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+/* Pins audit item C: a later on_lwip_sent stamp (downlink-traffic activity)
+ * overrides the original creation-time stamp, so a flow well past its
+ * ORIGINAL deadline survives once activity refreshed the clock. */
+static void
+test_idle_eviction_activity_refresh(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.tcp_idle_timeout_sec = 5;
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xf006ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 9006, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    /* Advance to just under the original timeout, then refresh via the
+     * downlink sent-callback stamp (uplink data uses on_lwip_recv; downlink
+     * data reaches last_activity_us via on_lwip_sent, fired when lwIP ACKs
+     * our tcp_write — see the audit comment on mqvpn_tcp_lane_on_lwip_sent). */
+    g_fake_now += (uint64_t)(cfg.tcp_idle_timeout_sec - 1) * 1000000ULL;
+    mqvpn_tcp_lane_on_lwip_sent(f, f->pcb, 0);
+
+    /* Push past what would have been the ORIGINAL creation-based deadline —
+     * the refreshed stamp must keep the flow alive here. */
+    g_fake_now += (uint64_t)(cfg.tcp_idle_timeout_sec - 1) * 1000000ULL;
+    mqvpn_tcp_lane_tick(lane, g_fake_now);
+
+    mqvpn_tcp_lane_stats_t stats;
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_idle_evicted, 0,
+                  "activity refresh keeps the flow alive past the original deadline");
+    mqvpn_flow_key_t k = mk_std_key(9006);
+    int out_raw = -1;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 1, "flow still present");
+
+    /* Finally let it go idle for real, measured from the refreshed stamp. */
+    g_fake_now += (uint64_t)(cfg.tcp_idle_timeout_sec + 1) * 1000000ULL;
+    mqvpn_tcp_lane_tick(lane, g_fake_now);
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_idle_evicted, 1,
+                  "eventually evicted once truly idle from the refreshed stamp");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
 int
 main(void)
 {
@@ -2440,6 +2645,12 @@ main(void)
     test_clean_close_uplink_fin_first();
     test_clean_close_downlink_fin_first();
     test_removal_updates_stats();
+    test_idle_eviction_basic();
+    test_idle_eviction_fresh_survives();
+    test_idle_eviction_sticky_raw_survives();
+    test_idle_eviction_timeout_zero_never_evicts();
+    test_idle_eviction_pending_accept_stamped();
+    test_idle_eviction_activity_refresh();
 
     fprintf(stderr, "test_tcp_lane: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

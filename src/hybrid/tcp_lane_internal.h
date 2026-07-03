@@ -143,16 +143,21 @@ typedef struct mqvpn_tcp_flow {
     uint8_t *downlink_stash;
     uint16_t downlink_stash_len;
 
-    /* Back-pointer to the owning lane, set at accept time. Needed because
-     * the lwIP callbacks (on_lwip_recv/on_lwip_sent) receive only the flow
-     * as tcp_arg, not the lane — this is how they reach lane->clock_fn for
+    /* Back-pointer to the owning lane. Set in mqvpn_tcp_lane_on_syn at flow
+     * creation for every to_tcp=1 flow (Task 13: the idle sweep's teardown
+     * funnel can reach a flow before it ever gets to the accept callback,
+     * and tcp_lane_remove_flow asserts this non-NULL), re-affirmed
+     * (harmlessly, same pointer) by the accept callback. Needed because the
+     * lwIP callbacks (on_lwip_recv/on_lwip_sent) receive only the flow as
+     * tcp_arg, not the lane — this is how they reach lane->clock_fn for
      * last_activity_us stamping, how on_lwip_sent's resume path can call the
      * public mqvpn_tcp_lane_downlink_pump(lane, stream) API, and (Task 12)
      * how the uplink TU's fatal-FIN-send/clean-close paths reach
      * tcp_lane_remove_flow(f->lane, f) without needing a `lane` parameter of
-     * their own. NULL for sticky-RAW markers (they never reach the accept
-     * callback) — every function that dereferences f->lane is only ever
-     * reachable for flows that DID reach the accept callback. */
+     * their own. NULL for sticky-RAW markers (they never reach the teardown
+     * funnel at all — excluded from the idle sweep by state, and never
+     * bound to a pcb/h3_request) — every function that dereferences f->lane
+     * is only ever reachable for a to_tcp=1 flow. */
     mqvpn_tcp_lane_t *lane;
 
     struct mqvpn_tcp_flow *next; /* hash chain */

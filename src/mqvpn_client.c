@@ -3215,6 +3215,11 @@ mqvpn_client_tick(mqvpn_client_t *c)
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
     /* H2: drive lwIP's manual timers (tcp_tmr cadence lives in the glue). */
     if (c->conn && c->conn->lwip_ctx) mqvpn_lwip_tick(c->conn->lwip_ctx);
+    /* H2/Task 13: TCP-lane idle-timeout eviction sweep. Order relative to
+     * mqvpn_lwip_tick above is irrelevant (both run every tick; neither
+     * depends on the other having just run). */
+    if (c->conn && c->conn->tcp_lane)
+        mqvpn_tcp_lane_tick(c->conn->tcp_lane, client_now_us(c));
 #endif
 
     return MQVPN_OK;

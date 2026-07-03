@@ -218,6 +218,35 @@ mqvpn_tcp_lane_on_syn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, int t
     }
     f->key = *key;
     f->state = to_tcp ? TCP_FLOW_PENDING_ACCEPT : TCP_FLOW_STICKY_RAW;
+    /* Stamp-at-creation (Task 13 fix): without this, a to_tcp=1 flow parked
+     * in PENDING_ACCEPT (SYN committed here, but lwIP hasn't yet driven the
+     * accept callback that would otherwise stamp it — see
+     * mqvpn_tcp_lane_lwip_accept below) carries last_activity_us == 0 from
+     * calloc and would be evicted on the very first idle sweep regardless of
+     * its true age. Stamped unconditionally (both to_tcp values, not just
+     * to_tcp=1) rather than branching: sticky-RAW markers are excluded from
+     * the sweep by f->state == TCP_FLOW_STICKY_RAW regardless of what
+     * last_activity_us holds, so stamping them too costs nothing and avoids
+     * a needless if. Same NULL-tolerant clock idiom as every other stamp
+     * site in this file. */
+    f->last_activity_us = lane->clock_fn ? lane->clock_fn(lane->clock_ctx) : 0;
+    if (to_tcp) {
+        /* Task 13: the idle sweep can now reach a PENDING_ACCEPT flow (SYN
+         * committed, lwIP hasn't yet driven the accept callback) through the
+         * teardown funnel (tcp_lane_teardown_flow -> tcp_lane_remove_flow),
+         * which dereferences f->lane and asserts it non-NULL. Previously
+         * f->lane was set ONLY in mqvpn_tcp_lane_lwip_accept, because every
+         * OTHER teardown call site only ever ran on a flow that had already
+         * reached that callback. Set it here instead — the accept callback's
+         * own `f->lane = lane` assignment becomes a harmless re-affirmation
+         * of the same value. Sticky-RAW markers deliberately do NOT get
+         * this: they never reach the teardown funnel at all (excluded from
+         * the sweep by state, and never bound to a pcb/h3_request — see
+         * tcp_lane_remove_flow's STICKY_RAW comment), so the "f->lane ==
+         * NULL for markers" invariant documented in tcp_lane_internal.h
+         * stays intact. */
+        f->lane = lane;
+    }
 
     f->next = lane->buckets[bucket];
     lane->buckets[bucket] = f;
@@ -230,12 +259,56 @@ mqvpn_tcp_lane_on_syn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, int t
     return 0;
 }
 
+/* Idle-timeout eviction sweep (Task 13). Walks every bucket and tears down
+ * any TCP-lane flow (any state except STICKY_RAW/CLOSING — see below) whose
+ * last_activity_us is older than cfg.tcp_idle_timeout_sec. Runs from
+ * mqvpn_client_tick, i.e. neither a lwIP-invoked frame nor an xquic-context
+ * notify: this is a THIRD calling context tcp_lane_flow_status_t's contract
+ * never anticipated, but the existing xquic-context idiom already fits —
+ * there is no ERR_ABRT to translate and no xquic frame to avoid re-entering,
+ * so the returned status is simply discarded (void-cast), same as
+ * on_stream_rejected/on_h3_closing/on_h3_writable above. */
 void
 mqvpn_tcp_lane_tick(mqvpn_tcp_lane_t *lane, uint64_t now_us)
 {
-    (void)lane;
-    (void)now_us;
-    /* Task 13 fills this in (idle eviction sweep). */
+    if (!lane) {
+        return;
+    }
+    /* cfg.tcp_idle_timeout_sec == 0 means "never evict" — classifier.h's
+     * field comment documents tcp_lane as the consumer; 0 is a deliberate
+     * opt-out (e.g. a deployment that wants tcp=stream flows to live for the
+     * whole connection lifetime), not an instant-timeout footgun. Guard here
+     * rather than at the config layer so mqvpn_hybrid_config_validate stays
+     * free to keep accepting 0 for this field. */
+    if (lane->cfg.tcp_idle_timeout_sec == 0) {
+        return;
+    }
+    uint64_t idle_us = (uint64_t)lane->cfg.tcp_idle_timeout_sec * 1000000ULL;
+    for (uint32_t b = 0; b < lane->n_buckets; b++) {
+        mqvpn_tcp_flow_t *f = lane->buckets[b];
+        while (f) {
+            /* Reconciliation E: tcp_lane_teardown_flow (via
+             * tcp_lane_remove_flow) unlinks and frees f — save next BEFORE
+             * that call, never dereference f again afterward. */
+            mqvpn_tcp_flow_t *next = f->next;
+            /* STICKY_RAW is excluded by design (never idle-evicted — see the
+             * marker-cap comment on TCP_LANE_RAW_MARKER_CAP above: markers
+             * must outlive the sweep or a tcp=auto single-path client would
+             * permanently thrash the RAW/TCP verdict). CLOSING is the
+             * never-assigned defensive guard value (tcp_lane_internal.h);
+             * skipped here for the same belt-and-suspenders reason the
+             * dispatch checks elsewhere in this file skip it. Wraparound-safe
+             * age test, same form as reorder_tx.c's evict_one_idle: a
+             * backwards-clock blip (now_us < last_activity_us) must not
+             * underflow and spuriously evict a live flow. */
+            if (f->state != TCP_FLOW_STICKY_RAW && f->state != TCP_FLOW_CLOSING &&
+                now_us > f->last_activity_us && now_us - f->last_activity_us > idle_us) {
+                lane->stats.flows_idle_evicted++; /* before teardown frees f */
+                (void)tcp_lane_teardown_flow(f, /*close_h3=*/1);
+            }
+            f = next;
+        }
+    }
 }
 
 void
@@ -949,7 +1022,11 @@ mqvpn_tcp_lane_lwip_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
     f->last_activity_us = lane->clock_fn ? lane->clock_fn(lane->clock_ctx) : 0;
     /* Task 11: back-pointer so the lwIP callbacks below (which only receive
      * f as tcp_arg, never the lane) can reach lane->clock_fn and re-enter
-     * mqvpn_tcp_lane_downlink_pump(lane, stream). */
+     * mqvpn_tcp_lane_downlink_pump(lane, stream). As of Task 13,
+     * mqvpn_tcp_lane_on_syn already set this for every to_tcp=1 flow at
+     * creation (PENDING_ACCEPT needs it too, for the idle sweep) — this is a
+     * harmless re-affirmation of the same pointer, kept for locality with
+     * the other per-accept field writes above. */
     f->lane = lane;
 
     tcp_arg(newpcb, f);
