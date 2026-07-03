@@ -10,6 +10,7 @@
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
 #include "mqvpn_scheduler.h"
+#include "mqvpn_server_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -919,19 +920,9 @@ cb_request_close(xqc_h3_request_t *h3_request, void *strm_user_data)
     return 0;
 }
 
-/* Parsed request headers relevant to dispatch/auth. Values live only for
- * the callback invocation. */
-typedef struct {
-    int is_connect;
-    int is_connect_ip;
-    const char *protocol; /* raw :protocol value, not NUL-terminated */
-    size_t protocol_len;
-    int has_scheme_https;
-    int has_capsule_proto;
-    int has_valid_path;
-    const char *auth_token; /* Bearer payload, not NUL-terminated */
-    size_t auth_token_len;
-} svr_req_headers_t;
+/* svr_req_headers_t is shared with src/hybrid/tcp_egress.c — defined in
+ * mqvpn_server_internal.h (see that header for why only this struct + two
+ * accessor functions moved, not the rest of this file's internals). */
 
 /* Walks the header list; also sets conn->peer_reorder_supported on the
  * mqvpn-reorder echo (deliberate side effect). */
@@ -956,10 +947,16 @@ svr_parse_request_headers(mqvpn_server_t *s, svr_stream_t *stream,
         if (h->name.iov_len == 7 && memcmp(h->name.iov_base, ":scheme", 7) == 0 &&
             h->value.iov_len == 5 && memcmp(h->value.iov_base, "https", 5) == 0)
             out->has_scheme_https = 1;
-        if (h->name.iov_len == 5 && memcmp(h->name.iov_base, ":path", 5) == 0 &&
-            h->value.iov_len >= 24 &&
-            memcmp(h->value.iov_base, "/.well-known/masque/ip/", 22) == 0)
-            out->has_valid_path = 1;
+        if (h->name.iov_len == 5 && memcmp(h->name.iov_base, ":path", 5) == 0) {
+            /* Raw capture for connect-tcp's own template parse
+             * (svr_tcp_egress_parse_path); has_valid_path below stays
+             * CONNECT-IP's specific fixed-prefix check. */
+            out->path = (const char *)h->value.iov_base;
+            out->path_len = h->value.iov_len;
+            if (h->value.iov_len >= 24 &&
+                memcmp(h->value.iov_base, "/.well-known/masque/ip/", 22) == 0)
+                out->has_valid_path = 1;
+        }
         if (h->name.iov_len == 16 &&
             memcmp(h->name.iov_base, "capsule-protocol", 16) == 0 &&
             h->value.iov_len == 2 && memcmp(h->value.iov_base, "?1", 2) == 0)
@@ -978,15 +975,25 @@ svr_parse_request_headers(mqvpn_server_t *s, svr_stream_t *stream,
     }
 }
 
-/* Credential check shared by every authenticated request type (CONNECT-IP
- * today; connect-tcp later). Constant-time over the global PSK and ALL
- * configured users regardless of early match. Returns 0 and writes the
- * matched identity ("(global)" or the user name) into out_username on
- * success; -1 on failure. Does NOT touch conn state and does NOT log —
- * the caller records username/connected_at_us, logs, and sends the 403.
- * Precondition: caller has already determined auth is required; with no
- * credentials configured this always returns -1. */
-static int
+/* Whether request-level auth must be checked at all — shared by CONNECT-IP
+ * and connect-tcp so the two protocols can never silently diverge on this.
+ * Declared in mqvpn_server_internal.h. */
+int
+svr_auth_required(const mqvpn_server_t *s)
+{
+    return (s->config.auth_key[0] != '\0') || (s->config.n_users > 0);
+}
+
+/* Credential check shared by every authenticated request type (CONNECT-IP,
+ * connect-tcp). Constant-time over the global PSK and ALL configured users
+ * regardless of early match. Returns 0 and writes the matched identity
+ * ("(global)" or the user name) into out_username on success; -1 on
+ * failure. Does NOT touch conn state and does NOT log — the caller records
+ * username/connected_at_us, logs, and sends the 403. Precondition: caller
+ * has already determined auth is required (svr_auth_required); with no
+ * credentials configured this always returns -1. Declared (non-static) in
+ * mqvpn_server_internal.h for src/hybrid/tcp_egress.c. */
+int
 svr_auth_check(const mqvpn_server_t *s, const char *auth_token, size_t auth_token_len,
                char *out_username, size_t username_cap)
 {
@@ -1045,8 +1052,7 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
         return -1;
     }
 
-    int auth_required = (s->config.auth_key[0] != '\0') || (s->config.n_users > 0);
-    if (auth_required) {
+    if (svr_auth_required(s)) {
         char username[sizeof(stream->conn->username)];
 
         if (svr_auth_check(s, hdrs->auth_token, hdrs->auth_token_len, username,
@@ -1065,6 +1071,26 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
     LOG_I(s, "Extended CONNECT for connect-ip received");
     if (svr_masque_send_response(h3_request, stream) < 0) return -1;
     return 0;
+}
+
+/* Egress ACL policy snapshot for src/hybrid/tcp_egress.c (connect-tcp
+ * destination check). Declared in mqvpn_server_internal.h. The tunnel
+ * subnet is derived from the SAME address pool CONNECT-IP address
+ * assignment uses (s->pool) — addr_pool.c enforces prefix_len in [16,30]
+ * at init time, so the mask/shift below never hits the n=0/n=32 edge cases
+ * mqvpn_cidr_mask_from_prefix guards for arbitrary (config-supplied)
+ * egress_allow/egress_deny entries. */
+void
+svr_get_egress_policy(const mqvpn_server_t *s, const mqvpn_cidr_entry_t **allow,
+                      int *n_allow, const mqvpn_cidr_entry_t **deny, int *n_deny,
+                      uint32_t *tunnel_net, uint32_t *tunnel_mask)
+{
+    *allow = s->config.hybrid.egress_allow;
+    *n_allow = s->config.hybrid.n_egress_allow;
+    *deny = s->config.hybrid.egress_deny;
+    *n_deny = s->config.hybrid.n_egress_deny;
+    *tunnel_mask = mqvpn_cidr_mask_from_prefix(s->pool.prefix_len);
+    *tunnel_net = ntohl(s->pool.base.s_addr) & *tunnel_mask;
 }
 
 /* CONNECT-IP stream body: capsule reassembly + ADDRESS_REQUEST handling. */

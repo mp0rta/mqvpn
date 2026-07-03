@@ -734,3 +734,46 @@ mqvpn_config_apply_hybrid(mqvpn_config_t *cfg, const mqvpn_hybrid_config_t *src)
     if (!cfg || !src) return;
     cfg->hybrid = *src;
 }
+
+int
+mqvpn_config_set_hybrid_connect_timeout(mqvpn_config_t *cfg, uint32_t sec)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    if (sec == 0) return MQVPN_ERR_INVALID_ARG;
+    cfg->hybrid.tcp_connect_timeout_sec = sec;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_hybrid_egress_acl(mqvpn_config_t *cfg, const char **allow, int n_allow,
+                                   const char **deny, int n_deny)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    if (n_allow < 0 || n_allow > MQVPN_EGRESS_ACL_MAX || n_deny < 0 ||
+        n_deny > MQVPN_EGRESS_ACL_MAX)
+        return MQVPN_ERR_INVALID_ARG;
+    if ((n_allow > 0 && !allow) || (n_deny > 0 && !deny)) return MQVPN_ERR_INVALID_ARG;
+
+    /* Validate into scratch buffers first: the whole call is atomic, so a
+     * malformed entry anywhere must leave cfg untouched. */
+    mqvpn_cidr_entry_t parsed_allow[MQVPN_EGRESS_ACL_MAX];
+    mqvpn_cidr_entry_t parsed_deny[MQVPN_EGRESS_ACL_MAX];
+    for (int i = 0; i < n_allow; i++) {
+        if (mqvpn_parse_cidr_v4(allow[i], &parsed_allow[i]) < 0)
+            return MQVPN_ERR_INVALID_ARG;
+    }
+    for (int i = 0; i < n_deny; i++) {
+        if (mqvpn_parse_cidr_v4(deny[i], &parsed_deny[i]) < 0)
+            return MQVPN_ERR_INVALID_ARG;
+    }
+
+    if (n_allow > 0)
+        memcpy(cfg->hybrid.egress_allow, parsed_allow,
+               sizeof(parsed_allow[0]) * (size_t)n_allow);
+    cfg->hybrid.n_egress_allow = n_allow;
+    if (n_deny > 0)
+        memcpy(cfg->hybrid.egress_deny, parsed_deny,
+               sizeof(parsed_deny[0]) * (size_t)n_deny);
+    cfg->hybrid.n_egress_deny = n_deny;
+    return MQVPN_OK;
+}

@@ -506,6 +506,23 @@ MQVPN_API int mqvpn_config_set_hybrid_tcp_mode(mqvpn_config_t *cfg, int mode);
  * 256 flows, 300 s idle timeout). */
 MQVPN_API int mqvpn_config_set_hybrid_limits(mqvpn_config_t *cfg, uint32_t tcp_max_flows,
                                              uint32_t tcp_idle_timeout_sec);
+/* Server-side egress connect() timeout for the connect-tcp lane, in
+ * seconds (default 10). sec must be > 0. */
+MQVPN_API int mqvpn_config_set_hybrid_connect_timeout(mqvpn_config_t *cfg, uint32_t sec);
+/* Egress ACL for the connect-tcp lane's destination check (server-side
+ * only; harmless but unused on clients). `allow` punches holes through the
+ * mandatory default-deny (loopback/RFC1918/link-local/CGNAT/multicast/
+ * broadcast/the server's own tunnel subnet); `deny` adds extra blocks
+ * evaluated after the default-deny set. Each entry is a strict "a.b.c.d/n"
+ * IPv4 CIDR string (n = 0..32, no bare-address form). Unlike the INI/JSON
+ * file-config loaders (which skip malformed entries with a warning), this
+ * setter validates the WHOLE call atomically: any malformed entry rejects
+ * the entire call with MQVPN_ERR_INVALID_ARG and leaves cfg unmodified.
+ * n_allow/n_deny may be 0 with allow/deny NULL; either list capped at
+ * MQVPN_EGRESS_ACL_MAX entries (src/hybrid/classifier.h). */
+MQVPN_API int mqvpn_config_set_hybrid_egress_acl(mqvpn_config_t *cfg, const char **allow,
+                                                 int n_allow, const char **deny,
+                                                 int n_deny);
 
 /* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock) */
 typedef uint64_t (*mqvpn_clock_fn)(void *ctx);

@@ -634,6 +634,8 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_U32(SEC_HYBRID, "TcpMaxFlows", "tcp_max_flows", hybrid.tcp_max_flows),
     CFG_U32(SEC_HYBRID, "TcpIdleTimeoutSec", "tcp_idle_timeout_sec",
             hybrid.tcp_idle_timeout_sec),
+    CFG_U32(SEC_HYBRID, "TcpConnectTimeoutSec", "tcp_connect_timeout_sec",
+            hybrid.tcp_connect_timeout_sec),
 };
 
 /* Shared typed store. Returns 0 on success, -1 on invalid value (caller
@@ -820,6 +822,56 @@ cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *
     }
 }
 
+/* Parse a JSON array of "a.b.c.d/n" CIDR strings into out[], capping at
+ * max_items (parity with the INI EgressAllow/EgressDeny cap). A malformed
+ * CIDR string is skipped with a warning (same tolerance as an invalid INI
+ * entry); malformed JSON syntax (unterminated string, wrong shape) aborts
+ * the whole array, same as json_read_string_array. */
+static int
+json_read_cidr_array(mqvpn_cidr_entry_t *out, int max_items, int *n_items, const char *p)
+{
+    if (!p || !out || !n_items || *p != '[') return -1;
+
+    p = json_skip_ws(p + 1);
+    int n = 0;
+    int dropped = 0;
+    while (*p && *p != ']') {
+        if (*p != '"') return -1;
+
+        char s[32];
+        if (json_read_string(p, s, sizeof(s)) < 0) return -1;
+
+        mqvpn_cidr_entry_t entry;
+        if (mqvpn_parse_cidr_v4(s, &entry) < 0) {
+            LOG_WRN("JSON: invalid hybrid egress CIDR '%s'; ignoring", s);
+        } else if (n < max_items) {
+            out[n++] = entry;
+        } else {
+            dropped++;
+        }
+
+        const char *e = p + 1;
+        while (*e && *e != '"') {
+            if (*e == '\\' && e[1]) e++;
+            e++;
+        }
+        if (*e != '"') return -1;
+        p = json_skip_ws(e + 1);
+
+        if (*p == ',')
+            p = json_skip_ws(p + 1);
+        else if (*p != ']')
+            return -1;
+    }
+
+    if (*p != ']') return -1;
+    if (dropped)
+        LOG_WRN("JSON: egress ACL array capped at %d items, dropped %d", max_items,
+                dropped);
+    *n_items = n;
+    return 0;
+}
+
 static int
 json_read_reorder_rules(mqvpn_file_config_t *cfg, const char *p)
 {
@@ -1000,6 +1052,33 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
         }
         return;
     }
+    case SEC_HYBRID: {
+        /* EgressAllow/EgressDeny are hand-coded like [Auth] User: repeated
+         * keys append to a list rather than mapping to one scalar field. A
+         * malformed entry (bad CIDR syntax) or an over-cap entry is
+         * skipped with a warning — it does not abort the whole config
+         * load, same tolerance as an invalid [Auth] User line. */
+        int is_allow = strcasecmp(key, "EgressAllow") == 0;
+        int is_deny = strcasecmp(key, "EgressDeny") == 0;
+        if (!is_allow && !is_deny) break;
+
+        mqvpn_cidr_entry_t entry;
+        if (mqvpn_parse_cidr_v4(val, &entry) < 0) {
+            LOG_WRN("%s:%d: invalid [Hybrid] %s '%s'", path, lineno, key, val);
+            return;
+        }
+
+        int *n = is_allow ? &cfg->hybrid.n_egress_allow : &cfg->hybrid.n_egress_deny;
+        mqvpn_cidr_entry_t *list =
+            is_allow ? cfg->hybrid.egress_allow : cfg->hybrid.egress_deny;
+        if (*n >= MQVPN_EGRESS_ACL_MAX) {
+            LOG_WRN("%s:%d: max %d %s entries supported, ignoring '%s'", path, lineno,
+                    MQVPN_EGRESS_ACL_MAX, key, val);
+            return;
+        }
+        list[(*n)++] = entry;
+        return;
+    }
     case SEC_NONE:
         LOG_WRN("%s:%d: key '%s' outside any section", path, lineno, key);
         return;
@@ -1055,6 +1134,20 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
 
     /* All scalar keys — one walk of the shared descriptor table. */
     cfg_key_apply_json(cfg, json_text, ro_raw, ro_end, hy_raw, hy_end);
+
+    /* [Hybrid] EgressAllow/EgressDeny — hand-coded like "users" below,
+     * bounded to the "hybrid" object span like every other hybrid key. */
+    if (hy_raw && hy_end) {
+        const char *ea_v = json_find_key_bounded(hy_raw, hy_end, "egress_allow");
+        if (ea_v && json_read_cidr_array(cfg->hybrid.egress_allow, MQVPN_EGRESS_ACL_MAX,
+                                         &cfg->hybrid.n_egress_allow, ea_v) < 0)
+            return -1;
+
+        const char *ed_v = json_find_key_bounded(hy_raw, hy_end, "egress_deny");
+        if (ed_v && json_read_cidr_array(cfg->hybrid.egress_deny, MQVPN_EGRESS_ACL_MAX,
+                                         &cfg->hybrid.n_egress_deny, ed_v) < 0)
+            return -1;
+    }
 
     char dns_buf[MQVPN_CONFIG_MAX_DNS][64];
     int n_dns = 0;

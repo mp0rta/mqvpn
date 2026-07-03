@@ -20,6 +20,7 @@
  */
 
 #include "libmqvpn.h"
+#include "hybrid/tcp_egress.h"
 #include "mqvpn_conn_settings.h"
 #include "mqvpn_internal.h"
 
@@ -113,6 +114,12 @@ typedef struct {
     size_t protocol_len;
     char authority[64];
     int auto_open; /* open the probe request from handshake_finished */
+    /* :path for the probe request; NULL -> "/probe" (the historical
+     * fixed probe path, still fine for tests that only care about
+     * :protocol dispatch). Must be set BEFORE the request is opened
+     * (either before harness_start with auto_open, or before a manual
+     * probe_open_request call). */
+    const char *path;
 
     int handshake_done;
     int response_done;
@@ -204,6 +211,7 @@ probe_open_request(probe_conn_t *p)
     xqc_h3_request_t *req = xqc_h3_request_create(p->engine, &p->cid, NULL, p);
     if (!req) return -1;
 
+    const char *path = p->path ? p->path : "/probe";
     xqc_http_header_t hdrs[5] = {
         {.name = {.iov_base = ":method", .iov_len = 7},
          .value = {.iov_base = "CONNECT", .iov_len = 7},
@@ -218,7 +226,7 @@ probe_open_request(probe_conn_t *p)
          .value = {.iov_base = p->authority, .iov_len = strlen(p->authority)},
          .flags = 0},
         {.name = {.iov_base = ":path", .iov_len = 5},
-         .value = {.iov_base = "/probe", .iov_len = 6},
+         .value = {.iov_base = (void *)path, .iov_len = strlen(path)},
          .flags = 0},
     };
     xqc_http_headers_t headers = {.headers = hdrs, .count = 5, .capacity = 5};
@@ -666,6 +674,35 @@ run_dispatch_probe(const char *protocol, size_t protocol_len, char *out_status,
     return ok ? 0 : -1;
 }
 
+/* Same as run_dispatch_probe but with a caller-chosen :path — needed for
+ * the connect-tcp ACL wiring test below, which must send a syntactically
+ * valid connect-tcp template (run_dispatch_probe's probes all use the
+ * fixed "/probe" path, which never gets past svr_tcp_egress_parse_path).
+ * auto_open is NOT used here: the path must be set on the probe before its
+ * request is opened, and auto_open would fire from handshake_finished
+ * before this function gets a chance to set it. */
+static int
+run_dispatch_probe_with_path(const char *protocol, size_t protocol_len, const char *path,
+                             char *out_status, size_t out_status_cap)
+{
+    harness_t h;
+    if (harness_start(&h, protocol, protocol_len, /*auto_open=*/0) != 0) return -1;
+    h.probe.path = path;
+
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    if (!h.probe.handshake_done || probe_open_request(&h.probe) != 0) {
+        harness_stop(&h);
+        return -1;
+    }
+
+    harness_pump(&h, &h.probe.response_done, 10000);
+    int ok = h.probe.response_done;
+    if (ok) snprintf(out_status, out_status_cap, "%s", h.probe.status);
+
+    harness_stop(&h);
+    return ok ? 0 : -1;
+}
+
 /* ── Tests ── */
 
 TEST(unrecognized_protocol_gets_501)
@@ -677,12 +714,28 @@ TEST(unrecognized_protocol_gets_501)
     ASSERT_STREQ(status, "501");
 }
 
-TEST(mqvpn_tcp_protocol_gets_403)
+TEST(mqvpn_tcp_bad_path_gets_400)
 {
-    /* Proves the dispatch branch itself is reached (the unconditional 403
-     * stub is replaced by real auth/ACL later). */
+    /* Proves the dispatch branch is reached and real request-path parsing
+     * runs: the probe's fixed "/probe" :path doesn't match the connect-tcp
+     * template, so (with no PSK configured, i.e. auth open) the request is
+     * rejected for a malformed path — not the old unconditional 403 stub. */
     char status[16] = {0};
     int rc = run_dispatch_probe("mqvpn-tcp", 9, status, sizeof(status));
+    ASSERT_EQ(rc, 0);
+    ASSERT_STREQ(status, "400");
+}
+
+TEST(mqvpn_tcp_acl_denied_gets_403)
+{
+    /* Proves the egress ACL is wired into the LIVE request path, not just
+     * unit-tested in isolation: a syntactically valid connect-tcp request
+     * targeting an RFC1918 address must be denied even though this
+     * harness's server has no PSK configured (the ACL is unconditional;
+     * only the identity check is optional). */
+    char status[16] = {0};
+    int rc = run_dispatch_probe_with_path(
+        "mqvpn-tcp", 9, "/.well-known/mqvpn/tcp/10.0.0.5/80/", status, sizeof(status));
     ASSERT_EQ(rc, 0);
     ASSERT_STREQ(status, "403");
 }
@@ -744,14 +797,134 @@ TEST(non_tunnel_close_keeps_tunnel_established)
     harness_stop(&h);
 }
 
+/* ── ACL decision core (pure, no live mqvpn_server_t) ── */
+
+static uint32_t
+ipv4(unsigned a, unsigned b, unsigned c, unsigned d)
+{
+    return ((uint32_t)a << 24) | ((uint32_t)b << 16) | ((uint32_t)c << 8) | d;
+}
+
+/* TEST-NET-2 (RFC 5737), ipv4(198,51,100,0): a neutral stand-in tunnel
+ * subnet that never overlaps the default-deny ranges or the public/
+ * RFC1918 IPs used below — isolates each ACL branch under test from the
+ * others. */
+#define NEUTRAL_TUNNEL_MASK 0xFFFFFF00u /* /24 */
+
+TEST(acl_blocks_rfc1918)
+{
+    int allowed = svr_tcp_egress_acl_decide(ipv4(10, 0, 0, 5), NULL, 0, NULL, 0,
+                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_blocks_loopback)
+{
+    int allowed = svr_tcp_egress_acl_decide(ipv4(127, 0, 0, 1), NULL, 0, NULL, 0,
+                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_allow_punches_hole)
+{
+    mqvpn_cidr_entry_t allow[1] = {{ipv4(10, 0, 0, 0), 0xFF000000u}};
+    int allowed = svr_tcp_egress_acl_decide(ipv4(10, 0, 0, 5), allow, 1, NULL, 0,
+                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    ASSERT_EQ(allowed, 1);
+}
+
+TEST(acl_blocks_own_tunnel_subnet)
+{
+    /* TEST-NET-3 (RFC 5737) as the tunnel subnet this time — outside every
+     * DEFAULT_DENY_V4 entry, so a deny here can only be the tunnel-subnet
+     * check, not an incidental default-deny match. No egress_deny at all. */
+    uint32_t tunnel_net = ipv4(203, 0, 113, 0);
+    uint32_t tunnel_mask = 0xFFFFFF00u;
+    int allowed = svr_tcp_egress_acl_decide(ipv4(203, 0, 113, 5), NULL, 0, NULL, 0,
+                                            tunnel_net, tunnel_mask);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_default_allows_public_ip)
+{
+    int allowed = svr_tcp_egress_acl_decide(ipv4(8, 8, 8, 8), NULL, 0, NULL, 0,
+                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    ASSERT_EQ(allowed, 1);
+}
+
+/* ── svr_tcp_egress_parse_path — fully attacker-controlled H3 :path bytes ── */
+
+TEST(parse_path_accepts_valid)
+{
+    const char *path = "/.well-known/mqvpn/tcp/192.168.1.1/8080/";
+    char host[16] = {0};
+    uint16_t port = 0;
+    int rc = svr_tcp_egress_parse_path(path, strlen(path), host, sizeof(host), &port);
+    ASSERT_EQ(rc, 0);
+    ASSERT_STREQ(host, "192.168.1.1");
+    ASSERT_EQ(port, 8080);
+}
+
+TEST(parse_path_rejects_oversized_host)
+{
+    /* "255.255.255.255" is 15 chars + NUL = exactly fills a 16-byte
+     * buffer; one more digit must not fit (and must not truncate). */
+    const char *path = "/.well-known/mqvpn/tcp/1255.255.255.255/80/";
+    char host[16];
+    uint16_t port;
+    int rc = svr_tcp_egress_parse_path(path, strlen(path), host, sizeof(host), &port);
+    ASSERT_EQ(rc == 0, 0);
+}
+
+TEST(parse_path_rejects_missing_port)
+{
+    const char *path = "/.well-known/mqvpn/tcp/1.2.3.4/";
+    char host[16];
+    uint16_t port;
+    int rc = svr_tcp_egress_parse_path(path, strlen(path), host, sizeof(host), &port);
+    ASSERT_EQ(rc == 0, 0);
+
+    const char *path2 = "/.well-known/mqvpn/tcp/1.2.3.4/notanumber/";
+    rc = svr_tcp_egress_parse_path(path2, strlen(path2), host, sizeof(host), &port);
+    ASSERT_EQ(rc == 0, 0);
+}
+
+TEST(parse_path_rejects_wrong_prefix)
+{
+    const char *path = "/probe";
+    char host[16];
+    uint16_t port;
+    int rc = svr_tcp_egress_parse_path(path, strlen(path), host, sizeof(host), &port);
+    ASSERT_EQ(rc == 0, 0);
+}
+
+TEST(parse_path_rejects_empty)
+{
+    char host[16];
+    uint16_t port;
+    int rc = svr_tcp_egress_parse_path("", 0, host, sizeof(host), &port);
+    ASSERT_EQ(rc == 0, 0);
+}
+
 int
 main(void)
 {
     printf("test_tcp_egress: server mqvpn-tcp dispatch tests\n");
 
     run_unrecognized_protocol_gets_501();
-    run_mqvpn_tcp_protocol_gets_403();
+    run_mqvpn_tcp_bad_path_gets_400();
+    run_mqvpn_tcp_acl_denied_gets_403();
     run_non_tunnel_close_keeps_tunnel_established();
+    run_acl_blocks_rfc1918();
+    run_acl_blocks_loopback();
+    run_acl_allow_punches_hole();
+    run_acl_blocks_own_tunnel_subnet();
+    run_acl_default_allows_public_ip();
+    run_parse_path_accepts_valid();
+    run_parse_path_rejects_oversized_host();
+    run_parse_path_rejects_missing_port();
+    run_parse_path_rejects_wrong_prefix();
+    run_parse_path_rejects_empty();
 
     printf("\n  %d/%d tests passed\n", g_tests_passed, g_tests_run);
     return (g_tests_passed == g_tests_run) ? 0 : 1;
