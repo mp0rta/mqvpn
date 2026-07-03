@@ -507,7 +507,10 @@ svr_tcp_egress_drain_body(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
         if (n > 0) {
             size_t off = 0;
             while (off < (size_t)n) {
-                ssize_t sent = send(ef->fd, buf + off, (size_t)n - off, MSG_DONTWAIT);
+                ssize_t sent;
+                do {
+                    sent = send(ef->fd, buf + off, (size_t)n - off, MSG_DONTWAIT);
+                } while (sent < 0 && errno == EINTR);
                 if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
                     svr_tcp_egress_stash_downlink(server, ef, buf + off, (size_t)n - off);
                     return 1;
@@ -545,8 +548,11 @@ svr_tcp_egress_flush_downlink_retry(mqvpn_server_t *server, svr_tcp_egress_flow_
 {
     size_t off = 0;
     while (off < ef->downlink_stash_len) {
-        ssize_t sent = send(ef->fd, ef->downlink_stash + off,
-                            ef->downlink_stash_len - off, MSG_DONTWAIT);
+        ssize_t sent;
+        do {
+            sent = send(ef->fd, ef->downlink_stash + off, ef->downlink_stash_len - off,
+                        MSG_DONTWAIT);
+        } while (sent < 0 && errno == EINTR);
         if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
         if (sent <= 0) {
             svr_tcp_egress_on_relay_error(server, ef, sent < 0 ? errno : 0);
@@ -859,7 +865,11 @@ svr_tcp_egress_on_relay_ready(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
     if (readable && !ef->uplink_withheld) {
         uint8_t buf[TCP_EGRESS_RELAY_CHUNK];
         ssize_t n;
-        while ((n = recv(ef->fd, buf, sizeof(buf), MSG_DONTWAIT)) > 0) {
+        for (;;) {
+            do {
+                n = recv(ef->fd, buf, sizeof(buf), MSG_DONTWAIT);
+            } while (n < 0 && errno == EINTR);
+            if (n <= 0) break;
             ssize_t sent = xqc_h3_request_send_body(ef->h3_request, buf, (size_t)n, 0);
             if (sent == -XQC_EAGAIN) sent = 0; /* normalize: nothing accepted */
             if (sent < 0) {
