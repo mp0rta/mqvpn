@@ -51,6 +51,22 @@
 #     scheduler's aggregation survives the stream lane (mqproxy reference:
 #     1.81x single-flow 2-path aggregation; 1.5x leaves margin for variance
 #     while still ruling out non-aggregating ~1.0x).
+#   Test 4 (TCP half-close, asymmetric-close row): a client half-closes its
+#     write side (shutdown(SHUT_WR)) but keeps reading; a server-side
+#     responder deliberately waits for the peer's FIN before replying, then
+#     closes. The reply only arrives if the half-close survived end-to-end
+#     through the client's lwIP termination and the server's egress relay
+#     (src/hybrid/tcp_egress.c's shutdown(fd, SHUT_WR) forwarding) — a real
+#     kernel TCP semantic no fake-double unit test can exercise.
+#   Test 5 (RST propagation, abortive-close row): an egress-side target sets
+#     SO_LINGER{1,0} and closes on SIGTERM, forcing the kernel to emit a real
+#     RST (not an incidental FIN) while the connection is live and flowing.
+#     Asserts the client-side reader (a) saw real data before the abort
+#     (proves "flowing", ruling out a same-shaped false pass from never
+#     connecting) and (b) tears down promptly (<5s, far under the 300s
+#     tcp_idle_timeout_sec default) — proof the RST propagates through the
+#     server's RESET_STREAM error-mapping rather than the client hanging
+#     toward the idle-eviction sweep.
 #
 # HTTP target addressing (Test 1): the client runs a full-tunnel default
 # route (0.0.0.0/1 + 128.0.0.0/1 via TUN, src/platform/linux/routing.c) with
@@ -94,6 +110,12 @@ HTTP_PID=""
 
 INNER_TCP_PORT=5402   # distinct from h1's 5401 — same CI job may run both
 
+# Ports for Test 4 (half-close) / Test 5 (RST propagation) — both bind on
+# the same HTTP_TARGET_IP loopback alias in NS_SERVER, distinct from every
+# other port already claimed above.
+HALFCLOSE_PORT=8071
+RST_PORT=8072
+
 CLIENT_LOG_T1="$(mktemp)"
 SERVER_LOG_T1="$(mktemp)"
 CLIENT_LOG_T7A="$(mktemp)"
@@ -108,6 +130,11 @@ CLIENT_LOG_T3A="$(mktemp)"
 SERVER_LOG_T3A="$(mktemp)"
 CLIENT_LOG_T3B="$(mktemp)"
 SERVER_LOG_T3B="$(mktemp)"
+CLIENT_LOG_T4="$(mktemp)"
+SERVER_LOG_T4="$(mktemp)"
+CLIENT_LOG_T5="$(mktemp)"
+SERVER_LOG_T5="$(mktemp)"
+RST_CLIENT_OUT="$(mktemp)"
 INI_T1="$(mktemp --suffix=.ini)"
 INI_T7A="$(mktemp --suffix=.ini)"
 INI_T7B="$(mktemp --suffix=.ini)"
@@ -127,11 +154,29 @@ cleanup_http_server() {
     ip netns exec "$NS_SERVER" ip addr del "${HTTP_TARGET_IP}/32" dev lo 2>/dev/null || true
 }
 
-trap 'cleanup_http_server; bench_cleanup; rm -rf "$HTTP_DOCROOT"; rm -f \
+# Background helper PIDs for Test 4's half-close responder and Test 5's RST
+# target + client-side reader — populated as each test starts them, so a
+# mid-run abort (trap on EXIT) can still reap whichever ones are live.
+HALFCLOSE_RESPONDER_PID=""
+RST_TARGET_PID=""
+RST_CLIENT_PID=""
+cleanup_bg_procs() {
+    local pid
+    for pid in "$HALFCLOSE_RESPONDER_PID" "$RST_TARGET_PID" "$RST_CLIENT_PID"; do
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        fi
+    done
+}
+
+trap 'cleanup_bg_procs; cleanup_http_server; bench_cleanup; rm -rf "$HTTP_DOCROOT"; rm -f \
     "$CLIENT_LOG_T1" "$SERVER_LOG_T1" "$CLIENT_LOG_T7A" "$SERVER_LOG_T7A" \
     "$CLIENT_LOG_T7B" "$SERVER_LOG_T7B" \
     "$CLIENT_LOG_T2A" "$SERVER_LOG_T2A" "$CLIENT_LOG_T2B" "$SERVER_LOG_T2B" \
     "$CLIENT_LOG_T3A" "$SERVER_LOG_T3A" "$CLIENT_LOG_T3B" "$SERVER_LOG_T3B" \
+    "$CLIENT_LOG_T4" "$SERVER_LOG_T4" "$CLIENT_LOG_T5" "$SERVER_LOG_T5" \
+    "$RST_CLIENT_OUT" \
     "$INI_T1" "$INI_T7A" "$INI_T7B" "$INI_T2A" "$INI_STREAM" \
     "$CURL_OUT" "$SENT_FILE_A" "$RECV_FILE_A" "$SENT_FILE_B" "$RECV_FILE_B"' EXIT
 
@@ -717,6 +762,158 @@ else
     fail=1
 fi
 
+# ─── Test 4/5 setup: rebuild single-path topology ─────────────────────────
+# Tests 4 and 5 prove close-mapping correctness, not scheduling — same
+# rationale as Tests 1/7/2. Test 3 left a 2-path topology behind; rebuild to
+# N=1 (re-adding the HTTP_TARGET_IP alias Test 3's rebuild also carried
+# forward, since bench_setup_netns_n fully deletes+recreates NS_SERVER).
+cleanup_http_server
+bench_setup_netns_n 1
+bench_add_server_host_routes 1
+ip netns exec "$NS_SERVER" ip addr add "${HTTP_TARGET_IP}/32" dev lo
+N_PATHS=1
+
+# ─── Test 4: TCP half-close (asymmetric-close row: shutdown(SHUT_WR)) ─────
+echo ""
+echo "=== Test 4: TCP half-close survives end-to-end (shutdown(SHUT_WR)) ==="
+hybrid_run "$INI_STREAM" "$SERVER_LOG_T4" "$CLIENT_LOG_T4"
+
+# Server-side responder: reads until it observes the peer's FIN (recv()
+# returns empty after "hello\n"), THEN replies, THEN closes. This ordering
+# is exactly what proves half-close survived end-to-end — if the impl
+# collapsed half-close into full-close anywhere along the client-lwIP /
+# server-egress relay, the reply never arrives.
+ip netns exec "$NS_SERVER" python3 -c "
+import socket
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('0.0.0.0', ${HALFCLOSE_PORT}))
+s.listen(1)
+conn, _ = s.accept()
+buf = b''
+while True:
+    chunk = conn.recv(4096)
+    if not chunk:
+        break  # peer FIN observed
+    buf += chunk
+conn.sendall(b'reply-after-halfclose\n')
+conn.close()
+" &
+HALFCLOSE_RESPONDER_PID=$!
+
+# Poll for readiness via ss (NOT a probe connect — the responder's listen
+# backlog is 1 and it does exactly one accept(), so an actual connect here
+# would consume the slot meant for the real client below).
+halfclose_ready=0
+for _ in $(seq 1 20); do
+    if ip netns exec "$NS_SERVER" ss -ltn 2>/dev/null | grep -q ":${HALFCLOSE_PORT} "; then
+        halfclose_ready=1
+        break
+    fi
+    sleep 0.5
+done
+
+if [ "$halfclose_ready" -ne 1 ]; then
+    echo "FAIL: half-close responder never became ready (port ${HALFCLOSE_PORT} not listening)"
+    fail=1
+    kill "$HALFCLOSE_RESPONDER_PID" 2>/dev/null || true
+    wait "$HALFCLOSE_RESPONDER_PID" 2>/dev/null || true
+    HALFCLOSE_RESPONDER_PID=""
+else
+    HALFCLOSE_RESULT="$(ip netns exec "$NS_CLIENT" timeout 20 python3 \
+        "${SCRIPT_DIR}/hybrid_h2_halfclose_client.py" \
+        "$HTTP_TARGET_IP" "$HALFCLOSE_PORT" 2>/dev/null || true)"
+    wait "$HALFCLOSE_RESPONDER_PID" 2>/dev/null || true
+    HALFCLOSE_RESPONDER_PID=""
+
+    if [ "$HALFCLOSE_RESULT" = "reply-after-halfclose" ]; then
+        echo "PASS: half-close reply received after peer FIN was observed server-side (reply-after-halfclose)"
+    else
+        echo "FAIL: half-close reply mismatch (got: '${HALFCLOSE_RESULT}')"
+        fail=1
+    fi
+fi
+
+# Confirm the traffic actually took the TCP lane (not a raw fallback that
+# would mask a half-close bug).
+assert_stream_lane_used "$CLIENT_LOG_T4" "Test4 half-close stream"
+
+bench_stop_vpn
+
+# ─── Test 5: RST propagation (abortive-close row: RESET_STREAM) ──────────
+echo ""
+echo "=== Test 5: RST propagation (SO_LINGER{1,0} -> prompt client teardown) ==="
+hybrid_run "$INI_STREAM" "$SERVER_LOG_T5" "$CLIENT_LOG_T5"
+
+ip netns exec "$NS_SERVER" python3 "${SCRIPT_DIR}/hybrid_h2_rst_target.py" \
+    "$RST_PORT" &
+RST_TARGET_PID=$!
+
+rst_target_ready=0
+for _ in $(seq 1 20); do
+    if ip netns exec "$NS_SERVER" ss -ltn 2>/dev/null | grep -q ":${RST_PORT} "; then
+        rst_target_ready=1
+        break
+    fi
+    sleep 0.5
+done
+
+if [ "$rst_target_ready" -ne 1 ]; then
+    echo "FAIL: RST target never became ready (port ${RST_PORT} not listening)"
+    fail=1
+    kill "$RST_TARGET_PID" 2>/dev/null || true
+    wait "$RST_TARGET_PID" 2>/dev/null || true
+    RST_TARGET_PID=""
+else
+    # Client-side reader, through the tunnel's TCP lane. Guarded with
+    # `timeout 10` so a genuine hang (client never sees the RST) FAILs at
+    # 10s instead of stalling the suite forever.
+    ip netns exec "$NS_CLIENT" timeout 10 nc "$HTTP_TARGET_IP" "$RST_PORT" \
+        >"$RST_CLIENT_OUT" 2>/dev/null &
+    RST_CLIENT_PID=$!
+
+    # Let real data flow before the abort — proves "flowing -> RST -> prompt
+    # teardown", not "never connected -> instant exit" (an instant exit for
+    # the wrong reason would also read as <5s and be a false pass).
+    sleep 1
+
+    kill -TERM "$RST_TARGET_PID" 2>/dev/null || true
+    RST_KILL_TS="$(date +%s.%N)"
+
+    nc_rc=0
+    wait "$RST_CLIENT_PID" 2>/dev/null || nc_rc=$?
+    RST_CLIENT_PID=""
+    RST_DONE_TS="$(date +%s.%N)"
+    wait "$RST_TARGET_PID" 2>/dev/null || true
+    RST_TARGET_PID=""
+
+    RST_ELAPSED="$(awk -v a="$RST_KILL_TS" -v b="$RST_DONE_TS" 'BEGIN{printf "%.2f", b-a}')"
+    RST_DATA_LINES="$(grep -c '^data$' "$RST_CLIENT_OUT" 2>/dev/null || true)"
+    [ -n "$RST_DATA_LINES" ] || RST_DATA_LINES=0
+
+    echo "  reader: exit_code=${nc_rc} (0=clean EOF, nonzero=reset/error — either is a valid abortive-close teardown)"
+    echo "  reader: data_lines_before_teardown=${RST_DATA_LINES} elapsed=${RST_ELAPSED}s (threshold <5.0s)"
+
+    if [ "$RST_DATA_LINES" -lt 1 ]; then
+        echo "FAIL: client reader saw no data before teardown — can't distinguish RST-cut-a-live-flow from never-connected"
+        fail=1
+    else
+        echo "PASS: client reader saw data flowing before the abort (${RST_DATA_LINES} lines)"
+    fi
+
+    if awk -v e="$RST_ELAPSED" 'BEGIN{exit !(e<5.0)}'; then
+        echo "PASS: client-side teardown was prompt (${RST_ELAPSED}s < 5.0s, well under the 300s idle-eviction default)"
+    else
+        echo "FAIL: client-side teardown took ${RST_ELAPSED}s (>=5.0s) — RST may not have propagated, client may have hung toward the idle sweep"
+        fail=1
+    fi
+fi
+
+# Confirm the traffic actually took the TCP lane.
+assert_stream_lane_used "$CLIENT_LOG_T5" "Test5 RST stream"
+
+bench_stop_vpn
+
 # ─── Verdict ───────────────────────────────────────────────────────────────
 echo ""
 if [ "$fail" -ne 0 ]; then
@@ -731,6 +928,10 @@ if [ "$fail" -ne 0 ]; then
     echo "--- Client log T3A (last 20) ---"; tail -20 "$CLIENT_LOG_T3A"
     echo "--- Client log T3B (last 20) ---"; tail -20 "$CLIENT_LOG_T3B"
     echo "--- Server log T3B (last 20) ---"; tail -20 "$SERVER_LOG_T3B"
+    echo "--- Client log T4 (last 20) ---"; tail -20 "$CLIENT_LOG_T4"
+    echo "--- Server log T4 (last 20) ---"; tail -20 "$SERVER_LOG_T4"
+    echo "--- Client log T5 (last 20) ---"; tail -20 "$CLIENT_LOG_T5"
+    echo "--- Server log T5 (last 20) ---"; tail -20 "$SERVER_LOG_T5"
     exit 1
 fi
 echo "RESULT: PASS"
