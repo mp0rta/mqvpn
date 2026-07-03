@@ -2149,6 +2149,18 @@ mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *out)
     out->dgram_recv = s->dgram_recv;
     out->dgram_lost = s->dgram_lost;
     out->dgram_acked = s->dgram_acked;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* tcp_flows_active: whole-server count of currently open egress TCP
+     * flows. tcp_egress_global_fd_count is already the live, exactly-once
+     * incremented/decremented admission counter (svr_tcp_egress_start_connect
+     * / svr_tcp_egress_flow_destroy) — no separate list-length walk needed.
+     * tcp_flows_total/rejected have no server-side source of truth (no
+     * cumulative "opened" or "rejected" counter is tracked for egress
+     * flows — the 503 admission-cap responses in tcp_egress.c are not
+     * counted) and are intentionally left at 0 (memset above); see the
+     * mqvpn_stats_t field comments in libmqvpn.h. */
+    out->tcp_flows_active = (uint64_t)s->tcp_egress_global_fd_count;
+#endif
     return MQVPN_OK;
 }
 

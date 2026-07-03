@@ -1400,6 +1400,17 @@ TEST(mqvpn_tcp_global_cap_gets_503)
     ASSERT_EQ(h.probe.response_done, 1);
     ASSERT_STREQ(h.probe.status, "200"); /* consumes the one global fd slot */
 
+    /* mqvpn_server_get_stats().tcp_flows_active must reflect exactly this
+     * one open egress flow — the whole-server wiring reads
+     * tcp_egress_global_fd_count verbatim (see mqvpn_server.c), so this
+     * pins that it is neither stuck at 0 nor double-counting. */
+    {
+        mqvpn_stats_t st;
+        memset(&st, 0, sizeof(st));
+        ASSERT_EQ(mqvpn_server_get_stats(h.svr, &st), MQVPN_OK);
+        ASSERT_EQ(st.tcp_flows_active, 1);
+    }
+
     probe_conn_t second;
     memset(&second, 0, sizeof(second));
     second.engine = h.probe.engine;
@@ -1426,6 +1437,17 @@ TEST(mqvpn_tcp_global_cap_gets_503)
         flow1_gone = h.probe.request_closed;
     }
     ASSERT_EQ(flow1_gone, 1);
+
+    /* The slot's release must be visible in tcp_flows_active too — proves
+     * the counter decrements on flow teardown, not just increments on
+     * open (a stuck-elevated counter would otherwise silently mislead
+     * monitoring long after the flow that caused it is gone). */
+    {
+        mqvpn_stats_t st;
+        memset(&st, 0, sizeof(st));
+        ASSERT_EQ(mqvpn_server_get_stats(h.svr, &st), MQVPN_OK);
+        ASSERT_EQ(st.tcp_flows_active, 0);
+    }
 
     h.probe.path = path1;
     h.probe.response_done = 0;

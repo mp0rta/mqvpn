@@ -317,9 +317,12 @@ status_log_cb(evutil_socket_t fd, short what, void *arg)
 
     LOG_INF("[STATUS] state=established paths=%d tx=%" PRIu64 " rx=%" PRIu64
             " srtt=%dms dgram_lost=%" PRIu64 " lanes tcp/dgram/raw=%" PRIu64 "/%" PRIu64
-            "/%" PRIu64,
+            "/%" PRIu64 " tcp_dropped=%" PRIu64 " flows act/tot/rej=%" PRIu64 "/%" PRIu64
+            "/%" PRIu64 " raw_markers=%" PRIu64,
             n_paths, stats.bytes_tx, stats.bytes_rx, stats.srtt_ms, stats.dgram_lost,
-            stats.pkts_lane_tcp, stats.pkts_lane_dgram, stats.pkts_lane_raw);
+            stats.pkts_lane_tcp, stats.pkts_lane_dgram, stats.pkts_lane_raw,
+            stats.pkts_lane_tcp_dropped, stats.tcp_flows_active, stats.tcp_flows_total,
+            stats.tcp_flows_rejected, stats.raw_markers_active);
 
     for (int i = 0; i < n_paths; i++) {
         const char *st_str = mqvpn_path_status_string(paths[i].status);

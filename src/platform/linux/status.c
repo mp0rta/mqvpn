@@ -286,10 +286,16 @@ print_stats_summary(const char *buf)
     uint64_t fl_act = (uint64_t)json_read_int64(json_find_key(buf, "tcp_flows_active"));
     uint64_t fl_tot = (uint64_t)json_read_int64(json_find_key(buf, "tcp_flows_total"));
     uint64_t fl_rej = (uint64_t)json_read_int64(json_find_key(buf, "tcp_flows_rejected"));
+    uint64_t lane_tcp_drop =
+        (uint64_t)json_read_int64(json_find_key(buf, "pkts_lane_tcp_dropped"));
+    uint64_t raw_markers =
+        (uint64_t)json_read_int64(json_find_key(buf, "raw_markers_active"));
 
     printf("server: lanes tcp/dgram/raw=%" PRIu64 "/%" PRIu64 "/%" PRIu64
-           " flows act/tot/rej=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "\n",
-           lane_tcp, lane_dgram, lane_raw, fl_act, fl_tot, fl_rej);
+           " (tcp_dropped=%" PRIu64 ") flows act/tot/rej=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           " raw_markers=%" PRIu64 "\n",
+           lane_tcp, lane_dgram, lane_raw, lane_tcp_drop, fl_act, fl_tot, fl_rej,
+           raw_markers);
 }
 
 /* ── Main entry point ── */

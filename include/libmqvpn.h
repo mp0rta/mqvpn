@@ -264,9 +264,24 @@ typedef struct {
     uint64_t pkts_lane_tcp;
     uint64_t pkts_lane_dgram;
     uint64_t pkts_lane_raw;
-    uint64_t tcp_flows_active;   /* future tcp_lane; 0 for now */
-    uint64_t tcp_flows_total;    /* future tcp_lane; 0 for now */
-    uint64_t tcp_flows_rejected; /* future tcp_lane; 0 for now */
+    /* tcp_flows_active: currently open TCP-lane flows. Client: the TCP-lane
+     * flow table's live count. Server: the whole-server count of open
+     * egress TCP flows (mqvpn_server_get_stats). */
+    uint64_t tcp_flows_active;
+    /* tcp_flows_total / tcp_flows_rejected: client-only counters (cumulative
+     * flows opened / SYNs rejected pre-lwIP). The server has no equivalent
+     * source of truth — no cumulative "opened" or "rejected" counter is
+     * tracked for egress flows — so mqvpn_server_get_stats always reports
+     * both as 0. */
+    uint64_t tcp_flows_total;
+    uint64_t tcp_flows_rejected;
+    /* pkts_lane_tcp_dropped: client-only — TCP-lane packets lwIP refused
+     * (e.g. no matching pcb). Always 0 server-side. */
+    uint64_t pkts_lane_tcp_dropped;
+    /* raw_markers_active: client-only gauge — sticky-RAW markers currently
+     * held in the TCP-lane flow table (5-tuples pinned to RAW under
+     * tcp=auto). Always 0 server-side. */
+    uint64_t raw_markers_active;
 } mqvpn_stats_t;
 
 typedef struct {

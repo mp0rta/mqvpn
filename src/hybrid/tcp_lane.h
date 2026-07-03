@@ -82,9 +82,9 @@ typedef struct {
     uint64_t flows_rejected_other;
     uint64_t flows_idle_evicted;
     uint64_t raw_markers_active; /* gauge, same derivation: sticky-RAW markers
-                                  * currently in the table (visibility into
-                                  * marker accumulation for Task 24's counter
-                                  * wiring) */
+                                  * currently in the table — surfaced through
+                                  * mqvpn_client_get_stats as the public
+                                  * raw_markers_active stat */
 } mqvpn_tcp_lane_stats_t;
 
 /* client_ctx is opaque to tcp_lane.c's callers outside mqvpn_client.c; it is

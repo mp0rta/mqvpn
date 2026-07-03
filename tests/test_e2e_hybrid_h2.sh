@@ -31,10 +31,11 @@
 #         classifier.c). PLUS: the client's tcp lane counter must stay at
 #         0 for the whole run (classifier never yields LANE_TCP under
 #         Tcp=raw, so nothing ever reaches lwIP — see the note by
-#         LANE_TCP_ASSERTION below for why this deviates from the literal
-#         task sketch), and the server's tcp_flows_active must read 0 via
-#         the control API (defensive: catches a future regression once
-#         Task 24 wires this field live; it is unconditionally 0 today).
+#         LANE_TCP_ASSERTION below), and the server's tcp_flows_active must
+#         read 0 via the control API — a real wiring check now that
+#         mqvpn_server_get_stats populates the field from the live
+#         tcp_egress_global_fd_count (Test 1b is the companion off-zero
+#         proof for the same field).
 #   Test 2 (single-path throughput), two phases, single path, unshaped:
 #     Phase A [Hybrid] Enabled=true / Tcp=raw: iperf3 through the plain
 #       CONNECT-IP tunnel (RAW_MBPS baseline).
@@ -89,15 +90,18 @@
 #       active_paths_count() crossing 2 — see the investigation note below).
 #       flow_b then opens (same target, same continuous-sender contract)
 #       with 2 paths active: tcp=auto must route it onto the real TCP lane.
-#       Observability: the client's [STATUS] `lanes tcp/dgram/raw=T/D/R`
-#       packet counters do NOT work for this — c->pkts_lane_tcp is bumped by
-#       mqvpn_hybrid_classify() the moment a packet is classified as
-#       TCP-protocol/non-excluded, BEFORE the per-flow sticky verdict is
-#       consulted, so it increments identically for a sticky-RAW flow and a
-#       real TCP-lane flow under tcp=auto (verified by reading
-#       src/mqvpn_client.c's tun_decide_lane — this is a genuine dead end,
-#       not a shortcut skipped for convenience). The test instead observes
-#       which TCP connection actually reaches the target: a sticky-RAW flow
+#       Observability: this test predates a fix to the client's [STATUS]
+#       `lanes tcp/dgram/raw=T/D/R` counter — c->pkts_lane_tcp used to be
+#       bumped by mqvpn_hybrid_classify() the moment a packet was classified
+#       as TCP-protocol/non-excluded, BEFORE the per-flow sticky verdict was
+#       consulted, so it incremented identically for a sticky-RAW flow and a
+#       real TCP-lane flow under tcp=auto. pkts_lane_tcp is now bumped only
+#       once the verdict resolves to "feed lwIP" (src/mqvpn_client.c's
+#       tun_decide_lane), so it WOULD distinguish the two cases today — but
+#       this test still uses the peer-address method below as its primary
+#       proof (more direct: it observes which endpoint the connection
+#       actually reached, not just a packet-classification side effect):
+#       a sticky-RAW flow
 #       is an unmodified, kernel-ip_forward'd packet (no NAT anywhere in this
 #       topology) and so arrives with the CLIENT's own tunnel-assigned
 #       address as its peer; a real TCP-lane flow is relayed via the
@@ -167,6 +171,8 @@ LANE_PORT_B=8074
 
 CLIENT_LOG_T1="$(mktemp)"
 SERVER_LOG_T1="$(mktemp)"
+CLIENT_LOG_T1B="$(mktemp)"
+SERVER_LOG_T1B="$(mktemp)"
 CLIENT_LOG_T7A="$(mktemp)"
 SERVER_LOG_T7A="$(mktemp)"
 CLIENT_LOG_T7B="$(mktemp)"
@@ -187,6 +193,7 @@ RST_CLIENT_OUT="$(mktemp)"
 CLIENT_LOG_T6="$(mktemp)"
 SERVER_LOG_T6="$(mktemp)"
 INI_T1="$(mktemp --suffix=.ini)"
+INI_T1B="$(mktemp --suffix=.ini)"
 INI_T7A="$(mktemp --suffix=.ini)"
 INI_T7B="$(mktemp --suffix=.ini)"
 INI_T2A="$(mktemp --suffix=.ini)"
@@ -220,11 +227,14 @@ LANE_RESPONDER_A_PID=""
 LANE_RESPONDER_B_PID=""
 LANE_SENDER_A_PID=""
 LANE_SENDER_B_PID=""
+LANE_CAP_PID1=""
+LANE_CAP_PID2=""
 cleanup_bg_procs() {
     local pid
     for pid in "$HALFCLOSE_RESPONDER_PID" "$RST_TARGET_PID" "$RST_CLIENT_PID" \
         "$LANE_RESPONDER_A_PID" "$LANE_RESPONDER_B_PID" \
-        "$LANE_SENDER_A_PID" "$LANE_SENDER_B_PID"; do
+        "$LANE_SENDER_A_PID" "$LANE_SENDER_B_PID" \
+        "$LANE_CAP_PID1" "$LANE_CAP_PID2"; do
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null || true
             wait "$pid" 2>/dev/null || true
@@ -233,14 +243,15 @@ cleanup_bg_procs() {
 }
 
 trap 'cleanup_bg_procs; cleanup_http_server; bench_cleanup; rm -rf "$HTTP_DOCROOT"; rm -f \
-    "$CLIENT_LOG_T1" "$SERVER_LOG_T1" "$CLIENT_LOG_T7A" "$SERVER_LOG_T7A" \
+    "$CLIENT_LOG_T1" "$SERVER_LOG_T1" "$CLIENT_LOG_T1B" "$SERVER_LOG_T1B" \
+    "$CLIENT_LOG_T7A" "$SERVER_LOG_T7A" \
     "$CLIENT_LOG_T7B" "$SERVER_LOG_T7B" \
     "$CLIENT_LOG_T2A" "$SERVER_LOG_T2A" "$CLIENT_LOG_T2B" "$SERVER_LOG_T2B" \
     "$CLIENT_LOG_T3A" "$SERVER_LOG_T3A" "$CLIENT_LOG_T3B" "$SERVER_LOG_T3B" \
     "$CLIENT_LOG_T4" "$SERVER_LOG_T4" "$CLIENT_LOG_T5" "$SERVER_LOG_T5" \
     "$CLIENT_LOG_T6" "$SERVER_LOG_T6" \
     "$RST_CLIENT_OUT" \
-    "$INI_T1" "$INI_T7A" "$INI_T7B" "$INI_T2A" "$INI_STREAM" "$INI_T6" \
+    "$INI_T1" "$INI_T1B" "$INI_T7A" "$INI_T7B" "$INI_T2A" "$INI_STREAM" "$INI_T6" \
     "$CURL_OUT" "$SENT_FILE_A" "$RECV_FILE_A" "$SENT_FILE_B" "$RECV_FILE_B" \
     "$LANE_PEER_A_FILE" "$LANE_BYTES_A_FILE" "$LANE_PEER_B_FILE" "$LANE_BYTES_B_FILE"' EXIT
 
@@ -377,6 +388,33 @@ parse_lanes() {
     LANE_TCP="${counts%%/*}"
     LANE_RAW="${counts##*/}"
     LANE_DGRAM="${counts#*/}"; LANE_DGRAM="${LANE_DGRAM%%/*}"
+    return 0
+}
+
+# Parse the LAST client "flows act/tot/rej=<a>/<t>/<r>" — the now-real
+# tcp_flows_active/total/rejected counters (previously stubbed at 0).
+FLOWS_ACT=0; FLOWS_TOT=0; FLOWS_REJ=0
+parse_flows() {
+    local clog="$1"
+    local counts
+    counts="$(grep -oE 'flows act/tot/rej=[0-9]+/[0-9]+/[0-9]+' "$clog" \
+        | tail -1 | cut -d= -f2)"
+    [ -n "$counts" ] || return 1
+    FLOWS_ACT="${counts%%/*}"
+    FLOWS_REJ="${counts##*/}"
+    FLOWS_TOT="${counts#*/}"; FLOWS_TOT="${FLOWS_TOT%%/*}"
+    return 0
+}
+
+# Parse the LAST client "raw_markers=<n>" — the count of sticky-RAW markers
+# currently held in the TCP-lane flow table.
+RAW_MARKERS=0
+parse_raw_markers() {
+    local clog="$1"
+    local v
+    v="$(grep -oE 'raw_markers=[0-9]+' "$clog" | tail -1 | cut -d= -f2)"
+    [ -n "$v" ] || return 1
+    RAW_MARKERS="$v"
     return 0
 }
 
@@ -616,6 +654,79 @@ else
     fail=1
 fi
 
+# tcp_flows_total is cumulative (never decrements once a flow has opened),
+# so it stays meaningful even though the curl request above has already
+# completed and its flow may already have closed — unlike tcp_flows_active,
+# which this test does NOT assert (see Test 6 for that, where the sender is
+# long-lived).
+if wait_for_log "$CLIENT_LOG_T1" 'flows act/tot/rej=[0-9]+/[1-9][0-9]*/' 40; then
+    parse_flows "$CLIENT_LOG_T1" || true
+    echo "PASS: [STATUS] reports nonzero tcp_flows_total (act=$FLOWS_ACT tot=$FLOWS_TOT rej=$FLOWS_REJ)"
+else
+    echo "FAIL: no [STATUS] line with nonzero tcp_flows_total within 40s"
+    parse_flows "$CLIENT_LOG_T1" \
+        && echo "      last flows line: act=$FLOWS_ACT tot=$FLOWS_TOT rej=$FLOWS_REJ" \
+        || echo "      (no flows line at all)"
+    fail=1
+fi
+
+bench_stop_vpn
+
+# ─── Test 1b: tcp_flows_rejected wiring (TcpMaxFlows=1, 2 concurrent flows,
+#      cross-checked against the server-side tcp_flows_active via the
+#      control API while both connections are held open) ──────────────────
+echo ""
+echo "=== Test 1b: tcp_flows_rejected wiring (TcpMaxFlows=1, 2 concurrent flows) ==="
+cat >"$INI_T1B" <<EOF
+[Hybrid]
+Enabled = true
+Tcp = stream
+TcpMaxFlows = 1
+EgressAllow = 10.222.0.0/24
+EOF
+hybrid_run "$INI_T1B" "$SERVER_LOG_T1B" "$CLIENT_LOG_T1B"
+
+# Hold two concurrent TCP connections open to the target: `sleep N | nc`
+# keeps nc's stdin open (piped from a process that never writes but doesn't
+# exit either), so nc never sees EOF and the connection stays up for the
+# duration — no responder needed on the target side. TcpMaxFlows=1 caps
+# concurrent TCP-lane flows at 1, so the second connection's SYN must be
+# rejected pre-lwIP (c->tcp_flows_rejected), not merely queued.
+sleep 50 | ip netns exec "$NS_CLIENT" nc -q0 "$HTTP_TARGET_IP" "$HTTP_TARGET_PORT" \
+    >/dev/null 2>&1 &
+LANE_CAP_PID1=$!
+sleep 1
+sleep 50 | ip netns exec "$NS_CLIENT" nc -q0 "$HTTP_TARGET_IP" "$HTTP_TARGET_PORT" \
+    >/dev/null 2>&1 &
+LANE_CAP_PID2=$!
+
+if wait_for_log "$CLIENT_LOG_T1B" 'flows act/tot/rej=[0-9]+/[0-9]+/[1-9][0-9]*' 40; then
+    parse_flows "$CLIENT_LOG_T1B" || true
+    echo "PASS: [STATUS] reports nonzero tcp_flows_rejected under TcpMaxFlows=1 (act=$FLOWS_ACT tot=$FLOWS_TOT rej=$FLOWS_REJ)"
+else
+    echo "FAIL: no [STATUS] line with nonzero tcp_flows_rejected within 40s"
+    parse_flows "$CLIENT_LOG_T1B" \
+        && echo "      last flows line: act=$FLOWS_ACT tot=$FLOWS_TOT rej=$FLOWS_REJ" \
+        || echo "      (no flows line at all)"
+    fail=1
+fi
+
+# Cross-check from the server side, over the control API, while the one
+# admitted connection is still held open: the server's whole-server
+# tcp_flows_active must read exactly 1 (the cap-rejected second connection
+# never reached the egress connect() at all).
+stats_json_t1b="$(bench_query_control "$CTRL_PORT" get_stats)"
+srv_flows_active_t1b="$(echo "$stats_json_t1b" | jq -r '.tcp_flows_active // -1' 2>/dev/null || echo -1)"
+if [ "$srv_flows_active_t1b" = "1" ]; then
+    echo "PASS: server get_stats reports tcp_flows_active=1 while the admitted flow is held open"
+else
+    echo "FAIL: server get_stats reports tcp_flows_active=$srv_flows_active_t1b (expected 1)"
+    echo "      raw response: $stats_json_t1b"
+    fail=1
+fi
+
+kill "$LANE_CAP_PID1" "$LANE_CAP_PID2" 2>/dev/null || true
+wait "$LANE_CAP_PID1" "$LANE_CAP_PID2" 2>/dev/null || true
 bench_stop_vpn
 
 # ─── Test 7 Phase A: Enabled=false (byte-identical baseline) ──────────────
@@ -685,10 +796,11 @@ else
     fail=1
 fi
 
-# Server-side tcp_flows_active via the control API — unconditionally 0
-# today (mqvpn_server_get_stats doesn't wire tcp_flows_active yet), so this
-# is a defensive/forward-looking assertion: it documents the invariant and
-# will start actually exercising it once a later task wires the field live.
+# Server-side tcp_flows_active via the control API — now a real wiring
+# check (mqvpn_server_get_stats reads the live tcp_egress_global_fd_count):
+# under Tcp=raw nothing ever reaches the egress connect() path, so this
+# must genuinely read 0, not just structurally read 0 because the field was
+# unwired. Test 1b is the companion off-zero proof for this same field.
 stats_json="$(bench_query_control "$CTRL_PORT" get_stats)"
 tcp_flows_active="$(echo "$stats_json" | jq -r '.tcp_flows_active // -1' 2>/dev/null || echo -1)"
 if [ "$tcp_flows_active" = "0" ]; then
@@ -1124,6 +1236,19 @@ else
     fi
 fi
 
+# flow_a's sticky-RAW verdict must have left a marker in the client's
+# TCP-lane flow table (raw_markers_active) — the wiring this test targets.
+if wait_for_log "$CLIENT_LOG_T6" 'raw_markers=[1-9][0-9]*' 40; then
+    parse_raw_markers "$CLIENT_LOG_T6" || true
+    echo "PASS: [STATUS] reports nonzero raw_markers_active (raw_markers=$RAW_MARKERS) after flow_a's sticky-RAW verdict"
+else
+    echo "FAIL: no [STATUS] line with nonzero raw_markers_active within 40s"
+    parse_raw_markers "$CLIENT_LOG_T6" \
+        && echo "      last raw_markers value: $RAW_MARKERS" \
+        || echo "      (no raw_markers line at all)"
+    fail=1
+fi
+
 # Snapshot flow_a's progress before the path bring-up (also the byte-count
 # baseline the post-bring-up check below diffs against).
 sleep 1
@@ -1203,6 +1328,23 @@ else
         echo "PASS: flow_b is exchanging data on the TCP lane (${LANE_BYTES_B} bytes)"
     else
         echo "FAIL: flow_b's TCP-lane connection accepted but never exchanged data"
+        fail=1
+    fi
+
+    # flow_b is a long-lived real TCP-lane flow (still open, per the
+    # continuity check below) — tcp_flows_active must read nonzero while it
+    # is up. This is the stable window this counter's off-zero proof needs
+    # (Test 1's curl transfer is too short-lived: its flow is typically
+    # already closed by the time a [STATUS] line lands, which is why Test 1
+    # asserts tcp_flows_total instead).
+    if wait_for_log "$CLIENT_LOG_T6" 'flows act/tot/rej=[1-9][0-9]*/' 40; then
+        parse_flows "$CLIENT_LOG_T6" || true
+        echo "PASS: [STATUS] reports nonzero tcp_flows_active (act=$FLOWS_ACT tot=$FLOWS_TOT rej=$FLOWS_REJ) while flow_b is open"
+    else
+        echo "FAIL: no [STATUS] line with nonzero tcp_flows_active within 40s"
+        parse_flows "$CLIENT_LOG_T6" \
+            && echo "      last flows line: act=$FLOWS_ACT tot=$FLOWS_TOT rej=$FLOWS_REJ" \
+            || echo "      (no flows line at all)"
         fail=1
     fi
 fi
