@@ -289,12 +289,26 @@ run_byte_identical_transfer() {
     return 0
 }
 
+# A measured sample below this floor (Mbps) is treated as a failed
+# measurement, not a real datapoint: averaging a 0.0 into a denominator
+# series (RAW, BEST_SINGLE) would silently make the ratio gates EASIER, and
+# a 0 numerator is just a broken run. Samples under the floor are retried
+# once; a persistent sub-floor sample fails the owning test.
+IPERF_MIN_MBPS=1.0
+
 # Single iperf3 TCP measurement (one flow) against $1 for $2 seconds.
 # Mirrors the existing netns iperf3-through-tunnel pattern in
 # benchmarks/bench_aggregate.sh: a one-shot server (`-1`) in NS_SERVER bound
 # to the target address, a JSON client run in NS_CLIENT, Mbps read from
 # end.sum_received.bits_per_second. Echoes "0.0" on any failure (missing
 # sum_received key, iperf3 error, etc) rather than aborting the script.
+#
+# Hang-safety: `iperf3 -s -1` blocks forever waiting for its first
+# connection, so a broken tunnel (client can't connect) would leave the
+# server alive and `wait` would block the whole suite indefinitely. The
+# client therefore runs under `timeout` (duration + slack), and the server
+# pid is killed BEFORE the guarded wait — a failed connect then yields an
+# empty JSON → "0.0" → sub-floor → FAIL, never a hang.
 run_iperf3_through_tunnel() {
     local target="$1"
     local duration="${2:-6}"
@@ -305,9 +319,10 @@ run_iperf3_through_tunnel() {
     local ipid=$!
     sleep 1
 
-    ip netns exec "$NS_CLIENT" iperf3 -c "$target" -t "$duration" -P 1 --json \
-        >"$json" 2>&1 || true
+    ip netns exec "$NS_CLIENT" timeout $((duration + 15)) \
+        iperf3 -c "$target" -t "$duration" -P 1 --json >"$json" 2>&1 || true
 
+    kill "$ipid" 2>/dev/null || true
     wait "$ipid" 2>/dev/null || true
 
     local mbps
@@ -331,12 +346,20 @@ except Exception:
 # Repeat run_iperf3_through_tunnel $3 times against $1 (duration $2),
 # logging each sample to stderr (labeled $4) and printing all samples
 # space-separated on stdout for the caller to average / report variance on.
+# A sub-floor sample (see IPERF_MIN_MBPS) is retried once; if it is still
+# sub-floor the (bad) value is still emitted so the caller's post-hoc
+# series-floor check (assert_series_floor) fails the test rather than a 0.0
+# quietly diluting the average.
 run_iperf3_repeated() {
     local target="$1" duration="$2" repeats="$3" label="$4"
     local i mbps
     local results=()
     for (( i=0; i<repeats; i++ )); do
         mbps="$(run_iperf3_through_tunnel "$target" "$duration")"
+        if awk -v m="$mbps" -v f="$IPERF_MIN_MBPS" 'BEGIN{exit !(m<f)}'; then
+            echo "    [$label] run $((i + 1))/${repeats}: ${mbps} Mbps (below floor ${IPERF_MIN_MBPS}, retrying once)" >&2
+            mbps="$(run_iperf3_through_tunnel "$target" "$duration")"
+        fi
         echo "    [$label] run $((i + 1))/${repeats}: ${mbps} Mbps" >&2
         results+=("$mbps")
     done
@@ -350,6 +373,46 @@ import sys
 vals = [float(x) for x in sys.argv[1:]]
 print(f'{sum(vals) / len(vals):.2f}' if vals else '0.0')
 " "$@"
+}
+
+# Fail the owning test (sets fail=1) if ANY sample in the series ($2..) is
+# below IPERF_MIN_MBPS — a persistent sub-floor sample survived the
+# in-repeat retry, so the measurement is broken and its average must not be
+# trusted as a gate input. $1 is a label for the diagnostic.
+assert_series_floor() {
+    local label="$1"; shift
+    local bad
+    bad="$(python3 -c "
+import sys
+f = ${IPERF_MIN_MBPS}
+vals = [float(x) for x in sys.argv[1:]]
+print(' '.join(str(v) for v in vals if v < f))
+" "$@")"
+    if [ -n "$bad" ]; then
+        echo "FAIL: [$label] sub-floor iperf3 sample(s) (<${IPERF_MIN_MBPS} Mbps): $bad — measurement broken"
+        fail=1
+        return 1
+    fi
+    return 0
+}
+
+# Prove the stream lane was actually exercised in a throughput phase (guards
+# against a silent raw regression that ip_forward would otherwise mask — the
+# bytes would still flow, just never through lwIP). Waits for a [STATUS]
+# line with a nonzero tcp lane; must be called while the client is still
+# alive (before bench_stop_vpn) so new status lines can still land.
+assert_stream_lane_used() {
+    local clog="$1" phase="$2"
+    if wait_for_log "$clog" 'lanes tcp/dgram/raw=[1-9][0-9]*/' 40; then
+        parse_lanes "$clog" || true
+        echo "PASS: [$phase] stream lane exercised (tcp=$LANE_TCP dgram=$LANE_DGRAM raw=$LANE_RAW)"
+    else
+        echo "FAIL: [$phase] no [STATUS] line with nonzero tcp lane within 40s (stream lane not used?)"
+        parse_lanes "$clog" \
+            && echo "      last lanes line: tcp=$LANE_TCP dgram=$LANE_DGRAM raw=$LANE_RAW" \
+            || echo "      (no lanes line at all)"
+        fail=1
+    fi
 }
 
 # Apply netem to a single path slot's veth pair only (client+server ends),
@@ -497,13 +560,18 @@ echo "-- Phase A: RAW baseline (Enabled=true / Tcp=raw, unshaped) --"
 hybrid_run "$INI_T2A" "$SERVER_LOG_T2A" "$CLIENT_LOG_T2A"
 RAW_RESULTS=($(run_iperf3_repeated "$TUNNEL_SERVER_IP" "$IPERF_DURATION_T2" "$IPERF_REPEATS_T2" RAW))
 bench_stop_vpn
+assert_series_floor RAW "${RAW_RESULTS[@]}"
 RAW_MBPS="$(avg_of "${RAW_RESULTS[@]}")"
 echo "  RAW_MBPS: avg=${RAW_MBPS} samples=(${RAW_RESULTS[*]})"
 
 echo "-- Phase B: stream lane (Enabled=true / Tcp=stream + EgressAllow, unshaped) --"
 hybrid_run "$INI_STREAM" "$SERVER_LOG_T2B" "$CLIENT_LOG_T2B"
 STREAM_RESULTS=($(run_iperf3_repeated "$HTTP_TARGET_IP" "$IPERF_DURATION_T2" "$IPERF_REPEATS_T2" STREAM))
+# Prove the stream lane carried this traffic (not a silent raw fallthrough)
+# while the client is still alive.
+assert_stream_lane_used "$CLIENT_LOG_T2B" "Test2B stream"
 bench_stop_vpn
+assert_series_floor STREAM "${STREAM_RESULTS[@]}"
 STREAM_MBPS="$(avg_of "${STREAM_RESULTS[@]}")"
 echo "  STREAM_MBPS: avg=${STREAM_MBPS} samples=(${STREAM_RESULTS[*]})"
 
@@ -541,14 +609,37 @@ bench_setup_netns_n 2
 bench_add_server_host_routes 2
 ip netns exec "$NS_SERVER" ip addr add "${HTTP_TARGET_IP}/32" dev lo
 
-echo "-- Baseline: single path (Path A leg of the profile only) --"
+# Baseline = the "best single path" = MAX of BOTH legs measured separately
+# under their OWN netem. A ratio against Path A's 40mbit leg alone is
+# fakeable: a scheduler that dumped everything onto Path B (100mbit, zero
+# aggregation) would still clear 1.5x vs the 40mbit leg. Measuring both legs
+# and gating against the fatter one means the multipath number must beat the
+# best single path — real aggregation, not path selection. Both legs run on
+# the lone path slot 0 (only veth-a exists at N_PATHS=1), same as
+# sweep_single_path.sh's per-leg approach.
 N_PATHS=1
+
+echo "-- Baseline leg A: single path under Path A netem --"
 apply_path_netem 0 "$NETEM_A"
 hybrid_run "$INI_STREAM" "$SERVER_LOG_T3A" "$CLIENT_LOG_T3A"
-BASELINE_RESULTS=($(run_iperf3_repeated "$HTTP_TARGET_IP" "$IPERF_DURATION_T3" "$IPERF_REPEATS_T3" BASELINE))
+BASE_A_RESULTS=($(run_iperf3_repeated "$HTTP_TARGET_IP" "$IPERF_DURATION_T3" "$IPERF_REPEATS_T3" BASE-A))
+assert_stream_lane_used "$CLIENT_LOG_T3A" "Test3 baseline-A stream"
 bench_stop_vpn
-BEST_SINGLE_MBPS="$(avg_of "${BASELINE_RESULTS[@]}")"
-echo "  BEST_SINGLE_MBPS: avg=${BEST_SINGLE_MBPS} samples=(${BASELINE_RESULTS[*]})"
+assert_series_floor BASE-A "${BASE_A_RESULTS[@]}"
+BASE_A_MBPS="$(avg_of "${BASE_A_RESULTS[@]}")"
+echo "  BASE_A_MBPS: avg=${BASE_A_MBPS} samples=(${BASE_A_RESULTS[*]})"
+
+echo "-- Baseline leg B: single path under Path B netem --"
+apply_path_netem 0 "$NETEM_B"
+hybrid_run "$INI_STREAM" "$SERVER_LOG_T3A" "$CLIENT_LOG_T3A"
+BASE_B_RESULTS=($(run_iperf3_repeated "$HTTP_TARGET_IP" "$IPERF_DURATION_T3" "$IPERF_REPEATS_T3" BASE-B))
+bench_stop_vpn
+assert_series_floor BASE-B "${BASE_B_RESULTS[@]}"
+BASE_B_MBPS="$(avg_of "${BASE_B_RESULTS[@]}")"
+echo "  BASE_B_MBPS: avg=${BASE_B_MBPS} samples=(${BASE_B_RESULTS[*]})"
+
+BEST_SINGLE_MBPS="$(python3 -c "print(f'{max(${BASE_A_MBPS}, ${BASE_B_MBPS}):.2f}')")"
+echo "  BEST_SINGLE_MBPS = max(A=${BASE_A_MBPS}, B=${BASE_B_MBPS}) = ${BEST_SINGLE_MBPS}"
 
 echo "-- Multipath: both paths active, same profile --"
 N_PATHS=2
@@ -567,13 +658,54 @@ else
 fi
 
 MULTI_RESULTS=($(run_iperf3_repeated "$HTTP_TARGET_IP" "$IPERF_DURATION_T3" "$IPERF_REPEATS_T3" MULTI))
+assert_stream_lane_used "$CLIENT_LOG_T3B" "Test3 multipath stream"
+
+# Per-path utilization assertion — the DIRECT proof of aggregation. Query
+# the server's get_status per-path byte counters (bytes_tx+bytes_rx, so the
+# check is robust to which direction the bulk flows — iperf uploads
+# client->server, landing on server-side per-path bytes_rx) BEFORE stopping
+# the tunnel, and assert BOTH paths carried real load with the lighter path
+# holding >=20% of the heavier one. A non-aggregating scheduler that pinned
+# all traffic to one path fails here even if its throughput number happened
+# to clear the ratio gate. FLOOR (100 KB) is well above handshake/probe
+# noise so an idle path can't sneak through on control frames alone.
+stats_mp="$(bench_query_control "$CTRL_PORT" get_status)"
+agg_check="$(echo "$stats_mp" | python3 -c "
+import sys, json
+FLOOR = 100000
+try:
+    d = json.load(sys.stdin)
+    paths = d['clients'][0]['paths']
+except Exception as e:
+    print('FAIL parse: %s' % e); sys.exit()
+loads = sorted(p.get('bytes_tx', 0) + p.get('bytes_rx', 0) for p in paths)
+if len(loads) < 2:
+    print('FAIL len<2 loads=%s' % loads); sys.exit()
+lo, hi = loads[0], loads[-1]
+share = (lo / hi) if hi else 0.0
+if lo < FLOOR:
+    print('FAIL underused lo=%d hi=%d (floor=%d)' % (lo, hi, FLOOR)); sys.exit()
+if lo < 0.2 * hi:
+    print('FAIL imbalanced lo=%d hi=%d minshare=%.2f' % (lo, hi, share)); sys.exit()
+print('OK lo=%d hi=%d minshare=%.2f' % (lo, hi, share))
+")"
+echo "  per-path load (tx+rx): ${agg_check}"
+if [ "${agg_check#OK}" != "$agg_check" ]; then
+    echo "PASS: both paths carried meaningful load — aggregation confirmed (${agg_check})"
+else
+    echo "FAIL: per-path utilization check failed — traffic did not spread across paths (${agg_check})"
+    echo "      raw get_status: $stats_mp"
+    fail=1
+fi
+
 bench_stop_vpn
+assert_series_floor MULTI "${MULTI_RESULTS[@]}"
 MULTI_MBPS="$(avg_of "${MULTI_RESULTS[@]}")"
 echo "  MULTI_MBPS: avg=${MULTI_MBPS} samples=(${MULTI_RESULTS[*]})"
 
 if awk -v b="$BEST_SINGLE_MBPS" 'BEGIN{exit !(b>0)}'; then
     AGG_RATIO="$(awk -v m="$MULTI_MBPS" -v b="$BEST_SINGLE_MBPS" 'BEGIN{printf "%.2f", m/b}')"
-    echo "  ratio (multi/best_single): ${AGG_RATIO}x (threshold >=1.5x)"
+    echo "  ratio (multi/best_single): ${AGG_RATIO}x (threshold >=1.5x, baseline=max-of-legs)"
     if awk -v r="$AGG_RATIO" 'BEGIN{exit !(r>=1.5)}'; then
         echo "PASS: multipath aggregation >= 1.5x best single path (ratio=${AGG_RATIO}x)"
     else
