@@ -1540,7 +1540,7 @@ test_hybrid_section_parse(void)
     ASSERT_EQ_INT((int)cfg.hybrid.tcp_idle_timeout_sec, 60, "hybrid json idle timeout");
 }
 
-/* ── [Hybrid] EgressAllow/EgressDeny + TcpConnectTimeoutSec (Task 16) ───── */
+/* ── [Hybrid] EgressAllow/EgressDeny lists + TcpConnectTimeoutSec ───────── */
 
 static void
 test_hybrid_egress_acl_ini(void)
@@ -1565,6 +1565,12 @@ test_hybrid_egress_acl_ini(void)
     ASSERT_EQ_INT(cfg.hybrid.n_egress_deny, 1, "1 egress_deny entry parsed");
     ASSERT_EQ_INT((int)cfg.hybrid.egress_deny[0].net, (int)0xAC100500, "deny[0] net");
     ASSERT_EQ_INT((int)cfg.hybrid.tcp_connect_timeout_sec, 20, "tcp_connect_timeout_sec");
+
+    /* Host bits in the address part are deliberately masked off (route-table
+     * convention): "10.0.0.5/8" stores net 10.0.0.0, not 10.0.0.5. */
+    mqvpn_cidr_entry_t e;
+    ASSERT_EQ_INT(mqvpn_parse_cidr_v4("10.0.0.5/8", &e), 0, "host-bits cidr parses");
+    ASSERT_EQ_INT((int)e.net, (int)0x0A000000, "host bits normalized off the net");
 }
 
 static void

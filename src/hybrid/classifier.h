@@ -33,7 +33,7 @@ typedef enum {
 } mqvpn_hybrid_tcp_mode_t;
 
 /* [Hybrid] EgressAllow/EgressDeny — CIDR lists for the server-side
- * connect-tcp egress ACL (Task 16). Clients embed mqvpn_hybrid_config_t too
+ * connect-tcp egress ACL. Clients embed mqvpn_hybrid_config_t too
  * (tcp_mode/tcp_max_flows drive client-side tcp_lane.c) but never read
  * these fields — egress reachability is purely a server concern, exactly
  * like tcp_max_flows is purely a client concern. Sized a bit above
@@ -108,9 +108,10 @@ typedef struct {
     mqvpn_hybrid_tcp_mode_t tcp_mode;
     uint32_t tcp_max_flows;           /* consumed by tcp_lane.c */
     uint32_t tcp_idle_timeout_sec;    /* consumed by tcp_lane.c */
-    uint32_t tcp_connect_timeout_sec; /* server: egress connect() timeout (Task 17) */
+    uint32_t tcp_connect_timeout_sec; /* server: egress connect() timeout —
+                                       * consumed when the connect stage lands */
 
-    /* Server-only egress ACL (connect-tcp destination policy, Task 16).
+    /* Server-only egress ACL (connect-tcp destination policy).
      * egress_allow punches holes through the mandatory default-deny;
      * egress_deny adds extra blocks. Ignored by client-side classify(). */
     mqvpn_cidr_entry_t egress_allow[MQVPN_EGRESS_ACL_MAX];

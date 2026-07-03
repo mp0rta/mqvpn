@@ -496,9 +496,13 @@ typedef struct {
 } harness_t;
 
 /* Everything up to (and including) the QUIC connect. Returns 0 on success;
- * on failure everything partially created is torn down. */
+ * on failure everything partially created is torn down. `cfg_hook`
+ * (nullable) runs on the server config after the fixed harness defaults and
+ * before mqvpn_server_new — the seam tests use to exercise config-dependent
+ * server behavior (e.g. the egress ACL) through the PUBLIC setter API. */
 static int
-harness_start(harness_t *h, const char *protocol, size_t protocol_len, int auto_open)
+harness_start(harness_t *h, const char *protocol, size_t protocol_len, int auto_open,
+              void (*cfg_hook)(mqvpn_config_t *))
 {
     memset(h, 0, sizeof(*h));
     h->svr_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
@@ -535,6 +539,7 @@ harness_start(harness_t *h, const char *protocol, size_t protocol_len, int auto_
         mqvpn_config_set_subnet(svr_cfg, "10.0.0.0/24");
         mqvpn_config_set_tls_cert(svr_cfg, TEST_CERT_FILE, TEST_KEY_FILE);
         mqvpn_config_set_log_level(svr_cfg, MQVPN_LOG_ERROR);
+        if (cfg_hook) cfg_hook(svr_cfg);
 
         mqvpn_server_callbacks_t svr_cbs = MQVPN_SERVER_CALLBACKS_INIT;
         svr_cbs.tun_output = counting_tun_output;
@@ -663,7 +668,7 @@ run_dispatch_probe(const char *protocol, size_t protocol_len, char *out_status,
                    size_t out_status_cap)
 {
     harness_t h;
-    if (harness_start(&h, protocol, protocol_len, /*auto_open=*/1) != 0) return -1;
+    if (harness_start(&h, protocol, protocol_len, /*auto_open=*/1, NULL) != 0) return -1;
 
     harness_pump(&h, &h.probe.response_done, 10000);
 
@@ -680,13 +685,16 @@ run_dispatch_probe(const char *protocol, size_t protocol_len, char *out_status,
  * fixed "/probe" path, which never gets past svr_tcp_egress_parse_path).
  * auto_open is NOT used here: the path must be set on the probe before its
  * request is opened, and auto_open would fire from handshake_finished
- * before this function gets a chance to set it. */
+ * before this function gets a chance to set it. `cfg_hook` (nullable)
+ * customizes the server config — see harness_start. */
 static int
 run_dispatch_probe_with_path(const char *protocol, size_t protocol_len, const char *path,
-                             char *out_status, size_t out_status_cap)
+                             void (*cfg_hook)(mqvpn_config_t *), char *out_status,
+                             size_t out_status_cap)
 {
     harness_t h;
-    if (harness_start(&h, protocol, protocol_len, /*auto_open=*/0) != 0) return -1;
+    if (harness_start(&h, protocol, protocol_len, /*auto_open=*/0, cfg_hook) != 0)
+        return -1;
     h.probe.path = path;
 
     harness_pump(&h, &h.probe.handshake_done, 10000);
@@ -734,10 +742,41 @@ TEST(mqvpn_tcp_acl_denied_gets_403)
      * harness's server has no PSK configured (the ACL is unconditional;
      * only the identity check is optional). */
     char status[16] = {0};
-    int rc = run_dispatch_probe_with_path(
-        "mqvpn-tcp", 9, "/.well-known/mqvpn/tcp/10.0.0.5/80/", status, sizeof(status));
+    int rc = run_dispatch_probe_with_path("mqvpn-tcp", 9,
+                                          "/.well-known/mqvpn/tcp/10.0.0.5/80/", NULL,
+                                          status, sizeof(status));
     ASSERT_EQ(rc, 0);
     ASSERT_STREQ(status, "403");
+}
+
+/* Config hook for the allow-hole test below: the PUBLIC egress-ACL setter,
+ * exactly as a platform embedding libmqvpn would call it. */
+static void
+harness_cfg_allow_10_slash_8(mqvpn_config_t *cfg)
+{
+    const char *allow[] = {"10.0.0.0/8"};
+    if (mqvpn_config_set_hybrid_egress_acl(cfg, allow, 1, NULL, 0) != MQVPN_OK) {
+        printf("FAIL\n    mqvpn_config_set_hybrid_egress_acl rejected valid input\n");
+        exit(1);
+    }
+}
+
+TEST(mqvpn_tcp_acl_allow_hole_gets_503)
+{
+    /* Proves CONFIGURED allow lists reach the live request path (public
+     * setter -> config.hybrid -> svr_get_egress_policy -> decision), not
+     * just the built-in default-deny table: with egress_allow=10.0.0.0/8
+     * punched through, a 10.x target now clears the ACL and reaches the
+     * start_connect stub (503) instead of the ACL's 403. Target 10.1.2.3,
+     * NOT 10.0.0.x: the harness server's tunnel subnet is 10.0.0.0/24 and
+     * the tunnel-subnet check deliberately precedes egress_allow, so a
+     * 10.0.0.x target would (correctly) still be 403 despite the hole. */
+    char status[16] = {0};
+    int rc = run_dispatch_probe_with_path(
+        "mqvpn-tcp", 9, "/.well-known/mqvpn/tcp/10.1.2.3/80/",
+        harness_cfg_allow_10_slash_8, status, sizeof(status));
+    ASSERT_EQ(rc, 0);
+    ASSERT_STREQ(status, "503");
 }
 
 /* Regression: a non-tunnel stream closing on the SAME H3 connection as an
@@ -749,7 +788,7 @@ TEST(non_tunnel_close_keeps_tunnel_established)
 {
     harness_t h;
     ASSERT_EQ(harness_start(&h, "something-bogus", strlen("something-bogus"),
-                            /*auto_open=*/0),
+                            /*auto_open=*/0, NULL),
               0);
     probe_conn_t *p = &h.probe;
 
@@ -914,6 +953,7 @@ main(void)
     run_unrecognized_protocol_gets_501();
     run_mqvpn_tcp_bad_path_gets_400();
     run_mqvpn_tcp_acl_denied_gets_403();
+    run_mqvpn_tcp_acl_allow_hole_gets_503();
     run_non_tunnel_close_keeps_tunnel_established();
     run_acl_blocks_rfc1918();
     run_acl_blocks_loopback();
