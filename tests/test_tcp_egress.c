@@ -488,12 +488,87 @@ probe_create_engine(void)
 
 /* ── Loopback harness: mqvpn server (public API) + raw H3 probe ── */
 
+/* Minimal fd-interest reactor for mqvpn_server_callbacks_t.egress_fd_register
+ * — a real platform embedder runs an actual event loop (epoll/kqueue/IOCP);
+ * this harness just tracks the handful of egress fds a test's connect-tcp
+ * flows open and polls them from harness_pump. Without this, tcp_egress.c's
+ * EINPROGRESS connects register interest but nothing ever calls
+ * mqvpn_server_on_egress_fd_ready, so they stall forever (exactly the
+ * documented rough edge for an operator who never wires the callback —
+ * except here it's the TEST that must wire it, not the code under test). */
+#define HARNESS_MAX_EGRESS_FDS 8
+
+typedef struct {
+    int fd;
+    void *fd_ctx;
+    int want_read, want_write;
+    int active;
+} harness_egress_fd_t;
+
 typedef struct {
     int svr_fd, cli_fd;
     struct sockaddr_in svr_addr, cli_addr;
     mqvpn_server_t *svr;
     probe_conn_t probe;
+    harness_egress_fd_t egress_fds[HARNESS_MAX_EGRESS_FDS];
 } harness_t;
+
+/* mqvpn_server_callbacks_t.egress_fd_register implementation: records/
+ * updates one slot in h->egress_fds, keyed by fd. Passed mqvpn_server_new's
+ * user_ctx (the harness itself) as `user_ctx`. Mirrors the real contract
+ * (libmqvpn.h / platform_linux.c): register only ever (re)arms interest —
+ * dropping it is the SEPARATE egress_fd_unregister callback below, not a
+ * want_read=want_write=0 call here. */
+static void
+harness_egress_fd_register(int fd, int want_read, int want_write, void *fd_ctx,
+                           void *user_ctx)
+{
+    harness_t *h = (harness_t *)user_ctx;
+    for (int i = 0; i < HARNESS_MAX_EGRESS_FDS; i++) {
+        if (h->egress_fds[i].active && h->egress_fds[i].fd == fd) {
+            h->egress_fds[i].fd_ctx = fd_ctx;
+            h->egress_fds[i].want_read = want_read;
+            h->egress_fds[i].want_write = want_write;
+            return;
+        }
+    }
+    for (int i = 0; i < HARNESS_MAX_EGRESS_FDS; i++) {
+        if (!h->egress_fds[i].active) {
+            h->egress_fds[i].fd = fd;
+            h->egress_fds[i].fd_ctx = fd_ctx;
+            h->egress_fds[i].want_read = want_read;
+            h->egress_fds[i].want_write = want_write;
+            h->egress_fds[i].active = 1;
+            return;
+        }
+    }
+    /* Slot table full: this harness only ever runs one or two flows per
+     * test, so silently dropping here would only mask a real test bug —
+     * fail loudly instead of stalling mysteriously later. */
+    printf("FAIL\n    harness_egress_fd_register: HARNESS_MAX_EGRESS_FDS exceeded\n");
+    exit(1);
+}
+
+/* mqvpn_server_callbacks_t.egress_fd_unregister implementation: clears the
+ * slot for fd, if any. No-op for an fd the harness never registered
+ * (mirrors platform_linux.c's find_egress_slot-returns-NULL no-op) — every
+ * flow-destroy path calls this, including ones that never registered a fd
+ * at all (synchronous connect() failures). Critical for correctness, not
+ * just bookkeeping: once tcp_egress.c close()s the real fd, the fd number
+ * can be reused by an unrelated socket; if the harness kept polling a stale
+ * slot it would eventually call mqvpn_server_on_egress_fd_ready with a
+ * dangling fd_ctx pointing at an already-freed flow. */
+static void
+harness_egress_fd_unregister(int fd, void *user_ctx)
+{
+    harness_t *h = (harness_t *)user_ctx;
+    for (int i = 0; i < HARNESS_MAX_EGRESS_FDS; i++) {
+        if (h->egress_fds[i].active && h->egress_fds[i].fd == fd) {
+            h->egress_fds[i].active = 0;
+            return;
+        }
+    }
+}
 
 /* Everything up to (and including) the QUIC connect. Returns 0 on success;
  * on failure everything partially created is torn down. `cfg_hook`
@@ -544,8 +619,10 @@ harness_start(harness_t *h, const char *protocol, size_t protocol_len, int auto_
         mqvpn_server_callbacks_t svr_cbs = MQVPN_SERVER_CALLBACKS_INIT;
         svr_cbs.tun_output = counting_tun_output;
         svr_cbs.tunnel_config_ready = noop_tunnel_config_ready;
+        svr_cbs.egress_fd_register = harness_egress_fd_register;
+        svr_cbs.egress_fd_unregister = harness_egress_fd_unregister;
 
-        h->svr = mqvpn_server_new(svr_cfg, &svr_cbs, NULL);
+        h->svr = mqvpn_server_new(svr_cfg, &svr_cbs, h);
         mqvpn_config_free(svr_cfg);
         if (!h->svr) goto fail_sockets;
 
@@ -627,6 +704,25 @@ harness_pump(harness_t *h, const int *done, int budget_ms)
                                       (struct sockaddr *)&h->cli_addr,
                                       sizeof(h->cli_addr), (struct sockaddr *)&from,
                                       from_len, (xqc_usec_t)test_now_us(), NULL);
+        }
+
+        /* Egress fd events (connect-tcp connect()/relay I/O the server
+         * registered via egress_fd_register). Zero-timeout poll: this is
+         * the reactor's "check what's ready right now" pass, matched by
+         * the harness-wide sleep-and-retry loop below for the case where
+         * nothing is ready yet. */
+        for (int i = 0; i < HARNESS_MAX_EGRESS_FDS; i++) {
+            if (!h->egress_fds[i].active) continue;
+            struct pollfd epfd = {.fd = h->egress_fds[i].fd, .events = 0};
+            if (h->egress_fds[i].want_read) epfd.events |= POLLIN;
+            if (h->egress_fds[i].want_write) epfd.events |= POLLOUT;
+            if (poll(&epfd, 1, 0) > 0 && epfd.revents != 0) {
+                int readable = (epfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
+                int writable = (epfd.revents & (POLLOUT | POLLERR)) != 0;
+                mqvpn_server_on_egress_fd_ready(h->svr, h->egress_fds[i].fd,
+                                                h->egress_fds[i].fd_ctx, readable,
+                                                writable);
+            }
         }
 
         mqvpn_server_tick(h->svr);
@@ -749,34 +845,171 @@ TEST(mqvpn_tcp_acl_denied_gets_403)
     ASSERT_STREQ(status, "403");
 }
 
-/* Config hook for the allow-hole test below: the PUBLIC egress-ACL setter,
- * exactly as a platform embedding libmqvpn would call it. */
+/* Config hook for the allow-hole tests below: the PUBLIC egress-ACL setter,
+ * exactly as a platform embedding libmqvpn would call it. 127.0.0.1/32
+ * (not 10.0.0.0/8): these tests now drive a REAL egress connect() against a
+ * loopback listener the test process itself opens, so the hole needs to
+ * punch through the built-in loopback default-deny, not RFC1918. */
 static void
-harness_cfg_allow_10_slash_8(mqvpn_config_t *cfg)
+harness_cfg_allow_127(mqvpn_config_t *cfg)
 {
-    const char *allow[] = {"10.0.0.0/8"};
+    const char *allow[] = {"127.0.0.1/32"};
     if (mqvpn_config_set_hybrid_egress_acl(cfg, allow, 1, NULL, 0) != MQVPN_OK) {
         printf("FAIL\n    mqvpn_config_set_hybrid_egress_acl rejected valid input\n");
         exit(1);
     }
 }
 
-TEST(mqvpn_tcp_acl_allow_hole_gets_503)
+/* Same allow-hole, plus a short (1s) connect timeout — used by the
+ * connect-timeout test so the deadline sweep fires quickly instead of
+ * waiting out the 10s config default. */
+static void
+harness_cfg_allow_127_short_timeout(mqvpn_config_t *cfg)
+{
+    harness_cfg_allow_127(cfg);
+    if (mqvpn_config_set_hybrid_connect_timeout(cfg, 1) != MQVPN_OK) {
+        printf(
+            "FAIL\n    mqvpn_config_set_hybrid_connect_timeout rejected valid input\n");
+        exit(1);
+    }
+}
+
+/* Opens a real loopback listener on an ephemeral port and returns it
+ * (still LISTENing, nothing accepted) plus the port in host byte order.
+ * Shared by the real-connect-success test and the second-probe-after-
+ * timeout regression below. */
+static int
+open_loopback_listener(int *out_port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(0);
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0 || listen(fd, 4) != 0) {
+        close(fd);
+        return -1;
+    }
+    socklen_t alen = sizeof(addr);
+    getsockname(fd, (struct sockaddr *)&addr, &alen);
+    *out_port = ntohs(addr.sin_port);
+    return fd;
+}
+
+TEST(mqvpn_tcp_acl_allow_hole_reaches_real_connect)
 {
     /* Proves CONFIGURED allow lists reach the live request path (public
-     * setter -> config.hybrid -> svr_get_egress_policy -> decision), not
-     * just the built-in default-deny table: with egress_allow=10.0.0.0/8
-     * punched through, a 10.x target now clears the ACL and reaches the
-     * start_connect stub (503) instead of the ACL's 403. Target 10.1.2.3,
-     * NOT 10.0.0.x: the harness server's tunnel subnet is 10.0.0.0/24 and
-     * the tunnel-subnet check deliberately precedes egress_allow, so a
-     * 10.0.0.x target would (correctly) still be 403 despite the hole. */
+     * setter -> config.hybrid -> svr_get_egress_policy -> decision) all the
+     * way through to a real, successful egress connect(): with
+     * egress_allow=127.0.0.1/32 punched through the loopback default-deny,
+     * a connect-tcp request targeting a real local listener gets a genuine
+     * 200 (replacing the old start_connect stub's unconditional 503), and
+     * the stream stays open (fin=0 — relay-ready) rather than closing
+     * immediately. */
+    int target_port = 0;
+    int listen_fd = open_loopback_listener(&target_port);
+    ASSERT_EQ(listen_fd >= 0, 1);
+
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", target_port);
+
     char status[16] = {0};
-    int rc = run_dispatch_probe_with_path(
-        "mqvpn-tcp", 9, "/.well-known/mqvpn/tcp/10.1.2.3/80/",
-        harness_cfg_allow_10_slash_8, status, sizeof(status));
+    int rc = run_dispatch_probe_with_path("mqvpn-tcp", 9, path, harness_cfg_allow_127,
+                                          status, sizeof(status));
     ASSERT_EQ(rc, 0);
-    ASSERT_STREQ(status, "503");
+    ASSERT_STREQ(status, "200");
+
+    close(listen_fd);
+}
+
+TEST(mqvpn_tcp_connect_timeout_gets_504)
+{
+    /* Deterministic, netns-free "blackhole": a listening socket with a
+     * small backlog whose accept queue is filled by non-blocking filler
+     * connects that are never accept()ed. A subsequent connect() to the
+     * same listener then never resolves (empirically verified 5/5 runs
+     * with an 800ms poll window standalone before wiring this in) — the
+     * server's own connect_deadline_us sweep (svr_tcp_egress_tick), not any
+     * OS-level SYN-retry timeout, is what must fire here. TcpConnectTimeoutSec
+     * is set to 1 via cfg_hook so the test doesn't wait out the 10s default. */
+    int target_port = 0;
+    int listen_fd = open_loopback_listener(&target_port);
+    ASSERT_EQ(listen_fd >= 0, 1);
+    ASSERT_EQ(listen(listen_fd, 1), 0); /* re-listen with backlog=1 (was 4) */
+
+    struct sockaddr_in target_addr;
+    memset(&target_addr, 0, sizeof(target_addr));
+    target_addr.sin_family = AF_INET;
+    target_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    target_addr.sin_port = htons((uint16_t)target_port);
+
+#define N_FILLERS 16
+    int filler_fds[N_FILLERS];
+    for (int i = 0; i < N_FILLERS; i++) {
+        filler_fds[i] = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+        ASSERT_EQ(filler_fds[i] >= 0, 1);
+        connect(filler_fds[i], (struct sockaddr *)&target_addr, sizeof(target_addr));
+    }
+    usleep(200000); /* let whichever fillers can complete their handshake do so */
+
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", target_port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
+                            harness_cfg_allow_127_short_timeout),
+              0);
+    h.probe.path = path;
+
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request(&h.probe), 0);
+
+    harness_pump(&h, &h.probe.response_done, 10000);
+    ASSERT_EQ(h.probe.response_done, 1);
+    ASSERT_STREQ(h.probe.status, "504");
+
+    /* Regression: after the timed-out flow is torn down, its counters
+     * (per-connection tcp_flow_count, global tcp_egress_global_fd_count)
+     * must not be stuck elevated (or underflowed) — a second connect-tcp
+     * request on the SAME h3 connection, this time to a real listener,
+     * must still succeed. */
+    int ok_port = 0;
+    int ok_listen_fd = open_loopback_listener(&ok_port);
+    ASSERT_EQ(ok_listen_fd >= 0, 1);
+    char ok_path[64];
+    snprintf(ok_path, sizeof(ok_path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", ok_port);
+
+    h.probe.path = ok_path;
+    h.probe.response_done = 0;
+    h.probe.status[0] = '\0';
+    ASSERT_EQ(probe_open_request(&h.probe), 0);
+    harness_pump(&h, &h.probe.response_done, 10000);
+    ASSERT_EQ(h.probe.response_done, 1);
+    ASSERT_STREQ(h.probe.status, "200");
+
+    harness_stop(&h);
+    close(ok_listen_fd);
+    for (int i = 0; i < N_FILLERS; i++)
+        close(filler_fds[i]);
+    close(listen_fd);
+#undef N_FILLERS
+}
+
+/* ── svr_tcp_egress_errno_to_status — pure function ── */
+
+TEST(errno_to_status_maps_known_codes)
+{
+    ASSERT_EQ(svr_tcp_egress_errno_to_status(ECONNREFUSED), 502);
+    ASSERT_EQ(svr_tcp_egress_errno_to_status(ETIMEDOUT), 504);
+    ASSERT_EQ(svr_tcp_egress_errno_to_status(ENETUNREACH), 502);
+    ASSERT_EQ(svr_tcp_egress_errno_to_status(EHOSTUNREACH), 502);
+    ASSERT_EQ(svr_tcp_egress_errno_to_status(EACCES), 502); /* default bucket */
 }
 
 /* Regression: a non-tunnel stream closing on the SAME H3 connection as an
@@ -1020,7 +1253,9 @@ main(void)
     run_unrecognized_protocol_gets_501();
     run_mqvpn_tcp_bad_path_gets_400();
     run_mqvpn_tcp_acl_denied_gets_403();
-    run_mqvpn_tcp_acl_allow_hole_gets_503();
+    run_mqvpn_tcp_acl_allow_hole_reaches_real_connect();
+    run_mqvpn_tcp_connect_timeout_gets_504();
+    run_errno_to_status_maps_known_codes();
     run_non_tunnel_close_keeps_tunnel_established();
     run_acl_blocks_rfc1918();
     run_acl_blocks_loopback();

@@ -192,6 +192,19 @@ struct mqvpn_server_s {
 
     int started;
 
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* Connect-stage bookkeeping for src/hybrid/tcp_egress.c: STORAGE only.
+     * Contents are mutated exclusively by tcp_egress.c through the
+     * pointer accessors in mqvpn_server_internal.h (svr_tcp_egress_fd_
+     * count_ptr / svr_tcp_egress_flow_list_head_ptr) — this file never
+     * reads or writes them directly. tcp_egress_flow_list_head points at
+     * the head of tcp_egress.c's own svr_tcp_egress_flow_t intrusive
+     * doubly-linked (D3) list; void* here since this file doesn't know
+     * that type. */
+    int tcp_egress_global_fd_count;
+    void *tcp_egress_flow_list_head;
+#endif
+
     /* Debug: tick thread assertion */
 #ifndef NDEBUG
 #  ifdef _WIN32
@@ -914,6 +927,22 @@ cb_request_close(xqc_h3_request_t *h3_request, void *strm_user_data)
          * mqvpn_client.c's cb_request_close. */
         if (stream->conn && stream->role == SVR_STREAM_ROLE_CONNECT_IP)
             stream->conn->tunnel_established = 0;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+        /* A connect-tcp stream can close (client resets it, or the H3
+         * connection itself is torn down) while its egress flow is still
+         * CONNECTING or ACTIVE. Tear the flow down here too — closes the
+         * fd, unregisters it from the platform reactor, unlinks it from
+         * the D3 tick list, decrements both flow counters, and frees it.
+         * If the flow already went through svr_tcp_egress_flow_destroy via
+         * fail_connect/timeout (which NULLs this same field), this is a
+         * no-op: exactly-once teardown either way, and destroy never
+         * touches h3_request so calling it from a stream-close path (where
+         * the request is already going away) is safe. */
+        if (stream->role == SVR_STREAM_ROLE_CONNECT_TCP && stream->conn &&
+            stream->tcp_egress_flow) {
+            svr_tcp_egress_flow_destroy(stream->conn->server, stream->tcp_egress_flow);
+        }
+#endif
         free(stream->capsule_buf);
         free(stream);
     }
@@ -1092,6 +1121,84 @@ svr_get_egress_policy(const mqvpn_server_t *s, const mqvpn_cidr_entry_t **allow,
     *tunnel_mask = mqvpn_cidr_mask_from_prefix(s->pool.prefix_len);
     *tunnel_net = ntohl(s->pool.base.s_addr) & *tunnel_mask;
 }
+
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+/* ---- connect()/relay boundary accessors for src/hybrid/tcp_egress.c ----
+ * See the docstring block in mqvpn_server_internal.h for why each of these
+ * exists as its own narrow function. */
+
+void **
+svr_stream_tcp_egress_flow_ptr(void *stream)
+{
+    svr_stream_t *st = (svr_stream_t *)stream;
+    return st ? &st->tcp_egress_flow : NULL;
+}
+
+int *
+svr_conn_tcp_flow_count_ptr(void *stream)
+{
+    svr_stream_t *st = (svr_stream_t *)stream;
+    if (!st || !st->conn) return NULL;
+    return &st->conn->tcp_flow_count;
+}
+
+void
+svr_get_tcp_egress_limits(const mqvpn_server_t *s, uint32_t *tcp_max_flows,
+                          uint32_t *tcp_connect_timeout_sec)
+{
+    *tcp_max_flows = s->config.hybrid.tcp_max_flows;
+    *tcp_connect_timeout_sec = s->config.hybrid.tcp_connect_timeout_sec;
+}
+
+int *
+svr_tcp_egress_fd_count_ptr(mqvpn_server_t *s)
+{
+    return &s->tcp_egress_global_fd_count;
+}
+
+void **
+svr_tcp_egress_flow_list_head_ptr(mqvpn_server_t *s)
+{
+    return &s->tcp_egress_flow_list_head;
+}
+
+int
+svr_egress_fd_register(mqvpn_server_t *s, int fd, int want_read, int want_write,
+                       void *fd_ctx)
+{
+    if (!s->cbs.egress_fd_register) return -1;
+    s->cbs.egress_fd_register(fd, want_read, want_write, fd_ctx, s->user_ctx);
+    return 0;
+}
+
+void
+svr_egress_fd_unregister(mqvpn_server_t *s, int fd)
+{
+    if (s->cbs.egress_fd_unregister) s->cbs.egress_fd_unregister(fd, s->user_ctx);
+}
+
+uint64_t
+svr_now_us(void)
+{
+    return now_us();
+}
+
+/* Formats once locally, then hands the finished string to server_log as a
+ * literal "%s" argument — reuses server_log's null/level-gate and cbs.log
+ * dispatch instead of duplicating them here (server_log can't take a
+ * va_list, so a one-shot vsnprintf is the only way to bridge `...`). */
+void
+svr_log(mqvpn_server_t *s, mqvpn_log_level_t level, const char *fmt, ...)
+{
+    if (!s->cbs.log || level < s->log_level) return;
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    server_log(s, level, "%s", buf);
+}
+#endif /* MQVPN_HYBRID_TCP_LANE_ENABLED */
 
 /* CONNECT-IP stream body: capsule reassembly + ADDRESS_REQUEST handling. */
 static int
@@ -1684,12 +1791,15 @@ void
 mqvpn_server_on_egress_fd_ready(mqvpn_server_t *s, int fd, void *fd_ctx, int readable,
                                 int writable)
 {
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    svr_tcp_egress_fd_ready(s, fd, fd_ctx, readable, writable);
+#else
     (void)s;
     (void)fd;
     (void)fd_ctx;
     (void)readable;
-    (void)writable; /* dispatch to tcp_egress.c lands with server-side cap
-                     * enforcement */
+    (void)writable;
+#endif
 }
 
 int
@@ -1934,6 +2044,13 @@ mqvpn_server_tick(mqvpn_server_t *s)
             if (conn && conn->reorder_rx) mqvpn_reorder_rx_tick(conn->reorder_rx, t);
         }
     }
+
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* Connect-timeout sweep over the D3 egress-flow list (one list, one
+     * tick function — the future ACTIVE-idle-timeout work extends this
+     * same walk rather than adding a second sweep). */
+    svr_tcp_egress_tick(s, now_us());
+#endif
 
     return MQVPN_OK;
 }

@@ -1,17 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 
-/* Server-side `:protocol == "mqvpn-tcp"` dispatch: real auth reuse + a
- * mandatory, default-on egress ACL. connect()/relay wiring (the actual TCP
- * socket work) lands in a follow-up task — svr_tcp_egress_start_connect is
- * a stub here that responds 503 once auth+ACL have both passed. */
+/* Server-side `:protocol == "mqvpn-tcp"` dispatch: real auth reuse, a
+ * mandatory default-on egress ACL, non-blocking egress connect() with a
+ * configurable timeout, and 2xx/4xx/5xx response mapping. Relay (the actual
+ * byte-shoveling once the flow is ACTIVE) lands in a follow-up task —
+ * svr_tcp_egress_on_relay_ready below is a no-op stub for now, but data CAN
+ * arrive on an ACTIVE fd before relay lands, so it must not crash. */
 
 #include "hybrid/tcp_egress.h"
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 /* "/.well-known/mqvpn/tcp/" — byte-for-byte the prefix mqvpn_client.c's
  * connect-tcp request builder emits (snprintf("/.well-known/mqvpn/tcp/"
@@ -143,17 +149,27 @@ svr_tcp_egress_acl_allowed(mqvpn_server_t *server, const char *target_host,
                                      tunnel_mask);
 }
 
+/* svr_log-routed warning macro — the only logging path this file has (see
+ * the boundary note in mqvpn_server_internal.h). */
+#define TLOG_W(server, ...) svr_log((server), MQVPN_LOG_WARN, __VA_ARGS__)
+
 /* Canned status-only response, generalizing the 403 stub this replaces.
  * Mirrors mqvpn_server.c's svr_masque_send_403/501 (kept separate on
  * purpose — see the boundary decision in this task: those two stay
  * CONNECT-IP-flavored helpers private to mqvpn_server.c, this one is the
- * connect-tcp-flavored equivalent private to this file). */
+ * connect-tcp-flavored equivalent private to this file).
+ *
+ * `fin`: 1 for a final response (stream closes, no relay follows — every
+ * 4xx/5xx here), 0 to keep the stream open for what comes after (the 200
+ * success response, so relay can use the same stream). Generalizes the
+ * original fin=1-only helper rather than adding a second near-duplicate
+ * send site for the 200 case. */
 static int
-svr_tcp_egress_respond(xqc_h3_request_t *h3_request, int status)
+svr_tcp_egress_respond(xqc_h3_request_t *h3_request, int status, uint8_t fin)
 {
     /* iov_len below is hardcoded 3, so status must be a 3-digit HTTP code
-     * (100-999). All call sites pass literals (400/403/503); a value
-     * outside that range would send a truncated/garbage :status. */
+     * (100-999). All call sites pass literals; a value outside that range
+     * would send a truncated/garbage :status. */
     char status_str[4];
     snprintf(status_str, sizeof(status_str), "%03d", status);
 
@@ -165,24 +181,231 @@ svr_tcp_egress_respond(xqc_h3_request_t *h3_request, int status)
     xqc_http_headers_t resp_hdrs = {.headers = resp, .count = 1, .capacity = 1};
     /* Send-failure deliberately not escalated: returning an error from the
      * H3 read-notify path would kill the whole H3 connection. */
-    xqc_h3_request_send_headers(h3_request, &resp_hdrs, 1);
+    xqc_h3_request_send_headers(h3_request, &resp_hdrs, fin);
     return 0;
 }
 
-/* connect()/relay wiring lands in a follow-up task. 503 = the feature is
- * recognized and passed auth+ACL but isn't available at this build/stage
- * yet — distinct from 403 (denied) and 400 (malformed request). */
+/* ── Per-flow state (Step 1) ──
+ *
+ * Private to this file — nothing outside tcp_egress.c ever dereferences
+ * this struct; every other file sees it only as a void*
+ * (stream->tcp_egress_flow, the fd_ctx handed to egress_fd_register, the
+ * `flow` parameter of svr_tcp_egress_flow_destroy). Relay buffers land with
+ * the next task; this task only needs enough to track one outstanding
+ * connect() and, once ACTIVE, hand future read/write events somewhere.
+ *
+ * prev/next: intrusive D3 tick-enumeration list (design decision: no
+ * server-side 5-tuple table, see tcp_egress.h's on_request docstring). The
+ * list head lives in mqvpn_server_t (storage only; see
+ * svr_tcp_egress_flow_list_head_ptr in mqvpn_server_internal.h). */
+typedef enum {
+    EGRESS_FLOW_CONNECTING = 0,
+    EGRESS_FLOW_ACTIVE,
+} svr_tcp_egress_flow_state_t;
+
+typedef struct svr_tcp_egress_flow_s {
+    int fd;
+    xqc_h3_request_t *h3_request;
+    void *stream; /* svr_stream_t*, opaque here — only mqvpn_server.c's
+                   * accessors (svr_stream_tcp_egress_flow_ptr,
+                   * svr_conn_tcp_flow_count_ptr) dereference it. */
+    svr_tcp_egress_flow_state_t state;
+    uint64_t connect_deadline_us; /* only meaningful while CONNECTING */
+    char username[64];            /* sized to match svr_auth_check's out
+                                   * buf; consumed by later stats work */
+    struct svr_tcp_egress_flow_s *prev, *next;
+} svr_tcp_egress_flow_t;
+
+static void
+svr_tcp_egress_list_insert(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
+{
+    void **head = svr_tcp_egress_flow_list_head_ptr(server);
+    ef->prev = NULL;
+    ef->next = (svr_tcp_egress_flow_t *)*head;
+    if (ef->next) ef->next->prev = ef;
+    *head = ef;
+}
+
+static void
+svr_tcp_egress_list_remove(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
+{
+    void **head = svr_tcp_egress_flow_list_head_ptr(server);
+    if (ef->prev) {
+        ef->prev->next = ef->next;
+    } else {
+        *head = ef->next;
+    }
+    if (ef->next) ef->next->prev = ef->prev;
+    ef->prev = NULL;
+    ef->next = NULL;
+}
+
+/* The ONLY teardown path for a flow (see the docstring in tcp_egress.h for
+ * why every call site funnels through here). Bookkeeping invariant: every
+ * live flow was counted exactly once, unconditionally, right after it was
+ * linked in svr_tcp_egress_start_connect — BEFORE the connect() syscall,
+ * regardless of whether that call turns out to complete synchronously,
+ * return EINPROGRESS, or fail outright. Because destroy() is only ever
+ * reachable after that increment (nothing calls it on the "flow never got
+ * created" paths — admission-cap 503s and a failed socket()/calloc()),
+ * decrementing here unconditionally is always paired 1:1 with a prior
+ * increment. No separate "counted" flag needed. */
+void
+svr_tcp_egress_flow_destroy(mqvpn_server_t *server, void *flow)
+{
+    svr_tcp_egress_flow_t *ef = (svr_tcp_egress_flow_t *)flow;
+    if (!server || !ef) return;
+
+    /* Unregister before close(): the platform reactor keys its registry
+     * off the fd number (see platform_linux.c's egress fd slot table), so
+     * dropping interest must happen while the fd is still open and
+     * unambiguously refers to this flow. Safe to call even for a flow that
+     * was never registered (sync connect() error/admission-cap paths never
+     * call svr_egress_fd_register at all) — both the real platform
+     * implementation and the test harness treat "unregister a fd I don't
+     * know about" as a no-op. */
+    svr_egress_fd_unregister(server, ef->fd);
+    close(ef->fd);
+
+    svr_tcp_egress_list_remove(server, ef);
+
+    int *conn_count = svr_conn_tcp_flow_count_ptr(ef->stream);
+    if (conn_count && *conn_count > 0) (*conn_count)--;
+    int *global_count = svr_tcp_egress_fd_count_ptr(server);
+    if (*global_count > 0) (*global_count)--;
+
+    void **stream_slot = svr_stream_tcp_egress_flow_ptr(ef->stream);
+    if (stream_slot) *stream_slot = NULL;
+
+    free(ef);
+}
+
+/* Errno -> H3 :status for a failed egress connect(), whether discovered
+ * synchronously (connect() itself returned a non-EINPROGRESS error) or via
+ * SO_ERROR after a writable event on an EINPROGRESS fd.
+ *   ECONNREFUSED           -> 502 (nothing listening / actively refused)
+ *   ETIMEDOUT              -> 504 (never completed — includes our own
+ *                              connect_deadline_us sweep, which synthesizes
+ *                              this errno rather than reading SO_ERROR)
+ *   ENETUNREACH/EHOSTUNREACH -> 502 (routing failure reaching the target)
+ *   default                -> 502 (every other errno collapses to the same
+ *                              "couldn't reach upstream" bucket; 502 is the
+ *                              closest HTTP semantic) */
+int
+svr_tcp_egress_errno_to_status(int err)
+{
+    switch (err) {
+    case ECONNREFUSED: return 502;
+    case ETIMEDOUT: return 504;
+    case ENETUNREACH:
+    case EHOSTUNREACH: return 502;
+    default: return 502;
+    }
+}
+
+/* Flips a CONNECTING flow to ACTIVE and re-arms the fd for relay events
+ * (want_read, not want_write — the connect signal was want_write; the next
+ * task's relay wants read-readiness on the upstream fd first). Sends the
+ * real 200 with fin=0: the stream stays open, relay traffic rides it. */
+static void
+svr_tcp_egress_on_connected(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
+{
+    ef->state = EGRESS_FLOW_ACTIVE;
+    (void)svr_egress_fd_register(server, ef->fd, 1, 0, ef);
+    svr_tcp_egress_respond(ef->h3_request, 200, 0);
+}
+
+/* Failed connect (either SO_ERROR after a writable event, or our own
+ * connect-timeout sweep synthesizing ETIMEDOUT): respond with the mapped
+ * status, then fully tear the flow down. */
+static void
+svr_tcp_egress_fail_connect(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef, int err)
+{
+    svr_tcp_egress_respond(ef->h3_request, svr_tcp_egress_errno_to_status(err), 1);
+    svr_tcp_egress_flow_destroy(server, ef);
+}
+
+/* connect()/relay wiring (Step 1-3): open a non-blocking egress socket,
+ * admit it against the per-session and server-wide caps, and either finish
+ * synchronously or arm the fd for a connect-completion callback. Response
+ * is sent immediately for every admission/syscall failure; on the
+ * EINPROGRESS path it is deferred until svr_tcp_egress_fd_ready or
+ * svr_tcp_egress_tick resolves the connect. */
 static int
 svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
                              xqc_h3_request_t *h3_request, const char *target_host,
                              uint16_t target_port, const char *username)
 {
-    (void)server;
-    (void)stream;
-    (void)target_host;
-    (void)target_port;
-    (void)username;
-    return svr_tcp_egress_respond(h3_request, 503);
+    int *global_count = svr_tcp_egress_fd_count_ptr(server);
+    if (*global_count >= mqvpn_server_egress_fd_budget(server)) {
+        return svr_tcp_egress_respond(h3_request, 503, 1);
+    }
+
+    uint32_t tcp_max_flows = 0, tcp_connect_timeout_sec = 0;
+    svr_get_tcp_egress_limits(server, &tcp_max_flows, &tcp_connect_timeout_sec);
+    int *conn_count = svr_conn_tcp_flow_count_ptr(stream);
+    if (conn_count && (uint32_t)*conn_count >= tcp_max_flows) {
+        return svr_tcp_egress_respond(h3_request, 503, 1);
+    }
+
+    int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if (fd < 0) {
+        return svr_tcp_egress_respond(h3_request, 500, 1);
+    }
+
+    struct sockaddr_in dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(target_port);
+    if (inet_pton(AF_INET, target_host, &dst.sin_addr) != 1) {
+        /* Unreachable in practice: svr_tcp_egress_acl_allowed already ran
+         * inet_pton on this exact string. Guarded anyway rather than
+         * trusting a cross-function invariant silently. */
+        close(fd);
+        return svr_tcp_egress_respond(h3_request, 500, 1);
+    }
+
+    svr_tcp_egress_flow_t *ef = calloc(1, sizeof(*ef));
+    if (!ef) {
+        close(fd);
+        return svr_tcp_egress_respond(h3_request, 500, 1);
+    }
+    ef->fd = fd;
+    ef->h3_request = h3_request;
+    ef->stream = stream;
+    ef->state = EGRESS_FLOW_CONNECTING;
+    ef->connect_deadline_us =
+        svr_now_us() + (uint64_t)tcp_connect_timeout_sec * 1000000ULL;
+    snprintf(ef->username, sizeof(ef->username), "%s", username ? username : "");
+
+    void **stream_slot = svr_stream_tcp_egress_flow_ptr(stream);
+    if (stream_slot) *stream_slot = ef; /* the ONE place this is set (D2) */
+    svr_tcp_egress_list_insert(server, ef);
+
+    /* Count exactly once, unconditionally, before the syscall — see the
+     * bookkeeping-invariant comment on svr_tcp_egress_flow_destroy. */
+    if (conn_count) (*conn_count)++;
+    (*global_count)++;
+
+    int r = connect(fd, (struct sockaddr *)&dst, sizeof(dst));
+    if (r == 0) {
+        /* Rare: loopback/already-routed targets can complete synchronously. */
+        svr_tcp_egress_on_connected(server, ef);
+        return 0;
+    }
+    if (errno != EINPROGRESS) {
+        int err = errno;
+        TLOG_W(server, "connect-tcp: connect() failed synchronously (errno=%d)", err);
+        svr_tcp_egress_fail_connect(server, ef, err);
+        return 0;
+    }
+
+    if (svr_egress_fd_register(server, fd, 0, 1 /* want_write = connect signal */, ef) !=
+        0) {
+        TLOG_W(server, "egress_fd_register callback unset — connect-tcp flow will stall "
+                       "until the connect timeout fires");
+    }
+    return 0; /* response deferred until connect completes or times out */
 }
 
 int
@@ -197,7 +420,7 @@ svr_tcp_egress_on_request(mqvpn_server_t *server, void *stream,
     if (svr_auth_required(server) &&
         svr_auth_check(server, hdrs->auth_token, hdrs->auth_token_len, username,
                        sizeof(username)) != 0) {
-        return svr_tcp_egress_respond(h3_request, 403);
+        return svr_tcp_egress_respond(h3_request, 403, 1);
     }
 
     /* The egress ACL below is unconditional regardless of auth: an open
@@ -210,11 +433,11 @@ svr_tcp_egress_on_request(mqvpn_server_t *server, void *stream,
     uint16_t target_port;
     if (svr_tcp_egress_parse_path(hdrs->path, hdrs->path_len, target_host,
                                   sizeof(target_host), &target_port) != 0) {
-        return svr_tcp_egress_respond(h3_request, 400);
+        return svr_tcp_egress_respond(h3_request, 400, 1);
     }
 
     if (!svr_tcp_egress_acl_allowed(server, target_host, target_port)) {
-        return svr_tcp_egress_respond(h3_request, 403);
+        return svr_tcp_egress_respond(h3_request, 403, 1);
     }
 
     return svr_tcp_egress_start_connect(server, stream, h3_request, target_host,
@@ -228,4 +451,57 @@ svr_tcp_egress_on_body(mqvpn_server_t *server, void *stream, xqc_h3_request_t *h
     (void)stream;
     (void)h3_request;
     return 0;
+}
+
+/* Relay lands in the next task. Data CAN arrive on an ACTIVE fd (upstream
+ * becomes readable, or the platform reports writable for a queued send)
+ * before that lands — this must not crash, just drop the event. */
+static void
+svr_tcp_egress_on_relay_ready(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
+                              int readable, int writable)
+{
+    (void)server;
+    (void)ef;
+    (void)readable;
+    (void)writable;
+}
+
+void
+svr_tcp_egress_fd_ready(mqvpn_server_t *server, int fd, void *fd_ctx, int readable,
+                        int writable)
+{
+    svr_tcp_egress_flow_t *ef = (svr_tcp_egress_flow_t *)fd_ctx;
+    if (!server || !ef) return;
+
+    if (ef->state == EGRESS_FLOW_CONNECTING && writable) {
+        int soerr = 0;
+        socklen_t len = sizeof(soerr);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len) != 0) soerr = errno;
+        if (soerr != 0) {
+            svr_tcp_egress_fail_connect(server, ef, soerr);
+            return;
+        }
+        svr_tcp_egress_on_connected(server, ef);
+        return;
+    }
+    svr_tcp_egress_on_relay_ready(server, ef, readable, writable);
+}
+
+void
+svr_tcp_egress_tick(mqvpn_server_t *server, uint64_t now_us)
+{
+    if (!server) return;
+
+    void **head = svr_tcp_egress_flow_list_head_ptr(server);
+    svr_tcp_egress_flow_t *ef = (svr_tcp_egress_flow_t *)*head;
+    while (ef) {
+        /* Save next before possibly destroying ef — fail_connect() unlinks
+         * and frees it, which would otherwise dereference freed memory on
+         * the next loop iteration. */
+        svr_tcp_egress_flow_t *next = ef->next;
+        if (ef->state == EGRESS_FLOW_CONNECTING && now_us >= ef->connect_deadline_us) {
+            svr_tcp_egress_fail_connect(server, ef, ETIMEDOUT);
+        }
+        ef = next;
+    }
 }

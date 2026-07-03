@@ -67,4 +67,79 @@ void svr_get_egress_policy(const mqvpn_server_t *s, const mqvpn_cidr_entry_t **a
                            int *n_allow, const mqvpn_cidr_entry_t **deny, int *n_deny,
                            uint32_t *tunnel_net, uint32_t *tunnel_mask);
 
+/*
+ * ---- connect()/relay boundary (this task) ----
+ *
+ * tcp_egress.c defines its own svr_tcp_egress_flow_t (fd, state, deadline,
+ * intrusive D3 tick-list links, ...) but never sees svr_stream_t/svr_conn_s
+ * or mqvpn_server_t's real layout. The accessors below are the narrow seam
+ * that lets it (a) store/find its one per-stream flow pointer, (b) enforce
+ * the per-session and server-wide concurrent-flow caps, (c) read the two
+ * hybrid config knobs it needs, and (d) forward fd-interest registration
+ * and log lines through the server's existing callback plumbing. Each does
+ * exactly one thing — no combined "give me everything" struct — so a
+ * future boundary audit can grep one call site per concern.
+ */
+
+/* Per-flow egress state slot on the stream (svr_tcp_egress_flow_t*, opaque
+ * here — only tcp_egress.c casts it). Pointer-accessor form: the caller
+ * reads/writes *return-value directly. Exactly one slot per stream, ever
+ * (see D2 in tcp_egress.h) — nothing else may write through this pointer.
+ * `stream` is the same opaque void* svr_tcp_egress_on_request/on_body
+ * receive. */
+void **svr_stream_tcp_egress_flow_ptr(void *stream);
+
+/* Per-connection concurrent connect-tcp flow counter (reached via
+ * stream->conn), for start_connect's per-session admission check against
+ * config.hybrid.tcp_max_flows. Pointer-accessor form, same idiom as above.
+ * Returns NULL only if stream or stream->conn is NULL (never true for a
+ * live request). */
+int *svr_conn_tcp_flow_count_ptr(void *stream);
+
+/* The two hybrid config knobs connect-stage admission/timeout needs.
+ * Declared together (not split into two accessors) because every caller
+ * needs both at once. */
+void svr_get_tcp_egress_limits(const mqvpn_server_t *s, uint32_t *tcp_max_flows,
+                               uint32_t *tcp_connect_timeout_sec);
+
+/* Server-wide egress state: tcp_egress.c owns the CONTENTS (global
+ * in-flight-connect fd count + the D3 intrusive tick-list head) but not the
+ * STORAGE — that lives inside mqvpn_server_t so mqvpn_server_tick can drive
+ * the connect-timeout sweep without tcp_egress.c owning any static/global
+ * state of its own. Pointer-accessor pair, same idiom as the two above. */
+int *svr_tcp_egress_fd_count_ptr(mqvpn_server_t *s);
+void **svr_tcp_egress_flow_list_head_ptr(mqvpn_server_t *s);
+
+/* fd-interest registration passthrough — server owns cbs/user_ctx, neither
+ * of which tcp_egress.c can see. Returns 0 if forwarded to the platform
+ * callback, -1 if the platform never installed egress_fd_register (caller
+ * decides whether/how to log; this accessor does not log itself). */
+int svr_egress_fd_register(mqvpn_server_t *s, int fd, int want_read, int want_write,
+                           void *fd_ctx);
+
+/* Drop interest in fd — the libmqvpn.h contract has a DEDICATED
+ * egress_fd_unregister callback for this, distinct from calling
+ * egress_fd_register with want_read=want_write=0 (see the platform_linux.c
+ * reference implementation: register replaces a libevent event in place,
+ * unregister tears it down and frees the registry slot). No-op if the
+ * platform never installed the callback. */
+void svr_egress_fd_unregister(mqvpn_server_t *s, int fd);
+
+/* Wall-clock microseconds — the SAME source mqvpn_server.c uses everywhere
+ * else (gettimeofday-based; see now_us() in mqvpn_server.c). Exposed so
+ * tcp_egress.c's connect-deadline computation doesn't introduce a second
+ * clock idiom. */
+uint64_t svr_now_us(void);
+
+/* Logging bridge: tcp_egress.c has no logging path of its own (a deliberate
+ * narrow boundary from the previous task); connect-stage observability
+ * needs one now, so this reuses mqvpn_server.c's existing callback-routed
+ * logger rather than inventing a second one. */
+#ifndef _MSC_VER
+void svr_log(mqvpn_server_t *s, mqvpn_log_level_t level, const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+#else
+void svr_log(mqvpn_server_t *s, mqvpn_log_level_t level, const char *fmt, ...);
+#endif
+
 #endif /* MQVPN_SERVER_INTERNAL_H */

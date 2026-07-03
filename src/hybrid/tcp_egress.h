@@ -32,6 +32,43 @@ int svr_tcp_egress_on_request(mqvpn_server_t *server, void *stream,
 int svr_tcp_egress_on_body(mqvpn_server_t *server, void *stream,
                            xqc_h3_request_t *h3_request);
 
+/* Body of mqvpn_server_on_egress_fd_ready (public API in libmqvpn.h) —
+ * dispatched here so mqvpn_server.c's public entry point stays a one-line
+ * delegation. fd_ctx is the svr_tcp_egress_flow_t* the flow was registered
+ * with. Handles both connect-completion (fd was registered want_write for
+ * the connect signal) and, once the next task lands relay, ordinary
+ * readable/writable relay events on an already-ACTIVE flow. */
+void svr_tcp_egress_fd_ready(mqvpn_server_t *server, int fd, void *fd_ctx, int readable,
+                             int writable);
+
+/* Connect-timeout sweep, called once per mqvpn_server_tick() pass. Walks
+ * the D3 intrusive list of in-flight flows; any still EGRESS_FLOW_CONNECTING
+ * past its connect_deadline_us is failed with ETIMEDOUT (-> 504). The walk
+ * is unlink-safe (a flow can be destroyed mid-walk by the timeout it just
+ * hit). The limits work lands ACTIVE-idle-timeout enforcement on this same
+ * walk later — one list, one tick function. */
+void svr_tcp_egress_tick(mqvpn_server_t *server, uint64_t now_us);
+
+/* Full teardown for exactly one flow: unregisters the fd from the platform
+ * reactor (if a callback was ever registered), close()s it, unlinks it
+ * from the D3 tick list, decrements both the per-connection and global
+ * in-flight-connect counters, NULLs the owning stream's tcp_egress_flow
+ * slot, and frees the flow. This is the ONLY place any of that bookkeeping
+ * happens — every teardown site (synchronous connect() error, failed
+ * connect completion, connect timeout, and the owning stream closing
+ * early) funnels through here so a live flow is counted exactly once and
+ * torn down exactly once regardless of which site gets there first. Safe
+ * to call from a stream-close path: this function never touches
+ * h3_request. `flow` is a svr_tcp_egress_flow_t*, opaque outside this
+ * file. */
+void svr_tcp_egress_flow_destroy(mqvpn_server_t *server, void *flow);
+
+/* Maps a connect()/SO_ERROR errno to the H3 :status this task sends back
+ * over the CONNECT-TCP response stream. Exposed (not static) purely for
+ * tests/test_tcp_egress.c's direct unit test — this is a pure function, no
+ * live mqvpn_server_t needed. */
+int svr_tcp_egress_errno_to_status(int err);
+
 /* Exposed for unit testing (tests/test_tcp_egress.c) — attacker-controlled
  * H3 :path bytes land here directly off the wire, so this is the highest-
  * value defensive-test surface in the file.
