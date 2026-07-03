@@ -672,12 +672,26 @@ tcp_lane_downlink_stash_free(mqvpn_tcp_flow_t *f)
  * flow teardown. Idempotent via fin_received_from_h3 — tcp_shutdown must
  * fire exactly once per pcb (vendored tcp.c's tcp_close_shutdown switches on
  * pcb->state, which tcp_shutdown itself transitions away from FIN-capable
- * states). Returns -1 if on_relay_error ran (tcp_shutdown's tx path can
- * return ERR_MEM on a FIN-enqueue allocation failure, or ERR_CONN if the pcb
- * is no longer in a shutdown-eligible state — vendored tcp.c/tcp_out.c;
- * both leave the FIN permanently undeliverable with no local retry hook,
- * unlike our own H3 FIN send which retries on the next writable notify, so
- * this is treated as fatal like the uplink's own alloc-failure convention). */
+ * states).
+ *
+ * Failure semantics, verified against the vendored tcp.c: for the states we
+ * can be in here (ESTABLISHED / CLOSE_WAIT / SYN_RCVD), a FIN-enqueue
+ * allocation failure NEVER surfaces at this call site —
+ * tcp_close_shutdown_fin swallows tcp_send_fin's ERR_MEM into ERR_OK and
+ * latches TF_CLOSEPEND instead (tcp.c:449-457). The pending FIN is then
+ * retried by tcp_fasttmr's "send pending FIN" pass (tcp.c:1522-1526; runs
+ * on every tcp_tmr, tcp.c:237 — i.e. within one ~250 ms tick of our manual
+ * cadence, lwip_glue.c) and opportunistically by tcp_handle_closepend when
+ * pcb allocation fails (tcp.c:1840-1842, called from tcp_alloc,
+ * tcp.c:1864-1865). Net: under memory pressure the FIN is silently
+ * DEFERRED, not delivered-or-errored — we set fin_received_from_h3 and move
+ * on with no detection hook, an accepted OOM-adjacent edge (bounded by the
+ * timer retry; worst case the peer's read blocks until the FIN lands or its
+ * own timeout fires). The only real non-OK return reachable here is
+ * ERR_CONN (pcb no longer in a shutdown-eligible state — tcp.c:537-549, or
+ * LISTEN, tcp.c:521-523): that FIN can never be sent, so it routes to
+ * on_relay_error (returns -1). The route covers ANY non-OK return as cheap
+ * future-proofing against vendored-lwIP changes. */
 static int
 tcp_lane_downlink_maybe_shutdown(mqvpn_tcp_flow_t *f)
 {
