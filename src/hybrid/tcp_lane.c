@@ -313,9 +313,11 @@ tcp_lane_remove_flow(mqvpn_tcp_lane_t *lane, mqvpn_tcp_flow_t *f)
     (void)f;
 }
 
-/* O(n) walk over every bucket matching the stored f->stream back-pointer —
- * see the rationale in tcp_lane.h above mqvpn_tcp_lane_on_stream_established.
- * n <= cfg.tcp_max_flows (default 256), and this only runs once per H3
+/* O(n) walk scanning every bucket for the entry whose stored f->stream
+ * back-pointer matches — see the rationale in tcp_lane.h above
+ * mqvpn_tcp_lane_on_stream_established. n <= cfg.tcp_max_flows +
+ * TCP_LANE_RAW_MARKER_CAP (256 + 4096 by default; markers have
+ * f->stream == NULL so never false-match), and this only runs once per H3
  * response/writable event (not per-packet), so the linear scan is cheap. */
 static mqvpn_tcp_flow_t *
 find_flow_by_stream(mqvpn_tcp_lane_t *lane, void *stream)

@@ -1451,6 +1451,9 @@ cli_connect_tcp_parse_status(xqc_http_headers_t *hdrs)
             if (n == 0 || n >= sizeof(buf)) return -1;
             memcpy(buf, h->value.iov_base, n);
             buf[n] = '\0';
+            /* Reject strtol's leading-whitespace/sign lenience (" 200",
+             * "+200") — a :status value must start with a digit. */
+            if (buf[0] < '0' || buf[0] > '9') return -1;
             char *end = NULL;
             long v = strtol(buf, &end, 10);
             if (end == buf || *end != '\0' || v < 100 || v > 599) return -1;
