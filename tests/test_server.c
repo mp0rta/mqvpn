@@ -216,6 +216,29 @@ TEST(server_destroy_null)
     mqvpn_server_destroy(NULL);
 }
 
+TEST(server_egress_fd_budget)
+{
+    reset_mocks();
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    cbs.log = mock_log;
+
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    ASSERT_NOT_NULL(s);
+    mqvpn_config_free(cfg);
+
+    int budget = mqvpn_server_egress_fd_budget(s);
+    ASSERT_EQ(budget > 0, 1);
+    ASSERT_EQ(budget <= MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT, 1);
+
+    /* NULL server → <= 0 (treat as tcp_egress disabled) */
+    ASSERT_EQ(mqvpn_server_egress_fd_budget(NULL) <= 0, 1);
+
+    mqvpn_server_destroy(s);
+}
+
 /* ── Lifecycle tests ── */
 
 TEST(server_lifecycle)
@@ -905,6 +928,7 @@ main(void)
     run_server_new_missing_tunnel_config_ready();
     run_server_new_destroy();
     run_server_destroy_null();
+    run_server_egress_fd_budget();
 
     /* Lifecycle */
     run_server_lifecycle();

@@ -35,6 +35,7 @@
 #  include <errno.h>
 #endif
 #include <inttypes.h>
+#include <limits.h>
 #include <time.h>
 #include <assert.h>
 
@@ -1335,7 +1336,13 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     if (!s) return NULL;
 
     memcpy(&s->config, cfg, sizeof(*cfg));
-    memcpy(&s->cbs, cbs, sizeof(*cbs));
+    /* Clamp to the caller's struct_size: a platform built against an older
+     * (shorter) callbacks struct must not be over-read — appended fields
+     * stay NULL (s is calloc'd), which is the "callback unset" state. */
+    size_t cbs_size = (cbs->struct_size && cbs->struct_size < sizeof(*cbs))
+                          ? cbs->struct_size
+                          : sizeof(*cbs);
+    memcpy(&s->cbs, cbs, cbs_size);
     s->user_ctx = user_ctx;
     s->log_level = cfg->log_level;
     /* caller guarantees lifetime exceeds this object */ // lgtm[cpp/stack-address-escape]
@@ -1595,15 +1602,15 @@ mqvpn_server_on_egress_fd_ready(mqvpn_server_t *s, int fd, void *fd_ctx, int rea
 int
 mqvpn_server_egress_fd_budget(mqvpn_server_t *s)
 {
-    if (!s) return MQVPN_ERR_INVALID_ARG;
+    if (!s) return 0;
 
     int budget = MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT;
 #ifndef _WIN32
     struct rlimit rl;
-    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY) {
-        /* Compare/subtract in a wide signed type first: rlim_cur is an
-         * unsigned type, and casting a huge value straight to int before
-         * bounding it against budget would be implementation-defined. */
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY &&
+        rl.rlim_cur <= (rlim_t)LLONG_MAX) {
+        /* Widen before subtracting/comparing: rlim_cur is unsigned and may
+         * exceed int range; the guards above keep the cast well-defined. */
         long long headroom = (long long)rl.rlim_cur - 64;
         if (headroom < 0) headroom = 0;
         if (headroom < budget) budget = (int)headroom;

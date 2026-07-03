@@ -706,7 +706,13 @@ client_init_handle(mqvpn_client_t *c, const mqvpn_config_t *cfg,
                    const mqvpn_client_callbacks_t *cbs, void *user_ctx)
 {
     memcpy(&c->config, cfg, sizeof(*cfg));
-    memcpy(&c->cbs, cbs, sizeof(*cbs));
+    /* Clamp to the caller's struct_size: a platform built against an older
+     * (shorter) callbacks struct must not be over-read — appended fields
+     * stay NULL (c is calloc'd), which is the "callback unset" state. */
+    size_t cbs_size = (cbs->struct_size && cbs->struct_size < sizeof(*cbs))
+                          ? cbs->struct_size
+                          : sizeof(*cbs);
+    memcpy(&c->cbs, cbs, cbs_size);
     c->user_ctx = user_ctx; // lgtm[cpp/stack-address-escape]
     c->log_level = cfg->log_level;
     c->state = MQVPN_STATE_IDLE;

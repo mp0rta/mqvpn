@@ -1461,7 +1461,13 @@ platform_egress_fd_register(int fd, int want_read, int want_write, void *fd_ctx,
         slot->fd_ctx = NULL;
         return;
     }
-    event_add(slot->ev, NULL);
+    if (event_add(slot->ev, NULL) < 0) {
+        LOG_WRN("event_add failed for egress fd=%d", fd);
+        event_free(slot->ev);
+        slot->ev = NULL;
+        slot->fd = -1;
+        slot->fd_ctx = NULL;
+    }
 }
 
 static void
@@ -1720,6 +1726,11 @@ cleanup:
         event_del(sp.ev_sigterm);
         event_free(sp.ev_sigterm);
     }
+    if (sp.udp_fd >= 0) close(sp.udp_fd);
+    mqvpn_server_destroy(sp.server);
+    /* After server destroy: teardown may call egress_fd_unregister for any
+     * still-open egress fds, which scans this registry — free it only once
+     * the server is gone (but before the event base the events belong to). */
     if (sp.egress_fds) {
         for (int i = 0; i < sp.n_egress_fds; i++) {
             if (sp.egress_fds[i].ev) {
@@ -1728,9 +1739,9 @@ cleanup:
             }
         }
         free(sp.egress_fds);
+        sp.egress_fds = NULL;
+        sp.n_egress_fds = 0;
     }
-    if (sp.udp_fd >= 0) close(sp.udp_fd);
-    mqvpn_server_destroy(sp.server);
     if (sp.eb) event_base_free(sp.eb);
 
     return rc;
