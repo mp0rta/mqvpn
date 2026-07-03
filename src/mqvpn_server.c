@@ -27,6 +27,7 @@
 #else
 #  include <unistd.h>
 #  include <sys/time.h>
+#  include <sys/resource.h>
 #  include <arpa/inet.h>
 #  include <pthread.h>
 #endif
@@ -1577,6 +1578,39 @@ mqvpn_server_on_socket_recv(mqvpn_server_t *s, const uint8_t *pkt, size_t len,
         LOG_D(s, "packet_process: %d", ret);
     }
     return MQVPN_OK;
+}
+
+void
+mqvpn_server_on_egress_fd_ready(mqvpn_server_t *s, int fd, void *fd_ctx, int readable,
+                                int writable)
+{
+    (void)s;
+    (void)fd;
+    (void)fd_ctx;
+    (void)readable;
+    (void)writable; /* dispatch to tcp_egress.c lands with server-side cap
+                     * enforcement */
+}
+
+int
+mqvpn_server_egress_fd_budget(mqvpn_server_t *s)
+{
+    if (!s) return MQVPN_ERR_INVALID_ARG;
+
+    int budget = MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT;
+#ifndef _WIN32
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY) {
+        /* Compare/subtract in a wide signed type first: rlim_cur is an
+         * unsigned type, and casting a huge value straight to int before
+         * bounding it against budget would be implementation-defined. */
+        long long headroom = (long long)rl.rlim_cur - 64;
+        if (headroom < 0) headroom = 0;
+        if (headroom < budget) budget = (int)headroom;
+    }
+#endif
+    if (budget < 0) budget = 0;
+    return budget;
 }
 
 int

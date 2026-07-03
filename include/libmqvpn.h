@@ -411,6 +411,20 @@ typedef struct {
                                 void *user_ctx);
     void (*on_client_disconnected)(uint32_t session_id, mqvpn_error_t reason,
                                    void *user_ctx);
+
+    /* v6: hybrid TCP lane egress fd interest (OPTIONAL — NULL disables
+     * tcp_egress; connect-tcp-style requests get 503 if unset). The core
+     * (src/hybrid/tcp_egress.c) owns every egress fd's socket()/connect()/
+     * send()/recv()/close() syscalls directly — same "fd-path mode"
+     * convention the client's UDP path fds already use. These two
+     * callbacks only ask the platform to (un)register interest in an
+     * ALREADY-OPEN fd with its reactor. want_read/want_write may be
+     * updated on an already-registered fd (egress_fd_register is called
+     * again with new flags, not just once at creation) — on Linux this
+     * means replacing the libevent event, not mutating one in place. */
+    void (*egress_fd_register)(int fd, int want_read, int want_write, void *fd_ctx,
+                               void *user_ctx);
+    void (*egress_fd_unregister)(int fd, void *user_ctx);
 } mqvpn_server_callbacks_t;
 
 #define MQVPN_SERVER_CALLBACKS_INIT                      \
@@ -662,6 +676,17 @@ MQVPN_API int mqvpn_server_stop(mqvpn_server_t *server);
 MQVPN_API int mqvpn_server_on_socket_recv(mqvpn_server_t *server, const uint8_t *pkt,
                                           size_t len, const struct sockaddr *peer,
                                           socklen_t peer_len);
+
+/* Platform calls this when a previously-registered egress fd (via
+ * egress_fd_register) becomes readable and/or writable. fd_ctx is the
+ * opaque pointer the core passed to egress_fd_register for that fd. */
+MQVPN_API void mqvpn_server_on_egress_fd_ready(mqvpn_server_t *server, int fd,
+                                               void *fd_ctx, int readable, int writable);
+
+/* Upper bound on concurrent egress TCP fds the server will ever open
+ * (min(rlimit_nofile - reserve, configured cap)). Platforms size their
+ * fd->event registries from this so the two bounds cannot drift. */
+MQVPN_API int mqvpn_server_egress_fd_budget(mqvpn_server_t *server);
 
 MQVPN_API int mqvpn_server_on_tun_packet(mqvpn_server_t *server, const uint8_t *pkt,
                                          size_t len);

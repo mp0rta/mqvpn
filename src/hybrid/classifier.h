@@ -34,6 +34,13 @@ typedef struct {
     uint32_t tcp_idle_timeout_sec; /* consumed by tcp_lane.c */
 } mqvpn_hybrid_config_t;
 
+/* Server-wide cap on concurrent egress TCP fds tcp_egress will ever open,
+ * before mqvpn_server_egress_fd_budget()'s rlimit-derived headroom check
+ * narrows it further. This is a whole-server bound, distinct from the
+ * per-flow-table tcp_max_flows above. config key lands with the
+ * server-side cap enforcement. */
+#define MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT 4096
+
 /* static inline ON PURPOSE (not in classifier.c): src/config.c and
  * src/mqvpn_config.c will call these, and three test targets link those
  * sources WITHOUT mqvpn_lib — out-of-line definitions would break links. */
