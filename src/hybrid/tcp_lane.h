@@ -27,7 +27,11 @@ typedef struct mqvpn_tcp_lane mqvpn_tcp_lane_t;
  *
  * Bounds-checked: needs len >= IHL + 14 to reach the flags byte at
  * tcp_off + 13. Truncated/garbage packets return 0 (treated as non-SYN;
- * unknown-flow non-SYN falls to RAW where existing paths handle it). */
+ * unknown-flow non-SYN falls to RAW where existing paths handle it).
+ *
+ * PRECONDITION: pkt must already be classified MQVPN_LANE_TCP
+ * (non-fragment IPv4 TCP); this helper does not re-verify protocol or
+ * fragment offset. */
 static inline int
 mqvpn_tcp_syn_flag(const uint8_t *pkt, size_t len)
 {

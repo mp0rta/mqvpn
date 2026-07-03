@@ -203,10 +203,12 @@ struct mqvpn_client_s {
     uint64_t dgram_lost;
     uint64_t dgram_acked;
     /* Hybrid-mode per-lane TX counters. Stay 0 unless hybrid is enabled.
-     * tcp_flows_rejected counts SYNs that wanted the TCP lane but hit the
-     * tcp_max_flows cap (fell back to RAW, safe pre-lwIP); tcp_lane keeps
-     * its own finer-grained stats (Task 24 wires everything into
-     * get_stats). pkts_lane_tcp_dropped counts packets lwIP refused. */
+     * tcp_flows_rejected counts SYNs that wanted the TCP lane but were
+     * refused pre-lwIP (cap or alloc failure); authoritative source for the
+     * public tcp_flows_rejected stat — Task 24 surfaces THIS counter, not
+     * the lane's flows_rejected_cap, and must not sum them (the lane's
+     * rejected_cap/rejected_other split overlaps this but is not equal).
+     * pkts_lane_tcp_dropped counts packets lwIP refused. */
     uint64_t pkts_lane_tcp;
     uint64_t pkts_lane_dgram;
     uint64_t pkts_lane_raw;
@@ -2475,10 +2477,12 @@ tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t 
             if (conn->tcp_lane) { /* implies lwip_ctx != NULL (coherence
                                    * rule at the creation site) */
                 int is_raw = 0;
-                int is_syn = (ip_ver == 4) && mqvpn_tcp_syn_flag(pkt, len);
                 int found = mqvpn_tcp_lane_lookup(conn->tcp_lane, &flow_key, &is_raw);
 
                 if (!found) {
+                    /* Flags parse only for unknown flows — the common
+                     * established-flow case skips it. */
+                    int is_syn = (ip_ver == 4) && mqvpn_tcp_syn_flag(pkt, len);
                     if (!is_syn) {
                         /* Non-SYN for an unknown flow: evicted, mid-stream
                          * (hybrid just enabled), or inbound-connection
