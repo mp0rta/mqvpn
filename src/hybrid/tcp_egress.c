@@ -454,12 +454,13 @@ svr_tcp_egress_maybe_shutdown_downlink(svr_tcp_egress_flow_t *ef)
 /* Stash one already-pulled-out-of-xquic chunk (destructively read via
  * recv_body — cannot be re-fetched on failure, so losing it here would
  * silently corrupt the relayed stream) and latch downlink_paused. On a
- * stash allocation failure, fails the flow instead of dropping bytes —
- * `ef` may be destroyed by the time this returns; every caller must treat
- * it as gone afterward (see the destroy-ownership note above
- * on_relay_error). len is always <= TCP_EGRESS_RELAY_CHUNK (a suffix of the
- * caller's fixed-size stack buffer). */
-static void
+ * stash allocation failure, fails the flow instead of dropping bytes.
+ * Returns 1 if `ef` is still alive, 0 if the alloc-failure path tore it
+ * down via on_relay_error (same "0 = ef gone, stop touching it" convention
+ * as drain_body/flush_downlink_retry — callers MUST propagate a 0). len is
+ * always <= TCP_EGRESS_RELAY_CHUNK (a suffix of the caller's fixed-size
+ * stack buffer). */
+static int
 svr_tcp_egress_stash_downlink(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
                               const uint8_t *buf, size_t len)
 {
@@ -467,13 +468,14 @@ svr_tcp_egress_stash_downlink(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
         ef->downlink_stash = malloc(TCP_EGRESS_RELAY_CHUNK);
         if (!ef->downlink_stash) {
             svr_tcp_egress_on_relay_error(server, ef, ENOMEM);
-            return;
+            return 0;
         }
     }
     memcpy(ef->downlink_stash, buf, len);
     ef->downlink_stash_len = len;
     ef->downlink_paused = 1;
     svr_tcp_egress_update_fd_interest(server, ef);
+    return 1;
 }
 
 /* Drain the flow's H3 request body into the egress socket. Stops at the
@@ -502,17 +504,35 @@ svr_tcp_egress_drain_body(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
     for (;;) {
         uint8_t fin = 0;
         ssize_t n = xqc_h3_request_recv_body(ef->h3_request, buf, sizeof(buf), &fin);
-        if (n < 0) break; /* -XQC_EAGAIN: drained for now */
+        if (n == -XQC_EAGAIN) break; /* drained for now */
+        if (n < 0) {
+            /* Real recv_body error (not would-block) — fatal for the flow,
+             * same routing as on_h3_writable's explicit -XQC_EAGAIN check. */
+            svr_tcp_egress_on_relay_error(server, ef, 0);
+            return 0;
+        }
 
         if (n > 0) {
             size_t off = 0;
             while (off < (size_t)n) {
                 ssize_t sent;
                 do {
-                    sent = send(ef->fd, buf + off, (size_t)n - off, MSG_DONTWAIT);
+                    /* MSG_NOSIGNAL: a peer that already fully closed
+                     * (RST'd) makes a subsequent send raise SIGPIPE, whose
+                     * default action kills the whole process — and this
+                     * library owns no signal handlers by design (signal
+                     * handling is externalized to the platform/CLI), so
+                     * suppression must happen at the syscall. EPIPE still
+                     * comes back as the errno and routes to on_relay_error
+                     * below. */
+                    sent = send(ef->fd, buf + off, (size_t)n - off,
+                                MSG_DONTWAIT | MSG_NOSIGNAL);
                 } while (sent < 0 && errno == EINTR);
                 if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                    svr_tcp_egress_stash_downlink(server, ef, buf + off, (size_t)n - off);
+                    if (!svr_tcp_egress_stash_downlink(server, ef, buf + off,
+                                                       (size_t)n - off)) {
+                        return 0; /* ef gone (stash alloc failure) */
+                    }
                     return 1;
                 }
                 if (sent <= 0) {
@@ -550,8 +570,10 @@ svr_tcp_egress_flush_downlink_retry(mqvpn_server_t *server, svr_tcp_egress_flow_
     while (off < ef->downlink_stash_len) {
         ssize_t sent;
         do {
+            /* MSG_NOSIGNAL — same SIGPIPE-suppression rationale as the
+             * drain_body send site above. */
             sent = send(ef->fd, ef->downlink_stash + off, ef->downlink_stash_len - off,
-                        MSG_DONTWAIT);
+                        MSG_DONTWAIT | MSG_NOSIGNAL);
         } while (sent < 0 && errno == EINTR);
         if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
         if (sent <= 0) {
@@ -602,8 +624,10 @@ svr_tcp_egress_try_uplink_fin(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
  * normalizes that to a zero-byte accept before calling this). Drops
  * want_read via the interest helper: xquic's own per-stream flow control
  * then backpressures whatever is upstream of the egress socket, mirroring
- * the downlink direction's backpressure the other way. */
-static void
+ * the downlink direction's backpressure the other way. Returns 1 if `ef`
+ * is still alive, 0 if the alloc-failure path tore it down — same boolean
+ * convention as svr_tcp_egress_stash_downlink. */
+static int
 svr_tcp_egress_stash_uplink(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
                             const uint8_t *buf, size_t len)
 {
@@ -611,13 +635,14 @@ svr_tcp_egress_stash_uplink(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
         ef->uplink_stash = malloc(TCP_EGRESS_RELAY_CHUNK);
         if (!ef->uplink_stash) {
             svr_tcp_egress_on_relay_error(server, ef, ENOMEM);
-            return;
+            return 0;
         }
     }
     memcpy(ef->uplink_stash, buf, len);
     ef->uplink_stash_len = len;
     ef->uplink_withheld = 1;
     svr_tcp_egress_update_fd_interest(server, ef);
+    return 1;
 }
 
 /* H3-writable notify dispatch (mqvpn_server.c's cb_request_write delegates
@@ -877,8 +902,11 @@ svr_tcp_egress_on_relay_ready(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
                 return;
             }
             if ((size_t)sent < (size_t)n) {
-                svr_tcp_egress_stash_uplink(server, ef, buf + sent,
-                                            (size_t)n - (size_t)sent);
+                /* Status legally discarded: this caller returns immediately
+                 * on BOTH outcomes (paused-alive or gone), touching ef no
+                 * further either way. */
+                (void)svr_tcp_egress_stash_uplink(server, ef, buf + sent,
+                                                  (size_t)n - (size_t)sent);
                 return; /* the ONLY break-equivalent exit of this loop */
             }
         }

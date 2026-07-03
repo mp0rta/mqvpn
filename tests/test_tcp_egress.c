@@ -980,7 +980,11 @@ tcp_sink_pump(tcp_sink_t *s)
         if (n < 0) break; /* EAGAIN (or a real error) — nothing more now */
         ssize_t off = 0;
         while (off < n) {
-            ssize_t sent = send(s->conn_fd, buf + off, (size_t)(n - off), MSG_DONTWAIT);
+            /* MSG_NOSIGNAL: don't let a peer that already closed take the
+             * whole test process down with SIGPIPE (same suppression the
+             * code under test applies to its own sends). */
+            ssize_t sent = send(s->conn_fd, buf + off, (size_t)(n - off),
+                                MSG_DONTWAIT | MSG_NOSIGNAL);
             if (sent <= 0)
                 break; /* best-effort; the small test payloads
                         * used here never hit real backpressure
@@ -1534,6 +1538,26 @@ TEST(mqvpn_tcp_downlink_backpressure_pause_resume)
     ASSERT_EQ(received_len, payload_len);
     ASSERT_EQ(memcmp(received, payload, payload_len), 0);
 
+    /* Deferred SHUT_WR must actually land: the fin above was sent while
+     * the flow was paused, so the shutdown was deferred until the stash
+     * drained — after the last payload byte, the sink must observe a clean
+     * half-close (recv()==0). Without this, a broken deferred-shutdown
+     * path (or a lost sticky-fin re-report feeding it) would leak the flow
+     * half-open while every byte-count assertion above still passed. */
+    int shutdown_seen = 0;
+    for (int i = 0; i < 500 && !shutdown_seen; i++) {
+        if (sink.conn_fd >= 0) {
+            uint8_t buf[4096];
+            ssize_t n = recv(sink.conn_fd, buf, sizeof(buf), MSG_DONTWAIT);
+            if (n == 0) shutdown_seen = 1;
+        }
+        if (!shutdown_seen) {
+            int never = 0;
+            harness_pump(&h, &never, 20);
+        }
+    }
+    ASSERT_EQ(shutdown_seen, 1);
+
     harness_stop(&h);
     tcp_sink_close(&sink);
     free(payload);
@@ -1541,14 +1565,14 @@ TEST(mqvpn_tcp_downlink_backpressure_pause_resume)
     free(h.probe.raw_recv_buf);
 }
 
-/* Closing-notify idempotency (a separate, dedicated test for uplink
- * -XQC_EAGAIN backpressure — is documented as an honest gap in the task
- * report rather than a fragile syscall-interposition test here):
- * closing-notify idempotency. The probe RESETs its own request mid-relay;
- * the server must tear the flow down exactly once (verified indirectly —
- * a double-destroy would double-free/double-close and show up under the
- * ASan run) and must actually close its egress socket as part of that
- * teardown, which the sink observes as EOF. */
+/* Closing-notify idempotency (the uplink -XQC_EAGAIN backpressure path,
+ * by contrast, has no dedicated test here — documented as an honest
+ * coverage gap rather than built as a fragile syscall-interposition
+ * fake). The probe RESETs its own request mid-relay; the server must tear
+ * the flow down exactly once (verified indirectly — a double-destroy
+ * would double-free/double-close and show up under the ASan run) and must
+ * actually close its egress socket as part of that teardown, which the
+ * sink observes as EOF. */
 TEST(mqvpn_tcp_closing_notify_idempotent)
 {
     tcp_sink_t sink;
