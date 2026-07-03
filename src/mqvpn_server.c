@@ -1369,8 +1369,47 @@ static int
 cb_request_write(xqc_h3_request_t *h3_request, void *strm_user_data)
 {
     (void)h3_request;
-    (void)strm_user_data;
+    svr_stream_t *stream = (svr_stream_t *)strm_user_data;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    if (stream && stream->role == SVR_STREAM_ROLE_CONNECT_TCP && stream->conn) {
+        svr_tcp_egress_on_h3_writable(stream->conn->server, stream);
+    }
+#else
+    (void)stream;
+#endif
     return 0;
+}
+
+/* Peer sent RESET_STREAM — xquic is already tearing this
+ * request down (verified against the vendored source, same citation trail
+ * as mqvpn_client.c's cb_request_closing_notify: this notify fires ONLY on
+ * RESET_STREAM frame reception, never on STOP_SENDING alone or on a clean
+ * bidi-FIN completion). CONNECT-IP has no per-flow teardown concept of its
+ * own (its close is handled via cb_request_close/h3_conn_close_notify), so
+ * only the connect-tcp branch does anything here — reuses the EXISTING
+ * svr_tcp_egress_flow_destroy funnel (the same one cb_request_close below
+ * already calls for the connect-timeout/synchronous-failure paths): the
+ * `stream->tcp_egress_flow` guard is what makes this idempotent against a
+ * flow that already went through a different teardown (svr_tcp_egress_
+ * flow_destroy NULLs it), so whichever of this callback or
+ * cb_request_close reaches the flow first destroys it and the other is a
+ * no-op. (void)err: the flow is dead either way, no err-code-specific
+ * handling needed. */
+static void
+cb_request_closing_notify(xqc_h3_request_t *h3_request, xqc_int_t err,
+                          void *strm_user_data)
+{
+    (void)h3_request;
+    (void)err;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    svr_stream_t *stream = (svr_stream_t *)strm_user_data;
+    if (stream && stream->role == SVR_STREAM_ROLE_CONNECT_TCP && stream->conn &&
+        stream->tcp_egress_flow) {
+        svr_tcp_egress_flow_destroy(stream->conn->server, stream->tcp_egress_flow);
+    }
+#else
+    (void)strm_user_data;
+#endif
 }
 
 /* ================================================================
@@ -1671,6 +1710,7 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
                 .h3_request_close_notify = cb_request_close,
                 .h3_request_read_notify = cb_request_read,
                 .h3_request_write_notify = cb_request_write,
+                .h3_request_closing_notify = cb_request_closing_notify,
             },
         .h3_ext_dgram_cbs =
             {

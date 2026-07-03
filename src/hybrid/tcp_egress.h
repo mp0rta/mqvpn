@@ -32,6 +32,16 @@ int svr_tcp_egress_on_request(mqvpn_server_t *server, void *stream,
 int svr_tcp_egress_on_body(mqvpn_server_t *server, void *stream,
                            xqc_h3_request_t *h3_request);
 
+/* H3-writable notify dispatch — mqvpn_server.c's cb_request_write delegates
+ * here for SVR_STREAM_ROLE_CONNECT_TCP streams (one entry point rather than
+ * poking flow fields mqvpn_server.c can't see the layout of). Flushes the
+ * uplink retry stash and/or retries the pending pure-FIN send
+ * (send_body(NULL,0,1)) once the egress socket has hit EOF — xquic does NOT
+ * buffer a fin-only send across -XQC_EAGAIN, so this retry is mandatory.
+ * No-op on an unknown/already-torn-down flow. `stream` is the caller's
+ * opaque svr_stream_t*. */
+void svr_tcp_egress_on_h3_writable(mqvpn_server_t *server, void *stream);
+
 /* Body of mqvpn_server_on_egress_fd_ready (public API in libmqvpn.h) —
  * dispatched here so mqvpn_server.c's public entry point stays a one-line
  * delegation. fd_ctx is the svr_tcp_egress_flow_t* the flow was registered

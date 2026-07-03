@@ -26,8 +26,10 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -126,12 +128,31 @@ typedef struct {
     int request_closed;
     char status[16];
 
+    /* Cached request object (relay tests below): probe_open_request_
+     * with_body sets this so probe_send_body_retry/probe_send_fin_retry
+     * and a direct xqc_h3_request_close (closing-notify idempotency test)
+     * have something to act on. NULL for the fire-and-forget dispatch
+     * probes above, which never need it. */
+    xqc_h3_request_t *req;
+
     /* CONNECT-IP tunnel state (probe_open_connect_ip) */
     uint64_t masque_stream_id;
     int tunnel_ready; /* ADDRESS_ASSIGN (v4) parsed from the response body */
     uint8_t assigned_ip[4];
     uint8_t body_buf[256];
     size_t body_len;
+
+    /* Raw body capture (relay tests below): when set, probe_cb_request_
+     * read's body branch accumulates bytes verbatim into a growable buffer
+     * instead of running the CONNECT-IP capsule decoder above — the
+     * connect-tcp relay tests need the exact echoed bytes, not capsule
+     * semantics. raw_recv_fin mirrors recv_body's *fin contract (verified
+     * level-triggered re-report — set once observed, never cleared). */
+    int raw_capture;
+    uint8_t *raw_recv_buf;
+    size_t raw_recv_len;
+    size_t raw_recv_cap;
+    int raw_recv_fin;
 } probe_conn_t;
 
 static void
@@ -235,6 +256,47 @@ probe_open_request(probe_conn_t *p)
      * dispatch branches under test. */
     ssize_t ret = xqc_h3_request_send_headers(req, &headers, 1);
     if (ret < 0) return -1;
+    return 0;
+}
+
+/* Same header set as probe_open_request, but fin=0 (a body follows) and
+ * caches the request object on the probe (p->req) for the relay tests
+ * below — those need to drive send_body/send_fin/close on the SAME
+ * request object across multiple harness_pump slices, not just fire
+ * headers and forget it. Kept as a separate function rather than adding a
+ * fin parameter to probe_open_request: every existing caller of that one
+ * wants the fixed fin=1 dispatch-probe shape, and this one is only ever
+ * used by the mqvpn-tcp relay tests (which always want fin=0 + the cached
+ * pointer). */
+static int
+probe_open_request_with_body(probe_conn_t *p)
+{
+    xqc_h3_request_t *req = xqc_h3_request_create(p->engine, &p->cid, NULL, p);
+    if (!req) return -1;
+
+    const char *path = p->path ? p->path : "/probe";
+    xqc_http_header_t hdrs[5] = {
+        {.name = {.iov_base = ":method", .iov_len = 7},
+         .value = {.iov_base = "CONNECT", .iov_len = 7},
+         .flags = 0},
+        {.name = {.iov_base = ":protocol", .iov_len = 9},
+         .value = {.iov_base = (void *)p->protocol, .iov_len = p->protocol_len},
+         .flags = 0},
+        {.name = {.iov_base = ":scheme", .iov_len = 7},
+         .value = {.iov_base = "https", .iov_len = 5},
+         .flags = 0},
+        {.name = {.iov_base = ":authority", .iov_len = 10},
+         .value = {.iov_base = p->authority, .iov_len = strlen(p->authority)},
+         .flags = 0},
+        {.name = {.iov_base = ":path", .iov_len = 5},
+         .value = {.iov_base = (void *)path, .iov_len = strlen(path)},
+         .flags = 0},
+    };
+    xqc_http_headers_t headers = {.headers = hdrs, .count = 5, .capacity = 5};
+
+    ssize_t ret = xqc_h3_request_send_headers(req, &headers, 0);
+    if (ret < 0) return -1;
+    p->req = req;
     return 0;
 }
 
@@ -354,6 +416,33 @@ probe_cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t fl
     }
 
     if (flag & XQC_REQ_NOTIFY_READ_BODY) {
+        if (p->raw_capture) {
+            /* Relay tests: capture the echoed bytes verbatim,
+             * growing the buffer as needed — no capsule framing on a
+             * connect-tcp stream, this IS the relayed payload. */
+            unsigned char buf[4096];
+            unsigned char fin = 0;
+            ssize_t n;
+            while ((n = xqc_h3_request_recv_body(h3_request, buf, sizeof(buf), &fin)) >
+                   0) {
+                if (p->raw_recv_len + (size_t)n > p->raw_recv_cap) {
+                    size_t new_cap = p->raw_recv_cap ? p->raw_recv_cap * 2 : 65536;
+                    while (new_cap < p->raw_recv_len + (size_t)n)
+                        new_cap *= 2;
+                    uint8_t *nb = realloc(p->raw_recv_buf, new_cap);
+                    if (!nb) {
+                        printf("FAIL\n    probe raw_recv_buf realloc failed\n");
+                        exit(1);
+                    }
+                    p->raw_recv_buf = nb;
+                    p->raw_recv_cap = new_cap;
+                }
+                memcpy(p->raw_recv_buf + p->raw_recv_len, buf, (size_t)n);
+                p->raw_recv_len += (size_t)n;
+            }
+            if (n == 0 && fin) p->raw_recv_fin = 1;
+            return 0;
+        }
         /* Accumulate and decode capsules — the CONNECT-IP response body
          * carries ADDRESS_ASSIGN (and ROUTE_ADVERTISEMENT), which the
          * tunnel-survival test needs for the inner packet's src IP. */
@@ -753,6 +842,54 @@ harness_pump(harness_t *h, const int *done, int budget_ms)
     }
 }
 
+/* Send `len` bytes of H3 body from `data`, retrying across -XQC_EAGAIN by
+ * pumping the harness between attempts (mirrors the client tcp_lane's own
+ * partial-accept-then-retry discipline — the probe's send window is
+ * finite, and the downlink-backpressure test deliberately never drains its
+ * sink, which propagates all the way back to blocking the probe's own H3
+ * sends via ordinary QUIC stream flow control). `iter_budget` bounds the
+ * number of 20ms pump slices attempted (not wall-clock time — the harness's
+ * own poll already has generous per-iteration timeouts) as a livelock
+ * backstop; a real bug shows up as a failed byte-count assertion long
+ * before this fires. Returns 0 once every byte was accepted by xquic, -1 on
+ * a fatal send error or exhausted budget. */
+static int
+probe_send_body_retry(harness_t *h, probe_conn_t *p, const uint8_t *data, size_t len,
+                      int iter_budget)
+{
+    size_t off = 0;
+    for (int i = 0; i < iter_budget; i++) {
+        while (off < len) {
+            ssize_t sent = xqc_h3_request_send_body(
+                p->req, (unsigned char *)(uintptr_t)(data + off), len - off, 0);
+            if (sent == -XQC_EAGAIN) break;
+            if (sent < 0) return -1;
+            off += (size_t)sent;
+        }
+        if (off >= len) return 0;
+        int never = 0;
+        harness_pump(h, &never, 20);
+    }
+    return -1;
+}
+
+/* Bare H3 fin (send_body(NULL, 0, 1)), same EAGAIN-retry shape as above.
+ * Mirrors the server's own svr_tcp_egress_try_uplink_fin retry discipline
+ * from the OTHER direction — xquic does not buffer a fin-only send across
+ * -XQC_EAGAIN on either side of the connection. */
+static int
+probe_send_fin_retry(harness_t *h, probe_conn_t *p, int iter_budget)
+{
+    for (int i = 0; i < iter_budget; i++) {
+        ssize_t sent = xqc_h3_request_send_body(p->req, NULL, 0, 1);
+        if (sent >= 0) return 0;
+        if (sent != -XQC_EAGAIN) return -1;
+        int never = 0;
+        harness_pump(h, &never, 20);
+    }
+    return -1;
+}
+
 static void
 harness_stop(harness_t *h)
 {
@@ -760,6 +897,125 @@ harness_stop(harness_t *h)
     mqvpn_server_destroy(h->svr);
     close(h->svr_fd);
     close(h->cli_fd);
+}
+
+/* ── Minimal in-test TCP echo/sink server (relay tests below) ──
+ *
+ * The relay paths under test run REAL syscalls against a REAL egress
+ * socket (send()/recv()/shutdown() in tcp_egress.c) — proving them needs a
+ * real TCP peer, not a fake-xquic double (test_tcp_lane.c's approach
+ * doesn't apply: the thing under test IS the socket boundary itself). This
+ * is a tiny, single-connection, manually-pumped TCP server driven from the
+ * SAME test-loop tick as harness_pump — no threads, so it composes with
+ * the existing poll-based harness without adding concurrency to reason
+ * about. */
+typedef struct {
+    int listen_fd;
+    int conn_fd; /* -1 until accepted */
+    int port;
+    int echo;                   /* 1: echo every byte read straight back (tests 1-3);
+                                 * 0: sink mode — accept only, never read (test 4 drains
+                                 * the accepted fd directly from the test body instead). */
+    int close_after_first_echo; /* test 2 (EOF -> H3 FIN): close() right
+                                 * after echoing back whatever was read. */
+    int eof_seen;               /* recv()==0 observed on conn_fd (echo mode only). */
+    uint64_t echoed_bytes;
+} tcp_sink_t;
+
+static int
+tcp_sink_open(tcp_sink_t *s, int echo)
+{
+    memset(s, 0, sizeof(*s));
+    s->conn_fd = -1;
+    s->echo = echo;
+    s->listen_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if (s->listen_fd < 0) return -1;
+    int one = 1;
+    setsockopt(s->listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(0);
+    if (bind(s->listen_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
+        listen(s->listen_fd, 4) != 0) {
+        close(s->listen_fd);
+        return -1;
+    }
+    socklen_t alen = sizeof(addr);
+    getsockname(s->listen_fd, (struct sockaddr *)&addr, &alen);
+    s->port = ntohs(addr.sin_port);
+    return 0;
+}
+
+/* One non-blocking tick: accept if not yet accepted, then (echo mode only)
+ * drain+echo whatever's currently available and note EOF. Sink mode
+ * (echo=0) only ever accepts here — test 4 reads the accepted fd directly
+ * from the test body once it's ready to start draining, which is the
+ * entire point of that test. Call once per harness_pump slice. */
+static void
+tcp_sink_pump(tcp_sink_t *s)
+{
+    if (s->conn_fd < 0) {
+        struct sockaddr_in from;
+        socklen_t flen = sizeof(from);
+        int fd = accept(s->listen_fd, (struct sockaddr *)&from, &flen);
+        if (fd >= 0) {
+            int fl = fcntl(fd, F_GETFL, 0);
+            fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+            s->conn_fd = fd;
+        }
+        return;
+    }
+    if (!s->echo) return;
+
+    uint8_t buf[4096];
+    for (;;) {
+        ssize_t n = recv(s->conn_fd, buf, sizeof(buf), MSG_DONTWAIT);
+        if (n == 0) {
+            s->eof_seen = 1;
+            break;
+        }
+        if (n < 0) break; /* EAGAIN (or a real error) — nothing more now */
+        ssize_t off = 0;
+        while (off < n) {
+            ssize_t sent = send(s->conn_fd, buf + off, (size_t)(n - off), MSG_DONTWAIT);
+            if (sent <= 0)
+                break; /* best-effort; the small test payloads
+                        * used here never hit real backpressure
+                        * echoing back over loopback. */
+            off += sent;
+        }
+        s->echoed_bytes += (uint64_t)n;
+        if (s->close_after_first_echo) {
+            close(s->conn_fd);
+            s->conn_fd = -1;
+            return;
+        }
+    }
+}
+
+static void
+tcp_sink_close(tcp_sink_t *s)
+{
+    if (s->conn_fd >= 0) close(s->conn_fd);
+    close(s->listen_fd);
+}
+
+/* harness_pump, plus a tcp_sink_pump tick before each slice — the shape
+ * every relay test drives its I/O with. `done` follows harness_pump's own
+ * contract (a probe-side flag such as response_done); pass a throwaway int
+ * for tests that only care about the sink-side observable. */
+static void
+harness_pump_with_sink(harness_t *h, tcp_sink_t *sink, const int *done, int budget_ms)
+{
+    for (int elapsed = 0; elapsed < budget_ms && !*done; elapsed += 20) {
+        tcp_sink_pump(sink);
+        int slice_done = 0;
+        harness_pump(h, &slice_done, 20);
+        if (*done) break;
+    }
 }
 
 /* ── Shared dispatch probe ──
@@ -1024,6 +1280,313 @@ TEST(mqvpn_tcp_connect_timeout_gets_504)
 #undef N_FILLERS
 }
 
+/* ── Relay: real syscalls against a real TCP peer ──
+ *
+ * Every test below opens a genuine connect-tcp flow against tcp_sink_t
+ * (never against the raw H3 probe's own transport — this exercises
+ * tcp_egress.c's send()/recv()/shutdown() calls for real, over loopback). */
+
+/* Test 1: echo roundtrip — proves BOTH relay directions in one shot: the
+ * probe's body reaches the sink (downlink), and the sink's echoed reply
+ * reaches the probe's H3 response body (uplink). */
+TEST(mqvpn_tcp_echo_roundtrip)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/1), 0);
+
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    h.probe.path = path;
+    h.probe.raw_capture = 1;
+
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+
+    harness_pump_with_sink(&h, &sink, &h.probe.response_done, 10000);
+    ASSERT_EQ(h.probe.response_done, 1);
+    ASSERT_STREQ(h.probe.status, "200");
+
+    const char *msg = "hello mqvpn-tcp relay";
+    size_t msg_len = strlen(msg);
+    ASSERT_EQ(probe_send_body_retry(&h, &h.probe, (const uint8_t *)msg, msg_len, 500), 0);
+
+    int got_all = 0;
+    for (int i = 0; i < 500 && !got_all; i++) {
+        int never = 0;
+        harness_pump_with_sink(&h, &sink, &never, 20);
+        got_all = h.probe.raw_recv_len >= msg_len;
+    }
+    ASSERT_EQ(got_all, 1);
+    ASSERT_EQ(h.probe.raw_recv_len, msg_len);
+    ASSERT_EQ(memcmp(h.probe.raw_recv_buf, msg, msg_len), 0);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
+/* Test 2: egress EOF -> pure H3 FIN. The sink closes right after echoing,
+ * so the server's egress recv() sees EOF and must map it to
+ * send_body(NULL, 0, 1) rather than silently going quiet or resetting the
+ * stream. */
+TEST(mqvpn_tcp_egress_eof_becomes_h3_fin)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/1), 0);
+    sink.close_after_first_echo = 1;
+
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    h.probe.path = path;
+    h.probe.raw_capture = 1;
+
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+
+    harness_pump_with_sink(&h, &sink, &h.probe.response_done, 10000);
+    ASSERT_EQ(h.probe.response_done, 1);
+    ASSERT_STREQ(h.probe.status, "200");
+
+    const char *msg = "goodbye";
+    size_t msg_len = strlen(msg);
+    ASSERT_EQ(probe_send_body_retry(&h, &h.probe, (const uint8_t *)msg, msg_len, 500), 0);
+
+    int fin_seen = 0;
+    for (int i = 0; i < 500 && !fin_seen; i++) {
+        int never = 0;
+        harness_pump_with_sink(&h, &sink, &never, 20);
+        fin_seen = h.probe.raw_recv_fin;
+    }
+    ASSERT_EQ(fin_seen, 1);
+    /* The echoed bytes must have arrived too — the sink closes AFTER
+     * echoing, so a correct FIN mapping never truncates them. */
+    ASSERT_EQ(h.probe.raw_recv_len, msg_len);
+    ASSERT_EQ(memcmp(h.probe.raw_recv_buf, msg, msg_len), 0);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
+/* Test 3: H3 fin (client's send half) -> shutdown(fd, SHUT_WR). The probe
+ * fins its OWN send direction after its bytes; the sink must observe a
+ * clean half-close (read()==0) only once every byte has arrived (never a
+ * premature/truncating shutdown), while the uplink direction (the sink's
+ * echoed reply) still completes independently of that half-close. */
+TEST(mqvpn_tcp_h3_fin_becomes_shut_wr)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/1), 0);
+
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    h.probe.path = path;
+    h.probe.raw_capture = 1;
+
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+
+    harness_pump_with_sink(&h, &sink, &h.probe.response_done, 10000);
+    ASSERT_EQ(h.probe.response_done, 1);
+    ASSERT_STREQ(h.probe.status, "200");
+
+    const char *msg = "half close me";
+    size_t msg_len = strlen(msg);
+    ASSERT_EQ(probe_send_body_retry(&h, &h.probe, (const uint8_t *)msg, msg_len, 500), 0);
+
+    /* Wait for the echo to complete BEFORE fin'ing, proving the uplink
+     * direction fully works ahead of (and thus independent of) the
+     * downlink half-close below. */
+    int got_echo = 0;
+    for (int i = 0; i < 500 && !got_echo; i++) {
+        int never = 0;
+        harness_pump_with_sink(&h, &sink, &never, 20);
+        got_echo = h.probe.raw_recv_len >= msg_len;
+    }
+    ASSERT_EQ(got_echo, 1);
+
+    ASSERT_EQ(probe_send_fin_retry(&h, &h.probe, 500), 0);
+
+    int eof_seen = 0;
+    for (int i = 0; i < 500 && !eof_seen; i++) {
+        tcp_sink_pump(&sink);
+        int never = 0;
+        harness_pump(&h, &never, 20);
+        eof_seen = sink.eof_seen;
+    }
+    ASSERT_EQ(eof_seen, 1);
+    /* Not truncated: the sink saw every byte before EOF. */
+    ASSERT_EQ((size_t)sink.echoed_bytes, msg_len);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
+/* Test 4: downlink backpressure pause/resume + deferred-shutdown ordering.
+ * The sink accepts but NEVER reads; the probe pumps a large payload
+ * (deliberately larger than the default loopback socket buffers) so
+ * send()'s EWOULDBLOCK in svr_tcp_egress_drain_body is hit for real,
+ * pausing the flow — which, through ordinary QUIC stream flow control
+ * (the server stops draining recv_body while paused), backpressures the
+ * probe's own sends too. The probe fins its side WHILE still paused/
+ * backed up (before the sink ever drains), exercising the "fin arrives
+ * during pause must not shutdown ahead of the still-stashed bytes"
+ * ordering. The sink then starts draining and must receive every byte,
+ * in order, with nothing lost — which is only possible if the deferred
+ * shutdown really waited for the stash to fully flush first. */
+TEST(mqvpn_tcp_downlink_backpressure_pause_resume)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0); /* never reads */
+
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    h.probe.path = path;
+    h.probe.raw_capture = 1;
+
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+
+    /* tcp_sink_pump's accept-only branch (echo=0) still needs to run so the
+     * server's egress connect() actually completes. */
+    harness_pump_with_sink(&h, &sink, &h.probe.response_done, 10000);
+    ASSERT_EQ(h.probe.response_done, 1);
+    ASSERT_STREQ(h.probe.status, "200");
+
+    size_t payload_len = 512 * 1024;
+    uint8_t *payload = malloc(payload_len);
+    ASSERT_EQ(payload != NULL, 1);
+    for (size_t i = 0; i < payload_len; i++)
+        payload[i] = (uint8_t)(i & 0xFF);
+
+    /* Pumps via harness_pump_with_sink so the sink keeps accept()ing (it's
+     * already accepted by now) without ever reading — this is what forces
+     * real EWOULDBLOCK on the server's egress send(). iter_budget is
+     * generous: each retry slice is 20ms and this may need many while the
+     * flow is genuinely paused. */
+    int sent_ok = 0;
+    {
+        size_t off = 0;
+        for (int i = 0; i < 5000 && off < payload_len; i++) {
+            while (off < payload_len) {
+                ssize_t sent = xqc_h3_request_send_body(
+                    h.probe.req, (unsigned char *)(payload + off), payload_len - off, 0);
+                if (sent == -XQC_EAGAIN) break;
+                ASSERT_EQ(sent > 0, 1);
+                off += (size_t)sent;
+            }
+            if (off >= payload_len) break;
+            tcp_sink_pump(&sink);
+            int never = 0;
+            harness_pump(&h, &never, 20);
+        }
+        sent_ok = (off == payload_len);
+    }
+    ASSERT_EQ(sent_ok, 1);
+
+    /* Fin while the flow is still (very likely) paused/backed up — the
+     * point of this test. */
+    ASSERT_EQ(probe_send_fin_retry(&h, &h.probe, 500), 0);
+
+    /* Now start draining the sink and keep pumping until every byte has
+     * arrived (or the budget is exhausted, which fails the length assert
+     * below rather than hanging). */
+    uint8_t *received = malloc(payload_len);
+    ASSERT_EQ(received != NULL, 1);
+    size_t received_len = 0;
+    for (int i = 0; i < 10000 && received_len < payload_len; i++) {
+        tcp_sink_pump(&sink); /* no-op past accept in sink mode */
+        if (sink.conn_fd >= 0) {
+            uint8_t buf[65536];
+            ssize_t n;
+            while ((n = recv(sink.conn_fd, buf, sizeof(buf), MSG_DONTWAIT)) > 0) {
+                if (received_len + (size_t)n <= payload_len) {
+                    memcpy(received + received_len, buf, (size_t)n);
+                }
+                received_len += (size_t)n;
+            }
+        }
+        int never = 0;
+        harness_pump(&h, &never, 5);
+    }
+
+    ASSERT_EQ(received_len, payload_len);
+    ASSERT_EQ(memcmp(received, payload, payload_len), 0);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(payload);
+    free(received);
+    free(h.probe.raw_recv_buf);
+}
+
+/* Closing-notify idempotency (a separate, dedicated test for uplink
+ * -XQC_EAGAIN backpressure — is documented as an honest gap in the task
+ * report rather than a fragile syscall-interposition test here):
+ * closing-notify idempotency. The probe RESETs its own request mid-relay;
+ * the server must tear the flow down exactly once (verified indirectly —
+ * a double-destroy would double-free/double-close and show up under the
+ * ASan run) and must actually close its egress socket as part of that
+ * teardown, which the sink observes as EOF. */
+TEST(mqvpn_tcp_closing_notify_idempotent)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/1), 0);
+
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    h.probe.path = path;
+    h.probe.raw_capture = 1;
+
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+
+    harness_pump_with_sink(&h, &sink, &h.probe.response_done, 10000);
+    ASSERT_EQ(h.probe.response_done, 1);
+    ASSERT_STREQ(h.probe.status, "200");
+
+    ASSERT_EQ(xqc_h3_request_close(h.probe.req), 0);
+
+    int gone = 0;
+    for (int i = 0; i < 500 && !gone; i++) {
+        tcp_sink_pump(&sink);
+        int never = 0;
+        harness_pump(&h, &never, 20);
+        gone = sink.eof_seen;
+    }
+    ASSERT_EQ(gone, 1);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
 /* ── svr_tcp_egress_errno_to_status — pure function ── */
 
 TEST(errno_to_status_maps_known_codes)
@@ -1278,6 +1841,11 @@ main(void)
     run_mqvpn_tcp_acl_denied_gets_403();
     run_mqvpn_tcp_acl_allow_hole_reaches_real_connect();
     run_mqvpn_tcp_connect_timeout_gets_504();
+    run_mqvpn_tcp_echo_roundtrip();
+    run_mqvpn_tcp_egress_eof_becomes_h3_fin();
+    run_mqvpn_tcp_h3_fin_becomes_shut_wr();
+    run_mqvpn_tcp_downlink_backpressure_pause_resume();
+    run_mqvpn_tcp_closing_notify_idempotent();
     run_errno_to_status_maps_known_codes();
     run_non_tunnel_close_keeps_tunnel_established();
     run_acl_blocks_rfc1918();

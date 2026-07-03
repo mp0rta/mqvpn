@@ -3,10 +3,10 @@
 
 /* Server-side `:protocol == "mqvpn-tcp"` dispatch: real auth reuse, a
  * mandatory default-on egress ACL, non-blocking egress connect() with a
- * configurable timeout, and 2xx/4xx/5xx response mapping. Relay (the actual
- * byte-shoveling once the flow is ACTIVE) lands in a follow-up task —
- * svr_tcp_egress_on_relay_ready below is a no-op stub for now, but data CAN
- * arrive on an ACTIVE fd before relay lands, so it must not crash. */
+ * configurable timeout, 2xx/4xx/5xx response mapping, the downlink/uplink
+ * relay once a flow is ACTIVE, and the close mapping that tears a flow down
+ * exactly once regardless of which side notices first (see the
+ * destroy-ownership note above svr_tcp_egress_on_relay_error). */
 
 #include "hybrid/tcp_egress.h"
 
@@ -25,6 +25,13 @@
  * "%u.%u.%u.%u/%u/", ...)). */
 #define TCP_EGRESS_PATH_PREFIX     "/.well-known/mqvpn/tcp/"
 #define TCP_EGRESS_PATH_PREFIX_LEN (sizeof(TCP_EGRESS_PATH_PREFIX) - 1)
+
+/* One relay-loop chunk (both directions) and the lazily-allocated stash
+ * buffer size: a single in-flight chunk per direction, matching the
+ * client's tcp_lane precedent (downlink_stash is TCP_MSS-sized there; here
+ * both directions share a flat 4096 to match the relay loop's stack
+ * buffers). */
+#define TCP_EGRESS_RELAY_CHUNK 4096
 
 int
 svr_tcp_egress_parse_path(const char *path, size_t path_len, char *out_host,
@@ -214,6 +221,55 @@ typedef struct svr_tcp_egress_flow_s {
     uint64_t connect_deadline_us; /* only meaningful while CONNECTING */
     char username[64];            /* sized to match svr_auth_check's out
                                    * buf; consumed by later stats work */
+
+    /* ── Relay state (this task) ──
+     *
+     * Plain booleans, not the client's high/low-water byte-count scheme
+     * (tcp_lane.h's MQVPN_TCP_LANE_BP_*_WATER): the server relays between
+     * two syscalls through a fixed 4096B stack buffer with no accumulation
+     * phase, so there is nothing to hysteresis over — withhold on ANY
+     * EWOULDBLOCK/-XQC_EAGAIN, resume on the very next writable/write-ready
+     * signal. Stash buffers are lazily malloc'd (first pause) and freed only
+     * in svr_tcp_egress_flow_destroy, matching the client's downlink_stash
+     * precedent. Memory bound: 2 * TCP_EGRESS_RELAY_CHUNK (8 KiB) per flow
+     * that has EVER paused in either direction, times the global egress fd
+     * budget — bounded by egress_fd_budget, not tcp_max_flows, since that's
+     * the true worst case (every admitted flow pauses once). */
+    int downlink_paused; /* send()-side backpressure: downlink_stash holds
+                          * one unsent chunk pulled out of xquic's body_buf
+                          * (already destructively consumed — cannot be
+                          * re-fetched, so it must live somewhere). */
+    uint8_t *downlink_stash;
+    size_t downlink_stash_len;
+    int fin_received_from_h3;   /* client fin observed (recv_body's *fin) —
+                                 * latched once; shutdown(fd, SHUT_WR) may
+                                 * still be DEFERRED if downlink_paused. */
+    int downlink_shutdown_done; /* shutdown(fd, SHUT_WR) actually issued —
+                                 * separate from fin_received_from_h3 so the
+                                 * deferred-during-pause case retries exactly
+                                 * once when the stash finally drains. */
+
+    int uplink_withheld; /* xquic send-side backpressure (-XQC_EAGAIN or a
+                          * partial accept): uplink_stash holds one unsent
+                          * chunk already pulled out of the egress socket
+                          * via recv() (same "already consumed" hazard as
+                          * the downlink direction). want_read is dropped
+                          * while this is set — see
+                          * svr_tcp_egress_update_fd_interest. */
+    uint8_t *uplink_stash;
+    size_t uplink_stash_len;
+    int egress_eof_seen; /* recv()==0 observed — want_read is dropped
+                          * PERMANENTLY for this fd (EOF is level-triggered
+                          * readable; re-arming would busy-loop). */
+    int uplink_fin_sent; /* send_body(NULL,0,1) succeeded — no more FIN
+                          * retries needed. Until this is true and
+                          * egress_eof_seen is true, cb_request_write
+                          * retries the FIN send every H3-writable notify
+                          * (mirrors the client's tcp_lane_uplink_maybe_fin:
+                          * a fin-only send is NOT buffered by xquic on
+                          * -XQC_EAGAIN, so a dedicated retry is
+                          * mandatory, not a redundant safety net). */
+
     struct svr_tcp_egress_flow_s *prev, *next;
 } svr_tcp_egress_flow_t;
 
@@ -292,6 +348,8 @@ svr_tcp_egress_flow_destroy(mqvpn_server_t *server, void *flow)
     void **stream_slot = svr_stream_tcp_egress_flow_ptr(ef->stream);
     if (stream_slot) *stream_slot = NULL;
 
+    free(ef->downlink_stash);
+    free(ef->uplink_stash);
     free(ef);
 }
 
@@ -318,21 +376,309 @@ svr_tcp_egress_errno_to_status(int err)
     }
 }
 
-/* Flips a CONNECTING flow to ACTIVE and DISARMS the fd (want_read=0,
- * want_write=0 — replaces the connect-signal want_write registration with
- * no interest, keeping the reactor slot). The relay stage arms want_read
- * when it can actually consume data; arming it now, against the no-op
- * relay stub below, would busy-loop a level-triggered reactor — a
- * server-speaks-first upstream (SMTP/SSH banner) or an upstream EOF makes
- * the fd permanently readable, re-firing the platform's event callback
- * every loop pass until stream close. Sends the real 200 with fin=0: the
- * stream stays open, relay traffic rides it. */
+/* ── Relay: the two byte-shoveling directions plus close mapping ──
+ *
+ * Naming (do not confuse — each side names relative to ITSELF): "downlink"
+ * is bytes FROM the H3 stream (the client's uplink) -> send() to the egress
+ * socket. "uplink" is recv() from the egress socket -> send_body() to the
+ * client. Every function below is named accordingly.
+ *
+ * Destroy ownership (decided here, once, for the whole relay stage): a
+ * fatal relay error (svr_tcp_egress_on_relay_error) NEVER calls
+ * svr_tcp_egress_flow_destroy directly — it only calls
+ * xqc_h3_request_close(ef->h3_request) and returns immediately without
+ * touching `ef` again. The actual destroy happens exactly once, later,
+ * from mqvpn_server.c's h3_request_close_notify (cb_request_close, already
+ * wired for the connect-timeout/synchronous-failure paths) OR
+ * h3_request_closing_notify (this task's new registration, for a peer
+ * RESET_STREAM) — both funnel through the SAME svr_tcp_egress_flow_destroy
+ * call, guarded by re-reading the stream's tcp_egress_flow slot fresh each
+ * time (destroy() NULLs it), so whichever notify fires first destroys the
+ * flow and the other one is a no-op. This matters because
+ * xqc_h3_request_close can synchronously re-enter the close-notify callback
+ * (verified: xqc_h3_stream_close destroys the h3 stream immediately, inline,
+ * when its transport stream already carries XQC_HTTP3_STREAM_FLAG_CLOSED —
+ * third_party/xquic/src/http3/xqc_h3_stream.c) — so every call site of
+ * on_relay_error in this file is its LAST statement before an unconditional
+ * `return`/`break` out of the enclosing function, exactly like the client's
+ * tcp_lane_flow_status_t discipline (tcp_lane.c), just collapsed to a
+ * simpler "did I just possibly free `ef`? then stop touching it" contract
+ * since the server has only one relay-error outcome (no clean-close /
+ * abort distinction to track). */
+static void
+svr_tcp_egress_on_relay_error(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef, int err)
+{
+    TLOG_W(server, "connect-tcp: relay I/O error (errno=%d) — closing stream", err);
+    xqc_h3_request_close(ef->h3_request);
+    /* Do NOT touch ef again — see the destroy-ownership note above. */
+}
+
+/* The ONE place fd interest is computed from flow state (per this task's
+ * design note: hand-written (want_read, want_write) pairs at every call
+ * site WILL drift). Safe to call liberally/redundantly — every caller here
+ * only reaches it with `ef` still alive, and re-registering the same
+ * interest twice is a harmless no-op reconfigure (platform_linux.c replaces
+ * the libevent event in place). No-ops for a CONNECTING flow: that stage
+ * manages its own single want_write=1 "connect signal" registration
+ * directly (svr_tcp_egress_start_connect) and this helper must not
+ * clobber it before the flow reaches ACTIVE. */
+static void
+svr_tcp_egress_update_fd_interest(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
+{
+    if (ef->state != EGRESS_FLOW_ACTIVE) return;
+    int want_write = ef->downlink_paused ? 1 : 0;
+    int want_read = (!ef->uplink_withheld && !ef->egress_eof_seen) ? 1 : 0;
+    (void)svr_egress_fd_register(server, ef->fd, want_read, want_write, ef);
+}
+
+/* Issue the deferred TX half-close once it's actually safe to: the client's
+ * fin must have arrived (fin_received_from_h3) AND nothing may still be
+ * sitting in the downlink stash waiting to reach the wire ahead of the FIN
+ * (downlink_paused) — shutdown(SHUT_WR) queues the FIN behind whatever the
+ * kernel already has buffered from send(), but bytes we haven't send()'d
+ * yet (still in our userspace stash) would arrive AFTER a premature FIN,
+ * corrupting the stream order / truncating it from the receiver's view.
+ * Idempotent via downlink_shutdown_done. Called both right after fin_flag
+ * observation (on_body's fin branch) and after a stash flush completes
+ * (svr_tcp_egress_flush_downlink_retry) — the latter is what makes the
+ * fin-during-pause ordering correct. */
+static void
+svr_tcp_egress_maybe_shutdown_downlink(svr_tcp_egress_flow_t *ef)
+{
+    if (!ef->fin_received_from_h3 || ef->downlink_paused || ef->downlink_shutdown_done)
+        return;
+    shutdown(ef->fd, SHUT_WR);
+    ef->downlink_shutdown_done = 1;
+}
+
+/* Stash one already-pulled-out-of-xquic chunk (destructively read via
+ * recv_body — cannot be re-fetched on failure, so losing it here would
+ * silently corrupt the relayed stream) and latch downlink_paused. On a
+ * stash allocation failure, fails the flow instead of dropping bytes —
+ * `ef` may be destroyed by the time this returns; every caller must treat
+ * it as gone afterward (see the destroy-ownership note above
+ * on_relay_error). len is always <= TCP_EGRESS_RELAY_CHUNK (a suffix of the
+ * caller's fixed-size stack buffer). */
+static void
+svr_tcp_egress_stash_downlink(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
+                              const uint8_t *buf, size_t len)
+{
+    if (!ef->downlink_stash) {
+        ef->downlink_stash = malloc(TCP_EGRESS_RELAY_CHUNK);
+        if (!ef->downlink_stash) {
+            svr_tcp_egress_on_relay_error(server, ef, ENOMEM);
+            return;
+        }
+    }
+    memcpy(ef->downlink_stash, buf, len);
+    ef->downlink_stash_len = len;
+    ef->downlink_paused = 1;
+    svr_tcp_egress_update_fd_interest(server, ef);
+}
+
+/* Drain the flow's H3 request body into the egress socket. Stops at the
+ * first would-block (recv_body returning -XQC_EAGAIN — nothing more
+ * buffered right now) or the first send()-side backpressure (stash +
+ * pause, mirroring the uplink's EAGAIN-stops-the-loop shape). Handles a
+ * partial send() the same as a full EWOULDBLOCK. Returns 1 if `ef` is
+ * still alive when this returns, 0 if a fatal error tore it down inside
+ * this call (the ONLY way that happens is via svr_tcp_egress_on_relay_error,
+ * always the last thing done on that path) — callers that get 0 must not
+ * touch `ef` again.
+ *
+ * Called from three places: the H3 body-read notify (svr_tcp_egress_on_body,
+ * only once ACTIVE), the post-flush resume (svr_tcp_egress_flush_downlink_
+ * retry, once the downlink stash fully drains — H3 may hold more buffered
+ * body that arrived while paused, and the data-notify is NOT guaranteed to
+ * re-fire for it on its own, see the report), and the drain-on-connect call
+ * from svr_tcp_egress_on_connected (draining anything the client sent
+ * before the 200 went out). */
+static int
+svr_tcp_egress_drain_body(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
+{
+    if (ef->downlink_paused) return 1;
+
+    uint8_t buf[TCP_EGRESS_RELAY_CHUNK];
+    for (;;) {
+        uint8_t fin = 0;
+        ssize_t n = xqc_h3_request_recv_body(ef->h3_request, buf, sizeof(buf), &fin);
+        if (n < 0) break; /* -XQC_EAGAIN: drained for now */
+
+        if (n > 0) {
+            size_t off = 0;
+            while (off < (size_t)n) {
+                ssize_t sent = send(ef->fd, buf + off, (size_t)n - off, MSG_DONTWAIT);
+                if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                    svr_tcp_egress_stash_downlink(server, ef, buf + off, (size_t)n - off);
+                    return 1;
+                }
+                if (sent <= 0) {
+                    /* Real error, or a spurious 0-length send — never spin
+                     * on either. */
+                    svr_tcp_egress_on_relay_error(server, ef, sent < 0 ? errno : 0);
+                    return 0;
+                }
+                off += (size_t)sent;
+            }
+        }
+
+        if (fin) {
+            ef->fin_received_from_h3 = 1;
+            svr_tcp_egress_maybe_shutdown_downlink(ef);
+            break;
+        }
+        if (n == 0) break; /* defensive: contract says n==0 implies fin */
+    }
+    return 1;
+}
+
+/* Re-send() the flow's one stashed downlink chunk once the egress fd
+ * reports writable. On a full drain: clears the pause, performs the
+ * deferred shutdown(SHUT_WR) if the client's fin arrived while paused (see
+ * svr_tcp_egress_maybe_shutdown_downlink's ordering note), recomputes fd
+ * interest, and re-runs the body drain loop in case xquic is holding more
+ * buffered body that arrived during the pause. Returns 1 if `ef` survives,
+ * 0 if a fatal write error tore it down (last action on that path — see
+ * on_relay_error). */
+static int
+svr_tcp_egress_flush_downlink_retry(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
+{
+    size_t off = 0;
+    while (off < ef->downlink_stash_len) {
+        ssize_t sent = send(ef->fd, ef->downlink_stash + off,
+                            ef->downlink_stash_len - off, MSG_DONTWAIT);
+        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+        if (sent <= 0) {
+            svr_tcp_egress_on_relay_error(server, ef, sent < 0 ? errno : 0);
+            return 0;
+        }
+        off += (size_t)sent;
+    }
+    if (off == 0) return 1; /* still fully blocked; nothing changed */
+    if (off < ef->downlink_stash_len) {
+        memmove(ef->downlink_stash, ef->downlink_stash + off,
+                ef->downlink_stash_len - off);
+        ef->downlink_stash_len -= off;
+        return 1; /* partial drain; stays paused for the next writable event */
+    }
+
+    ef->downlink_stash_len = 0;
+    ef->downlink_paused = 0;
+    svr_tcp_egress_maybe_shutdown_downlink(ef);
+    svr_tcp_egress_update_fd_interest(server, ef);
+    return svr_tcp_egress_drain_body(server, ef);
+}
+
+/* Attempt (or retry) the uplink pure-FIN send once the egress socket has
+ * seen EOF. CRITICAL xquic fact (verified against the vendored source,
+ * mirroring the client's tcp_lane_uplink_maybe_fin citation trail): a
+ * fin-only xqc_h3_request_send_body is NOT buffered by xquic across an
+ * -XQC_EAGAIN return on the 1-RTT send path — nothing will flush it
+ * automatically, so retrying from every subsequent H3-writable notify
+ * (svr_tcp_egress_on_h3_writable) is mandatory, not defensive redundancy.
+ * Idempotent via uplink_fin_sent. */
+static void
+svr_tcp_egress_try_uplink_fin(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
+{
+    if (ef->uplink_fin_sent) return;
+    ssize_t r = xqc_h3_request_send_body(ef->h3_request, NULL, 0, 1);
+    if (r == -XQC_EAGAIN) return; /* retried on the next H3-writable notify */
+    if (r < 0) {
+        svr_tcp_egress_on_relay_error(server, ef, 0);
+        return;
+    }
+    ef->uplink_fin_sent = 1;
+}
+
+/* Stash one already-recv()'d-from-the-socket chunk (same "already consumed,
+ * cannot re-fetch" hazard as the downlink direction) that xquic's send_body
+ * only partially accepted (or -XQC_EAGAIN'd entirely — the caller
+ * normalizes that to a zero-byte accept before calling this). Drops
+ * want_read via the interest helper: xquic's own per-stream flow control
+ * then backpressures whatever is upstream of the egress socket, mirroring
+ * the downlink direction's backpressure the other way. */
+static void
+svr_tcp_egress_stash_uplink(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
+                            const uint8_t *buf, size_t len)
+{
+    if (!ef->uplink_stash) {
+        ef->uplink_stash = malloc(TCP_EGRESS_RELAY_CHUNK);
+        if (!ef->uplink_stash) {
+            svr_tcp_egress_on_relay_error(server, ef, ENOMEM);
+            return;
+        }
+    }
+    memcpy(ef->uplink_stash, buf, len);
+    ef->uplink_stash_len = len;
+    ef->uplink_withheld = 1;
+    svr_tcp_egress_update_fd_interest(server, ef);
+}
+
+/* H3-writable notify dispatch (mqvpn_server.c's cb_request_write delegates
+ * here for SVR_STREAM_ROLE_CONNECT_TCP streams — one entry point, per this
+ * task's boundary rule, rather than mqvpn_server.c poking flow fields it
+ * can't even see the layout of). Flushes the uplink retry stash (FIFO of
+ * one chunk; stops at the first -XQC_EAGAIN, idempotent under repeated
+ * writable notifies) and, once drained, re-arms want_read; then retries the
+ * pending uplink FIN if the egress side has already hit EOF. `stream` is
+ * the opaque svr_stream_t* the H3 callback was invoked with. No-ops on an
+ * unknown/already-gone flow (stream_slot NULL or already-destroyed). */
+void
+svr_tcp_egress_on_h3_writable(mqvpn_server_t *server, void *stream)
+{
+    void **slot = svr_stream_tcp_egress_flow_ptr(stream);
+    svr_tcp_egress_flow_t *ef = slot ? (svr_tcp_egress_flow_t *)*slot : NULL;
+    if (!ef) return;
+
+    if (ef->uplink_withheld) {
+        size_t off = 0;
+        while (off < ef->uplink_stash_len) {
+            ssize_t sent = xqc_h3_request_send_body(
+                ef->h3_request, ef->uplink_stash + off, ef->uplink_stash_len - off, 0);
+            if (sent == -XQC_EAGAIN) break;
+            if (sent < 0) {
+                svr_tcp_egress_on_relay_error(server, ef, 0);
+                return;
+            }
+            off += (size_t)sent;
+        }
+        if (off < ef->uplink_stash_len) {
+            memmove(ef->uplink_stash, ef->uplink_stash + off, ef->uplink_stash_len - off);
+            ef->uplink_stash_len -= off;
+            return; /* still can't drain fully; retried on the next notify */
+        }
+        ef->uplink_stash_len = 0;
+        ef->uplink_withheld = 0;
+        svr_tcp_egress_update_fd_interest(server, ef); /* re-arm want_read */
+    }
+
+    if (ef->egress_eof_seen && !ef->uplink_fin_sent) {
+        svr_tcp_egress_try_uplink_fin(server, ef);
+    }
+}
+
+/* Flips a CONNECTING flow to ACTIVE and arms real read interest — the
+ * relay stage (above) can now actually consume data, so want_read=1 is
+ * correct here (an earlier task's interim registered (0,0): no relay yet,
+ * and arming want_read against a no-op stub would busy-loop a
+ * level-triggered reactor on a server-speaks-first upstream or an upstream
+ * EOF). Sends the real 200 with fin=0 (stream stays open, relay traffic
+ * rides it), then drains anything the client already sent before the 200
+ * went out — legal per RFC 9114 (the client may speak before the response
+ * arrives), and NOT guaranteed to be re-delivered by a later data-notify:
+ * verified against xqc_h3_request_on_recv_body (third_party/xquic), the
+ * read-notify callback only fires when NEW body data is appended to
+ * body_buf, not merely because body_buf is non-empty — a body chunk that
+ * arrived while svr_tcp_egress_on_body was a no-op (state != ACTIVE, so it
+ * never called recv_body) would sit undrained forever if the client never
+ * sends anything further before waiting for the response. */
 static void
 svr_tcp_egress_on_connected(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
 {
     ef->state = EGRESS_FLOW_ACTIVE;
-    (void)svr_egress_fd_register(server, ef->fd, 0, 0, ef);
+    svr_tcp_egress_update_fd_interest(server, ef);
     svr_tcp_egress_respond(ef->h3_request, 200, 0);
+    svr_tcp_egress_drain_body(server, ef);
 }
 
 /* Failed connect (either SO_ERROR after a writable event, or our own
@@ -463,26 +809,86 @@ svr_tcp_egress_on_request(mqvpn_server_t *server, void *stream,
                                         target_port, username);
 }
 
+/* H3 body-read notify. h3_request is unused once we have `ef` (the flow
+ * caches its own h3_request pointer at connect time) but kept in the
+ * signature to match the header/dispatch call site. Never returns negative
+ * — an H3 notify path returning < 0 kills the WHOLE h3 connection, not just
+ * this stream, so every failure here routes through
+ * svr_tcp_egress_on_relay_error (closes just this request) instead. */
 int
 svr_tcp_egress_on_body(mqvpn_server_t *server, void *stream, xqc_h3_request_t *h3_request)
 {
-    (void)server;
-    (void)stream;
     (void)h3_request;
+    void **slot = svr_stream_tcp_egress_flow_ptr(stream);
+    svr_tcp_egress_flow_t *ef = slot ? (svr_tcp_egress_flow_t *)*slot : NULL;
+    if (!ef)
+        return 0; /* role==CONNECT_TCP but no flow: rejected at request
+                   * time, or already torn down — nothing to feed. */
+
+    if (ef->state != EGRESS_FLOW_ACTIVE) {
+        /* CONNECTING: the client is legally allowed to send body before our
+         * 200 arrives, but there is no egress socket yet to send() it to.
+         * Leave it buffered in xquic — svr_tcp_egress_on_connected drains it
+         * explicitly once the flow goes ACTIVE (see that function's comment
+         * for why relying on a later data-notify re-fire is NOT safe). */
+        return 0;
+    }
+
+    (void)svr_tcp_egress_drain_body(server, ef);
     return 0;
 }
 
-/* Relay lands in the next task. Data CAN arrive on an ACTIVE fd (upstream
- * becomes readable, or the platform reports writable for a queued send)
- * before that lands — this must not crash, just drop the event. */
+/* fd-ready dispatch once the flow is ACTIVE (svr_tcp_egress_fd_ready routes
+ * the CONNECTING/connect-completion case elsewhere before reaching here).
+ * `readable`/`writable` are the platform's level-triggered signals for
+ * ef->fd (the egress socket) — see tcp_egress.h's on_request docstring for
+ * the fd-interest contract. */
 static void
 svr_tcp_egress_on_relay_ready(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
                               int readable, int writable)
 {
-    (void)server;
-    (void)ef;
-    (void)readable;
-    (void)writable;
+    if (writable && ef->downlink_paused) {
+        if (!svr_tcp_egress_flush_downlink_retry(server, ef)) return; /* ef destroyed */
+    }
+
+    /* Busy-spin lesson (mqproxy precedent): while uplink_withheld, want_read
+     * is already 0 via the interest helper, so `readable` shouldn't even
+     * re-fire for this reason — guarded explicitly anyway, belt-and-
+     * suspenders against a platform that reports a stale/edge-leftover
+     * event. */
+    if (readable && !ef->uplink_withheld) {
+        uint8_t buf[TCP_EGRESS_RELAY_CHUNK];
+        ssize_t n;
+        while ((n = recv(ef->fd, buf, sizeof(buf), MSG_DONTWAIT)) > 0) {
+            ssize_t sent = xqc_h3_request_send_body(ef->h3_request, buf, (size_t)n, 0);
+            if (sent == -XQC_EAGAIN) sent = 0; /* normalize: nothing accepted */
+            if (sent < 0) {
+                svr_tcp_egress_on_relay_error(server, ef, 0);
+                return;
+            }
+            if ((size_t)sent < (size_t)n) {
+                svr_tcp_egress_stash_uplink(server, ef, buf + sent,
+                                            (size_t)n - (size_t)sent);
+                return; /* the ONLY break-equivalent exit of this loop */
+            }
+        }
+        if (n == 0) {
+            /* Pure EOF: recv()==0 is level-triggered readable — drop
+             * want_read PERMANENTLY for this fd (via the interest helper)
+             * or a level-triggered reactor busy-loops on it forever. */
+            ef->egress_eof_seen = 1;
+            svr_tcp_egress_update_fd_interest(server, ef);
+            svr_tcp_egress_try_uplink_fin(server, ef);
+            return;
+        }
+        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            svr_tcp_egress_on_relay_error(server, ef, errno);
+            return;
+        }
+        /* n < 0 && EAGAIN/EWOULDBLOCK: nothing more to read right now. */
+    }
+
+    svr_tcp_egress_update_fd_interest(server, ef);
 }
 
 void
