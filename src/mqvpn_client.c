@@ -1065,8 +1065,14 @@ cli_masque_start_tunnel(cli_conn_t *conn)
  * freshly lwIP-accepted TCP-lane flow. NOT static — called cross-TU from
  * tcp_lane.c's accept callback (the one deliberate coupling point; prototype
  * lives in tcp_lane.h). Every failure path here is post-SYN-ACK, so it must
- * reject via mqvpn_tcp_lane_abort_pending — never fall the flow back to RAW. */
-void
+ * reject via mqvpn_tcp_lane_abort_pending — never fall the flow back to RAW.
+ *
+ * Returns 0 when the flow proceeds; nonzero (abort_pending's return,
+ * propagated verbatim) when a failure path tore the flow down AND
+ * tcp_abort()ed its pcb. This runs INSIDE lwIP's accept callback frame,
+ * which must return ERR_ABRT in that case — lwIP's tcp_process would
+ * otherwise keep using the freed pcb (see the contracts in tcp_lane.h). */
+int
 cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_key_t *key)
 {
     mqvpn_client_t *c = (mqvpn_client_t *)client_ctx;
@@ -1074,14 +1080,12 @@ cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_k
     if (!conn || !conn->h3_conn) {
         /* Accept fired without a live H3 connection (teardown race) — the
          * flow can never become real. */
-        mqvpn_tcp_lane_abort_pending(flow_handle);
-        return;
+        return mqvpn_tcp_lane_abort_pending(flow_handle);
     }
 
     cli_stream_t *stream = calloc(1, sizeof(*stream));
     if (!stream) {
-        mqvpn_tcp_lane_abort_pending(flow_handle);
-        return;
+        return mqvpn_tcp_lane_abort_pending(flow_handle);
     }
     stream->conn = conn;
     stream->role = CLI_STREAM_ROLE_CONNECT_TCP;
@@ -1094,8 +1098,7 @@ cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_k
          * and the flow cap is <= 256. */
         LOG_E(c, "connect-tcp: xqc_h3_request_create failed (stream credit?)");
         free(stream);
-        mqvpn_tcp_lane_abort_pending(flow_handle);
-        return;
+        return mqvpn_tcp_lane_abort_pending(flow_handle);
     }
     stream->h3_request = req;
 
@@ -1144,15 +1147,16 @@ cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_k
     if (ret < 0 && ret != -XQC_EAGAIN) {
         LOG_E(c, "connect-tcp: send headers failed (%zd)", ret);
         xqc_h3_request_close(req); /* close notify frees stream */
-        /* Task 12: the real abort_pending must clear f->h3_request/f->stream
-         * (they point at the just-closed request) and tolerate ACTIVE state
-         * despite its name — bind ran before send per the plan order. */
-        mqvpn_tcp_lane_abort_pending(flow_handle);
-        return;
+        /* abort_pending clears f->h3_request/f->stream (they point at the
+         * just-closed request) and never closes H3 itself — bind ran before
+         * send per the plan order, and we already closed the request one
+         * line up. */
+        return mqvpn_tcp_lane_abort_pending(flow_handle);
     }
 
     LOG_D(c, "connect-tcp: stream %" PRIu64 " opened for %s", xqc_h3_stream_id(req),
           path);
+    return 0;
 }
 
 /* H2/Task 10: uplink body send for the TCP lane. Cross-TU like

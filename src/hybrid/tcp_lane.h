@@ -84,7 +84,12 @@ void mqvpn_tcp_lane_free(mqvpn_tcp_lane_t *lane);
  * Matches the SYN-committed PENDING_ACCEPT entry, wires pcb callbacks, and
  * opens the per-flow H3 stream via cli_tcp_lane_open_stream. Rejections here
  * are post-SYN-ACK: the pcb is aborted (RST), NEVER fallen back to RAW (see
- * mqvpn_tcp_lane_on_syn's contract). */
+ * mqvpn_tcp_lane_on_syn's contract). Returns ERR_ABRT when the open-stream
+ * failure path already tcp_abort()ed newpcb itself (lwIP contract: on any
+ * other return value tcp_process would keep using — or double-abort — the
+ * freed pcb; see cli_tcp_lane_open_stream / mqvpn_tcp_lane_abort_pending
+ * below), a different non-ERR_OK code when lwIP itself should abort the
+ * still-live pcb, ERR_OK otherwise. */
 err_t mqvpn_tcp_lane_lwip_accept(void *arg, struct tcp_pcb *newpcb, err_t err);
 
 /* Bind the H3 request/stream cli_tcp_lane_open_stream opened back onto the
@@ -100,8 +105,18 @@ void mqvpn_tcp_lane_bind_h3_request(void *flow_handle, void *h3_request, void *s
  * Post-SYN-ACK, so abort-only — RAW fallback is forbidden. Never closes the
  * H3 request itself (the caller, cli_tcp_lane_open_stream, either never
  * created one yet or already closed the one it did create on its own
- * failure path) — just tears the pcb + flow down. */
-void mqvpn_tcp_lane_abort_pending(void *flow_handle);
+ * failure path) — just tears the pcb + flow down.
+ *
+ * Returns 1 if the flow's pcb was tcp_abort()ed inside this call, 0
+ * otherwise (NULL handle, or a flow with no live pcb). This matters because
+ * the ONLY call chain reaching here starts inside lwIP's accept callback
+ * frame (mqvpn_tcp_lane_lwip_accept -> cli_tcp_lane_open_stream -> here),
+ * and lwIP's contract requires that frame to return ERR_ABRT when its pcb
+ * was aborted (vendored tcp_in.c, tcp_process SYN_RCVD: on ERR_OK the core
+ * proceeds to tcp_receive(pcb) on the now-freed pcb — use-after-free).
+ * cli_tcp_lane_open_stream propagates this value for exactly that
+ * translation. */
+int mqvpn_tcp_lane_abort_pending(void *flow_handle);
 
 /* H3 response gating for a bound mqvpn-tcp stream (Task 9). `stream` is the
  * opaque cli_stream_t* handed to mqvpn_tcp_lane_bind_h3_request — these
@@ -224,9 +239,16 @@ int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
  * indirection: exactly one impl + minimal call sites each; the one-way
  * boundary stands — tcp_lane.c never includes xquic headers). flow_handle is
  * a mqvpn_tcp_flow_t*, passed back via mqvpn_tcp_lane_bind_h3_request /
- * mqvpn_tcp_lane_abort_pending. */
-void cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle,
-                              const mqvpn_flow_key_t *key);
+ * mqvpn_tcp_lane_abort_pending.
+ *
+ * Returns 0 when the flow proceeds (request opened, or a failure that did
+ * NOT abort the pcb); 1 when a failure path tore the flow down AND
+ * tcp_abort()ed its pcb (mqvpn_tcp_lane_abort_pending's return value,
+ * propagated verbatim). The caller is lwIP's accept callback frame
+ * (mqvpn_tcp_lane_lwip_accept), which must return ERR_ABRT in the latter
+ * case — see mqvpn_tcp_lane_abort_pending's contract above. */
+int cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle,
+                             const mqvpn_flow_key_t *key);
 
 /* Send uplink body bytes (or, with len==0 && fin==1, a bare FIN) on the
  * flow's bound H3 request. Returns bytes accepted by xquic (may be a PARTIAL

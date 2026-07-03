@@ -88,19 +88,31 @@ static void test_tcp_close_hook(struct tcp_pcb *pcb);
 
 static int g_pass = 0, g_fail = 0;
 
-/* ─── cli_tcp_lane_open_stream stub (real impl: mqvpn_client.c) ─── */
+/* ─── cli_tcp_lane_open_stream stub (real impl: mqvpn_client.c) ───
+ *
+ * Task 12 ERR_ABRT plumbing: the real function returns nonzero when a
+ * failure path called mqvpn_tcp_lane_abort_pending (which tcp_abort()s the
+ * pcb) — the accept callback frame must then return ERR_ABRT to lwIP. The
+ * stub mirrors both shapes: g_open_stream_fail=1 scripts the failure path
+ * (calls the REAL abort_pending exactly like every failure branch in
+ * mqvpn_client.c does, and propagates its return verbatim). */
 
 static int g_open_stream_calls;
 static void *g_open_stream_flow;
 static mqvpn_flow_key_t g_open_stream_key;
+static int g_open_stream_fail;
 
-void
+int
 cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_key_t *key)
 {
     (void)client_ctx;
     g_open_stream_calls++;
     g_open_stream_flow = flow_handle;
     g_open_stream_key = *key;
+    if (g_open_stream_fail) {
+        return mqvpn_tcp_lane_abort_pending(flow_handle);
+    }
+    return 0;
 }
 
 /* ─── tcp_recved observability (via MQVPN_TCP_LANE_TEST_RECVED) ─── */
@@ -465,6 +477,7 @@ relay_reset(void)
     g_tcp_close_last_pcb = NULL;
     g_h3_close_calls = 0;
     g_h3_close_last_req = NULL;
+    g_open_stream_fail = 0;
 }
 
 /* Real PBUF_RAM pbuf (MEM_LIBC_MALLOC=1 => plain malloc; no lwip_init or
@@ -1407,8 +1420,13 @@ test_relay_fatal_error_paths(void)
 
     h3_script_push(MQVPN_TCP_LANE_H3_SEND_ERR);
     struct pbuf *p = mk_pbuf(500);
-    ASSERT_EQ_INT(mqvpn_tcp_lane_on_lwip_recv(f, &pcb, p, ERR_OK), ERR_OK,
-                  "recv returns ERR_OK even on fatal send error");
+    /* CRITICAL contract (lwIP tcp_in.c): the teardown inside this call
+     * tcp_abort()ed pcb, so the recv frame MUST return ERR_ABRT — on
+     * ERR_OK the core would continue into TF_GOT_FIN/tcp_output on the
+     * freed pcb. ERR_ABRT despite the consumed pbuf matches convention
+     * (lwIP gives up its inseg reference on the aborted path too). */
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_lwip_recv(f, &pcb, p, ERR_OK), ERR_ABRT,
+                  "recv frame returns ERR_ABRT after aborting its own pcb");
     g_expected_len -= 500; /* bytes were never relayed; keep mirror aligned */
     ASSERT_EQ_INT(g_h3_capture_len, 0, "no bytes captured on immediate fatal error");
     /* f is freed as of the call above — do not touch it again. */
@@ -1452,8 +1470,11 @@ test_relay_fatal_error_paths(void)
     ASSERT_TRUE(f3->uplink_q_head == NULL, "queue starts empty");
 
     h3_script_push(MQVPN_TCP_LANE_H3_SEND_ERR);
-    ASSERT_EQ_INT(mqvpn_tcp_lane_on_lwip_recv(f3, &pcb3, NULL, ERR_OK), ERR_OK,
-                  "recv(NULL) tolerated when the fin send fails");
+    /* Same lwIP ERR_ABRT contract as case (a) — the FIN branch's flush ->
+     * maybe_fin fatal path tcp_abort()ed pcb3 inside this recv frame. */
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_lwip_recv(f3, &pcb3, NULL, ERR_OK), ERR_ABRT,
+                  "recv(NULL) frame returns ERR_ABRT when the fin-send teardown "
+                  "aborted its pcb");
     /* f3 is freed as of the call above (on_relay_error runs synchronously
      * inside maybe_fin's fatal-send branch) — do not touch it again; the
      * pre-Task-12 checks here ("tcp_fin_seen latched", "fin NOT marked
@@ -2121,7 +2142,9 @@ test_abort_pending_real(void)
                   "flow1 accepted");
     mqvpn_tcp_flow_t *f1 = (mqvpn_tcp_flow_t *)g_open_stream_flow;
 
-    mqvpn_tcp_lane_abort_pending(f1);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_abort_pending(f1), 1,
+                  "abort_pending reports the pcb abort (accept frame needs "
+                  "this to return ERR_ABRT)");
     /* f1 is freed as of the call above. */
     ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key1, NULL), 0, "flow1 removed");
     ASSERT_EQ_INT(g_tcp_abort_calls, 1, "pcb1 aborted");
@@ -2146,7 +2169,8 @@ test_abort_pending_real(void)
     int fake_req2, fake_stream2;
     mqvpn_tcp_lane_bind_h3_request(f2, &fake_req2, &fake_stream2);
 
-    mqvpn_tcp_lane_abort_pending(f2);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_abort_pending(f2), 1,
+                  "abort_pending reports the pcb abort in the post-bind shape too");
     /* f2 is freed as of the call above. */
     ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key2, NULL), 0, "flow2 removed");
     ASSERT_EQ_INT(g_tcp_abort_calls, 2, "pcb2 also aborted");
@@ -2154,6 +2178,114 @@ test_abort_pending_real(void)
     ASSERT_EQ_INT(g_h3_close_calls, 0,
                   "abort_pending STILL never closes H3, even with a bound request");
 
+    /* NULL handle: no pcb to have aborted — must report 0 (the accept
+     * frame then correctly does NOT claim ERR_ABRT). */
+    ASSERT_EQ_INT(mqvpn_tcp_lane_abort_pending(NULL), 0, "NULL handle reports no abort");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+/* Chain 1 of the Task 12 ERR_ABRT plumbing: lwIP accept frame ->
+ * cli_tcp_lane_open_stream failure -> abort_pending -> tcp_abort(newpcb).
+ * The accept callback MUST return ERR_ABRT — any other value makes lwIP's
+ * tcp_process either keep using the freed pcb (ERR_OK -> tcp_receive) or
+ * tcp_abort() it a second time (other non-OK values). Reachable in
+ * production via the teardown race (no live H3 conn), request-create
+ * failure, and send-headers failure — not just OOM. */
+static void
+test_accept_open_stream_fail_returns_abrt(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xe007ULL, NULL, fake_clock, NULL);
+
+    mqvpn_flow_key_t key = mk_std_key(8700);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &key, 1), 0, "SYN-time commit");
+    struct tcp_pcb pcb;
+    memset(&pcb, 0, sizeof(pcb));
+    pcb.state = ESTABLISHED;
+    IP4_ADDR(&pcb.local_ip, 93, 184, 216, 34);
+    IP4_ADDR(&pcb.remote_ip, 10, 0, 0, 1);
+    pcb.local_port = 80;
+    pcb.remote_port = 8700;
+
+    g_open_stream_fail = 1; /* stub routes through the REAL abort_pending */
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lwip_accept(lane, &pcb, ERR_OK), ERR_ABRT,
+                  "accept frame returns ERR_ABRT after open-stream failure "
+                  "aborted the pcb");
+    g_open_stream_fail = 0;
+
+    ASSERT_EQ_INT(g_tcp_abort_calls, 1, "the pcb was aborted exactly once");
+    ASSERT_TRUE(g_tcp_abort_last_pcb == &pcb, "the RIGHT pcb was aborted");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL), 0, "flow removed");
+    ASSERT_EQ_INT(g_h3_close_calls, 0, "no H3 request existed to close");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+/* Chain 4 of the Task 12 ERR_ABRT plumbing: lwIP sent frame. Two sub-chains:
+ * (a) the stash-rewrite tcp_write hits a FATAL error (not ERR_MEM) ->
+ * on_relay_error aborts the pcb inside on_lwip_sent; (b) the rewrite
+ * succeeds but the RESUMED drain hits a fatal recv error -> the pump core
+ * aborts the pcb inside on_lwip_sent. Both must surface as ERR_ABRT from
+ * the sent callback — on ERR_OK, tcp_in.c's TCP_EVENT_SENT site continues
+ * into recv_data/tcp_output on the freed pcb. */
+static void
+test_lwip_sent_teardown_returns_abrt(void)
+{
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+
+    /* (a) stash-rewrite fatal. Pause the flow first via an ERR_MEM write. */
+    relay_reset();
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xe008ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 8800, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    const uint8_t *c1 = mk_dl_bytes(300);
+    h3_recv_push_data(c1, 300, 0);
+    tw_script_push(ERR_MEM); /* pause: chunk stashed */
+    mqvpn_tcp_lane_downlink_pump(lane, &fake_stream);
+    ASSERT_EQ_INT(f->downlink_paused, 1, "paused with a stashed chunk");
+    g_expected_len -= 300; /* never written — teardown below discards it */
+
+    tw_script_push(ERR_ARG); /* the rewrite attempt now fails FATALLY */
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_lwip_sent(f, &pcb, 0), ERR_ABRT,
+                  "sent frame returns ERR_ABRT when the stash rewrite's "
+                  "teardown aborted its pcb");
+    /* f is freed as of the call above. */
+    mqvpn_flow_key_t key_a = mk_std_key(8800);
+    assert_flow_failed_closed(lane, &key_a, &pcb, &fake_req);
+    mqvpn_tcp_lane_free(lane);
+
+    /* (b) resumed-drain fatal: rewrite succeeds, the resumed pump's recv
+     * errors. */
+    relay_reset();
+    lane = mqvpn_tcp_lane_new(&cfg, 0xe009ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb2;
+    int fake_req2, fake_stream2;
+    mqvpn_tcp_flow_t *f2 = setup_flow(lane, &pcb2, 8801, &fake_req2, &fake_stream2, 1);
+    ASSERT_TRUE(f2 != NULL, "flow established");
+
+    const uint8_t *c2 = mk_dl_bytes(200);
+    h3_recv_push_data(c2, 200, 0);
+    tw_script_push(ERR_MEM); /* pause: chunk stashed */
+    mqvpn_tcp_lane_downlink_pump(lane, &fake_stream2);
+    ASSERT_EQ_INT(f2->downlink_paused, 1, "paused with a stashed chunk");
+
+    h3_recv_push_err(); /* the resumed drain's first recv is fatal */
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_lwip_sent(f2, &pcb2, 0), ERR_ABRT,
+                  "sent frame returns ERR_ABRT when the resumed drain's "
+                  "teardown aborted its pcb");
+    /* f2 is freed as of the call above. The stash WAS written on the
+     * successful rewrite before the fatal recv. */
+    ASSERT_EQ_INT(g_tcp_write_capture_len, 200, "stash flushed before the fatal recv");
+    ASSERT_TRUE(memcmp(g_tcp_write_capture, g_expected, 200) == 0, "byte-exact");
+    mqvpn_flow_key_t key_b = mk_std_key(8801);
+    assert_flow_failed_closed(lane, &key_b, &pcb2, &fake_req2);
     mqvpn_tcp_lane_free(lane);
 }
 
@@ -2223,9 +2355,14 @@ test_clean_close_downlink_fin_first(void)
     ASSERT_EQ_INT(g_tcp_close_calls, 0, "not done yet");
 
     /* Uplink FIN second: the inner client's TCP FIN arrives, forwarded to
-     * H3 — THIS side observes both flags set and triggers the clean close. */
+     * H3 — THIS side observes both flags set and triggers the clean close.
+     * ERR_OK, NOT ERR_ABRT, even though the flow is freed inside this
+     * frame: the pcb was gracefully tcp_close()d (which does not free a
+     * FIN_WAIT_1/LAST_ACK pcb), never tcp_abort()ed — falsely claiming
+     * ERR_ABRT would make lwIP believe the pcb is gone and leak/stall it
+     * (the GONE-vs-ABORTED distinction in tcp_lane_flow_status_t). */
     ASSERT_EQ_INT(mqvpn_tcp_lane_on_lwip_recv(f, &pcb, NULL, ERR_OK), ERR_OK,
-                  "recv(NULL) tolerated");
+                  "clean-close recv(NULL) frame stays ERR_OK (pcb closed, not aborted)");
     /* f is freed as of the call above. */
 
     mqvpn_flow_key_t key = mk_std_key(8500);
@@ -2298,6 +2435,8 @@ main(void)
     test_lwip_err_teardown();
     test_h3_closing_notify_teardown();
     test_abort_pending_real();
+    test_accept_open_stream_fail_returns_abrt();
+    test_lwip_sent_teardown_returns_abrt();
     test_clean_close_uplink_fin_first();
     test_clean_close_downlink_fin_first();
     test_removal_updates_stats();

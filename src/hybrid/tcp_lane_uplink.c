@@ -135,27 +135,29 @@ tcp_lane_uplink_stash(mqvpn_tcp_flow_t *f, struct pbuf *p, uint16_t offset)
  * driven by the writable notify) is what actually gets the FIN out — not a
  * harmless-redundant duplicate of xquic's own bookkeeping.
  *
- * Return: 0 if the flow is still live (AGAIN-pending or fully done with
- * nothing further to do here); -1 if `f` was torn down inside this call
- * (fatal send error -> mqvpn_tcp_lane_on_relay_error, or both directions
- * just completed cleanly -> tcp_lane_finish_clean_close) — in the -1 case
- * `f` must not be touched again by the caller (see tcp_lane_uplink_flush
- * below, which is exactly why this needs a return value instead of the
- * original void). */
-static int
+ * Return (tcp_lane_flow_status_t): LIVE if the flow survives (AGAIN-pending
+ * or fully done with nothing further to do here); non-LIVE if `f` was torn
+ * down inside this call — ABORTED for a fatal send error
+ * (mqvpn_tcp_lane_on_relay_error tcp_abort()ed the pcb; the lwIP frame at
+ * the top of the chain must return ERR_ABRT) or GONE when both directions
+ * just completed cleanly (tcp_lane_finish_clean_close — pcb gracefully
+ * tcp_close()d, not freed, so ERR_OK stays correct). On any non-LIVE
+ * status `f` must not be touched again by the caller (see
+ * tcp_lane_uplink_flush below, which is exactly why this needs a return
+ * value instead of the original void). */
+static tcp_lane_flow_status_t
 tcp_lane_uplink_maybe_fin(mqvpn_tcp_flow_t *f)
 {
     if (f->state != TCP_FLOW_ACTIVE || !f->h3_request || !f->tcp_fin_seen ||
         f->fin_sent_to_h3 || f->uplink_q_head) {
-        return 0;
+        return TCP_LANE_FLOW_LIVE;
     }
     ssize_t r = cli_tcp_lane_h3_send(f->h3_request, NULL, 0, 1);
     if (r == MQVPN_TCP_LANE_H3_SEND_ERR) {
         /* Fatal — mirror the general relay-error contract (full teardown,
          * not just a state flip) rather than leaving the flow ACTIVE with a
          * FIN that can now never be sent. */
-        mqvpn_tcp_lane_on_relay_error(f);
-        return -1;
+        return mqvpn_tcp_lane_on_relay_error(f);
     }
     if (r >= 0) {
         f->fin_sent_to_h3 = 1;
@@ -164,11 +166,11 @@ tcp_lane_uplink_maybe_fin(mqvpn_tcp_flow_t *f)
              * its FIN to the pcb (tcp_shutdown succeeded) before this one
              * completed — both directions are now cleanly closed. */
             tcp_lane_finish_clean_close(f);
-            return -1;
+            return TCP_LANE_FLOW_GONE;
         }
     }
     /* AGAIN: stays pending, retried on the next writable notify / flush. */
-    return 0;
+    return TCP_LANE_FLOW_LIVE;
 }
 
 /* Drain the uplink queue FIFO, stopping at the first EAGAIN/partial (later
@@ -176,19 +178,24 @@ tcp_lane_uplink_maybe_fin(mqvpn_tcp_flow_t *f)
  * writable notifies: nothing is popped until fully accepted, offsets only
  * advance. After a full drain, sends the pending H3 FIN (see above); then,
  * once the unsent backlog is below low-water, re-opens the lwIP receive
- * window withheld under backpressure. */
-void
+ * window withheld under backpressure.
+ *
+ * Return: LIVE if the flow survives; the teardown status otherwise (`f` is
+ * freed — hands off). tcp_lane.c's on_lwip_recv (the peer-FIN branch) is
+ * the one lwIP-invoked caller and translates ABORTED to ERR_ABRT; the
+ * xquic-context callers (on_stream_established, on_h3_writable) ignore
+ * the status. */
+tcp_lane_flow_status_t
 tcp_lane_uplink_flush(mqvpn_tcp_flow_t *f)
 {
     if (f->state != TCP_FLOW_ACTIVE || !f->h3_request) {
-        return;
+        return TCP_LANE_FLOW_LIVE;
     }
     while (f->uplink_q_head) {
         mqvpn_tcp_uplink_node_t *n = f->uplink_q_head;
         int32_t off = tcp_lane_uplink_send_from(f, n->p, n->offset);
         if (off < 0) {
-            mqvpn_tcp_lane_on_relay_error(f);
-            return;
+            return mqvpn_tcp_lane_on_relay_error(f);
         }
         f->uplink_queued_bytes -= ((uint32_t)off - n->offset);
         n->offset = (uint16_t)off;
@@ -203,8 +210,9 @@ tcp_lane_uplink_flush(mqvpn_tcp_flow_t *f)
         free(n);
     }
 
-    if (tcp_lane_uplink_maybe_fin(f) < 0) {
-        return; /* f was torn down (fatal error or clean-close completion) */
+    tcp_lane_flow_status_t st = tcp_lane_uplink_maybe_fin(f);
+    if (st != TCP_LANE_FLOW_LIVE) {
+        return st; /* f was torn down (fatal error or clean-close completion) */
     }
 
     if (f->uplink_withheld && f->uplink_queued_bytes < MQVPN_TCP_LANE_BP_LOW_WATER) {
@@ -214,15 +222,22 @@ tcp_lane_uplink_flush(mqvpn_tcp_flow_t *f)
         }
         f->uplink_withheld_recved = 0;
     }
+    return TCP_LANE_FLOW_LIVE;
 }
 
 /* One lwIP data-arrival delivery (tcp_lane.c's on_lwip_recv dispatches here
  * for the p != NULL case, after confirming the flow is ACTIVE or
- * PENDING_STREAM). Takes ownership of p. Fast path: ACTIVE with an empty
- * queue -> hand straight to xquic. A non-empty queue forces the stash path
- * even when ACTIVE (FIFO ordering: new bytes must ride behind the backlog).
- * PENDING_STREAM always stashes (pre-2xx: nothing may be sent yet). */
-void
+ * PENDING_STREAM). Takes ownership of p — including on the ABORTED paths
+ * (freed before the teardown; on_lwip_recv's ERR_ABRT return is correct
+ * despite the consumed pbuf, matching lwIP convention). Fast path: ACTIVE
+ * with an empty queue -> hand straight to xquic. A non-empty queue forces
+ * the stash path even when ACTIVE (FIFO ordering: new bytes must ride
+ * behind the backlog). PENDING_STREAM always stashes (pre-2xx: nothing may
+ * be sent yet).
+ *
+ * Return: LIVE, or ABORTED when a fatal send / queue-node alloc failure
+ * tore the flow down (never GONE — no clean-close path runs here). */
+tcp_lane_flow_status_t
 tcp_lane_uplink_deliver(mqvpn_tcp_flow_t *f, struct pbuf *p)
 {
     uint16_t tot = p->tot_len;
@@ -232,8 +247,7 @@ tcp_lane_uplink_deliver(mqvpn_tcp_flow_t *f, struct pbuf *p)
         int32_t r = tcp_lane_uplink_send_from(f, p, 0);
         if (r < 0) {
             pbuf_free(p);
-            mqvpn_tcp_lane_on_relay_error(f);
-            return;
+            return mqvpn_tcp_lane_on_relay_error(f);
         }
         off = (uint16_t)r;
     }
@@ -241,7 +255,7 @@ tcp_lane_uplink_deliver(mqvpn_tcp_flow_t *f, struct pbuf *p)
     if (off == tot) {
         pbuf_free(p);
         tcp_lane_recved(f->pcb, tot); /* fully accepted — window re-opens */
-        return;
+        return TCP_LANE_FLOW_LIVE;
     }
 
     /* Withhold/pre-2xx buffer — the SAME queue (one code path, not two). */
@@ -250,8 +264,7 @@ tcp_lane_uplink_deliver(mqvpn_tcp_flow_t *f, struct pbuf *p)
          * dropping them would silently corrupt the relayed stream. Fail the
          * flow instead. */
         pbuf_free(p);
-        mqvpn_tcp_lane_on_relay_error(f);
-        return;
+        return mqvpn_tcp_lane_on_relay_error(f);
     }
 
     /* recved-withholding policy (tcp_lane.h watermark comment):
@@ -270,4 +283,5 @@ tcp_lane_uplink_deliver(mqvpn_tcp_flow_t *f, struct pbuf *p)
     } else {
         tcp_lane_recved(f->pcb, tot);
     }
+    return TCP_LANE_FLOW_LIVE;
 }
