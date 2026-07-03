@@ -214,7 +214,40 @@ target_include_directories(tcp_lane_microbench PRIVATE
 )
 set_target_properties(tcp_lane_microbench PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+
+# libFuzzer target: classifier + lwIP packet-intake crash-safety (see
+# fuzz/fuzz_tcp_lane.c for scope). Requires clang (-fsanitize=fuzzer is a
+# clang-only flag); OFF by default so the normal build/CI is unaffected.
+# Standalone executable, same "link the hybrid sources directly" shape as
+# tcp_lane_microbench above — not part of mqvpn_lib.
+option(MQVPN_ENABLE_FUZZING "Build libFuzzer targets (requires clang)" OFF)
+if(MQVPN_ENABLE_FUZZING)
+    add_executable(fuzz_tcp_lane
+        fuzz/fuzz_tcp_lane.c
+        src/hybrid/classifier.c
+        src/hybrid/lwip_glue.c
+        src/log.c
+    )
+    target_compile_options(fuzz_tcp_lane PRIVATE -fsanitize=fuzzer,address)
+    target_link_options(fuzz_tcp_lane PRIVATE -fsanitize=fuzzer,address)
+    target_link_libraries(fuzz_tcp_lane PRIVATE lwip_core)
+    target_include_directories(fuzz_tcp_lane PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/include
+    )
+    set_target_properties(fuzz_tcp_lane PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+endif()
 endif() # MQVPN_HYBRID_TCP_LANE_BUILD
+
+# fuzz_tcp_lane links classifier.c + lwip_glue.c directly (mirrors
+# tcp_lane_microbench), so it needs the lwip_core target from the block
+# above — MQVPN_ENABLE_FUZZING with the hybrid TCP lane unavailable
+# (Windows/Android, or explicitly disabled) has nothing to build against.
+if(MQVPN_ENABLE_FUZZING AND NOT MQVPN_HYBRID_TCP_LANE_BUILD)
+    message(WARNING "MQVPN_ENABLE_FUZZING requires the hybrid TCP lane "
+                     "(MQVPN_HYBRID_TCP_LANE_BUILD) — skipping fuzz_tcp_lane")
+endif()
 
 # ---------- libmqvpn (static library — no libevent, no platform I/O) ----------
 add_library(mqvpn_lib STATIC ${MQVPN_LIB_SOURCES})
