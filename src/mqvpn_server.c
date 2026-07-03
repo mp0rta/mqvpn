@@ -612,6 +612,10 @@ cb_h3_handshake_finished(xqc_h3_conn_t *h3_conn, void *conn_user_data)
  *  MASQUE session handling
  * ================================================================ */
 
+/* Canned error responses. Callers on the H3 read-notify path deliberately
+ * ignore the return value: escalating a failed canned-response send by
+ * returning an error from the notify callback would kill the whole H3
+ * connection (XQC_H3_CONN_ERR) — worse than dropping the reply. */
 static int
 svr_masque_send_403(xqc_h3_request_t *h3_request)
 {
@@ -902,7 +906,13 @@ cb_request_close(xqc_h3_request_t *h3_request, void *strm_user_data)
     (void)h3_request;
     svr_stream_t *stream = (svr_stream_t *)strm_user_data;
     if (stream) {
-        if (stream->conn) stream->conn->tunnel_established = 0;
+        /* Only the CONNECT-IP tunnel stream owns tunnel_established — a
+         * closing non-tunnel stream (per-flow connect-tcp, or a 501'd
+         * unknown request) on the same H3 connection must not flip the
+         * tunnel dead. Mirrors the client-side role gate in
+         * mqvpn_client.c's cb_request_close. */
+        if (stream->conn && stream->role == SVR_STREAM_ROLE_CONNECT_IP)
+            stream->conn->tunnel_established = 0;
         free(stream->capsule_buf);
         free(stream);
     }
@@ -1185,9 +1195,15 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
         case SVR_STREAM_ROLE_CONNECT_TCP:
             return svr_tcp_egress_on_body(s, stream, h3_request);
 #endif
-        case SVR_STREAM_ROLE_UNKNOWN:
-            /* 501 already sent at header time; no body expected. */
+        case SVR_STREAM_ROLE_UNKNOWN: {
+            /* 501 already sent at header time. Drain and discard any body
+             * so it doesn't sit in xquic's recv buffers until flow control
+             * stalls. */
+            unsigned char drain[4096];
+            while (xqc_h3_request_recv_body(h3_request, drain, sizeof(drain), &fin) > 0) {
+            }
             return 0;
+        }
         }
         return 0;
     }

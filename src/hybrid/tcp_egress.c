@@ -23,6 +23,8 @@ svr_tcp_egress_on_request(mqvpn_server_t *server, void *stream,
          .flags = 0},
     };
     xqc_http_headers_t resp_hdrs = {.headers = resp, .count = 1, .capacity = 1};
+    /* Send-failure deliberately not escalated: returning an error from the
+     * H3 read-notify path would kill the whole H3 connection. */
     xqc_h3_request_send_headers(h3_request, &resp_hdrs, 1);
     return 0;
 }
