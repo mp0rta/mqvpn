@@ -68,17 +68,19 @@ void svr_get_egress_policy(const mqvpn_server_t *s, const mqvpn_cidr_entry_t **a
                            uint32_t *tunnel_net, uint32_t *tunnel_mask);
 
 /*
- * ---- connect()/relay boundary (this task) ----
+ * ---- connect()/relay boundary ----
  *
  * tcp_egress.c defines its own svr_tcp_egress_flow_t (fd, state, deadline,
  * intrusive D3 tick-list links, ...) but never sees svr_stream_t/svr_conn_s
- * or mqvpn_server_t's real layout. The accessors below are the narrow seam
- * that lets it (a) store/find its one per-stream flow pointer, (b) enforce
- * the per-session and server-wide concurrent-flow caps, (c) read the two
- * hybrid config knobs it needs, and (d) forward fd-interest registration
- * and log lines through the server's existing callback plumbing. Each does
- * exactly one thing — no combined "give me everything" struct — so a
- * future boundary audit can grep one call site per concern.
+ * or mqvpn_server_t's real layout. The seam below is deliberately capped —
+ * boundary rule, pinned:
+ *   - SERVER-scope state crosses via ONE bundled ctx accessor
+ *     (svr_get_tcp_egress_ctx), extended field-by-field as needs grow.
+ *   - PER-OBJECT (stream/conn) fields get at most one pointer accessor each.
+ *   - Behavior bridges (register/unregister/clock/log) are separate — they
+ *     forward calls, not field access.
+ * If a future change can't fit those three buckets, that's the signal to
+ * move the struct definitions into this header instead of adding accessors.
  */
 
 /* Per-flow egress state slot on the stream (svr_tcp_egress_flow_t*, opaque
@@ -96,19 +98,24 @@ void **svr_stream_tcp_egress_flow_ptr(void *stream);
  * live request). */
 int *svr_conn_tcp_flow_count_ptr(void *stream);
 
-/* The two hybrid config knobs connect-stage admission/timeout needs.
- * Declared together (not split into two accessors) because every caller
- * needs both at once. */
-void svr_get_tcp_egress_limits(const mqvpn_server_t *s, uint32_t *tcp_max_flows,
-                               uint32_t *tcp_connect_timeout_sec);
+/* Server-scope egress state + config, bundled (svr_get_egress_policy
+ * precedent). Pointer fields: tcp_egress.c owns the CONTENTS (global
+ * in-flight-connect fd count + the D3 intrusive tick-list head) but not
+ * the STORAGE — that lives inside mqvpn_server_t so the state is naturally
+ * per-server without tcp_egress.c holding statics/globals. Both pointers
+ * stay valid for the server's lifetime. Value fields are per-call
+ * snapshots of the two admission limits. */
+typedef struct {
+    void **flow_list_head;            /* D3 intrusive list head slot */
+    int *global_fd_count;             /* in-flight + active egress fds */
+    uint32_t tcp_max_flows;           /* per-session cap (config.hybrid) */
+    uint32_t tcp_connect_timeout_sec; /* connect() deadline (config.hybrid) */
+    int global_fd_budget;             /* mqvpn_server_egress_fd_budget(s) */
+} svr_tcp_egress_srv_ctx_t;
 
-/* Server-wide egress state: tcp_egress.c owns the CONTENTS (global
- * in-flight-connect fd count + the D3 intrusive tick-list head) but not the
- * STORAGE — that lives inside mqvpn_server_t so mqvpn_server_tick can drive
- * the connect-timeout sweep without tcp_egress.c owning any static/global
- * state of its own. Pointer-accessor pair, same idiom as the two above. */
-int *svr_tcp_egress_fd_count_ptr(mqvpn_server_t *s);
-void **svr_tcp_egress_flow_list_head_ptr(mqvpn_server_t *s);
+/* Fill *out. Call ONCE per entry point (start_connect / flow_destroy /
+ * tick), not per line — helpers take what they need as parameters. */
+void svr_get_tcp_egress_ctx(mqvpn_server_t *s, svr_tcp_egress_srv_ctx_t *out);
 
 /* fd-interest registration passthrough — server owns cbs/user_ctx, neither
  * of which tcp_egress.c can see. Returns 0 if forwarded to the platform

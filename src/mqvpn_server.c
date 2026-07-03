@@ -194,13 +194,12 @@ struct mqvpn_server_s {
 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
     /* Connect-stage bookkeeping for src/hybrid/tcp_egress.c: STORAGE only.
-     * Contents are mutated exclusively by tcp_egress.c through the
-     * pointer accessors in mqvpn_server_internal.h (svr_tcp_egress_fd_
-     * count_ptr / svr_tcp_egress_flow_list_head_ptr) — this file never
-     * reads or writes them directly. tcp_egress_flow_list_head points at
-     * the head of tcp_egress.c's own svr_tcp_egress_flow_t intrusive
-     * doubly-linked (D3) list; void* here since this file doesn't know
-     * that type. */
+     * Contents are mutated exclusively by tcp_egress.c through the bundled
+     * ctx accessor in mqvpn_server_internal.h (svr_get_tcp_egress_ctx) —
+     * this file never reads or writes them directly.
+     * tcp_egress_flow_list_head points at the head of tcp_egress.c's own
+     * svr_tcp_egress_flow_t intrusive doubly-linked (D3) list; void* here
+     * since this file doesn't know that type. */
     int tcp_egress_global_fd_count;
     void *tcp_egress_flow_list_head;
 #endif
@@ -1143,23 +1142,13 @@ svr_conn_tcp_flow_count_ptr(void *stream)
 }
 
 void
-svr_get_tcp_egress_limits(const mqvpn_server_t *s, uint32_t *tcp_max_flows,
-                          uint32_t *tcp_connect_timeout_sec)
+svr_get_tcp_egress_ctx(mqvpn_server_t *s, svr_tcp_egress_srv_ctx_t *out)
 {
-    *tcp_max_flows = s->config.hybrid.tcp_max_flows;
-    *tcp_connect_timeout_sec = s->config.hybrid.tcp_connect_timeout_sec;
-}
-
-int *
-svr_tcp_egress_fd_count_ptr(mqvpn_server_t *s)
-{
-    return &s->tcp_egress_global_fd_count;
-}
-
-void **
-svr_tcp_egress_flow_list_head_ptr(mqvpn_server_t *s)
-{
-    return &s->tcp_egress_flow_list_head;
+    out->flow_list_head = &s->tcp_egress_flow_list_head;
+    out->global_fd_count = &s->tcp_egress_global_fd_count;
+    out->tcp_max_flows = s->config.hybrid.tcp_max_flows;
+    out->tcp_connect_timeout_sec = s->config.hybrid.tcp_connect_timeout_sec;
+    out->global_fd_budget = mqvpn_server_egress_fd_budget(s);
 }
 
 int

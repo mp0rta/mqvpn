@@ -908,9 +908,11 @@ TEST(mqvpn_tcp_acl_allow_hole_reaches_real_connect)
      * way through to a real, successful egress connect(): with
      * egress_allow=127.0.0.1/32 punched through the loopback default-deny,
      * a connect-tcp request targeting a real local listener gets a genuine
-     * 200 (replacing the old start_connect stub's unconditional 503), and
-     * the stream stays open (fin=0 — relay-ready) rather than closing
-     * immediately. */
+     * 200 (replacing the old start_connect stub's unconditional 503), AND
+     * the stream stays open (fin=0 — the relay-ready contract the next
+     * task's relay depends on): no request-close lands within a post-200
+     * pump window. Contrast the 501/4xx paths, where fin=1 makes
+     * request_closed fire promptly (see the tunnel-survival test). */
     int target_port = 0;
     int listen_fd = open_loopback_listener(&target_port);
     ASSERT_EQ(listen_fd >= 0, 1);
@@ -918,12 +920,26 @@ TEST(mqvpn_tcp_acl_allow_hole_reaches_real_connect)
     char path[64];
     snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", target_port);
 
-    char status[16] = {0};
-    int rc = run_dispatch_probe_with_path("mqvpn-tcp", 9, path, harness_cfg_allow_127,
-                                          status, sizeof(status));
-    ASSERT_EQ(rc, 0);
-    ASSERT_STREQ(status, "200");
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    h.probe.path = path;
 
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request(&h.probe), 0);
+
+    harness_pump(&h, &h.probe.response_done, 10000);
+    ASSERT_EQ(h.probe.response_done, 1);
+    ASSERT_STREQ(h.probe.status, "200");
+
+    /* fin=0 assertion: keep pumping past the 200 — the request must NOT
+     * close. (400ms window; a server-sent fin would close the client-side
+     * request well within it, as the 501 test's request_closed wait shows.) */
+    harness_pump(&h, &h.probe.request_closed, 400);
+    ASSERT_EQ(h.probe.request_closed, 0);
+
+    harness_stop(&h);
     close(listen_fd);
 }
 

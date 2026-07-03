@@ -196,8 +196,8 @@ svr_tcp_egress_respond(xqc_h3_request_t *h3_request, int status, uint8_t fin)
  *
  * prev/next: intrusive D3 tick-enumeration list (design decision: no
  * server-side 5-tuple table, see tcp_egress.h's on_request docstring). The
- * list head lives in mqvpn_server_t (storage only; see
- * svr_tcp_egress_flow_list_head_ptr in mqvpn_server_internal.h). */
+ * list head lives in mqvpn_server_t (storage only; reached through the
+ * bundled svr_get_tcp_egress_ctx accessor in mqvpn_server_internal.h). */
 typedef enum {
     EGRESS_FLOW_CONNECTING = 0,
     EGRESS_FLOW_ACTIVE,
@@ -216,10 +216,13 @@ typedef struct svr_tcp_egress_flow_s {
     struct svr_tcp_egress_flow_s *prev, *next;
 } svr_tcp_egress_flow_t;
 
+/* List helpers take the head slot as a parameter — the entry points fetch
+ * the server ctx (svr_get_tcp_egress_ctx) once and pass ctx.flow_list_head
+ * down, per the one-ctx-call-per-entry-point rule in
+ * mqvpn_server_internal.h. */
 static void
-svr_tcp_egress_list_insert(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
+svr_tcp_egress_list_insert(void **head, svr_tcp_egress_flow_t *ef)
 {
-    void **head = svr_tcp_egress_flow_list_head_ptr(server);
     ef->prev = NULL;
     ef->next = (svr_tcp_egress_flow_t *)*head;
     if (ef->next) ef->next->prev = ef;
@@ -227,9 +230,8 @@ svr_tcp_egress_list_insert(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
 }
 
 static void
-svr_tcp_egress_list_remove(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
+svr_tcp_egress_list_remove(void **head, svr_tcp_egress_flow_t *ef)
 {
-    void **head = svr_tcp_egress_flow_list_head_ptr(server);
     if (ef->prev) {
         ef->prev->next = ef->next;
     } else {
@@ -267,12 +269,13 @@ svr_tcp_egress_flow_destroy(mqvpn_server_t *server, void *flow)
     svr_egress_fd_unregister(server, ef->fd);
     close(ef->fd);
 
-    svr_tcp_egress_list_remove(server, ef);
+    svr_tcp_egress_srv_ctx_t ctx;
+    svr_get_tcp_egress_ctx(server, &ctx);
+    svr_tcp_egress_list_remove(ctx.flow_list_head, ef);
 
     int *conn_count = svr_conn_tcp_flow_count_ptr(ef->stream);
     if (conn_count && *conn_count > 0) (*conn_count)--;
-    int *global_count = svr_tcp_egress_fd_count_ptr(server);
-    if (*global_count > 0) (*global_count)--;
+    if (*ctx.global_fd_count > 0) (*ctx.global_fd_count)--;
 
     void **stream_slot = svr_stream_tcp_egress_flow_ptr(ef->stream);
     if (stream_slot) *stream_slot = NULL;
@@ -336,15 +339,14 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
                              xqc_h3_request_t *h3_request, const char *target_host,
                              uint16_t target_port, const char *username)
 {
-    int *global_count = svr_tcp_egress_fd_count_ptr(server);
-    if (*global_count >= mqvpn_server_egress_fd_budget(server)) {
+    svr_tcp_egress_srv_ctx_t ctx;
+    svr_get_tcp_egress_ctx(server, &ctx);
+    if (*ctx.global_fd_count >= ctx.global_fd_budget) {
         return svr_tcp_egress_respond(h3_request, 503, 1);
     }
 
-    uint32_t tcp_max_flows = 0, tcp_connect_timeout_sec = 0;
-    svr_get_tcp_egress_limits(server, &tcp_max_flows, &tcp_connect_timeout_sec);
     int *conn_count = svr_conn_tcp_flow_count_ptr(stream);
-    if (conn_count && (uint32_t)*conn_count >= tcp_max_flows) {
+    if (conn_count && (uint32_t)*conn_count >= ctx.tcp_max_flows) {
         return svr_tcp_egress_respond(h3_request, 503, 1);
     }
 
@@ -375,17 +377,17 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
     ef->stream = stream;
     ef->state = EGRESS_FLOW_CONNECTING;
     ef->connect_deadline_us =
-        svr_now_us() + (uint64_t)tcp_connect_timeout_sec * 1000000ULL;
+        svr_now_us() + (uint64_t)ctx.tcp_connect_timeout_sec * 1000000ULL;
     snprintf(ef->username, sizeof(ef->username), "%s", username ? username : "");
 
     void **stream_slot = svr_stream_tcp_egress_flow_ptr(stream);
     if (stream_slot) *stream_slot = ef; /* the ONE place this is set (D2) */
-    svr_tcp_egress_list_insert(server, ef);
+    svr_tcp_egress_list_insert(ctx.flow_list_head, ef);
 
     /* Count exactly once, unconditionally, before the syscall — see the
      * bookkeeping-invariant comment on svr_tcp_egress_flow_destroy. */
     if (conn_count) (*conn_count)++;
-    (*global_count)++;
+    (*ctx.global_fd_count)++;
 
     int r = connect(fd, (struct sockaddr *)&dst, sizeof(dst));
     if (r == 0) {
@@ -492,8 +494,9 @@ svr_tcp_egress_tick(mqvpn_server_t *server, uint64_t now_us)
 {
     if (!server) return;
 
-    void **head = svr_tcp_egress_flow_list_head_ptr(server);
-    svr_tcp_egress_flow_t *ef = (svr_tcp_egress_flow_t *)*head;
+    svr_tcp_egress_srv_ctx_t ctx;
+    svr_get_tcp_egress_ctx(server, &ctx);
+    svr_tcp_egress_flow_t *ef = (svr_tcp_egress_flow_t *)*ctx.flow_list_head;
     while (ef) {
         /* Save next before possibly destroying ef — fail_connect() unlinks
          * and frees it, which would otherwise dereference freed memory on
