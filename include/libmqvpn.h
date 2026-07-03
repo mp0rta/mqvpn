@@ -509,6 +509,14 @@ MQVPN_API int mqvpn_config_set_hybrid_limits(mqvpn_config_t *cfg, uint32_t tcp_m
 /* Server-side egress connect() timeout for the connect-tcp lane, in
  * seconds (default 10). sec must be > 0. */
 MQVPN_API int mqvpn_config_set_hybrid_connect_timeout(mqvpn_config_t *cfg, uint32_t sec);
+/* Server-wide cap on concurrent egress TCP fds the connect-tcp lane will
+ * ever open (default MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT = 4096), narrowed
+ * further at startup by available rlimit headroom — see
+ * mqvpn_server_egress_fd_budget(). Distinct from
+ * mqvpn_config_set_hybrid_limits()'s tcp_max_flows, which caps concurrent
+ * flows per H3 connection, not server-wide. max_flows must be > 0. */
+MQVPN_API int mqvpn_config_set_hybrid_max_global_flows(mqvpn_config_t *cfg,
+                                                       uint32_t max_flows);
 /* Egress ACL for the connect-tcp lane's destination check (server-side
  * only; harmless but unused on clients). `allow` punches holes through the
  * mandatory default-deny (loopback/RFC1918/link-local/CGNAT/multicast/

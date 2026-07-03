@@ -259,6 +259,8 @@ test_hybrid_config_default(void)
     ASSERT_EQ_INT(cfg.tcp_mode, MQVPN_HYBRID_TCP_AUTO, "default tcp_mode auto");
     ASSERT_EQ_INT(cfg.tcp_max_flows, 256, "default tcp_max_flows");
     ASSERT_EQ_INT(cfg.tcp_idle_timeout_sec, 300, "default tcp_idle_timeout_sec");
+    ASSERT_EQ_INT(cfg.tcp_max_global_flows, MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT,
+                  "default tcp_max_global_flows");
 }
 
 static void
@@ -270,6 +272,11 @@ test_hybrid_config_validate(void)
 
     cfg.tcp_max_flows = 0;
     ASSERT_EQ_INT(mqvpn_hybrid_config_validate(&cfg), -1, "validate max_flows=0 -> -1");
+
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.tcp_max_global_flows = 0;
+    ASSERT_EQ_INT(mqvpn_hybrid_config_validate(&cfg), -1,
+                  "validate max_global_flows=0 -> -1");
 
     ASSERT_EQ_INT(mqvpn_hybrid_config_validate(NULL), -1, "validate NULL -> -1");
 

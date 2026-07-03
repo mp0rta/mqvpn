@@ -51,12 +51,15 @@ void svr_tcp_egress_on_h3_writable(mqvpn_server_t *server, void *stream);
 void svr_tcp_egress_fd_ready(mqvpn_server_t *server, int fd, void *fd_ctx, int readable,
                              int writable);
 
-/* Connect-timeout sweep, called once per mqvpn_server_tick() pass. Walks
- * the D3 intrusive list of in-flight flows; any still EGRESS_FLOW_CONNECTING
- * past its connect_deadline_us is failed with ETIMEDOUT (-> 504). The walk
- * is unlink-safe (a flow can be destroyed mid-walk by the timeout it just
- * hit). The limits work lands ACTIVE-idle-timeout enforcement on this same
- * walk later — one list, one tick function. */
+/* Connect-timeout + idle-timeout sweep, called once per mqvpn_server_tick()
+ * pass. Walks the D3 intrusive list of in-flight flows: any still
+ * EGRESS_FLOW_CONNECTING past its connect_deadline_us is failed with
+ * ETIMEDOUT (-> 504); any EGRESS_FLOW_ACTIVE flow whose last_activity_us has
+ * not advanced within config.hybrid.tcp_idle_timeout_sec (0 = disabled) has
+ * its H3 stream closed (no 5xx — it already sent its 200; see
+ * svr_tcp_egress_on_idle_evict). One list, one tick function; the walk is
+ * unlink-safe (a flow can be destroyed mid-walk by the timeout/eviction it
+ * just hit). */
 void svr_tcp_egress_tick(mqvpn_server_t *server, uint64_t now_us);
 
 /* Full teardown for exactly one flow: unregisters the fd from the platform

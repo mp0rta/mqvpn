@@ -636,6 +636,8 @@ static const cfg_key_desc_t cfg_keys[] = {
             hybrid.tcp_idle_timeout_sec),
     CFG_U32(SEC_HYBRID, "TcpConnectTimeoutSec", "tcp_connect_timeout_sec",
             hybrid.tcp_connect_timeout_sec),
+    CFG_U32(SEC_HYBRID, "TcpMaxGlobalFlows", "tcp_max_global_flows",
+            hybrid.tcp_max_global_flows),
 };
 
 /* Shared typed store. Returns 0 on success, -1 on invalid value (caller

@@ -192,7 +192,9 @@ struct mqvpn_server_s {
      * startup, so admission (tcp_egress.c's 503 cap check) must use the
      * same snapshot — recomputing per call would let a runtime setrlimit
      * grow admission past the fixed registry (flows admitted but never
-     * polled). */
+     * polled). min(rlimit_nofile - reserve, config.hybrid.tcp_max_global_flows
+     * [TcpMaxGlobalFlows / "tcp_max_global_flows"]) — see
+     * svr_compute_egress_fd_budget. */
     int egress_fd_budget;
 
     /* Log filtering */
@@ -253,14 +255,17 @@ now_us(void)
 #endif
 }
 
-/* One-shot at mqvpn_server_new (rlimit-derived headroom under the compile-
- * time cap); the result is stored in s->egress_fd_budget and intentionally
- * never recomputed — see that field's comment for the admission/registry
- * non-divergence rationale. */
+/* One-shot at mqvpn_server_new (rlimit-derived headroom under the
+ * config-supplied cap, config.hybrid.tcp_max_global_flows — TcpMaxGlobalFlows
+ * in INI/JSON, MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT if unset); the result is
+ * stored in s->egress_fd_budget and intentionally never recomputed — see
+ * that field's comment for the admission/registry non-divergence rationale.
+ * `configured_max` is a plain uint32_t (not the whole config struct) so this
+ * stays a pure, easily-unit-testable function of its input. */
 static int
-svr_compute_egress_fd_budget(void)
+svr_compute_egress_fd_budget(uint32_t configured_max)
 {
-    int budget = MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT;
+    int budget = (configured_max > (uint32_t)INT_MAX) ? INT_MAX : (int)configured_max;
 #ifndef _WIN32
     struct rlimit rl;
     if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY &&
@@ -1180,6 +1185,7 @@ svr_get_tcp_egress_ctx(mqvpn_server_t *s, svr_tcp_egress_srv_ctx_t *out)
     out->global_fd_count = &s->tcp_egress_global_fd_count;
     out->tcp_max_flows = s->config.hybrid.tcp_max_flows;
     out->tcp_connect_timeout_sec = s->config.hybrid.tcp_connect_timeout_sec;
+    out->tcp_idle_timeout_sec = s->config.hybrid.tcp_idle_timeout_sec;
     out->global_fd_budget = s->egress_fd_budget; /* frozen at server_new */
 }
 
@@ -1610,7 +1616,12 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     s->max_clients = cfg->max_clients > 0 ? cfg->max_clients : 64;
     s->ptb_tokens = PTB_RATE_LIMIT;
     s->boot_us = now_us();
-    s->egress_fd_budget = svr_compute_egress_fd_budget();
+    /* s->config was already populated by the memcpy above — the budget
+     * computation MUST read the applied config, not `cfg` directly, so a
+     * future refactor that changes what memcpy copies can't silently
+     * desync the two. */
+    s->egress_fd_budget =
+        svr_compute_egress_fd_budget(s->config.hybrid.tcp_max_global_flows);
 
     /* Initialize address pool */
     if (cfg->subnet[0] == '\0') {
@@ -1869,7 +1880,8 @@ mqvpn_server_egress_fd_budget(mqvpn_server_t *s)
 {
     /* Frozen snapshot from mqvpn_server_new — see svr_compute_egress_fd_
      * budget and the egress_fd_budget field comment for why this must not
-     * recompute per call. */
+     * recompute per call. Fed by config.hybrid.tcp_max_global_flows
+     * (TcpMaxGlobalFlows in INI/JSON). */
     if (!s) return 0;
     return s->egress_fd_budget;
 }

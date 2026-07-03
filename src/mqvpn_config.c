@@ -745,6 +745,19 @@ mqvpn_config_set_hybrid_connect_timeout(mqvpn_config_t *cfg, uint32_t sec)
 }
 
 int
+mqvpn_config_set_hybrid_max_global_flows(mqvpn_config_t *cfg, uint32_t max_flows)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    /* Same not-zero rule as tcp_max_flows/tcp_connect_timeout above: this is
+     * an admission cap, not an idle-style opt-out field, so 0 (admit
+     * nothing, server-wide) is rejected as a misconfiguration rather than
+     * accepted as "disabled". */
+    if (max_flows == 0) return MQVPN_ERR_INVALID_ARG;
+    cfg->hybrid.tcp_max_global_flows = max_flows;
+    return MQVPN_OK;
+}
+
+int
 mqvpn_config_set_hybrid_egress_acl(mqvpn_config_t *cfg, const char **allow, int n_allow,
                                    const char **deny, int n_deny)
 {

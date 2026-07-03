@@ -219,6 +219,31 @@ typedef struct svr_tcp_egress_flow_s {
                    * svr_conn_tcp_flow_count_ptr) dereference it. */
     svr_tcp_egress_flow_state_t state;
     uint64_t connect_deadline_us; /* only meaningful while CONNECTING */
+    uint64_t last_activity_us;    /* only meaningful while ACTIVE (the
+                                   * CONNECTING sweep uses connect_deadline_us
+                                   * instead — see svr_tcp_egress_tick).
+                                   * Definition of "activity": bytes actually
+                                   * moved in EITHER relay direction —
+                                   * downlink send() progress
+                                   * (svr_tcp_egress_drain_body,
+                                   * svr_tcp_egress_flush_downlink_retry) or
+                                   * uplink recv() progress
+                                   * (svr_tcp_egress_on_relay_ready,
+                                   * svr_tcp_egress_on_h3_writable's stash
+                                   * flush). A pure readiness notify that
+                                   * moves zero bytes (e.g. a writable event
+                                   * that still can't drain the stash) does
+                                   * NOT refresh this — that is precisely
+                                   * what makes a flow parked by uplink
+                                   * backpressure (uplink_withheld=1 with the
+                                   * client never reopening its H3 receive
+                                   * window) eventually idle-evictable: it has
+                                   * no other recovery path. Initialized at
+                                   * connect() start and again when the flow
+                                   * goes ACTIVE; svr_tcp_egress_tick compares
+                                   * it against config.hybrid.tcp_idle_timeout_sec
+                                   * (0 = disabled, shared field with the
+                                   * client's tcp_lane — see classifier.h). */
     char username[64];            /* sized to match svr_auth_check's out
                                    * buf; consumed by later stats work */
 
@@ -413,6 +438,26 @@ svr_tcp_egress_on_relay_error(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
     /* Do NOT touch ef again — see the destroy-ownership note above. */
 }
 
+/* ACTIVE-flow idle-timeout eviction (the limits work this file's tick
+ * docstring referenced). Same destroy-ownership discipline as
+ * on_relay_error above — closes the H3 stream and returns without touching
+ * `ef` again, letting the close-notify funnel run the real destroy — but
+ * kept as its own function rather than reusing on_relay_error under an
+ * errno=0 sentinel: an idle timeout is not an I/O error, and a dedicated log
+ * line keeps the two cases distinguishable in server logs. Called only from
+ * svr_tcp_egress_tick for a flow already confirmed ACTIVE (CONNECTING flows
+ * are gated out by state, not by this function). */
+static void
+svr_tcp_egress_on_idle_evict(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
+                             uint32_t idle_timeout_sec)
+{
+    TLOG_W(server, "connect-tcp: ACTIVE flow idle for over %u s — closing stream",
+           idle_timeout_sec);
+    xqc_h3_request_close(ef->h3_request);
+    /* Do NOT touch ef again — see the destroy-ownership note on
+     * on_relay_error above. */
+}
+
 /* The ONE place fd interest is computed from flow state (per this task's
  * design note: hand-written (want_read, want_write) pairs at every call
  * site WILL drift). Safe to call liberally/redundantly — every caller here
@@ -541,6 +586,9 @@ svr_tcp_egress_drain_body(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
                     svr_tcp_egress_on_relay_error(server, ef, sent < 0 ? errno : 0);
                     return 0;
                 }
+                /* Downlink activity: bytes actually reached the egress
+                 * socket (see last_activity_us's field comment). */
+                ef->last_activity_us = svr_now_us();
                 off += (size_t)sent;
             }
         }
@@ -583,6 +631,11 @@ svr_tcp_egress_flush_downlink_retry(mqvpn_server_t *server, svr_tcp_egress_flow_
         off += (size_t)sent;
     }
     if (off == 0) return 1; /* still fully blocked; nothing changed */
+    /* Downlink activity: some (or all) of the stash actually flushed to the
+     * socket — a call that returns here with off==0 above must NOT reach
+     * this line (see last_activity_us's field comment on why a no-progress
+     * readiness notify must not refresh it). */
+    ef->last_activity_us = svr_now_us();
     if (off < ef->downlink_stash_len) {
         memmove(ef->downlink_stash, ef->downlink_stash + off,
                 ef->downlink_stash_len - off);
@@ -673,6 +726,11 @@ svr_tcp_egress_on_h3_writable(mqvpn_server_t *server, void *stream)
             }
             off += (size_t)sent;
         }
+        /* Uplink activity: guarded by off > 0 so a notify that drains
+         * nothing (still fully -XQC_EAGAIN'd) does not refresh
+         * last_activity_us — same "no progress, no refresh" rule as the
+         * downlink stash flush above. */
+        if (off > 0) ef->last_activity_us = svr_now_us();
         if (off < ef->uplink_stash_len) {
             memmove(ef->uplink_stash, ef->uplink_stash + off, ef->uplink_stash_len - off);
             ef->uplink_stash_len -= off;
@@ -707,6 +765,7 @@ static void
 svr_tcp_egress_on_connected(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
 {
     ef->state = EGRESS_FLOW_ACTIVE;
+    ef->last_activity_us = svr_now_us(); /* idle-sweep clock starts now */
     svr_tcp_egress_update_fd_interest(server, ef);
     svr_tcp_egress_respond(ef->h3_request, 200, 0);
     svr_tcp_egress_drain_body(server, ef);
@@ -772,6 +831,12 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
     ef->state = EGRESS_FLOW_CONNECTING;
     ef->connect_deadline_us =
         svr_now_us() + (uint64_t)ctx.tcp_connect_timeout_sec * 1000000ULL;
+    /* Meaningless until ACTIVE (svr_tcp_egress_on_connected re-latches it to
+     * the moment the flow actually becomes idle-sweep-eligible), but
+     * initialized here too rather than left at calloc's 0 — 0 would read as
+     * "idle since the epoch" if anything ever inspected it before that
+     * transition. */
+    ef->last_activity_us = svr_now_us();
     snprintf(ef->username, sizeof(ef->username), "%s", username ? username : "");
 
     void **stream_slot = svr_stream_tcp_egress_flow_ptr(stream);
@@ -895,6 +960,11 @@ svr_tcp_egress_on_relay_ready(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
                 n = recv(ef->fd, buf, sizeof(buf), MSG_DONTWAIT);
             } while (n < 0 && errno == EINTR);
             if (n <= 0) break;
+            /* Uplink activity: bytes actually arrived from the egress
+             * socket, independent of whether xquic accepts them immediately
+             * or they end up stashed below (see last_activity_us's field
+             * comment — the recv() itself is the "bytes moved" event). */
+            ef->last_activity_us = svr_now_us();
             ssize_t sent = xqc_h3_request_send_body(ef->h3_request, buf, (size_t)n, 0);
             if (sent == -XQC_EAGAIN) sent = 0; /* normalize: nothing accepted */
             if (sent < 0) {
@@ -963,14 +1033,32 @@ svr_tcp_egress_tick(mqvpn_server_t *server, uint64_t now_us)
 
     svr_tcp_egress_srv_ctx_t ctx;
     svr_get_tcp_egress_ctx(server, &ctx);
+    /* 0 = disabled (shared client/server field — see classifier.h's
+     * tcp_idle_timeout_sec comment). Computed once per tick, mirroring the
+     * client's mqvpn_tcp_lane_tick idiom. */
+    int idle_evict_enabled = ctx.tcp_idle_timeout_sec != 0;
+    uint64_t idle_us = (uint64_t)ctx.tcp_idle_timeout_sec * 1000000ULL;
     svr_tcp_egress_flow_t *ef = *ctx.flow_list_head;
     while (ef) {
-        /* Save next before possibly destroying ef — fail_connect() unlinks
-         * and frees it, which would otherwise dereference freed memory on
-         * the next loop iteration. */
+        /* Save next before possibly destroying/closing ef — fail_connect()
+         * unlinks and frees it, and on_idle_evict() may synchronously
+         * re-enter the close-notify funnel that does the same (see the
+         * destroy-ownership note above svr_tcp_egress_on_relay_error) —
+         * either way, dereferencing ef again after would be a use-after-free
+         * on the next loop iteration. */
         svr_tcp_egress_flow_t *next = ef->next;
-        if (ef->state == EGRESS_FLOW_CONNECTING && now_us >= ef->connect_deadline_us) {
-            svr_tcp_egress_fail_connect(server, ef, ETIMEDOUT);
+        if (ef->state == EGRESS_FLOW_CONNECTING) {
+            /* CONNECTING flows are never idle-evicted: they use
+             * connect_deadline_us, not last_activity_us (which isn't even
+             * meaningful yet — see that field's comment). */
+            if (now_us >= ef->connect_deadline_us) {
+                svr_tcp_egress_fail_connect(server, ef, ETIMEDOUT);
+            }
+        } else if (idle_evict_enabled && now_us > ef->last_activity_us &&
+                   now_us - ef->last_activity_us > idle_us) {
+            /* Wraparound-safe age test (now_us > last_activity_us guard),
+             * same form as the client's mqvpn_tcp_lane_tick sweep. */
+            svr_tcp_egress_on_idle_evict(server, ef, ctx.tcp_idle_timeout_sec);
         }
         ef = next;
     }

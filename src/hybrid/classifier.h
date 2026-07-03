@@ -107,9 +107,32 @@ typedef struct {
     int enabled;
     mqvpn_hybrid_tcp_mode_t tcp_mode;
     uint32_t tcp_max_flows;           /* consumed by tcp_lane.c */
-    uint32_t tcp_idle_timeout_sec;    /* consumed by tcp_lane.c */
+    uint32_t tcp_idle_timeout_sec;    /* consumed by tcp_lane.c (client) AND, since the
+                                       * limits task, svr_tcp_egress_tick (server): the
+                                       * SAME field/semantics on both sides ("symmetric
+                                       * single [hybrid] config block" — no separate
+                                       * server-side idle key). 0 = disabled (never
+                                       * evict), mirroring tcp_lane.c's documented
+                                       * opt-out; a nonzero value evicts a flow whose
+                                       * last_activity_us has not advanced in that many
+                                       * seconds. Server-side: CONNECTING flows are
+                                       * excluded (they use connect_deadline_us
+                                       * instead, see svr_tcp_egress_tick); an ACTIVE
+                                       * flow gets its H3 stream closed, not a 5xx
+                                       * response (it already sent its 200). */
     uint32_t tcp_connect_timeout_sec; /* server: egress connect() timeout —
                                        * consumed when the connect stage lands */
+    uint32_t tcp_max_global_flows;    /* server: whole-server cap on concurrent egress TCP
+                                       * fds tcp_egress.c will ever open, before
+                                       * mqvpn_server_egress_fd_budget()'s rlimit-derived
+                                       * headroom check (svr_compute_egress_fd_budget)
+                                       * narrows it further — see
+                                       * MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT below for the
+                                       * default. Distinct from the per-session
+                                       * tcp_max_flows above (that one bounds concurrent
+                                       * flows on a SINGLE H3 connection; this one bounds
+                                       * the whole server). Ignored by client-side
+                                       * classify(), like the egress ACL fields below. */
 
     /* Server-only egress ACL (connect-tcp destination policy).
      * egress_allow punches holes through the mandatory default-deny;
@@ -120,11 +143,9 @@ typedef struct {
     int n_egress_deny;
 } mqvpn_hybrid_config_t;
 
-/* Server-wide cap on concurrent egress TCP fds tcp_egress will ever open,
- * before mqvpn_server_egress_fd_budget()'s rlimit-derived headroom check
- * narrows it further. This is a whole-server bound, distinct from the
- * per-flow-table tcp_max_flows above. config key lands with the
- * server-side cap enforcement. */
+/* Default for tcp_max_global_flows above — also the fallback budget when
+ * getrlimit(RLIMIT_NOFILE) headroom (rlim_cur - 64) is larger than this
+ * (svr_compute_egress_fd_budget takes min(headroom, tcp_max_global_flows)). */
 #define MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT 4096
 
 /* static inline ON PURPOSE (not in classifier.c): src/config.c and
@@ -139,6 +160,7 @@ mqvpn_hybrid_config_default(mqvpn_hybrid_config_t *cfg)
     cfg->tcp_max_flows = 256;
     cfg->tcp_idle_timeout_sec = 300;
     cfg->tcp_connect_timeout_sec = 10;
+    cfg->tcp_max_global_flows = MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT;
     /* n_egress_allow / n_egress_deny already 0 from the memset above. */
 }
 
@@ -149,6 +171,11 @@ mqvpn_hybrid_config_validate(const mqvpn_hybrid_config_t *cfg)
     if (cfg->tcp_mode > MQVPN_HYBRID_TCP_AUTO) return -1;
     if (cfg->tcp_max_flows == 0) return -1;
     if (cfg->tcp_connect_timeout_sec == 0) return -1;
+    /* tcp_max_global_flows == 0, like tcp_max_flows, would admit zero
+     * connect-tcp flows server-wide — treated as a misconfiguration, not a
+     * disable switch (tcp_idle_timeout_sec is the one field here where 0 is
+     * a legitimate "off" value; this isn't that kind of field). */
+    if (cfg->tcp_max_global_flows == 0) return -1;
     return 0;
 }
 

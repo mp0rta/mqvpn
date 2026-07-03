@@ -115,6 +115,9 @@ typedef struct {
     int *global_fd_count;                          /* in-flight + active egress fds */
     uint32_t tcp_max_flows;                        /* per-session cap (config.hybrid) */
     uint32_t tcp_connect_timeout_sec; /* connect() deadline (config.hybrid) */
+    uint32_t tcp_idle_timeout_sec;    /* ACTIVE-flow idle eviction, shared with the
+                                       * client's tcp_lane (config.hybrid); 0 = disabled,
+                                       * see the field comment in classifier.h */
     int global_fd_budget;             /* mqvpn_server_egress_fd_budget(s) */
 } svr_tcp_egress_srv_ctx_t;
 
