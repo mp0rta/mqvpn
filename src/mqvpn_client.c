@@ -1192,6 +1192,19 @@ cli_tcp_lane_h3_recv(void *h3_request, uint8_t *buf, size_t len, int *fin)
     *fin = xfin ? 1 : 0;
     return n;
 }
+
+/* H2/Task 12: close-mapping RST direction for the TCP lane. Cross-TU like
+ * cli_tcp_lane_h3_send/_recv above — wraps xqc_h3_request_close (sends
+ * RESET_STREAM to the peer; h3_request_close_notify fires later when xquic
+ * finally destroys the request struct, whatever the close reason). void:
+ * every caller in tcp_lane.c has already unconditionally decided the flow
+ * is dead, so there is no different action to take on success vs. failure
+ * here (matches tcp_abort's void contract on the pcb side). */
+void
+cli_tcp_lane_h3_close(void *h3_request)
+{
+    xqc_h3_request_close((xqc_h3_request_t *)h3_request);
+}
 #endif /* MQVPN_HYBRID_TCP_LANE_ENABLED */
 
 /* ─── Capsule parsing ─── */
@@ -1290,6 +1303,33 @@ process_capsules(cli_stream_t *stream)
 
 /* ─── H3 request callbacks ─── */
 
+/* H2/Task 12: peer sent RESET_STREAM — xquic is already tearing this
+ * request down (verified against the vendored source: this notify fires
+ * ONLY on RESET_STREAM frame reception, never on a clean bidi-FIN
+ * completion or on STOP_SENDING alone — see tcp_lane.h's
+ * mqvpn_tcp_lane_on_h3_closing doc for the full citation trail). CONNECT-IP
+ * ignores this: the tunnel stream has no separate per-flow teardown
+ * concept, and its own close is handled via cb_request_close/
+ * h3_conn_close_notify instead — routing it here too would be a no-op
+ * anyway (mqvpn_tcp_lane_on_h3_closing only exists for the TCP lane), so
+ * the CONNECT-IP case is simply not routed. (void)err: the flow is dead
+ * either way, no err-code-specific handling needed (deliberate
+ * simplification, matching cb_h3_conn_close's coarse-grained treatment
+ * elsewhere in this file). */
+static void
+cb_request_closing_notify(xqc_h3_request_t *h3_request, xqc_int_t err, void *user_data)
+{
+    (void)h3_request;
+    (void)err;
+    cli_stream_t *stream = (cli_stream_t *)user_data;
+    if (!stream) return;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    if (stream->role == CLI_STREAM_ROLE_CONNECT_TCP && stream->conn) {
+        mqvpn_tcp_lane_on_h3_closing(stream->conn->tcp_lane, stream);
+    }
+#endif
+}
+
 static int
 cb_request_close(xqc_h3_request_t *h3_request, void *user_data)
 {
@@ -1300,6 +1340,27 @@ cb_request_close(xqc_h3_request_t *h3_request, void *user_data)
          * per-flow connect-tcp stream must not flip the tunnel dead. */
         if (stream->conn && stream->role == CLI_STREAM_ROLE_CONNECT_IP)
             stream->conn->tunnel_ok = 0;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+        /* Task 12 (reconciliation G): this is the FINAL close notify for
+         * ANY reason (clean bidi-FIN, RST, or an explicit close call) —
+         * xqc_h3_request_destroy calls it unconditionally right before
+         * freeing the request struct (verified: exactly one call site,
+         * third_party/xquic src/http3/xqc_h3_stream.c). Route to
+         * on_h3_closing BEFORE freeing the stream below so no path can ever
+         * leave a flow with a dangling h3_request/stream pointer: a flow
+         * that already went through a different teardown (RST from us,
+         * on_stream_rejected, on_relay_error, or the RESET_STREAM
+         * closing-notify above) is already removed, so this is an
+         * idempotent no-op lookup miss for it; a flow that reached this
+         * point via a clean bidi-FIN completion is ALSO already removed
+         * (tcp_lane_finish_clean_close runs synchronously well before
+         * xquic gets around to destroying the request) — this call exists
+         * for the one remaining shape: a request that closes for some
+         * OTHER reason without either teardown path having run first. */
+        if (stream->conn && stream->role == CLI_STREAM_ROLE_CONNECT_TCP) {
+            mqvpn_tcp_lane_on_h3_closing(stream->conn->tcp_lane, stream);
+        }
+#endif
         free(stream->capsule_buf);
         free(stream);
     }
@@ -2237,6 +2298,7 @@ init_xquic_engine(mqvpn_client_t *c)
                 .h3_request_close_notify = cb_request_close,
                 .h3_request_read_notify = cb_request_read,
                 .h3_request_write_notify = cb_request_write,
+                .h3_request_closing_notify = cb_request_closing_notify,
             },
         .h3_ext_dgram_cbs =
             {

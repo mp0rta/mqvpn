@@ -97,8 +97,10 @@ err_t mqvpn_tcp_lane_lwip_accept(void *arg, struct tcp_pcb *newpcb, err_t err);
 void mqvpn_tcp_lane_bind_h3_request(void *flow_handle, void *h3_request, void *stream);
 
 /* Reject a flow whose H3 stream open failed after lwIP already accepted it.
- * Post-SYN-ACK, so abort-only — RAW fallback is forbidden. Stub until
- * Task 12 lands the real pcb abort + flow removal. */
+ * Post-SYN-ACK, so abort-only — RAW fallback is forbidden. Never closes the
+ * H3 request itself (the caller, cli_tcp_lane_open_stream, either never
+ * created one yet or already closed the one it did create on its own
+ * failure path) — just tears the pcb + flow down. */
 void mqvpn_tcp_lane_abort_pending(void *flow_handle);
 
 /* H3 response gating for a bound mqvpn-tcp stream (Task 9). `stream` is the
@@ -119,9 +121,22 @@ void mqvpn_tcp_lane_abort_pending(void *flow_handle);
  * (pre-2xx buffering and EAGAIN-retry share ONE per-flow queue). */
 void mqvpn_tcp_lane_on_stream_established(mqvpn_tcp_lane_t *lane, void *stream);
 
-/* Non-2xx response headers received: -> CLOSING. Task 12 does the real
- * tcp_abort(pcb) + flow removal; this only routes the signal. */
+/* Non-2xx response headers received: a LOCAL decision to abandon the flow —
+ * RST the pcb, RST the H3 request (the server may have sent a body we're
+ * not going to read), and remove the flow from the table. */
 void mqvpn_tcp_lane_on_stream_rejected(mqvpn_tcp_lane_t *lane, void *stream);
+
+/* H3 closing-notify (Task 12): xquic is already tearing this request down.
+ * Verified against the vendored xquic source that this notify fires ONLY on
+ * RESET_STREAM frame reception (never on STOP_SENDING alone — that only
+ * makes xquic send back a RESET_STREAM of our own — and never on a clean
+ * bidi-FIN completion, which has no closing-notify at all; see tcp_lane.c's
+ * comment on tcp_lane_finish_clean_close for that path). RSTs our local pcb
+ * side and removes the flow; deliberately does NOT close the H3 request
+ * again (it's already being reset by xquic). Tolerates an unknown/
+ * already-removed stream (no-op) — the flow may already be gone via a
+ * different teardown path. */
+void mqvpn_tcp_lane_on_h3_closing(mqvpn_tcp_lane_t *lane, void *stream);
 
 /* H3 send-window became writable again: flush the flow's uplink retry queue
  * (FIFO, stops at the first EAGAIN — idempotent under repeated notifies) and,
@@ -140,10 +155,12 @@ int mqvpn_tcp_lane_on_h3_writable(mqvpn_tcp_lane_t *lane, void *stream);
  * backpressures the server, mirroring the uplink's EAGAIN backpressure).
  * Also called from the sndbuf-recovered resume path (mqvpn_tcp_lane's own
  * lwIP sent callback) to continue draining after a pause. Returns 0 on
- * success/no-op, -1 on a fatal relay error (the flow is already routed to
- * CLOSING internally via on_relay_error before this returns — callers must
- * NOT propagate -1 to xquic as a stream/connection error; see
- * cli_connect_tcp_on_body's contract comment in mqvpn_client.c for why). */
+ * success/no-op, -1 if the flow is no longer live when this returns — either
+ * a fatal relay error (fully torn down internally via on_relay_error) or a
+ * clean bidi-FIN completion (both directions FIN'd; see tcp_lane.c's
+ * tcp_lane_finish_clean_close) — callers must NOT propagate -1 to xquic as
+ * a stream/connection error either way; see cli_connect_tcp_on_body's
+ * contract comment in mqvpn_client.c for why. */
 int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
 
 /* ─── Uplink backpressure watermarks (Task 10) ───
@@ -225,6 +242,15 @@ ssize_t cli_tcp_lane_h3_send(void *h3_request, const uint8_t *buf, size_t len, i
  * with *fin == 1 for a fin-only delivery), MQVPN_TCP_LANE_H3_RECV_AGAIN, or
  * MQVPN_TCP_LANE_H3_RECV_ERR. *fin is undefined on a negative return. */
 ssize_t cli_tcp_lane_h3_recv(void *h3_request, uint8_t *buf, size_t len, int *fin);
+
+/* Close the flow's bound H3 request with a RESET_STREAM (Task 12 close/
+ * error mapping — the RST direction of the close-mapping table). Wraps
+ * xqc_h3_request_close; best-effort/void, matching tcp_abort's contract on
+ * the pcb side — the caller has already decided the flow is dead regardless
+ * of this call's outcome, and cb_request_close/on_h3_closing will fire
+ * (idempotently, against an already-removed flow) once xquic finishes
+ * tearing the request down either way. */
+void cli_tcp_lane_h3_close(void *h3_request);
 
 /* Sticky-lane lookup: returns 1 if found (fills *out_raw: 1 if sticky-RAW,
  * 0 if active/pending TCP-lane flow), 0 if brand-new (caller decides policy

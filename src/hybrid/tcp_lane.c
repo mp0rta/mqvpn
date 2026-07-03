@@ -3,18 +3,16 @@
 
 /*
  * tcp_lane.c — client-side TCP-lane flow table (H2b): sticky-lane lookup,
- * SYN-time commit + cap enforcement, the lwIP accept callback, and the
- * downlink relay (H3 recv_body -> lwIP tcp_write, Task 11). lwIP pcb wiring
- * (Task 7), the H3 request/stream bridge (Task 8), and the close/error
- * mapping + real flow removal (Tasks 9-12) land incrementally on top of the
- * mqvpn_tcp_flow_t fields reserved for them.
+ * SYN-time commit + cap enforcement, the lwIP accept callback, the downlink
+ * relay (H3 recv_body -> lwIP tcp_write, Task 11), and the close/error
+ * mapping + flow removal that makes flow teardown real (Task 12).
  *
  * The uplink relay (lwIP recv -> H3 send_body, Task 10: the QUEUE + SEND +
- * FLUSH + FIN machinery) lives in tcp_lane_uplink.c — split out once this
- * file crossed the ~800-line extraction trigger. The two files are one
- * logical module; see tcp_lane_internal.h for the shared struct layouts,
- * the compile-time test-double hooks, and the small cross-TU function seam
- * between them.
+ * FLUSH + FIN machinery) lives in tcp_lane_uplink.c — split out at Task 12
+ * once this file crossed the ~800-line extraction trigger. The two files
+ * are one logical module; see tcp_lane_internal.h for the shared struct
+ * layouts, the compile-time test-double hooks, and the small cross-TU
+ * function seam between them.
  */
 
 #include "hybrid/tcp_lane_internal.h"
@@ -64,6 +62,19 @@ static void tcp_lane_downlink_stash_free(mqvpn_tcp_flow_t *f);
  * needs it before that point in the file, same forward-reference reason as
  * the other declaration here. */
 static mqvpn_tcp_flow_t *find_flow_by_stream(mqvpn_tcp_lane_t *lane, void *stream);
+/* Defined with the Task 12 close/error-mapping machinery below; needed by
+ * mqvpn_tcp_lane_free (DRY: shares the exact detach-then-abort sequence)
+ * and mqvpn_tcp_lane_lwip_accept's cap-exceeded defense branch above their
+ * definitions. */
+static void tcp_lane_silent_abort_pcb(mqvpn_tcp_flow_t *f);
+static void tcp_lane_remove_flow(mqvpn_tcp_lane_t *lane, mqvpn_tcp_flow_t *f);
+static void tcp_lane_close_h3(mqvpn_tcp_flow_t *f);
+static void tcp_lane_teardown_flow(mqvpn_tcp_flow_t *f, int close_h3);
+/* Defined at the very end of this file (thin dispatcher onto
+ * tcp_lane_uplink.c); mqvpn_tcp_lane_lwip_accept registers it as the pcb's
+ * recv callback before that point in the file. */
+static err_t mqvpn_tcp_lane_on_lwip_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p,
+                                         err_t err);
 
 /* Power-of-two bucket count from the table's total capacity (load factor
  * ~1), capped at 2^20 buckets. Identical to reorder_tx.c's pick_buckets —
@@ -120,23 +131,17 @@ mqvpn_tcp_lane_free(mqvpn_tcp_lane_t *lane)
         mqvpn_tcp_flow_t *f = lane->buckets[i];
         while (f) {
             mqvpn_tcp_flow_t *next = f->next;
-            if (f->pcb) {
-                /* Glue teardown contract (lwip_glue.h): the lane owns every
-                 * accepted pcb and must abort them all BEFORE the caller
-                 * frees the lwip ctx — lwIP's pcb lists are process-global,
-                 * so an orphaned pcb would survive into a reconnect's new
-                 * ctx with callback_arg pointing at freed flow memory.
-                 * Vendored tcp_abort → tcp_abandon (tcp.c) sends the RST,
-                 * frees the pcb, and THEN invokes the snapshotted err
-                 * callback with ERR_ABRT — clearing the callbacks first
-                 * (TCP_EVENT_ERR is NULL-guarded, tcp_priv.h) makes the
-                 * abort silent and sidesteps that post-free re-entrancy. */
-                tcp_arg(f->pcb, NULL);
-                tcp_recv(f->pcb, NULL);
-                tcp_sent(f->pcb, NULL);
-                tcp_err(f->pcb, NULL);
-                tcp_abort(f->pcb);
-            }
+            /* Glue teardown contract (lwip_glue.h): the lane owns every
+             * accepted pcb and must abort them all BEFORE the caller
+             * frees the lwip ctx — lwIP's pcb lists are process-global,
+             * so an orphaned pcb would survive into a reconnect's new
+             * ctx with callback_arg pointing at freed flow memory.
+             * Shares the exact detach-then-abort sequence (Task 12) the
+             * close/error-mapping paths use below — whole-lane teardown
+             * deliberately does NOT also close the H3 side: the caller
+             * tears the entire xquic connection down separately (which
+             * naturally closes every request, including these). */
+            tcp_lane_silent_abort_pcb(f);
             tcp_lane_uplink_queue_free(f);
             tcp_lane_downlink_stash_free(f);
             free(f);
@@ -247,68 +252,6 @@ mqvpn_tcp_lane_get_stats(const mqvpn_tcp_lane_t *lane, mqvpn_tcp_lane_stats_t *o
     out->raw_markers_active = lane->n_raw_markers;
 }
 
-/* Fatal relay failure (H3 send error, or an allocation failure that would
- * otherwise force dropping already-ACKed TCP bytes — silent data loss).
- * Routes the flow to CLOSING and releases the queue; Task 12 does the real
- * teardown (tcp_abort(f->pcb) RST + H3 request close + flow removal),
- * mirroring on_stream_rejected's routing-only contract. */
-void
-mqvpn_tcp_lane_on_relay_error(mqvpn_tcp_flow_t *f)
-{
-    f->state = TCP_FLOW_CLOSING;
-    tcp_lane_uplink_queue_free(f);
-    /* Clear the withholding bookkeeping too: a CLOSING flow never runs the
-     * low-water resume, so leaving these set would hand Task 12's teardown
-     * stale "recved still owed" state. The never-sent tcp_recved is moot —
-     * Task 12 tcp_abort()s the pcb (RST), discarding the window accounting
-     * wholesale. */
-    f->uplink_withheld = 0;
-    f->uplink_withheld_recved = 0;
-    /* Task 11: the downlink stash holds a chunk already destructively pulled
-     * out of xquic's recv_body (a re-read is impossible) — free it here too,
-     * same "teardown owns every buffer" contract as the uplink queue above.
-     * downlink_paused would otherwise wedge Task 12's view of the flow: a
-     * CLOSING flow must never look "paused" (nothing will ever resume it). */
-    tcp_lane_downlink_stash_free(f);
-    f->downlink_paused = 0;
-}
-
-/* Thin dispatcher onto tcp_lane_uplink.c (the uplink QUEUE + SEND + FLUSH +
- * FIN machinery itself lives there; this file keeps only the per-notify
- * bookkeeping and the two-way branch on p == NULL). */
-static err_t
-mqvpn_tcp_lane_on_lwip_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
-{
-    mqvpn_tcp_flow_t *f = (mqvpn_tcp_flow_t *)arg;
-    (void)pcb;
-    (void)err;
-
-    /* Activity signal (Task 13's idle sweep target) — any recv notify,
-     * data or peer FIN, counts. f->lane is set at accept time; NULL-guarded
-     * the same way the accept/establish stamps already are. */
-    if (f->lane && f->lane->clock_fn) {
-        f->last_activity_us = f->lane->clock_fn(f->lane->clock_ctx);
-    }
-
-    if (!p) {
-        /* Peer FIN from the lwIP side (KQ 8: recv(NULL) → H3 half-close).
-         * flush() drains queued data first and sends the FIN only after; if
-         * still PENDING_STREAM there is nothing to FIN yet — the
-         * established-flush completes it (Task 12 owns both orderings). */
-        f->tcp_fin_seen = 1;
-        tcp_lane_uplink_flush(f);
-        return ERR_OK;
-    }
-
-    if (f->state != TCP_FLOW_ACTIVE && f->state != TCP_FLOW_PENDING_STREAM) {
-        pbuf_free(p);
-        return ERR_OK; /* CLOSING etc. — drop; the close mapping owns teardown */
-    }
-
-    tcp_lane_uplink_deliver(f, p);
-    return ERR_OK;
-}
-
 /* ─── Downlink relay: H3 recv_body → lwIP tcp_write (Task 11) ─── */
 
 /* Save one just-read, not-yet-writable chunk. Lazily allocates the flow's
@@ -344,11 +287,10 @@ tcp_lane_downlink_stash_free(mqvpn_tcp_flow_t *f)
 /* Fin observed from cli_tcp_lane_h3_recv (with or without accompanying data
  * in the same call — see the MQVPN_TCP_LANE_H3_RECV_* contract). TX-side
  * half-close only (shut_rx=0): the inner app's peer may still have more to
- * say in the OTHER direction; Task 12 fully closes both ends together on
- * flow teardown. Idempotent via fin_received_from_h3 — tcp_shutdown must
- * fire exactly once per pcb (vendored tcp.c's tcp_close_shutdown switches on
- * pcb->state, which tcp_shutdown itself transitions away from FIN-capable
- * states).
+ * say in the OTHER direction. Idempotent via fin_received_from_h3 —
+ * tcp_shutdown must fire exactly once per pcb (vendored tcp.c's
+ * tcp_close_shutdown switches on pcb->state, which tcp_shutdown itself
+ * transitions away from FIN-capable states).
  *
  * Failure semantics, verified against the vendored tcp.c: for the states we
  * can be in here (ESTABLISHED / CLOSE_WAIT / SYN_RCVD), a FIN-enqueue
@@ -367,7 +309,17 @@ tcp_lane_downlink_stash_free(mqvpn_tcp_flow_t *f)
  * ERR_CONN (pcb no longer in a shutdown-eligible state — tcp.c:537-549, or
  * LISTEN, tcp.c:521-523): that FIN can never be sent, so it routes to
  * on_relay_error (returns -1). The route covers ANY non-OK return as cheap
- * future-proofing against vendored-lwIP changes. */
+ * future-proofing against vendored-lwIP changes.
+ *
+ * Return: 0 on success with nothing further to do; -1 if `f` was torn down
+ * inside this call and must not be touched again — either a fatal error
+ * (mqvpn_tcp_lane_on_relay_error) or, per reconciliation H below, both
+ * directions just completed a clean bidi FIN
+ * (tcp_lane_finish_clean_close). Callers (tcp_lane_downlink_drain) already
+ * treat -1 uniformly as "stop, don't touch f, propagate -1 up" regardless
+ * of which of the two it was — see mqvpn_tcp_lane_downlink_pump's header
+ * comment for why that -1 must never become an xquic stream/connection
+ * error either way. */
 static int
 tcp_lane_downlink_maybe_shutdown(mqvpn_tcp_flow_t *f)
 {
@@ -380,6 +332,13 @@ tcp_lane_downlink_maybe_shutdown(mqvpn_tcp_flow_t *f)
         mqvpn_tcp_lane_on_relay_error(f);
         return -1;
     }
+    if (f->fin_sent_to_h3) {
+        /* Reconciliation H: the uplink direction already forwarded ITS FIN
+         * to H3 (tcp_lane_uplink.c's maybe_fin) before this one completed —
+         * both directions are now cleanly closed. */
+        tcp_lane_finish_clean_close(f);
+        return -1;
+    }
     return 0;
 }
 
@@ -388,9 +347,10 @@ tcp_lane_downlink_maybe_shutdown(mqvpn_tcp_flow_t *f)
  * now; the next READ_BODY/EMPTY_FIN notify re-fires) or the first
  * sndbuf/ERR_MEM backpressure signal (stash the chunk, latch
  * downlink_paused, stop — mirrors the uplink's EAGAIN-stops-the-loop
- * design). A fatal recv or write error routes through on_relay_error and
- * returns -1; see mqvpn_tcp_lane_downlink_pump's header comment for why
- * callers must not propagate that into an xquic stream/connection error.
+ * design). A fatal recv/write error OR a clean bidi-FIN completion (see
+ * tcp_lane_downlink_maybe_shutdown above) routes through -1 and returns -1;
+ * see mqvpn_tcp_lane_downlink_pump's header comment for why callers must
+ * not propagate that into an xquic stream/connection error.
  * tcp_output is called AT MOST ONCE, after the loop — lwIP defers actual
  * segment transmission to tcp_output/tcp_tmr (vendored tcp_out.c: tcp_write
  * only appends to the unsent list), and with LWIP_TIMERS=0 the manual
@@ -446,7 +406,7 @@ tcp_lane_downlink_drain(mqvpn_tcp_flow_t *f)
         }
         if (fin) {
             if (tcp_lane_downlink_maybe_shutdown(f) < 0) {
-                return -1; /* on_relay_error already ran inside */
+                return -1; /* f torn down (relay error OR clean-close) above */
             }
             break; /* request fully consumed; nothing more to read */
         }
@@ -468,8 +428,12 @@ mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream)
     if (!f) {
         return 0;
     }
-    /* CLOSING: the flow is on its way out (Task 12 owns the real pcb abort +
-     * H3 close) — never consume recv_body for a dying flow. */
+    /* CLOSING: belt-and-suspenders only — Task 12 made every teardown path
+     * synchronous (state flip + full removal happen in the SAME call), so a
+     * flow is never actually found sitting in CLOSING here (removal means
+     * find_flow_by_stream already returned NULL above). Kept as a guard
+     * against a future deferred-teardown redesign reintroducing a window
+     * where a flow sits CLOSING-but-still-in-the-table. */
     if (f->state == TCP_FLOW_CLOSING) {
         return 0;
     }
@@ -499,8 +463,7 @@ mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream)
 }
 
 /* Real downlink resume (Task 11): once sndbuf recovers enough to fit the
- * stashed chunk, flush it and resume draining recv_body. Task 12 still owns
- * the error callback + real flow removal. */
+ * stashed chunk, flush it and resume draining recv_body. */
 static err_t
 mqvpn_tcp_lane_on_lwip_sent(void *arg, struct tcp_pcb *pcb, u16_t len)
 {
@@ -543,19 +506,202 @@ mqvpn_tcp_lane_on_lwip_sent(void *arg, struct tcp_pcb *pcb, u16_t len)
     return ERR_OK;
 }
 
+/* ─── Close/error mapping + flow removal (Task 12) ───
+ *
+ * Every path that decides a flow is dead funnels through
+ * tcp_lane_teardown_flow (locally-initiated: we detach + tcp_abort the pcb
+ * ourselves) or tcp_lane_finish_clean_close (a clean bidi-FIN completion —
+ * see its own comment). mqvpn_tcp_lane_on_lwip_err is the ONE exception:
+ * lwIP itself already freed the pcb before invoking it (see its comment).
+ *
+ * Reconciliation C's re-entrancy hazard: tcp_abort (vendored tcp.c ->
+ * tcp_abandon) frees the pcb and THEN synchronously invokes the pcb's own
+ * err callback (mqvpn_tcp_lane_on_lwip_err) with ERR_ABRT — clearing
+ * tcp_err(pcb, NULL) first (tcp_lane_silent_abort_pcb below) makes
+ * tcp_priv.h's TCP_EVENT_ERR macro a no-op (`if (errf != NULL)`), so a
+ * self-initiated abort never re-enters here. This is why every LOCAL kill
+ * detaches callbacks BEFORE calling tcp_abort, never after. */
+
 static void
-mqvpn_tcp_lane_on_lwip_err(void *arg, err_t err)
+tcp_lane_silent_abort_pcb(mqvpn_tcp_flow_t *f)
 {
-    (void)arg;
-    (void)err;
+    if (!f->pcb) {
+        return;
+    }
+    tcp_arg(f->pcb, NULL);
+    tcp_recv(f->pcb, NULL);
+    tcp_sent(f->pcb, NULL);
+    tcp_err(f->pcb, NULL);
+    MQVPN_TCP_LANE_TCP_ABORT(f->pcb);
+    f->pcb = NULL;
 }
 
-/* Task 12 stub: will unlink + free the flow and maintain n_tcp_flows. */
+/* RST the H3 side (best-effort — the caller has already decided the flow is
+ * dead regardless of the outcome) and guard against a double-close: once
+ * called, f->h3_request/f->stream are cleared so a later teardown call on
+ * the same (about-to-be-removed) flow is a no-op here. */
+static void
+tcp_lane_close_h3(mqvpn_tcp_flow_t *f)
+{
+    if (f->h3_request) {
+        cli_tcp_lane_h3_close(f->h3_request);
+        f->h3_request = NULL;
+        f->stream = NULL;
+    }
+}
+
+/* The one locally-initiated "kill this flow" sequence (reconciliation C):
+ * (1) RST the H3 request (close_h3=1) or just forget the pointers without
+ * closing (close_h3=0 — reconciliation E: the caller already closed it, or
+ * never created one); (2) detach + tcp_abort the pcb; (3) unlink + free the
+ * flow. Used by on_relay_error, abort_pending, on_h3_closing, and
+ * on_stream_rejected — see each call site's comment for which close_h3
+ * value applies and why. */
+static void
+tcp_lane_teardown_flow(mqvpn_tcp_flow_t *f, int close_h3)
+{
+    if (close_h3) {
+        tcp_lane_close_h3(f);
+    } else {
+        f->h3_request = NULL;
+        f->stream = NULL;
+    }
+    tcp_lane_silent_abort_pcb(f);
+    tcp_lane_remove_flow(f->lane, f);
+}
+
+/* Unlink f from its hash bucket, free its uplink queue + downlink stash,
+ * decrement the matching population counter, and free f. Callers must have
+ * already cleared f->pcb (tcp_lane_teardown_flow / tcp_lane_finish_
+ * clean_close both do) — this function does not touch the pcb.
+ *
+ * Idempotence (reconciliation D): every caller reaches this via a flow
+ * pointer it just found (find_flow_by_stream) or was handed directly
+ * (tcp_arg) — never a re-lookup after a prior removal — so a flow is never
+ * torn down twice from the SAME event. Two DIFFERENT events racing for the
+ * same flow (e.g. the H3 side rejects it the same tick lwIP RSTs it) can't
+ * happen either: once the first event's tcp_lane_silent_abort_pcb clears
+ * tcp_arg(pcb, NULL), the flow is unreachable as a callback argument, and
+ * once removed here, the SECOND event's own find_flow_by_stream lookup (the
+ * only other way to reach a flow) simply misses — a lookup miss is exactly
+ * every public API function's existing no-op contract, not a new case to
+ * handle.
+ *
+ * Sticky-RAW markers are structurally unreachable here: they have no pcb
+ * and never bind an h3_request/stream (mqvpn_tcp_lane_bind_h3_request is
+ * only ever called from the accept callback's stream-open path), so none
+ * of the four teardown call sites above can ever be reached with
+ * f->state == TCP_FLOW_STICKY_RAW — the branch below is defensive
+ * completeness (matches lane_free's separate, correct handling of markers
+ * via the plain free() in its own loop), not a path Task 12 exercises. */
 static void
 tcp_lane_remove_flow(mqvpn_tcp_lane_t *lane, mqvpn_tcp_flow_t *f)
 {
-    (void)lane;
-    (void)f;
+    if (!lane || !f) {
+        return;
+    }
+    uint32_t b =
+        (uint32_t)(mqvpn_flow_key_hash(&f->key, lane->hash_seed) & (lane->n_buckets - 1));
+    mqvpn_tcp_flow_t **pp = &lane->buckets[b];
+    while (*pp && *pp != f) {
+        pp = &(*pp)->next;
+    }
+    if (*pp == f) {
+        *pp = f->next;
+    }
+    if (f->state == TCP_FLOW_STICKY_RAW) {
+        lane->n_raw_markers--;
+    } else {
+        lane->n_tcp_flows--;
+    }
+    tcp_lane_uplink_queue_free(f);
+    tcp_lane_downlink_stash_free(f);
+    free(f);
+}
+
+void
+mqvpn_tcp_lane_on_relay_error(mqvpn_tcp_flow_t *f)
+{
+    /* Fatal relay failure (H3 send/recv error, a pcb write/shutdown error,
+     * or an allocation failure that would otherwise force dropping
+     * already-ACKed TCP bytes — silent data loss). This is a full
+     * local-initiated teardown: RST the pcb, RST the H3 request, unlink +
+     * free the flow. Every call site in this TU pair already returns
+     * immediately after calling this function — see tcp_lane_uplink.c's
+     * flush/maybe_fin for the one place that needed a return-code check to
+     * preserve that invariant once this started freeing `f`. */
+    tcp_lane_teardown_flow(f, /*close_h3=*/1);
+}
+
+void
+tcp_lane_finish_clean_close(mqvpn_tcp_flow_t *f)
+{
+    /* Reconciliation H, verified against the vendored lwIP tcp.c. By the
+     * time both fin_sent_to_h3 && fin_received_from_h3 are true, the
+     * downlink direction's tcp_shutdown(pcb, 0, 1) has ALREADY run (that
+     * call is what set fin_received_from_h3) and already drove the pcb
+     * into FIN_WAIT_1 (if the uplink FIN — tcp_fin_seen — arrived after) or
+     * LAST_ACK (if tcp_fin_seen was already true, i.e. RX had already
+     * reached CLOSE_WAIT, when tcp_shutdown ran) — either way PAST
+     * SYN_RCVD/ESTABLISHED/CLOSE_WAIT. tcp_close() here is therefore a
+     * proven no-op status-wise: tcp_close_shutdown's forced-RST-on-
+     * unacked-data branch only fires for ESTABLISHED/CLOSE_WAIT (tcp.c:352,
+     * already left by construction), and tcp_close_shutdown_fin's switch
+     * has no case for FIN_WAIT_1/LAST_ACK (tcp.c:414-440 — falls to
+     * "already closed, do nothing"). It still unconditionally sets
+     * TF_RXCLOSED first (tcp.c's tcp_close, before delegating) — a pure
+     * field write, and a safety net against any straggling data silently
+     * piling into pcb->refused_data forever after we detach below; lwIP's
+     * own timers carry the pcb the rest of the way to CLOSED without ever
+     * invoking our (already-cleared) callbacks.
+     *
+     * No RST, and no second H3 close either: both directions completed a
+     * bidi FIN on the h3_request too (we sent one via send_body(fin=1), we
+     * received one via recv_body's *fin), so xquic's own stream teardown
+     * will fire cb_request_close once it finishes tearing down the
+     * fully-closed stream on its own — calling the RST-sending close
+     * wrapper here would be a spurious RESET_STREAM after a graceful
+     * finish. Clear the pointers (not via tcp_lane_close_h3, which WOULD
+     * RST) so on_h3_closing/cb_request_close's later, idempotent lookup
+     * finds this flow already gone. */
+    if (f->pcb) {
+        tcp_arg(f->pcb, NULL);
+        tcp_recv(f->pcb, NULL);
+        tcp_sent(f->pcb, NULL);
+        tcp_err(f->pcb, NULL);
+        MQVPN_TCP_LANE_TCP_CLOSE(f->pcb);
+        f->pcb = NULL;
+    }
+    f->h3_request = NULL;
+    f->stream = NULL;
+    tcp_lane_remove_flow(f->lane, f);
+}
+
+/* lwIP-initiated close (peer RST, retransmit-timeout give-up, or any other
+ * internal error tcp_abandon reports) — the ONLY teardown path where WE did
+ * not decide to kill the flow. */
+static void
+mqvpn_tcp_lane_on_lwip_err(void *arg, err_t err)
+{
+    (void)err; /* RST vs timeout vs any other lwIP-internal error all mean
+                * the same thing to us: the connection is dead, tear the
+                * flow down — no err-code-specific handling needed. */
+    mqvpn_tcp_flow_t *f = (mqvpn_tcp_flow_t *)arg;
+    if (!f) {
+        return;
+    }
+    /* lwIP already freed the pcb before invoking this callback — vendored
+     * tcp_abandon (tcp.c): tcp_free(pcb) precedes TCP_EVENT_ERR. The
+     * pointer is dangling; unlike every locally-initiated teardown path
+     * above (which detach callbacks THEN call tcp_abort themselves), this
+     * path must NOT call tcp_arg/tcp_recv/tcp_sent/tcp_err/tcp_abort on it
+     * — that would touch already-freed memory. Just forget it.
+     * (This callback can also only ever fire for a pcb we did NOT already
+     * self-abort — see the comment on tcp_lane_silent_abort_pcb's ordering
+     * above for why a self-initiated abort can't re-enter here.) */
+    f->pcb = NULL;
+    tcp_lane_close_h3(f); /* RST the H3 side; no-op if already closed */
+    tcp_lane_remove_flow(f->lane, f);
 }
 
 /* O(n) walk scanning every bucket for the entry whose stored f->stream
@@ -591,7 +737,18 @@ mqvpn_tcp_lane_bind_h3_request(void *flow_handle, void *h3_request, void *stream
 void
 mqvpn_tcp_lane_abort_pending(void *flow_handle)
 {
-    (void)flow_handle; /* Task 12: tcp_abort(f->pcb) + remove_flow */
+    mqvpn_tcp_flow_t *f = (mqvpn_tcp_flow_t *)flow_handle;
+    if (!f) {
+        return;
+    }
+    /* Reconciliation E: never close H3 here. cli_tcp_lane_open_stream (the
+     * only caller) either never created a request yet (no live H3 conn /
+     * stream calloc failure / xqc_h3_request_create failure — all three
+     * pre-bind) or already closed the just-created one itself on the
+     * send-headers-failure path (post-bind) — closing it again here would
+     * double-close. Just forget the pointers (they may point at a request
+     * already mid-close) and tear the pcb + flow down. */
+    tcp_lane_teardown_flow(f, /*close_h3=*/0);
 }
 
 void
@@ -625,10 +782,37 @@ mqvpn_tcp_lane_on_stream_rejected(mqvpn_tcp_lane_t *lane, void *stream)
     if (!f) {
         return;
     }
-    /* Task 12 does the real teardown: tcp_abort(f->pcb) (RST to the local
-     * app) + tcp_lane_remove_flow. This task only routes the non-2xx signal
-     * to CLOSING so later code can recognize the flow is dead. */
-    f->state = TCP_FLOW_CLOSING;
+    /* A non-2xx response is a LOCAL decision to abandon this flow (distinct
+     * from mqvpn_tcp_lane_on_h3_closing below, which is xquic's OWN
+     * decision) — full locally-initiated teardown: RST the pcb
+     * (reconciliation C) and RST the H3 request (the server may have sent a
+     * body we're not going to read). */
+    tcp_lane_teardown_flow(f, /*close_h3=*/1);
+}
+
+/* H3 closing-notify (Task 12): xquic is already tearing this request down —
+ * verified against the vendored source that this notify fires ONLY on
+ * RESET_STREAM frame RECEPTION (xqc_process_reset_stream_frame ->
+ * xqc_stream_closing -> xqc_h3_stream_closing_notify ->
+ * xqc_h3_request_closing, third_party/xquic/src/transport/xqc_frame.c and
+ * src/http3/xqc_h3_stream.c/xqc_h3_request.c) — NEVER for STOP_SENDING
+ * reception alone (that only makes xquic send back a RESET_STREAM of our
+ * own, xqc_process_stop_sending_frame; if the peer then also resets, THAT
+ * inbound RESET_STREAM is what fires this) and NEVER for a clean bidi-FIN
+ * completion (see tcp_lane_finish_clean_close). RST our local pcb side;
+ * must NOT close the H3 request again (it's already being reset). */
+void
+mqvpn_tcp_lane_on_h3_closing(mqvpn_tcp_lane_t *lane, void *stream)
+{
+    if (!lane || !stream) {
+        return;
+    }
+    mqvpn_tcp_flow_t *f = find_flow_by_stream(lane, stream);
+    if (!f) {
+        return; /* already gone — idempotent (races with any other
+                 * teardown path, or a stale/duplicate notify) */
+    }
+    tcp_lane_teardown_flow(f, /*close_h3=*/0);
 }
 
 int
@@ -694,7 +878,9 @@ mqvpn_tcp_lane_lwip_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
     if (lane->n_tcp_flows > lane->cfg.tcp_max_flows) {
         /* Defense only — the cap is enforced pre-lwIP in on_syn; strict >
          * because this flow itself is already counted in n_tcp_flows. Same
-         * abort-not-RAW return convention as above. */
+         * abort-not-RAW return convention as above. f->pcb is still NULL
+         * here (set below on the success path only), so remove_flow just
+         * unlinks + frees — nothing pcb-side to touch. */
         lane->stats.flows_rejected_cap++;
         tcp_lane_remove_flow(lane, f);
         return ERR_MEM;
@@ -717,5 +903,48 @@ mqvpn_tcp_lane_lwip_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
 
     /* Direct .c-to-.c call — see the prototype's comment in tcp_lane.h. */
     cli_tcp_lane_open_stream(lane->client_ctx, f, &key);
+    return ERR_OK;
+}
+
+/* Thin dispatcher onto tcp_lane_uplink.c (Task 12 — the uplink QUEUE + SEND
+ * + FLUSH + FIN machinery itself lives there; this file keeps only the
+ * per-notify bookkeeping and the two-way branch on p == NULL). */
+static err_t
+mqvpn_tcp_lane_on_lwip_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
+{
+    mqvpn_tcp_flow_t *f = (mqvpn_tcp_flow_t *)arg;
+    (void)pcb;
+    (void)err;
+
+    /* Activity signal (Task 13's idle sweep target) — any recv notify,
+     * data or peer FIN, counts. f->lane is set at accept time; NULL-guarded
+     * the same way the accept/establish stamps already are. */
+    if (f->lane && f->lane->clock_fn) {
+        f->last_activity_us = f->lane->clock_fn(f->lane->clock_ctx);
+    }
+
+    if (!p) {
+        /* Peer FIN from the lwIP side (KQ 8: recv(NULL) → H3 half-close).
+         * flush() drains queued data first and sends the FIN only after; if
+         * still PENDING_STREAM there is nothing to FIN yet — the
+         * established-flush completes it. */
+        f->tcp_fin_seen = 1;
+        tcp_lane_uplink_flush(f);
+        return ERR_OK;
+    }
+
+    if (f->state != TCP_FLOW_ACTIVE && f->state != TCP_FLOW_PENDING_STREAM) {
+        /* CLOSING (belt-and-suspenders — see mqvpn_tcp_lane_downlink_pump's
+         * matching comment; every teardown path detaches tcp_recv on this
+         * exact pcb in the SAME call that sets CLOSING, so lwIP can never
+         * actually redeliver here for a flow in that state) or a state that
+         * shouldn't reach a live pcb at all (STICKY_RAW/PENDING_ACCEPT never
+         * get a recv callback registered). Drop; the close mapping above
+         * owns teardown. */
+        pbuf_free(p);
+        return ERR_OK;
+    }
+
+    tcp_lane_uplink_deliver(f, p);
     return ERR_OK;
 }

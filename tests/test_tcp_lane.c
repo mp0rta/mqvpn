@@ -63,6 +63,18 @@ static int8_t test_tcp_shutdown_hook(struct tcp_pcb *pcb, int shut_rx, int shut_
 static void test_tcp_output_hook(struct tcp_pcb *pcb);
 #define MQVPN_TCP_LANE_TCP_OUTPUT(pcb) test_tcp_output_hook(pcb)
 
+/* Task 12: tcp_abort/tcp_close hooks, same idiom. Calling the REAL
+ * tcp_abort/tcp_close on the stack-fake pcbs below would tcp_free()
+ * (memp_free) memory lwIP's pool never allocated and corrupt the
+ * active_pcbs list — see tcp_lane_internal.h's comment on these two
+ * macros. Both are recording-only (void real signatures; nothing to
+ * script). */
+static void test_tcp_abort_hook(struct tcp_pcb *pcb);
+#define MQVPN_TCP_LANE_TCP_ABORT(pcb) test_tcp_abort_hook(pcb)
+
+static void test_tcp_close_hook(struct tcp_pcb *pcb);
+#define MQVPN_TCP_LANE_TCP_CLOSE(pcb) test_tcp_close_hook(pcb)
+
 #include "hybrid/tcp_lane.c"
 /* tcp_lane.c crossed its ~800-line extraction trigger: the uplink QUEUE +
  * SEND + FLUSH + FIN machinery moved to its own TU (tcp_lane_internal.h
@@ -186,6 +198,40 @@ test_tcp_output_hook(struct tcp_pcb *pcb)
 {
     (void)pcb;
     g_tcp_output_calls++;
+}
+
+/* ─── Task 12 tcp_abort/tcp_close observability ─── */
+
+static int g_tcp_abort_calls;
+static struct tcp_pcb *g_tcp_abort_last_pcb;
+
+static void
+test_tcp_abort_hook(struct tcp_pcb *pcb)
+{
+    g_tcp_abort_calls++;
+    g_tcp_abort_last_pcb = pcb;
+}
+
+static int g_tcp_close_calls;
+static struct tcp_pcb *g_tcp_close_last_pcb;
+
+static void
+test_tcp_close_hook(struct tcp_pcb *pcb)
+{
+    g_tcp_close_calls++;
+    g_tcp_close_last_pcb = pcb;
+}
+
+/* ─── cli_tcp_lane_h3_close test double (real impl: mqvpn_client.c) ─── */
+
+static int g_h3_close_calls;
+static void *g_h3_close_last_req;
+
+void
+cli_tcp_lane_h3_close(void *h3_request)
+{
+    g_h3_close_calls++;
+    g_h3_close_last_req = h3_request;
 }
 
 /* ─── cli_tcp_lane_h3_recv test double (real impl: mqvpn_client.c) ───
@@ -411,6 +457,14 @@ relay_reset(void)
     h3_recv_script_clear();
     g_h3_recv_calls = 0;
     g_dl_src_len = 0;
+
+    /* Task 12 close/error-mapping test-double state. */
+    g_tcp_abort_calls = 0;
+    g_tcp_abort_last_pcb = NULL;
+    g_tcp_close_calls = 0;
+    g_tcp_close_last_pcb = NULL;
+    g_h3_close_calls = 0;
+    g_h3_close_last_req = NULL;
 }
 
 /* Real PBUF_RAM pbuf (MEM_LIBC_MALLOC=1 => plain malloc; no lwip_init or
@@ -477,13 +531,13 @@ mk_dl_bytes(size_t len)
     return start;
 }
 
-/* SYN-commit + fake-pcb accept + bind (+ optional 2xx establish) — the same
- * dance test_accept_key_correspondence pins, packaged for the relay tests.
- * pcb is caller-owned stack memory: callers must NULL f->pcb before
- * lane_free (the teardown loop would tcp_abort a pool-foreign pcb). */
-static mqvpn_tcp_flow_t *
-setup_flow(mqvpn_tcp_lane_t *lane, struct tcp_pcb *pcb, uint16_t src_port, void *req,
-           void *stream, int establish)
+/* The exact key setup_flow below builds from a given src_port — factored out
+ * (Task 12) so post-teardown tests can independently recompute "the key for
+ * the flow at this pcb" and assert a table lookup miss, without needing
+ * setup_flow itself to hand back a key (its established callers below don't
+ * need one — only the Task 12 teardown assertions do). */
+static mqvpn_flow_key_t
+mk_std_key(uint16_t src_port)
 {
     mqvpn_flow_key_t k;
     memset(&k, 0, sizeof(k));
@@ -497,6 +551,23 @@ setup_flow(mqvpn_tcp_lane_t *lane, struct tcp_pcb *pcb, uint16_t src_port, void 
     k.dst_ip[1] = 184;
     k.dst_ip[2] = 216;
     k.dst_ip[3] = 34;
+    return k;
+}
+
+/* SYN-commit + fake-pcb accept + bind (+ optional 2xx establish) — the same
+ * dance test_accept_key_correspondence pins, packaged for the relay tests.
+ * pcb is caller-owned stack memory: Task 12 onward, teardown paths route
+ * pcb detach through the hooked MQVPN_TCP_LANE_TCP_ABORT/_CLOSE (see the
+ * hooks above), so callers no longer need to manually NULL f->pcb before
+ * lane_free purely to dodge a real tcp_abort — some call sites still do so
+ * anyway wherever the flow is expected to still be ACTIVE (never torn down)
+ * at lane_free time, which is a real "stack-fake pcb, not pool-owned"
+ * precaution independent of the hooks. */
+static mqvpn_tcp_flow_t *
+setup_flow(mqvpn_tcp_lane_t *lane, struct tcp_pcb *pcb, uint16_t src_port, void *req,
+           void *stream, int establish)
+{
+    mqvpn_flow_key_t k = mk_std_key(src_port);
     if (mqvpn_tcp_lane_on_syn(lane, &k, 1) != 0) {
         return NULL;
     }
@@ -843,11 +914,14 @@ test_accept_key_correspondence(void)
     ASSERT_EQ_INT(f->last_activity_us, 67890, "last_activity re-stamped on activation");
     g_fake_now = 12345;
 
-    /* Non-2xx response on a second bound flow: PENDING_STREAM -> CLOSING.
-     * Key must match the pcb2 5-tuple below (10.0.0.1:4002 -> 93.184.216.34:80
-     * — the same addresses test_accept_key_correspondence's first flow uses,
-     * NOT make_key()'s generic 10.0.0.1/10.0.0.2), since the accept callback
-     * rebuilds the key from the pcb's local/remote ip/port. */
+    /* Non-2xx response on a second bound flow: PENDING_STREAM -> full
+     * teardown (Task 12: RST the pcb, RST the H3 request, remove from the
+     * table — no longer a CLOSING-and-inert state, since on_stream_rejected
+     * now does the real locally-initiated kill). Key must match the pcb2
+     * 5-tuple below (10.0.0.1:4002 -> 93.184.216.34:80 — the same addresses
+     * test_accept_key_correspondence's first flow uses, NOT make_key()'s
+     * generic 10.0.0.1/10.0.0.2), since the accept callback rebuilds the key
+     * from the pcb's local/remote ip/port. */
     mqvpn_flow_key_t key2;
     memset(&key2, 0, sizeof(key2));
     key2.ip_version = 4;
@@ -879,12 +953,20 @@ test_accept_key_correspondence(void)
     ASSERT_EQ_INT(f2->state, TCP_FLOW_PENDING_STREAM,
                   "second flow bound, still PENDING_STREAM");
     mqvpn_tcp_lane_on_stream_rejected(lane, &fake_stream2);
-    ASSERT_EQ_INT(f2->state, TCP_FLOW_CLOSING,
-                  "on_stream_rejected moves flow to CLOSING");
-    /* Rejecting/activating an unrelated stream must not disturb this flow. */
+    /* f2 is freed as of the call above — do not touch it again. The hooked
+     * MQVPN_TCP_LANE_TCP_ABORT is what makes this safe on pcb2 (a stack
+     * fake, not a real pool pcb) — no manual `f2->pcb = NULL` dodge needed
+     * anymore. */
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key2, NULL), 0,
+                  "rejected flow fully removed from the table");
+    ASSERT_EQ_INT(g_tcp_abort_calls, 1, "pcb2 aborted on rejection");
+    ASSERT_TRUE(g_tcp_abort_last_pcb == &pcb2, "the RIGHT pcb was aborted");
+    ASSERT_EQ_INT(g_h3_close_calls, 1, "H3 request2 RST on rejection");
+    ASSERT_TRUE(g_h3_close_last_req == &fake_req2, "the RIGHT request was RST");
+    /* Rejecting/activating an unrelated stream must not disturb the first
+     * flow (a DIFFERENT flow, never touched by any of the above). */
     ASSERT_EQ_INT(f->state, TCP_FLOW_ACTIVE,
                   "first flow unaffected by second flow's rejection");
-    f2->pcb = NULL; /* stack-fake pcb; detach before lane_free (see below) */
 
     /* Unknown pcb (no SYN-time commit) → refused, no stream open. The stub
      * pcb is safe here: the callback returns non-ERR_OK WITHOUT touching the
@@ -1284,45 +1366,28 @@ test_relay_chained_pbuf_gt_mss(void)
     mqvpn_tcp_lane_free(lane);
 }
 
-/* Shared post-fatal-error checks: pins mqvpn_tcp_lane_on_relay_error's full
- * contract (Task 12 will modify that function — this is the regression
- * anchor). CLOSING, queue freed + counters zeroed, withholding bookkeeping
- * cleared, and a subsequent recv is dropped (no send attempt, no recved, no
- * new queueing — the pbuf is freed inside the callback).
- *
- * Task 11 addition: on_relay_error now also frees the downlink stash slot
- * and clears downlink_paused (see its updated .c-side comment) — a CLOSING
- * flow must never look "paused" (nothing will ever resume it) and the
- * stashed chunk, like the uplink queue, must not survive teardown. */
+/* Shared post-fatal-error checks (Task 12 contract change): pins
+ * mqvpn_tcp_lane_on_relay_error's FULL teardown — RST the pcb (via the
+ * hooked MQVPN_TCP_LANE_TCP_ABORT), RST the H3 request, and remove the flow
+ * from the table entirely. This REPLACES the pre-Task-12 contract (flow
+ * sits CLOSING-and-inert, still dereferenceable) — on_relay_error now frees
+ * the flow synchronously inside the triggering call, so there is no `f` left
+ * to pass in: identify what used to be the flow by its key/pcb/h3_request
+ * instead. Every one of assert_flow_failed_closed's call sites must NOT
+ * touch its `f`/`fN` variable again after the triggering call (it's a
+ * dangling pointer) — this is why the callers below no longer have a
+ * trailing `f->pcb = NULL;` line: the pcb was already detached+aborted
+ * (via the hook) inside the very call that triggered this assertion. */
 static void
-assert_flow_failed_closed(mqvpn_tcp_lane_t *lane, mqvpn_tcp_flow_t *f,
-                          struct tcp_pcb *pcb)
+assert_flow_failed_closed(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key,
+                          struct tcp_pcb *pcb, void *h3_request)
 {
-    (void)lane;
-    ASSERT_EQ_INT(f->state, TCP_FLOW_CLOSING, "fatal send error -> CLOSING");
-    ASSERT_TRUE(f->uplink_q_head == NULL && f->uplink_q_tail == NULL,
-                "queue freed on relay error");
-    ASSERT_EQ_INT(f->uplink_queued_bytes, 0, "queued_bytes zeroed");
-    ASSERT_EQ_INT(f->uplink_withheld, 0, "withheld flag cleared");
-    ASSERT_EQ_INT(f->uplink_withheld_recved, 0, "deferred-recved total cleared");
-    ASSERT_TRUE(f->downlink_stash == NULL, "downlink stash freed on relay error");
-    ASSERT_EQ_INT(f->downlink_stash_len, 0, "downlink stash length cleared");
-    ASSERT_EQ_INT(f->downlink_paused, 0, "downlink_paused cleared on relay error");
-
-    int sends_before = g_h3_send_calls;
-    int recved_before = g_recved_calls;
-    struct pbuf *late = mk_pbuf(100);
-    ASSERT_TRUE(late != NULL, "late pbuf alloc");
-    ASSERT_EQ_INT(mqvpn_tcp_lane_on_lwip_recv(f, pcb, late, ERR_OK), ERR_OK,
-                  "recv on CLOSING flow tolerated");
-    ASSERT_EQ_INT(g_h3_send_calls, sends_before, "no send attempt on CLOSING flow");
-    ASSERT_EQ_INT(g_recved_calls, recved_before, "no recved on CLOSING flow");
-    ASSERT_TRUE(f->uplink_q_head == NULL, "late pbuf dropped, not queued");
-    ASSERT_EQ_INT(f->uplink_queued_bytes, 0, "queued_bytes stays 0 after drop");
-    /* late's 100 bytes were mirrored into g_expected by mk_pbuf but dropped
-     * by design; roll them back so later capture==expected checks (if any)
-     * stay aligned. */
-    g_expected_len -= 100;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, key, NULL), 0,
+                  "flow fully removed from the table on relay error (lookup miss)");
+    ASSERT_EQ_INT(g_tcp_abort_calls, 1, "pcb aborted exactly once");
+    ASSERT_TRUE(g_tcp_abort_last_pcb == pcb, "the RIGHT pcb was aborted");
+    ASSERT_EQ_INT(g_h3_close_calls, 1, "H3 request RST exactly once");
+    ASSERT_TRUE(g_h3_close_last_req == h3_request, "the RIGHT request was RST");
 }
 
 static void
@@ -1346,8 +1411,9 @@ test_relay_fatal_error_paths(void)
                   "recv returns ERR_OK even on fatal send error");
     g_expected_len -= 500; /* bytes were never relayed; keep mirror aligned */
     ASSERT_EQ_INT(g_h3_capture_len, 0, "no bytes captured on immediate fatal error");
-    assert_flow_failed_closed(lane, f, &pcb);
-    f->pcb = NULL;
+    /* f is freed as of the call above — do not touch it again. */
+    mqvpn_flow_key_t key_a = mk_std_key(5900);
+    assert_flow_failed_closed(lane, &key_a, &pcb, &fake_req);
 
     /* (b) Fatal error mid-flush with a non-empty queue: EAGAIN builds a
      * 2-node backlog, then the writable retry hits the hard error — BOTH
@@ -1371,8 +1437,9 @@ test_relay_fatal_error_paths(void)
                   "writable returns 0 even when the retry hits a fatal error");
     g_expected_len -= 1500;
     ASSERT_EQ_INT(g_h3_capture_len, 0, "nothing relayed before the mid-flush error");
-    assert_flow_failed_closed(lane, f2, &pcb2);
-    f2->pcb = NULL;
+    /* f2 is freed as of the call above — do not touch it again. */
+    mqvpn_flow_key_t key_b = mk_std_key(5901);
+    assert_flow_failed_closed(lane, &key_b, &pcb2, &fake_req2);
 
     /* (c) Fatal error on the FIN send (empty queue, recv(NULL) drives
      * maybe_fin directly): must also fail closed, NOT stay ACTIVE with a
@@ -1387,11 +1454,15 @@ test_relay_fatal_error_paths(void)
     h3_script_push(MQVPN_TCP_LANE_H3_SEND_ERR);
     ASSERT_EQ_INT(mqvpn_tcp_lane_on_lwip_recv(f3, &pcb3, NULL, ERR_OK), ERR_OK,
                   "recv(NULL) tolerated when the fin send fails");
-    ASSERT_EQ_INT(f3->tcp_fin_seen, 1, "tcp_fin_seen latched before the attempt");
-    ASSERT_EQ_INT(f3->fin_sent_to_h3, 0, "fin NOT marked sent on fatal error");
+    /* f3 is freed as of the call above (on_relay_error runs synchronously
+     * inside maybe_fin's fatal-send branch) — do not touch it again; the
+     * pre-Task-12 checks here ("tcp_fin_seen latched", "fin NOT marked
+     * sent") observed f3's intermediate state and are no longer possible to
+     * assert. g_h3_fin_attempts (a global counter, not a flow field) still
+     * pins that exactly one fin attempt was made before the failure. */
     ASSERT_EQ_INT(g_h3_fin_attempts, 1, "exactly one fin attempt");
-    assert_flow_failed_closed(lane, f3, &pcb3);
-    f3->pcb = NULL;
+    mqvpn_flow_key_t key_c = mk_std_key(5902);
+    assert_flow_failed_closed(lane, &key_c, &pcb3, &fake_req3);
 
     mqvpn_tcp_lane_free(lane);
 }
@@ -1820,14 +1891,23 @@ test_downlink_fatal_recv_error(void)
                   "pump returns -1 on a fatal recv error");
     ASSERT_EQ_INT(g_tcp_write_calls, 0, "no write attempted");
 
-    assert_flow_failed_closed(lane, f, &pcb);
-    f->pcb = NULL;
+    /* f is freed as of the call above — do not touch it again. */
+    mqvpn_flow_key_t key = mk_std_key(7700);
+    assert_flow_failed_closed(lane, &key, &pcb, &fake_req);
     mqvpn_tcp_lane_free(lane);
 }
 
 static void
-test_downlink_pump_on_closing_flow(void)
+test_downlink_pump_on_torn_down_flow(void)
 {
+    /* Task 12 contract change: a flow that a prior event already killed
+     * (here, on_stream_rejected) is no longer "sitting CLOSING and
+     * inert" (test_downlink_pump_on_closing_flow's pre-Task-12 name/shape)
+     * — it is REMOVED from the table entirely. A later downlink_pump call
+     * against the same (now-unknown) stream must therefore land on the
+     * ordinary "unknown stream" no-op path (find_flow_by_stream misses),
+     * observably identical (0 return, no recv_body/write/output calls) but
+     * via a different internal reason. */
     relay_reset();
     mqvpn_hybrid_config_t cfg;
     mqvpn_hybrid_config_default(&cfg);
@@ -1837,22 +1917,351 @@ test_downlink_pump_on_closing_flow(void)
     mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 7800, &fake_req, &fake_stream, 1);
     ASSERT_TRUE(f != NULL, "flow established");
 
-    /* Force CLOSING directly (Task 12 owns the real teardown path; this
-     * only needs the state, matching test_accept_key_correspondence's use
-     * of on_stream_rejected as a state-setting tool). */
     mqvpn_tcp_lane_on_stream_rejected(lane, &fake_stream);
-    ASSERT_EQ_INT(f->state, TCP_FLOW_CLOSING, "flow forced CLOSING");
+    /* f is freed as of the call above — do not touch it again. */
+    mqvpn_flow_key_t key = mk_std_key(7800);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL), 0,
+                  "rejected flow fully removed");
+    ASSERT_EQ_INT(g_tcp_abort_calls, 1, "pcb aborted on rejection");
+    ASSERT_TRUE(g_tcp_abort_last_pcb == &pcb, "the RIGHT pcb was aborted");
+    ASSERT_EQ_INT(g_h3_close_calls, 1, "H3 request RST on rejection");
+    ASSERT_TRUE(g_h3_close_last_req == &fake_req, "the RIGHT request was RST");
 
     const uint8_t *c1 = mk_dl_bytes(100);
     h3_recv_push_data(c1, 100, 0);
 
     ASSERT_EQ_INT(mqvpn_tcp_lane_downlink_pump(lane, &fake_stream), 0,
-                  "pump on CLOSING flow returns 0");
-    ASSERT_EQ_INT(g_h3_recv_calls, 0, "recv_body never called for a CLOSING flow");
-    ASSERT_EQ_INT(g_tcp_write_calls, 0, "no write for a CLOSING flow");
-    ASSERT_EQ_INT(g_tcp_output_calls, 0, "no output for a CLOSING flow");
+                  "pump on a removed flow's stream returns 0");
+    ASSERT_EQ_INT(g_h3_recv_calls, 0, "recv_body never called — unknown stream");
+    ASSERT_EQ_INT(g_tcp_write_calls, 0, "no write for an unknown stream");
+    ASSERT_EQ_INT(g_tcp_output_calls, 0, "no output for an unknown stream");
 
-    f->pcb = NULL;
+    mqvpn_tcp_lane_free(lane);
+}
+
+/* ─── Task 12: mqvpn_tcp_syn_flag pure-parser cases ───
+ *
+ * Carry-over from the header's inline helper (tcp_lane.h): only a single
+ * "pure SYN" case existed before (test_accept_key_correspondence's crafted
+ * packet), never a dedicated case sweep. Each case builds its own minimal
+ * buffer rather than reusing that 40-byte fixture — the point here is the
+ * IHL-derived-offset arithmetic and the length/version guards themselves,
+ * independent of any particular 5-tuple. */
+static void
+test_tcp_syn_flag_cases(void)
+{
+    /* (a) Pure SYN, IHL=20 (no options): SYN set, ACK clear -> flow-starting. */
+    {
+        uint8_t pkt[34];
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x45;       /* v4, IHL 5 (20 bytes) */
+        pkt[20 + 13] = 0x02; /* SYN */
+        ASSERT_TRUE(mqvpn_tcp_syn_flag(pkt, sizeof(pkt)), "pure SYN is flow-starting");
+    }
+    /* (b) SYN|ACK: NOT flow-starting (an inbound answer on the RAW downlink
+     * for an unknown 5-tuple must not commit to the TCP lane). */
+    {
+        uint8_t pkt[34];
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x45;
+        pkt[20 + 13] = 0x12; /* SYN + ACK */
+        ASSERT_TRUE(!mqvpn_tcp_syn_flag(pkt, sizeof(pkt)),
+                    "SYN|ACK is NOT flow-starting");
+    }
+    /* (c) Truncated: len stops one byte short of the flags byte
+     * (ihl + 14 == 34; providing only 33 must not read past the buffer). */
+    {
+        uint8_t pkt[33];
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x45;
+        ASSERT_TRUE(!mqvpn_tcp_syn_flag(pkt, sizeof(pkt)),
+                    "truncated (len == ihl+13) is treated as non-SYN");
+    }
+    /* (d) IHL=24 (one 32-bit option word): the flags byte must be read at
+     * the IHL-DERIVED offset (24+13=37), not a fixed offset — this is what
+     * actually exercises the ihl arithmetic rather than just IHL=20's
+     * common case. */
+    {
+        uint8_t pkt[38];
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x46;       /* v4, IHL 6 (24 bytes) */
+        pkt[24 + 13] = 0x02; /* SYN, at the ihl=24-derived offset */
+        ASSERT_TRUE(mqvpn_tcp_syn_flag(pkt, sizeof(pkt)),
+                    "SYN with a 24-byte IHL is flow-starting at the correct offset");
+    }
+    /* (e) IHL < 20 (invalid — the minimum IPv4 header is 20 bytes): must be
+     * rejected before ever computing a flags-byte offset from it. */
+    {
+        uint8_t pkt[34];
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x44; /* v4, IHL 4 (16 bytes) — invalid */
+        pkt[20 + 13] =
+            0x02; /* SYN, at what would be the IHL=20 offset — must not matter */
+        ASSERT_TRUE(!mqvpn_tcp_syn_flag(pkt, sizeof(pkt)), "IHL < 20 is rejected");
+    }
+    /* (f) Non-v4 (e.g. IPv6): the classifier already routes IPv6 TCP to RAW,
+     * but the helper's own guard must independently reject it too. */
+    {
+        uint8_t pkt[34];
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x60; /* version 6 */
+        pkt[20 + 13] = 0x02;
+        ASSERT_TRUE(!mqvpn_tcp_syn_flag(pkt, sizeof(pkt)), "non-v4 is rejected");
+    }
+}
+
+/* ─── Task 12: close/error mapping + flow removal ───
+ *
+ * Per-row coverage of the close-mapping table (tcp_lane.c's Task 12
+ * section comment) plus the races/idempotence reconciliation D calls for.
+ * test_relay_fatal_error_paths/test_downlink_fatal_recv_error above already
+ * cover the "fatal relay error" row (assert_flow_failed_closed); the
+ * rejection row is covered inline in test_accept_key_correspondence. What's
+ * left: the lwIP-err row, the H3 closing-notify row (+ its idempotence),
+ * abort_pending's real behavior, the clean bidi-FIN-completion row (both
+ * orderings), and stats bookkeeping on removal. */
+
+static void
+test_lwip_err_teardown(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xe001ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 8100, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    /* In production lwIP has ALREADY freed pcb before invoking this
+     * callback (vendored tcp_abandon) — the err_t value itself (RST vs.
+     * timeout vs. any other internal error) is deliberately ignored. */
+    mqvpn_tcp_lane_on_lwip_err(f, ERR_RST);
+    /* f is freed as of the call above. */
+
+    mqvpn_flow_key_t key = mk_std_key(8100);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL), 0,
+                  "flow removed on lwIP-initiated err");
+    /* The defining difference from every LOCALLY-initiated kill: no
+     * tcp_abort here — lwIP already freed the pcb itself. */
+    ASSERT_EQ_INT(g_tcp_abort_calls, 0, "no tcp_abort — lwIP already freed the pcb");
+    ASSERT_EQ_INT(g_tcp_close_calls, 0, "no tcp_close either — not the graceful path");
+    ASSERT_EQ_INT(g_h3_close_calls, 1, "H3 request RST on lwIP err");
+    ASSERT_TRUE(g_h3_close_last_req == &fake_req, "the RIGHT request was RST");
+
+    /* NULL arg tolerated (defensive). */
+    mqvpn_tcp_lane_on_lwip_err(NULL, ERR_RST);
+    ASSERT_EQ_INT(g_h3_close_calls, 1, "NULL arg is a no-op");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_h3_closing_notify_teardown(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xe002ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 8200, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    mqvpn_tcp_lane_on_h3_closing(lane, &fake_stream);
+    /* f is freed as of the call above. */
+
+    mqvpn_flow_key_t key = mk_std_key(8200);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL), 0,
+                  "flow removed on H3 closing-notify");
+    ASSERT_EQ_INT(g_tcp_abort_calls, 1, "pcb aborted on closing-notify");
+    ASSERT_TRUE(g_tcp_abort_last_pcb == &pcb, "the RIGHT pcb was aborted");
+    /* Must NOT RST the H3 request again — it's already being reset by
+     * xquic (that is WHY this notify fired in the first place). */
+    ASSERT_EQ_INT(g_h3_close_calls, 0,
+                  "H3 request NOT closed again on its own closing-notify");
+
+    /* Idempotence (reconciliation D): a second closing-notify on the same,
+     * already-removed stream is a no-op — no double-abort, no crash. */
+    mqvpn_tcp_lane_on_h3_closing(lane, &fake_stream);
+    ASSERT_EQ_INT(g_tcp_abort_calls, 1, "no double-abort on a repeated closing-notify");
+    ASSERT_EQ_INT(g_h3_close_calls, 0, "still no h3 close");
+
+    /* Unknown stream / NULL args tolerated. */
+    int unrelated;
+    mqvpn_tcp_lane_on_h3_closing(lane, &unrelated);
+    mqvpn_tcp_lane_on_h3_closing(NULL, &fake_stream);
+    mqvpn_tcp_lane_on_h3_closing(lane, NULL);
+    ASSERT_EQ_INT(g_tcp_abort_calls, 1, "no side effects from the unknown/NULL calls");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_abort_pending_real(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xe003ULL, NULL, fake_clock, NULL);
+
+    /* Case 1: abort BEFORE bind — no h3_request exists yet (the "no live H3
+     * conn / stream calloc failure / xqc_h3_request_create failure" shapes
+     * in cli_tcp_lane_open_stream, all pre-bind). */
+    mqvpn_flow_key_t key1 = mk_std_key(8300);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &key1, 1), 0, "flow1 SYN-time commit");
+    struct tcp_pcb pcb1;
+    memset(&pcb1, 0, sizeof(pcb1));
+    pcb1.state = ESTABLISHED;
+    IP4_ADDR(&pcb1.local_ip, 93, 184, 216, 34);
+    IP4_ADDR(&pcb1.remote_ip, 10, 0, 0, 1);
+    pcb1.local_port = 80;
+    pcb1.remote_port = 8300;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lwip_accept(lane, &pcb1, ERR_OK), ERR_OK,
+                  "flow1 accepted");
+    mqvpn_tcp_flow_t *f1 = (mqvpn_tcp_flow_t *)g_open_stream_flow;
+
+    mqvpn_tcp_lane_abort_pending(f1);
+    /* f1 is freed as of the call above. */
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key1, NULL), 0, "flow1 removed");
+    ASSERT_EQ_INT(g_tcp_abort_calls, 1, "pcb1 aborted");
+    ASSERT_TRUE(g_tcp_abort_last_pcb == &pcb1, "the RIGHT pcb was aborted");
+    ASSERT_EQ_INT(g_h3_close_calls, 0, "abort_pending never closes H3 (none existed)");
+
+    /* Case 2: abort AFTER bind — a request DOES exist (the send-headers-
+     * failure shape: the caller already closed it itself before calling
+     * abort_pending). abort_pending must still not close it again. */
+    mqvpn_flow_key_t key2 = mk_std_key(8301);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &key2, 1), 0, "flow2 SYN-time commit");
+    struct tcp_pcb pcb2;
+    memset(&pcb2, 0, sizeof(pcb2));
+    pcb2.state = ESTABLISHED;
+    IP4_ADDR(&pcb2.local_ip, 93, 184, 216, 34);
+    IP4_ADDR(&pcb2.remote_ip, 10, 0, 0, 1);
+    pcb2.local_port = 80;
+    pcb2.remote_port = 8301;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lwip_accept(lane, &pcb2, ERR_OK), ERR_OK,
+                  "flow2 accepted");
+    mqvpn_tcp_flow_t *f2 = (mqvpn_tcp_flow_t *)g_open_stream_flow;
+    int fake_req2, fake_stream2;
+    mqvpn_tcp_lane_bind_h3_request(f2, &fake_req2, &fake_stream2);
+
+    mqvpn_tcp_lane_abort_pending(f2);
+    /* f2 is freed as of the call above. */
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key2, NULL), 0, "flow2 removed");
+    ASSERT_EQ_INT(g_tcp_abort_calls, 2, "pcb2 also aborted");
+    ASSERT_TRUE(g_tcp_abort_last_pcb == &pcb2, "the RIGHT pcb was aborted");
+    ASSERT_EQ_INT(g_h3_close_calls, 0,
+                  "abort_pending STILL never closes H3, even with a bound request");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_clean_close_uplink_fin_first(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xe004ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 8400, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    /* Uplink FIN first: the inner client's TCP FIN arrives, forwarded to H3
+     * (accepted immediately — the h3_send test double defaults to
+     * accept-everything). Only one side is done — no clean-close yet. */
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_lwip_recv(f, &pcb, NULL, ERR_OK), ERR_OK,
+                  "recv(NULL) tolerated");
+    ASSERT_EQ_INT(f->fin_sent_to_h3, 1, "uplink fin forwarded to H3");
+    ASSERT_EQ_INT(f->fin_received_from_h3, 0, "downlink fin not yet observed");
+    ASSERT_EQ_INT(g_tcp_close_calls, 0, "not done yet — only one side FIN'd");
+
+    /* Downlink FIN second: the H3 response body ends, forwarded to the pcb
+     * via tcp_shutdown — THIS side observes both flags set and triggers the
+     * clean close. -1 here reuses downlink_pump's "flow no longer live, do
+     * not propagate as an xquic error" contract; it is not a failure. */
+    h3_recv_push_data(NULL, 0, 1);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_downlink_pump(lane, &fake_stream), -1,
+                  "pump signals the flow is gone (clean close, not an error)");
+    /* f is freed as of the call above. */
+
+    mqvpn_flow_key_t key = mk_std_key(8400);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL), 0,
+                  "flow removed on clean bidi-FIN completion");
+    ASSERT_EQ_INT(g_tcp_shutdown_calls, 1, "downlink tcp_shutdown called once");
+    ASSERT_EQ_INT(g_tcp_shutdown_last_rx, 0, "shut_rx == 0");
+    ASSERT_EQ_INT(g_tcp_shutdown_last_tx, 1, "shut_tx == 1");
+    ASSERT_EQ_INT(g_tcp_close_calls, 1, "graceful tcp_close called exactly once");
+    ASSERT_TRUE(g_tcp_close_last_pcb == &pcb, "the RIGHT pcb was closed");
+    ASSERT_EQ_INT(g_tcp_abort_calls, 0, "NOT aborted — this is the graceful path");
+    ASSERT_EQ_INT(g_h3_close_calls, 0, "NOT RST — both directions FIN'd cleanly");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_clean_close_downlink_fin_first(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xe005ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 8500, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    /* Downlink FIN first: the H3 response body ends before the inner
+     * client's TCP FIN arrives. Only one side is done — no clean-close. */
+    h3_recv_push_data(NULL, 0, 1);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_downlink_pump(lane, &fake_stream), 0,
+                  "pump completes normally — only one side FIN'd so far");
+    ASSERT_EQ_INT(f->fin_received_from_h3, 1, "downlink fin forwarded to the pcb");
+    ASSERT_EQ_INT(f->fin_sent_to_h3, 0, "uplink fin not yet observed");
+    ASSERT_EQ_INT(g_tcp_close_calls, 0, "not done yet");
+
+    /* Uplink FIN second: the inner client's TCP FIN arrives, forwarded to
+     * H3 — THIS side observes both flags set and triggers the clean close. */
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_lwip_recv(f, &pcb, NULL, ERR_OK), ERR_OK,
+                  "recv(NULL) tolerated");
+    /* f is freed as of the call above. */
+
+    mqvpn_flow_key_t key = mk_std_key(8500);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL), 0,
+                  "flow removed on clean bidi-FIN completion");
+    ASSERT_EQ_INT(g_tcp_shutdown_calls, 1, "downlink tcp_shutdown called once");
+    ASSERT_EQ_INT(g_tcp_close_calls, 1, "graceful tcp_close called exactly once");
+    ASSERT_TRUE(g_tcp_close_last_pcb == &pcb, "the RIGHT pcb was closed");
+    ASSERT_EQ_INT(g_tcp_abort_calls, 0, "NOT aborted — this is the graceful path");
+    ASSERT_EQ_INT(g_h3_close_calls, 0, "NOT RST — both directions FIN'd cleanly");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_removal_updates_stats(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xe006ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 8600, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    mqvpn_tcp_lane_stats_t stats;
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_active, 1, "one active flow before removal");
+
+    mqvpn_tcp_lane_abort_pending(f); /* any of the four teardown paths would do */
+    /* f is freed as of the call above. */
+
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_active, 0, "flows_active decremented on removal");
+
     mqvpn_tcp_lane_free(lane);
 }
 
@@ -1884,7 +2293,14 @@ main(void)
     test_downlink_fin_while_paused();
     test_downlink_fin_stashed_with_data();
     test_downlink_fatal_recv_error();
-    test_downlink_pump_on_closing_flow();
+    test_downlink_pump_on_torn_down_flow();
+    test_tcp_syn_flag_cases();
+    test_lwip_err_teardown();
+    test_h3_closing_notify_teardown();
+    test_abort_pending_real();
+    test_clean_close_uplink_fin_first();
+    test_clean_close_downlink_fin_first();
+    test_removal_updates_stats();
 
     fprintf(stderr, "test_tcp_lane: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
