@@ -260,20 +260,24 @@ typedef struct {
     uint64_t dgram_lost;
     uint64_t dgram_acked;
     int srtt_ms;
-    /* Hybrid-mode per-lane counters (0 unless hybrid classifier active). */
-    uint64_t pkts_lane_tcp;
-    uint64_t pkts_lane_dgram;
-    uint64_t pkts_lane_raw;
+    /* Hybrid-mode per-lane counters (0 unless hybrid classifier active).
+     * tcp/dgram/raw partition every classified packet exactly once. */
+    uint64_t pkts_lane_tcp;   /* packets actually handed to the TCP lane (lwIP) */
+    uint64_t pkts_lane_dgram; /* packets sent via the datagram lane */
+    uint64_t pkts_lane_raw;   /* packets sent via the raw lane, incl. TCP
+                               * candidates that fell back to RAW (sticky-RAW,
+                               * cap-rejected, non-SYN unknown, lane-less build) */
     /* tcp_flows_active: currently open TCP-lane flows. Client: the TCP-lane
      * flow table's live count. Server: the whole-server count of open
      * egress TCP flows (mqvpn_server_get_stats). */
     uint64_t tcp_flows_active;
-    /* tcp_flows_total / tcp_flows_rejected: client-only counters (cumulative
-     * flows opened / SYNs rejected pre-lwIP). The server has no equivalent
-     * source of truth — no cumulative "opened" or "rejected" counter is
-     * tracked for egress flows — so mqvpn_server_get_stats always reports
-     * both as 0. */
+    /* tcp_flows_total: cumulative TCP-lane flows opened (never decrements).
+     * Client: SYNs the flow table admitted. Server: egress flows admitted. */
     uint64_t tcp_flows_total;
+    /* tcp_flows_rejected: cumulative flows refused by a cap. Client: SYNs
+     * rejected pre-lwIP (flow-table cap or alloc failure). Server: cap-503s
+     * (global fd-budget + per-session tcp_max_flows; ACL 403s / 5xx syscall
+     * failures are not counted). */
     uint64_t tcp_flows_rejected;
     /* pkts_lane_tcp_dropped: client-only — TCP-lane packets lwIP refused
      * (e.g. no matching pcb). Always 0 server-side. */

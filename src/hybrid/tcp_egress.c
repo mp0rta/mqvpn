@@ -829,11 +829,13 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
     svr_tcp_egress_srv_ctx_t ctx;
     svr_get_tcp_egress_ctx(server, &ctx);
     if (*ctx.global_fd_count >= ctx.global_fd_budget) {
+        (*ctx.flows_rejected_cap)++; /* whole-server cap 503 */
         return svr_tcp_egress_respond(h3_request, 503, 1);
     }
 
     int *conn_count = svr_conn_tcp_flow_count_ptr(stream);
     if (conn_count && (uint32_t)*conn_count >= ctx.tcp_max_flows) {
+        (*ctx.flows_rejected_cap)++; /* per-session tcp_max_flows cap 503 */
         return svr_tcp_egress_respond(h3_request, 503, 1);
     }
 
@@ -878,9 +880,12 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
     svr_tcp_egress_list_insert(ctx.flow_list_head, ef);
 
     /* Count exactly once, unconditionally, before the syscall — see the
-     * bookkeeping-invariant comment on svr_tcp_egress_flow_destroy. */
+     * bookkeeping-invariant comment on svr_tcp_egress_flow_destroy.
+     * flows_total_opened is cumulative (never decremented on destroy),
+     * unlike the two live counters beside it. */
     if (conn_count) (*conn_count)++;
     (*ctx.global_fd_count)++;
+    (*ctx.flows_total_opened)++;
 
     int r = connect(fd, (struct sockaddr *)&dst, sizeof(dst));
     if (r == 0) {

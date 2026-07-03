@@ -212,6 +212,15 @@ struct mqvpn_server_s {
      * mqvpn_server_internal.h and defined only in tcp_egress.c, so the
      * pointer is typed but the layout stays opaque here. */
     int tcp_egress_global_fd_count;
+    /* Cumulative counters (never decrement), same STORAGE-only contract as
+     * tcp_egress_global_fd_count above — mutated only by tcp_egress.c via
+     * svr_get_tcp_egress_ctx. flows_total_opened counts every admitted
+     * egress flow; flows_rejected_cap counts every SYN refused by a cap
+     * (503) — the global fd-budget cap and the per-session tcp_max_flows
+     * cap, NOT ACL 403s or 5xx syscall failures. Surfaced as get_stats'
+     * tcp_flows_total / tcp_flows_rejected. */
+    uint64_t tcp_egress_flows_total_opened;
+    uint64_t tcp_egress_flows_rejected_cap;
     struct svr_tcp_egress_flow_s *tcp_egress_flow_list_head;
 #endif
 
@@ -1183,6 +1192,8 @@ svr_get_tcp_egress_ctx(mqvpn_server_t *s, svr_tcp_egress_srv_ctx_t *out)
 {
     out->flow_list_head = &s->tcp_egress_flow_list_head;
     out->global_fd_count = &s->tcp_egress_global_fd_count;
+    out->flows_total_opened = &s->tcp_egress_flows_total_opened;
+    out->flows_rejected_cap = &s->tcp_egress_flows_rejected_cap;
     out->tcp_max_flows = s->config.hybrid.tcp_max_flows;
     out->tcp_connect_timeout_sec = s->config.hybrid.tcp_connect_timeout_sec;
     out->tcp_idle_timeout_sec = s->config.hybrid.tcp_idle_timeout_sec;
@@ -2151,15 +2162,16 @@ mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *out)
     out->dgram_acked = s->dgram_acked;
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
     /* tcp_flows_active: whole-server count of currently open egress TCP
-     * flows. tcp_egress_global_fd_count is already the live, exactly-once
+     * flows. tcp_egress_global_fd_count is the live, exactly-once
      * incremented/decremented admission counter (svr_tcp_egress_start_connect
      * / svr_tcp_egress_flow_destroy) — no separate list-length walk needed.
-     * tcp_flows_total/rejected have no server-side source of truth (no
-     * cumulative "opened" or "rejected" counter is tracked for egress
-     * flows — the 503 admission-cap responses in tcp_egress.c are not
-     * counted) and are intentionally left at 0 (memset above); see the
-     * mqvpn_stats_t field comments in libmqvpn.h. */
+     * tcp_flows_total: cumulative admitted egress flows (never decrements).
+     * tcp_flows_rejected: cumulative cap-503 rejections (global fd-budget +
+     * per-session tcp_max_flows caps; ACL 403s and 5xx syscall failures are
+     * not caps and are not counted). See tcp_egress.c for the sites. */
     out->tcp_flows_active = (uint64_t)s->tcp_egress_global_fd_count;
+    out->tcp_flows_total = s->tcp_egress_flows_total_opened;
+    out->tcp_flows_rejected = s->tcp_egress_flows_rejected_cap;
 #endif
     return MQVPN_OK;
 }

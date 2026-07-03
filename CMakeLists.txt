@@ -297,7 +297,10 @@ else() # NOT WIN32 — Linux
 add_library(mqvpn_shared SHARED ${MQVPN_LIB_SOURCES})
 set_target_properties(mqvpn_shared PROPERTIES
     OUTPUT_NAME mqvpn
-    SOVERSION 1
+    # Bumped 1 -> 2: mqvpn_stats_t grew (hybrid lane/flow counters). Producers
+    # write sizeof(mqvpn_stats_t) with no caller-size negotiation, so a binary
+    # built against the old header must not resolve to the new .so.
+    SOVERSION 2
     C_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON
 )

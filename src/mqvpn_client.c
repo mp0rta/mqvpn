@@ -2838,6 +2838,15 @@ tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t 
      * disabled (default) — zero hot-path cost. */
     if (c->config.hybrid.enabled) {
         mqvpn_flow_key_t flow_key;
+        /* Set on entry to the LANE_TCP case; every exit from it EXCEPT the
+         * lwIP hand-off (which returns TUN_INGRESS_DROP before reaching the
+         * post-switch bump) is a fall-back to the RAW lane, so this flag
+         * lets those packets land in pkts_lane_raw — keeping the
+         * tcp+dgram+raw partition total. Without it, a TCP candidate that
+         * fell back to RAW (sticky-RAW marker, cap-rejected SYN, non-SYN on
+         * an unknown flow, marker-cap refusal, or a lane-less build) would
+         * be transmitted RAW yet counted in no lane at all. */
+        int tcp_candidate_to_raw = 0;
         switch (mqvpn_hybrid_classify(pkt, len, &c->config.hybrid, &flow_key)) {
         case MQVPN_LANE_TCP:
             /* pkts_lane_tcp is deliberately NOT incremented here: at this
@@ -2850,7 +2859,10 @@ tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t 
              * pkts_lane_tcp indistinguishable between a sticky-RAW flow and
              * a real TCP-lane flow under tcp=auto. The counter is bumped
              * instead right before the lwIP hand-off below, once the
-             * verdict has actually resolved to "feed lwIP". */
+             * verdict has actually resolved to "feed lwIP"; every OTHER
+             * exit from this case is a RAW fall-back (tcp_candidate_to_raw,
+             * counted in pkts_lane_raw after the switch). */
+            tcp_candidate_to_raw = 1;
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
             if (conn->tcp_lane) { /* implies lwip_ctx != NULL (coherence
                                    * rule at the creation site) */
@@ -2944,6 +2956,12 @@ tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t 
         case MQVPN_LANE_DGRAM: c->pkts_lane_dgram++; break;
         case MQVPN_LANE_RAW: c->pkts_lane_raw++; break;
         }
+        /* A TCP candidate that fell back to RAW (see tcp_candidate_to_raw's
+         * declaration): count it in the raw lane exactly once here. Cannot
+         * double-count with the MQVPN_LANE_RAW case above — that case never
+         * sets the flag — nor with the lwIP hand-off, which returns before
+         * reaching this point. */
+        if (tcp_candidate_to_raw) c->pkts_lane_raw++;
     }
 
     /* §5/§9: reorder gating decides STAMP vs RAW vs DROP_MTU. Stamping is

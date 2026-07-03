@@ -113,7 +113,9 @@ struct svr_tcp_egress_flow_s;
 typedef struct {
     struct svr_tcp_egress_flow_s **flow_list_head; /* D3 intrusive list head slot */
     int *global_fd_count;                          /* in-flight + active egress fds */
-    uint32_t tcp_max_flows;                        /* per-session cap (config.hybrid) */
+    uint64_t *flows_total_opened;     /* cumulative admitted egress flows (get_stats) */
+    uint64_t *flows_rejected_cap;     /* cumulative cap-503 rejections (get_stats) */
+    uint32_t tcp_max_flows;           /* per-session cap (config.hybrid) */
     uint32_t tcp_connect_timeout_sec; /* connect() deadline (config.hybrid) */
     uint32_t tcp_idle_timeout_sec;    /* ACTIVE-flow idle eviction, shared with the
                                        * client's tcp_lane (config.hybrid); 0 = disabled,

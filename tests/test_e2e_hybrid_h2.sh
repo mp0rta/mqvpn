@@ -173,6 +173,8 @@ CLIENT_LOG_T1="$(mktemp)"
 SERVER_LOG_T1="$(mktemp)"
 CLIENT_LOG_T1B="$(mktemp)"
 SERVER_LOG_T1B="$(mktemp)"
+CLIENT_LOG_T1C="$(mktemp)"
+SERVER_LOG_T1C="$(mktemp)"
 CLIENT_LOG_T7A="$(mktemp)"
 SERVER_LOG_T7A="$(mktemp)"
 CLIENT_LOG_T7B="$(mktemp)"
@@ -194,6 +196,7 @@ CLIENT_LOG_T6="$(mktemp)"
 SERVER_LOG_T6="$(mktemp)"
 INI_T1="$(mktemp --suffix=.ini)"
 INI_T1B="$(mktemp --suffix=.ini)"
+INI_T1C="$(mktemp --suffix=.ini)"
 INI_T7A="$(mktemp --suffix=.ini)"
 INI_T7B="$(mktemp --suffix=.ini)"
 INI_T2A="$(mktemp --suffix=.ini)"
@@ -244,6 +247,7 @@ cleanup_bg_procs() {
 
 trap 'cleanup_bg_procs; cleanup_http_server; bench_cleanup; rm -rf "$HTTP_DOCROOT"; rm -f \
     "$CLIENT_LOG_T1" "$SERVER_LOG_T1" "$CLIENT_LOG_T1B" "$SERVER_LOG_T1B" \
+    "$CLIENT_LOG_T1C" "$SERVER_LOG_T1C" \
     "$CLIENT_LOG_T7A" "$SERVER_LOG_T7A" \
     "$CLIENT_LOG_T7B" "$SERVER_LOG_T7B" \
     "$CLIENT_LOG_T2A" "$SERVER_LOG_T2A" "$CLIENT_LOG_T2B" "$SERVER_LOG_T2B" \
@@ -251,7 +255,7 @@ trap 'cleanup_bg_procs; cleanup_http_server; bench_cleanup; rm -rf "$HTTP_DOCROO
     "$CLIENT_LOG_T4" "$SERVER_LOG_T4" "$CLIENT_LOG_T5" "$SERVER_LOG_T5" \
     "$CLIENT_LOG_T6" "$SERVER_LOG_T6" \
     "$RST_CLIENT_OUT" \
-    "$INI_T1" "$INI_T1B" "$INI_T7A" "$INI_T7B" "$INI_T2A" "$INI_STREAM" "$INI_T6" \
+    "$INI_T1" "$INI_T1B" "$INI_T1C" "$INI_T7A" "$INI_T7B" "$INI_T2A" "$INI_STREAM" "$INI_T6" \
     "$CURL_OUT" "$SENT_FILE_A" "$RECV_FILE_A" "$SENT_FILE_B" "$RECV_FILE_B" \
     "$LANE_PEER_A_FILE" "$LANE_BYTES_A_FILE" "$LANE_PEER_B_FILE" "$LANE_BYTES_B_FILE"' EXIT
 
@@ -621,6 +625,22 @@ wait_for_nonempty_file() {
     return 1
 }
 
+# Open one TCP connection from NS_CLIENT to $1:$2 and hold it open for $3s
+# (default 50), then echo the holder PID. A single python process — NOT
+# `sleep N | nc` (which orphans the sleep when only nc's PID is killed).
+# `ip netns exec` execs into python, so the echoed PID *is* the python
+# process; killing it tears the whole thing down with no leaked upstream
+# proc. Used by Test 1b to pin concurrent TCP-lane flows against the cap.
+start_held_conn() {
+    local host="$1" port="$2" hold="${3:-50}"
+    ip netns exec "$NS_CLIENT" python3 -c "
+import socket, time
+s = socket.create_connection(('${host}', ${port}), timeout=10)
+time.sleep(${hold})
+" >/dev/null 2>&1 &
+    echo $!
+}
+
 # ─── Test 1: curl body correctness, Enabled=true / Tcp=stream ─────────────
 echo ""
 echo "=== Test 1: curl through the tunnel's TCP lane (body byte-for-byte) ==="
@@ -672,11 +692,16 @@ fi
 
 bench_stop_vpn
 
-# ─── Test 1b: tcp_flows_rejected wiring (TcpMaxFlows=1, 2 concurrent flows,
-#      cross-checked against the server-side tcp_flows_active via the
-#      control API while both connections are held open) ──────────────────
+# ─── Test 1b: CLIENT-side tcp_flows_rejected wiring (TcpMaxFlows=1) ────────
+# TcpMaxFlows is a shared key: the CLIENT flow table caps concurrent
+# TCP-lane flows at 1, so the second concurrent connection's SYN is
+# rejected pre-lwIP (c->tcp_flows_rejected) and falls back to RAW — the
+# server never sees it as a lane flow. This phase therefore exercises the
+# CLIENT reject counter and confirms the server sees exactly the 1 admitted
+# flow. (The SERVER reject counter needs the client to admit 2 flows while
+# the server caps — that is Test 1c below, using a server-only cap.)
 echo ""
-echo "=== Test 1b: tcp_flows_rejected wiring (TcpMaxFlows=1, 2 concurrent flows) ==="
+echo "=== Test 1b: CLIENT tcp_flows_rejected wiring (TcpMaxFlows=1, 2 concurrent flows) ==="
 cat >"$INI_T1B" <<EOF
 [Hybrid]
 Enabled = true
@@ -686,25 +711,17 @@ EgressAllow = 10.222.0.0/24
 EOF
 hybrid_run "$INI_T1B" "$SERVER_LOG_T1B" "$CLIENT_LOG_T1B"
 
-# Hold two concurrent TCP connections open to the target: `sleep N | nc`
-# keeps nc's stdin open (piped from a process that never writes but doesn't
-# exit either), so nc never sees EOF and the connection stays up for the
-# duration — no responder needed on the target side. TcpMaxFlows=1 caps
-# concurrent TCP-lane flows at 1, so the second connection's SYN must be
-# rejected pre-lwIP (c->tcp_flows_rejected), not merely queued.
-sleep 50 | ip netns exec "$NS_CLIENT" nc -q0 "$HTTP_TARGET_IP" "$HTTP_TARGET_PORT" \
-    >/dev/null 2>&1 &
-LANE_CAP_PID1=$!
+# Hold two concurrent TCP connections open to the target (single-process
+# holders — see start_held_conn; no orphaned upstream proc to leak).
+LANE_CAP_PID1="$(start_held_conn "$HTTP_TARGET_IP" "$HTTP_TARGET_PORT")"
 sleep 1
-sleep 50 | ip netns exec "$NS_CLIENT" nc -q0 "$HTTP_TARGET_IP" "$HTTP_TARGET_PORT" \
-    >/dev/null 2>&1 &
-LANE_CAP_PID2=$!
+LANE_CAP_PID2="$(start_held_conn "$HTTP_TARGET_IP" "$HTTP_TARGET_PORT")"
 
 if wait_for_log "$CLIENT_LOG_T1B" 'flows act/tot/rej=[0-9]+/[0-9]+/[1-9][0-9]*' 40; then
     parse_flows "$CLIENT_LOG_T1B" || true
-    echo "PASS: [STATUS] reports nonzero tcp_flows_rejected under TcpMaxFlows=1 (act=$FLOWS_ACT tot=$FLOWS_TOT rej=$FLOWS_REJ)"
+    echo "PASS: client [STATUS] reports nonzero tcp_flows_rejected under TcpMaxFlows=1 (act=$FLOWS_ACT tot=$FLOWS_TOT rej=$FLOWS_REJ)"
 else
-    echo "FAIL: no [STATUS] line with nonzero tcp_flows_rejected within 40s"
+    echo "FAIL: no client [STATUS] line with nonzero tcp_flows_rejected within 40s"
     parse_flows "$CLIENT_LOG_T1B" \
         && echo "      last flows line: act=$FLOWS_ACT tot=$FLOWS_TOT rej=$FLOWS_REJ" \
         || echo "      (no flows line at all)"
@@ -714,7 +731,7 @@ fi
 # Cross-check from the server side, over the control API, while the one
 # admitted connection is still held open: the server's whole-server
 # tcp_flows_active must read exactly 1 (the cap-rejected second connection
-# never reached the egress connect() at all).
+# never reached the server as a lane flow at all).
 stats_json_t1b="$(bench_query_control "$CTRL_PORT" get_stats)"
 srv_flows_active_t1b="$(echo "$stats_json_t1b" | jq -r '.tcp_flows_active // -1' 2>/dev/null || echo -1)"
 if [ "$srv_flows_active_t1b" = "1" ]; then
@@ -727,6 +744,49 @@ fi
 
 kill "$LANE_CAP_PID1" "$LANE_CAP_PID2" 2>/dev/null || true
 wait "$LANE_CAP_PID1" "$LANE_CAP_PID2" 2>/dev/null || true
+LANE_CAP_PID1=""; LANE_CAP_PID2=""
+bench_stop_vpn
+
+# ─── Test 1c: SERVER-side tcp_flows_rejected wiring (TcpMaxGlobalFlows=1) ──
+# TcpMaxGlobalFlows is server-only; the client keeps its default TcpMaxFlows
+# (256) so it admits BOTH concurrent flows to the lane. The server's
+# whole-server fd-budget cap (=1) then admits the first egress flow and
+# rejects the second with a cap-503 — incrementing the server's
+# tcp_flows_rejected. This is the mirror of Test 1b: client-shielding is
+# removed so the server cap is the binding one.
+echo ""
+echo "=== Test 1c: SERVER tcp_flows_rejected wiring (TcpMaxGlobalFlows=1, 2 concurrent flows) ==="
+cat >"$INI_T1C" <<EOF
+[Hybrid]
+Enabled = true
+Tcp = stream
+TcpMaxGlobalFlows = 1
+EgressAllow = 10.222.0.0/24
+EOF
+hybrid_run "$INI_T1C" "$SERVER_LOG_T1C" "$CLIENT_LOG_T1C"
+
+LANE_CAP_PID1="$(start_held_conn "$HTTP_TARGET_IP" "$HTTP_TARGET_PORT")"
+sleep 1
+LANE_CAP_PID2="$(start_held_conn "$HTTP_TARGET_IP" "$HTTP_TARGET_PORT")"
+
+# Give the second flow's H3 request time to reach the server and get 503'd.
+sleep 2
+stats_json_t1c="$(bench_query_control "$CTRL_PORT" get_stats)"
+srv_rej_t1c="$(echo "$stats_json_t1c" | jq -r '.tcp_flows_rejected // -1' 2>/dev/null || echo -1)"
+srv_tot_t1c="$(echo "$stats_json_t1c" | jq -r '.tcp_flows_total // -1' 2>/dev/null || echo -1)"
+srv_act_t1c="$(echo "$stats_json_t1c" | jq -r '.tcp_flows_active // -1' 2>/dev/null || echo -1)"
+if [ "$srv_rej_t1c" -ge 1 ] 2>/dev/null && [ "$srv_tot_t1c" -ge 1 ] 2>/dev/null \
+        && [ "$srv_act_t1c" = "1" ]; then
+    echo "PASS: server get_stats reports cap-503 rejection (rejected=$srv_rej_t1c total=$srv_tot_t1c active=$srv_act_t1c) under TcpMaxGlobalFlows=1"
+else
+    echo "FAIL: server get_stats did not show the expected cap rejection (rejected=$srv_rej_t1c total=$srv_tot_t1c active=$srv_act_t1c; expected rejected>=1, total>=1, active=1)"
+    echo "      raw response: $stats_json_t1c"
+    fail=1
+fi
+
+kill "$LANE_CAP_PID1" "$LANE_CAP_PID2" 2>/dev/null || true
+wait "$LANE_CAP_PID1" "$LANE_CAP_PID2" 2>/dev/null || true
+LANE_CAP_PID1=""; LANE_CAP_PID2=""
 bench_stop_vpn
 
 # ─── Test 7 Phase A: Enabled=false (byte-identical baseline) ──────────────
@@ -1366,6 +1426,26 @@ else
     fail=1
 fi
 
+# ── Partition proof: flow_a's sticky-RAW TCP packets must land in
+#    pkts_lane_raw. flow_a is a continuous ~5 pkt/s sticky-RAW sender that
+#    ran for the whole test, so by now the client's raw lane counter is well
+#    into the dozens — far above the handful of ambient tunnel-setup ping
+#    packets. A raw count >= 10 therefore proves the TCP-candidate-to-RAW
+#    fallback is counted (before the counting-point fix, sticky-RAW TCP
+#    packets incremented NO lane counter and raw would sit at the ambient
+#    ~2-6, failing this). `raw=[1-9][0-9]+` matches only two-or-more-digit
+#    values, i.e. >= 10. ──
+if wait_for_log "$CLIENT_LOG_T6" 'lanes tcp/dgram/raw=[0-9]+/[0-9]+/[1-9][0-9]+' 40; then
+    parse_lanes "$CLIENT_LOG_T6" || true
+    echo "PASS: [STATUS] raw lane counts flow_a's sticky-RAW TCP packets (tcp=$LANE_TCP dgram=$LANE_DGRAM raw=$LANE_RAW) — tcp+dgram+raw partition holds"
+else
+    echo "FAIL: raw lane never reached >=10 despite a continuous sticky-RAW flow — TCP-candidate-to-RAW packets not counted (partition broken)"
+    parse_lanes "$CLIENT_LOG_T6" \
+        && echo "      last lanes line: tcp=$LANE_TCP dgram=$LANE_DGRAM raw=$LANE_RAW" \
+        || echo "      (no lanes line at all)"
+    fail=1
+fi
+
 # Tear down Test 6's standalone sender/responder processes explicitly
 # (independent of the VPN client/server lifecycle) before bench_stop_vpn.
 for pid in "$LANE_SENDER_A_PID" "$LANE_SENDER_B_PID" \
@@ -1386,6 +1466,10 @@ if [ "$fail" -ne 0 ]; then
     echo "RESULT: FAIL"
     echo "--- Client log Test1 (last 20) ---"; tail -20 "$CLIENT_LOG_T1"
     echo "--- Server log Test1 (last 20) ---"; tail -20 "$SERVER_LOG_T1"
+    echo "--- Client log T1B (last 20) ---"; tail -20 "$CLIENT_LOG_T1B"
+    echo "--- Server log T1B (last 20) ---"; tail -20 "$SERVER_LOG_T1B"
+    echo "--- Client log T1C (last 20) ---"; tail -20 "$CLIENT_LOG_T1C"
+    echo "--- Server log T1C (last 20) ---"; tail -20 "$SERVER_LOG_T1C"
     echo "--- Client log T7A (last 20) ---"; tail -20 "$CLIENT_LOG_T7A"
     echo "--- Client log T7B (last 20) ---"; tail -20 "$CLIENT_LOG_T7B"
     echo "--- Server log T7B (last 20) ---"; tail -20 "$SERVER_LOG_T7B"

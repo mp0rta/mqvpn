@@ -1425,6 +1425,18 @@ TEST(mqvpn_tcp_global_cap_gets_503)
     ASSERT_EQ(second.response_done, 1);
     ASSERT_STREQ(second.status, "503");
 
+    /* The cumulative cap counters must move: exactly one flow was admitted
+     * so far (flows_total == 1, still active) and exactly one was cap-503'd
+     * (flows_rejected == 1). Neither decrements, so these are stable proofs
+     * the wiring reads the real tcp_egress counters, not a stub. */
+    {
+        mqvpn_stats_t st;
+        memset(&st, 0, sizeof(st));
+        ASSERT_EQ(mqvpn_server_get_stats(h.svr, &st), MQVPN_OK);
+        ASSERT_EQ(st.tcp_flows_total, 1);
+        ASSERT_EQ(st.tcp_flows_rejected, 1);
+    }
+
     /* Release the one slot (close flow #1's stream and wait for the
      * client-visible close), then a THIRD attempt on the same connection
      * must succeed again — the cap releases on destroy, same regression
