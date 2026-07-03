@@ -35,6 +35,22 @@
 #         task sketch), and the server's tcp_flows_active must read 0 via
 #         the control API (defensive: catches a future regression once
 #         Task 24 wires this field live; it is unconditionally 0 today).
+#   Test 2 (single-path throughput), two phases, single path, unshaped:
+#     Phase A [Hybrid] Enabled=true / Tcp=raw: iperf3 through the plain
+#       CONNECT-IP tunnel (RAW_MBPS baseline).
+#     Phase B [Hybrid] Enabled=true / Tcp=stream + EgressAllow: iperf3
+#       through the hybrid TCP-lane relay to the same egress-allowed target
+#       Test 1 uses (STREAM_MBPS). Asserts the stream lane costs <=20% of
+#       RAW — the mqproxy reference impl's TCP-over-stream overhead at
+#       single path (docs/report/2026-06-23).
+#   Test 3 (multipath aggregation): same stream-lane config as Test 2 Phase
+#     B, under an asymmetric two-path netem profile (bench_env_setup.sh's
+#     BENCH_ENV_NETEM table). Compares a single-path baseline (Path A's leg
+#     of the profile only) against both paths active, and asserts the
+#     2-path number is >=1.5x the single-path number — proof the WLB
+#     scheduler's aggregation survives the stream lane (mqproxy reference:
+#     1.81x single-flow 2-path aggregation; 1.5x leaves margin for variance
+#     while still ruling out non-aggregating ~1.0x).
 #
 # HTTP target addressing (Test 1): the client runs a full-tunnel default
 # route (0.0.0.0/1 + 128.0.0.0/1 via TUN, src/platform/linux/routing.c) with
@@ -84,9 +100,19 @@ CLIENT_LOG_T7A="$(mktemp)"
 SERVER_LOG_T7A="$(mktemp)"
 CLIENT_LOG_T7B="$(mktemp)"
 SERVER_LOG_T7B="$(mktemp)"
+CLIENT_LOG_T2A="$(mktemp)"
+SERVER_LOG_T2A="$(mktemp)"
+CLIENT_LOG_T2B="$(mktemp)"
+SERVER_LOG_T2B="$(mktemp)"
+CLIENT_LOG_T3A="$(mktemp)"
+SERVER_LOG_T3A="$(mktemp)"
+CLIENT_LOG_T3B="$(mktemp)"
+SERVER_LOG_T3B="$(mktemp)"
 INI_T1="$(mktemp --suffix=.ini)"
 INI_T7A="$(mktemp --suffix=.ini)"
 INI_T7B="$(mktemp --suffix=.ini)"
+INI_T2A="$(mktemp --suffix=.ini)"
+INI_STREAM="$(mktemp --suffix=.ini)"   # shared by Test 2 Phase B and Test 3
 CURL_OUT="$(mktemp)"
 SENT_FILE_A="$(mktemp)"
 RECV_FILE_A="$(mktemp)"
@@ -103,13 +129,16 @@ cleanup_http_server() {
 
 trap 'cleanup_http_server; bench_cleanup; rm -rf "$HTTP_DOCROOT"; rm -f \
     "$CLIENT_LOG_T1" "$SERVER_LOG_T1" "$CLIENT_LOG_T7A" "$SERVER_LOG_T7A" \
-    "$CLIENT_LOG_T7B" "$SERVER_LOG_T7B" "$INI_T1" "$INI_T7A" "$INI_T7B" \
+    "$CLIENT_LOG_T7B" "$SERVER_LOG_T7B" \
+    "$CLIENT_LOG_T2A" "$SERVER_LOG_T2A" "$CLIENT_LOG_T2B" "$SERVER_LOG_T2B" \
+    "$CLIENT_LOG_T3A" "$SERVER_LOG_T3A" "$CLIENT_LOG_T3B" "$SERVER_LOG_T3B" \
+    "$INI_T1" "$INI_T7A" "$INI_T7B" "$INI_T2A" "$INI_STREAM" \
     "$CURL_OUT" "$SENT_FILE_A" "$RECV_FILE_A" "$SENT_FILE_B" "$RECV_FILE_B"' EXIT
 
 fail=0
 
 echo "[hybrid-h2] N=$N_PATHS binary=$MQVPN inner-tcp-port=$INNER_TCP_PORT http-target=${HTTP_TARGET_IP}:${HTTP_TARGET_PORT}"
-bench_check_test_deps nc curl python3 jq
+bench_check_test_deps nc curl python3 jq iperf3
 
 # ── Phase INIs. Keys cross-checked against src/config.c cfg_keys[] and the
 #    hand-coded [Hybrid] EgressAllow parser (src/config.c ~line 1063):
@@ -129,6 +158,24 @@ cat >"$INI_T7B" <<EOF
 [Hybrid]
 Enabled = true
 Tcp = raw
+EOF
+
+# INI_T2A: identical policy to INI_T7B (Tcp=raw) — kept as a separate file
+# since Test 2 reads it under a different name for clarity at the call site.
+cat >"$INI_T2A" <<EOF
+[Hybrid]
+Enabled = true
+Tcp = raw
+EOF
+
+# INI_STREAM: Tcp=stream + EgressAllow, reused by both Test 2 Phase B and
+# Test 3 (both exercise the same stream-lane policy; only the topology and
+# netem shaping differ between them).
+cat >"$INI_STREAM" <<EOF
+[Hybrid]
+Enabled = true
+Tcp = stream
+EgressAllow = 10.222.0.0/24
 EOF
 
 # ── Topology: single path, no netem — H2 tests transport correctness, not
@@ -240,6 +287,86 @@ run_byte_identical_transfer() {
         return 1
     fi
     return 0
+}
+
+# Single iperf3 TCP measurement (one flow) against $1 for $2 seconds.
+# Mirrors the existing netns iperf3-through-tunnel pattern in
+# benchmarks/bench_aggregate.sh: a one-shot server (`-1`) in NS_SERVER bound
+# to the target address, a JSON client run in NS_CLIENT, Mbps read from
+# end.sum_received.bits_per_second. Echoes "0.0" on any failure (missing
+# sum_received key, iperf3 error, etc) rather than aborting the script.
+run_iperf3_through_tunnel() {
+    local target="$1"
+    local duration="${2:-6}"
+    local json
+    json="$(mktemp)"
+
+    ip netns exec "$NS_SERVER" iperf3 -s -B "$target" -1 &>/dev/null &
+    local ipid=$!
+    sleep 1
+
+    ip netns exec "$NS_CLIENT" iperf3 -c "$target" -t "$duration" -P 1 --json \
+        >"$json" 2>&1 || true
+
+    wait "$ipid" 2>/dev/null || true
+
+    local mbps
+    mbps="$(python3 -c "
+import json
+try:
+    with open('${json}') as f:
+        data = json.load(f)
+    end = data.get('end', {})
+    if 'sum_received' in end:
+        print(f\"{end['sum_received']['bits_per_second'] / 1e6:.1f}\")
+    else:
+        print('0.0')
+except Exception:
+    print('0.0')
+")"
+    rm -f "$json"
+    echo "$mbps"
+}
+
+# Repeat run_iperf3_through_tunnel $3 times against $1 (duration $2),
+# logging each sample to stderr (labeled $4) and printing all samples
+# space-separated on stdout for the caller to average / report variance on.
+run_iperf3_repeated() {
+    local target="$1" duration="$2" repeats="$3" label="$4"
+    local i mbps
+    local results=()
+    for (( i=0; i<repeats; i++ )); do
+        mbps="$(run_iperf3_through_tunnel "$target" "$duration")"
+        echo "    [$label] run $((i + 1))/${repeats}: ${mbps} Mbps" >&2
+        results+=("$mbps")
+    done
+    echo "${results[@]}"
+}
+
+# Arithmetic mean of the given numbers (arguments); "0.0" if none given.
+avg_of() {
+    python3 -c "
+import sys
+vals = [float(x) for x in sys.argv[1:]]
+print(f'{sum(vals) / len(vals):.2f}' if vals else '0.0')
+" "$@"
+}
+
+# Apply netem to a single path slot's veth pair only (client+server ends),
+# leaving any other path slot's qdisc untouched. Mirrors
+# benchmarks/sweep_single_path.sh's apply_single_netem, generalized to an
+# arbitrary path index — needed because bench_apply_netem hardcodes both
+# Path A and Path B and errors on Path B when only Path A's veth pair
+# exists (N_PATHS=1 topologies).
+apply_path_netem() {
+    local idx="$1" netem="$2"
+    local vc vs
+    vc="$(bench_path_veth_client "$idx")"
+    vs="$(bench_path_veth_server "$idx")"
+    ip netns exec "$NS_CLIENT" tc qdisc del dev "$vc" root 2>/dev/null || true
+    ip netns exec "$NS_SERVER" tc qdisc del dev "$vs" root 2>/dev/null || true
+    ip netns exec "$NS_CLIENT" tc qdisc add dev "$vc" root netem ${netem}
+    ip netns exec "$NS_SERVER" tc qdisc add dev "$vs" root netem ${netem}
 }
 
 # ─── Test 1: curl body correctness, Enabled=true / Tcp=stream ─────────────
@@ -358,6 +485,106 @@ else
     fail=1
 fi
 
+bench_stop_vpn
+
+# ─── Test 2: single-path throughput, stream lane within 20% of RAW ───────
+echo ""
+echo "=== Test 2: single-path throughput (stream lane vs RAW) ==="
+IPERF_DURATION_T2=6
+IPERF_REPEATS_T2=3
+
+echo "-- Phase A: RAW baseline (Enabled=true / Tcp=raw, unshaped) --"
+hybrid_run "$INI_T2A" "$SERVER_LOG_T2A" "$CLIENT_LOG_T2A"
+RAW_RESULTS=($(run_iperf3_repeated "$TUNNEL_SERVER_IP" "$IPERF_DURATION_T2" "$IPERF_REPEATS_T2" RAW))
+bench_stop_vpn
+RAW_MBPS="$(avg_of "${RAW_RESULTS[@]}")"
+echo "  RAW_MBPS: avg=${RAW_MBPS} samples=(${RAW_RESULTS[*]})"
+
+echo "-- Phase B: stream lane (Enabled=true / Tcp=stream + EgressAllow, unshaped) --"
+hybrid_run "$INI_STREAM" "$SERVER_LOG_T2B" "$CLIENT_LOG_T2B"
+STREAM_RESULTS=($(run_iperf3_repeated "$HTTP_TARGET_IP" "$IPERF_DURATION_T2" "$IPERF_REPEATS_T2" STREAM))
+bench_stop_vpn
+STREAM_MBPS="$(avg_of "${STREAM_RESULTS[@]}")"
+echo "  STREAM_MBPS: avg=${STREAM_MBPS} samples=(${STREAM_RESULTS[*]})"
+
+if awk -v r="$RAW_MBPS" 'BEGIN{exit !(r>0)}'; then
+    DEGRADATION_PCT="$(awk -v r="$RAW_MBPS" -v s="$STREAM_MBPS" 'BEGIN{printf "%.1f", (r-s)/r*100}')"
+    echo "  degradation: ${DEGRADATION_PCT}% (threshold <=20.0%)"
+    if awk -v d="$DEGRADATION_PCT" 'BEGIN{exit !(d<=20.0)}'; then
+        echo "PASS: stream lane within 20% of RAW (degradation=${DEGRADATION_PCT}%)"
+    else
+        echo "FAIL: stream lane degraded ${DEGRADATION_PCT}% vs RAW (threshold 20.0%)"
+        fail=1
+    fi
+else
+    echo "FAIL: RAW_MBPS=0 — iperf3 RAW baseline measurement failed, cannot compute degradation"
+    fail=1
+fi
+
+# ─── Test 3: multipath aggregation, stream lane >= 1.5x best single path ──
+echo ""
+echo "=== Test 3: multipath aggregation under asymmetric netem (stream lane) ==="
+NETEM_PROFILE="lte_starlink"
+NETEM_SPEC="${BENCH_ENV_NETEM[$NETEM_PROFILE]}"
+NETEM_A="${NETEM_SPEC%%|*}"
+NETEM_B="${NETEM_SPEC#*|}"
+echo "  profile=${NETEM_PROFILE} pathA='${NETEM_A}' pathB='${NETEM_B}'"
+IPERF_DURATION_T3=8
+IPERF_REPEATS_T3=3
+
+# Rebuild to a 2-path topology (Tests 1/7/2 only needed one path). This
+# fully deletes+recreates NS_SERVER, so the HTTP test server + its /32
+# alias from Test 1 don't survive; the HTTP server isn't needed past Test 1
+# — tear it down and re-add just the alias (iperf3's egress target).
+cleanup_http_server
+bench_setup_netns_n 2
+bench_add_server_host_routes 2
+ip netns exec "$NS_SERVER" ip addr add "${HTTP_TARGET_IP}/32" dev lo
+
+echo "-- Baseline: single path (Path A leg of the profile only) --"
+N_PATHS=1
+apply_path_netem 0 "$NETEM_A"
+hybrid_run "$INI_STREAM" "$SERVER_LOG_T3A" "$CLIENT_LOG_T3A"
+BASELINE_RESULTS=($(run_iperf3_repeated "$HTTP_TARGET_IP" "$IPERF_DURATION_T3" "$IPERF_REPEATS_T3" BASELINE))
+bench_stop_vpn
+BEST_SINGLE_MBPS="$(avg_of "${BASELINE_RESULTS[@]}")"
+echo "  BEST_SINGLE_MBPS: avg=${BEST_SINGLE_MBPS} samples=(${BASELINE_RESULTS[*]})"
+
+echo "-- Multipath: both paths active, same profile --"
+N_PATHS=2
+bench_apply_netem "$NETEM_A" "$NETEM_B"
+hybrid_run "$INI_STREAM" "$SERVER_LOG_T3B" "$CLIENT_LOG_T3B"
+
+# Verify the tunnel actually validated 2 paths via the control API before
+# trusting the number below as a multipath measurement — bench_wait_tunnel
+# inside hybrid_run only confirms path 0 + a single ping.
+observed_paths=$(bench_wait_for_n_paths 2 20 "$CTRL_PORT") && pc_rc=0 || pc_rc=$?
+if [ "$pc_rc" -eq 0 ]; then
+    echo "PASS: server control API confirms n_paths=${observed_paths}"
+else
+    echo "FAIL: server control API reports n_paths=${observed_paths} (expected >=2, rc=$pc_rc)"
+    fail=1
+fi
+
+MULTI_RESULTS=($(run_iperf3_repeated "$HTTP_TARGET_IP" "$IPERF_DURATION_T3" "$IPERF_REPEATS_T3" MULTI))
+bench_stop_vpn
+MULTI_MBPS="$(avg_of "${MULTI_RESULTS[@]}")"
+echo "  MULTI_MBPS: avg=${MULTI_MBPS} samples=(${MULTI_RESULTS[*]})"
+
+if awk -v b="$BEST_SINGLE_MBPS" 'BEGIN{exit !(b>0)}'; then
+    AGG_RATIO="$(awk -v m="$MULTI_MBPS" -v b="$BEST_SINGLE_MBPS" 'BEGIN{printf "%.2f", m/b}')"
+    echo "  ratio (multi/best_single): ${AGG_RATIO}x (threshold >=1.5x)"
+    if awk -v r="$AGG_RATIO" 'BEGIN{exit !(r>=1.5)}'; then
+        echo "PASS: multipath aggregation >= 1.5x best single path (ratio=${AGG_RATIO}x)"
+    else
+        echo "FAIL: multipath aggregation ${AGG_RATIO}x < 1.5x threshold"
+        fail=1
+    fi
+else
+    echo "FAIL: BEST_SINGLE_MBPS=0 — baseline iperf3 measurement failed, cannot compute ratio"
+    fail=1
+fi
+
 # ─── Verdict ───────────────────────────────────────────────────────────────
 echo ""
 if [ "$fail" -ne 0 ]; then
@@ -367,6 +594,11 @@ if [ "$fail" -ne 0 ]; then
     echo "--- Client log T7A (last 20) ---"; tail -20 "$CLIENT_LOG_T7A"
     echo "--- Client log T7B (last 20) ---"; tail -20 "$CLIENT_LOG_T7B"
     echo "--- Server log T7B (last 20) ---"; tail -20 "$SERVER_LOG_T7B"
+    echo "--- Client log T2A (last 20) ---"; tail -20 "$CLIENT_LOG_T2A"
+    echo "--- Client log T2B (last 20) ---"; tail -20 "$CLIENT_LOG_T2B"
+    echo "--- Client log T3A (last 20) ---"; tail -20 "$CLIENT_LOG_T3A"
+    echo "--- Client log T3B (last 20) ---"; tail -20 "$CLIENT_LOG_T3B"
+    echo "--- Server log T3B (last 20) ---"; tail -20 "$SERVER_LOG_T3B"
     exit 1
 fi
 echo "RESULT: PASS"
