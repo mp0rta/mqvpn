@@ -1172,6 +1172,26 @@ cli_tcp_lane_h3_send(void *h3_request, const uint8_t *buf, size_t len, int fin)
     if (ret < 0) return MQVPN_TCP_LANE_H3_SEND_ERR;
     return ret;
 }
+
+/* H2/Task 11: downlink body recv for the TCP lane. Cross-TU like
+ * cli_tcp_lane_h3_send above — same one-way boundary, same normalization
+ * duty, opposite direction. xqc_h3_request_recv_body (third_party/xquic
+ * src/http3/xqc_h3_request.c) writes *fin unconditionally on every call
+ * (starts XQC_FALSE, may become true), including alongside n > 0: the final
+ * DATA frame's bytes and its FIN can arrive in the SAME recv_body call, not
+ * only as a separate zero-byte "fin-only" call — both shapes are real wire
+ * behavior (confirmed by reading the vendored implementation), not a
+ * simplification tcp_lane.c's caller may skip handling. */
+ssize_t
+cli_tcp_lane_h3_recv(void *h3_request, uint8_t *buf, size_t len, int *fin)
+{
+    unsigned char xfin = 0;
+    ssize_t n = xqc_h3_request_recv_body((xqc_h3_request_t *)h3_request, buf, len, &xfin);
+    if (n == -XQC_EAGAIN) return MQVPN_TCP_LANE_H3_RECV_AGAIN;
+    if (n < 0) return MQVPN_TCP_LANE_H3_RECV_ERR;
+    *fin = xfin ? 1 : 0;
+    return n;
+}
 #endif /* MQVPN_HYBRID_TCP_LANE_ENABLED */
 
 /* ─── Capsule parsing ─── */
@@ -1500,20 +1520,28 @@ cli_connect_tcp_on_headers(cli_stream_t *stream, xqc_h3_request_t *h3_request)
     }
 }
 
-/* mqvpn-tcp CONNECT stream: response body. Task 11 replaces this drain
- * placeholder with the real downlink write into lwIP (tcp_write). Matches
- * cli_connect_ip_on_body's <=0 break idiom for recv_body's error/EAGAIN
- * return. */
+/* mqvpn-tcp CONNECT stream: response body. Routes to the per-flow downlink
+ * pump (tcp_lane.c), which locates the flow by this stream's back-pointer
+ * and drains xqc_h3_request_recv_body into lwIP via tcp_write.
+ *
+ * Return value contract — deliberately ALWAYS 0, never the pump's result:
+ * verified against xquic (third_party/xquic src/http3/xqc_h3_stream.c)
+ * that a negative return from h3_request_read_notify propagates up through
+ * xqc_h3_stream_process_bidi -> xqc_h3_stream_process_in ->
+ * XQC_H3_CONN_ERR, which closes the WHOLE H3/QUIC connection. That is the
+ * correct behavior for cli_connect_ip_on_body's -1 (the CONNECT-IP request
+ * IS the tunnel — if it's broken, the connection is dead anyway), but it
+ * would be catastrophic here: one flow's relay error killing every other
+ * TCP-lane flow AND the CONNECT-IP tunnel on the same connection. Fatal
+ * downlink errors are instead handled entirely inside
+ * mqvpn_tcp_lane_downlink_pump via mqvpn_tcp_lane_on_relay_error (routes
+ * just this flow to CLOSING); Task 12 tears down only that flow's pcb/H3
+ * request. */
 static int
 cli_connect_tcp_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
 {
-    (void)stream;
-    uint8_t drain[4096];
-    uint8_t fin = 0;
-    ssize_t n;
-    while ((n = xqc_h3_request_recv_body(h3_request, drain, sizeof(drain), &fin)) > 0) {
-        /* Task 11 replaces with tcp_write() into lwIP. */
-    }
+    (void)h3_request; /* the pump re-derives it from the flow via `stream` */
+    mqvpn_tcp_lane_downlink_pump(stream->conn->tcp_lane, stream);
     return 0;
 }
 #endif /* MQVPN_HYBRID_TCP_LANE_ENABLED */
@@ -1535,7 +1563,19 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
     case CLI_STREAM_ROLE_CONNECT_TCP:
         if (flag & XQC_REQ_NOTIFY_READ_HEADER)
             cli_connect_tcp_on_headers(stream, h3_request);
-        if (flag & XQC_REQ_NOTIFY_READ_BODY)
+        /* READ_BODY is the common case; READ_EMPTY_FIN is the OTHER real
+         * wire shape for a downlink close (third_party/xquic
+         * src/http3/xqc_h3_request.c xqc_h3_request_on_recv_empty_fin):
+         * fired standalone, WITHOUT READ_BODY, when a bodiless FIN STREAM
+         * frame arrives after every previously-buffered body byte has
+         * already been drained (read_flag == NULL at that point). Missing
+         * this notify would mean a peer that FINs on an idle/fully-drained
+         * stream never gets its downlink half-close observed — the flow
+         * would hang forever waiting for a body notify that never comes.
+         * cli_connect_tcp_on_body's recv_body call correctly reports this
+         * as n==0 && *fin==1 either way (verified in the vendored source),
+         * so one handler covers both notify shapes. */
+        if (flag & (XQC_REQ_NOTIFY_READ_BODY | XQC_REQ_NOTIFY_READ_EMPTY_FIN))
             return cli_connect_tcp_on_body(stream, h3_request);
         return 0;
 #endif

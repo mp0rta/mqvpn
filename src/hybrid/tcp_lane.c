@@ -99,6 +99,25 @@ typedef struct mqvpn_tcp_flow {
     int fin_received_from_h3;
     int tcp_fin_seen;
 
+    /* Downlink stash (Task 11): the ONE chunk already pulled out of the H3
+     * response body (recv_body is destructive — a re-read is not possible)
+     * but not yet accepted by tcp_write, because sndbuf/ERR_MEM said no.
+     * Exactly one slot always suffices: the pump stops consuming recv_body
+     * the INSTANT a write can't be queued, so at most one just-read chunk
+     * is ever awaiting a retry. Lazily malloc'd (most flows never pause) and
+     * kept for the flow's lifetime once allocated — freed by
+     * tcp_lane_downlink_stash_free (relay error, lane teardown). */
+    uint8_t *downlink_stash;
+    uint16_t downlink_stash_len;
+
+    /* Back-pointer to the owning lane, set at accept time. Needed because
+     * the lwIP callbacks (on_lwip_recv/on_lwip_sent) receive only the flow
+     * as tcp_arg, not the lane — this is how they reach lane->clock_fn for
+     * last_activity_us stamping and how on_lwip_sent's resume path can call
+     * the public mqvpn_tcp_lane_downlink_pump(lane, stream) API. NULL for
+     * sticky-RAW markers (they never reach the accept callback). */
+    mqvpn_tcp_lane_t *lane;
+
     struct mqvpn_tcp_flow *next; /* hash chain */
 } mqvpn_tcp_flow_t;
 
@@ -119,6 +138,12 @@ struct mqvpn_tcp_lane {
 /* Defined with the Task 10 uplink-relay machinery below; needed by
  * mqvpn_tcp_lane_free's teardown loop above it. */
 static void tcp_lane_uplink_queue_free(mqvpn_tcp_flow_t *f);
+/* Defined with the Task 11 downlink-relay machinery below; same reason. */
+static void tcp_lane_downlink_stash_free(mqvpn_tcp_flow_t *f);
+/* Defined further below (Task 9); mqvpn_tcp_lane_downlink_pump (Task 11)
+ * needs it before that point in the file, same forward-reference reason as
+ * the other two declarations here. */
+static mqvpn_tcp_flow_t *find_flow_by_stream(mqvpn_tcp_lane_t *lane, void *stream);
 
 /* Power-of-two bucket count from the table's total capacity (load factor
  * ~1), capped at 2^20 buckets. Identical to reorder_tx.c's pick_buckets —
@@ -193,6 +218,7 @@ mqvpn_tcp_lane_free(mqvpn_tcp_lane_t *lane)
                 tcp_abort(f->pcb);
             }
             tcp_lane_uplink_queue_free(f);
+            tcp_lane_downlink_stash_free(f);
             free(f);
             f = next;
         }
@@ -311,6 +337,31 @@ mqvpn_tcp_lane_get_stats(const mqvpn_tcp_lane_t *lane, mqvpn_tcp_lane_stats_t *o
 #  define MQVPN_TCP_LANE_TEST_RECVED(pcb, len) tcp_recved((pcb), (len))
 #endif
 
+/* Task 11 downlink hooks: same compile-time substitution idiom as
+ * MQVPN_TCP_LANE_TEST_RECVED above — the unit test (which links real
+ * lwip_core but drives hand-built stack-fake `struct tcp_pcb`s, not ones
+ * from tcp_new()/the pcb pool) defines scriptable/recording versions of all
+ * four before the #include of this TU, exactly like the h3_send/h3_recv
+ * test doubles. Calling the real tcp_write/tcp_shutdown/tcp_output on a
+ * stack-fake pcb would touch send-queue/pbuf internals never initialized by
+ * a real accept. tcp_sndbuf is a pure field read (`(pcb)->snd_buf`, see
+ * lwip/tcp.h) so it would technically be safe on a fake pcb too, but the
+ * hook is kept for symmetry and so tests can script sndbuf sequences
+ * independently of mutating the fake pcb's field. Zero production cost. */
+#ifndef MQVPN_TCP_LANE_TCP_WRITE
+#  define MQVPN_TCP_LANE_TCP_WRITE(pcb, buf, len, flags) \
+      tcp_write((pcb), (buf), (len), (flags))
+#endif
+#ifndef MQVPN_TCP_LANE_TCP_SNDBUF
+#  define MQVPN_TCP_LANE_TCP_SNDBUF(pcb) tcp_sndbuf(pcb)
+#endif
+#ifndef MQVPN_TCP_LANE_TCP_SHUTDOWN
+#  define MQVPN_TCP_LANE_TCP_SHUTDOWN(pcb, rx, tx) tcp_shutdown((pcb), (rx), (tx))
+#endif
+#ifndef MQVPN_TCP_LANE_TCP_OUTPUT
+#  define MQVPN_TCP_LANE_TCP_OUTPUT(pcb) tcp_output(pcb)
+#endif
+
 /* tcp_recved takes a u16_t; the deferred resume total can exceed 65535
  * (bounded by TCP_WND ~2 MiB), so re-open the window in u16-sized steps. */
 static void
@@ -355,6 +406,13 @@ mqvpn_tcp_lane_on_relay_error(mqvpn_tcp_flow_t *f)
      * wholesale. */
     f->uplink_withheld = 0;
     f->uplink_withheld_recved = 0;
+    /* Task 11: the downlink stash holds a chunk already destructively pulled
+     * out of xquic's recv_body (a re-read is impossible) — free it here too,
+     * same "teardown owns every buffer" contract as the uplink queue above.
+     * downlink_paused would otherwise wedge Task 12's view of the flow: a
+     * CLOSING flow must never look "paused" (nothing will ever resume it). */
+    tcp_lane_downlink_stash_free(f);
+    f->downlink_paused = 0;
 }
 
 /* Hand p's bytes [offset, tot_len) to the H3 stream. Returns the new offset
@@ -502,6 +560,13 @@ mqvpn_tcp_lane_on_lwip_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_
     (void)pcb;
     (void)err;
 
+    /* Activity signal (Task 13's idle sweep target) — any recv notify,
+     * data or peer FIN, counts. f->lane is set at accept time; NULL-guarded
+     * the same way the accept/establish stamps already are. */
+    if (f->lane && f->lane->clock_fn) {
+        f->last_activity_us = f->lane->clock_fn(f->lane->clock_ctx);
+    }
+
     if (!p) {
         /* Peer FIN from the lwIP side (KQ 8: recv(NULL) → H3 half-close).
          * flush() drains queued data first and sends the FIN only after; if
@@ -568,15 +633,213 @@ mqvpn_tcp_lane_on_lwip_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_
     return ERR_OK;
 }
 
-/* Downlink stubs — Task 11 fills the sent callback (downlink resume), Task 12
- * the error callback + real flow removal; the accept path only needs their
- * addresses. */
+/* ─── Downlink relay: H3 recv_body → lwIP tcp_write (Task 11) ─── */
+
+/* Save one just-read, not-yet-writable chunk. Lazily allocates the flow's
+ * single stash slot (kept for the flow's lifetime once allocated — see the
+ * field comment on mqvpn_tcp_flow_t). Returns -1 only on malloc failure,
+ * which the caller must treat as fatal: these bytes were already
+ * destructively pulled out of xquic's recv_body and cannot be re-fetched,
+ * so losing them here would silently corrupt the relayed stream (same
+ * "already-committed, cannot undo" hazard the uplink side's alloc-failure
+ * path documents). */
+static int
+tcp_lane_downlink_stash(mqvpn_tcp_flow_t *f, const uint8_t *buf, uint16_t len)
+{
+    if (!f->downlink_stash) {
+        f->downlink_stash = malloc(TCP_MSS);
+        if (!f->downlink_stash) {
+            return -1;
+        }
+    }
+    memcpy(f->downlink_stash, buf, len);
+    f->downlink_stash_len = len;
+    return 0;
+}
+
+static void
+tcp_lane_downlink_stash_free(mqvpn_tcp_flow_t *f)
+{
+    free(f->downlink_stash);
+    f->downlink_stash = NULL;
+    f->downlink_stash_len = 0;
+}
+
+/* Fin observed from cli_tcp_lane_h3_recv (with or without accompanying data
+ * in the same call — see the MQVPN_TCP_LANE_H3_RECV_* contract). TX-side
+ * half-close only (shut_rx=0): the inner app's peer may still have more to
+ * say in the OTHER direction; Task 12 fully closes both ends together on
+ * flow teardown. Idempotent via fin_received_from_h3 — tcp_shutdown must
+ * fire exactly once per pcb (vendored tcp.c's tcp_close_shutdown switches on
+ * pcb->state, which tcp_shutdown itself transitions away from FIN-capable
+ * states). Returns -1 if on_relay_error ran (tcp_shutdown's tx path can
+ * return ERR_MEM on a FIN-enqueue allocation failure, or ERR_CONN if the pcb
+ * is no longer in a shutdown-eligible state — vendored tcp.c/tcp_out.c;
+ * both leave the FIN permanently undeliverable with no local retry hook,
+ * unlike our own H3 FIN send which retries on the next writable notify, so
+ * this is treated as fatal like the uplink's own alloc-failure convention). */
+static int
+tcp_lane_downlink_maybe_shutdown(mqvpn_tcp_flow_t *f)
+{
+    if (f->fin_received_from_h3) {
+        return 0;
+    }
+    f->fin_received_from_h3 = 1;
+    err_t err = MQVPN_TCP_LANE_TCP_SHUTDOWN(f->pcb, 0, 1);
+    if (err != ERR_OK) {
+        mqvpn_tcp_lane_on_relay_error(f);
+        return -1;
+    }
+    return 0;
+}
+
+/* Drain the flow's H3 response body into lwIP. Stops at the first
+ * would-block (MQVPN_TCP_LANE_H3_RECV_AGAIN — nothing more buffered right
+ * now; the next READ_BODY/EMPTY_FIN notify re-fires) or the first
+ * sndbuf/ERR_MEM backpressure signal (stash the chunk, latch
+ * downlink_paused, stop — mirrors the uplink's EAGAIN-stops-the-loop
+ * design). A fatal recv or write error routes through on_relay_error and
+ * returns -1; see mqvpn_tcp_lane_downlink_pump's header comment for why
+ * callers must not propagate that into an xquic stream/connection error.
+ * tcp_output is called AT MOST ONCE, after the loop — lwIP defers actual
+ * segment transmission to tcp_output/tcp_tmr (vendored tcp_out.c: tcp_write
+ * only appends to the unsent list), and with LWIP_TIMERS=0 the manual
+ * tcp_tmr cadence (lwip_glue.c, every 250 ms) would otherwise sit on
+ * freshly-written downlink data for up to that long. */
+static int
+tcp_lane_downlink_drain(mqvpn_tcp_flow_t *f)
+{
+    uint8_t buf[TCP_MSS];
+    int wrote_any = 0;
+
+    for (;;) {
+        int fin = 0;
+        ssize_t n = cli_tcp_lane_h3_recv(f->h3_request, buf, sizeof(buf), &fin);
+        if (n == MQVPN_TCP_LANE_H3_RECV_AGAIN) {
+            break;
+        }
+        if (n == MQVPN_TCP_LANE_H3_RECV_ERR) {
+            mqvpn_tcp_lane_on_relay_error(f);
+            return -1;
+        }
+        if (n > 0) {
+            if ((size_t)MQVPN_TCP_LANE_TCP_SNDBUF(f->pcb) < (size_t)n) {
+                if (tcp_lane_downlink_stash(f, buf, (uint16_t)n) < 0) {
+                    mqvpn_tcp_lane_on_relay_error(f);
+                    return -1;
+                }
+                f->downlink_paused = 1;
+                break;
+            }
+            err_t werr =
+                MQVPN_TCP_LANE_TCP_WRITE(f->pcb, buf, (uint16_t)n, TCP_WRITE_FLAG_COPY);
+            if (werr == ERR_MEM) {
+                /* Transient — the write_checks gate (queuelen or a stricter
+                 * internal check than the sndbuf test above) said not now.
+                 * Same stash-and-pause handling as the sndbuf gate. */
+                if (tcp_lane_downlink_stash(f, buf, (uint16_t)n) < 0) {
+                    mqvpn_tcp_lane_on_relay_error(f);
+                    return -1;
+                }
+                f->downlink_paused = 1;
+                break;
+            }
+            if (werr != ERR_OK) {
+                mqvpn_tcp_lane_on_relay_error(f);
+                return -1;
+            }
+            wrote_any = 1;
+        }
+        if (fin) {
+            if (tcp_lane_downlink_maybe_shutdown(f) < 0) {
+                return -1; /* on_relay_error already ran inside */
+            }
+            break; /* request fully consumed; nothing more to read */
+        }
+    }
+
+    if (wrote_any) {
+        MQVPN_TCP_LANE_TCP_OUTPUT(f->pcb);
+    }
+    return 0;
+}
+
+int
+mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream)
+{
+    if (!lane || !stream) {
+        return 0;
+    }
+    mqvpn_tcp_flow_t *f = find_flow_by_stream(lane, stream);
+    if (!f) {
+        return 0;
+    }
+    /* CLOSING: the flow is on its way out (Task 12 owns the real pcb abort +
+     * H3 close) — never consume recv_body for a dying flow. */
+    if (f->state == TCP_FLOW_CLOSING) {
+        return 0;
+    }
+    /* Paused: deliberately NOT draining recv_body. This is not data loss —
+     * xquic's own per-stream flow control then backpressures the server (it
+     * cannot deliver more body until the buffered bytes are read), a
+     * bounded temporary state exactly mirroring the uplink's
+     * EAGAIN/backpressure design in the other direction. The stash-flush
+     * resume path (mqvpn_tcp_lane_on_lwip_sent below) clears downlink_paused
+     * and re-calls this function once sndbuf recovers — including when a
+     * FIN was still sitting undelivered in xquic's buffer at pause time:
+     * nothing here discards or skips past it, the resumed drain loop simply
+     * reaches it on its next cli_tcp_lane_h3_recv call. */
+    if (f->downlink_paused) {
+        return 0;
+    }
+    if (f->state != TCP_FLOW_ACTIVE || !f->h3_request || !f->pcb) {
+        return 0;
+    }
+    return tcp_lane_downlink_drain(f);
+}
+
+/* Real downlink resume (Task 11): once sndbuf recovers enough to fit the
+ * stashed chunk, flush it and resume draining recv_body. Task 12 still owns
+ * the error callback + real flow removal. */
 static err_t
 mqvpn_tcp_lane_on_lwip_sent(void *arg, struct tcp_pcb *pcb, u16_t len)
 {
-    (void)arg;
-    (void)pcb;
     (void)len;
+    mqvpn_tcp_flow_t *f = (mqvpn_tcp_flow_t *)arg;
+    if (!f) {
+        return ERR_OK;
+    }
+    (void)pcb; /* f->pcb is the same pointer; kept for signature parity */
+
+    /* Activity signal, same rationale as on_lwip_recv's stamp. */
+    if (f->lane && f->lane->clock_fn) {
+        f->last_activity_us = f->lane->clock_fn(f->lane->clock_ctx);
+    }
+
+    if (!f->downlink_paused) {
+        return ERR_OK;
+    }
+    if ((size_t)MQVPN_TCP_LANE_TCP_SNDBUF(f->pcb) < (size_t)f->downlink_stash_len) {
+        return ERR_OK; /* still not enough room; wait for the next sent notify */
+    }
+    err_t werr = MQVPN_TCP_LANE_TCP_WRITE(f->pcb, f->downlink_stash,
+                                          f->downlink_stash_len, TCP_WRITE_FLAG_COPY);
+    if (werr == ERR_MEM) {
+        return ERR_OK; /* transient; retry on the next sent notify */
+    }
+    if (werr != ERR_OK) {
+        mqvpn_tcp_lane_on_relay_error(f);
+        return ERR_OK;
+    }
+    MQVPN_TCP_LANE_TCP_OUTPUT(f->pcb);
+    f->downlink_stash_len = 0;
+    f->downlink_paused = 0;
+
+    /* Resume draining recv_body via the public entry point (keeps exactly
+     * one code path for "pump the downlink", same discipline as the
+     * uplink's single flush() for both pre-2xx buffering and EAGAIN retry).
+     * f->lane/f->stream are stable for the lifetime of an ACTIVE flow. */
+    mqvpn_tcp_lane_downlink_pump(f->lane, f->stream);
     return ERR_OK;
 }
 
@@ -742,6 +1005,10 @@ mqvpn_tcp_lane_lwip_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
     f->target_port = newpcb->local_port;
     f->state = TCP_FLOW_PENDING_STREAM;
     f->last_activity_us = lane->clock_fn ? lane->clock_fn(lane->clock_ctx) : 0;
+    /* Task 11: back-pointer so the lwIP callbacks below (which only receive
+     * f as tcp_arg, never the lane) can reach lane->clock_fn and re-enter
+     * mqvpn_tcp_lane_downlink_pump(lane, stream). */
+    f->lane = lane;
 
     tcp_arg(newpcb, f);
     tcp_recv(newpcb, mqvpn_tcp_lane_on_lwip_recv);

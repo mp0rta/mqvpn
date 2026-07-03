@@ -17,6 +17,8 @@
  * provides the cli_tcp_lane_open_stream stub — the real one lives in
  * mqvpn_client.c, which is not linked here.
  */
+#include <stdint.h> /* int8_t/uint16_t/uint8_t for the Task 11 hook forward decls below */
+
 /* Shrink the sticky-RAW marker cap (production default 4096) so the
  * marker-cap branch is testable without 4096 inserts. Must precede the
  * #include of the TU. */
@@ -30,6 +32,33 @@
 struct tcp_pcb;
 static void test_recved_hook(struct tcp_pcb *pcb, unsigned int len);
 #define MQVPN_TCP_LANE_TEST_RECVED(pcb, len) test_recved_hook((pcb), (len))
+
+/* Task 11: downlink hooks, same compile-time substitution idiom. Forward-
+ * declared here with plain stdint-width types instead of lwIP's own
+ * err_t/u16_t/u8_t aliases — those typedefs (lwip/err.h, lwip/arch.h) are
+ * not visible yet at this point in the file (before tcp_lane.c pulls in
+ * lwip/tcp.h below), but they resolve to EXACTLY these underlying types, so
+ * the forward declaration used at every macro-expansion call site inside
+ * tcp_lane.c and the real definition below (where the lwIP aliases ARE
+ * visible) describe the identical type — no mismatch. Calling the REAL
+ * tcp_write/tcp_shutdown/tcp_output on the stack-fake pcbs below would
+ * touch send-queue/pbuf-chain internals never initialized by a real
+ * tcp_new()+accept (tcp_sndbuf is a pure field read and would technically
+ * be safe, but is hooked too for scriptability independent of mutating the
+ * fake pcb's field — see the .c-side comment on these same macro names). */
+static int8_t test_tcp_write_hook(struct tcp_pcb *pcb, const void *dataptr, uint16_t len,
+                                  uint8_t apiflags);
+#define MQVPN_TCP_LANE_TCP_WRITE(pcb, buf, len, flags) \
+    test_tcp_write_hook((pcb), (buf), (len), (flags))
+
+static uint16_t test_tcp_sndbuf_hook(struct tcp_pcb *pcb);
+#define MQVPN_TCP_LANE_TCP_SNDBUF(pcb) test_tcp_sndbuf_hook(pcb)
+
+static int8_t test_tcp_shutdown_hook(struct tcp_pcb *pcb, int shut_rx, int shut_tx);
+#define MQVPN_TCP_LANE_TCP_SHUTDOWN(pcb, rx, tx) test_tcp_shutdown_hook((pcb), (rx), (tx))
+
+static void test_tcp_output_hook(struct tcp_pcb *pcb);
+#define MQVPN_TCP_LANE_TCP_OUTPUT(pcb) test_tcp_output_hook(pcb)
 
 #include "hybrid/tcp_lane.c"
 
@@ -64,6 +93,163 @@ test_recved_hook(struct tcp_pcb *pcb, unsigned int len)
     (void)pcb;
     g_recved_calls++;
     g_recved_total += len;
+}
+
+/* ─── Task 11 downlink hooks: tcp_write/tcp_sndbuf/tcp_shutdown/tcp_output
+ * observability + scripting ───
+ *
+ * tcp_write: captures every accepted byte (byte-exact assertions, same
+ * discipline as the h3_send capture below) and is scriptable via a small
+ * err_t queue (default ERR_OK == accept, matching real tcp_write's common
+ * case; push ERR_MEM or a generic fatal code to drive the pause/error
+ * paths). tcp_sndbuf: a single settable value (real tcp_sndbuf is a pure
+ * field read with no side effect to script around — one knob suffices).
+ * tcp_shutdown: records call count + args, return scriptable (default
+ * ERR_OK). tcp_output: call-count only (latency-fix observability). */
+
+#define TW_SCRIPT_MAX 16
+static int8_t g_tw_script[TW_SCRIPT_MAX];
+static int g_tw_script_len, g_tw_script_pos;
+static int g_tcp_write_calls;
+static uint8_t g_tcp_write_capture[512 * 1024];
+static size_t g_tcp_write_capture_len;
+
+static void
+tw_script_clear(void)
+{
+    g_tw_script_len = 0;
+    g_tw_script_pos = 0;
+}
+
+static void
+tw_script_push(int8_t v)
+{
+    g_tw_script[g_tw_script_len++] = v;
+}
+
+static int8_t
+test_tcp_write_hook(struct tcp_pcb *pcb, const void *dataptr, uint16_t len,
+                    uint8_t apiflags)
+{
+    (void)pcb;
+    (void)apiflags;
+    g_tcp_write_calls++;
+    int8_t ret = ERR_OK;
+    if (g_tw_script_pos < g_tw_script_len) {
+        ret = g_tw_script[g_tw_script_pos++];
+    }
+    if (ret == ERR_OK && dataptr) {
+        size_t room = sizeof(g_tcp_write_capture) - g_tcp_write_capture_len;
+        size_t n = ((size_t)len <= room) ? (size_t)len : room;
+        memcpy(g_tcp_write_capture + g_tcp_write_capture_len, dataptr, n);
+        g_tcp_write_capture_len += n;
+    }
+    return ret;
+}
+
+static uint16_t g_tcp_sndbuf_value = 0xFFFFu; /* default: plenty of room */
+
+static uint16_t
+test_tcp_sndbuf_hook(struct tcp_pcb *pcb)
+{
+    (void)pcb;
+    return g_tcp_sndbuf_value;
+}
+
+static int g_tcp_shutdown_calls;
+static int g_tcp_shutdown_last_rx, g_tcp_shutdown_last_tx;
+static int8_t g_tcp_shutdown_ret = ERR_OK;
+
+static int8_t
+test_tcp_shutdown_hook(struct tcp_pcb *pcb, int shut_rx, int shut_tx)
+{
+    (void)pcb;
+    g_tcp_shutdown_calls++;
+    g_tcp_shutdown_last_rx = shut_rx;
+    g_tcp_shutdown_last_tx = shut_tx;
+    return g_tcp_shutdown_ret;
+}
+
+static int g_tcp_output_calls;
+
+static void
+test_tcp_output_hook(struct tcp_pcb *pcb)
+{
+    (void)pcb;
+    g_tcp_output_calls++;
+}
+
+/* ─── cli_tcp_lane_h3_recv test double (real impl: mqvpn_client.c) ───
+ *
+ * Scripted delivery queue simulating the server's H3 response body: each
+ * entry is either a data chunk (with an optional fin), a bare AGAIN, or a
+ * bare ERR. Default on an exhausted script is AGAIN (NOT "accept
+ * everything" like h3_send's double) — that is what makes the drain loop
+ * inside mqvpn_tcp_lane_downlink_pump actually terminate once a test's
+ * scripted deliveries run out, mirroring xquic's real "nothing more
+ * buffered right now" signal. */
+
+typedef struct {
+    const uint8_t *data;
+    size_t len;
+    int fin;
+    int special; /* 0 = normal, 1 = AGAIN, 2 = ERR */
+} h3_recv_entry_t;
+
+#define H3_RECV_SCRIPT_MAX 32
+static h3_recv_entry_t g_h3_recv_script[H3_RECV_SCRIPT_MAX];
+static int g_h3_recv_script_len, g_h3_recv_script_pos;
+static int g_h3_recv_calls;
+
+static void
+h3_recv_script_clear(void)
+{
+    g_h3_recv_script_len = 0;
+    g_h3_recv_script_pos = 0;
+}
+
+static void
+h3_recv_push_data(const uint8_t *data, size_t len, int fin)
+{
+    h3_recv_entry_t *e = &g_h3_recv_script[g_h3_recv_script_len++];
+    e->data = data;
+    e->len = len;
+    e->fin = fin;
+    e->special = 0;
+}
+
+static void
+h3_recv_push_again(void)
+{
+    h3_recv_entry_t *e = &g_h3_recv_script[g_h3_recv_script_len++];
+    e->special = 1;
+}
+
+static void
+h3_recv_push_err(void)
+{
+    h3_recv_entry_t *e = &g_h3_recv_script[g_h3_recv_script_len++];
+    e->special = 2;
+}
+
+ssize_t
+cli_tcp_lane_h3_recv(void *h3_request, uint8_t *buf, size_t len, int *fin)
+{
+    (void)h3_request;
+    g_h3_recv_calls++;
+    if (g_h3_recv_script_pos >= g_h3_recv_script_len) {
+        return MQVPN_TCP_LANE_H3_RECV_AGAIN;
+    }
+    h3_recv_entry_t *e = &g_h3_recv_script[g_h3_recv_script_pos++];
+    if (e->special == 1) return MQVPN_TCP_LANE_H3_RECV_AGAIN;
+    if (e->special == 2) return MQVPN_TCP_LANE_H3_RECV_ERR;
+    size_t n = e->len;
+    if (n > len) n = len; /* test chunks are always <= the TCP_MSS scratch buffer */
+    if (n > 0 && e->data) {
+        memcpy(buf, e->data, n);
+    }
+    *fin = e->fin;
+    return (ssize_t)n;
 }
 
 /* ─── cli_tcp_lane_h3_send test double (real impl: mqvpn_client.c) ───
@@ -161,6 +347,12 @@ static uint8_t g_expected[512 * 1024];
 static size_t g_expected_len;
 static uint8_t g_seq;
 
+/* Backing store for scripted downlink byte chunks — declared here (not next
+ * to mk_dl_bytes below) so relay_reset can clear g_dl_src_len. */
+#define DL_SRC_MAX (256 * 1024)
+static uint8_t g_dl_src[DL_SRC_MAX];
+static size_t g_dl_src_len;
+
 static void
 relay_reset(void)
 {
@@ -176,6 +368,20 @@ relay_reset(void)
     g_expected_len = 0;
     g_seq = 0;
     g_fake_now = 12345;
+
+    /* Task 11 downlink test-double state. */
+    tw_script_clear();
+    g_tcp_write_calls = 0;
+    g_tcp_write_capture_len = 0;
+    g_tcp_sndbuf_value = 0xFFFFu;
+    g_tcp_shutdown_calls = 0;
+    g_tcp_shutdown_last_rx = 0;
+    g_tcp_shutdown_last_tx = 0;
+    g_tcp_shutdown_ret = ERR_OK;
+    g_tcp_output_calls = 0;
+    h3_recv_script_clear();
+    g_h3_recv_calls = 0;
+    g_dl_src_len = 0;
 }
 
 /* Real PBUF_RAM pbuf (MEM_LIBC_MALLOC=1 => plain malloc; no lwip_init or
@@ -221,6 +427,25 @@ mk_pbuf_chain(const uint16_t *seg_lens, int n)
         }
     }
     return head;
+}
+
+/* Backing store for scripted downlink byte chunks (h3_recv_push_data needs
+ * pointers that stay alive across the whole test) — mirrors mk_pbuf's
+ * rolling g_seq/g_expected pattern above so downlink tests get the same
+ * byte-exact assertion style. Variables declared alongside g_expected/g_seq
+ * above (relay_reset needs g_dl_src_len in scope); only the helper function
+ * lives here. */
+static const uint8_t *
+mk_dl_bytes(size_t len)
+{
+    uint8_t *start = g_dl_src + g_dl_src_len;
+    for (size_t i = 0; i < len; i++) {
+        start[i] = g_seq;
+        g_expected[g_expected_len++] = g_seq;
+        g_seq++;
+    }
+    g_dl_src_len += len;
+    return start;
 }
 
 /* SYN-commit + fake-pcb accept + bind (+ optional 2xx establish) — the same
@@ -1034,7 +1259,12 @@ test_relay_chained_pbuf_gt_mss(void)
  * contract (Task 12 will modify that function — this is the regression
  * anchor). CLOSING, queue freed + counters zeroed, withholding bookkeeping
  * cleared, and a subsequent recv is dropped (no send attempt, no recved, no
- * new queueing — the pbuf is freed inside the callback). */
+ * new queueing — the pbuf is freed inside the callback).
+ *
+ * Task 11 addition: on_relay_error now also frees the downlink stash slot
+ * and clears downlink_paused (see its updated .c-side comment) — a CLOSING
+ * flow must never look "paused" (nothing will ever resume it) and the
+ * stashed chunk, like the uplink queue, must not survive teardown. */
 static void
 assert_flow_failed_closed(mqvpn_tcp_lane_t *lane, mqvpn_tcp_flow_t *f,
                           struct tcp_pcb *pcb)
@@ -1046,6 +1276,9 @@ assert_flow_failed_closed(mqvpn_tcp_lane_t *lane, mqvpn_tcp_flow_t *f,
     ASSERT_EQ_INT(f->uplink_queued_bytes, 0, "queued_bytes zeroed");
     ASSERT_EQ_INT(f->uplink_withheld, 0, "withheld flag cleared");
     ASSERT_EQ_INT(f->uplink_withheld_recved, 0, "deferred-recved total cleared");
+    ASSERT_TRUE(f->downlink_stash == NULL, "downlink stash freed on relay error");
+    ASSERT_EQ_INT(f->downlink_stash_len, 0, "downlink stash length cleared");
+    ASSERT_EQ_INT(f->downlink_paused, 0, "downlink_paused cleared on relay error");
 
     int sends_before = g_h3_send_calls;
     int recved_before = g_recved_calls;
@@ -1229,6 +1462,316 @@ test_relay_fin_during_pending_stream(void)
     mqvpn_tcp_lane_free(lane);
 }
 
+/* ─── Task 11: downlink relay (H3 recv_body -> lwIP tcp_write) ───
+ *
+ * Same fixtures/idioms as the Task 10 uplink section above: setup_flow()
+ * for a bound+established flow, relay_reset() before every test, byte-exact
+ * assertions against a rolling g_seq pattern (mk_dl_bytes here instead of
+ * mk_pbuf — the "source" is a scripted H3 recv_body delivery, not a pbuf). */
+
+static void
+test_downlink_basic(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xd001ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 7100, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    const uint8_t *c1 = mk_dl_bytes(500);
+    const uint8_t *c2 = mk_dl_bytes(300);
+    h3_recv_push_data(c1, 500, 0);
+    h3_recv_push_data(c2, 300, 0);
+    /* script exhausted after these two -> AGAIN, pump loop terminates */
+
+    ASSERT_EQ_INT(mqvpn_tcp_lane_downlink_pump(lane, &fake_stream), 0, "pump returns 0");
+
+    ASSERT_EQ_INT(g_tcp_write_calls, 2, "one tcp_write per scripted chunk");
+    ASSERT_EQ_INT(g_tcp_write_capture_len, 800, "both chunks written");
+    ASSERT_TRUE(memcmp(g_tcp_write_capture, g_expected, 800) == 0,
+                "byte-exact relay, no dup/gap");
+    ASSERT_EQ_INT(g_tcp_output_calls, 1,
+                  "tcp_output called exactly once per pump, not once per write");
+    ASSERT_EQ_INT(f->downlink_paused, 0, "not paused");
+    ASSERT_EQ_INT(f->fin_received_from_h3, 0, "no fin yet");
+    ASSERT_EQ_INT(g_tcp_shutdown_calls, 0, "no shutdown without fin");
+
+    /* NULL/unknown-stream tolerance, mirrors on_h3_writable's coverage. */
+    ASSERT_EQ_INT(mqvpn_tcp_lane_downlink_pump(NULL, &fake_stream), 0,
+                  "NULL lane tolerated");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_downlink_pump(lane, NULL), 0, "NULL stream tolerated");
+    int unrelated;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_downlink_pump(lane, &unrelated), 0,
+                  "unknown stream tolerated");
+
+    f->pcb = NULL;
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_downlink_err_mem_stash_and_resume(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xd002ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 7200, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    const uint8_t *c1 = mk_dl_bytes(400);
+    const uint8_t *c2 = mk_dl_bytes(600);
+    h3_recv_push_data(c1, 400, 0);
+    h3_recv_push_data(c2, 600, 0);
+    tw_script_push(ERR_MEM); /* first tcp_write fails transiently */
+
+    mqvpn_tcp_lane_downlink_pump(lane, &fake_stream);
+
+    ASSERT_EQ_INT(g_h3_recv_calls, 1,
+                  "recv stopped after the failed write — c2 not read yet");
+    ASSERT_EQ_INT(g_tcp_write_calls, 1, "one write attempt");
+    ASSERT_EQ_INT(g_tcp_write_capture_len, 0, "nothing captured on ERR_MEM");
+    ASSERT_EQ_INT(f->downlink_paused, 1, "paused on ERR_MEM");
+    ASSERT_TRUE(f->downlink_stash != NULL, "stash allocated");
+    ASSERT_EQ_INT(f->downlink_stash_len, 400, "stash holds the failed chunk");
+    ASSERT_EQ_INT(g_tcp_output_calls, 0, "no output attempted — nothing was written");
+
+    /* A pump call while paused must stay a no-op — resume is on_lwip_sent's
+     * job only, not a re-drive from an ordinary READ_BODY/writable notify. */
+    ASSERT_EQ_INT(mqvpn_tcp_lane_downlink_pump(lane, &fake_stream), 0,
+                  "pump while paused is a no-op");
+    ASSERT_EQ_INT(g_h3_recv_calls, 1, "still no further recv while paused");
+
+    /* on_lwip_sent: sndbuf recovered enough for the stash. */
+    g_tcp_sndbuf_value = 0xFFFFu;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_lwip_sent(f, &pcb, 0), ERR_OK,
+                  "sent notify tolerated");
+
+    ASSERT_EQ_INT(f->downlink_paused, 0, "resumed");
+    ASSERT_EQ_INT(f->downlink_stash_len, 0, "stash slot drained");
+    ASSERT_EQ_INT(g_tcp_write_calls, 3, "stash flush + the resumed pump's write for c2");
+    ASSERT_EQ_INT(g_tcp_write_capture_len, 1000, "both chunks eventually written");
+    ASSERT_TRUE(
+        memcmp(g_tcp_write_capture, g_expected, 1000) == 0,
+        "byte-exact whole stream: stash (c1) flushed BEFORE the resumed drain (c2)");
+    /* 3, not 2: c1 (before the pause) + c2 (on resume) + one more call that
+     * returns AGAIN (the drain loop always re-checks after the last real
+     * chunk to confirm it's actually drained, per the recv contract). */
+    ASSERT_EQ_INT(g_h3_recv_calls, 3, "c2 read on resume, then AGAIN confirms drained");
+    ASSERT_TRUE(g_tcp_output_calls >= 1,
+                "tcp_output called on the flush and/or resumed pump");
+
+    f->pcb = NULL;
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_downlink_sndbuf_gate(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xd003ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 7300, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    /* First notify: ample sndbuf, chunk fits and writes normally. */
+    const uint8_t *c1 = mk_dl_bytes(200);
+    h3_recv_push_data(c1, 200, 0);
+    mqvpn_tcp_lane_downlink_pump(lane, &fake_stream);
+    ASSERT_EQ_INT(g_tcp_write_calls, 1, "first chunk written");
+    ASSERT_EQ_INT(g_tcp_write_capture_len, 200, "first chunk captured");
+    ASSERT_EQ_INT(f->downlink_paused, 0, "not paused after the first chunk");
+
+    /* Second notify: sndbuf has since shrunk below the chunk size — the
+     * SNDBUF gate must catch this BEFORE ever attempting tcp_write (distinct
+     * code path from the ERR_MEM-after-attempt case above). */
+    h3_recv_script_clear();
+    g_tcp_sndbuf_value = 50;
+    const uint8_t *c2 = mk_dl_bytes(300);
+    h3_recv_push_data(c2, 300, 0);
+    mqvpn_tcp_lane_downlink_pump(lane, &fake_stream);
+
+    ASSERT_EQ_INT(g_tcp_write_calls, 1,
+                  "no tcp_write attempt for the sndbuf-blocked chunk");
+    ASSERT_EQ_INT(g_tcp_write_capture_len, 200,
+                  "capture unchanged — second chunk not written");
+    ASSERT_EQ_INT(f->downlink_paused, 1, "paused on the sndbuf gate");
+    ASSERT_TRUE(f->downlink_stash != NULL, "stash allocated");
+    ASSERT_EQ_INT(f->downlink_stash_len, 300, "stash holds the blocked chunk");
+
+    f->pcb = NULL;
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_downlink_fin_with_data(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xd004ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 7400, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    const uint8_t *c1 = mk_dl_bytes(250);
+    h3_recv_push_data(c1, 250, 1); /* fin delivered WITH the final data chunk */
+
+    mqvpn_tcp_lane_downlink_pump(lane, &fake_stream);
+
+    ASSERT_EQ_INT(g_tcp_write_calls, 1, "the data was written");
+    ASSERT_EQ_INT(g_tcp_write_capture_len, 250, "all 250 bytes captured");
+    ASSERT_TRUE(memcmp(g_tcp_write_capture, g_expected, 250) == 0, "byte-exact");
+    ASSERT_EQ_INT(f->fin_received_from_h3, 1, "fin_received_from_h3 set");
+    ASSERT_EQ_INT(g_tcp_shutdown_calls, 1, "tcp_shutdown called exactly once");
+    ASSERT_EQ_INT(g_tcp_shutdown_last_rx, 0, "shut_rx == 0 (TX-side half-close only)");
+    ASSERT_EQ_INT(g_tcp_shutdown_last_tx, 1, "shut_tx == 1");
+    ASSERT_EQ_INT(g_tcp_output_calls, 1, "output flushed for the data write");
+
+    /* A further pump call must not re-fire tcp_shutdown (idempotent via
+     * fin_received_from_h3), even if somehow re-notified. */
+    mqvpn_tcp_lane_downlink_pump(lane, &fake_stream);
+    ASSERT_EQ_INT(g_tcp_shutdown_calls, 1, "shutdown not re-fired on a later pump");
+
+    f->pcb = NULL;
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_downlink_fin_only(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xd005ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 7500, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    h3_recv_push_data(NULL, 0, 1); /* bare fin, no data */
+
+    mqvpn_tcp_lane_downlink_pump(lane, &fake_stream);
+
+    ASSERT_EQ_INT(g_tcp_write_calls, 0, "no data means no tcp_write attempt");
+    ASSERT_EQ_INT(f->fin_received_from_h3, 1, "fin_received_from_h3 set");
+    ASSERT_EQ_INT(g_tcp_shutdown_calls, 1, "tcp_shutdown called exactly once");
+    ASSERT_EQ_INT(g_tcp_output_calls, 0,
+                  "tcp_output NOT called — nothing was written this pump");
+
+    f->pcb = NULL;
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_downlink_fin_while_paused(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xd006ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 7600, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    /* c2 carries the fin but sits UNREAD behind the pause — the pump stops
+     * consuming recv_body the instant c1's write fails, so it never even
+     * gets to look at c2 yet. This is the "fin still undelivered in xquic's
+     * buffer at pause time" scenario the reconciliation note calls out. */
+    const uint8_t *c1 = mk_dl_bytes(300);
+    const uint8_t *c2 = mk_dl_bytes(200);
+    h3_recv_push_data(c1, 300, 0);
+    h3_recv_push_data(c2, 200, 1);
+    tw_script_push(ERR_MEM);
+
+    mqvpn_tcp_lane_downlink_pump(lane, &fake_stream);
+
+    ASSERT_EQ_INT(g_h3_recv_calls, 1, "only c1 read before the pause");
+    ASSERT_EQ_INT(f->downlink_paused, 1, "paused");
+    ASSERT_EQ_INT(f->downlink_stash_len, 300, "c1 stashed");
+    ASSERT_EQ_INT(g_tcp_shutdown_calls, 0, "fin not reached yet — no shutdown");
+    ASSERT_EQ_INT(f->fin_received_from_h3, 0, "fin not observed yet");
+
+    /* Resume: stash flush writes c1, then the pump's own resume call reads
+     * and writes c2, observes fin, and shuts down — the fin is never lost. */
+    g_tcp_sndbuf_value = 0xFFFFu;
+    mqvpn_tcp_lane_on_lwip_sent(f, &pcb, 0);
+
+    ASSERT_EQ_INT(f->downlink_paused, 0, "resumed");
+    ASSERT_EQ_INT(g_h3_recv_calls, 2, "c2 read on resume");
+    ASSERT_EQ_INT(g_tcp_write_capture_len, 500,
+                  "both chunks written, byte-exact whole stream");
+    ASSERT_TRUE(memcmp(g_tcp_write_capture, g_expected, 500) == 0,
+                "c1 then c2, no dup/gap");
+    ASSERT_EQ_INT(f->fin_received_from_h3, 1, "fin observed on resume");
+    ASSERT_EQ_INT(g_tcp_shutdown_calls, 1, "shutdown fired on resume — fin never lost");
+
+    f->pcb = NULL;
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_downlink_fatal_recv_error(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xd007ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 7700, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    h3_recv_push_err();
+    ASSERT_EQ_INT(mqvpn_tcp_lane_downlink_pump(lane, &fake_stream), -1,
+                  "pump returns -1 on a fatal recv error");
+    ASSERT_EQ_INT(g_tcp_write_calls, 0, "no write attempted");
+
+    assert_flow_failed_closed(lane, f, &pcb);
+    f->pcb = NULL;
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_downlink_pump_on_closing_flow(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xd008ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 7800, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    /* Force CLOSING directly (Task 12 owns the real teardown path; this
+     * only needs the state, matching test_accept_key_correspondence's use
+     * of on_stream_rejected as a state-setting tool). */
+    mqvpn_tcp_lane_on_stream_rejected(lane, &fake_stream);
+    ASSERT_EQ_INT(f->state, TCP_FLOW_CLOSING, "flow forced CLOSING");
+
+    const uint8_t *c1 = mk_dl_bytes(100);
+    h3_recv_push_data(c1, 100, 0);
+
+    ASSERT_EQ_INT(mqvpn_tcp_lane_downlink_pump(lane, &fake_stream), 0,
+                  "pump on CLOSING flow returns 0");
+    ASSERT_EQ_INT(g_h3_recv_calls, 0, "recv_body never called for a CLOSING flow");
+    ASSERT_EQ_INT(g_tcp_write_calls, 0, "no write for a CLOSING flow");
+    ASSERT_EQ_INT(g_tcp_output_calls, 0, "no output for a CLOSING flow");
+
+    f->pcb = NULL;
+    mqvpn_tcp_lane_free(lane);
+}
+
 int
 main(void)
 {
@@ -1249,6 +1792,14 @@ main(void)
     test_relay_fatal_error_paths();
     test_relay_lane_free_with_queued_backlog();
     test_relay_fin_during_pending_stream();
+    test_downlink_basic();
+    test_downlink_err_mem_stash_and_resume();
+    test_downlink_sndbuf_gate();
+    test_downlink_fin_with_data();
+    test_downlink_fin_only();
+    test_downlink_fin_while_paused();
+    test_downlink_fatal_recv_error();
+    test_downlink_pump_on_closing_flow();
 
     fprintf(stderr, "test_tcp_lane: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

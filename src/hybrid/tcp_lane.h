@@ -130,6 +130,22 @@ void mqvpn_tcp_lane_on_stream_rejected(mqvpn_tcp_lane_t *lane, void *stream);
  * whose acknowledgment-to-lwIP was deferred). */
 int mqvpn_tcp_lane_on_h3_writable(mqvpn_tcp_lane_t *lane, void *stream);
 
+/* H3 downlink body/EMPTY_FIN notify (Task 11): drain the flow's H3 response
+ * body into lwIP via tcp_write, gated by tcp_sndbuf (mirrors the uplink's
+ * xquic-EAGAIN gate, just the other direction). `stream` is the same opaque
+ * cli_stream_t* used by the functions above (flow located the same way).
+ * No-ops (returns 0) on: unknown stream, CLOSING flow (dying, never
+ * consumes recv_body), or a flow already paused on sndbuf backpressure
+ * (deliberately not draining — xquic's per-stream flow control then
+ * backpressures the server, mirroring the uplink's EAGAIN backpressure).
+ * Also called from the sndbuf-recovered resume path (mqvpn_tcp_lane's own
+ * lwIP sent callback) to continue draining after a pause. Returns 0 on
+ * success/no-op, -1 on a fatal relay error (the flow is already routed to
+ * CLOSING internally via on_relay_error before this returns — callers must
+ * NOT propagate -1 to xquic as a stream/connection error; see
+ * cli_connect_tcp_on_body's contract comment in mqvpn_client.c for why). */
+int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
+
 /* ─── Uplink backpressure watermarks (Task 10) ───
  *
  * Internal compile-time constants, deliberately NOT public config (rev2
@@ -160,6 +176,18 @@ int mqvpn_tcp_lane_on_h3_writable(mqvpn_tcp_lane_t *lane, void *stream);
                                          * the next writable notify */
 #define MQVPN_TCP_LANE_H3_SEND_ERR (-2) /* fatal stream error */
 
+/* cli_tcp_lane_h3_recv return contract (Task 11, same normalization
+ * boundary as h3_send above). Verified against xqc_h3_request_recv_body
+ * (third_party/xquic src/http3/xqc_h3_request.c): fin may be signaled
+ * EITHER with the final data chunk in the SAME call (n > 0 && *fin) OR on
+ * its own zero-byte call (n == 0 && *fin) — both are real, reachable wire
+ * shapes, not a plan simplification. *fin is only meaningful when the
+ * return value is >= 0. */
+#define MQVPN_TCP_LANE_H3_RECV_AGAIN                                       \
+    (-1) /* drained for now (would-block) — retry on the next READ_BODY/ \
+          * EMPTY_FIN notify */
+#define MQVPN_TCP_LANE_H3_RECV_ERR (-2) /* fatal stream error */
+
 /* Implemented in mqvpn_client.c — the deliberate tcp_lane.c →
  * mqvpn_client.c coupling points (direct .c-to-.c calls, no callback-pointer
  * indirection: exactly one impl + minimal call sites each; the one-way
@@ -175,6 +203,14 @@ void cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle,
  * MQVPN_TCP_LANE_H3_SEND_AGAIN, or MQVPN_TCP_LANE_H3_SEND_ERR. buf may be
  * NULL only when len == 0. */
 ssize_t cli_tcp_lane_h3_send(void *h3_request, const uint8_t *buf, size_t len, int fin);
+
+/* Recv downlink body bytes from the flow's bound H3 request (Task 11). buf/
+ * len is the caller's scratch buffer; *fin is written 1 when the request's
+ * FIN has been observed (see the MQVPN_TCP_LANE_H3_RECV_* contract above for
+ * exactly when that can co-occur with data). Returns bytes read (may be 0
+ * with *fin == 1 for a fin-only delivery), MQVPN_TCP_LANE_H3_RECV_AGAIN, or
+ * MQVPN_TCP_LANE_H3_RECV_ERR. *fin is undefined on a negative return. */
+ssize_t cli_tcp_lane_h3_recv(void *h3_request, uint8_t *buf, size_t len, int *fin);
 
 /* Sticky-lane lookup: returns 1 if found (fills *out_raw: 1 if sticky-RAW,
  * 0 if active/pending TCP-lane flow), 0 if brand-new (caller decides policy
