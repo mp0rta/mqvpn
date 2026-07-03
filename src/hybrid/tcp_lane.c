@@ -348,6 +348,13 @@ mqvpn_tcp_lane_on_relay_error(mqvpn_tcp_flow_t *f)
 {
     f->state = TCP_FLOW_CLOSING;
     tcp_lane_uplink_queue_free(f);
+    /* Clear the withholding bookkeeping too: a CLOSING flow never runs the
+     * low-water resume, so leaving these set would hand Task 12's teardown
+     * stale "recved still owed" state. The never-sent tcp_recved is moot —
+     * Task 12 tcp_abort()s the pcb (RST), discarding the window accounting
+     * wholesale. */
+    f->uplink_withheld = 0;
+    f->uplink_withheld_recved = 0;
 }
 
 /* Hand p's bytes [offset, tot_len) to the H3 stream. Returns the new offset
@@ -464,7 +471,7 @@ tcp_lane_uplink_flush(mqvpn_tcp_flow_t *f)
             mqvpn_tcp_lane_on_relay_error(f);
             return;
         }
-        f->uplink_queued_bytes -= (uint32_t)off - n->offset;
+        f->uplink_queued_bytes -= ((uint32_t)off - n->offset);
         n->offset = (uint16_t)off;
         if (n->offset < n->p->tot_len) {
             break; /* backpressure — retry from here on the next notify */

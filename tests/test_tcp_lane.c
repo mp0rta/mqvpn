@@ -1030,6 +1030,205 @@ test_relay_chained_pbuf_gt_mss(void)
     mqvpn_tcp_lane_free(lane);
 }
 
+/* Shared post-fatal-error checks: pins mqvpn_tcp_lane_on_relay_error's full
+ * contract (Task 12 will modify that function — this is the regression
+ * anchor). CLOSING, queue freed + counters zeroed, withholding bookkeeping
+ * cleared, and a subsequent recv is dropped (no send attempt, no recved, no
+ * new queueing — the pbuf is freed inside the callback). */
+static void
+assert_flow_failed_closed(mqvpn_tcp_lane_t *lane, mqvpn_tcp_flow_t *f,
+                          struct tcp_pcb *pcb)
+{
+    (void)lane;
+    ASSERT_EQ_INT(f->state, TCP_FLOW_CLOSING, "fatal send error -> CLOSING");
+    ASSERT_TRUE(f->uplink_q_head == NULL && f->uplink_q_tail == NULL,
+                "queue freed on relay error");
+    ASSERT_EQ_INT(f->uplink_queued_bytes, 0, "queued_bytes zeroed");
+    ASSERT_EQ_INT(f->uplink_withheld, 0, "withheld flag cleared");
+    ASSERT_EQ_INT(f->uplink_withheld_recved, 0, "deferred-recved total cleared");
+
+    int sends_before = g_h3_send_calls;
+    int recved_before = g_recved_calls;
+    struct pbuf *late = mk_pbuf(100);
+    ASSERT_TRUE(late != NULL, "late pbuf alloc");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_lwip_recv(f, pcb, late, ERR_OK), ERR_OK,
+                  "recv on CLOSING flow tolerated");
+    ASSERT_EQ_INT(g_h3_send_calls, sends_before, "no send attempt on CLOSING flow");
+    ASSERT_EQ_INT(g_recved_calls, recved_before, "no recved on CLOSING flow");
+    ASSERT_TRUE(f->uplink_q_head == NULL, "late pbuf dropped, not queued");
+    ASSERT_EQ_INT(f->uplink_queued_bytes, 0, "queued_bytes stays 0 after drop");
+    /* late's 100 bytes were mirrored into g_expected by mk_pbuf but dropped
+     * by design; roll them back so later capture==expected checks (if any)
+     * stay aligned. */
+    g_expected_len -= 100;
+}
+
+static void
+test_relay_fatal_error_paths(void)
+{
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+
+    /* (a) Fatal error on the ACTIVE fast-path send (first attempt, empty
+     * queue — the recv callback's direct send_from). */
+    relay_reset();
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0x9999ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 5900, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    h3_script_push(MQVPN_TCP_LANE_H3_SEND_ERR);
+    struct pbuf *p = mk_pbuf(500);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_lwip_recv(f, &pcb, p, ERR_OK), ERR_OK,
+                  "recv returns ERR_OK even on fatal send error");
+    g_expected_len -= 500; /* bytes were never relayed; keep mirror aligned */
+    ASSERT_EQ_INT(g_h3_capture_len, 0, "no bytes captured on immediate fatal error");
+    assert_flow_failed_closed(lane, f, &pcb);
+    f->pcb = NULL;
+
+    /* (b) Fatal error mid-flush with a non-empty queue: EAGAIN builds a
+     * 2-node backlog, then the writable retry hits the hard error — BOTH
+     * queued nodes must be freed, not just the failing head. */
+    relay_reset();
+    struct tcp_pcb pcb2;
+    int fake_req2, fake_stream2;
+    mqvpn_tcp_flow_t *f2 = setup_flow(lane, &pcb2, 5901, &fake_req2, &fake_stream2, 1);
+    ASSERT_TRUE(f2 != NULL, "flow established");
+
+    h3_script_push(MQVPN_TCP_LANE_H3_SEND_AGAIN);
+    struct pbuf *q1 = mk_pbuf(700);
+    struct pbuf *q2 = mk_pbuf(800);
+    mqvpn_tcp_lane_on_lwip_recv(f2, &pcb2, q1, ERR_OK); /* EAGAIN -> stash */
+    mqvpn_tcp_lane_on_lwip_recv(f2, &pcb2, q2, ERR_OK); /* backlog -> stash */
+    ASSERT_EQ_INT(f2->uplink_queued_bytes, 1500, "two nodes backlogged");
+    ASSERT_EQ_INT(f2->uplink_withheld, 1, "withheld under backpressure");
+
+    h3_script_push(MQVPN_TCP_LANE_H3_SEND_ERR);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_h3_writable(lane, &fake_stream2), 0,
+                  "writable returns 0 even when the retry hits a fatal error");
+    g_expected_len -= 1500;
+    ASSERT_EQ_INT(g_h3_capture_len, 0, "nothing relayed before the mid-flush error");
+    assert_flow_failed_closed(lane, f2, &pcb2);
+    f2->pcb = NULL;
+
+    /* (c) Fatal error on the FIN send (empty queue, recv(NULL) drives
+     * maybe_fin directly): must also fail closed, NOT stay ACTIVE with a
+     * FIN that can never be delivered. */
+    relay_reset();
+    struct tcp_pcb pcb3;
+    int fake_req3, fake_stream3;
+    mqvpn_tcp_flow_t *f3 = setup_flow(lane, &pcb3, 5902, &fake_req3, &fake_stream3, 1);
+    ASSERT_TRUE(f3 != NULL, "flow established");
+    ASSERT_TRUE(f3->uplink_q_head == NULL, "queue starts empty");
+
+    h3_script_push(MQVPN_TCP_LANE_H3_SEND_ERR);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_lwip_recv(f3, &pcb3, NULL, ERR_OK), ERR_OK,
+                  "recv(NULL) tolerated when the fin send fails");
+    ASSERT_EQ_INT(f3->tcp_fin_seen, 1, "tcp_fin_seen latched before the attempt");
+    ASSERT_EQ_INT(f3->fin_sent_to_h3, 0, "fin NOT marked sent on fatal error");
+    ASSERT_EQ_INT(g_h3_fin_attempts, 1, "exactly one fin attempt");
+    assert_flow_failed_closed(lane, f3, &pcb3);
+    f3->pcb = NULL;
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_relay_lane_free_with_queued_backlog(void)
+{
+    /* Teardown-owns-the-queue: lane_free on a flow with ~90 KB still queued
+     * must free every node AND pbuf (tcp_lane_uplink_queue_free runs in the
+     * teardown loop). Leak-checked by the sanitizer build; the normal run
+     * still pins "no crash / no double-free". Same shape as
+     * test_relay_repeated_eagain_writable but WITHOUT the final draining
+     * writable notify. */
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xaaaaULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 6000, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    h3_script_push(MQVPN_TCP_LANE_H3_SEND_AGAIN);
+    struct pbuf *p1 = mk_pbuf(30000);
+    struct pbuf *p2 = mk_pbuf(30000);
+    struct pbuf *p3 = mk_pbuf(30000);
+    mqvpn_tcp_lane_on_lwip_recv(f, &pcb, p1, ERR_OK);
+    mqvpn_tcp_lane_on_lwip_recv(f, &pcb, p2, ERR_OK);
+    mqvpn_tcp_lane_on_lwip_recv(f, &pcb, p3, ERR_OK);
+    ASSERT_EQ_INT(f->uplink_queued_bytes, 90000, "90 KB backlogged, never drained");
+    ASSERT_TRUE(f->uplink_q_head != NULL, "queue non-empty at teardown");
+    g_expected_len -= 90000; /* never relayed */
+
+    f->pcb = NULL; /* stack-fake pcb, detach before the abort loop */
+    mqvpn_tcp_lane_free(lane);
+    /* Success criterion beyond "didn't crash" is the sanitizer build: ASan
+     * flags any leaked pbuf/node or double pbuf_free here. */
+    ASSERT_TRUE(1, "lane_free with a queued backlog completed");
+}
+
+static void
+test_relay_fin_during_pending_stream(void)
+{
+    /* Data + FIN both arrive PRE-2xx (PENDING_STREAM): nothing may be sent
+     * before the gate; on establish the flush must send the data first and
+     * the fin strictly last. The fin's first attempt is scripted EAGAIN to
+     * also cover maybe_fin's AGAIN branch (fin stays pending — tcp_fin_seen
+     * && !fin_sent_to_h3 IS the retry state) and its writable-notify
+     * completion. */
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xbbbbULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f =
+        setup_flow(lane, &pcb, 6100, &fake_req, &fake_stream, 0 /* pre-2xx */);
+    ASSERT_TRUE(f != NULL, "flow bound, PENDING_STREAM");
+
+    struct pbuf *p = mk_pbuf(600);
+    mqvpn_tcp_lane_on_lwip_recv(f, &pcb, p, ERR_OK);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_lwip_recv(f, &pcb, NULL, ERR_OK), ERR_OK,
+                  "recv(NULL) pre-2xx tolerated");
+    ASSERT_EQ_INT(f->tcp_fin_seen, 1, "tcp_fin_seen latched while PENDING_STREAM");
+    ASSERT_EQ_INT(g_h3_send_calls, 0, "no data AND no fin sent before the 2xx gate");
+    ASSERT_EQ_INT(f->uplink_queued_bytes, 600, "data buffered pre-2xx");
+
+    /* 2xx: flush sends the data (script[0] full accept), then the fin
+     * attempt gets script[1] = AGAIN -> stays pending. */
+    h3_script_push(600);
+    h3_script_push(MQVPN_TCP_LANE_H3_SEND_AGAIN);
+    mqvpn_tcp_lane_on_stream_established(lane, &fake_stream);
+
+    ASSERT_EQ_INT(f->state, TCP_FLOW_ACTIVE, "established");
+    ASSERT_EQ_INT(g_h3_capture_len, 600, "data relayed on establish");
+    ASSERT_TRUE(memcmp(g_h3_capture, g_expected, 600) == 0, "data byte-exact");
+    ASSERT_EQ_INT(g_h3_fin_attempts, 1, "fin attempted after the data drained");
+    ASSERT_EQ_INT(f->fin_sent_to_h3, 0, "fin still pending after EAGAIN");
+    ASSERT_TRUE(f->uplink_q_head == NULL, "data queue empty — only the fin is pending");
+
+    /* Writable notify: queue already empty, so flush goes straight to
+     * maybe_fin; script exhausted -> accepted. */
+    mqvpn_tcp_lane_on_h3_writable(lane, &fake_stream);
+
+    ASSERT_EQ_INT(f->fin_sent_to_h3, 1, "fin sent on the writable retry");
+    ASSERT_EQ_INT(g_h3_fin_attempts, 2, "exactly one fin retry");
+    ASSERT_EQ_INT(g_h3_log_len, 3, "data + fin(EAGAIN) + fin(accepted)");
+    ASSERT_TRUE(g_h3_log[0].len == 600 && g_h3_log[0].fin == 0,
+                "log[0]: the data send, before any fin");
+    ASSERT_TRUE(g_h3_log[1].len == 0 && g_h3_log[1].fin == 1 && g_h3_log[1].ret < 0,
+                "log[1]: first fin attempt, EAGAIN");
+    ASSERT_TRUE(g_h3_log[2].len == 0 && g_h3_log[2].fin == 1 && g_h3_log[2].ret >= 0,
+                "log[2]: fin strictly last, accepted");
+    ASSERT_EQ_INT(g_h3_capture_len, 600, "no data duplication around the fin retries");
+
+    f->pcb = NULL;
+    mqvpn_tcp_lane_free(lane);
+}
+
 int
 main(void)
 {
@@ -1047,6 +1246,9 @@ main(void)
     test_relay_fin_ordering();
     test_relay_repeated_eagain_writable();
     test_relay_chained_pbuf_gt_mss();
+    test_relay_fatal_error_paths();
+    test_relay_lane_free_with_queued_backlog();
+    test_relay_fin_during_pending_stream();
 
     fprintf(stderr, "test_tcp_lane: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
