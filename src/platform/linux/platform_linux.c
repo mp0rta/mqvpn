@@ -1216,11 +1216,12 @@ cleanup:
  *  Server platform layer
  * ================================================================ */
 
-/* Registry entry mapping one open egress TCP fd (owned by src/hybrid/
- * tcp_egress.c, opened via mqvpn_server_egress_fd_ready-style fd-path mode)
- * to the libevent event multiplexing it. libevent events aren't
- * individually mutable, so a want_read/want_write change means tearing
- * down and recreating the event (see platform_egress_fd_register()). */
+/* Registry entry tracking readiness interest for one egress TCP fd that
+ * the core (src/hybrid/tcp_egress.c) opened and manages itself — the
+ * platform only maps the fd to the libevent event multiplexing it.
+ * libevent events aren't individually mutable, so a want_read/want_write
+ * change means tearing down and recreating the event (see
+ * platform_egress_fd_register()). */
 typedef struct {
     int fd; /* -1 = empty slot */
     struct event *ev;
