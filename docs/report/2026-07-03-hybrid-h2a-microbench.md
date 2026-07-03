@@ -162,6 +162,9 @@ confirmed working by the stable per-second rate.
 bottleneck relative to the ~3–5 Gbit/s QUIC path budget — holds with wide
 margin.
 
-Pending user checkpoint: re-run `sudo bash benchmarks/tcp_lane_microbench/run.sh`
-on the bare host (ip-netns mode) to confirm the container numbers; the
-script auto-selects that mode when run as root.
+Bare-host confirmation (2026-07-03, `sudo bash run.sh`, ip-netns mode,
+Debug build, post-PBUF_RAM ingress change): **10.62 Gbit/s, PASS** —
+sender/receiver byte counts identical (13,273,923,584 bytes / 10.0 s),
+consistent with the container measurements above (10.47–10.49 Gbit/s)
+within run-to-run variance. The container methodology caveat is thereby
+discharged; the gate result stands on a native ip-netns run.
