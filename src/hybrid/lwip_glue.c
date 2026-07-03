@@ -218,12 +218,23 @@ void
 mqvpn_lwip_ctx_free(mqvpn_lwip_ctx_t *ctx)
 {
     if (!ctx) return;
-    /* Teardown-ordering guard: the tcp_lane owns every accepted pcb and
-     * must abort them all before freeing the glue ctx — a pcb surviving
-     * past here references a removed netif. Warn so the mistake surfaces
-     * immediately instead of as a later use-after-remove. */
+    /* Teardown-ordering guard: the tcp_lane owns every ACCEPTED pcb and
+     * must abort them all before freeing the glue ctx — such a pcb
+     * surviving past here would reference a removed netif. Warn so that
+     * mistake surfaces immediately instead of as a later use-after-remove.
+     *
+     * M5 (reworded): this can ALSO fire spuriously for a pcb tcp_lane
+     * genuinely has no way to know about or abort — a half-open SYN_RCVD
+     * pcb sitting in tcp_active_pcbs (vendored tcp_alloc registers it
+     * there immediately on SYN receipt) whose accept callback hasn't run
+     * yet, i.e. before tcp_lane's flow table ever binds a pcb pointer to
+     * it. Such a pcb is bounded (it either completes the handshake and
+     * gets accepted, or lwIP's own SYN_RCVD retransmit/timeout reaps it)
+     * and is not the leak this warning exists to catch — the log line is
+     * a coarse signal for triage, not proof of a tcp_lane bug. */
     if (tcp_active_pcbs)
-        LOG_WRN("lwip: ctx_free with active pcbs — tcp_lane must abort flows first");
+        LOG_WRN("lwip: ctx_free with active pcbs — tcp_lane must abort flows first "
+                "(or a half-open pre-accept SYN_RCVD pcb, which is expected/bounded)");
     if (ctx->listen_pcb) {
         tcp_close(ctx->listen_pcb); /* LISTEN pcb: closes + frees */
         ctx->listen_pcb = NULL;
@@ -246,7 +257,17 @@ int
 mqvpn_lwip_input(mqvpn_lwip_ctx_t *ctx, const uint8_t *pkt, size_t len)
 {
     if (len == 0 || len > 0xFFFF) return -1;
-    struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
+    /* I1: PBUF_RAM, not PBUF_POOL — an exact-size, MEM_LIBC_MALLOC-backed
+     * heap allocation (lwipopts.h's CAUTION comment on PBUF_POOL_SIZE has
+     * the full rationale). PBUF_POOL would burn one full ~9 KB
+     * PBUF_POOL_BUFSIZE slot out of the GLOBAL 256-slot pool per ingress
+     * packet regardless of its real size — at the real ~1382-byte tunnel
+     * MTU, one xquic-backpressured flow's stash could exhaust that shared
+     * pool and stall RX (SYNs/ACKs/FINs) for every OTHER flow. pbuf_take's
+     * copy cost is unchanged either way; the real per-flow bound becomes
+     * TCP_WND (the pcb's own receive window), which is what the relay
+     * (tcp_lane.c) already backpressures against. */
+    struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_RAM);
     if (!p) return -1;
     pbuf_take(p, pkt, (u16_t)len); /* cannot fail: p was sized for len */
     if (ctx->netif.input(p, &ctx->netif) != ERR_OK) {

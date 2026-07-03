@@ -78,20 +78,28 @@
  * exhaustion — the TCP-lane relay (tcp_lane.c) MUST handle that as
  * backpressure (retry on sent-callback), it is not optional. */
 #define MEMP_NUM_TCP_SEG 2048
-/* PBUF_POOL_SIZE: must hold a full receive window of queued data —
- * init.c's sanity check enforces TCP_WND <= PBUF_POOL_SIZE *
- * (PBUF_POOL_BUFSIZE - protocol headers). With TCP_WND ~2 MB and ~8946
- * usable bytes per pool pbuf (9000 - 54 header bytes), 128 pbufs
- * (~1.1 MB) is too small; 256 gives ~2.29 MB >= 2,097,120.
+/* PBUF_POOL_SIZE: sized to satisfy init.c's compile-time sanity check
+ * (TCP_WND <= PBUF_POOL_SIZE * (PBUF_POOL_BUFSIZE - protocol headers)),
+ * which lwIP enforces unconditionally whenever MEMP_MEM_MALLOC == 0 and
+ * PBUF_POOL_SIZE > 0 (init.c) — REGARDLESS of whether this project's own
+ * code actually allocates PBUF_POOL pbufs (see the RESOLVED note below).
+ * With TCP_WND ~2 MB and ~8946 usable bytes per pool pbuf (9000 - 54
+ * header bytes), 128 pbufs (~1.1 MB) is too small; 256 gives ~2.29 MB
+ * >= 2,097,120.
  *
- * CAUTION (bites at the real ~1382 tunnel MTU): each ingress packet
- * occupies one full-size pool pbuf regardless of its actual length, so at
- * MTU ~1382 the global 256-pbuf pool holds only ~350 KB of real payload —
- * far below the 2 MB window advertised PER FLOW. A single backpressured
- * flow queuing ooseq/refused data can exhaust the global pool and stall RX
- * for ALL flows. The TCP-lane relay (tcp_lane.c) must handle this (runtime
- * rcv_wnd reduction to match the real MTU budget, or PBUF_RAM-allocated
- * ingress). */
+ * RESOLVED (I1, cross-flow PBUF_POOL exhaustion DoS): mqvpn_lwip_input
+ * (lwip_glue.c) allocates every ingress packet as PBUF_RAM (exact-size,
+ * MEM_LIBC_MALLOC-backed heap), NOT PBUF_POOL. Previously each ingress
+ * packet occupied one full-size pool pbuf regardless of its actual
+ * length, so at the real ~1382-byte tunnel MTU the global 256-pbuf pool
+ * held only ~350 KB of real payload — far below the 2 MB window
+ * advertised PER FLOW — and a single xquic-backpressured flow's stash
+ * could exhaust the shared pool and stall RX (SYNs/ACKs/FINs) for every
+ * OTHER flow. PBUF_RAM's pbuf_take copy cost is unchanged; the real
+ * per-flow bound is now TCP_WND (the pcb's own receive window), which the
+ * TCP-lane relay (tcp_lane.c) already backpressures against via recved
+ * withholding. PBUF_POOL_SIZE stays 256 purely to satisfy the compile-time
+ * check above — it no longer bounds ingress throughput. */
 #define PBUF_POOL_SIZE    256
 #define PBUF_POOL_BUFSIZE LWIP_MEM_ALIGN_SIZE(TCP_MSS + 40 + PBUF_LINK_ENCAPSULATION_HLEN)
 
