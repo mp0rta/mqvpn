@@ -72,7 +72,9 @@ typedef struct {
  * without tcp_lane.c needing to know cli_conn_t's layout. clock_fn/clock_ctx
  * (nullable — flows then get last_activity_us = 0) is the same injected
  * microsecond clock the caller hands mqvpn_lwip_ctx_new, used for
- * per-flow last-activity stamps (Task 13's idle sweep). */
+ * per-flow last-activity stamps (Task 13's idle sweep). With a NULL clock,
+ * set cfg.tcp_idle_timeout_sec = 0 or flows evict spuriously (stamps stuck
+ * at 0 while tick's now_us advances past the timeout). */
 mqvpn_tcp_lane_t *mqvpn_tcp_lane_new(const mqvpn_hybrid_config_t *cfg, uint64_t hash_seed,
                                      void *client_ctx, mqvpn_lwip_clock_fn clock_fn,
                                      void *clock_ctx);

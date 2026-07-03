@@ -2607,6 +2607,182 @@ test_idle_eviction_activity_refresh(void)
     mqvpn_tcp_lane_free(lane);
 }
 
+/* Pins the sweep's saved-next chain walk: two flows forced into ONE hash
+ * bucket, the bucket HEAD idle and its chain successor fresh. Evicting the
+ * head frees it mid-walk — the walk must continue to the successor through
+ * the next pointer saved BEFORE the teardown, and must not evict the fresh
+ * successor. (on_syn inserts at the bucket head, so the LAST-created flow
+ * is the head.) */
+static void
+test_idle_eviction_same_bucket_head_evicted(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.tcp_idle_timeout_sec = 5;
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xf007ULL, NULL, fake_clock, NULL);
+
+    /* Find a second src_port whose key lands in the same bucket as port
+     * 9100's — the test TU has full struct visibility, so compute buckets
+     * exactly the way find_flow does. */
+    mqvpn_flow_key_t ka = mk_std_key(9100);
+    uint32_t bucket_a =
+        (uint32_t)(mqvpn_flow_key_hash(&ka, lane->hash_seed) & (lane->n_buckets - 1));
+    uint16_t port_b = 0;
+    for (uint16_t p = 9101; p != 0; p++) {
+        mqvpn_flow_key_t kb = mk_std_key(p);
+        uint32_t bucket_b =
+            (uint32_t)(mqvpn_flow_key_hash(&kb, lane->hash_seed) & (lane->n_buckets - 1));
+        if (bucket_b == bucket_a) {
+            port_b = p;
+            break;
+        }
+    }
+    ASSERT_TRUE(port_b != 0, "found a same-bucket second port");
+
+    struct tcp_pcb pcb_a, pcb_b;
+    int req_a, stream_a, req_b, stream_b;
+    /* A first (becomes the chain successor), B second (becomes the head). */
+    mqvpn_tcp_flow_t *fa = setup_flow(lane, &pcb_a, 9100, &req_a, &stream_a, 1);
+    mqvpn_tcp_flow_t *fb = setup_flow(lane, &pcb_b, port_b, &req_b, &stream_b, 1);
+    ASSERT_TRUE(fa != NULL && fb != NULL, "both same-bucket flows established");
+    ASSERT_TRUE(lane->buckets[bucket_a] == fb && fb->next == fa,
+                "chain shape as intended: head B -> successor A");
+
+    /* Keep A fresh (activity stamp at +4s), leave B idle from creation. */
+    g_fake_now += 4ULL * 1000000ULL;
+    mqvpn_tcp_lane_on_lwip_sent(fa, fa->pcb, 0);
+
+    g_fake_now += 2ULL * 1000000ULL; /* B age 6s > 5s; A age 2s */
+    mqvpn_tcp_lane_tick(lane, g_fake_now);
+
+    mqvpn_tcp_lane_stats_t stats;
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_idle_evicted, 1, "only the idle head evicted");
+    int out_raw = -1;
+    mqvpn_flow_key_t kb = mk_std_key(port_b);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &kb, &out_raw), 0, "head B gone");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &ka, &out_raw), 1,
+                  "fresh successor A survived the head's mid-walk free");
+    ASSERT_EQ_INT(g_tcp_abort_calls, 1, "exactly one pcb aborted");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+/* PENDING_STREAM eviction: H3 request opened and bound (pre-2xx gate), so
+ * the teardown funnel must close BOTH sides — pcb abort AND h3 close. */
+static void
+test_idle_eviction_pending_stream(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.tcp_idle_timeout_sec = 5;
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xf008ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f =
+        setup_flow(lane, &pcb, 9008, &fake_req, &fake_stream, /*establish=*/0);
+    ASSERT_TRUE(f != NULL, "flow bound, still PENDING_STREAM");
+    ASSERT_EQ_INT(f->state, TCP_FLOW_PENDING_STREAM, "pre-2xx state");
+
+    g_fake_now += 6ULL * 1000000ULL;
+    mqvpn_tcp_lane_tick(lane, g_fake_now);
+
+    mqvpn_tcp_lane_stats_t stats;
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_idle_evicted, 1, "PENDING_STREAM flow evicted");
+    ASSERT_EQ_INT(g_tcp_abort_calls, 1, "pcb aborted");
+    ASSERT_EQ_INT(g_h3_close_calls, 1, "bound h3 request closed");
+    mqvpn_flow_key_t k = mk_std_key(9008);
+    int out_raw = -1;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 0, "flow gone");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+/* Exact boundary: age == timeout must NOT evict (the sweep's strict >). */
+static void
+test_idle_eviction_exact_boundary(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.tcp_idle_timeout_sec = 5;
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xf009ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 9009, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    g_fake_now += (uint64_t)cfg.tcp_idle_timeout_sec * 1000000ULL; /* age == timeout */
+    mqvpn_tcp_lane_tick(lane, g_fake_now);
+
+    mqvpn_tcp_lane_stats_t stats;
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_idle_evicted, 0,
+                  "age == timeout is NOT evicted (strict >)");
+    mqvpn_flow_key_t k = mk_std_key(9009);
+    int out_raw = -1;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 1, "flow still present");
+
+    /* One second later (also re-satisfies the cadence gate) the age is
+     * strictly past the timeout — now it goes. */
+    g_fake_now += 1ULL * 1000000ULL;
+    mqvpn_tcp_lane_tick(lane, g_fake_now);
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_idle_evicted, 1, "evicted once strictly past the timeout");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+/* Pins the 1s cadence gate: a tick < 1s after the previous sweep must skip
+ * the walk entirely, even with an idle-eligible flow in the table. */
+static void
+test_idle_eviction_sweep_cadence_gate(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.tcp_idle_timeout_sec = 5;
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xf00aULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb_a, pcb_b;
+    int req_a, stream_a, req_b, stream_b;
+    mqvpn_tcp_flow_t *fa = setup_flow(lane, &pcb_a, 9010, &req_a, &stream_a, 1);
+    ASSERT_TRUE(fa != NULL, "flow A established");
+
+    /* Sweep once (evicts A) to latch last_sweep_us. */
+    g_fake_now += 6ULL * 1000000ULL;
+    mqvpn_tcp_lane_tick(lane, g_fake_now);
+    mqvpn_tcp_lane_stats_t stats;
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_idle_evicted, 1, "A evicted; sweep timestamp latched");
+
+    /* New flow, made idle-eligible IMMEDIATELY by backdating its stamp (the
+     * test TU has struct visibility; no legitimate stamp path could age a
+     * flow within the sub-second window this test needs). */
+    mqvpn_tcp_flow_t *fb = setup_flow(lane, &pcb_b, 9011, &req_b, &stream_b, 1);
+    ASSERT_TRUE(fb != NULL, "flow B established");
+    fb->last_activity_us = 12345; /* ancient: the pre-advance baseline */
+
+    g_fake_now += 500000ULL; /* +0.5s — inside the gate window */
+    mqvpn_tcp_lane_tick(lane, g_fake_now);
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_idle_evicted, 1,
+                  "gated tick did not sweep (idle-eligible B untouched)");
+    mqvpn_flow_key_t kb = mk_std_key(9011);
+    int out_raw = -1;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &kb, &out_raw), 1, "B still present");
+
+    g_fake_now += 500000ULL; /* +1.0s total since the last sweep — gate opens */
+    mqvpn_tcp_lane_tick(lane, g_fake_now);
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_idle_evicted, 2, "next sweep after the gate evicts B");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &kb, &out_raw), 0, "B gone");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
 int
 main(void)
 {
@@ -2651,6 +2827,10 @@ main(void)
     test_idle_eviction_timeout_zero_never_evicts();
     test_idle_eviction_pending_accept_stamped();
     test_idle_eviction_activity_refresh();
+    test_idle_eviction_same_bucket_head_evicted();
+    test_idle_eviction_pending_stream();
+    test_idle_eviction_exact_boundary();
+    test_idle_eviction_sweep_cadence_gate();
 
     fprintf(stderr, "test_tcp_lane: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

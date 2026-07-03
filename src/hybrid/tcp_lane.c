@@ -52,6 +52,8 @@ struct mqvpn_tcp_lane {
     uint32_t n_tcp_flows;   /* to_tcp=1 entries; capped by cfg.tcp_max_flows */
     uint32_t n_raw_markers; /* sticky-RAW entries; capped by
                              * TCP_LANE_RAW_MARKER_CAP */
+    uint64_t last_sweep_us; /* idle-sweep cadence gate — see
+                             * mqvpn_tcp_lane_tick */
     mqvpn_tcp_lane_stats_t stats;
 };
 
@@ -259,8 +261,9 @@ mqvpn_tcp_lane_on_syn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, int t
     return 0;
 }
 
-/* Idle-timeout eviction sweep (Task 13). Walks every bucket and tears down
- * any TCP-lane flow (any state except STICKY_RAW/CLOSING — see below) whose
+/* Idle-timeout eviction sweep (Task 13). Walks every bucket (at most once
+ * per second — internal cadence gate below) and tears down any TCP-lane flow
+ * (any state except STICKY_RAW/CLOSING — see below) whose
  * last_activity_us is older than cfg.tcp_idle_timeout_sec. Runs from
  * mqvpn_client_tick, i.e. neither a lwIP-invoked frame nor an xquic-context
  * notify: this is a THIRD calling context tcp_lane_flow_status_t's contract
@@ -283,6 +286,29 @@ mqvpn_tcp_lane_tick(mqvpn_tcp_lane_t *lane, uint64_t now_us)
     if (lane->cfg.tcp_idle_timeout_sec == 0) {
         return;
     }
+    /* Nothing evictable: markers are excluded from the sweep by state, so an
+     * all-marker (or empty) table has no work — skip the bucket walk
+     * entirely. Checked before the cadence gate so an idle lane never even
+     * consumes a last_sweep_us update. */
+    if (lane->n_tcp_flows == 0) {
+        return;
+    }
+    /* Cadence gate: the caller (mqvpn_client_tick) fires per event-loop
+     * iteration — including after every recv batch, i.e. potentially
+     * thousands of times per second under load — while eviction has
+     * seconds-granularity semantics. An ungated sweep walks all n_buckets
+     * heads (64 KB of pointer touches at the default sizing) every call:
+     * pure hot-path cache pollution. Gate it internally to at most once per
+     * second, keeping the caller dumb — the same pattern as lwip_glue.c's
+     * internal 250 ms tcp_tmr gate. Wraparound/backwards-clock note: if
+     * now_us regresses below last_sweep_us, the unsigned difference goes
+     * huge and the sweep RUNS — harmless (the per-flow age test below is
+     * independently underflow-guarded), and it self-heals by re-latching
+     * last_sweep_us to the new clock. */
+    if (now_us - lane->last_sweep_us < 1000000ULL) {
+        return;
+    }
+    lane->last_sweep_us = now_us;
     uint64_t idle_us = (uint64_t)lane->cfg.tcp_idle_timeout_sec * 1000000ULL;
     for (uint32_t b = 0; b < lane->n_buckets; b++) {
         mqvpn_tcp_flow_t *f = lane->buckets[b];
