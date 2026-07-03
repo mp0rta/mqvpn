@@ -24,14 +24,14 @@ typedef enum {
 } mqvpn_hybrid_tcp_mode_t;
 
 /* Static per-session policy. The per-flow SYN-time verdict for tcp=auto
- * (active_paths >= 2) belongs to the future tcp_lane at flow creation —
- * NOT evaluated here; classify() applies only the static gates so it
- * stays pure and per-packet. */
+ * (active_paths >= 2) belongs to tcp_lane.c at flow creation — NOT
+ * evaluated here; classify() applies only the static gates so it stays
+ * pure and per-packet. */
 typedef struct {
     int enabled;
     mqvpn_hybrid_tcp_mode_t tcp_mode;
-    uint32_t tcp_max_flows;        /* consumed by the future tcp_lane */
-    uint32_t tcp_idle_timeout_sec; /* consumed by the future tcp_lane */
+    uint32_t tcp_max_flows;        /* consumed by tcp_lane.c */
+    uint32_t tcp_idle_timeout_sec; /* consumed by tcp_lane.c */
 } mqvpn_hybrid_config_t;
 
 /* static inline ON PURPOSE (not in classifier.c): src/config.c and

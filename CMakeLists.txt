@@ -83,6 +83,20 @@ if(NOT ANDROID_CROSS_COMPILE)
     endif()
 endif()
 
+# ---------- Hybrid mode TCP lane (lwIP, Linux-only in v1) ----------
+option(MQVPN_ENABLE_HYBRID_TCP_LANE
+       "Build the hybrid-mode lwIP TCP lane (Linux-only in v1)" ON)
+if(MQVPN_ENABLE_HYBRID_TCP_LANE AND NOT WIN32 AND NOT ANDROID_CROSS_COMPILE)
+    set(MQVPN_HYBRID_TCP_LANE_BUILD ON)
+else()
+    if(MQVPN_ENABLE_HYBRID_TCP_LANE)
+        message(WARNING "MQVPN_ENABLE_HYBRID_TCP_LANE requested but target "
+                         "is Windows/Android — hybrid TCP lane is Linux-only "
+                         "in v1, ignoring.")
+    endif()
+    set(MQVPN_HYBRID_TCP_LANE_BUILD OFF)
+endif()
+
 # Prefer static xquic to avoid runtime library path issues
 if(TARGET xquic-static)
     set(XQUIC_LIB xquic-static)
@@ -128,6 +142,79 @@ set(MQVPN_LIB_SOURCES
     src/hybrid/classifier.c
 )
 
+# ---------- lwIP (hybrid mode TCP lane — see MQVPN_HYBRID_TCP_LANE_BUILD) ----------
+# Deliberately single-mode: no pre-built LWIP_BUILD_DIR variant (unlike
+# xquic's two-mode pattern above) — lwIP is a handful of .c files, always
+# built from source. YAGNI; add a pre-built mode only if a real need appears.
+if(MQVPN_HYBRID_TCP_LANE_BUILD)
+set(LWIP_ROOT ${CMAKE_SOURCE_DIR}/third_party/lwip)
+set(LWIP_PORT_DIR ${CMAKE_SOURCE_DIR}/src/hybrid/lwip_port)
+
+set(LWIP_CORE_SOURCES
+    ${LWIP_ROOT}/src/core/def.c
+    ${LWIP_ROOT}/src/core/init.c
+    ${LWIP_ROOT}/src/core/inet_chksum.c
+    ${LWIP_ROOT}/src/core/ip.c
+    ${LWIP_ROOT}/src/core/mem.c
+    ${LWIP_ROOT}/src/core/memp.c
+    ${LWIP_ROOT}/src/core/netif.c
+    ${LWIP_ROOT}/src/core/pbuf.c
+    ${LWIP_ROOT}/src/core/stats.c
+    ${LWIP_ROOT}/src/core/sys.c
+    ${LWIP_ROOT}/src/core/tcp.c
+    ${LWIP_ROOT}/src/core/tcp_in.c
+    ${LWIP_ROOT}/src/core/tcp_out.c
+    ${LWIP_ROOT}/src/core/timeouts.c
+    ${LWIP_ROOT}/src/core/ipv4/ip4.c
+    ${LWIP_ROOT}/src/core/ipv4/ip4_addr.c
+    ${LWIP_ROOT}/src/core/ipv4/ip4_frag.c
+    ${LWIP_ROOT}/src/core/ipv4/icmp.c
+)
+
+add_library(lwip_core STATIC ${LWIP_CORE_SOURCES})
+target_include_directories(lwip_core PUBLIC
+    ${LWIP_ROOT}/src/include
+    ${LWIP_PORT_DIR}
+)
+# debug.h gates on #ifndef LWIP_NOASSERT — the macro must be entirely absent
+# in Debug (defining it =0 would still disable asserts), present in Release.
+target_compile_definitions(lwip_core PRIVATE $<$<CONFIG:Release>:LWIP_NOASSERT>)
+# Vendored third-party code — not held to -Werror (ENABLE_SANITIZERS adds it
+# at directory scope; clang trips on lwIP's tautological-compare warnings).
+target_compile_options(lwip_core PRIVATE -Wno-error)
+# mqvpn_shared (a SHARED target) links this static lib below — its objects
+# must be position-independent, same reason xquic-static is unusable there.
+set_target_properties(lwip_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# Registered into the SAME shared list classifier.c (H1) already lives in.
+# Must happen here, before MQVPN_LIB_SOURCES is consumed by add_library()
+# below (mqvpn_lib) and further down (mqvpn_shared) — variable expansion in
+# add_library() is immediate, not deferred.
+list(APPEND MQVPN_LIB_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/hybrid/lwip_glue.c
+    ${CMAKE_SOURCE_DIR}/src/hybrid/tcp_lane.c
+    ${CMAKE_SOURCE_DIR}/src/hybrid/tcp_lane_uplink.c
+)
+
+# H2a micro-benchmark rig (Chunk 1 gate): TUN → classifier → lwIP → byte
+# sink, NO QUIC. Standalone executable, deliberately NOT part of mqvpn_lib —
+# links the hybrid sources directly. Driven by
+# benchmarks/tcp_lane_microbench/run.sh (gate: >= 10 Gbit/s).
+add_executable(tcp_lane_microbench
+    benchmarks/tcp_lane_microbench/harness.c
+    src/hybrid/classifier.c
+    src/hybrid/lwip_glue.c
+    src/log.c
+)
+target_link_libraries(tcp_lane_microbench lwip_core)
+target_include_directories(tcp_lane_microbench PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/include
+)
+set_target_properties(tcp_lane_microbench PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+endif() # MQVPN_HYBRID_TCP_LANE_BUILD
+
 # ---------- libmqvpn (static library — no libevent, no platform I/O) ----------
 add_library(mqvpn_lib STATIC ${MQVPN_LIB_SOURCES})
 if(WIN32)
@@ -146,6 +233,10 @@ elseif(WIN32)
     target_link_libraries(mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} ws2_32)
 else()
     target_link_libraries(mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} pthread)
+endif()
+if(MQVPN_HYBRID_TCP_LANE_BUILD)
+    target_link_libraries(mqvpn_lib lwip_core)
+    target_compile_definitions(mqvpn_lib PRIVATE MQVPN_HYBRID_TCP_LANE_ENABLED)
 endif()
 
 # Everything below requires libevent and a platform layer — skip for Android
@@ -215,6 +306,10 @@ target_include_directories(mqvpn_shared
 )
 # Shared lib needs shared xquic (static .a lacks -fPIC)
 target_link_libraries(mqvpn_shared xquic ${SSL_LIB} ${CRYPTO_LIB} pthread)
+if(MQVPN_HYBRID_TCP_LANE_BUILD)
+    target_link_libraries(mqvpn_shared lwip_core)
+    target_compile_definitions(mqvpn_shared PRIVATE MQVPN_HYBRID_TCP_LANE_ENABLED)
+endif()
 
 # ---------- mqvpn CLI binary ----------
 # Links libmqvpn for the library API; keeps platform-specific files separate.
@@ -276,8 +371,30 @@ if(BUILD_TESTING)
     add_executable(test_reorder_rx tests/test_reorder_rx.c src/mqvpn_config.c src/log.c)
     add_executable(test_reorder_config tests/test_reorder_config.c src/mqvpn_config.c src/config.c src/log.c)
     add_executable(test_classifier tests/test_classifier.c src/hybrid/classifier.c)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_classifier)
 
-    foreach(t test_config test_auth test_session test_dns test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_classifier)
+    # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
+    # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of
+    # tcp_lane.c; the two are one logical module — see
+    # src/hybrid/tcp_lane_internal.h) to reach the file-local flow table
+    # (mirrors test_reorder_rx's idiom); do NOT also list either .c here (it
+    # would compile the TU twice). Gated on MQVPN_HYBRID_TCP_LANE_BUILD since
+    # Task 8: tcp_lane.c's accept callback calls real lwIP (tcp_arg/
+    # tcp_recv/...), so the test links lwip_core (whose PUBLIC include dirs
+    # also supply the lwIP/port headers). classifier.c is linked for the
+    # accept-key correspondence test; lwip_glue.c + log.c satisfy lwip_core's
+    # port symbols (mqvpn_lwip_platform_diag / sys_now — same trio the
+    # microbench links). The test TU itself provides the cli_tcp_lane_open_
+    # stream/cli_tcp_lane_h3_close stubs (the real ones live in
+    # mqvpn_client.c, not linked here).
+    if(MQVPN_HYBRID_TCP_LANE_BUILD)
+        add_executable(test_tcp_lane tests/test_tcp_lane.c src/hybrid/classifier.c
+                       src/hybrid/lwip_glue.c src/log.c)
+        target_link_libraries(test_tcp_lane lwip_core)
+        list(APPEND MQVPN_UNIT_TESTS test_tcp_lane)
+    endif()
+
+    foreach(t ${MQVPN_UNIT_TESTS})
         target_include_directories(${t} PRIVATE
             ${CMAKE_SOURCE_DIR}/src
             ${CMAKE_SOURCE_DIR}/src/platform/linux

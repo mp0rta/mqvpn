@@ -4,6 +4,8 @@ ref/
 benchmarks/*
 !benchmarks/*.sh
 !benchmarks/sweep_reorder_analyze.py
+# H2a micro-benchmark rig (harness + driver) is tracked
+!benchmarks/tcp_lane_microbench/
 
 # local-only picoquic build for reorder sweep / interop (not vendored as a submodule).
 # picotls is picoquic's sibling TLS dependency, cloned + built next to it.
@@ -51,3 +53,6 @@ website/public/perf-data/
 
 # Git worktrees
 .worktrees/
+
+# local-only bench note (kept untracked by owner decision)
+docs/report/2026-07-03-hybrid-h2a-microbench.md

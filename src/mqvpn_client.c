@@ -43,6 +43,10 @@
 
 #include "flow_sched.h"
 #include "hybrid/classifier.h"
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+#  include "hybrid/lwip_glue.h"
+#  include "hybrid/tcp_lane.h"
+#endif
 #include "icmp.h"
 #include "path_state_machine.h"
 #include "reorder.h"
@@ -121,6 +125,20 @@ struct cli_conn_s {
     mqvpn_reorder_tx_t *reorder_tx;
     mqvpn_reorder_rx_t *reorder_rx;
     int peer_reorder_supported;
+
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* H2: lwIP TCP-lane stack. Created at tunnel-ready (needs the resolved
+     * inner MTU) when hybrid is enabled and tcp mode != raw; freed on conn
+     * teardown. This struct is private to this TU, so gating the field on
+     * the build flag is ODR-safe. */
+    mqvpn_lwip_ctx_t *lwip_ctx;
+    /* H2: sticky per-flow lane table. Created ONLY when lwip_ctx creation
+     * succeeded (the ingress fast path guards on tcp_lane alone and feeds
+     * lwip_ctx, so the two must be coherent: both live or both NULL). Freed
+     * BEFORE lwip_ctx on teardown — tcp_lane will eventually own pcb aborts
+     * against the still-live stack. */
+    mqvpn_tcp_lane_t *tcp_lane;
+#endif
 };
 
 /* Role of an H3 request stream. v0.8 has exactly one role; hybrid mode's
@@ -128,6 +146,9 @@ struct cli_conn_s {
  * dispatches on this. */
 typedef enum {
     CLI_STREAM_ROLE_CONNECT_IP = 0,
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    CLI_STREAM_ROLE_CONNECT_TCP,
+#endif
 } cli_stream_role_t;
 
 /* Per-stream state (Level 2) */
@@ -181,11 +202,18 @@ struct mqvpn_client_s {
     uint64_t dgram_recv;
     uint64_t dgram_lost;
     uint64_t dgram_acked;
-    /* Hybrid-mode per-lane TX counters (H1). Stay 0 unless hybrid is
-     * enabled; tcp_flows_* live in the future tcp_lane. */
+    /* Hybrid-mode per-lane TX counters. Stay 0 unless hybrid is enabled.
+     * tcp_flows_rejected counts SYNs that wanted the TCP lane but were
+     * refused pre-lwIP (cap or alloc failure); authoritative source for the
+     * public tcp_flows_rejected stat — Task 24 surfaces THIS counter, not
+     * the lane's flows_rejected_cap, and must not sum them (the lane's
+     * rejected_cap/rejected_other split overlaps this but is not equal).
+     * pkts_lane_tcp_dropped counts packets lwIP refused. */
     uint64_t pkts_lane_tcp;
     uint64_t pkts_lane_dgram;
     uint64_t pkts_lane_raw;
+    uint64_t tcp_flows_rejected;
+    uint64_t pkts_lane_tcp_dropped;
     int srtt_ms;
 
     /* Multipath (Level 1) */
@@ -295,6 +323,28 @@ xqc_custom_timestamp(void)
     if (s_xqc_clock_fn) return s_xqc_clock_fn(s_xqc_clock_ctx);
     return now_us();
 }
+
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+/* lwIP glue shims (H2). Clock: same injected-clock rules as client_now_us. */
+static uint64_t
+cli_lwip_clock_wrapper(void *clock_ctx)
+{
+    return client_now_us((const mqvpn_client_t *)clock_ctx);
+}
+
+/* lwIP-generated packets (SYN-ACK, ACKs, downlink data) are locally
+ * originated by the stack, not tunnel-forwarded — hand them straight to
+ * cbs.tun_output (the same sink every other lane's TUN delivery ends at)
+ * WITHOUT forward_inner_ip's TTL decrement / dgram stats, which are
+ * forwarding semantics. */
+static void
+cli_lwip_output_wrapper(const uint8_t *pkt, size_t len, void *output_ctx)
+{
+    mqvpn_client_t *c = (mqvpn_client_t *)output_ctx;
+    if (!c->tun_active) return;
+    c->cbs.tun_output(pkt, len, c->user_ctx);
+}
+#endif /* MQVPN_HYBRID_TCP_LANE_ENABLED */
 
 static int64_t
 now_ms_mono(void)
@@ -918,6 +968,23 @@ cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_data)
 
 /* ─── MASQUE tunnel start ─── */
 
+/* Append `authorization: Bearer <auth_key>` when configured. auth_buf is
+ * caller-owned and must stay live until xqc_h3_request_send_headers (the
+ * header only holds an iovec into it). Returns the new header count. Shared
+ * by cli_masque_start_tunnel and cli_tcp_lane_open_stream. */
+static int
+cli_append_auth_header(const mqvpn_client_t *c, xqc_http_header_t *hdrs, int hdr_count,
+                       char *auth_buf, size_t auth_buf_len)
+{
+    if (c->config.auth_key[0] == '\0') return hdr_count;
+    snprintf(auth_buf, auth_buf_len, "Bearer %s", c->config.auth_key);
+    hdrs[hdr_count].name = (struct iovec){.iov_base = "authorization", .iov_len = 13};
+    hdrs[hdr_count].value =
+        (struct iovec){.iov_base = auth_buf, .iov_len = strlen(auth_buf)};
+    hdrs[hdr_count].flags = 0;
+    return hdr_count + 1;
+}
+
 static int
 cli_masque_start_tunnel(cli_conn_t *conn)
 {
@@ -941,9 +1008,6 @@ cli_masque_start_tunnel(cli_conn_t *conn)
              c->config.server_port);
 
     char auth_value[300];
-    int has_auth = (c->config.auth_key[0] != '\0');
-    if (has_auth)
-        snprintf(auth_value, sizeof(auth_value), "Bearer %s", c->config.auth_key);
 
     xqc_http_header_t hdrs[8] = {
         {.name = {.iov_base = ":method", .iov_len = 7},
@@ -966,13 +1030,8 @@ cli_masque_start_tunnel(cli_conn_t *conn)
          .flags = 0},
     };
     int hdr_count = 6;
-    if (has_auth) {
-        hdrs[hdr_count].name = (struct iovec){.iov_base = "authorization", .iov_len = 13};
-        hdrs[hdr_count].value =
-            (struct iovec){.iov_base = auth_value, .iov_len = strlen(auth_value)};
-        hdrs[hdr_count].flags = 0;
-        hdr_count++;
-    }
+    hdr_count =
+        cli_append_auth_header(c, hdrs, hdr_count, auth_value, sizeof(auth_value));
     /* §19.2/§19.3: advertise the reorder capability only when locally enabled AND
      * the rx engine actually allocated — advertising with a NULL engine would make
      * the server stamp packets we then drop (one-way blackhole). */
@@ -1000,6 +1059,157 @@ cli_masque_start_tunnel(cli_conn_t *conn)
     LOG_I(c, "Extended CONNECT sent (stream_id=%" PRIu64 ")", conn->masque_stream_id);
     return 0;
 }
+
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+/* H2: open the per-flow CONNECT `:protocol=mqvpn-tcp` H3 request for a
+ * freshly lwIP-accepted TCP-lane flow. NOT static — called cross-TU from
+ * tcp_lane.c's accept callback (the one deliberate coupling point; prototype
+ * lives in tcp_lane.h). Every failure path here is post-SYN-ACK, so it must
+ * reject via mqvpn_tcp_lane_abort_pending — never fall the flow back to RAW.
+ *
+ * Returns 0 when the flow proceeds; nonzero (abort_pending's return,
+ * propagated verbatim) when a failure path tore the flow down AND
+ * tcp_abort()ed its pcb. This runs INSIDE lwIP's accept callback frame,
+ * which must return ERR_ABRT in that case — lwIP's tcp_process would
+ * otherwise keep using the freed pcb (see the contracts in tcp_lane.h). */
+int
+cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_key_t *key)
+{
+    mqvpn_client_t *c = (mqvpn_client_t *)client_ctx;
+    cli_conn_t *conn = c->conn;
+    if (!conn || !conn->h3_conn) {
+        /* Accept fired without a live H3 connection (teardown race) — the
+         * flow can never become real. */
+        return mqvpn_tcp_lane_abort_pending(flow_handle);
+    }
+
+    cli_stream_t *stream = calloc(1, sizeof(*stream));
+    if (!stream) {
+        return mqvpn_tcp_lane_abort_pending(flow_handle);
+    }
+    stream->conn = conn;
+    stream->role = CLI_STREAM_ROLE_CONNECT_TCP;
+
+    xqc_h3_request_t *req = xqc_h3_request_create(c->engine, &conn->cid, NULL, stream);
+    if (!req) {
+        /* Known v1 simplification: NULL here is transient stream-credit
+         * exhaustion, treated as a reject instead of queue-and-retry.
+         * Practically unreachable — the default credit of 1024 auto-extends
+         * and the flow cap is <= 256. */
+        LOG_E(c, "connect-tcp: xqc_h3_request_create failed (stream credit?)");
+        free(stream);
+        return mqvpn_tcp_lane_abort_pending(flow_handle);
+    }
+    stream->h3_request = req;
+
+    char authority[280];
+    snprintf(authority, sizeof(authority), "%s:%d", c->config.server_host,
+             c->config.server_port);
+
+    /* Original inner destination — key->dst_ip holds v4 in [0..3] (raw
+     * network-order header bytes, so direct indexing prints correctly),
+     * dst_port is host order (reorder.h key contract). */
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/%u.%u.%u.%u/%u/", key->dst_ip[0],
+             key->dst_ip[1], key->dst_ip[2], key->dst_ip[3], (unsigned)key->dst_port);
+
+    char auth_value[300];
+
+    /* 2026-07-03 wire decision: `:protocol` is "mqvpn-tcp" (NOT connect-tcp),
+     * and deliberately NO capsule-protocol / mqvpn-reorder headers — the TCP
+     * lane carries a raw byte relay, not capsules, and reorder is a
+     * DATAGRAM-lane concern. */
+    xqc_http_header_t hdrs[6] = {
+        {.name = {.iov_base = ":method", .iov_len = 7},
+         .value = {.iov_base = "CONNECT", .iov_len = 7},
+         .flags = 0},
+        {.name = {.iov_base = ":protocol", .iov_len = 9},
+         .value = {.iov_base = "mqvpn-tcp", .iov_len = 9},
+         .flags = 0},
+        {.name = {.iov_base = ":scheme", .iov_len = 7},
+         .value = {.iov_base = "https", .iov_len = 5},
+         .flags = 0},
+        {.name = {.iov_base = ":authority", .iov_len = 10},
+         .value = {.iov_base = authority, .iov_len = strlen(authority)},
+         .flags = 0},
+        {.name = {.iov_base = ":path", .iov_len = 5},
+         .value = {.iov_base = path, .iov_len = strlen(path)},
+         .flags = 0},
+    };
+    int hdr_count = 5;
+    hdr_count =
+        cli_append_auth_header(c, hdrs, hdr_count, auth_value, sizeof(auth_value));
+    xqc_http_headers_t headers = {.headers = hdrs, .count = hdr_count, .capacity = 6};
+
+    mqvpn_tcp_lane_bind_h3_request(flow_handle, req, stream);
+
+    ssize_t ret = xqc_h3_request_send_headers(req, &headers, 0);
+    if (ret < 0 && ret != -XQC_EAGAIN) {
+        LOG_E(c, "connect-tcp: send headers failed (%zd)", ret);
+        xqc_h3_request_close(req); /* close notify frees stream */
+        /* abort_pending clears f->h3_request/f->stream (they point at the
+         * just-closed request) and never closes H3 itself — bind ran before
+         * send per the plan order, and we already closed the request one
+         * line up. */
+        return mqvpn_tcp_lane_abort_pending(flow_handle);
+    }
+
+    LOG_D(c, "connect-tcp: stream %" PRIu64 " opened for %s", xqc_h3_stream_id(req),
+          path);
+    return 0;
+}
+
+/* H2/Task 10: uplink body send for the TCP lane. Cross-TU like
+ * cli_tcp_lane_open_stream above (prototype in tcp_lane.h) — tcp_lane.c
+ * never includes xquic headers, so xquic's return codes are normalized to
+ * the MQVPN_TCP_LANE_H3_SEND_* contract at this boundary. len == 0 with
+ * fin == 1 is the uplink half-close (xqc_h3_request_send_body documents the
+ * fin-only shape; data may be NULL then). */
+ssize_t
+cli_tcp_lane_h3_send(void *h3_request, const uint8_t *buf, size_t len, int fin)
+{
+    /* xquic's send_body takes a non-const buffer but only reads from it. */
+    ssize_t ret =
+        xqc_h3_request_send_body((xqc_h3_request_t *)h3_request,
+                                 (unsigned char *)(uintptr_t)buf, len, fin ? 1 : 0);
+    if (ret == -XQC_EAGAIN) return MQVPN_TCP_LANE_H3_SEND_AGAIN;
+    if (ret < 0) return MQVPN_TCP_LANE_H3_SEND_ERR;
+    return ret;
+}
+
+/* H2/Task 11: downlink body recv for the TCP lane. Cross-TU like
+ * cli_tcp_lane_h3_send above — same one-way boundary, same normalization
+ * duty, opposite direction. xqc_h3_request_recv_body (third_party/xquic
+ * src/http3/xqc_h3_request.c) writes *fin unconditionally on every call
+ * (starts XQC_FALSE, may become true), including alongside n > 0: the final
+ * DATA frame's bytes and its FIN can arrive in the SAME recv_body call, not
+ * only as a separate zero-byte "fin-only" call — both shapes are real wire
+ * behavior (confirmed by reading the vendored implementation), not a
+ * simplification tcp_lane.c's caller may skip handling. */
+ssize_t
+cli_tcp_lane_h3_recv(void *h3_request, uint8_t *buf, size_t len, int *fin)
+{
+    unsigned char xfin = 0;
+    ssize_t n = xqc_h3_request_recv_body((xqc_h3_request_t *)h3_request, buf, len, &xfin);
+    if (n == -XQC_EAGAIN) return MQVPN_TCP_LANE_H3_RECV_AGAIN;
+    if (n < 0) return MQVPN_TCP_LANE_H3_RECV_ERR;
+    *fin = xfin ? 1 : 0;
+    return n;
+}
+
+/* H2/Task 12: close-mapping RST direction for the TCP lane. Cross-TU like
+ * cli_tcp_lane_h3_send/_recv above — wraps xqc_h3_request_close (sends
+ * RESET_STREAM to the peer; h3_request_close_notify fires later when xquic
+ * finally destroys the request struct, whatever the close reason). void:
+ * every caller in tcp_lane.c has already unconditionally decided the flow
+ * is dead, so there is no different action to take on success vs. failure
+ * here (matches tcp_abort's void contract on the pcb side). */
+void
+cli_tcp_lane_h3_close(void *h3_request)
+{
+    xqc_h3_request_close((xqc_h3_request_t *)h3_request);
+}
+#endif /* MQVPN_HYBRID_TCP_LANE_ENABLED */
 
 /* ─── Capsule parsing ─── */
 
@@ -1097,13 +1307,68 @@ process_capsules(cli_stream_t *stream)
 
 /* ─── H3 request callbacks ─── */
 
+/* H2/Task 12: peer sent RESET_STREAM — xquic is already tearing this
+ * request down (verified against the vendored source: this notify fires
+ * ONLY on RESET_STREAM frame reception, never on a clean bidi-FIN
+ * completion or on STOP_SENDING alone — see tcp_lane.h's
+ * mqvpn_tcp_lane_on_h3_closing doc for the full citation trail). CONNECT-IP
+ * ignores this: the tunnel stream has no separate per-flow teardown
+ * concept, and its own close is handled via cb_request_close/
+ * h3_conn_close_notify instead — routing it here too would be a no-op
+ * anyway (mqvpn_tcp_lane_on_h3_closing only exists for the TCP lane), so
+ * the CONNECT-IP case is simply not routed. (void)err: the flow is dead
+ * either way, no err-code-specific handling needed (deliberate
+ * simplification, matching cb_h3_conn_close's coarse-grained treatment
+ * elsewhere in this file). */
+static void
+cb_request_closing_notify(xqc_h3_request_t *h3_request, xqc_int_t err, void *user_data)
+{
+    (void)h3_request;
+    (void)err;
+    cli_stream_t *stream = (cli_stream_t *)user_data;
+    if (!stream) return;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    if (stream->role == CLI_STREAM_ROLE_CONNECT_TCP && stream->conn) {
+        mqvpn_tcp_lane_on_h3_closing(stream->conn->tcp_lane, stream);
+    }
+#endif
+}
+
 static int
 cb_request_close(xqc_h3_request_t *h3_request, void *user_data)
 {
     (void)h3_request;
     cli_stream_t *stream = (cli_stream_t *)user_data;
     if (stream) {
-        if (stream->conn) stream->conn->tunnel_ok = 0;
+        /* Only the CONNECT-IP tunnel stream owns tunnel_ok — a closing
+         * per-flow connect-tcp stream must not flip the tunnel dead. */
+        if (stream->conn && stream->role == CLI_STREAM_ROLE_CONNECT_IP)
+            stream->conn->tunnel_ok = 0;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+        /* Task 12 (reconciliation G): this is the FINAL close notify for
+         * ANY reason (clean bidi-FIN, RST, or an explicit close call) —
+         * xqc_h3_request_destroy calls it unconditionally right before
+         * freeing the request struct (verified: exactly one call site,
+         * third_party/xquic src/http3/xqc_h3_stream.c). Route to
+         * on_h3_closing BEFORE freeing the stream below so no path can ever
+         * leave a flow with a dangling h3_request/stream pointer: a flow
+         * that already went through a different teardown (RST from us,
+         * on_stream_rejected, on_relay_error, or the RESET_STREAM
+         * closing-notify above) is already removed, so this is an
+         * idempotent no-op lookup miss for it; a flow that reached this
+         * point via a clean bidi-FIN completion has ALSO already cleared
+         * its f->stream to NULL (tcp_lane_finish_clean_close runs
+         * synchronously well before xquic gets around to destroying the
+         * request, and transitions the flow to a CLOSING routing-residency
+         * marker rather than removing it outright — C1 — but either way
+         * f->stream == NULL never matches a real stream pointer, so the
+         * lookup below still misses) — this call exists
+         * for the one remaining shape: a request that closes for some
+         * OTHER reason without either teardown path having run first. */
+        if (stream->conn && stream->role == CLI_STREAM_ROLE_CONNECT_TCP) {
+            mqvpn_tcp_lane_on_h3_closing(stream->conn->tcp_lane, stream);
+        }
+#endif
         free(stream->capsule_buf);
         free(stream);
     }
@@ -1195,6 +1460,46 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
         }
         c->mtu = tun_mtu;
 
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+        /* H2: bring up the lwIP TCP-lane stack now that the inner MTU is
+         * resolved (lwIP derives each pcb's MSS from netif->mtu at accept
+         * time). Gate mirrors the classifier's TCP-lane rule: enabled &&
+         * tcp mode != raw. Alloc failure degrades to RAW (lwip_ctx stays
+         * NULL), same policy as the reorder engines above. The !lwip_ctx
+         * guard's stale-MTU case is unreachable today: this block only
+         * re-fires for a NEW conn (reconnect destroys the old conn — and
+         * its lwip_ctx — first), never twice on the same conn. */
+        if (!conn->lwip_ctx && c->config.hybrid.enabled &&
+            c->config.hybrid.tcp_mode != MQVPN_HYBRID_TCP_RAW) {
+            conn->lwip_ctx = mqvpn_lwip_ctx_new(cli_lwip_clock_wrapper, c,
+                                                cli_lwip_output_wrapper, c, tun_mtu);
+            if (!conn->lwip_ctx)
+                LOG_W(c, "lwIP ctx create failed; TCP lane disabled (RAW fallback)");
+        }
+        /* Flow table rides the same lifecycle. Coherence rule: tcp_lane is
+         * created only when lwip_ctx exists, and a tcp_lane alloc failure
+         * tears lwip_ctx back down — the ingress path guards on tcp_lane
+         * alone and dereferences lwip_ctx. Hash seed mirrors the reorder
+         * engines' per-conn derivation (wall clock ^ conn_id; §6.2 needs no
+         * peer agreement). */
+        if (conn->lwip_ctx && !conn->tcp_lane) {
+            uint64_t lane_seed = client_now_us(c) ^ ((uint64_t)c->conn_id << 32);
+            conn->tcp_lane = mqvpn_tcp_lane_new(&c->config.hybrid, lane_seed, c,
+                                                cli_lwip_clock_wrapper, c);
+            if (!conn->tcp_lane) {
+                LOG_W(c, "tcp_lane alloc failed; TCP lane disabled (RAW fallback)");
+                mqvpn_lwip_ctx_free(conn->lwip_ctx);
+                conn->lwip_ctx = NULL;
+            } else {
+                /* Task 8: accepted flows land in the lane's accept callback,
+                 * which opens the per-flow H3 stream back through
+                 * cli_tcp_lane_open_stream above. */
+                mqvpn_lwip_ctx_set_accept_cb(conn->lwip_ctx, mqvpn_tcp_lane_lwip_accept,
+                                             conn->tcp_lane);
+            }
+        }
+#endif
+
         /* Build tunnel info for callback */
         mqvpn_tunnel_info_t info = {0};
         info.struct_size = sizeof(info);
@@ -1235,6 +1540,81 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
     return 0;
 }
 
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+/* Parse the numeric ":status" pseudo-header out of a response header block.
+ * Returns the parsed status code, or -1 if absent/malformed. Kept local
+ * (not shared with cli_connect_ip_on_headers above): that function only
+ * ever matches the exact literal "200", never needs a general numeric
+ * range, and factoring a shared helper would mean touching the already-
+ * shipped CONNECT-IP tunnel path for no behavioral gain here. */
+static int
+cli_connect_tcp_parse_status(xqc_http_headers_t *hdrs)
+{
+    for (int i = 0; i < (int)hdrs->count; i++) {
+        xqc_http_header_t *h = &hdrs->headers[i];
+        if (h->name.iov_len == 7 && memcmp(h->name.iov_base, ":status", 7) == 0) {
+            size_t n = h->value.iov_len;
+            char buf[8];
+            if (n == 0 || n >= sizeof(buf)) return -1;
+            memcpy(buf, h->value.iov_base, n);
+            buf[n] = '\0';
+            /* Reject strtol's leading-whitespace/sign lenience (" 200",
+             * "+200") — a :status value must start with a digit. */
+            if (buf[0] < '0' || buf[0] > '9') return -1;
+            char *end = NULL;
+            long v = strtol(buf, &end, 10);
+            if (end == buf || *end != '\0' || v < 100 || v > 599) return -1;
+            return (int)v;
+        }
+    }
+    return -1;
+}
+
+/* mqvpn-tcp CONNECT stream: response headers gate the flow. A 2xx moves the
+ * flow PENDING_STREAM -> ACTIVE (uplink may now flow); anything else is a
+ * rejection routed to the lane (Task 12 does the real tcp_abort + removal;
+ * this only signals it). */
+static void
+cli_connect_tcp_on_headers(cli_stream_t *stream, xqc_h3_request_t *h3_request)
+{
+    uint8_t fin = 0;
+    xqc_http_headers_t *hdrs = xqc_h3_request_recv_headers(h3_request, &fin);
+    if (!hdrs) return;
+
+    int status = cli_connect_tcp_parse_status(hdrs);
+    if (status >= 200 && status < 300) {
+        mqvpn_tcp_lane_on_stream_established(stream->conn->tcp_lane, stream);
+    } else {
+        mqvpn_tcp_lane_on_stream_rejected(stream->conn->tcp_lane, stream);
+    }
+}
+
+/* mqvpn-tcp CONNECT stream: response body. Routes to the per-flow downlink
+ * pump (tcp_lane.c), which locates the flow by this stream's back-pointer
+ * and drains xqc_h3_request_recv_body into lwIP via tcp_write.
+ *
+ * Return value contract — deliberately ALWAYS 0, never the pump's result:
+ * verified against xquic (third_party/xquic src/http3/xqc_h3_stream.c)
+ * that a negative return from h3_request_read_notify propagates up through
+ * xqc_h3_stream_process_bidi -> xqc_h3_stream_process_in ->
+ * XQC_H3_CONN_ERR, which closes the WHOLE H3/QUIC connection. That is the
+ * correct behavior for cli_connect_ip_on_body's -1 (the CONNECT-IP request
+ * IS the tunnel — if it's broken, the connection is dead anyway), but it
+ * would be catastrophic here: one flow's relay error killing every other
+ * TCP-lane flow AND the CONNECT-IP tunnel on the same connection. Fatal
+ * downlink errors are instead handled entirely inside
+ * mqvpn_tcp_lane_downlink_pump via mqvpn_tcp_lane_on_relay_error (routes
+ * just this flow to CLOSING); Task 12 tears down only that flow's pcb/H3
+ * request. */
+static int
+cli_connect_tcp_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
+{
+    (void)h3_request; /* the pump re-derives it from the flow via `stream` */
+    mqvpn_tcp_lane_downlink_pump(stream->conn->tcp_lane, stream);
+    return 0;
+}
+#endif /* MQVPN_HYBRID_TCP_LANE_ENABLED */
+
 static int
 cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
                 void *user_data)
@@ -1248,6 +1628,26 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
         if (flag & XQC_REQ_NOTIFY_READ_BODY)
             return cli_connect_ip_on_body(stream, h3_request);
         return 0;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    case CLI_STREAM_ROLE_CONNECT_TCP:
+        if (flag & XQC_REQ_NOTIFY_READ_HEADER)
+            cli_connect_tcp_on_headers(stream, h3_request);
+        /* READ_BODY is the common case; READ_EMPTY_FIN is the OTHER real
+         * wire shape for a downlink close (third_party/xquic
+         * src/http3/xqc_h3_request.c xqc_h3_request_on_recv_empty_fin):
+         * fired standalone, WITHOUT READ_BODY, when a bodiless FIN STREAM
+         * frame arrives after every previously-buffered body byte has
+         * already been drained (read_flag == NULL at that point). Missing
+         * this notify would mean a peer that FINs on an idle/fully-drained
+         * stream never gets its downlink half-close observed — the flow
+         * would hang forever waiting for a body notify that never comes.
+         * cli_connect_tcp_on_body's recv_body call correctly reports this
+         * as n==0 && *fin==1 either way (verified in the vendored source),
+         * so one handler covers both notify shapes. */
+        if (flag & (XQC_REQ_NOTIFY_READ_BODY | XQC_REQ_NOTIFY_READ_EMPTY_FIN))
+            return cli_connect_tcp_on_body(stream, h3_request);
+        return 0;
+#endif
     }
     /* No default: -Wswitch-ready shape; unknown roles intentionally no-op. */
     return 0;
@@ -1257,7 +1657,19 @@ static int
 cb_request_write(xqc_h3_request_t *h3_request, void *user_data)
 {
     (void)h3_request;
-    (void)user_data;
+    cli_stream_t *stream = (cli_stream_t *)user_data;
+    switch (stream->role) {
+    case CLI_STREAM_ROLE_CONNECT_IP:
+        /* No consumer today — deliberately no plumbing (nothing withholds
+         * uplink writes on the CONNECT-IP tunnel stream). */
+        return 0;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    case CLI_STREAM_ROLE_CONNECT_TCP:
+        /* Uplink re-arm: flush the flow's H3 retry queue and resume the
+         * withheld lwIP receive window (Task 10). */
+        return mqvpn_tcp_lane_on_h3_writable(stream->conn->tcp_lane, stream);
+#endif
+    }
     return 0;
 }
 
@@ -1682,6 +2094,19 @@ cli_conn_destroy(mqvpn_client_t *c)
         conn->reorder_rx = NULL;
     }
 
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* Teardown contract: tcp_lane BEFORE lwip_ctx — flow teardown will
+     * eventually abort pcbs, which needs the stack still alive. */
+    if (conn->tcp_lane) {
+        mqvpn_tcp_lane_free(conn->tcp_lane);
+        conn->tcp_lane = NULL;
+    }
+    if (conn->lwip_ctx) {
+        mqvpn_lwip_ctx_free(conn->lwip_ctx);
+        conn->lwip_ctx = NULL;
+    }
+#endif
+
     free(conn);
     c->conn = NULL;
 }
@@ -1881,6 +2306,7 @@ init_xquic_engine(mqvpn_client_t *c)
                 .h3_request_close_notify = cb_request_close,
                 .h3_request_read_notify = cb_request_read,
                 .h3_request_write_notify = cb_request_write,
+                .h3_request_closing_notify = cb_request_closing_notify,
             },
         .h3_ext_dgram_cbs =
             {
@@ -2327,6 +2753,38 @@ tun_validate_src(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t
     return TUN_INGRESS_PROCEED;
 }
 
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+/* Paths a new TCP-lane flow could actually be striped across right now.
+ * Same slot array mqvpn_client_get_paths() aggregates; only PATH_LC_ACTIVE
+ * counts — VALIDATING/STANDBY/DEGRADED paths carry no scheduled traffic,
+ * so they don't justify the TCP-lane detour under tcp=auto. */
+static int
+active_paths_count(const mqvpn_client_t *c)
+{
+    int n = 0;
+    for (int i = 0; i < c->n_paths; i++)
+        if (c->paths[i].state == PATH_LC_ACTIVE) n++;
+    return n;
+}
+
+/* SYN-time lane verdict (spec: snapshot at flow creation, never
+ * re-evaluated mid-flow — callers invoke this exactly once per new flow,
+ * right before mqvpn_tcp_lane_on_syn commits it). Returns 1 = TCP lane,
+ * 0 = sticky RAW. */
+static int
+hybrid_tcp_syn_policy(const mqvpn_client_t *c)
+{
+    switch (c->config.hybrid.tcp_mode) {
+    case MQVPN_HYBRID_TCP_STREAM: return 1;
+    case MQVPN_HYBRID_TCP_RAW:
+        return 0; /* unreachable: classifier never
+                   * yields LANE_TCP under tcp=raw */
+    case MQVPN_HYBRID_TCP_AUTO: break;
+    }
+    return active_paths_count(c) >= 2;
+}
+#endif /* MQVPN_HYBRID_TCP_LANE_ENABLED */
+
 /* Reorder STAMP/RAW/DROP_MTU decision + both ICMP PTB paths (stamped
  * over-MTU and RAW over-MTU). Computes udp_mss internally. Fills *do_stamp
  * and *peek. Caller must zero-initialize *do_stamp and *peek; they are
@@ -2335,14 +2793,100 @@ static tun_ingress_verdict_t
 tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t len,
                 uint8_t ip_ver, int *do_stamp, mqvpn_reorder_tx_peek_t *peek)
 {
-    /* Hybrid H1: classify for counters only. The TCP lane has no transport
-     * yet; candidates fall through to RAW. DGRAM verdicts fall through to
-     * the existing reorder STAMP/RAW gating unchanged. Skipped entirely
-     * when hybrid is disabled (default) — zero hot-path cost. */
+    /* Hybrid H2: classify, then route TCP-lane candidates through the
+     * sticky per-flow table — feed lwIP or fall to RAW. `break` out of the
+     * switch IS the RAW fallthrough (continues to the reorder gating
+     * below). DGRAM verdicts fall through to the existing reorder
+     * STAMP/RAW gating unchanged. Skipped entirely when hybrid is
+     * disabled (default) — zero hot-path cost. */
     if (c->config.hybrid.enabled) {
-        switch (mqvpn_hybrid_classify(pkt, len, &c->config.hybrid, NULL)) {
-        case MQVPN_LANE_TCP:
-            c->pkts_lane_tcp++; /* falls through to RAW in H1 */
+        mqvpn_flow_key_t flow_key;
+        switch (mqvpn_hybrid_classify(pkt, len, &c->config.hybrid, &flow_key)) {
+        case MQVPN_LANE_TCP: c->pkts_lane_tcp++;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+            if (conn->tcp_lane) { /* implies lwip_ctx != NULL (coherence
+                                   * rule at the creation site) */
+                int is_raw = 0, is_closing = 0;
+                int found = mqvpn_tcp_lane_lookup(conn->tcp_lane, &flow_key, &is_raw,
+                                                  &is_closing);
+
+                /* Flags parse: needed whenever the entry is unknown OR is a
+                 * CLOSING routing-residency marker (C1) OR a sticky-RAW
+                 * marker (I2) — a pure SYN in any of those cases needs
+                 * re-evaluating for tuple reuse. The common established-
+                 * flow case (found, ACTIVE / PENDING-anything) skips this
+                 * parse (and the ISN parse below) entirely. */
+                int is_syn = 0;
+                uint32_t pkt_isn = 0;
+                if (!found || is_closing || is_raw) {
+                    is_syn = (ip_ver == 4) && mqvpn_tcp_syn_flag(pkt, len);
+                    if (is_syn) pkt_isn = mqvpn_tcp_syn_isn(pkt, len);
+                }
+                if (found && is_syn) {
+                    if (is_closing) {
+                        /* C1: tuple reuse after close. The prior connection
+                         * on this 5-tuple already finished (CLOSING grace-
+                         * sweep residency, see tcp_lane_finish_clean_close)
+                         * — this is a genuinely new connection. Evaluate it
+                         * as brand-new; mqvpn_tcp_lane_on_syn removes the
+                         * stale CLOSING marker itself (see its own comment)
+                         * before committing the fresh verdict. */
+                        found = 0;
+                    } else if (is_raw && pkt_isn != mqvpn_tcp_lane_marker_isn(
+                                                        conn->tcp_lane, &flow_key)) {
+                        /* I2: a different ISN on a sticky-RAW marker means a
+                         * genuinely new connection reusing this 5-tuple
+                         * (ephemeral port recycling under tcp=auto) — the
+                         * old RAW verdict must not apply to it forever.
+                         * Same-ISN (the common case: a SYN retransmit of the
+                         * SAME still-forming/RAW-committed handshake) stays
+                         * sticky-RAW below without ever reaching here. */
+                        found = 0;
+                    }
+                }
+
+                if (!found) {
+                    if (!is_syn) {
+                        /* Non-SYN for an unknown flow: evicted, mid-stream
+                         * (hybrid just enabled), or inbound-connection
+                         * traffic (SYN|ACK is deliberately not
+                         * flow-starting — see mqvpn_tcp_syn_flag). No
+                         * sticky decision to honor — RAW. Do NOT call
+                         * on_syn: committing a NEW flow is a SYN-only
+                         * action. */
+                        break;
+                    }
+                    int want_tcp = hybrid_tcp_syn_policy(c);
+                    if (mqvpn_tcp_lane_on_syn(conn->tcp_lane, &flow_key, want_tcp,
+                                              pkt_isn) < 0) {
+                        /* Cap hit BEFORE lwIP saw the SYN — safe RAW
+                         * fallback (on_syn contract in tcp_lane.h; Task 8's
+                         * post-accept rejection point must abort instead).
+                         * A want_tcp=0 refusal is just the marker cap: the
+                         * flow stays unsticky, not a TCP-lane rejection. */
+                        if (want_tcp) c->tcp_flows_rejected++;
+                        break;
+                    }
+                    if (!want_tcp) break; /* sticky-RAW just recorded */
+                    /* want_tcp: fall through to feed lwIP */
+                } else if (is_raw) {
+                    break; /* sticky RAW: same-ISN retransmit (or non-SYN) */
+                }
+                /* found && is_closing && !is_syn falls through here too:
+                 * routing residency (C1) — feed whatever this packet is
+                 * (the LAST_ACK final ACK, a TIME_WAIT-era stray, ...) to
+                 * lwIP, which demuxes it against its OWN pcb/TIME_WAIT
+                 * state; we are only routing, not relaying. */
+
+                if (mqvpn_lwip_input(conn->lwip_ctx, pkt, len) < 0)
+                    c->pkts_lane_tcp_dropped++;
+                /* Consumed by lwIP. MUST be an explicit TUN_INGRESS_DROP:
+                 * proceeding would ALSO send the packet RAW via
+                 * tun_send_datagram (double-processing). */
+                return TUN_INGRESS_DROP;
+            }
+#endif
+            /* No tcp_lane (build flag off or alloc failed): RAW, as H1. */
             break;
         case MQVPN_LANE_DGRAM: c->pkts_lane_dgram++; break;
         case MQVPN_LANE_RAW: c->pkts_lane_raw++; break;
@@ -2711,6 +3255,16 @@ mqvpn_client_tick(mqvpn_client_t *c)
     if (c->conn && c->conn->reorder_rx)
         mqvpn_reorder_rx_tick(c->conn->reorder_rx, client_now_us(c));
 
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* H2: drive lwIP's manual timers (tcp_tmr cadence lives in the glue). */
+    if (c->conn && c->conn->lwip_ctx) mqvpn_lwip_tick(c->conn->lwip_ctx);
+    /* H2/Task 13: TCP-lane idle-timeout eviction sweep. Order relative to
+     * mqvpn_lwip_tick above is irrelevant (both run every tick; neither
+     * depends on the other having just run). */
+    if (c->conn && c->conn->tcp_lane)
+        mqvpn_tcp_lane_tick(c->conn->tcp_lane, client_now_us(c));
+#endif
+
     return MQVPN_OK;
 }
 
@@ -2738,7 +3292,8 @@ mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
     out->pkts_lane_tcp = c->pkts_lane_tcp;
     out->pkts_lane_dgram = c->pkts_lane_dgram;
     out->pkts_lane_raw = c->pkts_lane_raw;
-    /* tcp_flows_active/total/rejected stay 0 (memset above) until tcp_lane. */
+    /* tcp_flows_active/total/rejected stay 0 (memset above) until Task 24
+     * wires the live c->tcp_flows_rejected / tcp_lane stats through. */
 
     /* Get connection-level SRTT from xquic (μs → ms) */
     if (c->engine && c->conn) {
@@ -2868,6 +3423,23 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
             }
         }
     }
+
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* H2: lwIP TCP-lane timer (retransmits, TIME-WAIT reaping). Shorten-only,
+     * same shape as the Recovery / Stability blocks above: `ms <= 0` here
+     * means xquic requested a SUB-MILLISECOND wake (next_wake_us/1000
+     * truncates to 0), which the final `ms > 0 ? ms : 1` clamp below
+     * services in 1ms — overwriting it with up to 250ms (TCP_TMR_INTERVAL)
+     * would delay that imminent pacing wake, the exact BBR stall the
+     * Stability comment above records. The lone-TCP-flow-while-xquic-quiet
+     * case is covered by that same clamp (ms <= 0 always yields a 1ms
+     * wake), so shorten-only is sufficient AND protects pacing. Returns -1
+     * when no lwIP timer is pending, leaving `ms` untouched. */
+    if (c->conn && c->conn->lwip_ctx) {
+        int lwip_ms = mqvpn_lwip_next_timeout_ms(c->conn->lwip_ctx);
+        if (lwip_ms >= 0 && ms > 0 && lwip_ms < ms) ms = lwip_ms;
+    }
+#endif
 
     out->next_timer_ms = ms > 0 ? ms : 1;
     out->tun_readable = (c->tun_active && !c->backpressure) ? 1 : 0;
