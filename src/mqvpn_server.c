@@ -49,6 +49,9 @@
 #include "reorder.h"
 #include "reorder_rx.h"
 #include "reorder_tx.h"
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+#  include "hybrid/tcp_egress.h"
+#endif
 
 /* ─── Constants ─── */
 
@@ -91,19 +94,27 @@ struct svr_conn_s {
     mqvpn_reorder_tx_t *reorder_tx;
     mqvpn_reorder_rx_t *reorder_rx;
     int peer_reorder_supported;
+
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    int tcp_flow_count; /* per-session cap enforcement lands with the
+                         * server-side limits work — no 5-tuple table needed
+                         * server-side per Design Decision D2. */
+#endif
 };
 
 /* Forward decl: reorder RX deliver trampoline (defined near the datagram
  * callbacks) — referenced earlier in cb_h3_conn_create when engines are made. */
 static void svr_reorder_deliver(const uint8_t *pkt, size_t len, void *ctx);
 
-/* Role of an inbound H3 request stream, decided at header parse. v0.8 has
- * exactly one recognized role; unrecognized requests keep ROLE_UNKNOWN and
- * retain the historical fall-through behavior (hybrid's connect-tcp stage
- * replaces that with a 501). */
+/* Role of an inbound H3 request stream, decided at header parse.
+ * Unrecognized requests keep ROLE_UNKNOWN, which now gets an explicit 501
+ * (see cb_request_read) instead of the historical capsule fall-through. */
 typedef enum {
     SVR_STREAM_ROLE_UNKNOWN = 0,
     SVR_STREAM_ROLE_CONNECT_IP,
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    SVR_STREAM_ROLE_CONNECT_TCP,
+#endif
 } svr_stream_role_t;
 
 struct svr_stream_s {
@@ -114,6 +125,14 @@ struct svr_stream_s {
     uint8_t *capsule_buf;
     size_t capsule_len;
     size_t capsule_cap;
+
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* Per D2, xqc_h3_request_t's user_data slot stays svr_stream_t*
+     * everywhere; per-flow egress state hangs off THIS field instead of
+     * ever calling xqc_h3_request_set_user_data() a second time. */
+    void *tcp_egress_flow; /* svr_tcp_egress_flow_t*, opaque here — only
+                            * tcp_egress.c casts it. */
+#endif
 };
 
 /* ─── Server handle (opaque mqvpn_server_t) ─── */
@@ -605,6 +624,20 @@ svr_masque_send_403(xqc_h3_request_t *h3_request)
     return xqc_h3_request_send_headers(h3_request, &hdrs, 1) < 0 ? -1 : 0;
 }
 
+/* Unrecognized :protocol (or missing Extended CONNECT framing entirely):
+ * explicit 501, replacing the historical silent capsule fall-through. */
+static int
+svr_masque_send_501(xqc_h3_request_t *h3_request)
+{
+    xqc_http_header_t resp[] = {
+        {.name = {.iov_base = ":status", .iov_len = 7},
+         .value = {.iov_base = "501", .iov_len = 3},
+         .flags = 0},
+    };
+    xqc_http_headers_t hdrs = {.headers = resp, .count = 1, .capacity = 1};
+    return xqc_h3_request_send_headers(h3_request, &hdrs, 1) < 0 ? -1 : 0;
+}
+
 static int
 svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
 {
@@ -881,6 +914,8 @@ cb_request_close(xqc_h3_request_t *h3_request, void *strm_user_data)
 typedef struct {
     int is_connect;
     int is_connect_ip;
+    const char *protocol; /* raw :protocol value, not NUL-terminated */
+    size_t protocol_len;
     int has_scheme_https;
     int has_capsule_proto;
     int has_valid_path;
@@ -901,9 +936,13 @@ svr_parse_request_headers(mqvpn_server_t *s, svr_stream_t *stream,
         if (h->name.iov_len == 7 && memcmp(h->name.iov_base, ":method", 7) == 0 &&
             h->value.iov_len == 7 && memcmp(h->value.iov_base, "CONNECT", 7) == 0)
             out->is_connect = 1;
-        if (h->name.iov_len == 9 && memcmp(h->name.iov_base, ":protocol", 9) == 0 &&
-            h->value.iov_len == 10 && memcmp(h->value.iov_base, "connect-ip", 10) == 0)
-            out->is_connect_ip = 1;
+        if (h->name.iov_len == 9 && memcmp(h->name.iov_base, ":protocol", 9) == 0) {
+            out->protocol = (const char *)h->value.iov_base;
+            out->protocol_len = h->value.iov_len;
+            if (h->value.iov_len == 10 &&
+                memcmp(h->value.iov_base, "connect-ip", 10) == 0)
+                out->is_connect_ip = 1;
+        }
         if (h->name.iov_len == 7 && memcmp(h->name.iov_base, ":scheme", 7) == 0 &&
             h->value.iov_len == 5 && memcmp(h->value.iov_base, "https", 5) == 0)
             out->has_scheme_https = 1;
@@ -1125,18 +1164,30 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
             stream->role = SVR_STREAM_ROLE_CONNECT_IP;
             return svr_connect_ip_on_request(s, stream, h3_request, &hdrs);
         }
-        /* Unrecognized request: role stays UNKNOWN; historical behavior
-         * (fall through, body treated as capsules) preserved until the
-         * hybrid connect-tcp stage lands a 501. */
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+        if (hdrs.is_connect && hdrs.protocol_len == 9 &&
+            memcmp(hdrs.protocol, "mqvpn-tcp", 9) == 0) {
+            stream->role = SVR_STREAM_ROLE_CONNECT_TCP;
+            return svr_tcp_egress_on_request(s, stream, h3_request, &hdrs);
+        }
+#endif
+        /* Unrecognized request: explicit 501, replacing the historical
+         * silent fall-through. Role stays UNKNOWN — no body is expected. */
+        svr_masque_send_501(h3_request);
+        return 0;
     }
 
     if (flag & XQC_REQ_NOTIFY_READ_BODY) {
         switch (stream->role) {
         case SVR_STREAM_ROLE_CONNECT_IP:
-        case SVR_STREAM_ROLE_UNKNOWN:
-            /* Historical: unknown-role bodies are treated as capsules until
-             * the connect-tcp stage lands a 501. */
             return svr_connect_ip_on_body(s, stream, h3_request);
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+        case SVR_STREAM_ROLE_CONNECT_TCP:
+            return svr_tcp_egress_on_body(s, stream, h3_request);
+#endif
+        case SVR_STREAM_ROLE_UNKNOWN:
+            /* 501 already sent at header time; no body expected. */
+            return 0;
         }
         return 0;
     }

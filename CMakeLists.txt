@@ -194,6 +194,7 @@ list(APPEND MQVPN_LIB_SOURCES
     ${CMAKE_SOURCE_DIR}/src/hybrid/lwip_glue.c
     ${CMAKE_SOURCE_DIR}/src/hybrid/tcp_lane.c
     ${CMAKE_SOURCE_DIR}/src/hybrid/tcp_lane_uplink.c
+    ${CMAKE_SOURCE_DIR}/src/hybrid/tcp_egress.c
 )
 
 # H2a micro-benchmark rig (Chunk 1 gate): TUN → classifier → lwIP → byte
@@ -434,6 +435,20 @@ if(BUILD_TESTING)
     target_include_directories(test_conn_settings PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
     set_target_properties(test_conn_settings PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_conn_settings COMMAND test_conn_settings)
+
+    # Server-side mqvpn-tcp dispatch test (real xquic engine, gated on the
+    # hybrid TCP lane existing at all — see SVR_STREAM_ROLE_CONNECT_TCP).
+    if(MQVPN_HYBRID_TCP_LANE_BUILD)
+        add_executable(test_tcp_egress tests/test_tcp_egress.c)
+        target_link_libraries(test_tcp_egress mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
+        target_include_directories(test_tcp_egress PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
+        target_compile_definitions(test_tcp_egress PRIVATE
+            TEST_CERT_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.crt"
+            TEST_KEY_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.key"
+        )
+        set_target_properties(test_tcp_egress PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+        add_test(NAME test_tcp_egress COMMAND test_tcp_egress)
+    endif()
 
     # CLI argv overflow shell test (runs the built mqvpn binary)
     add_test(NAME test_cli_path_argv
