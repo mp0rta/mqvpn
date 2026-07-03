@@ -146,6 +146,23 @@ mqvpn_tcp_lane_free(mqvpn_tcp_lane_t *lane)
         mqvpn_tcp_flow_t *f = lane->buckets[i];
         while (f) {
             mqvpn_tcp_flow_t *next = f->next;
+            if (f->pcb) {
+                /* Glue teardown contract (lwip_glue.h): the lane owns every
+                 * accepted pcb and must abort them all BEFORE the caller
+                 * frees the lwip ctx — lwIP's pcb lists are process-global,
+                 * so an orphaned pcb would survive into a reconnect's new
+                 * ctx with callback_arg pointing at freed flow memory.
+                 * Vendored tcp_abort → tcp_abandon (tcp.c) sends the RST,
+                 * frees the pcb, and THEN invokes the snapshotted err
+                 * callback with ERR_ABRT — clearing the callbacks first
+                 * (TCP_EVENT_ERR is NULL-guarded, tcp_priv.h) makes the
+                 * abort silent and sidesteps that post-free re-entrancy. */
+                tcp_arg(f->pcb, NULL);
+                tcp_recv(f->pcb, NULL);
+                tcp_sent(f->pcb, NULL);
+                tcp_err(f->pcb, NULL);
+                tcp_abort(f->pcb);
+            }
             free(f);
             f = next;
         }

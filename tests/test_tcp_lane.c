@@ -359,6 +359,12 @@ test_accept_key_correspondence(void)
                 "NULL pcb (pool exhaustion) tolerated");
     ASSERT_EQ_INT(g_open_stream_calls, 1, "no stream open for NULL pcb");
 
+    /* The pcb above is a stack fake — lane_free's abort loop would
+     * tcp_abort → tcp_free (memp_free) it and corrupt lwIP's pools, so
+     * detach it first. The abort loop itself needs a REAL pool pcb (full
+     * checksummed handshake through lwip_ctx) to exercise — deliberately
+     * NOT faked here; covered by the e2e checkpoints. */
+    f->pcb = NULL;
     mqvpn_tcp_lane_free(lane);
 }
 

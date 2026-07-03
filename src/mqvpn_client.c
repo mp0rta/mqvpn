@@ -1144,6 +1144,9 @@ cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_k
     if (ret < 0 && ret != -XQC_EAGAIN) {
         LOG_E(c, "connect-tcp: send headers failed (%zd)", ret);
         xqc_h3_request_close(req); /* close notify frees stream */
+        /* Task 12: the real abort_pending must clear f->h3_request/f->stream
+         * (they point at the just-closed request) and tolerate ACTIVE state
+         * despite its name — bind ran before send per the plan order. */
         mqvpn_tcp_lane_abort_pending(flow_handle);
         return;
     }
