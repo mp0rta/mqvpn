@@ -182,7 +182,21 @@ int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
  * EITHER with the final data chunk in the SAME call (n > 0 && *fin) OR on
  * its own zero-byte call (n == 0 && *fin) — both are real, reachable wire
  * shapes, not a plan simplification. *fin is only meaningful when the
- * return value is >= 0. */
+ * return value is >= 0.
+ *
+ * fin is LEVEL-TRIGGERED in xquic, not edge-triggered: once the transport
+ * FIN has arrived, every subsequent recv call re-reports *fin=1
+ * (xqc_h3_request.c:795-801 re-derives *fin from the request's sticky
+ * fin_flag whenever body_buf_count == 0, and the n==0 && !*fin EAGAIN
+ * guard therefore can never fire again after that point). A caller may
+ * therefore stash a data+fin chunk, DROP the local fin flag, and rely on
+ * the re-report when its resumed drain calls recv again — the downlink
+ * pump's stash/pause path depends on exactly this (see tcp_lane.c). The
+ * only side effect of the repeated fin observation is a second
+ * xqc_h3_request_end call, which is a harmless timestamp re-record
+ * (xqc_h3_request.c:1055-1058: XQC_H3_REQUEST_RECORD_TIME of h3r_end_time,
+ * nothing else). Test doubles for this function must model the re-report
+ * or they will falsify the stash-then-resume fin path. */
 #define MQVPN_TCP_LANE_H3_RECV_AGAIN                                       \
     (-1) /* drained for now (would-block) — retry on the next READ_BODY/ \
           * EMPTY_FIN notify */

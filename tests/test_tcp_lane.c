@@ -51,7 +51,10 @@ static int8_t test_tcp_write_hook(struct tcp_pcb *pcb, const void *dataptr, uint
 #define MQVPN_TCP_LANE_TCP_WRITE(pcb, buf, len, flags) \
     test_tcp_write_hook((pcb), (buf), (len), (flags))
 
-static uint16_t test_tcp_sndbuf_hook(struct tcp_pcb *pcb);
+/* u32, not u16: with LWIP_WND_SCALE the real snd_buf is a 32-bit
+ * tcpwnd_size_t (TCP_SND_BUF is 2 MiB in lwip_port/lwipopts.h), and tests
+ * must be able to script sndbuf values above 65535. */
+static uint32_t test_tcp_sndbuf_hook(struct tcp_pcb *pcb);
 #define MQVPN_TCP_LANE_TCP_SNDBUF(pcb) test_tcp_sndbuf_hook(pcb)
 
 static int8_t test_tcp_shutdown_hook(struct tcp_pcb *pcb, int shut_rx, int shut_tx);
@@ -147,9 +150,9 @@ test_tcp_write_hook(struct tcp_pcb *pcb, const void *dataptr, uint16_t len,
     return ret;
 }
 
-static uint16_t g_tcp_sndbuf_value = 0xFFFFu; /* default: plenty of room */
+static uint32_t g_tcp_sndbuf_value = 0xFFFFu; /* default: plenty of room */
 
-static uint16_t
+static uint32_t
 test_tcp_sndbuf_hook(struct tcp_pcb *pcb)
 {
     (void)pcb;
@@ -187,7 +190,15 @@ test_tcp_output_hook(struct tcp_pcb *pcb)
  * everything" like h3_send's double) — that is what makes the drain loop
  * inside mqvpn_tcp_lane_downlink_pump actually terminate once a test's
  * scripted deliveries run out, mirroring xquic's real "nothing more
- * buffered right now" signal. */
+ * buffered right now" signal.
+ *
+ * fin is LEVEL-TRIGGERED, like the real xquic (tcp_lane.h H3_RECV contract,
+ * xqc_h3_request.c:795-801): once any entry with fin=1 has been delivered,
+ * an exhausted script returns 0 with *fin=1 instead of AGAIN — every later
+ * call re-reports the fin. The downlink drain's stash path DEPENDS on this
+ * (it drops the local fin flag when a data+fin chunk gets stashed and
+ * relies on the re-report at the resumed drain); an edge-triggered double
+ * would falsify that path (see test_downlink_fin_stashed_with_data). */
 
 typedef struct {
     const uint8_t *data;
@@ -200,12 +211,14 @@ typedef struct {
 static h3_recv_entry_t g_h3_recv_script[H3_RECV_SCRIPT_MAX];
 static int g_h3_recv_script_len, g_h3_recv_script_pos;
 static int g_h3_recv_calls;
+static int g_h3_recv_fin_latched; /* sticky, like xquic's h3r->fin_flag */
 
 static void
 h3_recv_script_clear(void)
 {
     g_h3_recv_script_len = 0;
     g_h3_recv_script_pos = 0;
+    g_h3_recv_fin_latched = 0;
 }
 
 static void
@@ -238,6 +251,13 @@ cli_tcp_lane_h3_recv(void *h3_request, uint8_t *buf, size_t len, int *fin)
     (void)h3_request;
     g_h3_recv_calls++;
     if (g_h3_recv_script_pos >= g_h3_recv_script_len) {
+        if (g_h3_recv_fin_latched) {
+            /* Level-triggered re-report: drained + fin already seen ==
+             * xquic's body_buf_count==0 && fin_flag path (0 bytes, *fin=1,
+             * never AGAIN again). */
+            *fin = 1;
+            return 0;
+        }
         return MQVPN_TCP_LANE_H3_RECV_AGAIN;
     }
     h3_recv_entry_t *e = &g_h3_recv_script[g_h3_recv_script_pos++];
@@ -247,6 +267,9 @@ cli_tcp_lane_h3_recv(void *h3_request, uint8_t *buf, size_t len, int *fin)
     if (n > len) n = len; /* test chunks are always <= the TCP_MSS scratch buffer */
     if (n > 0 && e->data) {
         memcpy(buf, e->data, n);
+    }
+    if (e->fin) {
+        g_h3_recv_fin_latched = 1;
     }
     *fin = e->fin;
     return (ssize_t)n;
@@ -1720,6 +1743,61 @@ test_downlink_fin_while_paused(void)
 }
 
 static void
+test_downlink_fin_stashed_with_data(void)
+{
+    /* The OTHER fin-across-pause shape (vs test_downlink_fin_while_paused's
+     * fin-still-unread): the fin arrives ON the very chunk whose tcp_write
+     * fails. The drain stashes the chunk and BREAKS BEFORE its fin check —
+     * the local fin flag is deliberately discarded, relying on recv's
+     * level-triggered re-report (tcp_lane.h H3_RECV contract,
+     * xqc_h3_request.c:795-801) at the resumed drain. This test is what
+     * makes that reliance a pinned regression: an edge-triggered recv (or a
+     * future drain refactor that honors only an edge-triggered reading of
+     * the contract) loses the FIN here and never reaches tcp_shutdown. */
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xd009ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 7900, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    const uint8_t *c1 = mk_dl_bytes(350);
+    h3_recv_push_data(c1, 350, 1); /* data + fin in the SAME delivery */
+    tw_script_push(ERR_MEM);       /* ...and its write fails */
+
+    mqvpn_tcp_lane_downlink_pump(lane, &fake_stream);
+
+    ASSERT_EQ_INT(f->downlink_paused, 1, "paused on the failed write");
+    ASSERT_EQ_INT(f->downlink_stash_len, 350, "data+fin chunk stashed");
+    ASSERT_EQ_INT(f->fin_received_from_h3, 0,
+                  "local fin dropped at the stash boundary — not yet acted on");
+    ASSERT_EQ_INT(g_tcp_shutdown_calls, 0, "no shutdown before the data is delivered");
+
+    /* Resume: stash flush writes the data, the resumed pump's recv gets the
+     * level-triggered 0-byte fin re-report, and shutdown fires. */
+    g_tcp_sndbuf_value = 0xFFFFu;
+    mqvpn_tcp_lane_on_lwip_sent(f, &pcb, 0);
+
+    ASSERT_EQ_INT(f->downlink_paused, 0, "resumed");
+    ASSERT_EQ_INT(g_tcp_write_capture_len, 350, "the stashed chunk written on resume");
+    ASSERT_TRUE(memcmp(g_tcp_write_capture, g_expected, 350) == 0, "byte-exact");
+    ASSERT_EQ_INT(f->fin_received_from_h3, 1, "fin recovered via the re-report");
+    ASSERT_EQ_INT(g_tcp_shutdown_calls, 1,
+                  "tcp_shutdown exactly once — fin not lost across the stash boundary");
+    ASSERT_EQ_INT(g_tcp_shutdown_last_tx, 1, "TX-side half-close");
+
+    /* And a further pump stays idempotent even though recv keeps
+     * re-reporting fin=1 forever (level-triggered). */
+    mqvpn_tcp_lane_downlink_pump(lane, &fake_stream);
+    ASSERT_EQ_INT(g_tcp_shutdown_calls, 1, "no shutdown re-fire on later pumps");
+
+    f->pcb = NULL;
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
 test_downlink_fatal_recv_error(void)
 {
     relay_reset();
@@ -1798,6 +1876,7 @@ main(void)
     test_downlink_fin_with_data();
     test_downlink_fin_only();
     test_downlink_fin_while_paused();
+    test_downlink_fin_stashed_with_data();
     test_downlink_fatal_recv_error();
     test_downlink_pump_on_closing_flow();
 

@@ -13,6 +13,7 @@
 
 #include "hybrid/tcp_lane.h"
 
+#include <assert.h> /* Task 11: pins the h3_recv "0 bytes implies fin" contract */
 #include <stdlib.h>
 #include <string.h>
 
@@ -736,6 +737,10 @@ tcp_lane_downlink_drain(mqvpn_tcp_flow_t *f)
             mqvpn_tcp_lane_on_relay_error(f);
             return -1;
         }
+        /* Contract pin (tcp_lane.h H3_RECV): a non-AGAIN/ERR return is
+         * either data (n > 0) or a fin-only delivery (n == 0 && fin) —
+         * a bare n == 0 without fin would spin this loop forever. */
+        assert(n > 0 || fin);
         if (n > 0) {
             if ((size_t)MQVPN_TCP_LANE_TCP_SNDBUF(f->pcb) < (size_t)n) {
                 if (tcp_lane_downlink_stash(f, buf, (uint16_t)n) < 0) {
@@ -799,10 +804,16 @@ mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream)
      * bounded temporary state exactly mirroring the uplink's
      * EAGAIN/backpressure design in the other direction. The stash-flush
      * resume path (mqvpn_tcp_lane_on_lwip_sent below) clears downlink_paused
-     * and re-calls this function once sndbuf recovers — including when a
-     * FIN was still sitting undelivered in xquic's buffer at pause time:
-     * nothing here discards or skips past it, the resumed drain loop simply
-     * reaches it on its next cli_tcp_lane_h3_recv call. */
+     * and re-calls this function once sndbuf recovers. A FIN cannot be lost
+     * across the pause, in either shape: (a) fin still UNREAD in xquic's
+     * buffer at pause time — the resumed drain simply reaches it on a later
+     * recv call; (b) fin already READ, arriving ON the very chunk that got
+     * stashed (n>0 && fin) — the drain's stash path DOES discard that local
+     * fin flag (it breaks before the fin check), deliberately relying on
+     * recv's level-triggered re-report at the resumed drain
+     * (MQVPN_TCP_LANE_H3_RECV_* contract in tcp_lane.h: xquic re-reports
+     * *fin=1 on every call once the transport FIN arrived,
+     * xqc_h3_request.c:795-801). */
     if (f->downlink_paused) {
         return 0;
     }
