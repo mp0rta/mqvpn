@@ -141,6 +141,21 @@ typedef struct {
     int n_egress_allow;
     mqvpn_cidr_entry_t egress_deny[MQVPN_EGRESS_ACL_MAX];
     int n_egress_deny;
+
+    /* Client-only, runtime-learned — NOT a config key (deliberately absent
+     * from cfg_keys[]): the tunnel subnet this client's CONNECT-IP address
+     * lives in, filled at ADDRESS_ASSIGN time (mqvpn_client.c, tunnel-
+     * config-ready path). classify() forces IPv4 TCP destined INSIDE this
+     * subnet onto the RAW lane: the server's connect-tcp egress ACL denies
+     * the tunnel subnet unconditionally (before EgressAllow is even
+     * consulted — svr_tcp_egress_acl_decide), so a TCP-lane flow to a
+     * tunnel-subnet destination can only ever end in a RESET, while RAW
+     * keeps intra-VPN TCP working exactly as it did before the lane
+     * existed. mask == 0 means "not learned" and disables the check (a /0
+     * tunnel subnet is meaningless, so 0 is a safe unset sentinel; the
+     * default memset covers it). Ignored by the server, mirroring how the
+     * egress ACL fields above are ignored by the client. */
+    mqvpn_cidr_entry_t client_tunnel_subnet;
 } mqvpn_hybrid_config_t;
 
 /* Default for tcp_max_global_flows above — also the fallback budget when
@@ -230,7 +245,8 @@ mqvpn_hybrid_config_sanitize(mqvpn_hybrid_config_t *cfg, const char **names,
 
 /* Classify one inner IP packet from TUN. Fills *out_key (nullable) for
  * TCP/UDP verdicts. Rules: IPv4 fragment → RAW; IPv4 TCP → TCP lane iff
- * enabled && tcp_mode != RAW; UDP → DGRAM; IPv6 TCP → RAW (v1);
+ * enabled && tcp_mode != RAW && dst outside client_tunnel_subnet (see the
+ * field's docstring above); UDP → DGRAM; IPv6 TCP → RAW (v1);
  * ICMP/other/parse-fail → RAW. */
 mqvpn_hybrid_lane_t mqvpn_hybrid_classify(const uint8_t *pkt, size_t len,
                                           const mqvpn_hybrid_config_t *pol,

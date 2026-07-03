@@ -165,6 +165,58 @@ test_classify_v4_tcp_gates(void)
 }
 
 static void
+test_classify_tunnel_subnet_tcp_raw(void)
+{
+    uint8_t buf[64];
+    mqvpn_flow_key_t k;
+    size_t n = build_v4_tcp(buf, 2222, 80, 0); /* dst 10.0.0.2 */
+
+    /* client_tunnel_subnet set (10.0.0.0/24, the e2e/default pool shape):
+     * TCP destined INSIDE it must be RAW even under enabled+stream — the
+     * server's egress ACL denies the tunnel subnet unconditionally, so the
+     * lane would only ever RST (see classifier.c's comment). */
+    mqvpn_hybrid_config_t pol = make_pol(1, MQVPN_HYBRID_TCP_STREAM);
+    ASSERT_EQ_INT(mqvpn_parse_cidr_v4("10.0.0.0/24", &pol.client_tunnel_subnet), 0,
+                  "tunnel subnet cidr parses");
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_RAW,
+                  "v4 tcp dst in tunnel subnet + stream -> raw");
+
+    /* AUTO passes the same static gate — inside-subnet must be RAW too. */
+    pol.tcp_mode = MQVPN_HYBRID_TCP_AUTO;
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_RAW,
+                  "v4 tcp dst in tunnel subnet + auto -> raw");
+
+    /* Outside the subnet: the lane verdict is unaffected. */
+    pol.tcp_mode = MQVPN_HYBRID_TCP_STREAM;
+    buf[16] = 10;
+    buf[17] = 222;
+    buf[18] = 0;
+    buf[19] = 1; /* dst 10.222.0.1 */
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_TCP,
+                  "v4 tcp dst outside tunnel subnet -> tcp");
+
+    /* mask == 0 (default / not learned): gate off, verdict as before —
+     * pinned so the zero-value sentinel can't accidentally match-all
+     * ((ip & 0) == 0 would otherwise swallow every destination). */
+    pol.client_tunnel_subnet.net = 0;
+    pol.client_tunnel_subnet.mask = 0;
+    buf[16] = 10;
+    buf[17] = 0;
+    buf[18] = 0;
+    buf[19] = 2; /* dst back inside 10.0.0.0/24 */
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_TCP,
+                  "unset tunnel subnet (mask 0) -> tcp unchanged");
+
+    /* UDP inside the subnet is untouched — the exclusion is a TCP-lane
+     * concern only (DGRAM never hits the egress ACL). */
+    ASSERT_EQ_INT(mqvpn_parse_cidr_v4("10.0.0.0/24", &pol.client_tunnel_subnet), 0,
+                  "tunnel subnet cidr re-parses");
+    n = build_v4_udp(buf, 1111, 443, 0, 17); /* dst 10.0.0.2 */
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_DGRAM,
+                  "v4 udp dst in tunnel subnet -> dgram unchanged");
+}
+
+static void
 test_classify_v6_tcp_raw_v1(void)
 {
     uint8_t buf[64];
@@ -347,6 +399,7 @@ main(void)
 {
     test_classify_udp_always_dgram();
     test_classify_v4_tcp_gates();
+    test_classify_tunnel_subnet_tcp_raw();
     test_classify_v6_tcp_raw_v1();
     test_classify_fragments_and_other_raw();
     test_classify_malformed_raw();
