@@ -333,12 +333,87 @@ test_accept_key_correspondence(void)
     ASSERT_TRUE(ip4_addr_eq(&f->target_ip, &pcb.local_ip), "target_ip from pcb local_ip");
     ASSERT_EQ_INT(f->last_activity_us, 12345, "last_activity stamped via clock_fn");
 
-    /* bind (mqvpn_client.c calls this after opening the H3 request) */
+    /* bind (mqvpn_client.c calls this after opening the H3 request). Task 9:
+     * bind alone no longer activates the flow — it stays PENDING_STREAM
+     * until the H3 response gate (on_stream_established/_rejected) fires. */
     int fake_req, fake_stream;
     mqvpn_tcp_lane_bind_h3_request(f, &fake_req, &fake_stream);
-    ASSERT_EQ_INT(f->state, TCP_FLOW_ACTIVE, "bind moves flow to ACTIVE");
+    ASSERT_EQ_INT(f->state, TCP_FLOW_PENDING_STREAM,
+                  "bind alone stays PENDING_STREAM (2xx gate not yet fired)");
     ASSERT_TRUE(f->h3_request == &fake_req && f->stream == &fake_stream,
                 "bind stores the opaque request/stream");
+
+    /* Flow-not-found tolerance: a stream pointer that matches no bound flow
+     * must no-op silently (stream may outlive the flow after a future
+     * Task 12/13 removal), not crash or touch an unrelated flow. */
+    int unrelated_stream;
+    mqvpn_tcp_lane_on_stream_established(lane, &unrelated_stream);
+    ASSERT_EQ_INT(
+        f->state, TCP_FLOW_PENDING_STREAM,
+        "on_stream_established on unknown stream leaves the real flow untouched");
+    mqvpn_tcp_lane_on_stream_rejected(lane, &unrelated_stream);
+    ASSERT_EQ_INT(f->state, TCP_FLOW_PENDING_STREAM,
+                  "on_stream_rejected on unknown stream leaves the real flow untouched");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_h3_writable(lane, &unrelated_stream), 0,
+                  "on_h3_writable on unknown stream is a harmless no-op");
+    /* NULL lane/stream must also be tolerated (defensive callers). */
+    mqvpn_tcp_lane_on_stream_established(NULL, &fake_stream);
+    mqvpn_tcp_lane_on_stream_established(lane, NULL);
+    mqvpn_tcp_lane_on_stream_rejected(NULL, &fake_stream);
+    mqvpn_tcp_lane_on_stream_rejected(lane, NULL);
+    ASSERT_EQ_INT(f->state, TCP_FLOW_PENDING_STREAM,
+                  "NULL lane/stream args are tolerated, no state change");
+
+    /* 2xx response: PENDING_STREAM -> ACTIVE, last_activity re-stamped via
+     * clock_fn (fake_clock always returns 12345, so re-stamping is
+     * observationally idempotent here but exercises the write path). */
+    mqvpn_tcp_lane_on_stream_established(lane, &fake_stream);
+    ASSERT_EQ_INT(f->state, TCP_FLOW_ACTIVE,
+                  "on_stream_established moves flow to ACTIVE");
+    ASSERT_EQ_INT(f->last_activity_us, 12345, "last_activity re-stamped on activation");
+
+    /* Non-2xx response on a second bound flow: PENDING_STREAM -> CLOSING.
+     * Key must match the pcb2 5-tuple below (10.0.0.1:4002 -> 93.184.216.34:80
+     * — the same addresses test_accept_key_correspondence's first flow uses,
+     * NOT make_key()'s generic 10.0.0.1/10.0.0.2), since the accept callback
+     * rebuilds the key from the pcb's local/remote ip/port. */
+    mqvpn_flow_key_t key2;
+    memset(&key2, 0, sizeof(key2));
+    key2.ip_version = 4;
+    key2.proto = 6; /* TCP */
+    key2.src_port = 4002;
+    key2.dst_port = 80;
+    key2.src_ip[0] = 10;
+    key2.src_ip[1] = 0;
+    key2.src_ip[2] = 0;
+    key2.src_ip[3] = 1;
+    key2.dst_ip[0] = 93;
+    key2.dst_ip[1] = 184;
+    key2.dst_ip[2] = 216;
+    key2.dst_ip[3] = 34;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &key2, 1), 0,
+                  "second flow SYN-time commit");
+    struct tcp_pcb pcb2;
+    memset(&pcb2, 0, sizeof(pcb2));
+    pcb2.state = ESTABLISHED;
+    IP4_ADDR(&pcb2.local_ip, 93, 184, 216, 34);
+    IP4_ADDR(&pcb2.remote_ip, 10, 0, 0, 1);
+    pcb2.local_port = 80;
+    pcb2.remote_port = 4002;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lwip_accept(lane, &pcb2, ERR_OK), ERR_OK,
+                  "second flow accepted");
+    mqvpn_tcp_flow_t *f2 = (mqvpn_tcp_flow_t *)g_open_stream_flow;
+    int fake_req2, fake_stream2;
+    mqvpn_tcp_lane_bind_h3_request(f2, &fake_req2, &fake_stream2);
+    ASSERT_EQ_INT(f2->state, TCP_FLOW_PENDING_STREAM,
+                  "second flow bound, still PENDING_STREAM");
+    mqvpn_tcp_lane_on_stream_rejected(lane, &fake_stream2);
+    ASSERT_EQ_INT(f2->state, TCP_FLOW_CLOSING,
+                  "on_stream_rejected moves flow to CLOSING");
+    /* Rejecting/activating an unrelated stream must not disturb this flow. */
+    ASSERT_EQ_INT(f->state, TCP_FLOW_ACTIVE,
+                  "first flow unaffected by second flow's rejection");
+    f2->pcb = NULL; /* stack-fake pcb; detach before lane_free (see below) */
 
     /* Unknown pcb (no SYN-time commit) → refused, no stream open. The stub
      * pcb is safe here: the callback returns non-ERR_OK WITHOUT touching the
@@ -352,12 +427,12 @@ test_accept_key_correspondence(void)
     stray.remote_port = 4001; /* never committed */
     ASSERT_TRUE(mqvpn_tcp_lane_lwip_accept(lane, &stray, ERR_OK) != ERR_OK,
                 "untracked pcb refused");
-    ASSERT_EQ_INT(g_open_stream_calls, 1, "no stream open for untracked pcb");
+    ASSERT_EQ_INT(g_open_stream_calls, 2, "no stream open for untracked pcb");
 
     /* pcb-pool exhaustion shape: (NULL, ERR_MEM) must be tolerated. */
     ASSERT_TRUE(mqvpn_tcp_lane_lwip_accept(lane, NULL, ERR_MEM) != ERR_OK,
                 "NULL pcb (pool exhaustion) tolerated");
-    ASSERT_EQ_INT(g_open_stream_calls, 1, "no stream open for NULL pcb");
+    ASSERT_EQ_INT(g_open_stream_calls, 2, "no stream open for NULL pcb");
 
     /* The pcb above is a stack fake — lane_free's abort loop would
      * tcp_abort → tcp_free (memp_free) it and corrupt lwIP's pools, so

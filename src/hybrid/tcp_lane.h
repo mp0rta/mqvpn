@@ -88,14 +88,41 @@ err_t mqvpn_tcp_lane_lwip_accept(void *arg, struct tcp_pcb *newpcb, err_t err);
 
 /* Bind the H3 request/stream cli_tcp_lane_open_stream opened back onto the
  * flow (opaque: xqc_h3_request_t* / cli_stream_t* — the dependency stays
- * one-way, tcp_lane.c never includes xquic headers). Task 9 inserts real
- * 2xx/4xx response gating; until then the flow goes straight to ACTIVE. */
+ * one-way, tcp_lane.c never includes xquic headers). Stores h3_request/
+ * stream and leaves the flow in PENDING_STREAM: the request is sent but no
+ * response has arrived yet. The 2xx/4xx response gate
+ * (mqvpn_tcp_lane_on_stream_established / _rejected below) is what actually
+ * moves the flow to ACTIVE or CLOSING. */
 void mqvpn_tcp_lane_bind_h3_request(void *flow_handle, void *h3_request, void *stream);
 
 /* Reject a flow whose H3 stream open failed after lwIP already accepted it.
  * Post-SYN-ACK, so abort-only — RAW fallback is forbidden. Stub until
  * Task 12 lands the real pcb abort + flow removal. */
 void mqvpn_tcp_lane_abort_pending(void *flow_handle);
+
+/* H3 response gating for a bound mqvpn-tcp stream (Task 9). `stream` is the
+ * opaque cli_stream_t* handed to mqvpn_tcp_lane_bind_h3_request — these
+ * functions locate the owning flow by its stored f->stream back-pointer (a
+ * bounded O(n) walk over the flow table, n <= cfg.tcp_max_flows, i.e. <=
+ * 256 by default) rather than caching a flow pointer inside cli_stream_t.
+ * That keeps the flow table the single source of truth: once Task 12/13
+ * remove a flow, the table walk simply stops finding it — no separate
+ * back-pointer to remember to invalidate and no risk of dereferencing freed
+ * flow memory through a stale cached pointer. All three tolerate
+ * stream-not-found (the flow may already be gone) by no-op'ing. */
+
+/* 2xx response headers received: PENDING_STREAM -> ACTIVE, stamp
+ * last_activity. Task 10 adds the flush of uplink bytes buffered before the
+ * gate opened at the marked hook site in the .c. */
+void mqvpn_tcp_lane_on_stream_established(mqvpn_tcp_lane_t *lane, void *stream);
+
+/* Non-2xx response headers received: -> CLOSING. Task 12 does the real
+ * tcp_abort(pcb) + flow removal; this only routes the signal. */
+void mqvpn_tcp_lane_on_stream_rejected(mqvpn_tcp_lane_t *lane, void *stream);
+
+/* H3 send-window became writable again. Stub returning 0; Task 10 re-arms
+ * uplink delivery that was withheld for lack of H3 write credit. */
+int mqvpn_tcp_lane_on_h3_writable(mqvpn_tcp_lane_t *lane, void *stream);
 
 /* Implemented in mqvpn_client.c — the ONE deliberate tcp_lane.c →
  * mqvpn_client.c coupling point (direct .c-to-.c call, no callback-pointer

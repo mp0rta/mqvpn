@@ -313,19 +313,84 @@ tcp_lane_remove_flow(mqvpn_tcp_lane_t *lane, mqvpn_tcp_flow_t *f)
     (void)f;
 }
 
+/* O(n) walk over every bucket matching the stored f->stream back-pointer —
+ * see the rationale in tcp_lane.h above mqvpn_tcp_lane_on_stream_established.
+ * n <= cfg.tcp_max_flows (default 256), and this only runs once per H3
+ * response/writable event (not per-packet), so the linear scan is cheap. */
+static mqvpn_tcp_flow_t *
+find_flow_by_stream(mqvpn_tcp_lane_t *lane, void *stream)
+{
+    for (uint32_t i = 0; i < lane->n_buckets; i++) {
+        for (mqvpn_tcp_flow_t *f = lane->buckets[i]; f; f = f->next) {
+            if (f->stream == stream) {
+                return f;
+            }
+        }
+    }
+    return NULL;
+}
+
 void
 mqvpn_tcp_lane_bind_h3_request(void *flow_handle, void *h3_request, void *stream)
 {
     mqvpn_tcp_flow_t *f = (mqvpn_tcp_flow_t *)flow_handle;
     f->h3_request = h3_request;
     f->stream = stream;
-    f->state = TCP_FLOW_ACTIVE; /* Task 9 inserts real 2xx/4xx gating */
+    /* Stay PENDING_STREAM: the request is sent but no response has arrived.
+     * mqvpn_tcp_lane_on_stream_established/_rejected (Task 9) do the actual
+     * 2xx/4xx-gated transition. */
 }
 
 void
 mqvpn_tcp_lane_abort_pending(void *flow_handle)
 {
     (void)flow_handle; /* Task 12: tcp_abort(f->pcb) + remove_flow */
+}
+
+void
+mqvpn_tcp_lane_on_stream_established(mqvpn_tcp_lane_t *lane, void *stream)
+{
+    if (!lane || !stream) {
+        return;
+    }
+    mqvpn_tcp_flow_t *f = find_flow_by_stream(lane, stream);
+    if (!f) {
+        /* Flow already gone (e.g. a race with a future Task 12/13 removal) —
+         * nothing to gate. */
+        return;
+    }
+    f->state = TCP_FLOW_ACTIVE;
+    f->last_activity_us = lane->clock_fn ? lane->clock_fn(lane->clock_ctx) : 0;
+    /* Task 10 hook site: flush any uplink bytes buffered while the flow sat
+     * in PENDING_STREAM waiting for the 2xx gate to open. */
+}
+
+void
+mqvpn_tcp_lane_on_stream_rejected(mqvpn_tcp_lane_t *lane, void *stream)
+{
+    if (!lane || !stream) {
+        return;
+    }
+    mqvpn_tcp_flow_t *f = find_flow_by_stream(lane, stream);
+    if (!f) {
+        return;
+    }
+    /* Task 12 does the real teardown: tcp_abort(f->pcb) (RST to the local
+     * app) + tcp_lane_remove_flow. This task only routes the non-2xx signal
+     * to CLOSING so later code can recognize the flow is dead. */
+    f->state = TCP_FLOW_CLOSING;
+}
+
+int
+mqvpn_tcp_lane_on_h3_writable(mqvpn_tcp_lane_t *lane, void *stream)
+{
+    (void)lane;
+    (void)stream;
+    /* Task 10: re-arm uplink delivery withheld for lack of H3 write credit
+     * (resume tcp_recved on the withheld side). Stub is a correct no-op for
+     * this checkpoint — nothing is withheld yet (Task 10 introduces
+     * withholding). */
+    return 0;
 }
 
 err_t

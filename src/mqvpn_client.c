@@ -1433,6 +1433,70 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
     return 0;
 }
 
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+/* Parse the numeric ":status" pseudo-header out of a response header block.
+ * Returns the parsed status code, or -1 if absent/malformed. Kept local
+ * (not shared with cli_connect_ip_on_headers above): that function only
+ * ever matches the exact literal "200", never needs a general numeric
+ * range, and factoring a shared helper would mean touching the already-
+ * shipped CONNECT-IP tunnel path for no behavioral gain here. */
+static int
+cli_connect_tcp_parse_status(xqc_http_headers_t *hdrs)
+{
+    for (int i = 0; i < (int)hdrs->count; i++) {
+        xqc_http_header_t *h = &hdrs->headers[i];
+        if (h->name.iov_len == 7 && memcmp(h->name.iov_base, ":status", 7) == 0) {
+            size_t n = h->value.iov_len;
+            char buf[8];
+            if (n == 0 || n >= sizeof(buf)) return -1;
+            memcpy(buf, h->value.iov_base, n);
+            buf[n] = '\0';
+            char *end = NULL;
+            long v = strtol(buf, &end, 10);
+            if (end == buf || *end != '\0' || v < 100 || v > 599) return -1;
+            return (int)v;
+        }
+    }
+    return -1;
+}
+
+/* mqvpn-tcp CONNECT stream: response headers gate the flow. A 2xx moves the
+ * flow PENDING_STREAM -> ACTIVE (uplink may now flow); anything else is a
+ * rejection routed to the lane (Task 12 does the real tcp_abort + removal;
+ * this only signals it). */
+static void
+cli_connect_tcp_on_headers(cli_stream_t *stream, xqc_h3_request_t *h3_request)
+{
+    uint8_t fin = 0;
+    xqc_http_headers_t *hdrs = xqc_h3_request_recv_headers(h3_request, &fin);
+    if (!hdrs) return;
+
+    int status = cli_connect_tcp_parse_status(hdrs);
+    if (status >= 200 && status < 300) {
+        mqvpn_tcp_lane_on_stream_established(stream->conn->tcp_lane, stream);
+    } else {
+        mqvpn_tcp_lane_on_stream_rejected(stream->conn->tcp_lane, stream);
+    }
+}
+
+/* mqvpn-tcp CONNECT stream: response body. Task 11 replaces this drain
+ * placeholder with the real downlink write into lwIP (tcp_write). Matches
+ * cli_connect_ip_on_body's <=0 break idiom for recv_body's error/EAGAIN
+ * return. */
+static int
+cli_connect_tcp_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
+{
+    (void)stream;
+    uint8_t drain[4096];
+    uint8_t fin = 0;
+    ssize_t n;
+    while ((n = xqc_h3_request_recv_body(h3_request, drain, sizeof(drain), &fin)) > 0) {
+        /* Task 11 replaces with tcp_write() into lwIP. */
+    }
+    return 0;
+}
+#endif /* MQVPN_HYBRID_TCP_LANE_ENABLED */
+
 static int
 cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
                 void *user_data)
@@ -1448,8 +1512,10 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
         return 0;
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
     case CLI_STREAM_ROLE_CONNECT_TCP:
-        /* Task 9 adds 2xx/4xx response gating; Task 11 adds downlink relay.
-         * Until then reads on connect-tcp streams are ignored. */
+        if (flag & XQC_REQ_NOTIFY_READ_HEADER)
+            cli_connect_tcp_on_headers(stream, h3_request);
+        if (flag & XQC_REQ_NOTIFY_READ_BODY)
+            return cli_connect_tcp_on_body(stream, h3_request);
         return 0;
 #endif
     }
@@ -1461,7 +1527,19 @@ static int
 cb_request_write(xqc_h3_request_t *h3_request, void *user_data)
 {
     (void)h3_request;
-    (void)user_data;
+    cli_stream_t *stream = (cli_stream_t *)user_data;
+    switch (stream->role) {
+    case CLI_STREAM_ROLE_CONNECT_IP:
+        /* No consumer today — deliberately no plumbing (nothing withholds
+         * uplink writes on the CONNECT-IP tunnel stream). */
+        return 0;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    case CLI_STREAM_ROLE_CONNECT_TCP:
+        /* Task 10 fills the real re-arm (resume tcp_recved on withheld
+         * uplink). Stub returning 0 is fine for this checkpoint. */
+        return mqvpn_tcp_lane_on_h3_writable(stream->conn->tcp_lane, stream);
+#endif
+    }
     return 0;
 }
 
