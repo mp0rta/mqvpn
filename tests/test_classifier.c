@@ -286,6 +286,62 @@ test_hybrid_config_validate(void)
                   "validate tcp_mode out of range -> -1");
 }
 
+static void
+test_hybrid_config_sanitize(void)
+{
+    mqvpn_hybrid_config_t cfg;
+    const char *names[8];
+
+    /* Valid config: nothing reset, nothing named. */
+    mqvpn_hybrid_config_default(&cfg);
+    ASSERT_EQ_INT(mqvpn_hybrid_config_sanitize(&cfg, names, 8), 0,
+                  "sanitize default resets nothing");
+
+    /* One bad scalar: ONLY that field resets — enabled, other fields, and
+     * the ACL lists stay exactly as configured (the whole point vs a
+     * whole-block default reset, which would fail-open on the deny list). */
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.enabled = 1;
+    cfg.tcp_idle_timeout_sec = 60;
+    cfg.tcp_max_flows = 99;
+    ASSERT_EQ_INT(mqvpn_parse_cidr_v4("203.0.113.0/24", &cfg.egress_deny[0]), 0,
+                  "sanitize test deny cidr parses");
+    cfg.n_egress_deny = 1;
+    cfg.tcp_max_global_flows = 0; /* the typo */
+    ASSERT_EQ_INT(mqvpn_hybrid_config_sanitize(&cfg, names, 8), 1,
+                  "sanitize resets exactly one field");
+    ASSERT_EQ_INT(strcmp(names[0], "TcpMaxGlobalFlows"), 0,
+                  "sanitize names the bad field (INI spelling)");
+    ASSERT_EQ_INT((int)cfg.tcp_max_global_flows, MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT,
+                  "bad field reset to its default");
+    ASSERT_EQ_INT(cfg.enabled, 1, "enabled untouched");
+    ASSERT_EQ_INT((int)cfg.tcp_idle_timeout_sec, 60, "valid scalar untouched");
+    ASSERT_EQ_INT((int)cfg.tcp_max_flows, 99, "other valid scalar untouched");
+    ASSERT_EQ_INT(cfg.n_egress_deny, 1, "deny list untouched");
+    ASSERT_EQ_INT((int)cfg.egress_deny[0].net, (int)0xCB007100, "deny entry untouched");
+    ASSERT_EQ_INT(mqvpn_hybrid_config_validate(&cfg), 0,
+                  "sanitized config passes validate");
+
+    /* All four checked fields bad at once: all reset, all named. */
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.tcp_mode = (mqvpn_hybrid_tcp_mode_t)(MQVPN_HYBRID_TCP_AUTO + 1);
+    cfg.tcp_max_flows = 0;
+    cfg.tcp_connect_timeout_sec = 0;
+    cfg.tcp_max_global_flows = 0;
+    ASSERT_EQ_INT(mqvpn_hybrid_config_sanitize(&cfg, names, 8), 4,
+                  "sanitize resets all four checked fields");
+    ASSERT_EQ_INT(mqvpn_hybrid_config_validate(&cfg), 0,
+                  "fully-sanitized config passes validate");
+
+    /* NULL cfg and truncated names[] are safe. */
+    ASSERT_EQ_INT(mqvpn_hybrid_config_sanitize(NULL, names, 8), 0, "sanitize NULL -> 0");
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.tcp_max_flows = 0;
+    cfg.tcp_max_global_flows = 0;
+    ASSERT_EQ_INT(mqvpn_hybrid_config_sanitize(&cfg, names, 1), 2,
+                  "count exceeds max_names without overflow");
+}
+
 int
 main(void)
 {
@@ -299,6 +355,7 @@ main(void)
 
     test_hybrid_config_default();
     test_hybrid_config_validate();
+    test_hybrid_config_sanitize();
 
     fprintf(stderr, "test_classifier: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

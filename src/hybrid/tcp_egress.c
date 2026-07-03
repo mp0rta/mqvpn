@@ -157,9 +157,10 @@ svr_tcp_egress_acl_allowed(mqvpn_server_t *server, const char *target_host,
                                      tunnel_mask);
 }
 
-/* svr_log-routed warning macro — the only logging path this file has (see
+/* svr_log-routed log macros — the only logging path this file has (see
  * the boundary note in mqvpn_server_internal.h). */
 #define TLOG_W(server, ...) svr_log((server), MQVPN_LOG_WARN, __VA_ARGS__)
+#define TLOG_I(server, ...) svr_log((server), MQVPN_LOG_INFO, __VA_ARGS__)
 
 /* Canned status-only response, generalizing the 403 stub this replaces.
  * Mirrors mqvpn_server.c's svr_masque_send_403/501 (kept separate on
@@ -446,13 +447,41 @@ svr_tcp_egress_on_relay_error(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
  * errno=0 sentinel: an idle timeout is not an I/O error, and a dedicated log
  * line keeps the two cases distinguishable in server logs. Called only from
  * svr_tcp_egress_tick for a flow already confirmed ACTIVE (CONNECTING flows
- * are gated out by state, not by this function). */
+ * are gated out by state, not by this function).
+ *
+ * Log-level split: a plain idle eviction is NORMAL operation (a TCP
+ * connection simply went quiet past the configured timeout) — INFO. A flow
+ * parked by uplink backpressure (uplink_withheld: the client stopped
+ * reading its H3 body and never reopened its receive window; this sweep is
+ * that flow's ONLY collector) suggests a misbehaving/stuck client — WARN,
+ * with distinct wording so an operator can grep the two apart. The flow's
+ * target comes from getpeername on its own connected fd (identical to the
+ * connect() target, no extra per-flow state needed); the username was
+ * captured at auth time. */
 static void
 svr_tcp_egress_on_idle_evict(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
                              uint32_t idle_timeout_sec)
 {
-    TLOG_W(server, "connect-tcp: ACTIVE flow idle for over %u s — closing stream",
-           idle_timeout_sec);
+    char peer[64] = "?";
+    struct sockaddr_in sa;
+    socklen_t sl = sizeof(sa);
+    if (getpeername(ef->fd, (struct sockaddr *)&sa, &sl) == 0 &&
+        sa.sin_family == AF_INET) {
+        char ip[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, &sa.sin_addr, ip, sizeof(ip)))
+            snprintf(peer, sizeof(peer), "%s:%u", ip, (unsigned)ntohs(sa.sin_port));
+    }
+    if (ef->uplink_withheld) {
+        TLOG_W(server,
+               "connect-tcp: flow to %s (user %s) parked by client backpressure "
+               "(client stopped reading) for over %u s — closing stream",
+               peer, ef->username, idle_timeout_sec);
+    } else {
+        TLOG_I(server,
+               "connect-tcp: flow to %s (user %s) idle for over %u s — "
+               "closing stream",
+               peer, ef->username, idle_timeout_sec);
+    }
     xqc_h3_request_close(ef->h3_request);
     /* Do NOT touch ef again — see the destroy-ownership note on
      * on_relay_error above. */
@@ -545,6 +574,13 @@ svr_tcp_egress_drain_body(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
 {
     if (ef->downlink_paused) return 1;
 
+    /* Downlink-activity accounting: bytes that actually reached the egress
+     * socket are summed here and folded into last_activity_us ONCE at the
+     * "still alive" exits (a per-send() refresh inside the loop would call
+     * svr_now_us per 4 KiB chunk for no precision gain — the idle sweep has
+     * seconds granularity). The relay-error exits skip the refresh: `ef`
+     * may already be freed there (see on_relay_error's contract). */
+    size_t moved = 0;
     uint8_t buf[TCP_EGRESS_RELAY_CHUNK];
     for (;;) {
         uint8_t fin = 0;
@@ -578,6 +614,7 @@ svr_tcp_egress_drain_body(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
                                                        (size_t)n - off)) {
                         return 0; /* ef gone (stash alloc failure) */
                     }
+                    if (moved) ef->last_activity_us = svr_now_us();
                     return 1;
                 }
                 if (sent <= 0) {
@@ -586,9 +623,7 @@ svr_tcp_egress_drain_body(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
                     svr_tcp_egress_on_relay_error(server, ef, sent < 0 ? errno : 0);
                     return 0;
                 }
-                /* Downlink activity: bytes actually reached the egress
-                 * socket (see last_activity_us's field comment). */
-                ef->last_activity_us = svr_now_us();
+                moved += (size_t)sent;
                 off += (size_t)sent;
             }
         }
@@ -600,6 +635,7 @@ svr_tcp_egress_drain_body(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
         }
         if (n == 0) break; /* defensive: contract says n==0 implies fin */
     }
+    if (moved) ef->last_activity_us = svr_now_us();
     return 1;
 }
 

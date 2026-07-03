@@ -1616,22 +1616,26 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     s->max_clients = cfg->max_clients > 0 ? cfg->max_clients : 64;
     s->ptb_tokens = PTB_RATE_LIMIT;
     s->boot_us = now_us();
-    /* Validate the [Hybrid] block at its consumer (validate-at-consumer
+    /* Sanitize the [Hybrid] block at its consumer (validate-at-consumer
      * pattern — same as mqvpn_reorder_config_validate run by
      * mqvpn_reorder_rx_new): the INI/JSON loaders store raw scalars (CFG_U32
      * accepts 0) and only the PUBLIC setters range-check, so a file config
      * with e.g. TcpMaxGlobalFlows = 0 would otherwise freeze the egress fd
-     * budget at 0 below and silently 503 every connect-tcp request. On
-     * invalid: warn + reset the WHOLE hybrid block to library defaults,
-     * matching the loaders' own warn-and-ignore convention for invalid
-     * scalars — never a hard server-start failure. */
-    if (mqvpn_hybrid_config_validate(&s->config.hybrid) != 0) {
-        LOG_W(s, "invalid [Hybrid] config; using defaults");
-        mqvpn_hybrid_config_default(&s->config.hybrid);
+     * budget at 0 below and silently 503 every connect-tcp request.
+     * PER-FIELD reset (mqvpn_hybrid_config_sanitize), never a whole-block
+     * default reset: that would silently drop the operator's EgressDeny/
+     * EgressAllow policy over an unrelated scalar typo — fail-open. Warned
+     * per field, matching the loaders' own per-key warn-and-ignore
+     * convention; never a hard server-start failure. */
+    {
+        const char *bad_fields[8];
+        int n_bad = mqvpn_hybrid_config_sanitize(&s->config.hybrid, bad_fields, 8);
+        for (int i = 0; i < n_bad && i < 8; i++)
+            LOG_W(s, "invalid [Hybrid] %s; using default", bad_fields[i]);
     }
     /* s->config was already populated by the memcpy above (and its hybrid
-     * block possibly reset just above) — the budget computation MUST read
-     * the applied config, not `cfg` directly, so a future refactor that
+     * scalars possibly sanitized just above) — the budget computation MUST
+     * read the applied config, not `cfg` directly, so a future refactor that
      * changes what memcpy copies can't silently desync the two. */
     s->egress_fd_budget =
         svr_compute_egress_fd_budget(s->config.hybrid.tcp_max_global_flows);
@@ -2516,6 +2520,17 @@ mqvpn_server_get_interest(const mqvpn_server_t *s, mqvpn_interest_t *out)
 
     int ms = (int)(s->next_wake_us / 1000);
     out->next_timer_ms = ms > 0 ? ms : 1;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* next_wake_us above comes solely from xquic's event timer, which knows
+     * nothing about the egress deadlines (connect timeout -> 504, ACTIVE
+     * idle eviction) that svr_tcp_egress_tick enforces — on a quiet server
+     * they could otherwise fire arbitrarily late. Clamp to a 1s ceiling
+     * whenever any egress flow is live: a simple clamp on purpose (not the
+     * exact nearest deadline — both deadlines have seconds granularity, so
+     * sub-second precision buys nothing and the clamp can't go stale). */
+    if (s->tcp_egress_flow_list_head != NULL && out->next_timer_ms > 1000)
+        out->next_timer_ms = 1000;
+#endif
     out->tun_readable = s->tun_paused ? 0 : 1;
     out->is_idle = (s->n_sessions == 0) ? 1 : 0;
     return MQVPN_OK;

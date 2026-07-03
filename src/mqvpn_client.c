@@ -1467,20 +1467,24 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
         c->mtu = tun_mtu;
 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
-        /* Validate the [Hybrid] block at its consumer, BEFORE the enabled
+        /* Sanitize the [Hybrid] block at its consumer, BEFORE the enabled
          * gate below (validate-at-consumer pattern — mirrors
          * mqvpn_reorder_config_validate at mqvpn_reorder_rx_new and the
          * server-side check in mqvpn_server_new): the INI/JSON loaders store
          * raw scalars, so an invalid block (e.g. TcpMaxFlows = 0) reaches
          * here unchecked and would size the lane's flow table from garbage.
-         * On invalid: warn + reset to library defaults — which also flips
-         * enabled off, so the lane simply doesn't come up (RAW fallback,
-         * same degradation policy as the alloc-failure paths below). Never a
-         * hard failure. Idempotent across reconnects: the reset makes the
-         * config valid, so the warn fires at most once per client. */
-        if (mqvpn_hybrid_config_validate(&c->config.hybrid) != 0) {
-            LOG_W(c, "invalid [Hybrid] config; using defaults (TCP lane disabled)");
-            mqvpn_hybrid_config_default(&c->config.hybrid);
+         * PER-FIELD reset (mqvpn_hybrid_config_sanitize), never a
+         * whole-block default reset: enabled and every valid field stay as
+         * configured — an unrelated scalar typo must not silently disable
+         * the whole TCP lane (nor, on the server side, drop ACL policy).
+         * Warned per field; never a hard failure. Idempotent across
+         * reconnects: the reset makes the config valid, so the warns fire
+         * at most once per client. */
+        {
+            const char *bad_fields[8];
+            int n_bad = mqvpn_hybrid_config_sanitize(&c->config.hybrid, bad_fields, 8);
+            for (int i = 0; i < n_bad && i < 8; i++)
+                LOG_W(c, "invalid [Hybrid] %s; using default", bad_fields[i]);
         }
         /* H2: bring up the lwIP TCP-lane stack now that the inner MTU is
          * resolved (lwIP derives each pcb's MSS from netif->mtu at accept

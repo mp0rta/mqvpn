@@ -148,6 +148,11 @@ typedef struct {
  * (svr_compute_egress_fd_budget takes min(headroom, tcp_max_global_flows)). */
 #define MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT 4096
 
+/* Per-field defaults shared by mqvpn_hybrid_config_default and
+ * mqvpn_hybrid_config_sanitize below — named so the two can't drift. */
+#define MQVPN_TCP_MAX_FLOWS_DEFAULT           256
+#define MQVPN_TCP_CONNECT_TIMEOUT_SEC_DEFAULT 10
+
 /* static inline ON PURPOSE (not in classifier.c): src/config.c and
  * src/mqvpn_config.c will call these, and three test targets link those
  * sources WITHOUT mqvpn_lib — out-of-line definitions would break links. */
@@ -157,9 +162,9 @@ mqvpn_hybrid_config_default(mqvpn_hybrid_config_t *cfg)
     memset(cfg, 0, sizeof(*cfg));
     cfg->enabled = 0;
     cfg->tcp_mode = MQVPN_HYBRID_TCP_AUTO;
-    cfg->tcp_max_flows = 256;
+    cfg->tcp_max_flows = MQVPN_TCP_MAX_FLOWS_DEFAULT;
     cfg->tcp_idle_timeout_sec = 300;
-    cfg->tcp_connect_timeout_sec = 10;
+    cfg->tcp_connect_timeout_sec = MQVPN_TCP_CONNECT_TIMEOUT_SEC_DEFAULT;
     cfg->tcp_max_global_flows = MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT;
     /* n_egress_allow / n_egress_deny already 0 from the memset above. */
 }
@@ -177,6 +182,50 @@ mqvpn_hybrid_config_validate(const mqvpn_hybrid_config_t *cfg)
      * a legitimate "off" value; this isn't that kind of field). */
     if (cfg->tcp_max_global_flows == 0) return -1;
     return 0;
+}
+
+/* Per-field companion to validate, run at the CONSUMERS (mqvpn_server_new /
+ * the client's tcp_lane init site — same validate-at-consumer pattern as
+ * mqvpn_reorder_config_validate): each field validate would reject is reset
+ * to its own default, and ONLY that field. enabled, every valid field, and
+ * the egress ACL lists are left untouched — a whole-block default reset
+ * would silently DROP an operator's EgressDeny policy over an unrelated
+ * typo (fail-open), where per-field reset matches the loaders' own per-key
+ * "invalid X; using default" convention. Returns the number of fields
+ * reset; names[0..min(ret,max_names)-1] receives static string literals
+ * (INI key spelling) so the caller can log one warn per field with
+ * whatever logger it owns (this header has no logging dependency on
+ * purpose — see mqvpn_parse_cidr_v4's note above). */
+static inline int
+mqvpn_hybrid_config_sanitize(mqvpn_hybrid_config_t *cfg, const char **names,
+                             int max_names)
+{
+    int n = 0;
+    if (!cfg) return 0;
+    if (cfg->tcp_mode > MQVPN_HYBRID_TCP_AUTO) {
+        cfg->tcp_mode = MQVPN_HYBRID_TCP_AUTO;
+        if (names && n < max_names) names[n] = "Tcp";
+        n++;
+    }
+    if (cfg->tcp_max_flows == 0) {
+        cfg->tcp_max_flows = MQVPN_TCP_MAX_FLOWS_DEFAULT;
+        if (names && n < max_names) names[n] = "TcpMaxFlows";
+        n++;
+    }
+    if (cfg->tcp_connect_timeout_sec == 0) {
+        cfg->tcp_connect_timeout_sec = MQVPN_TCP_CONNECT_TIMEOUT_SEC_DEFAULT;
+        if (names && n < max_names) names[n] = "TcpConnectTimeoutSec";
+        n++;
+    }
+    if (cfg->tcp_max_global_flows == 0) {
+        cfg->tcp_max_global_flows = MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT;
+        if (names && n < max_names) names[n] = "TcpMaxGlobalFlows";
+        n++;
+    }
+    /* Postcondition pinned: a sanitized config always passes validate —
+     * the four resets above cover exactly validate's four checks. Keep the
+     * two functions in lockstep when adding fields. */
+    return n;
 }
 
 /* Classify one inner IP packet from TUN. Fills *out_key (nullable) for
