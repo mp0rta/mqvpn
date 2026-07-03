@@ -891,6 +891,45 @@ TEST(acl_default_allows_public_ip)
     ASSERT_EQ(allowed, 1);
 }
 
+TEST(acl_blocks_this_network)
+{
+    /* 0.0.0.0 is not a dead address: Linux connect() to it reaches
+     * localhost, so it must hit the 0.0.0.0/8 default-deny row or the
+     * loopback protection is bypassable. */
+    int allowed = svr_tcp_egress_acl_decide(ipv4(0, 0, 0, 0), NULL, 0, NULL, 0,
+                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_blocks_reserved_240)
+{
+    int allowed = svr_tcp_egress_acl_decide(ipv4(240, 0, 0, 1), NULL, 0, NULL, 0,
+                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_deny_blocks_public_ip)
+{
+    /* egress_deny must be reachable past the default-deny table: a target
+     * OUTSIDE every built-in range is denied only by the configured list. */
+    mqvpn_cidr_entry_t deny[1] = {{ipv4(8, 8, 8, 8), 0xFFFFFFFFu}};
+    int allowed = svr_tcp_egress_acl_decide(ipv4(8, 8, 8, 8), NULL, 0, deny, 1,
+                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_allow_beats_deny)
+{
+    /* Precedence pin: the SAME range in both lists resolves to allowed,
+     * because allow is checked before both the default-deny table and the
+     * configured deny list (spec'd order — see acl_decide's docstring). */
+    mqvpn_cidr_entry_t allow[1] = {{ipv4(8, 8, 8, 8), 0xFFFFFFFFu}};
+    mqvpn_cidr_entry_t deny[1] = {{ipv4(8, 8, 8, 8), 0xFFFFFFFFu}};
+    int allowed = svr_tcp_egress_acl_decide(ipv4(8, 8, 8, 8), allow, 1, deny, 1,
+                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    ASSERT_EQ(allowed, 1);
+}
+
 /* ── svr_tcp_egress_parse_path — fully attacker-controlled H3 :path bytes ── */
 
 TEST(parse_path_accepts_valid)
@@ -928,6 +967,34 @@ TEST(parse_path_rejects_missing_port)
     ASSERT_EQ(rc == 0, 0);
 }
 
+TEST(parse_path_rejects_port_out_of_range)
+{
+    char host[16];
+    uint16_t port;
+
+    /* Port 0 is not a connectable port. */
+    const char *p0 = "/.well-known/mqvpn/tcp/1.2.3.4/0/";
+    ASSERT_EQ(svr_tcp_egress_parse_path(p0, strlen(p0), host, sizeof(host), &port) == 0,
+              0);
+
+    /* One past the max — must be rejected, not wrapped to 0. */
+    const char *p65536 = "/.well-known/mqvpn/tcp/1.2.3.4/65536/";
+    ASSERT_EQ(
+        svr_tcp_egress_parse_path(p65536, strlen(p65536), host, sizeof(host), &port) == 0,
+        0);
+}
+
+TEST(parse_path_rejects_trailing_bytes)
+{
+    /* The trailing '/' must be the LAST byte — extra segments/bytes after
+     * it break the byte-for-byte template match. */
+    const char *path = "/.well-known/mqvpn/tcp/1.2.3.4/443/x";
+    char host[16];
+    uint16_t port;
+    int rc = svr_tcp_egress_parse_path(path, strlen(path), host, sizeof(host), &port);
+    ASSERT_EQ(rc == 0, 0);
+}
+
 TEST(parse_path_rejects_wrong_prefix)
 {
     const char *path = "/probe";
@@ -960,9 +1027,15 @@ main(void)
     run_acl_allow_punches_hole();
     run_acl_blocks_own_tunnel_subnet();
     run_acl_default_allows_public_ip();
+    run_acl_blocks_this_network();
+    run_acl_blocks_reserved_240();
+    run_acl_deny_blocks_public_ip();
+    run_acl_allow_beats_deny();
     run_parse_path_accepts_valid();
     run_parse_path_rejects_oversized_host();
     run_parse_path_rejects_missing_port();
+    run_parse_path_rejects_port_out_of_range();
+    run_parse_path_rejects_trailing_bytes();
     run_parse_path_rejects_wrong_prefix();
     run_parse_path_rejects_empty();
 

@@ -42,9 +42,10 @@ svr_tcp_egress_parse_path(const char *path, size_t path_len, char *out_host,
 
     /* Port: digits only, terminated by exactly one trailing '/' that must
      * be the LAST byte of the path (byte-for-byte match with the client's
-     * trailing-slash template — no query string, no extra segments). */
+     * trailing-slash template — no query string, no extra segments).
+     * port_start <= end always holds here: slash1 came from a memchr
+     * bounded by end, so slash1 < end and slash1 + 1 <= end. */
     const char *port_start = slash1 + 1;
-    if (port_start > end) return -1;
     const void *slash2_v = memchr(port_start, '/', (size_t)(end - port_start));
     if (!slash2_v) return -1;
     const char *slash2 = (const char *)slash2_v;
@@ -66,24 +67,34 @@ svr_tcp_egress_parse_path(const char *path, size_t path_len, char *out_host,
     return 0;
 }
 
-/* Mandatory, default-on deny set: loopback, RFC1918, link-local, CGNAT,
- * multicast, broadcast. Evaluated regardless of config — egress_allow is
- * the only way through (see svr_tcp_egress_acl_decide's docstring for the
- * full precedence order, including the tunnel-subnet check that isn't in
- * this table because it depends on the server's own config). */
+/* Mandatory, default-on deny set: this-network, loopback, RFC1918,
+ * link-local, CGNAT, multicast, reserved, broadcast. Evaluated regardless
+ * of config — egress_allow is the only way through (see
+ * svr_tcp_egress_acl_decide's docstring for the full precedence order,
+ * including the tunnel-subnet check that isn't in this table because it
+ * depends on the server's own config). */
 static const struct {
     uint32_t net;
     uint32_t mask;
-    const char *name; /* diagnostic only, currently unused by any log site */
 } DEFAULT_DENY_V4[] = {
-    {0x7F000000u, 0xFF000000u, "loopback"},        /* 127.0.0.0/8 */
-    {0x0A000000u, 0xFF000000u, "rfc1918-10"},      /* 10.0.0.0/8 */
-    {0xAC100000u, 0xFFF00000u, "rfc1918-172-16"},  /* 172.16.0.0/12 */
-    {0xC0A80000u, 0xFFFF0000u, "rfc1918-192-168"}, /* 192.168.0.0/16 */
-    {0xA9FE0000u, 0xFFFF0000u, "link-local"},      /* 169.254.0.0/16 */
-    {0x64400000u, 0xFFC00000u, "cgnat"},           /* 100.64.0.0/10 */
-    {0xE0000000u, 0xF0000000u, "multicast"},       /* 224.0.0.0/4 */
-    {0xFFFFFFFFu, 0xFFFFFFFFu, "broadcast"},       /* 255.255.255.255/32 */
+    /* 0.0.0.0/8 "this network" (RFC 1122 §3.2.1.3): NOT a dead range —
+     * inet_pton accepts "0.0.0.0" and on Linux connect() to 0.0.0.0 reaches
+     * localhost, so without this row a connect-tcp target of 0.0.0.0 would
+     * bypass the loopback protection below. */
+    {0x00000000u, 0xFF000000u}, /* this-network 0.0.0.0/8 */
+    {0x7F000000u, 0xFF000000u}, /* loopback 127.0.0.0/8 */
+    {0x0A000000u, 0xFF000000u}, /* rfc1918 10.0.0.0/8 */
+    {0xAC100000u, 0xFFF00000u}, /* rfc1918 172.16.0.0/12 */
+    {0xC0A80000u, 0xFFFF0000u}, /* rfc1918 192.168.0.0/16 */
+    {0xA9FE0000u, 0xFFFF0000u}, /* link-local 169.254.0.0/16 */
+    {0x64400000u, 0xFFC00000u}, /* cgnat 100.64.0.0/10 */
+    {0xE0000000u, 0xF0000000u}, /* multicast 224.0.0.0/4 */
+    /* 240.0.0.0/4 reserved (RFC 1112 Class E), defense-in-depth. Subsumes
+     * the broadcast /32 row below; keeping both is harmless (rows are
+     * checked sequentially, first match denies) and keeps broadcast
+     * explicitly documented rather than implied. */
+    {0xF0000000u, 0xF0000000u}, /* reserved 240.0.0.0/4 */
+    {0xFFFFFFFFu, 0xFFFFFFFFu}, /* broadcast 255.255.255.255/32 */
 };
 
 int
@@ -140,6 +151,9 @@ svr_tcp_egress_acl_allowed(mqvpn_server_t *server, const char *target_host,
 static int
 svr_tcp_egress_respond(xqc_h3_request_t *h3_request, int status)
 {
+    /* iov_len below is hardcoded 3, so status must be a 3-digit HTTP code
+     * (100-999). All call sites pass literals (400/403/503); a value
+     * outside that range would send a truncated/garbage :status. */
     char status_str[4];
     snprintf(status_str, sizeof(status_str), "%03d", status);
 

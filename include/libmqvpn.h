@@ -519,7 +519,9 @@ MQVPN_API int mqvpn_config_set_hybrid_connect_timeout(mqvpn_config_t *cfg, uint3
  * setter validates the WHOLE call atomically: any malformed entry rejects
  * the entire call with MQVPN_ERR_INVALID_ARG and leaves cfg unmodified.
  * n_allow/n_deny may be 0 with allow/deny NULL; either list capped at
- * MQVPN_EGRESS_ACL_MAX entries (src/hybrid/classifier.h). */
+ * MQVPN_EGRESS_ACL_MAX entries (src/hybrid/classifier.h). Caution:
+ * "0.0.0.0/0" in the allow list disables the built-in protections
+ * (loopback/RFC1918/...); enumerate specific ranges instead. */
 MQVPN_API int mqvpn_config_set_hybrid_egress_acl(mqvpn_config_t *cfg, const char **allow,
                                                  int n_allow, const char **deny,
                                                  int n_deny);
