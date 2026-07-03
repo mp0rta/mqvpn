@@ -209,8 +209,8 @@ datagram counters and uptime.
   "dgram_lost":421,"dgram_acked":88341,
   "pkts_lane_tcp":0,"pkts_lane_dgram":0,
   "pkts_lane_raw":0,"pkts_lane_tcp_dropped":0,
-  "tcp_flows_active":1,"tcp_flows_total":0,
-  "tcp_flows_rejected":0,"raw_markers_active":0,
+  "tcp_flows_active":1,"tcp_flows_total":7,
+  "tcp_flows_rejected":2,"raw_markers_active":0,
   "uptime_sec":3601
 }
 ```
@@ -224,13 +224,13 @@ datagram counters and uptime.
 | `dgram_recv` | uint64  | QUIC datagrams the server forwarded to the TUN interface, all sessions. Excludes datagrams dropped before forwarding (TTL ≤ 1 → ICMP Time Exceeded, source-IP mismatch, malformed frame). |
 | `dgram_lost` | uint64  | Total QUIC datagrams declared lost, all sessions               |
 | `dgram_acked`| uint64  | Total QUIC datagrams acknowledged, all sessions                |
-| `pkts_lane_tcp`   | uint64 | Hybrid mode: inner packets classified into the TCP stream lane. Server-side: always 0 (the server does not classify TUN-ingress packets). |
-| `pkts_lane_dgram` | uint64 | Hybrid mode: inner packets classified into the datagram lane. Server-side: always 0. |
-| `pkts_lane_raw`   | uint64 | Hybrid mode: inner packets classified into the raw CONNECT-IP lane. Server-side: always 0. |
+| `pkts_lane_tcp`   | uint64 | Hybrid mode: packets actually handed to the TCP lane (lwIP). Server-side: always 0 (the server does not classify TUN-ingress packets). |
+| `pkts_lane_dgram` | uint64 | Hybrid mode: packets sent via the datagram lane. Server-side: always 0. |
+| `pkts_lane_raw`   | uint64 | Hybrid mode: packets sent via the raw CONNECT-IP lane, including TCP candidates that fell back to RAW (sticky-RAW, cap-rejected, non-SYN on an unknown flow, lane-less build). `pkts_lane_tcp` + `pkts_lane_dgram` + `pkts_lane_raw` partitions every classified packet exactly once. Server-side: always 0. |
 | `pkts_lane_tcp_dropped` | uint64 | Hybrid mode: TCP-lane packets lwIP refused (e.g. no matching pcb). Client-only; always 0 server-side. |
-| `tcp_flows_active`   | uint64 | Hybrid mode: currently open TCP-lane flows. Client: the TCP-lane flow table's live count. **Server: the whole-server count of open egress TCP flows — wired from real state.** |
-| `tcp_flows_total`    | uint64 | Hybrid mode: cumulative TCP-lane flows opened since start. Client-only; always 0 server-side (no cumulative "opened" counter is tracked for egress flows). |
-| `tcp_flows_rejected` | uint64 | Hybrid mode: SYNs that wanted the TCP lane but were rejected pre-lwIP (cap or alloc failure). Client-only; always 0 server-side (the server's 503 admission-cap responses are not counted). |
+| `tcp_flows_active`   | uint64 | Hybrid mode: currently open TCP-lane flows. Client: the TCP-lane flow table's live count. Server: the whole-server count of open egress TCP flows. Both wired from real state. |
+| `tcp_flows_total`    | uint64 | Hybrid mode: cumulative TCP-lane flows opened since start (never decrements). Client: SYNs the flow table admitted. Server: egress flows admitted. |
+| `tcp_flows_rejected` | uint64 | Hybrid mode: cumulative flows refused by a cap. Client: SYNs rejected pre-lwIP (flow-table cap or alloc failure). Server: cap-503 rejections (whole-server fd-budget cap + per-session `TcpMaxFlows` cap; ACL 403s and 5xx syscall failures are not caps and are not counted). |
 | `raw_markers_active` | uint64 | Hybrid mode: sticky-RAW markers currently held in the client's TCP-lane flow table (5-tuples pinned to RAW under `tcp=auto`). Client-only; always 0 server-side. |
 | `uptime_sec` | uint64  | Seconds since `mqvpn_server_create` was called                 |
 
@@ -240,11 +240,12 @@ Notes:
 - `dgram_*` counters are server-wide aggregates across all active sessions.
 - The eight hybrid-mode fields (`pkts_lane_*`, `tcp_flows_*`,
   `raw_markers_active`) are additive and stay 0 whenever the hybrid
-  classifier is disabled. `tcp_flows_active` is wired server-side (see
-  above); `tcp_flows_total`, `tcp_flows_rejected`, `raw_markers_active`, and
-  `pkts_lane_*` are client-only concepts with no server-side equivalent and
-  always report 0 on the server. See §9 for the `[Hybrid]` config keys that
-  control this behavior.
+  classifier is disabled. `tcp_flows_active`, `tcp_flows_total`, and
+  `tcp_flows_rejected` are wired on both client and server (with the
+  per-side semantics in the table above); `pkts_lane_*`,
+  `pkts_lane_tcp_dropped`, and `raw_markers_active` are client-only
+  concepts and always report 0 on the server. See §9 for the `[Hybrid]`
+  config keys that control this behavior.
 
 ---
 
@@ -506,14 +507,18 @@ mqvpn follows semantic versioning for the control API:
   `tcp_flows_rejected`, `raw_markers_active`). All eight now report real
   values on the client with `Tcp = stream` or `Tcp = auto`
   (`tcp_flows_active`, `tcp_flows_total`, `tcp_flows_rejected`, and
-  `raw_markers_active` were previously stubbed at 0); `tcp_flows_active` is
-  also wired server-side. See §5.4's field table for which fields stay 0
-  server-side by design. Existing JSON consumers remain unaffected. Note
-  for C API consumers: this is the first time `mqvpn_stats_t` has grown
-  since its introduction — the struct producers write
-  `sizeof(mqvpn_stats_t)` bytes, so binaries linked against the shared
-  library must be recompiled against the new header (the next release must
-  bump the library SOVERSION to 2).
+  `raw_markers_active` were previously stubbed at 0); `tcp_flows_active`,
+  `tcp_flows_total`, and `tcp_flows_rejected` are also wired server-side.
+  In the same change, `pkts_lane_tcp` changed meaning — from "packets
+  classified into the TCP lane" (classify-time) to "packets actually handed
+  to the TCP lane / lwIP" (post-sticky-verdict), so under `Tcp = auto` a
+  sticky-RAW flow's packets now count in `pkts_lane_raw` instead. See
+  §5.4's field table for which fields stay 0 server-side by design.
+  Existing JSON consumers remain unaffected. Note for C API consumers: this
+  is the first time `mqvpn_stats_t` has grown since its introduction — the
+  struct producers write `sizeof(mqvpn_stats_t)` bytes, so binaries linked
+  against the shared library must be recompiled against the new header. The
+  shared-library SOVERSION was bumped 1 → 2 for exactly this reason.
 - `get_status` paths gained a `state_label` string in v0.5.0 alongside the
   existing numeric `state`; `get_fec_stats` gained `mp_state_label` similarly.
   Consumers that only read the numeric fields remain unaffected, but new code
