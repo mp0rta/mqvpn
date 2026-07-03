@@ -1467,6 +1467,21 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
         c->mtu = tun_mtu;
 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+        /* Validate the [Hybrid] block at its consumer, BEFORE the enabled
+         * gate below (validate-at-consumer pattern — mirrors
+         * mqvpn_reorder_config_validate at mqvpn_reorder_rx_new and the
+         * server-side check in mqvpn_server_new): the INI/JSON loaders store
+         * raw scalars, so an invalid block (e.g. TcpMaxFlows = 0) reaches
+         * here unchecked and would size the lane's flow table from garbage.
+         * On invalid: warn + reset to library defaults — which also flips
+         * enabled off, so the lane simply doesn't come up (RAW fallback,
+         * same degradation policy as the alloc-failure paths below). Never a
+         * hard failure. Idempotent across reconnects: the reset makes the
+         * config valid, so the warn fires at most once per client. */
+        if (mqvpn_hybrid_config_validate(&c->config.hybrid) != 0) {
+            LOG_W(c, "invalid [Hybrid] config; using defaults (TCP lane disabled)");
+            mqvpn_hybrid_config_default(&c->config.hybrid);
+        }
         /* H2: bring up the lwIP TCP-lane stack now that the inner MTU is
          * resolved (lwIP derives each pcb's MSS from netif->mtu at accept
          * time). Gate mirrors the classifier's TCP-lane rule: enabled &&

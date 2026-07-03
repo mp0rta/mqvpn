@@ -1616,10 +1616,23 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     s->max_clients = cfg->max_clients > 0 ? cfg->max_clients : 64;
     s->ptb_tokens = PTB_RATE_LIMIT;
     s->boot_us = now_us();
-    /* s->config was already populated by the memcpy above — the budget
-     * computation MUST read the applied config, not `cfg` directly, so a
-     * future refactor that changes what memcpy copies can't silently
-     * desync the two. */
+    /* Validate the [Hybrid] block at its consumer (validate-at-consumer
+     * pattern — same as mqvpn_reorder_config_validate run by
+     * mqvpn_reorder_rx_new): the INI/JSON loaders store raw scalars (CFG_U32
+     * accepts 0) and only the PUBLIC setters range-check, so a file config
+     * with e.g. TcpMaxGlobalFlows = 0 would otherwise freeze the egress fd
+     * budget at 0 below and silently 503 every connect-tcp request. On
+     * invalid: warn + reset the WHOLE hybrid block to library defaults,
+     * matching the loaders' own warn-and-ignore convention for invalid
+     * scalars — never a hard server-start failure. */
+    if (mqvpn_hybrid_config_validate(&s->config.hybrid) != 0) {
+        LOG_W(s, "invalid [Hybrid] config; using defaults");
+        mqvpn_hybrid_config_default(&s->config.hybrid);
+    }
+    /* s->config was already populated by the memcpy above (and its hybrid
+     * block possibly reset just above) — the budget computation MUST read
+     * the applied config, not `cfg` directly, so a future refactor that
+     * changes what memcpy copies can't silently desync the two. */
     s->egress_fd_budget =
         svr_compute_egress_fd_budget(s->config.hybrid.tcp_max_global_flows);
 

@@ -439,6 +439,18 @@ TEST(config_set_hybrid)
     ASSERT_EQ(cfg->hybrid.tcp_max_flows, 128); /* rejected → unchanged */
     ASSERT_EQ(mqvpn_config_set_hybrid_limits(NULL, 128, 60), MQVPN_ERR_INVALID_ARG);
 
+    ASSERT_EQ(mqvpn_config_set_hybrid_connect_timeout(cfg, 20), MQVPN_OK);
+    ASSERT_EQ(cfg->hybrid.tcp_connect_timeout_sec, 20);
+    ASSERT_EQ(mqvpn_config_set_hybrid_connect_timeout(cfg, 0), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(cfg->hybrid.tcp_connect_timeout_sec, 20); /* rejected → unchanged */
+    ASSERT_EQ(mqvpn_config_set_hybrid_connect_timeout(NULL, 5), MQVPN_ERR_INVALID_ARG);
+
+    ASSERT_EQ(mqvpn_config_set_hybrid_max_global_flows(cfg, 8192), MQVPN_OK);
+    ASSERT_EQ(cfg->hybrid.tcp_max_global_flows, 8192);
+    ASSERT_EQ(mqvpn_config_set_hybrid_max_global_flows(cfg, 0), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(cfg->hybrid.tcp_max_global_flows, 8192); /* rejected → unchanged */
+    ASSERT_EQ(mqvpn_config_set_hybrid_max_global_flows(NULL, 1), MQVPN_ERR_INVALID_ARG);
+
     mqvpn_config_free(cfg);
 }
 

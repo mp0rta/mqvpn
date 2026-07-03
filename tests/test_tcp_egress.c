@@ -1182,6 +1182,22 @@ harness_cfg_allow_127_idle_timeout_1(mqvpn_config_t *cfg)
     }
 }
 
+/* Injects an INVALID hybrid block the way the INI/JSON bridge does —
+ * mqvpn_config_apply_hybrid (mqvpn_internal.h) copies raw with no range
+ * checks, exactly like platform_linux.c's file-config bridge; the PUBLIC
+ * setters would reject the 0 — then punches the usual loopback allow hole
+ * alongside it. Used by the validate-at-consumer test below: server_new
+ * must warn-reset this whole block (hole included) to defaults. */
+static void
+harness_cfg_invalid_hybrid_global_cap0(mqvpn_config_t *cfg)
+{
+    mqvpn_hybrid_config_t bad;
+    mqvpn_hybrid_config_default(&bad);
+    bad.tcp_max_global_flows = 0; /* invalid: would freeze the fd budget at 0 */
+    mqvpn_config_apply_hybrid(cfg, &bad);
+    harness_cfg_allow_127(cfg);
+}
+
 /* Opens a real loopback listener on an ephemeral port and returns it
  * (still LISTENing, nothing accepted) plus the port in host byte order.
  * Shared by the real-connect-success test and the second-probe-after-
@@ -1404,6 +1420,49 @@ TEST(mqvpn_tcp_global_cap_gets_503)
     close(fd2);
     free(h.probe.raw_recv_buf);
     free(second.raw_recv_buf);
+}
+
+/* Validate-at-consumer (limits follow-up): an INVALID hybrid block arriving
+ * through the raw file-config bridge (TcpMaxGlobalFlows = 0 — CFG_U32
+ * stores it unchecked) must be warn-reset to library defaults by
+ * mqvpn_server_new BEFORE the fd budget is frozen. Two behavioral pins:
+ *   1. the frozen budget is nonzero (came from the DEFAULT cap, not the
+ *      invalid 0 — without the consumer-side validate it would freeze at 0
+ *      and every connect-tcp request would 503 with zero log);
+ *   2. the reset is whole-block: the allow hole injected ALONGSIDE the
+ *      invalid value is gone too, so a loopback target now 403s at the
+ *      default-deny ACL — the unvalidated config would produce 503 (hole
+ *      present, budget 0) instead.
+ * The warn itself isn't asserted (the harness pins log_level=ERROR and has
+ * no capture hook); the behavioral outcome is the contract. */
+TEST(mqvpn_tcp_invalid_hybrid_config_resets_to_defaults)
+{
+    int target_port = 0;
+    int listen_fd = open_loopback_listener(&target_port);
+    ASSERT_EQ(listen_fd >= 0, 1);
+
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", target_port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
+                            harness_cfg_invalid_hybrid_global_cap0),
+              0);
+
+    /* Pin 1: budget frozen from defaults, not the invalid 0. */
+    ASSERT_EQ(mqvpn_server_egress_fd_budget(h.svr) > 0, 1);
+
+    /* Pin 2: 403 (ACL reset to default-deny), not 503 (budget starvation). */
+    h.probe.path = path;
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request(&h.probe), 0);
+    harness_pump(&h, &h.probe.response_done, 10000);
+    ASSERT_EQ(h.probe.response_done, 1);
+    ASSERT_STREQ(h.probe.status, "403");
+
+    harness_stop(&h);
+    close(listen_fd);
 }
 
 /* ── Relay: real syscalls against a real TCP peer ──
@@ -1687,14 +1746,20 @@ TEST(mqvpn_tcp_downlink_backpressure_pause_resume)
     free(h.probe.raw_recv_buf);
 }
 
-/* Closing-notify idempotency (the uplink -XQC_EAGAIN backpressure path,
- * by contrast, has no dedicated test here — documented as an honest
- * coverage gap rather than built as a fragile syscall-interposition
- * fake). The probe RESETs its own request mid-relay; the server must tear
- * the flow down exactly once (verified indirectly — a double-destroy
- * would double-free/double-close and show up under the ASan run) and must
- * actually close its egress socket as part of that teardown, which the
- * sink observes as EOF. */
+/* Closing-notify idempotency. (Uplink -XQC_EAGAIN coverage note: the
+ * stash-WRITE half of that path — send_body backpressure parking the flow
+ * via svr_tcp_egress_stash_uplink — IS exercised by
+ * mqvpn_tcp_parked_flow_idle_eviction below, with real H3 window
+ * exhaustion, no syscall interposition. What remains uncovered black-box
+ * is the stash-FLUSH/resume half: on_h3_writable draining the stash and
+ * re-arming want_read once the client reopens its window — the same
+ * forcing technique never reopens the window by construction, and the
+ * idle sweep collects the flow instead. The e2e/netem chunk owns that
+ * resume path.) The probe RESETs its own request mid-relay; the server
+ * must tear the flow down exactly once (verified indirectly — a
+ * double-destroy would double-free/double-close and show up under the
+ * ASan run) and must actually close its egress socket as part of that
+ * teardown, which the sink observes as EOF. */
 TEST(mqvpn_tcp_closing_notify_idempotent)
 {
     tcp_sink_t sink;
@@ -1808,6 +1873,98 @@ TEST(mqvpn_tcp_active_idle_timeout_evicts)
     tcp_sink_close(&sink);
     tcp_sink_close(&sink2);
     free(h.probe.raw_recv_buf);
+}
+
+/* Two co-resident ACTIVE flows on the SAME H3 connection, both aged past a
+ * 1s idle timeout, evicted in the same tick pass. Pins the sweep's
+ * unlink-safety under the eviction path specifically: on_idle_evict's
+ * xqc_h3_request_close can synchronously re-enter the close-notify funnel
+ * and destroy (unlink+free) the flow mid-walk, so evicting flow A must not
+ * corrupt the saved `next` pointer to flow B (see the save-next comment in
+ * svr_tcp_egress_tick). Asserts both streams close cleanly, both egress
+ * sockets really close (sink EOFs), and the CONNECTION itself survives — a
+ * subsequent connect-tcp request on it is still serviced with a 200, which
+ * also re-pins that both flows' counters were released (not stuck
+ * elevated/underflowed). The ASan run of this binary covers the
+ * no-UAF/no-double-free half of the claim. */
+TEST(mqvpn_tcp_two_flow_same_conn_idle_eviction)
+{
+    tcp_sink_t sink1, sink2;
+    ASSERT_EQ(tcp_sink_open(&sink1, /*echo=*/1), 0);
+    ASSERT_EQ(tcp_sink_open(&sink2, /*echo=*/1), 0);
+
+    char path1[64], path2[64];
+    snprintf(path1, sizeof(path1), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink1.port);
+    snprintf(path2, sizeof(path2), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink2.port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
+                            harness_cfg_allow_127_idle_timeout_1),
+              0);
+    h.probe.path = path1;
+
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+
+    /* Flow 1 (h.probe) and flow 2 (a second request-scoped probe_conn_t on
+     * the SAME engine/connection — the global-cap test's idiom). Both reach
+     * ACTIVE (200 received ⇒ svr_tcp_egress_on_connected ran). */
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+    harness_pump_with_sink(&h, &sink1, &h.probe.response_done, 10000);
+    ASSERT_EQ(h.probe.response_done, 1);
+    ASSERT_STREQ(h.probe.status, "200");
+
+    probe_conn_t second;
+    memset(&second, 0, sizeof(second));
+    second.engine = h.probe.engine;
+    memcpy(&second.cid, &h.probe.cid, sizeof(second.cid));
+    second.protocol = h.probe.protocol;
+    second.protocol_len = h.probe.protocol_len;
+    snprintf(second.authority, sizeof(second.authority), "%s", h.probe.authority);
+    second.path = path2;
+    ASSERT_EQ(probe_open_request_with_body(&second), 0);
+    harness_pump_with_sink(&h, &sink2, &second.response_done, 10000);
+    ASSERT_EQ(second.response_done, 1);
+    ASSERT_STREQ(second.status, "200");
+
+    /* Both quiet from birth (created within one pump of each other), so one
+     * tick pass past the 1s deadline sweeps BOTH in the same walk. Wait for
+     * all four observables; keep pumping both sinks so their EOFs land. */
+    int all_gone = 0;
+    for (int i = 0; i < 150 && !all_gone; i++) {
+        tcp_sink_pump(&sink1);
+        tcp_sink_pump(&sink2);
+        int never = 0;
+        harness_pump(&h, &never, 20);
+        all_gone = h.probe.request_closed && second.request_closed && sink1.eof_seen &&
+                   sink2.eof_seen;
+    }
+    ASSERT_EQ(h.probe.request_closed, 1);
+    ASSERT_EQ(second.request_closed, 1);
+    ASSERT_EQ(sink1.eof_seen, 1);
+    ASSERT_EQ(sink2.eof_seen, 1);
+
+    /* Connection survives the double eviction: a fresh request on it is
+     * still serviced end-to-end. */
+    tcp_sink_t sink3;
+    ASSERT_EQ(tcp_sink_open(&sink3, /*echo=*/1), 0);
+    char path3[64];
+    snprintf(path3, sizeof(path3), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink3.port);
+    h.probe.path = path3;
+    h.probe.response_done = 0;
+    h.probe.status[0] = '\0';
+    h.probe.request_closed = 0;
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+    harness_pump_with_sink(&h, &sink3, &h.probe.response_done, 10000);
+    ASSERT_EQ(h.probe.response_done, 1);
+    ASSERT_STREQ(h.probe.status, "200");
+
+    harness_stop(&h);
+    tcp_sink_close(&sink1);
+    tcp_sink_close(&sink2);
+    tcp_sink_close(&sink3);
+    free(h.probe.raw_recv_buf);
+    free(second.raw_recv_buf);
 }
 
 /* ── Limits (Step 2, carry-over from the relay review): parked-flow
@@ -2145,12 +2302,14 @@ main(void)
     run_mqvpn_tcp_acl_allow_hole_reaches_real_connect();
     run_mqvpn_tcp_connect_timeout_gets_504();
     run_mqvpn_tcp_global_cap_gets_503();
+    run_mqvpn_tcp_invalid_hybrid_config_resets_to_defaults();
     run_mqvpn_tcp_echo_roundtrip();
     run_mqvpn_tcp_egress_eof_becomes_h3_fin();
     run_mqvpn_tcp_h3_fin_becomes_shut_wr();
     run_mqvpn_tcp_downlink_backpressure_pause_resume();
     run_mqvpn_tcp_closing_notify_idempotent();
     run_mqvpn_tcp_active_idle_timeout_evicts();
+    run_mqvpn_tcp_two_flow_same_conn_idle_eviction();
     run_mqvpn_tcp_parked_flow_idle_eviction();
     run_errno_to_status_maps_known_codes();
     run_non_tunnel_close_keeps_tunnel_established();
