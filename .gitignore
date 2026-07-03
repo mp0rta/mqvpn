@@ -53,3 +53,6 @@ website/public/perf-data/
 
 # Git worktrees
 .worktrees/
+
+# local-only bench note (kept untracked by owner decision)
+docs/report/2026-07-03-hybrid-h2a-microbench.md
