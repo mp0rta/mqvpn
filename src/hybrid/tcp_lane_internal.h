@@ -52,15 +52,45 @@ typedef enum {
     TCP_FLOW_PENDING_STREAM, /* lwIP accepted; H3 CONNECT-TCP stream not
                               * yet open (Task 8). */
     TCP_FLOW_ACTIVE,         /* pcb + h3 stream both live, relaying. */
-    TCP_FLOW_CLOSING,        /* NEVER ASSIGNED as of Task 12: every
-                              * close/error-mapping path tears the flow down
-                              * synchronously (unlink + free in the same
-                              * call) instead of parking it in this state.
-                              * Retained only as a defensive dispatch-guard
-                              * value (on_lwip_recv, downlink_pump check for
-                              * it) against a future deferred-teardown
-                              * redesign reintroducing a window where a flow
-                              * sits CLOSING-but-still-in-the-table. */
+    TCP_FLOW_CLOSING,        /* C1 (post-Task-12 fix): both directions
+                              * completed a clean bidi FIN
+                              * (tcp_lane_finish_clean_close) — the pcb is
+                              * gracefully tcp_close()d (left in LAST_ACK or
+                              * heading into TIME_WAIT) and f->pcb == NULL:
+                              * we no longer need our own pointer to it,
+                              * because lwIP demuxes any further packet on
+                              * this 5-tuple against ITS OWN pcb (the
+                              * lingering LAST_ACK pcb, or its TIME_WAIT
+                              * entry) once tun_decide_lane routes the
+                              * packet to lwip_input — we are purely a
+                              * ROUTING MARKER at this point (TIME_WAIT-
+                              * adjacent residency), not a relay endpoint.
+                              * Without this state a post-close inner-OS
+                              * packet (the LAST_ACK final ACK, or any
+                              * TIME_WAIT-era stray) would miss the flow
+                              * table entirely (unknown non-SYN -> RAW),
+                              * leaking it to the already-closed origin and
+                              * making the LAST_ACK pcb retransmit its FIN
+                              * until TCP_MAXRTX gives up (minutes) —
+                              * see tcp_lane_finish_clean_close and
+                              * mqvpn_tcp_lane_tick's grace sweep.
+                              * f->h3_request/f->stream are NULL (already
+                              * cleared, both directions closed the H3 side
+                              * cleanly), so nothing further to relay.
+                              * Excluded from n_tcp_flows (tracked instead
+                              * in the lane's separate n_closing counter —
+                              * a CLOSING entry consumes no relay resource,
+                              * just table space) and never re-enters
+                              * on_lwip_recv/on_lwip_sent (callbacks were
+                              * detached before the transition). Swept by
+                              * mqvpn_tcp_lane_tick after a grace period
+                              * (TCP_LANE_CLOSING_GRACE_US), or evicted
+                              * immediately (oldest first) on
+                              * TCP_LANE_CLOSING_CAP overflow. A fresh pure
+                              * SYN reusing this 5-tuple (ephemeral port
+                              * recycling) removes the marker and
+                              * re-evaluates policy as a brand-new flow —
+                              * see mqvpn_tcp_lane_on_syn's own comment. */
 } mqvpn_tcp_flow_state_t;
 
 /* Flow-liveness status returned by the teardown funnel and by every helper
@@ -73,11 +103,17 @@ typedef enum {
  * TCP_EVENT_ACCEPT in tcp_process SYN_RCVD, tcp_in.c:962, proceeds to
  * tcp_receive(pcb) on ERR_OK). Conversely, returning ERR_ABRT WITHOUT
  * having aborted leaks/stalls the pcb (tcp.c's tcp_abort doc: "never return
- * ERR_ABRT otherwise"), so GONE (flow freed but pcb gracefully tcp_close()d
- * — which does NOT free a FIN_WAIT_1/LAST_ACK pcb — or already NULL) must
- * stay distinguishable from ABORTED. The status flows via return values,
- * never via flags on the flow — the flow is freed memory by the time the
- * frame needs the answer. Only frames lwIP itself invoked translate
+ * ERR_ABRT otherwise"), so GONE (pcb gracefully tcp_close()d — which does
+ * NOT free a FIN_WAIT_1/LAST_ACK pcb — or already NULL) must stay
+ * distinguishable from ABORTED. GONE covers two distinct outcomes from the
+ * relay code's point of view, both "stop, don't touch f again": a real
+ * free (tcp_lane_teardown_flow, when there was no pcb to abort) or, since
+ * C1, a transition to TCP_FLOW_CLOSING (tcp_lane_finish_clean_close) —
+ * `f` is NOT freed in the latter case, it becomes a routing-only marker
+ * the relay code no longer owns, but the calling convention is identical:
+ * the status flows via return values, never via flags on the flow, and
+ * callers must not dereference relay fields (h3_request, uplink queue,
+ * etc.) on `f` again either way. Only frames lwIP itself invoked translate
  * ABORTED to ERR_ABRT; xquic-context callers (downlink read notify,
  * writable notify, closing-notify, response gating) ignore the status. */
 typedef enum {
@@ -264,11 +300,20 @@ tcp_lane_flow_status_t mqvpn_tcp_lane_on_relay_error(mqvpn_tcp_flow_t *f);
  * tcp_lane.c's comment for the source-verified lwIP/xquic semantics
  * (reconciliation H). Called from tcp_lane_uplink.c's maybe_fin and
  * tcp_lane.c's own downlink-shutdown path, whichever direction's flag
- * transition observes the OTHER flag already set. Callers must treat `f`
- * as freed and touch it no further after this call. Void, always
- * status-GONE: the pcb is tcp_close()d, never tcp_abort()ed (tcp_close on
- * a FIN_WAIT_1/LAST_ACK pcb does not free it — tcp.c), so the enclosing
- * lwIP frame, if any, correctly returns ERR_OK. */
+ * transition observes the OTHER flag already set.
+ *
+ * C1 fix: this does NOT free `f` — it transitions it to TCP_FLOW_CLOSING,
+ * a TIME_WAIT-adjacent routing-marker residency (see that state's comment,
+ * tcp_lane_internal.h), so a stray post-close inner-OS packet (the
+ * LAST_ACK final ACK, a TIME_WAIT-era duplicate) still finds an entry and
+ * gets routed to lwIP instead of leaking out as RAW. Callers must still
+ * treat `f` as gone from the RELAY's point of view and touch it no
+ * further after this call — the flow no longer belongs to the uplink/
+ * downlink machinery, only to the CLOSING sweep/cap-eviction/tuple-reuse
+ * paths in tcp_lane.c. Void, always status-GONE: the pcb is tcp_close()d,
+ * never tcp_abort()ed (tcp_close on a FIN_WAIT_1/LAST_ACK pcb does not
+ * free it — tcp.c), so the enclosing lwIP frame, if any, correctly
+ * returns ERR_OK. */
 void tcp_lane_finish_clean_close(mqvpn_tcp_flow_t *f);
 
 #endif /* MQVPN_HYBRID_TCP_LANE_INTERNAL_H */

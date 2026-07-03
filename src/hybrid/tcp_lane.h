@@ -277,10 +277,19 @@ ssize_t cli_tcp_lane_h3_recv(void *h3_request, uint8_t *buf, size_t len, int *fi
 void cli_tcp_lane_h3_close(void *h3_request);
 
 /* Sticky-lane lookup: returns 1 if found (fills *out_raw: 1 if sticky-RAW,
- * 0 if active/pending TCP-lane flow), 0 if brand-new (caller decides policy
- * and calls mqvpn_tcp_lane_on_syn to commit). */
+ * 0 if active/pending/CLOSING TCP-lane flow), 0 if brand-new (caller
+ * decides policy and calls mqvpn_tcp_lane_on_syn to commit).
+ *
+ * *out_closing (nullable; C1): 1 if the found entry is TCP_FLOW_CLOSING —
+ * a post-clean-close TIME_WAIT-adjacent routing marker (see that state's
+ * comment, tcp_lane_internal.h): the pcb is already gone, ownership handed
+ * to lwIP, and the entry exists purely so tun_decide_lane keeps routing
+ * stray post-close packets to lwip_input instead of falling back to RAW.
+ * *out_raw is always 0 when *out_closing is 1 (CLOSING is never sticky-
+ * RAW). Callers that don't care about tuple-reuse-after-close (everything
+ * except tun_decide_lane) may pass NULL. */
 int mqvpn_tcp_lane_lookup(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key,
-                          int *out_raw);
+                          int *out_raw, int *out_closing);
 
 /* Commit a brand-new flow's lane decision at SYN time. to_tcp=0 records a
  * sticky-RAW marker. to_tcp=1 inserts a pending-accept entry AND is the
@@ -302,11 +311,21 @@ int mqvpn_tcp_lane_lookup(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key,
  *     flows_rejected_cap — the flow just stays unsticky and re-evaluates
  *     per SYN. Markers never consume tcp_max_flows budget (they are never
  *     idle-evicted, so a shared cap would permanently starve the TCP lane
- *     under tcp=auto on a single path). */
+ *     under tcp=auto on a single path).
+ *
+ * C1: an existing key is NOT always a caller-bug duplicate — if the
+ * existing entry is TCP_FLOW_CLOSING (a post-close routing-residency
+ * marker, see that state's comment), this is 5-tuple reuse after the
+ * prior connection finished, not a protocol violation. on_syn removes the
+ * stale CLOSING entry itself and proceeds with the fresh commit; the
+ * caller (tun_decide_lane) is responsible for having already confirmed
+ * this is a genuine new SYN (mqvpn_tcp_lane_lookup's *out_closing) before
+ * calling on_syn in that situation — on_syn does not re-verify SYN-ness. */
 int mqvpn_tcp_lane_on_syn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key,
                           int to_tcp);
 
-/* Idle-timeout sweep + stats snapshot, called from tick() (Task 13). */
+/* Idle-timeout sweep + CLOSING grace-sweep + stats snapshot, called from
+ * tick() (Task 13 / C1). */
 void mqvpn_tcp_lane_tick(mqvpn_tcp_lane_t *lane, uint64_t now_us);
 void mqvpn_tcp_lane_get_stats(const mqvpn_tcp_lane_t *lane, mqvpn_tcp_lane_stats_t *out);
 

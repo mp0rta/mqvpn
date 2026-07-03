@@ -21,6 +21,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "lwip/priv/tcp_priv.h" /* TCP_MSL — C1's CLOSING grace-sweep window */
+
 /* The accept callback memcpy's pcb local_ip/remote_ip as the flow key's raw
  * 4 network-order bytes — only valid while ip_addr_t IS the bare ip4_addr_t
  * (one u32_t). Pin the LWIP_IPV6=0 assumption (lwip_port/lwipopts.h). */
@@ -41,6 +43,30 @@ _Static_assert(sizeof(ip_addr_t) == 4,
 #  define TCP_LANE_RAW_MARKER_CAP 4096u
 #endif
 
+/* CLOSING routing-marker residency bound (C1) — same "memory bound only"
+ * rationale as TCP_LANE_RAW_MARKER_CAP above: a CLOSING entry is one
+ * mqvpn_tcp_flow_t with a NULL pcb/h3_request, so 4096 of them cost
+ * roughly the same ~0.5 MB worst case. Overflow evicts the OLDEST CLOSING
+ * entry immediately (mqvpn_tcp_lane_tick's cap check) rather than refusing
+ * the transition — the cost of evicting early is only that one flow's
+ * stray post-close packets (a FIN-storm flow, worst case) fall back to
+ * RAW a little sooner than the full grace window; never counted against
+ * flows_rejected_* (this is churn bookkeeping, not a rejected new flow).
+ * #ifndef so tests can override it small to exercise the cap branch. */
+#ifndef TCP_LANE_CLOSING_CAP
+#  define TCP_LANE_CLOSING_CAP 4096u
+#endif
+
+/* Grace residency for a CLOSING routing marker (C1): must outlive the
+ * inner OS's worst-case post-close retransmit horizon so the marker is
+ * still there to catch it. TCP_MSL (vendored lwip/priv/tcp_priv.h) is
+ * 60000 ms; a TIME_WAIT pcb is held for 2*TCP_MSL by lwIP itself, and a
+ * LAST_ACK pcb's FIN-retransmit backoff (TCP_MAXRTX, bounded by the same
+ * tcp_tmr-driven RTO doubling) is the same order of magnitude. 2*TCP_MSL
+ * (120 s) covers both shapes without requiring per-connection RTT/RTO
+ * tracking here — a coarse, cite-able constant beats a timing heuristic. */
+#define TCP_LANE_CLOSING_GRACE_US ((uint64_t)(2 * TCP_MSL) * 1000ULL)
+
 struct mqvpn_tcp_lane {
     mqvpn_hybrid_config_t cfg;
     uint64_t hash_seed;
@@ -52,6 +78,11 @@ struct mqvpn_tcp_lane {
     uint32_t n_tcp_flows;   /* to_tcp=1 entries; capped by cfg.tcp_max_flows */
     uint32_t n_raw_markers; /* sticky-RAW entries; capped by
                              * TCP_LANE_RAW_MARKER_CAP */
+    uint32_t n_closing;     /* TCP_FLOW_CLOSING routing markers (C1); capped
+                             * by TCP_LANE_CLOSING_CAP, swept after
+                             * TCP_LANE_CLOSING_GRACE_US. Does NOT count
+                             * toward n_tcp_flows — see that state's
+                             * comment (tcp_lane_internal.h). */
     uint64_t last_sweep_us; /* idle-sweep cadence gate — see
                              * mqvpn_tcp_lane_tick */
     mqvpn_tcp_lane_stats_t stats;
@@ -171,7 +202,8 @@ find_flow(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, uint32_t *bucket_
 }
 
 int
-mqvpn_tcp_lane_lookup(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, int *out_raw)
+mqvpn_tcp_lane_lookup(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, int *out_raw,
+                      int *out_closing)
 {
     if (!lane || !key) {
         return 0;
@@ -183,6 +215,9 @@ mqvpn_tcp_lane_lookup(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, int *
     if (out_raw) {
         *out_raw = (f->state == TCP_FLOW_STICKY_RAW) ? 1 : 0;
     }
+    if (out_closing) {
+        *out_closing = (f->state == TCP_FLOW_CLOSING) ? 1 : 0;
+    }
     return 1;
 }
 
@@ -192,6 +227,30 @@ mqvpn_tcp_lane_on_syn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, int t
     if (!lane || !key) {
         return -1;
     }
+
+    /* C1: resolve an existing entry FIRST, before the cap checks below —
+     * a CLOSING routing marker being replaced by a genuinely new
+     * connection (tuple reuse after close) must not look like a net-new
+     * insert against the cap, nor a caller-bug duplicate. tun_decide_lane
+     * only ever calls on_syn with an existing CLOSING key when it already
+     * confirmed this packet is a pure SYN (mqvpn_tcp_lane_lookup's
+     * *out_closing) — on_syn does not re-verify that itself. */
+    uint32_t bucket;
+    mqvpn_tcp_flow_t *existing = find_flow(lane, key, &bucket);
+    if (existing) {
+        if (existing->state == TCP_FLOW_CLOSING) {
+            tcp_lane_remove_flow(lane, existing);
+            existing = NULL;
+        } else {
+            /* Duplicate commit is a caller bug: the protocol is lookup-
+             * then-commit, so on_syn must only ever see brand-new keys
+             * (or a stale CLOSING marker, handled above). Refuse rather
+             * than insert a shadowing duplicate. */
+            lane->stats.flows_rejected_other++;
+            return -1;
+        }
+    }
+
     if (to_tcp) {
         /* Reject-before-side-effect: this runs BEFORE lwIP sees the SYN. */
         if (lane->n_tcp_flows >= lane->cfg.tcp_max_flows) {
@@ -204,14 +263,6 @@ mqvpn_tcp_lane_on_syn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, int t
         if (lane->n_raw_markers >= TCP_LANE_RAW_MARKER_CAP) {
             return -1;
         }
-    }
-    uint32_t bucket;
-    if (find_flow(lane, key, &bucket)) {
-        /* Duplicate commit is a caller bug: the protocol is lookup-then-
-         * commit, so on_syn must only ever see brand-new keys. Refuse
-         * rather than insert a shadowing duplicate. */
-        lane->stats.flows_rejected_other++;
-        return -1;
     }
     mqvpn_tcp_flow_t *f = calloc(1, sizeof(*f));
     if (!f) {
@@ -261,36 +312,47 @@ mqvpn_tcp_lane_on_syn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, int t
     return 0;
 }
 
-/* Idle-timeout eviction sweep (Task 13). Walks every bucket (at most once
- * per second — internal cadence gate below) and tears down any TCP-lane flow
- * (any state except STICKY_RAW/CLOSING — see below) whose
- * last_activity_us is older than cfg.tcp_idle_timeout_sec. Runs from
- * mqvpn_client_tick, i.e. neither a lwIP-invoked frame nor an xquic-context
- * notify: this is a THIRD calling context tcp_lane_flow_status_t's contract
- * never anticipated, but the existing xquic-context idiom already fits —
- * there is no ERR_ABRT to translate and no xquic frame to avoid re-entering,
- * so the returned status is simply discarded (void-cast), same as
- * on_stream_rejected/on_h3_closing/on_h3_writable above. */
+/* Idle-timeout eviction sweep (Task 13) + CLOSING routing-marker grace
+ * sweep (C1) — one bucket walk serves both. Runs from mqvpn_client_tick,
+ * i.e. neither a lwIP-invoked frame nor an xquic-context notify: this is a
+ * THIRD calling context tcp_lane_flow_status_t's contract never
+ * anticipated, but the existing xquic-context idiom already fits — there
+ * is no ERR_ABRT to translate and no xquic frame to avoid re-entering, so
+ * the idle-eviction status is simply discarded (void-cast), same as
+ * on_stream_rejected/on_h3_closing/on_h3_writable above.
+ *
+ * The two sweeps are independently gated: cfg.tcp_idle_timeout_sec == 0
+ * ("never evict" — classifier.h's field comment documents tcp_lane as the
+ * consumer; a deliberate opt-out, e.g. a deployment that wants tcp=stream
+ * flows to live for the whole connection lifetime, not an instant-timeout
+ * footgun) disables ONLY the idle-eviction half. The CLOSING grace sweep
+ * is a DIFFERENT mechanism with a different rationale (bounding routing-
+ * marker residency, not relay-flow idleness) and must keep running
+ * regardless — see M3's doc note below for why this matters even when
+ * tcp_idle_timeout_sec == 0. */
 void
 mqvpn_tcp_lane_tick(mqvpn_tcp_lane_t *lane, uint64_t now_us)
 {
     if (!lane) {
         return;
     }
-    /* cfg.tcp_idle_timeout_sec == 0 means "never evict" — classifier.h's
-     * field comment documents tcp_lane as the consumer; 0 is a deliberate
-     * opt-out (e.g. a deployment that wants tcp=stream flows to live for the
-     * whole connection lifetime), not an instant-timeout footgun. Guard here
-     * rather than at the config layer so mqvpn_hybrid_config_validate stays
-     * free to keep accepting 0 for this field. */
-    if (lane->cfg.tcp_idle_timeout_sec == 0) {
-        return;
-    }
-    /* Nothing evictable: markers are excluded from the sweep by state, so an
-     * all-marker (or empty) table has no work — skip the bucket walk
-     * entirely. Checked before the cadence gate so an idle lane never even
-     * consumes a last_sweep_us update. */
-    if (lane->n_tcp_flows == 0) {
+    /* Nothing evictable by EITHER sweep: markers (STICKY_RAW) are excluded
+     * from both regardless of population, so an idle lane with no
+     * TCP-lane flows and no CLOSING residency has no work — skip the
+     * bucket walk entirely. Checked before the cadence gate so a fully
+     * idle lane never even consumes a last_sweep_us update.
+     *
+     * M3 (doc note): PENDING_ACCEPT flows also rely on this sweep to be
+     * reaped if the accept callback never arrives (a half-open SYN whose
+     * lwIP accept callback is somehow lost) — with
+     * cfg.tcp_idle_timeout_sec == 0, such an orphan lingers for the
+     * connection's whole lifetime and consumes a tcp_max_flows slot. This
+     * is a SEPARATE, pre-existing tradeoff of the 0 opt-out (not something
+     * C1's n_closing accounting mitigates — n_closing only tracks CLOSING
+     * routing markers, which PENDING_ACCEPT flows never become); documented
+     * here rather than changed, since 0 is an intentional "never evict my
+     * relay flows" choice a deployment opts into. */
+    if (lane->n_tcp_flows == 0 && lane->n_closing == 0) {
         return;
     }
     /* Cadence gate: the caller (mqvpn_client_tick) fires per event-loop
@@ -302,33 +364,44 @@ mqvpn_tcp_lane_tick(mqvpn_tcp_lane_t *lane, uint64_t now_us)
      * second, keeping the caller dumb — the same pattern as lwip_glue.c's
      * internal 250 ms tcp_tmr gate. Wraparound/backwards-clock note: if
      * now_us regresses below last_sweep_us, the unsigned difference goes
-     * huge and the sweep RUNS — harmless (the per-flow age test below is
+     * huge and the sweep RUNS — harmless (the per-flow age tests below are
      * independently underflow-guarded), and it self-heals by re-latching
      * last_sweep_us to the new clock. */
     if (now_us - lane->last_sweep_us < 1000000ULL) {
         return;
     }
     lane->last_sweep_us = now_us;
+    int idle_evict_enabled = lane->cfg.tcp_idle_timeout_sec != 0;
     uint64_t idle_us = (uint64_t)lane->cfg.tcp_idle_timeout_sec * 1000000ULL;
     for (uint32_t b = 0; b < lane->n_buckets; b++) {
         mqvpn_tcp_flow_t *f = lane->buckets[b];
         while (f) {
-            /* Reconciliation E: tcp_lane_teardown_flow (via
-             * tcp_lane_remove_flow) unlinks and frees f — save next BEFORE
-             * that call, never dereference f again afterward. */
+            /* Reconciliation E: tcp_lane_teardown_flow / tcp_lane_remove_flow
+             * unlink and free f — save next BEFORE either call, never
+             * dereference f again afterward. */
             mqvpn_tcp_flow_t *next = f->next;
-            /* STICKY_RAW is excluded by design (never idle-evicted — see the
-             * marker-cap comment on TCP_LANE_RAW_MARKER_CAP above: markers
-             * must outlive the sweep or a tcp=auto single-path client would
-             * permanently thrash the RAW/TCP verdict). CLOSING is the
-             * never-assigned defensive guard value (tcp_lane_internal.h);
-             * skipped here for the same belt-and-suspenders reason the
-             * dispatch checks elsewhere in this file skip it. Wraparound-safe
-             * age test, same form as reorder_tx.c's evict_one_idle: a
-             * backwards-clock blip (now_us < last_activity_us) must not
-             * underflow and spuriously evict a live flow. */
-            if (f->state != TCP_FLOW_STICKY_RAW && f->state != TCP_FLOW_CLOSING &&
-                now_us > f->last_activity_us && now_us - f->last_activity_us > idle_us) {
+            if (f->state == TCP_FLOW_CLOSING) {
+                /* C1 grace sweep: a CLOSING entry is pure routing residency
+                 * (no relay resource to reclaim, no teardown funnel needed
+                 * — pcb already NULL, h3_request/stream already cleared by
+                 * tcp_lane_finish_clean_close) — plain unlink+free is safe.
+                 * Wraparound-safe age test, same form as the idle-eviction
+                 * one below. */
+                if (now_us > f->last_activity_us &&
+                    now_us - f->last_activity_us > TCP_LANE_CLOSING_GRACE_US) {
+                    tcp_lane_remove_flow(lane, f);
+                }
+            } else if (idle_evict_enabled && f->state != TCP_FLOW_STICKY_RAW &&
+                       now_us > f->last_activity_us &&
+                       now_us - f->last_activity_us > idle_us) {
+                /* STICKY_RAW is excluded by design (never idle-evicted —
+                 * see the marker-cap comment on TCP_LANE_RAW_MARKER_CAP
+                 * above: markers must outlive the sweep or a tcp=auto
+                 * single-path client would permanently thrash the RAW/TCP
+                 * verdict). Wraparound-safe age test, same form as
+                 * reorder_tx.c's evict_one_idle: a backwards-clock blip
+                 * (now_us < last_activity_us) must not underflow and
+                 * spuriously evict a live flow. */
                 lane->stats.flows_idle_evicted++; /* before teardown frees f */
                 (void)tcp_lane_teardown_flow(f, /*close_h3=*/1);
             }
@@ -474,8 +547,19 @@ tcp_lane_downlink_drain(mqvpn_tcp_flow_t *f)
         }
         /* Contract pin (tcp_lane.h H3_RECV): a non-AGAIN/ERR return is
          * either data (n > 0) or a fin-only delivery (n == 0 && fin) —
-         * a bare n == 0 without fin would spin this loop forever. */
-        assert(n > 0 || fin);
+         * a bare n == 0 without fin would spin this loop forever.
+         *
+         * M2: this used to be assert(n > 0 || fin), but Release builds
+         * (build.sh) compile with NDEBUG, silently no-op'ing the check —
+         * a future xquic behavior change violating this contract (this
+         * repo bumps its xquic submodule regularly) would spin the tick
+         * loop instead of failing loud. Treat a violation as a fatal
+         * relay error instead: same "tear the flow down" outcome as every
+         * other h3_recv/pcb failure in this loop, just triggered by a
+         * contract violation rather than an I/O error. */
+        if (n <= 0 && !fin) {
+            return mqvpn_tcp_lane_on_relay_error(f);
+        }
         if (n > 0) {
             if ((size_t)MQVPN_TCP_LANE_TCP_SNDBUF(f->pcb) < (size_t)n) {
                 if (tcp_lane_downlink_stash(f, buf, (uint16_t)n) < 0) {
@@ -516,6 +600,39 @@ tcp_lane_downlink_drain(mqvpn_tcp_flow_t *f)
     return TCP_LANE_FLOW_LIVE;
 }
 
+/* Attempt to flush the flow's one stashed downlink chunk into the pcb —
+ * the exact retry mqvpn_tcp_lane_on_lwip_sent performs, factored out (M1)
+ * so tcp_lane_downlink_pump_status's paused branch below can ALSO attempt
+ * it inline instead of unconditionally waiting for a sent-notify that may
+ * never arrive (an ERR_MEM'd retry has nothing further to be ACKed if
+ * nothing further was ever written — ACKs, and therefore tcp_sent
+ * notifies, only happen for data already on the wire). PRECONDITION:
+ * f->downlink_paused is true (both call sites check this first).
+ *
+ * Returns LIVE with downlink_paused cleared on success, LIVE with
+ * downlink_paused still set if there still isn't room (retry later), or
+ * the teardown status (ABORTED — GONE cannot happen here, f->pcb is
+ * always live on entry) if the retry write failed fatally. */
+static tcp_lane_flow_status_t
+tcp_lane_downlink_stash_retry(mqvpn_tcp_flow_t *f)
+{
+    if ((size_t)MQVPN_TCP_LANE_TCP_SNDBUF(f->pcb) < (size_t)f->downlink_stash_len) {
+        return TCP_LANE_FLOW_LIVE; /* still not enough room; wait and retry later */
+    }
+    err_t werr = MQVPN_TCP_LANE_TCP_WRITE(f->pcb, f->downlink_stash,
+                                          f->downlink_stash_len, TCP_WRITE_FLAG_COPY);
+    if (werr == ERR_MEM) {
+        return TCP_LANE_FLOW_LIVE; /* transient; retry later */
+    }
+    if (werr != ERR_OK) {
+        return mqvpn_tcp_lane_on_relay_error(f);
+    }
+    MQVPN_TCP_LANE_TCP_OUTPUT(f->pcb);
+    f->downlink_stash_len = 0;
+    f->downlink_paused = 0;
+    return TCP_LANE_FLOW_LIVE;
+}
+
 /* Status-returning pump core. The public mqvpn_tcp_lane_downlink_pump
  * below collapses this to its documented 0/-1 contract for xquic-context
  * callers; mqvpn_tcp_lane_on_lwip_sent calls THIS directly because a lwIP
@@ -531,33 +648,48 @@ tcp_lane_downlink_pump_status(mqvpn_tcp_lane_t *lane, void *stream)
     if (!f) {
         return TCP_LANE_FLOW_LIVE;
     }
-    /* CLOSING: belt-and-suspenders only — as of Task 12 NOTHING assigns
-     * this state (every teardown path unlinks + frees synchronously
-     * instead, so a dead flow means find_flow_by_stream already returned
-     * NULL above). Kept as a guard against a future deferred-teardown
-     * redesign reintroducing a window where a flow sits
-     * CLOSING-but-still-in-the-table. */
+    /* CLOSING: belt-and-suspenders only — a CLOSING flow's f->stream is
+     * always NULL (tcp_lane_finish_clean_close clears it before the
+     * transition), so find_flow_by_stream above can never actually match
+     * one; a real caller always passes a non-NULL stream. Kept as a guard
+     * against a future change to that invariant. */
     if (f->state == TCP_FLOW_CLOSING) {
         return TCP_LANE_FLOW_LIVE;
     }
-    /* Paused: deliberately NOT draining recv_body. This is not data loss —
-     * xquic's own per-stream flow control then backpressures the server (it
-     * cannot deliver more body until the buffered bytes are read), a
-     * bounded temporary state exactly mirroring the uplink's
-     * EAGAIN/backpressure design in the other direction. The stash-flush
-     * resume path (mqvpn_tcp_lane_on_lwip_sent below) clears downlink_paused
-     * and re-calls this function once sndbuf recovers. A FIN cannot be lost
-     * across the pause, in either shape: (a) fin still UNREAD in xquic's
-     * buffer at pause time — the resumed drain simply reaches it on a later
-     * recv call; (b) fin already READ, arriving ON the very chunk that got
-     * stashed (n>0 && fin) — the drain's stash path DOES discard that local
-     * fin flag (it breaks before the fin check), deliberately relying on
-     * recv's level-triggered re-report at the resumed drain
-     * (MQVPN_TCP_LANE_H3_RECV_* contract in tcp_lane.h: xquic re-reports
-     * *fin=1 on every call once the transport FIN arrived,
-     * xqc_h3_request.c:795-801). */
+    /* Paused: this entry point is called from BOTH xquic-context notifies
+     * (READ_BODY/EMPTY_FIN — more response body became available upstream,
+     * independent of any TCP-side event) and the lwIP sent-notify resume
+     * path below. M1: attempt the stash retry inline here too (guarded —
+     * calls tcp_lane_downlink_stash_retry directly, never recurses back
+     * into this function) rather than only reacting to sent-notifies: an
+     * ERR_MEM'd retry must not be stranded until a sent-notify that may
+     * never come (nothing further gets ACKed, hence no further tcp_sent
+     * fires, if nothing further was ever written while paused). */
     if (f->downlink_paused) {
-        return TCP_LANE_FLOW_LIVE;
+        tcp_lane_flow_status_t st = tcp_lane_downlink_stash_retry(f);
+        if (st != TCP_LANE_FLOW_LIVE) {
+            return st; /* f torn down (fatal write error) */
+        }
+        if (f->downlink_paused) {
+            /* Still not enough sndbuf room — this xquic-side notify alone
+             * can't force it open; wait for the next lwIP sent-notify. Not
+             * data loss: xquic's own per-stream flow control backpressures
+             * the server the same way the uplink's EAGAIN path does in the
+             * other direction. A FIN cannot be lost across the pause,
+             * in either shape: (a) fin still UNREAD in xquic's buffer at
+             * pause time — the resumed drain simply reaches it on a later
+             * recv call; (b) fin already READ, arriving ON the very chunk
+             * that got stashed (n>0 && fin) — the drain's stash path DOES
+             * discard that local fin flag (it breaks before the fin
+             * check), deliberately relying on recv's level-triggered
+             * re-report at the resumed drain (MQVPN_TCP_LANE_H3_RECV_*
+             * contract in tcp_lane.h: xquic re-reports *fin=1 on every
+             * call once the transport FIN arrived,
+             * xqc_h3_request.c:795-801). */
+            return TCP_LANE_FLOW_LIVE;
+        }
+        /* Stash flushed — fall through to resume draining recv_body below,
+         * same as the sent-notify resume path always did. */
     }
     if (f->state != TCP_FLOW_ACTIVE || !f->h3_request || !f->pcb) {
         return TCP_LANE_FLOW_LIVE;
@@ -602,21 +734,21 @@ mqvpn_tcp_lane_on_lwip_sent(void *arg, struct tcp_pcb *pcb, u16_t len)
     if (!f->downlink_paused) {
         return ERR_OK;
     }
-    if ((size_t)MQVPN_TCP_LANE_TCP_SNDBUF(f->pcb) < (size_t)f->downlink_stash_len) {
+    /* M1: the retry itself is shared with tcp_lane_downlink_pump_status's
+     * paused branch (tcp_lane_downlink_stash_retry) — this frame is the
+     * ORIGINAL driver of that retry (a sent-notify is the one real signal
+     * that sndbuf room may have opened up). */
+    tcp_lane_flow_status_t rst = tcp_lane_downlink_stash_retry(f);
+    if (rst != TCP_LANE_FLOW_LIVE) {
+        /* f torn down (fatal write error). GONE is not actually reachable
+         * from this helper (f->pcb is always live entering it — see its
+         * own comment), but treat it the same defensively rather than
+         * assume. */
+        return rst == TCP_LANE_FLOW_ABORTED ? ERR_ABRT : ERR_OK;
+    }
+    if (f->downlink_paused) {
         return ERR_OK; /* still not enough room; wait for the next sent notify */
     }
-    err_t werr = MQVPN_TCP_LANE_TCP_WRITE(f->pcb, f->downlink_stash,
-                                          f->downlink_stash_len, TCP_WRITE_FLAG_COPY);
-    if (werr == ERR_MEM) {
-        return ERR_OK; /* transient; retry on the next sent notify */
-    }
-    if (werr != ERR_OK) {
-        return mqvpn_tcp_lane_on_relay_error(f) == TCP_LANE_FLOW_ABORTED ? ERR_ABRT
-                                                                         : ERR_OK;
-    }
-    MQVPN_TCP_LANE_TCP_OUTPUT(f->pcb);
-    f->downlink_stash_len = 0;
-    f->downlink_paused = 0;
 
     /* Resume draining recv_body via the status-returning pump core (same
      * single "pump the downlink" code path as the public entry point, but
@@ -750,12 +882,59 @@ tcp_lane_remove_flow(mqvpn_tcp_lane_t *lane, mqvpn_tcp_flow_t *f)
     }
     if (f->state == TCP_FLOW_STICKY_RAW) {
         lane->n_raw_markers--;
+    } else if (f->state == TCP_FLOW_CLOSING) {
+        /* C1: a CLOSING routing marker was already excluded from
+         * n_tcp_flows at the mark_closing transition — decrement its OWN
+         * counter here instead, whether this removal is the grace sweep,
+         * cap eviction, or tuple-reuse-after-close (on_syn). */
+        lane->n_closing--;
     } else {
         lane->n_tcp_flows--;
     }
     tcp_lane_uplink_queue_free(f);
     tcp_lane_downlink_stash_free(f);
     free(f);
+}
+
+/* C1: evict the single OLDEST CLOSING routing marker (smallest
+ * last_activity_us) to make room under TCP_LANE_CLOSING_CAP. A full
+ * bucket walk is acceptable here — this only runs at cap-overflow
+ * frequency (churn bound by TCP_LANE_CLOSING_CAP itself), not per-packet
+ * or per-tick. Never called when n_closing == 0 (see the only call site,
+ * tcp_lane_mark_closing), so `oldest` is always found. */
+static void
+tcp_lane_evict_oldest_closing(mqvpn_tcp_lane_t *lane)
+{
+    mqvpn_tcp_flow_t *oldest = NULL;
+    for (uint32_t b = 0; b < lane->n_buckets; b++) {
+        for (mqvpn_tcp_flow_t *f = lane->buckets[b]; f; f = f->next) {
+            if (f->state == TCP_FLOW_CLOSING &&
+                (!oldest || f->last_activity_us < oldest->last_activity_us)) {
+                oldest = f;
+            }
+        }
+    }
+    if (oldest) {
+        tcp_lane_remove_flow(lane, oldest);
+    }
+}
+
+/* C1: transition f (already detached from the pcb/H3 side by the caller —
+ * tcp_lane_finish_clean_close) into TCP_FLOW_CLOSING routing-marker
+ * residency: stays in the table, stops counting toward n_tcp_flows, starts
+ * counting toward n_closing, and is stamped so the grace sweep
+ * (mqvpn_tcp_lane_tick) and cap eviction (this function) can age it. */
+static void
+tcp_lane_mark_closing(mqvpn_tcp_flow_t *f)
+{
+    mqvpn_tcp_lane_t *lane = f->lane;
+    if (lane->n_closing >= TCP_LANE_CLOSING_CAP) {
+        tcp_lane_evict_oldest_closing(lane);
+    }
+    lane->n_tcp_flows--;
+    lane->n_closing++;
+    f->state = TCP_FLOW_CLOSING;
+    f->last_activity_us = lane->clock_fn ? lane->clock_fn(lane->clock_ctx) : 0;
 }
 
 tcp_lane_flow_status_t
@@ -806,7 +985,15 @@ tcp_lane_finish_clean_close(mqvpn_tcp_flow_t *f)
      * wrapper here would be a spurious RESET_STREAM after a graceful
      * finish. Clear the pointers (not via tcp_lane_close_h3, which WOULD
      * RST) so on_h3_closing/cb_request_close's later, idempotent lookup
-     * finds this flow already gone. */
+     * (which matches on f->stream) misses this flow from here on —
+     * f->stream == NULL never matches a real stream pointer.
+     *
+     * C1: f is NOT freed below — tcp_lane_mark_closing transitions it to
+     * TCP_FLOW_CLOSING, a TIME_WAIT-adjacent routing marker that stays in
+     * the table (see that state's comment) so a stray post-close inner-OS
+     * packet on this 5-tuple (the LAST_ACK final ACK, a TIME_WAIT-era
+     * duplicate) still finds an entry and gets routed to lwip_input
+     * instead of leaking out as RAW to the already-closed origin. */
     if (f->pcb) {
         tcp_arg(f->pcb, NULL);
         tcp_recv(f->pcb, NULL);
@@ -817,7 +1004,7 @@ tcp_lane_finish_clean_close(mqvpn_tcp_flow_t *f)
     }
     f->h3_request = NULL;
     f->stream = NULL;
-    tcp_lane_remove_flow(f->lane, f);
+    tcp_lane_mark_closing(f);
 }
 
 /* lwIP-initiated close (peer RST, retransmit-timeout give-up, or any other

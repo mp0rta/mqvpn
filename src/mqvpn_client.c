@@ -1356,9 +1356,13 @@ cb_request_close(xqc_h3_request_t *h3_request, void *user_data)
          * on_stream_rejected, on_relay_error, or the RESET_STREAM
          * closing-notify above) is already removed, so this is an
          * idempotent no-op lookup miss for it; a flow that reached this
-         * point via a clean bidi-FIN completion is ALSO already removed
-         * (tcp_lane_finish_clean_close runs synchronously well before
-         * xquic gets around to destroying the request) — this call exists
+         * point via a clean bidi-FIN completion has ALSO already cleared
+         * its f->stream to NULL (tcp_lane_finish_clean_close runs
+         * synchronously well before xquic gets around to destroying the
+         * request, and transitions the flow to a CLOSING routing-residency
+         * marker rather than removing it outright — C1 — but either way
+         * f->stream == NULL never matches a real stream pointer, so the
+         * lookup below still misses) — this call exists
          * for the one remaining shape: a request that closes for some
          * OTHER reason without either teardown path having run first. */
         if (stream->conn && stream->role == CLI_STREAM_ROLE_CONNECT_TCP) {
@@ -2802,13 +2806,32 @@ tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
             if (conn->tcp_lane) { /* implies lwip_ctx != NULL (coherence
                                    * rule at the creation site) */
-                int is_raw = 0;
-                int found = mqvpn_tcp_lane_lookup(conn->tcp_lane, &flow_key, &is_raw);
+                int is_raw = 0, is_closing = 0;
+                int found = mqvpn_tcp_lane_lookup(conn->tcp_lane, &flow_key, &is_raw,
+                                                  &is_closing);
+
+                /* Flags parse: needed whenever the entry is unknown OR is a
+                 * CLOSING routing-residency marker (C1) — a pure SYN in the
+                 * latter case means this 5-tuple was reused after the prior
+                 * connection finished. The common established-flow case
+                 * (found, ACTIVE / PENDING-anything / STICKY_RAW) skips
+                 * this parse entirely. */
+                int is_syn = 0;
+                if (!found || is_closing) {
+                    is_syn = (ip_ver == 4) && mqvpn_tcp_syn_flag(pkt, len);
+                }
+                if (found && is_closing && is_syn) {
+                    /* C1: tuple reuse after close. The prior connection on
+                     * this 5-tuple already finished (CLOSING grace-sweep
+                     * residency, see tcp_lane_finish_clean_close) — this is
+                     * a genuinely new connection. Evaluate it as brand-new;
+                     * mqvpn_tcp_lane_on_syn removes the stale CLOSING
+                     * marker itself (see its own comment) before committing
+                     * the fresh verdict. */
+                    found = 0;
+                }
 
                 if (!found) {
-                    /* Flags parse only for unknown flows — the common
-                     * established-flow case skips it. */
-                    int is_syn = (ip_ver == 4) && mqvpn_tcp_syn_flag(pkt, len);
                     if (!is_syn) {
                         /* Non-SYN for an unknown flow: evicted, mid-stream
                          * (hybrid just enabled), or inbound-connection
@@ -2834,6 +2857,11 @@ tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t 
                 } else if (is_raw) {
                     break; /* sticky RAW from a prior SYN */
                 }
+                /* found && is_closing && !is_syn falls through here too:
+                 * routing residency (C1) — feed whatever this packet is
+                 * (the LAST_ACK final ACK, a TIME_WAIT-era stray, ...) to
+                 * lwIP, which demuxes it against its OWN pcb/TIME_WAIT
+                 * state; we are only routing, not relaying. */
 
                 if (mqvpn_lwip_input(conn->lwip_ctx, pkt, len) < 0)
                     c->pkts_lane_tcp_dropped++;

@@ -24,6 +24,11 @@
  * #include of the TU. */
 #define TCP_LANE_RAW_MARKER_CAP 4u
 
+/* C1: same idea for the CLOSING routing-marker cap (production default
+ * 4096) — shrunk so the cap-eviction branch is testable without 4096
+ * clean-closes. Must precede the #include of the TU. */
+#define TCP_LANE_CLOSING_CAP 4u
+
 /* Task 10: observe tcp_recved via tcp_lane.c's compile-time substitution
  * hook — calling the REAL tcp_recved on the stack-fake pcbs below would
  * touch rcv_wnd internals (and assert). Must precede the #include; the hook
@@ -652,13 +657,13 @@ test_new_flow_and_lookup(void)
 
     mqvpn_flow_key_t k = make_key(4000, 80);
     int out_raw = -1;
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 0,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw, NULL), 0,
                   "lookup miss on brand-new flow");
 
     ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 1), 0, "on_syn to_tcp commits");
 
     out_raw = -1;
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 1,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw, NULL), 1,
                   "lookup hit after commit");
     ASSERT_EQ_INT(out_raw, 0, "committed flow is not sticky-RAW");
 
@@ -691,7 +696,7 @@ test_sticky_raw(void)
                   "on_syn to_tcp=0 records sticky-RAW");
 
     int out_raw = -1;
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 1,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw, NULL), 1,
                   "lookup hit after sticky-RAW commit");
     ASSERT_EQ_INT(out_raw, 1, "sticky-RAW flow reports is_raw");
 
@@ -719,7 +724,7 @@ test_cap_rejection(void)
     ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k2, 1), -1,
                   "second on_syn rejected at cap");
     /* Rejection means NO insertion: the rejected key must stay absent. */
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k2, NULL), 0,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k2, NULL, NULL), 0,
                   "rejected key not inserted (lookup miss)");
 
     mqvpn_tcp_lane_stats_t stats;
@@ -790,7 +795,7 @@ test_marker_cap(void)
     mqvpn_flow_key_t kx = make_key(8999, 80);
     ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &kx, 0), -1,
                   "marker rejected at marker cap");
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &kx, NULL), 0,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &kx, NULL, NULL), 0,
                   "rejected marker key not inserted (lookup miss)");
 
     mqvpn_tcp_lane_stats_t stats;
@@ -970,7 +975,7 @@ test_accept_key_correspondence(void)
      * MQVPN_TCP_LANE_TCP_ABORT is what makes this safe on pcb2 (a stack
      * fake, not a real pool pcb) — no manual `f2->pcb = NULL` dodge needed
      * anymore. */
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key2, NULL), 0,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key2, NULL, NULL), 0,
                   "rejected flow fully removed from the table");
     ASSERT_EQ_INT(g_tcp_abort_calls, 1, "pcb2 aborted on rejection");
     ASSERT_TRUE(g_tcp_abort_last_pcb == &pcb2, "the RIGHT pcb was aborted");
@@ -1395,7 +1400,7 @@ static void
 assert_flow_failed_closed(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key,
                           struct tcp_pcb *pcb, void *h3_request)
 {
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, key, NULL), 0,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, key, NULL, NULL), 0,
                   "flow fully removed from the table on relay error (lookup miss)");
     ASSERT_EQ_INT(g_tcp_abort_calls, 1, "pcb aborted exactly once");
     ASSERT_TRUE(g_tcp_abort_last_pcb == pcb, "the RIGHT pcb was aborted");
@@ -1661,20 +1666,31 @@ test_downlink_err_mem_stash_and_resume(void)
     ASSERT_EQ_INT(f->downlink_stash_len, 400, "stash holds the failed chunk");
     ASSERT_EQ_INT(g_tcp_output_calls, 0, "no output attempted — nothing was written");
 
-    /* A pump call while paused must stay a no-op — resume is on_lwip_sent's
-     * job only, not a re-drive from an ordinary READ_BODY/writable notify. */
+    /* M1: a pump call while paused now attempts the stash retry INLINE
+     * (guarded — tcp_lane_downlink_stash_retry, never a recursive call
+     * back into the pump) instead of unconditionally waiting for
+     * on_lwip_sent — an ERR_MEM'd retry must not be stranded until a
+     * sent-notify that may never come. Script a SECOND transient failure
+     * first to pin the "still blocked" sub-case: the retry is attempted
+     * (write call count increments) but the drain does NOT resume. */
+    tw_script_push(ERR_MEM);
     ASSERT_EQ_INT(mqvpn_tcp_lane_downlink_pump(lane, &fake_stream), 0,
-                  "pump while paused is a no-op");
-    ASSERT_EQ_INT(g_h3_recv_calls, 1, "still no further recv while paused");
+                  "pump while paused returns 0 (flow still live either way)");
+    ASSERT_EQ_INT(g_tcp_write_calls, 2, "retry attempted, still fails");
+    ASSERT_EQ_INT(g_tcp_write_capture_len, 0, "nothing captured — retry failed again");
+    ASSERT_EQ_INT(f->downlink_paused, 1, "still paused — retry failed");
+    ASSERT_EQ_INT(g_h3_recv_calls, 1, "drain not resumed while still paused");
 
-    /* on_lwip_sent: sndbuf recovered enough for the stash. */
-    g_tcp_sndbuf_value = 0xFFFFu;
-    ASSERT_EQ_INT(mqvpn_tcp_lane_on_lwip_sent(f, &pcb, 0), ERR_OK,
-                  "sent notify tolerated");
+    /* Now let the retry succeed (no more scripted failures, ample sndbuf):
+     * a pump call — NOT on_lwip_sent — flushes the stash and resumes
+     * draining recv_body for c2, entirely via the xquic-notify path. */
+    ASSERT_EQ_INT(mqvpn_tcp_lane_downlink_pump(lane, &fake_stream), 0,
+                  "pump succeeds once room is available");
 
     ASSERT_EQ_INT(f->downlink_paused, 0, "resumed");
     ASSERT_EQ_INT(f->downlink_stash_len, 0, "stash slot drained");
-    ASSERT_EQ_INT(g_tcp_write_calls, 3, "stash flush + the resumed pump's write for c2");
+    ASSERT_EQ_INT(g_tcp_write_calls, 4,
+                  "2 failed attempts + stash flush + the resumed drain's write for c2");
     ASSERT_EQ_INT(g_tcp_write_capture_len, 1000, "both chunks eventually written");
     ASSERT_TRUE(
         memcmp(g_tcp_write_capture, g_expected, 1000) == 0,
@@ -1685,6 +1701,41 @@ test_downlink_err_mem_stash_and_resume(void)
     ASSERT_EQ_INT(g_h3_recv_calls, 3, "c2 read on resume, then AGAIN confirms drained");
     ASSERT_TRUE(g_tcp_output_calls >= 1,
                 "tcp_output called on the flush and/or resumed pump");
+
+    f->pcb = NULL;
+    mqvpn_tcp_lane_free(lane);
+}
+
+/* M1 regression pin: the SAME stash-retry helper is still reachable from
+ * on_lwip_sent (the real sent-notify), not just from the pump entry point
+ * exercised above — a paused flow that receives NO further xquic-side
+ * notify (nothing more buffered upstream) must still resume once the pcb
+ * itself signals room via tcp_sent. */
+static void
+test_downlink_sent_notify_still_resumes(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xd0021ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 7201, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    const uint8_t *c1 = mk_dl_bytes(400);
+    h3_recv_push_data(c1, 400, 0);
+    tw_script_push(ERR_MEM);
+    mqvpn_tcp_lane_downlink_pump(lane, &fake_stream);
+    ASSERT_EQ_INT(f->downlink_paused, 1, "paused on ERR_MEM");
+    ASSERT_EQ_INT(f->downlink_stash_len, 400, "stash holds the failed chunk");
+
+    /* No further pump call — only the sent-notify fires. */
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_lwip_sent(f, &pcb, 0), ERR_OK,
+                  "sent notify tolerated");
+    ASSERT_EQ_INT(f->downlink_paused, 0, "resumed via on_lwip_sent alone");
+    ASSERT_EQ_INT(g_tcp_write_capture_len, 400, "stash flushed");
+    ASSERT_TRUE(memcmp(g_tcp_write_capture, g_expected, 400) == 0, "byte-exact");
 
     f->pcb = NULL;
     mqvpn_tcp_lane_free(lane);
@@ -1941,7 +1992,7 @@ test_downlink_pump_on_torn_down_flow(void)
     mqvpn_tcp_lane_on_stream_rejected(lane, &fake_stream);
     /* f is freed as of the call above — do not touch it again. */
     mqvpn_flow_key_t key = mk_std_key(7800);
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL), 0,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL, NULL), 0,
                   "rejected flow fully removed");
     ASSERT_EQ_INT(g_tcp_abort_calls, 1, "pcb aborted on rejection");
     ASSERT_TRUE(g_tcp_abort_last_pcb == &pcb, "the RIGHT pcb was aborted");
@@ -2061,7 +2112,7 @@ test_lwip_err_teardown(void)
     /* f is freed as of the call above. */
 
     mqvpn_flow_key_t key = mk_std_key(8100);
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL), 0,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL, NULL), 0,
                   "flow removed on lwIP-initiated err");
     /* The defining difference from every LOCALLY-initiated kill: no
      * tcp_abort here — lwIP already freed the pcb itself. */
@@ -2093,7 +2144,7 @@ test_h3_closing_notify_teardown(void)
     /* f is freed as of the call above. */
 
     mqvpn_flow_key_t key = mk_std_key(8200);
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL), 0,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL, NULL), 0,
                   "flow removed on H3 closing-notify");
     ASSERT_EQ_INT(g_tcp_abort_calls, 1, "pcb aborted on closing-notify");
     ASSERT_TRUE(g_tcp_abort_last_pcb == &pcb, "the RIGHT pcb was aborted");
@@ -2146,7 +2197,7 @@ test_abort_pending_real(void)
                   "abort_pending reports the pcb abort (accept frame needs "
                   "this to return ERR_ABRT)");
     /* f1 is freed as of the call above. */
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key1, NULL), 0, "flow1 removed");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key1, NULL, NULL), 0, "flow1 removed");
     ASSERT_EQ_INT(g_tcp_abort_calls, 1, "pcb1 aborted");
     ASSERT_TRUE(g_tcp_abort_last_pcb == &pcb1, "the RIGHT pcb was aborted");
     ASSERT_EQ_INT(g_h3_close_calls, 0, "abort_pending never closes H3 (none existed)");
@@ -2172,7 +2223,7 @@ test_abort_pending_real(void)
     ASSERT_EQ_INT(mqvpn_tcp_lane_abort_pending(f2), 1,
                   "abort_pending reports the pcb abort in the post-bind shape too");
     /* f2 is freed as of the call above. */
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key2, NULL), 0, "flow2 removed");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key2, NULL, NULL), 0, "flow2 removed");
     ASSERT_EQ_INT(g_tcp_abort_calls, 2, "pcb2 also aborted");
     ASSERT_TRUE(g_tcp_abort_last_pcb == &pcb2, "the RIGHT pcb was aborted");
     ASSERT_EQ_INT(g_h3_close_calls, 0,
@@ -2218,7 +2269,7 @@ test_accept_open_stream_fail_returns_abrt(void)
 
     ASSERT_EQ_INT(g_tcp_abort_calls, 1, "the pcb was aborted exactly once");
     ASSERT_TRUE(g_tcp_abort_last_pcb == &pcb, "the RIGHT pcb was aborted");
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL), 0, "flow removed");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL, NULL), 0, "flow removed");
     ASSERT_EQ_INT(g_h3_close_calls, 0, "no H3 request existed to close");
 
     mqvpn_tcp_lane_free(lane);
@@ -2319,9 +2370,16 @@ test_clean_close_uplink_fin_first(void)
                   "pump signals the flow is gone (clean close, not an error)");
     /* f is freed as of the call above. */
 
+    /* C1: the flow is NOT removed on a clean bidi-FIN completion — it
+     * transitions to TCP_FLOW_CLOSING, a routing-residency marker. lookup
+     * must still find it (found=1), report it as NOT sticky-RAW, and flag
+     * it as CLOSING via *out_closing. */
     mqvpn_flow_key_t key = mk_std_key(8400);
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL), 0,
-                  "flow removed on clean bidi-FIN completion");
+    int out_raw = -1, out_closing = -1;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, &out_raw, &out_closing), 1,
+                  "flow stays in the table as a CLOSING routing marker (C1)");
+    ASSERT_EQ_INT(out_raw, 0, "CLOSING is never reported as sticky-RAW");
+    ASSERT_EQ_INT(out_closing, 1, "lookup reports the CLOSING marker");
     ASSERT_EQ_INT(g_tcp_shutdown_calls, 1, "downlink tcp_shutdown called once");
     ASSERT_EQ_INT(g_tcp_shutdown_last_rx, 0, "shut_rx == 0");
     ASSERT_EQ_INT(g_tcp_shutdown_last_tx, 1, "shut_tx == 1");
@@ -2329,6 +2387,12 @@ test_clean_close_uplink_fin_first(void)
     ASSERT_TRUE(g_tcp_close_last_pcb == &pcb, "the RIGHT pcb was closed");
     ASSERT_EQ_INT(g_tcp_abort_calls, 0, "NOT aborted — this is the graceful path");
     ASSERT_EQ_INT(g_h3_close_calls, 0, "NOT RST — both directions FIN'd cleanly");
+
+    mqvpn_tcp_lane_stats_t stats;
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_active, 0,
+                  "n_tcp_flows decremented — a CLOSING marker is not an active flow");
+    ASSERT_EQ_INT(lane->n_closing, 1, "n_closing incremented for the new marker");
 
     mqvpn_tcp_lane_free(lane);
 }
@@ -2365,14 +2429,25 @@ test_clean_close_downlink_fin_first(void)
                   "clean-close recv(NULL) frame stays ERR_OK (pcb closed, not aborted)");
     /* f is freed as of the call above. */
 
+    /* C1: same routing-residency transition as the uplink-FIN-first shape
+     * above, just reached via the other ordering. */
     mqvpn_flow_key_t key = mk_std_key(8500);
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL), 0,
-                  "flow removed on clean bidi-FIN completion");
+    int out_raw = -1, out_closing = -1;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, &out_raw, &out_closing), 1,
+                  "flow stays in the table as a CLOSING routing marker (C1)");
+    ASSERT_EQ_INT(out_raw, 0, "CLOSING is never reported as sticky-RAW");
+    ASSERT_EQ_INT(out_closing, 1, "lookup reports the CLOSING marker");
     ASSERT_EQ_INT(g_tcp_shutdown_calls, 1, "downlink tcp_shutdown called once");
     ASSERT_EQ_INT(g_tcp_close_calls, 1, "graceful tcp_close called exactly once");
     ASSERT_TRUE(g_tcp_close_last_pcb == &pcb, "the RIGHT pcb was closed");
     ASSERT_EQ_INT(g_tcp_abort_calls, 0, "NOT aborted — this is the graceful path");
     ASSERT_EQ_INT(g_h3_close_calls, 0, "NOT RST — both directions FIN'd cleanly");
+
+    mqvpn_tcp_lane_stats_t stats;
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_active, 0,
+                  "n_tcp_flows decremented — a CLOSING marker is not an active flow");
+    ASSERT_EQ_INT(lane->n_closing, 1, "n_closing incremented for the new marker");
 
     mqvpn_tcp_lane_free(lane);
 }
@@ -2402,6 +2477,180 @@ test_removal_updates_stats(void)
     mqvpn_tcp_lane_free(lane);
 }
 
+/* ─── CLOSING routing-marker residency (C1) ───
+ *
+ * Drives a flow through the SAME clean bidi-FIN sequence
+ * test_clean_close_uplink_fin_first pins, then exercises the grace sweep /
+ * cap eviction / tuple-reuse paths on the resulting CLOSING marker. */
+
+/* Establish + cleanly close (uplink-FIN-first shape) a flow, leaving it as
+ * a TCP_FLOW_CLOSING routing marker still in the table — NOT freed. `pcb`
+ * must be caller-owned stack memory that outlives the flow's ACTIVE phase
+ * (same convention as setup_flow). */
+static mqvpn_tcp_flow_t *
+make_closing_flow(mqvpn_tcp_lane_t *lane, struct tcp_pcb *pcb, uint16_t src_port,
+                  void *req, void *stream)
+{
+    mqvpn_tcp_flow_t *f = setup_flow(lane, pcb, src_port, req, stream, 1);
+    if (!f) {
+        return NULL;
+    }
+    mqvpn_tcp_lane_on_lwip_recv(f, pcb, NULL, ERR_OK); /* uplink fin -> H3 */
+    h3_recv_push_data(NULL, 0, 1);                     /* downlink fin */
+    mqvpn_tcp_lane_downlink_pump(lane, stream);        /* -> TCP_FLOW_CLOSING */
+    return f;
+}
+
+static void
+test_closing_grace_sweep_survives_then_expires(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xf101ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = make_closing_flow(lane, &pcb, 9101, &fake_req, &fake_stream);
+    ASSERT_TRUE(f != NULL, "flow reaches CLOSING");
+    ASSERT_EQ_INT(lane->n_closing, 1, "n_closing == 1");
+
+    mqvpn_flow_key_t key = mk_std_key(9101);
+
+    /* Well within the grace window: survives. */
+    g_fake_now += (TCP_LANE_CLOSING_GRACE_US - 1000000ULL);
+    mqvpn_tcp_lane_tick(lane, g_fake_now);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL, NULL), 1,
+                  "CLOSING marker survives a sweep within the grace window");
+    ASSERT_EQ_INT(lane->n_closing, 1, "still 1");
+
+    /* Past the grace window: swept. */
+    g_fake_now += 2000000ULL;
+    mqvpn_tcp_lane_tick(lane, g_fake_now);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL, NULL), 0,
+                  "CLOSING marker swept once past TCP_LANE_CLOSING_GRACE_US");
+    ASSERT_EQ_INT(lane->n_closing, 0, "n_closing decremented on sweep");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_closing_grace_sweep_runs_with_idle_timeout_zero(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.tcp_idle_timeout_sec = 0; /* idle-eviction opt-out */
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xf102ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = make_closing_flow(lane, &pcb, 9102, &fake_req, &fake_stream);
+    ASSERT_TRUE(f != NULL, "flow reaches CLOSING");
+
+    mqvpn_flow_key_t key = mk_std_key(9102);
+    g_fake_now += TCP_LANE_CLOSING_GRACE_US + 1000000ULL;
+    mqvpn_tcp_lane_tick(lane, g_fake_now);
+
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL, NULL), 0,
+                  "CLOSING grace sweep runs even with tcp_idle_timeout_sec == 0 — a "
+                  "DIFFERENT mechanism/rationale than idle-eviction");
+    ASSERT_EQ_INT(lane->n_closing, 0, "n_closing decremented");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_closing_cap_eviction(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xf103ULL, NULL, fake_clock, NULL);
+
+    struct tcp_pcb pcbs[TCP_LANE_CLOSING_CAP + 1];
+    int reqs[TCP_LANE_CLOSING_CAP + 1], streams[TCP_LANE_CLOSING_CAP + 1];
+    mqvpn_flow_key_t keys[TCP_LANE_CLOSING_CAP + 1];
+
+    /* Fill the cap exactly, each one strictly newer than the last (distinct
+     * last_activity_us stamps) so "oldest" is unambiguous. */
+    for (uint16_t i = 0; i < TCP_LANE_CLOSING_CAP; i++) {
+        keys[i] = mk_std_key((uint16_t)(9200 + i));
+        mqvpn_tcp_flow_t *f = make_closing_flow(lane, &pcbs[i], (uint16_t)(9200 + i),
+                                                &reqs[i], &streams[i]);
+        ASSERT_TRUE(f != NULL, "closing flow created");
+        g_fake_now += 1000000ULL; /* strictly increasing stamps */
+    }
+    ASSERT_EQ_INT(lane->n_closing, TCP_LANE_CLOSING_CAP, "at cap");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &keys[0], NULL, NULL), 1,
+                  "oldest still present, at cap");
+
+    /* One more closing transition at cap: evicts the OLDEST (index 0)
+     * immediately, not counted against flows_rejected_*. */
+    uint16_t idx = TCP_LANE_CLOSING_CAP;
+    keys[idx] = mk_std_key((uint16_t)(9200 + idx));
+    mqvpn_tcp_flow_t *f = make_closing_flow(lane, &pcbs[idx], (uint16_t)(9200 + idx),
+                                            &reqs[idx], &streams[idx]);
+    ASSERT_TRUE(f != NULL, "cap-overflow closing flow created");
+
+    ASSERT_EQ_INT(lane->n_closing, TCP_LANE_CLOSING_CAP, "still at cap — one evicted");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &keys[0], NULL, NULL), 0,
+                  "oldest CLOSING entry evicted on cap overflow");
+    for (uint16_t i = 1; i <= TCP_LANE_CLOSING_CAP; i++) {
+        ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &keys[i], NULL, NULL), 1,
+                      "every newer CLOSING entry survives the eviction");
+    }
+
+    mqvpn_tcp_lane_stats_t stats;
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_rejected_cap, 0,
+                  "CLOSING cap eviction is churn bookkeeping, not a rejection");
+    ASSERT_EQ_INT(stats.flows_rejected_other, 0, "not counted as a rejection either");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_syn_during_closing_reevaluates(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xf104ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = make_closing_flow(lane, &pcb, 9300, &fake_req, &fake_stream);
+    ASSERT_TRUE(f != NULL, "flow reaches CLOSING");
+    ASSERT_EQ_INT(lane->n_closing, 1, "n_closing == 1 before reuse");
+
+    mqvpn_flow_key_t key = mk_std_key(9300);
+    int out_raw = -1, out_closing = -1;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, &out_raw, &out_closing), 1,
+                  "lookup finds the CLOSING marker");
+    ASSERT_EQ_INT(out_closing, 1,
+                  "confirmed CLOSING — tun_decide_lane's cue to re-run "
+                  "policy on a pure SYN");
+
+    /* tun_decide_lane's contract (mqvpn_client.c): a pure SYN hitting a
+     * CLOSING entry re-runs policy via on_syn, which removes the stale
+     * marker itself. Pin on_syn's side of that contract directly. */
+    ASSERT_EQ_INT(
+        mqvpn_tcp_lane_on_syn(lane, &key, 1), 0,
+        "on_syn succeeds — stale CLOSING marker removed, fresh commit inserted");
+
+    ASSERT_EQ_INT(lane->n_closing, 0, "the stale marker is gone, not just shadowed");
+    int is_raw = -1;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, &is_raw, NULL), 1,
+                  "a brand-new entry now occupies the key");
+    ASSERT_EQ_INT(is_raw, 0, "the new entry is a real TCP-lane flow, not sticky-RAW");
+
+    mqvpn_tcp_lane_stats_t stats;
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_active, 1,
+                  "the new commit counts as an active TCP-lane flow");
+    ASSERT_EQ_INT(stats.flows_rejected_other, 0, "NOT treated as a caller-bug duplicate");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
 /* ─── Idle-timeout eviction sweep (Task 13) ───
  *
  * All tests here use a small tcp_idle_timeout_sec (5s) instead of the 300s
@@ -2423,7 +2672,7 @@ test_idle_eviction_basic(void)
 
     mqvpn_flow_key_t k = mk_std_key(9001);
     int out_raw = -1;
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 1,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw, NULL), 1,
                   "flow present before sweep");
 
     g_fake_now += (uint64_t)(cfg.tcp_idle_timeout_sec + 1) * 1000000ULL;
@@ -2432,7 +2681,7 @@ test_idle_eviction_basic(void)
     mqvpn_tcp_lane_stats_t stats;
     mqvpn_tcp_lane_get_stats(lane, &stats);
     ASSERT_EQ_INT(stats.flows_idle_evicted, 1, "idle flow evicted");
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 0,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw, NULL), 0,
                   "lookup miss after eviction");
     ASSERT_EQ_INT(g_tcp_abort_calls, 1, "teardown funnel aborted the pcb");
     ASSERT_EQ_INT(g_h3_close_calls, 1, "teardown funnel closed the h3 request");
@@ -2461,7 +2710,8 @@ test_idle_eviction_fresh_survives(void)
     ASSERT_EQ_INT(stats.flows_idle_evicted, 0, "fresh flow survives the sweep");
     mqvpn_flow_key_t k = mk_std_key(9002);
     int out_raw = -1;
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 1, "flow still present");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw, NULL), 1,
+                  "flow still present");
     ASSERT_EQ_INT(g_tcp_abort_calls, 0, "no teardown fired");
 
     mqvpn_tcp_lane_free(lane);
@@ -2487,7 +2737,8 @@ test_idle_eviction_sticky_raw_survives(void)
     ASSERT_EQ_INT(stats.flows_idle_evicted, 0,
                   "sticky-RAW marker never idle-evicted, however ancient");
     int out_raw = -1;
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 1, "marker still present");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw, NULL), 1,
+                  "marker still present");
     ASSERT_EQ_INT(out_raw, 1, "still sticky-RAW");
 
     mqvpn_tcp_lane_free(lane);
@@ -2514,7 +2765,7 @@ test_idle_eviction_timeout_zero_never_evicts(void)
     ASSERT_EQ_INT(stats.flows_idle_evicted, 0, "timeout=0 disables the sweep entirely");
     mqvpn_flow_key_t k = mk_std_key(9004);
     int out_raw = -1;
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 1, "flow untouched");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw, NULL), 1, "flow untouched");
 
     mqvpn_tcp_lane_free(lane);
 }
@@ -2544,7 +2795,7 @@ test_idle_eviction_pending_accept_stamped(void)
     ASSERT_EQ_INT(stats.flows_idle_evicted, 0,
                   "PENDING_ACCEPT survives a sweep within the timeout");
     int out_raw = -1;
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 1,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw, NULL), 1,
                   "flow still pending-accept");
 
     g_fake_now += (uint64_t)(cfg.tcp_idle_timeout_sec + 1) * 1000000ULL;
@@ -2553,7 +2804,7 @@ test_idle_eviction_pending_accept_stamped(void)
     mqvpn_tcp_lane_get_stats(lane, &stats);
     ASSERT_EQ_INT(stats.flows_idle_evicted, 1,
                   "PENDING_ACCEPT evicted once truly idle from its creation stamp");
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 0,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw, NULL), 0,
                   "lookup miss after eviction");
     ASSERT_EQ_INT(g_tcp_abort_calls, 0, "no pcb existed to abort (never reached accept)");
     ASSERT_EQ_INT(g_h3_close_calls, 0, "no h3 request existed to close (never bound)");
@@ -2595,7 +2846,8 @@ test_idle_eviction_activity_refresh(void)
                   "activity refresh keeps the flow alive past the original deadline");
     mqvpn_flow_key_t k = mk_std_key(9006);
     int out_raw = -1;
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 1, "flow still present");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw, NULL), 1,
+                  "flow still present");
 
     /* Finally let it go idle for real, measured from the refreshed stamp. */
     g_fake_now += (uint64_t)(cfg.tcp_idle_timeout_sec + 1) * 1000000ULL;
@@ -2661,8 +2913,8 @@ test_idle_eviction_same_bucket_head_evicted(void)
     ASSERT_EQ_INT(stats.flows_idle_evicted, 1, "only the idle head evicted");
     int out_raw = -1;
     mqvpn_flow_key_t kb = mk_std_key(port_b);
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &kb, &out_raw), 0, "head B gone");
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &ka, &out_raw), 1,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &kb, &out_raw, NULL), 0, "head B gone");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &ka, &out_raw, NULL), 1,
                   "fresh successor A survived the head's mid-walk free");
     ASSERT_EQ_INT(g_tcp_abort_calls, 1, "exactly one pcb aborted");
 
@@ -2696,7 +2948,7 @@ test_idle_eviction_pending_stream(void)
     ASSERT_EQ_INT(g_h3_close_calls, 1, "bound h3 request closed");
     mqvpn_flow_key_t k = mk_std_key(9008);
     int out_raw = -1;
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 0, "flow gone");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw, NULL), 0, "flow gone");
 
     mqvpn_tcp_lane_free(lane);
 }
@@ -2724,7 +2976,8 @@ test_idle_eviction_exact_boundary(void)
                   "age == timeout is NOT evicted (strict >)");
     mqvpn_flow_key_t k = mk_std_key(9009);
     int out_raw = -1;
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw), 1, "flow still present");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw, NULL), 1,
+                  "flow still present");
 
     /* One second later (also re-satisfies the cadence gate) the age is
      * strictly past the timeout — now it goes. */
@@ -2772,13 +3025,13 @@ test_idle_eviction_sweep_cadence_gate(void)
                   "gated tick did not sweep (idle-eligible B untouched)");
     mqvpn_flow_key_t kb = mk_std_key(9011);
     int out_raw = -1;
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &kb, &out_raw), 1, "B still present");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &kb, &out_raw, NULL), 1, "B still present");
 
     g_fake_now += 500000ULL; /* +1.0s total since the last sweep — gate opens */
     mqvpn_tcp_lane_tick(lane, g_fake_now);
     mqvpn_tcp_lane_get_stats(lane, &stats);
     ASSERT_EQ_INT(stats.flows_idle_evicted, 2, "next sweep after the gate evicts B");
-    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &kb, &out_raw), 0, "B gone");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &kb, &out_raw, NULL), 0, "B gone");
 
     mqvpn_tcp_lane_free(lane);
 }
@@ -2805,6 +3058,7 @@ main(void)
     test_relay_fin_during_pending_stream();
     test_downlink_basic();
     test_downlink_err_mem_stash_and_resume();
+    test_downlink_sent_notify_still_resumes();
     test_downlink_sndbuf_gate();
     test_downlink_fin_with_data();
     test_downlink_fin_only();
@@ -2821,6 +3075,11 @@ main(void)
     test_clean_close_uplink_fin_first();
     test_clean_close_downlink_fin_first();
     test_removal_updates_stats();
+
+    test_closing_grace_sweep_survives_then_expires();
+    test_closing_grace_sweep_runs_with_idle_timeout_zero();
+    test_closing_cap_eviction();
+    test_syn_during_closing_reevaluates();
     test_idle_eviction_basic();
     test_idle_eviction_fresh_survives();
     test_idle_eviction_sticky_raw_survives();
