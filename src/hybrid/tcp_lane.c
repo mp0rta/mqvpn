@@ -14,11 +14,21 @@
 #include "hybrid/tcp_lane.h"
 
 #include <stdlib.h>
+#include <string.h>
 
-/* Opaque outside lwip_glue.c/tcp_lane.c — this file does not include any
- * lwIP header, so the pcb pointer stays a forward declaration (same
- * convention as src/hybrid/lwip_glue.h). */
-struct tcp_pcb;
+/* Task 8: the accept callback below wires real pcbs (tcp_arg/tcp_recv/...),
+ * so this TU now needs full lwIP types. tcp_lane.h's PUBLIC surface stays
+ * lwIP-opaque (err_t + forward-declared struct tcp_pcb only) — the "opaque
+ * pcb" rule was always about the header, not this .c. */
+#include "lwip/ip_addr.h"
+#include "lwip/tcp.h"
+
+/* The accept callback memcpy's pcb local_ip/remote_ip as the flow key's raw
+ * 4 network-order bytes — only valid while ip_addr_t IS the bare ip4_addr_t
+ * (one u32_t). Pin the LWIP_IPV6=0 assumption (lwip_port/lwipopts.h). */
+_Static_assert(sizeof(ip_addr_t) == 4,
+               "TCP lane assumes LWIP_IPV6=0: ip_addr_t must be the bare "
+               "network-order ip4_addr_t");
 
 /* Sticky-RAW markers are capped separately from tcp_max_flows: they are
  * never idle-evicted (Task 13 sweeps TCP-lane flows only), so counting
@@ -50,9 +60,12 @@ typedef struct mqvpn_tcp_flow {
     mqvpn_tcp_flow_state_t state;
     uint64_t last_activity_us;
 
-    struct tcp_pcb *pcb; /* set by Task 8's lwIP accept callback */
-    void *h3_request;    /* opaque xqc_h3_request_t*; set by Task 8 */
-    void *stream;        /* opaque cli_stream_t*; set by Task 8 */
+    struct tcp_pcb *pcb;  /* set by the lwIP accept callback */
+    ip4_addr_t target_ip; /* original inner dst (== pcb->local_ip at accept —
+                           * wildcard intercept), network byte order */
+    uint16_t target_port; /* host order, same as the flow key's ports */
+    void *h3_request;     /* opaque xqc_h3_request_t*; set by bind_h3_request */
+    void *stream;         /* opaque cli_stream_t*; set by bind_h3_request */
 
     size_t uplink_inflight_bytes;
     int uplink_withheld;
@@ -68,6 +81,8 @@ struct mqvpn_tcp_lane {
     mqvpn_hybrid_config_t cfg;
     uint64_t hash_seed;
     void *client_ctx;
+    mqvpn_lwip_clock_fn clock_fn; /* nullable; last_activity_us stays 0 then */
+    void *clock_ctx;
     mqvpn_tcp_flow_t **buckets;
     uint32_t n_buckets;
     uint32_t n_tcp_flows;   /* to_tcp=1 entries; capped by cfg.tcp_max_flows */
@@ -93,7 +108,8 @@ pick_buckets(uint32_t max_flows)
 }
 
 mqvpn_tcp_lane_t *
-mqvpn_tcp_lane_new(const mqvpn_hybrid_config_t *cfg, uint64_t hash_seed, void *client_ctx)
+mqvpn_tcp_lane_new(const mqvpn_hybrid_config_t *cfg, uint64_t hash_seed, void *client_ctx,
+                   mqvpn_lwip_clock_fn clock_fn, void *clock_ctx)
 {
     if (!cfg) {
         return NULL;
@@ -105,6 +121,8 @@ mqvpn_tcp_lane_new(const mqvpn_hybrid_config_t *cfg, uint64_t hash_seed, void *c
     lane->cfg = *cfg;
     lane->hash_seed = hash_seed;
     lane->client_ctx = client_ctx;
+    lane->clock_fn = clock_fn;
+    lane->clock_ctx = clock_ctx;
     /* Size for BOTH populations sharing the table: up to tcp_max_flows
      * TCP-lane flows plus up to TCP_LANE_RAW_MARKER_CAP sticky-RAW markers
      * (which are exactly what accumulates in the tcp=auto single-path hot
@@ -234,4 +252,130 @@ mqvpn_tcp_lane_get_stats(const mqvpn_tcp_lane_t *lane, mqvpn_tcp_lane_stats_t *o
      * and can never leave the stats snapshot out of sync. */
     out->flows_active = lane->n_tcp_flows;
     out->raw_markers_active = lane->n_raw_markers;
+}
+
+/* ─── lwIP accept → H3 stream open (Task 8; relay/teardown stubbed) ─── */
+
+/* Relay/teardown stubs — Tasks 10/12 replace these; the accept path below
+ * only needs their addresses. recv: pbuf_free without tcp_recved means zero
+ * receive-window growth — inert but safe for the no-relay checkpoint
+ * (p == NULL is FIN, also ignored for now). */
+static err_t
+mqvpn_tcp_lane_on_lwip_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
+{
+    (void)arg;
+    (void)pcb;
+    (void)err;
+    if (p) {
+        pbuf_free(p);
+    }
+    return ERR_OK;
+}
+
+static err_t
+mqvpn_tcp_lane_on_lwip_sent(void *arg, struct tcp_pcb *pcb, u16_t len)
+{
+    (void)arg;
+    (void)pcb;
+    (void)len;
+    return ERR_OK;
+}
+
+static void
+mqvpn_tcp_lane_on_lwip_err(void *arg, err_t err)
+{
+    (void)arg;
+    (void)err;
+}
+
+/* Task 12 stub: will unlink + free the flow and maintain n_tcp_flows. */
+static void
+tcp_lane_remove_flow(mqvpn_tcp_lane_t *lane, mqvpn_tcp_flow_t *f)
+{
+    (void)lane;
+    (void)f;
+}
+
+void
+mqvpn_tcp_lane_bind_h3_request(void *flow_handle, void *h3_request, void *stream)
+{
+    mqvpn_tcp_flow_t *f = (mqvpn_tcp_flow_t *)flow_handle;
+    f->h3_request = h3_request;
+    f->stream = stream;
+    f->state = TCP_FLOW_ACTIVE; /* Task 9 inserts real 2xx/4xx gating */
+}
+
+void
+mqvpn_tcp_lane_abort_pending(void *flow_handle)
+{
+    (void)flow_handle; /* Task 12: tcp_abort(f->pcb) + remove_flow */
+}
+
+err_t
+mqvpn_tcp_lane_lwip_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
+{
+    mqvpn_tcp_lane_t *lane = (mqvpn_tcp_lane_t *)arg;
+
+    /* pcb-pool exhaustion: tcp_listen_input invokes the accept callback with
+     * (NULL, ERR_MEM) and ignores the return value (tcp_in.c). Nothing to
+     * track or abort — the peer's SYN retransmit retries, and the flow entry
+     * stays PENDING_ACCEPT so the retransmit is re-fed into lwIP. */
+    if (!newpcb || err != ERR_OK) {
+        return ERR_MEM;
+    }
+
+    /* Rebuild the SYN-time flow key from the accepted pcb — the fork's
+     * wildcard bind means local_ip/local_port ARE the true original
+     * destination. Byte-order contract (must be byte-identical to the key
+     * mqvpn_hybrid_classify built from the raw SYN, or find_flow below
+     * misses every time; pinned by test_tcp_lane's correspondence test):
+     *   - pcb ports are HOST order (tcp_input ntohs's the header before
+     *     tcp_listen_input copies src/dest — tcp_in.c), matching the key's
+     *     documented host-order ports (reorder.h);
+     *   - LWIP_IPV6=0 makes ip_addr_t the bare ip4_addr_t: one u32_t in
+     *     NETWORK order, i.e. the same 4 raw header bytes the classifier
+     *     memcpy'd (pinned by the _Static_assert at the top). */
+    mqvpn_flow_key_t key;
+    memset(&key, 0, sizeof(key));
+    key.ip_version = 4;
+    key.proto = MQVPN_IPPROTO_TCP;
+    key.src_port = newpcb->remote_port;
+    key.dst_port = newpcb->local_port;
+    memcpy(key.src_ip, &newpcb->remote_ip, sizeof(newpcb->remote_ip));
+    memcpy(key.dst_ip, &newpcb->local_ip, sizeof(newpcb->local_ip));
+
+    mqvpn_tcp_flow_t *f = find_flow(lane, &key, NULL);
+    if (!f || f->state != TCP_FLOW_PENDING_ACCEPT) {
+        /* Shouldn't happen — every lwIP-fed SYN was committed by on_syn
+         * first. Refuse rather than leak an untracked pcb. Post-SYN-ACK, so
+         * NEVER a RAW fallback. Return convention (vendored tcp_in.c,
+         * tcp_process SYN_RCVD): any non-ERR_OK return other than ERR_ABRT
+         * makes the stack tcp_abort() the pcb itself (RST + free); ERR_ABRT
+         * would instead claim WE already called tcp_abort — we didn't. */
+        return ERR_VAL;
+    }
+
+    if (lane->n_tcp_flows > lane->cfg.tcp_max_flows) {
+        /* Defense only — the cap is enforced pre-lwIP in on_syn; strict >
+         * because this flow itself is already counted in n_tcp_flows. Same
+         * abort-not-RAW return convention as above. */
+        lane->stats.flows_rejected_cap++;
+        tcp_lane_remove_flow(lane, f);
+        return ERR_MEM;
+    }
+
+    f->pcb = newpcb;
+    f->target_ip = *ip_2_ip4(&newpcb->local_ip);
+    f->target_port = newpcb->local_port;
+    f->state = TCP_FLOW_PENDING_STREAM;
+    f->last_activity_us = lane->clock_fn ? lane->clock_fn(lane->clock_ctx) : 0;
+
+    tcp_arg(newpcb, f);
+    tcp_recv(newpcb, mqvpn_tcp_lane_on_lwip_recv);
+    tcp_sent(newpcb, mqvpn_tcp_lane_on_lwip_sent);
+    tcp_err(newpcb, mqvpn_tcp_lane_on_lwip_err);
+
+    /* Direct .c-to-.c call — see the prototype's comment in tcp_lane.h. */
+    cli_tcp_lane_open_stream(lane->client_ctx, f, &key);
+    return ERR_OK;
 }

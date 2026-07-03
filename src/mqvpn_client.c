@@ -968,6 +968,23 @@ cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_data)
 
 /* ─── MASQUE tunnel start ─── */
 
+/* Append `authorization: Bearer <auth_key>` when configured. auth_buf is
+ * caller-owned and must stay live until xqc_h3_request_send_headers (the
+ * header only holds an iovec into it). Returns the new header count. Shared
+ * by cli_masque_start_tunnel and cli_tcp_lane_open_stream. */
+static int
+cli_append_auth_header(const mqvpn_client_t *c, xqc_http_header_t *hdrs, int hdr_count,
+                       char *auth_buf, size_t auth_buf_len)
+{
+    if (c->config.auth_key[0] == '\0') return hdr_count;
+    snprintf(auth_buf, auth_buf_len, "Bearer %s", c->config.auth_key);
+    hdrs[hdr_count].name = (struct iovec){.iov_base = "authorization", .iov_len = 13};
+    hdrs[hdr_count].value =
+        (struct iovec){.iov_base = auth_buf, .iov_len = strlen(auth_buf)};
+    hdrs[hdr_count].flags = 0;
+    return hdr_count + 1;
+}
+
 static int
 cli_masque_start_tunnel(cli_conn_t *conn)
 {
@@ -991,9 +1008,6 @@ cli_masque_start_tunnel(cli_conn_t *conn)
              c->config.server_port);
 
     char auth_value[300];
-    int has_auth = (c->config.auth_key[0] != '\0');
-    if (has_auth)
-        snprintf(auth_value, sizeof(auth_value), "Bearer %s", c->config.auth_key);
 
     xqc_http_header_t hdrs[8] = {
         {.name = {.iov_base = ":method", .iov_len = 7},
@@ -1016,13 +1030,8 @@ cli_masque_start_tunnel(cli_conn_t *conn)
          .flags = 0},
     };
     int hdr_count = 6;
-    if (has_auth) {
-        hdrs[hdr_count].name = (struct iovec){.iov_base = "authorization", .iov_len = 13};
-        hdrs[hdr_count].value =
-            (struct iovec){.iov_base = auth_value, .iov_len = strlen(auth_value)};
-        hdrs[hdr_count].flags = 0;
-        hdr_count++;
-    }
+    hdr_count =
+        cli_append_auth_header(c, hdrs, hdr_count, auth_value, sizeof(auth_value));
     /* §19.2/§19.3: advertise the reorder capability only when locally enabled AND
      * the rx engine actually allocated — advertising with a NULL engine would make
      * the server stamp packets we then drop (one-way blackhole). */
@@ -1050,6 +1059,99 @@ cli_masque_start_tunnel(cli_conn_t *conn)
     LOG_I(c, "Extended CONNECT sent (stream_id=%" PRIu64 ")", conn->masque_stream_id);
     return 0;
 }
+
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+/* H2: open the per-flow CONNECT `:protocol=mqvpn-tcp` H3 request for a
+ * freshly lwIP-accepted TCP-lane flow. NOT static — called cross-TU from
+ * tcp_lane.c's accept callback (the one deliberate coupling point; prototype
+ * lives in tcp_lane.h). Every failure path here is post-SYN-ACK, so it must
+ * reject via mqvpn_tcp_lane_abort_pending — never fall the flow back to RAW. */
+void
+cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_key_t *key)
+{
+    mqvpn_client_t *c = (mqvpn_client_t *)client_ctx;
+    cli_conn_t *conn = c->conn;
+    if (!conn || !conn->h3_conn) {
+        /* Accept fired without a live H3 connection (teardown race) — the
+         * flow can never become real. */
+        mqvpn_tcp_lane_abort_pending(flow_handle);
+        return;
+    }
+
+    cli_stream_t *stream = calloc(1, sizeof(*stream));
+    if (!stream) {
+        mqvpn_tcp_lane_abort_pending(flow_handle);
+        return;
+    }
+    stream->conn = conn;
+    stream->role = CLI_STREAM_ROLE_CONNECT_TCP;
+
+    xqc_h3_request_t *req = xqc_h3_request_create(c->engine, &conn->cid, NULL, stream);
+    if (!req) {
+        /* Known v1 simplification: NULL here is transient stream-credit
+         * exhaustion, treated as a reject instead of queue-and-retry.
+         * Practically unreachable — the default credit of 1024 auto-extends
+         * and the flow cap is <= 256. */
+        LOG_E(c, "connect-tcp: xqc_h3_request_create failed (stream credit?)");
+        free(stream);
+        mqvpn_tcp_lane_abort_pending(flow_handle);
+        return;
+    }
+    stream->h3_request = req;
+
+    char authority[280];
+    snprintf(authority, sizeof(authority), "%s:%d", c->config.server_host,
+             c->config.server_port);
+
+    /* Original inner destination — key->dst_ip holds v4 in [0..3] (raw
+     * network-order header bytes, so direct indexing prints correctly),
+     * dst_port is host order (reorder.h key contract). */
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/%u.%u.%u.%u/%u/", key->dst_ip[0],
+             key->dst_ip[1], key->dst_ip[2], key->dst_ip[3], (unsigned)key->dst_port);
+
+    char auth_value[300];
+
+    /* 2026-07-03 wire decision: `:protocol` is "mqvpn-tcp" (NOT connect-tcp),
+     * and deliberately NO capsule-protocol / mqvpn-reorder headers — the TCP
+     * lane carries a raw byte relay, not capsules, and reorder is a
+     * DATAGRAM-lane concern. */
+    xqc_http_header_t hdrs[6] = {
+        {.name = {.iov_base = ":method", .iov_len = 7},
+         .value = {.iov_base = "CONNECT", .iov_len = 7},
+         .flags = 0},
+        {.name = {.iov_base = ":protocol", .iov_len = 9},
+         .value = {.iov_base = "mqvpn-tcp", .iov_len = 9},
+         .flags = 0},
+        {.name = {.iov_base = ":scheme", .iov_len = 7},
+         .value = {.iov_base = "https", .iov_len = 5},
+         .flags = 0},
+        {.name = {.iov_base = ":authority", .iov_len = 10},
+         .value = {.iov_base = authority, .iov_len = strlen(authority)},
+         .flags = 0},
+        {.name = {.iov_base = ":path", .iov_len = 5},
+         .value = {.iov_base = path, .iov_len = strlen(path)},
+         .flags = 0},
+    };
+    int hdr_count = 5;
+    hdr_count =
+        cli_append_auth_header(c, hdrs, hdr_count, auth_value, sizeof(auth_value));
+    xqc_http_headers_t headers = {.headers = hdrs, .count = hdr_count, .capacity = 6};
+
+    mqvpn_tcp_lane_bind_h3_request(flow_handle, req, stream);
+
+    ssize_t ret = xqc_h3_request_send_headers(req, &headers, 0);
+    if (ret < 0 && ret != -XQC_EAGAIN) {
+        LOG_E(c, "connect-tcp: send headers failed (%zd)", ret);
+        xqc_h3_request_close(req); /* close notify frees stream */
+        mqvpn_tcp_lane_abort_pending(flow_handle);
+        return;
+    }
+
+    LOG_D(c, "connect-tcp: stream %" PRIu64 " opened for %s", xqc_h3_stream_id(req),
+          path);
+}
+#endif /* MQVPN_HYBRID_TCP_LANE_ENABLED */
 
 /* ─── Capsule parsing ─── */
 
@@ -1153,7 +1255,10 @@ cb_request_close(xqc_h3_request_t *h3_request, void *user_data)
     (void)h3_request;
     cli_stream_t *stream = (cli_stream_t *)user_data;
     if (stream) {
-        if (stream->conn) stream->conn->tunnel_ok = 0;
+        /* Only the CONNECT-IP tunnel stream owns tunnel_ok — a closing
+         * per-flow connect-tcp stream must not flip the tunnel dead. */
+        if (stream->conn && stream->role == CLI_STREAM_ROLE_CONNECT_IP)
+            stream->conn->tunnel_ok = 0;
         free(stream->capsule_buf);
         free(stream);
     }
@@ -1269,11 +1374,18 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
          * peer agreement). */
         if (conn->lwip_ctx && !conn->tcp_lane) {
             uint64_t lane_seed = client_now_us(c) ^ ((uint64_t)c->conn_id << 32);
-            conn->tcp_lane = mqvpn_tcp_lane_new(&c->config.hybrid, lane_seed, c);
+            conn->tcp_lane = mqvpn_tcp_lane_new(&c->config.hybrid, lane_seed, c,
+                                                cli_lwip_clock_wrapper, c);
             if (!conn->tcp_lane) {
                 LOG_W(c, "tcp_lane alloc failed; TCP lane disabled (RAW fallback)");
                 mqvpn_lwip_ctx_free(conn->lwip_ctx);
                 conn->lwip_ctx = NULL;
+            } else {
+                /* Task 8: accepted flows land in the lane's accept callback,
+                 * which opens the per-flow H3 stream back through
+                 * cli_tcp_lane_open_stream above. */
+                mqvpn_lwip_ctx_set_accept_cb(conn->lwip_ctx, mqvpn_tcp_lane_lwip_accept,
+                                             conn->tcp_lane);
             }
         }
 #endif
@@ -1331,6 +1443,12 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
         if (flag & XQC_REQ_NOTIFY_READ_BODY)
             return cli_connect_ip_on_body(stream, h3_request);
         return 0;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    case CLI_STREAM_ROLE_CONNECT_TCP:
+        /* Task 9 adds 2xx/4xx response gating; Task 11 adds downlink relay.
+         * Until then reads on connect-tcp streams are ignored. */
+        return 0;
+#endif
     }
     /* No default: -Wswitch-ready shape; unknown roles intentionally no-op. */
     return 0;

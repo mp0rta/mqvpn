@@ -7,6 +7,13 @@
 #include <stdint.h>
 #include "reorder.h"           /* mqvpn_flow_key_t, mqvpn_flow_key_hash/eq */
 #include "hybrid/classifier.h" /* mqvpn_hybrid_config_t */
+#include "hybrid/lwip_glue.h"  /* err_t + forward-declared struct tcp_pcb +
+                                * mqvpn_lwip_clock_fn/mqvpn_lwip_accept_fn —
+                                * the accept-callback surface below reuses the
+                                * exact lwIP-opaque treatment lwip_glue.h
+                                * already established; no lwIP struct
+                                * internals leak (both headers are internal
+                                * to src/hybrid/). */
 
 typedef struct mqvpn_tcp_lane mqvpn_tcp_lane_t;
 
@@ -60,11 +67,43 @@ typedef struct {
 } mqvpn_tcp_lane_stats_t;
 
 /* client_ctx is opaque to tcp_lane.c's callers outside mqvpn_client.c; it is
- * threaded through to the H3-stream-open call (Task 8) without tcp_lane.c
- * needing to know cli_conn_t's layout. */
+ * threaded through to the H3-stream-open call (cli_tcp_lane_open_stream)
+ * without tcp_lane.c needing to know cli_conn_t's layout. clock_fn/clock_ctx
+ * (nullable — flows then get last_activity_us = 0) is the same injected
+ * microsecond clock the caller hands mqvpn_lwip_ctx_new, used for
+ * per-flow last-activity stamps (Task 13's idle sweep). */
 mqvpn_tcp_lane_t *mqvpn_tcp_lane_new(const mqvpn_hybrid_config_t *cfg, uint64_t hash_seed,
-                                     void *client_ctx);
+                                     void *client_ctx, mqvpn_lwip_clock_fn clock_fn,
+                                     void *clock_ctx);
 void mqvpn_tcp_lane_free(mqvpn_tcp_lane_t *lane);
+
+/* lwIP accept callback — signature matches mqvpn_lwip_accept_fn verbatim, so
+ * mqvpn_client.c registers it directly (no trampoline):
+ *   mqvpn_lwip_ctx_set_accept_cb(ctx, mqvpn_tcp_lane_lwip_accept, lane).
+ * Matches the SYN-committed PENDING_ACCEPT entry, wires pcb callbacks, and
+ * opens the per-flow H3 stream via cli_tcp_lane_open_stream. Rejections here
+ * are post-SYN-ACK: the pcb is aborted (RST), NEVER fallen back to RAW (see
+ * mqvpn_tcp_lane_on_syn's contract). */
+err_t mqvpn_tcp_lane_lwip_accept(void *arg, struct tcp_pcb *newpcb, err_t err);
+
+/* Bind the H3 request/stream cli_tcp_lane_open_stream opened back onto the
+ * flow (opaque: xqc_h3_request_t* / cli_stream_t* — the dependency stays
+ * one-way, tcp_lane.c never includes xquic headers). Task 9 inserts real
+ * 2xx/4xx response gating; until then the flow goes straight to ACTIVE. */
+void mqvpn_tcp_lane_bind_h3_request(void *flow_handle, void *h3_request, void *stream);
+
+/* Reject a flow whose H3 stream open failed after lwIP already accepted it.
+ * Post-SYN-ACK, so abort-only — RAW fallback is forbidden. Stub until
+ * Task 12 lands the real pcb abort + flow removal. */
+void mqvpn_tcp_lane_abort_pending(void *flow_handle);
+
+/* Implemented in mqvpn_client.c — the ONE deliberate tcp_lane.c →
+ * mqvpn_client.c coupling point (direct .c-to-.c call, no callback-pointer
+ * indirection: exactly one impl + one call site ever). flow_handle is a
+ * mqvpn_tcp_flow_t*, passed back via mqvpn_tcp_lane_bind_h3_request /
+ * mqvpn_tcp_lane_abort_pending. */
+void cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle,
+                              const mqvpn_flow_key_t *key);
 
 /* Sticky-lane lookup: returns 1 if found (fills *out_raw: 1 if sticky-RAW,
  * 0 if active/pending TCP-lane flow), 0 if brand-new (caller decides policy

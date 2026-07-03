@@ -370,15 +370,27 @@ if(BUILD_TESTING)
     add_executable(test_reorder_rx tests/test_reorder_rx.c src/mqvpn_config.c src/log.c)
     add_executable(test_reorder_config tests/test_reorder_config.c src/mqvpn_config.c src/config.c src/log.c)
     add_executable(test_classifier tests/test_classifier.c src/hybrid/classifier.c)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_classifier)
+
     # test_tcp_lane #include's src/hybrid/tcp_lane.c to reach the file-local
     # flow table (mirrors test_reorder_rx's idiom); do NOT also list
-    # tcp_lane.c here (it would compile the TU twice). Ungated by
-    # MQVPN_HYBRID_TCP_LANE_BUILD: tcp_lane.c has no lwIP dependency yet
-    # (only a forward-declared struct tcp_pcb pointer), same as
-    # test_classifier above.
-    add_executable(test_tcp_lane tests/test_tcp_lane.c)
+    # tcp_lane.c here (it would compile the TU twice). Gated on
+    # MQVPN_HYBRID_TCP_LANE_BUILD since Task 8: tcp_lane.c's accept callback
+    # calls real lwIP (tcp_arg/tcp_recv/...), so the test links lwip_core
+    # (whose PUBLIC include dirs also supply the lwIP/port headers).
+    # classifier.c is linked for the accept-key correspondence test;
+    # lwip_glue.c + log.c satisfy lwip_core's port symbols
+    # (mqvpn_lwip_platform_diag / sys_now — same trio the microbench links).
+    # The test TU itself provides the cli_tcp_lane_open_stream stub (the real
+    # one lives in mqvpn_client.c, not linked here).
+    if(MQVPN_HYBRID_TCP_LANE_BUILD)
+        add_executable(test_tcp_lane tests/test_tcp_lane.c src/hybrid/classifier.c
+                       src/hybrid/lwip_glue.c src/log.c)
+        target_link_libraries(test_tcp_lane lwip_core)
+        list(APPEND MQVPN_UNIT_TESTS test_tcp_lane)
+    endif()
 
-    foreach(t test_config test_auth test_session test_dns test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_classifier test_tcp_lane)
+    foreach(t ${MQVPN_UNIT_TESTS})
         target_include_directories(${t} PRIVATE
             ${CMAKE_SOURCE_DIR}/src
             ${CMAKE_SOURCE_DIR}/src/platform/linux
