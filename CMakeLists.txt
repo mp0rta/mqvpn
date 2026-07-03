@@ -193,6 +193,7 @@ set_target_properties(lwip_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 list(APPEND MQVPN_LIB_SOURCES
     ${CMAKE_SOURCE_DIR}/src/hybrid/lwip_glue.c
     ${CMAKE_SOURCE_DIR}/src/hybrid/tcp_lane.c
+    ${CMAKE_SOURCE_DIR}/src/hybrid/tcp_lane_uplink.c
 )
 
 # H2a micro-benchmark rig (Chunk 1 gate): TUN → classifier → lwIP → byte
@@ -372,17 +373,20 @@ if(BUILD_TESTING)
     add_executable(test_classifier tests/test_classifier.c src/hybrid/classifier.c)
     set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_classifier)
 
-    # test_tcp_lane #include's src/hybrid/tcp_lane.c to reach the file-local
-    # flow table (mirrors test_reorder_rx's idiom); do NOT also list
-    # tcp_lane.c here (it would compile the TU twice). Gated on
-    # MQVPN_HYBRID_TCP_LANE_BUILD since Task 8: tcp_lane.c's accept callback
-    # calls real lwIP (tcp_arg/tcp_recv/...), so the test links lwip_core
-    # (whose PUBLIC include dirs also supply the lwIP/port headers).
-    # classifier.c is linked for the accept-key correspondence test;
-    # lwip_glue.c + log.c satisfy lwip_core's port symbols
-    # (mqvpn_lwip_platform_diag / sys_now — same trio the microbench links).
-    # The test TU itself provides the cli_tcp_lane_open_stream stub (the real
-    # one lives in mqvpn_client.c, not linked here).
+    # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
+    # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of
+    # tcp_lane.c; the two are one logical module — see
+    # src/hybrid/tcp_lane_internal.h) to reach the file-local flow table
+    # (mirrors test_reorder_rx's idiom); do NOT also list either .c here (it
+    # would compile the TU twice). Gated on MQVPN_HYBRID_TCP_LANE_BUILD since
+    # Task 8: tcp_lane.c's accept callback calls real lwIP (tcp_arg/
+    # tcp_recv/...), so the test links lwip_core (whose PUBLIC include dirs
+    # also supply the lwIP/port headers). classifier.c is linked for the
+    # accept-key correspondence test; lwip_glue.c + log.c satisfy lwip_core's
+    # port symbols (mqvpn_lwip_platform_diag / sys_now — same trio the
+    # microbench links). The test TU itself provides the cli_tcp_lane_open_
+    # stream/cli_tcp_lane_h3_close stubs (the real ones live in
+    # mqvpn_client.c, not linked here).
     if(MQVPN_HYBRID_TCP_LANE_BUILD)
         add_executable(test_tcp_lane tests/test_tcp_lane.c src/hybrid/classifier.c
                        src/hybrid/lwip_glue.c src/log.c)

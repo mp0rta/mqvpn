@@ -64,6 +64,12 @@ static void test_tcp_output_hook(struct tcp_pcb *pcb);
 #define MQVPN_TCP_LANE_TCP_OUTPUT(pcb) test_tcp_output_hook(pcb)
 
 #include "hybrid/tcp_lane.c"
+/* tcp_lane.c crossed its ~800-line extraction trigger: the uplink QUEUE +
+ * SEND + FLUSH + FIN machinery moved to its own TU (tcp_lane_internal.h
+ * documents why). Pull it into this same translation unit exactly like
+ * tcp_lane.c above — same file-local-struct reason, do NOT also list it in
+ * CMakeLists.txt (would compile it twice). */
+#include "hybrid/tcp_lane_uplink.c"
 
 #include <stdio.h>
 #include <string.h>
