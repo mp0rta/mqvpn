@@ -535,8 +535,8 @@ TEST(unrecognized_protocol_gets_501)
 
 TEST(mqvpn_tcp_protocol_gets_403)
 {
-    /* Proves the dispatch branch itself is reached (Task 16+ replaces the
-     * unconditional 403 stub with real auth/ACL). */
+    /* Proves the dispatch branch itself is reached (the unconditional 403
+     * stub is replaced by real auth/ACL later). */
     char status[16] = {0};
     int rc = run_dispatch_probe("mqvpn-tcp", 9, status, sizeof(status));
     ASSERT_EQ(rc, 0);
