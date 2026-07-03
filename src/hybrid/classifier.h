@@ -60,6 +60,43 @@ mqvpn_cidr_mask_from_prefix(int prefix_len)
     return 0xFFFFFFFFu << (32 - prefix_len);
 }
 
+/* Single-site CIDR membership test, shared by the classifier's tunnel-
+ * subnet gate and the server egress ACL's tunnel/allow/deny walks
+ * (svr_tcp_egress_acl_decide). ip is host byte order, like
+ * mqvpn_cidr_entry_t itself. NOTE: a mask==0 entry matches EVERY address
+ * ((ip & 0) == 0) — deliberate for a parsed "0.0.0.0/0" ACL row, which
+ * means match-all; a caller that uses mask==0 as an UNSET sentinel instead
+ * (client_tunnel_subnet below) must gate on `mask != 0` BEFORE calling. */
+static inline int
+mqvpn_cidr_match(const mqvpn_cidr_entry_t *e, uint32_t host_order_ip)
+{
+    return (host_order_ip & e->mask) == e->net;
+}
+
+/* Learn the client-side tunnel subnet from a CONNECT-IP ADDRESS_ASSIGN
+ * (assigned address bytes as they appear on the wire, network order). The
+ * server assigns a single /32 (this client's own address), not the pool
+ * subnet, so a wire prefix narrower than /24 is widened to /24 — the SAME
+ * assumption the client's server-IP derivation bakes in ("Server IP is .1
+ * in same subnet", mqvpn_client.c) — while a /24-or-wider wire prefix is
+ * honored as-is. A degenerate prefix <= 0 yields mask 0, the "not learned"
+ * sentinel that keeps the classifier gate off (see client_tunnel_subnet's
+ * docstring). Kept here rather than inline in mqvpn_client.c so the
+ * widening rule is host-unit-testable: honoring the wire /32 verbatim
+ * would still pass every classifier gate test yet silently break the
+ * tunnel-subnet exclusion in deployment. */
+static inline void
+mqvpn_tunnel_subnet_learn(const uint8_t ip[4], int assigned_prefix,
+                          mqvpn_cidr_entry_t *out)
+{
+    int plen = assigned_prefix < 24 ? assigned_prefix : 24;
+    uint32_t mask = mqvpn_cidr_mask_from_prefix(plen);
+    uint32_t hip = ((uint32_t)ip[0] << 24) | ((uint32_t)ip[1] << 16) |
+                   ((uint32_t)ip[2] << 8) | (uint32_t)ip[3];
+    out->net = hip & mask;
+    out->mask = mask;
+}
+
 /* Parse strict "a.b.c.d/n" (n = 0..32) into *out, host-byte-order, network
  * pre-masked so a caller-supplied host part (e.g. "10.1.2.3/8") is quietly
  * normalized the way route tables normally are. No bare-address (implicit

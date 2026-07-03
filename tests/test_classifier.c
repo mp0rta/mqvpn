@@ -216,6 +216,63 @@ test_classify_tunnel_subnet_tcp_raw(void)
                   "v4 udp dst in tunnel subnet -> dgram unchanged");
 }
 
+/* mqvpn_tunnel_subnet_learn: the ADDRESS_ASSIGN → tunnel-subnet widening
+ * rule, pinned at host-unit level (the e2e-only alternative would let a
+ * "simplification" that honors the wire /32 verbatim pass ctest while
+ * silently breaking the tunnel-subnet exclusion in deployment — the /32 is
+ * this client's own address, never the pool subnet). */
+static void
+test_tunnel_subnet_learn(void)
+{
+    const uint8_t ip[4] = {10, 0, 0, 2};
+    mqvpn_cidr_entry_t e;
+
+    /* /32 (today's server behavior): widened to /24, net masked to .0. */
+    mqvpn_tunnel_subnet_learn(ip, 32, &e);
+    ASSERT_EQ_INT((long long)e.net, 0x0A000000LL, "/32 widens: net 10.0.0.0");
+    ASSERT_EQ_INT((long long)e.mask, 0xFFFFFF00LL, "/32 widens: mask /24");
+
+    /* Narrower-than-/24 wire prefixes all widen to the same /24. */
+    mqvpn_tunnel_subnet_learn(ip, 28, &e);
+    ASSERT_EQ_INT((long long)e.mask, 0xFFFFFF00LL, "/28 widens: mask /24");
+    ASSERT_EQ_INT((long long)e.net, 0x0A000000LL, "/28 widens: net 10.0.0.0");
+
+    /* /24 exactly: honored as-is. */
+    mqvpn_tunnel_subnet_learn(ip, 24, &e);
+    ASSERT_EQ_INT((long long)e.mask, 0xFFFFFF00LL, "/24 honored: mask /24");
+    ASSERT_EQ_INT((long long)e.net, 0x0A000000LL, "/24 honored: net 10.0.0.0");
+
+    /* Wider than /24: honored as-is (a /16 pool signaled on the wire must
+     * not be narrowed back to /24). */
+    const uint8_t ip16[4] = {10, 0, 5, 2};
+    mqvpn_tunnel_subnet_learn(ip16, 16, &e);
+    ASSERT_EQ_INT((long long)e.mask, 0xFFFF0000LL, "/16 honored: mask /16");
+    ASSERT_EQ_INT((long long)e.net, 0x0A000000LL, "/16 honored: net 10.0.0.0");
+
+    /* Degenerate prefix <= 0: mask 0 — the "not learned" sentinel that
+     * keeps the classifier gate OFF (its mask != 0 guard). */
+    mqvpn_tunnel_subnet_learn(ip, 0, &e);
+    ASSERT_EQ_INT((long long)e.mask, 0LL, "/0 -> mask 0 sentinel");
+    mqvpn_tunnel_subnet_learn(ip, -1, &e);
+    ASSERT_EQ_INT((long long)e.mask, 0LL, "negative prefix -> mask 0 sentinel");
+}
+
+/* mqvpn_cidr_match: the shared matcher (classifier gate + egress ACL). */
+static void
+test_cidr_match(void)
+{
+    mqvpn_cidr_entry_t e;
+    ASSERT_EQ_INT(mqvpn_parse_cidr_v4("10.0.0.0/24", &e), 0, "match cidr parses");
+    ASSERT_EQ_INT(mqvpn_cidr_match(&e, 0x0A000001u), 1, "10.0.0.1 in 10.0.0.0/24");
+    ASSERT_EQ_INT(mqvpn_cidr_match(&e, 0x0A000100u), 0, "10.0.1.0 not in /24");
+
+    /* mask == 0 matches everything — the documented "0.0.0.0/0" ACL-row
+     * semantic; sentinel users must gate on mask != 0 themselves. */
+    e.net = 0;
+    e.mask = 0;
+    ASSERT_EQ_INT(mqvpn_cidr_match(&e, 0xC0A80101u), 1, "mask 0 matches all");
+}
+
 static void
 test_classify_v6_tcp_raw_v1(void)
 {
@@ -400,6 +457,8 @@ main(void)
     test_classify_udp_always_dgram();
     test_classify_v4_tcp_gates();
     test_classify_tunnel_subnet_tcp_raw();
+    test_tunnel_subnet_learn();
+    test_cidr_match();
     test_classify_v6_tcp_raw_v1();
     test_classify_fragments_and_other_raw();
     test_classify_malformed_raw();

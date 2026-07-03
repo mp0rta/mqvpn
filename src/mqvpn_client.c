@@ -1467,31 +1467,15 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
         c->mtu = tun_mtu;
 
         /* Hybrid: learn the tunnel subnet for the classifier's TCP-lane
-         * exclusion (client_tunnel_subnet docstring in classifier.h has the
-         * full rationale: the server's egress ACL denies the tunnel subnet
-         * unconditionally, so a lane flow there can only RST — RAW keeps
-         * intra-VPN TCP working). ADDRESS_ASSIGN hands this client a
-         * single /32 (its own address), not the pool subnet, so a wire
-         * prefix narrower than /24 is widened to the SAME /24 assumption
-         * the server-IP derivation below ("Server IP is .1 in same
-         * subnet") already bakes in; a wire prefix of /24 or wider is
-         * honored as-is. Pools wider than /24 (addr_pool allows down to
-         * /16) still lane-and-RST for siblings outside this /24 — a known
-         * limitation; widening further would silently de-lane legitimate
-         * EgressAllow'd RFC1918 egress targets instead. Deliberately
-         * OUTSIDE the MQVPN_HYBRID_TCP_LANE_ENABLED block: lane-less
-         * builds still classify for counters and must report the same
-         * verdicts. */
-        {
-            int tplen = conn->assigned_prefix < 24 ? (int)conn->assigned_prefix : 24;
-            uint32_t tmask = mqvpn_cidr_mask_from_prefix(tplen);
-            uint32_t tip = ((uint32_t)conn->assigned_ip[0] << 24) |
-                           ((uint32_t)conn->assigned_ip[1] << 16) |
-                           ((uint32_t)conn->assigned_ip[2] << 8) |
-                           (uint32_t)conn->assigned_ip[3];
-            c->config.hybrid.client_tunnel_subnet.net = tip & tmask;
-            c->config.hybrid.client_tunnel_subnet.mask = tmask;
-        }
+         * exclusion. The full rationale (server ACL denies the tunnel
+         * subnet unconditionally → lane could only RST; RAW keeps intra-VPN
+         * TCP working) and the /24 widening rule (with its wider-pool
+         * limitation) live on mqvpn_tunnel_subnet_learn and
+         * client_tunnel_subnet in classifier.h. Deliberately OUTSIDE the
+         * MQVPN_HYBRID_TCP_LANE_ENABLED block: lane-less builds still
+         * classify for counters and must report the same verdicts. */
+        mqvpn_tunnel_subnet_learn(conn->assigned_ip, (int)conn->assigned_prefix,
+                                  &c->config.hybrid.client_tunnel_subnet);
 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
         /* Sanitize the [Hybrid] block at its consumer, BEFORE the enabled

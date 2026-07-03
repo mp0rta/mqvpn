@@ -87,10 +87,7 @@ svr_tcp_egress_parse_path(const char *path, size_t path_len, char *out_host,
  * svr_tcp_egress_acl_decide's docstring for the full precedence order,
  * including the tunnel-subnet check that isn't in this table because it
  * depends on the server's own config). */
-static const struct {
-    uint32_t net;
-    uint32_t mask;
-} DEFAULT_DENY_V4[] = {
+static const mqvpn_cidr_entry_t DEFAULT_DENY_V4[] = {
     /* 0.0.0.0/8 "this network" (RFC 1122 §3.2.1.3): NOT a dead range —
      * inet_pton accepts "0.0.0.0" and on Linux connect() to 0.0.0.0 reaches
      * localhost, so without this row a connect-tcp target of 0.0.0.0 would
@@ -116,18 +113,19 @@ svr_tcp_egress_acl_decide(uint32_t ip, const mqvpn_cidr_entry_t *allow, int n_al
                           const mqvpn_cidr_entry_t *deny, int n_deny, uint32_t tunnel_net,
                           uint32_t tunnel_mask)
 {
-    if ((ip & tunnel_mask) == tunnel_net) return 0;
+    const mqvpn_cidr_entry_t tunnel = {.net = tunnel_net, .mask = tunnel_mask};
+    if (mqvpn_cidr_match(&tunnel, ip)) return 0;
 
     for (int i = 0; i < n_allow; i++) {
-        if ((ip & allow[i].mask) == allow[i].net) return 1;
+        if (mqvpn_cidr_match(&allow[i], ip)) return 1;
     }
 
     for (size_t i = 0; i < sizeof(DEFAULT_DENY_V4) / sizeof(DEFAULT_DENY_V4[0]); i++) {
-        if ((ip & DEFAULT_DENY_V4[i].mask) == DEFAULT_DENY_V4[i].net) return 0;
+        if (mqvpn_cidr_match(&DEFAULT_DENY_V4[i], ip)) return 0;
     }
 
     for (int i = 0; i < n_deny; i++) {
-        if ((ip & deny[i].mask) == deny[i].net) return 0;
+        if (mqvpn_cidr_match(&deny[i], ip)) return 0;
     }
 
     return 1;
