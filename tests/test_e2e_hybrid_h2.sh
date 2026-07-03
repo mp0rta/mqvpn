@@ -67,6 +67,49 @@
 #     tcp_idle_timeout_sec default) — proof the RST propagates through the
 #     server's RESET_STREAM error-mapping rather than the client hanging
 #     toward the idle-eviction sweep.
+#   Test 6 (tcp=auto sticky per-flow lane decision across a live path
+#     bring-up): the one test that exercises the whole sticky-lane invariant
+#     end-to-end — active_paths_count(c) >= 2 (src/mqvpn_client.c) is
+#     snapshotted ONCE per flow at SYN time (hybrid_tcp_syn_policy) and
+#     latched into the flow table; it must never be re-consulted for that
+#     flow again, no matter how the path count changes later.
+#       Topology: both path slots' veth pairs exist from the start (both
+#       --path args are given at client startup, satisfying the ifname-
+#       resolves check in platform_linux.c — see that file's iface-pin
+#       failure path), but path 1's CLIENT-side interface starts
+#       administratively down. This guarantees active_paths_count()==1
+#       structurally (a down link cannot complete PATH_CHALLENGE) with no
+#       polling/race needed, until the test explicitly `ip link set up`s it.
+#       flow_a opens (continuous sender, target 10.222.0.1 — outside the
+#       tunnel subnet, so the classifier's tunnel-subnet-forces-RAW carve-out
+#       cannot mask this measurement) while only 1 path is up: tcp=auto must
+#       route it sticky-RAW. Path 1 is then brought up live and its
+#       activation is confirmed via the "path[1] activated" log line (the
+#       client runs no control API, so this is the only external signal of
+#       active_paths_count() crossing 2 — see the investigation note below).
+#       flow_b then opens (same target, same continuous-sender contract)
+#       with 2 paths active: tcp=auto must route it onto the real TCP lane.
+#       Observability: the client's [STATUS] `lanes tcp/dgram/raw=T/D/R`
+#       packet counters do NOT work for this — c->pkts_lane_tcp is bumped by
+#       mqvpn_hybrid_classify() the moment a packet is classified as
+#       TCP-protocol/non-excluded, BEFORE the per-flow sticky verdict is
+#       consulted, so it increments identically for a sticky-RAW flow and a
+#       real TCP-lane flow under tcp=auto (verified by reading
+#       src/mqvpn_client.c's tun_decide_lane — this is a genuine dead end,
+#       not a shortcut skipped for convenience). The test instead observes
+#       which TCP connection actually reaches the target: a sticky-RAW flow
+#       is an unmodified, kernel-ip_forward'd packet (no NAT anywhere in this
+#       topology) and so arrives with the CLIENT's own tunnel-assigned
+#       address as its peer; a real TCP-lane flow is relayed via the
+#       SERVER's own brand-new connect() (src/hybrid/tcp_egress.c's
+#       svr_tcp_egress_start_connect) and can never carry the client's
+#       tunnel address as ITS peer. Each flow also has its cumulative
+#       received-byte count polled across the path bring-up + the other
+#       flow's creation — the direct proof a sticky decision was never
+#       silently re-evaluated mid-life (a reclassification bug would starve
+#       an established flow's byte count instead of raising a clean error,
+#       since lwIP has no pcb for a non-SYN packet on a 5-tuple it never saw
+#       the SYN for).
 #
 # HTTP target addressing (Test 1): the client runs a full-tunnel default
 # route (0.0.0.0/1 + 128.0.0.0/1 via TUN, src/platform/linux/routing.c) with
@@ -116,6 +159,12 @@ INNER_TCP_PORT=5402   # distinct from h1's 5401 — same CI job may run both
 HALFCLOSE_PORT=8071
 RST_PORT=8072
 
+# Ports for Test 6 (tcp=auto sticky lane) — flow_a and flow_b each get their
+# own port on HTTP_TARGET_IP so the two connections are never ambiguous by
+# arrival order alone.
+LANE_PORT_A=8073
+LANE_PORT_B=8074
+
 CLIENT_LOG_T1="$(mktemp)"
 SERVER_LOG_T1="$(mktemp)"
 CLIENT_LOG_T7A="$(mktemp)"
@@ -135,16 +184,23 @@ SERVER_LOG_T4="$(mktemp)"
 CLIENT_LOG_T5="$(mktemp)"
 SERVER_LOG_T5="$(mktemp)"
 RST_CLIENT_OUT="$(mktemp)"
+CLIENT_LOG_T6="$(mktemp)"
+SERVER_LOG_T6="$(mktemp)"
 INI_T1="$(mktemp --suffix=.ini)"
 INI_T7A="$(mktemp --suffix=.ini)"
 INI_T7B="$(mktemp --suffix=.ini)"
 INI_T2A="$(mktemp --suffix=.ini)"
 INI_STREAM="$(mktemp --suffix=.ini)"   # shared by Test 2 Phase B and Test 3
+INI_T6="$(mktemp --suffix=.ini)"
 CURL_OUT="$(mktemp)"
 SENT_FILE_A="$(mktemp)"
 RECV_FILE_A="$(mktemp)"
 SENT_FILE_B="$(mktemp)"
 RECV_FILE_B="$(mktemp)"
+LANE_PEER_A_FILE="$(mktemp)"
+LANE_BYTES_A_FILE="$(mktemp)"
+LANE_PEER_B_FILE="$(mktemp)"
+LANE_BYTES_B_FILE="$(mktemp)"
 
 cleanup_http_server() {
     if [ -n "$HTTP_PID" ] && kill -0 "$HTTP_PID" 2>/dev/null; then
@@ -160,9 +216,15 @@ cleanup_http_server() {
 HALFCLOSE_RESPONDER_PID=""
 RST_TARGET_PID=""
 RST_CLIENT_PID=""
+LANE_RESPONDER_A_PID=""
+LANE_RESPONDER_B_PID=""
+LANE_SENDER_A_PID=""
+LANE_SENDER_B_PID=""
 cleanup_bg_procs() {
     local pid
-    for pid in "$HALFCLOSE_RESPONDER_PID" "$RST_TARGET_PID" "$RST_CLIENT_PID"; do
+    for pid in "$HALFCLOSE_RESPONDER_PID" "$RST_TARGET_PID" "$RST_CLIENT_PID" \
+        "$LANE_RESPONDER_A_PID" "$LANE_RESPONDER_B_PID" \
+        "$LANE_SENDER_A_PID" "$LANE_SENDER_B_PID"; do
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null || true
             wait "$pid" 2>/dev/null || true
@@ -176,9 +238,11 @@ trap 'cleanup_bg_procs; cleanup_http_server; bench_cleanup; rm -rf "$HTTP_DOCROO
     "$CLIENT_LOG_T2A" "$SERVER_LOG_T2A" "$CLIENT_LOG_T2B" "$SERVER_LOG_T2B" \
     "$CLIENT_LOG_T3A" "$SERVER_LOG_T3A" "$CLIENT_LOG_T3B" "$SERVER_LOG_T3B" \
     "$CLIENT_LOG_T4" "$SERVER_LOG_T4" "$CLIENT_LOG_T5" "$SERVER_LOG_T5" \
+    "$CLIENT_LOG_T6" "$SERVER_LOG_T6" \
     "$RST_CLIENT_OUT" \
-    "$INI_T1" "$INI_T7A" "$INI_T7B" "$INI_T2A" "$INI_STREAM" \
-    "$CURL_OUT" "$SENT_FILE_A" "$RECV_FILE_A" "$SENT_FILE_B" "$RECV_FILE_B"' EXIT
+    "$INI_T1" "$INI_T7A" "$INI_T7B" "$INI_T2A" "$INI_STREAM" "$INI_T6" \
+    "$CURL_OUT" "$SENT_FILE_A" "$RECV_FILE_A" "$SENT_FILE_B" "$RECV_FILE_B" \
+    "$LANE_PEER_A_FILE" "$LANE_BYTES_A_FILE" "$LANE_PEER_B_FILE" "$LANE_BYTES_B_FILE"' EXIT
 
 fail=0
 
@@ -220,6 +284,16 @@ cat >"$INI_STREAM" <<EOF
 [Hybrid]
 Enabled = true
 Tcp = stream
+EgressAllow = 10.222.0.0/24
+EOF
+
+# INI_T6: Tcp=auto — the only phase in this file that exercises the AUTO
+# threshold (active_paths_count(c) >= 2, src/mqvpn_client.c) rather than a
+# fixed stream/raw policy.
+cat >"$INI_T6" <<EOF
+[Hybrid]
+Enabled = true
+Tcp = auto
 EgressAllow = 10.222.0.0/24
 EOF
 
@@ -475,6 +549,38 @@ apply_path_netem() {
     ip netns exec "$NS_SERVER" tc qdisc del dev "$vs" root 2>/dev/null || true
     ip netns exec "$NS_CLIENT" tc qdisc add dev "$vc" root netem ${netem}
     ip netns exec "$NS_SERVER" tc qdisc add dev "$vs" root netem ${netem}
+}
+
+# Poll (via ss, not a probe connect — Test 6's responders do exactly one
+# accept() each, same rationale as the Test 4/5 readiness checks) until a
+# TCP listener is up on $2 inside netns $1, or $3 seconds elapse (default
+# 20s). Shared by Test 6's two lane responders instead of duplicating the
+# inline loop twice.
+wait_for_listening_port() {
+    local ns="$1" port="$2" timeout="${3:-20}"
+    local i
+    for (( i=0; i<timeout*2; i++ )); do
+        if ip netns exec "$ns" ss -ltn 2>/dev/null | grep -q ":${port} "; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+
+# Poll until $1 exists and is non-empty, or $2 seconds elapse (default 20s).
+# Used by Test 6 to detect "the responder's accept() returned and recorded
+# the peer address" without a fixed sleep.
+wait_for_nonempty_file() {
+    local f="$1" timeout="${2:-20}"
+    local i
+    for (( i=0; i<timeout*2; i++ )); do
+        if [ -s "$f" ]; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    return 1
 }
 
 # ─── Test 1: curl body correctness, Enabled=true / Tcp=stream ─────────────
@@ -952,6 +1058,186 @@ assert_stream_lane_used "$CLIENT_LOG_T5" "Test5 RST stream"
 
 bench_stop_vpn
 
+# ─── Test 6: tcp=auto sticky per-flow lane decision across a live path
+#      bring-up ───────────────────────────────────────────────────────────
+echo ""
+echo "=== Test 6: tcp=auto sticky per-flow lane decision across a live path bring-up ==="
+
+# Rebuild to a 2-path topology, same rationale as Test 3. Both veth pairs
+# are created (and fully addressed on both ends) up front — the client is
+# given BOTH --path args at startup, satisfying platform_linux.c's
+# ifname-resolves check (down/unaddressed is fine; only a nonexistent
+# interface is fatal there) — but path 1's CLIENT-side link is then taken
+# administratively down so it cannot complete PATH_CHALLENGE. This pins
+# active_paths_count()==1 structurally (no polling/race) until this test
+# explicitly brings it back up below.
+cleanup_http_server
+bench_setup_netns_n 2
+bench_add_server_host_routes 2
+ip netns exec "$NS_SERVER" ip addr add "${HTTP_TARGET_IP}/32" dev lo
+
+LANE_PATH1_CLIENT_VETH="$(bench_path_veth_client 1)"
+ip netns exec "$NS_CLIENT" ip link set "$LANE_PATH1_CLIENT_VETH" down
+
+N_PATHS=2
+hybrid_run "$INI_T6" "$SERVER_LOG_T6" "$CLIENT_LOG_T6"
+
+# The client's own tunnel-assigned address (default TUN name "mqvpn0" — see
+# platform_linux.c's tun_name_cfg default). A sticky-RAW flow's packets are
+# kernel-ip_forward'd unmodified (no NAT anywhere in this topology, same
+# mechanism Test 7 relies on), so they reach the target still carrying THIS
+# address as their source/peer — the load-bearing signal below.
+CLIENT_TUN_IP="$(ip netns exec "$NS_CLIENT" ip -4 addr show dev mqvpn0 \
+    | grep -oP 'inet \K[0-9.]+' | head -1)"
+if [ -z "$CLIENT_TUN_IP" ]; then
+    echo "FAIL: could not determine the client's tunnel-assigned address (dev mqvpn0)"
+    fail=1
+else
+    echo "  client tunnel address: ${CLIENT_TUN_IP}"
+fi
+
+# ── flow_a: opened while only path 0 is up — tcp=auto must route it RAW ──
+ip netns exec "$NS_SERVER" python3 "${SCRIPT_DIR}/hybrid_h2_lane_responder.py" \
+    "$LANE_PORT_A" "$LANE_PEER_A_FILE" "$LANE_BYTES_A_FILE" &
+LANE_RESPONDER_A_PID=$!
+
+if ! wait_for_listening_port "$NS_SERVER" "$LANE_PORT_A" 20; then
+    echo "FAIL: Test 6 flow_a responder never became ready (port ${LANE_PORT_A} not listening)"
+    fail=1
+else
+    ip netns exec "$NS_CLIENT" python3 "${SCRIPT_DIR}/hybrid_h2_lane_sender.py" \
+        "$HTTP_TARGET_IP" "$LANE_PORT_A" &
+    LANE_SENDER_A_PID=$!
+
+    if ! wait_for_nonempty_file "$LANE_PEER_A_FILE" 20; then
+        echo "FAIL: flow_a's connection never reached the target within 20s"
+        fail=1
+    else
+        LANE_PEER_A="$(cat "$LANE_PEER_A_FILE")"
+        echo "  flow_a peer address observed at target: ${LANE_PEER_A}"
+        if [ -n "$CLIENT_TUN_IP" ] && [ "$LANE_PEER_A" = "$CLIENT_TUN_IP" ]; then
+            echo "PASS: flow_a arrived as an unmodified forwarded packet (peer == client tunnel address) — sticky-RAW with 1 path, as tcp=auto requires"
+        else
+            echo "FAIL: flow_a peer ($LANE_PEER_A) != client tunnel address ($CLIENT_TUN_IP) — flow_a did NOT take the RAW path with only 1 active path"
+            fail=1
+        fi
+    fi
+fi
+
+# Snapshot flow_a's progress before the path bring-up (also the byte-count
+# baseline the post-bring-up check below diffs against).
+sleep 1
+LANE_BYTES_A_BEFORE="$(cat "$LANE_BYTES_A_FILE" 2>/dev/null || echo 0)"
+[ -n "$LANE_BYTES_A_BEFORE" ] || LANE_BYTES_A_BEFORE=0
+echo "  flow_a bytes received at target before path bring-up: ${LANE_BYTES_A_BEFORE}"
+
+# ── Bring path 1 up live ──
+ip netns exec "$NS_CLIENT" ip link set "$LANE_PATH1_CLIENT_VETH" up
+# Re-add ONLY path 1's client-side host route to the server: taking veth-b0
+# down flushed the /32 route bound to it (same lesson as
+# test_e2e_dellink.sh's Test 2), and without it path 1's PATH_CHALLENGE has
+# no route to the VPN listen address. `ip route replace` + `|| true` is
+# idempotent whether or not the kernel kept it — deliberately NOT
+# bench_add_server_host_routes (its server-side `ip addr add .../32 dev lo`
+# is non-idempotent and would abort under set -e on the already-present addr).
+ip netns exec "$NS_CLIENT" ip route replace "${IP_A_SERVER_ADDR}/32" \
+    via "$(bench_path_server_ip 1)" dev "$LANE_PATH1_CLIENT_VETH" \
+    metric 101 2>/dev/null || true
+
+if wait_for_log "$CLIENT_LOG_T6" 'path\[1\] activated' 60; then
+    echo "PASS: path 1 activated live (control-API-free signal — the client runs no control port; see Step 0 investigation)"
+else
+    echo "FAIL: no \"path[1] activated\" log line within 60s of bringing path 1 up"
+    fail=1
+fi
+
+# ── flow_a-only window post-bring-up: prove the sticky decision was NOT
+#    re-evaluated now that active_paths_count() may have crossed 2, while
+#    flow_b does not exist yet to confound the byte-count signal. A
+#    reclassification bug would starve this counter (a non-SYN packet fed to
+#    lwIP on a 5-tuple it never saw the SYN for is simply dropped), not
+#    raise a clean error — so "still growing" is the only sound proof. ──
+sleep 2
+LANE_BYTES_A_MID="$(cat "$LANE_BYTES_A_FILE" 2>/dev/null || echo 0)"
+[ -n "$LANE_BYTES_A_MID" ] || LANE_BYTES_A_MID=0
+echo "  flow_a bytes received at target after path bring-up (flow_b not yet open): ${LANE_BYTES_A_MID}"
+if [ "$LANE_BYTES_A_MID" -gt "$LANE_BYTES_A_BEFORE" ]; then
+    echo "PASS: flow_a kept making progress after path 1 came up, alone (sticky RAW held, not re-evaluated)"
+else
+    echo "FAIL: flow_a stalled after path 1 came up (${LANE_BYTES_A_BEFORE} -> ${LANE_BYTES_A_MID}) — possible reclassification breaking the flow"
+    fail=1
+fi
+
+# ── flow_b: opened only now, with 2 paths active — tcp=auto must route it
+#    onto the real TCP lane ──
+ip netns exec "$NS_SERVER" python3 "${SCRIPT_DIR}/hybrid_h2_lane_responder.py" \
+    "$LANE_PORT_B" "$LANE_PEER_B_FILE" "$LANE_BYTES_B_FILE" &
+LANE_RESPONDER_B_PID=$!
+
+if ! wait_for_listening_port "$NS_SERVER" "$LANE_PORT_B" 20; then
+    echo "FAIL: Test 6 flow_b responder never became ready (port ${LANE_PORT_B} not listening)"
+    fail=1
+else
+    ip netns exec "$NS_CLIENT" python3 "${SCRIPT_DIR}/hybrid_h2_lane_sender.py" \
+        "$HTTP_TARGET_IP" "$LANE_PORT_B" &
+    LANE_SENDER_B_PID=$!
+
+    if ! wait_for_nonempty_file "$LANE_PEER_B_FILE" 20; then
+        echo "FAIL: flow_b's connection never reached the target within 20s"
+        fail=1
+    else
+        LANE_PEER_B="$(cat "$LANE_PEER_B_FILE")"
+        echo "  flow_b peer address observed at target: ${LANE_PEER_B}"
+        if [ -n "$CLIENT_TUN_IP" ] && [ "$LANE_PEER_B" != "$CLIENT_TUN_IP" ]; then
+            echo "PASS: flow_b arrived via the server's own egress connect() (peer != client tunnel address) — real TCP lane with 2 paths, as tcp=auto requires"
+        else
+            echo "FAIL: flow_b peer ($LANE_PEER_B) == client tunnel address ($CLIENT_TUN_IP) — flow_b did NOT take the TCP lane with 2 active paths"
+            fail=1
+        fi
+    fi
+
+    sleep 1
+    LANE_BYTES_B="$(cat "$LANE_BYTES_B_FILE" 2>/dev/null || echo 0)"
+    [ -n "$LANE_BYTES_B" ] || LANE_BYTES_B=0
+    if [ "$LANE_BYTES_B" -gt 0 ]; then
+        echo "PASS: flow_b is exchanging data on the TCP lane (${LANE_BYTES_B} bytes)"
+    else
+        echo "FAIL: flow_b's TCP-lane connection accepted but never exchanged data"
+        fail=1
+    fi
+fi
+
+# ── Final continuity check: flow_a (still running) must still be sticky-RAW
+#    and still progressing now that flow_b is also live on the TCP lane —
+#    the two flows coexisting is what makes this the actual sticky-vs-
+#    reclassified proof, not just "a flow opened before path 2 happened to
+#    look RAW". ──
+sleep 2
+LANE_BYTES_A_AFTER="$(cat "$LANE_BYTES_A_FILE" 2>/dev/null || echo 0)"
+[ -n "$LANE_BYTES_A_AFTER" ] || LANE_BYTES_A_AFTER=0
+LANE_PEER_A_FINAL="$(cat "$LANE_PEER_A_FILE" 2>/dev/null || echo "")"
+echo "  flow_a bytes received at target after flow_b opened: ${LANE_BYTES_A_AFTER} (peer still: ${LANE_PEER_A_FINAL})"
+if [ "$LANE_BYTES_A_AFTER" -gt "$LANE_BYTES_A_MID" ] && [ "$LANE_PEER_A_FINAL" = "$CLIENT_TUN_IP" ]; then
+    echo "PASS: flow_a stayed sticky-RAW and kept flowing for the whole test, even alongside a real TCP-lane flow"
+else
+    echo "FAIL: flow_a did not keep flowing as a stable sticky-RAW flow to the end (${LANE_BYTES_A_MID} -> ${LANE_BYTES_A_AFTER}, peer=${LANE_PEER_A_FINAL})"
+    fail=1
+fi
+
+# Tear down Test 6's standalone sender/responder processes explicitly
+# (independent of the VPN client/server lifecycle) before bench_stop_vpn.
+for pid in "$LANE_SENDER_A_PID" "$LANE_SENDER_B_PID" \
+    "$LANE_RESPONDER_A_PID" "$LANE_RESPONDER_B_PID"; do
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    fi
+done
+LANE_SENDER_A_PID=""; LANE_SENDER_B_PID=""
+LANE_RESPONDER_A_PID=""; LANE_RESPONDER_B_PID=""
+
+bench_stop_vpn
+
 # ─── Verdict ───────────────────────────────────────────────────────────────
 echo ""
 if [ "$fail" -ne 0 ]; then
@@ -970,6 +1256,8 @@ if [ "$fail" -ne 0 ]; then
     echo "--- Server log T4 (last 20) ---"; tail -20 "$SERVER_LOG_T4"
     echo "--- Client log T5 (last 20) ---"; tail -20 "$CLIENT_LOG_T5"
     echo "--- Server log T5 (last 20) ---"; tail -20 "$SERVER_LOG_T5"
+    echo "--- Client log T6 (last 30) ---"; tail -30 "$CLIENT_LOG_T6"
+    echo "--- Server log T6 (last 20) ---"; tail -20 "$SERVER_LOG_T6"
     exit 1
 fi
 echo "RESULT: PASS"
