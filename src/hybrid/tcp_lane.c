@@ -55,6 +55,17 @@ typedef enum {
     TCP_FLOW_CLOSING,        /* half- or full-close in progress. */
 } mqvpn_tcp_flow_state_t;
 
+/* One queued uplink delivery. p is a whole recv-callback pbuf (possibly a
+ * CHAIN — pbuf->next is the intra-packet chain pointer and must NOT be
+ * reused for queueing, hence this separate node). offset counts the leading
+ * bytes xquic already accepted (partial-accept resume point): re-delivering
+ * from 0 after a partial send would DUPLICATE bytes on the stream. */
+typedef struct mqvpn_tcp_uplink_node {
+    struct pbuf *p;  /* owned; freed when fully sent (or on queue teardown) */
+    uint16_t offset; /* bytes of p already handed to H3; < p->tot_len */
+    struct mqvpn_tcp_uplink_node *next;
+} mqvpn_tcp_uplink_node_t;
+
 typedef struct mqvpn_tcp_flow {
     mqvpn_flow_key_t key;
     mqvpn_tcp_flow_state_t state;
@@ -67,7 +78,21 @@ typedef struct mqvpn_tcp_flow {
     void *h3_request;     /* opaque xqc_h3_request_t*; set by bind_h3_request */
     void *stream;         /* opaque cli_stream_t*; set by bind_h3_request */
 
-    size_t uplink_inflight_bytes;
+    /* Uplink queue — ONE mechanism serving both pre-2xx buffering
+     * (PENDING_STREAM: nothing may be sent before the gate opens) and
+     * EAGAIN/partial-accept retry (ACTIVE: xquic backpressure). FIFO; flushed
+     * by the writable notify and by the 2xx transition. uplink_queued_bytes
+     * counts UNSENT bytes only (sum of tot_len - offset), which is the
+     * watermark metric: what xquic has not yet taken from us.
+     * (Task 6 reserved a uplink_inflight_bytes field here; it was never
+     * decremented anywhere in the plan and its "accepted by xquic" meaning
+     * has no completion signal to drive it, so it is replaced by
+     * uplink_queued_bytes — see tcp_lane.h's watermark comment.) */
+    mqvpn_tcp_uplink_node_t *uplink_q_head;
+    mqvpn_tcp_uplink_node_t *uplink_q_tail;
+    uint32_t uplink_queued_bytes;    /* unsent bytes across the queue */
+    uint32_t uplink_withheld_recved; /* delivered bytes whose tcp_recved is
+                                      * deferred until the low-water resume */
     int uplink_withheld;
     int downlink_paused;
     int fin_sent_to_h3;
@@ -90,6 +115,10 @@ struct mqvpn_tcp_lane {
                              * TCP_LANE_RAW_MARKER_CAP */
     mqvpn_tcp_lane_stats_t stats;
 };
+
+/* Defined with the Task 10 uplink-relay machinery below; needed by
+ * mqvpn_tcp_lane_free's teardown loop above it. */
+static void tcp_lane_uplink_queue_free(mqvpn_tcp_flow_t *f);
 
 /* Power-of-two bucket count from the table's total capacity (load factor
  * ~1), capped at 2^20 buckets. Identical to reorder_tx.c's pick_buckets —
@@ -163,6 +192,7 @@ mqvpn_tcp_lane_free(mqvpn_tcp_lane_t *lane)
                 tcp_err(f->pcb, NULL);
                 tcp_abort(f->pcb);
             }
+            tcp_lane_uplink_queue_free(f);
             free(f);
             f = next;
         }
@@ -271,24 +301,269 @@ mqvpn_tcp_lane_get_stats(const mqvpn_tcp_lane_t *lane, mqvpn_tcp_lane_stats_t *o
     out->raw_markers_active = lane->n_raw_markers;
 }
 
-/* ─── lwIP accept → H3 stream open (Task 8; relay/teardown stubbed) ─── */
+/* ─── Uplink relay: lwIP recv → H3 send_body (Task 10) ─── */
 
-/* Relay/teardown stubs — Tasks 10/12 replace these; the accept path below
- * only needs their addresses. recv: pbuf_free without tcp_recved means zero
- * receive-window growth — inert but safe for the no-relay checkpoint
- * (p == NULL is FIN, also ignored for now). */
+/* tcp_recved() indirection: the unit test (which #include's this TU) defines
+ * MQVPN_TCP_LANE_TEST_RECVED before the #include to observe recved calls on
+ * its fake pcbs (calling the REAL tcp_recved on a calloc'd pcb would corrupt
+ * rcv_wnd internals). Compile-time substitution — zero production cost. */
+#ifndef MQVPN_TCP_LANE_TEST_RECVED
+#  define MQVPN_TCP_LANE_TEST_RECVED(pcb, len) tcp_recved((pcb), (len))
+#endif
+
+/* tcp_recved takes a u16_t; the deferred resume total can exceed 65535
+ * (bounded by TCP_WND ~2 MiB), so re-open the window in u16-sized steps. */
+static void
+tcp_lane_recved(struct tcp_pcb *pcb, uint32_t len)
+{
+    while (len > 0) {
+        u16_t chunk = (len > 0xFFFFu) ? (u16_t)0xFFFFu : (u16_t)len;
+        MQVPN_TCP_LANE_TEST_RECVED(pcb, chunk);
+        len -= chunk;
+    }
+}
+
+static void
+tcp_lane_uplink_queue_free(mqvpn_tcp_flow_t *f)
+{
+    mqvpn_tcp_uplink_node_t *n = f->uplink_q_head;
+    while (n) {
+        mqvpn_tcp_uplink_node_t *next = n->next;
+        pbuf_free(n->p);
+        free(n);
+        n = next;
+    }
+    f->uplink_q_head = NULL;
+    f->uplink_q_tail = NULL;
+    f->uplink_queued_bytes = 0;
+}
+
+/* Fatal relay failure (H3 send error, or an allocation failure that would
+ * otherwise force dropping already-ACKed TCP bytes — silent data loss).
+ * Routes the flow to CLOSING and releases the queue; Task 12 does the real
+ * teardown (tcp_abort(f->pcb) RST + H3 request close + flow removal),
+ * mirroring on_stream_rejected's routing-only contract. */
+static void
+mqvpn_tcp_lane_on_relay_error(mqvpn_tcp_flow_t *f)
+{
+    f->state = TCP_FLOW_CLOSING;
+    tcp_lane_uplink_queue_free(f);
+}
+
+/* Hand p's bytes [offset, tot_len) to the H3 stream. Returns the new offset
+ * (== tot_len when fully accepted, < tot_len on EAGAIN/partial-accept
+ * backpressure) or -1 on a fatal send error. A contiguous pbuf is sent
+ * straight from its payload (no copy); a CHAINED pbuf (ooseq coalescing can
+ * hand chains whose tot_len exceeds any single segment) is flattened through
+ * a TCP_MSS-sized stack slice via pbuf_copy_partial — the loop slices until
+ * done, never truncates. Partial accepts advance offset by exactly the
+ * accepted byte count so nothing is ever resent. */
+static int32_t
+tcp_lane_uplink_send_from(mqvpn_tcp_flow_t *f, struct pbuf *p, uint16_t offset)
+{
+    uint8_t slice[TCP_MSS];
+
+    while (offset < p->tot_len) {
+        const uint8_t *ptr;
+        uint16_t chunk;
+        if (p->next == NULL) {
+            ptr = (const uint8_t *)p->payload + offset;
+            chunk = (uint16_t)(p->tot_len - offset);
+        } else {
+            uint16_t want = (uint16_t)(p->tot_len - offset);
+            if (want > sizeof(slice)) {
+                want = (uint16_t)sizeof(slice);
+            }
+            chunk = pbuf_copy_partial(p, slice, want, offset);
+            if (chunk == 0) {
+                return -1; /* offset out of range — internal invariant broken */
+            }
+            ptr = slice;
+        }
+        ssize_t sent = cli_tcp_lane_h3_send(f->h3_request, ptr, chunk, 0);
+        if (sent == MQVPN_TCP_LANE_H3_SEND_AGAIN) {
+            break;
+        }
+        if (sent < 0) {
+            return -1;
+        }
+        offset = (uint16_t)(offset + (uint16_t)sent);
+        if ((size_t)sent < (size_t)chunk) {
+            break; /* partial accept == backpressure; resume from offset */
+        }
+    }
+    return (int32_t)offset;
+}
+
+/* Append a (possibly partially sent) delivery to the flow's uplink queue.
+ * Takes ownership of p on success; on failure the caller still owns p. */
+static int
+tcp_lane_uplink_stash(mqvpn_tcp_flow_t *f, struct pbuf *p, uint16_t offset)
+{
+    mqvpn_tcp_uplink_node_t *n = malloc(sizeof(*n));
+    if (!n) {
+        return -1;
+    }
+    n->p = p;
+    n->offset = offset;
+    n->next = NULL;
+    if (f->uplink_q_tail) {
+        f->uplink_q_tail->next = n;
+    } else {
+        f->uplink_q_head = n;
+    }
+    f->uplink_q_tail = n;
+    f->uplink_queued_bytes += (uint32_t)(p->tot_len - offset);
+    return 0;
+}
+
+/* KQ 8 close mapping, uplink direction (minimal Task 10 slice): lwIP
+ * recv(NULL) == peer FIN → half-close the H3 stream (zero-length body with
+ * fin=1) once every queued uplink byte has drained. FIN-after-EAGAIN needs
+ * no dedicated retry entry: tcp_fin_seen && !fin_sent_to_h3 IS the pending
+ * state, re-checked at the end of every flush (writable notifies keep
+ * arriving while the stream has anything pending). Task 12 completes the
+ * full close-mapping matrix (both orderings, downlink FIN, RST paths). */
+static void
+tcp_lane_uplink_maybe_fin(mqvpn_tcp_flow_t *f)
+{
+    if (f->state != TCP_FLOW_ACTIVE || !f->h3_request || !f->tcp_fin_seen ||
+        f->fin_sent_to_h3 || f->uplink_q_head) {
+        return;
+    }
+    ssize_t r = cli_tcp_lane_h3_send(f->h3_request, NULL, 0, 1);
+    if (r == MQVPN_TCP_LANE_H3_SEND_ERR) {
+        /* Fatal — mirror on_relay_error's contract (CLOSING, Task 12 does the
+         * real teardown) rather than leaving the flow ACTIVE with a FIN that
+         * can now never be sent. */
+        mqvpn_tcp_lane_on_relay_error(f);
+        return;
+    }
+    if (r >= 0) {
+        f->fin_sent_to_h3 = 1;
+    }
+    /* AGAIN: stays pending, retried on the next writable notify / flush. */
+}
+
+/* Drain the uplink queue FIFO, stopping at the first EAGAIN/partial (later
+ * entries MUST wait — ordering). Idempotent under repeated all-EAGAIN
+ * writable notifies: nothing is popped until fully accepted, offsets only
+ * advance. After a full drain, sends the pending H3 FIN (see above); then,
+ * once the unsent backlog is below low-water, re-opens the lwIP receive
+ * window withheld under backpressure. */
+static void
+tcp_lane_uplink_flush(mqvpn_tcp_flow_t *f)
+{
+    if (f->state != TCP_FLOW_ACTIVE || !f->h3_request) {
+        return;
+    }
+    while (f->uplink_q_head) {
+        mqvpn_tcp_uplink_node_t *n = f->uplink_q_head;
+        int32_t off = tcp_lane_uplink_send_from(f, n->p, n->offset);
+        if (off < 0) {
+            mqvpn_tcp_lane_on_relay_error(f);
+            return;
+        }
+        f->uplink_queued_bytes -= (uint32_t)off - n->offset;
+        n->offset = (uint16_t)off;
+        if (n->offset < n->p->tot_len) {
+            break; /* backpressure — retry from here on the next notify */
+        }
+        f->uplink_q_head = n->next;
+        if (!f->uplink_q_head) {
+            f->uplink_q_tail = NULL;
+        }
+        pbuf_free(n->p);
+        free(n);
+    }
+
+    tcp_lane_uplink_maybe_fin(f);
+
+    if (f->uplink_withheld && f->uplink_queued_bytes < MQVPN_TCP_LANE_BP_LOW_WATER) {
+        f->uplink_withheld = 0;
+        if (f->uplink_withheld_recved > 0 && f->pcb) {
+            tcp_lane_recved(f->pcb, f->uplink_withheld_recved);
+        }
+        f->uplink_withheld_recved = 0;
+    }
+}
+
 static err_t
 mqvpn_tcp_lane_on_lwip_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
 {
-    (void)arg;
+    mqvpn_tcp_flow_t *f = (mqvpn_tcp_flow_t *)arg;
     (void)pcb;
     (void)err;
-    if (p) {
+
+    if (!p) {
+        /* Peer FIN from the lwIP side (KQ 8: recv(NULL) → H3 half-close).
+         * flush() drains queued data first and sends the FIN only after; if
+         * still PENDING_STREAM there is nothing to FIN yet — the
+         * established-flush completes it (Task 12 owns both orderings). */
+        f->tcp_fin_seen = 1;
+        tcp_lane_uplink_flush(f);
+        return ERR_OK;
+    }
+
+    if (f->state != TCP_FLOW_ACTIVE && f->state != TCP_FLOW_PENDING_STREAM) {
         pbuf_free(p);
+        return ERR_OK; /* CLOSING etc. — drop; the close mapping owns teardown */
+    }
+
+    uint16_t tot = p->tot_len;
+    uint16_t off = 0;
+
+    /* Fast path: ACTIVE with an empty queue → hand straight to xquic.
+     * A non-empty queue forces the stash path even when ACTIVE (FIFO
+     * ordering: new bytes must ride behind the backlog). */
+    if (f->state == TCP_FLOW_ACTIVE && !f->uplink_q_head && f->h3_request) {
+        int32_t r = tcp_lane_uplink_send_from(f, p, 0);
+        if (r < 0) {
+            pbuf_free(p);
+            mqvpn_tcp_lane_on_relay_error(f);
+            return ERR_OK;
+        }
+        off = (uint16_t)r;
+    }
+
+    if (off == tot) {
+        pbuf_free(p);
+        tcp_lane_recved(f->pcb, tot); /* fully accepted — window re-opens */
+        return ERR_OK;
+    }
+
+    /* Withhold/pre-2xx buffer — the SAME queue (one code path, not two). */
+    if (tcp_lane_uplink_stash(f, p, off) < 0) {
+        /* Alloc failure: these bytes are already ACKed at the TCP level —
+         * dropping them would silently corrupt the relayed stream. Fail the
+         * flow instead (Task 12 turns CLOSING into an RST). */
+        pbuf_free(p);
+        mqvpn_tcp_lane_on_relay_error(f);
+        return ERR_OK;
+    }
+
+    /* recved-withholding policy (tcp_lane.h watermark comment):
+     *  - ACTIVE + anything queued  = xquic said EAGAIN/partial → withhold
+     *    immediately (backpressure signal, no threshold);
+     *  - PENDING_STREAM            = no xquic signal exists yet → buffer
+     *    freely up to high-water, withhold beyond it.
+     * Withheld deliveries accumulate in uplink_withheld_recved and are
+     * recved in one batch at the low-water resume in flush(). */
+    if (f->state == TCP_FLOW_ACTIVE ||
+        f->uplink_queued_bytes >= MQVPN_TCP_LANE_BP_HIGH_WATER) {
+        f->uplink_withheld = 1;
+    }
+    if (f->uplink_withheld) {
+        f->uplink_withheld_recved += tot;
+    } else {
+        tcp_lane_recved(f->pcb, tot);
     }
     return ERR_OK;
 }
 
+/* Downlink stubs — Task 11 fills the sent callback (downlink resume), Task 12
+ * the error callback + real flow removal; the accept path only needs their
+ * addresses. */
 static err_t
 mqvpn_tcp_lane_on_lwip_sent(void *arg, struct tcp_pcb *pcb, u16_t len)
 {
@@ -363,8 +638,11 @@ mqvpn_tcp_lane_on_stream_established(mqvpn_tcp_lane_t *lane, void *stream)
     }
     f->state = TCP_FLOW_ACTIVE;
     f->last_activity_us = lane->clock_fn ? lane->clock_fn(lane->clock_ctx) : 0;
-    /* Task 10 hook site: flush any uplink bytes buffered while the flow sat
-     * in PENDING_STREAM waiting for the 2xx gate to open. */
+    /* Flush the uplink bytes buffered while the flow sat in PENDING_STREAM
+     * waiting for the 2xx gate to open — same queue + flush the writable
+     * notify uses (pre-2xx buffering and EAGAIN retry are ONE mechanism),
+     * including a FIN the inner app already sent. */
+    tcp_lane_uplink_flush(f);
 }
 
 void
@@ -386,12 +664,16 @@ mqvpn_tcp_lane_on_stream_rejected(mqvpn_tcp_lane_t *lane, void *stream)
 int
 mqvpn_tcp_lane_on_h3_writable(mqvpn_tcp_lane_t *lane, void *stream)
 {
-    (void)lane;
-    (void)stream;
-    /* Task 10: re-arm uplink delivery withheld for lack of H3 write credit
-     * (resume tcp_recved on the withheld side). Stub is a correct no-op for
-     * this checkpoint — nothing is withheld yet (Task 10 introduces
-     * withholding). */
+    if (!lane || !stream) {
+        return 0;
+    }
+    mqvpn_tcp_flow_t *f = find_flow_by_stream(lane, stream);
+    if (!f) {
+        return 0;
+    }
+    /* Retry-queue drain + low-water recved resume + pending-FIN send all
+     * live in flush (see its comment). */
+    tcp_lane_uplink_flush(f);
     return 0;
 }
 

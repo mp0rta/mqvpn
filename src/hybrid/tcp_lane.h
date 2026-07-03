@@ -5,6 +5,7 @@
 #define MQVPN_HYBRID_TCP_LANE_H
 
 #include <stdint.h>
+#include <sys/types.h>         /* ssize_t (cli_tcp_lane_h3_send) */
 #include "reorder.h"           /* mqvpn_flow_key_t, mqvpn_flow_key_hash/eq */
 #include "hybrid/classifier.h" /* mqvpn_hybrid_config_t */
 #include "hybrid/lwip_glue.h"  /* err_t + forward-declared struct tcp_pcb +
@@ -114,25 +115,66 @@ void mqvpn_tcp_lane_abort_pending(void *flow_handle);
  * stream-not-found (the flow may already be gone) by no-op'ing. */
 
 /* 2xx response headers received: PENDING_STREAM -> ACTIVE, stamp
- * last_activity. Task 10 adds the flush of uplink bytes buffered before the
- * gate opened at the marked hook site in the .c. */
+ * last_activity, and flush the uplink bytes buffered before the gate opened
+ * (pre-2xx buffering and EAGAIN-retry share ONE per-flow queue). */
 void mqvpn_tcp_lane_on_stream_established(mqvpn_tcp_lane_t *lane, void *stream);
 
 /* Non-2xx response headers received: -> CLOSING. Task 12 does the real
  * tcp_abort(pcb) + flow removal; this only routes the signal. */
 void mqvpn_tcp_lane_on_stream_rejected(mqvpn_tcp_lane_t *lane, void *stream);
 
-/* H3 send-window became writable again. Stub returning 0; Task 10 re-arms
- * uplink delivery that was withheld for lack of H3 write credit. */
+/* H3 send-window became writable again: flush the flow's uplink retry queue
+ * (FIFO, stops at the first EAGAIN — idempotent under repeated notifies) and,
+ * once the queue drains below the low-water mark, re-open the lwIP receive
+ * window that was withheld under backpressure (tcp_recved for every byte
+ * whose acknowledgment-to-lwIP was deferred). */
 int mqvpn_tcp_lane_on_h3_writable(mqvpn_tcp_lane_t *lane, void *stream);
 
-/* Implemented in mqvpn_client.c — the ONE deliberate tcp_lane.c →
- * mqvpn_client.c coupling point (direct .c-to-.c call, no callback-pointer
- * indirection: exactly one impl + one call site ever). flow_handle is a
- * mqvpn_tcp_flow_t*, passed back via mqvpn_tcp_lane_bind_h3_request /
+/* ─── Uplink backpressure watermarks (Task 10) ───
+ *
+ * Internal compile-time constants, deliberately NOT public config (rev2
+ * decision — no classifier/config/ABI surface).
+ *
+ * Semantics — these are RECVED-WITHHOLDING hysteresis thresholds, not hard
+ * memory caps: bytes lwIP has already delivered to the recv callback were
+ * already sequenced and ACKed on the wire, so they can never be dropped and
+ * MUST be queued when xquic won't take them. Withholding tcp_recved() only
+ * stops the receive window from RE-opening; the peer may still fill whatever
+ * window was already advertised, so the true worst-case per-flow queue bound
+ * is TCP_WND (~2 MiB, lwip_port/lwipopts.h) by TCP mechanics — the Chunk 5
+ * memory budget must cite TCP_WND, not the high-water mark. */
+#define MQVPN_TCP_LANE_BP_HIGH_WATER                                                    \
+    (262144u) /* 256 KiB — pre-2xx buffering                                          \
+               * withholds recved beyond this; between mqproxy's 64 KiB minimum (KQ 10) \
+               * and the multi-MB TCP_WND: headroom without approaching Chunk 5's       \
+               * memory-budget concerns. */
+#define MQVPN_TCP_LANE_BP_LOW_WATER                                       \
+    (65536u) /* 64 KiB — recved resumes only                            \
+              * once the unsent queue drains below this; the gap prevents \
+              * withhold/resume flapping. */
+
+/* cli_tcp_lane_h3_send return contract (tcp_lane.c never includes xquic
+ * headers, so xquic error codes are normalized at this boundary). */
+#define MQVPN_TCP_LANE_H3_SEND_AGAIN                                        \
+    (-1)                                /* stream not writable — retry on \
+                                         * the next writable notify */
+#define MQVPN_TCP_LANE_H3_SEND_ERR (-2) /* fatal stream error */
+
+/* Implemented in mqvpn_client.c — the deliberate tcp_lane.c →
+ * mqvpn_client.c coupling points (direct .c-to-.c calls, no callback-pointer
+ * indirection: exactly one impl + minimal call sites each; the one-way
+ * boundary stands — tcp_lane.c never includes xquic headers). flow_handle is
+ * a mqvpn_tcp_flow_t*, passed back via mqvpn_tcp_lane_bind_h3_request /
  * mqvpn_tcp_lane_abort_pending. */
 void cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle,
                               const mqvpn_flow_key_t *key);
+
+/* Send uplink body bytes (or, with len==0 && fin==1, a bare FIN) on the
+ * flow's bound H3 request. Returns bytes accepted by xquic (may be a PARTIAL
+ * accept — the caller must resume from the returned offset, never resend),
+ * MQVPN_TCP_LANE_H3_SEND_AGAIN, or MQVPN_TCP_LANE_H3_SEND_ERR. buf may be
+ * NULL only when len == 0. */
+ssize_t cli_tcp_lane_h3_send(void *h3_request, const uint8_t *buf, size_t len, int fin);
 
 /* Sticky-lane lookup: returns 1 if found (fills *out_raw: 1 if sticky-RAW,
  * 0 if active/pending TCP-lane flow), 0 if brand-new (caller decides policy

@@ -1154,6 +1154,24 @@ cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_k
     LOG_D(c, "connect-tcp: stream %" PRIu64 " opened for %s", xqc_h3_stream_id(req),
           path);
 }
+
+/* H2/Task 10: uplink body send for the TCP lane. Cross-TU like
+ * cli_tcp_lane_open_stream above (prototype in tcp_lane.h) — tcp_lane.c
+ * never includes xquic headers, so xquic's return codes are normalized to
+ * the MQVPN_TCP_LANE_H3_SEND_* contract at this boundary. len == 0 with
+ * fin == 1 is the uplink half-close (xqc_h3_request_send_body documents the
+ * fin-only shape; data may be NULL then). */
+ssize_t
+cli_tcp_lane_h3_send(void *h3_request, const uint8_t *buf, size_t len, int fin)
+{
+    /* xquic's send_body takes a non-const buffer but only reads from it. */
+    ssize_t ret =
+        xqc_h3_request_send_body((xqc_h3_request_t *)h3_request,
+                                 (unsigned char *)(uintptr_t)buf, len, fin ? 1 : 0);
+    if (ret == -XQC_EAGAIN) return MQVPN_TCP_LANE_H3_SEND_AGAIN;
+    if (ret < 0) return MQVPN_TCP_LANE_H3_SEND_ERR;
+    return ret;
+}
 #endif /* MQVPN_HYBRID_TCP_LANE_ENABLED */
 
 /* ─── Capsule parsing ─── */
@@ -1538,8 +1556,8 @@ cb_request_write(xqc_h3_request_t *h3_request, void *user_data)
         return 0;
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
     case CLI_STREAM_ROLE_CONNECT_TCP:
-        /* Task 10 fills the real re-arm (resume tcp_recved on withheld
-         * uplink). Stub returning 0 is fine for this checkpoint. */
+        /* Uplink re-arm: flush the flow's H3 retry queue and resume the
+         * withheld lwIP receive window (Task 10). */
         return mqvpn_tcp_lane_on_h3_writable(stream->conn->tcp_lane, stream);
 #endif
     }
