@@ -54,6 +54,26 @@ mqvpn_tcp_syn_flag(const uint8_t *pkt, size_t len)
     return (flags & 0x12) == 0x02; /* SYN set, ACK clear */
 }
 
+/* I2: extract the ISN (TCP sequence number, bytes 4-7 of the TCP header)
+ * from a pure SYN packet. PRECONDITION: mqvpn_tcp_syn_flag(pkt, len) must
+ * already have returned 1 for this EXACT packet — that check's bounds
+ * requirement (len >= ihl + 14, to reach the flags byte) is strictly
+ * larger than what reading the 4-byte seq field at ihl+4..ihl+7 needs, so
+ * no separate bounds check is done here (same PRECONDITION idiom as
+ * mqvpn_tcp_syn_flag's own header comment). Used to re-evaluate a sticky-
+ * RAW marker on tuple reuse: same ISN means the same handshake
+ * retransmitting (keep the marker), a different ISN means a genuinely new
+ * connection (see mqvpn_tcp_lane_marker_isn / mqvpn_tcp_lane_on_syn). */
+static inline uint32_t
+mqvpn_tcp_syn_isn(const uint8_t *pkt, size_t len)
+{
+    (void)len;
+    size_t ihl = (size_t)(pkt[0] & 0x0F) * 4;
+    const uint8_t *seq = pkt + ihl + 4;
+    return ((uint32_t)seq[0] << 24) | ((uint32_t)seq[1] << 16) | ((uint32_t)seq[2] << 8) |
+           (uint32_t)seq[3];
+}
+
 typedef struct {
     uint64_t flows_active; /* gauge: derived from the live TCP-flow count at
                             * snapshot time (never tracked in parallel) */
@@ -320,9 +340,36 @@ int mqvpn_tcp_lane_lookup(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key,
  * stale CLOSING entry itself and proceeds with the fresh commit; the
  * caller (tun_decide_lane) is responsible for having already confirmed
  * this is a genuine new SYN (mqvpn_tcp_lane_lookup's *out_closing) before
- * calling on_syn in that situation — on_syn does not re-verify SYN-ness. */
-int mqvpn_tcp_lane_on_syn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key,
-                          int to_tcp);
+ * calling on_syn in that situation — on_syn does not re-verify SYN-ness.
+ *
+ * I2: the same is true for an existing TCP_FLOW_STICKY_RAW marker whose
+ * stored ISN differs from `syn_isn` — the caller has already compared
+ * `syn_isn` against mqvpn_tcp_lane_marker_isn's return before deciding to
+ * call on_syn here (a SAME-ISN retransmit of the same handshake instead
+ * stays sticky-RAW without ever reaching on_syn — see tun_decide_lane).
+ * on_syn removes the stale marker and proceeds with the fresh commit,
+ * exactly like the CLOSING case above.
+ *
+ * `syn_isn` is stored on the new entry ONLY when to_tcp == 0 (a fresh
+ * sticky-RAW marker) — real TCP-lane flows need no ISN logic (see
+ * mqvpn_tcp_flow_t's field comment, tcp_lane_internal.h); pass the SYN's
+ * ISN regardless (harmlessly ignored for to_tcp == 1), or 0 if unknown. */
+int mqvpn_tcp_lane_on_syn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, int to_tcp,
+                          uint32_t syn_isn);
+
+/* I2: returns the ISN stored on the sticky-RAW marker at `key`, or 0 if
+ * there is no such marker (unknown key, or a key whose entry is not
+ * TCP_FLOW_STICKY_RAW). Only meaningful when a prior
+ * mqvpn_tcp_lane_lookup already reported *out_raw == 1 for this key —
+ * callers use it to decide whether a new pure SYN on that 5-tuple is the
+ * SAME handshake retransmitting (matching ISN — stays sticky-RAW) or a
+ * genuinely NEW connection reusing the tuple (different ISN — re-evaluate
+ * via on_syn, which removes the stale marker). A separate accessor rather
+ * than a third mqvpn_tcp_lane_lookup out-param: the ISN is only ever
+ * needed on the already-uncommon is_raw-AND-pure-SYN path, so a dedicated
+ * second (bounded, small) table walk there is cheaper than widening every
+ * lookup call's signature for a value almost no caller needs. */
+uint32_t mqvpn_tcp_lane_marker_isn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key);
 
 /* Idle-timeout sweep + CLOSING grace-sweep + stats snapshot, called from
  * tick() (Task 13 / C1). */

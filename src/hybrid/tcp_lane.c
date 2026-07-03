@@ -31,14 +31,19 @@ _Static_assert(sizeof(ip_addr_t) == 4,
                "network-order ip4_addr_t");
 
 /* Sticky-RAW markers are capped separately from tcp_max_flows: they are
- * never idle-evicted (Task 13 sweeps TCP-lane flows only), so counting
- * them against tcp_max_flows would let a tcp=auto client on a single path
- * permanently exhaust the TCP lane with markers — exactly the scenario
- * tcp=auto exists for. This cap only bounds memory: a marker entry is one
- * mqvpn_tcp_flow_t (~120 B, key 38 B) so 4096 markers ≈ 0.5 MB worst
- * case; the keys alone are 38 B × 4096 ≈ 156 KB. On cap hit the flow just
- * stays unsticky and re-evaluates per SYN (harmless per Task 7).
- * #ifndef so tests can override it small to exercise the cap branch. */
+ * never idle-evicted (Task 13 sweeps TCP-lane flows only — a marker's
+ * eviction bound is purely this cap, NOT time-based; I2 gives markers a
+ * DIFFERENT, tuple-reuse-triggered replacement path — a new pure SYN with
+ * a different ISN — see mqvpn_tcp_lane_on_syn — but a marker for a tuple
+ * that simply never sees another SYN lives until this cap forces an
+ * eviction), so counting them against tcp_max_flows would let a tcp=auto
+ * client on a single path permanently exhaust the TCP lane with markers —
+ * exactly the scenario tcp=auto exists for. This cap only bounds memory: a
+ * marker entry is one mqvpn_tcp_flow_t (~120 B, key 38 B) so 4096 markers
+ * ≈ 0.5 MB worst case; the keys alone are 38 B × 4096 ≈ 156 KB. On cap hit
+ * the flow just stays unsticky and re-evaluates per SYN (harmless per
+ * Task 7). #ifndef so tests can override it small to exercise the cap
+ * branch. */
 #ifndef TCP_LANE_RAW_MARKER_CAP
 #  define TCP_LANE_RAW_MARKER_CAP 4096u
 #endif
@@ -221,31 +226,53 @@ mqvpn_tcp_lane_lookup(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, int *
     return 1;
 }
 
+uint32_t
+mqvpn_tcp_lane_marker_isn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key)
+{
+    if (!lane || !key) {
+        return 0;
+    }
+    mqvpn_tcp_flow_t *f = find_flow(lane, key, NULL);
+    if (!f || f->state != TCP_FLOW_STICKY_RAW) {
+        return 0;
+    }
+    return f->syn_isn;
+}
+
 int
-mqvpn_tcp_lane_on_syn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, int to_tcp)
+mqvpn_tcp_lane_on_syn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, int to_tcp,
+                      uint32_t syn_isn)
 {
     if (!lane || !key) {
         return -1;
     }
 
-    /* C1: resolve an existing entry FIRST, before the cap checks below —
-     * a CLOSING routing marker being replaced by a genuinely new
-     * connection (tuple reuse after close) must not look like a net-new
-     * insert against the cap, nor a caller-bug duplicate. tun_decide_lane
-     * only ever calls on_syn with an existing CLOSING key when it already
-     * confirmed this packet is a pure SYN (mqvpn_tcp_lane_lookup's
-     * *out_closing) — on_syn does not re-verify that itself. */
+    /* Resolve an existing entry FIRST, before the cap checks below — a
+     * stale marker being replaced by a genuinely new connection must not
+     * look like a net-new insert against the cap, nor a caller-bug
+     * duplicate. Two cases tolerate an existing key here, both requiring
+     * the CALLER (tun_decide_lane) to have already confirmed this is a
+     * pure SYN before reaching on_syn — this function does not re-verify
+     * SYN-ness itself:
+     *   - C1: TCP_FLOW_CLOSING — a post-close routing-residency marker;
+     *     the prior connection on this 5-tuple already finished.
+     *   - I2: TCP_FLOW_STICKY_RAW with a DIFFERENT stored ISN than
+     *     `syn_isn` — the caller already compared syn_isn against
+     *     mqvpn_tcp_lane_marker_isn's return; a matching ISN (same
+     *     handshake retransmitting) is handled entirely by the caller
+     *     staying sticky-RAW and never reaching on_syn at all. */
     uint32_t bucket;
     mqvpn_tcp_flow_t *existing = find_flow(lane, key, &bucket);
     if (existing) {
-        if (existing->state == TCP_FLOW_CLOSING) {
+        if (existing->state == TCP_FLOW_CLOSING ||
+            existing->state == TCP_FLOW_STICKY_RAW) {
             tcp_lane_remove_flow(lane, existing);
             existing = NULL;
         } else {
             /* Duplicate commit is a caller bug: the protocol is lookup-
              * then-commit, so on_syn must only ever see brand-new keys
-             * (or a stale CLOSING marker, handled above). Refuse rather
-             * than insert a shadowing duplicate. */
+             * (or a stale CLOSING/sticky-RAW entry, handled above).
+             * Refuse rather than insert a shadowing duplicate. */
             lane->stats.flows_rejected_other++;
             return -1;
         }
@@ -271,6 +298,10 @@ mqvpn_tcp_lane_on_syn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, int t
     }
     f->key = *key;
     f->state = to_tcp ? TCP_FLOW_PENDING_ACCEPT : TCP_FLOW_STICKY_RAW;
+    /* I2: only meaningful for STICKY_RAW markers (mqvpn_tcp_flow_t's field
+     * comment) — stored unconditionally anyway, same "harmless, avoids a
+     * needless if" rationale as the last_activity_us stamp just below. */
+    f->syn_isn = syn_isn;
     /* Stamp-at-creation (Task 13 fix): without this, a to_tcp=1 flow parked
      * in PENDING_ACCEPT (SYN committed here, but lwIP hasn't yet driven the
      * accept callback that would otherwise stamp it — see
@@ -853,13 +884,20 @@ tcp_lane_teardown_flow(mqvpn_tcp_flow_t *f, int close_h3)
  * every public API function's existing no-op contract, not a new case to
  * handle.
  *
- * Sticky-RAW markers are structurally unreachable here: they have no pcb
- * and never bind an h3_request/stream (mqvpn_tcp_lane_bind_h3_request is
- * only ever called from the accept callback's stream-open path), so none
- * of the four teardown call sites above can ever be reached with
- * f->state == TCP_FLOW_STICKY_RAW — the branch below is defensive
- * completeness (matches lane_free's separate, correct handling of markers
- * via the plain free() in its own loop), not a path Task 12 exercises. */
+ * Sticky-RAW markers are unreachable through the FOUR TEARDOWN call sites
+ * above (on_relay_error, abort_pending, on_h3_closing, on_stream_rejected,
+ * all funneled through tcp_lane_teardown_flow): they have no pcb and never
+ * bind an h3_request/stream (mqvpn_tcp_lane_bind_h3_request is only ever
+ * called from the accept callback's stream-open path), so none of those
+ * four can ever reach here with f->state == TCP_FLOW_STICKY_RAW — for
+ * THEM the branch below is defensive completeness (matches lane_free's
+ * separate, correct handling of markers via the plain free() in its own
+ * loop), not a path Task 12 exercises.
+ *
+ * I2 DOES reach here directly with a STICKY_RAW f, bypassing
+ * tcp_lane_teardown_flow entirely (no pcb/H3 side to detach) — see
+ * mqvpn_tcp_lane_on_syn's stale-marker-replacement branch. Same shape as
+ * C1's CLOSING removal just below it in that function. */
 static void
 tcp_lane_remove_flow(mqvpn_tcp_lane_t *lane, mqvpn_tcp_flow_t *f)
 {

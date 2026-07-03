@@ -2811,24 +2811,38 @@ tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t 
                                                   &is_closing);
 
                 /* Flags parse: needed whenever the entry is unknown OR is a
-                 * CLOSING routing-residency marker (C1) — a pure SYN in the
-                 * latter case means this 5-tuple was reused after the prior
-                 * connection finished. The common established-flow case
-                 * (found, ACTIVE / PENDING-anything / STICKY_RAW) skips
-                 * this parse entirely. */
+                 * CLOSING routing-residency marker (C1) OR a sticky-RAW
+                 * marker (I2) — a pure SYN in any of those cases needs
+                 * re-evaluating for tuple reuse. The common established-
+                 * flow case (found, ACTIVE / PENDING-anything) skips this
+                 * parse (and the ISN parse below) entirely. */
                 int is_syn = 0;
-                if (!found || is_closing) {
+                uint32_t pkt_isn = 0;
+                if (!found || is_closing || is_raw) {
                     is_syn = (ip_ver == 4) && mqvpn_tcp_syn_flag(pkt, len);
+                    if (is_syn) pkt_isn = mqvpn_tcp_syn_isn(pkt, len);
                 }
-                if (found && is_closing && is_syn) {
-                    /* C1: tuple reuse after close. The prior connection on
-                     * this 5-tuple already finished (CLOSING grace-sweep
-                     * residency, see tcp_lane_finish_clean_close) — this is
-                     * a genuinely new connection. Evaluate it as brand-new;
-                     * mqvpn_tcp_lane_on_syn removes the stale CLOSING
-                     * marker itself (see its own comment) before committing
-                     * the fresh verdict. */
-                    found = 0;
+                if (found && is_syn) {
+                    if (is_closing) {
+                        /* C1: tuple reuse after close. The prior connection
+                         * on this 5-tuple already finished (CLOSING grace-
+                         * sweep residency, see tcp_lane_finish_clean_close)
+                         * — this is a genuinely new connection. Evaluate it
+                         * as brand-new; mqvpn_tcp_lane_on_syn removes the
+                         * stale CLOSING marker itself (see its own comment)
+                         * before committing the fresh verdict. */
+                        found = 0;
+                    } else if (is_raw && pkt_isn != mqvpn_tcp_lane_marker_isn(
+                                                        conn->tcp_lane, &flow_key)) {
+                        /* I2: a different ISN on a sticky-RAW marker means a
+                         * genuinely new connection reusing this 5-tuple
+                         * (ephemeral port recycling under tcp=auto) — the
+                         * old RAW verdict must not apply to it forever.
+                         * Same-ISN (the common case: a SYN retransmit of the
+                         * SAME still-forming/RAW-committed handshake) stays
+                         * sticky-RAW below without ever reaching here. */
+                        found = 0;
+                    }
                 }
 
                 if (!found) {
@@ -2843,7 +2857,8 @@ tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t 
                         break;
                     }
                     int want_tcp = hybrid_tcp_syn_policy(c);
-                    if (mqvpn_tcp_lane_on_syn(conn->tcp_lane, &flow_key, want_tcp) < 0) {
+                    if (mqvpn_tcp_lane_on_syn(conn->tcp_lane, &flow_key, want_tcp,
+                                              pkt_isn) < 0) {
                         /* Cap hit BEFORE lwIP saw the SYN — safe RAW
                          * fallback (on_syn contract in tcp_lane.h; Task 8's
                          * post-accept rejection point must abort instead).
@@ -2855,7 +2870,7 @@ tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t 
                     if (!want_tcp) break; /* sticky-RAW just recorded */
                     /* want_tcp: fall through to feed lwIP */
                 } else if (is_raw) {
-                    break; /* sticky RAW from a prior SYN */
+                    break; /* sticky RAW: same-ISN retransmit (or non-SYN) */
                 }
                 /* found && is_closing && !is_syn falls through here too:
                  * routing residency (C1) — feed whatever this packet is

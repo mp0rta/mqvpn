@@ -586,7 +586,7 @@ setup_flow(mqvpn_tcp_lane_t *lane, struct tcp_pcb *pcb, uint16_t src_port, void 
            void *stream, int establish)
 {
     mqvpn_flow_key_t k = mk_std_key(src_port);
-    if (mqvpn_tcp_lane_on_syn(lane, &k, 1) != 0) {
+    if (mqvpn_tcp_lane_on_syn(lane, &k, 1, 0) != 0) {
         return NULL;
     }
     memset(pcb, 0, sizeof(*pcb));
@@ -660,7 +660,7 @@ test_new_flow_and_lookup(void)
     ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw, NULL), 0,
                   "lookup miss on brand-new flow");
 
-    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 1), 0, "on_syn to_tcp commits");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 1, 0), 0, "on_syn to_tcp commits");
 
     out_raw = -1;
     ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw, NULL), 1,
@@ -674,7 +674,7 @@ test_new_flow_and_lookup(void)
 
     /* Duplicate commit is a caller bug (protocol: lookup-then-commit) —
      * refused, counted in flows_rejected_other, no shadowing insert. */
-    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 1), -1, "duplicate on_syn refused");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 1, 0), -1, "duplicate on_syn refused");
     mqvpn_tcp_lane_get_stats(lane, &stats);
     ASSERT_EQ_INT(stats.flows_rejected_other, 1,
                   "duplicate counted in flows_rejected_other");
@@ -692,7 +692,7 @@ test_sticky_raw(void)
     ASSERT_TRUE(lane != NULL, "lane_new succeeds");
 
     mqvpn_flow_key_t k = make_key(4001, 443);
-    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 0), 0,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 0, 0), 0,
                   "on_syn to_tcp=0 records sticky-RAW");
 
     int out_raw = -1;
@@ -708,6 +708,124 @@ test_sticky_raw(void)
     mqvpn_tcp_lane_free(lane);
 }
 
+/* ─── I2: ISN-based sticky-RAW re-evaluation ───
+ *
+ * tun_decide_lane (mqvpn_client.c) is the actual caller that compares a new
+ * pure SYN's ISN against mqvpn_tcp_lane_marker_isn's return and decides
+ * whether to call on_syn again — that policy-re-run decision itself lives
+ * outside tcp_lane.c and has no dedicated unit-test harness (tun_decide_lane
+ * is a static function with no test target of its own, same situation C1's
+ * "final-ACK-shape packet still routes to lwip_input" note already flagged).
+ * These tests pin the tcp_lane.c-side CONTRACT tun_decide_lane relies on:
+ * marker_isn's storage/retrieval, and on_syn's stale-sticky-RAW-marker
+ * replacement (both re-record and RAW->TCP transition). */
+
+static void
+test_marker_isn_stored_and_retrieved(void)
+{
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0x1235ULL, NULL, NULL, NULL);
+    ASSERT_TRUE(lane != NULL, "lane_new succeeds");
+
+    mqvpn_flow_key_t k = make_key(4002, 443);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_marker_isn(lane, &k), 0,
+                  "no marker yet -> 0 (unknown key)");
+
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 0, 0xdeadbeefu), 0,
+                  "on_syn to_tcp=0 records sticky-RAW with an ISN");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_marker_isn(lane, &k), 0xdeadbeefu,
+                  "marker_isn returns the stored ISN — same-ISN retransmit "
+                  "case: tun_decide_lane compares this and stays RAW without "
+                  "ever calling on_syn again");
+
+    /* A real (non-marker) TCP-lane flow has no meaningful ISN — accessor
+     * returns 0 for it too, not the stale marker value from a DIFFERENT
+     * key. */
+    mqvpn_flow_key_t k2 = make_key(4003, 443);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k2, 1, 0x11111111u), 0,
+                  "on_syn to_tcp=1 commits a real flow");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_marker_isn(lane, &k2), 0,
+                  "marker_isn is 0 for a non-sticky-RAW entry, regardless of "
+                  "what syn_isn on_syn was called with");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_syn_isn_mismatch_replaces_marker_raw_to_raw(void)
+{
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0x1236ULL, NULL, NULL, NULL);
+    ASSERT_TRUE(lane != NULL, "lane_new succeeds");
+
+    mqvpn_flow_key_t k = make_key(4004, 443);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 0, 100), 0, "first sticky-RAW marker");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_marker_isn(lane, &k), 100u, "ISN 100 stored");
+
+    mqvpn_tcp_lane_stats_t stats;
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_total, 1, "one entry so far");
+
+    /* Different ISN (200 != 100): tun_decide_lane's contract is to call
+     * on_syn again — pin on_syn's own side: it must remove the stale
+     * marker (not shadow it) and record the NEW verdict/ISN, again as
+     * sticky-RAW (the re-evaluated policy can legitimately land on RAW
+     * again — a single-path client that briefly saw >=2 paths and then
+     * dropped back to one, for instance). */
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 0, 200), 0,
+                  "on_syn succeeds on ISN mismatch — stale marker replaced");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_marker_isn(lane, &k), 200u,
+                  "marker now holds the NEW ISN, not the stale one");
+
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_total, 2,
+                  "flows_total counts the replacement as a new insert (not "
+                  "a no-op re-affirmation)");
+    ASSERT_EQ_INT(stats.raw_markers_active, 1,
+                  "exactly one marker live — the stale one was actually "
+                  "removed, not left as a shadowing duplicate");
+    ASSERT_EQ_INT(stats.flows_rejected_other, 0, "NOT treated as a caller-bug duplicate");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
+test_syn_isn_mismatch_replaces_marker_raw_to_tcp(void)
+{
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0x1237ULL, NULL, NULL, NULL);
+    ASSERT_TRUE(lane != NULL, "lane_new succeeds");
+
+    mqvpn_flow_key_t k = make_key(4005, 443);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 0, 300), 0,
+                  "sticky-RAW marker, ISN 300");
+
+    /* Different ISN, and this time the re-run policy lands on TCP (e.g. a
+     * second path came up between the two connections). */
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 1, 400), 0,
+                  "on_syn succeeds — RAW marker replaced by a real TCP-lane flow");
+
+    int out_raw = -1, out_closing = -1;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k, &out_raw, &out_closing), 1,
+                  "lookup finds the new entry");
+    ASSERT_EQ_INT(out_raw, 0, "no longer sticky-RAW");
+    ASSERT_EQ_INT(out_closing, 0, "not CLOSING either — a fresh PENDING_ACCEPT flow");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_marker_isn(lane, &k), 0,
+                  "marker_isn is 0 now — this key is a real flow, not a marker");
+
+    mqvpn_tcp_lane_stats_t stats;
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_active, 1, "counts as an active TCP-lane flow");
+    ASSERT_EQ_INT(stats.raw_markers_active, 0,
+                  "the old marker is gone, not just shadowed");
+    ASSERT_EQ_INT(stats.flows_rejected_other, 0, "NOT a caller-bug duplicate");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
 static void
 test_cap_rejection(void)
 {
@@ -718,10 +836,10 @@ test_cap_rejection(void)
     ASSERT_TRUE(lane != NULL, "lane_new succeeds");
 
     mqvpn_flow_key_t k1 = make_key(5000, 80);
-    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k1, 1), 0, "first on_syn succeeds");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k1, 1, 0), 0, "first on_syn succeeds");
 
     mqvpn_flow_key_t k2 = make_key(5001, 80);
-    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k2, 1), -1,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k2, 1, 0), -1,
                   "second on_syn rejected at cap");
     /* Rejection means NO insertion: the rejected key must stay absent. */
     ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k2, NULL, NULL), 0,
@@ -734,7 +852,7 @@ test_cap_rejection(void)
     /* Split-cap: a sticky-RAW marker is NOT blocked by the (full) TCP flow
      * cap and does not count as a TCP-lane rejection. */
     mqvpn_flow_key_t k3 = make_key(5002, 80);
-    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k3, 0), 0,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k3, 0, 0), 0,
                   "sticky-RAW marker succeeds at full tcp flow cap");
     mqvpn_tcp_lane_get_stats(lane, &stats);
     ASSERT_EQ_INT(stats.flows_rejected_cap, 1,
@@ -756,13 +874,13 @@ test_markers_dont_consume_tcp_budget(void)
     /* Fill the (test-shrunk) marker cap with sticky-RAW markers first... */
     for (uint16_t i = 0; i < TCP_LANE_RAW_MARKER_CAP; i++) {
         mqvpn_flow_key_t k = make_key((uint16_t)(6000 + i), 80);
-        ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 0), 0,
+        ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 0, 0), 0,
                       "sticky-RAW marker succeeds");
     }
 
     /* ...then a TCP-lane flow still fits: markers spent none of the budget. */
     mqvpn_flow_key_t kt = make_key(7000, 443);
-    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &kt, 1), 0,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &kt, 1, 0), 0,
                   "to_tcp still succeeds after markers (separate budgets)");
 
     mqvpn_tcp_lane_stats_t stats;
@@ -788,12 +906,13 @@ test_marker_cap(void)
     /* Fill the (test-shrunk) marker cap. */
     for (uint16_t i = 0; i < TCP_LANE_RAW_MARKER_CAP; i++) {
         mqvpn_flow_key_t k = make_key((uint16_t)(8000 + i), 80);
-        ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 0), 0, "marker succeeds below cap");
+        ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 0, 0), 0,
+                      "marker succeeds below cap");
     }
 
     /* Next marker is refused: -1, silent (no flows_rejected_cap), no insert. */
     mqvpn_flow_key_t kx = make_key(8999, 80);
-    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &kx, 0), -1,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &kx, 0, 0), -1,
                   "marker rejected at marker cap");
     ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &kx, NULL, NULL), 0,
                   "rejected marker key not inserted (lookup miss)");
@@ -807,7 +926,7 @@ test_marker_cap(void)
 
     /* TCP-lane commits are unaffected by the full marker table. */
     mqvpn_flow_key_t kt = make_key(9000, 443);
-    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &kt, 1), 0,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &kt, 1, 0), 0,
                   "to_tcp still succeeds at full marker cap");
 
     mqvpn_tcp_lane_free(lane);
@@ -860,7 +979,7 @@ test_accept_key_correspondence(void)
 
     mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0x4242ULL, NULL, fake_clock, NULL);
     ASSERT_TRUE(lane != NULL, "lane_new succeeds");
-    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &key, 1), 0, "SYN-time commit");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &key, 1, 0), 0, "SYN-time commit");
 
     /* Fake accepted pcb, fields as tcp_listen_input sets them: local/remote
      * ip ip_addr_copy'd from the IP header (network order), ports assigned
@@ -954,7 +1073,7 @@ test_accept_key_correspondence(void)
     key2.dst_ip[1] = 184;
     key2.dst_ip[2] = 216;
     key2.dst_ip[3] = 34;
-    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &key2, 1), 0,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &key2, 1, 0), 0,
                   "second flow SYN-time commit");
     struct tcp_pcb pcb2;
     memset(&pcb2, 0, sizeof(pcb2));
@@ -2181,7 +2300,7 @@ test_abort_pending_real(void)
      * conn / stream calloc failure / xqc_h3_request_create failure" shapes
      * in cli_tcp_lane_open_stream, all pre-bind). */
     mqvpn_flow_key_t key1 = mk_std_key(8300);
-    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &key1, 1), 0, "flow1 SYN-time commit");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &key1, 1, 0), 0, "flow1 SYN-time commit");
     struct tcp_pcb pcb1;
     memset(&pcb1, 0, sizeof(pcb1));
     pcb1.state = ESTABLISHED;
@@ -2206,7 +2325,7 @@ test_abort_pending_real(void)
      * failure shape: the caller already closed it itself before calling
      * abort_pending). abort_pending must still not close it again. */
     mqvpn_flow_key_t key2 = mk_std_key(8301);
-    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &key2, 1), 0, "flow2 SYN-time commit");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &key2, 1, 0), 0, "flow2 SYN-time commit");
     struct tcp_pcb pcb2;
     memset(&pcb2, 0, sizeof(pcb2));
     pcb2.state = ESTABLISHED;
@@ -2252,7 +2371,7 @@ test_accept_open_stream_fail_returns_abrt(void)
     mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xe007ULL, NULL, fake_clock, NULL);
 
     mqvpn_flow_key_t key = mk_std_key(8700);
-    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &key, 1), 0, "SYN-time commit");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &key, 1, 0), 0, "SYN-time commit");
     struct tcp_pcb pcb;
     memset(&pcb, 0, sizeof(pcb));
     pcb.state = ESTABLISHED;
@@ -2633,7 +2752,7 @@ test_syn_during_closing_reevaluates(void)
      * CLOSING entry re-runs policy via on_syn, which removes the stale
      * marker itself. Pin on_syn's side of that contract directly. */
     ASSERT_EQ_INT(
-        mqvpn_tcp_lane_on_syn(lane, &key, 1), 0,
+        mqvpn_tcp_lane_on_syn(lane, &key, 1, 0), 0,
         "on_syn succeeds — stale CLOSING marker removed, fresh commit inserted");
 
     ASSERT_EQ_INT(lane->n_closing, 0, "the stale marker is gone, not just shadowed");
@@ -2727,7 +2846,8 @@ test_idle_eviction_sticky_raw_survives(void)
     mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xf003ULL, NULL, fake_clock, NULL);
 
     mqvpn_flow_key_t k = make_key(4100, 80);
-    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 0), 0, "sticky-RAW marker committed");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 0, 0), 0,
+                  "sticky-RAW marker committed");
 
     g_fake_now += 1000ULL * 1000000ULL; /* ancient by any timeout */
     mqvpn_tcp_lane_tick(lane, g_fake_now);
@@ -2784,7 +2904,7 @@ test_idle_eviction_pending_accept_stamped(void)
     mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xf005ULL, NULL, fake_clock, NULL);
 
     mqvpn_flow_key_t k = make_key(4200, 80);
-    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 1), 0,
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 1, 0), 0,
                   "to_tcp flow committed, PENDING_ACCEPT");
 
     g_fake_now += 1ULL * 1000000ULL; /* well under the 5s timeout */
@@ -3041,6 +3161,9 @@ main(void)
 {
     test_new_flow_and_lookup();
     test_sticky_raw();
+    test_marker_isn_stored_and_retrieved();
+    test_syn_isn_mismatch_replaces_marker_raw_to_raw();
+    test_syn_isn_mismatch_replaces_marker_raw_to_tcp();
     test_cap_rejection();
     test_markers_dont_consume_tcp_budget();
     test_marker_cap();

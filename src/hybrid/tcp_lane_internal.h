@@ -140,6 +140,17 @@ typedef struct mqvpn_tcp_flow {
     mqvpn_tcp_flow_state_t state;
     uint64_t last_activity_us;
 
+    /* I2: the creating SYN's TCP sequence number (ISN), stored ONLY on
+     * TCP_FLOW_STICKY_RAW markers — a later pure SYN on the same 5-tuple
+     * with a DIFFERENT ISN is a genuinely new connection (ephemeral port
+     * recycling under tcp=auto), not the same handshake retransmitting,
+     * so the old RAW verdict must not apply to it forever. Real TCP-lane
+     * flows (PENDING_ACCEPT/PENDING_STREAM/ACTIVE/CLOSING) need NO ISN
+     * logic — their lifecycle is already pcb-bound, not SYN-tuple-bound —
+     * so this field is simply unused (left at its calloc'd 0) for them.
+     * See mqvpn_tcp_lane_on_syn / mqvpn_tcp_lane_marker_isn. */
+    uint32_t syn_isn;
+
     struct tcp_pcb *pcb;  /* set by the lwIP accept callback */
     ip4_addr_t target_ip; /* original inner dst (== pcb->local_ip at accept —
                            * wildcard intercept), network byte order */
