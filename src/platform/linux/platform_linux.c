@@ -1477,6 +1477,10 @@ platform_egress_fd_unregister(int fd, void *user_ctx)
     egress_fd_slot_t *slot = find_egress_slot(sp, fd);
     if (!slot) return;
 
+    /* Load-bearing libevent guarantee: event_del also removes a pending
+     * activation already queued in the current loop pass, so once this
+     * returns, on_egress_fd_event can never fire for this (possibly
+     * already-destroyed) flow again. */
     if (slot->ev) {
         event_del(slot->ev);
         event_free(slot->ev);

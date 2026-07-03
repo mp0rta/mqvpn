@@ -187,6 +187,14 @@ struct mqvpn_server_s {
      * mqvpn_server_uptime_seconds() uses (now_us() - boot_us) / 1e6. */
     uint64_t boot_us;
 
+    /* Egress fd budget, computed ONCE in mqvpn_server_new and intentionally
+     * frozen: the platform sizes its fd->event registry from this value at
+     * startup, so admission (tcp_egress.c's 503 cap check) must use the
+     * same snapshot — recomputing per call would let a runtime setrlimit
+     * grow admission past the fixed registry (flows admitted but never
+     * polled). */
+    int egress_fd_budget;
+
     /* Log filtering */
     mqvpn_log_level_t log_level;
 
@@ -197,11 +205,12 @@ struct mqvpn_server_s {
      * Contents are mutated exclusively by tcp_egress.c through the bundled
      * ctx accessor in mqvpn_server_internal.h (svr_get_tcp_egress_ctx) —
      * this file never reads or writes them directly.
-     * tcp_egress_flow_list_head points at the head of tcp_egress.c's own
-     * svr_tcp_egress_flow_t intrusive doubly-linked (D3) list; void* here
-     * since this file doesn't know that type. */
+     * tcp_egress_flow_list_head is the head of tcp_egress.c's intrusive
+     * doubly-linked (D3) list; the struct is forward-declared in
+     * mqvpn_server_internal.h and defined only in tcp_egress.c, so the
+     * pointer is typed but the layout stays opaque here. */
     int tcp_egress_global_fd_count;
-    void *tcp_egress_flow_list_head;
+    struct svr_tcp_egress_flow_s *tcp_egress_flow_list_head;
 #endif
 
     /* Debug: tick thread assertion */
@@ -242,6 +251,29 @@ now_us(void)
     gettimeofday(&tv, NULL);
     return (uint64_t)tv.tv_sec * 1000000 + (uint64_t)tv.tv_usec;
 #endif
+}
+
+/* One-shot at mqvpn_server_new (rlimit-derived headroom under the compile-
+ * time cap); the result is stored in s->egress_fd_budget and intentionally
+ * never recomputed — see that field's comment for the admission/registry
+ * non-divergence rationale. */
+static int
+svr_compute_egress_fd_budget(void)
+{
+    int budget = MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT;
+#ifndef _WIN32
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY &&
+        rl.rlim_cur <= (rlim_t)LLONG_MAX) {
+        /* Widen before subtracting/comparing: rlim_cur is unsigned and may
+         * exceed int range; the guards above keep the cast well-defined. */
+        long long headroom = (long long)rl.rlim_cur - 64;
+        if (headroom < 0) headroom = 0;
+        if (headroom < budget) budget = (int)headroom;
+    }
+#endif
+    if (budget < 0) budget = 0;
+    return budget;
 }
 
 static int64_t
@@ -1148,7 +1180,7 @@ svr_get_tcp_egress_ctx(mqvpn_server_t *s, svr_tcp_egress_srv_ctx_t *out)
     out->global_fd_count = &s->tcp_egress_global_fd_count;
     out->tcp_max_flows = s->config.hybrid.tcp_max_flows;
     out->tcp_connect_timeout_sec = s->config.hybrid.tcp_connect_timeout_sec;
-    out->global_fd_budget = mqvpn_server_egress_fd_budget(s);
+    out->global_fd_budget = s->egress_fd_budget; /* frozen at server_new */
 }
 
 int
@@ -1539,6 +1571,7 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     s->max_clients = cfg->max_clients > 0 ? cfg->max_clients : 64;
     s->ptb_tokens = PTB_RATE_LIMIT;
     s->boot_us = now_us();
+    s->egress_fd_budget = svr_compute_egress_fd_budget();
 
     /* Initialize address pool */
     if (cfg->subnet[0] == '\0') {
@@ -1794,22 +1827,11 @@ mqvpn_server_on_egress_fd_ready(mqvpn_server_t *s, int fd, void *fd_ctx, int rea
 int
 mqvpn_server_egress_fd_budget(mqvpn_server_t *s)
 {
+    /* Frozen snapshot from mqvpn_server_new — see svr_compute_egress_fd_
+     * budget and the egress_fd_budget field comment for why this must not
+     * recompute per call. */
     if (!s) return 0;
-
-    int budget = MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT;
-#ifndef _WIN32
-    struct rlimit rl;
-    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY &&
-        rl.rlim_cur <= (rlim_t)LLONG_MAX) {
-        /* Widen before subtracting/comparing: rlim_cur is unsigned and may
-         * exceed int range; the guards above keep the cast well-defined. */
-        long long headroom = (long long)rl.rlim_cur - 64;
-        if (headroom < 0) headroom = 0;
-        if (headroom < budget) budget = (int)headroom;
-    }
-#endif
-    if (budget < 0) budget = 0;
-    return budget;
+    return s->egress_fd_budget;
 }
 
 int

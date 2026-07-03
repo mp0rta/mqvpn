@@ -703,10 +703,12 @@ MQVPN_API void mqvpn_server_on_egress_fd_ready(mqvpn_server_t *server, int fd,
                                                void *fd_ctx, int readable, int writable);
 
 /* Upper bound on concurrent egress TCP fds the server will ever open
- * (min(rlimit_nofile - reserve, configured cap)). Platforms size their
- * fd->event registries from this so the two bounds cannot drift.
- * Returns 0 on NULL server; a value <= 0 means "treat tcp_egress as
- * disabled — do not allocate a registry". */
+ * (min(rlimit_nofile - reserve, configured cap)). Computed once at
+ * mqvpn_server_new and frozen for the server's lifetime: platforms size
+ * their fd->event registries from this, and the server's own admission cap
+ * uses the same snapshot, so the two bounds cannot drift (a runtime
+ * setrlimit changes neither). Returns 0 on NULL server; a value <= 0 means
+ * "treat tcp_egress as disabled — do not allocate a registry". */
 MQVPN_API int mqvpn_server_egress_fd_budget(mqvpn_server_t *server);
 
 MQVPN_API int mqvpn_server_on_tun_packet(mqvpn_server_t *server, const uint8_t *pkt,

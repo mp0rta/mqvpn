@@ -713,6 +713,13 @@ harness_pump(harness_t *h, const int *done, int budget_ms)
          * nothing is ready yet. */
         for (int i = 0; i < HARNESS_MAX_EGRESS_FDS; i++) {
             if (!h->egress_fds[i].active) continue;
+            /* No-interest registration (want_read=0, want_write=0): the
+             * server parked the fd (e.g. ACTIVE flow awaiting the relay
+             * stage). libevent would never fire an event with neither
+             * EV_READ nor EV_WRITE — skip entirely, or poll()'s
+             * always-reported POLLHUP/POLLERR would dispatch events the
+             * real platform never delivers. */
+            if (!h->egress_fds[i].want_read && !h->egress_fds[i].want_write) continue;
             struct pollfd epfd = {.fd = h->egress_fds[i].fd, .events = 0};
             if (h->egress_fds[i].want_read) epfd.events |= POLLIN;
             if (h->egress_fds[i].want_write) epfd.events |= POLLOUT;

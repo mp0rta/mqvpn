@@ -11,6 +11,7 @@
 #include "hybrid/tcp_egress.h"
 
 #include <arpa/inet.h>
+#include <assert.h>
 #include <errno.h>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -221,16 +222,16 @@ typedef struct svr_tcp_egress_flow_s {
  * down, per the one-ctx-call-per-entry-point rule in
  * mqvpn_server_internal.h. */
 static void
-svr_tcp_egress_list_insert(void **head, svr_tcp_egress_flow_t *ef)
+svr_tcp_egress_list_insert(svr_tcp_egress_flow_t **head, svr_tcp_egress_flow_t *ef)
 {
     ef->prev = NULL;
-    ef->next = (svr_tcp_egress_flow_t *)*head;
+    ef->next = *head;
     if (ef->next) ef->next->prev = ef;
     *head = ef;
 }
 
 static void
-svr_tcp_egress_list_remove(void **head, svr_tcp_egress_flow_t *ef)
+svr_tcp_egress_list_remove(svr_tcp_egress_flow_t **head, svr_tcp_egress_flow_t *ef)
 {
     if (ef->prev) {
         ef->prev->next = ef->next;
@@ -273,9 +274,20 @@ svr_tcp_egress_flow_destroy(mqvpn_server_t *server, void *flow)
     svr_get_tcp_egress_ctx(server, &ctx);
     svr_tcp_egress_list_remove(ctx.flow_list_head, ef);
 
+    /* 1:1 with the increments in start_connect (see the invariant comment
+     * above) — decrement unconditionally, assert-pinned like the library's
+     * other state invariants (path_state_machine.c). conn_count keeps a
+     * NULL guard: it's a different concern (stream/conn back-pointer
+     * liveness) than the count invariant, and a NULL deref in release
+     * would be strictly worse than a skipped decrement. */
     int *conn_count = svr_conn_tcp_flow_count_ptr(ef->stream);
-    if (conn_count && *conn_count > 0) (*conn_count)--;
-    if (*ctx.global_fd_count > 0) (*ctx.global_fd_count)--;
+    assert(conn_count != NULL); /* live flow always has stream->conn */
+    if (conn_count) {
+        assert(*conn_count > 0);
+        (*conn_count)--;
+    }
+    assert(*ctx.global_fd_count > 0);
+    (*ctx.global_fd_count)--;
 
     void **stream_slot = svr_stream_tcp_egress_flow_ptr(ef->stream);
     if (stream_slot) *stream_slot = NULL;
@@ -306,15 +318,20 @@ svr_tcp_egress_errno_to_status(int err)
     }
 }
 
-/* Flips a CONNECTING flow to ACTIVE and re-arms the fd for relay events
- * (want_read, not want_write — the connect signal was want_write; the next
- * task's relay wants read-readiness on the upstream fd first). Sends the
- * real 200 with fin=0: the stream stays open, relay traffic rides it. */
+/* Flips a CONNECTING flow to ACTIVE and DISARMS the fd (want_read=0,
+ * want_write=0 — replaces the connect-signal want_write registration with
+ * no interest, keeping the reactor slot). The relay stage arms want_read
+ * when it can actually consume data; arming it now, against the no-op
+ * relay stub below, would busy-loop a level-triggered reactor — a
+ * server-speaks-first upstream (SMTP/SSH banner) or an upstream EOF makes
+ * the fd permanently readable, re-firing the platform's event callback
+ * every loop pass until stream close. Sends the real 200 with fin=0: the
+ * stream stays open, relay traffic rides it. */
 static void
 svr_tcp_egress_on_connected(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
 {
     ef->state = EGRESS_FLOW_ACTIVE;
-    (void)svr_egress_fd_register(server, ef->fd, 1, 0, ef);
+    (void)svr_egress_fd_register(server, ef->fd, 0, 0, ef);
     svr_tcp_egress_respond(ef->h3_request, 200, 0);
 }
 
@@ -475,10 +492,16 @@ svr_tcp_egress_fd_ready(mqvpn_server_t *server, int fd, void *fd_ctx, int readab
     svr_tcp_egress_flow_t *ef = (svr_tcp_egress_flow_t *)fd_ctx;
     if (!server || !ef) return;
 
+    /* ef->fd is the single source of truth for which socket this flow
+     * owns; the platform-echoed fd param is advisory only (asserted
+     * consistent, then unused). */
+    assert(fd == ef->fd);
+    (void)fd;
+
     if (ef->state == EGRESS_FLOW_CONNECTING && writable) {
         int soerr = 0;
         socklen_t len = sizeof(soerr);
-        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len) != 0) soerr = errno;
+        if (getsockopt(ef->fd, SOL_SOCKET, SO_ERROR, &soerr, &len) != 0) soerr = errno;
         if (soerr != 0) {
             svr_tcp_egress_fail_connect(server, ef, soerr);
             return;
@@ -496,7 +519,7 @@ svr_tcp_egress_tick(mqvpn_server_t *server, uint64_t now_us)
 
     svr_tcp_egress_srv_ctx_t ctx;
     svr_get_tcp_egress_ctx(server, &ctx);
-    svr_tcp_egress_flow_t *ef = (svr_tcp_egress_flow_t *)*ctx.flow_list_head;
+    svr_tcp_egress_flow_t *ef = *ctx.flow_list_head;
     while (ef) {
         /* Save next before possibly destroying ef — fail_connect() unlinks
          * and frees it, which would otherwise dereference freed memory on

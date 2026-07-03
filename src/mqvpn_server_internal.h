@@ -98,17 +98,22 @@ void **svr_stream_tcp_egress_flow_ptr(void *stream);
  * live request). */
 int *svr_conn_tcp_flow_count_ptr(void *stream);
 
+/* Per-flow egress state — DEFINED in src/hybrid/tcp_egress.c only; forward
+ * declaration here so the list-head plumbing below is typed (compiler
+ * catches misuse) while the layout stays opaque to mqvpn_server.c. */
+struct svr_tcp_egress_flow_s;
+
 /* Server-scope egress state + config, bundled (svr_get_egress_policy
  * precedent). Pointer fields: tcp_egress.c owns the CONTENTS (global
  * in-flight-connect fd count + the D3 intrusive tick-list head) but not
  * the STORAGE — that lives inside mqvpn_server_t so the state is naturally
  * per-server without tcp_egress.c holding statics/globals. Both pointers
  * stay valid for the server's lifetime. Value fields are per-call
- * snapshots of the two admission limits. */
+ * snapshots of the admission limits. */
 typedef struct {
-    void **flow_list_head;            /* D3 intrusive list head slot */
-    int *global_fd_count;             /* in-flight + active egress fds */
-    uint32_t tcp_max_flows;           /* per-session cap (config.hybrid) */
+    struct svr_tcp_egress_flow_s **flow_list_head; /* D3 intrusive list head slot */
+    int *global_fd_count;                          /* in-flight + active egress fds */
+    uint32_t tcp_max_flows;                        /* per-session cap (config.hybrid) */
     uint32_t tcp_connect_timeout_sec; /* connect() deadline (config.hybrid) */
     int global_fd_budget;             /* mqvpn_server_egress_fd_budget(s) */
 } svr_tcp_egress_srv_ctx_t;
