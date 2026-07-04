@@ -717,6 +717,13 @@ harness_start(harness_t *h, const char *protocol, size_t protocol_len, int auto_
         mqvpn_config_set_subnet(svr_cfg, "10.0.0.0/24");
         mqvpn_config_set_tls_cert(svr_cfg, TEST_CERT_FILE, TEST_KEY_FILE);
         mqvpn_config_set_log_level(svr_cfg, MQVPN_LOG_ERROR);
+        /* [Hybrid] Enabled defaults to false (docs/control-api.md) — this
+         * whole file's dispatch tests exercise the connect-tcp path, which
+         * (I2 fix) now ALSO gates on this runtime flag, not just the compile
+         * flag. Default it on here so every existing test keeps exercising
+         * real dispatch; run_hybrid_disabled_gets_501 below overrides it
+         * back off via cfg_hook to cover the gate itself. */
+        mqvpn_config_set_hybrid_enabled(svr_cfg, 1);
         if (cfg_hook) cfg_hook(svr_cfg);
 
         mqvpn_server_callbacks_t svr_cbs = MQVPN_SERVER_CALLBACKS_INIT;
@@ -1126,6 +1133,33 @@ TEST(mqvpn_tcp_acl_denied_gets_403)
     ASSERT_STREQ(status, "403");
 }
 
+/* Config hook for hybrid_disabled_gets_501 below: overrides harness_start's
+ * default (Enabled=1, see its comment) back to false, matching the real
+ * documented default (docs/control-api.md: "[Hybrid] Enabled" is a
+ * client+server kill switch, default false). */
+static void
+harness_cfg_hybrid_disabled(mqvpn_config_t *cfg)
+{
+    mqvpn_config_set_hybrid_enabled(cfg, 0);
+}
+
+TEST(hybrid_disabled_gets_501)
+{
+    /* I2 regression: a hybrid-compiled server with runtime Enabled=false
+     * must treat :protocol=="mqvpn-tcp" exactly like an unrecognized
+     * protocol (501), not serve egress. Uses a syntactically VALID
+     * connect-tcp path (same template mqvpn_tcp_acl_denied_gets_403 above
+     * uses) specifically to prove the gate fires before path parsing / ACL
+     * / connect ever run — a bad-path or ACL-denied response would not
+     * distinguish "gated off" from "gated on but rejected downstream". */
+    char status[16] = {0};
+    int rc = run_dispatch_probe_with_path(
+        "mqvpn-tcp", 9, "/.well-known/mqvpn/tcp/10.0.0.5/80/",
+        harness_cfg_hybrid_disabled, status, sizeof(status));
+    ASSERT_EQ(rc, 0);
+    ASSERT_STREQ(status, "501");
+}
+
 /* Config hook for the allow-hole tests below: the PUBLIC egress-ACL setter,
  * exactly as a platform embedding libmqvpn would call it. 127.0.0.1/32
  * (not 10.0.0.0/8): these tests now drive a REAL egress connect() against a
@@ -1193,6 +1227,12 @@ harness_cfg_invalid_hybrid_global_cap0(mqvpn_config_t *cfg)
 {
     mqvpn_hybrid_config_t bad;
     mqvpn_hybrid_config_default(&bad);
+    bad.enabled = 1;              /* mqvpn_config_apply_hybrid replaces the WHOLE block,
+                                   * including Enabled — without this, this test's own
+                                   * harness_start default (Enabled=1) is wiped out by
+                                   * mqvpn_hybrid_config_default's false, and I2's runtime
+                                   * gate would 501 the probe before it ever reaches the
+                                   * sanitize-then-ACL behavior this test targets. */
     bad.tcp_max_global_flows = 0; /* invalid: would freeze the fd budget at 0 */
     mqvpn_config_apply_hybrid(cfg, &bad);
     harness_cfg_allow_127(cfg);
@@ -1675,6 +1715,100 @@ TEST(mqvpn_tcp_h3_fin_becomes_shut_wr)
     ASSERT_EQ(eof_seen, 1);
     /* Not truncated: the sink saw every byte before EOF. */
     ASSERT_EQ((size_t)sink.echoed_bytes, msg_len);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
+/* C1 regression: standalone READ_EMPTY_FIN dispatch.
+ *
+ * mqvpn_tcp_h3_fin_becomes_shut_wr above sends real body bytes before its
+ * fin, so xquic's h3 layer resolves that fin through the ordinary
+ * XQC_REQ_NOTIFY_READ_BODY path (recv_body's *fin out-param) — it never
+ * proves the OTHER wire shape exists. And critically, probe_send_fin_retry's
+ * xqc_h3_request_send_body(req, NULL, 0, 1) does NOT produce that other
+ * shape either: traced through xqc_h3_stream_send_data_frame
+ * (third_party/xquic/src/http3/xqc_h3_stream.c), a fin-only send_body call
+ * still emits a 2-byte H3 DATA frame header (type + zero-length varint)
+ * carrying the transport fin — never a truly empty (0-byte) QUIC STREAM
+ * frame — so xqc_h3_stream_process_request always sees data_len==2, not 0,
+ * and resolves through the ordinary DATA-frame/READ_BODY path regardless of
+ * how it's timed relative to prior body bytes (confirmed empirically by
+ * instrumenting xqc_h3_stream_process_request while writing this test).
+ *
+ * The one API that produces a genuinely bare QUIC-level fin with NO H3
+ * framing at all is xqc_h3_request_finish (-> xqc_h3_stream_send_finish),
+ * which appends a true zero-length var_buf with only the fin bit set — no
+ * DATA frame header, nothing else queued. That is what
+ * xqc_h3_request_on_recv_empty_fin's data_len==0 branch is actually for, and
+ * it's used here (via probe_send_finish_retry) instead of
+ * probe_send_fin_retry specifically to hit XQC_REQ_NOTIFY_READ_EMPTY_FIN
+ * standalone (verified: read_flag is back to XQC_REQ_NOTIFY_READ_NULL by
+ * this point since the header notify already drained via recv_headers and
+ * no body was ever sent, satisfying on_recv_empty_fin's "notify only if
+ * nothing is still pending application consumption" guard). This is the
+ * exact standalone notify C1 fixes mqvpn_server.c's cb_request_read to
+ * dispatch (previously only CONNECT_TCP's READ_BODY case was wired, so this
+ * notify hit the dispatcher's blanket `if (flag & XQC_REQ_NOTIFY_READ_BODY)`
+ * miss and fell all the way to the trailing `return 0`, and
+ * shutdown(fd, SHUT_WR) was never issued — the sink would hang waiting for
+ * EOF forever). mqvpn's own production code (both client and server) always
+ * uses send_body(NULL,0,1) for its uplink/downlink fin, never
+ * xqc_h3_request_finish — so this test exercises the dispatch branch
+ * directly at the xquic-notify level rather than reproducing a real client
+ * wire trace; the de-coalesced e2e half-close test below covers the
+ * production send_body(NULL,0,1) shape. */
+static int
+probe_send_finish_retry(harness_t *h, probe_conn_t *p, int iter_budget)
+{
+    for (int i = 0; i < iter_budget; i++) {
+        ssize_t sent = xqc_h3_request_finish(p->req);
+        if (sent >= 0) return 0;
+        if (sent != -XQC_EAGAIN) return -1;
+        int never = 0;
+        harness_pump(h, &never, 20);
+    }
+    return -1;
+}
+
+TEST(mqvpn_tcp_bodiless_fin_becomes_shut_wr)
+{
+    tcp_sink_t sink;
+    /* echo=1, not 0: tcp_sink_pump only latches eof_seen in echo mode (sink
+     * mode's accept-only tick never inspects the fd for EOF — see its
+     * docstring). No data is ever sent either direction here regardless. */
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/1), 0);
+
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    h.probe.path = path;
+
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+
+    harness_pump_with_sink(&h, &sink, &h.probe.response_done, 10000);
+    ASSERT_EQ(h.probe.response_done, 1);
+    ASSERT_STREQ(h.probe.status, "200");
+
+    /* Not a single downlink byte sent before this — the bare finish() below
+     * is the ENTIRE downlink content of the stream. */
+    ASSERT_EQ(probe_send_finish_retry(&h, &h.probe, 500), 0);
+
+    int eof_seen = 0;
+    for (int i = 0; i < 500 && !eof_seen; i++) {
+        tcp_sink_pump(&sink);
+        int never = 0;
+        harness_pump(&h, &never, 20);
+        eof_seen = sink.eof_seen;
+    }
+    ASSERT_EQ(eof_seen, 1);
+    ASSERT_EQ((size_t)sink.echoed_bytes, 0); /* nothing was ever sent */
 
     harness_stop(&h);
     tcp_sink_close(&sink);
@@ -2386,6 +2520,7 @@ main(void)
     run_unrecognized_protocol_gets_501();
     run_mqvpn_tcp_bad_path_gets_400();
     run_mqvpn_tcp_acl_denied_gets_403();
+    run_hybrid_disabled_gets_501();
     run_mqvpn_tcp_acl_allow_hole_reaches_real_connect();
     run_mqvpn_tcp_connect_timeout_gets_504();
     run_mqvpn_tcp_global_cap_gets_503();
@@ -2393,6 +2528,7 @@ main(void)
     run_mqvpn_tcp_echo_roundtrip();
     run_mqvpn_tcp_egress_eof_becomes_h3_fin();
     run_mqvpn_tcp_h3_fin_becomes_shut_wr();
+    run_mqvpn_tcp_bodiless_fin_becomes_shut_wr();
     run_mqvpn_tcp_downlink_backpressure_pause_resume();
     run_mqvpn_tcp_closing_notify_idempotent();
     run_mqvpn_tcp_active_idle_timeout_evicts();
