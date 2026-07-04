@@ -50,8 +50,10 @@ _Static_assert(sizeof(ip_addr_t) == 4,
 
 /* CLOSING routing-marker residency bound (C1) — same "memory bound only"
  * rationale as TCP_LANE_RAW_MARKER_CAP above: a CLOSING entry is one
- * mqvpn_tcp_flow_t with a NULL pcb/h3_request, so 4096 of them cost
- * roughly the same ~0.5 MB worst case. Overflow evicts the OLDEST CLOSING
+ * mqvpn_tcp_flow_t with a NULL pcb/h3_request AND a freed downlink_stash
+ * (tcp_lane_mark_closing releases it at the transition — see that
+ * function's comment), so 4096 of them cost roughly the same ~0.5 MB
+ * worst case. Overflow evicts the OLDEST CLOSING
  * entry immediately (mqvpn_tcp_lane_tick's cap check) rather than refusing
  * the transition — the cost of evicting early is only that one flow's
  * stray post-close packets (a FIN-storm flow, worst case) fall back to
@@ -100,6 +102,11 @@ static void tcp_lane_downlink_stash_free(mqvpn_tcp_flow_t *f);
  * needs it before that point in the file, same forward-reference reason as
  * the other declaration here. */
 static mqvpn_tcp_flow_t *find_flow_by_stream(mqvpn_tcp_lane_t *lane, void *stream);
+/* Defined with the downlink-relay machinery below; needed by
+ * mqvpn_tcp_lane_tick's I3 stash-retry-and-resume branch, which runs earlier
+ * in the file than either definition. */
+static tcp_lane_flow_status_t tcp_lane_downlink_stash_retry(mqvpn_tcp_flow_t *f);
+static tcp_lane_flow_status_t tcp_lane_downlink_drain(mqvpn_tcp_flow_t *f);
 /* Defined with the close/error-mapping machinery below; needed by
  * mqvpn_tcp_lane_free (DRY: shares the exact detach-then-abort sequence)
  * and mqvpn_tcp_lane_lwip_accept's cap-exceeded defense branch above their
@@ -435,6 +442,36 @@ mqvpn_tcp_lane_tick(mqvpn_tcp_lane_t *lane, uint64_t now_us)
                  * spuriously evict a live flow. */
                 lane->stats.flows_idle_evicted++; /* before teardown frees f */
                 (void)tcp_lane_teardown_flow(f, /*close_h3=*/1);
+            } else if (f->downlink_paused) {
+                /* I3: the sent-notify driver (mqvpn_tcp_lane_on_lwip_sent)
+                 * only fires if THIS pcb still has un-ACKed data in flight,
+                 * and the xquic-context driver (tcp_lane_downlink_pump_status's
+                 * paused branch) only fires on a new READ_BODY/EMPTY_FIN
+                 * notify — if the flow's own sndbuf is already empty (no
+                 * more ACKs coming) AND xquic's per-stream flow-control
+                 * window has filled (we stopped consuming recv_body, so
+                 * those notifies stopped too), NEITHER driver ever fires
+                 * again and the flow would stall holding its stash until
+                 * idle eviction (or forever with tcp_idle_timeout_sec == 0).
+                 * This 1 Hz sweep is the guaranteed third retry driver —
+                 * same retry-then-resume-drain idiom as the pump's paused
+                 * branch above (tcp_lane_downlink_pump_status,
+                 * ~line 699). */
+                tcp_lane_flow_status_t st = tcp_lane_downlink_stash_retry(f);
+                if (st == TCP_LANE_FLOW_LIVE && !f->downlink_paused &&
+                    f->state == TCP_FLOW_ACTIVE && f->h3_request && f->pcb) {
+                    /* Stash flushed — resume draining recv_body, same as the
+                     * pump's paused branch does after a successful retry. */
+                    st = tcp_lane_downlink_drain(f);
+                }
+                /* st != LIVE means the retry/drain teardown f (ABORTED, or
+                 * a clean bidi-FIN GONE reached from the resumed drain) —
+                 * same "third calling context, no xquic frame to avoid
+                 * re-entering, no ERR_ABRT to translate" rationale as this
+                 * function's header comment; discard the status. f is
+                 * already unlinked+freed by that point, and `next` was
+                 * saved before this if/else-if chain, so the walk is safe. */
+                (void)st;
             }
             f = next;
         }
@@ -961,7 +998,23 @@ tcp_lane_evict_oldest_closing(mqvpn_tcp_lane_t *lane)
  * tcp_lane_finish_clean_close) into TCP_FLOW_CLOSING routing-marker
  * residency: stays in the table, stops counting toward n_tcp_flows, starts
  * counting toward n_closing, and is stamped so the grace sweep
- * (mqvpn_tcp_lane_tick) and cap eviction (this function) can age it. */
+ * (mqvpn_tcp_lane_tick) and cap eviction (this function) can age it.
+ *
+ * Also releases the downlink stash here rather than leaving it to
+ * tcp_lane_remove_flow: a CLOSING marker can reside for up to 2*TCP_MSL
+ * (TCP_LANE_CLOSING_GRACE_US) before the grace sweep frees it, and holding
+ * a live flow's ~TCP_MSS stash for that whole window would blow the
+ * ~0.5 MB "CLOSING entries are cheap" bound this table's cap comment
+ * relies on (tcp_lane.h:51-53). Safe to free now: the only caller is
+ * tcp_lane_finish_clean_close, reached exclusively from
+ * tcp_lane_downlink_maybe_shutdown once BOTH directions have cleanly
+ * FIN'd — which can only happen with f->downlink_paused == 0 (the pump
+ * never lets tcp_lane_downlink_drain run, and therefore never reaches the
+ * fin-handling branch that calls maybe_shutdown, while a stash retry is
+ * still pending), so downlink_stash_len is always 0 here; any allocated
+ * buffer is just an idle cached slot (see its field comment,
+ * tcp_lane_internal.h) that will never be consumed again from CLOSING
+ * residency onward — pure routing residency has no relay left to drain. */
 static void
 tcp_lane_mark_closing(mqvpn_tcp_flow_t *f)
 {
@@ -973,6 +1026,7 @@ tcp_lane_mark_closing(mqvpn_tcp_flow_t *f)
     lane->n_closing++;
     f->state = TCP_FLOW_CLOSING;
     f->last_activity_us = lane->clock_fn ? lane->clock_fn(lane->clock_ctx) : 0;
+    tcp_lane_downlink_stash_free(f);
 }
 
 tcp_lane_flow_status_t
