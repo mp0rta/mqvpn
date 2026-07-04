@@ -598,3 +598,29 @@ Notes:
   internal compile-time constants, not configurable — see
   `src/hybrid/tcp_lane.h` if you need to know their values.
 - See §5.4 (`get_stats`) for the runtime counters this config surfaces.
+
+### Known limitations
+
+- **TCP to private targets needs an explicit `EgressAllow`.** The client's
+  TCP-lane classifier has no visibility into the server's `EgressAllow` list,
+  so it cannot decide up front whether a given RFC1918/CGNAT/link-local/
+  loopback target will actually be allowed egress — it always tries the TCP
+  lane for such targets when `Tcp = stream` or `Tcp = auto` picks TCP. If the
+  server's default-deny egress ACL (see the Notes above) then rejects the
+  connect, the failure surfaces *after* the inner app already saw its
+  `connect()` succeed: lwIP answers the inner SYN with a SYN-ACK locally
+  (the TCP-lane accept happens before the server's egress `connect()` is
+  attempted), so the app only finds out via a subsequent RST once the
+  server's `connect()` is denied — not a clean, immediate refusal. UDP and
+  RAW-lane traffic to the same targets are unaffected (no local SYN-ACK
+  step). Operators who need TCP to a private target through the hybrid lane
+  must add an `EgressAllow` entry covering it.
+- **Client-address pools wider than `/24` can deny intra-VPN TCP between
+  clients.** The client only exempts its *own* `/24` from the TCP lane (to
+  keep client-to-client traffic within that `/24` off the egress-ACL path);
+  with a wider pool, two clients in different `/24`s of the same pool hit the
+  server's default-deny egress ACL for TCP between them, same as any other
+  RFC1918 target. Use a `/24`-or-narrower client-address pool, or an
+  `EgressAllow` entry covering the pool, if you need TCP between clients on
+  different `/24`s. The server logs a startup warning when its configured
+  pool is wider than `/24` for this reason.

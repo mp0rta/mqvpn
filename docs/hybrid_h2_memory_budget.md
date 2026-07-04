@@ -36,12 +36,15 @@ code path actually draws from the pool.
 Since the I1 fix (`f20aa36`, "PBUF_RAM ingress to stop cross-flow PBUF_POOL
 exhaustion"), `mqvpn_lwip_input` allocates every ingress packet as `PBUF_RAM`
 (exact-size, `MEM_LIBC_MALLOC`-backed heap), not `PBUF_POOL`. **The 256-entry pool is
-therefore statically reserved (the BSS array exists, ~2.3 MiB) but functionally dead
-on the TCP-lane ingress path** — nothing allocates out of it in production. It is a
-documented tightening candidate: `PBUF_POOL_SIZE` could in principle drop to a
-minimal placeholder or 0, but that requires first confirming no other lwIP-internal
-facility in this build (e.g. IP reassembly, `LWIP_ARP`/output paths) still draws
-pool pbufs — not verified as part of this doc, called out as follow-up only.
+therefore statically reserved (the BSS array exists, ~2.3 MiB) but functionally
+dead in this build** — verified, not just assumed: the only `pbuf_alloc(..., PBUF_POOL)`
+call sites anywhere in the vendored lwIP tree are in `netif/ppp/vj.c`,
+`netif/ppp/pppos.c`, `netif/slipif.c`, `netif/lowpan6_common.c`, and the
+Unix-port `pcapif.c`/`tapif.c` netif drivers — cross-checked against
+`build-debug/compile_commands.json`, none of which are compiled into this tree
+(PPP, SLIP, 6LoWPAN, and the Unix pcap/tap netifs are all absent from the
+build). It is a documented tightening candidate: `PBUF_POOL_SIZE` could drop to
+a minimal placeholder or 0, saving the ~2.3 MiB reservation outright.
 
 ## 2. What actually bounds per-flow memory
 
@@ -51,11 +54,17 @@ hard per-flow memory cap. Bytes lwIP has already delivered to the TCP-lane recv
 callback were already sequenced and ACKed on the wire — they can never be dropped
 and must be queued whenever xquic won't take them yet. Withholding `tcp_recved()`
 only stops the receive window from *re-opening*; the peer may still fill whatever
-window was already advertised. The true worst-case per-flow queue bound is
-`TCP_WND` (~2 MiB), not the 256 KiB high-water mark — both `lwipopts.h`'s own
-comment and the tcp_lane.h watermark comment stress this distinction, and this doc
-follows it: **the dominant per-flow cost below is `TCP_WND` + `TCP_SND_BUF`, not the
-backpressure watermarks.**
+window was already advertised. The true worst-case per-flow queue bound is NOT
+just `TCP_WND` (~2 MiB): in the `PENDING_STREAM` case (H3 CONNECT-TCP stream not
+yet open, uplink bytes queued pending the 2xx gate), `tcp_lane_uplink_deliver`
+grants `tcp_recved()` for bytes below `MQVPN_TCP_LANE_BP_HIGH_WATER` (256 KiB) even
+while withholding the rest — the window re-opens for that slice, so a peer that
+keeps filling it can push a further 256 KiB into the queue beyond the once-only
+`TCP_WND` fill. Worst-case uplink queue is therefore `TCP_WND` + 256 KiB, not
+`TCP_WND` alone — both `lwipopts.h`'s own comment and the tcp_lane.h watermark
+comment stress the general distinction (queue bound vs. watermark), and this doc
+follows it precisely: **the dominant per-flow cost below is `TCP_WND` + 256 KiB +
+`TCP_SND_BUF`, not the backpressure watermarks.**
 
 Config knobs, by when they take effect:
 
@@ -71,31 +80,34 @@ Config knobs, by when they take effect:
 ## 3. Per-flow and aggregate cost, recomputed
 
 **Per-flow worst case** (one `ACTIVE` flow simultaneously saturated in both
-directions — recv window fully outstanding and send buffer fully queued):
+directions — recv window fully outstanding including the `PENDING_STREAM`
+256 KiB re-open headroom (§2), send buffer fully queued, one downlink chunk
+stashed awaiting a `tcp_write` retry, plus the flow's own control-block cost):
 
 ```
-TCP_WND (2,097,120 B) + TCP_SND_BUF (2,097,152 B) = 4,194,272 B ≈ 4.00 MiB / 4.19 MB
+TCP_WND (2,097,120 B) + 256 KiB re-open (262,144 B) + TCP_SND_BUF (2,097,152 B)
+  + downlink stash (TCP_MSS, 8,960 B) + mqvpn_tcp_flow_t (176 B)
+  = 4,465,552 B ≈ 4.46 MB
 ```
 
-This is the number to use as "cost per concurrent flow." It is about 10% below the
-plan sketch's ~4.7 MB/flow figure — the two dominant compile-time constants
-(`TCP_WND`, `TCP_SND_BUF`) are unchanged from what the plan assumed; the residual
-difference is attributable to secondary per-flow overhead the plan folded in
-(`mqvpn_tcp_flow_t` itself is small, ~120 B per the tcp_lane.c comment in §4, and
-uplink-node/pbuf-chain overhead — neither is large enough on its own to close a 10%
-gap, so treat both figures as "≈ 4–5 MB/flow, window-and-sndbuf dominated" rather
-than debugging the last 10%).
+This is the number to use as "cost per concurrent flow" — about 5% below the plan
+sketch's ~4.7 MB/flow figure, not the ~10% an earlier pass of this doc reported:
+that earlier `TCP_WND + TCP_SND_BUF`-only figure (4,194,272 B ≈ 4.19 MB) undercounted
+both the PENDING_STREAM re-open headroom above and the small stash/struct terms,
+which together close most of the gap to the plan's estimate (`mqvpn_tcp_flow_t` is
+176 B per the confirmed `sizeof`, not the ~120 B this doc previously assumed — see
+§4). Treat **≈ 4.5 MB/flow** as the precise, reconciled figure going forward.
 
 **Aggregate worst case** at the config default `tcp_max_flows = 256`:
 
 ```
-256 × 4,194,272 B = 1,073,733,632 B ≈ 1.00 GiB (≈ 1.07 GB decimal)
+256 × 4,465,552 B = 1,143,181,312 B ≈ 1.06 GiB (≈ 1.14 GB decimal)
 ```
 
-About 10% below the plan sketch's ~1.2 GB, for the same reason as above. Both
-numbers agree on the actionable conclusion: **the TCP-lane window/send-buffer pair
-dominates aggregate memory, not the marker tables or PBUF_POOL** — those are a
-few MB combined (see §4) against roughly 1 GB from the flow table itself.
+Still about 5% below the plan sketch's ~1.2 GB. Both numbers agree on the
+actionable conclusion: **the TCP-lane window/send-buffer pair dominates aggregate
+memory, not the marker tables or PBUF_POOL** — those are a few MB combined (see §4)
+against roughly 1 GB from the flow table itself.
 
 ## 4. Fixed overhead (independent of concurrent flow count)
 
@@ -105,11 +117,11 @@ worst case), not per active flow:
 | Item | Worst-case size | Source |
 |---|---|---|
 | PBUF_POOL static reservation | ≈ 2.3 MiB (dead on ingress, see §1a) | lwipopts.h |
-| Sticky-RAW marker table (cap 4096) | ≈ 0.5 MB entries (`mqvpn_tcp_flow_t` ≈ 120 B each); keys alone 38 B × 4096 ≈ 156 KB | tcp_lane.c comment on `TCP_LANE_RAW_MARKER_CAP` |
-| CLOSING routing-marker table (cap 4096) | ≈ 0.5 MB, same shape as above | tcp_lane.c comment on `TCP_LANE_CLOSING_CAP` |
+| Sticky-RAW marker table (cap 4096) | ≈ 0.72 MB entries (`mqvpn_tcp_flow_t` = 176 B each, confirmed via `sizeof`); key field alone 38 B × 4096 ≈ 156 KB (already counted within the 176 B) | tcp_lane.c comment on `TCP_LANE_RAW_MARKER_CAP` |
+| CLOSING routing-marker table (cap 4096) | ≈ 0.72 MB, same shape as above (downlink stash is freed at the CLOSING transition — see tcp_lane.c's `tcp_lane_mark_closing` — so a CLOSING entry never carries a live stash) | tcp_lane.c comment on `TCP_LANE_CLOSING_CAP` |
 | Hash bucket array (8192 buckets) | 64 KiB | tcp_lane.c `mqvpn_tcp_lane_new` |
 
-Total fixed overhead ≈ 3.3 MB worst case — small next to the ~1 GB flow-table cost
+Total fixed overhead ≈ 3.9 MB worst case — small next to the ~1 GB flow-table cost
 at 256 concurrent flows.
 
 ## 5. Framing against a future mobile constraint (iOS Network Extension, 50 MB)
@@ -126,12 +138,14 @@ of 4096, ≈ 30 KB each, negligible), leaves roughly **49 MB for the flow table*
 Two independent levers, illustrated separately (neither is a recommendation, both
 would need to be tuned together against expected concurrency and target link BDP):
 
-- **Cut concurrency, keep today's window sizing** (~4.19 MB/flow): `49 MB / 4.19 MB
-  ≈ 11` concurrent flows. A drop from 256 to ~11 is a severe concurrency cut,
-  likely too restrictive for general browsing/app traffic.
+- **Cut concurrency, keep today's window sizing** (~4.46 MB/flow, §3's reconciled
+  figure): `49 MB / 4.46 MB ≈ 11` concurrent flows. A drop from 256 to ~11 is a
+  severe concurrency cut, likely too restrictive for general browsing/app traffic.
 - **Keep a mobile-plausible concurrency (e.g. 64 flows), shrink the window
-  instead**: `49 MB / 64 ≈ 766 KB` per flow — `TCP_WND` + `TCP_SND_BUF` would need
-  to shrink roughly 5.5× from today's ~4.19 MB combined. E.g. dropping
+  instead**: `49 MB / 64 ≈ 766 KB` per flow — `TCP_WND` + `TCP_SND_BUF` (the
+  dominant pair, ~4.19 MB combined; the smaller re-open/stash/struct terms in
+  §3's full figure don't move this calculation) would need to shrink roughly
+  5.5× from today's combined size. E.g. dropping
   `TCP_RCV_SCALE` from 5 to 1 (`TCP_WND = 65535 << 1 = 131,070 B`) and shrinking
   `TCP_SND_BUF` to the same order (~512–640 KB) would land in range, at the cost of
   lower per-flow goodput on high-BDP mobile links.
@@ -144,7 +158,7 @@ single-knob fix; this section is scoping data for that future work, not a propos
 - **Sticky-RAW markers are never idle-evicted.** They are only replaced on cap
   overflow or on an ISN mismatch when the same 5-tuple sees a new SYN (I2). A
   workload that produces many short-lived flows misclassified sticky-RAW (e.g. under
-  `tcp=auto`) can hold the marker table near its 4096-entry (~0.5 MB) cap
+  `tcp=auto`) can hold the marker table near its 4096-entry (~0.72 MB) cap
   indefinitely; this is a memory-bound-only cap, not a correctness issue, but it is
   not time-bounded the way TCP-lane flows are (Task 13's idle sweep).
 - **`TCP_MSS` is a compile-time upper bound.** The vendored lwIP tree exposes no
@@ -153,10 +167,11 @@ single-knob fix; this section is scoping data for that future work, not a propos
   `netif->mtu`, clamped to `TCP_MSS`. Raising the TUN MTU ceiling above 9000 requires
   bumping `TCP_MSS` (and, per lwipopts.h's own derivation, `TCP_WND`/`TCP_SND_BUF`
   alongside it) at compile time — there is no runtime knob.
-- **`PBUF_POOL_SIZE` = 256 remains statically reserved** (≈ 2.3 MiB) despite having
-  no production consumer left on the ingress path after the I1 fix (§1a). Shrinking
-  it is a real tightening candidate but requires confirming no other lwIP-internal
-  facility in this build still draws from `PBUF_POOL` — not done here.
+- **`PBUF_POOL_SIZE` = 256 remains statically reserved** (≈ 2.3 MiB) despite being
+  verified dead in this build (§1a — every `pbuf_alloc(..., PBUF_POOL)` call site
+  in the vendored lwIP tree lives in a netif driver this build never compiles).
+  Shrinking it to a minimal placeholder or 0 is a real tightening candidate, not
+  just a follow-up to confirm.
 - **`MEMP_NUM_TCP_SEG` (2048, global) can bottleneck well before `tcp_max_flows`
   (256) does** under a bursty workload: only ≈ 2 flows can be simultaneously fully
   saturated at `TCP_SND_BUF` before the shared segment pool is exhausted, at which
