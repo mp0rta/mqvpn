@@ -746,3 +746,84 @@ jobs:
         env:
           LINT_MODE: fail
         run: bash scripts/lint/check_lifecycle_field_writes.sh
+
+  hybrid-e2e:
+    # H2 hybrid TCP-lane end-to-end suite (7 scenarios, incl. iperf3
+    # throughput ratios + a netem multipath-aggregation test). Runs in a
+    # dedicated NON-sanitized job on purpose: the throughput assertions are
+    # unreliable under ASan on shared runners (same reason the control-API
+    # e2e skips its data-plane phases in the sanitizer job). Reuses the same
+    # clang-Debug BoringSSL/xquic cache artifacts as the sanitizer job.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libevent-dev golang iptables conntrack clang iperf3 jq netcat-openbsd curl python3
+
+      - name: Compute xquic SHA
+        id: xqsha
+        run: echo "sha=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+-')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache BoringSSL (clang fPIC)
+        id: bssl-cache
+        uses: actions/cache@v6
+        with:
+          path: third_party/xquic/third_party/boringssl
+          key: bssl-9c95ec7-linux-clang-fpic-v1
+
+      - name: Clone BoringSSL (pinned)
+        if: steps.bssl-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+
+      - name: Build BoringSSL (clang)
+        if: steps.bssl-cache.outputs.cache-hit != 'true'
+        run: |
+          cd third_party/xquic/third_party/boringssl
+          mkdir -p build && cd build
+          CC=clang CXX=clang++ cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+          make -j$(nproc) ssl crypto
+
+      - name: Cache xquic (clang Debug)
+        id: xquic-cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            third_party/xquic/build
+            third_party/xquic/include/xquic/xqc_configure.h
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-9c95ec7-v4
+
+      - name: Build xquic (clang)
+        if: steps.xquic-cache.outputs.cache-hit != 'true'
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug -DSSL_TYPE=boringssl \
+                -DXQC_ENABLE_BBR2=ON \
+                -DXQC_ENABLE_UNLIMITED=ON \
+                -DXQC_ENABLE_FEC=ON \
+                -DXQC_ENABLE_XOR=ON \
+                -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
+          make -j$(nproc)
+
+      - name: Build mqvpn (clang, hybrid lane, no sanitizers)
+        run: |
+          mkdir -p build && cd build
+          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug \
+                -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON \
+                -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
+          make -j$(nproc)
+
+      - name: E2E hybrid H1 classifier/counters (netns)
+        run: sudo -E tests/test_e2e_hybrid_h1.sh build/mqvpn
+
+      - name: E2E hybrid H2 TCP-lane suite (netns)
+        run: sudo -E tests/test_e2e_hybrid_h2.sh build/mqvpn
