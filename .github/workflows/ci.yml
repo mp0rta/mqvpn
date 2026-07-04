@@ -195,6 +195,7 @@ jobs:
           mkdir -p build && cd build
           CC=clang cmake -DCMAKE_BUILD_TYPE=Debug \
                 -DENABLE_SANITIZERS=ON \
+                -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON \
                 -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
           make -j$(nproc)
 
@@ -203,6 +204,18 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: cd build && ctest --output-on-failure
+
+      - name: Fuzz tcp_lane (short budget)
+        run: |
+          mkdir -p build-fuzz && cd build-fuzz
+          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug \
+                -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON \
+                -DMQVPN_ENABLE_FUZZING=ON \
+                -DCMAKE_C_COMPILER=clang \
+                -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
+          make -j$(nproc) fuzz_tcp_lane
+          ASAN_OPTIONS=abort_on_error=1 \
+            ./fuzz_tcp_lane -max_total_time=120 ../fuzz/corpus/tcp_lane/
 
       - name: E2E smoke test (netns)
         env:
