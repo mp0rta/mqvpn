@@ -1397,6 +1397,13 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
         switch (stream->role) {
         case SVR_STREAM_ROLE_CONNECT_IP:
             return svr_connect_ip_on_body(s, stream, h3_request);
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+        case SVR_STREAM_ROLE_CONNECT_TCP:
+            /* Handled above in the CONNECT_TCP-scoped block
+             * (READ_BODY | READ_EMPTY_FIN); unreachable here, listed only
+             * to satisfy -Wswitch. */
+            return 0;
+#endif
         case SVR_STREAM_ROLE_UNKNOWN: {
             /* 501 already sent at header time. Drain and discard any body
              * so it doesn't sit in xquic's recv buffers until flow control
