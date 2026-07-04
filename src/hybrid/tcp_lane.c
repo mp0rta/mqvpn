@@ -464,14 +464,37 @@ mqvpn_tcp_lane_tick(mqvpn_tcp_lane_t *lane, uint64_t now_us)
                      * pump's paused branch does after a successful retry. */
                     st = tcp_lane_downlink_drain(f);
                 }
-                /* st != LIVE means the retry/drain teardown f (ABORTED, or
-                 * a clean bidi-FIN GONE reached from the resumed drain) —
-                 * same "third calling context, no xquic frame to avoid
-                 * re-entering, no ERR_ABRT to translate" rationale as this
-                 * function's header comment; discard the status. f is
-                 * already unlinked+freed by that point, and `next` was
-                 * saved before this if/else-if chain, so the walk is safe. */
-                (void)st;
+                if (st != TCP_LANE_FLOW_LIVE) {
+                    /* A non-LIVE status here means `f` was either freed
+                     * (ABORTED — a fatal retry/drain error tore it down) OR
+                     * transitioned to a CLOSING routing marker still in the
+                     * table (GONE via a clean bidi-FIN reached from the
+                     * resumed drain: tcp_lane_downlink_maybe_shutdown ->
+                     * tcp_lane_finish_clean_close -> tcp_lane_mark_closing).
+                     * The saved `next` is NOT safe to trust in the GONE case:
+                     * mark_closing, when n_closing is already at
+                     * TCP_LANE_CLOSING_CAP, calls
+                     * tcp_lane_evict_oldest_closing which frees the
+                     * GLOBALLY-oldest CLOSING flow — an ARBITRARY node that
+                     * may be `next` itself (same bucket) or any other
+                     * still-to-be-visited entry. This is the ONE tick path
+                     * that can free a flow OTHER than the current `f` (idle
+                     * eviction and the CLOSING grace sweep above only ever
+                     * free `f` itself, which the saved-`next` idiom handles).
+                     * Restart this bucket from its head rather than
+                     * dereferencing a possibly-freed `next`: flows already
+                     * handled this tick are naturally skipped by the branch
+                     * guards (a no-longer-paused/no-longer-idle flow won't
+                     * re-enter these branches; the idle re-check is
+                     * idempotent within one tick), and with load factor < 1
+                     * over 8192 buckets a bucket holds ~1 entry so the
+                     * restart is effectively O(1). The ABORTED case (only
+                     * `f` freed) is also correctly handled by the restart —
+                     * `f` is already unlinked, so re-walking from head simply
+                     * skips it. */
+                    f = lane->buckets[b];
+                    continue;
+                }
             }
             f = next;
         }
@@ -1006,15 +1029,20 @@ tcp_lane_evict_oldest_closing(mqvpn_tcp_lane_t *lane)
  * a live flow's ~TCP_MSS stash for that whole window would blow the
  * ~0.5 MB "CLOSING entries are cheap" bound this table's cap comment
  * relies on (tcp_lane.h:51-53). Safe to free now: the only caller is
- * tcp_lane_finish_clean_close, reached exclusively from
- * tcp_lane_downlink_maybe_shutdown once BOTH directions have cleanly
- * FIN'd — which can only happen with f->downlink_paused == 0 (the pump
- * never lets tcp_lane_downlink_drain run, and therefore never reaches the
- * fin-handling branch that calls maybe_shutdown, while a stash retry is
- * still pending), so downlink_stash_len is always 0 here; any allocated
- * buffer is just an idle cached slot (see its field comment,
- * tcp_lane_internal.h) that will never be consumed again from CLOSING
- * residency onward — pure routing residency has no relay left to drain. */
+ * tcp_lane_finish_clean_close, reached from whichever direction observes
+ * the SECOND FIN of a clean bidi close — either the downlink side
+ * (tcp_lane_downlink_maybe_shutdown, here in this TU) or the uplink side
+ * (tcp_lane_uplink.c's maybe_fin). Both require fin_received_from_h3, and
+ * that flag is only set once the downlink drain has fully consumed the H3
+ * response and shut the pcb down — which can only happen with
+ * f->downlink_paused == 0 (the pump never lets tcp_lane_downlink_drain run,
+ * and therefore never reaches the fin-handling branch that calls
+ * maybe_shutdown, while a stash retry is still pending). So
+ * downlink_stash_len is always 0 here regardless of which direction drove
+ * the close; any allocated buffer is just an idle cached slot (see its
+ * field comment, tcp_lane_internal.h) that will never be consumed again
+ * from CLOSING residency onward — pure routing residency has no relay
+ * left to drain. */
 static void
 tcp_lane_mark_closing(mqvpn_tcp_flow_t *f)
 {
