@@ -22,7 +22,7 @@
 /* MEM_LIBC_MALLOC (standard lwIP opt, NOT heiher's fork-specific
  * MEM_CUSTOM_ALLOCATOR — that macro plus its mem_malloc→hev_malloc weak-
  * symbol hookup lives in the port/ tree we deliberately do NOT vendor, see
- * Task 1's VENDOR.md license note): raw heap allocations (mem_malloc/
+ * VENDOR.md's license note): raw heap allocations (mem_malloc/
  * mem_free, used for pbuf payloads etc.) go straight to libc malloc/free,
  * no custom function needed. MEMP_MEM_MALLOC stays 0 — that is the
  * INDEPENDENT flag controlling the pool-based allocator (pcbs, tcp
@@ -38,7 +38,7 @@
  * (tcp.h) is a read-only accessor. Instead lwIP derives each pcb's MSS
  * automatically at connect/accept time via tcp_eff_send_mss_netif() from
  * the netif's MTU, and clamps the peer's advertised MSS option to TCP_MSS
- * (tcp_in.c). So Task 4's glue MUST set the lwIP netif->mtu from the real
+ * (tcp_in.c). So the glue MUST set the lwIP netif->mtu from the real
  * TUN MTU; the effective per-pcb MSS then becomes
  * min(TCP_MSS, netif->mtu - 40, peer-advertised MSS). */
 #define TCP_MSS 8960 /* 9000 - 40 */
