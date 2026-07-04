@@ -9,8 +9,8 @@
  * table, accept callback, downlink relay, close/error mapping) and
  * tcp_lane_uplink.c (uplink queue + send + flush + FIN machinery).
  *
- * Split out at Task 12 (tcp_lane.c crossed the file's ~800-line extraction
- * trigger): the two .c files are logically ONE module, just divided for
+ * Split out once tcp_lane.c crossed the file's ~800-line extraction
+ * trigger: the two .c files are logically ONE module, just divided for
  * size hygiene. This header is NOT part of the public API (src/hybrid/ is
  * internal to libmqvpn already; this header is internal to tcp_lane.c's own
  * pair of TUs) — it holds:
@@ -48,11 +48,11 @@ typedef enum {
                               * later packets on this 5-tuple skip
                               * re-classification (§ sticky-lane). */
     TCP_FLOW_PENDING_ACCEPT, /* to_tcp verdict recorded; lwIP has not yet
-                              * accepted the SYN (Task 7). */
+                              * accepted the SYN. */
     TCP_FLOW_PENDING_STREAM, /* lwIP accepted; H3 CONNECT-TCP stream not
-                              * yet open (Task 8). */
+                              * yet open. */
     TCP_FLOW_ACTIVE,         /* pcb + h3 stream both live, relaying. */
-    TCP_FLOW_CLOSING,        /* C1 (post-Task-12 fix): both directions
+    TCP_FLOW_CLOSING,        /* C1 (post-close-mapping fix): both directions
                               * completed a clean bidi FIN
                               * (tcp_lane_finish_clean_close) — the pcb is
                               * gracefully tcp_close()d (left in LAST_ACK or
@@ -94,7 +94,7 @@ typedef enum {
 } mqvpn_tcp_flow_state_t;
 
 /* Flow-liveness status returned by the teardown funnel and by every helper
- * a lwIP-invoked callback frame (accept/recv/sent) can reach — Task 12's
+ * a lwIP-invoked callback frame (accept/recv/sent) can reach — the
  * ERR_ABRT plumbing. lwIP's callback contract (vendored tcp_in.c): a
  * callback that tcp_abort()s its own pcb MUST return ERR_ABRT; on any other
  * return the core keeps dereferencing the freed pcb (tcp_in.c:474
@@ -164,8 +164,8 @@ typedef struct mqvpn_tcp_flow {
      * by the writable notify and by the 2xx transition. uplink_queued_bytes
      * counts UNSENT bytes only (sum of tot_len - offset), which is the
      * watermark metric: what xquic has not yet taken from us.
-     * (Task 6 reserved a uplink_inflight_bytes field here; it was never
-     * decremented anywhere in the plan and its "accepted by xquic" meaning
+     * (An earlier uplink_inflight_bytes field was reserved here; it was never
+     * decremented anywhere and its "accepted by xquic" meaning
      * has no completion signal to drive it, so it is replaced by
      * uplink_queued_bytes — see tcp_lane.h's watermark comment.) */
     mqvpn_tcp_uplink_node_t *uplink_q_head;
@@ -179,7 +179,7 @@ typedef struct mqvpn_tcp_flow {
     int fin_received_from_h3;
     int tcp_fin_seen;
 
-    /* Downlink stash (Task 11): the ONE chunk already pulled out of the H3
+    /* Downlink stash: the ONE chunk already pulled out of the H3
      * response body (recv_body is destructive — a re-read is not possible)
      * but not yet accepted by tcp_write, because sndbuf/ERR_MEM said no.
      * Exactly one slot always suffices: the pump stops consuming recv_body
@@ -191,14 +191,14 @@ typedef struct mqvpn_tcp_flow {
     uint16_t downlink_stash_len;
 
     /* Back-pointer to the owning lane. Set in mqvpn_tcp_lane_on_syn at flow
-     * creation for every to_tcp=1 flow (Task 13: the idle sweep's teardown
+     * creation for every to_tcp=1 flow (the idle sweep's teardown
      * funnel can reach a flow before it ever gets to the accept callback,
      * and tcp_lane_remove_flow asserts this non-NULL), re-affirmed
      * (harmlessly, same pointer) by the accept callback. Needed because the
      * lwIP callbacks (on_lwip_recv/on_lwip_sent) receive only the flow as
      * tcp_arg, not the lane — this is how they reach lane->clock_fn for
      * last_activity_us stamping, how on_lwip_sent's resume path can call the
-     * public mqvpn_tcp_lane_downlink_pump(lane, stream) API, and (Task 12)
+     * public mqvpn_tcp_lane_downlink_pump(lane, stream) API, and
      * how the uplink TU's fatal-FIN-send/clean-close paths reach
      * tcp_lane_remove_flow(f->lane, f) without needing a `lane` parameter of
      * their own. NULL for sticky-RAW markers (they never reach the teardown
@@ -246,12 +246,12 @@ typedef struct mqvpn_tcp_flow {
 #  define MQVPN_TCP_LANE_TCP_OUTPUT(pcb) tcp_output(pcb)
 #endif
 
-/* tcp_abort/tcp_close (Task 12): the close/error-mapping teardown paths.
+/* tcp_abort/tcp_close: the close/error-mapping teardown paths.
  * tcp_abort in particular sends an RST and FREES the pcb synchronously
  * (vendored tcp.c: tcp_abandon) — on a stack-fake test pcb this would
  * tcp_free() (memp_free) memory lwIP's pool never allocated. tcp_close is
  * only ever reached here on a pcb already past its own FIN-sending state
- * transition (reconciliation H's clean-close path), which is a proven
+ * transition (the clean-close path), which is a proven
  * no-op status-wise, but it still unconditionally sets the TF_RXCLOSED flag
  * via tcp_set_flags() before delegating — a harmless field write on a real
  * pcb, but still routed through the hook for symmetry with tcp_abort and so
@@ -293,7 +293,7 @@ tcp_lane_flow_status_t tcp_lane_uplink_deliver(mqvpn_tcp_flow_t *f, struct pbuf 
 
 /* Defined in tcp_lane.c. Fatal relay failure, from EITHER TU: an H3
  * send/recv error, a pcb write/shutdown error, or an allocation failure
- * that would otherwise force dropping already-ACKed TCP bytes. Task 12:
+ * that would otherwise force dropping already-ACKed TCP bytes. This
  * does the FULL local-initiated teardown (RST the pcb, RST the H3 request,
  * unlink + free the flow) — see tcp_lane.c's comment on
  * mqvpn_tcp_lane_on_relay_error and tcp_lane_teardown_flow for the exact
@@ -308,8 +308,8 @@ tcp_lane_flow_status_t mqvpn_tcp_lane_on_relay_error(mqvpn_tcp_flow_t *f);
 /* Defined in tcp_lane.c. Both directions have now cleanly FIN'd (the
  * uplink FIN was forwarded to H3 AND the downlink FIN was forwarded to the
  * pcb) — gracefully detach and let both sides finish on their own; see
- * tcp_lane.c's comment for the source-verified lwIP/xquic semantics
- * (reconciliation H). Called from tcp_lane_uplink.c's maybe_fin and
+ * tcp_lane.c's comment for the source-verified lwIP/xquic semantics.
+ * Called from tcp_lane_uplink.c's maybe_fin and
  * tcp_lane.c's own downlink-shutdown path, whichever direction's flag
  * transition observes the OTHER flag already set.
  *

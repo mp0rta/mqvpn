@@ -260,13 +260,32 @@ typedef struct {
     uint64_t dgram_lost;
     uint64_t dgram_acked;
     int srtt_ms;
-    /* Hybrid-mode per-lane counters (0 unless hybrid classifier active). */
-    uint64_t pkts_lane_tcp;
-    uint64_t pkts_lane_dgram;
-    uint64_t pkts_lane_raw;
-    uint64_t tcp_flows_active;   /* future tcp_lane; 0 for now */
-    uint64_t tcp_flows_total;    /* future tcp_lane; 0 for now */
-    uint64_t tcp_flows_rejected; /* future tcp_lane; 0 for now */
+    /* Hybrid-mode per-lane counters (0 unless hybrid classifier active).
+     * tcp/dgram/raw partition every classified packet exactly once. */
+    uint64_t pkts_lane_tcp;   /* packets actually handed to the TCP lane (lwIP) */
+    uint64_t pkts_lane_dgram; /* packets sent via the datagram lane */
+    uint64_t pkts_lane_raw;   /* packets sent via the raw lane, incl. TCP
+                               * candidates that fell back to RAW (sticky-RAW,
+                               * cap-rejected, non-SYN unknown, lane-less build) */
+    /* tcp_flows_active: currently open TCP-lane flows. Client: the TCP-lane
+     * flow table's live count. Server: the whole-server count of open
+     * egress TCP flows (mqvpn_server_get_stats). */
+    uint64_t tcp_flows_active;
+    /* tcp_flows_total: cumulative TCP-lane flows opened (never decrements).
+     * Client: SYNs the flow table admitted. Server: egress flows admitted. */
+    uint64_t tcp_flows_total;
+    /* tcp_flows_rejected: cumulative flows refused by a cap. Client: SYNs
+     * rejected pre-lwIP (flow-table cap or alloc failure). Server: cap-503s
+     * (global fd-budget + per-session tcp_max_flows; ACL 403s / 5xx syscall
+     * failures are not counted). */
+    uint64_t tcp_flows_rejected;
+    /* pkts_lane_tcp_dropped: client-only — TCP-lane packets lwIP refused
+     * (e.g. no matching pcb). Always 0 server-side. */
+    uint64_t pkts_lane_tcp_dropped;
+    /* raw_markers_active: client-only gauge — sticky-RAW markers currently
+     * held in the TCP-lane flow table (5-tuples pinned to RAW under
+     * tcp=auto). Always 0 server-side. */
+    uint64_t raw_markers_active;
 } mqvpn_stats_t;
 
 typedef struct {
@@ -411,6 +430,20 @@ typedef struct {
                                 void *user_ctx);
     void (*on_client_disconnected)(uint32_t session_id, mqvpn_error_t reason,
                                    void *user_ctx);
+
+    /* v6: hybrid TCP lane egress fd interest (OPTIONAL — NULL disables
+     * tcp_egress; connect-tcp-style requests get 503 if unset). The core
+     * (src/hybrid/tcp_egress.c) owns every egress fd's socket()/connect()/
+     * send()/recv()/close() syscalls directly — same "fd-path mode"
+     * convention the client's UDP path fds already use. These two
+     * callbacks only ask the platform to (un)register interest in an
+     * ALREADY-OPEN fd with its reactor. want_read/want_write may be
+     * updated on an already-registered fd (egress_fd_register is called
+     * again with new flags, not just once at creation) — on Linux this
+     * means replacing the libevent event, not mutating one in place. */
+    void (*egress_fd_register)(int fd, int want_read, int want_write, void *fd_ctx,
+                               void *user_ctx);
+    void (*egress_fd_unregister)(int fd, void *user_ctx);
 } mqvpn_server_callbacks_t;
 
 #define MQVPN_SERVER_CALLBACKS_INIT                      \
@@ -492,6 +525,33 @@ MQVPN_API int mqvpn_config_set_hybrid_tcp_mode(mqvpn_config_t *cfg, int mode);
  * 256 flows, 300 s idle timeout). */
 MQVPN_API int mqvpn_config_set_hybrid_limits(mqvpn_config_t *cfg, uint32_t tcp_max_flows,
                                              uint32_t tcp_idle_timeout_sec);
+/* Server-side egress connect() timeout for the connect-tcp lane, in
+ * seconds (default 10). sec must be > 0. */
+MQVPN_API int mqvpn_config_set_hybrid_connect_timeout(mqvpn_config_t *cfg, uint32_t sec);
+/* Server-wide cap on concurrent egress TCP fds the connect-tcp lane will
+ * ever open (default MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT = 4096), narrowed
+ * further at startup by available rlimit headroom — see
+ * mqvpn_server_egress_fd_budget(). Distinct from
+ * mqvpn_config_set_hybrid_limits()'s tcp_max_flows, which caps concurrent
+ * flows per H3 connection, not server-wide. max_flows must be > 0. */
+MQVPN_API int mqvpn_config_set_hybrid_max_global_flows(mqvpn_config_t *cfg,
+                                                       uint32_t max_flows);
+/* Egress ACL for the connect-tcp lane's destination check (server-side
+ * only; harmless but unused on clients). `allow` punches holes through the
+ * mandatory default-deny (loopback/RFC1918/link-local/CGNAT/multicast/
+ * broadcast/the server's own tunnel subnet); `deny` adds extra blocks
+ * evaluated after the default-deny set. Each entry is a strict "a.b.c.d/n"
+ * IPv4 CIDR string (n = 0..32, no bare-address form). Unlike the INI/JSON
+ * file-config loaders (which skip malformed entries with a warning), this
+ * setter validates the WHOLE call atomically: any malformed entry rejects
+ * the entire call with MQVPN_ERR_INVALID_ARG and leaves cfg unmodified.
+ * n_allow/n_deny may be 0 with allow/deny NULL; either list capped at
+ * MQVPN_EGRESS_ACL_MAX entries (src/hybrid/classifier.h). Caution:
+ * "0.0.0.0/0" in the allow list disables the built-in protections
+ * (loopback/RFC1918/...); enumerate specific ranges instead. */
+MQVPN_API int mqvpn_config_set_hybrid_egress_acl(mqvpn_config_t *cfg, const char **allow,
+                                                 int n_allow, const char **deny,
+                                                 int n_deny);
 
 /* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock) */
 typedef uint64_t (*mqvpn_clock_fn)(void *ctx);
@@ -662,6 +722,21 @@ MQVPN_API int mqvpn_server_stop(mqvpn_server_t *server);
 MQVPN_API int mqvpn_server_on_socket_recv(mqvpn_server_t *server, const uint8_t *pkt,
                                           size_t len, const struct sockaddr *peer,
                                           socklen_t peer_len);
+
+/* Platform calls this when a previously-registered egress fd (via
+ * egress_fd_register) becomes readable and/or writable. fd_ctx is the
+ * opaque pointer the core passed to egress_fd_register for that fd. */
+MQVPN_API void mqvpn_server_on_egress_fd_ready(mqvpn_server_t *server, int fd,
+                                               void *fd_ctx, int readable, int writable);
+
+/* Upper bound on concurrent egress TCP fds the server will ever open
+ * (min(rlimit_nofile - reserve, configured cap)). Computed once at
+ * mqvpn_server_new and frozen for the server's lifetime: platforms size
+ * their fd->event registries from this, and the server's own admission cap
+ * uses the same snapshot, so the two bounds cannot drift (a runtime
+ * setrlimit changes neither). Returns 0 on NULL server; a value <= 0 means
+ * "treat tcp_egress as disabled — do not allocate a registry". */
+MQVPN_API int mqvpn_server_egress_fd_budget(mqvpn_server_t *server);
 
 MQVPN_API int mqvpn_server_on_tun_packet(mqvpn_server_t *server, const uint8_t *pkt,
                                          size_t len);

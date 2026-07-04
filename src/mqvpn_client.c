@@ -205,10 +205,11 @@ struct mqvpn_client_s {
     /* Hybrid-mode per-lane TX counters. Stay 0 unless hybrid is enabled.
      * tcp_flows_rejected counts SYNs that wanted the TCP lane but were
      * refused pre-lwIP (cap or alloc failure); authoritative source for the
-     * public tcp_flows_rejected stat — Task 24 surfaces THIS counter, not
-     * the lane's flows_rejected_cap, and must not sum them (the lane's
-     * rejected_cap/rejected_other split overlaps this but is not equal).
-     * pkts_lane_tcp_dropped counts packets lwIP refused. */
+     * public tcp_flows_rejected stat surfaced by mqvpn_client_get_stats,
+     * which reads THIS counter, not the lane's flows_rejected_cap — summing
+     * them would double-count (the lane's rejected_cap/rejected_other split
+     * overlaps this but is not equal). pkts_lane_tcp_dropped counts packets
+     * lwIP refused. */
     uint64_t pkts_lane_tcp;
     uint64_t pkts_lane_dgram;
     uint64_t pkts_lane_raw;
@@ -706,7 +707,13 @@ client_init_handle(mqvpn_client_t *c, const mqvpn_config_t *cfg,
                    const mqvpn_client_callbacks_t *cbs, void *user_ctx)
 {
     memcpy(&c->config, cfg, sizeof(*cfg));
-    memcpy(&c->cbs, cbs, sizeof(*cbs));
+    /* Clamp to the caller's struct_size: a platform built against an older
+     * (shorter) callbacks struct must not be over-read — appended fields
+     * stay NULL (c is calloc'd), which is the "callback unset" state. */
+    size_t cbs_size = (cbs->struct_size && cbs->struct_size < sizeof(*cbs))
+                          ? cbs->struct_size
+                          : sizeof(*cbs);
+    memcpy(&c->cbs, cbs, cbs_size);
     c->user_ctx = user_ctx; // lgtm[cpp/stack-address-escape]
     c->log_level = cfg->log_level;
     c->state = MQVPN_STATE_IDLE;
@@ -1460,7 +1467,37 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
         }
         c->mtu = tun_mtu;
 
+        /* Hybrid: learn the tunnel subnet for the classifier's TCP-lane
+         * exclusion. The full rationale (server ACL denies the tunnel
+         * subnet unconditionally → lane could only RST; RAW keeps intra-VPN
+         * TCP working) and the /24 widening rule (with its wider-pool
+         * limitation) live on mqvpn_tunnel_subnet_learn and
+         * client_tunnel_subnet in classifier.h. Deliberately OUTSIDE the
+         * MQVPN_HYBRID_TCP_LANE_ENABLED block: lane-less builds still
+         * classify for counters and must report the same verdicts. */
+        mqvpn_tunnel_subnet_learn(conn->assigned_ip, (int)conn->assigned_prefix,
+                                  &c->config.hybrid.client_tunnel_subnet);
+
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+        /* Sanitize the [Hybrid] block at its consumer, BEFORE the enabled
+         * gate below (validate-at-consumer pattern — mirrors
+         * mqvpn_reorder_config_validate at mqvpn_reorder_rx_new and the
+         * server-side check in mqvpn_server_new): the INI/JSON loaders store
+         * raw scalars, so an invalid block (e.g. TcpMaxFlows = 0) reaches
+         * here unchecked and would size the lane's flow table from garbage.
+         * PER-FIELD reset (mqvpn_hybrid_config_sanitize), never a
+         * whole-block default reset: enabled and every valid field stay as
+         * configured — an unrelated scalar typo must not silently disable
+         * the whole TCP lane (nor, on the server side, drop ACL policy).
+         * Warned per field; never a hard failure. Idempotent across
+         * reconnects: the reset makes the config valid, so the warns fire
+         * at most once per client. */
+        {
+            const char *bad_fields[8];
+            int n_bad = mqvpn_hybrid_config_sanitize(&c->config.hybrid, bad_fields, 8);
+            for (int i = 0; i < n_bad && i < 8; i++)
+                LOG_W(c, "invalid [Hybrid] %s; using default", bad_fields[i]);
+        }
         /* H2: bring up the lwIP TCP-lane stack now that the inner MTU is
          * resolved (lwIP derives each pcb's MSS from netif->mtu at accept
          * time). Gate mirrors the classifier's TCP-lane rule: enabled &&
@@ -2801,8 +2838,31 @@ tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t 
      * disabled (default) — zero hot-path cost. */
     if (c->config.hybrid.enabled) {
         mqvpn_flow_key_t flow_key;
+        /* Set on entry to the LANE_TCP case; every exit from it EXCEPT the
+         * lwIP hand-off (which returns TUN_INGRESS_DROP before reaching the
+         * post-switch bump) is a fall-back to the RAW lane, so this flag
+         * lets those packets land in pkts_lane_raw — keeping the
+         * tcp+dgram+raw partition total. Without it, a TCP candidate that
+         * fell back to RAW (sticky-RAW marker, cap-rejected SYN, non-SYN on
+         * an unknown flow, marker-cap refusal, or a lane-less build) would
+         * be transmitted RAW yet counted in no lane at all. */
+        int tcp_candidate_to_raw = 0;
         switch (mqvpn_hybrid_classify(pkt, len, &c->config.hybrid, &flow_key)) {
-        case MQVPN_LANE_TCP: c->pkts_lane_tcp++;
+        case MQVPN_LANE_TCP:
+            /* pkts_lane_tcp is deliberately NOT incremented here: at this
+             * point the packet is only TCP-shaped (IPv4 TCP, hybrid
+             * enabled, tcp mode != raw) — whether it actually reaches the
+             * TCP lane still depends on the per-flow sticky verdict below
+             * (an established sticky-RAW flow, a cap-rejected new flow, or
+             * a non-SYN packet on an unknown flow all `break` out to RAW
+             * without ever touching lwIP). Counting here would make
+             * pkts_lane_tcp indistinguishable between a sticky-RAW flow and
+             * a real TCP-lane flow under tcp=auto. The counter is bumped
+             * instead right before the lwIP hand-off below, once the
+             * verdict has actually resolved to "feed lwIP"; every OTHER
+             * exit from this case is a RAW fall-back (tcp_candidate_to_raw,
+             * counted in pkts_lane_raw after the switch). */
+            tcp_candidate_to_raw = 1;
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
             if (conn->tcp_lane) { /* implies lwip_ctx != NULL (coherence
                                    * rule at the creation site) */
@@ -2878,6 +2938,11 @@ tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t 
                  * lwIP, which demuxes it against its OWN pcb/TIME_WAIT
                  * state; we are only routing, not relaying. */
 
+                /* The verdict has resolved to "feed lwIP" — this IS the TCP
+                 * lane, count it here (see the case-entry comment above for
+                 * why counting at classify-time instead would conflate
+                 * sticky-RAW/rejected packets with real TCP-lane ones). */
+                c->pkts_lane_tcp++;
                 if (mqvpn_lwip_input(conn->lwip_ctx, pkt, len) < 0)
                     c->pkts_lane_tcp_dropped++;
                 /* Consumed by lwIP. MUST be an explicit TUN_INGRESS_DROP:
@@ -2891,6 +2956,12 @@ tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t 
         case MQVPN_LANE_DGRAM: c->pkts_lane_dgram++; break;
         case MQVPN_LANE_RAW: c->pkts_lane_raw++; break;
         }
+        /* A TCP candidate that fell back to RAW (see tcp_candidate_to_raw's
+         * declaration): count it in the raw lane exactly once here. Cannot
+         * double-count with the MQVPN_LANE_RAW case above — that case never
+         * sets the flag — nor with the lwIP hand-off, which returns before
+         * reaching this point. */
+        if (tcp_candidate_to_raw) c->pkts_lane_raw++;
     }
 
     /* §5/§9: reorder gating decides STAMP vs RAW vs DROP_MTU. Stamping is
@@ -3292,8 +3363,25 @@ mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
     out->pkts_lane_tcp = c->pkts_lane_tcp;
     out->pkts_lane_dgram = c->pkts_lane_dgram;
     out->pkts_lane_raw = c->pkts_lane_raw;
-    /* tcp_flows_active/total/rejected stay 0 (memset above) until Task 24
-     * wires the live c->tcp_flows_rejected / tcp_lane stats through. */
+    out->pkts_lane_tcp_dropped = c->pkts_lane_tcp_dropped;
+    /* tcp_flows_rejected's authoritative source is c->tcp_flows_rejected
+     * (pre-lwIP SYN rejections, cap and alloc-failure alike) — see the
+     * field comment on c->pkts_lane_tcp above for why this must not be
+     * summed with the lane's internal flows_rejected_cap. */
+    out->tcp_flows_rejected = c->tcp_flows_rejected;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* tcp_flows_active/total and raw_markers_active are gauges/counters
+     * the TCP-lane flow table already maintains (mqvpn_tcp_lane_get_stats)
+     * — surface them verbatim rather than re-deriving. Stay 0 (memset
+     * above) when hybrid is disabled or the lane never came up. */
+    if (c->conn && c->conn->tcp_lane) {
+        mqvpn_tcp_lane_stats_t lane_stats;
+        mqvpn_tcp_lane_get_stats(c->conn->tcp_lane, &lane_stats);
+        out->tcp_flows_active = lane_stats.flows_active;
+        out->tcp_flows_total = lane_stats.flows_total;
+        out->raw_markers_active = lane_stats.raw_markers_active;
+    }
+#endif
 
     /* Get connection-level SRTT from xquic (μs → ms) */
     if (c->engine && c->conn) {

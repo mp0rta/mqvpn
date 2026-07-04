@@ -22,7 +22,7 @@
 /* MEM_LIBC_MALLOC (standard lwIP opt, NOT heiher's fork-specific
  * MEM_CUSTOM_ALLOCATOR — that macro plus its mem_malloc→hev_malloc weak-
  * symbol hookup lives in the port/ tree we deliberately do NOT vendor, see
- * Task 1's VENDOR.md license note): raw heap allocations (mem_malloc/
+ * VENDOR.md's license note): raw heap allocations (mem_malloc/
  * mem_free, used for pbuf payloads etc.) go straight to libc malloc/free,
  * no custom function needed. MEMP_MEM_MALLOC stays 0 — that is the
  * INDEPENDENT flag controlling the pool-based allocator (pcbs, tcp
@@ -38,7 +38,7 @@
  * (tcp.h) is a read-only accessor. Instead lwIP derives each pcb's MSS
  * automatically at connect/accept time via tcp_eff_send_mss_netif() from
  * the netif's MTU, and clamps the peer's advertised MSS option to TCP_MSS
- * (tcp_in.c). So Task 4's glue MUST set the lwIP netif->mtu from the real
+ * (tcp_in.c). So the glue MUST set the lwIP netif->mtu from the real
  * TUN MTU; the effective per-pcb MSS then becomes
  * min(TCP_MSS, netif->mtu - 40, peer-advertised MSS). */
 #define TCP_MSS 8960 /* 9000 - 40 */
@@ -104,9 +104,21 @@
 #define PBUF_POOL_BUFSIZE LWIP_MEM_ALIGN_SIZE(TCP_MSS + 40 + PBUF_LINK_ENCAPSULATION_HLEN)
 
 /* Checksums: keep ON in v1 (fuzz safety per spec Notes) — this is a known
- * perf knob, do not flip without a documented follow-up. */
-#define CHECKSUM_CHECK_IP     1
-#define CHECKSUM_CHECK_TCP    1
+ * perf knob, do not flip without a documented follow-up. The CHECK_* pair is
+ * #ifndef-guarded ONLY so the dedicated libFuzzer build (lwip_core_fuzz —
+ * see CMakeLists.txt, gated on MQVPN_ENABLE_FUZZING) can pass
+ * -DCHECKSUM_CHECK_IP=0 / -DCHECKSUM_CHECK_TCP=0 to drop the ingress
+ * checksum wall, so mutated packets actually reach the TCP state machine
+ * instead of dying in ip4_input/tcp_input. Production defines neither, so it
+ * still gets 1 — behavior is byte-for-byte identical to the plain #define.
+ * The GEN_* side stays unconditional: it never gates ingress and flipping it
+ * has no fuzzing value. */
+#ifndef CHECKSUM_CHECK_IP
+#  define CHECKSUM_CHECK_IP 1
+#endif
+#ifndef CHECKSUM_CHECK_TCP
+#  define CHECKSUM_CHECK_TCP 1
+#endif
 #define CHECKSUM_GEN_IP       1
 #define CHECKSUM_GEN_TCP      1
 #define LWIP_CHECKSUM_ON_COPY 1

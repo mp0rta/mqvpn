@@ -6,9 +6,18 @@
 #ifndef MQVPN_HYBRID_CLASSIFIER_H
 #define MQVPN_HYBRID_CLASSIFIER_H
 
+#include <ctype.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#else
+#  include <arpa/inet.h>
+#  include <netinet/in.h>
+#endif
 #include "reorder.h" /* mqvpn_flow_key_t, mqvpn_parse_l3l4 */
 
 typedef enum {
@@ -23,6 +32,110 @@ typedef enum {
     MQVPN_HYBRID_TCP_AUTO,
 } mqvpn_hybrid_tcp_mode_t;
 
+/* [Hybrid] EgressAllow/EgressDeny — CIDR lists for the server-side
+ * connect-tcp egress ACL. Clients embed mqvpn_hybrid_config_t too
+ * (tcp_mode/tcp_max_flows drive client-side tcp_lane.c) but never read
+ * these fields — egress reachability is purely a server concern, exactly
+ * like tcp_max_flows is purely a client concern. Sized a bit above
+ * [ReorderRule]'s cap (MQVPN_REORDER_MAX_RULES=16): egress ranges are
+ * hand-authored network blocks evaluated once per connect-tcp request, not
+ * a hot per-packet list, so a slightly larger ceiling costs nothing. */
+#define MQVPN_EGRESS_ACL_MAX 32
+
+/* One parsed IPv4 CIDR range, host-byte-order, net pre-masked (net = addr &
+ * mask) so a match test is a single `(ip & mask) == net`. */
+typedef struct {
+    uint32_t net;
+    uint32_t mask;
+} mqvpn_cidr_entry_t;
+
+/* Host-order /n mask, n clamped to [0,32]. n<=0 -> 0, n>=32 -> 0xFFFFFFFF —
+ * both branches exist to avoid undefined behavior shifting a 32-bit value
+ * by 32 (n=0 would otherwise require `~0u << 32`). */
+static inline uint32_t
+mqvpn_cidr_mask_from_prefix(int prefix_len)
+{
+    if (prefix_len <= 0) return 0u;
+    if (prefix_len >= 32) return 0xFFFFFFFFu;
+    return 0xFFFFFFFFu << (32 - prefix_len);
+}
+
+/* Single-site CIDR membership test, shared by the classifier's tunnel-
+ * subnet gate and the server egress ACL's tunnel/allow/deny walks
+ * (svr_tcp_egress_acl_decide). ip is host byte order, like
+ * mqvpn_cidr_entry_t itself. NOTE: a mask==0 entry matches EVERY address
+ * ((ip & 0) == 0) — deliberate for a parsed "0.0.0.0/0" ACL row, which
+ * means match-all; a caller that uses mask==0 as an UNSET sentinel instead
+ * (client_tunnel_subnet below) must gate on `mask != 0` BEFORE calling. */
+static inline int
+mqvpn_cidr_match(const mqvpn_cidr_entry_t *e, uint32_t host_order_ip)
+{
+    return (host_order_ip & e->mask) == e->net;
+}
+
+/* Learn the client-side tunnel subnet from a CONNECT-IP ADDRESS_ASSIGN
+ * (assigned address bytes as they appear on the wire, network order). The
+ * server assigns a single /32 (this client's own address), not the pool
+ * subnet, so a wire prefix narrower than /24 is widened to /24 — the SAME
+ * assumption the client's server-IP derivation bakes in ("Server IP is .1
+ * in same subnet", mqvpn_client.c) — while a /24-or-wider wire prefix is
+ * honored as-is. A degenerate prefix <= 0 yields mask 0, the "not learned"
+ * sentinel that keeps the classifier gate off (see client_tunnel_subnet's
+ * docstring). Kept here rather than inline in mqvpn_client.c so the
+ * widening rule is host-unit-testable: honoring the wire /32 verbatim
+ * would still pass every classifier gate test yet silently break the
+ * tunnel-subnet exclusion in deployment. */
+static inline void
+mqvpn_tunnel_subnet_learn(const uint8_t ip[4], int assigned_prefix,
+                          mqvpn_cidr_entry_t *out)
+{
+    int plen = assigned_prefix < 24 ? assigned_prefix : 24;
+    uint32_t mask = mqvpn_cidr_mask_from_prefix(plen);
+    uint32_t hip = ((uint32_t)ip[0] << 24) | ((uint32_t)ip[1] << 16) |
+                   ((uint32_t)ip[2] << 8) | (uint32_t)ip[3];
+    out->net = hip & mask;
+    out->mask = mask;
+}
+
+/* Parse strict "a.b.c.d/n" (n = 0..32) into *out, host-byte-order, network
+ * pre-masked so a caller-supplied host part (e.g. "10.1.2.3/8") is quietly
+ * normalized the way route tables normally are. No bare-address (implicit
+ * /32) form, no surrounding whitespace tolerance. Returns 0 on success, -1
+ * on malformed input — this header has no logging dependency on purpose
+ * (config.h pulls it in), so callers decide how/whether to log a failure.
+ * static inline for the same reason mqvpn_hybrid_config_default is: src/
+ * config.c, src/mqvpn_config.c, and test binaries that skip mqvpn_lib all
+ * need this, and an out-of-line definition would need a .c home in every
+ * one of those link sets. */
+static inline int
+mqvpn_parse_cidr_v4(const char *s, mqvpn_cidr_entry_t *out)
+{
+    if (!s || !out) return -1;
+
+    char buf[32];
+    size_t len = strlen(s);
+    if (len == 0 || len >= sizeof(buf)) return -1;
+    memcpy(buf, s, len + 1);
+
+    char *slash = strchr(buf, '/');
+    if (!slash) return -1;
+    *slash = '\0';
+
+    struct in_addr addr;
+    if (inet_pton(AF_INET, buf, &addr) != 1) return -1;
+
+    const char *prefix_str = slash + 1;
+    if (!isdigit((unsigned char)*prefix_str)) return -1;
+    char *end = NULL;
+    long prefix = strtol(prefix_str, &end, 10);
+    if (*end != '\0' || prefix < 0 || prefix > 32) return -1;
+
+    uint32_t mask = mqvpn_cidr_mask_from_prefix((int)prefix);
+    out->mask = mask;
+    out->net = ntohl(addr.s_addr) & mask;
+    return 0;
+}
+
 /* Static per-session policy. The per-flow SYN-time verdict for tcp=auto
  * (active_paths >= 2) belongs to tcp_lane.c at flow creation — NOT
  * evaluated here; classify() applies only the static gates so it stays
@@ -30,9 +143,67 @@ typedef enum {
 typedef struct {
     int enabled;
     mqvpn_hybrid_tcp_mode_t tcp_mode;
-    uint32_t tcp_max_flows;        /* consumed by tcp_lane.c */
-    uint32_t tcp_idle_timeout_sec; /* consumed by tcp_lane.c */
+    uint32_t tcp_max_flows;           /* consumed by tcp_lane.c */
+    uint32_t tcp_idle_timeout_sec;    /* consumed by tcp_lane.c (client) AND, since the
+                                       * limits task, svr_tcp_egress_tick (server): the
+                                       * SAME field/semantics on both sides ("symmetric
+                                       * single [hybrid] config block" — no separate
+                                       * server-side idle key). 0 = disabled (never
+                                       * evict), mirroring tcp_lane.c's documented
+                                       * opt-out; a nonzero value evicts a flow whose
+                                       * last_activity_us has not advanced in that many
+                                       * seconds. Server-side: CONNECTING flows are
+                                       * excluded (they use connect_deadline_us
+                                       * instead, see svr_tcp_egress_tick); an ACTIVE
+                                       * flow gets its H3 stream closed, not a 5xx
+                                       * response (it already sent its 200). */
+    uint32_t tcp_connect_timeout_sec; /* server: egress connect() timeout —
+                                       * consumed when the connect stage lands */
+    uint32_t tcp_max_global_flows;    /* server: whole-server cap on concurrent egress TCP
+                                       * fds tcp_egress.c will ever open, before
+                                       * mqvpn_server_egress_fd_budget()'s rlimit-derived
+                                       * headroom check (svr_compute_egress_fd_budget)
+                                       * narrows it further — see
+                                       * MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT below for the
+                                       * default. Distinct from the per-session
+                                       * tcp_max_flows above (that one bounds concurrent
+                                       * flows on a SINGLE H3 connection; this one bounds
+                                       * the whole server). Ignored by client-side
+                                       * classify(), like the egress ACL fields below. */
+
+    /* Server-only egress ACL (connect-tcp destination policy).
+     * egress_allow punches holes through the mandatory default-deny;
+     * egress_deny adds extra blocks. Ignored by client-side classify(). */
+    mqvpn_cidr_entry_t egress_allow[MQVPN_EGRESS_ACL_MAX];
+    int n_egress_allow;
+    mqvpn_cidr_entry_t egress_deny[MQVPN_EGRESS_ACL_MAX];
+    int n_egress_deny;
+
+    /* Client-only, runtime-learned — NOT a config key (deliberately absent
+     * from cfg_keys[]): the tunnel subnet this client's CONNECT-IP address
+     * lives in, filled at ADDRESS_ASSIGN time (mqvpn_client.c, tunnel-
+     * config-ready path). classify() forces IPv4 TCP destined INSIDE this
+     * subnet onto the RAW lane: the server's connect-tcp egress ACL denies
+     * the tunnel subnet unconditionally (before EgressAllow is even
+     * consulted — svr_tcp_egress_acl_decide), so a TCP-lane flow to a
+     * tunnel-subnet destination can only ever end in a RESET, while RAW
+     * keeps intra-VPN TCP working exactly as it did before the lane
+     * existed. mask == 0 means "not learned" and disables the check (a /0
+     * tunnel subnet is meaningless, so 0 is a safe unset sentinel; the
+     * default memset covers it). Ignored by the server, mirroring how the
+     * egress ACL fields above are ignored by the client. */
+    mqvpn_cidr_entry_t client_tunnel_subnet;
 } mqvpn_hybrid_config_t;
+
+/* Default for tcp_max_global_flows above — also the fallback budget when
+ * getrlimit(RLIMIT_NOFILE) headroom (rlim_cur - 64) is larger than this
+ * (svr_compute_egress_fd_budget takes min(headroom, tcp_max_global_flows)). */
+#define MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT 4096
+
+/* Per-field defaults shared by mqvpn_hybrid_config_default and
+ * mqvpn_hybrid_config_sanitize below — named so the two can't drift. */
+#define MQVPN_TCP_MAX_FLOWS_DEFAULT           256
+#define MQVPN_TCP_CONNECT_TIMEOUT_SEC_DEFAULT 10
 
 /* static inline ON PURPOSE (not in classifier.c): src/config.c and
  * src/mqvpn_config.c will call these, and three test targets link those
@@ -43,8 +214,11 @@ mqvpn_hybrid_config_default(mqvpn_hybrid_config_t *cfg)
     memset(cfg, 0, sizeof(*cfg));
     cfg->enabled = 0;
     cfg->tcp_mode = MQVPN_HYBRID_TCP_AUTO;
-    cfg->tcp_max_flows = 256;
+    cfg->tcp_max_flows = MQVPN_TCP_MAX_FLOWS_DEFAULT;
     cfg->tcp_idle_timeout_sec = 300;
+    cfg->tcp_connect_timeout_sec = MQVPN_TCP_CONNECT_TIMEOUT_SEC_DEFAULT;
+    cfg->tcp_max_global_flows = MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT;
+    /* n_egress_allow / n_egress_deny already 0 from the memset above. */
 }
 
 static inline int
@@ -53,12 +227,63 @@ mqvpn_hybrid_config_validate(const mqvpn_hybrid_config_t *cfg)
     if (!cfg) return -1;
     if (cfg->tcp_mode > MQVPN_HYBRID_TCP_AUTO) return -1;
     if (cfg->tcp_max_flows == 0) return -1;
+    if (cfg->tcp_connect_timeout_sec == 0) return -1;
+    /* tcp_max_global_flows == 0, like tcp_max_flows, would admit zero
+     * connect-tcp flows server-wide — treated as a misconfiguration, not a
+     * disable switch (tcp_idle_timeout_sec is the one field here where 0 is
+     * a legitimate "off" value; this isn't that kind of field). */
+    if (cfg->tcp_max_global_flows == 0) return -1;
     return 0;
+}
+
+/* Per-field companion to validate, run at the CONSUMERS (mqvpn_server_new /
+ * the client's tcp_lane init site — same validate-at-consumer pattern as
+ * mqvpn_reorder_config_validate): each field validate would reject is reset
+ * to its own default, and ONLY that field. enabled, every valid field, and
+ * the egress ACL lists are left untouched — a whole-block default reset
+ * would silently DROP an operator's EgressDeny policy over an unrelated
+ * typo (fail-open), where per-field reset matches the loaders' own per-key
+ * "invalid X; using default" convention. Returns the number of fields
+ * reset; names[0..min(ret,max_names)-1] receives static string literals
+ * (INI key spelling) so the caller can log one warn per field with
+ * whatever logger it owns (this header has no logging dependency on
+ * purpose — see mqvpn_parse_cidr_v4's note above). */
+static inline int
+mqvpn_hybrid_config_sanitize(mqvpn_hybrid_config_t *cfg, const char **names,
+                             int max_names)
+{
+    int n = 0;
+    if (!cfg) return 0;
+    if (cfg->tcp_mode > MQVPN_HYBRID_TCP_AUTO) {
+        cfg->tcp_mode = MQVPN_HYBRID_TCP_AUTO;
+        if (names && n < max_names) names[n] = "Tcp";
+        n++;
+    }
+    if (cfg->tcp_max_flows == 0) {
+        cfg->tcp_max_flows = MQVPN_TCP_MAX_FLOWS_DEFAULT;
+        if (names && n < max_names) names[n] = "TcpMaxFlows";
+        n++;
+    }
+    if (cfg->tcp_connect_timeout_sec == 0) {
+        cfg->tcp_connect_timeout_sec = MQVPN_TCP_CONNECT_TIMEOUT_SEC_DEFAULT;
+        if (names && n < max_names) names[n] = "TcpConnectTimeoutSec";
+        n++;
+    }
+    if (cfg->tcp_max_global_flows == 0) {
+        cfg->tcp_max_global_flows = MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT;
+        if (names && n < max_names) names[n] = "TcpMaxGlobalFlows";
+        n++;
+    }
+    /* Postcondition pinned: a sanitized config always passes validate —
+     * the four resets above cover exactly validate's four checks. Keep the
+     * two functions in lockstep when adding fields. */
+    return n;
 }
 
 /* Classify one inner IP packet from TUN. Fills *out_key (nullable) for
  * TCP/UDP verdicts. Rules: IPv4 fragment → RAW; IPv4 TCP → TCP lane iff
- * enabled && tcp_mode != RAW; UDP → DGRAM; IPv6 TCP → RAW (v1);
+ * enabled && tcp_mode != RAW && dst outside client_tunnel_subnet (see the
+ * field's docstring above); UDP → DGRAM; IPv6 TCP → RAW (v1);
  * ICMP/other/parse-fail → RAW. */
 mqvpn_hybrid_lane_t mqvpn_hybrid_classify(const uint8_t *pkt, size_t len,
                                           const mqvpn_hybrid_config_t *pol,

@@ -11,6 +11,10 @@ Third-party software included:
     Copyright (c) 2022, Alibaba Group Holding Limited
     Apache License 2.0 — see third_party/xquic/LICENSE
 
+  * lwIP (mp0rta/heiher-lwip fork of lwip/lwip)
+    Copyright (c) 2001, 2002 Swedish Institute of Computer Science
+    BSD-3-Clause — see third_party/lwip/LICENSE
+
   * Wintun userspace header (https://www.wintun.net)
     Copyright (C) 2018-2021 WireGuard LLC
     MIT License — see third_party/wintun/LICENSE

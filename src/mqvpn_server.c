@@ -10,6 +10,7 @@
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
 #include "mqvpn_scheduler.h"
+#include "mqvpn_server_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,7 @@
 #else
 #  include <unistd.h>
 #  include <sys/time.h>
+#  include <sys/resource.h>
 #  include <arpa/inet.h>
 #  include <pthread.h>
 #endif
@@ -34,6 +36,7 @@
 #  include <errno.h>
 #endif
 #include <inttypes.h>
+#include <limits.h>
 #include <time.h>
 #include <assert.h>
 
@@ -47,6 +50,9 @@
 #include "reorder.h"
 #include "reorder_rx.h"
 #include "reorder_tx.h"
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+#  include "hybrid/tcp_egress.h"
+#endif
 
 /* ─── Constants ─── */
 
@@ -89,19 +95,27 @@ struct svr_conn_s {
     mqvpn_reorder_tx_t *reorder_tx;
     mqvpn_reorder_rx_t *reorder_rx;
     int peer_reorder_supported;
+
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    int tcp_flow_count; /* per-session cap enforcement lands with the
+                         * server-side limits work — no 5-tuple table needed
+                         * server-side per Design Decision D2. */
+#endif
 };
 
 /* Forward decl: reorder RX deliver trampoline (defined near the datagram
  * callbacks) — referenced earlier in cb_h3_conn_create when engines are made. */
 static void svr_reorder_deliver(const uint8_t *pkt, size_t len, void *ctx);
 
-/* Role of an inbound H3 request stream, decided at header parse. v0.8 has
- * exactly one recognized role; unrecognized requests keep ROLE_UNKNOWN and
- * retain the historical fall-through behavior (hybrid's connect-tcp stage
- * replaces that with a 501). */
+/* Role of an inbound H3 request stream, decided at header parse.
+ * Unrecognized requests keep ROLE_UNKNOWN, which now gets an explicit 501
+ * (see cb_request_read) instead of the historical capsule fall-through. */
 typedef enum {
     SVR_STREAM_ROLE_UNKNOWN = 0,
     SVR_STREAM_ROLE_CONNECT_IP,
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    SVR_STREAM_ROLE_CONNECT_TCP,
+#endif
 } svr_stream_role_t;
 
 struct svr_stream_s {
@@ -112,6 +126,14 @@ struct svr_stream_s {
     uint8_t *capsule_buf;
     size_t capsule_len;
     size_t capsule_cap;
+
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* Per D2, xqc_h3_request_t's user_data slot stays svr_stream_t*
+     * everywhere; per-flow egress state hangs off THIS field instead of
+     * ever calling xqc_h3_request_set_user_data() a second time. */
+    void *tcp_egress_flow; /* svr_tcp_egress_flow_t*, opaque here — only
+                            * tcp_egress.c casts it. */
+#endif
 };
 
 /* ─── Server handle (opaque mqvpn_server_t) ─── */
@@ -165,10 +187,42 @@ struct mqvpn_server_s {
      * mqvpn_server_uptime_seconds() uses (now_us() - boot_us) / 1e6. */
     uint64_t boot_us;
 
+    /* Egress fd budget, computed ONCE in mqvpn_server_new and intentionally
+     * frozen: the platform sizes its fd->event registry from this value at
+     * startup, so admission (tcp_egress.c's 503 cap check) must use the
+     * same snapshot — recomputing per call would let a runtime setrlimit
+     * grow admission past the fixed registry (flows admitted but never
+     * polled). min(rlimit_nofile - reserve, config.hybrid.tcp_max_global_flows
+     * [TcpMaxGlobalFlows / "tcp_max_global_flows"]) — see
+     * svr_compute_egress_fd_budget. */
+    int egress_fd_budget;
+
     /* Log filtering */
     mqvpn_log_level_t log_level;
 
     int started;
+
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* Connect-stage bookkeeping for src/hybrid/tcp_egress.c: STORAGE only.
+     * Contents are mutated exclusively by tcp_egress.c through the bundled
+     * ctx accessor in mqvpn_server_internal.h (svr_get_tcp_egress_ctx) —
+     * this file never reads or writes them directly.
+     * tcp_egress_flow_list_head is the head of tcp_egress.c's intrusive
+     * doubly-linked (D3) list; the struct is forward-declared in
+     * mqvpn_server_internal.h and defined only in tcp_egress.c, so the
+     * pointer is typed but the layout stays opaque here. */
+    int tcp_egress_global_fd_count;
+    /* Cumulative counters (never decrement), same STORAGE-only contract as
+     * tcp_egress_global_fd_count above — mutated only by tcp_egress.c via
+     * svr_get_tcp_egress_ctx. flows_total_opened counts every admitted
+     * egress flow; flows_rejected_cap counts every SYN refused by a cap
+     * (503) — the global fd-budget cap and the per-session tcp_max_flows
+     * cap, NOT ACL 403s or 5xx syscall failures. Surfaced as get_stats'
+     * tcp_flows_total / tcp_flows_rejected. */
+    uint64_t tcp_egress_flows_total_opened;
+    uint64_t tcp_egress_flows_rejected_cap;
+    struct svr_tcp_egress_flow_s *tcp_egress_flow_list_head;
+#endif
 
     /* Debug: tick thread assertion */
 #ifndef NDEBUG
@@ -208,6 +262,32 @@ now_us(void)
     gettimeofday(&tv, NULL);
     return (uint64_t)tv.tv_sec * 1000000 + (uint64_t)tv.tv_usec;
 #endif
+}
+
+/* One-shot at mqvpn_server_new (rlimit-derived headroom under the
+ * config-supplied cap, config.hybrid.tcp_max_global_flows — TcpMaxGlobalFlows
+ * in INI/JSON, MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT if unset); the result is
+ * stored in s->egress_fd_budget and intentionally never recomputed — see
+ * that field's comment for the admission/registry non-divergence rationale.
+ * `configured_max` is a plain uint32_t (not the whole config struct) so this
+ * stays a pure, easily-unit-testable function of its input. */
+static int
+svr_compute_egress_fd_budget(uint32_t configured_max)
+{
+    int budget = (configured_max > (uint32_t)INT_MAX) ? INT_MAX : (int)configured_max;
+#ifndef _WIN32
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY &&
+        rl.rlim_cur <= (rlim_t)LLONG_MAX) {
+        /* Widen before subtracting/comparing: rlim_cur is unsigned and may
+         * exceed int range; the guards above keep the cast well-defined. */
+        long long headroom = (long long)rl.rlim_cur - 64;
+        if (headroom < 0) headroom = 0;
+        if (headroom < budget) budget = (int)headroom;
+    }
+#endif
+    if (budget < 0) budget = 0;
+    return budget;
 }
 
 static int64_t
@@ -591,12 +671,30 @@ cb_h3_handshake_finished(xqc_h3_conn_t *h3_conn, void *conn_user_data)
  *  MASQUE session handling
  * ================================================================ */
 
+/* Canned error responses. Callers on the H3 read-notify path deliberately
+ * ignore the return value: escalating a failed canned-response send by
+ * returning an error from the notify callback would kill the whole H3
+ * connection (XQC_H3_CONN_ERR) — worse than dropping the reply. */
 static int
 svr_masque_send_403(xqc_h3_request_t *h3_request)
 {
     xqc_http_header_t resp[] = {
         {.name = {.iov_base = ":status", .iov_len = 7},
          .value = {.iov_base = "403", .iov_len = 3},
+         .flags = 0},
+    };
+    xqc_http_headers_t hdrs = {.headers = resp, .count = 1, .capacity = 1};
+    return xqc_h3_request_send_headers(h3_request, &hdrs, 1) < 0 ? -1 : 0;
+}
+
+/* Unrecognized :protocol (or missing Extended CONNECT framing entirely):
+ * explicit 501, replacing the historical silent capsule fall-through. */
+static int
+svr_masque_send_501(xqc_h3_request_t *h3_request)
+{
+    xqc_http_header_t resp[] = {
+        {.name = {.iov_base = ":status", .iov_len = 7},
+         .value = {.iov_base = "501", .iov_len = 3},
          .flags = 0},
     };
     xqc_http_headers_t hdrs = {.headers = resp, .count = 1, .capacity = 1};
@@ -867,24 +965,38 @@ cb_request_close(xqc_h3_request_t *h3_request, void *strm_user_data)
     (void)h3_request;
     svr_stream_t *stream = (svr_stream_t *)strm_user_data;
     if (stream) {
-        if (stream->conn) stream->conn->tunnel_established = 0;
+        /* Only the CONNECT-IP tunnel stream owns tunnel_established — a
+         * closing non-tunnel stream (per-flow connect-tcp, or a 501'd
+         * unknown request) on the same H3 connection must not flip the
+         * tunnel dead. Mirrors the client-side role gate in
+         * mqvpn_client.c's cb_request_close. */
+        if (stream->conn && stream->role == SVR_STREAM_ROLE_CONNECT_IP)
+            stream->conn->tunnel_established = 0;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+        /* A connect-tcp stream can close (client resets it, or the H3
+         * connection itself is torn down) while its egress flow is still
+         * CONNECTING or ACTIVE. Tear the flow down here too — closes the
+         * fd, unregisters it from the platform reactor, unlinks it from
+         * the D3 tick list, decrements both flow counters, and frees it.
+         * If the flow already went through svr_tcp_egress_flow_destroy via
+         * fail_connect/timeout (which NULLs this same field), this is a
+         * no-op: exactly-once teardown either way, and destroy never
+         * touches h3_request so calling it from a stream-close path (where
+         * the request is already going away) is safe. */
+        if (stream->role == SVR_STREAM_ROLE_CONNECT_TCP && stream->conn &&
+            stream->tcp_egress_flow) {
+            svr_tcp_egress_flow_destroy(stream->conn->server, stream->tcp_egress_flow);
+        }
+#endif
         free(stream->capsule_buf);
         free(stream);
     }
     return 0;
 }
 
-/* Parsed request headers relevant to dispatch/auth. Values live only for
- * the callback invocation. */
-typedef struct {
-    int is_connect;
-    int is_connect_ip;
-    int has_scheme_https;
-    int has_capsule_proto;
-    int has_valid_path;
-    const char *auth_token; /* Bearer payload, not NUL-terminated */
-    size_t auth_token_len;
-} svr_req_headers_t;
+/* svr_req_headers_t is shared with src/hybrid/tcp_egress.c — defined in
+ * mqvpn_server_internal.h (see that header for why only this struct + two
+ * accessor functions moved, not the rest of this file's internals). */
 
 /* Walks the header list; also sets conn->peer_reorder_supported on the
  * mqvpn-reorder echo (deliberate side effect). */
@@ -899,16 +1011,26 @@ svr_parse_request_headers(mqvpn_server_t *s, svr_stream_t *stream,
         if (h->name.iov_len == 7 && memcmp(h->name.iov_base, ":method", 7) == 0 &&
             h->value.iov_len == 7 && memcmp(h->value.iov_base, "CONNECT", 7) == 0)
             out->is_connect = 1;
-        if (h->name.iov_len == 9 && memcmp(h->name.iov_base, ":protocol", 9) == 0 &&
-            h->value.iov_len == 10 && memcmp(h->value.iov_base, "connect-ip", 10) == 0)
-            out->is_connect_ip = 1;
+        if (h->name.iov_len == 9 && memcmp(h->name.iov_base, ":protocol", 9) == 0) {
+            out->protocol = (const char *)h->value.iov_base;
+            out->protocol_len = h->value.iov_len;
+            if (h->value.iov_len == 10 &&
+                memcmp(h->value.iov_base, "connect-ip", 10) == 0)
+                out->is_connect_ip = 1;
+        }
         if (h->name.iov_len == 7 && memcmp(h->name.iov_base, ":scheme", 7) == 0 &&
             h->value.iov_len == 5 && memcmp(h->value.iov_base, "https", 5) == 0)
             out->has_scheme_https = 1;
-        if (h->name.iov_len == 5 && memcmp(h->name.iov_base, ":path", 5) == 0 &&
-            h->value.iov_len >= 24 &&
-            memcmp(h->value.iov_base, "/.well-known/masque/ip/", 22) == 0)
-            out->has_valid_path = 1;
+        if (h->name.iov_len == 5 && memcmp(h->name.iov_base, ":path", 5) == 0) {
+            /* Raw capture for connect-tcp's own template parse
+             * (svr_tcp_egress_parse_path); has_valid_path below stays
+             * CONNECT-IP's specific fixed-prefix check. */
+            out->path = (const char *)h->value.iov_base;
+            out->path_len = h->value.iov_len;
+            if (h->value.iov_len >= 24 &&
+                memcmp(h->value.iov_base, "/.well-known/masque/ip/", 22) == 0)
+                out->has_valid_path = 1;
+        }
         if (h->name.iov_len == 16 &&
             memcmp(h->name.iov_base, "capsule-protocol", 16) == 0 &&
             h->value.iov_len == 2 && memcmp(h->value.iov_base, "?1", 2) == 0)
@@ -927,15 +1049,25 @@ svr_parse_request_headers(mqvpn_server_t *s, svr_stream_t *stream,
     }
 }
 
-/* Credential check shared by every authenticated request type (CONNECT-IP
- * today; connect-tcp later). Constant-time over the global PSK and ALL
- * configured users regardless of early match. Returns 0 and writes the
- * matched identity ("(global)" or the user name) into out_username on
- * success; -1 on failure. Does NOT touch conn state and does NOT log —
- * the caller records username/connected_at_us, logs, and sends the 403.
- * Precondition: caller has already determined auth is required; with no
- * credentials configured this always returns -1. */
-static int
+/* Whether request-level auth must be checked at all — shared by CONNECT-IP
+ * and connect-tcp so the two protocols can never silently diverge on this.
+ * Declared in mqvpn_server_internal.h. */
+int
+svr_auth_required(const mqvpn_server_t *s)
+{
+    return (s->config.auth_key[0] != '\0') || (s->config.n_users > 0);
+}
+
+/* Credential check shared by every authenticated request type (CONNECT-IP,
+ * connect-tcp). Constant-time over the global PSK and ALL configured users
+ * regardless of early match. Returns 0 and writes the matched identity
+ * ("(global)" or the user name) into out_username on success; -1 on
+ * failure. Does NOT touch conn state and does NOT log — the caller records
+ * username/connected_at_us, logs, and sends the 403. Precondition: caller
+ * has already determined auth is required (svr_auth_required); with no
+ * credentials configured this always returns -1. Declared (non-static) in
+ * mqvpn_server_internal.h for src/hybrid/tcp_egress.c. */
+int
 svr_auth_check(const mqvpn_server_t *s, const char *auth_token, size_t auth_token_len,
                char *out_username, size_t username_cap)
 {
@@ -994,8 +1126,7 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
         return -1;
     }
 
-    int auth_required = (s->config.auth_key[0] != '\0') || (s->config.n_users > 0);
-    if (auth_required) {
+    if (svr_auth_required(s)) {
         char username[sizeof(stream->conn->username)];
 
         if (svr_auth_check(s, hdrs->auth_token, hdrs->auth_token_len, username,
@@ -1015,6 +1146,103 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
     if (svr_masque_send_response(h3_request, stream) < 0) return -1;
     return 0;
 }
+
+/* Egress ACL policy snapshot for src/hybrid/tcp_egress.c (connect-tcp
+ * destination check). Declared in mqvpn_server_internal.h. The tunnel
+ * subnet is derived from the SAME address pool CONNECT-IP address
+ * assignment uses (s->pool) — addr_pool.c enforces prefix_len in [16,30]
+ * at init time, so the mask/shift below never hits the n=0/n=32 edge cases
+ * mqvpn_cidr_mask_from_prefix guards for arbitrary (config-supplied)
+ * egress_allow/egress_deny entries. */
+void
+svr_get_egress_policy(const mqvpn_server_t *s, const mqvpn_cidr_entry_t **allow,
+                      int *n_allow, const mqvpn_cidr_entry_t **deny, int *n_deny,
+                      uint32_t *tunnel_net, uint32_t *tunnel_mask)
+{
+    *allow = s->config.hybrid.egress_allow;
+    *n_allow = s->config.hybrid.n_egress_allow;
+    *deny = s->config.hybrid.egress_deny;
+    *n_deny = s->config.hybrid.n_egress_deny;
+    *tunnel_mask = mqvpn_cidr_mask_from_prefix(s->pool.prefix_len);
+    *tunnel_net = ntohl(s->pool.base.s_addr) & *tunnel_mask;
+}
+
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+/* ---- connect()/relay boundary accessors for src/hybrid/tcp_egress.c ----
+ * See the docstring block in mqvpn_server_internal.h for why each of these
+ * exists as its own narrow function. */
+
+void **
+svr_stream_tcp_egress_flow_ptr(void *stream)
+{
+    svr_stream_t *st = (svr_stream_t *)stream;
+    return st ? &st->tcp_egress_flow : NULL;
+}
+
+int *
+svr_conn_tcp_flow_count_ptr(void *stream)
+{
+    svr_stream_t *st = (svr_stream_t *)stream;
+    if (!st || !st->conn) return NULL;
+    return &st->conn->tcp_flow_count;
+}
+
+void
+svr_get_tcp_egress_ctx(mqvpn_server_t *s, svr_tcp_egress_srv_ctx_t *out)
+{
+    out->flow_list_head = &s->tcp_egress_flow_list_head;
+    out->global_fd_count = &s->tcp_egress_global_fd_count;
+    out->flows_total_opened = &s->tcp_egress_flows_total_opened;
+    out->flows_rejected_cap = &s->tcp_egress_flows_rejected_cap;
+    out->tcp_max_flows = s->config.hybrid.tcp_max_flows;
+    out->tcp_connect_timeout_sec = s->config.hybrid.tcp_connect_timeout_sec;
+    out->tcp_idle_timeout_sec = s->config.hybrid.tcp_idle_timeout_sec;
+    out->global_fd_budget = s->egress_fd_budget; /* frozen at server_new */
+}
+
+int
+svr_egress_fd_register(mqvpn_server_t *s, int fd, int want_read, int want_write,
+                       void *fd_ctx)
+{
+    if (!s->cbs.egress_fd_register) return -1;
+    s->cbs.egress_fd_register(fd, want_read, want_write, fd_ctx, s->user_ctx);
+    return 0;
+}
+
+int
+svr_egress_fd_register_is_set(mqvpn_server_t *s)
+{
+    return s->cbs.egress_fd_register != NULL;
+}
+
+void
+svr_egress_fd_unregister(mqvpn_server_t *s, int fd)
+{
+    if (s->cbs.egress_fd_unregister) s->cbs.egress_fd_unregister(fd, s->user_ctx);
+}
+
+uint64_t
+svr_now_us(void)
+{
+    return now_us();
+}
+
+/* Formats once locally, then hands the finished string to server_log as a
+ * literal "%s" argument — reuses server_log's null/level-gate and cbs.log
+ * dispatch instead of duplicating them here (server_log can't take a
+ * va_list, so a one-shot vsnprintf is the only way to bridge `...`). */
+void
+svr_log(mqvpn_server_t *s, mqvpn_log_level_t level, const char *fmt, ...)
+{
+    if (!s->cbs.log || level < s->log_level) return;
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    server_log(s, level, "%s", buf);
+}
+#endif /* MQVPN_HYBRID_TCP_LANE_ENABLED */
 
 /* CONNECT-IP stream body: capsule reassembly + ADDRESS_REQUEST handling. */
 static int
@@ -1123,18 +1351,61 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
             stream->role = SVR_STREAM_ROLE_CONNECT_IP;
             return svr_connect_ip_on_request(s, stream, h3_request, &hdrs);
         }
-        /* Unrecognized request: role stays UNKNOWN; historical behavior
-         * (fall through, body treated as capsules) preserved until the
-         * hybrid connect-tcp stage lands a 501. */
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+        /* [Hybrid] Enabled is a client+server kill switch (docs/control-api.md),
+         * default false, and IS parsed into config.hybrid.enabled (config.c
+         * CFG_BOOL(SEC_HYBRID, "Enabled", ...)). Gating on the compile flag
+         * alone means a hybrid-compiled server with Enabled=false still
+         * serves egress — require the runtime flag too. A disabled feature
+         * is treated exactly like an unrecognized protocol: fall through to
+         * the 501 below rather than a dedicated status, since the server
+         * offers no such capability right now. */
+        if (hdrs.is_connect && hdrs.protocol_len == 9 &&
+            memcmp(hdrs.protocol, "mqvpn-tcp", 9) == 0 && s->config.hybrid.enabled) {
+            stream->role = SVR_STREAM_ROLE_CONNECT_TCP;
+            return svr_tcp_egress_on_request(s, stream, h3_request, &hdrs);
+        }
+#endif
+        /* Unrecognized request: explicit 501, replacing the historical
+         * silent fall-through. Role stays UNKNOWN — no body is expected. */
+        svr_masque_send_501(h3_request);
+        return 0;
     }
+
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* READ_BODY is the common case; READ_EMPTY_FIN is the OTHER real wire
+     * shape for a downlink close (third_party/xquic src/http3/xqc_h3_request.c
+     * xqc_h3_request_on_recv_empty_fin): fired standalone, WITHOUT READ_BODY,
+     * when a bodiless FIN STREAM frame arrives while the request's read_flag
+     * is back to NULL (no header/body notify still pending application
+     * consumption — see that function's own guard). Missing this notify
+     * would mean a peer that FINs on an idle/fully-drained stream never gets
+     * its downlink half-close observed, so shutdown(fd, SHUT_WR) is never
+     * issued and a peer waiting for EOF hangs. Mirrors the client's handling
+     * at mqvpn_client.c cb_request_read (CLI_STREAM_ROLE_CONNECT_TCP case).
+     * svr_tcp_egress_on_body/svr_tcp_egress_drain_body correctly report this
+     * as n==0 && *fin==1 either way, so one handler covers both notify
+     * shapes; this is scoped to CONNECT_TCP only — CONNECT_IP and UNKNOWN
+     * are unaffected and still route through the switch below. */
+    if (stream->role == SVR_STREAM_ROLE_CONNECT_TCP &&
+        (flag & (XQC_REQ_NOTIFY_READ_BODY | XQC_REQ_NOTIFY_READ_EMPTY_FIN))) {
+        return svr_tcp_egress_on_body(s, stream, h3_request);
+    }
+#endif
 
     if (flag & XQC_REQ_NOTIFY_READ_BODY) {
         switch (stream->role) {
         case SVR_STREAM_ROLE_CONNECT_IP:
-        case SVR_STREAM_ROLE_UNKNOWN:
-            /* Historical: unknown-role bodies are treated as capsules until
-             * the connect-tcp stage lands a 501. */
             return svr_connect_ip_on_body(s, stream, h3_request);
+        case SVR_STREAM_ROLE_UNKNOWN: {
+            /* 501 already sent at header time. Drain and discard any body
+             * so it doesn't sit in xquic's recv buffers until flow control
+             * stalls. */
+            unsigned char drain[4096];
+            while (xqc_h3_request_recv_body(h3_request, drain, sizeof(drain), &fin) > 0) {
+            }
+            return 0;
+        }
         }
         return 0;
     }
@@ -1146,8 +1417,47 @@ static int
 cb_request_write(xqc_h3_request_t *h3_request, void *strm_user_data)
 {
     (void)h3_request;
-    (void)strm_user_data;
+    svr_stream_t *stream = (svr_stream_t *)strm_user_data;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    if (stream && stream->role == SVR_STREAM_ROLE_CONNECT_TCP && stream->conn) {
+        svr_tcp_egress_on_h3_writable(stream->conn->server, stream);
+    }
+#else
+    (void)stream;
+#endif
     return 0;
+}
+
+/* Peer sent RESET_STREAM — xquic is already tearing this
+ * request down (verified against the vendored source, same citation trail
+ * as mqvpn_client.c's cb_request_closing_notify: this notify fires ONLY on
+ * RESET_STREAM frame reception, never on STOP_SENDING alone or on a clean
+ * bidi-FIN completion). CONNECT-IP has no per-flow teardown concept of its
+ * own (its close is handled via cb_request_close/h3_conn_close_notify), so
+ * only the connect-tcp branch does anything here — reuses the EXISTING
+ * svr_tcp_egress_flow_destroy funnel (the same one cb_request_close below
+ * already calls for the connect-timeout/synchronous-failure paths): the
+ * `stream->tcp_egress_flow` guard is what makes this idempotent against a
+ * flow that already went through a different teardown (svr_tcp_egress_
+ * flow_destroy NULLs it), so whichever of this callback or
+ * cb_request_close reaches the flow first destroys it and the other is a
+ * no-op. (void)err: the flow is dead either way, no err-code-specific
+ * handling needed. */
+static void
+cb_request_closing_notify(xqc_h3_request_t *h3_request, xqc_int_t err,
+                          void *strm_user_data)
+{
+    (void)h3_request;
+    (void)err;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    svr_stream_t *stream = (svr_stream_t *)strm_user_data;
+    if (stream && stream->role == SVR_STREAM_ROLE_CONNECT_TCP && stream->conn &&
+        stream->tcp_egress_flow) {
+        svr_tcp_egress_flow_destroy(stream->conn->server, stream->tcp_egress_flow);
+    }
+#else
+    (void)strm_user_data;
+#endif
 }
 
 /* ================================================================
@@ -1334,7 +1644,13 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     if (!s) return NULL;
 
     memcpy(&s->config, cfg, sizeof(*cfg));
-    memcpy(&s->cbs, cbs, sizeof(*cbs));
+    /* Clamp to the caller's struct_size: a platform built against an older
+     * (shorter) callbacks struct must not be over-read — appended fields
+     * stay NULL (s is calloc'd), which is the "callback unset" state. */
+    size_t cbs_size = (cbs->struct_size && cbs->struct_size < sizeof(*cbs))
+                          ? cbs->struct_size
+                          : sizeof(*cbs);
+    memcpy(&s->cbs, cbs, cbs_size);
     s->user_ctx = user_ctx;
     s->log_level = cfg->log_level;
     /* caller guarantees lifetime exceeds this object */ // lgtm[cpp/stack-address-escape]
@@ -1342,6 +1658,29 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     s->max_clients = cfg->max_clients > 0 ? cfg->max_clients : 64;
     s->ptb_tokens = PTB_RATE_LIMIT;
     s->boot_us = now_us();
+    /* Sanitize the [Hybrid] block at its consumer (validate-at-consumer
+     * pattern — same as mqvpn_reorder_config_validate run by
+     * mqvpn_reorder_rx_new): the INI/JSON loaders store raw scalars (CFG_U32
+     * accepts 0) and only the PUBLIC setters range-check, so a file config
+     * with e.g. TcpMaxGlobalFlows = 0 would otherwise freeze the egress fd
+     * budget at 0 below and silently 503 every connect-tcp request.
+     * PER-FIELD reset (mqvpn_hybrid_config_sanitize), never a whole-block
+     * default reset: that would silently drop the operator's EgressDeny/
+     * EgressAllow policy over an unrelated scalar typo — fail-open. Warned
+     * per field, matching the loaders' own per-key warn-and-ignore
+     * convention; never a hard server-start failure. */
+    {
+        const char *bad_fields[8];
+        int n_bad = mqvpn_hybrid_config_sanitize(&s->config.hybrid, bad_fields, 8);
+        for (int i = 0; i < n_bad && i < 8; i++)
+            LOG_W(s, "invalid [Hybrid] %s; using default", bad_fields[i]);
+    }
+    /* s->config was already populated by the memcpy above (and its hybrid
+     * scalars possibly sanitized just above) — the budget computation MUST
+     * read the applied config, not `cfg` directly, so a future refactor that
+     * changes what memcpy copies can't silently desync the two. */
+    s->egress_fd_budget =
+        svr_compute_egress_fd_budget(s->config.hybrid.tcp_max_global_flows);
 
     /* Initialize address pool */
     if (cfg->subnet[0] == '\0') {
@@ -1357,6 +1696,24 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
             LOG_E(s, "failed to init IPv6 pool: %s", cfg->subnet6);
             goto cleanup;
         }
+    }
+
+    /* Startup advisory, not a refusal: a pool wider than /24 is legal
+     * (addr_pool.c allows prefix_len in [16,30]) and plenty of deployments
+     * never use intra-VPN client-to-client TCP. But the client widens its
+     * assigned /32 to /24 for the tunnel-subnet RAW gate, and the server's
+     * egress ACL denies the full pool subnet, so two clients outside a
+     * shared /24 within a wider pool get their hybrid TCP-lane traffic
+     * silently, permanently RST'd. Warn once at startup so operators with a
+     * wide pool + hybrid enabled know to either narrow the pool to /24 (or
+     * smaller) or add an explicit EgressAllow for the pool subnet. */
+    if (s->config.hybrid.enabled && s->pool.prefix_len < 24) {
+        LOG_W(s,
+              "hybrid TCP-lane: pool subnet is wider than /24 (prefix_len=%u) — "
+              "client-to-client TCP between clients outside a shared /24 will be "
+              "denied by the egress ACL; use a /24-or-narrower pool or add an "
+              "EgressAllow entry",
+              (unsigned)s->pool.prefix_len);
     }
 
     /* ── xquic engine setup ── */
@@ -1441,6 +1798,7 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
                 .h3_request_close_notify = cb_request_close,
                 .h3_request_read_notify = cb_request_read,
                 .h3_request_write_notify = cb_request_write,
+                .h3_request_closing_notify = cb_request_closing_notify,
             },
         .h3_ext_dgram_cbs =
             {
@@ -1485,7 +1843,21 @@ mqvpn_server_destroy(mqvpn_server_t *s)
         s->engine = NULL;
     }
 
-    /* Step 2: Defensive sweep — free any sessions not freed by engine callbacks.
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* Step 2: Defensive sweep — destroy any egress flows not torn down by
+     * the request-closing notify during the engine destroy above (same
+     * contingency the session sweep below defends against: a stream whose
+     * h3_request_closing_notify didn't fire leaves its tcp_egress_flow on
+     * the D3 list, leaking the open OS fd + heap). MUST run BEFORE the
+     * session sweep below: svr_tcp_egress_flow_destroy dereferences
+     * ef->stream->conn (via svr_conn_tcp_flow_count_ptr) to decrement the
+     * per-connection flow counter, and svr_conn_free() below frees that
+     * same conn — reversing the order would turn this leak fix into a
+     * heap-use-after-free on any conn that hit both contingencies at once. */
+    svr_tcp_egress_destroy_all(s);
+#endif
+
+    /* Step 3: Defensive sweep — free any sessions not freed by engine callbacks.
      * Uses svr_conn_free so the reorder engines are freed here too (the close
      * callback that would normally free them did not fire for these conns). */
     for (int i = 1; i <= MQVPN_ADDR_POOL_MAX; i++) {
@@ -1495,7 +1867,7 @@ mqvpn_server_destroy(mqvpn_server_t *s)
         }
     }
 
-    /* Step 3: free server handle */
+    /* Step 4: free server handle */
     free(s);
 }
 
@@ -1577,6 +1949,32 @@ mqvpn_server_on_socket_recv(mqvpn_server_t *s, const uint8_t *pkt, size_t len,
         LOG_D(s, "packet_process: %d", ret);
     }
     return MQVPN_OK;
+}
+
+void
+mqvpn_server_on_egress_fd_ready(mqvpn_server_t *s, int fd, void *fd_ctx, int readable,
+                                int writable)
+{
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    svr_tcp_egress_fd_ready(s, fd, fd_ctx, readable, writable);
+#else
+    (void)s;
+    (void)fd;
+    (void)fd_ctx;
+    (void)readable;
+    (void)writable;
+#endif
+}
+
+int
+mqvpn_server_egress_fd_budget(mqvpn_server_t *s)
+{
+    /* Frozen snapshot from mqvpn_server_new — see svr_compute_egress_fd_
+     * budget and the egress_fd_budget field comment for why this must not
+     * recompute per call. Fed by config.hybrid.tcp_max_global_flows
+     * (TcpMaxGlobalFlows in INI/JSON). */
+    if (!s) return 0;
+    return s->egress_fd_budget;
 }
 
 int
@@ -1801,6 +2199,13 @@ mqvpn_server_tick(mqvpn_server_t *s)
         }
     }
 
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* Connect-timeout sweep over the D3 egress-flow list (one list, one
+     * tick function — the future ACTIVE-idle-timeout work extends this
+     * same walk rather than adding a second sweep). */
+    svr_tcp_egress_tick(s, now_us());
+#endif
+
     return MQVPN_OK;
 }
 
@@ -1818,6 +2223,19 @@ mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *out)
     out->dgram_recv = s->dgram_recv;
     out->dgram_lost = s->dgram_lost;
     out->dgram_acked = s->dgram_acked;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* tcp_flows_active: whole-server count of currently open egress TCP
+     * flows. tcp_egress_global_fd_count is the live, exactly-once
+     * incremented/decremented admission counter (svr_tcp_egress_start_connect
+     * / svr_tcp_egress_flow_destroy) — no separate list-length walk needed.
+     * tcp_flows_total: cumulative admitted egress flows (never decrements).
+     * tcp_flows_rejected: cumulative cap-503 rejections (global fd-budget +
+     * per-session tcp_max_flows caps; ACL 403s and 5xx syscall failures are
+     * not caps and are not counted). See tcp_egress.c for the sites. */
+    out->tcp_flows_active = (uint64_t)s->tcp_egress_global_fd_count;
+    out->tcp_flows_total = s->tcp_egress_flows_total_opened;
+    out->tcp_flows_rejected = s->tcp_egress_flows_rejected_cap;
+#endif
     return MQVPN_OK;
 }
 
@@ -2189,6 +2607,17 @@ mqvpn_server_get_interest(const mqvpn_server_t *s, mqvpn_interest_t *out)
 
     int ms = (int)(s->next_wake_us / 1000);
     out->next_timer_ms = ms > 0 ? ms : 1;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* next_wake_us above comes solely from xquic's event timer, which knows
+     * nothing about the egress deadlines (connect timeout -> 504, ACTIVE
+     * idle eviction) that svr_tcp_egress_tick enforces — on a quiet server
+     * they could otherwise fire arbitrarily late. Clamp to a 1s ceiling
+     * whenever any egress flow is live: a simple clamp on purpose (not the
+     * exact nearest deadline — both deadlines have seconds granularity, so
+     * sub-second precision buys nothing and the clamp can't go stale). */
+    if (s->tcp_egress_flow_list_head != NULL && out->next_timer_ms > 1000)
+        out->next_timer_ms = 1000;
+#endif
     out->tun_readable = s->tun_paused ? 0 : 1;
     out->is_idle = (s->n_sessions == 0) ? 1 : 0;
     return MQVPN_OK;

@@ -194,6 +194,7 @@ list(APPEND MQVPN_LIB_SOURCES
     ${CMAKE_SOURCE_DIR}/src/hybrid/lwip_glue.c
     ${CMAKE_SOURCE_DIR}/src/hybrid/tcp_lane.c
     ${CMAKE_SOURCE_DIR}/src/hybrid/tcp_lane_uplink.c
+    ${CMAKE_SOURCE_DIR}/src/hybrid/tcp_egress.c
 )
 
 # H2a micro-benchmark rig (Chunk 1 gate): TUN → classifier → lwIP → byte
@@ -213,7 +214,64 @@ target_include_directories(tcp_lane_microbench PRIVATE
 )
 set_target_properties(tcp_lane_microbench PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+
+# libFuzzer target: classifier + lwIP packet-intake crash-safety (see
+# fuzz/fuzz_tcp_lane.c for scope). Requires clang (-fsanitize=fuzzer is a
+# clang-only flag); OFF by default so the normal build/CI is unaffected.
+# Standalone executable, same "link the hybrid sources directly" shape as
+# tcp_lane_microbench above — not part of mqvpn_lib.
+option(MQVPN_ENABLE_FUZZING "Build libFuzzer targets (requires clang)" OFF)
+if(MQVPN_ENABLE_FUZZING)
+    # Fuzz-only instrumented lwIP: the production lwip_core links into the
+    # non-sanitized mqvpn_lib/mqvpn_shared in this same tree, so ASan/SanCov
+    # can't be added to it directly. Build a SEPARATE static lib from the
+    # SAME lwIP sources with fuzzer-no-link,address (fuzzer-NO-link: only the
+    # final exe carries the libFuzzer main; the lib just needs the coverage
+    # instrumentation) so libFuzzer gets real coverage feedback from — and
+    # ASan actually watches loads/stores inside — tcp_in.c/ip4.c/etc. Without
+    # this the fuzzer explores lwIP BLIND (coverage plateaus, ASan is inert).
+    # The -DCHECKSUM_CHECK_* overrides drop the ingress checksum wall
+    # (lwipopts.h keeps 1 for production) so mutated packets reach the TCP
+    # state machine instead of dying in ip4_input/tcp_input's checksum test.
+    # -Wno-error: vendored code, same as lwip_core.
+    add_library(lwip_core_fuzz STATIC ${LWIP_CORE_SOURCES})
+    target_include_directories(lwip_core_fuzz PUBLIC
+        ${LWIP_ROOT}/src/include
+        ${LWIP_PORT_DIR}
+    )
+    target_compile_definitions(lwip_core_fuzz PRIVATE
+        $<$<CONFIG:Release>:LWIP_NOASSERT>
+        CHECKSUM_CHECK_IP=0
+        CHECKSUM_CHECK_TCP=0)
+    target_compile_options(lwip_core_fuzz PRIVATE
+        -Wno-error -fsanitize=fuzzer-no-link,address)
+
+    add_executable(fuzz_tcp_lane
+        fuzz/fuzz_tcp_lane.c
+        src/hybrid/classifier.c
+        src/hybrid/lwip_glue.c
+        src/log.c
+    )
+    target_compile_options(fuzz_tcp_lane PRIVATE -fsanitize=fuzzer,address)
+    target_link_options(fuzz_tcp_lane PRIVATE -fsanitize=fuzzer,address)
+    target_link_libraries(fuzz_tcp_lane PRIVATE lwip_core_fuzz)
+    target_include_directories(fuzz_tcp_lane PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/include
+    )
+    set_target_properties(fuzz_tcp_lane PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+endif()
 endif() # MQVPN_HYBRID_TCP_LANE_BUILD
+
+# fuzz_tcp_lane links classifier.c + lwip_glue.c directly (mirrors
+# tcp_lane_microbench) against the instrumented lwip_core_fuzz built inside
+# the block above — MQVPN_ENABLE_FUZZING with the hybrid TCP lane unavailable
+# (Windows/Android, or explicitly disabled) has nothing to build against.
+if(MQVPN_ENABLE_FUZZING AND NOT MQVPN_HYBRID_TCP_LANE_BUILD)
+    message(WARNING "MQVPN_ENABLE_FUZZING requires the hybrid TCP lane "
+                     "(MQVPN_HYBRID_TCP_LANE_BUILD) — skipping fuzz_tcp_lane")
+endif()
 
 # ---------- libmqvpn (static library — no libevent, no platform I/O) ----------
 add_library(mqvpn_lib STATIC ${MQVPN_LIB_SOURCES})
@@ -296,7 +354,10 @@ else() # NOT WIN32 — Linux
 add_library(mqvpn_shared SHARED ${MQVPN_LIB_SOURCES})
 set_target_properties(mqvpn_shared PROPERTIES
     OUTPUT_NAME mqvpn
-    SOVERSION 1
+    # Bumped 1 -> 2: mqvpn_stats_t grew (hybrid lane/flow counters). Producers
+    # write sizeof(mqvpn_stats_t) with no caller-size negotiation, so a binary
+    # built against the old header must not resolve to the new .so.
+    SOVERSION 2
     C_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON
 )
@@ -434,6 +495,20 @@ if(BUILD_TESTING)
     target_include_directories(test_conn_settings PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
     set_target_properties(test_conn_settings PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_conn_settings COMMAND test_conn_settings)
+
+    # Server-side mqvpn-tcp dispatch test (real xquic engine, gated on the
+    # hybrid TCP lane existing at all — see SVR_STREAM_ROLE_CONNECT_TCP).
+    if(MQVPN_HYBRID_TCP_LANE_BUILD)
+        add_executable(test_tcp_egress tests/test_tcp_egress.c)
+        target_link_libraries(test_tcp_egress mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
+        target_include_directories(test_tcp_egress PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
+        target_compile_definitions(test_tcp_egress PRIVATE
+            TEST_CERT_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.crt"
+            TEST_KEY_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.key"
+        )
+        set_target_properties(test_tcp_egress PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+        add_test(NAME test_tcp_egress COMMAND test_tcp_egress)
+    endif()
 
     # CLI argv overflow shell test (runs the built mqvpn binary)
     add_test(NAME test_cli_path_argv

@@ -38,7 +38,7 @@ struct mqvpn_lwip_ctx {
     void *clock_ctx;
     mqvpn_lwip_output_fn output_fn; /* the netif->output real-delivery path —
                                      * without it no TCP-lane handshake can
-                                     * ever complete (rev4 review fix) */
+                                     * ever complete */
     void *output_ctx;
     struct tcp_pcb *listen_pcb;
     u16_t mtu;              /* real TUN MTU; applied in the netif init cb */
@@ -223,7 +223,7 @@ mqvpn_lwip_ctx_free(mqvpn_lwip_ctx_t *ctx)
      * surviving past here would reference a removed netif. Warn so that
      * mistake surfaces immediately instead of as a later use-after-remove.
      *
-     * M5 (reworded): this can ALSO fire spuriously for a pcb tcp_lane
+     * This can ALSO fire spuriously for a pcb tcp_lane
      * genuinely has no way to know about or abort — a half-open SYN_RCVD
      * pcb sitting in tcp_active_pcbs (vendored tcp_alloc registers it
      * there immediately on SYN receipt) whose accept callback hasn't run

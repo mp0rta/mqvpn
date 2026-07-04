@@ -16,6 +16,19 @@ mqvpn_hybrid_classify(const uint8_t *pkt, size_t len, const mqvpn_hybrid_config_
         if (key->ip_version != 4) return MQVPN_LANE_RAW; /* v1: IPv6 TCP → RAW */
         if (!pol || !pol->enabled || pol->tcp_mode == MQVPN_HYBRID_TCP_RAW)
             return MQVPN_LANE_RAW;
+        /* Tunnel-subnet destinations stay RAW: the server-side connect-tcp
+         * egress ACL rejects the tunnel subnet unconditionally (its check
+         * precedes EgressAllow — svr_tcp_egress_acl_decide), so laning
+         * such a flow guarantees a RESET where RAW keeps intra-VPN TCP
+         * working exactly as with hybrid off. The mask != 0 guard is the
+         * unset-sentinel gate mqvpn_cidr_match's docstring demands: subnet
+         * not learned (or not a client) means gate OFF, not match-all. */
+        if (pol->client_tunnel_subnet.mask != 0) {
+            uint32_t dst = ((uint32_t)key->dst_ip[0] << 24) |
+                           ((uint32_t)key->dst_ip[1] << 16) |
+                           ((uint32_t)key->dst_ip[2] << 8) | (uint32_t)key->dst_ip[3];
+            if (mqvpn_cidr_match(&pol->client_tunnel_subnet, dst)) return MQVPN_LANE_RAW;
+        }
         return MQVPN_LANE_TCP;
     case MQVPN_L4_FRAGMENT:
     case MQVPN_L4_OTHER:

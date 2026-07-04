@@ -3,13 +3,13 @@
 
 /*
  * tcp_lane_uplink.c — client-side TCP-lane uplink relay: lwIP recv -> H3
- * send_body (Task 10), extracted from tcp_lane.c at Task 12 once that file
- * crossed the ~800-line extraction trigger.
+ * send_body, extracted from tcp_lane.c once that file crossed the ~800-line
+ * extraction trigger.
  *
  * This is the uplink QUEUE + SEND + FLUSH + FIN machinery only. tcp_lane.c
  * keeps: the flow table itself, the lwIP accept callback, the downlink
- * relay (H3 recv_body -> lwIP tcp_write, Task 11), and the close/error
- * mapping + flow removal (Task 12) — including on_lwip_recv, which stays a
+ * relay (H3 recv_body -> lwIP tcp_write), and the close/error
+ * mapping + flow removal — including on_lwip_recv, which stays a
  * thin dispatcher onto tcp_lane_uplink_flush/_deliver below. The two files
  * are one logical module; see tcp_lane_internal.h for the shared struct
  * layouts, the compile-time test-double hooks, and the small cross-TU
@@ -114,15 +114,15 @@ tcp_lane_uplink_stash(mqvpn_tcp_flow_t *f, struct pbuf *p, uint16_t offset)
     return 0;
 }
 
-/* KQ 8 close mapping, uplink direction: lwIP recv(NULL) == peer FIN ->
+/* Close mapping, uplink direction: lwIP recv(NULL) == peer FIN ->
  * half-close the H3 stream (zero-length body with fin=1) once every queued
  * uplink byte has drained. FIN-after-EAGAIN needs no dedicated retry entry:
  * tcp_fin_seen && !fin_sent_to_h3 IS the pending state, re-checked at the
  * end of every flush (writable notifies keep arriving while the stream has
  * anything pending).
  *
- * Retry necessity (reconciliation A, verified against the vendored xquic
- * source): a fin-only xqc_h3_request_send_body is NOT a one-shot latch
+ * Retry necessity (verified against the vendored xquic source): a
+ * fin-only xqc_h3_request_send_body is NOT a one-shot latch
  * inside xquic. Tracing xqc_h3_request_send_body -> xqc_h3_stream_send_data
  * -> xqc_h3_stream_send_data_frame -> xqc_stream_send: on the normal
  * post-handshake 1-RTT path (pkt_type == XQC_PTYPE_SHORT_HEADER, i.e. not
@@ -162,7 +162,7 @@ tcp_lane_uplink_maybe_fin(mqvpn_tcp_flow_t *f)
     if (r >= 0) {
         f->fin_sent_to_h3 = 1;
         if (f->fin_received_from_h3) {
-            /* Reconciliation H: the downlink direction already forwarded
+            /* The downlink direction already forwarded
              * its FIN to the pcb (tcp_shutdown succeeded) before this one
              * completed — both directions are now cleanly closed. */
             tcp_lane_finish_clean_close(f);

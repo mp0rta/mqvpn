@@ -82,9 +82,9 @@ typedef struct {
     uint64_t flows_rejected_other;
     uint64_t flows_idle_evicted;
     uint64_t raw_markers_active; /* gauge, same derivation: sticky-RAW markers
-                                  * currently in the table (visibility into
-                                  * marker accumulation for Task 24's counter
-                                  * wiring) */
+                                  * currently in the table — surfaced through
+                                  * mqvpn_client_get_stats as the public
+                                  * raw_markers_active stat */
 } mqvpn_tcp_lane_stats_t;
 
 /* client_ctx is opaque to tcp_lane.c's callers outside mqvpn_client.c; it is
@@ -92,7 +92,7 @@ typedef struct {
  * without tcp_lane.c needing to know cli_conn_t's layout. clock_fn/clock_ctx
  * (nullable — flows then get last_activity_us = 0) is the same injected
  * microsecond clock the caller hands mqvpn_lwip_ctx_new, used for
- * per-flow last-activity stamps (Task 13's idle sweep). With a NULL clock,
+ * per-flow last-activity stamps (used by the idle sweep). With a NULL clock,
  * set cfg.tcp_idle_timeout_sec = 0 or flows evict spuriously (stamps stuck
  * at 0 while tick's now_us advances past the timeout). */
 mqvpn_tcp_lane_t *mqvpn_tcp_lane_new(const mqvpn_hybrid_config_t *cfg, uint64_t hash_seed,
@@ -140,15 +140,15 @@ void mqvpn_tcp_lane_bind_h3_request(void *flow_handle, void *h3_request, void *s
  * translation. */
 int mqvpn_tcp_lane_abort_pending(void *flow_handle);
 
-/* H3 response gating for a bound mqvpn-tcp stream (Task 9). `stream` is the
+/* H3 response gating for a bound mqvpn-tcp stream. `stream` is the
  * opaque cli_stream_t* handed to mqvpn_tcp_lane_bind_h3_request — these
  * functions locate the owning flow by its stored f->stream back-pointer (a
  * bounded O(n) walk over the whole flow table, n <= cfg.tcp_max_flows +
  * TCP_LANE_RAW_MARKER_CAP, 256 + 4096 by default; markers have
  * f->stream == NULL so never false-match) rather than caching a flow
  * pointer inside cli_stream_t.
- * That keeps the flow table the single source of truth: once Task 12/13
- * remove a flow, the table walk simply stops finding it — no separate
+ * That keeps the flow table the single source of truth: once a flow is
+ * removed, the table walk simply stops finding it — no separate
  * back-pointer to remember to invalidate and no risk of dereferencing freed
  * flow memory through a stale cached pointer. All three tolerate
  * stream-not-found (the flow may already be gone) by no-op'ing. */
@@ -163,7 +163,7 @@ void mqvpn_tcp_lane_on_stream_established(mqvpn_tcp_lane_t *lane, void *stream);
  * not going to read), and remove the flow from the table. */
 void mqvpn_tcp_lane_on_stream_rejected(mqvpn_tcp_lane_t *lane, void *stream);
 
-/* H3 closing-notify (Task 12): xquic is already tearing this request down.
+/* H3 closing-notify: xquic is already tearing this request down.
  * Verified against the vendored xquic source that this notify fires ONLY on
  * RESET_STREAM frame reception (never on STOP_SENDING alone — that only
  * makes xquic send back a RESET_STREAM of our own — and never on a clean
@@ -182,7 +182,7 @@ void mqvpn_tcp_lane_on_h3_closing(mqvpn_tcp_lane_t *lane, void *stream);
  * whose acknowledgment-to-lwIP was deferred). */
 int mqvpn_tcp_lane_on_h3_writable(mqvpn_tcp_lane_t *lane, void *stream);
 
-/* H3 downlink body/EMPTY_FIN notify (Task 11): drain the flow's H3 response
+/* H3 downlink body/EMPTY_FIN notify: drain the flow's H3 response
  * body into lwIP via tcp_write, gated by tcp_sndbuf (mirrors the uplink's
  * xquic-EAGAIN gate, just the other direction). `stream` is the same opaque
  * cli_stream_t* used by the functions above (flow located the same way).
@@ -200,10 +200,10 @@ int mqvpn_tcp_lane_on_h3_writable(mqvpn_tcp_lane_t *lane, void *stream);
  * contract comment in mqvpn_client.c for why. */
 int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
 
-/* ─── Uplink backpressure watermarks (Task 10) ───
+/* ─── Uplink backpressure watermarks ───
  *
- * Internal compile-time constants, deliberately NOT public config (rev2
- * decision — no classifier/config/ABI surface).
+ * Internal compile-time constants, deliberately NOT public config — no
+ * classifier/config/ABI surface.
  *
  * Semantics — these are RECVED-WITHHOLDING hysteresis thresholds, not hard
  * memory caps: bytes lwIP has already delivered to the recv callback were
@@ -211,12 +211,13 @@ int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
  * MUST be queued when xquic won't take them. Withholding tcp_recved() only
  * stops the receive window from RE-opening; the peer may still fill whatever
  * window was already advertised, so the true worst-case per-flow queue bound
- * is TCP_WND (~2 MiB, lwip_port/lwipopts.h) by TCP mechanics — the Chunk 5
- * memory budget must cite TCP_WND, not the high-water mark. */
-#define MQVPN_TCP_LANE_BP_HIGH_WATER                                                    \
-    (262144u) /* 256 KiB — pre-2xx buffering                                          \
-               * withholds recved beyond this; between mqproxy's 64 KiB minimum (KQ 10) \
-               * and the multi-MB TCP_WND: headroom without approaching Chunk 5's       \
+ * is TCP_WND (~2 MiB, lwip_port/lwipopts.h) by TCP mechanics — the memory
+ * budget (docs/hybrid_h2_memory_budget.md) must cite TCP_WND, not the
+ * high-water mark. */
+#define MQVPN_TCP_LANE_BP_HIGH_WATER                                            \
+    (262144u) /* 256 KiB — pre-2xx buffering                                  \
+               * withholds recved beyond this; between mqproxy's 64 KiB minimum \
+               * and the multi-MB TCP_WND: headroom without approaching the     \
                * memory-budget concerns. */
 #define MQVPN_TCP_LANE_BP_LOW_WATER                                       \
     (65536u) /* 64 KiB — recved resumes only                            \
@@ -230,7 +231,7 @@ int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
                                          * the next writable notify */
 #define MQVPN_TCP_LANE_H3_SEND_ERR (-2) /* fatal stream error */
 
-/* cli_tcp_lane_h3_recv return contract (Task 11, same normalization
+/* cli_tcp_lane_h3_recv return contract (same normalization
  * boundary as h3_send above). Verified against xqc_h3_request_recv_body
  * (third_party/xquic src/http3/xqc_h3_request.c): fin may be signaled
  * EITHER with the final data chunk in the SAME call (n > 0 && *fin) OR on
@@ -279,7 +280,7 @@ int cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle,
  * NULL only when len == 0. */
 ssize_t cli_tcp_lane_h3_send(void *h3_request, const uint8_t *buf, size_t len, int fin);
 
-/* Recv downlink body bytes from the flow's bound H3 request (Task 11). buf/
+/* Recv downlink body bytes from the flow's bound H3 request. buf/
  * len is the caller's scratch buffer; *fin is written 1 when the request's
  * FIN has been observed (see the MQVPN_TCP_LANE_H3_RECV_* contract above for
  * exactly when that can co-occur with data). Returns bytes read (may be 0
@@ -287,8 +288,8 @@ ssize_t cli_tcp_lane_h3_send(void *h3_request, const uint8_t *buf, size_t len, i
  * MQVPN_TCP_LANE_H3_RECV_ERR. *fin is undefined on a negative return. */
 ssize_t cli_tcp_lane_h3_recv(void *h3_request, uint8_t *buf, size_t len, int *fin);
 
-/* Close the flow's bound H3 request with a RESET_STREAM (Task 12 close/
- * error mapping — the RST direction of the close-mapping table). Wraps
+/* Close the flow's bound H3 request with a RESET_STREAM (the RST direction
+ * of the close-mapping table). Wraps
  * xqc_h3_request_close; best-effort/void, matching tcp_abort's contract on
  * the pcb side — the caller has already decided the flow is dead regardless
  * of this call's outcome, and cb_request_close/on_h3_closing will fire
@@ -313,7 +314,7 @@ int mqvpn_tcp_lane_lookup(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key,
 
 /* Commit a brand-new flow's lane decision at SYN time. to_tcp=0 records a
  * sticky-RAW marker. to_tcp=1 inserts a pending-accept entry AND is the
- * caller's cue to feed the SYN into lwIP (Task 7). Returns 0 on success;
+ * caller's cue to feed the SYN into lwIP. Returns 0 on success;
  * -1 on cap, on NULL args, on allocation failure, or on a duplicate key
  * (a key already in the table is a caller bug — the protocol is
  * lookup-then-commit; alloc failure and duplicates are counted in
@@ -323,7 +324,7 @@ int mqvpn_tcp_lane_lookup(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key,
  *     reject-before-side-effect. On -1 HERE the caller may safely fall the
  *     flow back to RAW, ONLY because lwIP never saw the SYN (no half-built
  *     pcb state to contradict later packets). Once lwIP HAS seen the SYN —
- *     Task 8's rejection point inside the lwIP accept callback — RAW
+ *     the lwIP accept callback's own rejection point — RAW
  *     fallback is forbidden: the flow must be rejected explicitly (abort),
  *     never silently rerouted.
  *   - to_tcp=0: capped by an internal marker cap (memory bound only, see
@@ -372,7 +373,7 @@ int mqvpn_tcp_lane_on_syn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, i
 uint32_t mqvpn_tcp_lane_marker_isn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key);
 
 /* Idle-timeout sweep + CLOSING grace-sweep + stats snapshot, called from
- * tick() (Task 13 / C1). */
+ * tick() (C1). */
 void mqvpn_tcp_lane_tick(mqvpn_tcp_lane_t *lane, uint64_t now_us);
 void mqvpn_tcp_lane_get_stats(const mqvpn_tcp_lane_t *lane, mqvpn_tcp_lane_stats_t *out);
 
