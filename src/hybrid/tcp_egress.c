@@ -826,6 +826,18 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
                              xqc_h3_request_t *h3_request, const char *target_host,
                              uint16_t target_port, const char *username)
 {
+    /* libmqvpn.h's documented contract: NULL egress callbacks => connect-tcp
+     * gets 503. Checked FIRST, before the fd budget check and before the
+     * socket() syscall below, so a platform that never wired egress support
+     * fails fast instead of opening a socket, burning the global fd budget,
+     * and stalling for the full connect-timeout only to land on a 504 once
+     * svr_egress_fd_register's failure is discovered downstream. Not a
+     * caps rejection, so flows_rejected_cap (caps-only by contract) is left
+     * untouched. */
+    if (!svr_egress_fd_register_is_set(server)) {
+        return svr_tcp_egress_respond(h3_request, 503, 1);
+    }
+
     svr_tcp_egress_srv_ctx_t ctx;
     svr_get_tcp_egress_ctx(server, &ctx);
     if (*ctx.global_fd_count >= ctx.global_fd_budget) {
@@ -1099,6 +1111,24 @@ svr_tcp_egress_tick(mqvpn_server_t *server, uint64_t now_us)
              * same form as the client's mqvpn_tcp_lane_tick sweep. */
             svr_tcp_egress_on_idle_evict(server, ef, ctx.tcp_idle_timeout_sec);
         }
+        ef = next;
+    }
+}
+
+/* See the docstring in tcp_egress.h — mqvpn_server_destroy's defensive
+ * fd-leak sweep. Same next-before-destroy shape as svr_tcp_egress_tick
+ * above, since svr_tcp_egress_flow_destroy unlinks `ef` from the list. */
+void
+svr_tcp_egress_destroy_all(mqvpn_server_t *server)
+{
+    if (!server) return;
+
+    svr_tcp_egress_srv_ctx_t ctx;
+    svr_get_tcp_egress_ctx(server, &ctx);
+    svr_tcp_egress_flow_t *ef = *ctx.flow_list_head;
+    while (ef) {
+        svr_tcp_egress_flow_t *next = ef->next;
+        svr_tcp_egress_flow_destroy(server, ef);
         ef = next;
     }
 }

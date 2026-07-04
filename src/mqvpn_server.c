@@ -1209,6 +1209,12 @@ svr_egress_fd_register(mqvpn_server_t *s, int fd, int want_read, int want_write,
     return 0;
 }
 
+int
+svr_egress_fd_register_is_set(mqvpn_server_t *s)
+{
+    return s->cbs.egress_fd_register != NULL;
+}
+
 void
 svr_egress_fd_unregister(mqvpn_server_t *s, int fd)
 {
@@ -1346,8 +1352,16 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
             return svr_connect_ip_on_request(s, stream, h3_request, &hdrs);
         }
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+        /* [Hybrid] Enabled is a client+server kill switch (docs/control-api.md),
+         * default false, and IS parsed into config.hybrid.enabled (config.c
+         * CFG_BOOL(SEC_HYBRID, "Enabled", ...)). Gating on the compile flag
+         * alone means a hybrid-compiled server with Enabled=false still
+         * serves egress — require the runtime flag too. A disabled feature
+         * is treated exactly like an unrecognized protocol: fall through to
+         * the 501 below rather than a dedicated status, since the server
+         * offers no such capability right now. */
         if (hdrs.is_connect && hdrs.protocol_len == 9 &&
-            memcmp(hdrs.protocol, "mqvpn-tcp", 9) == 0) {
+            memcmp(hdrs.protocol, "mqvpn-tcp", 9) == 0 && s->config.hybrid.enabled) {
             stream->role = SVR_STREAM_ROLE_CONNECT_TCP;
             return svr_tcp_egress_on_request(s, stream, h3_request, &hdrs);
         }
@@ -1358,14 +1372,31 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
         return 0;
     }
 
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* READ_BODY is the common case; READ_EMPTY_FIN is the OTHER real wire
+     * shape for a downlink close (third_party/xquic src/http3/xqc_h3_request.c
+     * xqc_h3_request_on_recv_empty_fin): fired standalone, WITHOUT READ_BODY,
+     * when a bodiless FIN STREAM frame arrives while the request's read_flag
+     * is back to NULL (no header/body notify still pending application
+     * consumption — see that function's own guard). Missing this notify
+     * would mean a peer that FINs on an idle/fully-drained stream never gets
+     * its downlink half-close observed, so shutdown(fd, SHUT_WR) is never
+     * issued and a peer waiting for EOF hangs. Mirrors the client's handling
+     * at mqvpn_client.c cb_request_read (CLI_STREAM_ROLE_CONNECT_TCP case).
+     * svr_tcp_egress_on_body/svr_tcp_egress_drain_body correctly report this
+     * as n==0 && *fin==1 either way, so one handler covers both notify
+     * shapes; this is scoped to CONNECT_TCP only — CONNECT_IP and UNKNOWN
+     * are unaffected and still route through the switch below. */
+    if (stream->role == SVR_STREAM_ROLE_CONNECT_TCP &&
+        (flag & (XQC_REQ_NOTIFY_READ_BODY | XQC_REQ_NOTIFY_READ_EMPTY_FIN))) {
+        return svr_tcp_egress_on_body(s, stream, h3_request);
+    }
+#endif
+
     if (flag & XQC_REQ_NOTIFY_READ_BODY) {
         switch (stream->role) {
         case SVR_STREAM_ROLE_CONNECT_IP:
             return svr_connect_ip_on_body(s, stream, h3_request);
-#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
-        case SVR_STREAM_ROLE_CONNECT_TCP:
-            return svr_tcp_egress_on_body(s, stream, h3_request);
-#endif
         case SVR_STREAM_ROLE_UNKNOWN: {
             /* 501 already sent at header time. Drain and discard any body
              * so it doesn't sit in xquic's recv buffers until flow control
@@ -1667,6 +1698,24 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         }
     }
 
+    /* Startup advisory, not a refusal: a pool wider than /24 is legal
+     * (addr_pool.c allows prefix_len in [16,30]) and plenty of deployments
+     * never use intra-VPN client-to-client TCP. But the client widens its
+     * assigned /32 to /24 for the tunnel-subnet RAW gate, and the server's
+     * egress ACL denies the full pool subnet, so two clients outside a
+     * shared /24 within a wider pool get their hybrid TCP-lane traffic
+     * silently, permanently RST'd. Warn once at startup so operators with a
+     * wide pool + hybrid enabled know to either narrow the pool to /24 (or
+     * smaller) or add an explicit EgressAllow for the pool subnet. */
+    if (s->config.hybrid.enabled && s->pool.prefix_len < 24) {
+        LOG_W(s,
+              "hybrid TCP-lane: pool subnet is wider than /24 (prefix_len=%u) — "
+              "client-to-client TCP between clients outside a shared /24 will be "
+              "denied by the egress ACL; use a /24-or-narrower pool or add an "
+              "EgressAllow entry",
+              (unsigned)s->pool.prefix_len);
+    }
+
     /* ── xquic engine setup ── */
     xqc_engine_ssl_config_t engine_ssl;
     memset(&engine_ssl, 0, sizeof(engine_ssl));
@@ -1794,7 +1843,21 @@ mqvpn_server_destroy(mqvpn_server_t *s)
         s->engine = NULL;
     }
 
-    /* Step 2: Defensive sweep — free any sessions not freed by engine callbacks.
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* Step 2: Defensive sweep — destroy any egress flows not torn down by
+     * the request-closing notify during the engine destroy above (same
+     * contingency the session sweep below defends against: a stream whose
+     * h3_request_closing_notify didn't fire leaves its tcp_egress_flow on
+     * the D3 list, leaking the open OS fd + heap). MUST run BEFORE the
+     * session sweep below: svr_tcp_egress_flow_destroy dereferences
+     * ef->stream->conn (via svr_conn_tcp_flow_count_ptr) to decrement the
+     * per-connection flow counter, and svr_conn_free() below frees that
+     * same conn — reversing the order would turn this leak fix into a
+     * heap-use-after-free on any conn that hit both contingencies at once. */
+    svr_tcp_egress_destroy_all(s);
+#endif
+
+    /* Step 3: Defensive sweep — free any sessions not freed by engine callbacks.
      * Uses svr_conn_free so the reorder engines are freed here too (the close
      * callback that would normally free them did not fire for these conns). */
     for (int i = 1; i <= MQVPN_ADDR_POOL_MAX; i++) {
@@ -1804,7 +1867,7 @@ mqvpn_server_destroy(mqvpn_server_t *s)
         }
     }
 
-    /* Step 3: free server handle */
+    /* Step 4: free server handle */
     free(s);
 }
 

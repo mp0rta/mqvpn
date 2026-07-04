@@ -76,6 +76,17 @@ void svr_tcp_egress_tick(mqvpn_server_t *server, uint64_t now_us);
  * file. */
 void svr_tcp_egress_flow_destroy(mqvpn_server_t *server, void *flow);
 
+/* Defensive sweep for mqvpn_server_destroy's teardown contingency: normal
+ * flow teardown funnels through svr_tcp_egress_flow_destroy (see above), but
+ * if xqc_engine_destroy() tears down H3 requests without firing the close
+ * notify for every stream (mirrors the analogous session sweep already done
+ * for s->sessions[]), any egress flow still on the D3 tick list would leak
+ * its open OS fd and heap allocation. Walks *ctx.flow_list_head start to
+ * finish, destroying each flow (saving `next` before each destroy, since
+ * svr_tcp_egress_flow_destroy unlinks). Safe to call on an empty list
+ * (no-op) and safe to call after normal shutdown has already emptied it. */
+void svr_tcp_egress_destroy_all(mqvpn_server_t *server);
+
 /* Maps a connect()/SO_ERROR errno to the H3 :status this task sends back
  * over the CONNECT-TCP response stream. Exposed (not static) purely for
  * tests/test_tcp_egress.c's direct unit test — this is a pure function, no

@@ -134,6 +134,13 @@ void svr_get_tcp_egress_ctx(mqvpn_server_t *s, svr_tcp_egress_srv_ctx_t *out);
 int svr_egress_fd_register(mqvpn_server_t *s, int fd, int want_read, int want_write,
                            void *fd_ctx);
 
+/* True iff the platform installed egress_fd_register. Used at admission
+ * time (before the fd budget check or the socket() syscall) so a platform
+ * that never wired connect-tcp egress support gets an immediate 503
+ * instead of burning an fd/socket through to the 10s connect-timeout and
+ * a 504 (libmqvpn.h's documented NULL-egress-callback contract). */
+int svr_egress_fd_register_is_set(mqvpn_server_t *s);
+
 /* Drop interest in fd — the libmqvpn.h contract has a DEDICATED
  * egress_fd_unregister callback for this, distinct from calling
  * egress_fd_register with want_read=want_write=0 (see the platform_linux.c
