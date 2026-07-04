@@ -104,9 +104,21 @@
 #define PBUF_POOL_BUFSIZE LWIP_MEM_ALIGN_SIZE(TCP_MSS + 40 + PBUF_LINK_ENCAPSULATION_HLEN)
 
 /* Checksums: keep ON in v1 (fuzz safety per spec Notes) — this is a known
- * perf knob, do not flip without a documented follow-up. */
-#define CHECKSUM_CHECK_IP     1
-#define CHECKSUM_CHECK_TCP    1
+ * perf knob, do not flip without a documented follow-up. The CHECK_* pair is
+ * #ifndef-guarded ONLY so the dedicated libFuzzer build (lwip_core_fuzz —
+ * see CMakeLists.txt, gated on MQVPN_ENABLE_FUZZING) can pass
+ * -DCHECKSUM_CHECK_IP=0 / -DCHECKSUM_CHECK_TCP=0 to drop the ingress
+ * checksum wall, so mutated packets actually reach the TCP state machine
+ * instead of dying in ip4_input/tcp_input. Production defines neither, so it
+ * still gets 1 — behavior is byte-for-byte identical to the plain #define.
+ * The GEN_* side stays unconditional: it never gates ingress and flipping it
+ * has no fuzzing value. */
+#ifndef CHECKSUM_CHECK_IP
+#  define CHECKSUM_CHECK_IP 1
+#endif
+#ifndef CHECKSUM_CHECK_TCP
+#  define CHECKSUM_CHECK_TCP 1
+#endif
 #define CHECKSUM_GEN_IP       1
 #define CHECKSUM_GEN_TCP      1
 #define LWIP_CHECKSUM_ON_COPY 1

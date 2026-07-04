@@ -222,6 +222,30 @@ set_target_properties(tcp_lane_microbench PROPERTIES
 # tcp_lane_microbench above — not part of mqvpn_lib.
 option(MQVPN_ENABLE_FUZZING "Build libFuzzer targets (requires clang)" OFF)
 if(MQVPN_ENABLE_FUZZING)
+    # Fuzz-only instrumented lwIP: the production lwip_core links into the
+    # non-sanitized mqvpn_lib/mqvpn_shared in this same tree, so ASan/SanCov
+    # can't be added to it directly. Build a SEPARATE static lib from the
+    # SAME lwIP sources with fuzzer-no-link,address (fuzzer-NO-link: only the
+    # final exe carries the libFuzzer main; the lib just needs the coverage
+    # instrumentation) so libFuzzer gets real coverage feedback from — and
+    # ASan actually watches loads/stores inside — tcp_in.c/ip4.c/etc. Without
+    # this the fuzzer explores lwIP BLIND (coverage plateaus, ASan is inert).
+    # The -DCHECKSUM_CHECK_* overrides drop the ingress checksum wall
+    # (lwipopts.h keeps 1 for production) so mutated packets reach the TCP
+    # state machine instead of dying in ip4_input/tcp_input's checksum test.
+    # -Wno-error: vendored code, same as lwip_core.
+    add_library(lwip_core_fuzz STATIC ${LWIP_CORE_SOURCES})
+    target_include_directories(lwip_core_fuzz PUBLIC
+        ${LWIP_ROOT}/src/include
+        ${LWIP_PORT_DIR}
+    )
+    target_compile_definitions(lwip_core_fuzz PRIVATE
+        $<$<CONFIG:Release>:LWIP_NOASSERT>
+        CHECKSUM_CHECK_IP=0
+        CHECKSUM_CHECK_TCP=0)
+    target_compile_options(lwip_core_fuzz PRIVATE
+        -Wno-error -fsanitize=fuzzer-no-link,address)
+
     add_executable(fuzz_tcp_lane
         fuzz/fuzz_tcp_lane.c
         src/hybrid/classifier.c
@@ -230,7 +254,7 @@ if(MQVPN_ENABLE_FUZZING)
     )
     target_compile_options(fuzz_tcp_lane PRIVATE -fsanitize=fuzzer,address)
     target_link_options(fuzz_tcp_lane PRIVATE -fsanitize=fuzzer,address)
-    target_link_libraries(fuzz_tcp_lane PRIVATE lwip_core)
+    target_link_libraries(fuzz_tcp_lane PRIVATE lwip_core_fuzz)
     target_include_directories(fuzz_tcp_lane PRIVATE
         ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/include
@@ -241,8 +265,8 @@ endif()
 endif() # MQVPN_HYBRID_TCP_LANE_BUILD
 
 # fuzz_tcp_lane links classifier.c + lwip_glue.c directly (mirrors
-# tcp_lane_microbench), so it needs the lwip_core target from the block
-# above — MQVPN_ENABLE_FUZZING with the hybrid TCP lane unavailable
+# tcp_lane_microbench) against the instrumented lwip_core_fuzz built inside
+# the block above — MQVPN_ENABLE_FUZZING with the hybrid TCP lane unavailable
 # (Windows/Android, or explicitly disabled) has nothing to build against.
 if(MQVPN_ENABLE_FUZZING AND NOT MQVPN_HYBRID_TCP_LANE_BUILD)
     message(WARNING "MQVPN_ENABLE_FUZZING requires the hybrid TCP lane "

@@ -6,12 +6,16 @@ They exist only to bootstrap libFuzzer's coverage-guided mutation; the
 fuzzer generates everything else itself from these starting points.
 
 Regenerate after a wire-format change (e.g. the classifier's parsed fields,
-`mqvpn_parse_l3l4`'s accepted shapes) with a short one-off Python script that
-builds each packet by hand (IPv4 header with correct checksum + a TCP or
-UDP payload, no external pcap/scapy dependency) — see the git history of
-this file for the exact script used to produce the current set. There is no
-tracked generator script; regenerating is cheap enough (a few dozen lines)
-that keeping one in sync with wire-format changes was judged not worth it.
+`mqvpn_parse_l3l4`'s accepted shapes) with the tracked generator:
+
+```
+python3 fuzz/corpus/gen_tcp_lane_corpus.py
+```
+
+It builds each packet by hand (IPv4 header with correct checksum + a TCP or
+UDP payload, pure stdlib — no pcap/scapy) and overwrites the six `.bin`
+files in place. Editing the packet shapes there and rerunning is the
+intended regeneration path.
 
 Contents:
 - `01_syn.bin` — IPv4/TCP SYN, dst port 80, no options

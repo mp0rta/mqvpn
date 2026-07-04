@@ -18,12 +18,18 @@
  * plausible future candidate if a real need for one shows up, not built
  * here (YAGNI).
  *
- * No accept callback is registered on the lwIP listener: an accepted
- * connection would need a live flow table (tcp_lane.c) to do anything
- * useful with received data, which is out of scope for this target. A SYN
- * that completes the handshake with no accept callback set is a normal,
- * crash-safe lwIP outcome (TCP_EVENT_ACCEPT sees accept==NULL, returns
- * ERR_ARG, lwIP resets the pcb) — see lwip/tcp_in.c's LISTEN handling.
+ * A minimal accept callback IS registered on the lwIP listener (below),
+ * mirroring production's mqvpn_tcp_lane_lwip_accept (tcp_lane.c): it always
+ * returns ERR_MEM, the same shape as production's pcb-pool-exhaustion branch
+ * (tcp_lane.c: the !newpcb || err != ERR_OK case), without tracking or using
+ * the accepted pcb — a live flow table (tcp_lane.c)
+ * would be needed to do anything useful with received data, which is out of
+ * scope for this target. Registering a callback (any callback) is required,
+ * not optional: with none registered, the listener keeps lwIP's default
+ * tcp_accept_null, and tcp_listen_input's pcb-pool-exhaustion path
+ * (tcp_in.c) calls it with (NULL, ERR_MEM) — tcp_accept_null asserts on the
+ * NULL pcb ("tcp_accept_null: invalid pcb", tcp.c), aborting the fuzz
+ * process on a condition production never hits.
  *
  * Determinism / replay: mqvpn_lwip_ctx_new's clock_fn is the ONLY time
  * source sys_now() reads (lwip_glue.c: sys_now() calls
@@ -32,6 +38,14 @@
  * wall-clock client_now_us() used in production, so a saved crash input
  * replays identically. lwIP's LWIP_TIMERS is compiled out (0) in this
  * port (lwip_port/lwipopts.h) so no libc timer thread is involved either.
+ *
+ * Persistent-ctx replay caveat (Task 26 triage): g_ctx and the lwIP pcb
+ * lists are process-global and accumulate across inputs within one run — so
+ * a crash that depends on cross-input state (e.g. a pcb left half-open by an
+ * earlier input) will NOT reproduce from the single saved crash artifact
+ * alone. Whole-run replay (re-running the fuzzer over the same corpus with
+ * the same -seed) is still deterministic and is the fallback when a
+ * single-input artifact doesn't repro.
  */
 
 #include <stddef.h>
@@ -50,6 +64,20 @@ fuzz_clock(void *unused)
     return t += 1000; /* monotonic, deterministic, no real clock read */
 }
 
+/* Mirrors production's mqvpn_tcp_lane_lwip_accept's pcb-pool-exhaustion
+ * branch (tcp_lane.c, the !newpcb || err != ERR_OK case): unconditionally
+ * ERR_MEM, no pcb tracking. See the file
+ * comment above for why registering a callback at all (not just this
+ * specific behavior) is required for crash-safety. */
+static err_t
+fuzz_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err)
+{
+    (void)arg;
+    (void)newpcb;
+    (void)err;
+    return ERR_MEM;
+}
+
 int
 LLVMFuzzerInitialize(int *argc, char ***argv)
 {
@@ -59,7 +87,11 @@ LLVMFuzzerInitialize(int *argc, char ***argv)
      * mqvpn_tcp_lane_netif_output() no-ops safely on a NULL output_fn
      * (lwip_glue.c). */
     g_ctx = mqvpn_lwip_ctx_new(fuzz_clock, NULL, NULL, NULL, 1500);
-    return g_ctx ? 0 : -1;
+    if (!g_ctx) {
+        return -1;
+    }
+    mqvpn_lwip_ctx_set_accept_cb(g_ctx, fuzz_accept_cb, NULL);
+    return 0;
 }
 
 int
