@@ -527,9 +527,15 @@ iface_is_up_and_running(const char *ifname)
     return ok;
 }
 
-/* Check if interface has an IP address (v4 or v6) */
+/* Check if the interface has a usable source address for the given
+ * family. v4: any address. v6: global scope only — a link-local address
+ * cannot reach the server, and its presence used to let the re-add gate
+ * pass during the v4-less window right after link-up. Binding and
+ * challenging from an addressless iface triggers the kernel's
+ * assume-on-link output fallback with a source address borrowed from
+ * another interface, poisoning the server's view of the path 4-tuple. */
 static int
-iface_has_ip(const char *ifname)
+iface_has_usable_ip(const char *ifname, sa_family_t af)
 {
     struct ifaddrs *ifa_list = NULL, *ifa;
     int found = 0;
@@ -537,10 +543,14 @@ iface_has_ip(const char *ifname)
     for (ifa = ifa_list; ifa; ifa = ifa->ifa_next) {
         if (!ifa->ifa_addr) continue;
         if (strcmp(ifa->ifa_name, ifname) != 0) continue;
-        if (ifa->ifa_addr->sa_family == AF_INET || ifa->ifa_addr->sa_family == AF_INET6) {
-            found = 1;
-            break;
+        if (ifa->ifa_addr->sa_family != af) continue;
+        if (af == AF_INET6) {
+            const struct sockaddr_in6 *s6 =
+                (const struct sockaddr_in6 *)(const void *)ifa->ifa_addr;
+            if (IN6_IS_ADDR_LINKLOCAL(&s6->sin6_addr)) continue;
         }
+        found = 1;
+        break;
     }
     freeifaddrs(ifa_list);
     return found;
@@ -716,6 +726,11 @@ recovery_rollback(platform_ctx_t *p, int slot, mqvpn_add_path_outcome_t outcome)
 static int
 try_readd_removed_path(platform_ctx_t *p, const char *ifname)
 {
+    /* Never re-add while the interface lacks a usable source address of
+     * the server's family (see iface_has_usable_ip). RTM_NEWADDR for the
+     * right family, or the recovery timer, will retry once it exists. */
+    if (!iface_has_usable_ip(ifname, p->server_addr.ss_family)) return 0;
+
     mqvpn_path_info_t pinfo[MQVPN_MAX_PATHS];
     int n = 0;
     if (mqvpn_client_get_paths(p->client, pinfo, MQVPN_MAX_PATHS, &n) != MQVPN_OK)
@@ -827,7 +842,7 @@ recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
 
         const char *ifname = p->path_mgr.paths[i].iface;
         if (!iface_is_up_and_running(ifname)) continue;
-        if (!iface_has_ip(ifname)) continue;
+        if (!iface_has_usable_ip(ifname, p->server_addr.ss_family)) continue;
 
         /* try_readd_removed_path scans by ifname, finds this slot via
          * lib state, and either succeeds (resets the counter via line
@@ -920,7 +935,7 @@ handle_rtm_newlink(platform_ctx_t *p, struct nlmsghdr *nh)
     }
 
     if (!(ifi->ifi_flags & IFF_RUNNING)) return;
-    if (!iface_has_ip(ifname)) return;
+    if (!iface_has_usable_ip(ifname, p->server_addr.ss_family)) return;
 
     /* First: try to re-add paths removed by RTM_DELLINK (dead fd).
      * Otherwise: reactivate degraded/closed paths (fd still valid). */
