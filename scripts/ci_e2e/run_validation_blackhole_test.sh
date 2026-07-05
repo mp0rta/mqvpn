@@ -355,7 +355,7 @@ fi
 echo ""
 echo "=== Removing black hole on Path A ==="
 REMOVAL_MARK=$(wc -l <"${WORK_DIR}/client.log")
-ip netns exec "$NS_SERVER" tc qdisc del dev "$VETH_A1" root netem || true
+ip netns exec "$NS_SERVER" tc qdisc del dev "$VETH_A1" root netem
 echo "OK: black hole removed"
 
 # ─── Assertion 3 (recovery): path returns after the black hole lifts ───
