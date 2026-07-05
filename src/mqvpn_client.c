@@ -611,6 +611,41 @@ mqvpn_client_test_force_state(mqvpn_client_t *c, mqvpn_client_state_t s)
     return 0;
 }
 
+/* P1 test-only: force the client into the ESTABLISHED + multipath_ready
+ * shape that gates the Recovery/Stability timer block in
+ * mqvpn_client_get_interest, without driving a real handshake. Writes the
+ * connection-level c->state / c->multipath_ready directly (bypassing the
+ * transition table); these are NOT path_entry_t lifecycle fields, so no
+ * LINT-ALLOW is required. Hidden from libmqvpn.so's dynamic export table
+ * (not part of the public ABI). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_force_established(mqvpn_client_t *c)
+{
+    if (!c) return -1;
+    c->state = MQVPN_STATE_ESTABLISHED;
+    c->multipath_ready = 1;
+    return 0;
+}
+
+/* P1 test-only: seed c->next_wake_us — the xquic-requested wake that
+ * mqvpn_client_get_interest starts `ms` from (normally set by
+ * cb_set_event_timer). Lets a pure-function test observe whether the
+ * Recovery timer block clamps or leaves the wake untouched. Hidden from
+ * libmqvpn.so's dynamic export table (not part of the public ABI). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_set_next_wake_us(mqvpn_client_t *c, uint64_t us)
+{
+    if (!c) return -1;
+    c->next_wake_us = us;
+    return 0;
+}
+
 /* ─── ICMP PTB rate limiter ─── */
 
 static int
