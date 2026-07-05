@@ -875,15 +875,25 @@ handle_rtm_dellink(platform_ctx_t *p, struct nlmsghdr *nh)
  *
  * Gate on IFLA_OPERSTATE rather than !IFF_RUNNING. IFF_RUNNING also clears
  * during wifi association / dormant transitions, so an !IFF_RUNNING-based
- * gate would burn one path_id slot per wifi roam — defeating the very
- * XQC_MAX_PATHS_COUNT budget the drop is meant to preserve.
+ * gate would burn one path_id slot per wifi roam. This IFF_UP gate no
+ * longer means admin-down is ignored — the caller (handle_rtm_newlink)
+ * handles admin-down separately as a deliberate operational drop, reported
+ * before this function is even consulted. This gate's remaining job is to
+ * protect the IFF_UP=1 flap cases (wifi DORMANT/UNKNOWN etc.) from being
+ * misread as carrier loss.
  *
  * Drop only on a definite operational-down report (RFC 2863): IF_OPER_DOWN
  * (link admin/peer down) or IF_OPER_LOWERLAYERDOWN (e.g. underlying ethernet
  * of a vlan/bridge went away). IF_OPER_DORMANT (wifi associating),
  * IF_OPER_UNKNOWN (driver doesn't report; common on virtual interfaces) and
  * IF_OPER_TESTING are tolerated — the carrier-up handler / recovery timer
- * will still re-add once IFF_RUNNING + has_ip become true. */
+ * will still re-add once IFF_RUNNING + has_ip become true.
+ *
+ * Historically this also gated on IFF_UP to avoid burning the fixed
+ * XQC_MAX_PATHS_COUNT (8) path_id budget on transient admin-down flaps.
+ * That budget is obsolete since the draft-21 dynamic path cap work (paths
+ * now grow/shrink via PATHS_BLOCKED / MAX_PATH_ID rather than a fixed
+ * array), so admin-down no longer needs special-casing to preserve it. */
 static int
 is_carrier_loss(struct ifinfomsg *ifi, int operstate)
 {
@@ -891,8 +901,8 @@ is_carrier_loss(struct ifinfomsg *ifi, int operstate)
            (operstate == IF_OPER_DOWN || operstate == IF_OPER_LOWERLAYERDOWN);
 }
 
-/* RTM_NEWLINK: link state changed. Either drop on carrier loss, or attempt
- * recovery if the link is now usable. */
+/* RTM_NEWLINK: link state changed. Either drop on admin-down/carrier loss,
+ * or attempt recovery if the link is now usable. */
 static void
 handle_rtm_newlink(platform_ctx_t *p, struct nlmsghdr *nh)
 {
@@ -900,15 +910,16 @@ handle_rtm_newlink(platform_ctx_t *p, struct nlmsghdr *nh)
     const char *ifname = nlmsg_get_ifname(nh);
     if (!ifname) return;
 
-    if (is_carrier_loss(ifi, nlmsg_get_operstate(nh))) {
+    int admin_down = !(ifi->ifi_flags & IFF_UP);
+    if (admin_down || is_carrier_loss(ifi, nlmsg_get_operstate(nh))) {
         for (int i = 0; i < p->path_mgr.n_paths; i++) {
             if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0)
-                remove_path_by_index(p, i, "carrier lost");
+                remove_path_by_index(p, i, admin_down ? "admin down" : "carrier lost");
         }
         return;
     }
 
-    if (!(ifi->ifi_flags & IFF_UP) || !(ifi->ifi_flags & IFF_RUNNING)) return;
+    if (!(ifi->ifi_flags & IFF_RUNNING)) return;
     if (!iface_has_ip(ifname)) return;
 
     /* First: try to re-add paths removed by RTM_DELLINK (dead fd).
