@@ -373,6 +373,29 @@ else
     exit 1
 fi
 
+# ─── Recovery-latency assertion: re-add -> ACTIVE within 5s ───
+# Pins the "drive engine after netlink-driven path changes" fix: before
+# that fix, the re-added path only reactivated when an unrelated timer
+# happened to fire, taking ~13s here (and still passing under the loose
+# 45s window above). The engine must now be driven immediately after
+# the netlink-triggered re-add, so the real latency budget is tight.
+ts_to_ms() {  # HH:MM:SS.mmm -> ms since midnight
+    local h=${1%%:*} rest=${1#*:}
+    local m=${rest%%:*} s_ms=${rest#*:}
+    local s=${s_ms%%.*} ms=${s_ms#*.}
+    echo $(( (10#$h*3600 + 10#$m*60 + 10#$s)*1000 + 10#$ms ))
+}
+READD_TS=$(sed -n "${READD_LINE}p" "${WORK_DIR}/client.log" | awk '{print $1}')
+ACT_TS=$(tail -n "+$((READD_LINE + 1))" "${WORK_DIR}/client.log" \
+    | grep -E "$ACTIVATE_PATTERN" | head -1 | awk '{print $1}')
+LAT_MS=$(( $(ts_to_ms "$ACT_TS") - $(ts_to_ms "$READD_TS") ))
+# midnight wrap: extremely unlikely in CI; treat negative as wrap and skip
+if [ "$LAT_MS" -ge 0 ] && [ "$LAT_MS" -gt 5000 ]; then
+    echo "=== FAIL: re-add -> ACTIVE took ${LAT_MS} ms (budget 5000 ms) ==="
+    exit 1
+fi
+echo "OK: re-add -> ACTIVE in ${LAT_MS} ms"
+
 if ip netns exec "$NS_CLIENT" ping -c 3 -W 2 "$TUNNEL_IP" >/dev/null 2>&1; then
     echo "OK: tunnel ping works after admin up"
 else
