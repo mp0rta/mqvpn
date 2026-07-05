@@ -768,9 +768,13 @@ harness_start(harness_t *h, const char *protocol, size_t protocol_len, int auto_
         memset(&ssl_cfg, 0, sizeof(ssl_cfg));
         ssl_cfg.cert_verify_flag = XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED;
 
-        const xqc_cid_t *cid = xqc_h3_connect(
-            h->probe.engine, &cs, NULL, 0, "127.0.0.1", 0, &ssl_cfg,
-            (struct sockaddr *)&h->svr_addr, sizeof(h->svr_addr), &h->probe);
+        /* xqc_h3_connect may return a cid pointer that is not 8-byte aligned
+         * for xqc_cid_t (it points into xquic-internal storage); we only copy
+         * its bytes, so hold it as void* to avoid a -fsanitize=alignment
+         * report on a pointer we never dereference as an xqc_cid_t. */
+        const void *cid = xqc_h3_connect(h->probe.engine, &cs, NULL, 0, "127.0.0.1", 0,
+                                         &ssl_cfg, (struct sockaddr *)&h->svr_addr,
+                                         sizeof(h->svr_addr), &h->probe);
         if (!cid) {
             xqc_engine_destroy(h->probe.engine);
             goto fail_server;

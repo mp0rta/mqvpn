@@ -58,7 +58,7 @@ int svr_auth_check(const mqvpn_server_t *s, const char *auth_token, size_t auth_
                    char *out_username, size_t username_cap);
 
 /* Egress ACL policy snapshot for the connect-tcp destination check.
- * *allow/*deny point into the server's own config (valid for the server's
+ * *allow and *deny point into the server's own config (valid for the server's
  * lifetime; caller must not free them). tunnel_net/tunnel_mask are host-
  * byte-order IPv4 network/mask derived from the SAME address pool
  * CONNECT-IP address assignment already uses — the pool is the single
