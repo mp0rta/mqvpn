@@ -474,9 +474,11 @@ nlmsg_get_operstate(struct nlmsghdr *nh)
 }
 
 /* Remove a path because the kernel says it's no longer usable.
- * Two callers: RTM_DELLINK (interface gone) and RTM_NEWLINK with IFLA_OPERSTATE
- * = IF_OPER_DOWN / IF_OPER_LOWERLAYERDOWN (carrier lost — cable unplugged etc).
- * Both share cleanup; only the log message differs.
+ * Three callers: RTM_DELLINK (interface gone); RTM_NEWLINK with
+ * IFLA_OPERSTATE = IF_OPER_DOWN / IF_OPER_LOWERLAYERDOWN (carrier lost —
+ * cable unplugged etc); and RTM_NEWLINK with IFF_UP cleared (admin down,
+ * e.g. `ip link set down`). All three share cleanup; only the log message
+ * differs.
  *
  * Cleans up: library path, libevent, fd. Preserves iface name for re-add. */
 static void
@@ -528,12 +530,12 @@ iface_is_up_and_running(const char *ifname)
 }
 
 /* Check if the interface has a usable source address for the given
- * family. v4: any address. v6: global scope only — a link-local address
- * cannot reach the server, and its presence used to let the re-add gate
- * pass during the v4-less window right after link-up. Binding and
- * challenging from an addressless iface triggers the kernel's
- * assume-on-link output fallback with a source address borrowed from
- * another interface, poisoning the server's view of the path 4-tuple. */
+ * family. v4: any address except 169.254/16 link-local. v6: global scope
+ * only — a link-local address cannot reach the server, and its presence
+ * used to let the re-add gate pass during the v4-less window right after
+ * link-up. Binding and challenging from an addressless iface triggers the
+ * kernel's assume-on-link output fallback with a source address borrowed
+ * from another interface, poisoning the server's view of the path 4-tuple. */
 static int
 iface_has_usable_ip(const char *ifname, sa_family_t af)
 {
@@ -548,6 +550,14 @@ iface_has_usable_ip(const char *ifname, sa_family_t af)
             const struct sockaddr_in6 *s6 =
                 (const struct sockaddr_in6 *)(const void *)ifa->ifa_addr;
             if (IN6_IS_ADDR_LINKLOCAL(&s6->sin6_addr)) continue;
+        }
+        if (af == AF_INET) {
+            const struct sockaddr_in *s4 =
+                (const struct sockaddr_in *)(const void *)ifa->ifa_addr;
+            /* 169.254/16 (IPv4LL): same unusable-source class as v6
+             * link-local — present exactly when DHCP has NOT restored a
+             * real address yet. */
+            if ((ntohl(s4->sin_addr.s_addr) & 0xFFFF0000UL) == 0xA9FE0000UL) continue;
         }
         found = 1;
         break;
@@ -726,9 +736,17 @@ recovery_rollback(platform_ctx_t *p, int slot, mqvpn_add_path_outcome_t outcome)
 static int
 try_readd_removed_path(platform_ctx_t *p, const char *ifname)
 {
-    /* Never re-add while the interface lacks a usable source address of
-     * the server's family (see iface_has_usable_ip). RTM_NEWADDR for the
-     * right family, or the recovery timer, will retry once it exists. */
+    /* Never re-add on a down/no-carrier link, or while the interface lacks
+     * a usable source address of the server's family (see
+     * iface_has_usable_ip). RTM_NEWADDR for the right family, or the
+     * recovery timer, will retry once both hold.
+     *
+     * Note: handle_rtm_newlink / recover_dropped_paths_cb already check
+     * both conditions before calling in here — that's intentionally
+     * redundant. This function is also reachable via handle_rtm_newaddr,
+     * which must not be allowed to bypass the gate on an admin-down or
+     * carrier-less iface. */
+    if (!iface_is_up_and_running(ifname)) return 0;
     if (!iface_has_usable_ip(ifname, p->server_addr.ss_family)) return 0;
 
     mqvpn_path_info_t pinfo[MQVPN_MAX_PATHS];
@@ -890,12 +908,7 @@ handle_rtm_dellink(platform_ctx_t *p, struct nlmsghdr *nh)
  *
  * Gate on IFLA_OPERSTATE rather than !IFF_RUNNING. IFF_RUNNING also clears
  * during wifi association / dormant transitions, so an !IFF_RUNNING-based
- * gate would burn one path_id slot per wifi roam. This IFF_UP gate no
- * longer means admin-down is ignored — the caller (handle_rtm_newlink)
- * handles admin-down separately as a deliberate operational drop, reported
- * before this function is even consulted. This gate's remaining job is to
- * protect the IFF_UP=1 flap cases (wifi DORMANT/UNKNOWN etc.) from being
- * misread as carrier loss.
+ * gate would burn one path_id slot per wifi roam.
  *
  * Drop only on a definite operational-down report (RFC 2863): IF_OPER_DOWN
  * (link admin/peer down) or IF_OPER_LOWERLAYERDOWN (e.g. underlying ethernet
@@ -904,11 +917,19 @@ handle_rtm_dellink(platform_ctx_t *p, struct nlmsghdr *nh)
  * IF_OPER_TESTING are tolerated — the carrier-up handler / recovery timer
  * will still re-add once IFF_RUNNING + has_ip become true.
  *
- * Historically this also gated on IFF_UP to avoid burning the fixed
- * XQC_MAX_PATHS_COUNT (8) path_id budget on transient admin-down flaps.
- * That budget is obsolete since the draft-21 dynamic path cap work (paths
- * now grow/shrink via PATHS_BLOCKED / MAX_PATH_ID rather than a fixed
- * array), so admin-down no longer needs special-casing to preserve it. */
+ * The IFF_UP term below is checked for defensiveness but is redundant in
+ * practice: the caller (handle_rtm_newlink) already short-circuits on
+ * admin_down before ever consulting this function, so IFF_UP is always 1
+ * by the time we get here. It's kept only in case a future caller invokes
+ * this helper without that same admin_down pre-check. The operstate
+ * condition above is what actually protects the IFF_UP=1 flap cases (wifi
+ * DORMANT/UNKNOWN etc.) from being misread as carrier loss.
+ *
+ * Note this function does not need to special-case admin-down to preserve
+ * the fixed XQC_MAX_PATHS_COUNT (8) path_id budget — that budget is
+ * obsolete since the draft-21 dynamic path cap work (paths now grow/shrink
+ * via PATHS_BLOCKED / MAX_PATH_ID rather than a fixed array). Admin-down is
+ * instead handled explicitly and immediately by the caller. */
 static int
 is_carrier_loss(struct ifinfomsg *ifi, int operstate)
 {
