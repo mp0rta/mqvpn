@@ -31,8 +31,8 @@ _check_residence_warnings() {
     if [ -n "$log_file" ] && [ -f "$log_file" ] \
         && [ -z "${MQVPN_E2E_ALLOW_RESIDENCE_WARN:-}" ]; then
         if grep -qE "stuck in PENDING|DEGRADED retry overdue" "$log_file"; then
-            echo "RESIDENCE FAIL: $desc log contains a path-residence warning"
-            grep -nE "stuck in PENDING|DEGRADED retry overdue" "$log_file" | tail -5
+            echo "RESIDENCE FAIL: $desc log contains a path-residence warning" >&2
+            grep -nE "stuck in PENDING|DEGRADED retry overdue" "$log_file" | tail -5 >&2
             return 1
         fi
     fi

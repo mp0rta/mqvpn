@@ -375,6 +375,9 @@ client_path_residence_check(mqvpn_client_t *c, path_entry_t *p, uint64_t now_us)
     if (!path_should_warn_residence(p, now_us)) return;
 
     switch (p->status) {
+    /* The "stuck in PENDING" / "DEGRADED retry overdue" wordings are
+     * grepped by scripts/ci_e2e/sanitizer_check.sh as a suite-wide
+     * postcondition — rewording them silently disables that gate. */
     case MQVPN_PATH_PENDING:
         LOG_W(c, "path[%lld %s] stuck in PENDING for %llu ms", (long long)p->handle,
               p->name, (unsigned long long)((now_us - p->state_entered_at_us) / 1000));
