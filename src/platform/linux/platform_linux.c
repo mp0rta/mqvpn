@@ -942,7 +942,15 @@ handle_rtm_newaddr(platform_ctx_t *p, struct nlmsghdr *nh)
  * is still up with a route, so sends keep succeeding into a black hole until
  * the address returns. If the removal leaves no usable source address of the
  * server's family, drop the path so the scheduler fails over immediately;
- * RTM_NEWADDR re-adds it when an address comes back. */
+ * RTM_NEWADDR re-adds it when an address comes back.
+ *
+ * Only acts while the link is still up-and-running: admin down and link
+ * teardown flush addresses too, and the kernel emits those RTM_DELADDRs
+ * BEFORE the corresponding link event (`ip link del` -> v4 DELADDR before
+ * DELLINK; v6 admin down -> DELADDR before NEWLINK). Acting on them here
+ * would steal the drop from the more specific handler and misreport the
+ * public reason as ADDR_REMOVED. nmcli/DHCP address loss keeps IFF_UP and
+ * carrier set, so the gate never blocks the case this handler exists for. */
 static void
 handle_rtm_deladdr(platform_ctx_t *p, struct nlmsghdr *nh)
 {
@@ -950,6 +958,20 @@ handle_rtm_deladdr(platform_ctx_t *p, struct nlmsghdr *nh)
     if (ifa->ifa_family != p->server_addr.ss_family) return;
     char ifname[IFNAMSIZ];
     if (!if_indextoname(ifa->ifa_index, ifname)) return;
+
+    /* Cheap tracked-path match before the getifaddrs() enumeration: on
+     * hosts with container/veth churn every unrelated DELADDR would
+     * otherwise pay a full address-table walk inside the event loop. */
+    int tracked = 0;
+    for (int i = 0; i < p->path_mgr.n_paths; i++) {
+        if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0) {
+            tracked = 1;
+            break;
+        }
+    }
+    if (!tracked) return;
+
+    if (!iface_is_up_and_running(ifname)) return; /* link event owns the drop */
     if (iface_has_usable_ip(ifname, ifa->ifa_family) != 0) return;
     drop_paths_by_ifname(p, ifname, MQVPN_PLATFORM_REASON_ADDR_REMOVED);
 }
