@@ -258,6 +258,12 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_admin_down_test.sh
 
+      - name: E2E addr-del failover test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_addr_del_failover_test.sh
+
       - name: E2E validation black-hole test (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
@@ -481,6 +487,9 @@ jobs:
 
       - name: Carrier-flap test (netns)
         run: sudo scripts/ci_e2e/run_carrier_flap_test.sh
+
+      - name: Addr-del failover test (netns)
+        run: sudo scripts/ci_e2e/run_addr_del_failover_test.sh
 
       - name: Throughput-floor regression test (netns)
         run: sudo scripts/ci_e2e/run_throughput_floor_test.sh
