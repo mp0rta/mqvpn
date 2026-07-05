@@ -871,6 +871,13 @@ recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
             LOG_INF("netlink: timer re-added path %s after carrier-up failure", ifname);
     }
 
+    /* Netlink handlers may have created/dropped paths (queuing frames such
+     * as PATH_CHALLENGE inside xquic) — drive the engine and re-arm the
+     * tick from the engine's new wakeup request, exactly as on_socket_read
+     * does. Without this the queued frames wait for an unrelated timer. */
+    mqvpn_client_tick(p->client);
+    schedule_next_tick(p);
+
 rearm:
     if (p->ev_recover) {
         struct timeval tv = {.tv_sec = RECOVER_INTERVAL_SEC};
@@ -985,6 +992,13 @@ on_netlink_event(evutil_socket_t fd, short what, void *arg)
             }
         }
     }
+
+    /* Netlink handlers may have created/dropped paths (queuing frames such
+     * as PATH_CHALLENGE inside xquic) — drive the engine and re-arm the
+     * tick from the engine's new wakeup request, exactly as on_socket_read
+     * does. Without this the queued frames wait for an unrelated timer. */
+    mqvpn_client_tick(p->client);
+    schedule_next_tick(p);
 }
 
 static int
