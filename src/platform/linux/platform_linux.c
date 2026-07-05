@@ -527,6 +527,23 @@ remove_path_by_index(platform_ctx_t *p, int idx, mqvpn_platform_reason_t reason)
     mqvpn_client_on_platform_fd_closed(p->client, p->lib_path_handles[idx]);
 }
 
+/* Drop every tracked path on `ifname`. Shared by the RTM_DELADDR /
+ * RTM_DELLINK / RTM_NEWLINK drop branches so slot matching stays in one
+ * place. Returns the number of paths matched (dropped or already gone). */
+static int
+drop_paths_by_ifname(platform_ctx_t *p, const char *ifname,
+                     mqvpn_platform_reason_t reason)
+{
+    int matched = 0;
+    for (int i = 0; i < p->path_mgr.n_paths; i++) {
+        if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0) {
+            remove_path_by_index(p, i, reason);
+            matched++;
+        }
+    }
+    return matched;
+}
+
 /* Check whether `ifname` is admin-up AND has carrier (IFF_UP & IFF_RUNNING).
  * Used by the periodic recovery timer to skip retries on a still-down link. */
 static int
@@ -934,10 +951,7 @@ handle_rtm_deladdr(platform_ctx_t *p, struct nlmsghdr *nh)
     char ifname[IFNAMSIZ];
     if (!if_indextoname(ifa->ifa_index, ifname)) return;
     if (iface_has_usable_ip(ifname, ifa->ifa_family) != 0) return;
-    for (int i = 0; i < p->path_mgr.n_paths; i++) {
-        if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0)
-            remove_path_by_index(p, i, MQVPN_PLATFORM_REASON_ADDR_REMOVED);
-    }
+    drop_paths_by_ifname(p, ifname, MQVPN_PLATFORM_REASON_ADDR_REMOVED);
 }
 
 /* RTM_DELLINK: interface gone. remove_path_by_index() uses drop_path
@@ -948,10 +962,7 @@ handle_rtm_dellink(platform_ctx_t *p, struct nlmsghdr *nh)
 {
     const char *ifname = nlmsg_get_ifname(nh);
     if (!ifname) return;
-    for (int i = 0; i < p->path_mgr.n_paths; i++) {
-        if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0)
-            remove_path_by_index(p, i, MQVPN_PLATFORM_REASON_RTM_DELLINK);
-    }
+    drop_paths_by_ifname(p, ifname, MQVPN_PLATFORM_REASON_RTM_DELLINK);
 }
 
 /* Decide whether this RTM_NEWLINK is a carrier-loss event we should drop on.
@@ -998,12 +1009,9 @@ handle_rtm_newlink(platform_ctx_t *p, struct nlmsghdr *nh)
 
     int admin_down = !(ifi->ifi_flags & IFF_UP);
     if (admin_down || is_carrier_loss(ifi, nlmsg_get_operstate(nh))) {
-        for (int i = 0; i < p->path_mgr.n_paths; i++) {
-            if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0)
-                remove_path_by_index(p, i,
-                                     admin_down ? MQVPN_PLATFORM_REASON_ADMIN_DOWN
-                                                : MQVPN_PLATFORM_REASON_CARRIER_LOST);
-        }
+        drop_paths_by_ifname(p, ifname,
+                             admin_down ? MQVPN_PLATFORM_REASON_ADMIN_DOWN
+                                        : MQVPN_PLATFORM_REASON_CARRIER_LOST);
         return;
     }
 
