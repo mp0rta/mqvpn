@@ -139,7 +139,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake libevent-dev golang iptables conntrack clang iperf3 jq netcat-openbsd
+          sudo apt-get install -y cmake libevent-dev golang iptables conntrack clang iperf3 jq netcat-openbsd iproute2
 
       - name: Compute xquic SHA
         id: xqsha
@@ -251,6 +251,18 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_carrier_flap_test.sh
+
+      - name: E2E admin-down recovery test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_admin_down_test.sh
+
+      - name: E2E validation black-hole test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_validation_blackhole_test.sh
 
       - name: E2E backup_fec scheduler test (netns)
         env:

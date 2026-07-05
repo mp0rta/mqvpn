@@ -474,9 +474,11 @@ nlmsg_get_operstate(struct nlmsghdr *nh)
 }
 
 /* Remove a path because the kernel says it's no longer usable.
- * Two callers: RTM_DELLINK (interface gone) and RTM_NEWLINK with IFLA_OPERSTATE
- * = IF_OPER_DOWN / IF_OPER_LOWERLAYERDOWN (carrier lost — cable unplugged etc).
- * Both share cleanup; only the log message differs.
+ * Three callers: RTM_DELLINK (interface gone); RTM_NEWLINK with
+ * IFLA_OPERSTATE = IF_OPER_DOWN / IF_OPER_LOWERLAYERDOWN (carrier lost —
+ * cable unplugged etc); and RTM_NEWLINK with IFF_UP cleared (admin down,
+ * e.g. `ip link set down`). All three share cleanup; only the log message
+ * differs.
  *
  * Cleans up: library path, libevent, fd. Preserves iface name for re-add. */
 static void
@@ -527,9 +529,15 @@ iface_is_up_and_running(const char *ifname)
     return ok;
 }
 
-/* Check if interface has an IP address (v4 or v6) */
+/* Check if the interface has a usable source address for the given
+ * family. v4: any address except 169.254/16 link-local. v6: global scope
+ * only — a link-local address cannot reach the server, and its presence
+ * used to let the re-add gate pass during the v4-less window right after
+ * link-up. Binding and challenging from an addressless iface triggers the
+ * kernel's assume-on-link output fallback with a source address borrowed
+ * from another interface, poisoning the server's view of the path 4-tuple. */
 static int
-iface_has_ip(const char *ifname)
+iface_has_usable_ip(const char *ifname, sa_family_t af)
 {
     struct ifaddrs *ifa_list = NULL, *ifa;
     int found = 0;
@@ -537,10 +545,22 @@ iface_has_ip(const char *ifname)
     for (ifa = ifa_list; ifa; ifa = ifa->ifa_next) {
         if (!ifa->ifa_addr) continue;
         if (strcmp(ifa->ifa_name, ifname) != 0) continue;
-        if (ifa->ifa_addr->sa_family == AF_INET || ifa->ifa_addr->sa_family == AF_INET6) {
-            found = 1;
-            break;
+        if (ifa->ifa_addr->sa_family != af) continue;
+        if (af == AF_INET6) {
+            const struct sockaddr_in6 *s6 =
+                (const struct sockaddr_in6 *)(const void *)ifa->ifa_addr;
+            if (IN6_IS_ADDR_LINKLOCAL(&s6->sin6_addr)) continue;
         }
+        if (af == AF_INET) {
+            const struct sockaddr_in *s4 =
+                (const struct sockaddr_in *)(const void *)ifa->ifa_addr;
+            /* 169.254/16 (IPv4LL): same unusable-source class as v6
+             * link-local — present exactly when DHCP has NOT restored a
+             * real address yet. */
+            if ((ntohl(s4->sin_addr.s_addr) & 0xFFFF0000UL) == 0xA9FE0000UL) continue;
+        }
+        found = 1;
+        break;
     }
     freeifaddrs(ifa_list);
     return found;
@@ -716,6 +736,19 @@ recovery_rollback(platform_ctx_t *p, int slot, mqvpn_add_path_outcome_t outcome)
 static int
 try_readd_removed_path(platform_ctx_t *p, const char *ifname)
 {
+    /* Never re-add on a down/no-carrier link, or while the interface lacks
+     * a usable source address of the server's family (see
+     * iface_has_usable_ip). RTM_NEWADDR for the right family, or the
+     * recovery timer, will retry once both hold.
+     *
+     * Note: handle_rtm_newlink / recover_dropped_paths_cb already check
+     * both conditions before calling in here — that's intentionally
+     * redundant. This function is also reachable via handle_rtm_newaddr,
+     * which must not be allowed to bypass the gate on an admin-down or
+     * carrier-less iface. */
+    if (!iface_is_up_and_running(ifname)) return 0;
+    if (!iface_has_usable_ip(ifname, p->server_addr.ss_family)) return 0;
+
     mqvpn_path_info_t pinfo[MQVPN_MAX_PATHS];
     int n = 0;
     if (mqvpn_client_get_paths(p->client, pinfo, MQVPN_MAX_PATHS, &n) != MQVPN_OK)
@@ -827,7 +860,7 @@ recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
 
         const char *ifname = p->path_mgr.paths[i].iface;
         if (!iface_is_up_and_running(ifname)) continue;
-        if (!iface_has_ip(ifname)) continue;
+        if (!iface_has_usable_ip(ifname, p->server_addr.ss_family)) continue;
 
         /* try_readd_removed_path scans by ifname, finds this slot via
          * lib state, and either succeeds (resets the counter via line
@@ -837,6 +870,13 @@ recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
         if (try_readd_removed_path(p, ifname))
             LOG_INF("netlink: timer re-added path %s after carrier-up failure", ifname);
     }
+
+    /* The re-add above may have created a path (queuing a PATH_CHALLENGE
+     * inside xquic) — drive the engine and re-arm the tick from the
+     * engine's new wakeup request, exactly as on_socket_read does.
+     * Without this the queued frames wait for an unrelated timer. */
+    mqvpn_client_tick(p->client);
+    schedule_next_tick(p);
 
 rearm:
     if (p->ev_recover) {
@@ -875,15 +915,28 @@ handle_rtm_dellink(platform_ctx_t *p, struct nlmsghdr *nh)
  *
  * Gate on IFLA_OPERSTATE rather than !IFF_RUNNING. IFF_RUNNING also clears
  * during wifi association / dormant transitions, so an !IFF_RUNNING-based
- * gate would burn one path_id slot per wifi roam — defeating the very
- * XQC_MAX_PATHS_COUNT budget the drop is meant to preserve.
+ * gate would burn one path_id slot per wifi roam.
  *
  * Drop only on a definite operational-down report (RFC 2863): IF_OPER_DOWN
  * (link admin/peer down) or IF_OPER_LOWERLAYERDOWN (e.g. underlying ethernet
  * of a vlan/bridge went away). IF_OPER_DORMANT (wifi associating),
  * IF_OPER_UNKNOWN (driver doesn't report; common on virtual interfaces) and
  * IF_OPER_TESTING are tolerated — the carrier-up handler / recovery timer
- * will still re-add once IFF_RUNNING + has_ip become true. */
+ * will still re-add once IFF_RUNNING + has_ip become true.
+ *
+ * The IFF_UP term below is checked for defensiveness but is redundant in
+ * practice: the caller (handle_rtm_newlink) already short-circuits on
+ * admin_down before ever consulting this function, so IFF_UP is always 1
+ * by the time we get here. It's kept only in case a future caller invokes
+ * this helper without that same admin_down pre-check. The operstate
+ * condition above is what actually protects the IFF_UP=1 flap cases (wifi
+ * DORMANT/UNKNOWN etc.) from being misread as carrier loss.
+ *
+ * Note this function does not need to special-case admin-down to preserve
+ * the fixed XQC_MAX_PATHS_COUNT (8) path_id budget — that budget is
+ * obsolete since the draft-21 dynamic path cap work (paths now grow/shrink
+ * via PATHS_BLOCKED / MAX_PATH_ID rather than a fixed array). Admin-down is
+ * instead handled explicitly and immediately by the caller. */
 static int
 is_carrier_loss(struct ifinfomsg *ifi, int operstate)
 {
@@ -891,8 +944,8 @@ is_carrier_loss(struct ifinfomsg *ifi, int operstate)
            (operstate == IF_OPER_DOWN || operstate == IF_OPER_LOWERLAYERDOWN);
 }
 
-/* RTM_NEWLINK: link state changed. Either drop on carrier loss, or attempt
- * recovery if the link is now usable. */
+/* RTM_NEWLINK: link state changed. Either drop on admin-down/carrier loss,
+ * or attempt recovery if the link is now usable. */
 static void
 handle_rtm_newlink(platform_ctx_t *p, struct nlmsghdr *nh)
 {
@@ -900,16 +953,17 @@ handle_rtm_newlink(platform_ctx_t *p, struct nlmsghdr *nh)
     const char *ifname = nlmsg_get_ifname(nh);
     if (!ifname) return;
 
-    if (is_carrier_loss(ifi, nlmsg_get_operstate(nh))) {
+    int admin_down = !(ifi->ifi_flags & IFF_UP);
+    if (admin_down || is_carrier_loss(ifi, nlmsg_get_operstate(nh))) {
         for (int i = 0; i < p->path_mgr.n_paths; i++) {
             if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0)
-                remove_path_by_index(p, i, "carrier lost");
+                remove_path_by_index(p, i, admin_down ? "admin down" : "carrier lost");
         }
         return;
     }
 
-    if (!(ifi->ifi_flags & IFF_UP) || !(ifi->ifi_flags & IFF_RUNNING)) return;
-    if (!iface_has_ip(ifname)) return;
+    if (!(ifi->ifi_flags & IFF_RUNNING)) return;
+    if (!iface_has_usable_ip(ifname, p->server_addr.ss_family)) return;
 
     /* First: try to re-add paths removed by RTM_DELLINK (dead fd).
      * Otherwise: reactivate degraded/closed paths (fd still valid). */
@@ -938,6 +992,13 @@ on_netlink_event(evutil_socket_t fd, short what, void *arg)
             }
         }
     }
+
+    /* Netlink handlers may have created/dropped paths (queuing frames such
+     * as PATH_CHALLENGE inside xquic) — drive the engine and re-arm the
+     * tick from the engine's new wakeup request, exactly as on_socket_read
+     * does. Without this the queued frames wait for an unrelated timer. */
+    mqvpn_client_tick(p->client);
+    schedule_next_tick(p);
 }
 
 static int
