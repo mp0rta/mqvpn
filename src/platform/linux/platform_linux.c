@@ -535,13 +535,18 @@ iface_is_up_and_running(const char *ifname)
  * used to let the re-add gate pass during the v4-less window right after
  * link-up. Binding and challenging from an addressless iface triggers the
  * kernel's assume-on-link output fallback with a source address borrowed
- * from another interface, poisoning the server's view of the path 4-tuple. */
+ * from another interface, poisoning the server's view of the path 4-tuple.
+ *
+ * Returns 1 = usable address present, 0 = enumerated and found none,
+ * -1 = getifaddrs() failed (unknown). Callers must fail safe: the
+ * RTM_DELADDR drop requires a definite 0, the re-add gates a definite 1,
+ * so a transient getifaddrs failure never drops or re-adds a path. */
 static int
 iface_has_usable_ip(const char *ifname, sa_family_t af)
 {
     struct ifaddrs *ifa_list = NULL, *ifa;
     int found = 0;
-    if (getifaddrs(&ifa_list) < 0) return 0;
+    if (getifaddrs(&ifa_list) < 0) return -1;
     for (ifa = ifa_list; ifa; ifa = ifa->ifa_next) {
         if (!ifa->ifa_addr) continue;
         if (strcmp(ifa->ifa_name, ifname) != 0) continue;
@@ -747,7 +752,7 @@ try_readd_removed_path(platform_ctx_t *p, const char *ifname)
      * which must not be allowed to bypass the gate on an admin-down or
      * carrier-less iface. */
     if (!iface_is_up_and_running(ifname)) return 0;
-    if (!iface_has_usable_ip(ifname, p->server_addr.ss_family)) return 0;
+    if (iface_has_usable_ip(ifname, p->server_addr.ss_family) != 1) return 0;
 
     mqvpn_path_info_t pinfo[MQVPN_MAX_PATHS];
     int n = 0;
@@ -860,7 +865,7 @@ recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
 
         const char *ifname = p->path_mgr.paths[i].iface;
         if (!iface_is_up_and_running(ifname)) continue;
-        if (!iface_has_usable_ip(ifname, p->server_addr.ss_family)) continue;
+        if (iface_has_usable_ip(ifname, p->server_addr.ss_family) != 1) continue;
 
         /* try_readd_removed_path scans by ifname, finds this slot via
          * lib state, and either succeeds (resets the counter via line
@@ -895,6 +900,29 @@ handle_rtm_newaddr(platform_ctx_t *p, struct nlmsghdr *nh)
     char ifname[IFNAMSIZ];
     if (!if_indextoname(ifa->ifa_index, ifname)) return;
     if (!try_readd_removed_path(p, ifname)) try_reactivate_by_ifname(p, ifname);
+}
+
+/* RTM_DELADDR: an address was removed while the link stayed up. NetworkManager
+ * `nmcli dev disconnect`, a connection-profile switch, and DHCP lease expiry
+ * all remove addresses WITHOUT toggling IFF_UP or carrier — so neither the
+ * admin-down nor the carrier-loss branch of handle_rtm_newlink fires (no link
+ * event at all), and the write-error path never triggers either: the device
+ * is still up with a route, so sends keep succeeding into a black hole until
+ * the address returns. If the removal leaves no usable source address of the
+ * server's family, drop the path so the scheduler fails over immediately;
+ * RTM_NEWADDR re-adds it when an address comes back. */
+static void
+handle_rtm_deladdr(platform_ctx_t *p, struct nlmsghdr *nh)
+{
+    struct ifaddrmsg *ifa = (struct ifaddrmsg *)NLMSG_DATA(nh);
+    if (ifa->ifa_family != p->server_addr.ss_family) return;
+    char ifname[IFNAMSIZ];
+    if (!if_indextoname(ifa->ifa_index, ifname)) return;
+    if (iface_has_usable_ip(ifname, ifa->ifa_family) != 0) return;
+    for (int i = 0; i < p->path_mgr.n_paths; i++) {
+        if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0)
+            remove_path_by_index(p, i, "address removed");
+    }
 }
 
 /* RTM_DELLINK: interface gone. remove_path_by_index() uses drop_path
@@ -963,7 +991,7 @@ handle_rtm_newlink(platform_ctx_t *p, struct nlmsghdr *nh)
     }
 
     if (!(ifi->ifi_flags & IFF_RUNNING)) return;
-    if (!iface_has_usable_ip(ifname, p->server_addr.ss_family)) return;
+    if (iface_has_usable_ip(ifname, p->server_addr.ss_family) != 1) return;
 
     /* First: try to re-add paths removed by RTM_DELLINK (dead fd).
      * Otherwise: reactivate degraded/closed paths (fd still valid). */
@@ -987,6 +1015,7 @@ on_netlink_event(evutil_socket_t fd, short what, void *arg)
              nh = NLMSG_NEXT(nh, nlen)) {
             switch (nh->nlmsg_type) {
             case RTM_NEWADDR: handle_rtm_newaddr(p, nh); break;
+            case RTM_DELADDR: handle_rtm_deladdr(p, nh); break;
             case RTM_DELLINK: handle_rtm_dellink(p, nh); break;
             case RTM_NEWLINK: handle_rtm_newlink(p, nh); break;
             }
