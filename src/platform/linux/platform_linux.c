@@ -473,28 +473,43 @@ nlmsg_get_operstate(struct nlmsghdr *nh)
     return -1;
 }
 
+/* Log wording per reason. Frozen: e2e scripts grep these exact strings
+ * ("interface <if> <reason>, closing path"). */
+static const char *
+drop_reason_str(mqvpn_platform_reason_t reason)
+{
+    switch (reason) {
+    case MQVPN_PLATFORM_REASON_RTM_DELLINK: return "removed";
+    case MQVPN_PLATFORM_REASON_CARRIER_LOST: return "carrier lost";
+    case MQVPN_PLATFORM_REASON_ADMIN_DOWN: return "admin down";
+    case MQVPN_PLATFORM_REASON_ADDR_REMOVED: return "address removed";
+    default: return "dropped";
+    }
+}
+
 /* Remove a path because the kernel says it's no longer usable.
- * Three callers: RTM_DELLINK (interface gone); RTM_NEWLINK with
+ * Four callers: RTM_DELLINK (interface gone); RTM_NEWLINK with
  * IFLA_OPERSTATE = IF_OPER_DOWN / IF_OPER_LOWERLAYERDOWN (carrier lost —
- * cable unplugged etc); and RTM_NEWLINK with IFF_UP cleared (admin down,
- * e.g. `ip link set down`). All three share cleanup; only the log message
- * differs.
+ * cable unplugged etc); RTM_NEWLINK with IFF_UP cleared (admin down,
+ * e.g. `ip link set down`); and RTM_DELADDR (no usable source address
+ * left). All share cleanup; the reason is logged and reported in the
+ * public event.
  *
  * Cleans up: library path, libevent, fd. Preserves iface name for re-add. */
 static void
-remove_path_by_index(platform_ctx_t *p, int idx, const char *reason)
+remove_path_by_index(platform_ctx_t *p, int idx, mqvpn_platform_reason_t reason)
 {
     if (p->path_mgr.paths[idx].fd < 0) return; /* already removed */
 
     LOG_WRN("netlink: interface %s %s, closing path %d", p->path_mgr.paths[idx].iface,
-            reason, idx);
+            drop_reason_str(reason), idx);
 
     /* PR5: emit PLATFORM_DROP via new public API with diagnostic info.
      * Library transitions slot to CLOSED_DROPPED; fd close is reported
      * via mqvpn_client_on_platform_fd_closed() below. */
     mqvpn_platform_path_event_info_t info = {0};
     snprintf(info.iface, sizeof(info.iface), "%s", p->path_mgr.paths[idx].iface);
-    info.reason = MQVPN_PLATFORM_REASON_RTM_DELLINK;
+    info.reason = reason;
     mqvpn_client_on_platform_path_dropped(p->client, p->lib_path_handles[idx], &info);
 
     /* Remove libevent watcher */
@@ -921,7 +936,7 @@ handle_rtm_deladdr(platform_ctx_t *p, struct nlmsghdr *nh)
     if (iface_has_usable_ip(ifname, ifa->ifa_family) != 0) return;
     for (int i = 0; i < p->path_mgr.n_paths; i++) {
         if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0)
-            remove_path_by_index(p, i, "address removed");
+            remove_path_by_index(p, i, MQVPN_PLATFORM_REASON_ADDR_REMOVED);
     }
 }
 
@@ -935,7 +950,7 @@ handle_rtm_dellink(platform_ctx_t *p, struct nlmsghdr *nh)
     if (!ifname) return;
     for (int i = 0; i < p->path_mgr.n_paths; i++) {
         if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0)
-            remove_path_by_index(p, i, "removed");
+            remove_path_by_index(p, i, MQVPN_PLATFORM_REASON_RTM_DELLINK);
     }
 }
 
@@ -985,7 +1000,9 @@ handle_rtm_newlink(platform_ctx_t *p, struct nlmsghdr *nh)
     if (admin_down || is_carrier_loss(ifi, nlmsg_get_operstate(nh))) {
         for (int i = 0; i < p->path_mgr.n_paths; i++) {
             if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0)
-                remove_path_by_index(p, i, admin_down ? "admin down" : "carrier lost");
+                remove_path_by_index(p, i,
+                                     admin_down ? MQVPN_PLATFORM_REASON_ADMIN_DOWN
+                                                : MQVPN_PLATFORM_REASON_CARRIER_LOST);
         }
         return;
     }
