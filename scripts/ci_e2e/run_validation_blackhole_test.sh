@@ -2,6 +2,12 @@
 # run_validation_blackhole_test.sh — E2E test for PATH_CHALLENGE black-hole
 # abandon + recovery.
 #
+# Testing principle: idle recovery.
+#   No iperf/ping runs during the fault + recovery phases. Background
+#   socket reads would drive the xquic engine and mask a missing tick()
+#   wake-up (that masking hid a 13s recovery latency for months), so the
+#   recovery-latency assertions below depend on the tunnel staying idle.
+#
 # Companion to run_admin_down_test.sh (which exercises the admin-down/up
 # drop + address-gated re-add contract). This test instead verifies what
 # happens when a re-added path's validation traffic is silently dropped:

@@ -2,6 +2,12 @@
 # run_admin_down_test.sh — E2E test for LOCAL admin down/up recovery
 # (ip link set <local> down + ip addr flush → ip link set up + addr re-add).
 #
+# Testing principle: idle recovery.
+#   No iperf/ping runs during the fault + recovery phases. Background
+#   socket reads would drive the xquic engine and mask a missing tick()
+#   wake-up (that masking hid a 13s recovery latency for months), so the
+#   recovery-latency assertions below depend on the tunnel staying idle.
+#
 # Companion to run_carrier_flap_test.sh: that test takes the PEER (server)
 # side of the veth pair down, so the client sees a carrier loss
 # (operstate LOWERLAYERDOWN with IFF_UP still set) — the case
