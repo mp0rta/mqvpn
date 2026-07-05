@@ -14,6 +14,10 @@
 # netlink event to retry on — only the 3s timer keeps the slot
 # recoverable.
 #
+# Testing principle: idle recovery. No iperf/ping runs during Test 2's
+# recovery-measurement window (re-add -> activation) below; see the
+# header of run_admin_down_test.sh for the full rationale.
+#
 # Topology (dual-path multipath):
 #   vpn-client                   vpn-server
 #     veth-a0 ─────────────────── veth-a1       Path A (10.100.0.0/24)
@@ -103,6 +107,23 @@ wait_for_log() {
     local elapsed=0
     while [ "$elapsed" -lt "$timeout" ]; do
         if grep -qE "$pattern" "$log_file" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    return 1
+}
+
+# Like wait_for_log but only considers lines AFTER line number $3 —
+# needed to distinguish the post-re-add activation from the initial
+# connection-time activation of the same path.
+wait_for_log_after() {
+    local log_file="$1" pattern="$2" start_line="$3" timeout="${4:-15}"
+    local elapsed=0
+    while [ "$elapsed" -lt "$timeout" ]; do
+        if tail -n "+$((start_line + 1))" "$log_file" 2>/dev/null \
+                | grep -qE "$pattern"; then
             return 0
         fi
         sleep 1
@@ -254,21 +275,71 @@ fi
 echo ""
 echo "=== Test 2: Carrier restore (peer-side ip link set up) — path re-added ==="
 
+UP_MARK=$(wc -l <"${WORK_DIR}/client.log")
+
 ip netns exec "$NS_SERVER" ip link set "$VETH_A1" up
 # Client-side veth-a0-cf was never admin-downed, so this restores carrier.
+
+READD_PATTERN="path .* re-added|timer re-added path"
 
 # Allow up to 20s — the recovery timer fires every 3s, so even if the
 # RTM_NEWLINK-driven try_readd_removed_path() fails synchronously, the
 # timer will succeed on a later tick. The whole point of this test is
 # that recovery DOES happen even when the netlink event sequence is
 # minimal (carrier-only, no addr add/del).
-if ! wait_for_log "${WORK_DIR}/client.log" "path .* re-added|timer re-added path" 20; then
+if ! wait_for_log_after "${WORK_DIR}/client.log" "$READD_PATTERN" "$UP_MARK" 20; then
     echo "=== FAIL: Path re-addition not detected within 20s ==="
     echo "--- Client log ---"
     cat "${WORK_DIR}/client.log"
     exit 1
 fi
 echo "OK: path re-added"
+
+# Record where the re-add happened so the activation wait and the
+# recovery-latency assertion below only look at lines AFTER it (the
+# initial connect also logged an ACTIVE transition for this iface).
+READD_LINE=$(grep -nE "$READD_PATTERN" "${WORK_DIR}/client.log" | tail -1 | cut -d: -f1)
+
+# ─── Wait for the re-added path to return to ACTIVE/STANDBY ───
+# Markers (post-re-add only):
+#   INFO : "path[N] activated: path_id=... iface=veth-a0-cf state=ACTIVE"
+#   DEBUG: "path[handle=N name=veth-a0-cf] VALIDATING -> ACTIVE ..."
+ACTIVATE_PATTERN="activated:.*iface=${VETH_A0}.*state=(ACTIVE|STANDBY)|name=${VETH_A0}\].*-> (ACTIVE|STANDBY)"
+if wait_for_log_after "${WORK_DIR}/client.log" "$ACTIVATE_PATTERN" "$READD_LINE" 45; then
+    echo "OK: re-added path returned to ACTIVE"
+else
+    echo "=== FAIL: re-added path did not return to ACTIVE within 45s ==="
+    echo "--- Client log (post-restore) ---"
+    tail -n "+$((UP_MARK + 1))" "${WORK_DIR}/client.log"
+    exit 1
+fi
+
+# ─── Recovery-latency assertion: re-add -> ACTIVE within 5s ───
+# Pins the "drive engine after netlink-driven path changes" fix on the
+# carrier path specifically: unlike the admin-down test, the address
+# never leaves the interface here (this is a peer-side carrier flap,
+# not an admin down/addr flush), so the re-add fires right at
+# carrier-restore and validation must complete in milliseconds. Before
+# that fix, the re-added path only reactivated when an unrelated timer
+# happened to fire, taking ~13s here — the loose 20s recovery-timer
+# window above would still pass at that latency, so this tight budget
+# is what actually pins the regression.
+ts_to_ms() {  # HH:MM:SS.mmm -> ms since midnight
+    local h=${1%%:*} rest=${1#*:}
+    local m=${rest%%:*} s_ms=${rest#*:}
+    local s=${s_ms%%.*} ms=${s_ms#*.}
+    echo $(( (10#$h*3600 + 10#$m*60 + 10#$s)*1000 + 10#$ms ))
+}
+READD_TS=$(sed -n "${READD_LINE}p" "${WORK_DIR}/client.log" | awk '{print $1}')
+ACT_TS=$(tail -n "+$((READD_LINE + 1))" "${WORK_DIR}/client.log" \
+    | grep -E "$ACTIVATE_PATTERN" | head -1 | awk '{print $1}')
+LAT_MS=$(( $(ts_to_ms "$ACT_TS") - $(ts_to_ms "$READD_TS") ))
+# midnight wrap: extremely unlikely in CI; treat negative as wrap and skip
+if [ "$LAT_MS" -ge 0 ] && [ "$LAT_MS" -gt 5000 ]; then
+    echo "=== FAIL: re-add -> ACTIVE took ${LAT_MS} ms (budget 5000 ms) ==="
+    exit 1
+fi
+echo "OK: re-add -> ACTIVE in ${LAT_MS} ms"
 
 if ip netns exec "$NS_CLIENT" ping -c 3 -W 2 "$TUNNEL_IP" >/dev/null 2>&1; then
     echo "OK: tunnel ping works after carrier restore"
