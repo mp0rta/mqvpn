@@ -527,6 +527,23 @@ remove_path_by_index(platform_ctx_t *p, int idx, mqvpn_platform_reason_t reason)
     mqvpn_client_on_platform_fd_closed(p->client, p->lib_path_handles[idx]);
 }
 
+/* Drop every tracked path on `ifname`. Shared by the RTM_DELADDR /
+ * RTM_DELLINK / RTM_NEWLINK drop branches so slot matching stays in one
+ * place. Returns the number of paths matched (dropped or already gone). */
+static int
+drop_paths_by_ifname(platform_ctx_t *p, const char *ifname,
+                     mqvpn_platform_reason_t reason)
+{
+    int matched = 0;
+    for (int i = 0; i < p->path_mgr.n_paths; i++) {
+        if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0) {
+            remove_path_by_index(p, i, reason);
+            matched++;
+        }
+    }
+    return matched;
+}
+
 /* Check whether `ifname` is admin-up AND has carrier (IFF_UP & IFF_RUNNING).
  * Used by the periodic recovery timer to skip retries on a still-down link. */
 static int
@@ -925,7 +942,15 @@ handle_rtm_newaddr(platform_ctx_t *p, struct nlmsghdr *nh)
  * is still up with a route, so sends keep succeeding into a black hole until
  * the address returns. If the removal leaves no usable source address of the
  * server's family, drop the path so the scheduler fails over immediately;
- * RTM_NEWADDR re-adds it when an address comes back. */
+ * RTM_NEWADDR re-adds it when an address comes back.
+ *
+ * Only acts while the link is still up-and-running: admin down and link
+ * teardown flush addresses too, and the kernel emits those RTM_DELADDRs
+ * BEFORE the corresponding link event (`ip link del` -> v4 DELADDR before
+ * DELLINK; v6 admin down -> DELADDR before NEWLINK). Acting on them here
+ * would steal the drop from the more specific handler and misreport the
+ * public reason as ADDR_REMOVED. nmcli/DHCP address loss keeps IFF_UP and
+ * carrier set, so the gate never blocks the case this handler exists for. */
 static void
 handle_rtm_deladdr(platform_ctx_t *p, struct nlmsghdr *nh)
 {
@@ -933,11 +958,22 @@ handle_rtm_deladdr(platform_ctx_t *p, struct nlmsghdr *nh)
     if (ifa->ifa_family != p->server_addr.ss_family) return;
     char ifname[IFNAMSIZ];
     if (!if_indextoname(ifa->ifa_index, ifname)) return;
-    if (iface_has_usable_ip(ifname, ifa->ifa_family) != 0) return;
+
+    /* Cheap tracked-path match before the getifaddrs() enumeration: on
+     * hosts with container/veth churn every unrelated DELADDR would
+     * otherwise pay a full address-table walk inside the event loop. */
+    int tracked = 0;
     for (int i = 0; i < p->path_mgr.n_paths; i++) {
-        if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0)
-            remove_path_by_index(p, i, MQVPN_PLATFORM_REASON_ADDR_REMOVED);
+        if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0) {
+            tracked = 1;
+            break;
+        }
     }
+    if (!tracked) return;
+
+    if (!iface_is_up_and_running(ifname)) return; /* link event owns the drop */
+    if (iface_has_usable_ip(ifname, ifa->ifa_family) != 0) return;
+    drop_paths_by_ifname(p, ifname, MQVPN_PLATFORM_REASON_ADDR_REMOVED);
 }
 
 /* RTM_DELLINK: interface gone. remove_path_by_index() uses drop_path
@@ -948,10 +984,7 @@ handle_rtm_dellink(platform_ctx_t *p, struct nlmsghdr *nh)
 {
     const char *ifname = nlmsg_get_ifname(nh);
     if (!ifname) return;
-    for (int i = 0; i < p->path_mgr.n_paths; i++) {
-        if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0)
-            remove_path_by_index(p, i, MQVPN_PLATFORM_REASON_RTM_DELLINK);
-    }
+    drop_paths_by_ifname(p, ifname, MQVPN_PLATFORM_REASON_RTM_DELLINK);
 }
 
 /* Decide whether this RTM_NEWLINK is a carrier-loss event we should drop on.
@@ -998,12 +1031,9 @@ handle_rtm_newlink(platform_ctx_t *p, struct nlmsghdr *nh)
 
     int admin_down = !(ifi->ifi_flags & IFF_UP);
     if (admin_down || is_carrier_loss(ifi, nlmsg_get_operstate(nh))) {
-        for (int i = 0; i < p->path_mgr.n_paths; i++) {
-            if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0)
-                remove_path_by_index(p, i,
-                                     admin_down ? MQVPN_PLATFORM_REASON_ADMIN_DOWN
-                                                : MQVPN_PLATFORM_REASON_CARRIER_LOST);
-        }
+        drop_paths_by_ifname(p, ifname,
+                             admin_down ? MQVPN_PLATFORM_REASON_ADMIN_DOWN
+                                        : MQVPN_PLATFORM_REASON_CARRIER_LOST);
         return;
     }
 
