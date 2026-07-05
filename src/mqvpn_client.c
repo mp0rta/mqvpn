@@ -2738,8 +2738,13 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
             /* Recovery timer — shorten `ms` only, never extend. Same shape as
              * Stability timer below. Unlike the RECONNECTING / CONNECTING
              * blocks above, the tunnel is live here and BBR pacing depends
-             * on near-term ticks. */
-            if (p->status == MQVPN_PATH_DEGRADED && p->recreate_after_us > 0) {
+             * on near-term ticks.
+             *
+             * recreate_after_us != 0 exactly in CREATE_WAIT (public PENDING)
+             * and DEGRADED — both carry a retry deadline the tick must honor.
+             * Gating on the public DEGRADED status alone left CREATE_WAIT
+             * retries waiting for an unrelated timer. */
+            if (p->recreate_after_us > 0) {
                 if (p->recreate_after_us > now_val) {
                     int pms = (int)((p->recreate_after_us - now_val) / 1000);
                     if (ms > 0 && pms < ms) ms = pms;
