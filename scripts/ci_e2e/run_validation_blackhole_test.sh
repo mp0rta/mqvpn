@@ -316,8 +316,14 @@ GP3_REL=$(tail -n "+$((LINKUP_MARK + 1))" "${WORK_DIR}/client.log" \
     | grep -nE "G-P3 validation timeout" | head -1 | cut -d: -f1)
 GP3_LINE=$((LINKUP_MARK + GP3_REL))
 
+# 30s, not 10s: the abandon now arms a draining backstop (xquic fix N3)
+# before CLOSING -> CLOSED -> path_removed_notify fires. The backstop is
+# 3x the remaining ACTIVE path's un-backed-off PTO (xqc_conn_get_max_pto
+# skips the CLOSING path and applies no backoff) — typically well under
+# 1s in this topology. The 30s window is deliberate slack, not an
+# expected latency.
 if ! wait_for_log_after "${WORK_DIR}/client.log" \
-        "name=${VETH_A0}\].*-> CREATE_WAIT.*reason=XQUIC_REMOVED" "$GP3_LINE" 10; then
+        "name=${VETH_A0}\].*-> CREATE_WAIT.*reason=XQUIC_REMOVED" "$GP3_LINE" 30; then
     echo "=== FAIL: no abandon-driven -> CREATE_WAIT (reason=XQUIC_REMOVED) for ${VETH_A0} ==="
     echo "--- Client log (post-link-up) ---"
     tail -n "+$((LINKUP_MARK + 1))" "${WORK_DIR}/client.log"
