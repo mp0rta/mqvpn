@@ -15,10 +15,17 @@
 #   - When the black hole is later removed, one of the backoff retries
 #     re-validates the path and it returns to ACTIVE/STANDBY.
 #
-# The black hole is installed on the SERVER side (drop everything the
-# server would send back out Path A's interface), so the client's
+# The black hole is installed on the SERVER side (silently drop everything
+# the server would send back out Path A's interface), so the client's
 # PATH_CHALLENGE reaches the server but the PATH_RESPONSE never returns —
 # exactly the asymmetric black hole a broken NAT / firewall produces.
+#
+# Implemented with `tc qdisc ... netem loss 100%`, not iptables OUTPUT
+# DROP: iptables rejects the packet at the socket layer, so the server's
+# sendto() gets EPERM and the server itself abandons the path on the
+# write error — that's a loud failure, not the silent black hole this
+# test needs. netem drops the packet after the socket write already
+# succeeded, which is indistinguishable from the wire actually eating it.
 #
 # A fresh validation cycle on Path A is forced with a local
 # down/up of the client interface WITHOUT flushing the address: the
@@ -34,7 +41,7 @@
 # Test steps:
 #   1. Establish dual-path VPN tunnel (both paths up)
 #   2. Black-hole server->client on Path A only
-#      (iptables -A OUTPUT -o veth-a1-vb -j DROP in the server netns)
+#      (tc qdisc add dev veth-a1-vb root netem loss 100% in the server netns)
 #   3. Force a fresh validation on Path A: link down, sleep 2, link up
 #      (address NOT flushed)
 #   4. within 20s of link-up the client logs "G-P3 validation timeout"
@@ -72,9 +79,8 @@ if [ ! -f "$MQVPN" ]; then
     exit 1
 fi
 
-if ! command -v iptables >/dev/null 2>&1; then
-    echo "error: iptables not found (needed to install the black hole)"
-    echo "An nft-based iptables shim (iptables-nft) is fine."
+if ! command -v tc >/dev/null 2>&1; then
+    echo "error: tc (iproute2) not found (needed to install the netem black hole)"
     exit 1
 fi
 
@@ -105,7 +111,7 @@ cleanup() {
     echo "Cleaning up..."
     # Remove the black hole if still installed (netns teardown drops it
     # too, but be explicit and tolerant of it already being gone).
-    ip netns exec "$NS_SERVER" iptables -D OUTPUT -o "$VETH_A1" -j DROP \
+    ip netns exec "$NS_SERVER" tc qdisc del dev "$VETH_A1" root netem \
         2>/dev/null || true
     stop_and_check_sanitizer "$CLIENT_PID" "client" \
         "${WORK_DIR}/client.log" || SANITIZER_FAIL=1
@@ -273,7 +279,7 @@ echo "OK: dual-path active"
 
 echo ""
 echo "=== Installing black hole: drop server->client on Path A (${VETH_A1}) ==="
-ip netns exec "$NS_SERVER" iptables -A OUTPUT -o "$VETH_A1" -j DROP
+ip netns exec "$NS_SERVER" tc qdisc add dev "$VETH_A1" root netem loss 100%
 echo "OK: black hole installed"
 
 # Force a fresh validation cycle on Path A by bouncing the client
@@ -349,7 +355,7 @@ fi
 echo ""
 echo "=== Removing black hole on Path A ==="
 REMOVAL_MARK=$(wc -l <"${WORK_DIR}/client.log")
-ip netns exec "$NS_SERVER" iptables -D OUTPUT -o "$VETH_A1" -j DROP
+ip netns exec "$NS_SERVER" tc qdisc del dev "$VETH_A1" root netem || true
 echo "OK: black hole removed"
 
 # ─── Assertion 3 (recovery): path returns after the black hole lifts ───
