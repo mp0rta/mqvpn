@@ -904,10 +904,10 @@ recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
             for (int j = 0; j < n; j++) {
                 if (pinfo[j].handle == ah && pinfo[j].status == MQVPN_PATH_CLOSED) {
                     const char *rifname = p->path_mgr.paths[i].iface;
+                    /* route gate runs inside try_reactivate_by_ifname */
                     if (iface_is_up_and_running(rifname) &&
                         iface_has_usable_ip(rifname, p->server_addr.ss_family) == 1)
-                        try_reactivate_by_ifname(
-                            p, rifname); /* route gate は内部 (Step 2) */
+                        try_reactivate_by_ifname(p, rifname);
                     break;
                 }
             }
@@ -928,7 +928,9 @@ recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
         if (!iface_is_up_and_running(ifname)) continue;
         if (iface_has_usable_ip(ifname, p->server_addr.ss_family) != 1) continue;
         if (iface_has_route_to_server(ifname, &p->server_addr) == 0) {
-            /* first block + every 10th (≈30s at the 3s poll) */
+            /* First block + every 10th (≈30s at the 3s poll). The message
+             * wording is grepped by scripts/ci_e2e/run_route_gate_test.sh —
+             * rewording it silently disables that e2e's gate check. */
             if (p->route_gate_blocked[i]++ % 10 == 0)
                 LOG_WRN("netlink: %s has a usable address but no route to "
                         "the server — re-add deferred until a route appears",
