@@ -93,6 +93,7 @@ enum {
     SEC_CONTROL,
     SEC_REORDER,
     SEC_REORDER_RULE,
+    SEC_HYBRID,
 };
 
 static int
@@ -106,6 +107,7 @@ parse_section(const char *name)
     if (strcasecmp(name, "Control") == 0) return SEC_CONTROL;
     if (strcasecmp(name, "Reorder") == 0) return SEC_REORDER;
     if (strcasecmp(name, "ReorderRule") == 0) return SEC_REORDER_RULE;
+    if (strcasecmp(name, "Hybrid") == 0) return SEC_HYBRID;
     return -1;
 }
 
@@ -121,6 +123,7 @@ section_name(int section)
     case SEC_CONTROL: return "Control";
     case SEC_REORDER: return "Reorder";
     case SEC_REORDER_RULE: return "ReorderRule";
+    case SEC_HYBRID: return "Hybrid";
     default: return "?";
     }
 }
@@ -346,6 +349,28 @@ parse_reorder_enabled(const char *val, mqvpn_reorder_mode_t *out)
     return -1;
 }
 
+/* [Hybrid] Tcp mapping: stream|raw|auto (case-insensitive). Returns 0 on a
+ * recognized value (and writes *out), -1 otherwise — invalid values keep the
+ * default (AUTO from mqvpn_hybrid_config_default), mirroring
+ * parse_reorder_enabled. */
+static int
+parse_hybrid_tcp_mode(const char *val, mqvpn_hybrid_tcp_mode_t *out)
+{
+    if (strcasecmp(val, "stream") == 0) {
+        *out = MQVPN_HYBRID_TCP_STREAM;
+        return 0;
+    }
+    if (strcasecmp(val, "raw") == 0) {
+        *out = MQVPN_HYBRID_TCP_RAW;
+        return 0;
+    }
+    if (strcasecmp(val, "auto") == 0) {
+        *out = MQVPN_HYBRID_TCP_AUTO;
+        return 0;
+    }
+    return -1;
+}
+
 /* Parse an L4 protocol token for [ReorderRule] Proto. v1 only handles UDP
  * (the only eligible protocol, §4); a bare numeric value is also accepted. */
 static int
@@ -430,18 +455,20 @@ reorder_rule_begin(mqvpn_file_config_t *cfg, int lineno, const char *path)
  */
 
 typedef enum {
-    CFGK_STR,          /* char[]: snprintf copy, silent truncation          */
-    CFGK_BOOL,         /* int: parse_bool / json_read_bool                  */
-    CFGK_INT,          /* int: int_ok() gate; optional fallback on invalid  */
-    CFGK_U32,          /* uint32_t: inclusive max bound                     */
-    CFGK_U16,          /* uint16_t: max 0xffff                              */
-    CFGK_U64,          /* 64-bit unsigned: inclusive max bound              */
-    CFGK_REORDER_MODE, /* mqvpn_reorder_mode_t via parse_reorder_enabled    */
+    CFGK_STR,             /* char[]: snprintf copy, silent truncation          */
+    CFGK_BOOL,            /* int: parse_bool / json_read_bool                  */
+    CFGK_INT,             /* int: int_ok() gate; optional fallback on invalid  */
+    CFGK_U32,             /* uint32_t: inclusive max bound                     */
+    CFGK_U16,             /* uint16_t: max 0xffff                              */
+    CFGK_U64,             /* 64-bit unsigned: inclusive max bound              */
+    CFGK_REORDER_MODE,    /* mqvpn_reorder_mode_t via parse_reorder_enabled    */
+    CFGK_HYBRID_TCP_MODE, /* mqvpn_hybrid_tcp_mode_t via parse_hybrid_tcp_mode */
 } cfg_key_type_t;
 
 typedef struct {
-    uint8_t section;      /* SEC_*: INI section; SEC_REORDER doubles as
-                             "inside the JSON reorder object" scope         */
+    uint8_t section;      /* SEC_*: INI section; SEC_REORDER / SEC_HYBRID
+                             double as "inside the JSON reorder / hybrid
+                             object" scope                                  */
     const char *ini_key;  /* NULL = JSON-only key                           */
     const char *json_key; /* NULL = INI-only key                           */
     cfg_key_type_t type;
@@ -600,6 +627,17 @@ static const cfg_key_desc_t cfg_keys[] = {
             reorder.ingress_idle_timeout_sec),
     CFG_U32(SEC_REORDER, "EgressIdleSec", "egress_idle_sec",
             reorder.egress_idle_timeout_sec),
+    /* [Hybrid] — JSON side lives inside the bounded "hybrid" object */
+    CFG_BOOL(SEC_HYBRID, "Enabled", "enabled", hybrid.enabled),
+    {SEC_HYBRID, "Tcp", "tcp", CFGK_HYBRID_TCP_MODE, CFGK_OFF(hybrid.tcp_mode), 0, 0,
+     NULL, 0, 0, NULL},
+    CFG_U32(SEC_HYBRID, "TcpMaxFlows", "tcp_max_flows", hybrid.tcp_max_flows),
+    CFG_U32(SEC_HYBRID, "TcpIdleTimeoutSec", "tcp_idle_timeout_sec",
+            hybrid.tcp_idle_timeout_sec),
+    CFG_U32(SEC_HYBRID, "TcpConnectTimeoutSec", "tcp_connect_timeout_sec",
+            hybrid.tcp_connect_timeout_sec),
+    CFG_U32(SEC_HYBRID, "TcpMaxGlobalFlows", "tcp_max_global_flows",
+            hybrid.tcp_max_global_flows),
 };
 
 /* Shared typed store. Returns 0 on success, -1 on invalid value (caller
@@ -653,6 +691,12 @@ cfg_key_store(mqvpn_file_config_t *cfg, const cfg_key_desc_t *d, const char *v_s
         memcpy(base, &m, sizeof(m));
         break;
     }
+    case CFGK_HYBRID_TCP_MODE: {
+        mqvpn_hybrid_tcp_mode_t m = MQVPN_HYBRID_TCP_AUTO;
+        if (parse_hybrid_tcp_mode(v_str, &m) < 0) return -1;
+        memcpy(base, &m, sizeof(m));
+        break;
+    }
     }
     if (d->post_set) d->post_set(cfg);
     return 0;
@@ -672,7 +716,8 @@ cfg_key_apply_ini(mqvpn_file_config_t *cfg, int section, const char *key, const 
         int rc = 0;
         switch (d->type) {
         case CFGK_STR:
-        case CFGK_REORDER_MODE: rc = cfg_key_store(cfg, d, val, 0, 0); break;
+        case CFGK_REORDER_MODE:
+        case CFGK_HYBRID_TCP_MODE: rc = cfg_key_store(cfg, d, val, 0, 0); break;
         case CFGK_BOOL: rc = cfg_key_store(cfg, d, NULL, parse_bool(val), 0); break;
         case CFGK_INT: {
             /* INT_MIN sentinel: forced-invalid marker so an unparseable value
@@ -707,12 +752,13 @@ cfg_key_apply_ini(mqvpn_file_config_t *cfg, int section, const char *key, const 
 }
 
 /* JSON-side walker: applies every table row that has a json_key. SEC_REORDER
- * rows are searched inside [ro_raw, ro_end) (the bounded "reorder" object);
+ * rows are searched inside [ro_raw, ro_end) (the bounded "reorder" object),
+ * SEC_HYBRID rows inside [hy_raw, hy_end) (the bounded "hybrid" object);
  * everything else at top level. Absent keys are silent (forward-compat);
  * present-but-invalid keys warn. */
 static void
 cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *ro_raw,
-                   const char *ro_end)
+                   const char *ro_end, const char *hy_raw, const char *hy_end)
 {
     /* Must cover the largest CFGK_STR destination (listen/server_addr/
      * control_listen, all char[280]) or JSON strings would truncate
@@ -726,6 +772,9 @@ cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *
         if (d->section == SEC_REORDER) {
             if (!ro_raw || !ro_end) continue;
             v = json_find_key_bounded(ro_raw, ro_end, d->json_key);
+        } else if (d->section == SEC_HYBRID) {
+            if (!hy_raw || !hy_end) continue;
+            v = json_find_key_bounded(hy_raw, hy_end, d->json_key);
         } else {
             v = json_find_key(json_text, d->json_key);
         }
@@ -735,6 +784,7 @@ cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *
         switch (d->type) {
         case CFGK_STR:
         case CFGK_REORDER_MODE:
+        case CFGK_HYBRID_TCP_MODE:
             if (json_read_string(v, sbuf, sizeof(sbuf)) < 0)
                 rc = -1;
             else
@@ -766,9 +816,62 @@ cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *
         }
         }
         if (rc < 0)
-            LOG_WRN("JSON: invalid %s%s; %s", d->section == SEC_REORDER ? "reorder " : "",
+            LOG_WRN("JSON: invalid %s%s; %s",
+                    d->section == SEC_REORDER  ? "reorder "
+                    : d->section == SEC_HYBRID ? "hybrid "
+                                               : "",
                     d->json_key, d->has_invalid_fallback ? "using default" : "ignoring");
     }
+}
+
+/* Parse a JSON array of "a.b.c.d/n" CIDR strings into out[], capping at
+ * max_items (parity with the INI EgressAllow/EgressDeny cap). A malformed
+ * CIDR string is skipped with a warning (same tolerance as an invalid INI
+ * entry); malformed JSON syntax (unterminated string, wrong shape) aborts
+ * the whole array, same as json_read_string_array. */
+static int
+json_read_cidr_array(mqvpn_cidr_entry_t *out, int max_items, int *n_items, const char *p)
+{
+    if (!p || !out || !n_items || *p != '[') return -1;
+
+    p = json_skip_ws(p + 1);
+    int n = 0;
+    int dropped = 0;
+    while (*p && *p != ']') {
+        if (*p != '"') return -1;
+
+        char s[32];
+        if (json_read_string(p, s, sizeof(s)) < 0) return -1;
+
+        mqvpn_cidr_entry_t entry;
+        if (mqvpn_parse_cidr_v4(s, &entry) < 0) {
+            LOG_WRN("JSON: invalid hybrid egress CIDR '%s'; ignoring", s);
+        } else if (n < max_items) {
+            out[n++] = entry;
+        } else {
+            dropped++;
+        }
+
+        const char *e = p + 1;
+        while (*e && *e != '"') {
+            if (*e == '\\' && e[1]) e++;
+            e++;
+        }
+        if (*e != '"') return -1;
+        p = json_skip_ws(e + 1);
+
+        if (*p == ',')
+            p = json_skip_ws(p + 1);
+        else if (*p != ']')
+            return -1;
+    }
+
+    if (*p != ']') return -1;
+    if (dropped)
+        LOG_WRN("JSON: egress ACL array capped at %d items, dropped %d", max_items,
+                dropped);
+    *n_items = n;
+    return 0;
 }
 
 static int
@@ -951,6 +1054,33 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
         }
         return;
     }
+    case SEC_HYBRID: {
+        /* EgressAllow/EgressDeny are hand-coded like [Auth] User: repeated
+         * keys append to a list rather than mapping to one scalar field. A
+         * malformed entry (bad CIDR syntax) or an over-cap entry is
+         * skipped with a warning — it does not abort the whole config
+         * load, same tolerance as an invalid [Auth] User line. */
+        int is_allow = strcasecmp(key, "EgressAllow") == 0;
+        int is_deny = strcasecmp(key, "EgressDeny") == 0;
+        if (!is_allow && !is_deny) break;
+
+        mqvpn_cidr_entry_t entry;
+        if (mqvpn_parse_cidr_v4(val, &entry) < 0) {
+            LOG_WRN("%s:%d: invalid [Hybrid] %s '%s'", path, lineno, key, val);
+            return;
+        }
+
+        int *n = is_allow ? &cfg->hybrid.n_egress_allow : &cfg->hybrid.n_egress_deny;
+        mqvpn_cidr_entry_t *list =
+            is_allow ? cfg->hybrid.egress_allow : cfg->hybrid.egress_deny;
+        if (*n >= MQVPN_EGRESS_ACL_MAX) {
+            LOG_WRN("%s:%d: max %d %s entries supported, ignoring '%s'", path, lineno,
+                    MQVPN_EGRESS_ACL_MAX, key, val);
+            return;
+        }
+        list[(*n)++] = entry;
+        return;
+    }
     case SEC_NONE:
         LOG_WRN("%s:%d: key '%s' outside any section", path, lineno, key);
         return;
@@ -999,8 +1129,27 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
      * object yields ro_end == NULL and the block is skipped (same as absent). */
     const char *ro_end = (ro_raw && *ro_raw == '{') ? json_object_end(ro_raw) : NULL;
 
+    /* [Hybrid] equivalent: a "hybrid" object holding the same flat scalar knobs
+     * as the INI section (snake_case). Bounded the same way as "reorder". */
+    const char *hy_raw = json_find_key(json_text, "hybrid");
+    const char *hy_end = (hy_raw && *hy_raw == '{') ? json_object_end(hy_raw) : NULL;
+
     /* All scalar keys — one walk of the shared descriptor table. */
-    cfg_key_apply_json(cfg, json_text, ro_raw, ro_end);
+    cfg_key_apply_json(cfg, json_text, ro_raw, ro_end, hy_raw, hy_end);
+
+    /* [Hybrid] EgressAllow/EgressDeny — hand-coded like "users" below,
+     * bounded to the "hybrid" object span like every other hybrid key. */
+    if (hy_raw && hy_end) {
+        const char *ea_v = json_find_key_bounded(hy_raw, hy_end, "egress_allow");
+        if (ea_v && json_read_cidr_array(cfg->hybrid.egress_allow, MQVPN_EGRESS_ACL_MAX,
+                                         &cfg->hybrid.n_egress_allow, ea_v) < 0)
+            return -1;
+
+        const char *ed_v = json_find_key_bounded(hy_raw, hy_end, "egress_deny");
+        if (ed_v && json_read_cidr_array(cfg->hybrid.egress_deny, MQVPN_EGRESS_ACL_MAX,
+                                         &cfg->hybrid.n_egress_deny, ed_v) < 0)
+            return -1;
+    }
 
     char dns_buf[MQVPN_CONFIG_MAX_DNS][64];
     int n_dns = 0;
@@ -1116,6 +1265,7 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
     cfg->reconnect_interval = 5;
     cfg->manage_routes = 1;
     mqvpn_reorder_config_default(&cfg->reorder); /* §16: reorder defaults (mode OFF) */
+    mqvpn_hybrid_config_default(&cfg->hybrid);   /* H1: hybrid defaults (disabled) */
 }
 
 int

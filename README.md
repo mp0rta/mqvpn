@@ -213,6 +213,37 @@ inner flows under probe-region pressure. `wlb_udp_pin` is intended for tunnels
 carrying a small-to-moderate set of long-lived inner UDP flows; high-churn UDP
 profiles are better served by `wlb`.
 
+## Hybrid mode (TCP lane)
+
+Optionally terminates inner TCP connections locally (embedded lwIP) and relays them over a dedicated HTTP/3 request stream instead of the datagram CONNECT-IP path — trades small per-flow overhead for multipath TCP aggregation (see docs/report/ for measured numbers).
+
+```
+TUN packet
+  │
+  ▼
+classifier (per packet: protocol + Tcp mode + tunnel-subnet carve-out)
+  │
+  ├─ IPv4 TCP, Tcp=stream (or Tcp=auto with ≥2 active paths)
+  │     └─▶ tcp lane (client-side lwIP) ─▶ HTTP/3 request stream ─▶ server egress connect()
+  ├─ UDP (parseable)
+  │     └─▶ datagram lane (existing reorder/STAMP path) ─▶ CONNECT-IP DATAGRAM
+  └─ everything else (incl. TCP under Tcp=raw, or Tcp=auto with <2 active paths)
+        └─▶ raw lane (existing, unchanged) ─▶ CONNECT-IP DATAGRAM
+```
+
+```ini
+[Hybrid]
+Enabled = true
+Tcp = auto              # stream | raw | auto (per-flow: TCP lane once >=2 paths are active)
+TcpMaxFlows = 256        # concurrent TCP-lane flow cap (client) / per-session cap (server)
+EgressAllow = 10.0.5.0/24  # server: punch a hole through the default-deny egress ACL
+```
+
+Disabled by default; existing users see no behavior change. See
+[docs/control-api.md §9](docs/control-api.md#9-hybrid-mode-configuration-keys)
+for the full `[Hybrid]` config key reference and the `get_stats` counters
+this mode exposes.
+
 ## systemd
 
 ```bash
@@ -341,6 +372,18 @@ Asymmetric dual-path (300M/10ms + 80M/30ms) via network namespaces. Full report:
 | Failover | **0 downtime** |
 | Bandwidth aggregation (WLB, 16 streams) | **319 Mbps** (84% of 380 Mbps theoretical) |
 | WLB vs MinRTT | WLB **+21%** |
+
+### Hybrid TCP-lane (v0.9.0)
+
+Symmetric 2×100 Mbit / 25 ms, TCP uplink, `iperf3 -P {1,2,4,8,16}`, 3 reps. The hybrid TCP **stream lane** terminates TCP at the client and relays it in-order over a QUIC STREAM, so even a single flow aggregates both paths — where raw multipath (datagram tunneling) makes one flow back off on cross-path reorder. Hybrid ON reaches **~187 Mbps** (≈93 % of the 200 Mbps aggregate) at *every* stream count:
+
+| WLB, streams (`-P`) | 1 | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|---|
+| hybrid OFF (raw) | 96 | 177 | 167 | 177 | 178 |
+| hybrid ON (lane) | **187** | 186 | 188 | 188 | 188 |
+| gain | **+95 %** | +5 % | +12 % | +6 % | +6 % |
+
+Charts: [MinRTT](bench_results/hybrid_mode/hybrid_mode_minrtt_1783350878.png) · [WLB](bench_results/hybrid_mode/hybrid_mode_wlb_1783350878.png) — bench: [`benchmarks/bench_hybrid_scheduler.sh`](benchmarks/bench_hybrid_scheduler.sh) · data: [`bench_results/hybrid_mode/`](bench_results/hybrid_mode/)
 
 ## Architecture
 

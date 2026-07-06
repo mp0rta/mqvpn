@@ -182,14 +182,14 @@ print_client(const char *obj)
     }
 }
 
-/* ── Main entry point ── */
+/* ── Control-API query (one command per connection) ── */
 
-int
-run_status(const char *addr, int port)
+/* Connect to the control API, send `cmd` (write → shutdown(SHUT_WR)), read
+ * the response to EOF. Returns a malloc'd NUL-terminated buffer (caller
+ * frees) or NULL on error (message already printed to stderr). */
+static char *
+ctrl_query(const char *addr, int port, const char *cmd)
 {
-    if (!addr) addr = "127.0.0.1";
-
-    int rc = 1;
     int fd = -1;
     char *buf = NULL;
     struct addrinfo *res = NULL;
@@ -205,13 +205,13 @@ run_status(const char *addr, int port)
     int gai = getaddrinfo(addr, port_str, &hints, &res);
     if (gai != 0 || !res) {
         fprintf(stderr, "error: cannot resolve '%s': %s\n", addr, gai_strerror(gai));
-        goto cleanup;
+        goto fail;
     }
 
     fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (fd < 0) {
         fprintf(stderr, "error: socket: %s\n", strerror(errno));
-        goto cleanup;
+        goto fail;
     }
 
     /* Set timeouts to avoid hanging on unresponsive server */
@@ -221,13 +221,12 @@ run_status(const char *addr, int port)
 
     if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
         fprintf(stderr, "error: connect to %s:%d: %s\n", addr, port, strerror(errno));
-        goto cleanup;
+        goto fail;
     }
     freeaddrinfo(res);
     res = NULL;
 
     /* Send command (handle EINTR and partial writes) */
-    const char *cmd = "{\"cmd\":\"get_status\"}\n";
     size_t cmd_len = strlen(cmd);
     size_t sent = 0;
     while (sent < cmd_len) {
@@ -235,7 +234,7 @@ run_status(const char *addr, int port)
         if (n < 0) {
             if (errno == EINTR) continue;
             fprintf(stderr, "error: write: %s\n", strerror(errno));
-            goto cleanup;
+            goto fail;
         }
         sent += (size_t)n;
     }
@@ -244,7 +243,7 @@ run_status(const char *addr, int port)
 
     /* Read response (handle EINTR) */
     buf = malloc(STATUS_BUF_SIZE);
-    if (!buf) goto cleanup;
+    if (!buf) goto fail;
     size_t total = 0;
     while (total < STATUS_BUF_SIZE - 1) {
         ssize_t n = read(fd, buf + total, STATUS_BUF_SIZE - 1 - total);
@@ -252,7 +251,7 @@ run_status(const char *addr, int port)
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 fprintf(stderr, "error: read timed out\n");
-                goto cleanup;
+                goto fail;
             }
             break;
         }
@@ -261,7 +260,62 @@ run_status(const char *addr, int port)
     }
     buf[total] = '\0';
     close(fd);
-    fd = -1;
+    return buf;
+
+fail:
+    if (res) freeaddrinfo(res);
+    if (fd >= 0) close(fd);
+    free(buf);
+    return NULL;
+}
+
+/* ── Print the get_stats lane/flow summary line ── */
+
+static void
+print_stats_summary(const char *buf)
+{
+    const char *ok = json_find_key(buf, "ok");
+    if (!ok || strncmp(ok, "true", 4) != 0) return; /* older server / error */
+    /* Only print when the server reports the hybrid lane counters. */
+    if (!json_find_key(buf, "pkts_lane_tcp")) return;
+
+    uint64_t lane_tcp = (uint64_t)json_read_int64(json_find_key(buf, "pkts_lane_tcp"));
+    uint64_t lane_dgram =
+        (uint64_t)json_read_int64(json_find_key(buf, "pkts_lane_dgram"));
+    uint64_t lane_raw = (uint64_t)json_read_int64(json_find_key(buf, "pkts_lane_raw"));
+    uint64_t fl_act = (uint64_t)json_read_int64(json_find_key(buf, "tcp_flows_active"));
+    uint64_t fl_tot = (uint64_t)json_read_int64(json_find_key(buf, "tcp_flows_total"));
+    uint64_t fl_rej = (uint64_t)json_read_int64(json_find_key(buf, "tcp_flows_rejected"));
+    uint64_t lane_tcp_drop =
+        (uint64_t)json_read_int64(json_find_key(buf, "pkts_lane_tcp_dropped"));
+    uint64_t raw_markers =
+        (uint64_t)json_read_int64(json_find_key(buf, "raw_markers_active"));
+
+    printf("server: lanes tcp/dgram/raw=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           " (tcp_dropped=%" PRIu64 ") flows act/tot/rej=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           " raw_markers=%" PRIu64 "\n",
+           lane_tcp, lane_dgram, lane_raw, lane_tcp_drop, fl_act, fl_tot, fl_rej,
+           raw_markers);
+}
+
+/* ── Main entry point ── */
+
+int
+run_status(const char *addr, int port)
+{
+    if (!addr) addr = "127.0.0.1";
+
+    int rc = 1;
+
+    /* Control API handles one command per connection: get_stats first (lane
+     * summary), then get_status (per-client listing). */
+    char *stats_buf = ctrl_query(addr, port, "{\"cmd\":\"get_stats\"}\n");
+    if (!stats_buf) return 1; /* server unreachable — error already printed */
+    print_stats_summary(stats_buf);
+    free(stats_buf);
+
+    char *buf = ctrl_query(addr, port, "{\"cmd\":\"get_status\"}\n");
+    if (!buf) return 1;
 
     /* Parse and display */
     const char *ok = json_find_key(buf, "ok");
@@ -304,8 +358,6 @@ run_status(const char *addr, int port)
     rc = 0;
 
 cleanup:
-    if (res) freeaddrinfo(res);
-    if (fd >= 0) close(fd);
     free(buf);
     return rc;
 }

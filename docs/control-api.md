@@ -207,6 +207,10 @@ datagram counters and uptime.
   "bytes_tx":12345678,"bytes_rx":9876543,
   "dgram_sent":89012,"dgram_recv":84551,
   "dgram_lost":421,"dgram_acked":88341,
+  "pkts_lane_tcp":0,"pkts_lane_dgram":0,
+  "pkts_lane_raw":0,"pkts_lane_tcp_dropped":0,
+  "tcp_flows_active":1,"tcp_flows_total":7,
+  "tcp_flows_rejected":2,"raw_markers_active":0,
   "uptime_sec":3601
 }
 ```
@@ -220,12 +224,28 @@ datagram counters and uptime.
 | `dgram_recv` | uint64  | QUIC datagrams the server forwarded to the TUN interface, all sessions. Excludes datagrams dropped before forwarding (TTL ≤ 1 → ICMP Time Exceeded, source-IP mismatch, malformed frame). |
 | `dgram_lost` | uint64  | Total QUIC datagrams declared lost, all sessions               |
 | `dgram_acked`| uint64  | Total QUIC datagrams acknowledged, all sessions                |
+| `pkts_lane_tcp`   | uint64 | Hybrid mode: packets actually handed to the TCP lane (lwIP). Server-side: always 0 (the server does not classify TUN-ingress packets). |
+| `pkts_lane_dgram` | uint64 | Hybrid mode: packets sent via the datagram lane. Server-side: always 0. |
+| `pkts_lane_raw`   | uint64 | Hybrid mode: packets sent via the raw CONNECT-IP lane, including TCP candidates that fell back to RAW (sticky-RAW, cap-rejected, non-SYN on an unknown flow, lane-less build). `pkts_lane_tcp` + `pkts_lane_dgram` + `pkts_lane_raw` partitions every classified packet exactly once. Server-side: always 0. |
+| `pkts_lane_tcp_dropped` | uint64 | Hybrid mode: TCP-lane packets lwIP refused (e.g. no matching pcb). Client-only; always 0 server-side. |
+| `tcp_flows_active`   | uint64 | Hybrid mode: currently open TCP-lane flows. Client: the TCP-lane flow table's live count. Server: the whole-server count of open egress TCP flows. Both wired from real state. |
+| `tcp_flows_total`    | uint64 | Hybrid mode: cumulative TCP-lane flows opened since start (never decrements). Client: SYNs the flow table admitted. Server: egress flows admitted. |
+| `tcp_flows_rejected` | uint64 | Hybrid mode: cumulative flows refused by a cap. Client: SYNs rejected pre-lwIP (flow-table cap or alloc failure). Server: cap-503 rejections (whole-server fd-budget cap + per-session `TcpMaxFlows` cap; ACL 403s and 5xx syscall failures are not caps and are not counted). |
+| `raw_markers_active` | uint64 | Hybrid mode: sticky-RAW markers currently held in the client's TCP-lane flow table (5-tuples pinned to RAW under `tcp=auto`). Client-only; always 0 server-side. |
 | `uptime_sec` | uint64  | Seconds since `mqvpn_server_create` was called                 |
 
 Notes:
 - `bytes_tx`/`bytes_rx` are post-tunnel (TUN-layer) byte counts, not raw UDP
   wire bytes.
 - `dgram_*` counters are server-wide aggregates across all active sessions.
+- The eight hybrid-mode fields (`pkts_lane_*`, `tcp_flows_*`,
+  `raw_markers_active`) are additive and stay 0 whenever the hybrid
+  classifier is disabled. `tcp_flows_active`, `tcp_flows_total`, and
+  `tcp_flows_rejected` are wired on both client and server (with the
+  per-side semantics in the table above); `pkts_lane_*`,
+  `pkts_lane_tcp_dropped`, and `raw_markers_active` are client-only
+  concepts and always report 0 on the server. See §9 for the `[Hybrid]`
+  config keys that control this behavior.
 
 ---
 
@@ -481,6 +501,24 @@ mqvpn follows semantic versioning for the control API:
 - `get_stats` was extended in v0.5.0 with `dgram_sent`, `dgram_recv`,
   `dgram_lost`, `dgram_acked`, and `uptime_sec`. Consumers that only read
   `n_clients`, `bytes_tx`, and `bytes_rx` remain unaffected.
+- `get_stats` was extended again in v0.9.0 with the hybrid-mode
+  lane/flow counters (`pkts_lane_tcp`, `pkts_lane_dgram`, `pkts_lane_raw`,
+  `pkts_lane_tcp_dropped`, `tcp_flows_active`, `tcp_flows_total`,
+  `tcp_flows_rejected`, `raw_markers_active`). All eight now report real
+  values on the client with `Tcp = stream` or `Tcp = auto`
+  (`tcp_flows_active`, `tcp_flows_total`, `tcp_flows_rejected`, and
+  `raw_markers_active` were previously stubbed at 0); `tcp_flows_active`,
+  `tcp_flows_total`, and `tcp_flows_rejected` are also wired server-side.
+  In the same change, `pkts_lane_tcp` changed meaning — from "packets
+  classified into the TCP lane" (classify-time) to "packets actually handed
+  to the TCP lane / lwIP" (post-sticky-verdict), so under `Tcp = auto` a
+  sticky-RAW flow's packets now count in `pkts_lane_raw` instead. See
+  §5.4's field table for which fields stay 0 server-side by design.
+  Existing JSON consumers remain unaffected. Note for C API consumers: this
+  is the first time `mqvpn_stats_t` has grown since its introduction — the
+  struct producers write `sizeof(mqvpn_stats_t)` bytes, so binaries linked
+  against the shared library must be recompiled against the new header. The
+  shared-library SOVERSION was bumped 1 → 2 for exactly this reason.
 - `get_status` paths gained a `state_label` string in v0.5.0 alongside the
   existing numeric `state`; `get_fec_stats` gained `mp_state_label` similarly.
   Consumers that only read the numeric fields remain unaffected, but new code
@@ -523,3 +561,66 @@ echo '{"cmd":"remove_user","name":"carol"}' | nc -q1 127.0.0.1 9090
 ```
 
 On macOS, replace `-q1` with `-G 1` (BSD netcat).
+
+---
+
+## 9. Hybrid mode configuration keys
+
+Hybrid mode terminates inner TCP connections locally (client-side, via an
+embedded lwIP stack) and relays them over a dedicated HTTP/3 request stream
+instead of the datagram CONNECT-IP path. This section is the config-key
+reference; see the README's "Hybrid mode (TCP lane)" section for the lane
+diagram and a minimal example. Same `[Hybrid]` section in both INI
+(`server.conf`/`client.conf`) and JSON (`"hybrid": {...}`) config — JSON
+keys are the snake_case column below.
+
+| INI key                | JSON key                  | Type    | Default | Applies to     | Description |
+|-------------------------|---------------------------|---------|---------|----------------|-------------|
+| `Enabled`               | `enabled`                 | bool    | `false` | client + server | Turn hybrid mode on. Disabled by default — existing deployments see no behavior change. |
+| `Tcp`                   | `tcp`                     | string  | `auto`  | client only     | Per-flow TCP lane policy: `stream` (always relay via the TCP lane), `raw` (never — inner TCP stays on the CONNECT-IP datagram path, byte-identical to hybrid disabled), or `auto` (per-flow: TCP lane once ≥2 paths are active at SYN time, RAW otherwise; the decision is latched for the flow's lifetime, never re-evaluated). |
+| `TcpMaxFlows`           | `tcp_max_flows`           | uint32  | `256`   | client + server | Cap on concurrently open TCP-lane flows. Client: caps the local flow table (a SYN over the cap falls back to RAW pre-lwIP, counted in `tcp_flows_rejected`). Server: caps concurrent egress flows per client session (a SYN over the cap gets an HTTP `503`). |
+| `TcpIdleTimeoutSec`     | `tcp_idle_timeout_sec`    | uint32  | `300`   | client + server | Idle-eviction timeout for TCP-lane flows (no activity for this long tears the flow down). `0` disables idle eviction (flows live for the whole connection lifetime). |
+| `TcpConnectTimeoutSec`  | `tcp_connect_timeout_sec` | uint32  | `10`    | server only     | Timeout for the server's egress `connect()` to the requested target; on expiry the client gets an HTTP `504`. |
+| `TcpMaxGlobalFlows`     | `tcp_max_global_flows`    | uint32  | `4096`  | server only     | Whole-server cap on concurrent egress TCP flows, across all client sessions (independent of the per-session `TcpMaxFlows`). A SYN over the cap gets an HTTP `503`. |
+| `EgressAllow`           | `egress_allow`            | CIDR list (repeatable) | *(none)* | server only | Punches a hole through the mandatory default-deny for egress targets inside RFC1918/loopback/link-local ranges (e.g. `EgressAllow = 10.222.0.0/24`). Up to 32 entries. |
+| `EgressDeny`            | `egress_deny`             | CIDR list (repeatable) | *(none)* | server only | Additional egress targets to block, evaluated after `EgressAllow`. Up to 32 entries. |
+
+Notes:
+- `Tcp`/`tcp` is a client-only knob — the server has no concept of a
+  per-flow lane policy, it only relays whatever the client's classifier
+  routes to it.
+- The egress ACL default-denies RFC1918 (`10.0.0.0/8`, `172.16.0.0/12`,
+  `192.168.0.0/16`), loopback, and link-local ranges even with no
+  `EgressAllow`/`EgressDeny` configured — this is a safety default against a
+  compromised or misconfigured client using the server as an internal-network
+  pivot, not an opt-in feature.
+- `TcpBpHighWater`/`TcpBpLowWater` (uplink backpressure watermarks) are
+  internal compile-time constants, not configurable — see
+  `src/hybrid/tcp_lane.h` if you need to know their values.
+- See §5.4 (`get_stats`) for the runtime counters this config surfaces.
+
+### Known limitations
+
+- **TCP to private targets needs an explicit `EgressAllow`.** The client's
+  TCP-lane classifier has no visibility into the server's `EgressAllow` list,
+  so it cannot decide up front whether a given RFC1918/CGNAT/link-local/
+  loopback target will actually be allowed egress — it always tries the TCP
+  lane for such targets when `Tcp = stream` or `Tcp = auto` picks TCP. If the
+  server's default-deny egress ACL (see the Notes above) then rejects the
+  connect, the failure surfaces *after* the inner app already saw its
+  `connect()` succeed: lwIP answers the inner SYN with a SYN-ACK locally
+  (the TCP-lane accept happens before the server's egress `connect()` is
+  attempted), so the app only finds out via a subsequent RST once the
+  server's `connect()` is denied — not a clean, immediate refusal. UDP and
+  RAW-lane traffic to the same targets are unaffected (no local SYN-ACK
+  step). Operators who need TCP to a private target through the hybrid lane
+  must add an `EgressAllow` entry covering it.
+- **Client-address pools wider than `/24` can deny intra-VPN TCP between
+  clients.** The client only exempts its *own* `/24` from the TCP lane (to
+  keep client-to-client traffic within that `/24` off the egress-ACL path);
+  with a wider pool, two clients in different `/24`s of the same pool hit the
+  server's default-deny egress ACL for TCP between them, same as any other
+  RFC1918 target. Use a `/24`-or-narrower client-address pool, or an
+  `EgressAllow` entry covering the pool, if you need TCP between clients on
+  different `/24`s. The server logs a startup warning when its configured
+  pool is wider than `/24` for this reason.

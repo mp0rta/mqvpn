@@ -103,6 +103,7 @@ jobs:
           mkdir -p build && cd build
           cmake -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX=/usr \
+                -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON \
                 -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
           make -j$(nproc)
 
@@ -124,9 +125,9 @@ jobs:
         run: |
           set -e
           deb=$(ls build/mqvpn_*.deb)
-          expected=4
+          expected=5
           found=$(dpkg-deb -c "$deb" \
-                  | grep -cE 'usr/share/doc/mqvpn/(LICENSE|NOTICE|third-party/(xquic|boringssl)\.txt)$' \
+                  | grep -cE 'usr/share/doc/mqvpn/(LICENSE|NOTICE|third-party/(xquic|boringssl|lwip)\.txt)$' \
                   || true)
           if [ "$found" -ne "$expected" ]; then
             echo "::error::deb missing license files (found $found of $expected)"
@@ -160,6 +161,7 @@ jobs:
           mkdir -p "$STAGING/third-party"
           cp third_party/xquic/LICENSE                       "$STAGING/third-party/xquic.txt"
           cp third_party/xquic/third_party/boringssl/LICENSE "$STAGING/third-party/boringssl.txt"
+          cp third_party/lwip/LICENSE                        "$STAGING/third-party/lwip.txt"
           tar czf "mqvpn_${VERSION}_${{ matrix.arch }}.tar.gz" -C "$STAGING" .
           rm -rf "$STAGING" build-tarball
 
@@ -168,9 +170,9 @@ jobs:
         run: |
           set -e
           tarball=$(ls mqvpn_*.tar.gz)
-          expected=4
+          expected=5
           found=$(tar tzf "$tarball" \
-                  | grep -cE '^\./(LICENSE|NOTICE|third-party/(xquic|boringssl)\.txt)$' \
+                  | grep -cE '^\./(LICENSE|NOTICE|third-party/(xquic|boringssl|lwip)\.txt)$' \
                   || true)
           if [ "$found" -ne "$expected" ]; then
             echo "::error::tarball missing license files (found $found of $expected)"

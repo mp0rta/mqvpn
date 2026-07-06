@@ -316,8 +316,13 @@ status_log_cb(evutil_socket_t fd, short what, void *arg)
     mqvpn_client_get_paths(p->client, paths, MQVPN_MAX_PATHS, &n_paths);
 
     LOG_INF("[STATUS] state=established paths=%d tx=%" PRIu64 " rx=%" PRIu64
-            " srtt=%dms dgram_lost=%" PRIu64,
-            n_paths, stats.bytes_tx, stats.bytes_rx, stats.srtt_ms, stats.dgram_lost);
+            " srtt=%dms dgram_lost=%" PRIu64 " lanes tcp/dgram/raw=%" PRIu64 "/%" PRIu64
+            "/%" PRIu64 " tcp_dropped=%" PRIu64 " flows act/tot/rej=%" PRIu64 "/%" PRIu64
+            "/%" PRIu64 " raw_markers=%" PRIu64,
+            n_paths, stats.bytes_tx, stats.bytes_rx, stats.srtt_ms, stats.dgram_lost,
+            stats.pkts_lane_tcp, stats.pkts_lane_dgram, stats.pkts_lane_raw,
+            stats.pkts_lane_tcp_dropped, stats.tcp_flows_active, stats.tcp_flows_total,
+            stats.tcp_flows_rejected, stats.raw_markers_active);
 
     for (int i = 0; i < n_paths; i++) {
         const char *st_str = mqvpn_path_status_string(paths[i].status);
@@ -1221,6 +1226,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     mqvpn_config_set_tun_mtu(lib_cfg, cfg->tun_mtu);
     mqvpn_config_apply_reorder(lib_cfg,
                                &cfg->reorder); /* INI [Reorder]/[ReorderRule] bridge */
+    mqvpn_config_apply_hybrid(lib_cfg, &cfg->hybrid); /* INI [Hybrid] bridge */
 
     /* Create callbacks */
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
@@ -1390,7 +1396,20 @@ cleanup:
  *  Server platform layer
  * ================================================================ */
 
+/* Registry entry tracking readiness interest for one egress TCP fd that
+ * the core (src/hybrid/tcp_egress.c) opened and manages itself — the
+ * platform only maps the fd to the libevent event multiplexing it.
+ * libevent events aren't individually mutable, so a want_read/want_write
+ * change means tearing down and recreating the event (see
+ * platform_egress_fd_register()). */
 typedef struct {
+    int fd; /* -1 = empty slot */
+    struct event *ev;
+    void *fd_ctx;
+    struct server_platform_ctx_s *sp; /* backpointer for the event callback */
+} egress_fd_slot_t;
+
+typedef struct server_platform_ctx_s {
     mqvpn_server_t *server;
     struct event_base *eb;
     struct event *ev_tick;
@@ -1403,6 +1422,12 @@ typedef struct {
     int udp_fd;
     int shutting_down;
     ctrl_socket_t *ctrl;
+
+    /* Egress fd registry (hybrid TCP lane, D1). Sized once at server start
+     * from mqvpn_server_egress_fd_budget() so the platform's registry and
+     * the core's own fd cap can never drift apart. */
+    egress_fd_slot_t *egress_fds;
+    int n_egress_fds;
 } server_platform_ctx_t;
 
 static void svr_on_tick(evutil_socket_t fd, short what, void *arg);
@@ -1547,6 +1572,104 @@ svr_on_socket_read(evutil_socket_t fd, short what, void *arg)
     svr_schedule_next_tick(sp);
 }
 
+/* ─── Egress fd registry (hybrid TCP lane, D1) ───
+ *
+ * The core (src/hybrid/tcp_egress.c) owns every egress fd's socket()/
+ * connect()/send()/recv()/close() syscalls directly; these callbacks only
+ * (un)register the platform's interest in an already-open fd. Linear scan
+ * is fine — register/unregister fire on state-change, not per-packet. */
+
+static egress_fd_slot_t *
+find_egress_slot(server_platform_ctx_t *sp, int fd)
+{
+    for (int i = 0; i < sp->n_egress_fds; i++) {
+        if (sp->egress_fds[i].fd == fd) return &sp->egress_fds[i];
+    }
+    return NULL;
+}
+
+static egress_fd_slot_t *
+find_or_alloc_egress_slot(server_platform_ctx_t *sp, int fd)
+{
+    egress_fd_slot_t *existing = find_egress_slot(sp, fd);
+    if (existing) return existing;
+
+    for (int i = 0; i < sp->n_egress_fds; i++) {
+        if (sp->egress_fds[i].fd == -1) return &sp->egress_fds[i];
+    }
+    return NULL;
+}
+
+static void
+on_egress_fd_event(evutil_socket_t fd, short what, void *arg)
+{
+    egress_fd_slot_t *slot = (egress_fd_slot_t *)arg;
+    server_platform_ctx_t *sp = slot->sp;
+    mqvpn_server_on_egress_fd_ready(sp->server, (int)fd, slot->fd_ctx,
+                                    (what & EV_READ) != 0, (what & EV_WRITE) != 0);
+    mqvpn_server_tick(sp->server);
+    svr_schedule_next_tick(sp);
+}
+
+static void
+platform_egress_fd_register(int fd, int want_read, int want_write, void *fd_ctx,
+                            void *user_ctx)
+{
+    server_platform_ctx_t *sp = (server_platform_ctx_t *)user_ctx;
+    egress_fd_slot_t *slot = find_or_alloc_egress_slot(sp, fd);
+    if (!slot) {
+        LOG_WRN("egress fd registry full, fd=%d not polled", fd);
+        return;
+    }
+
+    /* Re-register: tear down the old event with stale want_read/want_write
+     * flags first — libevent events aren't individually mutable. */
+    if (slot->ev) {
+        event_del(slot->ev);
+        event_free(slot->ev);
+        slot->ev = NULL;
+    }
+
+    short flags = EV_PERSIST | (want_read ? EV_READ : 0) | (want_write ? EV_WRITE : 0);
+    slot->fd = fd;
+    slot->fd_ctx = fd_ctx;
+    slot->sp = sp;
+    slot->ev = event_new(sp->eb, fd, flags, on_egress_fd_event, slot);
+    if (!slot->ev) {
+        LOG_WRN("event_new failed for egress fd=%d", fd);
+        slot->fd = -1;
+        slot->fd_ctx = NULL;
+        return;
+    }
+    if (event_add(slot->ev, NULL) < 0) {
+        LOG_WRN("event_add failed for egress fd=%d", fd);
+        event_free(slot->ev);
+        slot->ev = NULL;
+        slot->fd = -1;
+        slot->fd_ctx = NULL;
+    }
+}
+
+static void
+platform_egress_fd_unregister(int fd, void *user_ctx)
+{
+    server_platform_ctx_t *sp = (server_platform_ctx_t *)user_ctx;
+    egress_fd_slot_t *slot = find_egress_slot(sp, fd);
+    if (!slot) return;
+
+    /* Load-bearing libevent guarantee: event_del also removes a pending
+     * activation already queued in the current loop pass, so once this
+     * returns, on_egress_fd_event can never fire for this (possibly
+     * already-destroyed) flow again. */
+    if (slot->ev) {
+        event_del(slot->ev);
+        event_free(slot->ev);
+    }
+    slot->ev = NULL;
+    slot->fd = -1;
+    slot->fd_ctx = NULL;
+}
+
 static void
 svr_on_signal(evutil_socket_t sig, short what, void *arg)
 {
@@ -1673,6 +1796,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     mqvpn_config_set_tun_mtu(lib_cfg, cfg->tun_mtu);
     mqvpn_config_apply_reorder(lib_cfg,
                                &cfg->reorder); /* INI [Reorder]/[ReorderRule] bridge */
+    mqvpn_config_apply_hybrid(lib_cfg, &cfg->hybrid); /* INI [Hybrid] bridge */
 
     mqvpn_config_set_log_level(lib_cfg, (mqvpn_log_level_t)cfg->log_level);
 
@@ -1682,6 +1806,8 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     cbs.tunnel_config_ready = svr_cb_tunnel_config_ready;
     cbs.send_packet = NULL; /* fd-only mode */
     cbs.log = svr_cb_log;
+    cbs.egress_fd_register = platform_egress_fd_register;
+    cbs.egress_fd_unregister = platform_egress_fd_unregister;
 
     /* Create server */
     sp.server = mqvpn_server_new(lib_cfg, &cbs, &sp);
@@ -1689,6 +1815,21 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     if (!sp.server) {
         LOG_ERR("failed to create mqvpn server");
         return 1;
+    }
+
+    /* Egress fd registry (hybrid TCP lane, D1). Sized from the same budget
+     * tcp_egress.c will itself enforce, so the two caps cannot drift. */
+    sp.n_egress_fds = mqvpn_server_egress_fd_budget(sp.server);
+    if (sp.n_egress_fds > 0) {
+        sp.egress_fds = calloc((size_t)sp.n_egress_fds, sizeof(*sp.egress_fds));
+        if (!sp.egress_fds) {
+            LOG_ERR("failed to allocate egress fd registry");
+            goto cleanup;
+        }
+        for (int i = 0; i < sp.n_egress_fds; i++)
+            sp.egress_fds[i].fd = -1;
+    } else {
+        sp.n_egress_fds = 0;
     }
 
     /* Create UDP socket */
@@ -1771,6 +1912,20 @@ cleanup:
     }
     if (sp.udp_fd >= 0) close(sp.udp_fd);
     mqvpn_server_destroy(sp.server);
+    /* After server destroy: teardown may call egress_fd_unregister for any
+     * still-open egress fds, which scans this registry — free it only once
+     * the server is gone (but before the event base the events belong to). */
+    if (sp.egress_fds) {
+        for (int i = 0; i < sp.n_egress_fds; i++) {
+            if (sp.egress_fds[i].ev) {
+                event_del(sp.egress_fds[i].ev);
+                event_free(sp.egress_fds[i].ev);
+            }
+        }
+        free(sp.egress_fds);
+        sp.egress_fds = NULL;
+        sp.n_egress_fds = 0;
+    }
     if (sp.eb) event_base_free(sp.eb);
 
     return rc;

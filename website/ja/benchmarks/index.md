@@ -70,6 +70,16 @@ const latestAggregate = computed(() => {
 
 </ClientOnly>
 
+## ハイブリッド TCP レーン集約（v0.9.0）
+
+<p class="section-desc">対称 2×100 Mbit / 25 ms、TCP 上り、<code>iperf3 -P {1,2,4,8,16}</code>、3 回。</p>
+
+ハイブリッドの TCP **ストリームレーン**はクライアント側で TCP を終端し、順序保証つきの QUIC STREAM で中継します。そのため単一フローでも両パスを集約でき、全ストリーム数で **~187 Mbps**（200 Mbps 集約上限の約 93 %）に到達します。一方、生のマルチパス（データグラムトンネリング）は単一フローがパス間の並べ替えでバックオフするため、並列ストリームが増えて初めて追いつきます（WLB <code>-P 1</code>：96 → 187 Mbps、**+95 %**）。
+
+![ハイブリッド TCP レーン — MinRTT スケジューラ](/img/bench-hybrid-minrtt.png)
+
+![ハイブリッド TCP レーン — WLB スケジューラ](/img/bench-hybrid-wlb.png)
+
 <style scoped>
 .page-desc {
   font-size: 0.9em;

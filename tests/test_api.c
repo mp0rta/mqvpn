@@ -412,6 +412,48 @@ TEST(config_set_multipath)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_set_hybrid)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    /* Defaults from mqvpn_hybrid_config_default() */
+    ASSERT_EQ(cfg->hybrid.enabled, 0);
+    ASSERT_EQ(cfg->hybrid.tcp_mode, MQVPN_HYBRID_TCP_AUTO);
+    ASSERT_EQ(cfg->hybrid.tcp_max_flows, 256);
+    ASSERT_EQ(cfg->hybrid.tcp_idle_timeout_sec, 300);
+
+    ASSERT_EQ(mqvpn_config_set_hybrid_enabled(cfg, 1), MQVPN_OK);
+    ASSERT_EQ(cfg->hybrid.enabled, 1);
+    ASSERT_EQ(mqvpn_config_set_hybrid_enabled(NULL, 1), MQVPN_ERR_INVALID_ARG);
+
+    ASSERT_EQ(mqvpn_config_set_hybrid_tcp_mode(cfg, 1), MQVPN_OK);
+    ASSERT_EQ(cfg->hybrid.tcp_mode, MQVPN_HYBRID_TCP_RAW);
+    ASSERT_EQ(mqvpn_config_set_hybrid_tcp_mode(cfg, 3), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_hybrid_tcp_mode(cfg, -1), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(cfg->hybrid.tcp_mode, MQVPN_HYBRID_TCP_RAW); /* rejected → unchanged */
+    ASSERT_EQ(mqvpn_config_set_hybrid_tcp_mode(NULL, 0), MQVPN_ERR_INVALID_ARG);
+
+    ASSERT_EQ(mqvpn_config_set_hybrid_limits(cfg, 128, 60), MQVPN_OK);
+    ASSERT_EQ(cfg->hybrid.tcp_max_flows, 128);
+    ASSERT_EQ(cfg->hybrid.tcp_idle_timeout_sec, 60);
+    ASSERT_EQ(mqvpn_config_set_hybrid_limits(cfg, 0, 60), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(cfg->hybrid.tcp_max_flows, 128); /* rejected → unchanged */
+    ASSERT_EQ(mqvpn_config_set_hybrid_limits(NULL, 128, 60), MQVPN_ERR_INVALID_ARG);
+
+    ASSERT_EQ(mqvpn_config_set_hybrid_connect_timeout(cfg, 20), MQVPN_OK);
+    ASSERT_EQ(cfg->hybrid.tcp_connect_timeout_sec, 20);
+    ASSERT_EQ(mqvpn_config_set_hybrid_connect_timeout(cfg, 0), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(cfg->hybrid.tcp_connect_timeout_sec, 20); /* rejected → unchanged */
+    ASSERT_EQ(mqvpn_config_set_hybrid_connect_timeout(NULL, 5), MQVPN_ERR_INVALID_ARG);
+
+    ASSERT_EQ(mqvpn_config_set_hybrid_max_global_flows(cfg, 8192), MQVPN_OK);
+    ASSERT_EQ(cfg->hybrid.tcp_max_global_flows, 8192);
+    ASSERT_EQ(mqvpn_config_set_hybrid_max_global_flows(cfg, 0), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(cfg->hybrid.tcp_max_global_flows, 8192); /* rejected → unchanged */
+    ASSERT_EQ(mqvpn_config_set_hybrid_max_global_flows(NULL, 1), MQVPN_ERR_INVALID_ARG);
+
+    mqvpn_config_free(cfg);
+}
+
 /* ── Callback ABI tests ── */
 
 TEST(callbacks_abi_init)
@@ -1957,6 +1999,7 @@ main(void)
     run_config_set_tls_cert();
     run_config_set_max_clients();
     run_config_set_multipath();
+    run_config_set_hybrid();
 
     /* ABI tests */
     run_callbacks_abi_init();

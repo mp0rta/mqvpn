@@ -73,6 +73,16 @@ const latestAggregate = computed(() => {
 
 </ClientOnly>
 
+## Hybrid TCP-lane aggregation (v0.9.0)
+
+<p class="section-desc">Symmetric 2×100 Mbit / 25 ms, TCP uplink, <code>iperf3 -P {1,2,4,8,16}</code>, 3 reps.</p>
+
+The hybrid TCP **stream lane** terminates TCP at the client and relays it in-order over a QUIC STREAM, so even a single flow aggregates both paths — reaching **~187 Mbps** (≈93 % of the 200 Mbps aggregate) at every stream count. Raw multipath (datagram tunneling) instead makes a single flow back off on cross-path reorder, so it only catches up as parallel streams grow (WLB <code>-P 1</code>: 96 → 187 Mbps, **+95 %**).
+
+![Hybrid TCP-lane — MinRTT scheduler](/img/bench-hybrid-minrtt.png)
+
+![Hybrid TCP-lane — WLB scheduler](/img/bench-hybrid-wlb.png)
+
 <style scoped>
 .page-desc {
   font-size: 0.9em;
