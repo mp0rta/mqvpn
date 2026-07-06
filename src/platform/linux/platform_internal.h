@@ -44,6 +44,7 @@ typedef struct {
      * errors (e.g. -XQC_EMP_NO_AVAIL_PATH_ID during WiFi reassoc CID
      * lag). Reset on success or Level-2 reconnect. */
     int path_recover_failures[MQVPN_MAX_PATHS];
+    int route_gate_blocked[MQVPN_MAX_PATHS]; /* consecutive poll blocks, warn debounce */
 
     /* TUN device */
     mqvpn_tun_t tun;
