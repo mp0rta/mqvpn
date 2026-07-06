@@ -570,6 +570,13 @@ install(FILES
     "${CMAKE_SOURCE_DIR}/third_party/xquic/third_party/boringssl/LICENSE"
     DESTINATION share/doc/mqvpn/third-party RENAME boringssl.txt
     OPTIONAL)
+# lwIP is statically linked only when the hybrid TCP lane is built in.
+if(MQVPN_HYBRID_TCP_LANE_BUILD)
+    install(FILES
+        "${CMAKE_SOURCE_DIR}/third_party/lwip/LICENSE"
+        DESTINATION share/doc/mqvpn/third-party RENAME lwip.txt
+        OPTIONAL)
+endif()
 
 # ---------- CPack deb packaging (only when dpkg is available) ----------
 find_program(DPKG_CMD dpkg)
