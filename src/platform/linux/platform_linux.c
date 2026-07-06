@@ -606,6 +606,8 @@ iface_has_usable_ip(const char *ifname, sa_family_t af)
 static void
 try_reactivate_by_ifname(platform_ctx_t *p, const char *ifname)
 {
+    if (iface_has_route_to_server(ifname, &p->server_addr) == 0) return;
+
     /* PR5: query lib state instead of platform-tracked path_recoverable[].
      * Reactivate is valid for slots in DEGRADED / CREATE_WAIT /
      * CLOSED_RECOVERABLE (per lib's reactivate_slot_eligible gate added
@@ -809,6 +811,13 @@ try_readd_removed_path(platform_ctx_t *p, const char *ifname)
          * or slot was never tracked (handle invalid / removed before lib saw it). */
         if (found && st != MQVPN_PATH_CLOSED) continue;
 
+        /* Definite "no FIB route to the server via this iface": re-adding
+         * now would SO_BINDTODEVICE the challenge into the kernel's
+         * assume-on-link ARP blackhole (sendto succeeds, nothing on the
+         * wire). The 3s recovery timer retries once a route exists.
+         * -1 (probe unavailable) intentionally passes — fail open. */
+        if (iface_has_route_to_server(ifname, &p->server_addr) == 0) return 0;
+
         mqvpn_path_t *mp = &p->path_mgr.paths[i];
         int fd = recovery_socket_create(p->server_addr.ss_family, ifname, mp);
         if (fd < 0) return 0;
@@ -883,7 +892,27 @@ recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
 
     for (int i = 0; i < p->path_mgr.n_paths; i++) {
         if (p->path_recover_failures[i] >= PATH_RECOVER_FAILURE_LIMIT) continue;
-        if (p->path_mgr.paths[i].platform_attached) continue; /* already live */
+        if (p->path_mgr.paths[i].platform_attached) {
+            /* CLOSED_RECOVERABLE slots (valid fd) are normally reactivated
+             * by one-shot RTM_NEWADDR/NEWLINK events. A route appearing
+             * emits neither, and the route gate may have swallowed the
+             * original event — so the timer must also retry reactivate.
+             * try_reactivate_by_ifname re-checks lib state and the lib
+             * rejects wrong states with INVALID_STATE, so this is
+             * idempotent. */
+            mqvpn_path_handle_t ah = p->lib_path_handles[i];
+            for (int j = 0; j < n; j++) {
+                if (pinfo[j].handle == ah && pinfo[j].status == MQVPN_PATH_CLOSED) {
+                    const char *rifname = p->path_mgr.paths[i].iface;
+                    /* route gate runs inside try_reactivate_by_ifname */
+                    if (iface_is_up_and_running(rifname) &&
+                        iface_has_usable_ip(rifname, p->server_addr.ss_family) == 1)
+                        try_reactivate_by_ifname(p, rifname);
+                    break;
+                }
+            }
+            continue;
+        }
 
         mqvpn_path_handle_t h = p->lib_path_handles[i];
         int is_closed = 0;
@@ -898,6 +927,17 @@ recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
         const char *ifname = p->path_mgr.paths[i].iface;
         if (!iface_is_up_and_running(ifname)) continue;
         if (iface_has_usable_ip(ifname, p->server_addr.ss_family) != 1) continue;
+        if (iface_has_route_to_server(ifname, &p->server_addr) == 0) {
+            /* First block + every 10th (≈30s at the 3s poll). The message
+             * wording is grepped by scripts/ci_e2e/run_route_gate_test.sh —
+             * rewording it silently disables that e2e's gate check. */
+            if (p->route_gate_blocked[i]++ % 10 == 0)
+                LOG_WRN("netlink: %s has a usable address but no route to "
+                        "the server — re-add deferred until a route appears",
+                        ifname);
+            continue;
+        }
+        p->route_gate_blocked[i] = 0;
 
         /* try_readd_removed_path scans by ifname, finds this slot via
          * lib state, and either succeeds (resets the counter via line
