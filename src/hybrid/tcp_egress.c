@@ -10,6 +10,8 @@
 
 #include "hybrid/tcp_egress.h"
 
+#include "compat/socket_compat.h"
+
 #include <arpa/inet.h>
 #include <assert.h>
 #include <errno.h>
@@ -596,16 +598,17 @@ svr_tcp_egress_drain_body(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
             while (off < (size_t)n) {
                 ssize_t sent;
                 do {
-                    /* MSG_NOSIGNAL: a peer that already fully closed
+                    /* MQVPN_MSG_NOSIGNAL: a peer that already fully closed
                      * (RST'd) makes a subsequent send raise SIGPIPE, whose
                      * default action kills the whole process — and this
                      * library owns no signal handlers by design (signal
                      * handling is externalized to the platform/CLI), so
-                     * suppression must happen at the syscall. EPIPE still
-                     * comes back as the errno and routes to on_relay_error
-                     * below. */
+                     * suppression must happen at the syscall (Linux
+                     * MSG_NOSIGNAL; on Darwin via the socket's SO_NOSIGPIPE
+                     * — see socket_compat.h). EPIPE still comes back as the
+                     * errno and routes to on_relay_error below. */
                     sent = send(ef->fd, buf + off, (size_t)n - off,
-                                MSG_DONTWAIT | MSG_NOSIGNAL);
+                                MSG_DONTWAIT | MQVPN_MSG_NOSIGNAL);
                 } while (sent < 0 && errno == EINTR);
                 if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
                     if (!svr_tcp_egress_stash_downlink(server, ef, buf + off,
@@ -652,10 +655,10 @@ svr_tcp_egress_flush_downlink_retry(mqvpn_server_t *server, svr_tcp_egress_flow_
     while (off < ef->downlink_stash_len) {
         ssize_t sent;
         do {
-            /* MSG_NOSIGNAL — same SIGPIPE-suppression rationale as the
-             * drain_body send site above. */
+            /* MQVPN_MSG_NOSIGNAL — same SIGPIPE-suppression rationale as
+             * the drain_body send site above. */
             sent = send(ef->fd, ef->downlink_stash + off, ef->downlink_stash_len - off,
-                        MSG_DONTWAIT | MSG_NOSIGNAL);
+                        MSG_DONTWAIT | MQVPN_MSG_NOSIGNAL);
         } while (sent < 0 && errno == EINTR);
         if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
         if (sent <= 0) {
@@ -851,7 +854,7 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
         return svr_tcp_egress_respond(h3_request, 503, 1);
     }
 
-    int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    int fd = mqvpn_socket_tcp_nonblock_new(AF_INET);
     if (fd < 0) {
         return svr_tcp_egress_respond(h3_request, 500, 1);
     }
