@@ -84,6 +84,9 @@ typedef struct {
 int setup_routes(platform_ctx_t *p);
 void cleanup_routes(platform_ctx_t *p);
 
+/* route_check.c */
+int iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *server);
+
 /* killswitch.c */
 int setup_killswitch(platform_ctx_t *p);
 void cleanup_killswitch(platform_ctx_t *p);
