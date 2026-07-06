@@ -501,7 +501,7 @@ mqvpn follows semantic versioning for the control API:
 - `get_stats` was extended in v0.5.0 with `dgram_sent`, `dgram_recv`,
   `dgram_lost`, `dgram_acked`, and `uptime_sec`. Consumers that only read
   `n_clients`, `bytes_tx`, and `bytes_rx` remain unaffected.
-- `get_stats` was extended again (unreleased, post-v0.8.0) with the hybrid-mode
+- `get_stats` was extended again in v0.9.0 with the hybrid-mode
   lane/flow counters (`pkts_lane_tcp`, `pkts_lane_dgram`, `pkts_lane_raw`,
   `pkts_lane_tcp_dropped`, `tcp_flows_active`, `tcp_flows_total`,
   `tcp_flows_rejected`, `raw_markers_active`). All eight now report real
