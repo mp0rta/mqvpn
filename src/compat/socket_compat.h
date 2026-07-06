@@ -65,6 +65,18 @@ mqvpn_socket_set_nonblock(int fd)
 #endif
 }
 
+/* Close a socket. Idempotent for fd<0. Errors are not reported. */
+static inline void
+mqvpn_socket_close(int fd)
+{
+    if (fd < 0) return;
+#ifdef _WIN32
+    closesocket((SOCKET)fd);
+#else
+    close(fd);
+#endif
+}
+
 /* Create a non-blocking TCP socket, or -1 on failure (errno set by the
  * failing syscall). Uses SOCK_NONBLOCK atomically where the platform has
  * it (Linux); falls back to socket() + fcntl elsewhere (Darwin, Windows).
@@ -92,18 +104,6 @@ mqvpn_socket_tcp_nonblock_new(int domain)
     (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
 #endif
     return fd;
-}
-
-/* Close a socket. Idempotent for fd<0. Errors are not reported. */
-static inline void
-mqvpn_socket_close(int fd)
-{
-    if (fd < 0) return;
-#ifdef _WIN32
-    closesocket((SOCKET)fd);
-#else
-    close(fd);
-#endif
 }
 
 /* Return a printable string for the most recent socket error.
