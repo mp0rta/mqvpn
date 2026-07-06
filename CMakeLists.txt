@@ -377,6 +377,7 @@ endif()
 add_executable(mqvpn
     src/main.c
     src/platform/linux/platform_linux.c
+    src/platform/linux/netlink_mon.c
     src/platform/linux/route_check.c
     src/platform/linux/control_socket.c
     src/platform/linux/status.c
