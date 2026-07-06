@@ -373,6 +373,18 @@ Asymmetric dual-path (300M/10ms + 80M/30ms) via network namespaces. Full report:
 | Bandwidth aggregation (WLB, 16 streams) | **319 Mbps** (84% of 380 Mbps theoretical) |
 | WLB vs MinRTT | WLB **+21%** |
 
+### Hybrid TCP-lane (v0.9.0)
+
+Symmetric 2×100 Mbit / 25 ms, TCP uplink, `iperf3 -P {1,2,4,8,16}`, 3 reps. The hybrid TCP **stream lane** terminates TCP at the client and relays it in-order over a QUIC STREAM, so even a single flow aggregates both paths — where raw multipath (datagram tunneling) makes one flow back off on cross-path reorder. Hybrid ON reaches **~187 Mbps** (≈93 % of the 200 Mbps aggregate) at *every* stream count:
+
+| WLB, streams (`-P`) | 1 | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|---|
+| hybrid OFF (raw) | 96 | 177 | 167 | 177 | 178 |
+| hybrid ON (lane) | **187** | 186 | 188 | 188 | 188 |
+| gain | **+95 %** | +5 % | +12 % | +6 % | +6 % |
+
+Charts: [MinRTT](bench_results/hybrid_mode/hybrid_mode_minrtt_1783350878.png) · [WLB](bench_results/hybrid_mode/hybrid_mode_wlb_1783350878.png) — bench: [`benchmarks/bench_hybrid_scheduler.sh`](benchmarks/bench_hybrid_scheduler.sh) · data: [`bench_results/hybrid_mode/`](bench_results/hybrid_mode/)
+
 ## Architecture
 
 ```
