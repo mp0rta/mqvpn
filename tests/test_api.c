@@ -1675,6 +1675,155 @@ TEST(get_interest_includes_handshake_stall_deadline)
     mqvpn_client_destroy(c);
 }
 
+/* ── get_interest Recovery timer: retry-deadline wake (regression pin for
+ *    commit 220a2e6) ──
+ *
+ * The Recovery block in mqvpn_client_get_interest must shorten next_timer_ms
+ * to a path's `recreate_after_us` retry deadline. The bug (fixed in 220a2e6)
+ * gated on `p->status == MQVPN_PATH_DEGRADED`, which missed CREATE_WAIT slots:
+ * a slot that fails activation before it ever validated lands in CREATE_WAIT,
+ * which projects to the public PENDING status, so the DEGRADED gate skipped
+ * its armed retry timer and the tick fired only on some unrelated (30s+)
+ * timer. The fix keys on `p->recreate_after_us > 0`, which is non-zero in
+ * exactly CREATE_WAIT and DEGRADED. These are pure-function tests over
+ * get_interest so the deadline-wake never needs a netns to verify.
+ *
+ * A fixed injected clock makes the arithmetic exact:
+ * apply_path_activation_failure arms recreate_after_us = now + 5s
+ * (PATH_RECREATE_DELAY_US, the first-retry backoff). */
+static uint64_t g_recovery_fake_now_us = 0;
+static uint64_t
+recovery_fake_clock(void *ctx)
+{
+    (void)ctx;
+    return g_recovery_fake_now_us;
+}
+
+static mqvpn_client_t *
+make_recovery_test_client(void)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    mqvpn_config_set_server(cfg, "1.2.3.4", 443);
+    mqvpn_config_set_clock(cfg, recovery_fake_clock, NULL);
+
+    mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
+    cbs.tun_output = dummy_tun_output;
+    cbs.tunnel_config_ready = dummy_config_ready;
+    cbs.state_changed = mock_state_changed;
+    cbs.path_event = mock_path_event;
+
+    mqvpn_client_t *c = mqvpn_client_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    return c;
+}
+
+extern int mqvpn_client_test_force_established(mqvpn_client_t *c);
+extern int mqvpn_client_test_set_next_wake_us(mqvpn_client_t *c, uint64_t us);
+
+/* Case 1: CREATE_WAIT slot with recreate_after_us = now + 5s. The retry
+ * deadline (5000 ms) must clamp next_timer_ms below the 30s xquic wake. */
+TEST(get_interest_recovery_create_wait_future_clamps_wake)
+{
+    g_recovery_fake_now_us = 1000000000ULL; /* arbitrary 1000 s base */
+    mqvpn_client_t *c = make_recovery_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    /* PENDING -> CREATE_WAIT, arming recreate_after_us = base + 5s. */
+    ASSERT_EQ(mqvpn_client_apply_path_activation_failure(c, h, g_recovery_fake_now_us),
+              0);
+    ASSERT_EQ(mqvpn_client_test_force_established(c), 0);
+    ASSERT_EQ(mqvpn_client_test_set_next_wake_us(c, 30ULL * 1000000), 0);
+
+    mqvpn_interest_t i = {0};
+    i.struct_size = sizeof(i);
+    ASSERT_EQ(mqvpn_client_get_interest(c, &i), MQVPN_OK);
+
+    ASSERT_EQ(i.next_timer_ms > 0, 1);
+    ASSERT_EQ(i.next_timer_ms <= 5000, 1);
+    /* Exact: clamped to the 5s deadline, not the 30s xquic wake. */
+    ASSERT_EQ(i.next_timer_ms, 5000);
+
+    mqvpn_client_destroy(c);
+}
+
+/* Case 2: same CREATE_WAIT slot but the deadline is already in the past —
+ * get_interest must force next_timer_ms to 1 (wake immediately). */
+TEST(get_interest_recovery_create_wait_past_forces_1ms)
+{
+    g_recovery_fake_now_us = 1000000000ULL;
+    mqvpn_client_t *c = make_recovery_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    ASSERT_EQ(mqvpn_client_apply_path_activation_failure(c, h, g_recovery_fake_now_us),
+              0);
+    ASSERT_EQ(mqvpn_client_test_force_established(c), 0);
+    ASSERT_EQ(mqvpn_client_test_set_next_wake_us(c, 30ULL * 1000000), 0);
+
+    /* Advance past the base+5s retry deadline. */
+    g_recovery_fake_now_us += 10ULL * 1000000;
+
+    mqvpn_interest_t i = {0};
+    i.struct_size = sizeof(i);
+    ASSERT_EQ(mqvpn_client_get_interest(c, &i), MQVPN_OK);
+    ASSERT_EQ(i.next_timer_ms, 1);
+
+    mqvpn_client_destroy(c);
+}
+
+/* Case 3: a fresh PENDING slot has recreate_after_us == 0, so the Recovery
+ * block must contribute nothing — the xquic-requested wake passes through
+ * untouched (NOT clamped to 5000, NOT forced to 1). Isolates the block by
+ * seeding next_wake_us to a distinctive 8000 ms. */
+TEST(get_interest_recovery_ignores_slot_without_retry_deadline)
+{
+    g_recovery_fake_now_us = 1000000000ULL;
+    mqvpn_client_t *c = make_recovery_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+    /* Fresh PENDING: recreate_after_us == 0, path_stable_since_us == 0. */
+
+    ASSERT_EQ(mqvpn_client_test_force_established(c), 0);
+    ASSERT_EQ(mqvpn_client_test_set_next_wake_us(c, 8ULL * 1000000), 0);
+
+    mqvpn_interest_t i = {0};
+    i.struct_size = sizeof(i);
+    ASSERT_EQ(mqvpn_client_get_interest(c, &i), MQVPN_OK);
+    ASSERT_EQ(i.next_timer_ms, 8000);
+
+    mqvpn_client_destroy(c);
+}
+
+/* Case 4: an overdue retry deadline must stay inert while the client is not
+ * ESTABLISHED. We arm CREATE_WAIT, force ESTABLISHED+multipath_ready, then
+ * move to RECONNECTING (valid transition) so multipath_ready stays 1 and only
+ * the state gate differs. reconnect_scheduled_us is 0, so the RECONNECTING
+ * block does not fire either — the wake must pass through, not be forced to 1. */
+TEST(get_interest_recovery_inert_when_not_established)
+{
+    g_recovery_fake_now_us = 1000000000ULL;
+    mqvpn_client_t *c = make_recovery_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    ASSERT_EQ(mqvpn_client_apply_path_activation_failure(c, h, g_recovery_fake_now_us),
+              0);
+    ASSERT_EQ(mqvpn_client_test_set_next_wake_us(c, 8ULL * 1000000), 0);
+    ASSERT_EQ(mqvpn_client_test_force_established(c), 0);
+    ASSERT_EQ(mqvpn_client_test_force_state(c, MQVPN_STATE_RECONNECTING), 0);
+
+    /* Deadline (base+5s) now in the past. */
+    g_recovery_fake_now_us += 10ULL * 1000000;
+
+    mqvpn_interest_t i = {0};
+    i.struct_size = sizeof(i);
+    ASSERT_EQ(mqvpn_client_get_interest(c, &i), MQVPN_OK);
+    ASSERT_EQ(i.next_timer_ms, 8000);
+
+    mqvpn_client_destroy(c);
+}
+
 /* ── Path reactivation preconditions ── */
 
 TEST(reactivate_path_null_client)
@@ -1946,6 +2095,12 @@ main(void)
     run_client_set_state_leaving_connecting_clears_handshake_start();
     run_client_set_state_reconnecting_clears_handshake_start();
     run_get_interest_includes_handshake_stall_deadline();
+
+    /* get_interest Recovery timer: CREATE_WAIT retry-deadline wake (220a2e6) */
+    run_get_interest_recovery_create_wait_future_clamps_wake();
+    run_get_interest_recovery_create_wait_past_forces_1ms();
+    run_get_interest_recovery_ignores_slot_without_retry_deadline();
+    run_get_interest_recovery_inert_when_not_established();
 
     /* Path reactivation tests */
     run_reactivate_path_null_client();

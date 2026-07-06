@@ -13,8 +13,8 @@ android {
         applicationId = "com.mqvpn.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 18
-        versionName = "0.8.0"
+        versionCode = 21
+        versionName = "0.8.2"
         // arm64-v8a only: must match sdk-native's abiFilters. Adding ABIs here
         // without updating sdk-native produces APKs that crash with
         // UnsatisfiedLinkError on those ABIs (no .so packaged).
@@ -66,7 +66,7 @@ dependencies {
     implementation(project(":sdk-core"))
 
     // Compose
-    implementation(platform("androidx.compose:compose-bom:2026.06.00"))
+    implementation(platform("androidx.compose:compose-bom:2026.06.01"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui-tooling-preview")
@@ -78,7 +78,7 @@ dependencies {
     // Hilt
     implementation("com.google.dagger:hilt-android:2.60")
     ksp("com.google.dagger:hilt-android-compiler:2.60")
-    implementation("androidx.hilt:hilt-navigation-compose:1.3.0")
+    implementation("androidx.hilt:hilt-navigation-compose:1.4.0")
 
     // Test
     testImplementation("junit:junit:4.13.2")

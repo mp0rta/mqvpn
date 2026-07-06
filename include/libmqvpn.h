@@ -5,7 +5,7 @@
  * libmqvpn — Multipath QUIC VPN library
  *
  * Public API header (single file).
- * Version: 0.8.0 (callback ABI version 2)
+ * Version: 0.8.2 (callback ABI version 2)
  *
  * Thread safety: All functions must be called from a single thread
  * (the "tick thread"). Debug builds assert this via MQVPN_ASSERT_TICK_THREAD.
@@ -39,7 +39,7 @@ extern "C" {
 
 #define MQVPN_VERSION_MAJOR 0
 #define MQVPN_VERSION_MINOR 8
-#define MQVPN_VERSION_PATCH 0
+#define MQVPN_VERSION_PATCH 2
 
 /* ─── ABI ─── */
 
@@ -210,11 +210,14 @@ typedef enum {
  * Fields:
  *   iface  - interface name (NUL-terminated, may be empty if N/A).
  *            Diagnostic only - library does not parse this.
- *   reason - platform-specific reason code. Currently only
- *            MQVPN_PLATFORM_REASON_RTM_DELLINK is emitted (Linux PR5).
+ *   reason - platform-specific reason code. Linux emits RTM_DELLINK
+ *            (interface gone), CARRIER_LOST (cable unplugged / peer down),
+ *            ADMIN_DOWN (ip link set down) and ADDR_REMOVED (last usable
+ *            source address removed while the link stayed up — nmcli
+ *            disconnect / DHCP lease loss).
  *            Library does not branch on this - log only.
- *            More values added when concrete emitter ships (CARRIER_LOST,
- *            NM_IFDOWN, iOS variants etc) - ABI-additive.
+ *            More values added when concrete emitter ships (iOS variants
+ *            etc) - ABI-additive.
  *
  * Future: `platform_net_id` (Android Network handle) is intentionally NOT
  * included now. Android path management uses existing
@@ -226,10 +229,12 @@ typedef enum {
  * semantic). */
 typedef enum {
     MQVPN_PLATFORM_REASON_UNKNOWN = 0,
-    MQVPN_PLATFORM_REASON_RTM_DELLINK = 1,
-    /* extend ABI-additively when concrete emitter ships:
-     * MQVPN_PLATFORM_REASON_CARRIER_LOST = 2,
-     * MQVPN_PLATFORM_REASON_NM_IFDOWN    = 3, ... */
+    MQVPN_PLATFORM_REASON_RTM_DELLINK = 1,  /* interface removed */
+    MQVPN_PLATFORM_REASON_CARRIER_LOST = 2, /* IFF_UP set, operstate DOWN */
+    MQVPN_PLATFORM_REASON_ADMIN_DOWN = 3,   /* IFF_UP cleared (ip link set down) */
+    MQVPN_PLATFORM_REASON_ADDR_REMOVED = 4, /* no usable source address left
+                                             * (RTM_DELADDR, link stays up) */
+    /* extend ABI-additively when concrete emitter ships (iOS variants etc) */
 } mqvpn_platform_reason_t;
 
 typedef struct {

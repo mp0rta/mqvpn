@@ -440,6 +440,9 @@ client_path_residence_check(mqvpn_client_t *c, path_entry_t *p, uint64_t now_us)
     if (!path_should_warn_residence(p, now_us)) return;
 
     switch (p->status) {
+    /* The "stuck in PENDING" / "DEGRADED retry overdue" wordings are
+     * grepped by scripts/ci_e2e/sanitizer_check.sh as a suite-wide
+     * postcondition — rewording them silently disables that gate. */
     case MQVPN_PATH_PENDING:
         LOG_W(c, "path[%lld %s] stuck in PENDING for %llu ms", (long long)p->handle,
               p->name, (unsigned long long)((now_us - p->state_entered_at_us) / 1000));
@@ -673,6 +676,41 @@ mqvpn_client_test_force_state(mqvpn_client_t *c, mqvpn_client_state_t s)
 {
     if (!c) return -1;
     client_set_state(c, s);
+    return 0;
+}
+
+/* P1 test-only: force the client into the ESTABLISHED + multipath_ready
+ * shape that gates the Recovery/Stability timer block in
+ * mqvpn_client_get_interest, without driving a real handshake. Writes the
+ * connection-level c->state / c->multipath_ready directly (bypassing the
+ * transition table); these are NOT path_entry_t lifecycle fields, so no
+ * LINT-ALLOW is required. Hidden from libmqvpn.so's dynamic export table
+ * (not part of the public ABI). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_force_established(mqvpn_client_t *c)
+{
+    if (!c) return -1;
+    c->state = MQVPN_STATE_ESTABLISHED;
+    c->multipath_ready = 1;
+    return 0;
+}
+
+/* P1 test-only: seed c->next_wake_us — the xquic-requested wake that
+ * mqvpn_client_get_interest starts `ms` from (normally set by
+ * cb_set_event_timer). Lets a pure-function test observe whether the
+ * Recovery timer block clamps or leaves the wake untouched. Hidden from
+ * libmqvpn.so's dynamic export table (not part of the public ABI). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_set_next_wake_us(mqvpn_client_t *c, uint64_t us)
+{
+    if (!c) return -1;
+    c->next_wake_us = us;
     return 0;
 }
 
@@ -3483,8 +3521,13 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
             /* Recovery timer — shorten `ms` only, never extend. Same shape as
              * Stability timer below. Unlike the RECONNECTING / CONNECTING
              * blocks above, the tunnel is live here and BBR pacing depends
-             * on near-term ticks. */
-            if (p->status == MQVPN_PATH_DEGRADED && p->recreate_after_us > 0) {
+             * on near-term ticks.
+             *
+             * recreate_after_us != 0 exactly in CREATE_WAIT (public PENDING)
+             * and DEGRADED — both carry a retry deadline the tick must honor.
+             * Gating on the public DEGRADED status alone left CREATE_WAIT
+             * retries waiting for an unrelated timer. */
+            if (p->recreate_after_us > 0) {
                 if (p->recreate_after_us > now_val) {
                     int pms = (int)((p->recreate_after_us - now_val) / 1000);
                     if (ms > 0 && pms < ms) ms = pms;

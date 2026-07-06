@@ -20,6 +20,25 @@ _dump_sanitizer_log() {
     echo "--- end ${desc} log ---" >&2
 }
 
+# Residence-warning postcondition: a path stuck in PENDING (or a retry
+# overdue) at the end of ANY e2e test is a recovery bug the test body
+# didn't assert on. The library already warns — make CI listen.
+# Opt out per-test with MQVPN_E2E_ALLOW_RESIDENCE_WARN=1 (e.g. for a
+# future test that deliberately parks a path).
+_check_residence_warnings() {
+    local desc="$1" log_file="$2"
+
+    if [ -n "$log_file" ] && [ -f "$log_file" ] \
+        && [ -z "${MQVPN_E2E_ALLOW_RESIDENCE_WARN:-}" ]; then
+        if grep -qE "stuck in PENDING|DEGRADED retry overdue" "$log_file"; then
+            echo "RESIDENCE FAIL: $desc log contains a path-residence warning" >&2
+            grep -nE "stuck in PENDING|DEGRADED retry overdue" "$log_file" | tail -5 >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+
 stop_and_check_sanitizer() {
     local pid="$1"
     local desc="${2:-process}"
@@ -36,6 +55,7 @@ stop_and_check_sanitizer() {
             _dump_sanitizer_log "$desc" "$log_file"
             return 1
         fi
+        _check_residence_warnings "$desc" "$log_file" || return 1
         return 0
     fi
 
@@ -49,5 +69,6 @@ stop_and_check_sanitizer() {
         _dump_sanitizer_log "$desc" "$log_file"
         return 1
     fi
+    _check_residence_warnings "$desc" "$log_file" || return 1
     return 0
 }
