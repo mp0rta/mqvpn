@@ -21,6 +21,7 @@
 #ifndef COMPAT_SOCKET_COMPAT_H
 #define COMPAT_SOCKET_COMPAT_H
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -31,13 +32,22 @@
 #  include <unistd.h>
 #  include <fcntl.h>
 #  include <sys/socket.h>
-#  include <errno.h>
 #endif
 
 #if defined(_MSC_VER)
 #  define MQVPN_TLS __declspec(thread)
 #else
 #  define MQVPN_TLS _Thread_local
+#endif
+
+/* MSG_NOSIGNAL is Linux/POSIX-2008-only. Darwin has no such send() flag —
+ * SIGPIPE suppression there is per-socket via SO_NOSIGPIPE, applied in
+ * mqvpn_socket_tcp_nonblock_new() below. Windows has no SIGPIPE at all.
+ * Callers pass MQVPN_MSG_NOSIGNAL in send() flags unconditionally. */
+#ifdef MSG_NOSIGNAL
+#  define MQVPN_MSG_NOSIGNAL MSG_NOSIGNAL
+#else
+#  define MQVPN_MSG_NOSIGNAL 0
 #endif
 
 /* Set socket to non-blocking mode. Returns 0 on success, -1 on failure.
@@ -65,6 +75,35 @@ mqvpn_socket_close(int fd)
 #else
     close(fd);
 #endif
+}
+
+/* Create a non-blocking TCP socket, or -1 on failure (errno set by the
+ * failing syscall). Uses SOCK_NONBLOCK atomically where the platform has
+ * it (Linux); falls back to socket() + fcntl elsewhere (Darwin, Windows).
+ * On Darwin additionally sets SO_NOSIGPIPE — the per-socket counterpart
+ * of the MQVPN_MSG_NOSIGNAL send() flag above, and the only SIGPIPE
+ * suppression available there. */
+static inline int
+mqvpn_socket_tcp_nonblock_new(int domain)
+{
+#ifdef SOCK_NONBLOCK
+    int fd = socket(domain, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if (fd < 0) return -1;
+#else
+    int fd = (int)socket(domain, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    if (mqvpn_socket_set_nonblock(fd) < 0) {
+        int saved = errno;
+        mqvpn_socket_close(fd);
+        errno = saved;
+        return -1;
+    }
+#endif
+#ifdef SO_NOSIGPIPE
+    int one = 1;
+    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#endif
+    return fd;
 }
 
 /* Return a printable string for the most recent socket error.

@@ -81,6 +81,11 @@ typedef struct {
     struct event *ev_netlink;
 } platform_ctx_t;
 
+/* platform_linux.c — reactor entry points shared with netlink_mon.c */
+int linux_pin_socket_to_iface(int fd, const char *ifname);
+void on_socket_read(evutil_socket_t fd, short what, void *arg);
+void schedule_next_tick(platform_ctx_t *p);
+
 /* routing.c */
 int setup_routes(platform_ctx_t *p);
 void cleanup_routes(platform_ctx_t *p);
