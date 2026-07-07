@@ -295,7 +295,7 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_g_p10_proactive_cid_test.sh
 
-      - name: E2E G-P14 PATH_ABANDON alt-path (netns, SKIP)
+      - name: E2E G-P14 PATH_ABANDON alt-path (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
