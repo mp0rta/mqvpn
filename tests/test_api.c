@@ -1824,6 +1824,205 @@ TEST(get_interest_recovery_inert_when_not_established)
     mqvpn_client_destroy(c);
 }
 
+/* ── get_interest: Stability timer (mqvpn_client.c §get_interest) ──
+ *
+ * The parallel of the Recovery-timer block above, but keyed on
+ * path_stable_since_us (set on VALIDATING -> ACTIVE) instead of
+ * recreate_after_us. Deadline = path_stable_since_us + PATH_STABLE_THRESHOLD_US
+ * (30 s). Guard: path_stable_since_us > 0 && xquic_path_live. The block was a
+ * documented ~3-4x throughput regression when it EXTENDED `ms` (0 -> 30000);
+ * these tests pin the shorten-only / force-1ms / inert-guard behaviour so that
+ * regression cannot silently return. Seeded via the fixed injected clock. */
+extern int mqvpn_client_test_set_path_stable_us(mqvpn_client_t *c,
+                                                mqvpn_path_handle_t handle,
+                                                uint64_t stable_since_us, int xquic_live);
+
+/* Deadline in the future: clamp next_timer_ms down to the remaining time,
+ * never past it. base-10s anchor -> stable_at = base+20s -> 20000 ms, below
+ * the 30s xquic wake it must win against. */
+TEST(get_interest_stability_future_clamps_wake)
+{
+    g_recovery_fake_now_us = 1000000000ULL; /* 1000 s base */
+    mqvpn_client_t *c = make_recovery_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    ASSERT_EQ(mqvpn_client_test_force_established(c), 0);
+    ASSERT_EQ(mqvpn_client_test_set_next_wake_us(c, 30ULL * 1000000), 0);
+    /* stable_at = (base - 10s) + 30s = base + 20s. */
+    ASSERT_EQ(mqvpn_client_test_set_path_stable_us(
+                  c, h, g_recovery_fake_now_us - 10ULL * 1000000, 1),
+              0);
+
+    mqvpn_interest_t i = {0};
+    i.struct_size = sizeof(i);
+    ASSERT_EQ(mqvpn_client_get_interest(c, &i), MQVPN_OK);
+    ASSERT_EQ(i.next_timer_ms, 20000);
+
+    mqvpn_client_destroy(c);
+}
+
+/* Deadline already in the past: force next_timer_ms to 1 (wake immediately). */
+TEST(get_interest_stability_past_forces_1ms)
+{
+    g_recovery_fake_now_us = 1000000000ULL;
+    mqvpn_client_t *c = make_recovery_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    ASSERT_EQ(mqvpn_client_test_force_established(c), 0);
+    ASSERT_EQ(mqvpn_client_test_set_next_wake_us(c, 30ULL * 1000000), 0);
+    /* stable_at = (base - 40s) + 30s = base - 10s (overdue). */
+    ASSERT_EQ(mqvpn_client_test_set_path_stable_us(
+                  c, h, g_recovery_fake_now_us - 40ULL * 1000000, 1),
+              0);
+
+    mqvpn_interest_t i = {0};
+    i.struct_size = sizeof(i);
+    ASSERT_EQ(mqvpn_client_get_interest(c, &i), MQVPN_OK);
+    ASSERT_EQ(i.next_timer_ms, 1);
+
+    mqvpn_client_destroy(c);
+}
+
+/* Guard: the block must stay inert unless BOTH path_stable_since_us > 0 AND
+ * xquic_path_live. A future deadline (would clamp to <30000) is seeded, but
+ * with each half of the guard missing in turn the 8000 ms xquic wake must pass
+ * through untouched. */
+TEST(get_interest_stability_ignores_dead_path)
+{
+    g_recovery_fake_now_us = 1000000000ULL;
+    mqvpn_client_t *c = make_recovery_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    ASSERT_EQ(mqvpn_client_test_force_established(c), 0);
+    ASSERT_EQ(mqvpn_client_test_set_next_wake_us(c, 8ULL * 1000000), 0);
+
+    /* Case A: stability anchor set but xquic_path_live == 0 -> inert. The
+     * anchor is deliberately OVERDUE (base-40s -> stable_at = base-10s): if a
+     * regression dropped only the `&& xquic_path_live` half of the guard, the
+     * overdue branch would force ms to 1, diverging from the asserted 8000. A
+     * future-dated anchor here would be vacuous (30000 > 8000 never shortens). */
+    ASSERT_EQ(mqvpn_client_test_set_path_stable_us(
+                  c, h, g_recovery_fake_now_us - 40ULL * 1000000, 0),
+              0);
+    mqvpn_interest_t i = {0};
+    i.struct_size = sizeof(i);
+    ASSERT_EQ(mqvpn_client_get_interest(c, &i), MQVPN_OK);
+    ASSERT_EQ(i.next_timer_ms, 8000);
+
+    /* Case B: xquic_path_live == 1 but no stability anchor -> inert. */
+    ASSERT_EQ(mqvpn_client_test_set_path_stable_us(c, h, 0, 1), 0);
+    mqvpn_interest_t i2 = {0};
+    i2.struct_size = sizeof(i2);
+    ASSERT_EQ(mqvpn_client_get_interest(c, &i2), MQVPN_OK);
+    ASSERT_EQ(i2.next_timer_ms, 8000);
+
+    mqvpn_client_destroy(c);
+}
+
+/* Two live-stable paths: next_timer_ms binds to the EARLIEST deadline. */
+TEST(get_interest_stability_two_paths_takes_min_deadline)
+{
+    g_recovery_fake_now_us = 1000000000ULL;
+    mqvpn_client_t *c = make_recovery_test_client();
+    mqvpn_path_handle_t h1 = mqvpn_client_add_path_fd(c, 42, NULL);
+    mqvpn_path_handle_t h2 = mqvpn_client_add_path_fd(c, 43, NULL);
+    ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
+    ASSERT_NE(h2, (mqvpn_path_handle_t)-1);
+
+    ASSERT_EQ(mqvpn_client_test_force_established(c), 0);
+    ASSERT_EQ(mqvpn_client_test_set_next_wake_us(c, 30ULL * 1000000), 0);
+    /* Put the MINIMUM deadline on the FIRST-processed path (h1 = paths[0]) so a
+     * genuine per-path min-comparison is REQUIRED to land on 5000: h1 stable_at
+     * = base + 5s (sms 5000), h2 stable_at = base + 20s (sms 20000). If the loop
+     * merely overwrote ms with each path's value (no `sms < ms` guard), h2 would
+     * clobber 5000 back up to 20000 and the assertion would fail. */
+    ASSERT_EQ(mqvpn_client_test_set_path_stable_us(
+                  c, h1, g_recovery_fake_now_us - 25ULL * 1000000, 1),
+              0);
+    ASSERT_EQ(mqvpn_client_test_set_path_stable_us(
+                  c, h2, g_recovery_fake_now_us - 10ULL * 1000000, 1),
+              0);
+
+    mqvpn_interest_t i = {0};
+    i.struct_size = sizeof(i);
+    ASSERT_EQ(mqvpn_client_get_interest(c, &i), MQVPN_OK);
+    ASSERT_EQ(i.next_timer_ms, 5000);
+
+    mqvpn_client_destroy(c);
+}
+
+/* Mixed: one FUTURE-deadline path and one OVERDUE path. The overdue path forces
+ * ms to 1, and the future path (sms=20000) must NOT reopen it — the force-1 is a
+ * floor, not a shorten candidate. Order-independent (whichever path lands last,
+ * an overdue path anywhere yields 1). Distinct failure mode from the single-path
+ * overdue case: it exercises the interaction between the shorten branch and the
+ * force-1 branch across paths (a mutant that let a later future path re-extend
+ * past the forced 1 would return 20000 here but still pass the single-path test). */
+TEST(get_interest_stability_overdue_wins_over_future_path)
+{
+    g_recovery_fake_now_us = 1000000000ULL;
+    mqvpn_client_t *c = make_recovery_test_client();
+    mqvpn_path_handle_t h1 = mqvpn_client_add_path_fd(c, 42, NULL);
+    mqvpn_path_handle_t h2 = mqvpn_client_add_path_fd(c, 43, NULL);
+    ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
+    ASSERT_NE(h2, (mqvpn_path_handle_t)-1);
+
+    ASSERT_EQ(mqvpn_client_test_force_established(c), 0);
+    ASSERT_EQ(mqvpn_client_test_set_next_wake_us(c, 30ULL * 1000000), 0);
+    /* Overdue on the FIRST-processed path (h1 = paths[0]) so it forces ms=1
+     * BEFORE the future path is seen; the future path (h2, sms 20000) must not
+     * reopen that floor. Exercises the else-branch (force-1) → if-branch
+     * (shorten) sequence across loop iterations, which neither the single-path
+     * nor the both-future tests reach. h1 overdue: stable_at = base - 10s;
+     * h2 future: stable_at = base + 20s. The reversed seed order (future first)
+     * would not have required the overdue path to win. */
+    ASSERT_EQ(mqvpn_client_test_set_path_stable_us(
+                  c, h1, g_recovery_fake_now_us - 40ULL * 1000000, 1),
+              0);
+    ASSERT_EQ(mqvpn_client_test_set_path_stable_us(
+                  c, h2, g_recovery_fake_now_us - 10ULL * 1000000, 1),
+              0);
+
+    mqvpn_interest_t i = {0};
+    i.struct_size = sizeof(i);
+    ASSERT_EQ(mqvpn_client_get_interest(c, &i), MQVPN_OK);
+    ASSERT_EQ(i.next_timer_ms,
+              1); /* overdue forces 1; later future 20000 never reopens it */
+
+    mqvpn_client_destroy(c);
+}
+
+/* Direct guard for the documented regression the Stability block once caused:
+ * it EXTENDED ms (0 -> 30000), pinning the libevent tick 30 s out and stalling
+ * BBR pacing (~3-4x throughput loss). The block is shorten-ONLY. Here the xquic
+ * wake (8000 ms) is already SHORTER than the stability deadline (base+20s ->
+ * 20000 ms); the block must leave it untouched, NOT push it out to 20000. A
+ * revived `sms < ms ? ...` -> `ms = sms` / extend regression fails here. */
+TEST(get_interest_stability_future_does_not_extend_smaller_wake)
+{
+    g_recovery_fake_now_us = 1000000000ULL;
+    mqvpn_client_t *c = make_recovery_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    ASSERT_EQ(mqvpn_client_test_force_established(c), 0);
+    ASSERT_EQ(mqvpn_client_test_set_next_wake_us(c, 8ULL * 1000000), 0);
+    /* stable_at = base + 20s -> sms = 20000, deliberately LARGER than 8000. */
+    ASSERT_EQ(mqvpn_client_test_set_path_stable_us(
+                  c, h, g_recovery_fake_now_us - 10ULL * 1000000, 1),
+              0);
+
+    mqvpn_interest_t i = {0};
+    i.struct_size = sizeof(i);
+    ASSERT_EQ(mqvpn_client_get_interest(c, &i), MQVPN_OK);
+    ASSERT_EQ(i.next_timer_ms, 8000); /* unchanged — never extended to 20000 */
+
+    mqvpn_client_destroy(c);
+}
+
 /* ── Path reactivation preconditions ── */
 
 TEST(reactivate_path_null_client)
@@ -2101,6 +2300,12 @@ main(void)
     run_get_interest_recovery_create_wait_past_forces_1ms();
     run_get_interest_recovery_ignores_slot_without_retry_deadline();
     run_get_interest_recovery_inert_when_not_established();
+    run_get_interest_stability_future_clamps_wake();
+    run_get_interest_stability_past_forces_1ms();
+    run_get_interest_stability_ignores_dead_path();
+    run_get_interest_stability_two_paths_takes_min_deadline();
+    run_get_interest_stability_overdue_wins_over_future_path();
+    run_get_interest_stability_future_does_not_extend_smaller_wake();
 
     /* Path reactivation tests */
     run_reactivate_path_null_client();

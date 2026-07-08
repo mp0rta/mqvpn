@@ -55,6 +55,18 @@ main(void)
     int r = iface_has_route_to_server("lo", &dst);
     assert(r == 1 || r == -1);
 
+    /* v6 loopback via a nonexistent interface → definite 0 (never a live
+     * FIB match on an iface that has no index). */
+    dst = v6("::1");
+    assert(iface_has_route_to_server("mqvpn-noif0", &dst) == 0);
+
+    /* v6 documentation prefix (2001:db8::/32) has no route via lo. Skip if
+     * v6 is disabled (-1); otherwise it must be a definite 0, mirroring the
+     * v4 TEST-NET-1 on-link fallback rejection above. */
+    dst = v6("2001:db8::1");
+    r = iface_has_route_to_server("lo", &dst);
+    assert(r == 0 || r == -1);
+
     printf("test_route_check: all OK\n");
     return 0;
 }

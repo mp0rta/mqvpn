@@ -171,6 +171,32 @@ test_propagation_init_max_path_id(void)
     return 0;
 }
 
+/* The server forces multipath ON unconditionally — mqvpn's client is the active
+ * path creator, so the server allows MP regardless of its input flag
+ * (src/mqvpn_conn_settings.c:88-95). test_asymmetry_server_vs_client only feeds
+ * the server enable_multipath=true; this pins the "ignore the input flag" half,
+ * so a regression that made the server honour in->enable_multipath (silently
+ * disabling server-side multipath when a caller passes false) fails here. */
+static int
+test_server_forces_multipath_regardless_of_input(void)
+{
+    xqc_conn_settings_t cs;
+    mqvpn_conn_settings_input_t in = {
+        .is_server = true,
+        .enable_multipath = false, /* client-style "off" — the server must ignore it */
+        .scheduler = MQVPN_SCHED_WLB,
+        .init_max_path_id = 0,
+    };
+
+    mqvpn_build_conn_settings(&in, &cs);
+
+    ASSERT_EQ(cs.enable_multipath, 1);
+    ASSERT_EQ(cs.mp_ping_on, 1);
+    ASSERT_EQ(cs.max_path_id_grant_max_value, 128);
+    ASSERT_EQ(cs.ping_on, 0); /* server never takes the client keep-alive role */
+    return 0;
+}
+
 int
 main(void)
 {
@@ -179,6 +205,7 @@ main(void)
     failed += test_propagation_scheduler();
     failed += test_propagation_cc();
     failed += test_propagation_init_max_path_id();
+    failed += test_server_forces_multipath_regardless_of_input();
     if (failed) {
         fprintf(stderr, "test_conn_settings: %d FAILED\n", failed);
         return 1;
