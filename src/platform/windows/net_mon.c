@@ -42,9 +42,12 @@
 /* Resolve a FriendlyName to a NET_LUID via the same conversion approach as
  * win_pin_socket_to_iface() in platform_windows.c: convert the char*
  * FriendlyName to wide chars first, then ConvertInterfaceAliasToLuid().
- * Returns NO_ERROR / *luid filled, or the failing API's error code
- * (ERROR_NOT_FOUND when the adapter is gone; some other Win32 error code
- * on ambiguous probe failure). */
+ * Returns NO_ERROR / *luid filled, or the failing API's error code.
+ * ConvertInterfaceAliasToLuid's alias-not-found code is undocumented on
+ * MSDN, so callers defensively accept BOTH ERROR_FILE_NOT_FOUND and
+ * ERROR_NOT_FOUND as "adapter gone" (empirical verification deferred to
+ * the manual Windows test matrix); any other code is an ambiguous probe
+ * failure. */
 static DWORD
 resolve_iface_luid(const char *ifname, NET_LUID *luid)
 {
@@ -65,7 +68,9 @@ resolve_iface_luid(const char *ifname, NET_LUID *luid)
  *   1  — OperStatus == IfOperStatusUp (and MediaConnectState, when
  *        reported, is Connected).
  *   0  — confirmed not up, or the adapter is gone: LUID resolution or
- *        GetIfEntry2 returned ERROR_NOT_FOUND, or GetIfEntry2 returned
+ *        GetIfEntry2 reported not-found (ERROR_FILE_NOT_FOUND is
+ *        GetIfEntry2's documented "LUID not on this machine" code;
+ *        ERROR_NOT_FOUND kept defensively), or GetIfEntry2 returned
  *        NO_ERROR with a non-up OperStatus. This is the RTM_DELLINK
  *        analog — dropping on this result is correct.
  *  -1  — any other API error (ambiguous). Caller must NOT drop on -1
@@ -75,14 +80,14 @@ iface_is_up_and_running(const char *ifname)
 {
     NET_LUID luid;
     DWORD err = resolve_iface_luid(ifname, &luid);
-    if (err == ERROR_NOT_FOUND) return 0;
+    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_NOT_FOUND) return 0;
     if (err != NO_ERROR) return -1;
 
     MIB_IF_ROW2 row;
     memset(&row, 0, sizeof(row));
     row.InterfaceLuid = luid;
     err = GetIfEntry2(&row);
-    if (err == ERROR_NOT_FOUND) return 0;
+    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_NOT_FOUND) return 0;
     if (err != NO_ERROR) return -1;
 
     if (row.OperStatus != IfOperStatusUp) return 0;
@@ -108,7 +113,7 @@ iface_has_usable_ip(const char *ifname, ADDRESS_FAMILY af)
 {
     NET_LUID luid;
     DWORD err = resolve_iface_luid(ifname, &luid);
-    if (err == ERROR_NOT_FOUND) return 0;
+    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_NOT_FOUND) return 0;
     if (err != NO_ERROR) return -1;
 
     ULONG flags =
@@ -173,14 +178,16 @@ iface_has_usable_ip(const char *ifname, ADDRESS_FAMILY af)
  * server_addr) contract in netlink_mon.c).
  *
  * Returns 1 = route exists, 0 = confirmed unreachable
- * (ERROR_NETWORK_UNREACHABLE / ERROR_HOST_UNREACHABLE), -1 = probe
- * failure (fail-open; caller must not drop/withhold re-add on -1). */
+ * (ERROR_NETWORK_UNREACHABLE / ERROR_HOST_UNREACHABLE) or interface gone
+ * (ERROR_FILE_NOT_FOUND, GetBestRoute2's documented "interface could not
+ * be found" code — parity with the Linux sibling's iface-gone → 0), -1 =
+ * probe failure (fail-open; caller must not drop/withhold re-add on -1). */
 static int
 iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *server_addr)
 {
     NET_LUID luid;
     DWORD err = resolve_iface_luid(ifname, &luid);
-    if (err == ERROR_NOT_FOUND) return 0;
+    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_NOT_FOUND) return 0;
     if (err != NO_ERROR) return -1;
 
     SOCKADDR_INET dest_addr;
@@ -200,7 +207,9 @@ iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *ser
 
     err = GetBestRoute2(&luid, 0, NULL, &dest_addr, 0, &best, &best_src);
     if (err == NO_ERROR) return 1;
-    if (err == ERROR_NETWORK_UNREACHABLE || err == ERROR_HOST_UNREACHABLE) return 0;
+    if (err == ERROR_NETWORK_UNREACHABLE || err == ERROR_HOST_UNREACHABLE ||
+        err == ERROR_FILE_NOT_FOUND)
+        return 0;
     return -1;
 }
 
