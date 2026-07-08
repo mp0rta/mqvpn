@@ -36,6 +36,79 @@
 #  include <stdlib.h>
 
 /* ================================================================
+ *  Layer B — path drop/teardown (sibling of Linux netlink_mon.c)
+ * ================================================================ */
+
+/* Log wording per reason. Frozen: e2e scripts grep these exact strings
+ * ("interface <if> <reason>, closing path"). */
+static const char *
+drop_reason_str(mqvpn_platform_reason_t reason)
+{
+    switch (reason) {
+    case MQVPN_PLATFORM_REASON_RTM_DELLINK: return "removed";
+    case MQVPN_PLATFORM_REASON_CARRIER_LOST: return "carrier lost";
+    case MQVPN_PLATFORM_REASON_ADMIN_DOWN: return "admin down";
+    case MQVPN_PLATFORM_REASON_ADDR_REMOVED: return "address removed";
+    default: return "dropped";
+    }
+}
+
+/* Remove a path because the platform says it's no longer usable.
+ * Four callers: adapter gone (RTM_DELLINK analog); operational-state down
+ * (carrier lost — cable unplugged etc); admin down (adapter disabled); and
+ * no usable source address left (RTM_DELADDR analog). All share cleanup;
+ * the reason is logged and reported in the public event.
+ *
+ * Cleans up: library path, libevent, fd. Preserves iface name for re-add. */
+static void
+remove_path_by_index(platform_win_ctx_t *p, int idx, mqvpn_platform_reason_t reason)
+{
+    if (p->path_mgr.paths[idx].fd < 0) return; /* already removed */
+
+    LOG_WRN("netmon: interface %s %s, closing path %d", p->path_mgr.paths[idx].iface,
+            drop_reason_str(reason), idx);
+
+    /* PR5: emit PLATFORM_DROP via new public API with diagnostic info.
+     * Library transitions slot to CLOSED_DROPPED; fd close is reported
+     * via mqvpn_client_on_platform_fd_closed() below. */
+    mqvpn_platform_path_event_info_t info = {0};
+    snprintf(info.iface, sizeof(info.iface), "%s", p->path_mgr.paths[idx].iface);
+    info.reason = reason;
+    mqvpn_client_on_platform_path_dropped(p->client, p->lib_path_handles[idx], &info);
+
+    /* Remove libevent watcher */
+    if (p->ev_udp[idx]) {
+        event_del(p->ev_udp[idx]);
+        event_free(p->ev_udp[idx]);
+        p->ev_udp[idx] = NULL;
+    }
+
+    /* Close dead socket + notify lib so CLOSED_DROPPED -> CLOSED_FREE
+     * cleanup can complete (once xquic-side also clears). */
+    mqvpn_socket_close(p->path_mgr.paths[idx].fd);
+    p->path_mgr.paths[idx].fd = -1;
+    p->path_mgr.paths[idx].platform_attached = 0;
+    mqvpn_client_on_platform_fd_closed(p->client, p->lib_path_handles[idx]);
+}
+
+/* Drop every tracked path on `ifname`. Shared by the drop-decision branches
+ * of the reconciler so slot matching stays in one place. Returns the number
+ * of paths matched (dropped or already gone). */
+static int
+drop_paths_by_ifname(platform_win_ctx_t *p, const char *ifname,
+                     mqvpn_platform_reason_t reason)
+{
+    int matched = 0;
+    for (int i = 0; i < p->path_mgr.n_paths; i++) {
+        if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0) {
+            remove_path_by_index(p, i, reason);
+            matched++;
+        }
+    }
+    return matched;
+}
+
+/* ================================================================
  *  Layer C — Windows iface/route probes
  * ================================================================ */
 
@@ -211,6 +284,130 @@ iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *ser
         err == ERROR_FILE_NOT_FOUND)
         return 0;
     return -1;
+}
+
+/* ================================================================
+ *  Layer B — recovery socket create / register / rollback
+ *  (sibling of Linux netlink_mon.c)
+ * ================================================================ */
+
+/* Create a UDP socket bound to the wildcard address and pinned to ifname.
+ * Updates mp->local_addr / mp->local_addrlen on success.
+ * Returns the new fd, or -1 (already logged). */
+static int
+recovery_socket_create(ADDRESS_FAMILY af, const char *ifname, mqvpn_path_t *mp)
+{
+    int fd = (int)socket(af, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        LOG_WRN("netmon: socket() for re-add %s: %s", ifname, mqvpn_socket_strerror());
+        return -1;
+    }
+    if (mqvpn_socket_set_nonblock(fd) < 0) {
+        LOG_WRN("netmon: set_nonblock() for re-add %s: %s", ifname,
+                mqvpn_socket_strerror());
+        goto fail;
+    }
+
+    /* Socket buffers are set by mqvpn_client_add_path_fd() (7 MiB) */
+
+    memset(&mp->local_addr, 0, sizeof(mp->local_addr));
+    if (af == AF_INET6) {
+        struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&mp->local_addr;
+        sin6->sin6_family = AF_INET6;
+        sin6->sin6_addr = in6addr_any;
+        mp->local_addrlen = sizeof(struct sockaddr_in6);
+    } else {
+        struct sockaddr_in *sin4 = (struct sockaddr_in *)&mp->local_addr;
+        sin4->sin_family = AF_INET;
+        sin4->sin_addr.s_addr = htonl(INADDR_ANY);
+        mp->local_addrlen = sizeof(struct sockaddr_in);
+    }
+    if (bind(fd, (struct sockaddr *)&mp->local_addr, mp->local_addrlen) < 0) {
+        LOG_WRN("netmon: bind() for re-add %s: %s", ifname, mqvpn_socket_strerror());
+        goto fail;
+    }
+
+    /* Pin AFTER bind, matching startup-loop order. */
+    if (win_pin_socket_to_iface(fd, ifname, af) < 0) {
+        LOG_WRN("netmon: iface pin for re-add %s failed", ifname);
+        goto fail;
+    }
+
+    return fd;
+fail:
+    mqvpn_socket_close(fd);
+    return -1;
+}
+
+/* Register a freshly-created socket with the library and capture the
+ * synchronous activation outcome via the with_outcome API. Returns the
+ * new handle and writes *outcome (MQVPN_ADD_PATH_OK / TRANSIENT / PERMANENT);
+ * returns -1 on handle-allocation failure (already logged). */
+static mqvpn_path_handle_t
+recovery_register_with_lib(platform_win_ctx_t *p, int slot, int fd, const char *ifname,
+                           mqvpn_add_path_outcome_t *outcome)
+{
+    mqvpn_path_t *mp = &p->path_mgr.paths[slot];
+
+    mqvpn_path_desc_t desc = {0};
+    desc.struct_size = sizeof(desc);
+    desc.fd = fd;
+    snprintf(desc.iface, sizeof(desc.iface), "%s", mp->iface);
+    if (mp->local_addrlen > 0 && mp->local_addrlen <= sizeof(desc.local_addr)) {
+        memcpy(desc.local_addr, &mp->local_addr, mp->local_addrlen);
+        desc.local_addr_len = mp->local_addrlen;
+    }
+
+    mqvpn_path_handle_t handle =
+        mqvpn_client_add_path_fd_with_outcome(p->client, fd, &desc, outcome);
+    if (handle < 0) {
+        LOG_WRN("netmon: add_path_fd() for re-add %s failed", ifname);
+        return -1;
+    }
+    p->lib_path_handles[slot] = handle;
+    return handle;
+}
+
+/* Roll back a failed re-add so the next attempt starts from a clean slate.
+ *
+ * Safe ordering: remove_path() first, then close(fd). The xquic_path_live=0
+ * invariant (enforced by apply_path_activation_failure /
+ * apply_path_create_permanent_failure) makes remove_path() skip
+ * xqc_conn_close_path(), so xquic never touches this fd during teardown.
+ * Do NOT remove that defensive clear — it's what makes this rollback safe. */
+static void
+recovery_rollback(platform_win_ctx_t *p, int slot, mqvpn_add_path_outcome_t outcome)
+{
+    mqvpn_path_t *mp = &p->path_mgr.paths[slot];
+    const char *ifname = mp->iface;
+
+    mqvpn_client_remove_path(p->client, p->lib_path_handles[slot]);
+    mqvpn_socket_close(mp->fd);
+    mp->fd = -1;
+    mp->platform_attached = 0;
+
+    if (outcome == MQVPN_ADD_PATH_PERMANENT_FAIL) {
+        /* Saturate the per-slot counter — recover_dropped_paths_cb will
+         * skip this slot until a fresh Level-2 reconnect resets the limit. */
+        p->path_recover_failures[slot] = PATH_RECOVER_FAILURE_LIMIT;
+        LOG_WRN("netmon: path %s recovery abandoned (xquic budget exhausted; "
+                "reconnect required)",
+                ifname);
+        return;
+    }
+
+    /* Transient failure (most commonly -XQC_EMP_NO_AVAIL_PATH_ID during
+     * WiFi reassoc CID-lag burst). Bump the consecutive-failure counter so
+     * the 3s recovery timer eventually gives up and waits for reconnect. */
+    p->path_recover_failures[slot]++;
+    if (p->path_recover_failures[slot] >= PATH_RECOVER_FAILURE_LIMIT) {
+        LOG_WRN("netmon: path %s recovery abandoned after %d consecutive "
+                "failures (will resume on reconnect)",
+                ifname, PATH_RECOVER_FAILURE_LIMIT);
+    } else {
+        LOG_WRN("netmon: re-add %s not activated, will retry (%d/%d)", ifname,
+                p->path_recover_failures[slot], PATH_RECOVER_FAILURE_LIMIT);
+    }
 }
 
 #endif /* _WIN32 */
