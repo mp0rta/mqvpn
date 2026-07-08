@@ -1,7 +1,7 @@
-# JNI downcall: NativeBridge の native メソッド名 (静的 JNI 名で解決)
+# JNI downcall: NativeBridge native method names (resolved by static JNI names)
 -keepclasseswithmembernames class **.NativeBridge { native <methods>; }
 
-# JNI upcall: GetMethodID で文字列名解決される callback (mqvpn_jni.c:450-466)
+# JNI upcall: callbacks resolved by string name through GetMethodID (mqvpn_jni.c:450-466)
 -keep class **.TunnelCallbacks { *; }
 -keepclassmembers class * implements **.TunnelCallbacks {
     void onNative*(...);

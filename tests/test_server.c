@@ -2,7 +2,7 @@
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 
 /*
- * test_server.c — libmqvpn server API lifecycle tests (M1-5)
+ * test_server.c - libmqvpn server API lifecycle tests (M1-5)
  *
  * Tests per impl_plan:
  *   test_server_lifecycle:
@@ -13,10 +13,10 @@
  *     - server_destroy() → valgrind leak-free
  *
  *   test_server_session:
- *     - on_socket_recv() でクライアント接続
- *     - tunnel_config_ready callback 発火
- *     - set_tun_active → tun_output でパケット出力
- *     - client 切断 → セッション解放
+ *     - on_socket_recv() accepts the client connection
+ *     - tunnel_config_ready callback fires
+ *     - set_tun_active sends packet output through tun_output
+ *     - client disconnect releases the session
  */
 
 #include <stdio.h>
@@ -34,7 +34,7 @@
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
 
-/* ── Test infrastructure ── */
+/* Test infrastructure */
 
 static int g_tests_run = 0;
 static int g_tests_passed = 0;
@@ -85,7 +85,7 @@ static int g_tests_passed = 0;
         }                                                                    \
     } while (0)
 
-/* ── Mock callback state ── */
+/* Mock callback state */
 
 static int g_tun_output_called = 0;
 static int g_tunnel_config_ready_called = 0;
@@ -127,7 +127,7 @@ reset_mocks(void)
     g_log_called = 0;
 }
 
-/* ── Helper: create a valid server config ── */
+/* Helper: create a valid server config */
 
 static mqvpn_config_t *
 make_server_config(void)
@@ -141,7 +141,7 @@ make_server_config(void)
     return cfg;
 }
 
-/* ── server_new tests ── */
+/* server_new tests */
 
 TEST(server_new_null_config)
 {
@@ -239,7 +239,7 @@ TEST(server_egress_fd_budget)
     mqvpn_server_destroy(s);
 }
 
-/* ── Lifecycle tests ── */
+/* Lifecycle tests */
 
 TEST(server_lifecycle)
 {
@@ -348,7 +348,7 @@ TEST(server_double_start)
     mqvpn_server_destroy(s);
 }
 
-/* ── set_socket_fd tests ── */
+/* set_socket_fd tests */
 
 TEST(server_set_socket_fd)
 {
@@ -370,7 +370,7 @@ TEST(server_set_socket_fd)
     mqvpn_server_destroy(s);
 }
 
-/* ── Query function null-safety tests ── */
+/* Query function null-safety tests */
 
 TEST(server_get_stats_null)
 {
@@ -404,7 +404,7 @@ TEST(server_on_socket_recv_null)
               MQVPN_ERR_INVALID_ARG);
 }
 
-/* ── reorder stats getter ── */
+/* reorder stats getter */
 
 TEST(server_get_reorder_stats_null)
 {
@@ -464,7 +464,7 @@ TEST(server_get_reorder_stats_no_conns)
     mqvpn_server_destroy(s);
 }
 
-/* ── on_tun_packet with no sessions ── */
+/* on_tun_packet with no sessions */
 
 TEST(server_on_tun_packet_no_sessions)
 {
@@ -487,7 +487,7 @@ TEST(server_on_tun_packet_no_sessions)
     mqvpn_server_destroy(s);
 }
 
-/* ── test_server_session: session lifecycle callbacks ── */
+/* test_server_session: session lifecycle callbacks */
 
 static int g_client_connected_called = 0;
 static uint32_t g_last_session_id = 0;
@@ -515,7 +515,7 @@ mock_on_client_disconnected(uint32_t session_id, mqvpn_error_t reason, void *use
     g_last_disconnected_session_id = session_id;
 }
 
-/* ── Client mock callbacks for loopback test ── */
+/* Client mock callbacks for loopback test */
 
 static int g_cli_tun_output_called = 0;
 static int g_cli_tunnel_ready_called = 0;
@@ -538,7 +538,7 @@ mock_cli_tunnel_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     if (info) memcpy(&g_cli_tunnel_info, info, sizeof(g_cli_tunnel_info));
 }
 
-/* ── Packet relay helper: drain sockets and tick both engines ── */
+/* Packet relay helper: drain sockets and tick both engines */
 
 static void
 drain_and_tick(mqvpn_server_t *svr, int svr_fd, mqvpn_client_t *cli, int cli_fd,
@@ -579,7 +579,7 @@ drain_and_tick(mqvpn_server_t *svr, int svr_fd, mqvpn_client_t *cli, int cli_fd,
 /* Note: all pump loops below use poll() instead of usleep() for CI robustness.
  * This avoids timing issues on slow CI runners where QUIC PTO (1s+) can expire. */
 
-/* ── test_server_session tests ── */
+/* test_server_session tests */
 
 TEST(server_session_callbacks_registered)
 {
@@ -644,7 +644,7 @@ TEST(server_session_set_socket_with_addr)
 
 TEST(server_session_on_tun_v6_no_sessions)
 {
-    /* IPv6 packet with no sessions → early return, no ICMP */
+    /* IPv6 packet with no sessions: early return, no ICMP */
     reset_mocks();
     mqvpn_config_t *cfg = make_server_config();
     mqvpn_config_set_subnet6(cfg, "fd00::/112");
@@ -674,20 +674,20 @@ TEST(server_session_on_tun_v6_no_sessions)
     pkt6[24] = 0xfd;
     pkt6[39] = 0x32;
 
-    /* n_sessions == 0 → early return, no ICMP generated */
+    /* n_sessions == 0: early return, no ICMP generated */
     ASSERT_EQ(mqvpn_server_on_tun_packet(s, pkt6, 60), MQVPN_OK);
     ASSERT_EQ(g_tun_output_called, baseline);
 
     mqvpn_server_destroy(s);
 }
 
-/* ── test_server_session: QUIC loopback integration test ──
+/* test_server_session: QUIC loopback integration test
  *
  * Per impl_plan M1-5:
- *   - on_socket_recv() でクライアント接続
- *   - tunnel_config_ready callback 発火
- *   - set_tun_active → tun_output でパケット出力
- *   - client 切断 → セッション解放
+ *   - on_socket_recv() accepts the client connection
+ *   - tunnel_config_ready callback fires
+ *   - set_tun_active sends packet output through tun_output
+ *   - client disconnect releases the session
  */
 TEST(server_session_quic_loopback)
 {
@@ -699,7 +699,7 @@ TEST(server_session_quic_loopback)
     g_cli_tunnel_ready_called = 0;
     memset(&g_cli_tunnel_info, 0, sizeof(g_cli_tunnel_info));
 
-    /* ── Create UDP sockets ── */
+    /* Create UDP sockets */
     int svr_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
     ASSERT_NE(svr_fd, -1);
     int cli_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
@@ -725,7 +725,7 @@ TEST(server_session_quic_loopback)
     alen = sizeof(cli_addr);
     getsockname(cli_fd, (struct sockaddr *)&cli_addr, &alen);
 
-    /* ── Server setup ── */
+    /* Server setup */
     mqvpn_config_t *svr_cfg = make_server_config();
     mqvpn_server_callbacks_t svr_cbs = MQVPN_SERVER_CALLBACKS_INIT;
     svr_cbs.tun_output = mock_tun_output;
@@ -742,7 +742,7 @@ TEST(server_session_quic_loopback)
               MQVPN_OK);
     ASSERT_EQ(mqvpn_server_start(svr), MQVPN_OK);
 
-    /* ── Client setup ── */
+    /* Client setup */
     mqvpn_config_t *cli_cfg = mqvpn_config_new();
     mqvpn_config_set_server(cli_cfg, "127.0.0.1", ntohs(svr_addr.sin_port));
     mqvpn_config_set_insecure(cli_cfg, 1);
@@ -751,7 +751,7 @@ TEST(server_session_quic_loopback)
     mqvpn_client_callbacks_t cli_cbs = MQVPN_CLIENT_CALLBACKS_INIT;
     cli_cbs.tun_output = mock_cli_tun_output;
     cli_cbs.tunnel_config_ready = mock_cli_tunnel_ready;
-    /* send_packet = NULL → fd-only mode */
+    /* send_packet = NULL: fd-only mode */
 
     mqvpn_client_t *cli = mqvpn_client_new(cli_cfg, &cli_cbs, NULL);
     ASSERT_NOT_NULL(cli);
@@ -771,7 +771,7 @@ TEST(server_session_quic_loopback)
     mqvpn_client_set_server_addr(cli, (struct sockaddr *)&svr_addr, sizeof(svr_addr));
     ASSERT_EQ(mqvpn_client_connect(cli), MQVPN_OK);
 
-    /* ── Phase 1: QUIC handshake + MASQUE tunnel setup ── */
+    /* Phase 1: QUIC handshake + MASQUE tunnel setup */
     /* Use poll-based pump with 10s timeout for slow CI runners.
      * QUIC retransmission PTO can be 1s+, so 500ms was too tight. */
     for (int elapsed = 0; elapsed < 10000; elapsed++) {
@@ -796,9 +796,9 @@ TEST(server_session_quic_loopback)
         elapsed += wait_ms;
     }
 
-    /* Verify: on_socket_recv() でクライアント接続 */
+    /* Verify: on_socket_recv() accepts the client connection */
     ASSERT_EQ(g_client_connected_called, 1);
-    /* Verify: tunnel_config_ready callback 発火 */
+    /* Verify: tunnel_config_ready callback fires */
     ASSERT_EQ(g_cli_tunnel_ready_called, 1);
     /* Client assigned IP should be 10.0.0.2 (first allocation in /24) */
     ASSERT_EQ(g_cli_tunnel_info.assigned_ip[0], 10);
@@ -806,11 +806,11 @@ TEST(server_session_quic_loopback)
     ASSERT_EQ(g_cli_tunnel_info.assigned_ip[2], 0);
     ASSERT_EQ(g_cli_tunnel_info.assigned_ip[3], 2);
 
-    /* Activate TUN → ESTABLISHED */
+    /* Activate TUN: ESTABLISHED */
     mqvpn_client_set_tun_active(cli, 1, -1);
     ASSERT_EQ(mqvpn_client_get_state(cli), MQVPN_STATE_ESTABLISHED);
 
-    /* ── Phase 2: set_tun_active → tun_output でパケット出力 ── */
+    /* Phase 2: set_tun_active sends packet output through tun_output */
     /* Build IPv4 packet destined for client's assigned IP */
     uint8_t tun_pkt[40];
     memset(tun_pkt, 0, sizeof(tun_pkt));
@@ -843,13 +843,13 @@ TEST(server_session_quic_loopback)
     }
     ASSERT_EQ(g_cli_tun_output_called, baseline + 1);
 
-    /* ── Phase 2b: DL TTL=1 → dropped, ICMP Time Exceeded via tun_output ── */
+    /* Phase 2b: DL TTL=1 is dropped; ICMP Time Exceeded via tun_output */
     uint8_t ttl1_pkt[40];
     memset(ttl1_pkt, 0, sizeof(ttl1_pkt));
     ttl1_pkt[0] = 0x45;
     ttl1_pkt[2] = 0;
     ttl1_pkt[3] = 40;
-    ttl1_pkt[8] = 1; /* TTL = 1 → expires */
+    ttl1_pkt[8] = 1; /* TTL = 1: expires */
     ttl1_pkt[9] = 17;
     ttl1_pkt[12] = 8;
     ttl1_pkt[13] = 8;
@@ -873,7 +873,7 @@ TEST(server_session_quic_loopback)
     }
     ASSERT_EQ(g_cli_tun_output_called, cli_baseline);
 
-    /* ── Phase 3: client 切断 → セッション解放 ── */
+    /* Phase 3: client disconnect releases the session */
     mqvpn_client_disconnect(cli);
 
     /* Pump to deliver CONNECTION_CLOSE to server */
@@ -890,14 +890,14 @@ TEST(server_session_quic_loopback)
     ASSERT_EQ(g_client_disconnected_called, 1);
     ASSERT_EQ(g_last_disconnected_session_id, g_last_session_id);
 
-    /* ── Cleanup ── */
+    /* Cleanup */
     mqvpn_client_destroy(cli);
     mqvpn_server_destroy(svr);
     close(svr_fd);
     close(cli_fd);
 }
 
-/* ── max_clients config boundary ── */
+/* max_clients config boundary */
 
 TEST(server_max_clients_config)
 {
@@ -913,7 +913,7 @@ TEST(server_max_clients_config)
     mqvpn_config_free(cfg);
 }
 
-/* ── Main ── */
+/* Main */
 
 int
 main(void)

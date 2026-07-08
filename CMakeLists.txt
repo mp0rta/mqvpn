@@ -435,7 +435,8 @@ if(BUILD_TESTING)
     add_executable(test_reorder_rx tests/test_reorder_rx.c src/mqvpn_config.c src/log.c)
     add_executable(test_reorder_config tests/test_reorder_config.c src/mqvpn_config.c src/config.c src/log.c)
     add_executable(test_classifier tests/test_classifier.c src/hybrid/classifier.c)
-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_classifier)
+    add_executable(test_icmp tests/test_icmp.c src/icmp.c)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_classifier test_icmp)
 
     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of
@@ -467,6 +468,29 @@ if(BUILD_TESTING)
         set_target_properties(${t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
         add_test(NAME ${t} COMMAND ${t})
     endforeach()
+
+    # Control-API command dispatch test. dispatch() is static, so the test
+    # #include's control_socket.c directly (test_reorder_rx idiom) and mocks the
+    # mqvpn_server_* API — no mqvpn_server.c / xquic linked. libevent is required
+    # because the connection handlers in the same TU reference event2; gated on
+    # libevent being available (Linux test builds only, never Android).
+    if(Libevent_FOUND OR EVENT_LIB)
+        add_executable(test_control_socket tests/test_control_socket.c src/log.c)
+        target_include_directories(test_control_socket PRIVATE
+            ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/src/platform/linux
+            ${CMAKE_SOURCE_DIR}/include
+        )
+        if(Libevent_FOUND)
+            target_link_libraries(test_control_socket libevent::core libevent::extra)
+        else()
+            target_include_directories(test_control_socket PRIVATE ${EVENT_INCLUDE_DIR})
+            target_link_libraries(test_control_socket ${EVENT_LIB})
+        endif()
+        set_target_properties(test_control_socket PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+        add_test(NAME test_control_socket COMMAND test_control_socket)
+    endif()
 
     # libmqvpn public API test (links libmqvpn + xquic)
     add_executable(test_api tests/test_api.c)

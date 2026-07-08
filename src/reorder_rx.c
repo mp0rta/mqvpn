@@ -88,8 +88,8 @@ ring_empty(const struct ring *r)
 
 /* §13.4 off-by-one: window is [expected, expected+cap); seq is far-ahead (drop)
  * when (seq - expected) >= cap. Works with slots==NULL (pure cap arithmetic,
- * §24.9 "lazy alloc 前でも seq - expected >= cap 判定が動く"). Callers gate this
- * before insert; ahead packets only (seq >= expected). */
+ * §24.9 "seq - expected >= cap still works before lazy allocation"). Callers
+ * gate this before insert; ahead packets only (seq >= expected). */
 static int
 ring_far_ahead(const struct ring *r, uint64_t seq, uint64_t expected)
 {

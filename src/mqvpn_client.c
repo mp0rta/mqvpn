@@ -2072,6 +2072,32 @@ mqvpn_client_test_force_validating(mqvpn_client_t *c, mqvpn_path_handle_t handle
     return 0;
 }
 
+/* PR3 test-only: seed a path slot's Stability-timer inputs
+ * (path_stable_since_us + xquic_path_live) so the Stability-timer block in
+ * mqvpn_client_get_interest can be exercised without a live xquic engine
+ * driving the VALIDATING -> ACTIVE transition that normally sets them. This
+ * is the parallel of the Recovery-timer seed used by the recovery tests
+ * (recreate_after_us via apply_path_activation_failure). Pass xquic_live=0 to
+ * model a stability anchor left on a path xquic no longer considers live — the
+ * block must stay inert in that case (guard: path_stable_since_us > 0 &&
+ * xquic_path_live). Does NOT run path_invariant_check: it deliberately writes
+ * a non-lifecycle-consistent shape to isolate the get_interest read path.
+ * Hidden from libmqvpn.so's dynamic export table (not part of the public ABI). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_set_path_stable_us(mqvpn_client_t *c, mqvpn_path_handle_t handle,
+                                     uint64_t stable_since_us, int xquic_live)
+{
+    if (!c) return -1;
+    path_entry_t *p = find_path_by_handle(c, handle);
+    if (!p) return -1;
+    p->path_stable_since_us = stable_since_us; /* LINT-ALLOW: test wrapper seed */
+    p->xquic_path_live = xquic_live ? 1 : 0;   /* LINT-ALLOW: test wrapper seed */
+    return 0;
+}
+
 /* PR3 test-only wrapper: forces a slot into VALIDATING then dispatches
  * path_on_event(XQUIC_REMOVED). Used by test_api to pin the
  * VALIDATING -> CREATE_WAIT dispatch without spinning up a live xquic
