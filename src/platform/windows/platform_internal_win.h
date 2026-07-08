@@ -46,14 +46,14 @@ typedef struct {
     struct event *ev_udp[MQVPN_MAX_PATHS];
 
     /* Path recovery accelerator (net_mon.c) */
-    int path_recover_failures[MQVPN_MAX_PATHS]; /* recovery backpressure; reset on
-                                                   reconnect */
-    int route_gate_blocked[MQVPN_MAX_PATHS];    /* route-gate log throttle; self-resets in
-                                                   reconciler */
-    struct event *ev_recover;                   /* 3s poll timer */
-    /* route_gate_blocked[] is intentionally NOT reset on reconnect — it
-     * self-resets when a route reappears (netlink_mon.c:531); a stale value
-     * only delays one throttled log line and self-heals within a few polls. */
+    /* Recovery backpressure; reset on reconnect. */
+    int path_recover_failures[MQVPN_MAX_PATHS];
+    /* Route-gate log throttle. Intentionally NOT reset on reconnect — it
+     * self-resets in the reconciler when a route reappears (Linux canon:
+     * linux netlink_mon.c:531); a stale value only delays one throttled
+     * log line and self-heals within a few polls. */
+    int route_gate_blocked[MQVPN_MAX_PATHS];
+    struct event *ev_recover; /* 3s poll timer */
 
     /* TUN device (Wintun) */
     mqvpn_tun_win_t tun;
