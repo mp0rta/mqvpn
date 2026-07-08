@@ -50,7 +50,7 @@ static platform_win_ctx_t *g_signal_ctx = NULL;
  *
  * Internal log level is WRN; the caller decides whether failure is fatal.
  */
-static int
+int
 win_pin_socket_to_iface(int fd, const char *friendly_name, ADDRESS_FAMILY af)
 {
     wchar_t wname[IF_MAX_STRING_SIZE + 1];
@@ -108,7 +108,6 @@ win_pin_socket_to_iface(int fd, const char *friendly_name, ADDRESS_FAMILY af)
  * ================================================================ */
 
 static void on_tun_read(evutil_socket_t fd, short what, void *arg);
-static void on_socket_read(evutil_socket_t fd, short what, void *arg);
 
 static void
 cb_tun_output(const uint8_t *pkt, size_t len, void *user_ctx)
@@ -314,7 +313,7 @@ cb_reconnect_scheduled(int delay_sec, void *user_ctx)
 
 static void on_tick_timer(evutil_socket_t fd, short what, void *arg);
 
-static void
+void
 schedule_next_tick(platform_win_ctx_t *p)
 {
     mqvpn_interest_t interest;
@@ -383,7 +382,7 @@ on_tun_read(evutil_socket_t fd, short what, void *arg)
     }
 }
 
-static void
+void
 on_socket_read(evutil_socket_t fd, short what, void *arg)
 {
     (void)what;
