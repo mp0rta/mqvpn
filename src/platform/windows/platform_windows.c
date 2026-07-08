@@ -17,6 +17,7 @@
 
 #  include "platform_internal_win.h"
 #  include "platform_windows.h"
+#  include "net_mon.h"
 #  include "log.h"
 
 #  include <stdio.h>
@@ -210,6 +211,15 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
 
     /* Tell library the TUN is active */
     mqvpn_client_set_tun_active(p->client, 1, -1);
+
+    /* Start periodic dropped-path recovery poll (Linux canon:
+     * platform_linux.c's ev_recover). Create-if-absent because
+     * cb_tunnel_config_ready re-fires on reconnect. */
+    if (!p->ev_recover) p->ev_recover = evtimer_new(p->eb, recover_dropped_paths_cb, p);
+    if (p->ev_recover) {
+        struct timeval tv = {.tv_sec = RECOVER_INTERVAL_SEC};
+        event_add(p->ev_recover, &tv);
+    }
     return;
 
 fail:
@@ -253,6 +263,12 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
     LOG_INF("state: %s -> %s", os, ns);
 
     if (new_state == MQVPN_STATE_RECONNECTING || new_state == MQVPN_STATE_CLOSED) {
+        /* Pause the recovery poll and reset its failure budget — reused on
+         * reconnect. route_gate_blocked is intentionally left untouched;
+         * it self-resets in the reconciler (net_mon.c) when a route
+         * reappears, per the field comment in platform_internal_win.h. */
+        if (p->ev_recover) event_del(p->ev_recover);
+        memset(p->path_recover_failures, 0, sizeof(p->path_recover_failures));
         win_cleanup_killswitch(p);
         if (p->manage_routes) win_cleanup_routes(p);
         win_cleanup_dns(p);
@@ -686,6 +702,11 @@ cleanup:
     if (ctx.ev_tick) {
         event_del(ctx.ev_tick);
         event_free(ctx.ev_tick);
+    }
+
+    if (ctx.ev_recover) {
+        event_del(ctx.ev_recover);
+        event_free(ctx.ev_recover);
     }
 
     mqvpn_path_mgr_destroy(&ctx.path_mgr);
