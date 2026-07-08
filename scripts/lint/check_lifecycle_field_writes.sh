@@ -40,6 +40,7 @@ src/mqvpn_server.c
 src/platform/linux/platform_linux.c
 src/platform/linux/netlink_mon.c
 src/platform/windows/platform_windows.c
+src/platform/windows/net_mon.c
 '
 
 cd "$REPO_ROOT"
