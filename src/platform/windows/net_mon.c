@@ -14,11 +14,17 @@
  * Helper change-notification event source and demotes the timer back to a
  * backstop, matching the Linux split.
  *
- * This file (Task 3) contains only the skeleton and the three Layer C
- * probe primitives (iface_is_up_and_running / iface_has_usable_ip /
+ * This file contains the Layer B teardown/rollback primitives (drop /
+ * recovery-socket create / register / rollback, sibling-cloned from
+ * netlink_mon.c) and the three Layer C probe primitives
+ * (iface_is_up_and_running / iface_has_usable_ip /
  * iface_has_route_to_server). They are static and currently unused —
- * the Layer B reconciler logic (drop/reactivate/re-add, sibling-cloned
- * from netlink_mon.c) lands in later tasks.
+ * the reconciler loop that drives them lands next. The function layout
+ * intentionally mirrors the Linux canon netlink_mon.c order so the two
+ * files stay byte-diff auditable against each other. Layer A — the
+ * event source (netlink on Linux; IP Helper change notifications in a
+ * later phase here) — is absent in this phase, which is why section
+ * labels start at B.
  */
 
 #ifdef _WIN32
@@ -39,8 +45,9 @@
  *  Layer B — path drop/teardown (sibling of Linux netlink_mon.c)
  * ================================================================ */
 
-/* Log wording per reason. Frozen: e2e scripts grep these exact strings
- * ("interface <if> <reason>, closing path"). */
+/* Log wording per reason. Kept in sync with the Linux sibling's wording
+ * ("interface <if> <reason>, closing path") for cross-platform log
+ * consistency; not currently enforced by any Windows e2e grep. */
 static const char *
 drop_reason_str(mqvpn_platform_reason_t reason)
 {
