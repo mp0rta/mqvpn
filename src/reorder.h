@@ -497,8 +497,9 @@ mqvpn_reorder_config_finalize(mqvpn_reorder_config_t *cfg)
  *
  * Per-flow receiver counters (§17). Lives here (not in reorder_rx.c) so the RX
  * snapshot accessor (mqvpn_reorder_rx_get_stats) can return it across the TU
- * boundary. wait period 1 回 = arm_gap_timer 1 回; each period ends in exactly
- * one of filled / timeout / overflow / demote / reset, giving the §17 identity:
+ * boundary. One wait period corresponds to one arm_gap_timer call; each period
+ * ends in exactly one of filled / timeout / overflow / demote / reset, giving the
+ * §17 identity:
  *
  *   gap_count = gap_filled_count + gap_timeout_count + gap_overflow_count
  *             + gap_demote_count  + gap_reset_count
