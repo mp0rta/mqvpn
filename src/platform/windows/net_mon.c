@@ -159,10 +159,13 @@ resolve_iface_luid(const char *ifname, NET_LUID *luid)
  *        GetIfEntry2 reported not-found (ERROR_FILE_NOT_FOUND is
  *        GetIfEntry2's documented "LUID not on this machine" code;
  *        ERROR_NOT_FOUND kept defensively), or GetIfEntry2 returned
- *        NO_ERROR with a non-up OperStatus. This is the RTM_DELLINK
- *        analog — dropping on this result is correct.
- *  -1  — any other API error (ambiguous). Caller must NOT drop on -1
- *        (fail-safe, same fail-open discipline as the Linux probes). */
+ *        NO_ERROR with a non-up OperStatus other than Unknown. This is
+ *        the RTM_DELLINK analog — dropping on this result is correct.
+ *  -1  — any other API error, or OperStatus == IfOperStatusUnknown
+ *        (ambiguous — Linux canon keeps IFF_RUNNING set for operstate
+ *        UNKNOWN, so Unknown must not confirm a drop). Caller must NOT
+ *        drop on -1 (fail-safe, same fail-open discipline as the Linux
+ *        probes). */
 static int
 iface_is_up_and_running(const char *ifname)
 {
@@ -178,6 +181,10 @@ iface_is_up_and_running(const char *ifname)
     if (err == ERROR_FILE_NOT_FOUND || err == ERROR_NOT_FOUND) return 0;
     if (err != NO_ERROR) return -1;
 
+    /* IfOperStatusUnknown is ambiguous, not a confirmed down: Linux canon
+     * treats operstate UNKNOWN as running (IFF_RUNNING stays set), so
+     * confirming a drop on Unknown would diverge in the dangerous direction. */
+    if (row.OperStatus == IfOperStatusUnknown) return -1;
     if (row.OperStatus != IfOperStatusUp) return 0;
     if (row.MediaConnectState != MediaConnectStateUnknown &&
         row.MediaConnectState != MediaConnectStateConnected)
@@ -219,6 +226,12 @@ iface_has_usable_ip(const char *ifname, ADDRESS_FAMILY af)
         }
         addrs = bigger;
         err = GetAdaptersAddresses(af, flags, NULL, addrs, &bufsize);
+    }
+    if (err == ERROR_NO_DATA) {
+        /* Confirmed: no addresses of this family anywhere on the system,
+         * so the target adapter has none either — definite "no usable IP". */
+        free(addrs);
+        return 0;
     }
     if (err != NO_ERROR) {
         free(addrs);
@@ -295,8 +308,11 @@ iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *ser
 
     err = GetBestRoute2(&luid, 0, NULL, &dest_addr, 0, &best, &best_src);
     if (err == NO_ERROR) return 1;
+    /* ERROR_NOT_FOUND is empirically GetBestRoute2's "no matching route"
+     * result; mapping it to 0 is fail-safe — the gate just defers recovery
+     * to a later poll once a route is confirmed. */
     if (err == ERROR_NETWORK_UNREACHABLE || err == ERROR_HOST_UNREACHABLE ||
-        err == ERROR_FILE_NOT_FOUND)
+        err == ERROR_FILE_NOT_FOUND || err == ERROR_NOT_FOUND)
         return 0;
     return -1;
 }
