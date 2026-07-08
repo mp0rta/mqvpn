@@ -313,6 +313,7 @@ add_executable(mqvpn
     src/platform/windows/routing.c
     src/platform/windows/firewall.c
     src/platform/windows/dns.c
+    src/platform/windows/net_mon.c
     src/path_mgr.c
     src/config.c
     src/compat/getopt.c
