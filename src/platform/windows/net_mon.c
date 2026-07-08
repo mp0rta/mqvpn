@@ -16,15 +16,23 @@
  *
  * This file contains the Layer B teardown/rollback primitives (drop /
  * recovery-socket create / register / rollback, sibling-cloned from
- * netlink_mon.c) and the three Layer C probe primitives
+ * netlink_mon.c), the three Layer C probe primitives
  * (iface_is_up_and_running / iface_has_usable_ip /
- * iface_has_route_to_server). They are static and currently unused —
- * the reconciler loop that drives them lands next. The function layout
- * intentionally mirrors the Linux canon netlink_mon.c order so the two
- * files stay byte-diff auditable against each other. Layer A — the
- * event source (netlink on Linux; IP Helper change notifications in a
- * later phase here) — is absent in this phase, which is why section
- * labels start at B.
+ * iface_has_route_to_server), and the poll reconciler (reconcile_all +
+ * the recover_dropped_paths_cb timer wrapper net_mon.h declares) that
+ * drives them. The function layout intentionally mirrors the Linux canon
+ * netlink_mon.c order so the two files stay byte-diff auditable against
+ * each other. Layer A — the event source (netlink on Linux; IP Helper
+ * change notifications in a later phase here) — is absent in this phase,
+ * which is why section labels start at B.
+ *
+ * One deliberate structural deviation from canon: reconcile_all()'s
+ * per-slot loop runs a Windows-only poll-driven drop check BEFORE the
+ * failure-limit gate. On Linux, drops arrive asynchronously via netlink,
+ * so the gate (recovery backpressure only) never interacts with drop
+ * decisions. On Windows the poll IS the drop source, so a
+ * recovery-exhausted slot on a live-dead adapter must still be droppable
+ * or it black-holes traffic — see the comment at that call site.
  */
 
 #ifdef _WIN32
@@ -482,7 +490,17 @@ recovery_rollback(platform_win_ctx_t *p, int slot, mqvpn_add_path_outcome_t outc
  * (CLOSED_FREE) OR is mid-cleanup (CLOSED_DROPPED with all xquic-side fields
  * drained). add_path_fd_with_outcome will refuse to reuse a non-CLOSED slot;
  * if cleanup hasn't completed we get TRANSIENT_FAIL and bail — next netlink
- * event will retry. */
+ * event will retry.
+ *
+ * try_reactivate_by_ifname / try_readd_removed_path are orchestration
+ * (consumers of the Layer C probes above), not probes themselves — kept in
+ * the Layer B section since they share Layer B's teardown/rollback
+ * primitives, not because they belong to Layer C.
+ *
+ * Canon (Linux) call graph: this function is invoked from
+ * handle_rtm_newlink / handle_rtm_newaddr / recover_dropped_paths_cb. None
+ * of those event handlers exist on Windows in this phase — the only caller
+ * here is reconcile_all()'s re-add branch below. */
 static int
 try_readd_removed_path(platform_win_ctx_t *p, const char *ifname)
 {
@@ -491,11 +509,10 @@ try_readd_removed_path(platform_win_ctx_t *p, const char *ifname)
      * iface_has_usable_ip). RTM_NEWADDR for the right family, or the
      * recovery timer, will retry once both hold.
      *
-     * Note: handle_rtm_newlink / recover_dropped_paths_cb already check
-     * both conditions before calling in here — that's intentionally
-     * redundant. This function is also reachable via handle_rtm_newaddr,
-     * which must not be allowed to bypass the gate on an admin-down or
-     * carrier-less iface. */
+     * Note: reconcile_all() already checks both conditions before calling
+     * in here for the timer-driven path — that's intentionally redundant,
+     * this function stays self-contained so a future Phase 2 event-driven
+     * caller can invoke it directly without re-deriving the gate. */
     if (iface_is_up_and_running(ifname) != 1)
         return 0; /* tri-state: 0 and -1 both not-up-for-recovery */
     if (iface_has_usable_ip(ifname, p->server_addr.ss_family) != 1) return 0;
@@ -564,6 +581,145 @@ try_readd_removed_path(platform_win_ctx_t *p, const char *ifname)
         return 1;
     }
     return 0;
+}
+
+/* ================================================================
+ *  Reconciler — poll body (sibling of Linux netlink_mon.c's
+ *  recover_dropped_paths_cb steps 1-3)
+ * ================================================================ */
+
+/* Drop dead paths and re-add/reactivate recovered ones. Extracted from the
+ * timer callback so a later Phase 2 IP Helper change-notification event
+ * source can call this directly without touching the poll cadence — the
+ * timer re-arm stays in recover_dropped_paths_cb(), NOT here.
+ *
+ * Spec sec 3.4 "Stateless Platforms" compliance: this holds NO lifecycle
+ * state of its own — it queries the library via mqvpn_client_get_paths()
+ * each call and acts on the public MQVPN_PATH_* status. path_recover_failures[]
+ * is pure backpressure to bound the busy-loop on transient xquic errors
+ * during a WiFi reassoc CID-lag burst — not a state mirror. */
+static void
+reconcile_all(platform_win_ctx_t *p)
+{
+    mqvpn_path_info_t pinfo[MQVPN_MAX_PATHS];
+    int n = 0;
+    if (mqvpn_client_get_paths(p->client, pinfo, MQVPN_MAX_PATHS, &n) != MQVPN_OK) return;
+
+    for (int i = 0; i < p->path_mgr.n_paths; i++) {
+        /* WINDOWS-ONLY: poll-driven drop (Linux does this via netlink), placed
+         * BEFORE the failure-limit gate — a recovery-exhausted live-dead adapter
+         * must still be droppable or it black-holes traffic. */
+        if (p->path_mgr.paths[i].platform_attached) {
+            mqvpn_path_handle_t ah = p->lib_path_handles[i];
+            int lib_alive = 0;
+            for (int j = 0; j < n; j++) {
+                if (pinfo[j].handle == ah) {
+                    lib_alive = (pinfo[j].status != MQVPN_PATH_CLOSED);
+                    break;
+                }
+            }
+            if (lib_alive) {
+                const char *ifn = p->path_mgr.paths[i].iface;
+                int up = iface_is_up_and_running(ifn); /* tri-state */
+                int ip =
+                    iface_has_usable_ip(ifn, p->server_addr.ss_family); /* tri-state */
+                if (up == 0 || ip == 0) { /* -1 (probe failure) => do NOT drop */
+                    /* reason is log-only, so the exact down-reason is cosmetic.
+                     * up==0 conflates gone/operstate-down/admin-down; use
+                     * CARRIER_LOST. ip==0 => ADDR_REMOVED. */
+                    drop_paths_by_ifname(p, ifn,
+                                         up == 0 ? MQVPN_PLATFORM_REASON_CARRIER_LOST
+                                                 : MQVPN_PLATFORM_REASON_ADDR_REMOVED);
+                    continue;
+                }
+            }
+        }
+
+        /* recovery backpressure gate — reactivate/re-add ONLY */
+        if (p->path_recover_failures[i] >= PATH_RECOVER_FAILURE_LIMIT) continue;
+        if (p->path_mgr.paths[i].platform_attached) {
+            /* CLOSED_RECOVERABLE slots (valid fd) are normally reactivated
+             * by one-shot RTM_NEWADDR/NEWLINK events. A route appearing
+             * emits neither, and the route gate may have swallowed the
+             * original event — so the timer must also retry reactivate.
+             * try_reactivate_by_ifname re-checks lib state and the lib
+             * rejects wrong states with INVALID_STATE, so this is
+             * idempotent. */
+            mqvpn_path_handle_t ah = p->lib_path_handles[i];
+            for (int j = 0; j < n; j++) {
+                if (pinfo[j].handle == ah && pinfo[j].status == MQVPN_PATH_CLOSED) {
+                    const char *rifname = p->path_mgr.paths[i].iface;
+                    /* route gate runs inside try_reactivate_by_ifname */
+                    if (iface_is_up_and_running(rifname) ==
+                            1 && /* tri-state: only ==1 counts as up */
+                        iface_has_usable_ip(rifname, p->server_addr.ss_family) == 1)
+                        try_reactivate_by_ifname(p, rifname);
+                    break;
+                }
+            }
+            continue;
+        }
+
+        mqvpn_path_handle_t h = p->lib_path_handles[i];
+        int is_closed = 0;
+        for (int j = 0; j < n; j++) {
+            if (pinfo[j].handle == h) {
+                is_closed = (pinfo[j].status == MQVPN_PATH_CLOSED);
+                break;
+            }
+        }
+        if (!is_closed) continue;
+
+        const char *ifname = p->path_mgr.paths[i].iface;
+        if (iface_is_up_and_running(ifname) != 1)
+            continue; /* tri-state: 0 and -1 both not-up-for-recovery */
+        if (iface_has_usable_ip(ifname, p->server_addr.ss_family) != 1) continue;
+        if (iface_has_route_to_server(ifname, &p->server_addr) == 0) {
+            /* First block + every 10th (≈30s at the 3s poll). Unlike the
+             * canon "netlink:"-prefixed line, this "netmon:" line is not
+             * currently grepped by scripts/ci_e2e/run_route_gate_test.sh
+             * (that e2e is Linux-only) — no e2e marker constraint here yet. */
+            if (p->route_gate_blocked[i]++ % 10 == 0)
+                LOG_WRN("netmon: %s has a usable address but no route to "
+                        "the server — re-add deferred until a route appears",
+                        ifname);
+            continue;
+        }
+        p->route_gate_blocked[i] = 0;
+
+        /* try_readd_removed_path scans by ifname, finds this slot via
+         * lib state, and either succeeds (resets the counter via line
+         * above) or fails through recovery_rollback (which bumps the
+         * counter). Multiple slots sharing one ifname are handled by
+         * try_readd's internal loop. */
+        if (try_readd_removed_path(p, ifname))
+            LOG_INF("netmon: timer re-added path %s after carrier-up failure", ifname);
+    }
+
+    /* The re-add above may have created a path (queuing a PATH_CHALLENGE
+     * inside xquic) — drive the engine and re-arm the tick from the
+     * engine's new wakeup request, exactly as on_socket_read does.
+     * Without this the queued frames wait for an unrelated timer. */
+    mqvpn_client_tick(p->client);
+    schedule_next_tick(p);
+}
+
+/* 3s poll timer callback: reconcile, then re-arm. The re-arm stays here
+ * (not in reconcile_all) so a future Phase 2 event-driven call to
+ * reconcile_all doesn't perturb the poll cadence. */
+void
+recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
+{
+    (void)fd;
+    (void)what;
+    platform_win_ctx_t *p = (platform_win_ctx_t *)arg;
+
+    reconcile_all(p);
+
+    if (p->ev_recover) {
+        struct timeval tv = {.tv_sec = RECOVER_INTERVAL_SEC};
+        event_add(p->ev_recover, &tv);
+    }
 }
 
 #endif /* _WIN32 */
