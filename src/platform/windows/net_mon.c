@@ -293,6 +293,65 @@ iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *ser
     return -1;
 }
 
+static void
+try_reactivate_by_ifname(platform_win_ctx_t *p, const char *ifname)
+{
+    if (iface_has_route_to_server(ifname, &p->server_addr) == 0) return;
+
+    /* PR5: query lib state instead of platform-tracked path_recoverable[].
+     * Reactivate is valid for slots in DEGRADED / CREATE_WAIT /
+     * CLOSED_RECOVERABLE (per lib's reactivate_slot_eligible gate added
+     * in 433272f). Public projection collapses these to MQVPN_PATH_DEGRADED
+     * (for DEGRADED+CREATE_WAIT) and MQVPN_PATH_CLOSED (for CLOSED_RECOVERABLE),
+     * so both warrant attempting reactivate. The lib's gate rejects bad
+     * states with MQVPN_ERR_INVALID_STATE which we silently swallow. */
+    mqvpn_path_info_t pinfo[MQVPN_MAX_PATHS];
+    int n = 0;
+    if (mqvpn_client_get_paths(p->client, pinfo, MQVPN_MAX_PATHS, &n) != MQVPN_OK) return;
+
+    for (int i = 0; i < p->path_mgr.n_paths; i++) {
+        if (strcmp(p->path_mgr.paths[i].iface, ifname) != 0) continue;
+        mqvpn_path_handle_t h = p->lib_path_handles[i];
+        if (h < 0) continue;
+
+        int found = 0;
+        mqvpn_path_status_t st = MQVPN_PATH_PENDING;
+        for (int j = 0; j < n; j++) {
+            if (pinfo[j].handle == h) {
+                found = 1;
+                st = pinfo[j].status;
+                break;
+            }
+        }
+        if (!found) continue;
+        if (st != MQVPN_PATH_DEGRADED && st != MQVPN_PATH_CLOSED) continue;
+
+        /* WINDOWS-ONLY: IP_UNICAST_IF bakes the ifindex into the socket at
+         * pin time, and that binding goes stale when the adapter is
+         * disabled/re-enabled (or the index is otherwise reassigned) — the
+         * old pin would silently send into a void. Re-apply the pin to the
+         * existing fd now that the route gate above confirms the interface
+         * is reachable again; must sit AFTER the route gate, or every 3s
+         * poll would waste a syscall + log line while the route is still
+         * absent. Skip reactivate for this slot if the re-pin fails: a
+         * reactivate on a stale binding would defeat the fix. */
+        if (win_pin_socket_to_iface(p->path_mgr.paths[i].fd, ifname,
+                                    p->server_addr.ss_family) < 0) {
+            LOG_WRN("netmon: re-pin %s before reactivate failed, skipping", ifname);
+            continue;
+        }
+
+        int ret = mqvpn_client_reactivate_path(p->client, h);
+        if (ret == MQVPN_OK) {
+            LOG_INF("netmon: reactivated path %s", ifname);
+        } else if (ret == MQVPN_ERR_INVALID_STATE) {
+            /* slot not in 3-state acceptance window (e.g. already VALIDATING) */
+        } else {
+            LOG_WRN("netmon: reactivate %s failed: %s", ifname, mqvpn_error_string(ret));
+        }
+    }
+}
+
 /* ================================================================
  *  Layer B — recovery socket create / register / rollback
  *  (sibling of Linux netlink_mon.c)
@@ -415,6 +474,96 @@ recovery_rollback(platform_win_ctx_t *p, int slot, mqvpn_add_path_outcome_t outc
         LOG_WRN("netmon: re-add %s not activated, will retry (%d/%d)", ifname,
                 p->path_recover_failures[slot], PATH_RECOVER_FAILURE_LIMIT);
     }
+}
+
+/* PR5: replace path_removed_by_platform[] polling with lib state query.
+ * The slot is considered "ready for re-add" if its public status is
+ * MQVPN_PATH_CLOSED — i.e., lib has fully cleaned up the previous incarnation
+ * (CLOSED_FREE) OR is mid-cleanup (CLOSED_DROPPED with all xquic-side fields
+ * drained). add_path_fd_with_outcome will refuse to reuse a non-CLOSED slot;
+ * if cleanup hasn't completed we get TRANSIENT_FAIL and bail — next netlink
+ * event will retry. */
+static int
+try_readd_removed_path(platform_win_ctx_t *p, const char *ifname)
+{
+    /* Never re-add on a down/no-carrier link, or while the interface lacks
+     * a usable source address of the server's family (see
+     * iface_has_usable_ip). RTM_NEWADDR for the right family, or the
+     * recovery timer, will retry once both hold.
+     *
+     * Note: handle_rtm_newlink / recover_dropped_paths_cb already check
+     * both conditions before calling in here — that's intentionally
+     * redundant. This function is also reachable via handle_rtm_newaddr,
+     * which must not be allowed to bypass the gate on an admin-down or
+     * carrier-less iface. */
+    if (iface_is_up_and_running(ifname) != 1)
+        return 0; /* tri-state: 0 and -1 both not-up-for-recovery */
+    if (iface_has_usable_ip(ifname, p->server_addr.ss_family) != 1) return 0;
+
+    mqvpn_path_info_t pinfo[MQVPN_MAX_PATHS];
+    int n = 0;
+    if (mqvpn_client_get_paths(p->client, pinfo, MQVPN_MAX_PATHS, &n) != MQVPN_OK)
+        return 0;
+
+    for (int i = 0; i < p->path_mgr.n_paths; i++) {
+        if (strcmp(p->path_mgr.paths[i].iface, ifname) != 0) continue;
+        if (p->path_recover_failures[i] >= PATH_RECOVER_FAILURE_LIMIT) continue;
+        mqvpn_path_handle_t h = p->lib_path_handles[i];
+
+        int found = 0;
+        mqvpn_path_status_t st = MQVPN_PATH_PENDING;
+        for (int j = 0; j < n; j++) {
+            if (pinfo[j].handle == h) {
+                found = 1;
+                st = pinfo[j].status;
+                break;
+            }
+        }
+        /* Re-add candidate: slot exists in lib as CLOSED (DROPPED or FREE),
+         * or slot was never tracked (handle invalid / removed before lib saw it). */
+        if (found && st != MQVPN_PATH_CLOSED) continue;
+
+        /* Definite "no FIB route to the server via this iface": re-adding
+         * now would SO_BINDTODEVICE the challenge into the kernel's
+         * assume-on-link ARP blackhole (sendto succeeds, nothing on the
+         * wire). The 3s recovery timer retries once a route exists.
+         * -1 (probe unavailable) intentionally passes — fail open. */
+        if (iface_has_route_to_server(ifname, &p->server_addr) == 0) return 0;
+
+        mqvpn_path_t *mp = &p->path_mgr.paths[i];
+        int fd = recovery_socket_create(p->server_addr.ss_family, ifname, mp);
+        if (fd < 0) return 0;
+
+        mp->fd = fd;
+        mp->platform_attached = 1;
+        mp->xquic_path_live = 0;
+        mp->path_id = 0;
+
+        mqvpn_add_path_outcome_t outcome = MQVPN_ADD_PATH_OK;
+        mqvpn_path_handle_t new_h =
+            recovery_register_with_lib(p, i, fd, ifname, &outcome);
+        if (new_h < 0) {
+            mqvpn_socket_close(fd);
+            mp->fd = -1;
+            mp->platform_attached = 0;
+            return 0;
+        }
+
+        if (outcome != MQVPN_ADD_PATH_OK) {
+            recovery_rollback(p, i, outcome);
+            return 0;
+        }
+
+        /* Activation confirmed — register libevent so packets are read from
+         * the new socket. */
+        p->ev_udp[i] = event_new(p->eb, fd, EV_READ | EV_PERSIST, on_socket_read, p);
+        event_add(p->ev_udp[i], NULL);
+
+        p->path_recover_failures[i] = 0; /* success resets the budget */
+        LOG_INF("netmon: path %s re-added (handle=%lld)", ifname, (long long)new_h);
+        return 1;
+    }
+    return 0;
 }
 
 #endif /* _WIN32 */
