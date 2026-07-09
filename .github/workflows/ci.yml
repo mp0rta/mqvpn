@@ -587,10 +587,16 @@ jobs:
         run: brew install libevent
 
       - name: Configure
+        # openssl@3 in the prefix path: find_library(SSL_LIB/CRYPTO_LIB)
+        # returning NOTFOUND is a generate-time hard error because the vars
+        # appear in target_link_libraries — even though this job's OBJECT
+        # target never links them. openssl@3 is keg-only, so the plain brew
+        # prefix does not expose libssl/libcrypto.
         run: |
           cmake -B build-darwin -DCMAKE_BUILD_TYPE=Debug \
             -DXQUIC_BUILD_DIR="$GITHUB_WORKSPACE/third_party/xquic/build" \
-            -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix);$(brew --prefix openssl@3)" \
+            -DMQVPN_ENABLE_HYBRID_TCP_LANE=OFF \
             -DCMAKE_C_FLAGS="-Wall -Wextra -Werror"
 
       - name: Build Darwin platform TUs
