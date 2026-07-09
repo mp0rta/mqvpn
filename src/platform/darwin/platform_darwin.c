@@ -14,11 +14,16 @@
  * killswitch, DNS and the control socket are not yet ported for Darwin
  * (foundation slice) — the calls below are kept as-is; they resolve once
  * those files land in a later change.
+ *
+ * This platform layer has not yet been compiled against a Darwin SDK;
+ * routing/dns/killswitch/control-socket ports and the main.c dispatch are
+ * pending, so the target does not link a full client yet.
  */
 
 #ifdef __APPLE__
 
 #  include "platform_internal.h"
+#  include "platform_darwin.h"
 #  include "route_mon.h"
 #  include "vpn_client.h"
 #  include "log.h"
@@ -75,9 +80,9 @@ darwin_pin_socket_to_iface(int fd, const char *ifname, sa_family_t af)
  *  libmqvpn callbacks
  * ================================================================ */
 
-/* Forward declarations for event handlers */
+/* Forward declarations for event handlers (on_socket_read is declared in
+ * platform_internal.h — shared with route_mon.c) */
 static void on_tun_read(evutil_socket_t fd, short what, void *arg);
-void on_socket_read(evutil_socket_t fd, short what, void *arg);
 
 static void
 cb_tun_output(const uint8_t *pkt, size_t len, void *user_ctx)

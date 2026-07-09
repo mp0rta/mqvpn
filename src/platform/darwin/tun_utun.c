@@ -238,6 +238,13 @@ mqvpn_tun_set_addr6(mqvpn_tun_t *tun, const char *addr6_str, int prefix_len)
         return -1;
     }
 
+    /* Deliberate omission: ifra_dstaddr stays zeroed — the mqvpn_tun
+     * interface carries no IPv6 peer address (unlike the v4 twin, whose
+     * signature has peer_addr), and BSD/utun conventions for v6
+     * point-to-point destination addresses vary. Address + prefix alone
+     * is expected to suffice for the tunnel subnet; unverified on
+     * hardware — this is the most likely adjustment point during macOS
+     * bring-up. */
     struct in6_aliasreq ifra6;
     memset(&ifra6, 0, sizeof(ifra6));
     strncpy(ifra6.ifra_name, tun->name, IFNAMSIZ - 1);

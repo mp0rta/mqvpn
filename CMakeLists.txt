@@ -361,7 +361,7 @@ add_executable(mqvpn
     src/platform/darwin/platform_darwin.c
     src/platform/darwin/route_mon.c
     src/platform/darwin/tun_utun.c
-    # TODO(darwin): routing/dns/killswitch/control_socket/status — not yet ported (foundation slice, out of scope)
+    # TODO(darwin): routing/dns/killswitch/control_socket/status + main.c platform dispatch — not yet ported (foundation slice, out of scope)
     src/path_mgr.c
     src/config.c
 )

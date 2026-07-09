@@ -193,7 +193,8 @@ iface_has_usable_ip(const char *ifname, sa_family_t af)
  * Returns 1 = carrier definitely down (IFM_AVALID set, IFM_ACTIVE clear),
  * 0 = carrier present, -1 = unknown (ioctl failed or media status not
  * supported). Callers must fail safe: NEVER drop a path on -1 — the same
- * doctrine as iface_has_usable_ip's -1. */
+ * doctrine as iface_has_usable_ip's -1. Per-driver IFM_AVALID/IFM_ACTIVE
+ * reporting is unverified on hardware. */
 static int
 iface_carrier_down(const char *ifname)
 {
@@ -249,7 +250,7 @@ try_reactivate_by_ifname(platform_ctx_t *p, const char *ifname)
         if (p->path_mgr.paths[i].fd < 0)
             continue; /* CLOSED (dropped) slot: no socket to pin */
 
-        /* WINDOWS-lesson ★1: interface re-enable can renumber the ifindex,
+        /* Lesson from the Windows port: interface re-enable can renumber the ifindex,
          * and IP_BOUND_IF/IPV6_BOUND_IF pin by index — a stale pin would
          * silently send traffic out the wrong interface on the very fd
          * we're about to hand back to xquic. Re-apply the pin now that the
@@ -537,7 +538,7 @@ recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
     (void)what;
     platform_ctx_t *p = (platform_ctx_t *)arg;
 
-    /* Darwin addition (rev12): xnu's routing socket has no overflow
+    /* Darwin addition (no Linux counterpart): xnu's routing socket has no overflow
      * notification (see route_resync), so the drop-capable reconcile can
      * only be timer-driven. It runs BEFORE the re-add/reactivate scan
      * below on purpose: drops must land first so the scan re-evaluates
@@ -554,7 +555,7 @@ recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
     mqvpn_path_info_t pinfo[MQVPN_MAX_PATHS];
     int n = 0;
     if (mqvpn_client_get_paths(p->client, pinfo, MQVPN_MAX_PATHS, &n) != MQVPN_OK) {
-        /* Darwin addition (rev12): the resync above may already have
+        /* Darwin addition (no Linux counterpart): the resync above may already have
          * dropped paths (queuing PATH_ABANDON inside xquic) before this
          * bail-out — drive the engine and re-arm the tick exactly as the
          * bottom of this function does, so those frames don't wait for an
@@ -739,7 +740,9 @@ route_resolve_ifname(platform_ctx_t *p, const struct sockaddr_dl *sdl, unsigned 
          * resource reasons (ENOMEM) — such failures are correlated across
          * slots, so treating any 0-return as "gone" could mass-drop every
          * path at once. Unknown fails safe, the same doctrine as the -1
-         * returns of iface_has_usable_ip / iface_carrier_down. */
+         * returns of iface_has_usable_ip / iface_carrier_down. The exact
+         * errno xnu sets for a vanished interface is unverified on
+         * hardware. */
         errno = 0;
         if (if_nametoindex(tracked_ifname) == 0 && errno == ENXIO)
             drop_paths_by_ifname(p, tracked_ifname, MQVPN_PLATFORM_REASON_RTM_DELLINK);
@@ -851,7 +854,7 @@ handle_rtm_ifinfo(platform_ctx_t *p, const struct if_msghdr *ifm, const char *ad
     try_reactivate_by_ifname(p, ifname);
 }
 
-/* ★3 drop-capable periodic resync. xnu's routing socket gives no overflow
+/* Drop-capable periodic resync. xnu's routing socket gives no overflow
  * signal to react to: raw_input() silently discards a broadcast when
  * appending it to a full receive buffer fails (no recv-side ENOBUFS, no
  * SO_RERROR) — so unlike Linux netlink there is no event that tells us a
@@ -1019,7 +1022,7 @@ setup_route_socket(platform_ctx_t *p)
     /* Raise the receive buffer as the first line of overflow mitigation —
      * this reduces but does not eliminate message loss under a
      * carrier-flap storm (xnu drops silently on a full buffer, with no
-     * signal to the reader); the ★3 periodic resync driven by
+     * signal to the reader); the periodic resync driven by
      * recover_dropped_paths_cb is the correctness backstop for whatever
      * this doesn't catch. */
     int bufsize = 256 * 1024;
