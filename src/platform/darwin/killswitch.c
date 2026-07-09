@@ -49,6 +49,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <sys/wait.h>
 
 #define MQVPN_PF_ANCHOR "com.apple/250.mqvpn"
@@ -83,6 +84,23 @@ run_pfctl_stdin(const char *const argv[], const char *text)
     int fds[2];
     if (pipe(fds) < 0) return -1;
 
+    /* Parent-side SIGPIPE protection: if the child dies before consuming
+     * its stdin (execvp failure, pfctl bailing out early on a failed
+     * /dev/pf open when not root), the parent's write() below would raise
+     * SIGPIPE — and mqvpn installs no process-wide SIGPIPE ignore
+     * (suppression is per-socket SO_NOSIGPIPE only, see
+     * compat/socket_compat.h; the CLI's evsignal handlers cover
+     * SIGINT/SIGTERM only), so the default disposition would kill the
+     * whole client mid-setup, with routes/DNS already mutated and no
+     * cleanup run. F_SETNOSIGPIPE (Darwin-native fcntl; this file is
+     * Darwin-only, so no ifdef) makes that write fail with EPIPE instead,
+     * turning the write_failed path below into the live error path. */
+    if (fcntl(fds[1], F_SETNOSIGPIPE, 1) < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return -1;
+    }
+
     pid_t pid = fork();
     if (pid < 0) {
         close(fds[0]);
@@ -107,6 +125,9 @@ run_pfctl_stdin(const char *const argv[], const char *text)
         ssize_t w = write(fds[1], text + off, len - off);
         if (w < 0) {
             if (errno == EINTR) continue;
+            /* EPIPE (child gone — F_SETNOSIGPIPE above converted the
+             * would-be SIGPIPE) or any other write error: report failure
+             * after reaping the child. */
             write_failed = 1;
             break;
         }
@@ -280,15 +301,24 @@ setup_killswitch(platform_ctx_t *p)
         return -1;
     }
 
-    /* `-f -` is a single atomic ruleset replace (unlike Linux's sequential
-     * iptables -I/-A calls, which can leave a partial chain on a mid-
-     * sequence failure): a failed load here leaves the anchor in whatever
-     * state it was in before this call (empty, absent, or a stale ruleset
-     * from a prior crash — see kill_switch_flush_stale_anchor), so there
-     * is nothing to unwind yet and killswitch_active must stay 0. */
+    /* `-f -` is a single atomic ruleset replace on the pfctl side (unlike
+     * Linux's sequential iptables -I/-A calls, which can leave a partial
+     * chain on a mid-sequence failure): a pfctl PARSE failure leaves the
+     * anchor untouched. But run_pfctl_stdin returning -1 does not prove
+     * the child loaded nothing — a parent-side failure (waitpid error, or
+     * a partial write whose truncated text still parsed as a valid
+     * pass-only ruleset and made the child exit 0) can coexist with a
+     * loaded anchor. "active=0 but rules loaded" would be unrecoverable
+     * until the next startup flush (cleanup_killswitch early-returns on
+     * !killswitch_active), so take the conservative Linux-canon shape
+     * (killswitch.c:57-60) on load failure too: mark active and unwind.
+     * One extra flush of an empty/absent anchor is harmless. */
+    p->ks_pf_token[0] = '\0'; /* before the failure path below can reach cleanup */
     const char *load_argv[] = {"pfctl", "-a", MQVPN_PF_ANCHOR, "-f", "-", NULL};
     if (run_pfctl_stdin(load_argv, rules) < 0) {
         LOG_WRN("failed to load pf kill switch rules into anchor %s", MQVPN_PF_ANCHOR);
+        p->killswitch_active = 1;
+        cleanup_killswitch(p);
         return -1;
     }
 
@@ -301,7 +331,6 @@ setup_killswitch(platform_ctx_t *p)
      * live, if pf happens to already be enabled by another holder), with
      * no later call site left to remove them. Exactly the pattern Linux's
      * setup_killswitch uses on its own first failure (killswitch.c:57-60). */
-    p->ks_pf_token[0] = '\0';
     char cap[256];
     const char *enable_argv[] = {"pfctl", "-E", NULL};
     if (run_pfctl_capture(enable_argv, cap, sizeof(cap)) < 0) {
@@ -326,6 +355,13 @@ setup_killswitch(platform_ctx_t *p)
             i++;
         }
         p->ks_pf_token[i] = '\0';
+        /* Digit run truncated (buffer filled while the next source char is
+         * still a digit): a wrong token is worse than none — cleanup's
+         * `pfctl -X <wrong>` would fail (or decrement the wrong reference)
+         * with no diagnostic, whereas the empty-token path below at least
+         * WRNs and documents the leaked reference. Discard it. */
+        if (i == sizeof(p->ks_pf_token) - 1 && tok[i] >= '0' && tok[i] <= '9')
+            p->ks_pf_token[0] = '\0';
     }
     if (p->ks_pf_token[0] == '\0') {
         /* NON-FATAL: pf is already enabled and the anchor already loaded,
