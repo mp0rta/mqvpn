@@ -469,6 +469,7 @@ add_executable(mqvpn
     src/platform/linux/killswitch.c
     src/platform/linux/tun.c
     src/platform/linux/dns.c
+    src/platform/posix/dns_common.c
     src/path_mgr.c
     src/config.c
 )
@@ -503,7 +504,7 @@ if(BUILD_TESTING)
     add_executable(test_config  tests/test_config.c  src/config.c  src/log.c)
     add_executable(test_auth    tests/test_auth.c    src/auth.c    src/log.c)
     add_executable(test_session tests/test_session.c src/addr_pool.c src/log.c)
-    add_executable(test_dns     tests/test_dns.c     src/platform/linux/dns.c     src/log.c)
+    add_executable(test_dns     tests/test_dns.c     src/platform/linux/dns.c     src/platform/posix/dns_common.c     src/log.c)
     add_executable(test_route_check tests/test_route_check.c src/platform/linux/route_check.c src/log.c)
     add_executable(test_flow_sched tests/test_flow_sched.c src/flow_sched.c src/log.c)
     add_executable(test_status tests/test_status.c)
