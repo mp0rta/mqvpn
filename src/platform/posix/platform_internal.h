@@ -73,6 +73,8 @@ typedef struct {
     int killswitch_active;
     int killswitch_enabled;
     char ks_comment[64];
+    char ks_pf_token[24]; /* Darwin pf enable token (pfctl -E); unused on Linux.
+                           * Length vs. real token format: verify on macOS. */
 
     /* Shutdown */
     int shutting_down;
@@ -116,5 +118,13 @@ int darwin_pin_socket_to_iface(int fd, const char *ifname, sa_family_t af);
 /* killswitch.c */
 int setup_killswitch(platform_ctx_t *p);
 void cleanup_killswitch(platform_ctx_t *p);
+
+/* darwin/killswitch.c — flushes the pf anchor unconditionally, independent
+ * of any platform_ctx_t / killswitch_active state. Darwin-only: called from
+ * the startup stale-recovery block (darwin_platform_run_client) before
+ * routes/killswitch/DNS are (re)established, to self-heal a pf anchor left
+ * live by a prior crash. Declaration is inert on Linux (never called
+ * there; linux/killswitch.c does not define it). */
+void kill_switch_flush_stale_anchor(void);
 
 #endif /* MQVPN_PLATFORM_INTERNAL_H */
