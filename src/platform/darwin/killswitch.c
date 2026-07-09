@@ -349,8 +349,13 @@ setup_killswitch(platform_ctx_t *p)
     const char *tok = strstr(cap, "Token : ");
     if (tok) {
         tok += strlen("Token : ");
+        /* Every tok[i] read below is bounded by toklen first (cap is
+         * NUL-terminated by run_pfctl_capture, so strlen is safe), keeping
+         * the index-before-bound ordering explicit. */
+        size_t toklen = strlen(tok);
         size_t i = 0;
-        while (tok[i] >= '0' && tok[i] <= '9' && i < sizeof(p->ks_pf_token) - 1) {
+        while (i < toklen && i < sizeof(p->ks_pf_token) - 1 && tok[i] >= '0' &&
+               tok[i] <= '9') {
             p->ks_pf_token[i] = tok[i];
             i++;
         }
@@ -360,7 +365,8 @@ setup_killswitch(platform_ctx_t *p)
          * `pfctl -X <wrong>` would fail (or decrement the wrong reference)
          * with no diagnostic, whereas the empty-token path below at least
          * WRNs and documents the leaked reference. Discard it. */
-        if (i == sizeof(p->ks_pf_token) - 1 && tok[i] >= '0' && tok[i] <= '9')
+        if (i == sizeof(p->ks_pf_token) - 1 && i < toklen && tok[i] >= '0' &&
+            tok[i] <= '9')
             p->ks_pf_token[0] = '\0';
     }
     if (p->ks_pf_token[0] == '\0') {

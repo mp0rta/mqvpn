@@ -228,7 +228,7 @@ test_fresh_apply_subset_rollback(fake_cmd_env_t *e)
 static void
 write_guard_backup(const char *backup_path)
 {
-    FILE *fp = fopen(backup_path, "w");
+    FILE *fp = fake_fopen_w(backup_path, 0600);
     char line[512];
     if (!fp) return;
     mqvpn_dns_backup_format_line(line, sizeof(line), "Wi-Fi", "192.168.1.1");
@@ -355,7 +355,7 @@ test_malformed_backup_abort(fake_cmd_env_t *e)
 
     const char *bad_content = "NoTabOnThisLineAtAll\n";
     {
-        FILE *fp = fopen(backup_path, "w");
+        FILE *fp = fake_fopen_w(backup_path, 0600);
         if (fp) {
             fputs(bad_content, fp);
             fclose(fp);
@@ -444,7 +444,7 @@ test_restore_stale(fake_cmd_env_t *e)
     unlink(lock_path);
 
     {
-        FILE *fp = fopen(backup_path, "w");
+        FILE *fp = fake_fopen_w(backup_path, 0600);
         char line[512];
         if (fp) {
             mqvpn_dns_backup_format_line(line, sizeof(line), "Wi-Fi", "192.168.1.1");

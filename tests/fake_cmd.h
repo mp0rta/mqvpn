@@ -38,6 +38,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 
 #define FAKE_CMD_PATH_MAX 512
@@ -47,6 +48,20 @@ typedef struct {
     char log_path[FAKE_CMD_PATH_MAX];   /* $MQVPN_FAKE_LOG */
     char count_path[FAKE_CMD_PATH_MAX]; /* $MQVPN_FAKE_COUNT_FILE */
 } fake_cmd_env_t;
+
+/* fopen(path, "w") equivalent that creates the file with an explicit mode
+ * instead of the umask-dependent 0666 default — every file this harness
+ * creates lives in a mkdtemp'd 0700 dir, but restricting the files
+ * themselves too costs nothing and keeps the permissions story local. */
+__attribute__((unused)) static FILE *
+fake_fopen_w(const char *path, mode_t mode)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, mode);
+    if (fd < 0) return NULL;
+    FILE *fp = fdopen(fd, "w");
+    if (!fp) close(fd);
+    return fp;
+}
 
 /* PATH as it was before the first fake_cmd_env_init() call in this process
  * — saved once so repeated env_init() calls (one per test scenario) don't
@@ -77,9 +92,9 @@ fake_cmd_env_init(fake_cmd_env_t *e)
     snprintf(e->log_path, sizeof(e->log_path), "%s/log", e->dir);
     snprintf(e->count_path, sizeof(e->count_path), "%s/count", e->dir);
 
-    FILE *fp = fopen(e->log_path, "w");
+    FILE *fp = fake_fopen_w(e->log_path, 0600);
     if (fp) fclose(fp);
-    fp = fopen(e->count_path, "w");
+    fp = fake_fopen_w(e->count_path, 0600);
     if (fp) fclose(fp);
 
     setenv("MQVPN_FAKE_LOG", e->log_path, 1);
@@ -103,7 +118,10 @@ fake_cmd_install(fake_cmd_env_t *e, const char *cmd, const char *body)
     char path[FAKE_CMD_PATH_MAX];
     snprintf(path, sizeof(path), "%s/%s", e->dir, cmd);
 
-    FILE *fp = fopen(path, "w");
+    /* Created 0700 and promoted to 0755 via fchmod on the still-open fd
+     * (not a post-close chmod(path) — operating on the fd avoids the
+     * check-then-use gap on the path). */
+    FILE *fp = fake_fopen_w(path, 0700);
     if (!fp) return -1;
     fprintf(
         fp,
@@ -128,8 +146,8 @@ fake_cmd_install(fake_cmd_env_t *e, const char *cmd, const char *body)
         "%s\n"
         "exit 0\n",
         cmd, body);
+    fchmod(fileno(fp), 0755);
     fclose(fp);
-    chmod(path, 0755);
     return 0;
 }
 
@@ -138,9 +156,9 @@ fake_cmd_install(fake_cmd_env_t *e, const char *cmd, const char *body)
 __attribute__((unused)) static void
 fake_cmd_reset(fake_cmd_env_t *e)
 {
-    FILE *fp = fopen(e->log_path, "w");
+    FILE *fp = fake_fopen_w(e->log_path, 0600);
     if (fp) fclose(fp);
-    fp = fopen(e->count_path, "w");
+    fp = fake_fopen_w(e->count_path, 0600);
     if (fp) fclose(fp);
     unsetenv("MQVPN_FAKE_FAIL_SUBSTR");
     unsetenv("MQVPN_FAKE_FAIL_NTH");
@@ -189,7 +207,7 @@ fake_cmd_write_content_file(fake_cmd_env_t *e, const char *name, const char *con
                             char *out_path, size_t out_path_len)
 {
     snprintf(out_path, out_path_len, "%s/%s", e->dir, name);
-    FILE *fp = fopen(out_path, "w");
+    FILE *fp = fake_fopen_w(out_path, 0600);
     if (!fp) return -1;
     fputs(content, fp);
     fclose(fp);
