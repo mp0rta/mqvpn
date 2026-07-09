@@ -51,12 +51,16 @@ run_route_cmd(const char *const argv[])
  * against real macOS output before relying on this in production; the
  * key names/whitespace handling here may need adjustment.
  *
- * Also on the hardware verify list: on-link gateways may also appear as a
- * link-layer (MAC) address sockaddr (e.g. "gateway: a4:83:e7:xx:xx:xx",
- * an LLINFO cloned route), not just "link#N" — such a value would pass
- * the current on-link filter and be misused as a gateway argument.
- * Verify on hardware; if confirmed, extend the on-link filter (candidate:
- * treat any value that fails inet_pton for both families as on-link).
+ * The gateway filter is non-IP-rejecting by design: `-n` forces numeric
+ * output, so a usable gateway can only ever be an IPv4/IPv6 literal.
+ * Any other rendering — "link#N", an lladdr MAC sockaddr (e.g.
+ * "gateway: a4:83:e7:xx:xx:xx" from an LLINFO cloned route), or anything
+ * else — is unusable as a `route add` gateway argument regardless of its
+ * exact format, so any value that fails inet_pton for both families is
+ * treated as on-link (gateway left empty). This holds independently of
+ * the actual macOS output format. Hardware verify item: confirm real
+ * on-link outputs are covered (link#N / lladdr) and that zoned v6
+ * gateways round-trip.
  *
  * Input beyond 1023 bytes is silently truncated by the internal buffer
  * (the production caller discover_route reads <= 1023 bytes, so this
@@ -94,8 +98,25 @@ mqvpn_parse_route_get_output(const char *out, char *gateway, size_t gw_len, char
             value[--vlen] = '\0';
 
         if (strcmp(key, "gateway") == 0) {
-            /* "link#N" is an on-link ARP/ND entry, not a gateway hop. */
-            if (strncmp(value, "link#", 5) != 0) snprintf(gateway, gw_len, "%s", value);
+            /* Accept only IPv4/IPv6 literals as a gateway; any non-IP
+             * rendering (link#N, an lladdr MAC, ...) is on-link — see the
+             * -n rationale in the block comment above. Zone-scoped v6
+             * gateways ("fe80::1%en0") fail inet_pton because of the
+             * %zone suffix: test the address part with the zone stripped,
+             * but keep the FULL zoned value in `gateway` — route(8)
+             * accepts zoned gateway args. A '%' at position 0 leaves an
+             * empty address part → rejected as non-IP. */
+            const char *zone = strchr(value, '%');
+            size_t ip_len = zone ? (size_t)(zone - value) : strlen(value);
+            char ip_part[INET6_ADDRSTRLEN];
+            if (ip_len > 0 && ip_len < sizeof(ip_part)) {
+                memcpy(ip_part, value, ip_len);
+                ip_part[ip_len] = '\0';
+                unsigned char scratch[sizeof(struct in6_addr)];
+                if (inet_pton(AF_INET, ip_part, scratch) == 1 ||
+                    inet_pton(AF_INET6, ip_part, scratch) == 1)
+                    snprintf(gateway, gw_len, "%s", value);
+            }
         } else if (strcmp(key, "interface") == 0) {
             snprintf(iface, if_len, "%s", value);
         }
