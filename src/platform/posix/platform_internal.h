@@ -96,6 +96,13 @@ void schedule_next_tick(platform_ctx_t *p);
 int setup_routes(platform_ctx_t *p);
 void cleanup_routes(platform_ctx_t *p);
 
+/* darwin/routing.c — `route -n get` output parser, non-static for unit tests.
+ * Fills gateway (empty string if on-link, incl. "link#N" gateways) and iface.
+ * Returns 0 if iface was found, -1 otherwise. Darwin-only (Linux never
+ * compiles darwin/routing.c; declaration here is inert on Linux). */
+int mqvpn_parse_route_get_output(const char *out, char *gateway, size_t gw_len,
+                                 char *iface, size_t if_len);
+
 /* route_check.c (linux) / route_mon.c (darwin) */
 int iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *server);
 
