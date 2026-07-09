@@ -160,10 +160,10 @@ setup_routes(platform_ctx_t *p)
          * the LOG_WRN below, same as canon. */
         int pin_ok;
         if (af == AF_INET6) {
-            const char *const add6[] = {"route",         "-n", "-inet6", "add", host_cidr,
+            const char *const add6[] = {"route",         "-n", "add", "-inet6", host_cidr,
                                         p->orig_gateway, NULL};
             const char *const chg6[] = {
-                "route", "-n", "-inet6", "change", host_cidr, p->orig_gateway, NULL};
+                "route", "-n", "change", "-inet6", host_cidr, p->orig_gateway, NULL};
             pin_ok = (run_route_cmd(add6) == 0) || (run_route_cmd(chg6) == 0);
         } else {
             const char *const add4[] = {"route",         "-n", "add", host_cidr,
@@ -197,7 +197,7 @@ setup_routes(platform_ctx_t *p)
         (void)run_route_cmd(u2);
         if (p->orig_gateway[0]) {
             if (af == AF_INET6) {
-                const char *u3[] = {"route",         "-n", "-inet6", "delete", host_cidr,
+                const char *u3[] = {"route",         "-n", "delete", "-inet6", host_cidr,
                                     p->orig_gateway, NULL};
                 (void)run_route_cmd(u3);
             } else {
@@ -253,7 +253,7 @@ cleanup_routes(platform_ctx_t *p)
         char hc[INET6_ADDRSTRLEN + 5];
         snprintf(hc, sizeof(hc), "%s/%d", p->server_ip_str, pfx);
         if (p->server_addr.ss_family == AF_INET6) {
-            const char *d5[] = {"route",         "-n", "-inet6", "delete", hc,
+            const char *d5[] = {"route",         "-n", "delete", "-inet6", hc,
                                 p->orig_gateway, NULL};
             (void)run_route_cmd(d5);
         } else {
