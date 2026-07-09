@@ -48,8 +48,11 @@
 #define MQVPN_DNS_LIST_CAP 4096
 /* `-getdnsservers <service>` output capture / joined-servers value. */
 #define MQVPN_DNS_GETDNS_CAP 512
-/* One backup line: "<service>\t<servers>\n". */
-#define MQVPN_DNS_BACKUP_LINE 640
+/* One backup line: "<service>\t<servers>\n" + NUL. Derived from the
+ * component caps so the constants always compose: worst case is
+ * (SVC_MAX-1) service bytes + '\t' + (GETDNS_CAP-1) servers bytes +
+ * '\n' + NUL = SVC_MAX + GETDNS_CAP + 1; the +2 leaves one spare byte. */
+#define MQVPN_DNS_BACKUP_LINE (MQVPN_DNS_SVC_MAX + MQVPN_DNS_GETDNS_CAP + 2)
 /* Upper bound on enumerated network services; deliberately generous —
  * truncation only logs a warning, it never corrupts state. */
 #define MQVPN_DNS_MAX_SERVICES 64
@@ -107,15 +110,52 @@ run_networksetup_capture(const char *const argv[], char *out, size_t outlen)
     }
 
     close(fds[1]);
-    ssize_t nread = read(fds[0], out, outlen - 1);
+
+    /* Read until EOF — a single read() may return only a partial pipe
+     * buffer, and a partially captured `-getdnsservers` output could
+     * record a real DNS config as "Empty" in the authoritative backup
+     * (a later restore would then clear the user's actual DNS). Retry
+     * EINTR; if the buffer fills before EOF, fail loudly rather than
+     * silently truncating. */
+    size_t used = 0;
+    int read_failed = 0;
+    int overflowed = 0;
+    for (;;) {
+        if (used >= outlen - 1) {
+            /* Buffer full — probe one more byte to distinguish "output
+             * exactly fits" from truncation. */
+            char probe;
+            ssize_t r = read(fds[0], &probe, 1);
+            if (r < 0) {
+                if (errno == EINTR) continue;
+                read_failed = 1;
+            } else if (r > 0) {
+                overflowed = 1;
+            }
+            break;
+        }
+        ssize_t r = read(fds[0], out + used, outlen - 1 - used);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            read_failed = 1;
+            break;
+        }
+        if (r == 0) break; /* EOF */
+        used += (size_t)r;
+    }
     close(fds[0]);
 
     int status = 0;
     while (waitpid(pid, &status, 0) < 0)
         if (errno != EINTR) return -1;
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || nread < 0) return -1;
+    if (read_failed || overflowed) {
+        LOG_ERR("dns: networksetup output capture %s",
+                overflowed ? "overflowed the buffer" : "read failed");
+        return -1;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return -1;
 
-    out[nread] = '\0';
+    out[used] = '\0';
     return 0;
 }
 
@@ -267,6 +307,14 @@ list_services(struct dns_service *out, int max_out)
             LOG_WRN("dns: more than %d network services enumerated, truncating", max_out);
             break;
         }
+        if (strlen(line) >= sizeof(out[n].name)) {
+            /* A truncated name would target a nonexistent service in
+             * every later networksetup call — downstream failure is safe
+             * (set fails → rollback; snapshot fails → apply aborts) but
+             * would be undiagnosable without this breadcrumb. */
+            LOG_WRN("dns: service name longer than %zu bytes truncated: '%s'",
+                    sizeof(out[n].name) - 1, line);
+        }
         snprintf(out[n].name, sizeof(out[n].name), "%s", line);
         n++;
     }
@@ -367,7 +415,11 @@ acquire_lock(mqvpn_dns_t *dns)
 
     int lfd = open(dns->lock_path, O_CREAT | O_RDWR, 0644);
     if (lfd < 0) {
-        LOG_ERR("dns: cannot open lock file %s: %m", dns->lock_path);
+        /* %m is a glibc extension — Apple Libc prints it literally, so
+         * all errno diagnostics in this file use strerror() instead
+         * (errno captured immediately, before any call can clobber it). */
+        int e = errno;
+        LOG_ERR("dns: cannot open lock file %s: %s", dns->lock_path, strerror(e));
         return -1;
     }
     if (flock(lfd, LOCK_EX | LOCK_NB) < 0) {
@@ -410,7 +462,9 @@ validate_existing_backup(const mqvpn_dns_t *dns)
 {
     FILE *fp = fopen(dns->backup_path, "r");
     if (!fp) {
-        LOG_ERR("dns: backup %s exists but could not be opened: %m", dns->backup_path);
+        int e = errno;
+        LOG_ERR("dns: backup %s exists but could not be opened: %s", dns->backup_path,
+                strerror(e));
         return -1;
     }
 
@@ -419,6 +473,19 @@ validate_existing_backup(const mqvpn_dns_t *dns)
     int lineno = 0;
     while (fgets(line, sizeof(line), fp)) {
         lineno++;
+        /* Overlong-line fragment guard: an fgets() that fills the buffer
+         * without reaching '\n' (and not at EOF) returned only a fragment
+         * of a physical line — the logical line is unparseable as a
+         * whole, and the leftover tail must not be misread as a second
+         * line. */
+        if (!strchr(line, '\n') && !feof(fp)) {
+            LOG_ERR("dns: existing backup %s line %d exceeds %d bytes — it may be the "
+                    "only copy of your original DNS settings; inspect or move the file "
+                    "manually, then retry",
+                    dns->backup_path, lineno, MQVPN_DNS_BACKUP_LINE - 1);
+            fclose(fp);
+            return -1;
+        }
         if (mqvpn_dns_backup_parse_line(line, svc, sizeof(svc), srv, sizeof(srv)) < 0) {
             LOG_ERR("dns: existing backup %s line %d is unparseable — it may be the "
                     "only copy of your original DNS settings; inspect or move the file "
@@ -427,6 +494,14 @@ validate_existing_backup(const mqvpn_dns_t *dns)
             fclose(fp);
             return -1;
         }
+    }
+    /* An I/O error can end the fgets loop early, silently vouching for
+     * lines that were never actually read — that must not count as a
+     * successful validation. */
+    if (ferror(fp)) {
+        LOG_ERR("dns: read error while validating backup %s", dns->backup_path);
+        fclose(fp);
+        return -1;
     }
     fclose(fp);
     return 0;
@@ -440,13 +515,15 @@ write_backup(const mqvpn_dns_t *dns, const char *tmp_path, const struct dns_serv
      * other unlink() errno means we can't be sure O_EXCL below will
      * actually create a fresh file, so it's a hard failure. */
     if (unlink(tmp_path) < 0 && errno != ENOENT) {
-        LOG_ERR("dns: cannot remove stale %s: %m", tmp_path);
+        int e = errno;
+        LOG_ERR("dns: cannot remove stale %s: %s", tmp_path, strerror(e));
         return -1;
     }
 
     int fd = open(tmp_path, O_CREAT | O_EXCL | O_WRONLY, 0600);
     if (fd < 0) {
-        LOG_ERR("dns: cannot create %s: %m", tmp_path);
+        int e = errno;
+        LOG_ERR("dns: cannot create %s: %s", tmp_path, strerror(e));
         return -1;
     }
 
@@ -466,7 +543,8 @@ write_backup(const mqvpn_dns_t *dns, const char *tmp_path, const struct dns_serv
             return -1;
         }
         if (write_all(fd, line, strlen(line)) < 0) {
-            LOG_ERR("dns: write to %s failed: %m", tmp_path);
+            int e = errno;
+            LOG_ERR("dns: write to %s failed: %s", tmp_path, strerror(e));
             close(fd);
             unlink(tmp_path);
             return -1;
@@ -474,7 +552,8 @@ write_backup(const mqvpn_dns_t *dns, const char *tmp_path, const struct dns_serv
     }
 
     if (durability_flush(fd) < 0) {
-        LOG_ERR("dns: durability flush of %s failed: %m", tmp_path);
+        int e = errno;
+        LOG_ERR("dns: durability flush of %s failed: %s", tmp_path, strerror(e));
         close(fd);
         unlink(tmp_path);
         return -1;
@@ -482,7 +561,9 @@ write_backup(const mqvpn_dns_t *dns, const char *tmp_path, const struct dns_serv
     close(fd);
 
     if (rename(tmp_path, dns->backup_path) < 0) {
-        LOG_ERR("dns: rename %s -> %s failed: %m", tmp_path, dns->backup_path);
+        int e = errno;
+        LOG_ERR("dns: rename %s -> %s failed: %s", tmp_path, dns->backup_path,
+                strerror(e));
         unlink(tmp_path);
         return -1;
     }
@@ -495,13 +576,15 @@ write_backup(const mqvpn_dns_t *dns, const char *tmp_path, const struct dns_serv
     parent_dir(dns->backup_path, dirbuf, sizeof(dirbuf));
     int dirfd = open(dirbuf, O_RDONLY);
     if (dirfd < 0) {
-        LOG_ERR("dns: cannot open %s for durability flush: %m", dirbuf);
+        int e = errno;
+        LOG_ERR("dns: cannot open %s for durability flush: %s", dirbuf, strerror(e));
         return -1;
     }
     int rc = durability_flush(dirfd);
+    int flush_errno = errno; /* capture before close() can clobber it */
     close(dirfd);
     if (rc < 0) {
-        LOG_ERR("dns: durability flush of %s failed: %m", dirbuf);
+        LOG_ERR("dns: durability flush of %s failed: %s", dirbuf, strerror(flush_errno));
         return -1;
     }
     return 0;
@@ -566,7 +649,7 @@ restore_one(const char *service, const char *servers)
  * filter[0..filter_n) are restored — used ONLY by apply()'s FRESH-path
  * self-rollback, where the backup was created by that same apply() call
  * and therefore exactly matches the pre-apply state, so touching only
- * the subset actually changed is complete by construction. Pass
+ * the subset possibly changed is complete by construction. Pass
  * filter=NULL to restore every line in the backup (mqvpn_dns_restore(),
  * mqvpn_dns_restore_stale(), and apply()'s GUARD-path rollback, where a
  * pre-existing backup may cover services dirtied before this process's
@@ -583,7 +666,8 @@ restore_from_backup_file(const mqvpn_dns_t *dns, const struct dns_service *filte
 {
     FILE *fp = fopen(dns->backup_path, "r");
     if (!fp) {
-        LOG_ERR("dns: cannot open backup %s: %m", dns->backup_path);
+        int e = errno;
+        LOG_ERR("dns: cannot open backup %s: %s", dns->backup_path, strerror(e));
         return -1;
     }
 
@@ -592,6 +676,19 @@ restore_from_backup_file(const mqvpn_dns_t *dns, const struct dns_service *filte
     int lineno = 0;
     while (fgets(line, sizeof(line), fp)) {
         lineno++;
+        /* Overlong-line fragment guard (see validate_existing_backup):
+         * treat the whole logical line as unparseable, and consume the
+         * remainder of the physical line so its tail isn't misread as
+         * the next record. */
+        if (!strchr(line, '\n') && !feof(fp)) {
+            LOG_ERR("dns: backup %s line %d exceeds %d bytes, skipping that service",
+                    dns->backup_path, lineno, MQVPN_DNS_BACKUP_LINE - 1);
+            ok = 0;
+            int c;
+            while ((c = fgetc(fp)) != EOF && c != '\n')
+                ;
+            continue;
+        }
         char svc[MQVPN_DNS_SVC_MAX], srv[MQVPN_DNS_GETDNS_CAP];
         if (mqvpn_dns_backup_parse_line(line, svc, sizeof(svc), srv, sizeof(srv)) < 0) {
             LOG_ERR("dns: backup %s line %d is unparseable, skipping that service",
@@ -612,6 +709,14 @@ restore_from_backup_file(const mqvpn_dns_t *dns, const struct dns_service *filte
         }
 
         if (restore_one(svc, srv) < 0) ok = 0;
+    }
+    /* An I/O error can end the fgets loop before every backup line was
+     * seen — services on the unread lines got no restore attempt, so
+     * this must NOT count as full restore success (the backup has to
+     * survive for a retry). */
+    if (ferror(fp)) {
+        LOG_ERR("dns: read error while restoring from backup %s", dns->backup_path);
+        ok = 0;
     }
     fclose(fp);
     return ok ? 0 : -1;
@@ -702,7 +807,8 @@ mqvpn_dns_apply(mqvpn_dns_t *dns)
          * invariant holds on the guard path too, even though we're not
          * about to write a fresh backup ourselves. */
         if (unlink(tmp_path) < 0 && errno != ENOENT) {
-            LOG_ERR("dns: cannot remove stale %s: %m", tmp_path);
+            int e = errno;
+            LOG_ERR("dns: cannot remove stale %s: %s", tmp_path, strerror(e));
             release_lock_if_inactive(dns);
             return -1;
         }
@@ -769,9 +875,13 @@ mqvpn_dns_apply(mqvpn_dns_t *dns)
      * The rollback SCOPE depends on which step-3 path we took:
      *
      *   FRESH path (this apply created the backup): before this call, all
-     *   services matched the backup exactly, so only the [0, applied)
-     *   subset we just changed can be dirty — a subset-filtered rollback
-     *   is complete by construction.
+     *   services matched the backup exactly, so only the [0, applied]
+     *   subset — INCLUDING the service whose set was reported failed (a
+     *   signal-killed networksetup can mutate state and still exit
+     *   nonzero) — can be dirty; a subset-filtered rollback over those
+     *   applied+1 services is complete by construction (applied < n
+     *   always holds here, so applied+1 <= n, and restoring an unmutated
+     *   service to its own fresh snapshot is idempotent).
      *
      *   GUARD path (backup pre-existed): the file is the authoritative
      *   original from an earlier run whose restore may itself have
@@ -788,7 +898,7 @@ mqvpn_dns_apply(mqvpn_dns_t *dns)
     if (preexisting_backup)
         rolled_back = restore_from_backup_file(dns, NULL, 0);
     else
-        rolled_back = restore_from_backup_file(dns, svcs, applied);
+        rolled_back = restore_from_backup_file(dns, svcs, applied + 1);
     if (rolled_back == 0) {
         /* Rollback success: every service the backup covers is back to
          * its original setting — DNS is clean again, so the backup is no
