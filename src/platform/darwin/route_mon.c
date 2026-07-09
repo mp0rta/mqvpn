@@ -28,6 +28,8 @@
 #  include <errno.h>
 #  include <fcntl.h>
 #  include <sys/socket.h>
+#  include <sys/ioctl.h>
+#  include <sys/sockio.h> /* SIOCGIFFLAGS lives here on Darwin */
 #  include <net/if.h>
 #  include <net/if_dl.h>
 #  include <net/route.h>
@@ -39,23 +41,22 @@
  * ================================================================ */
 
 /* Check whether `ifname` is admin-up AND has carrier (IFF_UP & IFF_RUNNING).
- * Used by the periodic recovery timer to skip retries on a still-down link.
- *
- * Darwin deviation from netlink_mon.c:141: no ioctl(SIOCGIFFLAGS) dgram
- * socket round trip — getifaddrs() already carries ifa_flags per
- * interface, so a single enumeration answers the question. */
+ * Used by the periodic recovery timer to skip retries on a still-down link. */
 static int
 iface_is_up_and_running(const char *ifname)
 {
-    struct ifaddrs *ifa_list = NULL, *ifa;
-    if (getifaddrs(&ifa_list) < 0) return 0;
+    /* Darwin deviation: no SOCK_CLOEXEC socket() flag — set FD_CLOEXEC
+     * post-hoc via fcntl instead. */
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s < 0) return 0;
+    fcntl(s, F_SETFD, FD_CLOEXEC);
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
     int ok = 0;
-    for (ifa = ifa_list; ifa; ifa = ifa->ifa_next) {
-        if (strcmp(ifa->ifa_name, ifname) != 0) continue;
-        ok = (ifa->ifa_flags & IFF_UP) && (ifa->ifa_flags & IFF_RUNNING);
-        break;
-    }
-    freeifaddrs(ifa_list);
+    if (ioctl(s, SIOCGIFFLAGS, &ifr) == 0)
+        ok = (ifr.ifr_flags & IFF_UP) && (ifr.ifr_flags & IFF_RUNNING);
+    close(s);
     return ok;
 }
 
