@@ -79,10 +79,10 @@ typedef struct {
 
     /* Path recovery event source (per-OS: netlink on Linux, PF_ROUTE on Darwin) */
 #if defined(__linux__)
-    int nl_fd;                 /* netlink socket, -1 if unavailable */
+    int nl_fd; /* netlink socket, -1 if unavailable */
     struct event *ev_netlink;
 #elif defined(__APPLE__)
-    int rt_fd;                 /* PF_ROUTE socket, -1 if unavailable */
+    int rt_fd; /* PF_ROUTE socket, -1 if unavailable */
     struct event *ev_route;
 #endif
 } platform_ctx_t;
@@ -98,10 +98,12 @@ void cleanup_routes(platform_ctx_t *p);
 
 /* route_check.c */
 int iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *server);
+
+/* platform_{linux,darwin}.c — per-OS socket-to-interface pinning */
 #if defined(__linux__)
-int  linux_pin_socket_to_iface(int fd, const char *ifname);
+int linux_pin_socket_to_iface(int fd, const char *ifname);
 #elif defined(__APPLE__)
-int  darwin_pin_socket_to_iface(int fd, const char *ifname, sa_family_t af);
+int darwin_pin_socket_to_iface(int fd, const char *ifname, sa_family_t af);
 #endif
 
 /* killswitch.c */

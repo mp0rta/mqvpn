@@ -351,17 +351,16 @@ endif()
 elseif(APPLE)
 
 # ---------- mqvpn CLI binary (Darwin) ----------
-# Foundation slice only — routing/dns/killswitch/control_socket/status
-# are not yet ported to Darwin (see plan Tasks 2+); this target exists so
-# CMake can pick up an APPLE branch instead of falling into the Linux
-# else() below (which would pull in netlink_mon.c and Linux tun.c/dns.c
-# and fail to compile on Darwin).
+# Darwin platform layer: recovery accelerator sources only; other platform
+# files are not yet ported. This branch exists so CMake picks up APPLE
+# instead of falling into the Linux else() below (which would pull in
+# netlink_mon.c and Linux tun.c/dns.c and fail to compile on Darwin).
 add_executable(mqvpn
     src/main.c
     src/platform/darwin/platform_darwin.c
     src/platform/darwin/route_mon.c
     src/platform/darwin/tun_utun.c
-    # TODO(darwin): routing/dns/killswitch/control_socket/status — foundation slice, out of this plan
+    # TODO(darwin): routing/dns/killswitch/control_socket/status — not yet ported (foundation slice, out of scope)
     src/path_mgr.c
     src/config.c
 )
