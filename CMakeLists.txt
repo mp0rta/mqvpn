@@ -399,9 +399,9 @@ target_link_libraries(mqvpn
     c++ # C++ runtime for BoringSSL; macOS SDKs ship libc++, not libstdc++
 )
 
-# Compile gate for CI: builds the Darwin platform TUs without linking the
-# (intentionally incomplete) full client. See .github/workflows/ci.yml
-# darwin job.
+# Compile gate for CI: builds the Darwin platform TUs as a standalone
+# OBJECT target, independent of the full CLI link above. See
+# .github/workflows/ci.yml darwin job.
 add_library(mqvpn_darwin_platform OBJECT
     src/platform/darwin/platform_darwin.c
     src/platform/darwin/route_mon.c

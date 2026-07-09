@@ -573,12 +573,12 @@ jobs:
         run: sudo scripts/ci_e2e/run_systemd_test.sh
 
   darwin:
-    name: darwin build (core libs + platform TUs, no CLI link)
-    # Full Darwin build minus the CLI executable: the mqvpn binary cannot
-    # link yet (main.c platform dispatch and the routing/dns/killswitch
-    # ports are a later slice). Builds mqvpn_lib, a real libmqvpn.dylib
-    # linked against xquic + BoringSSL, and the mqvpn_darwin_platform
-    # OBJECT target for the Darwin platform TUs.
+    name: darwin build (core libs + platform TUs + CLI, unit tests)
+    # Full Darwin build: mqvpn_lib, a real libmqvpn.dylib linked against
+    # xquic + BoringSSL, the mqvpn_darwin_platform OBJECT target for the
+    # Darwin platform TUs, the full mqvpn CLI (client mode; server mode +
+    # control_socket are intentionally not ported — see CMakeLists.txt),
+    # and the Darwin unit test binaries (run via ctest below).
     runs-on: macos-14
     timeout-minutes: 30
     steps:
@@ -642,7 +642,7 @@ jobs:
                 -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
           make -j"$(sysctl -n hw.ncpu)"
 
-      - name: Build mqvpn (core libs + Darwin platform TUs)
+      - name: Build mqvpn (core libs + Darwin platform TUs + CLI + tests)
         run: |
           cmake -B build-darwin -DCMAKE_BUILD_TYPE=Debug \
             -DXQUIC_BUILD_DIR="$GITHUB_WORKSPACE/third_party/xquic/build" \
@@ -651,12 +651,16 @@ jobs:
             -DCMAKE_C_FLAGS="-Wall -Wextra -Werror"
           cmake --build build-darwin \
             --target mqvpn_lib mqvpn_shared mqvpn_darwin_platform \
+                     mqvpn test_route_parse_darwin test_dns_backup_darwin \
             -j "$(sysctl -n hw.ncpu)"
 
       - name: Verify artifacts
         run: |
-          ls -l build-darwin/libmqvpn.a build-darwin/*.dylib
+          ls -l build-darwin/libmqvpn.a build-darwin/*.dylib build-darwin/mqvpn
           file -L build-darwin/*.dylib
+
+      - name: Run Darwin unit tests
+        run: ctest --test-dir build-darwin --output-on-failure
 
   windows:
     # Pinned to windows-2022 (VS 2022). windows-latest migrated to VS 2026 in
