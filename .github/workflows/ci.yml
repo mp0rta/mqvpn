@@ -652,6 +652,7 @@ jobs:
           cmake --build build-darwin \
             --target mqvpn_lib mqvpn_shared mqvpn_darwin_platform \
                      mqvpn test_route_parse_darwin test_dns_backup_darwin \
+                     test_dns_state_darwin test_routing_seq_darwin test_killswitch_rules_darwin \
             -j "$(sysctl -n hw.ncpu)"
 
       - name: Verify artifacts

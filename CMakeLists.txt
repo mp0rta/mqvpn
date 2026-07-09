@@ -471,7 +471,26 @@ if(BUILD_TESTING)
     add_executable(test_dns_backup_darwin
         tests/test_dns_backup_darwin.c src/platform/darwin/dns.c
         src/platform/posix/dns_common.c src/log.c)
-    foreach(t test_route_parse_darwin test_dns_backup_darwin)
+
+    # PATH-stub state machine tests (Task 10): inject fake networksetup/
+    # route/pfctl scripts via PATH (tests/fake_cmd.h) and drive the real
+    # apply/restore/setup/cleanup state machines end to end. Complement the
+    # pure-function tests above (test_route_parse_darwin / test_dns_backup_
+    # darwin), which never fork+exec anything.
+    add_executable(test_dns_state_darwin
+        tests/test_dns_state_darwin.c src/platform/darwin/dns.c
+        src/platform/posix/dns_common.c src/log.c)
+    add_executable(test_routing_seq_darwin
+        tests/test_routing_seq_darwin.c src/platform/darwin/routing.c
+        src/platform/posix/dns_common.c src/log.c)
+    # killswitch.c's build_pf_rules() is static, so this TU #includes
+    # killswitch.c directly (test_status.c's idiom) rather than linking it —
+    # only log.c is needed alongside.
+    add_executable(test_killswitch_rules_darwin
+        tests/test_killswitch_rules_darwin.c src/log.c)
+
+    foreach(t test_route_parse_darwin test_dns_backup_darwin
+              test_dns_state_darwin test_routing_seq_darwin test_killswitch_rules_darwin)
         target_include_directories(${t} PRIVATE
             ${EVENT_INCLUDE_DIR}   # platform_internal.h includes <event2/event.h>;
                                    # brew's /opt/homebrew/include is not a default search path
@@ -602,6 +621,49 @@ if(BUILD_TESTING)
             ${CMAKE_SOURCE_DIR}/src/platform/linux
             ${CMAKE_SOURCE_DIR}/include
         )
+        set_target_properties(${t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+        add_test(NAME ${t} COMMAND ${t})
+    endforeach()
+
+    # Darwin platform-twin PATH-stub state machine tests (Task 10), also
+    # registered here on Linux: the twins (darwin/dns.c, darwin/routing.c,
+    # darwin/killswitch.c) are portable POSIX C except for two Darwin-only
+    # fcntl commands, given placeholder values below for this compile only
+    # (inert on the real Darwin build, which already has both from
+    # <fcntl.h>).
+    #   - F_FULLFSYNC (dns.c's durability_flush): has an EINVAL fallback —
+    #     any value fcntl() rejects makes durability_flush() fall back to
+    #     fsync(), which is the correct and fully exercised behavior here,
+    #     so this uses an arbitrary placeholder (1000).
+    #   - F_SETNOSIGPIPE (killswitch.c's run_pfctl_stdin SIGPIPE guard): has
+    #     NO fallback — a nonzero fcntl() return hard-fails the call before
+    #     pfctl is ever forked. Its real Darwin value (73) is not a valid
+    #     Linux fcntl command and returns EINVAL there, which would block
+    #     every setup_killswitch() call at the first line and make 3 of the
+    #     4 killswitch scenarios below unreachable. Defined instead as
+    #     F_SETFD (2): a real POSIX fcntl command that always succeeds on a
+    #     pipe fd (it just sets FD_CLOEXEC — harmless, since the pipe is
+    #     closed before exec() either way), so the intended pfctl call
+    #     sequence actually runs on Linux too.
+    add_executable(test_dns_state_darwin
+        tests/test_dns_state_darwin.c src/platform/darwin/dns.c
+        src/platform/posix/dns_common.c src/log.c)
+    target_compile_definitions(test_dns_state_darwin PRIVATE F_FULLFSYNC=1000)
+
+    add_executable(test_routing_seq_darwin
+        tests/test_routing_seq_darwin.c src/platform/darwin/routing.c
+        src/platform/posix/dns_common.c src/log.c)
+
+    add_executable(test_killswitch_rules_darwin
+        tests/test_killswitch_rules_darwin.c src/log.c)
+    target_compile_definitions(test_killswitch_rules_darwin PRIVATE F_SETNOSIGPIPE=2)
+
+    foreach(t test_dns_state_darwin test_routing_seq_darwin test_killswitch_rules_darwin)
+        target_include_directories(${t} PRIVATE
+            ${EVENT_INCLUDE_DIR}   # platform_internal.h includes <event2/event.h>
+            ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/src/platform/posix
+            ${CMAKE_SOURCE_DIR}/src/platform/darwin)
         set_target_properties(${t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
         add_test(NAME ${t} COMMAND ${t})
     endforeach()
