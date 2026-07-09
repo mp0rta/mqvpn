@@ -572,6 +572,30 @@ jobs:
       - name: Systemd service integration test
         run: sudo scripts/ci_e2e/run_systemd_test.sh
 
+  darwin-compile:
+    name: darwin compile gate (per-TU, no link)
+    # The full mqvpn client does not link on Darwin yet (main.c dispatch and
+    # the routing/dns/killswitch ports are a later slice), so this job only
+    # compiles the Darwin platform TUs via the mqvpn_darwin_platform OBJECT
+    # library target (see CMakeLists.txt) — no xquic build, no cache needed.
+    runs-on: macos-14
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install libevent
+        run: brew install libevent
+
+      - name: Configure
+        run: |
+          cmake -B build-darwin -DCMAKE_BUILD_TYPE=Debug \
+            -DXQUIC_BUILD_DIR="$GITHUB_WORKSPACE/third_party/xquic/build" \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
+            -DCMAKE_C_FLAGS="-Wall -Wextra -Werror"
+
+      - name: Build Darwin platform TUs
+        run: cmake --build build-darwin --target mqvpn_darwin_platform -j 3
+
   windows:
     # Pinned to windows-2022 (VS 2022). windows-latest migrated to VS 2026 in
     # June 2026, where the hardcoded `-G "Visual Studio 17 2022"` generator finds

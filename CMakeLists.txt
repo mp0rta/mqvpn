@@ -46,9 +46,15 @@ if(XQUIC_BUILD_DIR)
             )
         endif()
     else()
-        # TODO(darwin): .dylib import path + Homebrew libevent prefix
+        # Shared xquic's file extension differs between Darwin (.dylib) and
+        # Linux (.so); the static archive name below is the same on both.
+        if(APPLE)
+            set(XQUIC_SHARED_LIB_NAME "libxquic.dylib")
+        else()
+            set(XQUIC_SHARED_LIB_NAME "libxquic.so")
+        endif()
         set_target_properties(xquic PROPERTIES
-            IMPORTED_LOCATION "${XQUIC_BUILD_DIR}/libxquic.so"
+            IMPORTED_LOCATION "${XQUIC_BUILD_DIR}/${XQUIC_SHARED_LIB_NAME}"
         )
         if(EXISTS "${XQUIC_BUILD_DIR}/libxquic-static.a")
             add_library(xquic-static STATIC IMPORTED)
@@ -385,6 +391,24 @@ target_link_libraries(mqvpn
     dl
     m
     c++ # C++ runtime for BoringSSL; macOS SDKs ship libc++, not libstdc++
+)
+
+# Compile gate for CI: builds the Darwin platform TUs without linking the
+# (intentionally incomplete) full client. See .github/workflows/ci.yml
+# darwin-compile job.
+add_library(mqvpn_darwin_platform OBJECT
+    src/platform/darwin/platform_darwin.c
+    src/platform/darwin/route_mon.c
+    src/platform/darwin/tun_utun.c
+)
+
+target_include_directories(mqvpn_darwin_platform PRIVATE
+    ${XQUIC_INCLUDE_DIR}
+    ${EVENT_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/platform/posix
+    ${CMAKE_SOURCE_DIR}/src/platform/darwin
 )
 
 else() # NOT WIN32, NOT APPLE — Linux
