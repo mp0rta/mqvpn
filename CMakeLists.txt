@@ -358,16 +358,22 @@ endif()
 elseif(APPLE)
 
 # ---------- mqvpn CLI binary (Darwin) ----------
-# Darwin platform layer: recovery accelerator sources only; other platform
-# files are not yet ported. This branch exists so CMake picks up APPLE
-# instead of falling into the Linux else() below (which would pull in
-# netlink_mon.c and Linux tun.c/dns.c and fail to compile on Darwin).
+# Darwin platform layer: client mode is fully wired (drop+reactivate path
+# lifecycle, routing, killswitch, DNS). Server mode + control_socket are
+# intentionally not ported here (server mode is not built on macOS in v1).
+# This branch exists so CMake picks up APPLE instead of falling into the
+# Linux else() below (which would pull in netlink_mon.c and Linux
+# tun.c/dns.c and fail to compile on Darwin).
 add_executable(mqvpn
     src/main.c
     src/platform/darwin/platform_darwin.c
     src/platform/darwin/route_mon.c
     src/platform/darwin/tun_utun.c
-    # TODO(darwin): routing/dns/killswitch/control_socket/status + main.c platform dispatch — not yet ported (foundation slice, out of scope)
+    src/platform/darwin/routing.c
+    src/platform/darwin/dns.c
+    src/platform/darwin/killswitch.c
+    src/platform/posix/status.c
+    src/platform/posix/dns_common.c
     src/path_mgr.c
     src/config.c
 )
@@ -400,6 +406,11 @@ add_library(mqvpn_darwin_platform OBJECT
     src/platform/darwin/platform_darwin.c
     src/platform/darwin/route_mon.c
     src/platform/darwin/tun_utun.c
+    src/platform/darwin/routing.c
+    src/platform/darwin/dns.c
+    src/platform/darwin/killswitch.c
+    src/platform/posix/status.c
+    src/platform/posix/dns_common.c
 )
 
 target_include_directories(mqvpn_darwin_platform PRIVATE
@@ -431,6 +442,31 @@ target_include_directories(mqvpn_shared
 # for -fPIC reasons; kept symmetric here even though clang on Darwin emits
 # PIC by default).
 target_link_libraries(mqvpn_shared xquic ${SSL_LIB} ${CRYPTO_LIB} pthread c++)
+
+# ---------- Tests (Darwin) ----------
+# Only the tests that exercise Darwin-specific parsing/formatting run here;
+# the full unit suite stays Linux-only (see the Linux branch below).
+option(BUILD_TESTING "Build unit tests" ON)
+if(BUILD_TESTING)
+    enable_testing()
+    add_executable(test_route_parse_darwin
+        tests/test_route_parse_darwin.c src/platform/darwin/routing.c
+        src/platform/posix/dns_common.c src/log.c)
+        # dns_common.c: routing.c calls mqvpn_sa_host_prefix/mqvpn_sa_ntop —
+        # omitting it fails the darwin CI link with undefined symbols
+    add_executable(test_dns_backup_darwin
+        tests/test_dns_backup_darwin.c src/platform/darwin/dns.c
+        src/platform/posix/dns_common.c src/log.c)
+    foreach(t test_route_parse_darwin test_dns_backup_darwin)
+        target_include_directories(${t} PRIVATE
+            ${EVENT_INCLUDE_DIR}   # platform_internal.h includes <event2/event.h>;
+                                   # brew's /opt/homebrew/include is not a default search path
+            ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/src/platform/posix
+            ${CMAKE_SOURCE_DIR}/src/platform/darwin)
+        add_test(NAME ${t} COMMAND ${t})
+    endforeach()
+endif()
 
 else() # NOT WIN32, NOT APPLE — Linux
 

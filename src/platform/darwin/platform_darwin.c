@@ -10,14 +10,16 @@
  *   - UDP socket creation via path_mgr
  *   - Signal handling (SIGINT/SIGTERM)
  *
- * Structurally cloned from platform_linux.c's client run loop. Routing,
- * killswitch, DNS and the control socket are not yet ported for Darwin
- * (foundation slice) — the calls below are kept as-is; they resolve once
- * those files land in a later change.
+ * Structurally cloned from platform_linux.c's client run loop. Client mode
+ * is fully wired: routing, killswitch, and DNS are ported (routing.c,
+ * killswitch.c, dns.c) and main.c dispatches to darwin_platform_run_client
+ * on __APPLE__. Server mode and the control socket are intentionally NOT
+ * ported here — server mode is not built on macOS in v1.
  *
- * This platform layer has not yet been compiled against a Darwin SDK;
- * routing/dns/killswitch/control-socket ports and the main.c dispatch are
- * pending, so the target does not link a full client yet.
+ * This platform layer has not yet been compiled against a Darwin SDK, so
+ * hardware verification (route(8)/networksetup(8)/pfctl(8) output shapes,
+ * utun ioctls, PF_ROUTE event decoding) is still pending — see the
+ * UNVERIFIED notes in routing.c/dns.c/killswitch.c/route_mon.c.
  */
 
 #ifdef __APPLE__

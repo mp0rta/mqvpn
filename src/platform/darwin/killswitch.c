@@ -37,7 +37,7 @@
  * — fail-closed by design, the same as Linux's iptables rules surviving a
  * crash. kill_switch_flush_stale_anchor() below is the self-recovery path;
  * it is wired into the startup stale-recovery block in
- * darwin_platform_run_client (a later change), not called from
+ * darwin_platform_run_client, not called from
  * setup_killswitch() — see kill_switch_flush_stale_anchor()'s doc comment
  * for why it cannot live inside setup_killswitch().
  */
