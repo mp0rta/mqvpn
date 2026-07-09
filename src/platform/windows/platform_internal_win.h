@@ -45,6 +45,16 @@ typedef struct {
     mqvpn_path_handle_t lib_path_handles[MQVPN_MAX_PATHS];
     struct event *ev_udp[MQVPN_MAX_PATHS];
 
+    /* Path recovery accelerator (net_mon.c) */
+    /* Recovery backpressure; reset on reconnect. */
+    int path_recover_failures[MQVPN_MAX_PATHS];
+    /* Route-gate log throttle. Intentionally NOT reset on reconnect — it
+     * self-resets in the reconciler when a route reappears (Linux canon:
+     * linux netlink_mon.c:531); a stale value only delays one throttled
+     * log line and self-heals within a few polls. */
+    int route_gate_blocked[MQVPN_MAX_PATHS];
+    struct event *ev_recover; /* 3s poll timer */
+
     /* TUN device (Wintun) */
     mqvpn_tun_win_t tun;
     char tun_name_cfg[256];
@@ -94,6 +104,11 @@ void win_cleanup_killswitch(platform_win_ctx_t *p);
 /* dns.c */
 int win_setup_dns(platform_win_ctx_t *p);
 void win_cleanup_dns(platform_win_ctx_t *p);
+
+/* platform_windows.c (reverse-referenced by net_mon.c) */
+int win_pin_socket_to_iface(int fd, const char *friendly_name, ADDRESS_FAMILY af);
+void schedule_next_tick(platform_win_ctx_t *p);
+void on_socket_read(evutil_socket_t fd, short what, void *arg);
 
 #endif /* _WIN32 */
 #endif /* MQVPN_PLATFORM_INTERNAL_WIN_H */
