@@ -40,6 +40,11 @@
  *  PF_ROUTE path recovery accelerator
  * ================================================================ */
 
+/* ----------------------------------------------------------------
+ * Layer B insertion point: drop_reason_str / remove_path_by_index /
+ * drop_paths_by_ifname (canon netlink_mon.c:70-139) land here.
+ * ---------------------------------------------------------------- */
+
 /* Check whether `ifname` is admin-up AND has carrier (IFF_UP & IFF_RUNNING).
  * Used by the periodic recovery timer to skip retries on a still-down link. */
 static int
@@ -103,14 +108,8 @@ iface_has_usable_ip(const char *ifname, sa_family_t af)
 }
 
 /* ----------------------------------------------------------------
- * Layer B (route-event handlers: try_reactivate_by_ifname,
- * recovery_register_with_lib, recovery_rollback, try_readd_removed_path,
- * recover_dropped_paths_cb, handle_rtm_* equivalents, on_route_event,
- * setup_route_socket) lands here in a later change, mirroring
- * netlink_mon.c's canonical layout (netlink_mon.c:197-239, :288-554,
- * :556-744). iface_has_route_to_server below is already visible to that
- * future code via platform_internal.h's shared prototype, even though its
- * definition sits after recovery_socket_create() in this file.
+ * Layer B insertion point: try_reactivate_by_ifname (canon
+ * netlink_mon.c:198) lands here.
  * ---------------------------------------------------------------- */
 
 /* Create a UDP socket bound to the wildcard address and pinned to ifname.
@@ -165,11 +164,18 @@ fail:
     return -1;
 }
 
-/* Round a BSD routing-socket sockaddr length up to the next sizeof(long)
- * boundary. Routing-socket messages pack sockaddrs back to back with this
- * alignment (route(4)); a plain sizeof(sockaddr_in)/sizeof(sockaddr_in6)
- * stride would misparse a mixed v4/v6 message. Only one address is sent
- * here, but the same rule applies to sizing the message length. */
+/* ----------------------------------------------------------------
+ * Layer B insertion point: recovery_register_with_lib /
+ * recovery_rollback / try_readd_removed_path (canon netlink_mon.c:293-471),
+ * then recover_dropped_paths_cb / handle_rtm_* / on_route_event /
+ * setup_route_socket (canon :473+) land here. iface_has_route_to_server
+ * stays last (new code, not in canon).
+ * ---------------------------------------------------------------- */
+
+/* Round the trailing sockaddr length up to the message stride. This is
+ * conservative power-of-2 padding: xnu walks appended sockaddrs by sa_len
+ * and tolerates trailing pad, so 8-byte rounding is safe even though the
+ * kernel's own ROUNDUP32 uses 4. */
 #  define ROUTE_SA_ROUNDUP(a) \
       ((a) > 0 ? (1 + (((a) - 1) | (sizeof(long) - 1))) : sizeof(long))
 
@@ -211,6 +217,9 @@ iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *ser
     socklen_t salen = (server->ss_family == AF_INET6) ? sizeof(struct sockaddr_in6)
                                                       : sizeof(struct sockaddr_in);
     memcpy(req.space, server, salen);
+    /* The resolver's literal-IP fast paths may leave ss_len zero; the
+     * routing socket walks appended sockaddrs by sa_len, so set it. */
+    ((struct sockaddr *)(void *)req.space)->sa_len = (uint8_t)salen;
 
     static int seq_counter = 0;
     int seq = ++seq_counter;
