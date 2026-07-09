@@ -572,35 +572,91 @@ jobs:
       - name: Systemd service integration test
         run: sudo scripts/ci_e2e/run_systemd_test.sh
 
-  darwin-compile:
-    name: darwin compile gate (per-TU, no link)
-    # The full mqvpn client does not link on Darwin yet (main.c dispatch and
-    # the routing/dns/killswitch ports are a later slice), so this job only
-    # compiles the Darwin platform TUs via the mqvpn_darwin_platform OBJECT
-    # library target (see CMakeLists.txt) — no xquic build, no cache needed.
+  darwin:
+    name: darwin build (core libs + platform TUs, no CLI link)
+    # Full Darwin build minus the CLI executable: the mqvpn binary cannot
+    # link yet (main.c platform dispatch and the routing/dns/killswitch
+    # ports are a later slice). Builds mqvpn_lib, a real libmqvpn.dylib
+    # linked against xquic + BoringSSL, and the mqvpn_darwin_platform
+    # OBJECT target for the Darwin platform TUs.
     runs-on: macos-14
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
       - name: Install libevent
         run: brew install libevent
 
-      - name: Configure
-        # openssl@3 in the prefix path: find_library(SSL_LIB/CRYPTO_LIB)
-        # returning NOTFOUND is a generate-time hard error because the vars
-        # appear in target_link_libraries — even though this job's OBJECT
-        # target never links them. openssl@3 is keg-only, so the plain brew
-        # prefix does not expose libssl/libcrypto.
+      - name: Compute xquic SHA
+        id: xqsha
+        run: echo "sha=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+-')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache BoringSSL (darwin arm64 clang)
+        id: bssl-cache
+        uses: actions/cache@v6
+        with:
+          path: third_party/xquic/third_party/boringssl
+          key: bssl-9c95ec7-darwin-arm64-clang-v1
+
+      - name: Clone BoringSSL (pinned)
+        if: steps.bssl-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+
+      - name: Build BoringSSL
+        if: steps.bssl-cache.outputs.cache-hit != 'true'
+        run: |
+          cd third_party/xquic/third_party/boringssl
+          mkdir -p build && cd build
+          cmake -DBUILD_SHARED_LIBS=0 ..
+          make -j"$(sysctl -n hw.ncpu)" ssl crypto
+
+      - name: Cache xquic (darwin Release)
+        id: xquic-cache
+        uses: actions/cache@v6
+        with:
+          # See "Cache xquic (Release)" comment above re: xqc_configure.h.
+          path: |
+            third_party/xquic/build
+            third_party/xquic/include/xquic/xqc_configure.h
+          key: xquic-${{ steps.xqsha.outputs.sha }}-darwin-arm64-clang-release-bssl-9c95ec7-v1
+
+      - name: Build xquic
+        if: steps.xquic-cache.outputs.cache-hit != 'true'
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          # -Wno-unknown-warning-option: xquic hardcodes -Werror plus the
+          # gcc-only -Wno-dangling-pointer for every non-MSVC compiler;
+          # AppleClang would otherwise error on the unknown warning flag
+          # (same workaround as the sanitizer job's clang xquic build).
+          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
+                -DXQC_ENABLE_BBR2=ON \
+                -DXQC_ENABLE_UNLIMITED=ON \
+                -DXQC_ENABLE_FEC=ON \
+                -DXQC_ENABLE_XOR=ON \
+                -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
+          make -j"$(sysctl -n hw.ncpu)"
+
+      - name: Build mqvpn (core libs + Darwin platform TUs)
         run: |
           cmake -B build-darwin -DCMAKE_BUILD_TYPE=Debug \
             -DXQUIC_BUILD_DIR="$GITHUB_WORKSPACE/third_party/xquic/build" \
-            -DCMAKE_PREFIX_PATH="$(brew --prefix);$(brew --prefix openssl@3)" \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
             -DMQVPN_ENABLE_HYBRID_TCP_LANE=OFF \
             -DCMAKE_C_FLAGS="-Wall -Wextra -Werror"
+          cmake --build build-darwin \
+            --target mqvpn_lib mqvpn_shared mqvpn_darwin_platform \
+            -j "$(sysctl -n hw.ncpu)"
 
-      - name: Build Darwin platform TUs
-        run: cmake --build build-darwin --target mqvpn_darwin_platform -j 3
+      - name: Verify artifacts
+        run: |
+          ls -l build-darwin/libmqvpn.a build-darwin/*.dylib
+          file -L build-darwin/*.dylib
 
   windows:
     # Pinned to windows-2022 (VS 2022). windows-latest migrated to VS 2026 in

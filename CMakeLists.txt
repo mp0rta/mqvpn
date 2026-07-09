@@ -395,7 +395,7 @@ target_link_libraries(mqvpn
 
 # Compile gate for CI: builds the Darwin platform TUs without linking the
 # (intentionally incomplete) full client. See .github/workflows/ci.yml
-# darwin-compile job.
+# darwin job.
 add_library(mqvpn_darwin_platform OBJECT
     src/platform/darwin/platform_darwin.c
     src/platform/darwin/route_mon.c
@@ -410,6 +410,27 @@ target_include_directories(mqvpn_darwin_platform PRIVATE
     ${CMAKE_SOURCE_DIR}/src/platform/posix
     ${CMAKE_SOURCE_DIR}/src/platform/darwin
 )
+
+# Shared library variant — mirrors the Linux mqvpn_shared block below (kept
+# per-branch: everything past the platform split, tests/install/CPack
+# included, is Linux-only; same SOVERSION rationale as the Linux block).
+# Links c++ (not stdc++) for BoringSSL's C++ internals — macOS SDKs ship
+# libc++ only, and a .dylib must fully resolve its symbols at link time.
+add_library(mqvpn_shared SHARED ${MQVPN_LIB_SOURCES})
+set_target_properties(mqvpn_shared PROPERTIES
+    OUTPUT_NAME mqvpn
+    SOVERSION 2
+    C_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+)
+target_include_directories(mqvpn_shared
+    PUBLIC  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+    PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR}
+)
+# Shared lib links shared xquic, same as Linux (static .a is unusable there
+# for -fPIC reasons; kept symmetric here even though clang on Darwin emits
+# PIC by default).
+target_link_libraries(mqvpn_shared xquic ${SSL_LIB} ${CRYPTO_LIB} pthread c++)
 
 else() # NOT WIN32, NOT APPLE — Linux
 
