@@ -23,6 +23,7 @@
 
 #  include <stdio.h>
 #  include <stdint.h> /* uint32_t for ROUTE_SA_ROUNDUP, uint8_t for sa_len */
+#  include <stddef.h> /* offsetof for the sockaddr_dl name clamp */
 #  include <stdlib.h>
 #  include <string.h>
 #  include <unistd.h>
@@ -34,10 +35,11 @@
 #  include <sys/sockio.h> /* SIOCGIFFLAGS lives here on Darwin */
 #  include <net/if.h>
 #  include <net/if_dl.h>
+#  include <net/if_media.h> /* IFM_AVALID / IFM_ACTIVE for the carrier probe */
 #  include <net/route.h>
-/* struct if_data / ifi_link_state / LINK_STATE_DOWN: present via
- * <net/if_var.h> on some SDK versions and <net/if.h> on others — include
- * both defensively (if_var.h guards itself against double-inclusion). */
+/* struct if_msghdr / ifa_msghdr live in <net/if_var.h> on Darwin —
+ * <net/if.h> pulls it in on most SDK configurations, kept explicit so a
+ * strict-POSIX compile doesn't lose the message-header structs. */
 #  include <net/if_var.h>
 #  include <ifaddrs.h>
 #  include <netinet/in.h>
@@ -179,6 +181,35 @@ iface_has_usable_ip(const char *ifname, sa_family_t af)
     }
     freeifaddrs(ifa_list);
     return found;
+}
+
+/* Check whether `ifname`'s link-layer carrier is definitely down.
+ *
+ * Darwin's if_data has no ifi_link_state field (that is a FreeBSD-ism);
+ * SIOCGIFMEDIA is the native carrier signal. IFM_AVALID gates whether
+ * IFM_ACTIVE is meaningful — media-less virtual interfaces (utun, ...)
+ * and drivers that don't implement media status leave it clear.
+ *
+ * Returns 1 = carrier definitely down (IFM_AVALID set, IFM_ACTIVE clear),
+ * 0 = carrier present, -1 = unknown (ioctl failed or media status not
+ * supported). Callers must fail safe: NEVER drop a path on -1 — the same
+ * doctrine as iface_has_usable_ip's -1. */
+static int
+iface_carrier_down(const char *ifname)
+{
+    /* Darwin deviation: no SOCK_CLOEXEC socket() flag — set FD_CLOEXEC
+     * post-hoc via fcntl instead. */
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s < 0) return -1;
+    fcntl(s, F_SETFD, FD_CLOEXEC);
+    struct ifmediareq ifmr;
+    memset(&ifmr, 0, sizeof(ifmr));
+    snprintf(ifmr.ifm_name, sizeof(ifmr.ifm_name), "%s", ifname);
+    int ret = -1;
+    if (ioctl(s, SIOCGIFMEDIA, &ifmr) == 0 && (ifmr.ifm_status & IFM_AVALID))
+        ret = (ifmr.ifm_status & IFM_ACTIVE) ? 0 : 1;
+    close(s);
+    return ret;
 }
 
 /* Layer B: try_reactivate_by_ifname */
@@ -472,6 +503,9 @@ try_readd_removed_path(platform_ctx_t *p, const char *ifname)
 #  define ROUTE_SA_ROUNDUP(a) \
       ((a) > 0 ? (1 + (((a) - 1) | (sizeof(uint32_t) - 1))) : sizeof(uint32_t))
 
+/* Defined below with the Layer A parsers; the recovery timer calls it. */
+static void route_resync(platform_ctx_t *p);
+
 /* Periodically re-add platform slots whose library state is CLOSED but
  * whose interface is currently up. Fires every RECOVER_INTERVAL_SEC.
  *
@@ -502,6 +536,20 @@ recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
     (void)fd;
     (void)what;
     platform_ctx_t *p = (platform_ctx_t *)arg;
+
+    /* Darwin addition (rev12): xnu's routing socket has no overflow
+     * notification (see route_resync), so the drop-capable reconcile can
+     * only be timer-driven. It runs BEFORE the re-add/reactivate scan
+     * below on purpose: drops must land first so the scan re-evaluates
+     * the reconciled library state — in the reverse order the scan could
+     * reactivate a slot from stale pre-drop state (IFF_RUNNING does not
+     * reliably track carrier on Darwin, so the scan's own gates cannot be
+     * trusted to catch a carrier loss the resync exists to detect), only
+     * for the resync to tear it straight back down. The static counter is
+     * throttle-class state (same class as the canon's log debounce), not
+     * a lifecycle mirror. */
+    static unsigned int resync_tick;
+    if (resync_tick++ % RESYNC_EVERY_N_TICKS == 0) route_resync(p);
 
     mqvpn_path_info_t pinfo[MQVPN_MAX_PATHS];
     int n = 0;
@@ -546,9 +594,10 @@ recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
         if (!iface_is_up_and_running(ifname)) continue;
         if (iface_has_usable_ip(ifname, p->server_addr.ss_family) != 1) continue;
         if (iface_has_route_to_server(ifname, &p->server_addr) == 0) {
-            /* First block + every 10th (≈30s at the 3s poll). The message
-             * wording is grepped by scripts/ci_e2e/run_route_gate_test.sh —
-             * rewording it silently disables that e2e's gate check. */
+            /* First block + every 10th (≈30s at the 3s poll). Body wording
+             * kept in sync with the Linux twin for a future Darwin e2e —
+             * run_route_gate_test.sh's GATE_PATTERN hardcodes the
+             * "netlink:" prefix, so this line is NOT covered by it today. */
             if (p->route_gate_blocked[i]++ % 10 == 0)
                 LOG_WRN("routemon: %s has a usable address but no route to "
                         "the server — re-add deferred until a route appears",
@@ -607,7 +656,7 @@ route_msg_get_addr(const char *addrs, const char *end, int addrs_mask, int want_
     const char *cp = addrs;
     for (int i = 0; i < RTAX_MAX && cp < end; i++) {
         if (!(addrs_mask & (1 << i))) continue;
-        if (cp + 2 > end) break; /* not enough room for sa_len/sa_family */
+        if ((size_t)(end - cp) < 2) break; /* not enough room for sa_len/sa_family */
         const struct sockaddr *sa = (const struct sockaddr *)(const void *)cp;
         size_t step = ROUTE_SA_ROUNDUP((int)sa->sa_len);
         /* A truncated read can leave a declared sa_len reaching past what
@@ -648,27 +697,42 @@ route_msg_get_ifp(const char *addrs, const char *end, int addrs_mask)
  *
  * Returns 1 on success (ifname filled). Returns 0 if both sources failed —
  * meaning the interface is already fully gone — after running the detach
- * fallback: scan tracked slots and drop any whose iface no longer
- * resolves via if_nametoindex() at all. */
+ * fallback: scan tracked slots and drop any whose iface definitely no
+ * longer exists (if_nametoindex fails with ENXIO). */
 static int
 route_resolve_ifname(platform_ctx_t *p, const struct sockaddr_dl *sdl, unsigned int index,
                      char *ifname, size_t ifname_size)
 {
-    if (sdl && sdl->sdl_nlen > 0) {
+    if (sdl && sdl->sdl_nlen > 0 &&
+        sdl->sdl_len >= offsetof(struct sockaddr_dl, sdl_data)) {
         /* Bounded copy only — sdl_data is NOT NUL-terminated, so
          * strcpy/strlen/%s directly on it would read past the interface
-         * name into whatever link-layer address bytes follow it. */
-        size_t n = sdl->sdl_nlen < ifname_size ? sdl->sdl_nlen : ifname_size - 1;
-        memcpy(ifname, sdl->sdl_data, n);
-        ifname[n] = '\0';
-        return 1;
+         * name into whatever link-layer address bytes follow it. Clamp by
+         * BOTH the declared name length and how many bytes the sockaddr's
+         * own sdl_len says physically exist after the header. */
+        size_t avail = sdl->sdl_len - offsetof(struct sockaddr_dl, sdl_data);
+        size_t n = sdl->sdl_nlen;
+        if (n > avail) n = avail;
+        if (n >= ifname_size) n = ifname_size - 1;
+        if (n > 0) {
+            memcpy(ifname, sdl->sdl_data, n);
+            ifname[n] = '\0';
+            return 1;
+        }
     }
     if (index != 0 && if_indextoname(index, ifname)) return 1;
 
     for (int i = 0; i < p->path_mgr.n_paths; i++) {
         const char *tracked_ifname = p->path_mgr.paths[i].iface;
         if (tracked_ifname[0] == '\0') continue;
-        if (if_nametoindex(tracked_ifname) == 0)
+        /* Only a definite ENXIO ("no such interface") counts as gone:
+         * if_nametoindex is getifaddrs-backed on Darwin and can fail for
+         * resource reasons (ENOMEM) — such failures are correlated across
+         * slots, so treating any 0-return as "gone" could mass-drop every
+         * path at once. Unknown fails safe, the same doctrine as the -1
+         * returns of iface_has_usable_ip / iface_carrier_down. */
+        errno = 0;
+        if (if_nametoindex(tracked_ifname) == 0 && errno == ENXIO)
             drop_paths_by_ifname(p, tracked_ifname, MQVPN_PLATFORM_REASON_RTM_DELLINK);
     }
     return 0;
@@ -743,9 +807,10 @@ handle_rtm_deladdr(platform_ctx_t *p, const struct ifa_msghdr *ifam, const char 
  *
  * Darwin has no RFC 2863 operational-state ladder (Linux's IFLA_OPERSTATE
  * with IF_OPER_DORMANT / TESTING / UNKNOWN tiers to tolerate during a wifi
- * association) — ifi_link_state is a 3-value enum (UNKNOWN/UP/DOWN), so a
- * definite LINK_STATE_DOWN is the only carrier-loss signal available and
- * is treated as a drop directly. */
+ * association) and its if_data carries no link-state field at all —
+ * SIOCGIFMEDIA (IFM_AVALID/IFM_ACTIVE) is the native carrier source, so
+ * the carrier branch queries it on-event instead of parsing it from the
+ * message. */
 static void
 handle_rtm_ifinfo(platform_ctx_t *p, const struct if_msghdr *ifm, const char *addrs,
                   const char *addrs_end)
@@ -759,7 +824,11 @@ handle_rtm_ifinfo(platform_ctx_t *p, const struct if_msghdr *ifm, const char *ad
         drop_paths_by_ifname(p, ifname, MQVPN_PLATFORM_REASON_ADMIN_DOWN);
         return;
     }
-    if (ifm->ifm_data.ifi_link_state == LINK_STATE_DOWN) {
+    /* Query-on-event: whether xnu even delivers an RTM_IFINFO on a pure
+     * carrier change is unverified on hardware — if it doesn't, the
+     * periodic resync in recover_dropped_paths_cb catches the loss within
+     * RESYNC_EVERY_N_TICKS ticks. -1 (unknown, e.g. utun) never drops. */
+    if (iface_carrier_down(ifname) == 1) {
         drop_paths_by_ifname(p, ifname, MQVPN_PLATFORM_REASON_CARRIER_LOST);
         return;
     }
@@ -773,59 +842,66 @@ handle_rtm_ifinfo(platform_ctx_t *p, const struct if_msghdr *ifm, const char *ad
     try_reactivate_by_ifname(p, ifname);
 }
 
-/* ★3 ENOBUFS resync: PF_ROUTE has no netlink-style guaranteed delivery to
- * a single reader — a busy carrier-flap storm can silently drop queued
- * messages once the kernel's routing-socket receive buffer overflows
- * (ENOBUFS on the next read), and unlike a lost netlink multicast-group
- * message there is no sequence gap to detect; the overflow notification
- * itself is the only signal that something was missed.
+/* ★3 drop-capable periodic resync. xnu's routing socket gives no overflow
+ * signal to react to: raw_input() silently discards a broadcast when
+ * appending it to a full receive buffer fails (no recv-side ENOBUFS, no
+ * SO_RERROR) — so unlike Linux netlink there is no event that tells us a
+ * message was missed. This reconcile therefore runs periodically from
+ * recover_dropped_paths_cb (every RESYNC_EVERY_N_TICKS ticks) rather than
+ * on an overflow notification.
  *
- * Runs a drop-capable full resync: for each tracked slot, evaluate
- * iface-gone / carrier-down / admin-down / usable-IP-lost and drop
- * through the same drop_paths_by_ifname() path the one-shot handlers
- * above use. Re-add is intentionally NOT duplicated here — the poll
- * timer's next tick (<= RECOVER_INTERVAL_SEC away) already re-scans
- * CLOSED slots, so re-running that scan inline would just double the
- * re-add attempt rate for no benefit.
+ * For each tracked slot, evaluate iface-gone / admin-down / carrier-down /
+ * usable-IP-lost and drop through the same drop_paths_by_ifname() path the
+ * one-shot handlers above use. Re-add is intentionally NOT duplicated
+ * here — the timer body's re-add/reactivate scan runs right after this in
+ * the same callback, over the state this reconcile just settled.
  *
  * getifaddrs() returns one entry per interface×family (v4, v6, link) —
- * naive per-record judgment would evaluate admin/carrier state once per
- * family and could double-drop or race; this evaluates each tracked slot
- * exactly once, sourcing admin/carrier state from a single matching
- * AF_LINK entry. */
+ * naive per-record judgment would evaluate admin state once per family
+ * and could double-drop; this evaluates each tracked slot exactly once
+ * with fixed per-predicate sources: presence = any entry with the slot's
+ * name exists in this snapshot (definite — no separate resolver call, so
+ * no correlated-failure mode); admin = the AF_LINK entry's ifa_flags;
+ * carrier = SIOCGIFMEDIA via iface_carrier_down (its -1 never drops);
+ * address = iface_has_usable_ip (its -1 never drops either). */
 static void
-route_resync_on_enobufs(platform_ctx_t *p)
+route_resync(platform_ctx_t *p)
 {
     struct ifaddrs *ifa_list = NULL;
-    if (getifaddrs(&ifa_list) < 0) return; /* fail-safe: next event/poll covers it */
+    if (getifaddrs(&ifa_list) < 0) {
+        /* Fail safe (skip entirely), but visibly: the drop backstop did
+         * not run this round; the next resync tick covers it. */
+        LOG_WRN("routemon: resync skipped: getifaddrs: %s", strerror(errno));
+        return;
+    }
 
     for (int i = 0; i < p->path_mgr.n_paths; i++) {
         const char *ifname = p->path_mgr.paths[i].iface;
         if (ifname[0] == '\0') continue;
 
-        if (if_nametoindex(ifname) == 0) {
+        /* Presence + admin state from the one snapshot. */
+        int present = 0;
+        int admin_down = 0;
+        for (struct ifaddrs *ifa = ifa_list; ifa; ifa = ifa->ifa_next) {
+            if (strcmp(ifa->ifa_name, ifname) != 0) continue;
+            present = 1;
+            if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_LINK) {
+                admin_down = !(ifa->ifa_flags & IFF_UP);
+                break; /* one AF_LINK entry per interface */
+            }
+        }
+        if (!present) {
             drop_paths_by_ifname(p, ifname, MQVPN_PLATFORM_REASON_RTM_DELLINK);
             continue;
         }
-
-        int dropped = 0;
-        for (struct ifaddrs *ifa = ifa_list; ifa; ifa = ifa->ifa_next) {
-            if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_LINK) continue;
-            if (strcmp(ifa->ifa_name, ifname) != 0) continue;
-
-            if (!(ifa->ifa_flags & IFF_UP)) {
-                drop_paths_by_ifname(p, ifname, MQVPN_PLATFORM_REASON_ADMIN_DOWN);
-                dropped = 1;
-            } else if (ifa->ifa_data &&
-                       ((const struct if_data *)ifa->ifa_data)->ifi_link_state ==
-                           LINK_STATE_DOWN) {
-                drop_paths_by_ifname(p, ifname, MQVPN_PLATFORM_REASON_CARRIER_LOST);
-                dropped = 1;
-            }
-            break; /* one AF_LINK entry per interface */
+        if (admin_down) {
+            drop_paths_by_ifname(p, ifname, MQVPN_PLATFORM_REASON_ADMIN_DOWN);
+            continue;
         }
-        if (dropped) continue;
-
+        if (iface_carrier_down(ifname) == 1) {
+            drop_paths_by_ifname(p, ifname, MQVPN_PLATFORM_REASON_CARRIER_LOST);
+            continue;
+        }
         if (iface_has_usable_ip(ifname, p->server_addr.ss_family) == 0)
             drop_paths_by_ifname(p, ifname, MQVPN_PLATFORM_REASON_ADDR_REMOVED);
     }
@@ -838,41 +914,71 @@ on_route_event(evutil_socket_t fd, short what, void *arg)
 {
     (void)what;
     platform_ctx_t *p = (platform_ctx_t *)arg;
-    char buf[ROUTE_BUF_SIZE];
+    union {
+        struct rt_msghdr rtm;
+        char raw[ROUTE_BUF_SIZE];
+    } rbuf;
 
     for (;;) {
-        ssize_t len = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
+        ssize_t len = recv(fd, rbuf.raw, sizeof(rbuf.raw), MSG_DONTWAIT);
+        if (len < 0 && errno == EINTR) continue;
         if (len <= 0) {
+            if (len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+                break; /* drained — the normal exit */
             if (len < 0 && errno == ENOBUFS) {
+                /* Belt-and-braces: xnu is not known to ever deliver
+                 * recv-side ENOBUFS on a routing socket (raw_input drops
+                 * silently on receive-buffer overflow — the reason the
+                 * resync is timer-driven from recover_dropped_paths_cb,
+                 * and the reason the RTM_GET probe below bounds its read
+                 * with SO_RCVTIMEO instead of trusting an error). Kept in
+                 * case that ever changes: it costs nothing and would
+                 * tighten resync latency from ~15s to the event. */
                 LOG_WRN("routemon: ENOBUFS on route socket, running full resync");
-                route_resync_on_enobufs(p);
+                route_resync(p);
+                break;
             }
+            /* EOF (len==0) or an unexpected errno: neither should happen
+             * on a PF_ROUTE socket. Debounced so a persistently broken
+             * socket doesn't flood the log from EV_PERSIST re-fires. */
+            static unsigned int recv_err_throttle;
+            if (recv_err_throttle++ % 10 == 0)
+                LOG_WRN("routemon: route socket recv failed: %s (len=%zd)",
+                        len < 0 ? strerror(errno) : "EOF", len);
             break;
         }
 
-        const char *cp = buf;
-        const char *end = buf + len;
+        const char *cp = rbuf.raw;
+        const char *end = rbuf.raw + len;
         while (cp < end) {
             if ((size_t)(end - cp) < sizeof(struct rt_msghdr)) break; /* truncated tail */
             const struct rt_msghdr *rtm = (const struct rt_msghdr *)(const void *)cp;
             if (rtm->rtm_msglen == 0) break;       /* guard against an infinite loop */
             if (cp + rtm->rtm_msglen > end) break; /* truncated tail */
+            if (rtm->rtm_version != RTM_VERSION) {
+                cp += rtm->rtm_msglen;
+                continue;
+            }
 
             switch (rtm->rtm_type) {
-            case RTM_NEWADDR: {
-                const struct ifa_msghdr *ifam =
-                    (const struct ifa_msghdr *)(const void *)cp;
-                handle_rtm_newaddr(p, ifam, cp + sizeof(*ifam), cp + rtm->rtm_msglen);
-                break;
-            }
+            case RTM_NEWADDR:
             case RTM_DELADDR: {
+                if (rtm->rtm_msglen < sizeof(struct ifa_msghdr)) break; /* short: skip */
                 const struct ifa_msghdr *ifam =
                     (const struct ifa_msghdr *)(const void *)cp;
-                handle_rtm_deladdr(p, ifam, cp + sizeof(*ifam), cp + rtm->rtm_msglen);
+                LOG_DBG("routemon: RTM type=%d index=%u", rtm->rtm_type,
+                        (unsigned)ifam->ifam_index);
+                if (rtm->rtm_type == RTM_NEWADDR)
+                    handle_rtm_newaddr(p, ifam, cp + sizeof(*ifam), cp + rtm->rtm_msglen);
+                else
+                    handle_rtm_deladdr(p, ifam, cp + sizeof(*ifam), cp + rtm->rtm_msglen);
                 break;
             }
             case RTM_IFINFO: {
+                if (rtm->rtm_msglen < sizeof(struct if_msghdr)) break; /* short: skip */
                 const struct if_msghdr *ifm = (const struct if_msghdr *)(const void *)cp;
+                LOG_DBG("routemon: RTM type=%d index=%u", rtm->rtm_type,
+                        (unsigned)ifm->ifm_index);
                 handle_rtm_ifinfo(p, ifm, cp + sizeof(*ifm), cp + rtm->rtm_msglen);
                 break;
             }
@@ -901,12 +1007,16 @@ setup_route_socket(platform_ctx_t *p)
     }
     fcntl(p->rt_fd, F_SETFD, FD_CLOEXEC);
 
-    /* Raise the receive buffer as the first line of ENOBUFS mitigation —
-     * this reduces but does not eliminate overflow under a carrier-flap
-     * storm; the ★3 resync in on_route_event is the correctness backstop
-     * for whatever this doesn't catch. */
+    /* Raise the receive buffer as the first line of overflow mitigation —
+     * this reduces but does not eliminate message loss under a
+     * carrier-flap storm (xnu drops silently on a full buffer, with no
+     * signal to the reader); the ★3 periodic resync driven by
+     * recover_dropped_paths_cb is the correctness backstop for whatever
+     * this doesn't catch. */
     int bufsize = 256 * 1024;
-    setsockopt(p->rt_fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+    if (setsockopt(p->rt_fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize)) < 0)
+        LOG_WRN("routemon: SO_RCVBUF failed: %s (overflow mitigation weakened)",
+                strerror(errno));
 
     if (mqvpn_socket_set_nonblock(p->rt_fd) < 0) {
         LOG_WRN("routemon: fcntl failed: %s (path recovery via timer only)",

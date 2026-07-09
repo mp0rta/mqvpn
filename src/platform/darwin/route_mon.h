@@ -22,6 +22,11 @@
 #define PATH_RECOVER_FAILURE_LIMIT 5
 /* Analog of NETLINK_BUF_SIZE — on_route_event / route probe read buffer. */
 #define ROUTE_BUF_SIZE 8192
+/* Run the drop-capable resync every Nth recovery tick (~15s at
+ * RECOVER_INTERVAL_SEC=3). xnu's routing socket delivers no overflow
+ * notification (no recv-side ENOBUFS, no SO_RERROR), so a periodic
+ * reconcile is the only sound trigger for catching missed drop events. */
+#define RESYNC_EVERY_N_TICKS 5
 
 /* Open the PF_ROUTE socket, subscribe to link/addr events and register
  * the read event on p->eb. Returns 0 on success, -1 if PF_ROUTE is
