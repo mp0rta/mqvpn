@@ -6,6 +6,7 @@
 #  include "tun.h"
 #  include "log.h"
 
+#  include <ctype.h>
 #  include <fcntl.h>
 #  include <unistd.h>
 #  include <string.h>
@@ -41,11 +42,11 @@ utun_requested_unit(const char *name)
     if (!name || !name[0] || strncmp(name, "utun", 4) != 0) return 0;
 
     const char *digits = name + 4;
-    if (!digits[0]) return 0;
+    if (!isdigit((unsigned char)digits[0])) return 0;
 
     char *end = NULL;
     long n = strtol(digits, &end, 10);
-    if (*end != '\0' || n < 0) return 0;
+    if (*end != '\0' || n < 0 || n > (long)UINT32_MAX - 1) return 0;
 
     return (uint32_t)(n + 1);
 }
@@ -90,9 +91,9 @@ mqvpn_tun_create(mqvpn_tun_t *tun, const char *dev_name)
     }
 
     /* Discover the kernel-assigned utunX name. Every downstream addr/MTU/
-     * up/route/DNS call keys off tun->name, and auto-allocation (sc_unit=0,
-     * or a requested unit that was already taken) means the name cannot be
-     * predicted in advance — it must come from the kernel. */
+     * up/route/DNS call keys off tun->name, and auto-allocation (sc_unit=0)
+     * means the name cannot be predicted in advance — it must come from
+     * the kernel. */
     char ifname[IFNAMSIZ] = "";
     socklen_t ifname_len = sizeof(ifname);
     if (getsockopt(fd, SYSPROTO_CONTROL, UTUN_OPT_IFNAME, ifname, &ifname_len) < 0) {
@@ -112,6 +113,9 @@ mqvpn_tun_create(mqvpn_tun_t *tun, const char *dev_name)
     tun->fd = fd;
     strncpy(tun->name, ifname, IFNAMSIZ - 1);
     tun->name[IFNAMSIZ - 1] = '\0';
+    if (name_buf[0] && strcmp(name_buf, tun->name) != 0)
+        LOG_WRN("requested TUN name '%s' not usable on Darwin; kernel assigned %s",
+                name_buf, tun->name);
     LOG_INF("TUN device %s created (fd=%d)", tun->name, tun->fd);
     return 0;
 }
@@ -284,7 +288,9 @@ mqvpn_tun_read(mqvpn_tun_t *tun, uint8_t *buf, size_t buf_len)
         LOG_ERR("tun read: %s", strerror(errno));
         return -1;
     }
-    if (n < (ssize_t)sizeof(af_hdr)) return 0; /* short read, no full header */
+    /* Defensive only: utun I/O is atomic per-packet, so a frame shorter
+     * than the AF header should not occur (also covers n==0). */
+    if (n < (ssize_t)sizeof(af_hdr)) return 0;
     return (int)(n - (ssize_t)sizeof(af_hdr));
 }
 
@@ -310,6 +316,8 @@ mqvpn_tun_write(mqvpn_tun_t *tun, const uint8_t *buf, size_t len)
         LOG_ERR("tun write: %s", strerror(errno));
         return -1;
     }
+    /* Defensive only: utun I/O is atomic per-packet, so a partial write
+     * of the AF header should not occur. */
     if (n < (ssize_t)sizeof(af_hdr)) return 0;
     return (int)(n - (ssize_t)sizeof(af_hdr));
 }
