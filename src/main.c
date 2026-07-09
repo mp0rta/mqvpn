@@ -15,6 +15,9 @@
 #ifdef _WIN32
 #  include "platform_windows.h"
 #  include <winsock2.h>
+#elif defined(__APPLE__)
+#  include "platform_darwin.h"
+#  include "status.h"
 #else
 #  include "platform_linux.h"
 #  include "status.h"
@@ -553,6 +556,8 @@ main(int argc, char *argv[])
         }
 #ifdef _WIN32
         return win_platform_run_client(&cfg);
+#elif defined(__APPLE__)
+        return darwin_platform_run_client(&cfg);
 #else
         return linux_platform_run_client(&cfg);
 #endif
@@ -602,6 +607,9 @@ main(int argc, char *argv[])
         }
 #ifdef _WIN32
         return win_platform_run_server(&cfg);
+#elif defined(__APPLE__)
+        fprintf(stderr, "error: server mode is not supported on macOS yet\n");
+        return 1;
 #else
         return linux_platform_run_server(&cfg);
 #endif

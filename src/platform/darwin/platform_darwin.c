@@ -499,6 +499,18 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
     for (int i = 0; i < cfg->n_dns; i++)
         mqvpn_dns_add_server(&ctx.dns, cfg->dns_servers[i]);
 
+    /* Startup stale recovery (spec carve-out): a previous crash can leave
+     * (a) persistent networksetup DNS changes with our backup file on disk,
+     * (b) a loaded pf anchor blocking all egress. Recover both before any
+     * network activity. The anchor flush is unconditional — setup_killswitch
+     * is only reached at tunnel-up, which a stale blocking anchor can itself
+     * prevent, and a restart without --kill-switch must still recover. */
+    if (mqvpn_dns_has_stale_backup(&ctx.dns)) {
+        LOG_WRN("stale DNS backup found (previous crash?) - restoring");
+        mqvpn_dns_restore_stale(&ctx.dns);
+    }
+    kill_switch_flush_stale_anchor();
+
     /* Resolve server address */
     if (mqvpn_resolve_host(cfg->server_addr, &ctx.server_addr, &ctx.server_addrlen) < 0) {
         LOG_ERR("could not resolve server address: %s", cfg->server_addr);
