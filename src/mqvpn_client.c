@@ -21,10 +21,14 @@
 #  include <windows.h>
 #  include <process.h>
 #  define MSG_DONTWAIT 0
-#  define EAGAIN       WSAEWOULDBLOCK
-#  define EWOULDBLOCK  WSAEWOULDBLOCK
-#  define EINTR        WSAEINTR
-#  define errno        WSAGetLastError()
+#  undef EAGAIN
+#  define EAGAIN WSAEWOULDBLOCK
+#  undef EWOULDBLOCK
+#  define EWOULDBLOCK WSAEWOULDBLOCK
+#  undef EINTR
+#  define EINTR WSAEINTR
+#  undef errno
+#  define errno WSAGetLastError()
 #else
 #  include <unistd.h>
 #  include <sys/time.h>
@@ -885,7 +889,7 @@ cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *pe
 
     ssize_t res;
     do {
-        res = sendto(fd, buf, size, MSG_DONTWAIT, peer, peerlen);
+        res = sendto(fd, buf, (int)size, MSG_DONTWAIT, peer, peerlen);
     } while (res < 0 && errno == EINTR);
     if (res < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return XQC_SOCKET_EAGAIN;
@@ -907,7 +911,7 @@ cb_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
 
     ssize_t res;
     do {
-        res = sendto(fd, buf, size, MSG_DONTWAIT, peer, peerlen);
+        res = sendto(fd, buf, (int)size, MSG_DONTWAIT, peer, peerlen);
     } while (res < 0 && errno == EINTR);
     if (res < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return XQC_SOCKET_EAGAIN;
@@ -2588,11 +2592,11 @@ mqvpn_client_add_path_fd_with_outcome(mqvpn_client_t *c, int fd,
 
     /* Ensure adequate socket buffers for high-throughput UDP (ref: WireGuard) */
     int bufsize = SOCKET_BUF_SIZE;
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
-    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, (const char *)&bufsize, sizeof(bufsize));
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (const char *)&bufsize, sizeof(bufsize));
 #ifdef SO_SNDBUFFORCE
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUFFORCE, &bufsize, sizeof(bufsize));
-    setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, &bufsize, sizeof(bufsize));
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUFFORCE, (const char *)&bufsize, sizeof(bufsize));
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, (const char *)&bufsize, sizeof(bufsize));
 #endif
 
     if (desc) {

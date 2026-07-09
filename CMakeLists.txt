@@ -356,6 +356,10 @@ endif()
 if(MSVC)
     target_compile_options(mqvpn PRIVATE /WX)
     target_compile_options(mqvpn_lib PRIVATE /WX)
+    # C4996 nags on strncpy/strerror; every use is bounds-checked with
+    # explicit NUL termination (the _s variants are not portable C11).
+    target_compile_definitions(mqvpn PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_definitions(mqvpn_lib PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
 else() # NOT WIN32 — Linux

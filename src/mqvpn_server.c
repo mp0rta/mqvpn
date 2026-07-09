@@ -21,10 +21,14 @@
 #  include <ws2tcpip.h>
 #  include <windows.h>
 #  include <process.h>
-#  define EAGAIN      WSAEWOULDBLOCK
+#  undef EAGAIN
+#  define EAGAIN WSAEWOULDBLOCK
+#  undef EWOULDBLOCK
 #  define EWOULDBLOCK WSAEWOULDBLOCK
-#  define EINTR       WSAEINTR
-#  define errno       WSAGetLastError()
+#  undef EINTR
+#  define EINTR WSAEINTR
+#  undef errno
+#  define errno WSAGetLastError()
 #else
 #  include <unistd.h>
 #  include <sys/time.h>
@@ -462,7 +466,7 @@ svr_do_send(mqvpn_server_t *s, const unsigned char *buf, size_t size,
     if (s->udp_fd < 0) return XQC_SOCKET_ERROR;
     ssize_t res;
     do {
-        res = sendto(s->udp_fd, buf, size, 0, peer, peerlen);
+        res = sendto(s->udp_fd, buf, (int)size, 0, peer, peerlen);
     } while (res < 0 && errno == EINTR);
     if (res < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return XQC_SOCKET_EAGAIN;
