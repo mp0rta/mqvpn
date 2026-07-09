@@ -316,20 +316,34 @@ get_dns_servers(const char *service, char *out, size_t outlen)
         have_any = 1;
 
         size_t llen = strlen(line);
-        if (used > 0 && used + 1 < sizeof(joined)) {
-            joined[used++] = ' ';
-            joined[used] = '\0';
+        size_t need = used + (used > 0 ? 1 : 0) + llen;
+        if (need >= sizeof(joined)) {
+            /* Joining would overflow: a truncated snapshot would silently
+             * misrepresent the service's original config, and the backup
+             * is the sole restore authority — fail loudly instead. The
+             * caller (write_backup) aborts backup creation, which aborts
+             * apply() before any setdnsservers runs (hard precondition). */
+            LOG_ERR("dns: DNS server list for service '%s' exceeds %zu bytes; "
+                    "refusing lossy backup",
+                    service, sizeof(joined));
+            return -1;
         }
-        if (used + llen < sizeof(joined)) {
-            memcpy(joined + used, line, llen);
-            used += llen;
-            joined[used] = '\0';
-        }
+        if (used > 0) joined[used++] = ' ';
+        memcpy(joined + used, line, llen);
+        used += llen;
+        joined[used] = '\0';
     }
 
     if (!have_any || !all_ip) {
         snprintf(out, outlen, "Empty");
         return 0;
+    }
+    if (used >= outlen) {
+        /* Same loud-failure rule for the caller-supplied buffer. */
+        LOG_ERR("dns: DNS server list for service '%s' exceeds %zu bytes; "
+                "refusing lossy backup",
+                service, outlen);
+        return -1;
     }
     snprintf(out, outlen, "%s", joined);
     return 0;
@@ -495,10 +509,15 @@ write_backup(const mqvpn_dns_t *dns, const char *tmp_path, const struct dns_serv
 
 /* Issue `networksetup -setdnsservers <service> <servers...>` for one
  * saved backup value. `servers` is either the literal "Empty" (passed
- * through as-is — that's networksetup's own "unset" argument) or a
- * space-joined list of IP literals, which we split back into separate
- * argv entries. Shared by apply()'s self-rollback, mqvpn_dns_restore(),
- * and mqvpn_dns_restore_stale(). */
+ * through as-is) or a space-joined list of IP literals, which we split
+ * back into separate argv entries. Shared by apply()'s self-rollback,
+ * mqvpn_dns_restore(), and mqvpn_dns_restore_stale().
+ *
+ * UNVERIFIED on real macOS hardware: the "Empty" unset semantics —
+ * `networksetup -setdnsservers <service> Empty` clearing the service's
+ * DNS override back to "no servers set" — is taken from networksetup(8)
+ * documentation and common usage, not verified against a real Mac.
+ * Confirm before relying on this in production. */
 static int
 restore_one(const char *service, const char *servers)
 {
@@ -515,9 +534,18 @@ restore_one(const char *service, const char *servers)
         argv[argc++] = "Empty";
     } else {
         char *saveptr = NULL;
-        for (char *tok = strtok_r(buf, " ", &saveptr);
-             tok && argc < (int)(sizeof(argv) / sizeof(argv[0])) - 1;
+        for (char *tok = strtok_r(buf, " ", &saveptr); tok;
              tok = strtok_r(NULL, " ", &saveptr)) {
+            if (argc >= (int)(sizeof(argv) / sizeof(argv[0])) - 1) {
+                /* More saved tokens than we can pass — restoring only a
+                 * prefix would silently misrepresent the original config;
+                 * fail loudly instead (counts as a restore failure, so
+                 * the backup is kept). */
+                LOG_ERR("dns: backup entry for service '%s' has more than %d server "
+                        "tokens; refusing lossy restore",
+                        service, MQVPN_DNS_RESTORE_MAX_TOKENS);
+                return -1;
+            }
             argv[argc++] = tok;
         }
     }
@@ -535,10 +563,14 @@ restore_one(const char *service, const char *servers)
  * setting via restore_one().
  *
  * If `filter` is non-NULL, only services whose name appears in
- * filter[0..filter_n) are restored (used by apply()'s self-rollback,
- * which must touch only the subset of services it actually changed
- * before the failure). Pass filter=NULL to restore every line in the
- * backup (used by mqvpn_dns_restore() and mqvpn_dns_restore_stale()).
+ * filter[0..filter_n) are restored — used ONLY by apply()'s FRESH-path
+ * self-rollback, where the backup was created by that same apply() call
+ * and therefore exactly matches the pre-apply state, so touching only
+ * the subset actually changed is complete by construction. Pass
+ * filter=NULL to restore every line in the backup (mqvpn_dns_restore(),
+ * mqvpn_dns_restore_stale(), and apply()'s GUARD-path rollback, where a
+ * pre-existing backup may cover services dirtied before this process's
+ * apply ever ran — see the step-5 comment in mqvpn_dns_apply()).
  *
  * An unparseable backup line is logged and treated as a failed restore
  * for that service (its data can't be recovered), but does not abort the
@@ -659,8 +691,13 @@ mqvpn_dns_apply(mqvpn_dns_t *dns)
 
     /* Step 3 GUARD: an existing backup is the authoritative original from
      * a prior (crashed or otherwise incomplete) run — it must never be
-     * overwritten. */
+     * overwritten. `preexisting_backup` is a function-local (not a new
+     * struct field — the persistent state stays exactly active/lock_fd/
+     * backup-file-existence) recording which case we're in, because
+     * step 5's rollback SCOPE depends on it. */
+    int preexisting_backup = 0;
     if (access(dns->backup_path, F_OK) == 0) {
+        preexisting_backup = 1;
         /* (a) Unconditionally clean up a stale .tmp — the cleanup
          * invariant holds on the guard path too, even though we're not
          * about to write a fresh backup ourselves. */
@@ -729,18 +766,33 @@ mqvpn_dns_apply(mqvpn_dns_t *dns)
 
     /* Step 5: a set failed mid-loop (services [0, applied) were already
      * changed) — self-rollback using the backup validated/created above.
-     * Note: if `applied` services collectively don't fully match the
-     * backup's service set (only possible on the guard path, if the
-     * network service list changed since an earlier crash), the
-     * unmatched services are simply left as-is by restore_from_backup_file
-     * — the pre-existing backup is treated as sole authority per step 3's
-     * guard, and this is an accepted, inherent limitation of that design,
-     * not something apply() can second-guess. */
+     * The rollback SCOPE depends on which step-3 path we took:
+     *
+     *   FRESH path (this apply created the backup): before this call, all
+     *   services matched the backup exactly, so only the [0, applied)
+     *   subset we just changed can be dirty — a subset-filtered rollback
+     *   is complete by construction.
+     *
+     *   GUARD path (backup pre-existed): the file is the authoritative
+     *   original from an earlier run whose restore may itself have
+     *   partially failed, i.e. services OUTSIDE [0, applied) may already
+     *   be dirty from before this apply ever ran. A subset rollback here
+     *   can "succeed" vacuously (worst case applied == 0, empty filter)
+     *   while the system is still dirty — deleting the backup on that
+     *   basis would permanently destroy the only record of the still-
+     *   dirty services. So on the guard path the rollback must restore
+     *   the FULL backup (filter=NULL), and only a fully successful full
+     *   restore may declare DNS clean. */
     LOG_WRN("dns: apply failed after %d/%d service(s); rolling back", applied, n);
-    if (restore_from_backup_file(dns, svcs, applied) == 0) {
-        /* Rollback success: everything we dirtied is back to original —
-         * DNS is clean again, so the backup is no longer needed and the
-         * lock can be released. */
+    int rolled_back;
+    if (preexisting_backup)
+        rolled_back = restore_from_backup_file(dns, NULL, 0);
+    else
+        rolled_back = restore_from_backup_file(dns, svcs, applied);
+    if (rolled_back == 0) {
+        /* Rollback success: every service the backup covers is back to
+         * its original setting — DNS is clean again, so the backup is no
+         * longer needed and the lock can be released. */
         dns->active = 0;
         unlink(dns->backup_path);
         release_lock_if_inactive(dns);
