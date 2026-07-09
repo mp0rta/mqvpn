@@ -121,9 +121,10 @@ void cleanup_killswitch(platform_ctx_t *p);
 
 /* darwin/killswitch.c — flushes the pf anchor unconditionally, independent
  * of any platform_ctx_t / killswitch_active state. Darwin-only: called from
- * the startup stale-recovery block (darwin_platform_run_client) before
- * routes/killswitch/DNS are (re)established, to self-heal a pf anchor left
- * live by a prior crash. Declaration is inert on Linux (never called
+ * the startup stale-recovery block (darwin_platform_run_client) to self-heal
+ * a pf anchor left live by a prior crash — for why this is a startup step
+ * rather than part of setup_killswitch(), see this function's doc comment
+ * in darwin/killswitch.c. Declaration is inert on Linux (never called
  * there; linux/killswitch.c does not define it). */
 void kill_switch_flush_stale_anchor(void);
 

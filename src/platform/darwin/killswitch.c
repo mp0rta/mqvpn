@@ -38,7 +38,8 @@
  * crash. kill_switch_flush_stale_anchor() below is the self-recovery path;
  * it is wired into the startup stale-recovery block in
  * darwin_platform_run_client (a later change), not called from
- * setup_killswitch() — see that function's doc comment for why.
+ * setup_killswitch() — see kill_switch_flush_stale_anchor()'s doc comment
+ * for why it cannot live inside setup_killswitch().
  */
 
 #include "platform_internal.h"
@@ -128,10 +129,19 @@ run_pfctl_stdin(const char *const argv[], const char *text)
  * dup2'ing its write end onto both fd 1 and fd 2 in the child, so the
  * caller can find the token line regardless of which stream it landed on.
  * Parent loop-reads to EOF with EINTR retry, twin of dns.c's
- * run_networksetup_capture (simplified: no overflow-loud-fail here — a
- * truncated/overflowed capture just means the token line, if present past
- * the truncation point, won't be found, which setup_killswitch already
- * treats as a non-fatal "empty token" case). */
+ * run_networksetup_capture but with a simpler buffer-full policy: dns.c
+ * probes one extra byte and fails loudly on overflow; here the parent
+ * just stops reading and closes the pipe. What happens next depends on
+ * the child: if it had already written its (small) output into the pipe
+ * buffer and exited, this returns 0 with a truncated capture and a
+ * missing token falls through to setup_killswitch's NON-fatal empty-token
+ * path; if it was still writing, the closed read end kills it with
+ * SIGPIPE (default disposition — mqvpn never sets a process-wide SIG_IGN;
+ * SIGPIPE suppression is per-socket only, see compat/socket_compat.h), so
+ * WIFEXITED is false, this returns -1, and setup_killswitch treats it as
+ * a FATAL `pfctl -E` failure (active=1 → cleanup). Both outcomes are
+ * safe, and both are practically unreachable for `pfctl -E`'s ~2-line
+ * output against the 256-byte capture buffer. */
 static int
 run_pfctl_capture(const char *const argv[], char *out, size_t outlen)
 {
@@ -378,9 +388,18 @@ void
 kill_switch_flush_stale_anchor(void)
 {
     /* Unconditional flush, independent of any platform_ctx_t state — see
-     * the file header's crash-residue note. A nonexistent/empty anchor
-     * failing this call is the NORMAL case (most starts are not recovering
-     * from a crash), so failures are logged at DBG, not WRN/ERR. */
+     * the file header's crash-residue note. This is deliberately a startup
+     * step (darwin_platform_run_client's stale-recovery block) and NOT
+     * part of setup_killswitch(), for two reasons:
+     *   (a) setup_killswitch only runs once the tunnel is up, but a stale
+     *       blocking anchor can prevent the connection from ever reaching
+     *       tunnel-up in the first place (e.g. this run's server differs
+     *       from the one the stale rules whitelist);
+     *   (b) a restart WITHOUT --kill-switch never calls setup_killswitch
+     *       at all, yet must still recover the host's connectivity.
+     * A nonexistent/empty anchor failing this call is the NORMAL case
+     * (most starts are not recovering from a crash), so failures are
+     * logged at DBG, not WRN/ERR. */
     const char *argv[] = {"pfctl", "-a", MQVPN_PF_ANCHOR, "-F", "all", NULL};
     if (run_pfctl(argv) < 0)
         LOG_DBG("pf anchor %s flush at startup: no-op (anchor empty/absent) or pfctl "
