@@ -354,8 +354,13 @@ endif()
 # Windows platform code has no other automated gate than this compile,
 # so a silent warning here is a bug that ships.
 if(MSVC)
-    target_compile_options(mqvpn PRIVATE /WX)
-    target_compile_options(mqvpn_lib PRIVATE /WX)
+    # /utf-8: our sources are UTF-8. Without this, MSVC decodes them in the
+    # system ANSI code page, so on non-UTF-8 locales (e.g. CP932 Japanese)
+    # every non-ASCII byte raises C4819 — which /WX below turns fatal. CI
+    # runs an English-locale image so it never trips; build it anyway to keep
+    # first-party compiles locale-independent.
+    target_compile_options(mqvpn PRIVATE /WX /utf-8)
+    target_compile_options(mqvpn_lib PRIVATE /WX /utf-8)
     # C4996 nags on strncpy/strerror; every use is bounds-checked with
     # explicit NUL termination (the _s variants are not portable C11).
     target_compile_definitions(mqvpn PRIVATE _CRT_SECURE_NO_WARNINGS)
