@@ -16,10 +16,11 @@
  * on __APPLE__. Server mode and the control socket are intentionally NOT
  * ported here — server mode is not built on macOS in v1.
  *
- * This platform layer has not yet been compiled against a Darwin SDK, so
- * hardware verification (route(8)/networksetup(8)/pfctl(8) output shapes,
- * utun ioctls, PF_ROUTE event decoding) is still pending — see the
- * UNVERIFIED notes in routing.c/dns.c/killswitch.c/route_mon.c.
+ * This platform layer compiles in the darwin CI job (macos-14) but has not
+ * yet run on real Darwin hardware, so hardware verification (route(8)/
+ * networksetup(8)/pfctl(8) output shapes, utun ioctls, PF_ROUTE event
+ * decoding) is still pending — see the UNVERIFIED notes in
+ * routing.c/dns.c/killswitch.c/route_mon.c.
  */
 
 #ifdef __APPLE__

@@ -417,7 +417,13 @@ acquire_lock(mqvpn_dns_t *dns)
     if (lfd < 0) {
         /* %m is a glibc extension — Apple Libc prints it literally, so
          * all errno diagnostics in this file use strerror() instead
-         * (errno captured immediately, before any call can clobber it). */
+         * (errno captured immediately, before any call can clobber it).
+         *
+         * Intentional divergence from Linux dns.c (which warns and
+         * continues WITHOUT the lock when the lock file can't be
+         * created): here the lock protects the authoritative backup
+         * that is a hard precondition for mutating DNS at all, so
+         * proceeding unlocked is not acceptable — abort instead. */
         int e = errno;
         LOG_ERR("dns: cannot open lock file %s: %s", dns->lock_path, strerror(e));
         return -1;
@@ -829,9 +835,10 @@ mqvpn_dns_apply(mqvpn_dns_t *dns)
         if (write_backup(dns, tmp_path, svcs, n) < 0) {
             /* Hard precondition: never mutate a single service's DNS
              * without a valid, durable, authoritative backup on disk.
-             * Unlike Linux dns.c:273-275 (which warns and continues when
-             * the resolv.conf backup fails — there's always a live
-             * resolv.conf to eventually restore, worst case, by hand),
+             * Unlike Linux dns.c's mqvpn_dns_apply (which warns and
+             * continues when the resolv.conf backup fails — there's
+             * always a live resolv.conf to eventually restore, worst
+             * case by hand),
              * Darwin's backup is the ONLY record of N independent
              * services' original settings; losing it isn't recoverable
              * the same way, so we abort before touching anything. */
@@ -936,8 +943,8 @@ mqvpn_dns_restore(mqvpn_dns_t *dns)
         return;
     }
 
-    /* Intentional divergence from Linux dns.c:330 (mqvpn_dns_restore()
-     * there clears `active` unconditionally): a single resolv.conf copy
+    /* Intentional divergence from Linux dns.c's mqvpn_dns_restore (which
+     * clears `active` unconditionally, even on failure): a single resolv.conf copy
      * has no notion of partial failure, but a Darwin backup spans N
      * independent services, so a partial restore failure is a real and
      * meaningful state — some services now carry our VPN DNS settings
