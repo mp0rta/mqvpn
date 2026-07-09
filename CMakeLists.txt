@@ -124,12 +124,26 @@ if(ANDROID_CROSS_COMPILE)
         set(SSL_LIB "${BORINGSSL_BUILD_DIR}/libssl.a")
         set(CRYPTO_LIB "${BORINGSSL_BUILD_DIR}/libcrypto.a")
     endif()
+elseif(EXISTS "${BORINGSSL_BUILD_DIR}/ssl/libssl.a")
+    # Prefer the sibling BoringSSL build artifacts explicitly when they
+    # exist: find_library searches CMAKE_PREFIX_PATH (e.g. Homebrew on the
+    # darwin CI runner) BEFORE the HINTS below, which can silently resolve
+    # ssl/crypto to OpenSSL — but libxquic-static.a needs BoringSSL-only
+    # symbols (SSL_set_quic_method, EVP_AEAD_*, HKDF_*, ...) at final link,
+    # which only surfaces as undefined symbols when linking the CLI.
+    set(SSL_LIB "${BORINGSSL_BUILD_DIR}/ssl/libssl.a")
+    set(CRYPTO_LIB "${BORINGSSL_BUILD_DIR}/crypto/libcrypto.a")
+elseif(EXISTS "${BORINGSSL_BUILD_DIR}/libssl.a")
+    # Newer BoringSSL layouts place the archives at the build root.
+    set(SSL_LIB "${BORINGSSL_BUILD_DIR}/libssl.a")
+    set(CRYPTO_LIB "${BORINGSSL_BUILD_DIR}/libcrypto.a")
 else()
     find_library(SSL_LIB ssl
         HINTS ${BORINGSSL_BUILD_DIR} ${BORINGSSL_BUILD_DIR}/ssl /usr/local/lib /usr/local/babassl/lib)
     find_library(CRYPTO_LIB crypto
         HINTS ${BORINGSSL_BUILD_DIR} ${BORINGSSL_BUILD_DIR}/crypto /usr/local/lib /usr/local/babassl/lib)
 endif()
+message(STATUS "SSL_LIB=${SSL_LIB} CRYPTO_LIB=${CRYPTO_LIB}")
 
 # ---------- libmqvpn source files (shared between static and shared targets) ----------
 set(MQVPN_LIB_SOURCES
