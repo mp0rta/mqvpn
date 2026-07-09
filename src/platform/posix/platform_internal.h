@@ -96,7 +96,7 @@ void schedule_next_tick(platform_ctx_t *p);
 int setup_routes(platform_ctx_t *p);
 void cleanup_routes(platform_ctx_t *p);
 
-/* route_check.c */
+/* route_check.c (linux) / route_mon.c (darwin) */
 int iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *server);
 
 /* per-OS socket-to-interface pinning (platform_linux.c / platform_darwin.c) */

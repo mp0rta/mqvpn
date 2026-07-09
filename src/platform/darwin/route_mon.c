@@ -28,6 +28,7 @@
 #  include <errno.h>
 #  include <fcntl.h>
 #  include <sys/socket.h>
+#  include <sys/time.h> /* struct timeval for the probe's SO_RCVTIMEO */
 #  include <sys/ioctl.h>
 #  include <sys/sockio.h> /* SIOCGIFFLAGS lives here on Darwin */
 #  include <net/if.h>
@@ -207,6 +208,15 @@ iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *ser
      * async RTM_* broadcasts on_route_event() consumes. */
     int fd = socket(PF_ROUTE, SOCK_RAW, 0);
     if (fd < 0) return -1;
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+
+    /* xnu silently drops a routing-socket reply when appending it to the
+     * receive buffer fails (unlike Linux netlink, which signals ENOBUFS),
+     * so a blocking read could hang the event-loop thread forever —
+     * precisely during the carrier-flap storms this probe runs in. Bound
+     * the wait; a timeout maps to -1 (fail open) below. */
+    struct timeval rcv_to = {0, 200000};
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_to, sizeof(rcv_to));
 
     struct {
         struct rt_msghdr rtm;
@@ -221,8 +231,11 @@ iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *ser
      * routing socket walks appended sockaddrs by sa_len, so set it. */
     ((struct sockaddr *)(void *)req.space)->sa_len = (uint8_t)salen;
 
-    static int seq_counter = 0;
-    int seq = ++seq_counter;
+    /* Unsigned so wraparound is defined. Non-atomic: assumes the platform
+     * run loop is single-threaded per process (multiple client instances
+     * in one process would need atomics here). */
+    static unsigned int seq_counter = 0;
+    int seq = (int)++seq_counter;
     pid_t pid = getpid();
 
     req.rtm.rtm_msglen =
@@ -236,7 +249,7 @@ iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *ser
     req.rtm.rtm_seq = seq;
 
     ssize_t wn = write(fd, &req, req.rtm.rtm_msglen);
-    if (wn != (ssize_t)req.rtm.rtm_msglen) {
+    if (wn < 0) {
         int err = errno;
         close(fd);
         /* BSD scoped route-get typically reports "no route" via write()
@@ -247,17 +260,28 @@ iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *ser
                 err);
         return -1;
     }
+    if (wn != (ssize_t)req.rtm.rtm_msglen) {
+        /* Short positive write: errno is stale here — never interpret it
+         * as a definite "no route". Fail open. */
+        close(fd);
+        return -1;
+    }
 
     int ret = -1;
-    char buf[ROUTE_BUF_SIZE];
+    union {
+        struct rt_msghdr rtm;
+        char raw[ROUTE_BUF_SIZE];
+    } rbuf;
     /* Bounded read loop: the kernel answers this synchronous RTM_GET on
      * the same socket, but a route socket also observes other processes'
      * RTM_GET replies — loop a bounded number of times to find the reply
-     * matching our pid+seq rather than trusting the first message read. */
+     * matching our type+pid+seq rather than trusting the first message
+     * read. A read timeout (SO_RCVTIMEO above) breaks out with ret == -1. */
     for (int i = 0; i < 8; i++) {
-        ssize_t len = read(fd, buf, sizeof(buf));
+        ssize_t len = read(fd, rbuf.raw, sizeof(rbuf.raw));
         if (len < (ssize_t)sizeof(struct rt_msghdr)) break;
-        const struct rt_msghdr *rtm = (const struct rt_msghdr *)buf;
+        const struct rt_msghdr *rtm = &rbuf.rtm;
+        if (rtm->rtm_type != RTM_GET) continue;
         if (rtm->rtm_pid != pid || rtm->rtm_seq != seq) continue;
         if (rtm->rtm_errno == 0) {
             ret = 1;
