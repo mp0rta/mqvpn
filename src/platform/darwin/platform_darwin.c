@@ -19,6 +19,7 @@
 #ifdef __APPLE__
 
 #  include "platform_internal.h"
+#  include "route_mon.h"
 #  include "vpn_client.h"
 #  include "log.h"
 #  include "mqvpn_internal.h" /* mqvpn_config_apply_reorder (INI reorder bridge) */
@@ -40,17 +41,6 @@
 #  define TUN_BUF_SIZE        65536
 #  define SOCK_BUF_SIZE       65536
 static void status_log_cb(evutil_socket_t fd, short what, void *arg);
-
-/* TODO(darwin): duplicated from netlink_mon.h's constant of the same name —
- * route_mon.h (arriving in a later change) will define the canonical one, at
- * which point this local copy must be dropped in favor of the header. */
-#  define RECOVER_INTERVAL_SEC 3
-
-/* PF_ROUTE path recovery accelerator (route_mon.c, arriving in a later
- * change). Declared extern here rather than via a route_mon.h include,
- * which doesn't exist yet — swap to the header once it does. */
-extern int setup_route_socket(platform_ctx_t *p);
-extern void recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg);
 
 /* ================================================================
  *  Socket pinning to a specific egress interface
