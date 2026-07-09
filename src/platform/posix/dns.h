@@ -44,6 +44,13 @@ int mqvpn_dns_has_stale_backup(const mqvpn_dns_t *dns);
 /* Restore from stale backup (startup recovery). */
 void mqvpn_dns_restore_stale(mqvpn_dns_t *dns);
 
+/* Darwin backup-file line helpers (darwin/dns.c; non-static for unit tests).
+ * Format: "<service>\t<server1> <server2> ...\n"; value "Empty" = unset. */
+int mqvpn_dns_backup_format_line(char *buf, size_t buflen, const char *service,
+                                 const char *servers);
+int mqvpn_dns_backup_parse_line(const char *line, char *service, size_t svc_len,
+                                char *servers, size_t srv_len);
+
 /* Resolve a hostname or IP literal to a sockaddr_storage.
  * Tries IPv4 literal, then IPv6 literal, then getaddrinfo(AF_UNSPEC).
  * On success: *out is filled as sockaddr_in or sockaddr_in6,
