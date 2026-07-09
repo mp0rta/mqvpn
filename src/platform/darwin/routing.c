@@ -50,6 +50,17 @@ run_route_cmd(const char *const argv[])
  * IP (no gateway hop — the caller must not pin a route via it). Verify
  * against real macOS output before relying on this in production; the
  * key names/whitespace handling here may need adjustment.
+ *
+ * Also on the hardware verify list: on-link gateways may also appear as a
+ * link-layer (MAC) address sockaddr (e.g. "gateway: a4:83:e7:xx:xx:xx",
+ * an LLINFO cloned route), not just "link#N" — such a value would pass
+ * the current on-link filter and be misused as a gateway argument.
+ * Verify on hardware; if confirmed, extend the on-link filter (candidate:
+ * treat any value that fails inet_pton for both families as on-link).
+ *
+ * Input beyond 1023 bytes is silently truncated by the internal buffer
+ * (the production caller discover_route reads <= 1023 bytes, so this
+ * only matters for unit tests).
  */
 int
 mqvpn_parse_route_get_output(const char *out, char *gateway, size_t gw_len, char *iface,
