@@ -17,24 +17,58 @@
  * the parser's tolerance for them) need to change; the parser's IP-vs-
  * non-IP gateway classification is independent of exact formatting.
  *
- * Style: bare assert(), mirroring tests/test_route_check.c (same domain:
- * a small pure predicate/parser, exercised with a handful of fixed
- * inputs).
+ * Assertions are discriminating (which vector, actual vs expected) on
+ * purpose: the darwin CI job is the ONLY executor of this test, so an
+ * ambiguous failure costs a full CI round trip to diagnose. The gw/ifc
+ * output buffers are re-poisoned before every parser call so each vector
+ * discriminates independently of case ordering (a stale-buffer bug in the
+ * parser can't be masked by a previous vector's output).
  */
-#include <assert.h>
+#include "platform_internal.h" /* mqvpn_parse_route_get_output — real
+                                * prototype, so a signature change in
+                                * routing.c breaks this TU at compile time
+                                * instead of at runtime on darwin CI */
 #include <stdio.h>
 #include <string.h>
-#include <arpa/inet.h>
-#include <net/if.h>
 
-int mqvpn_parse_route_get_output(const char *out, char *gateway, size_t gw_len,
-                                 char *iface, size_t if_len);
+static int g_pass = 0, g_fail = 0;
+
+#define ASSERT_EQ_INT(a, b, msg)                                               \
+    do {                                                                       \
+        if ((a) == (b)) {                                                      \
+            g_pass++;                                                          \
+        } else {                                                               \
+            g_fail++;                                                          \
+            fprintf(stderr, "FAIL [%s]: %d != %d\n", msg, (int)(a), (int)(b)); \
+        }                                                                      \
+    } while (0)
+
+#define ASSERT_EQ_STR(a, b, msg)                                         \
+    do {                                                                 \
+        if (strcmp((a), (b)) == 0) {                                     \
+            g_pass++;                                                    \
+        } else {                                                         \
+            g_fail++;                                                    \
+            fprintf(stderr, "FAIL [%s]: '%s' != '%s'\n", msg, (a), (b)); \
+        }                                                                \
+    } while (0)
+
+/* Fill an output buffer with a non-NUL poison pattern so a parser that
+ * fails to write (or fails to NUL-terminate) a field is caught in THIS
+ * vector, not masked by whatever the previous vector left behind. */
+static void
+poison(char *buf, size_t len)
+{
+    memset(buf, 'X', len - 1);
+    buf[len - 1] = '\0';
+}
 
 int
 main(void)
 {
     char gw[INET6_ADDRSTRLEN];
     char ifc[IFNAMSIZ];
+    int rc;
 
     /* (a) v4 gateway + interface, realistic route(8) shape. */
     {
@@ -43,40 +77,48 @@ main(void)
                          "       gateway: 192.168.1.1\n"
                          "     interface: en0\n"
                          "         flags: <UP,GATEWAY,DONE>\n";
-        int rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
-        assert(rc == 0);
-        assert(strcmp(gw, "192.168.1.1") == 0);
-        assert(strcmp(ifc, "en0") == 0);
+        poison(gw, sizeof(gw));
+        poison(ifc, sizeof(ifc));
+        rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
+        ASSERT_EQ_INT(rc, 0, "(a) v4-gateway rc");
+        ASSERT_EQ_STR(gw, "192.168.1.1", "(a) v4-gateway gw");
+        ASSERT_EQ_STR(ifc, "en0", "(a) v4-gateway iface");
     }
 
     /* (b) v6 gateway (fe80::1 style) -> accepted. */
     {
         const char *in = "   gateway: fe80::1\n"
                          "   interface: en0\n";
-        int rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
-        assert(rc == 0);
-        assert(strcmp(gw, "fe80::1") == 0);
-        assert(strcmp(ifc, "en0") == 0);
+        poison(gw, sizeof(gw));
+        poison(ifc, sizeof(ifc));
+        rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
+        ASSERT_EQ_INT(rc, 0, "(b) v6-gateway rc");
+        ASSERT_EQ_STR(gw, "fe80::1", "(b) v6-gateway gw");
+        ASSERT_EQ_STR(ifc, "en0", "(b) v6-gateway iface");
     }
 
     /* (c) zoned v6 fe80::1%en0 -> accepted, stored WITH the zone. */
     {
         const char *in = "   gateway: fe80::1%en0\n"
                          "   interface: en0\n";
-        int rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
-        assert(rc == 0);
-        assert(strcmp(gw, "fe80::1%en0") == 0);
-        assert(strcmp(ifc, "en0") == 0);
+        poison(gw, sizeof(gw));
+        poison(ifc, sizeof(ifc));
+        rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
+        ASSERT_EQ_INT(rc, 0, "(c) zoned-v6 rc");
+        ASSERT_EQ_STR(gw, "fe80::1%en0", "(c) zoned-v6 gw (zone kept)");
+        ASSERT_EQ_STR(ifc, "en0", "(c) zoned-v6 iface");
     }
 
     /* (d) on-link "link#4" -> gateway empty, iface still parsed, rc=0. */
     {
         const char *in = "   gateway: link#4\n"
                          "   interface: en0\n";
-        int rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
-        assert(rc == 0);
-        assert(gw[0] == '\0');
-        assert(strcmp(ifc, "en0") == 0);
+        poison(gw, sizeof(gw));
+        poison(ifc, sizeof(ifc));
+        rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
+        ASSERT_EQ_INT(rc, 0, "(d) link#N rc");
+        ASSERT_EQ_STR(gw, "", "(d) link#N gw empty");
+        ASSERT_EQ_STR(ifc, "en0", "(d) link#N iface");
     }
 
     /* (e) lladdr MAC ("gateway: a4:83:e7:12:34:56", an LLINFO cloned
@@ -85,20 +127,24 @@ main(void)
     {
         const char *in = "   gateway: a4:83:e7:12:34:56\n"
                          "   interface: en0\n";
-        int rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
-        assert(rc == 0);
-        assert(gw[0] == '\0');
-        assert(strcmp(ifc, "en0") == 0);
+        poison(gw, sizeof(gw));
+        poison(ifc, sizeof(ifc));
+        rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
+        ASSERT_EQ_INT(rc, 0, "(e) lladdr rc");
+        ASSERT_EQ_STR(gw, "", "(e) lladdr gw empty");
+        ASSERT_EQ_STR(ifc, "en0", "(e) lladdr iface");
     }
 
     /* (f) bogus non-IP token -> gateway empty. */
     {
         const char *in = "   gateway: bogus\n"
                          "   interface: en0\n";
-        int rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
-        assert(rc == 0);
-        assert(gw[0] == '\0');
-        assert(strcmp(ifc, "en0") == 0);
+        poison(gw, sizeof(gw));
+        poison(ifc, sizeof(ifc));
+        rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
+        ASSERT_EQ_INT(rc, 0, "(f) bogus rc");
+        ASSERT_EQ_STR(gw, "", "(f) bogus gw empty");
+        ASSERT_EQ_STR(ifc, "en0", "(f) bogus iface");
     }
 
     /* (g) "link#4%en0" -> the '%' splits off "link#4" as the address
@@ -107,10 +153,12 @@ main(void)
     {
         const char *in = "   gateway: link#4%en0\n"
                          "   interface: en0\n";
-        int rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
-        assert(rc == 0);
-        assert(gw[0] == '\0');
-        assert(strcmp(ifc, "en0") == 0);
+        poison(gw, sizeof(gw));
+        poison(ifc, sizeof(ifc));
+        rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
+        ASSERT_EQ_INT(rc, 0, "(g) link#N%zone rc");
+        ASSERT_EQ_STR(gw, "", "(g) link#N%zone gw empty");
+        ASSERT_EQ_STR(ifc, "en0", "(g) link#N%zone iface");
     }
 
     /* (h) "%en0" -> zone at position 0 leaves an empty address part
@@ -119,10 +167,12 @@ main(void)
     {
         const char *in = "   gateway: %en0\n"
                          "   interface: en0\n";
-        int rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
-        assert(rc == 0);
-        assert(gw[0] == '\0');
-        assert(strcmp(ifc, "en0") == 0);
+        poison(gw, sizeof(gw));
+        poison(ifc, sizeof(ifc));
+        rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
+        ASSERT_EQ_INT(rc, 0, "(h) %zone-only rc");
+        ASSERT_EQ_STR(gw, "", "(h) %zone-only gw empty");
+        ASSERT_EQ_STR(ifc, "en0", "(h) %zone-only iface");
     }
 
     /* (i) 49-char non-IP string (no '%') -> ip_len (49) >= sizeof(ip_part)
@@ -132,31 +182,37 @@ main(void)
         char value[50];
         memset(value, 'x', sizeof(value) - 1);
         value[sizeof(value) - 1] = '\0';
-        assert(strlen(value) == 49);
+        ASSERT_EQ_INT((int)strlen(value), 49, "(i) fixture length");
 
         char in[256];
         snprintf(in, sizeof(in), "   gateway: %s\n   interface: en0\n", value);
-        int rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
-        assert(rc == 0);
-        assert(gw[0] == '\0');
-        assert(strcmp(ifc, "en0") == 0);
+        poison(gw, sizeof(gw));
+        poison(ifc, sizeof(ifc));
+        rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
+        ASSERT_EQ_INT(rc, 0, "(i) 49-char rc");
+        ASSERT_EQ_STR(gw, "", "(i) 49-char gw empty (length guard)");
+        ASSERT_EQ_STR(ifc, "en0", "(i) 49-char iface");
     }
 
     /* (j) no gateway line at all -> rc=0, gateway empty, iface parsed. */
     {
         const char *in = "   interface: en0\n";
-        int rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
-        assert(rc == 0);
-        assert(gw[0] == '\0');
-        assert(strcmp(ifc, "en0") == 0);
+        poison(gw, sizeof(gw));
+        poison(ifc, sizeof(ifc));
+        rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
+        ASSERT_EQ_INT(rc, 0, "(j) no-gateway-line rc");
+        ASSERT_EQ_STR(gw, "", "(j) no-gateway-line gw empty");
+        ASSERT_EQ_STR(ifc, "en0", "(j) no-gateway-line iface");
     }
 
     /* (k) no interface line -> rc=-1 (iface not found is the sole error
      * condition). */
     {
         const char *in = "   gateway: 192.168.1.1\n";
-        int rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
-        assert(rc == -1);
+        poison(gw, sizeof(gw));
+        poison(ifc, sizeof(ifc));
+        rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
+        ASSERT_EQ_INT(rc, -1, "(k) no-interface-line rc");
     }
 
     /* (l) empty gateway value ("gateway:" with nothing after the colon)
@@ -164,12 +220,14 @@ main(void)
     {
         const char *in = "   gateway:\n"
                          "   interface: en0\n";
-        int rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
-        assert(rc == 0);
-        assert(gw[0] == '\0');
-        assert(strcmp(ifc, "en0") == 0);
+        poison(gw, sizeof(gw));
+        poison(ifc, sizeof(ifc));
+        rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));
+        ASSERT_EQ_INT(rc, 0, "(l) empty-gateway-value rc");
+        ASSERT_EQ_STR(gw, "", "(l) empty-gateway-value gw empty");
+        ASSERT_EQ_STR(ifc, "en0", "(l) empty-gateway-value iface");
     }
 
-    printf("test_route_parse_darwin: all OK\n");
-    return 0;
+    printf("\n=== test_route_parse_darwin: %d passed, %d failed ===\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
 }

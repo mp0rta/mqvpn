@@ -140,6 +140,38 @@ main(void)
         ASSERT_EQ_INT(rc, -1, "format-buffer-too-small");
     }
 
+    /* parse: empty servers field ("Wi-Fi\t\n") -> ACCEPTED with
+     * servers="". This pins the CURRENT implementation behavior: the tab
+     * is present and the service is non-empty, so the (newline-stripped)
+     * empty value passes the length checks. Note the writer side never
+     * produces this line — a service with no DNS is recorded as the
+     * literal "Empty" — so an empty field only appears in a hand-edited
+     * or corrupted backup. If it ever reaches restore, it would become an
+     * empty networksetup argument (hardware-verify item: what
+     * `networksetup -setdnsservers <svc> ""` actually does). */
+    {
+        char svc[64], srv[64];
+        int rc =
+            mqvpn_dns_backup_parse_line("Wi-Fi\t\n", svc, sizeof(svc), srv, sizeof(srv));
+        ASSERT_EQ_INT(rc, 0, "parse-empty-servers-accepted");
+        ASSERT_EQ_STR(svc, "Wi-Fi", "parse-empty-servers-service");
+        ASSERT_EQ_STR(srv, "", "parse-empty-servers-value");
+    }
+
+    /* parse: only the FIRST tab is the field separator — embedded tabs
+     * beyond it stay verbatim in the servers value (parse_line uses
+     * strchr, not a full split; the format side never emits such a line
+     * since servers are space-joined, so this only pins how a foreign
+     * line is read back). */
+    {
+        char svc[64], srv[64];
+        int rc = mqvpn_dns_backup_parse_line("Wi-Fi\t1.1.1.1\t8.8.8.8\n", svc,
+                                             sizeof(svc), srv, sizeof(srv));
+        ASSERT_EQ_INT(rc, 0, "parse-second-tab-rc");
+        ASSERT_EQ_STR(svc, "Wi-Fi", "parse-second-tab-service");
+        ASSERT_EQ_STR(srv, "1.1.1.1\t8.8.8.8", "parse-second-tab-kept-in-servers");
+    }
+
     /* parse: a line with NO trailing newline parses identically to one
      * with — parse_line does not require a line terminator. */
     {
