@@ -99,7 +99,7 @@ void cleanup_routes(platform_ctx_t *p);
 /* route_check.c */
 int iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *server);
 
-/* platform_{linux,darwin}.c — per-OS socket-to-interface pinning */
+/* per-OS socket-to-interface pinning (platform_linux.c / platform_darwin.c) */
 #if defined(__linux__)
 int linux_pin_socket_to_iface(int fd, const char *ifname);
 #elif defined(__APPLE__)

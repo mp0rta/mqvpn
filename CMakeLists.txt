@@ -46,6 +46,7 @@ if(XQUIC_BUILD_DIR)
             )
         endif()
     else()
+        # TODO(darwin): .dylib import path + Homebrew libevent prefix
         set_target_properties(xquic PROPERTIES
             IMPORTED_LOCATION "${XQUIC_BUILD_DIR}/libxquic.so"
         )
@@ -86,13 +87,13 @@ endif()
 # ---------- Hybrid mode TCP lane (lwIP, Linux-only in v1) ----------
 option(MQVPN_ENABLE_HYBRID_TCP_LANE
        "Build the hybrid-mode lwIP TCP lane (Linux-only in v1)" ON)
-if(MQVPN_ENABLE_HYBRID_TCP_LANE AND NOT WIN32 AND NOT ANDROID_CROSS_COMPILE)
+if(MQVPN_ENABLE_HYBRID_TCP_LANE AND NOT WIN32 AND NOT APPLE AND NOT ANDROID_CROSS_COMPILE)
     set(MQVPN_HYBRID_TCP_LANE_BUILD ON)
 else()
     if(MQVPN_ENABLE_HYBRID_TCP_LANE)
         message(WARNING "MQVPN_ENABLE_HYBRID_TCP_LANE requested but target "
-                         "is Windows/Android — hybrid TCP lane is Linux-only "
-                         "in v1, ignoring.")
+                         "is Windows/macOS/Android — hybrid TCP lane is "
+                         "Linux-only in v1, ignoring.")
     endif()
     set(MQVPN_HYBRID_TCP_LANE_BUILD OFF)
 endif()
@@ -383,7 +384,7 @@ target_link_libraries(mqvpn
     pthread
     dl
     m
-    stdc++
+    c++ # C++ runtime for BoringSSL; macOS SDKs ship libc++, not libstdc++
 )
 
 else() # NOT WIN32, NOT APPLE — Linux
