@@ -22,6 +22,7 @@
 #  include "compat/socket_compat.h"
 
 #  include <stdio.h>
+#  include <stdint.h> /* uint32_t for ROUTE_SA_ROUNDUP, uint8_t for sa_len */
 #  include <stdlib.h>
 #  include <string.h>
 #  include <unistd.h>
@@ -463,12 +464,13 @@ try_readd_removed_path(platform_ctx_t *p, const char *ifname)
  *  Layer A: PF_ROUTE message parsing + reactor (canon netlink_mon.c:473+)
  * ================================================================ */
 
-/* Round the trailing sockaddr length up to the message stride. This is
- * conservative power-of-2 padding: xnu walks appended sockaddrs by sa_len
- * and tolerates trailing pad, so 8-byte rounding is safe even though the
- * kernel's own ROUNDUP32 uses 4. */
+/* Round the trailing sockaddr length up to the message stride. xnu packs
+ * and parses routing-socket sockaddrs with 4-byte ROUNDUP32 (see route(4)
+ * consumers: network_cmds route.c, netstat); an 8-byte stride desyncs
+ * parsing after any 4-aligned sockaddr length. A sa_len==0 entry advances
+ * by the roundup minimum (4), preserving the infinite-loop guard. */
 #  define ROUTE_SA_ROUNDUP(a) \
-      ((a) > 0 ? (1 + (((a) - 1) | (sizeof(long) - 1))) : sizeof(long))
+      ((a) > 0 ? (1 + (((a) - 1) | (sizeof(uint32_t) - 1))) : sizeof(uint32_t))
 
 /* Periodically re-add platform slots whose library state is CLOSED but
  * whose interface is currently up. Fires every RECOVER_INTERVAL_SEC.
