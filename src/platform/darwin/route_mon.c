@@ -37,9 +37,9 @@
 #  include <net/if_dl.h>
 #  include <net/if_media.h> /* IFM_AVALID / IFM_ACTIVE for the carrier probe */
 #  include <net/route.h>
-/* struct if_msghdr / ifa_msghdr live in <net/if_var.h> on Darwin —
- * <net/if.h> pulls it in on most SDK configurations, kept explicit so a
- * strict-POSIX compile doesn't lose the message-header structs. */
+/* struct if_data (embedded by value in if_msghdr) is defined in
+ * <net/if_var.h>; net/if.h pulls it in on default configs — kept
+ * explicit. The msghdr structs themselves live in net/if.h. */
 #  include <net/if_var.h>
 #  include <ifaddrs.h>
 #  include <netinet/in.h>
@@ -553,8 +553,17 @@ recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
 
     mqvpn_path_info_t pinfo[MQVPN_MAX_PATHS];
     int n = 0;
-    if (mqvpn_client_get_paths(p->client, pinfo, MQVPN_MAX_PATHS, &n) != MQVPN_OK)
+    if (mqvpn_client_get_paths(p->client, pinfo, MQVPN_MAX_PATHS, &n) != MQVPN_OK) {
+        /* Darwin addition (rev12): the resync above may already have
+         * dropped paths (queuing PATH_ABANDON inside xquic) before this
+         * bail-out — drive the engine and re-arm the tick exactly as the
+         * bottom of this function does, so those frames don't wait for an
+         * unrelated timer. The canon's bare goto is safe there only
+         * because it has no pre-scan work. */
+        mqvpn_client_tick(p->client);
+        schedule_next_tick(p);
         goto rearm;
+    }
 
     for (int i = 0; i < p->path_mgr.n_paths; i++) {
         if (p->path_recover_failures[i] >= PATH_RECOVER_FAILURE_LIMIT) continue;
