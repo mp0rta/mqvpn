@@ -348,7 +348,46 @@ else()
     )
 endif()
 
-else() # NOT WIN32 — Linux
+elseif(APPLE)
+
+# ---------- mqvpn CLI binary (Darwin) ----------
+# Foundation slice only — routing/dns/killswitch/control_socket/status
+# are not yet ported to Darwin (see plan Tasks 2+); this target exists so
+# CMake can pick up an APPLE branch instead of falling into the Linux
+# else() below (which would pull in netlink_mon.c and Linux tun.c/dns.c
+# and fail to compile on Darwin).
+add_executable(mqvpn
+    src/main.c
+    src/platform/darwin/platform_darwin.c
+    src/platform/darwin/route_mon.c
+    src/platform/darwin/tun_utun.c
+    # TODO(darwin): routing/dns/killswitch/control_socket/status — foundation slice, out of this plan
+    src/path_mgr.c
+    src/config.c
+)
+
+target_include_directories(mqvpn PRIVATE
+    ${XQUIC_INCLUDE_DIR}
+    ${EVENT_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/platform/posix
+    ${CMAKE_SOURCE_DIR}/src/platform/darwin
+)
+
+target_link_libraries(mqvpn
+    mqvpn_lib
+    ${XQUIC_LIB}
+    ${EVENT_LIB}
+    ${SSL_LIB}
+    ${CRYPTO_LIB}
+    pthread
+    dl
+    m
+    stdc++
+)
+
+else() # NOT WIN32, NOT APPLE — Linux
 
 # Shared library variant
 add_library(mqvpn_shared SHARED ${MQVPN_LIB_SOURCES})
@@ -394,6 +433,7 @@ target_include_directories(mqvpn PRIVATE
     ${EVENT_INCLUDE_DIR}
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/platform/posix
     ${CMAKE_SOURCE_DIR}/src/platform/linux
 )
 
@@ -462,6 +502,7 @@ if(BUILD_TESTING)
     foreach(t ${MQVPN_UNIT_TESTS})
         target_include_directories(${t} PRIVATE
             ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/src/platform/posix
             ${CMAKE_SOURCE_DIR}/src/platform/linux
             ${CMAKE_SOURCE_DIR}/include
         )
@@ -622,6 +663,6 @@ if(DPKG_CMD)
     include(CPack)
 endif()
 
-endif() # WIN32 / Linux
+endif() # WIN32 / APPLE / Linux
 
 endif() # NOT ANDROID_CROSS_COMPILE

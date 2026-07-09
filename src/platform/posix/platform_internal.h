@@ -2,10 +2,11 @@
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 
 /*
- * platform_internal.h — Shared types for Linux platform layer
+ * platform_internal.h — Shared types for the POSIX platform layers
+ * (Linux, Darwin).
  *
- * Internal header used by platform_linux.c, routing.c, killswitch.c.
- * NOT part of the public API.
+ * Internal header used by platform_linux.c, routing.c, killswitch.c
+ * (and their Darwin counterparts). NOT part of the public API.
  */
 
 #ifndef MQVPN_PLATFORM_INTERNAL_H
@@ -76,13 +77,18 @@ typedef struct {
     /* Shutdown */
     int shutting_down;
 
-    /* Netlink path recovery */
-    int nl_fd; /* netlink socket, -1 if unavailable */
+    /* Path recovery event source (per-OS: netlink on Linux, PF_ROUTE on Darwin) */
+#if defined(__linux__)
+    int nl_fd;                 /* netlink socket, -1 if unavailable */
     struct event *ev_netlink;
+#elif defined(__APPLE__)
+    int rt_fd;                 /* PF_ROUTE socket, -1 if unavailable */
+    struct event *ev_route;
+#endif
 } platform_ctx_t;
 
-/* platform_linux.c — reactor entry points shared with netlink_mon.c */
-int linux_pin_socket_to_iface(int fd, const char *ifname);
+/* platform_{linux,darwin}.c — reactor entry points shared with
+ * netlink_mon.c (Linux) / route_mon.c (Darwin) */
 void on_socket_read(evutil_socket_t fd, short what, void *arg);
 void schedule_next_tick(platform_ctx_t *p);
 
@@ -92,6 +98,11 @@ void cleanup_routes(platform_ctx_t *p);
 
 /* route_check.c */
 int iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *server);
+#if defined(__linux__)
+int  linux_pin_socket_to_iface(int fd, const char *ifname);
+#elif defined(__APPLE__)
+int  darwin_pin_socket_to_iface(int fd, const char *ifname, sa_family_t af);
+#endif
 
 /* killswitch.c */
 int setup_killswitch(platform_ctx_t *p);
