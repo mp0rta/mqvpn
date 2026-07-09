@@ -889,6 +889,7 @@ cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *pe
 
     ssize_t res;
     do {
+        /* Winsock sendto() len is int; cast silences C4267 under /WX (size<=MTU). */
         res = sendto(fd, buf, (int)size, MSG_DONTWAIT, peer, peerlen);
     } while (res < 0 && errno == EINTR);
     if (res < 0) {
@@ -911,6 +912,7 @@ cb_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
 
     ssize_t res;
     do {
+        /* Winsock sendto() len is int; cast silences C4267 under /WX (size<=MTU). */
         res = sendto(fd, buf, (int)size, MSG_DONTWAIT, peer, peerlen);
     } while (res < 0 && errno == EINTR);
     if (res < 0) {

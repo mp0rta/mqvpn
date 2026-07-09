@@ -466,6 +466,7 @@ svr_do_send(mqvpn_server_t *s, const unsigned char *buf, size_t size,
     if (s->udp_fd < 0) return XQC_SOCKET_ERROR;
     ssize_t res;
     do {
+        /* Winsock sendto() len is int; cast silences C4267 under /WX (size<=MTU). */
         res = sendto(s->udp_fd, buf, (int)size, 0, peer, peerlen);
     } while (res < 0 && errno == EINTR);
     if (res < 0) {
