@@ -349,6 +349,15 @@ else()
     )
 endif()
 
+# MSVC warnings-as-errors, scoped to first-party targets only (xquic and
+# BoringSSL build in their own trees and are unaffected). Much of the
+# Windows platform code has no other automated gate than this compile,
+# so a silent warning here is a bug that ships.
+if(MSVC)
+    target_compile_options(mqvpn PRIVATE /WX)
+    target_compile_options(mqvpn_lib PRIVATE /WX)
+endif()
+
 else() # NOT WIN32 — Linux
 
 # Shared library variant
