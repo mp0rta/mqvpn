@@ -16,20 +16,24 @@
  * the tunnel via the host's normal v6 route). Do not fix this unilaterally
  * in a Darwin-only slice — it's a cross-platform follow-up.
  *
- * UNVERIFIED ON REAL MACOS HARDWARE (no Darwin machine in this dev
- * environment) — three separate items, each flagged again at its exact
- * use site below:
- *   1. That macOS's stock /etc/pf.conf evaluates every anchor whose name
- *      starts with "com.apple" followed by a slash (so loading rules into
- *      "com.apple/250.mqvpn" actually takes effect without this code also
- *      touching the main ruleset). This is the
- *      entire wiring strategy and is unverified end to end.
- *   2. Which stream (stdout or stderr) `pfctl -E`'s "Token : <N>" line
- *      is printed on, and the exact line format/casing.
- *   3. That `pfctl -X <token>` is the correct precise-decrement complement
- *      of `pfctl -E`'s reference-counted enable, and that a token-less
- *      cleanup (anchor flush only, `-X` skipped) truly leaves the host in
- *      a safe state — see the rationale in cleanup_killswitch().
+ * VERIFIED on real macOS 26.5 (arm64) — three items, each also flagged at
+ * its exact use site below:
+ *   1. macOS's stock /etc/pf.conf DOES evaluate anchors under the
+ *      "com.apple/" prefix: `pfctl -sr` lists a wildcard com.apple anchor in
+ *      the main ruleset, and rules loaded into "com.apple/250.mqvpn" actually
+ *      block traffic (curl bound to a physical IF fails while tunnel/lo0/
+ *      QUIC-to-server pass). The whole wiring strategy works end to end.
+ *   2. `pfctl -E`'s "Token : <N>" line is printed on STDERR (confirmed by
+ *      redirecting stdout to /dev/null) with that exact "Token : " prefix;
+ *      observed tokens are 19-20 decimal digits (uint64), well within
+ *      ks_pf_token[24]. run_pfctl_capture merges both streams anyway.
+ *   3. `pfctl -X <token>` precisely releases the enable reference (post-
+ *      shutdown `pfctl -s References` returns to "No pf starter references
+ *      held"); and the token-less crash path leaves a safe state — a
+ *      kill -9'd killswitch instance leaks its enable reference (pf stays
+ *      Enabled) but the startup anchor flush removes every rule, so traffic
+ *      flows and the lingering +1 reference is harmless (see
+ *      cleanup_killswitch()).
  *
  * Anchor rules are NOT tied to this process's lifetime: pf state lives in
  * the kernel, so a crashed mqvpn leaves the anchor (and, if this process

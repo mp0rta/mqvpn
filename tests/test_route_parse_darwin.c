@@ -8,14 +8,11 @@
  * Runs unprivileged: the parser is a pure string-to-string function, fed
  * canned `route -n get` text — no `route(8)` invocation, no network I/O.
  *
- * The canned multi-line shapes below (indented "   key: value" lines,
- * interleaved with unrelated keys such as "route to:"/"destination:"/
- * "flags:") are an ASSUMPTION about real `route -n get` output pending
- * hardware verification — see the block comment above
- * mqvpn_parse_route_get_output() in routing.c. If real macOS output
- * differs in indentation or key set, only the canned strings here (and
- * the parser's tolerance for them) need to change; the parser's IP-vs-
- * non-IP gateway classification is independent of exact formatting.
+ * Case (a) is REAL `route -n get <server>` output captured on macOS 26.5
+ * (arm64); the remaining cases (b)-(l) are synthetic edge cases probing the
+ * gateway IP-vs-non-IP classification (link#N / lladdr / zoned v6 / length
+ * guards), which is independent of exact route(8) framing. See the block
+ * comment above mqvpn_parse_route_get_output() in routing.c.
  *
  * Assertions are discriminating (which vector, actual vs expected) on
  * purpose: the darwin CI job is the ONLY executor of this test, so an
@@ -70,13 +67,23 @@ main(void)
     char ifc[IFNAMSIZ];
     int rc;
 
-    /* (a) v4 gateway + interface, realistic route(8) shape. */
+    /* (a) v4 gateway + interface, REAL `route -n get <server_ip>` output
+     * captured on macOS 26.5 (arm64) — an off-link server reached via the
+     * default route: note the extra "mask:" line and the trailing
+     * recvpipe/sendpipe metrics table (a header row + a values row, both
+     * colon-free so the parser skips them). Verifies the parser tolerates
+     * real route(8) framing, not just the minimal shape. */
     {
-        const char *in = "   route to: 10.0.0.1\n"
-                         "destination: 10.0.0.1\n"
-                         "       gateway: 192.168.1.1\n"
-                         "     interface: en0\n"
-                         "         flags: <UP,GATEWAY,DONE>\n";
+        const char *in = "   route to: 160.251.143.149\n"
+                         "destination: default\n"
+                         "       mask: default\n"
+                         "    gateway: 192.168.1.1\n"
+                         "  interface: en0\n"
+                         "      flags: <UP,GATEWAY,DONE,STATIC,PRCLONING,GLOBAL>\n"
+                         " recvpipe  sendpipe  ssthresh  rtt,msec    rttvar  "
+                         "hopcount      mtu     expire\n"
+                         "       0         0         0         0         0      "
+                         "    0      1500         0 \n";
         poison(gw, sizeof(gw));
         poison(ifc, sizeof(ifc));
         rc = mqvpn_parse_route_get_output(in, gw, sizeof(gw), ifc, sizeof(ifc));

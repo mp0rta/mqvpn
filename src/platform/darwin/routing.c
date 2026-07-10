@@ -38,18 +38,23 @@ run_route_cmd(const char *const argv[])
 
 /* `route -n get [-inet6] <dest>` output parsing.
  *
- * UNVERIFIED on real macOS (no Darwin hardware in this dev environment).
- * Assumed format per route(8), indented "key: value" lines, e.g.:
+ * Verified on macOS 26.5 (arm64). Real `route -n get <off-link server>`
+ * output is indented "key: value" lines plus a trailing colon-free metrics
+ * table (skipped), e.g.:
  *
- *      route to: 10.0.0.1
- *   destination: 10.0.0.1
- *       gateway: 10.0.0.254
+ *      route to: 160.251.143.149
+ *   destination: default
+ *          mask: default
+ *       gateway: 192.168.1.1
  *     interface: en0
+ *         flags: <UP,GATEWAY,DONE,STATIC,PRCLONING,GLOBAL>
+ *      recvpipe  sendpipe  ...
+ *             0         0  ...
  *
- * or, for an on-link destination, a "link#N" gateway entry instead of an
- * IP (no gateway hop — the caller must not pin a route via it). Verify
- * against real macOS output before relying on this in production; the
- * key names/whitespace handling here may need adjustment.
+ * For an on-link destination the gateway is rendered as "link#N" or an
+ * lladdr MAC instead of an IP (no gateway hop — the caller must not pin a
+ * route via it); those are handled by the IP-vs-non-IP filter below.
+ * (The exact captured vector is tests/test_route_parse_darwin.c case (a).)
  *
  * The gateway filter is non-IP-rejecting by design: `-n` forces numeric
  * output, so a usable gateway can only ever be an IPv4/IPv6 literal.

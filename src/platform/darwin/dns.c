@@ -285,13 +285,11 @@ list_services(struct dns_service *out, int max_out)
         return -1;
     }
 
-    /* UNVERIFIED on real macOS hardware (no Darwin machine in this dev
-     * environment): assumed output is one explanatory header line —
+    /* Verified on macOS 26.5: output is one explanatory header line —
      * "An asterisk (*) denotes that a network service is disabled." —
      * followed by one service name per line, with a leading '*' marking
-     * a disabled service. Skip both unconditionally. Verify against real
-     * `networksetup -listallnetworkservices` output before relying on
-     * this in production. */
+     * a disabled service. Skip the header (first line) unconditionally and
+     * any '*'-prefixed (disabled) service. */
     int n = 0;
     int first = 1;
     char *saveptr = NULL;
@@ -334,14 +332,14 @@ get_dns_servers(const char *service, char *out, size_t outlen)
         return -1;
     }
 
-    /* UNVERIFIED on real macOS hardware: the documented "no servers
-     * configured" output is a sentence of the form "There aren't any DNS
-     * Servers set on <service>.". Rather than matching that exact string
-     * (fragile across locales/macOS versions), match liberally: ANY
-     * output that isn't a clean list of IP literals (one per line, per
-     * `-getdnsservers`'s documented success format) is treated as
-     * "Empty". This is intentionally permissive so an unrecognized or
-     * localized sentence can never be misparsed as a bogus DNS server. */
+    /* Verified on macOS 26.5: the "no servers configured" output is the
+     * sentence "There aren't any DNS Servers set on <service>." Rather than
+     * matching that exact string (fragile across locales/macOS versions),
+     * match liberally: ANY output that isn't a clean list of IP literals
+     * (one per line, per `-getdnsservers`'s documented success format) is
+     * treated as "Empty". This is intentionally permissive so an
+     * unrecognized or localized sentence can never be misparsed as a bogus
+     * DNS server. */
     char joined[MQVPN_DNS_GETDNS_CAP];
     joined[0] = '\0';
     size_t used = 0;
