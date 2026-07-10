@@ -863,6 +863,32 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
 
 /* ─── UDP write callback (xquic → network) ─── */
 
+/* Return code for a per-path send that failed on the transport socket.
+ *
+ * Per xquic's write_socket_ex contract (xquic.h xqc_socket_write_ex_pt),
+ * XQC_SOCKET_ERROR triggers xqc_conn_should_close(), which tears down the
+ * WHOLE connection once it is down to its last active path (active_path_count
+ * < 2). On real macOS, removing a secondary path (USB tether unplug / Wi-Fi
+ * down) causes a brief routing flux that makes the SURVIVING path's very next
+ * sendto() transiently fail — and because that survivor is momentarily the
+ * only active path, the single transient error is treated as fatal and the
+ * multipath connection is destroyed + fully reconnected (~5s, new tunnel IP),
+ * instead of riding out on the survivor. Linux does not hit this: its sendto()
+ * does not transiently fail on sibling-path removal.
+ *
+ * Guard: only downgrade to EAGAIN (transient — xquic keeps the connection and
+ * retries) when at least one path still has a live socket. When NO live path
+ * remains, keep the hard XQC_SOCKET_ERROR so a genuinely dead connection still
+ * closes and reconnects. Since the guard requires an active fd to exist, the
+ * only behavioural change vs. before is in the exact "survivor's transient
+ * send error while siblings are alive" case — which is precisely the macOS bug
+ * and never arises on platforms whose sockets don't transiently fail there. */
+static ssize_t
+path_send_dead_retcode(const mqvpn_client_t *c)
+{
+    return (mqvpn_client_first_active_fd(c) >= 0) ? XQC_SOCKET_EAGAIN : XQC_SOCKET_ERROR;
+}
+
 static ssize_t
 cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *peer,
                 socklen_t peerlen, void *conn_user_data)
@@ -903,7 +929,7 @@ cb_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
     mqvpn_client_t *c = conn->client;
     int fd = get_fd_for_path(c, path_id);
-    if (fd < 0) return XQC_SOCKET_ERROR;
+    if (fd < 0) return path_send_dead_retcode(c);
 
     ssize_t res;
     do {
@@ -911,7 +937,7 @@ cb_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
     } while (res < 0 && errno == EINTR);
     if (res < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return XQC_SOCKET_EAGAIN;
-        return XQC_SOCKET_ERROR;
+        return path_send_dead_retcode(c);
     }
     c->bytes_tx += (uint64_t)res;
     {
