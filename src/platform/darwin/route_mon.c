@@ -1070,12 +1070,22 @@ setup_route_socket(platform_ctx_t *p)
  * treat -1 as PASS (fail open): an environment where the probe cannot run
  * must keep today's behavior rather than permanently blocking path
  * recovery. */
-int
-iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *server)
+/* One scoped RTM_GET probe: is there a route to `dst` scoped to `ifindex`?
+ * Returns 1 = route exists, 0 = definitely no route via this iface, -1 =
+ * query mechanism failed (fail open). Factored out of
+ * iface_has_route_to_server() so that function can issue a second
+ * (default-route) probe — see the fallback rationale there.
+ *
+ * want_default: when non-zero, append an all-zero RTA_NETMASK so the kernel
+ * does a NETWORK-route lookup (matching a /0 default route) instead of a HOST
+ * lookup for `dst`. A HOST lookup of 0.0.0.0 matches no route ("not in
+ * table") even when a scoped default route exists; `route -nv get -ifscope
+ * <if> default` emits exactly this DST+NETMASK pair (sockaddrs <DST,NETMASK,
+ * IFP>), whereas a host get emits DST only (<DST,IFP>, RTF_HOST). */
+static int
+darwin_scoped_route_probe(unsigned int ifindex, const struct sockaddr_storage *dst,
+                          int want_default)
 {
-    unsigned int ifindex = if_nametoindex(ifname);
-    if (ifindex == 0) return 0; /* iface gone: definitely unusable */
-
     /* Dedicated PF_ROUTE socket per probe — never the shared event socket
      * (p->rt_fd), which would interleave this synchronous reply with the
      * async RTM_* broadcasts on_route_event() consumes. */
@@ -1097,9 +1107,9 @@ iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *ser
     } req;
     memset(&req, 0, sizeof(req));
 
-    socklen_t salen = (server->ss_family == AF_INET6) ? sizeof(struct sockaddr_in6)
-                                                      : sizeof(struct sockaddr_in);
-    memcpy(req.space, server, salen);
+    socklen_t salen = (dst->ss_family == AF_INET6) ? sizeof(struct sockaddr_in6)
+                                                   : sizeof(struct sockaddr_in);
+    memcpy(req.space, dst, salen);
     /* The resolver's literal-IP fast paths may leave ss_len zero; the
      * routing socket walks appended sockaddrs by sa_len, so set it. */
     ((struct sockaddr *)(void *)req.space)->sa_len = (uint8_t)salen;
@@ -1111,11 +1121,25 @@ iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *ser
     int seq = (int)++seq_counter;
     pid_t pid = getpid();
 
-    req.rtm.rtm_msglen =
-        (u_short)(sizeof(struct rt_msghdr) + ROUTE_SA_ROUNDUP((int)salen));
+    size_t msglen = sizeof(struct rt_msghdr) + ROUTE_SA_ROUNDUP((int)salen);
+    int addrs = RTA_DST;
+    if (want_default) {
+        /* Append an all-zero netmask sockaddr (mask 0.0.0.0 == default) right
+         * after the (rounded-up) DST, and set RTA_NETMASK so the kernel does a
+         * network-route lookup that resolves through the scoped default route.
+         * addr bytes are already zero from the memset above. */
+        struct sockaddr *nm =
+            (struct sockaddr *)(void *)(req.space + ROUTE_SA_ROUNDUP((int)salen));
+        nm->sa_len = (uint8_t)salen;
+        nm->sa_family = dst->ss_family;
+        addrs |= RTA_NETMASK;
+        msglen += ROUTE_SA_ROUNDUP((int)salen);
+    }
+
+    req.rtm.rtm_msglen = (u_short)msglen;
     req.rtm.rtm_version = RTM_VERSION;
     req.rtm.rtm_type = RTM_GET;
-    req.rtm.rtm_addrs = RTA_DST;
+    req.rtm.rtm_addrs = addrs;
     req.rtm.rtm_flags = RTF_UP | RTF_IFSCOPE;
     req.rtm.rtm_index = (unsigned short)ifindex;
     req.rtm.rtm_pid = pid;
@@ -1170,6 +1194,43 @@ iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *ser
     }
     close(fd);
     return ret;
+}
+
+/* Public gate for the path re-add / reactivate paths (callers at the top of
+ * try_reactivate_by_ifname / try_readd_removed_path). Returns 1 = this iface
+ * can reach the server, 0 = definitely not, -1 = probe failed (callers treat
+ * -1 as PASS / fail open). */
+int
+iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *server)
+{
+    unsigned int ifindex = if_nametoindex(ifname);
+    if (ifindex == 0) return 0; /* iface gone: definitely unusable */
+
+    int r = darwin_scoped_route_probe(ifindex, server, 0);
+    if (r != 0) return r; /* 1 = route to server exists; -1 = probe failed (fail open) */
+
+    /* No interface-scoped route to the SPECIFIC server. On real multi-
+     * default-route macOS (e.g. Wi-Fi en0 + USB tether en5, each with its
+     * own default gateway), mqvpn pins the server /32 to a SINGLE primary
+     * gateway for split-tunnelling, so a scoped RTM_GET for the server via
+     * any OTHER interface answers ESRCH ("not in table") even when that
+     * interface has perfectly good upstream. But a multipath path socket is
+     * IP_BOUND_IF-pinned to its interface: its egress follows THAT
+     * interface's own default gateway, not the global server-route pin. So
+     * fall back to asking whether this interface has its own upstream — a
+     * scoped DEFAULT route. If it does, the bound socket can reach a public
+     * server through it and the recovered path MUST be re-addable (the HARD
+     * failover-reactivate requirement); if the interface has an address but
+     * no default route of its own, both probes return 0 and the path stays
+     * deferred exactly as before, preserving the "usable address but no
+     * route to the server" behaviour. Hardware-verified on macOS 26 (Wi-Fi +
+     * USB tether): scoped server probe via the tether → ESRCH, scoped
+     * default via the tether → its own gateway, so the recovered path
+     * re-adds instead of being trapped closed. */
+    struct sockaddr_storage any;
+    memset(&any, 0, sizeof(any));
+    any.ss_family = server->ss_family;
+    return (darwin_scoped_route_probe(ifindex, &any, 1) == 1) ? 1 : 0;
 }
 
 #endif /* __APPLE__ */
