@@ -334,6 +334,7 @@ add_executable(mqvpn
     src/platform/windows/routing.c
     src/platform/windows/firewall.c
     src/platform/windows/dns.c
+    src/platform/windows/net_mon.c
     src/path_mgr.c
     src/config.c
     src/compat/getopt.c
@@ -367,6 +368,24 @@ else()
         ${CRYPTO_LIB}
         ws2_32 iphlpapi fwpuclnt ole32
     )
+endif()
+
+# MSVC warnings-as-errors, scoped to first-party targets only (xquic and
+# BoringSSL build in their own trees and are unaffected). Much of the
+# Windows platform code has no other automated gate than this compile,
+# so a silent warning here is a bug that ships.
+if(MSVC)
+    # /utf-8: our sources are UTF-8. Without this, MSVC decodes them in the
+    # system ANSI code page, so on non-UTF-8 locales (e.g. CP932 Japanese)
+    # every non-ASCII byte raises C4819 — which /WX below turns fatal. CI
+    # runs an English-locale image so it never trips; build it anyway to keep
+    # first-party compiles locale-independent.
+    target_compile_options(mqvpn PRIVATE /WX /utf-8)
+    target_compile_options(mqvpn_lib PRIVATE /WX /utf-8)
+    # C4996 nags on strncpy/strerror; every use is bounds-checked with
+    # explicit NUL termination (the _s variants are not portable C11).
+    target_compile_definitions(mqvpn PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_definitions(mqvpn_lib PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
 elseif(APPLE)

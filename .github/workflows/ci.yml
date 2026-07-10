@@ -776,6 +776,12 @@ jobs:
           Test-Path build/Release/mqvpn.exe
           Get-Item build/Release/mqvpn.exe | Select-Object Name, Length
 
+      # Loads the exe (CRT + static libevent/xquic/BoringSSL link, Winsock
+      # init in main) instead of only checking the file exists. --version
+      # exits 0 without needing wintun or admin rights.
+      - name: Smoke-run binary
+        run: build/Release/mqvpn.exe --version
+
   android:
     runs-on: ubuntu-latest
     timeout-minutes: 20
