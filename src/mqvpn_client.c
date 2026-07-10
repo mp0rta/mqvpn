@@ -867,6 +867,39 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
 
 /* ─── UDP write callback (xquic → network) ─── */
 
+/* Return code for a per-path send that failed on the transport socket.
+ *
+ * Per xquic's write_socket_ex contract (xquic.h xqc_socket_write_ex_pt),
+ * XQC_SOCKET_ERROR triggers xqc_conn_should_close(), which tears down the
+ * WHOLE connection once it is down to its last active path (active_path_count
+ * < 2).
+ *
+ * Design: a send error is NEVER taken as proof of path death. Path life is
+ * decided solely by the platform monitors (netlink_mon / route_mon), which
+ * detach a dead path (platform_attached=0, fd closed). While any path is
+ * still attached, a failed send is downgraded to EAGAIN (xquic keeps the
+ * connection and retries); only when the monitors have detached every path
+ * does the hard XQC_SOCKET_ERROR propagate and close/reconnect.
+ *
+ * Send errors are untrustworthy on macOS because IP_BOUND_IF does not
+ * restrict the route lookup to the bound device up front the way Linux's
+ * SO_BINDTODEVICE does — it validates interface consistency against a lookup
+ * on the SHARED routing tree. A failover on a DIFFERENT interface invalidates
+ * cached routes, forcing surviving sockets to re-run the lookup, and while
+ * the table is being reconstructed there may transiently be no route
+ * consistent with the bound scope: sendto() on a perfectly healthy path
+ * fails. This applies even to a sole remaining path (e.g. during the scoped
+ * server-pin re-install window), so the downgrade deliberately covers the
+ * single-path case too — do NOT "tighten" this guard to exclude the failing
+ * path itself; that reintroduces the ~5s full reconnect (new tunnel IP) on
+ * transient flux. Other platforms' sockets do not fail this way, so this
+ * branch rarely fires there. */
+static ssize_t
+path_send_dead_retcode(const mqvpn_client_t *c)
+{
+    return (mqvpn_client_first_active_fd(c) >= 0) ? XQC_SOCKET_EAGAIN : XQC_SOCKET_ERROR;
+}
+
 static ssize_t
 cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *peer,
                 socklen_t peerlen, void *conn_user_data)
@@ -908,7 +941,7 @@ cb_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
     mqvpn_client_t *c = conn->client;
     int fd = get_fd_for_path(c, path_id);
-    if (fd < 0) return XQC_SOCKET_ERROR;
+    if (fd < 0) return path_send_dead_retcode(c);
 
     ssize_t res;
     do {
@@ -917,7 +950,7 @@ cb_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
     } while (res < 0 && errno == EINTR);
     if (res < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return XQC_SOCKET_EAGAIN;
-        return XQC_SOCKET_ERROR;
+        return path_send_dead_retcode(c);
     }
     c->bytes_tx += (uint64_t)res;
     {

@@ -7,6 +7,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
+env:
+  # Single source of truth for the BoringSSL pin in this workflow. MUST stay
+  # in lockstep with release.yml's BORINGSSL_COMMIT: CI must test the exact
+  # dependency revision the release builds ship.
+  BORINGSSL_COMMIT: "9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c"
+
 jobs:
   format-check:
     runs-on: ubuntu-latest
@@ -64,7 +70,7 @@ jobs:
         run: |
           git clone https://github.com/google/boringssl.git \
             third_party/xquic/third_party/boringssl
-          cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          cd third_party/xquic/third_party/boringssl && git checkout ${{ env.BORINGSSL_COMMIT }}
 
       - name: Build BoringSSL
         if: steps.bssl-cache.outputs.cache-hit != 'true'
@@ -157,7 +163,7 @@ jobs:
         run: |
           git clone https://github.com/google/boringssl.git \
             third_party/xquic/third_party/boringssl
-          cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          cd third_party/xquic/third_party/boringssl && git checkout ${{ env.BORINGSSL_COMMIT }}
 
       - name: Build BoringSSL (clang)
         if: steps.bssl-cache.outputs.cache-hit != 'true'
@@ -408,7 +414,7 @@ jobs:
         run: |
           git clone https://github.com/google/boringssl.git \
             third_party/xquic/third_party/boringssl
-          cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          cd third_party/xquic/third_party/boringssl && git checkout ${{ env.BORINGSSL_COMMIT }}
 
       - name: Build BoringSSL (clang + MSan)
         if: steps.bssl-cache.outputs.cache-hit != 'true'
@@ -572,6 +578,97 @@ jobs:
       - name: Systemd service integration test
         run: sudo scripts/ci_e2e/run_systemd_test.sh
 
+  darwin:
+    name: darwin build (core libs + platform TUs + CLI, unit tests)
+    # Full Darwin build: mqvpn_lib, a real libmqvpn.dylib linked against
+    # xquic + BoringSSL, the mqvpn_darwin_platform OBJECT target for the
+    # Darwin platform TUs, the full mqvpn CLI (client mode; server mode +
+    # control_socket are intentionally not ported — see CMakeLists.txt),
+    # and the Darwin unit test binaries (run via ctest below).
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install libevent
+        run: brew install libevent
+
+      - name: Compute xquic SHA
+        id: xqsha
+        run: echo "sha=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+-')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache BoringSSL (darwin arm64 clang)
+        id: bssl-cache
+        uses: actions/cache@v6
+        with:
+          path: third_party/xquic/third_party/boringssl
+          key: bssl-9c95ec7-darwin-arm64-clang-v1
+
+      - name: Clone BoringSSL (pinned)
+        if: steps.bssl-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl && git checkout ${{ env.BORINGSSL_COMMIT }}
+
+      - name: Build BoringSSL
+        if: steps.bssl-cache.outputs.cache-hit != 'true'
+        run: |
+          cd third_party/xquic/third_party/boringssl
+          mkdir -p build && cd build
+          cmake -DBUILD_SHARED_LIBS=0 ..
+          make -j"$(sysctl -n hw.ncpu)" ssl crypto
+
+      - name: Cache xquic (darwin Release)
+        id: xquic-cache
+        uses: actions/cache@v6
+        with:
+          # See "Cache xquic (Release)" comment above re: xqc_configure.h.
+          path: |
+            third_party/xquic/build
+            third_party/xquic/include/xquic/xqc_configure.h
+          key: xquic-${{ steps.xqsha.outputs.sha }}-darwin-arm64-clang-release-bssl-9c95ec7-v1
+
+      - name: Build xquic
+        if: steps.xquic-cache.outputs.cache-hit != 'true'
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          # -Wno-unknown-warning-option: xquic hardcodes -Werror plus the
+          # gcc-only -Wno-dangling-pointer for every non-MSVC compiler;
+          # AppleClang would otherwise error on the unknown warning flag
+          # (same workaround as the sanitizer job's clang xquic build).
+          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
+                -DXQC_ENABLE_BBR2=ON \
+                -DXQC_ENABLE_UNLIMITED=ON \
+                -DXQC_ENABLE_FEC=ON \
+                -DXQC_ENABLE_XOR=ON \
+                -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
+          make -j"$(sysctl -n hw.ncpu)"
+
+      - name: Build mqvpn (core libs + Darwin platform TUs + CLI + tests)
+        run: |
+          cmake -B build-darwin -DCMAKE_BUILD_TYPE=Debug \
+            -DXQUIC_BUILD_DIR="$GITHUB_WORKSPACE/third_party/xquic/build" \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
+            -DMQVPN_ENABLE_HYBRID_TCP_LANE=OFF \
+            -DCMAKE_C_FLAGS="-Wall -Wextra -Werror"
+          cmake --build build-darwin \
+            --target mqvpn_lib mqvpn_shared mqvpn_darwin_platform \
+                     mqvpn test_route_parse_darwin test_dns_backup_darwin \
+                     test_dns_state_darwin test_routing_seq_darwin test_killswitch_rules_darwin \
+            -j "$(sysctl -n hw.ncpu)"
+
+      - name: Verify artifacts
+        run: |
+          ls -l build-darwin/libmqvpn.a build-darwin/*.dylib build-darwin/mqvpn
+          file -L build-darwin/*.dylib
+
+      - name: Run Darwin unit tests
+        run: ctest --test-dir build-darwin --output-on-failure
+
   windows:
     # Pinned to windows-2022 (VS 2022). windows-latest migrated to VS 2026 in
     # June 2026, where the hardcoded `-G "Visual Studio 17 2022"` generator finds
@@ -617,7 +714,7 @@ jobs:
           git clone https://github.com/google/boringssl.git `
             third_party/xquic/third_party/boringssl
           cd third_party/xquic/third_party/boringssl
-          git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          git checkout ${{ env.BORINGSSL_COMMIT }}
 
       - name: Build BoringSSL
         if: steps.bssl-cache.outputs.cache-hit != 'true'
@@ -712,8 +809,8 @@ jobs:
           git clone --depth 1 https://github.com/google/boringssl.git \
             third_party/xquic/third_party/boringssl
           cd third_party/xquic/third_party/boringssl
-          git fetch --depth 1 origin 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
-          git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          git fetch --depth 1 origin ${{ env.BORINGSSL_COMMIT }}
+          git checkout ${{ env.BORINGSSL_COMMIT }}
 
       - name: NDK cross-compile (arm64-v8a)
         if: steps.ndk-cache.outputs.cache-hit != 'true'
@@ -809,7 +906,7 @@ jobs:
         run: |
           git clone https://github.com/google/boringssl.git \
             third_party/xquic/third_party/boringssl
-          cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          cd third_party/xquic/third_party/boringssl && git checkout ${{ env.BORINGSSL_COMMIT }}
 
       - name: Build BoringSSL (clang)
         if: steps.bssl-cache.outputs.cache-hit != 'true'

@@ -46,8 +46,15 @@ if(XQUIC_BUILD_DIR)
             )
         endif()
     else()
+        # Shared xquic's file extension differs between Darwin (.dylib) and
+        # Linux (.so); the static archive name below is the same on both.
+        if(APPLE)
+            set(XQUIC_SHARED_LIB_NAME "libxquic.dylib")
+        else()
+            set(XQUIC_SHARED_LIB_NAME "libxquic.so")
+        endif()
         set_target_properties(xquic PROPERTIES
-            IMPORTED_LOCATION "${XQUIC_BUILD_DIR}/libxquic.so"
+            IMPORTED_LOCATION "${XQUIC_BUILD_DIR}/${XQUIC_SHARED_LIB_NAME}"
         )
         if(EXISTS "${XQUIC_BUILD_DIR}/libxquic-static.a")
             add_library(xquic-static STATIC IMPORTED)
@@ -86,13 +93,13 @@ endif()
 # ---------- Hybrid mode TCP lane (lwIP, Linux-only in v1) ----------
 option(MQVPN_ENABLE_HYBRID_TCP_LANE
        "Build the hybrid-mode lwIP TCP lane (Linux-only in v1)" ON)
-if(MQVPN_ENABLE_HYBRID_TCP_LANE AND NOT WIN32 AND NOT ANDROID_CROSS_COMPILE)
+if(MQVPN_ENABLE_HYBRID_TCP_LANE AND NOT WIN32 AND NOT APPLE AND NOT ANDROID_CROSS_COMPILE)
     set(MQVPN_HYBRID_TCP_LANE_BUILD ON)
 else()
     if(MQVPN_ENABLE_HYBRID_TCP_LANE)
         message(WARNING "MQVPN_ENABLE_HYBRID_TCP_LANE requested but target "
-                         "is Windows/Android — hybrid TCP lane is Linux-only "
-                         "in v1, ignoring.")
+                         "is Windows/macOS/Android — hybrid TCP lane is "
+                         "Linux-only in v1, ignoring.")
     endif()
     set(MQVPN_HYBRID_TCP_LANE_BUILD OFF)
 endif()
@@ -117,12 +124,26 @@ if(ANDROID_CROSS_COMPILE)
         set(SSL_LIB "${BORINGSSL_BUILD_DIR}/libssl.a")
         set(CRYPTO_LIB "${BORINGSSL_BUILD_DIR}/libcrypto.a")
     endif()
+elseif(EXISTS "${BORINGSSL_BUILD_DIR}/ssl/libssl.a")
+    # Prefer the sibling BoringSSL build artifacts explicitly when they
+    # exist: find_library searches CMAKE_PREFIX_PATH (e.g. Homebrew on the
+    # darwin CI runner) BEFORE the HINTS below, which can silently resolve
+    # ssl/crypto to OpenSSL — but libxquic-static.a needs BoringSSL-only
+    # symbols (SSL_set_quic_method, EVP_AEAD_*, HKDF_*, ...) at final link,
+    # which only surfaces as undefined symbols when linking the CLI.
+    set(SSL_LIB "${BORINGSSL_BUILD_DIR}/ssl/libssl.a")
+    set(CRYPTO_LIB "${BORINGSSL_BUILD_DIR}/crypto/libcrypto.a")
+elseif(EXISTS "${BORINGSSL_BUILD_DIR}/libssl.a")
+    # Newer BoringSSL layouts place the archives at the build root.
+    set(SSL_LIB "${BORINGSSL_BUILD_DIR}/libssl.a")
+    set(CRYPTO_LIB "${BORINGSSL_BUILD_DIR}/libcrypto.a")
 else()
     find_library(SSL_LIB ssl
         HINTS ${BORINGSSL_BUILD_DIR} ${BORINGSSL_BUILD_DIR}/ssl /usr/local/lib /usr/local/babassl/lib)
     find_library(CRYPTO_LIB crypto
         HINTS ${BORINGSSL_BUILD_DIR} ${BORINGSSL_BUILD_DIR}/crypto /usr/local/lib /usr/local/babassl/lib)
 endif()
+message(STATUS "SSL_LIB=${SSL_LIB} CRYPTO_LIB=${CRYPTO_LIB}")
 
 # ---------- libmqvpn source files (shared between static and shared targets) ----------
 set(MQVPN_LIB_SOURCES
@@ -367,7 +388,139 @@ if(MSVC)
     target_compile_definitions(mqvpn_lib PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
-else() # NOT WIN32 — Linux
+elseif(APPLE)
+
+# ---------- mqvpn CLI binary (Darwin) ----------
+# Darwin platform layer: client mode is fully wired (drop+reactivate path
+# lifecycle, routing, killswitch, DNS). Server mode + control_socket are
+# intentionally not ported here (server mode is not built on macOS in v1).
+# This branch exists so CMake picks up APPLE instead of falling into the
+# Linux else() below (which would pull in netlink_mon.c and Linux
+# tun.c/dns.c and fail to compile on Darwin).
+add_executable(mqvpn
+    src/main.c
+    src/platform/darwin/platform_darwin.c
+    src/platform/darwin/route_mon.c
+    src/platform/darwin/tun_utun.c
+    src/platform/darwin/routing.c
+    src/platform/darwin/dns.c
+    src/platform/darwin/killswitch.c
+    src/platform/posix/status.c
+    src/platform/posix/dns_common.c
+    src/path_mgr.c
+    src/config.c
+)
+
+target_include_directories(mqvpn PRIVATE
+    ${XQUIC_INCLUDE_DIR}
+    ${EVENT_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/platform/posix
+    ${CMAKE_SOURCE_DIR}/src/platform/darwin
+)
+
+target_link_libraries(mqvpn
+    mqvpn_lib
+    ${XQUIC_LIB}
+    ${EVENT_LIB}
+    ${SSL_LIB}
+    ${CRYPTO_LIB}
+    pthread
+    dl
+    m
+    c++ # C++ runtime for BoringSSL; macOS SDKs ship libc++, not libstdc++
+)
+
+# Compile gate for CI: builds the Darwin platform TUs as a standalone
+# OBJECT target, independent of the full CLI link above. See
+# .github/workflows/ci.yml darwin job.
+add_library(mqvpn_darwin_platform OBJECT
+    src/platform/darwin/platform_darwin.c
+    src/platform/darwin/route_mon.c
+    src/platform/darwin/tun_utun.c
+    src/platform/darwin/routing.c
+    src/platform/darwin/dns.c
+    src/platform/darwin/killswitch.c
+    src/platform/posix/status.c
+    src/platform/posix/dns_common.c
+)
+
+target_include_directories(mqvpn_darwin_platform PRIVATE
+    ${XQUIC_INCLUDE_DIR}
+    ${EVENT_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/platform/posix
+    ${CMAKE_SOURCE_DIR}/src/platform/darwin
+)
+
+# Shared library variant — mirrors the Linux mqvpn_shared block below (kept
+# per-branch: everything past the platform split, tests/install/CPack
+# included, is Linux-only; same SOVERSION rationale as the Linux block).
+# Links c++ (not stdc++) for BoringSSL's C++ internals — macOS SDKs ship
+# libc++ only, and a .dylib must fully resolve its symbols at link time.
+add_library(mqvpn_shared SHARED ${MQVPN_LIB_SOURCES})
+set_target_properties(mqvpn_shared PROPERTIES
+    OUTPUT_NAME mqvpn
+    SOVERSION 2
+    C_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+)
+target_include_directories(mqvpn_shared
+    PUBLIC  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+    PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR}
+)
+# Shared lib links shared xquic, same as Linux (static .a is unusable there
+# for -fPIC reasons; kept symmetric here even though clang on Darwin emits
+# PIC by default).
+target_link_libraries(mqvpn_shared xquic ${SSL_LIB} ${CRYPTO_LIB} pthread c++)
+
+# ---------- Tests (Darwin) ----------
+# Only the tests that exercise Darwin-specific parsing/formatting run here;
+# the full unit suite stays Linux-only (see the Linux branch below).
+option(BUILD_TESTING "Build unit tests" ON)
+if(BUILD_TESTING)
+    enable_testing()
+    add_executable(test_route_parse_darwin
+        tests/test_route_parse_darwin.c src/platform/darwin/routing.c
+        src/platform/posix/dns_common.c src/log.c)
+        # dns_common.c: routing.c calls mqvpn_sa_host_prefix/mqvpn_sa_ntop —
+        # omitting it fails the darwin CI link with undefined symbols
+    add_executable(test_dns_backup_darwin
+        tests/test_dns_backup_darwin.c src/platform/darwin/dns.c
+        src/platform/posix/dns_common.c src/log.c)
+
+    # PATH-stub state machine tests (Task 10): inject fake networksetup/
+    # route/pfctl scripts via PATH (tests/fake_cmd.h) and drive the real
+    # apply/restore/setup/cleanup state machines end to end. Complement the
+    # pure-function tests above (test_route_parse_darwin / test_dns_backup_
+    # darwin), which never fork+exec anything.
+    add_executable(test_dns_state_darwin
+        tests/test_dns_state_darwin.c src/platform/darwin/dns.c
+        src/platform/posix/dns_common.c src/log.c)
+    add_executable(test_routing_seq_darwin
+        tests/test_routing_seq_darwin.c src/platform/darwin/routing.c
+        src/platform/posix/dns_common.c src/log.c)
+    # killswitch.c's build_pf_rules() is static, so this TU #includes
+    # killswitch.c directly (test_status.c's idiom) rather than linking it —
+    # only log.c is needed alongside.
+    add_executable(test_killswitch_rules_darwin
+        tests/test_killswitch_rules_darwin.c src/log.c)
+
+    foreach(t test_route_parse_darwin test_dns_backup_darwin
+              test_dns_state_darwin test_routing_seq_darwin test_killswitch_rules_darwin)
+        target_include_directories(${t} PRIVATE
+            ${EVENT_INCLUDE_DIR}   # platform_internal.h includes <event2/event.h>;
+                                   # brew's /opt/homebrew/include is not a default search path
+            ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/src/platform/posix
+            ${CMAKE_SOURCE_DIR}/src/platform/darwin)
+        add_test(NAME ${t} COMMAND ${t})
+    endforeach()
+endif()
+
+else() # NOT WIN32, NOT APPLE — Linux
 
 # Shared library variant
 add_library(mqvpn_shared SHARED ${MQVPN_LIB_SOURCES})
@@ -399,11 +552,12 @@ add_executable(mqvpn
     src/platform/linux/netlink_mon.c
     src/platform/linux/route_check.c
     src/platform/linux/control_socket.c
-    src/platform/linux/status.c
+    src/platform/posix/status.c
     src/platform/linux/routing.c
     src/platform/linux/killswitch.c
     src/platform/linux/tun.c
     src/platform/linux/dns.c
+    src/platform/posix/dns_common.c
     src/path_mgr.c
     src/config.c
 )
@@ -413,6 +567,7 @@ target_include_directories(mqvpn PRIVATE
     ${EVENT_INCLUDE_DIR}
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/platform/posix
     ${CMAKE_SOURCE_DIR}/src/platform/linux
 )
 
@@ -437,7 +592,7 @@ if(BUILD_TESTING)
     add_executable(test_config  tests/test_config.c  src/config.c  src/log.c)
     add_executable(test_auth    tests/test_auth.c    src/auth.c    src/log.c)
     add_executable(test_session tests/test_session.c src/addr_pool.c src/log.c)
-    add_executable(test_dns     tests/test_dns.c     src/platform/linux/dns.c     src/log.c)
+    add_executable(test_dns     tests/test_dns.c     src/platform/linux/dns.c     src/platform/posix/dns_common.c     src/log.c)
     add_executable(test_route_check tests/test_route_check.c src/platform/linux/route_check.c src/log.c)
     add_executable(test_flow_sched tests/test_flow_sched.c src/flow_sched.c src/log.c)
     add_executable(test_status tests/test_status.c)
@@ -481,9 +636,53 @@ if(BUILD_TESTING)
     foreach(t ${MQVPN_UNIT_TESTS})
         target_include_directories(${t} PRIVATE
             ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/src/platform/posix
             ${CMAKE_SOURCE_DIR}/src/platform/linux
             ${CMAKE_SOURCE_DIR}/include
         )
+        set_target_properties(${t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+        add_test(NAME ${t} COMMAND ${t})
+    endforeach()
+
+    # Darwin platform-twin PATH-stub state machine tests (Task 10), also
+    # registered here on Linux: the twins (darwin/dns.c, darwin/routing.c,
+    # darwin/killswitch.c) are portable POSIX C except for two Darwin-only
+    # fcntl commands, given placeholder values below for this compile only
+    # (inert on the real Darwin build, which already has both from
+    # <fcntl.h>).
+    #   - F_FULLFSYNC (dns.c's durability_flush): has an EINVAL fallback —
+    #     any value fcntl() rejects makes durability_flush() fall back to
+    #     fsync(), which is the correct and fully exercised behavior here,
+    #     so this uses an arbitrary placeholder (1000).
+    #   - F_SETNOSIGPIPE (killswitch.c's run_pfctl_stdin SIGPIPE guard): has
+    #     NO fallback — a nonzero fcntl() return hard-fails the call before
+    #     pfctl is ever forked. Its real Darwin value (73) is not a valid
+    #     Linux fcntl command and returns EINVAL there, which would block
+    #     every setup_killswitch() call at the first line and make 3 of the
+    #     4 killswitch scenarios below unreachable. Defined instead as
+    #     F_SETFD (2): a real POSIX fcntl command that always succeeds on a
+    #     pipe fd (it just sets FD_CLOEXEC — harmless, since the pipe is
+    #     closed before exec() either way), so the intended pfctl call
+    #     sequence actually runs on Linux too.
+    add_executable(test_dns_state_darwin
+        tests/test_dns_state_darwin.c src/platform/darwin/dns.c
+        src/platform/posix/dns_common.c src/log.c)
+    target_compile_definitions(test_dns_state_darwin PRIVATE F_FULLFSYNC=1000)
+
+    add_executable(test_routing_seq_darwin
+        tests/test_routing_seq_darwin.c src/platform/darwin/routing.c
+        src/platform/posix/dns_common.c src/log.c)
+
+    add_executable(test_killswitch_rules_darwin
+        tests/test_killswitch_rules_darwin.c src/log.c)
+    target_compile_definitions(test_killswitch_rules_darwin PRIVATE F_SETNOSIGPIPE=2)
+
+    foreach(t test_dns_state_darwin test_routing_seq_darwin test_killswitch_rules_darwin)
+        target_include_directories(${t} PRIVATE
+            ${EVENT_INCLUDE_DIR}   # platform_internal.h includes <event2/event.h>
+            ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/src/platform/posix
+            ${CMAKE_SOURCE_DIR}/src/platform/darwin)
         set_target_properties(${t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
         add_test(NAME ${t} COMMAND ${t})
     endforeach()
@@ -641,6 +840,6 @@ if(DPKG_CMD)
     include(CPack)
 endif()
 
-endif() # WIN32 / Linux
+endif() # WIN32 / APPLE / Linux
 
 endif() # NOT ANDROID_CROSS_COMPILE

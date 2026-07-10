@@ -12,7 +12,7 @@
 #include <assert.h>
 
 /* Pull in static functions from status.c */
-#include "../src/platform/linux/status.c"
+#include "../src/platform/posix/status.c"
 
 /* ── Test infrastructure ── */
 

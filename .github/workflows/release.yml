@@ -28,6 +28,10 @@ jobs:
           # those. arm64 stays on 24.04 because GitHub has no 22.04 ARM runner.
           - { os: linux,   arch: amd64, runner: ubuntu-22.04     }
           - { os: linux,   arch: arm64, runner: ubuntu-24.04-arm }
+          # macos-14 (arm64) matches ci.yml's darwin job — the only Darwin
+          # config that is continuously tested. Intel (x86_64) is deliberately
+          # not built: no CI coverage, and Apple silicon covers current Macs.
+          - { os: darwin,  arch: arm64, runner: macos-14         }
           # amd64 pinned to windows-2022 (VS 2022): windows-latest migrated to
           # VS 2026 in June 2026, breaking the hardcoded "Visual Studio 17 2022"
           # generator. Revisit (bump generator / Ninja) before windows-2022 retires.
@@ -183,6 +187,131 @@ jobs:
       - name: Stage release artifacts
         if: matrix.os == 'linux'
         run: cp build/mqvpn_*.deb .
+
+      - name: Install libevent (macOS)
+        if: matrix.os == 'darwin'
+        run: brew install libevent
+
+      - name: Clone BoringSSL (macOS)
+        if: matrix.os == 'darwin'
+        run: |
+          BSSL_DIR=third_party/xquic/third_party/boringssl
+          if [ ! -f "$BSSL_DIR/CMakeLists.txt" ]; then
+            git clone https://github.com/google/boringssl.git "$BSSL_DIR"
+          fi
+          cd "$BSSL_DIR" && git checkout ${{ env.BORINGSSL_COMMIT }}
+
+      - name: Build BoringSSL (macOS)
+        if: matrix.os == 'darwin'
+        run: |
+          cd third_party/xquic/third_party/boringssl
+          mkdir -p build && cd build
+          cmake -DBUILD_SHARED_LIBS=0 ..
+          make -j"$(sysctl -n hw.ncpu)" ssl crypto
+
+      - name: Build xquic (macOS)
+        if: matrix.os == 'darwin'
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          # -Wno-unknown-warning-option: xquic hardcodes -Werror plus the
+          # gcc-only -Wno-dangling-pointer for every non-MSVC compiler;
+          # AppleClang would otherwise error on the unknown warning flag
+          # (same workaround as ci.yml's darwin job).
+          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
+                -DXQC_ENABLE_BBR2=ON \
+                -DXQC_ENABLE_UNLIMITED=ON \
+                -DXQC_ENABLE_FEC=ON \
+                -DXQC_ENABLE_XOR=ON \
+                -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
+          make -j"$(sysctl -n hw.ncpu)"
+
+      - name: Build mqvpn (macOS)
+        if: matrix.os == 'darwin'
+        run: |
+          # EVENT_LIB is pinned to Homebrew's static archive so the shipped
+          # binary has no Homebrew runtime dependency (find_library would
+          # otherwise resolve to libevent.dylib under /opt/homebrew, which
+          # end-user machines don't have). xquic + BoringSSL are already
+          # static: CMakeLists.txt prefers libxquic-static.a when present.
+          cmake -B build -DCMAKE_BUILD_TYPE=Release \
+                -DXQUIC_BUILD_DIR="$GITHUB_WORKSPACE/third_party/xquic/build" \
+                -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
+                -DMQVPN_ENABLE_HYBRID_TCP_LANE=OFF \
+                -DEVENT_LIB="$(brew --prefix libevent)/lib/libevent.a"
+          cmake --build build -j "$(sysctl -n hw.ncpu)"
+
+      - name: Unit tests (macOS)
+        if: matrix.os == 'darwin'
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Verify self-contained binary (macOS)
+        if: matrix.os == 'darwin'
+        run: |
+          otool -L build/mqvpn
+          # First otool line is the file name; the rest must be system
+          # libraries. A Homebrew path here means the binary would fail to
+          # load on machines without that formula installed.
+          if otool -L build/mqvpn | tail -n +2 | grep -vE '^\s*(/usr/lib/|/System/)'; then
+            echo "::error::mqvpn links non-system libraries (see lines above)"
+            exit 1
+          fi
+          # 2>&1: main.c prints the usage text to stderr, not stdout.
+          out=$(./build/mqvpn --help 2>&1)
+          if ! printf '%s\n' "$out" | grep -q '^Usage:'; then
+            echo "::error::mqvpn --help did not print the expected 'Usage:' banner"
+            printf '%s\n' "$out"
+            exit 1
+          fi
+
+      - name: Create tarball (macOS)
+        if: matrix.os == 'darwin'
+        # No lwip.txt (unlike the Linux tarball): the lwIP hybrid TCP lane is
+        # Linux-only, so lwIP is not compiled into the macOS binary. libevent
+        # IS bundled here (statically linked above; BSD-3-Clause requires the
+        # license text to accompany binary distributions).
+        run: |
+          STAGING="mqvpn_${VERSION}_darwin_${{ matrix.arch }}"
+          mkdir -p "$STAGING/third-party"
+          cp build/mqvpn                 "$STAGING/"
+          cp packaging/macos/README.txt  "$STAGING/"
+          cp systemd/client.conf.example "$STAGING/"
+          cp LICENSE "$STAGING/"
+          cp NOTICE  "$STAGING/"
+          cp third_party/xquic/LICENSE                       "$STAGING/third-party/xquic.txt"
+          cp third_party/xquic/third_party/boringssl/LICENSE "$STAGING/third-party/boringssl.txt"
+          libevent_lic="$(brew --prefix libevent)/LICENSE"
+          if [ ! -f "$libevent_lic" ]; then
+            echo "::error::libevent LICENSE not found at $libevent_lic — Homebrew layout may have changed"
+            exit 1
+          fi
+          cp "$libevent_lic" "$STAGING/third-party/libevent.txt"
+          tar czf "mqvpn_${VERSION}_darwin_${{ matrix.arch }}.tar.gz" -C "$STAGING" .
+          rm -rf "$STAGING"
+
+      - name: Verify license files in tarball (macOS)
+        if: matrix.os == 'darwin'
+        run: |
+          set -e
+          tarball=$(ls mqvpn_*_darwin_*.tar.gz)
+          expected=5
+          found=$(tar tzf "$tarball" \
+                  | grep -cE '^\./(LICENSE|NOTICE|third-party/(xquic|boringssl|libevent)\.txt)$' \
+                  || true)
+          if [ "$found" -ne "$expected" ]; then
+            echo "::error::macOS tarball missing license files (found $found of $expected)"
+            tar tzf "$tarball" | grep -E 'LICENSE|NOTICE|third-party' || echo "  (none found)"
+            exit 1
+          fi
+
+      - name: Upload macOS artifact
+        if: matrix.os == 'darwin'
+        uses: actions/upload-artifact@v7
+        with:
+          # Artifact name includes the OS: the Linux job already uses
+          # release-arm64, so a bare release-${arch} would collide.
+          name: release-darwin-${{ matrix.arch }}
+          path: mqvpn_*_darwin_${{ matrix.arch }}.tar.gz
 
       - name: Setup MSVC dev environment (Windows)
         if: matrix.os == 'windows'
