@@ -22,7 +22,7 @@ features:
     details: Minimize disruption during path changes while combining multiple paths for better performance and stability.
   - icon: 🖥️
     title: Multi-Platform
-    details: Available on Linux (client and server), with Windows (client) and Android/Kotlin support.
+    details: Available on Linux (client and server), with Windows (client), macOS (client) and Android/Kotlin support.
   - icon: 🏗️
     title: Built on QUIC + MASQUE
     details: A modern VPN architecture built on open Internet standards.
