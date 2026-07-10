@@ -868,21 +868,28 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
  * Per xquic's write_socket_ex contract (xquic.h xqc_socket_write_ex_pt),
  * XQC_SOCKET_ERROR triggers xqc_conn_should_close(), which tears down the
  * WHOLE connection once it is down to its last active path (active_path_count
- * < 2). On real macOS, removing a secondary path (USB tether unplug / Wi-Fi
- * down) causes a brief routing flux that makes the SURVIVING path's very next
- * sendto() transiently fail — and because that survivor is momentarily the
- * only active path, the single transient error is treated as fatal and the
- * multipath connection is destroyed + fully reconnected (~5s, new tunnel IP),
- * instead of riding out on the survivor. Linux does not hit this: its sendto()
- * does not transiently fail on sibling-path removal.
+ * < 2).
  *
- * Guard: only downgrade to EAGAIN (transient — xquic keeps the connection and
- * retries) when at least one path still has a live socket. When NO live path
- * remains, keep the hard XQC_SOCKET_ERROR so a genuinely dead connection still
- * closes and reconnects. Since the guard requires an active fd to exist, the
- * only behavioural change vs. before is in the exact "survivor's transient
- * send error while siblings are alive" case — which is precisely the macOS bug
- * and never arises on platforms whose sockets don't transiently fail there. */
+ * Design: a send error is NEVER taken as proof of path death. Path life is
+ * decided solely by the platform monitors (netlink_mon / route_mon), which
+ * detach a dead path (platform_attached=0, fd closed). While any path is
+ * still attached, a failed send is downgraded to EAGAIN (xquic keeps the
+ * connection and retries); only when the monitors have detached every path
+ * does the hard XQC_SOCKET_ERROR propagate and close/reconnect.
+ *
+ * Send errors are untrustworthy on macOS because IP_BOUND_IF does not
+ * restrict the route lookup to the bound device up front the way Linux's
+ * SO_BINDTODEVICE does — it validates interface consistency against a lookup
+ * on the SHARED routing tree. A failover on a DIFFERENT interface invalidates
+ * cached routes, forcing surviving sockets to re-run the lookup, and while
+ * the table is being reconstructed there may transiently be no route
+ * consistent with the bound scope: sendto() on a perfectly healthy path
+ * fails. This applies even to a sole remaining path (e.g. during the scoped
+ * server-pin re-install window), so the downgrade deliberately covers the
+ * single-path case too — do NOT "tighten" this guard to exclude the failing
+ * path itself; that reintroduces the ~5s full reconnect (new tunnel IP) on
+ * transient flux. Other platforms' sockets do not fail this way, so this
+ * branch rarely fires there. */
 static ssize_t
 path_send_dead_retcode(const mqvpn_client_t *c)
 {
