@@ -7,6 +7,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
+env:
+  # Single source of truth for the BoringSSL pin in this workflow. MUST stay
+  # in lockstep with release.yml's BORINGSSL_COMMIT: CI must test the exact
+  # dependency revision the release builds ship.
+  BORINGSSL_COMMIT: "9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c"
+
 jobs:
   format-check:
     runs-on: ubuntu-latest
@@ -64,7 +70,7 @@ jobs:
         run: |
           git clone https://github.com/google/boringssl.git \
             third_party/xquic/third_party/boringssl
-          cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          cd third_party/xquic/third_party/boringssl && git checkout ${{ env.BORINGSSL_COMMIT }}
 
       - name: Build BoringSSL
         if: steps.bssl-cache.outputs.cache-hit != 'true'
@@ -157,7 +163,7 @@ jobs:
         run: |
           git clone https://github.com/google/boringssl.git \
             third_party/xquic/third_party/boringssl
-          cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          cd third_party/xquic/third_party/boringssl && git checkout ${{ env.BORINGSSL_COMMIT }}
 
       - name: Build BoringSSL (clang)
         if: steps.bssl-cache.outputs.cache-hit != 'true'
@@ -408,7 +414,7 @@ jobs:
         run: |
           git clone https://github.com/google/boringssl.git \
             third_party/xquic/third_party/boringssl
-          cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          cd third_party/xquic/third_party/boringssl && git checkout ${{ env.BORINGSSL_COMMIT }}
 
       - name: Build BoringSSL (clang + MSan)
         if: steps.bssl-cache.outputs.cache-hit != 'true'
@@ -605,7 +611,7 @@ jobs:
         run: |
           git clone https://github.com/google/boringssl.git \
             third_party/xquic/third_party/boringssl
-          cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          cd third_party/xquic/third_party/boringssl && git checkout ${{ env.BORINGSSL_COMMIT }}
 
       - name: Build BoringSSL
         if: steps.bssl-cache.outputs.cache-hit != 'true'
@@ -708,7 +714,7 @@ jobs:
           git clone https://github.com/google/boringssl.git `
             third_party/xquic/third_party/boringssl
           cd third_party/xquic/third_party/boringssl
-          git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          git checkout ${{ env.BORINGSSL_COMMIT }}
 
       - name: Build BoringSSL
         if: steps.bssl-cache.outputs.cache-hit != 'true'
@@ -797,8 +803,8 @@ jobs:
           git clone --depth 1 https://github.com/google/boringssl.git \
             third_party/xquic/third_party/boringssl
           cd third_party/xquic/third_party/boringssl
-          git fetch --depth 1 origin 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
-          git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          git fetch --depth 1 origin ${{ env.BORINGSSL_COMMIT }}
+          git checkout ${{ env.BORINGSSL_COMMIT }}
 
       - name: NDK cross-compile (arm64-v8a)
         if: steps.ndk-cache.outputs.cache-hit != 'true'
@@ -894,7 +900,7 @@ jobs:
         run: |
           git clone https://github.com/google/boringssl.git \
             third_party/xquic/third_party/boringssl
-          cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          cd third_party/xquic/third_party/boringssl && git checkout ${{ env.BORINGSSL_COMMIT }}
 
       - name: Build BoringSSL (clang)
         if: steps.bssl-cache.outputs.cache-hit != 'true'
