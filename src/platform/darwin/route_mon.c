@@ -265,6 +265,14 @@ try_reactivate_by_ifname(platform_ctx_t *p, const char *ifname)
             continue;
         }
 
+        /* #F1: the interface flap that dropped this path also flushed its
+         * scoped server pin — restore it BEFORE the reactivated path sends
+         * its first PATH_CHALLENGE, or the challenge dies with ENETUNREACH
+         * and the slot parks in VALIDATING (rationale at
+         * darwin_scoped_server_pin). Best-effort: on failure keep today's
+         * behavior and let xquic's challenge retransmits probe the route. */
+        if (p->routing_configured) (void)darwin_scoped_server_pin(p, ifname);
+
         int ret = mqvpn_client_reactivate_path(p->client, h);
         if (ret == MQVPN_OK) {
             LOG_INF("routemon: reactivated path %s", ifname);
@@ -455,6 +463,11 @@ try_readd_removed_path(platform_ctx_t *p, const char *ifname)
          * wire). The 3s recovery timer retries once a route exists.
          * -1 (probe unavailable) intentionally passes — fail open. */
         if (iface_has_route_to_server(ifname, &p->server_addr) == 0) return 0;
+
+        /* #F1: re-install this interface's scoped server pin before the
+         * add-path below fires the first PATH_CHALLENGE — see the twin
+         * call in try_reactivate_by_ifname. */
+        if (p->routing_configured) (void)darwin_scoped_server_pin(p, ifname);
 
         mqvpn_path_t *mp = &p->path_mgr.paths[i];
         int fd = recovery_socket_create(p->server_addr.ss_family, ifname, mp);

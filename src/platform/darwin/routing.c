@@ -129,9 +129,12 @@ mqvpn_parse_route_get_output(const char *out, char *gateway, size_t gw_len, char
     return iface[0] ? 0 : -1;
 }
 
+/* Run a `route -n get ...` command and parse its stdout into gateway/iface.
+ * Factored out of discover_route so discover_scoped_gateway can issue the
+ * -ifscope variant through the identical fork/pipe/parse path. */
 static int
-discover_route(const char *server_ip, sa_family_t af, char *gateway, size_t gw_len,
-               char *iface, size_t if_len)
+route_get_and_parse(const char *const argv[], char *gateway, size_t gw_len,
+                    char *iface, size_t if_len)
 {
     int fds[2];
     if (pipe(fds) < 0) return -1;
@@ -144,12 +147,10 @@ discover_route(const char *server_ip, sa_family_t af, char *gateway, size_t gw_l
     }
 
     if (pid == 0) {
-        const char *const a4[] = {"route", "-n", "get", server_ip, NULL};
-        const char *const a6[] = {"route", "-n", "get", "-inet6", server_ip, NULL};
         close(fds[0]);
         if (dup2(fds[1], STDOUT_FILENO) < 0) _exit(127);
         close(fds[1]);
-        execvp("route", (char *const *)((af == AF_INET6) ? a6 : a4));
+        execvp("route", (char *const *)argv);
         _exit(127);
     }
 
@@ -165,6 +166,139 @@ discover_route(const char *server_ip, sa_family_t af, char *gateway, size_t gw_l
 
     out[nread] = '\0';
     return mqvpn_parse_route_get_output(out, gateway, gw_len, iface, if_len);
+}
+
+static int
+discover_route(const char *server_ip, sa_family_t af, char *gateway, size_t gw_len,
+               char *iface, size_t if_len)
+{
+    const char *const a4[] = {"route", "-n", "get", server_ip, NULL};
+    const char *const a6[] = {"route", "-n", "get", "-inet6", server_ip, NULL};
+    return route_get_and_parse((af == AF_INET6) ? a6 : a4, gateway, gw_len, iface,
+                               if_len);
+}
+
+/* ── Per-interface scoped server pins (multipath, follow-up #F1) ──
+ *
+ * setup_routes()'s unscoped server pin goes via ONE gateway — whichever
+ * interface owned the primary default route at connect time. When THAT
+ * interface goes down, the kernel flushes the pin together with the
+ * interface's routes, and nothing restores it. From then on the server IP
+ * resolves through the utun catch-all (128.0.0.0/1), and xnu's scoped
+ * route lookup (what an IP_BOUND_IF path socket does on every send)
+ * rejects that more-specific route on ifp mismatch WITHOUT backtracking
+ * to the interface's own default route: every sendto() on a recovered
+ * path fails ENETUNREACH, the PATH_CHALLENGE never reaches the wire, and
+ * the path parks in VALIDATING forever (watchdog shows the public
+ * projection: "stuck in PENDING"). Hardware-verified on macOS 26.5
+ * (arm64, Wi-Fi en0 + USB ethernet en6): after a churn flap the recovered
+ * path retransmitted PATH_CHALLENGE for minutes with 14k+ socket errors,
+ * and manually adding the scoped host route flipped it to ACTIVE within
+ * 40 ms.
+ *
+ * Invariant maintained here: every multipath interface carries its own
+ * RTF_IFSCOPE host route to the server via its own gateway, so a path
+ * socket's scoped lookup never depends on which interface currently owns
+ * the unscoped primary default (configd reshuffles that on every
+ * interface arrival/departure). The kernel flushes a scoped pin with its
+ * interface on down; try_readd_removed_path / try_reactivate_by_ifname
+ * (route_mon.c) re-install it before handing the recovered socket back
+ * to xquic. */
+
+/* Gateway of ifname's own (scoped) default route, via
+ * `route -n get [-inet6] -ifscope <if> default`. Empty gateway = on-link
+ * upstream (link#N / lladdr rendering, same filter as discover_route).
+ * Returns 0 on success, -1 if the interface has no default route. */
+static int
+discover_scoped_gateway(const char *ifname, sa_family_t af, char *gateway,
+                        size_t gw_len)
+{
+    char gw_iface[IFNAMSIZ];
+    const char *const a4[] = {"route", "-n",      "get",     "-ifscope",
+                              ifname,  "default", NULL};
+    const char *const a6[] = {"route",    "-n",   "get",     "-inet6",
+                              "-ifscope", ifname, "default", NULL};
+    if (route_get_and_parse((af == AF_INET6) ? a6 : a4, gateway, gw_len, gw_iface,
+                            sizeof(gw_iface)) < 0)
+        return -1;
+    /* A scoped default get answers for exactly this interface; a reply
+     * naming another iface means there is no usable default via ifname. */
+    if (strcmp(gw_iface, ifname) != 0) return -1;
+    return 0;
+}
+
+int
+darwin_scoped_server_pin(platform_ctx_t *p, const char *ifname)
+{
+    if (!p->routing_configured) return -1;
+
+    sa_family_t af = p->server_addr.ss_family;
+    char host_cidr[INET6_ADDRSTRLEN + 5];
+    snprintf(host_cidr, sizeof(host_cidr), "%s/%d", p->server_ip_str,
+             mqvpn_sa_host_prefix(&p->server_addr));
+
+    char gw[INET6_ADDRSTRLEN];
+    if (discover_scoped_gateway(ifname, af, gw, sizeof(gw)) < 0) {
+        LOG_WRN("scoped server pin: no default route via %s", ifname);
+        return -1;
+    }
+
+    /* add, then retry as change — same no-`replace`-verb idiom (and the
+     * same fires-on-any-failure caveat) as setup_routes' unscoped pin. */
+    const char *argv[10];
+    int n = 0;
+    argv[n++] = "route";
+    argv[n++] = "-n";
+    argv[n++] = "add";
+    if (af == AF_INET6) argv[n++] = "-inet6";
+    argv[n++] = "-ifscope";
+    argv[n++] = ifname;
+    argv[n++] = host_cidr;
+    if (gw[0] != '\0') {
+        argv[n++] = gw;
+    } else {
+        /* On-link upstream: pin via the interface itself, mirroring
+         * setup_routes' on-link branch. */
+        argv[n++] = "-interface";
+        argv[n++] = ifname;
+    }
+    argv[n] = NULL;
+
+    int ok = (run_route_cmd(argv) == 0);
+    if (!ok) {
+        argv[2] = "change";
+        ok = (run_route_cmd(argv) == 0);
+    }
+    if (!ok) {
+        LOG_WRN("scoped server pin for %s failed", ifname);
+        return -1;
+    }
+    LOG_INF("scoped server pin: %s via %s dev %s", p->server_ip_str,
+            gw[0] ? gw : "on-link", ifname);
+    return 0;
+}
+
+/* Best-effort teardown twin of darwin_scoped_server_pin. Deleting a pin
+ * the kernel already flushed with its interface fails silently — fine. */
+static void
+scoped_server_pin_delete(platform_ctx_t *p, const char *ifname)
+{
+    sa_family_t af = p->server_addr.ss_family;
+    char host_cidr[INET6_ADDRSTRLEN + 5];
+    snprintf(host_cidr, sizeof(host_cidr), "%s/%d", p->server_ip_str,
+             mqvpn_sa_host_prefix(&p->server_addr));
+
+    const char *argv[8];
+    int n = 0;
+    argv[n++] = "route";
+    argv[n++] = "-n";
+    argv[n++] = "delete";
+    if (af == AF_INET6) argv[n++] = "-inet6";
+    argv[n++] = "-ifscope";
+    argv[n++] = ifname;
+    argv[n++] = host_cidr;
+    argv[n] = NULL;
+    (void)run_route_cmd(argv);
 }
 
 int
@@ -260,6 +394,16 @@ setup_routes(platform_ctx_t *p)
             LOG_WRN("failed to set IPv6 catch-all routes (continuing IPv4-only)");
         }
     }
+
+    /* Multipath: give every path interface its own scoped pin so a path
+     * socket's reachability never depends on the single unscoped pin above
+     * (follow-up #F1; doc block at darwin_scoped_server_pin). Best-effort:
+     * an interface without upstream right now gets its pin from route_mon
+     * at re-add/reactivate time instead. */
+    for (int i = 0; i < p->path_mgr.n_paths; i++) {
+        if (p->path_mgr.paths[i].iface[0] == '\0') continue;
+        (void)darwin_scoped_server_pin(p, p->path_mgr.paths[i].iface);
+    }
     return 0;
 }
 
@@ -267,6 +411,11 @@ void
 cleanup_routes(platform_ctx_t *p)
 {
     if (!p->routing_configured) return;
+
+    for (int i = 0; i < p->path_mgr.n_paths; i++) {
+        if (p->path_mgr.paths[i].iface[0] == '\0') continue;
+        scoped_server_pin_delete(p, p->path_mgr.paths[i].iface);
+    }
 
     if (p->routing6_configured) {
         const char *d1[] = {"route", "-n",         "delete",    "-inet6",

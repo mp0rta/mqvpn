@@ -108,6 +108,19 @@ int mqvpn_parse_route_get_output(const char *out, char *gateway, size_t gw_len,
 /* route_check.c (linux) / route_mon.c (darwin) */
 int iface_has_route_to_server(const char *ifname, const struct sockaddr_storage *server);
 
+/* darwin/routing.c — (re)installs ifname's RTF_IFSCOPE host route to the
+ * server via that interface's own default gateway (follow-up #F1: without
+ * it, a recovered path whose interface flap flushed the unscoped server
+ * pin gets ENETUNREACH on every scoped send and parks in VALIDATING —
+ * rationale block at the definition). Called from setup_routes for every
+ * configured path iface and from route_mon.c before a path re-add /
+ * reactivate hands the socket back to xquic. Returns 0 on success, -1 if
+ * routing is not configured, the interface has no default route, or
+ * route(8) failed — callers treat failure as best-effort (log + continue).
+ * Darwin-only (Linux never compiles darwin/routing.c; declaration here is
+ * inert on Linux). */
+int darwin_scoped_server_pin(platform_ctx_t *p, const char *ifname);
+
 /* per-OS socket-to-interface pinning (platform_linux.c / platform_darwin.c) */
 #if defined(__linux__)
 int linux_pin_socket_to_iface(int fd, const char *ifname);
