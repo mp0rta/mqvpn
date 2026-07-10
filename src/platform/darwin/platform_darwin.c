@@ -40,6 +40,7 @@
 #  include <errno.h>
 #  include <signal.h>
 #  include <fcntl.h>
+#  include <sys/file.h>
 #  include <sys/socket.h>
 #  include <netinet/in.h>
 #  include <net/if.h>
@@ -475,9 +476,51 @@ on_signal(evutil_socket_t sig, short what, void *arg)
  *  Main entry point: darwin_platform_run_client
  * ================================================================ */
 
+/* Single-instance gate. The per-host state this client owns is all keyed
+ * by FIXED names — the pf anchor (MQVPN_PF_ANCHOR), the DNS backup path,
+ * the startup stale-recovery flush — so two concurrent instances corrupt
+ * each other: most acutely, a second process's unconditional startup
+ * anchor flush silently disarms the first instance's live kill switch
+ * (the DNS side is flock-protected; the anchor has no equivalent).
+ * flock() is released by the kernel the moment the holder dies, so a
+ * crash can never wedge future startups. The returned fd is deliberately
+ * held open (never closed) for the process lifetime. */
+static int
+acquire_instance_lock(void)
+{
+    const char *path = "/var/run/mqvpn.lock";
+    int fd = open(path, O_CREAT | O_RDWR | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        int e = errno;
+        LOG_ERR("cannot open instance lock %s: %s", path, strerror(e));
+        return -1;
+    }
+    if (flock(fd, LOCK_EX | LOCK_NB) < 0) {
+        LOG_ERR("another mqvpn instance is already running (lock: %s)", path);
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
 int
 darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
 {
+    /* stdout/stderr may be a pipe (`mqvpn ... | tee log`). Ctrl-C delivers
+     * SIGINT to the whole foreground process group, so the pipe reader can
+     * die before our graceful shutdown finishes logging — and with SIGPIPE
+     * at its default disposition, the FIRST log write after that kills the
+     * process before any cleanup runs, leaving the kill-switch anchor and
+     * DNS overrides applied (hardware-reproduced on macOS 26.5: Ctrl-C
+     * under tee left pf blocking all egress). Ignore process-wide: log
+     * writes fail with EPIPE instead and cleanup completes. Fork children
+     * (route(8)/networksetup(8)/pfctl(8)) inherit the SIG_IGN across exec
+     * DELIBERATELY — they write diagnostics to the same dead pipe, and a
+     * default disposition killed cleanup's `pfctl -F all` on its ALTQ
+     * banner before the flush ran (hardware-reproduced), leaving the kill
+     * switch loaded after exit. */
+    signal(SIGPIPE, SIG_IGN);
+
     int rc = 1;
     platform_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
@@ -502,6 +545,12 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
     for (int i = 0; i < cfg->n_dns; i++)
         mqvpn_dns_add_server(&ctx.dns, cfg->dns_servers[i]);
 
+    /* Single-instance gate — MUST precede the stale-recovery block below:
+     * its unconditional anchor flush is only safe when no other instance
+     * is running. The fd stays open until process exit (kernel releases
+     * the flock on death, including crashes). */
+    if (acquire_instance_lock() < 0) return 1;
+
     /* Startup stale recovery (spec carve-out): a previous crash can leave
      * (a) persistent networksetup DNS changes with our backup file on disk,
      * (b) a loaded pf anchor blocking all egress. Recover both before any
@@ -520,6 +569,13 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
         return 1;
     }
     mqvpn_sa_set_port(&ctx.server_addr, (uint16_t)cfg->server_port);
+
+    /* Fill server_ip_str here, not only in setup_routes(): killswitch.c
+     * interpolates it into the pf server pass rule, and setup_routes() is
+     * skipped entirely with --no-manage-routes — an empty host in
+     * "pass out ... to <host> port = N" is valid pf syntax matching ANY
+     * destination, i.e. a silent kill-switch bypass. */
+    mqvpn_sa_ntop(&ctx.server_addr, ctx.server_ip_str, sizeof(ctx.server_ip_str));
 
     /* Create libmqvpn config */
     mqvpn_config_t *lib_cfg = mqvpn_config_new();

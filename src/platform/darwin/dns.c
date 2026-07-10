@@ -39,6 +39,7 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <signal.h>
 #include <errno.h>
 #include <arpa/inet.h>
 
@@ -79,6 +80,11 @@ run_networksetup(const char *const argv[])
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
+        /* Child inherits the client's process-wide SIGPIPE ignore (SIG_IGN
+         * survives exec) DELIBERATELY: during shutdown our stdout/stderr
+         * can be a dead pipe, and networksetup(8) writing diagnostics
+         * there must get EPIPE, not die before restoring DNS — same
+         * rationale as routing.c's run_route_cmd. */
         execvp("networksetup", (char *const *)argv);
         _exit(127);
     }
@@ -105,6 +111,7 @@ run_networksetup_capture(const char *const argv[], char *out, size_t outlen)
         close(fds[0]);
         if (dup2(fds[1], STDOUT_FILENO) < 0) _exit(127);
         close(fds[1]);
+        /* SIGPIPE stays SIG_IGN (inherited) — see run_networksetup. */
         execvp("networksetup", (char *const *)argv);
         _exit(127);
     }
@@ -594,6 +601,30 @@ write_backup(const mqvpn_dns_t *dns, const char *tmp_path, const struct dns_serv
     return 0;
 }
 
+/* Does the (already validated) pre-existing backup contain a line for
+ * `name`? GUARD-path helper for mqvpn_dns_apply step 4: a service with no
+ * backup line has NO restore path — once its DNS is overwritten, nothing
+ * ever reverts it, and a later successful restore unlinks the backup while
+ * that service is still dirty. validate_existing_backup() already rejected
+ * unparseable/overlong lines, so a plain per-line parse suffices here. */
+static int
+backup_has_service(const mqvpn_dns_t *dns, const char *name)
+{
+    FILE *fp = fopen(dns->backup_path, "r");
+    if (!fp) return 0;
+
+    char line[MQVPN_DNS_BACKUP_LINE];
+    char svc[MQVPN_DNS_SVC_MAX], srv[MQVPN_DNS_GETDNS_CAP];
+    int found = 0;
+    while (!found && fgets(line, sizeof(line), fp)) {
+        if (mqvpn_dns_backup_parse_line(line, svc, sizeof(svc), srv, sizeof(srv)) == 0 &&
+            strcmp(svc, name) == 0)
+            found = 1;
+    }
+    fclose(fp);
+    return found;
+}
+
 /* Issue `networksetup -setdnsservers <service> <servers...>` for one
  * saved backup value. `servers` is either the literal "Empty" (passed
  * through as-is) or a space-joined list of IP literals, which we split
@@ -847,7 +878,20 @@ mqvpn_dns_apply(mqvpn_dns_t *dns)
 
     /* Step 4: set the VPN's DNS servers on every enumerated service. */
     int applied;
+    int set_count = 0;
     for (applied = 0; applied < n; applied++) {
+        /* GUARD path: never touch a service the pre-existing backup has
+         * no line for. It appeared after that backup was written (e.g.
+         * between a crash and this restart), so no restore path could
+         * ever revert it — overwriting would strand it on VPN DNS
+         * permanently once the backup is consumed. */
+        if (preexisting_backup && !backup_has_service(dns, svcs[applied].name)) {
+            LOG_WRN("dns: service '%s' has no line in pre-existing backup %s; "
+                    "leaving its DNS untouched",
+                    svcs[applied].name, dns->backup_path);
+            continue;
+        }
+
         const char *argv[3 + MQVPN_DNS_MAX_SERVERS + 1];
         int argc = 0;
         argv[argc++] = "networksetup";
@@ -867,11 +911,24 @@ mqvpn_dns_apply(mqvpn_dns_t *dns)
          * changes", which becomes true the instant we mutate anything —
          * not only once every service is done. */
         dns->active = 1;
+        set_count++;
     }
 
     if (applied == n) {
+        if (set_count == 0) {
+            /* Every enumerated service was skipped by the GUARD filter:
+             * nothing was dirtied (`active` never set), so nothing needs
+             * rolling back — but reporting success would be a lie, and
+             * the stale backup needs a later restore/startup attempt to
+             * finally clear it. */
+            LOG_WRN("dns: pre-existing backup %s covers none of the %d enumerated "
+                    "service(s); DNS left untouched",
+                    dns->backup_path, n);
+            release_lock_if_inactive(dns);
+            return -1;
+        }
         LOG_INF("dns: configured %d server(s) across %d network service(s), backup at %s",
-                dns->n_servers, n, dns->backup_path);
+                dns->n_servers, set_count, dns->backup_path);
         return 0;
     }
 

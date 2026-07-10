@@ -166,6 +166,26 @@ test_build_pf_rules_truth_table(void)
 }
 
 /* ================================================================
+ * 1b. build_pf_rules() fails closed on an empty server IP string
+ *     (pf accepts "to  port = N" with no host and matches ANY
+ *     destination — emitting it would be a silent kill-switch bypass)
+ * ================================================================ */
+static void
+test_build_pf_rules_empty_server_ip(void)
+{
+    char buf[1024];
+    platform_ctx_t p;
+
+    init_ctx_v4(&p, 0);
+    p.server_ip_str[0] = '\0';
+    ASSERT_EQ_INT(build_pf_rules(&p, buf, sizeof(buf)), -1, "empty-server-ip v4 rc");
+
+    init_ctx_v6(&p, 1);
+    p.server_ip_str[0] = '\0';
+    ASSERT_EQ_INT(build_pf_rules(&p, buf, sizeof(buf)), -1, "empty-server-ip v6 rc");
+}
+
+/* ================================================================
  * 2. setup happy path: stdin ruleset captured verbatim, token parsed
  * ================================================================ */
 static void
@@ -273,6 +293,7 @@ int
 main(void)
 {
     test_build_pf_rules_truth_table();
+    test_build_pf_rules_empty_server_ip();
 
     fake_cmd_env_t e;
     if (fake_cmd_env_init(&e) < 0) {

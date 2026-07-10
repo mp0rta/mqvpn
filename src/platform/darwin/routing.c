@@ -19,6 +19,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <signal.h>
 #include <sys/wait.h>
 
 static int
@@ -27,6 +28,13 @@ run_route_cmd(const char *const argv[])
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
+        /* Child inherits the client's process-wide SIGPIPE ignore (SIG_IGN
+         * survives exec) DELIBERATELY: during shutdown our stdout/stderr
+         * can be a dead pipe (`| tee` whose reader Ctrl-C killed first),
+         * and route(8) writing any diagnostic there must get EPIPE, not
+         * die mid-cleanup — hardware-reproduced: a SIG_DFL reset here made
+         * cleanup's pfctl die on its ALTQ banner, leaving the kill switch
+         * loaded after exit. */
         execvp("route", (char *const *)argv);
         _exit(127);
     }
@@ -133,8 +141,8 @@ mqvpn_parse_route_get_output(const char *out, char *gateway, size_t gw_len, char
  * Factored out of discover_route so discover_scoped_gateway can issue the
  * -ifscope variant through the identical fork/pipe/parse path. */
 static int
-route_get_and_parse(const char *const argv[], char *gateway, size_t gw_len,
-                    char *iface, size_t if_len)
+route_get_and_parse(const char *const argv[], char *gateway, size_t gw_len, char *iface,
+                    size_t if_len)
 {
     int fds[2];
     if (pipe(fds) < 0) return -1;
@@ -150,21 +158,56 @@ route_get_and_parse(const char *const argv[], char *gateway, size_t gw_len,
         close(fds[0]);
         if (dup2(fds[1], STDOUT_FILENO) < 0) _exit(127);
         close(fds[1]);
+        /* SIGPIPE stays SIG_IGN (inherited) — see run_route_cmd. */
         execvp("route", (char *const *)argv);
         _exit(127);
     }
 
     close(fds[1]);
+
+    /* Read until EOF — a single read() may return only a partial pipe
+     * buffer (dns.c's run_networksetup_capture documents the same
+     * hazard), and a truncated capture could drop the "gateway:" /
+     * "interface:" lines of an otherwise good route(8) reply, turning it
+     * into an intermittent connect/recovery failure. Retry EINTR; treat
+     * buffer-full-before-EOF as a failed capture rather than parsing
+     * silently truncated text. */
     char out[1024];
-    ssize_t nread = read(fds[0], out, sizeof(out) - 1);
+    size_t used = 0;
+    int read_failed = 0, overflowed = 0;
+    for (;;) {
+        if (used >= sizeof(out) - 1) {
+            /* Buffer full — probe one more byte to distinguish "output
+             * exactly fits" from truncation. */
+            char probe;
+            ssize_t r = read(fds[0], &probe, 1);
+            if (r < 0) {
+                if (errno == EINTR) continue;
+                read_failed = 1;
+            } else if (r > 0) {
+                overflowed = 1;
+            }
+            break;
+        }
+        ssize_t r = read(fds[0], out + used, sizeof(out) - 1 - used);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            read_failed = 1;
+            break;
+        }
+        if (r == 0) break; /* EOF */
+        used += (size_t)r;
+    }
     close(fds[0]);
 
     int status = 0;
     while (waitpid(pid, &status, 0) < 0)
         if (errno != EINTR) return -1;
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || nread <= 0) return -1;
+    if (read_failed || overflowed || !WIFEXITED(status) || WEXITSTATUS(status) != 0 ||
+        used == 0)
+        return -1;
 
-    out[nread] = '\0';
+    out[used] = '\0';
     return mqvpn_parse_route_get_output(out, gateway, gw_len, iface, if_len);
 }
 
@@ -210,12 +253,10 @@ discover_route(const char *server_ip, sa_family_t af, char *gateway, size_t gw_l
  * upstream (link#N / lladdr rendering, same filter as discover_route).
  * Returns 0 on success, -1 if the interface has no default route. */
 static int
-discover_scoped_gateway(const char *ifname, sa_family_t af, char *gateway,
-                        size_t gw_len)
+discover_scoped_gateway(const char *ifname, sa_family_t af, char *gateway, size_t gw_len)
 {
     char gw_iface[IFNAMSIZ];
-    const char *const a4[] = {"route", "-n",      "get",     "-ifscope",
-                              ifname,  "default", NULL};
+    const char *const a4[] = {"route", "-n", "get", "-ifscope", ifname, "default", NULL};
     const char *const a6[] = {"route",    "-n",   "get",     "-inet6",
                               "-ifscope", ifname, "default", NULL};
     if (route_get_and_parse((af == AF_INET6) ? a6 : a4, gateway, gw_len, gw_iface,

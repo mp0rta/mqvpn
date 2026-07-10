@@ -341,6 +341,63 @@ test_guard_rollback_failure(fake_cmd_env_t *e)
 }
 
 /* ================================================================
+ * 4b. guard path: a currently-enumerated service with no backup line is
+ *     never touched (it appeared after the backup was written — e.g.
+ *     between a crash and this restart — so no restore path could ever
+ *     revert it once overwritten)
+ * ================================================================ */
+static void
+test_guard_skips_unbacked_service(fake_cmd_env_t *e)
+{
+    fake_cmd_reset(e);
+
+    char backup_path[FAKE_CMD_PATH_MAX], lock_path[FAKE_CMD_PATH_MAX];
+    snprintf(backup_path, sizeof(backup_path), "%s/backup4b.bak", e->dir);
+    snprintf(lock_path, sizeof(lock_path), "%s/lock4b", e->dir);
+    unlink(lock_path);
+
+    /* Backup covers Wi-Fi (and the departed "Old Svc") but NOT the
+     * currently-enumerated Thunderbolt Bridge. */
+    {
+        FILE *fp = fake_fopen_w(backup_path, 0600);
+        char line[512];
+        ASSERT_TRUE(fp != NULL, "guard-skip backup fixture opens");
+        if (fp) {
+            mqvpn_dns_backup_format_line(line, sizeof(line), "Wi-Fi", "192.168.1.1");
+            fputs(line, fp);
+            mqvpn_dns_backup_format_line(line, sizeof(line), "Old Svc", "192.168.1.3");
+            fputs(line, fp);
+            fclose(fp);
+        }
+    }
+
+    mqvpn_dns_t dns;
+    mqvpn_dns_init(&dns);
+    dns.backup_path = backup_path;
+    dns.lock_path = lock_path;
+    mqvpn_dns_add_server(&dns, "10.0.0.1");
+    mqvpn_dns_add_server(&dns, "10.0.0.2");
+
+    int rc = mqvpn_dns_apply(&dns);
+    ASSERT_EQ_INT(rc, 0, "guard-skip rc");
+    ASSERT_EQ_INT(dns.active, 1, "guard-skip active (the backed-up service was set)");
+
+    char log[4096];
+    fake_cmd_read_log(e, log, sizeof(log));
+    ASSERT_TRUE(strstr(log, "networksetup|-setdnsservers|Wi-Fi|10.0.0.1|10.0.0.2") !=
+                    NULL,
+                "guard-skip sets the backed-up service");
+    ASSERT_TRUE(strstr(log, "-setdnsservers|Thunderbolt Bridge") == NULL,
+                "guard-skip never touches the service missing from the backup");
+    ASSERT_TRUE(strstr(log, "-getdnsservers") == NULL,
+                "guard-skip never re-snapshots on the guard path");
+
+    mqvpn_dns_restore(&dns);
+    unlink(backup_path);
+    unlink(lock_path);
+}
+
+/* ================================================================
  * 5. malformed pre-existing backup -> abort before any set
  * ================================================================ */
 static void
@@ -537,6 +594,7 @@ main(void)
     test_fresh_apply_subset_rollback(&e);
     test_guard_rollback_success(&e);
     test_guard_rollback_failure(&e);
+    test_guard_skips_unbacked_service(&e);
     test_malformed_backup_abort(&e);
     test_restore_partial_then_full(&e);
     test_restore_stale(&e);

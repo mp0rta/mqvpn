@@ -54,6 +54,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/wait.h>
 
 #define MQVPN_PF_ANCHOR "com.apple/250.mqvpn"
@@ -69,6 +70,15 @@ run_pfctl(const char *const argv[])
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
+        /* Child inherits the client's process-wide SIGPIPE ignore (SIG_IGN
+         * survives exec) DELIBERATELY. This helper runs the cleanup-path
+         * anchor flush, whose stderr can be a dead pipe at shutdown
+         * (`| tee` whose reader Ctrl-C killed first) — pfctl writes its
+         * "No ALTQ support" banner there BEFORE acting, so a default
+         * SIGPIPE disposition kills it pre-flush and leaves the kill
+         * switch loaded after exit (hardware-reproduced on macOS 26.5).
+         * With SIG_IGN inherited the banner write fails with EPIPE, pfctl
+         * ignores it and the flush still executes. */
         execvp("pfctl", (char *const *)argv);
         _exit(127);
     }
@@ -91,14 +101,13 @@ run_pfctl_stdin(const char *const argv[], const char *text)
     /* Parent-side SIGPIPE protection: if the child dies before consuming
      * its stdin (execvp failure, pfctl bailing out early on a failed
      * /dev/pf open when not root), the parent's write() below would raise
-     * SIGPIPE — and mqvpn installs no process-wide SIGPIPE ignore
-     * (suppression is per-socket SO_NOSIGPIPE only, see
-     * compat/socket_compat.h; the CLI's evsignal handlers cover
-     * SIGINT/SIGTERM only), so the default disposition would kill the
-     * whole client mid-setup, with routes/DNS already mutated and no
-     * cleanup run. F_SETNOSIGPIPE (Darwin-native fcntl; this file is
-     * Darwin-only, so no ifdef) makes that write fail with EPIPE instead,
-     * turning the write_failed path below into the live error path. */
+     * SIGPIPE. darwin_platform_run_client DOES install a process-wide
+     * SIGPIPE ignore (added after Ctrl-C-under-tee killed the shutdown
+     * path mid-cleanup on real hardware), which already converts this to
+     * EPIPE — but keep the per-fd F_SETNOSIGPIPE (Darwin-native fcntl;
+     * this file is Darwin-only, so no ifdef) so this helper stays correct
+     * on its own, independent of caller-level signal setup. Either layer
+     * turns the write_failed path below into the live error path. */
     if (fcntl(fds[1], F_SETNOSIGPIPE, 1) < 0) {
         close(fds[0]);
         close(fds[1]);
@@ -116,6 +125,7 @@ run_pfctl_stdin(const char *const argv[], const char *text)
         close(fds[1]);
         if (dup2(fds[0], STDIN_FILENO) < 0) _exit(127);
         close(fds[0]);
+        /* SIGPIPE stays SIG_IGN (inherited) — see run_pfctl. */
         execvp("pfctl", (char *const *)argv);
         _exit(127);
     }
@@ -160,13 +170,14 @@ run_pfctl_stdin(const char *const argv[], const char *text)
  * the child: if it had already written its (small) output into the pipe
  * buffer and exited, this returns 0 with a truncated capture and a
  * missing token falls through to setup_killswitch's NON-fatal empty-token
- * path; if it was still writing, the closed read end kills it with
- * SIGPIPE (default disposition — mqvpn never sets a process-wide SIG_IGN;
- * SIGPIPE suppression is per-socket only, see compat/socket_compat.h), so
- * WIFEXITED is false, this returns -1, and setup_killswitch treats it as
- * a FATAL `pfctl -E` failure (active=1 → cleanup). Both outcomes are
- * safe, and both are practically unreachable for `pfctl -E`'s ~2-line
- * output against the 256-byte capture buffer. */
+ * path; if it was still writing, the closed read end makes its writes
+ * fail with EPIPE (the child inherits the client's process-wide SIGPIPE
+ * SIG_IGN — see run_pfctl), so pfctl either exits nonzero (this returns
+ * -1 and setup_killswitch treats it as a FATAL `pfctl -E` failure,
+ * active=1 → cleanup) or exits 0 with the truncated capture handled by
+ * the same non-fatal empty-token path. All outcomes are safe, and all are
+ * practically unreachable for `pfctl -E`'s ~2-line output against the
+ * 256-byte capture buffer. */
 static int
 run_pfctl_capture(const char *const argv[], char *out, size_t outlen)
 {
@@ -185,6 +196,7 @@ run_pfctl_capture(const char *const argv[], char *out, size_t outlen)
         if (dup2(fds[1], STDOUT_FILENO) < 0) _exit(127);
         if (dup2(fds[1], STDERR_FILENO) < 0) _exit(127);
         close(fds[1]);
+        /* SIGPIPE stays SIG_IGN (inherited) — see run_pfctl. */
         execvp("pfctl", (char *const *)argv);
         _exit(127);
     }
@@ -263,6 +275,17 @@ build_pf_rules(const platform_ctx_t *p, char *buf, size_t buflen)
     size_t off = 0;
     int n;
 
+    /* Fail closed on an empty server IP: pf accepts "pass out ... to
+     * port = N" with no host and matches ANY destination — emitting that
+     * would silently turn the server exception into a full UDP bypass.
+     * darwin_platform_run_client fills server_ip_str right after address
+     * resolution, so this only fires if a future caller reorders that. */
+    if (p->server_ip_str[0] == '\0') {
+        LOG_ERR("kill switch: server IP string is empty; refusing to emit a "
+                "match-any pass rule");
+        return -1;
+    }
+
 #define APPEND(...)                                         \
     do {                                                    \
         n = snprintf(buf + off, buflen - off, __VA_ARGS__); \
@@ -301,7 +324,7 @@ setup_killswitch(platform_ctx_t *p)
 
     char rules[1024];
     if (build_pf_rules(p, rules, sizeof(rules)) < 0) {
-        LOG_WRN("failed to build pf kill switch rule text (buffer too small)");
+        LOG_WRN("failed to build pf kill switch rule text");
         return -1;
     }
 
