@@ -21,6 +21,15 @@ struct PoCConfig {
             throw NSError(domain: "mqvpn.poc", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "server config missing"])
         }
+        guard (1...65535).contains(port) else {
+            throw NSError(domain: "mqvpn.poc", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "server port out of range"])
+        }
+        var addrCheck = in_addr()
+        guard inet_pton(AF_INET, host, &addrCheck) == 1 else {
+            throw NSError(domain: "mqvpn.poc", code: 3,
+                          userInfo: [NSLocalizedDescriptionKey: "server host must be an IPv4 literal"])
+        }
         let bulk = (d["MqvpnBulkURL"] as? String).flatMap(URL.init(string:))
         return PoCConfig(serverHost: host, serverPort: port,
                          authKey: (d["MqvpnAuthKey"] as? String) ?? "",
@@ -28,6 +37,8 @@ struct PoCConfig {
                          bulkURL: bulk)
     }
 
+    /// host is already validated as an IPv4 literal by `fromBundle()`, so no
+    /// error handling is needed here for inet_pton's result.
     var serverSockaddr: sockaddr_in {
         var sa = sockaddr_in()
         sa.sin_family = sa_family_t(AF_INET)

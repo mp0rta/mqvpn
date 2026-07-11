@@ -99,7 +99,7 @@ final class MqvpnEngine: NSObject {
             // reference driver defensively substitutes "" — mirror that here
             // rather than force-unwrapping into a crash.
             let text = msg.map { String(cString: $0) } ?? ""
-            log.info("[lib] \(text, privacy: .public)")
+            log.notice("[lib] \(text, privacy: .public)")
         }
         let ctx = Unmanaged.passUnretained(self).toOpaque()
         client = mqvpn_client_new(cfg, &cbs, ctx)

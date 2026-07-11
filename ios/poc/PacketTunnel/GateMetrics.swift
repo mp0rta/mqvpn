@@ -7,7 +7,8 @@ import os
 
 private let metricsLog = Logger(subsystem: "mqvpn.poc", category: "metrics")
 
-/// Periodic (10s) memory + path snapshot dump for the M2 gate procedures.
+/// Periodic (10s) memory + path snapshot dump for the on-device acceptance
+/// gate procedures.
 /// Every line starts with the grep-stable "GATE| " prefix the gate scripts
 /// key on — do not change it without updating those scripts.
 ///
@@ -24,7 +25,6 @@ final class GateMetrics {
     private let engine: MqvpnEngine
     private let binder: PathBinder
     private var timer: Timer?
-    private var loggedSockbufs = false
 
     init(engine: MqvpnEngine, binder: PathBinder) {
         self.engine = engine
@@ -56,14 +56,12 @@ final class GateMetrics {
             }
             line += " path[\(name)] st=\(p.status.rawValue) tx=\(p.bytes_tx) rx=\(p.bytes_rx)"
         }
-        metricsLog.info("\(line, privacy: .public)")
+        metricsLog.notice("\(line, privacy: .public)")
 
-        // Socket buffer sizes only matter as a one-time check that the
-        // PathBinder pre-set (or the core's later request) actually stuck;
-        // they do not change meaningfully afterwards, so only the first
-        // collection records them.
-        guard !loggedSockbufs else { return }
-        loggedSockbufs = true
+        // Re-checked on every collect (not just the first) so paths added
+        // after startup — cellular joining late, or every fresh-add during
+        // WiFi flap cycles — also get their buffer sizes recorded. Two
+        // getsockopt calls per path per 10s is negligible.
         for (ifname, fd) in binder.currentFds() {
             var sndbuf: Int32 = 0
             var sndlen = socklen_t(MemoryLayout<Int32>.size)
@@ -71,7 +69,7 @@ final class GateMetrics {
             var rcvbuf: Int32 = 0
             var rcvlen = socklen_t(MemoryLayout<Int32>.size)
             getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, &rcvlen)
-            metricsLog.info("GATE| sockbuf[\(ifname, privacy: .public)] sndbuf=\(sndbuf) rcvbuf=\(rcvbuf)")
+            metricsLog.notice("GATE| sockbuf[\(ifname, privacy: .public)] sndbuf=\(sndbuf) rcvbuf=\(rcvbuf)")
         }
     }
 

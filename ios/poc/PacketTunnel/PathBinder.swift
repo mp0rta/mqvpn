@@ -102,7 +102,7 @@ final class PathBinder {
             close(fd)
             return
         }
-        log.info("add_path outcome=\(outcome.rawValue) iface=\(iface.name, privacy: .public)")
+        log.notice("add_path outcome=\(outcome.rawValue) iface=\(iface.name, privacy: .public)")
         // First successful path unlocks the connection (server addr + connect).
         engine.connectIfNeeded()
         // 7. Read source AFTER successful registration; the handler captures
@@ -122,7 +122,7 @@ final class PathBinder {
         }
         source.resume()
         slots[type] = PathSlot(handle: handle, fd: fd, source: source, ifname: iface.name)
-        log.info("path added type=\(String(describing: type), privacy: .public) fd=\(fd) handle=\(handle)")
+        log.notice("path added type=\(String(describing: type), privacy: .public) fd=\(fd) handle=\(handle)")
     }
 
     /// Failover teardown. Runs on the tick thread.
@@ -132,7 +132,7 @@ final class PathBinder {
         guard let slot = slots.removeValue(forKey: type) else { return }
         engine.removePath(slot.handle)
         slot.source.cancel()
-        log.info("path removed type=\(String(describing: type), privacy: .public) handle=\(slot.handle)")
+        log.notice("path removed type=\(String(describing: type), privacy: .public) handle=\(slot.handle)")
     }
 
     /// Full teardown for stopTunnel. Runs on the tick thread. Mirrors
