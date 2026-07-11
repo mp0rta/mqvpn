@@ -64,7 +64,15 @@ if [ "$PHASE" = "xquic" ] || [ "$PHASE" = "all" ]; then
     # references under XQC_ENABLE_FEC && XQC_ENABLE_XOR, and a FEC-OFF
     # libxquic-static.a would surface as an undefined symbol only at the
     # Xcode extension link, far from the cause.
+    # The fork's CMakeLists.txt bakes -Wno-dangling-pointer into
+    # CMAKE_C_FLAGS_OPTION unconditionally (not gated by compiler ID); that
+    # flag is GCC-only and AppleClang rejects it as an unknown warning
+    # option, which -Werror then promotes to a hard error. Seeding
+    # CMAKE_C_FLAGS with -Wno-unknown-warning-option here (appended before
+    # the fork's own flags, so it's already active when they're parsed)
+    # downgrades that rejection to a no-op without touching the fork tree.
     cmake -S "$XQUIC_DIR" -B "$XQUIC_BUILD" "${IOS_CMAKE_FLAGS[@]}" \
+        -DCMAKE_C_FLAGS=-Wno-unknown-warning-option \
         -DSSL_TYPE=boringssl \
         -DSSL_PATH="$BSSL_DIR" \
         -DSSL_INC_PATH="$BSSL_DIR/include" \
