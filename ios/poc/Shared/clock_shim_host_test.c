@@ -13,9 +13,11 @@ main(void)
     uint64_t b = mqvpn_ios_clock_us(NULL);
     assert(b > a);
     uint64_t d = b - a;
-    /* A 20ms sleep must read as 15..500 ms in microsecond units — catches
-     * tick-vs-us unit bugs (raw mach ticks are ~24x off on Apple Silicon). */
-    assert(d > 15000 && d < 500000);
+    /* A 20ms sleep must read as 15..200 ms in microsecond units — catches
+     * tick-vs-us unit bugs: a raw mach-tick reading (24 MHz tick on Apple
+     * Silicon gives ~480000+ ticks for a 20ms sleep) lands clearly outside
+     * the upper bound. */
+    assert(d > 15000 && d < 200000);
     printf("OK delta=%llu us\n", (unsigned long long)d);
     return 0;
 }
