@@ -93,7 +93,7 @@ endif()
 # ---------- Hybrid mode TCP lane (lwIP, Linux-only in v1) ----------
 option(MQVPN_ENABLE_HYBRID_TCP_LANE
        "Build the hybrid-mode lwIP TCP lane (Linux-only in v1)" ON)
-if(MQVPN_ENABLE_HYBRID_TCP_LANE AND NOT WIN32 AND NOT APPLE AND NOT ANDROID_CROSS_COMPILE)
+if(MQVPN_ENABLE_HYBRID_TCP_LANE AND NOT WIN32 AND NOT APPLE)
     set(MQVPN_HYBRID_TCP_LANE_BUILD ON)
 else()
     if(MQVPN_ENABLE_HYBRID_TCP_LANE)

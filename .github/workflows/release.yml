@@ -594,7 +594,7 @@ jobs:
 
       - name: Verify prebuilt libraries
         run: |
-          for lib in libmqvpn.a libxquic.a libssl.a libcrypto.a; do
+          for lib in libmqvpn.a libxquic.a libssl.a libcrypto.a liblwip_core.a; do
             test -f "android/sdk-native/prebuilt/arm64-v8a/${lib}" \
               || { echo "MISSING: arm64-v8a/${lib}"; exit 1; }
           done
@@ -639,7 +639,8 @@ jobs:
 
       # Stage license texts as assets/ before APK build. Android Gradle Plugin
       # auto-includes src/main/assets/ in the produced APK. Required by
-      # Apache-2.0 §4(a) since the APK statically links xquic and BoringSSL.
+      # Apache-2.0 §4(a) since the APK statically links xquic, BoringSSL, and
+      # lwIP (BSD-3-Clause requires the same notice retention).
       - name: Stage license assets for APK
         run: |
           ASSETS=android/app/src/main/assets
@@ -648,6 +649,7 @@ jobs:
           cp NOTICE                                          "$ASSETS/NOTICE"
           cp third_party/xquic/LICENSE                       "$ASSETS/third-party/xquic.txt"
           cp third_party/xquic/third_party/boringssl/LICENSE "$ASSETS/third-party/boringssl.txt"
+          cp third_party/lwip/LICENSE                        "$ASSETS/third-party/lwip.txt"
 
       - name: Build signed release APK
         working-directory: android
@@ -663,9 +665,9 @@ jobs:
         run: |
           set -e
           apk=$(ls mqvpn-sample_*_android.apk)
-          expected=4
+          expected=5
           found=$(unzip -l "$apk" \
-                  | grep -cE 'assets/(LICENSE|NOTICE|third-party/(xquic|boringssl)\.txt)$' \
+                  | grep -cE 'assets/(LICENSE|NOTICE|third-party/(xquic|boringssl|lwip)\.txt)$' \
                   || true)
           if [ "$found" -ne "$expected" ]; then
             echo "::error::APK missing license assets (found $found of $expected)"
