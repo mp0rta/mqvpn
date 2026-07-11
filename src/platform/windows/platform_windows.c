@@ -396,6 +396,15 @@ on_tun_read(evutil_socket_t fd, short what, void *arg)
             break;
         }
     }
+
+    /* The sends above updated the engine's requested wake (pacing flush,
+     * PTO) — drive the engine and re-arm the tick from it, exactly as
+     * on_socket_read does. Without this, outbound-only traffic leaves the
+     * old timer armed: if the sent packet is lost, no ACK arrives to
+     * re-arm, and the PTO probe waits on the stale (possibly seconds-out)
+     * timer. */
+    mqvpn_client_tick(p->client);
+    schedule_next_tick(p);
 }
 
 void
