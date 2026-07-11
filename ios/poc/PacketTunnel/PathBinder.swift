@@ -135,6 +135,24 @@ final class PathBinder {
         log.info("path removed type=\(String(describing: type), privacy: .public) handle=\(slot.handle)")
     }
 
+    /// Full teardown for stopTunnel. Runs on the tick thread. Mirrors
+    /// removePath(type:) for every live slot, then cancels the monitors
+    /// themselves (start() is the only other writer of `monitors`, on the
+    /// caller's thread, so this is safe without extra synchronization).
+    func stop() {
+        for type in Array(slots.keys) {
+            removePath(type: type)
+        }
+        for (_, m) in monitors { m.cancel() }
+        monitors.removeAll()
+    }
+
+    /// Current (ifname, fd) per live slot, for GateMetrics' getsockopt
+    /// snapshot. Tick-thread only, like all other `slots` access.
+    func currentFds() -> [(String, Int32)] {
+        slots.values.map { ($0.ifname, $0.fd) }
+    }
+
     /// Drain readable datagrams; runs on monitorQueue, hops each datagram to
     /// the tick thread. Uses only its captured fd/handle — no shared state.
     private func drainSocket(fd: Int32, handle: mqvpn_path_handle_t) {
