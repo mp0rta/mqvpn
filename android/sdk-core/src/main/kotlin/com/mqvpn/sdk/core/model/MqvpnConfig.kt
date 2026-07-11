@@ -26,6 +26,8 @@ data class MqvpnConfig(
     val reorderEnabled: Boolean = false,
     val reorderProfile: ReorderProfile = ReorderProfile.CELLULAR_BOND,
     val reorderPorts: List<Int> = emptyList(),
+    val hybridEnabled: Boolean = false,
+    val hybridTcpMode: HybridTcpMode = HybridTcpMode.AUTO,
 ) : Parcelable {
 
     @Serializable
@@ -48,6 +50,13 @@ data class MqvpnConfig(
     enum class ReorderProfile(val native: Int) {
         CELLULAR_BOND(3),   // preset: wait=50ms cap=1024
         FIBER_LTE(4),       // preset: wait=50ms cap=2048
+    }
+
+    @Serializable
+    enum class HybridTcpMode(val native: Int) {
+        STREAM(0),   // always use the TCP stream lane
+        RAW(1),      // never (bypass the lane)
+        AUTO(2),     // per-flow decision at SYN time (default)
     }
 
     fun toJson(): String = Json.encodeToString(serializer(), this)
