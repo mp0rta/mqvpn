@@ -54,7 +54,7 @@
 #include "reorder.h"
 #include "reorder_rx.h"
 #include "reorder_tx.h"
-#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+#ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
 #  include "hybrid/tcp_egress.h"
 #endif
 
@@ -100,7 +100,7 @@ struct svr_conn_s {
     mqvpn_reorder_rx_t *reorder_rx;
     int peer_reorder_supported;
 
-#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+#ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     int tcp_flow_count; /* per-session cap enforcement lands with the
                          * server-side limits work — no 5-tuple table needed
                          * server-side per Design Decision D2. */
@@ -117,7 +117,7 @@ static void svr_reorder_deliver(const uint8_t *pkt, size_t len, void *ctx);
 typedef enum {
     SVR_STREAM_ROLE_UNKNOWN = 0,
     SVR_STREAM_ROLE_CONNECT_IP,
-#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+#ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     SVR_STREAM_ROLE_CONNECT_TCP,
 #endif
 } svr_stream_role_t;
@@ -131,7 +131,7 @@ struct svr_stream_s {
     size_t capsule_len;
     size_t capsule_cap;
 
-#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+#ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     /* Per D2, xqc_h3_request_t's user_data slot stays svr_stream_t*
      * everywhere; per-flow egress state hangs off THIS field instead of
      * ever calling xqc_h3_request_set_user_data() a second time. */
@@ -206,7 +206,7 @@ struct mqvpn_server_s {
 
     int started;
 
-#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+#ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     /* Connect-stage bookkeeping for src/hybrid/tcp_egress.c: STORAGE only.
      * Contents are mutated exclusively by tcp_egress.c through the bundled
      * ctx accessor in mqvpn_server_internal.h (svr_get_tcp_egress_ctx) —
@@ -977,7 +977,7 @@ cb_request_close(xqc_h3_request_t *h3_request, void *strm_user_data)
          * mqvpn_client.c's cb_request_close. */
         if (stream->conn && stream->role == SVR_STREAM_ROLE_CONNECT_IP)
             stream->conn->tunnel_established = 0;
-#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+#ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
         /* A connect-tcp stream can close (client resets it, or the H3
          * connection itself is torn down) while its egress flow is still
          * CONNECTING or ACTIVE. Tear the flow down here too — closes the
@@ -1172,7 +1172,7 @@ svr_get_egress_policy(const mqvpn_server_t *s, const mqvpn_cidr_entry_t **allow,
     *tunnel_net = ntohl(s->pool.base.s_addr) & *tunnel_mask;
 }
 
-#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+#ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
 /* ---- connect()/relay boundary accessors for src/hybrid/tcp_egress.c ----
  * See the docstring block in mqvpn_server_internal.h for why each of these
  * exists as its own narrow function. */
@@ -1247,7 +1247,7 @@ svr_log(mqvpn_server_t *s, mqvpn_log_level_t level, const char *fmt, ...)
     va_end(ap);
     server_log(s, level, "%s", buf);
 }
-#endif /* MQVPN_HYBRID_TCP_LANE_ENABLED */
+#endif /* MQVPN_HYBRID_TCP_EGRESS_ENABLED */
 
 /* CONNECT-IP stream body: capsule reassembly + ADDRESS_REQUEST handling. */
 static int
@@ -1356,7 +1356,7 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
             stream->role = SVR_STREAM_ROLE_CONNECT_IP;
             return svr_connect_ip_on_request(s, stream, h3_request, &hdrs);
         }
-#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+#ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
         /* [Hybrid] Enabled is a client+server kill switch (docs/control-api.md),
          * default false, and IS parsed into config.hybrid.enabled (config.c
          * CFG_BOOL(SEC_HYBRID, "Enabled", ...)). Gating on the compile flag
@@ -1377,7 +1377,7 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
         return 0;
     }
 
-#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+#ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     /* READ_BODY is the common case; READ_EMPTY_FIN is the OTHER real wire
      * shape for a downlink close (third_party/xquic src/http3/xqc_h3_request.c
      * xqc_h3_request_on_recv_empty_fin): fired standalone, WITHOUT READ_BODY,
@@ -1402,7 +1402,7 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
         switch (stream->role) {
         case SVR_STREAM_ROLE_CONNECT_IP:
             return svr_connect_ip_on_body(s, stream, h3_request);
-#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+#ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
         case SVR_STREAM_ROLE_CONNECT_TCP:
             /* Handled above in the CONNECT_TCP-scoped block
              * (READ_BODY | READ_EMPTY_FIN); unreachable here, listed only
@@ -1430,7 +1430,7 @@ cb_request_write(xqc_h3_request_t *h3_request, void *strm_user_data)
 {
     (void)h3_request;
     svr_stream_t *stream = (svr_stream_t *)strm_user_data;
-#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+#ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     if (stream && stream->role == SVR_STREAM_ROLE_CONNECT_TCP && stream->conn) {
         svr_tcp_egress_on_h3_writable(stream->conn->server, stream);
     }
@@ -1461,7 +1461,7 @@ cb_request_closing_notify(xqc_h3_request_t *h3_request, xqc_int_t err,
 {
     (void)h3_request;
     (void)err;
-#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+#ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     svr_stream_t *stream = (svr_stream_t *)strm_user_data;
     if (stream && stream->role == SVR_STREAM_ROLE_CONNECT_TCP && stream->conn &&
         stream->tcp_egress_flow) {
@@ -1855,7 +1855,7 @@ mqvpn_server_destroy(mqvpn_server_t *s)
         s->engine = NULL;
     }
 
-#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+#ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     /* Step 2: Defensive sweep — destroy any egress flows not torn down by
      * the request-closing notify during the engine destroy above (same
      * contingency the session sweep below defends against: a stream whose
@@ -1967,7 +1967,7 @@ void
 mqvpn_server_on_egress_fd_ready(mqvpn_server_t *s, int fd, void *fd_ctx, int readable,
                                 int writable)
 {
-#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+#ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     svr_tcp_egress_fd_ready(s, fd, fd_ctx, readable, writable);
 #else
     (void)s;
@@ -2211,7 +2211,7 @@ mqvpn_server_tick(mqvpn_server_t *s)
         }
     }
 
-#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+#ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     /* Connect-timeout sweep over the D3 egress-flow list (one list, one
      * tick function — the future ACTIVE-idle-timeout work extends this
      * same walk rather than adding a second sweep). */
@@ -2235,7 +2235,7 @@ mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *out)
     out->dgram_recv = s->dgram_recv;
     out->dgram_lost = s->dgram_lost;
     out->dgram_acked = s->dgram_acked;
-#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+#ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     /* tcp_flows_active: whole-server count of currently open egress TCP
      * flows. tcp_egress_global_fd_count is the live, exactly-once
      * incremented/decremented admission counter (svr_tcp_egress_start_connect
@@ -2619,7 +2619,7 @@ mqvpn_server_get_interest(const mqvpn_server_t *s, mqvpn_interest_t *out)
 
     int ms = (int)(s->next_wake_us / 1000);
     out->next_timer_ms = ms > 0 ? ms : 1;
-#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+#ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     /* next_wake_us above comes solely from xquic's event timer, which knows
      * nothing about the egress deadlines (connect timeout -> 504, ACTIVE
      * idle eviction) that svr_tcp_egress_tick enforces — on a quiet server

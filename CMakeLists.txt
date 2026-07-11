@@ -104,6 +104,30 @@ else()
     set(MQVPN_HYBRID_TCP_LANE_BUILD OFF)
 endif()
 
+# ---------- Hybrid mode server-side TCP egress (Linux-only) ----------
+# Server-side connect-tcp egress (src/hybrid/tcp_egress.c): POSIX sockets +
+# the platform egress-fd registry (platform_linux.c only). Depends on the
+# client lane (shares classifier/ACL types; serves no purpose without the
+# lane protocol). Unavailability downgrades with a warning, NEVER a
+# configure error — plain -DMQVPN_ENABLE_HYBRID_TCP_LANE=OFF must keep
+# configuring for existing CI jobs and downstream consumers.
+option(MQVPN_ENABLE_HYBRID_TCP_EGRESS
+       "Build the hybrid-mode server-side TCP egress (Linux-only)" ON)
+if(MQVPN_ENABLE_HYBRID_TCP_EGRESS AND MQVPN_HYBRID_TCP_LANE_BUILD
+   AND NOT WIN32 AND NOT APPLE AND NOT ANDROID_CROSS_COMPILE)
+    set(MQVPN_HYBRID_TCP_EGRESS_BUILD ON)
+else()
+    if(MQVPN_ENABLE_HYBRID_TCP_EGRESS)
+        message(WARNING "MQVPN_ENABLE_HYBRID_TCP_EGRESS requested but "
+                         "unavailable (requires the hybrid TCP lane, on "
+                         "Linux) — forcing OFF.")
+    endif()
+    set(MQVPN_HYBRID_TCP_EGRESS_BUILD OFF)
+endif()
+# Grep target for CI (quasi-stable once asserted — treat like a log marker):
+message(STATUS "mqvpn hybrid gates: LANE_BUILD=${MQVPN_HYBRID_TCP_LANE_BUILD} "
+               "EGRESS_BUILD=${MQVPN_HYBRID_TCP_EGRESS_BUILD}")
+
 # Prefer static xquic to avoid runtime library path issues
 if(TARGET xquic-static)
     set(XQUIC_LIB xquic-static)
@@ -215,7 +239,6 @@ list(APPEND MQVPN_LIB_SOURCES
     ${CMAKE_SOURCE_DIR}/src/hybrid/lwip_glue.c
     ${CMAKE_SOURCE_DIR}/src/hybrid/tcp_lane.c
     ${CMAKE_SOURCE_DIR}/src/hybrid/tcp_lane_uplink.c
-    ${CMAKE_SOURCE_DIR}/src/hybrid/tcp_egress.c
 )
 
 # H2a micro-benchmark rig (Chunk 1 gate): TUN → classifier → lwIP → byte
@@ -284,6 +307,12 @@ if(MQVPN_ENABLE_FUZZING)
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 endif()
 endif() # MQVPN_HYBRID_TCP_LANE_BUILD
+# Same-list append as the lane sources above (still before add_library
+# consumes it); EGRESS_BUILD implies LANE_BUILD, kept as a parallel
+# top-level gate.
+if(MQVPN_HYBRID_TCP_EGRESS_BUILD)
+    list(APPEND MQVPN_LIB_SOURCES ${CMAKE_SOURCE_DIR}/src/hybrid/tcp_egress.c)
+endif()
 
 # fuzz_tcp_lane links classifier.c + lwip_glue.c directly (mirrors
 # tcp_lane_microbench) against the instrumented lwip_core_fuzz built inside
@@ -316,6 +345,9 @@ endif()
 if(MQVPN_HYBRID_TCP_LANE_BUILD)
     target_link_libraries(mqvpn_lib lwip_core)
     target_compile_definitions(mqvpn_lib PRIVATE MQVPN_HYBRID_TCP_LANE_ENABLED)
+endif()
+if(MQVPN_HYBRID_TCP_EGRESS_BUILD)
+    target_compile_definitions(mqvpn_lib PRIVATE MQVPN_HYBRID_TCP_EGRESS_ENABLED)
 endif()
 
 # Everything below requires libevent and a platform layer — skip for Android
@@ -543,6 +575,9 @@ if(MQVPN_HYBRID_TCP_LANE_BUILD)
     target_link_libraries(mqvpn_shared lwip_core)
     target_compile_definitions(mqvpn_shared PRIVATE MQVPN_HYBRID_TCP_LANE_ENABLED)
 endif()
+if(MQVPN_HYBRID_TCP_EGRESS_BUILD)
+    target_compile_definitions(mqvpn_shared PRIVATE MQVPN_HYBRID_TCP_EGRESS_ENABLED)
+endif()
 
 # ---------- mqvpn CLI binary ----------
 # Links libmqvpn for the library API; keeps platform-specific files separate.
@@ -742,8 +777,8 @@ if(BUILD_TESTING)
     add_test(NAME test_conn_settings COMMAND test_conn_settings)
 
     # Server-side mqvpn-tcp dispatch test (real xquic engine, gated on the
-    # hybrid TCP lane existing at all — see SVR_STREAM_ROLE_CONNECT_TCP).
-    if(MQVPN_HYBRID_TCP_LANE_BUILD)
+    # server-side egress being built — see SVR_STREAM_ROLE_CONNECT_TCP).
+    if(MQVPN_HYBRID_TCP_EGRESS_BUILD)
         add_executable(test_tcp_egress tests/test_tcp_egress.c)
         target_link_libraries(test_tcp_egress mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
         target_include_directories(test_tcp_egress PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})

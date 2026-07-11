@@ -951,3 +951,114 @@ jobs:
 
       - name: E2E hybrid H2 TCP-lane suite (netns)
         run: sudo -E tests/test_e2e_hybrid_h2.sh build/mqvpn
+
+  hybrid-egress-off:
+    # Pins the LANE=ON / EGRESS=OFF build shape (client TCP lane compiled
+    # in, server-side TCP egress compiled out) — the shape Windows/Android/
+    # macOS ports will build once they land — plus a plain LANE=OFF
+    # configure-compatibility check. Reuses the same clang-Debug
+    # BoringSSL/xquic cache artifacts as the hybrid-e2e and sanitizer jobs.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libevent-dev golang iptables conntrack clang iperf3 jq netcat-openbsd curl python3
+
+      - name: Compute xquic SHA
+        id: xqsha
+        run: echo "sha=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+-')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache BoringSSL (clang fPIC)
+        id: bssl-cache
+        uses: actions/cache@v6
+        with:
+          path: third_party/xquic/third_party/boringssl
+          key: bssl-9c95ec7-linux-clang-fpic-v1
+
+      - name: Clone BoringSSL (pinned)
+        if: steps.bssl-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl && git checkout ${{ env.BORINGSSL_COMMIT }}
+
+      - name: Build BoringSSL (clang)
+        if: steps.bssl-cache.outputs.cache-hit != 'true'
+        run: |
+          cd third_party/xquic/third_party/boringssl
+          mkdir -p build && cd build
+          CC=clang CXX=clang++ cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+          make -j$(nproc) ssl crypto
+
+      - name: Cache xquic (clang Debug)
+        id: xquic-cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            third_party/xquic/build
+            third_party/xquic/include/xquic/xqc_configure.h
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-9c95ec7-v4
+
+      - name: Build xquic (clang)
+        if: steps.xquic-cache.outputs.cache-hit != 'true'
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug -DSSL_TYPE=boringssl \
+                -DXQC_ENABLE_BBR2=ON \
+                -DXQC_ENABLE_UNLIMITED=ON \
+                -DXQC_ENABLE_FEC=ON \
+                -DXQC_ENABLE_XOR=ON \
+                -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
+          make -j$(nproc)
+
+      - name: Configure-check — plain LANE=OFF stays compatible
+        run: |
+          set -o pipefail
+          cmake -B build-laneoff -DMQVPN_ENABLE_HYBRID_TCP_LANE=OFF \
+                -DXQUIC_BUILD_DIR="$GITHUB_WORKSPACE/third_party/xquic/build" \
+                2>&1 | tee laneoff.log
+          # The "forcing OFF" CMake WARNING below is EXPECTED output —
+          # the spec asserts the downgrade; do not "fix" it away.
+          # non-quiet grep is intentional: echoes the gates line into the CI log as evidence
+          grep "mqvpn hybrid gates: LANE_BUILD=OFF EGRESS_BUILD=OFF" laneoff.log
+          grep -q "forcing OFF" laneoff.log
+
+      - name: Build lane-ON / egress-OFF (Debug)
+        run: |
+          CC=clang cmake -B build -DCMAKE_BUILD_TYPE=Debug \
+                -DMQVPN_ENABLE_HYBRID_TCP_EGRESS=OFF \
+                -DXQUIC_BUILD_DIR="$GITHUB_WORKSPACE/third_party/xquic/build"
+          cmake --build build -j"$(nproc)"
+
+      - name: ctest (egress-off shape)
+        run: |
+          ctest --test-dir build --output-on-failure
+          # rename guard: the absence check below goes vacuous if the
+          # target is ever renamed — keep the name pinned to the source.
+          grep -q test_tcp_egress CMakeLists.txt
+          if ctest --test-dir build -N | grep -q test_tcp_egress; then
+            echo "test_tcp_egress must not register in egress-off builds"; exit 1
+          fi
+
+      - name: Structural assert — no egress module in the binary (pins the HTTP-501 fallback)
+        run: |
+          # Vacuousness guard (a both-ON build would prove these symbols
+          # exist, but we avoid a second CI build; instead pin the patterns
+          # to the source): the grep patterns must keep matching real
+          # source — if tcp_egress is ever renamed, this fails and forces
+          # the patterns below to be updated with it.
+          test -f src/hybrid/tcp_egress.c
+          grep -q svr_tcp_egress src/hybrid/tcp_egress.c
+          test -f build/libmqvpn.a
+          test "$(ar t build/libmqvpn.a | grep -c tcp_egress)" = 0
+          test "$(nm build/mqvpn | grep -c svr_tcp_egress)" = 0
+
+      - name: E2E hybrid mixed-config (netns)
+        run: sudo -E tests/test_e2e_hybrid_mixed.sh build/mqvpn
