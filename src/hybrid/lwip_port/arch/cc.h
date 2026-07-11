@@ -31,9 +31,15 @@ typedef uintptr_t mem_ptr_t;
 #  define BYTE_ORDER LITTLE_ENDIAN
 #endif
 
-/* No packed-struct pragma needed; lwIP's own PACK_STRUCT_* macros default
- * to GCC/Clang __attribute__((packed)) when left undefined, which is what
- * we want (matches xquic's own build assumptions on this repo's targets). */
+/* Struct packing. GCC/Clang: lwIP's own PACK_STRUCT_* defaults apply
+ * __attribute__((packed)) (vendored arch.h gates on __GNUC__/__clang__).
+ * MSVC: those defaults silently produce NO packing — define the pragma
+ * bracket pair explicitly so wire-format structs stay byte-exact. */
+#if defined(_MSC_VER) && !defined(__clang__)
+#  define PACK_STRUCT_BEGIN __pragma(pack(push, 1))
+#  define PACK_STRUCT_END   __pragma(pack(pop))
+#  define PACK_STRUCT_STRUCT
+#endif
 
 /* Route lwIP's internal LWIP_PLATFORM_DIAG through mqvpn's logger. Declared
  * here, defined in lwip_glue.c (must not pull src/log.h into every lwIP
