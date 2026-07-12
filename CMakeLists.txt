@@ -90,16 +90,16 @@ if(NOT ANDROID_CROSS_COMPILE)
     endif()
 endif()
 
-# ---------- Hybrid mode TCP lane (lwIP, Linux-only in v1) ----------
+# ---------- Hybrid mode TCP lane (lwIP, Linux/macOS) ----------
 option(MQVPN_ENABLE_HYBRID_TCP_LANE
-       "Build the hybrid-mode lwIP TCP lane (Linux-only in v1)" ON)
-if(MQVPN_ENABLE_HYBRID_TCP_LANE AND NOT WIN32 AND NOT APPLE AND NOT ANDROID_CROSS_COMPILE)
+       "Build the hybrid-mode lwIP TCP lane (Linux/macOS)" ON)
+if(MQVPN_ENABLE_HYBRID_TCP_LANE AND NOT WIN32 AND NOT ANDROID_CROSS_COMPILE)
     set(MQVPN_HYBRID_TCP_LANE_BUILD ON)
 else()
     if(MQVPN_ENABLE_HYBRID_TCP_LANE)
         message(WARNING "MQVPN_ENABLE_HYBRID_TCP_LANE requested but target "
-                         "is Windows/macOS/Android — hybrid TCP lane is "
-                         "Linux-only in v1, ignoring.")
+                         "is Windows/Android — hybrid TCP lane is not "
+                         "available there, ignoring.")
     endif()
     set(MQVPN_HYBRID_TCP_LANE_BUILD OFF)
 endif()
@@ -245,19 +245,23 @@ list(APPEND MQVPN_LIB_SOURCES
 # sink, NO QUIC. Standalone executable, deliberately NOT part of mqvpn_lib —
 # links the hybrid sources directly. Driven by
 # benchmarks/tcp_lane_microbench/run.sh (gate: >= 10 Gbit/s).
-add_executable(tcp_lane_microbench
-    benchmarks/tcp_lane_microbench/harness.c
-    src/hybrid/classifier.c
-    src/hybrid/lwip_glue.c
-    src/log.c
-)
-target_link_libraries(tcp_lane_microbench lwip_core)
-target_include_directories(tcp_lane_microbench PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/include
-)
-set_target_properties(tcp_lane_microbench PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+# harness.c is TUN/Linux-bound (<linux/if_tun.h>); the microbench is a
+# Linux-only rig even where the lane itself builds.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(tcp_lane_microbench
+        benchmarks/tcp_lane_microbench/harness.c
+        src/hybrid/classifier.c
+        src/hybrid/lwip_glue.c
+        src/log.c
+    )
+    target_link_libraries(tcp_lane_microbench lwip_core)
+    target_include_directories(tcp_lane_microbench PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/include
+    )
+    set_target_properties(tcp_lane_microbench PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+endif()
 
 # libFuzzer target: classifier + lwIP packet-intake crash-safety (see
 # fuzz/fuzz_tcp_lane.c for scope). Requires clang (-fsanitize=fuzzer is a
@@ -508,9 +512,20 @@ target_include_directories(mqvpn_shared
 # PIC by default).
 target_link_libraries(mqvpn_shared xquic ${SSL_LIB} ${CRYPTO_LIB} pthread c++)
 
+# Keep in sync with the Linux twin (the mqvpn_shared lane block in the
+# Linux branch below).
+if(MQVPN_HYBRID_TCP_LANE_BUILD)
+    target_link_libraries(mqvpn_shared lwip_core)
+    target_compile_definitions(mqvpn_shared PRIVATE MQVPN_HYBRID_TCP_LANE_ENABLED)
+endif()
+if(MQVPN_HYBRID_TCP_EGRESS_BUILD)
+    target_compile_definitions(mqvpn_shared PRIVATE MQVPN_HYBRID_TCP_EGRESS_ENABLED)
+endif()
+
 # ---------- Tests (Darwin) ----------
-# Only the tests that exercise Darwin-specific parsing/formatting run here;
-# the full unit suite stays Linux-only (see the Linux branch below).
+# Only the tests that exercise Darwin-specific parsing/formatting run here
+# (plus the hybrid TCP-lane unit test below); the full unit suite stays
+# Linux-only (see the Linux branch below).
 option(BUILD_TESTING "Build unit tests" ON)
 if(BUILD_TESTING)
     enable_testing()
@@ -550,6 +565,23 @@ if(BUILD_TESTING)
             ${CMAKE_SOURCE_DIR}/src/platform/darwin)
         add_test(NAME ${t} COMMAND ${t})
     endforeach()
+
+    # Hybrid TCP-lane unit test — keep in sync with the Linux twin (the
+    # test_tcp_lane block in the Linux branch below). The test TU
+    # #include's BOTH src/hybrid/tcp_lane.c AND src/hybrid/tcp_lane_uplink.c
+    # (one logical module — see src/hybrid/tcp_lane_internal.h); do NOT
+    # also list either .c here. lwIP + port include dirs arrive via
+    # lwip_core's PUBLIC include directories.
+    if(MQVPN_HYBRID_TCP_LANE_BUILD)
+        add_executable(test_tcp_lane tests/test_tcp_lane.c src/hybrid/classifier.c
+                       src/hybrid/lwip_glue.c src/log.c)
+        target_link_libraries(test_tcp_lane lwip_core)
+        target_include_directories(test_tcp_lane PRIVATE
+            ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/include
+        )
+        add_test(NAME test_tcp_lane COMMAND test_tcp_lane)
+    endif()
 endif()
 
 else() # NOT WIN32, NOT APPLE — Linux

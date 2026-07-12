@@ -237,7 +237,7 @@ jobs:
           cmake -B build -DCMAKE_BUILD_TYPE=Release \
                 -DXQUIC_BUILD_DIR="$GITHUB_WORKSPACE/third_party/xquic/build" \
                 -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
-                -DMQVPN_ENABLE_HYBRID_TCP_LANE=OFF \
+                -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON \
                 -DEVENT_LIB="$(brew --prefix libevent)/lib/libevent.a"
           cmake --build build -j "$(sysctl -n hw.ncpu)"
 
@@ -266,10 +266,11 @@ jobs:
 
       - name: Create tarball (macOS)
         if: matrix.os == 'darwin'
-        # No lwip.txt (unlike the Linux tarball): the lwIP hybrid TCP lane is
-        # Linux-only, so lwIP is not compiled into the macOS binary. libevent
-        # IS bundled here (statically linked above; BSD-3-Clause requires the
-        # license text to accompany binary distributions).
+        # lwip.txt: the hybrid TCP lane builds on macOS, so lwIP is compiled
+        # in; BSD-3-Clause requires the license text to accompany binary
+        # distributions — same rationale as the statically linked libevent
+        # below (bundled so the shipped binary has no Homebrew runtime
+        # dependency).
         run: |
           STAGING="mqvpn_${VERSION}_darwin_${{ matrix.arch }}"
           mkdir -p "$STAGING/third-party"
@@ -280,6 +281,7 @@ jobs:
           cp NOTICE  "$STAGING/"
           cp third_party/xquic/LICENSE                       "$STAGING/third-party/xquic.txt"
           cp third_party/xquic/third_party/boringssl/LICENSE "$STAGING/third-party/boringssl.txt"
+          cp third_party/lwip/LICENSE                        "$STAGING/third-party/lwip.txt"
           libevent_lic="$(brew --prefix libevent)/LICENSE"
           if [ ! -f "$libevent_lic" ]; then
             echo "::error::libevent LICENSE not found at $libevent_lic — Homebrew layout may have changed"
@@ -294,9 +296,9 @@ jobs:
         run: |
           set -e
           tarball=$(ls mqvpn_*_darwin_*.tar.gz)
-          expected=5
+          expected=6
           found=$(tar tzf "$tarball" \
-                  | grep -cE '^\./(LICENSE|NOTICE|third-party/(xquic|boringssl|libevent)\.txt)$' \
+                  | grep -cE '^\./(LICENSE|NOTICE|third-party/(xquic|boringssl|libevent|lwip)\.txt)$' \
                   || true)
           if [ "$found" -ne "$expected" ]; then
             echo "::error::macOS tarball missing license files (found $found of $expected)"

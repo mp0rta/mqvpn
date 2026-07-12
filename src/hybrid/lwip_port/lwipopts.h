@@ -5,6 +5,14 @@
 #define LWIP_TIMERS          0 /* mqvpn drives tcp_tmr()/ip_reass_tmr() manually from tick() */
 #define SYS_LIGHTWEIGHT_PROT 0 /* single-threaded, all lwIP calls on the tick thread */
 
+/* Do NOT alias htons/ntohs/htonl/ntohl to lwip_htons & co. Darwin's
+ * <sys/types.h> chain (sys/_endian.h) already defines them as macros, so
+ * lwIP's aliases trip -Wmacro-redefined under -Werror in any TU that sees
+ * both. Nothing we compile relies on the aliases: lwIP core uses
+ * lwip_htons() internally, and first-party code (classifier.h,
+ * tcp_egress.c) gets the standard names from its own system includes. */
+#define LWIP_DONT_PROVIDE_BYTEORDER_FUNCTIONS 1
+
 #define LWIP_NETCONN  0
 #define LWIP_SOCKET   0
 #define LWIP_DHCP     0
