@@ -7,6 +7,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var engine: MqvpnEngine!
     private var binder: PathBinder!
     private var metrics: GateMetrics!
+    // Optional (not `!`): handleAppMessage can be delivered independently of
+    // the start/stop lifecycle, so the reader must tolerate a nil cache.
+    private var snapshot: SnapshotCache?
     private var defaultPathObservation: NSKeyValueObservation?
 
     override func startTunnel(options: [String: NSObject]?) async throws {
@@ -14,6 +17,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         engine = MqvpnEngine()
         binder = PathBinder(engine: engine)
         metrics = GateMetrics(engine: engine, binder: binder)
+        snapshot = SnapshotCache(engine: engine)
 
         engine.onTunOutput = { [weak self] data in
             // NEPacketTunnelFlow requires a protocol family per packet; the
@@ -49,6 +53,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                         self.engine.tunActive()  // opens TUN + drives state 3->4
                         self.readLoop()          // one-shot API: re-armed per completion
                         self.metrics.start()     // 10s cadence os_log dumps
+                        self.snapshot?.start()   // 1s cadence app-facing cache
                         cont.resume()
                     }
                 }
@@ -124,6 +129,22 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     static func prefixToMask(_ prefix: UInt8) -> String {
         let m: UInt32 = prefix == 0 ? 0 : ~UInt32(0) << (32 - UInt32(prefix))
         return "\((m >> 24) & 255).\((m >> 16) & 255).\((m >> 8) & 255).\(m & 255)"
+    }
+
+    /// Command-agnostic snapshot request (future commands are YAGNI): any
+    /// message returns the latest cached snapshot. Runs on an arbitrary NE
+    /// thread, so it MUST NOT touch the engine (its accessors are
+    /// tick-thread-confined) — it only reads the lock-guarded cache and
+    /// serializes. A missing cache or encode failure yields nil, which the
+    /// app renders as "no data".
+    override func handleAppMessage(_ messageData: Data,
+                                   completionHandler: ((Data?) -> Void)?) {
+        guard let snap = snapshot?.read(),
+              let data = try? ProviderMessage.encode(snap) else {
+            completionHandler?(nil)
+            return
+        }
+        completionHandler?(data)
     }
 
     override func stopTunnel(with reason: NEProviderStopReason) async {
