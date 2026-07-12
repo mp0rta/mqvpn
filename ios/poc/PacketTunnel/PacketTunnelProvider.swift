@@ -94,6 +94,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         v4.includedRoutes = [NEIPv4Route.default()]
         s.ipv4Settings = v4
         s.mtu = NSNumber(value: info.mtu)
+        // The tunnel protocol does not carry DNS servers; like the Android
+        // client (which takes DNS from app-side config), the platform layer
+        // must supply resolvers. Without dnsSettings the phone keeps sending
+        // queries to its WiFi LAN resolver, which the full-tunnel default
+        // route captures and the server NATs to an unroutable private
+        // address — name resolution dies and every app looks offline.
+        s.dnsSettings = NEDNSSettings(servers: ["1.1.1.1", "8.8.8.8"])
         // IPv6 (info.has_v6 / assigned_ip6 / assigned_prefix6) is out of PoC
         // scope: the PoC server config assigns IPv4 only.
         return s
