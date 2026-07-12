@@ -60,10 +60,44 @@ Incidents during bring-up (not gate failures):
   comes from app-side config rather than the tunnel protocol. Safari
   browsing confirmed working after the fix.
 
-## G-i2 — multipath distribution: PENDING
+## G-i2 — multipath distribution: **PASS**
+
+Procedure: WiFi + cellular both enabled, tunnel restarted → both paths ACTIVE
+(`GATE| ... path[en0] st=1 ... path[pdp_ip0] st=1`, 23:52:35). Cellular came
+up with IPv4 (no NAT64 blocker on this SIM). Bulk download via the container
+app (sequential GETs of `http://10.0.0.1:8080/bulk-100M.bin` for 60 s),
+default WLB scheduler.
+
+Per-path byte deltas over the bulk window (23:52:35 → traffic flatline at
+23:55:05):
+
+| Path | Δtx | Δrx | Δ(tx+rx) | ≥1 MiB? |
+|---|---|---|---|---|
+| en0 (WiFi) | 36.9 MB | 780.1 MB | ~817 MB | PASS |
+| pdp_ip0 (cellular) | 130 KB | 7.67 MB | ~7.8 MB | PASS |
+
+Both paths stayed ACTIVE throughout; WLB distributed asymmetrically according
+to path capacity (WiFi-dominant), as designed. Aggregate ~787 MB over ~150 s
+(~42 Mbps through the tunnel; single-path WiFi reference earlier the same
+evening: ~94 MB in ~20 s).
 
 ## G-i3 — failover + recovery + flap ×3: PENDING
 
-## G-i4 — memory: PENDING
+## G-i4 — memory: **PASS**
+
+Metric: `task_vm_info.phys_footprint` (jetsam-relevant; NE limit 50 MB, gate
+threshold 40 MB). All three required points far under the limit:
+
+| Point | phys_footprint |
+|---|---|
+| (a) post-handshake, single path | 2,752,776 B (~2.75 MB) |
+| (b) two paths ACTIVE, idle | 2,883,848 B (~2.88 MB) |
+| (c) during bulk load (peak observed) | 4,800,776 B (~4.80 MB) |
+
+Non-gate recordings: `os_proc_available_memory()` stayed ~47-50 MB at all
+points (never below the 10 MB anomaly threshold). Per-path socket buffers:
+both en0 and pdp_ip0 report SO_SNDBUF/SO_RCVBUF = 6,291,456 B (6 MiB) — the
+platform pre-set (1 MiB) was superseded by the core's 7 MiB request being
+granted at 6 MiB rather than rejected to Darwin UDP defaults.
 
 ## G-i5 — verdict: PENDING
