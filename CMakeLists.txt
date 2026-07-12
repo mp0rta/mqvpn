@@ -90,18 +90,15 @@ if(NOT ANDROID_CROSS_COMPILE)
     endif()
 endif()
 
-# ---------- Hybrid mode TCP lane (lwIP, Linux/macOS/Android) ----------
+# ---------- Hybrid mode TCP lane (lwIP) ----------
 option(MQVPN_ENABLE_HYBRID_TCP_LANE
-       "Build the hybrid-mode lwIP TCP lane (Linux/macOS/Android)" ON)
-if(MQVPN_ENABLE_HYBRID_TCP_LANE AND NOT WIN32)
+       "Build the hybrid-mode lwIP TCP lane" ON)
+# Effective-value var (not the option directly): consumed by the EGRESS gate
+# below and the gates STATUS marker; the single seam if a platform ever needs
+# exclusion again.
+set(MQVPN_HYBRID_TCP_LANE_BUILD OFF)
+if(MQVPN_ENABLE_HYBRID_TCP_LANE)
     set(MQVPN_HYBRID_TCP_LANE_BUILD ON)
-else()
-    if(MQVPN_ENABLE_HYBRID_TCP_LANE)
-        message(WARNING "MQVPN_ENABLE_HYBRID_TCP_LANE requested but target "
-                         "is Windows — hybrid TCP lane is not "
-                         "available there, ignoring.")
-    endif()
-    set(MQVPN_HYBRID_TCP_LANE_BUILD OFF)
 endif()
 
 # ---------- Hybrid mode server-side TCP egress (Linux-only) ----------
@@ -226,7 +223,10 @@ target_include_directories(lwip_core PUBLIC
 target_compile_definitions(lwip_core PRIVATE $<$<CONFIG:Release>:LWIP_NOASSERT>)
 # Vendored third-party code — not held to -Werror (ENABLE_SANITIZERS adds it
 # at directory scope; clang trips on lwIP's tautological-compare warnings).
-target_compile_options(lwip_core PRIVATE -Wno-error)
+# GCC-syntax flag; MSVC applies /WX only to mqvpn/mqvpn_lib, never lwip_core.
+if(NOT MSVC)
+    target_compile_options(lwip_core PRIVATE -Wno-error)
+endif()
 # mqvpn_shared (a SHARED target) links this static lib below — its objects
 # must be position-independent, same reason xquic-static is unusable there.
 set_target_properties(lwip_core PROPERTIES POSITION_INDEPENDENT_CODE ON)

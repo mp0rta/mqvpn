@@ -5,7 +5,17 @@
 #define MQVPN_HYBRID_TCP_LANE_H
 
 #include <stdint.h>
-#include <sys/types.h>         /* ssize_t (cli_tcp_lane_h3_send) */
+#ifdef _MSC_VER
+/* MSVC has no ssize_t. NOTE: vendored xquic also typedefs ssize_t on
+ * Windows (xquic_typedef.h, __int64 on 64-bit) and mqvpn_client.c sees
+ * both in one TU — this typedef MUST resolve to the identical type
+ * (SSIZE_T = LONG_PTR = __int64 on _WIN64; a benign redefinition).
+ * Win32/x86 would clash — not a supported target. */
+#  include <basetsd.h> /* SSIZE_T */
+typedef SSIZE_T ssize_t;
+#else
+#  include <sys/types.h> /* ssize_t (cli_tcp_lane_h3_send) */
+#endif
 #include "reorder.h"           /* mqvpn_flow_key_t, mqvpn_flow_key_hash/eq */
 #include "hybrid/classifier.h" /* mqvpn_hybrid_config_t */
 #include "hybrid/lwip_glue.h"  /* err_t + forward-declared struct tcp_pcb +

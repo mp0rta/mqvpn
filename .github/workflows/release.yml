@@ -412,6 +412,9 @@ jobs:
 
       - name: Build mqvpn (Windows)
         if: matrix.os == 'windows'
+        # -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON is behavior-identical to omitting
+        # it (the option defaults ON) but kept explicit for self-documentation
+        # (spec §6). Covers both amd64 and arm64 via this one step set.
         run: |
           mkdir build
           cd build
@@ -423,7 +426,8 @@ jobs:
             -DXQUIC_BUILD_DIR="${{ github.workspace }}/third_party/xquic/build/Release" `
             -DBORINGSSL_BUILD_DIR="${{ github.workspace }}/third_party/xquic/third_party/boringssl/build/Release" `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=${{ matrix.arch == 'amd64' && 'x64-windows-static' || 'arm64-windows-static' }} ..
+            -DVCPKG_TARGET_TRIPLET=${{ matrix.arch == 'amd64' && 'x64-windows-static' || 'arm64-windows-static' }} `
+            -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON ..
           cmake --build . --config Release
 
       - name: Smoke test mqvpn.exe (Windows)
@@ -433,8 +437,8 @@ jobs:
           # ctest is intentionally skipped on Windows: the registered tests
           # (test_auth, test_config, test_dns, test_session) include POSIX
           # headers / Linux-only platform sources, so they cannot be built
-          # under MSVC. CMakeLists.txt:197 guards the test block with
-          # `else()  # NOT WIN32 — Linux`, meaning ctest on Windows would
+          # under MSVC. The unit-test block lives in the Linux else() branch
+          # of CMakeLists.txt, so ctest registers nothing on WIN32 and would
           # silently pass on zero tests. Skipping makes that explicit.
           # The smoke step below is the actual Windows build verification.
           $out = & "build/Release/mqvpn.exe" --help 2>&1 | Out-String
@@ -453,6 +457,9 @@ jobs:
       - name: Stage Windows release artifact
         if: matrix.os == 'windows'
         shell: pwsh
+        # lwip.txt: the hybrid TCP lane builds on Windows, so lwIP is
+        # compiled in; BSD-3-Clause requires the license text to accompany
+        # binary distributions — same rationale as macOS/Linux staging.
         run: |
           $staging = "mqvpn_${env:VERSION}_windows_${env:MATRIX_ARCH}"
           $tpl = "$staging/THIRD_PARTY_LICENSES"
@@ -478,6 +485,7 @@ jobs:
           Copy-Item "third_party/xquic/LICENSE" "$tpl/xquic.txt"
           Copy-Item "third_party/xquic/third_party/boringssl/LICENSE" "$tpl/boringssl.txt"
           Copy-Item "wintun-extract/wintun/LICENSE.txt" "$tpl/wintun.txt"
+          Copy-Item "third_party/lwip/LICENSE" "$tpl/lwip.txt"
           $triplet = if ($env:MATRIX_ARCH -eq 'amd64') { 'x64-windows-static' } else { 'arm64-windows-static' }
           $libevent_lic = "$env:VCPKG_INSTALLATION_ROOT/installed/$triplet/share/libevent/copyright"
           if (-not (Test-Path $libevent_lic)) {
@@ -521,7 +529,8 @@ jobs:
             '^THIRD_PARTY_LICENSES/xquic\.txt$',
             '^THIRD_PARTY_LICENSES/boringssl\.txt$',
             '^THIRD_PARTY_LICENSES/wintun\.txt$',
-            '^THIRD_PARTY_LICENSES/libevent\.txt$'
+            '^THIRD_PARTY_LICENSES/libevent\.txt$',
+            '^THIRD_PARTY_LICENSES/lwip\.txt$'
           )
           $missing = @()
           foreach ($pat in $expected) {

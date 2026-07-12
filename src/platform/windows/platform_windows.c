@@ -19,6 +19,7 @@
 #  include "platform_windows.h"
 #  include "net_mon.h"
 #  include "log.h"
+#  include "mqvpn_internal.h" /* mqvpn_config_apply_hybrid (INI [Hybrid] bridge) */
 
 #  include <stdio.h>
 #  include <stdlib.h>
@@ -581,6 +582,7 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     mqvpn_config_set_scheduler(lib_cfg, lib_sched);
     mqvpn_config_set_cc(lib_cfg, (mqvpn_cc_t)cfg->cc);
     mqvpn_config_set_tun_mtu(lib_cfg, cfg->tun_mtu);
+    mqvpn_config_apply_hybrid(lib_cfg, &cfg->hybrid); /* INI [Hybrid] bridge */
 
     /* Create callbacks */
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
