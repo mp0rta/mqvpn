@@ -1228,6 +1228,36 @@ TEST(cb_path_removed_validating_to_create_wait)
     mqvpn_client_destroy(c);
 }
 
+/* Primary-removal abandon regression pin — the primary path bootstraps as
+ * xqc_path_id=0, xquic_path_live=1 (id 0 is the live initial QUIC path,
+ * not an unset sentinel). Its removal must emit the xquic abandon
+ * (PATH_ABANDON) exactly like a secondary's; the id-0 guard introduced by
+ * the PR4 refactor (#116) skipped it and cost a ~95-115 s server-side
+ * downlink blackout on primary loss (iOS PoC gate G-i3). */
+extern int mqvpn_client_test_force_validating(mqvpn_client_t *c, mqvpn_path_handle_t handle,
+                                              uint64_t xqc_path_id);
+extern int mqvpn_client_test_abandon_due(mqvpn_client_t *c, mqvpn_path_handle_t handle);
+
+TEST(remove_live_primary_emits_abandon)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    /* Fresh PENDING slot: no live xquic path -> no abandon. */
+    ASSERT_EQ(mqvpn_client_test_abandon_due(c, h), 0);
+
+    /* Seed the primary bootstrap shape: live path with xqc_path_id=0. */
+    ASSERT_EQ(mqvpn_client_test_force_validating(c, h, 0), 0);
+    ASSERT_EQ(mqvpn_client_test_abandon_due(c, h), 1);
+
+    /* Secondary shape (non-zero id) keeps emitting too. */
+    ASSERT_EQ(mqvpn_client_test_force_validating(c, h, 7), 0);
+    ASSERT_EQ(mqvpn_client_test_abandon_due(c, h), 1);
+
+    mqvpn_client_destroy(c);
+}
+
 /* ── Permanent path-create failure (xquic budget exhausted / OOM) ──
  *
  * When xqc_conn_create_path() returns -XQC_EMP_CREATE_PATH (652), retrying
@@ -2285,6 +2315,7 @@ main(void)
     run_activation_failure_invalid_handle_returns_error();
     run_activation_failure_eventually_closes_path();
     run_cb_path_removed_validating_to_create_wait();
+    run_remove_live_primary_emits_abandon();
 
     /* path_event close-out semantics */
     run_remove_path_emits_closed_event_when_active();

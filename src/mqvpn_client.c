@@ -2161,6 +2161,23 @@ mqvpn_client_test_force_validating_then_remove(mqvpn_client_t *c,
     return 0;
 }
 
+static int path_xquic_abandon_due(const path_entry_t *p);
+
+/* Test-only: expose the shared abandon-emission predicate by handle so tests
+ * can pin that a live primary (xqc_path_id 0) is abandoned on removal.
+ * Hidden from libmqvpn.so's dynamic export table. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_abandon_due(mqvpn_client_t *c, mqvpn_path_handle_t handle)
+{
+    if (!c) return -1;
+    path_entry_t *p = find_path_by_handle(c, handle);
+    if (!p) return -1;
+    return path_xquic_abandon_due(p);
+}
+
 /* PR3 test-only getter: expose internal lifecycle state name + recreate_retries
  * by handle so tests can pin transitions that don't change the public
  * 5-state projection (e.g. CREATE_WAIT and PENDING both map to PENDING).
@@ -2700,6 +2717,18 @@ mqvpn_client_add_path_fd(mqvpn_client_t *c, int fd, const mqvpn_path_desc_t *des
     return mqvpn_client_add_path_fd_with_outcome(c, fd, desc, NULL);
 }
 
+/* Abandon-emission predicate shared by REMOVE_API and PLATFORM_DROP: any
+ * live xquic path must be abandoned toward the peer on removal. xqc_path_id 0
+ * is the live initial path (primary bootstrap), not an unset sentinel, so the
+ * id takes no part in the decision — skipping it left the server scheduling
+ * downlink onto a dead primary for its full liveness timeout. engine/conn
+ * availability is checked at the call sites (environmental, not path shape). */
+static int
+path_xquic_abandon_due(const path_entry_t *p)
+{
+    return p->xquic_path_live != 0;
+}
+
 int
 mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
 {
@@ -2712,7 +2741,7 @@ mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
 
     /* Spec §5.0: REMOVE_API allows orderly xquic close. Issue before
      * dispatch so the FSM stays xquic-API-free (avoids layer leak). */
-    if (p->xquic_path_live && p->xqc_path_id != 0 && c->engine && c->conn)
+    if (path_xquic_abandon_due(p) && c->engine && c->conn)
         xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
 
     path_event_ctx_t ctx = {.now_us = client_now_us(c)};
@@ -2748,7 +2777,7 @@ mqvpn_client_on_platform_path_dropped(mqvpn_client_t *c, mqvpn_path_handle_t han
      * CID/path_id slot is released for reuse. Non-blocking (queues frame
      * on an alternate path). Fails gracefully if this is the only active
      * path or if the connection is already closing. */
-    if (p->xquic_path_live && c->engine && c->conn)
+    if (path_xquic_abandon_due(p) && c->engine && c->conn)
         xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
 
     path_event_ctx_t ctx = {.now_us = client_now_us(c)};
