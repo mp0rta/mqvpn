@@ -649,16 +649,20 @@ jobs:
           make -j"$(sysctl -n hw.ncpu)"
 
       - name: Build mqvpn (core libs + Darwin platform TUs + CLI + tests)
+        # Expect a new EGRESS "forcing OFF" WARNING here: MQVPN_ENABLE_HYBRID_TCP_EGRESS
+        # defaults ON but the EGRESS gate still blocks APPLE (server egress
+        # stays OFF on macOS by design) — cosmetic, do not "fix" it.
         run: |
           cmake -B build-darwin -DCMAKE_BUILD_TYPE=Debug \
             -DXQUIC_BUILD_DIR="$GITHUB_WORKSPACE/third_party/xquic/build" \
             -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
-            -DMQVPN_ENABLE_HYBRID_TCP_LANE=OFF \
+            -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON \
             -DCMAKE_C_FLAGS="-Wall -Wextra -Werror"
           cmake --build build-darwin \
             --target mqvpn_lib mqvpn_shared mqvpn_darwin_platform \
                      mqvpn test_route_parse_darwin test_dns_backup_darwin \
                      test_dns_state_darwin test_routing_seq_darwin test_killswitch_rules_darwin \
+                     test_tcp_lane \
             -j "$(sysctl -n hw.ncpu)"
 
       - name: Verify artifacts
@@ -956,10 +960,11 @@ jobs:
 
   hybrid-egress-off:
     # Pins the LANE=ON / EGRESS=OFF build shape (client TCP lane compiled
-    # in, server-side TCP egress compiled out) — the shape Windows/Android/
-    # macOS ports will build once they land — plus a plain LANE=OFF
-    # configure-compatibility check. Reuses the same clang-Debug
-    # BoringSSL/xquic cache artifacts as the hybrid-e2e and sanitizer jobs.
+    # in, server-side TCP egress compiled out) — the shape the darwin job
+    # now builds, and the Windows/Android ports will build once they land —
+    # plus a plain LANE=OFF configure-compatibility check. Reuses the same
+    # clang-Debug BoringSSL/xquic cache artifacts as the hybrid-e2e and
+    # sanitizer jobs.
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
