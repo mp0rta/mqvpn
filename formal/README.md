@@ -44,7 +44,7 @@ been found.`
 |----------|------|------------------|--------------|
 | `TypeOK` | invariant | Variable domains | — |
 | `InvPerState` | invariant | Per-state field constraints, exactly the ones `path_invariant_check()` asserts (deliberately not more: e.g. `xqc_path_id` is unasserted in VALIDATING/ACTIVE because the primary slot keeps id 0, and `recreate_retries` is unasserted in CLOSED_FREE) | `src/path_state_machine.c:140-225` |
-| `StaleEventHarmless` | action property | A delayed callback belonging to an earlier slot incarnation can never mutate a later incarnation. Holds because of the composed delivery fences: handle lookup for platform events (`find_path_by_handle`; handles are monotonic, `mqvpn_client.c:2651,2760`), xqc_path_id + `xquic_path_live` lookup for xquic removal (`mqvpn_client.c:2184-2202`), and global freshness of xquic path ids (`xqc_conn_get_available_path_id`, `third_party/xquic/src/transport/xqc_conn.c:5444-5467`) | reuse scan `mqvpn_client.c:2632-2643` |
+| `StaleEventHarmless` | action property | A delayed callback belonging to an earlier slot incarnation can never mutate a later incarnation. Holds because of the composed delivery fences: handle lookup for platform events (`find_path_by_handle`; handles are monotonic, `mqvpn_client.c:2651,2760`), xqc_path_id + `xquic_path_live` lookup for xquic removal (`mqvpn_client.c:2184-2202`), and global freshness of xquic path ids — the allocator returns unused ids only (`xqc_conn_get_available_path_id`, `third_party/xquic/src/transport/xqc_conn.c:5444-5467`) *and* abandoned ids are never recycled (ABANDONED cid-set mark, `xqc_multipath.c:219-223`) | reuse scan `mqvpn_client.c:2632-2643` |
 | `FdOwnershipSafe` | action property | Only the FD_CLOSED completion of the current incarnation clears the platform-owned fd | `src/path_state_machine.c:672-689` |
 | `FreeQuiescent` | action property | CLOSED_FREE is left only by reuse (`add_path_fd`) | `src/path_state_machine.c:640-652` |
 | `ReuseOnlyFromFence` | action property | Reuse happens only from public-CLOSED, detached, xquic-drained slots — note this **includes** CLOSED_DROPPED with a still-open fd; the model proves that is safe, see log #1 discussion | `mqvpn_client.c:2616-2691` |
@@ -76,7 +76,7 @@ been found.`
   already removed" interleavings are covered.
 - **Public-event stream is not modeled per emission**: `path_on_event` fires
   the public callback on every internal state change
-  (`mqvpn_client.c:400-404`), so an observer sees CLOSED twice on
+  (`mqvpn_client.c:400-403`), so an observer sees CLOSED twice on
   DROPPED→FREE and possibly several CLOSED episodes per incarnation via
   manual reactivation. This is intentional implementation behavior; whether
   duplicate CLOSED notifications are desirable for observers is a UX

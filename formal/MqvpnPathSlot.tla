@@ -117,12 +117,13 @@ OnActivateRequested(result, newId) ==
               /\ state'      = "Validating"
               /\ UNCHANGED <<attached, fdOwner, retries, stableArmed>>
          [] result = "TRANSIENT" -> ApplyFailure("CreateWait")
-         [] OTHER ->  \* PERMANENT: retries untouched
-              /\ live'       = FALSE
-              /\ xqcId'      = NULL
-              /\ retryArmed' = FALSE
-              /\ state'      = "ClosedRecoverable"
-              /\ UNCHANGED <<attached, fdOwner, retries, stableArmed>>
+         [] OTHER ->  \* PERMANENT: retries untouched, stable timer cleared
+              /\ live'        = FALSE
+              /\ xqcId'       = NULL
+              /\ stableArmed' = FALSE
+              /\ retryArmed'  = FALSE
+              /\ state'       = "ClosedRecoverable"
+              /\ UNCHANGED <<attached, fdOwner, retries>>
   ELSE UNCHANGED slotVars  \* WARN no-op
 
 \* path_on_retry_timer (path_state_machine.c:483-515); retry target is the
@@ -136,12 +137,13 @@ OnRetryTimer(result, newId) ==
               /\ state'      = "Validating"
               /\ UNCHANGED <<attached, fdOwner, retries, stableArmed>>
          [] result = "TRANSIENT" -> ApplyFailure(state)
-         [] OTHER ->
-              /\ live'       = FALSE
-              /\ xqcId'      = NULL
-              /\ retryArmed' = FALSE
-              /\ state'      = "ClosedRecoverable"
-              /\ UNCHANGED <<attached, fdOwner, retries, stableArmed>>
+         [] OTHER ->  \* PERMANENT: retries untouched, stable timer cleared
+              /\ live'        = FALSE
+              /\ xqcId'       = NULL
+              /\ stableArmed' = FALSE
+              /\ retryArmed'  = FALSE
+              /\ state'       = "ClosedRecoverable"
+              /\ UNCHANGED <<attached, fdOwner, retries>>
   ELSE UNCHANGED slotVars  \* WARN no-op
 
 \* path_on_validation_ok (path_state_machine.c:517-531)
