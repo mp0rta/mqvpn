@@ -7,6 +7,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var engine: MqvpnEngine!
     private var binder: PathBinder!
     private var metrics: GateMetrics!
+    private var defaultPathObservation: NSKeyValueObservation?
 
     override func startTunnel(options: [String: NSObject]?) async throws {
         let config = try PoCConfig.fromBundle()
@@ -69,6 +70,20 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
             engine.start(config: config)
             binder.start()
+            // Redundant trigger for path lifecycle: NWPathMonitor updates
+            // have been observed to arrive minutes late inside the provider
+            // (device measurement: a WiFi-off unsatisfied delayed ~110 s,
+            // blacking out downlink because no orderly remove_path ran).
+            // NEProvider.defaultPath is an independent KVO channel that
+            // tracks the physical path; any change re-runs the binder's
+            // reconciliation. Only the TRIGGER is independent — the value
+            // is not read (it has no per-interface-type availability), and
+            // the binder probes fresh per-type state itself rather than
+            // trusting any possibly-stale monitor snapshot.
+            defaultPathObservation = observe(\.defaultPath) { [weak self] _, _ in
+                guard let self else { return }
+                self.engine.perform { self.binder.reconcile() }
+            }
         }
     }
 
@@ -117,6 +132,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // frame races the async fd close on monitorQueue — losing the race
         // just means the server falls back to its idle timeout) and gives
         // repeated gate runs a zero state start.
+        defaultPathObservation?.invalidate()
+        defaultPathObservation = nil
         await withCheckedContinuation { cont in
             // Safe to resume from inside perform{}: only this method cancels
             // the tick thread, so the hop cannot be dropped here.

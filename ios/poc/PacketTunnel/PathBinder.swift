@@ -27,21 +27,70 @@ final class PathBinder {
         // One monitor per interface type: a single default NWPathMonitor only
         // reports the preferred path, so WiFi+cellular can never be held
         // simultaneously with it.
+        //
+        // The persistent monitors are TRIGGERS, not state sources. Their
+        // update deliveries have been observed to stall for minutes inside
+        // an NE provider (a WiFi-off unsatisfied arrived ~110 s late on
+        // device), and a stalled monitor's currentPath is equally stale —
+        // it only advances when a delivery lands. So every trigger funnels
+        // into reconcile(), which probes FRESH state instead of trusting
+        // the delivered snapshot.
         for type in [NWInterface.InterfaceType.wifi, .cellular] {
             let m = NWPathMonitor(requiredInterfaceType: type)
-            m.pathUpdateHandler = { [weak self] path in
+            m.pathUpdateHandler = { [weak self] _ in
                 guard let self else { return }
-                let iface = path.availableInterfaces.first { $0.type == type }
-                self.engine.perform {   // hop to tick thread
-                    if path.status == .satisfied, let iface {
-                        self.addPath(type: type, iface: iface)
-                    } else {
-                        self.removePath(type: type)
-                    }
-                }
+                self.engine.perform { self.reconcile() }
             }
             m.start(queue: monitorQueue)
             monitors[type] = m
+        }
+    }
+
+    /// Re-derive add/remove state for every managed interface type. Called
+    /// on the tick thread, from two independent trigger channels: the
+    /// persistent monitors' deliveries and the provider's
+    /// NEProvider.defaultPath KVO (which keeps firing even when monitor
+    /// deliveries stall). Duplicate or out-of-order triggers are safe:
+    /// probe results funnel into addPath/removePath, whose guards make
+    /// repeats no-ops.
+    func reconcile() {
+        for type in monitors.keys { probe(type) }
+    }
+
+    /// One-shot fresh path lookup. A NEW NWPathMonitor registration always
+    /// receives an initial update reflecting current daemon state on start,
+    /// independent of any stalled long-lived monitor — that first delivery
+    /// is taken as the truth, then the probe is cancelled. The probe object
+    /// is kept alive by its own handler's capture until it fires.
+    private func probe(_ type: NWInterface.InterfaceType) {
+        let p = NWPathMonitor(requiredInterfaceType: type)
+        var fired = false   // monitorQueue-confined (handler queue)
+        p.pathUpdateHandler = { [weak self] path in
+            guard !fired else { return }
+            fired = true
+            p.cancel()
+            // Break the wrapper<->handler retain cycle: cancel() alone does
+            // not release the stored Swift closure that keeps `p` alive.
+            p.pathUpdateHandler = nil
+            guard let self else { return }
+            let iface = path.availableInterfaces.first { $0.type == type }
+            self.engine.perform {   // hop to tick thread
+                if path.status == .satisfied, let iface {
+                    self.addPath(type: type, iface: iface)
+                } else {
+                    self.removePath(type: type)
+                }
+            }
+        }
+        p.start(queue: monitorQueue)
+        // The initial delivery is documented behavior but this file exists
+        // because path-daemon deliveries can stall inside an NE provider —
+        // bound the probe's lifetime; the next trigger simply re-probes.
+        monitorQueue.asyncAfter(deadline: .now() + 3.0) {
+            guard !fired else { return }
+            fired = true
+            p.cancel()
+            p.pathUpdateHandler = nil
         }
     }
 
