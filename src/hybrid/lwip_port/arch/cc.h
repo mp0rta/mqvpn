@@ -39,6 +39,19 @@ typedef uintptr_t mem_ptr_t;
 #  define PACK_STRUCT_BEGIN __pragma(pack(push, 1))
 #  define PACK_STRUCT_END   __pragma(pack(pop))
 #  define PACK_STRUCT_STRUCT
+/* ssize_t: vendored arch.h (lwip/arch.h) does `typedef int ssize_t` when
+ * SSIZE_MAX is undefined — a 32-bit type that clashes (C2371) with xquic's
+ * and tcp_lane.h's __int64 ssize_t in any TU that sees both. Define
+ * SSIZE_MAX so arch.h skips that typedef, and LWIP_NO_UNISTD_H=1 so it does
+ * not then #include <unistd.h> (absent on MSVC). lwip_core itself never uses
+ * ssize_t; the lane TUs get their __int64 ssize_t from tcp_lane.h / xquic. */
+#  include <limits.h>
+#  ifndef SSIZE_MAX
+#    define SSIZE_MAX _I64_MAX
+#  endif
+#  ifndef LWIP_NO_UNISTD_H
+#    define LWIP_NO_UNISTD_H 1
+#  endif
 #endif
 
 /* Route lwIP's internal LWIP_PLATFORM_DIAG through mqvpn's logger. Declared
