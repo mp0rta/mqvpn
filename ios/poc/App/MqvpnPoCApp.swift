@@ -11,7 +11,7 @@ struct MqvpnPoCApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(controller: controller)
+            DashboardView(controller: controller)
                 // Foreground-only polling: pause IPC when not active to avoid
                 // battery drain and pointless sendProviderMessage churn.
                 .onChange(of: scenePhase) { phase in
@@ -21,20 +21,23 @@ struct MqvpnPoCApp: App {
     }
 }
 
-/// Minimal PoC container controller: load/save the one NETunnelProviderManager,
+/// PoC container controller: load/save the one NETunnelProviderManager,
 /// start/stop it, and — while foregrounded and connected — poll the provider
-/// for a development snapshot over `sendProviderMessage`.
+/// for a development snapshot over `sendProviderMessage`. Per-path transfer
+/// rates are derived here from consecutive snapshots.
 @MainActor
 final class TunnelController: ObservableObject {
     static let providerBundleID = "com.mp0rta.mqvpnpoc.PacketTunnel"
 
     @Published var status: NEVPNStatus = .invalid
     @Published var statusText = "not loaded"
-    @Published var snapshot: TunnelSnapshot?      // nil = no data
+    @Published var snapshot: TunnelSnapshot?       // nil = no data
+    @Published var pathRates: [String: Double] = [:]   // iface name -> Mbps
+    private var prevSnapshot: TunnelSnapshot?
     private var manager: NETunnelProviderManager?
     private var observer: NSObjectProtocol?
     private var pollTimer: Timer?
-    private var scenePhaseActive = true           // WindowGroup starts active
+    private var scenePhaseActive = true            // WindowGroup starts active
 
     func loadOrCreateManager() async {
         do {
@@ -109,7 +112,7 @@ final class TunnelController: ObservableObject {
             startPolling()
         } else {
             stopPolling()
-            if !up { snapshot = nil }
+            if !up { clearSnapshot() }
         }
     }
 
@@ -127,6 +130,12 @@ final class TunnelController: ObservableObject {
         pollTimer = nil
     }
 
+    private func clearSnapshot() {
+        snapshot = nil
+        pathRates = [:]
+        prevSnapshot = nil
+    }
+
     private func poll() {
         guard let session = manager?.connection as? NETunnelProviderSession else { return }
         do {
@@ -139,12 +148,36 @@ final class TunnelController: ObservableObject {
                         self.snapshot = nil   // no data / undecodable — never crash
                         return
                     }
-                    self.snapshot = snap
+                    self.ingest(snap)
                 }
             }
         } catch {
             snapshot = nil
         }
+    }
+
+    /// Compute per-path rates from the previous sample, then publish.
+    private func ingest(_ snap: TunnelSnapshot) {
+        if let prev = prevSnapshot {
+            let dt = snap.timestamp - prev.timestamp
+            if dt > 0.05 {
+                var prevByName: [String: PathSnapshot] = [:]
+                for pp in prev.paths { prevByName[pp.name] = pp }
+                var rates: [String: Double] = [:]
+                for p in snap.paths {
+                    guard let pp = prevByName[p.name] else { continue }
+                    // Double avoids UInt64 wrap; a counter reset (path re-add)
+                    // yields a negative delta which we clamp to 0.
+                    let curBytes = Double(p.txBytes) + Double(p.rxBytes)
+                    let oldBytes = Double(pp.txBytes) + Double(pp.rxBytes)
+                    let delta = curBytes - oldBytes
+                    rates[p.name] = delta > 0 ? delta * 8.0 / dt / 1_000_000.0 : 0.0
+                }
+                pathRates = rates
+            }
+        }
+        prevSnapshot = snap
+        snapshot = snap
     }
 
     private static func describe(_ s: NEVPNStatus) -> String {
@@ -156,70 +189,6 @@ final class TunnelController: ObservableObject {
         case .reasserting: return "reasserting"
         case .disconnecting: return "disconnecting"
         @unknown default: return "unknown(\(s.rawValue))"
-        }
-    }
-}
-
-struct ContentView: View {
-    @ObservedObject var controller: TunnelController
-    @State private var bulkStatus = ""
-    @State private var bulkRunning = false
-
-    var body: some View {
-        VStack(spacing: 16) {
-            Text("mqvpn PoC").font(.title)
-            Text(controller.statusText).font(.subheadline)
-            HStack(spacing: 12) {
-                Button("Start") { controller.start() }
-                Button("Stop") { controller.stop() }
-            }
-            // Task 2 round-trip confirmation: raw snapshot (Task 3 replaces
-            // this with the dashboard).
-            Text(snapshotSummary).font(.caption.monospaced())
-                .multilineTextAlignment(.leading)
-            Button(bulkRunning ? "Downloading…" : "Bulk Download (60s)") {
-                Task { await runBulkDownload() }
-            }
-            .disabled(bulkRunning)
-            if !bulkStatus.isEmpty {
-                Text(bulkStatus).font(.caption).multilineTextAlignment(.center)
-            }
-        }
-        .padding()
-        .task { await controller.loadOrCreateManager() }
-    }
-
-    private var snapshotSummary: String {
-        guard let s = controller.snapshot else { return "snapshot: no data" }
-        let paths = s.paths.map { "\($0.name) st=\($0.status) tx=\($0.txBytes) rx=\($0.rxBytes)" }
-            .joined(separator: "\n")
-        return "state=\(s.clientState) fp=\(s.footprint)\n\(paths)"
-    }
-
-    /// Sequential GETs against PoCConfig.bulkURL for ~60s: user-space
-    /// traffic through the tunnel for the multipath load gate. Sequential
-    /// (not concurrent) so a single active flow drives the gate's per-path
-    /// striping observation instead of masking it behind connection fanout.
-    private func runBulkDownload() async {
-        guard let url = try? PoCConfig.fromBundle().bulkURL else {
-            bulkStatus = "no bulkURL configured"
-            return
-        }
-        bulkRunning = true
-        defer { bulkRunning = false }
-        let deadline = Date().addingTimeInterval(60)
-        var totalBytes = 0
-        var requestCount = 0
-        while Date() < deadline {
-            do {
-                let (data, _) = try await URLSession.shared.data(from: url)
-                totalBytes += data.count
-                requestCount += 1
-                bulkStatus = "requests=\(requestCount) bytes=\(totalBytes)"
-            } catch {
-                bulkStatus = "download error: \(error.localizedDescription)"
-                break
-            }
         }
     }
 }
