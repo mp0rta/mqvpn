@@ -6,23 +6,35 @@ import SwiftUI
 
 @main
 struct MqvpnPoCApp: App {
+    @Environment(\.scenePhase) private var scenePhase
+    @StateObject private var controller = TunnelController()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(controller: controller)
+                // Foreground-only polling: pause IPC when not active to avoid
+                // battery drain and pointless sendProviderMessage churn.
+                .onChange(of: scenePhase) { phase in
+                    controller.setScenePhaseActive(phase == .active)
+                }
         }
     }
 }
 
-/// Minimal PoC container UI: load/save the one NETunnelProviderManager,
-/// start/stop it, and drive a bulk download through the tunnel as the
-/// multipath load gate's user-space traffic source.
+/// Minimal PoC container controller: load/save the one NETunnelProviderManager,
+/// start/stop it, and — while foregrounded and connected — poll the provider
+/// for a development snapshot over `sendProviderMessage`.
 @MainActor
 final class TunnelController: ObservableObject {
     static let providerBundleID = "com.mp0rta.mqvpnpoc.PacketTunnel"
 
+    @Published var status: NEVPNStatus = .invalid
     @Published var statusText = "not loaded"
+    @Published var snapshot: TunnelSnapshot?      // nil = no data
     private var manager: NETunnelProviderManager?
     private var observer: NSObjectProtocol?
+    private var pollTimer: Timer?
+    private var scenePhaseActive = true           // WindowGroup starts active
 
     func loadOrCreateManager() async {
         do {
@@ -41,7 +53,7 @@ final class TunnelController: ObservableObject {
             }
             manager = m
             attachObserver(to: m)
-            statusText = Self.describe(m.connection.status)
+            updateStatus(m.connection.status)
         } catch {
             statusText = "load error: \(error.localizedDescription)"
         }
@@ -50,15 +62,21 @@ final class TunnelController: ObservableObject {
     private func attachObserver(to manager: NETunnelProviderManager) {
         // NotificationCenter's completion closure is not MainActor-isolated
         // even with queue: .main (it is typed @Sendable by the SDK), so hop
-        // explicitly before touching @MainActor state (statusText, describe).
+        // explicitly before touching @MainActor state.
         observer = NotificationCenter.default.addObserver(
             forName: .NEVPNStatusDidChange, object: manager.connection, queue: .main
         ) { [weak self, weak manager] _ in
             Task { @MainActor in
                 guard let self, let manager else { return }
-                self.statusText = Self.describe(manager.connection.status)
+                self.updateStatus(manager.connection.status)
             }
         }
+    }
+
+    private func updateStatus(_ s: NEVPNStatus) {
+        status = s
+        statusText = Self.describe(s)
+        reconcilePolling()
     }
 
     func start() {
@@ -72,6 +90,61 @@ final class TunnelController: ObservableObject {
 
     func stop() {
         manager?.connection.stopVPNTunnel()
+    }
+
+    // MARK: - Snapshot polling
+
+    /// Called by the scene on activation changes; gates polling together with
+    /// the connection state.
+    func setScenePhaseActive(_ active: Bool) {
+        scenePhaseActive = active
+        reconcilePolling()
+    }
+
+    /// Single decision point: poll only while foregrounded AND the tunnel is
+    /// up. When the tunnel is down, drop the snapshot so the UI shows no data.
+    private func reconcilePolling() {
+        let up = (status == .connected || status == .reasserting)
+        if scenePhaseActive && up {
+            startPolling()
+        } else {
+            stopPolling()
+            if !up { snapshot = nil }
+        }
+    }
+
+    private func startPolling() {
+        guard pollTimer == nil else { return }
+        poll()   // immediate first sample
+        let t = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.poll() }
+        }
+        pollTimer = t
+    }
+
+    private func stopPolling() {
+        pollTimer?.invalidate()
+        pollTimer = nil
+    }
+
+    private func poll() {
+        guard let session = manager?.connection as? NETunnelProviderSession else { return }
+        do {
+            // Payload is ignored by the provider (command-agnostic); an empty
+            // request means "give me the latest snapshot".
+            try session.sendProviderMessage(Data()) { [weak self] resp in
+                Task { @MainActor in
+                    guard let self else { return }
+                    guard let resp, let snap = try? ProviderMessage.decode(resp) else {
+                        self.snapshot = nil   // no data / undecodable — never crash
+                        return
+                    }
+                    self.snapshot = snap
+                }
+            }
+        } catch {
+            snapshot = nil
+        }
     }
 
     private static func describe(_ s: NEVPNStatus) -> String {
@@ -88,7 +161,7 @@ final class TunnelController: ObservableObject {
 }
 
 struct ContentView: View {
-    @StateObject private var controller = TunnelController()
+    @ObservedObject var controller: TunnelController
     @State private var bulkStatus = ""
     @State private var bulkRunning = false
 
@@ -100,6 +173,10 @@ struct ContentView: View {
                 Button("Start") { controller.start() }
                 Button("Stop") { controller.stop() }
             }
+            // Task 2 round-trip confirmation: raw snapshot (Task 3 replaces
+            // this with the dashboard).
+            Text(snapshotSummary).font(.caption.monospaced())
+                .multilineTextAlignment(.leading)
             Button(bulkRunning ? "Downloading…" : "Bulk Download (60s)") {
                 Task { await runBulkDownload() }
             }
@@ -110,6 +187,13 @@ struct ContentView: View {
         }
         .padding()
         .task { await controller.loadOrCreateManager() }
+    }
+
+    private var snapshotSummary: String {
+        guard let s = controller.snapshot else { return "snapshot: no data" }
+        let paths = s.paths.map { "\($0.name) st=\($0.status) tx=\($0.txBytes) rx=\($0.rxBytes)" }
+            .joined(separator: "\n")
+        return "state=\(s.clientState) fp=\(s.footprint)\n\(paths)"
     }
 
     /// Sequential GETs against PoCConfig.bulkURL for ~60s: user-space
