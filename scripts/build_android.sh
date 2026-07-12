@@ -7,6 +7,7 @@
 #   android/sdk-native/prebuilt/{ABI}/libxquic.a
 #   android/sdk-native/prebuilt/{ABI}/libssl.a
 #   android/sdk-native/prebuilt/{ABI}/libcrypto.a
+#   android/sdk-native/prebuilt/{ABI}/liblwip_core.a
 #
 # Usage:
 #   scripts/build_android.sh [--abi arm64-v8a] [--ndk /path/to/ndk]
@@ -142,12 +143,18 @@ for ABI in $ABIS; do
         -DANDROID_CROSS_COMPILE=ON \
         -G "$CMAKE_GEN" \
         > /dev/null 2>&1
-    cmake --build "$MQ_BUILD" --target mqvpn_lib -j"$JOBS" > /dev/null 2>&1
+    cmake --build "$MQ_BUILD" --target mqvpn_lib --target lwip_core -j"$JOBS" > /dev/null 2>&1
 
     if [[ -f "${MQ_BUILD}/libmqvpn.a" ]]; then
         cp "$MQ_BUILD/libmqvpn.a" "$PREBUILT_DIR/"
     else
         echo "  WARNING: libmqvpn.a not found for $ABI"
+    fi
+
+    if [[ -f "${MQ_BUILD}/liblwip_core.a" ]]; then
+        cp "$MQ_BUILD/liblwip_core.a" "$PREBUILT_DIR/"
+    else
+        echo "  WARNING: liblwip_core.a not found for $ABI"
     fi
 
     echo "  → ${PREBUILT_DIR}/"

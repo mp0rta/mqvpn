@@ -68,6 +68,13 @@ fun ConnectScreen(
         it.name == reorderProfileName
     } ?: MqvpnConfig.ReorderProfile.CELLULAR_BOND
     var reorderPorts by rememberSaveable { mutableStateOf("") }
+    var hybridEnabled by rememberSaveable { mutableStateOf(false) }
+    var hybridTcpModeName by rememberSaveable {
+        mutableStateOf(MqvpnConfig.HybridTcpMode.AUTO.name)
+    }
+    val hybridTcpMode = MqvpnConfig.HybridTcpMode.entries.firstOrNull {
+        it.name == hybridTcpModeName
+    } ?: MqvpnConfig.HybridTcpMode.AUTO
 
     val vpnPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -77,6 +84,7 @@ fun ConnectScreen(
                 buildConfig(
                     serverAddress, serverPort, authKey, insecure, killSwitch,
                     reorderEnabled, reorderProfile, reorderPorts,
+                    hybridEnabled, hybridTcpMode,
                 )
             )
         }
@@ -194,6 +202,54 @@ fun ConnectScreen(
                 singleLine = true,
             )
         }
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Hybrid TCP lane settings
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Hybrid TCP Lane", modifier = Modifier.weight(1f))
+            Switch(
+                checked = hybridEnabled,
+                onCheckedChange = { hybridEnabled = it },
+                enabled = isDisconnected,
+            )
+        }
+        if (hybridEnabled) {
+            Spacer(modifier = Modifier.height(8.dp))
+            var hybridModeExpanded by remember { mutableStateOf(false) }
+            ExposedDropdownMenuBox(
+                expanded = hybridModeExpanded,
+                onExpandedChange = { if (isDisconnected) hybridModeExpanded = it },
+            ) {
+                OutlinedTextField(
+                    value = hybridTcpMode.name,
+                    onValueChange = {},
+                    label = { Text("Hybrid TCP Mode") },
+                    readOnly = true,
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = hybridModeExpanded) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
+                    enabled = isDisconnected,
+                )
+                ExposedDropdownMenu(
+                    expanded = hybridModeExpanded,
+                    onDismissRequest = { hybridModeExpanded = false },
+                ) {
+                    MqvpnConfig.HybridTcpMode.entries.forEach { mode ->
+                        DropdownMenuItem(
+                            text = { Text(mode.name) },
+                            onClick = {
+                                hybridTcpModeName = mode.name
+                                hybridModeExpanded = false
+                            },
+                        )
+                    }
+                }
+            }
+        }
         Spacer(modifier = Modifier.height(16.dp))
 
         // Connect/Disconnect button
@@ -213,6 +269,7 @@ fun ConnectScreen(
                                 buildConfig(
                                     serverAddress, serverPort, authKey, insecure, killSwitch,
                                     reorderEnabled, reorderProfile, reorderPorts,
+                                    hybridEnabled, hybridTcpMode,
                                 )
                             )
                         }
@@ -325,6 +382,8 @@ private fun buildConfig(
     reorderEnabled: Boolean,
     reorderProfile: MqvpnConfig.ReorderProfile,
     reorderPorts: String,
+    hybridEnabled: Boolean,
+    hybridTcpMode: MqvpnConfig.HybridTcpMode,
 ): MqvpnConfig {
     return MqvpnConfig(
         serverAddress = address.trim(),
@@ -337,6 +396,8 @@ private fun buildConfig(
         reorderPorts = reorderPorts.split(",")
             .mapNotNull { it.trim().toIntOrNull() }
             .filter { it in 1..65535 },
+        hybridEnabled = hybridEnabled,
+        hybridTcpMode = hybridTcpMode,
     )
 }
 

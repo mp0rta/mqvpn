@@ -798,7 +798,9 @@ jobs:
         id: ndk-cache-key
         run: |
           XQUIC_SHA=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+')
-          echo "key=ndk-android-arm64-v8a-${{ hashFiles('scripts/build_android.sh', 'CMakeLists.txt', 'src/**/*.c', 'src/**/*.h', 'include/**/*.h') }}-${XQUIC_SHA}-bssl-9c95ec7" >> "$GITHUB_OUTPUT"
+          # An lwIP fork bump must not serve stale prebuilts.
+          LWIP_SHA=$(git submodule status third_party/lwip | awk '{print $1}' | tr -d '+')
+          echo "key=ndk-android-arm64-v8a-${{ hashFiles('scripts/build_android.sh', 'CMakeLists.txt', 'src/**/*.c', 'src/**/*.h', 'include/**/*.h') }}-${XQUIC_SHA}-bssl-9c95ec7-lwip-${LWIP_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Cache NDK prebuilt libraries
         id: ndk-cache
@@ -831,7 +833,7 @@ jobs:
 
       - name: Verify prebuilt libraries
         run: |
-          for lib in libmqvpn.a libxquic.a libssl.a libcrypto.a; do
+          for lib in libmqvpn.a libxquic.a libssl.a libcrypto.a liblwip_core.a; do
             test -f "android/sdk-native/prebuilt/arm64-v8a/${lib}" \
               || { echo "MISSING: ${lib}"; exit 1; }
           done
@@ -850,7 +852,7 @@ jobs:
         working-directory: android
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: Unit tests (48 tests)
+      - name: Unit tests
         working-directory: android
         run: ./gradlew test --no-daemon --stacktrace
 

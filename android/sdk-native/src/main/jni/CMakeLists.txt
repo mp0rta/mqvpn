@@ -9,6 +9,11 @@ add_library(mqvpn STATIC IMPORTED)
 set_target_properties(mqvpn PROPERTIES
     IMPORTED_LOCATION ${PREBUILT_DIR}/libmqvpn.a)
 
+# lwIP core (hybrid TCP lane; static, split out of libmqvpn.a)
+add_library(lwip_core STATIC IMPORTED)
+set_target_properties(lwip_core PROPERTIES
+    IMPORTED_LOCATION ${PREBUILT_DIR}/liblwip_core.a)
+
 # xquic (static)
 add_library(xquic-static STATIC IMPORTED)
 set_target_properties(xquic-static PROPERTIES
@@ -39,6 +44,7 @@ set_target_properties(mqvpn_jni PROPERTIES LINKER_LANGUAGE CXX)
 
 target_link_libraries(mqvpn_jni
     mqvpn
+    lwip_core
     xquic-static
     ssl
     crypto
