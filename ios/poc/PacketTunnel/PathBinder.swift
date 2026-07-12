@@ -19,6 +19,7 @@ final class PathBinder {
     private let engine: MqvpnEngine
     private var slots: [NWInterface.InterfaceType: PathSlot] = [:]  // tick-thread confined
     private var monitors: [NWInterface.InterfaceType: NWPathMonitor] = [:]
+    private var pollTimer: Timer?   // tick-thread confined
     private let monitorQueue = DispatchQueue(label: "mqvpn.poc.pathmon")
 
     init(engine: MqvpnEngine) { self.engine = engine }
@@ -35,26 +36,49 @@ final class PathBinder {
         // it only advances when a delivery lands. So every trigger funnels
         // into reconcile(), which probes FRESH state instead of trusting
         // the delivered snapshot.
+        // Two passes: store every monitor in the dict BEFORE starting any.
+        // A handler can fire the instant its monitor starts and hop
+        // reconcile() onto the tick thread, which reads `monitors` — the
+        // dict must not be concurrently mutated by this loop at that point.
         for type in [NWInterface.InterfaceType.wifi, .cellular] {
             let m = NWPathMonitor(requiredInterfaceType: type)
             m.pathUpdateHandler = { [weak self] _ in
                 guard let self else { return }
                 self.engine.perform { self.reconcile() }
             }
-            m.start(queue: monitorQueue)
             monitors[type] = m
+        }
+        for (_, m) in monitors { m.start(queue: monitorQueue) }
+        // Poll as the third trigger channel. Device measurement showed BOTH
+        // event channels silent on a WiFi-off (monitor delivery stalled;
+        // defaultPath unchanged because the tunnel stayed up via cellular),
+        // leaving the dead path to server-side timeout. Probes read fresh
+        // daemon state, so a 1 s cadence bounds off-detection at ~1-2 s
+        // regardless of delivery stalls. Timer lives on the tick thread's
+        // run loop (same pattern as the metrics collector).
+        engine.perform { [weak self] in
+            let t = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+                self?.reconcile()
+            }
+            RunLoop.current.add(t, forMode: .default)
+            self?.pollTimer = t
         }
     }
 
-    /// Re-derive add/remove state for every managed interface type. Called
-    /// on the tick thread, from two independent trigger channels: the
-    /// persistent monitors' deliveries and the provider's
-    /// NEProvider.defaultPath KVO (which keeps firing even when monitor
-    /// deliveries stall). Duplicate or out-of-order triggers are safe:
-    /// probe results funnel into addPath/removePath, whose guards make
-    /// repeats no-ops.
+    /// Re-derive add/remove state for the managed interface types, WiFi
+    /// strictly before cellular: probes resolve asynchronously, so the
+    /// cellular probe only starts after the WiFi result was applied. This
+    /// keeps the first registration (and therefore the QUIC primary path)
+    /// deterministically on WiFi at session start. Called on the tick
+    /// thread from three trigger channels: persistent monitor deliveries,
+    /// the provider's NEProvider.defaultPath KVO, and the 1 s poll timer.
+    /// Overlapping triggers are safe: results funnel into
+    /// addPath/removePath, whose guards make repeats no-ops.
     func reconcile() {
-        for type in monitors.keys { probe(type) }
+        guard monitors[.wifi] != nil else { return }   // after stop(): no-op
+        probe(.wifi) { [weak self] in
+            self?.probe(.cellular, then: nil)
+        }
     }
 
     /// One-shot fresh path lookup. A NEW NWPathMonitor registration always
@@ -62,7 +86,10 @@ final class PathBinder {
     /// independent of any stalled long-lived monitor — that first delivery
     /// is taken as the truth, then the probe is cancelled. The probe object
     /// is kept alive by its own handler's capture until it fires.
-    private func probe(_ type: NWInterface.InterfaceType) {
+    /// `then` runs on the tick thread after the result (or timeout) was
+    /// applied.
+    private func probe(_ type: NWInterface.InterfaceType,
+                       then: (() -> Void)?) {
         let p = NWPathMonitor(requiredInterfaceType: type)
         var fired = false   // monitorQueue-confined (handler queue)
         p.pathUpdateHandler = { [weak self] path in
@@ -80,17 +107,19 @@ final class PathBinder {
                 } else {
                     self.removePath(type: type)
                 }
+                then?()
             }
         }
         p.start(queue: monitorQueue)
         // The initial delivery is documented behavior but this file exists
         // because path-daemon deliveries can stall inside an NE provider —
         // bound the probe's lifetime; the next trigger simply re-probes.
-        monitorQueue.asyncAfter(deadline: .now() + 3.0) {
+        monitorQueue.asyncAfter(deadline: .now() + 3.0) { [weak self] in
             guard !fired else { return }
             fired = true
             p.cancel()
             p.pathUpdateHandler = nil
+            if let self, let then { self.engine.perform { then() } }
         }
     }
 
@@ -189,6 +218,8 @@ final class PathBinder {
     /// themselves (start() is the only other writer of `monitors`, on the
     /// caller's thread, so this is safe without extra synchronization).
     func stop() {
+        pollTimer?.invalidate()
+        pollTimer = nil
         for type in Array(slots.keys) {
             removePath(type: type)
         }
