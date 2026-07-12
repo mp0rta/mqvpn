@@ -93,8 +93,11 @@ if [ "$PHASE" = "mqvpn" ] || [ "$PHASE" = "all" ]; then
     # it builds exactly the sans-I/O static core (mqvpn_lib) and nothing else.
     # BORINGSSL_BUILD_DIR must point at the iOS build — the root CMake default
     # is the host build dir and would resolve wrong/absent SSL libs.
+    # Hybrid TCP lane is default-ON since v0.11.0 but the PoC does not link
+    # lwip_core; keep the iOS core lane-free until the SDK phase stages lwIP.
     cmake -S "$SCRIPT_DIR" -B "$MQVPN_BUILD" "${IOS_CMAKE_FLAGS[@]}" \
         -DANDROID_CROSS_COMPILE=ON \
+        -DMQVPN_ENABLE_HYBRID_TCP_LANE=OFF \
         -DXQUIC_BUILD_DIR="$XQUIC_BUILD" \
         -DBORINGSSL_BUILD_DIR="$BSSL_BUILD"
     cmake --build "$MQVPN_BUILD" --target mqvpn_lib

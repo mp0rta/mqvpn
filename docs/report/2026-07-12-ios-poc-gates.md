@@ -217,3 +217,33 @@ of the PoC, in priority order:
   path was abandoned by xquic ~36 s after activation and self-healed by the
   reconcile machinery; not re-observed after WiFi-first ordering was
   restored. Worth watching in SDK-phase soak tests.
+
+## G-i3 re-run after the core fix (2026-07-13): **PASS 3/3 — merge blocker cleared**
+
+Core fix under test: emit PATH_ABANDON when removing the live primary path
+(the `xqc_path_id != 0` guard in `mqvpn_client_remove_path()` was a PR4
+refactor regression; removal now shares the PLATFORM_DROP emission predicate).
+Branch rebased onto main v0.11.0; same device (iPhone 14), same procedure
+(server `ping -i 0.2` to the client tunnel IP throughout, missed pings by
+icmp_seq gap; WiFi off/on x3 in one session, both paths ACTIVE before each
+cycle).
+
+| Flap | WiFi role at off-time | missed pings (<=10 = PASS) | recovery on WiFi-on |
+|---|---|---|---|
+| 1 | **primary (xqc_path_id 0)** | **2 (~0.4 s) — PASS** (was 477/~95 s pre-fix) | fresh add, 2 paths ACTIVE, 0 lost |
+| 2 | non-primary | **1 — PASS** | fresh add, 2 paths ACTIVE, 0 lost |
+| 3 | non-primary | **0 — PASS** | fresh add, 2 paths ACTIVE, 0 lost |
+
+Totals: 1323 pings sent over the session, 1320 received (3 lost = the two
+flap-1/flap-2 failover blips plus one at ping startup before any flap).
+Constants: state stayed ESTABLISHED throughout; off-detection ~1 s (poll);
+no slot exhaustion; footprint steady ~3 MB. The primary-loss blackout is
+gone: the server stopped scheduling downlink onto the dead WiFi path within
+2 pings of the removal, confirming the PATH_ABANDON now reaches it.
+
+Scope note from the fix investigation: the buggy branch is unreachable on
+Linux/Windows/macOS (their monitors drop lost paths via
+`on_platform_path_dropped()`, which always emitted the abandon; their only
+`remove_path()` callers run with `xquic_path_live==0`). The platforms that
+exercise it are the remove+add lifecycle ones — iOS (verified here) and
+Android (structurally exposed; on-device verification is a follow-up).
