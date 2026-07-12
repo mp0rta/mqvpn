@@ -90,18 +90,15 @@ if(NOT ANDROID_CROSS_COMPILE)
     endif()
 endif()
 
-# ---------- Hybrid mode TCP lane (lwIP, Linux/macOS/Android) ----------
+# ---------- Hybrid mode TCP lane (lwIP) ----------
 option(MQVPN_ENABLE_HYBRID_TCP_LANE
-       "Build the hybrid-mode lwIP TCP lane (Linux/macOS/Android)" ON)
-if(MQVPN_ENABLE_HYBRID_TCP_LANE AND NOT WIN32)
+       "Build the hybrid-mode lwIP TCP lane" ON)
+# Effective-value var (not the option directly): consumed by the EGRESS gate
+# below and the gates STATUS marker; the single seam if a platform ever needs
+# exclusion again.
+set(MQVPN_HYBRID_TCP_LANE_BUILD OFF)
+if(MQVPN_ENABLE_HYBRID_TCP_LANE)
     set(MQVPN_HYBRID_TCP_LANE_BUILD ON)
-else()
-    if(MQVPN_ENABLE_HYBRID_TCP_LANE)
-        message(WARNING "MQVPN_ENABLE_HYBRID_TCP_LANE requested but target "
-                         "is Windows — hybrid TCP lane is not "
-                         "available there, ignoring.")
-    endif()
-    set(MQVPN_HYBRID_TCP_LANE_BUILD OFF)
 endif()
 
 # ---------- Hybrid mode server-side TCP egress (Linux-only) ----------
