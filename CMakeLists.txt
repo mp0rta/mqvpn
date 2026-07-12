@@ -90,15 +90,15 @@ if(NOT ANDROID_CROSS_COMPILE)
     endif()
 endif()
 
-# ---------- Hybrid mode TCP lane (lwIP, Linux/macOS) ----------
+# ---------- Hybrid mode TCP lane (lwIP, Linux/macOS/Android) ----------
 option(MQVPN_ENABLE_HYBRID_TCP_LANE
-       "Build the hybrid-mode lwIP TCP lane (Linux/macOS)" ON)
+       "Build the hybrid-mode lwIP TCP lane (Linux/macOS/Android)" ON)
 if(MQVPN_ENABLE_HYBRID_TCP_LANE AND NOT WIN32)
     set(MQVPN_HYBRID_TCP_LANE_BUILD ON)
 else()
     if(MQVPN_ENABLE_HYBRID_TCP_LANE)
         message(WARNING "MQVPN_ENABLE_HYBRID_TCP_LANE requested but target "
-                         "is Windows/Android — hybrid TCP lane is not "
+                         "is Windows — hybrid TCP lane is not "
                          "available there, ignoring.")
     endif()
     set(MQVPN_HYBRID_TCP_LANE_BUILD OFF)
@@ -321,7 +321,7 @@ endif()
 # fuzz_tcp_lane links classifier.c + lwip_glue.c directly (mirrors
 # tcp_lane_microbench) against the instrumented lwip_core_fuzz built inside
 # the block above — MQVPN_ENABLE_FUZZING with the hybrid TCP lane unavailable
-# (Windows/Android, or explicitly disabled) has nothing to build against.
+# (Windows, or explicitly disabled) has nothing to build against.
 if(MQVPN_ENABLE_FUZZING AND NOT MQVPN_HYBRID_TCP_LANE_BUILD)
     message(WARNING "MQVPN_ENABLE_FUZZING requires the hybrid TCP lane "
                      "(MQVPN_HYBRID_TCP_LANE_BUILD) — skipping fuzz_tcp_lane")
