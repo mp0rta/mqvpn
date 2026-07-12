@@ -222,14 +222,19 @@ OnFdClosed ==
 \* lastTrigger with <<event, incarnation tag>>; pure environment steps leave
 \* lastTrigger unchanged.
 
-\* Fresh-id selection for successful activations: xquic never reuses an
-\* abandoned path_id (abandoned_path_ids bitmap, xqc_multipath.c:109-137), so
-\* real ids are globally fresh. Id 0 is additionally allowed to model the
-\* primary-path special case kept by the design doc (path_invariant_check
-\* does not assert xqc_path_id in VALIDATING/ACTIVE precisely because the
-\* primary slot keeps id 0).
-OkIdChoices ==
-  {NULL} \cup (IF nextXqcId <= MaxXqcIds THEN {nextXqcId} ELSE {})
+\* Fresh-id selection for successful activations. Faithful to the code:
+\* xqc_conn_create_path allocates via xqc_conn_get_available_path_id
+\* (third_party/xquic/src/transport/xqc_conn.c:5444-5467), which returns the
+\* next UNUSED path id - id 0 is held by the initial path and abandoned ids
+\* are marked ABANDONED (abandoned_path_ids bitmap, xqc_multipath.c:109-137,
+\* 219-223), so the activate path can never yield 0 or a recycled id.
+\* An earlier model revision also offered id 0 here to explore the
+\* primary-slot special case; TLC immediately produced an id-0 ABA
+\* counterexample that is unreachable in the implementation (see
+\* formal/README.md, counterexample log #1). The primary slot's id-0
+\* lifecycle is bound at handshake, not via activation, and is deferred to
+\* the composed-model phase.
+OkIdChoices == IF nextXqcId <= MaxXqcIds THEN {nextXqcId} ELSE {}
 
 BumpAllocator(newId) ==
   nextXqcId' = IF newId = nextXqcId THEN nextXqcId + 1 ELSE nextXqcId
@@ -438,17 +443,27 @@ ApiAddFd ==
                  xqcSideActive, nextXqcId, resetCount, abandonCount>>
 
 \* client_reset_paths_for_reconnect -> client_reset_path_runtime ->
-\* CONN_RESET (mqvpn_client.c:774-800). Pending notifications are retained
-\* (conservative; see design doc 4.3).
+\* CONN_RESET (mqvpn_client.c:774-800). In-flight removal notifications are
+\* FLUSHED: connection teardown destroys remaining paths without firing
+\* path_removed_notify (xqc_conn_destroy_paths_list -> xqc_path_destroy,
+\* xqc_multipath.c:821-830; the notify fires only in xqc_path_closed, :603),
+\* and after destroy no callback from the old connection can arrive. An
+\* earlier model revision retained them, producing an unreachable
+\* cross-connection stale-removal trace (README counterexample log #1).
+\* Platform-side obligations (fdObligations / pendingFdClose) survive the
+\* reset - they are independent of the connection. The fresh-id allocator is
+\* kept monotonic across resets: real ids restart per connection, but with
+\* removals flushed at reset an id collision across connections has no
+\* observable effect, and monotonicity keeps the model sound.
 EnvConnReset ==
   /\ inc >= 1
   /\ resetCount < ConnResetCap
   /\ OnConnReset
   /\ xqcSideActive' = FALSE
+  /\ pendingXqcRemoval' = {}
   /\ resetCount' = resetCount + 1
   /\ lastTrigger' = <<"CONN_RESET", inc>>
-  /\ UNCHANGED <<inc, pendingXqcRemoval, pendingFdClose, fdObligations,
-                 nextXqcId, abandonCount>>
+  /\ UNCHANGED <<inc, pendingFdClose, fdObligations, nextXqcId, abandonCount>>
 
 --------------------------------------------------------------------------------
 
@@ -562,10 +577,16 @@ FdOwnershipSafe ==
   [][ (fdOwner = "platform" /\ fdOwner' = "none")
         => lastTrigger' = <<"FD_CLOSED", inc>> ]_vars
 
-\* P4 (design doc rev4): ClosedFree is terminal for the incarnation - the
-\* only slot-mutating step out of it is reuse, which bumps inc.
+\* P4 (design doc rev4/rev6): ClosedFree is terminal for the incarnation -
+\* the only step that LEAVES it is reuse, which bumps inc. Formalized over
+\* `state` only: CONN_RESET legitimately dispatches to CLOSED_FREE slots too
+\* (client_reset_paths_for_reconnect iterates every slot) and its
+\* unconditional field clear may zero a stale recreate_retries value there
+\* without leaving the state and without firing a public event (prior ==
+\* state suppresses emission; CLOSED_FREE's invariant deliberately does not
+\* assert recreate_retries - see README counterexample log #2).
 FreeQuiescent ==
-  [][ (state = "ClosedFree" /\ slotVars' /= slotVars)
+  [][ (state = "ClosedFree" /\ state' /= "ClosedFree")
         => inc' = inc + 1 ]_vars
 
 \* Design doc rev5: reuse is possible from exactly the weak-fence states
