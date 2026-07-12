@@ -456,6 +456,25 @@ JNI_FN(configAddReorderRule)(JNIEnv *env, jobject thiz, jlong cfg, jint proto, j
                                          (mqvpn_reorder_profile_t)profile);
 }
 
+/* configSetHybridEnabled(cfg, enable) → int */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetHybridEnabled)(JNIEnv *env, jobject thiz, jlong cfg, jboolean enable)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_config_set_hybrid_enabled((mqvpn_config_t *)(intptr_t)cfg,
+                                           enable ? 1 : 0);
+}
+
+/* configSetHybridTcpMode(cfg, mode: 0=stream 1=raw 2=auto) → int */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetHybridTcpMode)(JNIEnv *env, jobject thiz, jlong cfg, jint mode)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_config_set_hybrid_tcp_mode((mqvpn_config_t *)(intptr_t)cfg, (int)mode);
+}
+
 /* ════════════════════════════════════════════════════════════════════════════
  *  Client lifecycle
  * ════════════════════════════════════════════════════════════════════════════ */

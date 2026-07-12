@@ -301,13 +301,6 @@ h3_recv_push_data(const uint8_t *data, size_t len, int fin)
 }
 
 static void
-h3_recv_push_again(void)
-{
-    h3_recv_entry_t *e = &g_h3_recv_script[g_h3_recv_script_len++];
-    e->special = 1;
-}
-
-static void
 h3_recv_push_err(void)
 {
     h3_recv_entry_t *e = &g_h3_recv_script[g_h3_recv_script_len++];

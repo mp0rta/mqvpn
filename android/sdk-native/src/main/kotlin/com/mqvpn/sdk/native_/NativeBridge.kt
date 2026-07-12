@@ -73,6 +73,12 @@ object NativeBridge {
     /** mqvpn_config_add_reorder_rule(cfg, proto, port, profile) */
     external fun configAddReorderRule(cfg: Long, proto: Int, port: Int, profile: Int): Int
 
+    /** mqvpn_config_set_hybrid_enabled(cfg, enabled) */
+    external fun configSetHybridEnabled(cfg: Long, enabled: Boolean): Int
+
+    /** mqvpn_config_set_hybrid_tcp_mode(cfg, mode: 0=STREAM, 1=RAW, 2=AUTO) */
+    external fun configSetHybridTcpMode(cfg: Long, mode: Int): Int
+
     /**
      * mqvpn_client_get_reorder_stats(client) → LongArray:
      * [deliveredCount, gapCount, gapFilledCount, gapTimeoutCount,
