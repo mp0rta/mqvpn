@@ -762,6 +762,11 @@ jobs:
           cmake --build . --config Release
 
       - name: Build mqvpn
+        # Expect a new EGRESS "forcing OFF" WARNING here: MQVPN_ENABLE_HYBRID_TCP_EGRESS
+        # defaults ON but the EGRESS gate still blocks WIN32 (server egress
+        # stays OFF on Windows by design) — cosmetic, do not "fix" it.
+        # -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON is behavior-identical to omitting
+        # it (the option defaults ON) but kept explicit for self-documentation.
         run: |
           mkdir build
           cd build
@@ -772,7 +777,8 @@ jobs:
             -DXQUIC_BUILD_DIR="${{ github.workspace }}/third_party/xquic/build/Release" `
             -DBORINGSSL_BUILD_DIR="${{ github.workspace }}/third_party/xquic/third_party/boringssl/build/Release" `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows-static ..
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON ..
           cmake --build . --config Release
 
       - name: Verify binary
