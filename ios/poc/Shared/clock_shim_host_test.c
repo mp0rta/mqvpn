@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and mqvpn contributors
+
 /* Host-side sanity test:
  *   cc -o /tmp/cst clock_shim_host_test.c mqvpn_clock_shim.c && /tmp/cst */
 #include <assert.h>
