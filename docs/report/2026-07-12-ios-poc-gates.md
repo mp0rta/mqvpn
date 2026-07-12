@@ -6,7 +6,7 @@
 |---|---|
 | Device | iPhone 14 (iPhone14,7), iOS 18.6.2 |
 | Xcode / SDK | Xcode 26.6, iPhoneOS 26.5 SDK, deployment target iOS 15.0 |
-|  Branch / commit | `feat/ios-poc` @ ad9518c (base = main 1ce75cc, v0.10.0) |
+| Branch / commit | `feat/ios-poc` @ a366d6f + gate-result commits (base = main 1ce75cc, v0.10.0) |
 | xquic pin | acccb18 |
 | BoringSSL clone commit | 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c (unpinned clone, recorded for reproducibility) |
 | Server | test-server v0.9.0, UDP 443, tunnel subnet 10.0.0.0/24 (gateway 10.0.0.1) |
@@ -81,7 +81,53 @@ to path capacity (WiFi-dominant), as designed. Aggregate ~787 MB over ~150 s
 (~42 Mbps through the tunnel; single-path WiFi reference earlier the same
 evening: ~94 MB in ~20 s).
 
-## G-i3 — failover + recovery + flap ×3: **FAIL (1/3), root cause identified: NWPathMonitor delivery**
+## G-i3 — failover + recovery + flap ×3 (final re-run): **non-primary PASS / primary-loss FAIL (core-side cause pinned)**
+
+Two platform-layer fixes were developed and committed between the first run
+(below) and the final re-run, after the first run exposed the event-delivery
+problem:
+
+- `767f044` — probe-based reconcile: NWPathMonitor deliveries (and their
+  `currentPath`, which only advances on delivery) proved untrustworthy inside
+  the provider, so add/remove state is re-derived from one-shot fresh
+  NWPathMonitor registrations ("probes"), triggered by monitor deliveries and
+  an NEProvider.defaultPath KVO.
+- `a366d6f` — 1 s poll + WiFi-first ordering: on a later WiFi-off BOTH event
+  channels stayed silent (monitor delivery stalled again; defaultPath never
+  changed because the tunnel stayed up via cellular), so a 1 s repeating
+  reconcile on the tick thread bounds off-detection at ~1-2 s. Probes are
+  chained WiFi-before-cellular to keep the QUIC primary deterministically on
+  WiFi (unordered probes had let cellular win the initial registration race).
+
+Final re-run (session with WiFi primary restored, server `ping -i 0.2`
+throughout, missed pings by deduplicated icmp_seq gap):
+
+| Flap | WiFi role at off-time | off detection → remove | missed pings (≤10 = PASS) | recovery on WiFi-on |
+|---|---|---|---|---|
+| 1 | **primary (xqc_path_id 0)** | ~1 s (poll) | **477 (~95 s) — FAIL** | fresh add, 2 paths ACTIVE |
+| 2 | non-primary | ~1 s | **0 — PASS** | fresh add, 2 paths ACTIVE |
+| 3 | non-primary | ~1 s | **1 — PASS** | fresh add, 2 paths ACTIVE |
+
+Constants: state stayed ESTABLISHED throughout; no slot exhaustion; cellular
+carried inner traffic within a second on every non-primary loss.
+
+**Root cause of the primary-loss blackout — core, not platform** (the
+spec's §1-9 asymmetry, confirmed on device): `remove_path()` emits
+PATH_ABANDON via `xqc_conn_close_path()` only for `xqc_path_id != 0`
+(src/mqvpn_client.c:2710-2712). When the PRIMARY dies, the platform-side
+removal (fd close + on_platform_fd_closed) runs within ~1 s but nothing tells
+the server, which keeps scheduling downlink onto the dead path until its own
+liveness timeout (~95-115 s observed across both primary-loss runs, old and
+new platform code alike). During the window the client core has already
+classified the path CLOSED and its residual sends are downgraded to EAGAIN
+(the designed send-error semantics — the session never dies). Non-primary
+losses send PATH_ABANDON and cost 0-1 pings, proving the rest of the chain.
+Core follow-up (separate spec per D3): give primary-path removal an
+equivalent abandon/migration signal. Likely affects all platforms — the
+asymmetry is in the common client, merely masked on platforms whose primary
+rarely dies first.
+
+## G-i3 — first run (superseded by the re-run above, kept for the record): **FAIL (1/3), root cause identified: NWPathMonitor delivery**
 
 Procedure: server-side `ping -i 0.2` to the client tunnel IP running
 throughout; WiFi toggled off/on three times in one session (both paths ACTIVE
@@ -128,4 +174,46 @@ both en0 and pdp_ip0 report SO_SNDBUF/SO_RCVBUF = 6,291,456 B (6 MiB) — the
 platform pre-set (1 MiB) was superseded by the core's 7 MiB request being
 granted at 6 MiB rather than rejected to Darwin UDP defaults.
 
-## G-i5 — verdict: PENDING
+## G-i5 — verdict: **fd-path CONFIRMED — v1 complete**
+
+The fd-path decision is judged on transport-layer stability (G-i1..G-i3):
+
+- G-i1 PASS, G-i2 PASS, G-i4 PASS with wide margins.
+- G-i3: non-primary failover meets the threshold (0-1 missed pings);
+  primary-loss fails it, but the failure mode is a protocol-layer signaling
+  gap in the common core (§1-9: no PATH_ABANDON on primary removal) — not an
+  fd-path API constraint, not an iOS socket/entitlement limitation, and not
+  something the ops-path (`send_packet`) alternative would change. The
+  fd-path architecture itself (POSIX UDP + IP_BOUND_IF inside the NE
+  provider, external TUN via packetFlow, dedicated tick thread) held up
+  under handshake, multipath load, and repeated failover.
+
+Verdict: **fd-path confirmed**; no ops-path spec needed. Follow-ups spun out
+of the PoC, in priority order:
+
+1. **Core (separate spec, blocks merge per project decision): primary-path
+   removal must signal the server** (abandon/migration equivalent), killing
+   the ~95-115 s primary-loss blackout. Applies to all platforms.
+2. Platform (SDK phase): iOS event-source hardening is DONE for the PoC
+   (probe + poll); revisit poll cadence vs battery for the SDK.
+3. Platform (SDK phase): items listed in the per-gate sections (IPv6 inner
+   support, DNS from config instead of hardcoded resolvers, etc.).
+
+### Observations (non-gate)
+
+- iOS delivered NWPathMonitor updates minutes late or not at all inside the
+  NE provider on multiple occasions, while fresh one-shot registrations
+  always returned correct state immediately — the poll+probe pattern is the
+  reliable shape on this OS.
+- `idevicesyslog` capture drops burst lines around interface transitions;
+  the `GATE|` 10 s cadence lines survived but several one-shot lifecycle
+  lines were lost (their occurrence was reconstructed from handle-number
+  progression and core-side logs). Post-hoc `log collect` (enabled by the
+  `.notice` levels) is the more complete evidence channel for future runs.
+- Sequential GET bulk through the tunnel sustained ~42 Mbps aggregate
+  (WiFi-dominant WLB split); single-path WiFi reference ~40 Mbps — the
+  packetFlow per-packet overhead did not bottleneck at these rates.
+- During cellular-primary operation (pre-fix session) the secondary WiFi
+  path was abandoned by xquic ~36 s after activation and self-healed by the
+  reconcile machinery; not re-observed after WiFi-first ordering was
+  restored. Worth watching in SDK-phase soak tests.
