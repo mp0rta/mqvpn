@@ -81,7 +81,35 @@ to path capacity (WiFi-dominant), as designed. Aggregate ~787 MB over ~150 s
 (~42 Mbps through the tunnel; single-path WiFi reference earlier the same
 evening: ~94 MB in ~20 s).
 
-## G-i3 — failover + recovery + flap ×3: PENDING
+## G-i3 — failover + recovery + flap ×3: **FAIL (1/3), root cause identified: NWPathMonitor delivery**
+
+Procedure: server-side `ping -i 0.2` to the client tunnel IP running
+throughout; WiFi toggled off/on three times in one session (both paths ACTIVE
+before each cycle). Missed pings counted by icmp_seq gaps.
+
+| Flap | unsatisfied delivery | missed pings (≤10 = PASS) | recovery |
+|---|---|---|---|
+| 1 (primary-path loss, xqc_path_id 0) | **delayed ~110 s** | **578 (~116 s) — FAIL** | session survived; core retry machinery re-activated en0 on WiFi return; then the late monitor events re-added it cleanly (handle 3) |
+| 2 | immediate | **0 — PASS** | fresh add_path_fd 13 s later (handle 4), 2 paths ACTIVE |
+| 3 | immediate | **0 — PASS** | fresh add_path_fd 11 s later (handle 5), 2 paths ACTIVE |
+
+Constant across all flaps: client state stayed `MQVPN_STATE_ESTABLISHED`
+(never RECONNECTING); cellular path stayed ACTIVE; no slot exhaustion
+(handles 3→4→5 across the flaps, MQVPN_MAX_PATHS=8 never approached).
+Primary-loss slot end state (spec §1-9 observation): the en0 slot stayed
+visible as `MQVPN_PATH_CLOSED` (st=4) in get_paths for ~2 min, then was
+reused cleanly — no residual leak observed.
+
+Root cause of flap 1: iOS delivered the `NWPathMonitor(.wifi)` unsatisfied
+update ~110 s after the radio went off. Until it arrived, no orderly
+`remove_path` ran, so the server kept scheduling downlink onto the dead WiFi
+path; inner traffic blacked out even though the cellular path was ACTIVE and
+the client core had classified en0 as CLOSED within seconds on its own. When
+the platform event finally arrived (flaps 2/3: immediately), failover cost 0
+pings. Conclusion: the failover/recovery mechanism is sound end-to-end, but
+**NWPathMonitor alone is not a trustworthy event source inside an NE packet
+tunnel provider** — it needs a redundant trigger. This is a platform-layer
+finding; no core change implicated.
 
 ## G-i4 — memory: **PASS**
 
