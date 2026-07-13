@@ -16,8 +16,8 @@ struct DashboardView: View {
                 connectionHeader
                 pathSection
                 statsRow
-                eventSection
                 BulkDownloadView()
+                eventSection
             }
             .padding()
         }
