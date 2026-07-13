@@ -9,8 +9,6 @@ import SwiftUI
 struct DashboardView: View {
     @ObservedObject var controller: TunnelController
     @ObservedObject var eventLog: EventLog
-    @State private var bulkStatus = ""
-    @State private var bulkRunning = false
 
     var body: some View {
         ScrollView {
@@ -19,7 +17,7 @@ struct DashboardView: View {
                 pathSection
                 statsRow
                 eventSection
-                bulkSection
+                BulkDownloadView()
             }
             .padding()
         }
@@ -193,45 +191,4 @@ struct DashboardView: View {
         return f
     }()
 
-    // MARK: - Bulk tool (extracted into BulkDownloadView in a later step)
-
-    private var bulkSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Bulk Download").font(.headline)
-            Button(bulkRunning ? "Downloading…" : "Run (60s)") {
-                Task { await runBulkDownload() }
-            }
-            .disabled(bulkRunning)
-            if !bulkStatus.isEmpty {
-                Text(bulkStatus).font(.caption).foregroundColor(.secondary)
-            }
-        }
-    }
-
-    /// Sequential GETs against PoCConfig.bulkURL for ~60s: user-space traffic
-    /// through the tunnel for the multipath load gate. Sequential (not
-    /// concurrent) so a single active flow drives the gate's per-path striping
-    /// observation instead of masking it behind connection fanout.
-    private func runBulkDownload() async {
-        guard let url = try? PoCConfig.fromBundle().bulkURL else {
-            bulkStatus = "no bulkURL configured"
-            return
-        }
-        bulkRunning = true
-        defer { bulkRunning = false }
-        let deadline = Date().addingTimeInterval(60)
-        var totalBytes = 0
-        var requestCount = 0
-        while Date() < deadline {
-            do {
-                let (data, _) = try await URLSession.shared.data(from: url)
-                totalBytes += data.count
-                requestCount += 1
-                bulkStatus = "requests=\(requestCount) bytes=\(totalBytes)"
-            } catch {
-                bulkStatus = "download error: \(error.localizedDescription)"
-                break
-            }
-        }
-    }
 }
