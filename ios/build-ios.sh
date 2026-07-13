@@ -88,7 +88,12 @@ fi
 MQVPN_BUILD="$SCRIPT_DIR/build-ios"
 
 if [ "$PHASE" = "mqvpn" ] || [ "$PHASE" = "all" ]; then
-    echo "=== Building libmqvpn (iOS, static) ==="
+    echo "=== Building libmqvpn (iOS, static) — clean build for ABI consistency ==="
+    # Clean only the mqvpn object/build dir (NOT BoringSSL/xquic, which have
+    # their own dirs) so every mqvpn TU is compiled in one pass against a
+    # single reorder.h; a mixed-object archive with disagreeing struct layouts
+    # is then not producible.
+    rm -rf "$MQVPN_BUILD"
     # ANDROID_CROSS_COMPILE=ON is the existing "skip libevent + CLI" switch;
     # it builds exactly the sans-I/O static core (mqvpn_lib) and nothing else.
     # BORINGSSL_BUILD_DIR must point at the iOS build — the root CMake default
