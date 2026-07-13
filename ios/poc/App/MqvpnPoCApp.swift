@@ -11,7 +11,7 @@ struct MqvpnPoCApp: App {
 
     var body: some Scene {
         WindowGroup {
-            DashboardView(controller: controller)
+            DashboardView(controller: controller, eventLog: controller.eventLog)
                 // Foreground-only polling: pause IPC when not active to avoid
                 // battery drain and pointless sendProviderMessage churn.
                 .onChange(of: scenePhase) { phase in
@@ -33,6 +33,8 @@ final class TunnelController: ObservableObject {
     @Published var statusText = "not loaded"
     @Published var snapshot: TunnelSnapshot?       // nil = no data
     @Published var pathRates: [String: Double] = [:]   // iface name -> Mbps
+    /// Observed directly by the dashboard; fed the same snapshot stream.
+    let eventLog = EventLog()
     private var prevSnapshot: TunnelSnapshot?
     private var manager: NETunnelProviderManager?
     private var observer: NSObjectProtocol?
@@ -134,6 +136,7 @@ final class TunnelController: ObservableObject {
         snapshot = nil
         pathRates = [:]
         prevSnapshot = nil
+        eventLog.resetBaseline()
     }
 
     private func poll() {
@@ -178,6 +181,7 @@ final class TunnelController: ObservableObject {
         }
         prevSnapshot = snap
         snapshot = snap
+        eventLog.ingest(snap)
     }
 
     private static func describe(_ s: NEVPNStatus) -> String {

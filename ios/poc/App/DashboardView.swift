@@ -8,6 +8,7 @@ import SwiftUI
 /// controller's published snapshot — no IPC or diff logic lives here.
 struct DashboardView: View {
     @ObservedObject var controller: TunnelController
+    @ObservedObject var eventLog: EventLog
     @State private var bulkStatus = ""
     @State private var bulkRunning = false
 
@@ -17,6 +18,7 @@ struct DashboardView: View {
                 connectionHeader
                 pathSection
                 statsRow
+                eventSection
                 bulkSection
             }
             .padding()
@@ -126,6 +128,70 @@ struct DashboardView: View {
     private static func mbText(_ b: UInt64) -> String {
         String(format: "%.1f MB", Double(b) / (1024 * 1024))
     }
+
+    // MARK: - Event log
+
+    private var eventSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Events").font(.headline)
+            if eventLog.events.isEmpty {
+                Text("—").font(.caption).foregroundColor(.secondary)
+            } else {
+                ForEach(eventLog.events) { e in
+                    HStack(spacing: 8) {
+                        Image(systemName: Self.eventIcon(e.kind))
+                            .font(.caption2)
+                            .foregroundColor(Self.eventColor(e.kind))
+                            .frame(width: 16)
+                        Text(Self.timeFormatter.string(from: e.time))
+                            .font(.caption2.monospacedDigit())
+                            .foregroundColor(.secondary)
+                        Text(Self.eventText(e.kind)).font(.caption)
+                        Spacer()
+                    }
+                }
+            }
+        }
+    }
+
+    // Structured events are named/colored here (the model stays View-free),
+    // reusing the same raw→display tables as the header and path cards.
+    static func eventText(_ k: LogEvent.Kind) -> String {
+        switch k {
+        case .coreState(let s):
+            return "core → \(clientStateName(s))"
+        case .pathAdded(let n, let s):
+            return "\(n) added (\(PathCardView.statusName(s)))"
+        case .pathRemoved(let n):
+            return "\(n) removed"
+        case .pathStatus(let n, let from, let to):
+            return "\(n): \(PathCardView.statusName(from)) → \(PathCardView.statusName(to))"
+        }
+    }
+
+    static func eventIcon(_ k: LogEvent.Kind) -> String {
+        switch k {
+        case .coreState: return "bolt.horizontal.circle"
+        case .pathAdded: return "plus.circle"
+        case .pathRemoved: return "minus.circle"
+        case .pathStatus: return "arrow.triangle.2.circlepath"
+        }
+    }
+
+    static func eventColor(_ k: LogEvent.Kind) -> Color {
+        switch k {
+        case .coreState: return .blue
+        case .pathAdded: return .green
+        case .pathRemoved: return .gray
+        case .pathStatus(_, _, let to): return PathCardView.statusColor(to)
+        }
+    }
+
+    static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
 
     // MARK: - Bulk tool (extracted into BulkDownloadView in a later step)
 
