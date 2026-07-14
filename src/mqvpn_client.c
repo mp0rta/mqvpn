@@ -2991,7 +2991,13 @@ tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t 
                 int is_syn = 0;
                 uint32_t pkt_isn = 0;
                 if (!found || is_closing || is_raw) {
-                    is_syn = (ip_ver == 4) && mqvpn_tcp_syn_flag(pkt, len);
+                    /* Chunk 3: mqvpn_tcp_syn_flag is now family-aware (v4
+                     * IHL-derived offset, v6 fixed offset 40) — no ip_ver
+                     * gate needed here. Chunk 2's classifier already
+                     * excluded ext-header/fragmented v6 (MQVPN_LANE_TCP
+                     * only fires for base-NH==TCP), so a v6 is_syn here is
+                     * always lane-terminable. */
+                    is_syn = mqvpn_tcp_syn_flag(pkt, len);
                     if (is_syn) pkt_isn = mqvpn_tcp_syn_isn(pkt, len);
                 }
                 if (found && is_syn) {
