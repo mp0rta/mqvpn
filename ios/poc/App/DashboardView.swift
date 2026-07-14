@@ -9,17 +9,29 @@ import SwiftUI
 struct DashboardView: View {
     @ObservedObject var controller: TunnelController
     @ObservedObject var eventLog: EventLog
+    @State private var showSettings = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                connectionHeader
-                pathSection
-                statsRow
-                BulkDownloadView()
-                eventSection
+        NavigationView {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    connectionHeader
+                    pathSection
+                    statsRow
+                    if let snap = controller.snapshot, snap.reorderConfigured, let r = snap.reorder {
+                        ReorderStatsCard(stats: r)
+                    }
+                    BulkDownloadView()
+                    eventSection
+                }
+                .padding()
             }
-            .padding()
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                }
+            }
+            .sheet(isPresented: $showSettings) { SettingsView(controller: controller) }
         }
         .task { await controller.loadOrCreateManager() }
     }
@@ -37,7 +49,7 @@ struct DashboardView: View {
                 Spacer()
             }
             HStack(spacing: 12) {
-                Button("Start") { controller.start() }
+                Button("Start") { if !controller.isSaving { controller.start() } }
                     .buttonStyle(.borderedProminent)
                 Button("Stop") { controller.stop() }
                     .buttonStyle(.bordered)
