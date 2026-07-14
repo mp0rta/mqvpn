@@ -21,7 +21,7 @@
 #include "reorder.h" /* mqvpn_flow_key_t, mqvpn_parse_l3l4 */
 
 typedef enum {
-    MQVPN_LANE_TCP,   /* IPv4 TCP, hybrid enabled, tcp mode != raw */
+    MQVPN_LANE_TCP,   /* IPv4/IPv6 TCP, hybrid enabled, tcp mode != raw */
     MQVPN_LANE_DGRAM, /* parseable UDP — reorder engine decides profile */
     MQVPN_LANE_RAW,   /* everything else — existing CONNECT-IP RAW */
 } mqvpn_hybrid_lane_t;

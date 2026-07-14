@@ -572,6 +572,14 @@ test_classify_v6_address_class_ineligible(void)
     ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_RAW,
                   "v6 tcp unspecified src -> raw");
 
+    /* Deliberate asymmetry: the unspecified check is SOURCE-only. A clean
+     * src with an unspecified (::) DESTINATION stays eligible (LANE_TCP) —
+     * pins the guard so a future edit that wrongly adds is_unspecified(dst)
+     * would be caught here. */
+    n = build_v6_tcp_addrs(buf, normal_src, unspec, 4444, 8080);
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_TCP,
+                  "v6 tcp unspecified DST (src-only asymmetry) -> tcp");
+
     /* Sanity: a clean, eligible packet still classifies TCP (no false
      * positive from the ineligibility gate). */
     n = build_v6_tcp_addrs(buf, normal_src, normal_dst, 4444, 8080);

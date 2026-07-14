@@ -14,8 +14,16 @@ is_v4mapped(const uint8_t addr[16])
     return addr[10] == 0xff && addr[11] == 0xff;
 }
 
+/* First octet 0xff marks an IPv6 multicast address (RFC 4291 §2.7). */
 static int
-is_all_zero(const uint8_t addr[16])
+is_v6_multicast(const uint8_t addr[16])
+{
+    return addr[0] == 0xff;
+}
+
+/* All 16 bytes zero — the :: unspecified address (RFC 4291 §2.5.2). */
+static int
+is_unspecified(const uint8_t addr[16])
 {
     for (int i = 0; i < 16; i++) {
         if (addr[i] != 0) return 0;
@@ -26,15 +34,17 @@ is_all_zero(const uint8_t addr[16])
 /* v6 TCP address classes lwIP pre-accept-drops before a PENDING_ACCEPT slot
  * is ever created (spec §3.C rev7/rev8): v4-mapped src/dst (::ffff:0:0/96,
  * not a real dual-stack address on the wire here), a multicast src or dst
- * (first octet 0xff — TCP has no valid multicast use), and an unspecified
- * (::) source. Laning any of these would only ever fail inside lwIP, so
- * they're routed RAW instead — each maps to a concrete lwIP drop site cited
- * in the design spec. */
+ * (TCP has no valid multicast use), and an unspecified (::) SOURCE only — a
+ * :: destination is left eligible on purpose (a real, if unusual, connect
+ * target; the asymmetry is pinned by test). Laning any of these would only
+ * ever fail inside lwIP, so they're routed RAW instead — each maps to a
+ * concrete lwIP drop site cited in the design spec. */
 static int
 v6_lane_ineligible(const mqvpn_flow_key_t *key)
 {
     return is_v4mapped(key->dst_ip) || is_v4mapped(key->src_ip) ||
-           key->src_ip[0] == 0xff || key->dst_ip[0] == 0xff || is_all_zero(key->src_ip);
+           is_v6_multicast(key->src_ip) || is_v6_multicast(key->dst_ip) ||
+           is_unspecified(key->src_ip);
 }
 
 mqvpn_hybrid_lane_t
