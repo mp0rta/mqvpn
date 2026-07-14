@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # test_multiclient.sh — Multi-client + PSK authentication E2E test
 #
 # Creates 1 server + 3 client netns, verifies:

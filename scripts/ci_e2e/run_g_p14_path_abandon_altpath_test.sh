@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_g_p14_path_abandon_altpath_test.sh -- G-P14: PATH_ABANDON via alt-path.
 #
 # ACTIVE (un-skipped 2026-07-08). Formerly SKIPped on the belief that a netns

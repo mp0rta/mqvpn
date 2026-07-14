@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_route_gate_test.sh — E2E test for the FIB route-reachability gate
 # on path re-add (route_check.c / platform_linux.c).
 #

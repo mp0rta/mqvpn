@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # bench_failover.sh — Netns failover benchmark (TTF + TTR)
 #
 # Runs a 75-second iperf3 transfer over multipath VPN, injects a path

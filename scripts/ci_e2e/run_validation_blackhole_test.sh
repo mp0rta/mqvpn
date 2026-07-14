@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_validation_blackhole_test.sh — E2E test for PATH_CHALLENGE black-hole
 # abandon + recovery.
 #

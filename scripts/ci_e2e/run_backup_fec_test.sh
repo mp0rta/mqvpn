@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_backup_fec_test.sh — E2E smoke for the backup_fec scheduler.
 #
 # Verifies that both endpoints can establish a dual-path tunnel with

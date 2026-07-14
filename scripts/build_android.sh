@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 #
 # build_android.sh — Cross-compile libmqvpn + xquic + BoringSSL for Android
 #

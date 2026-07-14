@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # ci_bench_raw_throughput.sh — Raw throughput benchmark (no netem)
 #
 # Measures VPN overhead by comparing direct veth throughput against VPN throughput.

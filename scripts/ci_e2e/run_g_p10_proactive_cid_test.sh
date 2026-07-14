@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_g_p10_proactive_cid_test.sh — G-P10 (proactive per-path CID issuance).
 #
 # Validates that after handshake completes the server proactively issues

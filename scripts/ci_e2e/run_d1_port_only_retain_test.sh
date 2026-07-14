@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_d1_port_only_retain_test.sh — D1 §9.4 ¶1 MAY retain on port-only change.
 #
 # Negative-side of run_d1_ip_change_rebind_test.sh: when ONLY the source port

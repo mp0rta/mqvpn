@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # ci_bench_failover.sh — CI dual-path failover benchmark (TTF + TTR)
 #
 # Tests both Path A and Path B fault/recovery in a single 100s run.

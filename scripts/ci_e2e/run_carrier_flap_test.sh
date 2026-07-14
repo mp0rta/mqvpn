@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_carrier_flap_test.sh — E2E test for carrier-flap recovery (ip link
 # set down/up without ip addr del/add).
 #

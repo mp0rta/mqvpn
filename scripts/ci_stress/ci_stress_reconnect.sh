@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # ci_stress_reconnect.sh — 500-cycle connect/disconnect stress test
 #
 # Validates that the VPN server survives many client reconnections without

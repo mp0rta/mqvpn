@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # ci_bench_udp_sweep.sh — UDP rate sweep benchmark
 #
 # Sweeps UDP send rate from 200-380 Mbps to find the saturation point

@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_g_p16_paths_blocked_emission_test.sh — E2E test for the
 # PR7 (receive auto-grant) + PR8 (G-P16 PATHS_BLOCKED send-side)
 # closed loop, exercised via a deterministic 4-path startup scenario

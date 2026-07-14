@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # benchmarks/tcp_lane_microbench/run.sh — H2a gate: TUN(MTU 8500) →
 # classifier → lwIP termination → /dev/null sink, single bulk TCP flow.
 # Gate: >= 10 Gbit/s receiver-side (spec H2a).

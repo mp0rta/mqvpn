@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # Cross-build BoringSSL -> xquic (static) -> libmqvpn (static) for iOS arm64.
 # Usage: ./ios/build-ios.sh [boringssl|xquic|mqvpn|all]   (default: all)
 set -euo pipefail

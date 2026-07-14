@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # bench_udp_sweep.sh — UDP rate sweep benchmark (netns)
 #
 # Sweeps UDP send rate for single-path vs multipath (wlb / minrtt)

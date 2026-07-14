@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_wlb_test.sh — WLB scheduler non-regression test
 #
 # Verifies WLB scheduler matches MinRTT throughput (no regression) while

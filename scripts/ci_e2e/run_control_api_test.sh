@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_control_api_test.sh — end-to-end test for the v0.5.0 server control API.
 #
 # Verifies all 8 control commands (add_user / remove_user / list_users / get_stats /

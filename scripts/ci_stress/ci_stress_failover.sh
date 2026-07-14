@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # ci_stress_failover.sh — 100-cycle path fault/recover stress test
 #
 # Runs 100 fault/recover cycles alternating Path A and Path B while continuous

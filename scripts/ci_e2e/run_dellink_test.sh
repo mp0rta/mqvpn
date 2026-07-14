@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_dellink_test.sh — E2E test for RTM_DELLINK path removal/re-addition
 #
 # Verifies that when a network interface is removed (ip link del / USB unplug),
