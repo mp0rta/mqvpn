@@ -28,11 +28,16 @@ typedef SSIZE_T ssize_t;
 
 typedef struct mqvpn_tcp_lane mqvpn_tcp_lane_t;
 
-/* Flow-starting SYN test for TUN-ingress lane policy (IPv4 only — the
- * classifier routes IPv6 TCP to RAW in v1). Re-parses the one flags byte
- * at the IHL-derived offset DELIBERATELY instead of extending reorder.h's
- * parser: the spec scopes mqvpn_parse_l3l4 to classifier needs (5-tuple),
- * and flags are a lane-policy concern only.
+/* Flow-starting SYN test for TUN-ingress lane policy. Family-aware since
+ * Chunk 3: IPv4 re-parses the one flags byte at the IHL-derived offset;
+ * IPv6 re-parses it at the FIXED offset 40 (the v6 fixed header is always
+ * exactly 40 bytes, and Chunk 2's classifier only ever lanes a v6 packet
+ * whose BASE Next Header is already TCP — no extension headers, no
+ * fragments — so the TCP header always starts right there; see
+ * mqvpn_hybrid_classify's pkt[6] gate in classifier.c). Re-parses
+ * DELIBERATELY instead of extending reorder.h's parser: the spec scopes
+ * mqvpn_parse_l3l4 to classifier needs (5-tuple), and flags are a
+ * lane-policy concern only.
  *
  * Returns 1 only for a pure SYN (SYN set, ACK clear). SYN|ACK is
  * intentionally NOT flow-starting: on the client's TUN ingress a SYN|ACK
@@ -43,43 +48,70 @@ typedef struct mqvpn_tcp_lane mqvpn_tcp_lane_t;
  * (every packet re-evaluates as unknown non-SYN → RAW), which is correct:
  * only client-originated outbound flows enter the TCP lane.
  *
- * Bounds-checked: needs len >= IHL + 14 to reach the flags byte at
- * tcp_off + 13. Truncated/garbage packets return 0 (treated as non-SYN;
- * unknown-flow non-SYN falls to RAW where existing paths handle it).
+ * Bounds-checked: needs len >= tcp_off + 14 to reach the flags byte at
+ * tcp_off + 13 (tcp_off = IHL for v4, fixed 40 for v6). Truncated/garbage
+ * packets return 0 (treated as non-SYN; unknown-flow non-SYN falls to RAW
+ * where existing paths handle it). Neither v4 nor v6 (dispatched purely on
+ * the pkt[0] version nibble) also returns 0.
  *
- * PRECONDITION: pkt must already be classified MQVPN_LANE_TCP
- * (non-fragment IPv4 TCP); this helper does not re-verify protocol or
- * fragment offset. */
+ * PRECONDITION: pkt must already be classified MQVPN_LANE_TCP (non-fragment
+ * IPv4 TCP, or direct-base-NH IPv6 TCP); this helper does not re-verify
+ * protocol, fragment offset, or — for IPv6 — the base Next Header byte
+ * itself. It trusts the classifier's base-NH==TCP gate (Chunk 2) for the
+ * v6 fixed-offset assumption and only dispatches on IP version. */
 static inline int
 mqvpn_tcp_syn_flag(const uint8_t *pkt, size_t len)
 {
-    if (len < 20 || (pkt[0] >> 4) != 4) {
+    if (len < 1) {
         return 0;
     }
-    size_t ihl = (size_t)(pkt[0] & 0x0F) * 4;
-    if (ihl < 20 || len < ihl + 14) {
+    size_t tcp_off;
+    if ((pkt[0] >> 4) == 4) {
+        if (len < 20) {
+            return 0;
+        }
+        tcp_off = (size_t)(pkt[0] & 0x0F) * 4;
+        if (tcp_off < 20) {
+            return 0;
+        }
+    } else if ((pkt[0] >> 4) == 6) {
+        tcp_off = 40;
+    } else {
         return 0;
     }
-    uint8_t flags = pkt[ihl + 13];
+    if (len < tcp_off + 14) {
+        return 0;
+    }
+    uint8_t flags = pkt[tcp_off + 13];
     return (flags & 0x12) == 0x02; /* SYN set, ACK clear */
 }
 
 /* I2: extract the ISN (TCP sequence number, bytes 4-7 of the TCP header)
- * from a pure SYN packet. PRECONDITION: mqvpn_tcp_syn_flag(pkt, len) must
- * already have returned 1 for this EXACT packet — that check's bounds
- * requirement (len >= ihl + 14, to reach the flags byte) is strictly
- * larger than what reading the 4-byte seq field at ihl+4..ihl+7 needs, so
- * no separate bounds check is done here (same PRECONDITION idiom as
- * mqvpn_tcp_syn_flag's own header comment). Used to re-evaluate a sticky-
- * RAW marker on tuple reuse: same ISN means the same handshake
+ * from a pure SYN packet. Family-aware since Chunk 3, mirroring
+ * mqvpn_tcp_syn_flag's v4-IHL-derived-offset / v6-fixed-offset-40 split.
+ *
+ * PRECONDITION: mqvpn_tcp_syn_flag(pkt, len) must already have returned 1
+ * for this EXACT packet — that check's bounds requirement (len >=
+ * tcp_off + 14, to reach the flags byte) is strictly larger than what
+ * reading the 4-byte seq field at tcp_off+4..tcp_off+7 needs, so no
+ * separate bounds check is done here (same PRECONDITION idiom as
+ * mqvpn_tcp_syn_flag's own header comment); it also guarantees pkt[0]'s
+ * version nibble is 4 or 6 (any other value returns 0 from the flag check
+ * above, so this function is never reached for it). Used to re-evaluate a
+ * sticky-RAW marker on tuple reuse: same ISN means the same handshake
  * retransmitting (keep the marker), a different ISN means a genuinely new
  * connection (see mqvpn_tcp_lane_marker_isn / mqvpn_tcp_lane_on_syn). */
 static inline uint32_t
 mqvpn_tcp_syn_isn(const uint8_t *pkt, size_t len)
 {
     (void)len;
-    size_t ihl = (size_t)(pkt[0] & 0x0F) * 4;
-    const uint8_t *seq = pkt + ihl + 4;
+    const uint8_t *seq;
+    if ((pkt[0] >> 4) == 6) {
+        seq = pkt + 40 + 4;
+    } else {
+        size_t ihl = (size_t)(pkt[0] & 0x0F) * 4;
+        seq = pkt + ihl + 4;
+    }
     return ((uint32_t)seq[0] << 24) | ((uint32_t)seq[1] << 16) | ((uint32_t)seq[2] << 8) |
            (uint32_t)seq[3];
 }

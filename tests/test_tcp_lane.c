@@ -2183,15 +2183,89 @@ test_tcp_syn_flag_cases(void)
             0x02; /* SYN, at what would be the IHL=20 offset — must not matter */
         ASSERT_TRUE(!mqvpn_tcp_syn_flag(pkt, sizeof(pkt)), "IHL < 20 is rejected");
     }
-    /* (f) Non-v4 (e.g. IPv6): the classifier already routes IPv6 TCP to RAW,
-     * but the helper's own guard must independently reject it too. */
+    /* (f) Chunk 3: IPv6 direct-base-NH TCP (base NH == TCP, guaranteed by
+     * Chunk 2's classifier gate) is now flow-starting too, parsed at the
+     * FIXED offset 40 (not IHL-derived — IPv6's fixed header is always 40
+     * bytes and pkt[0]&0x0F is the traffic-class high nibble here, NOT an
+     * IHL). Pure SYN -> flow-starting. */
     {
-        uint8_t pkt[34];
+        uint8_t pkt[54]; /* 40-byte v6 header + 14 bytes of TCP header */
         memset(pkt, 0, sizeof(pkt));
-        pkt[0] = 0x60; /* version 6 */
-        pkt[20 + 13] = 0x02;
-        ASSERT_TRUE(!mqvpn_tcp_syn_flag(pkt, sizeof(pkt)), "non-v4 is rejected");
+        pkt[0] = 0x60;       /* version 6 */
+        pkt[6] = 6;          /* Next Header: TCP (base NH gate) */
+        pkt[40 + 13] = 0x02; /* SYN, at the fixed v6 offset */
+        ASSERT_TRUE(mqvpn_tcp_syn_flag(pkt, sizeof(pkt)),
+                    "v6 direct-TCP pure SYN is flow-starting at the fixed offset");
     }
+    /* (g) IPv6 SYN|ACK: same non-flow-starting rule as v4 (e). */
+    {
+        uint8_t pkt[54];
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x60;
+        pkt[6] = 6;
+        pkt[40 + 13] = 0x12; /* SYN + ACK */
+        ASSERT_TRUE(!mqvpn_tcp_syn_flag(pkt, sizeof(pkt)),
+                    "v6 SYN|ACK is NOT flow-starting");
+    }
+    /* (h) IPv6 too-short: len stops one byte short of the fixed flags-byte
+     * offset (40 + 13 == 53; providing only 53 bytes must not read past the
+     * buffer). */
+    {
+        uint8_t pkt[53];
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x60;
+        pkt[6] = 6;
+        ASSERT_TRUE(!mqvpn_tcp_syn_flag(pkt, sizeof(pkt)),
+                    "v6 truncated (len == 40+13) is treated as non-SYN");
+    }
+    /* (i) IPv6 packet whose base NH isn't TCP: the helper trusts the
+     * PRECONDITION (Chunk 2's base-NH gate already ran) and does not
+     * re-check pkt[6] itself — with the flags byte left at its zeroed
+     * default this still correctly reads as non-SYN, exercising the fixed
+     * v6 offset independent of the actual NH value. */
+    {
+        uint8_t pkt[54];
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x60;
+        pkt[6] = 17; /* Next Header: UDP */
+        ASSERT_TRUE(!mqvpn_tcp_syn_flag(pkt, sizeof(pkt)),
+                    "v6 non-TCP base NH with a zeroed flags byte is non-SYN");
+    }
+    /* (j) Neither v4 nor v6 (e.g. version 5): the dispatch's catch-all
+     * "anything else -> 0" branch. */
+    {
+        uint8_t pkt[54];
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x50; /* version 5 */
+        pkt[40 + 13] = 0x02;
+        ASSERT_TRUE(!mqvpn_tcp_syn_flag(pkt, sizeof(pkt)),
+                    "version 5 (neither v4 nor v6) is rejected");
+    }
+}
+
+/* ─── Chunk 3: mqvpn_tcp_syn_isn, IPv6 direct-TCP ───
+ *
+ * mqvpn_tcp_syn_isn had no dedicated packet-parsing unit test before this
+ * chunk (only exercised indirectly through mqvpn_tcp_lane_on_syn, which
+ * takes an already-computed ISN — see the I2 tests above). Pin the v6
+ * fixed-offset-40 extraction explicitly: seq bytes at pkt[44..47], mirroring
+ * the v4 ihl+4..ihl+7 idiom. */
+static void
+test_tcp_syn_isn_v6(void)
+{
+    uint8_t pkt[54];
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x60;       /* version 6 */
+    pkt[6] = 6;          /* Next Header: TCP */
+    pkt[40 + 13] = 0x02; /* SYN */
+    pkt[40 + 4] = 0xde;
+    pkt[40 + 5] = 0xad;
+    pkt[40 + 6] = 0xbe;
+    pkt[40 + 7] = 0xef;
+
+    ASSERT_TRUE(mqvpn_tcp_syn_flag(pkt, sizeof(pkt)), "precondition: v6 pure SYN");
+    ASSERT_EQ_INT(mqvpn_tcp_syn_isn(pkt, sizeof(pkt)), 0xdeadbeefu,
+                  "v6 ISN read at the fixed offset (pkt[44..47])");
 }
 
 /* ─── Task 12: close/error mapping + flow removal ───
@@ -3183,6 +3257,7 @@ main(void)
     test_downlink_fatal_recv_error();
     test_downlink_pump_on_torn_down_flow();
     test_tcp_syn_flag_cases();
+    test_tcp_syn_isn_v6();
     test_lwip_err_teardown();
     test_h3_closing_notify_teardown();
     test_abort_pending_real();
