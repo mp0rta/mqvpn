@@ -2,8 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 mp0rta and mqvpn contributors
 #
-# hybrid_h2_lane_responder.py — Test 6 target-side responder for the
-# tcp=auto sticky per-flow lane e2e proof.
+# hybrid_h2_lane_responder.py — target-side responder shared by Test 6
+# (tcp=auto sticky per-flow lane e2e proof, v4, records peer address) and
+# Test 8 (IPv6 TCP-lane aggregation/failover, v6 bind host, no peer address
+# to record — see the peer_file paragraph below). Optional argv (bind host,
+# peer_file) default to Test 6's original behavior, so its 3-arg invocation
+# (port, peer_file, bytes_file) is unchanged.
 #
 # Why peer address, not the client's [STATUS] lane counters: c->pkts_lane_tcp
 # is bumped by mqvpn_hybrid_classify() the moment a packet is classified as
@@ -38,21 +42,30 @@
 # was never silently re-evaluated mid-life: a reclassification bug would
 # starve this counter (lwIP has no pcb for a non-SYN packet on a flow it
 # never saw the SYN for), not raise a clean error.
+#
+# Test 8 has no sticky-RAW-vs-lane ambiguity to resolve (it uses a fixed
+# Tcp=stream policy, not tcp=auto), so peer_file is optional there — pass ""
+# to skip peer recording entirely. It also binds a real v6 literal instead of
+# "0.0.0.0", so the optional host argv selects the listening socket's address
+# family (a literal containing ':' is v6) instead of hardcoding AF_INET.
 import socket
 import sys
 
 port = int(sys.argv[1])
 peer_file = sys.argv[2]
 bytes_file = sys.argv[3]
+host = sys.argv[4] if len(sys.argv) > 4 else "0.0.0.0"
 
-srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+family = socket.AF_INET6 if ":" in host else socket.AF_INET
+srv = socket.socket(family, socket.SOCK_STREAM)
 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-srv.bind(("0.0.0.0", port))
+srv.bind((host, port))
 srv.listen(1)
 conn, addr = srv.accept()
 
-with open(peer_file, "w") as f:
-    f.write(addr[0])
+if peer_file:
+    with open(peer_file, "w") as f:
+        f.write(addr[0])
 
 total = 0
 with open(bytes_file, "w") as f:

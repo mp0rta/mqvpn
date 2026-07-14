@@ -327,8 +327,19 @@ int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
  * indexing prints correctly) and dst_port is host order (reorder.h key
  * contract). Writes the request target as
  * "/.well-known/mqvpn/tcp/<dst>/<port>/" into out (capacity cap) and returns
- * snprintf's return value, so a caller can detect truncation the same way any
- * snprintf caller would (return >= cap).
+ * snprintf's return value, so a caller CAN detect truncation the same way any
+ * snprintf caller would (return >= cap) — test_tcp_lane.c's
+ * test_connect_path_format_truncation exercises exactly that, with a
+ * deliberately undersized buffer.
+ *
+ * The production caller (cli_tcp_lane_open_stream, mqvpn_client.c) does NOT
+ * add that `>= cap` check, and that is correct, not an oversight: with
+ * MQVPN_TCP_CONNECT_PATH_CAP's worst case — 23 (prefix) + 45
+ * (INET6_ADDRSTRLEN-1 v6 literal) + 7 ("/" + 5-digit port + "/") + 1 (NUL)
+ * = 76 < 80 — truncation can never actually happen there, so the only
+ * failure mode left to check is the `< 0` (inet_ntop failure) branch it does
+ * have. Do not add a dead `>= cap` branch to that caller on the strength of
+ * this docstring alone.
  *
  * v6: emits the RAW inet_ntop colon form — NOT bracketed
  * ("[2001:db8::1]") and NOT percent-encoded. The server's tcp_egress.c path

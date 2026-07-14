@@ -1675,16 +1675,16 @@ fi
 #    scripts/ci_e2e/run_ipv6_multipath_test.sh's Test 4 uses (bring Path A
 #    down, confirm traffic continues on Path B), applied here to a real
 #    TCP-lane flow instead of ping. ──
-ip netns exec "$NS_SERVER" python3 "${SCRIPT_DIR}/hybrid_h2_v6_sink.py" \
-    "$V6_EGRESS_IP" "$V6_LANE_PORT" "$V6_BYTES_FILE" &
+ip netns exec "$NS_SERVER" python3 "${SCRIPT_DIR}/hybrid_h2_lane_responder.py" \
+    "$V6_LANE_PORT" "" "$V6_BYTES_FILE" "$V6_EGRESS_IP" &
 V6_SINK_PID=$!
 
 if ! wait_for_listening_port "$NS_SERVER" "$V6_LANE_PORT" 20; then
     echo "FAIL: Test 8 IPv6 sink never became ready (port ${V6_LANE_PORT} not listening)"
     fail=1
 else
-    ip netns exec "$NS_CLIENT" python3 "${SCRIPT_DIR}/hybrid_h2_v6_source.py" \
-        "$V6_EGRESS_IP" "$V6_LANE_PORT" &
+    ip netns exec "$NS_CLIENT" python3 "${SCRIPT_DIR}/hybrid_h2_lane_sender.py" \
+        "$V6_EGRESS_IP" "$V6_LANE_PORT" 4096 0.05 &
     V6_SOURCE_PID=$!
 
     if ! wait_for_nonempty_file "$V6_BYTES_FILE" 20; then
