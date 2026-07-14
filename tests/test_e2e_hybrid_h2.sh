@@ -120,9 +120,10 @@
 #     client's v6 literal connect-tcp request builder, and the server's v6
 #     egress ACL (DEFAULT_DENY_V6 + IPV6_V6ONLY) against a live two-path
 #     multipath tunnel, not just unit/host coverage. A short iperf3 -6 burst
-#     is measured against the SAME per-path load-share floor Test 3 uses
+#     is measured against the same load-share check shape Test 3 uses
 #     (both paths must carry real load, lighter path >=20% of the heavier —
-#     the direct proof against a scheduler that pinned traffic on one path).
+#     the direct proof against a scheduler that pinned traffic on one path;
+#     the absolute byte floor differs from Test 3's, see the check below).
 #     A separate long-lived v6 TCP-lane flow then proves failover: path 0's
 #     client-side link is dropped mid-flow and the flow must keep making
 #     progress on the surviving path, the same technique
@@ -1615,11 +1616,13 @@ else
 fi
 
 # ── Aggregation: a short iperf3 -6 burst through the v6 stream-lane target,
-#    then the same per-path load-share check Test 3 uses (both paths must
+#    then the same load-share check SHAPE Test 3 uses (both paths must
 #    carry real load, lighter path >=20% of the heavier) — the direct proof
 #    against a scheduler that pinned all traffic on one path. A fresh copy
 #    of the check (not a shared function with Test 3) so this phase cannot
-#    perturb Test 3's already-verified logic. ──
+#    perturb Test 3's already-verified logic. The absolute byte floor is
+#    HALF of Test 3's (see the FLOOR clause below) — same shape, different
+#    threshold, deliberately not tracking Test 3's value. ──
 IPERF_DURATION_T8=6
 V6_IPERF_MBPS="$(run_iperf3_v6_through_tunnel "$V6_EGRESS_IP" "$IPERF_DURATION_T8")"
 echo "  IPv6 iperf3 (both paths active): ${V6_IPERF_MBPS} Mbps"
@@ -1637,6 +1640,10 @@ assert_stream_lane_used "$CLIENT_LOG_T8" "Test8 v6 stream"
 stats_t8="$(bench_query_control "$CTRL_PORT" get_status)"
 agg_check_t8="$(echo "$stats_t8" | python3 -c "
 import sys, json
+# Half of Test 3's 100000 floor: this phase is a single ~6s iperf3 burst,
+# not Test 3's repeated run_iperf3_repeated series, so fewer per-path bytes
+# accumulate before the get_status snapshot — while still being far above
+# handshake/probe noise (an idle path can't reach 50 KB on control frames).
 FLOOR = 50000
 try:
     d = json.load(sys.stdin)
