@@ -29,10 +29,10 @@ typedef SSIZE_T ssize_t;
 
 typedef struct mqvpn_tcp_lane mqvpn_tcp_lane_t;
 
-/* Flow-starting SYN test for TUN-ingress lane policy. Family-aware since
- * Chunk 3: IPv4 re-parses the one flags byte at the IHL-derived offset;
+/* Flow-starting SYN test for TUN-ingress lane policy. Family-aware:
+ * IPv4 re-parses the one flags byte at the IHL-derived offset;
  * IPv6 re-parses it at the FIXED offset 40 (the v6 fixed header is always
- * exactly 40 bytes, and Chunk 2's classifier only ever lanes a v6 packet
+ * exactly 40 bytes, and the classifier only ever lanes a v6 packet
  * whose BASE Next Header is already TCP — no extension headers, no
  * fragments — so the TCP header always starts right there; see
  * mqvpn_hybrid_classify's pkt[6] gate in classifier.c). Re-parses
@@ -58,7 +58,7 @@ typedef struct mqvpn_tcp_lane mqvpn_tcp_lane_t;
  * PRECONDITION: pkt must already be classified MQVPN_LANE_TCP (non-fragment
  * IPv4 TCP, or direct-base-NH IPv6 TCP); this helper does not re-verify
  * protocol, fragment offset, or — for IPv6 — the base Next Header byte
- * itself. It trusts the classifier's base-NH==TCP gate (Chunk 2) for the
+ * itself. It trusts the classifier's base-NH==TCP gate for the
  * v6 fixed-offset assumption and only dispatches on IP version. */
 static inline int
 mqvpn_tcp_syn_flag(const uint8_t *pkt, size_t len)
@@ -88,7 +88,7 @@ mqvpn_tcp_syn_flag(const uint8_t *pkt, size_t len)
 }
 
 /* I2: extract the ISN (TCP sequence number, bytes 4-7 of the TCP header)
- * from a pure SYN packet. Family-aware since Chunk 3, mirroring
+ * from a pure SYN packet. Family-aware, mirroring
  * mqvpn_tcp_syn_flag's v4-IHL-derived-offset / v6-fixed-offset-40 split.
  *
  * PRECONDITION: mqvpn_tcp_syn_flag(pkt, len) must already have returned 1
@@ -313,7 +313,7 @@ int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
  * the sizing lives in one place next to the format string it must fit. */
 #define MQVPN_TCP_CONNECT_PATH_CAP 80
 
-/* connect-tcp :path formatter — extracted (Chunk 5) from the inline snprintf
+/* connect-tcp :path formatter — extracted from the inline snprintf
  * that used to live directly in cli_tcp_lane_open_stream (mqvpn_client.c),
  * purely so it gets a unit-test seam: that function is static and this file's
  * test double stubs cli_tcp_lane_open_stream instead of linking the real one.
@@ -330,7 +330,7 @@ int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
  * snprintf's return value, so a caller can detect truncation the same way any
  * snprintf caller would (return >= cap).
  *
- * v6 (Chunk 5, spec 3.G): emits the RAW inet_ntop colon form — NOT bracketed
+ * v6: emits the RAW inet_ntop colon form — NOT bracketed
  * ("[2001:db8::1]") and NOT percent-encoded. The server's tcp_egress.c path
  * parser splits :path on '/' and feeds the host segment straight to
  * inet_pton with no bracket-strip/percent-decode step, so a bracketed or

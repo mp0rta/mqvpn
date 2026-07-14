@@ -23,7 +23,7 @@
 
 #include "lwip/priv/tcp_priv.h" /* TCP_MSL — C1's CLOSING grace-sweep window */
 
-/* Chunk 4 (dual-stack, LWIP_IPV6=1): ip_addr_t is now a tagged union
+/* Dual-stack (LWIP_IPV6=1): ip_addr_t is now a tagged union
  * (lwip/ip_addr.h) — sizeof(ip_addr_t) != 4, so the old compile-time pin on
  * the bare-ip4_addr_t assumption no longer applies. The accept callback
  * (mqvpn_tcp_lane_lwip_accept below) instead switches on IP_IS_V6() and

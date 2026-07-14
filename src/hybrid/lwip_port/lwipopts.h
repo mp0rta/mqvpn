@@ -25,7 +25,7 @@
 #define LWIP_UDP      0 /* v1: TCP lane only; UDP stays on the DATAGRAM lane */
 
 #define LWIP_IPV4 1
-/* Chunk 4: dual-stack — v6 SYNs admitted to the lwIP TCP lane alongside v4
+/* Dual-stack — v6 SYNs admitted to the lwIP TCP lane alongside v4
  * (classifier gates which v6 traffic reaches here; lwIP itself is
  * family-agnostic). */
 #define LWIP_IPV6 1

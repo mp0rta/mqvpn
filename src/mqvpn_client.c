@@ -1559,11 +1559,13 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
          * client_tunnel_subnet in classifier.h. Deliberately OUTSIDE the
          * MQVPN_HYBRID_TCP_LANE_ENABLED block: lane-less builds still
          * classify for counters and must report the same verdicts.
-         * client_tunnel_subnet[0] is v4 (always learned here); [1] is v6,
-         * learned only once an IPv6 address has actually been assigned —
-         * classify() doesn't consult it yet (v1: IPv6 TCP is always RAW),
-         * but learning it now means Chunk 6's classifier gate needs no
-         * further mqvpn_client.c wiring. */
+         * client_tunnel_subnet[0] is v4 (always learned here); [1] is the v6
+         * tunnel subnet, learned only once an IPv6 address has actually been
+         * assigned. The classifier's family-aware TCP-lane carve-out consumes
+         * [1] for v6 flows exactly as it consumes [0] for v4 (see
+         * classify()'s tunnel-subnet check), for the same reason: laning a
+         * tunnel-subnet destination would only draw a server RESET, so it
+         * stays RAW. */
         mqvpn_tunnel_subnet_learn(conn->assigned_ip, (int)conn->assigned_prefix,
                                   &c->config.hybrid.client_tunnel_subnet[0]);
         if (conn->addr6_assigned) {
@@ -2998,12 +3000,12 @@ tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t 
                 int is_syn = 0;
                 uint32_t pkt_isn = 0;
                 if (!found || is_closing || is_raw) {
-                    /* Chunk 3: mqvpn_tcp_syn_flag is now family-aware (v4
-                     * IHL-derived offset, v6 fixed offset 40) — no ip_ver
-                     * gate needed here. Chunk 2's classifier already
-                     * excluded ext-header/fragmented v6 (MQVPN_LANE_TCP
-                     * only fires for base-NH==TCP), so a v6 is_syn here is
-                     * always lane-terminable. */
+                    /* mqvpn_tcp_syn_flag is family-aware (v4 IHL-derived
+                     * offset, v6 fixed offset 40) — no ip_ver gate needed
+                     * here. The classifier already excluded ext-header/
+                     * fragmented v6 (MQVPN_LANE_TCP only fires for
+                     * base-NH==TCP), so a v6 is_syn here is always
+                     * lane-terminable. */
                     is_syn = mqvpn_tcp_syn_flag(pkt, len);
                     if (is_syn) pkt_isn = mqvpn_tcp_syn_isn(pkt, len);
                 }
