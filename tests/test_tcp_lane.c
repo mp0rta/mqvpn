@@ -2243,13 +2243,57 @@ test_tcp_syn_flag_cases(void)
     }
 }
 
+/* ─── Chunk 3: mqvpn_tcp_syn_isn, IPv4 IHL-derived offset ───
+ *
+ * mqvpn_tcp_syn_isn had no dedicated packet-parsing unit test for EITHER
+ * family before this chunk (only exercised indirectly through
+ * mqvpn_tcp_lane_on_syn, which takes an already-computed ISN — see the I2
+ * tests above). Pin the v4 side explicitly, both at IHL=20 and at IHL=24
+ * (one TCP-options word) so the ihl computation itself is exercised, not
+ * just the common no-options case. Companion to test_tcp_syn_isn_v6 below,
+ * closing the v4/v6 coverage asymmetry. */
+static void
+test_tcp_syn_isn_v4(void)
+{
+    /* (a) IHL=20 (no options): seq at ihl+4..ihl+7 == pkt[24..27]. */
+    {
+        uint8_t pkt[34];
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x45;       /* v4, IHL 5 (20 bytes) */
+        pkt[20 + 13] = 0x02; /* SYN */
+        pkt[20 + 4] = 0xde;
+        pkt[20 + 5] = 0xad;
+        pkt[20 + 6] = 0xbe;
+        pkt[20 + 7] = 0xef;
+        ASSERT_TRUE(mqvpn_tcp_syn_flag(pkt, sizeof(pkt)),
+                    "precondition: v4 IHL=20 pure SYN");
+        ASSERT_EQ_INT(mqvpn_tcp_syn_isn(pkt, sizeof(pkt)), 0xdeadbeefu,
+                      "v4 ISN read at the IHL=20-derived offset (pkt[24..27])");
+    }
+    /* (b) IHL=24 (one 32-bit TCP-options word): the seq field must be read at
+     * the IHL-DERIVED offset ihl+4..ihl+7 == pkt[28..31], exercising the ihl
+     * arithmetic rather than a fixed offset. */
+    {
+        uint8_t pkt[38];
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x46;       /* v4, IHL 6 (24 bytes) */
+        pkt[24 + 13] = 0x02; /* SYN, at the ihl=24-derived offset */
+        pkt[24 + 4] = 0xca;
+        pkt[24 + 5] = 0xfe;
+        pkt[24 + 6] = 0xba;
+        pkt[24 + 7] = 0xbe;
+        ASSERT_TRUE(mqvpn_tcp_syn_flag(pkt, sizeof(pkt)),
+                    "precondition: v4 IHL=24 pure SYN");
+        ASSERT_EQ_INT(mqvpn_tcp_syn_isn(pkt, sizeof(pkt)), 0xcafebabeu,
+                      "v4 ISN read at the IHL=24-derived offset (pkt[28..31])");
+    }
+}
+
 /* ─── Chunk 3: mqvpn_tcp_syn_isn, IPv6 direct-TCP ───
  *
- * mqvpn_tcp_syn_isn had no dedicated packet-parsing unit test before this
- * chunk (only exercised indirectly through mqvpn_tcp_lane_on_syn, which
- * takes an already-computed ISN — see the I2 tests above). Pin the v6
- * fixed-offset-40 extraction explicitly: seq bytes at pkt[44..47], mirroring
- * the v4 ihl+4..ihl+7 idiom. */
+ * Pin the v6 fixed-offset-40 extraction explicitly: seq bytes at
+ * pkt[44..47], mirroring the v4 ihl+4..ihl+7 idiom (see test_tcp_syn_isn_v4
+ * above). */
 static void
 test_tcp_syn_isn_v6(void)
 {
@@ -3257,6 +3301,7 @@ main(void)
     test_downlink_fatal_recv_error();
     test_downlink_pump_on_torn_down_flow();
     test_tcp_syn_flag_cases();
+    test_tcp_syn_isn_v4();
     test_tcp_syn_isn_v6();
     test_lwip_err_teardown();
     test_h3_closing_notify_teardown();

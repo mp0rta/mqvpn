@@ -51,8 +51,8 @@ typedef struct mqvpn_tcp_lane mqvpn_tcp_lane_t;
  * Bounds-checked: needs len >= tcp_off + 14 to reach the flags byte at
  * tcp_off + 13 (tcp_off = IHL for v4, fixed 40 for v6). Truncated/garbage
  * packets return 0 (treated as non-SYN; unknown-flow non-SYN falls to RAW
- * where existing paths handle it). Neither v4 nor v6 (dispatched purely on
- * the pkt[0] version nibble) also returns 0.
+ * where existing paths handle it). A version nibble that is neither 4 nor 6
+ * (dispatched purely on pkt[0]) also returns 0.
  *
  * PRECONDITION: pkt must already be classified MQVPN_LANE_TCP (non-fragment
  * IPv4 TCP, or direct-base-NH IPv6 TCP); this helper does not re-verify
