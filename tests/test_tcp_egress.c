@@ -2464,6 +2464,214 @@ TEST(acl_allow_beats_deny)
     ASSERT_EQ(allowed, 1);
 }
 
+/* ── ACL decision core, IPv6 (Task 6.1 — family-aware acl_decide +
+ * DEFAULT_DENY_V6) ── */
+
+/* Builds a 16-byte network-order v6 address via inet_pton — the v6
+ * counterpart of ipv4_addr() above. */
+static void
+ipv6_addr(const char *literal, uint8_t out[16])
+{
+    struct in6_addr a6;
+    ASSERT_EQ(inet_pton(AF_INET6, literal, &a6), 1);
+    memcpy(out, a6.s6_addr, 16);
+}
+
+/* RFC 3849 documentation prefix (2001:db8::/32): a neutral stand-in tunnel
+ * subnet that never overlaps DEFAULT_DENY_V6 or the public GUAs used below
+ * — the v6 counterpart of NEUTRAL_TUNNEL (TEST-NET-2) above. */
+static const mqvpn_cidr_entry_t NEUTRAL_TUNNEL_V6 = {6, 32, {0x20, 0x01, 0x0d, 0xb8}};
+
+TEST(acl_v6_blocks_loopback)
+{
+    uint8_t addr[16];
+    ipv6_addr("::1", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_v6_blocks_link_local)
+{
+    uint8_t addr[16];
+    ipv6_addr("fe80::1", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_v6_allows_just_outside_link_local)
+{
+    /* fe80::/10 covers byte[1] in [0x80,0xBF] (top 2 bits == '10'); 0xC0 is
+     * one bit past the boundary and must NOT be denied by this row —
+     * exercises the /10 (non-byte-aligned) mask precisely. */
+    uint8_t addr[16];
+    ipv6_addr("fec0::1", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 1);
+}
+
+TEST(acl_v6_blocks_ula_fc00)
+{
+    uint8_t addr[16];
+    ipv6_addr("fc00::1", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_v6_blocks_ula_fd00)
+{
+    /* fc00::/7 (not /8) must cover BOTH halves RFC 4193 splits ULA into —
+     * pins the /7 width specifically. */
+    uint8_t addr[16];
+    ipv6_addr("fd00::1", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_v6_allows_just_outside_ula)
+{
+    /* fc00::/7's covered top-7-bit pattern is 0xFC/0xFD only; 0xFE is one
+     * bit past the boundary (and doesn't collide with ff00::/8 multicast
+     * either) — must NOT be denied by the ULA row. */
+    uint8_t addr[16];
+    ipv6_addr("fe00::1", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 1);
+}
+
+TEST(acl_v6_blocks_multicast)
+{
+    uint8_t addr[16];
+    ipv6_addr("ff02::1", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_v6_blocks_unspecified)
+{
+    uint8_t addr[16];
+    ipv6_addr("::", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_v6_blocks_v4_mapped)
+{
+    uint8_t addr[16];
+    ipv6_addr("::ffff:1.2.3.4", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_v6_allows_just_outside_v4_mapped)
+{
+    /* ::ffff:0:0/96 keys off bytes[10..11] == 0xff,0xff; one byte off (0xfe
+     * instead of 0xff at byte 11) must NOT be denied by this row. */
+    uint8_t addr[16];
+    ipv6_addr("::fffe:1.2.3.4", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 1);
+}
+
+TEST(acl_v6_default_allows_public_gua)
+{
+    /* Default-*allow* parity with v4: a public GUA outside every
+     * DEFAULT_DENY_V6 row is reachable with no config at all. */
+    uint8_t addr[16];
+    ipv6_addr("2606:4700::1", addr); /* Cloudflare GUA */
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 1);
+}
+
+TEST(acl_v6_allow_punches_hole)
+{
+    mqvpn_cidr_entry_t allow[1] = {{6, 7, {0xfc}}}; /* fc00::/7 */
+    uint8_t addr[16];
+    ipv6_addr("fc00::5", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, allow, 1, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 1);
+}
+
+TEST(acl_v6_blocks_own_tunnel_subnet)
+{
+    /* A distinct docs sub-range (2001:db8:dead::/48), separate from
+     * NEUTRAL_TUNNEL_V6 (2001:db8::/32) — mirrors the v4
+     * acl_blocks_own_tunnel_subnet test's use of a dedicated `tunnel` var
+     * distinct from NEUTRAL_TUNNEL. */
+    mqvpn_cidr_entry_t tunnel = {6, 48, {0x20, 0x01, 0x0d, 0xb8, 0xde, 0xad}};
+    uint8_t addr[16];
+    ipv6_addr("2001:db8:dead::5", addr);
+    int allowed = svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &tunnel);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_v6_deny_blocks_public_ip)
+{
+    /* egress_deny must be reachable past the default-deny table: a target
+     * OUTSIDE every built-in v6 range is denied only by the configured
+     * list. */
+    mqvpn_cidr_entry_t deny[1] = {{6, 32, {0x26, 0x06, 0x47, 0x00}}};
+    uint8_t addr[16];
+    ipv6_addr("2606:4700::1", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, deny, 1, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_v6_allow_beats_deny)
+{
+    /* Precedence pin (v6): the SAME range in both lists resolves to
+     * allowed, same order as the v4 acl_allow_beats_deny test. */
+    mqvpn_cidr_entry_t allow[1] = {{6, 32, {0x26, 0x06, 0x47, 0x00}}};
+    mqvpn_cidr_entry_t deny[1] = {{6, 32, {0x26, 0x06, 0x47, 0x00}}};
+    uint8_t addr[16];
+    ipv6_addr("2606:4700::1", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, allow, 1, deny, 1, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 1);
+}
+
+TEST(acl_v6_tunnel_unset_allows_public_gua)
+{
+    /* The has_v6-gate regression (spec's central concern): when Subnet6 is
+     * unconfigured, svr_get_egress_policy emits tunnels[1] with family == 0
+     * (see mqvpn_server.c). Mirror that EXACT shape here directly against
+     * acl_decide and confirm a v6 GUA egress target is allowed, not
+     * silently denied by an ungated tunnel-match. */
+    mqvpn_cidr_entry_t tunnel_unset;
+    memset(&tunnel_unset, 0, sizeof(tunnel_unset)); /* family == 0: unset sentinel */
+    uint8_t addr[16];
+    ipv6_addr("2606:4700::1", addr);
+    int allowed = svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &tunnel_unset);
+    ASSERT_EQ(allowed, 1);
+}
+
+TEST(acl_v6_ungated_prefix0_would_deny_all_regression)
+{
+    /* Contrast case, kept as a tripwire: if svr_get_egress_policy's "Subnet6
+     * unset" branch ever regressed to emitting {family=6, prefix_len=0}
+     * instead of {family=0}, mqvpn_cidr_match would treat it as ::/0 —
+     * matching EVERY v6 address and silently denying ALL v6 egress. Pinned
+     * here so a future refactor of that branch trips this test instead of a
+     * production incident. */
+    mqvpn_cidr_entry_t bad_tunnel = {6, 0, {0}};
+    uint8_t addr[16];
+    ipv6_addr("2606:4700::1", addr);
+    int allowed = svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &bad_tunnel);
+    ASSERT_EQ(allowed, 0); /* demonstrates the bug this gate prevents */
+}
+
 /* ── svr_tcp_egress_parse_path — fully attacker-controlled H3 :path bytes ── */
 
 TEST(parse_path_accepts_valid)
@@ -2579,6 +2787,23 @@ main(void)
     run_acl_blocks_reserved_240();
     run_acl_deny_blocks_public_ip();
     run_acl_allow_beats_deny();
+    run_acl_v6_blocks_loopback();
+    run_acl_v6_blocks_link_local();
+    run_acl_v6_allows_just_outside_link_local();
+    run_acl_v6_blocks_ula_fc00();
+    run_acl_v6_blocks_ula_fd00();
+    run_acl_v6_allows_just_outside_ula();
+    run_acl_v6_blocks_multicast();
+    run_acl_v6_blocks_unspecified();
+    run_acl_v6_blocks_v4_mapped();
+    run_acl_v6_allows_just_outside_v4_mapped();
+    run_acl_v6_default_allows_public_gua();
+    run_acl_v6_allow_punches_hole();
+    run_acl_v6_blocks_own_tunnel_subnet();
+    run_acl_v6_deny_blocks_public_ip();
+    run_acl_v6_allow_beats_deny();
+    run_acl_v6_tunnel_unset_allows_public_gua();
+    run_acl_v6_ungated_prefix0_would_deny_all_regression();
     run_parse_path_accepts_valid();
     run_parse_path_rejects_oversized_host();
     run_parse_path_rejects_missing_port();

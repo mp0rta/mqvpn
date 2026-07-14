@@ -116,17 +116,19 @@ int svr_tcp_egress_parse_path(const char *path, size_t path_len, char *out_host,
  * pointer to a single entry — "no tunnel subnet configured" is expressed as
  * family == 0 (the unset sentinel mqvpn_cidr_match already treats as a
  * guaranteed non-match), not a NULL pointer. Returns 1 = allowed, 0 =
- * denied. v1: only ever called with family == 4 — the built-in default-deny
- * table below is IPv4-only (DEFAULT_DENY_V4); a v6 counterpart is future
- * work, not a second signature change (mqvpn_cidr_match's own family gate
- * already makes every v4 table entry a no-op against a v6 addr).
+ * denied. Family-aware: family == 4 walks DEFAULT_DENY_V4, family == 6
+ * walks DEFAULT_DENY_V6 (loopback/link-local/ULA/multicast/unspecified/
+ * v4-mapped) — the array AND its element count are selected together from
+ * the same branch (see the comment at the selection site), so a v6 call
+ * never partially reuses the v4 table.
  *
  * Evaluation order (do not reorder without updating the docstring AND the
  * self-review note in the task that introduced this):
  *   1. tunnel subnet   -> always denied, even if also present in `allow`
  *   2. egress_allow    -> punches holes through the default-deny below
- *   3. built-in default-deny ranges (loopback/RFC1918/link-local/CGNAT/
- *      multicast/broadcast)
+ *   3. built-in default-deny ranges, family-selected (loopback/RFC1918/
+ *      link-local/CGNAT/multicast/broadcast for v4; loopback/link-local/
+ *      ULA/multicast/unspecified/v4-mapped for v6)
  *   4. egress_deny     -> extra blocks past the built-in set
  *   5. default allow — this is a general-purpose egress proxy, not a
  *      walled garden; only enumerated private/special ranges are blocked

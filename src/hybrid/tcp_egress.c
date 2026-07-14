@@ -110,6 +110,29 @@ static const mqvpn_cidr_entry_t DEFAULT_DENY_V4[] = {
     {4, 32, {255, 255, 255, 255}}, /* broadcast 255.255.255.255/32 */
 };
 
+/* IPv6 counterpart of DEFAULT_DENY_V4 above — same mandatory, default-on
+ * deny set, evaluated regardless of config. Entries use C designated
+ * initializers for net[] so the non-zero bytes are visually obvious; every
+ * row's masking was verified against mqvpn_cidr_match's bit-prefix compare
+ * (see the security review note in the task that added this table). */
+static const mqvpn_cidr_entry_t DEFAULT_DENY_V6[] = {
+    {6, 128, {[15] = 1}},  /* loopback ::1/128 */
+    {6, 10, {0xfe, 0x80}}, /* link-local fe80::/10 */
+    /* ULA fc00::/7 — a /7, not /8: this ONE row covers BOTH fc00::/8 and
+     * fd00::/8 (the two halves RFC 4193 splits the ULA space into). */
+    {6, 7, {0xfc}},
+    {6, 8, {0xff}}, /* multicast ff00::/8 */
+    {6, 128, {0}},  /* unspecified ::/128 */
+    /* v4-mapped ::ffff:0:0/96 — defense-in-depth alongside IPV6_V6ONLY on
+     * the egress socket (see svr_tcp_egress_start_connect): without this
+     * row, a v6-literal connect-tcp target of e.g. "::ffff:127.0.0.1" would
+     * be evaluated purely as a v6 address (no v4 DEFAULT_DENY_V4 row would
+     * ever see it) and only IPV6_V6ONLY at the socket layer would stand
+     * between it and the v4 loopback — this row makes the denial explicit
+     * and attributable at the ACL layer too. */
+    {6, 96, {[10] = 0xff, [11] = 0xff}},
+};
+
 int
 svr_tcp_egress_acl_decide(uint8_t family, const uint8_t addr[16],
                           const mqvpn_cidr_entry_t *allow, int n_allow,
@@ -122,8 +145,20 @@ svr_tcp_egress_acl_decide(uint8_t family, const uint8_t addr[16],
         if (mqvpn_cidr_match(&allow[i], family, addr)) return 1;
     }
 
-    for (size_t i = 0; i < sizeof(DEFAULT_DENY_V4) / sizeof(DEFAULT_DENY_V4[0]); i++) {
-        if (mqvpn_cidr_match(&DEFAULT_DENY_V4[i], family, addr)) return 0;
+    /* Select BOTH the array and its element count from the same family
+     * branch — never let one come from v4 and the other from v6, or a
+     * length mismatch over-reads past the shorter table. */
+    const mqvpn_cidr_entry_t *default_deny;
+    size_t n_default_deny;
+    if (family == 6) {
+        default_deny = DEFAULT_DENY_V6;
+        n_default_deny = sizeof(DEFAULT_DENY_V6) / sizeof(DEFAULT_DENY_V6[0]);
+    } else {
+        default_deny = DEFAULT_DENY_V4;
+        n_default_deny = sizeof(DEFAULT_DENY_V4) / sizeof(DEFAULT_DENY_V4[0]);
+    }
+    for (size_t i = 0; i < n_default_deny; i++) {
+        if (mqvpn_cidr_match(&default_deny[i], family, addr)) return 0;
     }
 
     for (int i = 0; i < n_deny; i++) {
