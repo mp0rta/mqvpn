@@ -414,15 +414,48 @@ test_parse_cidr(void)
     ASSERT_EQ_INT(mqvpn_parse_cidr("10.0.0.0/24", NULL), -1, "NULL out rejected");
 }
 
+/* v6 TCP is no longer forced to RAW (the v1 restriction is lifted): it gets
+ * the same enabled/tcp_mode/tunnel-subnet gates as v4 TCP, matched against
+ * client_tunnel_subnet[1] (the v6 entry) instead of [0]. */
 static void
-test_classify_v6_tcp_raw_v1(void)
+test_classify_v6_tcp_tunnel_subnet(void)
 {
-    uint8_t buf[64];
+    uint8_t buf[80];
     mqvpn_flow_key_t k;
-    size_t n = build_v6(buf, 6, 4444, 8080);
+    size_t n = build_v6(buf, 6, 4444, 8080); /* direct TCP, dst 2002:... */
     mqvpn_hybrid_config_t pol = make_pol(1, MQVPN_HYBRID_TCP_STREAM);
+
+    /* No v6 tunnel subnet learned (family 0 unset sentinel): gate off,
+     * verdict is TCP — this is the case the old v1 guard used to force to
+     * RAW unconditionally. */
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_TCP,
+                  "v6 tcp enabled+stream, no tunnel subnet -> tcp");
+    ASSERT_EQ_INT(k.ip_version, 6, "v6 tcp key version");
+    ASSERT_EQ_INT(k.proto, 6, "v6 tcp key proto");
+
+    /* client_tunnel_subnet[1] (v6) set to 2002::/16 — matches the packet's
+     * dst (2002:...) — must be RAW, mirroring the v4 tunnel-subnet
+     * carve-out (index 1 = v6, per mqvpn_hybrid_config_t's docstring). */
+    ASSERT_EQ_INT(mqvpn_parse_cidr("2002::/16", &pol.client_tunnel_subnet[1]), 0,
+                  "v6 tunnel subnet cidr parses");
     ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_RAW,
-                  "v6 tcp enabled+stream -> raw (v1)");
+                  "v6 tcp dst in tunnel subnet -> raw");
+
+    /* Outside the v6 subnet (dst 2003:...): unaffected -> TCP. */
+    buf[24] = 0x20;
+    buf[25] = 0x03;
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_TCP,
+                  "v6 tcp dst outside tunnel subnet -> tcp");
+
+    /* The v6 entry above must not cross-wire the v4 gate — v4 TCP keys off
+     * client_tunnel_subnet[0] only. */
+    mqvpn_hybrid_config_t pol_v4 = make_pol(1, MQVPN_HYBRID_TCP_STREAM);
+    ASSERT_EQ_INT(mqvpn_parse_cidr("2002::/16", &pol_v4.client_tunnel_subnet[1]), 0,
+                  "v6 tunnel subnet cidr parses (v4-unaffected check)");
+    uint8_t vbuf[64];
+    size_t vn = build_v4_tcp(vbuf, 2222, 80, 0); /* dst 10.0.0.2 */
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(vbuf, vn, &pol_v4, &k), MQVPN_LANE_TCP,
+                  "v4 tcp unaffected by v6 tunnel subnet entry");
 }
 
 static void
@@ -605,7 +638,7 @@ main(void)
     test_tunnel_subnet_learn_v6();
     test_cidr_match_family_strict();
     test_parse_cidr();
-    test_classify_v6_tcp_raw_v1();
+    test_classify_v6_tcp_tunnel_subnet();
     test_classify_fragments_and_other_raw();
     test_classify_malformed_raw();
     test_classify_null_out_key();

@@ -262,9 +262,10 @@ typedef struct {
      * from cfg_keys[]): the tunnel subnet this client's CONNECT-IP address
      * lives in, filled at ADDRESS_ASSIGN time (mqvpn_client.c, tunnel-
      * config-ready path). Index 0 = IPv4 (mqvpn_tunnel_subnet_learn), index
-     * 1 = IPv6 (mqvpn_tunnel_subnet_learn_v6). classify() forces IPv4 TCP
-     * destined INSIDE the v4 entry onto the RAW lane: the server's
-     * connect-tcp egress ACL denies the tunnel subnet unconditionally
+     * 1 = IPv6 (mqvpn_tunnel_subnet_learn_v6). classify() forces TCP
+     * destined INSIDE the matching-family entry (IPv4 against index 0, IPv6
+     * against index 1) onto the RAW lane: the server's connect-tcp egress
+     * ACL denies the tunnel subnet unconditionally
      * (before EgressAllow is even consulted — svr_tcp_egress_acl_decide), so
      * a TCP-lane flow to a tunnel-subnet destination can only ever end in a
      * RESET, while RAW keeps intra-VPN TCP working exactly as it did before
@@ -361,10 +362,10 @@ mqvpn_hybrid_config_sanitize(mqvpn_hybrid_config_t *cfg, const char **names,
 }
 
 /* Classify one inner IP packet from TUN. Fills *out_key (nullable) for
- * TCP/UDP verdicts. Rules: IPv4 fragment → RAW; IPv4 TCP → TCP lane iff
- * enabled && tcp_mode != RAW && dst outside client_tunnel_subnet (see the
- * field's docstring above); UDP → DGRAM; IPv6 TCP → RAW (v1);
- * ICMP/other/parse-fail → RAW. */
+ * TCP/UDP verdicts. Rules: fragment (v4 or v6) → RAW; IPv4/IPv6 TCP → TCP
+ * lane iff enabled && tcp_mode != RAW && dst outside the matching-family
+ * client_tunnel_subnet entry (see the field's docstring above); UDP →
+ * DGRAM; ICMP/other/parse-fail → RAW. */
 mqvpn_hybrid_lane_t mqvpn_hybrid_classify(const uint8_t *pkt, size_t len,
                                           const mqvpn_hybrid_config_t *pol,
                                           mqvpn_flow_key_t *out_key);
