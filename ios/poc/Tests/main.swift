@@ -11,7 +11,7 @@ check(ReorderSettings(enabled: false, profile: 4, ports: [443]).planReorder().ru
 let plan = ReorderSettings(enabled: true, profile: 4, ports: [443, 443, 0, 70000, 5401]).planReorder()
 check(plan.rules.map { $0.port } == [443, 5401], "dedupe + range filter")
 check(plan.rules.allSatisfy { $0.proto == 17 && $0.profile == 4 }, "proto=17 + profile passthrough")
-check(plan.warnings.contains { $0.contains("0") } && plan.warnings.contains { $0.contains("70000") },
+check(plan.warnings.contains { $0.contains(": 0") } && plan.warnings.contains { $0.contains("70000") },
       "out-of-range warnings")
 let many = ReorderSettings(enabled: true, profile: 3, ports: Array(1000..<1020)).planReorder()
 check(many.rules.count == 16 && many.warnings.contains { $0.contains("exceed 16") }, "cap at 16 + warning")
@@ -57,7 +57,7 @@ let full = TunnelSnapshot(timestamp: 2, clientState: 4, connectedSince: 1, footp
                                                         gapTimeout: 0, ackDemote: 0,
                                                         bufferedP50Ms: 1.5, bufferedP99Ms: 9.0))
 let rt = try! JSONDecoder().decode(TunnelSnapshot.self, from: try! JSONEncoder().encode(full))
-check(rt.seq == 7 && rt.reorderConfigured && rt.reorder?.delivered == 5, "new-wire round-trip")
+check(rt.seq == 7 && rt.reorderConfigured && rt.reorder == full.reorder, "new-wire round-trip")
 
 // saveGuard order
 check(saveGuard(isSaving: true, isEditable: false, hasManager: false) == .inProgress, "inProgress first")

@@ -8,7 +8,9 @@ set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 SHARED="$DIR/../Shared"
 APP="$DIR/../App"
-OUT="$(mktemp -d)/hosttests"
+TMPD="$(mktemp -d)"
+OUT="$TMPD/hosttests"
+trap 'rm -rf "$TMPD"' EXIT
 swiftc -o "$OUT" \
     "$SHARED/ReorderSettings.swift" \
     "$SHARED/ProviderMessage.swift" \

@@ -42,8 +42,10 @@ struct ReorderSettings: Equatable {
     }
 
     /// Validates on read. A malformed top-level dict yields nil (caller falls
-    /// back to `.disabled`). profile out of {3,4} clamps to 3; ports out of
-    /// range / wrong type are dropped.
+    /// back to `.disabled`). profile out of {3,4} clamps to 3. Within a valid
+    /// NSNumber ports array, out-of-range or bool-backed entries are dropped
+    /// per element; if the ports value is not a homogeneous NSNumber array, the
+    /// whole ports list is dropped.
     init?(providerConfiguration dict: [String: Any]?) {
         guard let dict else { return nil }
         var enabled = false
