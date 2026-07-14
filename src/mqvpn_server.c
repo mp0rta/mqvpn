@@ -2267,21 +2267,21 @@ mqvpn_server_scheduler_label(const mqvpn_server_t *s)
     return mqvpn_scheduler_label(s->config.scheduler);
 }
 
-/* xquic XQC_PATH_STATE_* values (xqc_multipath.h). Kept as switch on raw int
- * rather than the xquic enum so this TU does not need to include xquic
- * internal headers — values are part of the on-wire xquic stats contract.
- * The _Static_assert in derive_mp_state_label below pins the active value
- * we depend on; if any other value drifts, the labels here become wrong
- * silently and the catch is e2e-only. */
+/* xqc_path_state_t values (private xqc_multipath.h). Uses the mqvpn mirror
+ * constants rather than the xquic enum so this TU need not include xquic
+ * internal headers — the values are part of the xquic stats contract and
+ * are surfaced through the public control API. Every value is pinned to the
+ * real enum by tests/test_xquic_abi_pin.c, so an upstream renumber fails
+ * the build instead of silently mislabeling paths. */
 const char *
 mqvpn_path_state_label(int state)
 {
     switch (state) {
-    case 0: return "init";
-    case 1: return "validating";
-    case 2: return "active";
-    case 3: return "closing";
-    case 4: return "closed";
+    case MQVPN_XQC_PATH_STATE_INIT: return "init";
+    case MQVPN_XQC_PATH_STATE_VALIDATING: return "validating";
+    case MQVPN_XQC_PATH_STATE_ACTIVE: return "active";
+    case MQVPN_XQC_PATH_STATE_CLOSING: return "closing";
+    case MQVPN_XQC_PATH_STATE_CLOSED: return "closed";
     default: return "unknown";
     }
 }
@@ -2303,12 +2303,10 @@ mqvpn_path_state_label(int state)
 static const char *
 derive_mp_state_label(const xqc_conn_stats_t *st)
 {
-    /* Pin the xquic constants we depend on. XQC_PATH_STATE_ACTIVE = 2 lives
-     * in private xqc_multipath.h so we assert against the literal we use
-     * below; XQC_APP_PATH_STATUS_STANDBY is in the public xquic_typedef.h. */
-    _Static_assert(XQC_APP_PATH_STATUS_STANDBY == 1,
-                   "xquic XQC_APP_PATH_STATUS_STANDBY drifted from 1");
-
+    /* This function reads path_app_status via the public XQC_APP_PATH_STATUS_*
+     * symbols (below), so it does not depend on their numeric values. The
+     * path_state values it does depend on (via MQVPN_XQC_PATH_STATE_ACTIVE)
+     * are pinned in tests/test_xquic_abi_pin.c. */
     if (!st) return "unknown";
 
     int available = 0, standby = 0;
@@ -2316,10 +2314,10 @@ derive_mp_state_label(const xqc_conn_stats_t *st)
      * iterate by paths_info_count. paths_info may be NULL when count==0. */
     for (uint32_t i = 0; st->paths_info && i < st->paths_info_count; i++) {
         const xqc_path_metrics_t *p = &st->paths_info[i];
-        /* Only count paths in XQC_PATH_STATE_ACTIVE (=2); paths that are
-         * still validating, closing, or already closed should not influence
-         * the operator-facing label. */
-        if (p->path_state != 2) continue;
+        /* Only count ACTIVE paths; paths that are still validating,
+         * closing, or already closed should not influence the
+         * operator-facing label. */
+        if (p->path_state != MQVPN_XQC_PATH_STATE_ACTIVE) continue;
         /* FROZEN means xquic flushed the send buffer and stopped forwarding
          * on that path (xqc_set_application_path_status, xqc_multipath.c).
          * It cannot contribute to operational redundancy — neither as

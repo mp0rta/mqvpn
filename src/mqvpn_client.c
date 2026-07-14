@@ -403,7 +403,11 @@ path_fsm_fire_path_event(mqvpn_client_t *c, const path_entry_t *p)
 }
 
 /* G-P15 (draft-21 §3.3 ¶6): emit PATH_STATUS to peer when local lifecycle
- * demotes. app_status: 1=STANDBY, 2=AVAILABLE, 3=FROZEN (xqc_typedef.h).
+ * demotes. app_status is an internal relay code from g_p15_xqc_app_status_for
+ * (1=standby, 2=available, 3=frozen) that this switch decodes to the named
+ * xqc_conn_mark_path_* calls — the raw value is never handed to xquic, so it
+ * is NOT an xquic-ABI value dependency and needs no pin (unlike path_state).
+ * The mnemonic mirrors XQC_APP_PATH_STATUS_* but is not required to.
  * No-op if engine or conn is missing (e.g. during reconnect, or for
  * pre-handshake transitions); path-status will be re-asserted by the
  * caller when the conn is re-established and the lifecycle moves again. */
@@ -3279,10 +3283,10 @@ tick_drive_retry_timer(mqvpn_client_t *c, path_entry_t *p, int idx, uint64_t now
  * per-slot loop so the xqc_conn_get_stats result is shared across all
  * VALIDATING slots.
  *
- * Note on the literal `2`: XQC_PATH_STATE_ACTIVE lives in the private
- * xqc_multipath.h header and is not visible to library consumers. Server-side
- * also uses the literal with a comment cross-reference (no _Static_assert
- * exists — there is nothing public to assert against). */
+ * XQC_PATH_STATE_ACTIVE lives in the private xqc_multipath.h and is not
+ * visible to library consumers, so this uses the MQVPN_XQC_PATH_STATE_ACTIVE
+ * mirror; tests/test_xquic_abi_pin.c pins it (and the other path_state
+ * values) to the real enum. */
 static void
 tick_check_all_validations(mqvpn_client_t *c, uint64_t now)
 {
@@ -3310,9 +3314,9 @@ tick_check_all_validations(mqvpn_client_t *c, uint64_t now)
 
         const xqc_path_metrics_t *pm = xqc_find_path_metrics(&st, p->xqc_path_id);
         if (!pm) continue;
-        if (pm->path_state != 2) continue;
-        /* XQC_PATH_STATE_ACTIVE = 2 lives in private xqc_multipath.h;
-         * still validating below that. */
+        /* Skip paths not yet xquic-ACTIVE (still validating below). The
+         * value is pinned to xquic's enum by tests/test_xquic_abi_pin.c. */
+        if (pm->path_state != MQVPN_XQC_PATH_STATE_ACTIVE) continue;
 
         /* Branch on connection-scoped scheduler config — secondary paths
          * created under backup_fec are STANDBY (spec §10.1.1). Scheduler

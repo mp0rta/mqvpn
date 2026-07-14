@@ -802,6 +802,24 @@ if(BUILD_TESTING)
     set_target_properties(test_scheduler PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_scheduler COMMAND test_scheduler)
 
+    # xquic ABI pin — compile-time only. The one TU allowed to reach into
+    # xquic's private src/transport headers, so it can pin the numeric
+    # values libmqvpn hardcodes against the real private enum (see
+    # tests/test_xquic_abi_pin.c). No xquic link: the _Static_asserts need
+    # only declarations. The extra include dirs are the xquic source root
+    # (private "src/..."-style includes) and the public header dir.
+    add_executable(test_xquic_abi_pin tests/test_xquic_abi_pin.c)
+    target_include_directories(test_xquic_abi_pin PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/third_party/xquic ${XQUIC_INCLUDE_DIR})
+    # Pulling in xquic's private transport headers drags internal macros that
+    # are not warning-clean under mqvpn's strict/-Werror flags (e.g.
+    # xqc_str.h -Wunused-value). This TU has no logic of its own — the
+    # _Static_asserts are the whole test — so silence warnings for it only.
+    target_compile_options(test_xquic_abi_pin PRIVATE -w)
+    set_target_properties(test_xquic_abi_pin PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_xquic_abi_pin COMMAND test_xquic_abi_pin)
+
     add_executable(test_conn_settings tests/test_conn_settings.c)
     target_link_libraries(test_conn_settings mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
     target_include_directories(test_conn_settings PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
