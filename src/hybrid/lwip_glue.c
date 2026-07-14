@@ -77,11 +77,16 @@ sys_now(void)
 /* Pretend pseudo-netif (heiher/lwip convention): NETIF_FLAG_PRETEND + a
  * listener bound tcp_bind_netif-then-tcp_bind(pcb, NULL, 0) accepts SYNs
  * for ANY destination arriving on this netif. The netif STILL transmits
- * (SYN-ACK, ACKs, downlink data) — pretend != non-transmitting. */
+ * (SYN-ACK, ACKs, downlink data) — pretend != non-transmitting.
+ *
+ * Shared body for the v4 (netif->output) and v6 (netif->output_ip6) output
+ * callbacks below — lwIP gives the two a different pbuf-to-dest-address
+ * signature (ip4_addr_t* vs ip6_addr_t*), but neither wrapper actually reads
+ * its ipaddr argument (the pbuf already carries the dest in its own IP
+ * header), so there is nothing family-specific left to do once inside. */
 static err_t
-mqvpn_tcp_lane_netif_output(struct netif *netif, struct pbuf *p, const ip4_addr_t *ipaddr)
+mqvpn_tcp_lane_netif_emit(struct netif *netif, struct pbuf *p)
 {
-    (void)ipaddr; /* the pbuf already carries the dest in its IP header */
     mqvpn_lwip_ctx_t *ctx = (mqvpn_lwip_ctx_t *)netif->state;
     if (!ctx->output_fn) return ERR_OK; /* no sink configured — drop, don't crash */
 
@@ -97,6 +102,21 @@ mqvpn_tcp_lane_netif_output(struct netif *netif, struct pbuf *p, const ip4_addr_
 }
 
 static err_t
+mqvpn_tcp_lane_netif_output(struct netif *netif, struct pbuf *p, const ip4_addr_t *ipaddr)
+{
+    (void)ipaddr;
+    return mqvpn_tcp_lane_netif_emit(netif, p);
+}
+
+static err_t
+mqvpn_tcp_lane_netif_output_ip6(struct netif *netif, struct pbuf *p,
+                                const ip6_addr_t *ipaddr)
+{
+    (void)ipaddr;
+    return mqvpn_tcp_lane_netif_emit(netif, p);
+}
+
+static err_t
 mqvpn_tcp_lane_netif_init(struct netif *netif)
 {
     /* netif_add() zeroes mtu/flags/output right before calling this — the
@@ -104,8 +124,27 @@ mqvpn_tcp_lane_netif_init(struct netif *netif)
     mqvpn_lwip_ctx_t *ctx = (mqvpn_lwip_ctx_t *)netif->state;
     netif->name[0] = 'p';
     netif->name[1] = 'r';
-    netif->output = mqvpn_tcp_lane_netif_output; /* NOT NULL — see above */
-    netif->mtu = ctx->mtu; /* per-pcb MSS derives from this at accept time */
+    netif->output = mqvpn_tcp_lane_netif_output;         /* NOT NULL — see above */
+    netif->output_ip6 = mqvpn_tcp_lane_netif_output_ip6; /* v6 sibling; without
+                                                          * this override
+                                                          * netif_add() leaves
+                                                          * its own safe
+                                                          * netif_null_output_ip6
+                                                          * stub in place
+                                                          * (netif.c) — no
+                                                          * crash, but every
+                                                          * v6 SYN-ACK / RST /
+                                                          * downlink packet
+                                                          * silently vanishes
+                                                          * (ERR_IF, no-op) and
+                                                          * no v6 handshake can
+                                                          * ever complete */
+    netif->mtu = ctx->mtu; /* per-pcb MSS derives from this at accept time
+                            * (netif_add() also copies this into netif->mtu6
+                            * right after this callback returns, since
+                            * LWIP_ND6_ALLOW_RA_UPDATES defaults to 1 — v6
+                            * MSS derivation reuses the same value, no
+                            * separate mtu6 assignment needed here). */
     netif->flags |= NETIF_FLAG_PRETEND;
     return ERR_OK;
 }
@@ -172,7 +211,11 @@ mqvpn_lwip_ctx_new(mqvpn_lwip_clock_fn clock_fn, void *clock_ctx,
      * (tcp_in.c), no ip_route() involved. */
     netif_set_default(&ctx->netif);
 
-    ctx->listen_pcb = tcp_new_ip_type(IPADDR_TYPE_V4);
+    /* IPADDR_TYPE_ANY (not _V4): a same-family-only listener DROPS every
+     * SYN of the other family at tcp_input's pcb-match step (tcp_in.c) —
+     * dual-stack needs the ANY-type wildcard match on both local_ip type
+     * and address. */
+    ctx->listen_pcb = tcp_new_ip_type(IPADDR_TYPE_ANY);
     if (!ctx->listen_pcb) {
         LOG_ERR("lwip: tcp_new_ip_type failed (pcb pool exhausted?)");
         goto fail_netif;

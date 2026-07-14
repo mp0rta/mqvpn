@@ -999,8 +999,7 @@ test_accept_key_correspondence(void)
     ASSERT_EQ_INT(f->state, TCP_FLOW_PENDING_STREAM, "flow is PENDING_STREAM");
     ASSERT_TRUE(f->pcb == &pcb, "flow holds the pcb");
     ASSERT_EQ_INT(f->target_port, 80, "target_port from pcb local_port");
-    ASSERT_TRUE(ip4_addr_eq(&f->target_ip, ip_2_ip4(&pcb.local_ip)),
-                "target_ip from pcb local_ip");
+    ASSERT_TRUE(ip_addr_eq(&f->target_ip, &pcb.local_ip), "target_ip from pcb local_ip");
     ASSERT_EQ_INT(f->last_activity_us, 12345, "last_activity stamped via clock_fn");
 
     /* bind (mqvpn_client.c calls this after opening the H3 request). Task 9:
@@ -1122,9 +1121,299 @@ test_accept_key_correspondence(void)
      * tcp_abort → tcp_free (memp_free) it and corrupt lwIP's pools, so
      * detach it first. The abort loop itself needs a REAL pool pcb (full
      * checksummed handshake through lwip_ctx) to exercise — deliberately
-     * NOT faked here; covered by the e2e checkpoints. */
+     * NOT faked here; see test_accept_dual_stack_v6 below, which drives
+     * exactly that (v6 dual-stack case). */
     f->pcb = NULL;
     mqvpn_tcp_lane_free(lane);
+}
+
+/* Chunk 4: dual-stack lwIP listener (real end-to-end v6 handshake).
+ *
+ * Unlike test_accept_key_correspondence above (a fake stack pcb, called
+ * directly into mqvpn_tcp_lane_lwip_accept), this test drives a REAL v6 TCP
+ * 3-way handshake through mqvpn_lwip_input against a real mqvpn_lwip_ctx_t —
+ * the only way to actually exercise: (1) the dual-stack listener
+ * (tcp_new_ip_type(IPADDR_TYPE_ANY) in lwip_glue.c) — a v4-only listener
+ * DROPS a v6 SYN outright at tcp_input's pcb-match step, so a fake pcb can
+ * never catch that regression; (2) netif->output_ip6 actually being wired up
+ * — without it, netif_add()'s own safe netif_null_output_ip6 stub silently
+ * swallows the SYN-ACK (no crash, just ERR_IF/no-op — verified with gdb
+ * against a deliberately-reverted build), so no v6 handshake can ever
+ * complete; (3) a v6 pcb's effective MSS deriving from netif->mtu via
+ * tcp_eff_send_mss_netif. */
+
+/* RFC 1071 Internet checksum, accumulate-only (no fold/complement) so the
+ * pseudo-header and the segment can be summed in pieces before one fold at
+ * the end. */
+static uint32_t
+test_v6_chksum_add(const uint8_t *data, size_t len, uint32_t sum)
+{
+    size_t i = 0;
+    for (; i + 1 < len; i += 2) {
+        sum += (uint32_t)((data[i] << 8) | data[i + 1]);
+    }
+    if (i < len) {
+        sum += (uint32_t)(data[i] << 8);
+    }
+    return sum;
+}
+
+static uint16_t
+test_v6_chksum_fold(uint32_t sum)
+{
+    while (sum >> 16) {
+        sum = (sum & 0xFFFFu) + (sum >> 16);
+    }
+    uint16_t folded = (uint16_t)~sum;
+    return folded == 0 ? 0xFFFFu : folded;
+}
+
+/* IPv6 pseudo-header (RFC 8200 section 8.1: src + dst + 32-bit upper-layer
+ * length + 3 zero bytes + next header) plus the TCP segment itself — the
+ * ground truth a packet must satisfy to pass lwIP's ingress checksum wall
+ * (CHECKSUM_CHECK_TCP=1, unmodified in this test build). Deliberately
+ * independent of lwIP's own inet_chksum helpers. tcp_seg's checksum field
+ * must already be zeroed by the caller. */
+static uint16_t
+test_v6_tcp_chksum(const uint8_t src[16], const uint8_t dst[16], const uint8_t *tcp_seg,
+                   size_t tcp_len)
+{
+    uint32_t sum = 0;
+    sum = test_v6_chksum_add(src, 16, sum);
+    sum = test_v6_chksum_add(dst, 16, sum);
+    uint8_t hdr[8] = {
+        (uint8_t)(tcp_len >> 24),
+        (uint8_t)(tcp_len >> 16),
+        (uint8_t)(tcp_len >> 8),
+        (uint8_t)(tcp_len),
+        0,
+        0,
+        0,
+        MQVPN_IPPROTO_TCP,
+    };
+    sum = test_v6_chksum_add(hdr, sizeof(hdr), sum);
+    sum = test_v6_chksum_add(tcp_seg, tcp_len, sum);
+    return test_v6_chksum_fold(sum);
+}
+
+/* Direct v6 TCP SYN (base NH == TCP, no ext headers) carrying one MSS
+ * option that deliberately advertises MORE than the netif MTU can ever
+ * yield. tcp_parseopt (tcp_in.c) clamps it to the compile-time TCP_MSS
+ * ceiling first; tcp_eff_send_mss_netif then clamps THAT to netif->mtu —
+ * only the second clamp is what the MSS assertion below pins. 64 bytes: 40
+ * v6 header + 20 fixed TCP header + one 4-byte MSS option. */
+static size_t
+build_v6_syn(uint8_t *buf, const uint8_t src[16], const uint8_t dst[16], uint16_t sport,
+             uint16_t dport, uint32_t seq, uint16_t advertised_mss)
+{
+    memset(buf, 0, 64);
+    buf[0] = 0x60; /* version 6 */
+    buf[5] = 24;   /* payload length: TCP header (20) + MSS option (4) */
+    buf[6] = MQVPN_IPPROTO_TCP;
+    buf[7] = 64; /* hop limit */
+    memcpy(buf + 8, src, 16);
+    memcpy(buf + 24, dst, 16);
+
+    uint8_t *tcp = buf + 40;
+    tcp[0] = (uint8_t)(sport >> 8);
+    tcp[1] = (uint8_t)sport;
+    tcp[2] = (uint8_t)(dport >> 8);
+    tcp[3] = (uint8_t)dport;
+    tcp[4] = (uint8_t)(seq >> 24);
+    tcp[5] = (uint8_t)(seq >> 16);
+    tcp[6] = (uint8_t)(seq >> 8);
+    tcp[7] = (uint8_t)seq;
+    /* ack (bytes 8-11) left 0 — no ACK flag on a pure SYN */
+    tcp[12] = 0x60; /* data offset 6 words = 24 bytes (20 fixed + 4-byte option) */
+    tcp[13] = TCP_SYN;
+    tcp[14] = 0xFF; /* window 65535 */
+    tcp[15] = 0xFF;
+    /* checksum (16-17) filled below; urgent ptr (18-19) stays 0 */
+    tcp[20] = 2; /* MSS option kind */
+    tcp[21] = 4; /* MSS option length */
+    tcp[22] = (uint8_t)(advertised_mss >> 8);
+    tcp[23] = (uint8_t)(advertised_mss);
+
+    uint16_t csum = test_v6_tcp_chksum(src, dst, tcp, 24);
+    tcp[16] = (uint8_t)(csum >> 8);
+    tcp[17] = (uint8_t)csum;
+    return 64;
+}
+
+/* Direct v6 TCP segment with no options/data — used for the ACK that
+ * completes the 3-way handshake. 60 bytes: 40 v6 header + 20 TCP header. */
+static size_t
+build_v6_ack(uint8_t *buf, const uint8_t src[16], const uint8_t dst[16], uint16_t sport,
+             uint16_t dport, uint32_t seq, uint32_t ack)
+{
+    memset(buf, 0, 60);
+    buf[0] = 0x60;
+    buf[5] = 20;
+    buf[6] = MQVPN_IPPROTO_TCP;
+    buf[7] = 64;
+    memcpy(buf + 8, src, 16);
+    memcpy(buf + 24, dst, 16);
+
+    uint8_t *tcp = buf + 40;
+    tcp[0] = (uint8_t)(sport >> 8);
+    tcp[1] = (uint8_t)sport;
+    tcp[2] = (uint8_t)(dport >> 8);
+    tcp[3] = (uint8_t)dport;
+    tcp[4] = (uint8_t)(seq >> 24);
+    tcp[5] = (uint8_t)(seq >> 16);
+    tcp[6] = (uint8_t)(seq >> 8);
+    tcp[7] = (uint8_t)seq;
+    tcp[8] = (uint8_t)(ack >> 24);
+    tcp[9] = (uint8_t)(ack >> 16);
+    tcp[10] = (uint8_t)(ack >> 8);
+    tcp[11] = (uint8_t)ack;
+    tcp[12] = 0x50; /* data offset 5, no options */
+    tcp[13] = TCP_ACK;
+    tcp[14] = 0xFF;
+    tcp[15] = 0xFF;
+
+    uint16_t csum = test_v6_tcp_chksum(src, dst, tcp, 20);
+    tcp[16] = (uint8_t)(csum >> 8);
+    tcp[17] = (uint8_t)csum;
+    return 60;
+}
+
+/* Captures whatever mqvpn_tcp_lane_netif_output_ip6 emits — the SYN-ACK the
+ * dual-stack listener sends back, whose server ISN this test needs in
+ * order to build the completing ACK. */
+static uint8_t g_v6_out_buf[128];
+static size_t g_v6_out_len;
+
+static void
+test_v6_output_capture(const uint8_t *pkt, size_t len, void *ctx)
+{
+    (void)ctx;
+    if (len > sizeof(g_v6_out_buf)) len = sizeof(g_v6_out_buf);
+    memcpy(g_v6_out_buf, pkt, len);
+    g_v6_out_len = len;
+}
+
+static void
+test_accept_dual_stack_v6(void)
+{
+    relay_reset();
+
+    const uint8_t client_ip[16] = {0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+                                   0,    0,    0,    0,    0, 0, 0, 1};
+    const uint8_t server_ip[16] = {0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+                                   0,    0,    0,    0,    0, 0, 0, 2};
+    const uint16_t sport = 5555, dport = 443;
+    const uint32_t client_isn = 1000;
+
+    uint8_t syn[64];
+    size_t syn_len =
+        build_v6_syn(syn, client_ip, server_ip, sport, dport, client_isn, 9000);
+
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.enabled = 1;
+    cfg.tcp_mode = MQVPN_HYBRID_TCP_STREAM;
+
+    mqvpn_flow_key_t key;
+    memset(&key, 0, sizeof(key));
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(syn, syn_len, &cfg, &key), MQVPN_LANE_TCP,
+                  "v6 SYN classifies to the TCP lane");
+    ASSERT_EQ_INT(key.ip_version, 6, "classifier key is v6");
+
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xf6f6ULL, NULL, fake_clock, NULL);
+    ASSERT_TRUE(lane != NULL, "lane_new succeeds");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &key, 1, 0), 0, "v6 SYN-time commit");
+
+    /* mtu deliberately well below both the SYN's advertised MSS (9000,
+     * itself clamped to TCP_MSS=8960 by tcp_parseopt) — the only way the
+     * eventual effective MSS can come out below 8960 is if it derives from
+     * netif->mtu (tcp_eff_send_mss_netif), which is exactly what the
+     * assertion below pins. */
+    const int mtu = 1500;
+    g_v6_out_len = 0;
+    mqvpn_lwip_ctx_t *ctx =
+        mqvpn_lwip_ctx_new(fake_clock, NULL, test_v6_output_capture, NULL, mtu);
+    ASSERT_TRUE(ctx != NULL, "lwip ctx created");
+    mqvpn_lwip_ctx_set_accept_cb(ctx, mqvpn_tcp_lane_lwip_accept, lane);
+
+    g_open_stream_calls = 0;
+    g_open_stream_flow = NULL; /* else a pre-fix regression (accept never
+                                * fires) would leave this at whatever a
+                                * DIFFERENT, already-freed flow from an
+                                * earlier test last set it to — a dangling
+                                * pointer the guard below must not chase */
+    ASSERT_EQ_INT(mqvpn_lwip_input(ctx, syn, syn_len), 0,
+                  "dual-stack listener accepts the v6 SYN (not dropped)");
+    ASSERT_EQ_INT(g_open_stream_calls, 0,
+                  "accept callback does not fire on the SYN alone (3WHS not done)");
+    ASSERT_TRUE(g_v6_out_len >= 60, "a SYN-ACK was emitted via netif->output_ip6");
+    ASSERT_EQ_INT(g_v6_out_buf[6], MQVPN_IPPROTO_TCP, "captured reply is v6/TCP");
+    ASSERT_EQ_INT((int)g_v6_out_buf[40 + 13], (int)(TCP_SYN | TCP_ACK),
+                  "captured reply is a SYN-ACK");
+
+    uint32_t server_isn = ((uint32_t)g_v6_out_buf[44] << 24) |
+                          ((uint32_t)g_v6_out_buf[45] << 16) |
+                          ((uint32_t)g_v6_out_buf[46] << 8) | (uint32_t)g_v6_out_buf[47];
+
+    uint8_t ack[60];
+    size_t ack_len = build_v6_ack(ack, client_ip, server_ip, sport, dport, client_isn + 1,
+                                  server_isn + 1);
+    ASSERT_EQ_INT(mqvpn_lwip_input(ctx, ack, ack_len), 0, "completing ACK accepted");
+
+    ASSERT_EQ_INT(g_open_stream_calls, 1, "accept callback fired exactly once");
+    ASSERT_TRUE(mqvpn_flow_key_eq(&g_open_stream_key, &key),
+                "accept-rebuilt v6 key is byte-identical to the classifier key");
+    ASSERT_EQ_INT(g_open_stream_key.ip_version, 6, "accept-rebuilt key stayed v6");
+
+    mqvpn_tcp_flow_t *f = (mqvpn_tcp_flow_t *)g_open_stream_flow;
+    ASSERT_TRUE(f != NULL, "flow handle set");
+    if (f != NULL) {
+        /* Guarded: on a pre-fix regression (accept never fires) f stays
+         * NULL (reset above) and every f-> access below would either crash
+         * or chase a stale pointer — the ASSERT_TRUE above already reports
+         * the failure, nothing more to check. */
+        ASSERT_EQ_INT(f->state, TCP_FLOW_PENDING_STREAM, "flow is PENDING_STREAM");
+        ASSERT_TRUE(f->pcb != NULL, "flow holds a real accepted pcb");
+        if (f->pcb != NULL) {
+            ASSERT_TRUE(IP_IS_V6(&f->pcb->local_ip), "accepted pcb is v6");
+            ASSERT_EQ_INT(f->target_port, dport, "target_port from pcb local_port");
+            ASSERT_TRUE(ip_addr_eq(&f->target_ip, &f->pcb->local_ip),
+                        "target_ip mirrors pcb local_ip");
+            ASSERT_TRUE(memcmp(ip_2_ip6(&f->pcb->local_ip)->addr, server_ip, 16) == 0,
+                        "accepted pcb local_ip is the server address");
+            ASSERT_TRUE(memcmp(ip_2_ip6(&f->pcb->remote_ip)->addr, client_ip, 16) == 0,
+                        "accepted pcb remote_ip is the client address");
+
+            /* The MSS proof: mtu(1500) - IP6_HLEN(40) - TCP_HLEN(20) = 1440,
+             * well below both the SYN's advertised 9000 and the
+             * compile-time TCP_MSS ceiling (8960) — this exact value can
+             * only come from netif->mtu. */
+            ASSERT_EQ_INT(f->pcb->mss, mtu - 40 - 20,
+                          "v6 pcb effective MSS derives from netif->mtu, not the peer's "
+                          "advertised MSS or the compile-time TCP_MSS ceiling");
+
+            /* Real accepted pcb (genuine tcp_alloc, registered in
+             * tcp_active_pcbs) — unlike the fake-stack-pcb tests elsewhere
+             * in this file, this one MUST be torn down with the REAL lwIP
+             * tcp_abort: tcp_lane.c's abort macro is hooked to a no-op
+             * recorder in this TU (see the Task 12 hook comment near the
+             * top of this file), so mqvpn_tcp_lane_free would otherwise
+             * leave this pcb live in tcp_active_pcbs — a process-global
+             * list — corrupting every test that runs after this one.
+             *
+             * tcp_abort() -> tcp_abandon() (tcp.c) frees the pcb AND fires
+             * the registered tcp_err callback (mqvpn_tcp_lane_on_lwip_err,
+             * tcp_lane.c) before returning; that callback itself sets
+             * f->pcb = NULL and calls tcp_lane_remove_flow(), which frees f
+             * — mirrors test_lwip_err_teardown's direct-call version. So f
+             * is ALSO gone as of this call: touching f (or the now-stale
+             * real_pcb) afterward is a use-after-free (caught by ASan on
+             * the first draft of this test — do not reintroduce it). */
+            tcp_abort(f->pcb);
+        }
+    }
+    mqvpn_tcp_lane_free(lane);
+    mqvpn_lwip_ctx_free(ctx);
 }
 
 /* ─── Task 10: uplink relay (lwIP recv -> H3 send_body) ───
@@ -3327,6 +3616,16 @@ main(void)
     test_idle_eviction_pending_stream();
     test_idle_eviction_exact_boundary();
     test_idle_eviction_sweep_cadence_gate();
+
+    /* Called last deliberately: drives a real lwIP handshake (genuine
+     * tcp_alloc'd pcb, not a stack fake like every test above) and is
+     * guarded against a failed accept (see the f != NULL / f->pcb != NULL
+     * checks inside), but it is still the one test in this file touching
+     * process-global lwIP state (tcp_active_pcbs, the pcb pools) via a real
+     * pcb — keeping it last means every other test's pass/fail has already
+     * been reported (stderr is unbuffered) even in the unexpected event
+     * this one's cleanup can't run to completion. */
+    test_accept_dual_stack_v6();
 
     fprintf(stderr, "test_tcp_lane: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

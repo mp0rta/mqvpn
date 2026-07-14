@@ -51,11 +51,11 @@ mqvpn_lwip_ctx_t *mqvpn_lwip_ctx_new(mqvpn_lwip_clock_fn clock_fn, void *clock_c
  * netif. */
 void mqvpn_lwip_ctx_free(mqvpn_lwip_ctx_t *ctx);
 
-/* Feed one IPv4 TCP packet (already classified MQVPN_LANE_TCP) into the
- * netif, unmodified — no rewriting (the wildcard bind accepts SYNs for any
- * destination; the accepted pcb's local_ip/local_port ARE the original
- * dst). Returns 0 on success, <0 if pbuf alloc failed (caller drops the
- * packet). */
+/* Feed one IPv4 or IPv6 TCP packet (already classified MQVPN_LANE_TCP) into
+ * the netif, unmodified — no rewriting (the wildcard bind accepts SYNs for
+ * any destination, either family; the accepted pcb's local_ip/local_port
+ * ARE the original dst). Returns 0 on success, <0 if pbuf alloc failed
+ * (caller drops the packet). */
 int mqvpn_lwip_input(mqvpn_lwip_ctx_t *ctx, const uint8_t *pkt, size_t len);
 
 /* Register the accept callback + its arg on the glue-owned wildcard
