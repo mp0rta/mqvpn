@@ -21,6 +21,8 @@ final class MqvpnEngine: NSObject {
     private let runLoopReady = DispatchSemaphore(value: 0)
     private var runLoop: RunLoop!
     private var tickTimer: Timer?
+    private(set) var reorderConfigured = false
+    private var reorderStatsUnavailable = false
 
     // Injected by PacketTunnelProvider:
     var onTunOutput: ((Data) -> Void)?          // -> packetFlow.writePackets
@@ -29,7 +31,15 @@ final class MqvpnEngine: NSObject {
 
     /// Blocks until the client exists on the tick thread — callers may start
     /// PathBinder immediately after return without ordering assumptions.
-    func start(config: PoCConfig) {
+    func start(config: PoCConfig, reorder: ReorderSettings = .disabled) {
+        // Provenance-independent ABI guard: the linked libmqvpn.a and this
+        // extension must share the mqvpn_reorder_stats_t layout. On mismatch,
+        // disable the monitor (never read the struct); a debug build asserts.
+        if mqvpn_ext_reorder_layout_id() != mqvpn_reorder_stats_layout_id() {
+            reorderStatsUnavailable = true
+            log.error("[reorder] stats layout mismatch — monitor disabled")
+            assert(false, "reorder stats ABI layout mismatch (stale libmqvpn.a?)")
+        }
         tickThread = Thread { [weak self] in
             guard let self else { return }
             self.runLoop = RunLoop.current
@@ -45,7 +55,7 @@ final class MqvpnEngine: NSObject {
         tickThread.start()
         runLoopReady.wait()
         let ready = DispatchSemaphore(value: 0)
-        perform { self.setupClient(config); ready.signal() }
+        perform { self.setupClient(config, reorder: reorder); ready.signal() }
         ready.wait()
     }
 
@@ -72,12 +82,31 @@ final class MqvpnEngine: NSObject {
         tickThread.cancel()
     }
 
-    private func setupClient(_ config: PoCConfig) {
+    private func setupClient(_ config: PoCConfig, reorder: ReorderSettings) {
         let cfg = mqvpn_config_new()
         mqvpn_config_set_server(cfg, config.serverHost, Int32(config.serverPort))
         mqvpn_config_set_clock(cfg, mqvpn_ios_clock_us, nil)
         if !config.authKey.isEmpty { mqvpn_config_set_auth_key(cfg, config.authKey) }
         if config.tlsInsecure { mqvpn_config_set_insecure(cfg, 1) }
+        // Add rules FIRST, enable ONLY if >=1 landed. Never hand the core
+        // mode-ON-with-zero-rules (it reorders ALL UDP under a global default,
+        // ignoring the profile).
+        let plan = reorder.planReorder()
+        var results: [Bool] = []
+        for r in plan.rules {
+            let prof: mqvpn_reorder_profile_t =
+                (r.profile == ReorderSettings.profileFiberLTE) ? MQVPN_RPROF_FIBER_LTE
+                                                               : MQVPN_RPROF_CELLULAR_BOND
+            let rc = mqvpn_config_add_reorder_rule(cfg, UInt8(r.proto), UInt16(r.port), prof)
+            results.append(rc == 0)
+            if rc != 0 { log.error("[reorder] add rule port=\(r.port) rc=\(rc)") }
+        }
+        let decision = ReorderSettings.reorderEnableDecision(ruleResults: results)
+        if decision.enable {
+            _ = mqvpn_config_set_reorder_enabled(cfg, MQVPN_REORDER_ON)
+            reorderConfigured = true
+        }
+        log.notice("[reorder] applied rules=\(decision.added)/\(plan.rules.count) configured=\(self.reorderConfigured)")
         var cbs = mqvpn_client_callbacks_t()
         cbs.abi_version = UInt32(MQVPN_CALLBACKS_ABI_VERSION)
         cbs.struct_size = UInt32(MemoryLayout<mqvpn_client_callbacks_t>.size)
@@ -206,5 +235,20 @@ final class MqvpnEngine: NSObject {
         // duration of the call) — matches the C signature exactly.
         mqvpn_client_get_paths(c, &out, Int32(out.count), &n)
         return Array(out.prefix(Int(n)))
+    }
+
+    /// Tick-thread only. nil when the ABI layout check failed (never misread)
+    /// or the client is gone; else the current counters (get_reorder_stats
+    /// always succeeds, zero-filled if RX absent).
+    func reorderStats() -> ReorderStatsSnapshot? {
+        guard !reorderStatsUnavailable, let c = client else { return nil }
+        var st = mqvpn_reorder_stats_t()
+        guard mqvpn_client_get_reorder_stats(c, &st) == 0 else { return nil }
+        let p50 = mqvpn_reorder_latency_buffered_percentile(&st, 0.50)
+        let p99 = mqvpn_reorder_latency_buffered_percentile(&st, 0.99)
+        return ReorderStatsSnapshot(
+            delivered: st.delivered_count, gapCount: st.gap_count,
+            gapFilled: st.gap_filled_count, gapTimeout: st.gap_timeout_count,
+            ackDemote: st.ack_demote_count, bufferedP50Ms: p50, bufferedP99Ms: p99)
     }
 }
