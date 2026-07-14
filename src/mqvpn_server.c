@@ -1153,23 +1153,34 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
 }
 
 /* Egress ACL policy snapshot for src/hybrid/tcp_egress.c (connect-tcp
- * destination check). Declared in mqvpn_server_internal.h. The tunnel
- * subnet is derived from the SAME address pool CONNECT-IP address
- * assignment uses (s->pool) — addr_pool.c enforces prefix_len in [16,30]
- * at init time, so the mask/shift below never hits the n=0/n=32 edge cases
- * mqvpn_cidr_mask_from_prefix guards for arbitrary (config-supplied)
- * egress_allow/egress_deny entries. */
+ * destination check). Declared in mqvpn_server_internal.h. The v4 tunnel
+ * subnet (tunnels[0]) is derived from the SAME address pool CONNECT-IP
+ * address assignment uses (s->pool) — addr_pool.c enforces prefix_len in
+ * [16,30] at init time, so mqvpn_cidr_premask below never hits a
+ * pathological prefix from arbitrary (config-supplied) egress_allow/
+ * egress_deny entries. tunnels[1] (v6) is left unset (family 0) — Chunk 6
+ * fills it once has_v6 is threaded through. */
 void
 svr_get_egress_policy(const mqvpn_server_t *s, const mqvpn_cidr_entry_t **allow,
                       int *n_allow, const mqvpn_cidr_entry_t **deny, int *n_deny,
-                      uint32_t *tunnel_net, uint32_t *tunnel_mask)
+                      mqvpn_cidr_entry_t tunnels[2])
 {
     *allow = s->config.hybrid.egress_allow;
     *n_allow = s->config.hybrid.n_egress_allow;
     *deny = s->config.hybrid.egress_deny;
     *n_deny = s->config.hybrid.n_egress_deny;
-    *tunnel_mask = mqvpn_cidr_mask_from_prefix(s->pool.prefix_len);
-    *tunnel_net = ntohl(s->pool.base.s_addr) & *tunnel_mask;
+
+    memset(&tunnels[0], 0, sizeof(tunnels[0]));
+    tunnels[0].family = 4;
+    tunnels[0].prefix_len = (uint8_t)s->pool.prefix_len;
+    uint32_t net_hip = ntohl(s->pool.base.s_addr);
+    tunnels[0].net[0] = (uint8_t)(net_hip >> 24);
+    tunnels[0].net[1] = (uint8_t)(net_hip >> 16);
+    tunnels[0].net[2] = (uint8_t)(net_hip >> 8);
+    tunnels[0].net[3] = (uint8_t)(net_hip);
+    mqvpn_cidr_premask(tunnels[0].net, tunnels[0].prefix_len);
+
+    memset(&tunnels[1], 0, sizeof(tunnels[1])); /* v6: unset until Chunk 6 */
 }
 
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED

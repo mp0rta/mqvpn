@@ -1551,9 +1551,18 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
          * limitation) live on mqvpn_tunnel_subnet_learn and
          * client_tunnel_subnet in classifier.h. Deliberately OUTSIDE the
          * MQVPN_HYBRID_TCP_LANE_ENABLED block: lane-less builds still
-         * classify for counters and must report the same verdicts. */
+         * classify for counters and must report the same verdicts.
+         * client_tunnel_subnet[0] is v4 (always learned here); [1] is v6,
+         * learned only once an IPv6 address has actually been assigned —
+         * classify() doesn't consult it yet (v1: IPv6 TCP is always RAW),
+         * but learning it now means Chunk 6's classifier gate needs no
+         * further mqvpn_client.c wiring. */
         mqvpn_tunnel_subnet_learn(conn->assigned_ip, (int)conn->assigned_prefix,
-                                  &c->config.hybrid.client_tunnel_subnet);
+                                  &c->config.hybrid.client_tunnel_subnet[0]);
+        if (conn->addr6_assigned) {
+            mqvpn_tunnel_subnet_learn_v6(conn->assigned_ip6, (int)conn->assigned_prefix6,
+                                         &c->config.hybrid.client_tunnel_subnet[1]);
+        }
 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
         /* Sanitize the [Hybrid] block at its consumer, BEFORE the enabled

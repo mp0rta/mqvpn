@@ -1563,19 +1563,26 @@ test_hybrid_egress_acl_ini(void)
 
     ASSERT_EQ_INT(rc, 0, "egress acl ini load ok");
     ASSERT_EQ_INT(cfg.hybrid.n_egress_allow, 2, "2 egress_allow entries parsed");
-    ASSERT_EQ_INT((int)cfg.hybrid.egress_allow[0].net, (int)0x0A000000, "allow[0] net");
-    ASSERT_EQ_INT((int)cfg.hybrid.egress_allow[0].mask, (int)0xFF000000, "allow[0] mask");
-    ASSERT_EQ_INT((int)cfg.hybrid.egress_allow[1].net, (int)0xC0A80100, "allow[1] net");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[0].family, 4, "allow[0] family");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[0].prefix_len, 8, "allow[0] prefix_len");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[0].net[0], 10, "allow[0] net[0]");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[1].prefix_len, 24, "allow[1] prefix_len");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[1].net[0], 192, "allow[1] net[0]");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[1].net[1], 168, "allow[1] net[1]");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[1].net[2], 1, "allow[1] net[2]");
     ASSERT_EQ_INT(cfg.hybrid.n_egress_deny, 1, "1 egress_deny entry parsed");
-    ASSERT_EQ_INT((int)cfg.hybrid.egress_deny[0].net, (int)0xAC100500, "deny[0] net");
+    ASSERT_EQ_INT(cfg.hybrid.egress_deny[0].net[0], 172, "deny[0] net[0]");
+    ASSERT_EQ_INT(cfg.hybrid.egress_deny[0].net[1], 16, "deny[0] net[1]");
+    ASSERT_EQ_INT(cfg.hybrid.egress_deny[0].net[2], 5, "deny[0] net[2]");
     ASSERT_EQ_INT((int)cfg.hybrid.tcp_connect_timeout_sec, 20, "tcp_connect_timeout_sec");
     ASSERT_EQ_INT((int)cfg.hybrid.tcp_max_global_flows, 8192, "tcp_max_global_flows");
 
     /* Host bits in the address part are deliberately masked off (route-table
      * convention): "10.0.0.5/8" stores net 10.0.0.0, not 10.0.0.5. */
     mqvpn_cidr_entry_t e;
-    ASSERT_EQ_INT(mqvpn_parse_cidr_v4("10.0.0.5/8", &e), 0, "host-bits cidr parses");
-    ASSERT_EQ_INT((int)e.net, (int)0x0A000000, "host bits normalized off the net");
+    ASSERT_EQ_INT(mqvpn_parse_cidr("10.0.0.5/8", &e), 0, "host-bits cidr parses");
+    ASSERT_EQ_INT(e.net[0], 10, "host bits normalized off the net");
+    ASSERT_EQ_INT(e.net[3], 0, "host bits normalized off the net (last byte)");
 }
 
 static void
@@ -1594,8 +1601,7 @@ test_hybrid_egress_acl_ini_invalid_ignored(void)
 
     ASSERT_EQ_INT(rc, 0, "malformed egress acl entries don't abort load");
     ASSERT_EQ_INT(cfg.hybrid.n_egress_allow, 1, "only the valid entry parsed");
-    ASSERT_EQ_INT((int)cfg.hybrid.egress_allow[0].net, (int)0x0A000000,
-                  "valid entry kept");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[0].net[0], 10, "valid entry kept");
 }
 
 static void
@@ -1611,13 +1617,41 @@ test_hybrid_egress_acl_json(void)
                                                   "}}");
     ASSERT_EQ_INT(rc, 0, "egress acl json load ok");
     ASSERT_EQ_INT(cfg.hybrid.n_egress_allow, 1, "1 egress_allow entry parsed (json)");
-    ASSERT_EQ_INT((int)cfg.hybrid.egress_allow[0].net, (int)0x0A000000,
-                  "allow[0] net (json)");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[0].net[0], 10, "allow[0] net[0] (json)");
     ASSERT_EQ_INT(cfg.hybrid.n_egress_deny, 1, "1 egress_deny entry parsed (json)");
     ASSERT_EQ_INT((int)cfg.hybrid.tcp_connect_timeout_sec, 20,
                   "tcp_connect_timeout_sec (json)");
     ASSERT_EQ_INT((int)cfg.hybrid.tcp_max_global_flows, 8192,
                   "tcp_max_global_flows (json)");
+}
+
+/* [Hybrid] EgressAllow/EgressDeny is a hand-coded repeated key (config.c's
+ * SEC_HYBRID case), NOT a cfg_keys[] scalar descriptor row — so this is the
+ * only place a v6 entry needs its own parse-path test; there is no
+ * scalar-parity row to add alongside it (see the table refactor, PR #185). */
+static void
+test_hybrid_egress_acl_ini_v6(void)
+{
+    const char *ini = "[Hybrid]\n"
+                      "EgressAllow = fd00::/8\n"
+                      "EgressDeny = 2001:db8::/32\n";
+
+    char *p = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+
+    ASSERT_EQ_INT(rc, 0, "v6 egress acl ini load ok");
+    ASSERT_EQ_INT(cfg.hybrid.n_egress_allow, 1, "1 v6 egress_allow entry parsed");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[0].family, 6, "v6 allow[0] family");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[0].prefix_len, 8, "v6 allow[0] prefix_len");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[0].net[0], 0xfd, "v6 allow[0] net[0]");
+    ASSERT_EQ_INT(cfg.hybrid.n_egress_deny, 1, "1 v6 egress_deny entry parsed");
+    ASSERT_EQ_INT(cfg.hybrid.egress_deny[0].family, 6, "v6 deny[0] family");
+    ASSERT_EQ_INT(cfg.hybrid.egress_deny[0].prefix_len, 32, "v6 deny[0] prefix_len");
+    ASSERT_EQ_INT(cfg.hybrid.egress_deny[0].net[0], 0x20, "v6 deny[0] net[0]");
+    ASSERT_EQ_INT(cfg.hybrid.egress_deny[0].net[1], 0x01, "v6 deny[0] net[1]");
 }
 
 /* ── INI ↔ JSON scalar-key parity (pins the descriptor-table refactor) ──── */
@@ -1990,6 +2024,7 @@ main(void)
     test_hybrid_section_parse();
     test_hybrid_egress_acl_ini();
     test_hybrid_egress_acl_ini_invalid_ignored();
+    test_hybrid_egress_acl_ini_v6();
     test_hybrid_egress_acl_json();
 
     /* INI/JSON scalar-key parity */

@@ -110,8 +110,16 @@ int svr_tcp_egress_parse_path(const char *path, size_t path_len, char *out_host,
 
 /* Pure ACL decision core — no live mqvpn_server_t needed, so unit tests can
  * exercise the default-deny table and allow/deny precedence directly with
- * plain parsed inputs. All values host-byte-order; `allow`/`deny` may be
- * NULL when n_allow/n_deny are 0. Returns 1 = allowed, 0 = denied.
+ * plain parsed inputs. `addr` is network-byte-order, 16 bytes, v4 in [0..3]
+ * (same layout as mqvpn_flow_key_t / mqvpn_cidr_entry_t.net); `allow`/`deny`
+ * may be NULL when n_allow/n_deny are 0. `tunnel` must be a valid (non-NULL)
+ * pointer to a single entry — "no tunnel subnet configured" is expressed as
+ * family == 0 (the unset sentinel mqvpn_cidr_match already treats as a
+ * guaranteed non-match), not a NULL pointer. Returns 1 = allowed, 0 =
+ * denied. v1: only ever called with family == 4 — the built-in default-deny
+ * table below is IPv4-only (DEFAULT_DENY_V4); a v6 counterpart is future
+ * work, not a second signature change (mqvpn_cidr_match's own family gate
+ * already makes every v4 table entry a no-op against a v6 addr).
  *
  * Evaluation order (do not reorder without updating the docstring AND the
  * self-review note in the task that introduced this):
@@ -123,8 +131,9 @@ int svr_tcp_egress_parse_path(const char *path, size_t path_len, char *out_host,
  *   5. default allow — this is a general-purpose egress proxy, not a
  *      walled garden; only enumerated private/special ranges are blocked
  *      by default. */
-int svr_tcp_egress_acl_decide(uint32_t ip, const mqvpn_cidr_entry_t *allow, int n_allow,
+int svr_tcp_egress_acl_decide(uint8_t family, const uint8_t addr[16],
+                              const mqvpn_cidr_entry_t *allow, int n_allow,
                               const mqvpn_cidr_entry_t *deny, int n_deny,
-                              uint32_t tunnel_net, uint32_t tunnel_mask);
+                              const mqvpn_cidr_entry_t *tunnel);
 
 #endif /* MQVPN_HYBRID_TCP_EGRESS_H */

@@ -94,40 +94,40 @@ static const mqvpn_cidr_entry_t DEFAULT_DENY_V4[] = {
      * inet_pton accepts "0.0.0.0" and on Linux connect() to 0.0.0.0 reaches
      * localhost, so without this row a connect-tcp target of 0.0.0.0 would
      * bypass the loopback protection below. */
-    {0x00000000u, 0xFF000000u}, /* this-network 0.0.0.0/8 */
-    {0x7F000000u, 0xFF000000u}, /* loopback 127.0.0.0/8 */
-    {0x0A000000u, 0xFF000000u}, /* rfc1918 10.0.0.0/8 */
-    {0xAC100000u, 0xFFF00000u}, /* rfc1918 172.16.0.0/12 */
-    {0xC0A80000u, 0xFFFF0000u}, /* rfc1918 192.168.0.0/16 */
-    {0xA9FE0000u, 0xFFFF0000u}, /* link-local 169.254.0.0/16 */
-    {0x64400000u, 0xFFC00000u}, /* cgnat 100.64.0.0/10 */
-    {0xE0000000u, 0xF0000000u}, /* multicast 224.0.0.0/4 */
+    {4, 8, {0}},         /* this-network 0.0.0.0/8 */
+    {4, 8, {127}},       /* loopback 127.0.0.0/8 */
+    {4, 8, {10}},        /* rfc1918 10.0.0.0/8 */
+    {4, 12, {172, 16}},  /* rfc1918 172.16.0.0/12 */
+    {4, 16, {192, 168}}, /* rfc1918 192.168.0.0/16 */
+    {4, 16, {169, 254}}, /* link-local 169.254.0.0/16 */
+    {4, 10, {100, 64}},  /* cgnat 100.64.0.0/10 */
+    {4, 4, {224}},       /* multicast 224.0.0.0/4 */
     /* 240.0.0.0/4 reserved (RFC 1112 Class E), defense-in-depth. Subsumes
      * the broadcast /32 row below; keeping both is harmless (rows are
      * checked sequentially, first match denies) and keeps broadcast
      * explicitly documented rather than implied. */
-    {0xF0000000u, 0xF0000000u}, /* reserved 240.0.0.0/4 */
-    {0xFFFFFFFFu, 0xFFFFFFFFu}, /* broadcast 255.255.255.255/32 */
+    {4, 4, {240}},                 /* reserved 240.0.0.0/4 */
+    {4, 32, {255, 255, 255, 255}}, /* broadcast 255.255.255.255/32 */
 };
 
 int
-svr_tcp_egress_acl_decide(uint32_t ip, const mqvpn_cidr_entry_t *allow, int n_allow,
-                          const mqvpn_cidr_entry_t *deny, int n_deny, uint32_t tunnel_net,
-                          uint32_t tunnel_mask)
+svr_tcp_egress_acl_decide(uint8_t family, const uint8_t addr[16],
+                          const mqvpn_cidr_entry_t *allow, int n_allow,
+                          const mqvpn_cidr_entry_t *deny, int n_deny,
+                          const mqvpn_cidr_entry_t *tunnel)
 {
-    const mqvpn_cidr_entry_t tunnel = {.net = tunnel_net, .mask = tunnel_mask};
-    if (mqvpn_cidr_match(&tunnel, ip)) return 0;
+    if (mqvpn_cidr_match(tunnel, family, addr)) return 0;
 
     for (int i = 0; i < n_allow; i++) {
-        if (mqvpn_cidr_match(&allow[i], ip)) return 1;
+        if (mqvpn_cidr_match(&allow[i], family, addr)) return 1;
     }
 
     for (size_t i = 0; i < sizeof(DEFAULT_DENY_V4) / sizeof(DEFAULT_DENY_V4[0]); i++) {
-        if (mqvpn_cidr_match(&DEFAULT_DENY_V4[i], ip)) return 0;
+        if (mqvpn_cidr_match(&DEFAULT_DENY_V4[i], family, addr)) return 0;
     }
 
     for (int i = 0; i < n_deny; i++) {
-        if (mqvpn_cidr_match(&deny[i], ip)) return 0;
+        if (mqvpn_cidr_match(&deny[i], family, addr)) return 0;
     }
 
     return 1;
@@ -145,16 +145,19 @@ svr_tcp_egress_acl_allowed(mqvpn_server_t *server, const char *target_host,
     struct in_addr addr;
     if (inet_pton(AF_INET, target_host, &addr) != 1)
         return 0; /* unparseable target — reject closed, not open */
-    uint32_t ip = ntohl(addr.s_addr);
+
+    uint8_t addr_bytes[16];
+    memset(addr_bytes, 0, sizeof(addr_bytes));
+    memcpy(addr_bytes, &addr.s_addr, 4); /* s_addr is already network order */
+    const uint8_t family = 4;            /* v1: connect-tcp targets are IPv4-only */
 
     const mqvpn_cidr_entry_t *allow = NULL, *deny = NULL;
     int n_allow = 0, n_deny = 0;
-    uint32_t tunnel_net = 0, tunnel_mask = 0;
-    svr_get_egress_policy(server, &allow, &n_allow, &deny, &n_deny, &tunnel_net,
-                          &tunnel_mask);
+    mqvpn_cidr_entry_t tunnels[2]; /* [0]=v4, [1]=v6 (unfilled — Chunk 6) */
+    svr_get_egress_policy(server, &allow, &n_allow, &deny, &n_deny, tunnels);
 
-    return svr_tcp_egress_acl_decide(ip, allow, n_allow, deny, n_deny, tunnel_net,
-                                     tunnel_mask);
+    return svr_tcp_egress_acl_decide(family, addr_bytes, allow, n_allow, deny, n_deny,
+                                     &tunnels[family == 6 ? 1 : 0]);
 }
 
 /* svr_log-routed log macros — the only logging path this file has (see

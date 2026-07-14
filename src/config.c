@@ -840,11 +840,11 @@ json_read_cidr_array(mqvpn_cidr_entry_t *out, int max_items, int *n_items, const
     while (*p && *p != ']') {
         if (*p != '"') return -1;
 
-        char s[32];
+        char s[INET6_ADDRSTRLEN + 8];
         if (json_read_string(p, s, sizeof(s)) < 0) return -1;
 
         mqvpn_cidr_entry_t entry;
-        if (mqvpn_parse_cidr_v4(s, &entry) < 0) {
+        if (mqvpn_parse_cidr(s, &entry) < 0) {
             LOG_WRN("JSON: invalid hybrid egress CIDR '%s'; ignoring", s);
         } else if (n < max_items) {
             out[n++] = entry;
@@ -1065,7 +1065,7 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
         if (!is_allow && !is_deny) break;
 
         mqvpn_cidr_entry_t entry;
-        if (mqvpn_parse_cidr_v4(val, &entry) < 0) {
+        if (mqvpn_parse_cidr(val, &entry) < 0) {
             LOG_WRN("%s:%d: invalid [Hybrid] %s '%s'", path, lineno, key, val);
             return;
         }

@@ -103,8 +103,8 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     mqvpn_hybrid_config_default(&pol);
     pol.enabled = 1;
     pol.tcp_mode = MQVPN_HYBRID_TCP_STREAM;
-    /* client_tunnel_subnet stays mask==0 (unset sentinel) from the memset
-     * in mqvpn_hybrid_config_default — gate off, per classifier.h's
+    /* client_tunnel_subnet[] stays family==0 (unset sentinel) from the
+     * memset in mqvpn_hybrid_config_default — gate off, per classifier.h's
      * docstring; fine for fuzzing the parser/lane-selection surface. */
 
     mqvpn_flow_key_t key;

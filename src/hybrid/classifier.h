@@ -42,77 +42,140 @@ typedef enum {
  * a hot per-packet list, so a slightly larger ceiling costs nothing. */
 #define MQVPN_EGRESS_ACL_MAX 32
 
-/* One parsed IPv4 CIDR range, host-byte-order, net pre-masked (net = addr &
- * mask) so a match test is a single `(ip & mask) == net`. */
+/* One parsed CIDR range (v4 or v6), network-byte-order, net pre-masked
+ * (bits beyond prefix_len are zeroed) so a match test is a fixed bit-prefix
+ * compare against the SAME byte layout the flow key uses (mqvpn_flow_key_t's
+ * src_ip/dst_ip in reorder.h: v4 in [0..3], rest zero) — no host-order
+ * conversion needed at the classifier gate. family 0 is the "unset"
+ * sentinel (replaces the old mask==0 dual-use: a real 0.0.0.0/0 or ::/0 ACL
+ * row now has its own family+prefix_len==0 shape, distinct from "never
+ * learned"). */
 typedef struct {
-    uint32_t net;
-    uint32_t mask;
+    uint8_t family;     /* 4 or 6; 0 = unset sentinel */
+    uint8_t prefix_len; /* 0..32 (v4) or 0..128 (v6) */
+    uint8_t net[16];    /* network-order, pre-masked; v4 in [0..3], rest zero */
 } mqvpn_cidr_entry_t;
 
-/* Host-order /n mask, n clamped to [0,32]. n<=0 -> 0, n>=32 -> 0xFFFFFFFF —
- * both branches exist to avoid undefined behavior shifting a 32-bit value
- * by 32 (n=0 would otherwise require `~0u << 32`). */
-static inline uint32_t
-mqvpn_cidr_mask_from_prefix(int prefix_len)
+/* Zero any net[] bits beyond prefix_len (route-table convention: a
+ * caller-supplied host part, e.g. "10.1.2.3/8", is silently normalized the
+ * way route tables normally are). Shared by mqvpn_parse_cidr and
+ * mqvpn_tunnel_subnet_learn{,_v6} so the masking logic can't drift between
+ * them. prefix_len must already be validated into [0,128] by the caller. */
+static inline void
+mqvpn_cidr_premask(uint8_t net[16], int prefix_len)
 {
-    if (prefix_len <= 0) return 0u;
-    if (prefix_len >= 32) return 0xFFFFFFFFu;
-    return 0xFFFFFFFFu << (32 - prefix_len);
+    int full = prefix_len / 8;
+    int rem = prefix_len % 8;
+    if (rem) {
+        uint8_t m = (uint8_t)(0xFF << (8 - rem));
+        net[full] = (uint8_t)(net[full] & m);
+        full++;
+    }
+    for (int i = full; i < 16; i++)
+        net[i] = 0;
 }
 
 /* Single-site CIDR membership test, shared by the classifier's tunnel-
  * subnet gate and the server egress ACL's tunnel/allow/deny walks
- * (svr_tcp_egress_acl_decide). ip is host byte order, like
- * mqvpn_cidr_entry_t itself. NOTE: a mask==0 entry matches EVERY address
- * ((ip & 0) == 0) — deliberate for a parsed "0.0.0.0/0" ACL row, which
- * means match-all; a caller that uses mask==0 as an UNSET sentinel instead
- * (client_tunnel_subnet below) must gate on `mask != 0` BEFORE calling. */
+ * (svr_tcp_egress_acl_decide). addr is network byte order, 16 bytes, v4 in
+ * [0..3] — same layout as mqvpn_flow_key_t's src_ip/dst_ip, so callers never
+ * need a host-order round trip. A family mismatch (including the e->family
+ * == 0 unset sentinel) always misses; a real "match everything" row is
+ * family + prefix_len == 0 (e.g. a parsed "0.0.0.0/0"), NOT the unset
+ * sentinel — the two are no longer the same bit pattern, so no caller-side
+ * gate is needed on top of this function anymore. Precondition (same as
+ * mqvpn_cidr_premask): prefix_len is in [0,128]; every producer here
+ * (mqvpn_parse_cidr, mqvpn_tunnel_subnet_learn{,_v6}, svr_get_egress_policy)
+ * enforces it, but a prefix_len > 128 would drive full > 16 and over-read
+ * addr[]/net[], so a careless future caller is fenced off with an explicit
+ * guard rather than left to corrupt memory. */
 static inline int
-mqvpn_cidr_match(const mqvpn_cidr_entry_t *e, uint32_t host_order_ip)
+mqvpn_cidr_match(const mqvpn_cidr_entry_t *e, uint8_t family, const uint8_t addr[16])
 {
-    return (host_order_ip & e->mask) == e->net;
+    if (e->family == 0 || e->family != family) return 0;
+    if (e->prefix_len > 128) return 0; /* malformed entry: fail closed, no over-read */
+
+    int nbits = e->prefix_len;
+    int full = nbits / 8;
+    int rem = nbits % 8;
+    for (int i = 0; i < full; i++) {
+        if (addr[i] != e->net[i]) return 0;
+    }
+    if (rem) {
+        uint8_t m = (uint8_t)(0xFF << (8 - rem));
+        if ((addr[full] & m) != (e->net[full] & m)) return 0;
+    }
+    return 1;
 }
 
-/* Learn the client-side tunnel subnet from a CONNECT-IP ADDRESS_ASSIGN
+/* Learn the client-side IPv4 tunnel subnet from a CONNECT-IP ADDRESS_ASSIGN
  * (assigned address bytes as they appear on the wire, network order). The
  * server assigns a single /32 (this client's own address), not the pool
  * subnet, so a wire prefix narrower than /24 is widened to /24 — the SAME
  * assumption the client's server-IP derivation bakes in ("Server IP is .1
  * in same subnet", mqvpn_client.c) — while a /24-or-wider wire prefix is
- * honored as-is. A degenerate prefix <= 0 yields mask 0, the "not learned"
- * sentinel that keeps the classifier gate off (see client_tunnel_subnet's
- * docstring). Kept here rather than inline in mqvpn_client.c so the
- * widening rule is host-unit-testable: honoring the wire /32 verbatim
- * would still pass every classifier gate test yet silently break the
- * tunnel-subnet exclusion in deployment. */
+ * honored as-is. A degenerate prefix <= 0 leaves *out zeroed (family stays
+ * 0, the "not learned" sentinel that keeps the classifier gate off via
+ * mqvpn_cidr_match's own family check — no separate caller-side gate needed
+ * anymore). Kept here rather than inline in mqvpn_client.c so the widening
+ * rule is host-unit-testable: honoring the wire /32 verbatim would still
+ * pass every classifier gate test yet silently break the tunnel-subnet
+ * exclusion in deployment. */
 static inline void
 mqvpn_tunnel_subnet_learn(const uint8_t ip[4], int assigned_prefix,
                           mqvpn_cidr_entry_t *out)
 {
+    memset(out, 0, sizeof(*out));
+    if (assigned_prefix <= 0) return; /* family stays 0: not learned */
+
     int plen = assigned_prefix < 24 ? assigned_prefix : 24;
-    uint32_t mask = mqvpn_cidr_mask_from_prefix(plen);
-    uint32_t hip = ((uint32_t)ip[0] << 24) | ((uint32_t)ip[1] << 16) |
-                   ((uint32_t)ip[2] << 8) | (uint32_t)ip[3];
-    out->net = hip & mask;
-    out->mask = mask;
+    out->family = 4;
+    out->prefix_len = (uint8_t)plen;
+    out->net[0] = ip[0];
+    out->net[1] = ip[1];
+    out->net[2] = ip[2];
+    out->net[3] = ip[3];
+    mqvpn_cidr_premask(out->net, plen);
 }
 
-/* Parse strict "a.b.c.d/n" (n = 0..32) into *out, host-byte-order, network
- * pre-masked so a caller-supplied host part (e.g. "10.1.2.3/8") is quietly
- * normalized the way route tables normally are. No bare-address (implicit
- * /32) form, no surrounding whitespace tolerance. Returns 0 on success, -1
- * on malformed input — this header has no logging dependency on purpose
+/* IPv6 counterpart of mqvpn_tunnel_subnet_learn above. Unlike the v4 form,
+ * the assigned prefix is honored DIRECTLY (no >=24 widening) — that clamp
+ * exists only because the server's v4 pool always assigns a client its own
+ * /32 inside a /24-or-wider pool; the v6 ADDRESS_ASSIGN prefix is already
+ * the real tunnel-subnet prefix, nothing to widen. A degenerate prefix
+ * (<= 0 or > 128) leaves *out zeroed (family 0, unset sentinel). */
+static inline void
+mqvpn_tunnel_subnet_learn_v6(const uint8_t ip6[16], int assigned_prefix,
+                             mqvpn_cidr_entry_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (assigned_prefix <= 0 || assigned_prefix > 128) return;
+
+    out->family = 6;
+    out->prefix_len = (uint8_t)assigned_prefix;
+    memcpy(out->net, ip6, 16);
+    mqvpn_cidr_premask(out->net, assigned_prefix);
+}
+
+/* Parse "a.b.c.d/n" (n = 0..32) or "x:x::.../n" (n = 0..128) into *out,
+ * network-byte-order, net pre-masked so a caller-supplied host part (e.g.
+ * "10.1.2.3/8") is quietly normalized the way route tables normally are.
+ * Family is auto-detected by the presence of ':' in the address part
+ * (bare-address/implicit-prefix forms are not accepted for either family,
+ * and neither is surrounding whitespace). Returns 0 on success, -1 on
+ * malformed input — this header has no logging dependency on purpose
  * (config.h pulls it in), so callers decide how/whether to log a failure.
  * static inline for the same reason mqvpn_hybrid_config_default is: src/
  * config.c, src/mqvpn_config.c, and test binaries that skip mqvpn_lib all
  * need this, and an out-of-line definition would need a .c home in every
- * one of those link sets. */
+ * one of those link sets. buf is sized for the longest valid full-form v6
+ * literal ("xxxx:" x8 = 39 chars) plus the "/128" suffix and slack. */
 static inline int
-mqvpn_parse_cidr_v4(const char *s, mqvpn_cidr_entry_t *out)
+mqvpn_parse_cidr(const char *s, mqvpn_cidr_entry_t *out)
 {
     if (!s || !out) return -1;
 
-    char buf[32];
+    char buf[INET6_ADDRSTRLEN + 8];
     size_t len = strlen(s);
     if (len == 0 || len >= sizeof(buf)) return -1;
     memcpy(buf, s, len + 1);
@@ -121,18 +184,34 @@ mqvpn_parse_cidr_v4(const char *s, mqvpn_cidr_entry_t *out)
     if (!slash) return -1;
     *slash = '\0';
 
-    struct in_addr addr;
-    if (inet_pton(AF_INET, buf, &addr) != 1) return -1;
+    int is_v6 = strchr(buf, ':') != NULL;
+    int max_prefix = is_v6 ? 128 : 32;
+
+    uint8_t net[16];
+    memset(net, 0, sizeof(net));
+    if (is_v6) {
+        if (inet_pton(AF_INET6, buf, net) != 1) return -1;
+    } else {
+        struct in_addr addr;
+        if (inet_pton(AF_INET, buf, &addr) != 1) return -1;
+        uint32_t hip = ntohl(addr.s_addr);
+        net[0] = (uint8_t)(hip >> 24);
+        net[1] = (uint8_t)(hip >> 16);
+        net[2] = (uint8_t)(hip >> 8);
+        net[3] = (uint8_t)(hip);
+    }
 
     const char *prefix_str = slash + 1;
     if (!isdigit((unsigned char)*prefix_str)) return -1;
     char *end = NULL;
     long prefix = strtol(prefix_str, &end, 10);
-    if (*end != '\0' || prefix < 0 || prefix > 32) return -1;
+    if (*end != '\0' || prefix < 0 || prefix > max_prefix) return -1;
 
-    uint32_t mask = mqvpn_cidr_mask_from_prefix((int)prefix);
-    out->mask = mask;
-    out->net = ntohl(addr.s_addr) & mask;
+    mqvpn_cidr_premask(net, (int)prefix);
+
+    out->family = is_v6 ? 6 : 4;
+    out->prefix_len = (uint8_t)prefix;
+    memcpy(out->net, net, sizeof(net));
     return 0;
 }
 
@@ -182,17 +261,18 @@ typedef struct {
     /* Client-only, runtime-learned — NOT a config key (deliberately absent
      * from cfg_keys[]): the tunnel subnet this client's CONNECT-IP address
      * lives in, filled at ADDRESS_ASSIGN time (mqvpn_client.c, tunnel-
-     * config-ready path). classify() forces IPv4 TCP destined INSIDE this
-     * subnet onto the RAW lane: the server's connect-tcp egress ACL denies
-     * the tunnel subnet unconditionally (before EgressAllow is even
-     * consulted — svr_tcp_egress_acl_decide), so a TCP-lane flow to a
-     * tunnel-subnet destination can only ever end in a RESET, while RAW
-     * keeps intra-VPN TCP working exactly as it did before the lane
-     * existed. mask == 0 means "not learned" and disables the check (a /0
-     * tunnel subnet is meaningless, so 0 is a safe unset sentinel; the
-     * default memset covers it). Ignored by the server, mirroring how the
-     * egress ACL fields above are ignored by the client. */
-    mqvpn_cidr_entry_t client_tunnel_subnet;
+     * config-ready path). Index 0 = IPv4 (mqvpn_tunnel_subnet_learn), index
+     * 1 = IPv6 (mqvpn_tunnel_subnet_learn_v6). classify() forces IPv4 TCP
+     * destined INSIDE the v4 entry onto the RAW lane: the server's
+     * connect-tcp egress ACL denies the tunnel subnet unconditionally
+     * (before EgressAllow is even consulted — svr_tcp_egress_acl_decide), so
+     * a TCP-lane flow to a tunnel-subnet destination can only ever end in a
+     * RESET, while RAW keeps intra-VPN TCP working exactly as it did before
+     * the lane existed. An unfilled entry has family == 0 ("not learned",
+     * disables the check for that family — the default memset below covers
+     * both entries). Ignored by the server, mirroring how the egress ACL
+     * fields above are ignored by the client. */
+    mqvpn_cidr_entry_t client_tunnel_subnet[2];
 } mqvpn_hybrid_config_t;
 
 /* Default for tcp_max_global_flows above — also the fallback budget when
@@ -247,7 +327,7 @@ mqvpn_hybrid_config_validate(const mqvpn_hybrid_config_t *cfg)
  * reset; names[0..min(ret,max_names)-1] receives static string literals
  * (INI key spelling) so the caller can log one warn per field with
  * whatever logger it owns (this header has no logging dependency on
- * purpose — see mqvpn_parse_cidr_v4's note above). */
+ * purpose — see mqvpn_parse_cidr's note above). */
 static inline int
 mqvpn_hybrid_config_sanitize(mqvpn_hybrid_config_t *cfg, const char **names,
                              int max_names)

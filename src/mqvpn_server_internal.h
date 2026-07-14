@@ -59,13 +59,16 @@ int svr_auth_check(const mqvpn_server_t *s, const char *auth_token, size_t auth_
 
 /* Egress ACL policy snapshot for the connect-tcp destination check.
  * *allow and *deny point into the server's own config (valid for the server's
- * lifetime; caller must not free them). tunnel_net/tunnel_mask are host-
- * byte-order IPv4 network/mask derived from the SAME address pool
- * CONNECT-IP address assignment already uses — the pool is the single
- * source of truth for "what is the tunnel subnet". */
+ * lifetime; caller must not free them). tunnels[0] is the family-tagged v4
+ * tunnel-subnet entry derived from the SAME address pool CONNECT-IP address
+ * assignment already uses — the pool is the single source of truth for
+ * "what is the tunnel subnet". tunnels[1] is the v6 counterpart; left
+ * family == 0 (unset) until the has_v6 wiring lands (Chunk 6) — caller-owned
+ * storage, filled in place (not a pointer into server state, unlike
+ * allow/deny). */
 void svr_get_egress_policy(const mqvpn_server_t *s, const mqvpn_cidr_entry_t **allow,
                            int *n_allow, const mqvpn_cidr_entry_t **deny, int *n_deny,
-                           uint32_t *tunnel_net, uint32_t *tunnel_mask);
+                           mqvpn_cidr_entry_t tunnels[2]);
 
 /*
  * ---- connect()/relay boundary ----

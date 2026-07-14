@@ -2357,37 +2357,47 @@ TEST(non_tunnel_close_keeps_tunnel_established)
 
 /* ── ACL decision core (pure, no live mqvpn_server_t) ── */
 
-static uint32_t
-ipv4(unsigned a, unsigned b, unsigned c, unsigned d)
+/* Builds a 16-byte network-order address (v4 in [0..3], rest zero) — the
+ * same layout svr_tcp_egress_acl_decide's `addr` param and
+ * mqvpn_cidr_entry_t.net both use, so no host-order round trip is needed
+ * anywhere in these tests. */
+static void
+ipv4_addr(unsigned a, unsigned b, unsigned c, unsigned d, uint8_t out[16])
 {
-    return ((uint32_t)a << 24) | ((uint32_t)b << 16) | ((uint32_t)c << 8) | d;
+    memset(out, 0, 16);
+    out[0] = (uint8_t)a;
+    out[1] = (uint8_t)b;
+    out[2] = (uint8_t)c;
+    out[3] = (uint8_t)d;
 }
 
-/* TEST-NET-2 (RFC 5737), ipv4(198,51,100,0): a neutral stand-in tunnel
- * subnet that never overlaps the default-deny ranges or the public/
- * RFC1918 IPs used below — isolates each ACL branch under test from the
- * others. */
-#define NEUTRAL_TUNNEL_MASK 0xFFFFFF00u /* /24 */
+/* TEST-NET-2 (RFC 5737), 198.51.100.0/24: a neutral stand-in tunnel subnet
+ * that never overlaps the default-deny ranges or the public/RFC1918 IPs
+ * used below — isolates each ACL branch under test from the others. */
+static const mqvpn_cidr_entry_t NEUTRAL_TUNNEL = {4, 24, {198, 51, 100}};
 
 TEST(acl_blocks_rfc1918)
 {
-    int allowed = svr_tcp_egress_acl_decide(ipv4(10, 0, 0, 5), NULL, 0, NULL, 0,
-                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    uint8_t addr[16];
+    ipv4_addr(10, 0, 0, 5, addr);
+    int allowed = svr_tcp_egress_acl_decide(4, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL);
     ASSERT_EQ(allowed, 0);
 }
 
 TEST(acl_blocks_loopback)
 {
-    int allowed = svr_tcp_egress_acl_decide(ipv4(127, 0, 0, 1), NULL, 0, NULL, 0,
-                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    uint8_t addr[16];
+    ipv4_addr(127, 0, 0, 1, addr);
+    int allowed = svr_tcp_egress_acl_decide(4, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL);
     ASSERT_EQ(allowed, 0);
 }
 
 TEST(acl_allow_punches_hole)
 {
-    mqvpn_cidr_entry_t allow[1] = {{ipv4(10, 0, 0, 0), 0xFF000000u}};
-    int allowed = svr_tcp_egress_acl_decide(ipv4(10, 0, 0, 5), allow, 1, NULL, 0,
-                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    mqvpn_cidr_entry_t allow[1] = {{4, 8, {10}}};
+    uint8_t addr[16];
+    ipv4_addr(10, 0, 0, 5, addr);
+    int allowed = svr_tcp_egress_acl_decide(4, addr, allow, 1, NULL, 0, &NEUTRAL_TUNNEL);
     ASSERT_EQ(allowed, 1);
 }
 
@@ -2396,17 +2406,18 @@ TEST(acl_blocks_own_tunnel_subnet)
     /* TEST-NET-3 (RFC 5737) as the tunnel subnet this time — outside every
      * DEFAULT_DENY_V4 entry, so a deny here can only be the tunnel-subnet
      * check, not an incidental default-deny match. No egress_deny at all. */
-    uint32_t tunnel_net = ipv4(203, 0, 113, 0);
-    uint32_t tunnel_mask = 0xFFFFFF00u;
-    int allowed = svr_tcp_egress_acl_decide(ipv4(203, 0, 113, 5), NULL, 0, NULL, 0,
-                                            tunnel_net, tunnel_mask);
+    mqvpn_cidr_entry_t tunnel = {4, 24, {203, 0, 113}};
+    uint8_t addr[16];
+    ipv4_addr(203, 0, 113, 5, addr);
+    int allowed = svr_tcp_egress_acl_decide(4, addr, NULL, 0, NULL, 0, &tunnel);
     ASSERT_EQ(allowed, 0);
 }
 
 TEST(acl_default_allows_public_ip)
 {
-    int allowed = svr_tcp_egress_acl_decide(ipv4(8, 8, 8, 8), NULL, 0, NULL, 0,
-                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    uint8_t addr[16];
+    ipv4_addr(8, 8, 8, 8, addr);
+    int allowed = svr_tcp_egress_acl_decide(4, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL);
     ASSERT_EQ(allowed, 1);
 }
 
@@ -2415,15 +2426,17 @@ TEST(acl_blocks_this_network)
     /* 0.0.0.0 is not a dead address: Linux connect() to it reaches
      * localhost, so it must hit the 0.0.0.0/8 default-deny row or the
      * loopback protection is bypassable. */
-    int allowed = svr_tcp_egress_acl_decide(ipv4(0, 0, 0, 0), NULL, 0, NULL, 0,
-                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    uint8_t addr[16];
+    ipv4_addr(0, 0, 0, 0, addr);
+    int allowed = svr_tcp_egress_acl_decide(4, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL);
     ASSERT_EQ(allowed, 0);
 }
 
 TEST(acl_blocks_reserved_240)
 {
-    int allowed = svr_tcp_egress_acl_decide(ipv4(240, 0, 0, 1), NULL, 0, NULL, 0,
-                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    uint8_t addr[16];
+    ipv4_addr(240, 0, 0, 1, addr);
+    int allowed = svr_tcp_egress_acl_decide(4, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL);
     ASSERT_EQ(allowed, 0);
 }
 
@@ -2431,9 +2444,10 @@ TEST(acl_deny_blocks_public_ip)
 {
     /* egress_deny must be reachable past the default-deny table: a target
      * OUTSIDE every built-in range is denied only by the configured list. */
-    mqvpn_cidr_entry_t deny[1] = {{ipv4(8, 8, 8, 8), 0xFFFFFFFFu}};
-    int allowed = svr_tcp_egress_acl_decide(ipv4(8, 8, 8, 8), NULL, 0, deny, 1,
-                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    mqvpn_cidr_entry_t deny[1] = {{4, 32, {8, 8, 8, 8}}};
+    uint8_t addr[16];
+    ipv4_addr(8, 8, 8, 8, addr);
+    int allowed = svr_tcp_egress_acl_decide(4, addr, NULL, 0, deny, 1, &NEUTRAL_TUNNEL);
     ASSERT_EQ(allowed, 0);
 }
 
@@ -2442,10 +2456,11 @@ TEST(acl_allow_beats_deny)
     /* Precedence pin: the SAME range in both lists resolves to allowed,
      * because allow is checked before both the default-deny table and the
      * configured deny list (spec'd order — see acl_decide's docstring). */
-    mqvpn_cidr_entry_t allow[1] = {{ipv4(8, 8, 8, 8), 0xFFFFFFFFu}};
-    mqvpn_cidr_entry_t deny[1] = {{ipv4(8, 8, 8, 8), 0xFFFFFFFFu}};
-    int allowed = svr_tcp_egress_acl_decide(ipv4(8, 8, 8, 8), allow, 1, deny, 1,
-                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    mqvpn_cidr_entry_t allow[1] = {{4, 32, {8, 8, 8, 8}}};
+    mqvpn_cidr_entry_t deny[1] = {{4, 32, {8, 8, 8, 8}}};
+    uint8_t addr[16];
+    ipv4_addr(8, 8, 8, 8, addr);
+    int allowed = svr_tcp_egress_acl_decide(4, addr, allow, 1, deny, 1, &NEUTRAL_TUNNEL);
     ASSERT_EQ(allowed, 1);
 }
 
