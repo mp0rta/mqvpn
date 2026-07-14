@@ -44,6 +44,6 @@ check(ReorderSettings.reorderEnableDecision(ruleResults: [false, false]).enable 
 check(ReorderSettings.reorderEnableDecision(ruleResults: [false, true]) == (true, 1), "partial -> enabled, added=1")
 check(ReorderSettings.reorderEnableDecision(ruleResults: []).enable == false, "no rules -> disabled")
 
-// (snapshot + ingest/save tests appended by Tasks 3 and 7)
+// (snapshot decode + ingest/save assertions are appended when those Shared/App files land)
 
 if failures == 0 { print("host tests: ALL PASS") } else { print("host tests: \(failures) FAILURES"); exit(1) }
