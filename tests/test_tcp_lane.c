@@ -2614,7 +2614,7 @@ static void
 test_connect_path_format_v4(void)
 {
     mqvpn_flow_key_t k = mk_std_key(4000); /* dst 93.184.216.34:80, v4 */
-    char buf[80];
+    char buf[MQVPN_TCP_CONNECT_PATH_CAP];
     int n = mqvpn_tcp_lane_format_connect_path(buf, sizeof(buf), &k);
     ASSERT_TRUE(n > 0 && (size_t)n < sizeof(buf), "v4 path formats without truncation");
     ASSERT_TRUE(strcmp(buf, "/.well-known/mqvpn/tcp/93.184.216.34/80/") == 0,
@@ -2637,7 +2637,7 @@ test_connect_path_format_v4_pinned_literal(void)
     k.dst_ip[2] = 3;
     k.dst_ip[3] = 4;
 
-    char buf[80];
+    char buf[MQVPN_TCP_CONNECT_PATH_CAP];
     int n = mqvpn_tcp_lane_format_connect_path(buf, sizeof(buf), &k);
     ASSERT_TRUE(n > 0 && (size_t)n < sizeof(buf), "v4 path formats without truncation");
     ASSERT_TRUE(strcmp(buf, "/.well-known/mqvpn/tcp/1.2.3.4/443/") == 0,
@@ -2662,12 +2662,39 @@ test_connect_path_format_v6(void)
     k.dst_ip[3] = 0xb8;
     k.dst_ip[15] = 0x01;
 
-    char buf[80];
+    char buf[MQVPN_TCP_CONNECT_PATH_CAP];
     int n = mqvpn_tcp_lane_format_connect_path(buf, sizeof(buf), &k);
     ASSERT_TRUE(n > 0 && (size_t)n < sizeof(buf),
-                "v6 path (<=45-char literal) fits cap=80 without truncation");
+                "v6 path (<=45-char literal) fits cap without truncation");
     ASSERT_TRUE(strcmp(buf, "/.well-known/mqvpn/tcp/2001:db8::1/443/") == 0,
                 "v6 path uses raw colons, no brackets/percent-encoding");
+}
+
+/* Exercise the return value's actual purpose (truncation detection): every
+ * test above asserts the no-truncation case, so pin the snprintf convention
+ * the helper exists to expose — a too-small cap yields the FULL untruncated
+ * length (>= cap), never the truncated write's length. */
+static void
+test_connect_path_format_truncation(void)
+{
+    mqvpn_flow_key_t k;
+    memset(&k, 0, sizeof(k));
+    k.ip_version = 4;
+    k.proto = 6;
+    k.dst_port = 443;
+    k.dst_ip[0] = 1;
+    k.dst_ip[1] = 2;
+    k.dst_ip[2] = 3;
+    k.dst_ip[3] = 4;
+
+    /* Full path "/.well-known/mqvpn/tcp/1.2.3.4/443/" is 35 chars; a cap of
+     * 10 forces truncation. snprintf returns the length it WOULD have written
+     * (35), so the caller can detect the overflow via ret >= cap. */
+    char small[10];
+    int n = mqvpn_tcp_lane_format_connect_path(small, sizeof(small), &k);
+    ASSERT_EQ_INT(n, 35, "returns the full untruncated length, not the clamped one");
+    ASSERT_TRUE((size_t)n >= sizeof(small),
+                "ret >= cap is how a caller detects truncation");
 }
 
 /* ─── Task 12: close/error mapping + flow removal ───
@@ -3664,6 +3691,7 @@ main(void)
     test_connect_path_format_v4();
     test_connect_path_format_v4_pinned_literal();
     test_connect_path_format_v6();
+    test_connect_path_format_truncation();
     test_lwip_err_teardown();
     test_h3_closing_notify_teardown();
     test_abort_pending_real();

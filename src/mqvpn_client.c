@@ -1191,12 +1191,18 @@ cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_k
              c->config.server_port);
 
     /* Original inner destination — see mqvpn_tcp_lane_format_connect_path's
-     * doc comment (tcp_lane.h) for the key-field byte-order contract this
-     * relies on. 80, not 64: a v6 literal (<= INET6_ADDRSTRLEN-1 = 45 bytes)
-     * plus the "/.well-known/mqvpn/tcp/" prefix (23) and "/<port>/" suffix
-     * (<= 7) is ~75 — 64 would truncate. */
-    char path[80];
-    mqvpn_tcp_lane_format_connect_path(path, sizeof(path), key);
+     * doc comment (tcp_lane.h) for the key-field byte-order contract and the
+     * MQVPN_TCP_CONNECT_PATH_CAP worst-case sizing this relies on. A negative
+     * return is inet_ntop failure (path left unwritten) — reject via the same
+     * abort path the allocation failures above use, so the later strlen(path)
+     * never reads an uninitialized buffer. Dead today (AF_INET6 hardcoded,
+     * cap large enough) but guards a future refactor. */
+    char path[MQVPN_TCP_CONNECT_PATH_CAP];
+    if (mqvpn_tcp_lane_format_connect_path(path, sizeof(path), key) < 0) {
+        LOG_E(c, "connect-tcp: could not format request path");
+        xqc_h3_request_close(req); /* close notify frees stream */
+        return mqvpn_tcp_lane_abort_pending(flow_handle);
+    }
 
     char auth_value[300];
 

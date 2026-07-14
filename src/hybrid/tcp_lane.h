@@ -300,12 +300,28 @@ int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
           * EMPTY_FIN notify */
 #define MQVPN_TCP_LANE_H3_RECV_ERR (-2) /* fatal stream error */
 
+/* The connect-tcp request-target prefix. Byte-identical to the server-side
+ * TCP_EGRESS_PATH_PREFIX (tcp_egress.c), whose comment points back at this
+ * emitter; kept as separate local defines on each side deliberately (sharing
+ * one constant would need a common header for a single string — not worth the
+ * coupling). */
+#define MQVPN_TCP_CONNECT_PATH_PREFIX "/.well-known/mqvpn/tcp/"
+
+/* Worst-case connect-tcp :path buffer: 23 (prefix) + 45 (INET6_ADDRSTRLEN-1
+ * v6 literal) + 7 ("/" + 5-digit port + "/") + 1 (NUL) = 76, rounded to 80.
+ * Every buffer handed to mqvpn_tcp_lane_format_connect_path should use this so
+ * the sizing lives in one place next to the format string it must fit. */
+#define MQVPN_TCP_CONNECT_PATH_CAP 80
+
 /* connect-tcp :path formatter — extracted (Chunk 5) from the inline snprintf
  * that used to live directly in cli_tcp_lane_open_stream (mqvpn_client.c),
  * purely so it gets a unit-test seam: that function is static and this file's
  * test double stubs cli_tcp_lane_open_stream instead of linking the real one.
  * `static inline` like the SYN helpers above, so both mqvpn_client.c and
- * test_tcp_lane.c get it from this one header.
+ * test_tcp_lane.c get it from this one header. inet_ntop / AF_INET6 /
+ * INET6_ADDRSTRLEN come portably (the _WIN32-guarded winsock/arpa split) via
+ * the already-included hybrid/classifier.h — this file only adds <stdio.h>
+ * for snprintf, so a clean checkout resolves both without a bare arpa include.
  *
  * key->dst_ip holds v4 in [0..3] (raw network-order header bytes — direct
  * indexing prints correctly) and dst_port is host order (reorder.h key
@@ -330,11 +346,11 @@ mqvpn_tcp_lane_format_connect_path(char *out, size_t cap, const mqvpn_flow_key_t
         if (!inet_ntop(AF_INET6, key->dst_ip, ipbuf, sizeof(ipbuf))) {
             return -1;
         }
-        return snprintf(out, cap, "/.well-known/mqvpn/tcp/%s/%u/", ipbuf,
+        return snprintf(out, cap, MQVPN_TCP_CONNECT_PATH_PREFIX "%s/%u/", ipbuf,
                         (unsigned)key->dst_port);
     }
-    return snprintf(out, cap, "/.well-known/mqvpn/tcp/%u.%u.%u.%u/%u/", key->dst_ip[0],
-                    key->dst_ip[1], key->dst_ip[2], key->dst_ip[3],
+    return snprintf(out, cap, MQVPN_TCP_CONNECT_PATH_PREFIX "%u.%u.%u.%u/%u/",
+                    key->dst_ip[0], key->dst_ip[1], key->dst_ip[2], key->dst_ip[3],
                     (unsigned)key->dst_port);
 }
 
