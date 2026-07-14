@@ -1158,8 +1158,14 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
  * address assignment uses (s->pool) — addr_pool.c enforces prefix_len in
  * [16,30] at init time, so mqvpn_cidr_premask below never hits a
  * pathological prefix from arbitrary (config-supplied) egress_allow/
- * egress_deny entries. tunnels[1] (v6) is left unset (family 0) — Chunk 6
- * fills it once has_v6 is threaded through. */
+ * egress_deny entries. tunnels[1] (v6) mirrors tunnels[0] from s->pool.base6/
+ * prefix6, but ONLY when s->pool.has_v6 (i.e. Subnet6 was configured) —
+ * left at family == 0 (the unset sentinel) otherwise. This gate is
+ * load-bearing, not cosmetic: mqvpn_cidr_match ignores prefix_len when
+ * family == 0, but a same-shaped {family=6, prefix_len=0} would be
+ * indistinguishable from a real "::/0" entry and would match EVERY v6
+ * address, silently denying all v6 egress for any server that never
+ * configured Subnet6. */
 void
 svr_get_egress_policy(const mqvpn_server_t *s, const mqvpn_cidr_entry_t **allow,
                       int *n_allow, const mqvpn_cidr_entry_t **deny, int *n_deny,
@@ -1180,7 +1186,16 @@ svr_get_egress_policy(const mqvpn_server_t *s, const mqvpn_cidr_entry_t **allow,
     tunnels[0].net[3] = (uint8_t)(net_hip);
     mqvpn_cidr_premask(tunnels[0].net, tunnels[0].prefix_len);
 
-    memset(&tunnels[1], 0, sizeof(tunnels[1])); /* v6: unset until Chunk 6 */
+    memset(&tunnels[1], 0, sizeof(tunnels[1]));
+    if (s->pool.has_v6) {
+        tunnels[1].family = 6;
+        tunnels[1].prefix_len = (uint8_t)s->pool.prefix6;
+        memcpy(tunnels[1].net, s->pool.base6.s6_addr, 16);
+        mqvpn_cidr_premask(tunnels[1].net, tunnels[1].prefix_len);
+    }
+    /* else: family stays 0 (memset above) — the unset sentinel, NOT a
+     * {family=6, prefix_len=0} "match everything" shape. See the has_v6
+     * gate rationale in this function's docstring. */
 }
 
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED

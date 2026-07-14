@@ -62,10 +62,12 @@ int svr_auth_check(const mqvpn_server_t *s, const char *auth_token, size_t auth_
  * lifetime; caller must not free them). tunnels[0] is the family-tagged v4
  * tunnel-subnet entry derived from the SAME address pool CONNECT-IP address
  * assignment already uses — the pool is the single source of truth for
- * "what is the tunnel subnet". tunnels[1] is the v6 counterpart; left
- * family == 0 (unset) until the has_v6 wiring lands (Chunk 6) — caller-owned
- * storage, filled in place (not a pointer into server state, unlike
- * allow/deny). */
+ * "what is the tunnel subnet". tunnels[1] is the v6 counterpart, derived the
+ * same way from the pool's v6 half, but ONLY when pool.has_v6 (Subnet6
+ * configured) — otherwise left family == 0 (unset sentinel), NEVER a
+ * {family=6, prefix_len=0} shape (that would match every v6 address and
+ * deny all v6 egress by accident). caller-owned storage, filled in place
+ * (not a pointer into server state, unlike allow/deny). */
 void svr_get_egress_policy(const mqvpn_server_t *s, const mqvpn_cidr_entry_t **allow,
                            int *n_allow, const mqvpn_cidr_entry_t **deny, int *n_deny,
                            mqvpn_cidr_entry_t tunnels[2]);

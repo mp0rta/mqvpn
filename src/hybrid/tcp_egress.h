@@ -97,14 +97,19 @@ int svr_tcp_egress_errno_to_status(int err);
  * H3 :path bytes land here directly off the wire, so this is the highest-
  * value defensive-test surface in the file.
  *
- * Parses exactly "/.well-known/mqvpn/tcp/<ipv4>/<port>/" — byte-for-byte
- * the client's template (see mqvpn_client.c's connect-tcp request builder).
- * out_host must be at least 16 bytes (IPv4 dotted-quad + NUL); a host that
- * doesn't fit is rejected outright, never truncated. Returns 0 on success,
- * -1 on any malformed input (wrong prefix, missing/non-numeric/out-of-range
- * port, oversized host, empty input). Purely a format check — it does NOT
- * validate that out_host is a syntactically valid IPv4 address; that's
- * left to inet_pton() in the ACL check below. */
+ * Parses exactly "/.well-known/mqvpn/tcp/<ip>/<port>/" — byte-for-byte the
+ * client's template (see mqvpn_client.c's connect-tcp request builder). <ip>
+ * may be an IPv4 dotted-quad or a bare (no brackets) IPv6 literal — the
+ * host/port split here is purely textual (memchr on '/'), so a v6 literal's
+ * embedded colons never interfere with it. out_host must be at least
+ * INET6_ADDRSTRLEN bytes (46 — the longest textual IPv6 form, the
+ * "x:x:x:x:x:x:d.d.d.d" v4-mapped notation, is 45 chars + NUL) or a v4-only
+ * caller may still use 16; a host that doesn't fit is rejected outright,
+ * never truncated. Returns 0 on success, -1 on any malformed input (wrong
+ * prefix, missing/non-numeric/out-of-range port, oversized host, empty
+ * input). Purely a format check — it does NOT validate that out_host is a
+ * syntactically valid IPv4/IPv6 address; that's left to inet_pton() in the
+ * ACL check below. */
 int svr_tcp_egress_parse_path(const char *path, size_t path_len, char *out_host,
                               size_t out_host_cap, uint16_t *out_port);
 

@@ -1137,6 +1137,49 @@ TEST(mqvpn_tcp_acl_denied_gets_403)
     ASSERT_STREQ(status, "403");
 }
 
+TEST(mqvpn_tcp_v6_loopback_denied_gets_403)
+{
+    /* Task 6.2 wiring proof, live: a syntactically valid connect-tcp
+     * request with a BARE v6 literal target must be recognized (not
+     * rejected as an oversized/unparseable host — the old 16-byte
+     * target_host buffer made this a 400) and denied via
+     * svr_tcp_egress_acl_allowed's ':'-based family detection +
+     * DEFAULT_DENY_V6. No real network I/O: the ACL denies before
+     * start_connect ever runs, exactly like the v4 RFC1918 test above. */
+    char status[16] = {0};
+    int rc = run_dispatch_probe_with_path(
+        "mqvpn-tcp", 9, "/.well-known/mqvpn/tcp/::1/80/", NULL, status, sizeof(status));
+    ASSERT_EQ(rc, 0);
+    ASSERT_STREQ(status, "403");
+}
+
+/* Config hook for the v6 tunnel-subnet test below: the PUBLIC Subnet6
+ * setter, as a platform embedding libmqvpn would call it. */
+static void
+harness_cfg_subnet6(mqvpn_config_t *cfg)
+{
+    if (mqvpn_config_set_subnet6(cfg, "2001:db8:abcd::/112") != MQVPN_OK) {
+        printf("FAIL\n    mqvpn_config_set_subnet6 rejected valid input\n");
+        exit(1);
+    }
+}
+
+TEST(mqvpn_tcp_v6_tunnel_subnet_denied_gets_403)
+{
+    /* has_v6-gated tunnel-deny wiring, live: with Subnet6 configured, a v6
+     * egress target INSIDE that tunnel subnet must be denied — proving
+     * svr_get_egress_policy's has_v6 branch (not just acl_decide's tunnel
+     * parameter in isolation) is wired into the real request path, mirroring
+     * how mqvpn_tcp_acl_denied_gets_403 proves the v4 tunnel/ACL wiring. No
+     * real connect() happens: the ACL denies before start_connect runs. */
+    char status[16] = {0};
+    int rc = run_dispatch_probe_with_path("mqvpn-tcp", 9,
+                                          "/.well-known/mqvpn/tcp/2001:db8:abcd::5/80/",
+                                          harness_cfg_subnet6, status, sizeof(status));
+    ASSERT_EQ(rc, 0);
+    ASSERT_STREQ(status, "403");
+}
+
 /* Config hook for hybrid_disabled_gets_501 below: overrides harness_start's
  * default (Enabled=1, see its comment) back to false, matching the real
  * documented default (docs/control-api.md: "[Hybrid] Enabled" is a
@@ -2672,6 +2715,77 @@ TEST(acl_v6_ungated_prefix0_would_deny_all_regression)
     ASSERT_EQ(allowed, 0); /* demonstrates the bug this gate prevents */
 }
 
+/* ── svr_get_egress_policy — has_v6 gate (Task 6.2) ──
+ *
+ * Direct unit tests of the real function (not just a stand-in shape passed
+ * to acl_decide above): builds a genuine mqvpn_server_t via the public API
+ * and inspects tunnels[1] straight out of svr_get_egress_policy. No socket
+ * bind/start/live dispatch needed — this function only reads s->config and
+ * s->pool, both fully populated by mqvpn_server_new() alone. Available here
+ * because hybrid/tcp_egress.h already pulls in mqvpn_server_internal.h. */
+
+TEST(get_egress_policy_v6_tunnel_unset_without_subnet6)
+{
+    /* Subnet6 left unconfigured: tunnels[1] must stay family==0 (unset
+     * sentinel), NOT {family=6, prefix_len=0} — the exact shape the
+     * acl_v6_ungated_prefix0_would_deny_all_regression test above shows
+     * would silently deny ALL v6 egress. */
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    mqvpn_config_set_listen(cfg, "0.0.0.0", 443);
+    mqvpn_config_set_subnet(cfg, "10.0.0.0/24");
+    mqvpn_config_set_tls_cert(cfg, TEST_CERT_FILE, TEST_KEY_FILE);
+    mqvpn_config_set_log_level(cfg, MQVPN_LOG_ERROR);
+
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = counting_tun_output;
+    cbs.tunnel_config_ready = noop_tunnel_config_ready;
+    mqvpn_server_t *svr = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    ASSERT_EQ(svr != NULL, 1);
+
+    const mqvpn_cidr_entry_t *allow = NULL, *deny = NULL;
+    int n_allow = 0, n_deny = 0;
+    mqvpn_cidr_entry_t tunnels[2];
+    svr_get_egress_policy(svr, &allow, &n_allow, &deny, &n_deny, tunnels);
+
+    ASSERT_EQ(tunnels[1].family, 0);
+
+    mqvpn_server_destroy(svr);
+}
+
+TEST(get_egress_policy_v6_tunnel_set_when_subnet6_configured)
+{
+    /* Subnet6 configured: tunnels[1] must mirror the v6 pool, premasked. */
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    mqvpn_config_set_listen(cfg, "0.0.0.0", 443);
+    mqvpn_config_set_subnet(cfg, "10.0.0.0/24");
+    ASSERT_EQ(mqvpn_config_set_subnet6(cfg, "2001:db8:abcd::/112"), MQVPN_OK);
+    mqvpn_config_set_tls_cert(cfg, TEST_CERT_FILE, TEST_KEY_FILE);
+    mqvpn_config_set_log_level(cfg, MQVPN_LOG_ERROR);
+
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = counting_tun_output;
+    cbs.tunnel_config_ready = noop_tunnel_config_ready;
+    mqvpn_server_t *svr = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    ASSERT_EQ(svr != NULL, 1);
+
+    const mqvpn_cidr_entry_t *allow = NULL, *deny = NULL;
+    int n_allow = 0, n_deny = 0;
+    mqvpn_cidr_entry_t tunnels[2];
+    svr_get_egress_policy(svr, &allow, &n_allow, &deny, &n_deny, tunnels);
+
+    ASSERT_EQ(tunnels[1].family, 6);
+    ASSERT_EQ(tunnels[1].prefix_len, 112);
+
+    uint8_t expect_net[16];
+    ASSERT_EQ(inet_pton(AF_INET6, "2001:db8:abcd::", expect_net), 1);
+    mqvpn_cidr_premask(expect_net, 112);
+    ASSERT_EQ(memcmp(tunnels[1].net, expect_net, 16), 0);
+
+    mqvpn_server_destroy(svr);
+}
+
 /* ── svr_tcp_egress_parse_path — fully attacker-controlled H3 :path bytes ── */
 
 TEST(parse_path_accepts_valid)
@@ -2754,6 +2868,28 @@ TEST(parse_path_rejects_empty)
     ASSERT_EQ(rc == 0, 0);
 }
 
+TEST(parse_path_accepts_v6_literal_45_chars)
+{
+    /* Longest textual IPv6 form (the "x:x:x:x:x:x:d.d.d.d" v4-mapped
+     * notation) is exactly 45 chars — pins that an out_host_cap of
+     * INET6_ADDRSTRLEN (46) is enough, unlike the old 16-byte target_host
+     * that rejected every v6 literal outright (host_len >= out_host_cap).
+     * The host/port split itself needs no v6-specific logic: it's a plain
+     * memchr on '/', unaffected by embedded colons. */
+    const char *host_literal = "ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255";
+    ASSERT_EQ(strlen(host_literal), 45);
+
+    char path[128];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/%s/443/", host_literal);
+
+    char host[INET6_ADDRSTRLEN];
+    uint16_t port = 0;
+    int rc = svr_tcp_egress_parse_path(path, strlen(path), host, sizeof(host), &port);
+    ASSERT_EQ(rc, 0);
+    ASSERT_STREQ(host, host_literal);
+    ASSERT_EQ(port, 443);
+}
+
 int
 main(void)
 {
@@ -2762,6 +2898,8 @@ main(void)
     run_unrecognized_protocol_gets_501();
     run_mqvpn_tcp_bad_path_gets_400();
     run_mqvpn_tcp_acl_denied_gets_403();
+    run_mqvpn_tcp_v6_loopback_denied_gets_403();
+    run_mqvpn_tcp_v6_tunnel_subnet_denied_gets_403();
     run_hybrid_disabled_gets_501();
     run_mqvpn_tcp_acl_allow_hole_reaches_real_connect();
     run_mqvpn_tcp_connect_timeout_gets_504();
@@ -2804,6 +2942,8 @@ main(void)
     run_acl_v6_allow_beats_deny();
     run_acl_v6_tunnel_unset_allows_public_gua();
     run_acl_v6_ungated_prefix0_would_deny_all_regression();
+    run_get_egress_policy_v6_tunnel_unset_without_subnet6();
+    run_get_egress_policy_v6_tunnel_set_when_subnet6_configured();
     run_parse_path_accepts_valid();
     run_parse_path_rejects_oversized_host();
     run_parse_path_rejects_missing_port();
@@ -2811,6 +2951,7 @@ main(void)
     run_parse_path_rejects_trailing_bytes();
     run_parse_path_rejects_wrong_prefix();
     run_parse_path_rejects_empty();
+    run_parse_path_accepts_v6_literal_45_chars();
 
     printf("\n  %d/%d tests passed\n", g_tests_passed, g_tests_run);
     return (g_tests_passed == g_tests_run) ? 0 : 1;

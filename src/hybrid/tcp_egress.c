@@ -169,7 +169,12 @@ svr_tcp_egress_acl_decide(uint8_t family, const uint8_t addr[16],
 }
 
 /* server-bound wrapper: resolves the target string and the server's own
- * policy/tunnel-subnet, then defers to the pure decision core above. */
+ * policy/tunnel-subnet, then defers to the pure decision core above.
+ * Family is detected the same way mqvpn_parse_cidr does (classifier.h): a
+ * ':' anywhere in the string means IPv6 — a bare IPv4 dotted-quad never
+ * contains one, and svr_tcp_egress_parse_path never hands this function a
+ * bracketed literal (the client's template has no brackets either), so
+ * there's no "[::1]"-style ambiguity to resolve. */
 static int
 svr_tcp_egress_acl_allowed(mqvpn_server_t *server, const char *target_host,
                            uint16_t target_port)
@@ -177,18 +182,27 @@ svr_tcp_egress_acl_allowed(mqvpn_server_t *server, const char *target_host,
     (void)target_port; /* v1: host-only ACL — no port-scoped rules requested;
                         * don't add scope beyond what's asked. */
 
-    struct in_addr addr;
-    if (inet_pton(AF_INET, target_host, &addr) != 1)
-        return 0; /* unparseable target — reject closed, not open */
-
     uint8_t addr_bytes[16];
     memset(addr_bytes, 0, sizeof(addr_bytes));
-    memcpy(addr_bytes, &addr.s_addr, 4); /* s_addr is already network order */
-    const uint8_t family = 4;            /* v1: connect-tcp targets are IPv4-only */
+    uint8_t family;
+
+    if (strchr(target_host, ':')) {
+        struct in6_addr addr6;
+        if (inet_pton(AF_INET6, target_host, &addr6) != 1)
+            return 0; /* unparseable target — reject closed, not open */
+        memcpy(addr_bytes, addr6.s6_addr, 16);
+        family = 6;
+    } else {
+        struct in_addr addr4;
+        if (inet_pton(AF_INET, target_host, &addr4) != 1)
+            return 0; /* unparseable target — reject closed, not open */
+        memcpy(addr_bytes, &addr4.s_addr, 4); /* s_addr is already network order */
+        family = 4;
+    }
 
     const mqvpn_cidr_entry_t *allow = NULL, *deny = NULL;
     int n_allow = 0, n_deny = 0;
-    mqvpn_cidr_entry_t tunnels[2]; /* [0]=v4, [1]=v6 (unfilled — Chunk 6) */
+    mqvpn_cidr_entry_t tunnels[2]; /* [0]=v4, [1]=v6 (family=0 unless has_v6) */
     svr_get_egress_policy(server, &allow, &n_allow, &deny, &n_deny, tunnels);
 
     return svr_tcp_egress_acl_decide(family, addr_bytes, allow, n_allow, deny, n_deny,
@@ -500,14 +514,27 @@ static void
 svr_tcp_egress_on_idle_evict(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
                              uint32_t idle_timeout_sec)
 {
+    /* sockaddr_storage (was sockaddr_in): the egress fd may now be an
+     * AF_INET6 socket — getpeername's own on-wire shape doesn't change, only
+     * the buffer that has to hold it. The log wording below (marker text an
+     * e2e wait_for_log may grep on) is UNCHANGED; only the %s peer VALUE
+     * gains v6 capability. */
     char peer[64] = "?";
-    struct sockaddr_in sa;
+    struct sockaddr_storage sa;
     socklen_t sl = sizeof(sa);
-    if (getpeername(ef->fd, (struct sockaddr *)&sa, &sl) == 0 &&
-        sa.sin_family == AF_INET) {
-        char ip[INET_ADDRSTRLEN];
-        if (inet_ntop(AF_INET, &sa.sin_addr, ip, sizeof(ip)))
-            snprintf(peer, sizeof(peer), "%s:%u", ip, (unsigned)ntohs(sa.sin_port));
+    if (getpeername(ef->fd, (struct sockaddr *)&sa, &sl) == 0) {
+        if (sa.ss_family == AF_INET) {
+            struct sockaddr_in *sa4 = (struct sockaddr_in *)&sa;
+            char ip[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, &sa4->sin_addr, ip, sizeof(ip)))
+                snprintf(peer, sizeof(peer), "%s:%u", ip, (unsigned)ntohs(sa4->sin_port));
+        } else if (sa.ss_family == AF_INET6) {
+            struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *)&sa;
+            char ip[INET6_ADDRSTRLEN];
+            if (inet_ntop(AF_INET6, &sa6->sin6_addr, ip, sizeof(ip)))
+                snprintf(peer, sizeof(peer), "%s:%u", ip,
+                         (unsigned)ntohs(sa6->sin6_port));
+        }
     }
     if (ef->uplink_withheld) {
         TLOG_W(server,
@@ -892,21 +919,51 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
         return svr_tcp_egress_respond(h3_request, 503, 1);
     }
 
-    int fd = mqvpn_socket_tcp_nonblock_new(AF_INET);
+    /* Same ':'-based family detection as svr_tcp_egress_acl_allowed — see
+     * that function's docstring for why a bare (unbracketed) literal is
+     * unambiguous here. */
+    int is_v6 = strchr(target_host, ':') != NULL;
+    int fd = mqvpn_socket_tcp_nonblock_new(is_v6 ? AF_INET6 : AF_INET);
     if (fd < 0) {
         return svr_tcp_egress_respond(h3_request, 500, 1);
     }
 
-    struct sockaddr_in dst;
+    struct sockaddr_storage dst;
+    socklen_t dst_len;
     memset(&dst, 0, sizeof(dst));
-    dst.sin_family = AF_INET;
-    dst.sin_port = htons(target_port);
-    if (inet_pton(AF_INET, target_host, &dst.sin_addr) != 1) {
-        /* Unreachable in practice: svr_tcp_egress_acl_allowed already ran
-         * inet_pton on this exact string. Guarded anyway rather than
-         * trusting a cross-function invariant silently. */
-        close(fd);
-        return svr_tcp_egress_respond(h3_request, 500, 1);
+    if (is_v6) {
+        struct sockaddr_in6 *dst6 = (struct sockaddr_in6 *)&dst;
+        dst6->sin6_family = AF_INET6;
+        dst6->sin6_port = htons(target_port);
+        if (inet_pton(AF_INET6, target_host, &dst6->sin6_addr) != 1) {
+            /* Unreachable in practice: svr_tcp_egress_acl_allowed already
+             * ran inet_pton on this exact string. Guarded anyway rather
+             * than trusting a cross-function invariant silently. */
+            close(fd);
+            return svr_tcp_egress_respond(h3_request, 500, 1);
+        }
+        /* SECURITY-CRITICAL: without IPV6_V6ONLY, a connect() to a
+         * v4-mapped literal like "::ffff:127.0.0.1" reaches the v4 address
+         * 127.0.0.1 directly — bypassing every v4 DEFAULT_DENY_V4/tunnel-
+         * subnet check, since the ACL evaluated this target purely as v6
+         * (DEFAULT_DENY_V6's ::ffff:0:0/96 row denies the common case at
+         * the ACL layer too, but this setsockopt is the actual enforcement
+         * boundary — defense-in-depth, not redundant). Set BEFORE connect(). */
+        int v6only = 1;
+        setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+        dst_len = sizeof(*dst6);
+    } else {
+        struct sockaddr_in *dst4 = (struct sockaddr_in *)&dst;
+        dst4->sin_family = AF_INET;
+        dst4->sin_port = htons(target_port);
+        if (inet_pton(AF_INET, target_host, &dst4->sin_addr) != 1) {
+            /* Unreachable in practice: svr_tcp_egress_acl_allowed already
+             * ran inet_pton on this exact string. Guarded anyway rather
+             * than trusting a cross-function invariant silently. */
+            close(fd);
+            return svr_tcp_egress_respond(h3_request, 500, 1);
+        }
+        dst_len = sizeof(*dst4);
     }
 
     svr_tcp_egress_flow_t *ef = calloc(1, sizeof(*ef));
@@ -940,7 +997,7 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
     (*ctx.global_fd_count)++;
     (*ctx.flows_total_opened)++;
 
-    int r = connect(fd, (struct sockaddr *)&dst, sizeof(dst));
+    int r = connect(fd, (struct sockaddr *)&dst, dst_len);
     if (r == 0) {
         /* Rare: loopback/already-routed targets can complete synchronously. */
         svr_tcp_egress_on_connected(server, ef);
@@ -981,8 +1038,13 @@ svr_tcp_egress_on_request(mqvpn_server_t *server, void *stream,
      * only the identity check is optional, not the network-reachability
      * check. An open tunnel can already reach the same destinations via
      * RAW/DGRAM, so connect-tcp adds no new exposure, only a second
-     * protocol surface. */
-    char target_host[16];
+     * protocol surface.
+     *
+     * INET6_ADDRSTRLEN (46), not 16: the target may be a bare IPv6 literal
+     * now (the longest textual v6 form, the "x:x:x:x:x:x:d.d.d.d" v4-mapped
+     * notation, is 45 chars + NUL) — a 16-byte buffer would reject every
+     * v6 literal outright via parse_path's host_len >= out_host_cap guard. */
+    char target_host[INET6_ADDRSTRLEN];
     uint16_t target_port;
     if (svr_tcp_egress_parse_path(hdrs->path, hdrs->path_len, target_host,
                                   sizeof(target_host), &target_port) != 0) {
