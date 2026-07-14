@@ -363,9 +363,10 @@ mqvpn_hybrid_config_sanitize(mqvpn_hybrid_config_t *cfg, const char **names,
 
 /* Classify one inner IP packet from TUN. Fills *out_key (nullable) for
  * TCP/UDP verdicts. Rules: fragment (v4 or v6) → RAW; IPv4/IPv6 TCP → TCP
- * lane iff enabled && tcp_mode != RAW && dst outside the matching-family
- * client_tunnel_subnet entry (see the field's docstring above); UDP →
- * DGRAM; ICMP/other/parse-fail → RAW. */
+ * lane iff enabled && tcp_mode != RAW && (IPv6 only) the base Next Header
+ * is TCP (an ext-header-then-TCP packet is pre-accept-undeliverable in
+ * lwIP) && dst outside the matching-family client_tunnel_subnet entry (see
+ * the field's docstring above); UDP → DGRAM; ICMP/other/parse-fail → RAW. */
 mqvpn_hybrid_lane_t mqvpn_hybrid_classify(const uint8_t *pkt, size_t len,
                                           const mqvpn_hybrid_config_t *pol,
                                           mqvpn_flow_key_t *out_key);

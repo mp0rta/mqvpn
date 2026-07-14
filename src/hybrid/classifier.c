@@ -15,6 +15,16 @@ mqvpn_hybrid_classify(const uint8_t *pkt, size_t len, const mqvpn_hybrid_config_
     case MQVPN_L4_TCP:
         if (!pol || !pol->enabled || pol->tcp_mode == MQVPN_HYBRID_TCP_RAW)
             return MQVPN_LANE_RAW;
+        /* mqvpn_parse_l3l4 walks the v6 extension-header chain to reach
+         * TCP, so an MQVPN_L4_TCP verdict does not imply the packet's BASE
+         * Next Header (pkt offset 6) is TCP — an ext-header-then-TCP packet
+         * still verdicts TCP. lwIP's netif input only special-cases a
+         * handful of base-NH values, so anything else is pre-accept-
+         * dropped rather than delivered to the stream lane; route it RAW
+         * instead. Reading pkt[6] needs no separate length guard here:
+         * reaching this branch already required mqvpn_parse_l3l4's v6
+         * fixed-header check (len >= 40). */
+        if (key->ip_version == 6 && pkt[6] != MQVPN_IPPROTO_TCP) return MQVPN_LANE_RAW;
         /* Tunnel-subnet destinations stay RAW: the server-side connect-tcp
          * egress ACL rejects the tunnel subnet unconditionally (its check
          * precedes EgressAllow — svr_tcp_egress_acl_decide), so laning

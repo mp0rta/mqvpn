@@ -97,6 +97,32 @@ build_v6(uint8_t *buf, uint8_t next_header, uint16_t sport, uint16_t dport)
     return 60;
 }
 
+/* Build a v6 packet whose BASE Next Header (offset 6) is an extension header
+ * (Hop-by-Hop Options, hdr_ext_len=0 -> 8-byte ext header) with TCP reached
+ * through it. mqvpn_parse_l3l4 walks the chain and still verdicts this
+ * MQVPN_L4_TCP, but the base NH isn't TCP — used to test the base-NH==TCP
+ * gate (lwIP's netif input path pre-accept-drops anything it can't strip
+ * inline, orphaning a would-be PENDING_ACCEPT slot). */
+static size_t
+build_v6_ext_then_tcp(uint8_t *buf, uint16_t sport, uint16_t dport)
+{
+    memset(buf, 0, 68);
+    buf[0] = 0x60; /* version 6 */
+    buf[6] = 0;    /* base NH = Hop-by-Hop Options */
+    buf[8] = 0x20;
+    buf[9] = 0x01; /* src 2001:... */
+    buf[24] = 0x20;
+    buf[25] = 0x02; /* dst 2002:... */
+    buf[40] = 6;    /* ext header's own next header = TCP */
+    buf[41] = 0;    /* hdr_ext_len = 0 -> 8-byte ext header */
+    buf[48] = (uint8_t)(sport >> 8);
+    buf[49] = (uint8_t)(sport);
+    buf[50] = (uint8_t)(dport >> 8);
+    buf[51] = (uint8_t)(dport);
+    buf[60] = 0x50; /* TCP data offset = 5, harmless */
+    return 68;      /* 40 (v6 fixed hdr) + 8 (ext hdr) + 20 (TCP hdr) */
+}
+
 static mqvpn_hybrid_config_t
 make_pol(int enabled, mqvpn_hybrid_tcp_mode_t mode)
 {
@@ -458,6 +484,28 @@ test_classify_v6_tcp_tunnel_subnet(void)
                   "v4 tcp unaffected by v6 tunnel subnet entry");
 }
 
+/* base-NH==TCP gate (spec §3.C): mqvpn_parse_l3l4 walks the v6 ext-header
+ * chain to reach TCP, so MQVPN_L4_TCP alone doesn't mean lwIP can actually
+ * PRE-ACCEPT the flow — only a direct (no ext headers) TCP packet can. */
+static void
+test_classify_v6_tcp_base_nh_gate(void)
+{
+    uint8_t buf[80];
+    mqvpn_flow_key_t k;
+    mqvpn_hybrid_config_t pol = make_pol(1, MQVPN_HYBRID_TCP_STREAM);
+
+    /* Base NH = Hop-by-Hop (0), TCP reached via the ext header chain -> RAW,
+     * even though mqvpn_parse_l3l4 verdicts MQVPN_L4_TCP. */
+    size_t n = build_v6_ext_then_tcp(buf, 4444, 8080);
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_RAW,
+                  "v6 tcp via ext header (base NH != TCP) -> raw");
+
+    /* Direct v6 TCP (base NH == TCP, no ext headers) is unaffected -> TCP. */
+    n = build_v6(buf, 6, 4444, 8080);
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_TCP,
+                  "v6 tcp base NH == TCP -> tcp");
+}
+
 static void
 test_classify_fragments_and_other_raw(void)
 {
@@ -639,6 +687,7 @@ main(void)
     test_cidr_match_family_strict();
     test_parse_cidr();
     test_classify_v6_tcp_tunnel_subnet();
+    test_classify_v6_tcp_base_nh_gate();
     test_classify_fragments_and_other_raw();
     test_classify_malformed_raw();
     test_classify_null_out_key();
