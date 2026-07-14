@@ -18,13 +18,21 @@
 /* ─── Constants ─── */
 /* MQVPN_MAX_PATHS and MQVPN_MAX_USERS are defined in libmqvpn.h */
 
-/* Mirror of xquic's private XQC_PATH_STATE_ACTIVE (third_party/xquic/
+/* Mirror of xquic's private xqc_path_state_t (third_party/xquic/
  * src/transport/xqc_multipath.h). The library links shared xquic and sees
- * only its public header, which exposes xqc_path_metrics_t.path_state as a
- * bare uint8_t, so the enum symbol is not visible here. Use this named
- * constant instead of a bare literal; its value is pinned to the real enum
- * at compile time by tests/test_xquic_abi_pin.c. */
-#define MQVPN_XQC_PATH_STATE_ACTIVE 2
+ * only its public header, which types xqc_path_metrics_t.path_state as a
+ * bare uint8_t, so the enum symbols are not visible here. mqvpn depends on
+ * these values by number: the validation poll / mp-state label test ACTIVE,
+ * mqvpn_path_state_label() maps all five, and the raw value is surfaced
+ * through the public control API (mqvpn_path_stat_t.state). Use these named
+ * constants instead of bare literals; every value is pinned to the real
+ * enum at compile time by tests/test_xquic_abi_pin.c, so an upstream
+ * renumber fails the build instead of silently mislabeling paths. */
+#define MQVPN_XQC_PATH_STATE_INIT       0
+#define MQVPN_XQC_PATH_STATE_VALIDATING 1
+#define MQVPN_XQC_PATH_STATE_ACTIVE     2
+#define MQVPN_XQC_PATH_STATE_CLOSING    3
+#define MQVPN_XQC_PATH_STATE_CLOSED     4
 
 /* Server "auto" TUN MTU.  The true MASQUE datagram MSS is per-connection
  * (peer TPs, CID length, FEC headroom, PMTUD) and unknowable at server
