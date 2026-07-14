@@ -114,6 +114,26 @@
 #       an established flow's byte count instead of raising a clean error,
 #       since lwIP has no pcb for a non-SYN packet on a 5-tuple it never saw
 #       the SYN for).
+#   Test 8 (IPv6 TCP lane, aggregation + failover): same Tcp=stream policy as
+#     Test 2 Phase B / Test 3, but driving INNER IPv6 TCP instead of IPv4 —
+#     the first end-to-end exercise of the family-aware SYN/ISN parser, the
+#     client's v6 literal connect-tcp request builder, and the server's v6
+#     egress ACL (DEFAULT_DENY_V6 + IPV6_V6ONLY) against a live two-path
+#     multipath tunnel, not just unit/host coverage. A short iperf3 -6 burst
+#     is measured against the SAME per-path load-share floor Test 3 uses
+#     (both paths must carry real load, lighter path >=20% of the heavier —
+#     the direct proof against a scheduler that pinned traffic on one path).
+#     A separate long-lived v6 TCP-lane flow then proves failover: path 0's
+#     client-side link is dropped mid-flow and the flow must keep making
+#     progress on the surviving path, the same technique
+#     scripts/ci_e2e/run_ipv6_multipath_test.sh's Test 4 uses for a plain v6
+#     ping, applied here to a real TCP-lane flow. This phase runs ONLY v6
+#     traffic (no concurrent v4 flow), which is what makes the EXISTING
+#     family-blind counters — the client's "lanes tcp/dgram/raw=" /
+#     "flows act/tot/rej=" [STATUS] markers and the server's control-API
+#     tcp_flows_active/tcp_flows_total — unambiguous proof of v6 TCP-lane
+#     use without adding a single new counter field (mqvpn_stats_t has no
+#     v4/v6 split, and adding one would force a SOVERSION bump).
 #
 # HTTP target addressing (Test 1): the client runs a full-tunnel default
 # route (0.0.0.0/1 + 128.0.0.0/1 via TUN, src/platform/linux/routing.c) with
@@ -129,6 +149,16 @@
 # alias in the server netns (10.222.0.1, disjoint from every subnet above)
 # satisfies all four; EgressAllow punches it through the mandatory
 # default-on RFC1918 deny (src/hybrid/tcp_egress.c DEFAULT_DENY_V4).
+#
+# IPv6 egress target addressing (Test 8): the same shape as the v4 note
+# above, translated to v6. The tunnel subnet's own family-aware ACL check
+# denies any v6 egress target inside it unconditionally (before EgressAllow
+# is even consulted), so the target must be outside Subnet6's range; a ULA
+# (fc00::/7) address is entirely inside DEFAULT_DENY_V6's default-deny set
+# (src/hybrid/tcp_egress.c), so — again mirroring the v4 RFC1918 case — it
+# needs an explicit EgressAllow to punch through. A /128 loopback alias in
+# the server netns (fd00:c9::1, disjoint from Subnet6's fd00:a6::/112)
+# satisfies both.
 #
 # Requires: root, netns support, netcat-openbsd, curl, python3, jq.
 # Usage:    sudo ./test_e2e_hybrid_h2.sh [mqvpn-binary]
@@ -169,6 +199,18 @@ RST_PORT=8072
 LANE_PORT_A=8073
 LANE_PORT_B=8074
 
+# Test 8 (IPv6 TCP lane): tunnel subnet the server assigns v6 addresses
+# from (client gets ::2, server's own tunnel address is ::1 — same /112
+# convention scripts/ci_e2e/run_ipv6_multipath_test.sh pins), the v6 egress
+# target (a /128 loopback alias in NS_SERVER, disjoint from the tunnel
+# subnet — see the addressing note above), and the long-lived flow's port
+# (distinct from every v4 port already claimed above).
+V6_SUBNET6="fd00:a6::/112"
+V6_TUNNEL_SERVER_IP="fd00:a6::1"
+V6_EGRESS_NET="fd00:c9::/64"
+V6_EGRESS_IP="fd00:c9::1"
+V6_LANE_PORT=8076
+
 CLIENT_LOG_T1="$(mktemp)"
 SERVER_LOG_T1="$(mktemp)"
 CLIENT_LOG_T1B="$(mktemp)"
@@ -194,6 +236,8 @@ SERVER_LOG_T5="$(mktemp)"
 RST_CLIENT_OUT="$(mktemp)"
 CLIENT_LOG_T6="$(mktemp)"
 SERVER_LOG_T6="$(mktemp)"
+CLIENT_LOG_T8="$(mktemp)"
+SERVER_LOG_T8="$(mktemp)"
 INI_T1="$(mktemp --suffix=.ini)"
 INI_T1B="$(mktemp --suffix=.ini)"
 INI_T1C="$(mktemp --suffix=.ini)"
@@ -202,6 +246,7 @@ INI_T7B="$(mktemp --suffix=.ini)"
 INI_T2A="$(mktemp --suffix=.ini)"
 INI_STREAM="$(mktemp --suffix=.ini)"   # shared by Test 2 Phase B and Test 3
 INI_T6="$(mktemp --suffix=.ini)"
+INI_T8="$(mktemp --suffix=.ini)"
 CURL_OUT="$(mktemp)"
 SENT_FILE_A="$(mktemp)"
 RECV_FILE_A="$(mktemp)"
@@ -211,6 +256,7 @@ LANE_PEER_A_FILE="$(mktemp)"
 LANE_BYTES_A_FILE="$(mktemp)"
 LANE_PEER_B_FILE="$(mktemp)"
 LANE_BYTES_B_FILE="$(mktemp)"
+V6_BYTES_FILE="$(mktemp)"
 
 cleanup_http_server() {
     if [ -n "$HTTP_PID" ] && kill -0 "$HTTP_PID" 2>/dev/null; then
@@ -232,12 +278,15 @@ LANE_SENDER_A_PID=""
 LANE_SENDER_B_PID=""
 LANE_CAP_PID1=""
 LANE_CAP_PID2=""
+V6_SINK_PID=""
+V6_SOURCE_PID=""
 cleanup_bg_procs() {
     local pid
     for pid in "$HALFCLOSE_RESPONDER_PID" "$RST_TARGET_PID" "$RST_CLIENT_PID" \
         "$LANE_RESPONDER_A_PID" "$LANE_RESPONDER_B_PID" \
         "$LANE_SENDER_A_PID" "$LANE_SENDER_B_PID" \
-        "$LANE_CAP_PID1" "$LANE_CAP_PID2"; do
+        "$LANE_CAP_PID1" "$LANE_CAP_PID2" \
+        "$V6_SINK_PID" "$V6_SOURCE_PID"; do
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null || true
             wait "$pid" 2>/dev/null || true
@@ -253,11 +302,12 @@ trap 'cleanup_bg_procs; cleanup_http_server; bench_cleanup; rm -rf "$HTTP_DOCROO
     "$CLIENT_LOG_T2A" "$SERVER_LOG_T2A" "$CLIENT_LOG_T2B" "$SERVER_LOG_T2B" \
     "$CLIENT_LOG_T3A" "$SERVER_LOG_T3A" "$CLIENT_LOG_T3B" "$SERVER_LOG_T3B" \
     "$CLIENT_LOG_T4" "$SERVER_LOG_T4" "$CLIENT_LOG_T5" "$SERVER_LOG_T5" \
-    "$CLIENT_LOG_T6" "$SERVER_LOG_T6" \
+    "$CLIENT_LOG_T6" "$SERVER_LOG_T6" "$CLIENT_LOG_T8" "$SERVER_LOG_T8" \
     "$RST_CLIENT_OUT" \
-    "$INI_T1" "$INI_T1B" "$INI_T1C" "$INI_T7A" "$INI_T7B" "$INI_T2A" "$INI_STREAM" "$INI_T6" \
+    "$INI_T1" "$INI_T1B" "$INI_T1C" "$INI_T7A" "$INI_T7B" "$INI_T2A" "$INI_STREAM" "$INI_T6" "$INI_T8" \
     "$CURL_OUT" "$SENT_FILE_A" "$RECV_FILE_A" "$SENT_FILE_B" "$RECV_FILE_B" \
-    "$LANE_PEER_A_FILE" "$LANE_BYTES_A_FILE" "$LANE_PEER_B_FILE" "$LANE_BYTES_B_FILE"' EXIT
+    "$LANE_PEER_A_FILE" "$LANE_BYTES_A_FILE" "$LANE_PEER_B_FILE" "$LANE_BYTES_B_FILE" \
+    "$V6_BYTES_FILE"' EXIT
 
 fail=0
 
@@ -310,6 +360,21 @@ cat >"$INI_T6" <<EOF
 Enabled = true
 Tcp = auto
 EgressAllow = 10.222.0.0/24
+EOF
+
+# INI_T8: [Interface] Subnet6 (so the client is assigned a v6 address) +
+# the same Tcp=stream policy as INI_STREAM, with a v6 EgressAllow punching
+# through DEFAULT_DENY_V6's ULA row for the v6 egress target (see the
+# addressing note above). No v4 EgressAllow here on purpose — this phase
+# runs v6-only traffic (see the Test 8 doc comment for why that matters).
+cat >"$INI_T8" <<EOF
+[Interface]
+Subnet6 = ${V6_SUBNET6}
+
+[Hybrid]
+Enabled = true
+Tcp = stream
+EgressAllow = ${V6_EGRESS_NET}
 EOF
 
 # ── Topology: single path, no netem — H2 tests transport correctness, not
@@ -482,6 +547,44 @@ run_iperf3_through_tunnel() {
 
     ip netns exec "$NS_CLIENT" timeout $((duration + 15)) \
         iperf3 -c "$target" -t "$duration" -P 1 --json >"$json" 2>&1 || true
+
+    kill "$ipid" 2>/dev/null || true
+    wait "$ipid" 2>/dev/null || true
+
+    local mbps
+    mbps="$(python3 -c "
+import json
+try:
+    with open('${json}') as f:
+        data = json.load(f)
+    end = data.get('end', {})
+    if 'sum_received' in end:
+        print(f\"{end['sum_received']['bits_per_second'] / 1e6:.1f}\")
+    else:
+        print('0.0')
+except Exception:
+    print('0.0')
+")"
+    rm -f "$json"
+    echo "$mbps"
+}
+
+# IPv6 counterpart of run_iperf3_through_tunnel above — identical shape,
+# with -6 added on both ends so the v6 literal target is resolved/bound
+# explicitly. Kept as its own function (not a flag on the v4 one) so Test 8
+# cannot perturb the v4 measurement path Test 2/3 already rely on.
+run_iperf3_v6_through_tunnel() {
+    local target="$1"
+    local duration="${2:-6}"
+    local json
+    json="$(mktemp)"
+
+    ip netns exec "$NS_SERVER" iperf3 -s -6 -B "$target" -1 &>/dev/null &
+    local ipid=$!
+    sleep 1
+
+    ip netns exec "$NS_CLIENT" timeout $((duration + 15)) \
+        iperf3 -c "$target" -6 -t "$duration" -P 1 --json >"$json" 2>&1 || true
 
     kill "$ipid" 2>/dev/null || true
     wait "$ipid" 2>/dev/null || true
@@ -1460,6 +1563,189 @@ LANE_RESPONDER_A_PID=""; LANE_RESPONDER_B_PID=""
 
 bench_stop_vpn
 
+# ─── Test 8: IPv6 TCP lane (aggregation across 2 paths + failover) ───────
+echo ""
+echo "=== Test 8: IPv6 TCP lane (aggregation across 2 paths + failover) ==="
+
+# Rebuild a fresh 2-path topology (same rationale as Test 3/6's rebuilds).
+cleanup_http_server
+bench_setup_netns_n 2
+bench_add_server_host_routes 2
+
+# Some container base images ship IPv6 disabled at the sysctl level; this is
+# the same defensive re-enable scripts/ci_e2e/run_ipv6_multipath_test.sh
+# does for its own separate topology.
+ip netns exec "$NS_SERVER" sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null 2>&1 || true
+ip netns exec "$NS_CLIENT" sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null 2>&1 || true
+
+# v6 egress target — a /128 loopback alias in NS_SERVER (see the IPv6
+# addressing note above).
+ip netns exec "$NS_SERVER" ip -6 addr add "${V6_EGRESS_IP}/128" dev lo
+
+N_PATHS=2
+hybrid_run "$INI_T8" "$SERVER_LOG_T8" "$CLIENT_LOG_T8"
+
+# Confirm both paths are QUIC-validated (not just L3-reachable) before
+# trusting anything below as a multipath measurement — same gate Test 3
+# uses ahead of its own aggregation measurement.
+observed_paths_t8=$(bench_wait_for_n_paths 2 20 "$CTRL_PORT") && pc_rc_t8=0 || pc_rc_t8=$?
+if [ "$pc_rc_t8" -eq 0 ]; then
+    echo "PASS: server control API confirms n_paths=${observed_paths_t8}"
+else
+    echo "FAIL: server control API reports n_paths=${observed_paths_t8} (expected >=2, rc=$pc_rc_t8)"
+    fail=1
+fi
+
+# Wait for the v6 CONNECT-IP address assignment to land and the inner v6
+# path to actually be reachable — ADDRESS_ASSIGN for v6 can trail the v4
+# tunnel-up check hybrid_run's bench_wait_tunnel already performed.
+v6_ready=0
+for _ in $(seq 1 20); do
+    if ip netns exec "$NS_CLIENT" ping -6 -c 1 -W 1 "$V6_TUNNEL_SERVER_IP" >/dev/null 2>&1; then
+        v6_ready=1
+        break
+    fi
+    sleep 1
+done
+if [ "$v6_ready" -ne 1 ]; then
+    echo "FAIL: IPv6 tunnel address never became reachable (ping6 to ${V6_TUNNEL_SERVER_IP} failed after 20s)"
+    fail=1
+else
+    echo "OK: IPv6 tunnel reachable (${V6_TUNNEL_SERVER_IP})"
+fi
+
+# ── Aggregation: a short iperf3 -6 burst through the v6 stream-lane target,
+#    then the same per-path load-share check Test 3 uses (both paths must
+#    carry real load, lighter path >=20% of the heavier) — the direct proof
+#    against a scheduler that pinned all traffic on one path. A fresh copy
+#    of the check (not a shared function with Test 3) so this phase cannot
+#    perturb Test 3's already-verified logic. ──
+IPERF_DURATION_T8=6
+V6_IPERF_MBPS="$(run_iperf3_v6_through_tunnel "$V6_EGRESS_IP" "$IPERF_DURATION_T8")"
+echo "  IPv6 iperf3 (both paths active): ${V6_IPERF_MBPS} Mbps"
+if awk -v m="$V6_IPERF_MBPS" 'BEGIN{exit !(m>0)}'; then
+    echo "OK: IPv6 iperf3 measurement produced a nonzero sample"
+else
+    echo "FAIL: IPv6 iperf3 measurement returned 0.0 Mbps — measurement broken"
+    fail=1
+fi
+
+# Prove the stream lane carried this traffic (not a silent raw fallthrough)
+# while the client is still alive.
+assert_stream_lane_used "$CLIENT_LOG_T8" "Test8 v6 stream"
+
+stats_t8="$(bench_query_control "$CTRL_PORT" get_status)"
+agg_check_t8="$(echo "$stats_t8" | python3 -c "
+import sys, json
+FLOOR = 50000
+try:
+    d = json.load(sys.stdin)
+    paths = d['clients'][0]['paths']
+except Exception as e:
+    print('FAIL parse: %s' % e); sys.exit()
+loads = sorted(p.get('bytes_tx', 0) + p.get('bytes_rx', 0) for p in paths)
+if len(loads) < 2:
+    print('FAIL len<2 loads=%s' % loads); sys.exit()
+lo, hi = loads[0], loads[-1]
+share = (lo / hi) if hi else 0.0
+if lo < FLOOR:
+    print('FAIL underused lo=%d hi=%d (floor=%d)' % (lo, hi, FLOOR)); sys.exit()
+if lo < 0.2 * hi:
+    print('FAIL imbalanced lo=%d hi=%d minshare=%.2f' % (lo, hi, share)); sys.exit()
+print('OK lo=%d hi=%d minshare=%.2f' % (lo, hi, share))
+")"
+echo "  per-path load (tx+rx) after IPv6 iperf3 burst: ${agg_check_t8}"
+if [ "${agg_check_t8#OK}" != "$agg_check_t8" ]; then
+    echo "PASS: both paths carried meaningful load from IPv6 TCP-lane traffic (${agg_check_t8})"
+else
+    echo "FAIL: per-path utilization check failed for IPv6 traffic (${agg_check_t8})"
+    echo "      raw get_status: $stats_t8"
+    fail=1
+fi
+
+# ── Failover: a long-lived v6 TCP-lane flow, then bring one path down and
+#    confirm it keeps flowing on the survivor — same technique
+#    scripts/ci_e2e/run_ipv6_multipath_test.sh's Test 4 uses (bring Path A
+#    down, confirm traffic continues on Path B), applied here to a real
+#    TCP-lane flow instead of ping. ──
+ip netns exec "$NS_SERVER" python3 "${SCRIPT_DIR}/hybrid_h2_v6_sink.py" \
+    "$V6_EGRESS_IP" "$V6_LANE_PORT" "$V6_BYTES_FILE" &
+V6_SINK_PID=$!
+
+if ! wait_for_listening_port "$NS_SERVER" "$V6_LANE_PORT" 20; then
+    echo "FAIL: Test 8 IPv6 sink never became ready (port ${V6_LANE_PORT} not listening)"
+    fail=1
+else
+    ip netns exec "$NS_CLIENT" python3 "${SCRIPT_DIR}/hybrid_h2_v6_source.py" \
+        "$V6_EGRESS_IP" "$V6_LANE_PORT" &
+    V6_SOURCE_PID=$!
+
+    if ! wait_for_nonempty_file "$V6_BYTES_FILE" 20; then
+        echo "FAIL: Test 8 IPv6 flow never started exchanging data within 20s"
+        fail=1
+    else
+        # flows act/tot/rej must show a nonzero ACTIVE count while this
+        # long-lived flow is open — same rationale as Test 6's flow_b check
+        # (Test 1's curl is too short-lived for tcp_flows_active).
+        if wait_for_log "$CLIENT_LOG_T8" 'flows act/tot/rej=[1-9][0-9]*/' 40; then
+            parse_flows "$CLIENT_LOG_T8" || true
+            echo "PASS: [STATUS] reports nonzero tcp_flows_active (act=$FLOWS_ACT tot=$FLOWS_TOT rej=$FLOWS_REJ) for the open IPv6 flow"
+        else
+            echo "FAIL: no [STATUS] line with nonzero tcp_flows_active within 40s"
+            parse_flows "$CLIENT_LOG_T8" \
+                && echo "      last flows line: act=$FLOWS_ACT tot=$FLOWS_TOT rej=$FLOWS_REJ" \
+                || echo "      (no flows line at all)"
+            fail=1
+        fi
+
+        stats_json_t8="$(bench_query_control "$CTRL_PORT" get_stats)"
+        srv_active_t8="$(echo "$stats_json_t8" | jq -r '.tcp_flows_active // -1' 2>/dev/null || echo -1)"
+        if [ "$srv_active_t8" -ge 1 ] 2>/dev/null; then
+            echo "PASS: server get_stats reports tcp_flows_active=${srv_active_t8} (>=1) for the IPv6 egress flow"
+        else
+            echo "FAIL: server get_stats reports tcp_flows_active=${srv_active_t8} (expected >=1)"
+            echo "      raw response: $stats_json_t8"
+            fail=1
+        fi
+
+        sleep 1
+        V6_BYTES_BEFORE="$(cat "$V6_BYTES_FILE" 2>/dev/null || echo 0)"
+        [ -n "$V6_BYTES_BEFORE" ] || V6_BYTES_BEFORE=0
+        echo "  IPv6 flow bytes received before failover: ${V6_BYTES_BEFORE}"
+
+        # Bring path 0's client-side link down; the surviving path (path 1)
+        # keeps the flow's underlying multipath QUIC connection alive — the
+        # same RTM_DELLINK-driven drop-path lifecycle production traffic
+        # goes through on a real link loss.
+        ip netns exec "$NS_CLIENT" ip link set "$(bench_path_veth_client 0)" down
+        sleep 3
+
+        V6_BYTES_AFTER="$(cat "$V6_BYTES_FILE" 2>/dev/null || echo 0)"
+        [ -n "$V6_BYTES_AFTER" ] || V6_BYTES_AFTER=0
+        echo "  IPv6 flow bytes received after path 0 down: ${V6_BYTES_AFTER}"
+        if [ "$V6_BYTES_AFTER" -gt "$V6_BYTES_BEFORE" ]; then
+            echo "PASS: IPv6 TCP-lane flow kept flowing after path 0 was dropped (failover, no stall)"
+        else
+            echo "FAIL: IPv6 TCP-lane flow stalled after path 0 was dropped (${V6_BYTES_BEFORE} -> ${V6_BYTES_AFTER})"
+            fail=1
+        fi
+
+        # Restore path 0 so bench_cleanup's teardown doesn't have to
+        # special-case a downed link.
+        ip netns exec "$NS_CLIENT" ip link set "$(bench_path_veth_client 0)" up
+    fi
+fi
+
+for pid in "$V6_SOURCE_PID" "$V6_SINK_PID"; do
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    fi
+done
+V6_SOURCE_PID=""; V6_SINK_PID=""
+
+bench_stop_vpn
+
 # ─── Verdict ───────────────────────────────────────────────────────────────
 echo ""
 if [ "$fail" -ne 0 ]; then
@@ -1484,6 +1770,8 @@ if [ "$fail" -ne 0 ]; then
     echo "--- Server log T5 (last 20) ---"; tail -20 "$SERVER_LOG_T5"
     echo "--- Client log T6 (last 30) ---"; tail -30 "$CLIENT_LOG_T6"
     echo "--- Server log T6 (last 20) ---"; tail -20 "$SERVER_LOG_T6"
+    echo "--- Client log T8 (last 30) ---"; tail -30 "$CLIENT_LOG_T8"
+    echo "--- Server log T8 (last 20) ---"; tail -20 "$SERVER_LOG_T8"
     exit 1
 fi
 echo "RESULT: PASS"
