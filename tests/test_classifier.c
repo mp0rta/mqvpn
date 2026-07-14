@@ -123,6 +123,28 @@ build_v6_ext_then_tcp(uint8_t *buf, uint16_t sport, uint16_t dport)
     return 68;      /* 40 (v6 fixed hdr) + 8 (ext hdr) + 20 (TCP hdr) */
 }
 
+/* Build a direct v6 TCP packet (base NH == TCP, no ext headers) with
+ * fully-specified 16-byte src/dst addresses — needed for the address-class
+ * ineligibility gate tests (v4-mapped / multicast / unspecified), where
+ * build_v6's hardcoded 2001:.../2002:... addresses can't express the needed
+ * bit patterns. */
+static size_t
+build_v6_tcp_addrs(uint8_t *buf, const uint8_t src[16], const uint8_t dst[16],
+                   uint16_t sport, uint16_t dport)
+{
+    memset(buf, 0, 60);
+    buf[0] = 0x60; /* version 6 */
+    buf[6] = 6;    /* base NH = TCP */
+    memcpy(buf + 8, src, 16);
+    memcpy(buf + 24, dst, 16);
+    buf[40] = (uint8_t)(sport >> 8);
+    buf[41] = (uint8_t)(sport);
+    buf[42] = (uint8_t)(dport >> 8);
+    buf[43] = (uint8_t)(dport);
+    buf[52] = 0x50; /* TCP data offset = 5, harmless */
+    return 60;
+}
+
 static mqvpn_hybrid_config_t
 make_pol(int enabled, mqvpn_hybrid_tcp_mode_t mode)
 {
@@ -506,6 +528,57 @@ test_classify_v6_tcp_base_nh_gate(void)
                   "v6 tcp base NH == TCP -> tcp");
 }
 
+/* address-class pre-accept-drop guard (spec §3.C rev7/rev8): each case here
+ * mirrors a concrete lwIP pre-accept drop site that would otherwise orphan a
+ * PENDING_ACCEPT slot, so the classifier routes it RAW instead of laning it. */
+static void
+test_classify_v6_address_class_ineligible(void)
+{
+    uint8_t buf[64];
+    mqvpn_flow_key_t k;
+    mqvpn_hybrid_config_t pol = make_pol(1, MQVPN_HYBRID_TCP_STREAM);
+    uint8_t normal_src[16] = {0x20, 0x01};
+    uint8_t normal_dst[16] = {0x20, 0x02};
+
+    /* dst is v4-mapped (::ffff:0:0/96). */
+    uint8_t v4mapped[16] = {0};
+    v4mapped[10] = 0xff;
+    v4mapped[11] = 0xff;
+    v4mapped[12] = 10;
+    v4mapped[15] = 1;
+    size_t n = build_v6_tcp_addrs(buf, normal_src, v4mapped, 4444, 8080);
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_RAW,
+                  "v6 tcp v4-mapped dst -> raw");
+
+    /* src is v4-mapped. */
+    n = build_v6_tcp_addrs(buf, v4mapped, normal_dst, 4444, 8080);
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_RAW,
+                  "v6 tcp v4-mapped src -> raw");
+
+    /* multicast source (src[0] == 0xff). */
+    uint8_t mcast[16] = {0xff, 0x02};
+    n = build_v6_tcp_addrs(buf, mcast, normal_dst, 4444, 8080);
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_RAW,
+                  "v6 tcp multicast src -> raw");
+
+    /* multicast destination (dst[0] == 0xff). */
+    n = build_v6_tcp_addrs(buf, normal_src, mcast, 4444, 8080);
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_RAW,
+                  "v6 tcp multicast dst -> raw");
+
+    /* unspecified source (:: — all 16 bytes zero). */
+    uint8_t unspec[16] = {0};
+    n = build_v6_tcp_addrs(buf, unspec, normal_dst, 4444, 8080);
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_RAW,
+                  "v6 tcp unspecified src -> raw");
+
+    /* Sanity: a clean, eligible packet still classifies TCP (no false
+     * positive from the ineligibility gate). */
+    n = build_v6_tcp_addrs(buf, normal_src, normal_dst, 4444, 8080);
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_TCP,
+                  "v6 tcp normal addrs -> tcp (no false positive)");
+}
+
 static void
 test_classify_fragments_and_other_raw(void)
 {
@@ -688,6 +761,7 @@ main(void)
     test_parse_cidr();
     test_classify_v6_tcp_tunnel_subnet();
     test_classify_v6_tcp_base_nh_gate();
+    test_classify_v6_address_class_ineligible();
     test_classify_fragments_and_other_raw();
     test_classify_malformed_raw();
     test_classify_null_out_key();
