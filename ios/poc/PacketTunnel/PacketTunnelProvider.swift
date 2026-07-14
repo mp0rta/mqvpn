@@ -14,6 +14,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func startTunnel(options: [String: NSObject]?) async throws {
         let config = try PoCConfig.fromBundle()
+        let providerConfig = (self.protocolConfiguration as? NETunnelProviderProtocol)?
+            .providerConfiguration
+        let reorder = ReorderSettings(providerConfiguration: providerConfig) ?? .disabled
         engine = MqvpnEngine()
         binder = PathBinder(engine: engine)
         metrics = GateMetrics(engine: engine, binder: binder)
@@ -73,7 +76,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     self.cancelTunnelWithError(err)
                 }
             }
-            engine.start(config: config)
+            engine.start(config: config, reorder: reorder)
             binder.start()
             // Redundant trigger for path lifecycle: NWPathMonitor updates
             // have been observed to arrive minutes late inside the provider

@@ -20,6 +20,9 @@ final class SnapshotCache {
     private var timer: Timer?
     /// Tick-thread-confined: first-ESTABLISHED wall-clock, for uptime display.
     private var connectedSince: Double?
+    /// Tick-thread-confined: provider-side monotonic ordering key, one per
+    /// produced snapshot (lets the app detect stalls/reordered reads).
+    private var seq: UInt64 = 0
 
     init(engine: MqvpnEngine) {
         self.engine = engine
@@ -65,9 +68,12 @@ final class SnapshotCache {
             paths.append(PathSnapshot(name: name, status: Int32(p.status.rawValue),
                                       txBytes: p.bytes_tx, rxBytes: p.bytes_rx))
         }
+        seq &+= 1
         let snap = TunnelSnapshot(timestamp: now, clientState: Int32(state.rawValue),
                                   connectedSince: connectedSince,
-                                  footprint: Self.physFootprint(), paths: paths)
+                                  footprint: Self.physFootprint(), paths: paths,
+                                  seq: seq, reorderConfigured: engine.reorderConfigured,
+                                  reorder: engine.reorderStats())
         lock.lock()
         latest = snap
         lock.unlock()
