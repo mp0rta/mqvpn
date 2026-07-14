@@ -1,8 +1,42 @@
-<p align="center">
+<div align="center">
   <img src="website/public/img/mqvpn-lockup-violet-light.svg" alt="mqvpn" width="400">
-</p>
+  <p><b>All your connections. One stronger connection.</b></p>
+</div>
 
-Multipath QUIC VPN using [MASQUE CONNECT-IP (RFC 9484)](https://www.rfc-editor.org/rfc/rfc9484) over [HTTP Datagrams (RFC 9297)](https://www.rfc-editor.org/rfc/rfc9297) / [QUIC DATAGRAMs (RFC 9221)](https://www.rfc-editor.org/rfc/rfc9221), built on a [fork of XQUIC](https://github.com/mp0rta/xquic/tree/mqvpn-main) with [Multipath QUIC](https://datatracker.ietf.org/doc/draft-ietf-quic-multipath/).
+mqvpn is an open-source VPN that combines multiple internet connections—such as Wi-Fi, cellular, Starlink, and multiple ISPs—for bandwidth aggregation and seamless failover.
+
+## Table of Contents
+
+<!--toc:start-->
+- [Features](#features)
+- [Installation](#installation)
+  - [Server](#server)
+  - [Client (deb package)](#client-deb-package)
+  - [Windows client](#windows-client)
+  - [macOS client](#macos-client)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+  - [INI config](#ini-config)
+  - [JSON config](#json-config)
+- [Schedulers](#schedulers)
+- [Reorder buffer (datagram lane)](#reorder-buffer-datagram-lane)
+- [Hybrid mode (TCP lane)](#hybrid-mode-tcp-lane)
+- [systemd](#systemd)
+- [Control API](#control-api)
+- [Benchmarks](#benchmarks)
+- [Architecture](#architecture)
+- [Building](#building)
+  - [Android SDK](#android-sdk)
+- [Testing](#testing)
+- [Usage](#usage)
+- [Roadmap](#roadmap)
+- [Protocol Standards](#protocol-standards)
+- [Community](#community)
+- [Disclaimer](#disclaimer)
+- [Commercial Support](#commercial-support)
+- [License](#license)
+- [Acknowledgments](#acknowledgments)
+<!--toc:end-->
 
 ## Features
 
@@ -12,6 +46,7 @@ Multipath QUIC VPN using [MASQUE CONNECT-IP (RFC 9484)](https://www.rfc-editor.o
 - **Multi-Platform** — Available on Linux (server/client), Windows (client only), macOS (client only) and Android (client only) support.
 - **PSK auth** — Pre-shared key over TLS 1.3.
 - **DNS override** — Prevents DNS leaks. Uses `resolvectl` on systemd-resolved systems, falls back to resolv.conf.
+
 
 ## Installation
 
@@ -86,6 +121,7 @@ sudo mqvpn --mode client --server YOUR_SERVER:443 \
 ## Configuration
 
 Config files support both INI and JSON. CLI arguments override config values.
+### INI config
 
 ```ini
 # /etc/mqvpn/server.conf
@@ -543,6 +579,7 @@ mqvpn [--config PATH] --mode client|server [options]
 - [ ] Interop testing (masque-go, QUICHE)
 
 ## Protocol Standards
+mqvpn is designed to comply with the following RFCs as much as possible.
 
 | Protocol | Spec |
 |----------|------|
@@ -552,11 +589,22 @@ mqvpn [--config PATH] --mode client|server [options]
 | Multipath QUIC | [draft-ietf-quic-multipath](https://datatracker.ietf.org/doc/draft-ietf-quic-multipath/) |
 | HTTP/3 | [RFC 9114](https://www.rfc-editor.org/rfc/rfc9114) |
 
+## Community
+
+Join the [mqvpn community on Zulip](https://mqvpn.zulipchat.com/) to ask questions, discuss use cases, share feedback, and contribute to the project.
+
 ## Disclaimer
 
 mqvpn is licensed under the Apache License 2.0 and is provided **"AS IS"**, without warranties or conditions of any kind.
 
 Use of mqvpn is at your own risk. Users are solely responsible for validating its suitability, security, and operational safety, especially in production or commercial environments.
+
+## Commercial Support
+
+If you need commercial support, integration consulting, managed deployments, or SLA inquiries, contact contact@mp0rta.dev.
+
+You can also contact via Zulip.
+
 
 ## License
 
