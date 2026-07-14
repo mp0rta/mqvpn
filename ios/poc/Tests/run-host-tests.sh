@@ -11,5 +11,6 @@ APP="$DIR/../App"
 OUT="$(mktemp -d)/hosttests"
 swiftc -o "$OUT" \
     "$SHARED/ReorderSettings.swift" \
+    "$SHARED/ProviderMessage.swift" \
     "$DIR/main.swift"
 "$OUT"

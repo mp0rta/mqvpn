@@ -44,6 +44,21 @@ check(ReorderSettings.reorderEnableDecision(ruleResults: [false, false]).enable 
 check(ReorderSettings.reorderEnableDecision(ruleResults: [false, true]) == (true, 1), "partial -> enabled, added=1")
 check(ReorderSettings.reorderEnableDecision(ruleResults: []).enable == false, "no rules -> disabled")
 
-// (snapshot decode + ingest/save assertions are appended when those Shared/App files land)
+// old-wire decode: JSON missing the new keys -> safe defaults, no throw
+let oldWire = #"{"timestamp":1.0,"clientState":4,"connectedSince":0.5,"footprint":100,"paths":[]}"#
+    .data(using: .utf8)!
+let old = try! JSONDecoder().decode(TunnelSnapshot.self, from: oldWire)
+check(old.seq == 0 && old.reorderConfigured == false && old.reorder == nil, "old-wire safe defaults")
+
+// new-wire round-trip
+let full = TunnelSnapshot(timestamp: 2, clientState: 4, connectedSince: 1, footprint: 1, paths: [],
+                          seq: 7, reorderConfigured: true,
+                          reorder: ReorderStatsSnapshot(delivered: 5, gapCount: 1, gapFilled: 1,
+                                                        gapTimeout: 0, ackDemote: 0,
+                                                        bufferedP50Ms: 1.5, bufferedP99Ms: 9.0))
+let rt = try! JSONDecoder().decode(TunnelSnapshot.self, from: try! JSONEncoder().encode(full))
+check(rt.seq == 7 && rt.reorderConfigured && rt.reorder?.delivered == 5, "new-wire round-trip")
+
+// (ingest/save assertions are appended when those App files land)
 
 if failures == 0 { print("host tests: ALL PASS") } else { print("host tests: \(failures) FAILURES"); exit(1) }
