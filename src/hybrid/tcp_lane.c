@@ -23,12 +23,13 @@
 
 #include "lwip/priv/tcp_priv.h" /* TCP_MSL — C1's CLOSING grace-sweep window */
 
-/* The accept callback memcpy's pcb local_ip/remote_ip as the flow key's raw
- * 4 network-order bytes — only valid while ip_addr_t IS the bare ip4_addr_t
- * (one u32_t). Pin the LWIP_IPV6=0 assumption (lwip_port/lwipopts.h). */
-_Static_assert(sizeof(ip_addr_t) == 4,
-               "TCP lane assumes LWIP_IPV6=0: ip_addr_t must be the bare "
-               "network-order ip4_addr_t");
+/* Chunk 4 (dual-stack, LWIP_IPV6=1): ip_addr_t is now a tagged union
+ * (lwip/ip_addr.h) — sizeof(ip_addr_t) != 4, so the old compile-time pin on
+ * the bare-ip4_addr_t assumption no longer applies. The accept callback
+ * (mqvpn_tcp_lane_lwip_accept below) instead switches on IP_IS_V6() and
+ * memcpy's from ip_2_ip4()/ip_2_ip6()'s ->addr fields explicitly for each
+ * family — see its docstring for the byte-order contract, now covering
+ * both v4 and v6. */
 
 /* Sticky-RAW markers are capped separately from tcp_max_flows: they are
  * never idle-evicted (the idle sweep covers TCP-lane flows only — a marker's
@@ -1314,17 +1315,22 @@ mqvpn_tcp_lane_lwip_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
      *   - pcb ports are HOST order (tcp_input ntohs's the header before
      *     tcp_listen_input copies src/dest — tcp_in.c), matching the key's
      *     documented host-order ports (reorder.h);
-     *   - LWIP_IPV6=0 makes ip_addr_t the bare ip4_addr_t: one u32_t in
-     *     NETWORK order, i.e. the same 4 raw header bytes the classifier
-     *     memcpy'd (pinned by the _Static_assert at the top). */
+     *   - ip_addr_t is now a tagged union (LWIP_IPV6=1): a whole-struct
+     *     memcpy would spill past the key's 4-byte v4 slot (sizeof(ip_addr_t)
+     *     > 4) and would also copy the union's type tag along with the
+     *     address, so pull the v4 address out explicitly via ip_2_ip4()->addr
+     *     — one u32_t in NETWORK order, the same 4 raw header bytes the
+     *     classifier memcpy'd. The listener is still IPADDR_TYPE_V4-only at
+     *     this point (dual-stack accept lands in a later change), so v4 is
+     *     the only family this callback ever sees. */
     mqvpn_flow_key_t key;
     memset(&key, 0, sizeof(key));
     key.ip_version = 4;
     key.proto = MQVPN_IPPROTO_TCP;
     key.src_port = newpcb->remote_port;
     key.dst_port = newpcb->local_port;
-    memcpy(key.src_ip, &newpcb->remote_ip, sizeof(newpcb->remote_ip));
-    memcpy(key.dst_ip, &newpcb->local_ip, sizeof(newpcb->local_ip));
+    memcpy(key.src_ip, &ip_2_ip4(&newpcb->remote_ip)->addr, 4);
+    memcpy(key.dst_ip, &ip_2_ip4(&newpcb->local_ip)->addr, 4);
 
     mqvpn_tcp_flow_t *f = find_flow(lane, &key, NULL);
     if (!f || f->state != TCP_FLOW_PENDING_ACCEPT) {

@@ -25,7 +25,18 @@
 #define LWIP_UDP      0 /* v1: TCP lane only; UDP stays on the DATAGRAM lane */
 
 #define LWIP_IPV4 1
-#define LWIP_IPV6 0 /* v1 non-goal: IPv6 TCP termination — IPv6 TCP goes RAW */
+#define LWIP_IPV6                                                 \
+    1 /* Chunk 4: dual-stack — v6 SYNs admitted to the lwIP TCP \
+       * lane alongside v4 (classifier gates which v6 traffic     \
+       * reaches here; lwIP itself is family-agnostic). */
+/* The address-less pretend netif (lwip_glue.c) must stay silent on the wire
+ * beyond what the classifier explicitly routes here: no Router Solicitation,
+ * no SLAAC address assignment, no Multicast Listener Discovery joins. All
+ * three default to LWIP_IPV6 (i.e. would turn ON with it) unless forced off
+ * here individually. */
+#define LWIP_IPV6_MLD                 0
+#define LWIP_IPV6_AUTOCONFIG          0
+#define LWIP_IPV6_SEND_ROUTER_SOLICIT 0
 
 /* MEM_LIBC_MALLOC (standard lwIP opt, NOT heiher's fork-specific
  * MEM_CUSTOM_ALLOCATOR — that macro plus its mem_malloc→hev_malloc weak-

@@ -584,8 +584,8 @@ setup_flow(mqvpn_tcp_lane_t *lane, struct tcp_pcb *pcb, uint16_t src_port, void 
     }
     memset(pcb, 0, sizeof(*pcb));
     pcb->state = ESTABLISHED;
-    IP4_ADDR(&pcb->local_ip, 93, 184, 216, 34);
-    IP4_ADDR(&pcb->remote_ip, 10, 0, 0, 1);
+    IP_ADDR4(&pcb->local_ip, 93, 184, 216, 34);
+    IP_ADDR4(&pcb->remote_ip, 10, 0, 0, 1);
     pcb->local_port = 80;
     pcb->remote_port = src_port;
     if (mqvpn_tcp_lane_lwip_accept(lane, pcb, ERR_OK) != ERR_OK) {
@@ -981,8 +981,8 @@ test_accept_key_correspondence(void)
     struct tcp_pcb pcb;
     memset(&pcb, 0, sizeof(pcb));
     pcb.state = ESTABLISHED;
-    IP4_ADDR(&pcb.local_ip, 93, 184, 216, 34);
-    IP4_ADDR(&pcb.remote_ip, 10, 0, 0, 1);
+    IP_ADDR4(&pcb.local_ip, 93, 184, 216, 34);
+    IP_ADDR4(&pcb.remote_ip, 10, 0, 0, 1);
     pcb.local_port = 80;
     pcb.remote_port = 4000;
 
@@ -999,7 +999,8 @@ test_accept_key_correspondence(void)
     ASSERT_EQ_INT(f->state, TCP_FLOW_PENDING_STREAM, "flow is PENDING_STREAM");
     ASSERT_TRUE(f->pcb == &pcb, "flow holds the pcb");
     ASSERT_EQ_INT(f->target_port, 80, "target_port from pcb local_port");
-    ASSERT_TRUE(ip4_addr_eq(&f->target_ip, &pcb.local_ip), "target_ip from pcb local_ip");
+    ASSERT_TRUE(ip4_addr_eq(&f->target_ip, ip_2_ip4(&pcb.local_ip)),
+                "target_ip from pcb local_ip");
     ASSERT_EQ_INT(f->last_activity_us, 12345, "last_activity stamped via clock_fn");
 
     /* bind (mqvpn_client.c calls this after opening the H3 request). Task 9:
@@ -1071,8 +1072,8 @@ test_accept_key_correspondence(void)
     struct tcp_pcb pcb2;
     memset(&pcb2, 0, sizeof(pcb2));
     pcb2.state = ESTABLISHED;
-    IP4_ADDR(&pcb2.local_ip, 93, 184, 216, 34);
-    IP4_ADDR(&pcb2.remote_ip, 10, 0, 0, 1);
+    IP_ADDR4(&pcb2.local_ip, 93, 184, 216, 34);
+    IP_ADDR4(&pcb2.remote_ip, 10, 0, 0, 1);
     pcb2.local_port = 80;
     pcb2.remote_port = 4002;
     ASSERT_EQ_INT(mqvpn_tcp_lane_lwip_accept(lane, &pcb2, ERR_OK), ERR_OK,
@@ -1104,8 +1105,8 @@ test_accept_key_correspondence(void)
     struct tcp_pcb stray;
     memset(&stray, 0, sizeof(stray));
     stray.state = ESTABLISHED;
-    IP4_ADDR(&stray.local_ip, 93, 184, 216, 34);
-    IP4_ADDR(&stray.remote_ip, 10, 0, 0, 1);
+    IP_ADDR4(&stray.local_ip, 93, 184, 216, 34);
+    IP_ADDR4(&stray.remote_ip, 10, 0, 0, 1);
     stray.local_port = 80;
     stray.remote_port = 4001; /* never committed */
     ASSERT_TRUE(mqvpn_tcp_lane_lwip_accept(lane, &stray, ERR_OK) != ERR_OK,
@@ -2415,8 +2416,8 @@ test_abort_pending_real(void)
     struct tcp_pcb pcb1;
     memset(&pcb1, 0, sizeof(pcb1));
     pcb1.state = ESTABLISHED;
-    IP4_ADDR(&pcb1.local_ip, 93, 184, 216, 34);
-    IP4_ADDR(&pcb1.remote_ip, 10, 0, 0, 1);
+    IP_ADDR4(&pcb1.local_ip, 93, 184, 216, 34);
+    IP_ADDR4(&pcb1.remote_ip, 10, 0, 0, 1);
     pcb1.local_port = 80;
     pcb1.remote_port = 8300;
     ASSERT_EQ_INT(mqvpn_tcp_lane_lwip_accept(lane, &pcb1, ERR_OK), ERR_OK,
@@ -2440,8 +2441,8 @@ test_abort_pending_real(void)
     struct tcp_pcb pcb2;
     memset(&pcb2, 0, sizeof(pcb2));
     pcb2.state = ESTABLISHED;
-    IP4_ADDR(&pcb2.local_ip, 93, 184, 216, 34);
-    IP4_ADDR(&pcb2.remote_ip, 10, 0, 0, 1);
+    IP_ADDR4(&pcb2.local_ip, 93, 184, 216, 34);
+    IP_ADDR4(&pcb2.remote_ip, 10, 0, 0, 1);
     pcb2.local_port = 80;
     pcb2.remote_port = 8301;
     ASSERT_EQ_INT(mqvpn_tcp_lane_lwip_accept(lane, &pcb2, ERR_OK), ERR_OK,
@@ -2486,8 +2487,8 @@ test_accept_open_stream_fail_returns_abrt(void)
     struct tcp_pcb pcb;
     memset(&pcb, 0, sizeof(pcb));
     pcb.state = ESTABLISHED;
-    IP4_ADDR(&pcb.local_ip, 93, 184, 216, 34);
-    IP4_ADDR(&pcb.remote_ip, 10, 0, 0, 1);
+    IP_ADDR4(&pcb.local_ip, 93, 184, 216, 34);
+    IP_ADDR4(&pcb.remote_ip, 10, 0, 0, 1);
     pcb.local_port = 80;
     pcb.remote_port = 8700;
 

@@ -153,7 +153,9 @@ typedef struct mqvpn_tcp_flow {
 
     struct tcp_pcb *pcb;  /* set by the lwIP accept callback */
     ip4_addr_t target_ip; /* original inner dst (== pcb->local_ip at accept —
-                           * wildcard intercept), network byte order */
+                           * wildcard intercept), network byte order. v4-only
+                           * for now — the listener is still IPADDR_TYPE_V4
+                           * (dual-stack accept lands in a later change). */
     uint16_t target_port; /* host order, same as the flow key's ports */
     void *h3_request;     /* opaque xqc_h3_request_t*; set by bind_h3_request */
     void *stream;         /* opaque cli_stream_t*; set by bind_h3_request */
