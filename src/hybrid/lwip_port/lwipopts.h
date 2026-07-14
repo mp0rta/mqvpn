@@ -25,10 +25,10 @@
 #define LWIP_UDP      0 /* v1: TCP lane only; UDP stays on the DATAGRAM lane */
 
 #define LWIP_IPV4 1
-#define LWIP_IPV6                                                 \
-    1 /* Chunk 4: dual-stack — v6 SYNs admitted to the lwIP TCP \
-       * lane alongside v4 (classifier gates which v6 traffic     \
-       * reaches here; lwIP itself is family-agnostic). */
+/* Chunk 4: dual-stack — v6 SYNs admitted to the lwIP TCP lane alongside v4
+ * (classifier gates which v6 traffic reaches here; lwIP itself is
+ * family-agnostic). */
+#define LWIP_IPV6 1
 /* The address-less pretend netif (lwip_glue.c) must stay silent on the wire
  * beyond what the classifier explicitly routes here: no Router Solicitation,
  * no SLAAC address assignment, no Multicast Listener Discovery joins. All
