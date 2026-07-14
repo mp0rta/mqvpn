@@ -59,6 +59,63 @@ let full = TunnelSnapshot(timestamp: 2, clientState: 4, connectedSince: 1, footp
 let rt = try! JSONDecoder().decode(TunnelSnapshot.self, from: try! JSONEncoder().encode(full))
 check(rt.seq == 7 && rt.reorderConfigured && rt.reorder?.delivered == 5, "new-wire round-trip")
 
-// (ingest/save assertions are appended when those App files land)
+// saveGuard order
+check(saveGuard(isSaving: true, isEditable: false, hasManager: false) == .inProgress, "inProgress first")
+check(saveGuard(isSaving: false, isEditable: false, hasManager: true) == .notEditable, "notEditable")
+check(saveGuard(isSaving: false, isEditable: true, hasManager: false) == .notReady, "notReady")
+check(saveGuard(isSaving: false, isEditable: true, hasManager: true) == nil, "proceed")
+
+// performAtomicSave (real rollback logic, fault-injected via a fake store)
+enum TestErr: Error { case boom }
+final class FakeStore: ReorderConfigStore {
+    var providerConfiguration: [String: Any]?
+    var commitThrows = false
+    var refreshThrows = false
+    func commit() async throws { if commitThrows { throw TestErr.boom } }
+    func refresh() async throws { if refreshThrows { throw TestErr.boom } }
+}
+func runAsync(_ body: @escaping () async -> Void) {
+    let sem = DispatchSemaphore(value: 0)
+    Task { await body(); sem.signal() }
+    sem.wait()
+}
+func boolOf(_ store: FakeStore, _ k: String) -> Bool? {
+    (store.providerConfiguration?[k] as? NSNumber)?.boolValue
+}
+runAsync {
+    // commit fails -> providerConfiguration rolled back to the backup value
+    let store = FakeStore(); store.providerConfiguration = ["reorderEnabled": NSNumber(value: false)]
+    store.commitThrows = true
+    var threw = false
+    do { try await performAtomicSave(store, merge: ["reorderEnabled": NSNumber(value: true)]) }
+    catch { threw = true }
+    check(threw && boolOf(store, "reorderEnabled") == false, "commit fail -> rethrow + rollback")
+}
+runAsync {
+    // commit ok but refresh fails -> committed value stays (refresh non-fatal)
+    let store = FakeStore(); store.providerConfiguration = [:]
+    store.refreshThrows = true
+    var threw = false
+    do { try await performAtomicSave(store, merge: ["reorderEnabled": NSNumber(value: true)]) }
+    catch { threw = true }
+    check(!threw && boolOf(store, "reorderEnabled") == true, "refresh fail -> committed")
+}
+
+// IngestGate
+check(!IngestGate.accept(capturedEpoch: 1, currentEpoch: 2, isUp: true, snapSeq: 5,
+                         snapTimestamp: 9, lastSeq: 0, lastTimestamp: 0), "stale epoch rejected")
+check(!IngestGate.accept(capturedEpoch: 1, currentEpoch: 1, isUp: false, snapSeq: 5,
+                         snapTimestamp: 9, lastSeq: 0, lastTimestamp: 0), "not-up rejected")
+check(!IngestGate.accept(capturedEpoch: 1, currentEpoch: 1, isUp: true, snapSeq: 5,
+                         snapTimestamp: 9, lastSeq: 5, lastTimestamp: 0), "seq regression rejected")
+check(IngestGate.accept(capturedEpoch: 1, currentEpoch: 1, isUp: true, snapSeq: 6,
+                        snapTimestamp: 9, lastSeq: 5, lastTimestamp: 0), "seq advance accepted")
+check(IngestGate.accept(capturedEpoch: 1, currentEpoch: 1, isUp: true, snapSeq: 0,
+                        snapTimestamp: 2, lastSeq: 0, lastTimestamp: 1), "legacy ts advance accepted")
+check(!IngestGate.accept(capturedEpoch: 1, currentEpoch: 1, isUp: true, snapSeq: 0,
+                         snapTimestamp: 1, lastSeq: 0, lastTimestamp: 2), "legacy ts regression rejected")
+// legacy response must NOT slip in after a modern snapshot (lastSeq != 0)
+check(!IngestGate.accept(capturedEpoch: 1, currentEpoch: 1, isUp: true, snapSeq: 0,
+                         snapTimestamp: 99, lastSeq: 5, lastTimestamp: 0), "legacy rejected once modern seen")
 
 if failures == 0 { print("host tests: ALL PASS") } else { print("host tests: \(failures) FAILURES"); exit(1) }
