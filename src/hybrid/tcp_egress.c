@@ -123,13 +123,14 @@ static const mqvpn_cidr_entry_t DEFAULT_DENY_V6[] = {
     {6, 7, {0xfc}},
     {6, 8, {0xff}}, /* multicast ff00::/8 */
     {6, 128, {0}},  /* unspecified ::/128 */
-    /* v4-mapped ::ffff:0:0/96 — defense-in-depth alongside IPV6_V6ONLY on
-     * the egress socket (see svr_tcp_egress_start_connect): without this
-     * row, a v6-literal connect-tcp target of e.g. "::ffff:127.0.0.1" would
-     * be evaluated purely as a v6 address (no v4 DEFAULT_DENY_V4 row would
-     * ever see it) and only IPV6_V6ONLY at the socket layer would stand
-     * between it and the v4 loopback — this row makes the denial explicit
-     * and attributable at the ACL layer too. */
+    /* v4-mapped ::ffff:0:0/96 — the PRIMARY guard against a v4-mapped
+     * literal (e.g. "::ffff:127.0.0.1") reaching v4 space unfiltered: such a
+     * target is evaluated purely as a v6 address (no v4 DEFAULT_DENY_V4 row
+     * would ever see it), so this row 403s it here, at the ACL, before any
+     * socket is created — explicit and attributable. The IPV6_V6ONLY
+     * setsockopt in svr_tcp_egress_start_connect is only defense-in-depth
+     * behind this row (it would catch a v4-mapped dst arriving via some
+     * OTHER path that skipped this ACL). */
     {6, 96, {[10] = 0xff, [11] = 0xff}},
 };
 
@@ -531,8 +532,12 @@ svr_tcp_egress_on_idle_evict(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
         } else if (sa.ss_family == AF_INET6) {
             struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *)&sa;
             char ip[INET6_ADDRSTRLEN];
+            /* Bracket the v6 literal ("[%s]:%u", not "%s:%u"): a bare
+             * "2001:db8::1:80" is ambiguous host-vs-port. Only the
+             * interpolated peer VALUE changes; the surrounding
+             * "connect-tcp: flow to %s ..." marker text is untouched. */
             if (inet_ntop(AF_INET6, &sa6->sin6_addr, ip, sizeof(ip)))
-                snprintf(peer, sizeof(peer), "%s:%u", ip,
+                snprintf(peer, sizeof(peer), "[%s]:%u", ip,
                          (unsigned)ntohs(sa6->sin6_port));
         }
     }
@@ -942,13 +947,18 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
             close(fd);
             return svr_tcp_egress_respond(h3_request, 500, 1);
         }
-        /* SECURITY-CRITICAL: without IPV6_V6ONLY, a connect() to a
-         * v4-mapped literal like "::ffff:127.0.0.1" reaches the v4 address
-         * 127.0.0.1 directly — bypassing every v4 DEFAULT_DENY_V4/tunnel-
-         * subnet check, since the ACL evaluated this target purely as v6
-         * (DEFAULT_DENY_V6's ::ffff:0:0/96 row denies the common case at
-         * the ACL layer too, but this setsockopt is the actual enforcement
-         * boundary — defense-in-depth, not redundant). Set BEFORE connect(). */
+        /* Defense-in-depth for v4-mapped destinations. The PRIMARY boundary
+         * is the ACL: DEFAULT_DENY_V6's ::ffff:0:0/96 row 403s EVERY
+         * v4-mapped literal (e.g. "::ffff:127.0.0.1") in
+         * svr_tcp_egress_acl_allowed, before this function is ever reached —
+         * so start_connect never runs for one under the normal request path.
+         * IPV6_V6ONLY is the belt-and-suspenders in case any OTHER path ever
+         * reaches connect() with a v4-mapped dst: without it, connect() to
+         * "::ffff:127.0.0.1" would reach the v4 address 127.0.0.1 directly,
+         * bypassing every v4 DEFAULT_DENY_V4/tunnel-subnet check (the ACL
+         * evaluated the target purely as v6). Set BEFORE connect(). Return
+         * intentionally unchecked — the /96 ACL row is the real boundary, so
+         * a V6ONLY failure only loses this secondary layer. */
         int v6only = 1;
         setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
         dst_len = sizeof(*dst6);
