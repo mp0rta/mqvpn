@@ -1333,12 +1333,12 @@ mqvpn_tcp_lane_lwip_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
     key.dst_port = newpcb->local_port;
     if (IP_IS_V6(&newpcb->local_ip)) {
         key.ip_version = 6;
-        memcpy(key.src_ip, ip_2_ip6(&newpcb->remote_ip)->addr, 16);
-        memcpy(key.dst_ip, ip_2_ip6(&newpcb->local_ip)->addr, 16);
+        memcpy(key.src_ip, ip_2_ip6(&newpcb->remote_ip)->addr, 16); /* addr[4], array */
+        memcpy(key.dst_ip, ip_2_ip6(&newpcb->local_ip)->addr, 16);  /* addr[4], array */
     } else {
         key.ip_version = 4;
-        memcpy(key.src_ip, &ip_2_ip4(&newpcb->remote_ip)->addr, 4);
-        memcpy(key.dst_ip, &ip_2_ip4(&newpcb->local_ip)->addr, 4);
+        memcpy(key.src_ip, &ip_2_ip4(&newpcb->remote_ip)->addr, 4); /* scalar u32 */
+        memcpy(key.dst_ip, &ip_2_ip4(&newpcb->local_ip)->addr, 4);  /* scalar u32 */
     }
 
     mqvpn_tcp_flow_t *f = find_flow(lane, &key, NULL);

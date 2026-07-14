@@ -124,21 +124,12 @@ mqvpn_tcp_lane_netif_init(struct netif *netif)
     mqvpn_lwip_ctx_t *ctx = (mqvpn_lwip_ctx_t *)netif->state;
     netif->name[0] = 'p';
     netif->name[1] = 'r';
-    netif->output = mqvpn_tcp_lane_netif_output;         /* NOT NULL — see above */
-    netif->output_ip6 = mqvpn_tcp_lane_netif_output_ip6; /* v6 sibling; without
-                                                          * this override
-                                                          * netif_add() leaves
-                                                          * its own safe
-                                                          * netif_null_output_ip6
-                                                          * stub in place
-                                                          * (netif.c) — no
-                                                          * crash, but every
-                                                          * v6 SYN-ACK / RST /
-                                                          * downlink packet
-                                                          * silently vanishes
-                                                          * (ERR_IF, no-op) and
-                                                          * no v6 handshake can
-                                                          * ever complete */
+    netif->output = mqvpn_tcp_lane_netif_output; /* NOT NULL — see above */
+    /* v6 sibling of netif->output. Without this override netif_add() leaves
+     * its own safe netif_null_output_ip6 stub in place (netif.c) — no crash,
+     * but every v6 SYN-ACK / RST / downlink packet silently vanishes
+     * (ERR_IF, no-op) and no v6 handshake can ever complete. */
+    netif->output_ip6 = mqvpn_tcp_lane_netif_output_ip6;
     netif->mtu = ctx->mtu; /* per-pcb MSS derives from this at accept time
                             * (netif_add() also copies this into netif->mtu6
                             * right after this callback returns, since
