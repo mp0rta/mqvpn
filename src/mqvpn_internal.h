@@ -144,10 +144,10 @@ MQVPN_INTERNAL const char *mqvpn_server_scheduler_label(const mqvpn_server_t *s)
  * Strings are URL-safe and lowercase to be usable as Prometheus label values.
  * Unknown values map to "unknown". Static storage — do not free.
  *
- * Pinned values (xqc_multipath.h xqc_path_state_t enum):
- *   0 init, 1 validating, 2 active, 3 closing, 4 closed.
- * If xquic re-orders this enum the labels become wrong; the corresponding
- * _Static_assert lives in mqvpn_server.c next to the implementation. */
+ * Values mirror xqc_multipath.h xqc_path_state_t (MQVPN_XQC_PATH_STATE_*
+ * above): 0 init, 1 validating, 2 active, 3 closing, 4 closed.
+ * If xquic re-orders this enum the labels become wrong; every value is
+ * pinned to the real enum by tests/test_xquic_abi_pin.c. */
 MQVPN_INTERNAL const char *mqvpn_path_state_label(int state);
 
 /* Snapshot of FEC / multipath counters for one client.
