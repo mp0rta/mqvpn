@@ -9,7 +9,7 @@ settings:
   base:
     SWIFT_VERSION: "5.9"
     LIBRARY_SEARCH_PATHS: "$(SRCROOT)/../build"
-    HEADER_SEARCH_PATHS: "$(SRCROOT)/../../include $(SRCROOT)/Shared"
+    HEADER_SEARCH_PATHS: "$(SRCROOT)/../../include $(SRCROOT)/../../src $(SRCROOT)/Shared"
 schemes:
   MqvpnPoC:
     build:
