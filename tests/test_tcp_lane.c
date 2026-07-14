@@ -2644,6 +2644,32 @@ test_connect_path_format_v4_pinned_literal(void)
                 "v4 path matches the plan's pinned literal");
 }
 
+static void
+test_connect_path_format_v6(void)
+{
+    /* 2001:db8::1, port 443 — raw colons, no brackets, no percent-encoding
+     * (spec 3.G: the server's tcp_egress.c path parser splits :path on '/'
+     * and feeds the host segment straight to inet_pton — bracketed or
+     * percent-encoded forms would inet_pton-fail there). */
+    mqvpn_flow_key_t k;
+    memset(&k, 0, sizeof(k));
+    k.ip_version = 6;
+    k.proto = 6;
+    k.dst_port = 443;
+    k.dst_ip[0] = 0x20;
+    k.dst_ip[1] = 0x01;
+    k.dst_ip[2] = 0x0d;
+    k.dst_ip[3] = 0xb8;
+    k.dst_ip[15] = 0x01;
+
+    char buf[80];
+    int n = mqvpn_tcp_lane_format_connect_path(buf, sizeof(buf), &k);
+    ASSERT_TRUE(n > 0 && (size_t)n < sizeof(buf),
+                "v6 path (<=45-char literal) fits cap=80 without truncation");
+    ASSERT_TRUE(strcmp(buf, "/.well-known/mqvpn/tcp/2001:db8::1/443/") == 0,
+                "v6 path uses raw colons, no brackets/percent-encoding");
+}
+
 /* ─── Task 12: close/error mapping + flow removal ───
  *
  * Per-row coverage of the close-mapping table (tcp_lane.c's Task 12
@@ -3637,6 +3663,7 @@ main(void)
     test_tcp_syn_isn_v6();
     test_connect_path_format_v4();
     test_connect_path_format_v4_pinned_literal();
+    test_connect_path_format_v6();
     test_lwip_err_teardown();
     test_h3_closing_notify_teardown();
     test_abort_pending_real();

@@ -312,10 +312,27 @@ int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
  * contract). Writes the request target as
  * "/.well-known/mqvpn/tcp/<dst>/<port>/" into out (capacity cap) and returns
  * snprintf's return value, so a caller can detect truncation the same way any
- * snprintf caller would (return >= cap). */
+ * snprintf caller would (return >= cap).
+ *
+ * v6 (Chunk 5, spec 3.G): emits the RAW inet_ntop colon form — NOT bracketed
+ * ("[2001:db8::1]") and NOT percent-encoded. The server's tcp_egress.c path
+ * parser splits :path on '/' and feeds the host segment straight to
+ * inet_pton with no bracket-strip/percent-decode step, so a bracketed or
+ * escaped literal would inet_pton-fail there (403). On an inet_ntop failure
+ * (malformed key->dst_ip; not expected in practice) returns -1 — the same
+ * negative-on-failure shape snprintf itself uses, so callers that already
+ * check `ret < 0` for truncation/error need no separate branch. */
 static inline int
 mqvpn_tcp_lane_format_connect_path(char *out, size_t cap, const mqvpn_flow_key_t *key)
 {
+    if (key->ip_version == 6) {
+        char ipbuf[INET6_ADDRSTRLEN];
+        if (!inet_ntop(AF_INET6, key->dst_ip, ipbuf, sizeof(ipbuf))) {
+            return -1;
+        }
+        return snprintf(out, cap, "/.well-known/mqvpn/tcp/%s/%u/", ipbuf,
+                        (unsigned)key->dst_port);
+    }
     return snprintf(out, cap, "/.well-known/mqvpn/tcp/%u.%u.%u.%u/%u/", key->dst_ip[0],
                     key->dst_ip[1], key->dst_ip[2], key->dst_ip[3],
                     (unsigned)key->dst_port);
