@@ -18,6 +18,14 @@
 /* ─── Constants ─── */
 /* MQVPN_MAX_PATHS and MQVPN_MAX_USERS are defined in libmqvpn.h */
 
+/* Mirror of xquic's private XQC_PATH_STATE_ACTIVE (third_party/xquic/
+ * src/transport/xqc_multipath.h). The library links shared xquic and sees
+ * only its public header, which exposes xqc_path_metrics_t.path_state as a
+ * bare uint8_t, so the enum symbol is not visible here. Use this named
+ * constant instead of a bare literal; its value is pinned to the real enum
+ * at compile time by tests/test_xquic_abi_pin.c. */
+#define MQVPN_XQC_PATH_STATE_ACTIVE 2
+
 /* Server "auto" TUN MTU.  The true MASQUE datagram MSS is per-connection
  * (peer TPs, CID length, FEC headroom, PMTUD) and unknowable at server
  * startup, so "auto" uses the typical negotiated value on a 1500-MTU path

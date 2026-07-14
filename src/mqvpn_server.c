@@ -2303,9 +2303,10 @@ mqvpn_path_state_label(int state)
 static const char *
 derive_mp_state_label(const xqc_conn_stats_t *st)
 {
-    /* Pin the xquic constants we depend on. XQC_PATH_STATE_ACTIVE = 2 lives
-     * in private xqc_multipath.h so we assert against the literal we use
-     * below; XQC_APP_PATH_STATUS_STANDBY is in the public xquic_typedef.h. */
+    /* XQC_APP_PATH_STATUS_STANDBY is in the public xquic_typedef.h, so pin
+     * it inline here. XQC_PATH_STATE_ACTIVE is private to xqc_multipath.h;
+     * we use MQVPN_XQC_PATH_STATE_ACTIVE below and pin it separately in
+     * tests/test_xquic_abi_pin.c (which can include the private header). */
     _Static_assert(XQC_APP_PATH_STATUS_STANDBY == 1,
                    "xquic XQC_APP_PATH_STATUS_STANDBY drifted from 1");
 
@@ -2316,10 +2317,10 @@ derive_mp_state_label(const xqc_conn_stats_t *st)
      * iterate by paths_info_count. paths_info may be NULL when count==0. */
     for (uint32_t i = 0; st->paths_info && i < st->paths_info_count; i++) {
         const xqc_path_metrics_t *p = &st->paths_info[i];
-        /* Only count paths in XQC_PATH_STATE_ACTIVE (=2); paths that are
-         * still validating, closing, or already closed should not influence
-         * the operator-facing label. */
-        if (p->path_state != 2) continue;
+        /* Only count ACTIVE paths; paths that are still validating,
+         * closing, or already closed should not influence the
+         * operator-facing label. */
+        if (p->path_state != MQVPN_XQC_PATH_STATE_ACTIVE) continue;
         /* FROZEN means xquic flushed the send buffer and stopped forwarding
          * on that path (xqc_set_application_path_status, xqc_multipath.c).
          * It cannot contribute to operational redundancy — neither as

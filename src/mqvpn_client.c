@@ -3310,9 +3310,9 @@ tick_check_all_validations(mqvpn_client_t *c, uint64_t now)
 
         const xqc_path_metrics_t *pm = xqc_find_path_metrics(&st, p->xqc_path_id);
         if (!pm) continue;
-        if (pm->path_state != 2) continue;
-        /* XQC_PATH_STATE_ACTIVE = 2 lives in private xqc_multipath.h;
-         * still validating below that. */
+        /* Skip paths not yet xquic-ACTIVE (still validating below). The
+         * value is pinned to xquic's enum by tests/test_xquic_abi_pin.c. */
+        if (pm->path_state != MQVPN_XQC_PATH_STATE_ACTIVE) continue;
 
         /* Branch on connection-scoped scheduler config — secondary paths
          * created under backup_fec are STANDBY (spec §10.1.1). Scheduler
