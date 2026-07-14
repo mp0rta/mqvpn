@@ -2602,6 +2602,48 @@ test_tcp_syn_isn_v6(void)
                   "v6 ISN read at the fixed offset (pkt[44..47])");
 }
 
+/* ─── Chunk 5, Task 5.1/5.2: connect-tcp :path formatter ───
+ *
+ * mqvpn_tcp_lane_format_connect_path is the pure helper extracted from
+ * cli_tcp_lane_open_stream's inline snprintf (mqvpn_client.c) so it gets a
+ * unit-test seam — that function is static and test_tcp_lane.c stubs
+ * cli_tcp_lane_open_stream rather than linking the real one, so there was
+ * previously no seam onto the inline snprintf at all. */
+
+static void
+test_connect_path_format_v4(void)
+{
+    mqvpn_flow_key_t k = mk_std_key(4000); /* dst 93.184.216.34:80, v4 */
+    char buf[80];
+    int n = mqvpn_tcp_lane_format_connect_path(buf, sizeof(buf), &k);
+    ASSERT_TRUE(n > 0 && (size_t)n < sizeof(buf), "v4 path formats without truncation");
+    ASSERT_TRUE(strcmp(buf, "/.well-known/mqvpn/tcp/93.184.216.34/80/") == 0,
+                "v4 path is the byte-identical dotted-quad form");
+}
+
+static void
+test_connect_path_format_v4_pinned_literal(void)
+{
+    /* Same fixture the plan itself pins (1.2.3.4/443) — a second, minimal
+     * key independent of mk_std_key's fixture in case that helper's field
+     * values ever change for unrelated reasons. */
+    mqvpn_flow_key_t k;
+    memset(&k, 0, sizeof(k));
+    k.ip_version = 4;
+    k.proto = 6;
+    k.dst_port = 443;
+    k.dst_ip[0] = 1;
+    k.dst_ip[1] = 2;
+    k.dst_ip[2] = 3;
+    k.dst_ip[3] = 4;
+
+    char buf[80];
+    int n = mqvpn_tcp_lane_format_connect_path(buf, sizeof(buf), &k);
+    ASSERT_TRUE(n > 0 && (size_t)n < sizeof(buf), "v4 path formats without truncation");
+    ASSERT_TRUE(strcmp(buf, "/.well-known/mqvpn/tcp/1.2.3.4/443/") == 0,
+                "v4 path matches the plan's pinned literal");
+}
+
 /* ─── Task 12: close/error mapping + flow removal ───
  *
  * Per-row coverage of the close-mapping table (tcp_lane.c's Task 12
@@ -3593,6 +3635,8 @@ main(void)
     test_tcp_syn_flag_cases();
     test_tcp_syn_isn_v4();
     test_tcp_syn_isn_v6();
+    test_connect_path_format_v4();
+    test_connect_path_format_v4_pinned_literal();
     test_lwip_err_teardown();
     test_h3_closing_notify_teardown();
     test_abort_pending_real();

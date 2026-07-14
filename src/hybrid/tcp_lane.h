@@ -5,6 +5,7 @@
 #define MQVPN_HYBRID_TCP_LANE_H
 
 #include <stdint.h>
+#include <stdio.h> /* snprintf (mqvpn_tcp_lane_format_connect_path) */
 #ifdef _MSC_VER
 /* MSVC has no ssize_t. NOTE: vendored xquic also typedefs ssize_t on
  * Windows (xquic_typedef.h, __int64 on 64-bit) and mqvpn_client.c sees
@@ -298,6 +299,27 @@ int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
     (-1) /* drained for now (would-block) — retry on the next READ_BODY/ \
           * EMPTY_FIN notify */
 #define MQVPN_TCP_LANE_H3_RECV_ERR (-2) /* fatal stream error */
+
+/* connect-tcp :path formatter — extracted (Chunk 5) from the inline snprintf
+ * that used to live directly in cli_tcp_lane_open_stream (mqvpn_client.c),
+ * purely so it gets a unit-test seam: that function is static and this file's
+ * test double stubs cli_tcp_lane_open_stream instead of linking the real one.
+ * `static inline` like the SYN helpers above, so both mqvpn_client.c and
+ * test_tcp_lane.c get it from this one header.
+ *
+ * key->dst_ip holds v4 in [0..3] (raw network-order header bytes — direct
+ * indexing prints correctly) and dst_port is host order (reorder.h key
+ * contract). Writes the request target as
+ * "/.well-known/mqvpn/tcp/<dst>/<port>/" into out (capacity cap) and returns
+ * snprintf's return value, so a caller can detect truncation the same way any
+ * snprintf caller would (return >= cap). */
+static inline int
+mqvpn_tcp_lane_format_connect_path(char *out, size_t cap, const mqvpn_flow_key_t *key)
+{
+    return snprintf(out, cap, "/.well-known/mqvpn/tcp/%u.%u.%u.%u/%u/", key->dst_ip[0],
+                    key->dst_ip[1], key->dst_ip[2], key->dst_ip[3],
+                    (unsigned)key->dst_port);
+}
 
 /* Implemented in mqvpn_client.c — the deliberate tcp_lane.c →
  * mqvpn_client.c coupling points (direct .c-to-.c calls, no callback-pointer

@@ -1190,12 +1190,13 @@ cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_k
     snprintf(authority, sizeof(authority), "%s:%d", c->config.server_host,
              c->config.server_port);
 
-    /* Original inner destination — key->dst_ip holds v4 in [0..3] (raw
-     * network-order header bytes, so direct indexing prints correctly),
-     * dst_port is host order (reorder.h key contract). */
-    char path[64];
-    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/%u.%u.%u.%u/%u/", key->dst_ip[0],
-             key->dst_ip[1], key->dst_ip[2], key->dst_ip[3], (unsigned)key->dst_port);
+    /* Original inner destination — see mqvpn_tcp_lane_format_connect_path's
+     * doc comment (tcp_lane.h) for the key-field byte-order contract this
+     * relies on. 80, not 64: a v6 literal (<= INET6_ADDRSTRLEN-1 = 45 bytes)
+     * plus the "/.well-known/mqvpn/tcp/" prefix (23) and "/<port>/" suffix
+     * (<= 7) is ~75 — 64 would truncate. */
+    char path[80];
+    mqvpn_tcp_lane_format_connect_path(path, sizeof(path), key);
 
     char auth_value[300];
 
