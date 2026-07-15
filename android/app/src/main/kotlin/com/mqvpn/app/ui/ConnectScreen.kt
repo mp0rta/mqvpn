@@ -67,7 +67,7 @@ fun ConnectScreen(
     val reorderProfile = MqvpnConfig.ReorderProfile.entries.firstOrNull {
         it.name == reorderProfileName
     } ?: MqvpnConfig.ReorderProfile.CELLULAR_BOND
-    var reorderPorts by rememberSaveable { mutableStateOf("") }
+    var reorderPorts by rememberSaveable { mutableStateOf("443") }
     var hybridEnabled by rememberSaveable { mutableStateOf(false) }
     var hybridTcpModeName by rememberSaveable {
         mutableStateOf(MqvpnConfig.HybridTcpMode.AUTO.name)
@@ -197,6 +197,7 @@ fun ConnectScreen(
                 value = reorderPorts,
                 onValueChange = { reorderPorts = it },
                 label = { Text("Reorder Ports (comma-separated, e.g. 443,8443)") },
+                supportingText = { Text("Empty = reorder all UDP flows") },
                 modifier = Modifier.fillMaxWidth(),
                 enabled = isDisconnected,
                 singleLine = true,
