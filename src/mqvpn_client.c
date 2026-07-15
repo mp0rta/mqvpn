@@ -85,6 +85,11 @@ static void cli_conn_destroy(mqvpn_client_t *c);
  * (~:648) and cli_connect_ip_on_headers (:1492) both call it ahead of its
  * definition (above cb_h3_conn_close). */
 static mqvpn_error_t cli_classify_status(int status);
+/* Forward-declared for the mqvpn_client_test_* wrapper cluster only (their
+ * production callers all sit below the definitions). */
+static void cli_signal_connect_fail(cli_conn_t *conn, mqvpn_error_t reason,
+                                    int status_for_log);
+static void cli_notify_conn_closed(mqvpn_client_t *c, cli_conn_t *conn);
 
 /* Look up xquic per-path metrics by path_id in a stats snapshot.
  *
@@ -660,6 +665,72 @@ mqvpn_client_test_classify_status(int status)
     return (int)cli_classify_status(status);
 }
 
+/* Test-only: attach a bare (calloc-zeroed, no xquic) conn to the client so
+ * the once-flag latch can be exercised without a live connection. Free with
+ * mqvpn_client_test_conn_free (cli_conn_destroy handles the all-NULL conn).
+ * Hidden from libmqvpn.so's dynamic export table (not part of the public
+ * ABI). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_conn_alloc(mqvpn_client_t *c)
+{
+    if (!c || c->conn) return -1;
+    cli_conn_t *conn = calloc(1, sizeof(*conn));
+    if (!conn) return -1;
+    conn->client = c;
+    c->conn = conn;
+    return 0;
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_conn_free(mqvpn_client_t *c)
+{
+    if (!c || !c->conn) return -1;
+    cli_conn_destroy(c);
+    return 0;
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_conn_tunnel_notified(const mqvpn_client_t *c)
+{
+    if (!c || !c->conn) return -1;
+    return c->conn->tunnel_notified;
+}
+
+/* Test-only: drive the real pre-establishment failure-signal path
+ * (cli_signal_connect_fail) on the attached test conn. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_signal_connect_fail(mqvpn_client_t *c, int reason, int status)
+{
+    if (!c || !c->conn) return -1;
+    cli_signal_connect_fail(c->conn, (mqvpn_error_t)reason, status);
+    return 0;
+}
+
+/* Test-only: drive the real cb_h3_conn_close platform-notify gate
+ * (cli_notify_conn_closed) on the attached test conn. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_notify_conn_closed(mqvpn_client_t *c)
+{
+    if (!c || !c->conn) return -1;
+    cli_notify_conn_closed(c, c->conn);
+    return 0;
+}
+
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((visibility("hidden")))
 #endif
@@ -1057,6 +1128,22 @@ cli_signal_connect_fail(cli_conn_t *conn, mqvpn_error_t reason, int status_for_l
     if (c->cbs.tunnel_closed) c->cbs.tunnel_closed(reason, c->user_ctx);
 }
 
+/* cb_h3_conn_close's platform notification, factored out so the once-flag
+ * gate is unit-testable without a live xqc_h3_conn_t (xqc_h3_conn_get_errno
+ * dereferences it unconditionally). Do NOT discriminate on conn->tunnel_ok
+ * here: vendored xquic runs the stream close-notify BEFORE the conn
+ * close-notify (xqc_conn.c destroys streams first), so cb_request_close has
+ * already zeroed tunnel_ok by now — a tunnel_ok test would be always-false
+ * and mislabel post-establishment drops as PROTOCOL. The once-flag alone
+ * gives exactly-once and preserves CLOSED for a genuine post-establishment
+ * drop. */
+static void
+cli_notify_conn_closed(mqvpn_client_t *c, cli_conn_t *conn)
+{
+    if (c->cbs.tunnel_closed && !conn->tunnel_notified)
+        c->cbs.tunnel_closed(MQVPN_ERR_CLOSED, c->user_ctx);
+}
+
 static int
 cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_data)
 {
@@ -1068,15 +1155,8 @@ cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_data)
     int err = xqc_h3_conn_get_errno(h3_conn);
     LOG_I(c, "connection closed (errno=%d)", err);
 
-    /* Notify platform (skip if a pre-establishment failure already fired).
-     * Do NOT discriminate on conn->tunnel_ok here: vendored xquic runs the
-     * stream close-notify BEFORE the conn close-notify (xqc_conn.c destroys
-     * streams first), so cb_request_close has already zeroed tunnel_ok by now
-     * — a tunnel_ok test would be always-false and mislabel post-establishment
-     * drops as PROTOCOL. The once-flag alone gives exactly-once and preserves
-     * CLOSED for a genuine post-establishment drop. */
-    if (c->cbs.tunnel_closed && !conn->tunnel_notified)
-        c->cbs.tunnel_closed(MQVPN_ERR_CLOSED, c->user_ctx);
+    /* Notify platform (skip if a pre-establishment failure already fired). */
+    cli_notify_conn_closed(c, conn);
 
     cli_conn_destroy(c);
 

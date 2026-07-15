@@ -24,11 +24,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../benchmarks/bench_env_setup.sh"
 
 MQVPN="${1:-${MQVPN}}"
-# WARN-or-lower: the "CONNECT-IP request failed" marker is a LOG_W line —
-# INFO/DEBUG works too (WARN is a strict superset at lower verbosity), but an
-# ERROR-only level would suppress it and hang wait_for_log into a false
-# failure. Keep this at "warn" deliberately (see cli_signal_connect_fail).
-BENCH_LOG_LEVEL="${BENCH_LOG_LEVEL:-warn}"
+# Force the log level unconditionally: the "CONNECT-IP request failed" marker
+# is a LOG_W line (cli_signal_connect_fail), so an externally exported
+# BENCH_LOG_LEVEL=error would suppress it and hang wait_for_log into a false
+# failure. bench_env_setup.sh already applied its own default at source time,
+# so a ${VAR:-} guard here would be a no-op — overwrite it outright.
+BENCH_LOG_LEVEL="info"
 
 PASS=0
 FAIL=0

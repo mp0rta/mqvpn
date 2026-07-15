@@ -1234,8 +1234,7 @@ TEST(cb_path_removed_validating_to_create_wait)
  * (PATH_ABANDON) exactly like a secondary's; the id-0 guard introduced by
  * the PR4 refactor (#116) skipped it and cost a ~95-115 s server-side
  * downlink blackout on primary loss (iOS PoC gate G-i3). */
-extern int mqvpn_client_test_force_validating(mqvpn_client_t *c,
-                                              mqvpn_path_handle_t handle,
+extern int mqvpn_client_test_force_validating(mqvpn_client_t *c, mqvpn_path_handle_t handle,
                                               uint64_t xqc_path_id);
 extern int mqvpn_client_test_abandon_due(mqvpn_client_t *c, mqvpn_path_handle_t handle);
 
@@ -1718,6 +1717,109 @@ TEST(classify_status_zero_is_protocol)
     /* status 0 = no :status header observed (e.g. malformed / stream reset
      * before headers) — treated as PROTOCOL. */
     ASSERT_EQ(mqvpn_client_test_classify_status(0), MQVPN_ERR_PROTOCOL);
+}
+
+/* ── Callback-ordering once-flag (tunnel_notified latch) ──
+ *
+ * Two callbacks can witness a pre-establishment failure (non-200 headers vs
+ * tunnel-stream RST), and cb_h3_conn_close follows both. The per-conn
+ * tunnel_notified latch must guarantee exactly ONE tunnel_closed per failed
+ * conn, and cb_h3_conn_close's CLOSED notification must be skipped when the
+ * latch is set — but still fire for an un-latched (genuine
+ * post-establishment) close. Driven through the real
+ * cli_signal_connect_fail / cli_notify_conn_closed via test hooks, on a bare
+ * conn attached by mqvpn_client_test_conn_alloc. */
+
+extern int mqvpn_client_test_conn_alloc(mqvpn_client_t *c);
+extern int mqvpn_client_test_conn_free(mqvpn_client_t *c);
+extern int mqvpn_client_test_conn_tunnel_notified(const mqvpn_client_t *c);
+extern int mqvpn_client_test_signal_connect_fail(mqvpn_client_t *c, int reason,
+                                                 int status);
+extern int mqvpn_client_test_notify_conn_closed(mqvpn_client_t *c);
+
+static int g_tunnel_closed_count = 0;
+static mqvpn_error_t g_last_tunnel_closed_reason;
+
+static void
+mock_tunnel_closed(mqvpn_error_t reason, void *u)
+{
+    (void)u;
+    g_tunnel_closed_count++;
+    g_last_tunnel_closed_reason = reason;
+}
+
+/* Helper: make_test_client + counting tunnel_closed callback. */
+static mqvpn_client_t *
+make_test_client_with_closed_cb(void)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    mqvpn_config_set_server(cfg, "1.2.3.4", 443);
+
+    mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
+    cbs.tun_output = dummy_tun_output;
+    cbs.tunnel_config_ready = dummy_config_ready;
+    cbs.tunnel_closed = mock_tunnel_closed;
+
+    mqvpn_client_t *c = mqvpn_client_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    g_tunnel_closed_count = 0;
+    return c;
+}
+
+TEST(connect_fail_signals_tunnel_closed_exactly_once)
+{
+    mqvpn_client_t *c = make_test_client_with_closed_cb();
+    ASSERT_EQ(mqvpn_client_test_conn_alloc(c), 0);
+    ASSERT_EQ(mqvpn_client_test_conn_tunnel_notified(c), 0);
+
+    /* First witness (e.g. 403 headers) fires the callback and latches. */
+    ASSERT_EQ(mqvpn_client_test_signal_connect_fail(c, MQVPN_ERR_AUTH, 403), 0);
+    ASSERT_EQ(g_tunnel_closed_count, 1);
+    ASSERT_EQ(g_last_tunnel_closed_reason, MQVPN_ERR_AUTH);
+    ASSERT_EQ(mqvpn_client_test_conn_tunnel_notified(c), 1);
+
+    /* Second witness (e.g. the stream RST that follows the 403) must be a
+     * no-op: still exactly one callback, first reason preserved. */
+    ASSERT_EQ(mqvpn_client_test_signal_connect_fail(c, MQVPN_ERR_PROTOCOL, 0), 0);
+    ASSERT_EQ(g_tunnel_closed_count, 1);
+    ASSERT_EQ(g_last_tunnel_closed_reason, MQVPN_ERR_AUTH);
+
+    ASSERT_EQ(mqvpn_client_test_conn_free(c), 0);
+    mqvpn_client_destroy(c);
+}
+
+TEST(conn_close_skips_closed_after_connect_fail)
+{
+    mqvpn_client_t *c = make_test_client_with_closed_cb();
+    ASSERT_EQ(mqvpn_client_test_conn_alloc(c), 0);
+
+    /* Pre-establishment failure latches and fires once... */
+    ASSERT_EQ(mqvpn_client_test_signal_connect_fail(c, MQVPN_ERR_AUTH, 403), 0);
+    ASSERT_EQ(g_tunnel_closed_count, 1);
+
+    /* ...then cb_h3_conn_close's notify gate must NOT add a second
+     * (CLOSED) callback for the same conn. */
+    ASSERT_EQ(mqvpn_client_test_notify_conn_closed(c), 0);
+    ASSERT_EQ(g_tunnel_closed_count, 1);
+    ASSERT_EQ(g_last_tunnel_closed_reason, MQVPN_ERR_AUTH);
+
+    ASSERT_EQ(mqvpn_client_test_conn_free(c), 0);
+    mqvpn_client_destroy(c);
+}
+
+TEST(conn_close_fires_closed_when_not_latched)
+{
+    mqvpn_client_t *c = make_test_client_with_closed_cb();
+    ASSERT_EQ(mqvpn_client_test_conn_alloc(c), 0);
+
+    /* Genuine post-establishment drop: no pre-establishment failure fired,
+     * so the conn-close notify must deliver exactly one CLOSED. */
+    ASSERT_EQ(mqvpn_client_test_notify_conn_closed(c), 0);
+    ASSERT_EQ(g_tunnel_closed_count, 1);
+    ASSERT_EQ(g_last_tunnel_closed_reason, MQVPN_ERR_CLOSED);
+
+    ASSERT_EQ(mqvpn_client_test_conn_free(c), 0);
+    mqvpn_client_destroy(c);
 }
 
 TEST(client_set_state_reconnecting_clears_handshake_start)
@@ -2386,6 +2488,9 @@ main(void)
     run_classify_status_404_is_protocol();
     run_classify_status_500_is_protocol();
     run_classify_status_zero_is_protocol();
+    run_connect_fail_signals_tunnel_closed_exactly_once();
+    run_conn_close_skips_closed_after_connect_fail();
+    run_conn_close_fires_closed_when_not_latched();
 
     run_client_set_state_reconnecting_clears_handshake_start();
     run_get_interest_includes_handshake_stall_deadline();
