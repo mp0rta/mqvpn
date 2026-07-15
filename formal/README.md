@@ -4,16 +4,18 @@
 # Formal verification models
 
 This directory contains TLA+ models of mqvpn state machines, checked with
-TLC. The models are written *as-is* against the implementation: they encode
-what the code does (including deliberately weak guards), not an idealized
-design. Divergence between a model and the code it maps is a bug in one of
-the two.
+TLC, plus a CBMC harness that pins the C implementation to the TLA+
+transition relation. The models are written *as-is* against the
+implementation: they encode what the code does (including deliberately weak
+guards), not an idealized design. Divergence between a model and the code it
+maps is a bug in one of the two.
 
 ## Models
 
 | Model | Maps | Checks |
 |-------|------|--------|
 | `MqvpnPathSlot.tla` | Single path-slot lifecycle FSM (`src/path_state_machine.c`) composed with an abstract environment (platform, abstract xquic, API, connection reset) | Slot-reuse safety under delayed callbacks, per-state invariants, cleanup liveness, retry accounting |
+| `cbmc/` (harness) | `path_on_event()` (`src/path_state_machine.c`), all 10 events over all invariant-legal shapes | Bounded-model-checked conformance of the C field updates to the TLA+ transition relation, `path_invariant_check()` assertions, callback-emission discipline, absence of UB in the assumed domain |
 
 ## How to run
 
@@ -81,6 +83,107 @@ been found.`
   manual reactivation. This is intentional implementation behavior; whether
   duplicate CLOSED notifications are desirable for observers is a UX
   question outside this model's scope.
+
+## CBMC conformance harness (`cbmc/`)
+
+While TLC explores the *asynchronous environment* around the FSM, the CBMC
+harness closes the model↔code gap: it proves that the real
+`path_on_event()` C code performs exactly the field updates the TLA+
+event-handler operators describe, for **every** invariant-legal input shape
+and every event — not just the shapes unit tests enumerate.
+
+### How to run
+
+Requires `cbmc` >= 5.95 on PATH (Ubuntu: `apt install cbmc`; without root:
+`apt-get download cbmc minisat`, `dpkg -x` both into a prefix, and export
+`PATH`/`LD_LIBRARY_PATH` accordingly).
+
+```bash
+formal/cbmc/run.sh
+```
+
+Last verified with CBMC 5.95.1: `VERIFICATION SUCCESSFUL`, 0 of 1541
+properties failed (includes all `path_invariant_check` assertions,
+unwinding assertions, and the built-in bounds / pointer / signed-overflow /
+undefined-shift / div-by-zero checks).
+
+### What is pinned
+
+- **Transition conformance (P15)**: post-state equals the
+  `model_step()` prediction (a line-referenced transliteration of the TLA+
+  operators in `cbmc/model_step.h`) field by field, under the abstraction
+  map documented at the top of `model_step.h`. `xqc_path_id` is compared
+  exactly (not as a boolean), so storing a *wrong* nonzero id would be
+  caught.
+- **Per-state invariants + status projection (P2, C side)**: the
+  `assert()`s inside `path_invariant_check()` become CBMC proof
+  obligations (`NDEBUG` must never be defined for this run).
+- **Callback discipline**: the public path event fires exactly on
+  lifecycle-state change (`path_on_event` tail), and the xquic app-status
+  mirror (`g_p15_xqc_app_status_for`) fires exactly per its table.
+- **`ADD_FD` is checked caller-composed**: the handler only contributes
+  `platform_attached` + state; `path_entry_init` and the fresh `fd >= 0`
+  are the caller's prefix (`mqvpn_client_add_path_fd_with_outcome`,
+  `mqvpn_client.c:2616-2691`), reproduced by the harness — matching the TLA+
+  `ApiAddFd` action, which models the composite atomically.
+- **NULL-ctx defensive branch**: leaves the slot untouched, fires nothing.
+
+### Assumptions (harness `__CPROVER_assume` domain)
+
+Each assumption narrows the verified domain; anything outside it is
+unverified by this harness.
+
+1. **Initial shape is invariant-legal** — the pre-state satisfies
+   `path_invariant_check()` (transliterated as assumptions) plus
+   `status == path_public_status_from_lifecycle(state)`. Shapes the
+   invariant does not constrain (e.g. nonzero `xqc_path_id` in
+   CREATE_WAIT) are *included* even if no current caller produces them.
+2. **`platform_attached` / `xquic_path_live` ∈ {0, 1}** — writer
+   discipline; the FSM and its callers only ever write 0 or 1.
+3. **`ctx->now_us` ∈ [1, 2^62]** — the lower bound is a caller contract:
+   `client_now_us` returns an injected clock with no nonzero guard
+   (`mqvpn_client.c:311-314`), and a zero clock would leave
+   `path_stable_since_us == 0` after VALIDATION_OK, disarming the stable
+   timer (the TLA+ model sets `stableArmed' = TRUE` unconditionally). The
+   upper bound keeps `now_us + backoff(<= 60s)` from wrapping to 0 and
+   disarming the retry timer; 2^62 µs ≈ 146,000 years of monotonic clock.
+4. **`new_xqc_path_id >= 1` on ACTIVATE_OK** — an *external xquic
+   guarantee*, not a caller-side check: `activate_via_xquic_classify`
+   forwards the id without validating it (`mqvpn_client.c:1967-1975`);
+   nonzero-ness comes from `xqc_conn_get_available_path_id`
+   (`third_party/xquic/src/transport/xqc_conn.c:5444-5467`), which never
+   returns id 0 (held by the initial path). Adding a caller-side check is
+   a possible hardening follow-up.
+5. **`validated_target` ∈ {ACTIVE, STANDBY} on VALIDATION_OK** — caller
+   contract, both callsites checked (`mqvpn_client.c:1643,3326`).
+6. **`recreate_retries` ∈ [0, PATH_RECREATE_MAX_RETRIES + 1]** — the
+   abstraction saturates at the cap (as the TLA+ model does for TypeOK),
+   and cap+1 represents every "already past the threshold" entry state.
+   **Known out-of-domain issue**: the concrete counter is incremented
+   unboundedly (`apply_failure_with_retry_check`,
+   `src/path_state_machine.c:389`), and the loop CLOSED_RECOVERABLE →
+   MANUAL_REACTIVATE(OK) → VALIDATING → XQUIC_REMOVED raises it past the
+   cap without limit — a theoretical `int` signed-overflow after ~2^31
+   manual-reactivate round trips. Saturating the increment is a possible
+   hardening follow-up; the abstract state space is unaffected (all values
+   ≥ cap project to the same abstract state).
+
+### Sensitivity (mutation) check
+
+Green runs are only meaningful if the harness can fail. Verified on two
+deliberate `model_step.h` mutations, each detected as expected:
+swapping the TRANSIENT retry target (CREATE_WAIT → DEGRADED) fails
+`conformance: state`; corrupting the →DEGRADED app-status table value
+fails `xqc app-status notify value`.
+
+Coverage note: the ACTIVE↔STANDBY rows of the app-status table
+(`g_p15_xqc_app_status_for` returning 1 and 2) are **not exercisable
+through `path_on_event`** — no single event produces those transitions,
+and the residual direct `set_path_state_with_log` callsites
+(`mqvpn_client.c:2109,2327`) only target VALIDATING. Those two table rows
+are therefore pinned only structurally (same-shape transliteration), not
+behaviorally; they become checkable if a scheduler-driven ACTIVE↔STANDBY
+switch is ever routed through the FSM.
 
 ## Counterexample log
 
