@@ -947,20 +947,26 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
             close(fd);
             return svr_tcp_egress_respond(h3_request, 500, 1);
         }
-        /* Defense-in-depth for v4-mapped destinations. The PRIMARY boundary
-         * is the ACL: DEFAULT_DENY_V6's ::ffff:0:0/96 row 403s EVERY
-         * v4-mapped literal (e.g. "::ffff:127.0.0.1") in
-         * svr_tcp_egress_acl_allowed, before this function is ever reached —
-         * so start_connect never runs for one under the normal request path.
-         * IPV6_V6ONLY is the belt-and-suspenders in case any OTHER path ever
-         * reaches connect() with a v4-mapped dst: without it, connect() to
-         * "::ffff:127.0.0.1" would reach the v4 address 127.0.0.1 directly,
-         * bypassing every v4 DEFAULT_DENY_V4/tunnel-subnet check (the ACL
-         * evaluated the target purely as v6). Set BEFORE connect(). Return
-         * intentionally unchecked — the /96 ACL row is the real boundary, so
-         * a V6ONLY failure only loses this secondary layer. */
+        /* v4-mapped-destination guard — two INDEPENDENT defenses, and this
+         * one (IPV6_V6ONLY) is load-bearing, NOT merely defense-in-depth:
+         *   1. Under the DEFAULT config, DEFAULT_DENY_V6's ::ffff:0:0/96 row
+         *      403s every v4-mapped literal (e.g. "::ffff:127.0.0.1") in
+         *      svr_tcp_egress_acl_allowed before this function is reached.
+         *   2. BUT the ACL evaluates EgressAllow BEFORE DEFAULT_DENY_V6, so an
+         *      operator EgressAllow that covers a v4-mapped range (or "::/0")
+         *      overrides the /96 row and lets such a target reach here. In
+         *      that case IPV6_V6ONLY is the SOLE defense: without it, connect()
+         *      to "::ffff:127.0.0.1" reaches the v4 address 127.0.0.1 directly,
+         *      bypassing every v4 DEFAULT_DENY_V4 / tunnel-subnet check (the
+         *      ACL evaluated the target purely as v6).
+         * Set BEFORE connect(), and FAIL CLOSED on error: if the socket cannot
+         * be pinned to v6-only we cannot rule out the v4-mapped bypass, so
+         * abort the connect rather than risk it. */
         int v6only = 1;
-        setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+        if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only)) != 0) {
+            close(fd);
+            return svr_tcp_egress_respond(h3_request, 500, 1);
+        }
         dst_len = sizeof(*dst6);
     } else {
         struct sockaddr_in *dst4 = (struct sockaddr_in *)&dst;
