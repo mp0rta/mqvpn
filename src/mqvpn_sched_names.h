@@ -121,10 +121,11 @@ case enum_val: return 1;
  * (built with -Werror in the project's CI sanitizer job, see AGENTS.md G11)
  * turns "a new mqvpn_scheduler_t enumerator was added to libmqvpn.h but not
  * to MQVPN_SCHED_LIST" into a build failure. Never called; exists purely for
- * the compiler to typecheck it. A literal _Static_assert on row count isn't
- * feasible here without adding a private sentinel enumerator to the public
- * ABI header (out of scope for this refactor), so this switch is the
- * cheapest equivalent. */
+ * the compiler to typecheck it. This is stronger than a row-count
+ * _Static_assert: it checks membership in both directions (every enumerator
+ * has a table row via -Wswitch, every table row names a real enumerator via
+ * the case labels), not just cardinality — and the enum values themselves
+ * are ABI-fixed in libmqvpn.h, so the case labels double as a pin. */
 static inline void
 mqvpn_sched_list_covers_enum_(mqvpn_scheduler_t sched)
 {
@@ -134,7 +135,6 @@ case enum_val: break;
         MQVPN_SCHED_LIST(MQVPN_SCHED_COVERAGE_CASE)
 #undef MQVPN_SCHED_COVERAGE_CASE
     }
-    (void)sched;
 }
 
 static inline void
@@ -146,7 +146,6 @@ case enum_val: break;
         MQVPN_CC_LIST(MQVPN_CC_COVERAGE_CASE)
 #undef MQVPN_CC_COVERAGE_CASE
     }
-    (void)cc;
 }
 
 #endif /* MQVPN_SCHED_NAMES_H */

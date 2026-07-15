@@ -79,15 +79,30 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     out->idle_time_out = 120000;
     out->init_idle_time_out = 10000;
 
-    /* --- congestion control --- */
-    switch (in->cc) {
+    /* --- congestion control ---
+     * Invalid/out-of-range values fall back to BBR2, matching the old
+     * `default:` case. Normalized up front so the switch can drop
+     * `default:` and get -Wswitch coverage (same treatment as
+     * mqvpn_apply_scheduler above). */
+    mqvpn_cc_t cc = in->cc;
+    if (!mqvpn_cc_is_valid(cc)) cc = MQVPN_CC_BBR2;
+#ifndef XQC_ENABLE_UNLIMITED
+    /* Built without UNLIMITED — NONE degrades to BBR2, as the old
+     * default: case did (main.c's CLI gate rejects "none" up front; this
+     * only protects direct API callers). */
+    if (cc == MQVPN_CC_NONE) cc = MQVPN_CC_BBR2;
+#endif
+    switch (cc) {
     case MQVPN_CC_BBR: out->cong_ctrl_callback = xqc_bbr_cb; break;
     case MQVPN_CC_CUBIC: out->cong_ctrl_callback = xqc_cubic_cb; break;
+    case MQVPN_CC_NONE:
 #ifdef XQC_ENABLE_UNLIMITED
-    case MQVPN_CC_NONE: out->cong_ctrl_callback = xqc_unlimited_cc_cb; break;
+        out->cong_ctrl_callback = xqc_unlimited_cc_cb;
 #endif
+        /* unreachable when UNLIMITED is off (normalized above); the case
+         * label stays so -Wswitch coverage holds in both build configs. */
+        break;
     case MQVPN_CC_BBR2:
-    default:
         out->cong_ctrl_callback = xqc_bbr2_cb;
         out->cc_params.cc_optimization_flags =
             XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
