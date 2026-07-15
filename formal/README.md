@@ -102,7 +102,7 @@ Requires `cbmc` >= 5.95 on PATH (Ubuntu: `apt install cbmc`; without root:
 formal/cbmc/run.sh
 ```
 
-Last verified with CBMC 5.95.1: `VERIFICATION SUCCESSFUL`, 0 of 1541
+Last verified with CBMC 5.95.1: `VERIFICATION SUCCESSFUL`, 0 of 1547
 properties failed (includes all `path_invariant_check` assertions,
 unwinding assertions, and the built-in bounds / pointer / signed-overflow /
 undefined-shift / div-by-zero checks).
@@ -127,6 +127,23 @@ undefined-shift / div-by-zero checks).
   `mqvpn_client.c:2616-2691`), reproduced by the harness — matching the TLA+
   `ApiAddFd` action, which models the composite atomically.
 - **NULL-ctx defensive branch**: leaves the slot untouched, fires nothing.
+- **Exact-value pins**: on top of the abstract-tuple comparison, the
+  harness fixes the *concrete* post-values of `fd` (written only by
+  FD_CLOSED, to -1), `recreate_retries` (incremented exactly by
+  `apply_failure_with_retry_check`, zeroed by CONN_RESET),
+  `recreate_after_us` (`now + backoff` when freshly armed, literal 0 when
+  disarmed, carried over otherwise — e.g. across a failed manual
+  reactivate), and `path_stable_since_us` (`now` on validation, 0 when
+  disarmed). A sign-preserving wrong fd write or a wrong nonzero
+  timestamp therefore cannot pass. It also pins that every state change
+  re-anchors `state_entered_at_us`. These pins deliberately re-encode the
+  handler guards, so a drift in either encoding fails.
+
+Known scope boundary: same-state re-anchoring behavior (the
+`state_entered_at_us == 0` "first entry" special case in
+`set_path_state_with_log`) affects only logging and the residence-warn
+timer, both outside the TLA+ slot state; it is exercised by the unit
+tests, not this harness.
 
 ### Assumptions (harness `__CPROVER_assume` domain)
 

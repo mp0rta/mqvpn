@@ -179,6 +179,13 @@ harness(void)
 
     abs_slot_t pre = abs_of_entry(&p);
 
+    /* Concrete pre-values for the exact-value pins below (the abstract
+     * tuple alone would let a sign/nonzero-preserving wrong write pass). */
+    int pre_fd = p.fd;
+    int pre_retries_concrete = p.recreate_retries;
+    uint64_t pre_after = p.recreate_after_us;
+    uint64_t pre_stable = p.path_stable_since_us;
+
     /* NULL-ctx defensive branch (path_on_event, src/path_state_machine.c:
      * 425-429): must leave the slot untouched and fire nothing. */
     if (nondet_int()) {
@@ -217,6 +224,71 @@ harness(void)
                      "conformance: retry_armed");
     __CPROVER_assert(post.stable_armed == expected.stable_armed,
                      "conformance: stable_armed");
+
+    /* ── Exact-value pins ──
+     * The abstract tuple compares fd/timers/retries through sign / nonzero /
+     * saturation abstractions (matching the TLA state space). The pins below
+     * additionally fix the CONCRETE values, so a wrong-but-same-sign fd
+     * write, a wrong nonzero timestamp, or a wrong over-cap retry count
+     * cannot pass. They intentionally re-encode the handler guards — a
+     * drift in either encoding fails the check. */
+
+    /* apply_failure_with_retry_check runs exactly on these guard-passed
+     * dispatches (src/path_state_machine.c:468-470,502-504,540-548). */
+    int ran_apply_failure =
+        (ev == PATH_EVENT_ACTIVATE_REQUESTED && pre.state == PATH_LC_PENDING &&
+         ctx.result == ACTIVATE_TRANSIENT_FAIL) ||
+        (ev == PATH_EVENT_RETRY_TIMER &&
+         (pre.state == PATH_LC_CREATE_WAIT || pre.state == PATH_LC_DEGRADED) &&
+         ctx.result == ACTIVATE_TRANSIENT_FAIL) ||
+        (ev == PATH_EVENT_XQUIC_REMOVED &&
+         (pre.state == PATH_LC_VALIDATING || pre.state == PATH_LC_ACTIVE ||
+          pre.state == PATH_LC_STANDBY));
+
+    /* recreate_retries: incremented by apply_failure (unconditionally, even
+     * past the cap — src/path_state_machine.c:389), zeroed by CONN_RESET,
+     * untouched otherwise. */
+    int expected_retries_concrete =
+        (ev == PATH_EVENT_CONN_RESET)
+            ? 0
+            : (ran_apply_failure ? pre_retries_concrete + 1 : pre_retries_concrete);
+    __CPROVER_assert(p.recreate_retries == expected_retries_concrete,
+                     "exact: recreate_retries");
+
+    /* recreate_after_us: freshly armed only by apply_failure below the cap
+     * (now + backoff, src/path_state_machine.c:394); every path that
+     * disarms writes literal 0; otherwise carried over (e.g. failed
+     * MANUAL_REACTIVATE keeps the pending auto-retry deadline). */
+    uint64_t expected_after =
+        (ran_apply_failure && expected.retry_armed)
+            ? ctx.now_us + path_recreate_backoff(expected_retries_concrete)
+            : (expected.retry_armed ? pre_after : 0);
+    __CPROVER_assert(p.recreate_after_us == expected_after, "exact: recreate_after_us");
+
+    /* path_stable_since_us: set to now only by VALIDATION_OK in VALIDATING
+     * (src/path_state_machine.c:529); cleared to 0 wherever disarmed. */
+    uint64_t expected_stable =
+        (ev == PATH_EVENT_VALIDATION_OK && pre.state == PATH_LC_VALIDATING)
+            ? ctx.now_us
+            : (expected.stable_armed ? pre_stable : 0);
+    __CPROVER_assert(p.path_stable_since_us == expected_stable,
+                     "exact: path_stable_since_us");
+
+    /* fd: written by the FSM only in path_on_fd_closed (-1,
+     * src/path_state_machine.c:687); every other handler must leave it. */
+    int expected_fd =
+        (ev == PATH_EVENT_FD_CLOSED && pre.state == PATH_LC_CLOSED_DROPPED) ? -1 : pre_fd;
+    __CPROVER_assert(p.fd == expected_fd, "exact: fd");
+
+    /* Residence-timer anchor: every real state change must re-anchor
+     * state_entered_at_us via path_mark_state_entry (stub clock returns 1).
+     * Same-state re-anchoring (state_entered_at_us == 0 self-loops) is a
+     * logging/residence-timer concern outside this harness's scope — see
+     * formal/README.md. */
+    if (pre.state != post.state) {
+        __CPROVER_assert(p.state_entered_at_us == 1,
+                         "state change re-anchors residence timer");
+    }
 
     /* Public callback fires exactly on lifecycle-state change
      * (path_on_event, src/path_state_machine.c:446-448). */
