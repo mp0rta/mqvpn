@@ -105,23 +105,24 @@ typedef enum {
  * Decide STAMP / RAW / DROP for one TUN-read inner-IP packet.
  *
  * reorder_tx may be NULL (no reorder engine for this connection/session).
- * *do_stamp must be caller-zeroed; written only on MQVPN_RGATE_STAMP. *peek
- * must be caller-zeroed (or at least valid to write into); written only on
- * MQVPN_RGATE_STAMP (mirrors mqvpn_reorder_tx_peek's own contract). *out_mtu
- * is written only on the two DROP verdicts.
+ * The MQVPN_RGATE_STAMP return value is the single source of truth for
+ * whether the caller stamps ("do_stamp"); there is no separate out-flag.
+ * peek->action is written whenever the reorder branch runs (the peek
+ * memsets *peek and sets action on every path — see reorder_tx.h); hdr/flow
+ * are meaningful only on STAMP. *out_mtu is written only on the two DROP
+ * verdicts.
  */
 static inline mqvpn_rgate_verdict_t
 mqvpn_rgate_decide(mqvpn_reorder_tx_t *reorder_tx, int peer_reorder_supported,
                    mqvpn_reorder_mode_t reorder_mode, const uint8_t *pkt, size_t len,
-                   uint64_t now_us, uint32_t udp_mss, int *do_stamp,
-                   mqvpn_reorder_tx_peek_t *peek, size_t *out_mtu)
+                   uint64_t now_us, uint32_t udp_mss, mqvpn_reorder_tx_peek_t *peek,
+                   size_t *out_mtu)
 {
     if (reorder_tx && peer_reorder_supported && reorder_mode != MQVPN_REORDER_OFF &&
         udp_mss > 0) {
         mqvpn_reorder_tx_action_t act =
             mqvpn_reorder_tx_peek(reorder_tx, pkt, len, now_us, udp_mss, peek);
         if (act == MQVPN_REORDER_TX_STAMP) {
-            *do_stamp = 1;
             return MQVPN_RGATE_STAMP;
         } else if (act == MQVPN_REORDER_TX_DROP_MTU) {
             /* MQVPN_REORDER_HDR_LEN (8) + len exceeds the DATAGRAM payload:
@@ -152,9 +153,11 @@ mqvpn_rgate_decide(mqvpn_reorder_tx_t *reorder_tx, int peer_reorder_supported,
  * conn->addr6_assigned; server: always for v4, pool.has_v6 for v6) — when
  * false, no token is consumed (mirrors the historical
  * `if (addr_ok && ptb_rate_allow(...))` short-circuit). `src_ip` is 4 bytes
- * for ip_ver==4, 16 bytes for ip_ver==6. Returns 1 if the ICMP was actually
- * sent (rate limit + addr_ok both passed) so the caller can log identically
- * to before; 0 otherwise.
+ * for ip_ver==4, 16 bytes for ip_ver==6. On ip_ver==4 an mtu above the
+ * 16-bit ICMP field silently clamps to 0xFFFF (v6 carries the full 32-bit
+ * value) — same as the historical inline emission. Returns 1 if the ICMP was
+ * actually sent (rate limit + addr_ok both passed) so the caller can log
+ * identically to before; 0 otherwise.
  */
 static inline int
 mqvpn_rgate_send_ptb(mqvpn_ptb_bucket_t *bucket, int64_t now_ms, uint8_t ip_ver,

@@ -83,13 +83,11 @@ test_decide_no_reorder_tx_raw(void)
 {
     uint8_t pkt[256];
     size_t n = build_v4_udp(pkt, 5000, 443, 100);
-    int do_stamp = 0;
     mqvpn_reorder_tx_peek_t peek = {0};
     size_t mtu = 0;
-    mqvpn_rgate_verdict_t v = mqvpn_rgate_decide(NULL, 1, MQVPN_REORDER_ON, pkt, n, 1,
-                                                 1400, &do_stamp, &peek, &mtu);
+    mqvpn_rgate_verdict_t v =
+        mqvpn_rgate_decide(NULL, 1, MQVPN_REORDER_ON, pkt, n, 1, 1400, &peek, &mtu);
     ASSERT_EQ_INT(v, MQVPN_RGATE_RAW, "no reorder_tx -> RAW");
-    ASSERT_EQ_INT(do_stamp, 0, "do_stamp untouched");
 }
 
 /* Peer hasn't advertised reorder support: stays RAW even with a live engine
@@ -101,18 +99,17 @@ test_decide_peer_unsupported_raw(void)
     mqvpn_reorder_tx_t *tx = mqvpn_reorder_tx_new(&c, 0x1);
     uint8_t pkt[256];
     size_t n = build_v4_udp(pkt, 5000, 443, 100);
-    int do_stamp = 0;
     mqvpn_reorder_tx_peek_t peek = {0};
     size_t mtu = 0;
     mqvpn_rgate_verdict_t v = mqvpn_rgate_decide(tx, /*peer_reorder_supported=*/0, c.mode,
-                                                 pkt, n, 1, 1400, &do_stamp, &peek, &mtu);
+                                                 pkt, n, 1, 1400, &peek, &mtu);
     ASSERT_EQ_INT(v, MQVPN_RGATE_RAW, "peer unsupported -> RAW");
-    ASSERT_EQ_INT(do_stamp, 0, "do_stamp untouched");
     mqvpn_reorder_tx_free(tx);
 }
 
-/* Eligible flow, everything gated open, fits budget: STAMP, do_stamp set,
- * peek->hdr filled (passthrough of mqvpn_reorder_tx_peek's own STAMP path). */
+/* Eligible flow, everything gated open, fits budget: STAMP verdict (the
+ * caller derives do_stamp from it), peek->hdr filled (passthrough of
+ * mqvpn_reorder_tx_peek's own STAMP path). */
 static void
 test_decide_stamp_passthrough(void)
 {
@@ -120,13 +117,11 @@ test_decide_stamp_passthrough(void)
     mqvpn_reorder_tx_t *tx = mqvpn_reorder_tx_new(&c, 0x1);
     uint8_t pkt[256];
     size_t n = build_v4_udp(pkt, 5000, 443, 100);
-    int do_stamp = 0;
     mqvpn_reorder_tx_peek_t peek = {0};
     size_t mtu = 0;
     mqvpn_rgate_verdict_t v =
-        mqvpn_rgate_decide(tx, 1, c.mode, pkt, n, 1, 1400, &do_stamp, &peek, &mtu);
+        mqvpn_rgate_decide(tx, 1, c.mode, pkt, n, 1, 1400, &peek, &mtu);
     ASSERT_EQ_INT(v, MQVPN_RGATE_STAMP, "eligible + fits budget -> STAMP");
-    ASSERT_EQ_INT(do_stamp, 1, "do_stamp set");
     ASSERT_EQ_INT(peek.action, MQVPN_REORDER_TX_STAMP, "peek.action STAMP");
     mqvpn_reorder_tx_free(tx);
 }
@@ -146,14 +141,12 @@ test_decide_drop_reorder_mtu(void)
     size_t built = build_v4_udp(pkt, 5000, 443, n - 28);
     ASSERT_EQ_INT(built, n, "built == N-7");
 
-    int do_stamp = 0;
     mqvpn_reorder_tx_peek_t peek = {0};
     size_t mtu = 0;
     mqvpn_rgate_verdict_t v =
-        mqvpn_rgate_decide(tx, 1, c.mode, pkt, built, 1, N, &do_stamp, &peek, &mtu);
+        mqvpn_rgate_decide(tx, 1, c.mode, pkt, built, 1, N, &peek, &mtu);
     ASSERT_EQ_INT(v, MQVPN_RGATE_DROP_REORDER_MTU,
                   "over stamped budget -> DROP_REORDER_MTU");
-    ASSERT_EQ_INT(do_stamp, 0, "do_stamp NOT set on drop");
     ASSERT_EQ_INT(mtu, N - MQVPN_REORDER_HDR_LEN, "out_mtu == udp_mss - HDR_LEN");
     mqvpn_reorder_tx_free(tx);
 }
@@ -165,15 +158,21 @@ test_decide_drop_raw_mtu(void)
 {
     uint8_t pkt[2048];
     size_t n = build_v4_udp(pkt, 5000, 443, 300); /* total len 328 */
-    int do_stamp = 0;
     mqvpn_reorder_tx_peek_t peek = {0};
     size_t mtu = 0;
-    mqvpn_rgate_verdict_t v =
-        mqvpn_rgate_decide(NULL, 0, MQVPN_REORDER_OFF, pkt, n, 1, 200 /* udp_mss < n */,
-                           &do_stamp, &peek, &mtu);
+    mqvpn_rgate_verdict_t v = mqvpn_rgate_decide(NULL, 0, MQVPN_REORDER_OFF, pkt, n, 1,
+                                                 200 /* udp_mss < n */, &peek, &mtu);
     ASSERT_EQ_INT(v, MQVPN_RGATE_DROP_RAW_MTU,
                   "len > udp_mss, no reorder -> DROP_RAW_MTU");
     ASSERT_EQ_INT(mtu, 200, "out_mtu == udp_mss");
+
+    /* Boundary: len == udp_mss is NOT oversize — must proceed RAW with no
+     * PTB (strict `len > udp_mss` comparison, same as the old inline code). */
+    peek = (mqvpn_reorder_tx_peek_t){0};
+    mtu = 0;
+    v = mqvpn_rgate_decide(NULL, 0, MQVPN_REORDER_OFF, pkt, n, 1, (uint32_t)n, &peek,
+                           &mtu);
+    ASSERT_EQ_INT(v, MQVPN_RGATE_RAW, "len == udp_mss boundary -> RAW, no PTB");
 }
 
 /* udp_mss==0 (e.g. dgram_mss not yet known): both gates are udp_mss>0
@@ -183,11 +182,10 @@ test_decide_zero_mss_raw(void)
 {
     uint8_t pkt[2048];
     size_t n = build_v4_udp(pkt, 5000, 443, 300);
-    int do_stamp = 0;
     mqvpn_reorder_tx_peek_t peek = {0};
     size_t mtu = 0;
-    mqvpn_rgate_verdict_t v = mqvpn_rgate_decide(NULL, 0, MQVPN_REORDER_OFF, pkt, n, 1, 0,
-                                                 &do_stamp, &peek, &mtu);
+    mqvpn_rgate_verdict_t v =
+        mqvpn_rgate_decide(NULL, 0, MQVPN_REORDER_OFF, pkt, n, 1, 0, &peek, &mtu);
     ASSERT_EQ_INT(v, MQVPN_RGATE_RAW, "udp_mss==0 -> RAW (no MTU gate possible)");
 }
 
@@ -319,6 +317,48 @@ test_send_ptb_v6_sends(void)
     ASSERT_EQ_INT(g_cap.buf[41], 0, "ICMPv6 code == 0");
 }
 
+/* Exhausted bucket: returns 0 and never touches the output sink (the ICMP
+ * builder must not run at all when rate-limited). */
+static void
+test_send_ptb_exhausted_bucket_no_send(void)
+{
+    mqvpn_ptb_bucket_t b;
+    mqvpn_ptb_bucket_init(&b);
+    uint8_t pkt[64];
+    size_t n = build_v4_udp(pkt, 5000, 443, 10);
+    uint8_t src4[4] = {10, 0, 0, 1};
+
+    /* Drain all tokens within one window. */
+    for (int i = 0; i < MQVPN_PTB_RATE_LIMIT; i++)
+        (void)mqvpn_ptb_bucket_allow(&b, 1000);
+
+    reset_cap();
+    int sent = mqvpn_rgate_send_ptb(&b, 1000, 4, 1, src4, 1200, capture, NULL, pkt, n);
+    ASSERT_EQ_INT(sent, 0, "exhausted bucket -> not sent");
+    ASSERT_EQ_INT(g_cap.called, 0, "tun_output NOT invoked when rate-limited");
+}
+
+/* v4 mtu above the 16-bit ICMP field silently clamps to 0xFFFF (bytes 6-7 of
+ * the ICMP header); v6 carries the full 32-bit value so no clamp there. */
+static void
+test_send_ptb_v4_mtu_clamp(void)
+{
+    mqvpn_ptb_bucket_t b;
+    mqvpn_ptb_bucket_init(&b);
+    uint8_t pkt[64];
+    size_t n = build_v4_udp(pkt, 5000, 443, 10);
+    uint8_t src4[4] = {10, 0, 0, 1};
+
+    reset_cap();
+    int sent = mqvpn_rgate_send_ptb(&b, 1000, 4, 1, src4, 0x10000 /* > 0xFFFF */, capture,
+                                    NULL, pkt, n);
+    ASSERT_EQ_INT(sent, 1, "oversized mtu still sends");
+    ASSERT_EQ_INT(g_cap.called, 1, "tun_output invoked once");
+    /* ICMP header starts at offset 20; MTU is ICMP bytes 6-7. */
+    ASSERT_EQ_INT(g_cap.buf[20 + 6], 0xFF, "clamped MTU hi byte == 0xFF");
+    ASSERT_EQ_INT(g_cap.buf[20 + 7], 0xFF, "clamped MTU lo byte == 0xFF");
+}
+
 int
 main(void)
 {
@@ -335,6 +375,8 @@ main(void)
     test_send_ptb_addr_not_ok_no_token_consumed();
     test_send_ptb_v4_sends_and_consumes_token();
     test_send_ptb_v6_sends();
+    test_send_ptb_exhausted_bucket_no_send();
+    test_send_ptb_v4_mtu_clamp();
 
     fprintf(stderr, "test_reorder_gate: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

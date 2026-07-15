@@ -2067,11 +2067,11 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
         udp_mss = xqc_h3_ext_masque_udp_mss(target->dgram_mss, target->masque_stream_id);
 
     mqvpn_reorder_tx_peek_t peek = {0};
-    int do_stamp = 0;
     size_t ptb_mtu = 0;
     mqvpn_rgate_verdict_t rv = mqvpn_rgate_decide(
         target->reorder_tx, target->peer_reorder_supported, s->config.reorder.mode, pkt,
-        len, now_us(), (uint32_t)udp_mss, &do_stamp, &peek, &ptb_mtu);
+        len, now_us(), (uint32_t)udp_mss, &peek, &ptb_mtu);
+    int do_stamp = (rv == MQVPN_RGATE_STAMP);
     if (rv == MQVPN_RGATE_DROP_REORDER_MTU || rv == MQVPN_RGATE_DROP_RAW_MTU) {
         int sent;
         if (ip_ver == 4) {

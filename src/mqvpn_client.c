@@ -2930,9 +2930,10 @@ hybrid_tcp_syn_policy(const mqvpn_client_t *c)
 #endif /* MQVPN_HYBRID_TCP_LANE_ENABLED */
 
 /* Reorder STAMP/RAW/DROP_MTU decision + both ICMP PTB paths (stamped
- * over-MTU and RAW over-MTU). Computes udp_mss internally. Fills *do_stamp
- * and *peek. Caller must zero-initialize *do_stamp and *peek; they are
- * written only on the STAMP path. */
+ * over-MTU and RAW over-MTU). Computes udp_mss internally. Caller must
+ * zero-initialize *do_stamp and *peek: early returns (drops before the gate)
+ * leave both untouched; the gate itself sets *do_stamp from the verdict and
+ * fills peek->hdr only on STAMP. */
 static tun_ingress_verdict_t
 tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t len,
                 uint8_t ip_ver, int *do_stamp, mqvpn_reorder_tx_peek_t *peek)
@@ -3090,7 +3091,8 @@ tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t 
     size_t ptb_mtu = 0;
     mqvpn_rgate_verdict_t rv = mqvpn_rgate_decide(
         conn->reorder_tx, conn->peer_reorder_supported, c->config.reorder.mode, pkt, len,
-        client_now_us(c), (uint32_t)udp_mss, do_stamp, peek, &ptb_mtu);
+        client_now_us(c), (uint32_t)udp_mss, peek, &ptb_mtu);
+    *do_stamp = (rv == MQVPN_RGATE_STAMP);
     if (rv == MQVPN_RGATE_DROP_REORDER_MTU || rv == MQVPN_RGATE_DROP_RAW_MTU) {
         int addr_ok = ip_ver == 4 ? conn->addr_assigned : conn->addr6_assigned;
         const uint8_t *src_ip = ip_ver == 4 ? conn->assigned_ip : conn->assigned_ip6;
