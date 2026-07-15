@@ -584,8 +584,8 @@ setup_flow(mqvpn_tcp_lane_t *lane, struct tcp_pcb *pcb, uint16_t src_port, void 
     }
     memset(pcb, 0, sizeof(*pcb));
     pcb->state = ESTABLISHED;
-    IP4_ADDR(&pcb->local_ip, 93, 184, 216, 34);
-    IP4_ADDR(&pcb->remote_ip, 10, 0, 0, 1);
+    IP_ADDR4(&pcb->local_ip, 93, 184, 216, 34);
+    IP_ADDR4(&pcb->remote_ip, 10, 0, 0, 1);
     pcb->local_port = 80;
     pcb->remote_port = src_port;
     if (mqvpn_tcp_lane_lwip_accept(lane, pcb, ERR_OK) != ERR_OK) {
@@ -981,8 +981,8 @@ test_accept_key_correspondence(void)
     struct tcp_pcb pcb;
     memset(&pcb, 0, sizeof(pcb));
     pcb.state = ESTABLISHED;
-    IP4_ADDR(&pcb.local_ip, 93, 184, 216, 34);
-    IP4_ADDR(&pcb.remote_ip, 10, 0, 0, 1);
+    IP_ADDR4(&pcb.local_ip, 93, 184, 216, 34);
+    IP_ADDR4(&pcb.remote_ip, 10, 0, 0, 1);
     pcb.local_port = 80;
     pcb.remote_port = 4000;
 
@@ -999,7 +999,7 @@ test_accept_key_correspondence(void)
     ASSERT_EQ_INT(f->state, TCP_FLOW_PENDING_STREAM, "flow is PENDING_STREAM");
     ASSERT_TRUE(f->pcb == &pcb, "flow holds the pcb");
     ASSERT_EQ_INT(f->target_port, 80, "target_port from pcb local_port");
-    ASSERT_TRUE(ip4_addr_eq(&f->target_ip, &pcb.local_ip), "target_ip from pcb local_ip");
+    ASSERT_TRUE(ip_addr_eq(&f->target_ip, &pcb.local_ip), "target_ip from pcb local_ip");
     ASSERT_EQ_INT(f->last_activity_us, 12345, "last_activity stamped via clock_fn");
 
     /* bind (mqvpn_client.c calls this after opening the H3 request). Task 9:
@@ -1071,8 +1071,8 @@ test_accept_key_correspondence(void)
     struct tcp_pcb pcb2;
     memset(&pcb2, 0, sizeof(pcb2));
     pcb2.state = ESTABLISHED;
-    IP4_ADDR(&pcb2.local_ip, 93, 184, 216, 34);
-    IP4_ADDR(&pcb2.remote_ip, 10, 0, 0, 1);
+    IP_ADDR4(&pcb2.local_ip, 93, 184, 216, 34);
+    IP_ADDR4(&pcb2.remote_ip, 10, 0, 0, 1);
     pcb2.local_port = 80;
     pcb2.remote_port = 4002;
     ASSERT_EQ_INT(mqvpn_tcp_lane_lwip_accept(lane, &pcb2, ERR_OK), ERR_OK,
@@ -1104,8 +1104,8 @@ test_accept_key_correspondence(void)
     struct tcp_pcb stray;
     memset(&stray, 0, sizeof(stray));
     stray.state = ESTABLISHED;
-    IP4_ADDR(&stray.local_ip, 93, 184, 216, 34);
-    IP4_ADDR(&stray.remote_ip, 10, 0, 0, 1);
+    IP_ADDR4(&stray.local_ip, 93, 184, 216, 34);
+    IP_ADDR4(&stray.remote_ip, 10, 0, 0, 1);
     stray.local_port = 80;
     stray.remote_port = 4001; /* never committed */
     ASSERT_TRUE(mqvpn_tcp_lane_lwip_accept(lane, &stray, ERR_OK) != ERR_OK,
@@ -1121,9 +1121,299 @@ test_accept_key_correspondence(void)
      * tcp_abort → tcp_free (memp_free) it and corrupt lwIP's pools, so
      * detach it first. The abort loop itself needs a REAL pool pcb (full
      * checksummed handshake through lwip_ctx) to exercise — deliberately
-     * NOT faked here; covered by the e2e checkpoints. */
+     * NOT faked here; see test_accept_dual_stack_v6 below, which drives
+     * exactly that (v6 dual-stack case). */
     f->pcb = NULL;
     mqvpn_tcp_lane_free(lane);
+}
+
+/* Chunk 4: dual-stack lwIP listener (real end-to-end v6 handshake).
+ *
+ * Unlike test_accept_key_correspondence above (a fake stack pcb, called
+ * directly into mqvpn_tcp_lane_lwip_accept), this test drives a REAL v6 TCP
+ * 3-way handshake through mqvpn_lwip_input against a real mqvpn_lwip_ctx_t —
+ * the only way to actually exercise: (1) the dual-stack listener
+ * (tcp_new_ip_type(IPADDR_TYPE_ANY) in lwip_glue.c) — a v4-only listener
+ * DROPS a v6 SYN outright at tcp_input's pcb-match step, so a fake pcb can
+ * never catch that regression; (2) netif->output_ip6 actually being wired up
+ * — without it, netif_add()'s own safe netif_null_output_ip6 stub silently
+ * swallows the SYN-ACK (no crash, just ERR_IF/no-op — verified with gdb
+ * against a deliberately-reverted build), so no v6 handshake can ever
+ * complete; (3) a v6 pcb's effective MSS deriving from netif->mtu via
+ * tcp_eff_send_mss_netif. */
+
+/* RFC 1071 Internet checksum, accumulate-only (no fold/complement) so the
+ * pseudo-header and the segment can be summed in pieces before one fold at
+ * the end. */
+static uint32_t
+test_v6_chksum_add(const uint8_t *data, size_t len, uint32_t sum)
+{
+    size_t i = 0;
+    for (; i + 1 < len; i += 2) {
+        sum += (uint32_t)((data[i] << 8) | data[i + 1]);
+    }
+    if (i < len) {
+        sum += (uint32_t)(data[i] << 8);
+    }
+    return sum;
+}
+
+static uint16_t
+test_v6_chksum_fold(uint32_t sum)
+{
+    while (sum >> 16) {
+        sum = (sum & 0xFFFFu) + (sum >> 16);
+    }
+    uint16_t folded = (uint16_t)~sum;
+    return folded == 0 ? 0xFFFFu : folded;
+}
+
+/* IPv6 pseudo-header (RFC 8200 section 8.1: src + dst + 32-bit upper-layer
+ * length + 3 zero bytes + next header) plus the TCP segment itself — the
+ * ground truth a packet must satisfy to pass lwIP's ingress checksum wall
+ * (CHECKSUM_CHECK_TCP=1, unmodified in this test build). Deliberately
+ * independent of lwIP's own inet_chksum helpers. tcp_seg's checksum field
+ * must already be zeroed by the caller. */
+static uint16_t
+test_v6_tcp_chksum(const uint8_t src[16], const uint8_t dst[16], const uint8_t *tcp_seg,
+                   size_t tcp_len)
+{
+    uint32_t sum = 0;
+    sum = test_v6_chksum_add(src, 16, sum);
+    sum = test_v6_chksum_add(dst, 16, sum);
+    uint8_t hdr[8] = {
+        (uint8_t)(tcp_len >> 24),
+        (uint8_t)(tcp_len >> 16),
+        (uint8_t)(tcp_len >> 8),
+        (uint8_t)(tcp_len),
+        0,
+        0,
+        0,
+        MQVPN_IPPROTO_TCP,
+    };
+    sum = test_v6_chksum_add(hdr, sizeof(hdr), sum);
+    sum = test_v6_chksum_add(tcp_seg, tcp_len, sum);
+    return test_v6_chksum_fold(sum);
+}
+
+/* Direct v6 TCP SYN (base NH == TCP, no ext headers) carrying one MSS
+ * option that deliberately advertises MORE than the netif MTU can ever
+ * yield. tcp_parseopt (tcp_in.c) clamps it to the compile-time TCP_MSS
+ * ceiling first; tcp_eff_send_mss_netif then clamps THAT to netif->mtu —
+ * only the second clamp is what the MSS assertion below pins. 64 bytes: 40
+ * v6 header + 20 fixed TCP header + one 4-byte MSS option. */
+static size_t
+build_v6_syn(uint8_t *buf, const uint8_t src[16], const uint8_t dst[16], uint16_t sport,
+             uint16_t dport, uint32_t seq, uint16_t advertised_mss)
+{
+    memset(buf, 0, 64);
+    buf[0] = 0x60; /* version 6 */
+    buf[5] = 24;   /* payload length: TCP header (20) + MSS option (4) */
+    buf[6] = MQVPN_IPPROTO_TCP;
+    buf[7] = 64; /* hop limit */
+    memcpy(buf + 8, src, 16);
+    memcpy(buf + 24, dst, 16);
+
+    uint8_t *tcp = buf + 40;
+    tcp[0] = (uint8_t)(sport >> 8);
+    tcp[1] = (uint8_t)sport;
+    tcp[2] = (uint8_t)(dport >> 8);
+    tcp[3] = (uint8_t)dport;
+    tcp[4] = (uint8_t)(seq >> 24);
+    tcp[5] = (uint8_t)(seq >> 16);
+    tcp[6] = (uint8_t)(seq >> 8);
+    tcp[7] = (uint8_t)seq;
+    /* ack (bytes 8-11) left 0 — no ACK flag on a pure SYN */
+    tcp[12] = 0x60; /* data offset 6 words = 24 bytes (20 fixed + 4-byte option) */
+    tcp[13] = TCP_SYN;
+    tcp[14] = 0xFF; /* window 65535 */
+    tcp[15] = 0xFF;
+    /* checksum (16-17) filled below; urgent ptr (18-19) stays 0 */
+    tcp[20] = 2; /* MSS option kind */
+    tcp[21] = 4; /* MSS option length */
+    tcp[22] = (uint8_t)(advertised_mss >> 8);
+    tcp[23] = (uint8_t)(advertised_mss);
+
+    uint16_t csum = test_v6_tcp_chksum(src, dst, tcp, 24);
+    tcp[16] = (uint8_t)(csum >> 8);
+    tcp[17] = (uint8_t)csum;
+    return 64;
+}
+
+/* Direct v6 TCP segment with no options/data — used for the ACK that
+ * completes the 3-way handshake. 60 bytes: 40 v6 header + 20 TCP header. */
+static size_t
+build_v6_ack(uint8_t *buf, const uint8_t src[16], const uint8_t dst[16], uint16_t sport,
+             uint16_t dport, uint32_t seq, uint32_t ack)
+{
+    memset(buf, 0, 60);
+    buf[0] = 0x60;
+    buf[5] = 20;
+    buf[6] = MQVPN_IPPROTO_TCP;
+    buf[7] = 64;
+    memcpy(buf + 8, src, 16);
+    memcpy(buf + 24, dst, 16);
+
+    uint8_t *tcp = buf + 40;
+    tcp[0] = (uint8_t)(sport >> 8);
+    tcp[1] = (uint8_t)sport;
+    tcp[2] = (uint8_t)(dport >> 8);
+    tcp[3] = (uint8_t)dport;
+    tcp[4] = (uint8_t)(seq >> 24);
+    tcp[5] = (uint8_t)(seq >> 16);
+    tcp[6] = (uint8_t)(seq >> 8);
+    tcp[7] = (uint8_t)seq;
+    tcp[8] = (uint8_t)(ack >> 24);
+    tcp[9] = (uint8_t)(ack >> 16);
+    tcp[10] = (uint8_t)(ack >> 8);
+    tcp[11] = (uint8_t)ack;
+    tcp[12] = 0x50; /* data offset 5, no options */
+    tcp[13] = TCP_ACK;
+    tcp[14] = 0xFF;
+    tcp[15] = 0xFF;
+
+    uint16_t csum = test_v6_tcp_chksum(src, dst, tcp, 20);
+    tcp[16] = (uint8_t)(csum >> 8);
+    tcp[17] = (uint8_t)csum;
+    return 60;
+}
+
+/* Captures whatever mqvpn_tcp_lane_netif_output_ip6 emits — the SYN-ACK the
+ * dual-stack listener sends back, whose server ISN this test needs in
+ * order to build the completing ACK. */
+static uint8_t g_v6_out_buf[128];
+static size_t g_v6_out_len;
+
+static void
+test_v6_output_capture(const uint8_t *pkt, size_t len, void *ctx)
+{
+    (void)ctx;
+    if (len > sizeof(g_v6_out_buf)) len = sizeof(g_v6_out_buf);
+    memcpy(g_v6_out_buf, pkt, len);
+    g_v6_out_len = len;
+}
+
+static void
+test_accept_dual_stack_v6(void)
+{
+    relay_reset();
+
+    const uint8_t client_ip[16] = {0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+                                   0,    0,    0,    0,    0, 0, 0, 1};
+    const uint8_t server_ip[16] = {0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+                                   0,    0,    0,    0,    0, 0, 0, 2};
+    const uint16_t sport = 5555, dport = 443;
+    const uint32_t client_isn = 1000;
+
+    uint8_t syn[64];
+    size_t syn_len =
+        build_v6_syn(syn, client_ip, server_ip, sport, dport, client_isn, 9000);
+
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.enabled = 1;
+    cfg.tcp_mode = MQVPN_HYBRID_TCP_STREAM;
+
+    mqvpn_flow_key_t key;
+    memset(&key, 0, sizeof(key));
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(syn, syn_len, &cfg, &key), MQVPN_LANE_TCP,
+                  "v6 SYN classifies to the TCP lane");
+    ASSERT_EQ_INT(key.ip_version, 6, "classifier key is v6");
+
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xf6f6ULL, NULL, fake_clock, NULL);
+    ASSERT_TRUE(lane != NULL, "lane_new succeeds");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &key, 1, 0), 0, "v6 SYN-time commit");
+
+    /* mtu deliberately well below both the SYN's advertised MSS (9000,
+     * itself clamped to TCP_MSS=8960 by tcp_parseopt) — the only way the
+     * eventual effective MSS can come out below 8960 is if it derives from
+     * netif->mtu (tcp_eff_send_mss_netif), which is exactly what the
+     * assertion below pins. */
+    const int mtu = 1500;
+    g_v6_out_len = 0;
+    mqvpn_lwip_ctx_t *ctx =
+        mqvpn_lwip_ctx_new(fake_clock, NULL, test_v6_output_capture, NULL, mtu);
+    ASSERT_TRUE(ctx != NULL, "lwip ctx created");
+    mqvpn_lwip_ctx_set_accept_cb(ctx, mqvpn_tcp_lane_lwip_accept, lane);
+
+    g_open_stream_calls = 0;
+    g_open_stream_flow = NULL; /* else a pre-fix regression (accept never
+                                * fires) would leave this at whatever a
+                                * DIFFERENT, already-freed flow from an
+                                * earlier test last set it to — a dangling
+                                * pointer the guard below must not chase */
+    ASSERT_EQ_INT(mqvpn_lwip_input(ctx, syn, syn_len), 0,
+                  "dual-stack listener accepts the v6 SYN (not dropped)");
+    ASSERT_EQ_INT(g_open_stream_calls, 0,
+                  "accept callback does not fire on the SYN alone (3WHS not done)");
+    ASSERT_TRUE(g_v6_out_len >= 60, "a SYN-ACK was emitted via netif->output_ip6");
+    ASSERT_EQ_INT(g_v6_out_buf[6], MQVPN_IPPROTO_TCP, "captured reply is v6/TCP");
+    ASSERT_EQ_INT((int)g_v6_out_buf[40 + 13], (int)(TCP_SYN | TCP_ACK),
+                  "captured reply is a SYN-ACK");
+
+    uint32_t server_isn = ((uint32_t)g_v6_out_buf[44] << 24) |
+                          ((uint32_t)g_v6_out_buf[45] << 16) |
+                          ((uint32_t)g_v6_out_buf[46] << 8) | (uint32_t)g_v6_out_buf[47];
+
+    uint8_t ack[60];
+    size_t ack_len = build_v6_ack(ack, client_ip, server_ip, sport, dport, client_isn + 1,
+                                  server_isn + 1);
+    ASSERT_EQ_INT(mqvpn_lwip_input(ctx, ack, ack_len), 0, "completing ACK accepted");
+
+    ASSERT_EQ_INT(g_open_stream_calls, 1, "accept callback fired exactly once");
+    ASSERT_TRUE(mqvpn_flow_key_eq(&g_open_stream_key, &key),
+                "accept-rebuilt v6 key is byte-identical to the classifier key");
+    ASSERT_EQ_INT(g_open_stream_key.ip_version, 6, "accept-rebuilt key stayed v6");
+
+    mqvpn_tcp_flow_t *f = (mqvpn_tcp_flow_t *)g_open_stream_flow;
+    ASSERT_TRUE(f != NULL, "flow handle set");
+    if (f != NULL) {
+        /* Guarded: on a pre-fix regression (accept never fires) f stays
+         * NULL (reset above) and every f-> access below would either crash
+         * or chase a stale pointer — the ASSERT_TRUE above already reports
+         * the failure, nothing more to check. */
+        ASSERT_EQ_INT(f->state, TCP_FLOW_PENDING_STREAM, "flow is PENDING_STREAM");
+        ASSERT_TRUE(f->pcb != NULL, "flow holds a real accepted pcb");
+        if (f->pcb != NULL) {
+            ASSERT_TRUE(IP_IS_V6(&f->pcb->local_ip), "accepted pcb is v6");
+            ASSERT_EQ_INT(f->target_port, dport, "target_port from pcb local_port");
+            ASSERT_TRUE(ip_addr_eq(&f->target_ip, &f->pcb->local_ip),
+                        "target_ip mirrors pcb local_ip");
+            ASSERT_TRUE(memcmp(ip_2_ip6(&f->pcb->local_ip)->addr, server_ip, 16) == 0,
+                        "accepted pcb local_ip is the server address");
+            ASSERT_TRUE(memcmp(ip_2_ip6(&f->pcb->remote_ip)->addr, client_ip, 16) == 0,
+                        "accepted pcb remote_ip is the client address");
+
+            /* The MSS proof: mtu(1500) - IP6_HLEN(40) - TCP_HLEN(20) = 1440,
+             * well below both the SYN's advertised 9000 and the
+             * compile-time TCP_MSS ceiling (8960) — this exact value can
+             * only come from netif->mtu. */
+            ASSERT_EQ_INT(f->pcb->mss, mtu - 40 - 20,
+                          "v6 pcb effective MSS derives from netif->mtu, not the peer's "
+                          "advertised MSS or the compile-time TCP_MSS ceiling");
+
+            /* Real accepted pcb (genuine tcp_alloc, registered in
+             * tcp_active_pcbs) — unlike the fake-stack-pcb tests elsewhere
+             * in this file, this one MUST be torn down with the REAL lwIP
+             * tcp_abort: tcp_lane.c's abort macro is hooked to a no-op
+             * recorder in this TU (see the Task 12 hook comment near the
+             * top of this file), so mqvpn_tcp_lane_free would otherwise
+             * leave this pcb live in tcp_active_pcbs — a process-global
+             * list — corrupting every test that runs after this one.
+             *
+             * tcp_abort() -> tcp_abandon() (tcp.c) frees the pcb AND fires
+             * the registered tcp_err callback (mqvpn_tcp_lane_on_lwip_err,
+             * tcp_lane.c) before returning; that callback itself sets
+             * f->pcb = NULL and calls tcp_lane_remove_flow(), which frees f
+             * — mirrors test_lwip_err_teardown's direct-call version. So f
+             * is ALSO gone as of this call: touching f (or the now-stale
+             * real_pcb) afterward is a use-after-free (caught by ASan on
+             * the first draft of this test — do not reintroduce it). */
+            tcp_abort(f->pcb);
+        }
+    }
+    mqvpn_tcp_lane_free(lane);
+    mqvpn_lwip_ctx_free(ctx);
 }
 
 /* ─── Task 10: uplink relay (lwIP recv -> H3 send_body) ───
@@ -2183,15 +2473,228 @@ test_tcp_syn_flag_cases(void)
             0x02; /* SYN, at what would be the IHL=20 offset — must not matter */
         ASSERT_TRUE(!mqvpn_tcp_syn_flag(pkt, sizeof(pkt)), "IHL < 20 is rejected");
     }
-    /* (f) Non-v4 (e.g. IPv6): the classifier already routes IPv6 TCP to RAW,
-     * but the helper's own guard must independently reject it too. */
+    /* (f) Chunk 3: IPv6 direct-base-NH TCP (base NH == TCP, guaranteed by
+     * Chunk 2's classifier gate) is now flow-starting too, parsed at the
+     * FIXED offset 40 (not IHL-derived — IPv6's fixed header is always 40
+     * bytes and pkt[0]&0x0F is the traffic-class high nibble here, NOT an
+     * IHL). Pure SYN -> flow-starting. */
+    {
+        uint8_t pkt[54]; /* 40-byte v6 header + 14 bytes of TCP header */
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x60;       /* version 6 */
+        pkt[6] = 6;          /* Next Header: TCP (base NH gate) */
+        pkt[40 + 13] = 0x02; /* SYN, at the fixed v6 offset */
+        ASSERT_TRUE(mqvpn_tcp_syn_flag(pkt, sizeof(pkt)),
+                    "v6 direct-TCP pure SYN is flow-starting at the fixed offset");
+    }
+    /* (g) IPv6 SYN|ACK: same non-flow-starting rule as v4 (e). */
+    {
+        uint8_t pkt[54];
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x60;
+        pkt[6] = 6;
+        pkt[40 + 13] = 0x12; /* SYN + ACK */
+        ASSERT_TRUE(!mqvpn_tcp_syn_flag(pkt, sizeof(pkt)),
+                    "v6 SYN|ACK is NOT flow-starting");
+    }
+    /* (h) IPv6 too-short: len stops one byte short of the fixed flags-byte
+     * offset (40 + 13 == 53; providing only 53 bytes must not read past the
+     * buffer). */
+    {
+        uint8_t pkt[53];
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x60;
+        pkt[6] = 6;
+        ASSERT_TRUE(!mqvpn_tcp_syn_flag(pkt, sizeof(pkt)),
+                    "v6 truncated (len == 40+13) is treated as non-SYN");
+    }
+    /* (i) IPv6 packet whose base NH isn't TCP: the helper trusts the
+     * PRECONDITION (Chunk 2's base-NH gate already ran) and does not
+     * re-check pkt[6] itself — with the flags byte left at its zeroed
+     * default this still correctly reads as non-SYN, exercising the fixed
+     * v6 offset independent of the actual NH value. */
+    {
+        uint8_t pkt[54];
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x60;
+        pkt[6] = 17; /* Next Header: UDP */
+        ASSERT_TRUE(!mqvpn_tcp_syn_flag(pkt, sizeof(pkt)),
+                    "v6 non-TCP base NH with a zeroed flags byte is non-SYN");
+    }
+    /* (j) Neither v4 nor v6 (e.g. version 5): the dispatch's catch-all
+     * "anything else -> 0" branch. */
+    {
+        uint8_t pkt[54];
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x50; /* version 5 */
+        pkt[40 + 13] = 0x02;
+        ASSERT_TRUE(!mqvpn_tcp_syn_flag(pkt, sizeof(pkt)),
+                    "version 5 (neither v4 nor v6) is rejected");
+    }
+}
+
+/* ─── Chunk 3: mqvpn_tcp_syn_isn, IPv4 IHL-derived offset ───
+ *
+ * mqvpn_tcp_syn_isn had no dedicated packet-parsing unit test for EITHER
+ * family before this chunk (only exercised indirectly through
+ * mqvpn_tcp_lane_on_syn, which takes an already-computed ISN — see the I2
+ * tests above). Pin the v4 side explicitly, both at IHL=20 and at IHL=24
+ * (one TCP-options word) so the ihl computation itself is exercised, not
+ * just the common no-options case. Companion to test_tcp_syn_isn_v6 below,
+ * closing the v4/v6 coverage asymmetry. */
+static void
+test_tcp_syn_isn_v4(void)
+{
+    /* (a) IHL=20 (no options): seq at ihl+4..ihl+7 == pkt[24..27]. */
     {
         uint8_t pkt[34];
         memset(pkt, 0, sizeof(pkt));
-        pkt[0] = 0x60; /* version 6 */
-        pkt[20 + 13] = 0x02;
-        ASSERT_TRUE(!mqvpn_tcp_syn_flag(pkt, sizeof(pkt)), "non-v4 is rejected");
+        pkt[0] = 0x45;       /* v4, IHL 5 (20 bytes) */
+        pkt[20 + 13] = 0x02; /* SYN */
+        pkt[20 + 4] = 0xde;
+        pkt[20 + 5] = 0xad;
+        pkt[20 + 6] = 0xbe;
+        pkt[20 + 7] = 0xef;
+        ASSERT_TRUE(mqvpn_tcp_syn_flag(pkt, sizeof(pkt)),
+                    "precondition: v4 IHL=20 pure SYN");
+        ASSERT_EQ_INT(mqvpn_tcp_syn_isn(pkt, sizeof(pkt)), 0xdeadbeefu,
+                      "v4 ISN read at the IHL=20-derived offset (pkt[24..27])");
     }
+    /* (b) IHL=24 (one 32-bit TCP-options word): the seq field must be read at
+     * the IHL-DERIVED offset ihl+4..ihl+7 == pkt[28..31], exercising the ihl
+     * arithmetic rather than a fixed offset. */
+    {
+        uint8_t pkt[38];
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x46;       /* v4, IHL 6 (24 bytes) */
+        pkt[24 + 13] = 0x02; /* SYN, at the ihl=24-derived offset */
+        pkt[24 + 4] = 0xca;
+        pkt[24 + 5] = 0xfe;
+        pkt[24 + 6] = 0xba;
+        pkt[24 + 7] = 0xbe;
+        ASSERT_TRUE(mqvpn_tcp_syn_flag(pkt, sizeof(pkt)),
+                    "precondition: v4 IHL=24 pure SYN");
+        ASSERT_EQ_INT(mqvpn_tcp_syn_isn(pkt, sizeof(pkt)), 0xcafebabeu,
+                      "v4 ISN read at the IHL=24-derived offset (pkt[28..31])");
+    }
+}
+
+/* ─── Chunk 3: mqvpn_tcp_syn_isn, IPv6 direct-TCP ───
+ *
+ * Pin the v6 fixed-offset-40 extraction explicitly: seq bytes at
+ * pkt[44..47], mirroring the v4 ihl+4..ihl+7 idiom (see test_tcp_syn_isn_v4
+ * above). */
+static void
+test_tcp_syn_isn_v6(void)
+{
+    uint8_t pkt[54];
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x60;       /* version 6 */
+    pkt[6] = 6;          /* Next Header: TCP */
+    pkt[40 + 13] = 0x02; /* SYN */
+    pkt[40 + 4] = 0xde;
+    pkt[40 + 5] = 0xad;
+    pkt[40 + 6] = 0xbe;
+    pkt[40 + 7] = 0xef;
+
+    ASSERT_TRUE(mqvpn_tcp_syn_flag(pkt, sizeof(pkt)), "precondition: v6 pure SYN");
+    ASSERT_EQ_INT(mqvpn_tcp_syn_isn(pkt, sizeof(pkt)), 0xdeadbeefu,
+                  "v6 ISN read at the fixed offset (pkt[44..47])");
+}
+
+/* ─── Chunk 5, Task 5.1/5.2: connect-tcp :path formatter ───
+ *
+ * mqvpn_tcp_lane_format_connect_path is the pure helper extracted from
+ * cli_tcp_lane_open_stream's inline snprintf (mqvpn_client.c) so it gets a
+ * unit-test seam — that function is static and test_tcp_lane.c stubs
+ * cli_tcp_lane_open_stream rather than linking the real one, so there was
+ * previously no seam onto the inline snprintf at all. */
+
+static void
+test_connect_path_format_v4(void)
+{
+    mqvpn_flow_key_t k = mk_std_key(4000); /* dst 93.184.216.34:80, v4 */
+    char buf[MQVPN_TCP_CONNECT_PATH_CAP];
+    int n = mqvpn_tcp_lane_format_connect_path(buf, sizeof(buf), &k);
+    ASSERT_TRUE(n > 0 && (size_t)n < sizeof(buf), "v4 path formats without truncation");
+    ASSERT_TRUE(strcmp(buf, "/.well-known/mqvpn/tcp/93.184.216.34/80/") == 0,
+                "v4 path is the byte-identical dotted-quad form");
+}
+
+static void
+test_connect_path_format_v4_pinned_literal(void)
+{
+    /* Same fixture the plan itself pins (1.2.3.4/443) — a second, minimal
+     * key independent of mk_std_key's fixture in case that helper's field
+     * values ever change for unrelated reasons. */
+    mqvpn_flow_key_t k;
+    memset(&k, 0, sizeof(k));
+    k.ip_version = 4;
+    k.proto = 6;
+    k.dst_port = 443;
+    k.dst_ip[0] = 1;
+    k.dst_ip[1] = 2;
+    k.dst_ip[2] = 3;
+    k.dst_ip[3] = 4;
+
+    char buf[MQVPN_TCP_CONNECT_PATH_CAP];
+    int n = mqvpn_tcp_lane_format_connect_path(buf, sizeof(buf), &k);
+    ASSERT_TRUE(n > 0 && (size_t)n < sizeof(buf), "v4 path formats without truncation");
+    ASSERT_TRUE(strcmp(buf, "/.well-known/mqvpn/tcp/1.2.3.4/443/") == 0,
+                "v4 path matches the plan's pinned literal");
+}
+
+static void
+test_connect_path_format_v6(void)
+{
+    /* 2001:db8::1, port 443 — raw colons, no brackets, no percent-encoding
+     * (spec 3.G: the server's tcp_egress.c path parser splits :path on '/'
+     * and feeds the host segment straight to inet_pton — bracketed or
+     * percent-encoded forms would inet_pton-fail there). */
+    mqvpn_flow_key_t k;
+    memset(&k, 0, sizeof(k));
+    k.ip_version = 6;
+    k.proto = 6;
+    k.dst_port = 443;
+    k.dst_ip[0] = 0x20;
+    k.dst_ip[1] = 0x01;
+    k.dst_ip[2] = 0x0d;
+    k.dst_ip[3] = 0xb8;
+    k.dst_ip[15] = 0x01;
+
+    char buf[MQVPN_TCP_CONNECT_PATH_CAP];
+    int n = mqvpn_tcp_lane_format_connect_path(buf, sizeof(buf), &k);
+    ASSERT_TRUE(n > 0 && (size_t)n < sizeof(buf),
+                "v6 path (<=45-char literal) fits cap without truncation");
+    ASSERT_TRUE(strcmp(buf, "/.well-known/mqvpn/tcp/2001:db8::1/443/") == 0,
+                "v6 path uses raw colons, no brackets/percent-encoding");
+}
+
+/* Exercise the return value's actual purpose (truncation detection): every
+ * test above asserts the no-truncation case, so pin the snprintf convention
+ * the helper exists to expose — a too-small cap yields the FULL untruncated
+ * length (>= cap), never the truncated write's length. */
+static void
+test_connect_path_format_truncation(void)
+{
+    mqvpn_flow_key_t k;
+    memset(&k, 0, sizeof(k));
+    k.ip_version = 4;
+    k.proto = 6;
+    k.dst_port = 443;
+    k.dst_ip[0] = 1;
+    k.dst_ip[1] = 2;
+    k.dst_ip[2] = 3;
+    k.dst_ip[3] = 4;
+
+    /* Full path "/.well-known/mqvpn/tcp/1.2.3.4/443/" is 35 chars; a cap of
+     * 10 forces truncation. snprintf returns the length it WOULD have written
+     * (35), so the caller can detect the overflow via ret >= cap. */
+    char small[10];
+    int n = mqvpn_tcp_lane_format_connect_path(small, sizeof(small), &k);
+    ASSERT_EQ_INT(n, 35, "returns the full untruncated length, not the clamped one");
+    ASSERT_TRUE((size_t)n >= sizeof(small),
+                "ret >= cap is how a caller detects truncation");
 }
 
 /* ─── Task 12: close/error mapping + flow removal ───
@@ -2297,8 +2800,8 @@ test_abort_pending_real(void)
     struct tcp_pcb pcb1;
     memset(&pcb1, 0, sizeof(pcb1));
     pcb1.state = ESTABLISHED;
-    IP4_ADDR(&pcb1.local_ip, 93, 184, 216, 34);
-    IP4_ADDR(&pcb1.remote_ip, 10, 0, 0, 1);
+    IP_ADDR4(&pcb1.local_ip, 93, 184, 216, 34);
+    IP_ADDR4(&pcb1.remote_ip, 10, 0, 0, 1);
     pcb1.local_port = 80;
     pcb1.remote_port = 8300;
     ASSERT_EQ_INT(mqvpn_tcp_lane_lwip_accept(lane, &pcb1, ERR_OK), ERR_OK,
@@ -2322,8 +2825,8 @@ test_abort_pending_real(void)
     struct tcp_pcb pcb2;
     memset(&pcb2, 0, sizeof(pcb2));
     pcb2.state = ESTABLISHED;
-    IP4_ADDR(&pcb2.local_ip, 93, 184, 216, 34);
-    IP4_ADDR(&pcb2.remote_ip, 10, 0, 0, 1);
+    IP_ADDR4(&pcb2.local_ip, 93, 184, 216, 34);
+    IP_ADDR4(&pcb2.remote_ip, 10, 0, 0, 1);
     pcb2.local_port = 80;
     pcb2.remote_port = 8301;
     ASSERT_EQ_INT(mqvpn_tcp_lane_lwip_accept(lane, &pcb2, ERR_OK), ERR_OK,
@@ -2368,8 +2871,8 @@ test_accept_open_stream_fail_returns_abrt(void)
     struct tcp_pcb pcb;
     memset(&pcb, 0, sizeof(pcb));
     pcb.state = ESTABLISHED;
-    IP4_ADDR(&pcb.local_ip, 93, 184, 216, 34);
-    IP4_ADDR(&pcb.remote_ip, 10, 0, 0, 1);
+    IP_ADDR4(&pcb.local_ip, 93, 184, 216, 34);
+    IP_ADDR4(&pcb.remote_ip, 10, 0, 0, 1);
     pcb.local_port = 80;
     pcb.remote_port = 8700;
 
@@ -3183,6 +3686,12 @@ main(void)
     test_downlink_fatal_recv_error();
     test_downlink_pump_on_torn_down_flow();
     test_tcp_syn_flag_cases();
+    test_tcp_syn_isn_v4();
+    test_tcp_syn_isn_v6();
+    test_connect_path_format_v4();
+    test_connect_path_format_v4_pinned_literal();
+    test_connect_path_format_v6();
+    test_connect_path_format_truncation();
     test_lwip_err_teardown();
     test_h3_closing_notify_teardown();
     test_abort_pending_real();
@@ -3206,6 +3715,16 @@ main(void)
     test_idle_eviction_pending_stream();
     test_idle_eviction_exact_boundary();
     test_idle_eviction_sweep_cadence_gate();
+
+    /* Called last deliberately: drives a real lwIP handshake (genuine
+     * tcp_alloc'd pcb, not a stack fake like every test above) and is
+     * guarded against a failed accept (see the f != NULL / f->pcb != NULL
+     * checks inside), but it is still the one test in this file touching
+     * process-global lwIP state (tcp_active_pcbs, the pcb pools) via a real
+     * pcb — keeping it last means every other test's pass/fail has already
+     * been reported (stderr is unbuffered) even in the unexpected event
+     * this one's cleanup can't run to completion. */
+    test_accept_dual_stack_v6();
 
     fprintf(stderr, "test_tcp_lane: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

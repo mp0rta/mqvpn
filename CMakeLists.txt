@@ -211,6 +211,14 @@ set(LWIP_CORE_SOURCES
     ${LWIP_ROOT}/src/core/ipv4/ip4_addr.c
     ${LWIP_ROOT}/src/core/ipv4/ip4_frag.c
     ${LWIP_ROOT}/src/core/ipv4/icmp.c
+    # Chunk 4: dual-stack (LWIP_IPV6=1 in lwipopts.h). MLD/dhcp6/autoconf are
+    # OFF (lwipopts.h), so mld6.c/dhcp6.c are NOT needed — set pinned by the
+    # linker (undefined-symbol errors), not added speculatively.
+    ${LWIP_ROOT}/src/core/ipv6/ip6.c
+    ${LWIP_ROOT}/src/core/ipv6/ip6_addr.c
+    ${LWIP_ROOT}/src/core/ipv6/ip6_frag.c
+    ${LWIP_ROOT}/src/core/ipv6/icmp6.c
+    ${LWIP_ROOT}/src/core/ipv6/nd6.c
 )
 
 add_library(lwip_core STATIC ${LWIP_CORE_SOURCES})

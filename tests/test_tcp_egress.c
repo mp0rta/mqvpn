@@ -1137,6 +1137,49 @@ TEST(mqvpn_tcp_acl_denied_gets_403)
     ASSERT_STREQ(status, "403");
 }
 
+TEST(mqvpn_tcp_v6_loopback_denied_gets_403)
+{
+    /* Task 6.2 wiring proof, live: a syntactically valid connect-tcp
+     * request with a BARE v6 literal target must be recognized (not
+     * rejected as an oversized/unparseable host — the old 16-byte
+     * target_host buffer made this a 400) and denied via
+     * svr_tcp_egress_acl_allowed's ':'-based family detection +
+     * DEFAULT_DENY_V6. No real network I/O: the ACL denies before
+     * start_connect ever runs, exactly like the v4 RFC1918 test above. */
+    char status[16] = {0};
+    int rc = run_dispatch_probe_with_path(
+        "mqvpn-tcp", 9, "/.well-known/mqvpn/tcp/::1/80/", NULL, status, sizeof(status));
+    ASSERT_EQ(rc, 0);
+    ASSERT_STREQ(status, "403");
+}
+
+/* Config hook for the v6 tunnel-subnet test below: the PUBLIC Subnet6
+ * setter, as a platform embedding libmqvpn would call it. */
+static void
+harness_cfg_subnet6(mqvpn_config_t *cfg)
+{
+    if (mqvpn_config_set_subnet6(cfg, "2001:db8:abcd::/112") != MQVPN_OK) {
+        printf("FAIL\n    mqvpn_config_set_subnet6 rejected valid input\n");
+        exit(1);
+    }
+}
+
+TEST(mqvpn_tcp_v6_tunnel_subnet_denied_gets_403)
+{
+    /* has_v6-gated tunnel-deny wiring, live: with Subnet6 configured, a v6
+     * egress target INSIDE that tunnel subnet must be denied — proving
+     * svr_get_egress_policy's has_v6 branch (not just acl_decide's tunnel
+     * parameter in isolation) is wired into the real request path, mirroring
+     * how mqvpn_tcp_acl_denied_gets_403 proves the v4 tunnel/ACL wiring. No
+     * real connect() happens: the ACL denies before start_connect runs. */
+    char status[16] = {0};
+    int rc = run_dispatch_probe_with_path("mqvpn-tcp", 9,
+                                          "/.well-known/mqvpn/tcp/2001:db8:abcd::5/80/",
+                                          harness_cfg_subnet6, status, sizeof(status));
+    ASSERT_EQ(rc, 0);
+    ASSERT_STREQ(status, "403");
+}
+
 /* Config hook for hybrid_disabled_gets_501 below: overrides harness_start's
  * default (Enabled=1, see its comment) back to false, matching the real
  * documented default (docs/control-api.md: "[Hybrid] Enabled" is a
@@ -2357,37 +2400,47 @@ TEST(non_tunnel_close_keeps_tunnel_established)
 
 /* ── ACL decision core (pure, no live mqvpn_server_t) ── */
 
-static uint32_t
-ipv4(unsigned a, unsigned b, unsigned c, unsigned d)
+/* Builds a 16-byte network-order address (v4 in [0..3], rest zero) — the
+ * same layout svr_tcp_egress_acl_decide's `addr` param and
+ * mqvpn_cidr_entry_t.net both use, so no host-order round trip is needed
+ * anywhere in these tests. */
+static void
+ipv4_addr(unsigned a, unsigned b, unsigned c, unsigned d, uint8_t out[16])
 {
-    return ((uint32_t)a << 24) | ((uint32_t)b << 16) | ((uint32_t)c << 8) | d;
+    memset(out, 0, 16);
+    out[0] = (uint8_t)a;
+    out[1] = (uint8_t)b;
+    out[2] = (uint8_t)c;
+    out[3] = (uint8_t)d;
 }
 
-/* TEST-NET-2 (RFC 5737), ipv4(198,51,100,0): a neutral stand-in tunnel
- * subnet that never overlaps the default-deny ranges or the public/
- * RFC1918 IPs used below — isolates each ACL branch under test from the
- * others. */
-#define NEUTRAL_TUNNEL_MASK 0xFFFFFF00u /* /24 */
+/* TEST-NET-2 (RFC 5737), 198.51.100.0/24: a neutral stand-in tunnel subnet
+ * that never overlaps the default-deny ranges or the public/RFC1918 IPs
+ * used below — isolates each ACL branch under test from the others. */
+static const mqvpn_cidr_entry_t NEUTRAL_TUNNEL = {4, 24, {198, 51, 100}};
 
 TEST(acl_blocks_rfc1918)
 {
-    int allowed = svr_tcp_egress_acl_decide(ipv4(10, 0, 0, 5), NULL, 0, NULL, 0,
-                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    uint8_t addr[16];
+    ipv4_addr(10, 0, 0, 5, addr);
+    int allowed = svr_tcp_egress_acl_decide(4, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL);
     ASSERT_EQ(allowed, 0);
 }
 
 TEST(acl_blocks_loopback)
 {
-    int allowed = svr_tcp_egress_acl_decide(ipv4(127, 0, 0, 1), NULL, 0, NULL, 0,
-                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    uint8_t addr[16];
+    ipv4_addr(127, 0, 0, 1, addr);
+    int allowed = svr_tcp_egress_acl_decide(4, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL);
     ASSERT_EQ(allowed, 0);
 }
 
 TEST(acl_allow_punches_hole)
 {
-    mqvpn_cidr_entry_t allow[1] = {{ipv4(10, 0, 0, 0), 0xFF000000u}};
-    int allowed = svr_tcp_egress_acl_decide(ipv4(10, 0, 0, 5), allow, 1, NULL, 0,
-                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    mqvpn_cidr_entry_t allow[1] = {{4, 8, {10}}};
+    uint8_t addr[16];
+    ipv4_addr(10, 0, 0, 5, addr);
+    int allowed = svr_tcp_egress_acl_decide(4, addr, allow, 1, NULL, 0, &NEUTRAL_TUNNEL);
     ASSERT_EQ(allowed, 1);
 }
 
@@ -2396,17 +2449,18 @@ TEST(acl_blocks_own_tunnel_subnet)
     /* TEST-NET-3 (RFC 5737) as the tunnel subnet this time — outside every
      * DEFAULT_DENY_V4 entry, so a deny here can only be the tunnel-subnet
      * check, not an incidental default-deny match. No egress_deny at all. */
-    uint32_t tunnel_net = ipv4(203, 0, 113, 0);
-    uint32_t tunnel_mask = 0xFFFFFF00u;
-    int allowed = svr_tcp_egress_acl_decide(ipv4(203, 0, 113, 5), NULL, 0, NULL, 0,
-                                            tunnel_net, tunnel_mask);
+    mqvpn_cidr_entry_t tunnel = {4, 24, {203, 0, 113}};
+    uint8_t addr[16];
+    ipv4_addr(203, 0, 113, 5, addr);
+    int allowed = svr_tcp_egress_acl_decide(4, addr, NULL, 0, NULL, 0, &tunnel);
     ASSERT_EQ(allowed, 0);
 }
 
 TEST(acl_default_allows_public_ip)
 {
-    int allowed = svr_tcp_egress_acl_decide(ipv4(8, 8, 8, 8), NULL, 0, NULL, 0,
-                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    uint8_t addr[16];
+    ipv4_addr(8, 8, 8, 8, addr);
+    int allowed = svr_tcp_egress_acl_decide(4, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL);
     ASSERT_EQ(allowed, 1);
 }
 
@@ -2415,15 +2469,17 @@ TEST(acl_blocks_this_network)
     /* 0.0.0.0 is not a dead address: Linux connect() to it reaches
      * localhost, so it must hit the 0.0.0.0/8 default-deny row or the
      * loopback protection is bypassable. */
-    int allowed = svr_tcp_egress_acl_decide(ipv4(0, 0, 0, 0), NULL, 0, NULL, 0,
-                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    uint8_t addr[16];
+    ipv4_addr(0, 0, 0, 0, addr);
+    int allowed = svr_tcp_egress_acl_decide(4, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL);
     ASSERT_EQ(allowed, 0);
 }
 
 TEST(acl_blocks_reserved_240)
 {
-    int allowed = svr_tcp_egress_acl_decide(ipv4(240, 0, 0, 1), NULL, 0, NULL, 0,
-                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    uint8_t addr[16];
+    ipv4_addr(240, 0, 0, 1, addr);
+    int allowed = svr_tcp_egress_acl_decide(4, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL);
     ASSERT_EQ(allowed, 0);
 }
 
@@ -2431,9 +2487,10 @@ TEST(acl_deny_blocks_public_ip)
 {
     /* egress_deny must be reachable past the default-deny table: a target
      * OUTSIDE every built-in range is denied only by the configured list. */
-    mqvpn_cidr_entry_t deny[1] = {{ipv4(8, 8, 8, 8), 0xFFFFFFFFu}};
-    int allowed = svr_tcp_egress_acl_decide(ipv4(8, 8, 8, 8), NULL, 0, deny, 1,
-                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    mqvpn_cidr_entry_t deny[1] = {{4, 32, {8, 8, 8, 8}}};
+    uint8_t addr[16];
+    ipv4_addr(8, 8, 8, 8, addr);
+    int allowed = svr_tcp_egress_acl_decide(4, addr, NULL, 0, deny, 1, &NEUTRAL_TUNNEL);
     ASSERT_EQ(allowed, 0);
 }
 
@@ -2442,11 +2499,291 @@ TEST(acl_allow_beats_deny)
     /* Precedence pin: the SAME range in both lists resolves to allowed,
      * because allow is checked before both the default-deny table and the
      * configured deny list (spec'd order — see acl_decide's docstring). */
-    mqvpn_cidr_entry_t allow[1] = {{ipv4(8, 8, 8, 8), 0xFFFFFFFFu}};
-    mqvpn_cidr_entry_t deny[1] = {{ipv4(8, 8, 8, 8), 0xFFFFFFFFu}};
-    int allowed = svr_tcp_egress_acl_decide(ipv4(8, 8, 8, 8), allow, 1, deny, 1,
-                                            ipv4(198, 51, 100, 0), NEUTRAL_TUNNEL_MASK);
+    mqvpn_cidr_entry_t allow[1] = {{4, 32, {8, 8, 8, 8}}};
+    mqvpn_cidr_entry_t deny[1] = {{4, 32, {8, 8, 8, 8}}};
+    uint8_t addr[16];
+    ipv4_addr(8, 8, 8, 8, addr);
+    int allowed = svr_tcp_egress_acl_decide(4, addr, allow, 1, deny, 1, &NEUTRAL_TUNNEL);
     ASSERT_EQ(allowed, 1);
+}
+
+/* ── ACL decision core, IPv6 (Task 6.1 — family-aware acl_decide +
+ * DEFAULT_DENY_V6) ── */
+
+/* Builds a 16-byte network-order v6 address via inet_pton — the v6
+ * counterpart of ipv4_addr() above. */
+static void
+ipv6_addr(const char *literal, uint8_t out[16])
+{
+    struct in6_addr a6;
+    ASSERT_EQ(inet_pton(AF_INET6, literal, &a6), 1);
+    memcpy(out, a6.s6_addr, 16);
+}
+
+/* RFC 3849 documentation prefix (2001:db8::/32): a neutral stand-in tunnel
+ * subnet that never overlaps DEFAULT_DENY_V6 or the public GUAs used below
+ * — the v6 counterpart of NEUTRAL_TUNNEL (TEST-NET-2) above. */
+static const mqvpn_cidr_entry_t NEUTRAL_TUNNEL_V6 = {6, 32, {0x20, 0x01, 0x0d, 0xb8}};
+
+TEST(acl_v6_blocks_loopback)
+{
+    uint8_t addr[16];
+    ipv6_addr("::1", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_v6_blocks_link_local)
+{
+    uint8_t addr[16];
+    ipv6_addr("fe80::1", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_v6_allows_just_outside_link_local)
+{
+    /* fe80::/10 covers byte[1] in [0x80,0xBF] (top 2 bits == '10'); 0xC0 is
+     * one bit past the boundary and must NOT be denied by this row —
+     * exercises the /10 (non-byte-aligned) mask precisely. */
+    uint8_t addr[16];
+    ipv6_addr("fec0::1", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 1);
+}
+
+TEST(acl_v6_blocks_ula_fc00)
+{
+    uint8_t addr[16];
+    ipv6_addr("fc00::1", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_v6_blocks_ula_fd00)
+{
+    /* fc00::/7 (not /8) must cover BOTH halves RFC 4193 splits ULA into —
+     * pins the /7 width specifically. */
+    uint8_t addr[16];
+    ipv6_addr("fd00::1", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_v6_allows_just_outside_ula)
+{
+    /* fc00::/7's covered top-7-bit pattern is 0xFC/0xFD only; 0xFE is one
+     * bit past the boundary (and doesn't collide with ff00::/8 multicast
+     * either) — must NOT be denied by the ULA row. */
+    uint8_t addr[16];
+    ipv6_addr("fe00::1", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 1);
+}
+
+TEST(acl_v6_blocks_multicast)
+{
+    uint8_t addr[16];
+    ipv6_addr("ff02::1", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_v6_blocks_unspecified)
+{
+    uint8_t addr[16];
+    ipv6_addr("::", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_v6_blocks_v4_mapped)
+{
+    uint8_t addr[16];
+    ipv6_addr("::ffff:1.2.3.4", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_v6_allows_just_outside_v4_mapped)
+{
+    /* ::ffff:0:0/96 keys off bytes[10..11] == 0xff,0xff; one byte off (0xfe
+     * instead of 0xff at byte 11) must NOT be denied by this row. */
+    uint8_t addr[16];
+    ipv6_addr("::fffe:1.2.3.4", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 1);
+}
+
+TEST(acl_v6_default_allows_public_gua)
+{
+    /* Default-*allow* parity with v4: a public GUA outside every
+     * DEFAULT_DENY_V6 row is reachable with no config at all. */
+    uint8_t addr[16];
+    ipv6_addr("2606:4700::1", addr); /* Cloudflare GUA */
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 1);
+}
+
+TEST(acl_v6_allow_punches_hole)
+{
+    mqvpn_cidr_entry_t allow[1] = {{6, 7, {0xfc}}}; /* fc00::/7 */
+    uint8_t addr[16];
+    ipv6_addr("fc00::5", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, allow, 1, NULL, 0, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 1);
+}
+
+TEST(acl_v6_blocks_own_tunnel_subnet)
+{
+    /* A distinct docs sub-range (2001:db8:dead::/48), separate from
+     * NEUTRAL_TUNNEL_V6 (2001:db8::/32) — mirrors the v4
+     * acl_blocks_own_tunnel_subnet test's use of a dedicated `tunnel` var
+     * distinct from NEUTRAL_TUNNEL. */
+    mqvpn_cidr_entry_t tunnel = {6, 48, {0x20, 0x01, 0x0d, 0xb8, 0xde, 0xad}};
+    uint8_t addr[16];
+    ipv6_addr("2001:db8:dead::5", addr);
+    int allowed = svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &tunnel);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_v6_deny_blocks_public_ip)
+{
+    /* egress_deny must be reachable past the default-deny table: a target
+     * OUTSIDE every built-in v6 range is denied only by the configured
+     * list. */
+    mqvpn_cidr_entry_t deny[1] = {{6, 32, {0x26, 0x06, 0x47, 0x00}}};
+    uint8_t addr[16];
+    ipv6_addr("2606:4700::1", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, NULL, 0, deny, 1, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 0);
+}
+
+TEST(acl_v6_allow_beats_deny)
+{
+    /* Precedence pin (v6): the SAME range in both lists resolves to
+     * allowed, same order as the v4 acl_allow_beats_deny test. */
+    mqvpn_cidr_entry_t allow[1] = {{6, 32, {0x26, 0x06, 0x47, 0x00}}};
+    mqvpn_cidr_entry_t deny[1] = {{6, 32, {0x26, 0x06, 0x47, 0x00}}};
+    uint8_t addr[16];
+    ipv6_addr("2606:4700::1", addr);
+    int allowed =
+        svr_tcp_egress_acl_decide(6, addr, allow, 1, deny, 1, &NEUTRAL_TUNNEL_V6);
+    ASSERT_EQ(allowed, 1);
+}
+
+TEST(acl_v6_tunnel_unset_allows_public_gua)
+{
+    /* The has_v6-gate regression (spec's central concern): when Subnet6 is
+     * unconfigured, svr_get_egress_policy emits tunnels[1] with family == 0
+     * (see mqvpn_server.c). Mirror that EXACT shape here directly against
+     * acl_decide and confirm a v6 GUA egress target is allowed, not
+     * silently denied by an ungated tunnel-match. */
+    mqvpn_cidr_entry_t tunnel_unset;
+    memset(&tunnel_unset, 0, sizeof(tunnel_unset)); /* family == 0: unset sentinel */
+    uint8_t addr[16];
+    ipv6_addr("2606:4700::1", addr);
+    int allowed = svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &tunnel_unset);
+    ASSERT_EQ(allowed, 1);
+}
+
+TEST(acl_v6_ungated_prefix0_would_deny_all_regression)
+{
+    /* Contrast case, kept as a tripwire: if svr_get_egress_policy's "Subnet6
+     * unset" branch ever regressed to emitting {family=6, prefix_len=0}
+     * instead of {family=0}, mqvpn_cidr_match would treat it as ::/0 —
+     * matching EVERY v6 address and silently denying ALL v6 egress. Pinned
+     * here so a future refactor of that branch trips this test instead of a
+     * production incident. */
+    mqvpn_cidr_entry_t bad_tunnel = {6, 0, {0}};
+    uint8_t addr[16];
+    ipv6_addr("2606:4700::1", addr);
+    int allowed = svr_tcp_egress_acl_decide(6, addr, NULL, 0, NULL, 0, &bad_tunnel);
+    ASSERT_EQ(allowed, 0); /* demonstrates the bug this gate prevents */
+}
+
+/* ── svr_get_egress_policy — has_v6 gate (Task 6.2) ──
+ *
+ * Direct unit tests of the real function (not just a stand-in shape passed
+ * to acl_decide above): builds a genuine mqvpn_server_t via the public API
+ * and inspects tunnels[1] straight out of svr_get_egress_policy. No socket
+ * bind/start/live dispatch needed — this function only reads s->config and
+ * s->pool, both fully populated by mqvpn_server_new() alone. Available here
+ * because hybrid/tcp_egress.h already pulls in mqvpn_server_internal.h. */
+
+TEST(get_egress_policy_v6_tunnel_unset_without_subnet6)
+{
+    /* Subnet6 left unconfigured: tunnels[1] must stay family==0 (unset
+     * sentinel), NOT {family=6, prefix_len=0} — the exact shape the
+     * acl_v6_ungated_prefix0_would_deny_all_regression test above shows
+     * would silently deny ALL v6 egress. */
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    mqvpn_config_set_listen(cfg, "0.0.0.0", 443);
+    mqvpn_config_set_subnet(cfg, "10.0.0.0/24");
+    mqvpn_config_set_tls_cert(cfg, TEST_CERT_FILE, TEST_KEY_FILE);
+    mqvpn_config_set_log_level(cfg, MQVPN_LOG_ERROR);
+
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = counting_tun_output;
+    cbs.tunnel_config_ready = noop_tunnel_config_ready;
+    mqvpn_server_t *svr = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    ASSERT_EQ(svr != NULL, 1);
+
+    const mqvpn_cidr_entry_t *allow = NULL, *deny = NULL;
+    int n_allow = 0, n_deny = 0;
+    mqvpn_cidr_entry_t tunnels[2];
+    svr_get_egress_policy(svr, &allow, &n_allow, &deny, &n_deny, tunnels);
+
+    ASSERT_EQ(tunnels[1].family, 0);
+
+    mqvpn_server_destroy(svr);
+}
+
+TEST(get_egress_policy_v6_tunnel_set_when_subnet6_configured)
+{
+    /* Subnet6 configured: tunnels[1] must mirror the v6 pool, premasked. */
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    mqvpn_config_set_listen(cfg, "0.0.0.0", 443);
+    mqvpn_config_set_subnet(cfg, "10.0.0.0/24");
+    ASSERT_EQ(mqvpn_config_set_subnet6(cfg, "2001:db8:abcd::/112"), MQVPN_OK);
+    mqvpn_config_set_tls_cert(cfg, TEST_CERT_FILE, TEST_KEY_FILE);
+    mqvpn_config_set_log_level(cfg, MQVPN_LOG_ERROR);
+
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = counting_tun_output;
+    cbs.tunnel_config_ready = noop_tunnel_config_ready;
+    mqvpn_server_t *svr = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    ASSERT_EQ(svr != NULL, 1);
+
+    const mqvpn_cidr_entry_t *allow = NULL, *deny = NULL;
+    int n_allow = 0, n_deny = 0;
+    mqvpn_cidr_entry_t tunnels[2];
+    svr_get_egress_policy(svr, &allow, &n_allow, &deny, &n_deny, tunnels);
+
+    ASSERT_EQ(tunnels[1].family, 6);
+    ASSERT_EQ(tunnels[1].prefix_len, 112);
+
+    uint8_t expect_net[16];
+    ASSERT_EQ(inet_pton(AF_INET6, "2001:db8:abcd::", expect_net), 1);
+    mqvpn_cidr_premask(expect_net, 112);
+    ASSERT_EQ(memcmp(tunnels[1].net, expect_net, 16), 0);
+
+    mqvpn_server_destroy(svr);
 }
 
 /* ── svr_tcp_egress_parse_path — fully attacker-controlled H3 :path bytes ── */
@@ -2531,6 +2868,28 @@ TEST(parse_path_rejects_empty)
     ASSERT_EQ(rc == 0, 0);
 }
 
+TEST(parse_path_accepts_v6_literal_45_chars)
+{
+    /* Longest textual IPv6 form (the "x:x:x:x:x:x:d.d.d.d" v4-mapped
+     * notation) is exactly 45 chars — pins that an out_host_cap of
+     * INET6_ADDRSTRLEN (46) is enough, unlike the old 16-byte target_host
+     * that rejected every v6 literal outright (host_len >= out_host_cap).
+     * The host/port split itself needs no v6-specific logic: it's a plain
+     * memchr on '/', unaffected by embedded colons. */
+    const char *host_literal = "ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255";
+    ASSERT_EQ(strlen(host_literal), 45);
+
+    char path[128];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/%s/443/", host_literal);
+
+    char host[INET6_ADDRSTRLEN];
+    uint16_t port = 0;
+    int rc = svr_tcp_egress_parse_path(path, strlen(path), host, sizeof(host), &port);
+    ASSERT_EQ(rc, 0);
+    ASSERT_STREQ(host, host_literal);
+    ASSERT_EQ(port, 443);
+}
+
 int
 main(void)
 {
@@ -2539,6 +2898,8 @@ main(void)
     run_unrecognized_protocol_gets_501();
     run_mqvpn_tcp_bad_path_gets_400();
     run_mqvpn_tcp_acl_denied_gets_403();
+    run_mqvpn_tcp_v6_loopback_denied_gets_403();
+    run_mqvpn_tcp_v6_tunnel_subnet_denied_gets_403();
     run_hybrid_disabled_gets_501();
     run_mqvpn_tcp_acl_allow_hole_reaches_real_connect();
     run_mqvpn_tcp_connect_timeout_gets_504();
@@ -2564,6 +2925,25 @@ main(void)
     run_acl_blocks_reserved_240();
     run_acl_deny_blocks_public_ip();
     run_acl_allow_beats_deny();
+    run_acl_v6_blocks_loopback();
+    run_acl_v6_blocks_link_local();
+    run_acl_v6_allows_just_outside_link_local();
+    run_acl_v6_blocks_ula_fc00();
+    run_acl_v6_blocks_ula_fd00();
+    run_acl_v6_allows_just_outside_ula();
+    run_acl_v6_blocks_multicast();
+    run_acl_v6_blocks_unspecified();
+    run_acl_v6_blocks_v4_mapped();
+    run_acl_v6_allows_just_outside_v4_mapped();
+    run_acl_v6_default_allows_public_gua();
+    run_acl_v6_allow_punches_hole();
+    run_acl_v6_blocks_own_tunnel_subnet();
+    run_acl_v6_deny_blocks_public_ip();
+    run_acl_v6_allow_beats_deny();
+    run_acl_v6_tunnel_unset_allows_public_gua();
+    run_acl_v6_ungated_prefix0_would_deny_all_regression();
+    run_get_egress_policy_v6_tunnel_unset_without_subnet6();
+    run_get_egress_policy_v6_tunnel_set_when_subnet6_configured();
     run_parse_path_accepts_valid();
     run_parse_path_rejects_oversized_host();
     run_parse_path_rejects_missing_port();
@@ -2571,6 +2951,7 @@ main(void)
     run_parse_path_rejects_trailing_bytes();
     run_parse_path_rejects_wrong_prefix();
     run_parse_path_rejects_empty();
+    run_parse_path_accepts_v6_literal_45_chars();
 
     printf("\n  %d/%d tests passed\n", g_tests_passed, g_tests_run);
     return (g_tests_passed == g_tests_run) ? 0 : 1;

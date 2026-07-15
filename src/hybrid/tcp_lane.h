@@ -5,6 +5,7 @@
 #define MQVPN_HYBRID_TCP_LANE_H
 
 #include <stdint.h>
+#include <stdio.h> /* snprintf (mqvpn_tcp_lane_format_connect_path) */
 #ifdef _MSC_VER
 /* MSVC has no ssize_t. NOTE: vendored xquic also typedefs ssize_t on
  * Windows (xquic_typedef.h, __int64 on 64-bit) and mqvpn_client.c sees
@@ -28,11 +29,16 @@ typedef SSIZE_T ssize_t;
 
 typedef struct mqvpn_tcp_lane mqvpn_tcp_lane_t;
 
-/* Flow-starting SYN test for TUN-ingress lane policy (IPv4 only — the
- * classifier routes IPv6 TCP to RAW in v1). Re-parses the one flags byte
- * at the IHL-derived offset DELIBERATELY instead of extending reorder.h's
- * parser: the spec scopes mqvpn_parse_l3l4 to classifier needs (5-tuple),
- * and flags are a lane-policy concern only.
+/* Flow-starting SYN test for TUN-ingress lane policy. Family-aware:
+ * IPv4 re-parses the one flags byte at the IHL-derived offset;
+ * IPv6 re-parses it at the FIXED offset 40 (the v6 fixed header is always
+ * exactly 40 bytes, and the classifier only ever lanes a v6 packet
+ * whose BASE Next Header is already TCP — no extension headers, no
+ * fragments — so the TCP header always starts right there; see
+ * mqvpn_hybrid_classify's pkt[6] gate in classifier.c). Re-parses
+ * DELIBERATELY instead of extending reorder.h's parser: the spec scopes
+ * mqvpn_parse_l3l4 to classifier needs (5-tuple), and flags are a
+ * lane-policy concern only.
  *
  * Returns 1 only for a pure SYN (SYN set, ACK clear). SYN|ACK is
  * intentionally NOT flow-starting: on the client's TUN ingress a SYN|ACK
@@ -43,43 +49,70 @@ typedef struct mqvpn_tcp_lane mqvpn_tcp_lane_t;
  * (every packet re-evaluates as unknown non-SYN → RAW), which is correct:
  * only client-originated outbound flows enter the TCP lane.
  *
- * Bounds-checked: needs len >= IHL + 14 to reach the flags byte at
- * tcp_off + 13. Truncated/garbage packets return 0 (treated as non-SYN;
- * unknown-flow non-SYN falls to RAW where existing paths handle it).
+ * Bounds-checked: needs len >= tcp_off + 14 to reach the flags byte at
+ * tcp_off + 13 (tcp_off = IHL for v4, fixed 40 for v6). Truncated/garbage
+ * packets return 0 (treated as non-SYN; unknown-flow non-SYN falls to RAW
+ * where existing paths handle it). A version nibble that is neither 4 nor 6
+ * (dispatched purely on pkt[0]) also returns 0.
  *
- * PRECONDITION: pkt must already be classified MQVPN_LANE_TCP
- * (non-fragment IPv4 TCP); this helper does not re-verify protocol or
- * fragment offset. */
+ * PRECONDITION: pkt must already be classified MQVPN_LANE_TCP (non-fragment
+ * IPv4 TCP, or direct-base-NH IPv6 TCP); this helper does not re-verify
+ * protocol, fragment offset, or — for IPv6 — the base Next Header byte
+ * itself. It trusts the classifier's base-NH==TCP gate for the
+ * v6 fixed-offset assumption and only dispatches on IP version. */
 static inline int
 mqvpn_tcp_syn_flag(const uint8_t *pkt, size_t len)
 {
-    if (len < 20 || (pkt[0] >> 4) != 4) {
+    if (len < 1) {
         return 0;
     }
-    size_t ihl = (size_t)(pkt[0] & 0x0F) * 4;
-    if (ihl < 20 || len < ihl + 14) {
+    size_t tcp_off;
+    if ((pkt[0] >> 4) == 4) {
+        if (len < 20) {
+            return 0;
+        }
+        tcp_off = (size_t)(pkt[0] & 0x0F) * 4;
+        if (tcp_off < 20) {
+            return 0;
+        }
+    } else if ((pkt[0] >> 4) == 6) {
+        tcp_off = 40;
+    } else {
         return 0;
     }
-    uint8_t flags = pkt[ihl + 13];
+    if (len < tcp_off + 14) {
+        return 0;
+    }
+    uint8_t flags = pkt[tcp_off + 13];
     return (flags & 0x12) == 0x02; /* SYN set, ACK clear */
 }
 
 /* I2: extract the ISN (TCP sequence number, bytes 4-7 of the TCP header)
- * from a pure SYN packet. PRECONDITION: mqvpn_tcp_syn_flag(pkt, len) must
- * already have returned 1 for this EXACT packet — that check's bounds
- * requirement (len >= ihl + 14, to reach the flags byte) is strictly
- * larger than what reading the 4-byte seq field at ihl+4..ihl+7 needs, so
- * no separate bounds check is done here (same PRECONDITION idiom as
- * mqvpn_tcp_syn_flag's own header comment). Used to re-evaluate a sticky-
- * RAW marker on tuple reuse: same ISN means the same handshake
+ * from a pure SYN packet. Family-aware, mirroring
+ * mqvpn_tcp_syn_flag's v4-IHL-derived-offset / v6-fixed-offset-40 split.
+ *
+ * PRECONDITION: mqvpn_tcp_syn_flag(pkt, len) must already have returned 1
+ * for this EXACT packet — that check's bounds requirement (len >=
+ * tcp_off + 14, to reach the flags byte) is strictly larger than what
+ * reading the 4-byte seq field at tcp_off+4..tcp_off+7 needs, so no
+ * separate bounds check is done here (same PRECONDITION idiom as
+ * mqvpn_tcp_syn_flag's own header comment); it also guarantees pkt[0]'s
+ * version nibble is 4 or 6 (any other value returns 0 from the flag check
+ * above, so this function is never reached for it). Used to re-evaluate a
+ * sticky-RAW marker on tuple reuse: same ISN means the same handshake
  * retransmitting (keep the marker), a different ISN means a genuinely new
  * connection (see mqvpn_tcp_lane_marker_isn / mqvpn_tcp_lane_on_syn). */
 static inline uint32_t
 mqvpn_tcp_syn_isn(const uint8_t *pkt, size_t len)
 {
     (void)len;
-    size_t ihl = (size_t)(pkt[0] & 0x0F) * 4;
-    const uint8_t *seq = pkt + ihl + 4;
+    const uint8_t *seq;
+    if ((pkt[0] >> 4) == 6) {
+        seq = pkt + 40 + 4;
+    } else {
+        size_t ihl = (size_t)(pkt[0] & 0x0F) * 4;
+        seq = pkt + ihl + 4;
+    }
     return ((uint32_t)seq[0] << 24) | ((uint32_t)seq[1] << 16) | ((uint32_t)seq[2] << 8) |
            (uint32_t)seq[3];
 }
@@ -266,6 +299,71 @@ int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
     (-1) /* drained for now (would-block) — retry on the next READ_BODY/ \
           * EMPTY_FIN notify */
 #define MQVPN_TCP_LANE_H3_RECV_ERR (-2) /* fatal stream error */
+
+/* The connect-tcp request-target prefix. Byte-identical to the server-side
+ * TCP_EGRESS_PATH_PREFIX (tcp_egress.c), whose comment points back at this
+ * emitter; kept as separate local defines on each side deliberately (sharing
+ * one constant would need a common header for a single string — not worth the
+ * coupling). */
+#define MQVPN_TCP_CONNECT_PATH_PREFIX "/.well-known/mqvpn/tcp/"
+
+/* Worst-case connect-tcp :path buffer: 23 (prefix) + 45 (INET6_ADDRSTRLEN-1
+ * v6 literal) + 7 ("/" + 5-digit port + "/") + 1 (NUL) = 76, rounded to 80.
+ * Every buffer handed to mqvpn_tcp_lane_format_connect_path should use this so
+ * the sizing lives in one place next to the format string it must fit. */
+#define MQVPN_TCP_CONNECT_PATH_CAP 80
+
+/* connect-tcp :path formatter — extracted from the inline snprintf
+ * that used to live directly in cli_tcp_lane_open_stream (mqvpn_client.c),
+ * purely so it gets a unit-test seam: that function is static and this file's
+ * test double stubs cli_tcp_lane_open_stream instead of linking the real one.
+ * `static inline` like the SYN helpers above, so both mqvpn_client.c and
+ * test_tcp_lane.c get it from this one header. inet_ntop / AF_INET6 /
+ * INET6_ADDRSTRLEN come portably (the _WIN32-guarded winsock/arpa split) via
+ * the already-included hybrid/classifier.h — this file only adds <stdio.h>
+ * for snprintf, so a clean checkout resolves both without a bare arpa include.
+ *
+ * key->dst_ip holds v4 in [0..3] (raw network-order header bytes — direct
+ * indexing prints correctly) and dst_port is host order (reorder.h key
+ * contract). Writes the request target as
+ * "/.well-known/mqvpn/tcp/<dst>/<port>/" into out (capacity cap) and returns
+ * snprintf's return value, so a caller CAN detect truncation the same way any
+ * snprintf caller would (return >= cap) — test_tcp_lane.c's
+ * test_connect_path_format_truncation exercises exactly that, with a
+ * deliberately undersized buffer.
+ *
+ * The production caller (cli_tcp_lane_open_stream, mqvpn_client.c) does NOT
+ * add that `>= cap` check, and that is correct, not an oversight: with
+ * MQVPN_TCP_CONNECT_PATH_CAP's worst case — 23 (prefix) + 45
+ * (INET6_ADDRSTRLEN-1 v6 literal) + 7 ("/" + 5-digit port + "/") + 1 (NUL)
+ * = 76 < 80 — truncation can never actually happen there, so the only
+ * failure mode left to check is the `< 0` (inet_ntop failure) branch it does
+ * have. Do not add a dead `>= cap` branch to that caller on the strength of
+ * this docstring alone.
+ *
+ * v6: emits the RAW inet_ntop colon form — NOT bracketed
+ * ("[2001:db8::1]") and NOT percent-encoded. The server's tcp_egress.c path
+ * parser splits :path on '/' and feeds the host segment straight to
+ * inet_pton with no bracket-strip/percent-decode step, so a bracketed or
+ * escaped literal would inet_pton-fail there (403). On an inet_ntop failure
+ * (malformed key->dst_ip; not expected in practice) returns -1 — the same
+ * negative-on-failure shape snprintf itself uses, so callers that already
+ * check `ret < 0` for truncation/error need no separate branch. */
+static inline int
+mqvpn_tcp_lane_format_connect_path(char *out, size_t cap, const mqvpn_flow_key_t *key)
+{
+    if (key->ip_version == 6) {
+        char ipbuf[INET6_ADDRSTRLEN];
+        if (!inet_ntop(AF_INET6, key->dst_ip, ipbuf, sizeof(ipbuf))) {
+            return -1;
+        }
+        return snprintf(out, cap, MQVPN_TCP_CONNECT_PATH_PREFIX "%s/%u/", ipbuf,
+                        (unsigned)key->dst_port);
+    }
+    return snprintf(out, cap, MQVPN_TCP_CONNECT_PATH_PREFIX "%u.%u.%u.%u/%u/",
+                    key->dst_ip[0], key->dst_ip[1], key->dst_ip[2], key->dst_ip[3],
+                    (unsigned)key->dst_port);
+}
 
 /* Implemented in mqvpn_client.c — the deliberate tcp_lane.c →
  * mqvpn_client.c coupling points (direct .c-to-.c calls, no callback-pointer

@@ -1194,12 +1194,19 @@ cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_k
     snprintf(authority, sizeof(authority), "%s:%d", c->config.server_host,
              c->config.server_port);
 
-    /* Original inner destination — key->dst_ip holds v4 in [0..3] (raw
-     * network-order header bytes, so direct indexing prints correctly),
-     * dst_port is host order (reorder.h key contract). */
-    char path[64];
-    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/%u.%u.%u.%u/%u/", key->dst_ip[0],
-             key->dst_ip[1], key->dst_ip[2], key->dst_ip[3], (unsigned)key->dst_port);
+    /* Original inner destination — see mqvpn_tcp_lane_format_connect_path's
+     * doc comment (tcp_lane.h) for the key-field byte-order contract and the
+     * MQVPN_TCP_CONNECT_PATH_CAP worst-case sizing this relies on. A negative
+     * return is inet_ntop failure (path left unwritten) — reject via the same
+     * abort path the allocation failures above use, so the later strlen(path)
+     * never reads an uninitialized buffer. Dead today (AF_INET6 hardcoded,
+     * cap large enough) but guards a future refactor. */
+    char path[MQVPN_TCP_CONNECT_PATH_CAP];
+    if (mqvpn_tcp_lane_format_connect_path(path, sizeof(path), key) < 0) {
+        LOG_E(c, "connect-tcp: could not format request path");
+        xqc_h3_request_close(req); /* close notify frees stream */
+        return mqvpn_tcp_lane_abort_pending(flow_handle);
+    }
 
     char auth_value[300];
 
@@ -1555,9 +1562,20 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
          * limitation) live on mqvpn_tunnel_subnet_learn and
          * client_tunnel_subnet in classifier.h. Deliberately OUTSIDE the
          * MQVPN_HYBRID_TCP_LANE_ENABLED block: lane-less builds still
-         * classify for counters and must report the same verdicts. */
+         * classify for counters and must report the same verdicts.
+         * client_tunnel_subnet[0] is v4 (always learned here); [1] is the v6
+         * tunnel subnet, learned only once an IPv6 address has actually been
+         * assigned. The classifier's family-aware TCP-lane carve-out consumes
+         * [1] for v6 flows exactly as it consumes [0] for v4 (see
+         * classify()'s tunnel-subnet check), for the same reason: laning a
+         * tunnel-subnet destination would only draw a server RESET, so it
+         * stays RAW. */
         mqvpn_tunnel_subnet_learn(conn->assigned_ip, (int)conn->assigned_prefix,
-                                  &c->config.hybrid.client_tunnel_subnet);
+                                  &c->config.hybrid.client_tunnel_subnet[0]);
+        if (conn->addr6_assigned) {
+            mqvpn_tunnel_subnet_learn_v6(conn->assigned_ip6, (int)conn->assigned_prefix6,
+                                         &c->config.hybrid.client_tunnel_subnet[1]);
+        }
 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
         /* Sanitize the [Hybrid] block at its consumer, BEFORE the enabled
@@ -2986,7 +3004,13 @@ tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t 
                 int is_syn = 0;
                 uint32_t pkt_isn = 0;
                 if (!found || is_closing || is_raw) {
-                    is_syn = (ip_ver == 4) && mqvpn_tcp_syn_flag(pkt, len);
+                    /* mqvpn_tcp_syn_flag is family-aware (v4 IHL-derived
+                     * offset, v6 fixed offset 40) — no ip_ver gate needed
+                     * here. The classifier already excluded ext-header/
+                     * fragmented v6 (MQVPN_LANE_TCP only fires for
+                     * base-NH==TCP), so a v6 is_syn here is always
+                     * lane-terminable. */
+                    is_syn = mqvpn_tcp_syn_flag(pkt, len);
                     if (is_syn) pkt_isn = mqvpn_tcp_syn_isn(pkt, len);
                 }
                 if (found && is_syn) {

@@ -772,12 +772,11 @@ mqvpn_config_set_hybrid_egress_acl(mqvpn_config_t *cfg, const char **allow, int 
     mqvpn_cidr_entry_t parsed_allow[MQVPN_EGRESS_ACL_MAX];
     mqvpn_cidr_entry_t parsed_deny[MQVPN_EGRESS_ACL_MAX];
     for (int i = 0; i < n_allow; i++) {
-        if (mqvpn_parse_cidr_v4(allow[i], &parsed_allow[i]) < 0)
+        if (mqvpn_parse_cidr(allow[i], &parsed_allow[i]) < 0)
             return MQVPN_ERR_INVALID_ARG;
     }
     for (int i = 0; i < n_deny; i++) {
-        if (mqvpn_parse_cidr_v4(deny[i], &parsed_deny[i]) < 0)
-            return MQVPN_ERR_INVALID_ARG;
+        if (mqvpn_parse_cidr(deny[i], &parsed_deny[i]) < 0) return MQVPN_ERR_INVALID_ARG;
     }
 
     if (n_allow > 0)

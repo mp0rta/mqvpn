@@ -152,8 +152,13 @@ typedef struct mqvpn_tcp_flow {
     uint32_t syn_isn;
 
     struct tcp_pcb *pcb;  /* set by the lwIP accept callback */
-    ip4_addr_t target_ip; /* original inner dst (== pcb->local_ip at accept —
-                           * wildcard intercept), network byte order */
+    ip_addr_t target_ip;  /* original inner dst (== pcb->local_ip at accept —
+                           * wildcard intercept), network byte order. Tagged
+                           * union (was ip4_addr_t) now that LWIP_IPV6=1 and
+                           * the listener is dual-stack — copied whole
+                           * (family + address) from pcb->local_ip so it
+                           * works for both v4 and v6 accepted flows (see
+                           * mqvpn_tcp_lane_lwip_accept). */
     uint16_t target_port; /* host order, same as the flow key's ports */
     void *h3_request;     /* opaque xqc_h3_request_t*; set by bind_h3_request */
     void *stream;         /* opaque cli_stream_t*; set by bind_h3_request */

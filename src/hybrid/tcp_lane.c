@@ -23,12 +23,13 @@
 
 #include "lwip/priv/tcp_priv.h" /* TCP_MSL — C1's CLOSING grace-sweep window */
 
-/* The accept callback memcpy's pcb local_ip/remote_ip as the flow key's raw
- * 4 network-order bytes — only valid while ip_addr_t IS the bare ip4_addr_t
- * (one u32_t). Pin the LWIP_IPV6=0 assumption (lwip_port/lwipopts.h). */
-_Static_assert(sizeof(ip_addr_t) == 4,
-               "TCP lane assumes LWIP_IPV6=0: ip_addr_t must be the bare "
-               "network-order ip4_addr_t");
+/* Dual-stack (LWIP_IPV6=1): ip_addr_t is now a tagged union
+ * (lwip/ip_addr.h) — sizeof(ip_addr_t) != 4, so the old compile-time pin on
+ * the bare-ip4_addr_t assumption no longer applies. The accept callback
+ * (mqvpn_tcp_lane_lwip_accept below) instead switches on IP_IS_V6() and
+ * memcpy's from ip_2_ip4()/ip_2_ip6()'s ->addr fields explicitly for each
+ * family — see its docstring for the byte-order contract, now covering
+ * both v4 and v6. */
 
 /* Sticky-RAW markers are capped separately from tcp_max_flows: they are
  * never idle-evicted (the idle sweep covers TCP-lane flows only — a marker's
@@ -1310,21 +1311,35 @@ mqvpn_tcp_lane_lwip_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
      * wildcard bind means local_ip/local_port ARE the true original
      * destination. Byte-order contract (must be byte-identical to the key
      * mqvpn_hybrid_classify built from the raw SYN, or find_flow below
-     * misses every time; pinned by test_tcp_lane's correspondence test):
+     * misses every time; pinned by test_tcp_lane's correspondence tests,
+     * v4 and v6):
      *   - pcb ports are HOST order (tcp_input ntohs's the header before
      *     tcp_listen_input copies src/dest — tcp_in.c), matching the key's
      *     documented host-order ports (reorder.h);
-     *   - LWIP_IPV6=0 makes ip_addr_t the bare ip4_addr_t: one u32_t in
-     *     NETWORK order, i.e. the same 4 raw header bytes the classifier
-     *     memcpy'd (pinned by the _Static_assert at the top). */
+     *   - ip_addr_t is a tagged union (LWIP_IPV6=1), so switch on the pcb's
+     *     actual family instead of one whole-struct memcpy (which would
+     *     also copy the union's type tag / unused arm into the key's raw
+     *     byte array):
+     *       - v4: ip_2_ip4(...)->addr is the bare ip4_addr_t, one u32_t in
+     *         NETWORK order — same 4 raw header bytes the classifier
+     *         memcpy'd.
+     *       - v6: ip_2_ip6(...)->addr is u32_t addr[4], 16 bytes total in
+     *         NETWORK order — same 16 raw header bytes the classifier
+     *         memcpy'd (reorder.h's mqvpn_parse_l3l4, v6 branch). */
     mqvpn_flow_key_t key;
     memset(&key, 0, sizeof(key));
-    key.ip_version = 4;
     key.proto = MQVPN_IPPROTO_TCP;
     key.src_port = newpcb->remote_port;
     key.dst_port = newpcb->local_port;
-    memcpy(key.src_ip, &newpcb->remote_ip, sizeof(newpcb->remote_ip));
-    memcpy(key.dst_ip, &newpcb->local_ip, sizeof(newpcb->local_ip));
+    if (IP_IS_V6(&newpcb->local_ip)) {
+        key.ip_version = 6;
+        memcpy(key.src_ip, ip_2_ip6(&newpcb->remote_ip)->addr, 16); /* addr[4], array */
+        memcpy(key.dst_ip, ip_2_ip6(&newpcb->local_ip)->addr, 16);  /* addr[4], array */
+    } else {
+        key.ip_version = 4;
+        memcpy(key.src_ip, &ip_2_ip4(&newpcb->remote_ip)->addr, 4); /* scalar u32 */
+        memcpy(key.dst_ip, &ip_2_ip4(&newpcb->local_ip)->addr, 4);  /* scalar u32 */
+    }
 
     mqvpn_tcp_flow_t *f = find_flow(lane, &key, NULL);
     if (!f || f->state != TCP_FLOW_PENDING_ACCEPT) {
@@ -1349,7 +1364,7 @@ mqvpn_tcp_lane_lwip_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
     }
 
     f->pcb = newpcb;
-    f->target_ip = *ip_2_ip4(&newpcb->local_ip);
+    f->target_ip = newpcb->local_ip; /* whole union: family + address */
     f->target_port = newpcb->local_port;
     f->state = TCP_FLOW_PENDING_STREAM;
     f->last_activity_us = lane->clock_fn ? lane->clock_fn(lane->clock_ctx) : 0;

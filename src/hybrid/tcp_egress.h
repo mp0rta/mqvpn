@@ -97,34 +97,50 @@ int svr_tcp_egress_errno_to_status(int err);
  * H3 :path bytes land here directly off the wire, so this is the highest-
  * value defensive-test surface in the file.
  *
- * Parses exactly "/.well-known/mqvpn/tcp/<ipv4>/<port>/" — byte-for-byte
- * the client's template (see mqvpn_client.c's connect-tcp request builder).
- * out_host must be at least 16 bytes (IPv4 dotted-quad + NUL); a host that
- * doesn't fit is rejected outright, never truncated. Returns 0 on success,
- * -1 on any malformed input (wrong prefix, missing/non-numeric/out-of-range
- * port, oversized host, empty input). Purely a format check — it does NOT
- * validate that out_host is a syntactically valid IPv4 address; that's
- * left to inet_pton() in the ACL check below. */
+ * Parses exactly "/.well-known/mqvpn/tcp/<ip>/<port>/" — byte-for-byte the
+ * client's template (see mqvpn_client.c's connect-tcp request builder). <ip>
+ * may be an IPv4 dotted-quad or a bare (no brackets) IPv6 literal — the
+ * host/port split here is purely textual (memchr on '/'), so a v6 literal's
+ * embedded colons never interfere with it. out_host must be at least
+ * INET6_ADDRSTRLEN bytes (46 — the longest textual IPv6 form, the
+ * "x:x:x:x:x:x:d.d.d.d" v4-mapped notation, is 45 chars + NUL) or a v4-only
+ * caller may still use 16; a host that doesn't fit is rejected outright,
+ * never truncated. Returns 0 on success, -1 on any malformed input (wrong
+ * prefix, missing/non-numeric/out-of-range port, oversized host, empty
+ * input). Purely a format check — it does NOT validate that out_host is a
+ * syntactically valid IPv4/IPv6 address; that's left to inet_pton() in the
+ * ACL check below. */
 int svr_tcp_egress_parse_path(const char *path, size_t path_len, char *out_host,
                               size_t out_host_cap, uint16_t *out_port);
 
 /* Pure ACL decision core — no live mqvpn_server_t needed, so unit tests can
  * exercise the default-deny table and allow/deny precedence directly with
- * plain parsed inputs. All values host-byte-order; `allow`/`deny` may be
- * NULL when n_allow/n_deny are 0. Returns 1 = allowed, 0 = denied.
+ * plain parsed inputs. `addr` is network-byte-order, 16 bytes, v4 in [0..3]
+ * (same layout as mqvpn_flow_key_t / mqvpn_cidr_entry_t.net); `allow`/`deny`
+ * may be NULL when n_allow/n_deny are 0. `tunnel` must be a valid (non-NULL)
+ * pointer to a single entry — "no tunnel subnet configured" is expressed as
+ * family == 0 (the unset sentinel mqvpn_cidr_match already treats as a
+ * guaranteed non-match), not a NULL pointer. Returns 1 = allowed, 0 =
+ * denied. Family-aware: family == 4 walks DEFAULT_DENY_V4, family == 6
+ * walks DEFAULT_DENY_V6 (loopback/link-local/ULA/multicast/unspecified/
+ * v4-mapped) — the array AND its element count are selected together from
+ * the same branch (see the comment at the selection site), so a v6 call
+ * never partially reuses the v4 table.
  *
  * Evaluation order (do not reorder without updating the docstring AND the
  * self-review note in the task that introduced this):
  *   1. tunnel subnet   -> always denied, even if also present in `allow`
  *   2. egress_allow    -> punches holes through the default-deny below
- *   3. built-in default-deny ranges (loopback/RFC1918/link-local/CGNAT/
- *      multicast/broadcast)
+ *   3. built-in default-deny ranges, family-selected (loopback/RFC1918/
+ *      link-local/CGNAT/multicast/broadcast for v4; loopback/link-local/
+ *      ULA/multicast/unspecified/v4-mapped for v6)
  *   4. egress_deny     -> extra blocks past the built-in set
  *   5. default allow — this is a general-purpose egress proxy, not a
  *      walled garden; only enumerated private/special ranges are blocked
  *      by default. */
-int svr_tcp_egress_acl_decide(uint32_t ip, const mqvpn_cidr_entry_t *allow, int n_allow,
+int svr_tcp_egress_acl_decide(uint8_t family, const uint8_t addr[16],
+                              const mqvpn_cidr_entry_t *allow, int n_allow,
                               const mqvpn_cidr_entry_t *deny, int n_deny,
-                              uint32_t tunnel_net, uint32_t tunnel_mask);
+                              const mqvpn_cidr_entry_t *tunnel);
 
 #endif /* MQVPN_HYBRID_TCP_EGRESS_H */
