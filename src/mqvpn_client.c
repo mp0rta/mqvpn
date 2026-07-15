@@ -54,6 +54,7 @@
 #include "icmp.h"
 #include "path_state_machine.h"
 #include "reorder.h"
+#include "reorder_gate.h"
 #include "reorder_rx.h"
 #include "reorder_tx.h"
 
@@ -67,7 +68,6 @@
  * this window, so a dead first-listed path triggers reconnect (and primary_path_idx
  * rotation, issue #46) rather than waiting for xquic's idle_time_out (120s). */
 #define HANDSHAKE_STALL_TIMEOUT_MS 5000
-#define PTB_RATE_LIMIT             10
 /* PATH_RECREATE_* and PATH_STABLE_THRESHOLD_US relocated to path_state_machine.h
  * for PR4 — shared with path_state_machine.c. */
 #define SOCKET_BUF_SIZE (7 * 1024 * 1024) /* 7 MiB socket buffer */
@@ -249,8 +249,7 @@ struct mqvpn_client_s {
     uint64_t handshake_started_us;
 
     /* ICMP PTB rate limit */
-    int ptb_tokens;
-    int64_t ptb_refill_ms;
+    mqvpn_ptb_bucket_t ptb_bucket;
 
     /* Debug: tick thread assertion */
 #ifndef NDEBUG
@@ -722,23 +721,6 @@ mqvpn_client_test_set_next_wake_us(mqvpn_client_t *c, uint64_t us)
     return 0;
 }
 
-/* ─── ICMP PTB rate limiter ─── */
-
-static int
-ptb_rate_allow(mqvpn_client_t *c)
-{
-    int64_t ms = now_ms_mono();
-    if (ms - c->ptb_refill_ms >= 1000) {
-        c->ptb_tokens = PTB_RATE_LIMIT;
-        c->ptb_refill_ms = ms;
-    }
-    if (c->ptb_tokens > 0) {
-        c->ptb_tokens--;
-        return 1;
-    }
-    return 0;
-}
-
 static int
 client_validate_new_args(const mqvpn_config_t *cfg, const mqvpn_client_callbacks_t *cbs)
 {
@@ -764,7 +746,7 @@ client_init_handle(mqvpn_client_t *c, const mqvpn_config_t *cfg,
     c->log_level = cfg->log_level;
     c->state = MQVPN_STATE_IDLE;
     c->next_path_handle = 1;
-    c->ptb_tokens = PTB_RATE_LIMIT;
+    mqvpn_ptb_bucket_init(&c->ptb_bucket);
 }
 
 static void
@@ -3105,50 +3087,16 @@ tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t 
     if (conn->dgram_mss > 0)
         udp_mss = xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
 
-    if (conn->reorder_tx && conn->peer_reorder_supported &&
-        c->config.reorder.mode != MQVPN_REORDER_OFF && udp_mss > 0) {
-        mqvpn_reorder_tx_action_t act = mqvpn_reorder_tx_peek(
-            conn->reorder_tx, pkt, len, client_now_us(c), (uint32_t)udp_mss, peek);
-        if (act == MQVPN_REORDER_TX_STAMP) {
-            *do_stamp = 1;
-        } else if (act == MQVPN_REORDER_TX_DROP_MTU) {
-            /* 8 + len exceeds the DATAGRAM payload: emit ICMP PTB advertising the
-             * reorder-reduced effective MTU (udp_mss - 8) and drop, mirroring the
-             * RAW MTU-too-big handling below. */
-            size_t eff_mtu =
-                udp_mss > MQVPN_REORDER_HDR_LEN ? udp_mss - MQVPN_REORDER_HDR_LEN : 0;
-            if (ip_ver == 4) {
-                if (conn->addr_assigned && ptb_rate_allow(c))
-                    mqvpn_icmp_send_v4(
-                        c->cbs.tun_output, c->user_ctx, conn->assigned_ip, 3, 4,
-                        (eff_mtu > 0xFFFF) ? 0xFFFF : (uint16_t)eff_mtu, pkt, len);
-            } else {
-                if (conn->addr6_assigned && ptb_rate_allow(c))
-                    mqvpn_icmp_send_v6(c->cbs.tun_output, c->user_ctx, conn->assigned_ip6,
-                                       2, 0, (uint32_t)eff_mtu, pkt, len);
-            }
-            return TUN_INGRESS_DROP;
-        }
-        /* MQVPN_REORDER_TX_RAW falls through to the RAW path. */
-    }
-
-    /* ICMP PTB if a RAW packet exceeds tunnel capacity. (When stamping, the
-     * §9 MTU reduction already keeps len within budget; the peek's DROP_MTU
-     * branch above covers the stamped over-MTU case.) */
-    if (!*do_stamp && udp_mss > 0) {
-        if (len > udp_mss) {
-            if (ip_ver == 4) {
-                if (conn->addr_assigned && ptb_rate_allow(c))
-                    mqvpn_icmp_send_v4(
-                        c->cbs.tun_output, c->user_ctx, conn->assigned_ip, 3, 4,
-                        (udp_mss > 0xFFFF) ? 0xFFFF : (uint16_t)udp_mss, pkt, len);
-            } else {
-                if (conn->addr6_assigned && ptb_rate_allow(c))
-                    mqvpn_icmp_send_v6(c->cbs.tun_output, c->user_ctx, conn->assigned_ip6,
-                                       2, 0, (uint32_t)udp_mss, pkt, len);
-            }
-            return TUN_INGRESS_DROP;
-        }
+    size_t ptb_mtu = 0;
+    mqvpn_rgate_verdict_t rv = mqvpn_rgate_decide(
+        conn->reorder_tx, conn->peer_reorder_supported, c->config.reorder.mode, pkt, len,
+        client_now_us(c), (uint32_t)udp_mss, do_stamp, peek, &ptb_mtu);
+    if (rv == MQVPN_RGATE_DROP_REORDER_MTU || rv == MQVPN_RGATE_DROP_RAW_MTU) {
+        int addr_ok = ip_ver == 4 ? conn->addr_assigned : conn->addr6_assigned;
+        const uint8_t *src_ip = ip_ver == 4 ? conn->assigned_ip : conn->assigned_ip6;
+        mqvpn_rgate_send_ptb(&c->ptb_bucket, now_ms_mono(), ip_ver, addr_ok, src_ip,
+                             ptb_mtu, c->cbs.tun_output, c->user_ctx, pkt, len);
+        return TUN_INGRESS_DROP;
     }
 
     return TUN_INGRESS_PROCEED;
