@@ -123,14 +123,17 @@ static const mqvpn_cidr_entry_t DEFAULT_DENY_V6[] = {
     {6, 7, {0xfc}},
     {6, 8, {0xff}}, /* multicast ff00::/8 */
     {6, 128, {0}},  /* unspecified ::/128 */
-    /* v4-mapped ::ffff:0:0/96 — the PRIMARY guard against a v4-mapped
-     * literal (e.g. "::ffff:127.0.0.1") reaching v4 space unfiltered: such a
-     * target is evaluated purely as a v6 address (no v4 DEFAULT_DENY_V4 row
-     * would ever see it), so this row 403s it here, at the ACL, before any
-     * socket is created — explicit and attributable. The IPV6_V6ONLY
-     * setsockopt in svr_tcp_egress_start_connect is only defense-in-depth
-     * behind this row (it would catch a v4-mapped dst arriving via some
-     * OTHER path that skipped this ACL). */
+    /* v4-mapped ::ffff:0:0/96 — under the DEFAULT config this is the primary
+     * guard against a v4-mapped literal (e.g. "::ffff:127.0.0.1") reaching v4
+     * space: such a target is evaluated purely as a v6 address (no v4
+     * DEFAULT_DENY_V4 row would ever see it), so this row 403s it here, at the
+     * ACL, before any socket is created — explicit and attributable. It is
+     * NOT an absolute boundary though: EgressAllow is evaluated BEFORE
+     * DEFAULT_DENY_V6, so an operator EgressAllow covering a v4-mapped range
+     * (or ::/0) overrides this row. The IPV6_V6ONLY setsockopt in
+     * svr_tcp_egress_start_connect is load-bearing (NOT merely
+     * defense-in-depth) in exactly that case, and fails closed — see its
+     * comment. */
     {6, 96, {[10] = 0xff, [11] = 0xff}},
 };
 
