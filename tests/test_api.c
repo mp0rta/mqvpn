@@ -1234,7 +1234,8 @@ TEST(cb_path_removed_validating_to_create_wait)
  * (PATH_ABANDON) exactly like a secondary's; the id-0 guard introduced by
  * the PR4 refactor (#116) skipped it and cost a ~95-115 s server-side
  * downlink blackout on primary loss (iOS PoC gate G-i3). */
-extern int mqvpn_client_test_force_validating(mqvpn_client_t *c, mqvpn_path_handle_t handle,
+extern int mqvpn_client_test_force_validating(mqvpn_client_t *c,
+                                              mqvpn_path_handle_t handle,
                                               uint64_t xqc_path_id);
 extern int mqvpn_client_test_abandon_due(mqvpn_client_t *c, mqvpn_path_handle_t handle);
 
@@ -1681,6 +1682,42 @@ TEST(client_set_state_leaving_connecting_clears_handshake_start)
     ASSERT_EQ(mqvpn_client_test_get_handshake_started_us(c), 0u);
 
     mqvpn_client_destroy(c);
+}
+
+/* ── CONNECT-IP failure classification (wrong-PSK fast-fail) ──
+ *
+ * cli_classify_status maps a non-200 CONNECT-IP :status to a pre-establishment
+ * failure reason: 401/403 -> AUTH (RFC 9110 §15.5.2 / §15.5.4), everything
+ * else (incl. 0 = no headers seen) -> PROTOCOL. Pure function, no live
+ * connection needed. */
+
+extern int mqvpn_client_test_classify_status(int status);
+
+TEST(classify_status_401_is_auth)
+{
+    ASSERT_EQ(mqvpn_client_test_classify_status(401), MQVPN_ERR_AUTH);
+}
+
+TEST(classify_status_403_is_auth)
+{
+    ASSERT_EQ(mqvpn_client_test_classify_status(403), MQVPN_ERR_AUTH);
+}
+
+TEST(classify_status_404_is_protocol)
+{
+    ASSERT_EQ(mqvpn_client_test_classify_status(404), MQVPN_ERR_PROTOCOL);
+}
+
+TEST(classify_status_500_is_protocol)
+{
+    ASSERT_EQ(mqvpn_client_test_classify_status(500), MQVPN_ERR_PROTOCOL);
+}
+
+TEST(classify_status_zero_is_protocol)
+{
+    /* status 0 = no :status header observed (e.g. malformed / stream reset
+     * before headers) — treated as PROTOCOL. */
+    ASSERT_EQ(mqvpn_client_test_classify_status(0), MQVPN_ERR_PROTOCOL);
 }
 
 TEST(client_set_state_reconnecting_clears_handshake_start)
@@ -2342,6 +2379,14 @@ main(void)
     run_handshake_stall_only_in_connecting_state();
     run_client_set_state_to_connecting_records_handshake_start();
     run_client_set_state_leaving_connecting_clears_handshake_start();
+
+    /* CONNECT-IP failure classification */
+    run_classify_status_401_is_auth();
+    run_classify_status_403_is_auth();
+    run_classify_status_404_is_protocol();
+    run_classify_status_500_is_protocol();
+    run_classify_status_zero_is_protocol();
+
     run_client_set_state_reconnecting_clears_handshake_start();
     run_get_interest_includes_handshake_stall_deadline();
 

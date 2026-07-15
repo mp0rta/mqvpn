@@ -80,6 +80,12 @@ typedef struct cli_stream_s cli_stream_t;
 static int cli_start_connection(mqvpn_client_t *c);
 static void cli_conn_destroy(mqvpn_client_t *c);
 
+/* Map a non-200 CONNECT-IP :status to a pre-establishment failure reason.
+ * Forward-declared here because the mqvpn_client_test_* wrapper cluster
+ * (~:648) and cli_connect_ip_on_headers (:1492) both call it ahead of its
+ * definition (above cb_h3_conn_close). */
+static mqvpn_error_t cli_classify_status(int status);
+
 /* Look up xquic per-path metrics by path_id in a stats snapshot.
  *
  * xqc_conn_stats_t.paths_info is a dynamically allocated buffer of
@@ -113,6 +119,7 @@ struct cli_conn_s {
     xqc_h3_request_t *masque_request;
     uint64_t masque_stream_id;
     int tunnel_ok;
+    int tunnel_notified; /* one-shot: a tunnel_closed already fired for this conn */
     int addr_assigned;
     uint8_t assigned_ip[4];
     uint8_t assigned_prefix;
@@ -647,6 +654,15 @@ mqvpn_client_test_next_primary_idx(const mqvpn_client_t *c, int from_idx)
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((visibility("hidden")))
 #endif
+int
+mqvpn_client_test_classify_status(int status)
+{
+    return (int)cli_classify_status(status);
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
 uint64_t
 mqvpn_client_test_get_handshake_started_us(const mqvpn_client_t *c)
 {
@@ -1007,6 +1023,40 @@ cb_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *user_data)
     cli_masque_start_tunnel(conn);
 }
 
+/* Map a non-200 CONNECT-IP :status to a pre-establishment failure reason.
+ * Pure → unit-testable without a live connection. Per RFC 9110 §15.5.2 (401) /
+ * §15.5.4 (403) both signal auth failure. NB: the server currently sends 403
+ * for max-clients too, so a full server legibly surfaces as AUTH; giving
+ * capacity a distinct status (503→MAX_CLIENTS) needs a server-side change and
+ * is a documented follow-up, out of this plan's client+iOS scope. */
+static mqvpn_error_t
+cli_classify_status(int status)
+{
+    switch (status) {
+    case 401:
+    case 403: return MQVPN_ERR_AUTH;
+    default: return MQVPN_ERR_PROTOCOL; /* incl. status 0 = no headers seen */
+    }
+}
+
+/* Fire tunnel_closed exactly once for a CONNECT-IP request that failed BEFORE
+ * establishment (observed non-200 status, or the tunnel stream closing before
+ * 200). Notifies only — it does not abort the request in-core (cross-platform
+ * full-stop and non-iOS reconnect-suppression are a documented follow-up);
+ * iOS's onTunnelClosed turns this into a startTunnel throw, and the process
+ * teardown that follows stops any reconnect on the iOS target. */
+static void
+cli_signal_connect_fail(cli_conn_t *conn, mqvpn_error_t reason, int status_for_log)
+{
+    mqvpn_client_t *c = conn->client;
+    if (conn->tunnel_notified) return; /* once (calloc-zeroed at conn start) */
+    assert(!conn->tunnel_ok);          /* every caller gates on !tunnel_ok / non-200 */
+    conn->tunnel_notified = 1;
+    LOG_W(c, "CONNECT-IP request failed (status=%d) → tunnel_closed(%d)", status_for_log,
+          (int)reason);
+    if (c->cbs.tunnel_closed) c->cbs.tunnel_closed(reason, c->user_ctx);
+}
+
 static int
 cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_data)
 {
@@ -1018,8 +1068,15 @@ cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_data)
     int err = xqc_h3_conn_get_errno(h3_conn);
     LOG_I(c, "connection closed (errno=%d)", err);
 
-    /* Notify platform */
-    if (c->cbs.tunnel_closed) c->cbs.tunnel_closed(MQVPN_ERR_CLOSED, c->user_ctx);
+    /* Notify platform (skip if a pre-establishment failure already fired).
+     * Do NOT discriminate on conn->tunnel_ok here: vendored xquic runs the
+     * stream close-notify BEFORE the conn close-notify (xqc_conn.c destroys
+     * streams first), so cb_request_close has already zeroed tunnel_ok by now
+     * — a tunnel_ok test would be always-false and mislabel post-establishment
+     * drops as PROTOCOL. The once-flag alone gives exactly-once and preserves
+     * CLOSED for a genuine post-establishment drop. */
+    if (c->cbs.tunnel_closed && !conn->tunnel_notified)
+        c->cbs.tunnel_closed(MQVPN_ERR_CLOSED, c->user_ctx);
 
     cli_conn_destroy(c);
 
@@ -1419,8 +1476,15 @@ cb_request_close(xqc_h3_request_t *h3_request, void *user_data)
     if (stream) {
         /* Only the CONNECT-IP tunnel stream owns tunnel_ok — a closing
          * per-flow connect-tcp stream must not flip the tunnel dead. */
-        if (stream->conn && stream->role == CLI_STREAM_ROLE_CONNECT_IP)
+        if (stream->conn && stream->role == CLI_STREAM_ROLE_CONNECT_IP) {
+            /* Stream closed without reaching 200 → pre-establishment failure.
+             * A prior non-200 status already latched (once-flag dedups); a bare
+             * RST-before-headers is a generic PROTOCOL failure. This is what
+             * unblocks iOS when the server RSTs the tunnel stream after 403. */
+            if (!stream->conn->tunnel_ok)
+                cli_signal_connect_fail(stream->conn, MQVPN_ERR_PROTOCOL, 0);
             stream->conn->tunnel_ok = 0;
+        }
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
         /* Task 12 (reconciliation G): this is the FINAL close notify for
          * ANY reason (clean bidi-FIN, RST, or an explicit close call) —
@@ -1482,9 +1546,22 @@ cli_connect_ip_on_headers(cli_stream_t *stream, xqc_h3_request_t *h3_request)
         for (int i = 0; i < (int)headers->count; i++) {
             xqc_http_header_t *h = &headers->headers[i];
             if (h->name.iov_len == 7 && memcmp(h->name.iov_base, ":status", 7) == 0 &&
-                h->value.iov_len == 3 && memcmp(h->value.iov_base, "200", 3) == 0) {
-                conn->tunnel_ok = 1;
-                LOG_I(c, "tunnel 200 OK");
+                h->value.iov_len == 3) {
+                const unsigned char *v = h->value.iov_base;
+                if (v[0] >= '0' && v[0] <= '9' && v[1] >= '0' && v[1] <= '9' &&
+                    v[2] >= '0' && v[2] <= '9') {
+                    int st = (v[0] - '0') * 100 + (v[1] - '0') * 10 + (v[2] - '0');
+                    if (st == 200) {
+                        conn->tunnel_ok = 1;
+                        LOG_I(c, "tunnel 200 OK");
+                    } else {
+                        LOG_W(c, "tunnel non-200 status=%d", st);
+                        cli_signal_connect_fail(conn, cli_classify_status(st), st);
+                    }
+                } else {
+                    LOG_W(c, "tunnel malformed :status");
+                    cli_signal_connect_fail(conn, MQVPN_ERR_PROTOCOL, 0);
+                }
             }
             /* §19.3: server echoed mqvpn-reorder → it supports the shim, so
              * we may now stamp (gated below by cfg.reorder.mode != OFF). */
