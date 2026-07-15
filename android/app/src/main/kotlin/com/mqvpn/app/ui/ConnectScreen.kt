@@ -67,7 +67,7 @@ fun ConnectScreen(
     val reorderProfile = MqvpnConfig.ReorderProfile.entries.firstOrNull {
         it.name == reorderProfileName
     } ?: MqvpnConfig.ReorderProfile.CELLULAR_BOND
-    var reorderPorts by rememberSaveable { mutableStateOf("") }
+    var reorderPorts by rememberSaveable { mutableStateOf("443") }
     var hybridEnabled by rememberSaveable { mutableStateOf(false) }
     var hybridTcpModeName by rememberSaveable {
         mutableStateOf(MqvpnConfig.HybridTcpMode.AUTO.name)
