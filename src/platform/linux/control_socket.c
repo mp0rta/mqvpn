@@ -442,6 +442,21 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
 
 /* ── Connection read handler ─────────────────────────────────────────────── */
 
+/* Common per-connection teardown: unhook the libevent event, close the fd,
+ * release the connection's slot in the ctrl-socket's active-connection
+ * count, and free the connection struct. conn->fd is set once in
+ * ctrl_on_accept() and never changes, so it always matches the fd the
+ * caller's event fired on. */
+static void
+ctrl_conn_close(ctrl_conn_t *conn)
+{
+    event_del(conn->ev);
+    event_free(conn->ev);
+    close(conn->fd);
+    conn->cs->n_conns--;
+    free(conn);
+}
+
 static void
 ctrl_on_read(evutil_socket_t fd, short what, void *arg)
 {
@@ -449,11 +464,7 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
 
     /* Idle timeout — close without processing */
     if (what & EV_TIMEOUT) {
-        event_del(conn->ev);
-        event_free(conn->ev);
-        close(fd);
-        conn->cs->n_conns--;
-        free(conn);
+        ctrl_conn_close(conn);
         return;
     }
 
@@ -499,11 +510,7 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
             return; /* wait for more data */
         } else {
             /* read error — close connection */
-            event_del(conn->ev);
-            event_free(conn->ev);
-            close(fd);
-            conn->cs->n_conns--;
-            free(conn);
+            ctrl_conn_close(conn);
             return;
         }
         break;
@@ -530,11 +537,7 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
         (void)write(fd, resp, (size_t)rlen + 1);
     }
 
-    event_del(conn->ev);
-    event_free(conn->ev);
-    close(fd);
-    conn->cs->n_conns--;
-    free(conn);
+    ctrl_conn_close(conn);
 }
 
 /* ── Accept handler ──────────────────────────────────────────────────────── */
