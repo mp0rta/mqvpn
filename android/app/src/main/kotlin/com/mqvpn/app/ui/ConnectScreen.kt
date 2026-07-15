@@ -197,6 +197,7 @@ fun ConnectScreen(
                 value = reorderPorts,
                 onValueChange = { reorderPorts = it },
                 label = { Text("Reorder Ports (comma-separated, e.g. 443,8443)") },
+                supportingText = { Text("Empty = reorder all UDP flows") },
                 modifier = Modifier.fillMaxWidth(),
                 enabled = isDisconnected,
                 singleLine = true,
