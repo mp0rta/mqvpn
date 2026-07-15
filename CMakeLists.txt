@@ -851,6 +851,11 @@ if(BUILD_TESTING)
     # CLI argv overflow shell test (runs the built mqvpn binary)
     add_test(NAME test_cli_path_argv
         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_cli_path_argv.sh $<TARGET_FILE:mqvpn>)
+
+    # Guard: every tests/test_*.c using bare assert() must #undef NDEBUG,
+    # since CI also runs ctest on a Release (-DNDEBUG) build.
+    add_test(NAME test_ndebug_guard
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/check_ndebug_guard.sh ${CMAKE_SOURCE_DIR}/tests)
 endif()
 
 # ---------- Install ----------
