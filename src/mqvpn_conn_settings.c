@@ -10,6 +10,7 @@
 
 #include "libmqvpn.h"
 #include "mqvpn_scheduler.h"
+#include "mqvpn_sched_names.h"
 
 #include <string.h>
 
@@ -22,6 +23,19 @@
 void
 mqvpn_apply_scheduler(xqc_conn_settings_t *cs, mqvpn_scheduler_t sched)
 {
+    /* Invalid/out-of-range values (e.g. a direct API caller bypassing
+     * mqvpn_config_set_scheduler()'s validation) fall back to MINRTT,
+     * matching the old `default:` case below. Handled up front so the
+     * switch itself can drop `default:` and get compile-time coverage:
+     * with -Werror -Wswitch (see AGENTS.md build gate), a new
+     * mqvpn_scheduler_t enumerator added to libmqvpn.h without a
+     * corresponding case here becomes a build failure instead of a
+     * silently-missed dispatch. */
+    if (!mqvpn_sched_is_valid(sched)) {
+        cs->scheduler_callback = xqc_minrtt_scheduler_cb;
+        return;
+    }
+
     switch (sched) {
     case MQVPN_SCHED_WLB:
     case MQVPN_SCHED_WLB_UDP_PIN: cs->scheduler_callback = xqc_wlb_scheduler_cb; break;
@@ -46,8 +60,7 @@ mqvpn_apply_scheduler(xqc_conn_settings_t *cs, mqvpn_scheduler_t sched)
         cs->scheduler_callback = xqc_minrtt_scheduler_cb;
 #endif
         break;
-    case MQVPN_SCHED_MINRTT:
-    default: cs->scheduler_callback = xqc_minrtt_scheduler_cb; break;
+    case MQVPN_SCHED_MINRTT: cs->scheduler_callback = xqc_minrtt_scheduler_cb; break;
     }
 }
 

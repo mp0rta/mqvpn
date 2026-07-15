@@ -9,6 +9,7 @@
 
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
+#include "mqvpn_sched_names.h"
 #include "json_mini.h"
 
 #include <stdlib.h>
@@ -71,64 +72,40 @@ json_read_users(mqvpn_config_t *cfg, const char *p)
                : MQVPN_ERR_INVALID_ARG;
 }
 
+/* JSON path deliberately does NOT gate "backup_fec" on XQC_ENABLE_FEC (that
+ * gate lives only at the main.c CLI call site) — known, intentional drift
+ * per mqvpn_sched_names.h's header comment; config format is a compat
+ * surface, do not unify. */
 static int
 parse_scheduler_name(const char *s, mqvpn_scheduler_t *out)
 {
     if (!s || !out) return MQVPN_ERR_INVALID_ARG;
-    if (strcmp(s, "minrtt") == 0) {
-        *out = MQVPN_SCHED_MINRTT;
-        return MQVPN_OK;
-    }
-    if (strcmp(s, "wlb") == 0) {
-        *out = MQVPN_SCHED_WLB;
-        return MQVPN_OK;
-    }
-    if (strcmp(s, "wlb_udp_pin") == 0) {
-        *out = MQVPN_SCHED_WLB_UDP_PIN;
-        return MQVPN_OK;
-    }
-    if (strcmp(s, "backup_fec") == 0) {
-        *out = MQVPN_SCHED_BACKUP_FEC;
-        return MQVPN_OK;
-    }
-    return MQVPN_ERR_INVALID_ARG;
+    int v = mqvpn_sched_from_name(s);
+    if (v < 0) return MQVPN_ERR_INVALID_ARG;
+    *out = (mqvpn_scheduler_t)v;
+    return MQVPN_OK;
 }
 
 static int
 parse_cc_name(const char *s, mqvpn_cc_t *out)
 {
     if (!s || !out) return MQVPN_ERR_INVALID_ARG;
-    if (strcmp(s, "bbr2") == 0) {
-        *out = MQVPN_CC_BBR2;
-        return MQVPN_OK;
-    }
-    if (strcmp(s, "bbr") == 0) {
-        *out = MQVPN_CC_BBR;
-        return MQVPN_OK;
-    }
-    if (strcmp(s, "cubic") == 0) {
-        *out = MQVPN_CC_CUBIC;
-        return MQVPN_OK;
-    }
-    if (strcmp(s, "none") == 0) {
-        *out = MQVPN_CC_NONE;
-        return MQVPN_OK;
-    }
-    return MQVPN_ERR_INVALID_ARG;
+    int v = mqvpn_cc_from_name(s);
+    if (v < 0) return MQVPN_ERR_INVALID_ARG;
+    *out = (mqvpn_cc_t)v;
+    return MQVPN_OK;
 }
 
 static int
 is_valid_scheduler(mqvpn_scheduler_t sched)
 {
-    return sched == MQVPN_SCHED_MINRTT || sched == MQVPN_SCHED_WLB ||
-           sched == MQVPN_SCHED_BACKUP_FEC || sched == MQVPN_SCHED_WLB_UDP_PIN;
+    return mqvpn_sched_is_valid(sched);
 }
 
 static int
 is_valid_cc(mqvpn_cc_t cc)
 {
-    return cc == MQVPN_CC_BBR2 || cc == MQVPN_CC_BBR || cc == MQVPN_CC_CUBIC ||
-           cc == MQVPN_CC_NONE;
+    return mqvpn_cc_is_valid(cc);
 }
 
 /* ─── Config new/free ─── */

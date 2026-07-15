@@ -7,6 +7,7 @@
  * Build: cc -o tests/test_config tests/test_config.c src/config.c src/log.c -Isrc
  */
 #include "config.h"
+#include "mqvpn_sched_names.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1971,6 +1972,37 @@ test_ini_json_invalid_scalar_parity(void)
                   "invalid hybrid tcp json falls back to auto");
 }
 
+/* Table-driven round-trip test over MQVPN_SCHED_LIST / MQVPN_CC_LIST
+ * (src/mqvpn_sched_names.h): every row must survive from_name(name) ==
+ * enum and to_name(enum) == name. This is the mechanical parity check the
+ * X-macro table exists for — a future row addition/removal is exercised
+ * here automatically without editing this test. */
+static void
+test_sched_cc_name_roundtrip(void)
+{
+#define MQVPN_SCHED_ROUNDTRIP_CHECK(enum_val, str)                                     \
+    ASSERT_EQ_INT(mqvpn_sched_from_name(str), (int)(enum_val),                         \
+                  "sched from_name(" str ") == " #enum_val);                           \
+    ASSERT_EQ_STR(mqvpn_sched_to_name(enum_val), str, "sched to_name(" #enum_val ")"); \
+    ASSERT_TRUE(mqvpn_sched_is_valid(enum_val), "sched is_valid(" #enum_val ")");
+    MQVPN_SCHED_LIST(MQVPN_SCHED_ROUNDTRIP_CHECK)
+#undef MQVPN_SCHED_ROUNDTRIP_CHECK
+
+#define MQVPN_CC_ROUNDTRIP_CHECK(enum_val, str)                                  \
+    ASSERT_EQ_INT(mqvpn_cc_from_name(str), (int)(enum_val),                      \
+                  "cc from_name(" str ") == " #enum_val);                        \
+    ASSERT_EQ_STR(mqvpn_cc_to_name(enum_val), str, "cc to_name(" #enum_val ")"); \
+    ASSERT_TRUE(mqvpn_cc_is_valid(enum_val), "cc is_valid(" #enum_val ")");
+    MQVPN_CC_LIST(MQVPN_CC_ROUNDTRIP_CHECK)
+#undef MQVPN_CC_ROUNDTRIP_CHECK
+
+    /* Unrecognized strings must be rejected by both tables. */
+    ASSERT_EQ_INT(mqvpn_sched_from_name("bogus"), -1, "sched from_name(bogus)");
+    ASSERT_EQ_INT(mqvpn_sched_from_name(NULL), -1, "sched from_name(NULL)");
+    ASSERT_EQ_INT(mqvpn_cc_from_name("bogus"), -1, "cc from_name(bogus)");
+    ASSERT_EQ_INT(mqvpn_cc_from_name(NULL), -1, "cc from_name(NULL)");
+}
+
 int
 main(void)
 {
@@ -2078,6 +2110,9 @@ main(void)
     /* INI/JSON scalar-key parity */
     test_ini_json_scalar_parity();
     test_ini_json_invalid_scalar_parity();
+
+    /* mqvpn_sched_names.h table parity */
+    test_sched_cc_name_roundtrip();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

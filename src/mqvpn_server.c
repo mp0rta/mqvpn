@@ -10,6 +10,7 @@
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
 #include "mqvpn_scheduler.h"
+#include "mqvpn_sched_names.h"
 #include "mqvpn_server_internal.h"
 
 #include <stdlib.h>
@@ -243,13 +244,7 @@ struct mqvpn_server_s {
 static const char *
 mqvpn_scheduler_label(int s)
 {
-    switch (s) {
-    case MQVPN_SCHED_MINRTT: return "minrtt";
-    case MQVPN_SCHED_WLB: return "wlb";
-    case MQVPN_SCHED_BACKUP_FEC: return "backup_fec";
-    case MQVPN_SCHED_WLB_UDP_PIN: return "wlb_udp_pin";
-    default: return "unknown";
-    }
+    return mqvpn_sched_to_name((mqvpn_scheduler_t)s);
 }
 
 static uint64_t
