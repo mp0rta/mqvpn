@@ -1212,6 +1212,52 @@ test_json_invalid_users_error(void)
     ASSERT_TRUE(rc != 0, "json invalid users returns error");
 }
 
+static void
+test_json_users_brace_in_string_value(void)
+{
+    /* A '}' inside a string value must not be mistaken for the object's
+     * closing brace (regression for the naive strchr(p, '}') scan). */
+    const char *json = "{"
+                       "\"listen\":\"0.0.0.0:443\","
+                       "\"users\":[{\"name\":\"a}b\",\"key\":\"k1\"},\"carol:c3\"]"
+                       "}";
+
+    char *path = write_tmp(json);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "json users brace-in-string parse ok");
+    ASSERT_EQ_INT(cfg.n_users, 2, "json users brace-in-string count");
+    ASSERT_EQ_STR(cfg.user_names[0], "a}b", "json users brace-in-string name");
+    ASSERT_EQ_STR(cfg.user_keys[0], "k1", "json users brace-in-string key");
+    ASSERT_EQ_STR(cfg.user_names[1], "carol", "json users string-form name after object");
+    ASSERT_EQ_STR(cfg.user_keys[1], "c3", "json users string-form key after object");
+}
+
+static void
+test_json_users_escaped_quote_in_value(void)
+{
+    /* \" inside an object-form value must not terminate the string scan
+     * early. */
+    const char *json = "{"
+                       "\"listen\":\"0.0.0.0:443\","
+                       "\"users\":[{\"name\":\"dave\",\"key\":\"k\\\"2\"}]"
+                       "}";
+
+    char *path = write_tmp(json);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "json users escaped-quote parse ok");
+    ASSERT_EQ_INT(cfg.n_users, 1, "json users escaped-quote count");
+    ASSERT_EQ_STR(cfg.user_names[0], "dave", "json users escaped-quote name");
+    ASSERT_EQ_STR(cfg.user_keys[0], "k\"2", "json users escaped-quote key");
+}
+
 /* ================================================================
  *  Buffer boundary and edge case tests
  * ================================================================ */
@@ -1996,6 +2042,8 @@ main(void)
     test_parse_json_scheduler_wlb_udp_pin();
     test_json_duplicate_users_last_wins();
     test_json_invalid_users_error();
+    test_json_users_brace_in_string_value();
+    test_json_users_escaped_quote_in_value();
 
     /* buffer boundary and edge case tests */
     test_tun_name_max_length();

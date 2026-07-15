@@ -56,71 +56,19 @@ json_read_string_array(const char *p, char out[][32], int max_items, int *n_item
 }
 
 static int
+json_add_user_cb(void *ctx, const char *name, const char *key)
+{
+    return (mqvpn_config_add_user((mqvpn_config_t *)ctx, name, key) == MQVPN_OK) ? 0 : -1;
+}
+
+static int
 json_read_users(mqvpn_config_t *cfg, const char *p)
 {
     if (!cfg || !p || *p != '[') return MQVPN_ERR_INVALID_ARG;
-    p = json_skip_ws(p + 1);
     cfg->n_users = 0;
-
-    while (*p && *p != ']') {
-        char uname[64] = {0};
-        char key[256] = {0};
-
-        if (*p == '"') {
-            char pair[320] = {0};
-            if (json_read_string(p, pair, sizeof(pair)) != MQVPN_OK) {
-                return MQVPN_ERR_INVALID_ARG;
-            }
-            char *sep = strchr(pair, ':');
-            if (!sep) return MQVPN_ERR_INVALID_ARG;
-            *sep = '\0';
-            mqvpn_copy_str(uname, sizeof(uname), pair);
-            mqvpn_copy_str(key, sizeof(key), sep + 1);
-
-            const char *e = p + 1;
-            while (*e && *e != '"') {
-                if (*e == '\\' && e[1]) e++;
-                e++;
-            }
-            if (*e != '"') return MQVPN_ERR_INVALID_ARG;
-            p = json_skip_ws(e + 1);
-        } else if (*p == '{') {
-            const char *obj_end = strchr(p, '}');
-            if (!obj_end) return MQVPN_ERR_INVALID_ARG;
-
-            char obj[512];
-            size_t obj_len = (size_t)(obj_end - p + 1);
-            if (obj_len >= sizeof(obj)) return MQVPN_ERR_INVALID_ARG;
-            memcpy(obj, p, obj_len);
-            obj[obj_len] = '\0';
-
-            const char *name_val = json_find_key(obj, "name");
-            const char *key_val = json_find_key(obj, "key");
-            if (!name_val || !key_val) return MQVPN_ERR_INVALID_ARG;
-            if (json_read_string(name_val, uname, sizeof(uname)) != MQVPN_OK) {
-                return MQVPN_ERR_INVALID_ARG;
-            }
-            if (json_read_string(key_val, key, sizeof(key)) != MQVPN_OK) {
-                return MQVPN_ERR_INVALID_ARG;
-            }
-
-            p = json_skip_ws(obj_end + 1);
-        } else {
-            return MQVPN_ERR_INVALID_ARG;
-        }
-
-        if (mqvpn_config_add_user(cfg, uname, key) != MQVPN_OK) {
-            return MQVPN_ERR_INVALID_ARG;
-        }
-
-        if (*p == ',') {
-            p = json_skip_ws(p + 1);
-        } else if (*p != ']') {
-            return MQVPN_ERR_INVALID_ARG;
-        }
-    }
-
-    return (*p == ']') ? MQVPN_OK : MQVPN_ERR_INVALID_ARG;
+    return (mqvpn_json_parse_users(p, cfg, json_add_user_cb) == 0)
+               ? MQVPN_OK
+               : MQVPN_ERR_INVALID_ARG;
 }
 
 static int
