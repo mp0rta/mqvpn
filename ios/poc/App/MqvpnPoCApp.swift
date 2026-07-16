@@ -137,26 +137,10 @@ final class TunnelController: ObservableObject {
         manager?.connection.stopVPNTunnel()
     }
 
-    /// Persists reorder settings via the atomic snapshot -> merge -> mutate ->
-    /// commit -> refresh sequence in performAtomicSave, the exact function the
-    /// host tests fault-inject — so the tested logic IS the production logic.
-    func saveReorderSettings(_ new: ReorderSettings) async throws {
-        if let e = saveGuard(isSaving: isSaving, isEditable: isEditable, hasManager: manager != nil) {
-            throw e
-        }
-        guard let manager,
-              let proto = manager.protocolConfiguration as? NETunnelProviderProtocol else {
-            throw SaveError.notReady
-        }
-        isSaving = true
-        defer { isSaving = false }
-        try await performAtomicSave(NEConfigStore(manager: manager, proto: proto),
-                                    merge: new.toProviderConfiguration())
-        reorderSettings = new     // only on success (performAtomicSave rethrows on commit failure)
-    }
-
-    /// Combined server + reorder save; supersedes `saveReorderSettings` once the
-    /// settings UI is wired to it (Task 6), which will remove that method.
+    /// Persists server + reorder settings via the atomic snapshot -> merge ->
+    /// mutate -> commit -> refresh sequence in performAtomicSave, the exact
+    /// function the host tests fault-inject — so the tested logic IS the
+    /// production logic.
     func saveSettings(server: ServerSettings, reorder: ReorderSettings) async throws {
         if let e = saveGuard(isSaving: isSaving, isEditable: isEditable, hasManager: manager != nil) {
             throw e

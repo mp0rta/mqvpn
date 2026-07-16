@@ -48,9 +48,13 @@ struct DashboardView: View {
                 }
                 Spacer()
             }
+            if let ce = controller.configError {
+                Text(ce).font(.caption).foregroundColor(.red)
+            }
             HStack(spacing: 12) {
-                Button("Start") { if !controller.isSaving { controller.start() } }
+                Button("Start") { controller.start() }
                     .buttonStyle(.borderedProminent)
+                    .disabled(!controller.isConnectable)
                 Button("Stop") { controller.stop() }
                     .buttonStyle(.bordered)
             }
