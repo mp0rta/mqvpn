@@ -685,7 +685,9 @@ if(BUILD_TESTING)
     add_executable(test_reorder_config tests/test_reorder_config.c src/mqvpn_config.c src/config.c src/log.c)
     add_executable(test_classifier tests/test_classifier.c src/hybrid/classifier.c)
     add_executable(test_icmp tests/test_icmp.c src/icmp.c)
-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_classifier test_icmp)
+    add_executable(test_cmp_json tests/test_cmp_json.c src/common/ipc/cmp_json.c)
+    target_include_directories(test_cmp_json PRIVATE ${CMAKE_SOURCE_DIR}/src/common/ipc)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_classifier test_icmp test_cmp_json)
 
     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of
