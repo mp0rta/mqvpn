@@ -42,3 +42,22 @@ func resolveServer(_ host: String, _ port: Int) -> ResolvedServerAddress? {
     }
     return out
 }
+
+extension ResolvedServerAddress {
+    /// Dotted-decimal IPv4 literal for the resolved address. resolveServer
+    /// guarantees AF_INET/sockaddr_in, so this only returns nil on the
+    /// (theoretically impossible) inet_ntop failure. NEPacketTunnelNetworkSettings
+    /// requires tunnelRemoteAddress to be an IP literal — a hostname there
+    /// makes NE reject the settings apply ("Invalid NETunnelNetworkSettings
+    /// tunnelRemoteAddress"), even though the tunnel itself established fine.
+    var ipString: String? {
+        var sa = storage
+        return withUnsafeBytes(of: &sa) { raw -> String? in
+            let sin = raw.baseAddress!.assumingMemoryBound(to: sockaddr_in.self).pointee
+            var addr = sin.sin_addr
+            var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            guard inet_ntop(AF_INET, &addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil else { return nil }
+            return String(cString: buf)
+        }
+    }
+}

@@ -22,7 +22,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let reorder = ReorderSettings(providerConfiguration: providerConfig) ?? .disabled
         guard let resolved = await Task.detached(priority: .userInitiated, operation: {
             resolveServer(server.host, server.port)
-        }).value else {
+        }).value, let resolvedIP = resolved.ipString else {
             throw NSError(domain: "mqvpn.poc", code: 11,
                           userInfo: [NSLocalizedDescriptionKey: "server unresolved: \(server.host)"])
         }
@@ -56,7 +56,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 // apply NE settings to a dead session.
                 guard let self, !configHandled, !startResolved else { return }
                 configHandled = true
-                let settings = Self.makeSettings(from: info, server: server.host)
+                // tunnelRemoteAddress must be an IP literal (NE rejects hostnames
+                // there); the engine/TLS side still gets server.host for SNI.
+                let settings = Self.makeSettings(from: info, server: resolvedIP)
                 self.setTunnelNetworkSettings(settings) { err in
                     self.engine.perform {   // hop: latch access stays single-threaded
                         guard !startResolved else { return }

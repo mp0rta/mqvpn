@@ -155,4 +155,9 @@ check4(resolveServer("localhost", 8080), 8080, "resolve hostname localhost:8080"
 check(resolveServer("", 443) == nil, "empty host → nil")       // Optional<T> == nil compiles for any T
 check(resolveServer("   ", 443) == nil, "whitespace host → nil")
 
+// ipString: NE requires an IP literal for tunnelRemoteAddress; hostnames must
+// resolve to their dotted-decimal form, not pass through unresolved.
+check(resolveServer("127.0.0.1", 443)?.ipString == "127.0.0.1", "ipString IP literal")
+check(resolveServer("localhost", 8080)?.ipString == "127.0.0.1", "ipString from hostname")
+
 if failures == 0 { print("host tests: ALL PASS") } else { print("host tests: \(failures) FAILURES"); exit(1) }
