@@ -115,9 +115,26 @@ cmp_json_array_contains_str(const char *json, const char *key, const char *want)
         p = json_skip_ws(p);
         if (*p == ']' || *p == '\0') break;
         if (*p != '"') {
-            /* Non-string element: not supported, skip to next comma/']'. */
-            while (*p && *p != ',' && *p != ']')
+            /* Non-string element (number/bool/null/object/array): skip it
+             * whole, tracking brace/bracket depth and string literals so a
+             * string inside an object element (e.g. [{"1.0":1}]) can never
+             * be mistaken for an array element. */
+            int depth = 0, in_str = 0;
+            while (*p && (depth > 0 || (*p != ',' && *p != ']'))) {
+                if (in_str) {
+                    if (*p == '\\' && p[1])
+                        p++;
+                    else if (*p == '"')
+                        in_str = 0;
+                } else if (*p == '"') {
+                    in_str = 1;
+                } else if (*p == '{' || *p == '[') {
+                    depth++;
+                } else if (*p == '}' || *p == ']') {
+                    depth--;
+                }
                 p++;
+            }
         } else {
             const char *start = p + 1;
             const char *e = start;

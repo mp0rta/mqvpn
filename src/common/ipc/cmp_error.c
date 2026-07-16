@@ -41,5 +41,7 @@ cmp_error_code_str(cmp_error_code_t code)
     if ((int)code < 0 || (int)code >= CMP_E__COUNT) {
         return "MQVPN_CLIENT_INTERNAL_ERROR";
     }
-    return tbl[code];
+    /* A future enum value without a matching table row would be NULL here;
+     * never return NULL (callers pass this straight to the JSON writer). */
+    return tbl[code] ? tbl[code] : "MQVPN_CLIENT_INTERNAL_ERROR";
 }

@@ -13,9 +13,9 @@
 #define CMP_ENDPOINT_NAME      "mqvpn-client"
 #define CMP_MAX_REQUEST_BYTES  (64 * 1024)
 #define CMP_MAX_RESPONSE_BYTES (1024 * 1024)
-#define CMP_MIN_RESPONSE_BUF                           \
-    256 /* mgmt_dispatch_request の out_cap 下限。 \
-         * RESPONSE_TOO_LARGE 固定短文が必ず収まる */
+#define CMP_MIN_RESPONSE_BUF                                          \
+    256 /* Lower bound for mgmt_dispatch_request's out_cap: the fixed \
+         * short RESPONSE_TOO_LARGE reply is guaranteed to fit. */
 #define CMP_MAX_CONNECTIONS      32
 #define CMP_DEFAULT_SOCKET_PATH  "/run/mqvpn/client.sock"
 #define CMP_FALLBACK_SOCKET_PATH "/var/run/mqvpn/client.sock"

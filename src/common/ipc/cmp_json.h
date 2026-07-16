@@ -12,8 +12,9 @@
 #define MQVPN_CMP_JSON_H
 #include <stddef.h>
 
-/* Bounded append-only writer. overflow 後の書き込みは無視され、
- * overflow flag が立つ (truncated JSON を絶対に送らないための仕掛け)。 */
+/* Bounded append-only writer. Writes after an overflow are ignored and the
+ * overflow flag latches — the mechanism that guarantees truncated JSON is
+ * never sent on the wire. */
 typedef struct {
     char *buf;
     size_t cap;
@@ -22,19 +23,26 @@ typedef struct {
 } cmp_buf_t;
 
 void cmp_buf_init(cmp_buf_t *b, char *storage, size_t cap);
-/* printf-style append。fmt に %s で外部由来文字列を渡すのは禁止
- * (escape を通らないため) — 文字列値は cmp_json_append_str を使う。 */
+/* printf-style append. Passing externally sourced strings through %s is
+ * forbidden (they would bypass escaping) — use cmp_json_append_str for
+ * string values. */
 void cmp_buf_appendf(cmp_buf_t *b, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
-/* JSON string literal を quote 込みで append する。
- * ", \\, および U+0000–U+001F を \n/\r/\t/\uXXXX へ escape。
- * それ以外のバイト (UTF-8 継続バイト含む) は素通し。 */
+/* Append a JSON string literal, including the surrounding quotes.
+ * Escapes ", \, and U+0000-U+001F as \n/\r/\t/\uXXXX; every other byte
+ * (including UTF-8 continuation bytes) passes through unmodified.
+ * Limitation: `s` is a NUL-terminated C string, so embedded NUL bytes
+ * cannot be represented — the string is emitted up to the first NUL. */
 void cmp_json_append_str(cmp_buf_t *b, const char *s);
 
-/* json_mini.h には配列 parser が無いため、Phase 1 に必要な最小ヘルパを
- * ここに置く: key の値が JSON 配列で、その中に文字列要素 want が含まれるか。
- * 例: cmp_json_array_contains_str(req, "supported_protocols", "1.0")。
- * 配列でない/欠落は 0。ネスト配列・object 要素は非対応 (CMP では出現しない)。 */
+/* json_mini.h has no array parser, so the minimal helper Phase 1 needs
+ * lives here: does the value of `key` parse as a JSON array containing the
+ * string element `want`?
+ * Example: cmp_json_array_contains_str(req, "supported_protocols", "1.0").
+ * Returns 0 when the key is missing or the value is not an array. Elements
+ * are compared against the raw JSON bytes (no unescaping), so a `want`
+ * containing " or \ never matches. Nested arrays and object elements are
+ * skipped, never matched into (they do not occur in CMP). */
 int cmp_json_array_contains_str(const char *json, const char *key, const char *want);
 
 #endif
