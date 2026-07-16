@@ -159,17 +159,17 @@ print_client(const char *obj)
             int64_t srtt = json_read_int64(json_find_key(path_obj, "srtt_ms"));
             int64_t min_rtt = json_read_int64(json_find_key(path_obj, "min_rtt_ms"));
             uint64_t cwnd = (uint64_t)json_read_int64(json_find_key(path_obj, "cwnd"));
-            int state = (int)json_read_int64(json_find_key(path_obj, "state"));
 
             char cwnd_str[16];
             format_size(cwnd, cwnd_str, sizeof(cwnd_str));
 
-            const char *state_str = "unknown";
-            switch (state) {
-            case 1: state_str = "active"; break;
-            case 3: state_str = "standby"; break;
-            case 4: state_str = "closed"; break;
-            }
+            /* The server names the state in "state_label" (control_socket.c,
+             * mqvpn_path_state_label); the numeric "state" is a raw xquic
+             * path_state whose values are not part of the control-API
+             * contract, so never map it here. */
+            char state_str[24] = "unknown";
+            const char *sl = json_find_key(path_obj, "state_label");
+            if (sl) json_read_string(sl, state_str, sizeof(state_str));
 
             printf("  path %d: srtt=%" PRId64 "ms min_rtt=%" PRId64 "ms cwnd=%s %s\n",
                    idx, srtt, min_rtt, cwnd_str, state_str);
