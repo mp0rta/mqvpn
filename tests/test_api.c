@@ -1234,7 +1234,8 @@ TEST(cb_path_removed_validating_to_create_wait)
  * (PATH_ABANDON) exactly like a secondary's; the id-0 guard introduced by
  * the PR4 refactor (#116) skipped it and cost a ~95-115 s server-side
  * downlink blackout on primary loss (iOS PoC gate G-i3). */
-extern int mqvpn_client_test_force_validating(mqvpn_client_t *c, mqvpn_path_handle_t handle,
+extern int mqvpn_client_test_force_validating(mqvpn_client_t *c,
+                                              mqvpn_path_handle_t handle,
                                               uint64_t xqc_path_id);
 extern int mqvpn_client_test_abandon_due(mqvpn_client_t *c, mqvpn_path_handle_t handle);
 
