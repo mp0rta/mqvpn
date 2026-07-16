@@ -34,6 +34,8 @@ final class TunnelController: ObservableObject {
     @Published var snapshot: TunnelSnapshot?       // nil = no data
     @Published var pathRates: [String: Double] = [:]   // iface name -> Mbps
     @Published var reorderSettings: ReorderSettings = .disabled
+    @Published var serverSettings: ServerSettings?   // nil = unset/corrupt → Connect disabled
+    @Published var configError: String?              // separate from statusText (updateStatus overwrites)
     @Published private(set) var isSaving = false
     /// Observed directly by the dashboard; fed the same snapshot stream.
     let eventLog = EventLog()
@@ -51,6 +53,7 @@ final class TunnelController: ObservableObject {
     private var lastIngestedTimestamp: Double = 0
 
     var isEditable: Bool { manager != nil && status == .disconnected }
+    var isConnectable: Bool { isEditable && serverSettings != nil && !isSaving }
     static func isUp(_ s: NEVPNStatus) -> Bool { s == .connected || s == .reasserting }
 
     func loadOrCreateManager() async {
@@ -58,18 +61,35 @@ final class TunnelController: ObservableObject {
             let existing = try await NETunnelProviderManager.loadAllFromPreferences()
             let m = existing.first ?? NETunnelProviderManager()
             if existing.isEmpty {
-                let config = try PoCConfig.fromBundle()
+                // Placeholder only: NE rejects an empty serverAddress at save.
+                // Decoupled from the real peer, which the seeding step below
+                // (and ultimately the extension) resolves and sets itself.
                 let proto = NETunnelProviderProtocol()
                 proto.providerBundleIdentifier = Self.providerBundleID
-                proto.serverAddress = config.serverHost
+                proto.serverAddress = (try? ServerSettings.fromBundle())?.host ?? "mqvpn"
                 m.protocolConfiguration = proto
                 m.localizedDescription = "mqvpn PoC"
                 m.isEnabled = true
                 try await m.saveToPreferences()
                 try await m.loadFromPreferences()
             }
+            manager = nil  // reset until we decide the manager is usable
+            guard let proto = m.protocolConfiguration as? NETunnelProviderProtocol else {
+                statusText = "config error"; return
+            }
+            let pc = proto.providerConfiguration
+            if !ServerSettings.serverKeysPresent(in: pc) {                 // ABSENT → seed
+                let seed = try ServerSettings.fromBundle()
+                try await performAtomicSave(NEConfigStore(manager: m, proto: proto),
+                                            merge: seed.toProviderConfiguration())
+                serverSettings = seed
+            } else if let s = ServerSettings(providerConfiguration: pc) {  // VALID
+                serverSettings = s
+            } else {                                                       // CORRUPT → D4: no overwrite
+                serverSettings = nil
+                configError = "server config invalid — re-enter in Settings"
+            }
             manager = m
-            let pc = (m.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
             reorderSettings = ReorderSettings(providerConfiguration: pc) ?? .disabled
             attachObserver(to: m)
             updateStatus(m.connection.status)
@@ -105,7 +125,7 @@ final class TunnelController: ObservableObject {
     }
 
     func start() {
-        guard !isSaving, let manager else { return }
+        guard isConnectable, let manager else { return }
         do {
             try manager.connection.startVPNTunnel()
         } catch {
@@ -133,6 +153,24 @@ final class TunnelController: ObservableObject {
         try await performAtomicSave(NEConfigStore(manager: manager, proto: proto),
                                     merge: new.toProviderConfiguration())
         reorderSettings = new     // only on success (performAtomicSave rethrows on commit failure)
+    }
+
+    /// Combined server + reorder save; supersedes `saveReorderSettings` once the
+    /// settings UI is wired to it (Task 6), which will remove that method.
+    func saveSettings(server: ServerSettings, reorder: ReorderSettings) async throws {
+        if let e = saveGuard(isSaving: isSaving, isEditable: isEditable, hasManager: manager != nil) {
+            throw e
+        }
+        guard let manager,
+              let proto = manager.protocolConfiguration as? NETunnelProviderProtocol else {
+            throw SaveError.notReady
+        }
+        isSaving = true
+        defer { isSaving = false }
+        var merged = server.toProviderConfiguration()
+        for (k, v) in reorder.toProviderConfiguration() { merged[k] = v }
+        try await performAtomicSave(NEConfigStore(manager: manager, proto: proto), merge: merged)
+        serverSettings = server; reorderSettings = reorder; configError = nil   // only on success
     }
 
     // MARK: - Snapshot polling
