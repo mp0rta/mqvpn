@@ -15,7 +15,8 @@ let log = Logger(subsystem: "mqvpn.poc", category: "engine")
 /// hop in via `perform{}`.
 final class MqvpnEngine: NSObject {
     private var client: OpaquePointer?          // mqvpn_client_t*
-    private var config: PoCConfig!
+    private var serverAddr: ResolvedServerAddress!
+    private var startFailed = false
     private var connected = false
     private var tickThread: Thread!
     private let runLoopReady = DispatchSemaphore(value: 0)
@@ -31,7 +32,9 @@ final class MqvpnEngine: NSObject {
 
     /// Blocks until the client exists on the tick thread — callers may start
     /// PathBinder immediately after return without ordering assumptions.
-    func start(config: PoCConfig, reorder: ReorderSettings = .disabled) {
+    func start(server: ServerSettings, reorder: ReorderSettings = .disabled,
+               serverAddr: ResolvedServerAddress) {
+        self.serverAddr = serverAddr
         // Provenance-independent ABI guard: the linked libmqvpn.a and this
         // extension must share the mqvpn_reorder_stats_t layout. On mismatch,
         // disable the monitor (never read the struct); a debug build asserts.
@@ -55,7 +58,7 @@ final class MqvpnEngine: NSObject {
         tickThread.start()
         runLoopReady.wait()
         let ready = DispatchSemaphore(value: 0)
-        perform { self.setupClient(config, reorder: reorder); ready.signal() }
+        perform { self.setupClient(server, reorder: reorder); ready.signal() }
         ready.wait()
     }
 
@@ -82,12 +85,12 @@ final class MqvpnEngine: NSObject {
         tickThread.cancel()
     }
 
-    private func setupClient(_ config: PoCConfig, reorder: ReorderSettings) {
+    private func setupClient(_ server: ServerSettings, reorder: ReorderSettings) {
         let cfg = mqvpn_config_new()
-        mqvpn_config_set_server(cfg, config.serverHost, Int32(config.serverPort))
+        mqvpn_config_set_server(cfg, server.host, Int32(server.port))
         mqvpn_config_set_clock(cfg, mqvpn_ios_clock_us, nil)
-        if !config.authKey.isEmpty { mqvpn_config_set_auth_key(cfg, config.authKey) }
-        if config.tlsInsecure { mqvpn_config_set_insecure(cfg, 1) }
+        if !server.authKey.isEmpty { mqvpn_config_set_auth_key(cfg, server.authKey) }
+        if server.insecure { mqvpn_config_set_insecure(cfg, 1) }
         // Add rules FIRST, enable ONLY if >=1 landed. Never hand the core
         // mode-ON-with-zero-rules (it reorders ALL UDP under a global default,
         // ignoring the profile).
@@ -133,7 +136,12 @@ final class MqvpnEngine: NSObject {
         let ctx = Unmanaged.passUnretained(self).toOpaque()
         client = mqvpn_client_new(cfg, &cbs, ctx)
         mqvpn_config_free(cfg)
-        self.config = config
+        guard client != nil else {
+            log.error("[engine] mqvpn_client_new failed")
+            startFailed = true
+            onTunnelClosed?(Int32(MQVPN_ERR_ENGINE.rawValue))
+            return
+        }
         // NOTE: no connect here. The core sends handshake packets via
         // sendto() on path fds, and xquic needs the resolved peer address
         // set before connect — so connection start is deferred until the
@@ -145,16 +153,20 @@ final class MqvpnEngine: NSObject {
     /// Called by PathBinder after the FIRST successful add_path_fd
     /// (tick thread). Sets the resolved server address and connects, once.
     func connectIfNeeded() {
-        guard !connected, let c = client else { return }
-        connected = true
-        var sa = config.serverSockaddr
-        withUnsafePointer(to: &sa) {
+        guard !connected, !startFailed, let c = client else { return }
+        var sa = serverAddr.storage
+        let rc = withUnsafePointer(to: &sa) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                _ = mqvpn_client_set_server_addr(c, $0,
-                        socklen_t(MemoryLayout<sockaddr_in>.size))
+                mqvpn_client_set_server_addr(c, $0, serverAddr.len)
             }
         }
-        mqvpn_client_connect(c)
+        func fail(_ what: String) {
+            log.error("\(what)"); startFailed = true
+            onTunnelClosed?(Int32(MQVPN_ERR_ENGINE.rawValue))
+        }
+        if rc != 0 { fail("set_server_addr rc=\(rc)"); return }
+        if mqvpn_client_connect(c) != 0 { fail("connect failed"); return }
+        connected = true
         scheduleTick(afterMs: 0)
     }
 

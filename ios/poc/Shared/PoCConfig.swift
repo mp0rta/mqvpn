@@ -31,14 +31,4 @@ struct PoCConfig {
                          tlsInsecure: (d["MqvpnTLSInsecure"] as? String) == "1",
                          bulkURL: bulk)
     }
-
-    /// Legacy extension-path support: assumes an IPv4-literal host. Slated
-    /// for removal once the engine takes a pre-resolved address instead.
-    var serverSockaddr: sockaddr_in {
-        var sa = sockaddr_in()
-        sa.sin_family = sa_family_t(AF_INET)
-        sa.sin_port = in_port_t(UInt16(serverPort).bigEndian)
-        inet_pton(AF_INET, serverHost, &sa.sin_addr)
-        return sa
-    }
 }
