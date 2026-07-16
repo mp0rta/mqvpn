@@ -8,7 +8,10 @@
 #      "CONNECT-IP request failed" marker within a few seconds (not a hang).
 #      The exact reason (AUTH vs PROTOCOL) is intentionally NOT asserted: a
 #      403 header and a stream RST can race, and whichever the peer sends
-#      first is legitimate (spec §3.4: headers "usually but not guaranteed").
+#      first is legitimate: a non-200 response's headers are usually observed
+#      before the stream reset, but the server may RST the stream before the
+#      client sees the headers, so the test asserts only the reason-agnostic
+#      marker.
 #   2. The correct PSK still establishes normally ("tunnel 200 OK" unchanged,
 #      ping succeeds) — the fast-fail path must not regress the happy path.
 #

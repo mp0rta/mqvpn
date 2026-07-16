@@ -83,7 +83,7 @@ struct SettingsView: View {
                 }
                 if let errorText { Section { Text(errorText).foregroundColor(.red) } }
                 if !controller.isEditable {
-                    Section { Text("Disconnect to edit reorder settings.")
+                    Section { Text("Disconnect to edit settings.")
                         .font(.caption).foregroundColor(.secondary) }
                 }
             }

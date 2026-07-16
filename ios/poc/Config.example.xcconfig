@@ -1,6 +1,6 @@
 // Copy to Config.xcconfig and fill in. Config.xcconfig is gitignored.
 DEVELOPMENT_TEAM = YOUR_TEAM_ID
-// PoC server (IPv4 literal by design — no per-path DNS in the PoC)
+// PoC server (hostname or IPv4 literal; resolved once at tunnel start)
 MQVPN_POC_SERVER_HOST = 192.0.2.1
 MQVPN_POC_SERVER_PORT = 4433
 // Auth key matching the test-server config (empty = no Authorization header)
