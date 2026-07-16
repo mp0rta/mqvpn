@@ -627,6 +627,7 @@ add_executable(mqvpn
     src/platform/linux/netlink_mon.c
     src/platform/linux/route_check.c
     src/platform/linux/control_socket.c
+    src/platform/linux/mgmt_socket.c
     src/platform/posix/status.c
     src/platform/linux/routing.c
     src/platform/linux/killswitch.c
@@ -635,6 +636,9 @@ add_executable(mqvpn
     src/platform/posix/dns_common.c
     src/path_mgr.c
     src/config.c
+    src/mgmt/mgmt_dispatch.c
+    src/common/ipc/cmp_json.c
+    src/common/ipc/cmp_error.c
 )
 
 target_include_directories(mqvpn PRIVATE
@@ -644,6 +648,8 @@ target_include_directories(mqvpn PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/platform/posix
     ${CMAKE_SOURCE_DIR}/src/platform/linux
+    ${CMAKE_SOURCE_DIR}/src/mgmt
+    ${CMAKE_SOURCE_DIR}/src/common/ipc
 )
 
 target_link_libraries(mqvpn
@@ -792,6 +798,36 @@ if(BUILD_TESTING)
         set_target_properties(test_control_socket PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
         add_test(NAME test_control_socket COMMAND test_control_socket)
+    endif()
+
+    # Client Management IPC socket-layer smoke-test harness (helper binary,
+    # NOT an add_test — driven manually or by a shell script connecting to
+    # the Unix socket). Linux-only, same libevent gating as
+    # test_control_socket above.
+    if(Libevent_FOUND OR EVENT_LIB)
+        add_executable(mgmt_endpoint_host
+            tests/mgmt_endpoint_host.c
+            src/platform/linux/mgmt_socket.c
+            src/mgmt/mgmt_dispatch.c
+            src/common/ipc/cmp_json.c
+            src/common/ipc/cmp_error.c
+            src/log.c
+        )
+        target_include_directories(mgmt_endpoint_host PRIVATE
+            ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/src/platform/linux
+            ${CMAKE_SOURCE_DIR}/src/mgmt
+            ${CMAKE_SOURCE_DIR}/src/common/ipc
+            ${CMAKE_SOURCE_DIR}/include
+        )
+        if(Libevent_FOUND)
+            target_link_libraries(mgmt_endpoint_host libevent::core libevent::extra)
+        else()
+            target_include_directories(mgmt_endpoint_host PRIVATE ${EVENT_INCLUDE_DIR})
+            target_link_libraries(mgmt_endpoint_host ${EVENT_LIB})
+        endif()
+        set_target_properties(mgmt_endpoint_host PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     endif()
 
     # libmqvpn public API test (links libmqvpn + xquic)
