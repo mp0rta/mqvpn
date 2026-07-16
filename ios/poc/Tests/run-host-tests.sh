@@ -12,6 +12,8 @@ TMPD="$(mktemp -d)"
 OUT="$TMPD/hosttests"
 trap 'rm -rf "$TMPD"' EXIT
 swiftc -o "$OUT" \
+    "$SHARED/PoCConfig.swift" \
+    "$SHARED/ServerSettings.swift" \
     "$SHARED/ReorderSettings.swift" \
     "$SHARED/ProviderMessage.swift" \
     "$APP/ReorderIngest.swift" \
