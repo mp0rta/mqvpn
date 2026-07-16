@@ -2,6 +2,10 @@
 // Runs unprivileged: RTM_GETROUTE queries need no capabilities and the
 // only interface assumed to exist is lo (local table provides
 // 127.0.0.1 / ::1 entries).
+
+/* Keep assert() live even in Release builds: CI runs ctest on Release too,
+ * where NDEBUG would silently no-op every assertion in this file. */
+#undef NDEBUG
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>

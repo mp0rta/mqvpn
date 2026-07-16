@@ -234,6 +234,24 @@ TEST(config_load_json_invalid_users)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_load_json_users_brace_in_string_value)
+{
+    /* A '}' inside a string value must not be mistaken for the object's
+     * closing brace (regression for the naive strchr(p, '}') scan). */
+    const char *json = "{"
+                       "\"users\":[{\"name\":\"a}b\",\"key\":\"k1\"},\"carol:c3\"]"
+                       "}";
+
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_load_json(cfg, json), MQVPN_OK);
+    ASSERT_EQ(cfg->n_users, 2);
+    ASSERT_STR_EQ(cfg->user_names[0], "a}b");
+    ASSERT_STR_EQ(cfg->user_keys[0], "k1");
+    ASSERT_STR_EQ(cfg->user_names[1], "carol");
+    ASSERT_STR_EQ(cfg->user_keys[1], "c3");
+    mqvpn_config_free(cfg);
+}
+
 TEST(config_load_json_invalid_tuning)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
@@ -2183,6 +2201,7 @@ main(void)
     run_config_load_json();
     run_config_load_json_duplicate_users_last_wins();
     run_config_load_json_invalid_users();
+    run_config_load_json_users_brace_in_string_value();
     run_config_load_json_invalid_tuning();
     run_config_set_tls_server_name();
     run_config_set_insecure();

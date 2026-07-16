@@ -9,6 +9,7 @@
 
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
+#include "mqvpn_sched_names.h"
 #include "json_mini.h"
 
 #include <stdlib.h>
@@ -56,131 +57,55 @@ json_read_string_array(const char *p, char out[][32], int max_items, int *n_item
 }
 
 static int
+json_add_user_cb(void *ctx, const char *name, const char *key)
+{
+    return (mqvpn_config_add_user((mqvpn_config_t *)ctx, name, key) == MQVPN_OK) ? 0 : -1;
+}
+
+static int
 json_read_users(mqvpn_config_t *cfg, const char *p)
 {
     if (!cfg || !p || *p != '[') return MQVPN_ERR_INVALID_ARG;
-    p = json_skip_ws(p + 1);
     cfg->n_users = 0;
-
-    while (*p && *p != ']') {
-        char uname[64] = {0};
-        char key[256] = {0};
-
-        if (*p == '"') {
-            char pair[320] = {0};
-            if (json_read_string(p, pair, sizeof(pair)) != MQVPN_OK) {
-                return MQVPN_ERR_INVALID_ARG;
-            }
-            char *sep = strchr(pair, ':');
-            if (!sep) return MQVPN_ERR_INVALID_ARG;
-            *sep = '\0';
-            mqvpn_copy_str(uname, sizeof(uname), pair);
-            mqvpn_copy_str(key, sizeof(key), sep + 1);
-
-            const char *e = p + 1;
-            while (*e && *e != '"') {
-                if (*e == '\\' && e[1]) e++;
-                e++;
-            }
-            if (*e != '"') return MQVPN_ERR_INVALID_ARG;
-            p = json_skip_ws(e + 1);
-        } else if (*p == '{') {
-            const char *obj_end = strchr(p, '}');
-            if (!obj_end) return MQVPN_ERR_INVALID_ARG;
-
-            char obj[512];
-            size_t obj_len = (size_t)(obj_end - p + 1);
-            if (obj_len >= sizeof(obj)) return MQVPN_ERR_INVALID_ARG;
-            memcpy(obj, p, obj_len);
-            obj[obj_len] = '\0';
-
-            const char *name_val = json_find_key(obj, "name");
-            const char *key_val = json_find_key(obj, "key");
-            if (!name_val || !key_val) return MQVPN_ERR_INVALID_ARG;
-            if (json_read_string(name_val, uname, sizeof(uname)) != MQVPN_OK) {
-                return MQVPN_ERR_INVALID_ARG;
-            }
-            if (json_read_string(key_val, key, sizeof(key)) != MQVPN_OK) {
-                return MQVPN_ERR_INVALID_ARG;
-            }
-
-            p = json_skip_ws(obj_end + 1);
-        } else {
-            return MQVPN_ERR_INVALID_ARG;
-        }
-
-        if (mqvpn_config_add_user(cfg, uname, key) != MQVPN_OK) {
-            return MQVPN_ERR_INVALID_ARG;
-        }
-
-        if (*p == ',') {
-            p = json_skip_ws(p + 1);
-        } else if (*p != ']') {
-            return MQVPN_ERR_INVALID_ARG;
-        }
-    }
-
-    return (*p == ']') ? MQVPN_OK : MQVPN_ERR_INVALID_ARG;
+    return (mqvpn_json_parse_users(p, cfg, json_add_user_cb) == 0)
+               ? MQVPN_OK
+               : MQVPN_ERR_INVALID_ARG;
 }
 
+/* JSON path deliberately does NOT gate "backup_fec" on XQC_ENABLE_FEC (that
+ * gate lives only at the main.c CLI call site) — known, intentional drift
+ * per mqvpn_sched_names.h's header comment; config format is a compat
+ * surface, do not unify. */
 static int
 parse_scheduler_name(const char *s, mqvpn_scheduler_t *out)
 {
     if (!s || !out) return MQVPN_ERR_INVALID_ARG;
-    if (strcmp(s, "minrtt") == 0) {
-        *out = MQVPN_SCHED_MINRTT;
-        return MQVPN_OK;
-    }
-    if (strcmp(s, "wlb") == 0) {
-        *out = MQVPN_SCHED_WLB;
-        return MQVPN_OK;
-    }
-    if (strcmp(s, "wlb_udp_pin") == 0) {
-        *out = MQVPN_SCHED_WLB_UDP_PIN;
-        return MQVPN_OK;
-    }
-    if (strcmp(s, "backup_fec") == 0) {
-        *out = MQVPN_SCHED_BACKUP_FEC;
-        return MQVPN_OK;
-    }
-    return MQVPN_ERR_INVALID_ARG;
+    int v = mqvpn_sched_from_name(s);
+    if (v < 0) return MQVPN_ERR_INVALID_ARG;
+    *out = (mqvpn_scheduler_t)v;
+    return MQVPN_OK;
 }
 
 static int
 parse_cc_name(const char *s, mqvpn_cc_t *out)
 {
     if (!s || !out) return MQVPN_ERR_INVALID_ARG;
-    if (strcmp(s, "bbr2") == 0) {
-        *out = MQVPN_CC_BBR2;
-        return MQVPN_OK;
-    }
-    if (strcmp(s, "bbr") == 0) {
-        *out = MQVPN_CC_BBR;
-        return MQVPN_OK;
-    }
-    if (strcmp(s, "cubic") == 0) {
-        *out = MQVPN_CC_CUBIC;
-        return MQVPN_OK;
-    }
-    if (strcmp(s, "none") == 0) {
-        *out = MQVPN_CC_NONE;
-        return MQVPN_OK;
-    }
-    return MQVPN_ERR_INVALID_ARG;
+    int v = mqvpn_cc_from_name(s);
+    if (v < 0) return MQVPN_ERR_INVALID_ARG;
+    *out = (mqvpn_cc_t)v;
+    return MQVPN_OK;
 }
 
 static int
 is_valid_scheduler(mqvpn_scheduler_t sched)
 {
-    return sched == MQVPN_SCHED_MINRTT || sched == MQVPN_SCHED_WLB ||
-           sched == MQVPN_SCHED_BACKUP_FEC || sched == MQVPN_SCHED_WLB_UDP_PIN;
+    return mqvpn_sched_is_valid(sched);
 }
 
 static int
 is_valid_cc(mqvpn_cc_t cc)
 {
-    return cc == MQVPN_CC_BBR2 || cc == MQVPN_CC_BBR || cc == MQVPN_CC_CUBIC ||
-           cc == MQVPN_CC_NONE;
+    return mqvpn_cc_is_valid(cc);
 }
 
 /* ─── Config new/free ─── */

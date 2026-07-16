@@ -258,62 +258,20 @@ json_read_string_array(const char *p, char out[][64], int max_items, int *n_item
 }
 
 static int
+json_add_user_cb(void *ctx, const char *name, const char *key)
+{
+    /* add_user_entry() logs and skips invalid/duplicate/overflow entries
+     * rather than failing the whole parse; preserve that here. */
+    add_user_entry((mqvpn_file_config_t *)ctx, name, key, 0, "json");
+    return 0;
+}
+
+static int
 json_read_users(mqvpn_file_config_t *cfg, const char *p)
 {
     if (!cfg || !p || *p != '[') return -1;
     cfg->n_users = 0;
-    p = json_skip_ws(p + 1);
-
-    while (*p && *p != ']') {
-        char name[64] = {0};
-        char key[256] = {0};
-
-        if (*p == '"') {
-            char pair[360] = {0};
-            if (json_read_string(p, pair, sizeof(pair)) < 0) return -1;
-            char *sep = strchr(pair, ':');
-            if (!sep) return -1;
-            *sep = '\0';
-            mqvpn_copy_str(name, sizeof(name), pair);
-            mqvpn_copy_str(key, sizeof(key), sep + 1);
-
-            const char *e = p + 1;
-            while (*e && *e != '"') {
-                if (*e == '\\' && e[1]) e++;
-                e++;
-            }
-            if (*e != '"') return -1;
-            p = json_skip_ws(e + 1);
-        } else if (*p == '{') {
-            const char *end = strchr(p, '}');
-            if (!end) return -1;
-
-            char obj[512];
-            size_t len = (size_t)(end - p + 1);
-            if (len >= sizeof(obj)) return -1;
-            memcpy(obj, p, len);
-            obj[len] = '\0';
-
-            const char *name_v = json_find_key(obj, "name");
-            const char *key_v = json_find_key(obj, "key");
-            if (!name_v || !key_v) return -1;
-            if (json_read_string(name_v, name, sizeof(name)) < 0) return -1;
-            if (json_read_string(key_v, key, sizeof(key)) < 0) return -1;
-
-            p = json_skip_ws(end + 1);
-        } else {
-            return -1;
-        }
-
-        add_user_entry(cfg, name, key, 0, "json");
-
-        if (*p == ',')
-            p = json_skip_ws(p + 1);
-        else if (*p != ']')
-            return -1;
-    }
-
-    return (*p == ']') ? 0 : -1;
+    return mqvpn_json_parse_users(p, cfg, json_add_user_cb);
 }
 
 /* Parse the "reorder_rules" JSON array of {proto, port, profile} objects into
