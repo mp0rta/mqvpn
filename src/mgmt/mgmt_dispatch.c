@@ -29,9 +29,21 @@ typedef struct {
     int retryable;
 } mgmt_result_t;
 
+/* Parsed request view handed to handlers. `protocol` points at the raw
+ * top-level "protocol" value token (inside the request-line buffer);
+ * `params` at the params object's '{'; `params_end` one past its matching
+ * '}'. Handlers must bound every params lookup to [params, params_end) —
+ * the underlying buffer is the whole request line, so an unbounded search
+ * would see keys in trailing/sibling JSON. */
+typedef struct {
+    const char *protocol;
+    const char *params;
+    const char *params_end;
+} mgmt_req_t;
+
 typedef void (*mgmt_handler_fn)(const mgmt_ctx_t *ctx, mgmt_conn_t *conn,
-                                const char *params, const char *params_end,
-                                cmp_buf_t *result, mgmt_result_t *out);
+                                const mgmt_req_t *req, cmp_buf_t *result,
+                                mgmt_result_t *out);
 
 typedef struct {
     const char *name;
@@ -110,31 +122,50 @@ write_hello_result(const mgmt_ctx_t *ctx, cmp_buf_t *b)
     cmp_buf_appendf(b, "}");
 }
 
-/* ── method handlers ─────────────────────────────────────────────────────
- * `params` points at the request's params object ('{'); `params_end` points
- * one past its matching '}'. Handlers must bound every params lookup to
- * that span — the underlying buffer is the whole request line, so an
- * unbounded search would see keys in trailing/sibling JSON. */
+/* ── method handlers ─────────────────────────────────────────────────── */
 
 static void
-h_hello(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *params,
-        const char *params_end, cmp_buf_t *result, mgmt_result_t *out)
+set_protocol_incompatible(mgmt_result_t *out)
+{
+    out->code = CMP_E_PROTOCOL_INCOMPATIBLE;
+    out->message = "no compatible protocol version";
+    out->details_json = "{\"supported_protocols\":[\"" CMP_PROTOCOL_VERSION "\"]}";
+    out->retryable = 0;
+}
+
+static void
+h_hello(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const mgmt_req_t *req,
+        cmp_buf_t *result, mgmt_result_t *out)
 {
     /* Negotiation is fixed at the first successful hello: a duplicate hello
      * on an already-handshaken connection is an idempotent success and does
-     * not re-check supported_protocols. */
+     * not re-check protocol/supported_protocols. */
     if (conn->handshake_done) {
         write_hello_result(ctx, result);
         out->code = CMP_E_OK;
         return;
     }
 
-    if (!cmp_json_array_contains_str_bounded(params, params_end, "supported_protocols",
-                                             CMP_PROTOCOL_VERSION)) {
-        out->code = CMP_E_PROTOCOL_INCOMPATIBLE;
-        out->message = "no compatible protocol version";
-        out->details_json = "{\"supported_protocols\":[\"" CMP_PROTOCOL_VERSION "\"]}";
-        out->retryable = 0;
+    /* Protocol value validation happens at handshake time (spec): the
+     * request's top-level "protocol" must be the string "1.0". Non-hello
+     * requests stay presence-only checked (also spec-pinned). */
+    char proto_str[16];
+    if (json_read_string(req->protocol, proto_str, sizeof(proto_str)) != 0 ||
+        strcmp(proto_str, CMP_PROTOCOL_VERSION) != 0) {
+        set_protocol_incompatible(out);
+        return;
+    }
+
+    /* supported_protocols must live at depth 1 of the params object — a
+     * nested object inside params must not be able to shadow it. The array
+     * scan is bounded by the value's own closing ']' (see
+     * cmp_json_array_value_contains_str), so params_end as the outer bound
+     * is safe. */
+    const char *sp =
+        find_key_depth1(req->params, req->params_end - 1, "supported_protocols");
+    if (!sp ||
+        !cmp_json_array_value_contains_str(sp, req->params_end, CMP_PROTOCOL_VERSION)) {
+        set_protocol_incompatible(out);
         return;
     }
 
@@ -144,12 +175,11 @@ h_hello(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *params,
 }
 
 static void
-h_version(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *params,
-          const char *params_end, cmp_buf_t *result, mgmt_result_t *out)
+h_version(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const mgmt_req_t *req,
+          cmp_buf_t *result, mgmt_result_t *out)
 {
     (void)conn;
-    (void)params;
-    (void)params_end;
+    (void)req;
     cmp_buf_appendf(result, "{\"version\":");
     cmp_json_append_str(result, ctx->endpoint_version);
     cmp_buf_appendf(result, "}");
@@ -157,12 +187,11 @@ h_version(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *params,
 }
 
 static void
-h_capabilities(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *params,
-               const char *params_end, cmp_buf_t *result, mgmt_result_t *out)
+h_capabilities(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const mgmt_req_t *req,
+               cmp_buf_t *result, mgmt_result_t *out)
 {
     (void)conn;
-    (void)params;
-    (void)params_end;
+    (void)req;
     cmp_buf_appendf(result, "{\"capabilities\":");
     write_capabilities_array(ctx, result);
     cmp_buf_appendf(result, "}");
@@ -170,13 +199,12 @@ h_capabilities(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *params,
 }
 
 static void
-h_ping(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *params,
-       const char *params_end, cmp_buf_t *result, mgmt_result_t *out)
+h_ping(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const mgmt_req_t *req, cmp_buf_t *result,
+       mgmt_result_t *out)
 {
     (void)ctx;
     (void)conn;
-    (void)params;
-    (void)params_end;
+    (void)req;
     cmp_buf_appendf(result, "{}");
     out->code = CMP_E_OK;
 }
@@ -319,7 +347,12 @@ mgmt_dispatch_request(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *line
         res.details_json = NULL;
         res.retryable = 0;
 
-        m->fn(ctx, conn, paramsv, params_end, &result_buf, &res);
+        mgmt_req_t req;
+        req.protocol = protov;
+        req.params = paramsv;
+        req.params_end = params_end;
+
+        m->fn(ctx, conn, &req, &result_buf, &res);
 
         if (res.code != CMP_E_OK) {
             rc = res.code;

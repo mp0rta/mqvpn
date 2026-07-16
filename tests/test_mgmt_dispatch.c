@@ -497,6 +497,88 @@ test_method_as_number(void)
     check_single_trailing_lf(out);
 }
 
+/* ── T. hello with a non-string protocol field (false) ── */
+static void
+test_hello_protocol_not_string(void)
+{
+    mgmt_ctx_t ctx = make_ctx();
+    mgmt_conn_t conn = make_conn();
+    char out[CMP_MAX_RESPONSE_BYTES];
+
+    dispatch(&ctx, &conn,
+             "{\"id\":1,\"protocol\":false,\"method\":\"system.hello\","
+             "\"params\":{\"supported_protocols\":[\"1.0\"]}}",
+             out, sizeof(out));
+    CHECK(has_substr(out, "\"ok\":false"));
+    CHECK(has_substr(out, "\"code\":\"MQVPN_CLIENT_PROTOCOL_INCOMPATIBLE\""));
+    CHECK(has_substr(out, "\"supported_protocols\":[\"1.0\"]"));
+    CHECK(conn.handshake_done == 0);
+    check_single_trailing_lf(out);
+}
+
+/* ── U. hello with an unknown protocol version string ── */
+static void
+test_hello_protocol_wrong_version(void)
+{
+    mgmt_ctx_t ctx = make_ctx();
+    mgmt_conn_t conn = make_conn();
+    char out[CMP_MAX_RESPONSE_BYTES];
+
+    dispatch(&ctx, &conn,
+             "{\"id\":1,\"protocol\":\"9.9\",\"method\":\"system.hello\","
+             "\"params\":{\"supported_protocols\":[\"1.0\"]}}",
+             out, sizeof(out));
+    CHECK(has_substr(out, "\"ok\":false"));
+    CHECK(has_substr(out, "\"code\":\"MQVPN_CLIENT_PROTOCOL_INCOMPATIBLE\""));
+    CHECK(has_substr(out, "\"supported_protocols\":[\"1.0\"]"));
+    CHECK(conn.handshake_done == 0);
+    check_single_trailing_lf(out);
+}
+
+/* ── V. post-handshake requests stay presence-only on protocol (pinned) ── */
+static void
+test_post_handshake_protocol_presence_only(void)
+{
+    mgmt_ctx_t ctx = make_ctx();
+    mgmt_conn_t conn = make_conn();
+    char out[CMP_MAX_RESPONSE_BYTES];
+
+    dispatch(&ctx, &conn,
+             "{\"id\":1,\"protocol\":\"1.0\",\"method\":\"system.hello\","
+             "\"params\":{\"supported_protocols\":[\"1.0\"]}}",
+             out, sizeof(out));
+    CHECK(conn.handshake_done == 1);
+
+    dispatch(&ctx, &conn,
+             "{\"id\":2,\"protocol\":\"9.9\",\"method\":\"system.ping\",\"params\":{}}",
+             out, sizeof(out));
+    CHECK(has_substr(out, "\"ok\":true"));
+    CHECK(has_substr(out, "\"id\":2"));
+    check_single_trailing_lf(out);
+}
+
+/* ── W. nested object inside params must not shadow supported_protocols ──
+ * Regression: a flat key scan inside params let
+ * {"x":{"supported_protocols":["1.0"]},...} satisfy the hello check even
+ * though the real depth-1 supported_protocols is ["9.9"]. */
+static void
+test_params_nested_supported_protocols_ignored(void)
+{
+    mgmt_ctx_t ctx = make_ctx();
+    mgmt_conn_t conn = make_conn();
+    char out[CMP_MAX_RESPONSE_BYTES];
+
+    dispatch(&ctx, &conn,
+             "{\"id\":1,\"protocol\":\"1.0\",\"method\":\"system.hello\","
+             "\"params\":{\"x\":{\"supported_protocols\":[\"1.0\"]},"
+             "\"supported_protocols\":[\"9.9\"]}}",
+             out, sizeof(out));
+    CHECK(has_substr(out, "\"ok\":false"));
+    CHECK(has_substr(out, "\"code\":\"MQVPN_CLIENT_PROTOCOL_INCOMPATIBLE\""));
+    CHECK(conn.handshake_done == 0);
+    check_single_trailing_lf(out);
+}
+
 int
 main(void)
 {
@@ -518,6 +600,10 @@ main(void)
     test_params_search_bounded_to_request();
     test_result_overflow_internal_error();
     test_method_as_number();
+    test_hello_protocol_not_string();
+    test_hello_protocol_wrong_version();
+    test_post_handshake_protocol_presence_only();
+    test_params_nested_supported_protocols_ignored();
 
     if (g_failed) {
         fprintf(stderr, "%d check(s) failed\n", g_failed);

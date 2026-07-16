@@ -113,6 +113,12 @@ cmp_json_array_contains_str_bounded(const char *json, const char *json_end,
 {
     const char *v = json_find_key_bounded(json, json_end, key);
     if (!v) return 0;
+    return cmp_json_array_value_contains_str(v, json_end, want);
+}
+
+int
+cmp_json_array_value_contains_str(const char *v, const char *json_end, const char *want)
+{
     v = json_skip_ws(v);
     if (v >= json_end || *v != '[') return 0;
 

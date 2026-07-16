@@ -12,7 +12,7 @@
 #   T4  endpoint unreachable -> exit 5, text + --json "unavailable"
 #   T5  malformed request survives, connection stays usable
 #   T6  oversized request is rejected, endpoint stays usable
-#   T7  4 pipelined requests on one persistent connection, ids in order
+#   T7  4 pipelined requests sent in one burst on one connection, ids in order
 #   T8a raw hello with an unsupported protocol -> PROTOCOL_INCOMPATIBLE
 #   T8b `mqvpnctl version` against an incompatible endpoint -> exit 9
 #   T8c response + trailing junk line in one send() burst -> still exit 0
@@ -21,7 +21,7 @@
 #   T10 two concurrent `mqvpnctl version` invocations both succeed
 #   T11 `mqvpnctl --timeout 1 version` against a silent endpoint -> exit 8
 #   T12 `mgmt_endpoint_host --mode 0640` produces a 0640 socket
-#   T13 permission boundary (root-only; SKIP under non-root)
+#   T13 permission boundary (root or passwordless sudo; SKIP otherwise)
 #
 # Usage: scripts/ci_e2e/run_client_mgmt_ipc_phase1_test.sh [build-dir]
 # Exit code: 0 if all run tests pass, 1 if any fails.
@@ -255,6 +255,9 @@ PYEOF
 run_test "T6 oversized request rejected, endpoint stays usable" test_t6
 
 # ── T7 ──────────────────────────────────────────────────────────────────
+# Genuinely pipelined: all 4 requests go out in ONE send() burst before any
+# response is read, exercising the endpoint's buffered multi-line loop and
+# write-backpressure resume, then the 4 responses must come back in order.
 test_t7() {
     python3 - "${SOCK_MAIN}" <<'PYEOF'
 import socket, sys, json
@@ -263,33 +266,38 @@ sock_path = sys.argv[1]
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.connect(sock_path)
 
-def send_recv(i, method, params):
-    req = json.dumps({"id": i, "protocol": "1.0", "method": method,
-                       "params": params}) + "\n"
-    s.sendall(req.encode())
-    buf = b""
-    while not buf.endswith(b"\n"):
-        chunk = s.recv(65536)
-        if not chunk:
-            raise SystemExit(f"connection closed waiting for response to id={i}")
-        buf += chunk
-    return json.loads(buf.decode())
+requests = [
+    ("system.hello", {"client_name": "t7", "client_version": "1",
+                      "supported_protocols": ["1.0"]}),
+    ("system.version", {}),
+    ("system.capabilities", {}),
+    ("system.ping", {}),
+]
+burst = b"".join(
+    (json.dumps({"id": i, "protocol": "1.0", "method": m, "params": p})
+     + "\n").encode()
+    for i, (m, p) in enumerate(requests, start=1))
+s.sendall(burst)  # ONE send() for all 4 requests
 
-r1 = send_recv(1, "system.hello",
-                {"client_name": "t7", "client_version": "1",
-                 "supported_protocols": ["1.0"]})
-r2 = send_recv(2, "system.version", {})
-r3 = send_recv(3, "system.capabilities", {})
-r4 = send_recv(4, "system.ping", {})
+buf = b""
+while buf.count(b"\n") < len(requests):
+    chunk = s.recv(65536)
+    if not chunk:
+        n = buf.count(b"\n")
+        raise SystemExit("connection closed after %d responses" % n)
+    buf += chunk
 s.close()
 
-for expected_id, r in enumerate([r1, r2, r3, r4], start=1):
+lines = buf.decode().splitlines()
+assert len(lines) == len(requests), lines
+for expected_id, line in enumerate(lines, start=1):
+    r = json.loads(line)
     assert r["ok"] is True, r
     assert r["id"] == expected_id, r
 print("T7_OK")
 PYEOF
 }
-run_test "T7 4 pipelined requests, ids in order" test_t7
+run_test "T7 4 pipelined requests in one send() burst, ids in order" test_t7
 
 # ── T8a ─────────────────────────────────────────────────────────────────
 test_t8a() {
@@ -529,10 +537,18 @@ test_t12() {
 run_test "T12 mgmt_endpoint_host --mode 0640" test_t12
 
 # ── T13 ─────────────────────────────────────────────────────────────────
+# Runs as root directly, or — when not root but passwordless sudo is
+# available (GitHub ubuntu runners) — via sudo, so CI actually exercises the
+# permission boundary. SKIP only when neither is available.
 test_t13() {
+    local use_sudo=0
     if [[ "${EUID}" -ne 0 ]]; then
-        echo "T13 SKIP (requires root)"
-        return 0
+        if sudo -n true 2>/dev/null; then
+            use_sudo=1
+        else
+            echo "T13 SKIP (requires root or passwordless sudo)"
+            return 0
+        fi
     fi
 
     if ! id nobody >/dev/null 2>&1; then
@@ -541,25 +557,56 @@ test_t13() {
     fi
 
     local sock="${TMPD}/t13.sock"
-    local pid
     # mktemp -d creates 0700 dirs; open the directory up so `nobody` can
     # traverse to the socket — the test must exercise the socket's own mode,
     # not directory-permission denial.
     chmod 755 "${TMPD}"
-    pid="$(start_host "${sock}")"
-    wait_for_socket "${sock}" 5 || { echo "  host never bound"; return 1; }
-    # Default mode (0660, root:root) — connecting as an unrelated
-    # unprivileged user must fail with a permission error.
+
+    # Start a root-owned host (default socket mode 0660, root:root).
+    local host_log="${TMPD}/host_t13.log"
+    local pid
+    if (( use_sudo )); then
+        sudo -n "${HOST_BIN}" "${sock}" >"${host_log}" 2>&1 &
+        pid=$!  # pid of sudo; the host itself is root-owned
+    else
+        "${HOST_BIN}" "${sock}" >"${host_log}" 2>&1 &
+        pid=$!
+        BG_PIDS+=("${pid}")
+    fi
+
+    stop_t13_host() {
+        if (( use_sudo )); then
+            # A non-root shell cannot signal the root-owned host directly.
+            sudo -n pkill -f "${HOST_BIN} ${sock}" >/dev/null 2>&1
+            wait "${pid}" 2>/dev/null
+        else
+            kill "${pid}" >/dev/null 2>&1
+        fi
+    }
+
+    if ! wait_for_socket "${sock}" 5; then
+        echo "  host never bound"
+        stop_t13_host
+        return 1
+    fi
+
+    # Connecting as an unrelated unprivileged user must fail with a
+    # permission error.
     local out rc
-    out="$(runuser -u nobody -- "${MQVPNCTL}" --endpoint "unix://${sock}" version 2>&1)"
-    rc=$?
+    if (( use_sudo )); then
+        out="$(sudo -n -u nobody "${MQVPNCTL}" --endpoint "unix://${sock}" version 2>&1)"
+        rc=$?
+    else
+        out="$(runuser -u nobody -- "${MQVPNCTL}" --endpoint "unix://${sock}" version 2>&1)"
+        rc=$?
+    fi
     echo "${out}"
-    kill "${pid}" >/dev/null 2>&1
+    stop_t13_host
     [[ ${rc} -ne 0 ]] || { echo "  expected a failure exit code for permission-denied connect"; return 1; }
     [[ "${out}" == *"ermission"* || "${out}" == *"unavailable"* ]] || {
         echo "  expected a permission-related message"; return 1; }
 }
-run_test "T13 permission boundary (root-only)" test_t13
+run_test "T13 permission boundary (root or passwordless sudo)" test_t13
 
 # ── Summary ─────────────────────────────────────────────────────────────
 echo ""

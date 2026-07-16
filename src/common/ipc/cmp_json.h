@@ -52,4 +52,13 @@ int cmp_json_array_contains_str(const char *json, const char *key, const char *w
 int cmp_json_array_contains_str_bounded(const char *json, const char *json_end,
                                         const char *key, const char *want);
 
+/* Value-level companion for callers that have already located the key (e.g.
+ * with a depth-aware scanner): does the JSON value starting at `v` parse as
+ * an array containing the string element `want`? `v_end` only has to bound
+ * the enclosing buffer, not the value itself — the element scan stops at the
+ * array's own closing ']' (nested containers are skipped with a depth walk),
+ * so it never reads sibling values even when v_end lies past them. Returns 0
+ * when the value is not an array. */
+int cmp_json_array_value_contains_str(const char *v, const char *v_end, const char *want);
+
 #endif

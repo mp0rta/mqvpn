@@ -248,6 +248,24 @@ test_array_contains_str_bounded(void)
                                       "supported_protocols", "1.0") == 1);
 }
 
+/* ── 9c. cmp_json_array_value_contains_str: value-level scan stops at the
+ * array's own ']' even when the bound lies past sibling values ── */
+static void
+test_array_value_contains_str(void)
+{
+    /* v points at the array; a sibling array with the wanted element follows
+     * before the bound — it must never be scanned into */
+    const char *obj = "{\"a\":[\"9.9\"],\"b\":[\"1.0\"]}";
+    const char *v = strchr(obj, '[');
+    const char *end = obj + strlen(obj);
+    CHECK(cmp_json_array_value_contains_str(v, end, "1.0") == 0);
+    CHECK(cmp_json_array_value_contains_str(v, end, "9.9") == 1);
+    /* non-array value -> 0 */
+    const char *str_val = "\"1.0\"";
+    CHECK(cmp_json_array_value_contains_str(str_val, str_val + strlen(str_val), "1.0") ==
+          0);
+}
+
 /* ── 10. cmp_error_code_str: every code maps to a non-NULL wire string ── */
 static void
 test_error_code_str_table(void)
@@ -282,6 +300,7 @@ main(void)
     test_no_raw_newline_in_any_case();
     test_array_contains_str();
     test_array_contains_str_bounded();
+    test_array_value_contains_str();
     test_error_code_str_table();
 
     if (g_failed) {
