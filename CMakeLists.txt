@@ -719,7 +719,11 @@ if(BUILD_TESTING)
         ${CMAKE_SOURCE_DIR}/src/common/ipc
         ${CMAKE_SOURCE_DIR}/src/mgmt
     )
-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_classifier test_icmp test_cmp_json test_mgmt_dispatch)
+    # test_reorder_gate exercises src/reorder_gate.h (shared STAMP/RAW/DROP_MTU
+    # gate + PTB token bucket, extracted from mqvpn_client.c/mqvpn_server.c) —
+    # links reorder_tx.c (for the peek it wraps) + icmp.c (for the PTB send).
+    add_executable(test_reorder_gate tests/test_reorder_gate.c src/reorder_tx.c src/icmp.c src/log.c)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_classifier test_icmp test_reorder_gate test_cmp_json test_mgmt_dispatch)
 
     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of
@@ -915,6 +919,11 @@ if(BUILD_TESTING)
     # CLI argv overflow shell test (runs the built mqvpn binary)
     add_test(NAME test_cli_path_argv
         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_cli_path_argv.sh $<TARGET_FILE:mqvpn>)
+
+    # Guard: every tests/test_*.c using bare assert() must #undef NDEBUG,
+    # since CI also runs ctest on a Release (-DNDEBUG) build.
+    add_test(NAME test_ndebug_guard
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/check_ndebug_guard.sh ${CMAKE_SOURCE_DIR}/tests)
 endif()
 
 # ---------- Install ----------

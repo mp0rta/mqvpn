@@ -9,6 +9,7 @@
 #include "vpn_client.h"
 #include "vpn_server.h"
 #include "flow_sched.h"
+#include "mqvpn_sched_names.h"
 
 #include <xquic/xquic.h> /* for XQC_ENABLE_* compile-time defines */
 
@@ -445,43 +446,38 @@ main(int argc, char *argv[])
         log_level = MQVPN_LOG_ERROR;
     mqvpn_log_set_level(log_level);
 
-    /* Parse scheduler */
-    int scheduler = MQVPN_SCHED_MINRTT;
-    if (strcmp(eff_scheduler, "wlb") == 0) {
-        scheduler = MQVPN_SCHED_WLB;
-    } else if (strcmp(eff_scheduler, "wlb_udp_pin") == 0) {
-        scheduler = MQVPN_SCHED_WLB_UDP_PIN;
-    } else if (strcmp(eff_scheduler, "backup_fec") == 0) {
-#if defined(XQC_ENABLE_FEC) && defined(XQC_ENABLE_XOR)
-        scheduler = MQVPN_SCHED_BACKUP_FEC;
-#else
-        fprintf(stderr, "error: --scheduler 'backup_fec' requires rebuild with "
-                        "-DXQC_ENABLE_FEC=ON -DXQC_ENABLE_XOR=ON in xquic\n");
-        return 1;
-#endif
-    } else if (strcmp(eff_scheduler, "minrtt") != 0) {
+    /* Parse scheduler. Name lookup is the shared table (mqvpn_sched_names.h);
+     * the backup_fec build-flag gate stays here — it's a CLI-surface-only
+     * policy, not a table fact (mqvpn_config.c's JSON path accepts
+     * "backup_fec" unconditionally; see that file's parse_scheduler_name). */
+    int sched_lookup = mqvpn_sched_from_name(eff_scheduler);
+    if (sched_lookup < 0) {
         fprintf(stderr, "error: --scheduler must be 'minrtt', 'wlb', 'wlb_udp_pin', or "
                         "'backup_fec'\n");
         return 1;
     }
+    int scheduler = sched_lookup;
+    if (scheduler == MQVPN_SCHED_BACKUP_FEC) {
+#if !(defined(XQC_ENABLE_FEC) && defined(XQC_ENABLE_XOR))
+        fprintf(stderr, "error: --scheduler 'backup_fec' requires rebuild with "
+                        "-DXQC_ENABLE_FEC=ON -DXQC_ENABLE_XOR=ON in xquic\n");
+        return 1;
+#endif
+    }
 
-    /* Parse congestion control */
-    int cc = MQVPN_CC_BBR2;
-    if (strcmp(eff_cc, "bbr") == 0) {
-        cc = MQVPN_CC_BBR;
-    } else if (strcmp(eff_cc, "cubic") == 0) {
-        cc = MQVPN_CC_CUBIC;
-    } else if (strcmp(eff_cc, "none") == 0) {
-#ifdef XQC_ENABLE_UNLIMITED
-        cc = MQVPN_CC_NONE;
-#else
+    /* Parse congestion control. Same shared-table + site-gate split. */
+    int cc_lookup = mqvpn_cc_from_name(eff_cc);
+    if (cc_lookup < 0) {
+        fprintf(stderr, "error: --cc must be 'bbr2', 'bbr', 'cubic', or 'none'\n");
+        return 1;
+    }
+    int cc = cc_lookup;
+    if (cc == MQVPN_CC_NONE) {
+#ifndef XQC_ENABLE_UNLIMITED
         fprintf(stderr, "error: --cc 'none' requires rebuild with "
                         "-DXQC_ENABLE_UNLIMITED=ON in xquic\n");
         return 1;
 #endif
-    } else if (strcmp(eff_cc, "bbr2") != 0) {
-        fprintf(stderr, "error: --cc must be 'bbr2', 'bbr', 'cubic', or 'none'\n");
-        return 1;
     }
 
     /* Paths: CLI paths override config paths entirely */

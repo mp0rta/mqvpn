@@ -2,6 +2,12 @@
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 
 /* tests/test_path_state_machine.c */
+
+/* Keep assert() live even in Release builds: CI runs ctest on Release too,
+ * where NDEBUG would silently no-op every assertion in this file. */
+#undef NDEBUG
+#include <assert.h>
+
 #include "path_entry_internal.h"
 #include "path_state_machine.h"
 #include "libmqvpn.h"

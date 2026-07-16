@@ -12,10 +12,15 @@
  *             -I src
  * Run:    ./test_flow_sched
  */
+
+/* Keep assert() live even in Release builds: CI runs ctest on Release too,
+ * where NDEBUG would silently no-op every assertion in this file. */
+#undef NDEBUG
+#include <assert.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <assert.h>
 #include <arpa/inet.h>
 
 #include "flow_sched.h"
