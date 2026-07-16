@@ -45,4 +45,11 @@ void cmp_json_append_str(cmp_buf_t *b, const char *s);
  * skipped, never matched into (they do not occur in CMP). */
 int cmp_json_array_contains_str(const char *json, const char *key, const char *want);
 
+/* Bounded variant: the key lookup and the array scan never consider bytes at
+ * or beyond `json_end`. Used when `json` points into a larger buffer (e.g. a
+ * params object inside a request line) so that keys/elements in sibling or
+ * trailing JSON can never satisfy the search. */
+int cmp_json_array_contains_str_bounded(const char *json, const char *json_end,
+                                        const char *key, const char *want);
+
 #endif

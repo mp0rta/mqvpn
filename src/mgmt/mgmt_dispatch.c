@@ -30,14 +30,59 @@ typedef struct {
 } mgmt_result_t;
 
 typedef void (*mgmt_handler_fn)(const mgmt_ctx_t *ctx, mgmt_conn_t *conn,
-                                const char *params, cmp_buf_t *result,
-                                mgmt_result_t *out);
+                                const char *params, const char *params_end,
+                                cmp_buf_t *result, mgmt_result_t *out);
 
 typedef struct {
     const char *name;
     int requires_handshake;
     mgmt_handler_fn fn;
 } mgmt_method_t;
+
+/* Locate `key` at depth 1 of the object [obj, obj_end) ONLY: keys inside
+ * nested objects/arrays or matching text inside string values can never
+ * satisfy the lookup (json_find_key is a flat text scan and would). `obj`
+ * must point at '{' and `obj_end` at its matching '}' (from
+ * json_object_end). Returns a pointer to the key's value (after ':' and
+ * whitespace), or NULL. The state walk (depth + in-string with backslash
+ * escapes) mirrors cmp_json_array_contains_str's element scanner. */
+static const char *
+find_key_depth1(const char *obj, const char *obj_end, const char *key)
+{
+    size_t key_len = strlen(key);
+    int depth = 1;
+    const char *p = obj + 1;
+
+    while (p < obj_end) {
+        if (*p == '"') {
+            const char *k = p + 1;
+            const char *e = k;
+            while (e < obj_end && *e != '"') {
+                if (*e == '\\' && e + 1 < obj_end) e++;
+                e++;
+            }
+            if (e >= obj_end) return NULL; /* unterminated string */
+            const char *c = json_skip_ws(e + 1);
+            if (depth == 1 && c < obj_end && *c == ':') {
+                /* A key of this top-level object. */
+                if ((size_t)(e - k) == key_len && strncmp(k, key, key_len) == 0) {
+                    return json_skip_ws(c + 1);
+                }
+                p = c + 1; /* continue scanning at the value */
+            } else {
+                p = e + 1; /* a string value (or nested key): skip it whole */
+            }
+            continue;
+        }
+        if (*p == '{' || *p == '[') {
+            depth++;
+        } else if (*p == '}' || *p == ']') {
+            depth--;
+        }
+        p++;
+    }
+    return NULL;
+}
 
 /* ── result-body helpers shared by handlers ─────────────────────────────── */
 
@@ -66,14 +111,14 @@ write_hello_result(const mgmt_ctx_t *ctx, cmp_buf_t *b)
 }
 
 /* ── method handlers ─────────────────────────────────────────────────────
- * `params` points at the value of the request's "params" key (still inside
- * the original request-line buffer, NUL-terminated at the buffer's end —
- * not bounded to the params object itself, mirroring json_find_key's
- * existing unbounded-search idiom elsewhere in the codebase). */
+ * `params` points at the request's params object ('{'); `params_end` points
+ * one past its matching '}'. Handlers must bound every params lookup to
+ * that span — the underlying buffer is the whole request line, so an
+ * unbounded search would see keys in trailing/sibling JSON. */
 
 static void
-h_hello(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *params, cmp_buf_t *result,
-        mgmt_result_t *out)
+h_hello(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *params,
+        const char *params_end, cmp_buf_t *result, mgmt_result_t *out)
 {
     /* Negotiation is fixed at the first successful hello: a duplicate hello
      * on an already-handshaken connection is an idempotent success and does
@@ -84,8 +129,8 @@ h_hello(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *params, cmp_buf_t 
         return;
     }
 
-    if (!cmp_json_array_contains_str(params, "supported_protocols",
-                                     CMP_PROTOCOL_VERSION)) {
+    if (!cmp_json_array_contains_str_bounded(params, params_end, "supported_protocols",
+                                             CMP_PROTOCOL_VERSION)) {
         out->code = CMP_E_PROTOCOL_INCOMPATIBLE;
         out->message = "no compatible protocol version";
         out->details_json = "{\"supported_protocols\":[\"" CMP_PROTOCOL_VERSION "\"]}";
@@ -99,11 +144,12 @@ h_hello(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *params, cmp_buf_t 
 }
 
 static void
-h_version(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *params, cmp_buf_t *result,
-          mgmt_result_t *out)
+h_version(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *params,
+          const char *params_end, cmp_buf_t *result, mgmt_result_t *out)
 {
     (void)conn;
     (void)params;
+    (void)params_end;
     cmp_buf_appendf(result, "{\"version\":");
     cmp_json_append_str(result, ctx->endpoint_version);
     cmp_buf_appendf(result, "}");
@@ -112,10 +158,11 @@ h_version(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *params, cmp_buf_
 
 static void
 h_capabilities(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *params,
-               cmp_buf_t *result, mgmt_result_t *out)
+               const char *params_end, cmp_buf_t *result, mgmt_result_t *out)
 {
     (void)conn;
     (void)params;
+    (void)params_end;
     cmp_buf_appendf(result, "{\"capabilities\":");
     write_capabilities_array(ctx, result);
     cmp_buf_appendf(result, "}");
@@ -123,12 +170,13 @@ h_capabilities(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *params,
 }
 
 static void
-h_ping(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *params, cmp_buf_t *result,
-       mgmt_result_t *out)
+h_ping(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *params,
+       const char *params_end, cmp_buf_t *result, mgmt_result_t *out)
 {
     (void)ctx;
     (void)conn;
     (void)params;
+    (void)params_end;
     cmp_buf_appendf(result, "{}");
     out->code = CMP_E_OK;
 }
@@ -200,7 +248,7 @@ mgmt_dispatch_request(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *line
     }
 
     {
-        const char *idv = json_find_key_bounded(p, obj_end, "id");
+        const char *idv = find_key_depth1(p, obj_end, "id");
         uint64_t v;
         if (idv && json_read_u64_strict(idv, &v) == 0 && v != 0) {
             id = v;
@@ -214,15 +262,24 @@ mgmt_dispatch_request(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *line
     }
 
     {
-        const char *protov = json_find_key_bounded(p, obj_end, "protocol");
-        const char *methodv = json_find_key_bounded(p, obj_end, "method");
-        const char *paramsv = json_find_key_bounded(p, obj_end, "params");
+        const char *protov = find_key_depth1(p, obj_end, "protocol");
+        const char *methodv = find_key_depth1(p, obj_end, "method");
+        const char *paramsv = find_key_depth1(p, obj_end, "params");
 
         if (!protov || !methodv || !paramsv) {
             mgmt_write_error(&out_buf, id, 1, CMP_E_INVALID_ARGUMENT,
                              "missing required field (protocol/method/params)", NULL, 0);
             goto finalize;
         }
+
+        /* params must be an object; its end bounds every handler lookup. */
+        const char *params_close = json_object_end(paramsv);
+        if (*paramsv != '{' || !params_close) {
+            mgmt_write_error(&out_buf, id, 1, CMP_E_INVALID_ARGUMENT,
+                             "params must be an object", NULL, 0);
+            goto finalize;
+        }
+        const char *params_end = params_close + 1;
 
         char method_name[64];
         if (json_read_string(methodv, method_name, sizeof(method_name)) != 0) {
@@ -257,7 +314,7 @@ mgmt_dispatch_request(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *line
         res.details_json = NULL;
         res.retryable = 0;
 
-        m->fn(ctx, conn, paramsv, &result_buf, &res);
+        m->fn(ctx, conn, paramsv, params_end, &result_buf, &res);
 
         if (res.code != CMP_E_OK) {
             mgmt_write_error(&out_buf, id, 1, res.code, res.message, res.details_json,
@@ -283,15 +340,16 @@ mgmt_dispatch_request(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *line
 
 finalize:
     /* Fixed short fallback when the real response does not fit out_cap.
-     * Guaranteed (by construction; spot-checked in tests) to fit in
-     * CMP_MIN_RESPONSE_BUF. No id: whatever was written above may itself be
-     * why out_buf overflowed, so it cannot be trusted to recover one. */
+     * ~150 bytes, well under CMP_MIN_RESPONSE_BUF (256; spot-checked in
+     * tests). No id: whatever was written above may itself be why out_buf
+     * overflowed, so it cannot be trusted to recover one. */
     if (out_buf.overflow) {
         cmp_buf_init(&out_buf, out, out_cap);
         cmp_buf_appendf(&out_buf,
-                        "{\"ok\":false,\"error\":{\"code\":\"%s\","
+                        "{\"protocol\":\"%s\",\"ok\":false,\"error\":{\"code\":\"%s\","
                         "\"message\":\"response exceeded size limit\","
                         "\"retryable\":false}}\n",
+                        CMP_PROTOCOL_VERSION,
                         cmp_error_code_str(CMP_E_RESPONSE_TOO_LARGE));
     }
     return 0;

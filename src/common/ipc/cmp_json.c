@@ -104,25 +104,32 @@ cmp_json_append_str(cmp_buf_t *b, const char *s)
 int
 cmp_json_array_contains_str(const char *json, const char *key, const char *want)
 {
-    const char *v = json_find_key(json, key);
+    return cmp_json_array_contains_str_bounded(json, json + strlen(json), key, want);
+}
+
+int
+cmp_json_array_contains_str_bounded(const char *json, const char *json_end,
+                                    const char *key, const char *want)
+{
+    const char *v = json_find_key_bounded(json, json_end, key);
     if (!v) return 0;
     v = json_skip_ws(v);
-    if (*v != '[') return 0;
+    if (v >= json_end || *v != '[') return 0;
 
     size_t want_len = strlen(want);
     const char *p = v + 1;
     for (;;) {
         p = json_skip_ws(p);
-        if (*p == ']' || *p == '\0') break;
+        if (p >= json_end || *p == ']' || *p == '\0') break;
         if (*p != '"') {
             /* Non-string element (number/bool/null/object/array): skip it
              * whole, tracking brace/bracket depth and string literals so a
              * string inside an object element (e.g. [{"1.0":1}]) can never
              * be mistaken for an array element. */
             int depth = 0, in_str = 0;
-            while (*p && (depth > 0 || (*p != ',' && *p != ']'))) {
+            while (p < json_end && *p && (depth > 0 || (*p != ',' && *p != ']'))) {
                 if (in_str) {
-                    if (*p == '\\' && p[1])
+                    if (*p == '\\' && p + 1 < json_end && p[1])
                         p++;
                     else if (*p == '"')
                         in_str = 0;
@@ -138,18 +145,18 @@ cmp_json_array_contains_str(const char *json, const char *key, const char *want)
         } else {
             const char *start = p + 1;
             const char *e = start;
-            while (*e && *e != '"') {
-                if (*e == '\\' && e[1]) e++;
+            while (e < json_end && *e && *e != '"') {
+                if (*e == '\\' && e + 1 < json_end && e[1]) e++;
                 e++;
             }
-            if (*e != '"') break; /* unterminated string */
+            if (e >= json_end || *e != '"') break; /* unterminated string */
             if ((size_t)(e - start) == want_len && strncmp(start, want, want_len) == 0) {
                 return 1;
             }
             p = e + 1;
         }
         p = json_skip_ws(p);
-        if (*p == ',') {
+        if (p < json_end && *p == ',') {
             p++;
             continue;
         }

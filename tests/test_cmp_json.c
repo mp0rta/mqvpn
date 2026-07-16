@@ -221,6 +221,33 @@ test_array_contains_str(void)
               "supported_protocols", "1.0") == 1);
 }
 
+/* ── 9b. cmp_json_array_contains_str_bounded: bytes at/after json_end are
+ * invisible to both the key lookup and the array scan ── */
+static void
+test_array_contains_str_bounded(void)
+{
+    /* two objects on one line; the span covers only the first */
+    const char *line = "{\"client_name\":\"x\"} {\"supported_protocols\":[\"1.0\"]}";
+    const char *end1 = strchr(line, '}') + 1;
+    CHECK(cmp_json_array_contains_str_bounded(line, end1, "supported_protocols", "1.0") ==
+          0);
+    /* the full line still matches (sanity: the key is really there) */
+    CHECK(cmp_json_array_contains_str_bounded(line, line + strlen(line),
+                                              "supported_protocols", "1.0") == 1);
+
+    /* array truncated by the bound: the wanted element lies past json_end */
+    const char *arr = "{\"supported_protocols\":[\"2.0\",\"1.0\"]}";
+    const char *cut = strstr(arr, ",\"1.0\"");
+    CHECK(cmp_json_array_contains_str_bounded(arr, cut, "supported_protocols", "1.0") ==
+          0);
+    CHECK(cmp_json_array_contains_str_bounded(arr, arr + strlen(arr),
+                                              "supported_protocols", "1.0") == 1);
+
+    /* unbounded wrapper still behaves as before */
+    CHECK(cmp_json_array_contains_str("{\"supported_protocols\":[\"1.0\"]}",
+                                      "supported_protocols", "1.0") == 1);
+}
+
 /* ── 10. cmp_error_code_str: every code maps to a non-NULL wire string ── */
 static void
 test_error_code_str_table(void)
@@ -254,6 +281,7 @@ main(void)
     test_appendf_boundary();
     test_no_raw_newline_in_any_case();
     test_array_contains_str();
+    test_array_contains_str_bounded();
     test_error_code_str_table();
 
     if (g_failed) {

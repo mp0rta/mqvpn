@@ -98,6 +98,7 @@ test_hello_success(void)
              out, sizeof(out));
 
     CHECK(has_substr(out, "\"ok\":true"));
+    CHECK(has_substr(out, "\"protocol\":\"1.0\""));
     CHECK(has_substr(out, "\"endpoint_name\":\"mqvpn-client\""));
     CHECK(has_substr(out, "\"selected_protocol\":\"1.0\""));
     CHECK(has_substr(out, "\"capabilities\":[]"));
@@ -120,7 +121,9 @@ test_version_before_hello_requires_handshake(void)
         out, sizeof(out));
 
     CHECK(has_substr(out, "\"ok\":false"));
+    CHECK(has_substr(out, "\"protocol\":\"1.0\""));
     CHECK(has_substr(out, "\"code\":\"MQVPN_CLIENT_HANDSHAKE_REQUIRED\""));
+    CHECK(has_substr(out, "\"retryable\":false"));
     CHECK(conn.handshake_done == 0);
     check_single_trailing_lf(out);
 }
@@ -139,7 +142,9 @@ test_hello_incompatible_protocol(void)
              out, sizeof(out));
 
     CHECK(has_substr(out, "\"ok\":false"));
+    CHECK(has_substr(out, "\"protocol\":\"1.0\""));
     CHECK(has_substr(out, "\"code\":\"MQVPN_CLIENT_PROTOCOL_INCOMPATIBLE\""));
+    CHECK(has_substr(out, "\"retryable\":false"));
     CHECK(has_substr(out, "\"details\""));
     CHECK(has_substr(out, "\"supported_protocols\":[\"1.0\"]"));
     CHECK(conn.handshake_done == 0);
@@ -372,6 +377,121 @@ test_response_too_large_fallback(void)
     CHECK(strlen(out) < sizeof(out));
     CHECK(has_substr(out, "\"code\":\"MQVPN_CLIENT_RESPONSE_TOO_LARGE\""));
     CHECK(has_substr(out, "\"ok\":false"));
+    CHECK(has_substr(out, "\"protocol\":\"1.0\""));
+    check_single_trailing_lf(out);
+}
+
+/* ── O. nested "method" inside params must not shadow the top-level one ──
+ * Regression: json_find_key's flat text scan used to pick up
+ * params.method ("system.hello") and dispatch it. The top-level method is
+ * system.ping — before handshake that must yield HANDSHAKE_REQUIRED and
+ * must NOT run the hello handler. */
+static void
+test_nested_method_key_ignored(void)
+{
+    mgmt_ctx_t ctx = make_ctx();
+    mgmt_conn_t conn = make_conn();
+    char out[CMP_MAX_RESPONSE_BYTES];
+
+    dispatch(&ctx, &conn,
+             "{\"id\":1,\"protocol\":\"1.0\","
+             "\"params\":{\"method\":\"system.hello\","
+             "\"supported_protocols\":[\"1.0\"]},"
+             "\"method\":\"system.ping\"}",
+             out, sizeof(out));
+
+    CHECK(has_substr(out, "\"ok\":false"));
+    CHECK(has_substr(out, "\"code\":\"MQVPN_CLIENT_HANDSHAKE_REQUIRED\""));
+    CHECK(!has_substr(out, "endpoint_name")); /* hello handler did not run */
+    CHECK(conn.handshake_done == 0);
+    check_single_trailing_lf(out);
+}
+
+/* ── P. nested "id" inside a sibling object must not shadow the real id ── */
+static void
+test_nested_id_key_ignored(void)
+{
+    mgmt_ctx_t ctx = make_ctx();
+    mgmt_conn_t conn = make_conn();
+    char out[CMP_MAX_RESPONSE_BYTES];
+
+    dispatch(&ctx, &conn,
+             "{\"id\":1,\"protocol\":\"1.0\",\"method\":\"system.hello\","
+             "\"params\":{\"supported_protocols\":[\"1.0\"]}}",
+             out, sizeof(out));
+    CHECK(conn.handshake_done == 1);
+
+    dispatch(&ctx, &conn,
+             "{\"a\":{\"id\":777},\"id\":2,\"protocol\":\"1.0\","
+             "\"method\":\"system.ping\",\"params\":{}}",
+             out, sizeof(out));
+    CHECK(has_substr(out, "\"ok\":true"));
+    CHECK(has_substr(out, "\"id\":2"));
+    CHECK(!has_substr(out, "777"));
+    check_single_trailing_lf(out);
+}
+
+/* ── Q. supported_protocols lookup is bounded to the params object ──
+ * Regression: a second JSON object trailing the request on the same line
+ * used to satisfy the unbounded supported_protocols search. */
+static void
+test_params_search_bounded_to_request(void)
+{
+    mgmt_ctx_t ctx = make_ctx();
+    mgmt_conn_t conn = make_conn();
+    char out[CMP_MAX_RESPONSE_BYTES];
+
+    dispatch(&ctx, &conn,
+             "{\"id\":1,\"protocol\":\"1.0\",\"method\":\"system.hello\","
+             "\"params\":{\"client_name\":\"x\"}} "
+             "{\"supported_protocols\":[\"1.0\"]}",
+             out, sizeof(out));
+
+    CHECK(has_substr(out, "\"ok\":false"));
+    CHECK(has_substr(out, "\"code\":\"MQVPN_CLIENT_PROTOCOL_INCOMPATIBLE\""));
+    CHECK(conn.handshake_done == 0);
+    check_single_trailing_lf(out);
+}
+
+/* ── R. result-buffer overflow guard: oversized endpoint_version with a
+ * LARGE out_cap must yield a clean INTERNAL_ERROR response, never a spliced
+ * truncated result fragment ── */
+static void
+test_result_overflow_internal_error(void)
+{
+    static char huge_version[3001];
+    memset(huge_version, 'a', sizeof(huge_version) - 1);
+    huge_version[sizeof(huge_version) - 1] = '\0';
+
+    mgmt_ctx_t ctx = make_ctx();
+    ctx.endpoint_version = huge_version;
+    mgmt_conn_t conn = make_conn();
+    char out[CMP_MAX_RESPONSE_BYTES];
+
+    dispatch(&ctx, &conn,
+             "{\"id\":1,\"protocol\":\"1.0\",\"method\":\"system.hello\","
+             "\"params\":{\"supported_protocols\":[\"1.0\"]}}",
+             out, sizeof(out));
+
+    CHECK(has_substr(out, "\"ok\":false"));
+    CHECK(has_substr(out, "\"code\":\"MQVPN_CLIENT_INTERNAL_ERROR\""));
+    CHECK(!has_substr(out, "endpoint_name")); /* no truncated fragment */
+    CHECK(!has_substr(out, "aaaa"));
+    check_single_trailing_lf(out);
+}
+
+/* ── S. method field that is not a string (number) ── */
+static void
+test_method_as_number(void)
+{
+    mgmt_ctx_t ctx = make_ctx();
+    mgmt_conn_t conn = make_conn();
+    char out[CMP_MAX_RESPONSE_BYTES];
+
+    dispatch(&ctx, &conn, "{\"id\":1,\"protocol\":\"1.0\",\"method\":123,\"params\":{}}",
+             out, sizeof(out));
+    CHECK(has_substr(out, "\"ok\":false"));
+    CHECK(has_substr(out, "\"code\":\"MQVPN_CLIENT_INVALID_ARGUMENT\""));
     check_single_trailing_lf(out);
 }
 
@@ -391,6 +511,11 @@ main(void)
     test_missing_required_fields();
     test_quote_in_endpoint_version_escaped();
     test_response_too_large_fallback();
+    test_nested_method_key_ignored();
+    test_nested_id_key_ignored();
+    test_params_search_bounded_to_request();
+    test_result_overflow_internal_error();
+    test_method_as_number();
 
     if (g_failed) {
         fprintf(stderr, "%d check(s) failed\n", g_failed);

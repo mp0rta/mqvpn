@@ -29,6 +29,9 @@ typedef struct {
 /* Process one request line (no LF/CR) and write exactly one response line
  * (trailing LF included) to out. Always returns 0 and always produces a
  * response for any input (never crashing is the contract).
+ * Caller contract: `line` MUST be NUL-terminated at line[len] (the json_mini
+ * helpers walk C strings); `len` is the string length. evbuffer_readln and
+ * the CLI both naturally provide this.
  * Requires out_cap >= CMP_MIN_RESPONSE_BUF (256 — the fixed short
  * RESPONSE_TOO_LARGE fallback always fits; defined in cmp_types.h). If the
  * real response does not fit in out_cap, it is replaced by that fallback.
