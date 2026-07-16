@@ -137,4 +137,22 @@ check(ServerSettings.serverKeysPresent(in: ["serverPort": "not-a-number"]) == tr
 check(ServerSettings.serverKeysPresent(in: ["reorderEnabled": NSNumber(value: true)]) == false, "only reorder keys → absent")
 check(ServerSettings.serverKeysPresent(in: nil) == false, "nil dict → absent")
 
+// ── resolveServer (offline) ──
+// Shared assertion: AF_INET, big-endian port, exact sockaddr_in length.
+func check4(_ r: ResolvedServerAddress?, _ port: UInt16, _ label: String) {
+    guard let r else { check(false, "\(label): returned nil"); return }
+    var sa = r.storage
+    let ok = withUnsafeBytes(of: &sa) { raw -> Bool in
+        let sin = raw.baseAddress!.assumingMemoryBound(to: sockaddr_in.self).pointee
+        return sin.sin_family == sa_family_t(AF_INET)
+            && sin.sin_port == in_port_t(port.bigEndian)
+            && r.len == socklen_t(MemoryLayout<sockaddr_in>.size)
+    }
+    check(ok, label)
+}
+check4(resolveServer("127.0.0.1", 443), 443, "resolve IP literal 127.0.0.1:443")
+check4(resolveServer("localhost", 8080), 8080, "resolve hostname localhost:8080")  // /etc/hosts, offline; proves the name (non-literal) path + port propagation
+check(resolveServer("", 443) == nil, "empty host → nil")       // Optional<T> == nil compiles for any T
+check(resolveServer("   ", 443) == nil, "whitespace host → nil")
+
 if failures == 0 { print("host tests: ALL PASS") } else { print("host tests: \(failures) FAILURES"); exit(1) }

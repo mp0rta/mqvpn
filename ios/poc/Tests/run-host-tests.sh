@@ -14,6 +14,7 @@ trap 'rm -rf "$TMPD"' EXIT
 swiftc -o "$OUT" \
     "$SHARED/PoCConfig.swift" \
     "$SHARED/ServerSettings.swift" \
+    "$SHARED/ServerResolve.swift" \
     "$SHARED/ReorderSettings.swift" \
     "$SHARED/ProviderMessage.swift" \
     "$APP/ReorderIngest.swift" \
