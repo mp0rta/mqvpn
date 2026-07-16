@@ -240,10 +240,13 @@ mgmt_dispatch_request(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *line
 
     uint64_t id = 0;
     int has_id = 0;
+    /* Error code of the response being written; returned to the caller so
+     * the socket layer can log without re-parsing the response. */
+    cmp_error_code_t rc = CMP_E_OK;
 
     if (!obj_end) {
-        mgmt_write_error(&out_buf, 0, 0, CMP_E_INVALID_ARGUMENT, "malformed JSON request",
-                         NULL, 0);
+        rc = CMP_E_INVALID_ARGUMENT;
+        mgmt_write_error(&out_buf, 0, 0, rc, "malformed JSON request", NULL, 0);
         goto finalize;
     }
 
@@ -256,8 +259,8 @@ mgmt_dispatch_request(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *line
         }
     }
     if (!has_id) {
-        mgmt_write_error(&out_buf, 0, 0, CMP_E_INVALID_ARGUMENT, "missing or invalid id",
-                         NULL, 0);
+        rc = CMP_E_INVALID_ARGUMENT;
+        mgmt_write_error(&out_buf, 0, 0, rc, "missing or invalid id", NULL, 0);
         goto finalize;
     }
 
@@ -267,7 +270,8 @@ mgmt_dispatch_request(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *line
         const char *paramsv = find_key_depth1(p, obj_end, "params");
 
         if (!protov || !methodv || !paramsv) {
-            mgmt_write_error(&out_buf, id, 1, CMP_E_INVALID_ARGUMENT,
+            rc = CMP_E_INVALID_ARGUMENT;
+            mgmt_write_error(&out_buf, id, 1, rc,
                              "missing required field (protocol/method/params)", NULL, 0);
             goto finalize;
         }
@@ -275,29 +279,30 @@ mgmt_dispatch_request(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *line
         /* params must be an object; its end bounds every handler lookup. */
         const char *params_close = json_object_end(paramsv);
         if (*paramsv != '{' || !params_close) {
-            mgmt_write_error(&out_buf, id, 1, CMP_E_INVALID_ARGUMENT,
-                             "params must be an object", NULL, 0);
+            rc = CMP_E_INVALID_ARGUMENT;
+            mgmt_write_error(&out_buf, id, 1, rc, "params must be an object", NULL, 0);
             goto finalize;
         }
         const char *params_end = params_close + 1;
 
         char method_name[64];
         if (json_read_string(methodv, method_name, sizeof(method_name)) != 0) {
-            mgmt_write_error(&out_buf, id, 1, CMP_E_INVALID_ARGUMENT,
-                             "invalid method field", NULL, 0);
+            rc = CMP_E_INVALID_ARGUMENT;
+            mgmt_write_error(&out_buf, id, 1, rc, "invalid method field", NULL, 0);
             goto finalize;
         }
 
         const mgmt_method_t *m = find_method(method_name);
         if (!m) {
-            mgmt_write_error(&out_buf, id, 1, CMP_E_METHOD_NOT_FOUND, "unknown method",
-                             NULL, 0);
+            rc = CMP_E_METHOD_NOT_FOUND;
+            mgmt_write_error(&out_buf, id, 1, rc, "unknown method", NULL, 0);
             goto finalize;
         }
 
         if (m->requires_handshake && !conn->handshake_done) {
-            mgmt_write_error(&out_buf, id, 1, CMP_E_HANDSHAKE_REQUIRED,
-                             "handshake required before this method", NULL, 0);
+            rc = CMP_E_HANDSHAKE_REQUIRED;
+            mgmt_write_error(&out_buf, id, 1, rc, "handshake required before this method",
+                             NULL, 0);
             goto finalize;
         }
 
@@ -317,14 +322,16 @@ mgmt_dispatch_request(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *line
         m->fn(ctx, conn, paramsv, params_end, &result_buf, &res);
 
         if (res.code != CMP_E_OK) {
+            rc = res.code;
             mgmt_write_error(&out_buf, id, 1, res.code, res.message, res.details_json,
                              res.retryable);
             goto finalize;
         }
 
         if (result_buf.overflow) {
-            mgmt_write_error(&out_buf, id, 1, CMP_E_INTERNAL_ERROR,
-                             "internal result buffer overflow", NULL, 0);
+            rc = CMP_E_INTERNAL_ERROR;
+            mgmt_write_error(&out_buf, id, 1, rc, "internal result buffer overflow", NULL,
+                             0);
             goto finalize;
         }
 
@@ -344,6 +351,7 @@ finalize:
      * tests). No id: whatever was written above may itself be why out_buf
      * overflowed, so it cannot be trusted to recover one. */
     if (out_buf.overflow) {
+        rc = CMP_E_RESPONSE_TOO_LARGE;
         cmp_buf_init(&out_buf, out, out_cap);
         cmp_buf_appendf(&out_buf,
                         "{\"protocol\":\"%s\",\"ok\":false,\"error\":{\"code\":\"%s\","
@@ -352,5 +360,5 @@ finalize:
                         CMP_PROTOCOL_VERSION,
                         cmp_error_code_str(CMP_E_RESPONSE_TOO_LARGE));
     }
-    return 0;
+    return (int)rc;
 }

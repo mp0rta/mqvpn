@@ -110,21 +110,37 @@ mgmt_conn_free(mgmt_conn_impl_t *c)
 
 /* ── oversized-request rejection ─────────────────────────────────────────── */
 
+static void mgmt_on_event(struct bufferevent *bev, short events, void *arg);
+
+/* While a rejected connection is being torn down, keep reading and
+ * discarding whatever the peer sends. Unread bytes (userspace or kernel
+ * receive queue) at close() time would make the kernel emit RST, and the
+ * peer would see ECONNRESET instead of error-line-then-EOF. */
 static void
-mgmt_on_write_drained_close(struct bufferevent *bev, void *arg)
+mgmt_on_read_discard(struct bufferevent *bev, void *arg)
+{
+    (void)arg;
+    evbuffer_drain(bufferevent_get_input(bev), (size_t)-1);
+}
+
+/* Error line fully flushed: send a clean FIN via shutdown(SHUT_WR) and wait
+ * for the peer's EOF (or the 5s timeout) in mgmt_on_event before freeing —
+ * an immediate close() could still race bytes in flight into an RST. */
+static void
+mgmt_on_write_drained_shutdown(struct bufferevent *bev, void *arg)
 {
     mgmt_conn_impl_t *c = (mgmt_conn_impl_t *)arg;
     if (evbuffer_get_length(bufferevent_get_output(bev)) == 0) {
-        mgmt_conn_free(c);
+        shutdown(bufferevent_getfd(bev), SHUT_WR);
+        bufferevent_setcb(bev, mgmt_on_read_discard, NULL, mgmt_on_event, c);
     }
 }
 
-static void mgmt_on_event(struct bufferevent *bev, short events, void *arg);
-
 /* Reject a request that is (or would become, once fully buffered) larger
  * than CMP_MAX_REQUEST_BYTES: write a fixed error line (no id — we may not
- * have parsed one), stop reading, and free the connection once the write
- * has fully drained. */
+ * have parsed one), then FIN-then-EOF teardown (see the callbacks above).
+ * The 5s timeout bounds a peer that never reads/closes; the pre-handshake
+ * timeout set at accept may already have been cleared, so re-arm it. */
 static void
 mgmt_reject_oversized(mgmt_conn_impl_t *c)
 {
@@ -137,10 +153,13 @@ mgmt_reject_oversized(mgmt_conn_impl_t *c)
     LOG_WRN("mgmt ipc: rejecting oversized request (> %d bytes), closing connection",
             CMP_MAX_REQUEST_BYTES);
 
-    bufferevent_disable(c->bev, EV_READ);
-    bufferevent_setcb(c->bev, NULL, mgmt_on_write_drained_close, mgmt_on_event, c);
+    evbuffer_drain(bufferevent_get_input(c->bev), (size_t)-1);
+    bufferevent_setcb(c->bev, mgmt_on_read_discard, mgmt_on_write_drained_shutdown,
+                      mgmt_on_event, c);
+    struct timeval tv = {.tv_sec = MGMT_HANDSHAKE_TIMEOUT_S};
+    bufferevent_set_timeouts(c->bev, &tv, NULL);
     bufferevent_write(c->bev, buf, strlen(buf));
-    bufferevent_enable(c->bev, EV_WRITE);
+    bufferevent_enable(c->bev, EV_READ | EV_WRITE);
 }
 
 /* ── read / event callbacks ──────────────────────────────────────────────── */
@@ -181,8 +200,14 @@ mgmt_on_read(struct bufferevent *bev, void *arg)
             n--;
         }
 
-        mgmt_dispatch_request(ms->ctx, &c->mconn, line, n, ms->scratch,
-                              CMP_MAX_RESPONSE_BYTES);
+        int rc = mgmt_dispatch_request(ms->ctx, &c->mconn, line, n, ms->scratch,
+                                       CMP_MAX_RESPONSE_BYTES);
+        /* Warn only for malformed/invalid requests (spec: "invalid request"
+         * is logged). Other error codes (HANDSHAKE_REQUIRED,
+         * METHOD_NOT_FOUND, ...) are normal protocol-level replies. */
+        if (rc == (int)CMP_E_INVALID_ARGUMENT) {
+            LOG_WRN("mgmt ipc: invalid request from client");
+        }
         bufferevent_write(bev, ms->scratch, strlen(ms->scratch));
         free(line);
 
@@ -202,8 +227,10 @@ mgmt_on_event(struct bufferevent *bev, short events, void *arg)
     (void)bev;
     mgmt_conn_impl_t *c = (mgmt_conn_impl_t *)arg;
 
+    /* Fires for the pre-handshake read timeout and for a rejected peer that
+     * never reads/closes (mgmt_reject_oversized re-arms the same timeout). */
     if (events & BEV_EVENT_TIMEOUT) {
-        LOG_WRN("mgmt ipc: pre-handshake read timeout, closing connection");
+        LOG_WRN("mgmt ipc: read timeout, closing connection");
         mgmt_conn_free(c);
         return;
     }

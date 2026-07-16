@@ -51,14 +51,14 @@ make_conn(void)
 }
 
 /* Runs mgmt_dispatch_request into a CMP_MAX_RESPONSE_BYTES-sized scratch
- * buffer (the normal-caller size) and returns 0. `out` must be at least
- * that large. */
-static void
+ * buffer (the normal-caller size) and returns its return value (the
+ * response's cmp_error_code_t; CMP_E_OK for ok:true responses). `out` must
+ * be at least that large. */
+static int
 dispatch(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *line, char *out,
          size_t out_cap)
 {
-    int rc = mgmt_dispatch_request(ctx, conn, line, strlen(line), out, out_cap);
-    CHECK(rc == 0);
+    return mgmt_dispatch_request(ctx, conn, line, strlen(line), out, out_cap);
 }
 
 /* ── helpers to sanity-check the envelope shape ── */
@@ -91,12 +91,13 @@ test_hello_success(void)
     mgmt_conn_t conn = make_conn();
     char out[CMP_MAX_RESPONSE_BYTES];
 
-    dispatch(&ctx, &conn,
-             "{\"id\":1,\"protocol\":\"1.0\",\"method\":\"system.hello\","
-             "\"params\":{\"client_name\":\"t\",\"client_version\":\"0\","
-             "\"supported_protocols\":[\"1.0\"]}}",
-             out, sizeof(out));
+    int rc = dispatch(&ctx, &conn,
+                      "{\"id\":1,\"protocol\":\"1.0\",\"method\":\"system.hello\","
+                      "\"params\":{\"client_name\":\"t\",\"client_version\":\"0\","
+                      "\"supported_protocols\":[\"1.0\"]}}",
+                      out, sizeof(out));
 
+    CHECK(rc == (int)CMP_E_OK);
     CHECK(has_substr(out, "\"ok\":true"));
     CHECK(has_substr(out, "\"protocol\":\"1.0\""));
     CHECK(has_substr(out, "\"endpoint_name\":\"mqvpn-client\""));
@@ -266,7 +267,8 @@ test_malformed_json_no_id(void)
     mgmt_conn_t conn = make_conn();
     char out[CMP_MAX_RESPONSE_BYTES];
 
-    dispatch(&ctx, &conn, "{oops", out, sizeof(out));
+    int rc = dispatch(&ctx, &conn, "{oops", out, sizeof(out));
+    CHECK(rc == (int)CMP_E_INVALID_ARGUMENT);
     CHECK(has_substr(out, "\"ok\":false"));
     CHECK(has_substr(out, "\"code\":\"MQVPN_CLIENT_INVALID_ARGUMENT\""));
     CHECK(!has_substr(out, "\"id\":"));
@@ -373,7 +375,7 @@ test_response_too_large_fallback(void)
         strlen("{\"id\":1,\"protocol\":\"1.0\",\"method\":\"system.hello\","
                "\"params\":{\"supported_protocols\":[\"1.0\"]}}"),
         out, sizeof(out));
-    CHECK(rc == 0);
+    CHECK(rc == (int)CMP_E_RESPONSE_TOO_LARGE);
     CHECK(strlen(out) < sizeof(out));
     CHECK(has_substr(out, "\"code\":\"MQVPN_CLIENT_RESPONSE_TOO_LARGE\""));
     CHECK(has_substr(out, "\"ok\":false"));
