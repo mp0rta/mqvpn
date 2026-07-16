@@ -17,7 +17,9 @@ for f in "$TESTS_DIR"/test_*.c; do
     # Bare assert(<non-empty-args>) call site, excluding _Static_assert(...)
     # and comment mentions of the empty-arg form "assert()".
     if grep -qE '\bassert\([^)]' "$f"; then
-        if ! grep -q '#undef NDEBUG' "$f"; then
+        # Anchored to a real preprocessor directive at line start, so a
+        # commented-out "/* #undef NDEBUG */" cannot satisfy the gate.
+        if ! grep -qE '^[[:space:]]*#[[:space:]]*undef[[:space:]]+NDEBUG' "$f"; then
             echo "FAIL: $f uses assert() but is missing '#undef NDEBUG'" >&2
             fail=1
         fi
