@@ -664,6 +664,25 @@ target_link_libraries(mqvpn
     stdc++
 )
 
+# ---------- mqvpnctl: management CLI ----------
+# Standalone Client Management Protocol (CMP) client. Deliberately must not
+# link mqvpn_lib / xquic / libevent (machine-verified by
+# scripts/ci_e2e/run_client_mgmt_ipc_phase1_test.sh, T9) — it only needs
+# libmqvpn.h for the MQVPN_VERSION_* macros (a header include, not a link
+# dependency) plus the OS-neutral cmp_json/cmp_error helpers.
+add_executable(mqvpnctl
+    src/cli/ctl_main.c
+    src/cli/ctl_ipc.c
+    src/common/ipc/cmp_json.c
+    src/common/ipc/cmp_error.c
+)
+target_include_directories(mqvpnctl PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/cli
+    ${CMAKE_SOURCE_DIR}/src/common/ipc
+    ${CMAKE_SOURCE_DIR}/include
+)
+
 # ---------- Tests ----------
 option(BUILD_TESTING "Build unit tests" ON)
 if(BUILD_TESTING)
@@ -900,6 +919,7 @@ endif()
 
 # ---------- Install ----------
 install(TARGETS mqvpn DESTINATION bin)
+install(TARGETS mqvpnctl DESTINATION bin)
 install(TARGETS mqvpn_lib DESTINATION lib)
 install(TARGETS mqvpn_shared DESTINATION lib)
 # Bundle xquic shared library (no standalone deb exists)
