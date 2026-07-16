@@ -127,6 +127,7 @@ jobs:
           name: build
           path: |
             build/mqvpn
+            build/mqvpnctl
             build/libmqvpn.a
             build/libmqvpn.so*
             build/libxquic.so
@@ -570,8 +571,8 @@ jobs:
           name: build
           path: build
 
-      - name: Make binary executable
-        run: chmod +x build/mqvpn
+      - name: Make binaries executable
+        run: chmod +x build/mqvpn build/mqvpnctl
 
       - name: Restore libxquic.so for cmake install
         run: |
