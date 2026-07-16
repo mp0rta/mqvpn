@@ -211,6 +211,12 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: cd build && ctest --output-on-failure
 
+      - name: Client management IPC integration test (mqvpnctl, no sudo/netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: scripts/ci_e2e/run_client_mgmt_ipc_phase1_test.sh build
+
       - name: Fuzz tcp_lane (short budget)
         run: |
           mkdir -p build-fuzz && cd build-fuzz
