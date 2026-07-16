@@ -15,6 +15,8 @@
 #   T7  4 pipelined requests on one persistent connection, ids in order
 #   T8a raw hello with an unsupported protocol -> PROTOCOL_INCOMPATIBLE
 #   T8b `mqvpnctl version` against an incompatible endpoint -> exit 9
+#   T8c response + trailing junk line in one send() burst -> still exit 0
+#       (regression: recv_line compaction must not alias the returned line)
 #   T9  mqvpnctl links neither libmqvpn, xquic, nor libevent
 #   T10 two concurrent `mqvpnctl version` invocations both succeed
 #   T11 `mqvpnctl --timeout 1 version` against a silent endpoint -> exit 8
@@ -364,18 +366,95 @@ test_t8b() {
 }
 run_test "T8b mqvpnctl version vs incompatible endpoint -> exit 9" test_t8b
 
+# ── T8c ─────────────────────────────────────────────────────────────────
+# Regression pin for the recv_line compaction-aliasing bug: a peer that
+# bursts the real response plus a junk second line into one send() must not
+# corrupt the line handed back to the parser (the CLI used to see the junk
+# overlap and exit 9 "malformed response" instead of 0).
+FAKE_BURST_PY="${TMPD}/fake_burst.py"
+cat >"${FAKE_BURST_PY}" <<'PYEOF'
+import socket, sys, os, time, json
+
+sock_path = sys.argv[1]
+if os.path.exists(sock_path):
+    os.remove(sock_path)
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind(sock_path)
+s.listen(1)
+conn, _ = s.accept()
+
+def read_line():
+    buf = b""
+    while not buf.endswith(b"\n"):
+        chunk = conn.recv(65536)
+        if not chunk:
+            sys.exit(0)
+        buf += chunk
+    return json.loads(buf.decode())
+
+req = read_line()  # system.hello
+hello = json.dumps({
+    "id": req["id"], "protocol": "1.0", "ok": True,
+    "result": {"endpoint_name": "mqvpn-client",
+               "endpoint_version": "host-test-1.0",
+               "selected_protocol": "1.0", "capabilities": []},
+}) + "\n"
+conn.sendall(hello.encode())
+
+req = read_line()  # system.version
+ver = json.dumps({
+    "id": req["id"], "protocol": "1.0", "ok": True,
+    "result": {"version": "host-test-1.0"},
+}) + "\n"
+# The point of the test: real response + junk line in ONE burst.
+conn.sendall(ver.encode() + b'{"this":"is junk trailing data"}\n')
+time.sleep(30)  # keep the connection open; the CLI closes its side
+PYEOF
+
+test_t8c() {
+    local sock="${TMPD}/fake_burst.sock"
+    local pid
+    python3 "${FAKE_BURST_PY}" "${sock}" &
+    pid=$!
+    BG_PIDS+=("${pid}")
+    wait_for_socket "${sock}" 5 || { echo "  fake endpoint never bound"; return 1; }
+
+    local out rc
+    out="$("${MQVPNCTL}" --endpoint "unix://${sock}" version 2>&1)"
+    rc=$?
+    echo "${out}"
+    kill "${pid}" >/dev/null 2>&1
+    [[ ${rc} -eq 0 ]] || { echo "  expected exit 0, got ${rc}"; return 1; }
+    [[ "${out}" == *"host-test-1.0"* ]] || { echo "  missing correct version"; return 1; }
+}
+run_test "T8c two-line send burst does not corrupt the response" test_t8c
+
 # ── T9 ──────────────────────────────────────────────────────────────────
 test_t9() {
-    local ldd_out leak_count
+    local ldd_out
     ldd_out="$(ldd "${MQVPNCTL}")"
     echo "${ldd_out}"
     if echo "${ldd_out}" | grep -Eq 'libmqvpn|libxquic|libevent'; then
         echo "  ldd shows a forbidden dependency"
         return 1
     fi
-    leak_count="$(nm "${MQVPNCTL}" 2>/dev/null | grep -c 'mqvpn_client_\|xqc_')"
-    echo "  static-link leak symbol count: ${leak_count}"
-    [[ "${leak_count}" -eq 0 ]]
+
+    # Guard against a stripped binary silently passing the symbol checks:
+    # nm output must be non-empty overall before the leak greps mean anything.
+    local nm_total
+    nm_total="$(nm "${MQVPNCTL}" 2>/dev/null | wc -l)"
+    echo "  nm symbol count: ${nm_total}"
+    if [[ "${nm_total}" -eq 0 ]]; then
+        echo "  nm output empty (stripped binary?) — symbol check inconclusive"
+        return 1
+    fi
+
+    local defined_leaks undef_leaks
+    defined_leaks="$(nm --defined-only "${MQVPNCTL}" 2>/dev/null \
+        | grep -c 'mqvpn_client_\|xqc_')"
+    undef_leaks="$(nm -u "${MQVPNCTL}" 2>/dev/null | grep -c 'mqvpn_client_\|xqc_')"
+    echo "  static-link leak symbols: defined=${defined_leaks} undefined=${undef_leaks}"
+    [[ "${defined_leaks}" -eq 0 && "${undef_leaks}" -eq 0 ]]
 }
 run_test "T9 mqvpnctl links neither libmqvpn/xquic/libevent" test_t9
 
@@ -420,6 +499,7 @@ test_t11() {
     BG_PIDS+=("${pid}")
     wait_for_socket "${sock}" 5 || { echo "  fake endpoint never bound"; return 1; }
 
+    # --timeout takes seconds: 1s override on every per-request timeout.
     local out rc start end elapsed
     start=$(date +%s%N)
     out="$(timeout 3 "${MQVPNCTL}" --endpoint "unix://${sock}" --timeout 1 version 2>&1)"
@@ -462,6 +542,10 @@ test_t13() {
 
     local sock="${TMPD}/t13.sock"
     local pid
+    # mktemp -d creates 0700 dirs; open the directory up so `nobody` can
+    # traverse to the socket — the test must exercise the socket's own mode,
+    # not directory-permission denial.
+    chmod 755 "${TMPD}"
     pid="$(start_host "${sock}")"
     wait_for_socket "${sock}" 5 || { echo "  host never bound"; return 1; }
     # Default mode (0660, root:root) — connecting as an unrelated

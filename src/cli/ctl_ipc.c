@@ -84,18 +84,28 @@ ctl_connect(ctl_conn_t *c, const char *endpoint, int timeout_ms, char *err, size
     if (rc < 0) {
         /* EINPROGRESS: wait for the connect to complete. POLLOUT fires on
          * both success and failure — SO_ERROR is the only way to tell them
-         * apart; skipping it would treat e.g. ECONNREFUSED as success. */
+         * apart; skipping it would treat e.g. ECONNREFUSED as success.
+         * EINTR retries recompute the remaining time from an absolute
+         * deadline (same pattern as send_all / recv_line), so signals
+         * cannot stretch the overall connect window. */
+        struct timespec dl;
+        deadline_set(&dl, op_timeout);
         struct pollfd pfd = {.fd = fd, .events = POLLOUT};
-        int pr = poll(&pfd, 1, op_timeout);
-        if (pr == 0) {
-            snprintf(err, errlen, "connect(%s): timed out", endpoint);
-            close(fd);
-            return CTL_E_TIMEOUT;
-        }
-        if (pr < 0) {
-            snprintf(err, errlen, "poll(): %s", strerror(errno));
-            close(fd);
-            return CTL_E_UNAVAILABLE;
+        for (;;) {
+            int remain = deadline_remaining_ms(&dl);
+            int pr = remain > 0 ? poll(&pfd, 1, remain) : 0;
+            if (pr == 0) {
+                snprintf(err, errlen, "connect(%s): timed out", endpoint);
+                close(fd);
+                return CTL_E_TIMEOUT;
+            }
+            if (pr < 0) {
+                if (errno == EINTR) continue;
+                snprintf(err, errlen, "poll(): %s", strerror(errno));
+                close(fd);
+                return CTL_E_UNAVAILABLE;
+            }
+            break;
         }
 
         int soerr = 0;
@@ -166,10 +176,15 @@ send_all(int fd, const char *buf, size_t len, const struct timespec *dl, char *e
 }
 
 /* poll(POLLIN)-guarded recv loop that fills c->rbuf until a LF appears,
- * then hands back a NUL-terminated line (LF stripped) and compacts any
- * remaining buffered bytes to the front of c->rbuf. */
+ * then copies the line (LF stripped, NUL-terminated) into `out` and only
+ * AFTER that compacts any remaining buffered bytes to the front of c->rbuf.
+ * The copy-before-compact order matters: when a peer bursts two lines into
+ * one segment, compaction slides the second line over the first — a caller
+ * still holding a pointer into rbuf would read the overlap (that aliasing
+ * bug shipped once; the burst regression test in
+ * run_client_mgmt_ipc_phase1_test.sh pins the fix). */
 static int
-recv_line(ctl_conn_t *c, const struct timespec *dl, char **out_line, char *err,
+recv_line(ctl_conn_t *c, const struct timespec *dl, char *out, size_t out_cap, char *err,
           size_t errlen)
 {
     struct pollfd pfd = {.fd = c->fd, .events = POLLIN};
@@ -177,9 +192,17 @@ recv_line(ctl_conn_t *c, const struct timespec *dl, char **out_line, char *err,
     for (;;) {
         char *nl = memchr(c->rbuf, '\n', c->rlen);
         if (nl) {
-            *nl = '\0';
-            *out_line = c->rbuf;
-            size_t consumed = (size_t)(nl - c->rbuf) + 1;
+            size_t linelen = (size_t)(nl - c->rbuf);
+            if (linelen >= out_cap) {
+                snprintf(err, errlen, "response too large for caller buffer (%zu bytes)",
+                         linelen);
+                c->rlen = 0;
+                return CTL_E_PROTOCOL;
+            }
+            memcpy(out, c->rbuf, linelen);
+            out[linelen] = '\0';
+
+            size_t consumed = linelen + 1;
             size_t remaining = c->rlen - consumed;
             if (remaining > 0) {
                 memmove(c->rbuf, c->rbuf + consumed, remaining);
@@ -256,17 +279,8 @@ ctl_do_request(ctl_conn_t *c, const char *method, const char *params_json, int t
     if (rc != CTL_OK) return rc;
 
     for (;;) {
-        char *line;
-        rc = recv_line(c, &dl, &line, err, errlen);
+        rc = recv_line(c, &dl, resp, resp_cap, err, errlen);
         if (rc != CTL_OK) return rc;
-
-        size_t linelen = strlen(line);
-        if (linelen >= resp_cap) {
-            snprintf(err, errlen, "response too large for caller buffer (%zu bytes)",
-                     linelen);
-            return CTL_E_PROTOCOL;
-        }
-        memcpy(resp, line, linelen + 1);
 
         uint64_t rid = 0;
         int has_rid = 0;

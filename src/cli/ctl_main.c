@@ -34,7 +34,7 @@ usage(FILE *out, const char *argv0)
             "  version   show CLI and management-endpoint versions\n"
             "options:\n"
             "  --endpoint EP   management socket path (unix:// prefix optional)\n"
-            "  --timeout N     override all per-request timeouts, in milliseconds\n"
+            "  --timeout N     override all per-request timeouts, in seconds\n"
             "  --json          machine-readable output\n"
             "  -h, --help      show this help\n",
             argv0);
@@ -163,17 +163,26 @@ main(int argc, char **argv)
     const char *command = NULL;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--endpoint") == 0 && i + 1 < argc) {
-            cli_endpoint = argv[++i];
-        } else if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc) {
+        if (strcmp(argv[i], "--endpoint") == 0 || strcmp(argv[i], "--timeout") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "missing argument for %s\n", argv[i]);
+                usage(stderr, argv[0]);
+                return 2;
+            }
+            if (argv[i][2] == 'e') { /* --endpoint */
+                cli_endpoint = argv[++i];
+                continue;
+            }
+            /* --timeout: seconds on the CLI surface (spec §25); converted
+             * to milliseconds internally (ctl_ipc.h works in ms). */
             char *end = NULL;
             long v = strtol(argv[++i], &end, 10);
-            if (end == argv[i] || *end != '\0' || v <= 0 || v > INT_MAX) {
-                fprintf(stderr, "invalid --timeout (positive integer milliseconds): %s\n",
+            if (end == argv[i] || *end != '\0' || v <= 0 || v > INT_MAX / 1000) {
+                fprintf(stderr, "invalid --timeout (positive integer seconds): %s\n",
                         argv[i]);
                 return 2;
             }
-            timeout_ms = (int)v;
+            timeout_ms = (int)(v * 1000);
         } else if (strcmp(argv[i], "--json") == 0) {
             json_out = 1;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {

@@ -53,7 +53,8 @@ typedef struct {
     size_t rlen;
     uint64_t next_id;
     /* 0 == use the per-operation defaults above; non-zero overrides all of
-     * them (set from --timeout N). */
+     * them (set from --timeout N, which is seconds on the CLI surface;
+     * ctl_main.c converts to ms before it reaches here). */
     int timeout_ms;
 } ctl_conn_t;
 
