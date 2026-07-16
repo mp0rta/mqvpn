@@ -15,6 +15,7 @@
 
 #include <event2/event.h>
 
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,7 +53,15 @@ main(int argc, char **argv)
 
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
-            mode = (mode_t)strtoul(argv[++i], NULL, 8);
+            const char *arg = argv[++i];
+            char *end = NULL;
+            errno = 0;
+            unsigned long v = strtoul(arg, &end, 8);
+            if (errno != 0 || end == arg || *end != '\0' || v > 07777) {
+                fprintf(stderr, "invalid --mode (octal, max 7777): %s\n", arg);
+                return 1;
+            }
+            mode = (mode_t)v;
         } else if (strcmp(argv[i], "--group") == 0 && i + 1 < argc) {
             group = argv[++i];
         } else {
@@ -61,6 +70,11 @@ main(int argc, char **argv)
             return 1;
         }
     }
+
+    /* Embedding contract (mgmt_socket.h): the host process must ignore
+     * SIGPIPE, or a peer closing/RSTing before a response write flushes
+     * would kill the whole process. */
+    signal(SIGPIPE, SIG_IGN);
 
     g_eb = event_base_new();
     if (!g_eb) {
@@ -89,6 +103,8 @@ main(int argc, char **argv)
     struct event *ev_int = evsignal_new(g_eb, SIGINT, on_signal, NULL);
     if (!ev_term || !ev_int) {
         fprintf(stderr, "evsignal_new() failed\n");
+        if (ev_term) event_free(ev_term);
+        if (ev_int) event_free(ev_int);
         mgmt_socket_destroy(ms);
         event_base_free(g_eb);
         return 1;

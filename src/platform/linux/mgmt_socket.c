@@ -16,6 +16,8 @@
  * so it compiles cleanly in both the mqvpn binary and the mgmt_endpoint_host
  * test harness with zero extra plumbing.
  */
+#define _GNU_SOURCE /* accept4 */
+
 #include "mgmt_socket.h"
 
 #include "cmp_error.h"
@@ -38,8 +40,11 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-#define MGMT_LISTEN_BACKLOG      8
-#define MGMT_HANDSHAKE_TIMEOUT_S 5
+#define MGMT_LISTEN_BACKLOG  8
+#define MGMT_CONN_DEADLINE_S 5
+/* Output backpressure threshold: while a connection's output evbuffer holds
+ * more than this, stop reading further pipelined requests from it. */
+#define MGMT_OUTPUT_HIGH_BYTES CMP_MAX_RESPONSE_BYTES
 
 /* ── Per-connection state ────────────────────────────────────────────────── */
 
@@ -47,6 +52,13 @@ typedef struct mgmt_conn_impl {
     struct bufferevent *bev;
     mgmt_socket_t *ms;
     mgmt_conn_t mconn; /* handshake_done — owned by mgmt_dispatch.c contract */
+    /* Absolute wall-clock deadline (evtimer, NOT a bufferevent read timeout
+     * — those re-arm on every received byte, so a 1-byte-per-second
+     * trickler would evade them forever and could wedge all connection
+     * slots). Armed at accept, deleted when the handshake completes,
+     * re-armed once (fresh 5s) when reject-teardown starts. Allocated for
+     * the connection's whole lifetime; freed in mgmt_conn_free. */
+    struct event *deadline;
     struct mgmt_conn_impl *prev, *next;
 } mgmt_conn_impl_t;
 
@@ -104,8 +116,31 @@ mgmt_conn_free(mgmt_conn_impl_t *c)
 {
     mgmt_socket_t *ms = c->ms;
     mgmt_conn_unlink(ms, c);
+    if (c->deadline) event_free(c->deadline); /* event_free deletes if pending */
     bufferevent_free(c->bev);
     free(c);
+}
+
+/* ── absolute per-connection deadline ────────────────────────────────────── */
+
+static void
+mgmt_on_deadline(evutil_socket_t fd, short what, void *arg)
+{
+    (void)fd;
+    (void)what;
+    mgmt_conn_impl_t *c = (mgmt_conn_impl_t *)arg;
+    LOG_WRN("mgmt ipc: connection deadline expired, closing connection");
+    mgmt_conn_free(c);
+}
+
+/* (Re-)arm the deadline with a fresh window. event_add on an already-pending
+ * timer re-schedules it, so this is safe for both the accept-time arm and
+ * the reject-teardown re-arm. */
+static void
+mgmt_deadline_arm(mgmt_conn_impl_t *c)
+{
+    struct timeval tv = {.tv_sec = MGMT_CONN_DEADLINE_S};
+    evtimer_add(c->deadline, &tv);
 }
 
 /* ── oversized-request rejection ─────────────────────────────────────────── */
@@ -124,8 +159,8 @@ mgmt_on_read_discard(struct bufferevent *bev, void *arg)
 }
 
 /* Error line fully flushed: send a clean FIN via shutdown(SHUT_WR) and wait
- * for the peer's EOF (or the 5s timeout) in mgmt_on_event before freeing —
- * an immediate close() could still race bytes in flight into an RST. */
+ * for the peer's EOF (or the connection deadline) before freeing — an
+ * immediate close() could still race bytes in flight into an RST. */
 static void
 mgmt_on_write_drained_shutdown(struct bufferevent *bev, void *arg)
 {
@@ -139,8 +174,10 @@ mgmt_on_write_drained_shutdown(struct bufferevent *bev, void *arg)
 /* Reject a request that is (or would become, once fully buffered) larger
  * than CMP_MAX_REQUEST_BYTES: write a fixed error line (no id — we may not
  * have parsed one), then FIN-then-EOF teardown (see the callbacks above).
- * The 5s timeout bounds a peer that never reads/closes; the pre-handshake
- * timeout set at accept may already have been cleared, so re-arm it. */
+ * The re-armed deadline bounds a peer that never reads/closes (the
+ * accept-time one may already have been deleted at handshake). The caller
+ * must return immediately after this: the connection may already be freed
+ * (write failure). */
 static void
 mgmt_reject_oversized(mgmt_conn_impl_t *c)
 {
@@ -156,9 +193,12 @@ mgmt_reject_oversized(mgmt_conn_impl_t *c)
     evbuffer_drain(bufferevent_get_input(c->bev), (size_t)-1);
     bufferevent_setcb(c->bev, mgmt_on_read_discard, mgmt_on_write_drained_shutdown,
                       mgmt_on_event, c);
-    struct timeval tv = {.tv_sec = MGMT_HANDSHAKE_TIMEOUT_S};
-    bufferevent_set_timeouts(c->bev, &tv, NULL);
-    bufferevent_write(c->bev, buf, strlen(buf));
+    mgmt_deadline_arm(c);
+    if (bufferevent_write(c->bev, buf, strlen(buf)) != 0) {
+        LOG_WRN("mgmt ipc: response write failed, closing connection");
+        mgmt_conn_free(c);
+        return;
+    }
     bufferevent_enable(c->bev, EV_READ | EV_WRITE);
 }
 
@@ -202,22 +242,48 @@ mgmt_on_read(struct bufferevent *bev, void *arg)
 
         int rc = mgmt_dispatch_request(ms->ctx, &c->mconn, line, n, ms->scratch,
                                        CMP_MAX_RESPONSE_BYTES);
+        free(line);
         /* Warn only for malformed/invalid requests (spec: "invalid request"
          * is logged). Other error codes (HANDSHAKE_REQUIRED,
          * METHOD_NOT_FOUND, ...) are normal protocol-level replies. */
         if (rc == (int)CMP_E_INVALID_ARGUMENT) {
             LOG_WRN("mgmt ipc: invalid request from client");
         }
-        bufferevent_write(bev, ms->scratch, strlen(ms->scratch));
-        free(line);
-
-        /* Pre-handshake connections get a 5s read timeout (set at accept);
-         * once the handshake completes, drop it — persistent connections
-         * are not subject to an idle timeout. Clearing is idempotent, so no
-         * extra "already cleared" bookkeeping is needed. */
-        if (c->mconn.handshake_done) {
-            bufferevent_set_timeouts(bev, NULL, NULL);
+        if (bufferevent_write(bev, ms->scratch, strlen(ms->scratch)) != 0) {
+            LOG_WRN("mgmt ipc: response write failed, closing connection");
+            mgmt_conn_free(c);
+            return;
         }
+
+        /* The 5s deadline only covers the handshake; once it completes,
+         * persistent connections have no idle limit. Deleting is
+         * idempotent, so no extra "already deleted" bookkeeping. */
+        if (c->mconn.handshake_done) {
+            evtimer_del(c->deadline);
+        }
+
+        /* Backpressure: a client that pipelines requests without reading
+         * responses would otherwise grow the output evbuffer without
+         * bound. Stop reading until mgmt_on_write drains it. */
+        if (evbuffer_get_length(bufferevent_get_output(bev)) > MGMT_OUTPUT_HIGH_BYTES) {
+            bufferevent_disable(bev, EV_READ);
+            return;
+        }
+    }
+}
+
+/* Normal-connection write callback (fires when the output evbuffer fully
+ * drains): lift read backpressure and resume any pipelined requests that
+ * are already sitting in the input evbuffer — re-enabling EV_READ alone
+ * would not reprocess them until the peer sends more bytes. */
+static void
+mgmt_on_write(struct bufferevent *bev, void *arg)
+{
+    mgmt_conn_impl_t *c = (mgmt_conn_impl_t *)arg;
+    if (evbuffer_get_length(bufferevent_get_output(bev)) <= MGMT_OUTPUT_HIGH_BYTES &&
+        !(bufferevent_get_enabled(bev) & EV_READ)) {
+        bufferevent_enable(bev, EV_READ);
+        mgmt_on_read(bev, c);
     }
 }
 
@@ -227,13 +293,6 @@ mgmt_on_event(struct bufferevent *bev, short events, void *arg)
     (void)bev;
     mgmt_conn_impl_t *c = (mgmt_conn_impl_t *)arg;
 
-    /* Fires for the pre-handshake read timeout and for a rejected peer that
-     * never reads/closes (mgmt_reject_oversized re-arms the same timeout). */
-    if (events & BEV_EVENT_TIMEOUT) {
-        LOG_WRN("mgmt ipc: read timeout, closing connection");
-        mgmt_conn_free(c);
-        return;
-    }
     if (events & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
         mgmt_conn_free(c);
     }
@@ -247,17 +306,12 @@ mgmt_on_accept(evutil_socket_t fd, short what, void *arg)
     (void)what;
     mgmt_socket_t *ms = (mgmt_socket_t *)arg;
 
-    int cfd = accept(fd, NULL, NULL);
+    int cfd = accept4(fd, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
     if (cfd < 0) return;
 
     if (ms->n_conns >= CMP_MAX_CONNECTIONS) {
         LOG_WRN("mgmt ipc: connection limit reached (%d), rejecting new connection",
                 CMP_MAX_CONNECTIONS);
-        close(cfd);
-        return;
-    }
-
-    if (evutil_make_socket_nonblocking(cfd) < 0) {
         close(cfd);
         return;
     }
@@ -276,9 +330,15 @@ mgmt_on_accept(evutil_socket_t fd, short what, void *arg)
         return;
     }
 
-    bufferevent_setcb(c->bev, mgmt_on_read, NULL, mgmt_on_event, c);
-    struct timeval tv = {.tv_sec = MGMT_HANDSHAKE_TIMEOUT_S};
-    bufferevent_set_timeouts(c->bev, &tv, NULL);
+    c->deadline = evtimer_new(ms->eb, mgmt_on_deadline, c);
+    if (!c->deadline) {
+        bufferevent_free(c->bev); /* closes cfd (BEV_OPT_CLOSE_ON_FREE) */
+        free(c);
+        return;
+    }
+
+    bufferevent_setcb(c->bev, mgmt_on_read, mgmt_on_write, mgmt_on_event, c);
+    mgmt_deadline_arm(c);
     bufferevent_enable(c->bev, EV_READ | EV_WRITE);
 
     mgmt_conn_link(ms, c);
@@ -353,7 +413,7 @@ mgmt_socket_create(struct event_base *eb, const char *path, mode_t mode,
         return NULL;
     }
 
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) {
         snprintf(errbuf, errlen, "socket(): %s", strerror(errno));
         LOG_ERR("mgmt ipc: %s", errbuf);

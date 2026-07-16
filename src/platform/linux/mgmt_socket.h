@@ -2,7 +2,13 @@
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 
 /* src/platform/linux/mgmt_socket.h — Client Management IPC socket layer.
- * Linux/libevent only (included only in the Linux CMake build). */
+ * Linux/libevent only (included only in the Linux CMake build).
+ *
+ * Embedding contract: the process embedding this layer MUST ignore SIGPIPE
+ * (signal(SIGPIPE, SIG_IGN)). A peer that closes (or RSTs) its end while a
+ * response write is in flight would otherwise kill the whole process.
+ * Handled by the embedder, not here, because signal handling lives in the
+ * CLI/platform process, never in library-ish code (see AGENTS.md). */
 #ifndef MQVPN_MGMT_SOCKET_H
 #define MQVPN_MGMT_SOCKET_H
 #include <stddef.h>
