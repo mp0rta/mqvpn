@@ -13,10 +13,19 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var defaultPathObservation: NSKeyValueObservation?
 
     override func startTunnel(options: [String: NSObject]?) async throws {
-        let config = try PoCConfig.fromBundle()
         let providerConfig = (self.protocolConfiguration as? NETunnelProviderProtocol)?
             .providerConfiguration
+        guard let server = ServerSettings(providerConfiguration: providerConfig) else {
+            throw NSError(domain: "mqvpn.poc", code: 10,
+                          userInfo: [NSLocalizedDescriptionKey: "server not configured"])
+        }
         let reorder = ReorderSettings(providerConfiguration: providerConfig) ?? .disabled
+        guard let resolved = await Task.detached(priority: .userInitiated, operation: {
+            resolveServer(server.host, server.port)
+        }).value else {
+            throw NSError(domain: "mqvpn.poc", code: 11,
+                          userInfo: [NSLocalizedDescriptionKey: "server unresolved: \(server.host)"])
+        }
         engine = MqvpnEngine()
         binder = PathBinder(engine: engine)
         metrics = GateMetrics(engine: engine, binder: binder)
@@ -47,7 +56,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 // apply NE settings to a dead session.
                 guard let self, !configHandled, !startResolved else { return }
                 configHandled = true
-                let settings = Self.makeSettings(from: info, server: config.serverHost)
+                let settings = Self.makeSettings(from: info, server: server.host)
                 self.setTunnelNetworkSettings(settings) { err in
                     self.engine.perform {   // hop: latch access stays single-threaded
                         guard !startResolved else { return }
@@ -76,7 +85,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     self.cancelTunnelWithError(err)
                 }
             }
-            engine.start(config: config, reorder: reorder)
+            engine.start(server: server, reorder: reorder, serverAddr: resolved)
             binder.start()
             // Redundant trigger for path lifecycle: NWPathMonitor updates
             // have been observed to arrive minutes late inside the provider
