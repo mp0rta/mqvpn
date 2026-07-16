@@ -62,6 +62,13 @@ typedef struct mqvpn_file_config_s {
     /* [Control] — server */
     char control_listen[280]; /* "addr:port" — empty string when control API disabled */
 
+    /* [ClientManagement] — client-side management IPC (unix socket) */
+    int client_mgmt_enabled;         /* 1=enabled (default), 0=off */
+    char client_mgmt_endpoint[280];  /* unix socket path, "" = platform default */
+    char client_mgmt_socket_mode[8]; /* octal string e.g. "0660"; parsed by platform layer
+                                      */
+    char client_mgmt_socket_group[32]; /* "" = no chown, root-only access */
+
     /* [Multipath] */
     char paths[MQVPN_CONFIG_MAX_PATHS][32];
     int n_paths;

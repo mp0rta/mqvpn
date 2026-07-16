@@ -91,6 +91,7 @@ enum {
     SEC_AUTH,
     SEC_MULTIPATH,
     SEC_CONTROL,
+    SEC_CLIENT_MGMT,
     SEC_REORDER,
     SEC_REORDER_RULE,
     SEC_HYBRID,
@@ -105,6 +106,7 @@ parse_section(const char *name)
     if (strcasecmp(name, "Auth") == 0) return SEC_AUTH;
     if (strcasecmp(name, "Multipath") == 0) return SEC_MULTIPATH;
     if (strcasecmp(name, "Control") == 0) return SEC_CONTROL;
+    if (strcasecmp(name, "ClientManagement") == 0) return SEC_CLIENT_MGMT;
     if (strcasecmp(name, "Reorder") == 0) return SEC_REORDER;
     if (strcasecmp(name, "ReorderRule") == 0) return SEC_REORDER_RULE;
     if (strcasecmp(name, "Hybrid") == 0) return SEC_HYBRID;
@@ -121,6 +123,7 @@ section_name(int section)
     case SEC_AUTH: return "Auth";
     case SEC_MULTIPATH: return "Multipath";
     case SEC_CONTROL: return "Control";
+    case SEC_CLIENT_MGMT: return "ClientManagement";
     case SEC_REORDER: return "Reorder";
     case SEC_REORDER_RULE: return "ReorderRule";
     case SEC_HYBRID: return "Hybrid";
@@ -597,6 +600,13 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_INT_FB(SEC_AUTH, "MaxClients", "max_clients", max_clients, cfgk_int_positive, 64),
     /* [Control] */
     CFG_STR(SEC_CONTROL, "Listen", "control_listen", control_listen),
+    /* [ClientManagement] — client-side management IPC (unix socket) */
+    CFG_BOOL(SEC_CLIENT_MGMT, "Enabled", "client_mgmt_enabled", client_mgmt_enabled),
+    CFG_STR(SEC_CLIENT_MGMT, "Endpoint", "client_mgmt_endpoint", client_mgmt_endpoint),
+    CFG_STR(SEC_CLIENT_MGMT, "SocketMode", "client_mgmt_socket_mode",
+            client_mgmt_socket_mode),
+    CFG_STR(SEC_CLIENT_MGMT, "SocketGroup", "client_mgmt_socket_group",
+            client_mgmt_socket_group),
     /* [Multipath] */
     CFG_STR(SEC_MULTIPATH, "Scheduler", "scheduler", scheduler),
     CFG_STR(SEC_MULTIPATH, "CC", "cc", cc),
@@ -1264,6 +1274,7 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
     cfg->reconnect = 1;
     cfg->reconnect_interval = 5;
     cfg->manage_routes = 1;
+    cfg->client_mgmt_enabled = 1; /* [ClientManagement] Enabled default: on */
     mqvpn_reorder_config_default(&cfg->reorder); /* §16: reorder defaults (mode OFF) */
     mqvpn_hybrid_config_default(&cfg->hybrid);   /* H1: hybrid defaults (disabled) */
 }
