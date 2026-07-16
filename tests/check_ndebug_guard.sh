@@ -19,7 +19,7 @@ for f in "$TESTS_DIR"/test_*.c; do
     if grep -qE '\bassert\([^)]' "$f"; then
         # Anchored to a real preprocessor directive at line start, so a
         # commented-out "/* #undef NDEBUG */" cannot satisfy the gate.
-        if ! grep -qE '^[[:space:]]*#[[:space:]]*undef[[:space:]]+NDEBUG' "$f"; then
+        if ! grep -qE '^[[:space:]]*#[[:space:]]*undef[[:space:]]+NDEBUG([^A-Za-z0-9_]|$)' "$f"; then
             echo "FAIL: $f uses assert() but is missing '#undef NDEBUG'" >&2
             fail=1
         fi
