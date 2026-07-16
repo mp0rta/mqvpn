@@ -16,7 +16,10 @@
 #include "platform_internal.h"
 #include "platform_linux.h"
 #include "control_socket.h"
+#include "cmp_types.h" /* CMP_DEFAULT_SOCKET_PATH / CMP_FALLBACK_SOCKET_PATH */
 #include "log.h"
+#include "mgmt_dispatch.h" /* mgmt_ctx_t */
+#include "mgmt_socket.h"
 #include "mqvpn_internal.h" /* mqvpn_config_apply_reorder (INI reorder bridge) */
 #include "netlink_mon.h"
 
@@ -448,13 +451,62 @@ on_signal(evutil_socket_t sig, short what, void *arg)
 
 
 /* ================================================================
+ *  Client Management IPC (mgmt_socket) setup helpers
+ * ================================================================ */
+
+/* Resolve the effective mgmt endpoint path into out[out_len]: strips a
+ * leading "unix://" prefix if present; an empty cfg_endpoint falls back to
+ * CMP_DEFAULT_SOCKET_PATH when /run exists, else CMP_FALLBACK_SOCKET_PATH
+ * (e.g. non-root dev boxes without a writable /run). */
+static void
+mgmt_resolve_endpoint(const char *cfg_endpoint, char *out, size_t out_len)
+{
+    const char *ep = cfg_endpoint;
+    if (ep && strncmp(ep, "unix://", 7) == 0) ep += 7;
+
+    if (!ep || ep[0] == '\0') {
+        ep = (access("/run", F_OK) == 0) ? CMP_DEFAULT_SOCKET_PATH
+                                         : CMP_FALLBACK_SOCKET_PATH;
+    }
+    snprintf(out, out_len, "%s", ep);
+}
+
+/* Parse an octal socket-mode string (e.g. "0660"). Empty or invalid input
+ * (garbage chars, out-of-range for a POSIX mode) falls back to 0660 with a
+ * warning — a bad config value must not block client startup. */
+static mode_t
+mgmt_parse_socket_mode(const char *mode_str)
+{
+    if (!mode_str || mode_str[0] == '\0') return 0660;
+
+    char *endptr = NULL;
+    errno = 0;
+    unsigned long v = strtoul(mode_str, &endptr, 8);
+    if (errno != 0 || endptr == mode_str || *endptr != '\0' || v > 07777) {
+        LOG_WRN("invalid ClientManagement SocketMode '%s'; using 0660", mode_str);
+        return 0660;
+    }
+    return (mode_t)v;
+}
+
+/* ================================================================
  *  Main entry point: linux_platform_run_client
  * ================================================================ */
 
 int
 linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
 {
+    /* mgmt_socket.h embedding contract: the process MUST ignore SIGPIPE —
+     * a management client that closes/RSTs its connection while a response
+     * write is in flight would otherwise kill the whole process. Signal
+     * handling lives in the platform process, never in library-ish code
+     * (see AGENTS.md). */
+    signal(SIGPIPE, SIG_IGN);
+
     int rc = 1;
+    mgmt_socket_t *mgmt = NULL;
+    mgmt_ctx_t mgmt_ctx = {0};
+    char mgmt_endpoint[280];
     platform_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.tun.fd = -1;
@@ -613,6 +665,30 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     /* Tick timer */
     ctx.ev_tick = event_new(ctx.eb, -1, 0, on_tick_timer, &ctx);
 
+    /* Client Management IPC (mgmt_socket) — best-effort: observability must
+     * never block VPN startup, so a failure here is a warning, not fatal. */
+    if (cfg->client_mgmt_enabled) {
+        mgmt_resolve_endpoint(cfg->client_mgmt_endpoint, mgmt_endpoint,
+                              sizeof(mgmt_endpoint));
+        mode_t mgmt_mode = mgmt_parse_socket_mode(cfg->client_mgmt_socket_mode);
+        const char *mgmt_group =
+            (cfg->client_mgmt_socket_group && cfg->client_mgmt_socket_group[0] != '\0')
+                ? cfg->client_mgmt_socket_group
+                : NULL;
+
+        mgmt_ctx.endpoint_version = mqvpn_version_string();
+        mgmt_ctx.capabilities = NULL;
+        mgmt_ctx.n_capabilities = 0;
+
+        char mgmt_errbuf[128];
+        mgmt = mgmt_socket_create(ctx.eb, mgmt_endpoint, mgmt_mode, mgmt_group, &mgmt_ctx,
+                                  mgmt_errbuf, sizeof(mgmt_errbuf));
+        if (!mgmt) {
+            LOG_WRN("management endpoint setup failed: %s — continuing without it",
+                    mgmt_errbuf);
+        }
+    }
+
     /* Connect */
     if (mqvpn_client_connect(ctx.client) != MQVPN_OK) {
         LOG_ERR("client connect failed");
@@ -627,6 +703,8 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     rc = 0;
 
 cleanup:
+    mgmt_socket_destroy(mgmt);
+
     /* Clean up platform resources */
     cleanup_killswitch(&ctx);
     if (ctx.manage_routes) cleanup_routes(&ctx);

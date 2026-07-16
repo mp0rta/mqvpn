@@ -37,6 +37,12 @@ typedef struct mqvpn_client_cfg_s {
     mqvpn_reorder_config_t
         reorder;                  /* INI [Reorder]/[ReorderRule] (mode OFF by default) */
     mqvpn_hybrid_config_t hybrid; /* INI [Hybrid] (disabled by default) */
+
+    /* INI [ClientManagement] — management IPC endpoint (unix socket) */
+    int client_mgmt_enabled;              /* 1=enabled (default), 0=off */
+    const char *client_mgmt_endpoint;     /* unix socket path, "" = platform default */
+    const char *client_mgmt_socket_mode;  /* octal string e.g. "0660", "" = default */
+    const char *client_mgmt_socket_group; /* "" = no chown, root-only access */
 } mqvpn_client_cfg_t;
 
 #endif /* MQVPN_VPN_CLIENT_H */
