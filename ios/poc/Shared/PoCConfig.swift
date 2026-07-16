@@ -4,11 +4,11 @@
 import Foundation
 
 /// PoC server/tunnel configuration, read from the Info.plist keys injected
-/// by Config.xcconfig at build time (see project.yml). The App target only
-/// needs `bulkURL` (multipath load gate); the extension only needs
-/// host/port/authKey/tlsInsecure/serverSockaddr.
+/// by Config.xcconfig at build time (see project.yml). App-side: bundle
+/// read (build-time seed values) plus `bulkURL` (multipath load gate).
+/// `serverHost` may be a hostname or an IP literal.
 struct PoCConfig {
-    let serverHost: String      // IPv4 literal
+    let serverHost: String      // hostname or IP literal
     let serverPort: Int
     let authKey: String         // "" = no Authorization header
     let tlsInsecure: Bool       // test-server PoC: certificate check off
@@ -25,11 +25,6 @@ struct PoCConfig {
             throw NSError(domain: "mqvpn.poc", code: 2,
                           userInfo: [NSLocalizedDescriptionKey: "server port out of range"])
         }
-        var addrCheck = in_addr()
-        guard inet_pton(AF_INET, host, &addrCheck) == 1 else {
-            throw NSError(domain: "mqvpn.poc", code: 3,
-                          userInfo: [NSLocalizedDescriptionKey: "server host must be an IPv4 literal"])
-        }
         let bulk = (d["MqvpnBulkURL"] as? String).flatMap(URL.init(string:))
         return PoCConfig(serverHost: host, serverPort: port,
                          authKey: (d["MqvpnAuthKey"] as? String) ?? "",
@@ -37,8 +32,8 @@ struct PoCConfig {
                          bulkURL: bulk)
     }
 
-    /// host is already validated as an IPv4 literal by `fromBundle()`, so no
-    /// error handling is needed here for inet_pton's result.
+    /// Legacy extension-path support: assumes an IPv4-literal host. Slated
+    /// for removal once the engine takes a pre-resolved address instead.
     var serverSockaddr: sockaddr_in {
         var sa = sockaddr_in()
         sa.sin_family = sa_family_t(AF_INET)

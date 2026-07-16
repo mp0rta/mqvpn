@@ -42,6 +42,8 @@ targets:
         MqvpnServerHost: $(MQVPN_POC_SERVER_HOST)
         MqvpnServerPort: $(MQVPN_POC_SERVER_PORT)
         MqvpnBulkURL: $(MQVPN_POC_BULK_URL)
+        MqvpnAuthKey: $(MQVPN_POC_AUTH_KEY)
+        MqvpnTLSInsecure: $(MQVPN_POC_TLS_INSECURE)
   PacketTunnel:
     type: app-extension
     platform: iOS
