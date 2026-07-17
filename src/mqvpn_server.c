@@ -112,6 +112,10 @@ struct svr_conn_s {
  * callbacks) — referenced earlier in cb_h3_conn_create when engines are made. */
 static void svr_reorder_deliver(const uint8_t *pkt, size_t len, void *ctx);
 
+/* Forward decl: per-conn context teardown (defined with the H3 close path) —
+ * cb_refuse frees pre-H3 contexts through it, ahead of its definition. */
+static void svr_conn_free(svr_conn_t *conn);
+
 /* Role of an inbound H3 request stream, decided at header parse.
  * Unrecognized requests keep ROLE_UNKNOWN, which now gets an explicit 501
  * (see cb_request_read) instead of the historical capsule fall-through. */
@@ -497,9 +501,29 @@ cb_accept(xqc_engine_t *engine, xqc_connection_t *conn, const xqc_cid_t *cid,
           void *user_data)
 {
     (void)engine;
-    (void)conn;
-    (void)cid;
     mqvpn_server_t *s = (mqvpn_server_t *)user_data;
+
+    /* Allocate the per-connection context at the headmost server callback and
+     * bind it as the transport user_data NOW. Immediately after this returns,
+     * xquic sets SERVER_ACCEPT and every server->client send switches to
+     * cb_write_socket, which reinterprets conn_user_data as an svr_conn_t*.
+     * Binding it here closes the pre-handshake window in which conn_user_data
+     * was still the engine handle (mqvpn_server_t *) — a type confusion an
+     * unauthenticated no-ALPN / no-SNI probe could turn into a remote crash
+     * (svr_conn_t.server aliases mqvpn_config_t.server_host at offset 0).
+     * cb_h3_conn_create later fills in the H3-specific fields; the context is
+     * freed by cb_h3_conn_close (H3 was reached) or cb_refuse (connection
+     * closed before H3). */
+    svr_conn_t *conn_ctx = calloc(1, sizeof(*conn_ctx));
+    if (!conn_ctx) {
+        LOG_E(s, "accept: connection context alloc failed");
+        return -1; /* refuse: SERVER_ACCEPT is not set, nothing to free */
+    }
+    conn_ctx->server = s;
+    /* cid may be misaligned inside xquic's internal structures */
+    memcpy(&conn_ctx->cid, (const void *)cid, sizeof(conn_ctx->cid));
+    xqc_conn_set_transport_user_data(conn, conn_ctx);
+
     LOG_I(s, "connection accepted");
     return 0;
 }
@@ -511,11 +535,16 @@ cb_refuse(xqc_engine_t *engine, xqc_connection_t *conn, const xqc_cid_t *cid,
     (void)engine;
     (void)conn;
     (void)cid;
-    (void)user_data;
-    /* No per-connection context is allocated in cb_accept.
-     * svr_conn_t is allocated in cb_h3_conn_create and freed in cb_h3_conn_close.
-     * If refuse fires before H3 setup, user_data is the engine user_data
-     * (mqvpn_server_t *), which must NOT be freed. */
+    /* Fires from xqc_conn_destroy for a connection that set SERVER_ACCEPT but
+     * never negotiated an ALPN — so cb_h3_conn_create / cb_h3_conn_close never
+     * ran. user_data is the svr_conn_t* bound in cb_accept; free it here. This
+     * is the pre-H3 counterpart of cb_h3_conn_close, and the two are mutually
+     * exclusive in xqc_conn_destroy (UPPER_CONN_EXIST selects the ALPN close
+     * path, else SERVER_ACCEPT selects refuse), so there is no double free.
+     * Such a connection never entered the session table or addr pool, so no
+     * other bookkeeping is required. */
+    svr_conn_t *conn_ctx = (svr_conn_t *)user_data;
+    if (conn_ctx) svr_conn_free(conn_ctx);
 }
 
 static ssize_t
@@ -557,13 +586,14 @@ cb_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data)
 static int
 cb_h3_conn_create(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_data)
 {
-    /* For server-side connections, xquic passes engine_user_data
-     * as conn_user_data initially (set during xqc_engine_create). */
-    mqvpn_server_t *s = (mqvpn_server_t *)conn_user_data;
-
-    svr_conn_t *conn = calloc(1, sizeof(*conn));
+    /* The per-connection context was allocated and bound as the transport
+     * user_data back in cb_accept; xquic hands it back here (conn_create_notify
+     * passes conn->user_data). Fill in the H3-specific fields — do NOT
+     * allocate a second context. */
+    svr_conn_t *conn = (svr_conn_t *)conn_user_data;
     if (!conn) return -1;
-    conn->server = s;
+    mqvpn_server_t *s = conn->server;
+
     conn->h3_conn = h3_conn;
     /* cid may be misaligned inside xquic's internal structures */
     memcpy(&conn->cid, (const void *)cid, sizeof(conn->cid));
