@@ -290,7 +290,7 @@ TUN packet
   ▼
 classifier (per packet: protocol + Tcp mode + tunnel-subnet carve-out)
   │
-  ├─ IPv4 TCP, Tcp=stream (or Tcp=auto with ≥2 active paths)
+  ├─ TCP, Tcp=stream (or Tcp=auto with ≥2 active paths)
   │     └─▶ tcp lane (client-side lwIP) ─▶ HTTP/3 request stream ─▶ server egress connect()
   ├─ UDP (parseable)
   │     └─▶ datagram lane (existing reorder/STAMP path) ─▶ CONNECT-IP DATAGRAM

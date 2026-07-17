@@ -280,6 +280,27 @@ Reorder is **off by default** and is meant to be opt-in only within its useful r
 | `MaxWaitMs` | Per-rule override of the hold time (ms). `0` is rejected with a warning — to pass a port through untouched use `Profile = default_udp` instead | profile preset |
 | `CapPackets` | Per-rule override of the per-flow buffer cap. Must be a non-zero power of two, or it is rejected with a warning | profile preset |
 
+### `[Hybrid]`
+
+Terminates inner TCP locally and relays it over an HTTP/3 request stream so a single TCP flow can aggregate multiple paths. Disabled by default. See [Hybrid Mode](./hybrid-mode) for the lane diagram, egress ACL semantics, and known limitations.
+
+| Key | Description | Applies to | Default |
+|-----|-------------|------------|---------|
+| `Enabled` | Master switch | client + server | `false` |
+| `Tcp` | Per-flow TCP lane policy: `stream` (always), `raw` (never — byte-identical to hybrid disabled), or `auto` (TCP lane once ≥2 paths are active at SYN time; latched for the flow's lifetime) | client | `auto` |
+| `TcpMaxFlows` | Concurrent TCP-lane flow cap. Client: local flow table (over-cap SYNs fall back to RAW). Server: per client session (over-cap SYNs get HTTP `503`) | client + server | `256` |
+| `TcpIdleTimeoutSec` | Idle-eviction timeout for TCP-lane flows; `0` disables idle eviction | client + server | `300` |
+| `TcpConnectTimeoutSec` | Timeout for the server's egress `connect()`; on expiry the client gets HTTP `504` | server | `10` |
+| `TcpMaxGlobalFlows` | Whole-server cap on concurrent egress TCP flows across all sessions | server | `4096` |
+| `EgressAllow` | CIDR allowed through the default-deny egress ACL for private ranges (repeatable, up to 32) | server | — |
+| `EgressDeny` | Additional CIDR to block, evaluated after `EgressAllow` (repeatable, up to 32) | server | — |
+
+In JSON, the section is a `"hybrid"` object with snake_case keys (`enabled`, `tcp`, `tcp_max_flows`, `tcp_idle_timeout_sec`, `tcp_connect_timeout_sec`, `tcp_max_global_flows`, `egress_allow`, `egress_deny`).
+
+> The egress ACL default-denies RFC1918, loopback, and link-local targets even
+> with no `EgressAllow`/`EgressDeny` configured — a safety default against a
+> compromised client using the server as an internal-network pivot.
+
 ## MTU Guidelines
 
 ### Default (auto) — most deployments
