@@ -35,6 +35,7 @@ export const ja: LocaleSpecificConfig<DefaultTheme.Config> & { label: string; la
             { text: 'ビルド', link: '/ja/guide/building' },
             { text: '設定', link: '/ja/guide/configuration' },
             { text: 'マルチパス', link: '/ja/guide/multipath' },
+            { text: 'ハイブリッドモード', link: '/ja/guide/hybrid-mode' },
             { text: 'アーキテクチャ', link: '/ja/guide/architecture' },
           ],
         },
