@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # setup_server_nat.sh — Configure NAT for mqvpn server
 # Run on the VPN server after mqvpn-server starts.
 #

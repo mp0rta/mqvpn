@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_ipv6_dataplane_test.sh — IPv6 data plane (dual-stack TUN) E2E test
 #
 # Verifies that mqvpn can carry both IPv4 and IPv6 packets through the tunnel

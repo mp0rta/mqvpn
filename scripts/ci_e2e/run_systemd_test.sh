@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_systemd_test.sh — Systemd service integration test using network namespaces
 #
 # Validates the full systemd lifecycle for mqvpn-server.service and

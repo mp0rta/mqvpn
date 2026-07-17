@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # bench_aggregate_wan.sh — WAN/EC2 bandwidth aggregation N-sweep
 #
 # Same structure as bench_aggregate.sh but uses real NICs instead of netns.

@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_throughput_floor_test.sh — multipath throughput regression smoke.
 #
 # Runs the WLB scheduler over a 2-path netem topology and asserts:

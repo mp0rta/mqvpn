@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # benchmark_ntn.sh — NTN (Non-Terrestrial Network) multipath scheduler benchmark
 #
 # Tests MinRTT vs WLB across LTE + satellite NTN scenarios.

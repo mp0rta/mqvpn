@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_nat_test.sh — NAT/WAN E2E test using network namespaces
 #
 # Creates three netns (vpn-client, vpn-server, vpn-external) with two veth

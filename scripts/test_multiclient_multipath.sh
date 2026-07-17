@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # test_multiclient_multipath.sh — Multi-client + Multipath E2E test
 #
 # Topology:

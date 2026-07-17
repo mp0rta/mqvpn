@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # ci_bench_aggregate.sh — CI bandwidth aggregation benchmark
 #
 # Measures throughput for single-path vs multipath across varying

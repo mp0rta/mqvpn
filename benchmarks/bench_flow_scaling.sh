@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # ci_bench_flow_scaling.sh — CI flow scaling benchmark
 #
 # Tests WLB vs MinRTT with varying parallel stream counts on asymmetric paths.

@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # ci_stress_long_running.sh — Long-running continuous transfer stress test
 #
 # Runs a continuous iperf3 transfer (default 15min) over a multipath VPN tunnel while monitoring

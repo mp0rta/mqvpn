@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # bench_env_setup.sh — Netns environment setup for mqvpn benchmarks
 #
 # Source this file from other benchmark scripts:

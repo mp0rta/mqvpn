@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_ipv6_multipath_test.sh — IPv6 + Multipath E2E test
 #
 # Verifies that mqvpn can carry IPv6 packets over multipath QUIC,

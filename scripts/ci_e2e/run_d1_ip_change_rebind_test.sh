@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_d1_ip_change_rebind_test.sh — D1 §9.4 ¶1: cwnd/RTT MUST reset on peer IP change.
 #
 # Simulates an Android-style handover by rotating the SNAT source IP on a

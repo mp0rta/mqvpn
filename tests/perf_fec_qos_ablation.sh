@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # perf_fec_qos_ablation.sh — FEC QoS ablation matrix.
 #
 # Compares HIGH (FEC off) vs NORMAL (FEC on) DATAGRAM QoS across 4 netem

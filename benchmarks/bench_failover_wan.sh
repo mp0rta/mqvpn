@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # bench_failover_wan.sh — WAN/EC2 failover TTR measurement
 #
 # Same structure as bench_failover.sh but uses real NICs instead of netns.

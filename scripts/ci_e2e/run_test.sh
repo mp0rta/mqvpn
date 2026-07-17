@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_test.sh — Quick smoke test using network namespaces
 #
 # Creates two netns (vpn-client, vpn-server), runs mqvpn server and client,

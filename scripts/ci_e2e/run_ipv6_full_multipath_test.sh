@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_ipv6_full_multipath_test.sh — Full IPv6 (underlay + data plane) multipath E2E test
 #
 # Verifies that mqvpn works with IPv6 QUIC transport AND IPv6 tunnel data plane

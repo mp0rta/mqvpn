@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # bench_aggregate.sh — Netns bandwidth aggregation N-sweep
 #
 # Measures throughput for single-path vs multipath across varying

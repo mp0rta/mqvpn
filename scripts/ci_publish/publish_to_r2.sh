@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # Publish ci_bench_results/*.json to Cloudflare R2.
 #
 # Usage: publish_to_r2.sh <prefix> <run_type>

@@ -503,6 +503,12 @@ mqvpn_reorder_latency_buffered_percentile(const mqvpn_reorder_stats_t *st, doubl
     return lat_percentile(st, q, 1);
 }
 
+uint64_t
+mqvpn_reorder_stats_layout_id(void)
+{
+    return MQVPN_REORDER_STATS_LAYOUT_ID;
+}
+
 static void
 deliver_pkt(mqvpn_reorder_rx_t *rx, const uint8_t *pkt, size_t len,
             mqvpn_reorder_flow_t *f, uint64_t now_us, uint64_t enq_us)

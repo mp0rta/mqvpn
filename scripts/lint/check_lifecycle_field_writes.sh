@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # scripts/lint/check_lifecycle_field_writes.sh
 #
 # Enforce spec §3.3 / §7.1: direct assignment to path_entry_t lifecycle

@@ -1,0 +1,73 @@
+name: MqvpnPoC
+options:
+  deploymentTarget:
+    iOS: "15.0"
+configFiles:
+  Debug: Config.xcconfig
+  Release: Config.xcconfig
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    LIBRARY_SEARCH_PATHS: "$(SRCROOT)/../build"
+    HEADER_SEARCH_PATHS: "$(SRCROOT)/../../include $(SRCROOT)/../../src $(SRCROOT)/Shared"
+schemes:
+  MqvpnPoC:
+    build:
+      targets:
+        MqvpnPoC: all
+targets:
+  MqvpnPoC:
+    type: application
+    platform: iOS
+    sources:
+      - App
+      # PoCConfig.swift is shared with the extension; the C files are not
+      # needed by the app (and the host test defines main()) — exclude them.
+      - path: Shared
+        excludes: ["*.c"]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mp0rta.mqvpnpoc
+    entitlements:
+      path: App.entitlements
+      properties:
+        com.apple.developer.networking.networkextension: [packet-tunnel-provider]
+    dependencies:
+      - target: PacketTunnel
+        embed: true
+    info:
+      path: App/Info.plist
+      properties:
+        UILaunchScreen: {}
+        MqvpnServerHost: $(MQVPN_POC_SERVER_HOST)
+        MqvpnServerPort: $(MQVPN_POC_SERVER_PORT)
+        MqvpnBulkURL: $(MQVPN_POC_BULK_URL)
+        MqvpnAuthKey: $(MQVPN_POC_AUTH_KEY)
+        MqvpnTLSInsecure: $(MQVPN_POC_TLS_INSECURE)
+  PacketTunnel:
+    type: app-extension
+    platform: iOS
+    sources:
+      - PacketTunnel
+      # host test defines main() — never compile it into a target
+      - path: Shared
+        excludes: ["clock_shim_host_test.c"]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mp0rta.mqvpnpoc.PacketTunnel
+        SWIFT_OBJC_BRIDGING_HEADER: PacketTunnel/BridgingHeader.h
+        OTHER_LDFLAGS: "-lmqvpn -lxquic-static -lssl -lcrypto -lc++"
+    entitlements:
+      path: PacketTunnel.entitlements
+      properties:
+        com.apple.developer.networking.networkextension: [packet-tunnel-provider]
+    info:
+      path: PacketTunnel/Info.plist
+      properties:
+        MqvpnServerHost: $(MQVPN_POC_SERVER_HOST)
+        MqvpnServerPort: $(MQVPN_POC_SERVER_PORT)
+        MqvpnAuthKey: $(MQVPN_POC_AUTH_KEY)
+        MqvpnTLSInsecure: $(MQVPN_POC_TLS_INSECURE)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider

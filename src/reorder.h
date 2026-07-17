@@ -528,6 +528,25 @@ typedef struct {
     uint64_t residence_max_us;                            /* exact max residence */
 } mqvpn_reorder_stats_t;
 
+/* ABI layout fingerprint of mqvpn_reorder_stats_t: folds sizeof + the offsets
+ * of the five counters cross-module consumers read (delivered / gap_count /
+ * gap_filled / gap_timeout / ack_demote). Compile-time constant; equal on both
+ * sides only if both were compiled against the same struct. A cross-module
+ * consumer (the iOS extension) compares its own MQVPN_REORDER_STATS_LAYOUT_ID
+ * against mqvpn_reorder_stats_layout_id() from the linked library and refuses
+ * to read the struct on mismatch. Requires <stddef.h> for offsetof. */
+#define MQVPN_REORDER_STATS_LAYOUT_ID                                       \
+    (((uint64_t)sizeof(mqvpn_reorder_stats_t) << 0) ^                       \
+     ((uint64_t)offsetof(mqvpn_reorder_stats_t, delivered_count) << 8) ^    \
+     ((uint64_t)offsetof(mqvpn_reorder_stats_t, gap_count) << 16) ^         \
+     ((uint64_t)offsetof(mqvpn_reorder_stats_t, gap_filled_count) << 24) ^  \
+     ((uint64_t)offsetof(mqvpn_reorder_stats_t, gap_timeout_count) << 32) ^ \
+     ((uint64_t)offsetof(mqvpn_reorder_stats_t, ack_demote_count) << 40))
+
+/* Returns MQVPN_REORDER_STATS_LAYOUT_ID as compiled into THIS library, so a
+ * consumer can detect a stale/mismatched libmqvpn.a at runtime. */
+uint64_t mqvpn_reorder_stats_layout_id(void);
+
 /* Added-latency percentiles over the residence histogram (non-static so the
  * control API can link them). _percentile spans all buckets (includes the
  * residence-0 in-order packets); _buffered_percentile starts at bucket 1 so it

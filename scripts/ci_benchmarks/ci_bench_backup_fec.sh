@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # ci_bench_backup_fec.sh — CI lossy-primary multipath benchmark.
 #
 # Compares wlb vs backup_fec on a 2-path topology where the primary path

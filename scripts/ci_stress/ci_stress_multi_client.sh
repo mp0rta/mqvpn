@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # ci_stress_multi_client.sh — 60-simultaneous-client stress test
 #
 # Validates that the VPN server can handle 60 concurrent clients without

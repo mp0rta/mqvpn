@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # benchmark_udp_scheduler.sh — UDP multipath scheduler benchmark
 #
 # Measures UDP-specific metrics (throughput, jitter, loss%) for MinRTT vs WLB.

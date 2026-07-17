@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_8paths_dellink_test.sh — E2E test for RTM_DELLINK at the full 8-path
 # budget. Exists to catch failover-storm / path_id grant-accounting
 # regressions at MQVPN_MAX_PATHS = 8 that the 2-path run_dellink_test

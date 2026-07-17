@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # scripts/vps_setup.sh — Run on VPS to start mqvpn server
 set -e
 

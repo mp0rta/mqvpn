@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_addr_del_failover_test.sh — E2E test for path failover on ADDRESS-ONLY
 # removal (RTM_DELADDR with the link staying admin-UP), i.e. the NetworkManager
 # `nmcli dev disconnect` / DHCP-lease-loss case.

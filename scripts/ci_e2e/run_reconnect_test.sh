@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_reconnect_test.sh — Automatic reconnection E2E test
 #
 # Verifies that the client automatically reconnects after the server

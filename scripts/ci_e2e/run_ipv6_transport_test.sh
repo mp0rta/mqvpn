@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_ipv6_transport_test.sh — IPv6 transport (underlay) E2E test
 #
 # Verifies that mqvpn can use IPv6 for the QUIC underlay while keeping

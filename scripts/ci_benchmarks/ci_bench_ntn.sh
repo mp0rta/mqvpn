@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # ci_bench_ntn.sh — NTN (Non-Terrestrial Network) satellite link benchmark
 #
 # Tests multipath scheduler performance across LTE/WiFi + satellite scenarios.
