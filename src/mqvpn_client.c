@@ -2470,6 +2470,7 @@ cli_start_connection(mqvpn_client_t *c)
         .scheduler = c->config.scheduler,
         .cc = c->config.cc,
         .init_max_path_id = c->config.init_max_path_id,
+        .recv_rate_bytes_per_sec = c->config.recv_rate_limit,
     };
     mqvpn_build_conn_settings(&cs_input, &cs);
 

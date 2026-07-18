@@ -197,6 +197,32 @@ test_server_forces_multipath_regardless_of_input(void)
     return 0;
 }
 
+static int
+test_recv_rate_limit_wiring(void)
+{
+    xqc_conn_settings_t cli, srv;
+    mqvpn_conn_settings_input_t c = {
+        .is_server = false,
+        .enable_multipath = true,
+        .scheduler = MQVPN_SCHED_WLB,
+        .recv_rate_bytes_per_sec = 125000000ULL,
+    };
+    mqvpn_build_conn_settings(&c, &cli);
+    ASSERT_EQ(cli.recv_rate_bytes_per_sec, 125000000ULL);
+
+    /* server MUST stay 0 even if a caller passes a value: a server-side
+     * conn-level cap throttles every client's uplink. */
+    mqvpn_conn_settings_input_t s = {
+        .is_server = true,
+        .enable_multipath = true,
+        .scheduler = MQVPN_SCHED_WLB,
+        .recv_rate_bytes_per_sec = 125000000ULL,
+    };
+    mqvpn_build_conn_settings(&s, &srv);
+    ASSERT_EQ(srv.recv_rate_bytes_per_sec, 0);
+    return 0;
+}
+
 int
 main(void)
 {
@@ -206,6 +232,7 @@ main(void)
     failed += test_propagation_cc();
     failed += test_propagation_init_max_path_id();
     failed += test_server_forces_multipath_regardless_of_input();
+    failed += test_recv_rate_limit_wiring();
     if (failed) {
         fprintf(stderr, "test_conn_settings: %d FAILED\n", failed);
         return 1;

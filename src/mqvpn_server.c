@@ -1822,7 +1822,7 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
                                   &tcbs, s);
     if (!s->engine) goto cleanup;
 
-        /* Connection settings — see src/mqvpn_conn_settings.c for the full body. */
+    /* Connection settings — see src/mqvpn_conn_settings.c for the full body. */
 #if !defined(XQC_ENABLE_FEC) || !defined(XQC_ENABLE_XOR)
     if (cfg->scheduler == MQVPN_SCHED_BACKUP_FEC) {
         LOG_W(s, "backup_fec scheduler requested but library built without FEC "
@@ -1836,6 +1836,7 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         .scheduler = cfg->scheduler,
         .cc = cfg->cc,
         .init_max_path_id = cfg->init_max_path_id,
+        /* recv_rate_bytes_per_sec: intentionally absent (=0) — client-only knob */
     };
     mqvpn_build_conn_settings(&cs_input, &conn_settings);
     xqc_server_set_conn_settings(s->engine, &conn_settings);

@@ -127,6 +127,10 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
         out->enable_multipath = in->enable_multipath ? 1 : 0;
         out->mp_ping_on = in->enable_multipath ? 1 : 0;
         out->ping_on = 1;
+
+        if (in->recv_rate_bytes_per_sec) {
+            out->recv_rate_bytes_per_sec = in->recv_rate_bytes_per_sec;
+        }
     }
 
     /* --- scheduler / FEC params --- */
