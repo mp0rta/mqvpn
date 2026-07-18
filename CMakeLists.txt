@@ -602,6 +602,24 @@ if(BUILD_TESTING)
         )
         add_test(NAME test_tcp_lane COMMAND test_tcp_lane)
     endif()
+
+    # test_config / test_conn_settings — copied from the Linux definitions
+    # below (:681 / :866); kept in sync so Tasks 6-8's red/green loops are
+    # not vacuous on darwin. Link diff vs Linux: dl/m are folded into
+    # libSystem here, and stdc++ becomes c++ (libc++).
+    add_executable(test_config tests/test_config.c src/config.c src/log.c)
+    target_include_directories(test_config PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
+    add_test(NAME test_config COMMAND test_config)
+
+    add_executable(test_conn_settings tests/test_conn_settings.c)
+    target_link_libraries(test_conn_settings mqvpn_lib ${XQUIC_LIB} ${SSL_LIB}
+                          ${CRYPTO_LIB} c++)
+    target_include_directories(test_conn_settings PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
+    set_target_properties(test_conn_settings PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_conn_settings COMMAND test_conn_settings)
 endif()
 
 else() # NOT WIN32, NOT APPLE — Linux
