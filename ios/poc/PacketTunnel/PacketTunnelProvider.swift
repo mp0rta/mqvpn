@@ -20,6 +20,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                           userInfo: [NSLocalizedDescriptionKey: "server not configured"])
         }
         let reorder = ReorderSettings(providerConfiguration: providerConfig) ?? .disabled
+        let hybrid = HybridSettings(providerConfiguration: providerConfig) ?? .disabled
         guard let resolved = await Task.detached(priority: .userInitiated, operation: {
             resolveServer(server.host, server.port)
         }).value, let resolvedIP = resolved.ipString else {
@@ -87,7 +88,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     self.cancelTunnelWithError(err)
                 }
             }
-            engine.start(server: server, reorder: reorder, serverAddr: resolved)
+            engine.start(server: server, reorder: reorder, hybrid: hybrid, serverAddr: resolved)
             binder.start()
             // Redundant trigger for path lifecycle: NWPathMonitor updates
             // have been observed to arrive minutes late inside the provider

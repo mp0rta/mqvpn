@@ -23,6 +23,7 @@ final class MqvpnEngine: NSObject {
     private var runLoop: RunLoop!
     private var tickTimer: Timer?
     private(set) var reorderConfigured = false
+    private(set) var hybridConfigured = false
     private var reorderStatsUnavailable = false
 
     // Injected by PacketTunnelProvider:
@@ -33,7 +34,7 @@ final class MqvpnEngine: NSObject {
     /// Blocks until the client exists on the tick thread — callers may start
     /// PathBinder immediately after return without ordering assumptions.
     func start(server: ServerSettings, reorder: ReorderSettings = .disabled,
-               serverAddr: ResolvedServerAddress) {
+               hybrid: HybridSettings = .disabled, serverAddr: ResolvedServerAddress) {
         self.serverAddr = serverAddr
         // Provenance-independent ABI guard: the linked libmqvpn.a and this
         // extension must share the mqvpn_reorder_stats_t layout. On mismatch,
@@ -58,7 +59,7 @@ final class MqvpnEngine: NSObject {
         tickThread.start()
         runLoopReady.wait()
         let ready = DispatchSemaphore(value: 0)
-        perform { self.setupClient(server, reorder: reorder); ready.signal() }
+        perform { self.setupClient(server, reorder: reorder, hybrid: hybrid); ready.signal() }
         ready.wait()
     }
 
@@ -85,7 +86,7 @@ final class MqvpnEngine: NSObject {
         tickThread.cancel()
     }
 
-    private func setupClient(_ server: ServerSettings, reorder: ReorderSettings) {
+    private func setupClient(_ server: ServerSettings, reorder: ReorderSettings, hybrid: HybridSettings) {
         let cfg = mqvpn_config_new()
         mqvpn_config_set_server(cfg, server.host, Int32(server.port))
         mqvpn_config_set_clock(cfg, mqvpn_ios_clock_us, nil)
@@ -110,6 +111,30 @@ final class MqvpnEngine: NSObject {
             reorderConfigured = true
         }
         log.notice("[reorder] applied rules=\(decision.added)/\(plan.rules.count) configured=\(self.reorderConfigured)")
+        // Hybrid: mode/limits/rate first, enable LAST only if all landed
+        // (fail-closed — set_hybrid_enabled has no rollback for later
+        // failures; mirrors the reorder rules-first pattern above).
+        var hybridOK = false
+        if hybrid.enabled {
+            let iosTcpMaxFlows: UInt32 = 64      // couples with mobile-profile MEMP_NUM_TCP_PCB=128
+            let iosIdleTimeoutSec: UInt32 = 300  // library default, stated explicitly
+            let iosRecvRateLimit: UInt64 = 125_000_000  // 1 Gbps ceiling; QUIC window = rate x srtt
+            let rcs = [
+                mqvpn_config_set_hybrid_tcp_mode(cfg, Int32(hybrid.tcpMode)),
+                mqvpn_config_set_hybrid_limits(cfg, iosTcpMaxFlows, iosIdleTimeoutSec),
+                mqvpn_config_set_recv_rate_limit(cfg, iosRecvRateLimit),
+            ]
+            if rcs.allSatisfy({ $0 == 0 }) {
+                hybridOK = (mqvpn_config_set_hybrid_enabled(cfg, 1) == 0)
+            }
+            if !hybridOK {
+                // Array interpolation is os.Logger-private by default — force
+                // public or the one log needed on failure reads "<private>".
+                log.error("[hybrid] setter failed rcs=\(rcs.map(String.init).joined(separator: ","), privacy: .public) — starting with hybrid OFF")
+            }
+        }
+        hybridConfigured = hybridOK
+        log.notice("[hybrid] applied enabled=\(hybrid.enabled) mode=\(hybrid.tcpMode) configured=\(hybridOK)")
         var cbs = mqvpn_client_callbacks_t()
         cbs.abi_version = UInt32(MQVPN_CALLBACKS_ABI_VERSION)
         cbs.struct_size = UInt32(MemoryLayout<mqvpn_client_callbacks_t>.size)
