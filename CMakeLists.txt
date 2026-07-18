@@ -101,6 +101,16 @@ if(MQVPN_ENABLE_HYBRID_TCP_LANE)
     set(MQVPN_HYBRID_TCP_LANE_BUILD ON)
 endif()
 
+# Mobile lwIP profile (iOS NE memory ceiling). Directory-global on purpose:
+# the profile constants are consumed by lwip_core AND tcp_lane.h includers
+# (mqvpn_lib, tests, fuzz, microbench) — per-target defs would silently
+# split the profile across TUs. Must precede every lane target definition.
+option(MQVPN_LWIP_MOBILE_PROFILE
+       "Shrink lwIP TCP-lane buffers for mobile (iOS NE) builds" OFF)
+if(MQVPN_LWIP_MOBILE_PROFILE)
+    add_compile_definitions(MQVPN_LWIP_MOBILE_PROFILE)
+endif()
+
 # ---------- Hybrid mode server-side TCP egress (Linux-only) ----------
 # Server-side connect-tcp egress (src/hybrid/tcp_egress.c): POSIX sockets +
 # the platform egress-fd registry (platform_linux.c only). Depends on the
@@ -537,6 +547,8 @@ endif()
 option(BUILD_TESTING "Build unit tests" ON)
 if(BUILD_TESTING)
     enable_testing()
+    add_test(NAME check_lwip_profile_invariance
+             COMMAND bash ${CMAKE_SOURCE_DIR}/tests/check_lwip_profile_invariance.sh)
     add_executable(test_route_parse_darwin
         tests/test_route_parse_darwin.c src/platform/darwin/routing.c
         src/platform/posix/dns_common.c src/log.c)
@@ -662,6 +674,8 @@ target_link_libraries(mqvpn
 option(BUILD_TESTING "Build unit tests" ON)
 if(BUILD_TESTING)
     enable_testing()
+    add_test(NAME check_lwip_profile_invariance
+             COMMAND bash ${CMAKE_SOURCE_DIR}/tests/check_lwip_profile_invariance.sh)
 
     # Each test links only the source files it needs (no xquic dependency)
     add_executable(test_config  tests/test_config.c  src/config.c  src/log.c)
