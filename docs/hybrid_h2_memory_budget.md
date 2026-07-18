@@ -130,7 +130,7 @@ a device-internal handoff (µs-scale latency, no real BDP to fill), not the WAN 
 — the WAN bytes-in-flight belong to the QUIC layer's own flow-control window (§5b), not the
 lwIP TCP window.
 
-Measured (Linux netns, 2×100 Mbit/s paths per config, QUIC-side `RecvRateLimit` fixed at
+Measured data (Linux netns, 2×100 Mbit/s paths per config, QUIC-side `RecvRateLimit` fixed at
 125 MB/s — see §5b) supports the reframing for this topology: sweeping `TCP_RCV_SCALE` /
 `TCP_WND` down through and below the mobile profile's default shows no aggregate goodput
 loss.
@@ -204,7 +204,7 @@ Derived subtotal at 64 concurrent flows:
 | 64 × `TCP_WND` (receive) | ≈ 16 MiB | 64 × 262,140 B |
 | Shared TCP segment pool (`MEMP_NUM_TCP_SEG`) | ≈ 4.4 MiB | 512-segment cap, shared send+OOSEQ |
 | `PBUF_POOL` (32 pbufs) | ≈ 0.29 MiB | 32 × `PBUF_POOL_BUFSIZE` |
-| Marker tables (RAW + CLOSING, 256 each) | ≈ 0.06 MiB | §4 shape, mobile caps |
+| Marker tables (RAW + CLOSING, 256 each) | ≈ 0.09 MiB | §4 shape, mobile caps |
 | 64 × `TCP_MSS` downlink stash | ≈ 0.55 MiB | one stashed downlink chunk per flow (§3) |
 | PCB pool (`MEMP_NUM_TCP_PCB` = 128) | ≈ 0.2 MiB | lwIP pcb struct × 128 |
 | **Subtotal** | **≈ 21.5 MiB** | lower-bound-leaning, see below |
