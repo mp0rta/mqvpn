@@ -93,8 +93,8 @@ static void test_tcp_close_hook(struct tcp_pcb *pcb);
 
 /* The 90000-byte backlog sites assume LOW < 90000 < HIGH in BOTH profiles;
  * a sweep scale that breaks this must re-derive the sites consciously. */
-_Static_assert(90000u > MQVPN_TCP_LANE_BP_LOW_WATER
-               && 90000u < MQVPN_TCP_LANE_BP_HIGH_WATER,
+_Static_assert(90000u > MQVPN_TCP_LANE_BP_LOW_WATER &&
+                   90000u < MQVPN_TCP_LANE_BP_HIGH_WATER,
                "backlog literal no longer straddles the watermarks");
 
 static int g_pass = 0, g_fail = 0;

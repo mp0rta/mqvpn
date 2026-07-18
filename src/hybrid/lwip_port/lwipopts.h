@@ -1,8 +1,8 @@
 #ifndef MQVPN_LWIPOPTS_H
 #define MQVPN_LWIPOPTS_H
 
-#define NO_SYS      1
-#define LWIP_TIMERS 0 /* mqvpn drives tcp_tmr()/ip_reass_tmr() manually from tick() */
+#define NO_SYS               1
+#define LWIP_TIMERS          0 /* mqvpn drives tcp_tmr()/ip_reass_tmr() manually from tick() */
 #define SYS_LIGHTWEIGHT_PROT 0 /* single-threaded, all lwIP calls on the tick thread */
 
 /* Do NOT alias htons/ntohs/htonl/ntohl to lwip_htons & co. Darwin's
