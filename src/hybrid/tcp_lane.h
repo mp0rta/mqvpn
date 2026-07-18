@@ -257,18 +257,35 @@ int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
  * is TCP_WND (~2 MiB, lwip_port/lwipopts.h) by TCP mechanics — the memory
  * budget (docs/hybrid_h2_memory_budget.md) must cite TCP_WND, not the
  * high-water mark. */
+#include "lwip_port/mqvpn_lwip_profile.h"
+
+#ifdef MQVPN_LWIP_MOBILE_PROFILE
+/* Derived from the SAME scale as lwipopts.h: HIGH = TCP_WND/2, LOW =
+ * TCP_WND/8 — keeps HIGH < TCP_WND structurally and the 4:1 ratio. */
+#  define MQVPN_TCP_LANE_BP_HIGH_WATER ((65535u << MQVPN_LWIP_MOBILE_RCV_SCALE) / 2)
+#  define MQVPN_TCP_LANE_BP_LOW_WATER  ((65535u << MQVPN_LWIP_MOBILE_RCV_SCALE) / 8)
+/* #ifndef: tests/test_tcp_lane.c pre-defines both caps as 4u before the TU
+ * include (cap-branch testing) — the mobile profile must not collide. */
+#  ifndef TCP_LANE_RAW_MARKER_CAP
+#    define TCP_LANE_RAW_MARKER_CAP 256u
+#  endif
+#  ifndef TCP_LANE_CLOSING_CAP
+#    define TCP_LANE_CLOSING_CAP 256u
+#  endif
+#endif
+
 #ifndef MQVPN_TCP_LANE_BP_HIGH_WATER
-#define MQVPN_TCP_LANE_BP_HIGH_WATER                                            \
-    (262144u) /* 256 KiB — pre-2xx buffering                                  \
-               * withholds recved beyond this; between mqproxy's 64 KiB minimum \
-               * and the multi-MB TCP_WND: headroom without approaching the     \
-               * memory-budget concerns. */
+#  define MQVPN_TCP_LANE_BP_HIGH_WATER                                            \
+      (262144u) /* 256 KiB — pre-2xx buffering                                  \
+                 * withholds recved beyond this; between mqproxy's 64 KiB minimum \
+                 * and the multi-MB TCP_WND: headroom without approaching the     \
+                 * memory-budget concerns. */
 #endif
 #ifndef MQVPN_TCP_LANE_BP_LOW_WATER
-#define MQVPN_TCP_LANE_BP_LOW_WATER                                       \
-    (65536u) /* 64 KiB — recved resumes only                            \
-              * once the unsent queue drains below this; the gap prevents \
-              * withhold/resume flapping. */
+#  define MQVPN_TCP_LANE_BP_LOW_WATER                                       \
+      (65536u) /* 64 KiB — recved resumes only                            \
+                * once the unsent queue drains below this; the gap prevents \
+                * withhold/resume flapping. */
 #endif
 
 /* cli_tcp_lane_h3_send return contract (tcp_lane.c never includes xquic
