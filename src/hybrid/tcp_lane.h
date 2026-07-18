@@ -257,15 +257,19 @@ int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
  * is TCP_WND (~2 MiB, lwip_port/lwipopts.h) by TCP mechanics — the memory
  * budget (docs/hybrid_h2_memory_budget.md) must cite TCP_WND, not the
  * high-water mark. */
+#ifndef MQVPN_TCP_LANE_BP_HIGH_WATER
 #define MQVPN_TCP_LANE_BP_HIGH_WATER                                            \
     (262144u) /* 256 KiB — pre-2xx buffering                                  \
                * withholds recved beyond this; between mqproxy's 64 KiB minimum \
                * and the multi-MB TCP_WND: headroom without approaching the     \
                * memory-budget concerns. */
+#endif
+#ifndef MQVPN_TCP_LANE_BP_LOW_WATER
 #define MQVPN_TCP_LANE_BP_LOW_WATER                                       \
     (65536u) /* 64 KiB — recved resumes only                            \
               * once the unsent queue drains below this; the gap prevents \
               * withhold/resume flapping. */
+#endif
 
 /* cli_tcp_lane_h3_send return contract (tcp_lane.c never includes xquic
  * headers, so xquic error codes are normalized at this boundary). */
