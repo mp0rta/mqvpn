@@ -16,6 +16,7 @@ swiftc -o "$OUT" \
     "$SHARED/ServerSettings.swift" \
     "$SHARED/ServerResolve.swift" \
     "$SHARED/ReorderSettings.swift" \
+    "$SHARED/HybridSettings.swift" \
     "$SHARED/ProviderMessage.swift" \
     "$APP/ReorderIngest.swift" \
     "$DIR/main.swift"

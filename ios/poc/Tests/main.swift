@@ -160,4 +160,16 @@ check(resolveServer("   ", 443) == nil, "whitespace host → nil")
 check(resolveServer("127.0.0.1", 443)?.ipString == "127.0.0.1", "ipString IP literal")
 check(resolveServer("localhost", 8080)?.ipString == "127.0.0.1", "ipString from hostname")
 
+// HybridSettings
+let hy = HybridSettings(enabled: true, tcpMode: 0)
+check(HybridSettings(providerConfiguration: hy.toProviderConfiguration()) == hy, "hybrid round-trip")
+check(HybridSettings.disabled == HybridSettings(enabled: false, tcpMode: 2), "hybrid disabled default auto")
+check(HybridSettings(providerConfiguration: nil) == nil, "hybrid nil dict -> nil")
+let hyBad: [String: Any] = ["hybridEnabled": NSNumber(value: true), "hybridTcpMode": NSNumber(value: 9)]
+check(HybridSettings(providerConfiguration: hyBad)!.tcpMode == 2, "out-of-range mode clamps to auto")
+let hyBool: [String: Any] = ["hybridEnabled": NSNumber(value: 1), "hybridTcpMode": NSNumber(value: true)]
+let hyParsed = HybridSettings(providerConfiguration: hyBool)!
+check(hyParsed.enabled == false, "int-backed enabled rejected (isBool strict)")
+check(hyParsed.tcpMode == 2, "bool-backed mode clamps to auto")
+
 if failures == 0 { print("host tests: ALL PASS") } else { print("host tests: \(failures) FAILURES"); exit(1) }
