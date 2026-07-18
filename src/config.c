@@ -94,6 +94,7 @@ enum {
     SEC_REORDER,
     SEC_REORDER_RULE,
     SEC_HYBRID,
+    SEC_ADVANCED,
 };
 
 static int
@@ -108,6 +109,7 @@ parse_section(const char *name)
     if (strcasecmp(name, "Reorder") == 0) return SEC_REORDER;
     if (strcasecmp(name, "ReorderRule") == 0) return SEC_REORDER_RULE;
     if (strcasecmp(name, "Hybrid") == 0) return SEC_HYBRID;
+    if (strcasecmp(name, "Advanced") == 0) return SEC_ADVANCED;
     return -1;
 }
 
@@ -124,6 +126,7 @@ section_name(int section)
     case SEC_REORDER: return "Reorder";
     case SEC_REORDER_RULE: return "ReorderRule";
     case SEC_HYBRID: return "Hybrid";
+    case SEC_ADVANCED: return "Advanced";
     default: return "?";
     }
 }
@@ -488,45 +491,44 @@ cfgk_post_explicit_cap(mqvpn_file_config_t *cfg)
 #define CFGK_OFF(field) offsetof(mqvpn_file_config_t, field)
 
 /* Row helpers keep the table readable; positional init otherwise. */
-#define CFG_STR(sec, ik, jk, field)                                        \
-    {                                                                      \
-        (sec), (ik), (jk), CFGK_STR, CFGK_OFF(field),                      \
-            sizeof(((mqvpn_file_config_t *)0)->field), 0, NULL, 0, 0, NULL \
-    }
-#define CFG_STR_POST(sec, ik, jk, field, post)                               \
-    {                                                                        \
-        (sec), (ik), (jk), CFGK_STR, CFGK_OFF(field),                        \
-            sizeof(((mqvpn_file_config_t *)0)->field), 0, NULL, 0, 0, (post) \
-    }
-#define CFG_BOOL(sec, ik, jk, field)                                          \
-    {                                                                         \
-        (sec), (ik), (jk), CFGK_BOOL, CFGK_OFF(field), 0, 0, NULL, 0, 0, NULL \
-    }
-#define CFG_INT(sec, ik, jk, field, okfn)                                      \
-    {                                                                          \
-        (sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 0, 0, NULL \
-    }
-#define CFG_INT_FB(sec, ik, jk, field, okfn, fb)                                  \
-    {                                                                             \
-        (sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 1, (fb), NULL \
-    }
-#define CFG_U32(sec, ik, jk, field)                                                      \
-    {                                                                                    \
-        (sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, NULL \
-    }
-#define CFG_U32_POST(sec, ik, jk, field, post)                                      \
-    {                                                                               \
-        (sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, \
-            (post)                                                                  \
-    }
-#define CFG_U16(sec, ik, jk, field)                                                  \
-    {                                                                                \
-        (sec), (ik), (jk), CFGK_U16, CFGK_OFF(field), 0, 0xffffULL, NULL, 0, 0, NULL \
-    }
-#define CFG_U64(sec, ik, jk, field, maxv)                                         \
-    {                                                                             \
-        (sec), (ik), (jk), CFGK_U64, CFGK_OFF(field), 0, (maxv), NULL, 0, 0, NULL \
-    }
+#define CFG_STR(sec, ik, jk, field)             \
+    {(sec),                                     \
+     (ik),                                      \
+     (jk),                                      \
+     CFGK_STR,                                  \
+     CFGK_OFF(field),                           \
+     sizeof(((mqvpn_file_config_t *)0)->field), \
+     0,                                         \
+     NULL,                                      \
+     0,                                         \
+     0,                                         \
+     NULL}
+#define CFG_STR_POST(sec, ik, jk, field, post)  \
+    {(sec),                                     \
+     (ik),                                      \
+     (jk),                                      \
+     CFGK_STR,                                  \
+     CFGK_OFF(field),                           \
+     sizeof(((mqvpn_file_config_t *)0)->field), \
+     0,                                         \
+     NULL,                                      \
+     0,                                         \
+     0,                                         \
+     (post)}
+#define CFG_BOOL(sec, ik, jk, field) \
+    {(sec), (ik), (jk), CFGK_BOOL, CFGK_OFF(field), 0, 0, NULL, 0, 0, NULL}
+#define CFG_INT(sec, ik, jk, field, okfn) \
+    {(sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 0, 0, NULL}
+#define CFG_INT_FB(sec, ik, jk, field, okfn, fb) \
+    {(sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 1, (fb), NULL}
+#define CFG_U32(sec, ik, jk, field) \
+    {(sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, NULL}
+#define CFG_U32_POST(sec, ik, jk, field, post) \
+    {(sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, (post)}
+#define CFG_U16(sec, ik, jk, field) \
+    {(sec), (ik), (jk), CFGK_U16, CFGK_OFF(field), 0, 0xffffULL, NULL, 0, 0, NULL}
+#define CFG_U64(sec, ik, jk, field, maxv) \
+    {(sec), (ik), (jk), CFGK_U64, CFGK_OFF(field), 0, (maxv), NULL, 0, 0, NULL}
 
 static const cfg_key_desc_t cfg_keys[] = {
     /* [Interface] */
@@ -596,6 +598,9 @@ static const cfg_key_desc_t cfg_keys[] = {
             hybrid.tcp_connect_timeout_sec),
     CFG_U32(SEC_HYBRID, "TcpMaxGlobalFlows", "tcp_max_global_flows",
             hybrid.tcp_max_global_flows),
+    /* [Advanced] — JSON side lives inside the bounded "advanced" object */
+    CFG_U64(SEC_ADVANCED, "RecvRateLimit", "recv_rate_limit", recv_rate_limit,
+            0xffffffffffffffffULL),
 };
 
 /* Shared typed store. Returns 0 on success, -1 on invalid value (caller
@@ -711,12 +716,14 @@ cfg_key_apply_ini(mqvpn_file_config_t *cfg, int section, const char *key, const 
 
 /* JSON-side walker: applies every table row that has a json_key. SEC_REORDER
  * rows are searched inside [ro_raw, ro_end) (the bounded "reorder" object),
- * SEC_HYBRID rows inside [hy_raw, hy_end) (the bounded "hybrid" object);
+ * SEC_HYBRID rows inside [hy_raw, hy_end) (the bounded "hybrid" object),
+ * SEC_ADVANCED rows inside [adv_raw, adv_end) (the bounded "advanced" object);
  * everything else at top level. Absent keys are silent (forward-compat);
  * present-but-invalid keys warn. */
 static void
 cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *ro_raw,
-                   const char *ro_end, const char *hy_raw, const char *hy_end)
+                   const char *ro_end, const char *hy_raw, const char *hy_end,
+                   const char *adv_raw, const char *adv_end)
 {
     /* Must cover the largest CFGK_STR destination (listen/server_addr/
      * control_listen, all char[280]) or JSON strings would truncate
@@ -733,6 +740,9 @@ cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *
         } else if (d->section == SEC_HYBRID) {
             if (!hy_raw || !hy_end) continue;
             v = json_find_key_bounded(hy_raw, hy_end, d->json_key);
+        } else if (d->section == SEC_ADVANCED) {
+            if (!adv_raw || !adv_end) continue;
+            v = json_find_key_bounded(adv_raw, adv_end, d->json_key);
         } else {
             v = json_find_key(json_text, d->json_key);
         }
@@ -775,9 +785,10 @@ cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *
         }
         if (rc < 0)
             LOG_WRN("JSON: invalid %s%s; %s",
-                    d->section == SEC_REORDER  ? "reorder "
-                    : d->section == SEC_HYBRID ? "hybrid "
-                                               : "",
+                    d->section == SEC_REORDER    ? "reorder "
+                    : d->section == SEC_HYBRID   ? "hybrid "
+                    : d->section == SEC_ADVANCED ? "advanced "
+                                                 : "",
                     d->json_key, d->has_invalid_fallback ? "using default" : "ignoring");
     }
 }
@@ -1092,8 +1103,14 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     const char *hy_raw = json_find_key(json_text, "hybrid");
     const char *hy_end = (hy_raw && *hy_raw == '{') ? json_object_end(hy_raw) : NULL;
 
+    /* [Advanced] equivalent: an "advanced" object holding the same flat
+     * scalar knobs as the INI section (snake_case). Bounded the same way
+     * as "reorder"/"hybrid". */
+    const char *adv_raw = json_find_key(json_text, "advanced");
+    const char *adv_end = (adv_raw && *adv_raw == '{') ? json_object_end(adv_raw) : NULL;
+
     /* All scalar keys — one walk of the shared descriptor table. */
-    cfg_key_apply_json(cfg, json_text, ro_raw, ro_end, hy_raw, hy_end);
+    cfg_key_apply_json(cfg, json_text, ro_raw, ro_end, hy_raw, hy_end, adv_raw, adv_end);
 
     /* [Hybrid] EgressAllow/EgressDeny — hand-coded like "users" below,
      * bounded to the "hybrid" object span like every other hybrid key. */
