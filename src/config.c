@@ -491,44 +491,45 @@ cfgk_post_explicit_cap(mqvpn_file_config_t *cfg)
 #define CFGK_OFF(field) offsetof(mqvpn_file_config_t, field)
 
 /* Row helpers keep the table readable; positional init otherwise. */
-#define CFG_STR(sec, ik, jk, field)             \
-    {(sec),                                     \
-     (ik),                                      \
-     (jk),                                      \
-     CFGK_STR,                                  \
-     CFGK_OFF(field),                           \
-     sizeof(((mqvpn_file_config_t *)0)->field), \
-     0,                                         \
-     NULL,                                      \
-     0,                                         \
-     0,                                         \
-     NULL}
-#define CFG_STR_POST(sec, ik, jk, field, post)  \
-    {(sec),                                     \
-     (ik),                                      \
-     (jk),                                      \
-     CFGK_STR,                                  \
-     CFGK_OFF(field),                           \
-     sizeof(((mqvpn_file_config_t *)0)->field), \
-     0,                                         \
-     NULL,                                      \
-     0,                                         \
-     0,                                         \
-     (post)}
-#define CFG_BOOL(sec, ik, jk, field) \
-    {(sec), (ik), (jk), CFGK_BOOL, CFGK_OFF(field), 0, 0, NULL, 0, 0, NULL}
-#define CFG_INT(sec, ik, jk, field, okfn) \
-    {(sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 0, 0, NULL}
-#define CFG_INT_FB(sec, ik, jk, field, okfn, fb) \
-    {(sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 1, (fb), NULL}
-#define CFG_U32(sec, ik, jk, field) \
-    {(sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, NULL}
-#define CFG_U32_POST(sec, ik, jk, field, post) \
-    {(sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, (post)}
-#define CFG_U16(sec, ik, jk, field) \
-    {(sec), (ik), (jk), CFGK_U16, CFGK_OFF(field), 0, 0xffffULL, NULL, 0, 0, NULL}
-#define CFG_U64(sec, ik, jk, field, maxv) \
-    {(sec), (ik), (jk), CFGK_U64, CFGK_OFF(field), 0, (maxv), NULL, 0, 0, NULL}
+#define CFG_STR(sec, ik, jk, field)                                        \
+    {                                                                      \
+        (sec), (ik), (jk), CFGK_STR, CFGK_OFF(field),                      \
+            sizeof(((mqvpn_file_config_t *)0)->field), 0, NULL, 0, 0, NULL \
+    }
+#define CFG_STR_POST(sec, ik, jk, field, post)                               \
+    {                                                                        \
+        (sec), (ik), (jk), CFGK_STR, CFGK_OFF(field),                        \
+            sizeof(((mqvpn_file_config_t *)0)->field), 0, NULL, 0, 0, (post) \
+    }
+#define CFG_BOOL(sec, ik, jk, field)                                          \
+    {                                                                         \
+        (sec), (ik), (jk), CFGK_BOOL, CFGK_OFF(field), 0, 0, NULL, 0, 0, NULL \
+    }
+#define CFG_INT(sec, ik, jk, field, okfn)                                      \
+    {                                                                          \
+        (sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 0, 0, NULL \
+    }
+#define CFG_INT_FB(sec, ik, jk, field, okfn, fb)                                  \
+    {                                                                             \
+        (sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 1, (fb), NULL \
+    }
+#define CFG_U32(sec, ik, jk, field)                                                      \
+    {                                                                                    \
+        (sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, NULL \
+    }
+#define CFG_U32_POST(sec, ik, jk, field, post)                                      \
+    {                                                                               \
+        (sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, \
+            (post)                                                                  \
+    }
+#define CFG_U16(sec, ik, jk, field)                                                  \
+    {                                                                                \
+        (sec), (ik), (jk), CFGK_U16, CFGK_OFF(field), 0, 0xffffULL, NULL, 0, 0, NULL \
+    }
+#define CFG_U64(sec, ik, jk, field, maxv)                                         \
+    {                                                                             \
+        (sec), (ik), (jk), CFGK_U64, CFGK_OFF(field), 0, (maxv), NULL, 0, 0, NULL \
+    }
 
 static const cfg_key_desc_t cfg_keys[] = {
     /* [Interface] */
