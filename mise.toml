@@ -1,2 +1,10 @@
+[settings]
+pipx.uvx = true # run pipx-backend tools via uvx (no separate pipx install)
+
 [tools]
 node = "22"
+uv = "latest" # runner for the pipx backend below
+# Pin to the same major as CI's format-check (ubuntu clang-format 18) —
+# other majors (e.g. 22) disagree with the repo style and reformat
+# unrelated regions. Never run a non-pinned clang-format on this repo.
+"pipx:clang-format" = "18.1.8"
