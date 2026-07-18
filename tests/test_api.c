@@ -469,6 +469,11 @@ TEST(config_set_hybrid)
     ASSERT_EQ(cfg->hybrid.tcp_max_global_flows, 8192); /* rejected → unchanged */
     ASSERT_EQ(mqvpn_config_set_hybrid_max_global_flows(NULL, 1), MQVPN_ERR_INVALID_ARG);
 
+    /* [Advanced] RecvRateLimit setter (client-only knob; 0 = off) */
+    ASSERT_EQ(mqvpn_config_set_recv_rate_limit(cfg, 125000000ULL), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_recv_rate_limit(cfg, 0), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_recv_rate_limit(NULL, 1), MQVPN_ERR_INVALID_ARG);
+
     mqvpn_config_free(cfg);
 }
 

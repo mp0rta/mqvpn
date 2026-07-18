@@ -653,6 +653,14 @@ mqvpn_config_set_hybrid_limits(mqvpn_config_t *cfg, uint32_t tcp_max_flows,
     return MQVPN_OK;
 }
 
+int
+mqvpn_config_set_recv_rate_limit(mqvpn_config_t *cfg, uint64_t bytes_per_sec)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->recv_rate_limit = bytes_per_sec;
+    return MQVPN_OK;
+}
+
 void
 mqvpn_config_apply_hybrid(mqvpn_config_t *cfg, const mqvpn_hybrid_config_t *src)
 {

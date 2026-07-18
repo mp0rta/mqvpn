@@ -560,6 +560,13 @@ MQVPN_API int mqvpn_config_set_hybrid_egress_acl(mqvpn_config_t *cfg, const char
                                                  int n_allow, const char **deny,
                                                  int n_deny);
 
+/* Conn-level receive-rate cap in bytes/sec (0 = library default, no cap).
+ * Bounds the aggregate QUIC transport receive window to rate x srtt.
+ * CLIENT-ONLY: the server connection-settings path ignores it — a
+ * server-side cap would throttle every client's uplink. */
+MQVPN_API int mqvpn_config_set_recv_rate_limit(mqvpn_config_t *cfg,
+                                               uint64_t bytes_per_sec);
+
 /* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock) */
 typedef uint64_t (*mqvpn_clock_fn)(void *ctx);
 MQVPN_API int mqvpn_config_set_clock(mqvpn_config_t *cfg, mqvpn_clock_fn clock_fn,
