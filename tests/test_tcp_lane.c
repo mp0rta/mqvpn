@@ -91,6 +91,12 @@ static void test_tcp_close_hook(struct tcp_pcb *pcb);
 #include <stdio.h>
 #include <string.h>
 
+/* The 90000-byte backlog sites assume LOW < 90000 < HIGH in BOTH profiles;
+ * a sweep scale that breaks this must re-derive the sites consciously. */
+_Static_assert(90000u > MQVPN_TCP_LANE_BP_LOW_WATER
+               && 90000u < MQVPN_TCP_LANE_BP_HIGH_WATER,
+               "backlog literal no longer straddles the watermarks");
+
 static int g_pass = 0, g_fail = 0;
 
 /* ─── cli_tcp_lane_open_stream stub (real impl: mqvpn_client.c) ───
@@ -1595,17 +1601,20 @@ test_relay_pending_stream_high_water(void)
     ASSERT_TRUE(f != NULL, "flow bound, PENDING_STREAM");
 
     const uint16_t seg = 9000;
-    const int n = 30; /* 9000*29=261000 < HIGH_WATER(262144) <= 9000*30=270000 */
-    for (int i = 0; i < n; i++) {
+    /* Crossing index: smallest n with 9000*n >= HIGH_WATER.
+     * default: ceil(262144/9000)=30 (unchanged); mobile scale=2:
+     * ceil(131070/9000)=15. */
+    const uint32_t n = (MQVPN_TCP_LANE_BP_HIGH_WATER + 8999u) / 9000u;
+    for (uint32_t i = 0; i < n; i++) {
         struct pbuf *p = mk_pbuf(seg);
         ASSERT_TRUE(p != NULL, "pbuf alloc");
         mqvpn_tcp_lane_on_lwip_recv(f, &pcb, p, ERR_OK);
     }
 
-    ASSERT_EQ_INT(f->uplink_queued_bytes, (uint32_t)seg * n, "all 30 segments queued");
+    ASSERT_EQ_INT(f->uplink_queued_bytes, (uint32_t)seg * n, "all n segments queued");
     ASSERT_EQ_INT(f->uplink_withheld, 1, "high-water crossed -> withheld latched");
-    ASSERT_EQ_INT(g_recved_total, 9000u * 29u,
-                  "the 29 segments below high-water were recved immediately");
+    ASSERT_EQ_INT(g_recved_total, 9000u * (n - 1u),
+                  "the n-1 segments below high-water were recved immediately");
     ASSERT_EQ_INT(f->uplink_withheld_recved, 9000,
                   "only the crossing segment is deferred");
 
