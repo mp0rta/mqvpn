@@ -113,7 +113,7 @@ Extensions as input for a future mobile port ("cut concurrency" vs. "shrink the 
 below), since v1 was Linux-CLI-only and no such port existed. That port now exists in-tree:
 a compile-time `MQVPN_LWIP_MOBILE_PROFILE` build flag (`src/hybrid/lwip_port/lwipopts.h`)
 shrinks the constants from §1, parameterized by `MQVPN_LWIP_MOBILE_RCV_SCALE` (default 2),
-and pairs the window shrink with a cut in `tcp_max_flows` to 64. This is exactly the second
+and sizes the pools (`MEMP_NUM_TCP_PCB` = 128) for a `tcp_max_flows` cut to 64, a ceiling the mobile client sets at runtime rather than the build flag (the config default remains 256). This is exactly the second
 lever from the original estimate below, exercised together with the first rather than in
 isolation. §5a revises the goodput caveat that estimate ended on against measured data;
 §5b covers the QUIC-side complement; §5c gives the shipped profile's budget table.

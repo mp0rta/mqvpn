@@ -139,7 +139,7 @@ final class TunnelController: ObservableObject {
         manager?.connection.stopVPNTunnel()
     }
 
-    /// Persists server + reorder settings via the atomic snapshot -> merge ->
+    /// Persists server + reorder + hybrid settings via the atomic snapshot -> merge ->
     /// mutate -> commit -> refresh sequence in performAtomicSave, the exact
     /// function the host tests fault-inject — so the tested logic IS the
     /// production logic.
