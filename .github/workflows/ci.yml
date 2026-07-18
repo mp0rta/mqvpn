@@ -662,7 +662,7 @@ jobs:
             --target mqvpn_lib mqvpn_shared mqvpn_darwin_platform \
                      mqvpn test_route_parse_darwin test_dns_backup_darwin \
                      test_dns_state_darwin test_routing_seq_darwin test_killswitch_rules_darwin \
-                     test_tcp_lane \
+                     test_tcp_lane test_config test_conn_settings \
             -j "$(sysctl -n hw.ncpu)"
 
       - name: Verify artifacts
