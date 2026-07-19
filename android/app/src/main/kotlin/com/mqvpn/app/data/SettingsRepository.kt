@@ -27,6 +27,8 @@ import javax.inject.Singleton
 class SettingsRepository @Inject constructor(
     private val dataStore: DataStore<Preferences>,
 ) {
+    // Adding a DemoSettings field = key here + read (settings map) + write
+    // (save) + round-trip test entry in SettingsRepositoryTest.
     private object Keys {
         val SERVER_ADDRESS = stringPreferencesKey("server_address")
         val SERVER_PORT = intPreferencesKey("server_port")
@@ -60,19 +62,19 @@ class SettingsRepository @Inject constructor(
             )
         }
 
-    suspend fun save(s: DemoSettings) {
+    suspend fun save(newSettings: DemoSettings) {
         dataStore.edit { prefs ->
-            prefs[Keys.SERVER_ADDRESS] = s.serverAddress
-            prefs[Keys.SERVER_PORT] = s.serverPort
-            prefs[Keys.TLS_SERVER_NAME] = s.tlsServerName
-            prefs[Keys.AUTH_KEY] = s.authKey
-            prefs[Keys.INSECURE] = s.insecure
-            prefs[Keys.KILL_SWITCH] = s.killSwitch
-            prefs[Keys.REORDER_ENABLED] = s.reorderEnabled
-            prefs[Keys.REORDER_PROFILE] = s.reorderProfile
-            prefs[Keys.REORDER_PORTS] = s.reorderPorts
-            prefs[Keys.HYBRID_ENABLED] = s.hybridEnabled
-            prefs[Keys.HYBRID_TCP_MODE] = s.hybridTcpMode
+            prefs[Keys.SERVER_ADDRESS] = newSettings.serverAddress
+            prefs[Keys.SERVER_PORT] = newSettings.serverPort
+            prefs[Keys.TLS_SERVER_NAME] = newSettings.tlsServerName
+            prefs[Keys.AUTH_KEY] = newSettings.authKey
+            prefs[Keys.INSECURE] = newSettings.insecure
+            prefs[Keys.KILL_SWITCH] = newSettings.killSwitch
+            prefs[Keys.REORDER_ENABLED] = newSettings.reorderEnabled
+            prefs[Keys.REORDER_PROFILE] = newSettings.reorderProfile
+            prefs[Keys.REORDER_PORTS] = newSettings.reorderPorts
+            prefs[Keys.HYBRID_ENABLED] = newSettings.hybridEnabled
+            prefs[Keys.HYBRID_TCP_MODE] = newSettings.hybridTcpMode
         }
     }
 }

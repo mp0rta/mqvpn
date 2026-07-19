@@ -4,9 +4,11 @@
 package com.mqvpn.app
 
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.mqvpn.app.data.DemoSettings
@@ -19,7 +21,6 @@ import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -38,10 +39,14 @@ class SettingsRepositoryTest {
         storeScope.cancel()
     }
 
-    private fun newFile(): File = tmpFolder.newFile("test-${System.nanoTime()}.preferences_pb")
+    private fun newFile(): File = File(tmpFolder.root, "test-${System.nanoTime()}.preferences_pb")
 
-    private fun newDataStore(file: File): DataStore<Preferences> =
+    private fun newDataStore(
+        file: File,
+        corruptionHandler: ReplaceFileCorruptionHandler<Preferences>? = null,
+    ): DataStore<Preferences> =
         PreferenceDataStoreFactory.create(
+            corruptionHandler = corruptionHandler,
             scope = storeScope,
             produceFile = { file },
         )
@@ -98,5 +103,32 @@ class SettingsRepositoryTest {
         val repo = SettingsRepository(newDataStore(file))
 
         assertEquals(DemoSettings(), repo.settings.first())
+    }
+
+    @Test
+    fun `save self-heals a corrupt store when a corruption handler is installed`() = runTest(testDispatcher) {
+        val file = newFile()
+        file.writeBytes(byteArrayOf(0x00, 0x01, 0x02, 0x03, 0x42, 0x13, 0x37))
+
+        val store = newDataStore(file, ReplaceFileCorruptionHandler { emptyPreferences() })
+        val repo = SettingsRepository(store)
+
+        val nonDefault = DemoSettings(
+            serverAddress = "203.0.113.5",
+            serverPort = 8443,
+            tlsServerName = "vpn.example.com",
+            authKey = "another-key",
+            insecure = false,
+            killSwitch = true,
+            reorderEnabled = true,
+            reorderProfile = "FIBER_LTE",
+            reorderPorts = "443,8443",
+            hybridEnabled = true,
+            hybridTcpMode = "RAW",
+        )
+
+        repo.save(nonDefault)
+
+        assertEquals(nonDefault, repo.settings.first())
     }
 }
