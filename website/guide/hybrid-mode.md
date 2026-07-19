@@ -69,13 +69,13 @@ The control API's `get_stats` exposes the lane's runtime counters on both client
 
 ## Mobile builds (iOS)
 
-Mobile builds compile the lane with a reduced lwIP footprint (the
-`MQVPN_LWIP_MOBILE_PROFILE` build flag: ~256 KiB TCP windows and 64-flow pool
-sizing instead of ~2 MiB / 256) to fit the iOS Network Extension memory ceiling.
-The profile is paired with the QUIC-side
-[`[Advanced] RecvRateLimit`](./configuration#advanced) receive-rate cap — shrinking
-the inner TCP windows alone does not bound the outer QUIC connection's own
-buffering, so mobile clients set both. The full budget arithmetic and measured
+iOS builds (`ios/build-ios.sh`) compile the lane with a reduced lwIP footprint
+(the `MQVPN_LWIP_MOBILE_PROFILE` build flag: ~256 KiB TCP windows and 64-flow
+pool sizing instead of ~2 MiB / 256) to fit the iOS Network Extension memory
+ceiling. Android builds use the default profile. The profile is paired with the
+QUIC-side [`[Advanced] RecvRateLimit`](./configuration#advanced) receive-rate
+cap — shrinking the inner TCP windows alone does not bound the outer QUIC
+connection's own buffering, so the iOS client sets both. The full budget arithmetic and measured
 numbers are in
 [docs/hybrid_h2_memory_budget.md §5](https://github.com/mp0rta/mqvpn/blob/main/docs/hybrid_h2_memory_budget.md).
 

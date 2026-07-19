@@ -138,7 +138,7 @@ At the libmqvpn API level, paths can be added or removed while the VPN is runnin
 
 At the library level, the platform uses `mqvpn_client_add_path_fd()` to add a new UDP socket as a path, and the path manager handles the lifecycle automatically. When a path is removed (interface goes down), traffic seamlessly shifts to the remaining paths.
 
-In the standard CLI, paths are specified at startup with `--path` flags (runtime interface monitoring for automatic add/remove is not implemented yet). With multiple paths registered at startup, failover still shifts traffic to remaining paths when one path fails.
+In the standard CLI, paths are specified at startup with `--path` flags. The platform layer then monitors those interfaces at runtime (netlink on Linux, `PF_ROUTE` on macOS): when an interface goes down its path is dropped automatically, and when the interface comes back with a usable address the socket is re-created and the path is re-added — backed by a periodic recovery timer. Discovery of brand-new interfaces that were never registered at startup is not implemented; only interfaces named via `--path` participate in this monitoring.
 
 ## Path Weighting
 

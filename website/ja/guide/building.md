@@ -204,4 +204,37 @@ android/
 └── app/           # デモアプリ（Jetpack Compose）
 ```
 
+## iOS
+
+::: info
+iOS 対応はクライアントのみで開発中です。アプリと PacketTunnel 拡張は `ios/poc/` 配下にあります。CI はフルチェーンのクロスビルドとアプリの未署名ビルドを行いますが、実機での実行には各自の署名 ID が必要です。
+:::
+
+### 前提条件
+
+- 新しめの Xcode（16.3 以降。CI は `macos-15` イメージでインストール済みの最新 Xcode を選択）を備えた macOS
+- CMake、Ninja、Python 3
+- Xcode プロジェクト生成用の [xcodegen](https://github.com/yonaskolb/XcodeGen)（`brew install xcodegen`）
+- サブモジュール込みのチェックアウト（`--recurse-submodules`）。BoringSSL は初回ビルド時に自動でクローンされます
+
+### ネイティブライブラリのクロスビルド
+
+```bash
+./ios/build-ios.sh            # BoringSSL → xquic（静的）→ libmqvpn（静的）
+./ios/build-ios.sh mqvpn      # mqvpn コアのみ再ビルド
+```
+
+このスクリプトは全ライブラリを `iphoneos`/arm64（デプロイメントターゲット 15.0）向けにビルドし、ハイブリッド TCP レーンを縮小版の[モバイル lwIP プロファイル](./hybrid-mode)（`MQVPN_LWIP_MOBILE_PROFILE=ON`）付きで有効化、プロファイルが全翻訳単位に伝播したことを検証（`tests/check_profile_propagation.py`）した上で、アーカイブを `ios/build/` にステージングします（`libmqvpn.a`、`liblwip_core.a`、`libxquic-static.a`、`libssl.a`、`libcrypto.a`）。
+
+### アプリと PacketTunnel 拡張のビルド
+
+```bash
+bash ios/poc/Tests/run-host-tests.sh                         # Swift ホストテスト（SDK 不要）
+
+cp ios/poc/Config.example.xcconfig ios/poc/Config.xcconfig   # DEVELOPMENT_TEAM を設定
+(cd ios/poc && xcodegen generate)                            # Xcode プロジェクトを生成
+```
+
+生成されたプロジェクトを Xcode で開いて実機向けにビルド・実行します。CI は同じビルドを未署名（`CODE_SIGNING_ALLOWED=NO`）で行い、実機・シミュレータでの実行は手動ステップです。
+
 ビルドのテストは[はじめに](./getting-started)を参照してください。

@@ -7,30 +7,32 @@ mqvpn is built as a **[sans-I/O](https://sans-io.readthedocs.io/) C library** (`
 The library does not embed a platform event loop or device management. It is driven via `tick()` and data-injection APIs: received UDP/TUN data is fed via `on_socket_recv()` / `on_tun_packet()`, while egress uses xquic transport callbacks to write to UDP sockets (CLI uses fd-only mode).
 
 ```
-┌───────────────────────────────────────────────┐
-│  Platform Layer (owns I/O)                    │
-│  ┌──────────┐  ┌───────────┐  ┌───────────┐   │
-│  │ Linux CLI│  │ Android   │  │ Windows   │   │
-│  │(libevent)│  │ (Handler) │  │ (IOCP)    │   │
-│  └────┬─────┘  └─────┬─────┘  └─────┬─────┘   │
-│       │ tick()        │ tick()       │ tick() │
-├───────┴───────────────┴──────────────┴────────┤
-│  libmqvpn (core engine — event-loop agnostic) │
-│  ┌──────────────────────────────────────────┐ │
-│  │ mqvpn_client.c / mqvpn_server.c          │ │
-│  │ mqvpn_config.c / auth.c                  │ │
-│  │ path_mgr.c / flow_sched.c / addr_pool.c  │ │
-│  └──────────────────────────────────────────┘ │
-│       │ xquic callbacks                       │
-├───────┴───────────────────────────────────────┤
-│  xquic (QUIC / HTTP/3 / MASQUE engine)        │
-│  BoringSSL (TLS 1.3)                          │
-└───────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  Platform Layer (owns I/O)                                   │
+│  ┌──────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐      │
+│  │ Linux CLI│ │ Darwin    │ │ Android   │ │ Windows   │      │
+│  │(libevent)│ │(libevent) │ │ (Handler) │ │ (IOCP)    │      │
+│  └────┬─────┘ └─────┬─────┘ └─────┬─────┘ └─────┬─────┘      │
+│       │ tick()      │ tick()      │ tick()      │ tick()     │
+├───────┴─────────────┴─────────────┴─────────────┴────────────┤
+│  libmqvpn (core engine — event-loop agnostic)                │
+│  ┌──────────────────────────────────────────┐                │
+│  │ mqvpn_client.c / mqvpn_server.c          │                │
+│  │ mqvpn_config.c / auth.c                  │                │
+│  │ path_mgr.c / flow_sched.c / addr_pool.c  │                │
+│  └──────────────────────────────────────────┘                │
+│       │ xquic callbacks                                      │
+├───────┴──────────────────────────────────────────────────────┤
+│  xquic (QUIC / HTTP/3 / MASQUE engine)                       │
+│  BoringSSL (TLS 1.3)                                         │
+└──────────────────────────────────────────────────────────────┘
 ```
+
+The Darwin layer (`src/platform/darwin/`) serves both macOS (CLI) and iOS (Network Extension), using a libevent event loop and the `utun` device.
 
 ### Why Sans-I/O?
 
-- **Portability** — Each platform provides its own event loop (libevent on Linux, IOCP on Windows, Android Handler on mobile -- or GCD, kqueue, etc. for future ports). The library doesn't force a threading model.
+- **Portability** — Each platform provides its own event loop (libevent on Linux and Darwin/macOS/iOS, IOCP on Windows, Android Handler on mobile). The library doesn't force a threading model.
 - **Testability** — The `tick()` function drives state transitions synchronously, making unit tests deterministic with no timing issues.
 - **Power efficiency** — The platform controls when to wake the CPU. The library reports idle state via `interest.is_idle`.
 - **Dependency separation** — The library itself does not own an event loop implementation; the platform layer owns libevent and OS-specific dependencies (including pthreads on Linux).
@@ -113,4 +115,4 @@ To port mqvpn to a new platform, implement:
 4. **Routing** — Set up routes to direct traffic through the TUN device
 5. **DNS** — Configure DNS to prevent leaks
 
-See `src/platform/linux/platform_linux.c` as a reference implementation.
+See `src/platform/linux/platform_linux.c` and `src/platform/darwin/platform_darwin.c` as reference implementations.
