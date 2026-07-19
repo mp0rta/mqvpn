@@ -235,6 +235,6 @@ cp ios/poc/Config.example.xcconfig ios/poc/Config.xcconfig   # DEVELOPMENT_TEAM 
 (cd ios/poc && xcodegen generate)                            # Xcode プロジェクトを生成
 ```
 
-生成されたプロジェクトを Xcode で開いて実機向けにビルド・実行します。CI は同じビルドを未署名（`CODE_SIGNING_ALLOWED=NO`）で行い、実機・シミュレータでの実行は手動ステップです。
+CI は同じプロジェクトを未署名（`CODE_SIGNING_ALLOWED=NO`）でビルドし、実機・シミュレータでの実行は手動ステップです。
 
 ビルドのテストは[はじめに](./getting-started)を参照してください。

@@ -231,6 +231,6 @@ cp ios/poc/Config.example.xcconfig ios/poc/Config.xcconfig   # set your DEVELOPM
 (cd ios/poc && xcodegen generate)                            # generate the Xcode project
 ```
 
-Open the generated project in Xcode to build and run on a device. CI performs the same build unsigned (`CODE_SIGNING_ALLOWED=NO`); device and simulator execution remain a manual step.
+CI builds the same project unsigned (`CODE_SIGNING_ALLOWED=NO`); device and simulator execution remain a manual step.
 
 See [Getting Started](./getting-started) to test your build.
