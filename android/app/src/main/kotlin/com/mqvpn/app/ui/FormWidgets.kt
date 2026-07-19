@@ -22,10 +22,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 
-/** Warning-tint color shared by settings validation hints. */
+/** Warning-tint color for settings validation hints. */
 internal val WarningColor = Color(0xFFFF9800)
 
-/** Row pairing a label with a trailing [Switch], shared by Dashboard/Settings. */
+/** Row pairing a label with a trailing [Switch]; shared settings-form row. */
 @Composable
 internal fun LabeledSwitchRow(
     label: String,

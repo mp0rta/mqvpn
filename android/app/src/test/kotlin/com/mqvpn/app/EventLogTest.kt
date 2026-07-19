@@ -5,6 +5,7 @@ package com.mqvpn.app
 
 import com.mqvpn.app.ui.EventLog
 import com.mqvpn.app.ui.LogEvent
+import com.mqvpn.app.ui.eventText
 import com.mqvpn.sdk.core.model.MqvpnError
 import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.PathInfo
@@ -260,5 +261,40 @@ class EventLogTest {
 
         assertEquals(2L, log.events[0].time)
         assertEquals(1L, log.events[1].time)
+    }
+
+    // -- eventText rendering ------------------------------------------------
+
+    @Test
+    fun `eventText renders CoreState`() {
+        assertEquals("core → Connected", eventText(LogEvent.Kind.CoreState("Connected")))
+    }
+
+    @Test
+    fun `eventText renders PathAdded`() {
+        assertEquals("wlan0 added (Active)", eventText(LogEvent.Kind.PathAdded("wlan0", 1)))
+    }
+
+    @Test
+    fun `eventText renders PathRemoved`() {
+        assertEquals("wlan0 removed", eventText(LogEvent.Kind.PathRemoved("wlan0")))
+    }
+
+    @Test
+    fun `eventText renders PathStatus`() {
+        assertEquals(
+            "wlan0: Pending → Active",
+            eventText(LogEvent.Kind.PathStatus("wlan0", 0, 1)),
+        )
+    }
+
+    @Test
+    fun `eventText renders Error`() {
+        assertEquals("error: tls failed", eventText(LogEvent.Kind.Error("tls failed")))
+    }
+
+    @Test
+    fun `eventText renders Reconnecting`() {
+        assertEquals("reconnecting in 4s", eventText(LogEvent.Kind.Reconnecting(4)))
     }
 }

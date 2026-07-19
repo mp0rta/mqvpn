@@ -25,6 +25,16 @@ data class LogEvent(val time: Long, val kind: Kind) {
     }
 }
 
+/** Plain-text rendering of one [LogEvent.Kind], shared by the dashboard's event rows. */
+internal fun eventText(kind: LogEvent.Kind): String = when (kind) {
+    is LogEvent.Kind.CoreState -> "core → ${kind.label}"
+    is LogEvent.Kind.PathAdded -> "${kind.iface} added (${pathStatusName(kind.status)})"
+    is LogEvent.Kind.PathRemoved -> "${kind.iface} removed"
+    is LogEvent.Kind.PathStatus -> "${kind.iface}: ${pathStatusName(kind.from)} → ${pathStatusName(kind.to)}"
+    is LogEvent.Kind.Error -> "error: ${kind.message}"
+    is LogEvent.Kind.Reconnecting -> "reconnecting in ${kind.delaySec}s"
+}
+
 /**
  * View-independent event log: diffs consecutive [MqvpnState]/[PathInfo]
  * snapshots into the sparse event classes the dashboard shows (core-state

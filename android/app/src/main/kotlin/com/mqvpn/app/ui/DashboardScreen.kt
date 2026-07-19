@@ -227,20 +227,11 @@ private fun EventRow(event: LogEvent, timeFormat: SimpleDateFormat) {
 @Composable
 private fun eventIconAndTint(kind: LogEvent.Kind): Pair<ImageVector, Color> = when (kind) {
     is LogEvent.Kind.CoreState -> Icons.Filled.Bolt to MaterialTheme.colorScheme.primary
-    is LogEvent.Kind.PathAdded -> Icons.Filled.AddCircle to Color(0xFF4CAF50)
+    is LogEvent.Kind.PathAdded -> Icons.Filled.AddCircle to pathStatusColor(kind.status)
     is LogEvent.Kind.PathRemoved -> Icons.Filled.RemoveCircle to Color.Gray
     is LogEvent.Kind.PathStatus -> Icons.Filled.Autorenew to pathStatusColor(kind.to)
     is LogEvent.Kind.Error -> Icons.Filled.ErrorOutline to MaterialTheme.colorScheme.error
     is LogEvent.Kind.Reconnecting -> Icons.Filled.Refresh to MaterialTheme.colorScheme.tertiary
-}
-
-private fun eventText(kind: LogEvent.Kind): String = when (kind) {
-    is LogEvent.Kind.CoreState -> "core → ${kind.label}"
-    is LogEvent.Kind.PathAdded -> "${kind.iface} added (${pathStatusName(kind.status)})"
-    is LogEvent.Kind.PathRemoved -> "${kind.iface} removed"
-    is LogEvent.Kind.PathStatus -> "${kind.iface}: ${pathStatusName(kind.from)} → ${pathStatusName(kind.to)}"
-    is LogEvent.Kind.Error -> "error: ${kind.message}"
-    is LogEvent.Kind.Reconnecting -> "reconnecting in ${kind.delaySec}s"
 }
 
 @Composable

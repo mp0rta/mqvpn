@@ -62,7 +62,13 @@ data class DemoSettings(
     fun isValid(): Boolean = hostValid() && portValid() && reorderPortsValid()
 
     companion object {
-        /** Upper bound on distinct reorder ports the platform layer honors. */
+        /**
+         * Upper bound on distinct reorder ports the platform layer honors.
+         * Mirrors `MQVPN_REORDER_MAX_RULES` in
+         * `android/sdk-core/src/main/kotlin/com/mqvpn/sdk/core/internal/ReorderPlan.kt`
+         * (and `src/reorder.h`) — keep in sync by hand; grep for
+         * `MQVPN_REORDER_MAX_RULES` if either side changes.
+         */
         const val MAX_REORDER_PORTS = 16
     }
 }
