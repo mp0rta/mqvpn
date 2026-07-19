@@ -67,6 +67,18 @@ EgressDeny = 10.0.5.13/32   # evaluated after EgressAllow
 
 The control API's `get_stats` exposes the lane's runtime counters on both client and server: `tcp_flows_active`, `tcp_flows_total`, `tcp_flows_rejected`, plus per-lane packet counters (`pkts_lane_*`). See [docs/control-api.md §5.4](https://github.com/mp0rta/mqvpn/blob/main/docs/control-api.md) for field semantics.
 
+## Mobile builds (iOS)
+
+Mobile builds compile the lane with a reduced lwIP footprint (the
+`MQVPN_LWIP_MOBILE_PROFILE` build flag: ~256 KiB TCP windows and 64-flow pool
+sizing instead of ~2 MiB / 256) to fit the iOS Network Extension memory ceiling.
+The profile is paired with the QUIC-side
+[`[Advanced] RecvRateLimit`](./configuration#advanced) receive-rate cap — shrinking
+the inner TCP windows alone does not bound the outer QUIC connection's own
+buffering, so mobile clients set both. The full budget arithmetic and measured
+numbers are in
+[docs/hybrid_h2_memory_budget.md §5](https://github.com/mp0rta/mqvpn/blob/main/docs/hybrid_h2_memory_budget.md).
+
 ## Known limitations
 
 - **TCP to private targets needs an explicit `EgressAllow`.** The client cannot see the server's ACL, so lwIP answers the inner SYN locally before the server's egress `connect()` is attempted; an ACL denial surfaces to the app as a later RST rather than an immediate connection refusal.
