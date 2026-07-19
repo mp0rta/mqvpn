@@ -160,7 +160,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `User` | Per-user PSK in `NAME:KEY` format (repeatable) | — |
 | `MaxClients` | Maximum concurrent clients (server only) | `64` |
 
-In JSON, the client key is `auth_key` and the server's global key is `server_auth_key` (an INI `Key` fills both roles automatically).
+In JSON, use `auth_key` on both client and server (as in the examples above).
 
 ### `[Multipath]`
 

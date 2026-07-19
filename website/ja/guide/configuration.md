@@ -160,7 +160,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `User` | ユーザー個別の PSK（`NAME:KEY` 形式、複数指定可） | — |
 | `MaxClients` | 最大同時接続クライアント数（サーバーのみ） | `64` |
 
-JSON では、クライアント側の鍵は `auth_key`、サーバーのグローバル鍵は `server_auth_key` です（INI の `Key` は自動的に両方の役割を満たします）。
+JSON ではクライアント・サーバーとも `auth_key` を使います（上の例のとおり）。
 
 ### `[Multipath]`
 
