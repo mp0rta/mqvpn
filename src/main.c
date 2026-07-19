@@ -543,6 +543,11 @@ main(int argc, char *argv[])
             /* INI [Hybrid]; always valid (mqvpn_config_defaults seeds the
              * disabled defaults even with no [Hybrid] section). */
             .hybrid = file_cfg.hybrid,
+            /* INI [ClientManagement]; no CLI flags in v1. */
+            .client_mgmt_enabled = file_cfg.client_mgmt_enabled,
+            .client_mgmt_endpoint = file_cfg.client_mgmt_endpoint,
+            .client_mgmt_socket_mode = file_cfg.client_mgmt_socket_mode,
+            .client_mgmt_socket_group = file_cfg.client_mgmt_socket_group,
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];

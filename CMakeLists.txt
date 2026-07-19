@@ -627,6 +627,7 @@ add_executable(mqvpn
     src/platform/linux/netlink_mon.c
     src/platform/linux/route_check.c
     src/platform/linux/control_socket.c
+    src/platform/linux/mgmt_socket.c
     src/platform/posix/status.c
     src/platform/linux/routing.c
     src/platform/linux/killswitch.c
@@ -635,6 +636,9 @@ add_executable(mqvpn
     src/platform/posix/dns_common.c
     src/path_mgr.c
     src/config.c
+    src/mgmt/mgmt_dispatch.c
+    src/common/ipc/cmp_json.c
+    src/common/ipc/cmp_error.c
 )
 
 target_include_directories(mqvpn PRIVATE
@@ -644,6 +648,8 @@ target_include_directories(mqvpn PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/platform/posix
     ${CMAKE_SOURCE_DIR}/src/platform/linux
+    ${CMAKE_SOURCE_DIR}/src/mgmt
+    ${CMAKE_SOURCE_DIR}/src/common/ipc
 )
 
 target_link_libraries(mqvpn
@@ -656,6 +662,25 @@ target_link_libraries(mqvpn
     dl
     m
     stdc++
+)
+
+# ---------- mqvpnctl: management CLI ----------
+# Standalone Client Management Protocol (CMP) client. Deliberately must not
+# link mqvpn_lib / xquic / libevent (machine-verified by
+# scripts/ci_e2e/run_client_mgmt_ipc_phase1_test.sh, T9) — it only needs
+# libmqvpn.h for the MQVPN_VERSION_* macros (a header include, not a link
+# dependency) plus the OS-neutral cmp_json/cmp_error helpers.
+add_executable(mqvpnctl
+    src/cli/ctl_main.c
+    src/cli/ctl_ipc.c
+    src/common/ipc/cmp_json.c
+    src/common/ipc/cmp_error.c
+)
+target_include_directories(mqvpnctl PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/cli
+    ${CMAKE_SOURCE_DIR}/src/common/ipc
+    ${CMAKE_SOURCE_DIR}/include
 )
 
 # ---------- Tests ----------
@@ -685,11 +710,20 @@ if(BUILD_TESTING)
     add_executable(test_reorder_config tests/test_reorder_config.c src/mqvpn_config.c src/config.c src/log.c)
     add_executable(test_classifier tests/test_classifier.c src/hybrid/classifier.c)
     add_executable(test_icmp tests/test_icmp.c src/icmp.c)
+    add_executable(test_cmp_json tests/test_cmp_json.c src/common/ipc/cmp_json.c
+                   src/common/ipc/cmp_error.c)
+    target_include_directories(test_cmp_json PRIVATE ${CMAKE_SOURCE_DIR}/src/common/ipc)
+    add_executable(test_mgmt_dispatch tests/test_mgmt_dispatch.c src/mgmt/mgmt_dispatch.c
+                   src/common/ipc/cmp_json.c src/common/ipc/cmp_error.c)
+    target_include_directories(test_mgmt_dispatch PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/common/ipc
+        ${CMAKE_SOURCE_DIR}/src/mgmt
+    )
     # test_reorder_gate exercises src/reorder_gate.h (shared STAMP/RAW/DROP_MTU
     # gate + PTB token bucket, extracted from mqvpn_client.c/mqvpn_server.c) —
     # links reorder_tx.c (for the peek it wraps) + icmp.c (for the PTB send).
     add_executable(test_reorder_gate tests/test_reorder_gate.c src/reorder_tx.c src/icmp.c src/log.c)
-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_classifier test_icmp test_reorder_gate)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_classifier test_icmp test_reorder_gate test_cmp_json test_mgmt_dispatch)
 
     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of
@@ -789,6 +823,36 @@ if(BUILD_TESTING)
         add_test(NAME test_control_socket COMMAND test_control_socket)
     endif()
 
+    # Client Management IPC socket-layer smoke-test harness (helper binary,
+    # NOT an add_test — driven manually or by a shell script connecting to
+    # the Unix socket). Linux-only, same libevent gating as
+    # test_control_socket above.
+    if(Libevent_FOUND OR EVENT_LIB)
+        add_executable(mgmt_endpoint_host
+            tests/mgmt_endpoint_host.c
+            src/platform/linux/mgmt_socket.c
+            src/mgmt/mgmt_dispatch.c
+            src/common/ipc/cmp_json.c
+            src/common/ipc/cmp_error.c
+            src/log.c
+        )
+        target_include_directories(mgmt_endpoint_host PRIVATE
+            ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/src/platform/linux
+            ${CMAKE_SOURCE_DIR}/src/mgmt
+            ${CMAKE_SOURCE_DIR}/src/common/ipc
+            ${CMAKE_SOURCE_DIR}/include
+        )
+        if(Libevent_FOUND)
+            target_link_libraries(mgmt_endpoint_host libevent::core libevent::extra)
+        else()
+            target_include_directories(mgmt_endpoint_host PRIVATE ${EVENT_INCLUDE_DIR})
+            target_link_libraries(mgmt_endpoint_host ${EVENT_LIB})
+        endif()
+        set_target_properties(mgmt_endpoint_host PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    endif()
+
     # libmqvpn public API test (links libmqvpn + xquic)
     add_executable(test_api tests/test_api.c)
     target_link_libraries(test_api mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
@@ -881,6 +945,7 @@ endif()
 
 # ---------- Install ----------
 install(TARGETS mqvpn DESTINATION bin)
+install(TARGETS mqvpnctl DESTINATION bin)
 install(TARGETS mqvpn_lib DESTINATION lib)
 install(TARGETS mqvpn_shared DESTINATION lib)
 # Bundle xquic shared library (no standalone deb exists)

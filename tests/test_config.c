@@ -1731,6 +1731,11 @@ test_ini_json_scalar_parity(void)
                       "MaxClients = 120\n"
                       "[Control]\n"
                       "Listen = 127.0.0.2:9091\n"
+                      "[ClientManagement]\n"
+                      "Enabled = false\n"
+                      "Endpoint = /run/mqvpn/parity.sock\n"
+                      "SocketMode = 0640\n"
+                      "SocketGroup = mqvpnparity\n"
                       "[Multipath]\n"
                       "Scheduler = min_srtt\n"
                       "CC = cubic\n"
@@ -1779,6 +1784,10 @@ test_ini_json_scalar_parity(void)
                        "\"server_auth_key\":\"parity-secret\","
                        "\"max_clients\":120,"
                        "\"control_listen\":\"127.0.0.2:9091\","
+                       "\"client_mgmt_enabled\":false,"
+                       "\"client_mgmt_endpoint\":\"/run/mqvpn/parity.sock\","
+                       "\"client_mgmt_socket_mode\":\"0640\","
+                       "\"client_mgmt_socket_group\":\"mqvpnparity\","
                        "\"scheduler\":\"min_srtt\","
                        "\"cc\":\"cubic\","
                        "\"init_max_path_id\":16,"
@@ -1831,6 +1840,14 @@ test_ini_json_scalar_parity(void)
                   "parity init_max_path_id");
     ASSERT_EQ_STR(a.auth_key, b.auth_key, "parity auth_key");
     ASSERT_EQ_STR(a.server_auth_key, b.server_auth_key, "parity server_auth_key");
+    ASSERT_EQ_INT(a.client_mgmt_enabled, b.client_mgmt_enabled,
+                  "parity client_mgmt_enabled");
+    ASSERT_EQ_STR(a.client_mgmt_endpoint, b.client_mgmt_endpoint,
+                  "parity client_mgmt_endpoint");
+    ASSERT_EQ_STR(a.client_mgmt_socket_mode, b.client_mgmt_socket_mode,
+                  "parity client_mgmt_socket_mode");
+    ASSERT_EQ_STR(a.client_mgmt_socket_group, b.client_mgmt_socket_group,
+                  "parity client_mgmt_socket_group");
     ASSERT_EQ_INT(a.reorder.mode, b.reorder.mode, "parity reorder mode");
     ASSERT_EQ_INT((int)a.reorder.max_wait_ms, (int)b.reorder.max_wait_ms,
                   "parity reorder max_wait_ms");
@@ -1870,6 +1887,13 @@ test_ini_json_scalar_parity(void)
                   "parity hybrid tcp_connect_timeout_sec is non-default");
     ASSERT_EQ_INT((int)a.hybrid.tcp_max_global_flows, 8192,
                   "parity hybrid tcp_max_global_flows is non-default");
+    ASSERT_EQ_INT(a.client_mgmt_enabled, 0, "parity client_mgmt_enabled is non-default");
+    ASSERT_EQ_STR(a.client_mgmt_endpoint, "/run/mqvpn/parity.sock",
+                  "parity client_mgmt_endpoint is non-default");
+    ASSERT_EQ_STR(a.client_mgmt_socket_mode, "0640",
+                  "parity client_mgmt_socket_mode is non-default");
+    ASSERT_EQ_STR(a.client_mgmt_socket_group, "mqvpnparity",
+                  "parity client_mgmt_socket_group is non-default");
 
     /* Both structs were memset by mqvpn_config_defaults → padding is zero
      * → whole-struct compare is deterministic. */

@@ -1,0 +1,397 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and mqvpn contributors
+
+/* src/mgmt/mgmt_dispatch.c — OS-neutral CMP request dispatcher.
+ *
+ * No libevent, no libmqvpn includes. Only cmp_* + json_mini.h + libc. This
+ * file processes one already-framed NDJSON request line and always writes
+ * exactly one response line (see mgmt_dispatch_request's contract in the
+ * header) — it never touches a socket or an event loop.
+ */
+#include "mgmt_dispatch.h"
+
+#include "cmp_error.h"
+#include "cmp_json.h"
+#include "cmp_types.h"
+#include "json_mini.h"
+
+#include <stdint.h>
+#include <string.h>
+
+/* Result of a method handler. On success (code == CMP_E_OK) the handler has
+ * already written the result-object body into the `result` cmp_buf_t passed
+ * to it and the other fields are ignored. On error the handler leaves
+ * `result` untouched and fills message/details/retryable instead. */
+typedef struct {
+    cmp_error_code_t code;
+    const char *message;      /* fixed literal; ignored when code == CMP_E_OK */
+    const char *details_json; /* raw JSON object literal, or NULL */
+    int retryable;
+} mgmt_result_t;
+
+/* Parsed request view handed to handlers. `protocol` points at the raw
+ * top-level "protocol" value token (inside the request-line buffer);
+ * `params` at the params object's '{'; `params_end` one past its matching
+ * '}'. Handlers must bound every params lookup to [params, params_end) —
+ * the underlying buffer is the whole request line, so an unbounded search
+ * would see keys in trailing/sibling JSON. */
+typedef struct {
+    const char *protocol;
+    const char *params;
+    const char *params_end;
+} mgmt_req_t;
+
+typedef void (*mgmt_handler_fn)(const mgmt_ctx_t *ctx, mgmt_conn_t *conn,
+                                const mgmt_req_t *req, cmp_buf_t *result,
+                                mgmt_result_t *out);
+
+typedef struct {
+    const char *name;
+    int requires_handshake;
+    mgmt_handler_fn fn;
+} mgmt_method_t;
+
+/* Locate `key` at depth 1 of the object [obj, obj_end) ONLY: keys inside
+ * nested objects/arrays or matching text inside string values can never
+ * satisfy the lookup (json_find_key is a flat text scan and would). `obj`
+ * must point at '{' and `obj_end` at its matching '}' (from
+ * json_object_end). Returns a pointer to the key's value (after ':' and
+ * whitespace), or NULL. The state walk (depth + in-string with backslash
+ * escapes) mirrors cmp_json_array_contains_str's element scanner. */
+static const char *
+find_key_depth1(const char *obj, const char *obj_end, const char *key)
+{
+    size_t key_len = strlen(key);
+    int depth = 1;
+    const char *p = obj + 1;
+
+    while (p < obj_end) {
+        if (*p == '"') {
+            const char *k = p + 1;
+            const char *e = k;
+            while (e < obj_end && *e != '"') {
+                if (*e == '\\' && e + 1 < obj_end) e++;
+                e++;
+            }
+            if (e >= obj_end) return NULL; /* unterminated string */
+            const char *c = json_skip_ws(e + 1);
+            if (depth == 1 && c < obj_end && *c == ':') {
+                /* A key of this top-level object. */
+                if ((size_t)(e - k) == key_len && strncmp(k, key, key_len) == 0) {
+                    return json_skip_ws(c + 1);
+                }
+                p = c + 1; /* continue scanning at the value */
+            } else {
+                p = e + 1; /* a string value (or nested key): skip it whole */
+            }
+            continue;
+        }
+        if (*p == '{' || *p == '[') {
+            depth++;
+        } else if (*p == '}' || *p == ']') {
+            depth--;
+        }
+        p++;
+    }
+    return NULL;
+}
+
+/* ── result-body helpers shared by handlers ─────────────────────────────── */
+
+static void
+write_capabilities_array(const mgmt_ctx_t *ctx, cmp_buf_t *b)
+{
+    cmp_buf_appendf(b, "[");
+    for (size_t i = 0; i < ctx->n_capabilities; i++) {
+        if (i > 0) cmp_buf_appendf(b, ",");
+        cmp_json_append_str(b, ctx->capabilities[i]);
+    }
+    cmp_buf_appendf(b, "]");
+}
+
+static void
+write_hello_result(const mgmt_ctx_t *ctx, cmp_buf_t *b)
+{
+    cmp_buf_appendf(b, "{\"endpoint_name\":");
+    cmp_json_append_str(b, CMP_ENDPOINT_NAME);
+    cmp_buf_appendf(b, ",\"endpoint_version\":");
+    cmp_json_append_str(b, ctx->endpoint_version);
+    cmp_buf_appendf(
+        b, ",\"selected_protocol\":\"%s\",\"capabilities\":", CMP_PROTOCOL_VERSION);
+    write_capabilities_array(ctx, b);
+    cmp_buf_appendf(b, "}");
+}
+
+/* ── method handlers ─────────────────────────────────────────────────── */
+
+static void
+set_protocol_incompatible(mgmt_result_t *out)
+{
+    out->code = CMP_E_PROTOCOL_INCOMPATIBLE;
+    out->message = "no compatible protocol version";
+    out->details_json = "{\"supported_protocols\":[\"" CMP_PROTOCOL_VERSION "\"]}";
+    out->retryable = 0;
+}
+
+static void
+h_hello(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const mgmt_req_t *req,
+        cmp_buf_t *result, mgmt_result_t *out)
+{
+    /* Negotiation is fixed at the first successful hello: a duplicate hello
+     * on an already-handshaken connection is an idempotent success and does
+     * not re-check protocol/supported_protocols. */
+    if (conn->handshake_done) {
+        write_hello_result(ctx, result);
+        out->code = CMP_E_OK;
+        return;
+    }
+
+    /* Protocol value validation happens at handshake time (spec): the
+     * request's top-level "protocol" must be the string "1.0". Non-hello
+     * requests stay presence-only checked (also spec-pinned). */
+    char proto_str[16];
+    if (json_read_string(req->protocol, proto_str, sizeof(proto_str)) != 0 ||
+        strcmp(proto_str, CMP_PROTOCOL_VERSION) != 0) {
+        set_protocol_incompatible(out);
+        return;
+    }
+
+    /* supported_protocols must live at depth 1 of the params object — a
+     * nested object inside params must not be able to shadow it. The array
+     * scan is bounded by the value's own closing ']' (see
+     * cmp_json_array_value_contains_str), so params_end as the outer bound
+     * is safe. */
+    const char *sp =
+        find_key_depth1(req->params, req->params_end - 1, "supported_protocols");
+    if (!sp ||
+        !cmp_json_array_value_contains_str(sp, req->params_end, CMP_PROTOCOL_VERSION)) {
+        set_protocol_incompatible(out);
+        return;
+    }
+
+    write_hello_result(ctx, result);
+    conn->handshake_done = 1;
+    out->code = CMP_E_OK;
+}
+
+static void
+h_version(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const mgmt_req_t *req,
+          cmp_buf_t *result, mgmt_result_t *out)
+{
+    (void)conn;
+    (void)req;
+    cmp_buf_appendf(result, "{\"version\":");
+    cmp_json_append_str(result, ctx->endpoint_version);
+    cmp_buf_appendf(result, "}");
+    out->code = CMP_E_OK;
+}
+
+static void
+h_capabilities(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const mgmt_req_t *req,
+               cmp_buf_t *result, mgmt_result_t *out)
+{
+    (void)conn;
+    (void)req;
+    cmp_buf_appendf(result, "{\"capabilities\":");
+    write_capabilities_array(ctx, result);
+    cmp_buf_appendf(result, "}");
+    out->code = CMP_E_OK;
+}
+
+static void
+h_ping(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const mgmt_req_t *req, cmp_buf_t *result,
+       mgmt_result_t *out)
+{
+    (void)ctx;
+    (void)conn;
+    (void)req;
+    cmp_buf_appendf(result, "{}");
+    out->code = CMP_E_OK;
+}
+
+/* Phase 1 method table. Keep in sync with the AGENTS.md/spec method list —
+ * system.ping is pulled forward from Phase 2 deliberately (trivial, useful
+ * for socket-layer testing). */
+static const mgmt_method_t mgmt_methods[] = {
+    {"system.hello", 0, h_hello},
+    {"system.version", 1, h_version},
+    {"system.capabilities", 1, h_capabilities},
+    {"system.ping", 1, h_ping},
+};
+
+static const mgmt_method_t *
+find_method(const char *name)
+{
+    for (size_t i = 0; i < sizeof(mgmt_methods) / sizeof(mgmt_methods[0]); i++) {
+        if (strcmp(mgmt_methods[i].name, name) == 0) return &mgmt_methods[i];
+    }
+    return NULL;
+}
+
+/* ── envelope writers ────────────────────────────────────────────────────
+ * `msg` goes through cmp_json_append_str (escaped) since it is not
+ * guaranteed control-character-free even though every current call site
+ * passes a fixed literal; `details_json`, when non-NULL, is always a
+ * pre-formed literal JSON fragment authored by this file, so it is safe to
+ * splice in raw. */
+
+static void
+mgmt_write_error(cmp_buf_t *b, uint64_t id, int has_id, cmp_error_code_t code,
+                 const char *msg, const char *details_json, int retryable)
+{
+    cmp_buf_appendf(b, "{");
+    if (has_id) {
+        cmp_buf_appendf(b, "\"id\":%llu,", (unsigned long long)id);
+    }
+    cmp_buf_appendf(
+        b, "\"protocol\":\"%s\",\"ok\":false,\"error\":{\"code\":\"%s\",\"message\":",
+        CMP_PROTOCOL_VERSION, cmp_error_code_str(code));
+    cmp_json_append_str(b, msg);
+    cmp_buf_appendf(b, ",\"retryable\":%s", retryable ? "true" : "false");
+    if (details_json) {
+        cmp_buf_appendf(b, ",\"details\":%s", details_json);
+    }
+    cmp_buf_appendf(b, "}}\n");
+}
+
+int
+mgmt_dispatch_request(const mgmt_ctx_t *ctx, mgmt_conn_t *conn, const char *line,
+                      size_t len, char *out, size_t out_cap)
+{
+    (void)len; /* line is NUL-terminated by the caller; len is advisory only */
+
+    cmp_buf_t out_buf;
+    cmp_buf_init(&out_buf, out, out_cap);
+
+    const char *p = json_skip_ws(line);
+    const char *obj_end = (*p == '{') ? json_object_end(p) : NULL;
+
+    uint64_t id = 0;
+    int has_id = 0;
+    /* Error code of the response being written; returned to the caller so
+     * the socket layer can log without re-parsing the response. */
+    cmp_error_code_t rc = CMP_E_OK;
+
+    if (!obj_end) {
+        rc = CMP_E_INVALID_ARGUMENT;
+        mgmt_write_error(&out_buf, 0, 0, rc, "malformed JSON request", NULL, 0);
+        goto finalize;
+    }
+
+    {
+        const char *idv = find_key_depth1(p, obj_end, "id");
+        uint64_t v;
+        if (idv && json_read_u64_strict(idv, &v) == 0 && v != 0) {
+            id = v;
+            has_id = 1;
+        }
+    }
+    if (!has_id) {
+        rc = CMP_E_INVALID_ARGUMENT;
+        mgmt_write_error(&out_buf, 0, 0, rc, "missing or invalid id", NULL, 0);
+        goto finalize;
+    }
+
+    {
+        const char *protov = find_key_depth1(p, obj_end, "protocol");
+        const char *methodv = find_key_depth1(p, obj_end, "method");
+        const char *paramsv = find_key_depth1(p, obj_end, "params");
+
+        if (!protov || !methodv || !paramsv) {
+            rc = CMP_E_INVALID_ARGUMENT;
+            mgmt_write_error(&out_buf, id, 1, rc,
+                             "missing required field (protocol/method/params)", NULL, 0);
+            goto finalize;
+        }
+
+        /* params must be an object; its end bounds every handler lookup. */
+        const char *params_close = json_object_end(paramsv);
+        if (*paramsv != '{' || !params_close) {
+            rc = CMP_E_INVALID_ARGUMENT;
+            mgmt_write_error(&out_buf, id, 1, rc, "params must be an object", NULL, 0);
+            goto finalize;
+        }
+        const char *params_end = params_close + 1;
+
+        char method_name[64];
+        if (json_read_string(methodv, method_name, sizeof(method_name)) != 0) {
+            rc = CMP_E_INVALID_ARGUMENT;
+            mgmt_write_error(&out_buf, id, 1, rc, "invalid method field", NULL, 0);
+            goto finalize;
+        }
+
+        const mgmt_method_t *m = find_method(method_name);
+        if (!m) {
+            rc = CMP_E_METHOD_NOT_FOUND;
+            mgmt_write_error(&out_buf, id, 1, rc, "unknown method", NULL, 0);
+            goto finalize;
+        }
+
+        if (m->requires_handshake && !conn->handshake_done) {
+            rc = CMP_E_HANDSHAKE_REQUIRED;
+            mgmt_write_error(&out_buf, id, 1, rc, "handshake required before this method",
+                             NULL, 0);
+            goto finalize;
+        }
+
+        /* Result bodies are small and fixed-shape for every Phase 1 method
+         * (endpoint name/version/capabilities/{}); 2048 bytes is generous
+         * headroom even for a long endpoint_version string. */
+        char result_storage[2048];
+        cmp_buf_t result_buf;
+        cmp_buf_init(&result_buf, result_storage, sizeof(result_storage));
+
+        mgmt_result_t res;
+        res.code = CMP_E_OK;
+        res.message = NULL;
+        res.details_json = NULL;
+        res.retryable = 0;
+
+        mgmt_req_t req;
+        req.protocol = protov;
+        req.params = paramsv;
+        req.params_end = params_end;
+
+        m->fn(ctx, conn, &req, &result_buf, &res);
+
+        if (res.code != CMP_E_OK) {
+            rc = res.code;
+            mgmt_write_error(&out_buf, id, 1, res.code, res.message, res.details_json,
+                             res.retryable);
+            goto finalize;
+        }
+
+        if (result_buf.overflow) {
+            rc = CMP_E_INTERNAL_ERROR;
+            mgmt_write_error(&out_buf, id, 1, rc, "internal result buffer overflow", NULL,
+                             0);
+            goto finalize;
+        }
+
+        cmp_buf_appendf(&out_buf,
+                        "{\"id\":%llu,\"protocol\":\"%s\",\"ok\":true,\"result\":",
+                        (unsigned long long)id, CMP_PROTOCOL_VERSION);
+        /* result_buf.buf is JSON we constructed ourselves via
+         * cmp_json_append_str/cmp_buf_appendf above, not an externally
+         * sourced string, so splicing it via %s does not bypass escaping. */
+        cmp_buf_appendf(&out_buf, "%s", result_buf.buf);
+        cmp_buf_appendf(&out_buf, "}\n");
+    }
+
+finalize:
+    /* Fixed short fallback when the real response does not fit out_cap.
+     * ~150 bytes, well under CMP_MIN_RESPONSE_BUF (256; spot-checked in
+     * tests). No id: whatever was written above may itself be why out_buf
+     * overflowed, so it cannot be trusted to recover one. */
+    if (out_buf.overflow) {
+        rc = CMP_E_RESPONSE_TOO_LARGE;
+        cmp_buf_init(&out_buf, out, out_cap);
+        cmp_buf_appendf(&out_buf,
+                        "{\"protocol\":\"%s\",\"ok\":false,\"error\":{\"code\":\"%s\","
+                        "\"message\":\"response exceeded size limit\","
+                        "\"retryable\":false}}\n",
+                        CMP_PROTOCOL_VERSION,
+                        cmp_error_code_str(CMP_E_RESPONSE_TOO_LARGE));
+    }
+    return (int)rc;
+}
