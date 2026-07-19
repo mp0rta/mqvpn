@@ -200,4 +200,37 @@ android/
 └── app/           # Demo app (Jetpack Compose)
 ```
 
+## iOS
+
+::: info
+iOS support is client-only and in development: the app and PacketTunnel extension live under `ios/poc/`. CI cross-builds the full chain and compiles the app unsigned; running on a device requires your own signing identity.
+:::
+
+### Prerequisites
+
+- macOS with a recent Xcode (16.3 or newer; CI uses the `macos-15` image and selects the newest installed Xcode)
+- CMake, Ninja, Python 3
+- [xcodegen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`) for generating the Xcode project
+- Git checkout with submodules (`--recurse-submodules`); BoringSSL is cloned automatically on first build
+
+### Cross-build the native libraries
+
+```bash
+./ios/build-ios.sh            # BoringSSL → xquic (static) → libmqvpn (static)
+./ios/build-ios.sh mqvpn      # rebuild only the mqvpn core
+```
+
+The script builds everything for `iphoneos`/arm64 with deployment target 15.0, enables the hybrid TCP lane with the reduced [mobile lwIP profile](./hybrid-mode#mobile-builds-ios) (`MQVPN_LWIP_MOBILE_PROFILE=ON`), verifies the profile propagated to every translation unit (`tests/check_profile_propagation.py`), and stages the archives to `ios/build/` (`libmqvpn.a`, `liblwip_core.a`, `libxquic-static.a`, `libssl.a`, `libcrypto.a`).
+
+### Build the app and PacketTunnel extension
+
+```bash
+bash ios/poc/Tests/run-host-tests.sh                         # Swift host tests (no SDK required)
+
+cp ios/poc/Config.example.xcconfig ios/poc/Config.xcconfig   # set your DEVELOPMENT_TEAM
+(cd ios/poc && xcodegen generate)                            # generate the Xcode project
+```
+
+CI builds the same project unsigned (`CODE_SIGNING_ALLOWED=NO`); device and simulator execution remain a manual step.
+
 See [Getting Started](./getting-started) to test your build.
