@@ -77,15 +77,15 @@ control block.
 
 ```
 TCP_WND (2,097,120 B) + 256 KiB re-open (262,144 B) + TCP_SND_BUF (2,097,152 B)
-  + downlink stash (TCP_MSS, 8,960 B) + mqvpn_tcp_flow_t (176 B)
-  = 4,465,552 B ≈ 4.46 MB
+  + downlink stash (TCP_MSS, 8,960 B) + mqvpn_tcp_flow_t (200 B)
+  = 4,465,576 B ≈ 4.47 MB
 ```
 
 Use **≈ 4.5 MB per concurrent flow** as the working figure. Aggregate worst case at the
 default `tcp_max_flows = 256`:
 
 ```
-256 × 4,465,552 B = 1,143,181,312 B ≈ 1.06 GiB (≈ 1.14 GB decimal)
+256 × 4,465,576 B = 1,143,187,456 B ≈ 1.06 GiB (≈ 1.14 GB decimal)
 ```
 
 The window/send-buffer pair dominates aggregate memory; the marker tables and PBUF_POOL
@@ -99,11 +99,11 @@ per active flow:
 | Item | Worst-case size | Source |
 |---|---|---|
 | PBUF_POOL static reservation | ≈ 2.3 MiB (unused on ingress, see §1a) | lwipopts.h |
-| Sticky-RAW marker table (cap 4096) | ≈ 0.72 MB (`mqvpn_tcp_flow_t` = 176 B each; the 38 B key field is counted within the 176 B) | `TCP_LANE_RAW_MARKER_CAP` |
-| CLOSING routing-marker table (cap 4096) | ≈ 0.72 MB, same shape (the downlink stash is freed at the CLOSING transition in `tcp_lane_mark_closing`, so a CLOSING entry never carries a live stash) | `TCP_LANE_CLOSING_CAP` |
+| Sticky-RAW marker table (cap 4096) | ≈ 0.82 MB (`mqvpn_tcp_flow_t` = 200 B each, measured on the dual-stack layout; the 38 B key field is counted within the 200 B) | `TCP_LANE_RAW_MARKER_CAP` |
+| CLOSING routing-marker table (cap 4096) | ≈ 0.82 MB, same shape (the downlink stash is freed at the CLOSING transition in `tcp_lane_mark_closing`, so a CLOSING entry never carries a live stash) | `TCP_LANE_CLOSING_CAP` |
 | Hash bucket array (8192 buckets) | 64 KiB | tcp_lane.c `mqvpn_tcp_lane_new` |
 
-Total fixed overhead ≈ 3.9 MB worst case, small next to the ~1 GiB flow-table cost at 256
+Total fixed overhead ≈ 4.1 MB worst case, small next to the ~1 GiB flow-table cost at 256
 concurrent flows.
 
 ## 5. Mobile profile (iOS Network Extension, 50 MB)
@@ -204,10 +204,10 @@ Derived subtotal at 64 concurrent flows:
 | 64 × `TCP_WND` (receive) | ≈ 16 MiB | 64 × 262,140 B |
 | Shared TCP segment pool (`MEMP_NUM_TCP_SEG`) | ≈ 4.4 MiB | 512-segment cap, shared send+OOSEQ |
 | `PBUF_POOL` (32 pbufs) | ≈ 0.29 MiB | 32 × `PBUF_POOL_BUFSIZE` |
-| Marker tables (RAW + CLOSING, 256 each) | ≈ 0.09 MiB | §4 shape, mobile caps |
+| Marker tables (RAW + CLOSING, 256 each) | ≈ 0.1 MiB | §4 shape, mobile caps (512 × 200 B) |
 | 64 × `TCP_MSS` downlink stash | ≈ 0.55 MiB | one stashed downlink chunk per flow (§3) |
-| PCB pool (`MEMP_NUM_TCP_PCB` = 128) | ≈ 0.2 MiB | lwIP pcb struct × 128 |
-| **Subtotal** | **≈ 21.5 MiB** | lower-bound-leaning, see below |
+| PCB pool (`MEMP_NUM_TCP_PCB` = 128) | ≈ 0.04 MiB | measured: `struct tcp_pcb` = 312 B × 128 |
+| **Subtotal** | **≈ 21.4 MiB** | lower-bound-leaning, see below |
 
 **Not counted in this subtotal** — it is lower-bound-leaning, not a hard ceiling: per-flow
 `mqvpn_tcp_flow_t` uplink-queue/relay objects and stash bytes beyond the one downlink chunk
@@ -216,8 +216,8 @@ and the hash bucket array (§4 — small, fixed, unaffected by the mobile marker
 Final authority is on-device measurement, not this arithmetic.
 
 Add the QUIC-side receive-rate cap (§5b) on top: typically ≈ 7.15 MiB (`rate × srtt` at
-60 ms), up to the 16 MiB clamp in the worst case. All-up: ≈ 21.5 MiB (lwIP mobile profile)
-+ up to 16 MiB (QUIC cap, worst case) ≈ 37.5 MiB against the 50 MB Network Extension
+60 ms), up to the 16 MiB clamp in the worst case. All-up: ≈ 21.4 MiB (lwIP mobile profile)
++ up to 16 MiB (QUIC cap, worst case) ≈ 37.4 MiB against the 50 MB Network Extension
 ceiling, leaving headroom for process/runtime overhead outside this doc's scope.
 
 ### 5d. Original scoping estimate (kept for context)
@@ -242,7 +242,7 @@ isolation (the shipped profile, §5c, applies both together):
 - **Sticky-RAW markers are never idle-evicted.** They are replaced only on cap overflow, or
   on an ISN mismatch when the same 5-tuple sees a new SYN. A workload producing many
   short-lived flows misclassified sticky-RAW (e.g. under `tcp=auto`) can hold the marker
-  table near its 4096-entry (~0.72 MB) cap indefinitely. This is a memory bound, not a
+  table near its 4096-entry (~0.82 MB) cap indefinitely. This is a memory bound, not a
   correctness issue, but unlike TCP-lane flows it is not time-bounded by the idle sweep.
 - **`TCP_MSS` is a compile-time upper bound.** The vendored lwIP tree exposes no per-pcb MSS
   setter (`tcp_mss(pcb)` is a read-only accessor); the effective per-pcb MSS is derived at
