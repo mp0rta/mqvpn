@@ -41,6 +41,7 @@ targets:
         UILaunchScreen: {}
         MqvpnServerHost: $(MQVPN_POC_SERVER_HOST)
         MqvpnServerPort: $(MQVPN_POC_SERVER_PORT)
+        MqvpnServerName: $(MQVPN_POC_SERVER_NAME)
         MqvpnBulkURL: $(MQVPN_POC_BULK_URL)
         MqvpnAuthKey: $(MQVPN_POC_AUTH_KEY)
         MqvpnTLSInsecure: $(MQVPN_POC_TLS_INSECURE)
@@ -66,6 +67,7 @@ targets:
       properties:
         MqvpnServerHost: $(MQVPN_POC_SERVER_HOST)
         MqvpnServerPort: $(MQVPN_POC_SERVER_PORT)
+        MqvpnServerName: $(MQVPN_POC_SERVER_NAME)
         MqvpnAuthKey: $(MQVPN_POC_AUTH_KEY)
         MqvpnTLSInsecure: $(MQVPN_POC_TLS_INSECURE)
         NSExtension:

@@ -89,6 +89,11 @@ final class MqvpnEngine: NSObject {
     private func setupClient(_ server: ServerSettings, reorder: ReorderSettings, hybrid: HybridSettings) {
         let cfg = mqvpn_config_new()
         mqvpn_config_set_server(cfg, server.host, Int32(server.port))
+        // "" = unset: the core then uses server.host for SNI / cert verify,
+        // matching the desktop client.conf ServerName default.
+        if !server.serverName.isEmpty {
+            mqvpn_config_set_tls_server_name(cfg, server.serverName)
+        }
         mqvpn_config_set_clock(cfg, mqvpn_ios_clock_us, nil)
         if !server.authKey.isEmpty { mqvpn_config_set_auth_key(cfg, server.authKey) }
         if server.insecure { mqvpn_config_set_insecure(cfg, 1) }
