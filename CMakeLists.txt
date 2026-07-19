@@ -825,6 +825,11 @@ if(BUILD_TESTING)
     add_executable(test_api tests/test_api.c)
     target_link_libraries(test_api mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
     target_include_directories(test_api PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    if(MQVPN_HYBRID_TCP_LANE_BUILD)
+        # Lets test_api compile the hybrid-only tests (tcp_max_flows
+        # pool-bound warn); without it those #ifdef blocks are vacuous.
+        target_compile_definitions(test_api PRIVATE MQVPN_HYBRID_TCP_LANE_ENABLED)
+    endif()
     set_target_properties(test_api PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_api COMMAND test_api)
 

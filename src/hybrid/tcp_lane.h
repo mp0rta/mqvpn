@@ -512,4 +512,10 @@ void mqvpn_tcp_lane_get_stats(const mqvpn_tcp_lane_t *lane, mqvpn_tcp_lane_stats
  * clamp engaged, keeping the override observable. 0 if lane is NULL. */
 uint32_t mqvpn_tcp_lane_effective_max_flows(const mqvpn_tcp_lane_t *lane);
 
+/* The largest tcp_max_flows the lane will honor — half the build profile's
+ * lwIP pcb pool (same bound the lane_new clamp enforces). Exposed so config
+ * consumers can surface an over-bound configured value at load time,
+ * before any lane exists. */
+uint32_t mqvpn_tcp_lane_pool_flow_bound(void);
+
 #endif
