@@ -10,6 +10,7 @@ import Foundation
 struct PoCConfig {
     let serverHost: String      // hostname or IP literal
     let serverPort: Int
+    let serverName: String      // TLS SNI / cert verify name; "" = use serverHost
     let authKey: String         // "" = no Authorization header
     let tlsInsecure: Bool       // test-server PoC: certificate check off
     let bulkURL: URL?           // nil in the extension (app-only key)
@@ -27,6 +28,7 @@ struct PoCConfig {
         }
         let bulk = (d["MqvpnBulkURL"] as? String).flatMap(URL.init(string:))
         return PoCConfig(serverHost: host, serverPort: port,
+                         serverName: (d["MqvpnServerName"] as? String) ?? "",
                          authKey: (d["MqvpnAuthKey"] as? String) ?? "",
                          tlsInsecure: (d["MqvpnTLSInsecure"] as? String) == "1",
                          bulkURL: bulk)
