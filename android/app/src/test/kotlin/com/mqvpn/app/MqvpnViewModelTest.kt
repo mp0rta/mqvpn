@@ -9,7 +9,6 @@ import com.mqvpn.app.service.MyVpnService
 import com.mqvpn.app.ui.LogEvent
 import com.mqvpn.app.ui.MqvpnViewModel
 import com.mqvpn.sdk.core.MqvpnManager
-import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.PathInfo
 import com.mqvpn.sdk.core.model.ReorderStats
@@ -88,16 +87,6 @@ class MqvpnViewModelTest {
     @Test
     fun `initial paths are empty`() {
         assertTrue(viewModel.paths.value.isEmpty())
-    }
-
-    @Test
-    fun `connect delegates to manager`() {
-        val config = MqvpnConfig(
-            serverAddress = "vpn.example.com",
-            authKey = "testkey",
-        )
-        viewModel.connect(config)
-        verify { mockManager.connect(config, MyVpnService::class.java) }
     }
 
     @Test

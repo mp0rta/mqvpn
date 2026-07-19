@@ -6,7 +6,6 @@ package com.mqvpn.app.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -18,17 +17,12 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExposedDropdownMenuAnchorType
-import androidx.compose.material3.ExposedDropdownMenuBox
-import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -36,12 +30,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -89,6 +81,8 @@ fun SettingsScreen(
         mutableStateOf(MqvpnConfig.HybridTcpMode.AUTO.name)
     }
 
+    // Seed during composition (not LaunchedEffect) to avoid a one-frame flash
+    // of empty fields; seeded gate makes it write-once.
     val current = loaded
     if (current != null && !seeded) {
         serverAddress = current.serverAddress
@@ -222,13 +216,12 @@ fun SettingsScreen(
                 visualTransformation = PasswordVisualTransformation(),
             )
             Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Insecure (skip TLS verify)", modifier = Modifier.weight(1f))
-                Switch(checked = insecure, onCheckedChange = { insecure = it }, enabled = fieldsEnabled)
-            }
+            LabeledSwitchRow(
+                label = "Insecure (skip TLS verify)",
+                checked = insecure,
+                onCheckedChange = { insecure = it },
+                enabled = fieldsEnabled,
+            )
             if (!draft.hostValid() || !draft.portValid()) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
@@ -241,62 +234,32 @@ fun SettingsScreen(
 
             Text("Kill Switch", style = MaterialTheme.typography.titleSmall)
             Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Kill Switch", modifier = Modifier.weight(1f))
-                Switch(checked = killSwitch, onCheckedChange = { killSwitch = it }, enabled = fieldsEnabled)
-            }
+            LabeledSwitchRow(
+                label = "Kill Switch",
+                checked = killSwitch,
+                onCheckedChange = { killSwitch = it },
+                enabled = fieldsEnabled,
+            )
             Spacer(modifier = Modifier.height(16.dp))
 
             Text("Reorder Buffer", style = MaterialTheme.typography.titleSmall)
             Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Reorder Buffer", modifier = Modifier.weight(1f))
-                Switch(
-                    checked = reorderEnabled,
-                    onCheckedChange = { reorderEnabled = it },
-                    enabled = fieldsEnabled,
-                )
-            }
+            LabeledSwitchRow(
+                label = "Reorder Buffer",
+                checked = reorderEnabled,
+                onCheckedChange = { reorderEnabled = it },
+                enabled = fieldsEnabled,
+            )
             if (reorderEnabled) {
                 Spacer(modifier = Modifier.height(8.dp))
-                var profileExpanded by remember { mutableStateOf(false) }
-                val reorderProfile = draft.reorderProfileEnum()
-                ExposedDropdownMenuBox(
-                    expanded = profileExpanded,
-                    onExpandedChange = { if (fieldsEnabled) profileExpanded = it },
-                ) {
-                    OutlinedTextField(
-                        value = reorderProfile.name.replace("_", " "),
-                        onValueChange = {},
-                        label = { Text("Reorder Profile") },
-                        readOnly = true,
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = profileExpanded) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
-                        enabled = fieldsEnabled,
-                    )
-                    ExposedDropdownMenu(
-                        expanded = profileExpanded,
-                        onDismissRequest = { profileExpanded = false },
-                    ) {
-                        MqvpnConfig.ReorderProfile.entries.forEach { profile ->
-                            DropdownMenuItem(
-                                text = { Text(profile.name.replace("_", " ")) },
-                                onClick = {
-                                    reorderProfileName = profile.name
-                                    profileExpanded = false
-                                },
-                            )
-                        }
-                    }
-                }
+                EnumDropdownField(
+                    label = "Reorder Profile",
+                    options = MqvpnConfig.ReorderProfile.entries,
+                    selected = draft.reorderProfileEnum(),
+                    displayName = { it.name.replace("_", " ") },
+                    onSelect = { reorderProfileName = it.name },
+                    enabled = fieldsEnabled,
+                )
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedTextField(
                     value = reorderPorts,
@@ -315,12 +278,12 @@ fun SettingsScreen(
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
-                if (draft.distinctValidPortCount() > 16) {
+                if (draft.distinctValidPortCount() > DemoSettings.MAX_REORDER_PORTS) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        "Only the first 16 ports take effect",
+                        "Only the first ${DemoSettings.MAX_REORDER_PORTS} ports take effect",
                         style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFFFF9800),
+                        color = WarningColor,
                     )
                 }
             }
@@ -328,51 +291,22 @@ fun SettingsScreen(
 
             Text("Hybrid Mode", style = MaterialTheme.typography.titleSmall)
             Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Hybrid Mode", modifier = Modifier.weight(1f))
-                Switch(
-                    checked = hybridEnabled,
-                    onCheckedChange = { hybridEnabled = it },
-                    enabled = fieldsEnabled,
-                )
-            }
+            LabeledSwitchRow(
+                label = "Hybrid Mode",
+                checked = hybridEnabled,
+                onCheckedChange = { hybridEnabled = it },
+                enabled = fieldsEnabled,
+            )
             if (hybridEnabled) {
                 Spacer(modifier = Modifier.height(8.dp))
-                var hybridModeExpanded by remember { mutableStateOf(false) }
-                val hybridTcpMode = draft.hybridTcpModeEnum()
-                ExposedDropdownMenuBox(
-                    expanded = hybridModeExpanded,
-                    onExpandedChange = { if (fieldsEnabled) hybridModeExpanded = it },
-                ) {
-                    OutlinedTextField(
-                        value = hybridTcpMode.name,
-                        onValueChange = {},
-                        label = { Text("TCP Mode") },
-                        readOnly = true,
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = hybridModeExpanded) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
-                        enabled = fieldsEnabled,
-                    )
-                    ExposedDropdownMenu(
-                        expanded = hybridModeExpanded,
-                        onDismissRequest = { hybridModeExpanded = false },
-                    ) {
-                        MqvpnConfig.HybridTcpMode.entries.forEach { mode ->
-                            DropdownMenuItem(
-                                text = { Text(mode.name) },
-                                onClick = {
-                                    hybridTcpModeName = mode.name
-                                    hybridModeExpanded = false
-                                },
-                            )
-                        }
-                    }
-                }
+                EnumDropdownField(
+                    label = "TCP Mode",
+                    options = MqvpnConfig.HybridTcpMode.entries,
+                    selected = draft.hybridTcpModeEnum(),
+                    displayName = { it.name },
+                    onSelect = { hybridTcpModeName = it.name },
+                    enabled = fieldsEnabled,
+                )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     "Requires hybrid support on the server; TCP connections fail otherwise.",

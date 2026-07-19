@@ -9,7 +9,6 @@ import androidx.lifecycle.viewModelScope
 import com.mqvpn.app.data.SettingsRepository
 import com.mqvpn.app.service.MyVpnService
 import com.mqvpn.sdk.core.MqvpnManager
-import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.PathInfo
 import com.mqvpn.sdk.core.model.ReorderStats
@@ -86,10 +85,6 @@ class MqvpnViewModel(
 
     private fun publishEvents() {
         _events.value = eventLog.events
-    }
-
-    fun connect(config: MqvpnConfig) {
-        manager.connect(config, MyVpnService::class.java)
     }
 
     fun connectWithSavedSettings() {

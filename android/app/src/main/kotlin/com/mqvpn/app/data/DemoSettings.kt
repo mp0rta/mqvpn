@@ -60,4 +60,9 @@ data class DemoSettings(
     fun reorderPortsValid(): Boolean = !reorderEnabled || parsedReorderPorts().isNotEmpty()
 
     fun isValid(): Boolean = hostValid() && portValid() && reorderPortsValid()
+
+    companion object {
+        /** Upper bound on distinct reorder ports the platform layer honors. */
+        const val MAX_REORDER_PORTS = 16
+    }
 }
