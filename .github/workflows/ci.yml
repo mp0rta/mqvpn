@@ -707,6 +707,85 @@ jobs:
         run: |
           ctest --test-dir build-darwin-mobile -R "test_tcp_lane" --output-on-failure
 
+  # iOS: the real cross-build chain (BoringSSL -> xquic -> libmqvpn, all
+  # iphoneos/arm64 static, mobile lwIP profile) plus the Swift host tests and
+  # an UNSIGNED xcodebuild of the app + PacketTunnel extension against the
+  # staged archives. This is the only job that compiles the Swift sources and
+  # links the extension the way a device build does — the darwin job's
+  # mobile-profile step covers the C core only. Device/simulator execution
+  # stays a manual gate (needs signing + hardware).
+  ios:
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      # Pure-Foundation logic tests; swiftc on the macOS host, no SDK cross
+      # bits and no dependency on the caches below — run first so a Swift
+      # logic regression fails in seconds, not after the C-chain build.
+      - name: Swift host tests
+        run: bash ios/poc/Tests/run-host-tests.sh
+
+      - name: Compute xquic SHA
+        id: xqsha
+        run: echo "sha=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+-')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache BoringSSL (iOS arm64)
+        id: bssl-ios-cache
+        uses: actions/cache@v6
+        with:
+          path: third_party/xquic/third_party/boringssl
+          key: bssl-9c95ec7-ios-arm64-v1
+
+      - name: Clone BoringSSL (pinned)
+        if: steps.bssl-ios-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl && git checkout ${{ env.BORINGSSL_COMMIT }}
+
+      - name: Build BoringSSL (iOS)
+        if: steps.bssl-ios-cache.outputs.cache-hit != 'true'
+        run: ./ios/build-ios.sh boringssl
+
+      - name: Cache xquic (iOS Release)
+        id: xquic-ios-cache
+        uses: actions/cache@v6
+        with:
+          # See "Cache xquic (Release)" comment above re: xqc_configure.h.
+          path: |
+            third_party/xquic/build-ios
+            third_party/xquic/include/xquic/xqc_configure.h
+          key: xquic-${{ steps.xqsha.outputs.sha }}-ios-arm64-release-bssl-9c95ec7-v1
+
+      - name: Build xquic (iOS)
+        if: steps.xquic-ios-cache.outputs.cache-hit != 'true'
+        run: ./ios/build-ios.sh xquic
+
+      # Always from scratch (the script rm -rf's its build dir for ABI
+      # consistency); also runs the mobile-profile propagation check against
+      # the REAL iphoneos build — the darwin-mobile step above checks the
+      # same property on a host build.
+      - name: Build libmqvpn (iOS) + stage archives
+        run: ./ios/build-ios.sh mqvpn
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          # CI has no signing identity: the example config's placeholder
+          # DEVELOPMENT_TEAM is fine because the build below disables signing.
+          cp ios/poc/Config.example.xcconfig ios/poc/Config.xcconfig
+          cd ios/poc && xcodegen generate
+
+      - name: Build app + extension (unsigned)
+        run: |
+          xcodebuild -project ios/poc/MqvpnPoC.xcodeproj -scheme MqvpnPoC \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath ios/poc/DerivedData \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+
   windows:
     # Pinned to windows-2022 (VS 2022). windows-latest migrated to VS 2026 in
     # June 2026, where the hardcoded `-G "Visual Studio 17 2022"` generator finds
