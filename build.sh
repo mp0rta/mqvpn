@@ -29,8 +29,12 @@ for cmd in cmake make cc git; do
     fi
 done
 
-if ! find /usr/include /usr/local/include -name "event.h" -path "*/event2/*" 2>/dev/null | head -1 | grep -q .; then
-    echo "ERROR: libevent headers not found. Install: apt install libevent-dev"
+# /opt/homebrew is Apple Silicon Homebrew's prefix (Intel-mac brew installs
+# under /usr/local, already covered). -L: Homebrew's include/event2 is a
+# symlink into the keg, which find will not descend into by default.
+if ! find -L /usr/include /usr/local/include /opt/homebrew/include \
+        -name "event.h" -path "*/event2/*" 2>/dev/null | head -1 | grep -q .; then
+    echo "ERROR: libevent headers not found. Install: apt install libevent-dev (macOS: brew install libevent)"
     err=1
 fi
 
