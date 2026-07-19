@@ -862,6 +862,41 @@ test_cap_rejection(void)
 }
 
 static void
+test_max_flows_pool_clamp(void)
+{
+    /* Pool-coupling clamp: a config asking for more concurrent flows than
+     * the lwIP pcb pool can safely back (MEMP_NUM_TCP_PCB / 2 — the pool
+     * also holds TIME_WAIT/half-open pcbs beyond the tracked flows) must be
+     * clamped at lane creation, so the lane's own cap check — whose
+     * contract is reject → tcp_abort (RST), never a silent hang — stays
+     * REACHABLE before tcp_alloc() starts failing SYNs with no callback.
+     * Guards the mobile profile especially: there the library default
+     * tcp_max_flows (256) exceeds the pool (128). */
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.tcp_max_flows = MEMP_NUM_TCP_PCB; /* above the pool-safety bound */
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0x7777ULL, NULL, NULL, NULL);
+    ASSERT_TRUE(lane != NULL, "lane_new succeeds");
+
+    uint32_t bound = MEMP_NUM_TCP_PCB / 2;
+    for (uint32_t i = 0; i < bound; i++) {
+        mqvpn_flow_key_t k = make_key((uint16_t)(10000 + i), 443);
+        ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 1, 0), 0,
+                      "flows within the pool bound are accepted");
+    }
+    mqvpn_flow_key_t over = make_key((uint16_t)(10000 + bound), 443);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &over, 1, 0), -1,
+                  "flow beyond the pool-clamped cap rejected");
+
+    mqvpn_tcp_lane_stats_t stats;
+    mqvpn_tcp_lane_get_stats(lane, &stats);
+    ASSERT_EQ_INT(stats.flows_active, (int)bound, "flows_active == clamped cap");
+    ASSERT_EQ_INT(stats.flows_rejected_cap, 1, "over-bound flow counted as cap reject");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
+static void
 test_markers_dont_consume_tcp_budget(void)
 {
     mqvpn_hybrid_config_t cfg;
@@ -3670,6 +3705,7 @@ main(void)
     test_syn_isn_mismatch_replaces_marker_raw_to_raw();
     test_syn_isn_mismatch_replaces_marker_raw_to_tcp();
     test_cap_rejection();
+    test_max_flows_pool_clamp();
     test_markers_dont_consume_tcp_budget();
     test_marker_cap();
     test_accept_key_correspondence();

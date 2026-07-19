@@ -112,9 +112,14 @@
 #define LWIP_TCP_SACK_OUT 1
 
 /* mqvpn's tcp_max_flows default is 256; this pool is the hard lwIP-side
- * cap, sized above the config default with headroom — the
- * hybrid.tcp_max_flows check in tcp_lane.c is the real enforcement point
- * (spec: on reject → tcp_abort, do NOT silently fall to RAW). */
+ * cap — the hybrid.tcp_max_flows check in tcp_lane.c is the real
+ * enforcement point (spec: on reject → tcp_abort, do NOT silently fall to
+ * RAW). To keep that check reachable, mqvpn_tcp_lane_new clamps
+ * tcp_max_flows to MEMP_NUM_TCP_PCB / 2 (the other half backs
+ * TIME_WAIT/half-open pcbs the flow table doesn't count): default profile
+ * 512/2 = 256 == the config default; mobile profile 128/2 = 64 == the iOS
+ * NE value. A cap above the clamp would let tcp_alloc() start failing
+ * SYNs (silent hang, no RST) before the cap check ever ran. */
 /* MEMP_NUM_TCP_SEG is a GLOBAL pool shared by all flows: 2048 segments
  * covers only ~2 flows at full TCP_SND_BUF (2 MB / 8960-byte MSS ~ 234
  * segs each x safety factor). tcp_write() returns ERR_MEM on pool

@@ -529,7 +529,11 @@ MQVPN_API int mqvpn_config_set_hybrid_enabled(mqvpn_config_t *cfg, int enabled);
 /* mode: 0=stream 1=raw 2=auto. Other values → MQVPN_ERR_INVALID_ARG. */
 MQVPN_API int mqvpn_config_set_hybrid_tcp_mode(mqvpn_config_t *cfg, int mode);
 /* Limits for the future tcp_lane. tcp_max_flows must be > 0 (defaults:
- * 256 flows, 300 s idle timeout). */
+ * 256 flows, 300 s idle timeout). On the CLIENT the effective cap is
+ * additionally clamped at lane creation to half the lwIP pcb pool of the
+ * build profile (default 512/2 = 256; mobile 128/2 = 64) — above that,
+ * pcb exhaustion would hang new connections before the cap's documented
+ * reject-with-RST behavior could apply. */
 MQVPN_API int mqvpn_config_set_hybrid_limits(mqvpn_config_t *cfg, uint32_t tcp_max_flows,
                                              uint32_t tcp_idle_timeout_sec);
 /* Server-side egress connect() timeout for the connect-tcp lane, in

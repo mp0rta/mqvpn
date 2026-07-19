@@ -150,6 +150,19 @@ mqvpn_tcp_lane_new(const mqvpn_hybrid_config_t *cfg, uint64_t hash_seed, void *c
         return NULL;
     }
     lane->cfg = *cfg;
+    /* Pool-coupling clamp: the lane's cap check below (on_syn) is the
+     * documented enforcement point — reject → tcp_abort (RST), never a
+     * silent hang — but it is only reachable while lwIP can still allocate
+     * pcbs. MEMP_NUM_TCP_PCB backs tracked flows PLUS TIME_WAIT/half-open
+     * pcbs the table no longer (or does not yet) count, so a cap above
+     * pool/2 lets tcp_alloc() start failing inbound SYNs (no callback, no
+     * RST — the inner connection just hangs) before the cap ever fires.
+     * Matters on the mobile profile, where the pool (128) sits BELOW the
+     * library's default tcp_max_flows (256); on the default profile the
+     * bound (512/2 = 256) equals that default, so nothing changes. */
+    if (lane->cfg.tcp_max_flows > MEMP_NUM_TCP_PCB / 2) {
+        lane->cfg.tcp_max_flows = MEMP_NUM_TCP_PCB / 2;
+    }
     lane->hash_seed = hash_seed;
     lane->client_ctx = client_ctx;
     lane->clock_fn = clock_fn;
