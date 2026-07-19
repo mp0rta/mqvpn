@@ -100,20 +100,33 @@ if [ "$PHASE" = "mqvpn" ] || [ "$PHASE" = "all" ]; then
     # it builds exactly the sans-I/O static core (mqvpn_lib) and nothing else.
     # BORINGSSL_BUILD_DIR must point at the iOS build — the root CMake default
     # is the host build dir and would resolve wrong/absent SSL libs.
-    # Hybrid TCP lane is default-ON since v0.11.0 but the PoC does not link
-    # lwip_core; keep the iOS core lane-free until the SDK phase stages lwIP.
+    # Hybrid lane ON with the mobile lwIP profile (NE memory ceiling).
+    # CMAKE_EXPORT_COMPILE_COMMANDS feeds check_profile_propagation.py below —
+    # the _Static_assert in each TU cannot catch an UNpropagated TU (it just
+    # takes the default branch and passes), so the compile database is the
+    # only place a split-profile build is visible.
     cmake -S "$SCRIPT_DIR" -B "$MQVPN_BUILD" "${IOS_CMAKE_FLAGS[@]}" \
         -DANDROID_CROSS_COMPILE=ON \
-        -DMQVPN_ENABLE_HYBRID_TCP_LANE=OFF \
+        -DMQVPN_LWIP_MOBILE_PROFILE=ON \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DXQUIC_BUILD_DIR="$XQUIC_BUILD" \
         -DBORINGSSL_BUILD_DIR="$BSSL_BUILD"
     cmake --build "$MQVPN_BUILD" --target mqvpn_lib
 
+    echo "=== Checking mobile-profile propagation ==="
+    python3 "$SCRIPT_DIR/tests/check_profile_propagation.py" "$MQVPN_BUILD"
+
     echo "=== Staging artifacts to $OUT_DIR ==="
     resolve_bssl_libs
     cp "$MQVPN_BUILD/libmqvpn.a" "$OUT_DIR/"
+    cp "$MQVPN_BUILD/liblwip_core.a" "$OUT_DIR/"
     cp "$XQUIC_BUILD/libxquic-static.a" "$OUT_DIR/"
     cp "$SSL_A" "$CRYPTO_A" "$OUT_DIR/"
     echo "=== Done ==="
-    lipo -info "$OUT_DIR"/*.a
+    for a in libmqvpn.a liblwip_core.a libxquic-static.a libssl.a libcrypto.a; do
+        [ -f "$OUT_DIR/$a" ] || { echo "missing staged archive: $a" >&2; exit 1; }
+    done
+    for a in libmqvpn.a liblwip_core.a libxquic-static.a libssl.a libcrypto.a; do
+        lipo -info "$OUT_DIR/$a"
+    done
 fi

@@ -34,6 +34,7 @@ final class TunnelController: ObservableObject {
     @Published var snapshot: TunnelSnapshot?       // nil = no data
     @Published var pathRates: [String: Double] = [:]   // iface name -> Mbps
     @Published var reorderSettings: ReorderSettings = .disabled
+    @Published var hybridSettings = HybridSettings.disabled
     @Published var serverSettings: ServerSettings?   // nil = unset/corrupt → Connect disabled
     @Published var configError: String?              // separate from statusText (updateStatus overwrites)
     @Published private(set) var isSaving = false
@@ -91,6 +92,7 @@ final class TunnelController: ObservableObject {
             }
             manager = m
             reorderSettings = ReorderSettings(providerConfiguration: pc) ?? .disabled
+            hybridSettings = HybridSettings(providerConfiguration: pc) ?? .disabled
             attachObserver(to: m)
             updateStatus(m.connection.status)
         } catch {
@@ -137,11 +139,11 @@ final class TunnelController: ObservableObject {
         manager?.connection.stopVPNTunnel()
     }
 
-    /// Persists server + reorder settings via the atomic snapshot -> merge ->
+    /// Persists server + reorder + hybrid settings via the atomic snapshot -> merge ->
     /// mutate -> commit -> refresh sequence in performAtomicSave, the exact
     /// function the host tests fault-inject — so the tested logic IS the
     /// production logic.
-    func saveSettings(server: ServerSettings, reorder: ReorderSettings) async throws {
+    func saveSettings(server: ServerSettings, reorder: ReorderSettings, hybrid: HybridSettings) async throws {
         if let e = saveGuard(isSaving: isSaving, isEditable: isEditable, hasManager: manager != nil) {
             throw e
         }
@@ -153,8 +155,9 @@ final class TunnelController: ObservableObject {
         defer { isSaving = false }
         var merged = server.toProviderConfiguration()
         for (k, v) in reorder.toProviderConfiguration() { merged[k] = v }
+        for (k, v) in hybrid.toProviderConfiguration() { merged[k] = v }
         try await performAtomicSave(NEConfigStore(manager: manager, proto: proto), merge: merged)
-        serverSettings = server; reorderSettings = reorder; configError = nil   // only on success
+        serverSettings = server; reorderSettings = reorder; hybridSettings = hybrid; configError = nil   // only on success
     }
 
     // MARK: - Snapshot polling

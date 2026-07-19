@@ -27,4 +27,10 @@ paths = [
 regexes = [
   '''tiiUC0/Fx51w5XuxAnpOgdRZb19SLqglwFdhxbbsbnM=''',
   '''mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=''',
+  # GitHub Actions cache keys (ci.yml/release.yml convention: dep name +
+  # commit prefix + platform slug + trailing -vN bump suffix). High-entropy
+  # enough to trip the generic-api-key rule (first hit: the ios job's
+  # bssl-9c95ec7-ios-arm64-v1) but not secrets. Anchored on the -vN suffix
+  # so real keys/tokens never match.
+  '''(?:bssl|xquic|libevent)-[A-Za-z0-9._-]+-v\d+''',
 ]

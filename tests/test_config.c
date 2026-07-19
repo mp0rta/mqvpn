@@ -4,9 +4,11 @@
 /*
  * test_config.c — unit tests for INI config parser
  *
- * Build: cc -o tests/test_config tests/test_config.c src/config.c src/log.c -Isrc
+ * Build: cc -o tests/test_config tests/test_config.c src/config.c src/log.c \
+ *            -Isrc -Iinclude
  */
 #include "config.h"
+#include "libmqvpn.h" /* MQVPN_RECV_RATE_LIMIT_MAX */
 #include "mqvpn_sched_names.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -1590,6 +1592,56 @@ test_hybrid_section_parse(void)
     ASSERT_EQ_INT((int)cfg.hybrid.tcp_idle_timeout_sec, 60, "hybrid json idle timeout");
 }
 
+static void
+test_advanced_recv_rate_limit(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(cfg.recv_rate_limit == 0, 1, "recv_rate_limit default 0");
+
+    char *p = write_tmp("[Advanced]\nRecvRateLimit = 125000000\n");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "advanced ini load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.recv_rate_limit == 125000000ULL, 1, "ini recv_rate_limit");
+
+    p = write_tmp("{\"advanced\": {\"recv_rate_limit\": 125000000}}");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "advanced json load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.recv_rate_limit == 125000000ULL, 1, "json recv_rate_limit");
+
+    /* Range cap (MQVPN_RECV_RATE_LIMIT_MAX): values above it must be
+     * rejected (warn-and-continue, field keeps its default) — an
+     * over-range rate would overflow xquic's rate x srtt(us) u64 window
+     * product and pin the window at the MINIMUM, the opposite of intent. */
+    char over[128];
+    snprintf(over, sizeof(over), "[Advanced]\nRecvRateLimit = %llu\n",
+             (unsigned long long)MQVPN_RECV_RATE_LIMIT_MAX + 1);
+    p = write_tmp(over);
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "over-max ini warns, load rc 0");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.recv_rate_limit == 0, 1, "over-max ini rejected → default 0");
+
+    snprintf(over, sizeof(over), "[Advanced]\nRecvRateLimit = %llu\n",
+             (unsigned long long)MQVPN_RECV_RATE_LIMIT_MAX);
+    p = write_tmp(over);
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "boundary ini load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.recv_rate_limit == MQVPN_RECV_RATE_LIMIT_MAX, 1,
+                  "boundary value == max accepted");
+
+    snprintf(over, sizeof(over), "{\"advanced\": {\"recv_rate_limit\": %llu}}",
+             (unsigned long long)MQVPN_RECV_RATE_LIMIT_MAX + 1);
+    p = write_tmp(over);
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "over-max json warns, load rc 0");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.recv_rate_limit == 0, 1, "over-max json rejected → default 0");
+}
+
 /* ── [Hybrid] EgressAllow/EgressDeny lists + TcpConnectTimeoutSec ───────── */
 
 static void
@@ -1755,7 +1807,9 @@ test_ini_json_scalar_parity(void)
                       "TcpMaxFlows = 128\n"
                       "TcpIdleTimeoutSec = 60\n"
                       "TcpConnectTimeoutSec = 20\n"
-                      "TcpMaxGlobalFlows = 8192\n";
+                      "TcpMaxGlobalFlows = 8192\n"
+                      "[Advanced]\n"
+                      "RecvRateLimit = 77\n";
     /* NOTE: [Auth] Key is INI-only dual-write (auth_key + server_auth_key);
      * mirror it in JSON by setting BOTH json keys to the same value. */
     const char *ini_auth_extra = "[Auth]\nKey = parity-secret\n";
@@ -1804,6 +1858,9 @@ test_ini_json_scalar_parity(void)
                        "\"tcp_idle_timeout_sec\":60,"
                        "\"tcp_connect_timeout_sec\":20,"
                        "\"tcp_max_global_flows\":8192"
+                       "},"
+                       "\"advanced\":{"
+                       "\"recv_rate_limit\":77"
                        "}"
                        "}";
 
@@ -1851,6 +1908,8 @@ test_ini_json_scalar_parity(void)
                   "parity hybrid tcp_connect_timeout_sec");
     ASSERT_EQ_INT((int)a.hybrid.tcp_max_global_flows, (int)b.hybrid.tcp_max_global_flows,
                   "parity hybrid tcp_max_global_flows");
+    ASSERT_EQ_INT((int)a.recv_rate_limit, (int)b.recv_rate_limit,
+                  "parity advanced recv_rate_limit");
 
     /* Non-default guards: prove these asserts pass because the value was
      * actually parsed, not because it silently failed to parse on BOTH
@@ -1870,6 +1929,8 @@ test_ini_json_scalar_parity(void)
                   "parity hybrid tcp_connect_timeout_sec is non-default");
     ASSERT_EQ_INT((int)a.hybrid.tcp_max_global_flows, 8192,
                   "parity hybrid tcp_max_global_flows is non-default");
+    ASSERT_EQ_INT((int)a.recv_rate_limit, 77,
+                  "parity advanced recv_rate_limit is non-default");
 
     /* Both structs were memset by mqvpn_config_defaults → padding is zero
      * → whole-struct compare is deterministic. */
@@ -2102,6 +2163,7 @@ main(void)
     /* [Hybrid] section tests */
     test_hybrid_defaults_when_absent();
     test_hybrid_section_parse();
+    test_advanced_recv_rate_limit();
     test_hybrid_egress_acl_ini();
     test_hybrid_egress_acl_ini_invalid_ignored();
     test_hybrid_egress_acl_ini_v6();

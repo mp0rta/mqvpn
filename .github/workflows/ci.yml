@@ -21,7 +21,11 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Check clang-format
+        # Version pinned to match mise.toml's pipx:clang-format — the repo
+        # canon is defined by this exact version, not the runner image's apt
+        # package (patch-level differences change macro-layout judgments).
         run: |
+          pipx install clang-format==18.1.3
           FILES=$(find src include tests -name '*.c' -o -name '*.h' | grep -v third_party)
           FAIL=0
           for f in $FILES; do
@@ -662,7 +666,7 @@ jobs:
             --target mqvpn_lib mqvpn_shared mqvpn_darwin_platform \
                      mqvpn test_route_parse_darwin test_dns_backup_darwin \
                      test_dns_state_darwin test_routing_seq_darwin test_killswitch_rules_darwin \
-                     test_tcp_lane \
+                     test_tcp_lane test_config test_conn_settings \
             -j "$(sysctl -n hw.ncpu)"
 
       - name: Verify artifacts
@@ -672,6 +676,126 @@ jobs:
 
       - name: Run Darwin unit tests
         run: ctest --test-dir build-darwin --output-on-failure
+
+      # Mobile lwIP profile coverage: the only other consumer of
+      # MQVPN_LWIP_MOBILE_PROFILE is ios/build-ios.sh (not run in CI), so
+      # without this step every mobile-only #if branch, _Static_assert, and
+      # lwIP init.c compile-time bound is unexercised by automation — a
+      # default-profile-valid change that breaks a mobile constraint would
+      # merge green and only surface at the next local iOS build.
+      # CMAKE_EXPORT_COMPILE_COMMANDS feeds check_profile_propagation.py
+      # (an unpropagated TU takes the default branch and passes its own
+      # _Static_assert — only the compile database shows a split profile).
+      - name: Build mqvpn (mobile lwIP profile) + propagation check
+        run: |
+          cmake -B build-darwin-mobile -DCMAKE_BUILD_TYPE=Debug \
+            -DXQUIC_BUILD_DIR="$GITHUB_WORKSPACE/third_party/xquic/build" \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
+            -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON \
+            -DMQVPN_LWIP_MOBILE_PROFILE=ON \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DCMAKE_C_FLAGS="-Wall -Wextra -Werror"
+          cmake --build build-darwin-mobile --target mqvpn_lib test_tcp_lane \
+            -j "$(sysctl -n hw.ncpu)"
+          python3 tests/check_profile_propagation.py build-darwin-mobile
+
+      # Only test_tcp_lane: check_lwip_profile_invariance preprocesses BOTH
+      # profiles from source itself (build-dir-independent), so the default
+      # tree's unfiltered ctest above already covers it — re-running it here
+      # would imply extra coverage this tree does not add.
+      - name: Run mobile-profile TCP-lane tests
+        run: |
+          ctest --test-dir build-darwin-mobile -R "test_tcp_lane" --output-on-failure
+
+  # iOS: the real cross-build chain (BoringSSL -> xquic -> libmqvpn, all
+  # iphoneos/arm64 static, mobile lwIP profile) plus the Swift host tests and
+  # an UNSIGNED xcodebuild of the app + PacketTunnel extension against the
+  # staged archives. This is the only job that compiles the Swift sources and
+  # links the extension the way a device build does — the darwin job's
+  # mobile-profile step covers the C core only. Device/simulator execution
+  # stays a manual gate (needs signing + hardware).
+  ios:
+    # macos-15, not macos-14: current xcodegen emits the Xcode 16+ project
+    # format (objectVersion 77) unconditionally — no spec option pins it
+    # back (verified against xcodegen 2.45.4) — and macos-14's default
+    # Xcode 15.4 refuses to open it ("future Xcode project file format").
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      # Newest installed toolchain, deterministically — the image default can
+      # lag behind what the generated project format requires (>= 16.3).
+      - name: Select newest Xcode
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -n1)"
+          xcodebuild -version
+
+      # Pure-Foundation logic tests; swiftc on the macOS host, no SDK cross
+      # bits and no dependency on the caches below — run first so a Swift
+      # logic regression fails in seconds, not after the C-chain build.
+      - name: Swift host tests
+        run: bash ios/poc/Tests/run-host-tests.sh
+
+      - name: Compute xquic SHA
+        id: xqsha
+        run: echo "sha=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+-')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache BoringSSL (iOS arm64)
+        id: bssl-ios-cache
+        uses: actions/cache@v6
+        with:
+          path: third_party/xquic/third_party/boringssl
+          key: bssl-9c95ec7-ios-arm64-v2
+
+      - name: Clone BoringSSL (pinned)
+        if: steps.bssl-ios-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl && git checkout ${{ env.BORINGSSL_COMMIT }}
+
+      - name: Build BoringSSL (iOS)
+        if: steps.bssl-ios-cache.outputs.cache-hit != 'true'
+        run: ./ios/build-ios.sh boringssl
+
+      - name: Cache xquic (iOS Release)
+        id: xquic-ios-cache
+        uses: actions/cache@v6
+        with:
+          # See "Cache xquic (Release)" comment above re: xqc_configure.h.
+          path: |
+            third_party/xquic/build-ios
+            third_party/xquic/include/xquic/xqc_configure.h
+          key: xquic-${{ steps.xqsha.outputs.sha }}-ios-arm64-release-bssl-9c95ec7-v2
+
+      - name: Build xquic (iOS)
+        if: steps.xquic-ios-cache.outputs.cache-hit != 'true'
+        run: ./ios/build-ios.sh xquic
+
+      # Always from scratch (the script rm -rf's its build dir for ABI
+      # consistency); also runs the mobile-profile propagation check against
+      # the REAL iphoneos build — the darwin-mobile step above checks the
+      # same property on a host build.
+      - name: Build libmqvpn (iOS) + stage archives
+        run: ./ios/build-ios.sh mqvpn
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          # CI has no signing identity: the example config's placeholder
+          # DEVELOPMENT_TEAM is fine because the build below disables signing.
+          cp ios/poc/Config.example.xcconfig ios/poc/Config.xcconfig
+          cd ios/poc && xcodegen generate
+
+      - name: Build app + extension (unsigned)
+        run: |
+          xcodebuild -project ios/poc/MqvpnPoC.xcodeproj -scheme MqvpnPoC \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath ios/poc/DerivedData \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
 
   windows:
     # Pinned to windows-2022 (VS 2022). windows-latest migrated to VS 2026 in

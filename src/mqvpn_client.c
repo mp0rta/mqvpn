@@ -1771,6 +1771,16 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
                  * cli_tcp_lane_open_stream above. */
                 mqvpn_lwip_ctx_set_accept_cb(conn->lwip_ctx, mqvpn_tcp_lane_lwip_accept,
                                              conn->tcp_lane);
+                /* Surface the lane's pcb-pool clamp: a configured cap above
+                 * the build profile's pool bound is silently reduced inside
+                 * lane_new (by design), so this is the one place the
+                 * operator learns their value was not honored. */
+                uint32_t eff = mqvpn_tcp_lane_effective_max_flows(conn->tcp_lane);
+                if (eff < c->config.hybrid.tcp_max_flows) {
+                    LOG_W(c,
+                          "hybrid: tcp_max_flows %u clamped to %u (lwIP pcb pool bound)",
+                          c->config.hybrid.tcp_max_flows, eff);
+                }
             }
         }
 #endif
@@ -2470,6 +2480,7 @@ cli_start_connection(mqvpn_client_t *c)
         .scheduler = c->config.scheduler,
         .cc = c->config.cc,
         .init_max_path_id = c->config.init_max_path_id,
+        .recv_rate_bytes_per_sec = c->config.recv_rate_limit,
     };
     mqvpn_build_conn_settings(&cs_input, &cs);
 

@@ -1,2 +1,11 @@
+[settings]
+pipx.uvx = true # run pipx-backend tools via uvx (no separate pipx install)
+
 [tools]
 node = "22"
+uv = "latest" # runner for the pipx backend below
+# Pin to EXACTLY the version CI's format-check installs (ci.yml) — even
+# patch-level differences (18.1.3 vs 18.1.8) disagree on the CFG_* macro
+# layout in src/config.c, and other majors (e.g. 22) reformat unrelated
+# regions. Never run a non-pinned clang-format on this repo.
+"pipx:clang-format" = "18.1.3"

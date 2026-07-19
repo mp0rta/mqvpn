@@ -25,6 +25,18 @@
 
 #include "log.h"
 
+/* Profile derivation pin — catches drift WITHIN the selected profile.
+ * (Per-target propagation failures are caught by
+ * tests/check_profile_propagation.py — invoked by ios/build-ios.sh and
+ * the mobile-profile CI step against the build's compile_commands.json —
+ * not here: an unpropagated TU takes the default branch and passes.) */
+#ifdef MQVPN_LWIP_MOBILE_PROFILE
+_Static_assert(TCP_WND == (65535 << MQVPN_LWIP_MOBILE_RCV_SCALE),
+               "mobile profile: TCP_WND derivation drifted");
+#else
+_Static_assert(TCP_WND == (65535 << 5), "default profile: TCP_WND drifted");
+#endif
+
 /* Upper bound for one lwIP-emitted IP packet — a true invariant via two
  * independent bounds: ctx_new clamps netif->mtu to 9216 (the project's
  * documented jumbo ceiling; ip4_output never emits more than netif->mtu),

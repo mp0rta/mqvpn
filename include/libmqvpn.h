@@ -529,7 +529,11 @@ MQVPN_API int mqvpn_config_set_hybrid_enabled(mqvpn_config_t *cfg, int enabled);
 /* mode: 0=stream 1=raw 2=auto. Other values → MQVPN_ERR_INVALID_ARG. */
 MQVPN_API int mqvpn_config_set_hybrid_tcp_mode(mqvpn_config_t *cfg, int mode);
 /* Limits for the future tcp_lane. tcp_max_flows must be > 0 (defaults:
- * 256 flows, 300 s idle timeout). */
+ * 256 flows, 300 s idle timeout). On the CLIENT the effective cap is
+ * additionally clamped at lane creation to half the lwIP pcb pool of the
+ * build profile (default 512/2 = 256; mobile 128/2 = 64) — above that,
+ * pcb exhaustion would hang new connections before the cap's documented
+ * reject-with-RST behavior could apply. */
 MQVPN_API int mqvpn_config_set_hybrid_limits(mqvpn_config_t *cfg, uint32_t tcp_max_flows,
                                              uint32_t tcp_idle_timeout_sec);
 /* Server-side egress connect() timeout for the connect-tcp lane, in
@@ -559,6 +563,26 @@ MQVPN_API int mqvpn_config_set_hybrid_max_global_flows(mqvpn_config_t *cfg,
 MQVPN_API int mqvpn_config_set_hybrid_egress_acl(mqvpn_config_t *cfg, const char **allow,
                                                  int n_allow, const char **deny,
                                                  int n_deny);
+
+/* Conn-level receive-rate cap in bytes/sec (0 = library default, no cap).
+ * Bounds the aggregate QUIC transport receive window to rate x srtt.
+ * CLIENT-ONLY: the server connection-settings path ignores it — a
+ * server-side cap would throttle every client's uplink.
+ *
+ * Values above MQVPN_RECV_RATE_LIMIT_MAX are rejected
+ * (MQVPN_ERR_INVALID_ARG): the transport computes the window as
+ * rate x srtt(us) in uint64, so an unbounded rate overflows the product
+ * and pins the window at the MINIMUM — the opposite of the caller's
+ * intent. 10^10 B/s (10 GB/s, 80 Gbit/s) keeps that product in range for
+ * any srtt below ~1800 s while sitting far above any real link rate;
+ * "no cap" is expressed as 0, not a huge value. The srtt precondition is
+ * structural, not probabilistic: an RTT sample needs its packet still
+ * tracked as unacked at ACK time, and both loss detection (a few srtt)
+ * and mqvpn's 120 s idle timeout (mqvpn_conn_settings.c) retire packets
+ * or the connection itself orders of magnitude before 1800 s. */
+#define MQVPN_RECV_RATE_LIMIT_MAX 10000000000ULL
+MQVPN_API int mqvpn_config_set_recv_rate_limit(mqvpn_config_t *cfg,
+                                               uint64_t bytes_per_sec);
 
 /* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock) */
 typedef uint64_t (*mqvpn_clock_fn)(void *ctx);

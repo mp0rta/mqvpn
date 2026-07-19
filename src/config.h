@@ -87,6 +87,11 @@ typedef struct mqvpn_file_config_s {
      * Seeded with mqvpn_hybrid_config_default() in mqvpn_config_defaults(). */
     mqvpn_hybrid_config_t hybrid;
 
+    /* [Advanced] — cross-cutting QUIC transport knobs. recv_rate_limit:
+     * conn-level receive-rate cap in bytes/sec, 0 = library default (off).
+     * CLIENT-ONLY by policy — see mqvpn_conn_settings.c. */
+    uint64_t recv_rate_limit;
+
     /* Inferred mode: 1=server, 0=client */
     int is_server;
 } mqvpn_file_config_t;

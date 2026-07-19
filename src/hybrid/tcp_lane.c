@@ -150,6 +150,22 @@ mqvpn_tcp_lane_new(const mqvpn_hybrid_config_t *cfg, uint64_t hash_seed, void *c
         return NULL;
     }
     lane->cfg = *cfg;
+    /* Pool-coupling clamp: the lane's cap check below (on_syn) is the
+     * documented enforcement point — reject → tcp_abort (RST), never a
+     * silent hang — but it is only reachable while lwIP can still allocate
+     * pcbs. MEMP_NUM_TCP_PCB backs tracked flows PLUS TIME_WAIT/half-open
+     * pcbs the table no longer (or does not yet) count, so a cap above
+     * pool/2 lets tcp_alloc() start failing inbound SYNs (no callback, no
+     * RST — the inner connection just hangs) before the cap ever fires.
+     * Matters on the mobile profile, where the pool (128) sits BELOW the
+     * library's default tcp_max_flows (256); on the default profile the
+     * bound (512/2 = 256) equals the DEFAULT value, so only explicitly
+     * configured values above it are (deliberately) clamped — the caller
+     * can compare mqvpn_tcp_lane_effective_max_flows() against its
+     * configured value to surface that. */
+    if (lane->cfg.tcp_max_flows > MEMP_NUM_TCP_PCB / 2) {
+        lane->cfg.tcp_max_flows = MEMP_NUM_TCP_PCB / 2;
+    }
     lane->hash_seed = hash_seed;
     lane->client_ctx = client_ctx;
     lane->clock_fn = clock_fn;
@@ -157,8 +173,13 @@ mqvpn_tcp_lane_new(const mqvpn_hybrid_config_t *cfg, uint64_t hash_seed, void *c
     /* Size for BOTH populations sharing the table: up to tcp_max_flows
      * TCP-lane flows plus up to TCP_LANE_RAW_MARKER_CAP sticky-RAW markers
      * (which are exactly what accumulates in the tcp=auto single-path hot
-     * case). Defaults: 256 + 4096 → 8192 buckets = 64 KB of pointers. */
-    lane->n_buckets = pick_buckets(cfg->tcp_max_flows + TCP_LANE_RAW_MARKER_CAP);
+     * case). Defaults: 256 + 4096 → 8192 buckets = 64 KB of pointers.
+     * MUST read the CLAMPED lane->cfg value, not the caller's cfg: sizing
+     * from the raw input would let a huge configured value allocate the
+     * 2^20-bucket cap (8 MB of pointers — a real dent in the NE memory
+     * ceiling) for a table whose admission cap is 64, and a value near
+     * UINT32_MAX would wrap the sum to a tiny bucket count. */
+    lane->n_buckets = pick_buckets(lane->cfg.tcp_max_flows + TCP_LANE_RAW_MARKER_CAP);
     lane->buckets = calloc(lane->n_buckets, sizeof(*lane->buckets));
     if (!lane->buckets) {
         free(lane);
@@ -514,6 +535,12 @@ mqvpn_tcp_lane_get_stats(const mqvpn_tcp_lane_t *lane, mqvpn_tcp_lane_stats_t *o
      * and can never leave the stats snapshot out of sync. */
     out->flows_active = lane->n_tcp_flows;
     out->raw_markers_active = lane->n_raw_markers;
+}
+
+uint32_t
+mqvpn_tcp_lane_effective_max_flows(const mqvpn_tcp_lane_t *lane)
+{
+    return lane ? lane->cfg.tcp_max_flows : 0;
 }
 
 /* ─── Downlink relay: H3 recv_body → lwIP tcp_write ─── */

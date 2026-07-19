@@ -19,6 +19,9 @@ struct SettingsView: View {
     @State private var pskText: String
     @State private var insecure: Bool
 
+    @State private var hybridEnabled: Bool
+    @State private var hybridMode: Int
+
     init(controller: TunnelController) {
         self.controller = controller
         let s = controller.reorderSettings
@@ -31,6 +34,9 @@ struct SettingsView: View {
         _portText = State(initialValue: String(srv.port))
         _pskText = State(initialValue: srv.authKey)
         _insecure = State(initialValue: srv.insecure)
+
+        _hybridEnabled = State(initialValue: controller.hybridSettings.enabled)
+        _hybridMode = State(initialValue: controller.hybridSettings.tcpMode)
     }
 
     private var draft: ReorderSettings {
@@ -81,6 +87,18 @@ struct SettingsView: View {
                         }
                     }
                 }
+                Section {
+                    Toggle("Enabled", isOn: $hybridEnabled).disabled(!controller.isEditable)
+                    if hybridEnabled {
+                        Picker("TCP Mode", selection: $hybridMode) {
+                            Text("Auto").tag(HybridSettings.modeAuto)
+                            Text("Stream").tag(HybridSettings.modeStream)
+                            Text("Raw").tag(HybridSettings.modeRaw)
+                        }.disabled(!controller.isEditable)
+                    }
+                } header: { Text("Hybrid Mode") } footer: {
+                    Text("Requires hybrid support on the server; TCP connections fail otherwise.")
+                }
                 if let errorText { Section { Text(errorText).foregroundColor(.red) } }
                 if !controller.isEditable {
                     Section { Text("Disconnect to edit settings.")
@@ -102,7 +120,8 @@ struct SettingsView: View {
     }
 
     private func save() async {
-        do { try await controller.saveSettings(server: serverDraft, reorder: draft); dismiss() }
+        let hybrid = HybridSettings(enabled: hybridEnabled, tcpMode: hybridMode)
+        do { try await controller.saveSettings(server: serverDraft, reorder: draft, hybrid: hybrid); dismiss() }
         catch { errorText = "Save failed: \(error)" }
     }
 }

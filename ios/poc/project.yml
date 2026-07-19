@@ -56,7 +56,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.mp0rta.mqvpnpoc.PacketTunnel
         SWIFT_OBJC_BRIDGING_HEADER: PacketTunnel/BridgingHeader.h
-        OTHER_LDFLAGS: "-lmqvpn -lxquic-static -lssl -lcrypto -lc++"
+        OTHER_LDFLAGS: "-lmqvpn -llwip_core -lxquic-static -lssl -lcrypto -lc++"
     entitlements:
       path: PacketTunnel.entitlements
       properties:

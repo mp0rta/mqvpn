@@ -92,6 +92,8 @@ struct mqvpn_config_s {
      * mqvpn_hybrid_config_default() in mqvpn_config_new(); the library
      * consumer reads cfg->hybrid. */
     mqvpn_hybrid_config_t hybrid;
+
+    uint64_t recv_rate_limit; /* 0 = off; client-only, see libmqvpn.h */
 };
 
 /* ─── State transition validation (M0-5) ─── */
