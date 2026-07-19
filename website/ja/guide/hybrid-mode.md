@@ -67,6 +67,11 @@ EgressDeny = 10.0.5.13/32   # EgressAllow の後に評価
 
 control API の `get_stats` がレーンのランタイムカウンタをクライアント・サーバ両方で公開します: `tcp_flows_active`、`tcp_flows_total`、`tcp_flows_rejected`、およびレーン別パケットカウンタ（`pkts_lane_*`）。フィールドの意味は [docs/control-api.md §5.4](https://github.com/mp0rta/mqvpn/blob/main/docs/control-api.md) を参照してください。
 
+## モバイルビルド（iOS）
+
+モバイルビルドでは、iOS Network Extension のメモリ上限に収めるため、lwIP のフットプリントを削減した構成（`MQVPN_LWIP_MOBILE_PROFILE` ビルドフラグ: TCP ウィンドウ約 2 MiB / 256 フローに対して約 256 KiB / 64 フロー構成）でレーンをコンパイルします。このプロファイルは QUIC 側の受信レート上限 [`[Advanced] RecvRateLimit`](./configuration#advanced) とセットで使います — 内側 TCP のウィンドウを縮めるだけでは外側 QUIC コネクション自体のバッファリングは抑えられないため、モバイルクライアントは両方を設定します。予算計算と実測値の詳細は
+[docs/hybrid_h2_memory_budget.md §5](https://github.com/mp0rta/mqvpn/blob/main/docs/hybrid_h2_memory_budget.md) を参照してください。
+
 ## 既知の制限
 
 - **プライベート宛先への TCP には明示的な `EgressAllow` が必要です。** クライアントはサーバの ACL を参照できないため、サーバの egress `connect()` が試行される前に lwIP が内側 SYN にローカルで応答します。ACL による拒否は即時の接続拒否ではなく、後からの RST としてアプリケーションに現れます。
