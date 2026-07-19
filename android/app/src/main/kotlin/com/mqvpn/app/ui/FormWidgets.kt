@@ -90,6 +90,7 @@ internal fun <T> EnumDropdownField(
                         onSelect(option)
                         expanded = false
                     },
+                    enabled = enabled,
                 )
             }
         }
