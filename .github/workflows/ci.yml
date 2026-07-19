@@ -699,10 +699,13 @@ jobs:
             -j "$(sysctl -n hw.ncpu)"
           python3 tests/check_profile_propagation.py build-darwin-mobile
 
+      # Only test_tcp_lane: check_lwip_profile_invariance preprocesses BOTH
+      # profiles from source itself (build-dir-independent), so the default
+      # tree's unfiltered ctest above already covers it — re-running it here
+      # would imply extra coverage this tree does not add.
       - name: Run mobile-profile TCP-lane tests
         run: |
-          ctest --test-dir build-darwin-mobile \
-            -R "test_tcp_lane|check_lwip_profile_invariance" --output-on-failure
+          ctest --test-dir build-darwin-mobile -R "test_tcp_lane" --output-on-failure
 
   windows:
     # Pinned to windows-2022 (VS 2022). windows-latest migrated to VS 2026 in
