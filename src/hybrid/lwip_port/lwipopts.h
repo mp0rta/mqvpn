@@ -120,19 +120,22 @@
  * 512/2 = 256 == the config default; mobile profile 128/2 = 64 == the iOS
  * NE value. A cap above the clamp would let tcp_alloc() start failing
  * SYNs (silent hang, no RST) before the cap check ever ran. */
-/* MEMP_NUM_TCP_SEG is a GLOBAL pool shared by all flows: 2048 segments
- * covers only ~2 flows at full TCP_SND_BUF (2 MB / 8960-byte MSS ~ 234
- * segs each x safety factor). tcp_write() returns ERR_MEM on pool
- * exhaustion — the TCP-lane relay (tcp_lane.c) MUST handle that as
- * backpressure (retry on sent-callback), it is not optional. */
+/* MEMP_NUM_TCP_SEG is a GLOBAL pool shared by all flows, sized per profile
+ * (default 2048 / mobile 512). Either way it covers only a few flows at
+ * full TCP_SND_BUF (TCP_SND_QUEUELEN caps one pcb at 4*TCP_SND_BUF/MSS
+ * segments: default 937 of 2048 ~ 2 flows, mobile scale=2 118 of 512 ~ 4
+ * flows). tcp_write() returns ERR_MEM on pool exhaustion — the TCP-lane
+ * relay (tcp_lane.c) MUST handle that as backpressure (retry on
+ * sent-callback), it is not optional. */
 /* PBUF_POOL_SIZE: sized to satisfy init.c's compile-time sanity check
  * (TCP_WND <= PBUF_POOL_SIZE * (PBUF_POOL_BUFSIZE - protocol headers)),
  * which lwIP enforces unconditionally whenever MEMP_MEM_MALLOC == 0 and
  * PBUF_POOL_SIZE > 0 (init.c) — REGARDLESS of whether this project's own
  * code actually allocates PBUF_POOL pbufs (see the RESOLVED note below).
- * With TCP_WND ~2 MB and ~8946 usable bytes per pool pbuf (9000 - 54
- * header bytes), 128 pbufs (~1.1 MB) is too small; 256 gives ~2.29 MB
- * >= 2,097,120.
+ * Default profile: with TCP_WND ~2 MB and ~8946 usable bytes per pool pbuf
+ * (9000 - 54 header bytes), 128 pbufs (~1.1 MB) is too small; 256 gives
+ * ~2.29 MB >= 2,097,120. The mobile profile derives its (smaller) size from
+ * TCP_WND via the power-of-two ladder above.
  *
  * RESOLVED (I1, cross-flow PBUF_POOL exhaustion DoS): mqvpn_lwip_input
  * (lwip_glue.c) allocates every ingress packet as PBUF_RAM (exact-size,
