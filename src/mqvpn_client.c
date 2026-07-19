@@ -757,22 +757,23 @@ mqvpn_client_test_set_shutting_down(mqvpn_client_t *c, int v)
 
 /* Test-only: drive the real CONNECT-IP response-header scan
  * (cli_connect_ip_scan_headers) on the attached test conn with a fabricated
- * header section of n ":status" headers. The xqc_http_headers_t is built
+ * header section of n (name, value) pairs. The xqc_http_headers_t is built
  * here so tests don't need xquic types. */
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((visibility("hidden")))
 #endif
 int
-mqvpn_client_test_scan_status_headers(mqvpn_client_t *c, const char **values, int n)
+mqvpn_client_test_scan_headers(mqvpn_client_t *c, const char **names, const char **values,
+                               int n)
 {
     enum { SCAN_MAX = 8 };
     xqc_http_header_t hs[SCAN_MAX];
 
-    if (!c || !c->conn || !values || n < 0 || n > SCAN_MAX) return -1;
+    if (!c || !c->conn || !names || !values || n < 0 || n > SCAN_MAX) return -1;
     memset(hs, 0, sizeof(hs));
     for (int i = 0; i < n; i++) {
-        hs[i].name.iov_base = (void *)":status";
-        hs[i].name.iov_len = 7;
+        hs[i].name.iov_base = (void *)names[i];
+        hs[i].name.iov_len = strlen(names[i]);
         hs[i].value.iov_base = (void *)values[i];
         hs[i].value.iov_len = strlen(values[i]);
     }
@@ -782,6 +783,16 @@ mqvpn_client_test_scan_status_headers(mqvpn_client_t *c, const char **values, in
     hdrs.capacity = SCAN_MAX;
     cli_connect_ip_scan_headers(c->conn, &hdrs);
     return 0;
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_conn_peer_reorder(const mqvpn_client_t *c)
+{
+    if (!c || !c->conn) return -1;
+    return c->conn->peer_reorder_supported;
 }
 
 /* Test-only: drive the real CONNECT-IP final-close handling
@@ -1705,46 +1716,54 @@ cli_connect_ip_scan_headers(cli_conn_t *conn, const xqc_http_headers_t *headers)
      * cli_signal_connect_fail with tunnel_ok already set, nor resurrect
      * tunnel_ok on a conn whose failure is already latched. */
     int final_seen = conn->tunnel_ok || conn->tunnel_notified;
+    int decided_200 = 0;  /* THIS section carried the deciding 200 */
+    int reorder_echo = 0; /* THIS section carried the mqvpn-reorder echo */
 
     for (int i = 0; i < (int)headers->count; i++) {
         xqc_http_header_t *h = &headers->headers[i];
-        if (h->name.iov_len == 7 && memcmp(h->name.iov_base, ":status", 7) == 0 &&
-            h->value.iov_len == 3) {
+        if (h->name.iov_len == 7 && memcmp(h->name.iov_base, ":status", 7) == 0) {
             const unsigned char *v = h->value.iov_base;
-            if (v[0] >= '0' && v[0] <= '9' && v[1] >= '0' && v[1] <= '9' && v[2] >= '0' &&
-                v[2] <= '9') {
-                int st = (v[0] - '0') * 100 + (v[1] - '0') * 10 + (v[2] - '0');
-                if (st >= 100 && st < 200) {
-                    /* Interim response — not a final status; a client MUST
-                     * be able to parse 1xx before the final response and MAY
-                     * ignore it (RFC 9110 §15.2.1). */
-                    LOG_I(c, "tunnel interim status=%d, awaiting final response", st);
-                } else if (final_seen) {
-                    LOG_W(c, "tunnel duplicate :status %d ignored", st);
-                } else if (st == 200) {
-                    final_seen = 1;
-                    conn->tunnel_ok = 1;
-                    LOG_I(c, "tunnel 200 OK");
-                } else {
-                    final_seen = 1;
-                    LOG_W(c, "tunnel non-200 status=%d", st);
-                    cli_signal_connect_fail(conn, cli_classify_status(st), st);
-                }
+            /* A value that is not exactly 3 digits is malformed (st = -1). */
+            int st = -1;
+            if (h->value.iov_len == 3 && v[0] >= '0' && v[0] <= '9' && v[1] >= '0' &&
+                v[1] <= '9' && v[2] >= '0' && v[2] <= '9') {
+                st = (v[0] - '0') * 100 + (v[1] - '0') * 10 + (v[2] - '0');
+            }
+            if (st >= 100 && st < 200) {
+                /* Interim response — not a final status; a client MUST be
+                 * able to parse 1xx before the final response and MAY
+                 * ignore it (RFC 9110 §15.2.1). */
+                LOG_I(c, "tunnel interim status=%d, awaiting final response", st);
             } else if (final_seen) {
-                LOG_W(c, "tunnel malformed :status ignored");
-            } else {
+                LOG_W(c, "tunnel duplicate :status %d ignored", st);
+            } else if (st == 200) {
+                final_seen = 1;
+                decided_200 = 1;
+                conn->tunnel_ok = 1;
+                LOG_I(c, "tunnel 200 OK");
+            } else if (st < 0) {
                 final_seen = 1;
                 LOG_W(c, "tunnel malformed :status");
                 cli_signal_connect_fail(conn, MQVPN_ERR_PROTOCOL, 0);
+            } else {
+                final_seen = 1;
+                LOG_W(c, "tunnel non-200 status=%d", st);
+                cli_signal_connect_fail(conn, cli_classify_status(st), st);
             }
         }
-        /* §19.3: server echoed mqvpn-reorder → it supports the shim, so
-         * we may now stamp (gated below by cfg.reorder.mode != OFF). */
         if (mqvpn_reorder_header_match(h->name.iov_base, h->name.iov_len,
                                        h->value.iov_base, h->value.iov_len)) {
-            conn->peer_reorder_supported = 1;
-            LOG_I(c, "peer advertised mqvpn-reorder; TX stamping enabled");
+            reorder_echo = 1;
         }
+    }
+
+    /* §19.2/§19.3: the server echoes mqvpn-reorder in its 200 response
+     * only — accept the echo solely from the section that carried the
+     * deciding 200 (order independent within it), so an echo smuggled into
+     * an interim response or trailers can't enable TX stamping. */
+    if (decided_200 && reorder_echo) {
+        conn->peer_reorder_supported = 1;
+        LOG_I(c, "peer advertised mqvpn-reorder; TX stamping enabled");
     }
 }
 
@@ -2783,13 +2802,19 @@ mqvpn_client_new(const mqvpn_config_t *cfg, const mqvpn_client_callbacks_t *cbs,
     /* Load-time visibility for the lane's pcb-pool clamp: the value is
      * silently reduced at lane creation (by design — see tcp_lane.c), and
      * the establishment-time warn is easy to miss in production. Surface
-     * the override where the operator reads startup logs. */
-    if (c->config.hybrid.enabled && c->config.hybrid.tcp_mode != MQVPN_HYBRID_TCP_RAW &&
-        c->config.hybrid.tcp_max_flows > mqvpn_tcp_lane_pool_flow_bound()) {
-        LOG_W(c,
-              "hybrid: configured tcp_max_flows %u exceeds lwIP pcb pool bound "
-              "%u and will be clamped at tunnel setup",
-              c->config.hybrid.tcp_max_flows, mqvpn_tcp_lane_pool_flow_bound());
+     * the override where the operator reads startup logs. Judge the
+     * SANITIZED value — tunnel setup expands 0 to the library default,
+     * which on the mobile profile already exceeds the pool bound. */
+    {
+        mqvpn_hybrid_config_t hcfg = c->config.hybrid;
+        (void)mqvpn_hybrid_config_sanitize(&hcfg, NULL, 0);
+        if (hcfg.enabled && hcfg.tcp_mode != MQVPN_HYBRID_TCP_RAW &&
+            hcfg.tcp_max_flows > mqvpn_tcp_lane_pool_flow_bound()) {
+            LOG_W(c,
+                  "hybrid: configured tcp_max_flows %u exceeds lwIP pcb pool bound "
+                  "%u and will be clamped at tunnel setup",
+                  hcfg.tcp_max_flows, mqvpn_tcp_lane_pool_flow_bound());
+        }
     }
 #endif
 

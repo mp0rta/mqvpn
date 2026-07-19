@@ -1847,8 +1847,19 @@ TEST(conn_close_fires_closed_when_not_latched)
 
 extern int mqvpn_client_test_conn_tunnel_ok(const mqvpn_client_t *c);
 extern int mqvpn_client_test_set_shutting_down(mqvpn_client_t *c, int v);
-extern int mqvpn_client_test_scan_status_headers(mqvpn_client_t *c, const char **values,
-                                                 int n);
+extern int mqvpn_client_test_scan_headers(mqvpn_client_t *c, const char **names,
+                                          const char **values, int n);
+extern int mqvpn_client_test_conn_peer_reorder(const mqvpn_client_t *c);
+
+/* All-":status" convenience wrapper over the (name, value) scan hook. */
+static int
+scan_status_headers(mqvpn_client_t *c, const char **values, int n)
+{
+    const char *names[8];
+    for (int i = 0; i < n && i < 8; i++)
+        names[i] = ":status";
+    return mqvpn_client_test_scan_headers(c, names, values, n);
+}
 extern int mqvpn_client_test_request_close_connect_ip(mqvpn_client_t *c);
 
 TEST(headers_duplicate_status_first_final_wins)
@@ -1860,7 +1871,7 @@ TEST(headers_duplicate_status_first_final_wins)
      * the first final status wins; the duplicate must neither fire
      * tunnel_closed nor (Debug builds) trip the connect-fail assert. */
     const char *vals[] = {"200", "403"};
-    ASSERT_EQ(mqvpn_client_test_scan_status_headers(c, vals, 2), 0);
+    ASSERT_EQ(scan_status_headers(c, vals, 2), 0);
     ASSERT_EQ(mqvpn_client_test_conn_tunnel_ok(c), 1);
     ASSERT_EQ(g_tunnel_closed_count, 0);
     ASSERT_EQ(mqvpn_client_test_conn_tunnel_notified(c), 0);
@@ -1877,7 +1888,7 @@ TEST(headers_status_after_failure_latch_ignored)
     /* First final status 403 decides the conn; a trailing duplicate "200"
      * must not resurrect tunnel_ok on a conn already latched failed. */
     const char *vals[] = {"403", "200"};
-    ASSERT_EQ(mqvpn_client_test_scan_status_headers(c, vals, 2), 0);
+    ASSERT_EQ(scan_status_headers(c, vals, 2), 0);
     ASSERT_EQ(g_tunnel_closed_count, 1);
     ASSERT_EQ(g_last_tunnel_closed_reason, MQVPN_ERR_AUTH);
     ASSERT_EQ(mqvpn_client_test_conn_tunnel_ok(c), 0);
@@ -1895,8 +1906,8 @@ TEST(headers_status_across_sections_first_wins)
      * after the tunnel is up must be ignored, not classified as failure. */
     const char *ok[] = {"200"};
     const char *late[] = {"403"};
-    ASSERT_EQ(mqvpn_client_test_scan_status_headers(c, ok, 1), 0);
-    ASSERT_EQ(mqvpn_client_test_scan_status_headers(c, late, 1), 0);
+    ASSERT_EQ(scan_status_headers(c, ok, 1), 0);
+    ASSERT_EQ(scan_status_headers(c, late, 1), 0);
     ASSERT_EQ(mqvpn_client_test_conn_tunnel_ok(c), 1);
     ASSERT_EQ(g_tunnel_closed_count, 0);
 
@@ -1912,16 +1923,74 @@ TEST(headers_interim_1xx_not_a_failure)
     /* RFC 9110 §15.2.1: interim responses may precede the final one and a
      * client MUST be able to parse them; they are not a terminal status. */
     const char *interim[] = {"103"};
-    ASSERT_EQ(mqvpn_client_test_scan_status_headers(c, interim, 1), 0);
+    ASSERT_EQ(scan_status_headers(c, interim, 1), 0);
     ASSERT_EQ(mqvpn_client_test_conn_tunnel_ok(c), 0);
     ASSERT_EQ(g_tunnel_closed_count, 0);
     ASSERT_EQ(mqvpn_client_test_conn_tunnel_notified(c), 0);
 
     /* The final 200 that follows must still establish the tunnel. */
     const char *final_ok[] = {"200"};
-    ASSERT_EQ(mqvpn_client_test_scan_status_headers(c, final_ok, 1), 0);
+    ASSERT_EQ(scan_status_headers(c, final_ok, 1), 0);
     ASSERT_EQ(mqvpn_client_test_conn_tunnel_ok(c), 1);
     ASSERT_EQ(g_tunnel_closed_count, 0);
+
+    ASSERT_EQ(mqvpn_client_test_conn_free(c), 0);
+    mqvpn_client_destroy(c);
+}
+
+TEST(headers_malformed_status_length_latches_failure)
+{
+    mqvpn_client_t *c = make_test_client_with_closed_cb();
+    ASSERT_EQ(mqvpn_client_test_conn_alloc(c), 0);
+
+    /* A :status whose value is not exactly 3 digits is malformed; it must
+     * latch a PROTOCOL failure, not be skipped so that a later duplicate
+     * "200" establishes the tunnel. */
+    const char *vals[] = {"2000", "200"};
+    ASSERT_EQ(scan_status_headers(c, vals, 2), 0);
+    ASSERT_EQ(g_tunnel_closed_count, 1);
+    ASSERT_EQ(g_last_tunnel_closed_reason, MQVPN_ERR_PROTOCOL);
+    ASSERT_EQ(mqvpn_client_test_conn_tunnel_ok(c), 0);
+
+    ASSERT_EQ(mqvpn_client_test_conn_free(c), 0);
+    mqvpn_client_destroy(c);
+}
+
+TEST(reorder_echo_ignored_outside_deciding_200_section)
+{
+    mqvpn_client_t *c = make_test_client_with_closed_cb();
+    ASSERT_EQ(mqvpn_client_test_conn_alloc(c), 0);
+
+    /* §19.2: the server echoes mqvpn-reorder in its 200 response only. An
+     * echo smuggled into an interim response, followed by a 200 WITHOUT the
+     * echo, must not enable TX stamping. */
+    const char *n1[] = {":status", "mqvpn-reorder"};
+    const char *v1[] = {"103", "v1"};
+    ASSERT_EQ(mqvpn_client_test_scan_headers(c, n1, v1, 2), 0);
+    ASSERT_EQ(mqvpn_client_test_conn_peer_reorder(c), 0);
+
+    const char *n2[] = {":status"};
+    const char *v2[] = {"200"};
+    ASSERT_EQ(mqvpn_client_test_scan_headers(c, n2, v2, 1), 0);
+    ASSERT_EQ(mqvpn_client_test_conn_tunnel_ok(c), 1);
+    ASSERT_EQ(mqvpn_client_test_conn_peer_reorder(c), 0);
+
+    ASSERT_EQ(mqvpn_client_test_conn_free(c), 0);
+    mqvpn_client_destroy(c);
+}
+
+TEST(reorder_echo_in_deciding_200_section_sets_flag)
+{
+    mqvpn_client_t *c = make_test_client_with_closed_cb();
+    ASSERT_EQ(mqvpn_client_test_conn_alloc(c), 0);
+
+    /* Happy path pin: echo in the same section as the deciding 200 (order
+     * independent — echo may precede :status). */
+    const char *n1[] = {"mqvpn-reorder", ":status"};
+    const char *v1[] = {"v1", "200"};
+    ASSERT_EQ(mqvpn_client_test_scan_headers(c, n1, v1, 2), 0);
+    ASSERT_EQ(mqvpn_client_test_conn_tunnel_ok(c), 1);
+    ASSERT_EQ(mqvpn_client_test_conn_peer_reorder(c), 1);
 
     ASSERT_EQ(mqvpn_client_test_conn_free(c), 0);
     mqvpn_client_destroy(c);
@@ -1988,8 +2057,15 @@ make_hybrid_client_with_flows(uint32_t flows)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
     mqvpn_config_set_server(cfg, "1.2.3.4", 443);
-    mqvpn_config_set_hybrid_enabled(cfg, 1);
-    mqvpn_config_set_hybrid_limits(cfg, flows, 300);
+    /* Mirror the INI [Hybrid] bridge (mqvpn_config_apply_hybrid): a raw
+     * struct copy with no setter validation, so flows==0 — which the file
+     * parser accepts and the public setter rejects — reaches the library
+     * exactly as it does from a config file. */
+    mqvpn_hybrid_config_t h;
+    mqvpn_hybrid_config_default(&h);
+    h.enabled = 1;
+    h.tcp_max_flows = flows;
+    mqvpn_config_apply_hybrid(cfg, &h);
 
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
     cbs.tun_output = dummy_tun_output;
@@ -2018,6 +2094,20 @@ TEST(client_new_quiet_tcp_max_flows_at_pool_bound)
     mqvpn_client_t *c = make_hybrid_client_with_flows(mqvpn_tcp_lane_pool_flow_bound());
     ASSERT_EQ(c != NULL, 1);
     ASSERT_EQ(g_clamp_warn_count, 0);
+    mqvpn_client_destroy(c);
+}
+
+TEST(client_new_warn_keys_on_sanitized_flows)
+{
+    /* TcpMaxFlows=0 sanitizes to MQVPN_TCP_MAX_FLOWS_DEFAULT at tunnel
+     * setup; the startup warn must key on that sanitized value, or the
+     * mobile profile (default 256 > bound 64) misses the clamp until
+     * establishment. Expectation is profile-derived so this test is exact
+     * on both the default (256 == bound → quiet) and mobile profiles. */
+    int expect = MQVPN_TCP_MAX_FLOWS_DEFAULT > mqvpn_tcp_lane_pool_flow_bound() ? 1 : 0;
+    mqvpn_client_t *c = make_hybrid_client_with_flows(0);
+    ASSERT_EQ(c != NULL, 1);
+    ASSERT_EQ(g_clamp_warn_count, expect);
     mqvpn_client_destroy(c);
 }
 #endif /* MQVPN_HYBRID_TCP_LANE_ENABLED */
@@ -2697,11 +2787,15 @@ main(void)
     run_headers_status_after_failure_latch_ignored();
     run_headers_status_across_sections_first_wins();
     run_headers_interim_1xx_not_a_failure();
+    run_headers_malformed_status_length_latches_failure();
+    run_reorder_echo_ignored_outside_deciding_200_section();
+    run_reorder_echo_in_deciding_200_section_sets_flag();
     run_request_close_during_local_shutdown_keeps_closed_reason();
     run_request_close_server_rst_still_signals_protocol();
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
     run_client_new_warns_tcp_max_flows_above_pool_bound();
     run_client_new_quiet_tcp_max_flows_at_pool_bound();
+    run_client_new_warn_keys_on_sanitized_flows();
 #endif
 
     run_client_set_state_reconnecting_clears_handshake_start();
