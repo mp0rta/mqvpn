@@ -27,7 +27,8 @@
 
 /* Profile derivation pin — catches drift WITHIN the selected profile.
  * (Per-target propagation failures are caught by
- * tests/check_profile_propagation.py — run per mobile-profile build —
+ * tests/check_profile_propagation.py — invoked by ios/build-ios.sh and
+ * the mobile-profile CI step against the build's compile_commands.json —
  * not here: an unpropagated TU takes the default branch and passes.) */
 #ifdef MQVPN_LWIP_MOBILE_PROFILE
 _Static_assert(TCP_WND == (65535 << MQVPN_LWIP_MOBILE_RCV_SCALE),

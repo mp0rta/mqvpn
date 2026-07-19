@@ -101,12 +101,20 @@ if [ "$PHASE" = "mqvpn" ] || [ "$PHASE" = "all" ]; then
     # BORINGSSL_BUILD_DIR must point at the iOS build — the root CMake default
     # is the host build dir and would resolve wrong/absent SSL libs.
     # Hybrid lane ON with the mobile lwIP profile (NE memory ceiling).
+    # CMAKE_EXPORT_COMPILE_COMMANDS feeds check_profile_propagation.py below —
+    # the _Static_assert in each TU cannot catch an UNpropagated TU (it just
+    # takes the default branch and passes), so the compile database is the
+    # only place a split-profile build is visible.
     cmake -S "$SCRIPT_DIR" -B "$MQVPN_BUILD" "${IOS_CMAKE_FLAGS[@]}" \
         -DANDROID_CROSS_COMPILE=ON \
         -DMQVPN_LWIP_MOBILE_PROFILE=ON \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DXQUIC_BUILD_DIR="$XQUIC_BUILD" \
         -DBORINGSSL_BUILD_DIR="$BSSL_BUILD"
     cmake --build "$MQVPN_BUILD" --target mqvpn_lib
+
+    echo "=== Checking mobile-profile propagation ==="
+    python3 "$SCRIPT_DIR/tests/check_profile_propagation.py" "$MQVPN_BUILD"
 
     echo "=== Staging artifacts to $OUT_DIR ==="
     resolve_bssl_libs
