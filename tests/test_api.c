@@ -1966,6 +1966,62 @@ TEST(request_close_server_rst_still_signals_protocol)
     mqvpn_client_destroy(c);
 }
 
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+/* ── Hybrid tcp_max_flows pool-bound warn at client_new (config-load-time
+ *    visibility for the lane's silent clamp) ── */
+
+extern uint32_t mqvpn_tcp_lane_pool_flow_bound(void);
+
+static int g_clamp_warn_count = 0;
+
+static void
+clamp_warn_log(mqvpn_log_level_t level, const char *msg, void *u)
+{
+    (void)u;
+    if (level == MQVPN_LOG_WARN && strstr(msg, "tcp_max_flows") != NULL &&
+        strstr(msg, "clamp") != NULL)
+        g_clamp_warn_count++;
+}
+
+static mqvpn_client_t *
+make_hybrid_client_with_flows(uint32_t flows)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    mqvpn_config_set_server(cfg, "1.2.3.4", 443);
+    mqvpn_config_set_hybrid_enabled(cfg, 1);
+    mqvpn_config_set_hybrid_limits(cfg, flows, 300);
+
+    mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
+    cbs.tun_output = dummy_tun_output;
+    cbs.tunnel_config_ready = dummy_config_ready;
+    cbs.log = clamp_warn_log;
+
+    g_clamp_warn_count = 0;
+    mqvpn_client_t *c = mqvpn_client_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    return c;
+}
+
+TEST(client_new_warns_tcp_max_flows_above_pool_bound)
+{
+    mqvpn_client_t *c =
+        make_hybrid_client_with_flows(mqvpn_tcp_lane_pool_flow_bound() + 1);
+    ASSERT_EQ(c != NULL, 1);
+    /* The operator must learn at startup — not at tunnel establishment —
+     * that the configured value will be clamped. */
+    ASSERT_EQ(g_clamp_warn_count, 1);
+    mqvpn_client_destroy(c);
+}
+
+TEST(client_new_quiet_tcp_max_flows_at_pool_bound)
+{
+    mqvpn_client_t *c = make_hybrid_client_with_flows(mqvpn_tcp_lane_pool_flow_bound());
+    ASSERT_EQ(c != NULL, 1);
+    ASSERT_EQ(g_clamp_warn_count, 0);
+    mqvpn_client_destroy(c);
+}
+#endif /* MQVPN_HYBRID_TCP_LANE_ENABLED */
+
 TEST(client_set_state_reconnecting_clears_handshake_start)
 {
     mqvpn_client_t *c = make_test_client();
@@ -2643,6 +2699,10 @@ main(void)
     run_headers_interim_1xx_not_a_failure();
     run_request_close_during_local_shutdown_keeps_closed_reason();
     run_request_close_server_rst_still_signals_protocol();
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    run_client_new_warns_tcp_max_flows_above_pool_bound();
+    run_client_new_quiet_tcp_max_flows_at_pool_bound();
+#endif
 
     run_client_set_state_reconnecting_clears_handshake_start();
     run_get_interest_includes_handshake_stall_deadline();

@@ -543,6 +543,12 @@ mqvpn_tcp_lane_effective_max_flows(const mqvpn_tcp_lane_t *lane)
     return lane ? lane->cfg.tcp_max_flows : 0;
 }
 
+uint32_t
+mqvpn_tcp_lane_pool_flow_bound(void)
+{
+    return MEMP_NUM_TCP_PCB / 2;
+}
+
 /* ─── Downlink relay: H3 recv_body → lwIP tcp_write ─── */
 
 /* Save one just-read, not-yet-writable chunk. Lazily allocates the flow's

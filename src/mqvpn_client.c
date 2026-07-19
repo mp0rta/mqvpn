@@ -2779,6 +2779,20 @@ mqvpn_client_new(const mqvpn_config_t *cfg, const mqvpn_client_callbacks_t *cbs,
 
     client_init_handle(c, cfg, cbs, user_ctx);
 
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    /* Load-time visibility for the lane's pcb-pool clamp: the value is
+     * silently reduced at lane creation (by design — see tcp_lane.c), and
+     * the establishment-time warn is easy to miss in production. Surface
+     * the override where the operator reads startup logs. */
+    if (c->config.hybrid.enabled && c->config.hybrid.tcp_mode != MQVPN_HYBRID_TCP_RAW &&
+        c->config.hybrid.tcp_max_flows > mqvpn_tcp_lane_pool_flow_bound()) {
+        LOG_W(c,
+              "hybrid: configured tcp_max_flows %u exceeds lwIP pcb pool bound "
+              "%u and will be clamped at tunnel setup",
+              c->config.hybrid.tcp_max_flows, mqvpn_tcp_lane_pool_flow_bound());
+    }
+#endif
+
     if (init_xquic_engine(c) < 0) {
         client_destroy_engine(c);
         free(c);
