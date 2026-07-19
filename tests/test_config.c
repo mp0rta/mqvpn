@@ -4,7 +4,8 @@
 /*
  * test_config.c — unit tests for INI config parser
  *
- * Build: cc -o tests/test_config tests/test_config.c src/config.c src/log.c -Isrc
+ * Build: cc -o tests/test_config tests/test_config.c src/config.c src/log.c \
+ *            -Isrc -Iinclude
  */
 #include "config.h"
 #include "libmqvpn.h" /* MQVPN_RECV_RATE_LIMIT_MAX */
