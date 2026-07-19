@@ -57,6 +57,7 @@ fun ConnectScreen(
 
     var serverAddress by rememberSaveable { mutableStateOf("160.251.143.149") }
     var serverPort by rememberSaveable { mutableStateOf("443") }
+    var tlsServerName by rememberSaveable { mutableStateOf("") }
     var authKey by rememberSaveable { mutableStateOf("tiiUC0/Fx51w5XuxAnpOgdRZb19SLqglwFdhxbbsbnM=") }
     var insecure by rememberSaveable { mutableStateOf(true) }
     var killSwitch by rememberSaveable { mutableStateOf(false) }
@@ -82,7 +83,7 @@ fun ConnectScreen(
         if (result.resultCode == Activity.RESULT_OK) {
             viewModel.connect(
                 buildConfig(
-                    serverAddress, serverPort, authKey, insecure, killSwitch,
+                    serverAddress, serverPort, tlsServerName, authKey, insecure, killSwitch,
                     reorderEnabled, reorderProfile, reorderPorts,
                     hybridEnabled, hybridTcpMode,
                 )
@@ -118,6 +119,16 @@ fun ConnectScreen(
             enabled = isDisconnected,
             singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        OutlinedTextField(
+            value = tlsServerName,
+            onValueChange = { tlsServerName = it },
+            label = { Text("TLS Server Name") },
+            supportingText = { Text("Empty = use server address") },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = isDisconnected,
+            singleLine = true,
         )
         Spacer(modifier = Modifier.height(8.dp))
         OutlinedTextField(
@@ -268,7 +279,7 @@ fun ConnectScreen(
                         } else {
                             viewModel.connect(
                                 buildConfig(
-                                    serverAddress, serverPort, authKey, insecure, killSwitch,
+                                    serverAddress, serverPort, tlsServerName, authKey, insecure, killSwitch,
                                     reorderEnabled, reorderProfile, reorderPorts,
                                     hybridEnabled, hybridTcpMode,
                                 )
@@ -377,6 +388,7 @@ private fun ReorderStatsCard(rs: ReorderStats) {
 private fun buildConfig(
     address: String,
     port: String,
+    serverName: String,
     key: String,
     insecure: Boolean,
     killSwitch: Boolean,
@@ -389,6 +401,7 @@ private fun buildConfig(
     return MqvpnConfig(
         serverAddress = address.trim(),
         serverPort = port.trim().toIntOrNull() ?: 443,
+        tlsServerName = serverName.trim().ifEmpty { null },
         authKey = key.trim(),
         insecure = insecure,
         killSwitch = killSwitch,
