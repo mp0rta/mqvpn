@@ -40,8 +40,8 @@
  * eviction), so counting them against tcp_max_flows would let a tcp=auto
  * client on a single path permanently exhaust the TCP lane with markers —
  * exactly the scenario tcp=auto exists for. This cap only bounds memory: a
- * marker entry is one mqvpn_tcp_flow_t (~120 B, key 38 B) so 4096 markers
- * ≈ 0.5 MB worst case; the keys alone are 38 B × 4096 ≈ 156 KB. On cap hit
+ * marker entry is one mqvpn_tcp_flow_t (200 B, key 38 B) so 4096 markers
+ * ≈ 0.82 MB worst case; the keys alone are 38 B × 4096 ≈ 156 KB. On cap hit
  * the flow just stays unsticky and re-evaluates per SYN (harmless).
  * #ifndef so tests can override it small to exercise the cap
  * branch. */
@@ -53,7 +53,7 @@
  * rationale as TCP_LANE_RAW_MARKER_CAP above: a CLOSING entry is one
  * mqvpn_tcp_flow_t with a NULL pcb/h3_request AND a freed downlink_stash
  * (tcp_lane_mark_closing releases it at the transition — see that
- * function's comment), so 4096 of them cost roughly the same ~0.5 MB
+ * function's comment), so 4096 of them cost roughly the same ~0.82 MB
  * worst case. Overflow evicts the OLDEST CLOSING
  * entry immediately (mqvpn_tcp_lane_tick's cap check) rather than refusing
  * the transition — the cost of evicting early is only that one flow's
@@ -1055,8 +1055,8 @@ tcp_lane_evict_oldest_closing(mqvpn_tcp_lane_t *lane)
  * tcp_lane_remove_flow: a CLOSING marker can reside for up to 2*TCP_MSL
  * (TCP_LANE_CLOSING_GRACE_US) before the grace sweep frees it, and holding
  * a live flow's ~TCP_MSS stash for that whole window would blow the
- * ~0.5 MB "CLOSING entries are cheap" bound this table's cap comment
- * relies on (tcp_lane.h:51-53). Safe to free now: the only caller is
+ * ~0.82 MB "CLOSING entries are cheap" bound this table's cap comment
+ * relies on (TCP_LANE_CLOSING_CAP above). Safe to free now: the only caller is
  * tcp_lane_finish_clean_close, reached from whichever direction observes
  * the SECOND FIN of a clean bidi close — either the downlink side
  * (tcp_lane_downlink_maybe_shutdown, here in this TU) or the uplink side
