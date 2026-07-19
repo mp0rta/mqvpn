@@ -469,8 +469,15 @@ TEST(config_set_hybrid)
     ASSERT_EQ(cfg->hybrid.tcp_max_global_flows, 8192); /* rejected → unchanged */
     ASSERT_EQ(mqvpn_config_set_hybrid_max_global_flows(NULL, 1), MQVPN_ERR_INVALID_ARG);
 
-    /* [Advanced] RecvRateLimit setter (client-only knob; 0 = off) */
+    /* [Advanced] RecvRateLimit setter (client-only knob; 0 = off).
+     * Values above MQVPN_RECV_RATE_LIMIT_MAX are rejected: they would
+     * overflow xquic's rate x srtt(us) u64 window product and pin the
+     * receive window at the minimum instead of raising it. */
     ASSERT_EQ(mqvpn_config_set_recv_rate_limit(cfg, 125000000ULL), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_recv_rate_limit(cfg, MQVPN_RECV_RATE_LIMIT_MAX), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_recv_rate_limit(cfg, MQVPN_RECV_RATE_LIMIT_MAX + 1),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(cfg->recv_rate_limit, MQVPN_RECV_RATE_LIMIT_MAX); /* unchanged */
     ASSERT_EQ(mqvpn_config_set_recv_rate_limit(cfg, 0), MQVPN_OK);
     ASSERT_EQ(mqvpn_config_set_recv_rate_limit(NULL, 1), MQVPN_ERR_INVALID_ARG);
 

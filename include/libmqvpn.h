@@ -563,7 +563,16 @@ MQVPN_API int mqvpn_config_set_hybrid_egress_acl(mqvpn_config_t *cfg, const char
 /* Conn-level receive-rate cap in bytes/sec (0 = library default, no cap).
  * Bounds the aggregate QUIC transport receive window to rate x srtt.
  * CLIENT-ONLY: the server connection-settings path ignores it — a
- * server-side cap would throttle every client's uplink. */
+ * server-side cap would throttle every client's uplink.
+ *
+ * Values above MQVPN_RECV_RATE_LIMIT_MAX are rejected
+ * (MQVPN_ERR_INVALID_ARG): the transport computes the window as
+ * rate x srtt(us) in uint64, so an unbounded rate overflows the product
+ * and pins the window at the MINIMUM — the opposite of the caller's
+ * intent. 10^10 B/s (10 GB/s, 80 Gbit/s) keeps that product in range for
+ * any srtt below ~1800 s while sitting far above any real link rate;
+ * "no cap" is expressed as 0, not a huge value. */
+#define MQVPN_RECV_RATE_LIMIT_MAX 10000000000ULL
 MQVPN_API int mqvpn_config_set_recv_rate_limit(mqvpn_config_t *cfg,
                                                uint64_t bytes_per_sec);
 

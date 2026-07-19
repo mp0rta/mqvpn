@@ -7,6 +7,7 @@
  * Build: cc -o tests/test_config tests/test_config.c src/config.c src/log.c -Isrc
  */
 #include "config.h"
+#include "libmqvpn.h" /* MQVPN_RECV_RATE_LIMIT_MAX */
 #include "mqvpn_sched_names.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -1608,6 +1609,36 @@ test_advanced_recv_rate_limit(void)
     ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "advanced json load ok");
     unlink(p);
     ASSERT_EQ_INT(cfg.recv_rate_limit == 125000000ULL, 1, "json recv_rate_limit");
+
+    /* Range cap (MQVPN_RECV_RATE_LIMIT_MAX): values above it must be
+     * rejected (warn-and-continue, field keeps its default) — an
+     * over-range rate would overflow xquic's rate x srtt(us) u64 window
+     * product and pin the window at the MINIMUM, the opposite of intent. */
+    char over[128];
+    snprintf(over, sizeof(over), "[Advanced]\nRecvRateLimit = %llu\n",
+             (unsigned long long)MQVPN_RECV_RATE_LIMIT_MAX + 1);
+    p = write_tmp(over);
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "over-max ini warns, load rc 0");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.recv_rate_limit == 0, 1, "over-max ini rejected → default 0");
+
+    snprintf(over, sizeof(over), "[Advanced]\nRecvRateLimit = %llu\n",
+             (unsigned long long)MQVPN_RECV_RATE_LIMIT_MAX);
+    p = write_tmp(over);
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "boundary ini load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.recv_rate_limit == MQVPN_RECV_RATE_LIMIT_MAX, 1,
+                  "boundary value == max accepted");
+
+    snprintf(over, sizeof(over), "{\"advanced\": {\"recv_rate_limit\": %llu}}",
+             (unsigned long long)MQVPN_RECV_RATE_LIMIT_MAX + 1);
+    p = write_tmp(over);
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "over-max json warns, load rc 0");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.recv_rate_limit == 0, 1, "over-max json rejected → default 0");
 }
 
 /* ── [Hybrid] EgressAllow/EgressDeny lists + TcpConnectTimeoutSec ───────── */

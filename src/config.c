@@ -599,9 +599,11 @@ static const cfg_key_desc_t cfg_keys[] = {
             hybrid.tcp_connect_timeout_sec),
     CFG_U32(SEC_HYBRID, "TcpMaxGlobalFlows", "tcp_max_global_flows",
             hybrid.tcp_max_global_flows),
-    /* [Advanced] — JSON side lives inside the bounded "advanced" object */
+    /* [Advanced] — JSON side lives inside the bounded "advanced" object.
+     * Max mirrors the public setter: above it, xquic's rate x srtt(us)
+     * u64 window product overflows (see MQVPN_RECV_RATE_LIMIT_MAX). */
     CFG_U64(SEC_ADVANCED, "RecvRateLimit", "recv_rate_limit", recv_rate_limit,
-            0xffffffffffffffffULL),
+            MQVPN_RECV_RATE_LIMIT_MAX),
 };
 
 /* Shared typed store. Returns 0 on success, -1 on invalid value (caller
