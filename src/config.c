@@ -477,6 +477,17 @@ cfgk_post_mirror_auth_key(mqvpn_file_config_t *cfg)
 }
 
 static void
+cfgk_post_warn_server_auth_key(mqvpn_file_config_t *cfg)
+{
+    /* JSON-only row (ini_key NULL), so this fires only for JSON configs.
+     * The key was never documented and 'auth_key' serves both roles via the
+     * effective-key fallback in main.c; accepted for compatibility until
+     * removal in a future release. */
+    (void)cfg;
+    LOG_WRN("JSON: 'server_auth_key' is deprecated; use 'auth_key'");
+}
+
+static void
 cfgk_post_explicit_wait(mqvpn_file_config_t *cfg)
 {
     cfg->reorder.has_explicit_wait = 1;
@@ -554,7 +565,8 @@ static const cfg_key_desc_t cfg_keys[] = {
     /* [Auth] — INI Key is mode-agnostic dual-write; JSON has two keys */
     CFG_STR_POST(SEC_AUTH, "Key", NULL, auth_key, cfgk_post_mirror_auth_key),
     CFG_STR(SEC_AUTH, NULL, "auth_key", auth_key),
-    CFG_STR(SEC_AUTH, NULL, "server_auth_key", server_auth_key),
+    CFG_STR_POST(SEC_AUTH, NULL, "server_auth_key", server_auth_key,
+                 cfgk_post_warn_server_auth_key),
     CFG_INT_FB(SEC_AUTH, "MaxClients", "max_clients", max_clients, cfgk_int_positive, 64),
     /* [Control] */
     CFG_STR(SEC_CONTROL, "Listen", "control_listen", control_listen),
