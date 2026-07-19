@@ -119,6 +119,37 @@ class SettingsViewModelTest {
     }
 
     @Test
+    fun `save after unconsumed success resets saveDone when the new attempt fails`() = runTest(testDispatcher) {
+        advanceUntilIdle()
+
+        // First save succeeds; saveDone stays true because the UI hasn't
+        // consumed it yet.
+        viewModel.save(testSettings)
+        advanceUntilIdle()
+        assertTrue(viewModel.saveDone.value)
+        assertNull(viewModel.saveError.value)
+
+        // Second attempt fails while the first success is still unconsumed:
+        // saveDone must flip back to false so the UI does not navigate away
+        // on a failed save.
+        coEvery { mockRepository.save(any()) } throws IllegalStateException("boom")
+        viewModel.save(testSettings.copy(serverAddress = "other.example.com"))
+        advanceUntilIdle()
+
+        assertFalse(viewModel.saveDone.value)
+        assertEquals("Save failed: boom", viewModel.saveError.value)
+        assertFalse(viewModel.isSaving.value)
+
+        // A subsequent successful save clears saveError.
+        coEvery { mockRepository.save(any()) } returns Unit
+        viewModel.save(testSettings)
+        advanceUntilIdle()
+
+        assertNull(viewModel.saveError.value)
+        assertTrue(viewModel.saveDone.value)
+    }
+
+    @Test
     fun `second save while first is in flight is ignored`() = runTest(testDispatcher) {
         advanceUntilIdle()
         val gate = CompletableDeferred<Unit>()

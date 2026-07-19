@@ -43,7 +43,7 @@ class SettingsViewModel @Inject constructor(
     // attached.
     val isEditable: StateFlow<Boolean> = manager.vpnState
         .map { it.isEditableState() }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, true)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, manager.vpnState.value.isEditableState())
 
     private val _isSaving = MutableStateFlow(false)
     val isSaving: StateFlow<Boolean> = _isSaving.asStateFlow()
@@ -70,6 +70,7 @@ class SettingsViewModel @Inject constructor(
         if (_isSaving.value || !isEditable.value || !draft.isValid()) return
         _isSaving.value = true
         _saveError.value = null
+        _saveDone.value = false
         viewModelScope.launch {
             try {
                 repository.save(draft)
@@ -90,6 +91,6 @@ class SettingsViewModel @Inject constructor(
 }
 
 private fun MqvpnState.isEditableState(): Boolean = when (this) {
-    is MqvpnState.Disconnected, is MqvpnState.Error -> true
-    is MqvpnState.Connecting, is MqvpnState.Reconnecting, is MqvpnState.Connected -> false
+    MqvpnState.Disconnected, is MqvpnState.Error -> true
+    MqvpnState.Connecting, is MqvpnState.Reconnecting, is MqvpnState.Connected -> false
 }
