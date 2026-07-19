@@ -292,7 +292,7 @@ Terminates inner TCP locally and relays it over an HTTP/3 request stream so a si
 |-----|-------------|------------|---------|
 | `Enabled` | Master switch | client + server | `false` |
 | `Tcp` | Per-flow TCP lane policy: `stream` (always), `raw` (never — byte-identical to hybrid disabled), or `auto` (TCP lane once ≥2 paths are active at SYN time; latched for the flow's lifetime) | client | `auto` |
-| `TcpMaxFlows` | Concurrent TCP-lane flow cap. Client: local flow table (over-cap SYNs fall back to RAW). Server: per client session (over-cap SYNs get HTTP `503`). On the client the value is additionally clamped to half the lwIP TCP pcb pool — `256` on default builds, `64` with the [mobile lwIP profile](./hybrid-mode#mobile-builds-ios) — and the clamp is logged | client + server | `256` |
+| `TcpMaxFlows` | Concurrent TCP-lane flow cap. Client: local flow table (over-cap SYNs fall back to RAW). Server: per client session (over-cap SYNs get HTTP `503`). On the client the value is additionally clamped to half the lwIP TCP pcb pool — `256` on default builds, `64` with the [mobile lwIP profile](./hybrid-mode#mobile-builds-ios) — and the clamp is logged. The other pool half backs TIME_WAIT and half-open pcbs the flow table doesn't count; without that headroom, pcb exhaustion would silently hang new SYNs instead of the explicit reject (RST) firing | client + server | `256` |
 | `TcpIdleTimeoutSec` | Idle-eviction timeout for TCP-lane flows; `0` disables idle eviction | client + server | `300` |
 | `TcpConnectTimeoutSec` | Timeout for the server's egress `connect()`; on expiry the client gets HTTP `504` | server | `10` |
 | `TcpMaxGlobalFlows` | Whole-server cap on concurrent egress TCP flows across all sessions | server | `4096` |
