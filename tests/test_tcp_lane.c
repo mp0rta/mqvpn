@@ -879,6 +879,10 @@ test_max_flows_pool_clamp(void)
     ASSERT_TRUE(lane != NULL, "lane_new succeeds");
 
     uint32_t bound = MEMP_NUM_TCP_PCB / 2;
+    ASSERT_EQ_INT((int)mqvpn_tcp_lane_effective_max_flows(lane), (int)bound,
+                  "effective_max_flows reports the clamped cap");
+    ASSERT_EQ_INT((int)mqvpn_tcp_lane_effective_max_flows(NULL), 0,
+                  "effective_max_flows NULL-tolerant");
     for (uint32_t i = 0; i < bound; i++) {
         mqvpn_flow_key_t k = make_key((uint16_t)(10000 + i), 443);
         ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 1, 0), 0,

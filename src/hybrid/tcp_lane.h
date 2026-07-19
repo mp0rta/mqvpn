@@ -506,4 +506,10 @@ uint32_t mqvpn_tcp_lane_marker_isn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_
 void mqvpn_tcp_lane_tick(mqvpn_tcp_lane_t *lane, uint64_t now_us);
 void mqvpn_tcp_lane_get_stats(const mqvpn_tcp_lane_t *lane, mqvpn_tcp_lane_stats_t *out);
 
+/* Effective concurrent-flow cap after lane_new's pcb-pool clamp
+ * (MEMP_NUM_TCP_PCB / 2 — see the clamp comment in tcp_lane.c). Lets the
+ * creator compare against its configured tcp_max_flows and warn when the
+ * clamp engaged, keeping the override observable. 0 if lane is NULL. */
+uint32_t mqvpn_tcp_lane_effective_max_flows(const mqvpn_tcp_lane_t *lane);
+
 #endif
