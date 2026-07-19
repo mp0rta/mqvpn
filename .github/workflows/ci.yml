@@ -715,12 +715,23 @@ jobs:
   # mobile-profile step covers the C core only. Device/simulator execution
   # stays a manual gate (needs signing + hardware).
   ios:
-    runs-on: macos-14
+    # macos-15, not macos-14: current xcodegen emits the Xcode 16+ project
+    # format (objectVersion 77) unconditionally — no spec option pins it
+    # back (verified against xcodegen 2.45.4) — and macos-14's default
+    # Xcode 15.4 refuses to open it ("future Xcode project file format").
+    runs-on: macos-15
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
+
+      # Newest installed toolchain, deterministically — the image default can
+      # lag behind what the generated project format requires (>= 16.3).
+      - name: Select newest Xcode
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -n1)"
+          xcodebuild -version
 
       # Pure-Foundation logic tests; swiftc on the macOS host, no SDK cross
       # bits and no dependency on the caches below — run first so a Swift
@@ -737,7 +748,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: third_party/xquic/third_party/boringssl
-          key: bssl-9c95ec7-ios-arm64-v1
+          key: bssl-9c95ec7-ios-arm64-v2
 
       - name: Clone BoringSSL (pinned)
         if: steps.bssl-ios-cache.outputs.cache-hit != 'true'
@@ -758,7 +769,7 @@ jobs:
           path: |
             third_party/xquic/build-ios
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-ios-arm64-release-bssl-9c95ec7-v1
+          key: xquic-${{ steps.xqsha.outputs.sha }}-ios-arm64-release-bssl-9c95ec7-v2
 
       - name: Build xquic (iOS)
         if: steps.xquic-ios-cache.outputs.cache-hit != 'true'
