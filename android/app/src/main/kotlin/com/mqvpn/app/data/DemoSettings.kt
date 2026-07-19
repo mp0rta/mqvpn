@@ -39,6 +39,12 @@ data class DemoSettings(
 
     fun distinctValidPortCount(): Int = parsedReorderPorts().distinct().size
 
+    /** Tokens that are non-blank after trimming but don't parse as a valid 1..65535 port. */
+    fun invalidPortTokens(): List<String> =
+        reorderPorts.split(",")
+            .map { it.trim() }
+            .filter { it.isNotBlank() && (it.toIntOrNull() ?: -1) !in 1..65535 }
+
     fun toMqvpnConfig(): MqvpnConfig = MqvpnConfig(
         serverAddress = serverAddress.trim(),
         serverPort = serverPort,

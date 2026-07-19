@@ -17,6 +17,7 @@ import io.mockk.mockk
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
@@ -200,6 +201,46 @@ class SettingsViewModelTest {
         advanceUntilIdle()
 
         coVerify(exactly = 0) { mockRepository.save(any()) }
+    }
+
+    @Test
+    fun `save before the initial load completes is ignored`() = runTest(testDispatcher) {
+        // Repository emission is gated behind a signal that never fires in
+        // this test, so `loaded` stays null — simulates a save() call that
+        // races ahead of the first repository read (e.g. right after
+        // process recreation with a rememberSaveable-restored draft).
+        val signal = MutableSharedFlow<DemoSettings>()
+        val neverLoadedRepository = mockk<SettingsRepository>(relaxed = true).also {
+            every { it.settings } returns signal
+            coEvery { it.save(any()) } returns Unit
+        }
+        val neverLoadedViewModel = SettingsViewModel(neverLoadedRepository, mockManager)
+        advanceUntilIdle()
+
+        assertNull(neverLoadedViewModel.loaded.value)
+
+        neverLoadedViewModel.save(testSettings)
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { neverLoadedRepository.save(any()) }
+        assertFalse(neverLoadedViewModel.isSaving.value)
+    }
+
+    @Test
+    fun `save while loadError is set is ignored`() = runTest(testDispatcher) {
+        val failingRepository = mockk<SettingsRepository>(relaxed = true).also {
+            every { it.settings } returns flow { throw IllegalStateException("boom") }
+            coEvery { it.save(any()) } returns Unit
+        }
+        val failingViewModel = SettingsViewModel(failingRepository, mockManager)
+        advanceUntilIdle()
+
+        assertEquals("Load failed: boom", failingViewModel.loadError.value)
+
+        failingViewModel.save(testSettings)
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { failingRepository.save(any()) }
     }
 
     @Test

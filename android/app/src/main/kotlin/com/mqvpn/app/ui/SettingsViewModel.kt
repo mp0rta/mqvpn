@@ -67,6 +67,12 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun save(draft: DemoSettings) {
+        // Belt-and-braces: the UI's Save button already gates on loaded !=
+        // null && loadError == null, but re-check here so a stale/racy
+        // caller can never save over an unloaded or failed-to-load baseline
+        // (e.g. right after process recreation, before the repository
+        // emission lands).
+        if (_loaded.value == null || _loadError.value != null) return
         if (_isSaving.value || !isEditable.value || !draft.isValid()) return
         _isSaving.value = true
         _saveError.value = null

@@ -76,6 +76,32 @@ class DemoSettingsTest {
         assertEquals(listOf(443, 8443), settings.parsedReorderPorts())
     }
 
+    // -- invalidPortTokens ----------------------------------------------------
+
+    @Test
+    fun `invalidPortTokens is empty for an all-valid list`() {
+        val settings = DemoSettings(reorderPorts = "443,8443,53")
+        assertEquals(emptyList<String>(), settings.invalidPortTokens())
+    }
+
+    @Test
+    fun `invalidPortTokens reports non-numeric and out-of-range tokens`() {
+        val settings = DemoSettings(reorderPorts = "443,abc,0,65536,53")
+        assertEquals(listOf("abc", "0", "65536"), settings.invalidPortTokens())
+    }
+
+    @Test
+    fun `invalidPortTokens ignores blank tokens`() {
+        val settings = DemoSettings(reorderPorts = "443,,  ,53")
+        assertEquals(emptyList<String>(), settings.invalidPortTokens())
+    }
+
+    @Test
+    fun `invalidPortTokens trims surrounding whitespace before reporting`() {
+        val settings = DemoSettings(reorderPorts = " abc ,443")
+        assertEquals(listOf("abc"), settings.invalidPortTokens())
+    }
+
     // -- toMqvpnConfig field mapping ------------------------------------------
 
     @Test

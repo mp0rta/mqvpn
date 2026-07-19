@@ -55,7 +55,12 @@ fun SettingsScreen(
     val saveError by viewModel.saveError.collectAsStateWithLifecycle()
     val saveDone by viewModel.saveDone.collectAsStateWithLifecycle()
 
-    BackHandler(enabled = isSaving) { /* swallow system back while saving */ }
+    // Decide at event time from the ViewModel's StateFlow, not the composed
+    // `isSaving` snapshot: a back press in the frame before recomposition
+    // catches up could otherwise pop mid-save.
+    BackHandler(enabled = true) {
+        if (!viewModel.isSaving.value) onNavigateUp()
+    }
 
     LaunchedEffect(saveDone) {
         if (saveDone) {
@@ -120,14 +125,17 @@ fun SettingsScreen(
             TopAppBar(
                 title = { Text("Settings") },
                 navigationIcon = {
-                    IconButton(onClick = onNavigateUp, enabled = !isSaving) {
+                    IconButton(
+                        onClick = { if (!viewModel.isSaving.value) onNavigateUp() },
+                        enabled = !isSaving,
+                    ) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Cancel")
                     }
                 },
                 actions = {
                     TextButton(
                         onClick = { viewModel.save(draft) },
-                        enabled = fieldsEnabled && draft.isValid(),
+                        enabled = fieldsEnabled && draft.isValid() && loaded != null && loadError == null,
                     ) {
                         Text("Save")
                     }
@@ -286,6 +294,15 @@ fun SettingsScreen(
                         color = WarningColor,
                     )
                 }
+                val invalidTokens = draft.invalidPortTokens()
+                if (invalidTokens.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "Invalid ports ignored: " + invalidTokens.joinToString(", "),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = WarningColor,
+                    )
+                }
             }
             Spacer(modifier = Modifier.height(16.dp))
 
@@ -307,12 +324,12 @@ fun SettingsScreen(
                     onSelect = { hybridTcpModeName = it.name },
                     enabled = fieldsEnabled,
                 )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    "Requires hybrid support on the server; TCP connections fail otherwise.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
             }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "Requires hybrid support on the server; TCP connections fail otherwise.",
+                style = MaterialTheme.typography.bodySmall,
+            )
 
             if (saveError != null) {
                 Spacer(modifier = Modifier.height(16.dp))

@@ -14,6 +14,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,6 +58,12 @@ internal fun <T> EnumDropdownField(
     enabled: Boolean,
 ) {
     var expanded by remember { mutableStateOf(false) }
+    // Close the popup if the form locks (e.g. connect starts) while it's
+    // still open — otherwise the open menu stays clickable over disabled
+    // fields.
+    LaunchedEffect(enabled) {
+        if (!enabled) expanded = false
+    }
     ExposedDropdownMenuBox(
         expanded = expanded,
         onExpandedChange = { if (enabled) expanded = it },

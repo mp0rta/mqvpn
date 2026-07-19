@@ -227,7 +227,7 @@ private fun EventRow(event: LogEvent, timeFormat: SimpleDateFormat) {
 @Composable
 private fun eventIconAndTint(kind: LogEvent.Kind): Pair<ImageVector, Color> = when (kind) {
     is LogEvent.Kind.CoreState -> Icons.Filled.Bolt to MaterialTheme.colorScheme.primary
-    is LogEvent.Kind.PathAdded -> Icons.Filled.AddCircle to pathStatusColor(kind.status)
+    is LogEvent.Kind.PathAdded -> Icons.Filled.AddCircle to Color(0xFF4CAF50)
     is LogEvent.Kind.PathRemoved -> Icons.Filled.RemoveCircle to Color.Gray
     is LogEvent.Kind.PathStatus -> Icons.Filled.Autorenew to pathStatusColor(kind.to)
     is LogEvent.Kind.Error -> Icons.Filled.ErrorOutline to MaterialTheme.colorScheme.error
