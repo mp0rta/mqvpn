@@ -114,5 +114,3 @@ To port mqvpn to a new platform, implement:
 3. **TUN device** — Create platform-specific TUN; write packets from `tun_output` callback; read packets and pass to `on_tun_packet()`
 4. **Routing** — Set up routes to direct traffic through the TUN device
 5. **DNS** — Configure DNS to prevent leaks
-
-See `src/platform/linux/platform_linux.c` and `src/platform/darwin/platform_darwin.c` as reference implementations.
