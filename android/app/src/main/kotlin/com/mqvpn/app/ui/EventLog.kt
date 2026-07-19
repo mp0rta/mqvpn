@@ -8,10 +8,11 @@ import com.mqvpn.sdk.core.model.PathInfo
 import kotlin.reflect.KClass
 
 /**
- * One sparse, info-level event derived from a state/path snapshot diff. The
- * event is STRUCTURED (raw values, not display strings): naming/coloring is
- * the view's job, which keeps this model free of any Android/Compose
- * dependency and lets the diff logic be exercised in isolation.
+ * One sparse, info-level event derived from a state/path snapshot diff.
+ * Path/status fields stay raw (ints, not display strings) so coloring is the
+ * view's job; [Kind.CoreState.label] carries the state subclass's simple
+ * name, which the demo UI renders directly. Keeping the event free of any
+ * Android/Compose dependency lets the diff logic be exercised in isolation.
  */
 data class LogEvent(val time: Long, val kind: Kind) {
     sealed interface Kind {
@@ -44,6 +45,9 @@ data class LogEvent(val time: Long, val kind: Kind) {
  */
 class EventLog(private val capacity: Int = 20) {
 
+    /** Baseline value for one path handle: the last-seen (iface, status) pair. */
+    private data class PathSnapshot(val iface: String, val status: Int)
+
     private val _events = mutableListOf<LogEvent>()
 
     /** Newest-first snapshot of the logged events. */
@@ -55,8 +59,7 @@ class EventLog(private val capacity: Int = 20) {
     // so the very first ingestState(Disconnected) is a no-op.
     private var lastStateKind: KClass<out MqvpnState> = MqvpnState.Disconnected::class
 
-    // handle -> (iface, status)
-    private val pathBaseline = mutableMapOf<Long, Pair<String, Int>>()
+    private val pathBaseline = mutableMapOf<Long, PathSnapshot>()
 
     fun ingestState(state: MqvpnState, now: Long) {
         val kind = state::class
@@ -81,22 +84,24 @@ class EventLog(private val capacity: Int = 20) {
             return
         }
 
-        val current = paths.associate { it.handle to (it.iface to it.status) }
+        val current = paths.associate { it.handle to PathSnapshot(it.iface, it.status) }
 
         // Removals are logged first so that, within a single ingestPaths
         // call, an add on the same iface (handle replacement) ends up as
         // the newer of the two rows in the newest-first buffer.
         for ((handle, old) in pathBaseline) {
             if (handle !in current) {
-                append(LogEvent(now, LogEvent.Kind.PathRemoved(old.first)))
+                append(LogEvent(now, LogEvent.Kind.PathRemoved(old.iface)))
             }
         }
         for (p in paths) {
             val old = pathBaseline[p.handle]
             if (old == null) {
                 append(LogEvent(now, LogEvent.Kind.PathAdded(p.iface, p.status)))
-            } else if (old.second != p.status) {
-                append(LogEvent(now, LogEvent.Kind.PathStatus(p.iface, old.second, p.status)))
+            } else if (old.status != p.status) {
+                // Note: a same-handle iface change with an unchanged status is
+                // deliberately not an event — only (handle, status) is diffed.
+                append(LogEvent(now, LogEvent.Kind.PathStatus(p.iface, old.status, p.status)))
             }
         }
 

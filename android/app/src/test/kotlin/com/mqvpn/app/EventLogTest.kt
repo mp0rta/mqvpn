@@ -11,7 +11,6 @@ import com.mqvpn.sdk.core.model.PathInfo
 import com.mqvpn.sdk.core.model.ReconnectInfo
 import com.mqvpn.sdk.core.model.TunnelInfo
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -32,7 +31,7 @@ class EventLogTest {
         mtu = 1400,
     )
 
-    // -- bullet 2: startup Disconnected is suppressed --------------------
+    // -- startup Disconnected is suppressed -------------------------------
 
     @Test
     fun `startup Disconnected is suppressed`() {
@@ -41,7 +40,7 @@ class EventLogTest {
         assertEquals(emptyList<LogEvent>(), log.events)
     }
 
-    // -- bullet 1: kind-dedup, not instance equality ---------------------
+    // -- kind-dedup, not instance equality ---------------------------------
 
     @Test
     fun `CoreState dedupes by kind across payload changes`() {
@@ -64,7 +63,7 @@ class EventLogTest {
         assertEquals(LogEvent.Kind.CoreState("Connecting"), log.events[1].kind)
     }
 
-    // -- bullet 3: Error / Reconnecting payload events fire every time ---
+    // -- Error / Reconnecting payload events fire every time ---------------
 
     @Test
     fun `Error logs a payload event on every emission`() {
@@ -91,7 +90,7 @@ class EventLogTest {
         assertEquals(LogEvent.Kind.CoreState("Reconnecting"), log.events[2].kind)
     }
 
-    // -- bullet 4: path gate --------------------------------------------
+    // -- path gate ----------------------------------------------------------
 
     @Test
     fun `ingestPaths is a no-op while last state is Disconnected`() {
@@ -152,7 +151,7 @@ class EventLogTest {
         assertEquals(LogEvent.Kind.PathAdded("wlan0", 0), log.events[0].kind)
     }
 
-    // -- bullet 5 / diffing -----------------------------------------------
+    // -- diffing --------------------------------------------------------
 
     @Test
     fun `ingestPaths logs PathAdded for a new handle`() {
@@ -187,6 +186,21 @@ class EventLogTest {
     }
 
     @Test
+    fun `same handle with an unchanged status but a different iface logs nothing`() {
+        // Deliberate: the diff only tracks (iface, status) per handle, and iface
+        // is not itself compared — a bare rename with no status change is not
+        // surfaced as an event.
+        val log = EventLog()
+        log.ingestState(MqvpnState.Connecting, now = 1L)
+        log.ingestPaths(listOf(path(1, "wlan0", 0)), now = 2L)
+        val before = log.events
+
+        log.ingestPaths(listOf(path(1, "eth0", 0)), now = 3L)
+
+        assertEquals(before, log.events)
+    }
+
+    @Test
     fun `handle replacement on the same iface logs remove then add`() {
         val log = EventLog()
         log.ingestState(MqvpnState.Connecting, now = 1L)
@@ -199,7 +213,7 @@ class EventLogTest {
         assertEquals(LogEvent.Kind.PathRemoved("wlan0"), log.events[1].kind)
     }
 
-    // -- bullet 6: resetBaseline ------------------------------------------
+    // -- resetBaseline ------------------------------------------------------
 
     @Test
     fun `resetBaseline clears paths but keeps history and state memory`() {
@@ -221,7 +235,7 @@ class EventLogTest {
         assertEquals(sizeBefore, log.events.size)
     }
 
-    // -- bullet 7: ring buffer eviction ------------------------------------
+    // -- ring buffer eviction -------------------------------------------
 
     @Test
     fun `ring buffer evicts oldest beyond capacity`() {
@@ -231,12 +245,12 @@ class EventLogTest {
         log.ingestState(MqvpnState.Connecting, now = 3L)
         log.ingestState(MqvpnState.Reconnecting(ReconnectInfo(delaySec = 2)), now = 4L)
 
-        assertEquals(3, log.events.size)
-        // oldest events (the first Connecting/Reconnecting CoreState rows) evicted
-        assertTrue(log.events.none { it.time == 1L })
+        // oldest events (the first Connecting/Reconnecting CoreState rows) evicted;
+        // survivors are the Reconnecting(2) payload + CoreState rows, newest-first
+        assertEquals(listOf(4L, 4L, 3L), log.events.map { it.time })
     }
 
-    // -- bullet 7/newest-first order ---------------------------------------
+    // -- newest-first order ---------------------------------------------
 
     @Test
     fun `events are newest-first`() {
