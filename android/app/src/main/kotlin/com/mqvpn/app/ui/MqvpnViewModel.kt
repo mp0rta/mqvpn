@@ -15,6 +15,7 @@ import com.mqvpn.sdk.core.model.PathInfo
 import com.mqvpn.sdk.core.model.ReorderStats
 import com.mqvpn.sdk.core.model.VpnStats
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -25,25 +26,25 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 @HiltViewModel
-class MqvpnViewModel @Inject constructor(
+class MqvpnViewModel(
     private val manager: MqvpnManager,
     private val repository: SettingsRepository,
+    private val clock: () -> Long,
 ) : ViewModel() {
 
-    // Test-only seam: production always uses the wall clock via the
-    // @Inject constructor above; tests substitute a fixed clock through
-    // this internal constructor so event timestamps are deterministic.
-    // See G6: this is a pre-approved injectable-clock exception, not a
+    // Primary constructor takes clock as an immutable val so it is set
+    // before init{} launches the collectors below — a `var` mutated by a
+    // secondary constructor's body runs AFTER init{} on the primary
+    // constructor, which happened to work only because
+    // StandardTestDispatcher queues launched coroutines instead of running
+    // them inline; an UnconfinedTestDispatcher would start the collectors
+    // synchronously and silently observe the wall clock instead. Hilt only
+    // sees this @Inject-annotated secondary constructor, so DI is
+    // unaffected; tests use the primary constructor directly with a fixed
+    // clock. See G6: injectable-clock is a pre-approved exception, not a
     // test-only production flag.
-    internal constructor(
-        manager: MqvpnManager,
-        repository: SettingsRepository,
-        clock: () -> Long,
-    ) : this(manager, repository) {
-        this.clock = clock
-    }
-
-    private var clock: () -> Long = System::currentTimeMillis
+    @Inject constructor(manager: MqvpnManager, repository: SettingsRepository) :
+        this(manager, repository, System::currentTimeMillis)
 
     private val eventLog = EventLog()
 
@@ -72,15 +73,19 @@ class MqvpnViewModel @Inject constructor(
         viewModelScope.launch {
             manager.vpnState.collect {
                 eventLog.ingestState(it, clock())
-                _events.value = eventLog.events
+                publishEvents()
             }
         }
         viewModelScope.launch {
             manager.paths.collect {
                 eventLog.ingestPaths(it, clock())
-                _events.value = eventLog.events
+                publishEvents()
             }
         }
+    }
+
+    private fun publishEvents() {
+        _events.value = eventLog.events
     }
 
     fun connect(config: MqvpnConfig) {
@@ -95,6 +100,8 @@ class MqvpnViewModel @Inject constructor(
             try {
                 val cfg = repository.settings.first().toMqvpnConfig()
                 manager.connect(cfg, MyVpnService::class.java)
+            } catch (e: CancellationException) {
+                throw e
             } catch (t: Throwable) {
                 _connectError.value = "Connect failed: ${t.message}"
             } finally {

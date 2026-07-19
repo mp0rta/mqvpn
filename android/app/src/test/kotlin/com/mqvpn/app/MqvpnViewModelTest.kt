@@ -243,8 +243,10 @@ class MqvpnViewModelTest {
 
     @Test
     fun `state and path emissions feed events`() = runTest(testDispatcher) {
-        val stateJob = launch { viewModel.vpnState.collect {} }
-        val pathJob = launch { viewModel.paths.collect {} }
+        // No collectors on vpnState/paths here: event feeding is wired
+        // directly off manager.vpnState/manager.paths in init{}, independent
+        // of the stateIn-backed UI-facing flows, so events flow without UI
+        // subscribers.
         advanceUntilIdle()
 
         val info = TunnelInfo(
@@ -275,8 +277,5 @@ class MqvpnViewModelTest {
         assertTrue(
             viewModel.events.value.any { it.kind == LogEvent.Kind.PathAdded("wlan0", 1) },
         )
-
-        stateJob.cancel()
-        pathJob.cancel()
     }
 }
