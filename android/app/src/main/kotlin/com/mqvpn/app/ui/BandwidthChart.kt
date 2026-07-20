@@ -44,7 +44,9 @@ fun BandwidthChart(state: BandwidthHistoryState) {
     if (samples.isEmpty()) return
 
     val activeIfaces = samples.asSequence().flatMap { it.perPathBps.keys }.distinct().toList()
-    val totalColor = MaterialTheme.colorScheme.primary
+    // onSurface, not primary: dynamic (Material You) primary can collide with the
+    // per-path palette hues; black/white never does
+    val totalColor = MaterialTheme.colorScheme.onSurface
     val surfaceColor = MaterialTheme.colorScheme.surfaceVariant
     val gridColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
     val labelStyle = MaterialTheme.typography.labelSmall
