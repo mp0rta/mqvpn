@@ -13,6 +13,8 @@ on:
       - 'android/**'
       - 'scripts/build_android.sh'
       - 'scripts/stage_apk_license_assets.sh'
+      - 'LICENSE'
+      - 'NOTICE'
       - 'CMakeLists.txt'
       - 'src/**'
       - 'include/**'
@@ -66,7 +68,7 @@ jobs:
         # timestamp-dependent output, which identical-mtime copies would
         # mask. --exclude=.git keeps repo metadata out of the build trees.
         run: |
-          set -e
+          set -euo pipefail
           for d in "$RUNNER_TEMP/repro-a" "$RUNNER_TEMP/repro-b"; do
             mkdir -p "$d"
             tar -C "$GITHUB_WORKSPACE" --exclude=.git -cf - . | tar -C "$d" -xmf -
