@@ -5,6 +5,11 @@ plugins {
 android {
     namespace = "com.mqvpn.sdk.native_"
     compileSdk = 37
+    // Pin the NDK used for the JNI wrapper build. Without this, AGP falls
+    // back to its bundled default, which breaks environments that provision
+    // a specific NDK via ndk.dir (e.g. the F-Droid buildserver). Keep in
+    // sync with `ndk:` in fdroiddata's metadata/com.mqvpn.app.yml.
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         minSdk = 26

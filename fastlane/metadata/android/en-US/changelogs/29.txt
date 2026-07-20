@@ -1,0 +1,2 @@
+- Settings now start blank: enter your own server address and auth key
+- Release artifacts carry Sigstore build provenance attestations
