@@ -12,6 +12,12 @@ env:
   WINTUN_VER: "0.14.1"
   WINTUN_SHA256: "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
   BORINGSSL_COMMIT: "9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c"
+  # Keep in sync with ndkVersion in android/sdk-native/build.gradle.kts and
+  # NDK_VERSION in android-repro.yml.
+  NDK_VERSION: "28.2.13676358"
+  # SHA-256 fingerprint of the canonical mqvpn upload certificate. Keep in
+  # sync with verify-android-keystore.yml.
+  UPLOAD_CERT_SHA256: "F1:C5:D8:18:AE:C5:EA:4F:28:7B:44:CE:CC:1E:41:A0:AD:F2:B9:04:C8:EB:12:B3:41:F2:69:4F:BA:AB:B0:42"
 
 jobs:
   build-release:
@@ -580,20 +586,17 @@ jobs:
           fi
           cd "$BSSL_DIR" && git checkout ${{ env.BORINGSSL_COMMIT }}
 
-      - name: Locate NDK
+      - name: Install pinned NDK
         id: ndk
+        # The runner image's default NDK drifts with image updates; the
+        # reproducibility contract requires the exact NDK the repro gate and
+        # Gradle pin, so install it explicitly.
         run: |
-          NDK_PATH=""
-          if [ -n "${ANDROID_NDK_HOME:-}" ]; then
-            NDK_PATH="$ANDROID_NDK_HOME"
-          elif [ -d "${ANDROID_HOME:-}/ndk" ]; then
-            NDK_PATH="$(ls -d ${ANDROID_HOME}/ndk/*/ 2>/dev/null | sort -V | tail -1)"
-            NDK_PATH="${NDK_PATH%/}"
+          NDK_PATH="$ANDROID_HOME/ndk/$NDK_VERSION"
+          if [ ! -d "$NDK_PATH" ]; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" > /dev/null
           fi
-          if [ -z "$NDK_PATH" ] || [ ! -d "$NDK_PATH" ]; then
-            echo "ERROR: NDK not found (ANDROID_NDK_HOME='${ANDROID_NDK_HOME:-}', ANDROID_HOME='${ANDROID_HOME:-}')"
-            exit 1
-          fi
+          [ -d "$NDK_PATH" ] || { echo "ERROR: NDK $NDK_VERSION install failed"; exit 1; }
           echo "ndk_path=$NDK_PATH" >> "$GITHUB_OUTPUT"
 
       # arm64-v8a only: matches sdk-native's abiFilters. APK will not run in
@@ -624,8 +627,10 @@ jobs:
       # below so the job still succeeds (those APKs can't be upgraded in
       # place, which is fine for fork builds).
       - name: Detect release keystore secret
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
         run: |
-          if [ -n "${{ secrets.ANDROID_KEYSTORE_B64 }}" ]; then
+          if [ -n "$KEYSTORE_B64" ]; then
             echo "HAVE_KEYSTORE=true" >> "$GITHUB_ENV"
           elif [[ "$GITHUB_REF" == refs/tags/v* && "$GITHUB_REPOSITORY" == mp0rta/mqvpn ]]; then
             # Never let an official tag release fall back to a throwaway key:
@@ -648,6 +653,19 @@ jobs:
         run: |
           KEYSTORE="$RUNNER_TEMP/release.jks"
           printf '%s' "$KEYSTORE_B64" | base64 -d > "$KEYSTORE"
+          # Preflight: refuse to sign with anything but the canonical upload
+          # key. Checks the alias holds a usable private key (certreq
+          # exercises it) and that the certificate fingerprint matches.
+          keytool -list -keystore "$KEYSTORE" -storepass "$KEYSTORE_PASSWORD" \
+              -alias mqvpn-upload 2>/dev/null | grep -q PrivateKeyEntry \
+            || { echo "::error::keystore alias mqvpn-upload missing or not a PrivateKeyEntry"; exit 1; }
+          keytool -certreq -keystore "$KEYSTORE" -storepass "$KEYSTORE_PASSWORD" \
+              -keypass "$KEYSTORE_PASSWORD" -alias mqvpn-upload -file /dev/null 2>/dev/null \
+            || { echo "::error::private key not usable with the provided password"; exit 1; }
+          FP=$(keytool -list -v -keystore "$KEYSTORE" -storepass "$KEYSTORE_PASSWORD" \
+                 -alias mqvpn-upload 2>/dev/null | sed -n 's/.*SHA256: //p' | head -1)
+          [ "$FP" = "$UPLOAD_CERT_SHA256" ] \
+            || { echo "::error::upload certificate fingerprint mismatch: got $FP"; exit 1; }
           echo "MQVPN_KEYSTORE_PATH=$KEYSTORE" >> "$GITHUB_ENV"
           echo "MQVPN_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
           echo "MQVPN_KEY_ALIAS=mqvpn-upload" >> "$GITHUB_ENV"
@@ -683,14 +701,7 @@ jobs:
       # Apache-2.0 §4(a) since the APK statically links xquic, BoringSSL, and
       # lwIP (BSD-3-Clause requires the same notice retention).
       - name: Stage license assets for APK
-        run: |
-          ASSETS=android/app/src/main/assets
-          mkdir -p "$ASSETS/third-party"
-          cp LICENSE                                         "$ASSETS/LICENSE"
-          cp NOTICE                                          "$ASSETS/NOTICE"
-          cp third_party/xquic/LICENSE                       "$ASSETS/third-party/xquic.txt"
-          cp third_party/xquic/third_party/boringssl/LICENSE "$ASSETS/third-party/boringssl.txt"
-          cp third_party/lwip/LICENSE                        "$ASSETS/third-party/lwip.txt"
+        run: scripts/stage_apk_license_assets.sh
 
       - name: Build signed release APK
         working-directory: android

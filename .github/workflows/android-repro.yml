@@ -12,6 +12,10 @@ on:
     paths:
       - 'android/**'
       - 'scripts/build_android.sh'
+      - 'scripts/stage_apk_license_assets.sh'
+      - 'CMakeLists.txt'
+      - 'src/**'
+      - 'include/**'
       - '.gitmodules'
       - 'third_party/xquic'
       - 'third_party/lwip'
@@ -24,8 +28,9 @@ permissions:
 env:
   # Keep in sync with BORINGSSL_COMMIT in release.yml.
   BORINGSSL_COMMIT: "9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c"
-  # Keep in sync with ndkVersion in android/sdk-native/build.gradle.kts and
-  # `ndk:` in fdroiddata's metadata/org.mqvpn.app.yml.
+  # Keep in sync with ndkVersion in android/sdk-native/build.gradle.kts,
+  # NDK_VERSION in release.yml, and `ndk:` in fdroiddata's
+  # metadata/org.mqvpn.app.yml.
   NDK_VERSION: "28.2.13676358"
 
 jobs:
@@ -49,15 +54,25 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
       - name: Install NDK
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;${NDK_VERSION}" > /dev/null
 
       - name: Build twice in different directories
+        # tar -xm (not cp -a): drops source mtimes so the two trees also get
+        # *different* file timestamps — the gate then catches
+        # timestamp-dependent output, which identical-mtime copies would
+        # mask. --exclude=.git keeps repo metadata out of the build trees.
         run: |
           set -e
           for d in "$RUNNER_TEMP/repro-a" "$RUNNER_TEMP/repro-b"; do
-            cp -a "$GITHUB_WORKSPACE" "$d"
+            mkdir -p "$d"
+            tar -C "$GITHUB_WORKSPACE" --exclude=.git -cf - . | tar -C "$d" -xmf -
+            sleep 2   # ensure the two trees get distinct timestamps
             ( cd "$d"
+              scripts/stage_apk_license_assets.sh
               ANDROID_NDK="$ANDROID_HOME/ndk/${NDK_VERSION}" \
                 scripts/build_android.sh --abi arm64-v8a > /dev/null
               cd android
