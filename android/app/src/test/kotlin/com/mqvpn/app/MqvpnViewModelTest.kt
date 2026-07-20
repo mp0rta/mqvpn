@@ -330,7 +330,7 @@ class MqvpnViewModelTest {
     }
 
     @Test
-    fun `bandwidth history clears on disconnect and stays empty while disconnected`() = runTest(testDispatcher) {
+    fun `bandwidth history clears on disconnect and stays empty while disconnected`() = tickerTest {
         pathsFlow.value = listOf(PathInfo(1L, 0, "wlan0", 0L, 0L, 10L))
         stateFlow.value = MqvpnState.Connected(connectedInfo())
         runCurrent()

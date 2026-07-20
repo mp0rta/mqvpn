@@ -75,12 +75,13 @@ fun BandwidthChart(state: BandwidthHistoryState) {
             }
             val top = ceilNice(windowMax)
 
-            drawGridLines(gridColor)
-
-            // inset by half the widest stroke so peaks/zeros aren't clipped at the edges
+            // inset by half the widest stroke so peaks/zeros aren't clipped at the edges;
+            // gridlines and labels share this scale so lines sit exactly on their values
             val strokeInset = 1.5.dp.toPx()
             fun yFor(bps: Long): Float =
                 size.height - strokeInset - (bps.toFloat() / top) * (size.height - 2 * strokeInset)
+
+            drawGridLines(gridColor, strokeInset)
 
             fun drawSeries(values: List<Long?>, color: Color, strokeDp: Float) {
                 val stepX = size.width / (BandwidthHistory.MAX_SAMPLES - 1)
@@ -106,7 +107,7 @@ fun BandwidthChart(state: BandwidthHistoryState) {
             }
             drawSeries(samples.map { it.totalBps }, totalColor, strokeDp = 3f)
 
-            drawGridLabels(top, textMeasurer, labelStyle)
+            drawGridLabels(top, strokeInset, textMeasurer, labelStyle)
         }
     }
 }
@@ -123,20 +124,26 @@ private fun LegendEntry(label: String, color: Color, thick: Boolean) {
 
 // Lines are drawn beneath the series, labels above it (see call order in BandwidthChart).
 
-private fun DrawScope.drawGridLines(gridColor: Color) {
+// frac 0 = top value, 1 = zero baseline, both on the stroke-inset scale used by the series
+private fun DrawScope.gridY(frac: Float, inset: Float): Float =
+    inset + frac * (size.height - 2 * inset)
+
+private fun DrawScope.drawGridLines(gridColor: Color, inset: Float) {
     val dashPx = 6.dp.toPx()
     val dash = PathEffect.dashPathEffect(floatArrayOf(dashPx, dashPx))
 
-    // dashed gridlines at top and mid; solid baseline at 0 (bottom edge)
+    // dashed gridlines at top and mid; solid baseline at 0
     for (frac in listOf(0f, 0.5f)) {
-        val y = size.height * frac
+        val y = gridY(frac, inset)
         drawLine(gridColor, Offset(0f, y), Offset(size.width, y), pathEffect = dash)
     }
-    drawLine(gridColor, Offset(0f, size.height - 1f), Offset(size.width, size.height - 1f))
+    val y0 = gridY(1f, inset)
+    drawLine(gridColor, Offset(0f, y0), Offset(size.width, y0))
 }
 
 private fun DrawScope.drawGridLabels(
     top: Long,
+    inset: Float,
     textMeasurer: TextMeasurer,
     labelStyle: TextStyle,
 ) {
@@ -145,7 +152,7 @@ private fun DrawScope.drawGridLabels(
     for ((frac, bps) in listOf(0f to top, 0.5f to top / 2)) {
         drawText(
             textMeasurer.measure(formatBps(bps), labelStyle),
-            topLeft = Offset(pad, size.height * frac + pad / 2),
+            topLeft = Offset(pad, gridY(frac, inset) + pad / 2),
         )
     }
     val zeroLayout = textMeasurer.measure("0", labelStyle)
