@@ -44,6 +44,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mqvpn.sdk.core.model.MqvpnState
+import com.mqvpn.sdk.core.model.PathInfo
 import com.mqvpn.sdk.core.model.ReorderStats
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -159,13 +160,7 @@ fun DashboardScreen(
                         }
                     }
 
-                    if (paths.isNotEmpty() || bandwidthHistory.samples.isNotEmpty()) {
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text("Paths", style = MaterialTheme.typography.titleSmall)
-                        BandwidthChart(bandwidthHistory)
-                        Spacer(modifier = Modifier.height(4.dp))
-                        paths.forEach { path -> PathCard(path) }
-                    }
+                    PathsSection(paths, bandwidthHistory)
 
                     if (reorderStats.delivered > 0 || reorderStats.gapCount > 0) {
                         Spacer(modifier = Modifier.height(12.dp))
@@ -178,6 +173,8 @@ fun DashboardScreen(
                         "Reconnecting in ${s.info.delaySec}s...",
                         color = MaterialTheme.colorScheme.tertiary,
                     )
+                    // history is kept across reconnects so the failover dip stays visible
+                    PathsSection(paths, bandwidthHistory)
                 }
 
                 is MqvpnState.Error -> {
@@ -201,6 +198,16 @@ fun DashboardScreen(
             }
         }
     }
+}
+
+@Composable
+private fun PathsSection(paths: List<PathInfo>, bandwidthHistory: BandwidthHistoryState) {
+    if (paths.isEmpty() && bandwidthHistory.samples.isEmpty()) return
+    Spacer(modifier = Modifier.height(12.dp))
+    Text("Paths", style = MaterialTheme.typography.titleSmall)
+    BandwidthChart(bandwidthHistory)
+    Spacer(modifier = Modifier.height(4.dp))
+    paths.forEach { path -> PathCard(path) }
 }
 
 @Composable
