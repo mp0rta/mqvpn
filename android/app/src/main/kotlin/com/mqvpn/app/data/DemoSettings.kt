@@ -12,10 +12,10 @@ import com.mqvpn.sdk.core.model.MqvpnConfig
  * an Android runtime.
  */
 data class DemoSettings(
-    val serverAddress: String = "160.251.143.149",
+    val serverAddress: String = "",
     val serverPort: Int = 443,
     val tlsServerName: String = "",
-    val authKey: String = "tiiUC0/Fx51w5XuxAnpOgdRZb19SLqglwFdhxbbsbnM=",
+    val authKey: String = "",
     val insecure: Boolean = true,
     val killSwitch: Boolean = false,
     val reorderEnabled: Boolean = false,
