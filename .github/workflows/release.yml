@@ -627,6 +627,13 @@ jobs:
         run: |
           if [ -n "${{ secrets.ANDROID_KEYSTORE_B64 }}" ]; then
             echo "HAVE_KEYSTORE=true" >> "$GITHUB_ENV"
+          elif [[ "$GITHUB_REF" == refs/tags/v* && "$GITHUB_REPOSITORY" == mp0rta/mqvpn ]]; then
+            # Never let an official tag release fall back to a throwaway key:
+            # a wrongly-signed release breaks in-place updates permanently and
+            # fails F-Droid's reproducible-build verification. Verify secrets
+            # beforehand with the "Verify Android keystore secret" workflow.
+            echo "::error::ANDROID_KEYSTORE_B64 secret missing on an official tag build"
+            exit 1
           fi
 
       - name: Set up release keystore
