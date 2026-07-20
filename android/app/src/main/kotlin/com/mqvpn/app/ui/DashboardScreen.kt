@@ -62,6 +62,7 @@ fun DashboardScreen(
     val connectPending by viewModel.connectPending.collectAsStateWithLifecycle()
     val connectError by viewModel.connectError.collectAsStateWithLifecycle()
     val events by viewModel.events.collectAsStateWithLifecycle()
+    val bandwidthHistory by viewModel.bandwidthHistory.collectAsStateWithLifecycle()
 
     val vpnPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -158,10 +159,10 @@ fun DashboardScreen(
                         }
                     }
 
-                    if (paths.isNotEmpty()) {
+                    if (paths.isNotEmpty() || bandwidthHistory.samples.isNotEmpty()) {
                         Spacer(modifier = Modifier.height(12.dp))
                         Text("Paths", style = MaterialTheme.typography.titleSmall)
-                        BandwidthChart(paths)
+                        BandwidthChart(bandwidthHistory)
                         Spacer(modifier = Modifier.height(4.dp))
                         paths.forEach { path -> PathCard(path) }
                     }
