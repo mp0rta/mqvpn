@@ -85,6 +85,19 @@ class MqvpnViewModelTest {
         runCurrent()
     }
 
+    /**
+     * runTest wrapper for tests that may leave the ticker running: stops it even
+     * when an assertion throws, so a failing test reports instead of hanging the
+     * suite in runTest's scheduler-drain cleanup.
+     */
+    private fun tickerTest(block: suspend TestScope.() -> Unit) = runTest(testDispatcher) {
+        try {
+            block()
+        } finally {
+            stopTicker()
+        }
+    }
+
     private fun connectedInfo() = TunnelInfo(
         assignedIp = "10.0.0.2",
         prefix = 24,
@@ -117,7 +130,7 @@ class MqvpnViewModelTest {
     }
 
     @Test
-    fun `state updates propagate`() = runTest(testDispatcher) {
+    fun `state updates propagate`() = tickerTest {
         val job = launch { viewModel.vpnState.collect {} }
         advanceUntilIdle()
 
@@ -133,7 +146,6 @@ class MqvpnViewModelTest {
 
         assertTrue(viewModel.vpnState.value is MqvpnState.Connected)
         job.cancel()
-        stopTicker()
     }
 
     @Test
@@ -253,7 +265,7 @@ class MqvpnViewModelTest {
     }
 
     @Test
-    fun `state and path emissions feed events`() = runTest(testDispatcher) {
+    fun `state and path emissions feed events`() = tickerTest {
         // No collectors on vpnState/paths here: event feeding is wired
         // directly off manager.vpnState/manager.paths in init{}, independent
         // of the stateIn-backed UI-facing flows, so events flow without UI
@@ -288,11 +300,10 @@ class MqvpnViewModelTest {
         assertTrue(
             viewModel.events.value.any { it.kind == LogEvent.Kind.PathAdded("wlan0", 1) },
         )
-        stopTicker()
     }
 
     @Test
-    fun `bandwidth history emits one sample per second while connected even with idle paths`() = runTest(testDispatcher) {
+    fun `bandwidth history emits one sample per second while connected even with idle paths`() = tickerTest {
         pathsFlow.value = listOf(PathInfo(1L, 0, "wlan0", 100L, 100L, 10L))
         stateFlow.value = MqvpnState.Connected(connectedInfo())
         runCurrent() // vpnState collector starts the ticker
@@ -304,11 +315,10 @@ class MqvpnViewModelTest {
         assertEquals(3, viewModel.bandwidthHistory.value.samples.size)
         // idle counters -> all-zero samples, but they still flow
         assertTrue(viewModel.bandwidthHistory.value.samples.all { it.totalBps == 0L })
-        stopTicker()
     }
 
     @Test
-    fun `bandwidth history keeps sampling through reconnecting`() = runTest(testDispatcher) {
+    fun `bandwidth history keeps sampling through reconnecting`() = tickerTest {
         pathsFlow.value = listOf(PathInfo(1L, 0, "wlan0", 0L, 0L, 10L))
         stateFlow.value = MqvpnState.Connected(connectedInfo())
         runCurrent()
@@ -317,7 +327,6 @@ class MqvpnViewModelTest {
         runCurrent()
         fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent()
         assertEquals(2, viewModel.bandwidthHistory.value.samples.size)
-        stopTicker()
     }
 
     @Test
@@ -333,5 +342,22 @@ class MqvpnViewModelTest {
         assertTrue(viewModel.bandwidthHistory.value.ifaceSlots.isEmpty())
         fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent()
         assertTrue(viewModel.bandwidthHistory.value.samples.isEmpty())
+    }
+
+    @Test
+    fun `bandwidth ticker pauses during mid-session connecting and resumes with history kept`() = tickerTest {
+        pathsFlow.value = listOf(PathInfo(1L, 0, "wlan0", 0L, 0L, 10L))
+        stateFlow.value = MqvpnState.Connected(connectedInfo())
+        runCurrent()
+        fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent()
+        assertEquals(1, viewModel.bandwidthHistory.value.samples.size)
+        stateFlow.value = MqvpnState.Connecting
+        runCurrent()
+        fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent()
+        assertEquals(1, viewModel.bandwidthHistory.value.samples.size) // paused, history kept
+        stateFlow.value = MqvpnState.Connected(connectedInfo())
+        runCurrent()
+        fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent()
+        assertEquals(2, viewModel.bandwidthHistory.value.samples.size) // resumed
     }
 }

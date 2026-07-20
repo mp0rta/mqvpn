@@ -95,7 +95,11 @@ class MqvpnViewModel(
                         bandwidth.clear()
                         _bandwidthHistory.value = BandwidthHistoryState()
                     }
-                    is MqvpnState.Connecting -> Unit // nothing to start or clear
+                    is MqvpnState.Connecting -> {
+                        // mid-session handshake re-emits Connecting: pause ticks, keep history
+                        tickerJob?.cancel()
+                        tickerJob = null
+                    }
                 }
             }
         }
