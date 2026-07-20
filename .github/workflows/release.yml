@@ -697,6 +697,10 @@ jobs:
     needs: [build-release, build-android]
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v7
 
@@ -714,6 +718,18 @@ jobs:
           shopt -s nullglob
           sha256sum mqvpn_*.tar.gz mqvpn_*.deb mqvpn_*.zip mqvpn-sample_*_android.apk > SHA256SUMS
           cat SHA256SUMS
+
+      - name: Attest build provenance
+        # Signs Sigstore provenance (SLSA) for every released binary artifact.
+        # Users verify with:
+        #   gh attestation verify <file> --owner mp0rta
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            artifacts/mqvpn_*.tar.gz
+            artifacts/mqvpn_*.deb
+            artifacts/mqvpn_*.zip
+            artifacts/mqvpn-sample_*_android.apk
 
       - name: Create GitHub Release
         env:
