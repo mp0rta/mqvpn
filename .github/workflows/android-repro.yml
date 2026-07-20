@@ -1,0 +1,76 @@
+name: Android reproducible-build gate
+
+# Builds the Android APK twice from clean trees in different directories and
+# fails if the outputs are not byte-identical. Guards the reproducibility
+# contract required by the F-Droid listing (which rebuilds our releases and
+# byte-compares them against the signed APK we publish). The usual way this
+# breaks is an AGP/Gradle/NDK bump reintroducing path- or time-dependent
+# output — catch it here, not after a tag.
+
+on:
+  pull_request:
+    paths:
+      - 'android/**'
+      - 'scripts/build_android.sh'
+      - '.gitmodules'
+      - 'third_party/xquic'
+      - 'third_party/lwip'
+      - '.github/workflows/android-repro.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Keep in sync with BORINGSSL_COMMIT in release.yml.
+  BORINGSSL_COMMIT: "9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c"
+  # Keep in sync with ndkVersion in android/sdk-native/build.gradle.kts and
+  # `ndk:` in fdroiddata's metadata/org.mqvpn.app.yml.
+  NDK_VERSION: "28.2.13676358"
+
+jobs:
+  android-repro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Clone BoringSSL (pinned)
+        run: |
+          BSSL_DIR=third_party/xquic/third_party/boringssl
+          git clone https://github.com/google/boringssl.git "$BSSL_DIR"
+          cd "$BSSL_DIR" && git checkout ${{ env.BORINGSSL_COMMIT }}
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install NDK
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;${NDK_VERSION}" > /dev/null
+
+      - name: Build twice in different directories
+        run: |
+          set -e
+          for d in "$RUNNER_TEMP/repro-a" "$RUNNER_TEMP/repro-b"; do
+            cp -a "$GITHUB_WORKSPACE" "$d"
+            ( cd "$d"
+              ANDROID_NDK="$ANDROID_HOME/ndk/${NDK_VERSION}" \
+                scripts/build_android.sh --abi arm64-v8a > /dev/null
+              cd android
+              ./gradlew --no-daemon -q :app:assembleRelease )
+          done
+
+      - name: Compare APKs
+        run: |
+          A="$RUNNER_TEMP/repro-a/android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          B="$RUNNER_TEMP/repro-b/android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          sha256sum "$A" "$B"
+          if ! cmp -s "$A" "$B"; then
+            echo "::error::APK is not reproducible across build directories"
+            exit 1
+          fi
+          echo "Byte-identical APKs — reproducibility gate PASS"

@@ -10,7 +10,7 @@ android {
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "com.mqvpn.app"
+        applicationId = "org.mqvpn.app"
         minSdk = 26
         targetSdk = 36
         versionCode = 29

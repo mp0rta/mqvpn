@@ -619,12 +619,35 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
 
-      # Ephemeral release keystore: generated fresh per CI run, so each
-      # release is signed with a different key. Acceptable for the sample
-      # APK (clearly labelled as demo); upgrades require uninstall+reinstall.
-      # If we later switch to a stable keystore, replace this step with one
-      # that decodes a base64 secret into release.jks instead.
+      # Official releases sign with the stable upload key (repo secrets);
+      # forks and secret-less runs fall back to an ephemeral per-run keystore
+      # below so the job still succeeds (those APKs can't be upgraded in
+      # place, which is fine for fork builds).
+      - name: Detect release keystore secret
+        run: |
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_B64 }}" ]; then
+            echo "HAVE_KEYSTORE=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Set up release keystore
+        # Official releases sign with the stable upload key from repo secrets
+        # (required for F-Droid reproducible-build verification, which grafts
+        # this signature onto F-Droid's own build). Forks and secret-less runs
+        # fall back to an ephemeral keystore so the job still succeeds.
+        if: env.HAVE_KEYSTORE == 'true'
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          KEYSTORE="$RUNNER_TEMP/release.jks"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$KEYSTORE"
+          echo "MQVPN_KEYSTORE_PATH=$KEYSTORE" >> "$GITHUB_ENV"
+          echo "MQVPN_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+          echo "MQVPN_KEY_ALIAS=mqvpn-upload" >> "$GITHUB_ENV"
+          echo "MQVPN_KEY_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+
       - name: Generate ephemeral release keystore
+        if: env.HAVE_KEYSTORE != 'true'
         run: |
           KEYSTORE="$RUNNER_TEMP/release.jks"
           # Single password for both store and key entry. JDK 9+ defaults
@@ -670,12 +693,12 @@ jobs:
         run: |
           SRC=android/app/build/outputs/apk/release/app-release.apk
           test -f "$SRC" || { echo "APK not found at $SRC"; ls -R android/app/build/outputs/apk/ || true; exit 1; }
-          cp "$SRC" "mqvpn-sample_${VERSION}_android.apk"
+          cp "$SRC" "mqvpn_${VERSION}_android.apk"
 
       - name: Verify license assets in APK
         run: |
           set -e
-          apk=$(ls mqvpn-sample_*_android.apk)
+          apk=$(ls mqvpn_*_android.apk)
           expected=5
           found=$(unzip -l "$apk" \
                   | grep -cE 'assets/(LICENSE|NOTICE|third-party/(xquic|boringssl|lwip)\.txt)$' \
@@ -690,7 +713,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: release-android
-          path: mqvpn-sample_*_android.apk
+          path: mqvpn_*_android.apk
 
   publish-release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -716,7 +739,7 @@ jobs:
           # nullglob so missing pattern → empty rather than the literal pattern
           # passed to sha256sum (would fail "No such file or directory").
           shopt -s nullglob
-          sha256sum mqvpn_*.tar.gz mqvpn_*.deb mqvpn_*.zip mqvpn-sample_*_android.apk > SHA256SUMS
+          sha256sum mqvpn_*.tar.gz mqvpn_*.deb mqvpn_*.zip mqvpn_*_android.apk > SHA256SUMS
           cat SHA256SUMS
 
       - name: Attest build provenance
@@ -729,7 +752,7 @@ jobs:
             artifacts/mqvpn_*.tar.gz
             artifacts/mqvpn_*.deb
             artifacts/mqvpn_*.zip
-            artifacts/mqvpn-sample_*_android.apk
+            artifacts/mqvpn_*_android.apk
 
       - name: Create GitHub Release
         env:
@@ -740,7 +763,7 @@ jobs:
           TARS=(artifacts/mqvpn_*.tar.gz)
           DEBS=(artifacts/mqvpn_*.deb)
           ZIPS=(artifacts/mqvpn_*.zip)
-          APKS=(artifacts/mqvpn-sample_*_android.apk)
+          APKS=(artifacts/mqvpn_*_android.apk)
           # SemVer pre-release identifier (anything after '-') → mark as
           # pre-release so it does not become the "Latest" release.
           # e.g. v0.4.0-beta1, v0.4.0-rc.1 → pre-release; v0.4.0 → latest.
