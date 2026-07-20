@@ -4,12 +4,14 @@
 package com.mqvpn.app.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -51,6 +53,7 @@ fun BandwidthChart(state: BandwidthHistoryState) {
 
     Column {
         Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -72,9 +75,12 @@ fun BandwidthChart(state: BandwidthHistoryState) {
             }
             val top = ceilNice(windowMax)
 
-            drawGrid(top, gridColor, textMeasurer, labelStyle)
+            drawGridLines(gridColor)
 
-            fun yFor(bps: Long): Float = size.height - (bps.toFloat() / top) * size.height
+            // inset by half the widest stroke so peaks/zeros aren't clipped at the edges
+            val strokeInset = 1.5.dp.toPx()
+            fun yFor(bps: Long): Float =
+                size.height - strokeInset - (bps.toFloat() / top) * (size.height - 2 * strokeInset)
 
             fun drawSeries(values: List<Long?>, color: Color, strokeDp: Float) {
                 val stepX = size.width / (BandwidthHistory.MAX_SAMPLES - 1)
@@ -99,6 +105,8 @@ fun BandwidthChart(state: BandwidthHistoryState) {
                 )
             }
             drawSeries(samples.map { it.totalBps }, totalColor, strokeDp = 3f)
+
+            drawGridLabels(top, textMeasurer, labelStyle)
         }
     }
 }
@@ -113,28 +121,37 @@ private fun LegendEntry(label: String, color: Color, thick: Boolean) {
     }
 }
 
-private fun DrawScope.drawGrid(
+// Lines are drawn beneath the series, labels above it (see call order in BandwidthChart).
+
+private fun DrawScope.drawGridLines(gridColor: Color) {
+    val dashPx = 6.dp.toPx()
+    val dash = PathEffect.dashPathEffect(floatArrayOf(dashPx, dashPx))
+
+    // dashed gridlines at top and mid; solid baseline at 0 (bottom edge)
+    for (frac in listOf(0f, 0.5f)) {
+        val y = size.height * frac
+        drawLine(gridColor, Offset(0f, y), Offset(size.width, y), pathEffect = dash)
+    }
+    drawLine(gridColor, Offset(0f, size.height - 1f), Offset(size.width, size.height - 1f))
+}
+
+private fun DrawScope.drawGridLabels(
     top: Long,
-    gridColor: Color,
     textMeasurer: TextMeasurer,
     labelStyle: TextStyle,
 ) {
-    val dash = PathEffect.dashPathEffect(floatArrayOf(6f, 6f))
     val pad = 4.dp.toPx()
 
-    // dashed gridlines at top and mid; solid baseline at 0 (bottom edge)
     for ((frac, bps) in listOf(0f to top, 0.5f to top / 2)) {
-        val y = size.height * frac
-        drawLine(gridColor, Offset(0f, y), Offset(size.width, y), pathEffect = dash)
         drawText(
             textMeasurer.measure(formatBps(bps), labelStyle),
-            topLeft = Offset(pad, y + pad / 2),
+            topLeft = Offset(pad, size.height * frac + pad / 2),
         )
     }
-    drawLine(gridColor, Offset(0f, size.height - 1f), Offset(size.width, size.height - 1f))
+    val zeroLayout = textMeasurer.measure("0", labelStyle)
     drawText(
-        textMeasurer.measure("0", labelStyle),
-        topLeft = Offset(pad, size.height - textMeasurer.measure("0", labelStyle).size.height - pad / 2),
+        zeroLayout,
+        topLeft = Offset(pad, size.height - zeroLayout.size.height - pad / 2),
     )
 
     // time labels: -60s (left), -30s (mid), now (right)
