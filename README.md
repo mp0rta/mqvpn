@@ -612,6 +612,9 @@ Apache-2.0
 
 Copyright (c) 2026 mp0rta
 
+The "mqvpn" name and logo are not covered by the license — see
+[TRADEMARK.md](TRADEMARK.md).
+
 ## Acknowledgments
 
 - [XQUIC](https://github.com/alibaba/xquic) by Alibaba
