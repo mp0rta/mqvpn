@@ -3,12 +3,15 @@
 
 package com.mqvpn.app
 
+import com.mqvpn.app.data.DemoSettings
+import com.mqvpn.app.data.SettingsRepository
 import com.mqvpn.app.service.MyVpnService
+import com.mqvpn.app.ui.LogEvent
 import com.mqvpn.app.ui.MqvpnViewModel
 import com.mqvpn.sdk.core.MqvpnManager
-import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.PathInfo
+import com.mqvpn.sdk.core.model.ReconnectInfo
 import com.mqvpn.sdk.core.model.ReorderStats
 import com.mqvpn.sdk.core.model.TunnelInfo
 import com.mqvpn.sdk.core.model.VpnStats
@@ -17,15 +20,21 @@ import io.mockk.mockk
 import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -47,18 +56,55 @@ class MqvpnViewModelTest {
         every { it.reorderStats } returns reorderStatsFlow
     }
 
+    private val testSettings = DemoSettings(serverAddress = "repo.example.com", serverPort = 1234)
+    private val mockRepository = mockk<SettingsRepository>(relaxed = true).also {
+        every { it.settings } returns MutableStateFlow(testSettings)
+    }
+
+    private val fixedClock: () -> Long = { 42L }
+
+    private var fakeNanos = 0L
+    private val fakeNanoClock: () -> Long = { fakeNanos }
+
     private lateinit var viewModel: MqvpnViewModel
 
     @Before
     fun setUp() {
         Dispatchers.setMain(testDispatcher)
-        viewModel = MqvpnViewModel(mockManager)
+        viewModel = MqvpnViewModel(mockManager, mockRepository, fixedClock, fakeNanoClock)
     }
 
     @After
     fun tearDown() {
         Dispatchers.resetMain()
     }
+
+    /** runTest cleanup drains the scheduler to empty; a live ticker never idles it. */
+    private fun TestScope.stopTicker() {
+        stateFlow.value = MqvpnState.Disconnected
+        runCurrent()
+    }
+
+    /**
+     * runTest wrapper for tests that may leave the ticker running: stops it even
+     * when an assertion throws, so a failing test reports instead of hanging the
+     * suite in runTest's scheduler-drain cleanup.
+     */
+    private fun tickerTest(block: suspend TestScope.() -> Unit) = runTest(testDispatcher) {
+        try {
+            block()
+        } finally {
+            stopTicker()
+        }
+    }
+
+    private fun connectedInfo() = TunnelInfo(
+        assignedIp = "10.0.0.2",
+        prefix = 24,
+        serverIp = "1.2.3.4",
+        serverPrefix = 24,
+        mtu = 1400,
+    )
 
     @Test
     fun `initial state is Disconnected`() {
@@ -78,23 +124,13 @@ class MqvpnViewModelTest {
     }
 
     @Test
-    fun `connect delegates to manager`() {
-        val config = MqvpnConfig(
-            serverAddress = "vpn.example.com",
-            authKey = "testkey",
-        )
-        viewModel.connect(config)
-        verify { mockManager.connect(config, MyVpnService::class.java) }
-    }
-
-    @Test
     fun `disconnect delegates to manager`() {
         viewModel.disconnect()
         verify { mockManager.disconnect() }
     }
 
     @Test
-    fun `state updates propagate`() = runTest(testDispatcher) {
+    fun `state updates propagate`() = tickerTest {
         val job = launch { viewModel.vpnState.collect {} }
         advanceUntilIdle()
 
@@ -106,7 +142,7 @@ class MqvpnViewModelTest {
             mtu = 1400,
         )
         stateFlow.value = MqvpnState.Connected(info)
-        advanceUntilIdle()
+        runCurrent()
 
         assertTrue(viewModel.vpnState.value is MqvpnState.Connected)
         job.cancel()
@@ -170,5 +206,158 @@ class MqvpnViewModelTest {
         val result = viewModel.prepareVpn()
         assertEquals(null, result)
         verify { mockManager.prepareVpn() }
+    }
+
+    @Test
+    fun `connectWithSavedSettings connects using config built from repository settings`() = runTest(testDispatcher) {
+        viewModel.connectWithSavedSettings()
+        advanceUntilIdle()
+
+        verify(exactly = 1) { mockManager.connect(testSettings.toMqvpnConfig(), MyVpnService::class.java) }
+        assertEquals(false, viewModel.connectPending.value)
+        assertNull(viewModel.connectError.value)
+    }
+
+    @Test
+    fun `repeated connectWithSavedSettings calls while read is suspended only connect once`() = runTest(testDispatcher) {
+        val signal = MutableSharedFlow<DemoSettings>()
+        val slowRepository = mockk<SettingsRepository>(relaxed = true).also {
+            every { it.settings } returns signal
+        }
+        val slowViewModel = MqvpnViewModel(mockManager, slowRepository, fixedClock, fakeNanoClock)
+
+        slowViewModel.connectWithSavedSettings()
+        slowViewModel.connectWithSavedSettings()
+        slowViewModel.connectWithSavedSettings()
+        advanceUntilIdle()
+
+        assertEquals(true, slowViewModel.connectPending.value)
+        verify(exactly = 0) { mockManager.connect(any(), any()) }
+
+        signal.emit(testSettings)
+        advanceUntilIdle()
+
+        verify(exactly = 1) { mockManager.connect(any(), any()) }
+        assertEquals(false, slowViewModel.connectPending.value)
+    }
+
+    @Test
+    fun `connectWithSavedSettings surfaces repository failure without connecting`() = runTest(testDispatcher) {
+        val failingRepository = mockk<SettingsRepository>(relaxed = true).also {
+            every { it.settings } returns flow { throw IllegalStateException("boom") }
+        }
+        val failingViewModel = MqvpnViewModel(mockManager, failingRepository, fixedClock, fakeNanoClock)
+
+        failingViewModel.connectWithSavedSettings()
+        advanceUntilIdle()
+
+        assertEquals("Connect failed: boom", failingViewModel.connectError.value)
+        assertEquals(false, failingViewModel.connectPending.value)
+        verify(exactly = 0) { mockManager.connect(any(), any()) }
+
+        // A subsequent successful attempt clears the error.
+        every { failingRepository.settings } returns MutableStateFlow(testSettings)
+        failingViewModel.connectWithSavedSettings()
+        advanceUntilIdle()
+
+        assertNull(failingViewModel.connectError.value)
+        verify(exactly = 1) { mockManager.connect(testSettings.toMqvpnConfig(), MyVpnService::class.java) }
+    }
+
+    @Test
+    fun `state and path emissions feed events`() = tickerTest {
+        // No collectors on vpnState/paths here: event feeding is wired
+        // directly off manager.vpnState/manager.paths in init{}, independent
+        // of the stateIn-backed UI-facing flows, so events flow without UI
+        // subscribers.
+        advanceUntilIdle()
+
+        val info = TunnelInfo(
+            assignedIp = "10.0.0.2",
+            prefix = 24,
+            serverIp = "1.2.3.4",
+            serverPrefix = 24,
+            mtu = 1400,
+        )
+        stateFlow.value = MqvpnState.Connected(info)
+        runCurrent()
+
+        assertTrue(
+            viewModel.events.value.any { it.kind == LogEvent.Kind.CoreState("Connected") },
+        )
+
+        val path = PathInfo(
+            handle = 1L,
+            status = 1,
+            iface = "wlan0",
+            bytesTx = 100,
+            bytesRx = 200,
+            srttMs = 12,
+        )
+        pathsFlow.value = listOf(path)
+        runCurrent()
+
+        assertTrue(
+            viewModel.events.value.any { it.kind == LogEvent.Kind.PathAdded("wlan0", 1) },
+        )
+    }
+
+    @Test
+    fun `bandwidth history emits one sample per second while connected even with idle paths`() = tickerTest {
+        pathsFlow.value = listOf(PathInfo(1L, 0, "wlan0", 100L, 100L, 10L))
+        stateFlow.value = MqvpnState.Connected(connectedInfo())
+        runCurrent() // vpnState collector starts the ticker
+        repeat(3) {
+            fakeNanos += 1_000_000_000L
+            advanceTimeBy(1_000)
+            runCurrent()
+        }
+        assertEquals(3, viewModel.bandwidthHistory.value.samples.size)
+        // idle counters -> all-zero samples, but they still flow
+        assertTrue(viewModel.bandwidthHistory.value.samples.all { it.totalBps == 0L })
+    }
+
+    @Test
+    fun `bandwidth history keeps sampling through reconnecting`() = tickerTest {
+        pathsFlow.value = listOf(PathInfo(1L, 0, "wlan0", 0L, 0L, 10L))
+        stateFlow.value = MqvpnState.Connected(connectedInfo())
+        runCurrent()
+        fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent()
+        stateFlow.value = MqvpnState.Reconnecting(ReconnectInfo(3))
+        runCurrent()
+        fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent()
+        assertEquals(2, viewModel.bandwidthHistory.value.samples.size)
+    }
+
+    @Test
+    fun `bandwidth history clears on disconnect and stays empty while disconnected`() = tickerTest {
+        pathsFlow.value = listOf(PathInfo(1L, 0, "wlan0", 0L, 0L, 10L))
+        stateFlow.value = MqvpnState.Connected(connectedInfo())
+        runCurrent()
+        fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent()
+        assertEquals(1, viewModel.bandwidthHistory.value.samples.size)
+        stateFlow.value = MqvpnState.Disconnected
+        runCurrent()
+        assertTrue(viewModel.bandwidthHistory.value.samples.isEmpty())
+        assertTrue(viewModel.bandwidthHistory.value.ifaceSlots.isEmpty())
+        fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent()
+        assertTrue(viewModel.bandwidthHistory.value.samples.isEmpty())
+    }
+
+    @Test
+    fun `bandwidth ticker pauses during mid-session connecting and resumes with history kept`() = tickerTest {
+        pathsFlow.value = listOf(PathInfo(1L, 0, "wlan0", 0L, 0L, 10L))
+        stateFlow.value = MqvpnState.Connected(connectedInfo())
+        runCurrent()
+        fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent()
+        assertEquals(1, viewModel.bandwidthHistory.value.samples.size)
+        stateFlow.value = MqvpnState.Connecting
+        runCurrent()
+        fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent()
+        assertEquals(1, viewModel.bandwidthHistory.value.samples.size) // paused, history kept
+        stateFlow.value = MqvpnState.Connected(connectedInfo())
+        runCurrent()
+        fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent()
+        assertEquals(2, viewModel.bandwidthHistory.value.samples.size) // resumed
     }
 }
