@@ -22,4 +22,4 @@ Please do not:
 - Use the name or logo in a way that suggests your distribution is the
   official one, or is endorsed by the mqvpn project.
 
-For permission beyond these guidelines, contact <3p0rta26@gmail.com>.
+For permission beyond these guidelines, contact <contact@mp0rta.dev>.
