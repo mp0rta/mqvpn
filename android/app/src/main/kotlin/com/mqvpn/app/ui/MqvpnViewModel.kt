@@ -15,6 +15,8 @@ import com.mqvpn.sdk.core.model.ReorderStats
 import com.mqvpn.sdk.core.model.VpnStats
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -29,21 +31,22 @@ class MqvpnViewModel(
     private val manager: MqvpnManager,
     private val repository: SettingsRepository,
     private val clock: () -> Long,
+    private val nanoClock: () -> Long,
 ) : ViewModel() {
 
-    // Primary constructor takes clock as an immutable val so it is set
-    // before init{} launches the collectors below — a `var` mutated by a
-    // secondary constructor's body runs AFTER init{} on the primary
-    // constructor, which happened to work only because
+    // Primary constructor takes clock/nanoClock as immutable vals so they
+    // are set before init{} launches the collectors below — a `var`
+    // mutated by a secondary constructor's body runs AFTER init{} on the
+    // primary constructor, which happened to work only because
     // StandardTestDispatcher queues launched coroutines instead of running
     // them inline; an UnconfinedTestDispatcher would start the collectors
     // synchronously and silently observe the wall clock instead. Hilt only
     // sees this @Inject-annotated secondary constructor, so DI is
-    // unaffected; tests use the primary constructor directly with a fixed
-    // clock. See G6: injectable-clock is a pre-approved exception, not a
+    // unaffected; tests use the primary constructor directly with fixed
+    // clocks. See G6: injectable-clock is a pre-approved exception, not a
     // test-only production flag.
     @Inject constructor(manager: MqvpnManager, repository: SettingsRepository) :
-        this(manager, repository, System::currentTimeMillis)
+        this(manager, repository, System::currentTimeMillis, System::nanoTime)
 
     private val eventLog = EventLog()
 
@@ -55,6 +58,13 @@ class MqvpnViewModel(
 
     private val _connectError = MutableStateFlow<String?>(null)
     val connectError: StateFlow<String?> = _connectError.asStateFlow()
+
+    private val bandwidth = BandwidthHistory()
+    private var latestPaths: List<PathInfo> = emptyList()
+    private var tickerJob: Job? = null
+
+    private val _bandwidthHistory = MutableStateFlow(BandwidthHistoryState())
+    val bandwidthHistory: StateFlow<BandwidthHistoryState> = _bandwidthHistory.asStateFlow()
 
     val vpnState: StateFlow<MqvpnState> = manager.vpnState
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), MqvpnState.Disconnected)
@@ -73,10 +83,25 @@ class MqvpnViewModel(
             manager.vpnState.collect {
                 eventLog.ingestState(it, clock())
                 publishEvents()
+                when (it) {
+                    is MqvpnState.Connected, is MqvpnState.Reconnecting -> {
+                        if (tickerJob?.isActive != true) {
+                            tickerJob = viewModelScope.launch { bandwidthTickerLoop() }
+                        }
+                    }
+                    is MqvpnState.Disconnected, is MqvpnState.Error -> {
+                        tickerJob?.cancel()
+                        tickerJob = null
+                        bandwidth.clear()
+                        _bandwidthHistory.value = BandwidthHistoryState()
+                    }
+                    is MqvpnState.Connecting -> Unit // nothing to start or clear
+                }
             }
         }
         viewModelScope.launch {
             manager.paths.collect {
+                latestPaths = it
                 eventLog.ingestPaths(it, clock())
                 publishEvents()
             }
@@ -85,6 +110,14 @@ class MqvpnViewModel(
 
     private fun publishEvents() {
         _events.value = eventLog.events
+    }
+
+    private suspend fun bandwidthTickerLoop() {
+        while (true) {
+            delay(1_000)
+            val samples = bandwidth.onTick(latestPaths, nanoClock())
+            _bandwidthHistory.value = BandwidthHistoryState(samples, bandwidth.ifaceSlots())
+        }
     }
 
     fun connectWithSavedSettings() {
