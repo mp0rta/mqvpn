@@ -1,0 +1,11 @@
+mqvpn is an open-source multipath VPN client. It combines multiple internet
+connections (Wi-Fi + cellular) for bandwidth aggregation and seamless
+failover, speaking standards-based MASQUE CONNECT-IP (RFC 9484) over
+Multipath QUIC — no proprietary tunnel format.
+
+Features:
+
+* Multipath: bond Wi-Fi and cellular, seamless failover between them
+* Standards-based: MASQUE CONNECT-IP (RFC 9484) over QUIC
+* Pre-shared-key auth over TLS 1.3
+* Requires a self-hosted mqvpn server (see the project README)
