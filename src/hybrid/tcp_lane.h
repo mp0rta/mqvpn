@@ -259,13 +259,13 @@ int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
  * high-water mark. */
 #include "lwip_port/mqvpn_lwip_profile.h"
 
-#ifdef MQVPN_LWIP_MOBILE_PROFILE
+#ifdef MQVPN_LWIP_IOS_PROFILE
 /* Derived from the SAME scale as lwipopts.h: HIGH = TCP_WND/2, LOW =
  * TCP_WND/8 — keeps HIGH < TCP_WND structurally and the 4:1 ratio. */
-#  define MQVPN_TCP_LANE_BP_HIGH_WATER ((65535u << MQVPN_LWIP_MOBILE_RCV_SCALE) / 2)
-#  define MQVPN_TCP_LANE_BP_LOW_WATER  ((65535u << MQVPN_LWIP_MOBILE_RCV_SCALE) / 8)
+#  define MQVPN_TCP_LANE_BP_HIGH_WATER ((65535u << MQVPN_LWIP_IOS_RCV_SCALE) / 2)
+#  define MQVPN_TCP_LANE_BP_LOW_WATER  ((65535u << MQVPN_LWIP_IOS_RCV_SCALE) / 8)
 /* #ifndef: tests/test_tcp_lane.c pre-defines both caps as 4u before the TU
- * include (cap-branch testing) — the mobile profile must not collide. */
+ * include (cap-branch testing) — the iOS profile must not collide. */
 #  ifndef TCP_LANE_RAW_MARKER_CAP
 #    define TCP_LANE_RAW_MARKER_CAP 256u
 #  endif

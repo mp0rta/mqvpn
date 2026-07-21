@@ -157,7 +157,7 @@ mqvpn_tcp_lane_new(const mqvpn_hybrid_config_t *cfg, uint64_t hash_seed, void *c
      * pcbs the table no longer (or does not yet) count, so a cap above
      * pool/2 lets tcp_alloc() start failing inbound SYNs (no callback, no
      * RST — the inner connection just hangs) before the cap ever fires.
-     * Matters on the mobile profile, where the pool (128) sits BELOW the
+     * Matters on the iOS profile, where the pool (128) sits BELOW the
      * library's default tcp_max_flows (256); on the default profile the
      * bound (512/2 = 256) equals the DEFAULT value, so only explicitly
      * configured values above it are (deliberately) clamped — the caller

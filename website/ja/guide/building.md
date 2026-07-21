@@ -224,7 +224,7 @@ iOS 対応はクライアントのみで開発中です。アプリと PacketTun
 ./ios/build-ios.sh mqvpn      # mqvpn コアのみ再ビルド
 ```
 
-このスクリプトは全ライブラリを `iphoneos`/arm64（デプロイメントターゲット 15.0）向けにビルドし、ハイブリッド TCP レーンを縮小版の[モバイル lwIP プロファイル](./hybrid-mode)（`MQVPN_LWIP_MOBILE_PROFILE=ON`）付きで有効化、プロファイルが全翻訳単位に伝播したことを検証（`tests/check_profile_propagation.py`）した上で、アーカイブを `ios/build/` にステージングします（`libmqvpn.a`、`liblwip_core.a`、`libxquic-static.a`、`libssl.a`、`libcrypto.a`）。
+このスクリプトは全ライブラリを `iphoneos`/arm64（デプロイメントターゲット 15.0）向けにビルドし、ハイブリッド TCP レーンを縮小版の[モバイル lwIP プロファイル](./hybrid-mode)（`MQVPN_LWIP_IOS_PROFILE=ON`）付きで有効化、プロファイルが全翻訳単位に伝播したことを検証（`tests/check_profile_propagation.py`）した上で、アーカイブを `ios/build/` にステージングします（`libmqvpn.a`、`liblwip_core.a`、`libxquic-static.a`、`libssl.a`、`libcrypto.a`）。
 
 ### アプリと PacketTunnel 拡張のビルド
 

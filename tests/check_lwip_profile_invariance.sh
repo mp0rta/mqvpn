@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 mp0rta and mqvpn contributors
 # G-hy1: default-profile effective values must stay byte-identical to the
-# pre-profile constants; the mobile profile must actually select.
+# pre-profile constants; the iOS profile must actually select.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 dump() {
@@ -20,7 +20,7 @@ done <<'PINS'
 #define PBUF_POOL_SIZE 256
 #define TCP_SND_BUF (2 * 1024 * 1024)
 PINS
-M="$(dump "-DMQVPN_LWIP_MOBILE_PROFILE")"
-echo "$M" | grep -Fq '#define TCP_RCV_SCALE MQVPN_LWIP_MOBILE_RCV_SCALE' \
-  || { echo "FAIL: mobile profile not selected"; exit 1; }
+M="$(dump "-DMQVPN_LWIP_IOS_PROFILE")"
+echo "$M" | grep -Fq '#define TCP_RCV_SCALE MQVPN_LWIP_IOS_RCV_SCALE' \
+  || { echo "FAIL: iOS profile not selected"; exit 1; }
 echo "PASS: profile invariance"

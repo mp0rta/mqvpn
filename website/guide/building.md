@@ -220,7 +220,7 @@ iOS support is client-only and in development: the app and PacketTunnel extensio
 ./ios/build-ios.sh mqvpn      # rebuild only the mqvpn core
 ```
 
-The script builds everything for `iphoneos`/arm64 with deployment target 15.0, enables the hybrid TCP lane with the reduced [mobile lwIP profile](./hybrid-mode#mobile-builds-ios) (`MQVPN_LWIP_MOBILE_PROFILE=ON`), verifies the profile propagated to every translation unit (`tests/check_profile_propagation.py`), and stages the archives to `ios/build/` (`libmqvpn.a`, `liblwip_core.a`, `libxquic-static.a`, `libssl.a`, `libcrypto.a`).
+The script builds everything for `iphoneos`/arm64 with deployment target 15.0, enables the hybrid TCP lane with the reduced [iOS lwIP profile](./hybrid-mode#ios-builds) (`MQVPN_LWIP_IOS_PROFILE=ON`), verifies the profile propagated to every translation unit (`tests/check_profile_propagation.py`), and stages the archives to `ios/build/` (`libmqvpn.a`, `liblwip_core.a`, `libxquic-static.a`, `libssl.a`, `libcrypto.a`).
 
 ### Build the app and PacketTunnel extension
 

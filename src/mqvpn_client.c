@@ -2804,7 +2804,7 @@ mqvpn_client_new(const mqvpn_config_t *cfg, const mqvpn_client_callbacks_t *cbs,
      * the establishment-time warn is easy to miss in production. Surface
      * the override where the operator reads startup logs. Judge the
      * SANITIZED value — tunnel setup expands 0 to the library default,
-     * which on the mobile profile already exceeds the pool bound. */
+     * which on the iOS profile already exceeds the pool bound. */
     {
         mqvpn_hybrid_config_t hcfg = c->config.hybrid;
         (void)mqvpn_hybrid_config_sanitize(&hcfg, NULL, 0);

@@ -101,14 +101,14 @@ if(MQVPN_ENABLE_HYBRID_TCP_LANE)
     set(MQVPN_HYBRID_TCP_LANE_BUILD ON)
 endif()
 
-# Mobile lwIP profile (iOS NE memory ceiling). Directory-global on purpose:
+# iOS lwIP profile (Network Extension memory ceiling). Directory-global on purpose:
 # the profile constants are consumed by lwip_core AND tcp_lane.h includers
 # (mqvpn_lib, tests, fuzz, microbench) — per-target defs would silently
 # split the profile across TUs. Must precede every lane target definition.
-option(MQVPN_LWIP_MOBILE_PROFILE
-       "Shrink lwIP TCP-lane buffers for mobile (iOS NE) builds" OFF)
-if(MQVPN_LWIP_MOBILE_PROFILE)
-    add_compile_definitions(MQVPN_LWIP_MOBILE_PROFILE)
+option(MQVPN_LWIP_IOS_PROFILE
+       "Shrink lwIP TCP-lane buffers for iOS Network Extension builds" OFF)
+if(MQVPN_LWIP_IOS_PROFILE)
+    add_compile_definitions(MQVPN_LWIP_IOS_PROFILE)
 endif()
 
 # ---------- Hybrid mode server-side TCP egress (Linux-only) ----------

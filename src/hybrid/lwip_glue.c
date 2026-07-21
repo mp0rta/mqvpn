@@ -28,11 +28,11 @@
 /* Profile derivation pin — catches drift WITHIN the selected profile.
  * (Per-target propagation failures are caught by
  * tests/check_profile_propagation.py — invoked by ios/build-ios.sh and
- * the mobile-profile CI step against the build's compile_commands.json —
+ * the iOS-profile CI step against the build's compile_commands.json —
  * not here: an unpropagated TU takes the default branch and passes.) */
-#ifdef MQVPN_LWIP_MOBILE_PROFILE
-_Static_assert(TCP_WND == (65535 << MQVPN_LWIP_MOBILE_RCV_SCALE),
-               "mobile profile: TCP_WND derivation drifted");
+#ifdef MQVPN_LWIP_IOS_PROFILE
+_Static_assert(TCP_WND == (65535 << MQVPN_LWIP_IOS_RCV_SCALE),
+               "iOS profile: TCP_WND derivation drifted");
 #else
 _Static_assert(TCP_WND == (65535 << 5), "default profile: TCP_WND drifted");
 #endif
