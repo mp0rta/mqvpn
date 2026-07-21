@@ -109,24 +109,44 @@ TCP_WND (2,097,120 B) + 256 KiB re-open (262,144 B) + TCP_SND_BUF (2,097,152 B)
   = 4,465,576 B ≈ 4.47 MB
 ```
 
-Use **≈ 4.5 MB per concurrent flow** as the working figure. Aggregate worst case at the
-default `tcp_max_flows = 256`:
+Use **≈ 4.5 MB** as the worst case for *one* flow. **Do not multiply it by the flow count**
+— the send-buffer term is not independently reachable per flow. `TCP_SND_BUF` is drained
+through the *global* `MEMP_NUM_TCP_SEG` pool, and `TCP_SND_QUEUELEN` caps one pcb at 937
+segments, so only ⌊8192/937⌋ ≈ 8 flows can hold a full send queue simultaneously on
+desktop/router. The send side therefore contributes an aggregate ceiling of
+`MEMP_NUM_TCP_SEG × payload` — ≤ 73 MB at the compile-time `TCP_MSS`, ≈ 11 MB at the real
+~1382-byte tunnel MSS — regardless of how many flows exist.
+
+What *does* scale per flow is the uplink queue, which is lane-owned and heap-backed:
 
 ```
-256 × 4,465,576 B = 1,143,187,456 B ≈ 1.06 GiB (≈ 1.14 GB decimal)
+TCP_WND (2,097,120 B) + PENDING_STREAM high-water (262,144 B) = 2,359,264 B ≈ 2.25 MiB
 ```
 
-The window/send-buffer pair dominates aggregate memory; the marker tables and PBUF_POOL
-together are a few MB (§4) against roughly 1 GiB from the flow table.
+Aggregate worst case is that term times the flow count, plus the flat send-side ceiling:
+
+```
+256  × 2,359,264 B =   603,971,584 B ≈ 576 MiB  (+ ≤73 MB send side)
+4096 × 2,359,264 B = 9,663,545,344 B ≈ 9.0 GiB  (+ ≤73 MB send side)
+```
 
 ### 3a. Raising `TcpMaxFlows` toward the desktop/router ceiling
 
-The per-flow figure does not shrink as the cap grows, so the aggregate worst case scales
-linearly with it — at the 4096 ceiling (§0) it is ≈ 17 GiB. That number is a bound, not a
-forecast: it assumes every one of the 4096 flows is simultaneously saturated in **both**
-directions with its full window outstanding, which no realistic traffic mix reaches (a
-router's flow table is dominated by idle and short flows, each costing the ~200 B control
-block plus whatever is actually in flight).
+The per-flow uplink term does not shrink as the cap grows, so the aggregate worst case
+scales linearly with it — at the 4096 ceiling (§0) it is ≈ 9.0 GiB (§3). That is a bound,
+not a forecast: it assumes all 4096 flows are simultaneously backpressured with a full
+window outstanding, which no realistic traffic mix reaches (a router's flow table is
+dominated by idle and short flows, each costing the ~200 B control block plus whatever is
+actually in flight).
+
+**Cross-check against the iOS profile.** The two profiles must tell the same story, and
+they do. iOS caps at 64 flows to fit a ~50 MB Network Extension ceiling; its per-flow
+uplink term is `TCP_WND` (262,140) + high-water (`TCP_WND`/2 = 131,070) = 393,210 B, so
+64 flows ≈ 24 MiB — comfortably inside that ceiling (§5c). Desktop/router is 64× the flow
+count *and* 6× the per-flow term (2,359,264 / 393,210, from the 8× wider window against a
+2× smaller relative high-water), i.e. 384× the iOS total: 24 MiB × 384 = 9.0 GiB. The
+factor is 384, not 64, because raising the flow ceiling and the window sizing are
+independent axes (§0) — which is also why window sizing, not the cap, is the lever below.
 
 **CPU, not memory, is likely the first wall.** lwIP demultiplexes every inbound
 segment by walking `tcp_active_pcbs` linearly (`tcp_input`, `third_party/lwip/src/core/tcp_in.c`)
@@ -145,7 +165,7 @@ budget unnecessary — so there deliberately is none. The largest per-flow term 
 queue:
 `tcp_lane_uplink_deliver` takes ownership of each received pbuf and tracks it exactly in
 `uplink_queued_bytes` (`src/hybrid/tcp_lane_uplink.c`), reaching `TCP_WND` plus the
-`PENDING_STREAM` high-water — ~2.36 MB — for a flow whose H3 stream is backpressured. The
+`PENDING_STREAM` high-water — ~2.25 MiB — for a flow whose H3 stream is backpressured. The
 flow cap bounds how many flows can be in that state, and it is a *true* bound rather than
 an approximate one:
 
@@ -159,7 +179,7 @@ an approximate one:
   frees the queue outright. So a marker never holds uplink bytes.
 
 The operator rule is therefore just arithmetic on one knob: **the client-side worst case is
-`TcpMaxFlows` × ~2.36 MB** (≈ 9.7 GiB at 4096, ≈ 604 MB at 256). Size the cap from the
+`TcpMaxFlows` × ~2.25 MiB** (≈ 9.0 GiB at 4096, ≈ 576 MiB at 256). Size the cap from the
 box's RAM. Note this is the *client* knob — `TcpMaxGlobalFlows` is server-only and bounds
 the server's egress fd budget, not this lane's memory.
 
@@ -188,7 +208,7 @@ per active flow:
 | Hash bucket array (8192 buckets) | 64 KiB | tcp_lane.c `mqvpn_tcp_lane_new` |
 
 Total fixed overhead ≈ 6.8 MB worst case on desktop/router (≈ 4.2 MB on Android), small
-next to the ~1 GiB flow-table cost at 256 concurrent flows. Only the two lwIP pools grew
+next to the ~576 MiB flow-table cost at 256 concurrent flows (§3). Only the two lwIP pools grew
 with the raised ceiling — the marker tables and hash buckets were already sized for 4096
 entries and are unchanged (§1).
 
