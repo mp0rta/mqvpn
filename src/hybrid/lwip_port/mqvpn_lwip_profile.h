@@ -27,8 +27,9 @@
  * compatibility alias: silently accepting the old name would keep the
  * ambiguous "mobile" spelling alive, and silently IGNORING it is worse still —
  * an iOS Network Extension build that still passes -DMQVPN_LWIP_MOBILE_PROFILE
- * would fall through to the desktop/router branch and get 2 MiB windows with an
- * 8192-pcb pool, blowing the NE memory ceiling at runtime instead of failing at
+ * would fall through to the desktop/router branch and get its 512 KiB windows
+ * with an 8192-pcb pool — a 64x larger flow ceiling against the NE memory
+ * ceiling, failing at runtime instead of at
  * build time. Every in-tree caller was renamed with the macro; this only fires
  * for an out-of-tree build script. */
 #if defined(MQVPN_LWIP_MOBILE_PROFILE) || defined(MQVPN_LWIP_MOBILE_RCV_SCALE)
@@ -41,7 +42,7 @@
 #    define MQVPN_LWIP_IOS_RCV_SCALE 2
 #  endif
 /* MEMP_NUM_TCP_SEG(512) >= TCP_SND_QUEUELEN (lwIP init.c #error) caps the
- * sweep at scale<=4; the 2 MiB reference point uses the default profile. */
+ * sweep at scale<=4. */
 #  if MQVPN_LWIP_IOS_RCV_SCALE > 4
 #    error "iOS profile: scale > 4 violates MEMP_NUM_TCP_SEG >= TCP_SND_QUEUELEN"
 #  endif

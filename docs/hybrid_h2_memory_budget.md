@@ -41,7 +41,7 @@ Sections 1–4 below describe the **desktop/router** profile unless stated other
 | `TCP_SND_QUEUELEN` | lwipopts.h | `(4×TCP_SND_BUF + TCP_MSS−1) / TCP_MSS` = 937 segments | per-pcb segment cap |
 | `MEMP_NUM_TCP_PCB` | mqvpn_lwip_profile.h | 8192 (Android 512) | lwIP-side hard cap; sets the honored `TcpMaxFlows` ceiling at pool/2 = 4096, but is not the real enforcement point (see §2). ≈ 2.44 MiB of `.bss` at 312 B per `struct tcp_pcb` (LP64), faulted in only once a lane exists — `lwip_init()` runs lazily from `lwip_glue.c`, so hybrid-disabled builds pay nothing resident |
 | `MEMP_NUM_TCP_SEG` | mqvpn_lwip_profile.h | 8192 (Android 2048) | global pool shared by every flow (≈ 256 KiB of `.bss` at 32 B per `struct tcp_seg`); a single flow filling its 937-segment `TCP_SND_QUEUELEN` leaves room for only ≈ 8 flows to be simultaneously saturated. Tracks the pcb pool so a fully-occupied flow table still has segments per flow — at the old 2048 against a 4096-flow cap it could not hold even one segment per flow. `tcp_write` returning `ERR_MEM` here is treated as backpressure by `tcp_lane.c`, not as an error |
-| `PBUF_POOL_SIZE` | lwipopts.h | 256 | see §1a |
+| `PBUF_POOL_SIZE` | lwipopts.h | 64 | see §1a — cut from 256 with the window (§5d); 256 was sized for the old 2 MiB `TCP_WND` |
 | `PBUF_POOL_BUFSIZE` | lwipopts.h | `LWIP_MEM_ALIGN_SIZE(TCP_MSS + 40 + PBUF_LINK_ENCAPSULATION_HLEN)` ≈ 9000 B aligned | see §1a |
 | `TCP_LANE_RAW_MARKER_CAP` | tcp_lane.c | 4096 | sticky-RAW marker cap, compile-time (`#ifndef`-overridable for tests) |
 | `TCP_LANE_CLOSING_CAP` | tcp_lane.c | 4096 | post-close routing-marker cap, same shape as the RAW cap |
@@ -51,8 +51,10 @@ Sections 1–4 below describe the **desktop/router** profile unless stated other
 
 ### 1a. PBUF_POOL status
 
-`PBUF_POOL_SIZE` is 256 (≈ 2.3 MiB of static/BSS reservation: 256 pbufs ×
-~9000 usable bytes each). It is kept nonzero to satisfy an unconditional compile-time
+`PBUF_POOL_SIZE` is 64 (≈ 0.55 MiB of static/BSS reservation: 64 pbufs ×
+~9000 usable bytes each). It was 256 while `TCP_WND` was 2 MiB; the window cut (§5d)
+left three quarters of that reservation dead, so it now tracks the check it exists to
+satisfy — `ceil(524280 / 8946) = 59`, rounded to 64. It is kept nonzero to satisfy an unconditional compile-time
 check in `init.c` (`TCP_WND <= PBUF_POOL_SIZE * (PBUF_POOL_BUFSIZE - headers)` when
 `MEMP_MEM_MALLOC == 0 && PBUF_POOL_SIZE > 0`), independent of whether any code path
 draws from the pool.
@@ -63,8 +65,8 @@ not `PBUF_POOL`. The pool is therefore statically reserved but unused on the dat
 this build: the only `pbuf_alloc(..., PBUF_POOL)` call sites in the vendored lwIP tree are
 in `netif/ppp/vj.c`, `netif/ppp/pppos.c`, `netif/slipif.c`, `netif/lowpan6_common.c`, and
 the Unix-port `pcapif.c`/`tapif.c` drivers — none of which are compiled here (confirmed
-against `build-debug/compile_commands.json`). `PBUF_POOL_SIZE` could drop to a minimal
-placeholder or 0 to reclaim the ~2.3 MiB reservation.
+against `build-debug/compile_commands.json`). `PBUF_POOL_SIZE` could still drop to a minimal
+placeholder or 0 to reclaim the remaining ~0.55 MiB.
 
 ## 2. What bounds per-flow memory
 
@@ -207,12 +209,12 @@ per active flow:
 |---|---|---|
 | pcb pool (`MEMP_NUM_TCP_PCB`) | ≈ 2.44 MiB (8192 × 312 B; Android 512 → ≈ 156 KiB) | mqvpn_lwip_profile.h |
 | TCP segment pool (`MEMP_NUM_TCP_SEG`) | ≈ 256 KiB (8192 × 32 B; Android 2048 → ≈ 64 KiB) | mqvpn_lwip_profile.h |
-| PBUF_POOL static reservation | ≈ 2.3 MiB (unused on ingress, see §1a) | lwipopts.h |
+| PBUF_POOL static reservation | ≈ 0.55 MiB (unused on ingress, see §1a) | lwipopts.h |
 | Sticky-RAW marker table (cap 4096) | ≈ 0.82 MB (`mqvpn_tcp_flow_t` = 200 B each, measured on the dual-stack layout; the 38 B key field is counted within the 200 B) | `TCP_LANE_RAW_MARKER_CAP` |
 | CLOSING routing-marker table (cap 4096) | ≈ 0.82 MB, same shape (the downlink stash is freed at the CLOSING transition in `tcp_lane_mark_closing`, so a CLOSING entry never carries a live stash) | `TCP_LANE_CLOSING_CAP` |
 | Hash bucket array (8192 buckets) | 64 KiB | tcp_lane.c `mqvpn_tcp_lane_new` |
 
-Total fixed overhead ≈ 6.8 MB worst case on desktop/router (≈ 4.2 MB on Android), small
+Total fixed overhead ≈ 5.1 MB worst case on desktop/router (≈ 2.5 MB on Android), small
 next to the ~192 MiB flow-table cost at 256 concurrent flows (§3). Only the two lwIP pools grew
 with the raised ceiling — the marker tables and hash buckets were already sized for 4096
 entries and are unchanged (§1).
@@ -245,8 +247,14 @@ plainly rather than burying:
   at ≈ 350 Mbps, putting the LAN BDP at 43 KiB (1 ms RTT) and 342 KiB (8 ms RTT) against
   a 512 KiB window. The run therefore shows *"512 KiB is not limiting for a realistic
   router LAN"*, not *"512 KiB is the boundary"*. The boundary is arithmetic:
-  `window / RTT` caps a single inner flow at **4.2 Gbit/s over a 1 ms LAN**, 0.52 Gbit/s
-  over an (unrealistic for a LAN) 8 ms one.
+  `window / RTT` caps a single inner flow at **4.2 Gbit/s over a 1 ms LAN** and
+  **0.52 Gbit/s over an 8 ms one**. Wired LAN RTT is well under 1 ms, so the first figure
+  is the one that applies to most deployments — but 8 ms is a realistic *Wi-Fi*-under-load
+  RTT, not a strawman, and there the cut does lower the single-flow ceiling from the old
+  2.1 Gbit/s to 0.52. It binds only where aggregate WAN capacity exceeds that AND the
+  transfer is single-stream (each flow gets its own window, so P>1 is unaffected). A
+  deployment that hits it can rebuild with `-DMQVPN_LWIP_RCV_SCALE=4` or `5`; the pool
+  sizing is independent of the window, so the flow ceiling is unaffected either way.
 - **The −3.6 % cell is not a window effect.** It appears at the *low*-RTT LAN, where the
   BDP is 43 KiB — twelve times inside the window. A genuine window-BDP limit has to get
   worse as RTT grows; this one reverses sign (+0.4 %) at 8× the RTT. Ordering or CC
@@ -397,9 +405,9 @@ isolation (the shipped profile, §5c, applies both together):
   connect/accept time from `netif->mtu`, clamped to `TCP_MSS`. Raising the TUN MTU ceiling
   above 9000 requires bumping `TCP_MSS` — and, per lwipopts.h's derivation, `TCP_WND` and
   `TCP_SND_BUF` alongside it — at compile time. There is no runtime knob.
-- **`PBUF_POOL_SIZE` = 256 remains statically reserved** (≈ 2.3 MiB) despite being unused on
-  the data path in this build (§1a). Shrinking it to a minimal placeholder or 0 is a
-  tightening candidate.
+- **`PBUF_POOL_SIZE` = 64 remains statically reserved** (≈ 0.55 MiB) despite being unused on
+  the data path in this build (§1a). It was cut from 256 alongside the window (§5d);
+  shrinking the remainder to a minimal placeholder or 0 is still a tightening candidate.
 - **`MEMP_NUM_TCP_SEG` (global) can bottleneck before `tcp_max_flows`.** Under a bursty
   workload only ≈ 8 flows on desktop/router (8192 segments) or ≈ 2 on Android (2048) can be
   simultaneously saturated at `TCP_SND_BUF` before the shared segment pool is exhausted,

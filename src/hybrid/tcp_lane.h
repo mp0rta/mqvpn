@@ -254,7 +254,8 @@ int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
  * MUST be queued when xquic won't take them. Withholding tcp_recved() only
  * stops the receive window from RE-opening; the peer may still fill whatever
  * window was already advertised, so the true worst-case per-flow queue bound
- * is TCP_WND (~2 MiB, lwip_port/lwipopts.h) by TCP mechanics — the memory
+ * is TCP_WND (512 KiB on the non-iOS profile, lwip_port/lwipopts.h) by TCP
+ * mechanics — the memory
  * budget (docs/hybrid_h2_memory_budget.md) must cite TCP_WND, not the
  * high-water mark. */
 #include "lwip_port/mqvpn_lwip_profile.h"

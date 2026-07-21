@@ -83,15 +83,18 @@ echo "output: $OUT"
 # scale would silently mix two window sizes into one binary.
 for s in $SCALES; do
     bdir="$BUILD_DIR/s$s"
-    if [ ! -x "$bdir/mqvpn" ]; then
-        echo "=== building scale $s -> $bdir ==="
-        cmake -S "$ROOT" -B "$bdir" -DCMAKE_BUILD_TYPE=Release \
-            -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON \
-            -DXQUIC_BUILD_DIR="$XQUIC_BUILD_DIR" \
-            -DCMAKE_C_FLAGS="-DMQVPN_LWIP_RCV_SCALE=$s" >"$OUT/build-s$s.log" 2>&1 \
-          && cmake --build "$bdir" -j"$(nproc)" >>"$OUT/build-s$s.log" 2>&1 \
-          || { echo "BUILD FAILED for scale $s — see $OUT/build-s$s.log"; exit 1; }
-    fi
+    # ALWAYS reconfigure and rebuild — never trust an existing binary. cmake is
+    # incremental so an unchanged tree costs seconds, whereas a cached
+    # build-winsweep/sN/mqvpn from an older source tree would be measured under
+    # the current commit's label and silently report OK for code that was never
+    # compiled.
+    echo "=== building scale $s -> $bdir ==="
+    cmake -S "$ROOT" -B "$bdir" -DCMAKE_BUILD_TYPE=Release \
+        -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON \
+        -DXQUIC_BUILD_DIR="$XQUIC_BUILD_DIR" \
+        -DCMAKE_C_FLAGS="-DMQVPN_LWIP_RCV_SCALE=$s" >"$OUT/build-s$s.log" 2>&1 \
+      && cmake --build "$bdir" -j"$(nproc)" >>"$OUT/build-s$s.log" 2>&1 \
+      || { echo "BUILD FAILED for scale $s — see $OUT/build-s$s.log"; exit 1; }
     # Prove the binary really carries this scale rather than the default: the
     # whole sweep is meaningless if the -D silently failed to reach lwipopts.h.
     got=$(cc -E -dM -DMQVPN_LWIP_RCV_SCALE=$s -I"$ROOT/src" -I"$ROOT/src/hybrid" \
@@ -275,6 +278,8 @@ for lan in sorted({k[1] for k in agg}):
                     worst=min(worst,pct); d+=f" s{s}:{pct:+.1f}%"
         print(f"{lan:>4} {P:>3} " + " ".join(cells) + "  " + d)
 print(f"\nworst cell vs reference: {worst:+.1f}%   (gate: -5%)")
-print("PASS" if worst > -5.0 else "FAIL")
+if worst <= -5.0:
+    print("FAIL"); sys.exit(1)
+print("PASS")
 PY
 echo "csv: $CSV"

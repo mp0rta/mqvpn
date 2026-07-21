@@ -70,9 +70,9 @@
  * (post-scaling total) and the 16-bit header field advertises
  * TCP_WND >> TCP_RCV_SCALE (tcp_out.c). The effective ~2 MB window must
  * therefore be encoded in TCP_WND itself; the scale factor only widens the
- * wire encoding. 65535 << 5 = 2,097,120 (~2 MB effective; header advertises
- * 65535, the 16-bit max). tcpwnd_size_t is u32_t when LWIP_WND_SCALE==1
- * (tcpbase.h), so this fits. */
+ * wire encoding. At the shipped non-iOS scale 3 that is 65535 << 3 = 524,280
+ * (512 KiB effective; the header advertises 65535, the 16-bit max).
+ * tcpwnd_size_t is u32_t when LWIP_WND_SCALE==1 (tcpbase.h), so this fits. */
 #ifdef MQVPN_LWIP_IOS_PROFILE
 /* iOS NE profile — the on-device lwIP hop only needs a small
  * window; WAN in-flight lives in the QUIC layer. Derives from the scale. */
@@ -92,7 +92,7 @@
 #else
 #  define TCP_RCV_SCALE  MQVPN_LWIP_RCV_SCALE /* shift count, range [0..14] */
 #  define TCP_SND_BUF    (2 * 1024 * 1024)
-#  define PBUF_POOL_SIZE 256
+#  define PBUF_POOL_SIZE 64
 #endif
 /* Pool sizing is a THREE-way split (iOS / Android / desktop-router) and lives
  * in the profile header — unlike the window sizing above it keys on the
@@ -114,16 +114,17 @@
 
 /* mqvpn's tcp_max_flows default is 256; this pool is the hard lwIP-side
  * cap — the hybrid.tcp_max_flows check in tcp_lane.c is the real
- * enforcement point (spec: on reject → tcp_abort, do NOT silently fall to
- * RAW). To keep that check reachable, mqvpn_tcp_lane_new clamps
- * tcp_max_flows to MEMP_NUM_TCP_PCB / 2 (the other half backs the
- * TIME_WAIT/LAST_ACK/CLOSING pcbs the flow table has stopped counting —
- * see the clamp comment in tcp_lane.c), so the pool is
- * what sets each profile's honored ceiling: desktop/router 8192/2 = 4096,
- * Android 512/2 = 256 == the config default, iOS 128/2 = 64. A cap above
- * the clamp would let tcp_alloc() start failing SYNs (silent hang, no RST)
- * before the cap check ever ran. Raising the ceiling raises only what an
- * operator MAY configure — the config default stays 256 on every profile. */
+ * enforcement point. That check runs BEFORE lwIP sees the SYN, and a hit
+ * falls back to the RAW CONNECT-IP lane (mqvpn_client.c); it is the
+ * POST-accept rejection inside the lane that must tcp_abort instead, since
+ * by then lwIP has already answered the SYN. To keep that check reachable,
+ * mqvpn_tcp_lane_new clamps tcp_max_flows to MEMP_NUM_TCP_PCB / 2 (the other half backs
+ * the TIME_WAIT/LAST_ACK/CLOSING pcbs the flow table has stopped counting — see the clamp
+ * comment in tcp_lane.c), so the pool is what sets each profile's honored ceiling:
+ * desktop/router 8192/2 = 4096, Android 512/2 = 256 == the config default, iOS 128/2
+ * = 64. A cap above the clamp would let tcp_alloc() start failing SYNs (silent hang, no
+ * RST) before the cap check ever ran. Raising the ceiling raises only what an operator
+ * MAY configure — the config default stays 256 on every profile. */
 /* MEMP_NUM_TCP_SEG is a GLOBAL pool shared by all flows, sized per profile
  * (desktop/router 8192 / Android 2048 / iOS 512). Either way it covers
  * only a few flows at full TCP_SND_BUF (TCP_SND_QUEUELEN caps one pcb at
@@ -138,11 +139,14 @@
  * which lwIP enforces unconditionally whenever MEMP_MEM_MALLOC == 0 and
  * PBUF_POOL_SIZE > 0 (init.c) — REGARDLESS of whether this project's own
  * code actually allocates PBUF_POOL pbufs (see the RESOLVED note below).
- * Desktop/router and Android profiles: with TCP_WND ~2 MB and ~8946
- * usable bytes per pool pbuf
- * (9000 - 54 header bytes), 128 pbufs (~1.1 MB) is too small; 256 gives
- * ~2.29 MB >= 2,097,120. The iOS profile derives its (smaller) size from
- * TCP_WND via the power-of-two ladder above.
+ * Desktop/router and Android profiles: with TCP_WND 524,280 and ~8946 usable
+ * bytes per pool pbuf (9000 - 54 header bytes), the check needs
+ * ceil(524280/8946) = 59 pbufs; 64 is the next power of two and gives
+ * ~572 KB >= 524,280. It was 256 while TCP_WND was 2 MiB — the window cut
+ * (mqvpn_lwip_profile.h) made three quarters of that reservation dead weight,
+ * ~1.6 MiB of .bss that every non-iOS lane, Android included, was paying for a
+ * pool the data path does not even draw from. The iOS profile derives its own
+ * size from TCP_WND via the power-of-two ladder above.
  *
  * RESOLVED (I1, cross-flow PBUF_POOL exhaustion DoS): mqvpn_lwip_input
  * (lwip_glue.c) allocates every ingress packet as PBUF_RAM (exact-size,

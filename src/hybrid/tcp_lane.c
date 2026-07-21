@@ -151,8 +151,9 @@ mqvpn_tcp_lane_new(const mqvpn_hybrid_config_t *cfg, uint64_t hash_seed, void *c
     }
     lane->cfg = *cfg;
     /* Pool-coupling clamp: the lane's cap check below (on_syn) is the
-     * documented enforcement point — reject → tcp_abort (RST), never a
-     * silent hang — but it is only reachable while lwIP can still allocate
+     * documented enforcement point — a hit there falls back to the RAW lane
+     * before lwIP ever sees the SYN, never a silent hang — but it is only
+     * reachable while lwIP can still allocate
      * pcbs. MEMP_NUM_TCP_PCB backs tracked flows PLUS the pcbs the table has
      * stopped counting: TIME_WAIT, LAST_ACK and CLOSING, which outlive the
      * mark_closing decrement below. (Half-open pcbs are NOT in that set —

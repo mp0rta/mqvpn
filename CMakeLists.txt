@@ -109,7 +109,7 @@ endif()
 # arrives as a cache variable, never as a preprocessor define — the #error in
 # mqvpn_lwip_profile.h cannot see it. Without this check an out-of-tree iOS
 # script still passing the old flag would configure cleanly and silently build
-# the desktop/router profile (2 MiB windows, 8192-pcb pool) into a Network
+# the desktop/router profile (512 KiB windows, 8192-pcb pool) into a Network
 # Extension. Reject at configure time; the header guard covers the separate
 # CMAKE_C_FLAGS path.
 if(DEFINED MQVPN_LWIP_MOBILE_PROFILE OR DEFINED MQVPN_LWIP_MOBILE_RCV_SCALE)
