@@ -791,32 +791,26 @@ jobs:
           merge-multiple: true
 
       - name: Verify the published APK reproduces
-        # The repro gate proves two builds agree on its own runner; this proves
-        # the artifact we are about to publish is that same build. Signing adds
-        # META-INF/* (v1) and an APK Signing Block, which is not a zip entry —
-        # every other entry must match the independent rebuild bit for bit.
+        # F-Droid verifies our releases by grafting our signature onto their
+        # own rebuild and byte-comparing the result; apksigcopier is the tool
+        # they use for it. Running the same check here means a release F-Droid
+        # could not verify never gets published. Anything weaker (comparing
+        # entry checksums, say) would pass on APKs whose compressed bytes,
+        # entry order or alignment differ — exactly what grafting cannot
+        # tolerate.
         run: |
           set -euo pipefail
           signed=$(ls artifacts/mqvpn_*_android.apk)
           repro=artifacts/repro-unsigned.apk
           test -f "$repro" || { echo "::error::rebuilt APK artifact missing"; exit 1; }
-          python3 - "$signed" "$repro" <<'PY'
-          import sys, zipfile
-          def entries(path):
-              with zipfile.ZipFile(path) as z:
-                  return {i.filename: i.CRC for i in z.infolist()
-                          if not i.is_dir() and not i.filename.startswith('META-INF/')}
-          published, rebuilt = entries(sys.argv[1]), entries(sys.argv[2])
-          only = sorted(set(published) ^ set(rebuilt))
-          if only:
-              print("::error::entry sets differ: " + ", ".join(only[:20]))
-              sys.exit(1)
-          differing = sorted(k for k in published if published[k] != rebuilt[k])
-          if differing:
-              print("::error::content differs in: " + ", ".join(differing[:20]))
-              sys.exit(1)
-          print(f"{len(published)} entries match the independent rebuild")
-          PY
+          build_tools=$(ls -d "${ANDROID_HOME:?}"/build-tools/* 2>/dev/null | sort -V | tail -1)
+          [ -n "$build_tools" ] \
+            || { echo "::error::apksigner not found — no Android build-tools on this runner"; exit 1; }
+          export PATH="$build_tools:$PATH"
+          python3 -m venv "$RUNNER_TEMP/apksigcopier-venv"
+          "$RUNNER_TEMP/apksigcopier-venv/bin/pip" install --quiet apksigcopier==1.1.1
+          "$RUNNER_TEMP/apksigcopier-venv/bin/apksigcopier" compare "$signed" --unsigned "$repro"
+          echo "Published APK grafts onto the independent rebuild — F-Droid-verifiable"
 
       - name: Generate SHA256SUMS
         run: |
