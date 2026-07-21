@@ -622,23 +622,28 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
 
-      # Official releases sign with the stable upload key (repo secrets);
-      # forks and secret-less runs fall back to an ephemeral per-run keystore
-      # below so the job still succeeds (those APKs can't be upgraded in
-      # place, which is fine for fork builds).
+      # The stable upload key signs only official tag builds of the canonical
+      # repo. An APK carrying that signature is update-compatible and trusted
+      # by users, so it must never be producible from an arbitrary ref — a
+      # workflow_dispatch run on any branch would otherwise publish a
+      # canonical-key-signed artifact of unreviewed code. Every other run
+      # (forks, dispatch, branch experiments) uses the throwaway key below.
       - name: Detect release keystore secret
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
         run: |
-          if [ -n "$KEYSTORE_B64" ]; then
+          if [[ "$GITHUB_REF" == refs/tags/v* && "$GITHUB_REPOSITORY" == mp0rta/mqvpn ]]; then
+            if [ -z "$KEYSTORE_B64" ]; then
+              # Never let an official tag release fall back to a throwaway key:
+              # a wrongly-signed release breaks in-place updates permanently and
+              # fails F-Droid's reproducible-build verification. Verify secrets
+              # beforehand with the "Verify Android keystore secret" workflow.
+              echo "::error::ANDROID_KEYSTORE_B64 secret missing on an official tag build"
+              exit 1
+            fi
             echo "HAVE_KEYSTORE=true" >> "$GITHUB_ENV"
-          elif [[ "$GITHUB_REF" == refs/tags/v* && "$GITHUB_REPOSITORY" == mp0rta/mqvpn ]]; then
-            # Never let an official tag release fall back to a throwaway key:
-            # a wrongly-signed release breaks in-place updates permanently and
-            # fails F-Droid's reproducible-build verification. Verify secrets
-            # beforehand with the "Verify Android keystore secret" workflow.
-            echo "::error::ANDROID_KEYSTORE_B64 secret missing on an official tag build"
-            exit 1
+          else
+            echo "Not an official tag build — signing with an ephemeral key"
           fi
 
       - name: Set up release keystore
@@ -733,9 +738,17 @@ jobs:
           name: release-android
           path: mqvpn_*_android.apk
 
+  # Reproducibility is a release-time contract, not just a PR check: F-Droid
+  # rebuilds the tagged commit and byte-compares it against the APK we sign
+  # here. Publishing a release we cannot reproduce would strand the F-Droid
+  # listing, so gate publication on the same two-tree comparison.
+  android-repro:
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/android-repro.yml
+
   publish-release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-release, build-android]
+    needs: [build-release, build-android, android-repro]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
