@@ -1,0 +1,167 @@
+name: Android reproducible-build gate
+
+# Builds the Android APK twice from clean trees and fails if the outputs are
+# not byte-identical. Guards the reproducibility contract required by the
+# F-Droid listing (which rebuilds our releases and byte-compares them against
+# the signed APK we publish). The usual way this breaks is an AGP/Gradle/NDK
+# bump reintroducing path- or time-dependent output — catch it here, not
+# after a tag.
+#
+# The two builds differ in build path, file timestamps, directory-entry
+# order, Gradle home, and — because the second runs in a Debian container
+# with Debian's OpenJDK — in distribution, JDK build, cmake version and uid.
+# That matters: F-Droid rebuilds on their own Debian buildserver, so a check
+# that only varies paths within one runner image would prove much less than
+# it appears. What it still cannot model is different hardware and a fresh
+# checkout, so F-Droid's rebuild remains the authoritative check.
+
+on:
+  pull_request:
+    paths:
+      - 'android/**'
+      - 'scripts/build_android.sh'
+      - 'scripts/stage_apk_license_assets.sh'
+      - 'LICENSE'
+      - 'NOTICE'
+      - 'CMakeLists.txt'
+      - 'src/**'
+      - 'include/**'
+      - '.gitmodules'
+      - 'third_party/xquic'
+      - 'third_party/lwip'
+      - '.github/workflows/android-repro.yml'
+      # Toolchain pins live here too; a release-only bump must re-run the gate.
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+  # Called by release.yml on tags so publication is gated on reproducibility.
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  # Checked against release.yml by the "toolchain pins" step below.
+  BORINGSSL_COMMIT: "9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c"
+  NDK_VERSION: "28.2.13676358"
+
+jobs:
+  android-repro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+
+      - name: Check toolchain pins are in sync
+        # The gate is only meaningful if it builds with the same toolchain as
+        # the release. These values are declared per workflow (reusable
+        # workflows do not inherit the caller's env), so assert equality
+        # instead of relying on "keep in sync" comments.
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          rel=.github/workflows/release.yml
+          gradle_ndk=$(sed -n 's/.*ndkVersion = "\([^"]*\)".*/\1/p' \
+                       android/sdk-native/build.gradle.kts | head -1)
+          rel_ndk=$(sed -n 's/^  NDK_VERSION: "\([^"]*\)".*/\1/p' "$rel" | head -1)
+          rel_bssl=$(sed -n 's/^  BORINGSSL_COMMIT: "\([^"]*\)".*/\1/p' "$rel" | head -1)
+          [ -n "$gradle_ndk" ] && [ -n "$rel_ndk" ] && [ -n "$rel_bssl" ] \
+            || fail "could not parse toolchain pins — update the patterns in this step"
+          [ "$rel_ndk" = "$NDK_VERSION" ] \
+            || fail "NDK pin drift: release.yml has $rel_ndk, this gate has $NDK_VERSION"
+          [ "$gradle_ndk" = "$NDK_VERSION" ] \
+            || fail "NDK pin drift: sdk-native has $gradle_ndk, this gate has $NDK_VERSION"
+          [ "$rel_bssl" = "$BORINGSSL_COMMIT" ] \
+            || fail "BoringSSL pin drift: release.yml has $rel_bssl"
+          echo "Toolchain pins in sync (NDK $NDK_VERSION)"
+
+      - name: Clone BoringSSL (pinned)
+        run: |
+          BSSL_DIR=third_party/xquic/third_party/boringssl
+          git clone https://github.com/google/boringssl.git "$BSSL_DIR"
+          cd "$BSSL_DIR" && git checkout ${{ env.BORINGSSL_COMMIT }}
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6
+        with:
+          # Used for wrapper validation only. Caching is disabled because each
+          # build below runs against its own GRADLE_USER_HOME — a shared one
+          # would let the second build reuse the first's artifact-transform
+          # outputs (dependency dexing lands in the APK), hiding exactly the
+          # nondeterminism this gate exists to catch.
+          cache-disabled: true
+
+      - name: Install NDK
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;${NDK_VERSION}" > /dev/null
+
+      - name: Build tree A on the runner
+        # tar -m (not cp -a): extraction-time mtimes, so the trees also differ
+        # in file timestamps. --sort differs per tree so directory entries are
+        # created in a different order too. --exclude=.git keeps repo metadata
+        # out of the build trees. Distinct Gradle homes give full cache
+        # isolation and expose a Gradle-home path leaking into outputs.
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/repro-a"
+          mkdir -p "$d"
+          tar -C "$GITHUB_WORKSPACE" --exclude=.git --sort=name -cf - . | tar -C "$d" -xmf -
+          cd "$d"
+          export GRADLE_USER_HOME="$RUNNER_TEMP/gradle-home-a"
+          scripts/stage_apk_license_assets.sh
+          ANDROID_NDK="$ANDROID_HOME/ndk/${NDK_VERSION}" \
+            scripts/build_android.sh --abi arm64-v8a > /dev/null
+          cd android
+          ./gradlew --no-daemon -q :app:assembleRelease
+
+      - name: Build tree B in a Debian container
+        # Debian with Debian's OpenJDK, mirroring where F-Droid rebuilds us.
+        # The SDK is mounted read-only on purpose: if the container's AGP
+        # wanted a build-tools version the runner does not have, we want a
+        # loud failure rather than a silent second toolchain.
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/repro-b"
+          mkdir -p "$d"
+          sleep 2   # distinct timestamps from tree A
+          tar -C "$GITHUB_WORKSPACE" --exclude=.git --sort=inode -cf - . | tar -C "$d" -xmf -
+          rm -f "$d/android/local.properties"
+          docker run --rm \
+            -v "$d:/src" -v "$ANDROID_HOME:/sdk:ro" -w /src \
+            -e ANDROID_HOME=/sdk -e ANDROID_SDK_ROOT=/sdk \
+            -e ANDROID_USER_HOME=/tmp/.android -e GRADLE_USER_HOME=/tmp/gradle-home-b \
+            debian:trixie bash -euc '
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                openjdk-21-jdk-headless cmake ninja-build git unzip > /dev/null
+              scripts/stage_apk_license_assets.sh
+              ANDROID_NDK=/sdk/ndk/'"$NDK_VERSION"' \
+                scripts/build_android.sh --abi arm64-v8a > /dev/null
+              cd android && ./gradlew --no-daemon -q :app:assembleRelease'
+
+      - name: Compare APKs
+        run: |
+          A="$RUNNER_TEMP/repro-a/android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          B="$RUNNER_TEMP/repro-b/android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          sha256sum "$A" "$B"
+          if ! cmp -s "$A" "$B"; then
+            echo "::error::APK is not reproducible across build directories"
+            exit 1
+          fi
+          cp "$A" "$RUNNER_TEMP/repro-unsigned.apk"
+          echo "Byte-identical APKs — reproducibility gate PASS"
+
+      - name: Upload rebuilt APK
+        # release.yml compares this independently rebuilt APK against the one
+        # it is about to publish, so the gate covers the shipped artifact and
+        # not just two builds on this runner.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: repro-android
+          path: ${{ runner.temp }}/repro-unsigned.apk

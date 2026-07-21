@@ -16,6 +16,19 @@ android {
         consumerProguardFiles("consumer-rules.pro")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
+        externalNativeBuild {
+            cmake {
+                // Reproducible-build hygiene for the JNI wrapper: strip the
+                // checkout path from __FILE__/debug info, and drop the linker
+                // build-id (it hashes pre-strip debug info, which embeds
+                // paths). Together with the -ffile-prefix-map flags in
+                // scripts/build_android.sh this makes the APK byte-identical
+                // across build directories.
+                cFlags("-ffile-prefix-map=${rootProject.projectDir.parentFile}=/mqvpn")
+                arguments("-DCMAKE_SHARED_LINKER_FLAGS=-Wl,--build-id=none")
+            }
+        }
+
         ndk {
             // Only ABIs with prebuilt .a files (build_android.sh output)
             abiFilters += listOf("arm64-v8a")

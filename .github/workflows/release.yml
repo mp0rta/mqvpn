@@ -5,13 +5,32 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# Actions in this workflow — and in android-repro.yml, which it calls — are
+# pinned to commit SHAs with the version in a trailing comment; ci.yml
+# deliberately stays on tags. The line is what the job produces, not who
+# publishes an action: everything here ends up in artifacts we ship to users
+# and vouch for with a provenance attestation, so a moved tag would put
+# unreviewed code inside a signed, attested release. CI output is discarded,
+# so the same risk is not there. Keep new actions in this workflow pinned;
+# dependabot updates the SHAs and keeps the comment in step.
+
+# Read-only by default; publish-release declares the write scopes it needs.
+# The build jobs run third-party code (Gradle plugins, native build scripts)
+# while actions/checkout keeps the job credential on disk, so they must not
+# hold a token that could create or edit a release and thereby sidestep the
+# reproducibility gate publish-release depends on.
 permissions:
-  contents: write
+  contents: read
 
 env:
   WINTUN_VER: "0.14.1"
   WINTUN_SHA256: "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
   BORINGSSL_COMMIT: "9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c"
+  # Keep in sync with ndkVersion in android/sdk-native/build.gradle.kts and
+  # NDK_VERSION in android-repro.yml.
+  NDK_VERSION: "28.2.13676358"
+  # SHA-256 fingerprint of the canonical mqvpn upload certificate (public).
+  UPLOAD_CERT_SHA256: "F1:C5:D8:18:AE:C5:EA:4F:28:7B:44:CE:CC:1E:41:A0:AD:F2:B9:04:C8:EB:12:B3:41:F2:69:4F:BA:AB:B0:42"
 
 jobs:
   build-release:
@@ -40,7 +59,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           submodules: recursive
 
@@ -308,7 +327,7 @@ jobs:
 
       - name: Upload macOS artifact
         if: matrix.os == 'darwin'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           # Artifact name includes the OS: the Linux job already uses
           # release-arm64, so a bare release-${arch} would collide.
@@ -317,17 +336,17 @@ jobs:
 
       - name: Setup MSVC dev environment (Windows)
         if: matrix.os == 'windows'
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: ${{ matrix.arch == 'amd64' && 'x64' || 'arm64' }}
 
       - name: Install NASM (Windows)
         if: matrix.os == 'windows'
-        uses: ilammy/setup-nasm@v1
+        uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
 
       - name: Setup Go (Windows, BoringSSL build)
         if: matrix.os == 'windows'
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: 'stable'
 
@@ -340,7 +359,7 @@ jobs:
       - name: Cache wintun
         if: matrix.os == 'windows'
         id: cache-wintun
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: wintun-extract
           key: wintun-${{ env.WINTUN_VER }}-${{ env.WINTUN_SHA256 }}
@@ -545,14 +564,14 @@ jobs:
 
       - name: Upload Windows artifacts
         if: matrix.os == 'windows'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-windows-${{ matrix.arch }}
           path: mqvpn_*_windows_${{ matrix.arch }}.zip
 
       - name: Upload artifacts
         if: matrix.os == 'linux'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-${{ matrix.arch }}
           path: |
@@ -562,8 +581,15 @@ jobs:
   build-android:
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    # The upload-key secrets live in the protected `release` environment whose
+    # deployment rule admits only v* tags, so GitHub — not a check inside this
+    # file — decides whether a run can read them. That is what actually stops a
+    # modified workflow on an arbitrary branch from signing with the canonical
+    # key. Non-tag runs request no environment, receive no secrets, and fall
+    # back to the ephemeral key below.
+    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || '' }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           submodules: recursive
 
@@ -580,20 +606,17 @@ jobs:
           fi
           cd "$BSSL_DIR" && git checkout ${{ env.BORINGSSL_COMMIT }}
 
-      - name: Locate NDK
+      - name: Install pinned NDK
         id: ndk
+        # The runner image's default NDK drifts with image updates; the
+        # reproducibility contract requires the exact NDK the repro gate and
+        # Gradle pin, so install it explicitly.
         run: |
-          NDK_PATH=""
-          if [ -n "${ANDROID_NDK_HOME:-}" ]; then
-            NDK_PATH="$ANDROID_NDK_HOME"
-          elif [ -d "${ANDROID_HOME:-}/ndk" ]; then
-            NDK_PATH="$(ls -d ${ANDROID_HOME}/ndk/*/ 2>/dev/null | sort -V | tail -1)"
-            NDK_PATH="${NDK_PATH%/}"
+          NDK_PATH="$ANDROID_HOME/ndk/$NDK_VERSION"
+          if [ ! -d "$NDK_PATH" ]; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" > /dev/null
           fi
-          if [ -z "$NDK_PATH" ] || [ ! -d "$NDK_PATH" ]; then
-            echo "ERROR: NDK not found (ANDROID_NDK_HOME='${ANDROID_NDK_HOME:-}', ANDROID_HOME='${ANDROID_HOME:-}')"
-            exit 1
-          fi
+          [ -d "$NDK_PATH" ] || { echo "ERROR: NDK $NDK_VERSION install failed"; exit 1; }
           echo "ndk_path=$NDK_PATH" >> "$GITHUB_OUTPUT"
 
       # arm64-v8a only: matches sdk-native's abiFilters. APK will not run in
@@ -611,20 +634,81 @@ jobs:
           done
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
         with:
           distribution: temurin
           java-version: 21
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6
 
-      # Ephemeral release keystore: generated fresh per CI run, so each
-      # release is signed with a different key. Acceptable for the sample
-      # APK (clearly labelled as demo); upgrades require uninstall+reinstall.
-      # If we later switch to a stable keystore, replace this step with one
-      # that decodes a base64 secret into release.jks instead.
+      # The stable upload key signs only official tag builds of the canonical
+      # repo. An APK carrying that signature is update-compatible and trusted
+      # by users, so it must never be producible from an arbitrary ref — a
+      # workflow_dispatch run on any branch would otherwise publish a
+      # canonical-key-signed artifact of unreviewed code. Every other run
+      # (forks, dispatch, branch experiments) uses the throwaway key below.
+      - name: Detect release keystore secret
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* && "$GITHUB_REPOSITORY" == mp0rta/mqvpn ]]; then
+            if [ -z "$KEYSTORE_B64" ]; then
+              # Never let an official tag release fall back to a throwaway key:
+              # a wrongly-signed release breaks in-place updates permanently and
+              # fails F-Droid's reproducible-build verification. Missing or
+              # wrong secrets fail this job before anything is signed; to
+              # rehearse the path, tag a pre-release (vX.Y.Z-rcN) and delete it.
+              echo "::error::ANDROID_KEYSTORE_B64 secret missing on an official tag build"
+              exit 1
+            fi
+            echo "HAVE_KEYSTORE=true" >> "$GITHUB_ENV"
+          else
+            # Assign explicitly rather than leaving it unset: earlier steps run
+            # repo scripts that could have appended HAVE_KEYSTORE=true to
+            # $GITHUB_ENV, and the last assignment wins.
+            echo "HAVE_KEYSTORE=false" >> "$GITHUB_ENV"
+            echo "Not an official tag build — signing with an ephemeral key"
+          fi
+
+      - name: Set up release keystore
+        # Official releases sign with the stable upload key from repo secrets
+        # (required for F-Droid reproducible-build verification, which grafts
+        # this signature onto F-Droid's own build). Forks and secret-less runs
+        # fall back to an ephemeral keystore so the job still succeeds.
+        if: env.HAVE_KEYSTORE == 'true'
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          KEYSTORE="$RUNNER_TEMP/release.jks"
+          # $GITHUB_ENV uses NAME=value lines, so a password containing a
+          # newline would be truncated or rejected further down. Say so here
+          # rather than failing obscurely mid-build after a key rotation.
+          case "$KEYSTORE_PASSWORD" in
+            *[$'\n\r']*) echo "::error::ANDROID_KEYSTORE_PASSWORD must not contain newlines"; exit 1 ;;
+          esac
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$KEYSTORE"
+          # Preflight: refuse to sign with anything but the canonical upload
+          # key. Checks the alias holds a usable private key (certreq
+          # exercises it) and that the certificate fingerprint matches.
+          keytool -list -keystore "$KEYSTORE" -storepass "$KEYSTORE_PASSWORD" \
+              -alias mqvpn-upload 2>/dev/null | grep -q PrivateKeyEntry \
+            || { echo "::error::keystore alias mqvpn-upload missing or not a PrivateKeyEntry"; exit 1; }
+          keytool -certreq -keystore "$KEYSTORE" -storepass "$KEYSTORE_PASSWORD" \
+              -keypass "$KEYSTORE_PASSWORD" -alias mqvpn-upload -file /dev/null 2>/dev/null \
+            || { echo "::error::private key not usable with the provided password"; exit 1; }
+          FP=$(keytool -list -v -keystore "$KEYSTORE" -storepass "$KEYSTORE_PASSWORD" \
+                 -alias mqvpn-upload 2>/dev/null | sed -n 's/.*SHA256: //p' | head -1)
+          [ "$FP" = "$UPLOAD_CERT_SHA256" ] \
+            || { echo "::error::upload certificate fingerprint mismatch: got $FP"; exit 1; }
+          echo "MQVPN_KEYSTORE_PATH=$KEYSTORE" >> "$GITHUB_ENV"
+          echo "MQVPN_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+          echo "MQVPN_KEY_ALIAS=mqvpn-upload" >> "$GITHUB_ENV"
+          echo "MQVPN_KEY_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+
       - name: Generate ephemeral release keystore
+        if: env.HAVE_KEYSTORE != 'true'
         run: |
           KEYSTORE="$RUNNER_TEMP/release.jks"
           # Single password for both store and key entry. JDK 9+ defaults
@@ -653,29 +737,41 @@ jobs:
       # Apache-2.0 §4(a) since the APK statically links xquic, BoringSSL, and
       # lwIP (BSD-3-Clause requires the same notice retention).
       - name: Stage license assets for APK
-        run: |
-          ASSETS=android/app/src/main/assets
-          mkdir -p "$ASSETS/third-party"
-          cp LICENSE                                         "$ASSETS/LICENSE"
-          cp NOTICE                                          "$ASSETS/NOTICE"
-          cp third_party/xquic/LICENSE                       "$ASSETS/third-party/xquic.txt"
-          cp third_party/xquic/third_party/boringssl/LICENSE "$ASSETS/third-party/boringssl.txt"
-          cp third_party/lwip/LICENSE                        "$ASSETS/third-party/lwip.txt"
+        run: scripts/stage_apk_license_assets.sh
 
       - name: Build signed release APK
         working-directory: android
         run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
 
+      - name: Clear signing material
+        # Signing is done; drop the keystore and blank the env vars so the
+        # steps that follow — including third-party actions such as
+        # upload-artifact — never have the private key or its password in
+        # reach. Runs even on failure.
+        if: always()
+        run: |
+          # Remove the decode target unconditionally, not just the exported
+          # path: a preflight failure aborts before that variable is set and
+          # would otherwise leave the keystore on disk.
+          rm -f "$RUNNER_TEMP/release.jks"
+          if [ -n "${MQVPN_KEYSTORE_PATH:-}" ]; then rm -f "$MQVPN_KEYSTORE_PATH"; fi
+          {
+            echo "MQVPN_KEYSTORE_PATH="
+            echo "MQVPN_KEYSTORE_PASSWORD="
+            echo "MQVPN_KEY_ALIAS="
+            echo "MQVPN_KEY_PASSWORD="
+          } >> "$GITHUB_ENV"
+
       - name: Stage Android release artifact
         run: |
           SRC=android/app/build/outputs/apk/release/app-release.apk
           test -f "$SRC" || { echo "APK not found at $SRC"; ls -R android/app/build/outputs/apk/ || true; exit 1; }
-          cp "$SRC" "mqvpn-sample_${VERSION}_android.apk"
+          cp "$SRC" "mqvpn_${VERSION}_android.apk"
 
       - name: Verify license assets in APK
         run: |
           set -e
-          apk=$(ls mqvpn-sample_*_android.apk)
+          apk=$(ls mqvpn_*_android.apk)
           expected=5
           found=$(unzip -l "$apk" \
                   | grep -cE 'assets/(LICENSE|NOTICE|third-party/(xquic|boringssl|lwip)\.txt)$' \
@@ -687,14 +783,22 @@ jobs:
           fi
 
       - name: Upload Android artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-android
-          path: mqvpn-sample_*_android.apk
+          path: mqvpn_*_android.apk
+
+  # Reproducibility is a release-time contract, not just a PR check: F-Droid
+  # rebuilds the tagged commit and byte-compares it against the APK we sign
+  # here. Publishing a release we cannot reproduce would strand the F-Droid
+  # listing, so gate publication on the same two-tree comparison.
+  android-repro:
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/android-repro.yml
 
   publish-release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-release, build-android]
+    needs: [build-release, build-android, android-repro]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -702,13 +806,53 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
           merge-multiple: true
+
+      - name: Verify the published APK reproduces
+        # F-Droid verifies our releases by grafting our signature onto their
+        # own rebuild and byte-comparing the result; apksigcopier is the tool
+        # they use for it. Running the same check here means a release F-Droid
+        # could not verify never gets published. Anything weaker (comparing
+        # entry checksums, say) would pass on APKs whose compressed bytes,
+        # entry order or alignment differ — exactly what grafting cannot
+        # tolerate.
+        run: |
+          set -euo pipefail
+          signed=$(ls artifacts/mqvpn_*_android.apk)
+          repro=artifacts/repro-unsigned.apk
+          test -f "$repro" || { echo "::error::rebuilt APK artifact missing"; exit 1; }
+          build_tools=$(ls -d "${ANDROID_HOME:?}"/build-tools/* 2>/dev/null | sort -V | tail -1)
+          [ -n "$build_tools" ] \
+            || { echo "::error::apksigner not found — no Android build-tools on this runner"; exit 1; }
+          export PATH="$build_tools:$PATH"
+          # The signer must be the canonical upload certificate. The keystore
+          # preflight in build-android runs in a different job, and this job
+          # only sees a downloaded artifact, so check the signature actually
+          # on the APK we are about to publish. apksigner prints the digest
+          # lowercase without separators; UPLOAD_CERT_SHA256 is in keytool's
+          # colon-separated form.
+          expected=$(printf '%s' "$UPLOAD_CERT_SHA256" | tr -d ':' | tr 'A-Z' 'a-z')
+          digests=$(apksigner verify --print-certs "$signed" \
+                    | sed -n 's/.*certificate SHA-256 digest: //p')
+          # Exactly one signer: an extra co-signer would still graft and still
+          # contain the canonical certificate, but it changes the app's signing
+          # identity and breaks upgrades for existing installs.
+          signers=$(printf '%s\n' "$digests" | grep -c . || true)
+          [ "$signers" = "1" ] \
+            || { echo "::error::expected exactly one APK signer, found $signers"; exit 1; }
+          [ "$digests" = "$expected" ] \
+            || { echo "::error::published APK signer mismatch: got ${digests:-none}"; exit 1; }
+          python3 -m venv "$RUNNER_TEMP/apksigcopier-venv"
+          "$RUNNER_TEMP/apksigcopier-venv/bin/pip" install --quiet \
+            --require-hashes -r .github/requirements-apksigcopier.txt
+          "$RUNNER_TEMP/apksigcopier-venv/bin/apksigcopier" compare "$signed" --unsigned "$repro"
+          echo "Published APK is signed by the upload key and grafts onto the independent rebuild"
 
       - name: Generate SHA256SUMS
         run: |
@@ -716,20 +860,20 @@ jobs:
           # nullglob so missing pattern → empty rather than the literal pattern
           # passed to sha256sum (would fail "No such file or directory").
           shopt -s nullglob
-          sha256sum mqvpn_*.tar.gz mqvpn_*.deb mqvpn_*.zip mqvpn-sample_*_android.apk > SHA256SUMS
+          sha256sum mqvpn_*.tar.gz mqvpn_*.deb mqvpn_*.zip mqvpn_*_android.apk > SHA256SUMS
           cat SHA256SUMS
 
       - name: Attest build provenance
         # Signs Sigstore provenance (SLSA) for every released binary artifact.
         # Users verify with:
         #   gh attestation verify <file> --owner mp0rta
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
         with:
           subject-path: |
             artifacts/mqvpn_*.tar.gz
             artifacts/mqvpn_*.deb
             artifacts/mqvpn_*.zip
-            artifacts/mqvpn-sample_*_android.apk
+            artifacts/mqvpn_*_android.apk
 
       - name: Create GitHub Release
         env:
@@ -740,7 +884,7 @@ jobs:
           TARS=(artifacts/mqvpn_*.tar.gz)
           DEBS=(artifacts/mqvpn_*.deb)
           ZIPS=(artifacts/mqvpn_*.zip)
-          APKS=(artifacts/mqvpn-sample_*_android.apk)
+          APKS=(artifacts/mqvpn_*_android.apk)
           # SemVer pre-release identifier (anything after '-') → mark as
           # pre-release so it does not become the "Latest" release.
           # e.g. v0.4.0-beta1, v0.4.0-rc.1 → pre-release; v0.4.0 → latest.
