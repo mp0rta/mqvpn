@@ -133,4 +133,14 @@ jobs:
             echo "::error::APK is not reproducible across build directories"
             exit 1
           fi
+          cp "$A" "$RUNNER_TEMP/repro-unsigned.apk"
           echo "Byte-identical APKs — reproducibility gate PASS"
+
+      - name: Upload rebuilt APK
+        # release.yml compares this independently rebuilt APK against the one
+        # it is about to publish, so the gate covers the shipped artifact and
+        # not just two builds on this runner.
+        uses: actions/upload-artifact@v7
+        with:
+          name: repro-android
+          path: ${{ runner.temp }}/repro-unsigned.apk

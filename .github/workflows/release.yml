@@ -568,6 +568,13 @@ jobs:
   build-android:
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    # The upload-key secrets live in the protected `release` environment whose
+    # deployment rule admits only v* tags, so GitHub — not a check inside this
+    # file — decides whether a run can read them. That is what actually stops a
+    # modified workflow on an arbitrary branch from signing with the canonical
+    # key. Non-tag runs request no environment, receive no secrets, and fall
+    # back to the ephemeral key below.
+    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || '' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -643,6 +650,10 @@ jobs:
             fi
             echo "HAVE_KEYSTORE=true" >> "$GITHUB_ENV"
           else
+            # Assign explicitly rather than leaving it unset: earlier steps run
+            # repo scripts that could have appended HAVE_KEYSTORE=true to
+            # $GITHUB_ENV, and the last assignment wins.
+            echo "HAVE_KEYSTORE=false" >> "$GITHUB_ENV"
             echo "Not an official tag build — signing with an ephemeral key"
           fi
 
@@ -712,6 +723,21 @@ jobs:
         working-directory: android
         run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
 
+      - name: Clear signing material
+        # Signing is done; drop the keystore and blank the env vars so the
+        # steps that follow — including third-party actions such as
+        # upload-artifact — never have the private key or its password in
+        # reach. Runs even on failure.
+        if: always()
+        run: |
+          if [ -n "${MQVPN_KEYSTORE_PATH:-}" ]; then rm -f "$MQVPN_KEYSTORE_PATH"; fi
+          {
+            echo "MQVPN_KEYSTORE_PATH="
+            echo "MQVPN_KEYSTORE_PASSWORD="
+            echo "MQVPN_KEY_ALIAS="
+            echo "MQVPN_KEY_PASSWORD="
+          } >> "$GITHUB_ENV"
+
       - name: Stage Android release artifact
         run: |
           SRC=android/app/build/outputs/apk/release/app-release.apk
@@ -763,6 +789,34 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+
+      - name: Verify the published APK reproduces
+        # The repro gate proves two builds agree on its own runner; this proves
+        # the artifact we are about to publish is that same build. Signing adds
+        # META-INF/* (v1) and an APK Signing Block, which is not a zip entry —
+        # every other entry must match the independent rebuild bit for bit.
+        run: |
+          set -euo pipefail
+          signed=$(ls artifacts/mqvpn_*_android.apk)
+          repro=artifacts/repro-unsigned.apk
+          test -f "$repro" || { echo "::error::rebuilt APK artifact missing"; exit 1; }
+          python3 - "$signed" "$repro" <<'PY'
+          import sys, zipfile
+          def entries(path):
+              with zipfile.ZipFile(path) as z:
+                  return {i.filename: i.CRC for i in z.infolist()
+                          if not i.is_dir() and not i.filename.startswith('META-INF/')}
+          published, rebuilt = entries(sys.argv[1]), entries(sys.argv[2])
+          only = sorted(set(published) ^ set(rebuilt))
+          if only:
+              print("::error::entry sets differ: " + ", ".join(only[:20]))
+              sys.exit(1)
+          differing = sorted(k for k in published if published[k] != rebuilt[k])
+          if differing:
+              print("::error::content differs in: " + ", ".join(differing[:20]))
+              sys.exit(1)
+          print(f"{len(published)} entries match the independent rebuild")
+          PY
 
       - name: Generate SHA256SUMS
         run: |
