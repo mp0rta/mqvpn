@@ -7,10 +7,13 @@ name: Android reproducible-build gate
 # bump reintroducing path- or time-dependent output — catch it here, not
 # after a tag.
 #
-# Scope limit: both trees are copies made inside one runner, so this models
-# differences in build path, file timestamps, directory-entry order and
-# Gradle home, but not a genuinely independent checkout on different
-# hardware. F-Droid's own rebuild remains the authoritative check.
+# The two builds differ in build path, file timestamps, directory-entry
+# order, Gradle home, and — because the second runs in a Debian container
+# with Debian's OpenJDK — in distribution, JDK build, cmake version and uid.
+# That matters: F-Droid rebuilds on their own Debian buildserver, so a check
+# that only varies paths within one runner image would prove much less than
+# it appears. What it still cannot model is different hardware and a fresh
+# checkout, so F-Droid's rebuild remains the authoritative check.
 
 on:
   pull_request:
@@ -98,31 +101,49 @@ jobs:
       - name: Install NDK
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;${NDK_VERSION}" > /dev/null
 
-      - name: Build twice in different directories
+      - name: Build tree A on the runner
+        # tar -m (not cp -a): extraction-time mtimes, so the trees also differ
+        # in file timestamps. --sort differs per tree so directory entries are
+        # created in a different order too. --exclude=.git keeps repo metadata
+        # out of the build trees. Distinct Gradle homes give full cache
+        # isolation and expose a Gradle-home path leaking into outputs.
         run: |
           set -euo pipefail
-          i=0
-          for d in "$RUNNER_TEMP/repro-a" "$RUNNER_TEMP/repro-b"; do
-            i=$((i + 1))
-            # tar -m (not cp -a): extraction-time mtimes, so the two trees also
-            # differ in file timestamps. --sort differs per tree so directory
-            # entries are created in a different order as well. --exclude=.git
-            # keeps repo metadata out of the build trees.
-            if [ "$i" = 1 ]; then sort_mode=name; else sort_mode=inode; fi
-            mkdir -p "$d"
-            tar -C "$GITHUB_WORKSPACE" --exclude=.git --sort="$sort_mode" -cf - . \
-              | tar -C "$d" -xmf -
-            sleep 2   # ensure the two trees get distinct timestamps
-            ( cd "$d"
-              # Distinct Gradle homes: full cache isolation, and their differing
-              # paths also expose any Gradle-home path leaking into outputs.
-              export GRADLE_USER_HOME="$RUNNER_TEMP/gradle-home-$i"
+          d="$RUNNER_TEMP/repro-a"
+          mkdir -p "$d"
+          tar -C "$GITHUB_WORKSPACE" --exclude=.git --sort=name -cf - . | tar -C "$d" -xmf -
+          cd "$d"
+          export GRADLE_USER_HOME="$RUNNER_TEMP/gradle-home-a"
+          scripts/stage_apk_license_assets.sh
+          ANDROID_NDK="$ANDROID_HOME/ndk/${NDK_VERSION}" \
+            scripts/build_android.sh --abi arm64-v8a > /dev/null
+          cd android
+          ./gradlew --no-daemon -q :app:assembleRelease
+
+      - name: Build tree B in a Debian container
+        # Debian with Debian's OpenJDK, mirroring where F-Droid rebuilds us.
+        # The SDK is mounted read-only on purpose: if the container's AGP
+        # wanted a build-tools version the runner does not have, we want a
+        # loud failure rather than a silent second toolchain.
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/repro-b"
+          mkdir -p "$d"
+          sleep 2   # distinct timestamps from tree A
+          tar -C "$GITHUB_WORKSPACE" --exclude=.git --sort=inode -cf - . | tar -C "$d" -xmf -
+          rm -f "$d/android/local.properties"
+          docker run --rm \
+            -v "$d:/src" -v "$ANDROID_HOME:/sdk:ro" -w /src \
+            -e ANDROID_HOME=/sdk -e ANDROID_SDK_ROOT=/sdk \
+            -e ANDROID_USER_HOME=/tmp/.android -e GRADLE_USER_HOME=/tmp/gradle-home-b \
+            debian:trixie bash -euc '
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                openjdk-21-jdk-headless cmake ninja-build git unzip > /dev/null
               scripts/stage_apk_license_assets.sh
-              ANDROID_NDK="$ANDROID_HOME/ndk/${NDK_VERSION}" \
+              ANDROID_NDK=/sdk/ndk/'"$NDK_VERSION"' \
                 scripts/build_android.sh --abi arm64-v8a > /dev/null
-              cd android
-              ./gradlew --no-daemon -q :app:assembleRelease )
-          done
+              cd android && ./gradlew --no-daemon -q :app:assembleRelease'
 
       - name: Compare APKs
         run: |
