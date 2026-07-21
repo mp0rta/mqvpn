@@ -274,12 +274,19 @@ int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
 #  endif
 #endif
 
+/* Fixed rather than derived from TCP_WND (the iOS profile derives; see above).
+ * Note what the scale 5 -> 3 window cut did to the RATIO without moving either
+ * constant: HIGH was 12.5% of the old 2 MiB window and is 50% of the 512 KiB
+ * one, LOW 3.1% -> 12.5%. That lands both almost exactly on the TCP_WND/2 and
+ * TCP_WND/8 the iOS profile picks deliberately, so the two profiles now share a
+ * hysteresis shape instead of diverging — but it also means these constants are
+ * no longer free to sit still if the window moves again. Below scale 3 HIGH
+ * would meet or exceed TCP_WND, which mqvpn_lwip_profile.h rejects at compile
+ * time; that guard is the floor until these are derived too. */
 #ifndef MQVPN_TCP_LANE_BP_HIGH_WATER
-#  define MQVPN_TCP_LANE_BP_HIGH_WATER                                            \
-      (262144u) /* 256 KiB — pre-2xx buffering                                  \
-                 * withholds recved beyond this; between mqproxy's 64 KiB minimum \
-                 * and the multi-MB TCP_WND: headroom without approaching the     \
-                 * memory-budget concerns. */
+#  define MQVPN_TCP_LANE_BP_HIGH_WATER                                         \
+      (262144u) /* 256 KiB — pre-2xx buffering withholds recved beyond this; \
+                 * above mqproxy's 64 KiB minimum, at half the window. */
 #endif
 #ifndef MQVPN_TCP_LANE_BP_LOW_WATER
 #  define MQVPN_TCP_LANE_BP_LOW_WATER                                       \
