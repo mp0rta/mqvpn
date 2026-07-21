@@ -51,7 +51,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           submodules: recursive
 
@@ -319,7 +319,7 @@ jobs:
 
       - name: Upload macOS artifact
         if: matrix.os == 'darwin'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           # Artifact name includes the OS: the Linux job already uses
           # release-arm64, so a bare release-${arch} would collide.
@@ -328,17 +328,17 @@ jobs:
 
       - name: Setup MSVC dev environment (Windows)
         if: matrix.os == 'windows'
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: ${{ matrix.arch == 'amd64' && 'x64' || 'arm64' }}
 
       - name: Install NASM (Windows)
         if: matrix.os == 'windows'
-        uses: ilammy/setup-nasm@v1
+        uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
 
       - name: Setup Go (Windows, BoringSSL build)
         if: matrix.os == 'windows'
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: 'stable'
 
@@ -351,7 +351,7 @@ jobs:
       - name: Cache wintun
         if: matrix.os == 'windows'
         id: cache-wintun
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: wintun-extract
           key: wintun-${{ env.WINTUN_VER }}-${{ env.WINTUN_SHA256 }}
@@ -556,14 +556,14 @@ jobs:
 
       - name: Upload Windows artifacts
         if: matrix.os == 'windows'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-windows-${{ matrix.arch }}
           path: mqvpn_*_windows_${{ matrix.arch }}.zip
 
       - name: Upload artifacts
         if: matrix.os == 'linux'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-${{ matrix.arch }}
           path: |
@@ -581,7 +581,7 @@ jobs:
     # back to the ephemeral key below.
     environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || '' }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           submodules: recursive
 
@@ -626,13 +626,13 @@ jobs:
           done
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
         with:
           distribution: temurin
           java-version: 21
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6
 
       # The stable upload key signs only official tag builds of the canonical
       # repo. An APK carrying that signature is update-compatible and trusted
@@ -768,7 +768,7 @@ jobs:
           fi
 
       - name: Upload Android artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-android
           path: mqvpn_*_android.apk
@@ -791,10 +791,10 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
           merge-multiple: true
@@ -816,10 +816,22 @@ jobs:
           [ -n "$build_tools" ] \
             || { echo "::error::apksigner not found — no Android build-tools on this runner"; exit 1; }
           export PATH="$build_tools:$PATH"
+          # The signer must be the canonical upload certificate. The keystore
+          # preflight in build-android runs in a different job, and this job
+          # only sees a downloaded artifact, so check the signature actually
+          # on the APK we are about to publish. apksigner prints the digest
+          # lowercase without separators; UPLOAD_CERT_SHA256 is in keytool's
+          # colon-separated form.
+          expected=$(printf '%s' "$UPLOAD_CERT_SHA256" | tr -d ':' | tr 'A-Z' 'a-z')
+          actual=$(apksigner verify --print-certs "$signed" \
+                   | sed -n 's/.*certificate SHA-256 digest: //p' | head -1)
+          [ "$actual" = "$expected" ] \
+            || { echo "::error::published APK signer mismatch: got ${actual:-none}"; exit 1; }
           python3 -m venv "$RUNNER_TEMP/apksigcopier-venv"
-          "$RUNNER_TEMP/apksigcopier-venv/bin/pip" install --quiet apksigcopier==1.1.1
+          "$RUNNER_TEMP/apksigcopier-venv/bin/pip" install --quiet \
+            --require-hashes -r .github/requirements-apksigcopier.txt
           "$RUNNER_TEMP/apksigcopier-venv/bin/apksigcopier" compare "$signed" --unsigned "$repro"
-          echo "Published APK grafts onto the independent rebuild — F-Droid-verifiable"
+          echo "Published APK is signed by the upload key and grafts onto the independent rebuild"
 
       - name: Generate SHA256SUMS
         run: |
@@ -834,7 +846,7 @@ jobs:
         # Signs Sigstore provenance (SLSA) for every released binary artifact.
         # Users verify with:
         #   gh attestation verify <file> --owner mp0rta
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
         with:
           subject-path: |
             artifacts/mqvpn_*.tar.gz

@@ -1,0 +1,12 @@
+# Pinned, hash-locked toolchain for the release-time reproducibility check.
+# apksigcopier is what fdroidserver uses to graft a signature onto a rebuild
+# and byte-compare; it is the only thing standing between a non-reproducible
+# build and a published release, so resolve it deterministically rather than
+# letting pip pick whatever is current.
+#
+# Regenerate after a version bump:
+#   pip download apksigcopier==<ver> -d /tmp/dl && sha256sum /tmp/dl/*
+apksigcopier==1.1.1 \
+    --hash=sha256:0834bb7d6f3607bb0994cf8cd2e26b8f0c9d481e13b75872e0fa9cec052e519b
+click==8.4.2 \
+    --hash=sha256:e6f9f66136c816745b9d65817da91d61d957fb16e02e4dcd0552553c5a197b76

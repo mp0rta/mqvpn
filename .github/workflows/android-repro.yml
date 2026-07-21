@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           submodules: recursive
 
@@ -80,13 +80,13 @@ jobs:
           cd "$BSSL_DIR" && git checkout ${{ env.BORINGSSL_COMMIT }}
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
         with:
           distribution: temurin
           java-version: '21'
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6
         with:
           # Used for wrapper validation only. Caching is disabled because each
           # build below runs against its own GRADLE_USER_HOME — a shared one
@@ -140,7 +140,7 @@ jobs:
         # release.yml compares this independently rebuilt APK against the one
         # it is about to publish, so the gate covers the shipped artifact and
         # not just two builds on this runner.
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: repro-android
           path: ${{ runner.temp }}/repro-unsigned.apk
