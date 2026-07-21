@@ -153,10 +153,14 @@ mqvpn_tcp_lane_new(const mqvpn_hybrid_config_t *cfg, uint64_t hash_seed, void *c
     /* Pool-coupling clamp: the lane's cap check below (on_syn) is the
      * documented enforcement point — reject → tcp_abort (RST), never a
      * silent hang — but it is only reachable while lwIP can still allocate
-     * pcbs. MEMP_NUM_TCP_PCB backs tracked flows PLUS TIME_WAIT/half-open
-     * pcbs the table no longer (or does not yet) count, so a cap above
-     * pool/2 lets tcp_alloc() start failing inbound SYNs (no callback, no
-     * RST — the inner connection just hangs) before the cap ever fires.
+     * pcbs. MEMP_NUM_TCP_PCB backs tracked flows PLUS the pcbs the table has
+     * stopped counting: TIME_WAIT, LAST_ACK and CLOSING, which outlive the
+     * mark_closing decrement below. (Half-open pcbs are NOT in that set —
+     * on_syn runs before lwIP sees the SYN and has already counted the flow
+     * by the time the SYN_RCVD pcb exists.) lwIP reclaims TIME_WAIT under
+     * allocation pressure (tcp_alloc, tcp.c), but not the rest, so a cap
+     * above pool/2 lets tcp_alloc() start failing inbound SYNs (no callback,
+     * no RST — the inner connection just hangs) before the cap ever fires.
      * The bound is per build profile (lwip_port/mqvpn_lwip_profile.h):
      * desktop/router 8192/2 = 4096, Android 512/2 = 256, iOS 128/2 = 64.
      * It matters most on the iOS profile, where the pool sits BELOW the

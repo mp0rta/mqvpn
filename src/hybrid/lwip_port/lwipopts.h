@@ -116,8 +116,9 @@
  * cap — the hybrid.tcp_max_flows check in tcp_lane.c is the real
  * enforcement point (spec: on reject → tcp_abort, do NOT silently fall to
  * RAW). To keep that check reachable, mqvpn_tcp_lane_new clamps
- * tcp_max_flows to MEMP_NUM_TCP_PCB / 2 (the other half backs
- * TIME_WAIT/half-open pcbs the flow table doesn't count), so the pool is
+ * tcp_max_flows to MEMP_NUM_TCP_PCB / 2 (the other half backs the
+ * TIME_WAIT/LAST_ACK/CLOSING pcbs the flow table has stopped counting —
+ * see the clamp comment in tcp_lane.c), so the pool is
  * what sets each profile's honored ceiling: desktop/router 8192/2 = 4096,
  * Android 512/2 = 256 == the config default, iOS 128/2 = 64. A cap above
  * the clamp would let tcp_alloc() start failing SYNs (silent hang, no RST)

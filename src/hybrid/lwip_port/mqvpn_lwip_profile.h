@@ -23,6 +23,19 @@
 #ifndef MQVPN_LWIP_PROFILE_H
 #define MQVPN_LWIP_PROFILE_H
 
+/* Tripwire for the pre-rename spelling. Deliberately an #error rather than a
+ * compatibility alias: silently accepting the old name would keep the
+ * ambiguous "mobile" spelling alive, and silently IGNORING it is worse still —
+ * an iOS Network Extension build that still passes -DMQVPN_LWIP_MOBILE_PROFILE
+ * would fall through to the desktop/router branch and get 2 MiB windows with an
+ * 8192-pcb pool, blowing the NE memory ceiling at runtime instead of failing at
+ * build time. Every in-tree caller was renamed with the macro; this only fires
+ * for an out-of-tree build script. */
+#if defined(MQVPN_LWIP_MOBILE_PROFILE) || defined(MQVPN_LWIP_MOBILE_RCV_SCALE)
+#  error \
+      "MQVPN_LWIP_MOBILE_{PROFILE,RCV_SCALE} were renamed to MQVPN_LWIP_IOS_{PROFILE,RCV_SCALE}"
+#endif
+
 #ifdef MQVPN_LWIP_IOS_PROFILE
 #  ifndef MQVPN_LWIP_IOS_RCV_SCALE
 #    define MQVPN_LWIP_IOS_RCV_SCALE 2

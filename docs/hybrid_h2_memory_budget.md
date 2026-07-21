@@ -128,6 +128,16 @@ directions with its full window outstanding, which no realistic traffic mix reac
 router's flow table is dominated by idle and short flows, each costing the ~200 B control
 block plus whatever is actually in flight).
 
+**CPU, not memory, is likely the first wall.** lwIP demultiplexes every inbound
+segment by walking `tcp_active_pcbs` linearly (`tcp_input`, `third_party/lwip/src/core/tcp_in.c`)
+— there is no hash. The list is move-to-front, so a workload where a few flows carry most
+packets stays cheap, but cost scales with the number of *concurrently active* flows: at
+4096 the average walk is ~16× the old 256-flow ceiling. A router genuinely running
+thousands of simultaneously busy inner flows can saturate a core on demultiplexing alone,
+before either the flow cap or the memory bound is reached. Like the memory figure, this
+scales with real concurrency and not with the configured cap — raising the cap costs
+nothing until the flows actually exist.
+
 Two things follow for operators raising the cap:
 
 - The honest planning figure is the *expected* concurrent-saturated flow count, not the
@@ -306,7 +316,11 @@ isolation (the shipped profile, §5c, applies both together):
 - **`PBUF_POOL_SIZE` = 256 remains statically reserved** (≈ 2.3 MiB) despite being unused on
   the data path in this build (§1a). Shrinking it to a minimal placeholder or 0 is a
   tightening candidate.
-- **`MEMP_NUM_TCP_SEG` (2048, global) can bottleneck before `tcp_max_flows` (256).** Under a
-  bursty workload only ≈ 2 flows can be simultaneously saturated at `TCP_SND_BUF` before the
-  shared segment pool is exhausted, after which `tcp_write` backpressure — not a config cap —
-  limits further flows from fully using their send buffer concurrently.
+- **`MEMP_NUM_TCP_SEG` (global) can bottleneck before `tcp_max_flows`.** Under a bursty
+  workload only ≈ 8 flows on desktop/router (8192 segments) or ≈ 2 on Android (2048) can be
+  simultaneously saturated at `TCP_SND_BUF` before the shared segment pool is exhausted,
+  after which `tcp_write` backpressure — not a config cap — limits further flows from fully
+  using their send buffer concurrently.
+- **Inbound demultiplexing is O(active flows)** — lwIP's `tcp_input` scans `tcp_active_pcbs`
+  linearly with no hash. See §3a: this is the practical scaling wall at high flow counts,
+  ahead of both the memory bound and the flow cap.
