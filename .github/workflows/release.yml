@@ -5,8 +5,13 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# Read-only by default; publish-release declares the write scopes it needs.
+# The build jobs run third-party code (Gradle plugins, native build scripts)
+# while actions/checkout keeps the job credential on disk, so they must not
+# hold a token that could create or edit a release and thereby sidestep the
+# reproducibility gate publish-release depends on.
 permissions:
-  contents: write
+  contents: read
 
 env:
   WINTUN_VER: "0.14.1"
@@ -730,6 +735,10 @@ jobs:
         # reach. Runs even on failure.
         if: always()
         run: |
+          # Remove the decode target unconditionally, not just the exported
+          # path: a preflight failure aborts before that variable is set and
+          # would otherwise leave the keystore on disk.
+          rm -f "$RUNNER_TEMP/release.jks"
           if [ -n "${MQVPN_KEYSTORE_PATH:-}" ]; then rm -f "$MQVPN_KEYSTORE_PATH"; fi
           {
             echo "MQVPN_KEYSTORE_PATH="
