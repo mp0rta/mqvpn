@@ -34,8 +34,8 @@ Sections 1–4 below describe the **desktop/router** profile unless stated other
 | Constant | Source | Value | Note |
 |---|---|---|---|
 | `TCP_MSS` | lwipopts.h | 8960 B | 9000-byte MTU ceiling − 40 (IP+TCP headers); compile-time upper bound, no per-pcb override in the vendored tree |
-| `TCP_RCV_SCALE` | lwipopts.h | 5 | window-scale shift; `TCP_WND` below is the already-scaled effective window, not the 16-bit wire value |
-| `TCP_WND` | lwipopts.h | `65535 << 5` = 2,097,120 B (≈ 2.00 MiB) | dominant per-flow bound — worst-case receive-side bytes a pcb may hold once already ACKed on the wire |
+| `TCP_RCV_SCALE` | mqvpn_lwip_profile.h | 3 (`MQVPN_LWIP_RCV_SCALE`) | window-scale shift; `TCP_WND` below is the already-scaled effective window, not the 16-bit wire value. Was 5 (2 MiB) through v0.13.0 — cut on router-topology measurement, §5d |
+| `TCP_WND` | lwipopts.h | `65535 << 3` = 524,280 B (≈ 512 KiB) | dominant per-flow bound — worst-case receive-side bytes a pcb may hold once already ACKed on the wire |
 | `TCP_SND_BUF` | lwipopts.h | 2 × 1024 × 1024 = 2,097,152 B (2 MiB) | per-flow send-buffer bound (`tcp_write` returns `ERR_MEM` above this) |
 | `TCP_SNDLOWAT` | lwipopts.h | `TCP_MSS` = 8960 B | inert (netconn/socket-only field, both compiled out); pinned only to satisfy init.c's sanity check |
 | `TCP_SND_QUEUELEN` | lwipopts.h | `(4×TCP_SND_BUF + TCP_MSS−1) / TCP_MSS` = 937 segments | per-pcb segment cap |
@@ -75,7 +75,7 @@ ACKed on the wire; they cannot be dropped and must be queued whenever xquic will
 accept them. Withholding `tcp_recved()` only stops the receive window from re-opening —
 the peer may still fill whatever window was already advertised.
 
-The worst-case per-flow queue is therefore larger than `TCP_WND` (~2 MiB). In the
+The worst-case per-flow queue is therefore larger than `TCP_WND` (512 KiB). In the
 `PENDING_STREAM` case (the H3 CONNECT-TCP stream is not yet open and uplink bytes are
 queued pending the 2xx gate), `tcp_lane_uplink_deliver` grants `tcp_recved()` for bytes
 below `MQVPN_TCP_LANE_BP_HIGH_WATER` (256 KiB) while withholding the rest, re-opening the
@@ -104,12 +104,12 @@ fully queued, one downlink chunk stashed awaiting a `tcp_write` retry, plus the 
 control block.
 
 ```
-TCP_WND (2,097,120 B) + 256 KiB re-open (262,144 B) + TCP_SND_BUF (2,097,152 B)
+TCP_WND (524,280 B) + 256 KiB re-open (262,144 B) + TCP_SND_BUF (2,097,152 B)
   + downlink stash (TCP_MSS, 8,960 B) + mqvpn_tcp_flow_t (200 B)
-  = 4,465,576 B ≈ 4.47 MB
+  = 2,892,736 B ≈ 2.89 MB
 ```
 
-Use **≈ 4.5 MB** as the worst case for *one* flow. **Do not multiply it by the flow count**
+Use **≈ 2.9 MB** as the worst case for *one* flow. **Do not multiply it by the flow count**
 — the send-buffer term is not independently reachable per flow. `TCP_SND_BUF` is drained
 through the *global* `MEMP_NUM_TCP_SEG` pool, and `TCP_SND_QUEUELEN` caps one pcb at 937
 segments, so only ⌊8192/937⌋ ≈ 8 flows can hold a full send queue simultaneously on
@@ -120,20 +120,20 @@ desktop/router. The send side therefore contributes an aggregate ceiling of
 What *does* scale per flow is the uplink queue, which is lane-owned and heap-backed:
 
 ```
-TCP_WND (2,097,120 B) + PENDING_STREAM high-water (262,144 B) = 2,359,264 B ≈ 2.25 MiB
+TCP_WND (524,280 B) + PENDING_STREAM high-water (262,144 B) = 786,424 B ≈ 0.75 MiB
 ```
 
 Aggregate worst case is that term times the flow count, plus the flat send-side ceiling:
 
 ```
-256  × 2,359,264 B =   603,971,584 B ≈ 576 MiB  (+ ≤73 MB send side)
-4096 × 2,359,264 B = 9,663,545,344 B ≈ 9.0 GiB  (+ ≤73 MB send side)
+256  ×   786,424 B =   201,324,544 B ≈ 192 MiB  (+ ≤73 MB send side)
+4096 ×   786,424 B = 3,221,192,704 B ≈ 3.0 GiB  (+ ≤73 MB send side)
 ```
 
 ### 3a. Raising `TcpMaxFlows` toward the desktop/router ceiling
 
 The per-flow uplink term does not shrink as the cap grows, so the aggregate worst case
-scales linearly with it — at the 4096 ceiling (§0) it is ≈ 9.0 GiB (§3). That is a bound,
+scales linearly with it — at the 4096 ceiling (§0) it is ≈ 3.0 GiB (§3). That is a bound,
 not a forecast: it assumes all 4096 flows are simultaneously backpressured with a full
 window outstanding, which no realistic traffic mix reaches (a router's flow table is
 dominated by idle and short flows, each costing the ~200 B control block plus whatever is
@@ -143,10 +143,11 @@ actually in flight).
 they do. iOS caps at 64 flows to fit a ~50 MB Network Extension ceiling; its per-flow
 uplink term is `TCP_WND` (262,140) + high-water (`TCP_WND`/2 = 131,070) = 393,210 B, so
 64 flows ≈ 24 MiB — comfortably inside that ceiling (§5c). Desktop/router is 64× the flow
-count *and* 6× the per-flow term (2,359,264 / 393,210, from the 8× wider window against a
-2× smaller relative high-water), i.e. 384× the iOS total: 24 MiB × 384 = 9.0 GiB. The
-factor is 384, not 64, because raising the flow ceiling and the window sizing are
-independent axes (§0) — which is also why window sizing, not the cap, is the lever below.
+count *and* 2× the per-flow term (786,424 / 393,210, from the 2× wider window against a
+2× smaller relative high-water), i.e. 128× the iOS total: 24 MiB × 128 = 3.0 GiB. The
+factor is 128, not 64, because the flow ceiling and the window sizing are independent
+axes (§0). The two still differ on both, but far less than when desktop/router ran a
+2 MiB window — that gap is what §5d closed.
 
 **CPU, not memory, is likely the first wall.** lwIP demultiplexes every inbound
 segment by walking `tcp_active_pcbs` linearly (`tcp_input`, `third_party/lwip/src/core/tcp_in.c`)
@@ -165,7 +166,7 @@ budget unnecessary — so there deliberately is none. The largest per-flow term 
 queue:
 `tcp_lane_uplink_deliver` takes ownership of each received pbuf and tracks it exactly in
 `uplink_queued_bytes` (`src/hybrid/tcp_lane_uplink.c`), reaching `TCP_WND` plus the
-`PENDING_STREAM` high-water — ~2.25 MiB — for a flow whose H3 stream is backpressured. The
+`PENDING_STREAM` high-water — ~0.75 MiB — for a flow whose H3 stream is backpressured. The
 flow cap bounds how many flows can be in that state, and it is a *true* bound rather than
 an approximate one:
 
@@ -179,13 +180,17 @@ an approximate one:
   frees the queue outright. So a marker never holds uplink bytes.
 
 The operator rule is therefore just arithmetic on one knob: **the client-side worst case is
-`TcpMaxFlows` × ~2.25 MiB** (≈ 9.0 GiB at 4096, ≈ 576 MiB at 256). Size the cap from the
+`TcpMaxFlows` × ~0.75 MiB** (≈ 3.0 GiB at 4096, ≈ 192 MiB at 256). Size the cap from the
 box's RAM. Note this is the *client* knob — `TcpMaxGlobalFlows` is server-only and bounds
 the server's egress fd budget, not this lane's memory.
 
 - The honest planning figure is the *expected* concurrent-backpressured flow count, not the
   cap; the cap is the ceiling that keeps the worst case finite.
-- If the bound itself needs to come down, the lever is the window sizing, not the cap.
+- The window sizing has already been taken as far as measurement supports (§5d): 512 KiB,
+  down from the 2 MiB shipped through v0.13.0, which is what makes 4096 cost ≈ 3.0 GiB
+  instead of ≈ 9.0 GiB. Going lower needs the watermarks derived from `TCP_WND` the way
+  the iOS profile does — the non-iOS `BP_HIGH_WATER` is a fixed 256 KiB, and a scale below
+  3 would put it at or above `TCP_WND` (compile-time guarded in mqvpn_lwip_profile.h).
   §5a measured `TCP_WND` down to 64 KiB with no aggregate goodput loss on this
   architecture — the lwIP hop is device-internal, so its window is not covering WAN
   bytes-in-flight. A build with a smaller `TCP_RCV_SCALE` cuts the dominant per-flow term
@@ -208,9 +213,46 @@ per active flow:
 | Hash bucket array (8192 buckets) | 64 KiB | tcp_lane.c `mqvpn_tcp_lane_new` |
 
 Total fixed overhead ≈ 6.8 MB worst case on desktop/router (≈ 4.2 MB on Android), small
-next to the ~576 MiB flow-table cost at 256 concurrent flows (§3). Only the two lwIP pools grew
+next to the ~192 MiB flow-table cost at 256 concurrent flows (§3). Only the two lwIP pools grew
 with the raised ceiling — the marker tables and hash buckets were already sized for 4096
 entries and are unchanged (§1).
+
+### 5d. Router-topology window measurement (desktop/router scale 5 → 3)
+
+§5a retired the window-shrink goodput caveat, but scoped the retirement to a topology
+where the inner TCP peer sits on the *same device* as lwIP. A router breaks that: the
+inner peer is a separate LAN machine, so the window has to cover a real LAN
+bandwidth-delay product. Every pre-existing sweep inherited the same-device shape
+(`bench_env_setup.sh` runs iperf3 inside `NS_CLIENT`), so the desktop/router window could
+not be sized from them without applying §5a outside its stated scope.
+
+`benchmarks/bench_router_window.sh` builds the missing shape — a `bench-lan` netns behind
+a forwarding, MASQUERADE-ing router — and sweeps `MQVPN_LWIP_RCV_SCALE`. Run
+2026-07-22, WAN legs at the harness default (300 Mbit/10 ms + 80 Mbit/30 ms, ≈ 350 Mbps
+aggregate in practice), 3 reps × {P=1, P=8} per cell:
+
+| LAN hop | P | s5 (2 MiB) | s4 (1 MiB) | s3 (512 KiB) |
+|---|---|---|---|---|
+| 0.5 ms/leg | 1 | 334.0 Mbps | 324.2 (−2.9 %) | 321.9 (−3.6 %) |
+| 0.5 ms/leg | 8 | 355.1 Mbps | 352.1 (−0.8 %) | 353.5 (−0.5 %) |
+| 4 ms/leg | 1 | 335.7 Mbps | 342.3 (+2.0 %) | 337.0 (+0.4 %) |
+| 4 ms/leg | 8 | 352.2 Mbps | 355.1 (+0.8 %) | 354.4 (+0.6 %) |
+
+Worst cell −3.6 % against a −5 % gate → scale 3 adopted. Two caveats worth stating
+plainly rather than burying:
+
+- **The window was never the binding constraint in this run.** The WAN capped throughput
+  at ≈ 350 Mbps, putting the LAN BDP at 43 KiB (1 ms RTT) and 342 KiB (8 ms RTT) against
+  a 512 KiB window. The run therefore shows *"512 KiB is not limiting for a realistic
+  router LAN"*, not *"512 KiB is the boundary"*. The boundary is arithmetic:
+  `window / RTT` caps a single inner flow at **4.2 Gbit/s over a 1 ms LAN**, 0.52 Gbit/s
+  over an (unrealistic for a LAN) 8 ms one.
+- **The −3.6 % cell is not a window effect.** It appears at the *low*-RTT LAN, where the
+  BDP is 43 KiB — twelve times inside the window. A genuine window-BDP limit has to get
+  worse as RTT grows; this one reverses sign (+0.4 %) at 8× the RTT. Ordering or CC
+  variance is the likelier cause, and it stays inside the gate either way.
+
+Raw data: `bench_results/router_window/`.
 
 ## 5. iOS profile (Network Extension, 50 MB)
 
@@ -293,13 +335,13 @@ Shipped constants for `MQVPN_LWIP_IOS_PROFILE` at the default scale (2) and
 
 | Constant | Source | Value (scale 2) | Note |
 |---|---|---|---|
-| `TCP_RCV_SCALE` (`MQVPN_LWIP_IOS_RCV_SCALE`) | lwipopts.h | 2 (default) | down from 5 |
+| `TCP_RCV_SCALE` (`MQVPN_LWIP_IOS_RCV_SCALE`) | lwipopts.h | 2 (default) | down from the non-iOS 3 (which was itself 5 through v0.13.0) |
 | `TCP_WND` | lwipopts.h | `65535 << 2` = 262,140 B (≈256 KiB) | shared derivation (§1) at iOS scale |
 | `TCP_SND_BUF` | lwipopts.h | `65536 << 2` = 262,144 B (256 KiB) | down from 2 MiB |
 | `MEMP_NUM_TCP_PCB` | mqvpn_lwip_profile.h | 128 (`tcp_max_flows`=64 + headroom) | down from 8192 desktop/router, 512 Android |
 | `MEMP_NUM_TCP_SEG` | mqvpn_lwip_profile.h | 512, shared send+OOSEQ pool | down from 8192 desktop/router, 2048 Android |
 | `PBUF_POOL_SIZE` | lwipopts.h | 32 (power-of-2 ladder off `TCP_WND`) | down from 256 |
-| `MQVPN_TCP_LANE_BP_HIGH_WATER` | tcp_lane.h | `TCP_WND`/2 ≈ 131,070 B | down from 256 KiB |
+| `MQVPN_TCP_LANE_BP_HIGH_WATER` | tcp_lane.h | `TCP_WND`/2 ≈ 131,070 B | down from the fixed 256 KiB |
 | `MQVPN_TCP_LANE_BP_LOW_WATER` | tcp_lane.h | `TCP_WND`/8 ≈ 32,767 B | down from 64 KiB |
 | `TCP_LANE_RAW_MARKER_CAP` / `TCP_LANE_CLOSING_CAP` | tcp_lane.h | 256 each | down from 4096 each |
 

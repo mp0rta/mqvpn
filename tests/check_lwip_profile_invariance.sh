@@ -28,7 +28,7 @@ check() {
 }
 
 check "desktop/router" "" <<'PINS'
-#define MQVPN_LWIP_RCV_SCALE 5
+#define MQVPN_LWIP_RCV_SCALE 3
 #define TCP_RCV_SCALE MQVPN_LWIP_RCV_SCALE
 #define MQVPN_LWIP_TCP_PCB_POOL 8192
 #define MQVPN_LWIP_TCP_SEG_POOL 8192
@@ -40,7 +40,7 @@ PINS
 
 # Android keeps the pre-v0.14 pools (flow ceiling 256) but the desktop windows.
 check "Android" "-D__ANDROID__" <<'PINS'
-#define MQVPN_LWIP_RCV_SCALE 5
+#define MQVPN_LWIP_RCV_SCALE 3
 #define TCP_RCV_SCALE MQVPN_LWIP_RCV_SCALE
 #define MQVPN_LWIP_TCP_PCB_POOL 512
 #define MQVPN_LWIP_TCP_SEG_POOL 2048
