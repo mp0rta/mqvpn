@@ -288,8 +288,8 @@ Window sweep, hybrid-on aggregate throughput (mean of 2 schedulers × 5 path-cou
 
 | `TCP_WND` @ scale | Config A (symmetric, 60 ms/leg) | Config B (asymmetric, 15/80 ms per leg) |
 |---|---|---|
-| ref, 2 MiB (scale 5 — current desktop/router default) | 186.7 Mbps | 186.6 Mbps |
-| 512 KiB (scale 3) | 186.5 Mbps | 186.4 Mbps |
+| ref, 2 MiB (scale 5 — the desktop/router default at the time; now 3, see §5d) | 186.7 Mbps | 186.6 Mbps |
+| 512 KiB (scale 3 — now the desktop/router default) | 186.5 Mbps | 186.4 Mbps |
 | 256 KiB (scale 2 — iOS default) | 187.0 Mbps | 186.4 Mbps |
 | 64 KiB (scale 0) | 186.9 Mbps | 186.9 Mbps |
 
