@@ -5,6 +5,15 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# Actions in this workflow — and in android-repro.yml, which it calls — are
+# pinned to commit SHAs with the version in a trailing comment; ci.yml
+# deliberately stays on tags. The line is what the job produces, not who
+# publishes an action: everything here ends up in artifacts we ship to users
+# and vouch for with a provenance attestation, so a moved tag would put
+# unreviewed code inside a signed, attested release. CI output is discarded,
+# so the same risk is not there. Keep new actions in this workflow pinned;
+# dependabot updates the SHAs and keeps the comment in step.
+
 # Read-only by default; publish-release declares the write scopes it needs.
 # The build jobs run third-party code (Gradle plugins, native build scripts)
 # while actions/checkout keeps the job credential on disk, so they must not
