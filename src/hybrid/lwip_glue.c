@@ -30,11 +30,24 @@
  * tests/check_profile_propagation.py — invoked by ios/build-ios.sh and
  * the iOS-profile CI step against the build's compile_commands.json —
  * not here: an unpropagated TU takes the default branch and passes.) */
+/* The MEMP_NUM_TCP_PCB / 2 pins below are the honored hybrid.TcpMaxFlows
+ * ceiling (tcp_lane.c's pool-coupling clamp) stated per profile, so a pool
+ * edit that silently moves the configurable flow cap fails the build.
+ * tests/check_lwip_profile_invariance.sh pins the same values by
+ * preprocessing all three profiles from source; this assert is what covers
+ * the Android branch under the REAL NDK toolchain, where __ANDROID__ comes
+ * from the compiler rather than the test's simulated -D. */
 #ifdef MQVPN_LWIP_IOS_PROFILE
 _Static_assert(TCP_WND == (65535 << MQVPN_LWIP_IOS_RCV_SCALE),
                "iOS profile: TCP_WND derivation drifted");
+_Static_assert(MEMP_NUM_TCP_PCB / 2 == 64, "iOS profile: flow ceiling drifted");
+#elif defined(__ANDROID__)
+_Static_assert(TCP_WND == (65535 << 5), "Android profile: TCP_WND drifted");
+_Static_assert(MEMP_NUM_TCP_PCB / 2 == 256, "Android profile: flow ceiling drifted");
 #else
-_Static_assert(TCP_WND == (65535 << 5), "default profile: TCP_WND drifted");
+_Static_assert(TCP_WND == (65535 << 5), "desktop/router profile: TCP_WND drifted");
+_Static_assert(MEMP_NUM_TCP_PCB / 2 == 4096,
+               "desktop/router profile: flow ceiling drifted");
 #endif
 
 /* Upper bound for one lwIP-emitted IP packet — a true invariant via two

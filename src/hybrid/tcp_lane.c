@@ -157,10 +157,13 @@ mqvpn_tcp_lane_new(const mqvpn_hybrid_config_t *cfg, uint64_t hash_seed, void *c
      * pcbs the table no longer (or does not yet) count, so a cap above
      * pool/2 lets tcp_alloc() start failing inbound SYNs (no callback, no
      * RST — the inner connection just hangs) before the cap ever fires.
-     * Matters on the iOS profile, where the pool (128) sits BELOW the
-     * library's default tcp_max_flows (256); on the default profile the
-     * bound (512/2 = 256) equals the DEFAULT value, so only explicitly
-     * configured values above it are (deliberately) clamped — the caller
+     * The bound is per build profile (lwip_port/mqvpn_lwip_profile.h):
+     * desktop/router 8192/2 = 4096, Android 512/2 = 256, iOS 128/2 = 64.
+     * It matters most on the iOS profile, where the pool sits BELOW the
+     * library's default tcp_max_flows (256) and every default config is
+     * clamped; on Android the bound equals that default, and on
+     * desktop/router it sits well above it, so there only explicitly
+     * configured values beyond 4096 are (deliberately) clamped — the caller
      * can compare mqvpn_tcp_lane_effective_max_flows() against its
      * configured value to surface that. */
     if (lane->cfg.tcp_max_flows > MEMP_NUM_TCP_PCB / 2) {
@@ -173,7 +176,9 @@ mqvpn_tcp_lane_new(const mqvpn_hybrid_config_t *cfg, uint64_t hash_seed, void *c
     /* Size for BOTH populations sharing the table: up to tcp_max_flows
      * TCP-lane flows plus up to TCP_LANE_RAW_MARKER_CAP sticky-RAW markers
      * (which are exactly what accumulates in the tcp=auto single-path hot
-     * case). Defaults: 256 + 4096 → 8192 buckets = 64 KB of pointers.
+     * case). Defaults: 256 + 4096 → 8192 buckets = 64 KB of pointers; the
+     * desktop/router maximum (4096 + 4096) lands on the same 8192 buckets,
+     * so raising the flow cap costs nothing here.
      * MUST read the CLAMPED lane->cfg value, not the caller's cfg: sizing
      * from the raw input would let a huge configured value allocate the
      * 2^20-bucket cap (8 MB of pointers — a real dent in the NE memory

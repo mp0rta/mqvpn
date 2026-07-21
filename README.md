@@ -315,7 +315,7 @@ classifier (per packet: protocol + Tcp mode + tunnel-subnet carve-out)
 [Hybrid]
 Enabled = true
 Tcp = auto              # stream | raw | auto (per-flow: TCP lane once >=2 paths are active)
-TcpMaxFlows = 256        # concurrent TCP-lane flow cap (client) / per-session cap (server)
+TcpMaxFlows = 256        # concurrent TCP-lane flow cap (client, up to 4096) / per-session cap (server)
 EgressAllow = 10.0.5.0/24  # server: punch a hole through the default-deny egress ACL
 ```
 

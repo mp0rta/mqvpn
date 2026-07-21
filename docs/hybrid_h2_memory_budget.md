@@ -4,6 +4,31 @@ Per-flow and aggregate memory cost of the hybrid TCP lane
 (`src/hybrid/lwip_port/lwipopts.h`, `src/hybrid/tcp_lane.{h,c}`), derived from the
 constants compiled into the current tree.
 
+## 0. Build profiles at a glance
+
+Pool sizing is a three-way split selected in
+`src/hybrid/lwip_port/mqvpn_lwip_profile.h`; window sizing is a separate two-way
+(iOS vs. rest) split in `lwipopts.h`. The pcb pool is what bounds the honored
+`hybrid.TcpMaxFlows`, because `mqvpn_tcp_lane_new` clamps it to
+`MEMP_NUM_TCP_PCB / 2` (§2).
+
+| Profile | Selected by | `MEMP_NUM_TCP_PCB` | `MEMP_NUM_TCP_SEG` | Honored `TcpMaxFlows` ceiling |
+|---|---|---|---|---|
+| desktop / router (Linux, Windows, macOS) | default | 8192 | 8192 | 4096 |
+| Android | `__ANDROID__` toolchain predefine | 512 | 2048 | 256 |
+| iOS NE | `MQVPN_LWIP_IOS_PROFILE` CMake option | 128 | 512 | 64 |
+
+The **config default stays 256 on every profile** — the ceiling only bounds what an
+operator may configure upward. The desktop/router ceiling was 256 through v0.13.0;
+it was raised because the OpenMPTCProuter integration aggregates a whole LAN behind
+one tunnel, where 256 concurrent inner TCP flows is a real limit. Android keeps the
+older pools deliberately: a handset multiplexes far fewer inner flows, and the pools
+are `.bss` touched at `lwip_init()`, so the larger pcb pool would be resident cost
+with no matching demand.
+
+Sections 1–4 below describe the **desktop/router** profile unless stated otherwise;
+§5c gives the iOS-profile table. Android differs from §1 only in the two pool rows.
+
 ## 1. Current defaults
 
 | Constant | Source | Value | Note |
@@ -14,13 +39,13 @@ constants compiled into the current tree.
 | `TCP_SND_BUF` | lwipopts.h | 2 × 1024 × 1024 = 2,097,152 B (2 MiB) | per-flow send-buffer bound (`tcp_write` returns `ERR_MEM` above this) |
 | `TCP_SNDLOWAT` | lwipopts.h | `TCP_MSS` = 8960 B | inert (netconn/socket-only field, both compiled out); pinned only to satisfy init.c's sanity check |
 | `TCP_SND_QUEUELEN` | lwipopts.h | `(4×TCP_SND_BUF + TCP_MSS−1) / TCP_MSS` = 937 segments | per-pcb segment cap |
-| `MEMP_NUM_TCP_PCB` | lwipopts.h | 512 | lwIP-side hard cap, sized with headroom above the config default; not the real enforcement point (see §2) |
-| `MEMP_NUM_TCP_SEG` | lwipopts.h | 2048 | global pool shared by every flow; a single flow filling its 937-segment `TCP_SND_QUEUELEN` leaves room for only ≈ 2 flows to be simultaneously saturated. `tcp_write` returning `ERR_MEM` here is treated as backpressure by `tcp_lane.c`, not as an error |
+| `MEMP_NUM_TCP_PCB` | mqvpn_lwip_profile.h | 8192 (Android 512) | lwIP-side hard cap; sets the honored `TcpMaxFlows` ceiling at pool/2 = 4096, but is not the real enforcement point (see §2). ≈ 2.44 MiB of `.bss` at 312 B per `struct tcp_pcb` (LP64), faulted in only once a lane exists — `lwip_init()` runs lazily from `lwip_glue.c`, so hybrid-disabled builds pay nothing resident |
+| `MEMP_NUM_TCP_SEG` | mqvpn_lwip_profile.h | 8192 (Android 2048) | global pool shared by every flow (≈ 256 KiB of `.bss` at 32 B per `struct tcp_seg`); a single flow filling its 937-segment `TCP_SND_QUEUELEN` leaves room for only ≈ 8 flows to be simultaneously saturated. Tracks the pcb pool so a fully-occupied flow table still has segments per flow — at the old 2048 against a 4096-flow cap it could not hold even one segment per flow. `tcp_write` returning `ERR_MEM` here is treated as backpressure by `tcp_lane.c`, not as an error |
 | `PBUF_POOL_SIZE` | lwipopts.h | 256 | see §1a |
 | `PBUF_POOL_BUFSIZE` | lwipopts.h | `LWIP_MEM_ALIGN_SIZE(TCP_MSS + 40 + PBUF_LINK_ENCAPSULATION_HLEN)` ≈ 9000 B aligned | see §1a |
 | `TCP_LANE_RAW_MARKER_CAP` | tcp_lane.c | 4096 | sticky-RAW marker cap, compile-time (`#ifndef`-overridable for tests) |
 | `TCP_LANE_CLOSING_CAP` | tcp_lane.c | 4096 | post-close routing-marker cap, same shape as the RAW cap |
-| hash bucket array | tcp_lane.c `pick_buckets` | 8192 buckets × 8 B pointer = 64 KiB | sized from `tcp_max_flows + TCP_LANE_RAW_MARKER_CAP` (256 + 4096 → next pow2) |
+| hash bucket array | tcp_lane.c `pick_buckets` | 8192 buckets × 8 B pointer = 64 KiB | sized from `tcp_max_flows + TCP_LANE_RAW_MARKER_CAP` (256 + 4096 → next pow2). Unchanged at the 4096 ceiling: 4096 + 4096 lands on the same 8192 buckets, so raising the flow cap costs nothing here |
 | `MQVPN_TCP_LANE_BP_HIGH_WATER` | tcp_lane.h | 262,144 B (256 KiB) | see §2 — not the per-flow hard bound |
 | `MQVPN_TCP_LANE_BP_LOW_WATER` | tcp_lane.h | 65,536 B (64 KiB) | resume threshold, prevents withhold/resume flapping |
 
@@ -62,7 +87,10 @@ Config knobs, by when they take effect:
 
 - **`hybrid.TcpMaxFlows` (`tcp_max_flows`, session-config key)** — default 256. The real
   enforcement point, checked in `tcp_lane.c` before lwIP sees the SYN, rather than
-  `MEMP_NUM_TCP_PCB` (512, lwIP-side headroom).
+  `MEMP_NUM_TCP_PCB` (lwIP-side headroom). Configured values above `MEMP_NUM_TCP_PCB / 2`
+  are clamped to it at lane creation (§0) and the clamp is logged, so the honored value
+  is `min(configured, profile ceiling)` — raising it past the ceiling is silent-free but
+  ineffective.
 - **BP high/low water (compile-time, `tcp_lane.h`)** — internal constants, not exposed as
   config. Bound only the relay-stash portion of the uplink queue.
 - **`lwipopts.h` window sizing (compile-time)** — `TCP_WND` + `TCP_SND_BUF`, the dominant
@@ -91,6 +119,28 @@ default `tcp_max_flows = 256`:
 The window/send-buffer pair dominates aggregate memory; the marker tables and PBUF_POOL
 together are a few MB (§4) against roughly 1 GiB from the flow table.
 
+### 3a. Raising `TcpMaxFlows` toward the desktop/router ceiling
+
+The per-flow figure does not shrink as the cap grows, so the aggregate worst case scales
+linearly with it — at the 4096 ceiling (§0) it is ≈ 17 GiB. That number is a bound, not a
+forecast: it assumes every one of the 4096 flows is simultaneously saturated in **both**
+directions with its full window outstanding, which no realistic traffic mix reaches (a
+router's flow table is dominated by idle and short flows, each costing the ~200 B control
+block plus whatever is actually in flight).
+
+Two things follow for operators raising the cap:
+
+- The honest planning figure is the *expected* concurrent-saturated flow count, not the
+  cap. Size RAM against that, and treat the cap purely as an admission ceiling that
+  prevents unbounded growth.
+- If the bound itself needs to come down, the lever is the window sizing, not the cap.
+  §5a measured `TCP_WND` down to 64 KiB with no aggregate goodput loss on this
+  architecture — the lwIP hop is device-internal, so its window is not covering WAN
+  bytes-in-flight. A build with a smaller `TCP_RCV_SCALE` cuts the dominant per-flow term
+  roughly proportionally. That knob is currently exposed only through the iOS profile;
+  generalizing it to desktop/router builds is unimplemented, and is the natural follow-up
+  if high-flow-count deployments turn out to need it.
+
 ## 4. Fixed overhead (independent of concurrent flow count)
 
 Paid once per `mqvpn_tcp_lane_t` instance, or up to the stated cap in the worst case, not
@@ -98,13 +148,17 @@ per active flow:
 
 | Item | Worst-case size | Source |
 |---|---|---|
+| pcb pool (`MEMP_NUM_TCP_PCB`) | ≈ 2.44 MiB (8192 × 312 B; Android 512 → ≈ 156 KiB) | mqvpn_lwip_profile.h |
+| TCP segment pool (`MEMP_NUM_TCP_SEG`) | ≈ 256 KiB (8192 × 32 B; Android 2048 → ≈ 64 KiB) | mqvpn_lwip_profile.h |
 | PBUF_POOL static reservation | ≈ 2.3 MiB (unused on ingress, see §1a) | lwipopts.h |
 | Sticky-RAW marker table (cap 4096) | ≈ 0.82 MB (`mqvpn_tcp_flow_t` = 200 B each, measured on the dual-stack layout; the 38 B key field is counted within the 200 B) | `TCP_LANE_RAW_MARKER_CAP` |
 | CLOSING routing-marker table (cap 4096) | ≈ 0.82 MB, same shape (the downlink stash is freed at the CLOSING transition in `tcp_lane_mark_closing`, so a CLOSING entry never carries a live stash) | `TCP_LANE_CLOSING_CAP` |
 | Hash bucket array (8192 buckets) | 64 KiB | tcp_lane.c `mqvpn_tcp_lane_new` |
 
-Total fixed overhead ≈ 4.1 MB worst case, small next to the ~1 GiB flow-table cost at 256
-concurrent flows.
+Total fixed overhead ≈ 6.8 MB worst case on desktop/router (≈ 4.2 MB on Android), small
+next to the ~1 GiB flow-table cost at 256 concurrent flows. Only the two lwIP pools grew
+with the raised ceiling — the marker tables and hash buckets were already sized for 4096
+entries and are unchanged (§1).
 
 ## 5. iOS profile (Network Extension, 50 MB)
 
@@ -190,8 +244,8 @@ Shipped constants for `MQVPN_LWIP_IOS_PROFILE` at the default scale (2) and
 | `TCP_RCV_SCALE` (`MQVPN_LWIP_IOS_RCV_SCALE`) | lwipopts.h | 2 (default) | down from 5 |
 | `TCP_WND` | lwipopts.h | `65535 << 2` = 262,140 B (≈256 KiB) | shared derivation (§1) at iOS scale |
 | `TCP_SND_BUF` | lwipopts.h | `65536 << 2` = 262,144 B (256 KiB) | down from 2 MiB |
-| `MEMP_NUM_TCP_PCB` | lwipopts.h | 128 (`tcp_max_flows`=64 + headroom) | down from 512 |
-| `MEMP_NUM_TCP_SEG` | lwipopts.h | 512, shared send+OOSEQ pool | down from 2048 |
+| `MEMP_NUM_TCP_PCB` | mqvpn_lwip_profile.h | 128 (`tcp_max_flows`=64 + headroom) | down from 8192 desktop/router, 512 Android |
+| `MEMP_NUM_TCP_SEG` | mqvpn_lwip_profile.h | 512, shared send+OOSEQ pool | down from 8192 desktop/router, 2048 Android |
 | `PBUF_POOL_SIZE` | lwipopts.h | 32 (power-of-2 ladder off `TCP_WND`) | down from 256 |
 | `MQVPN_TCP_LANE_BP_HIGH_WATER` | tcp_lane.h | `TCP_WND`/2 ≈ 131,070 B | down from 256 KiB |
 | `MQVPN_TCP_LANE_BP_LOW_WATER` | tcp_lane.h | `TCP_WND`/8 ≈ 32,767 B | down from 64 KiB |
