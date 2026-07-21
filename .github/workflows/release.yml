@@ -20,8 +20,7 @@ env:
   # Keep in sync with ndkVersion in android/sdk-native/build.gradle.kts and
   # NDK_VERSION in android-repro.yml.
   NDK_VERSION: "28.2.13676358"
-  # SHA-256 fingerprint of the canonical mqvpn upload certificate. Keep in
-  # sync with verify-android-keystore.yml.
+  # SHA-256 fingerprint of the canonical mqvpn upload certificate (public).
   UPLOAD_CERT_SHA256: "F1:C5:D8:18:AE:C5:EA:4F:28:7B:44:CE:CC:1E:41:A0:AD:F2:B9:04:C8:EB:12:B3:41:F2:69:4F:BA:AB:B0:42"
 
 jobs:
@@ -648,8 +647,9 @@ jobs:
             if [ -z "$KEYSTORE_B64" ]; then
               # Never let an official tag release fall back to a throwaway key:
               # a wrongly-signed release breaks in-place updates permanently and
-              # fails F-Droid's reproducible-build verification. Verify secrets
-              # beforehand with the "Verify Android keystore secret" workflow.
+              # fails F-Droid's reproducible-build verification. Missing or
+              # wrong secrets fail this job before anything is signed; to
+              # rehearse the path, tag a pre-release (vX.Y.Z-rcN) and delete it.
               echo "::error::ANDROID_KEYSTORE_B64 secret missing on an official tag build"
               exit 1
             fi
@@ -673,6 +673,12 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
           KEYSTORE="$RUNNER_TEMP/release.jks"
+          # $GITHUB_ENV uses NAME=value lines, so a password containing a
+          # newline would be truncated or rejected further down. Say so here
+          # rather than failing obscurely mid-build after a key rotation.
+          case "$KEYSTORE_PASSWORD" in
+            *[$'\n\r']*) echo "::error::ANDROID_KEYSTORE_PASSWORD must not contain newlines"; exit 1 ;;
+          esac
           printf '%s' "$KEYSTORE_B64" | base64 -d > "$KEYSTORE"
           # Preflight: refuse to sign with anything but the canonical upload
           # key. Checks the alias holds a usable private key (certreq
@@ -823,10 +829,16 @@ jobs:
           # lowercase without separators; UPLOAD_CERT_SHA256 is in keytool's
           # colon-separated form.
           expected=$(printf '%s' "$UPLOAD_CERT_SHA256" | tr -d ':' | tr 'A-Z' 'a-z')
-          actual=$(apksigner verify --print-certs "$signed" \
-                   | sed -n 's/.*certificate SHA-256 digest: //p' | head -1)
-          [ "$actual" = "$expected" ] \
-            || { echo "::error::published APK signer mismatch: got ${actual:-none}"; exit 1; }
+          digests=$(apksigner verify --print-certs "$signed" \
+                    | sed -n 's/.*certificate SHA-256 digest: //p')
+          # Exactly one signer: an extra co-signer would still graft and still
+          # contain the canonical certificate, but it changes the app's signing
+          # identity and breaks upgrades for existing installs.
+          signers=$(printf '%s\n' "$digests" | grep -c . || true)
+          [ "$signers" = "1" ] \
+            || { echo "::error::expected exactly one APK signer, found $signers"; exit 1; }
+          [ "$digests" = "$expected" ] \
+            || { echo "::error::published APK signer mismatch: got ${digests:-none}"; exit 1; }
           python3 -m venv "$RUNNER_TEMP/apksigcopier-venv"
           "$RUNNER_TEMP/apksigcopier-venv/bin/pip" install --quiet \
             --require-hashes -r .github/requirements-apksigcopier.txt
