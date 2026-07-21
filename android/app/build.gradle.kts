@@ -13,8 +13,8 @@ android {
         applicationId = "org.mqvpn.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 29
-        versionName = "0.13.1"
+        versionCode = 30
+        versionName = "0.13.2"
         // arm64-v8a only: must match sdk-native's abiFilters. Adding ABIs here
         // without updating sdk-native produces APKs that crash with
         // UnsatisfiedLinkError on those ABIs (no .so packaged).
