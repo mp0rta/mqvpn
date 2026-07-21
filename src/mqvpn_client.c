@@ -263,6 +263,15 @@ struct mqvpn_client_s {
      * (typically a dead primary path) before xquic's 120s idle_time_out. */
     uint64_t handshake_started_us;
 
+    /* 0-RTT resumption */
+    char saved_sni[256];
+    unsigned char saved_token[256];
+    uint32_t saved_token_len;
+    char saved_session[8192];
+    size_t saved_session_len;
+    char saved_tp[8192];
+    size_t saved_tp_len;
+
     /* ICMP PTB rate limit */
     mqvpn_ptb_bucket_t ptb_bucket;
 
@@ -953,7 +962,7 @@ static int
 client_reconnect_delay_sec(const mqvpn_client_t *c)
 {
     int base = c->config.reconnect_interval_sec;
-    if (base <= 0) base = 5;
+    if (base <= 0) base = 1;
 
     int delay = base;
     for (int i = 0; i < c->reconnect_attempts && delay < RECONNECT_BACKOFF_MAX_SEC; i++)
@@ -1128,23 +1137,47 @@ cb_cert_verify(const unsigned char *certs[], const size_t cert_len[], size_t cer
 static void
 cb_save_token(const unsigned char *t, unsigned tl, void *u)
 {
-    (void)t;
-    (void)tl;
-    (void)u;
+    cli_conn_t *conn = u;
+    mqvpn_client_t *c = conn->client;
+    if (tl > sizeof(c->saved_token)) {
+        LOG_W(c, "0-RTT: token too large (%u bytes), discarding", tl);
+        c->saved_token_len = 0;
+        return;
+    }
+    memcpy(c->saved_token, t, tl);
+    c->saved_token_len = tl;
+    LOG_D(c, "0-RTT: saved token (%u bytes)", tl);
 }
 static void
 cb_save_session(const char *d, size_t dl, void *u)
 {
-    (void)d;
-    (void)dl;
-    (void)u;
+    cli_conn_t *conn = u;
+    mqvpn_client_t *c = conn->client;
+    if (dl > sizeof(c->saved_session)) {
+        LOG_W(c, "0-RTT: session ticket too large (%zu bytes), discarding", dl);
+        c->saved_session_len = 0;
+        return;
+    }
+    memcpy(c->saved_session, d, dl);
+    c->saved_session_len = dl;
+    const char *sni =
+        c->config.tls_server_name[0] ? c->config.tls_server_name : c->config.server_host;
+    snprintf(c->saved_sni, sizeof(c->saved_sni), "%s", sni);
+    LOG_D(c, "0-RTT: saved session ticket (%zu bytes)", dl);
 }
 static void
 cb_save_tp(const char *d, size_t dl, void *u)
 {
-    (void)d;
-    (void)dl;
-    (void)u;
+    cli_conn_t *conn = u;
+    mqvpn_client_t *c = conn->client;
+    if (dl > sizeof(c->saved_tp)) {
+        LOG_W(c, "0-RTT: transport params too large (%zu bytes), discarding", dl);
+        c->saved_tp_len = 0;
+        return;
+    }
+    memcpy(c->saved_tp, d, dl);
+    c->saved_tp_len = dl;
+    LOG_D(c, "0-RTT: saved transport params (%zu bytes)", dl);
 }
 
 /* ─── H3 connection callbacks ─── */
@@ -2615,9 +2648,20 @@ cli_start_connection(mqvpn_client_t *c)
     const char *sni =
         c->config.tls_server_name[0] ? c->config.tls_server_name : c->config.server_host;
 
-    const xqc_cid_t *cid =
-        xqc_h3_connect(c->engine, &cs, NULL, 0, sni, 0, &ssl_cfg,
-                       (struct sockaddr *)&c->server_addr, c->server_addrlen, conn);
+    int can_resume =
+        c->saved_session_len > 0 && c->saved_tp_len > 0 && strcmp(c->saved_sni, sni) == 0;
+    if (can_resume) {
+        ssl_cfg.session_ticket_data = c->saved_session;
+        ssl_cfg.session_ticket_len = c->saved_session_len;
+        ssl_cfg.transport_parameter_data = c->saved_tp;
+        ssl_cfg.transport_parameter_data_len = c->saved_tp_len;
+        LOG_I(c, "0-RTT: attempting resumption");
+    }
+
+    const xqc_cid_t *cid = xqc_h3_connect(
+        c->engine, &cs, can_resume && c->saved_token_len > 0 ? c->saved_token : NULL,
+        can_resume ? c->saved_token_len : 0, sni, 0, &ssl_cfg,
+        (struct sockaddr *)&c->server_addr, c->server_addrlen, conn);
     if (!cid) {
         LOG_E(c, "xqc_h3_connect failed");
         goto cleanup;
