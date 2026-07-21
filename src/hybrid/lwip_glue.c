@@ -42,10 +42,12 @@ _Static_assert(TCP_WND == (65535 << MQVPN_LWIP_IOS_RCV_SCALE),
                "iOS profile: TCP_WND derivation drifted");
 _Static_assert(MEMP_NUM_TCP_PCB / 2 == 64, "iOS profile: flow ceiling drifted");
 #elif defined(__ANDROID__)
-_Static_assert(TCP_WND == (65535 << 5), "Android profile: TCP_WND drifted");
+_Static_assert(TCP_WND == (65535 << MQVPN_LWIP_RCV_SCALE),
+               "Android profile: TCP_WND drifted");
 _Static_assert(MEMP_NUM_TCP_PCB / 2 == 256, "Android profile: flow ceiling drifted");
 #else
-_Static_assert(TCP_WND == (65535 << 5), "desktop/router profile: TCP_WND drifted");
+_Static_assert(TCP_WND == (65535 << MQVPN_LWIP_RCV_SCALE),
+               "desktop/router profile: TCP_WND drifted");
 _Static_assert(MEMP_NUM_TCP_PCB / 2 == 4096,
                "desktop/router profile: flow ceiling drifted");
 #endif

@@ -90,7 +90,7 @@
 #    define PBUF_POOL_SIZE 128
 #  endif
 #else
-#  define TCP_RCV_SCALE  5 /* shift count for the wire encoding, range [0..14] */
+#  define TCP_RCV_SCALE  MQVPN_LWIP_RCV_SCALE /* shift count, range [0..14] */
 #  define TCP_SND_BUF    (2 * 1024 * 1024)
 #  define PBUF_POOL_SIZE 256
 #endif

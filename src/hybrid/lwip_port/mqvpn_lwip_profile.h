@@ -70,4 +70,24 @@
 #  define MQVPN_LWIP_TCP_SEG_POOL 8192
 #endif
 
+/* Window scale for the NON-iOS side of the window axis (desktop/router AND
+ * Android — the window split is two-way, unlike the three-way pool split).
+ * Overridable so benchmarks/bench_router_window.sh can A/B it without
+ * patching the source; 5 (= 2 MiB TCP_WND) is the shipped value.
+ *
+ * The per-flow uplink queue is TCP_WND + MQVPN_TCP_LANE_BP_HIGH_WATER, and
+ * that product with the flow cap is the lane's aggregate memory bound
+ * (docs/hybrid_h2_memory_budget.md §3), so this is the lever for cutting it.
+ * Unlike the iOS profile the watermarks here are fixed constants rather than
+ * derived from TCP_WND, so a scale low enough to put TCP_WND under the
+ * high-water would break the "HIGH < TCP_WND" invariant tcp_lane.h relies on.
+ * Guarded below rather than left to produce a subtly wedged backpressure
+ * state at runtime. */
+#ifndef MQVPN_LWIP_RCV_SCALE
+#  define MQVPN_LWIP_RCV_SCALE 5
+#endif
+#if (65535 << MQVPN_LWIP_RCV_SCALE) <= 262144
+#  error "MQVPN_LWIP_RCV_SCALE too low: TCP_WND <= BP_HIGH_WATER breaks HIGH < TCP_WND"
+#endif
+
 #endif /* MQVPN_LWIP_PROFILE_H */
