@@ -143,6 +143,18 @@ Two things follow for operators raising the cap:
 - The honest planning figure is the *expected* concurrent-saturated flow count, not the
   cap. Size RAM against that, and treat the cap purely as an admission ceiling that
   prevents unbounded growth.
+- **The uplink half of that bound is lane-owned and already measured, but not capped in
+  aggregate.** `tcp_lane_uplink_deliver` takes ownership of each received pbuf into a
+  per-flow queue and tracks it exactly in `uplink_queued_bytes`
+  (`src/hybrid/tcp_lane_uplink.c`). A flow can hold up to `TCP_WND` plus the
+  `PENDING_STREAM` high-water — ~2.36 MB — and there is no lane-wide sum of those
+  counters, so nothing refuses growth across flows. At 4096 flows whose H3 streams are
+  simultaneously backpressured that is ~9 GiB of heap-backed pbufs. Adding a lane-wide
+  queued-byte budget on top of the existing per-flow counter is the identified mitigation
+  and is **not implemented**; until it is, treat a high `TcpMaxFlows` as safe only where
+  the expected concurrent-backpressured flow count times ~2.36 MB fits in RAM. (A
+  lane-wide budget would bound this normal path but not bytes already handed to xquic or
+  adversarial out-of-order data — window sizing below remains the complementary bound.)
 - If the bound itself needs to come down, the lever is the window sizing, not the cap.
   §5a measured `TCP_WND` down to 64 KiB with no aggregate goodput loss on this
   architecture — the lwIP hop is device-internal, so its window is not covering WAN

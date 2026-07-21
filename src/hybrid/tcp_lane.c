@@ -157,10 +157,13 @@ mqvpn_tcp_lane_new(const mqvpn_hybrid_config_t *cfg, uint64_t hash_seed, void *c
      * stopped counting: TIME_WAIT, LAST_ACK and CLOSING, which outlive the
      * mark_closing decrement below. (Half-open pcbs are NOT in that set —
      * on_syn runs before lwIP sees the SYN and has already counted the flow
-     * by the time the SYN_RCVD pcb exists.) lwIP reclaims TIME_WAIT under
-     * allocation pressure (tcp_alloc, tcp.c), but not the rest, so a cap
-     * above pool/2 lets tcp_alloc() start failing inbound SYNs (no callback,
-     * no RST — the inner connection just hangs) before the cap ever fires.
+     * by the time the SYN_RCVD pcb exists.)
+     * Running the pool dry is worse than a stalled SYN: tcp_alloc() escalates
+     * TIME_WAIT -> LAST_ACK -> CLOSING and then tcp_kill_prio(), which tears
+     * down an ESTABLISHED lower-priority pcb — i.e. lwIP starts killing live
+     * inner connections to admit new ones (tcp.c). The headroom keeps the
+     * lane's own cap the thing that refuses growth, while it can still refuse
+     * cheaply, instead of leaving lwIP to evict working flows.
      * The bound is per build profile (lwip_port/mqvpn_lwip_profile.h):
      * desktop/router 8192/2 = 4096, Android 512/2 = 256, iOS 128/2 = 64.
      * It matters most on the iOS profile, where the pool sits BELOW the

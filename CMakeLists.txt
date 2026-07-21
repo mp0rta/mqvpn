@@ -105,6 +105,19 @@ endif()
 # the profile constants are consumed by lwip_core AND tcp_lane.h includers
 # (mqvpn_lib, tests, fuzz, microbench) — per-target defs would silently
 # split the profile across TUs. Must precede every lane target definition.
+# The pre-rename spelling was a CMake option, so -DMQVPN_LWIP_MOBILE_PROFILE=ON
+# arrives as a cache variable, never as a preprocessor define — the #error in
+# mqvpn_lwip_profile.h cannot see it. Without this check an out-of-tree iOS
+# script still passing the old flag would configure cleanly and silently build
+# the desktop/router profile (2 MiB windows, 8192-pcb pool) into a Network
+# Extension. Reject at configure time; the header guard covers the separate
+# CMAKE_C_FLAGS path.
+if(DEFINED MQVPN_LWIP_MOBILE_PROFILE OR DEFINED MQVPN_LWIP_MOBILE_RCV_SCALE)
+    message(FATAL_ERROR
+            "MQVPN_LWIP_MOBILE_PROFILE/MQVPN_LWIP_MOBILE_RCV_SCALE were renamed to "
+            "MQVPN_LWIP_IOS_PROFILE/MQVPN_LWIP_IOS_RCV_SCALE")
+endif()
+
 option(MQVPN_LWIP_IOS_PROFILE
        "Shrink lwIP TCP-lane buffers for iOS Network Extension builds" OFF)
 if(MQVPN_LWIP_IOS_PROFILE)
