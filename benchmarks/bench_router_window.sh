@@ -155,17 +155,20 @@ lan_setup() {
     echo "  LAN leg up via $tun (netem: $netem)"
 }
 
-# run_iperf_lan <P> — receiver Mbps measured FROM THE LAN NETNS ("0.0" on error)
+# run_iperf_lan <P> [duration] — receiver Mbps measured FROM THE LAN NETNS
+# ("0.0" on error). Duration is an explicit arg, not an inherited global: the
+# pre-flight needs a short probe and `DURATION=2 run_iperf_lan` would rely on
+# assignment-prefix scoping rules that differ between shells.
 run_iperf_lan() {
-    local P="$1" json ipid
+    local P="$1" dur="${2:-$DURATION}" json ipid
     json="$(mktemp)"
     ip netns exec "$NS_SERVER" iperf3 -s -B "$TARGET" -1 &>/dev/null &
     ipid=$!
     sleep 1
     # -O 3 drops the CC ramp; the arms ramp differently per window size and the
     # transient would otherwise leak straight into the comparison.
-    ip netns exec "$NS_LAN" timeout $((DURATION + 20)) \
-        iperf3 -c "$TARGET" -t "$DURATION" -O 3 -P "$P" --json >"$json" 2>/dev/null || true
+    ip netns exec "$NS_LAN" timeout $((dur + 20)) \
+        iperf3 -c "$TARGET" -t "$dur" -O 3 -P "$P" --json >"$json" 2>/dev/null || true
     kill "$ipid" 2>/dev/null || true; wait "$ipid" 2>/dev/null || true
     python3 -c "
 import json
@@ -198,12 +201,30 @@ for netem in "${LAN_PROFILES[@]}"; do
         bench_setup_netns >/dev/null || { echo "  netns setup failed"; continue; }
         bench_apply_netem >/dev/null 2>&1 || true
         bench_add_server_host_routes 2 >/dev/null 2>&1 || true
+        # The out-of-tunnel egress target. Without it the server's connect-tcp
+        # fails ENETUNREACH, which still ADMITS the flow (tcp_flows_total ticks)
+        # — so the lane gate reads healthy while every cell measures 0 Mbps.
+        ip netns exec "$NS_SERVER" ip addr add "${TARGET}/32" dev lo 2>/dev/null || true
         bench_start_vpn_server "--control-port $CTRL_PORT --config $INI" \
             "$OUT/server-s$s-l$lan_idx.log" >/dev/null || { echo "  server failed"; continue; }
         bench_start_vpn_client "--path $VETH_A0 --path $VETH_B0 --config $INI" \
             "$OUT/client-s$s-l$lan_idx.log" >/dev/null || { echo "  client failed"; continue; }
         bench_wait_tunnel 20 >/dev/null || { echo "  tunnel not up"; continue; }
         lan_setup "$netem" || { echo "  LAN setup failed"; continue; }
+
+        # Pre-flight, once per cell: a 3 s probe over the exact path the sweep
+        # measures. Infra faults here (missing egress alias, NAT/forwarding
+        # gap, dead tunnel) otherwise surface only as a wall of plausible
+        # 0.0 Mbps rows — the gate catches them, but not before burning the
+        # whole matrix. Abort loudly instead of grinding on.
+        probe=$(run_iperf_lan 1 3)
+        if [ "$probe" = "0.0" ]; then
+            echo "  PRE-FLIGHT FAILED (0 Mbps over the LAN path)."
+            echo "  Check: $TARGET alias on server lo, ip_forward/MASQUERADE," \
+                 "tunnel state. Logs: $OUT/{server,client}-s$s-l$lan_idx.log"
+            exit 1
+        fi
+        echo "  pre-flight OK (${probe} Mbps)"
 
         for P in $PVALUES; do
             for rep in $(seq 1 "$REPEAT"); do
