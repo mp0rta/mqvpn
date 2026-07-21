@@ -138,23 +138,33 @@ before either the flow cap or the memory bound is reached. Like the memory figur
 scales with real concurrency and not with the configured cap — raising the cap costs
 nothing until the flows actually exist.
 
-Two things follow for operators raising the cap:
+**`TcpMaxFlows` caps a flow count, not bytes.** It bounds memory only derivatively: because
+the lane-owned per-flow memory has a hard ceiling, limiting the count yields a memory bound
+as `count × per-flow ceiling`. That derivation is what makes a second, byte-denominated
+budget unnecessary — so there deliberately is none. The largest per-flow term is the uplink
+queue:
+`tcp_lane_uplink_deliver` takes ownership of each received pbuf and tracks it exactly in
+`uplink_queued_bytes` (`src/hybrid/tcp_lane_uplink.c`), reaching `TCP_WND` plus the
+`PENDING_STREAM` high-water — ~2.36 MB — for a flow whose H3 stream is backpressured. The
+flow cap bounds how many flows can be in that state, and it is a *true* bound rather than
+an approximate one:
 
-- The honest planning figure is the *expected* concurrent-saturated flow count, not the
-  cap. Size RAM against that, and treat the cap purely as an admission ceiling that
-  prevents unbounded growth.
-- **The uplink half of that bound is lane-owned and already measured, but not capped in
-  aggregate.** `tcp_lane_uplink_deliver` takes ownership of each received pbuf into a
-  per-flow queue and tracks it exactly in `uplink_queued_bytes`
-  (`src/hybrid/tcp_lane_uplink.c`). A flow can hold up to `TCP_WND` plus the
-  `PENDING_STREAM` high-water — ~2.36 MB — and there is no lane-wide sum of those
-  counters, so nothing refuses growth across flows. At 4096 flows whose H3 streams are
-  simultaneously backpressured that is ~9 GiB of heap-backed pbufs. Adding a lane-wide
-  queued-byte budget on top of the existing per-flow counter is the identified mitigation
-  and is **not implemented**; until it is, treat a high `TcpMaxFlows` as safe only where
-  the expected concurrent-backpressured flow count times ~2.36 MB fits in RAM. (A
-  lane-wide budget would bound this normal path but not bytes already handed to xquic or
-  adversarial out-of-order data — window sizing below remains the complementary bound.)
+- A SYN over the cap never enters the lane. It falls back to the RAW CONNECT-IP lane
+  (`mqvpn_client.c`), so hitting the cap costs those flows the TCP-lane treatment but does
+  not break them — this is graceful degradation, not a refusal.
+- `CLOSING` routing markers stop counting toward `tcp_max_flows` but cannot smuggle memory
+  past the cap: `tcp_lane_mark_closing` is reached only from `tcp_lane_finish_clean_close`,
+  which requires the uplink FIN to have been sent, which in turn requires the uplink queue
+  to have fully drained. Every unclean teardown goes through `tcp_lane_remove_flow`, which
+  frees the queue outright. So a marker never holds uplink bytes.
+
+The operator rule is therefore just arithmetic on one knob: **the client-side worst case is
+`TcpMaxFlows` × ~2.36 MB** (≈ 9.7 GiB at 4096, ≈ 604 MB at 256). Size the cap from the
+box's RAM. Note this is the *client* knob — `TcpMaxGlobalFlows` is server-only and bounds
+the server's egress fd budget, not this lane's memory.
+
+- The honest planning figure is the *expected* concurrent-backpressured flow count, not the
+  cap; the cap is the ceiling that keeps the worst case finite.
 - If the bound itself needs to come down, the lever is the window sizing, not the cap.
   §5a measured `TCP_WND` down to 64 KiB with no aggregate goodput loss on this
   architecture — the lwIP hop is device-internal, so its window is not covering WAN
