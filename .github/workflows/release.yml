@@ -25,7 +25,6 @@ permissions:
 env:
   WINTUN_VER: "0.14.1"
   WINTUN_SHA256: "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
-  BORINGSSL_COMMIT: "9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c"
   # Keep in sync with ndkVersion in android/sdk-native/build.gradle.kts and
   # NDK_VERSION in android-repro.yml.
   NDK_VERSION: "28.2.13676358"
@@ -89,15 +88,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake libevent-dev golang iptables
-
-      - name: Clone BoringSSL (pinned)
-        if: matrix.os == 'linux'
-        run: |
-          BSSL_DIR=third_party/xquic/third_party/boringssl
-          if [ ! -f "$BSSL_DIR/CMakeLists.txt" ]; then
-            git clone https://github.com/google/boringssl.git "$BSSL_DIR"
-          fi
-          cd "$BSSL_DIR" && git checkout ${{ env.BORINGSSL_COMMIT }}
 
       - name: Build BoringSSL
         if: matrix.os == 'linux'
@@ -210,15 +200,6 @@ jobs:
       - name: Install libevent (macOS)
         if: matrix.os == 'darwin'
         run: brew install libevent
-
-      - name: Clone BoringSSL (macOS)
-        if: matrix.os == 'darwin'
-        run: |
-          BSSL_DIR=third_party/xquic/third_party/boringssl
-          if [ ! -f "$BSSL_DIR/CMakeLists.txt" ]; then
-            git clone https://github.com/google/boringssl.git "$BSSL_DIR"
-          fi
-          cd "$BSSL_DIR" && git checkout ${{ env.BORINGSSL_COMMIT }}
 
       - name: Build BoringSSL (macOS)
         if: matrix.os == 'darwin'
@@ -377,18 +358,6 @@ jobs:
           }
           Expand-Archive $zip -DestinationPath wintun-extract
 
-      - name: Clone BoringSSL (Windows)
-        if: matrix.os == 'windows'
-        shell: pwsh
-        run: |
-          $bssl = "third_party/xquic/third_party/boringssl"
-          if (-not (Test-Path "$bssl/CMakeLists.txt")) {
-            git clone https://github.com/google/boringssl.git $bssl
-          }
-          Push-Location $bssl
-          git checkout ${{ env.BORINGSSL_COMMIT }}
-          Pop-Location
-
       - name: Build BoringSSL (Windows)
         if: matrix.os == 'windows'
         run: |
@@ -399,7 +368,7 @@ jobs:
           # the pinned commit that mis-routes ASM source selection on
           # Windows ARM64 (pulls in x86_64-apple obj → LNK1181). Trade-off:
           # ARM64 falls back to C crypto, measurably slower than amd64 for
-          # AES-GCM / SHA. Revisit when bumping BORINGSSL_COMMIT.
+          # AES-GCM / SHA. Revisit when bumping the BoringSSL submodule pin.
           cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
             -DBUILD_SHARED_LIBS=0 `
             ${{ matrix.arch == 'arm64' && '-DOPENSSL_NO_ASM=1' || '' }} ..
@@ -597,14 +566,6 @@ jobs:
         run: |
           CMAKE_VERSION=$(sed -n 's/^project(mqvpn VERSION \([0-9.][0-9.]*\).*/\1/p' CMakeLists.txt)
           echo "VERSION=$CMAKE_VERSION" >> "$GITHUB_ENV"
-
-      - name: Clone BoringSSL (pinned)
-        run: |
-          BSSL_DIR=third_party/xquic/third_party/boringssl
-          if [ ! -f "$BSSL_DIR/CMakeLists.txt" ]; then
-            git clone https://github.com/google/boringssl.git "$BSSL_DIR"
-          fi
-          cd "$BSSL_DIR" && git checkout ${{ env.BORINGSSL_COMMIT }}
 
       - name: Install pinned NDK
         id: ndk
