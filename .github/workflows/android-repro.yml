@@ -40,8 +40,6 @@ permissions:
   contents: read
 
 env:
-  # Checked against release.yml by the "toolchain pins" step below.
-  BORINGSSL_COMMIT: "9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c"
   NDK_VERSION: "28.2.13676358"
 
 jobs:
@@ -65,22 +63,13 @@ jobs:
           gradle_ndk=$(sed -n 's/.*ndkVersion = "\([^"]*\)".*/\1/p' \
                        android/sdk-native/build.gradle.kts | head -1)
           rel_ndk=$(sed -n 's/^  NDK_VERSION: "\([^"]*\)".*/\1/p' "$rel" | head -1)
-          rel_bssl=$(sed -n 's/^  BORINGSSL_COMMIT: "\([^"]*\)".*/\1/p' "$rel" | head -1)
-          [ -n "$gradle_ndk" ] && [ -n "$rel_ndk" ] && [ -n "$rel_bssl" ] \
-            || fail "could not parse toolchain pins — update the patterns in this step"
+          [ -n "$gradle_ndk" ] && [ -n "$rel_ndk" ] \
+            || fail "could not parse NDK pins — update the patterns in this step"
           [ "$rel_ndk" = "$NDK_VERSION" ] \
             || fail "NDK pin drift: release.yml has $rel_ndk, this gate has $NDK_VERSION"
           [ "$gradle_ndk" = "$NDK_VERSION" ] \
             || fail "NDK pin drift: sdk-native has $gradle_ndk, this gate has $NDK_VERSION"
-          [ "$rel_bssl" = "$BORINGSSL_COMMIT" ] \
-            || fail "BoringSSL pin drift: release.yml has $rel_bssl"
-          echo "Toolchain pins in sync (NDK $NDK_VERSION)"
-
-      - name: Clone BoringSSL (pinned)
-        run: |
-          BSSL_DIR=third_party/xquic/third_party/boringssl
-          git clone https://github.com/google/boringssl.git "$BSSL_DIR"
-          cd "$BSSL_DIR" && git checkout ${{ env.BORINGSSL_COMMIT }}
+          echo "NDK pin in sync ($NDK_VERSION). BoringSSL is a submodule (single pin)."
 
       - name: Set up JDK 21
         uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
