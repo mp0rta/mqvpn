@@ -23,6 +23,23 @@ ok()    { echo "[+] $*"; }
 warn()  { echo "[!] $*" >&2; }
 err()   { echo "[!] $*" >&2; exit 1; }
 
+# Startup banner -- pure ASCII and colorless on purpose, so it is safe for
+# non-TTY output, NO_COLOR, dumb terminals, and log redirection without any
+# locale or TTY probing. Letterforms follow the mqvpn wordmark; the lone
+# backslash line is the q descender, not a stray character.
+print_banner() {
+    cat <<'EOF'
+
+ _______     _____     \       /   ______     _______
+/   |   \   /     \     \     /   |      \   /       \
+|   |   |  |   o   |     \   /    | _____/   |       |
+|   |   |   \_____/\      \_/     |          |       |
+                    \
+                                   multipath quic vpn
+
+EOF
+}
+
 # Generate a per-install ULA prefix per RFC 4193: fd + 40 random bits, /112.
 # /112 keeps the 16-bit host pool (matches IPv4 /24) and stays within the
 # [96,126] range required by mqvpn_addr_pool_init6.
@@ -113,6 +130,8 @@ do_uninstall() {
 if [ "$UNINSTALL" -eq 1 ]; then
     do_uninstall
 fi
+
+print_banner
 
 # --- Step 1: Environment checks ---
 info "[1/6] Detecting system..."
