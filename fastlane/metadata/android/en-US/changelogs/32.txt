@@ -1,0 +1,2 @@
+- Update BoringSSL to 0.20260713.0, picking up upstream TLS/crypto fixes
+  since the previous pin.
