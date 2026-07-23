@@ -1,8 +1,13 @@
 <div align="center">
   <h1>
     <picture>
-    　<source media="(prefers-color-scheme: dark)" srcset="website/public/img/mqvpn-lockup-violet-dark.svg">
-  　　<img src="website/public/img/mqvpn-lockup-violet-light.svg" alt="mqvpn" width="400">
+      <source
+        media="(prefers-color-scheme: dark)"
+        srcset="website/public/img/mqvpn-lockup-violet-dark.svg">
+      <img
+        src="website/public/img/mqvpn-lockup-violet-light.svg"
+        alt="mqvpn"
+        width="400">
     </picture>
   </h1>
   <p><b>All your connections. One stronger connection.</b></p>
