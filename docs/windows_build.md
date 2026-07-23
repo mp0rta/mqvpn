@@ -45,10 +45,9 @@ vcpkg install libevent:x64-windows-static
 ### 2. Build BoringSSL
 
 ```
-cd third_party\xquic\third_party
-git clone https://github.com/google/boringssl.git
-cd boringssl
-git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+REM BoringSSL is a submodule of the xquic fork (pinned); it is fetched by
+REM `git submodule update --init --recursive`.
+cd third_party\xquic\third_party\boringssl
 
 mkdir build && cd build
 cmake -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=0 ..

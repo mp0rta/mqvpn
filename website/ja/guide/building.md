@@ -115,10 +115,9 @@ vcpkg install libevent:x64-windows-static
 #### 2. BoringSSL のビルド
 
 ```batch
-cd third_party\xquic\third_party
-git clone https://github.com/google/boringssl.git
-cd boringssl
-git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+REM BoringSSL is a submodule of the xquic fork (pinned); it is fetched by
+REM `git submodule update --init --recursive`.
+cd third_party\xquic\third_party\boringssl
 
 mkdir build && cd build
 cmake -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=0 ..
@@ -177,11 +176,8 @@ export ANDROID_HOME=/path/to/android-sdk
 export ANDROID_NDK_HOME=/path/to/android-ndk
 export ANDROID_NDK="$ANDROID_NDK_HOME"
 
-# サブモジュールを取得
+# サブモジュールを取得（BoringSSL を含む）
 git submodule update --init --recursive
-
-# BoringSSL ソースの準備
-git clone https://github.com/google/boringssl.git third_party/xquic/third_party/boringssl
 
 # ネイティブライブラリをクロスコンパイル（arm64-v8a）
 scripts/build_android.sh --abi arm64-v8a

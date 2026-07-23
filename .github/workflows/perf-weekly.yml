@@ -36,7 +36,7 @@ jobs:
 
       - name: Clean previous build
         run: |
-          rm -rf third_party/xquic/third_party/boringssl
+          rm -rf third_party/xquic/third_party/boringssl/build
           rm -rf third_party/xquic/build
           rm -rf build
 
