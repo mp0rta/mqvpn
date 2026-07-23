@@ -9,7 +9,7 @@
 - GNU Make
 - GCC or Clang (C11)
 - libevent 2.x
-- Network access for the first build (BoringSSL is cloned from GitHub)
+- Network access to fetch submodules (`git submodule update --init --recursive`, which includes BoringSSL)
 
 ### Quick Build
 
@@ -207,7 +207,7 @@ iOS support is client-only and in development: the app and PacketTunnel extensio
 - macOS with a recent Xcode (16.3 or newer; CI uses the `macos-15` image and selects the newest installed Xcode)
 - CMake, Ninja, Python 3
 - [xcodegen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`) for generating the Xcode project
-- Git checkout with submodules (`--recurse-submodules`); BoringSSL is cloned automatically on first build
+- Git checkout with submodules (`git submodule update --init --recursive`), which includes BoringSSL
 
 ### Cross-build the native libraries
 

@@ -11,7 +11,7 @@
 - libevent 2.x
 
 ::: info
-初回ビルド時に BoringSSL のソースを GitHub からクローンするため、インターネット接続が必要です。
+サブモジュール取得（`git submodule update --init --recursive`、BoringSSL を含む）にインターネット接続が必要です。
 :::
 
 ### クイックビルド
@@ -211,7 +211,7 @@ iOS 対応はクライアントのみで開発中です。アプリと PacketTun
 - 新しめの Xcode（16.3 以降。CI は `macos-15` イメージでインストール済みの最新 Xcode を選択）を備えた macOS
 - CMake、Ninja、Python 3
 - Xcode プロジェクト生成用の [xcodegen](https://github.com/yonaskolb/XcodeGen)（`brew install xcodegen`）
-- サブモジュール込みのチェックアウト（`--recurse-submodules`）。BoringSSL は初回ビルド時に自動でクローンされます
+- サブモジュール込みのチェックアウト（`git submodule update --init --recursive`）。BoringSSL も含まれます
 
 ### ネイティブライブラリのクロスビルド
 
