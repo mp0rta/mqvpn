@@ -67,9 +67,9 @@ EgressDeny = 10.0.5.13/32   # EgressAllow の後に評価
 
 control API の `get_stats` がレーンのランタイムカウンタをクライアント・サーバ両方で公開します: `tcp_flows_active`、`tcp_flows_total`、`tcp_flows_rejected`、およびレーン別パケットカウンタ（`pkts_lane_*`）。フィールドの意味は [docs/control-api.md §5.4](https://github.com/mp0rta/mqvpn/blob/main/docs/control-api.md) を参照してください。
 
-## モバイルビルド（iOS）
+## iOS ビルド
 
-iOS ビルド（`ios/build-ios.sh`）では、iOS Network Extension のメモリ上限に収めるため、lwIP のフットプリントを削減した構成（`MQVPN_LWIP_MOBILE_PROFILE` ビルドフラグ: TCP ウィンドウ約 2 MiB / 256 フローに対して約 256 KiB / 64 フロー構成）でレーンをコンパイルします。Android ビルドはデフォルトプロファイルを使用します。このプロファイルは QUIC 側の受信レート上限 [`[Advanced] RecvRateLimit`](./configuration#advanced) とセットで使います — 内側 TCP のウィンドウを縮めるだけでは外側 QUIC コネクション自体のバッファリングは抑えられないため、iOS クライアントは両方を設定します。予算計算と実測値の詳細は
+iOS ビルド（`ios/build-ios.sh`）では、iOS Network Extension のメモリ上限に収めるため、lwIP のフットプリントを削減した構成（`MQVPN_LWIP_IOS_PROFILE` ビルドフラグ: 他プロファイルの 512 KiB ウィンドウに対し約 256 KiB、フロー上限 64）でレーンをコンパイルします。Android ビルドは専用プロファイル（desktop と同じウィンドウ + 512 pcb プール = 256 フロー上限）を使用します。desktop / router ビルドは 8192 pcb プールで 4096 フロー上限です。このプロファイルは QUIC 側の受信レート上限 [`[Advanced] RecvRateLimit`](./configuration#advanced) とセットで使います — 内側 TCP のウィンドウを縮めるだけでは外側 QUIC コネクション自体のバッファリングは抑えられないため、iOS クライアントは両方を設定します。予算計算と実測値の詳細は
 [docs/hybrid_h2_memory_budget.md §5](https://github.com/mp0rta/mqvpn/blob/main/docs/hybrid_h2_memory_budget.md) を参照してください。
 
 ## 既知の制限

@@ -121,7 +121,7 @@ final class MqvpnEngine: NSObject {
         // failures; mirrors the reorder rules-first pattern above).
         var hybridOK = false
         if hybrid.enabled {
-            let iosTcpMaxFlows: UInt32 = 64      // couples with mobile-profile MEMP_NUM_TCP_PCB=128
+            let iosTcpMaxFlows: UInt32 = 64      // couples with iOS-profile MEMP_NUM_TCP_PCB=128
             let iosIdleTimeoutSec: UInt32 = 300  // library default, stated explicitly
             let iosRecvRateLimit: UInt64 = 125_000_000  // 1 Gbps ceiling; QUIC window = rate x srtt
             let rcs = [

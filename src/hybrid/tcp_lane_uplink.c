@@ -21,7 +21,8 @@
 #include <stdlib.h> /* malloc/free (queue nodes) */
 
 /* tcp_recved takes a u16_t; the deferred resume total can exceed 65535
- * (bounded by TCP_WND ~2 MiB), so re-open the window in u16-sized steps. */
+ * (bounded by TCP_WND, 512 KiB on the non-iOS profile), so re-open the
+ * window in u16-sized steps. */
 static void
 tcp_lane_recved(struct tcp_pcb *pcb, uint32_t len)
 {

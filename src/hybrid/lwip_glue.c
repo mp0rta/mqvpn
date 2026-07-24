@@ -28,13 +28,28 @@
 /* Profile derivation pin — catches drift WITHIN the selected profile.
  * (Per-target propagation failures are caught by
  * tests/check_profile_propagation.py — invoked by ios/build-ios.sh and
- * the mobile-profile CI step against the build's compile_commands.json —
+ * the iOS-profile CI step against the build's compile_commands.json —
  * not here: an unpropagated TU takes the default branch and passes.) */
-#ifdef MQVPN_LWIP_MOBILE_PROFILE
-_Static_assert(TCP_WND == (65535 << MQVPN_LWIP_MOBILE_RCV_SCALE),
-               "mobile profile: TCP_WND derivation drifted");
+/* The MEMP_NUM_TCP_PCB / 2 pins below are the honored hybrid.TcpMaxFlows
+ * ceiling (tcp_lane.c's pool-coupling clamp) stated per profile, so a pool
+ * edit that silently moves the configurable flow cap fails the build.
+ * tests/check_lwip_profile_invariance.sh pins the same values by
+ * preprocessing all three profiles from source; this assert is what covers
+ * the Android branch under the REAL NDK toolchain, where __ANDROID__ comes
+ * from the compiler rather than the test's simulated -D. */
+#ifdef MQVPN_LWIP_IOS_PROFILE
+_Static_assert(TCP_WND == (65535 << MQVPN_LWIP_IOS_RCV_SCALE),
+               "iOS profile: TCP_WND derivation drifted");
+_Static_assert(MEMP_NUM_TCP_PCB / 2 == 64, "iOS profile: flow ceiling drifted");
+#elif defined(__ANDROID__)
+_Static_assert(TCP_WND == (65535 << MQVPN_LWIP_RCV_SCALE),
+               "Android profile: TCP_WND drifted");
+_Static_assert(MEMP_NUM_TCP_PCB / 2 == 256, "Android profile: flow ceiling drifted");
 #else
-_Static_assert(TCP_WND == (65535 << 5), "default profile: TCP_WND drifted");
+_Static_assert(TCP_WND == (65535 << MQVPN_LWIP_RCV_SCALE),
+               "desktop/router profile: TCP_WND drifted");
+_Static_assert(MEMP_NUM_TCP_PCB / 2 == 4096,
+               "desktop/router profile: flow ceiling drifted");
 #endif
 
 /* Upper bound for one lwIP-emitted IP packet — a true invariant via two
@@ -306,7 +321,7 @@ mqvpn_lwip_input(mqvpn_lwip_ctx_t *ctx, const uint8_t *pkt, size_t len)
     /* I1: PBUF_RAM, not PBUF_POOL — an exact-size, MEM_LIBC_MALLOC-backed
      * heap allocation (lwipopts.h's CAUTION comment on PBUF_POOL_SIZE has
      * the full rationale). PBUF_POOL would burn one full ~9 KB
-     * PBUF_POOL_BUFSIZE slot out of the GLOBAL 256-slot pool per ingress
+     * PBUF_POOL_BUFSIZE slot out of the small GLOBAL pool per ingress
      * packet regardless of its real size — at the real ~1382-byte tunnel
      * MTU, one xquic-backpressured flow's stash could exhaust that shared
      * pool and stall RX (SYNs/ACKs/FINs) for every OTHER flow. pbuf_take's

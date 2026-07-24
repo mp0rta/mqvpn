@@ -870,7 +870,7 @@ test_max_flows_pool_clamp(void)
      * clamped at lane creation, so the lane's own cap check — whose
      * contract is reject → tcp_abort (RST), never a silent hang — stays
      * REACHABLE before tcp_alloc() starts failing SYNs with no callback.
-     * Guards the mobile profile especially: there the library default
+     * Guards the iOS profile especially: there the library default
      * tcp_max_flows (256) exceeds the pool (128). */
     mqvpn_hybrid_config_t cfg;
     mqvpn_hybrid_config_default(&cfg);
@@ -1643,7 +1643,7 @@ test_relay_pending_stream_high_water(void)
 
     const uint16_t seg = 9000;
     /* Crossing index: smallest n with 9000*n >= HIGH_WATER.
-     * default: ceil(262144/9000)=30 (unchanged); mobile scale=2:
+     * default: ceil(262144/9000)=30 (unchanged); iOS scale=2:
      * ceil(131070/9000)=15. */
     const uint32_t n = (MQVPN_TCP_LANE_BP_HIGH_WATER + 8999u) / 9000u;
     for (uint32_t i = 0; i < n; i++) {

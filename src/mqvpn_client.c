@@ -1378,8 +1378,16 @@ cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_k
     if (!req) {
         /* Known v1 simplification: NULL here is transient stream-credit
          * exhaustion, treated as a reject instead of queue-and-retry.
-         * Practically unreachable — the default credit of 1024 auto-extends
-         * and the flow cap is <= 256. */
+         * The concurrent flow count is NOT the binding constraint: QUIC
+         * MAX_STREAMS is cumulative-id based, and xquic's peer side extends
+         * the limit by another initial_max_streams_bidi (default 1024) each
+         * time an opened stream id crosses half the current allowance
+         * (xqc_stream_do_create_flow_ctl), so credit tracks streams opened,
+         * not streams still open. What remains reachable is a burst that
+         * opens more than the outstanding allowance within one RTT, before
+         * the peer's MAX_STREAMS lands — likelier now that the flow cap can
+         * be configured up to 4096. That degrades to a reset (tcp_abort) for
+         * the one flow, never a hang, which is why it stays a reject. */
         LOG_E(c, "connect-tcp: xqc_h3_request_create failed (stream credit?)");
         free(stream);
         return mqvpn_tcp_lane_abort_pending(flow_handle);
@@ -2804,7 +2812,7 @@ mqvpn_client_new(const mqvpn_config_t *cfg, const mqvpn_client_callbacks_t *cbs,
      * the establishment-time warn is easy to miss in production. Surface
      * the override where the operator reads startup logs. Judge the
      * SANITIZED value — tunnel setup expands 0 to the library default,
-     * which on the mobile profile already exceeds the pool bound. */
+     * which on the iOS profile already exceeds the pool bound. */
     {
         mqvpn_hybrid_config_t hcfg = c->config.hybrid;
         (void)mqvpn_hybrid_config_sanitize(&hcfg, NULL, 0);

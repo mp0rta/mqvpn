@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 mp0rta and mqvpn contributors
-# Verifies MQVPN_LWIP_MOBILE_PROFILE reached every profile-consuming TU in a
-# mobile-profile build (the _Static_assert cannot catch unpropagated TUs —
+# Verifies MQVPN_LWIP_IOS_PROFILE reached every profile-consuming TU in a
+# iOS-profile build (the _Static_assert cannot catch unpropagated TUs —
 # they take the default branch and pass). Usage: check_profile_propagation.py <build-dir>
 import json, sys
 
@@ -16,7 +16,7 @@ if not watched:
     # exactly the states this checker exists to distinguish from "propagated".
     raise SystemExit("PROPAGATION FAIL: no profile-consuming TU in "
                      "compile_commands.json (wrong build dir, or lane not configured?)")
-bad = [e["file"] for e in watched if "MQVPN_LWIP_MOBILE_PROFILE" not in e["command"]]
+bad = [e["file"] for e in watched if "MQVPN_LWIP_IOS_PROFILE" not in e["command"]]
 if bad:
     raise SystemExit(f"PROPAGATION FAIL: {bad}")
 print(f"PASS: propagation ({len(watched)} TUs)")

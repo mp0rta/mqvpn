@@ -2101,9 +2101,10 @@ TEST(client_new_warn_keys_on_sanitized_flows)
 {
     /* TcpMaxFlows=0 sanitizes to MQVPN_TCP_MAX_FLOWS_DEFAULT at tunnel
      * setup; the startup warn must key on that sanitized value, or the
-     * mobile profile (default 256 > bound 64) misses the clamp until
+     * iOS profile (default 256 > bound 64) misses the clamp until
      * establishment. Expectation is profile-derived so this test is exact
-     * on both the default (256 == bound → quiet) and mobile profiles. */
+     * on every profile: quiet where the default fits the bound
+     * (desktop/router 256 < 4096, Android 256 == 256), warning on iOS. */
     int expect = MQVPN_TCP_MAX_FLOWS_DEFAULT > mqvpn_tcp_lane_pool_flow_bound() ? 1 : 0;
     mqvpn_client_t *c = make_hybrid_client_with_flows(0);
     ASSERT_EQ(c != NULL, 1);

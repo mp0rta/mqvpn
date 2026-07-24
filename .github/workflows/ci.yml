@@ -659,42 +659,42 @@ jobs:
       - name: Run Darwin unit tests
         run: ctest --test-dir build-darwin --output-on-failure
 
-      # Mobile lwIP profile coverage: the only other consumer of
-      # MQVPN_LWIP_MOBILE_PROFILE is ios/build-ios.sh (not run in CI), so
-      # without this step every mobile-only #if branch, _Static_assert, and
+      # iOS lwIP profile coverage: the only other consumer of
+      # MQVPN_LWIP_IOS_PROFILE is ios/build-ios.sh (not run in CI), so
+      # without this step every iOS-only #if branch, _Static_assert, and
       # lwIP init.c compile-time bound is unexercised by automation — a
-      # default-profile-valid change that breaks a mobile constraint would
+      # default-profile-valid change that breaks an iOS constraint would
       # merge green and only surface at the next local iOS build.
       # CMAKE_EXPORT_COMPILE_COMMANDS feeds check_profile_propagation.py
       # (an unpropagated TU takes the default branch and passes its own
       # _Static_assert — only the compile database shows a split profile).
-      - name: Build mqvpn (mobile lwIP profile) + propagation check
+      - name: Build mqvpn (iOS lwIP profile) + propagation check
         run: |
-          cmake -B build-darwin-mobile -DCMAKE_BUILD_TYPE=Debug \
+          cmake -B build-darwin-ios -DCMAKE_BUILD_TYPE=Debug \
             -DXQUIC_BUILD_DIR="$GITHUB_WORKSPACE/third_party/xquic/build" \
             -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
             -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON \
-            -DMQVPN_LWIP_MOBILE_PROFILE=ON \
+            -DMQVPN_LWIP_IOS_PROFILE=ON \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DCMAKE_C_FLAGS="-Wall -Wextra -Werror"
-          cmake --build build-darwin-mobile --target mqvpn_lib test_tcp_lane \
+          cmake --build build-darwin-ios --target mqvpn_lib test_tcp_lane \
             -j "$(sysctl -n hw.ncpu)"
-          python3 tests/check_profile_propagation.py build-darwin-mobile
+          python3 tests/check_profile_propagation.py build-darwin-ios
 
       # Only test_tcp_lane: check_lwip_profile_invariance preprocesses BOTH
       # profiles from source itself (build-dir-independent), so the default
       # tree's unfiltered ctest above already covers it — re-running it here
       # would imply extra coverage this tree does not add.
-      - name: Run mobile-profile TCP-lane tests
+      - name: Run iOS-profile TCP-lane tests
         run: |
-          ctest --test-dir build-darwin-mobile -R "test_tcp_lane" --output-on-failure
+          ctest --test-dir build-darwin-ios -R "test_tcp_lane" --output-on-failure
 
   # iOS: the real cross-build chain (BoringSSL -> xquic -> libmqvpn, all
-  # iphoneos/arm64 static, mobile lwIP profile) plus the Swift host tests and
+  # iphoneos/arm64 static, iOS lwIP profile) plus the Swift host tests and
   # an UNSIGNED xcodebuild of the app + PacketTunnel extension against the
   # staged archives. This is the only job that compiles the Swift sources and
   # links the extension the way a device build does — the darwin job's
-  # mobile-profile step covers the C core only. Device/simulator execution
+  # iOS-profile step covers the C core only. Device/simulator execution
   # stays a manual gate (needs signing + hardware).
   ios:
     # macos-15, not macos-14: current xcodegen emits the Xcode 16+ project
@@ -755,8 +755,8 @@ jobs:
         run: ./ios/build-ios.sh xquic
 
       # Always from scratch (the script rm -rf's its build dir for ABI
-      # consistency); also runs the mobile-profile propagation check against
-      # the REAL iphoneos build — the darwin-mobile step above checks the
+      # consistency); also runs the iOS-profile propagation check against
+      # the REAL iphoneos build — the darwin iOS-profile step above checks the
       # same property on a host build.
       - name: Build libmqvpn (iOS) + stage archives
         run: ./ios/build-ios.sh mqvpn
