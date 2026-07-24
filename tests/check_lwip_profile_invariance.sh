@@ -82,13 +82,21 @@ TCP_SND_BUF|(2 * 1024 * 1024)
 PINS
 
 # The iOS profile must win over __ANDROID__ if both are ever set.
+# MQVPN_LWIP_IOS_RCV_SCALE is pinned to its CONCRETE default (2), not just the
+# symbolic TCP_RCV_SCALE indirection: with only the symbolic pin, bumping the
+# default scale would pass every check in the tree while silently doubling the
+# iOS windows and PBUF ladder against the NE memory ceiling.
 check "iOS" "-DMQVPN_LWIP_IOS_PROFILE" <<'PINS'
 TCP_RCV_SCALE|MQVPN_LWIP_IOS_RCV_SCALE
+MQVPN_LWIP_IOS_RCV_SCALE|2
 MQVPN_LWIP_TCP_PCB_POOL|128
 MQVPN_LWIP_TCP_SEG_POOL|512
+PBUF_POOL_SIZE|32
+TCP_SND_BUF|(65536 << MQVPN_LWIP_IOS_RCV_SCALE)
 PINS
 check "iOS over Android" "-DMQVPN_LWIP_IOS_PROFILE -D__ANDROID__" <<'PINS'
 MQVPN_LWIP_TCP_PCB_POOL|128
+MQVPN_LWIP_TCP_SEG_POOL|512
 PINS
 
 echo "PASS: profile invariance"

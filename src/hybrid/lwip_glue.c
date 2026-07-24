@@ -321,7 +321,7 @@ mqvpn_lwip_input(mqvpn_lwip_ctx_t *ctx, const uint8_t *pkt, size_t len)
     /* I1: PBUF_RAM, not PBUF_POOL — an exact-size, MEM_LIBC_MALLOC-backed
      * heap allocation (lwipopts.h's CAUTION comment on PBUF_POOL_SIZE has
      * the full rationale). PBUF_POOL would burn one full ~9 KB
-     * PBUF_POOL_BUFSIZE slot out of the GLOBAL 256-slot pool per ingress
+     * PBUF_POOL_BUFSIZE slot out of the small GLOBAL pool per ingress
      * packet regardless of its real size — at the real ~1382-byte tunnel
      * MTU, one xquic-backpressured flow's stash could exhaust that shared
      * pool and stall RX (SYNs/ACKs/FINs) for every OTHER flow. pbuf_take's

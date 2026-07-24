@@ -68,7 +68,7 @@
 /* Per opt.h: "when using TCP_RCV_SCALE, TCP_WND is the total size WITH
  * scaling applied" — i.e. TCP_WND is the effective receive window in bytes
  * (post-scaling total) and the 16-bit header field advertises
- * TCP_WND >> TCP_RCV_SCALE (tcp_out.c). The effective ~2 MB window must
+ * TCP_WND >> TCP_RCV_SCALE (tcp_out.c). The effective window must
  * therefore be encoded in TCP_WND itself; the scale factor only widens the
  * wire encoding. At the shipped non-iOS scale 3 that is 65535 << 3 = 524,280
  * (512 KiB effective; the header advertises 65535, the 16-bit max).
@@ -159,8 +159,8 @@
  * OTHER flow. PBUF_RAM's pbuf_take copy cost is unchanged; the real
  * per-flow bound is now TCP_WND (the pcb's own receive window), which the
  * TCP-lane relay (tcp_lane.c) already backpressures against via recved
- * withholding. PBUF_POOL_SIZE stays 256 purely to satisfy the compile-time
- * check above — it no longer bounds ingress throughput. */
+ * withholding. PBUF_POOL_SIZE stays nonzero purely to satisfy the
+ * compile-time check above — it no longer bounds ingress throughput. */
 #define PBUF_POOL_BUFSIZE LWIP_MEM_ALIGN_SIZE(TCP_MSS + 40 + PBUF_LINK_ENCAPSULATION_HLEN)
 
 /* Checksums: keep ON in v1 (fuzz safety per spec Notes) — this is a known
