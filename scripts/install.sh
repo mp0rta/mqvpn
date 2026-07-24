@@ -23,6 +23,36 @@ ok()    { echo "[+] $*"; }
 warn()  { echo "[!] $*" >&2; }
 err()   { echo "[!] $*" >&2; exit 1; }
 
+# Query the latest release version from the GitHub API. $1 = curl timeout
+# in seconds. Prints the bare version (e.g. "0.13.4"); fails (non-zero) or
+# prints nothing on network error or unexpected payload. sed -n prints only
+# on an exact "tag_name": "vX..." match, so a tag without the "v" prefix
+# yields empty output instead of leaking the raw JSON line; escaped quotes
+# inside JSON strings cannot spell a bare "tag_name": key, so the pattern
+# cannot match release-notes text. Reads the stream to EOF (no early-exit
+# reader, no SIGPIPE under pipefail).
+fetch_latest_version() {
+    curl -fsSL --max-time "$1" "https://api.github.com/repos/$REPO/releases/latest" \
+        | sed -n 's/.*"tag_name":[[:space:]]*"v\([0-9][^"]*\)".*/\1/p'
+}
+
+# Startup banner -- pure ASCII and colorless on purpose, so it is safe for
+# non-TTY output, NO_COLOR, dumb terminals, and log redirection without any
+# locale or TTY probing. Letterforms follow the mqvpn wordmark; the lone
+# backslash line is the q descender, not a stray character.
+print_banner() {
+    cat <<'EOF'
+
+ _______     _____     \       /   ______     _______
+/   |   \   /     \     \     /   |      \   /       \
+|   |   |  |   o   |     \   /    | _____/   |       |
+|   |   |   \_____/\      \_/     |          |       |
+                    \
+EOF
+    # The leading indent must keep the tagline aligned under the art above.
+    printf '                                   multipath quic vpn%s\n\n' "${1:+ v$1}"
+}
+
 # Generate a per-install ULA prefix per RFC 4193: fd + 40 random bits, /112.
 # /112 keeps the 16-bit host pool (matches IPv4 /24) and stays within the
 # [96,126] range required by mqvpn_addr_pool_init6.
@@ -114,6 +144,12 @@ if [ "$UNINSTALL" -eq 1 ]; then
     do_uninstall
 fi
 
+# Best-effort version lookup for the banner -- never fatal: on network
+# failure the banner simply omits the version and Step 2 retries fatally.
+VERSION=$(fetch_latest_version 3 2>/dev/null) || VERSION=""
+
+print_banner "$VERSION"
+
 # --- Step 1: Environment checks ---
 info "[1/6] Detecting system..."
 
@@ -148,8 +184,9 @@ ok "Detected ${PRETTY_NAME:-$ID}, $ARCH"
 # --- Step 2: Download ---
 info "[2/6] Downloading mqvpn..."
 
-VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-    | grep '"tag_name"' | head -1 | sed 's/.*"v\([^"]*\)".*/\1/')
+if [ -z "$VERSION" ]; then
+    VERSION=$(fetch_latest_version 30) || err "Failed to detect latest version"
+fi
 [ -n "$VERSION" ] || err "Failed to detect latest version"
 
 TARBALL="mqvpn_${VERSION}_${ARCH}.tar.gz"
