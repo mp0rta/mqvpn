@@ -1,0 +1,6 @@
+- Application id is now org.mqvpn.app. This is a new app to Android, so it
+  installs alongside any earlier build rather than updating it.
+- Releases are signed with a stable key from now on, so future updates
+  install over this one.
+- Release builds are reproducible and verified against an independent
+  rebuild before publishing.

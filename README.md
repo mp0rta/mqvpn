@@ -1,6 +1,20 @@
 <div align="center">
-  <img src="website/public/img/mqvpn-lockup-violet-light.svg" alt="mqvpn" width="400">
+  <h1>
+    <picture>
+      <source
+        media="(prefers-color-scheme: dark)"
+        srcset="website/public/img/mqvpn-lockup-violet-dark.svg">
+      <img
+        src="website/public/img/mqvpn-lockup-violet-light.svg"
+        alt="mqvpn"
+        width="400">
+    </picture>
+  </h1>
   <p><b>All your connections. One stronger connection.</b></p>
+  <p>
+    <a href="https://docs.mqvpn.org/">Documentation</a> |
+    <a href="https://discord.gg/rjEqtBNtF">Discord community</a>
+  </p>
 </div>
 
 mqvpn is an open-source VPN that combines multiple internet connections—such as Wi-Fi, cellular, Starlink, and multiple ISPs—for bandwidth aggregation and seamless failover.
@@ -604,7 +618,7 @@ mqvpn is designed to comply with the following RFCs as much as possible.
 
 ## Community
 
-Join the [mqvpn community on Zulip](https://mqvpn.zulipchat.com/) to ask questions, discuss use cases, share feedback, and contribute to the project.
+Welcome to join the [mqvpn community on Discord](https://discord.gg/rjEqtBNtF) to ask questions, discuss use cases, share feedback, and contribute to the project.
 
 ## Disclaimer
 
@@ -616,7 +630,7 @@ Use of mqvpn is at your own risk. Users are solely responsible for validating it
 
 If you need commercial support, integration consulting, managed deployments, or SLA inquiries, contact contact@mp0rta.dev.
 
-You can also contact via Zulip.
+You can also contact me via Discord.
 
 
 ## License

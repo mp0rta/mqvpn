@@ -9,12 +9,20 @@ android {
     namespace = "com.mqvpn.app"
     compileSdk = 37
 
+    // AGP embeds a Google-signed "dependency metadata" block in the APK
+    // signing block by default. It is not reproducible and F-Droid rejects
+    // it (its APK scanner flags an extra signing block), so keep it out.
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
+    }
+
     defaultConfig {
-        applicationId = "com.mqvpn.app"
+        applicationId = "org.mqvpn.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 29
-        versionName = "0.13.1"
+        versionCode = 32
+        versionName = "0.13.4"
         // arm64-v8a only: must match sdk-native's abiFilters. Adding ABIs here
         // without updating sdk-native produces APKs that crash with
         // UnsatisfiedLinkError on those ABIs (no .so packaged).

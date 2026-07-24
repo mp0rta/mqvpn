@@ -72,6 +72,8 @@ for ABI in $ABIS; do
         echo "  [1/3] Building BoringSSL..."
         mkdir -p "$BSSL_BUILD"
         cmake -S "$BORINGSSL_DIR" -B "$BSSL_BUILD" \
+            -DCMAKE_C_FLAGS="-ffile-prefix-map=$PROJECT_ROOT=/mqvpn" \
+            -DCMAKE_CXX_FLAGS="-ffile-prefix-map=$PROJECT_ROOT=/mqvpn" \
             -DCMAKE_TOOLCHAIN_FILE="$NDK_CMAKE" \
             -DANDROID_ABI="$ABI" \
             -DANDROID_NATIVE_API_LEVEL="$API_LEVEL" \
@@ -109,7 +111,7 @@ for ABI in $ABIS; do
             -DANDROID_ABI="$ABI" \
             -DANDROID_NATIVE_API_LEVEL="$API_LEVEL" \
             -DCMAKE_BUILD_TYPE=MinSizeRel \
-            -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" \
+            -DCMAKE_C_FLAGS="-Wno-unknown-warning-option -ffile-prefix-map=$PROJECT_ROOT=/mqvpn" \
             -DSSL_TYPE=boringssl \
             -DSSL_PATH="$BSSL_BUILD" \
             -DSSL_INC_PATH="${BORINGSSL_DIR}/include" \
@@ -136,6 +138,7 @@ for ABI in $ABIS; do
     echo "  [3/3] Building libmqvpn..."
     mkdir -p "$MQ_BUILD"
     cmake -S "$PROJECT_ROOT" -B "$MQ_BUILD" \
+        -DCMAKE_C_FLAGS="-ffile-prefix-map=$PROJECT_ROOT=/mqvpn" \
         -DCMAKE_TOOLCHAIN_FILE="$NDK_CMAKE" \
         -DANDROID_ABI="$ABI" \
         -DANDROID_NATIVE_API_LEVEL="$API_LEVEL" \

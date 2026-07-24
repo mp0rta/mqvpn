@@ -1,0 +1,2 @@
+- Drop the Google-signed dependency-metadata block AGP adds to the APK, so
+  the build is fully reproducible and verifiable on F-Droid.

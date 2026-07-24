@@ -9,7 +9,7 @@
 - GNU Make
 - GCC or Clang (C11)
 - libevent 2.x
-- Network access for the first build (BoringSSL is cloned from GitHub)
+- Network access to fetch submodules (`git submodule update --init --recursive`, which includes BoringSSL)
 
 ### Quick Build
 
@@ -111,10 +111,9 @@ vcpkg install libevent:x64-windows-static
 #### 2. Build BoringSSL
 
 ```batch
-cd third_party\xquic\third_party
-git clone https://github.com/google/boringssl.git
-cd boringssl
-git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+REM BoringSSL is a submodule of the xquic fork (pinned); it is fetched by
+REM `git submodule update --init --recursive`.
+cd third_party\xquic\third_party\boringssl
 
 mkdir build && cd build
 cmake -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=0 ..
@@ -176,9 +175,6 @@ export ANDROID_NDK="$ANDROID_NDK_HOME"
 # Ensure submodules are present
 git submodule update --init --recursive
 
-# Prepare BoringSSL source
-git clone https://github.com/google/boringssl.git third_party/xquic/third_party/boringssl
-
 # Cross-compile native libraries (arm64-v8a)
 scripts/build_android.sh --abi arm64-v8a
 
@@ -211,7 +207,7 @@ iOS support is client-only and in development: the app and PacketTunnel extensio
 - macOS with a recent Xcode (16.3 or newer; CI uses the `macos-15` image and selects the newest installed Xcode)
 - CMake, Ninja, Python 3
 - [xcodegen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`) for generating the Xcode project
-- Git checkout with submodules (`--recurse-submodules`); BoringSSL is cloned automatically on first build
+- Git checkout with submodules (`git submodule update --init --recursive`), which includes BoringSSL
 
 ### Cross-build the native libraries
 

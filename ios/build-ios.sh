@@ -27,8 +27,9 @@ BSSL_BUILD="$BSSL_DIR/build-ios"
 
 if [ "$PHASE" = "boringssl" ] || [ "$PHASE" = "all" ]; then
     if [ ! -f "$BSSL_DIR/CMakeLists.txt" ]; then
-        echo "=== Cloning BoringSSL ==="
-        git clone https://github.com/google/boringssl.git "$BSSL_DIR"
+        echo "ERROR: BoringSSL not found at $BSSL_DIR."
+        echo "Run: git submodule update --init --recursive"
+        exit 1
     fi
     echo "=== BoringSSL commit: $(git -C "$BSSL_DIR" rev-parse HEAD) ==="
     echo "=== Building BoringSSL (iOS) ==="

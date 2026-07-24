@@ -47,10 +47,12 @@ fi
 BSSL_DIR="$SCRIPT_DIR/third_party/xquic/third_party/boringssl"
 BSSL_BUILD="$BSSL_DIR/build"
 
-# Clone BoringSSL if not present (not a git submodule of xquic)
+# BoringSSL is a submodule of the xquic fork, pinned to an exact commit.
+# `git submodule update --init --recursive` (run after checkout) puts it here.
 if [ ! -f "$BSSL_DIR/CMakeLists.txt" ]; then
-    echo "=== Cloning BoringSSL ==="
-    git clone https://github.com/google/boringssl.git "$BSSL_DIR"
+    echo "ERROR: BoringSSL not found at $BSSL_DIR."
+    echo "Run: git submodule update --init --recursive"
+    exit 1
 fi
 
 echo "=== Building BoringSSL ==="

@@ -16,48 +16,79 @@ dump() {
      -include "$ROOT/src/hybrid/lwip_port/lwipopts.h" -x c /dev/null
 }
 
-# check <profile-label> <extra-cflags> <<PINS
+# Read the whole dump with awk rather than piping it into `grep -q`: grep -q
+# exits the moment it matches, and under `set -o pipefail` a writer that is
+# still filling the pipe then fails the pipeline, so the check reports a
+# missing macro that is in fact present. That is what made this test fail
+# intermittently on macOS — twice on the same commit, naming a different
+# macro each time. Comparing values (not the exact line the preprocessor
+# printed) also stops the check depending on how a toolchain spaces -dM.
+macro_value() {  # $1 = dump, $2 = macro name
+  printf '%s\n' "$1" | awk -v name="$2" '
+    $1 == "#define" && $2 == name {
+      $1 = ""; $2 = ""; sub(/^[ \t]+/, ""); gsub(/[ \t]+/, " "); print; found = 1
+    }
+    END { if (!found) print "<undefined>" }'
+}
+
+WATCHED='MQVPN_LWIP_RCV_SCALE|TCP_RCV_SCALE|MQVPN_LWIP_TCP_PCB_POOL|MQVPN_LWIP_TCP_SEG_POOL|MEMP_NUM_TCP_PCB|MEMP_NUM_TCP_SEG|PBUF_POOL_SIZE|TCP_SND_BUF'
+
+# check <profile-label> <extra-cflags>; pins on stdin as "NAME|value" lines.
 check() {
-  local label="$1" flags="$2" out
+  local label="$1" flags="$2" out fail=0 name want got
   out="$(dump "$flags")"
-  while IFS= read -r pin; do
-    [ -n "$pin" ] || continue
-    echo "$out" | grep -Fqx "$pin" \
-      || { echo "FAIL: ${label} profile lost: ${pin}"; exit 1; }
+  while IFS='|' read -r name want; do
+    [ -n "$name" ] || continue
+    got="$(macro_value "$out" "$name")"
+    if [ "$got" != "$want" ]; then
+      echo "FAIL: ${label} profile: $name is '$got', expected '$want'"
+      fail=1
+    fi
   done
+  if [ "$fail" -ne 0 ]; then
+    # Tell a real profile regression apart from a toolchain difference without
+    # needing another CI round.
+    echo "--- compiler:"
+    cc --version 2>&1 | head -2
+    echo "--- watched macros as the preprocessor emitted them (${label}):"
+    printf '%s\n' "$out" \
+      | grep -E "^#define[[:space:]]+(${WATCHED})[[:space:]]" \
+      || echo "  (none matched — lwipopts.h may not have been included)"
+    exit 1
+  fi
 }
 
 check "desktop/router" "" <<'PINS'
-#define MQVPN_LWIP_RCV_SCALE 3
-#define TCP_RCV_SCALE MQVPN_LWIP_RCV_SCALE
-#define MQVPN_LWIP_TCP_PCB_POOL 8192
-#define MQVPN_LWIP_TCP_SEG_POOL 8192
-#define PBUF_POOL_SIZE 64
-#define TCP_SND_BUF (2 * 1024 * 1024)
-#define MEMP_NUM_TCP_PCB MQVPN_LWIP_TCP_PCB_POOL
-#define MEMP_NUM_TCP_SEG MQVPN_LWIP_TCP_SEG_POOL
+MQVPN_LWIP_RCV_SCALE|3
+TCP_RCV_SCALE|MQVPN_LWIP_RCV_SCALE
+MQVPN_LWIP_TCP_PCB_POOL|8192
+MQVPN_LWIP_TCP_SEG_POOL|8192
+MEMP_NUM_TCP_PCB|MQVPN_LWIP_TCP_PCB_POOL
+MEMP_NUM_TCP_SEG|MQVPN_LWIP_TCP_SEG_POOL
+PBUF_POOL_SIZE|64
+TCP_SND_BUF|(2 * 1024 * 1024)
 PINS
 
 # Android keeps the pre-v0.14 pools (flow ceiling 256) but the desktop windows.
 check "Android" "-D__ANDROID__" <<'PINS'
-#define MQVPN_LWIP_RCV_SCALE 3
-#define TCP_RCV_SCALE MQVPN_LWIP_RCV_SCALE
-#define MQVPN_LWIP_TCP_PCB_POOL 512
-#define MQVPN_LWIP_TCP_SEG_POOL 2048
-#define PBUF_POOL_SIZE 64
-#define TCP_SND_BUF (2 * 1024 * 1024)
-#define MEMP_NUM_TCP_PCB MQVPN_LWIP_TCP_PCB_POOL
-#define MEMP_NUM_TCP_SEG MQVPN_LWIP_TCP_SEG_POOL
+MQVPN_LWIP_RCV_SCALE|3
+TCP_RCV_SCALE|MQVPN_LWIP_RCV_SCALE
+MQVPN_LWIP_TCP_PCB_POOL|512
+MQVPN_LWIP_TCP_SEG_POOL|2048
+MEMP_NUM_TCP_PCB|MQVPN_LWIP_TCP_PCB_POOL
+MEMP_NUM_TCP_SEG|MQVPN_LWIP_TCP_SEG_POOL
+PBUF_POOL_SIZE|64
+TCP_SND_BUF|(2 * 1024 * 1024)
 PINS
 
 # The iOS profile must win over __ANDROID__ if both are ever set.
 check "iOS" "-DMQVPN_LWIP_IOS_PROFILE" <<'PINS'
-#define TCP_RCV_SCALE MQVPN_LWIP_IOS_RCV_SCALE
-#define MQVPN_LWIP_TCP_PCB_POOL 128
-#define MQVPN_LWIP_TCP_SEG_POOL 512
+TCP_RCV_SCALE|MQVPN_LWIP_IOS_RCV_SCALE
+MQVPN_LWIP_TCP_PCB_POOL|128
+MQVPN_LWIP_TCP_SEG_POOL|512
 PINS
 check "iOS over Android" "-DMQVPN_LWIP_IOS_PROFILE -D__ANDROID__" <<'PINS'
-#define MQVPN_LWIP_TCP_PCB_POOL 128
+MQVPN_LWIP_TCP_PCB_POOL|128
 PINS
 
 echo "PASS: profile invariance"

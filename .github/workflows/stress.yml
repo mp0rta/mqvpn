@@ -33,19 +33,16 @@ jobs:
         id: xqsha
         run: echo "sha=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+-')" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve BoringSSL pin
+        id: bssl-pin
+        run: echo "sha=$(git -C third_party/xquic/third_party/boringssl rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Cache BoringSSL (clang fPIC, stress)
         id: bssl-cache
         uses: actions/cache@v6
         with:
           path: third_party/xquic/third_party/boringssl
-          key: bssl-9c95ec7-linux-clang-fpic-stress-v1
-
-      - name: Clone BoringSSL
-        if: steps.bssl-cache.outputs.cache-hit != 'true'
-        run: |
-          git clone https://github.com/google/boringssl.git \
-            third_party/xquic/third_party/boringssl
-          cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          key: bssl-${{ steps.bssl-pin.outputs.sha }}-linux-clang-fpic-stress-v1
 
       - name: Build BoringSSL
         if: steps.bssl-cache.outputs.cache-hit != 'true'
@@ -65,7 +62,7 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-9c95ec7-stress-v3
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-${{ steps.bssl-pin.outputs.sha }}-stress-v3
 
       - name: Build xquic
         if: steps.xquic-cache.outputs.cache-hit != 'true'
