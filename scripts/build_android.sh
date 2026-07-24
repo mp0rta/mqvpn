@@ -51,6 +51,7 @@ fi
 
 XQUIC_DIR="${PROJECT_ROOT}/third_party/xquic"
 BORINGSSL_DIR="${XQUIC_DIR}/third_party/boringssl"
+source "${PROJECT_ROOT}/scripts/bssl_build_guard.sh"
 PREBUILT_BASE="${PROJECT_ROOT}/android/sdk-native/prebuilt"
 
 echo "=== Android cross-compile ==="
@@ -68,6 +69,10 @@ for ABI in $ABIS; do
 
     # ── 1. BoringSSL ──
     BSSL_BUILD="${BUILD_DIR}/boringssl"
+    # Provenance guard BEFORE the skip check: without it, archives left by a
+    # previous pin satisfy the check below and the bump never builds at all
+    # (bssl_build_guard.sh). A wiped dir falls through to a fresh build.
+    bssl_guard_build_dir "$BORINGSSL_DIR" "$BSSL_BUILD"
     if [[ ! -f "${BSSL_BUILD}/libssl.a" ]] && [[ ! -f "${BSSL_BUILD}/ssl/libssl.a" ]]; then
         echo "  [1/3] Building BoringSSL..."
         mkdir -p "$BSSL_BUILD"
@@ -82,6 +87,7 @@ for ABI in $ABIS; do
             -G "$CMAKE_GEN" \
             > /dev/null 2>&1
         cmake --build "$BSSL_BUILD" --target ssl --target crypto -j"$JOBS" > /dev/null 2>&1
+        bssl_stamp_build_dir "$BORINGSSL_DIR" "$BSSL_BUILD"
     else
         echo "  [1/3] BoringSSL (cached)"
     fi

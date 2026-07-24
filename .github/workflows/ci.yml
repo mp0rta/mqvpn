@@ -734,7 +734,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: third_party/xquic/third_party/boringssl
-          key: bssl-${{ steps.bssl-pin.outputs.sha }}-ios-arm64-v2
+          key: bssl-${{ steps.bssl-pin.outputs.sha }}-ios-arm64-v3
 
       - name: Build BoringSSL (iOS)
         if: steps.bssl-ios-cache.outputs.cache-hit != 'true'
