@@ -56,6 +56,12 @@ if [ ! -f "$BSSL_DIR/CMakeLists.txt" ]; then
 fi
 
 echo "=== Building BoringSSL ==="
+# Wipe the build dir if it was produced from a different BoringSSL pin — an
+# incremental rebuild across a pin bump can leave the previous revision's
+# archives in the other layout, and the ssl/-first probes below would link
+# them (see scripts/bssl_build_guard.sh).
+source "$SCRIPT_DIR/scripts/bssl_build_guard.sh"
+bssl_guard_build_dir "$BSSL_DIR" "$BSSL_BUILD"
 mkdir -p "$BSSL_BUILD"
 if [ ! -f "$BSSL_BUILD/CMakeCache.txt" ]; then
     cmake -S "$BSSL_DIR" -B "$BSSL_BUILD" \
@@ -64,6 +70,7 @@ if [ ! -f "$BSSL_BUILD/CMakeCache.txt" ]; then
         -DCMAKE_CXX_FLAGS="-fPIC"
 fi
 make -C "$BSSL_BUILD" -j"$NPROC" ssl crypto
+bssl_stamp_build_dir "$BSSL_DIR" "$BSSL_BUILD"
 
 # ---------- 2. xquic ----------
 

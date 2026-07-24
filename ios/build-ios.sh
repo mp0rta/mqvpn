@@ -24,6 +24,7 @@ IOS_CMAKE_FLAGS=(
 
 BSSL_DIR="$SCRIPT_DIR/third_party/xquic/third_party/boringssl"
 BSSL_BUILD="$BSSL_DIR/build-ios"
+source "$SCRIPT_DIR/scripts/bssl_build_guard.sh"
 
 if [ "$PHASE" = "boringssl" ] || [ "$PHASE" = "all" ]; then
     if [ ! -f "$BSSL_DIR/CMakeLists.txt" ]; then
@@ -38,15 +39,25 @@ if [ "$PHASE" = "boringssl" ] || [ "$PHASE" = "all" ]; then
     # target's install() rule (configure-time error, unrelated to which
     # targets we actually build). We only need the static libs, so disable
     # bundling instead of patching upstream BoringSSL's CMakeLists.
+    # Provenance guard: a build dir left over from a different pin can hold
+    # the previous revision's archives in the other layout, which
+    # resolve_bssl_libs below would prefer (bssl_build_guard.sh).
+    bssl_guard_build_dir "$BSSL_DIR" "$BSSL_BUILD"
     cmake -S "$BSSL_DIR" -B "$BSSL_BUILD" "${IOS_CMAKE_FLAGS[@]}" \
         -DCMAKE_MACOSX_BUNDLE=OFF
     cmake --build "$BSSL_BUILD" --target ssl crypto
+    bssl_stamp_build_dir "$BSSL_DIR" "$BSSL_BUILD"
 fi
 
 # Newer BoringSSL layouts place archives at the build root instead of
 # ssl/ + crypto/ subdirs (the repo's own root CMake handles both) — probe
 # once, use the resolved paths everywhere below.
 resolve_bssl_libs() {
+    # The xquic/mqvpn phases can run without the boringssl phase (CI restores
+    # the build dir from a pin-keyed cache and skips it) — so consumption is
+    # where a stale dir must be caught. Cannot silently rebuild here: this
+    # phase may not have the flags the boringssl phase used.
+    bssl_verify_build_dir "$BSSL_DIR" "$BSSL_BUILD" || exit 1
     if [ -f "$BSSL_BUILD/ssl/libssl.a" ]; then
         SSL_A="$BSSL_BUILD/ssl/libssl.a"; CRYPTO_A="$BSSL_BUILD/crypto/libcrypto.a"
     else
