@@ -2,16 +2,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 mp0rta and mqvpn contributors
 #
-# scripts/bssl_build_guard.sh behaviour, including the case that broke the
-# Android reproducible-build gate: the guard reads the pin with `git rev-parse`
-# and every consumer runs under `set -e`, so a source tree WITHOUT git metadata
-# (release tarball, or android-repro.yml's `tar --exclude=.git` copies) aborted
-# the whole build with "fatal: not a git repository".
+# scripts/bssl_build_guard.sh behaviour.
 #
-# Uses throwaway git repos in a temp dir — no submodules, no network, no
-# BoringSSL build. Runs the functions the way the consumers do, i.e. under
-# `set -e`, because "returns nonzero" and "aborts the build" are the same thing
-# there and only the second one is observable to a user.
+# Two halves. First, the provenance contract itself (stamp, keep, wipe, loud
+# reject). Second, the two properties that made provenance content-derived
+# rather than `git rev-parse HEAD`:
+#
+#   - a tree with no git metadata must still work. A submodule's .git is a
+#     gitlink FILE, so `tar --exclude=.git` drops it; that is what
+#     android-repro.yml builds from and what a release tarball looks like. The
+#     commit-based guard aborted there ("fatal: not a git repository") and took
+#     the whole build with it.
+#   - a MODIFIED source tree must invalidate the build dir. The commit-based
+#     guard could not see this at all: rev-parse reports the committed
+#     revision, so archives built from a patched tree were stamped as if they
+#     came from the clean pin.
+#
+# Throwaway trees in a temp dir — no submodules, no network, no BoringSSL
+# build. Functions are called the way the consumers call them (sourced, under
+# `set -e`), because there "returns nonzero" and "aborts the build" are the
+# same event and only the second is observable to a user.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 GUARD="$ROOT/scripts/bssl_build_guard.sh"
@@ -19,24 +29,30 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 fail=0
 
-note() { printf '  %s\n' "$1"; }
 ok() { printf 'PASS: %s\n' "$1"; }
 bad() {
     printf 'FAIL: %s\n' "$1"
     fail=1
 }
 
-# A git repo with one commit; echoes its path.
-make_repo() {
+# A minimal "BoringSSL source tree": a couple of files in a subdir.
+make_src() {
     local d="$WORK/$1"
-    mkdir -p "$d"
-    git -C "$d" init -q
-    git -C "$d" -c user.email=t@t -c user.name=t commit -q --allow-empty -m x
+    mkdir -p "$d/crypto"
+    echo "int ssl(void);" > "$d/ssl.h"
+    echo "int crypto(void);" > "$d/crypto/crypto.h"
     echo "$d"
 }
 
-# Run a guard call exactly as a consumer does: sourced, under `set -e`.
-# Echoes the exit status; stderr/stdout go to $WORK/out.
+make_build_dir() {
+    local d="$WORK/$1"
+    mkdir -p "$d"
+    echo "archive" > "$d/libssl.a"
+    echo "$d"
+}
+
+# Run a guard call exactly as a consumer does. Echoes the exit status; output
+# lands in $WORK/out.
 run_guarded() {
     (
         set -euo pipefail
@@ -47,62 +63,25 @@ run_guarded() {
     echo $?
 }
 
-# ── 1. no git metadata: must not abort, must not leave a bogus stamp ───────
-src="$WORK/nogit-src"
-bdir="$WORK/nogit-build"
-mkdir -p "$src" "$bdir"
-touch "$bdir/libssl.a"
+stamp_of() { head -n 1 "$1/.mqvpn-boringssl-provenance" 2> /dev/null || true; }
 
-rc="$(run_guarded bssl_guard_build_dir "$src" "$bdir")"
-if [ "$rc" -ne 0 ]; then
-    bad "guard aborts on a tree without git metadata (rc=$rc)"
-    sed 's/^/      /' "$WORK/out"
-elif [ -d "$bdir" ]; then
-    bad "guard left an unattributable build dir in place"
-else
-    ok "guard wipes an unattributable build dir instead of aborting"
-fi
+# ── 1. provenance contract ────────────────────────────────────────────────
+src="$(make_src src1)"
+bdir="$(make_build_dir build1)"
 
-mkdir -p "$bdir"
 rc="$(run_guarded bssl_stamp_build_dir "$src" "$bdir")"
-if [ "$rc" -ne 0 ]; then
-    bad "stamp aborts on a tree without git metadata (rc=$rc)"
+if [ "$rc" -ne 0 ] || [ -z "$(stamp_of "$bdir")" ]; then
+    bad "stamp did not record provenance (rc=$rc)"
     sed 's/^/      /' "$WORK/out"
-elif [ -e "$bdir/.mqvpn-boringssl-commit" ]; then
-    bad "stamp wrote a stamp it cannot attribute (an empty stamp reads as a real one)"
 else
-    ok "stamp records nothing when the pin is undeterminable"
-fi
-
-rc="$(run_guarded bssl_verify_build_dir "$src" "$bdir")"
-if [ "$rc" -ne 0 ]; then
-    bad "verify aborts on a tree without git metadata (rc=$rc)"
-    sed 's/^/      /' "$WORK/out"
-elif ! grep -q "WARNING" "$WORK/out"; then
-    bad "verify skipped silently; the skip must be visible in the build log"
-else
-    ok "verify skips (loudly) when the pin is undeterminable"
-fi
-
-# ── 2. real repo: the provenance contract itself still holds ──────────────
-src="$(make_repo repo)"
-bdir="$WORK/repo-build"
-mkdir -p "$bdir"
-touch "$bdir/libssl.a"
-
-run_guarded bssl_stamp_build_dir "$src" "$bdir" > /dev/null
-pin="$(git -C "$src" rev-parse HEAD)"
-if [ "$(cat "$bdir/.mqvpn-boringssl-commit")" != "$pin" ]; then
-    bad "stamp did not record the pin"
-else
-    ok "stamp records the pin"
+    ok "stamp records provenance"
 fi
 
 rc="$(run_guarded bssl_guard_build_dir "$src" "$bdir")"
 if [ "$rc" -ne 0 ] || [ ! -f "$bdir/libssl.a" ]; then
-    bad "guard wiped a build dir whose stamp matches the pin (rc=$rc)"
+    bad "guard wiped a build dir that matches its source (rc=$rc)"
 else
-    ok "guard keeps a build dir whose stamp matches the pin"
+    ok "guard keeps a build dir that matches its source"
 fi
 
 rc="$(run_guarded bssl_verify_build_dir "$src" "$bdir")"
@@ -112,36 +91,117 @@ else
     ok "verify accepts a matching stamp"
 fi
 
-# Pin bump → the dir must go.
-git -C "$src" -c user.email=t@t -c user.name=t commit -q --allow-empty -m y
-rc="$(run_guarded bssl_guard_build_dir "$src" "$bdir")"
-if [ "$rc" -ne 0 ]; then
-    bad "guard aborted on a pin bump instead of wiping (rc=$rc)"
-elif [ -d "$bdir" ]; then
-    bad "guard kept a build dir built from the previous pin"
-else
-    ok "guard wipes a build dir built from the previous pin"
-fi
-
-# Consume-only path: no rebuild available, so a mismatch must fail loudly.
-mkdir -p "$bdir"
-echo "0000000000000000000000000000000000000000" > "$bdir/.mqvpn-boringssl-commit"
-rc="$(run_guarded bssl_verify_build_dir "$src" "$bdir")"
-if [ "$rc" -eq 0 ]; then
-    bad "verify accepted a stamp from another revision"
-elif ! grep -q "ERROR" "$WORK/out"; then
-    bad "verify failed without saying why"
-else
-    ok "verify rejects a stamp from another revision"
-fi
-
-# Unstamped dir (pre-stamp build): unknown provenance, treated as stale.
-rm -f "$bdir/.mqvpn-boringssl-commit"
+# Unstamped dir (a pre-stamp build): unknown provenance is stale by contract.
+rm -f "$bdir/.mqvpn-boringssl-provenance"
 rc="$(run_guarded bssl_guard_build_dir "$src" "$bdir")"
 if [ "$rc" -ne 0 ] || [ -d "$bdir" ]; then
     bad "guard did not wipe an unstamped build dir (rc=$rc)"
 else
     ok "guard wipes an unstamped build dir"
+fi
+
+# Consume-only path: a mismatch must fail loudly, never wipe-and-continue.
+bdir="$(make_build_dir build1b)"
+echo "0000000000000000000000000000000000000000000000000000000000000000" \
+    > "$bdir/.mqvpn-boringssl-provenance"
+rc="$(run_guarded bssl_verify_build_dir "$src" "$bdir")"
+if [ "$rc" -eq 0 ]; then
+    bad "verify accepted a stamp from another source"
+elif ! grep -q "ERROR" "$WORK/out"; then
+    bad "verify failed without saying why"
+elif [ ! -d "$bdir" ]; then
+    bad "verify wiped the build dir; the consume-only path must not"
+else
+    ok "verify rejects a stamp from another source, loudly, without wiping"
+fi
+
+# ── 2. no git metadata (the android-repro / tarball case) ─────────────────
+# Nothing here is a git repo: make_src never runs `git init`. The old guard
+# aborted at this point.
+src="$(make_src src2)"
+bdir="$(make_build_dir build2)"
+
+rc="$(run_guarded bssl_stamp_build_dir "$src" "$bdir")"
+if [ "$rc" -ne 0 ] || [ -z "$(stamp_of "$bdir")" ]; then
+    bad "stamp fails without git metadata (rc=$rc)"
+    sed 's/^/      /' "$WORK/out"
+else
+    ok "stamp works without git metadata"
+fi
+
+rc="$(run_guarded bssl_guard_build_dir "$src" "$bdir")"
+if [ "$rc" -ne 0 ] || [ ! -f "$bdir/libssl.a" ]; then
+    bad "guard fails or over-wipes without git metadata (rc=$rc)"
+    sed 's/^/      /' "$WORK/out"
+else
+    ok "guard works without git metadata"
+fi
+
+rc="$(run_guarded bssl_verify_build_dir "$src" "$bdir")"
+if [ "$rc" -ne 0 ]; then
+    bad "verify fails without git metadata (rc=$rc)"
+    sed 's/^/      /' "$WORK/out"
+else
+    ok "verify works without git metadata"
+fi
+
+# ── 3. a modified source invalidates the build dir ────────────────────────
+# The property `git rev-parse HEAD` cannot have: this edit is uncommitted, so
+# a commit-based stamp would still read as a match.
+echo "int ssl_patched(void);" >> "$src/ssl.h"
+rc="$(run_guarded bssl_guard_build_dir "$src" "$bdir")"
+if [ "$rc" -ne 0 ]; then
+    bad "guard errored on a modified source (rc=$rc)"
+elif [ -d "$bdir" ]; then
+    bad "guard kept a build dir after the source was modified"
+else
+    ok "guard wipes a build dir after the source was modified"
+fi
+
+# A new file must count too, not just changed contents.
+bdir="$(make_build_dir build3)"
+run_guarded bssl_stamp_build_dir "$src" "$bdir" > /dev/null
+echo "int extra(void);" > "$src/crypto/extra.h"
+rc="$(run_guarded bssl_guard_build_dir "$src" "$bdir")"
+if [ "$rc" -ne 0 ] || [ -d "$bdir" ]; then
+    bad "guard kept a build dir after a file was added to the source (rc=$rc)"
+else
+    ok "guard wipes a build dir after a file was added to the source"
+fi
+
+# ── 4. the digest ignores what android-repro deliberately varies ──────────
+# Two copies of one source, differing in mtimes, ownership bits we can change
+# unprivileged (mode), and directory-entry order, must stamp identically —
+# otherwise the reproducibility gate's two trees would disagree about their
+# own source.
+a="$(make_src copyA)"
+b="$WORK/copyB"
+mkdir -p "$b"
+tar -C "$a" -cf - . | tar -C "$b" -xmf -
+find "$b" -type f -exec touch -t 199901010000 {} +
+chmod -R g-rwx,o-rwx "$b"
+da="$(bash -c "source '$GUARD'; bssl_source_digest '$a'")"
+db="$(bash -c "source '$GUARD'; bssl_source_digest '$b'")"
+if [ -z "$da" ] || [ "$da" != "$db" ]; then
+    bad "digest differs between copies of one source (mtime/mode sensitivity): $da vs $db"
+else
+    ok "digest ignores mtimes, modes and copy location"
+fi
+
+# ── 5. missing/empty source is an error, not a silent pass ────────────────
+rc="$(run_guarded bssl_source_digest "$WORK/does-not-exist")"
+if [ "$rc" -eq 0 ]; then
+    bad "digest of a missing source tree succeeded"
+else
+    ok "digest of a missing source tree fails loudly"
+fi
+
+mkdir -p "$WORK/empty-src"
+rc="$(run_guarded bssl_source_digest "$WORK/empty-src")"
+if [ "$rc" -eq 0 ]; then
+    bad "digest of an empty source tree succeeded (submodule not checked out)"
+else
+    ok "digest of an empty source tree fails loudly"
 fi
 
 if [ "$fail" -ne 0 ]; then

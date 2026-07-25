@@ -13,25 +13,39 @@
 # at worst a "successful" build shipping the previous BoringSSL revision
 # (i.e. a security bump that never actually landed).
 #
-# The fix is provenance, not probe order (reordering just mirrors the trap for
-# the opposite migration): each build dir carries a stamp naming the submodule
-# commit it was built from, and consumers wipe or reject a dir whose stamp
-# does not match the current pin. A dir with no stamp has unknown provenance
-# and is treated as stale — including pre-stamp build dirs, which pay one
-# forced rebuild. CI caches are keyed by the pin, so a restored cache either
-# matches or was already unusable.
+# The fix is provenance: each build dir carries a stamp naming the source it
+# was built from, and consumers wipe or reject a dir whose stamp does not
+# match the current source. A dir with no stamp has unknown provenance and is
+# treated as stale — including pre-stamp build dirs, which pay one forced
+# rebuild.
 #
-# Trees without git metadata: the pin is read with `git rev-parse`, which has
-# nothing to read when the source tree was extracted from an archive rather
-# than cloned — a release tarball, or the deliberately .git-less copies
-# .github/workflows/android-repro.yml builds from (`tar --exclude=.git`, so
-# that repo metadata cannot leak into a reproducibility comparison). Every
-# consumer runs under `set -e`, so an unguarded `git` failure there aborts the
-# whole build. "Cannot determine the pin" is therefore handled explicitly
-# below, and always in the direction that cannot ship a stale archive: guard
-# wipes, stamp records nothing, verify skips. CI itself always has git
-# metadata (actions/checkout), so the loud consume-only failure this guard
-# exists for is unaffected.
+# Provenance is a digest of the source CONTENT, not the submodule commit id.
+# Reading the commit (`git -C <src> rev-parse HEAD`) was the obvious choice and
+# is wrong twice over:
+#
+#   - It is unreadable in a tree that was copied rather than cloned. A
+#     submodule's .git is a gitlink FILE pointing into the superproject's .git,
+#     so `tar --exclude=.git` drops both — which is exactly what
+#     .github/workflows/android-repro.yml does on purpose (repo metadata must
+#     not leak into a reproducibility byte-comparison), and what a release
+#     tarball looks like. Every consumer runs the guard bare under `set -e`, so
+#     a git failure there aborted the whole build.
+#   - It answers the wrong question even when it works. `rev-parse HEAD` names
+#     the COMMITTED revision, so a locally modified BoringSSL working tree — a
+#     hand-applied patch, a half-finished submodule update — stamps archives
+#     with a commit they were not built from. That is the same "the bump never
+#     actually landed" failure this guard exists to prevent, arriving through a
+#     different door.
+#
+# A content digest has neither hole: it is computable in any tree and it
+# changes when the source changes, committed or not. Cost is ~0.3 s over
+# BoringSSL's ~400 MB / ~9.7k files, against a multi-minute build.
+#
+# The digest deliberately covers file paths and contents only — no mtimes,
+# ownership or permission bits, which differ between a runner checkout and a
+# container extraction of the same source (android-repro varies both by
+# design). File modes are therefore invisible to it; content is what decides
+# what the compiler produces here.
 #
 # Usage (all three take <bssl_src_dir> <bssl_build_dir>):
 #   bssl_guard_build_dir   before configuring/skip-checking: wipe on mismatch
@@ -39,58 +53,86 @@
 #   bssl_verify_build_dir  consume-only paths (no rebuild available): fail
 #                          loudly on mismatch instead of wiping
 
-bssl_stamp_file() { echo "$2/.mqvpn-boringssl-commit"; }
+# Renamed with the mechanism: the stamp holds a content digest now, not a
+# commit id. Old stamps read as unstamped, i.e. stale — the same one forced
+# rebuild a pre-stamp build dir already pays.
+bssl_stamp_file() { echo "$2/.mqvpn-boringssl-provenance"; }
 
-# Echoes the pinned commit, or nothing when it cannot be determined (no git
-# metadata, git not installed). Never fails: callers decide what "unknown"
-# means for them, and none of them may abort the build over it.
-bssl_pin_commit() { git -C "$1" rev-parse HEAD 2>/dev/null || true; }
+# sha256sum is coreutils; macOS ships shasum instead. Echoed as a command
+# STRING because it must be usable both as an xargs command and inline, and
+# shell functions cannot be either (xargs execs, it does not go through bash).
+bssl_hash_cmd() {
+    if command -v sha256sum > /dev/null 2>&1; then
+        echo "sha256sum"
+    else
+        echo "shasum -a 256"
+    fi
+}
+
+# Digest of the source tree's paths + contents. Echoes the digest, or nothing
+# (plus an explanation on stderr) when the tree is missing or empty — which
+# means the submodule was never checked out, and every consumer is about to
+# fail at cmake anyway.
+#
+# GNU-only spellings are avoided on purpose: this also runs on macOS via
+# ios/build-ios.sh, where find(1) has no -printf and tar(1) has no --sort.
+# `-name .git -prune` matches the submodule's gitlink FILE as well as a
+# standalone clone's .git directory. xargs may split a 9.7k-file list across
+# several invocations; per-file lines keep the order xargs received them, so
+# the outer digest is stable either way.
+bssl_source_digest() {
+    local src="$1" list hasher
+    hasher="$(bssl_hash_cmd)"
+    if [ ! -d "$src" ]; then
+        echo "bssl_source_digest: $src does not exist" >&2
+        return 1
+    fi
+    list="$(cd "$src" && find . -name .git -prune -o -type f -print | LC_ALL=C sort)"
+    if [ -z "$list" ]; then
+        echo "bssl_source_digest: $src has no files (submodule not checked out?)" >&2
+        return 1
+    fi
+    # shellcheck disable=SC2086  # hasher may carry arguments ("shasum -a 256")
+    printf '%s\n' "$list" | (cd "$src" && xargs $hasher) | $hasher | cut -d' ' -f1
+}
 
 bssl_guard_build_dir() {
     local src="$1" bdir="$2" want have
-    want="$(bssl_pin_commit "$src")"
     [ -d "$bdir" ] || return 0
-    if [ -z "$want" ]; then
-        # Unknown pin: provenance cannot be established, so the dir cannot be
-        # trusted. Wiping costs a rebuild; keeping it risks linking archives
-        # from another revision, which is the failure this guard exists to
-        # prevent.
-        echo "BoringSSL pin is undeterminable in $src (no git metadata) — wiping $bdir"
-        rm -rf "$bdir"
-        return 0
-    fi
-    have="$(cat "$(bssl_stamp_file "$src" "$bdir")" 2>/dev/null || true)"
+    want="$(bssl_source_digest "$src")" || return 1
+    have="$(head -n 1 "$(bssl_stamp_file "$src" "$bdir")" 2> /dev/null || true)"
     if [ "$have" != "$want" ]; then
-        echo "BoringSSL build dir is stale (built from '${have:-unknown}', pin is $want) — wiping $bdir"
+        echo "BoringSSL build dir is stale (built from '${have:-unknown}', source is $want) — wiping $bdir"
         rm -rf "$bdir"
     fi
 }
 
 bssl_stamp_build_dir() {
-    local src="$1" bdir="$2" want
-    want="$(bssl_pin_commit "$src")"
-    if [ -z "$want" ]; then
-        # Leave no stamp rather than an empty one: an empty stamp reads as a
-        # real recorded provenance that matches nothing, which would make a
-        # later verify report "stale" for a dir that is simply unattributable.
-        rm -f "$(bssl_stamp_file "$src" "$bdir")"
-        return 0
-    fi
-    printf '%s\n' "$want" > "$(bssl_stamp_file "$src" "$bdir")"
+    local src="$1" bdir="$2" want commit
+    want="$(bssl_source_digest "$src")" || return 1
+    # Line 1 is the digest and the only line ever compared. The commit, when
+    # the tree still has the metadata to name one, rides along as a comment so
+    # a human reading the stamp can tell which revision this was — it is
+    # informational precisely because it can be a lie about a dirty tree.
+    commit="$(git -C "$src" rev-parse HEAD 2> /dev/null || true)"
+    # if/fi, not `[ -n "$commit" ] && printf`: the latter is the last command
+    # of the group when there is no commit, so the function would return 1 and
+    # abort every caller (they all run it bare under `set -e`).
+    {
+        printf '%s\n' "$want"
+        if [ -n "$commit" ]; then
+            printf '# commit %s\n' "$commit"
+        fi
+    } > "$(bssl_stamp_file "$src" "$bdir")"
 }
 
 bssl_verify_build_dir() {
     local src="$1" bdir="$2" want have
-    want="$(bssl_pin_commit "$src")"
-    if [ -z "$want" ]; then
-        echo "WARNING: BoringSSL pin is undeterminable in $src (no git metadata);" >&2
-        echo "         skipping the provenance check for $bdir." >&2
-        return 0
-    fi
-    have="$(cat "$(bssl_stamp_file "$src" "$bdir")" 2>/dev/null || true)"
+    want="$(bssl_source_digest "$src")" || return 1
+    have="$(head -n 1 "$(bssl_stamp_file "$src" "$bdir")" 2> /dev/null || true)"
     if [ "$have" != "$want" ]; then
         echo "ERROR: BoringSSL build dir $bdir is stale or unstamped" >&2
-        echo "       (built from '${have:-unknown}', pin is $want)." >&2
+        echo "       (built from '${have:-unknown}', source is $want)." >&2
         echo "       Re-run the BoringSSL build phase for this target." >&2
         return 1
     fi
