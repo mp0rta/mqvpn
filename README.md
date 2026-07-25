@@ -22,6 +22,7 @@ mqvpn is an open-source VPN that combines multiple internet connections—such a
 ## Table of Contents
 
 <!--toc:start-->
+- [Supported Platforms](#supported-platforms)
 - [Features](#features)
 - [Installation](#installation)
   - [Server](#server)
@@ -52,6 +53,29 @@ mqvpn is an open-source VPN that combines multiple internet connections—such a
 - [License](#license)
 - [Acknowledgments](#acknowledgments)
 <!--toc:end-->
+
+## Supported Platforms
+
+**Server**
+
+| Platform | Minimum version | Status | Notes |
+|---|---|---:|---|
+| [Ubuntu/Debian (amd64/arm64)](#server) | Ubuntu 22.04 / Debian 12 | ✅ | amd64 Recommended |
+| Windows | — | — | Not supported |
+| macOS | — | — | Not supported |
+
+**Client**
+
+| Platform | Minimum version | CLI | GUI/App | Distribution |
+|---|---|---:|---:|---:|
+| [Ubuntu/Debian (amd64/arm64)](#client-deb-package) | Ubuntu 22.04 / Debian 12 | ✅ | 📋 | Release package |
+| [Arch Linux (amd64/arm64)](https://aur.archlinux.org/packages/mqvpn) | rolling | ✅ | 📋 | AUR |
+| [Windows (amd64/arm64)](#windows-client) | Windows 10 | ✅ | 📋 | Release archive |
+| [macOS arm64](https://github.com/mp0rta/homebrew-tap#install) | macOS 14 (Sonoma) | ✅ | 📋 | Homebrew / Release archive |
+| iOS | iOS 15 | — | 🚧 | App Store planned |
+| [Android](https://github.com/mp0rta/mqvpn/releases) | Android 8.0 (API 26) | — | 🧪 | APK / F-Droid pending / Play Store planned |
+
+> ✅ Supported · 🧪 Experimental · 🚧 In development · 📋 Planned
 
 ## Features
 
