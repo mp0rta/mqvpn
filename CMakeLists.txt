@@ -549,6 +549,11 @@ if(BUILD_TESTING)
     enable_testing()
     add_test(NAME check_lwip_profile_invariance
              COMMAND bash ${CMAKE_SOURCE_DIR}/tests/check_lwip_profile_invariance.sh)
+    # Build-script test, not a library one: it needs no target, no submodule
+    # and no network (throwaway git repos in a temp dir), so it is registered
+    # unconditionally alongside the profile check rather than behind the lane.
+    add_test(NAME check_bssl_build_guard
+             COMMAND bash ${CMAKE_SOURCE_DIR}/tests/check_bssl_build_guard.sh)
     add_executable(test_route_parse_darwin
         tests/test_route_parse_darwin.c src/platform/darwin/routing.c
         src/platform/posix/dns_common.c src/log.c)
@@ -694,6 +699,11 @@ if(BUILD_TESTING)
     enable_testing()
     add_test(NAME check_lwip_profile_invariance
              COMMAND bash ${CMAKE_SOURCE_DIR}/tests/check_lwip_profile_invariance.sh)
+    # Build-script test, not a library one: it needs no target, no submodule
+    # and no network (throwaway git repos in a temp dir), so it is registered
+    # unconditionally alongside the profile check rather than behind the lane.
+    add_test(NAME check_bssl_build_guard
+             COMMAND bash ${CMAKE_SOURCE_DIR}/tests/check_bssl_build_guard.sh)
 
     # Each test links only the source files it needs (no xquic dependency)
     add_executable(test_config  tests/test_config.c  src/config.c  src/log.c)
