@@ -188,7 +188,66 @@ else
     ok "digest ignores mtimes, modes and copy location"
 fi
 
-# ── 5. missing/empty source is an error, not a silent pass ────────────────
+# ── 5. build dirs INSIDE the source tree ──────────────────────────────────
+# build.sh puts its build dir at boringssl/build and ios/build-ios.sh at
+# boringssl/build-ios; only scripts/build_android.sh builds out of tree. The
+# cases above all used a sibling build dir, i.e. the out-of-tree layout only,
+# and so missed the in-tree one entirely: a digest that walks into the build
+# dir also walks over the stamp file living there, so the stamp is false the
+# moment it is written. That shipped — the iOS CI job failed at
+# `build-ios.sh mqvpn` with "build dir is stale or unstamped", and every
+# build.sh run silently re-built BoringSSL from scratch.
+src="$(make_src src5)"
+bdir="$(make_build_dir src5/build-ios)"
+
+rc="$(run_guarded bssl_stamp_build_dir "$src" "$bdir")"
+if [ "$rc" -ne 0 ]; then
+    bad "stamp failed for a build dir inside the source tree (rc=$rc)"
+    sed 's/^/      /' "$WORK/out"
+else
+    rc="$(run_guarded bssl_verify_build_dir "$src" "$bdir")"
+    if [ "$rc" -ne 0 ]; then
+        bad "the stamp it just wrote does not verify (rc=$rc); the digest is self-invalidating"
+        sed 's/^/      /' "$WORK/out"
+    else
+        ok "an in-tree build dir stamps and verifies"
+    fi
+fi
+
+# A second in-tree build dir (build.sh's, next to the iOS one) must not
+# invalidate this one — otherwise two consumers on one machine wipe each
+# other's BoringSSL build on every run.
+other="$(make_build_dir src5/build)"
+echo "more output" > "$other/extra.o"
+rc="$(run_guarded bssl_verify_build_dir "$src" "$bdir")"
+if [ "$rc" -ne 0 ]; then
+    bad "a sibling in-tree build dir invalidated the stamp (rc=$rc)"
+    sed 's/^/      /' "$WORK/out"
+else
+    ok "a sibling in-tree build dir does not invalidate the stamp"
+fi
+
+# The exclusion must stay as narrow as the consumers require. Anything wider
+# drops real source from provenance, and the guard then reports a match across
+# a pin bump that only touched the dropped files — the "the bump never landed"
+# failure it exists to prevent. Two ways to get that wrong, one case each:
+# excluding by NAME would take BoringSSL's real util/build/ source dir with it,
+# and a './build*' wildcard would take any top-level dir upstream adds under
+# that prefix.
+for probe in util/build build-support; do
+    mkdir -p "$src/$probe"
+    echo "package build" > "$src/$probe/build.go"
+    run_guarded bssl_stamp_build_dir "$src" "$bdir" > /dev/null
+    echo "// patched" >> "$src/$probe/build.go"
+    rc="$(run_guarded bssl_verify_build_dir "$src" "$bdir")"
+    if [ "$rc" -eq 0 ]; then
+        bad "a change under $probe/ went unnoticed; the build-dir exclusion is too wide"
+    else
+        ok "a change under $probe/ still invalidates the stamp"
+    fi
+done
+
+# ── 6. missing/empty source is an error, not a silent pass ────────────────
 rc="$(run_guarded bssl_source_digest "$WORK/does-not-exist")"
 if [ "$rc" -eq 0 ]; then
     bad "digest of a missing source tree succeeded"

@@ -74,8 +74,32 @@ bssl_hash_cmd() {
 # means the submodule was never checked out, and every consumer is about to
 # fail at cmake anyway.
 #
+# Our own build output is excluded, and that exclusion is load-bearing rather
+# than an optimisation: two of the three consumers put the build dir INSIDE the
+# source dir (build.sh -> boringssl/build, ios/build-ios.sh -> boringssl/
+# build-ios; only scripts/build_android.sh builds out of tree). A digest that
+# walked into them would be self-invalidating, because the stamp file itself
+# lives in the build dir — bssl_stamp_build_dir would record a digest that
+# stopped being true the instant it was written, so bssl_verify_build_dir
+# always failed (a hard error on the iOS path) and bssl_guard_build_dir always
+# wiped (a silent full BoringSSL rebuild on every build.sh run). Excluding the
+# build dirs also stops two sibling ones on the same machine from invalidating
+# each other.
+#
+# The two paths are named EXACTLY, and both halves of that matter. `-name
+# build` would also prune BoringSSL's real source dir at util/build/, and a
+# `./build*` wildcard would prune anything upstream might add at the top level
+# under that prefix (a build-support/, say). Either way the guard would go on
+# reporting a match across a pin bump that only touched the dropped files —
+# i.e. exactly the "the bump never actually landed" failure it exists to
+# prevent, so the exclusion is kept as narrow as the consumers require. A
+# consumer that adds a third in-tree build dir must add it here; it will
+# announce itself loudly (verify fails, guard wipes every run) rather than
+# silently widening what provenance covers.
+#
 # GNU-only spellings are avoided on purpose: this also runs on macOS via
-# ios/build-ios.sh, where find(1) has no -printf and tar(1) has no --sort.
+# ios/build-ios.sh, where find(1) has no -printf and tar(1) has no --sort
+# (-path and -prune are in POSIX find, so the exclusion above is portable).
 # `-name .git -prune` matches the submodule's gitlink FILE as well as a
 # standalone clone's .git directory. xargs may split a 9.7k-file list across
 # several invocations; per-file lines keep the order xargs received them, so
@@ -87,7 +111,9 @@ bssl_source_digest() {
         echo "bssl_source_digest: $src does not exist" >&2
         return 1
     fi
-    list="$(cd "$src" && find . -name .git -prune -o -type f -print | LC_ALL=C sort)"
+    list="$(cd "$src" && find . -name .git -prune \
+        -o \( -type d \( -path './build' -o -path './build-ios' \) -prune \) \
+        -o -type f -print | LC_ALL=C sort)"
     if [ -z "$list" ]; then
         echo "bssl_source_digest: $src has no files (submodule not checked out?)" >&2
         return 1
