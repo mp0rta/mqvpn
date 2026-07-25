@@ -65,15 +65,25 @@ jobs:
         uses: actions/cache@v6
         with:
           path: third_party/xquic/third_party/boringssl
-          key: bssl-${{ steps.bssl-pin.outputs.sha }}-linux-gcc-fpic-v1
+          key: bssl-${{ steps.bssl-pin.outputs.sha }}-linux-gcc-fpic-v2
 
       - name: Build BoringSSL
         if: steps.bssl-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
-          cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+          # CMAKE_BUILD_TYPE is mandatory: BoringSSL sets no default, so
+          # omitting it builds at -O0 and enables BORINGSSL_DISPATCH_TEST
+          # instrumentation (~21% VPN throughput, ~7x on X25519). The cache
+          # key is bumped with it — the cached path holds the build dir.
+          cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
           make -j$(nproc) ssl crypto
+
+      # Deliberately not gated on the cache miss: a cache restored from before
+      # the CMAKE_BUILD_TYPE fix is exactly what this is meant to catch.
+      - name: Verify BoringSSL is an optimized build
+        run: bash scripts/ci_check_bssl_optimized.sh third_party/xquic/third_party/boringssl/build
 
       - name: Cache xquic (Release)
         id: xquic-cache
@@ -88,7 +98,10 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-gcc-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v4
+          # v5: libxquic.so statically absorbs BoringSSL (hidden-visibility
+          # symbols), so a cached xquic build outlives a BoringSSL flag change
+          # unless this key moves with it.
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-gcc-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v5
 
       - name: Build xquic
         if: steps.xquic-cache.outputs.cache-hit != 'true'
@@ -162,6 +175,9 @@ jobs:
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
+          # No CMAKE_BUILD_TYPE here on purpose — the clang Debug arms want
+          # BoringSSL unoptimized with its asserts live. Release belongs on the
+          # shipping builds only (see the `build` job).
           CC=clang CXX=clang++ cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
           make -j$(nproc) ssl crypto
 
@@ -410,6 +426,7 @@ jobs:
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
+          # No CMAKE_BUILD_TYPE here on purpose — see the sanitizer job.
           CC=clang CXX=clang++ cmake \
             -DBUILD_SHARED_LIBS=0 \
             -DBUILD_TESTING=OFF \
@@ -597,14 +614,15 @@ jobs:
         uses: actions/cache@v6
         with:
           path: third_party/xquic/third_party/boringssl
-          key: bssl-${{ steps.bssl-pin.outputs.sha }}-darwin-arm64-clang-v1
+          key: bssl-${{ steps.bssl-pin.outputs.sha }}-darwin-arm64-clang-v2
 
       - name: Build BoringSSL
         if: steps.bssl-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
-          cmake -DBUILD_SHARED_LIBS=0 ..
+          # See the linux-build job re: why CMAKE_BUILD_TYPE is mandatory.
+          cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_BUILD_TYPE=Release ..
           make -j"$(sysctl -n hw.ncpu)" ssl crypto
 
       - name: Cache xquic (darwin Release)
@@ -615,7 +633,8 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-darwin-arm64-clang-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v1
+          # v2: bumped with the BoringSSL cache — see the linux-build job.
+          key: xquic-${{ steps.xqsha.outputs.sha }}-darwin-arm64-clang-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v2
 
       - name: Build xquic
         if: steps.xquic-cache.outputs.cache-hit != 'true'
@@ -1019,6 +1038,9 @@ jobs:
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
+          # No CMAKE_BUILD_TYPE here on purpose — the clang Debug arms want
+          # BoringSSL unoptimized with its asserts live. Release belongs on the
+          # shipping builds only (see the `build` job).
           CC=clang CXX=clang++ cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
           make -j$(nproc) ssl crypto
 
@@ -1116,6 +1138,9 @@ jobs:
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
+          # No CMAKE_BUILD_TYPE here on purpose — the clang Debug arms want
+          # BoringSSL unoptimized with its asserts live. Release belongs on the
+          # shipping builds only (see the `build` job).
           CC=clang CXX=clang++ cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
           make -j$(nproc) ssl crypto
 

@@ -44,7 +44,10 @@ jobs:
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
-          cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+          # See perf.yml re: why CMAKE_BUILD_TYPE is mandatory — results from
+          # before this line were taken against an -O0 crypto library.
+          cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
           make -j$(nproc) ssl crypto
 
       - name: Build xquic

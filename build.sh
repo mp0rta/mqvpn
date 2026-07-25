@@ -63,9 +63,28 @@ echo "=== Building BoringSSL ==="
 source "$SCRIPT_DIR/scripts/bssl_build_guard.sh"
 bssl_guard_build_dir "$BSSL_DIR" "$BSSL_BUILD"
 mkdir -p "$BSSL_BUILD"
+# CMAKE_BUILD_TYPE is mandatory: BoringSSL's CMakeLists sets no default, so
+# omitting it compiles the whole library at -O0 with asserts live, and its
+# `NOT CMAKE_BUILD_TYPE MATCHES "rel"` guard additionally defines
+# BORINGSSL_DISPATCH_TEST (CPU-dispatch test instrumentation). Measured cost
+# of the omission: ~21% VPN throughput and ~7x on X25519.
 if [ ! -f "$BSSL_BUILD/CMakeCache.txt" ]; then
     cmake -S "$BSSL_DIR" -B "$BSSL_BUILD" \
         -DBUILD_SHARED_LIBS=0 \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_FLAGS="-fPIC" \
+        -DCMAKE_CXX_FLAGS="-fPIC"
+elif ! grep -qiE '^CMAKE_BUILD_TYPE:STRING=Rel' "$BSSL_BUILD/CMakeCache.txt"; then
+    # A build dir configured before that flag existed would silently keep its
+    # -O0 objects, since the configure above is skipped once a cache exists.
+    # Any Rel* type is left alone — that is the same prefix BoringSSL's own
+    # CMakeLists tests to decide whether the build is an optimized one.
+    echo "BoringSSL build dir was configured without CMAKE_BUILD_TYPE=Release — reconfiguring"
+    rm -rf "$BSSL_BUILD"
+    mkdir -p "$BSSL_BUILD"
+    cmake -S "$BSSL_DIR" -B "$BSSL_BUILD" \
+        -DBUILD_SHARED_LIBS=0 \
+        -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_FLAGS="-fPIC" \
         -DCMAKE_CXX_FLAGS="-fPIC"
 fi

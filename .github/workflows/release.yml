@@ -94,8 +94,16 @@ jobs:
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
-          cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+          # CMAKE_BUILD_TYPE is mandatory: BoringSSL sets no default, so
+          # omitting it ships an -O0 library with BORINGSSL_DISPATCH_TEST
+          # instrumentation (~21% VPN throughput, ~7x on X25519).
+          cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
           make -j$(nproc) ssl crypto
+
+      - name: Verify BoringSSL is an optimized build (Linux)
+        if: matrix.os == 'linux'
+        run: bash scripts/ci_check_bssl_optimized.sh third_party/xquic/third_party/boringssl/build
 
       - name: Build xquic
         if: matrix.os == 'linux'
@@ -206,8 +214,13 @@ jobs:
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
-          cmake -DBUILD_SHARED_LIBS=0 ..
+          # See the Linux BoringSSL step re: why CMAKE_BUILD_TYPE is mandatory.
+          cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_BUILD_TYPE=Release ..
           make -j"$(sysctl -n hw.ncpu)" ssl crypto
+
+      - name: Verify BoringSSL is an optimized build (macOS)
+        if: matrix.os == 'darwin'
+        run: bash scripts/ci_check_bssl_optimized.sh third_party/xquic/third_party/boringssl/build
 
       - name: Build xquic (macOS)
         if: matrix.os == 'darwin'

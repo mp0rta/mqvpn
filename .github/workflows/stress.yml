@@ -49,6 +49,7 @@ jobs:
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
+          # No CMAKE_BUILD_TYPE here on purpose — see ci.yml's sanitizer job.
           CC=clang CXX=clang++ cmake -DBUILD_SHARED_LIBS=0 -DBUILD_TESTING=OFF \
             -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
           make -j$(nproc) ssl crypto

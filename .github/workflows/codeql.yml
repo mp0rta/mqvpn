@@ -44,14 +44,18 @@ jobs:
         uses: actions/cache@v6
         with:
           path: third_party/xquic/third_party/boringssl
-          key: bssl-${{ steps.bssl-pin.outputs.sha }}-linux-gcc-fpic-v1
+          key: bssl-${{ steps.bssl-pin.outputs.sha }}-linux-gcc-fpic-v2
 
       - name: Build BoringSSL
         if: steps.bssl-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
-          cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+          # Must stay byte-identical to ci.yml's linux-build step: both jobs
+          # share the bssl-*-linux-gcc-fpic-* cache key. See there re: why
+          # CMAKE_BUILD_TYPE is mandatory.
+          cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
           make -j$(nproc) ssl crypto
 
       - name: Initialize CodeQL
@@ -72,7 +76,8 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-gcc-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v3
+          # v4: bumped with the BoringSSL cache — libxquic.so absorbs it.
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-gcc-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v4
 
       - name: Build xquic (CodeQL traced)
         if: steps.xquic-cache.outputs.cache-hit != 'true'

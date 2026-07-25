@@ -538,9 +538,12 @@ cd mqvpn
 
 ```bash
 # 1. Build BoringSSL
+# CMAKE_BUILD_TYPE is required — BoringSSL has no default build type, and
+# omitting it produces an unoptimized library (~21% less VPN throughput).
 cd third_party/xquic/third_party/boringssl
 mkdir -p build && cd build
-cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
 make -j$(nproc) ssl crypto
 cd ../../../../..
 
