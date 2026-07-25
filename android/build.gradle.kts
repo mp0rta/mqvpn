@@ -1,6 +1,6 @@
 plugins {
-    id("com.android.application") version "9.3.0" apply false
-    id("com.android.library") version "9.3.0" apply false
+    id("com.android.application") version "9.3.1" apply false
+    id("com.android.library") version "9.3.1" apply false
     // Kotlin 2.4.x is blocked on Hilt: dagger 2.59.2 bundles kotlin-metadata-jvm
     // that reads metadata <= 2.3.0, so :app:hiltJavaCompileDebug fails on 2.4.0
     // output. Bump together with a Hilt release that supports Kotlin 2.4.
