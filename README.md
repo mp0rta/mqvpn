@@ -80,7 +80,7 @@ mqvpn is an open-source VPN that combines multiple internet connections—such a
 ## Features
 
 - **Multipath** — Bind multiple interfaces (WiFi + LTE, dual ISP). Seamless failover and bandwidth aggregation via WLB scheduler.
-- **Standards-based** — MASQUE CONNECT-IP (RFC 9484), no proprietary tunnel format.
+- **Standards-based** — the tunnel is MASQUE CONNECT-IP (RFC 9484) over Multipath QUIC. Optional extensions (hybrid TCP lane, reorder) are negotiated in-band; the wire stays standard when they are off.
 - **Dual-stack** — IPv4 + IPv6 inside the tunnel.
 - **Multi-Platform** — Available on Linux (server/client), Windows (client only), macOS (client only) and Android (client only) support.
 - **PSK auth** — Pre-shared key over TLS 1.3.
