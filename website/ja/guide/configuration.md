@@ -183,7 +183,7 @@ JSON ではクライアント・サーバーとも `auth_key` を使います（
 
 内側 UDP トラフィック向けの、フロー単位の reorder バッファです。mqvpn のマルチパス集約によって複数経路に分散される単一の内側コネクション（例: 内側 QUIC）を対象とし、順序が乱れたデータグラムを短時間だけ保持して順序どおりに配送することで、内側エンドポイントが受け取る順序の乱れを軽減します。デフォルトは無効（`Enabled = off`）で、無効時はこのセクションは効果を持たず、パケットはそのまま転送されます。
 
-> **対象範囲:** reorder バッファは現在 **内側 UDP フローのみ** に適用されます。**内側 TCP はまだ reorder バッファでは扱いません（TODO）。** 内側 TCP は代わりに、TCP フローを単一経路に固定するスケジューラのフローピン留め（`wlb` / `wlb_udp_pin`）と、TCP 自身の順序乱れ耐性（RACK/SACK）に依存します。
+> **対象範囲:** reorder バッファは **内側 UDP フローのみ** に適用されます。**内側 TCP は reorder バッファでは扱いません。** 内側 TCP は代わりに、後述する hybrid mode（[`[Hybrid]`](#hybrid)）を有効化してください。QUIC stream によって reordering されます。
 
 | キー | 説明 | デフォルト |
 |------|------|-----------|
@@ -220,7 +220,7 @@ Port = 53
 Profile = default_udp
 ```
 
-…または JSON でも同様に設定できます。`reorder` オブジェクトは上記 INI キーに 1:1 で対応する snake_case キーを使い、`reorder_rules` は `{proto, port, profile}` オブジェクトの配列です（各ルールには任意で `max_wait_ms` / `cap_packets` のオーバーライドを付けられます）:
+JSON でも同様に設定できます。`reorder` オブジェクトは上記 INI キーに 1:1 で対応する snake_case キーを使い、`reorder_rules` は `{proto, port, profile}` オブジェクトの配列です（各ルールには任意で `max_wait_ms` / `cap_packets` のオーバーライドを付けられます）:
 
 ```json
 {
@@ -292,16 +292,16 @@ reorder は**デフォルトで無効**であり、有効な範囲の中での�
 |------|------|------|-----------|
 | `Enabled` | マスタースイッチ | client + server | `false` |
 | `Tcp` | フロー単位の TCP レーンポリシー: `stream`（常に使用）、`raw`（不使用 — hybrid 無効時とバイト同一）、`auto`（SYN 時点でアクティブパスが 2 本以上なら TCP レーン。判定はフローの生存期間中固定） | client | `auto` |
-| `TcpMaxFlows` | 同時 TCP レーンフロー数の上限。**client と server で実装も失敗時の挙動も異なる** — 詳細はこの表の直下の **client と server で挙動が違う** を参照 | client + server | `256` |
+| `TcpMaxFlows` | 同時 TCP レーンフロー数の上限。**client と server で実装も失敗時の挙動も異なる** — 詳細はこの表の直下の **`TcpMaxFlows`の注意点** を参照 | client + server | `256` |
 | `TcpIdleTimeoutSec` | TCP レーンフローのアイドル破棄タイムアウト。`0` で無効化 | client + server | `300` |
 | `TcpConnectTimeoutSec` | サーバの egress `connect()` タイムアウト。超過時クライアントは HTTP `504` を受け取ります | server | `10` |
 | `TcpMaxGlobalFlows` | 全セッション合計の egress TCP フロー数のサーバ全体上限 | server | `4096` |
 | `EgressAllow` | プライベートレンジ向けデフォルト拒否 egress ACL を通す CIDR（繰り返し可、最大 32） | server | — |
 | `EgressDeny` | 追加で拒否する CIDR。`EgressAllow` の後に評価されます（繰り返し可、最大 32） | server | — |
 
-#### `TcpMaxFlows` — client と server で挙動が違う
-
-共通しているのはキー名だけで、数える対象も、上限に当たったときの結果も別物。
+#### `TcpMaxFlows`の注意点
+`TcpMaxFlows` は client と server で挙動が異なります。
+共通しているのはキー名だけで、数える対象も、上限に当たったときの結果も別物になります。
 
 | | client | server |
 |---|---|---|
@@ -313,18 +313,13 @@ reorder は**デフォルトで無効**であり、有効な範囲の中での�
 | 先に尽きる資源 | RAM — worst case は `TcpMaxFlows` × 0.75 MiB (既定 256 で約 192 MiB、4096 で約 3.0 GiB) | **fd 予算** — 全体上限の `TcpMaxGlobalFlows` が先に判定される |
 | 実効値の clamp | lwIP TCP pcb プールの**半分**まで (下記) | なし (lwIP を使わないため) |
 
-**client の clamp について。** 実効値は lwIP TCP pcb プールの半分に制限される —
-desktop/router ビルド (Linux / Windows / macOS) で `4096`、Android で `256`、
-[iOS lwIP プロファイル](./hybrid-mode#ios-ビルド)で `64`。clamp が働いた場合はログに出る。
-既定値 256 は desktop/router では clamp されない (256 < 4096)。
+**client の clamp:** 実効値は lwIP TCP pcb プールの半分に制限されます。
+最大値は、desktop/router ビルド (Linux / Windows / macOS) で `4096`、Android で `256`、
+[iOS lwIP プロファイル](./hybrid-mode#ios-ビルド)で `64`になります。
 
-**これは設定値を半分にするものではない。** 実効値ぶんのフローは同時に張れる。プールの
+**これは設定値を半分にするものではありません。** 実効値ぶんのフローは同時に張れます。プールの
 残り半分は、フローテーブルが数えなくなった pcb (TIME_WAIT / LAST_ACK / CLOSING はフローより
-長生きする) が居座るための余白。この余白があるおかげで、プールが「生きたフローだけ」で
-埋まることが構造的に起こり得ず、lwIP の `tcp_alloc()` が枯渇時に行う段階的な回収
-(TIME_WAIT → LAST_ACK → CLOSING → **確立済み pcb**) が最後の段に到達しない。
-つまり「レーン側の cap が先に安く断る」という設計が、運任せではなく構造で保証される。
-
+長生きする) が居座るための余白として確保してあります。
 
 JSON では `"hybrid"` オブジェクトに snake_case キーで指定します（`enabled`, `tcp`, `tcp_max_flows`, `tcp_idle_timeout_sec`, `tcp_connect_timeout_sec`, `tcp_max_global_flows`, `egress_allow`, `egress_deny`）。
 
@@ -342,7 +337,7 @@ JSON では `"advanced"` オブジェクトに snake_case キーで指定しま�
 
 ## MTU ガイドライン
 
-### デフォルト（auto）— 通常はそのままで OK
+### デフォルト（auto)
 
 ほとんどの環境では `MTU` を設定する必要はありません。自動ネゴシエーションで決まる値（約 1382）は、標準的な Ethernet（1500）、PPPoE（1492）、モバイル回線でそのまま使えます。
 

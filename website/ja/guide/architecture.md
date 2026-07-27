@@ -30,7 +30,7 @@ mqvpn は **[sans-I/O](https://sans-io.readthedocs.io/) C ライブラリ**（`l
 
 Apple プラットフォームでは 2 つのエントリポイントが異なる構成を取ります: macOS CLI は Darwin プラットフォーム層（`src/platform/darwin/`、libevent イベントループ + `utun` デバイス）を使う一方、iOS Network Extension は sans-I/O コアを Swift で直接ラップします — RunLoop タイマー駆動の専用 tick スレッドで、パケットは `NEPacketTunnelFlow` 経由でやり取りします（libevent も独自の `utun` 操作も使いません）。
 
-### なぜ Sans-I/O か？
+### Sans-I/Oである理由
 
 - **移植性** — 各プラットフォームが独自のイベントループ（Linux / macOS では libevent、Windows では IOCP、Android では Handler 駆動ループ、iOS では Network Extension 内の専用 RunLoop スレッド）を提供します。ライブラリはスレッドモデルを強制しません。
 - **テスト容易性** — `tick()` 関数が状態遷移を同期的に駆動するため、ユニットテストがタイミング問題なく決定的に実行できます。

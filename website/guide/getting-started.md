@@ -1,6 +1,6 @@
 # Getting Started
 
-mqvpn is a multipath QUIC VPN that uses MASQUE CONNECT-IP (RFC 9484) for standards-based IP tunneling over Multipath QUIC.
+mqvpn is an L3 multipath VPN built on MASQUE CONNECT-IP (RFC 9484) and Multipath QUIC.
 
 ## Installation
 

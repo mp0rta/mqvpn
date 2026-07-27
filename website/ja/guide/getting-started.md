@@ -1,6 +1,6 @@
 # はじめに
 
-mqvpn は MASQUE CONNECT-IP (RFC 9484) を使用し、Multipath QUIC 上で標準準拠の IP トンネリングを実現するマルチパス QUIC VPN です。
+mqvpn は MASQUE CONNECT-IP (RFC 9484) と、Multipath QUIC をベースとしたL3 マルチパス VPN です。
 
 ## インストール
 

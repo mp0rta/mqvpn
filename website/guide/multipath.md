@@ -3,7 +3,7 @@
 mqvpn uses [Multipath QUIC](https://datatracker.ietf.org/doc/draft-ietf-quic-multipath/) to send traffic over multiple network paths simultaneously. This enables:
 
 - **Seamless failover** — If one path goes down, traffic continues on the remaining paths to minimize disruption during path changes.
-- **Bandwidth aggregation** — Combine bandwidth from multiple interfaces (e.g., WiFi + LTE). Aggregation works best with multiple concurrent flows; single TCP flows may see limited benefit due to flow pinning (see [WLB](#wlb-weighted-load-balancing-default)).
+- **Bandwidth aggregation** — Combine bandwidth from multiple interfaces (e.g., WiFi + LTE). Aggregation works best with multiple concurrent flows; to aggregate a single TCP flow, use [hybrid mode](./hybrid-mode).
 
 ## Setting Up Multipath
 
@@ -132,13 +132,6 @@ throughput vs WLB across loss rates 1%–10%.
 | Similar-speed paths | Either works well |
 | Lossy primary + reliable standby (experimental) | `backup_fec` |
 
-## Dynamic Path Management
-
-At the libmqvpn API level, paths can be added or removed while the VPN is running. This is useful for mobile scenarios where network interfaces come and go (e.g., connecting to WiFi while on LTE).
-
-At the library level, the platform uses `mqvpn_client_add_path_fd()` to add a new UDP socket as a path, and the path manager handles the lifecycle automatically. When a path is removed (interface goes down), traffic seamlessly shifts to the remaining paths.
-
-In the standard CLI, paths are specified at startup with `--path` flags. The platform layer then monitors those interfaces at runtime (netlink on Linux, `PF_ROUTE` on macOS): when an interface goes down its path is dropped automatically, and when the interface comes back with a usable address the socket is re-created and the path is re-added — backed by a periodic recovery timer. Discovery of brand-new interfaces that were never registered at startup is not implemented; only interfaces named via `--path` participate in this monitoring.
 
 ## Path Weighting
 
