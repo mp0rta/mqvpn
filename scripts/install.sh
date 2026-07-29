@@ -184,9 +184,7 @@ ok "Detected ${PRETTY_NAME:-$ID}, $ARCH"
 # --- Step 2: Download ---
 info "[2/6] Downloading mqvpn..."
 
-if [ -z "$MQVPN_VERSION" ]; then
-    MQVPN_VERSION=$(fetch_latest_version 30) || err "Failed to detect latest version"
-fi
+MQVPN_VERSION=$(fetch_latest_version 30) || err "Failed to detect latest version"
 [ -n "$MQVPN_VERSION" ] || err "Failed to detect latest version"
 
 TARBALL="mqvpn_${MQVPN_VERSION}_${ARCH}.tar.gz"
