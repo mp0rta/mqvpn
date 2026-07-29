@@ -410,6 +410,12 @@ bench_cleanup() {
     ip netns del "$NS_SERVER" 2>/dev/null || true
     ip netns del "$NS_CLIENT" 2>/dev/null || true
 
-    # Remove temp dir
-    [ -n "$_BENCH_WORK_DIR" ] && rm -rf "$_BENCH_WORK_DIR"
+    # Remove temp dir. Keep the if-form: a trailing `[ -n ] && rm` returns 1
+    # when the dir was already reaped by bench_stop_vpn, and that status
+    # aborts the callers' set -e EXIT traps, turning a passing suite into
+    # exit 1.
+    if [ -n "$_BENCH_WORK_DIR" ]; then
+        rm -rf "$_BENCH_WORK_DIR"
+        _BENCH_WORK_DIR=""
+    fi
 }
