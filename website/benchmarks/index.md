@@ -83,6 +83,16 @@ The hybrid TCP **stream lane** terminates TCP at the client and relays it in-ord
 
 ![Hybrid TCP-lane — WLB scheduler](/img/bench-hybrid-wlb.png)
 
+## Hybrid TCP-lane on asymmetric paths (v0.14.0)
+
+<p class="section-desc">Asymmetric A = 300 Mbit / 10 ms + B = 80 Mbit / 30 ms (380 Mbps aggregate), TCP uplink, <code>iperf3 -P {1,2,4,8,16}</code>, 3 reps.</p>
+
+Hybrid ON saturates the aggregate on asymmetric paths too — **350–357 Mbps** (≈93 % of 380 Mbps) at <code>-P ≥ 2</code>. Raw multipath never fully recovers here: with WLB the cross-path reorder penalty (20 ms vs 60 ms RTT legs) caps it at 330 Mbps even at 16 streams, and MinRTT keeps everything on the fast path (~275 Mbps) since it only spills when cwnd-blocked. Unlike the symmetric case, the lane's gain therefore persists at every stream count: MinRTT **+29–35 %**, WLB **+26 %** (<code>-P 1</code>) → **+7 %** (<code>-P 16</code>).
+
+![Hybrid TCP-lane, asymmetric paths — MinRTT scheduler](/img/bench-hybrid-asym-minrtt.png)
+
+![Hybrid TCP-lane, asymmetric paths — WLB scheduler](/img/bench-hybrid-asym-wlb.png)
+
 <style scoped>
 .page-desc {
   font-size: 0.9em;

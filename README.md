@@ -503,6 +503,21 @@ Symmetric 2×100 Mbit / 25 ms, TCP uplink, `iperf3 -P {1,2,4,8,16}`, 3 reps. The
 
 Charts: [MinRTT](bench_results/hybrid_mode/hybrid_mode_minrtt_1783350878.png) · [WLB](bench_results/hybrid_mode/hybrid_mode_wlb_1783350878.png) — bench: [`benchmarks/bench_hybrid_scheduler.sh`](benchmarks/bench_hybrid_scheduler.sh) · data: [`bench_results/hybrid_mode/`](bench_results/hybrid_mode/)
 
+### Hybrid TCP-lane on asymmetric paths (v0.14.0)
+
+Same bench on the asymmetric pair (A = 300 Mbit / 10 ms + B = 80 Mbit / 30 ms, 380 Mbps aggregate). Hybrid ON saturates the aggregate (**350–357 Mbps** ≈ 93 % at `-P ≥ 2`) here too, while raw multipath never fully recovers: with WLB the cross-path reorder penalty (20 ms vs 60 ms RTT legs) caps it at 330 Mbps even at 16 streams, and MinRTT keeps everything on the fast path (~275 Mbps) since it only spills when cwnd-blocked — so unlike the symmetric case, the lane's gain persists at every stream count:
+
+| Streams (`-P`) | 1 | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|---|
+| WLB — hybrid OFF (raw) | 261 | 271 | 314 | 317 | 330 |
+| WLB — hybrid ON (lane) | **327** | 350 | 354 | 356 | 354 |
+| WLB gain | **+26 %** | +29 % | +13 % | +12 % | +7 % |
+| MinRTT — hybrid OFF (raw) | 244 | 263 | 265 | 268 | 275 |
+| MinRTT — hybrid ON (lane) | **329** | 356 | 353 | 357 | 355 |
+| MinRTT gain | **+35 %** | +35 % | +33 % | +33 % | +29 % |
+
+Charts: [MinRTT](bench_results/hybrid_mode/hybrid_mode_asym_minrtt_1785306660.png) · [WLB](bench_results/hybrid_mode/hybrid_mode_asym_wlb_1785306660.png) — data: [`bench_results/hybrid_mode/`](bench_results/hybrid_mode/)
+
 ## Architecture
 
 ```
