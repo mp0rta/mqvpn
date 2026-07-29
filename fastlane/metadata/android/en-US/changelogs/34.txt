@@ -1,0 +1,2 @@
+- No Android-side changes: this release aligns the app with mqvpn 0.14.1,
+  which fixes the Linux server install scripts and updates documentation.
