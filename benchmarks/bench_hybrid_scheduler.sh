@@ -91,6 +91,9 @@ cat >"$INI_ON" <<EOF
 Enabled = true
 Tcp = stream
 EgressAllow = 10.222.0.0/24
+
+[Advanced]
+RecvRateLimit = 125000000
 EOF
 
 declare -A R_BW R_SP
@@ -111,7 +114,7 @@ run_iperf_p() {
     # CC ramp — the two arms (inner-TCP CUBIC vs split-TCP/QUIC-CC) ramp
     # differently, and without this the transient would leak into gain%.
     ip netns exec "$NS_CLIENT" timeout $((duration + 20)) \
-        iperf3 -c "$target" -t "$duration" -O 3 -P "$P" --json >"$json" 2>/dev/null || true
+        iperf3 -c "$target" -t "$duration" -O 3 -P "$P" ${IPERF_EXTRA:-} --json >"$json" 2>/dev/null || true
     kill "$ipid" 2>/dev/null || true; wait "$ipid" 2>/dev/null || true
     python3 -c "
 import json
@@ -171,7 +174,7 @@ run_cell() {
         # signal comes from the server API, not the client's 30s [STATUS] line).
         local slog; slog="$(mktemp)"
         if ! bench_start_vpn_server "--control-port $CTRL_PORT $cfg" "$slog" >/dev/null 2>&1 \
-           || ! bench_start_vpn_client "--path $(bench_path_veth_client 0) --path $(bench_path_veth_client 1) $cfg" /dev/null >/dev/null 2>&1 \
+           || ! bench_start_vpn_client "--path $(bench_path_veth_client 0) --path $(bench_path_veth_client 1) $cfg" "${CLIENT_LOG:+${CLIENT_LOG}.${key}.rep${rep}}" >/dev/null 2>&1 \
            || ! bench_wait_tunnel 25 >/dev/null 2>&1; then
             echo "VPN_FAIL"; { echo "      ── server log tail ──"; tail -5 "$slog"; } >&2
             echo "${sched},${hybrid},${P},${rep},,,,,VPN_FAIL" >>"$CSV"
@@ -215,7 +218,11 @@ run_cell() {
 echo "================================================================"
 echo "  mqvpn Hybrid TCP-lane × Scheduler Benchmark"
 echo "  Binary:   $MQVPN  ($("$MQVPN" --version 2>/dev/null))"
-echo "  Link:     ${NETEM} per leg, symmetric, 2 paths (RTT ≈ 2×delay)"
+if [ -n "${NETEM_HI:-}" ] && [ "${NETEM_HI}" != "$NETEM" ]; then
+    echo "  Link:     A=${NETEM} / B=${NETEM_HI} per leg, asymmetric, 2 paths"
+else
+    echo "  Link:     ${NETEM} per leg, symmetric, 2 paths (RTT ≈ 2×delay)"
+fi
 echo "  Target:   ${TARGET} (out-of-tunnel egress, STREAM-lane eligible)"
 echo "  iperf3:   TCP uplink -P {${PVALUES// /,}} -t ${DURATION}s, ${REPEAT} reps"
 echo "  Sched:    ${SCHEDULERS}"
@@ -226,7 +233,7 @@ echo "================================================================"
 bench_setup_netns_n 2
 bench_add_server_host_routes 2
 ip netns exec "$NS_SERVER" ip addr add "${TARGET}/32" dev lo
-bench_apply_netem "$NETEM" "$NETEM"
+bench_apply_netem "$NETEM" "${NETEM_HI:-$NETEM}" || { echo "FATAL: tc netem apply failed" >&2; exit 1; }
 
 for sched in $SCHEDULERS; do
     for hybrid in off on; do
