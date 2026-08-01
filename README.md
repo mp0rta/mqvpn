@@ -19,7 +19,7 @@
 
 mqvpn is an open-source VPN that combines multiple internet connections—such as Wi-Fi, cellular, Starlink, and multiple ISPs—for bandwidth aggregation and seamless failover.
 
-An 8 Mbps SRT live stream over two 6 Mbit uplinks — a single connection (left) vs the same two connections bonded by mqvpn (right):
+usecase ex): An 8 Mbps SRT live stream over two 6 Mbit uplinks — a single connection (left) vs the same two connections bonded by mqvpn (right):
 
 https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
 
@@ -96,9 +96,7 @@ https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
 
 **Stream bonding** — live feeds (SRT, RTMP) where a single connection does not provide sufficient bandwidth. The video at the top of this page shows an 8 Mbps SRT stream carried over two 6 Mbit uplinks; details in [Benchmarks](#benchmarks).
 
-**General-purpose transfer, including a single TCP connection** — with [hybrid mode](#hybrid-mode-tcp-lane), TCP traffic is also aggregated across paths: on symmetric 2 × 100 Mbit paths, one TCP flow goes from 96 Mbps (limited to one path) to 187 Mbps (both paths):
-
-![Single-flow TCP throughput with hybrid mode on vs off, symmetric 2 × 100 Mbit paths](bench_results/hybrid_mode/hybrid_mode_wlb_1783350878.png)
+**General-purpose transfer, including a TCP connection** — with [hybrid mode](#hybrid-mode-tcp-lane), TCP traffic is also aggregated across multiple paths. Details in [Benchmarks](#benchmarks).
 
 **Staying connected on unreliable links** — when one connection drops or degrades (moving vehicles, congested Wi-Fi, cellular dead spots), traffic continues over the remaining paths without interrupting sessions.
 
@@ -528,7 +526,7 @@ Charts: [MinRTT](bench_results/hybrid_mode/hybrid_mode_minrtt_1783350878.png) ·
 
 Charts: [MinRTT](bench_results/hybrid_mode/hybrid_mode_asym_minrtt_1785306660.png) · [WLB](bench_results/hybrid_mode/hybrid_mode_asym_wlb_1785306660.png) — data: [`bench_results/hybrid_mode/`](bench_results/hybrid_mode/)
 
-### SRT live streaming (v0.15.0)
+### SRT live streaming
 
 SRT contribution feeds over mqvpn, netns-emulated impaired links, mqvpn defaults (WLB, BBRv2) + SRT `lossmaxttl=32`. The starved-uplinks comparison video is shown at the top of this page; per-scenario results:
 
