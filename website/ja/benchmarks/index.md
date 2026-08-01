@@ -86,7 +86,7 @@ const latestAggregate = computed(() => {
 
 ![ハイブリッド TCP レーン（非対称パス）— WLB スケジューラ](/img/bench-hybrid-asym-wlb.png)
 
-## SRT ライブ配信（v0.15.0）
+## SRT ライブ配信
 
 <p class="section-desc">エミュレートした劣悪回線（netns）上の SRT 伝送。mqvpn はデフォルト設定（WLB スケジューラ、BBR v2）+ SRT 受信側 <code>lossmaxttl=32</code>。</p>
 

@@ -89,7 +89,7 @@ The hybrid TCP **stream lane** terminates TCP at the client and relays it in-ord
 
 ![Hybrid TCP-lane, asymmetric paths — WLB scheduler](/img/bench-hybrid-asym-wlb.png)
 
-## SRT live streaming (v0.15.0)
+## SRT live streaming
 
 <p class="section-desc">SRT contribution feeds over emulated impaired links (netns). mqvpn defaults (WLB scheduler, BBR v2) + SRT receiver <code>lossmaxttl=32</code>.</p>
 
