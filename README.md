@@ -19,7 +19,7 @@
 
 mqvpn is an open-source VPN that combines multiple internet connections—such as Wi-Fi, cellular, Starlink, and multiple ISPs—for bandwidth aggregation and seamless failover.
 
-usecase ex): An 8 Mbps SRT live stream over two 6 Mbit uplinks — a single connection (left) vs the same two connections bonded by mqvpn (right):
+Example: an 8 Mbps SRT live stream over two 6 Mbit uplinks — a single connection (left) vs the same two connections bonded by mqvpn (right):
 
 https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
 
