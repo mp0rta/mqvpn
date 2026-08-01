@@ -19,9 +19,22 @@
 
 mqvpn is an open-source VPN that combines multiple internet connections—such as Wi-Fi, cellular, Starlink, and multiple ISPs—for bandwidth aggregation and seamless failover.
 
+## Why mqvpn?
+
+- **Faster together** — connections add up: one link's 6 Mbit and another's 6 Mbit carry a stream neither could alone.
+- **No dropouts** — if one connection dies, traffic keeps flowing over the others with zero downtime.
+- **Stable on bad networks** — packet loss on one link is absorbed by the bond instead of freezing your stream.
+
+See it in action — a live video stream that needs 8 Mbps, over uplinks that can only do 6 Mbit each. Left: single connection. Right: the same two connections bonded by mqvpn:
+
+https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
+
+More scenarios and numbers in [Benchmarks](#benchmarks).
+
 ## Table of Contents
 
 <!--toc:start-->
+- [Why mqvpn?](#why-mqvpn)
 - [Supported Platforms](#supported-platforms)
 - [Features](#features)
 - [Installation](#installation)
@@ -512,6 +525,18 @@ Charts: [MinRTT](bench_results/hybrid_mode/hybrid_mode_minrtt_1783350878.png) ·
 | gain | **+26 %** | +29 % | +13 % | +12 % | +7 % |
 
 Charts: [MinRTT](bench_results/hybrid_mode/hybrid_mode_asym_minrtt_1785306660.png) · [WLB](bench_results/hybrid_mode/hybrid_mode_asym_wlb_1785306660.png) — data: [`bench_results/hybrid_mode/`](bench_results/hybrid_mode/)
+
+### SRT live streaming (v0.15.0)
+
+SRT contribution feeds over mqvpn, netns-emulated impaired links, mqvpn defaults (WLB, BBRv2) + SRT `lossmaxttl=32`. The starved-uplinks comparison video is shown in [Why mqvpn?](#why-mqvpn) above; per-scenario results:
+
+| Scenario | Direct (single link) | mqvpn (2-path) |
+|---|---|---|
+| Starved uplinks (8 Mbps FHD over 2 × 6 Mbit) | VMAF 8.6, 1.2 s frozen | VMAF **87.7**, 0 s frozen |
+| Overload (120 Mbps over 2 × 100 Mbit) | 31.5 % stream loss | **0.06 %** stream loss |
+| Dual cellular (20–40 % link loss) | 20–40 % stream loss | **0.9 %** stream loss |
+
+Full report: [`bench_results/srt/REPORT.md`](bench_results/srt/REPORT.md) — data & comparison videos: [`bench_results/srt/`](bench_results/srt/) — bench: [`scripts/benchmark_srt.sh`](scripts/benchmark_srt.sh)
 
 ## Architecture
 
