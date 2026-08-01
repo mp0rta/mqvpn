@@ -89,6 +89,24 @@ The hybrid TCP **stream lane** terminates TCP at the client and relays it in-ord
 
 ![Hybrid TCP-lane, asymmetric paths — WLB scheduler](/img/bench-hybrid-asym-wlb.png)
 
+## SRT live streaming (v0.15.0)
+
+<p class="section-desc">SRT contribution feeds over emulated impaired links (netns). mqvpn defaults (WLB scheduler, BBR v2) + SRT receiver <code>lossmaxttl=32</code>.</p>
+
+Bonding two weak or lossy links turns an unwatchable SRT feed into a stable one. Below, an 8 Mbps FHD stream where each uplink alone is only 6 Mbit — a single connection (left) vs the same two connections bonded by mqvpn (right):
+
+<video controls muted playsinline style="width: 100%; border-radius: 8px;" src="https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5"></video>
+
+| Scenario | Direct (single link) | mqvpn (2-path) |
+|---|---|---|
+| Starved uplinks (8 Mbps FHD over 2 × 6 Mbit) | VMAF 8.6, 1.2 s frozen | VMAF **87.7**, 0 s frozen |
+| Overload (120 Mbps over 2 × 100 Mbit) | 31.5 % stream loss | **0.06 %** stream loss |
+| Dual cellular (20–40 % link loss) | 20–40 % stream loss | **0.9 %** stream loss |
+
+<p class="section-desc">VMAF: perceptual video quality score, 0–100 (higher is better).</p>
+
+Full report and comparison videos: [`bench_results/srt/`](https://github.com/mp0rta/mqvpn/tree/main/bench_results/srt)
+
 <style scoped>
 .page-desc {
   font-size: 0.9em;

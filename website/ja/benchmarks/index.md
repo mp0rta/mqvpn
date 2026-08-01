@@ -86,6 +86,24 @@ const latestAggregate = computed(() => {
 
 ![ハイブリッド TCP レーン（非対称パス）— WLB スケジューラ](/img/bench-hybrid-asym-wlb.png)
 
+## SRT ライブ配信（v0.15.0）
+
+<p class="section-desc">エミュレートした劣悪回線（netns）上の SRT 伝送。mqvpn はデフォルト設定（WLB スケジューラ、BBR v2）+ SRT 受信側 <code>lossmaxttl=32</code>。</p>
+
+弱い回線・ロスの多い回線でも、2 本束ねることで視聴に耐えない SRT 配信が安定します。以下は各アップリンクが 6 Mbit しか出ない環境に 8 Mbps の FHD 配信を流した比較 — 単一回線（左）と、同じ 2 回線を mqvpn で束ねた場合（右）：
+
+<video controls muted playsinline style="width: 100%; border-radius: 8px;" src="https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5"></video>
+
+| シナリオ | 単一回線（direct） | mqvpn（2 パス） |
+|---|---|---|
+| 帯域不足（8 Mbps FHD を 2 × 6 Mbit で） | VMAF 8.6、フリーズ 1.2 秒 | VMAF **87.7**、フリーズ 0 秒 |
+| 過負荷（120 Mbps を 2 × 100 Mbit で） | ストリームロス 31.5 % | ストリームロス **0.06 %** |
+| デュアルセルラー（回線ロス 20–40 %） | ストリームロス 20–40 % | ストリームロス **0.9 %** |
+
+<p class="section-desc">VMAF：体感画質スコア（0–100、高いほど良い）。</p>
+
+フルレポートと比較動画: [`bench_results/srt/`](https://github.com/mp0rta/mqvpn/tree/main/bench_results/srt)
+
 <style scoped>
 .page-desc {
   font-size: 0.9em;
