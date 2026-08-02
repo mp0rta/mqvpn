@@ -97,7 +97,7 @@ https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
 
 **Stream bonding** — live feeds (SRT, RTMP) where a single connection does not provide sufficient bandwidth. The video at the top of this page shows an 8 Mbps SRT stream carried over two 6 Mbit uplinks; details in [Benchmarks](#benchmarks).
 
-**General-purpose transfer, including a TCP connection** — with [hybrid mode](#hybrid-mode-tcp-lane), TCP traffic is also aggregated across multiple paths. Details in [Benchmarks](#benchmarks).
+**General-purpose transfer** — with [hybrid mode](#hybrid-mode-tcp-lane), TCP traffic is also aggregated across multiple paths. Details in [Benchmarks](#benchmarks).
 
 **Staying connected on unreliable links** — when one connection drops or degrades (moving vehicles, congested Wi-Fi, cellular dead spots), traffic continues over the remaining paths without interrupting sessions.
 
