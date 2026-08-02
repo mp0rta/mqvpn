@@ -100,7 +100,7 @@ Bonding two weak or lossy links turns an unwatchable SRT feed into a stable one.
 | Scenario | Direct (single link) | mqvpn (2-path) |
 |---|---|---|
 | Starved uplinks (8 Mbps FHD over 2 × 6 Mbit) | VMAF 8.6, 1.2 s frozen | VMAF **87.7**, 0 s frozen |
-| Overload (120 Mbps over 2 × 100 Mbit) | 31.5 % stream loss | **0.06 %** stream loss |
+| Exceeds any single link (120 Mbps over 2 × 100 Mbit) | 31.5 % stream loss | **0.06 %** stream loss |
 | Dual cellular (42 Mbps over 40 + 30 Mbit lossy links) | 20–40 % stream loss | **0.9 %** stream loss |
 
 <p class="section-desc">VMAF: perceptual video quality score, 0–100 (higher is better).</p>
