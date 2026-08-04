@@ -2971,11 +2971,14 @@ mqvpn_client_destroy(mqvpn_client_t *client)
     if (!client) return;
 
     /* Transmit-side offload summary — the TX counterpart of the "udp-rx: "
-     * line platform_linux.c emits at teardown. Emitted before the engine
-     * teardown so the logger is still wired, and unconditionally — including
-     * udp_gso=0 — so e2e and bench parse one stable line per run regardless
-     * of configuration. Deliberately NOT prefixed "udp-gso: ": that prefix
-     * is an enablement marker whose absence is asserted when UdpGso=false. */
+     * line platform_linux.c emits at teardown. Emitted at the top of
+     * destroy, so it covers every send up to this point and excludes
+     * whatever the engine teardown below may still put on the wire (a
+     * handful of datagrams at most, against a whole session's traffic).
+     * Unconditional — including udp_gso=0 — so e2e and bench parse one
+     * stable line per run regardless of configuration. Deliberately NOT
+     * prefixed "udp-gso: ": that prefix is an enablement marker whose
+     * absence is asserted when UdpGso=false. */
     LOG_I(client, "udp-tx: sends=%" PRIu64 " datagrams=%" PRIu64 " gso_config=%d",
           client->tx_sends, client->tx_datagrams, client->config.udp_gso);
 

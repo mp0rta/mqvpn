@@ -2010,8 +2010,8 @@ mqvpn_server_destroy(mqvpn_server_t *s)
     if (!s) return;
 
     /* Transmit-side offload summary; see the matching comment in
-     * mqvpn_client_destroy. Emitted before the engine teardown below so the
-     * logger is still wired. */
+     * mqvpn_client_destroy, including why sends made during the engine
+     * teardown below fall outside this count. */
     LOG_I(s, "udp-tx: sends=%" PRIu64 " datagrams=%" PRIu64 " gso_config=%d", s->tx_sends,
           s->tx_datagrams, s->config.udp_gso);
 
