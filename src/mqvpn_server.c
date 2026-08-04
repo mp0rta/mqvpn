@@ -161,6 +161,12 @@ struct mqvpn_server_s {
     int udp_fd;
     int gso_available; /* engine-create probe result */
     int gso_disabled;  /* runtime sticky; reset on fd assignment */
+    /* Outer-UDP TX syscall counters; see the matching comment in
+     * mqvpn_client.c's struct. tx_datagrams / tx_sends is the achieved
+     * batching factor, fed by both the batched and the single-datagram send
+     * paths. Reported by mqvpn_server_destroy as the "udp-tx: " line. */
+    uint64_t tx_sends;
+    uint64_t tx_datagrams;
     struct sockaddr_storage local_addr;
     socklen_t local_addrlen;
 
@@ -470,6 +476,8 @@ svr_do_send(mqvpn_server_t *s, const unsigned char *buf, size_t size,
         return XQC_SOCKET_ERROR;
     }
     s->bytes_tx += (uint64_t)res;
+    s->tx_sends++; /* one sendto = one datagram; keeps the batching factor */
+    s->tx_datagrams++;
     return res;
 }
 
@@ -515,10 +523,10 @@ cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vle
 
     if (s->udp_fd < 0) return XQC_SOCKET_ERROR; /* same check as svr_do_send */
 
-    uint64_t bytes = 0;
+    mqvpn_tx_counters_t tx = {0};
     int was_gso = !s->gso_disabled;
     ssize_t r = mqvpn_udp_send_batch(s->udp_fd, msg_iov, vlen, peer, peerlen,
-                                     s->gso_available, &s->gso_disabled, &bytes);
+                                     s->gso_available, &s->gso_disabled, &tx);
     if (was_gso && s->gso_disabled) {
         /* One-shot transition: gso_disabled only resets on
          * mqvpn_server_set_socket_fd(), so this fires at most once per
@@ -531,7 +539,9 @@ cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vle
     /* single aggregate counter — the server has no per-path bytes_tx (that's
      * a client-only concept) — matching svr_do_send's s->bytes_tx accounting.
      * (bytes==0 when r<0 per udp_offload.h) */
-    s->bytes_tx += bytes;
+    s->bytes_tx += tx.bytes;
+    s->tx_sends += tx.sends;
+    s->tx_datagrams += tx.datagrams;
     if (r >= 0) return r;
     if (r == MQVPN_SEND_EAGAIN) return XQC_SOCKET_EAGAIN;
     /* xquic's own |error send mmsg| log carries no errno, and XQC_SOCKET_ERROR
@@ -1998,6 +2008,12 @@ void
 mqvpn_server_destroy(mqvpn_server_t *s)
 {
     if (!s) return;
+
+    /* Transmit-side offload summary; see the matching comment in
+     * mqvpn_client_destroy. Emitted before the engine teardown below so the
+     * logger is still wired. */
+    LOG_I(s, "udp-tx: sends=%" PRIu64 " datagrams=%" PRIu64 " gso_config=%d", s->tx_sends,
+          s->tx_datagrams, s->config.udp_gso);
 
     /* Step 1: xqc_engine_destroy triggers h3_conn_close → session free */
     if (s->engine) {

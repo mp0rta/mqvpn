@@ -127,7 +127,7 @@ send_one_run(int fd, const struct iovec *iov, size_t run, uint16_t seg,
  * mqvpn_udp_send_batch() in udp_offload.h. */
 static ssize_t
 send_batch_mmsg(int fd, const struct iovec *iov, unsigned int cnt,
-                const struct sockaddr *peer, socklen_t peerlen, uint64_t *bytes_sent)
+                const struct sockaddr *peer, socklen_t peerlen, mqvpn_tx_counters_t *tx)
 {
     struct mmsghdr mv[MQVPN_OFFLOAD_MAX_BATCH];
     if (cnt > MQVPN_OFFLOAD_MAX_BATCH) cnt = MQVPN_OFFLOAD_MAX_BATCH;
@@ -142,9 +142,15 @@ send_batch_mmsg(int fd, const struct iovec *iov, unsigned int cnt,
     do {
         r = OFFLOAD_SENDMMSG(fd, mv, cnt, MSG_DONTWAIT);
     } while (r < 0 && errno == EINTR);
-    if (r > 0)
+    if (r > 0) {
+        /* One syscall carried r datagrams — the whole point of the fallback
+         * path, and indistinguishable from r separate sendto()s in every
+         * other counter we keep. */
+        tx->sends++;
+        tx->datagrams += (uint64_t)r;
         for (int i = 0; i < r; i++)
-            *bytes_sent += mv[i].msg_len;
+            tx->bytes += mv[i].msg_len;
+    }
     return r;
 }
 
@@ -160,12 +166,12 @@ gso_class_error(int e)
 ssize_t
 mqvpn_udp_send_batch(int fd, const struct iovec *iov, unsigned int cnt,
                      const struct sockaddr *peer, socklen_t peerlen, int use_gso,
-                     int *gso_disabled, uint64_t *bytes_sent)
+                     int *gso_disabled, mqvpn_tx_counters_t *tx)
 {
     if (cnt == 0) return 0; /* nothing to do; avoids classifying stale errno */
 
     if (!use_gso || *gso_disabled) {
-        ssize_t r = send_batch_mmsg(fd, iov, cnt, peer, peerlen, bytes_sent);
+        ssize_t r = send_batch_mmsg(fd, iov, cnt, peer, peerlen, tx);
         if (r > 0) return r;
         return (errno == EAGAIN || errno == EWOULDBLOCK) ? MQVPN_SEND_EAGAIN
                                                          : MQVPN_SEND_ERR;
@@ -184,13 +190,17 @@ mqvpn_udp_send_batch(int fd, const struct iovec *iov, unsigned int cnt,
                 *gso_disabled = 1; /* sticky, any burst position */
                 if (sent == 0)     /* in-call retry only at 0 sent */
                     return mqvpn_udp_send_batch(fd, iov, cnt, peer, peerlen, 0,
-                                                gso_disabled, bytes_sent);
+                                                gso_disabled, tx);
             }
             if (sent > 0) return sent; /* contiguous prefix */
             return (errno == EAGAIN || errno == EWOULDBLOCK) ? MQVPN_SEND_EAGAIN
                                                              : MQVPN_SEND_ERR;
         }
-        *bytes_sent += (uint64_t)r;
+        tx->bytes += (uint64_t)r;
+        /* One sendmsg carried `run` datagrams: run > 1 means the UDP_SEGMENT
+         * cmsg was attached and the kernel fanned the buffer out. */
+        tx->sends++;
+        tx->datagrams += run;
         sent += (unsigned int)run;
     }
     return sent;

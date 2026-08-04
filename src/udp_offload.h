@@ -46,6 +46,19 @@ ssize_t mqvpn_seam_recvmsg(int fd, struct msghdr *msg, int flags);
  * no global cache: probing is idempotent and engine creation is rare.) */
 int mqvpn_udp_gso_probe(void);
 
+/* TX counters accumulated by mqvpn_udp_send_batch() over one socket's
+ * lifetime. `datagrams / sends` is the achieved batching factor: 1.0 means
+ * every datagram cost its own syscall — no GSO run and no sendmmsg batch ever
+ * formed — which the "udp-gso: GSO enabled" marker cannot distinguish from a
+ * fully batched run, because that marker only reports the kernel capability
+ * probe. Failed syscalls contribute to nothing. Owned by the caller (one
+ * instance per client/server), read at teardown for the "udp-tx: " line. */
+typedef struct {
+    uint64_t bytes;     /* bytes the kernel accepted */
+    uint64_t sends;     /* send syscalls that accepted >= 1 datagram */
+    uint64_t datagrams; /* datagrams the kernel accepted */
+} mqvpn_tx_counters_t;
+
 /* Length of the maximal GSO run starting at iov[0]: the longest prefix of
  * equal-size datagrams, optionally closed by ONE shorter datagram (kernel
  * rule: all segments equal, only the last may be short). A larger datagram
@@ -67,7 +80,9 @@ size_t mqvpn_gso_run_len(const struct iovec *iov, size_t cnt);
  *     (never send later runs after a failed one).
  *   - 0 sent: MQVPN_SEND_EAGAIN on EAGAIN/EWOULDBLOCK, MQVPN_SEND_ERR else.
  *   - EINTR: retry the current syscall.  All syscalls use MSG_DONTWAIT.
- *   - *bytes_sent accumulates actual bytes from syscall results.
+ *   - *tx accumulates bytes, send syscalls and datagrams from syscall
+ *     results; a syscall that failed outright contributes nothing, so the
+ *     sticky-disable retry counts only the sendmmsg that succeeded.
  * Precondition: cnt >= 1 (the engine's burst path never sends empty); every
  * iov_len >= 1 (QUIC packets are never empty).
  *
@@ -85,7 +100,7 @@ size_t mqvpn_gso_run_len(const struct iovec *iov, size_t cnt);
  * GSO-class errno here). */
 ssize_t mqvpn_udp_send_batch(int fd, const struct iovec *iov, unsigned int cnt,
                              const struct sockaddr *peer, socklen_t peerlen, int use_gso,
-                             int *gso_disabled, uint64_t *bytes_sent);
+                             int *gso_disabled, mqvpn_tx_counters_t *tx);
 
 /* ── RX ─────────────────────────────────────────────────────────────── */
 

@@ -12,6 +12,7 @@
 #include "mqvpn_scheduler.h"
 #include "mqvpn_sched_names.h" /* mqvpn_reinj_to_name for the startup log */
 
+#include <inttypes.h> /* PRIu64 in the udp-tx teardown line */
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
@@ -236,6 +237,16 @@ struct mqvpn_client_s {
     uint64_t pkts_lane_raw;
     uint64_t tcp_flows_rejected;
     uint64_t pkts_lane_tcp_dropped;
+    /* Outer-UDP TX syscall counters. tx_datagrams / tx_sends is the achieved
+     * batching factor: 1.0 means no GSO run and no sendmmsg batch ever
+     * formed, which the one-shot "udp-gso: GSO enabled" marker cannot
+     * distinguish because that marker only reports the kernel capability
+     * probe. Every outer-UDP send path feeds these, so the ratio stays
+     * meaningful with UdpGso=false and on platforms without the batched
+     * callback, where it is exactly 1.0 by construction. Reported by
+     * mqvpn_client_destroy as the "udp-tx: " line. */
+    uint64_t tx_sends;
+    uint64_t tx_datagrams;
     int srtt_ms;
     int gso_available; /* engine-create probe result */
 
@@ -1102,6 +1113,8 @@ cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *pe
     }
     c->bytes_tx += (uint64_t)res;
     c->paths[active_idx].bytes_tx += (uint64_t)res;
+    c->tx_sends++; /* one sendto = one datagram; keeps the batching factor */
+    c->tx_datagrams++;
     return res;
 }
 
@@ -1128,6 +1141,8 @@ cb_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
         path_entry_t *p = find_path_by_xqc_id(c, path_id);
         if (p) p->bytes_tx += (uint64_t)res;
     }
+    c->tx_sends++; /* one sendto = one datagram; keeps the batching factor */
+    c->tx_datagrams++;
     return res;
 }
 
@@ -1141,10 +1156,10 @@ cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vle
     path_entry_t *p = get_path_entry_for_send(c, path_id);
     if (!p || p->fd < 0) return path_send_dead_retcode(c);
 
-    uint64_t bytes = 0;
+    mqvpn_tx_counters_t tx = {0};
     int was_gso = !p->gso_disabled;
     ssize_t r = mqvpn_udp_send_batch(p->fd, msg_iov, vlen, peer, peerlen,
-                                     c->gso_available, &p->gso_disabled, &bytes);
+                                     c->gso_available, &p->gso_disabled, &tx);
     if (was_gso && p->gso_disabled) {
         /* One-shot transition: gso_disabled only resets on fd (re)assignment
          * (mqvpn_client_add_path_fd), so this fires at most once per fd
@@ -1159,11 +1174,13 @@ cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vle
         LOG_W(c,
               "udp-gso: runtime GSO failure, sticky fallback to sendmmsg on this path");
     }
-    c->bytes_tx += bytes;
+    c->bytes_tx += tx.bytes;
     /* bytes attributed to the slot owning the fd actually used — deliberately
      * differs from cb_write_socket_ex's requested-path attribution in the
      * fallback window */
-    p->bytes_tx += bytes;
+    p->bytes_tx += tx.bytes;
+    c->tx_sends += tx.sends;
+    c->tx_datagrams += tx.datagrams;
     if (r >= 0) return r;
     if (r == MQVPN_SEND_EAGAIN) return XQC_SOCKET_EAGAIN;
     /* xquic's own |error send mmsg| log carries no errno, and the retcode
@@ -2952,6 +2969,15 @@ void
 mqvpn_client_destroy(mqvpn_client_t *client)
 {
     if (!client) return;
+
+    /* Transmit-side offload summary — the TX counterpart of the "udp-rx: "
+     * line platform_linux.c emits at teardown. Emitted before the engine
+     * teardown so the logger is still wired, and unconditionally — including
+     * udp_gso=0 — so e2e and bench parse one stable line per run regardless
+     * of configuration. Deliberately NOT prefixed "udp-gso: ": that prefix
+     * is an enablement marker whose absence is asserted when UdpGso=false. */
+    LOG_I(client, "udp-tx: sends=%" PRIu64 " datagrams=%" PRIu64 " gso_config=%d",
+          client->tx_sends, client->tx_datagrams, client->config.udp_gso);
 
     client_destroy_engine(client);
     cli_conn_destroy(client);
