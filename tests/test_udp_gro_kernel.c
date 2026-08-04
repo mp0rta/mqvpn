@@ -68,12 +68,18 @@ main(void)
             segs[s].iov_base = payload + s * SEG;
             segs[s].iov_len = SEG;
         }
-        uint64_t sent = 0;
+        /* `tx` is the socket fd here, hence the tx_cnt name. */
+        mqvpn_tx_counters_t tx_cnt = {0};
         int gso_disabled = 0;
         ssize_t r = mqvpn_udp_send_batch(tx, segs, NSEGS, (struct sockaddr *)&a,
-                                         sizeof(a), 1, &gso_disabled, &sent);
+                                         sizeof(a), 1, &gso_disabled, &tx_cnt);
         assert(r == NSEGS); /* a short/failed batch send is a real defect */
-        assert(sent == TOTAL);
+        assert(tx_cnt.bytes == TOTAL);
+        /* Uniform segments form one run, so the real kernel took all NSEGS
+         * datagrams in a single sendmsg — the TX-side counterpart of the
+         * receives/datagrams coalescing check below. */
+        assert(tx_cnt.sends == 1);
+        assert(tx_cnt.datagrams == NSEGS);
     } else {
         for (int s = 0; s < NSEGS; s++)
             assert(sendto(tx, payload + s * SEG, SEG, 0, (struct sockaddr *)&a,
