@@ -63,6 +63,15 @@
 #     method reports whole-process CPU (all threads aggregated), confirmed
 #     empirically with a 2-thread pthread busy-loop test process reading
 #     ~200% from both methods — not just the main thread.
+#   - Transmit-side counters (per run, printed as a separate detail table —
+#     see the "Transmit-side detail" section below): the "udp-tx: sends=N
+#     datagrams=M gso_config=X" teardown telemetry line from BOTH endpoint
+#     logs, parsed under the same reaped-first / "NA" rules as the
+#     receive-side line below. datagrams/sends is the achieved batching
+#     factor, and the only runtime evidence that UdpGso did anything: the
+#     startup "udp-gso: " marker reports a kernel capability probe, so it
+#     reads identically whether every burst formed a 32-datagram GSO run or
+#     every datagram took a syscall of its own.
 #   - Receive-side counters (per run, printed as a separate detail table —
 #     see the "Receive-side detail" section below): the "udp-rx:
 #     receives=N datagrams=M gro_config=X" teardown telemetry line from
@@ -839,15 +848,52 @@ except Exception:
     echo "  udp-rx: client receives=${c_receives} datagrams=${c_datagrams} gro_config=${c_gro_cfg}" \
          " server receives=${s_receives} datagrams=${s_datagrams} gro_config=${s_gro_cfg}"
 
+    # udp-tx: sends=N datagrams=M gso_config=X — the transmit-side
+    # counterpart, emitted unconditionally at teardown by BOTH endpoints
+    # (mqvpn_client_destroy / mqvpn_server_destroy), including when UdpGso is
+    # off (gso_config=0). datagrams/sends is the achieved batching factor:
+    # 1.0 means every datagram cost its own syscall, a state the startup
+    # "udp-gso: " marker cannot distinguish from a fully batched run because
+    # it only reports the kernel capability probe. Same NA convention as the
+    # udp-rx block above.
+    local c_tx c_sends c_tx_dgrams c_gso_cfg
+    local s_tx s_sends s_tx_dgrams s_gso_cfg
+    c_tx="$(grep "udp-tx: " "$client_log" 2>/dev/null | tail -1 || true)"
+    s_tx="$(grep "udp-tx: " "$server_log" 2>/dev/null | tail -1 || true)"
+    if [ -n "$c_tx" ]; then
+        c_sends="$(echo "$c_tx" | sed -n 's/.*sends=\([0-9]*\).*/\1/p')"
+        c_tx_dgrams="$(echo "$c_tx" | sed -n 's/.*datagrams=\([0-9]*\).*/\1/p')"
+        c_gso_cfg="$(echo "$c_tx" | sed -n 's/.*gso_config=\([0-9]*\).*/\1/p')"
+    else
+        c_sends="NA"; c_tx_dgrams="NA"; c_gso_cfg="NA"
+    fi
+    if [ -n "$s_tx" ]; then
+        s_sends="$(echo "$s_tx" | sed -n 's/.*sends=\([0-9]*\).*/\1/p')"
+        s_tx_dgrams="$(echo "$s_tx" | sed -n 's/.*datagrams=\([0-9]*\).*/\1/p')"
+        s_gso_cfg="$(echo "$s_tx" | sed -n 's/.*gso_config=\([0-9]*\).*/\1/p')"
+    else
+        s_sends="NA"; s_tx_dgrams="NA"; s_gso_cfg="NA"
+    fi
+    [ -z "$c_sends" ] && c_sends="NA"
+    [ -z "$c_tx_dgrams" ] && c_tx_dgrams="NA"
+    [ -z "$c_gso_cfg" ] && c_gso_cfg="NA"
+    [ -z "$s_sends" ] && s_sends="NA"
+    [ -z "$s_tx_dgrams" ] && s_tx_dgrams="NA"
+    [ -z "$s_gso_cfg" ] && s_gso_cfg="NA"
+    echo "  udp-tx: client sends=${c_sends} datagrams=${c_tx_dgrams} gso_config=${c_gso_cfg}" \
+         " server sends=${s_sends} datagrams=${s_tx_dgrams} gso_config=${s_gso_cfg}"
+
     # RAW_RESULTS row — every field is guaranteed whitespace-free (see
     # comments above) so the fixed-column-count parse in the Python table
     # generator below stays valid. Field order MUST match FIELD_NAMES in
     # the PYEOF block later in this script.
-    printf '%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n' \
+    printf '%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n' \
         "$arm_label" "$run_idx" "$mbps" "$client_cpu" "$server_cpu" \
         "$gso_state" "$gro_state" \
         "$c_receives" "$c_datagrams" "$c_gro_cfg" \
         "$s_receives" "$s_datagrams" "$s_gro_cfg" \
+        "$c_sends" "$c_tx_dgrams" "$c_gso_cfg" \
+        "$s_sends" "$s_tx_dgrams" "$s_gso_cfg" \
         "$c_inerr_d" "$c_rberr_d" "$s_inerr_d" "$s_rberr_d" \
         "$c_rcvbuf" "$s_rcvbuf" "$gro_flush_c" "$gro_flush_s" "$rtt" \
         >> "$RAW_RESULTS"
@@ -936,6 +982,8 @@ FIELD_NAMES = [
     "gso", "gro",
     "c_receives", "c_datagrams", "c_gro_cfg",
     "s_receives", "s_datagrams", "s_gro_cfg",
+    "c_sends", "c_tx_dgrams", "c_gso_cfg",
+    "s_sends", "s_tx_dgrams", "s_gso_cfg",
     "c_inerr_d", "c_rberr_d", "s_inerr_d", "s_rberr_d",
     "c_rcvbuf", "s_rcvbuf",
     "gro_flush_c", "gro_flush_s",
@@ -948,14 +996,24 @@ ARM_ORDER = ("default", "disabled", "gro_off", "both_off")
 
 
 def _int_or_na(x):
-    """Receive-side counters are either an integer or the literal "NA"
-    (arm failed before carrying traffic, or the sysfs/proc source was
-    unavailable — see run_one()'s comments). Pass non-numeric values
-    through unchanged rather than raising."""
+    """Receive- and transmit-side counters are either an integer or the
+    literal "NA" (arm failed before carrying traffic, or the sysfs/proc
+    source was unavailable — see run_one()'s comments). Pass non-numeric
+    values through unchanged rather than raising."""
     try:
         return int(x)
     except ValueError:
         return x
+
+
+def _ratio(dgrams, sends):
+    """Batching factor datagrams/sends as a short string, or "NA" when
+    either operand is non-numeric ("NA" from a failed arm) or no send was
+    ever made — which would otherwise divide by zero on an arm that died
+    before carrying traffic."""
+    if not isinstance(dgrams, int) or not isinstance(sends, int) or sends == 0:
+        return "NA"
+    return f"{dgrams / sends:.2f}"
 
 
 rows = []
@@ -976,6 +1034,8 @@ with open(raw_file) as f:
         r["scpu"] = float(r["scpu"])
         for k in ("c_receives", "c_datagrams", "c_gro_cfg",
                   "s_receives", "s_datagrams", "s_gro_cfg",
+                  "c_sends", "c_tx_dgrams", "c_gso_cfg",
+                  "s_sends", "s_tx_dgrams", "s_gso_cfg",
                   "c_inerr_d", "c_rberr_d", "s_inerr_d", "s_rberr_d",
                   "c_rcvbuf", "s_rcvbuf", "gro_flush_c", "gro_flush_s"):
             r[k] = _int_or_na(r[k])
@@ -1048,6 +1108,28 @@ for r in rows:
         f"{r['s_receives']!s:<9}{r['s_datagrams']!s:<9}{r['s_gro_cfg']!s:<8}"
         f"{r['c_inerr_d']!s:<10}{r['c_rberr_d']!s:<10}{r['s_inerr_d']!s:<10}{r['s_rberr_d']!s:<10}"
         f"{r['c_rcvbuf']!s:<10}{r['s_rcvbuf']!s:<10}{r['gro_flush_c']!s:<9}{r['gro_flush_s']!s:<9}"
+    )
+
+lines.append("")
+lines.append("Transmit-side detail (diagnostic only — never a pass/fail gate; a")
+lines.append('missing udp-tx counter ("NA") means the arm failed before carrying')
+lines.append("traffic. ratio = datagrams/sends is the achieved batching factor:")
+lines.append("1.00 means every datagram cost its own send syscall, the state the")
+lines.append('startup "udp-gso: GSO enabled" marker cannot distinguish from a')
+lines.append("fully batched run because it only reports the kernel capability")
+lines.append("probe. *_gsoC is the UdpGso value the endpoint actually ran with.)")
+lines.append(
+    f"{'arm':<10}{'run':<5}"
+    f"{'c_sends':<10}{'c_dgram':<10}{'c_ratio':<9}{'c_gsoC':<8}"
+    f"{'s_sends':<10}{'s_dgram':<10}{'s_ratio':<9}{'s_gsoC':<8}"
+)
+for r in rows:
+    lines.append(
+        f"{r['arm']:<10}{r['run']:<5}"
+        f"{r['c_sends']!s:<10}{r['c_tx_dgrams']!s:<10}"
+        f"{_ratio(r['c_tx_dgrams'], r['c_sends']):<9}{r['c_gso_cfg']!s:<8}"
+        f"{r['s_sends']!s:<10}{r['s_tx_dgrams']!s:<10}"
+        f"{_ratio(r['s_tx_dgrams'], r['s_sends']):<9}{r['s_gso_cfg']!s:<8}"
     )
 
 text = "\n".join(lines)
