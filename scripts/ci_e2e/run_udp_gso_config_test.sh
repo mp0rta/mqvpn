@@ -41,11 +41,19 @@
 # invariants elsewhere in this suite (see sanitizer_check.sh and
 # AGENTS.md's e2e log marker note). If you reword either, update the
 # matching grep pattern in this file (search "udp-gso:" / "udp-gro:") in
-# the same change. Note the receive-side telemetry line added alongside
-# UdpGro, "udp-rx: receives=N datagrams=M gro_config=X" (emitted
-# unconditionally at teardown, on both the enabled and disabled path), is
-# a different, disjoint prefix — it never matches either grep here and is
-# not asserted by this script (see run_udp_gso_bench.sh for its consumer).
+# the same change. Two teardown telemetry lines use further, disjoint
+# prefixes that never match either grep above:
+#     LOG_INF("udp-rx: receives=%llu datagrams=%llu gro_config=%d", ...);
+#     LOG_I(c, "udp-tx: sends=%llu datagrams=%llu gso_config=%d", ...);
+#     LOG_I(s, "udp-tx: sends=%llu datagrams=%llu gso_config=%d", ...);
+# Both are emitted unconditionally — on the enabled and the disabled path
+# alike — so a knob's state shows up in the *_config field value rather
+# than in the line's presence, and neither can serve as an enablement
+# marker. They are asserted by check_teardown_line below, which runs after
+# the endpoints have been reaped (the lines do not exist before teardown:
+# udp-rx comes from platform_linux.c's `cleanup:` labels, udp-tx from
+# mqvpn_client_destroy / mqvpn_server_destroy). run_udp_gso_bench.sh
+# parses the same two lines into its result table.
 #
 # Race-freedom rationale (why asserting log-ABSENCE right after tunnel-up
 # is safe, not a best-effort poll): both LOG_I("udp-gso: ...") call sites
@@ -271,11 +279,54 @@ check_marker() {
     return 0
 }
 
+# check_teardown_line <prefix> <expected_field> <server_log> <client_log>
+#
+# Assertion for the unconditional teardown telemetry lines ("udp-rx: " /
+# "udp-tx: "). Unlike check_marker's presence/absence contract, these lines
+# are emitted whatever the knob's state, so the knob is verified through a
+# field value carried ON the line (e.g. "gso_config=0") — presence alone
+# would prove nothing. Both endpoints must emit it.
+#
+# MUST be called only after finish_arm has reaped both endpoints: the
+# lines are written during process teardown, so grepping any earlier races
+# a line that does not exist yet. Greps the FILES directly and closes with
+# `tail -1` (reads to EOF) rather than a `grep -q`-style early-exit reader
+# — G19: under pipefail an early-exiting reader SIGPIPEs the writer and
+# turns a successful match into a spurious failure.
+check_teardown_line() {
+    local prefix="$1" field="$2" server_log="$3" client_log="$4"
+    local rc=0 log line
+    for log in "$server_log" "$client_log"; do
+        line="$(grep "$prefix" "$log" 2>/dev/null | tail -1 || true)"
+        if [ -z "$line" ]; then
+            echo "  FAIL: '$prefix' teardown line missing from $log"
+            rc=1
+            continue
+        fi
+        case "$line" in
+            *"$field"*)
+                echo "  OK: $(basename "$log"): $line"
+                ;;
+            *)
+                echo "  FAIL: '$prefix' line does not carry '$field' in $log:"
+                echo "    $line"
+                rc=1
+                ;;
+        esac
+    done
+    return $rc
+}
+
 # --- Shared arm body ---
 #
 # arm_id: short tag for log filenames.
 # expect_gso: 1 = "udp-gso: " must be present in both logs, 0 = absent.
+#             Also asserted verbatim as "gso_config=<expect_gso>" on the
+#             "udp-tx: " teardown line, which pins that the config value
+#             actually reached the send path rather than only the startup
+#             registration branch.
 # expect_gro: 1 = "udp-gro: " must be present in both logs, 0 = absent.
+#             Likewise asserted as "gro_config=<expect_gro>" on "udp-rx: ".
 # extra_flags: appended to BOTH the server and client command lines
 #              (e.g. "-C <ini>" for Arm B/C; empty for Arm A).
 run_arm() {
@@ -343,6 +394,20 @@ run_arm() {
     echo "  OK: tunnel connectivity verified"
 
     finish_arm "$arm_id" "$server_log" "$client_log"
+
+    # Teardown telemetry, checked only now: both endpoints have been reaped
+    # above, and these lines are written on the way out (see the header's
+    # G13 note). Each carries its knob's configured value, so this catches a
+    # config value that reached the startup registration but not the data
+    # path — the "udp-gso: "/"udp-gro: " marker checks above cannot.
+    if ! check_teardown_line "udp-tx: " "gso_config=${expect_gso}" \
+        "$server_log" "$client_log"; then
+        return 1
+    fi
+    if ! check_teardown_line "udp-rx: " "gro_config=${expect_gro}" \
+        "$server_log" "$client_log"; then
+        return 1
+    fi
     return 0
 }
 
