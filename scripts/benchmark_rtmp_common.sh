@@ -160,7 +160,10 @@ EOF
 
 # start_ingest <cell-dir> — nginx in NS_SERVER, waits for the listen socket
 start_ingest() {
-    local dir="$1"
+    local dir
+    # absolute path required: nginx resolves a relative -c against the -p
+    # prefix (observed: prefix + relative conf path concatenated → ENOENT)
+    dir="$(readlink -f "$1")"
     write_nginx_conf "$dir"
     ip netns exec "$NS_SERVER" nginx -c "$dir/nginx.conf" -p "$dir/nginx-prefix" \
         -g "daemon off;" >"$dir/nginx-logs/stdout.log" 2>&1 &
