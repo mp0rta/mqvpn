@@ -250,23 +250,24 @@ compose_timeline() {
     # Drop stub FLVs that never received media. nginx's record module opens
     # the file at publish START, so a reconnect attempt that connects but
     # dies before any media arrives leaves a 0-byte FLV with no qualifying
-    # session (observed in R3 smoke: the retry landing 0.4s after flap-up
-    # races the lingering previous publisher and is rejected — dvr had a
-    # 0-byte bench-*.flv). Keep only FLVs that own at least one byte-growth
-    # sample in flv_samples.csv — the same data source compute_gaps keys
-    # on, so pairing and gap attribution stay consistent.
-    local grown=() f base
+    # session (observed in R3: the retry landing 0.4s after flap-up races
+    # the lingering previous publisher and is rejected). Filter by SIZE,
+    # not by growth-sample ownership: at link restore three events coincide
+    # (previous session's close-flush grows total_bytes, the stub is
+    # created = newest by mtime, the next session starts), so the sampler
+    # can attribute the flush growth to the stub — observed: a 0-byte FLV
+    # owning 2 growth samples. A real session is >=0.5s of 8 Mbps
+    # (~500 KB), so a <4 KB file is unambiguously a stub.
+    local kept=() f sz
     for f in "${flvs[@]}"; do
-        base="$(basename "$f")"
-        if awk -F, -v n="$base" \
-            'NR > 1 { if ($2 + 0 > prev && $3 == n) found = 1; prev = $2 + 0 }
-             END { exit !found }' "$cell/flv_samples.csv"; then
-            grown+=("$f")
+        sz=$(stat -c %s "$f")
+        if [ "$sz" -ge 4096 ]; then
+            kept+=("$f")
         else
-            echo "compose_timeline: ignoring stub FLV $base ($(stat -c %s "$f") bytes, no growth samples)" >&2
+            echo "compose_timeline: ignoring stub FLV $(basename "$f") (${sz} bytes < 4096)" >&2
         fi
     done
-    flvs=("${grown[@]}")
+    flvs=("${kept[@]}")
     local flv_count=${#flvs[@]}
 
     # "sessions that sent bytes": a session counts only if its lag.N.csv
