@@ -137,6 +137,10 @@ run_vpn_rtmp() {
 write_nginx_conf() {
     local dir="$1"
     mkdir -p "$dir/dvr" "$dir/nginx-logs" "$dir/nginx-prefix"
+    # nginx workers drop to an unprivileged user (www-data); the record
+    # module opens FLVs as that user, so a root-owned dvr dir yields
+    # "record: failed to open file ... (13: Permission denied)" (observed).
+    chmod 0777 "$dir/dvr"
     cat >"$dir/nginx.conf" <<EOF
 load_module /usr/lib/nginx/modules/ngx_rtmp_module.so;
 error_log "$dir/nginx-logs/error.log" info;
