@@ -4,7 +4,6 @@
 # Copyright (c) 2026 mp0rta and mqvpn contributors
 #
 # RTMP continuity benchmark: direct single-link vs mqvpn (hybrid lane).
-# Spec: docs/superpowers/specs/2026-08-09-rtmp-bench-design.md
 # Conds : R1 starvation (=SRT V1 shape), R2 burst loss (=C3h shape), R3 flap
 # Arms  : direct-a, mqvpn-hybrid, mqvpn-datagram (internal-only)
 # Metric: continuity (disconnects, dead-air s, recovery s) + live lag
