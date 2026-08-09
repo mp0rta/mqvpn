@@ -45,9 +45,12 @@ if command -v ffmpeg >/dev/null 2>&1; then
         ffmpeg -hide_banner -filters 2>/dev/null | awk -v f="$filt" '$0 ~ f {ok=1} END{exit !ok}' \
             || missing+=("ffmpeg ${filt} filter")
     done
-    ffmpeg -hide_banner -encoders 2>/dev/null | awk '/libx264/{f=1} END{exit !f}' \
+    # field-match (not substring): -encoders output's 2nd column is the
+    # exact codec name, so a substring match like /aac/ would also pass on
+    # an unrelated encoder whose name merely contains "aac".
+    ffmpeg -hide_banner -encoders 2>/dev/null | awk '$2=="libx264"{f=1} END{exit !f}' \
         || missing+=("ffmpeg libx264 encoder")
-    ffmpeg -hide_banner -encoders 2>/dev/null | awk '/aac/{f=1} END{exit !f}' \
+    ffmpeg -hide_banner -encoders 2>/dev/null | awk '$2=="aac"{f=1} END{exit !f}' \
         || missing+=("ffmpeg aac encoder")
     # drawtext needs either fontconfig defaults or an explicit fontfile; a
     # missing font must fail HERE, not 40 minutes into the matrix inside
@@ -70,6 +73,28 @@ if command -v ffmpeg >/dev/null 2>&1; then
         fi
     fi
 fi
+
+# Clip geometry/audio: compose_timeline re-encodes every session FLV and
+# slate to IDENTICAL codec params (x264/yuv420p/30fps/aac-48k-stereo) but
+# does NOT scale or synthesize audio — it trusts the clip matches the
+# 1920x1080 slates already. A non-1080p or audio-less clip would still
+# concat successfully (uniform codec params is all `-f concat` checks) and
+# silently produce a squashed/misaligned or audio-drifting timeline. Assert
+# both here, with the actual probed values, instead of discovering it in a
+# finished artifact.
+if [ -f "$CLIP" ] && command -v ffprobe >/dev/null 2>&1; then
+    clip_wh=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height \
+        -of csv=s=x:p=0 "$CLIP" 2>/dev/null || true)
+    if [ "$clip_wh" != "1920x1080" ]; then
+        missing+=("clip geometry: ${CLIP} probed as '${clip_wh:-unreadable}', need 1920x1080 (compose_timeline asserts this in preflight rather than scaling — see its codec-params comment)")
+    fi
+    clip_audio_streams=$( (ffprobe -v error -select_streams a -show_entries stream=index \
+        -of csv=p=0 "$CLIP" 2>/dev/null || true) | awk 'END{print NR+0}')
+    if [ "$clip_audio_streams" -eq 0 ]; then
+        missing+=("clip audio: ${CLIP} probed with 0 audio streams, need >=1 (session segments/slates are re-encoded to aac 48kHz stereo and need a source track)")
+    fi
+fi
+
 if [ "${#missing[@]}" -gt 0 ]; then
     echo "missing dependencies:"
     printf '  - %s\n' "${missing[@]}"
@@ -79,6 +104,18 @@ fi
 OUT_DIR="${RTMP_BENCH_OUT:-bench_results/rtmp/tier2_$(date +%Y%m%d_%H%M%S)}"
 WORK_DIR="$(mktemp -d /tmp/rtmp-bench-video.XXXXXX)"
 PSK="rtmp-bench-video-psk"
+
+# compose_timeline's concat list uses `file '<path>'` quoting (ffmpeg concat
+# demuxer syntax): a single-quote inside OUT_DIR/WORK_DIR (e.g. an operator
+# passing RTMP_BENCH_OUT="/tmp/joe's-run") would break that quoting and
+# either fail ffmpeg or, worse, get silently misparsed. Reject it up front.
+case "$OUT_DIR$WORK_DIR" in
+    *"'"*)
+        echo "error: OUT_DIR/WORK_DIR must not contain a single-quote (concat list uses file '<path>' quoting): OUT_DIR=$OUT_DIR WORK_DIR=$WORK_DIR"
+        exit 1
+        ;;
+esac
+
 mkdir -p "$OUT_DIR"
 
 # shellcheck source=benchmark_rtmp_common.sh
@@ -237,7 +274,10 @@ compose_timeline() {
     # (x264 veryfast, yuv420p, 30fps, aac 48kHz stereo) — the concat
     # demuxer requires uniform params across segments; stream-copying the
     # source FLVs (variable fps/keyframes/audio) into one concat would not
-    # produce a clean timeline.mp4, so re-encoding here is required.
+    # produce a clean timeline.mp4, so re-encoding here is required. Source
+    # geometry (1920x1080, matching the slates) is asserted in preflight,
+    # not normalized here — no -vf scale is applied, so a clip that somehow
+    # bypassed preflight would still concat "successfully" at the wrong size.
     local list="$work/concat.txt"
     : >"$list"
     local i=0
@@ -286,7 +326,12 @@ compose_timeline() {
 # freeze intentionally: a viewer experiences dead air as a freeze). The
 # ffmpeg call is wrapped with `|| true` so a decode error still lets awk
 # read to EOF and print whatever partial sum it saw, instead of tripping
-# pipefail on the assignment at the call site.
+# pipefail on the assignment at the call site. Note: freezedetect only
+# emits freeze_duration on THAW, so a freeze still in progress at EOF is
+# undercounted (missing from the sum entirely). This is bounded, not
+# unbounded, because the timeline's last segment is always a session
+# (compose_timeline never ends on a slate), so any freeze open at EOF is at
+# most that last session's own trailing freeze, not an entire missed gap.
 run_freezedetect() {
     local timeline="$1"
     { ffmpeg -nostdin -hide_banner -i "$timeline" \
@@ -354,13 +399,13 @@ for spec in "${CONDS[@]}"; do
         stop_ingest
         # restore path A state in case a failed run aborted mid-flap
         ip netns exec "$NS_CLIENT" ip link set bench-a0 up 2>/dev/null || true
-        ip netns exec "$NS_CLIENT" ip addr replace ${PATH_A_CLIENT_IP}/24 dev bench-a0 2>/dev/null || true
+        ip netns exec "$NS_CLIENT" ip addr replace "${PATH_A_CLIENT_IP}/24" dev bench-a0 2>/dev/null || true
 
         row=""
         if [ "$ok" -eq 1 ]; then
             if ! row=$(python3 "$(dirname "$0")/../benchmarks/rtmp_analyze.py" \
                     cell --cell-dir "$cell" --cond "$cond" --arm "$arm" --rep 1 --duration "$dur"); then
-                ok=0; reason="rtmp_analyze.py cell exited nonzero (empty publisher events)"
+                ok=0; reason="rtmp_analyze.py cell exited nonzero (see stderr)"
             fi
         fi
 
@@ -392,8 +437,13 @@ for spec in "${CONDS[@]}"; do
         fi
     done
 
+    sbs="$OUT_DIR/${cond}_sbs.mp4"
+    # Clear any stale sbs (and its log) up front — a reused RTMP_BENCH_OUT
+    # must not let a PRIOR run's side-by-side masquerade as this run's,
+    # whether this run regenerates it below or skips it because an arm
+    # FAILED.
+    rm -f "$sbs" "${sbs}.log"
     if [ "${ROW_TIMELINE[$cond,direct-a]:--}" != "-" ] && [ "${ROW_TIMELINE[$cond,mqvpn-hybrid]:--}" != "-" ]; then
-        sbs="$OUT_DIR/${cond}_sbs.mp4"
         if render_sbs "${ROW_TIMELINE[$cond,direct-a]}" "${ROW_TIMELINE[$cond,mqvpn-hybrid]}" "$sbs"; then
             echo "  sbs: $sbs"
             SBS["$cond"]="$sbs"
