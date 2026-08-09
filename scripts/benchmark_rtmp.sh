@@ -16,6 +16,8 @@
 #        RTMP_BENCH_OUT=<dir>  → reuse an output dir (required for resume:
 #                                the default dir is timestamped per run)
 #        RTMP_BENCH_CSV=<path> → override the results CSV path
+#        RTMP_BENCH_CHOWN=<owner[:group]> → chown results to this spec
+#                                (for docker etc. where SUDO_USER is unset)
 set -euo pipefail
 
 MQVPN="${1:-build-lib/mqvpn}"
@@ -23,11 +25,15 @@ MQVPN="${1:-build-lib/mqvpn}"
 MQVPN="$(readlink -f "$MQVPN")"
 [ "$(id -u)" -eq 0 ] || { echo "needs root (netns)"; exit 1; }
 
+# sourced before preflight so it can use the common lib's constants
+# (both common files are side-effect-free at source time)
+. "$(dirname "$0")/benchmark_rtmp_common.sh"
+
 # preflight: fail fast with a clear message instead of a mid-matrix cell
 # failure from a missing dependency.
 missing=()
 command -v nginx >/dev/null 2>&1 || missing+=("nginx")
-[ -e /usr/lib/nginx/modules/ngx_rtmp_module.so ] || missing+=("nginx-rtmp module (/usr/lib/nginx/modules/ngx_rtmp_module.so)")
+[ -e "$NGINX_RTMP_MODULE" ] || missing+=("nginx-rtmp module ($NGINX_RTMP_MODULE)")
 command -v ffmpeg >/dev/null 2>&1 || missing+=("ffmpeg")
 command -v python3 >/dev/null 2>&1 || missing+=("python3")
 if [ "${#missing[@]}" -gt 0 ]; then
@@ -41,8 +47,6 @@ WORK_DIR="$(mktemp -d /tmp/rtmp-bench.XXXXXX)"
 PSK="rtmp-bench-psk"
 mkdir -p "$OUT_DIR"
 
-. "$(dirname "$0")/benchmark_rtmp_common.sh"
-
 cleanup() {
     if [ -n "${PUBLISHER_FFMPEG_PID:-}" ]; then
         kill -9 "$PUBLISHER_FFMPEG_PID" 2>/dev/null || true
@@ -50,8 +54,12 @@ cleanup() {
     stop_flv_sampler; stop_flap; kill_vpn; stop_ingest
     clear_tc; teardown_netns
     rm -rf "$WORK_DIR"
-    # also on abort paths — a set -e exit must not leave root-owned results
-    if [ -n "${SUDO_USER:-}" ] && [ -d "$OUT_DIR" ]; then
+    # also on abort paths — a set -e exit must not leave root-owned results.
+    # RTMP_BENCH_CHOWN is a verbatim chown owner spec (e.g. "1000:1000")
+    # for environments where SUDO_USER is unset, e.g. docker.
+    if [ -n "${RTMP_BENCH_CHOWN:-}" ] && [ -d "$OUT_DIR" ]; then
+        chown -R "$RTMP_BENCH_CHOWN" "$OUT_DIR"
+    elif [ -n "${SUDO_USER:-}" ] && [ -d "$OUT_DIR" ]; then
         chown -R "$SUDO_USER:" "$OUT_DIR"
     fi
 }

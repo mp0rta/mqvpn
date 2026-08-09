@@ -12,6 +12,10 @@
 . "$(dirname "${BASH_SOURCE[0]}")/benchmark_srt_common.sh"
 
 RTMP_PORT=1935
+# Single source of truth for the module path — used by write_nginx_conf's
+# load_module AND both drivers' preflight checks (they source this file
+# first), so the two can never drift.
+NGINX_RTMP_MODULE=/usr/lib/nginx/modules/ngx_rtmp_module.so
 # Stream-lane egress target for the mqvpn arms. MUST be outside the tunnel
 # subnet: the server egress ACL rejects tunnel-subnet targets BEFORE
 # EgressAllow is consulted (src/hybrid/tcp_egress.c,
@@ -138,12 +142,14 @@ write_nginx_conf() {
     local dir="$1"
     mkdir -p "$dir/dvr" "$dir/nginx-logs" "$dir/nginx-prefix"
     cat >"$dir/nginx.conf" <<EOF
-load_module /usr/lib/nginx/modules/ngx_rtmp_module.so;
-# Workers must stay root: they default to www-data, which cannot traverse
-# into ~/... (Ubuntu ships /home/USER as 750), so the record module fails
-# with "record: failed to open file ... (13: Permission denied)" even when
-# the dvr dir itself is 0777 (observed). Bench runs inside a netns; the
-# usual privilege-drop rationale does not apply here.
+load_module ${NGINX_RTMP_MODULE};
+# Workers must stay root: they default to an unprivileged user (nobody
+# with this build — no --user configure flag; www-data only when the
+# distro conf sets it), which cannot traverse into ~/... (Ubuntu ships
+# /home/USER as 750), so the record module fails with "record: failed to
+# open file ... (13: Permission denied)" even when the dvr dir itself is
+# 0777 (observed). Bench-only conf inside the bench netns; the usual
+# privilege-drop rationale does not apply — never reuse this conf outside.
 user root;
 error_log "$dir/nginx-logs/error.log" info;
 pid "$dir/nginx.pid";

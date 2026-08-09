@@ -24,6 +24,13 @@ MQVPN="${1:-build-lib/mqvpn}"
 MQVPN="$(readlink -f "$MQVPN")"
 [ "$(id -u)" -eq 0 ] || { echo "needs root (netns)"; exit 1; }
 
+# sourced before preflight so it can use the common lib's constants
+# (both common files are side-effect-free at source time)
+# shellcheck source=benchmark_rtmp_common.sh
+# (run `shellcheck -x` from scripts/ cwd, per the task's verify recipe, so
+# this relative directive resolves)
+. "$(dirname "$0")/benchmark_rtmp_common.sh"
+
 CLIP_DIR="${RTMP_BENCH_CLIP_DIR:-$HOME/workspace/oss-speedify-proj/tools/clips}"
 CLIP="${CLIP_DIR}/clip_8m.mp4"
 
@@ -33,7 +40,7 @@ CLIP="${CLIP_DIR}/clip_8m.mp4"
 # explicit fontfile is required (checked below).
 missing=()
 command -v nginx >/dev/null 2>&1 || missing+=("nginx")
-[ -e /usr/lib/nginx/modules/ngx_rtmp_module.so ] || missing+=("nginx-rtmp module (/usr/lib/nginx/modules/ngx_rtmp_module.so)")
+[ -e "$NGINX_RTMP_MODULE" ] || missing+=("nginx-rtmp module ($NGINX_RTMP_MODULE)")
 command -v ffmpeg >/dev/null 2>&1 || missing+=("ffmpeg")
 command -v ffprobe >/dev/null 2>&1 || missing+=("ffprobe")
 command -v python3 >/dev/null 2>&1 || missing+=("python3")
@@ -118,11 +125,6 @@ esac
 
 mkdir -p "$OUT_DIR"
 
-# shellcheck source=benchmark_rtmp_common.sh
-# (run `shellcheck -x` from scripts/ cwd, per the task's verify recipe, so
-# this relative directive resolves)
-. "$(dirname "$0")/benchmark_rtmp_common.sh"
-
 cleanup() {
     if [ -n "${PUBLISHER_FFMPEG_PID:-}" ]; then
         kill -9 "$PUBLISHER_FFMPEG_PID" 2>/dev/null || true
@@ -131,7 +133,11 @@ cleanup() {
     clear_tc; teardown_netns
     rm -rf "$WORK_DIR"
     # also on abort paths — a set -e exit must not leave root-owned results
-    if [ -n "${SUDO_USER:-}" ] && [ -d "$OUT_DIR" ]; then
+    # RTMP_BENCH_CHOWN is a verbatim chown owner spec (e.g. "1000:1000")
+    # for environments where SUDO_USER is unset, e.g. docker.
+    if [ -n "${RTMP_BENCH_CHOWN:-}" ] && [ -d "$OUT_DIR" ]; then
+        chown -R "$RTMP_BENCH_CHOWN" "$OUT_DIR"
+    elif [ -n "${SUDO_USER:-}" ] && [ -d "$OUT_DIR" ]; then
         chown -R "$SUDO_USER:" "$OUT_DIR"
     fi
 }
@@ -222,6 +228,27 @@ compose_timeline() {
     # spaces survive `cut` (find -printf + awk field-splitting would not).
     mapfile -t flvs < <(find "$dvr" -maxdepth 1 -name '*.flv' -printf '%T@\t%p\n' 2>/dev/null \
         | sort -n -k1,1 | cut -f2-)
+
+    # Drop stub FLVs that never received media. nginx's record module opens
+    # the file at publish START, so a reconnect attempt that connects but
+    # dies before any media arrives leaves a 0-byte FLV with no qualifying
+    # session (observed in R3 smoke: the retry landing 0.4s after flap-up
+    # races the lingering previous publisher and is rejected — dvr had a
+    # 0-byte bench-*.flv). Keep only FLVs that own at least one byte-growth
+    # sample in flv_samples.csv — the same data source compute_gaps keys
+    # on, so pairing and gap attribution stay consistent.
+    local grown=() f base
+    for f in "${flvs[@]}"; do
+        base="$(basename "$f")"
+        if awk -F, -v n="$base" \
+            'NR > 1 { if ($2 + 0 > prev && $3 == n) found = 1; prev = $2 + 0 }
+             END { exit !found }' "$cell/flv_samples.csv"; then
+            grown+=("$f")
+        else
+            echo "compose_timeline: ignoring stub FLV $base ($(stat -c %s "$f") bytes, no growth samples)" >&2
+        fi
+    done
+    flvs=("${grown[@]}")
     local flv_count=${#flvs[@]}
 
     # "sessions that sent bytes": a session counts only if its lag.N.csv
@@ -229,10 +256,8 @@ compose_timeline() {
     # session_lags() uses). Chosen because it is the one signal that is
     # unambiguously per-session (flv_samples.csv is a GLOBAL byte counter,
     # not per-file) and directly reflects "ffmpeg actually produced encoded
-    # output for this session" rather than merely "connected". A session
-    # that connects and is RST'd before its first 0.5s progress sample
-    # produces neither an advancing lag.N.csv NOR (in practice) a
-    # meaningfully-sized FLV, so the two counts are expected to agree; a
+    # output for this session" rather than merely "connected". With stub
+    # FLVs filtered above, the two counts are expected to agree; a
     # disagreement means the two data sources disagree about what happened
     # and the cell is not trustworthy — hence the hard fail below rather
     # than a guess.
