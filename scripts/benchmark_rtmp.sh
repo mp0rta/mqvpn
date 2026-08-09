@@ -12,14 +12,28 @@
 #        RTMP_BENCH_QUICK=1  → one cell (R1 × direct-a × rep1), short duration
 #        RTMP_BENCH_ARMS="direct-a mqvpn-hybrid"  → arm subset
 #        RTMP_BENCH_CONDS="R3"                    → condition subset
+#        RTMP_BENCH_REPEATS=3  → repeats per (cond, arm) cell
 #        RTMP_BENCH_OUT=<dir>  → reuse an output dir (required for resume:
 #                                the default dir is timestamped per run)
+#        RTMP_BENCH_CSV=<path> → override the results CSV path
 set -euo pipefail
 
 MQVPN="${1:-build-lib/mqvpn}"
 [ -x "$MQVPN" ] || { echo "mqvpn binary not found: $MQVPN"; exit 1; }
 MQVPN="$(readlink -f "$MQVPN")"
 [ "$(id -u)" -eq 0 ] || { echo "needs root (netns)"; exit 1; }
+
+# preflight: fail fast with a clear message instead of a mid-matrix cell
+# failure from a missing dependency.
+missing=()
+command -v nginx >/dev/null 2>&1 || missing+=("nginx")
+[ -e /usr/lib/nginx/modules/ngx_rtmp_module.so ] || missing+=("nginx-rtmp module (/usr/lib/nginx/modules/ngx_rtmp_module.so)")
+command -v ffmpeg >/dev/null 2>&1 || missing+=("ffmpeg")
+command -v python3 >/dev/null 2>&1 || missing+=("python3")
+if [ "${#missing[@]}" -gt 0 ]; then
+    echo "missing dependencies: ${missing[*]}"
+    exit 1
+fi
 
 OUT_DIR="${RTMP_BENCH_OUT:-bench_results/rtmp/tier1_$(date +%Y%m%d_%H%M%S)}"
 CSV="${RTMP_BENCH_CSV:-${OUT_DIR}/results.csv}"
@@ -70,6 +84,10 @@ if [ -n "${RTMP_BENCH_CONDS:-}" ]; then
     [ "${#CONDS[@]}" -gt 0 ] || { echo "RTMP_BENCH_CONDS matched nothing"; exit 1; }
 fi
 
+for arm in "${ARMS[@]}"; do
+    arm_ini "$arm" >/dev/null || exit 1
+done
+
 # resume: a cell is done when its cond,arm,rep row exists (needs RTMP_BENCH_OUT)
 declare -A DONE_KEYS
 if [ -s "$CSV" ]; then
@@ -85,6 +103,7 @@ setup_ingest_alias
 generate_cert
 write_rtmp_inis
 
+failed=0
 for spec in "${CONDS[@]}"; do
     IFS='|' read -r cond rate_a netem_a rate_b netem_b dur flap <<<"$spec"
     echo "=== $cond  A:${rate_a}/${netem_a}  B:${rate_b}/${netem_b}  dur=${dur}s flap=${flap:-none} ==="
@@ -97,6 +116,11 @@ for spec in "${CONDS[@]}"; do
                 continue
             fi
             cell="$OUT_DIR/${cond}_${arm}_r${rep}"
+            # wipe any stale artifacts from a prior FAILED attempt at this
+            # cell (dvr FLVs, lag.N.csv, appended flap.log) — a retry must
+            # not let them corrupt the new attempt's analysis. Skipped-done
+            # cells `continue` above and never reach this line.
+            rm -rf "$cell"
             mkdir -p "$cell"
             echo "  [$key] ..."
             ok=1
@@ -126,6 +150,7 @@ for spec in "${CONDS[@]}"; do
                 echo "    -> $row"
             else
                 echo "    -> FAILED (no CSV row; artifacts kept in $cell)"
+                failed=$((failed + 1))
             fi
         done
     done
@@ -135,3 +160,7 @@ clear_tc
 python3 "$(dirname "$0")/../benchmarks/rtmp_analyze.py" summarize --csv "$CSV" >"$OUT_DIR/summary.md"
 echo "Results: $CSV"
 echo "Summary: $OUT_DIR/summary.md"
+if [ "$failed" -gt 0 ]; then
+    echo "WARNING: $failed cells FAILED — re-run with RTMP_BENCH_OUT=$OUT_DIR to retry"
+    exit 1
+fi
