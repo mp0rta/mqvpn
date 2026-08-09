@@ -27,6 +27,7 @@ FLAP_PID=""
 # write_rtmp_inis — one INI per mqvpn arm, passed to BOTH sides (EgressAllow
 # is only meaningful on the server; harmless on the client). Format mirrors
 # tests/test_e2e_hybrid_h2.sh (keys cross-checked against src/config.c).
+# NOTE: EgressAllow's subnet below must stay in sync with RTMP_TARGET_IP.
 write_rtmp_inis() {
     cat >"${WORK_DIR}/hybrid-stream.conf" <<EOF
 [Hybrid]
@@ -138,8 +139,8 @@ write_nginx_conf() {
     mkdir -p "$dir/dvr" "$dir/nginx-logs" "$dir/nginx-prefix"
     cat >"$dir/nginx.conf" <<EOF
 load_module /usr/lib/nginx/modules/ngx_rtmp_module.so;
-error_log $dir/nginx-logs/error.log info;
-pid $dir/nginx.pid;
+error_log "$dir/nginx-logs/error.log" info;
+pid "$dir/nginx.pid";
 worker_processes 1;
 events { worker_connections 128; }
 rtmp {
@@ -149,7 +150,7 @@ rtmp {
         application live {
             live on;
             record all;
-            record_path $dir/dvr;
+            record_path "$dir/dvr";
             record_unique on;
         }
     }
@@ -165,6 +166,7 @@ start_ingest() {
         -g "daemon off;" >"$dir/nginx-logs/stdout.log" 2>&1 &
     INGEST_PID=$!
     local i
+    # shellcheck disable=SC2034  # loop counter only; the bound (40 tries) is the point
     for i in $(seq 1 40); do
         # awk reads ss output to EOF — safe under pipefail (G19)
         if ip netns exec "$NS_SERVER" ss -ltn 2>/dev/null \
@@ -235,6 +237,10 @@ stop_flv_sampler() {
 # schedule_flap <down-at-s> <up-at-s> <flap-log>
 schedule_flap() {
     local down_at="$1" up_at="$2" log="$3"
+    if ! [ "$up_at" -gt "$down_at" ]; then
+        echo "schedule_flap: up_at ($up_at) must be > down_at ($down_at)" >&2
+        return 1
+    fi
     (
         sleep "$down_at"
         ip netns exec "$NS_CLIENT" ip link set bench-a0 down
@@ -255,20 +261,38 @@ wait_flap() {
     FLAP_PID=""
 }
 
+# stop_flap — kill + wait + reset FLAP_PID (symmetric with stop_ingest /
+# stop_flv_sampler), for snappy abort cleanup instead of waiting out the
+# scheduled up-time.
+stop_flap() {
+    if [ -n "$FLAP_PID" ]; then
+        kill "$FLAP_PID" 2>/dev/null || true
+        wait "$FLAP_PID" 2>/dev/null || true
+    fi
+    FLAP_PID=""
+}
+
 # ---- publisher: ffmpeg + OBS-like reconnect wrapper ---------------------
 
 WATCHDOG_STALL_S=10
 RECONNECT_DELAY_S=2
 RECONNECT_CONFIRM_S=3
+# Exposed for a driver EXIT trap to kill an orphaned ffmpeg deterministically
+# (set next to fpid in run_publisher, cleared after wait).
+# shellcheck disable=SC2034  # read by driver scripts, not within this file
+PUBLISHER_FFMPEG_PID=""
 
 ev_log() { # <file> <text...>
     local f="$1"; shift
     printf '%s %s\n' "$(date +%s.%3N)" "$*" >>"$f"
 }
 
-# progress_out_time_us <progress-file> — last out_time_us, 0 if none yet
+# progress_out_time_us <progress-file> — last out_time_us, 0 if none yet.
+# The `|| printf '0'` fallback keeps this safe under set -e when the file
+# is missing or unreadable (awk exits non-zero on open failure).
 progress_out_time_us() {
-    awk -F= '$1 == "out_time_us" { v = $2 } END { printf "%d", v + 0 }' "$1" 2>/dev/null
+    awk -F= '$1 == "out_time_us" { v = $2 } END { printf "%d", v + 0 }' "$1" 2>/dev/null \
+        || printf '0'
 }
 
 # run_publisher <cell-dir> <rtmp-url> <scenario-s> -- <ffmpeg input args...>
@@ -298,6 +322,7 @@ run_publisher() {
             -f flv -progress "$prog" \
             "$url" >"$cell/ffmpeg.$session.log" 2>&1 &
         local fpid=$!
+        PUBLISHER_FFMPEG_PID=$fpid
         ev_log "$ev" "connect session=$session"
         local last_out=0 last_change=$SECONDS ok_since=-1 confirmed=0
         while kill -0 "$fpid" 2>/dev/null && [ "$SECONDS" -lt "$end" ]; do
@@ -327,12 +352,22 @@ run_publisher() {
             fi
         done
         if [ "$SECONDS" -ge "$end" ] && kill -0 "$fpid" 2>/dev/null; then
+            # TERM, poll up to 5s, then KILL — ffmpeg blocked in a socket
+            # write can ignore TERM; unbounded wait hangs the whole matrix
+            # (same pattern as kill_vpn in benchmark_srt_common.sh:158-176).
             kill "$fpid" 2>/dev/null || true
+            local deadline=$((SECONDS + 5))
+            while kill -0 "$fpid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
+                sleep 0.2
+            done
+            kill -9 "$fpid" 2>/dev/null || true
         fi
         set +e
         wait "$fpid" 2>/dev/null
         local rc=$?
         set -e
+        # shellcheck disable=SC2034  # cleared for the driver's EXIT trap, not read in this file
+        PUBLISHER_FFMPEG_PID=""
         ev_log "$ev" "exit session=$session rc=$rc"
         if [ "$SECONDS" -lt "$end" ]; then
             sleep "$RECONNECT_DELAY_S"
@@ -344,4 +379,5 @@ run_publisher() {
 # tier-1 synthetic source args (1080p30 + tone), infinite; killed at scenario
 # end. -re per input (canonical form); tier 2 passes its own
 # (-re -stream_loop -1 -i clip) instead.
+# shellcheck disable=SC2034  # consumed by driver scripts via "${TIER1_SRC[@]}"
 TIER1_SRC=(-re -f lavfi -i "testsrc2=size=1920x1080:rate=30" -re -f lavfi -i "sine=frequency=440:sample_rate=48000")
