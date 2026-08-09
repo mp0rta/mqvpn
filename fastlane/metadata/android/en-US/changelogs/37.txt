@@ -1,0 +1,3 @@
+- Faster, more efficient uploads: UDP packets are now sent in batches
+  (UDP GSO), with automatic fallback on networks that do not support it.
+- Hybrid mode TCP throughput improvements via deferred send flushing.
