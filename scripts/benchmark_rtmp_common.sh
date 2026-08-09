@@ -254,3 +254,94 @@ wait_flap() {
     fi
     FLAP_PID=""
 }
+
+# ---- publisher: ffmpeg + OBS-like reconnect wrapper ---------------------
+
+WATCHDOG_STALL_S=10
+RECONNECT_DELAY_S=2
+RECONNECT_CONFIRM_S=3
+
+ev_log() { # <file> <text...>
+    local f="$1"; shift
+    printf '%s %s\n' "$(date +%s.%3N)" "$*" >>"$f"
+}
+
+# progress_out_time_us <progress-file> — last out_time_us, 0 if none yet
+progress_out_time_us() {
+    awk -F= '$1 == "out_time_us" { v = $2 } END { printf "%d", v + 0 }' "$1" 2>/dev/null
+}
+
+# run_publisher <cell-dir> <rtmp-url> <scenario-s> -- <ffmpeg input args...>
+# Blocks for the whole scenario. Artifacts in <cell-dir>:
+#   publisher.events                 connect/stall-kill/exit/reconnect-ok
+#   progress.N / ffmpeg.N.log        per publish session
+#   lag.N.csv                        ts,out_time_us samples (per session)
+run_publisher() {
+    local cell="$1" url="$2" scenario_s="$3"; shift 3
+    [ "${1:-}" = "--" ] && shift
+    local ev="$cell/publisher.events"
+    : >"$ev"
+    local t0=$SECONDS
+    local end=$((SECONDS + scenario_s))
+    local session=0
+    while [ "$SECONDS" -lt "$end" ]; do
+        session=$((session + 1))
+        local prog="$cell/progress.$session"
+        local lagcsv="$cell/lag.$session.csv"
+        : >"$prog"
+        echo "ts,out_time_us" >"$lagcsv"
+        ip netns exec "$NS_CLIENT" ffmpeg -nostdin -hide_banner -loglevel warning \
+            "$@" \
+            -c:v libx264 -preset veryfast -b:v 8M -maxrate 8M -bufsize 16M \
+            -g 60 -keyint_min 60 -pix_fmt yuv420p \
+            -c:a aac -b:a 160k \
+            -f flv -progress "$prog" \
+            "$url" >"$cell/ffmpeg.$session.log" 2>&1 &
+        local fpid=$!
+        ev_log "$ev" "connect session=$session"
+        local last_out=0 last_change=$SECONDS ok_since=-1 confirmed=0
+        while kill -0 "$fpid" 2>/dev/null && [ "$SECONDS" -lt "$end" ]; do
+            sleep 0.5
+            local cur
+            cur=$(progress_out_time_us "$prog")
+            printf '%s,%s\n' "$(date +%s.%3N)" "$cur" >>"$lagcsv"
+            if [ "$cur" -gt "$last_out" ]; then
+                # ok_since = FIRST advance; deliberately not reset on later
+                # stalls ("advanced ≥3s after first advance"). Against the
+                # 10 s watchdog at 0.5 s polling this cannot materially
+                # miscount; keep the definition in sync with rtmp_analyze.py.
+                if [ "$ok_since" -lt 0 ]; then ok_since=$SECONDS; fi
+                if [ "$session" -gt 1 ] && [ "$confirmed" -eq 0 ] \
+                   && [ $((SECONDS - ok_since)) -ge "$RECONNECT_CONFIRM_S" ]; then
+                    ev_log "$ev" "reconnect-ok session=$session"
+                    confirmed=1
+                fi
+                last_out=$cur
+                last_change=$SECONDS
+            else
+                if [ $((SECONDS - last_change)) -ge "$WATCHDOG_STALL_S" ]; then
+                    ev_log "$ev" "stall-kill session=$session"
+                    kill -9 "$fpid" 2>/dev/null || true
+                    break
+                fi
+            fi
+        done
+        if [ "$SECONDS" -ge "$end" ] && kill -0 "$fpid" 2>/dev/null; then
+            kill "$fpid" 2>/dev/null || true
+        fi
+        set +e
+        wait "$fpid" 2>/dev/null
+        local rc=$?
+        set -e
+        ev_log "$ev" "exit session=$session rc=$rc"
+        if [ "$SECONDS" -lt "$end" ]; then
+            sleep "$RECONNECT_DELAY_S"
+        fi
+    done
+    ev_log "$ev" "scenario-end sessions=$session elapsed=$((SECONDS - t0))"
+}
+
+# tier-1 synthetic source args (1080p30 + tone), infinite; killed at scenario
+# end. -re per input (canonical form); tier 2 passes its own
+# (-re -stream_loop -1 -i clip) instead.
+TIER1_SRC=(-re -f lavfi -i "testsrc2=size=1920x1080:rate=30" -re -f lavfi -i "sine=frequency=440:sample_rate=48000")
