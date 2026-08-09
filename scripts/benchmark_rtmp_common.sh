@@ -129,3 +129,128 @@ run_vpn_rtmp() {
     fi
     return 0
 }
+
+# ---- RTMP ingest (nginx-rtmp) ------------------------------------------
+
+# write_nginx_conf <cell-dir>
+write_nginx_conf() {
+    local dir="$1"
+    mkdir -p "$dir/dvr" "$dir/nginx-logs" "$dir/nginx-prefix"
+    cat >"$dir/nginx.conf" <<EOF
+load_module /usr/lib/nginx/modules/ngx_rtmp_module.so;
+error_log $dir/nginx-logs/error.log info;
+pid $dir/nginx.pid;
+worker_processes 1;
+events { worker_connections 128; }
+rtmp {
+    server {
+        listen ${RTMP_PORT};
+        chunk_size 4096;
+        application live {
+            live on;
+            record all;
+            record_path $dir/dvr;
+            record_unique on;
+        }
+    }
+}
+EOF
+}
+
+# start_ingest <cell-dir> — nginx in NS_SERVER, waits for the listen socket
+start_ingest() {
+    local dir="$1"
+    write_nginx_conf "$dir"
+    ip netns exec "$NS_SERVER" nginx -c "$dir/nginx.conf" -p "$dir/nginx-prefix" \
+        -g "daemon off;" >"$dir/nginx-logs/stdout.log" 2>&1 &
+    INGEST_PID=$!
+    local i
+    for i in $(seq 1 40); do
+        # awk reads ss output to EOF — safe under pipefail (G19)
+        if ip netns exec "$NS_SERVER" ss -ltn 2>/dev/null \
+            | awk -v p=":${RTMP_PORT}\$" '$4 ~ p {found=1} END {exit !found}'; then
+            return 0
+        fi
+        if ! kill -0 "$INGEST_PID" 2>/dev/null; then
+            echo "    ERROR: nginx died (see $dir/nginx-logs/)"
+            return 1
+        fi
+        sleep 0.25
+    done
+    echo "    ERROR: nginx-rtmp never listened on :${RTMP_PORT}"
+    return 1
+}
+
+stop_ingest() {
+    if [ -n "$INGEST_PID" ]; then
+        kill "$INGEST_PID" 2>/dev/null || true
+        wait "$INGEST_PID" 2>/dev/null || true
+    fi
+    INGEST_PID=""
+}
+
+# ---- ingest byte-timeline sampler --------------------------------------
+# Polls ALL *.flv in the DVR dir every 250 ms; logs epoch, summed bytes,
+# newest file (by mtime). record_unique creates one FLV per publish session,
+# so a disconnect/re-publish cycle switches files mid-scenario; dead air is
+# computed downstream by rtmp_analyze.py on the summed-size timeline.
+
+# start_flv_sampler <dvr-dir> <out-csv>
+start_flv_sampler() {
+    local dvr="$1" out="$2"
+    echo "ts,total_bytes,newest" >"$out"
+    (
+        while :; do
+            total=0; newest=""; newest_m=0
+            for f in "$dvr"/*.flv; do
+                [ -e "$f" ] || continue
+                sz=$(stat -c %s "$f" 2>/dev/null) || continue
+                m=$(stat -c %Y "$f" 2>/dev/null) || m=0
+                total=$((total + sz))
+                if [ "$m" -ge "$newest_m" ]; then newest_m=$m; newest="${f##*/}"; fi
+            done
+            printf '%s,%s,%s\n' "$(date +%s.%3N)" "$total" "$newest" >>"$out"
+            sleep 0.25
+        done
+    ) &
+    SAMPLER_PID=$!
+}
+
+stop_flv_sampler() {
+    if [ -n "$SAMPLER_PID" ]; then
+        kill "$SAMPLER_PID" 2>/dev/null || true
+        wait "$SAMPLER_PID" 2>/dev/null || true
+    fi
+    SAMPLER_PID=""
+}
+
+# ---- link flap (R3) -----------------------------------------------------
+# Recipe from scripts/ci_e2e/run_admin_down_test.sh: admin down + addr flush
+# (platform treats as immediate path drop), restore = up + addr re-add.
+# netem qdisc survives down/up (attached to the device).
+# NOTE: the subshell inherits set -e — if the down half fails, the up half
+# is skipped and bench-a0 stays down. The tier-1 driver's post-cell restore
+# (ip link set up + ip addr replace) is the recovery for that case; keep it.
+
+# schedule_flap <down-at-s> <up-at-s> <flap-log>
+schedule_flap() {
+    local down_at="$1" up_at="$2" log="$3"
+    (
+        sleep "$down_at"
+        ip netns exec "$NS_CLIENT" ip link set bench-a0 down
+        ip netns exec "$NS_CLIENT" ip addr flush dev bench-a0
+        printf '%s flap-down\n' "$(date +%s.%3N)" >>"$log"
+        sleep $((up_at - down_at))
+        ip netns exec "$NS_CLIENT" ip link set bench-a0 up
+        ip netns exec "$NS_CLIENT" ip addr add ${PATH_A_CLIENT_IP}/24 dev bench-a0
+        printf '%s flap-up\n' "$(date +%s.%3N)" >>"$log"
+    ) &
+    FLAP_PID=$!
+}
+
+wait_flap() {
+    if [ -n "$FLAP_PID" ]; then
+        wait "$FLAP_PID" 2>/dev/null || true
+    fi
+    FLAP_PID=""
+}
