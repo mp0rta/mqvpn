@@ -6,7 +6,7 @@
 Subcommands:
   cell      — one cell dir -> one CSV row on stdout (called by benchmark_rtmp.sh)
   summarize — tier-1 results.csv -> markdown tables on stdout
-  chart     — lag + ingest timeline PNG for one or more cells (matplotlib)
+  chart     — lag timeline PNG for one or more cells (matplotlib)
 
 Metric definitions live here and only here:
   dead_air_s : total seconds inside windows > 1.0 s where total_bytes in
@@ -65,6 +65,9 @@ def dead_air_windows(samples, t_end):
     return wins
 
 def read_events(path):
+    # Strictness is intentional: writers (run_publisher / schedule_flap)
+    # complete before analysis runs, so a missing/short line here means
+    # corrupted artifacts, not a race — fail loudly rather than guess.
     evs = []
     if os.path.exists(path):
         with open(path) as f:
@@ -104,7 +107,9 @@ def session_lags(cell):
 
 def analyze_cell(cell, duration):
     evs = read_events(os.path.join(cell, "publisher.events"))
-    t_start = evs[0][0] if evs else 0.0
+    if not evs:
+        raise SystemExit(f"no publisher events in {cell}")
+    t_start = evs[0][0]
     t_end = t_start + duration
     samples = read_flv_samples(os.path.join(cell, "flv_samples.csv"))
     # clamp: sampler overshoots scenario end by poll granularity; post-end
@@ -154,16 +159,16 @@ def cmd_summarize(a):
     print("# RTMP bench — tier 1 summary\n")
     for cond in conds:
         print(f"## {cond}\n")
-        print("| arm | disconnects (mean) | dead air s (mean) | max gap s (worst) | TTR s | max lag s (worst) | ingest Mbps (mean) |")
+        print("| arm | disconnects (mean) | dead air s (mean) | max gap s (worst) | TTR s (mean) | max lag s (worst) | ingest Mbps (mean) |")
         print("|---|---|---|---|---|---|---|")
         arms = sorted({r["arm"] for r in rows if r["cond"] == cond})
         for arm in arms:
             g = [r for r in rows if r["cond"] == cond and r["arm"] == arm]
             def mean(k):
-                vs = [float(r[k]) for r in g if r[k] not in ("NA", "")]
+                vs = [float(r.get(k)) for r in g if r.get(k) not in (None, "NA", "")]
                 return f"{sum(vs)/len(vs):.1f}" if vs else "NA"
             def worst(k):
-                vs = [float(r[k]) for r in g if r[k] not in ("NA", "")]
+                vs = [float(r.get(k)) for r in g if r.get(k) not in (None, "NA", "")]
                 return f"{max(vs):.1f}" if vs else "NA"
             print(f"| {arm} | {mean('disconnects')} | {mean('dead_air_s')} | "
                   f"{worst('max_gap_s')} | {mean('ttr_s')} | {worst('max_lag_s')} | {mean('ingest_mbps')} |")
@@ -178,14 +183,15 @@ def cmd_chart(a):
         label = os.path.basename(cell.rstrip("/"))
         lags = session_lags(cell)
         t0 = None
-        first_sess = min(lags) if lags else None
+        color = None
         for sess in sorted(lags):
             pts = lags[sess]
             if t0 is None and pts:
                 t0 = pts[0][0]
             xs = [ts - t0 for ts, _ in pts]
             ys = [l for _, l in pts]
-            ax.plot(xs, ys, label=label if sess == first_sess else None)
+            line, = ax.plot(xs, ys, color=color, label=label if color is None else None)
+            color = line.get_color()
     ax.set_xlabel("time (s)"); ax.set_ylabel("live lag (s)")
     ax.legend(); ax.grid(True, alpha=0.3)
     fig.tight_layout(); fig.savefig(a.out, dpi=120)
