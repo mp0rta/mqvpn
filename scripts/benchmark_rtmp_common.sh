@@ -137,12 +137,14 @@ run_vpn_rtmp() {
 write_nginx_conf() {
     local dir="$1"
     mkdir -p "$dir/dvr" "$dir/nginx-logs" "$dir/nginx-prefix"
-    # nginx workers drop to an unprivileged user (www-data); the record
-    # module opens FLVs as that user, so a root-owned dvr dir yields
-    # "record: failed to open file ... (13: Permission denied)" (observed).
-    chmod 0777 "$dir/dvr"
     cat >"$dir/nginx.conf" <<EOF
 load_module /usr/lib/nginx/modules/ngx_rtmp_module.so;
+# Workers must stay root: they default to www-data, which cannot traverse
+# into ~/... (Ubuntu ships /home/USER as 750), so the record module fails
+# with "record: failed to open file ... (13: Permission denied)" even when
+# the dvr dir itself is 0777 (observed). Bench runs inside a netns; the
+# usual privilege-drop rationale does not apply here.
+user root;
 error_log "$dir/nginx-logs/error.log" info;
 pid "$dir/nginx.pid";
 worker_processes 1;
