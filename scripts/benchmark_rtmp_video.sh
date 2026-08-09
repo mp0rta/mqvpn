@@ -159,24 +159,35 @@ done
 
 # ---- gap + timeline composition -----------------------------------------
 
-# compute_gaps <flv-samples-csv> <flv-basename-1> [<flv-basename-2> ...]
-# Prints one inter-session gap (seconds, space-separated, one line) per
-# consecutive pair of basenames on stdout; prints its derivation (per-gap
-# first/last growth timestamps) to stderr — the values it derived, per G19.
-# Basenames must be given in the same chronological order as the sessions
-# they belong to (compose_timeline pairs DVR-mtime order to session order,
-# see the comment there). A growth sample is a row whose total_bytes
-# increased since the previous sample AND whose "newest" column names this
-# basename — record_unique only ever grows one file at a time, so this
-# correctly ignores a mid-session stall (newest stays on the same file) and
-# only fires at real file-to-file handoffs.
+# compute_gaps <flv-samples-csv> <name=duration-1> [<name=duration-2> ...]
+# Args after the csv are FLV basenames with their ffprobe'd MEDIA duration
+# (seconds), chronological order. Prints one inter-session gap per
+# consecutive pair on stdout; derivation to stderr (the values it derived,
+# per G19).
+#
+# gap[i] = first_growth(next) - (first_growth(this) + media_duration(this))
+#
+# Deliberately NOT last-growth based: nginx's record module buffers writes
+# and flushes the tail when the SESSION CLOSES, and a publisher that dies
+# behind a downed link only closes when the link returns — so the file's
+# last byte growth lands at link-restore, not when media stopped (observed:
+# 28.6s of media, last growth 32s later, which collapsed a 33s dead-air
+# slate to 0.77s). first_growth + media duration marks where the media
+# actually ended on the wall clock. A growth sample is a row whose
+# total_bytes increased AND whose "newest" column names this basename
+# (record_unique grows one file at a time).
 compute_gaps() {
     local samples="$1"; shift
     python3 - "$samples" "$@" <<'PYEOF'
 import csv, sys
 
 samples_path = sys.argv[1]
-order = sys.argv[2:]
+order = []
+dur = {}
+for spec in sys.argv[2:]:
+    name, _, d = spec.rpartition("=")
+    order.append(name)
+    dur[name] = float(d)
 
 rows = []
 with open(samples_path) as f:
@@ -188,27 +199,34 @@ with open(samples_path) as f:
 rows.sort(key=lambda r: r[0])
 
 first_growth = {b: None for b in order}
-last_growth = {b: None for b in order}
 prev_bytes = None
 for ts, b, newest in rows:
     if prev_bytes is not None and b > prev_bytes and newest in first_growth:
         if first_growth[newest] is None:
             first_growth[newest] = ts
-        last_growth[newest] = ts
     prev_bytes = b
 
 gaps = []
 for i in range(len(order) - 1):
     a, b = order[i], order[i + 1]
-    if last_growth[a] is None or first_growth[b] is None:
-        print(f"compute_gaps: no growth observed for {a!r} (last_growth={last_growth[a]}) "
-              f"or {b!r} (first_growth={first_growth[b]})", file=sys.stderr)
+    if first_growth[a] is None or first_growth[b] is None:
+        print(f"compute_gaps: no growth observed for {a!r} "
+              f"(first_growth={first_growth[a]}) or {b!r} "
+              f"(first_growth={first_growth[b]})", file=sys.stderr)
         sys.exit(1)
-    gap = first_growth[b] - last_growth[a]
+    media_end = first_growth[a] + dur[a]
+    gap = first_growth[b] - media_end
     print(f"compute_gaps: gap[{i}] = first_growth({b})={first_growth[b]:.3f} "
-          f"- last_growth({a})={last_growth[a]:.3f} = {gap:.3f}", file=sys.stderr)
+          f"- (first_growth({a})={first_growth[a]:.3f} + dur={dur[a]:.3f}) "
+          f"= {gap:.3f}", file=sys.stderr)
+    if gap < 0:
+        print(f"compute_gaps: gap[{i}] negative ({gap:.3f}); clamping to 0 "
+              f"(nginx buffering skew)", file=sys.stderr)
+        gap = 0.0
     gaps.append(gap)
 
+print(f"compute_gaps: media={sum(dur[n] for n in order):.1f}s "
+      f"slates={sum(gaps):.1f}s", file=sys.stderr)
 print(" ".join(f"{g:.3f}" for g in gaps))
 PYEOF
 }
@@ -281,10 +299,22 @@ compose_timeline() {
     local basenames=() f
     for f in "${flvs[@]}"; do basenames+=("$(basename "$f")"); done
 
+    # media duration per FLV — the wallclock anchor for gap math (see the
+    # compute_gaps comment for why last-growth timestamps cannot be used)
+    local durspecs=() d
+    for f in "${flvs[@]}"; do
+        if ! d=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$f"); then
+            echo "compose_timeline: ffprobe duration failed for $f" >&2
+            return 1
+        fi
+        d="${d%%,*}"   # some ffprobe builds append a trailing comma in csv output
+        durspecs+=("$(basename "$f")=$d")
+    done
+
     local gaps=()
     if [ "$flv_count" -gt 1 ]; then
         local gapline
-        if ! gapline=$(compute_gaps "$cell/flv_samples.csv" "${basenames[@]}"); then
+        if ! gapline=$(compute_gaps "$cell/flv_samples.csv" "${durspecs[@]}"); then
             echo "compose_timeline: gap computation failed for $cell (see compute_gaps stderr above)" >&2
             return 1
         fi
@@ -317,7 +347,11 @@ compose_timeline() {
         fi
         printf "file '%s'\n" "$(readlink -f "$seg")" >>"$list"
 
-        if [ "$i" -lt "${#gaps[@]}" ]; then
+        if [ "$i" -lt "${#gaps[@]}" ] && awk -v g="${gaps[$i]}" 'BEGIN { exit !(g < 0.5) }'; then
+            # below the 1s dead-air threshold and too short for a readable
+            # slate; ffmpeg also misbehaves with near-zero -t
+            echo "compose_timeline: skipping negligible gap[$i]=${gaps[$i]}s (< 0.5s)" >&2
+        elif [ "$i" -lt "${#gaps[@]}" ]; then
             local gap="${gaps[$i]}"
             local slate="$work/slate_${i}.mp4"
             local ft=""
