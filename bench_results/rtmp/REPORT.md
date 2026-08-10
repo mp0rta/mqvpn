@@ -71,8 +71,9 @@ the full rate; hybrid holds lag under 1 s.
   (dead air 34.3 / 7.7 / 1.0 s across reps) — the outcome depends on how
   the single pinned flow interacts with the lossy path.
 - hybrid lane: QUIC repairs loss per-path below the inner TCP; all three
-  reps identical (1.0 s dead air, 1 s lag). **This is the data behind
-  "route TCP workloads through the stream lane".**
+  reps identical (1 s lag; the 1.0 s dead air is the t=0 start-up gap —
+  under the loss itself, arrival never paused > ~0.5 s). **This is the
+  data behind "route TCP workloads through the stream lane".**
 
 ### R3 flap
 
@@ -84,8 +85,13 @@ the full rate; hybrid holds lag under 1 s.
 
 direct: the encoder's TCP dies with the link; reconnects fail until the
 link returns (dead air ≈ flap window + watchdog). Both mqvpn arms survive
-with a ~1 s blip — QUIC multipath absorbs the path loss; the inner TCP
-session never resets. Highly reproducible (direct TTR 30.4–30.7 s).
+with zero disconnects — QUIC multipath absorbs the path loss and the
+inner TCP never resets. The 1.0–1.3 s mqvpn dead-air figures are NOT a
+failover blip: verified from `flv_samples.csv` (all reps), that window
+sits at t=0 (the universal encoder start-up gap, FLV header → first media
+chunk ≈ 1 s), and around the flap itself byte arrival never paused beyond
+one 250 ms sampling interval. The failover is invisible at the
+measurement's resolution. Highly reproducible (direct TTR 30.4–30.7 s).
 
 Lag timelines: `charts/lag_R2_rep1.png`, `charts/lag_R3_rep1.png`.
 
@@ -126,6 +132,11 @@ the slate by design — a viewer experiences dead air as a freeze.
 5. Tier 2 needs the audio-bearing clip variant
    (`tools/clips-rtmp/clip_8m.mp4`, silent AAC track added); the SRT
    clips have no audio and are rejected by preflight.
+6. The dead-air metric includes a universal ~1 s start-up gap (FLV header
+   lands at publish start, first media chunk ≈ 1 s later; counted because
+   measurement starts at the first ingest byte). Read small per-arm
+   dead-air values against that floor before attributing them to
+   loss/failover — locate the windows in `flv_samples.csv` when in doubt.
 
 ## 5. Reproduction
 
