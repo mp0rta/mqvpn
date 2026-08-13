@@ -289,13 +289,14 @@ Return per-client and per-path detail for all currently connected clients.
       "user":"alice","endpoint":"1.2.3.4:443",
       "connected_sec":42,
       "bytes_tx":1000,"bytes_rx":2000,
-      "paths":[
+      "n_paths":1,"paths":[
         {
           "path_id":0,"srtt_ms":31,"min_rtt_ms":18,
           "cwnd":196608,"in_flight":1024,
           "bytes_tx":900,"bytes_rx":1900,
           "pkt_sent":50,"pkt_recv":49,"pkt_lost":1,
-          "state":2,"state_label":"active"
+          "state":2,"state_label":"active",
+          "reinject_tx_bytes":0
         }
       ]
     }
@@ -319,6 +320,7 @@ Return per-client and per-path detail for all currently connected clients.
 | `connected_sec` | uint64 | Seconds since the session was established          |
 | `bytes_tx`      | uint64 | TUN bytes sent to this client                      |
 | `bytes_rx`      | uint64 | TUN bytes received from this client                |
+| `n_paths`       | int    | Number of entries in `paths`                       |
 | `paths`         | array  | Per-path objects (see below)                       |
 
 **Path object**
@@ -337,6 +339,7 @@ Return per-client and per-path detail for all currently connected clients.
 | `pkt_lost`     | uint64 | QUIC packets declared lost on this path                                                                            |
 | `state`        | uint   | xquic transport path state (numeric). **Legacy** — prefer `state_label` for new code; the numeric value is the raw `xqc_path_state_t` and may shift if xquic re-orders the enum. |
 | `state_label`  | string | Stable label for the state — one of `init`, `validating`, `active`, `closing`, `closed`, `unknown`. Added in v0.5.0. |
+| `reinject_tx_bytes` | uint64 | Cumulative bytes speculatively duplicated onto this path by reinjection (`[Multipath] Reinjection`; see README). 0 when reinjection is `off` (the default). Added in v0.15.0. |
 
 > **Note on `state`:** the numeric value is the raw xquic transport-layer path
 > state, **not** the mqvpn scheduler's logical role (primary / standby / etc.).
@@ -538,6 +541,11 @@ mqvpn follows semantic versioning for the control API:
   UDP GRO is configured and un-coalesced entirely in the platform layer, which
   the library never observes, so those two are read straight from the platform
   by the control socket (`ctrl_socket_create`) instead.
+- `get_status` path objects gained `reinject_tx_bytes` in v0.15.0 — the
+  per-path bytes speculatively duplicated by reinjection. Additive; existing
+  JSON consumers remain unaffected. The value is read from the server's
+  internal reinjection snapshot, not `mqvpn_path_stats_t`, so there is no
+  C-API struct growth and no recompile caveat.
 - `get_status` paths gained a `state_label` string in v0.5.0 alongside the
   existing numeric `state`; `get_fec_stats` gained `mp_state_label` similarly.
   Consumers that only read the numeric fields remain unaffected, but new code
