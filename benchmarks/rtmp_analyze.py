@@ -179,6 +179,7 @@ def cmd_chart(a):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(10, 4))
+    down_xs, up_xs = [], []
     for cell in a.cell_dirs:
         label = os.path.basename(cell.rstrip("/"))
         lags = session_lags(cell)
@@ -192,6 +193,30 @@ def cmd_chart(a):
             ys = [l for _, l in pts]
             line, = ax.plot(xs, ys, color=color, label=label if color is None else None)
             color = line.get_color()
+        # flap markers (cells share the schedule; dedup below by rounding)
+        if t0 is not None:
+            for ts, k, _a in read_events(os.path.join(cell, "flap.log")):
+                if k == "flap-down":
+                    down_xs.append(ts - t0)
+                elif k == "flap-up":
+                    up_xs.append(ts - t0)
+    def cluster(vals, eps=2.0):
+        # cells align to their own t0, so the shared flap schedule lands at
+        # slightly different relative times per cell; merge marks within eps
+        out = []
+        for v in sorted(vals):
+            if out and v - out[-1][-1] <= eps:
+                out[-1].append(v)
+            else:
+                out.append([v])
+        return [sum(c) / len(c) for c in out]
+
+    for i, x in enumerate(cluster(down_xs)):
+        ax.axvline(x, color="tab:red", linestyle="--", alpha=0.8,
+                   label="link down" if i == 0 else None)
+    for i, x in enumerate(cluster(up_xs)):
+        ax.axvline(x, color="tab:green", linestyle="--", alpha=0.8,
+                   label="link restored" if i == 0 else None)
     ax.set_xlabel("time (s)"); ax.set_ylabel("live lag (s)")
     ax.legend(); ax.grid(True, alpha=0.3)
     fig.tight_layout(); fig.savefig(a.out, dpi=120)
