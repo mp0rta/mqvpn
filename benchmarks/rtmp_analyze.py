@@ -183,7 +183,12 @@ def cmd_chart(a):
     for cell in a.cell_dirs:
         label = os.path.basename(cell.rstrip("/"))
         lags = session_lags(cell)
-        t0 = None
+        # x-axis origin = when the publisher first attempted to connect
+        # (cell start, matching the condition's flap schedule), not the
+        # first media sample — otherwise the ~1 s encoder start-up shifts
+        # every event left on the chart
+        evs = read_events(os.path.join(cell, "publisher.events"))
+        t0 = next((ts for ts, k, _a in evs if k == "connect"), None)
         color = None
         for sess in sorted(lags):
             pts = lags[sess]
