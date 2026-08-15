@@ -91,6 +91,15 @@ typedef struct {
     /* Shutdown */
     int shutting_down;
     int fatal_error; /* set by tunnel-setup failures to force exit code != 0 */
+
+    /* Ctrl+C bridge: the console-control handler runs on a Windows-spawned
+     * thread, and every mqvpn_client_* call must stay on the loop thread
+     * (libmqvpn.h single-thread contract). The handler only pokes
+     * wake_pair[1]; ev_wake fires on_shutdown_wake on the loop thread,
+     * which performs the actual disconnect — the Windows analogue of the
+     * Linux in-loop evsignal pattern. */
+    evutil_socket_t wake_pair[2]; /* [0]=loop-side read, [1]=handler-side write */
+    struct event *ev_wake;
 } platform_win_ctx_t;
 
 /* routing.c */

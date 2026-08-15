@@ -441,16 +441,38 @@ on_socket_read(evutil_socket_t fd, short what, void *arg)
 
 /* ── Ctrl+C handler ── */
 
+/* Runs on the LOOP thread (ev_wake fired). This is where the shutdown work
+ * actually happens; console_ctrl_handler below must not touch the client. */
+static void
+on_shutdown_wake(evutil_socket_t fd, short what, void *arg)
+{
+    (void)what;
+    platform_win_ctx_t *p = (platform_win_ctx_t *)arg;
+
+    char drain[16];
+    while (recv((SOCKET)fd, drain, sizeof(drain), 0) > 0) {}
+
+    if (p->shutting_down) return; /* repeated Ctrl+C while already closing */
+    p->shutting_down = 1;
+    LOG_INF("received Ctrl+C, shutting down...");
+    mqvpn_client_disconnect(p->client);
+    /* state_changed callback will call event_base_loopbreak on CLOSED */
+}
+
 static BOOL WINAPI
 console_ctrl_handler(DWORD ctrl_type)
 {
     if (ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT) {
+        /* This callback runs on an OS-spawned thread. Calling
+         * mqvpn_client_disconnect() from here (the old code) raced the tick
+         * thread inside xqc_engine_main_logic — every mqvpn_client_* call
+         * must stay on the loop thread (libmqvpn.h single-thread contract).
+         * Only poke the self-pipe: send() on a connected socket is safe
+         * from another thread, and on_shutdown_wake does the real work
+         * in-loop. All mutable shutdown state (shutting_down, the log line)
+         * is written on the loop thread only. */
         platform_win_ctx_t *p = g_signal_ctx;
-        if (p) {
-            LOG_INF("received Ctrl+C, shutting down...");
-            p->shutting_down = 1;
-            mqvpn_client_disconnect(p->client);
-        }
+        if (p) (void)send((SOCKET)p->wake_pair[1], "q", 1, 0);
         return TRUE;
     }
     return FALSE;
@@ -512,6 +534,9 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     int rc = 1;
     platform_win_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
+    /* 0 is a plausible SOCKET value on Windows — sentinel the pair
+     * explicitly so the cleanup guards below don't close a stranger. */
+    ctx.wake_pair[0] = ctx.wake_pair[1] = (evutil_socket_t)-1;
     ctx.server_port = cfg->server_port;
     ctx.killswitch_enabled = cfg->kill_switch;
     ctx.manage_routes = cfg->manage_routes;
@@ -586,6 +611,11 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
                                                  cfg->reinj_hard_deadline_ms,
                                                  cfg->reinj_deadline_lower_bound_ms);
     mqvpn_config_set_tun_mtu(lib_cfg, cfg->tun_mtu);
+    /* draft-21 §4.6 initial_max_path_id cap — parity with the Linux bridge
+     * (platform_linux.c). Previously never forwarded on Windows, so the
+     * InitMaxPathId INI key / --init-max-path-id option was silently
+     * dropped and xquic's default went on the wire. */
+    mqvpn_config_set_init_max_path_id(lib_cfg, cfg->init_max_path_id);
     mqvpn_config_apply_reorder(lib_cfg,
                                &cfg->reorder); /* INI [Reorder]/[ReorderRule] bridge */
     mqvpn_config_apply_hybrid(lib_cfg, &cfg->hybrid); /* INI [Hybrid] bridge */
@@ -675,7 +705,17 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
         event_add(ctx.ev_udp[i], NULL);
     }
 
-    /* Ctrl+C handler */
+    /* Ctrl+C handler — see console_ctrl_handler: the console-control thread
+     * only pokes this self-pipe, on_shutdown_wake disconnects in-loop. */
+    if (evutil_socketpair(AF_INET, SOCK_STREAM, 0, ctx.wake_pair) < 0) {
+        LOG_ERR("evutil_socketpair for the Ctrl+C bridge failed");
+        goto cleanup;
+    }
+    evutil_make_socket_nonblocking(ctx.wake_pair[0]);
+    evutil_make_socket_nonblocking(ctx.wake_pair[1]);
+    ctx.ev_wake =
+        event_new(ctx.eb, ctx.wake_pair[0], EV_READ | EV_PERSIST, on_shutdown_wake, &ctx);
+    event_add(ctx.ev_wake, NULL);
     g_signal_ctx = &ctx;
     SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
 
@@ -698,6 +738,21 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
 cleanup:
     SetConsoleCtrlHandler(console_ctrl_handler, FALSE);
     g_signal_ctx = NULL;
+
+    /* Library teardown FIRST, while every callback-owned platform object is
+     * still alive — mirror of the Linux cleanup (platform_linux.c): the
+     * destroy-time deferred flush drives the engine, which can fire the same
+     * callbacks as normal operation — cb_state_changed frees ev_tun and
+     * tears down the TUN, NULLing/clearing ctx fields as it goes, exactly
+     * as for an in-loop close. The old order (TUN + events + path fds freed
+     * BEFORE the destroy) handed those callbacks an already-freed ev_tun and
+     * a dead TUN whenever cleanup was entered with a still-live connection.
+     * After destroy returns no callback can fire, and the NULL/flag guards
+     * below skip whatever the callbacks already released. Path fds must
+     * also outlive the destroy (the flush sends on them), so
+     * path_mgr_destroy stays below. */
+    mqvpn_client_destroy(ctx.client);
+    ctx.client = NULL;
 
     win_cleanup_killswitch(&ctx);
     if (ctx.manage_routes) win_cleanup_routes(&ctx);
@@ -728,8 +783,17 @@ cleanup:
         event_free(ctx.ev_recover);
     }
 
+    if (ctx.ev_wake) {
+        event_del(ctx.ev_wake);
+        event_free(ctx.ev_wake);
+    }
+    if (ctx.wake_pair[0] != (evutil_socket_t)-1) evutil_closesocket(ctx.wake_pair[0]);
+    if (ctx.wake_pair[1] != (evutil_socket_t)-1) evutil_closesocket(ctx.wake_pair[1]);
+
+    /* Path fds close only here, after the library is gone (see the destroy
+     * comment above): the destroy-time flush sends on them, and the library
+     * never closes them itself. */
     mqvpn_path_mgr_destroy(&ctx.path_mgr);
-    mqvpn_client_destroy(ctx.client);
 
     if (ctx.eb) event_base_free(ctx.eb);
 
