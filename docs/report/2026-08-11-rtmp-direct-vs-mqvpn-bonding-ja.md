@@ -2,6 +2,7 @@
 
 日付: 2026-08-11。
 対象バージョン: mqvpn v0.16.0。
+(English version: [2026-08-11-rtmp-direct-vs-mqvpn-bonding-en.md](2026-08-11-rtmp-direct-vs-mqvpn-bonding-en.md))
 
 ## RTMP は 1 本の回線に縛られる
 
