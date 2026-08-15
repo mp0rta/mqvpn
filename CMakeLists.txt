@@ -938,6 +938,24 @@ if(BUILD_TESTING)
     # regression fails fast rather than stalling the suite for ctest's default.
     set_tests_properties(test_server_preaccept_dos PROPERTIES TIMEOUT 60)
 
+    # Duplicate CONNECT-IP regression: drives a raw xquic H3 client through a
+    # real handshake, then sends a second connect-ip request on the same H3
+    # connection, to prove the server rejects it (409) instead of leaking a
+    # dangling sessions[] entry (xquic-dependent — needs XQUIC_INCLUDE_DIR).
+    add_executable(test_server_double_connectip tests/test_server_double_connectip.c)
+    target_link_libraries(test_server_double_connectip mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
+    target_include_directories(test_server_double_connectip PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
+    target_compile_definitions(test_server_double_connectip PRIVATE
+        TEST_CERT_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.crt"
+        TEST_KEY_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.key"
+    )
+    set_target_properties(test_server_double_connectip PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_server_double_connectip COMMAND test_server_double_connectip)
+    # A full QUIC handshake + two H3 requests is slower than the pre-accept
+    # probe above; 60s matches that test's budget and is generous for a
+    # loopback exchange bounded by this test's own pump-loop iteration caps.
+    set_tests_properties(test_server_double_connectip PROPERTIES TIMEOUT 60)
+
     # Scheduler dispatch test (xquic-dependent — needs XQUIC_INCLUDE_DIR)
     add_executable(test_scheduler tests/test_scheduler.c)
     target_link_libraries(test_scheduler mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)

@@ -668,6 +668,38 @@ cb_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data)
  *  H3 connection callbacks
  * ================================================================ */
 
+/* §5: create the reorder shim engines when locally enabled and not already
+ * present. TX stamping stays gated on peer_reorder_supported (set when the
+ * client advertises in its CONNECT-IP request), so until then everything is
+ * sent RAW. The hash seeds need not match the peer (§6.2); derive from
+ * wall-clock time. Shared by cb_h3_conn_create (first tunnel) and
+ * svr_connect_ip_on_request (re-establishment after svr_session_release freed
+ * the previous generation's engines — each tunnel generation gets fresh
+ * sequence/flow state). On alloc failure both engines are left NULL (RAW
+ * fallback); a later re-establishment naturally retries the alloc. */
+static void
+svr_conn_reorder_engines_init(mqvpn_server_t *s, svr_conn_t *conn)
+{
+    if (s->config.reorder.mode == MQVPN_REORDER_OFF) return;
+    if (conn->reorder_tx || conn->reorder_rx) return; /* already provisioned */
+
+    uint64_t seed_base = now_us();
+    conn->reorder_tx = mqvpn_reorder_tx_new(&s->config.reorder, seed_base);
+    conn->reorder_rx = mqvpn_reorder_rx_new(&s->config.reorder, seed_base ^ 0x9e3779b9,
+                                            svr_reorder_deliver, conn);
+    if (!conn->reorder_tx || !conn->reorder_rx) {
+        LOG_W(s, "reorder engine alloc failed; falling back to RAW");
+        if (conn->reorder_tx) {
+            mqvpn_reorder_tx_free(conn->reorder_tx);
+            conn->reorder_tx = NULL;
+        }
+        if (conn->reorder_rx) {
+            mqvpn_reorder_rx_free(conn->reorder_rx);
+            conn->reorder_rx = NULL;
+        }
+    }
+}
+
 static int
 cb_h3_conn_create(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_data)
 {
@@ -688,27 +720,7 @@ cb_h3_conn_create(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_
     xqc_h3_conn_get_peer_addr(h3_conn, (struct sockaddr *)&conn->peer_addr,
                               sizeof(conn->peer_addr), &conn->peer_addrlen);
 
-    /* §5: create the reorder shim engines when locally enabled. TX stamping
-     * stays gated on peer_reorder_supported (set when the client advertises in
-     * its CONNECT-IP request), so until then everything is sent RAW. The hash
-     * seeds need not match the peer (§6.2); derive from wall-clock time. */
-    if (s->config.reorder.mode != MQVPN_REORDER_OFF) {
-        uint64_t seed_base = now_us();
-        conn->reorder_tx = mqvpn_reorder_tx_new(&s->config.reorder, seed_base);
-        conn->reorder_rx = mqvpn_reorder_rx_new(
-            &s->config.reorder, seed_base ^ 0x9e3779b9, svr_reorder_deliver, conn);
-        if (!conn->reorder_tx || !conn->reorder_rx) {
-            LOG_W(s, "reorder engine alloc failed; falling back to RAW");
-            if (conn->reorder_tx) {
-                mqvpn_reorder_tx_free(conn->reorder_tx);
-                conn->reorder_tx = NULL;
-            }
-            if (conn->reorder_rx) {
-                mqvpn_reorder_rx_free(conn->reorder_rx);
-                conn->reorder_rx = NULL;
-            }
-        }
-    }
+    svr_conn_reorder_engines_init(s, conn);
 
     LOG_I(s, "H3 connection created");
     return 0;
@@ -735,6 +747,53 @@ svr_conn_free(svr_conn_t *conn)
     free(conn);
 }
 
+/* Deregister `conn`'s session and release its pool address(es), then zero the
+ * conn-scoped tunnel fields so the conn can host a fresh CONNECT-IP
+ * establishment. No-op when the conn never completed an ADDRESS_ASSIGN
+ * (assigned_ip zero — including after fail_release_ip). Shared by
+ * cb_h3_conn_close (conn teardown) and svr_connect_ip_on_request
+ * (re-establishment after the previous tunnel stream closed) so the two
+ * release paths cannot drift. */
+static void
+svr_session_release(mqvpn_server_t *s, svr_conn_t *conn)
+{
+    if (!conn->assigned_ip.s_addr) return;
+
+    uint32_t offset = ntohl(conn->assigned_ip.s_addr) - ntohl(s->pool.base.s_addr);
+    if (offset > 0 && offset <= MQVPN_ADDR_POOL_MAX && s->sessions[offset] == conn) {
+        s->sessions[offset] = NULL;
+        s->n_sessions--;
+        char ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &conn->assigned_ip, ip_str, sizeof(ip_str));
+        LOG_I(s, "session removed: %s (active=%d)", ip_str, s->n_sessions);
+
+        if (s->cbs.on_client_disconnected)
+            s->cbs.on_client_disconnected(offset, MQVPN_ERR_CLOSED, s->user_ctx);
+    }
+    mqvpn_addr_pool_release(&s->pool, &conn->assigned_ip);
+    memset(&conn->assigned_ip, 0, sizeof(conn->assigned_ip));
+    conn->has_v6 = 0;
+    memset(&conn->assigned_ip6, 0, sizeof(conn->assigned_ip6));
+    conn->masque_stream_id = 0;
+    conn->tunnel_established = 0;
+    conn->peer_reorder_supported = 0;
+
+    /* Tunnel-generation fence for the reorder shim: free the engines with the
+     * session so packets buffered under the old tunnel (possibly a re-assigned
+     * inner address) can never flush into a later generation.
+     * svr_connect_ip_on_request re-provisions fresh engines on
+     * re-establishment; on the conn-close path svr_conn_free's own frees
+     * become no-ops. */
+    if (conn->reorder_tx) {
+        mqvpn_reorder_tx_free(conn->reorder_tx);
+        conn->reorder_tx = NULL;
+    }
+    if (conn->reorder_rx) {
+        mqvpn_reorder_rx_free(conn->reorder_rx);
+        conn->reorder_rx = NULL;
+    }
+}
+
 static int
 cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_data)
 {
@@ -747,20 +806,7 @@ cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_d
     LOG_I(s, "server dgram summary: acked=%" PRIu64 " lost=%" PRIu64,
           conn->dgram_acked_cnt, conn->dgram_lost_cnt);
 
-    if (conn->assigned_ip.s_addr) {
-        uint32_t offset = ntohl(conn->assigned_ip.s_addr) - ntohl(s->pool.base.s_addr);
-        if (offset > 0 && offset <= MQVPN_ADDR_POOL_MAX && s->sessions[offset] == conn) {
-            s->sessions[offset] = NULL;
-            s->n_sessions--;
-            char ip_str[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &conn->assigned_ip, ip_str, sizeof(ip_str));
-            LOG_I(s, "session removed: %s (active=%d)", ip_str, s->n_sessions);
-
-            if (s->cbs.on_client_disconnected)
-                s->cbs.on_client_disconnected(offset, MQVPN_ERR_CLOSED, s->user_ctx);
-        }
-        mqvpn_addr_pool_release(&s->pool, &conn->assigned_ip);
-    }
+    svr_session_release(s, conn);
 
     LOG_I(s, "H3 connection closed");
     svr_conn_free(conn);
@@ -803,6 +849,23 @@ svr_masque_send_501(xqc_h3_request_t *h3_request)
     xqc_http_header_t resp[] = {
         {.name = {.iov_base = ":status", .iov_len = 7},
          .value = {.iov_base = "501", .iov_len = 3},
+         .flags = 0},
+    };
+    xqc_http_headers_t hdrs = {.headers = resp, .count = 1, .capacity = 1};
+    return xqc_h3_request_send_headers(h3_request, &hdrs, 1) < 0 ? -1 : 0;
+}
+
+/* Second CONNECT-IP request on a connection that already holds a tunnel:
+ * 409 Conflict. mqvpn binds one tunnel (one pool address, one sessions[] slot)
+ * per H3 connection; the extra request is refused rather than tearing down the
+ * connection, so the client's existing tunnel keeps working. RFC 9484 S4.1
+ * leaves both the choice to reject and the status code to proxy policy. */
+static int
+svr_masque_send_409(xqc_h3_request_t *h3_request)
+{
+    xqc_http_header_t resp[] = {
+        {.name = {.iov_base = ":status", .iov_len = 7},
+         .value = {.iov_base = "409", .iov_len = 3},
          .flags = 0},
     };
     xqc_http_headers_t hdrs = {.headers = resp, .count = 1, .capacity = 1};
@@ -1077,9 +1140,23 @@ cb_request_close(xqc_h3_request_t *h3_request, void *strm_user_data)
          * closing non-tunnel stream (per-flow connect-tcp, or a 501'd
          * unknown request) on the same H3 connection must not flip the
          * tunnel dead. Mirrors the client-side role gate in
-         * mqvpn_client.c's cb_request_close. */
+         * mqvpn_client.c's cb_request_close.
+         *
+         * RFC 9484 §4.1 ties the tunnel's lifetime to its request stream, so
+         * tear down the WHOLE session here (sessions[] entry, pool address,
+         * on_client_disconnected, reorder engines) — not just
+         * tunnel_established. Otherwise a client that closes its tunnel
+         * stream but keeps the H3 connection open pins a pool address and a
+         * max_clients slot until the connection dies. Safe on every path:
+         * xquic destroys streams before conn_close_notify (xqc_conn.c
+         * "destroy streams, must before conn_close_notify"), so the later
+         * cb_h3_conn_close release is an idempotent no-op; a CONNECT_IP
+         * stream that never established has assigned_ip==0 and the release
+         * no-ops. The closing CONNECT_IP stream is always the current tunnel
+         * owner: a duplicate request is 409'd with role UNKNOWN, and a
+         * re-establishment is preceded by the previous release. */
         if (stream->conn && stream->role == SVR_STREAM_ROLE_CONNECT_IP)
-            stream->conn->tunnel_established = 0;
+            svr_session_release(stream->conn->server, stream->conn);
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
         /* A connect-tcp stream can close (client resets it, or the H3
          * connection itself is torn down) while its egress flow is still
@@ -1106,11 +1183,17 @@ cb_request_close(xqc_h3_request_t *h3_request, void *strm_user_data)
  * mqvpn_server_internal.h (see that header for why only this struct + two
  * accessor functions moved, not the rest of this file's internals). */
 
-/* Walks the header list; also sets conn->peer_reorder_supported on the
- * mqvpn-reorder echo (deliberate side effect). */
+/* Walks the header list into `out` only — no conn state is written here.
+ * In particular the mqvpn-reorder advertisement is reported via
+ * out->has_reorder_hdr and applied to conn->peer_reorder_supported only by
+ * svr_connect_ip_on_request when the request actually establishes the
+ * tunnel: any request on the connection reaches this parser (duplicate
+ * CONNECT-IP, connect-tcp, unknown-501), and writing the conn-wide flag
+ * here would let a rejected request flip reorder stamping on for a live
+ * tunnel that never negotiated it. */
 static void
-svr_parse_request_headers(mqvpn_server_t *s, svr_stream_t *stream,
-                          xqc_http_headers_t *headers, svr_req_headers_t *out)
+svr_parse_request_headers(mqvpn_server_t *s, xqc_http_headers_t *headers,
+                          svr_req_headers_t *out)
 {
     memset(out, 0, sizeof(*out));
 
@@ -1151,7 +1234,7 @@ svr_parse_request_headers(mqvpn_server_t *s, svr_stream_t *stream,
         /* §19.3: client advertised mqvpn-reorder → it supports the shim. */
         if (mqvpn_reorder_header_match(h->name.iov_base, h->name.iov_len,
                                        h->value.iov_base, h->value.iov_len)) {
-            stream->conn->peer_reorder_supported = 1;
+            out->has_reorder_hdr = 1;
             LOG_I(s, "client advertised mqvpn-reorder");
         }
     }
@@ -1249,6 +1332,29 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
 
         LOG_I(s, "client authenticated successfully (user=%s)", stream->conn->username);
     }
+
+    /* Re-establishment: the previous tunnel STREAM closed (cb_request_close
+     * cleared tunnel_established) but the conn-scoped session — sessions[]
+     * entry, pool address — is still registered. Per RFC 9484 §4.1 the tunnel
+     * died with its stream, so release the stale session before establishing
+     * the new one. Done after auth so an unauthenticated request cannot
+     * mutate state, and before svr_masque_send_response so the conn's own
+     * stale slot doesn't count against the max_clients check. The
+     * live-tunnel case never reaches here (409 in cb_request_read). */
+    svr_session_release(s, stream->conn);
+
+    /* Re-provision the reorder engines for this tunnel generation (no-op on
+     * first establishment — cb_h3_conn_create's engines are still in place;
+     * after a release they were freed, so a re-establishment starts with
+     * fresh sequence/flow state). Must run before svr_masque_send_response:
+     * the mqvpn-reorder echo checks conn->reorder_rx. */
+    svr_conn_reorder_engines_init(s, stream->conn);
+
+    /* §19.3: reorder negotiation is scoped to the request that establishes
+     * the tunnel. Applied here (not in header parsing) so a rejected
+     * duplicate or unrelated request can never flip stamping on for a live
+     * tunnel that did not negotiate it. */
+    stream->conn->peer_reorder_supported = hdrs->has_reorder_hdr;
 
     LOG_I(s, "Extended CONNECT for connect-ip received");
     if (svr_masque_send_response(h3_request, stream) < 0) return -1;
@@ -1490,9 +1596,33 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
         if (!headers) return -1;
 
         svr_req_headers_t hdrs;
-        svr_parse_request_headers(s, stream, headers, &hdrs);
+        svr_parse_request_headers(s, headers, &hdrs);
 
         if (hdrs.is_connect && hdrs.is_connect_ip) {
+            /* Reject a concurrent CONNECT-IP request while this connection's
+             * tunnel is live. mqvpn binds one live tunnel (one pool address,
+             * one sessions[] slot) per H3 connection; accepting a duplicate
+             * would re-run mqvpn_addr_pool_alloc, overwrite conn->assigned_ip,
+             * and register a second sessions[] entry for the same conn — the
+             * first entry then dangles after cb_h3_conn_close releases only
+             * the current address (heap UAF + addr-pool leak + n_sessions
+             * drift). Do NOT tag SVR_STREAM_ROLE_CONNECT_IP for the rejected
+             * stream — its close must not clear the live tunnel's
+             * tunnel_established flag (see cb_request_close). Send 409 and
+             * keep the connection (and the existing tunnel) alive.
+             *
+             * A CONNECT-IP request whose previous tunnel STREAM already
+             * closed (tunnel_established=0, session still registered) is NOT
+             * rejected here: RFC 9484 §4.1 ties tunnel lifetime to the
+             * request stream, so that is a legitimate re-establishment —
+             * svr_connect_ip_on_request releases the stale session after
+             * auth and proceeds. */
+            if (stream->conn && stream->conn->tunnel_established) {
+                LOG_W(s, "rejecting duplicate CONNECT-IP: connection already has "
+                         "a tunnel");
+                svr_masque_send_409(h3_request);
+                return 0;
+            }
             /* Role is tagged even though the handler may still fail with -1
              * (stream reset); harmless — a reset stream's role is never
              * consulted again. */
@@ -1714,6 +1844,17 @@ cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *u
     xqc_int_t xret = xqc_h3_ext_masque_unframe_udp((const uint8_t *)data, data_len, &qsid,
                                                    &ctx_id, &payload, &payload_len);
     if (xret != XQC_OK) return;
+
+    /* RFC 9297 §2.1: HTTP Datagrams are associated with a request stream via
+     * the quarter stream ID. Accept only datagrams belonging to the CURRENT
+     * tunnel stream — this is also the tunnel-generation fence: a late
+     * datagram from a previous tunnel on this connection (closed stream,
+     * possibly a re-assigned inner address) must not be delivered into the
+     * new tunnel. */
+    if (qsid != conn->masque_stream_id / 4) {
+        LOG_D(s, "dgram: qsid %" PRIu64 " is not the tunnel stream; dropping", qsid);
+        return;
+    }
     if (payload_len < 1) return;
 
     /* §5/§8.1 self-describing dispatch on payload[0]. */

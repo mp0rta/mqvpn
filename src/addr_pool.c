@@ -52,6 +52,18 @@ mqvpn_addr_pool_init(mqvpn_addr_pool_t *pool, const char *cidr)
         total_hosts > MQVPN_ADDR_POOL_MAX ? MQVPN_ADDR_POOL_MAX : total_hosts;
     pool->next = 2; /* .1 is reserved for server */
 
+    /* Reject a pool whose highest handed-out address (base + pool_size) would
+     * wrap past 255.255.255.255: a wrapped allocation can yield 0.0.0.0 —
+     * which defeats every "assigned_ip.s_addr != 0" liveness check in the
+     * server — and mqvpn_addr_pool_release's underflow guard can never
+     * release a wrapped address. Non-aligned but non-wrapping bases stay
+     * accepted (pinned by test_cidr_non_aligned). */
+    uint32_t base_h = ntohl(pool->base.s_addr);
+    if (base_h + pool->pool_size < base_h) {
+        LOG_ERR("addr_pool: %s wraps past 255.255.255.255", cidr);
+        return -1;
+    }
+
     LOG_INF("addr_pool: %s, %u addresses available", cidr, pool->pool_size - 1);
     return 0;
 }

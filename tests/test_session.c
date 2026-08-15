@@ -220,6 +220,26 @@ test_invalid_cidr_bad_prefix(void)
 }
 
 static void
+test_cidr_wrapping_base(void)
+{
+    mqvpn_addr_pool_t pool;
+
+    /* A base so high that base + pool_size wraps past 255.255.255.255 is
+     * rejected: a wrapped allocation could yield 0.0.0.0, which defeats the
+     * server's "assigned_ip.s_addr != 0" liveness checks, and
+     * mqvpn_addr_pool_release's underflow guard could never release it. */
+    ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "255.255.255.254/16") < 0,
+                "wrapping /16 base rejected");
+    ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "255.255.255.128/24") < 0,
+                "wrapping /24 base rejected");
+
+    /* Highest non-wrapping /24 stays accepted (non-aligned bases are legal;
+     * see test_cidr_non_aligned). base + pool_size = 255.255.255.255 here. */
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "255.255.255.1/24"), 0,
+                  "highest non-wrapping base accepted");
+}
+
+static void
 test_invalid_cidr_bad_ip(void)
 {
     mqvpn_addr_pool_t pool;
@@ -725,6 +745,7 @@ main(void)
     test_session_table_simulation();
     test_invalid_cidr_no_slash();
     test_invalid_cidr_bad_prefix();
+    test_cidr_wrapping_base();
     test_invalid_cidr_bad_ip();
     test_invalid_cidr_empty_prefix();
     test_subnet_size_28();
