@@ -906,6 +906,27 @@ mqvpn_client_test_force_established(mqvpn_client_t *c)
     return 0;
 }
 
+/* Test-only: kill the live connection through xquic's REAL local-close
+ * machinery WITHOUT the disconnect bookkeeping (shutting_down stays 0 and
+ * the state is not forced to CLOSED). The close notify then runs the same
+ * path as a peer/transport-initiated death — cli_conn_destroy plus the
+ * reconnect arming when enabled — leaving the path slots exactly as a
+ * genuine drop leaves them (stale). Exists because the QUIC idle timeout is
+ * a fixed 120 s (mqvpn_conn_settings.c), far beyond unit-test budgets.
+ * Hidden from libmqvpn.so's dynamic export table (not part of the public
+ * ABI). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_kill_conn(mqvpn_client_t *c)
+{
+    if (!c || !c->conn || !c->engine) return -1;
+    xqc_conn_close(c->engine, &c->conn->cid);
+    xqc_engine_main_logic(c->engine);
+    return 0;
+}
+
 /* P1 test-only: seed c->next_wake_us — the xquic-requested wake that
  * mqvpn_client_get_interest starts `ms` from (normally set by
  * cb_set_event_timer). Lets a pure-function test observe whether the
@@ -3034,6 +3055,21 @@ mqvpn_client_connect(mqvpn_client_t *c)
 
     if (!mqvpn_state_transition_valid(c->state, MQVPN_STATE_CONNECTING))
         return MQVPN_ERR_INVALID_ARG;
+
+    /* Manual re-establishment from RECONNECTING (the transition table's only
+     * other entry into CONNECTING): run the same pre-start reset the internal
+     * retry path (tick_reconnect) runs. The dead connection's slots still
+     * carry xquic-side bindings — xquic never fires path_removed_notify on
+     * conn destroy — plus stale ACTIVE/DEGRADED states and multipath_ready=1.
+     * Starting on them force-writes a DEGRADED primary to VALIDATING (Debug
+     * invariant abort) and leaves stale-ACTIVE secondaries permanently
+     * un-activatable (activate_pending_paths is PENDING-only: silent
+     * multipath loss). Also disarm the pending retry so tick_reconnect cannot
+     * start a second connection on top of this one. */
+    if (c->state == MQVPN_STATE_RECONNECTING) {
+        c->reconnect_scheduled_us = 0;
+        client_reset_paths_for_reconnect(c);
+    }
 
     /* Warn if the scheduler choice has unmet path-count preconditions.
      * This is a snapshot at connect time — adding a second path later via
