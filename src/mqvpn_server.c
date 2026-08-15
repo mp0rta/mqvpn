@@ -747,6 +747,44 @@ svr_conn_free(svr_conn_t *conn)
     free(conn);
 }
 
+/* Debug-only consistency check for the session table. The double CONNECT-IP
+ * corruption (a second establishment overwriting conn->assigned_ip and adding
+ * a second sessions[] slot for the same conn) only surfaced as a heap UAF at
+ * teardown, far from the cause. These invariants abort at the exact tick the
+ * table goes inconsistent instead. No-op under NDEBUG (build.sh forces
+ * Release/NDEBUG; this runs in the Debug/sanitizer builds and CI). Cheap: at
+ * most MQVPN_ADDR_POOL_MAX (254) slots. */
+#ifndef NDEBUG
+static void
+svr_check_session_invariants(const mqvpn_server_t *s)
+{
+    uint32_t base_h = ntohl(s->pool.base.s_addr);
+    int counted = 0;
+    for (int off = 1; off <= MQVPN_ADDR_POOL_MAX; off++) {
+        const svr_conn_t *c = s->sessions[off];
+        if (!c) continue;
+        counted++;
+        /* A registered slot must hold a live address... */
+        assert(c->assigned_ip.s_addr != 0 &&
+               "session slot points at a conn with no assigned address");
+        /* ...and that address must map back to THIS slot. A second
+         * establishment on the same conn overwrites assigned_ip, leaving the
+         * first slot pointing at a conn whose address now decodes to a
+         * different offset — this is the assert that fires on the double
+         * CONNECT-IP corruption. */
+        uint32_t mapped = ntohl(c->assigned_ip.s_addr) - base_h;
+        assert(mapped == (uint32_t)off &&
+               "session slot offset does not match its conn's assigned address");
+    }
+    assert(counted == s->n_sessions &&
+           "n_sessions disagrees with the non-NULL sessions[] count");
+    assert(s->n_sessions >= 0 && s->n_sessions <= s->max_clients &&
+           "n_sessions outside [0, max_clients]");
+}
+#else
+#  define svr_check_session_invariants(s) ((void)(s))
+#endif
+
 /* Deregister `conn`'s session and release its pool address(es), then zero the
  * conn-scoped tunnel fields so the conn can host a fresh CONNECT-IP
  * establishment. No-op when the conn never completed an ADDRESS_ASSIGN
@@ -792,6 +830,8 @@ svr_session_release(mqvpn_server_t *s, svr_conn_t *conn)
         mqvpn_reorder_rx_free(conn->reorder_rx);
         conn->reorder_rx = NULL;
     }
+
+    svr_check_session_invariants(s);
 }
 
 static int
@@ -1062,6 +1102,7 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
         s->sessions[ip_off] = conn;
         s->n_sessions++;
     }
+    svr_check_session_invariants(s);
     LOG_I(s, "MASQUE tunnel established (stream_id=%" PRIu64 ", clients=%d)",
           conn->masque_stream_id, s->n_sessions);
 
@@ -2216,6 +2257,12 @@ mqvpn_server_destroy(mqvpn_server_t *s)
      * heap-use-after-free on any conn that hit both contingencies at once. */
     svr_tcp_egress_destroy_all(s);
 #endif
+
+    /* The engine teardown above fired the conn-close callbacks, so a clean
+     * shutdown leaves the table empty; any slots still set here are the
+     * contingency the sweep below defends against. Either way the accounting
+     * must still be consistent — check before we start freeing. */
+    svr_check_session_invariants(s);
 
     /* Step 3: Defensive sweep — free any sessions not freed by engine callbacks.
      * Uses svr_conn_free so the reorder engines are freed here too (the close
