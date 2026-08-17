@@ -268,6 +268,14 @@ struct mqvpn_client_s {
     int reconnect_attempts;
     uint64_t reconnect_scheduled_us;
     int shutting_down;
+    /* Re-entrancy fence for the reset+start transaction (connect entry
+     * points). The pre-start slot reset and the primary bootstrap fire
+     * path_event/state_changed synchronously; a callback calling
+     * mqvpn_client_connect()/mqvpn_client_disconnect() mid-transaction
+     * would double-start, double-arm the retry backoff, or drive a
+     * CLOSED->CONNECTING resurrection. While set, both entry points
+     * return MQVPN_ERR_INVALID_ARG. Single writer (tick thread). */
+    int in_connect;
 
     /* Log correlation + filtering */
     uint32_t conn_id; /* monotonic, bumped on each connect */
@@ -3080,8 +3088,18 @@ mqvpn_client_connect(mqvpn_client_t *c)
     if (!c) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
 
+    /* Re-entrancy fence: the reset/bootstrap below fire callbacks
+     * synchronously; a callback re-entering connect() mid-transaction must
+     * be refused (see the in_connect field comment). */
+    if (c->in_connect) {
+        LOG_W(c, "connect() re-entered from a client callback; rejected");
+        return MQVPN_ERR_INVALID_ARG;
+    }
+
     if (!mqvpn_state_transition_valid(c->state, MQVPN_STATE_CONNECTING))
         return MQVPN_ERR_INVALID_ARG;
+
+    c->in_connect = 1;
 
     /* Manual re-establishment from RECONNECTING (the transition table's only
      * other entry into CONNECTING): run the same pre-start reset the internal
@@ -3140,10 +3158,12 @@ mqvpn_client_connect(mqvpn_client_t *c)
             if (c->cbs.reconnect_scheduled)
                 c->cbs.reconnect_scheduled(delay, c->user_ctx);
         }
+        c->in_connect = 0;
         return MQVPN_ERR_ENGINE;
     }
 
     client_set_state(c, MQVPN_STATE_CONNECTING);
+    c->in_connect = 0;
     /* Platform drives the engine via tick() — no main_logic here */
     return MQVPN_OK;
 }
@@ -3153,6 +3173,15 @@ mqvpn_client_disconnect(mqvpn_client_t *c)
 {
     if (!c) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
+
+    /* Re-entrancy fence: disconnecting from inside a callback fired by an
+     * in-progress connect transaction would tear down mid-reset state
+     * (CLOSED->CONNECTING resurrection in release, transition assert in
+     * debug). Refused; disconnect after the connect call returns. */
+    if (c->in_connect) {
+        LOG_W(c, "disconnect() re-entered from a client callback; rejected");
+        return MQVPN_ERR_INVALID_ARG;
+    }
 
     if (c->state == MQVPN_STATE_CLOSED || c->state == MQVPN_STATE_IDLE) return MQVPN_OK;
 
@@ -3983,6 +4012,11 @@ tick_reconnect(mqvpn_client_t *c)
     c->reconnect_scheduled_us = 0;
     LOG_I(c, "attempting reconnection (attempt %d)...", c->reconnect_attempts);
 
+    /* Same re-entrancy fence as mqvpn_client_connect(): the reset below
+     * fires callbacks synchronously, and a callback calling
+     * connect()/disconnect() mid-transaction must be refused. */
+    c->in_connect = 1;
+
     /* Reset path state for a fresh connection attempt. */
     client_reset_paths_for_reconnect(c);
 
@@ -3995,6 +4029,7 @@ tick_reconnect(mqvpn_client_t *c)
         client_set_state(c, MQVPN_STATE_CONNECTING);
         xqc_engine_main_logic(c->engine);
     }
+    c->in_connect = 0;
 }
 
 /* ─── Tick: handshake stall watchdog ─── */

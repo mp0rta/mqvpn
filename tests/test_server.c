@@ -937,6 +937,31 @@ drain_and_tick2(mqvpn_server_t *svr, int svr_fd, mqvpn_client_t *cli, const int 
 extern int mqvpn_client_test_kill_conn(mqvpn_client_t *c);
 extern uint64_t mqvpn_client_test_get_reconnect_scheduled_us(const mqvpn_client_t *c);
 
+/* Re-entrancy probe for the manual-reconnect transaction: when armed, the
+ * FIRST path_event fired inside mqvpn_client_connect()'s pre-start reset
+ * re-enters connect() and disconnect() and records their results. The fence
+ * must reject both with MQVPN_ERR_INVALID_ARG — without it the inner
+ * connect() double-starts (conn ownership overwrite class) and the inner
+ * disconnect() drives a CLOSED->CONNECTING resurrection. */
+static mqvpn_client_t *g_reentry_cli = NULL;
+static int g_reentry_armed = 0;
+static int g_reentry_fired = 0;
+static int g_reentry_connect_rc = 12345;
+static int g_reentry_disconnect_rc = 12345;
+
+static void
+reentry_probe_path_event(mqvpn_path_handle_t path, mqvpn_path_status_t status,
+                         void *user_ctx)
+{
+    (void)path;
+    (void)status;
+    (void)user_ctx;
+    if (!g_reentry_armed || g_reentry_fired || !g_reentry_cli) return;
+    g_reentry_fired = 1;
+    g_reentry_connect_rc = mqvpn_client_connect(g_reentry_cli);
+    g_reentry_disconnect_rc = mqvpn_client_disconnect(g_reentry_cli);
+}
+
 static int
 count_active_paths(mqvpn_client_t *cli)
 {
@@ -1025,9 +1050,14 @@ TEST(server_reconnect_manual_connect)
     mqvpn_client_callbacks_t cli_cbs = MQVPN_CLIENT_CALLBACKS_INIT;
     cli_cbs.tun_output = mock_cli_tun_output;
     cli_cbs.tunnel_config_ready = mock_cli_tunnel_ready;
+    cli_cbs.path_event = reentry_probe_path_event;
     mqvpn_client_t *cli = mqvpn_client_new(cli_cfg, &cli_cbs, NULL);
     ASSERT_NOT_NULL(cli);
     mqvpn_config_free(cli_cfg);
+    g_reentry_cli = cli;
+    g_reentry_armed = 0;
+    g_reentry_fired = 0;
+    g_reentry_connect_rc = g_reentry_disconnect_rc = 12345;
 
     mqvpn_path_handle_t ph[2];
     for (int k = 0; k < 2; k++) {
@@ -1105,8 +1135,16 @@ TEST(server_reconnect_manual_connect)
      * reworked — fail loudly instead of passing vacuously. */
     ASSERT_EQ(count_active_paths(cli), 2);
 
-    /* Phase 3: MANUAL reconnect against the same live server. */
+    /* Phase 3: MANUAL reconnect against the same live server. The armed
+     * probe re-enters connect()+disconnect() from the FIRST path_event of
+     * the pre-start reset; the fence must reject both, and the outer
+     * transaction must complete untouched. */
+    g_reentry_armed = 1;
     ASSERT_EQ(mqvpn_client_connect(cli), MQVPN_OK);
+    g_reentry_armed = 0;
+    ASSERT_EQ(g_reentry_fired, 1);
+    ASSERT_EQ(g_reentry_connect_rc, MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(g_reentry_disconnect_rc, MQVPN_ERR_INVALID_ARG);
     /* The pending internal retry must be disarmed by the successful manual
      * start (no second connection on top of this one). */
     ASSERT_EQ(mqvpn_client_test_get_reconnect_scheduled_us(cli), 0);
@@ -1148,6 +1186,7 @@ TEST(server_reconnect_manual_connect)
     ASSERT_EQ(count_active_paths(cli), 2);
 
     /* Cleanup */
+    g_reentry_cli = NULL;
     mqvpn_client_destroy(cli);
     mqvpn_server_destroy(svr);
     close(svr_fd);
