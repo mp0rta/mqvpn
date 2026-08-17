@@ -268,13 +268,19 @@ struct mqvpn_client_s {
     int reconnect_attempts;
     uint64_t reconnect_scheduled_us;
     int shutting_down;
-    /* Re-entrancy fence for the reset+start transaction (connect entry
-     * points). The pre-start slot reset and the primary bootstrap fire
-     * path_event/state_changed synchronously; a callback calling
-     * mqvpn_client_connect()/mqvpn_client_disconnect() mid-transaction
-     * would double-start, double-arm the retry backoff, or drive a
-     * CLOSED->CONNECTING resurrection. While set, both entry points
-     * return MQVPN_ERR_INVALID_ARG. Single writer (tick thread). */
+    /* Re-entrancy fence for the UNSAFE window of a connect transaction:
+     * the pre-start slot reset + the connection bootstrap
+     * (cli_start_connection), which fire path_event synchronously while
+     * slots/conn ownership are mid-mutation. A callback calling
+     * mqvpn_client_connect()/mqvpn_client_disconnect() there would
+     * double-start, double-arm the retry backoff, or drive a
+     * CLOSED->CONNECTING resurrection; while set, both entry points
+     * return MQVPN_ERR_INVALID_ARG. Deliberately CLEARED before the
+     * post-outcome callbacks (reconnect_scheduled on failure,
+     * state_changed(CONNECTING) on success): those observe committed
+     * state, and cancelling from them — e.g. disconnect() inside
+     * reconnect_scheduled after a retry limit — must keep working.
+     * Single writer (tick thread). */
     int in_connect;
 
     /* Log correlation + filtering */
@@ -3144,7 +3150,16 @@ mqvpn_client_connect(mqvpn_client_t *c)
     }
 #endif
 
-    if (cli_start_connection(c) < 0) {
+    int start_rc = cli_start_connection(c);
+    /* The unsafe window — slot reset + connection bootstrap — ends here.
+     * Callbacks fired below (reconnect_scheduled on failure, state_changed
+     * on success) observe committed, consistent state, so lifecycle calls
+     * from them are legitimate again: in particular an embedder cancelling
+     * the retry via disconnect() from reconnect_scheduled must keep
+     * working (it did before this fence existed). */
+    c->in_connect = 0;
+
+    if (start_rc < 0) {
         /* Restore the automatic retry disarmed above — otherwise a failed
          * manual attempt leaves a RECONNECTING client with a zero timer and
          * tick_reconnect never fires again (permanent reconnect loss).
@@ -3158,12 +3173,10 @@ mqvpn_client_connect(mqvpn_client_t *c)
             if (c->cbs.reconnect_scheduled)
                 c->cbs.reconnect_scheduled(delay, c->user_ctx);
         }
-        c->in_connect = 0;
         return MQVPN_ERR_ENGINE;
     }
 
     client_set_state(c, MQVPN_STATE_CONNECTING);
-    c->in_connect = 0;
     /* Platform drives the engine via tick() — no main_logic here */
     return MQVPN_OK;
 }
@@ -4020,7 +4033,12 @@ tick_reconnect(mqvpn_client_t *c)
     /* Reset path state for a fresh connection attempt. */
     client_reset_paths_for_reconnect(c);
 
-    if (cli_start_connection(c) < 0) {
+    int start_rc = cli_start_connection(c);
+    /* Unsafe window over (see mqvpn_client_connect): callbacks below run
+     * against committed state and may call lifecycle APIs again. */
+    c->in_connect = 0;
+
+    if (start_rc < 0) {
         int delay = client_arm_reconnect_timer(c);
         LOG_I(c, "reconnect failed, retrying in %ds (attempt %d)", delay,
               c->reconnect_attempts);
@@ -4029,7 +4047,6 @@ tick_reconnect(mqvpn_client_t *c)
         client_set_state(c, MQVPN_STATE_CONNECTING);
         xqc_engine_main_logic(c->engine);
     }
-    c->in_connect = 0;
 }
 
 /* ─── Tick: handshake stall watchdog ─── */

@@ -656,9 +656,13 @@ MQVPN_API void mqvpn_client_destroy(mqvpn_client_t *client);
  * Calling from RECONNECTING runs the same pre-start path reset as the
  * internal retry and replaces the pending automatic attempt; on failure the
  * automatic retry is re-armed. RE-ENTRANCY: the call fires callbacks
- * (path_event, state_changed) synchronously; calling connect() or
- * disconnect() from inside such a callback while a connect transaction is
- * in progress returns MQVPN_ERR_INVALID_ARG. */
+ * synchronously (path_event during the pre-start reset;
+ * reconnect_scheduled on a failed start; state_changed on success).
+ * connect()/disconnect() called from a callback while the reset/bootstrap
+ * section is still in progress return MQVPN_ERR_INVALID_ARG; callbacks
+ * fired after the outcome is committed (reconnect_scheduled,
+ * state_changed) may call them normally — e.g. cancelling further retries
+ * via disconnect() from reconnect_scheduled is supported. */
 MQVPN_API int mqvpn_client_connect(mqvpn_client_t *client);
 MQVPN_API int mqvpn_client_disconnect(mqvpn_client_t *client);
 

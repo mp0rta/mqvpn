@@ -949,6 +949,24 @@ static int g_reentry_fired = 0;
 static int g_reentry_connect_rc = 12345;
 static int g_reentry_disconnect_rc = 12345;
 
+/* Cancellation probe: when armed, reconnect_scheduled (fired AFTER a failed
+ * start commits its outcome) calls disconnect() — the restored pre-fence
+ * pattern "give up after the retry limit". Must return MQVPN_OK. */
+static mqvpn_client_t *g_cancel_cli = NULL;
+static int g_cancel_armed = 0;
+static int g_cancel_fired = 0;
+static int g_cancel_rc = 12345;
+
+static void
+cancel_probe_reconnect_scheduled(int delay_sec, void *user_ctx)
+{
+    (void)delay_sec;
+    (void)user_ctx;
+    if (!g_cancel_armed || g_cancel_fired || !g_cancel_cli) return;
+    g_cancel_fired = 1;
+    g_cancel_rc = mqvpn_client_disconnect(g_cancel_cli);
+}
+
 static void
 reentry_probe_path_event(mqvpn_path_handle_t path, mqvpn_path_status_t status,
                          void *user_ctx)
@@ -1250,9 +1268,14 @@ TEST(server_reconnect_manual_failure_rearm)
     mqvpn_client_callbacks_t cli_cbs = MQVPN_CLIENT_CALLBACKS_INIT;
     cli_cbs.tun_output = mock_cli_tun_output;
     cli_cbs.tunnel_config_ready = mock_cli_tunnel_ready;
+    cli_cbs.reconnect_scheduled = cancel_probe_reconnect_scheduled;
     mqvpn_client_t *cli = mqvpn_client_new(cli_cfg, &cli_cbs, NULL);
     ASSERT_NOT_NULL(cli);
     mqvpn_config_free(cli_cfg);
+    g_cancel_cli = cli;
+    g_cancel_armed = 0;
+    g_cancel_fired = 0;
+    g_cancel_rc = 12345;
 
     mqvpn_path_handle_t ph[2];
     mqvpn_path_desc_t desc;
@@ -1302,6 +1325,19 @@ TEST(server_reconnect_manual_failure_rearm)
     ASSERT_EQ(mqvpn_client_get_state(cli), MQVPN_STATE_RECONNECTING);
     ASSERT_NE(mqvpn_client_test_get_reconnect_scheduled_us(cli), 0);
 
+    /* Cancellation from reconnect_scheduled: the callback fires after the
+     * failed outcome is committed (fence already lowered), so an embedder
+     * giving up on retries by calling disconnect() there must get MQVPN_OK
+     * and land in CLOSED — the pre-fence behavior, pinned here so the
+     * re-entrancy fence can never grow back over this window. */
+    g_cancel_armed = 1;
+    ASSERT_EQ(mqvpn_client_connect(cli), MQVPN_ERR_ENGINE);
+    g_cancel_armed = 0;
+    ASSERT_EQ(g_cancel_fired, 1);
+    ASSERT_EQ(g_cancel_rc, MQVPN_OK);
+    ASSERT_EQ(mqvpn_client_get_state(cli), MQVPN_STATE_CLOSED);
+
+    g_cancel_cli = NULL;
     mqvpn_client_destroy(cli);
     mqvpn_server_destroy(svr);
     close(svr_fd);
