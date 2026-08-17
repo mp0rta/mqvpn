@@ -920,6 +920,7 @@ drain_and_tick2(mqvpn_server_t *svr, int svr_fd, mqvpn_client_t *cli, const int 
                                         from_len);
     }
     for (int k = 0; k < 2; k++) {
+        if (cli_fd[k] < 0) continue; /* single-path callers pass -1 */
         for (;;) {
             from_len = sizeof(from);
             ssize_t n = recvfrom(cli_fd[k], buf, sizeof(buf), MSG_DONTWAIT,
@@ -934,6 +935,7 @@ drain_and_tick2(mqvpn_server_t *svr, int svr_fd, mqvpn_client_t *cli, const int 
 }
 
 extern int mqvpn_client_test_kill_conn(mqvpn_client_t *c);
+extern uint64_t mqvpn_client_test_get_reconnect_scheduled_us(const mqvpn_client_t *c);
 
 static int
 count_active_paths(mqvpn_client_t *cli)
@@ -1105,6 +1107,9 @@ TEST(server_reconnect_manual_connect)
 
     /* Phase 3: MANUAL reconnect against the same live server. */
     ASSERT_EQ(mqvpn_client_connect(cli), MQVPN_OK);
+    /* The pending internal retry must be disarmed by the successful manual
+     * start (no second connection on top of this one). */
+    ASSERT_EQ(mqvpn_client_test_get_reconnect_scheduled_us(cli), 0);
     /* Discriminator (a): the reset ran BEFORE the start — no slot may still
      * carry the dead connection's ACTIVE state at this instant. (VALIDATING
      * maps to public PENDING, so a fresh bootstrap never shows ACTIVE
@@ -1148,6 +1153,120 @@ TEST(server_reconnect_manual_connect)
     close(svr_fd);
     close(cli_fd[0]);
     close(cli_fd[1]);
+}
+
+/* test_server_reconnect_manual_failure_rearm: a manual connect() from
+ * RECONNECTING that FAILS to start (here: the only path was removed, so the
+ * primary-readiness guard in cli_start_connection trips) must re-arm the
+ * automatic retry it disarmed on entry. Without the re-arm the client is
+ * stranded: state stays RECONNECTING with a zero timer, tick_reconnect never
+ * fires again, and no later event restarts the connection. */
+TEST(server_reconnect_manual_failure_rearm)
+{
+    reset_mocks();
+    g_client_connected_called = 0;
+    g_client_disconnected_called = 0;
+    g_cli_tunnel_ready_called = 0;
+
+    int svr_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    int cli_fd[2];
+    cli_fd[0] = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    cli_fd[1] = -1; /* single-path variant; drain_and_tick2 skips fd -1 */
+    ASSERT_NE(svr_fd, -1);
+    ASSERT_NE(cli_fd[0], -1);
+
+    struct sockaddr_in svr_addr, cli_addr;
+    memset(&svr_addr, 0, sizeof(svr_addr));
+    svr_addr.sin_family = AF_INET;
+    svr_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ASSERT_EQ(bind(svr_fd, (struct sockaddr *)&svr_addr, sizeof(svr_addr)), 0);
+    socklen_t alen = sizeof(svr_addr);
+    getsockname(svr_fd, (struct sockaddr *)&svr_addr, &alen);
+    memset(&cli_addr, 0, sizeof(cli_addr));
+    cli_addr.sin_family = AF_INET;
+    cli_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ASSERT_EQ(bind(cli_fd[0], (struct sockaddr *)&cli_addr, sizeof(cli_addr)), 0);
+    alen = sizeof(cli_addr);
+    getsockname(cli_fd[0], (struct sockaddr *)&cli_addr, &alen);
+
+    mqvpn_config_t *svr_cfg = make_server_config();
+    mqvpn_server_callbacks_t svr_cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    svr_cbs.tun_output = mock_tun_output;
+    svr_cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    svr_cbs.on_client_connected = mock_on_client_connected;
+    svr_cbs.on_client_disconnected = mock_on_client_disconnected;
+    mqvpn_server_t *svr = mqvpn_server_new(svr_cfg, &svr_cbs, NULL);
+    ASSERT_NOT_NULL(svr);
+    mqvpn_config_free(svr_cfg);
+    ASSERT_EQ(mqvpn_server_set_socket_fd(svr, svr_fd, (struct sockaddr *)&svr_addr,
+                                         sizeof(svr_addr)),
+              MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_start(svr), MQVPN_OK);
+
+    mqvpn_config_t *cli_cfg = mqvpn_config_new();
+    mqvpn_config_set_server(cli_cfg, "127.0.0.1", ntohs(svr_addr.sin_port));
+    mqvpn_config_set_insecure(cli_cfg, 1);
+    mqvpn_config_set_reconnect(cli_cfg, 1, 3600);
+    mqvpn_config_set_log_level(cli_cfg, MQVPN_LOG_ERROR);
+    mqvpn_client_callbacks_t cli_cbs = MQVPN_CLIENT_CALLBACKS_INIT;
+    cli_cbs.tun_output = mock_cli_tun_output;
+    cli_cbs.tunnel_config_ready = mock_cli_tunnel_ready;
+    mqvpn_client_t *cli = mqvpn_client_new(cli_cfg, &cli_cbs, NULL);
+    ASSERT_NOT_NULL(cli);
+    mqvpn_config_free(cli_cfg);
+
+    mqvpn_path_handle_t ph[2];
+    mqvpn_path_desc_t desc;
+    memset(&desc, 0, sizeof(desc));
+    desc.struct_size = sizeof(desc);
+    memcpy(desc.local_addr, &cli_addr, sizeof(cli_addr));
+    desc.local_addr_len = sizeof(cli_addr);
+    ph[0] = mqvpn_client_add_path_fd(cli, cli_fd[0], &desc);
+    ph[1] = -1;
+    ASSERT_NE(ph[0], (mqvpn_path_handle_t)-1);
+    mqvpn_client_set_server_addr(cli, (struct sockaddr *)&svr_addr, sizeof(svr_addr));
+    ASSERT_EQ(mqvpn_client_connect(cli), MQVPN_OK);
+
+    for (int elapsed = 0; elapsed < 15000;) {
+        drain_and_tick2(svr, svr_fd, cli, cli_fd, ph);
+        if (g_cli_tunnel_ready_called > 0) break;
+        struct pollfd pfds[2] = {
+            {.fd = svr_fd, .events = POLLIN},
+            {.fd = cli_fd[0], .events = POLLIN},
+        };
+        int w = poll(pfds, 2, 20);
+        elapsed += (w == 0) ? 20 : 1;
+    }
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+    /* TUN up -> ESTABLISHED: the RECONNECTING transition is only valid from
+     * ESTABLISHED (a TUNNEL_READY conn death takes the CLOSED edge). */
+    mqvpn_client_set_tun_active(cli, 1, -1);
+
+    ASSERT_EQ(mqvpn_client_test_kill_conn(cli), 0);
+    for (int elapsed = 0; elapsed < 15000;) {
+        drain_and_tick2(svr, svr_fd, cli, cli_fd, ph);
+        if (mqvpn_client_get_state(cli) == MQVPN_STATE_RECONNECTING) break;
+        struct pollfd pfds[2] = {
+            {.fd = svr_fd, .events = POLLIN},
+            {.fd = cli_fd[0], .events = POLLIN},
+        };
+        int w = poll(pfds, 2, 20);
+        elapsed += (w == 0) ? 20 : 1;
+    }
+    ASSERT_EQ(mqvpn_client_get_state(cli), MQVPN_STATE_RECONNECTING);
+    ASSERT_NE(mqvpn_client_test_get_reconnect_scheduled_us(cli), 0);
+
+    /* Remove the only path — the manual connect below cannot start (primary
+     * readiness guard) and must re-arm the retry it disarmed. */
+    ASSERT_EQ(mqvpn_client_remove_path(cli, ph[0]), MQVPN_OK);
+    ASSERT_EQ(mqvpn_client_connect(cli), MQVPN_ERR_ENGINE);
+    ASSERT_EQ(mqvpn_client_get_state(cli), MQVPN_STATE_RECONNECTING);
+    ASSERT_NE(mqvpn_client_test_get_reconnect_scheduled_us(cli), 0);
+
+    mqvpn_client_destroy(cli);
+    mqvpn_server_destroy(svr);
+    close(svr_fd);
+    close(cli_fd[0]);
 }
 
 /* max_clients config boundary */
@@ -1214,6 +1333,7 @@ main(void)
     /* QUIC loopback integration test (test_server_session per impl_plan) */
     run_server_session_quic_loopback();
     run_server_reconnect_manual_connect();
+    run_server_reconnect_manual_failure_rearm();
 
     /* max_clients config boundary */
     run_server_max_clients_config();

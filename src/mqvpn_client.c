@@ -927,6 +927,19 @@ mqvpn_client_test_kill_conn(mqvpn_client_t *c)
     return 0;
 }
 
+/* Test-only: read the armed reconnect deadline (0 = disarmed). Lets tests
+ * pin the disarm-on-manual-connect / re-arm-on-failure contract without
+ * exposing the field publicly. Hidden from libmqvpn.so's dynamic export
+ * table (not part of the public ABI). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+uint64_t
+mqvpn_client_test_get_reconnect_scheduled_us(const mqvpn_client_t *c)
+{
+    return c ? c->reconnect_scheduled_us : 0;
+}
+
 /* P1 test-only: seed c->next_wake_us — the xquic-requested wake that
  * mqvpn_client_get_interest starts `ms` from (normally set by
  * cb_set_event_timer). Lets a pure-function test observe whether the
@@ -2701,6 +2714,20 @@ mqvpn_check_scheduler_preconditions(mqvpn_scheduler_t scheduler, int n_paths)
 static int
 cli_start_connection(mqvpn_client_t *c)
 {
+    /* Invariant: starting requires no live connection. Every legitimate
+     * entry satisfies it — initial connect from IDLE never created one,
+     * and both reconnect entries (tick_reconnect, manual connect from
+     * RECONNECTING) run only after cb_h3_conn_close destroyed and NULLed
+     * c->conn. The reachable violation is a re-entrant lifecycle call: the
+     * pre-start slot reset fires path_event synchronously (documented
+     * contract), and an observer calling mqvpn_client_connect() from there
+     * would otherwise start a SECOND connection whose c->conn overwrite
+     * makes a later close notify free the wrong connection. Refuse instead. */
+    if (c->conn) {
+        LOG_W(c, "connection start refused: a connection already exists");
+        return -1;
+    }
+
     c->conn_id++;
     cli_conn_t *conn = calloc(1, sizeof(*conn));
     if (!conn) return -1;
@@ -3065,8 +3092,11 @@ mqvpn_client_connect(mqvpn_client_t *c)
      * invariant abort) and leaves stale-ACTIVE secondaries permanently
      * un-activatable (activate_pending_paths is PENDING-only: silent
      * multipath loss). Also disarm the pending retry so tick_reconnect cannot
-     * start a second connection on top of this one. */
-    if (c->state == MQVPN_STATE_RECONNECTING) {
+     * start a second connection on top of this one; on start failure below
+     * the timer is re-armed, so a failed manual attempt cannot strand a
+     * RECONNECTING client with automatic retry disabled. */
+    int from_reconnecting = (c->state == MQVPN_STATE_RECONNECTING);
+    if (from_reconnecting) {
         c->reconnect_scheduled_us = 0;
         client_reset_paths_for_reconnect(c);
     }
@@ -3096,7 +3126,22 @@ mqvpn_client_connect(mqvpn_client_t *c)
     }
 #endif
 
-    if (cli_start_connection(c) < 0) return MQVPN_ERR_ENGINE;
+    if (cli_start_connection(c) < 0) {
+        /* Restore the automatic retry disarmed above — otherwise a failed
+         * manual attempt leaves a RECONNECTING client with a zero timer and
+         * tick_reconnect never fires again (permanent reconnect loss).
+         * Mirrors tick_reconnect's own failure handling. The state re-check
+         * skips the re-arm when a re-entrant connect() already moved the
+         * client to CONNECTING (a connection IS underway then). */
+        if (from_reconnecting && c->state == MQVPN_STATE_RECONNECTING) {
+            int delay = client_arm_reconnect_timer(c);
+            LOG_I(c, "manual reconnect failed, retrying in %ds (attempt %d)", delay,
+                  c->reconnect_attempts);
+            if (c->cbs.reconnect_scheduled)
+                c->cbs.reconnect_scheduled(delay, c->user_ctx);
+        }
+        return MQVPN_ERR_ENGINE;
+    }
 
     client_set_state(c, MQVPN_STATE_CONNECTING);
     /* Platform drives the engine via tick() — no main_logic here */
