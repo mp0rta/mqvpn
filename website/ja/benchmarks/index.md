@@ -118,7 +118,7 @@ RTMP は単一の TCP 接続で送るプロトコルで、それ自体では回�
 | バースト損失（モバイル回線相当） | 切断を繰り返し、ほぼ届かない | **安定、切断なし** |
 | 片方の回線を 30 秒遮断 | 配信も切断、回線復旧まで停止 | **配信は切れない** |
 
-数値の詳細はフルレポート: [RTMP ボンディング測定レポート](https://github.com/mp0rta/mqvpn/blob/main/docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bonding-ja.md) — データと動画: [`bench_results/rtmp/`](https://github.com/mp0rta/mqvpn/tree/main/bench_results/rtmp)
+数値の詳細はフルレポート: [RTMP ボンディング測定レポート（英語）](https://github.com/mp0rta/mqvpn/blob/main/docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bonding-en.md) — データと動画: [`bench_results/rtmp/`](https://github.com/mp0rta/mqvpn/tree/main/bench_results/rtmp)
 
 <style scoped>
 .page-desc {

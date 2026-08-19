@@ -2,7 +2,6 @@
 
 Date: 2026-08-11.
 Version under test: mqvpn v0.16.0.
-(日本語版: [2026-08-11-rtmp-direct-vs-mqvpn-bonding-ja.md](2026-08-11-rtmp-direct-vs-mqvpn-bonding-ja.md))
 
 ## RTMP is tied to a single connection
 
