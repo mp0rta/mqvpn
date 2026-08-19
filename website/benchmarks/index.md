@@ -107,6 +107,24 @@ Bonding two weak or lossy links turns an unwatchable SRT feed into a stable one.
 
 Full report and comparison videos: [`bench_results/srt/`](https://github.com/mp0rta/mqvpn/tree/main/bench_results/srt)
 
+## RTMP live streaming
+
+<p class="section-desc">RTMP publishing over emulated impaired links (netns), through mqvpn's hybrid TCP lane. OBS-like publisher behaviour: 10 s stall detection, 2 s reconnect retry.</p>
+
+RTMP runs over a single TCP connection and cannot bond links by itself. Through mqvpn it bonds transparently — the encoder and the streaming service stay unmodified. Below, one of two bonded links is cut for 30 seconds mid-stream — direct (left) stops for ~33 s; mqvpn (right) never stops:
+
+<video controls muted playsinline style="width: 100%; border-radius: 8px;" src="https://github.com/user-attachments/assets/04d3b4f9-be82-4a85-857d-474e503bfa94"></video>
+
+| Scenario | Direct (single link) | mqvpn (2-path) |
+|---|---|---|
+| Starved uplinks (8 Mbps over 2 × 6 Mbit) | 5.7 Mbps, 17 s behind live | **7.8 Mbps**, < 1 s behind |
+| Bursty loss (mobile-style, ~10 %) | 4 disconnects/min, 42 s downtime | **0 disconnects, 0 s downtime** |
+| One link cut for 30 s | 8.7 disconnects, 33 s downtime | **0 disconnects, 0 s downtime** |
+
+<p class="section-desc">Downtime: time during which no data reached the ingest server (the viewer sees a frozen stream).</p>
+
+Full report: [RTMP bonding benchmark](https://github.com/mp0rta/mqvpn/blob/main/docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bonding-en.md) — data and videos: [`bench_results/rtmp/`](https://github.com/mp0rta/mqvpn/tree/main/bench_results/rtmp)
+
 <style scoped>
 .page-desc {
   font-size: 0.9em;

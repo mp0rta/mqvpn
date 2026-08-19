@@ -104,6 +104,24 @@ const latestAggregate = computed(() => {
 
 フルレポートと比較動画: [`bench_results/srt/`](https://github.com/mp0rta/mqvpn/tree/main/bench_results/srt)
 
+## RTMP ライブ配信
+
+<p class="section-desc">エミュレートした劣悪回線（netns）上の RTMP 配信。mqvpn のハイブリッド TCP レーン経由。配信ソフトは OBS 相当の挙動（10 秒で切断検知、2 秒間隔で再接続）。</p>
+
+RTMP は単一の TCP 接続で送るプロトコルで、それ自体では回線を束ねられません。mqvpn を通すと、配信ソフトも配信先も無改造のまま透過的にボンディングされます。以下は配信中に 2 本のうち 1 本を 30 秒間遮断した比較 — 単一回線（左）は約 33 秒停止し、mqvpn（右）は止まりません：
+
+<video controls muted playsinline style="width: 100%; border-radius: 8px;" src="https://github.com/user-attachments/assets/04d3b4f9-be82-4a85-857d-474e503bfa94"></video>
+
+| シナリオ | 単一回線（direct） | mqvpn（2 パス） |
+|---|---|---|
+| 帯域不足（8 Mbps を 2 × 6 Mbit で） | 5.7 Mbps、ライブから 17 秒遅れ | **7.8 Mbps**、遅れ 1 秒未満 |
+| バースト損失（モバイル回線相当、約 10 %） | 切断 4 回/分、停止 42 秒 | **切断 0 回、停止 0 秒** |
+| 片方の回線を 30 秒遮断 | 切断 8.7 回、停止 33 秒 | **切断 0 回、停止 0 秒** |
+
+<p class="section-desc">停止：配信先にデータが届かなかった時間（視聴者には映像の停止として見える）。</p>
+
+フルレポート: [RTMP ボンディング測定レポート](https://github.com/mp0rta/mqvpn/blob/main/docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bonding-ja.md) — データと動画: [`bench_results/rtmp/`](https://github.com/mp0rta/mqvpn/tree/main/bench_results/rtmp)
+
 <style scoped>
 .page-desc {
   font-size: 0.9em;
