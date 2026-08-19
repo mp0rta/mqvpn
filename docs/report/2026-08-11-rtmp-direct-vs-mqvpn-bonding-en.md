@@ -124,13 +124,16 @@ where the software's connection was dead.
 |---|---|---|
 | Disconnects | 8.7 | 0 |
 | Stream downtime (of 120 s) | 32.9 s | 0 s |
-| Time from link recovery to stream recovery | 30.6 s | n/a (never stopped) |
+| Time from link recovery to stream recovery | 2.2–4.0 s | n/a (never stopped) |
 | Delivered bitrate | 8.0 Mbps | 8.1 Mbps |
 
 With direct, the stream's TCP connection dies with the link.
 The software keeps retrying, but with only that one link the retries fail
-until the link itself returns, so the 30-second cut (plus a few seconds
-of detection and reconnection) becomes stream downtime in full.
+until the link itself returns.
+This is why the downtime (32.9 s) exceeds the cut itself: the 30-second
+cut plus the 2–4 seconds it takes, after recovery, for a reconnect to
+succeed and the first media to arrive (stall detection completes during
+the cut, so it adds nothing on top).
 mqvpn switches to the surviving link B immediately and the software's
 connection never drops.
 The behaviour was identical in all three runs.

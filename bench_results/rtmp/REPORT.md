@@ -91,7 +91,15 @@ failover blip: verified from `flv_samples.csv` (all reps), that window
 sits at t=0 (the universal encoder start-up gap, FLV header → first media
 chunk ≈ 1 s), and around the flap itself byte arrival never paused beyond
 one 250 ms sampling interval. The failover is invisible at the
-measurement's resolution. Highly reproducible (direct TTR 30.4–30.7 s).
+measurement's resolution.
+
+TTR semantics caveat: the analyzer's raw `ttr_s` (30.4–30.7 s here) is
+measured from flap-DOWN to the end of the containing no-growth window,
+and that window is truncated early by the close-flush artifact (finding
+2) — it is NOT "time from link recovery". From `flv_samples.csv`
+directly: direct's stream returns 2.2–4.0 s after link restore, and the
+total mid-stream outage is 31.5–33.8 s = the 30 s cut + that reconnect
+overhead. Highly reproducible across reps.
 
 Lag timelines: `charts/lag_R2_rep1.png`, `charts/lag_R3_rep1.png`.
 
