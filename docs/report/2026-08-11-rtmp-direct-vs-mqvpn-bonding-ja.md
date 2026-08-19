@@ -112,6 +112,10 @@ direct 側は 32.8 秒の「signal lost」表示 (実測の停止時間と一致
 - [動画: 条件 3 の並列比較 (direct vs mqvpn)](../../bench_results/rtmp/video/r3_flap_direct_vs_mqvpn.mp4)
 - [動画: 条件 1 の並列比較](../../bench_results/rtmp/video/r1_starved_direct_vs_mqvpn.mp4)
 
+条件 1 の動画では、direct 側が 45 秒過ぎに静止して見える。
+これは切断ではなく、60 秒の試験中に direct 側は 45.6 秒分の映像しか配信先に届かず (mqvpn 側は 57.7 秒分でほぼ全編)、届いた映像が先に尽きたものである。
+表の「ライブからの遅れ」は、動画上ではこの形で現れる。
+
 ## 設定方法
 
 RTMP のような TCP ベースのプロトコルでは、トンネルの hybrid TCP レーンを有効にする。

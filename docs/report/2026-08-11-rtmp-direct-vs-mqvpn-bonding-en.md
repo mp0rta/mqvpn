@@ -163,6 +163,14 @@ the measured downtime); the mqvpn side keeps playing throughout.
 - [Video: side-by-side under condition 3 (direct vs mqvpn)](../../bench_results/rtmp/video/r3_flap_direct_vs_mqvpn.mp4)
 - [Video: side-by-side under condition 1](../../bench_results/rtmp/video/r1_starved_direct_vs_mqvpn.mp4)
 
+In the condition-1 video, the direct side appears to stop past the
+45-second mark.
+That is not a disconnect: over the 60-second run only 45.6 seconds of
+video reached the destination on the direct side (57.7 seconds — nearly
+the whole run — on the mqvpn side), so the delivered footage simply runs
+out early.
+This is what "drift behind live" from the table looks like on video.
+
 ## Configuration
 
 For TCP-based protocols such as RTMP, enable the tunnel's hybrid TCP
