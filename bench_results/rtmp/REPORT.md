@@ -104,6 +104,11 @@ Lag timelines: `charts/lag_R2_rep1.png`, `charts/lag_R3_rep1.png`.
 | R3 | direct-a | 9 | 34.3 | 32.8 | `video/r3_flap_direct_vs_mqvpn.mp4` |
 | R3 | mqvpn-hybrid | 1 | 1.3 | 0.0 | (same side-by-side) |
 
+The tracked `video/` files are 540 kbps two-pass web re-encodes of the
+side-by-sides (kept under GitHub's upload limits; also uploaded as
+user-attachments for README/website embeds). The full-rate originals are
+the `R{1,3}_sbs.mp4` outputs of a tier-2 run.
+
 The R3 side-by-side shows direct on a 32.8 s "signal lost (reconnecting)"
 slate while mqvpn keeps playing. Slate length (32.8 s) is consistent with
 the measured dead air (34.3 s; ~1 s sampler/buffer jitter). freeze_s counts
