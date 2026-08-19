@@ -571,11 +571,11 @@ https://github.com/user-attachments/assets/04d3b4f9-be82-4a85-857d-474e503bfa94
 
 | Scenario | Direct (single link) | mqvpn (2-path) |
 |---|---|---|
-| Starved uplinks (8 Mbps over 2 × 6 Mbit) | 5.7 Mbps, 17 s behind live | **7.8 Mbps**, < 1 s behind |
-| Bursty loss (mobile-style, ~10 %) | 4 disconnects/min, 42 s downtime | **0 disconnects, 0 s downtime** |
-| One link cut for 30 s | 8.7 disconnects, 33 s downtime | **0 disconnects, 0 s downtime** |
+| Two weak uplinks (8 Mbps over 2 × 6 Mbit) | capped at 5.7 Mbps, drifts behind live | **7.8 Mbps, stays live** |
+| Bursty mobile-style loss | repeated disconnects, barely delivers | **stable, no disconnects** |
+| One link cut for 30 s | stream drops until the link returns | **keeps streaming** |
 
-OBS-like publisher behaviour (10 s stall detection, 2 s reconnect retry), netns-emulated links, 3 runs per cell. Full report: [`docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bonding-en.md`](docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bonding-en.md) — data & videos: [`bench_results/rtmp/`](bench_results/rtmp/) — bench: [`scripts/benchmark_rtmp.sh`](scripts/benchmark_rtmp.sh)
+Full report with all numbers: [`docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bonding-en.md`](docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bonding-en.md) — data & videos: [`bench_results/rtmp/`](bench_results/rtmp/) — bench: [`scripts/benchmark_rtmp.sh`](scripts/benchmark_rtmp.sh)
 
 ## Architecture
 

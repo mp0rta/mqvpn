@@ -117,13 +117,11 @@ RTMP runs over a single TCP connection and cannot bond links by itself. Through 
 
 | Scenario | Direct (single link) | mqvpn (2-path) |
 |---|---|---|
-| Starved uplinks (8 Mbps over 2 × 6 Mbit) | 5.7 Mbps, 17 s behind live | **7.8 Mbps**, < 1 s behind |
-| Bursty loss (mobile-style, ~10 %) | 4 disconnects/min, 42 s downtime | **0 disconnects, 0 s downtime** |
-| One link cut for 30 s | 8.7 disconnects, 33 s downtime | **0 disconnects, 0 s downtime** |
+| Two weak uplinks (8 Mbps over 2 × 6 Mbit) | capped at 5.7 Mbps, drifts behind live | **7.8 Mbps, stays live** |
+| Bursty mobile-style loss | repeated disconnects, barely delivers | **stable, no disconnects** |
+| One link cut for 30 s | stream drops until the link returns | **keeps streaming** |
 
-<p class="section-desc">Downtime: time during which no data reached the ingest server (the viewer sees a frozen stream).</p>
-
-Full report: [RTMP bonding benchmark](https://github.com/mp0rta/mqvpn/blob/main/docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bonding-en.md) — data and videos: [`bench_results/rtmp/`](https://github.com/mp0rta/mqvpn/tree/main/bench_results/rtmp)
+Full report with all numbers: [RTMP bonding benchmark](https://github.com/mp0rta/mqvpn/blob/main/docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bonding-en.md) — data and videos: [`bench_results/rtmp/`](https://github.com/mp0rta/mqvpn/tree/main/bench_results/rtmp)
 
 <style scoped>
 .page-desc {

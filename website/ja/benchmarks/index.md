@@ -114,13 +114,11 @@ RTMP は単一の TCP 接続で送るプロトコルで、それ自体では回�
 
 | シナリオ | 単一回線（direct） | mqvpn（2 パス） |
 |---|---|---|
-| 帯域不足（8 Mbps を 2 × 6 Mbit で） | 5.7 Mbps、ライブから 17 秒遅れ | **7.8 Mbps**、遅れ 1 秒未満 |
-| バースト損失（モバイル回線相当、約 10 %） | 切断 4 回/分、停止 42 秒 | **切断 0 回、停止 0 秒** |
-| 片方の回線を 30 秒遮断 | 切断 8.7 回、停止 33 秒 | **切断 0 回、停止 0 秒** |
+| 帯域不足（8 Mbps を 2 × 6 Mbit で） | 5.7 Mbps 止まり、ライブから遅れ続ける | **7.8 Mbps、遅れなし** |
+| バースト損失（モバイル回線相当） | 切断を繰り返し、ほぼ届かない | **安定、切断なし** |
+| 片方の回線を 30 秒遮断 | 配信も切断、回線復旧まで停止 | **配信は切れない** |
 
-<p class="section-desc">停止：配信先にデータが届かなかった時間（視聴者には映像の停止として見える）。</p>
-
-フルレポート: [RTMP ボンディング測定レポート](https://github.com/mp0rta/mqvpn/blob/main/docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bonding-ja.md) — データと動画: [`bench_results/rtmp/`](https://github.com/mp0rta/mqvpn/tree/main/bench_results/rtmp)
+数値の詳細はフルレポート: [RTMP ボンディング測定レポート](https://github.com/mp0rta/mqvpn/blob/main/docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bonding-ja.md) — データと動画: [`bench_results/rtmp/`](https://github.com/mp0rta/mqvpn/tree/main/bench_results/rtmp)
 
 <style scoped>
 .page-desc {
