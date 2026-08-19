@@ -95,6 +95,11 @@ A 17-second delay is the point where interacting with chat stops working.
 mqvpn carries the 8 Mbps stream over the combined capacity of both links,
 with drift under 1 second.
 
+![Drift behind live over time (condition 1, one representative run)](../../bench_results/rtmp/charts/lag_R1_rep1.png)
+
+This is the drift the condition-1 video cannot show directly: direct
+falls further behind every second, while mqvpn holds under one second.
+
 ## Result 2: keeping a stream alive on a lossy link
 
 | | direct | mqvpn |
