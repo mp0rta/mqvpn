@@ -167,6 +167,26 @@ class SettingsRepositoryTest {
     }
 
     @Test
+    fun `explicit insecure=true saved after corruption recovery survives a reopen`() = runTest(testDispatcher) {
+        val file = newFile()
+        file.writeBytes(byteArrayOf(0x00, 0x01, 0x02, 0x03, 0x42, 0x13, 0x37))
+
+        val firstScope = CoroutineScope(testDispatcher + Job())
+        val firstRepo = SettingsRepository(
+            newDataStore(file, ReplaceFileCorruptionHandler { emptyPreferences() }, scope = firstScope),
+        )
+        firstRepo.save(DemoSettings(serverAddress = "203.0.113.5", insecure = true))
+        firstScope.cancel()
+        testScheduler.advanceUntilIdle()
+
+        val repo = SettingsRepository(
+            newDataStore(file, ReplaceFileCorruptionHandler { emptyPreferences() }),
+        )
+
+        assertEquals(true, repo.settings.first().insecure)
+    }
+
+    @Test
     fun `save self-heals a corrupt store when a corruption handler is installed`() = runTest(testDispatcher) {
         val file = newFile()
         file.writeBytes(byteArrayOf(0x00, 0x01, 0x02, 0x03, 0x42, 0x13, 0x37))
