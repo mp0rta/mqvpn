@@ -3,6 +3,7 @@
 
 package com.mqvpn.app.data
 
+import androidx.datastore.core.DataMigration
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -41,6 +42,34 @@ class SettingsRepository @Inject constructor(
         val REORDER_PORTS = stringPreferencesKey("reorder_ports")
         val HYBRID_ENABLED = booleanPreferencesKey("hybrid_enabled")
         val HYBRID_TCP_MODE = stringPreferencesKey("hybrid_tcp_mode")
+        val SCHEMA = intPreferencesKey("settings_schema_version")
+    }
+
+    companion object {
+        private const val SCHEMA_VERSION = 1
+
+        /**
+         * v0 -> v1: builds up to 0.16.0 shipped with the Insecure toggle ON
+         * by default, so every saved store carries insecure=true even when
+         * the user never touched the toggle. Drop the key once so those
+         * stores fall back to the secure default; the version stamp makes a
+         * later explicit opt-in stick.
+         */
+        val MIGRATIONS: List<DataMigration<Preferences>> = listOf(
+            object : DataMigration<Preferences> {
+                override suspend fun shouldMigrate(currentData: Preferences): Boolean =
+                    (currentData[Keys.SCHEMA] ?: 0) < SCHEMA_VERSION
+
+                override suspend fun migrate(currentData: Preferences): Preferences {
+                    val prefs = currentData.toMutablePreferences()
+                    prefs.remove(Keys.INSECURE)
+                    prefs[Keys.SCHEMA] = SCHEMA_VERSION
+                    return prefs.toPreferences()
+                }
+
+                override suspend fun cleanUp() {}
+            },
+        )
     }
 
     val settings: Flow<DemoSettings> = dataStore.data

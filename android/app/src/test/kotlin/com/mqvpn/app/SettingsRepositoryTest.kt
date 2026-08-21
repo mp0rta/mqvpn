@@ -7,6 +7,8 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.MutablePreferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
@@ -18,6 +20,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -44,12 +47,29 @@ class SettingsRepositoryTest {
     private fun newDataStore(
         file: File,
         corruptionHandler: ReplaceFileCorruptionHandler<Preferences>? = null,
+        scope: CoroutineScope = storeScope,
     ): DataStore<Preferences> =
         PreferenceDataStoreFactory.create(
             corruptionHandler = corruptionHandler,
-            scope = storeScope,
+            migrations = SettingsRepository.MIGRATIONS,
+            scope = scope,
             produceFile = { file },
         )
+
+    /**
+     * Seed [file] the way pre-migration builds wrote it (no schema-version
+     * key), then release the store so the file can be reopened.
+     */
+    private suspend fun TestScope.seedLegacyStore(
+        file: File,
+        block: suspend (MutablePreferences) -> Unit,
+    ) {
+        val seedScope = CoroutineScope(testDispatcher + Job())
+        val seed = PreferenceDataStoreFactory.create(scope = seedScope, produceFile = { file })
+        seed.edit { block(it) }
+        seedScope.cancel()
+        testScheduler.advanceUntilIdle()
+    }
 
     @Test
     fun `fresh store yields defaults`() = runTest(testDispatcher) {
@@ -93,6 +113,47 @@ class SettingsRepositoryTest {
 
         val expected = DemoSettings(serverAddress = "198.51.100.9", serverPort = 51820)
         assertEquals(expected, result)
+    }
+
+    @Test
+    fun `pre-migration store with baked-in insecure=true is reset to false`() = runTest(testDispatcher) {
+        val file = newFile()
+        seedLegacyStore(file) { prefs ->
+            prefs[stringPreferencesKey("server_address")] = "203.0.113.5"
+            prefs[booleanPreferencesKey("insecure")] = true
+        }
+
+        val repo = SettingsRepository(newDataStore(file))
+        val result = repo.settings.first()
+
+        assertEquals(false, result.insecure)
+        assertEquals("203.0.113.5", result.serverAddress)
+    }
+
+    @Test
+    fun `pre-migration store with insecure=false stays false`() = runTest(testDispatcher) {
+        val file = newFile()
+        seedLegacyStore(file) { prefs ->
+            prefs[booleanPreferencesKey("insecure")] = false
+        }
+
+        val repo = SettingsRepository(newDataStore(file))
+
+        assertEquals(false, repo.settings.first().insecure)
+    }
+
+    @Test
+    fun `explicit insecure=true saved after migration survives a reopen`() = runTest(testDispatcher) {
+        val file = newFile()
+        val firstScope = CoroutineScope(testDispatcher + Job())
+        val firstRepo = SettingsRepository(newDataStore(file, scope = firstScope))
+        firstRepo.save(DemoSettings(serverAddress = "203.0.113.5", insecure = true))
+        firstScope.cancel()
+        testScheduler.advanceUntilIdle()
+
+        val repo = SettingsRepository(newDataStore(file))
+
+        assertEquals(true, repo.settings.first().insecure)
     }
 
     @Test
