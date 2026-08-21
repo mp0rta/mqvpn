@@ -16,7 +16,7 @@ data class DemoSettings(
     val serverPort: Int = 443,
     val tlsServerName: String = "",
     val authKey: String = "",
-    val insecure: Boolean = true,
+    val insecure: Boolean = false,
     val killSwitch: Boolean = false,
     val reorderEnabled: Boolean = false,
     val reorderProfile: String = MqvpnConfig.ReorderProfile.CELLULAR_BOND.name,

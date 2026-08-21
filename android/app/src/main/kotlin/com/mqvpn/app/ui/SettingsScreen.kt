@@ -74,7 +74,7 @@ fun SettingsScreen(
     var serverPortText by rememberSaveable { mutableStateOf("") }
     var tlsServerName by rememberSaveable { mutableStateOf("") }
     var authKey by rememberSaveable { mutableStateOf("") }
-    var insecure by rememberSaveable { mutableStateOf(true) }
+    var insecure by rememberSaveable { mutableStateOf(false) }
     var killSwitch by rememberSaveable { mutableStateOf(false) }
     var reorderEnabled by rememberSaveable { mutableStateOf(false) }
     var reorderProfileName by rememberSaveable {

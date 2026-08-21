@@ -18,6 +18,17 @@ import org.junit.Test
  */
 class DemoSettingsTest {
 
+    // -- defaults -----------------------------------------------------------
+
+    @Test
+    fun `insecure defaults to false, matching the MqvpnConfig default`() {
+        assertFalse(DemoSettings().insecure)
+        assertFalse(
+            DemoSettings(serverAddress = "vpn.example.org", authKey = "k")
+                .toMqvpnConfig().insecure,
+        )
+    }
+
     // -- enum round-trip ----------------------------------------------------
 
     @Test
