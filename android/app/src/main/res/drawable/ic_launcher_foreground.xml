@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- mqvpn mark: two bonded paths joined at a midpoint. Geometry from the
+     64x64 source SVG, centered in the 108dp adaptive-icon canvas (translate
+     +22) so the mark's bounding box stays inside the 66dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:translateX="22"
+        android:translateY="22">
+        <path
+            android:pathData="M15,14 L35,14 A7,7 0 0 1 35,28 L15,28 A7,7 0 0 1 15,14 Z"
+            android:fillColor="#B8A3F6" />
+        <path
+            android:pathData="M29,36 L49,36 A7,7 0 0 1 49,50 L29,50 A7,7 0 0 1 29,36 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:type="linear"
+                    android:startX="22"
+                    android:startY="36"
+                    android:endX="56"
+                    android:endY="50">
+                    <item android:offset="0" android:color="#FF8B5CF6" />
+                    <item android:offset="1" android:color="#FF5B21B6" />
+                </gradient>
+            </aapt:attr>
+        </path>
+        <path
+            android:pathData="M28,32 a4,4 0 1 0 8,0 a4,4 0 1 0 -8,0 Z"
+            android:fillColor="#FBFAFF" />
+    </group>
+</vector>
