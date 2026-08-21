@@ -3,7 +3,10 @@
 
 package com.mqvpn.app.ui
 
+import android.Manifest
 import android.app.Activity
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
@@ -41,7 +44,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.PathInfo
@@ -65,12 +70,32 @@ fun DashboardScreen(
     val events by viewModel.events.collectAsStateWithLifecycle()
     val bandwidthHistory by viewModel.bandwidthHistory.collectAsStateWithLifecycle()
 
+    val context = LocalContext.current
+
     val vpnPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             viewModel.connectWithSavedSettings()
         }
+    }
+
+    val startConnectFlow = {
+        val prepareIntent = viewModel.prepareVpn()
+        if (prepareIntent != null) {
+            vpnPermissionLauncher.launch(prepareIntent)
+        } else {
+            viewModel.connectWithSavedSettings()
+        }
+    }
+
+    // The VPN status notification needs POST_NOTIFICATIONS on 13+; ask when
+    // the user starts a connection, and proceed whether or not it is granted
+    // (the tunnel must work without it).
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { _ ->
+        startConnectFlow()
     }
 
     Scaffold(
@@ -101,11 +126,18 @@ fun DashboardScreen(
 
                         is MqvpnState.Disconnected,
                         is MqvpnState.Error -> {
-                            val prepareIntent = viewModel.prepareVpn()
-                            if (prepareIntent != null) {
-                                vpnPermissionLauncher.launch(prepareIntent)
+                            val needsNotificationPermission =
+                                Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                    ContextCompat.checkSelfPermission(
+                                        context,
+                                        Manifest.permission.POST_NOTIFICATIONS,
+                                    ) != PackageManager.PERMISSION_GRANTED
+                            if (needsNotificationPermission) {
+                                notificationPermissionLauncher.launch(
+                                    Manifest.permission.POST_NOTIFICATIONS,
+                                )
                             } else {
-                                viewModel.connectWithSavedSettings()
+                                startConnectFlow()
                             }
                         }
 
