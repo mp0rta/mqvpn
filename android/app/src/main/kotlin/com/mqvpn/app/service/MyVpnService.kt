@@ -79,10 +79,14 @@ class MyVpnService : MqvpnVpnService() {
                 updateNotification("Reconnecting...")
             // Error details stay visible in the app UI (connect error +
             // event log); an ongoing notification must not outlive the
-            // service, so both terminal states remove it.
+            // service, so both terminal states remove it. The explicit
+            // cancel() covers notifications re-posted via notify(), which
+            // can lose their foreground-service association and survive
+            // stopForeground (observed on Android 16).
             is MqvpnState.Disconnected,
             is MqvpnState.Error -> {
                 stopForeground(STOP_FOREGROUND_REMOVE)
+                getSystemService<NotificationManager>()?.cancel(NOTIFICATION_ID)
                 stopSelf()
             }
             else -> {}
