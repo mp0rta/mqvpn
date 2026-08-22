@@ -151,7 +151,9 @@ fun DashboardScreen(
                     when (state) {
                         is MqvpnState.Connected -> "Disconnect"
                         is MqvpnState.Connecting -> "Connecting..."
-                        is MqvpnState.Reconnecting -> "Reconnecting..."
+                        // Reconnecting taps call disconnect(); label the
+                        // action — the status line below shows the state.
+                        is MqvpnState.Reconnecting -> "Disconnect"
                         else -> "Connect"
                     }
                 )
