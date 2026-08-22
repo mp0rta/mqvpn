@@ -6,3 +6,5 @@
   status notification appears on Android 13+.
 - Disconnect now fully stops the VPN service and removes its
   notification.
+- Update BoringSSL to 0.20260813.0, picking up upstream TLS/crypto
+  fixes since the previous pin.
