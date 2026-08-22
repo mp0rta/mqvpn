@@ -77,10 +77,12 @@ class MyVpnService : MqvpnVpnService() {
                 updateNotification("Connected: ${newState.tunnelInfo.assignedIp}")
             is MqvpnState.Reconnecting ->
                 updateNotification("Reconnecting...")
-            is MqvpnState.Disconnected ->
-                stopSelf()
+            // Error details stay visible in the app UI (connect error +
+            // event log); an ongoing notification must not outlive the
+            // service, so both terminal states remove it.
+            is MqvpnState.Disconnected,
             is MqvpnState.Error -> {
-                updateNotification("Error: ${newState.error.message}")
+                stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
             else -> {}

@@ -53,6 +53,7 @@ class MqvpnManager(private val context: Context) {
      * Launches the VpnService, binds to it, and calls startTunnel().
      */
     fun connect(config: MqvpnConfig, serviceClass: Class<out MqvpnVpnService>) {
+        unbind() // release any binding left from a previous connect
         _vpnState.value = MqvpnState.Connecting
 
         val intent = Intent(context, serviceClass).apply {
@@ -88,7 +89,25 @@ class MqvpnManager(private val context: Context) {
     /** Disconnect the VPN. */
     fun disconnect() {
         boundService?.stopTunnel()
+        // Release the binding: a started+bound service is not destroyed by
+        // stopSelf() while a BIND_AUTO_CREATE binding remains, so keeping it
+        // would leave the foreground service (and its notification) running.
+        unbind()
         _vpnState.value = MqvpnState.Disconnected
+        resetMetrics()
+    }
+
+    private fun unbind() {
+        boundService?.manager = null
+        boundService = null
+        serviceConnection?.let { conn ->
+            try {
+                context.unbindService(conn)
+            } catch (_: IllegalArgumentException) {
+                // bindService failed earlier; nothing was registered
+            }
+        }
+        serviceConnection = null
     }
 
     /** Get libmqvpn version string. */
