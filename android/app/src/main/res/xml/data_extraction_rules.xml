@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- App data includes the VPN pre-shared key (DataStore settings and the
+     service's SharedPreferences snapshot). Exclude everything from both
+     cloud backup and device-to-device transfer explicitly, so the exclusion
+     does not depend on how allowBackup is interpreted per Android version.
+     The privacy policy's "stored locally on your device only" claim relies
+     on these rules. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+    </device-transfer>
+</data-extraction-rules>
