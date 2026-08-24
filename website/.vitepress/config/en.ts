@@ -12,7 +12,7 @@ export const en: LocaleSpecificConfig<DefaultTheme.Config> & { label: string; la
     ],
 
     footer: {
-      message: 'Released under the Apache License 2.0',
+      message: 'Released under the Apache License 2.0 · <a href="/privacy">Privacy Policy</a>',
       copyright: 'Provided "AS IS" without warranty of any kind. Use at your own risk.',
     },
 
