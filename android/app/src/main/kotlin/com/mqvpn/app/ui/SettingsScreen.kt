@@ -43,7 +43,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mqvpn.app.data.DemoSettings
 import com.mqvpn.sdk.core.model.MqvpnConfig
 
-private const val PRIVACY_POLICY_URL = "https://doc.mqvpn.org/privacy"
+private const val PRIVACY_POLICY_URL = "https://docs.mqvpn.org/privacy"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

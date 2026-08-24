@@ -8,7 +8,7 @@ export default defineConfig({
   cleanUrls: true,
 
   head: [
-    ['link', { rel: 'canonical', href: 'https://doc.mqvpn.org' }],
+    ['link', { rel: 'canonical', href: 'https://docs.mqvpn.org' }],
   ],
 
   locales: {
