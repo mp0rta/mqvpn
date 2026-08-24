@@ -34,6 +34,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -41,6 +42,8 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mqvpn.app.data.DemoSettings
 import com.mqvpn.sdk.core.model.MqvpnConfig
+
+private const val PRIVACY_POLICY_URL = "https://doc.mqvpn.org/privacy"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -54,6 +57,7 @@ fun SettingsScreen(
     val isSaving by viewModel.isSaving.collectAsStateWithLifecycle()
     val saveError by viewModel.saveError.collectAsStateWithLifecycle()
     val saveDone by viewModel.saveDone.collectAsStateWithLifecycle()
+    val uriHandler = LocalUriHandler.current
 
     // Decide at event time from the ViewModel's StateFlow, not the composed
     // `isSaving` snapshot: a back press in the frame before recomposition
@@ -334,6 +338,14 @@ fun SettingsScreen(
             if (saveError != null) {
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(saveError.orEmpty(), color = MaterialTheme.colorScheme.error)
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Google Play's User Data policy requires a privacy policy link
+            // inside the app, not just on the store listing.
+            Text("About", style = MaterialTheme.typography.titleSmall)
+            TextButton(onClick = { uriHandler.openUri(PRIVACY_POLICY_URL) }) {
+                Text("Privacy Policy")
             }
 
             Spacer(modifier = Modifier.height(16.dp))
