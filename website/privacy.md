@@ -7,10 +7,10 @@ by Vortric Labs.
 
 ## What we collect
 
-Nothing. mqvpn does not collect or transmit personal data, usage data,
-analytics, telemetry, or crash reports to Vortric Labs or to any service
-operated by Vortric Labs. The app contains no analytics, advertising, or
-crash-reporting SDKs.
+Nothing. Apart from the VPN traffic described below, mqvpn does not collect
+or transmit personal data, usage data, analytics, telemetry, or crash reports
+to Vortric Labs or to any service operated by Vortric Labs. The app contains
+no analytics, advertising, or crash-reporting SDKs.
 
 To provide its VPN functionality, mqvpn transmits network traffic to the VPN
 server explicitly configured by the user, as described below.

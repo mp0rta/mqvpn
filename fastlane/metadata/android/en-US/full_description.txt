@@ -5,8 +5,8 @@ Multipath QUIC — no proprietary tunnel format.
 
 The app uses Android's VpnService to route the device's network traffic
 through the tunnel; Android asks for your consent before the first
-connection. Traffic goes only to the server you configure — the app sends
-nothing to the developer. Privacy policy: https://doc.mqvpn.org/privacy
+connection. Traffic goes only to the server you configure; the app contains
+no analytics or telemetry. Privacy policy: https://doc.mqvpn.org/privacy
 
 Features:
 
