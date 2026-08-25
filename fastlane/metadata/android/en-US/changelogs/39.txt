@@ -1,0 +1,5 @@
+- Add a Privacy Policy link in Settings.
+- Connection settings (including the auth key) are no longer included
+  in Android backups or device-to-device transfers.
+- Tapping Connect while an automatic reconnect is pending now restarts
+  the connection immediately instead of failing.
