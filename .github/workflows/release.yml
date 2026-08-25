@@ -713,9 +713,12 @@ jobs:
       - name: Stage license assets for APK
         run: scripts/stage_apk_license_assets.sh
 
-      - name: Build signed release APK
+      - name: Build signed release APK and App Bundle
+        # One invocation so both outputs are signed inside this job's signing
+        # window (the keystore is destroyed in the next step). The .aab is the
+        # Play Store upload artifact and carries the same license assets.
         working-directory: android
-        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
+        run: ./gradlew :app:assembleRelease :app:bundleRelease --no-daemon --stacktrace
 
       - name: Clear signing material
         # Signing is done; drop the keystore and blank the env vars so the
@@ -736,17 +739,20 @@ jobs:
             echo "MQVPN_KEY_PASSWORD="
           } >> "$GITHUB_ENV"
 
-      - name: Stage Android release artifact
+      - name: Stage Android release artifacts
         run: |
           SRC=android/app/build/outputs/apk/release/app-release.apk
           test -f "$SRC" || { echo "APK not found at $SRC"; ls -R android/app/build/outputs/apk/ || true; exit 1; }
           cp "$SRC" "mqvpn_${VERSION}_android.apk"
+          AAB=android/app/build/outputs/bundle/release/app-release.aab
+          test -f "$AAB" || { echo "AAB not found at $AAB"; ls -R android/app/build/outputs/bundle/ || true; exit 1; }
+          cp "$AAB" "mqvpn_${VERSION}_android.aab"
 
-      - name: Verify license assets in APK
+      - name: Verify license assets in APK and AAB
         run: |
           set -e
-          apk=$(ls mqvpn_*_android.apk)
           expected=5
+          apk=$(ls mqvpn_*_android.apk)
           found=$(unzip -l "$apk" \
                   | grep -cE 'assets/(LICENSE|NOTICE|third-party/(xquic|boringssl|lwip)\.txt)$' \
                   || true)
@@ -755,12 +761,29 @@ jobs:
             unzip -l "$apk" | grep -E 'assets/' || echo "  (none found)"
             exit 1
           fi
+          # Same check on the bundle: Play generates the user-facing APKs
+          # from it, so the assets must be present under base/.
+          aab=$(ls mqvpn_*_android.aab)
+          found=$(unzip -l "$aab" \
+                  | grep -cE 'base/assets/(LICENSE|NOTICE|third-party/(xquic|boringssl|lwip)\.txt)$' \
+                  || true)
+          if [ "$found" -ne "$expected" ]; then
+            echo "::error::AAB missing license assets (found $found of $expected)"
+            unzip -l "$aab" | grep -E 'assets/' || echo "  (none found)"
+            exit 1
+          fi
 
-      - name: Upload Android artifact
+      # The .aab stays a workflow artifact and is deliberately NOT attached to
+      # the GitHub release: it is not user-installable, and Play re-signs and
+      # re-packages it anyway. Download it from this run for the Play Console
+      # upload.
+      - name: Upload Android artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-android
-          path: mqvpn_*_android.apk
+          path: |
+            mqvpn_*_android.apk
+            mqvpn_*_android.aab
 
   # Reproducibility is a release-time contract, not just a PR check: F-Droid
   # rebuilds the tagged commit and byte-compares it against the APK we sign
