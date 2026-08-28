@@ -431,6 +431,7 @@ set(WINTUN_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/third_party/wintun)
 # ---------- mqvpn CLI binary (Windows) ----------
 add_executable(mqvpn
     src/main.c
+    src/platform/client_config_bridge.c
     src/platform/windows/platform_windows.c
     src/platform/windows/tun_wintun.c
     src/platform/windows/routing.c
@@ -501,6 +502,7 @@ elseif(APPLE)
 # tun.c/dns.c and fail to compile on Darwin).
 add_executable(mqvpn
     src/main.c
+    src/platform/client_config_bridge.c
     src/platform/darwin/platform_darwin.c
     src/platform/darwin/route_mon.c
     src/platform/darwin/tun_utun.c
@@ -538,6 +540,7 @@ target_link_libraries(mqvpn
 # OBJECT target, independent of the full CLI link above. See
 # .github/workflows/ci.yml darwin job.
 add_library(mqvpn_darwin_platform OBJECT
+    src/platform/client_config_bridge.c
     src/platform/darwin/platform_darwin.c
     src/platform/darwin/route_mon.c
     src/platform/darwin/tun_utun.c
@@ -705,6 +708,7 @@ endif()
 # Links libmqvpn for the library API; keeps platform-specific files separate.
 add_executable(mqvpn
     src/main.c
+    src/platform/client_config_bridge.c
     src/platform/linux/platform_linux.c
     src/platform/linux/netlink_mon.c
     src/platform/linux/route_check.c
@@ -772,13 +776,17 @@ if(BUILD_TESTING)
     # mqvpn_config.c is linked (separate TU) for the composed-builder bridge test.
     add_executable(test_reorder_rx tests/test_reorder_rx.c src/mqvpn_config.c src/log.c)
     add_executable(test_reorder_config tests/test_reorder_config.c src/mqvpn_config.c src/config.c src/log.c)
+    # Parity test for the shared CLI→library config bridge: pins every field
+    # forwarded by mqvpn_platform_apply_client_config so a new knob cannot be
+    # bridged on one platform and dropped on another (see the bridge TU).
+    add_executable(test_config_bridge tests/test_config_bridge.c src/platform/client_config_bridge.c src/mqvpn_config.c src/log.c)
     add_executable(test_classifier tests/test_classifier.c src/hybrid/classifier.c)
     add_executable(test_icmp tests/test_icmp.c src/icmp.c)
     # test_reorder_gate exercises src/reorder_gate.h (shared STAMP/RAW/DROP_MTU
     # gate + PTB token bucket, extracted from mqvpn_client.c/mqvpn_server.c) —
     # links reorder_tx.c (for the peek it wraps) + icmp.c (for the PTB send).
     add_executable(test_reorder_gate tests/test_reorder_gate.c src/reorder_tx.c src/icmp.c src/log.c)
-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_classifier test_icmp test_reorder_gate)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate)
 
     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of
