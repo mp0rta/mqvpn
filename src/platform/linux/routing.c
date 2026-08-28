@@ -145,9 +145,20 @@ setup_routes(platform_ctx_t *p)
                              "::/1", "dev", p->tun.name, NULL};
         const char *v6h[] = {"ip",       "-6",  "route",     "replace",
                              "8000::/1", "dev", p->tun.name, NULL};
-        if (run_ip_cmd(v6l) == 0 && run_ip_cmd(v6h) == 0) {
-            p->routing6_configured = 1;
-            LOG_INF("IPv6 catch-all routes set via %s", p->tun.name);
+        if (run_ip_cmd(v6l) == 0) {
+            if (run_ip_cmd(v6h) == 0) {
+                p->routing6_configured = 1;
+                LOG_INF("IPv6 catch-all routes set via %s", p->tun.name);
+            } else {
+                /* Partial install must not outlive the failure: with
+                 * routing6_configured still 0, cleanup_routes() skips the
+                 * IPv6 deletes, so a ::/1 left behind here would keep
+                 * routing half the v6 space into the TUN after disconnect. */
+                const char *v6u[] = {"ip",   "-6",  "route",     "del",
+                                     "::/1", "dev", p->tun.name, NULL};
+                (void)run_ip_cmd(v6u);
+                LOG_WRN("failed to set IPv6 catch-all routes (continuing IPv4-only)");
+            }
         } else {
             LOG_WRN("failed to set IPv6 catch-all routes (continuing IPv4-only)");
         }
