@@ -736,6 +736,19 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
     rc = 0;
 
 cleanup:
+    /* Library teardown FIRST, while every callback-owned platform object is
+     * still alive: the destroy-time deferred flush drives the engine, which
+     * can fire the same callbacks as normal operation — cb_state_changed
+     * pauses/frees events and tears down the TUN, NULLing ctx fields as it
+     * goes, exactly as it does for an in-loop close. Freeing those objects
+     * before the destroy (the old order) handed the callbacks freed events
+     * and a dead TUN. After destroy returns no callback can fire, and the
+     * NULL guards below skip whatever the callbacks already released. Path
+     * fds must also outlive the destroy (the flush sends on them), so
+     * path_mgr_destroy stays below as well. */
+    mqvpn_client_destroy(ctx.client);
+    ctx.client = NULL;
+
     /* Clean up platform resources */
     cleanup_killswitch(&ctx);
     if (ctx.manage_routes) cleanup_routes(&ctx);
@@ -783,8 +796,10 @@ cleanup:
         event_free(ctx.ev_recover);
     }
 
+    /* Path fds close only here, after the library is gone (see the destroy
+     * comment at the top of this cleanup): the destroy-time flush sends on
+     * them, and the library never closes them itself. */
     mqvpn_path_mgr_destroy(&ctx.path_mgr);
-    mqvpn_client_destroy(ctx.client);
 
     if (ctx.eb) event_base_free(ctx.eb);
 
