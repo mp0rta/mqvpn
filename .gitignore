@@ -7,6 +7,9 @@ benchmarks/*
 # H2a micro-benchmark rig (harness + driver) is tracked
 !benchmarks/tcp_lane_microbench/
 
+fuzz/corpus/tcp_lane/*
+!fuzz/corpus/tcp_lane/*.bin
+
 # local-only picoquic build for reorder sweep / interop (not vendored as a submodule).
 # picotls is picoquic's sibling TLS dependency, cloned + built next to it.
 /third_party/picoquic/
