@@ -227,9 +227,11 @@ jobs:
                 -DMQVPN_ENABLE_FUZZING=ON \
                 -DCMAKE_C_COMPILER=clang \
                 -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
-          make -j$(nproc) fuzz_tcp_lane
+          make -j$(nproc) fuzz_tcp_lane fuzz_control_dispatch
           ASAN_OPTIONS=abort_on_error=1 \
             ./fuzz_tcp_lane -max_total_time=120 ../fuzz/corpus/tcp_lane/
+          ASAN_OPTIONS=abort_on_error=1 \
+            ./fuzz_control_dispatch -max_total_time=60 ../fuzz/corpus/control_dispatch/
 
       - name: E2E smoke test (netns)
         env:

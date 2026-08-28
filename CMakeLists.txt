@@ -740,6 +740,34 @@ target_link_libraries(mqvpn
     stdc++
 )
 
+# libFuzzer target: control-API request parsing crash-safety (see
+# fuzz/fuzz_control_dispatch.c for scope). Lives here — not in the
+# fuzz_tcp_lane block above — because control_socket.c is Linux-only and
+# needs libevent, both guaranteed in this branch. The TU #include's
+# control_socket.c to reach the file-local dispatch(); mqvpn_lib resolves
+# the NULL-guarded mqvpn_server_* calls (log.c is inside mqvpn_lib — do
+# not add it here). Only the fuzz TU is instrumented — that covers the
+# dispatch + argument-extraction surface (json_mini.h is header-inline, so
+# it compiles into the TU); library-side validation of extracted strings
+# short-circuits at the server=NULL guard and is out of scope (see the TU).
+if(MQVPN_ENABLE_FUZZING)
+    add_executable(fuzz_control_dispatch fuzz/fuzz_control_dispatch.c)
+    target_compile_options(fuzz_control_dispatch PRIVATE -fsanitize=fuzzer,address)
+    target_link_options(fuzz_control_dispatch PRIVATE -fsanitize=fuzzer,address)
+    target_link_libraries(fuzz_control_dispatch PRIVATE
+        mqvpn_lib ${XQUIC_LIB} ${EVENT_LIB} ${SSL_LIB} ${CRYPTO_LIB}
+        pthread dl m stdc++)
+    target_include_directories(fuzz_control_dispatch PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/platform/linux
+        ${CMAKE_SOURCE_DIR}/src/platform/posix
+        ${CMAKE_SOURCE_DIR}/include
+        ${EVENT_INCLUDE_DIR}
+        ${XQUIC_INCLUDE_DIR})
+    set_target_properties(fuzz_control_dispatch PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+endif()
+
 # ---------- Tests ----------
 option(BUILD_TESTING "Build unit tests" ON)
 if(BUILD_TESTING)
