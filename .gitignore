@@ -60,3 +60,8 @@ website/public/perf-data/
 # local-only bench notes (kept untracked by owner decision)
 docs/report/2026-07-03-hybrid-h2a-microbench.md
 docs/report/2026-07-04-hybrid-h2b-throughput.md
+
+# libFuzzer writes minimized findings into the corpus dir it is given —
+# keep curated *.bin seeds tracked, ignore SHA-named fuzzer output.
+fuzz/corpus/control_dispatch/*
+!fuzz/corpus/control_dispatch/*.bin
