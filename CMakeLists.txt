@@ -911,6 +911,28 @@ if(BUILD_TESTING)
         add_test(NAME ${t} COMMAND ${t})
     endforeach()
 
+    # Linux platform-twin PATH-stub state machine tests: same fake_cmd.h
+    # harness and scenario shape as the Darwin trio above, pointed at the
+    # Linux twins (linux/routing.c drives `ip`, linux/killswitch.c drives
+    # iptables/ip6tables — all via fork+execvp, so the PATH-stub idiom
+    # ports unchanged). Until now these files were exercised only by the
+    # sudo+netns e2e suite.
+    add_executable(test_routing_linux
+        tests/test_routing_linux.c src/platform/linux/routing.c
+        src/platform/posix/dns_common.c src/log.c)
+    add_executable(test_killswitch_rules_linux
+        tests/test_killswitch_rules_linux.c src/platform/linux/killswitch.c
+        src/platform/posix/dns_common.c src/log.c)
+    foreach(t test_routing_linux test_killswitch_rules_linux)
+        target_include_directories(${t} PRIVATE
+            ${EVENT_INCLUDE_DIR}   # platform_internal.h includes <event2/event.h>
+            ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/src/platform/posix
+            ${CMAKE_SOURCE_DIR}/src/platform/linux)
+        set_target_properties(${t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+        add_test(NAME ${t} COMMAND ${t})
+    endforeach()
+
     # Control-API command dispatch test. dispatch() is static, so the test
     # #include's control_socket.c directly (test_reorder_rx idiom) and mocks the
     # mqvpn_server_* API — no mqvpn_server.c / xquic linked. libevent is required
