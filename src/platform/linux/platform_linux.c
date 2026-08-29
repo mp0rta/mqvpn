@@ -173,7 +173,7 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     }
 
     /* Start periodic dropped-path re-add timer. Carrier-up netlink events
-     * fire only once and `try_readd_removed_path()` can fail synchronously
+     * fire only once and `netmon_try_readd_removed_path()` can fail synchronously
      * (e.g. xqc_conn_create_path returning -XQC_EMP_NO_AVAIL_PATH_ID before
      * the server has distributed enough CIDs). Without this timer the slot
      * would sit in CLOSED_DROPPED indefinitely — no further netlink event
@@ -261,7 +261,7 @@ cb_path_event(mqvpn_path_handle_t path, mqvpn_path_status_t status, void *user_c
 {
     (void)user_ctx;
     /* PR5: path lifecycle state is owned entirely by libmqvpn. Platform
-     * no longer mirrors recoverable / removed state — try_reactivate_by_ifname
+     * no longer mirrors recoverable / removed state — netmon_try_reactivate_by_ifname
      * queries lib state directly via mqvpn_client_get_paths(). */
     const char *sn = mqvpn_path_status_string(status);
     LOG_INF("path %lld -> %s", (long long)path, sn);

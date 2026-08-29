@@ -244,7 +244,7 @@ discover_route(const char *server_ip, sa_family_t af, char *gateway, size_t gw_l
  * socket's scoped lookup never depends on which interface currently owns
  * the unscoped primary default (configd reshuffles that on every
  * interface arrival/departure). The kernel flushes a scoped pin with its
- * interface on down; try_readd_removed_path / try_reactivate_by_ifname
+ * interface on down; the netmon pre-readd / pre-reactivate adapters
  * (route_mon.c) re-install it before handing the recovered socket back
  * to xquic. */
 

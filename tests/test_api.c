@@ -1563,7 +1563,7 @@ TEST(drop_path_does_not_emit_when_already_closed)
     mqvpn_client_destroy(c);
 }
 
-/* Reproduce the try_readd_removed_path rollback flow at unit level: a
+/* Reproduce the netmon_try_readd_removed_path rollback flow at unit level: a
  * synchronously-failed activation transitions the slot PENDING → CREATE_WAIT
  * (PR3 — was DEGRADED in PR2; both project to public PENDING/PENDING-vs-
  * DEGRADED respectively), firing path_event with the new public status,
@@ -2684,7 +2684,8 @@ TEST(reactivate_slot_eligible_rejects_validating)
     mqvpn_client_destroy(c);
 }
 
-/* PR3 regression #2 + cleanup: platform_linux's try_readd_removed_path
+/* PR3 regression #2 + cleanup: the monitor's try_readd_removed_path (now
+ * netmon_try_readd_removed_path, netmon_common.c)
  * called recovery_check_activation() which inspected public status to
  * tell if the synchronous activate half of add_path_fd had succeeded.
  *

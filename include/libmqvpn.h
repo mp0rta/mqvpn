@@ -203,7 +203,7 @@ MQVPN_API const char *mqvpn_path_status_string(mqvpn_path_status_t status);
  * sync transient failure. Platform recovery (RTM_NEWLINK after a
  * carrier-loss drop_path) needs this distinction to avoid rolling back
  * a successful activation and burning xqc path_id budget — see
- * platform_linux::try_readd_removed_path().
+ * netmon_try_readd_removed_path() (src/platform/posix/netmon_common.c).
  */
 typedef enum {
     MQVPN_ADD_PATH_OK = 0,
