@@ -10,7 +10,7 @@
 # toggling but DO NOT emit RTM_NEWADDR — the failure mode protected by
 # the 3s recover_dropped_paths_cb timer (platform_linux.c).
 #
-# Why this needs its own test: if the one-shot try_readd_removed_path()
+# Why this needs its own test: if the one-shot netmon_try_readd_removed_path()
 # driven by the single RTM_NEWLINK fails (e.g. xqc_conn_create_path
 # transient error during the carrier transient), there is no further
 # netlink event to retry on — only the 3s timer keeps the slot
@@ -285,7 +285,7 @@ ip netns exec "$NS_SERVER" ip link set "$VETH_A1" up
 READD_PATTERN="path .* re-added|timer re-added path"
 
 # Allow up to 20s — the recovery timer fires every 3s, so even if the
-# RTM_NEWLINK-driven try_readd_removed_path() fails synchronously, the
+# RTM_NEWLINK-driven netmon_try_readd_removed_path() fails synchronously, the
 # timer will succeed on a later tick. The whole point of this test is
 # that recovery DOES happen even when the netlink event sequence is
 # minimal (carrier-only, no addr add/del).

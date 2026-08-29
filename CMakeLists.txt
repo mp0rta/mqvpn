@@ -505,6 +505,7 @@ add_executable(mqvpn
     src/platform/client_config_bridge.c
     src/platform/darwin/platform_darwin.c
     src/platform/darwin/route_mon.c
+    src/platform/posix/netmon_common.c
     src/platform/darwin/tun_utun.c
     src/platform/darwin/routing.c
     src/platform/darwin/dns.c
@@ -543,6 +544,7 @@ add_library(mqvpn_darwin_platform OBJECT
     src/platform/client_config_bridge.c
     src/platform/darwin/platform_darwin.c
     src/platform/darwin/route_mon.c
+    src/platform/posix/netmon_common.c
     src/platform/darwin/tun_utun.c
     src/platform/darwin/routing.c
     src/platform/darwin/dns.c
@@ -711,6 +713,7 @@ add_executable(mqvpn
     src/platform/client_config_bridge.c
     src/platform/linux/platform_linux.c
     src/platform/linux/netlink_mon.c
+    src/platform/posix/netmon_common.c
     src/platform/linux/route_check.c
     src/platform/linux/control_socket.c
     src/platform/posix/status.c
