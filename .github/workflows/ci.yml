@@ -1003,6 +1003,93 @@ jobs:
             android/sdk-network/build/reports/tests/
           retention-days: 7
 
+  # Instrumented (androidTest) run on an x86_64 emulator. This is the only
+  # place the JNI boundary is executed in CI: assembleDebug + JVM `test`
+  # never load libmqvpn_jni.so, so a Kotlin external fun <-> C JNI_FN drift
+  # or a missing native symbol ships undetected without this job
+  # (ReorderJniSmokeTest resolves the externals against the real .so).
+  # Builds its own x86_64 prebuilts (the release ABI is arm64-v8a only);
+  # sdk-native reads -PmqvpnAbiFilters so release/F-Droid stay arm64-only.
+  android-emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Compute NDK cache key (x86_64)
+        id: ndk-cache-key
+        run: |
+          XQUIC_SHA=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+')
+          # An lwIP fork bump must not serve stale prebuilts.
+          LWIP_SHA=$(git submodule status third_party/lwip | awk '{print $1}' | tr -d '+')
+          BSSL_SHA=$(git -C third_party/xquic/third_party/boringssl rev-parse --short HEAD)
+          echo "key=ndk-android-x86_64-${{ hashFiles('scripts/build_android.sh', 'CMakeLists.txt', 'src/**/*.c', 'src/**/*.h', 'include/**/*.h') }}-${XQUIC_SHA}-bssl-${BSSL_SHA}-lwip-${LWIP_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache NDK prebuilt libraries (x86_64)
+        id: ndk-cache
+        uses: actions/cache@v6
+        with:
+          path: android/sdk-native/prebuilt
+          key: ${{ steps.ndk-cache-key.outputs.key }}
+
+      - name: NDK cross-compile (x86_64)
+        if: steps.ndk-cache.outputs.cache-hit != 'true'
+        run: |
+          # Find NDK: ANDROID_NDK_HOME > ANDROID_HOME/ndk/<latest> > default
+          if [ -n "${ANDROID_NDK_HOME:-}" ]; then
+            NDK_PATH="$ANDROID_NDK_HOME"
+          elif [ -d "${ANDROID_HOME}/ndk" ]; then
+            NDK_PATH="$(ls -d ${ANDROID_HOME}/ndk/*/ 2>/dev/null | sort -V | tail -1)"
+            NDK_PATH="${NDK_PATH%/}"
+          fi
+          echo "Using NDK: ${NDK_PATH}"
+          scripts/build_android.sh --abi x86_64 --ndk "$NDK_PATH"
+
+      - name: Verify prebuilt libraries
+        run: |
+          for lib in libmqvpn.a libxquic.a libssl.a libcrypto.a liblwip_core.a; do
+            test -f "android/sdk-native/prebuilt/x86_64/${lib}" \
+              || { echo "MISSING: ${lib}"; exit 1; }
+          done
+          ls -lh android/sdk-native/prebuilt/x86_64/
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5.7.0
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Instrumented tests (x86_64 emulator)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          target: default
+          disable-animations: true
+          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot
+          working-directory: android
+          script: ./gradlew :sdk-native:connectedAndroidTest -PmqvpnAbiFilters=x86_64 --no-daemon --stacktrace
+
+      - name: Upload instrumented test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-instrumented-test-reports
+          path: android/sdk-native/build/reports/androidTests/
+          retention-days: 7
+
   lint-lifecycle-writes:
     name: Lint - lifecycle field writes (spec §3.3)
     runs-on: ubuntu-latest
