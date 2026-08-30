@@ -351,9 +351,7 @@ now_us(void)
 /* Injectable clock: use config clock_fn if set, else default now_us().
  * PR4 — non-static + visibility hidden so path_state_machine.c can call it
  * without exporting from libmqvpn.so. MSVC ignores visibility(). */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 uint64_t
 client_now_us(const mqvpn_client_t *c)
 {
@@ -414,16 +412,14 @@ now_ms_mono(void)
 }
 
 #if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden"))) void
-client_log(mqvpn_client_t *c, mqvpn_log_level_t level, const char *fmt, ...)
+MQVPN_INTERNAL void client_log(mqvpn_client_t *c, mqvpn_log_level_t level,
+                               const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 #endif
 
 /* PR4 — non-static + visibility hidden so path_state_machine.c can call it
  * without exporting from libmqvpn.so. MSVC ignores visibility(). */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 void
 client_log(mqvpn_client_t *c, mqvpn_log_level_t level, const char *fmt, ...)
 {
@@ -440,9 +436,7 @@ client_log(mqvpn_client_t *c, mqvpn_log_level_t level, const char *fmt, ...)
 
 /* PR4 - Fire public path_event callback from FSM body.
  * MSVC ignores visibility(). */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 void
 path_fsm_fire_path_event(mqvpn_client_t *c, const path_entry_t *p)
 {
@@ -458,9 +452,7 @@ path_fsm_fire_path_event(mqvpn_client_t *c, const path_entry_t *p)
  * No-op if engine or conn is missing (e.g. during reconnect, or for
  * pre-handshake transitions); path-status will be re-asserted by the
  * caller when the conn is re-established and the lifecycle moves again. */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 void
 client_notify_xqc_path_state(mqvpn_client_t *c, const path_entry_t *p, int app_status)
 {
@@ -609,9 +601,7 @@ first_active_idx(const mqvpn_client_t *c)
  * driving xquic.  Marked `hidden` so it does not show up in
  * libmqvpn.so's dynamic symbol table — not part of the public ABI,
  * and intentionally absent from libmqvpn.h. */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_first_active_fd(const mqvpn_client_t *c)
 {
@@ -679,9 +669,7 @@ client_next_primary_idx(const mqvpn_client_t *c, int from_idx)
  * lock in the issue #46 + OMR-backport composite fallback semantics
  * without driving xquic.  Hidden from libmqvpn.so's dynamic export
  * table (not part of public ABI). */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_set_primary_path_idx(mqvpn_client_t *c, int idx)
 {
@@ -690,9 +678,7 @@ mqvpn_client_test_set_primary_path_idx(mqvpn_client_t *c, int idx)
     return 0;
 }
 
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_get_fd_for_path(mqvpn_client_t *c, uint64_t xqc_path_id)
 {
@@ -700,9 +686,7 @@ mqvpn_client_test_get_fd_for_path(mqvpn_client_t *c, uint64_t xqc_path_id)
     return get_fd_for_path(c, xqc_path_id);
 }
 
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_next_primary_idx(const mqvpn_client_t *c, int from_idx)
 {
@@ -710,9 +694,7 @@ mqvpn_client_test_next_primary_idx(const mqvpn_client_t *c, int from_idx)
     return client_next_primary_idx(c, from_idx);
 }
 
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_classify_status(int status)
 {
@@ -724,9 +706,7 @@ mqvpn_client_test_classify_status(int status)
  * mqvpn_client_test_conn_free (cli_conn_destroy handles the all-NULL conn).
  * Hidden from libmqvpn.so's dynamic export table (not part of the public
  * ABI). */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_conn_alloc(mqvpn_client_t *c)
 {
@@ -738,9 +718,7 @@ mqvpn_client_test_conn_alloc(mqvpn_client_t *c)
     return 0;
 }
 
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_conn_free(mqvpn_client_t *c)
 {
@@ -749,9 +727,7 @@ mqvpn_client_test_conn_free(mqvpn_client_t *c)
     return 0;
 }
 
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_conn_tunnel_notified(const mqvpn_client_t *c)
 {
@@ -761,9 +737,7 @@ mqvpn_client_test_conn_tunnel_notified(const mqvpn_client_t *c)
 
 /* Test-only: drive the real pre-establishment failure-signal path
  * (cli_signal_connect_fail) on the attached test conn. */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_signal_connect_fail(mqvpn_client_t *c, int reason, int status)
 {
@@ -774,9 +748,7 @@ mqvpn_client_test_signal_connect_fail(mqvpn_client_t *c, int reason, int status)
 
 /* Test-only: drive the real cb_h3_conn_close platform-notify gate
  * (cli_notify_conn_closed) on the attached test conn. */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_notify_conn_closed(mqvpn_client_t *c)
 {
@@ -785,9 +757,7 @@ mqvpn_client_test_notify_conn_closed(mqvpn_client_t *c)
     return 0;
 }
 
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_conn_tunnel_ok(const mqvpn_client_t *c)
 {
@@ -795,9 +765,7 @@ mqvpn_client_test_conn_tunnel_ok(const mqvpn_client_t *c)
     return c->conn->tunnel_ok;
 }
 
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_set_shutting_down(mqvpn_client_t *c, int v)
 {
@@ -810,9 +778,7 @@ mqvpn_client_test_set_shutting_down(mqvpn_client_t *c, int v)
  * (cli_connect_ip_scan_headers) on the attached test conn with a fabricated
  * header section of n (name, value) pairs. The xqc_http_headers_t is built
  * here so tests don't need xquic types. */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_scan_headers(mqvpn_client_t *c, const char **names, const char **values,
                                int n)
@@ -836,9 +802,7 @@ mqvpn_client_test_scan_headers(mqvpn_client_t *c, const char **names, const char
     return 0;
 }
 
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_conn_peer_reorder(const mqvpn_client_t *c)
 {
@@ -848,9 +812,7 @@ mqvpn_client_test_conn_peer_reorder(const mqvpn_client_t *c)
 
 /* Test-only: drive the real CONNECT-IP final-close handling
  * (cli_connect_ip_on_request_close) on the attached test conn. */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_request_close_connect_ip(mqvpn_client_t *c)
 {
@@ -859,9 +821,7 @@ mqvpn_client_test_request_close_connect_ip(mqvpn_client_t *c)
     return 0;
 }
 
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 uint64_t
 mqvpn_client_test_get_handshake_started_us(const mqvpn_client_t *c)
 {
@@ -869,9 +829,7 @@ mqvpn_client_test_get_handshake_started_us(const mqvpn_client_t *c)
     return c->handshake_started_us;
 }
 
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_set_handshake_started_us(mqvpn_client_t *c, uint64_t us)
 {
@@ -880,9 +838,7 @@ mqvpn_client_test_set_handshake_started_us(mqvpn_client_t *c, uint64_t us)
     return 0;
 }
 
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_handshake_stalled(const mqvpn_client_t *c, uint64_t now_us)
 {
@@ -890,9 +846,7 @@ mqvpn_client_test_handshake_stalled(const mqvpn_client_t *c, uint64_t now_us)
     return client_handshake_stalled(c, now_us) ? 1 : 0;
 }
 
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_force_state(mqvpn_client_t *c, mqvpn_client_state_t s)
 {
@@ -908,9 +862,7 @@ mqvpn_client_test_force_state(mqvpn_client_t *c, mqvpn_client_state_t s)
  * transition table); these are NOT path_entry_t lifecycle fields, so no
  * LINT-ALLOW is required. Hidden from libmqvpn.so's dynamic export table
  * (not part of the public ABI). */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_force_established(mqvpn_client_t *c)
 {
@@ -929,9 +881,7 @@ mqvpn_client_test_force_established(mqvpn_client_t *c)
  * a fixed 120 s (mqvpn_conn_settings.c), far beyond unit-test budgets.
  * Hidden from libmqvpn.so's dynamic export table (not part of the public
  * ABI). */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_kill_conn(mqvpn_client_t *c)
 {
@@ -945,9 +895,7 @@ mqvpn_client_test_kill_conn(mqvpn_client_t *c)
  * pin the disarm-on-manual-connect / re-arm-on-failure contract without
  * exposing the field publicly. Hidden from libmqvpn.so's dynamic export
  * table (not part of the public ABI). */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 uint64_t
 mqvpn_client_test_get_reconnect_scheduled_us(const mqvpn_client_t *c)
 {
@@ -959,9 +907,7 @@ mqvpn_client_test_get_reconnect_scheduled_us(const mqvpn_client_t *c)
  * cb_set_event_timer). Lets a pure-function test observe whether the
  * Recovery timer block clamps or leaves the wake untouched. Hidden from
  * libmqvpn.so's dynamic export table (not part of the public ABI). */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_set_next_wake_us(mqvpn_client_t *c, uint64_t us)
 {
@@ -2488,9 +2434,7 @@ cb_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
  * part of public ABI). The event chosen depends on current state — fresh
  * PENDING slots take ACTIVATE_REQUESTED, retry-armed slots (CREATE_WAIT /
  * DEGRADED) take RETRY_TIMER. */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_apply_path_activation_failure(mqvpn_client_t *c, mqvpn_path_handle_t handle,
                                            uint64_t now_us)
@@ -2507,9 +2451,7 @@ mqvpn_client_apply_path_activation_failure(mqvpn_client_t *c, mqvpn_path_handle_
 
 /* Test-only wrapper: drives the permanent path-create failure path via
  * path_on_event(). Hidden from libmqvpn.so's dynamic export table. */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_apply_path_create_permanent_failure(mqvpn_client_t *c,
                                                       mqvpn_path_handle_t handle)
@@ -2532,9 +2474,7 @@ mqvpn_client_test_apply_path_create_permanent_failure(mqvpn_client_t *c,
  * §7.1 visibility=hidden test wrapper: seed VALIDATING-shape invariants
  * directly so tests can pin transitions without spinning up xquic. Each
  * direct write carries a LINT-ALLOW trailer for check_lifecycle_field_writes.sh. */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_force_validating(mqvpn_client_t *c, mqvpn_path_handle_t handle,
                                    uint64_t xqc_path_id)
@@ -2567,9 +2507,7 @@ mqvpn_client_test_force_validating(mqvpn_client_t *c, mqvpn_path_handle_t handle
  * xquic_path_live). Does NOT run path_invariant_check: it deliberately writes
  * a non-lifecycle-consistent shape to isolate the get_interest read path.
  * Hidden from libmqvpn.so's dynamic export table (not part of the public ABI). */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_set_path_stable_us(mqvpn_client_t *c, mqvpn_path_handle_t handle,
                                      uint64_t stable_since_us, int xquic_live)
@@ -2586,9 +2524,7 @@ mqvpn_client_test_set_path_stable_us(mqvpn_client_t *c, mqvpn_path_handle_t hand
  * path_on_event(XQUIC_REMOVED). Used by test_api to pin the
  * VALIDATING -> CREATE_WAIT dispatch without spinning up a live xquic
  * engine. Hidden from libmqvpn.so's dynamic export table. */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_force_validating_then_remove(mqvpn_client_t *c,
                                                mqvpn_path_handle_t handle,
@@ -2607,9 +2543,7 @@ static int path_xquic_abandon_due(const path_entry_t *p);
 /* Test-only: expose the shared abandon-emission predicate by handle so tests
  * can pin that a live primary (xqc_path_id 0) is abandoned on removal.
  * Hidden from libmqvpn.so's dynamic export table. */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_abandon_due(mqvpn_client_t *c, mqvpn_path_handle_t handle)
 {
@@ -2625,9 +2559,7 @@ mqvpn_client_test_abandon_due(mqvpn_client_t *c, mqvpn_path_handle_t handle)
  * Returns the lifecycle name (static string, never NULL on success), writes
  * recreate_retries to *out_retries. Returns NULL on bad input. Hidden from
  * libmqvpn.so's dynamic export table. */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 const char *
 mqvpn_client_test_get_path_state_name(mqvpn_client_t *c, mqvpn_path_handle_t handle,
                                       int *out_retries)
@@ -3509,9 +3441,7 @@ mqvpn_client_reactivate_path(mqvpn_client_t *c, mqvpn_path_handle_t handle)
  * multipath_ready guard and the live activation call so tests can pin
  * the gate without a real engine/conn. Hidden from libmqvpn.so's
  * dynamic export table. */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
+MQVPN_INTERNAL
 int
 mqvpn_client_test_reactivate_slot_eligible(mqvpn_client_t *c, mqvpn_path_handle_t handle)
 {
