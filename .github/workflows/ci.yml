@@ -1084,7 +1084,10 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: Instrumented tests (x86_64 emulator)
-        uses: reactivecircus/android-emulator-runner@v2
+        # Community action — pinned to a commit SHA (not the mutable v2 tag):
+        # it runs arbitrary code on the runner, and although this job holds
+        # no secrets, an upstream compromise could poison the prebuilt cache.
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
           api-level: 30
           arch: x86_64
