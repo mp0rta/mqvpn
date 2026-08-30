@@ -945,7 +945,14 @@ jobs:
           # An lwIP fork bump must not serve stale prebuilts.
           LWIP_SHA=$(git submodule status third_party/lwip | awk '{print $1}' | tr -d '+')
           BSSL_SHA=$(git -C third_party/xquic/third_party/boringssl rev-parse --short HEAD)
-          echo "key=ndk-android-arm64-v8a-${{ hashFiles('scripts/build_android.sh', 'CMakeLists.txt', 'src/**/*.c', 'src/**/*.h', 'include/**/*.h') }}-${XQUIC_SHA}-bssl-${BSSL_SHA}-lwip-${LWIP_SHA}" >> "$GITHUB_OUTPUT"
+          # Prebuilts must be compiled by the SAME NDK the JNI wrapper links
+          # with (gradle's ndkVersion pin, single source of truth) — and the
+          # cache key must carry it, or a runner-default NDK bump silently
+          # serves archives built by a different toolchain.
+          NDK_VERSION=$(sed -n 's/^[[:space:]]*ndkVersion = "\(.*\)"$/\1/p' android/sdk-native/build.gradle.kts)
+          test -n "$NDK_VERSION" || { echo "ndkVersion pin not found"; exit 1; }
+          echo "ndk-version=${NDK_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "key=ndk-android-arm64-v8a-r${NDK_VERSION}-${{ hashFiles('scripts/build_android.sh', 'CMakeLists.txt', 'src/**/*.c', 'src/**/*.h', 'include/**/*.h') }}-${XQUIC_SHA}-bssl-${BSSL_SHA}-lwip-${LWIP_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Cache NDK prebuilt libraries
         id: ndk-cache
@@ -957,12 +964,12 @@ jobs:
       - name: NDK cross-compile (arm64-v8a)
         if: steps.ndk-cache.outputs.cache-hit != 'true'
         run: |
-          # Find NDK: ANDROID_NDK_HOME > ANDROID_HOME/ndk/<latest> > default
-          if [ -n "${ANDROID_NDK_HOME:-}" ]; then
-            NDK_PATH="$ANDROID_NDK_HOME"
-          elif [ -d "${ANDROID_HOME}/ndk" ]; then
-            NDK_PATH="$(ls -d ${ANDROID_HOME}/ndk/*/ 2>/dev/null | sort -V | tail -1)"
-            NDK_PATH="${NDK_PATH%/}"
+          # Use the gradle-pinned NDK (not the mutable runner default), so
+          # the .a archives and the JNI wrapper are built by one toolchain.
+          NDK_VERSION="${{ steps.ndk-cache-key.outputs.ndk-version }}"
+          NDK_PATH="${ANDROID_HOME}/ndk/${NDK_VERSION}"
+          if [ ! -d "$NDK_PATH" ]; then
+            "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${NDK_VERSION}"
           fi
           echo "Using NDK: ${NDK_PATH}"
           scripts/build_android.sh --abi arm64-v8a --ndk "$NDK_PATH"
@@ -1025,7 +1032,12 @@ jobs:
           # An lwIP fork bump must not serve stale prebuilts.
           LWIP_SHA=$(git submodule status third_party/lwip | awk '{print $1}' | tr -d '+')
           BSSL_SHA=$(git -C third_party/xquic/third_party/boringssl rev-parse --short HEAD)
-          echo "key=ndk-android-x86_64-${{ hashFiles('scripts/build_android.sh', 'CMakeLists.txt', 'src/**/*.c', 'src/**/*.h', 'include/**/*.h') }}-${XQUIC_SHA}-bssl-${BSSL_SHA}-lwip-${LWIP_SHA}" >> "$GITHUB_OUTPUT"
+          # NDK identity in the key + gradle pin as source of truth — see the
+          # arm64 twin above.
+          NDK_VERSION=$(sed -n 's/^[[:space:]]*ndkVersion = "\(.*\)"$/\1/p' android/sdk-native/build.gradle.kts)
+          test -n "$NDK_VERSION" || { echo "ndkVersion pin not found"; exit 1; }
+          echo "ndk-version=${NDK_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "key=ndk-android-x86_64-r${NDK_VERSION}-${{ hashFiles('scripts/build_android.sh', 'CMakeLists.txt', 'src/**/*.c', 'src/**/*.h', 'include/**/*.h') }}-${XQUIC_SHA}-bssl-${BSSL_SHA}-lwip-${LWIP_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Cache NDK prebuilt libraries (x86_64)
         id: ndk-cache
@@ -1037,12 +1049,12 @@ jobs:
       - name: NDK cross-compile (x86_64)
         if: steps.ndk-cache.outputs.cache-hit != 'true'
         run: |
-          # Find NDK: ANDROID_NDK_HOME > ANDROID_HOME/ndk/<latest> > default
-          if [ -n "${ANDROID_NDK_HOME:-}" ]; then
-            NDK_PATH="$ANDROID_NDK_HOME"
-          elif [ -d "${ANDROID_HOME}/ndk" ]; then
-            NDK_PATH="$(ls -d ${ANDROID_HOME}/ndk/*/ 2>/dev/null | sort -V | tail -1)"
-            NDK_PATH="${NDK_PATH%/}"
+          # Use the gradle-pinned NDK (not the mutable runner default), so
+          # the .a archives and the JNI wrapper are built by one toolchain.
+          NDK_VERSION="${{ steps.ndk-cache-key.outputs.ndk-version }}"
+          NDK_PATH="${ANDROID_HOME}/ndk/${NDK_VERSION}"
+          if [ ! -d "$NDK_PATH" ]; then
+            "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${NDK_VERSION}"
           fi
           echo "Using NDK: ${NDK_PATH}"
           scripts/build_android.sh --abi x86_64 --ndk "$NDK_PATH"
