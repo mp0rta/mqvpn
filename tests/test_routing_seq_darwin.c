@@ -43,24 +43,15 @@ static int g_pass = 0, g_fail = 0;
         }                                        \
     } while (0)
 
-/* Asserts each of `needles[0..n)` appears in `log`, in that order (each
- * search resumes after the previous match) — pins call ORDER, not just
- * presence. */
+/* Order-pinning assertion over the fake-cmd log; matching semantics live
+ * in fake_cmd_log_order() (tests/fake_cmd.h). */
 static void
 assert_log_order(const char *log, const char *const *needles, int n, const char *tag)
 {
-    const char *pos = log;
-    for (int i = 0; i < n; i++) {
-        const char *found = strstr(pos, needles[i]);
-        if (!found) {
-            g_fail++;
-            fprintf(stderr, "FAIL [%s]: missing or out-of-order needle #%d: '%s'\n", tag,
-                    i, needles[i]);
-            return;
-        }
-        pos = found + strlen(needles[i]);
-    }
-    g_pass++;
+    if (fake_cmd_log_order(log, needles, n, tag) == 0)
+        g_pass++;
+    else
+        g_fail++;
 }
 
 static char g_route_get_file[FAKE_CMD_PATH_MAX];
