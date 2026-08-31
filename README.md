@@ -13,7 +13,7 @@
   <p><b>All your connections. One stronger connection.</b></p>
   <p>
     <a href="https://docs.mqvpn.org/">Documentation</a> |
-    <a href="https://discord.gg/rjEqtBNtF">Discord community</a>
+    <a href="https://discord.gg/5rsqnZfBqu">Discord community</a>
   </p>
   <p>
     <a href="https://f-droid.org/packages/org.mqvpn.app/">
@@ -727,7 +727,7 @@ mqvpn is designed to comply with the following RFCs as much as possible.
 
 ## Community
 
-Welcome to join the [mqvpn community on Discord](https://discord.gg/rjEqtBNtF) to ask questions, discuss use cases, share feedback, and contribute to the project.
+Welcome to join the [mqvpn community on Discord](https://discord.gg/5rsqnZfBqu) to ask questions, discuss use cases, share feedback, and contribute to the project.
 
 ## Disclaimer
 
