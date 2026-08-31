@@ -41,6 +41,17 @@ PIN_PATH_STATE(MQVPN_XQC_PATH_STATE_ACTIVE, XQC_PATH_STATE_ACTIVE);
 PIN_PATH_STATE(MQVPN_XQC_PATH_STATE_CLOSING, XQC_PATH_STATE_CLOSING);
 PIN_PATH_STATE(MQVPN_XQC_PATH_STATE_CLOSED, XQC_PATH_STATE_CLOSED);
 
+/* ── mqvpn public-ABI freeze pins (kindred purpose, different source) ──
+ * Constants baked into public struct LAYOUT: changing one silently breaks
+ * callers built against the older header (the library writes these arrays
+ * bounded by its own compiled-in value — see the ABI-FROZEN comments in
+ * libmqvpn.h). This assert turns the comment into enforcement: a bump
+ * cannot compile without touching this pin, forcing the SemVer/layout
+ * conversation the comment asks for. */
+_Static_assert(MQVPN_MAX_PATHS == 8,
+               "MQVPN_MAX_PATHS is ABI-frozen (embedded in mqvpn_client_info_t "
+               "layout) — see libmqvpn.h before changing this pin");
+
 int
 main(void)
 {
