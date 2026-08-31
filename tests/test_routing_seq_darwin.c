@@ -8,7 +8,8 @@
  * on PATH (see tests/fake_cmd.h).
  *
  * Fixture shared by every scenario: server 203.0.113.9, TUN "utun9",
- * IPv4-only (has_v6=0). `route -n get 203.0.113.9`'s canned output is set
+ * IPv4-only (has_v6=0) unless a scenario opts in to IPv6.
+ * `route -n get 203.0.113.9`'s canned output is set
  * per scenario via $MQVPN_FAKE_ROUTE_GET_FILE (gateway+interface lines, or
  * a "link#4" on-link gateway for the on-link scenario).
  */
@@ -246,6 +247,46 @@ test_onlink_no_pin(fake_cmd_env_t *e)
                 "onlink-no-pin cleanup: no pin route to delete");
 }
 
+/* ================================================================
+ * 5. v6 HIGH catch-all failure -> ::/1 rolled back (no leaked route)
+ * ================================================================ */
+static void
+test_v6_high_failure_rollback(fake_cmd_env_t *e)
+{
+    fake_cmd_reset(e);
+    set_route_get_output(e, "   gateway: 203.0.113.1\n   interface: en0\n");
+    /* Matches only the HIGH v6 "add" (the rollback uses "delete"). */
+    fake_cmd_set_fail_substr("add|-inet6|8000::/1");
+
+    platform_ctx_t p;
+    init_ctx(&p);
+    p.has_v6 = 1;
+
+    int rc = setup_routes(&p);
+    ASSERT_EQ_INT(rc, 0, "v6-high-failure rc (still IPv4-tolerated)");
+    ASSERT_EQ_INT(p.routing_configured, 1, "v6-high-failure keeps IPv4 routing");
+    ASSERT_EQ_INT(p.routing6_configured, 0, "v6-high-failure routing6 stays 0");
+
+    char log[4096];
+    fake_cmd_read_log(e, log, sizeof(log));
+    const char *seq[] = {
+        "route|-n|add|-inet6|::/1|-interface|utun9",     /* installed */
+        "route|-n|add|-inet6|8000::/1|-interface|utun9", /* fails */
+        "route|-n|delete|-inet6|::/1|-interface|utun9",  /* rollback of the
+                                                          * half-install:
+                                                          * routing6_configured
+                                                          * stays 0, so
+                                                          * cleanup_routes()
+                                                          * would never delete
+                                                          * a leftover ::/1 */
+    };
+    assert_log_order(log, seq, 3, "v6-high-failure rollback sequence");
+
+    fake_cmd_clear_fail();
+    fake_cmd_reset(e);
+    cleanup_routes(&p);
+}
+
 int
 main(void)
 {
@@ -260,6 +301,7 @@ main(void)
     test_pin_change_fallback(&e);
     test_catchall_failure_rollback(&e);
     test_onlink_no_pin(&e);
+    test_v6_high_failure_rollback(&e);
 
     fake_cmd_env_cleanup(&e);
 
