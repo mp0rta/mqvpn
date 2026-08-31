@@ -299,6 +299,20 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_validation_blackhole_test.sh
 
+      # The one NEGATIVE suite in this recovery family: every sibling above
+      # proves drop -> successful re-add; this one proves re-add is REFUSED
+      # while the iface has an address but no route to the server. A
+      # regression that weakens that gate passes every other suite (their
+      # ifaces always have routes) while re-adding paths into the kernel's
+      # assume-on-link ARP blackhole on multi-homed routers. Also the only
+      # coverage of timer-driven recovery from a change (route appearing)
+      # that emits no netlink event, and of the deferral log marker.
+      - name: E2E route-gate re-add deferral test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_route_gate_test.sh
+
       - name: E2E backup_fec scheduler test (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
