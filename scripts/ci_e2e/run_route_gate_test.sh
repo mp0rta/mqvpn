@@ -55,11 +55,11 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-MQVPN="${MQVPN:-${SCRIPT_DIR}/../../build-lib/mqvpn}"
+MQVPN="${MQVPN:-${SCRIPT_DIR}/../../build/mqvpn}"
 
 if [ ! -f "$MQVPN" ]; then
     echo "error: mqvpn binary not found at $MQVPN"
-    echo "Build first: cd build-lib && cmake .. && make"
+    echo "Build first: mkdir build && cd build && cmake .. && make"
     exit 1
 fi
 
