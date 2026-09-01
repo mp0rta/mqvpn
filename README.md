@@ -10,12 +10,21 @@
         width="400">
     </picture>
   </h1>
+
   <p><b>All your connections. One stronger connection.</b></p>
+
   <p>
     <a href="https://docs.mqvpn.org/">Documentation</a> |
     <a href="https://discord.gg/5rsqnZfBqu">Discord community</a>
   </p>
+
   <p>
+    <a href="https://play.google.com/store/apps/details?id=org.mqvpn.app">
+      <img
+        src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png"
+        alt="Get it on Google Play"
+        height="80">
+    </a>
     <a href="https://f-droid.org/packages/org.mqvpn.app/">
       <img
         src="https://fdroid.gitlab.io/artwork/badge/get-it-on.png"
