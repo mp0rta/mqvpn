@@ -47,7 +47,17 @@ extern "C" {
 
 /* ─── Capacity constants ─── */
 
-#define MQVPN_MAX_USERS            64
+#define MQVPN_MAX_USERS 64
+/* ABI-FROZEN — do not bump. MQVPN_MAX_PATHS is baked into the layout of
+ * public structs (mqvpn_client_info_t embeds paths[MQVPN_MAX_PATHS] by
+ * value), and the library fills that array bounded by ITS OWN compiled-in
+ * value: a caller built against an older header linked to a newer .so
+ * with a larger value would take an out-of-bounds write past its
+ * caller-provided storage (stack or heap).
+ * If more path headroom is ever needed, add a caller-bounded paginated
+ * API instead (mqvpn_client_get_paths already takes max_paths and is the
+ * model to follow). Enforced: tests/test_xquic_abi_pin.c pins this value
+ * at compile time, so a bump cannot build without meeting this comment. */
 #define MQVPN_MAX_PATHS            8
 #define MQVPN_INIT_MAX_PATH_ID_MAX UINT64_C(0xffffffff)
 
@@ -203,7 +213,7 @@ MQVPN_API const char *mqvpn_path_status_string(mqvpn_path_status_t status);
  * sync transient failure. Platform recovery (RTM_NEWLINK after a
  * carrier-loss drop_path) needs this distinction to avoid rolling back
  * a successful activation and burning xqc path_id budget — see
- * platform_linux::try_readd_removed_path().
+ * netmon_try_readd_removed_path() (src/platform/posix/netmon_common.c).
  */
 typedef enum {
     MQVPN_ADD_PATH_OK = 0,

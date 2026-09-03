@@ -49,9 +49,9 @@ typedef struct {
     /* Recovery backpressure; reset on reconnect. */
     int path_recover_failures[MQVPN_MAX_PATHS];
     /* Route-gate log throttle. Intentionally NOT reset on reconnect — it
-     * self-resets in the reconciler when a route reappears (Linux canon:
-     * linux netlink_mon.c:531); a stale value only delays one throttled
-     * log line and self-heals within a few polls. */
+     * self-resets in the reconciler when a route reappears (POSIX canon:
+     * netmon_common.c recover_dropped_paths_cb); a stale value only delays
+     * one throttled log line and self-heals within a few polls. */
     int route_gate_blocked[MQVPN_MAX_PATHS];
     struct event *ev_recover; /* 3s poll timer */
 

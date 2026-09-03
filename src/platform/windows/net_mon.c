@@ -15,13 +15,14 @@
  * backstop, matching the Linux split.
  *
  * This file contains the Layer B teardown/rollback primitives (drop /
- * recovery-socket create / register / rollback, sibling-cloned from
- * netlink_mon.c), the three Layer C probe primitives
+ * recovery-socket create / register / rollback, sibling-cloned from the
+ * POSIX canon — formerly netlink_mon.c, now shared as
+ * src/platform/posix/netmon_common.c), the three Layer C probe primitives
  * (iface_is_up_and_running / iface_has_usable_ip /
  * iface_has_route_to_server), and the poll reconciler (reconcile_all +
  * the recover_dropped_paths_cb timer wrapper net_mon.h declares) that
- * drives them. The function layout intentionally mirrors the Linux canon
- * netlink_mon.c order so the two files stay byte-diff auditable against
+ * drives them. The function layout intentionally mirrors the POSIX canon
+ * netmon_common.c order so the two stay byte-diff auditable against
  * each other. Layer A — the event source (netlink on Linux; IP Helper
  * change notifications in a later phase here) — is absent in this phase,
  * which is why section labels start at B.
@@ -50,7 +51,7 @@
 #  include <stdlib.h>
 
 /* ================================================================
- *  Layer B — path drop/teardown (sibling of Linux netlink_mon.c)
+ *  Layer B — path drop/teardown (sibling of the POSIX netmon_common.c)
  * ================================================================ */
 
 /* Log wording per reason. Kept in sync with the Linux sibling's wording
@@ -194,7 +195,7 @@ iface_is_up_and_running(const char *ifname)
 }
 
 /* Check whether `ifname` has a usable unicast source address for `af`.
- * Windows analog of the Linux getifaddrs() version (netlink_mon.c);
+ * Windows analog of the POSIX getifaddrs() version (netmon_common.c);
  * same exclusion semantics: skip IPv4 link-local (169.254/16) and IPv6
  * link-local (IN6_IS_ADDR_LINKLOCAL) addresses — neither can reach the
  * server, and their presence must not let a re-add pass.
@@ -276,7 +277,7 @@ iface_has_usable_ip(const char *ifname, ADDRESS_FAMILY af)
  * multi-NIC bonding setup; the constrained form answers "does THIS
  * interface have a route at all", which is what the drop/re-add gate
  * needs (mirrors the Linux sibling's iface_has_route_to_server(ifname,
- * server_addr) contract in netlink_mon.c).
+ * server_addr) contract in the POSIX monitors).
  *
  * Returns 1 = route exists, 0 = confirmed unreachable
  * (ERROR_NETWORK_UNREACHABLE / ERROR_HOST_UNREACHABLE) or interface gone
@@ -378,7 +379,7 @@ try_reactivate_by_ifname(platform_win_ctx_t *p, const char *ifname)
 
 /* ================================================================
  *  Layer B — recovery socket create / register / rollback
- *  (sibling of Linux netlink_mon.c)
+ *  (sibling of the POSIX netmon_common.c)
  * ================================================================ */
 
 /* Create a UDP socket bound to the wildcard address and pinned to ifname.
@@ -606,7 +607,7 @@ try_readd_removed_path(platform_win_ctx_t *p, const char *ifname)
 }
 
 /* ================================================================
- *  Reconciler — poll body (sibling of Linux netlink_mon.c's
+ *  Reconciler — poll body (sibling of the POSIX netmon_common.c's
  *  recover_dropped_paths_cb steps 1-3)
  * ================================================================ */
 

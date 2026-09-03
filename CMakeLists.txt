@@ -431,6 +431,7 @@ set(WINTUN_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/third_party/wintun)
 # ---------- mqvpn CLI binary (Windows) ----------
 add_executable(mqvpn
     src/main.c
+    src/platform/client_config_bridge.c
     src/platform/windows/platform_windows.c
     src/platform/windows/tun_wintun.c
     src/platform/windows/routing.c
@@ -501,8 +502,10 @@ elseif(APPLE)
 # tun.c/dns.c and fail to compile on Darwin).
 add_executable(mqvpn
     src/main.c
+    src/platform/client_config_bridge.c
     src/platform/darwin/platform_darwin.c
     src/platform/darwin/route_mon.c
+    src/platform/posix/netmon_common.c
     src/platform/darwin/tun_utun.c
     src/platform/darwin/routing.c
     src/platform/darwin/dns.c
@@ -538,8 +541,10 @@ target_link_libraries(mqvpn
 # OBJECT target, independent of the full CLI link above. See
 # .github/workflows/ci.yml darwin job.
 add_library(mqvpn_darwin_platform OBJECT
+    src/platform/client_config_bridge.c
     src/platform/darwin/platform_darwin.c
     src/platform/darwin/route_mon.c
+    src/platform/posix/netmon_common.c
     src/platform/darwin/tun_utun.c
     src/platform/darwin/routing.c
     src/platform/darwin/dns.c
@@ -705,8 +710,10 @@ endif()
 # Links libmqvpn for the library API; keeps platform-specific files separate.
 add_executable(mqvpn
     src/main.c
+    src/platform/client_config_bridge.c
     src/platform/linux/platform_linux.c
     src/platform/linux/netlink_mon.c
+    src/platform/posix/netmon_common.c
     src/platform/linux/route_check.c
     src/platform/linux/control_socket.c
     src/platform/posix/status.c
@@ -740,6 +747,34 @@ target_link_libraries(mqvpn
     stdc++
 )
 
+# libFuzzer target: control-API request parsing crash-safety (see
+# fuzz/fuzz_control_dispatch.c for scope). Lives here — not in the
+# fuzz_tcp_lane block above — because control_socket.c is Linux-only and
+# needs libevent, both guaranteed in this branch. The TU #include's
+# control_socket.c to reach the file-local dispatch(); mqvpn_lib resolves
+# the NULL-guarded mqvpn_server_* calls (log.c is inside mqvpn_lib — do
+# not add it here). Only the fuzz TU is instrumented — that covers the
+# dispatch + argument-extraction surface (json_mini.h is header-inline, so
+# it compiles into the TU); library-side validation of extracted strings
+# short-circuits at the server=NULL guard and is out of scope (see the TU).
+if(MQVPN_ENABLE_FUZZING)
+    add_executable(fuzz_control_dispatch fuzz/fuzz_control_dispatch.c)
+    target_compile_options(fuzz_control_dispatch PRIVATE -fsanitize=fuzzer,address)
+    target_link_options(fuzz_control_dispatch PRIVATE -fsanitize=fuzzer,address)
+    target_link_libraries(fuzz_control_dispatch PRIVATE
+        mqvpn_lib ${XQUIC_LIB} ${EVENT_LIB} ${SSL_LIB} ${CRYPTO_LIB}
+        pthread dl m stdc++)
+    target_include_directories(fuzz_control_dispatch PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/platform/linux
+        ${CMAKE_SOURCE_DIR}/src/platform/posix
+        ${CMAKE_SOURCE_DIR}/include
+        ${EVENT_INCLUDE_DIR}
+        ${XQUIC_INCLUDE_DIR})
+    set_target_properties(fuzz_control_dispatch PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+endif()
+
 # ---------- Tests ----------
 option(BUILD_TESTING "Build unit tests" ON)
 if(BUILD_TESTING)
@@ -772,13 +807,17 @@ if(BUILD_TESTING)
     # mqvpn_config.c is linked (separate TU) for the composed-builder bridge test.
     add_executable(test_reorder_rx tests/test_reorder_rx.c src/mqvpn_config.c src/log.c)
     add_executable(test_reorder_config tests/test_reorder_config.c src/mqvpn_config.c src/config.c src/log.c)
+    # Parity test for the shared CLI→library config bridge: pins every field
+    # forwarded by mqvpn_platform_apply_client_config so a new knob cannot be
+    # bridged on one platform and dropped on another (see the bridge TU).
+    add_executable(test_config_bridge tests/test_config_bridge.c src/platform/client_config_bridge.c src/mqvpn_config.c src/log.c)
     add_executable(test_classifier tests/test_classifier.c src/hybrid/classifier.c)
     add_executable(test_icmp tests/test_icmp.c src/icmp.c)
     # test_reorder_gate exercises src/reorder_gate.h (shared STAMP/RAW/DROP_MTU
     # gate + PTB token bucket, extracted from mqvpn_client.c/mqvpn_server.c) —
     # links reorder_tx.c (for the peek it wraps) + icmp.c (for the PTB send).
     add_executable(test_reorder_gate tests/test_reorder_gate.c src/reorder_tx.c src/icmp.c src/log.c)
-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_classifier test_icmp test_reorder_gate)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate)
 
     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of
@@ -871,6 +910,28 @@ if(BUILD_TESTING)
             ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
             ${CMAKE_SOURCE_DIR}/src/platform/posix
             ${CMAKE_SOURCE_DIR}/src/platform/darwin)
+        set_target_properties(${t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+        add_test(NAME ${t} COMMAND ${t})
+    endforeach()
+
+    # Linux platform-twin PATH-stub state machine tests: same fake_cmd.h
+    # harness and scenario shape as the Darwin trio above, pointed at the
+    # Linux twins (linux/routing.c drives `ip`, linux/killswitch.c drives
+    # iptables/ip6tables — all via fork+execvp, so the PATH-stub idiom
+    # ports unchanged). Until now these files were exercised only by the
+    # sudo+netns e2e suite.
+    add_executable(test_routing_linux
+        tests/test_routing_linux.c src/platform/linux/routing.c
+        src/platform/posix/dns_common.c src/log.c)
+    add_executable(test_killswitch_rules_linux
+        tests/test_killswitch_rules_linux.c src/platform/linux/killswitch.c
+        src/platform/posix/dns_common.c src/log.c)
+    foreach(t test_routing_linux test_killswitch_rules_linux)
+        target_include_directories(${t} PRIVATE
+            ${EVENT_INCLUDE_DIR}   # platform_internal.h includes <event2/event.h>
+            ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/src/platform/posix
+            ${CMAKE_SOURCE_DIR}/src/platform/linux)
         set_target_properties(${t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
         add_test(NAME ${t} COMMAND ${t})
     endforeach()

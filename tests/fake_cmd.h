@@ -198,6 +198,27 @@ fake_cmd_read_log(fake_cmd_env_t *e, char *buf, size_t bufsize)
     return (int)n;
 }
 
+/* Checks each of `needles[0..n)` appears in `log`, in that order (each
+ * search resumes after the previous match) — pins call ORDER, not just
+ * presence. Returns 0 when all match; on the first missing/out-of-order
+ * needle prints it to stderr (tagged `tag`) and returns -1. Callers own
+ * their pass/fail accounting. */
+__attribute__((unused)) static int
+fake_cmd_log_order(const char *log, const char *const *needles, int n, const char *tag)
+{
+    const char *pos = log;
+    for (int i = 0; i < n; i++) {
+        const char *found = strstr(pos, needles[i]);
+        if (!found) {
+            fprintf(stderr, "FAIL [%s]: missing or out-of-order needle #%d: '%s'\n", tag,
+                    i, needles[i]);
+            return -1;
+        }
+        pos = found + strlen(needles[i]);
+    }
+    return 0;
+}
+
 /* Writes `content` to a fresh file under e->dir named `name` and returns
  * its full path in `out_path` — used for the query-verb content files
  * (networksetup -listallnetworkservices / -getdnsservers, pfctl -E token)

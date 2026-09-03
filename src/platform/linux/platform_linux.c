@@ -173,7 +173,7 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     }
 
     /* Start periodic dropped-path re-add timer. Carrier-up netlink events
-     * fire only once and `try_readd_removed_path()` can fail synchronously
+     * fire only once and `netmon_try_readd_removed_path()` can fail synchronously
      * (e.g. xqc_conn_create_path returning -XQC_EMP_NO_AVAIL_PATH_ID before
      * the server has distributed enough CIDs). Without this timer the slot
      * would sit in CLOSED_DROPPED indefinitely — no further netlink event
@@ -261,7 +261,7 @@ cb_path_event(mqvpn_path_handle_t path, mqvpn_path_status_t status, void *user_c
 {
     (void)user_ctx;
     /* PR5: path lifecycle state is owned entirely by libmqvpn. Platform
-     * no longer mirrors recoverable / removed state — try_reactivate_by_ifname
+     * no longer mirrors recoverable / removed state — netmon_try_reactivate_by_ifname
      * queries lib state directly via mqvpn_client_get_paths(). */
     const char *sn = mqvpn_path_status_string(status);
     LOG_INF("path %lld -> %s", (long long)path, sn);
@@ -571,39 +571,9 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
         return 1;
     }
 
-    mqvpn_config_set_server(lib_cfg, cfg->server_addr, cfg->server_port);
-    if (cfg->tls_server_name)
-        mqvpn_config_set_tls_server_name(lib_cfg, cfg->tls_server_name);
-    if (cfg->auth_key) mqvpn_config_set_auth_key(lib_cfg, cfg->auth_key);
-    mqvpn_config_set_insecure(lib_cfg, cfg->insecure);
-    mqvpn_config_set_multipath(lib_cfg, cfg->n_paths > 1 ? 1 : 0);
-    mqvpn_config_set_reconnect(lib_cfg, cfg->reconnect,
-                               cfg->reconnect_interval > 0 ? cfg->reconnect_interval : 5);
-    mqvpn_config_set_killswitch_hint(lib_cfg, cfg->kill_switch);
-
-    mqvpn_config_set_log_level(lib_cfg, (mqvpn_log_level_t)cfg->log_level);
-
-    mqvpn_scheduler_t lib_sched;
-    switch (cfg->scheduler) {
-    case 1: lib_sched = MQVPN_SCHED_WLB; break;
-    case 2: lib_sched = MQVPN_SCHED_BACKUP_FEC; break;
-    case 3: lib_sched = MQVPN_SCHED_WLB_UDP_PIN; break;
-    default: lib_sched = MQVPN_SCHED_MINRTT; break;
-    }
-    mqvpn_config_set_scheduler(lib_cfg, lib_sched);
-    mqvpn_config_set_cc(lib_cfg, (mqvpn_cc_t)cfg->cc);
-    mqvpn_config_set_reinjection(lib_cfg, (mqvpn_reinjection_t)cfg->reinjection);
-    mqvpn_config_set_reinjection_deadline_params(lib_cfg, cfg->reinj_srtt_factor_pct,
-                                                 cfg->reinj_hard_deadline_ms,
-                                                 cfg->reinj_deadline_lower_bound_ms);
-    mqvpn_config_set_init_max_path_id(lib_cfg, cfg->init_max_path_id);
-    mqvpn_config_set_tun_mtu(lib_cfg, cfg->tun_mtu);
-    mqvpn_config_apply_reorder(lib_cfg,
-                               &cfg->reorder); /* INI [Reorder]/[ReorderRule] bridge */
-    mqvpn_config_apply_hybrid(lib_cfg, &cfg->hybrid); /* INI [Hybrid] bridge */
-    if (cfg->recv_rate_limit)
-        mqvpn_config_set_recv_rate_limit(lib_cfg, cfg->recv_rate_limit);
-    /* Unconditional: 0 is a meaningful explicit-disable, not "unset". */
+    mqvpn_platform_apply_client_config(lib_cfg, cfg);
+    /* Linux-only knob, deliberately outside the shared bridge (vpn_client.h).
+     * Unconditional: 0 is a meaningful explicit-disable, not "unset". */
     mqvpn_config_set_udp_gso(lib_cfg, cfg->udp_gso);
 
     /* Create callbacks */

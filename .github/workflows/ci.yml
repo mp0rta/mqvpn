@@ -227,9 +227,11 @@ jobs:
                 -DMQVPN_ENABLE_FUZZING=ON \
                 -DCMAKE_C_COMPILER=clang \
                 -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
-          make -j$(nproc) fuzz_tcp_lane
+          make -j$(nproc) fuzz_tcp_lane fuzz_control_dispatch
           ASAN_OPTIONS=abort_on_error=1 \
             ./fuzz_tcp_lane -max_total_time=120 ../fuzz/corpus/tcp_lane/
+          ASAN_OPTIONS=abort_on_error=1 \
+            ./fuzz_control_dispatch -max_total_time=60 ../fuzz/corpus/control_dispatch/
 
       - name: E2E smoke test (netns)
         env:
@@ -296,6 +298,33 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_validation_blackhole_test.sh
+
+      # The one NEGATIVE suite in this recovery family: every sibling above
+      # proves drop -> successful re-add; this one proves re-add is REFUSED
+      # while the iface has an address but no route to the server. A
+      # regression that weakens that gate passes every other suite (their
+      # ifaces always have routes) while re-adding paths into the kernel's
+      # assume-on-link ARP blackhole on multi-homed routers. Also the only
+      # coverage of timer-driven recovery from a change (route appearing)
+      # that emits no netlink event, and of the deferral log marker.
+      - name: E2E route-gate re-add deferral test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_route_gate_test.sh
+
+      # Reorder shim end to end (~30s): the unit tests cover the engine in
+      # isolation; only this suite exercises the client<->server negotiation
+      # wiring (advertise marker -> echo -> stamping) plus the INI/profile
+      # config path and in-order delivery under netem. A regression in that
+      # wiring ships a dead-on-arrival feature while every unit test stays
+      # green (that exact failure shape has happened before: an engine
+      # getter bypass masked an unwired stats field).
+      - name: E2E reorder shim test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E tests/test_e2e_reorder.sh build/mqvpn
 
       - name: E2E backup_fec scheduler test (netns)
         env:
@@ -943,7 +972,14 @@ jobs:
           # An lwIP fork bump must not serve stale prebuilts.
           LWIP_SHA=$(git submodule status third_party/lwip | awk '{print $1}' | tr -d '+')
           BSSL_SHA=$(git -C third_party/xquic/third_party/boringssl rev-parse --short HEAD)
-          echo "key=ndk-android-arm64-v8a-${{ hashFiles('scripts/build_android.sh', 'CMakeLists.txt', 'src/**/*.c', 'src/**/*.h', 'include/**/*.h') }}-${XQUIC_SHA}-bssl-${BSSL_SHA}-lwip-${LWIP_SHA}" >> "$GITHUB_OUTPUT"
+          # Prebuilts must be compiled by the SAME NDK the JNI wrapper links
+          # with (gradle's ndkVersion pin, single source of truth) — and the
+          # cache key must carry it, or a runner-default NDK bump silently
+          # serves archives built by a different toolchain.
+          NDK_VERSION=$(sed -n 's/^[[:space:]]*ndkVersion = "\(.*\)"$/\1/p' android/sdk-native/build.gradle.kts)
+          test -n "$NDK_VERSION" || { echo "ndkVersion pin not found"; exit 1; }
+          echo "ndk-version=${NDK_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "key=ndk-android-arm64-v8a-r${NDK_VERSION}-${{ hashFiles('scripts/build_android.sh', 'CMakeLists.txt', 'src/**/*.c', 'src/**/*.h', 'include/**/*.h') }}-${XQUIC_SHA}-bssl-${BSSL_SHA}-lwip-${LWIP_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Cache NDK prebuilt libraries
         id: ndk-cache
@@ -955,12 +991,12 @@ jobs:
       - name: NDK cross-compile (arm64-v8a)
         if: steps.ndk-cache.outputs.cache-hit != 'true'
         run: |
-          # Find NDK: ANDROID_NDK_HOME > ANDROID_HOME/ndk/<latest> > default
-          if [ -n "${ANDROID_NDK_HOME:-}" ]; then
-            NDK_PATH="$ANDROID_NDK_HOME"
-          elif [ -d "${ANDROID_HOME}/ndk" ]; then
-            NDK_PATH="$(ls -d ${ANDROID_HOME}/ndk/*/ 2>/dev/null | sort -V | tail -1)"
-            NDK_PATH="${NDK_PATH%/}"
+          # Use the gradle-pinned NDK (not the mutable runner default), so
+          # the .a archives and the JNI wrapper are built by one toolchain.
+          NDK_VERSION="${{ steps.ndk-cache-key.outputs.ndk-version }}"
+          NDK_PATH="${ANDROID_HOME}/ndk/${NDK_VERSION}"
+          if [ ! -d "$NDK_PATH" ]; then
+            "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${NDK_VERSION}"
           fi
           echo "Using NDK: ${NDK_PATH}"
           scripts/build_android.sh --abi arm64-v8a --ndk "$NDK_PATH"
@@ -999,6 +1035,101 @@ jobs:
             android/sdk-core/build/reports/tests/
             android/sdk-runtime/build/reports/tests/
             android/sdk-network/build/reports/tests/
+          retention-days: 7
+
+  # Instrumented (androidTest) run on an x86_64 emulator. This is the only
+  # place the JNI boundary is executed in CI: assembleDebug + JVM `test`
+  # never load libmqvpn_jni.so, so a Kotlin external fun <-> C JNI_FN drift
+  # or a missing native symbol ships undetected without this job
+  # (ReorderJniSmokeTest resolves the externals against the real .so).
+  # Builds its own x86_64 prebuilts (the release ABI is arm64-v8a only);
+  # sdk-native reads -PmqvpnAbiFilters so release/F-Droid stay arm64-only.
+  android-emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Compute NDK cache key (x86_64)
+        id: ndk-cache-key
+        run: |
+          XQUIC_SHA=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+')
+          # An lwIP fork bump must not serve stale prebuilts.
+          LWIP_SHA=$(git submodule status third_party/lwip | awk '{print $1}' | tr -d '+')
+          BSSL_SHA=$(git -C third_party/xquic/third_party/boringssl rev-parse --short HEAD)
+          # NDK identity in the key + gradle pin as source of truth — see the
+          # arm64 twin above.
+          NDK_VERSION=$(sed -n 's/^[[:space:]]*ndkVersion = "\(.*\)"$/\1/p' android/sdk-native/build.gradle.kts)
+          test -n "$NDK_VERSION" || { echo "ndkVersion pin not found"; exit 1; }
+          echo "ndk-version=${NDK_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "key=ndk-android-x86_64-r${NDK_VERSION}-${{ hashFiles('scripts/build_android.sh', 'CMakeLists.txt', 'src/**/*.c', 'src/**/*.h', 'include/**/*.h') }}-${XQUIC_SHA}-bssl-${BSSL_SHA}-lwip-${LWIP_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache NDK prebuilt libraries (x86_64)
+        id: ndk-cache
+        uses: actions/cache@v6
+        with:
+          path: android/sdk-native/prebuilt
+          key: ${{ steps.ndk-cache-key.outputs.key }}
+
+      - name: NDK cross-compile (x86_64)
+        if: steps.ndk-cache.outputs.cache-hit != 'true'
+        run: |
+          # Use the gradle-pinned NDK (not the mutable runner default), so
+          # the .a archives and the JNI wrapper are built by one toolchain.
+          NDK_VERSION="${{ steps.ndk-cache-key.outputs.ndk-version }}"
+          NDK_PATH="${ANDROID_HOME}/ndk/${NDK_VERSION}"
+          if [ ! -d "$NDK_PATH" ]; then
+            "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${NDK_VERSION}"
+          fi
+          echo "Using NDK: ${NDK_PATH}"
+          scripts/build_android.sh --abi x86_64 --ndk "$NDK_PATH"
+
+      - name: Verify prebuilt libraries
+        run: |
+          for lib in libmqvpn.a libxquic.a libssl.a libcrypto.a liblwip_core.a; do
+            test -f "android/sdk-native/prebuilt/x86_64/${lib}" \
+              || { echo "MISSING: ${lib}"; exit 1; }
+          done
+          ls -lh android/sdk-native/prebuilt/x86_64/
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5.7.0
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Instrumented tests (x86_64 emulator)
+        # Community action — pinned to a commit SHA (not the mutable v2 tag):
+        # it runs arbitrary code on the runner, and although this job holds
+        # no secrets, an upstream compromise could poison the prebuilt cache.
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 30
+          arch: x86_64
+          target: default
+          disable-animations: true
+          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot
+          working-directory: android
+          script: ./gradlew :sdk-native:connectedAndroidTest -PmqvpnAbiFilters=x86_64 --no-daemon --stacktrace
+
+      - name: Upload instrumented test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-instrumented-test-reports
+          path: android/sdk-native/build/reports/androidTests/
           retention-days: 7
 
   lint-lifecycle-writes:
