@@ -269,6 +269,12 @@ typedef struct {
     uint8_t server_prefix;
     int mtu;
     uint8_t assigned_ip6[16]; /* IPv6 tunnel IP (all-zero = none) */
+    /* Prefix to configure on the TUN for assigned_ip6. Client: derived locally
+     * (a well-formed wire prefix is widened to at most /112 so the tunnel
+     * subnet stays on-link; a malformed prefix > 128 passes through unchanged)
+     * — not the wire ADDRESS_ASSIGN prefix, which is this client's own /128.
+     * Server: the pool prefix, both for its own TUN (tunnel_config_ready) and
+     * in on_client_connected. */
     uint8_t assigned_prefix6;
     int has_v6; /* 1 = IPv6 assigned */
 } mqvpn_tunnel_info_t;

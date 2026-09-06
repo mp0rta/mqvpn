@@ -307,9 +307,25 @@ test_tunnel_subnet_learn(void)
     ASSERT_EQ_INT(e.family, 0, "negative prefix -> unset sentinel");
 }
 
-/* mqvpn_tunnel_subnet_learn_v6: unlike the v4 form, the assigned prefix is
- * honored DIRECTLY — no >=24-style widening (that clamp is a v4-pool-only
- * artifact). */
+/* mqvpn_tunnel_prefix6_effective: boundary cases of the /112 convention. */
+static void
+test_tunnel_prefix6_effective(void)
+{
+    ASSERT_EQ_INT(mqvpn_tunnel_prefix6_effective(128), 112, "128 -> 112");
+    ASSERT_EQ_INT(mqvpn_tunnel_prefix6_effective(124), 112, "124 -> 112 (future block)");
+    ASSERT_EQ_INT(mqvpn_tunnel_prefix6_effective(113), 112, "113 -> 112 (lower edge)");
+    ASSERT_EQ_INT(mqvpn_tunnel_prefix6_effective(112), 112, "112 -> 112 (unchanged)");
+    ASSERT_EQ_INT(mqvpn_tunnel_prefix6_effective(96), 96,
+                  "96 -> 96 (wider passes through)");
+    ASSERT_EQ_INT(mqvpn_tunnel_prefix6_effective(0), 0,
+                  "0 -> 0 (degenerate passes through)");
+    ASSERT_EQ_INT(mqvpn_tunnel_prefix6_effective(129), 129,
+                  "129 -> 129 (invalid stays invalid)");
+}
+
+/* mqvpn_tunnel_subnet_learn_v6: /112-or-wider is honored as-is; narrower
+ * widens to /112 (rule in mqvpn_tunnel_prefix6_effective); degenerate
+ * prefixes stay the unset sentinel. */
 static void
 test_tunnel_subnet_learn_v6(void)
 {
@@ -323,10 +339,15 @@ test_tunnel_subnet_learn_v6(void)
     ASSERT_EQ_INT(e.net[0], 0xfd, "v6 learn: net[0] preserved");
     ASSERT_EQ_INT(e.net[8], 0, "v6 learn: net[8] masked off past /64");
 
-    /* /128 (host route): honored as-is, nothing masked off. */
+    /* /128 (what the server sends): widened to /112. */
     mqvpn_tunnel_subnet_learn_v6(ip6, 128, &e);
-    ASSERT_EQ_INT(e.prefix_len, 128, "v6 learn /128: prefix_len honored");
-    ASSERT_EQ_INT(e.net[15], 1, "v6 learn /128: net[15] preserved");
+    ASSERT_EQ_INT(e.prefix_len, 112, "v6 learn /128: widened to /112");
+    ASSERT_EQ_INT(e.net[15], 0, "v6 learn /128: net[15] masked off");
+
+    /* 113..127 widens too (not a /128-only special case). */
+    mqvpn_tunnel_subnet_learn_v6(ip6, 120, &e);
+    ASSERT_EQ_INT(e.prefix_len, 112, "v6 learn /120: widened to /112");
+    ASSERT_EQ_INT(e.net[15], 0, "v6 learn /120: net[15] masked off");
 
     /* Degenerate prefix: unset sentinel. */
     mqvpn_tunnel_subnet_learn_v6(ip6, 0, &e);
@@ -764,6 +785,7 @@ main(void)
     test_classify_v4_tcp_gates();
     test_classify_tunnel_subnet_tcp_raw();
     test_tunnel_subnet_learn();
+    test_tunnel_prefix6_effective();
     test_tunnel_subnet_learn_v6();
     test_cidr_match_family_strict();
     test_parse_cidr();

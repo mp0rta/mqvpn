@@ -211,6 +211,8 @@ struct mqvpn_client_s {
     uint8_t server_prefix;
     int mtu;
     uint8_t assigned_ip6[16];
+    /* wire value, write-only mirror of conn->assigned_prefix6 (no reader); the TUN
+     * width is derived at the tunnel_info builder via mqvpn_tunnel_prefix6_effective */
     uint8_t assigned_prefix6;
     int has_v6;
     int tun_active;
@@ -1917,9 +1919,9 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
         /* Hybrid: learn the tunnel subnet for the classifier's TCP-lane
          * exclusion. The full rationale (server ACL denies the tunnel
          * subnet unconditionally → lane could only RST; RAW keeps intra-VPN
-         * TCP working) and the /24 widening rule (with its wider-pool
-         * limitation) live on mqvpn_tunnel_subnet_learn and
-         * client_tunnel_subnet in classifier.h. Deliberately OUTSIDE the
+         * TCP working) and the v4 /24 and v6 /112 widening rules (with their pool-width
+         * limitations) live on mqvpn_tunnel_subnet_learn / mqvpn_tunnel_prefix6_effective
+         * and client_tunnel_subnet in classifier.h. Deliberately OUTSIDE the
          * MQVPN_HYBRID_TCP_LANE_ENABLED block: lane-less builds still
          * classify for counters and must report the same verdicts.
          * client_tunnel_subnet[0] is v4 (always learned here); [1] is the v6
@@ -2017,7 +2019,8 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
         info.mtu = tun_mtu;
         if (conn->addr6_assigned) {
             memcpy(info.assigned_ip6, conn->assigned_ip6, 16);
-            info.assigned_prefix6 = conn->assigned_prefix6;
+            info.assigned_prefix6 =
+                (uint8_t)mqvpn_tunnel_prefix6_effective(conn->assigned_prefix6);
             info.has_v6 = 1;
         }
 

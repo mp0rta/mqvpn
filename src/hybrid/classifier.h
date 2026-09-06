@@ -138,12 +138,21 @@ mqvpn_tunnel_subnet_learn(const uint8_t ip[4], int assigned_prefix,
     mqvpn_cidr_premask(out->net, plen);
 }
 
-/* IPv6 counterpart of mqvpn_tunnel_subnet_learn above. Unlike the v4 form,
- * the assigned prefix is honored DIRECTLY (no >=24 widening) — that clamp
- * exists only because the server's v4 pool always assigns a client its own
- * /32 inside a /24-or-wider pool; the v6 ADDRESS_ASSIGN prefix is already
- * the real tunnel-subnet prefix, nothing to widen. A degenerate prefix
- * (<= 0 or > 128) leaves *out zeroed (family 0, unset sentinel). */
+/* Wire ADDRESS_ASSIGN prefix (permitted-source width — the server sends this
+ * client's own /128, RFC 9484 §4.7.1) → width for the TUN address and the
+ * classifier's tunnel-subnet carve-out: a client-side convention, like the
+ * v4 /32 → /24 rule above. <= /112 is honored (pre-fix servers send the pool
+ * prefix); > 128 passes through so an out-of-range wire byte stays out of
+ * range instead of becoming a valid /112 (only learn_v6 below validates). */
+static inline int
+mqvpn_tunnel_prefix6_effective(int capsule_prefix)
+{
+    return (capsule_prefix > 112 && capsule_prefix <= 128) ? 112 : capsule_prefix;
+}
+
+/* IPv6 counterpart of mqvpn_tunnel_subnet_learn above; the widening rule
+ * lives in mqvpn_tunnel_prefix6_effective. A degenerate prefix (<= 0 or
+ * > 128) leaves *out zeroed (family 0, unset sentinel). */
 static inline void
 mqvpn_tunnel_subnet_learn_v6(const uint8_t ip6[16], int assigned_prefix,
                              mqvpn_cidr_entry_t *out)
@@ -151,10 +160,11 @@ mqvpn_tunnel_subnet_learn_v6(const uint8_t ip6[16], int assigned_prefix,
     memset(out, 0, sizeof(*out));
     if (assigned_prefix <= 0 || assigned_prefix > 128) return;
 
+    int plen = mqvpn_tunnel_prefix6_effective(assigned_prefix);
     out->family = 6;
-    out->prefix_len = (uint8_t)assigned_prefix;
+    out->prefix_len = (uint8_t)plen;
     memcpy(out->net, ip6, 16);
-    mqvpn_cidr_premask(out->net, assigned_prefix);
+    mqvpn_cidr_premask(out->net, plen);
 }
 
 /* Parse "a.b.c.d/n" (n = 0..32) or "x:x::.../n" (n = 0..128) into *out,
