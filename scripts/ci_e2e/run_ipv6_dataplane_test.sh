@@ -276,10 +276,12 @@ else
 fi
 
 # Check TUN has IPv6 address
-if ip netns exec "$NS_C" ip -6 addr show dev mqvpn0 | grep -q "fd00:abcd::2"; then
-    echo "OK: Client TUN has IPv6 address fd00:abcd::2"
+# /112 on the TUN although the wire ADDRESS_ASSIGN is /128: the client widens locally.
+if ip netns exec "$NS_C" ip -6 addr show dev mqvpn0 | grep -q "fd00:abcd::2/112"; then
+    echo "OK: Client TUN has IPv6 address fd00:abcd::2/112"
 else
-    echo "FAIL: Client TUN missing IPv6 address"
+    echo "FAIL: Client TUN IPv6 address missing or not /112; actual:"
+    ip netns exec "$NS_C" ip -6 addr show dev mqvpn0 || true
     FAIL=1
 fi
 
@@ -324,10 +326,11 @@ else
     FAIL=1
 fi
 
-if grep -q "ADDRESS_ASSIGN.*fd00:abcd::2" "${WORK_DIR}/client.log"; then
-    echo "OK: Client received IPv6 ADDRESS_ASSIGN"
+# The client logs the PARSED prefix, so this pins the wire byte (RFC 9484 §4.7.1).
+if grep -q "ADDRESS_ASSIGN: IPv6 fd00:abcd::2/128" "${WORK_DIR}/client.log"; then
+    echo "OK: Client received IPv6 ADDRESS_ASSIGN as /128"
 else
-    echo "FAIL: Client IPv6 ADDRESS_ASSIGN not found in log"
+    echo "FAIL: Client IPv6 ADDRESS_ASSIGN missing or not /128"
     FAIL=1
 fi
 

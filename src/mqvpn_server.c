@@ -1016,7 +1016,11 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
         a6_payload[a6_off++] = 6;
         memcpy(a6_payload + a6_off, &v6, 16);
         a6_off += 16;
-        a6_payload[a6_off++] = (uint8_t)s->pool.prefix6;
+        /* /128 = this client's own address. A shorter prefix would need zero host
+         * bits and would permit the whole prefix as sources — more than
+         * forward_inner_ip's exact match (RFC 9484 §4.7.1). The client widens its
+         * interface width locally (mqvpn_tunnel_prefix6_effective). */
+        a6_payload[a6_off++] = 128;
 
         uint8_t cap6_buf[64];
         size_t cap6_written = 0;
@@ -1038,7 +1042,7 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
 
         char v6str[INET6_ADDRSTRLEN];
         inet_ntop(AF_INET6, &conn->assigned_ip6, v6str, sizeof(v6str));
-        LOG_I(s, "ADDRESS_ASSIGN: client=%s/%d", v6str, s->pool.prefix6);
+        LOG_I(s, "ADDRESS_ASSIGN: client=%s/128", v6str);
     }
 
     /* 4. ROUTE_ADVERTISEMENT (0.0.0.0 — 255.255.255.255) */

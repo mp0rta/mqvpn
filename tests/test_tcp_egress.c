@@ -139,6 +139,8 @@ typedef struct {
     uint64_t masque_stream_id;
     int tunnel_ready; /* ADDRESS_ASSIGN (v4) parsed from the response body */
     uint8_t assigned_ip[4];
+    int assigned6_seen;       /* ADDRESS_ASSIGN (v6) parsed from the response body */
+    uint8_t assigned_prefix6; /* its wire prefix length */
     uint8_t body_buf[256];
     size_t body_len;
 
@@ -482,10 +484,14 @@ probe_cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t fl
                 size_t ip_len = 16, aa_consumed;
                 if (xqc_h3_ext_connectip_parse_address_assign(
                         cap_payload, cap_len, &req_id, &ip_ver, ip_addr, &ip_len, &prefix,
-                        &aa_consumed) == XQC_OK &&
-                    ip_ver == 4) {
-                    memcpy(p->assigned_ip, ip_addr, 4);
-                    p->tunnel_ready = 1;
+                        &aa_consumed) == XQC_OK) {
+                    if (ip_ver == 4) {
+                        memcpy(p->assigned_ip, ip_addr, 4);
+                        p->tunnel_ready = 1;
+                    } else if (ip_ver == 6) {
+                        p->assigned_prefix6 = prefix;
+                        p->assigned6_seen = 1;
+                    }
                 }
             }
             if (consumed < p->body_len)
@@ -2398,6 +2404,28 @@ TEST(non_tunnel_close_keeps_tunnel_established)
     harness_stop(&h);
 }
 
+/* The IPv6 ADDRESS_ASSIGN must be this client's own /128 — see the comment
+ * at the capsule byte in mqvpn_server.c (RFC 9484 §4.7.1). */
+TEST(connect_ip_v6_address_assign_is_slash_128)
+{
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "unused-protocol", strlen("unused-protocol"),
+                            /*auto_open=*/0, harness_cfg_subnet6),
+              0);
+    probe_conn_t *p = &h.probe;
+
+    harness_pump(&h, &p->handshake_done, 10000);
+    ASSERT_EQ(p->handshake_done, 1);
+    ASSERT_EQ(probe_open_connect_ip(p), 0);
+    harness_pump(&h, &p->assigned6_seen, 10000);
+    ASSERT_EQ(p->tunnel_ready, 1);
+    ASSERT_STREQ(p->status, "200");
+    ASSERT_EQ(p->assigned6_seen, 1);
+    ASSERT_EQ(p->assigned_prefix6, 128);
+
+    harness_stop(&h);
+}
+
 /* ── ACL decision core (pure, no live mqvpn_server_t) ── */
 
 /* Builds a 16-byte network-order address (v4 in [0..3], rest zero) — the
@@ -2916,6 +2944,7 @@ main(void)
     run_mqvpn_tcp_parked_flow_idle_eviction();
     run_errno_to_status_maps_known_codes();
     run_non_tunnel_close_keeps_tunnel_established();
+    run_connect_ip_v6_address_assign_is_slash_128();
     run_acl_blocks_rfc1918();
     run_acl_blocks_loopback();
     run_acl_allow_punches_hole();
