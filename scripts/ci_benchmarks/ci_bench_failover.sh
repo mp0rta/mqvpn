@@ -158,8 +158,13 @@ for SCHED in $SCHEDULERS; do
         # Restore the via-route the link down flushed; without it the client's
         # re-add gate never lets Path B back and TTR B stays None
         # (see ci_bench_add_path_b_route). The 3s recovery timer picks the
-        # path up once the route exists.
-        ci_bench_add_path_b_route || true
+        # path up once the route exists. This runs in a background subshell
+        # that cannot fail the run, so say so loudly instead of vanishing —
+        # a silent miss here reads as a scheduler regression in the numbers.
+        if ! ci_bench_add_path_b_route; then
+            echo "[$(date +%T)] ERROR ($SCHED): could not restore Path B's route —" \
+                 "the t=75 recovery numbers below measure Path A alone"
+        fi
         # Re-apply netem on restored interfaces
         ip netns exec "$NS_CLIENT" tc qdisc add dev "$VETH_B0" root netem delay 30ms rate 150mbit 2>/dev/null || true
         ip netns exec "$NS_SERVER" tc qdisc add dev "$VETH_B1" root netem delay 30ms rate 150mbit 2>/dev/null || true

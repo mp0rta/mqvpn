@@ -85,11 +85,16 @@ ci_bench_cleanup_stale() {
 # normal conditions. It is also what the client's path re-add gate
 # (route_check.c, RTM_F_FIB_MATCH) requires: without a FIB route via B the
 # gate defers the re-add forever, even though a SO_BINDTODEVICE socket would
-# still send through the kernel's on-link fallback. `ip link set <B> down`
-# flushes this route (only the on-link prefix route is auto-restored), so a
-# benchmark that faults Path B must call this again on recovery.
+# still send through the kernel's on-link fallback. A benchmark that faults
+# Path B must call this again on recovery.
+#
+# `replace`, not `add`: an admin down flushes every route through the link
+# while a carrier loss keeps them and only flags them linkdown, so `add`
+# would succeed in one case and fail with EEXIST in the other. `replace`
+# states the intent ("this route must exist now") for both, which is what
+# lets callers drop the `|| true` that would otherwise hide a real failure.
 ci_bench_add_path_b_route() {
-    ip netns exec "$NS_CLIENT" ip route add "$IP_A_SUBNET" via "$IP_B_SERVER_ADDR" \
+    ip netns exec "$NS_CLIENT" ip route replace "$IP_A_SUBNET" via "$IP_B_SERVER_ADDR" \
         dev "$VETH_B0" metric 200
 }
 

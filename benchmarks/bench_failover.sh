@@ -135,8 +135,11 @@ if [ "$FAULT_PATH_LABEL" = "B" ]; then
     # tests/test_e2e_hybrid_h2.sh Test 6 does — deliberately NOT
     # bench_add_server_host_routes, whose server-side `ip addr add` is not
     # idempotent under set -e.
-    ip netns exec "$NS_CLIENT" ip route replace "${IP_A_SERVER_ADDR}/32" \
-        via "$(bench_path_server_ip 1)" dev "$FAULT_IF_CLIENT" metric 101 2>/dev/null || true
+    if ! ip netns exec "$NS_CLIENT" ip route replace "${IP_A_SERVER_ADDR}/32" \
+            via "$(bench_path_server_ip 1)" dev "$FAULT_IF_CLIENT" metric 101; then
+        echo "[$(date +%T)] ERROR: could not restore Path B's host route —" \
+             "the recovery numbers below measure Path A alone"
+    fi
 fi
 ip netns exec "$NS_CLIENT" tc qdisc add dev "$FAULT_IF_CLIENT" root netem ${FAULT_NETEM} 2>/dev/null || true
 ip netns exec "$NS_SERVER" tc qdisc add dev "$FAULT_IF_SERVER" root netem ${FAULT_NETEM} 2>/dev/null || true
