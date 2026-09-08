@@ -42,6 +42,13 @@ TUNNEL_SERVER_IP="10.0.0.1"
 VPN_LISTEN_PORT="4433"
 CI_STRESS_LOG_LEVEL="${CI_STRESS_LOG_LEVEL:-warn}"
 
+# Optional log capture. When a caller sets these before ci_stress_start_server
+# / ci_stress_start_client, that VPN process's stdout+stderr goes to the named
+# file instead of being inherited. Only scripts that assert on log content opt
+# in (ci_stress_failover.sh); the others keep today's inline console output.
+CI_STRESS_SERVER_LOG="${CI_STRESS_SERVER_LOG:-}"
+CI_STRESS_CLIENT_LOG="${CI_STRESS_CLIENT_LOG:-}"
+
 # Default netem
 NETEM_A="${NETEM_A:-delay 10ms rate 300mbit}"
 NETEM_B="${NETEM_B:-delay 30ms rate 80mbit}"
@@ -92,11 +99,18 @@ ci_stress_cleanup_stale() {
 # answers the ARP), but the client's path re-add gate
 # (src/platform/linux/route_check.c, RTM_F_FIB_MATCH) sees no FIB route and
 # defers the re-add forever — B never comes back after its first fault.
-# Same route as the ci_e2e dual-path suites. `ip link set <B> down` flushes
-# it (only the on-link prefix route is auto-restored on up), so any script
-# that faults Path B must call this again on recovery.
+# Same route as the ci_e2e dual-path suites. Any script that faults Path B
+# must call this again on recovery.
+#
+# `replace`, not `add`: whether the route survived the fault depends on how
+# the path was broken. An admin down flushes every route through the link,
+# but a carrier loss (peer down) keeps them and only flags them linkdown --
+# so `add` would succeed in one case and fail with EEXIST in the other.
+# `replace` states the intent ("this route must exist now") for both, which
+# is what lets callers drop the `|| true` that would otherwise hide a real
+# failure such as a missing namespace.
 ci_stress_add_path_b_route() {
-    ip netns exec "$NS_CLIENT" ip route add "$IP_A_SUBNET" via "$IP_B_SERVER_ADDR" \
+    ip netns exec "$NS_CLIENT" ip route replace "$IP_A_SUBNET" via "$IP_B_SERVER_ADDR" \
         dev "$VETH_B0" metric 200
 }
 
@@ -181,6 +195,7 @@ ci_stress_start_server() {
         -keyout "${_CS_WORK_DIR}/server.key" -out "${_CS_WORK_DIR}/server.crt" \
         -days 365 -nodes -subj "/CN=ci-stress" 2>/dev/null
 
+    if [ -n "$CI_STRESS_SERVER_LOG" ]; then exec 3>>"$CI_STRESS_SERVER_LOG"; else exec 3>&1; fi
     ip netns exec "$NS_SERVER" "$MQVPN" \
         --mode server \
         --listen "0.0.0.0:${VPN_LISTEN_PORT}" \
@@ -189,8 +204,9 @@ ci_stress_start_server() {
         --key "${_CS_WORK_DIR}/server.key" \
         --auth-key "$_CS_PSK" \
         --scheduler "$scheduler" \
-        --log-level "$CI_STRESS_LOG_LEVEL" &
+        --log-level "$CI_STRESS_LOG_LEVEL" >&3 2>&1 &
     _CS_SERVER_PID=$!
+    exec 3>&-
     sleep 2
 
     if ! kill -0 "$_CS_SERVER_PID" 2>/dev/null; then
@@ -220,6 +236,7 @@ ci_stress_start_client() {
         sleep 1
     fi
 
+    if [ -n "$CI_STRESS_CLIENT_LOG" ]; then exec 3>>"$CI_STRESS_CLIENT_LOG"; else exec 3>&1; fi
     ip netns exec "$NS_CLIENT" "$MQVPN" \
         --mode client \
         --server "${server_addr}:${VPN_LISTEN_PORT}" \
@@ -227,8 +244,9 @@ ci_stress_start_client() {
         --auth-key "$_CS_PSK" \
         --scheduler "$scheduler" \
         --insecure \
-        --log-level "$CI_STRESS_LOG_LEVEL" &
+        --log-level "$CI_STRESS_LOG_LEVEL" >&3 2>&1 &
     _CS_CLIENT_PID=$!
+    exec 3>&-
     sleep 3
 
     if ! kill -0 "$_CS_CLIENT_PID" 2>/dev/null; then
@@ -309,6 +327,42 @@ ci_stress_check_sanitizer() {
         echo "  OK: no sanitizer errors"
     fi
     return $failed
+}
+
+# ── Log assertions (for captured VPN logs) ──
+
+# Wait until <pattern> (extended regex) appears in <log> after line
+# <start_line>. Returns 0 on match, 1 on timeout.
+#
+# G19: deliberately awk, not `tail -n +N | grep -q`. These scripts run under
+# `set -o pipefail`, where a grep that exits at its first match can SIGPIPE
+# the writer and turn a match into a spurious timeout -- the exact hazard
+# scripts/ci_e2e/e2e_lib.sh documents but does not have to handle, because no
+# consumer of that library sets pipefail. awk reads to EOF and uses no pipe
+# at all. The pattern travels through the environment so awk does not
+# reprocess its backslashes the way -v would.
+ci_stress_wait_log_after() {
+    local log="$1" pattern="$2" start_line="$3" timeout="${4:-15}"
+    local elapsed=0
+    while [ "$elapsed" -lt "$timeout" ]; do
+        if CS_LOG_PAT="$pattern" awk -v start="$start_line" \
+                'NR > start && $0 ~ ENVIRON["CS_LOG_PAT"] { found = 1 }
+                 END { exit !found }' "$log" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    return 1
+}
+
+# Echo the last <max> log lines a failing step produced, indented, so the
+# console explains the failure instead of only naming it.
+ci_stress_dump_log_since() {
+    local log="$1" start_line="$2" max="${3:-12}"
+    echo "    ── log since the fault (last ${max} lines) ──"
+    awk -v start="$start_line" 'NR > start' "$log" 2>/dev/null \
+        | tail -n "$max" | sed 's/^/    /'
 }
 
 # ── RSS/fd monitoring ──
