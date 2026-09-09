@@ -204,8 +204,18 @@ for ((i = 1; i <= NUM_CYCLES; i++)); do
         # event to observe, "the tunnel stayed up while one path silently ate
         # every packet" is the only thing this kind proves, and it is
         # unobservable once the path is healthy again.
-        if ! ip netns exec "$NS_CLIENT" ping -c 5 -W 1 "$TUNNEL_SERVER_IP" >/dev/null 2>&1; then
+        #
+        # The probe has to be a sample, not a single shot. ICMP is
+        # deliberately unpinned (src/flow_sched.c pins inner TCP, and UDP only
+        # under wlb_udp_pin), so WLB sprays these echoes across both paths per
+        # packet: while one path discards everything, an echo needs both its
+        # request and its reply to miss that path, which measured out at
+        # roughly a third of attempts. Five attempts lost that coin flip on 2
+        # of 16 cycles; twenty put a false red near 1e-4 per cycle while still
+        # fitting in the same ~5s window.
+        if ! PING_OUT=$(ip netns exec "$NS_CLIENT" ping -c 20 -i 0.2 -W 1 "$TUNNEL_SERVER_IP" 2>&1); then
             echo "  [$TAG] FAIL: tunnel dead while the path was blackholed"
+            echo "$PING_OUT" | tail -n 3 | sed 's/^/    /'
             ci_stress_dump_log_since "$VPN_CLIENT_LOG" "$LOG_MARK"
             CYCLE_OK=false
         fi
