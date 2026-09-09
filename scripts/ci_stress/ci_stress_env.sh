@@ -399,6 +399,23 @@ ci_stress_monitor_stop() {
     _CS_MONITOR_PIDS=()
 }
 
+# True when the binary under test is an ASan build.
+#
+# ASan reserves a large shadow region and quarantines freed memory instead of
+# returning it, so a sanitizer build's RSS climbs by hundreds of percent with
+# nothing leaking -- which is why the growth check below is skipped for them.
+# Leak coverage does not depend on it: LeakSanitizer still runs at exit and
+# the fd check still applies.
+#
+# Detect it from the binary, not from ASAN_OPTIONS: that variable is a tuning
+# knob rather than a marker, and a caller who simply did not export it turns a
+# clean run red for the wrong reason. The variable is still honoured as a
+# fallback for when the binary cannot be read.
+ci_stress_is_asan_build() {
+    [ -n "${ASAN_OPTIONS:-}" ] && return 0
+    LC_ALL=C grep -qa "__asan_init" "$MQVPN" 2>/dev/null
+}
+
 # Check resource log for leaks.
 # Fails if RSS grew >50% from initial or fd count increased.
 # Usage: ci_stress_check_resources LOGFILE LABEL
@@ -412,7 +429,7 @@ ci_stress_check_resources() {
         return 0
     fi
 
-    python3 -c "
+    CS_ASAN="$(ci_stress_is_asan_build && echo 1 || echo 0)" python3 -c "
 import sys
 
 lines = open('${logfile}').read().strip().split('\n')
@@ -440,7 +457,7 @@ print(f'  $label: RSS initial={initial_rss}KB final={final_rss}KB max={max_rss}K
 print(f'  $label: fd  initial={initial_fd} final={final_fd}')
 
 import os
-asan_enabled = bool(os.environ.get('ASAN_OPTIONS', ''))
+asan_enabled = os.environ.get('CS_ASAN') == '1'
 
 failed = False
 
