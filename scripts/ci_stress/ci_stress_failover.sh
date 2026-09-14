@@ -28,7 +28,7 @@ source "${SCRIPT_DIR}/ci_stress_env.sh"
 
 MQVPN="${1:-${MQVPN}}"
 
-NUM_CYCLES=100
+NUM_CYCLES="${NUM_CYCLES:-100}"   # env override for short local runs
 SCHEDULER="wlb"
 
 trap ci_stress_cleanup EXIT
@@ -117,11 +117,22 @@ for ((i = 1; i <= NUM_CYCLES; i++)); do
     # (c) Traffic on surviving path only
     sleep 2
 
-    # (d) RECOVER: bring up, re-add IPs (lost when link went down), re-apply netem
+    # (d) RECOVER: bring up, re-add IPs (IPv4 addresses actually survive a
+    #     link down; the add is a no-op safety net), restore Path B's
+    #     via-route, re-apply netem.
     ip netns exec "$NS_CLIENT" ip link set "$FAULT_VETH_C" up
     ip netns exec "$NS_SERVER" ip link set "$FAULT_VETH_S" up
     ip netns exec "$NS_CLIENT" ip addr add "$FAULT_IP_C" dev "$FAULT_VETH_C" 2>/dev/null || true
     ip netns exec "$NS_SERVER" ip addr add "$FAULT_IP_S" dev "$FAULT_VETH_S" 2>/dev/null || true
+    if [ "$FAULT_LABEL" = "B" ]; then
+        # The link down flushed the via-route (see ci_stress_add_path_b_route).
+        # The carrier-up event above already fired without it, so the client's
+        # re-add gate deferred; the library's 3s recovery timer re-checks the
+        # FIB and re-adds the path once this route exists — well inside the
+        # 10s wait below. A failure here is left visible on stderr and shows
+        # up as a failed cycle rather than aborting the whole run.
+        ci_stress_add_path_b_route || true
+    fi
     ip netns exec "$NS_CLIENT" tc qdisc add dev "$FAULT_VETH_C" root netem ${FAULT_NETEM} 2>/dev/null || true
     ip netns exec "$NS_SERVER" tc qdisc add dev "$FAULT_VETH_S" root netem ${FAULT_NETEM} 2>/dev/null || true
 
