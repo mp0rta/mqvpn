@@ -377,11 +377,15 @@ jobs:
           cd third_party/xquic/third_party/boringssl
           mkdir build
           cd build
-          # OPENSSL_NO_ASM=1 on ARM64: works around BoringSSL CMake bug at
-          # the pinned commit that mis-routes ASM source selection on
-          # Windows ARM64 (pulls in x86_64-apple obj → LNK1181). Trade-off:
-          # ARM64 falls back to C crypto, measurably slower than amd64 for
-          # AES-GCM / SHA. Revisit when bumping the BoringSSL submodule pin.
+          # OPENSSL_NO_ASM=1 on ARM64: BoringSSL ships its AArch64 assembly
+          # as .S files that only clang-cl can assemble; with the Visual
+          # Studio generator + cl.exe the ASM source selection breaks (pulled
+          # in an x86_64-apple obj → LNK1181), so ARM64 runs constant-time C
+          # crypto, roughly 10x slower per byte than the asm path. Accepted:
+          # Windows ARM64 has no known users. Fixing it means building
+          # BoringSSL with Ninja + clang-cl for this arch, not a pin bump.
+          # scripts/ci_check_bssl_optimized.sh would fail on this archive
+          # and is deliberately not wired for Windows.
           cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
             -DBUILD_SHARED_LIBS=0 `
             ${{ matrix.arch == 'arm64' && '-DOPENSSL_NO_ASM=1' || '' }} ..
@@ -599,6 +603,15 @@ jobs:
       - name: NDK cross-compile (arm64-v8a)
         run: |
           scripts/build_android.sh --abi arm64-v8a --ndk "${{ steps.ndk.outputs.ndk_path }}"
+
+      # The NDK toolchain supplies -O3 for Release and BoringSSL enables its
+      # AArch64 assembly by default; neither is spelled out in
+      # build_android.sh, so check the archive rather than trust the defaults.
+      # llvm-nm from the NDK reads the aarch64 archive regardless of host nm.
+      - name: Verify BoringSSL (arm64-v8a) is an optimized build
+        run: |
+          NM="${{ steps.ndk.outputs.ndk_path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" \
+            bash scripts/ci_check_bssl_optimized.sh build-android/arm64-v8a/boringssl
 
       - name: Verify prebuilt libraries
         run: |

@@ -666,6 +666,11 @@ jobs:
           cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_BUILD_TYPE=Release ..
           make -j"$(sysctl -n hw.ncpu)" ssl crypto
 
+      # Deliberately not gated on the cache miss: a cache restored from before
+      # the CMAKE_BUILD_TYPE fix is exactly what this is meant to catch.
+      - name: Verify BoringSSL is an optimized build
+        run: bash scripts/ci_check_bssl_optimized.sh third_party/xquic/third_party/boringssl/build
+
       - name: Cache xquic (darwin Release)
         id: xquic-cache
         uses: actions/cache@v6
@@ -805,6 +810,11 @@ jobs:
       - name: Build BoringSSL (iOS)
         if: steps.bssl-ios-cache.outputs.cache-hit != 'true'
         run: ./ios/build-ios.sh boringssl
+
+      # Not gated on the cache miss (see the linux-build job). build-ios.sh
+      # runs the same check after a fresh build; this re-checks a cache hit.
+      - name: Verify BoringSSL (iOS) is an optimized build
+        run: bash scripts/ci_check_bssl_optimized.sh third_party/xquic/third_party/boringssl/build-ios
 
       - name: Cache xquic (iOS Release)
         id: xquic-ios-cache

@@ -47,6 +47,9 @@ if [ "$PHASE" = "boringssl" ] || [ "$PHASE" = "all" ]; then
         -DCMAKE_MACOSX_BUNDLE=OFF
     cmake --build "$BSSL_BUILD" --target ssl crypto
     bssl_stamp_build_dir "$BSSL_DIR" "$BSSL_BUILD"
+    # Release + assembly are what CMAKE_BUILD_TYPE=Release is meant to give
+    # us; verify the archive rather than the flags.
+    bash "$SCRIPT_DIR/scripts/ci_check_bssl_optimized.sh" "$BSSL_BUILD"
 fi
 
 # Newer BoringSSL layouts place archives at the build root instead of
