@@ -60,8 +60,14 @@ fi
 # pipeline spuriously.
 SYMS="$(mktemp)"
 trap 'rm -f "$SYMS"' EXIT
-"$NM" "$ARCHIVE" > "$SYMS" 2>/dev/null || true
-
+# A nonzero status is fatal even if partial output was produced: a member
+# that failed to parse could be the one carrying the fingerprint we look for.
+# Valid archives return 0 from GNU nm and llvm-nm, including when they warn
+# about empty (other-arch) assembly members.
+if ! "$NM" "$ARCHIVE" > "$SYMS" 2>/dev/null; then
+    echo "ERROR: $NM failed on $ARCHIVE — check cannot run" >&2
+    exit 1
+fi
 if [ "$(wc -l < "$SYMS")" -lt 100 ]; then
     echo "ERROR: could not read symbols from $ARCHIVE with $NM — check cannot run" >&2
     exit 1
