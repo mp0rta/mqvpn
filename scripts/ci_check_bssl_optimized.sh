@@ -33,7 +33,8 @@
 #   NM=<tool>  symbol lister to use (default: nm). GNU nm reads any ELF64
 #              archive via its generic target, so a foreign-arch archive
 #              (e.g. the Android arm64 build on an x86_64 runner) normally
-#              works; point NM at llvm-nm if a host nm cannot read it.
+#              works; point NM at llvm-nm if a host nm cannot read it, and
+#              on Windows (COFF .lib) use llvm-nm or a MinGW nm from bash.
 set -euo pipefail
 
 BUILD_DIR="${1:?usage: ci_check_bssl_optimized.sh <boringssl-build-dir>}"
@@ -41,12 +42,16 @@ NM="${NM:-nm}"
 
 # Newer BoringSSL layouts place the archives at the build root; older ones use
 # crypto/ + ssl/ subdirs (same probe order as CMakeLists.txt and build.sh).
-if [ -f "$BUILD_DIR/crypto/libcrypto.a" ]; then
-    ARCHIVE="$BUILD_DIR/crypto/libcrypto.a"
-elif [ -f "$BUILD_DIR/libcrypto.a" ]; then
-    ARCHIVE="$BUILD_DIR/libcrypto.a"
-else
-    echo "ERROR: libcrypto.a not found under $BUILD_DIR" >&2
+# MSVC multi-config builds emit Release/crypto.lib instead.
+ARCHIVE=""
+for candidate in crypto/libcrypto.a libcrypto.a Release/crypto.lib crypto.lib; do
+    if [ -f "$BUILD_DIR/$candidate" ]; then
+        ARCHIVE="$BUILD_DIR/$candidate"
+        break
+    fi
+done
+if [ -z "$ARCHIVE" ]; then
+    echo "ERROR: libcrypto.a / crypto.lib not found under $BUILD_DIR" >&2
     exit 1
 fi
 

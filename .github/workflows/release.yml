@@ -386,11 +386,32 @@ jobs:
           # BoringSSL with Ninja + clang-cl for this arch, not a pin bump.
           # scripts/ci_check_bssl_optimized.sh would fail on this archive
           # and is deliberately not wired for Windows.
+          # CMAKE_BUILD_TYPE is ignored by the multi-config generator for
+          # build selection (that is --config below) but BoringSSL's own
+          # CMakeLists still reads it: left empty, its `NOT ... MATCHES "rel"`
+          # guard compiles BORINGSSL_DISPATCH_TEST instrumentation into an
+          # otherwise /O2 build. Same fix as the Linux jobs.
           cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
             -DBUILD_SHARED_LIBS=0 `
+            -DCMAKE_BUILD_TYPE=Release `
             ${{ matrix.arch == 'arm64' && '-DOPENSSL_NO_ASM=1' || '' }} ..
           cmake --build . --target ssl --config Release
           cmake --build . --target crypto --config Release
+
+      # amd64 only: arm64 is NO_ASM by decision (see above) and would fail
+      # the assembly check. The runner image ships LLVM and MinGW binutils;
+      # either reads the COFF archive, and we fail loudly if neither is on
+      # PATH rather than skip the gate.
+      - name: Verify BoringSSL is an optimized build (Windows amd64)
+        if: matrix.os == 'windows' && matrix.arch == 'amd64'
+        shell: bash
+        run: |
+          NM="$(command -v llvm-nm || command -v nm || true)"
+          if [ -z "$NM" ]; then
+            echo "ERROR: neither llvm-nm nor nm on PATH — cannot verify BoringSSL" >&2
+            exit 1
+          fi
+          NM="$NM" bash scripts/ci_check_bssl_optimized.sh third_party/xquic/third_party/boringssl/build
 
       - name: Build xquic (Windows)
         if: matrix.os == 'windows'

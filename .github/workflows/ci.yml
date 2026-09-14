@@ -893,7 +893,10 @@ jobs:
         uses: actions/cache@v6
         with:
           path: third_party/xquic/third_party/boringssl
-          key: bssl-${{ steps.bssl-pin.outputs.sha }}-windows-msvc-v1
+          # v2: configure now passes CMAKE_BUILD_TYPE=Release (drops the
+          # dispatch-test instrumentation); the xquic key below moves with it
+          # because xquic.dll links BoringSSL statically.
+          key: bssl-${{ steps.bssl-pin.outputs.sha }}-windows-msvc-v2
 
       - name: Build BoringSSL
         if: steps.bssl-cache.outputs.cache-hit != 'true'
@@ -901,9 +904,23 @@ jobs:
           cd third_party/xquic/third_party/boringssl
           mkdir build
           cd build
-          cmake -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=0 ..
+          # See release.yml re: why CMAKE_BUILD_TYPE is passed to a
+          # multi-config generator (BoringSSL's dispatch-test guard reads it).
+          cmake -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=0 `
+            -DCMAKE_BUILD_TYPE=Release ..
           cmake --build . --target ssl --config Release
           cmake --build . --target crypto --config Release
+
+      # Deliberately not gated on the cache miss (see the linux-build job).
+      - name: Verify BoringSSL is an optimized build
+        shell: bash
+        run: |
+          NM="$(command -v llvm-nm || command -v nm || true)"
+          if [ -z "$NM" ]; then
+            echo "ERROR: neither llvm-nm nor nm on PATH — cannot verify BoringSSL" >&2
+            exit 1
+          fi
+          NM="$NM" bash scripts/ci_check_bssl_optimized.sh third_party/xquic/third_party/boringssl/build
 
       - name: Cache xquic (MSVC Release)
         id: xquic-cache
@@ -913,7 +930,7 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-windows-msvc-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v4
+          key: xquic-${{ steps.xqsha.outputs.sha }}-windows-msvc-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v5
 
       - name: Build xquic
         if: steps.xquic-cache.outputs.cache-hit != 'true'
