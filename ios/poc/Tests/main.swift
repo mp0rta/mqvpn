@@ -286,4 +286,20 @@ check(c17.handle(.closed(reason: -10)) == [], "terminal: closed inert")
 check(c17.handle(.startFailed(code: -3)) == [], "terminal: startFailed inert")
 check(c17.handle(.stopRequested) == [], "terminal: stop inert")
 
+// ── TeardownSequence (spec D8) ──────────────────────────────────────────
+var tdOrder: [String] = []
+var tdPathsDone: (() -> Void)?
+TeardownSequence.run(
+    detach: { tdOrder.append("detach") },
+    disconnect: { tdOrder.append("disconnect") },
+    resolveStart: { tdOrder.append("resolveStart") },
+    stopPaths: { done in tdOrder.append("stopPaths"); tdPathsDone = done },
+    destroy: { tdOrder.append("destroy") },
+    complete: { tdOrder.append("complete") })
+check(tdOrder == ["detach", "disconnect", "resolveStart", "stopPaths"],
+      "teardown: destroy waits for the paths completion")
+tdPathsDone?()
+check(tdOrder == ["detach", "disconnect", "resolveStart", "stopPaths", "destroy", "complete"],
+      "teardown: full order after paths completion")
+
 if failures == 0 { print("host tests: ALL PASS") } else { print("host tests: \(failures) FAILURES"); exit(1) }

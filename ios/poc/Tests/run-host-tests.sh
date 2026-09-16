@@ -19,6 +19,7 @@ swiftc -o "$OUT" \
     "$SHARED/HybridSettings.swift" \
     "$SHARED/ProviderMessage.swift" \
     "$SHARED/TunnelSessionCoordinator.swift" \
+    "$SHARED/TeardownSequence.swift" \
     "$APP/ReorderIngest.swift" \
     "$DIR/main.swift"
 "$OUT"
