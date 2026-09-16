@@ -36,6 +36,8 @@ IP_A_SERVER="10.100.0.1/24"
 IP_B_CLIENT="10.200.0.2/24"
 IP_B_SERVER="10.200.0.1/24"
 IP_A_SERVER_ADDR="10.100.0.1"
+IP_A_SUBNET="10.100.0.0/24"
+IP_B_SERVER_ADDR="10.200.0.1"
 TUNNEL_SERVER_IP="10.0.0.1"
 VPN_LISTEN_PORT="4433"
 CI_STRESS_LOG_LEVEL="${CI_STRESS_LOG_LEVEL:-warn}"
@@ -82,6 +84,22 @@ ci_stress_cleanup_stale() {
     ip link del "$VETH_B0" 2>/dev/null || true
 }
 
+# ── Path B route to the server ──
+
+# The server (IP_A_SERVER_ADDR) lives on Path A's subnet, so Path B reaches it
+# only through this via-route. Without it a SO_BINDTODEVICE socket on B still
+# sends (the kernel assumes the destination is on-link and the veth peer
+# answers the ARP), but the client's path re-add gate
+# (src/platform/linux/route_check.c, RTM_F_FIB_MATCH) sees no FIB route and
+# defers the re-add forever — B never comes back after its first fault.
+# Same route as the ci_e2e dual-path suites. `ip link set <B> down` flushes
+# it (only the on-link prefix route is auto-restored on up), so any script
+# that faults Path B must call this again on recovery.
+ci_stress_add_path_b_route() {
+    ip netns exec "$NS_CLIENT" ip route add "$IP_A_SUBNET" via "$IP_B_SERVER_ADDR" \
+        dev "$VETH_B0" metric 200
+}
+
 # ── Network namespace setup ──
 
 ci_stress_setup_netns() {
@@ -117,9 +135,15 @@ ci_stress_setup_netns() {
     # IP forwarding
     ip netns exec "$NS_SERVER" sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
+    ci_stress_add_path_b_route
+
     # Verify
     ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$IP_A_SERVER_ADDR" >/dev/null
-    ip netns exec "$NS_CLIENT" ping -c 1 -W 1 10.200.0.1 >/dev/null
+    ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$IP_B_SERVER_ADDR" >/dev/null
+    # The exact FIB query the re-add gate performs. A ping via B cannot tell
+    # the difference (the on-link fallback also answers), this can: it fails
+    # with "No route" when only the fallback would carry Path B.
+    ip netns exec "$NS_CLIENT" ip route get "$IP_A_SERVER_ADDR" oif "$VETH_B0" fibmatch >/dev/null
 
     echo "OK: netns created"
 }
