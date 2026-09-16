@@ -4,13 +4,33 @@
 import NetworkExtension
 
 class PacketTunnelProvider: NEPacketTunnelProvider {
-    private var engine: MqvpnEngine!
-    private var binder: PathBinder!
-    private var metrics: GateMetrics!
-    // Optional (not `!`): handleAppMessage can be delivered independently of
-    // the start/stop lifecycle, so the reader must tolerate a nil cache.
+    private typealias Coordinator = TunnelSessionCoordinator<mqvpn_tunnel_info_t>
+
+    // Lifecycle state machine + its lock (spec D6/D8). Inputs enter the
+    // coordinator under `lock`; returned actions run outside it. The same
+    // lock covers `published` and the continuation so the terminal check
+    // and the registration are one critical section.
+    private let lock = NSLock()
+    private var coordinator = Coordinator()
+    private var published = false
+    private var startContinuation: CheckedContinuation<Void, Error>?
+
+    // Session objects. Created as locals in startTunnel (D6 rule 4) and
+    // published under `lock` only after engine.start()/binder.start()
+    // returned with the coordinator still non-terminal. Published once and
+    // never nil-ed again: handleAppMessage reads `snapshot` from an
+    // arbitrary NE thread without the lock, so a nil-out on stop would be
+    // a use-after-free race, and a reader overlapping the publish just
+    // sees nil ("no data").
+    private var engine: MqvpnEngine?
+    private var binder: PathBinder?
+    private var metrics: GateMetrics?
     private var snapshot: SnapshotCache?
     private var defaultPathObservation: NSKeyValueObservation?
+
+    // Written once before the continuation closure runs; read by every
+    // applySettings (reconnects included). Independent of the publish gate.
+    private var resolvedIP = ""
 
     override func startTunnel(options: [String: NSObject]?) async throws {
         let providerConfig = (self.protocolConfiguration as? NETunnelProviderProtocol)?
@@ -27,93 +47,182 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             throw NSError(domain: "mqvpn.poc", code: 11,
                           userInfo: [NSLocalizedDescriptionKey: "server unresolved: \(server.host)"])
         }
-        engine = MqvpnEngine()
-        binder = PathBinder(engine: engine)
-        metrics = GateMetrics(engine: engine, binder: binder)
-        snapshot = SnapshotCache(engine: engine)
-
-        engine.onTunOutput = { [weak self] data in
-            // NEPacketTunnelFlow requires a protocol family per packet; the
-            // library hands us raw IP bytes, so derive it from the version
-            // nibble.
-            let proto: NSNumber = (data.first ?? 0) >> 4 == 6 ? NSNumber(value: AF_INET6)
-                                                              : NSNumber(value: AF_INET)
-            self?.packetFlow.writePackets([data], withProtocols: [proto])
-        }
+        self.resolvedIP = resolvedIP
         return try await withCheckedThrowingContinuation { cont in
-            // Two separate latches, both touched ONLY on the tick thread
-            // (the settings completion hops back before touching them):
-            //   configHandled — dedupes tunnel_config_ready refires so a
-            //     second settings apply is never issued;
-            //   startResolved — resume-once for the checked continuation.
-            // Conflating them would let a tunnel_closed that arrives while
-            // the settings apply is still in flight be treated as a
-            // post-establishment close — reporting a successful start for a
-            // dead session.
-            var configHandled = false
-            var startResolved = false
+            // (1) Terminal check + continuation registration, one critical
+            // section (D8): a stopRequested that already ran turned the
+            // coordinator terminal (seen here — resume and bail); one that
+            // runs later resumes the registered continuation through
+            // failStart(.cancelled).
+            lock.lock()
+            if coordinator.phase == .terminal {
+                lock.unlock()
+                cont.resume(throwing: CancellationError())
+                return
+            }
+            startContinuation = cont
+            lock.unlock()
+
+            // (2) Locals, not properties (D6 rule 4): nothing below reads
+            // self.engine & co. until the publish in (3).
+            let engine = MqvpnEngine()
+            let binder = PathBinder(engine: engine)
+            let metrics = GateMetrics(engine: engine, binder: binder)
+            let snapshot = SnapshotCache(engine: engine)
+
+            engine.onTunOutput = { [weak self] data in
+                // NEPacketTunnelFlow requires a protocol family per packet;
+                // the library hands us raw IP bytes, so derive it from the
+                // version nibble.
+                let proto: NSNumber = (data.first ?? 0) >> 4 == 6 ? NSNumber(value: AF_INET6)
+                                                                  : NSNumber(value: AF_INET)
+                self?.packetFlow.writePackets([data], withProtocols: [proto])
+            }
             engine.onTunnelConfig = { [weak self] info in
-                // !startResolved: a late config-ready after a close must not
-                // apply NE settings to a dead session.
-                guard let self, !configHandled, !startResolved else { return }
-                configHandled = true
-                // tunnelRemoteAddress must be an IP literal (NE rejects hostnames
-                // there); the engine/TLS side still gets server.host for SNI.
-                let settings = Self.makeSettings(from: info, server: resolvedIP)
-                self.setTunnelNetworkSettings(settings) { err in
-                    self.engine.perform {   // hop: latch access stays single-threaded
-                        guard !startResolved else { return }
-                        startResolved = true
-                        if let err { cont.resume(throwing: err); return }
-                        self.engine.tunActive()  // opens TUN + drives state 3->4
-                        self.readLoop()          // one-shot API: re-armed per completion
-                        self.metrics.start()     // 10s cadence os_log dumps
-                        self.snapshot?.start()   // 1s cadence app-facing cache
-                        cont.resume()
-                    }
-                }
+                self?.feed(.configReady(info), engine: engine,
+                           metrics: metrics, snapshot: snapshot)
             }
-            // Before startTunnel resolves, a close (handshake/auth failure,
-            // or death during the settings apply) must fail startTunnel —
-            // otherwise it hangs until the NE watchdog kills the extension.
-            // After resolution, a close is a dead session: tear down.
             engine.onTunnelClosed = { [weak self] reason in
-                guard let self else { return }
-                let err = NSError(domain: "mqvpn.poc", code: Int(reason),
-                                  userInfo: [NSLocalizedDescriptionKey: "tunnel closed"])
-                if !startResolved {
-                    startResolved = true
-                    cont.resume(throwing: err)
-                } else {
-                    self.cancelTunnelWithError(err)
-                }
+                self?.feed(.closed(reason: reason), engine: engine,
+                           metrics: metrics, snapshot: snapshot)
             }
-            engine.start(server: server, reorder: reorder, hybrid: hybrid, serverAddr: resolved)
-            binder.start()
+            engine.onStartFailed = { [weak self] code in
+                self?.feed(.startFailed(code: code), engine: engine,
+                           metrics: metrics, snapshot: snapshot)
+            }
             // Redundant trigger for path lifecycle: NWPathMonitor updates
-            // have been observed to arrive minutes late inside the provider
-            // (device measurement: a WiFi-off unsatisfied delayed ~110 s,
-            // blacking out downlink because no orderly remove_path ran).
-            // NEProvider.defaultPath is an independent KVO channel that
-            // tracks the physical path; any change re-runs the binder's
-            // reconciliation. Only the TRIGGER is independent — the value
-            // is not read (it has no per-interface-type availability), and
-            // the binder probes fresh per-type state itself rather than
-            // trusting any possibly-stale monitor snapshot.
-            defaultPathObservation = observe(\.defaultPath) { [weak self] _, _ in
-                guard let self else { return }
-                self.engine.perform { self.binder.reconcile() }
+            // have been observed to arrive minutes late inside the provider;
+            // NEProvider.defaultPath is an independent KVO channel. Only the
+            // TRIGGER is independent — the binder probes fresh state itself.
+            let observation = observe(\.defaultPath) { [weak self] _, _ in
+                guard self != nil else { return }
+                engine.perform { binder.reconcile() }
             }
+            engine.start(server: server, reorder: reorder, hybrid: hybrid,
+                         serverAddr: resolved)
+            binder.start()
+
+            // (3) Publish, or fold the locals if a stop or failure already
+            // turned the coordinator terminal (D8). Every input that leaves
+            // .starting emits failStart, so the continuation is resolved on
+            // both branches. The fold runs on the tick thread (alive:
+            // engine.start() returned) and is best-effort: no STOP markers,
+            // no waiting — NE may kill the process before it finishes.
+            lock.lock()
+            if coordinator.phase == .terminal {
+                lock.unlock()
+                engine.perform {
+                    TeardownSequence.run(
+                        detach: {
+                            engine.onTunnelClosed = nil
+                            engine.onTunnelConfig = nil
+                            engine.onTunOutput = nil
+                            engine.onStartFailed = nil
+                            observation.invalidate()
+                        },
+                        disconnect: { engine.disconnect() },
+                        resolveStart: {},
+                        stopPaths: { done in binder.stop(completion: done) },
+                        destroy: { engine.destroy() },
+                        complete: {})
+                }
+                return
+            }
+            self.engine = engine
+            self.binder = binder
+            self.metrics = metrics
+            self.snapshot = snapshot
+            self.defaultPathObservation = observation
+            published = true
+            lock.unlock()
         }
     }
 
-    private func readLoop() {
+    /// Adapter entry (D6 rule 1): input under the lock, actions outside it.
+    /// The session objects arrive as parameters so pre-publish closures
+    /// never read the nil properties (D6 rule 4).
+    private func feed(_ input: Coordinator.Input, engine: MqvpnEngine?,
+                      metrics: GateMetrics?, snapshot: SnapshotCache?) {
+        lock.lock()
+        let actions = coordinator.handle(input)
+        lock.unlock()
+        for action in actions {
+            run(action, engine: engine, metrics: metrics, snapshot: snapshot)
+        }
+    }
+
+    /// Actions run on the thread that fed the input (D6 rule 2); the ones
+    /// that touch the engine are only emitted for settingsApplied, whose
+    /// completion hops through engine.perform first.
+    private func run(_ action: Coordinator.Action, engine: MqvpnEngine?,
+                     metrics: GateMetrics?, snapshot: SnapshotCache?) {
+        switch action {
+        case .applySettings(let info):
+            // tunnelRemoteAddress must be an IP literal (NE rejects
+            // hostnames); the engine/TLS side still gets server.host/SNI.
+            let settings = Self.makeSettings(from: info, server: resolvedIP)
+            setTunnelNetworkSettings(settings) { [weak self] err in
+                engine?.perform {
+                    self?.feed(.settingsApplied(err), engine: engine,
+                               metrics: metrics, snapshot: snapshot)
+                }
+            }
+        case .tunActive:
+            engine?.tunActive()   // opens TUN + drives state 3->4
+        case .resumeStart:
+            // Tick thread. Only this action arms the read loop and the
+            // collectors — exitReasserting must not double-arm (D6 rule 3).
+            takeContinuation()?.resume()
+            if let engine { readLoop(engine) }
+            metrics?.start()      // 10s cadence os_log dumps
+            snapshot?.start()     // 1s cadence app-facing cache
+        case .failStart(let failure):
+            takeContinuation()?.resume(throwing: Self.error(from: failure))
+        case .enterReasserting:
+            reasserting = true
+        case .exitReasserting:
+            reasserting = false
+        case .cancelTunnel(let failure):
+            cancelTunnelWithError(Self.error(from: failure))
+        }
+    }
+
+    /// Resume-once: the continuation leaves under the same lock the
+    /// coordinator runs under, so failStart/resumeStart can never both get
+    /// it. nil (already taken, or stop resolved it via (1)) is a no-op.
+    private func takeContinuation() -> CheckedContinuation<Void, Error>? {
+        lock.lock()
+        defer { lock.unlock() }
+        let c = startContinuation
+        startContinuation = nil
+        return c
+    }
+
+    private static func error(from failure: StartFailure) -> Error {
+        switch failure {
+        case .core(let code):
+            // -4 == MQVPN_ERR_TLS: name it so the dashboard's failure line
+            // is recognizably TLS (gate G-t1).
+            let msg = code == -4 ? "TLS certificate rejected" : "tunnel closed"
+            return NSError(domain: "mqvpn.poc", code: Int(code),
+                           userInfo: [NSLocalizedDescriptionKey: msg])
+        case .local(let code):
+            return NSError(domain: "mqvpn.poc", code: Int(code),
+                           userInfo: [NSLocalizedDescriptionKey: "engine start failed"])
+        case .settings(let err):
+            return err
+        case .cancelled:
+            return CancellationError()
+        }
+    }
+
+    private func readLoop(_ engine: MqvpnEngine) {
         packetFlow.readPackets { [weak self] packets, _ in
             guard let self else { return }
-            self.engine.perform {
-                for p in packets { self.engine.feedTunPacket(p) }
+            engine.perform {
+                for p in packets { engine.feedTunPacket(p) }
             }
-            self.readLoop()   // MUST re-arm: readPackets delivers once per call
+            self.readLoop(engine)   // MUST re-arm: readPackets delivers once
         }
     }
 
@@ -163,25 +272,52 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func stopTunnel(with reason: NEProviderStopReason) async {
-        // The extension process dies right after this returns; the orderly
-        // teardown is a BEST-EFFORT clean close for the server (the close
-        // frame races the async fd close on monitorQueue — losing the race
-        // just means the server falls back to its idle timeout) and gives
-        // repeated gate runs a zero state start.
-        defaultPathObservation?.invalidate()
-        defaultPathObservation = nil
+        log.notice("GATE| STOP_BEGIN")
+        lock.lock()
+        guard published else {
+            // Pre-publish stop: there is nothing to tear down here —
+            // startTunnel's (3) folds its locals when it sees the terminal
+            // phase. stopRequested resolves a registered continuation via
+            // failStart(.cancelled); an unregistered one is resumed by (1).
+            let actions = coordinator.handle(.stopRequested)
+            lock.unlock()
+            for action in actions {
+                run(action, engine: nil, metrics: nil, snapshot: nil)
+            }
+            log.notice("GATE| STOP_FINISHED")
+            return
+        }
+        lock.unlock()
+        guard let engine, let binder else { return }   // published ⇒ non-nil
         await withCheckedContinuation { cont in
-            // Safe to resume from inside perform{}: only this method cancels
-            // the tick thread, so the hop cannot be dropped here.
-            engine.perform { [binder, engine] in
-                // Detach the closed-callback first: disconnect fires
-                // tunnel_closed synchronously, and re-entering
-                // cancelTunnelWithError during a system-initiated stop is
-                // unwanted.
-                engine?.onTunnelClosed = nil
-                binder?.stop()       // removePath for every slot + cancel monitors
-                engine?.shutdown()   // client=nil -> disconnect -> destroy -> thread cancel
-                cont.resume()
+            engine.perform { [weak self] in
+                TeardownSequence.run(
+                    detach: {
+                        // Callbacks off first: disconnect fires tunnel_closed
+                        // synchronously and must not re-enter the adapter.
+                        engine.onTunnelClosed = nil
+                        engine.onTunnelConfig = nil
+                        engine.onTunOutput = nil
+                        engine.onStartFailed = nil
+                        self?.defaultPathObservation?.invalidate()
+                    },
+                    disconnect: { engine.disconnect() },
+                    resolveStart: {
+                        // After the CONNECTION_CLOSE went out (D8 step 3):
+                        // resolves a still-pending start; a post-start stop
+                        // is a silent terminal transition.
+                        self?.feed(.stopRequested, engine: engine,
+                                   metrics: nil, snapshot: nil)
+                    },
+                    stopPaths: { done in
+                        binder.stop(completion: done)
+                        log.notice("GATE| STOP_DISPATCHED")
+                    },
+                    destroy: { engine.destroy() },
+                    complete: {
+                        log.notice("GATE| STOP_FINISHED")
+                        cont.resume()
+                    })
             }
         }
     }
