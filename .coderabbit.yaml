@@ -1,0 +1,152 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit configuration for mqvpn.
+# Rules live in AGENTS.md (read automatically as code guidelines); their
+# rationale is in docs/design-decisions.md for humans. This file carries
+# routing, pre-merge checks for cross-file consistency, and the few review
+# hints CI does not enforce. Settings equal to the CodeRabbit defaults are
+# omitted (except `language`, kept as an explicit decision).
+
+language: "en-US"
+tone_instructions: "Terse engineering tone; no praise."
+
+reviews:
+  profile: "assertive"
+  review_details: true
+  sequence_diagrams: false
+  suggested_labels: false
+  suggested_reviewers: false
+
+  auto_review:
+    base_branches:
+      - "^dev$"
+    ignore_usernames:
+      - "dependabot[bot]"
+      - "github-actions[bot]"
+    ignore_title_keywords:
+      - "[skip review]"
+
+  path_filters:
+    - "!bench_results/**"
+    - "!**/*.png"
+    - "!**/*.svg"
+    - "!**/*.bin"
+
+  path_instructions:
+    - path: "**"
+      instructions: |
+        If a change contradicts a rule in AGENTS.md, quote the rule and ask
+        whether the deviation is intentional instead of proposing the
+        reverse. docs/design-decisions.md holds the rationale.
+    - path: "include/libmqvpn.h"
+      instructions: |
+        Version numbers (MQVPN_VERSION_*, the CMake project version, the
+        header's Version comment) are bumped only in release commits; do not
+        request a bump in a feature PR.
+    - path: "scripts/ci_e2e/**"
+      instructions: |
+        netns e2e scripts, run under sudo. Every grep marker must match the
+        current log wording in src/. Scripts that source e2e_lib.sh must not
+        set pipefail: its wait helpers pipe tail into grep -q and rely on
+        pipefail being off. In a script that does set pipefail, a writer
+        piped into an early-exiting reader (grep -q, grep -m1, head) fails
+        spuriously with SIGPIPE; read to EOF (awk, here-string, temp file)
+        instead. A function in a sourced library must not end with
+        `[ cond ] && action` (it returns 1 under set -e); use if. Cleanup
+        must run from a trap on failure.
+
+  tools:
+    markdownlint:
+      enabled: false
+    languagetool:
+      enabled: false
+
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
+    title:
+      requirements: >-
+        `[T] subject` or `[T]: subject`, where T is `+` add, `-` remove,
+        `=` no behaviour change or `~` behaviour change; or `type: subject`
+        / `type(scope): subject` with a lowercase type. Imperative mood, no
+        trailing period, at most 72 characters. Squash merges reuse the
+        title as the commit subject.
+    custom_checks:
+      - name: "Log markers in sync"
+        instructions: >-
+          Fail if this PR changes or removes a log format string under src/
+          and, searching the repository at the PR head, the old wording still
+          appears in tests/test_e2e_*.sh, scripts/ci_e2e/*.sh or
+          .github/workflows/ci.yml without being updated in this PR. No hits
+          for the old wording passes.
+      - name: "Config key companion changes"
+        instructions: >-
+          Fail if this PR adds a scalar config key to the descriptor table in
+          src/config.c without, in the same PR, a row in
+          test_ini_json_scalar_parity (tests/test_config.c) and the key
+          documented in website/guide/configuration.md and
+          website/ja/guide/configuration.md.
+      - name: "Config compatibility note"
+        instructions: >-
+          Fail if this PR renames or removes a user-facing INI/JSON config
+          key, or changes such a key's default, and the PR description does
+          not state the compatibility impact for existing configs. An
+          unedited placeholder such as `<none / describe>` is not a
+          statement.
+      - name: "Submodule bump provenance"
+        instructions: >-
+          Fail if this PR moves the third_party/xquic or third_party/lwip
+          submodule pointer and the PR description does not name the fork
+          pull request or tag the new commit comes from; an unedited
+          placeholder such as `<link>` does not count.
+
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+    autofix:
+      enabled: false
+    fix_ci:
+      enabled: false
+    resolve_merge_conflict:
+      enabled: false
+
+chat:
+  art: false
+
+knowledge_base:
+  learnings:
+    scope: "local"
+  linked_repositories:
+    - repository: "mp0rta/xquic"
+      instructions: >-
+        mp0rta/xquic is the QUIC/HTTP3 fork pinned as submodule
+        third_party/xquic; this repository's AGENTS.md (Git section)
+        describes its branches. Its default branch mqvpn-main is the pinned
+        line. mqvpn includes only the public headers xquic/xquic.h,
+        xquic/xqc_http3.h and xquic/xquic_typedef.h; the one private include
+        is src/transport/xqc_multipath.h in tests/test_xquic_abi_pin.c, which
+        pins every xqc_path_state_t enumerator by value. Fork-only surface
+        mqvpn depends on (absent from upstream alibaba/xquic):
+        xqc_conn_settings_t.defer_send_flush and max_path_id_grant_max_value;
+        the dynamic xqc_conn_stats_t.paths_info[] with paths_info_count;
+        xqc_wlb_scheduler_cb; xqc_conn_set_dgram_flow_hash;
+        xqc_h3_ext_capsule_*, xqc_h3_ext_connectip_*, xqc_h3_ext_masque_*.
+        When reviewing mqvpn: flag any xqc_* symbol, settings field, enum
+        value or callback signature absent on mqvpn-main; flag code that
+        assumes xquic behaviour the fork does not implement.
+    - repository: "mp0rta/heiher-lwip"
+      instructions: >-
+        mp0rta/heiher-lwip is the lwIP fork pinned as submodule
+        third_party/lwip on branch mqvpn-main (main mirrors upstream
+        heiher/lwip). mqvpn's hybrid TCP lane (src/hybrid/lwip_glue.c,
+        tcp_lane.c, tcp_lane_uplink.c) builds lwIP with
+        src/hybrid/lwip_port/lwipopts.h and mqvpn_lwip_profile.h and includes
+        the private header lwip/priv/tcp_priv.h for tcp_tmr(),
+        tcp_active_pcbs, tcp_tw_pcbs and TCP_MSL; its teardown relies on the
+        tcp_abandon -> tcp_free -> err-callback order and on tcp_input's
+        pcb-match/RST path in src/core/tcp_in.c, so changes to those
+        internals are consumer-visible. The fork carries an mqvpn-specific
+        TCP option-length guard in src/core/tcp_in.c. Flag a submodule bump
+        whose commit is not on mqvpn-main.
