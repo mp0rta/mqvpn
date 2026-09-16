@@ -736,7 +736,7 @@ mqvpn is designed to comply with the following RFCs as much as possible.
 
 ## Community
 
-Welcome to join the [mqvpn community on Discord](https://discord.gg/5rsqnZfBqu) to ask questions, discuss use cases, share feedback, and contribute to the project.
+Welcome to join the [mqvpn community on Discord](https://discord.gg/5rsqnZfBqu) to ask questions, discuss use cases, share feedback, and contribute to the project. Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Disclaimer
 
