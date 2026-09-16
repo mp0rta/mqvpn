@@ -118,9 +118,11 @@ per-packet logging.
 ## §6 WLB scheduler
 
 The WLB scheduler is production-grade (LATE + OLB + flow pinning + soft
-spillover; 2–4× throughput vs. glorytun/openvpn in real deployments). Do not
-casually add BLEST/LLHD-style schedulers. For jitter-sensitive real-time
-streams (SRT/RTP), recommend `Scheduler = minrtt` instead of writing a new
+spillover). Its measured behaviour lives in the benchmark results, not here:
+see `docs/benchmarks_netns.md` and the benchmark pages on the website, which
+are regenerated as the implementation changes. Do not casually add
+BLEST/LLHD-style schedulers. For jitter-sensitive real-time streams
+(SRT/RTP), recommend `Scheduler = minrtt` instead of writing a new
 scheduler.
 
 ## §7 The hybrid TCP lane is scheduled by MinRTT, not by WLB — by construction
