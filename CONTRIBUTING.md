@@ -20,8 +20,8 @@ with the standard two-line header:
 
 - Questions and ideas: the Discord community linked from the README
   (section "Community").
-- Bugs and feature requests: GitHub Discussions (issue creation is
-  restricted to maintainers; a maintainer opens the tracking issue).
+- Bugs and feature requests: please start in GitHub Discussions; a
+  maintainer opens the tracking issue from there.
 - Security vulnerabilities: do not open an issue; email
   `3p0rta26@gmail.com`.
 

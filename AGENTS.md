@@ -81,8 +81,8 @@ rules belong here, reasons there.
   is out of scope: `PATH_ACK_ECN` keeps PATH_ACK recovery semantics and its
   ECN counts are parsed and discarded. [DD §9]
 - xquic's `MULTIPATH_xx` names are internal labels, not draft numbers.
-  draft-21 path management is dynamic (`PATHS_BLOCKED` / `MAX_PATH_ID`); do
-  not bump `XQC_MAX_PATHS_COUNT`. [DD §9]
+  draft-21 path management is dynamic (`PATHS_BLOCKED` / `MAX_PATH_ID`); the
+  fixed `XQC_MAX_PATHS_COUNT` cap was removed and must not return. [DD §9]
 - The MTU config upper bound stays 9000 until `max_pkt_out_size` becomes
   configurable. [DD §10]
 
@@ -128,7 +128,7 @@ rules belong here, reasons there.
 
 ## Rules — licensing and release
 
-- Copyright notice form: `Copyright (c) <year> <name> and contributors`
+- Copyright notice form: the exact header in CONTRIBUTING.md section 1
   (individual form, not "The X Authors").
 - `NOTICE` is attribution-only and lists direct vendored deps only; never a
   change log; transitive deps stay in upstream's own LICENSE/NOTICE.

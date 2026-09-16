@@ -204,8 +204,9 @@ obsolete.
 ## §11 Git: branch bases and history
 
 `dev` and `main` can diverge in both directions (at times one is simply
-behind the other), so the base of a bug-fix branch is decided per fix: start from the tip of the release line where the bug was
-found, not from whatever checkout you happen to be on. External contributors
+behind the other), so the base of a bug-fix branch is decided per fix: start
+from the tip of the release line where the bug was found, not from whatever
+checkout you happen to be on. External contributors
 target `dev`; maintainers backport. `main` is updated only via GitHub PRs
 merged in the web UI. No force-push once a PR is open; stack corrections as
 new commits and squash only when asked.
