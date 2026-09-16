@@ -177,4 +177,113 @@ let hyParsed = HybridSettings(providerConfiguration: hyBool)!
 check(hyParsed.enabled == false, "int-backed enabled rejected (isBool strict)")
 check(hyParsed.tcpMode == 2, "bool-backed mode clamps to auto")
 
+// ── TunnelSessionCoordinator (spec D6) ──────────────────────────────────
+// Reason codes pinned here: -10 CLOSED / -6 PROTOCOL transient; -4 TLS /
+// -5 AUTH / anything else terminal.
+typealias TC = TunnelSessionCoordinator<Int>
+
+func established() -> TC {
+    var c = TC()
+    _ = c.handle(.configReady(1))
+    _ = c.handle(.settingsApplied(nil))
+    return c
+}
+let settingsErr = NSError(domain: "t", code: 7)
+
+// first start happy path
+var c1 = TC()
+check(c1.handle(.configReady(1)) == [.applySettings(1)], "start: configReady applies settings")
+check(c1.handle(.settingsApplied(nil)) == [.tunActive, .resumeStart], "start: applied -> tunActive+resume")
+check(c1.phase == .established, "start: phase established")
+// second configReady while idle (reconnect) starts a fresh apply
+check(c1.handle(.configReady(2)) == [.applySettings(2)], "reconnect configReady applies")
+check(c1.handle(.settingsApplied(nil)) == [.tunActive], "established re-apply: tunActive only")
+check(c1.phase == .established, "established stays established")
+
+// close while starting fails the start, for transient and terminal reasons alike
+var c2 = TC()
+check(c2.handle(.closed(reason: -10)) == [.failStart(.core(-10))], "starting+CLOSED -> failStart")
+check(c2.phase == .terminal, "starting close is terminal")
+var c3 = TC()
+check(c3.handle(.closed(reason: -4)) == [.failStart(.core(-4))], "starting+TLS -> failStart")
+
+// established: transient reasons reassert, terminal reasons cancel
+var c4 = established()
+check(c4.handle(.closed(reason: -10)) == [.enterReasserting], "established+CLOSED reasserts")
+check(c4.phase == .reasserting, "phase reasserting")
+check(c4.handle(.closed(reason: -10)) == [], "reasserting+CLOSED again: no edge")
+var c5 = established()
+check(c5.handle(.closed(reason: -6)) == [.enterReasserting], "established+PROTOCOL reasserts")
+for reason: Int32 in [-4, -5, -99] {
+    var c = established()
+    check(c.handle(.closed(reason: reason)) == [.cancelTunnel(.core(reason))],
+          "established+\(reason) cancels")
+    check(c.phase == .terminal, "established+\(reason) terminal")
+}
+
+// reasserting recovery: configReady + applied -> tunActive + exitReasserting
+var c6 = established()
+_ = c6.handle(.closed(reason: -10))
+check(c6.handle(.configReady(2)) == [.applySettings(2)], "reasserting: configReady applies")
+check(c6.handle(.settingsApplied(nil)) == [.tunActive, .exitReasserting], "recovery exits reasserting")
+check(c6.phase == .established, "recovered to established")
+
+// close during an in-flight apply marks it stale; its completion is inert
+var c7 = established()
+_ = c7.handle(.configReady(2))
+check(c7.handle(.closed(reason: -10)) == [.enterReasserting], "close mid-apply reasserts")
+check(c7.handle(.settingsApplied(nil)) == [], "stale apply completion is inert")
+// same from reasserting (no enterReasserting edge)
+var c8 = established()
+_ = c8.handle(.closed(reason: -10))
+_ = c8.handle(.configReady(2))
+check(c8.handle(.closed(reason: -10)) == [], "reasserting close mid-apply: no edge")
+check(c8.handle(.settingsApplied(nil)) == [], "stale apply completion inert (reasserting)")
+
+// pending chain: B discarded by the second close, C applied from the stale completion
+var c9 = established()
+_ = c9.handle(.configReady(2))          // apply in flight
+_ = c9.handle(.closed(reason: -10))     // stale
+check(c9.handle(.configReady(3)) == [], "pending B queued silently")
+_ = c9.handle(.closed(reason: -10))     // B discarded
+check(c9.handle(.configReady(4)) == [], "pending C queued silently")
+check(c9.handle(.settingsApplied(nil)) == [.applySettings(4)], "stale completion applies only C")
+check(c9.handle(.settingsApplied(nil)) == [.tunActive, .exitReasserting], "C completion recovers")
+
+// settingsApplied(error): fail start / cancel after; idle completions are inert
+var c10 = TC()
+_ = c10.handle(.configReady(1))
+check(c10.handle(.settingsApplied(settingsErr)) == [.failStart(.settings(settingsErr))],
+      "starting settings error fails start")
+var c11 = established()
+_ = c11.handle(.configReady(2))
+check(c11.handle(.settingsApplied(settingsErr)) == [.cancelTunnel(.settings(settingsErr))],
+      "established settings error cancels")
+var c12 = established()
+check(c12.handle(.settingsApplied(nil)) == [], "idle settingsApplied inert")
+check(c12.handle(.settingsApplied(settingsErr)) == [], "idle settingsApplied(error) inert")
+
+// startFailed
+var c13 = TC()
+check(c13.handle(.startFailed(code: -3)) == [.failStart(.local(-3))], "starting startFailed fails start")
+var c14 = established()
+check(c14.handle(.startFailed(code: -3)) == [.cancelTunnel(.local(-3))], "established startFailed cancels")
+
+// stopRequested
+var c15 = TC()
+check(c15.handle(.stopRequested) == [.failStart(.cancelled)], "starting stop resolves the continuation")
+check(c15.phase == .terminal, "stop is terminal")
+var c16 = established()
+check(c16.handle(.stopRequested) == [], "established stop: silent terminal")
+check(c16.phase == .terminal, "established stop terminal")
+
+// terminal absorbs everything
+var c17 = TC()
+_ = c17.handle(.stopRequested)
+check(c17.handle(.configReady(9)) == [], "terminal: configReady inert")
+check(c17.handle(.settingsApplied(nil)) == [], "terminal: settingsApplied inert")
+check(c17.handle(.closed(reason: -10)) == [], "terminal: closed inert")
+check(c17.handle(.startFailed(code: -3)) == [], "terminal: startFailed inert")
+check(c17.handle(.stopRequested) == [], "terminal: stop inert")
+
 if failures == 0 { print("host tests: ALL PASS") } else { print("host tests: \(failures) FAILURES"); exit(1) }
