@@ -302,4 +302,21 @@ tdPathsDone?()
 check(tdOrder == ["detach", "disconnect", "resolveStart", "stopPaths", "destroy", "complete"],
       "teardown: full order after paths completion")
 
+// ── SystemTrust (spec D9): rejection paths only; acceptance of a real CA
+// chain is the on-device gate G-t1 ──────────────────────────────────────
+check(SystemTrust.evaluate(chain: [], hostname: "example.com") == false,
+      "empty chain rejected")
+check(SystemTrust.evaluate(chain: [Data([0x30, 0x00])], hostname: "example.com") == false,
+      "broken DER rejected")
+// Self-signed leaf: tests/certs/test.crt via #filePath (host-test cwd is the
+// caller's, so relative paths are unusable).
+let tdCertURL = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()                                   // ios/poc/Tests
+    .appendingPathComponent("../../../tests/certs/test.crt").standardized
+let tdPEM = try! String(contentsOf: tdCertURL, encoding: .utf8)
+let tdB64 = tdPEM.split(separator: "\n").filter { !$0.hasPrefix("-----") }.joined()
+let tdDER = Data(base64Encoded: tdB64)!
+check(SystemTrust.evaluate(chain: [tdDER], hostname: "mqvpn-test") == false,
+      "self-signed leaf rejected")
+
 if failures == 0 { print("host tests: ALL PASS") } else { print("host tests: \(failures) FAILURES"); exit(1) }
