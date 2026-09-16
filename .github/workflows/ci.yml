@@ -413,6 +413,16 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_udp_gso_config_test.sh
 
+      # The abort path reaches exit() for the first time, so this is where the
+      # sanitizers get to see it. The client under test exits non-zero by
+      # design; the suite keeps it away from stop_and_check_sanitizer and
+      # asserts the status and the absence of sanitizer reports itself.
+      - name: E2E setup-abort exit test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_setup_abort_exit_test.sh
+
   msan:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -535,6 +545,9 @@ jobs:
 
       - name: Smoke test (netns)
         run: sudo scripts/ci_e2e/run_test.sh
+
+      - name: Setup-abort exit test (netns)
+        run: sudo scripts/ci_e2e/run_setup_abort_exit_test.sh
 
       - name: Multi-client test (netns)
         run: sudo scripts/ci_e2e/test_multiclient.sh

@@ -94,6 +94,12 @@ typedef struct {
 
     /* Shutdown */
     int shutting_down;
+    /* Tunnel setup aborted in cb_tunnel_config_ready()'s fail: path — the
+     * platform could not build the tunnel the server just handed it (TUN,
+     * addressing, MTU, routes, kill switch). Read once after the event loop
+     * returns, to exit non-zero. Same name and meaning as platform_win_ctx_t's
+     * fatal_error (platform_windows.c:236, read at :703). */
+    int fatal_error;
 
     /* Path recovery event source (per-OS: netlink on Linux, PF_ROUTE on Darwin) */
 #if defined(__linux__)

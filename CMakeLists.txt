@@ -1077,6 +1077,13 @@ if(BUILD_TESTING)
     add_test(NAME test_cli_path_argv
         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_cli_path_argv.sh $<TARGET_FILE:mqvpn>)
 
+    # SIGTERM-while-CLOSED shell test (runs the built mqvpn binary). Needs no
+    # root, no server and no TUN — the client reaches CLOSED on a handshake
+    # that times out — so it runs here rather than in the sudo+netns suite.
+    # ~10s: the failed handshake waits out xquic's init_idle_time_out.
+    add_test(NAME test_cli_sigterm_closed
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_cli_sigterm_closed.sh $<TARGET_FILE:mqvpn>)
+
     # Guard: every tests/test_*.c using bare assert() must #undef NDEBUG,
     # since CI also runs ctest on a Release (-DNDEBUG) build.
     add_test(NAME test_ndebug_guard

@@ -224,6 +224,15 @@ fail:
     if (p->tun.fd >= 0) mqvpn_tun_destroy(&p->tun);
     p->tun.fd = -1;
     p->tun_up = 0;
+    /* Host state, not wire state — the TUN, its addressing, the routes, the
+     * kill switch — so an in-process retry every ReconnectInterval seconds
+     * would fail identically forever and tell nobody; Reconnect covers the
+     * connection dropping, not a host the client cannot configure. Mark fatal
+     * so the event loop exits non-zero once the disconnect below reaches
+     * CLOSED, and leave it to the supervisor. Same as the Windows twin
+     * (platform_windows.c:232-238, its rc at :703). */
+    p->fatal_error = 1;
+    p->shutting_down = 1;
     mqvpn_client_disconnect(p->client);
 }
 
@@ -477,7 +486,15 @@ on_signal(evutil_socket_t sig, short what, void *arg)
     LOG_INF("received signal, shutting down...");
     p->shutting_down = 1;
     mqvpn_client_disconnect(p->client);
-    /* state_changed callback will call event_base_loopbreak on CLOSED */
+    /* Break the loop here rather than from the CLOSED transition:
+     * mqvpn_client_disconnect() returns early when the state is already
+     * CLOSED or IDLE, so a client that got there by itself delivers no
+     * transition, cb_state_changed never runs, and the process keeps ticking
+     * a dead client through every SIGTERM. svr_on_signal() already breaks the
+     * loop directly. Harmless when the disconnect did transition and
+     * cb_state_changed broke the loop already: loopbreak only sets a flag the
+     * loop reads once. */
+    event_base_loopbreak(p->eb);
 }
 
 
@@ -703,7 +720,8 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
     LOG_INF("entering event loop...");
     event_base_dispatch(ctx.eb);
-    rc = 0;
+    rc = ctx.fatal_error ? 1 : 0;
+    if (rc) LOG_ERR("exiting: tunnel setup failed");
 
 cleanup:
     /* Library teardown FIRST, while every callback-owned platform object is
