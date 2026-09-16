@@ -106,14 +106,15 @@ rules belong here, reasons there.
 
 ## Rules — git
 
-- `main` changes only through GitHub PRs; never push to it. PRs target
-  `dev`. Never force-push a branch with an open PR; stack corrections as new
-  commits. Commit subject is one line (`type: subject`, `type(scope): subject`
-  or `[T] subject`); body only when the why is non-obvious; no tool or
-  session trailers (CONTRIBUTING.md sections 5 and 8 say the same). Squash
-  only when asked.
-- A bug-fix branch starts from the tip of the release line where the bug was
-  found; decide the base per fix (`dev` and `main` can diverge). [DD §11]
+- `main` changes only through GitHub PRs; never push to it. Contributor
+  branches start from `dev` and target `dev`. Never force-push once the PR
+  is open; stack corrections as new commits. Commit subject is one line
+  (`type: subject`, `type(scope): subject` or `[T] subject`); body only when
+  the why is non-obvious; no tool or session trailers (CONTRIBUTING.md
+  sections 5 and 8 say the same). Squash only when asked.
+- A maintainer backport branch starts from the tip of the release line where
+  the bug was found; decide the base per fix (`dev` and `main` can diverge).
+  [DD §11]
 - A submodule bump PR names the fork PR or tag it comes from; the commit must
   be on the fork's `mqvpn-main`.
 - In the xquic fork, `include/xquic/xqc_configure.h` is cmake-generated into

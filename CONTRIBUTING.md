@@ -46,16 +46,26 @@ CC=clang cmake -DCMAKE_BUILD_TYPE=Debug -DENABLE_SANITIZERS=ON \
 ctest --output-on-failure
 ```
 
-Formatting is checked with clang-format 18.1.3 exactly (`mise install` pins
-it); when the `format-check` job fails, the CI log prints the command that
-fixes it. Android: `cd android && ./gradlew test`. Changes to the control API
-or the connection lifecycle also need the netns e2e suite, which runs under
-sudo: `scripts/ci_e2e/`.
+Formatting is checked with clang-format 18.1.3 exactly; `mise install` pins
+it, or `pipx install clang-format==18.1.3` without mise. When the
+`format-check` job fails, the CI log prints the command that fixes it.
+Android: `cd android && ./gradlew test`.
+
+Changes to the control API or the connection lifecycle also need the netns
+e2e suite in `scripts/ci_e2e/`. It needs Linux and root, plus the packages
+the `netns-tests` job in `.github/workflows/ci.yml` installs. For the
+control API run `run_control_api_test.sh`; for the connection lifecycle,
+`run_reconnect_test.sh`, `run_dellink_test.sh`, `run_8paths_dellink_test.sh`,
+`run_carrier_flap_test.sh`, `run_addr_del_failover_test.sh`,
+`run_admin_down_test.sh`, `run_validation_blackhole_test.sh` and
+`run_route_gate_test.sh`. If you cannot run them, say so under Validation
+Cases and a maintainer will.
 
 ## 5. Branches and pull requests
 
-- Open pull requests against `dev`. GitHub's PR form defaults the base to
-  `main`; change it to `dev`. Maintainers backport to release lines.
+- Branch from `dev` and open the pull request against `dev`. GitHub's PR
+  form defaults the base to `main`; change it to `dev`. Maintainers backport
+  to release lines.
 - For a bug fix, say which released version reproduces the bug.
 - Title: either `[T] subject` / `[T]: subject` with T one of `+` (add),
   `-` (remove), `=` (no behaviour change), `~` (behaviour change), or
@@ -65,7 +75,7 @@ sudo: `scripts/ci_e2e/`.
 - Fill in the pull request template. Reference issues as `Refs #123`;
   closing keywords only work on PRs that target `main`, so issues are closed
   in the release PR.
-- Once review has started, do not force-push; add commits instead.
+- Once the pull request is open, do not force-push; add commits instead.
 - CodeRabbit reviews every PR automatically. If new pushes stop getting
   reviewed, comment `@coderabbitai review`. Address each finding or explain
   why you are dismissing it.
