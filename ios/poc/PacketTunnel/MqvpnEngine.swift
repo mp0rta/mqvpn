@@ -6,6 +6,20 @@ import os.log
 
 let log = Logger(subsystem: "mqvpn.poc", category: "engine")
 
+/// C trampoline for mqvpn_config_set_cert_verifier (spec D9). Rebuilds the
+/// DER chain and asks SystemTrust; ctx is unused (SystemTrust is stateless).
+/// Runs on the tick thread inside the handshake — SystemTrust never touches
+/// the network, and nothing here re-enters libmqvpn.
+private let mqvpnCertVerify: mqvpn_cert_verify_fn = { certs, certLen, nCerts, hostname, _ in
+    guard let certs, let certLen, let hostname, nCerts > 0 else { return -1 }
+    var chain: [Data] = []
+    for i in 0..<nCerts {
+        guard let p = certs[i] else { return -1 }
+        chain.append(Data(bytes: p, count: certLen[i]))
+    }
+    return SystemTrust.evaluate(chain: chain, hostname: String(cString: hostname)) ? 0 : -1
+}
+
 /// Owns the libmqvpn client and the dedicated tick thread.
 ///
 /// THREADING CONTRACT: every libmqvpn call happens on `tickThread`. The core
@@ -30,6 +44,7 @@ final class MqvpnEngine: NSObject {
     var onTunOutput: ((Data) -> Void)?          // -> packetFlow.writePackets
     var onTunnelConfig: ((mqvpn_tunnel_info_t) -> Void)?
     var onTunnelClosed: ((Int32) -> Void)?
+    var onStartFailed: ((Int32) -> Void)?   // engine-local failures (client_new/connect)
 
     /// Blocks until the client exists on the tick thread — callers may start
     /// PathBinder immediately after return without ordering assumptions.
@@ -73,14 +88,21 @@ final class MqvpnEngine: NSObject {
                         with: nil, waitUntilDone: false)
     }
 
-    /// Tears the client down (tick thread). client goes nil first so any
+    /// Stops the session (tick thread) but keeps `client` alive: the
+    /// fd-closed hops still in flight after binder.stop() must reach the
+    /// core's slot cleanup, and disconnect's synchronous CONNECTION_CLOSE
+    /// needs live path fds. Reconnects are suppressed from here on.
+    func disconnect() {
+        tickTimer?.invalidate()
+        if let c = client { mqvpn_client_disconnect(c) }
+    }
+
+    /// Final teardown (tick thread). client goes nil first so any
     /// already-queued hop on this run-loop pass sees the guard, not a freed
     /// pointer.
-    func shutdown() {
-        tickTimer?.invalidate()
+    func destroy() {
         if let c = client {
             client = nil
-            mqvpn_client_disconnect(c)
             mqvpn_client_destroy(c)
         }
         tickThread.cancel()
@@ -95,6 +117,10 @@ final class MqvpnEngine: NSObject {
             mqvpn_config_set_tls_server_name(cfg, server.serverName)
         }
         mqvpn_config_set_clock(cfg, mqvpn_ios_clock_us, nil)
+        // Always installed; insecure precedence is the core's (D3): with
+        // insecure=1 the core never consults the verifier and logs one WARN
+        // at client creation — expected on self-signed test-server runs.
+        mqvpn_config_set_cert_verifier(cfg, mqvpnCertVerify, nil)
         if !server.authKey.isEmpty { mqvpn_config_set_auth_key(cfg, server.authKey) }
         if server.insecure { mqvpn_config_set_insecure(cfg, 1) }
         // Add rules FIRST, enable ONLY if >=1 landed. Never hand the core
@@ -169,7 +195,7 @@ final class MqvpnEngine: NSObject {
         guard client != nil else {
             log.error("[engine] mqvpn_client_new failed")
             startFailed = true
-            onTunnelClosed?(Int32(MQVPN_ERR_ENGINE.rawValue))
+            onStartFailed?(Int32(MQVPN_ERR_ENGINE.rawValue))
             return
         }
         // NOTE: no connect here. The core sends handshake packets via
@@ -192,7 +218,7 @@ final class MqvpnEngine: NSObject {
         }
         func fail(_ what: String) {
             log.error("\(what)"); startFailed = true
-            onTunnelClosed?(Int32(MQVPN_ERR_ENGINE.rawValue))
+            onStartFailed?(Int32(MQVPN_ERR_ENGINE.rawValue))
         }
         if rc != 0 { fail("set_server_addr rc=\(rc)"); return }
         if mqvpn_client_connect(c) != 0 { fail("connect failed"); return }
