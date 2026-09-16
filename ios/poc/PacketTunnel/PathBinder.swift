@@ -21,8 +21,16 @@ final class PathBinder {
     private var monitors: [NWInterface.InterfaceType: NWPathMonitor] = [:]
     private var pollTimer: Timer?   // tick-thread confined
     private let monitorQueue = DispatchQueue(label: "mqvpn.poc.pathmon")
+    // Balances one enter per read source against its cancel handler's leave;
+    // stop(completion:) notifies on it once every fd is closed.
+    private let fence = DispatchGroup()
 
     init(engine: MqvpnEngine) { self.engine = engine }
+    /// True once stop() emptied the monitors (start() has run by the time
+    /// any caller can observe this — reconcile/addPath are only reachable
+    /// through triggers start() arms). One predicate for both guards so
+    /// adding an interface type cannot desynchronize them (D8).
+    var isStopped: Bool { monitors.isEmpty }
 
     func start() {
         // One monitor per interface type: a single default NWPathMonitor only
@@ -75,7 +83,7 @@ final class PathBinder {
     /// Overlapping triggers are safe: results funnel into
     /// addPath/removePath, whose guards make repeats no-ops.
     func reconcile() {
-        guard monitors[.wifi] != nil else { return }   // after stop(): no-op
+        guard !isStopped else { return }   // after stop(): no-op
         probe(.wifi) { [weak self] in
             self?.probe(.cellular, then: nil)
         }
@@ -125,7 +133,11 @@ final class PathBinder {
 
     /// Socket preparation + registration. Runs on the tick thread.
     private func addPath(type: NWInterface.InterfaceType, iface: NWInterface) {
-        guard slots[type] == nil else { return }   // already bound
+        // isStopped: an in-flight probe chain can reach here after stop()
+        // (its hop was queued before); without this guard the new source
+        // would enter the fence after the notify was registered and the
+        // fence would never close.
+        guard !isStopped, slots[type] == nil else { return }   // stopped / already bound
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
         guard fd >= 0 else { log.error("socket() errno=\(errno)"); return }
         // 1. non-blocking (Darwin Swift imports fcntl with 3 args)
@@ -187,15 +199,19 @@ final class PathBinder {
         //    fd/handle (immutable). Datagrams arriving between add and resume
         //    just wait in the socket buffer.
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: monitorQueue)
+        fence.enter()   // left in the cancel handler, right after close(fd)
         source.setEventHandler { [weak self] in
             self?.drainSocket(fd: fd, handle: handle)
         }
-        source.setCancelHandler { [weak self] in
+        source.setCancelHandler { [fence, weak self] in
             // close(fd) must happen HERE: cancelling and closing synchronously
             // races an in-flight read handler against fd reuse (the classic
-            // DispatchSource bug). After the close, hop to the tick thread to
-            // report fd closure so the core can finish the slot's cleanup.
+            // DispatchSource bug). The fence contract is "fd is closed", so
+            // leave right after the close, on monitorQueue — decoupled from
+            // the fdClosed hop (which is desirable-before-destroy but not
+            // required: mqvpn_client_destroy frees path slots regardless).
             close(fd)
+            fence.leave()
             self?.engine.perform { self?.engine.fdClosed(handle) }
         }
         source.resume()
@@ -213,11 +229,12 @@ final class PathBinder {
         log.notice("path removed type=\(String(describing: type), privacy: .public) handle=\(slot.handle)")
     }
 
-    /// Full teardown for stopTunnel. Runs on the tick thread. Mirrors
-    /// removePath(type:) for every live slot, then cancels the monitors
-    /// themselves (start() is the only other writer of `monitors`, on the
-    /// caller's thread, so this is safe without extra synchronization).
-    func stop() {
+    /// Full teardown for stopTunnel (tick thread). Mirrors removePath(type:)
+    /// for every live slot, cancels the monitors, then registers the
+    /// completion to run (hopped back to the tick thread) once every cancel
+    /// handler has closed its fd. Returns without waiting: blocking the
+    /// tick thread here would deadlock the very hops the fence waits on.
+    func stop(completion: @escaping () -> Void) {
         pollTimer?.invalidate()
         pollTimer = nil
         for type in Array(slots.keys) {
@@ -225,6 +242,9 @@ final class PathBinder {
         }
         for (_, m) in monitors { m.cancel() }
         monitors.removeAll()
+        fence.notify(queue: monitorQueue) { [engine] in
+            engine.perform(completion)
+        }
     }
 
     /// Current (ifname, fd) per live slot, for GateMetrics' getsockopt
