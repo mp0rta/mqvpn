@@ -319,4 +319,7 @@ let tdDER = Data(base64Encoded: tdB64)!
 check(SystemTrust.evaluate(chain: [tdDER], hostname: "mqvpn-test") == false,
       "self-signed leaf rejected")
 
+// ── Insecure defaults OFF (spec D10) ────────────────────────────────────
+check(ServerSettings.emptyDraft.insecure == false, "emptyDraft defaults to Insecure OFF")
+
 if failures == 0 { print("host tests: ALL PASS") } else { print("host tests: \(failures) FAILURES"); exit(1) }
