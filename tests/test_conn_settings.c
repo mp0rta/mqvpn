@@ -6,6 +6,10 @@
  * scheduler / init_max_path_id propagate and the four asymmetric fields
  * (ping_on, enable_multipath, mp_ping_on, max_path_id_grant_max_value)
  * take the documented per-side values.
+ *
+ * It also pins the two exceptions to "same on both sides":
+ * recv_rate_bytes_per_sec is dropped for servers, and the four [Advanced]
+ * buffer limits are not.
  */
 
 #include "libmqvpn.h"
@@ -223,6 +227,199 @@ test_recv_rate_limit_wiring(void)
     return 0;
 }
 
+
+/* ── [Advanced] buffer limits ──────────────────────────────────────────
+ *
+ * The contrast with the function directly above: recv_rate_bytes_per_sec is
+ * hard-zeroed for servers, and these four are not. */
+
+/* Four distinct values, none a default, none equal to another: a builder that
+ * assigned the wrong input to the wrong field would still satisfy asserts
+ * written against a single shared value. */
+static void
+set_lim(mqvpn_conn_settings_input_t *in)
+{
+    in->h3_body_buf_per_stream = 262144;  /* 256 KiB */
+    in->blocked_buf_per_stream = 1048576; /* 1 MiB   */
+    in->blocked_buf_per_conn = 8388608;   /* 8 MiB   */
+    in->max_recv_window = 6291456;        /* 6 MiB   */
+}
+
+/* The two #ifdefs track whether this build's xquic has the field at all —
+ * see mqvpn_conn_settings.h. Where it does not, tests/test_config.c asserts
+ * that the key is rejected at startup. */
+static int
+check_lim_applied(const xqc_conn_settings_t *cs)
+{
+#ifdef MQVPN_HAVE_XQC_MAX_BODY_BUF_PER_STREAM
+    ASSERT_EQ(cs->max_body_buf_per_stream, 262144);
+#endif
+    ASSERT_EQ(cs->max_blocked_buf_per_stream, 1048576);
+    ASSERT_EQ(cs->max_blocked_buf_per_conn, 8388608);
+#ifdef MQVPN_HAVE_XQC_MAX_RECV_WINDOW
+    ASSERT_EQ(cs->max_recv_window, 6291456);
+#endif
+    return 0;
+}
+
+static int
+test_buf_limits_reach_both_sides(void)
+{
+    xqc_conn_settings_t cli, srv;
+
+    mqvpn_conn_settings_input_t c = {
+        .is_server = false,
+        .enable_multipath = true,
+        .scheduler = MQVPN_SCHED_WLB,
+        .recv_rate_bytes_per_sec = 125000000ULL,
+    };
+    set_lim(&c);
+    mqvpn_build_conn_settings(&c, &cli);
+    if (check_lim_applied(&cli)) return 1;
+
+    mqvpn_conn_settings_input_t s = {
+        .is_server = true,
+        .enable_multipath = true,
+        .scheduler = MQVPN_SCHED_WLB,
+        .recv_rate_bytes_per_sec = 125000000ULL,
+    };
+    set_lim(&s);
+    mqvpn_build_conn_settings(&s, &srv);
+    if (check_lim_applied(&srv)) return 1;
+
+    /* The SAME input struct and the SAME builder call, side by side: one
+     * field dropped on the server, four carried. */
+    ASSERT_EQ(cli.recv_rate_bytes_per_sec, 125000000ULL);
+    ASSERT_EQ(srv.recv_rate_bytes_per_sec, 0);
+#ifdef MQVPN_HAVE_XQC_MAX_BODY_BUF_PER_STREAM
+    ASSERT_EQ(srv.max_body_buf_per_stream, cli.max_body_buf_per_stream);
+#endif
+    ASSERT_EQ(srv.max_blocked_buf_per_stream, cli.max_blocked_buf_per_stream);
+    ASSERT_EQ(srv.max_blocked_buf_per_conn, cli.max_blocked_buf_per_conn);
+#ifdef MQVPN_HAVE_XQC_MAX_RECV_WINDOW
+    ASSERT_EQ(srv.max_recv_window, cli.max_recv_window);
+#endif
+    return 0;
+}
+
+/* Zero in, zero out, on both sides: xquic reads 0 as "use my own default" for
+ * all four. What this test pins is that the BUILDER does not substitute a
+ * default of its own. */
+static int
+test_buf_limits_zero_is_inert(void)
+{
+    xqc_conn_settings_t cs;
+
+    mqvpn_conn_settings_input_t in = {
+        .is_server = false, .enable_multipath = true, .scheduler = MQVPN_SCHED_WLB,
+        /* the four limits absent from the designated initializer == all zero */
+    };
+    mqvpn_build_conn_settings(&in, &cs);
+#ifdef MQVPN_HAVE_XQC_MAX_BODY_BUF_PER_STREAM
+    ASSERT_EQ(cs.max_body_buf_per_stream, 0);
+#endif
+    ASSERT_EQ(cs.max_blocked_buf_per_stream, 0);
+    ASSERT_EQ(cs.max_blocked_buf_per_conn, 0);
+#ifdef MQVPN_HAVE_XQC_MAX_RECV_WINDOW
+    ASSERT_EQ(cs.max_recv_window, 0);
+#endif
+
+    in.is_server = true;
+    mqvpn_build_conn_settings(&in, &cs);
+#ifdef MQVPN_HAVE_XQC_MAX_BODY_BUF_PER_STREAM
+    ASSERT_EQ(cs.max_body_buf_per_stream, 0);
+#endif
+    ASSERT_EQ(cs.max_blocked_buf_per_stream, 0);
+    ASSERT_EQ(cs.max_blocked_buf_per_conn, 0);
+#ifdef MQVPN_HAVE_XQC_MAX_RECV_WINDOW
+    ASSERT_EQ(cs.max_recv_window, 0);
+#endif
+    return 0;
+}
+
+/* The config surface range-checks these against its own cap of 2^32-1
+ * (MQVPN_CONFIG_MAX_BUF_LIMIT in src/config.h — spelled out as a literal here
+ * because this TU is library-side and does not include the CLI config
+ * header), but a direct API caller bypasses it — the same caller
+ * mqvpn_apply_scheduler() and mqvpn_apply_reinjection() guard against. The
+ * builder clamps to each field's own type instead of truncating.
+ *
+ * Two halves: the surface cap is carried through unchanged, and a value past
+ * the field's type saturates instead of wrapping. */
+static int
+test_buf_limits_clamped_never_truncated(void)
+{
+    xqc_conn_settings_t cs;
+
+    mqvpn_conn_settings_input_t in = {
+        .is_server = false,
+        .enable_multipath = true,
+        .scheduler = MQVPN_SCHED_WLB,
+        .h3_body_buf_per_stream = 0xffffffffULL,
+        .blocked_buf_per_stream = 0xffffffffULL,
+        .blocked_buf_per_conn = 0xffffffffULL,
+        .max_recv_window = 0xffffffffULL,
+    };
+    mqvpn_build_conn_settings(&in, &cs);
+#ifdef MQVPN_HAVE_XQC_MAX_BODY_BUF_PER_STREAM
+    ASSERT_EQ(cs.max_body_buf_per_stream, (size_t)0xffffffffULL);
+#endif
+    ASSERT_EQ(cs.max_blocked_buf_per_stream, (size_t)0xffffffffULL);
+    ASSERT_EQ(cs.max_blocked_buf_per_conn, (size_t)0xffffffffULL);
+#ifdef MQVPN_HAVE_XQC_MAX_RECV_WINDOW
+    ASSERT_EQ(cs.max_recv_window, (uint32_t)0xffffffffULL);
+#endif
+
+    in.h3_body_buf_per_stream = 0xffffffffffffffffULL;
+    in.blocked_buf_per_stream = 0xffffffffffffffffULL;
+    in.blocked_buf_per_conn = 0xffffffffffffffffULL;
+    in.max_recv_window = 0xffffffffffffffffULL;
+    mqvpn_build_conn_settings(&in, &cs);
+#ifdef MQVPN_HAVE_XQC_MAX_BODY_BUF_PER_STREAM
+    ASSERT_EQ(cs.max_body_buf_per_stream, SIZE_MAX);
+#endif
+    ASSERT_EQ(cs.max_blocked_buf_per_stream, SIZE_MAX);
+    ASSERT_EQ(cs.max_blocked_buf_per_conn, SIZE_MAX);
+#ifdef MQVPN_HAVE_XQC_MAX_RECV_WINDOW
+    ASSERT_EQ(cs.max_recv_window, UINT32_MAX);
+#endif
+    return 0;
+}
+
+/* Carried, not synthesised: the input stays FIXED while every unrelated axis
+ * is permuted, so an implementation that ANDed these with any local condition
+ * (multipath, scheduler, cc, reinjection, a rate limit) fails here. */
+static int
+test_buf_limits_carried_not_synthesised(void)
+{
+    xqc_conn_settings_t cs;
+
+    mqvpn_conn_settings_input_t in = {
+        .is_server = true,
+        .enable_multipath = false,
+        .scheduler = MQVPN_SCHED_MINRTT,
+        .cc = MQVPN_CC_CUBIC,
+        .reinjection = MQVPN_REINJ_DEADLINE,
+        .init_max_path_id = 16,
+        .defer_send_flush = true,
+        .recv_rate_bytes_per_sec = 0,
+    };
+    set_lim(&in);
+    mqvpn_build_conn_settings(&in, &cs);
+    if (check_lim_applied(&cs)) return 1;
+
+    in.is_server = false;
+    in.enable_multipath = true;
+    in.scheduler = MQVPN_SCHED_WLB;
+    in.cc = MQVPN_CC_BBR2;
+    in.reinjection = MQVPN_REINJ_OFF;
+    in.defer_send_flush = false;
+    in.recv_rate_bytes_per_sec = 125000000ULL;
+    mqvpn_build_conn_settings(&in, &cs);
+    if (check_lim_applied(&cs)) return 1;
+    return 0;
+}
+
 static int
 test_reinjection_mapping(void)
 {
@@ -394,6 +591,10 @@ main(void)
     failed += test_propagation_init_max_path_id();
     failed += test_server_forces_multipath_regardless_of_input();
     failed += test_recv_rate_limit_wiring();
+    failed += test_buf_limits_reach_both_sides();
+    failed += test_buf_limits_zero_is_inert();
+    failed += test_buf_limits_clamped_never_truncated();
+    failed += test_buf_limits_carried_not_synthesised();
     failed += test_reinjection_mapping();
     if (failed) {
         fprintf(stderr, "test_conn_settings: %d FAILED\n", failed);

@@ -638,6 +638,16 @@ static const cfg_key_desc_t cfg_keys[] = {
             MQVPN_RECV_RATE_LIMIT_MAX),
     CFG_BOOL(SEC_ADVANCED, "UdpGso", "udp_gso", udp_gso),
     CFG_BOOL(SEC_ADVANCED, "UdpGro", "udp_gro", udp_gro),
+    /* Receive-buffering limits. 0 (the memset default) = leave xquic's own
+     * default alone. Both client and server, unlike RecvRateLimit above. */
+    CFG_U64(SEC_ADVANCED, "H3BodyBufPerStream", "h3_body_buf_per_stream",
+            h3_body_buf_per_stream, MQVPN_CONFIG_MAX_BUF_LIMIT),
+    CFG_U64(SEC_ADVANCED, "BlockedBufPerStream", "blocked_buf_per_stream",
+            blocked_buf_per_stream, MQVPN_CONFIG_MAX_BUF_LIMIT),
+    CFG_U64(SEC_ADVANCED, "BlockedBufPerConn", "blocked_buf_per_conn",
+            blocked_buf_per_conn, MQVPN_CONFIG_MAX_BUF_LIMIT),
+    CFG_U64(SEC_ADVANCED, "MaxRecvWindow", "max_recv_window", max_recv_window,
+            MQVPN_CONFIG_MAX_BUF_LIMIT),
 };
 
 /* Shared typed store. Returns 0 on success, -1 on invalid value (caller
@@ -1378,4 +1388,27 @@ mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
 
     free(buf);
     return 0;
+}
+
+/* See the contract on this function in config.h. Only the two limits CMake
+ * probes for can be unsupported: max_blocked_buf_per_stream and
+ * max_blocked_buf_per_conn are in xqc_conn_settings_t in the xquic this
+ * repository pins. */
+const char *
+mqvpn_config_unsupported_buf_limit(const mqvpn_file_config_t *cfg)
+{
+    if (cfg == NULL) {
+        return NULL;
+    }
+#ifndef MQVPN_HAVE_XQC_MAX_BODY_BUF_PER_STREAM
+    if (cfg->h3_body_buf_per_stream != 0) {
+        return "H3BodyBufPerStream";
+    }
+#endif
+#ifndef MQVPN_HAVE_XQC_MAX_RECV_WINDOW
+    if (cfg->max_recv_window != 0) {
+        return "MaxRecvWindow";
+    }
+#endif
+    return NULL;
 }

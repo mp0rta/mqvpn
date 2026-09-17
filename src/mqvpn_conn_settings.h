@@ -52,6 +52,24 @@ typedef struct {
      * registration on — never a re-derived condition, which is what would let
      * them drift apart. */
     bool defer_send_flush;
+    /* [Advanced] receive-buffering limits, bytes; 0 = xquic's own default.
+     * src/config.h documents what each one bounds.
+     *
+     * Not hard-zeroed for servers, unlike recv_rate_bytes_per_sec above: the
+     * builder assigns them outside the is_server if/else, and
+     * tests/test_conn_settings.c pins both sides.
+     *
+     * h3_body_buf_per_stream and max_recv_window need
+     * xqc_conn_settings_t.max_body_buf_per_stream and .max_recv_window,
+     * which the xquic this repository pins does not have as of this
+     * commit. CMake probes for each and defines MQVPN_HAVE_XQC_*; the
+     * builder assigns only the fields that are there, and
+     * mqvpn_config_unsupported_buf_limit() (src/config.h) refuses at
+     * startup. */
+    uint64_t h3_body_buf_per_stream;
+    uint64_t blocked_buf_per_stream;
+    uint64_t blocked_buf_per_conn;
+    uint64_t max_recv_window;
 } mqvpn_conn_settings_input_t;
 
 /* Populates *out with mqvpn-canonical xquic conn settings. Always begins
