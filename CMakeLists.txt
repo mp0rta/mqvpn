@@ -787,6 +787,12 @@ if(BUILD_TESTING)
     add_test(NAME check_bssl_build_guard
              COMMAND bash ${CMAKE_SOURCE_DIR}/tests/check_bssl_build_guard.sh)
 
+    # Committed certificate fixtures must be one consistent set (openssl
+    # verify on the DER files + the exact patched bytes the identity tests
+    # depend on). Bash + openssl + python3 only, no target.
+    add_test(NAME check_cert_fixtures
+             COMMAND bash ${CMAKE_SOURCE_DIR}/tests/check_cert_fixtures.sh)
+
     # Each test links only the source files it needs (no xquic dependency)
     add_executable(test_config  tests/test_config.c  src/config.c  src/log.c)
     add_executable(test_auth    tests/test_auth.c    src/auth.c    src/log.c)
