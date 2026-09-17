@@ -5,8 +5,8 @@ package com.mqvpn.sdk.native_
 
 /**
  * The reference identifier the certificate must match, classified once, in
- * pure Kotlin. The same grammar is mirrored by the Windows C implementation;
- * change both or neither.
+ * pure Kotlin. The Windows C port must mirror this grammar; change both or
+ * neither.
  *
  * Normalise first (ASCII fold, one trailing dot stripped), then classify:
  * IPv4/IPv6 literal (bytes produced here, no resolver), LDH DNS hostname, or
@@ -31,9 +31,9 @@ internal object HostIdentifier {
     fun classify(raw: String): Result {
         if (raw.length >= 255) return Result.Invalid            // 255+ = possibly truncated by the C setter
         if (raw.any { it.code !in 0x21..0x7E }) return Result.Invalid
-        var h = asciiLower(raw)
-        var trailingDot = false
-        if (h.endsWith('.')) { h = h.dropLast(1); trailingDot = true }
+        val folded = asciiLower(raw)
+        val trailingDot = folded.endsWith('.')
+        val h = if (trailingDot) folded.dropLast(1) else folded
         if (h.isEmpty() || h.indexOf('*') >= 0 || h.indexOf('[') >= 0 || h.indexOf(']') >= 0) return Result.Invalid
 
         parseIpv4(h)?.let { return if (trailingDot) Result.Invalid else Result.Ip(it) }
@@ -55,6 +55,13 @@ internal object HostIdentifier {
         val sb = StringBuilder(s.length)
         for (c in s) sb.append(if (c in 'A'..'Z') (c + 32) else c)
         return sb.toString()
+    }
+
+    /** ASCII fold, then strip exactly one trailing dot (if present). Shared with [PlatformTrust]
+     * for the identifier shown in a rejection reason and passed to the platform trust manager. */
+    internal fun normalise(raw: String): String {
+        val folded = asciiLower(raw)
+        return if (folded.endsWith('.')) folded.dropLast(1) else folded
     }
 
     /** Exactly four labels, each "0" or [1-9][0-9]{0,2}, value <= 255. */
