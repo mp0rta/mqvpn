@@ -930,7 +930,7 @@ TEST(client_secure_without_verifier_rejects_self_signed_as_closed)
     loopback_teardown(&lb);
 }
 
-/* ── Two-tier chain: leaf ← intermediate ← (uncommitted, untrusted) root ── */
+/* ── Two-tier chain: leaf ← intermediate ← committed, untrusted chain-root.der ── */
 
 static void
 use_chain_server_cert(void)
