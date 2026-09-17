@@ -16,6 +16,7 @@
  */
 
 #include <jni.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -55,6 +56,11 @@ typedef struct {
 
 static JavaVM *g_jvm = NULL;
 
+/* PlatformTrust, resolved once in JNI_OnLoad. All three NULL = reject-all. */
+static jclass g_platform_trust_cls = NULL;
+static jmethodID g_platform_trust_verify = NULL;
+static jclass g_byte_array_cls = NULL;
+
 /*
  * Active JNI context — Android VpnService runs a single client per process.
  * Set in clientNew, cleared in clientDestroy.
@@ -68,16 +74,18 @@ static jni_ctx_t *s_active_ctx = NULL;
  * thread), GetEnv should succeed without AttachCurrentThread.
  *
  * If fallback attachment is needed (non-JNI thread), *did_attach is set to 1.
- * Caller MUST call detach_if_needed() after the JNI upcall to prevent leaks.
+ * Caller MUST call the matching detach_if_needed*() (detach_if_needed_vm()
+ * for this function; detach_if_needed() for the ctx-based wrapper below)
+ * after the JNI upcall to prevent leaks.
  */
 static JNIEnv *
-get_env(jni_ctx_t *ctx, int *did_attach)
+get_env_vm(JavaVM *vm, int *did_attach)
 {
     JNIEnv *env = NULL;
     *did_attach = 0;
-    if ((*ctx->jvm)->GetEnv(ctx->jvm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
         /* Fallback: attach if called from a non-JNI thread */
-        if ((*ctx->jvm)->AttachCurrentThread(ctx->jvm, &env, NULL) != JNI_OK) {
+        if ((*vm)->AttachCurrentThread(vm, &env, NULL) != JNI_OK) {
             LOGE("Failed to attach thread");
             return NULL;
         }
@@ -87,18 +95,99 @@ get_env(jni_ctx_t *ctx, int *did_attach)
 }
 
 static void
+detach_if_needed_vm(JavaVM *vm, int did_attach)
+{
+    if (did_attach) (*vm)->DetachCurrentThread(vm);
+}
+
+static JNIEnv *
+get_env(jni_ctx_t *ctx, int *did_attach)
+{
+    return get_env_vm(ctx->jvm, did_attach);
+}
+
+static void
 detach_if_needed(jni_ctx_t *ctx, int did_attach)
 {
-    if (did_attach) (*ctx->jvm)->DetachCurrentThread(ctx->jvm);
+    detach_if_needed_vm(ctx->jvm, did_attach);
 }
 
 /* ─── JNI_OnLoad ─── */
 
+/*
+ * Common failure path for JNI_OnLoad below: clears whatever exception is
+ * pending, deletes the local refs resolved so far, and logs. Returns
+ * JNI_VERSION_1_6 so the library still loads; the failure is fail-closed at
+ * verify time through the NULL globals, not at load time (a JNI_ERR would
+ * make System.loadLibrary throw). cls/bac may each be NULL (nothing to
+ * delete yet at that step).
+ *
+ * Apart from the Exception*, Delete*Ref and Release* family, a JNI call
+ * under a pending exception is undefined behaviour (CheckJNI aborts), so
+ * every step in JNI_OnLoad checks before the next call.
+ */
+static jint
+onload_fail(JNIEnv *env, jclass cls, jclass bac, const char *step)
+{
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (cls) (*env)->DeleteLocalRef(env, cls);
+    if (bac) (*env)->DeleteLocalRef(env, bac);
+    LOGE("PlatformTrust unavailable (%s): every server certificate will be rejected",
+         step);
+    return JNI_VERSION_1_6;
+}
+
+/*
+ * Resolves PlatformTrust.verify once, up front, so the per-handshake
+ * verifier never does class/method lookup. Fail closed: if anything here
+ * does not resolve, the three globals stay NULL and jni_cert_verify()
+ * rejects every certificate (see below) rather than silently trusting.
+ * g_platform_trust_verify is assigned last, on purpose: any earlier failure
+ * must leave all three globals NULL, and each step below is checked with
+ * ExceptionCheck before the next JNI call — never call into JNI (or Java)
+ * while an exception from the previous call may still be pending.
+ */
 JNIEXPORT jint
 JNI_OnLoad(JavaVM *vm, void *reserved)
 {
     (void)reserved;
     g_jvm = vm;
+
+    JNIEnv *env = NULL;
+    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK || env == NULL) {
+        LOGE("PlatformTrust unavailable (no JNIEnv): every server certificate will be "
+             "rejected");
+        return JNI_VERSION_1_6;
+    }
+
+    jclass cls = (*env)->FindClass(env, "com/mqvpn/sdk/native_/PlatformTrust");
+    if (!cls || (*env)->ExceptionCheck(env))
+        return onload_fail(env, cls, NULL, "FindClass(PlatformTrust)");
+
+    jmethodID mid = (*env)->GetStaticMethodID(
+        env, cls, "verify", "([[BLjava/lang/String;)Ljava/lang/String;");
+    if (!mid || (*env)->ExceptionCheck(env))
+        return onload_fail(env, cls, NULL, "GetStaticMethodID(verify)");
+
+    jclass bac = (*env)->FindClass(env, "[B");
+    if (!bac || (*env)->ExceptionCheck(env))
+        return onload_fail(env, cls, bac, "FindClass([B)");
+
+    jclass gcls = (jclass)(*env)->NewGlobalRef(env, cls);
+    if (!gcls || (*env)->ExceptionCheck(env))
+        return onload_fail(env, cls, bac, "NewGlobalRef(PlatformTrust)");
+
+    jclass gbac = (jclass)(*env)->NewGlobalRef(env, bac);
+    if (!gbac || (*env)->ExceptionCheck(env)) {
+        (*env)->DeleteGlobalRef(env, gcls);
+        return onload_fail(env, cls, bac, "NewGlobalRef([B)");
+    }
+
+    (*env)->DeleteLocalRef(env, cls);
+    (*env)->DeleteLocalRef(env, bac);
+    g_platform_trust_cls = gcls;
+    g_byte_array_cls = gbac;
+    g_platform_trust_verify = mid;
     return JNI_VERSION_1_6;
 }
 
@@ -277,6 +366,131 @@ android_clock_us(void *ctx)
  * JNI name mangling: underscore in "native_" → "_1", then package separator "_".
  * Result: Java_com_mqvpn_sdk_native_1_NativeBridge_<method>
  */
+
+/* ─── Platform certificate verifier (mqvpn_config_set_cert_verifier) ───
+ *
+ * Runs on the tick thread inside the TLS handshake; never touches
+ * mqvpn_client_*. Fail closed: the only `return 0` is the one after
+ * PlatformTrust.verify returned null with no pending exception.
+ */
+
+/* Chains longer than this are rejected outright (fail-closed; no real
+ * server comes close). */
+#define JNI_CERT_MAX 64
+
+static int
+jni_call_verifier(JNIEnv *env, jclass cls, jmethodID mid, const uint8_t *const certs[],
+                  const size_t cert_len[], size_t n_certs, const char *hostname)
+{
+    int rc = -1;
+    jobjectArray arr = NULL;
+    jstring jhost = NULL;
+    jobject result = NULL;
+
+    if (n_certs == 0 || n_certs > JNI_CERT_MAX) {
+        LOGE("TLS certificate rejected: chain has %zu certificates (allowed 1..%d)",
+             n_certs, JNI_CERT_MAX);
+        return -1;
+    }
+    for (size_t i = 0; i < n_certs; i++)
+        if (certs[i] == NULL || cert_len[i] == 0 || cert_len[i] > (size_t)INT_MAX) {
+            LOGE("TLS certificate rejected: certificate %zu has an unusable length", i);
+            return -1;
+        }
+    if (hostname == NULL || hostname[0] == '\0') {
+        LOGE("TLS certificate rejected: empty host");
+        return -1;
+    }
+    /* Mirrors HostIdentifier.classify steps 1-2 on purpose: C must refuse
+     * before NewStringUTF (CheckJNI aborts on invalid modified UTF-8) and
+     * before a possibly-truncated 255-byte host crosses into Java. Kotlin
+     * stays the rule of record and re-checks. Change both or neither. */
+    size_t hlen = strnlen(hostname, 256);
+    if (hlen >= 255) {
+        LOGE(
+            "TLS certificate rejected: host is 255 bytes or longer (possibly truncated)");
+        return -1;
+    }
+    for (size_t i = 0; i < hlen; i++)
+        if ((unsigned char)hostname[i] < 0x21 || (unsigned char)hostname[i] > 0x7E) {
+            LOGE("TLS certificate rejected: host contains a non-printable or non-ASCII "
+                 "byte");
+            return -1;
+        }
+
+    if (!g_byte_array_cls) {
+        LOGE("TLS certificate rejected: PlatformTrust unavailable");
+        return -1;
+    }
+    arr = (*env)->NewObjectArray(env, (jsize)n_certs, g_byte_array_cls, NULL);
+    if (!arr || (*env)->ExceptionCheck(env)) goto out;
+    for (size_t i = 0; i < n_certs; i++) {
+        jbyteArray ba = (*env)->NewByteArray(env, (jsize)cert_len[i]);
+        if (!ba || (*env)->ExceptionCheck(env)) goto out;
+        (*env)->SetByteArrayRegion(env, ba, 0, (jsize)cert_len[i],
+                                   (const jbyte *)certs[i]);
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->DeleteLocalRef(env, ba);
+            goto out;
+        }
+        (*env)->SetObjectArrayElement(env, arr, (jsize)i, ba);
+        (*env)->DeleteLocalRef(env, ba);
+        if ((*env)->ExceptionCheck(env)) goto out;
+    }
+    jhost =
+        (*env)->NewStringUTF(env, hostname); /* printable ASCII: valid modified UTF-8 */
+    if (!jhost || (*env)->ExceptionCheck(env)) goto out;
+
+    result = (*env)->CallStaticObjectMethod(env, cls, mid, arr, jhost);
+    if ((*env)->ExceptionCheck(env)) {
+        /* Exception first: a NULL result under a pending exception must never read as
+         * trusted. The return value is undefined under a pending exception — do not touch
+         * it. */
+        result = NULL;
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+        LOGE("TLS certificate rejected: platform verifier threw");
+        goto out;
+    }
+    if (result == NULL) {
+        rc = 0; /* trusted */
+        goto out;
+    }
+    {
+        const char *reason = (*env)->GetStringUTFChars(env, (jstring)result, NULL);
+        if (!reason || (*env)->ExceptionCheck(env)) {
+            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+            LOGE("TLS certificate rejected by platform (reason unavailable)");
+        } else {
+            LOGE("TLS certificate rejected by platform: %s", reason);
+            (*env)->ReleaseStringUTFChars(env, (jstring)result, reason);
+        }
+    }
+out:
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (result) (*env)->DeleteLocalRef(env, result);
+    if (jhost) (*env)->DeleteLocalRef(env, jhost);
+    if (arr) (*env)->DeleteLocalRef(env, arr);
+    return rc;
+}
+
+static int
+jni_cert_verify(const uint8_t *const certs[], const size_t cert_len[], size_t n_certs,
+                const char *hostname, void *ctx)
+{
+    (void)ctx;
+    if (!g_platform_trust_cls || !g_platform_trust_verify || !g_byte_array_cls) {
+        LOGE("TLS certificate rejected: PlatformTrust unavailable");
+        return -1;
+    }
+    int did_attach = 0;
+    JNIEnv *env = get_env_vm(g_jvm, &did_attach);
+    if (!env) return -1;
+    int rc = jni_call_verifier(env, g_platform_trust_cls, g_platform_trust_verify, certs,
+                               cert_len, n_certs, hostname);
+    detach_if_needed_vm(g_jvm, did_attach);
+    return rc;
+}
 
 /* ════════════════════════════════════════════════════════════════════════════
  *  Config methods
@@ -490,6 +704,17 @@ JNIEXPORT jlong JNICALL
 JNI_FN(clientNew)(JNIEnv *env, jobject thiz, jlong cfg, jobject callbackObj)
 {
     (void)thiz;
+
+    /* Always install the platform verifier, before any JNI-owned state is
+     * allocated so a failure has nothing to clean up. This must stay the
+     * first real statement in the function. cfg is the mutable handle
+     * configNew() created; the jlong→pointer conversion is just that. */
+    int vrc = mqvpn_config_set_cert_verifier((mqvpn_config_t *)(intptr_t)cfg,
+                                             jni_cert_verify, NULL);
+    if (vrc != MQVPN_OK) {
+        LOGE("mqvpn_config_set_cert_verifier failed: %d", vrc);
+        return 0;
+    }
 
     jni_ctx_t *ctx = calloc(1, sizeof(jni_ctx_t));
     if (!ctx) return 0;
@@ -994,3 +1219,112 @@ JNI_FN(recvFrom)(JNIEnv *env, jobject thiz, jint fd, jbyteArray buf, jint offset
 
     return (jint)n;
 }
+
+#ifdef MQVPN_JNI_TEST_SEAMS
+/* ─── Test-only entry points (debug build type only; NativeBridgeTestSeams) ─── */
+#  define JNI_TEST_FN(name) Java_com_mqvpn_sdk_native_1_NativeBridgeTestSeams_##name
+
+/* Marshals the Kotlin arrays into C arrays and calls `fn`, which is either
+ * the production entry point jni_cert_verify (reject-all check + env + the
+ * upcall to PlatformTrust.verify) or the throwing variant below. */
+typedef int (*seam_verify_fn)(const uint8_t *const certs[], const size_t cert_len[],
+                              size_t n, const char *host, void *arg);
+
+static int
+seam_marshal_and_call(JNIEnv *env, seam_verify_fn fn, void *arg, jobjectArray chain,
+                      jstring host)
+{
+    jsize n = (*env)->GetArrayLength(env, chain);
+    if (n <= 0 || n > JNI_CERT_MAX) return -1;
+    /* n element refs + cls (throwing seam) + arr/ba/jhost/result in jni_call_verifier,
+     * with slack */
+    if ((*env)->EnsureLocalCapacity(env, n + 8) != JNI_OK ||
+        (*env)->ExceptionCheck(env)) {
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        return -1;
+    }
+    const uint8_t *certs[JNI_CERT_MAX];
+    size_t lens[JNI_CERT_MAX];
+    jbyteArray refs[JNI_CERT_MAX];
+    memset(certs, 0, sizeof(certs));
+    memset(lens, 0, sizeof(lens));
+    memset(refs, 0, sizeof(refs));
+    int rc = -1;
+    for (jsize i = 0; i < n; i++) {
+        refs[i] = (jbyteArray)(*env)->GetObjectArrayElement(env, chain, i);
+        if (!refs[i]) goto out;
+        lens[i] = (size_t)(*env)->GetArrayLength(env, refs[i]);
+        certs[i] = (const uint8_t *)(*env)->GetByteArrayElements(env, refs[i], NULL);
+        if (!certs[i]) goto out;
+    }
+    const char *h = (*env)->GetStringUTFChars(env, host, NULL);
+    if (!h) goto out;
+    rc = fn(certs, lens, (size_t)n, h, arg);
+    (*env)->ReleaseStringUTFChars(env, host, h);
+out:
+    for (jsize i = 0; i < n; i++) {
+        if (refs[i] && certs[i])
+            (*env)->ReleaseByteArrayElements(env, refs[i], (jbyte *)certs[i], JNI_ABORT);
+        if (refs[i]) (*env)->DeleteLocalRef(env, refs[i]);
+    }
+    return rc;
+}
+
+/* nativeVerifyForTest(chain, host): the exact production entry point, jni_cert_verify
+ * (reject-all check, env acquisition, jni_call_verifier, PlatformTrust.verify). */
+JNIEXPORT jint JNICALL
+JNI_TEST_FN(nativeVerifyForTest)(JNIEnv *env, jobject thiz, jobjectArray chain,
+                                 jstring host)
+{
+    (void)thiz;
+    return seam_marshal_and_call(env, jni_cert_verify, NULL, chain, host);
+}
+
+/* nativeVerifyThrowingForTest(chain, host): jni_call_verifier against a Kotlin method
+ * that throws */
+static int
+seam_throwing_verify(const uint8_t *const certs[], const size_t cert_len[], size_t n,
+                     const char *host, void *arg)
+{
+    JNIEnv *env = (JNIEnv *)arg;
+    jclass cls = (*env)->FindClass(env, "com/mqvpn/sdk/native_/NativeBridgeTestSeams");
+    if (!cls) {
+        (*env)->ExceptionClear(env);
+        return -1;
+    }
+    jmethodID mid = (*env)->GetStaticMethodID(
+        env, cls, "throwingVerify", "([[BLjava/lang/String;)Ljava/lang/String;");
+    if (!mid) {
+        (*env)->ExceptionClear(env);
+        (*env)->DeleteLocalRef(env, cls);
+        return -1;
+    }
+    int rc = jni_call_verifier(env, cls, mid, certs, cert_len, n, host);
+    (*env)->DeleteLocalRef(env, cls);
+    return rc;
+}
+JNIEXPORT jint JNICALL
+JNI_TEST_FN(nativeVerifyThrowingForTest)(JNIEnv *env, jobject thiz, jobjectArray chain,
+                                         jstring host)
+{
+    (void)thiz;
+    return seam_marshal_and_call(env, seam_throwing_verify, env, chain, host);
+}
+
+/* nativeConfigHasPlatformVerifier(cfg): weak deletion tripwire. clientNew
+ * installs the verifier on the config handle (its first statement), so
+ * after a successful clientNew the handle carries jni_cert_verify. It proves
+ * the install still runs, not that it runs before mqvpn_client_new copies
+ * the config — that ordering is pinned by review, because the client's own
+ * copy is not reachable (struct mqvpn_client_s is private to
+ * mqvpn_client.c; struct mqvpn_config_s is in mqvpn_internal.h, already
+ * included above). */
+JNIEXPORT jboolean JNICALL
+JNI_TEST_FN(nativeConfigHasPlatformVerifier)(JNIEnv *env, jobject thiz, jlong cfg)
+{
+    (void)env;
+    (void)thiz;
+    const mqvpn_config_t *c = (const mqvpn_config_t *)(intptr_t)cfg;
+    return (c && c->cert_verify_fn == jni_cert_verify) ? JNI_TRUE : JNI_FALSE;
+}
+#endif /* MQVPN_JNI_TEST_SEAMS */
