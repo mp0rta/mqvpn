@@ -118,12 +118,28 @@ final class TunnelController: ObservableObject {
         let wasUp = Self.isUp(status)
         status = s
         statusText = Self.describe(s)
+        if s == .disconnected { surfaceDisconnectError() }
         if wasUp && !Self.isUp(s) {          // up -> down session boundary
             sessionEpoch += 1
             lastIngestedSeq = 0
             lastIngestedTimestamp = 0
         }
         reconcilePolling()
+    }
+
+    /// The provider's startTunnel throw / cancelTunnelWithError NSError is
+    /// only retrievable via fetchLastDisconnectError (iOS 16+); without it
+    /// the dashboard shows a bare "disconnected" even for a TLS rejection.
+    private func surfaceDisconnectError() {
+        guard #available(iOS 16.0, *),
+              let session = manager?.connection as? NETunnelProviderSession else { return }
+        session.fetchLastDisconnectError { [weak self] err in
+            guard let err else { return }
+            Task { @MainActor in
+                guard let self, self.status == .disconnected else { return }
+                self.statusText = "disconnected: \(err.localizedDescription)"
+            }
+        }
     }
 
     func start() {
