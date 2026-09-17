@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- A library module's androidTest APK is self-instrumenting: it is the
+         application under test, so this network security config governs the
+         process in which PlatformTrust.verify runs. It trusts the fixture root
+         (chain-root.der → @raw/chain_root) so one instrumented case can drive
+         the real platform trust manager to a positive verdict. Test APK only. -->
+    <application android:networkSecurityConfig="@xml/test_network_security_config" />
+</manifest>
