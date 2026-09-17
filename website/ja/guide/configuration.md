@@ -131,7 +131,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 |------|------|-----------|
 | `Address` | サーバーアドレス（`HOST:PORT`、IPv6 は `[2001:db8::1]:443` 形式） | 必須 |
 | `ServerName` | TLS SNI および証明書検証名。IP 直接接続でドメイン証明書を検証する場合に使用 | Address のホスト部 |
-| `Insecure` | TLS 証明書検証を省略する (自己署名のテスト構成のみ)。`false` ではシステムのストア (`/etc/ssl`。`SSL_CERT_FILE` / `SSL_CERT_DIR` で上書き可) で検証する。IP アドレスで接続する場合は `ServerName` に証明書の DNS 名を設定する。 | `false` |
+| `Insecure` | TLS 証明書検証を省略する (自己署名のテスト構成のみ)。`false` ではシステムのストア (`/etc/ssl`。`SSL_CERT_FILE` / `SSL_CERT_DIR` で上書き可) で検証する。IP アドレスで接続する場合は `ServerName` に証明書の DNS 名を設定する。Android では端末の CA ストアとアプリの network security config で検証する。証明書が一致すべき名前は `tlsServerName` (`ServerName` の SDK 版) で、ブラケットなしのホスト名か IP リテラルを指定する。 | `false` |
 
 ### `[Interface]`
 

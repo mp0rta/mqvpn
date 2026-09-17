@@ -136,7 +136,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 |-----|-------------|---------|
 | `Address` | Server address (`HOST:PORT`, e.g. `[2001:db8::1]:443` for IPv6) | Required |
 | `ServerName` | TLS SNI and certificate verification name. Use when connecting by IP but verifying against a domain certificate | Address host |
-| `Insecure` | Skip TLS certificate verification (self-signed test setups only). With `false` the certificate is verified against the system store (`/etc/ssl`; override with `SSL_CERT_FILE` / `SSL_CERT_DIR`); when connecting by IP address, set `ServerName` to the certificate's DNS name. | `false` |
+| `Insecure` | Skip TLS certificate verification (self-signed test setups only). With `false` the certificate is verified against the system store (`/etc/ssl`; override with `SSL_CERT_FILE` / `SSL_CERT_DIR`); when connecting by IP address, set `ServerName` to the certificate's DNS name. On Android the certificate is verified against the device's CA store and the app's network security config; `tlsServerName` (the SDK counterpart of `ServerName`) is the name it must match, and it must be a bare host name or IP literal (no brackets). | `false` |
 
 ### `[Interface]`
 

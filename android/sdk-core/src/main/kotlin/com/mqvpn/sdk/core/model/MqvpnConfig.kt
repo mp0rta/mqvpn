@@ -24,6 +24,14 @@ data class MqvpnConfig(
     /** Same rules as [serverAddress]; when set it is both the SNI and the name the certificate must match. */
     val tlsServerName: String? = null,
     val authKey: String,
+    /**
+     * Skip server certificate verification (self-signed test servers only).
+     * With `false` the certificate is verified against the device CA store and
+     * the app's network security config, and must match [tlsServerName] (or
+     * [serverAddress]). With `true` the library logs
+     * "insecure=1 overrides the configured certificate verifier" once at
+     * client creation: expected, it means verification is off.
+     */
     val insecure: Boolean = false,
     val multipathEnabled: Boolean = true,
     val scheduler: Scheduler = Scheduler.MIN_RTT,

@@ -1062,6 +1062,7 @@ jobs:
             android/sdk-core/build/reports/tests/
             android/sdk-runtime/build/reports/tests/
             android/sdk-network/build/reports/tests/
+            android/sdk-native/build/reports/tests/
           retention-days: 7
 
   # Instrumented (androidTest) run on an x86_64 emulator. This is the only
