@@ -51,8 +51,15 @@ class MqvpnManager(private val context: Context) {
     /**
      * Start VPN with the given config.
      * Launches the VpnService, binds to it, and calls startTunnel().
+     *
+     * @throws IllegalArgumentException when [MqvpnConfig.serverAddress] or
+     *   [MqvpnConfig.tlsServerName] is not a bare ASCII identifier (see
+     *   [MqvpnConfig.hostIdentifierError]). Thrown before any state change or
+     *   service start.
      */
     fun connect(config: MqvpnConfig, serviceClass: Class<out MqvpnVpnService>) {
+        // synchronous: a bad host must fail here, not inside the service (whose executor only logs)
+        config.hostIdentifierError()?.let { throw IllegalArgumentException(it) }
         unbind() // release any binding left from a previous connect
         _vpnState.value = MqvpnState.Connecting
 

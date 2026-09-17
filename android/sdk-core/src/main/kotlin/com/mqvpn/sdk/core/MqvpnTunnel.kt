@@ -138,6 +138,9 @@ class MqvpnTunnel internal constructor(
         }
 
         internal fun create(config: MqvpnConfig, callbacks: TunnelCallbacks): MqvpnTunnel {
+            // Also guards startTunnel callers that bypass MqvpnManager.connect() (restored-config
+            // path); note the service executor only logs a throw here.
+            config.hostIdentifierError()?.let { throw IllegalArgumentException(it) }
             val cfg = NativeBridge.configNew()
             NativeBridge.configSetServer(cfg, config.serverAddress, config.serverPort)
             config.tlsServerName?.let { NativeBridge.configSetTlsServerName(cfg, it) }

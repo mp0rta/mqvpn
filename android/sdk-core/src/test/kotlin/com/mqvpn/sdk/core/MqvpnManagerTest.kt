@@ -11,6 +11,7 @@ import com.mqvpn.sdk.core.model.ReorderStats
 import com.mqvpn.sdk.core.model.TunnelInfo
 import com.mqvpn.sdk.core.model.VpnStats
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -54,6 +55,18 @@ class MqvpnManagerTest {
         )
         manager.connect(config, MqvpnVpnService::class.java)
         assertEquals(MqvpnState.Connecting, manager.vpnState.value)
+    }
+
+    @Test
+    fun connect_rejectsBadHostSynchronously() {
+        val config = MqvpnConfig(
+            serverAddress = "[2001:db8::1]",
+            authKey = "test-key",
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            manager.connect(config, MqvpnVpnService::class.java)
+        }
+        assertEquals(MqvpnState.Disconnected, manager.vpnState.value)
     }
 
     @Test
