@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -1666,6 +1667,159 @@ TEST(mqvpn_tcp_echo_roundtrip)
     free(h.probe.raw_recv_buf);
 }
 
+/* Test 1b: ONE readable event relays at most TCP_EGRESS_RELAY_BUDGET bytes.
+ *
+ * The relay loop used to read until the egress socket ran dry. That is right
+ * for one flow and wrong for several: an egress socket with a fast peer
+ * behind it is refilled about as fast as the loop drains it, so what stops
+ * the loop is xquic's send queue — by which point the flow the reactor
+ * happened to dispatch first has spent the whole send-queue release, and the
+ * other flows on the connection are down to what their H3 write notify can
+ * push out of a stash. TCP_EGRESS_RELAY_BUDGET's comment in tcp_egress.h has
+ * the mechanism and the xquic side of it.
+ *
+ * A unit test cannot see the throughput split that comes out of that, but it
+ * can see the thing that causes it, so that is what is asserted: queue more
+ * than a budget on the egress socket, dispatch exactly ONE readable event,
+ * and count what left the socket. Without a budget the answer is "all of it".
+ *
+ * Deliberately NOT a fairness or throughput assertion — that needs several
+ * concurrent flows over real paths, which is netns territory
+ * (tests/test_e2e_hybrid_h2.sh, whose iperf3 probes run one flow at a time).
+ *
+ * The two properties that make the budget a yield rather than a stall are
+ * pinned as well: want_read stays armed (the flow is out of budget, not
+ * uplink_withheld), and a second event takes the remainder with no re-arm of
+ * any kind — the fd is level-triggered in both reactors (EV_PERSIST | EV_READ
+ * in platform_linux.c, POLLIN in harness_pump above). */
+TEST(mqvpn_tcp_uplink_relay_stops_at_budget)
+{
+    /* echo=0: the sink accepts and then never touches the connection, so
+     * this test body owns the accepted fd and is the only thing writing to
+     * it. Nothing is echoed, so the server's egress socket holds exactly
+     * what this test puts there and not a byte more. */
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0);
+
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    h.probe.path = path;
+
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+
+    harness_pump_with_sink(&h, &sink, &h.probe.response_done, 10000);
+    ASSERT_EQ(h.probe.response_done, 1);
+    ASSERT_STREQ(h.probe.status, "200");
+
+    /* The accept has to have happened before anything can be written back
+     * down the connection (the 200 can beat it: the kernel completes the
+     * handshake from the listen backlog, accept() is the sink's own tick). */
+    for (int i = 0; i < 200 && sink.conn_fd < 0; i++) {
+        int never = 0;
+        harness_pump_with_sink(&h, &sink, &never, 20);
+    }
+    ASSERT_EQ(sink.conn_fd >= 0, 1);
+
+    /* The flow's egress socket: exactly one is registered at this point (one
+     * flow, one fd), and its fd_ctx is what the reactor dispatches with. */
+    int egress_fd = -1;
+    void *egress_ctx = NULL;
+    int egress_slots = 0;
+    for (int i = 0; i < HARNESS_MAX_EGRESS_FDS; i++) {
+        if (!h.egress_fds[i].active) continue;
+        egress_slots++;
+        egress_fd = h.egress_fds[i].fd;
+        egress_ctx = h.egress_fds[i].fd_ctx;
+    }
+    ASSERT_EQ(egress_slots, 1);
+    ASSERT_EQ(h.egress_fds[0].want_read, 1);
+
+    /* One budget plus a little, and deliberately no more: it all has to fit
+     * in the egress socket's receive queue with the sink's own send queue
+     * left empty, or bytes still in flight would trickle in DURING the
+     * dispatch below and the count would measure the kernel instead of the
+     * loop. 72 KiB, against a loopback receive queue that defaults to well
+     * over that; if some platform's is smaller the two ASSERT_EQs below fail
+     * rather than mismeasuring. */
+    const size_t flood = (size_t)TCP_EGRESS_RELAY_BUDGET + 8192;
+    uint8_t *blob = (uint8_t *)malloc(flood);
+    ASSERT_EQ(blob != NULL, 1);
+    memset(blob, 0xA5, flood);
+
+    /* NO harness_pump from here to the measurement below: pumping would
+     * dispatch the readable event itself and there would be nothing left to
+     * count. The bytes reach the egress socket's receive queue through the
+     * kernel, which needs no help from the test loop. */
+    size_t off = 0;
+    for (int i = 0; i < 2000 && off < flood; i++) {
+        ssize_t k =
+            send(sink.conn_fd, blob + off, flood - off, MSG_DONTWAIT | MSG_NOSIGNAL);
+        if (k > 0) {
+            off += (size_t)k;
+            continue;
+        }
+        if (k < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            usleep(1000);
+            continue;
+        }
+        break;
+    }
+    ASSERT_EQ(off, flood);
+
+    int q0 = 0;
+    for (int i = 0; i < 2000; i++) {
+        if (ioctl(egress_fd, FIONREAD, &q0) == 0 && (size_t)q0 >= flood) break;
+        usleep(1000);
+    }
+    /* Everything arrived and nothing is still in flight, so the receive queue
+     * is the whole population this one dispatch can draw from. */
+    ASSERT_EQ((size_t)q0, flood);
+
+    /* Exactly one readable event, which is what the reactor delivers. */
+    mqvpn_server_on_egress_fd_ready(h.svr, egress_fd, egress_ctx, /*readable=*/1,
+                                    /*writable=*/0);
+
+    int q1 = 0;
+    ASSERT_EQ(ioctl(egress_fd, FIONREAD, &q1), 0);
+    size_t consumed = (size_t)q0 - (size_t)q1;
+
+    /* THE ASSERTION. Without the budget this is `flood` — the loop drains the
+     * socket — and 73728 > 65536 fails here. */
+    if (consumed > (size_t)TCP_EGRESS_RELAY_BUDGET) {
+        printf("FAIL\n    %s:%d: one readable event relayed %zu bytes, "
+               "budget is %d\n",
+               __FILE__, __LINE__, consumed, (int)TCP_EGRESS_RELAY_BUDGET);
+        exit(1);
+    }
+
+    /* A yield, not a stall. want_read stays armed: the flow is out of budget,
+     * not uplink_withheld — the interest helper computes want_read from
+     * uplink_withheld, so a 0 here would mean xquic refused the body and the
+     * number above measured backpressure rather than the budget. */
+    ASSERT_EQ(h.egress_fds[0].want_read, 1);
+    /* And the budget was actually spent, so the count above is the budget
+     * binding rather than an early exit on a short read. */
+    ASSERT_EQ(consumed, (size_t)TCP_EGRESS_RELAY_BUDGET);
+
+    /* The remainder is still there and the next event takes it: a
+     * level-triggered fd with bytes left is reported again, with no re-arm. */
+    mqvpn_server_on_egress_fd_ready(h.svr, egress_fd, egress_ctx, /*readable=*/1,
+                                    /*writable=*/0);
+    int q2 = 0;
+    ASSERT_EQ(ioctl(egress_fd, FIONREAD, &q2), 0);
+    ASSERT_EQ(q2, 0);
+
+    free(blob);
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+}
+
 /* Test 2: egress EOF -> pure H3 FIN. The sink closes right after echoing,
  * so the server's egress recv() sees EOF and must map it to
  * send_body(NULL, 0, 1) rather than silently going quiet or resetting the
@@ -2934,6 +3088,7 @@ main(void)
     run_mqvpn_tcp_global_cap_gets_503();
     run_mqvpn_tcp_invalid_hybrid_field_sanitized_acl_survives();
     run_mqvpn_tcp_echo_roundtrip();
+    run_mqvpn_tcp_uplink_relay_stops_at_budget();
     run_mqvpn_tcp_egress_eof_becomes_h3_fin();
     run_mqvpn_tcp_h3_fin_becomes_shut_wr();
     run_mqvpn_tcp_bodiless_fin_becomes_shut_wr();

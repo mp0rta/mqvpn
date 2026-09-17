@@ -87,6 +87,16 @@
 _Static_assert(3 * TCP_EGRESS_RELAY_CHUNK <= 48 * 1024,
                "relay chunk frames must stay within a small-thread stack budget");
 
+/* The fairness budget (TCP_EGRESS_RELAY_BUDGET, tcp_egress.h) is spent one
+ * chunk-sized read at a time, so a budget under one chunk would simply be one
+ * chunk, and a budget that is not a whole number of chunks would overshoot by
+ * the remainder on every pass. Neither breaks anything; both would make the
+ * quantum something other than the number the header's arithmetic is written
+ * against. */
+_Static_assert(TCP_EGRESS_RELAY_BUDGET >= TCP_EGRESS_RELAY_CHUNK &&
+                   TCP_EGRESS_RELAY_BUDGET % TCP_EGRESS_RELAY_CHUNK == 0,
+               "relay budget must be a whole number of relay chunks");
+
 int
 svr_tcp_egress_parse_path(const char *path, size_t path_len, char *out_host,
                           size_t out_host_cap, uint16_t *out_port)
@@ -1220,10 +1230,17 @@ svr_tcp_egress_on_relay_ready(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
      * event. */
     if (readable && !ef->uplink_withheld) {
         uint8_t buf[TCP_EGRESS_RELAY_CHUNK];
+        size_t relayed = 0;
         ssize_t n;
         for (;;) {
+            /* Read no further than the budget allows. relayed is below
+             * TCP_EGRESS_RELAY_BUDGET here -- the break further down fires at
+             * >= -- so want is at least 1 and a zero-length read, which would
+             * look like EOF, cannot happen. */
+            size_t want = TCP_EGRESS_RELAY_BUDGET - relayed;
+            if (want > sizeof(buf)) want = sizeof(buf);
             do {
-                n = recv(ef->fd, buf, sizeof(buf), MSG_DONTWAIT);
+                n = recv(ef->fd, buf, want, MSG_DONTWAIT);
             } while (n < 0 && errno == EINTR);
             if (n <= 0) break;
             /* Uplink activity: bytes actually arrived from the egress
@@ -1243,8 +1260,28 @@ svr_tcp_egress_on_relay_ready(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
                  * further either way. */
                 (void)svr_tcp_egress_stash_uplink(server, ef, buf + sent,
                                                   (size_t)n - (size_t)sent);
-                return; /* the ONLY break-equivalent exit of this loop */
+                return; /* a break-equivalent exit of this loop */
             }
+            /* Fairness yield: hand the reactor back after a budget, so the
+             * other flows on this connection get a turn at the send-queue
+             * release this loop would otherwise spend by itself. The
+             * arithmetic is in tcp_egress.h beside TCP_EGRESS_RELAY_BUDGET.
+             *
+             * break rather than return: n > 0 on this path, so neither
+             * post-loop recv()-status branch applies and control reaches
+             * svr_tcp_egress_update_fd_interest() at the tail, which leaves
+             * want_read set -- uplink_withheld is still 0 here, so the flow
+             * is out of budget rather than stalled. `readable` is a
+             * level-triggered signal by this function's own contract (see the
+             * comment above it), and the only two places that set
+             * cbs.egress_fd_register deliver it that way (EV_PERSIST | EV_READ
+             * in platform/linux/platform_linux.c, POLLIN in
+             * tests/test_tcp_egress.c's harness_pump), so whatever is left
+             * in the socket is reported again on the next pass. The budget is
+             * at least one chunk, so bytes have always moved before the yield:
+             * it cannot spin. */
+            relayed += (size_t)sent;
+            if (relayed >= TCP_EGRESS_RELAY_BUDGET) break;
         }
         if (n == 0) {
             /* Pure EOF: recv()==0 is level-triggered readable — drop
