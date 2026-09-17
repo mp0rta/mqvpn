@@ -50,3 +50,11 @@ target_link_libraries(mqvpn_jni
     crypto
     log           # Android __android_log_print
     c++_static)   # BoringSSL is C++ — needs libc++ for vtable/RTTI/exceptions
+
+# Test-only JNI entry points (NativeBridgeTestSeams, debug source set). The
+# debug build type passes -DMQVPN_JNI_TEST_SEAMS=ON from build.gradle.kts;
+# release compiles none of them.
+option(MQVPN_JNI_TEST_SEAMS "Compile test-only JNI entry points" OFF)
+if(MQVPN_JNI_TEST_SEAMS)
+    target_compile_definitions(mqvpn_jni PRIVATE MQVPN_JNI_TEST_SEAMS=1)
+endif()
