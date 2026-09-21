@@ -211,12 +211,14 @@ path_invariant_check(const path_entry_t *p)
         break;
     case PATH_LC_CLOSED_FREE:
         /* Full free gate + empty payload. transport_released is the
-         * lifecycle evidence; ctx == NULL is only its consequence (a
-         * stateless transport has ctx == NULL while attached). */
+         * lifecycle evidence; the empty ops table and ctx == NULL are only
+         * its consequence (a stateless transport has ctx == NULL while
+         * attached, which is why ctx alone is never the evidence). */
         assert(p->transport_attached == 0);
         assert(p->transport_released == 1);
         assert(p->xquic_path_live == 0);
         assert(p->xqc_path_id == 0);
+        assert(p->ops.send == NULL);
         assert(p->transport_ctx == NULL);
         assert(p->recreate_after_us == 0);
         assert(p->path_stable_since_us == 0);

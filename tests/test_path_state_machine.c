@@ -61,6 +61,9 @@ client_notify_xqc_path_state(struct mqvpn_client_s *c, const path_entry_t *p,
     g_p15_last_path_id = p->xqc_path_id;
 }
 
+/* A slot that still owes an ops.release(). Callers that need it to look
+ * attached set transport_attached themselves — this helper deliberately
+ * leaves that to the test, since not every caller runs an invariant check. */
 static path_entry_t
 make_slot(void)
 {
@@ -202,7 +205,7 @@ test_invariant_closed_dropped_legal(void)
     p.status = MQVPN_PATH_CLOSED;
     p.transport_attached = 0;
     /* recreate_after_us = path_stable_since_us = 0 by zero-init.
-     * xquic_path_live / xqc_path_id / transport_released may be lazy — leave 0. */
+     * xquic_path_live / xqc_path_id may be lazy — leave 0. */
     path_invariant_check_legacy(&p);
 }
 
@@ -526,7 +529,7 @@ test_invariant_closed_dropped_lazy_pass(void)
     p.transport_attached = 0; /* required */
     p.recreate_after_us = 0;
     p.path_stable_since_us = 0;
-    /* lazy fields can be non-zero */
+    /* lazy: the transport is not released yet and xquic still holds the path */
     p.transport_released = 0;
     p.xquic_path_live = 1;
     p.xqc_path_id = 5;
@@ -620,7 +623,7 @@ test_should_warn_state_entered_zero_is_silent(void)
 
 /* ─── PR4: path_on_event() dispatch table coverage ───
  *
- * Pins the 9-state × 9-event matrix at the entry points that matter for
+ * Pins the 9-state × 10-event matrix at the entry points that matter for
  * Chunk 4 callsite migration. Each case seeds a `path_entry_t p` with
  * stack-local `p.field = ...` (dot, NOT arrow — the lint regex looks for
  * arrow only, so these seeds don't trip check_lifecycle_field_writes.sh).
@@ -682,7 +685,7 @@ test_dispatch_table(void)
         /* 1: permanent classification — retries unchanged */
         {"PENDING + ACTIVATE_REQ(PERMANENT)",
          PATH_LC_PENDING,
-         /*pa=*/1,
+         /*ta=*/1,
          /*xpl=*/0,
          /*rec_after=*/0,
          /*pss=*/0,
@@ -695,7 +698,7 @@ test_dispatch_table(void)
         /* 2: DEGRADED + RETRY_TIMER(PERMANENT) */
         {"DEGRADED + RETRY_TIMER(PERMANENT)",
          PATH_LC_DEGRADED,
-         /*pa=*/1,
+         /*ta=*/1,
          /*xpl=*/0,
          /*rec_after=*/1000,
          /*pss=*/0,
@@ -708,7 +711,7 @@ test_dispatch_table(void)
         /* 3: MAX guard — CREATE_WAIT retries=5 + RETRY_TIMER(TRANSIENT) */
         {"CREATE_WAIT retries=5 + RETRY_TIMER(TRANSIENT) -> MAX",
          PATH_LC_CREATE_WAIT,
-         /*pa=*/1,
+         /*ta=*/1,
          /*xpl=*/0,
          /*rec_after=*/1000,
          /*pss=*/0,
@@ -721,7 +724,7 @@ test_dispatch_table(void)
         /* 4: VALIDATING + XQUIC_REMOVED → CREATE_WAIT */
         {"VALIDATING + XQUIC_REMOVED -> CREATE_WAIT",
          PATH_LC_VALIDATING,
-         /*pa=*/1,
+         /*ta=*/1,
          /*xpl=*/1,
          /*rec_after=*/0,
          /*pss=*/0,
@@ -734,7 +737,7 @@ test_dispatch_table(void)
         /* 5: ACTIVE + XQUIC_REMOVED → DEGRADED */
         {"ACTIVE + XQUIC_REMOVED -> DEGRADED",
          PATH_LC_ACTIVE,
-         /*pa=*/1,
+         /*ta=*/1,
          /*xpl=*/1,
          /*rec_after=*/0,
          /*pss=*/0,
@@ -747,7 +750,7 @@ test_dispatch_table(void)
         /* 6: CLOSED_RECOVERABLE + MANUAL(OK) → VALIDATING (retries unchanged) */
         {"CLOSED_RECOVERABLE + MANUAL(OK) -> VALIDATING",
          PATH_LC_CLOSED_RECOVERABLE,
-         /*pa=*/1,
+         /*ta=*/1,
          /*xpl=*/0,
          /*rec_after=*/0,
          /*pss=*/0,
@@ -760,7 +763,7 @@ test_dispatch_table(void)
         /* 7: rev5 — CREATE_WAIT + MANUAL(OK) → VALIDATING */
         {"CREATE_WAIT + MANUAL(OK) -> VALIDATING (rev5)",
          PATH_LC_CREATE_WAIT,
-         /*pa=*/1,
+         /*ta=*/1,
          /*xpl=*/0,
          /*rec_after=*/1000,
          /*pss=*/0,
@@ -773,7 +776,7 @@ test_dispatch_table(void)
         /* 8: rev5 — DEGRADED + MANUAL(OK) → VALIDATING */
         {"DEGRADED + MANUAL(OK) -> VALIDATING (rev5)",
          PATH_LC_DEGRADED,
-         /*pa=*/1,
+         /*ta=*/1,
          /*xpl=*/0,
          /*rec_after=*/1000,
          /*pss=*/0,
@@ -786,7 +789,7 @@ test_dispatch_table(void)
         /* 9: ACTIVE + CONN_RESET (transport_attached, retries reset to 0) */
         {"ACTIVE + CONN_RESET (transport_attached)",
          PATH_LC_ACTIVE,
-         /*pa=*/1,
+         /*ta=*/1,
          /*xpl=*/1,
          /*rec_after=*/0,
          /*pss=*/0,
@@ -799,7 +802,7 @@ test_dispatch_table(void)
         /* 10: CLOSED_DROPPED + CONN_RESET (!transport_attached, retries cleared) */
         {"CLOSED_DROPPED + CONN_RESET (!transport_attached)",
          PATH_LC_CLOSED_DROPPED,
-         /*pa=*/0,
+         /*ta=*/0,
          /*xpl=*/0,
          /*rec_after=*/0,
          /*pss=*/0,

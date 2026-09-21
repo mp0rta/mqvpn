@@ -110,8 +110,8 @@ typedef enum {
  * a circular include (path_state_machine.h includes path_entry_internal.h
  * for path_entry_t, which contains a path_lifecycle_t field).
  *
- * PR3 will further split PENDING into PENDING / CREATE_WAIT / VALIDATING
- * (→ 9 states total). */
+ * PR3 split PENDING into PENDING / CREATE_WAIT / VALIDATING, which is how
+ * the enum reaches its 9 states. */
 
 /* Map internal lifecycle → public 5-state. Pure function. */
 MQVPN_INTERNAL mqvpn_path_status_t path_public_status_from_lifecycle(path_lifecycle_t s);
@@ -120,8 +120,8 @@ MQVPN_INTERNAL mqvpn_path_status_t path_public_status_from_lifecycle(path_lifecy
 MQVPN_INTERNAL const char *path_lifecycle_name(path_lifecycle_t s);
 
 /* Debug-build 9-state invariant check. Asserts the (state, transport_attached,
- * transport_released, xquic_path_live, xqc_path_id, recreate_after_us,
- * path_stable_since_us) tuple is legal AND that p->status ==
+ * transport_released, transport_ctx, xquic_path_live, xqc_path_id,
+ * recreate_after_us, path_stable_since_us) tuple is legal AND that p->status ==
  * path_public_status_from_lifecycle(p->state) (denormalization invariant).
  * No-op in release builds. */
 MQVPN_INTERNAL void path_invariant_check(const path_entry_t *p);
