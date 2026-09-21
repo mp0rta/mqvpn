@@ -203,26 +203,22 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
 
 #if defined(__linux__)
 
-#  include "udp_offload.h"
-
-/* The fallback sendmmsg path hands xquic's whole burst to one
- * mqvpn_udp_send_batch() call; its mmsghdr array must cover it. Pinned here,
- * next to the one registration site, rather than per caller. */
-_Static_assert(XQC_MAX_SEND_MSG_ONCE <= MQVPN_OFFLOAD_MAX_BATCH,
-               "fallback mmsghdr array must cover xquic's burst size");
+/* The bundled binds accept at most 32 datagrams per send (BIND_POSIX_MAX_BATCH
+ * in src/bind/posix.c == MQVPN_OFFLOAD_MAX_BATCH); a bigger xquic burst would
+ * be re-offered in two calls and quietly halve the batching factor. */
+_Static_assert(XQC_MAX_SEND_MSG_ONCE <= 32,
+               "raise the bundled binds' batch cap with xquic's burst");
 
 int
 mqvpn_tx_batch_register(int udp_gso, xqc_send_mmsg_ex_pt cb,
-                        xqc_transport_callbacks_t *tcbs, xqc_config_t *xconfig,
-                        int *gso_available)
+                        xqc_transport_callbacks_t *tcbs, xqc_config_t *xconfig)
 {
-    /* mqvpn_tx_batch_enabled's MQVPN_MAX_PKT_OUT_SIZE <= 1500 term guards
-     * mqvpn_udp_send_batch()'s single-run/no-splitting contract
-     * (udp_offload.h) — a future raise of the constant above ~2KB must
-     * revisit run-splitting before this registration can stay
-     * unconditional. */
+    /* mqvpn_tx_batch_enabled's MQVPN_MAX_PKT_OUT_SIZE <= 1500 term is a
+     * compatibility guard for the Linux GSO run bound (a full burst of
+     * XQC_MAX_SEND_MSG_ONCE datagrams must stay far below the ~64KB kernel
+     * ceiling so the bind can skip run splitting). It is not an xquic
+     * constraint; it can go once the bind splits runs itself. */
     if (!mqvpn_tx_batch_enabled(udp_gso)) return 0;
-    *gso_available = mqvpn_udp_gso_probe();
     tcbs->write_mmsg_ex = cb;
     xconfig->sendmmsg_on = 1;
     return 1;

@@ -56,7 +56,6 @@
 #include "reorder_gate.h"
 #include "reorder_rx.h"
 #include "reorder_tx.h"
-#include "udp_offload.h"
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
 #  include "hybrid/tcp_egress.h"
 #endif

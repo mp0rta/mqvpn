@@ -13,6 +13,7 @@
 #include "mqvpn_sched_names.h" /* mqvpn_reinj_to_name for the startup log */
 
 #include <inttypes.h> /* PRIu64 in the udp-tx teardown line */
+#include <stddef.h>   /* offsetof for the struct_size-guarded field copies */
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
@@ -59,7 +60,6 @@
 #include "reorder_gate.h"
 #include "reorder_rx.h"
 #include "reorder_tx.h"
-#include "udp_offload.h"
 
 /* ─── Constants ─── */
 
@@ -73,7 +73,6 @@
 #define HANDSHAKE_STALL_TIMEOUT_MS 5000
 /* PATH_RECREATE_* and PATH_STABLE_THRESHOLD_US relocated to path_state_machine.h
  * for PR4 — shared with path_state_machine.c. */
-#define SOCKET_BUF_SIZE (7 * 1024 * 1024) /* 7 MiB socket buffer */
 
 /* ─── Forward declarations ─── */
 
@@ -239,22 +238,28 @@ struct mqvpn_client_s {
     uint64_t pkts_lane_raw;
     uint64_t tcp_flows_rejected;
     uint64_t pkts_lane_tcp_dropped;
-    /* Outer-UDP TX syscall counters. tx_datagrams / tx_sends is the achieved
-     * batching factor: 1.0 means no GSO run and no sendmmsg batch ever
-     * formed, which the one-shot "udp-gso: GSO enabled" marker cannot
-     * distinguish because that marker only reports the kernel capability
-     * probe. Every outer-UDP send path feeds these, so the ratio stays
-     * meaningful with UdpGso=false and on platforms without the batched
-     * callback, where it is exactly 1.0 by construction. Reported by
-     * mqvpn_client_destroy as the "udp-tx: " line. */
-    uint64_t tx_sends;
-    uint64_t tx_datagrams;
+    /* Outer-UDP TX syscall counters. These now come from the transports:
+     * every send is issued by an ops table, so the core no longer counts
+     * syscalls itself and instead reads mqvpn_transport_stats_t. The ratio
+     * tx_datagrams / tx_sends is still the achieved batching factor: 1.0
+     * means no GSO run and no sendmmsg batch ever formed, which the one-shot
+     * "udp-gso: GSO enabled" marker cannot distinguish because that marker
+     * only reports the kernel capability probe. The ratio stays meaningful
+     * with UdpGso=false and on platforms without the batched callback, where
+     * it is exactly 1.0 by construction. Reported by mqvpn_client_destroy as
+     * the "udp-tx: " line.
+     *
+     * Retired transport telemetry: harvested from ops.get_stats() exactly once
+     * per ctx at release. Live ctxs are summed on demand (client_tx_totals),
+     * so the public udp_tx_* numbers survive any number of add/drop cycles. */
+    uint64_t retired_tx_sends;
+    uint64_t retired_tx_datagrams;
+    int tx_zero_return_logged; /* once-per-client guard for the 0-return log */
     int srtt_ms;
-    int gso_available; /* engine-create probe result */
     /* 1 = the batched send callback (cb_write_mmsg_ex) was registered. Also
      * drives conn_settings.defer_send_flush, so the two can never disagree — see
-     * mqvpn_conn_settings.h. Independent of gso_available: a failed UDP_SEGMENT probe
-     * still batches via sendmmsg. */
+     * mqvpn_conn_settings.h. Independent of the transport's own GSO capability:
+     * a bind without UDP_SEGMENT still batches via sendmmsg. */
     int tx_batch;
 
     /* Multipath (Level 1) */
@@ -586,68 +591,46 @@ first_active_idx(const mqvpn_client_t *c)
 {
     if (!c) return -1;
     for (int i = 0; i < c->n_paths; i++)
-        if (c->paths[i].platform_attached) return i;
+        if (c->paths[i].transport_attached) return i;
     return -1;
 }
 
-/* Returns the fd of the first active path slot, or -1 if none.
- *
- * cb_write_socket() (no path_id) and get_fd_for_path()'s fallback both
- * use this when xquic asks for a write socket but the slot indexed by
- * path_id is not currently usable.  The naive `paths[0].fd` fallback
- * would otherwise hand back the fd of a path that was just dropped (see
- * ysurac/mqvpn 654f598).  We search instead so a still-active sibling
- * slot wins.
- *
- * Exported (non-static) so tests can verify the selection without
- * driving xquic.  Marked `hidden` so it does not show up in
- * libmqvpn.so's dynamic symbol table — not part of the public ABI,
- * and intentionally absent from libmqvpn.h. */
+/* Handle of the first attached slot, or -1. Exported (hidden visibility) for
+ * tests that verify send-slot selection without driving xquic. */
 MQVPN_INTERNAL
-int
-mqvpn_client_first_active_fd(const mqvpn_client_t *c)
+mqvpn_path_handle_t
+mqvpn_client_first_active_handle(const mqvpn_client_t *c)
 {
     int idx = first_active_idx(c);
-    return idx >= 0 ? c->paths[idx].fd : -1;
+    return idx >= 0 ? c->paths[idx].handle : -1;
 }
 
 /* Resolve the path slot used for sending on an xquic path_id, falling back
  * to the (rotated) primary slot if still active, else to the first active
- * slot. get_fd_for_path() is a thin wrapper over this function so the two
- * views cannot drift.
+ * slot. cb_write_socket_ex / cb_write_mmsg_ex both resolve through here.
  *
  * Two requirements compose here:
  *   - The handshake fallback must use `primary_path_idx` (rotation owner)
  *     so a dead first-configured path doesn't trap reconnect (issue #46).
  *   - After multipath setup, if the primary was dropped mid-session we
- *     must NOT hand back its stale fd — fall through to any active sibling
+ *     must NOT hand back its stale slot — fall through to any active sibling
  *     (post-OMR-backport semantics protecting against EBADF / sendto-on-
  *     dead-iface).
  *
  * The first branch is deliberately unconditional: a path_id bound to a
- * dropped slot returns that slot (fd == -1) so the caller downgrades via
- * path_send_dead_retcode during the drop window — it must NOT fall through
- * to a sibling fd (that would put this path's CIDs on another path's
- * 4-tuple and change the documented drop-window semantics). The sticky GSO
- * flag lives on the slot owning the fd actually used, which under the
- * primary/first-active fallback is not the requested path_id's slot. */
+ * dropped slot returns that slot (transport_attached == 0) so the caller
+ * downgrades via path_send_dead_retcode during the drop window — it must NOT
+ * fall through to a sibling (that would put this path's CIDs on another
+ * path's 4-tuple and change the documented drop-window semantics). */
 static path_entry_t *
 get_path_entry_for_send(mqvpn_client_t *c, uint64_t xqc_path_id)
 {
     path_entry_t *p = find_path_by_xqc_id(c, xqc_path_id);
-    if (p) return p; /* even if dropped: caller handles fd < 0 */
+    if (p) return p; /* even if dropped: caller checks transport_attached */
     int pidx = c->primary_path_idx;
-    if (pidx < c->n_paths && c->paths[pidx].platform_attached) return &c->paths[pidx];
+    if (pidx < c->n_paths && c->paths[pidx].transport_attached) return &c->paths[pidx];
     int idx = first_active_idx(c);
     return (idx >= 0) ? &c->paths[idx] : NULL;
-}
-
-/* fd view of get_path_entry_for_send(); doc above. */
-static int
-get_fd_for_path(mqvpn_client_t *c, uint64_t xqc_path_id)
-{
-    path_entry_t *p = get_path_entry_for_send(c, xqc_path_id);
-    return p ? p->fd : -1;
 }
 
 /* Pick the next active path index for the next handshake attempt.
@@ -661,7 +644,7 @@ client_next_primary_idx(const mqvpn_client_t *c, int from_idx)
     int i = start;
     do {
         const path_entry_t *p = &c->paths[i];
-        if (p->platform_attached && p->status != MQVPN_PATH_CLOSED) return i;
+        if (p->transport_attached && p->status != MQVPN_PATH_CLOSED) return i;
         i = (i + 1) % c->n_paths;
     } while (i != start);
     return from_idx;
@@ -680,12 +663,35 @@ mqvpn_client_test_set_primary_path_idx(mqvpn_client_t *c, int idx)
     return 0;
 }
 
+/* Test hook: handle of the slot get_path_entry_for_send() resolves for an
+ * xquic path_id (-1 if none). Hidden visibility, not public ABI. */
 MQVPN_INTERNAL
-int
-mqvpn_client_test_get_fd_for_path(mqvpn_client_t *c, uint64_t xqc_path_id)
+mqvpn_path_handle_t
+mqvpn_client_test_get_send_handle_for_path(mqvpn_client_t *c, uint64_t xqc_path_id)
 {
     if (!c) return -1;
-    return get_fd_for_path(c, xqc_path_id);
+    path_entry_t *p = get_path_entry_for_send(c, xqc_path_id);
+    return p ? p->handle : -1;
+}
+
+/* Defined with the send callbacks, below. */
+static int path_transport_send(mqvpn_client_t *c, path_entry_t *p,
+                               const mqvpn_datagram_t *bufs, unsigned n,
+                               const struct sockaddr *peer, socklen_t peerlen);
+
+/* Test hook: run path_transport_send() on the slot `h` toward the configured
+ * server address. Returns the mapped result (k / MQVPN_TX_WOULD_BLOCK /
+ * MQVPN_TX_FAILED). Hidden visibility, not public ABI. */
+MQVPN_INTERNAL
+int
+mqvpn_client_test_transport_send(mqvpn_client_t *c, mqvpn_path_handle_t h,
+                                 const mqvpn_datagram_t *bufs, unsigned n)
+{
+    if (!c) return MQVPN_TX_FAILED;
+    path_entry_t *p = find_path_by_handle(c, h);
+    if (!p || !p->transport_attached) return MQVPN_TX_FAILED;
+    return path_transport_send(c, p, bufs, n, (const struct sockaddr *)&c->server_addr,
+                               c->server_addrlen);
 }
 
 MQVPN_INTERNAL
@@ -954,6 +960,67 @@ client_destroy_engine(mqvpn_client_t *c)
     c->engine = NULL;
 }
 
+/* Finalise a slot's transport exactly once: harvest ops.get_stats into the
+ * retired totals (a failing get_stats consumes nothing), then ops.release.
+ * Never closes anything — the platform owns the socket. The lifecycle flag
+ * transport_released is set by the FSM (TRANSPORT_RELEASED) or, at destroy,
+ * left as is because the object is going away. */
+static void
+client_finalize_transport(mqvpn_client_t *c, path_entry_t *p)
+{
+    /* Snapshot, then clear the slot BEFORE calling out: transport callbacks
+     * must not re-enter the library, but if one does (platform bug) it finds
+     * an already-finalised slot (ops.send == NULL) and cannot trigger a
+     * second release. */
+    mqvpn_path_ops_t ops = p->ops;
+    void *ctx = p->transport_ctx;
+    memset(&p->ops, 0, sizeof(p->ops)); /* send == NULL: nothing installed */
+    p->transport_ctx = NULL;
+
+    mqvpn_transport_stats_t st = {0};
+    if (ops.get_stats && ops.get_stats(ctx, &st) == MQVPN_OK) {
+        c->retired_tx_sends += st.tx_sends;
+        c->retired_tx_datagrams += st.tx_datagrams;
+    }
+    if (ops.release) ops.release(ctx);
+}
+
+/* Field-guarded prefix copy of a caller's ops table: an optional function
+ * pointer is taken only when the caller's struct_size covers it whole, so a
+ * struct_size ending partway through a field can never yield a garbage
+ * non-NULL pointer (a byte-wise memcpy of a prefix could). `send` presence
+ * is validated by the caller. */
+static void
+client_copy_path_ops(mqvpn_path_ops_t *dst, const mqvpn_path_ops_t *src)
+{
+    memset(dst, 0, sizeof(*dst));
+    dst->struct_size = sizeof(*dst);
+    dst->send = src->send;
+    if (src->struct_size >=
+        offsetof(mqvpn_path_ops_t, get_stats) + sizeof(src->get_stats))
+        dst->get_stats = src->get_stats;
+    if (src->struct_size >= offsetof(mqvpn_path_ops_t, release) + sizeof(src->release))
+        dst->release = src->release;
+}
+
+/* Public udp_tx_* view: retired totals + every live ctx's cumulative snapshot. */
+static void
+client_tx_totals(const mqvpn_client_t *c, uint64_t *sends, uint64_t *datagrams)
+{
+    uint64_t s = c->retired_tx_sends, d = c->retired_tx_datagrams;
+    for (int i = 0; i < c->n_paths; i++) {
+        const path_entry_t *p = &c->paths[i];
+        if (p->transport_released || !p->ops.get_stats) continue;
+        mqvpn_transport_stats_t st = {0};
+        if (p->ops.get_stats(p->transport_ctx, &st) == MQVPN_OK) {
+            s += st.tx_sends;
+            d += st.tx_datagrams;
+        }
+    }
+    *sends = s;
+    *datagrams = d;
+}
+
 static void
 client_reset_path_runtime(mqvpn_client_t *c, path_entry_t *p)
 {
@@ -1059,7 +1126,7 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
  *
  * Design: a send error is NEVER taken as proof of path death. Path life is
  * decided solely by the platform monitors (netlink_mon / route_mon), which
- * detach a dead path (platform_attached=0, fd closed). While any path is
+ * detach a dead path (transport_attached=0). While any path is
  * still attached, a failed send is downgraded to EAGAIN (xquic keeps the
  * connection and retries); only when the monitors have detached every path
  * does the hard XQC_SOCKET_ERROR propagate and close/reconnect.
@@ -1080,7 +1147,35 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
 static ssize_t
 path_send_dead_retcode(const mqvpn_client_t *c)
 {
-    return (mqvpn_client_first_active_fd(c) >= 0) ? XQC_SOCKET_EAGAIN : XQC_SOCKET_ERROR;
+    return (first_active_idx(c) >= 0) ? XQC_SOCKET_EAGAIN : XQC_SOCKET_ERROR;
+}
+
+/* Offer n datagrams to the slot's transport (§ ABI 3 send contract).
+ * Precondition: p->transport_attached. Folds the 0-return contract
+ * violation into MQVPN_TX_FAILED (logged once per client) and accounts
+ * bytes_tx for the accepted prefix on both the client and the slot. */
+static int
+path_transport_send(mqvpn_client_t *c, path_entry_t *p, const mqvpn_datagram_t *bufs,
+                    unsigned n, const struct sockaddr *peer, socklen_t peerlen)
+{
+    int k = p->ops.send(p->transport_ctx, bufs, n, peer, peerlen);
+    if (k == 0) {
+        if (!c->tx_zero_return_logged) {
+            c->tx_zero_return_logged = 1;
+            LOG_W(c,
+                  "transport: send returned 0 (contract violation), treating as FAILED");
+        }
+        return MQVPN_TX_FAILED;
+    }
+    if (k < 0)
+        return (k == MQVPN_TX_WOULD_BLOCK) ? MQVPN_TX_WOULD_BLOCK : MQVPN_TX_FAILED;
+    if ((unsigned)k > n) k = (int)n; /* defensive: never trust more than offered */
+    uint64_t bytes = 0;
+    for (int i = 0; i < k; i++)
+        bytes += bufs[i].len;
+    c->bytes_tx += bytes;
+    p->bytes_tx += bytes;
+    return k;
 }
 
 static ssize_t
@@ -1090,33 +1185,20 @@ cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *pe
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
     mqvpn_client_t *c = conn->client;
     /* Prefer the rotated handshake primary (issue #46); fall back to any
-     * still-active slot if the primary was dropped mid-session. Without
-     * primary preference, handshake on a non-paths[0] primary would silently
-     * sendto via paths[0].fd. Without first-active fallback, a dropped
-     * primary mid-session would sendto via a dead fd / EBADF. */
-    int active_idx = -1;
+     * still-attached slot if the primary was dropped mid-session. */
+    int idx;
     int pidx = c->primary_path_idx;
-    if (pidx < c->n_paths && c->paths[pidx].platform_attached)
-        active_idx = pidx;
+    if (pidx < c->n_paths && c->paths[pidx].transport_attached)
+        idx = pidx;
     else
-        active_idx = first_active_idx(c);
-    int fd = (active_idx >= 0) ? c->paths[active_idx].fd : -1;
-    if (fd < 0) return XQC_SOCKET_ERROR;
+        idx = first_active_idx(c);
+    if (idx < 0) return XQC_SOCKET_ERROR; /* no transport at all: as before */
 
-    ssize_t res;
-    do {
-        /* Winsock sendto() len is int; cast silences C4267 under /WX (size<=MTU). */
-        res = sendto(fd, buf, (int)size, MSG_DONTWAIT, peer, peerlen);
-    } while (res < 0 && errno == EINTR);
-    if (res < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return XQC_SOCKET_EAGAIN;
-        return XQC_SOCKET_ERROR;
-    }
-    c->bytes_tx += (uint64_t)res;
-    c->paths[active_idx].bytes_tx += (uint64_t)res;
-    c->tx_sends++; /* one sendto = one datagram; keeps the batching factor */
-    c->tx_datagrams++;
-    return res;
+    mqvpn_datagram_t d = {buf, size};
+    int k = path_transport_send(c, &c->paths[idx], &d, 1, peer, peerlen);
+    if (k >= 1) return (ssize_t)size;
+    if (k == MQVPN_TX_WOULD_BLOCK) return XQC_SOCKET_EAGAIN;
+    return path_send_dead_retcode(c);
 }
 
 static ssize_t
@@ -1125,29 +1207,23 @@ cb_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
 {
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
     mqvpn_client_t *c = conn->client;
-    int fd = get_fd_for_path(c, path_id);
-    if (fd < 0) return path_send_dead_retcode(c);
+    path_entry_t *p = get_path_entry_for_send(c, path_id);
+    /* A dropped slot bound to this path_id is returned deliberately and
+     * refused here (drop-window semantics: never fall through to a sibling). */
+    if (!p || !p->transport_attached) return path_send_dead_retcode(c);
 
-    ssize_t res;
-    do {
-        /* Winsock sendto() len is int; cast silences C4267 under /WX (size<=MTU). */
-        res = sendto(fd, buf, (int)size, MSG_DONTWAIT, peer, peerlen);
-    } while (res < 0 && errno == EINTR);
-    if (res < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return XQC_SOCKET_EAGAIN;
-        return path_send_dead_retcode(c);
-    }
-    c->bytes_tx += (uint64_t)res;
-    {
-        path_entry_t *p = find_path_by_xqc_id(c, path_id);
-        if (p) p->bytes_tx += (uint64_t)res;
-    }
-    c->tx_sends++; /* one sendto = one datagram; keeps the batching factor */
-    c->tx_datagrams++;
-    return res;
+    mqvpn_datagram_t d = {buf, size};
+    int k = path_transport_send(c, p, &d, 1, peer, peerlen);
+    if (k >= 1) return (ssize_t)size;
+    if (k == MQVPN_TX_WOULD_BLOCK) return XQC_SOCKET_EAGAIN;
+    return path_send_dead_retcode(c);
 }
 
 #if defined(__linux__)
+/* Batched send: xquic hands a burst (<= XQC_MAX_SEND_MSG_ONCE) for one path;
+ * the transport decides how to put it on the wire (GSO / sendmmsg / one by
+ * one) and reports the accepted prefix, which is exactly xquic's mmsg
+ * contract. */
 static ssize_t
 cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vlen,
                  const struct sockaddr *peer, socklen_t peerlen, void *conn_user_data)
@@ -1155,49 +1231,19 @@ cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vle
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
     mqvpn_client_t *c = conn->client;
     path_entry_t *p = get_path_entry_for_send(c, path_id);
-    if (!p || p->fd < 0) return path_send_dead_retcode(c);
+    if (!p || !p->transport_attached) return path_send_dead_retcode(c);
+    if (vlen == 0) return 0;
+    if (vlen > XQC_MAX_SEND_MSG_ONCE) vlen = XQC_MAX_SEND_MSG_ONCE;
 
-    mqvpn_tx_counters_t tx = {0};
-    int was_gso = !p->gso_disabled;
-    ssize_t r = mqvpn_udp_send_batch(p->fd, msg_iov, vlen, peer, peerlen,
-                                     c->gso_available, &p->gso_disabled, &tx);
-    /* Captured before any LOG_* call: the log write path can clobber errno,
-     * and the hard-error branch below is the only diagnostic that reports
-     * it. Meaningful only when r == MQVPN_SEND_ERR (udp_offload.h). */
-    int send_errno = errno;
-    if (was_gso && p->gso_disabled) {
-        /* One-shot transition: gso_disabled only resets on fd (re)assignment
-         * (mqvpn_client_add_path_fd), so this fires at most once per fd
-         * lifetime — no spam guard needed. The reason comes from the flag
-         * itself (mqvpn_udp_send_batch stores the classifying errno there),
-         * NOT from errno: this transition is also reachable when the call
-         * overall SUCCEEDED (zero-sent retry-as-sendmmsg path), where errno
-         * belongs to the successful retry. The handle names WHICH path fell
-         * back — on a mixed-MTU multipath bond (e.g. fiber + LTE) only the
-         * narrow path degrades, and the operator needs to see which one
-         * (same identifier as the "path %lld -> %s" event log). EMSGSIZE
-         * here reads as "this route's PMTU cannot carry our segment size"
-         * (see gso_class_error in udp_offload.c). */
-        LOG_W(c,
-              "udp-gso: runtime GSO failure (%s), sticky fallback to sendmmsg on "
-              "path %lld",
-              strerror(p->gso_disabled), (long long)p->handle);
+    mqvpn_datagram_t bufs[XQC_MAX_SEND_MSG_ONCE];
+    for (unsigned int i = 0; i < vlen; i++) {
+        bufs[i].data = (const uint8_t *)msg_iov[i].iov_base;
+        bufs[i].len = msg_iov[i].iov_len;
     }
-    c->bytes_tx += tx.bytes;
-    /* bytes attributed to the slot owning the fd actually used — deliberately
-     * differs from cb_write_socket_ex's requested-path attribution in the
-     * fallback window */
-    p->bytes_tx += tx.bytes;
-    c->tx_sends += tx.sends;
-    c->tx_datagrams += tx.datagrams;
-    if (r >= 0) return r;
-    if (r == MQVPN_SEND_EAGAIN) return XQC_SOCKET_EAGAIN;
-    /* xquic's own |error send mmsg| log carries no errno, and the retcode
-     * from this callback can escalate to connection close; GSO-class errors
-     * are absorbed by the sticky fallback in mqvpn_udp_send_batch, so this
-     * branch is rare — no spam risk. */
-    LOG_E(c, "batch send: %s", strerror(send_errno));
-    return path_send_dead_retcode(c); /* same downgrade policy as cb_write_socket_ex */
+    int k = path_transport_send(c, p, bufs, vlen, peer, peerlen);
+    if (k >= 1) return (ssize_t)k;
+    if (k == MQVPN_TX_WOULD_BLOCK) return XQC_SOCKET_EAGAIN;
+    return path_send_dead_retcode(c);
 }
 #endif
 
@@ -2077,7 +2123,7 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
          * tick boundary; path_on_validation_ok's `if (state != VALIDATING)`
          * guard makes the second dispatch a LOG_D no-op. */
         int pidx = c->primary_path_idx;
-        if (c->n_paths > 0 && pidx < c->n_paths && c->paths[pidx].platform_attached &&
+        if (c->n_paths > 0 && pidx < c->n_paths && c->paths[pidx].transport_attached &&
             c->paths[pidx].state == PATH_LC_VALIDATING) {
             path_entry_t *pp = &c->paths[pidx];
             path_event_ctx_t v_ctx = {
@@ -2447,7 +2493,7 @@ client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
 
 /* Activate every path currently in PATH_LC_PENDING.
  *
- * PR3 translator: the legacy predicate (xquic_path_live=0 && platform_attached=1)
+ * PR3 translator: the legacy predicate (xquic_path_live=0 && transport_attached=1)
  * is now expressed by the PENDING lifecycle state. CREATE_WAIT slots (also
  * have xquic_path_live=0) are correctly skipped — they wait for their retry
  * timer in tick(), not for re-activation here. */
@@ -2533,9 +2579,9 @@ mqvpn_client_test_force_validating(mqvpn_client_t *c, mqvpn_path_handle_t handle
     path_entry_t *p = find_path_by_handle(c, handle);
     if (!p) return -1;
     /* Force the slot into VALIDATING — the invariants for VALIDATING
-     * require platform_attached=1, xquic_path_live=1, fd>=0,
+     * require transport_attached=1, xquic_path_live=1, fd>=0,
      * recreate_after_us=0 (see path_invariant_check in path_state_machine.c). */
-    p->platform_attached = 1;     /* LINT-ALLOW: test wrapper seed */
+    p->transport_attached = 1;    /* LINT-ALLOW: test wrapper seed */
     p->xquic_path_live = 1;       /* LINT-ALLOW: test wrapper seed */
     p->xqc_path_id = xqc_path_id; /* LINT-ALLOW: test wrapper seed */
     p->recreate_after_us = 0;     /* LINT-ALLOW: test wrapper seed */
@@ -2735,9 +2781,9 @@ cli_start_connection(mqvpn_client_t *c)
      * xquic connection (avoids leaking an xquic conn on early bail-out). */
     if (c->n_paths > 0 && c->primary_path_idx < c->n_paths) {
         path_entry_t *pp = &c->paths[c->primary_path_idx];
-        if (!pp->platform_attached || pp->fd < 0) {
-            LOG_W(c, "primary path[%s] not ready (attached=%d fd=%d state=%s)", pp->name,
-                  pp->platform_attached, pp->fd, path_lifecycle_name(pp->state));
+        if (!pp->transport_attached) {
+            LOG_W(c, "primary path[%s] not ready (attached=%d state=%s)", pp->name,
+                  pp->transport_attached, path_lifecycle_name(pp->state));
             goto cleanup;
         }
     }
@@ -2928,19 +2974,13 @@ init_xquic_engine(mqvpn_client_t *c)
     xconfig.cfg_log_level = (xqc_log_level_t)map_log_level_to_xquic(cfg->log_level);
 
 #if defined(__linux__)
-    /* `cfg` is init_xquic_engine's existing local (= &c->config). tx_batch is
-     * recorded rather than re-derived: cli_start_connection() feeds this same
-     * flag to conn_settings.defer_send_flush, so the deferred flush cannot
-     * outlive the batch callback it exists to fill. Registration mechanics
-     * and the e2e-pinned marker strings are shared with the server via
-     * mqvpn_tx_batch_register (mqvpn_conn_settings.h). */
-    if (mqvpn_tx_batch_register(cfg->udp_gso, cb_write_mmsg_ex, &tcbs, &xconfig,
-                                &c->gso_available)) {
+    /* tx_batch is recorded rather than re-derived: cli_start_connection()
+     * feeds this same flag to conn_settings.defer_send_flush, so the deferred
+     * flush cannot outlive the batch callback it exists to fill. The GSO
+     * capability probe and its "udp-gso: " marker live in the POSIX bind
+     * (src/bind/posix.c), which is where UDP_SEGMENT is actually used. */
+    if (mqvpn_tx_batch_register(cfg->udp_gso, cb_write_mmsg_ex, &tcbs, &xconfig))
         c->tx_batch = 1;
-        LOG_I(c, "%s",
-              c->gso_available ? MQVPN_UDP_GSO_MARKER_ENABLED
-                               : MQVPN_UDP_GSO_MARKER_UNAVAILABLE);
-    }
 #endif
 
     c->engine = xqc_engine_create(XQC_ENGINE_CLIENT, &xconfig, &engine_ssl, &engine_cbs,
@@ -3078,11 +3118,21 @@ mqvpn_client_destroy(mqvpn_client_t *client)
      * parse one stable line per run regardless of configuration.
      * Deliberately NOT prefixed "udp-gso: ": that prefix is an enablement
      * marker whose absence is asserted when UdpGso=false. */
-    LOG_I(client, MQVPN_UDP_TX_LINE_FMT, client->tx_sends, client->tx_datagrams,
-          client->config.udp_gso);
+    uint64_t tx_sends, tx_datagrams;
+    client_tx_totals(client, &tx_sends, &tx_datagrams);
+    LOG_I(client, MQVPN_UDP_TX_LINE_FMT, tx_sends, tx_datagrams, client->config.udp_gso);
 
     client_destroy_engine(client);
     cli_conn_destroy(client);
+
+    /* Whole-object teardown finalises every ctx the platform still has
+     * attached (no released-notification is expected after destroy). The
+     * native sockets stayed open through the engine teardown above because
+     * the final flush may have sent on them; the platform closes them next. */
+    for (int i = 0; i < client->n_paths; i++) {
+        path_entry_t *p = &client->paths[i];
+        if (!p->transport_released) client_finalize_transport(client, p);
+    }
     free(client);
 }
 
@@ -3125,7 +3175,7 @@ mqvpn_client_connect(mqvpn_client_t *c)
 
     /* Warn if the scheduler choice has unmet path-count preconditions.
      * This is a snapshot at connect time — adding a second path later via
-     * mqvpn_client_add_path_fd() resolves the underlying issue but does
+     * mqvpn_client_add_path() resolves the underlying issue but does
      * not retract the warning. Acceptable tradeoff: the warning is
      * informational only and the typical backup_fec deployment configures
      * both paths before connect(). */
@@ -3230,7 +3280,7 @@ mqvpn_client_disconnect(mqvpn_client_t *c)
 /* ─── Path management ─── */
 
 /* Map the slot's lifecycle state after the synchronous activation half of
- * mqvpn_client_add_path_fd_with_outcome to the public add-path outcome.
+ * mqvpn_client_add_path to the public add-path outcome.
  *
  * Called only when activation was attempted (multipath_ready was true).
  *
@@ -3277,26 +3327,38 @@ add_path_outcome_from_state(path_lifecycle_t s)
 }
 
 mqvpn_path_handle_t
-mqvpn_client_add_path_fd_with_outcome(mqvpn_client_t *c, int fd,
-                                      const mqvpn_path_desc_t *desc,
-                                      mqvpn_add_path_outcome_t *outcome)
+mqvpn_client_add_path(mqvpn_client_t *c, const mqvpn_path_desc_t *desc,
+                      const mqvpn_path_ops_t *ops, void *transport_ctx,
+                      mqvpn_add_path_outcome_t *outcome)
 {
-    if (!c || fd < 0) return -1;
+    if (!c || !ops) return -1;
     ASSERT_TICK_THREAD(c);
+    if (ops->struct_size < offsetof(mqvpn_path_ops_t, send) + sizeof(ops->send))
+        return -1;
+    if (!ops->send) return -1;
+    /* Validate before mutating any slot. An oversized local_addr_len used to
+     * be stored verbatim while its copy was skipped, and
+     * mqvpn_client_on_socket_recv() then copied that many bytes out of the
+     * slot into a stack sockaddr_storage on every received packet — an
+     * over-read and a stack overflow. Bound it by both ends of the copy
+     * (desc->local_addr is the source, the slot's sockaddr_storage the
+     * destination) and reject, as mqvpn_server_set_transport and
+     * mqvpn_client_set_server_addr do. */
+    if (desc &&
+        desc->struct_size >=
+            offsetof(mqvpn_path_desc_t, local_addr_len) + sizeof(desc->local_addr_len) &&
+        (desc->local_addr_len > sizeof(desc->local_addr) ||
+         desc->local_addr_len > sizeof(((path_entry_t *)0)->local_addr)))
+        return -1;
 
-    /* Reuse a CLOSED slot if available, otherwise append.
-     *
-     * Tighten the predicate with `!xquic_path_live`: a slot in CLOSED_DROPPED
-     * whose xquic-side path hasn't drained yet (xquic_path_live=1 with a
-     * pending cb_path_removed) carries a live xqc_path_id binding. Reusing
-     * the slot now zeroes that binding via path_entry_init() — when the
-     * delayed cb_path_removed fires it can no longer find_path_by_xqc_id,
-     * leaving xquic's removal accounting unreconciled with the lib slot.
-     * Waiting for xquic-side cleanup (xquic_path_live=0) is the natural fence. */
+    /* Reuse only a fully released slot. A CLOSED_DROPPED slot whose platform
+     * has not yet called on_platform_path_released still owns a ctx that is
+     * owed exactly one release; recycling it would orphan that ctx and make
+     * the late notification land on a recycled handle. Append instead; -1
+     * only when the table is full (documented behaviour of the re-add path). */
     int idx = -1;
     for (int i = 0; i < c->n_paths; i++) {
-        if (c->paths[i].status == MQVPN_PATH_CLOSED && !c->paths[i].platform_attached &&
-            !c->paths[i].xquic_path_live) {
+        if (c->paths[i].state == PATH_LC_CLOSED_FREE) {
             idx = i;
             break;
         }
@@ -3308,58 +3370,42 @@ mqvpn_client_add_path_fd_with_outcome(mqvpn_client_t *c, int fd,
 
     path_entry_t *p = &c->paths[idx];
     /* Slot init (§7.1 file-scope allow — slot has no prior state to preserve).
-     * path_entry_init leaves p->state at PATH_LC_CLOSED_FREE so EVENT_ADD_FD
-     * transitions cleanly to PENDING and the platform_attached=1 field is
-     * applied inside path_on_add_fd. */
+     * path_entry_init leaves p->state at PATH_LC_CLOSED_FREE so EVENT_ADD
+     * transitions cleanly to PENDING; the attached/released flags are
+     * applied inside path_on_add. */
     path_entry_init(p);
     p->handle = c->next_path_handle++;
-    p->fd = fd;
-    /* fd numbers are kernel-recycled; reset on every assignment */
-    p->gso_disabled = 0;
-
-    /* Ensure adequate socket buffers for high-throughput UDP (ref: WireGuard) */
-    int bufsize = SOCKET_BUF_SIZE;
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, (const char *)&bufsize, sizeof(bufsize));
-    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (const char *)&bufsize, sizeof(bufsize));
-#ifdef SO_SNDBUFFORCE
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUFFORCE, (const char *)&bufsize, sizeof(bufsize));
-    setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, (const char *)&bufsize, sizeof(bufsize));
-#endif
+    client_copy_path_ops(&p->ops, ops);
+    p->transport_ctx = transport_ctx;
 
     if (desc) {
-        memcpy(p->name, desc->iface, sizeof(p->name));
-        p->name[sizeof(p->name) - 1] = '\0';
-        if (desc->local_addr_len > 0 && desc->local_addr_len <= sizeof(p->local_addr))
+        /* Field-guarded reads (same rule as the ops table): a field is taken
+         * only when the caller's struct_size covers it whole. */
+#define DESC_HAS(f) \
+    (desc->struct_size >= offsetof(mqvpn_path_desc_t, f) + sizeof(desc->f))
+        if (DESC_HAS(iface)) {
+            memcpy(p->name, desc->iface, sizeof(p->name));
+            p->name[sizeof(p->name) - 1] = '\0';
+        }
+        if (DESC_HAS(local_addr) && DESC_HAS(local_addr_len) &&
+            desc->local_addr_len > 0) {
             memcpy(&p->local_addr, desc->local_addr, desc->local_addr_len);
-        p->local_addr_len = desc->local_addr_len;
-        p->platform_net_id = desc->platform_net_id;
-        p->flags = desc->flags;
+            p->local_addr_len = desc->local_addr_len;
+        }
+        if (DESC_HAS(platform_net_id)) p->platform_net_id = desc->platform_net_id;
+        if (DESC_HAS(flags)) p->flags = desc->flags;
+#undef DESC_HAS
     }
 
-    /* CLOSED_FREE -> PENDING via EVENT_ADD_FD. path_on_add_fd handler sets
-     * platform_attached=1 and emits the transition log. */
     path_event_ctx_t add_ctx = {.now_us = client_now_us(c)};
-    path_on_event(c, p, PATH_EVENT_ADD_FD, &add_ctx);
+    path_on_event(c, p, PATH_EVENT_ADD, &add_ctx);
 
-    /* Default outcome: OK (deferred until cb_ready_to_create_path drains
-     * PENDING slots). Will be overwritten if activation runs synchronously. */
     if (outcome) *outcome = MQVPN_ADD_PATH_OK;
-
-    /* If multipath is already negotiated, activate immediately. Any other
-     * PENDING slot (rare — usually drained by the ready_to_create_path
-     * callback) should have been activated too. */
     if (c->multipath_ready && c->config.multipath && c->conn) {
         activate_pending_paths(c);
         if (outcome) *outcome = add_path_outcome_from_state(p->state);
     }
-
     return p->handle;
-}
-
-mqvpn_path_handle_t
-mqvpn_client_add_path_fd(mqvpn_client_t *c, int fd, const mqvpn_path_desc_t *desc)
-{
-    return mqvpn_client_add_path_fd_with_outcome(c, fd, desc, NULL);
 }
 
 /* Abandon-emission predicate shared by REMOVE_API and PLATFORM_DROP: any
@@ -3431,15 +3477,28 @@ mqvpn_client_on_platform_path_dropped(mqvpn_client_t *c, mqvpn_path_handle_t han
 }
 
 int
-mqvpn_client_on_platform_fd_closed(mqvpn_client_t *c, mqvpn_path_handle_t handle)
+mqvpn_client_on_platform_path_released(mqvpn_client_t *c, mqvpn_path_handle_t handle)
 {
     if (!c) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
     path_entry_t *p = find_path_by_handle(c, handle);
-    if (!p) return MQVPN_ERR_INVALID_ARG;
+    if (!p) return MQVPN_ERR_INVALID_ARG;                 /* unknown or recycled handle */
+    if (p->state == PATH_LC_CLOSED_FREE) return MQVPN_OK; /* late duplicate */
+    if (p->state != PATH_LC_CLOSED_DROPPED) {
+        LOG_W(c,
+              "path[%s] TRANSPORT_RELEASED in state %s: drop/remove must precede release",
+              p->name, path_lifecycle_name(p->state));
+        return MQVPN_ERR_INVALID_STATE;
+    }
+    if (p->transport_released || !p->ops.send)
+        return MQVPN_OK; /* duplicate (or re-entered mid-finalise) */
 
+    /* Exactly once: harvest + release here (the FSM stays free of transport
+     * calls, mirroring how PATH_ABANDON is emitted by the caller of
+     * PLATFORM_DROP), then let the FSM flip the flag and re-evaluate the gate. */
+    client_finalize_transport(c, p);
     path_event_ctx_t ctx = {.now_us = client_now_us(c)};
-    path_on_event(c, p, PATH_EVENT_FD_CLOSED, &ctx);
+    path_on_event(c, p, PATH_EVENT_TRANSPORT_RELEASED, &ctx);
     return MQVPN_OK;
 }
 
@@ -3458,7 +3517,7 @@ static int
 reactivate_slot_eligible(const path_entry_t *p)
 {
     if (p->xquic_path_live) return MQVPN_ERR_INVALID_STATE;
-    if (!p->platform_attached) return MQVPN_ERR_INVALID_STATE;
+    if (!p->transport_attached) return MQVPN_ERR_INVALID_STATE;
     if (p->state != PATH_LC_DEGRADED && p->state != PATH_LC_CREATE_WAIT &&
         p->state != PATH_LC_CLOSED_RECOVERABLE)
         return MQVPN_ERR_INVALID_STATE;
@@ -4140,8 +4199,7 @@ mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
      * field comment on c->pkts_lane_tcp above for why this must not be
      * summed with the lane's internal flows_rejected_cap. */
     out->tcp_flows_rejected = c->tcp_flows_rejected;
-    out->udp_tx_sends = c->tx_sends;
-    out->udp_tx_datagrams = c->tx_datagrams;
+    client_tx_totals(c, &out->udp_tx_sends, &out->udp_tx_datagrams);
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
     /* tcp_flows_active/total and raw_markers_active are gauges/counters
      * the TCP-lane flow table already maintains (mqvpn_tcp_lane_get_stats)
