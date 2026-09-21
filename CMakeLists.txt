@@ -966,9 +966,9 @@ if(BUILD_TESTING)
     endif()
 
     # libmqvpn public API test (links libmqvpn + xquic)
-    add_executable(test_api tests/test_api.c)
+    add_executable(test_api tests/test_api.c tests/fake_transport.c)
     target_link_libraries(test_api mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
-    target_include_directories(test_api PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_include_directories(test_api PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
     if(MQVPN_HYBRID_TCP_LANE_BUILD)
         # Lets test_api compile the hybrid-only tests (tcp_max_flows
         # pool-bound warn); without it those #ifdef blocks are vacuous.
