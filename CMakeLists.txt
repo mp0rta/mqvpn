@@ -247,8 +247,7 @@ set(MQVPN_LIB_SOURCES
 if(NOT WIN32)
     set(MQVPN_BIND_SOURCES
         src/bind/posix_offload.c
-        # src/bind/posix.c is appended by Task 9 (the file does not exist yet;
-        # CMake refuses a missing non-GENERATED source at configure time)
+        src/bind/posix.c
     )
 else()
     set(MQVPN_BIND_SOURCES)   # mqvpn_bind_winsock lands in slice 2
@@ -1127,7 +1126,7 @@ if(XQUIC_BUILD_DIR)
     endif()
     install(FILES ${_XQUIC_BUILD_ABS}/libxquic.so DESTINATION lib)
 endif()
-install(FILES include/libmqvpn.h DESTINATION include)
+install(FILES include/libmqvpn.h include/mqvpn_bind_posix.h DESTINATION include)
 configure_file(systemd/mqvpn-server.service.in
     ${CMAKE_BINARY_DIR}/systemd/mqvpn-server.service @ONLY)
 configure_file(systemd/mqvpn-client@.service.in
