@@ -23,15 +23,6 @@
 #  include <ws2tcpip.h>
 #  include <windows.h>
 #  include <process.h>
-#  define MSG_DONTWAIT 0
-#  undef EAGAIN
-#  define EAGAIN WSAEWOULDBLOCK
-#  undef EWOULDBLOCK
-#  define EWOULDBLOCK WSAEWOULDBLOCK
-#  undef EINTR
-#  define EINTR WSAEINTR
-#  undef errno
-#  define errno WSAGetLastError()
 #else
 #  include <unistd.h>
 #  include <sys/time.h>
@@ -4387,7 +4378,7 @@ mqvpn_client_set_server_addr(mqvpn_client_t *c, const struct sockaddr *addr,
      * clamping) also avoids memcpy over-reading the caller's real sockaddr
      * object, which is typically far smaller than the bogus length; every
      * legitimate sockaddr fits in sockaddr_storage, so an oversized length
-     * is always a caller bug. Mirrors mqvpn_server_set_socket_fd. */
+     * is always a caller bug. Mirrors mqvpn_server_set_transport. */
     if (addrlen > sizeof(c->server_addr)) return MQVPN_ERR_INVALID_ARG;
     memcpy(&c->server_addr, addr, addrlen);
     c->server_addrlen = addrlen;
