@@ -978,9 +978,9 @@ if(BUILD_TESTING)
     add_test(NAME test_api COMMAND test_api)
 
     # Server API test (links libmqvpn + xquic)
-    add_executable(test_server tests/test_server.c)
+    add_executable(test_server tests/test_server.c tests/fake_transport.c)
     target_link_libraries(test_server mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
-    target_include_directories(test_server PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_include_directories(test_server PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
     target_compile_definitions(test_server PRIVATE
         TEST_CERT_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.crt"
         TEST_KEY_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.key"

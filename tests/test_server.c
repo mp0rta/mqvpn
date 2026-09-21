@@ -32,6 +32,7 @@
 #include <errno.h>
 #include <poll.h>
 
+#include "fake_transport.h"
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
 
@@ -349,9 +350,9 @@ TEST(server_double_start)
     mqvpn_server_destroy(s);
 }
 
-/* set_socket_fd tests */
+/* set_transport tests */
 
-TEST(server_set_socket_fd)
+TEST(server_set_transport_args)
 {
     reset_mocks();
     mqvpn_config_t *cfg = make_server_config();
@@ -363,12 +364,68 @@ TEST(server_set_socket_fd)
     mqvpn_config_free(cfg);
 
     struct sockaddr_in laddr = {.sin_family = AF_INET};
-    ASSERT_EQ(mqvpn_server_set_socket_fd(s, 42, (struct sockaddr *)&laddr, sizeof(laddr)),
+    static fake_transport_t t; /* ~130 KB: keep it off the ASan stack */
+    fake_transport_init(&t);
+    ASSERT_EQ(mqvpn_server_set_transport(s, fake_server_ops(), &t,
+                                         (struct sockaddr *)&laddr, sizeof(laddr)),
               MQVPN_OK);
-    ASSERT_EQ(mqvpn_server_set_socket_fd(s, -1, NULL, 0), MQVPN_ERR_INVALID_ARG);
-    ASSERT_EQ(mqvpn_server_set_socket_fd(NULL, 42, NULL, 0), MQVPN_ERR_INVALID_ARG);
+    /* Argument validation runs before the state check, so a bad argument is
+     * INVALID_ARG even once a transport is installed. */
+    ASSERT_EQ(mqvpn_server_set_transport(NULL, fake_server_ops(), &t, NULL, 0),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_set_transport(s, NULL, &t, NULL, 0), MQVPN_ERR_INVALID_ARG);
 
     mqvpn_server_destroy(s);
+}
+
+/* Scope-per-connection behaviour -- a unique non-zero scope per accepted
+ * connection, release_scope exactly once per close, scope 0 for pre-accept and
+ * stateless-reset sends, and every scope released before the shared release --
+ * needs a real handshake to observe. It is asserted at the transport level by
+ * the real-socket loopback tests further down this file
+ * (server_session_quic_loopback and the two reconnect tests), which drive a
+ * full in-process client/server exchange over the POSIX bind. The fake
+ * transport here covers the install-time contract only. */
+
+TEST(server_get_stats_failure_reports_zero)
+{
+    reset_mocks();
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    static fake_transport_t t;
+    fake_transport_init(&t);
+    t.sends_accepted = 9;
+    ASSERT_EQ(mqvpn_server_set_transport(s, fake_server_ops(), &t, NULL, 0), MQVPN_OK);
+    mqvpn_stats_t st;
+    ASSERT_EQ(mqvpn_server_get_stats(s, &st), MQVPN_OK);
+    ASSERT_EQ(st.udp_tx_sends, 9u);
+    t.stats_rc = MQVPN_ERR_ENGINE; /* the fake scribbles 12345 before failing */
+    ASSERT_EQ(mqvpn_server_get_stats(s, &st), MQVPN_OK);
+    ASSERT_EQ(st.udp_tx_sends, 0u); /* failure contributes zero, never the scribble */
+    mqvpn_server_destroy(s);
+}
+
+TEST(server_start_without_transport_is_legal)
+{
+    reset_mocks();
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    ASSERT_EQ(mqvpn_server_start(s), MQVPN_OK);
+    static fake_transport_t t;
+    fake_transport_init(&t);
+    /* after start: refused */
+    ASSERT_EQ(mqvpn_server_set_transport(s, fake_server_ops(), &t, NULL, 0),
+              MQVPN_ERR_INVALID_STATE);
+    mqvpn_server_destroy(s);
+    ASSERT_EQ(t.release_calls, 0u);
 }
 
 /* Query function null-safety tests */
@@ -1110,9 +1167,9 @@ TEST(server_session_callbacks_registered)
     mqvpn_server_destroy(s);
 }
 
-TEST(server_session_set_socket_with_addr)
+TEST(server_set_transport_once)
 {
-    /* Verify set_socket_fd stores local address */
+    /* Verify set_transport is accepted exactly once */
     reset_mocks();
     mqvpn_config_t *cfg = make_server_config();
     mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
@@ -1128,13 +1185,23 @@ TEST(server_session_set_socket_with_addr)
     laddr.sin_port = htons(443);
     laddr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-    ASSERT_EQ(mqvpn_server_set_socket_fd(s, 42, (struct sockaddr *)&laddr, sizeof(laddr)),
+    static fake_transport_t t1, t2; /* ~130 KB each: keep off the ASan stack */
+    fake_transport_init(&t1);
+    fake_transport_init(&t2);
+    ASSERT_EQ(mqvpn_server_set_transport(s, fake_server_ops(), &t1,
+                                         (struct sockaddr *)&laddr, sizeof(laddr)),
               MQVPN_OK);
-
-    /* Verify NULL local_addr is also accepted */
-    ASSERT_EQ(mqvpn_server_set_socket_fd(s, 43, NULL, 0), MQVPN_OK);
+    /* Once only: the second install is refused and the offered ctx untouched. */
+    ASSERT_EQ(mqvpn_server_set_transport(s, fake_server_ops(), &t2, NULL, 0),
+              MQVPN_ERR_INVALID_STATE);
+    /* Bad tables are rejected before anything is stored. */
+    mqvpn_server_transport_ops_t bad = *fake_server_ops();
+    bad.send = NULL;
+    ASSERT_EQ(mqvpn_server_set_transport(s, &bad, &t2, NULL, 0), MQVPN_ERR_INVALID_ARG);
 
     mqvpn_server_destroy(s);
+    ASSERT_EQ(t1.release_calls, 1u); /* installed ctx finalised by destroy */
+    ASSERT_EQ(t2.release_calls, 0u); /* refused ctx stays caller-owned */
 }
 
 TEST(server_session_on_tun_v6_no_sessions)
@@ -1787,8 +1854,10 @@ main(void)
     run_server_lifecycle_with_v6();
     run_server_double_start();
 
-    /* set_socket_fd */
-    run_server_set_socket_fd();
+    /* set_transport */
+    run_server_set_transport_args();
+    run_server_get_stats_failure_reports_zero();
+    run_server_start_without_transport_is_legal();
 
     /* Null safety */
     run_server_get_stats_null();
@@ -1806,7 +1875,7 @@ main(void)
 
     /* Session lifecycle (test_server_session per impl_plan) */
     run_server_session_callbacks_registered();
-    run_server_session_set_socket_with_addr();
+    run_server_set_transport_once();
     run_server_session_on_tun_v6_no_sessions();
 
     /* QUIC loopback integration test (test_server_session per impl_plan) */
