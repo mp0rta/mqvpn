@@ -283,7 +283,7 @@ path_event_name(path_event_t ev)
 
 /* ─── PR4: relocated helpers + path_on_event() body ─── */
 
-/* PR2 — transition log emitter using internal 7-state names. Relocated from
+/* PR2 — transition log emitter using internal 9-state names. Relocated from
  * mqvpn_client.c in PR4; client_log/client_now_us are now non-static
  * accessors (declared in path_state_machine.h). */
 void
@@ -300,7 +300,7 @@ path_log_state_change(mqvpn_client_t *c, const path_entry_t *p,
 }
 
 /* PR2 — internal helper. Updates both `status` (public ABI projection) and
- * `state` (internal 7-state lifecycle) atomically. Maintains the
+ * `state` (internal 9-state lifecycle) atomically. Maintains the
  * denormalization invariant `status == path_public_status_from_lifecycle(state)`
  * at every transition exit.
  *

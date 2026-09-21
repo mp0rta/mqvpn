@@ -420,7 +420,7 @@ test_public_status_mapping(void)
     printf("  test_public_status_mapping: OK (9 cases)\n");
 }
 
-/* ─── PR2 Chunk 4: 7-state path_invariant_check ─── */
+/* ─── PR2 Chunk 4: 9-state path_invariant_check ─── */
 
 static void
 test_invariant_pending_pass(void)

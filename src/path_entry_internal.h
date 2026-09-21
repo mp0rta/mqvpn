@@ -62,7 +62,7 @@ typedef struct path_entry_s {
     int transport_released;
     char name[16];
     mqvpn_path_status_t status;
-    path_lifecycle_t state; /* PR2 — internal 7-state, must satisfy:
+    path_lifecycle_t state; /* PR2 — internal 9-state, must satisfy:
                                status == path_public_status_from_lifecycle(state) */
     struct sockaddr_storage local_addr;
     uint32_t local_addr_len;

@@ -105,7 +105,7 @@ typedef enum {
     PATH_REASON_TRANSPORT_RELEASED, /* symmetric with PATH_REASON_XQUIC_REMOVED */
 } path_transition_reason_t;
 
-/* Phase 2 (PR2): internal 7-state lifecycle helpers.
+/* Phase 2 (PR2): internal 9-state lifecycle helpers.
  * The enum `path_lifecycle_t` is defined in path_entry_internal.h to avoid
  * a circular include (path_state_machine.h includes path_entry_internal.h
  * for path_entry_t, which contains a path_lifecycle_t field).
@@ -119,7 +119,7 @@ MQVPN_INTERNAL mqvpn_path_status_t path_public_status_from_lifecycle(path_lifecy
 /* Human-readable name (for logs). */
 MQVPN_INTERNAL const char *path_lifecycle_name(path_lifecycle_t s);
 
-/* Debug-build 7-state invariant check. Asserts the (state, transport_attached,
+/* Debug-build 9-state invariant check. Asserts the (state, transport_attached,
  * transport_released, xquic_path_live, xqc_path_id, recreate_after_us,
  * path_stable_since_us) tuple is legal AND that p->status ==
  * path_public_status_from_lifecycle(p->state) (denormalization invariant).
