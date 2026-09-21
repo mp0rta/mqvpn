@@ -277,9 +277,11 @@ MQVPN_API const char *mqvpn_path_status_string(mqvpn_path_status_t status);
  *   TRANSIENT_FAIL  — xqc_conn_create_path returned a recoverable error
  *                     (e.g. -XQC_EMP_NO_AVAIL_PATH_ID — server hasn't
  *                     distributed CIDs yet). The library's tick recovery
- *                     loop will retry with exponential backoff. The
- *                     platform layer typically rolls back the transport here
- *                     so a fresh re-add starts from a clean state.
+ *                     loop will retry with exponential backoff. A handle
+ *                     was allocated, so the library owns the ctx: a
+ *                     platform that rolls back here must do it with
+ *                     remove_path() + on_platform_path_released(), never
+ *                     by freeing transport_ctx itself.
  *
  *   PERMANENT_FAIL  — xqc_conn_create_path returned -XQC_EMP_CREATE_PATH
  *                     (XQC_MAX_PATHS_COUNT cap hit or OOM). The slot is
@@ -810,9 +812,9 @@ MQVPN_API int mqvpn_client_disconnect(mqvpn_client_t *client);
  *   synchronous activation attempt (see mqvpn_add_path_outcome_t).
  *
  * Returns the handle (>= 0), or -1 on invalid arguments (client/ops NULL,
- * struct_size not covering `send`, send NULL) or a full slot table. Only
- * slots whose previous transport has been fully released are reused; a
- * dropped-but-not-yet-released slot is never recycled.
+ * struct_size not covering `send`, send NULL, oversized desc->local_addr_len)
+ * or a full slot table. Only slots whose previous transport has been fully
+ * released are reused; a dropped-but-not-yet-released slot is never recycled.
  *
  * RE-ENTRANCY: path_event may fire before this returns (see
  * mqvpn_path_event_fn). Thread safety: tick thread only.
@@ -955,6 +957,9 @@ MQVPN_API void mqvpn_server_destroy(mqvpn_server_t *server);
  * owns finalisation: ops.release(ctx) runs inside mqvpn_server_destroy()
  * after every connection's release_scope. Starting without a transport is
  * legal: every send then fails with a hard error until one is installed.
+ * Returns MQVPN_ERR_INVALID_ARG (server/ops NULL, struct_size not covering
+ * `send`, send NULL, local_addrlen larger than the library's
+ * sockaddr_storage) without touching the offered ctx.
  * local_addr (nullable) is the bound address reported to xquic.
  */
 MQVPN_API int mqvpn_server_set_transport(mqvpn_server_t *server,
