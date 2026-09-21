@@ -2579,8 +2579,10 @@ mqvpn_client_test_force_validating(mqvpn_client_t *c, mqvpn_path_handle_t handle
     path_entry_t *p = find_path_by_handle(c, handle);
     if (!p) return -1;
     /* Force the slot into VALIDATING — the invariants for VALIDATING
-     * require transport_attached=1, xquic_path_live=1, fd>=0,
-     * recreate_after_us=0 (see path_invariant_check in path_state_machine.c). */
+     * require transport_attached=1, transport_released=0, xquic_path_live=1,
+     * recreate_after_us=0 (see path_invariant_check in path_state_machine.c).
+     * transport_released=0 comes from mqvpn_client_add_path, which every
+     * caller runs first (as it used to supply the fd). */
     p->transport_attached = 1;    /* LINT-ALLOW: test wrapper seed */
     p->xquic_path_live = 1;       /* LINT-ALLOW: test wrapper seed */
     p->xqc_path_id = xqc_path_id; /* LINT-ALLOW: test wrapper seed */
