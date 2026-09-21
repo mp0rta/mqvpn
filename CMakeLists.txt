@@ -1000,6 +1000,15 @@ if(BUILD_TESTING)
     set_target_properties(test_server PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_server COMMAND test_server)
 
+    # Portable core of the Windows certificate verifier (no Win32 headers):
+    # the host parser, SAN DER walker and identity match are unit-tested here
+    # as well as in the Windows CI job, which also tests the CryptoAPI half.
+    add_executable(test_cert_identity tests/test_cert_identity.c src/platform/windows/cert_identity.c)
+    target_include_directories(test_cert_identity PRIVATE ${CMAKE_SOURCE_DIR}/src/platform/windows)
+    target_compile_definitions(test_cert_identity PRIVATE TEST_CERT_DIR="${CMAKE_SOURCE_DIR}/tests/certs")
+    set_target_properties(test_cert_identity PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_cert_identity COMMAND test_cert_identity)
+
     # Pre-accept type-confusion DoS regression: drives a raw xquic client with
     # a bogus ALPN at the server to prove an unauthenticated pre-handshake
     # crash cannot recur (xquic-dependent — needs XQUIC_INCLUDE_DIR).
