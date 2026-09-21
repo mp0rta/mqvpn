@@ -106,6 +106,7 @@ echo "Starting mqvpn client..."
     --path "$NIC_A" --path "$NIC_B" \
     --auth-key "$AUTH_KEY" \
     --scheduler "$SCHEDULER" \
+    --insecure \
     --log-level info &
 CLIENT_PID=$!
 sleep 4
