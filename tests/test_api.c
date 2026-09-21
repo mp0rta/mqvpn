@@ -1212,8 +1212,8 @@ TEST(drop_path_double_drop)
 }
 
 /* Internal accessor — used to verify the active-path fallback that
- * cb_write_socket / get_path_entry_for_send rely on when the current primary
- * slot has been dropped. */
+ * get_path_entry_for_send relies on when the current primary slot has been
+ * dropped. */
 extern mqvpn_path_handle_t mqvpn_client_first_active_handle(const mqvpn_client_t *c);
 
 TEST(first_active_handle_with_no_paths_is_minus_one)
@@ -1658,8 +1658,10 @@ TEST(rollback_after_activation_failure_emits_event_then_closed)
 
 /* ── Primary-path rotation (issue #46) + OMR write-socket fallback ──
  *
- * Locks in the composite semantic for the no-path_id write fallback in
- * cb_write_socket / get_path_entry_for_send:
+ * Locks in the composite semantic for the unknown-path_id fallback inside
+ * get_path_entry_for_send — the slot resolver shared by cb_write_socket_ex
+ * and cb_write_mmsg_ex — driven here through the hidden
+ * mqvpn_client_test_get_send_handle_for_path hook rather than through xquic:
  *   1. Prefer the rotated primary (issue #46) so a non-paths[0] primary
  *      actually receives handshake bytes.
  *   2. Fall back to the first active slot (OMR backport) when the primary
@@ -1668,7 +1670,15 @@ TEST(rollback_after_activation_failure_emits_event_then_closed)
  * Without test 1, a future refactor could collapse the fallback back
  * into `first_active_idx` alone and silently regress issue #46. Without
  * test 2, the same refactor in the opposite direction would re-introduce
- * the dropped-primary EBADF bug. Test 3 pins the rotation helper. */
+ * the dropped-primary EBADF bug. Test 3 pins the rotation helper.
+ *
+ * cb_write_socket — the no-path_id callback, which carries its own copy of
+ * the same preference — is NOT pinned here, or anywhere: xquic selects
+ * write_socket only when transport_cbs.write_socket_ex is NULL
+ * (xqc_conn.c, xqc_send_packet_with_pn), and init_xquic_engine always
+ * registers write_socket_ex, so no client configuration reaches that branch.
+ * Mutation-checked: abort() at the top of cb_write_socket leaves the whole
+ * suite green, multipath on or off. */
 
 extern int mqvpn_client_test_set_primary_path_idx(mqvpn_client_t *c, int idx);
 extern mqvpn_path_handle_t
@@ -3138,16 +3148,20 @@ TEST(destroy_finalises_every_attached_ctx_once)
     ASSERT_EQ(tb->send_after_release, 0u);
 }
 
-/* Drives a real xquic connect attempt: the Initial packet goes through
- * cb_write_socket → ops.send SYNCHRONOUSLY inside mqvpn_client_connect()
- * (xqc_client_connect → xqc_engine_conn_logic). Server address 127.0.0.1:1
- * is never reached; only the transport's view matters. What xquic does NOT
- * do under mqvpn's tick loop: re-offer an Initial that was never accepted
- * (no PTO timer is armed until a packet was sent, and mqvpn never calls
- * xqc_conn_continue_send) — so tests must not assert a retry on tick; the
- * "packet kept, re-offered later" half of the WOULD_BLOCK contract is
- * xquic's xqc_path_send_packets contract and is covered end to end by the
- * e2e / GSO bench parity. add_path == 0 creates NO slot. */
+/* Drives a real xquic connect attempt: the Initial packet goes through a
+ * per-path send callback → ops.send SYNCHRONOUSLY inside
+ * mqvpn_client_connect() (xqc_client_connect → xqc_engine_conn_logic).
+ * Which callback is the TX-batch decision, not the multipath one:
+ * cb_write_mmsg_ex here (udp_gso defaults on, so init_xquic_engine registers
+ * write_mmsg_ex), cb_write_socket_ex where that registration is skipped.
+ * Never cb_write_socket. Server address 127.0.0.1:1 is never reached; only
+ * the transport's view matters. What xquic does NOT do under mqvpn's tick
+ * loop: re-offer an Initial that was never accepted (no PTO timer is armed
+ * until a packet was sent, and mqvpn never calls xqc_conn_continue_send)
+ * — so tests must not assert a retry on tick; the "packet kept, re-offered
+ * later" half of the WOULD_BLOCK contract is xquic's xqc_path_send_packets
+ * contract and is covered end to end by the e2e / GSO bench parity.
+ * add_path == 0 creates NO slot. */
 static mqvpn_client_t *
 make_connecting_client(fake_transport_t **out, fake_mode_t mode, int add_path)
 {
