@@ -242,7 +242,11 @@ on_netlink_event(evutil_socket_t fd, short what, void *arg)
         ssize_t len = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
         if (len <= 0) break;
 
-        int nlen = (int)len;
+        /* NLMSG_NEXT subtracts the *aligned* length, so the cursor can go
+         * negative by up to 3 bytes on the last message; it must stay signed.
+         * ssize_t (not int) also keeps NLMSG_OK's `nlmsg_len <= nlen` a
+         * signed/signed comparison under -Wextra. */
+        ssize_t nlen = len;
         for (struct nlmsghdr *nh = (struct nlmsghdr *)buf; NLMSG_OK(nh, nlen);
              nh = NLMSG_NEXT(nh, nlen)) {
             switch (nh->nlmsg_type) {
