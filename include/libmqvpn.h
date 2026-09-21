@@ -258,7 +258,7 @@ typedef enum {
 MQVPN_API const char *mqvpn_path_status_string(mqvpn_path_status_t status);
 
 /*
- * Outcome of the synchronous half of mqvpn_client_add_path_with_outcome().
+ * Outcome of the synchronous half of mqvpn_client_add_path().
  *
  * After add_path, the slot has been registered and (if multipath is
  * already negotiated) activation has been attempted in the same call. The
@@ -270,13 +270,15 @@ MQVPN_API const char *mqvpn_path_status_string(mqvpn_path_status_t status);
  *                     reports XQC_PATH_STATE_ACTIVE), OR multipath wasn't
  *                     ready yet and activation will fire from
  *                     cb_ready_to_create_path when handshake completes.
- *                     In both cases the caller should keep the fd.
+ *                     In both cases the caller keeps the transport (the ctx
+ *                     stays installed; the library releases it via
+ *                     mqvpn_client_on_platform_path_released() or destroy()).
  *
  *   TRANSIENT_FAIL  — xqc_conn_create_path returned a recoverable error
  *                     (e.g. -XQC_EMP_NO_AVAIL_PATH_ID — server hasn't
  *                     distributed CIDs yet). The library's tick recovery
  *                     loop will retry with exponential backoff. The
- *                     platform layer typically rolls back the fd here
+ *                     platform layer typically rolls back the transport here
  *                     so a fresh re-add starts from a clean state.
  *
  *   PERMANENT_FAIL  — xqc_conn_create_path returned -XQC_EMP_CREATE_PATH
@@ -284,10 +286,11 @@ MQVPN_API const char *mqvpn_path_status_string(mqvpn_path_status_t status);
  *                     marked CLOSED; recovery requires a Level-2 reconnect
  *                     that resets the path_id namespace.
  *
- * The legacy add_path() always succeeds at the handle layer (returning
- * the handle) and silently swallows TRANSIENT_FAIL / PERMANENT_FAIL; the
- * caller has to poll status via mqvpn_client_get_paths to discover them.
- * The with_outcome variant exists because that poll loses information:
+ * mqvpn_client_add_path()'s `outcome` parameter is optional. Passing NULL
+ * leaves only the handle-layer result: the handle is still returned, but
+ * TRANSIENT_FAIL / PERMANENT_FAIL stay invisible until the caller polls
+ * status via mqvpn_client_get_paths to discover them. A non-NULL outcome
+ * exists because that poll loses information:
  * PR3's PATH_LC_VALIDATING and PATH_LC_CREATE_WAIT both project to
  * MQVPN_PATH_PENDING, so status alone cannot tell sync success from
  * sync transient failure. Platform recovery (RTM_NEWLINK after a
@@ -555,8 +558,10 @@ typedef struct {
      * struct_size growth; OPTIONAL — NULL disables
      * tcp_egress; connect-tcp-style requests get 503 if unset). The core
      * (src/hybrid/tcp_egress.c) owns every egress fd's socket()/connect()/
-     * send()/recv()/close() syscalls directly — same "fd-path mode"
-     * convention the client's UDP path fds already use. These two
+     * send()/recv()/close() syscalls directly — a deliberate exception to
+     * the ABI 3 transport-ops split: the client's UDP paths and the
+     * server's UDP socket now go through mqvpn_path_ops_t /
+     * mqvpn_server_transport_ops_t instead. These two
      * callbacks only ask the platform to (un)register interest in an
      * ALREADY-OPEN fd with its reactor. want_read/want_write may be
      * updated on an already-registered fd (egress_fd_register is called
@@ -768,9 +773,10 @@ MQVPN_API mqvpn_client_t *mqvpn_client_new(const mqvpn_config_t *cfg,
  * tunnel_closed — never reconnect_scheduled) from inside the call: with the
  * batched send path engaged it first flushes datagrams already accepted by
  * mqvpn_client_on_tun_packet, and that engine pass can close the
- * connection. Callback-owned resources must therefore stay valid until
- * this returns, and nothing — including those callbacks — may use the
- * handle afterwards. */
+ * connection. Callback-owned resources — and every still-attached path's
+ * transport_ctx, released via ops.release() as part of this call — must
+ * therefore stay valid until this returns, and nothing — including those
+ * callbacks — may use the handle afterwards. */
 MQVPN_API void mqvpn_client_destroy(mqvpn_client_t *client);
 
 /* Start (or, from RECONNECTING, immediately restart) the connection.
@@ -832,7 +838,7 @@ MQVPN_API int mqvpn_client_remove_path(mqvpn_client_t *client, mqvpn_path_handle
 MQVPN_API int mqvpn_client_drop_path(mqvpn_client_t *client, mqvpn_path_handle_t path);
 
 /*
- * Platform reports that a path is no longer reachable via its current fd
+ * Platform reports that a path is no longer reachable via its current transport
  * (carrier loss, RTM_DELLINK, NotifyIpInterfaceChange ifDown, etc).
  *
  * Library transitions the slot to PATH_CLOSED_DROPPED (via EVENT_PLATFORM_DROP).
@@ -875,7 +881,7 @@ MQVPN_API int mqvpn_client_on_platform_path_released(mqvpn_client_t *client,
  * and deliver a fresh handle on recovery (Android ConnectivityManager Network,
  * iOS NEPacketTunnelProvider where socket-to-interface bindings are invalidated
  * when the underlying interface re-attaches, e.g. cellular handoff). Those
- * platforms should call remove_path() + a new add_path() with a fresh fd
+ * platforms should call remove_path() + a new add_path() with a fresh transport
  * instead.
  *
  * Preconditions: !xquic_path_live && transport_attached && (DEGRADED || CLOSED).
@@ -937,8 +943,8 @@ MQVPN_API mqvpn_server_t *mqvpn_server_new(const mqvpn_config_t *cfg,
 /* Destroy the server. Same callback contract as mqvpn_client_destroy: the
  * deferred-flush pass and engine teardown can still invoke callbacks
  * (tun_output, egress fd unregister, log), so callback-owned resources —
- * the TUN, the UDP socket, the egress registry — must stay valid until
- * this returns. */
+ * the TUN, the installed transport (and the socket it borrows), the
+ * egress registry — must stay valid until this returns. */
 MQVPN_API void mqvpn_server_destroy(mqvpn_server_t *server);
 
 /*
