@@ -438,6 +438,8 @@ add_executable(mqvpn
     src/platform/windows/firewall.c
     src/platform/windows/dns.c
     src/platform/windows/net_mon.c
+    src/platform/windows/cert_identity.c
+    src/platform/windows/cert_verify.c
     src/path_mgr.c
     src/config.c
     src/compat/getopt.c
@@ -459,7 +461,7 @@ if(Libevent_FOUND)
         libevent::core libevent::extra
         ${SSL_LIB}
         ${CRYPTO_LIB}
-        ws2_32 iphlpapi fwpuclnt ole32
+        ws2_32 iphlpapi fwpuclnt ole32 crypt32
     )
 else()
     target_include_directories(mqvpn PRIVATE ${EVENT_INCLUDE_DIR})
@@ -469,7 +471,7 @@ else()
         ${EVENT_LIB}
         ${SSL_LIB}
         ${CRYPTO_LIB}
-        ws2_32 iphlpapi fwpuclnt ole32
+        ws2_32 iphlpapi fwpuclnt ole32 crypt32
     )
 endif()
 
@@ -489,6 +491,36 @@ if(MSVC)
     # explicit NUL termination (the _s variants are not portable C11).
     target_compile_definitions(mqvpn PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_compile_definitions(mqvpn_lib PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+
+# ---------- Tests (Windows) ----------
+# The Windows branch had no tests until the certificate verifier: the option
+# and enable_testing() are declared here because the Darwin and Linux
+# declarations below are inside their own branches.
+option(BUILD_TESTING "Build unit tests" ON)
+if(BUILD_TESTING)
+    enable_testing()
+    # Portable identity core: same test as on Linux.
+    add_executable(test_cert_identity tests/test_cert_identity.c src/platform/windows/cert_identity.c)
+    target_include_directories(test_cert_identity PRIVATE ${CMAKE_SOURCE_DIR}/src/platform/windows)
+    target_compile_definitions(test_cert_identity PRIVATE TEST_CERT_DIR="${CMAKE_SOURCE_DIR}/tests/certs")
+    add_test(NAME test_cert_identity COMMAND test_cert_identity)
+    # CryptoAPI half, driven with an exclusive-root chain engine. Links only
+    # what it needs.
+    add_executable(test_cert_verify_win tests/test_cert_verify_win.c
+        src/platform/windows/cert_verify.c src/platform/windows/cert_identity.c src/log.c)
+    target_include_directories(test_cert_verify_win PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/platform/windows)
+    target_link_libraries(test_cert_verify_win crypt32)
+    target_compile_definitions(test_cert_verify_win PRIVATE TEST_CERT_DIR="${CMAKE_SOURCE_DIR}/tests/certs")
+    add_test(NAME test_cert_verify_win COMMAND test_cert_verify_win)
+    if(MSVC)
+        # same gate as the product build; target-scoped options are not inherited
+        foreach(t test_cert_identity test_cert_verify_win)
+            target_compile_options(${t} PRIVATE /WX /utf-8)
+            target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
+        endforeach()
+    endif()
 endif()
 
 elseif(APPLE)
