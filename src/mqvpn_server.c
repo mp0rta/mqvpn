@@ -13,6 +13,7 @@
 #include "mqvpn_sched_names.h"
 #include "mqvpn_server_internal.h"
 
+#include <stddef.h> /* offsetof for the struct_size-guarded field copies */
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
@@ -94,16 +95,10 @@ struct svr_conn_s {
     char username[64];
     uint64_t connected_at_us;
 
-    /* Runtime sticky GSO fallback, PER CONNECTION — not on the shared
-     * server socket. The GSO-class errno set includes EMSGSIZE, which
-     * reflects the ROUTE to one peer (segment + headers exceed that path's
-     * PMTU), so a socket-wide flag would let a single narrow-PMTU client
-     * permanently disable GSO for every other client. Scope therefore
-     * matches the client side's per-path-fd flag: one destination, one
-     * flag. Capability-class errnos (EIO/EINVAL/ENOTSUP) re-discover per
-     * conn — one extra failed syscall per connection lifetime, bounded by
-     * max_clients. Zero on accept (calloc). */
-    int gso_disabled;
+    /* Transport scope, issued in cb_accept, released exactly once in
+     * svr_conn_free. Lets the transport keep per-destination sticky state
+     * (GSO fallback) with a lifetime equal to this QUIC connection. */
+    mqvpn_server_tx_scope_t tx_scope;
 
     /* Flow-aware reorder shim (§5). Created on accept when cfg.reorder.mode
      * != OFF, freed on conn teardown. peer_reorder_supported is set when the
@@ -167,21 +162,21 @@ struct mqvpn_server_s {
     /* xquic engine */
     xqc_engine_t *engine;
 
-    /* UDP socket (provided by platform via set_socket_fd) */
-    int udp_fd;
-    int gso_available; /* engine-create probe result (kernel capability;
-                        * the runtime sticky flag is per-conn — svr_conn_s) */
+    /* Shared transport (installed once via set_transport). tops.send != NULL
+     * iff installed; transport_ctx is an opaque payload (NULL legal). The
+     * outer-UDP TX totals live in the transport too: svr_tx_totals() reads
+     * them back through tops.get_stats for mqvpn_server_get_stats and the
+     * "udp-tx: " teardown line. Unlike the client there is nothing to
+     * retire — one shared transport lives as long as the server. */
+    mqvpn_server_transport_ops_t tops;
+    void *transport_ctx;
+    mqvpn_server_tx_scope_t next_tx_scope; /* last issued scope; 0 = none yet */
+    int tx_zero_return_logged; /* once-per-server guard for the 0-return log */
     /* 1 = the batched send callback (cb_write_mmsg_ex) was registered. Also
      * drives conn_settings.defer_send_flush, so the two can never disagree — see
-     * mqvpn_conn_settings.h. Independent of gso_available: a failed UDP_SEGMENT probe
-     * still batches via sendmmsg. */
+     * mqvpn_conn_settings.h. Independent of the transport's own GSO capability:
+     * a bind without UDP_SEGMENT still batches via sendmmsg. */
     int tx_batch;
-    /* Outer-UDP TX syscall counters; see the matching comment in
-     * mqvpn_client.c's struct. tx_datagrams / tx_sends is the achieved
-     * batching factor, fed by both the batched and the single-datagram send
-     * paths. Reported by mqvpn_server_destroy as the "udp-tx: " line. */
-    uint64_t tx_sends;
-    uint64_t tx_datagrams;
     struct sockaddr_storage local_addr;
     socklen_t local_addrlen;
 
@@ -473,27 +468,47 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
     s->cbs.log(ml, msg, s->user_ctx);
 }
 
-/* ─── UDP send helper ─── */
+/* ─── Transport send helpers ─── */
 
-static ssize_t
-svr_do_send(mqvpn_server_t *s, const unsigned char *buf, size_t size,
-            const struct sockaddr *peer, socklen_t peerlen)
+/* Offer n datagrams to the shared transport under `scope`. Folds the
+ * 0-return contract violation into MQVPN_TX_FAILED (logged once per server)
+ * and accounts bytes_tx for the accepted prefix. */
+static int
+svr_transport_send(mqvpn_server_t *s, mqvpn_server_tx_scope_t scope,
+                   const mqvpn_datagram_t *bufs, unsigned n, const struct sockaddr *peer,
+                   socklen_t peerlen)
 {
-    if (s->udp_fd < 0) return XQC_SOCKET_ERROR;
-    ssize_t res;
-    do {
-        /* Winsock sendto() len is int; cast silences C4267 under /WX (size<=MTU). */
-        res = sendto(s->udp_fd, buf, (int)size, 0, peer, peerlen);
-    } while (res < 0 && errno == EINTR);
-    if (res < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return XQC_SOCKET_EAGAIN;
-        LOG_E(s, "sendto: %s", strerror(errno));
-        return XQC_SOCKET_ERROR;
+    int k = s->tops.send(s->transport_ctx, scope, bufs, n, peer, peerlen);
+    if (k == 0) {
+        if (!s->tx_zero_return_logged) {
+            s->tx_zero_return_logged = 1;
+            LOG_W(s,
+                  "transport: send returned 0 (contract violation), treating as FAILED");
+        }
+        return MQVPN_TX_FAILED;
     }
-    s->bytes_tx += (uint64_t)res;
-    s->tx_sends++; /* one sendto = one datagram; keeps the batching factor */
-    s->tx_datagrams++;
-    return res;
+    if (k < 0)
+        return (k == MQVPN_TX_WOULD_BLOCK) ? MQVPN_TX_WOULD_BLOCK : MQVPN_TX_FAILED;
+    if ((unsigned)k > n) k = (int)n; /* defensive: never trust more than offered */
+    for (int i = 0; i < k; i++)
+        s->bytes_tx += bufs[i].len;
+    return k;
+}
+
+/* Single-datagram send. Scope 0 is legal here (pre-accept / stateless
+ * reset); a server started without a transport maps every send to a hard
+ * error rather than crashing. */
+static ssize_t
+svr_do_send(mqvpn_server_t *s, mqvpn_server_tx_scope_t scope, const unsigned char *buf,
+            size_t size, const struct sockaddr *peer, socklen_t peerlen)
+{
+    if (!s->tops.send) return XQC_SOCKET_ERROR; /* no transport installed */
+    mqvpn_datagram_t d = {buf, size};
+    int k = svr_transport_send(s, scope, &d, 1, peer, peerlen);
+    if (k >= 1) return (ssize_t)size;
+    if (k == MQVPN_TX_WOULD_BLOCK) return XQC_SOCKET_EAGAIN;
+    LOG_E(s, "transport send failed");
+    return XQC_SOCKET_ERROR;
 }
 
 /* ─── xquic transport callbacks ─── */
@@ -503,7 +518,7 @@ cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *pe
                 socklen_t peerlen, void *conn_user_data)
 {
     svr_conn_t *conn = (svr_conn_t *)conn_user_data;
-    return svr_do_send(conn->server, buf, size, peer, peerlen);
+    return svr_do_send(conn->server, conn->tx_scope, buf, size, peer, peerlen);
 }
 
 static ssize_t
@@ -515,18 +530,13 @@ cb_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
 }
 
 #if defined(__linux__)
-/* Batch/GSO send for post-accept server conns. The server has ONE socket for
- * all clients (unlike the client's per-path fd), so — unlike the client's
- * cb_write_mmsg_ex, which resolves a path_entry_t per path_id — there is no
- * per-path/per-client state to consult here: conn_user_data resolves to s
- * exactly as cb_write_socket does (conn_user_data reinterpreted as
- * svr_conn_t*, see the comment in cb_accept), and the burst always targets
- * s->udp_fd with the peer sockaddr xquic hands in. path_id is unused for the
- * same reason cb_write_socket_ex ignores it above. gso_available is
- * server-wide (a kernel property, probed once in mqvpn_server_new() at
- * engine-create time and never re-probed); gso_disabled is PER CONNECTION —
- * see its field doc on svr_conn_s for why destination-scoped stickiness is
- * required on the shared socket. */
+/* Batched send for post-accept server conns: one shared transport, sends
+ * tagged with the connection's scope so per-destination sticky GSO state
+ * lives in the transport with the connection's lifetime. One transport
+ * serves every client, so — unlike the client's cb_write_mmsg_ex, which
+ * resolves a path_entry_t per path_id — there is nothing to look up here
+ * and path_id is unused, for the same reason cb_write_socket_ex ignores it
+ * above. */
 static ssize_t
 cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vlen,
                  const struct sockaddr *peer, socklen_t peerlen, void *conn_user_data)
@@ -534,41 +544,20 @@ cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vle
     (void)path_id;
     svr_conn_t *conn = (svr_conn_t *)conn_user_data;
     mqvpn_server_t *s = conn->server;
+    if (!s->tops.send) return XQC_SOCKET_ERROR;
+    if (vlen == 0) return 0;
+    if (vlen > XQC_MAX_SEND_MSG_ONCE) vlen = XQC_MAX_SEND_MSG_ONCE;
 
-    if (s->udp_fd < 0) return XQC_SOCKET_ERROR; /* same check as svr_do_send */
-
-    mqvpn_tx_counters_t tx = {0};
-    int was_gso = !conn->gso_disabled;
-    ssize_t r = mqvpn_udp_send_batch(s->udp_fd, msg_iov, vlen, peer, peerlen,
-                                     s->gso_available, &conn->gso_disabled, &tx);
-    /* Captured before any LOG_* call: the log write path can clobber errno,
-     * and the hard-error branch below is the only diagnostic that reports
-     * it. Meaningful only when r == MQVPN_SEND_ERR (udp_offload.h). */
-    int send_errno = errno;
-    if (was_gso && conn->gso_disabled) {
-        /* One-shot per connection (the flag never resets within one) — at
-         * most max_clients lines per server lifetime, no spam guard
-         * needed. The reason comes from the flag itself, not errno — see
-         * the matching comment in the client's cb_write_mmsg_ex. */
-        LOG_W(s,
-              "udp-gso: runtime GSO failure (%s), sticky fallback to sendmmsg for "
-              "this client",
-              strerror(conn->gso_disabled));
+    mqvpn_datagram_t bufs[XQC_MAX_SEND_MSG_ONCE];
+    for (unsigned int i = 0; i < vlen; i++) {
+        bufs[i].data = (const uint8_t *)msg_iov[i].iov_base;
+        bufs[i].len = msg_iov[i].iov_len;
     }
-    /* single aggregate counter — the server has no per-path bytes_tx (that's
-     * a client-only concept) — matching svr_do_send's s->bytes_tx accounting.
-     * (bytes==0 when r<0 per udp_offload.h) */
-    s->bytes_tx += tx.bytes;
-    s->tx_sends += tx.sends;
-    s->tx_datagrams += tx.datagrams;
-    if (r >= 0) return r;
-    if (r == MQVPN_SEND_EAGAIN) return XQC_SOCKET_EAGAIN;
-    /* xquic's own |error send mmsg| log carries no errno, and XQC_SOCKET_ERROR
-     * from this callback can escalate to connection close; GSO-class errors
-     * are absorbed by the sticky fallback in mqvpn_udp_send_batch, so this
-     * branch is rare — no spam risk. */
-    LOG_E(s, "batch send: %s", strerror(send_errno));
-    return XQC_SOCKET_ERROR; /* same convention as svr_do_send's hard-error path */
+    int k = svr_transport_send(s, conn->tx_scope, bufs, vlen, peer, peerlen);
+    if (k >= 1) return (ssize_t)k;
+    if (k == MQVPN_TX_WOULD_BLOCK) return XQC_SOCKET_EAGAIN;
+    LOG_E(s, "batch transport send failed");
+    return XQC_SOCKET_ERROR;
 }
 #endif
 
@@ -577,7 +566,7 @@ cb_write_before_accept(const unsigned char *buf, size_t size, const struct socka
                        socklen_t peerlen, void *user_data)
 {
     mqvpn_server_t *s = (mqvpn_server_t *)user_data;
-    return svr_do_send(s, buf, size, peer, peerlen);
+    return svr_do_send(s, 0, buf, size, peer, peerlen); /* scope 0 = transient */
 }
 
 static int
@@ -604,6 +593,15 @@ cb_accept(xqc_engine_t *engine, xqc_connection_t *conn, const xqc_cid_t *cid,
         return -1; /* refuse: SERVER_ACCEPT is not set, nothing to free */
     }
     conn_ctx->server = s;
+    /* Issue the transport scope before xquic switches this connection's
+     * sends to cb_write_socket (which happens as soon as we return 0).
+     * Monotonic, never reused; wrap is treated as exhaustion. */
+    if (s->next_tx_scope == UINT64_MAX) {
+        LOG_E(s, "accept: transport scope counter exhausted");
+        free(conn_ctx);
+        return -1;
+    }
+    conn_ctx->tx_scope = ++s->next_tx_scope;
     /* cid may be misaligned inside xquic's internal structures */
     memcpy(&conn_ctx->cid, (const void *)cid, sizeof(conn_ctx->cid));
     xqc_conn_set_transport_user_data(conn, conn_ctx);
@@ -639,7 +637,7 @@ cb_stateless_reset(const unsigned char *buf, size_t size, const struct sockaddr 
     (void)local;
     (void)locallen;
     mqvpn_server_t *s = (mqvpn_server_t *)user_data;
-    return svr_do_send(s, buf, size, peer, peerlen);
+    return svr_do_send(s, 0, buf, size, peer, peerlen); /* scope 0 = transient */
 }
 
 /* ─── Multipath callbacks ─── */
@@ -743,6 +741,13 @@ svr_conn_free(svr_conn_t *conn)
         mqvpn_reorder_rx_free(conn->reorder_rx);
         conn->reorder_rx = NULL;
     }
+    /* Release the transport scope exactly once. Clear before calling out
+     * (re-entrancy guard, same rule as the client); scope 0 is transient and
+     * is never released. */
+    mqvpn_server_tx_scope_t scope = conn->tx_scope;
+    conn->tx_scope = 0;
+    if (scope != 0 && conn->server && conn->server->tops.release_scope)
+        conn->server->tops.release_scope(conn->server->transport_ctx, scope);
     free(conn);
 }
 
@@ -1542,6 +1547,39 @@ svr_flush_deferred_sends(mqvpn_server_t *s)
     if (s->tx_batch && s->engine) xqc_engine_main_logic(s->engine);
 }
 
+/* Public udp_tx_* view: the shared transport's cumulative snapshot. */
+static void
+svr_tx_totals(const mqvpn_server_t *s, uint64_t *sends, uint64_t *datagrams)
+{
+    /* A failing get_stats may have scribbled on the buffer: consume the
+     * snapshot only on MQVPN_OK, otherwise report zeros. */
+    mqvpn_transport_stats_t st = {0}, tmp = {0};
+    if (s->tops.get_stats && s->tops.get_stats(s->transport_ctx, &tmp) == MQVPN_OK)
+        st = tmp;
+    *sends = st.tx_sends;
+    *datagrams = st.tx_datagrams;
+}
+
+/* Field-guarded prefix copy of a caller's ops table: an optional function
+ * pointer is taken only when the caller's struct_size covers it whole, so a
+ * struct_size ending partway through a field can never yield a garbage
+ * non-NULL pointer (a byte-wise memcpy of a prefix could). `send` presence
+ * is validated by the caller. */
+static void
+svr_copy_transport_ops(mqvpn_server_transport_ops_t *dst,
+                       const mqvpn_server_transport_ops_t *src)
+{
+    memset(dst, 0, sizeof(*dst));
+    dst->struct_size = sizeof(*dst);
+    dst->send = src->send;
+#define SVR_OPS_HAS(f) \
+    (src->struct_size >= offsetof(mqvpn_server_transport_ops_t, f) + sizeof(src->f))
+    if (SVR_OPS_HAS(release_scope)) dst->release_scope = src->release_scope;
+    if (SVR_OPS_HAS(get_stats)) dst->get_stats = src->get_stats;
+    if (SVR_OPS_HAS(release)) dst->release = src->release;
+#undef SVR_OPS_HAS
+}
+
 /* CONNECT-IP stream body: capsule reassembly + ADDRESS_REQUEST handling. */
 static int
 svr_connect_ip_on_body(mqvpn_server_t *s, svr_stream_t *stream,
@@ -1991,10 +2029,9 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
                           ? cbs->struct_size
                           : sizeof(*cbs);
     memcpy(&s->cbs, cbs, cbs_size);
+    /* caller guarantees lifetime exceeds this object */ // lgtm[cpp/stack-address-escape]
     s->user_ctx = user_ctx;
     s->log_level = cfg->log_level;
-    /* caller guarantees lifetime exceeds this object */ // lgtm[cpp/stack-address-escape]
-    s->udp_fd = -1;
     s->max_clients = cfg->max_clients > 0 ? cfg->max_clients : 64;
     mqvpn_ptb_bucket_init(&s->ptb_bucket);
     s->boot_us = now_us();
@@ -2106,21 +2143,15 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     /* `cfg` is mqvpn_server_new's own parameter, holding the same udp_gso
      * value as s->config.udp_gso (memcpy'd above; never touched by the
      * [Hybrid]-only sanitize pass). tx_batch is recorded rather than
-     * re-derived: the cs_input below feeds this same flag to
-     * conn_settings.defer_send_flush, so the deferred flush cannot outlive
-     * the batch callback it exists to fill. Registration mechanics and the
-     * e2e-pinned marker strings are shared with the client via
-     * mqvpn_tx_batch_register (mqvpn_conn_settings.h). xquic requires
-     * XQC_CONN_FLAG_SERVER_ACCEPT for batch sends on server conns, so
-     * pre-accept traffic (cb_write_before_accept) keeps using
-     * conn_send_packet_before_accept unaffected by this registration. */
-    if (mqvpn_tx_batch_register(cfg->udp_gso, cb_write_mmsg_ex, &tcbs, &xconfig,
-                                &s->gso_available)) {
+     * re-derived (see the client): the cs_input below feeds this same flag
+     * to conn_settings.defer_send_flush, so the deferred flush cannot
+     * outlive the batch callback it exists to fill. The GSO capability
+     * probe and its "udp-gso: " marker are the POSIX bind's job. xquic
+     * requires XQC_CONN_FLAG_SERVER_ACCEPT for batch sends on server conns,
+     * so pre-accept traffic (cb_write_before_accept) keeps using
+     * conn_send_packet_before_accept with scope 0. */
+    if (mqvpn_tx_batch_register(cfg->udp_gso, cb_write_mmsg_ex, &tcbs, &xconfig))
         s->tx_batch = 1;
-        LOG_I(s, "%s",
-              s->gso_available ? MQVPN_UDP_GSO_MARKER_ENABLED
-                               : MQVPN_UDP_GSO_MARKER_UNAVAILABLE);
-    }
 #endif
 
     s->engine = xqc_engine_create(XQC_ENGINE_SERVER, &xconfig, &engine_ssl, &engine_cbs,
@@ -2239,7 +2270,9 @@ mqvpn_server_destroy(mqvpn_server_t *s)
      * mqvpn_client_destroy — emitted after the flush above so a short run's
      * final deferred burst is counted, before the engine teardown whose few
      * close-frame sends fall outside the count. */
-    LOG_I(s, MQVPN_UDP_TX_LINE_FMT, s->tx_sends, s->tx_datagrams, s->config.udp_gso);
+    uint64_t tx_sends, tx_datagrams;
+    svr_tx_totals(s, &tx_sends, &tx_datagrams);
+    LOG_I(s, MQVPN_UDP_TX_LINE_FMT, tx_sends, tx_datagrams, s->config.udp_gso);
 
     /* Step 1: xqc_engine_destroy triggers h3_conn_close → session free */
     if (s->engine) {
@@ -2277,22 +2310,46 @@ mqvpn_server_destroy(mqvpn_server_t *s)
         }
     }
 
-    /* Step 4: free server handle */
+    /* Step 4: every connection's release_scope has run (engine teardown plus
+     * the sweeps above); only now may the shared transport be finalised.
+     * Snapshot-then-clear before calling out, the same re-entrancy rule the
+     * client uses when it finalises a path's transport. */
+    {
+        mqvpn_server_transport_ops_t tops = s->tops;
+        void *tctx = s->transport_ctx;
+        memset(&s->tops, 0, sizeof(s->tops));
+        s->transport_ctx = NULL;
+        if (tops.release) tops.release(tctx);
+    }
+
+    /* Step 5: free server handle */
     free(s);
 }
 
 int
-mqvpn_server_set_socket_fd(mqvpn_server_t *s, int fd, const struct sockaddr *local_addr,
+mqvpn_server_set_transport(mqvpn_server_t *s, const mqvpn_server_transport_ops_t *ops,
+                           void *transport_ctx, const struct sockaddr *local_addr,
                            socklen_t local_addrlen)
 {
-    if (!s || fd < 0) return MQVPN_ERR_INVALID_ARG;
-    /* Validate before mutating any state. Reject (not clamp) an oversized
-     * addrlen: clamping still lets memcpy over-read the caller's real
-     * sockaddr object, and every legitimate sockaddr fits in
-     * sockaddr_storage, so an oversized length is always a caller bug.
-     * Mirrors mqvpn_client_set_server_addr. */
+    /* Validate before mutating any state, and before the state check, so a
+     * bad table is always INVALID_ARG. */
+    if (!s || !ops) return MQVPN_ERR_INVALID_ARG;
+    if (ops->struct_size <
+        offsetof(mqvpn_server_transport_ops_t, send) + sizeof(ops->send))
+        return MQVPN_ERR_INVALID_ARG;
+    if (!ops->send) return MQVPN_ERR_INVALID_ARG;
+    /* Reject (not clamp) an oversized addrlen: clamping still lets memcpy
+     * over-read the caller's real sockaddr object, and every legitimate
+     * sockaddr fits in sockaddr_storage, so an oversized length is always a
+     * caller bug. Mirrors mqvpn_client_set_server_addr. */
     if (local_addr && local_addrlen > sizeof(s->local_addr)) return MQVPN_ERR_INVALID_ARG;
-    s->udp_fd = fd;
+    /* Once, and before start: a second install would have to decide what to
+     * do with the first ctx; refusing keeps ownership unambiguous. Either
+     * refusal leaves the installed and the offered ctx untouched. */
+    if (s->started || s->tops.send) return MQVPN_ERR_INVALID_STATE;
+
+    svr_copy_transport_ops(&s->tops, ops);
+    s->transport_ctx = transport_ctx;
     if (local_addr && local_addrlen > 0) {
         memcpy(&s->local_addr, local_addr, local_addrlen);
         s->local_addrlen = local_addrlen;
@@ -2626,8 +2683,7 @@ mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *out)
     out->tcp_flows_total = s->tcp_egress_flows_total_opened;
     out->tcp_flows_rejected = s->tcp_egress_flows_rejected_cap;
 #endif
-    out->udp_tx_sends = s->tx_sends;
-    out->udp_tx_datagrams = s->tx_datagrams;
+    svr_tx_totals(s, &out->udp_tx_sends, &out->udp_tx_datagrams);
     return MQVPN_OK;
 }
 
