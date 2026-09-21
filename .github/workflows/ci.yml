@@ -994,6 +994,15 @@ jobs:
       - name: Smoke-run binary
         run: build/Release/mqvpn.exe --version
 
+      # For on-machine checks the runner cannot do (real certificate stores,
+      # a real server). Needs wintun.dll next to it: take it from a release zip.
+      - name: Upload mqvpn.exe
+        uses: actions/upload-artifact@v7
+        with:
+          name: mqvpn-windows-x64
+          path: build/Release/mqvpn.exe
+          retention-days: 7
+
   android:
     runs-on: ubuntu-latest
     timeout-minutes: 20
