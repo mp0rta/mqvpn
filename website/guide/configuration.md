@@ -148,11 +148,17 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `TunName` | TUN device name | `mqvpn0` |
 | `DNS` | DNS servers (comma-separated) | — |
 | `LogLevel` | Log level (`debug`, `info`, `warn`, `error`) | `info` |
-| `KillSwitch` | Block traffic outside the VPN tunnel (client only) | `false` |
+| `KillSwitch` | Block traffic outside the VPN tunnel (client only). Also stops applications that bind to a specific network adapter from bypassing the tunnel. | `false` |
 | `Reconnect` | Enable automatic reconnection (client only) | `true` |
 | `ReconnectInterval` | Seconds between reconnection attempts | `5` |
-| `ManageRoutes` | Manage the host routing table (VPN routes and server pin route). Set to `false` (or pass `--no-manage-routes`) to handle routing yourself | `true` |
+| `ManageRoutes` | Manage the host routing table (VPN routes and server pin route). Set to `false` (or pass `--no-manage-routes`) to handle routing yourself. Routing alone does not stop applications that bind their sockets to a specific adapter — see the note below. | `true` |
 | `MTU` | TUN MTU (1280–9000). Client: cap — if the negotiated MTU is lower, the negotiated value is used. Server: sets the TUN MTU directly. | auto (client ~1382 negotiated, server 1382) |
+
+> **Note: route management does not cover interface-bound applications**
+>
+> mqvpn adds a split default route (`0.0.0.0/1` + `128.0.0.0/1`) instead of replacing the system default route, so the original default route stays in place. Applications that pick a network adapter by looking up the *system default route* — rather than the route to the destination — keep using the physical adapter and bypass the tunnel. Tailscale on Windows does this for its own sockets.
+>
+> This is independent of `ManageRoutes`. To stop such applications, set `KillSwitch = true`. Note that they are then **blocked outright rather than routed through the tunnel**.
 
 ### `[TLS]` (server only)
 
