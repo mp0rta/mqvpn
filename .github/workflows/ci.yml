@@ -973,6 +973,16 @@ jobs:
             -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON ..
           cmake --build . --config Release
 
+      # The only place the CryptoAPI half of the verifier is compiled and run.
+      # Both tests use their own checks, not assert(), so Release is fine.
+      - name: Certificate verifier tests
+        run: ctest --test-dir build -C Release -R "test_cert_(identity|verify_win)" --no-tests=error --output-on-failure
+
+      # Weak: presence and order of the install call only (see the script).
+      - name: Verifier wiring tripwire
+        shell: bash
+        run: bash scripts/ci_check_windows_verifier_wiring.sh
+
       - name: Verify binary
         run: |
           Test-Path build/Release/mqvpn.exe

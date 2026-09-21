@@ -18,6 +18,7 @@
 #  include "platform_internal_win.h"
 #  include "platform_windows.h"
 #  include "net_mon.h"
+#  include "cert_verify.h"
 #  include "log.h"
 #  include "mqvpn_internal.h" /* mqvpn_config_apply_hybrid (INI [Hybrid] bridge) */
 
@@ -601,6 +602,31 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     cbs.mtu_updated = cb_mtu_updated;
     cbs.log = cb_log;
     cbs.reconnect_scheduled = cb_reconnect_scheduled;
+
+    /* Platform certificate verifier: the Windows stores decide trust and the
+     * shared rule decides identity. Not installed when the operator supplied
+     * a custom trust path for the library-side verifier (the public header
+     * names SSL_CERT_FILE / SSL_CERT_DIR as overrides of the default paths),
+     * nor with Insecure, where no verifier is ever consulted. */
+    if (!cfg->insecure) {
+        const char *cert_file = getenv("SSL_CERT_FILE");
+        const char *cert_dir = getenv("SSL_CERT_DIR");
+        if (cert_file && cert_file[0]) {
+            LOG_WRN("SSL_CERT_FILE set: verifying against that PEM bundle, not the "
+                    "Windows certificate store");
+        } else if (cert_dir && cert_dir[0]) {
+            LOG_WRN("SSL_CERT_DIR set: verifying against that hashed certificate "
+                    "directory, not the Windows certificate store");
+        } else {
+            int vrc =
+                mqvpn_config_set_cert_verifier(lib_cfg, mqvpn_win_cert_verify, NULL);
+            if (vrc != MQVPN_OK) {
+                LOG_ERR("failed to install the certificate verifier: %d", vrc);
+                mqvpn_config_free(lib_cfg);
+                return 1;
+            }
+        }
+    }
 
     /* Create client */
     ctx.client = mqvpn_client_new(lib_cfg, &cbs, &ctx);
