@@ -227,7 +227,6 @@ message(STATUS "SSL_LIB=${SSL_LIB} CRYPTO_LIB=${CRYPTO_LIB}")
 set(MQVPN_LIB_SOURCES
     src/mqvpn_config.c
     src/mqvpn_client.c
-    src/udp_offload.c
     src/mqvpn_server.c
     src/mqvpn_conn_settings.c
     src/mqvpn_util.c
@@ -241,6 +240,19 @@ set(MQVPN_LIB_SOURCES
     src/reorder_rx.c
     src/hybrid/classifier.c
 )
+
+# ---------- bundled transport implementations (NOT part of the sans-I/O core) ----------
+# These are the only files in the library allowed to issue socket syscalls;
+# scripts/lint/check_sansio_core.sh excludes exactly this list.
+if(NOT WIN32)
+    set(MQVPN_BIND_SOURCES
+        src/bind/posix_offload.c
+        # src/bind/posix.c is appended by Task 9 (the file does not exist yet;
+        # CMake refuses a missing non-GENERATED source at configure time)
+    )
+else()
+    set(MQVPN_BIND_SOURCES)   # mqvpn_bind_winsock lands in slice 2
+endif()
 
 # ---------- lwIP (hybrid mode TCP lane — see MQVPN_HYBRID_TCP_LANE_BUILD) ----------
 # Deliberately single-mode: no pre-built LWIP_BUILD_DIR variant (unlike
@@ -394,7 +406,11 @@ if(MQVPN_ENABLE_FUZZING AND NOT MQVPN_HYBRID_TCP_LANE_BUILD)
 endif()
 
 # ---------- libmqvpn (static library — no libevent, no platform I/O) ----------
-add_library(mqvpn_lib STATIC ${MQVPN_LIB_SOURCES})
+add_library(mqvpn_lib STATIC ${MQVPN_LIB_SOURCES} ${MQVPN_BIND_SOURCES})
+# Resolved (post-configure) core source list consumed by
+# scripts/lint/check_sansio_core.sh — includes the conditional hybrid appends.
+file(GENERATE OUTPUT ${CMAKE_BINARY_DIR}/mqvpn_lib_sources.txt
+     CONTENT "$<JOIN:$<TARGET_PROPERTY:mqvpn_lib,SOURCES>,\n>\n")
 if(WIN32)
     set_target_properties(mqvpn_lib PROPERTIES OUTPUT_NAME mqvpn_lib)
 else()
@@ -567,7 +583,7 @@ target_include_directories(mqvpn_darwin_platform PRIVATE
 # included, is Linux-only; same SOVERSION rationale as the Linux block).
 # Links c++ (not stdc++) for BoringSSL's C++ internals — macOS SDKs ship
 # libc++ only, and a .dylib must fully resolve its symbols at link time.
-add_library(mqvpn_shared SHARED ${MQVPN_LIB_SOURCES})
+add_library(mqvpn_shared SHARED ${MQVPN_LIB_SOURCES} ${MQVPN_BIND_SOURCES})
 set_target_properties(mqvpn_shared PROPERTIES
     OUTPUT_NAME mqvpn
     SOVERSION ${MQVPN_SOVERSION}
@@ -683,7 +699,7 @@ endif()
 else() # NOT WIN32, NOT APPLE — Linux
 
 # Shared library variant
-add_library(mqvpn_shared SHARED ${MQVPN_LIB_SOURCES})
+add_library(mqvpn_shared SHARED ${MQVPN_LIB_SOURCES} ${MQVPN_BIND_SOURCES})
 set_target_properties(mqvpn_shared PROPERTIES
     OUTPUT_NAME mqvpn
     # Defined once at the top of this file, with the bump history — both this
@@ -860,19 +876,19 @@ if(BUILD_TESTING)
     # UDP GSO TX offload (issue #167): pure syscall/mechanics layer, no xquic
     # dependency. MQVPN_OFFLOAD_TEST_SEAM is wired: it swaps sendmsg/sendmmsg
     # for mqvpn_seam_sendmsg/mqvpn_seam_sendmmsg (defined in
-    # tests/test_udp_offload.c), which the fault-injection tests use to force
-    # error/short-write/EAGAIN paths deterministically.
-    add_executable(test_udp_offload tests/test_udp_offload.c src/udp_offload.c)
-    target_compile_definitions(test_udp_offload PRIVATE MQVPN_OFFLOAD_TEST_SEAM)
-    target_include_directories(test_udp_offload PRIVATE src include)
-    set_target_properties(test_udp_offload PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
-    add_test(NAME test_udp_offload COMMAND test_udp_offload)
+    # tests/test_bind_posix_offload.c), which the fault-injection tests use to
+    # force error/short-write/EAGAIN paths deterministically.
+    add_executable(test_bind_posix_offload tests/test_bind_posix_offload.c src/bind/posix_offload.c)
+    target_compile_definitions(test_bind_posix_offload PRIVATE MQVPN_OFFLOAD_TEST_SEAM)
+    target_include_directories(test_bind_posix_offload PRIVATE src include)
+    set_target_properties(test_bind_posix_offload PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_bind_posix_offload COMMAND test_bind_posix_offload)
 
     # Kernel-backed UDP GSO/GRO round trip (issue #167): built WITHOUT
     # MQVPN_OFFLOAD_TEST_SEAM, so every syscall is the real one — this pins
     # the wrapper against the actual kernel rather than the fabricated seam
     # kernel above.
-    add_executable(test_udp_gro_kernel tests/test_udp_gro_kernel.c src/udp_offload.c)
+    add_executable(test_udp_gro_kernel tests/test_udp_gro_kernel.c src/bind/posix_offload.c)
     target_include_directories(test_udp_gro_kernel PRIVATE src include)
     set_target_properties(test_udp_gro_kernel PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_udp_gro_kernel COMMAND test_udp_gro_kernel)
