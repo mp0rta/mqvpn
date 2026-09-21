@@ -38,10 +38,17 @@ final class EventLog: ObservableObject {
             append(LogEvent(time: now, kind: .coreState(snap.clientState)))
             prevState = snap.clientState
         }
+        // Diff LIVE paths only. After a reconnect the core can transiently
+        // return a stale CLOSED slot (mqvpn_path_status_t CLOSED = 4) next to
+        // the live path for the same interface — get_paths never shrinks
+        // n_paths, so a reaped slot lingers a poll or two. Keyed by interface
+        // name, that duplicate would fabricate en0 active<->closed churn every
+        // tick. A path leaving the live set is logged as a removal instead.
+        let live = snap.paths.filter { $0.status != 4 }
         var cur: [String: Int32] = [:]
-        for p in snap.paths { cur[p.name] = p.status }
+        for p in live { cur[p.name] = p.status }
         // (a) additions + (b) status transitions
-        for p in snap.paths {
+        for p in live {
             if let old = prevPaths[p.name] {
                 if old != p.status {
                     append(LogEvent(time: now,

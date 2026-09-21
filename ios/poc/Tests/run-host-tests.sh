@@ -22,5 +22,6 @@ swiftc -framework Security -o "$OUT" \
     "$SHARED/TeardownSequence.swift" \
     "$SHARED/SystemTrust.swift" \
     "$APP/ReorderIngest.swift" \
+    "$APP/EventLog.swift" \
     "$DIR/main.swift"
 "$OUT"

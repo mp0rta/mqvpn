@@ -322,4 +322,30 @@ check(SystemTrust.evaluate(chain: [tdDER], hostname: "mqvpn-test") == false,
 // ── Insecure defaults OFF (spec D10) ────────────────────────────────────
 check(ServerSettings.emptyDraft.insecure == false, "emptyDraft defaults to Insecure OFF")
 
+// ── EventLog: a transient stale CLOSED path must not fabricate churn ──────
+// After a reconnect the core can briefly return two same-name paths (the live
+// one + a stale CLOSED slot, since get_paths never shrinks n_paths). Keyed by
+// interface name, that duplicate would fabricate en0 active<->closed churn.
+func evSnap(_ paths: [(String, Int32)], state: Int32 = 4) -> TunnelSnapshot {
+    TunnelSnapshot(timestamp: 0, clientState: state, connectedSince: nil, footprint: 0,
+                   paths: paths.map { PathSnapshot(name: $0.0, status: $0.1, txBytes: 0, rxBytes: 0) })
+}
+func countStatus(_ log: EventLog) -> Int {
+    log.events.filter { if case .pathStatus = $0.kind { return true } else { return false } }.count
+}
+
+let elReconnect = EventLog()
+let t0 = Date()
+elReconnect.ingest(evSnap([("en0", 1)]), now: t0)                 // baseline: active
+elReconnect.ingest(evSnap([("en0", 1), ("en0", 4)]), now: t0)    // transient active + stale closed
+elReconnect.ingest(evSnap([("en0", 1)]), now: t0)                // reaped back to single active
+check(countStatus(elReconnect) == 0,
+      "transient stale CLOSED duplicate must not fabricate path-status churn")
+
+// A genuine live-status transition (active -> degraded) must still be logged.
+let elReal = EventLog()
+elReal.ingest(evSnap([("en0", 1)]), now: t0)
+elReal.ingest(evSnap([("en0", 2)]), now: t0)
+check(countStatus(elReal) == 1, "genuine active->degraded transition still logged")
+
 if failures == 0 { print("host tests: ALL PASS") } else { print("host tests: \(failures) FAILURES"); exit(1) }
