@@ -21,6 +21,27 @@ android {
         unitTests {
             isIncludeAndroidResources = true
             isReturnDefaultValues = true
+            // Robolectric pokes OpenJDK internals, which JDK 17+ denies by
+            // default. Latent until 4.17: its SDK 36+ bootstrap now calls
+            // ApplicationSharedMemory.create(), which routes through
+            // FileDescriptor.setInt$ -> jdk.internal.access.SharedSecrets and
+            // fails with "Failed to interact with raw FileDescriptor
+            // internals". The list is verbatim from robolectric.org's
+            // getting-started page; keep it whole rather than trimming it to
+            // today's single offender.
+            all {
+                it.jvmArgs(
+                    "--add-opens=java.base/java.lang=ALL-UNNAMED",
+                    "--add-opens=java.base/java.util=ALL-UNNAMED",
+                    "--add-opens=java.base/java.io=ALL-UNNAMED",
+                    "--add-opens=java.base/java.net=ALL-UNNAMED",
+                    "--add-opens=java.base/java.security=ALL-UNNAMED",
+                    "--add-opens=java.base/java.text=ALL-UNNAMED",
+                    "--add-opens=java.base/jdk.internal.access=ALL-UNNAMED",
+                    "--add-opens=java.desktop/java.awt.font=ALL-UNNAMED",
+                    "--add-opens=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED",
+                )
+            }
         }
     }
 }
