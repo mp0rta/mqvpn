@@ -3283,8 +3283,11 @@ TEST(transport_send_mapping_partial_would_block_zero_bogus)
     int n = 0;
     ASSERT_EQ(mqvpn_client_get_paths(c, info, 1, &n), MQVPN_OK);
     mqvpn_path_handle_t h = info[0].handle;
-    uint8_t a[10] = {0}, b[20] = {0}, d[30] = {0}, e[40] = {0}; /* MSan-clean */
-    mqvpn_datagram_t bufs[4] = {{a, 10}, {b, 20}, {d, 30}, {e, 40}};
+    /* No single length equals the accepted-prefix sum (10+20=30), so a core
+     * that charged the wrong datagram cannot satisfy the bytes_tx assertion
+     * by coincidence. */
+    uint8_t a[10] = {0}, b[20] = {0}, d[35] = {0}, e[40] = {0}; /* MSan-clean */
+    mqvpn_datagram_t bufs[4] = {{a, 10}, {b, 20}, {d, 35}, {e, 40}};
     mqvpn_stats_t st;
 
     t->partial_k = 2;

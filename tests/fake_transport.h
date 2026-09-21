@@ -26,8 +26,7 @@ typedef enum {
 
 typedef struct {
     fake_mode_t mode;
-    int partial_k; /* FAKE_PARTIAL prefix length; must be >= 0 (it is compared unsigned)
-                    */
+    int partial_k; /* FAKE_PARTIAL prefix length; must be >= 0 (compared unsigned) */
     int stats_rc;  /* return value of get_stats; MQVPN_OK by default */
 
     /* observation */

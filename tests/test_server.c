@@ -381,11 +381,11 @@ TEST(server_set_transport_args)
 /* Scope-per-connection behaviour -- a unique non-zero scope per accepted
  * connection, release_scope exactly once per close, scope 0 for pre-accept and
  * stateless-reset sends, and every scope released before the shared release --
- * needs a real handshake to observe. It is asserted at the transport level by
- * the real-socket loopback tests further down this file
- * (server_session_quic_loopback and the two reconnect tests), which drive a
- * full in-process client/server exchange over the POSIX bind. The fake
- * transport here covers the install-time contract only. */
+ * needs a real handshake to observe, so it is NOT asserted in this file. A
+ * recording transport in tests/test_server_double_connectip.c (which also
+ * probes the scope-0 stateless-reset path) and the in-process exchange in
+ * server_reconnect_manual_connect are what pin it. The fake transport here
+ * covers the install-time contract only. */
 
 TEST(server_get_stats_failure_reports_zero)
 {
