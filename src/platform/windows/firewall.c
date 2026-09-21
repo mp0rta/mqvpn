@@ -10,7 +10,12 @@
  *   - Traffic to the VPN server (UDP on original interface)
  *   - Traffic on the TUN (Wintun) interface
  *
- * All filters are added under a single sublayer so cleanup is atomic.
+ * All objects are added through a DYNAMIC WFP session. BFE deletes everything
+ * a dynamic session added once that session ends, including when the process
+ * dies without running cleanup. That matters because WFP objects are static by
+ * default and "live until they are deleted, BFE stops, or the system is
+ * shutdown" (WFP Object Management) — a crash with static filters leaves the
+ * block-all rules in place and cuts the host off until the next reboot.
  */
 
 #ifdef _WIN32
@@ -37,23 +42,17 @@ wfp_filter_base(FWPM_FILTER0 *f, const GUID *layer, const GUID *sublayer,
     f->action.type = action;
 }
 
-/* Add a single WFP filter and track its ID */
+/* Add a single WFP filter */
 static int
 add_filter(platform_win_ctx_t *p, const FWPM_FILTER0 *filter)
 {
-    if (p->n_wfp_filters >= MAX_WFP_FILTERS) {
-        LOG_WRN("killswitch: max filter count reached");
-        return -1;
-    }
-
-    UINT64 fid = 0;
-    DWORD err = FwpmFilterAdd0(p->wfp_engine, filter, NULL, &fid);
+    DWORD err = FwpmFilterAdd0(p->wfp_engine, filter, NULL, NULL);
     if (err != ERROR_SUCCESS) {
         LOG_ERR("FwpmFilterAdd0: error %lu", err);
         return -1;
     }
 
-    p->wfp_filter_ids[p->n_wfp_filters++] = fid;
+    p->n_wfp_filters++;
     return 0;
 }
 
@@ -204,8 +203,13 @@ win_setup_killswitch(platform_win_ctx_t *p)
 
     DWORD err;
 
-    /* Open WFP engine */
-    err = FwpmEngineOpen0(NULL, RPC_C_AUTHN_DEFAULT, NULL, NULL, &p->wfp_engine);
+    /* Open WFP engine on a dynamic session — see the file header for why. */
+    FWPM_SESSION0 session;
+    memset(&session, 0, sizeof(session));
+    session.displayData.name = L"mqvpn kill switch";
+    session.flags = FWPM_SESSION_FLAG_DYNAMIC;
+
+    err = FwpmEngineOpen0(NULL, RPC_C_AUTHN_DEFAULT, NULL, &session, &p->wfp_engine);
     if (err != ERROR_SUCCESS) {
         LOG_ERR("FwpmEngineOpen0: error %lu", err);
         return -1;
@@ -269,15 +273,26 @@ win_cleanup_killswitch(platform_win_ctx_t *p)
 {
     if (!p->killswitch_active || !p->wfp_engine) return;
 
-    /* Deleting the sublayer cascades and removes all filters in it */
-    DWORD err = FwpmSubLayerDeleteByKey0(p->wfp_engine, &p->wfp_sublayer_key);
-    if (err != ERROR_SUCCESS && err != FWP_E_SUBLAYER_NOT_FOUND)
-        LOG_WRN("FwpmSubLayerDeleteByKey0: error %lu", err);
+    /* Closing the engine ends the dynamic session, which deletes the sublayer
+     * and every filter in it.
+     *
+     * WFP has no cascade delete: "An object cannot be deleted until all
+     * objects that reference it have first been deleted" (WFP Object
+     * Management), and every filter references the sublayer it was added to.
+     * Deleting the sublayer on its own therefore leaves the filters — and the
+     * block-all rules among them — in place. */
+    DWORD err = FwpmEngineClose0(p->wfp_engine);
 
-    FwpmEngineClose0(p->wfp_engine);
     p->wfp_engine = NULL;
     p->killswitch_active = 0;
     p->n_wfp_filters = 0;
+
+    if (err != ERROR_SUCCESS) {
+        LOG_ERR("FwpmEngineClose0: error %lu; kill switch filters persist until "
+                "this process exits",
+                err);
+        return;
+    }
     LOG_INF("kill switch deactivated");
 }
 

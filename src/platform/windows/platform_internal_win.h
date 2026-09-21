@@ -29,9 +29,6 @@
 /* Maximum number of routes we install */
 #  define MAX_INSTALLED_ROUTES 8
 
-/* Maximum number of WFP filters (loopback*2 + TUN*2 + server + block*2 + spare) */
-#  define MAX_WFP_FILTERS 10
-
 typedef struct {
     mqvpn_client_t *client;
 
@@ -83,7 +80,6 @@ typedef struct {
     /* Kill switch (WFP) */
     HANDLE wfp_engine;
     GUID wfp_sublayer_key;
-    UINT64 wfp_filter_ids[MAX_WFP_FILTERS];
     int n_wfp_filters;
     int killswitch_active;
     int killswitch_enabled;
