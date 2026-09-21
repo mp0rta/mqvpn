@@ -87,12 +87,11 @@
 _Static_assert(3 * TCP_EGRESS_RELAY_CHUNK <= 48 * 1024,
                "relay chunk frames must stay within a small-thread stack budget");
 
-/* The fairness budget (TCP_EGRESS_RELAY_BUDGET, tcp_egress.h) is spent one
- * chunk-sized read at a time, so a budget under one chunk would simply be one
- * chunk, and a budget that is not a whole number of chunks would overshoot by
- * the remainder on every pass. Neither breaks anything; both would make the
- * quantum something other than the number the header's arithmetic is written
- * against. */
+/* The fairness budget (TCP_EGRESS_RELAY_BUDGET, tcp_egress.h) is normally
+ * spent in chunk-sized reads; the final read is capped to the remaining
+ * budget, so an arbitrary positive value would still be enforced exactly.
+ * Keep it at least one full chunk and a whole number of chunks because the
+ * header documents and reasons about the quantum in those units. */
 _Static_assert(TCP_EGRESS_RELAY_BUDGET >= TCP_EGRESS_RELAY_CHUNK &&
                    TCP_EGRESS_RELAY_BUDGET % TCP_EGRESS_RELAY_CHUNK == 0,
                "relay budget must be a whole number of relay chunks");
