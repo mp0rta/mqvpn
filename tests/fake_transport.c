@@ -35,7 +35,7 @@ fake_send_common(fake_transport_t *t, const mqvpn_datagram_t *bufs, unsigned n)
     switch (t->mode) {
     case FAKE_ACCEPT_ALL:
         capture(t, bufs, n);
-        t->sends_accepted++;
+        if (n > 0) t->sends_accepted++;
         return (int)n;
     case FAKE_WOULD_BLOCK: return MQVPN_TX_WOULD_BLOCK;
     case FAKE_FAILED: return MQVPN_TX_FAILED;
@@ -66,7 +66,10 @@ fake_get_stats(void *ctx, mqvpn_transport_stats_t *out)
     fake_transport_t *t = (fake_transport_t *)ctx;
     t->get_stats_calls++;
     if (t->stats_rc != MQVPN_OK) {
-        out->tx_sends = 12345; /* must be ignored by the core */
+        /* Poison BOTH fields: a core that consumes a failed snapshot must be
+         * caught whichever one it reads. */
+        out->tx_sends = 12345;
+        out->tx_datagrams = 12345;
         return t->stats_rc;
     }
     out->tx_sends = t->sends_accepted; /* sends that accepted >= 1 datagram */

@@ -1675,7 +1675,7 @@ extern mqvpn_path_handle_t
 mqvpn_client_test_get_send_handle_for_path(mqvpn_client_t *c, uint64_t xqc_path_id);
 extern int mqvpn_client_test_next_primary_idx(const mqvpn_client_t *c, int from_idx);
 
-TEST(get_fd_prefers_rotated_primary_when_active)
+TEST(get_send_handle_prefers_rotated_primary_when_active)
 {
     mqvpn_client_t *c = make_test_client();
     mqvpn_path_desc_t d0 = {0};
@@ -1700,7 +1700,7 @@ TEST(get_fd_prefers_rotated_primary_when_active)
     mqvpn_client_destroy(c);
 }
 
-TEST(get_fd_falls_back_to_first_active_when_primary_dropped)
+TEST(get_send_handle_falls_back_to_first_active_when_primary_dropped)
 {
     mqvpn_client_t *c = make_test_client();
     mqvpn_path_desc_t d0 = {0};
@@ -3434,8 +3434,8 @@ main(void)
     run_rollback_after_activation_failure_emits_event_then_closed();
 
     /* Primary-path rotation (issue #46) + OMR fallback composite */
-    run_get_fd_prefers_rotated_primary_when_active();
-    run_get_fd_falls_back_to_first_active_when_primary_dropped();
+    run_get_send_handle_prefers_rotated_primary_when_active();
+    run_get_send_handle_falls_back_to_first_active_when_primary_dropped();
     run_client_next_primary_idx_skips_closed_and_inactive();
 
     /* Permanent path-create failure (XQC_EMP_CREATE_PATH) */
