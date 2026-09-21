@@ -951,7 +951,8 @@ MQVPN_API void mqvpn_server_destroy(mqvpn_server_t *server);
 
 /*
  * Install the server's shared transport. Accepted exactly once, before
- * mqvpn_server_start(); a second call, or a call after start, returns
+ * mqvpn_server_start(); a second call, or a call while the server is running,
+ * returns
  * MQVPN_ERR_INVALID_STATE and leaves both the installed and the offered ctx
  * untouched (the offered ctx stays caller-owned). On MQVPN_OK the library
  * owns finalisation: ops.release(ctx) runs inside mqvpn_server_destroy()

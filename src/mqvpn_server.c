@@ -23,14 +23,6 @@
 #  include <ws2tcpip.h>
 #  include <windows.h>
 #  include <process.h>
-#  undef EAGAIN
-#  define EAGAIN WSAEWOULDBLOCK
-#  undef EWOULDBLOCK
-#  define EWOULDBLOCK WSAEWOULDBLOCK
-#  undef EINTR
-#  define EINTR WSAEINTR
-#  undef errno
-#  define errno WSAGetLastError()
 #else
 #  include <unistd.h>
 #  include <sys/time.h>
@@ -472,7 +464,12 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
 
 /* Offer n datagrams to the shared transport under `scope`. Folds the
  * 0-return contract violation into MQVPN_TX_FAILED (logged once per server)
- * and accounts bytes_tx for the accepted prefix. */
+ * and accounts bytes_tx for the accepted prefix.*
+ * The result MUST be mapped explicitly at every callsite, never handed
+ * back to xquic as-is: MQVPN_TX_WOULD_BLOCK(-1) / MQVPN_TX_FAILED(-2) are
+ * numerically equal to XQC_SOCKET_ERROR(-1) / XQC_SOCKET_EAGAIN(-2) with
+ * the meanings SWAPPED, so a bare `return k;` would turn a transient block
+ * into a connection teardown. */
 static int
 svr_transport_send(mqvpn_server_t *s, mqvpn_server_tx_scope_t scope,
                    const mqvpn_datagram_t *bufs, unsigned n, const struct sockaddr *peer,
@@ -2029,8 +2026,7 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
                           ? cbs->struct_size
                           : sizeof(*cbs);
     memcpy(&s->cbs, cbs, cbs_size);
-    /* caller guarantees lifetime exceeds this object */ // lgtm[cpp/stack-address-escape]
-    s->user_ctx = user_ctx;
+    s->user_ctx = user_ctx; // lgtm[cpp/stack-address-escape]
     s->log_level = cfg->log_level;
     s->max_clients = cfg->max_clients > 0 ? cfg->max_clients : 64;
     mqvpn_ptb_bucket_init(&s->ptb_bucket);

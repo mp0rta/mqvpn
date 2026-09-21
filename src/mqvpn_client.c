@@ -1144,7 +1144,12 @@ path_send_dead_retcode(const mqvpn_client_t *c)
 /* Offer n datagrams to the slot's transport (§ ABI 3 send contract).
  * Precondition: p->transport_attached. Folds the 0-return contract
  * violation into MQVPN_TX_FAILED (logged once per client) and accounts
- * bytes_tx for the accepted prefix on both the client and the slot. */
+ * bytes_tx for the accepted prefix on both the client and the slot.*
+ * The result MUST be mapped explicitly at every callsite, never handed
+ * back to xquic as-is: MQVPN_TX_WOULD_BLOCK(-1) / MQVPN_TX_FAILED(-2) are
+ * numerically equal to XQC_SOCKET_ERROR(-1) / XQC_SOCKET_EAGAIN(-2) with
+ * the meanings SWAPPED, so a bare `return k;` would turn a transient block
+ * into a connection teardown. */
 static int
 path_transport_send(mqvpn_client_t *c, path_entry_t *p, const mqvpn_datagram_t *bufs,
                     unsigned n, const struct sockaddr *peer, socklen_t peerlen)
