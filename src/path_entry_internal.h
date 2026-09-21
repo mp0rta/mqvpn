@@ -49,12 +49,21 @@ typedef enum {
 
 typedef struct path_entry_s {
     mqvpn_path_handle_t handle;
-    int fd;
+    /* Transport (ABI 3). ops is the copied table (send != NULL iff a
+     * transport is installed); transport_ctx is an opaque payload — NULL is a
+     * legal value and never a lifecycle signal. The two flags are the
+     * lifecycle evidence:
+     *   transport_attached  platform currently provides I/O for this slot
+     *   transport_released  no ctx is owed a release (fresh slot, or the ctx
+     *                       was finalised after the platform stopped I/O) */
+    mqvpn_path_ops_t ops;
+    void *transport_ctx;
+    int transport_attached;
+    int transport_released;
     char name[16];
     mqvpn_path_status_t status;
     path_lifecycle_t state; /* PR2 — internal 7-state, must satisfy:
                                status == path_public_status_from_lifecycle(state) */
-    int platform_attached;  /* PR0 rename of `active` */
     struct sockaddr_storage local_addr;
     uint32_t local_addr_len;
     int64_t platform_net_id;
@@ -69,9 +78,6 @@ typedef struct path_entry_s {
     uint64_t path_stable_since_us;
     uint64_t state_entered_at_us;       /* PR1 — Phase 1 observability */
     uint64_t last_residence_warn_at_us; /* PR1 — residence-warn debounce, used in B10 */
-    int gso_disabled;                   /* runtime sticky: 0 = GSO usable, else the
-                                         * GSO-class errno that disabled it (see
-                                         * udp_offload.h); reset on fd assignment */
 } path_entry_t;
 
 #endif /* MQVPN_PATH_ENTRY_INTERNAL_H */

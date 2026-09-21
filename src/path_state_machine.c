@@ -24,7 +24,7 @@ const char *
 mqvpn_path_transition_reason_name(path_transition_reason_t r)
 {
     switch (r) {
-    case PATH_REASON_ADD_FD: return "ADD_FD";
+    case PATH_REASON_ADD: return "ADD";
     case PATH_REASON_ACTIVATE_OK: return "ACTIVATE_OK";
     case PATH_REASON_ACTIVATE_FAILED: return "ACTIVATE_FAILED";
     case PATH_REASON_XQUIC_REMOVED: return "XQUIC_REMOVED";
@@ -33,7 +33,7 @@ mqvpn_path_transition_reason_name(path_transition_reason_t r)
     case PATH_REASON_REACTIVATE: return "REACTIVATE";
     case PATH_REASON_CONN_RESET: return "CONN_RESET";
     case PATH_REASON_RETRY_RESET: return "RETRY_RESET";
-    case PATH_REASON_FD_CLOSED: return "FD_CLOSED";
+    case PATH_REASON_TRANSPORT_RELEASED: return "TRANSPORT_RELEASED";
     }
     return "UNKNOWN";
 }
@@ -43,21 +43,21 @@ void
 path_invariant_check_legacy(const path_entry_t *p)
 {
 #ifndef NDEBUG
-    int fd_valid = (p->fd >= 0);
+    int attached_ok = (p->transport_attached == 1 && p->transport_released == 0);
     switch (p->status) {
     case MQVPN_PATH_PENDING:
-        assert(p->platform_attached == 1);
+        assert(p->transport_attached == 1);
         assert(p->xquic_path_live == 0);
-        assert(fd_valid);
+        assert(attached_ok);
         assert(p->xqc_path_id == 0);
         assert(p->recreate_after_us == 0); /* PENDING is not retry-armed */
         assert(p->path_stable_since_us == 0);
         break;
     case MQVPN_PATH_ACTIVE:
     case MQVPN_PATH_STANDBY:
-        assert(p->platform_attached == 1);
+        assert(p->transport_attached == 1);
         assert(p->xquic_path_live == 1);
-        assert(fd_valid);
+        assert(attached_ok);
         /* xqc_path_id == 0 is legal for the primary path (initial QUIC
          * connection path); secondary paths always receive a non-zero ID
          * from xqc_conn_create_path(). No per-slot "is_primary" flag
@@ -65,21 +65,21 @@ path_invariant_check_legacy(const path_entry_t *p)
         assert(p->recreate_after_us == 0); /* usable states have no pending retry */
         break;
     case MQVPN_PATH_DEGRADED:
-        assert(p->platform_attached == 1);
+        assert(p->transport_attached == 1);
         assert(p->xquic_path_live == 0);
-        assert(fd_valid);
+        assert(attached_ok);
         assert(p->xqc_path_id == 0);
         assert(p->recreate_after_us != 0); /* DEGRADED MUST be retry-armed */
         assert(p->path_stable_since_us == 0);
         break;
     case MQVPN_PATH_CLOSED:
         /* Two legal sub-cases (recoverable vs dropped), distinguished
-         * by platform_attached. Fields beyond platform_attached are
+         * by transport_attached. Fields beyond transport_attached are
          * lazy in the dropped case. */
-        if (p->platform_attached == 1) {
-            /* CLOSED_RECOVERABLE: retry exhausted, fd still valid */
+        if (p->transport_attached == 1) {
+            /* CLOSED_RECOVERABLE: retry exhausted, transport still attached */
             assert(p->xquic_path_live == 0);
-            assert(fd_valid);
+            assert(attached_ok);
             assert(p->xqc_path_id == 0);
             assert(p->recreate_after_us == 0); /* retry NOT re-armed */
             assert(p->path_stable_since_us == 0);
@@ -144,21 +144,21 @@ path_invariant_check(const path_entry_t *p)
      * of state. Drift is a bug. */
     assert(p->status == path_public_status_from_lifecycle(p->state));
 
-    int fd_valid = (p->fd >= 0);
+    int attached_ok = (p->transport_attached == 1 && p->transport_released == 0);
 
     switch (p->state) {
     case PATH_LC_PENDING:
-        assert(p->platform_attached == 1);
+        assert(p->transport_attached == 1);
         assert(p->xquic_path_live == 0);
-        assert(fd_valid);
+        assert(attached_ok);
         assert(p->xqc_path_id == 0);
         assert(p->recreate_after_us == 0);
         assert(p->path_stable_since_us == 0);
         break;
     case PATH_LC_CREATE_WAIT:
-        assert(p->platform_attached == 1);
+        assert(p->transport_attached == 1);
         assert(!p->xquic_path_live);
-        assert(fd_valid);
+        assert(attached_ok);
         /* xqc_path_id is intentionally NOT asserted: a CREATE_WAIT entered
          * after a previous validation cycle on the primary path may still
          * carry id=0. Same exception as PR2 ACTIVE/STANDBY (commit e4d5dc6)
@@ -166,18 +166,18 @@ path_invariant_check(const path_entry_t *p)
         assert(p->recreate_after_us != 0);
         break;
     case PATH_LC_VALIDATING:
-        assert(p->platform_attached == 1);
+        assert(p->transport_attached == 1);
         assert(p->xquic_path_live == 1);
-        assert(fd_valid);
+        assert(attached_ok);
         /* xqc_path_id is intentionally NOT asserted: primary path keeps id=0
          * through validation. Same exception as PR2 ACTIVE/STANDBY. */
         assert(p->recreate_after_us == 0);
         break;
     case PATH_LC_ACTIVE:
     case PATH_LC_STANDBY:
-        assert(p->platform_attached == 1);
+        assert(p->transport_attached == 1);
         assert(p->xquic_path_live == 1);
-        assert(fd_valid);
+        assert(attached_ok);
         /* xqc_path_id == 0 is legal for the primary path (initial QUIC
          * connection path); secondary paths always receive a non-zero ID
          * from xqc_conn_create_path(). No per-slot "is_primary" flag
@@ -185,36 +185,39 @@ path_invariant_check(const path_entry_t *p)
         assert(p->recreate_after_us == 0);
         break;
     case PATH_LC_DEGRADED:
-        assert(p->platform_attached == 1);
+        assert(p->transport_attached == 1);
         assert(p->xquic_path_live == 0);
-        assert(fd_valid);
+        assert(attached_ok);
         assert(p->xqc_path_id == 0);
         assert(p->recreate_after_us != 0);
         assert(p->path_stable_since_us == 0);
         break;
     case PATH_LC_CLOSED_RECOVERABLE:
-        assert(p->platform_attached == 1);
+        assert(p->transport_attached == 1);
         assert(p->xquic_path_live == 0);
-        assert(fd_valid);
+        assert(attached_ok);
         assert(p->xqc_path_id == 0);
         assert(p->recreate_after_us == 0);
         assert(p->path_stable_since_us == 0);
         break;
     case PATH_LC_CLOSED_DROPPED:
-        /* Lazy: only enforce platform_attached=0 + recreate_after_us=0 +
+        /* Lazy: only enforce transport_attached=0 + recreate_after_us=0 +
          * path_stable_since_us=0. Other fields may carry over from prior
-         * state until xquic-removed and fd-closed events finish cleanup
-         * (PR3 spec §5.1). */
-        assert(p->platform_attached == 0);
+         * state until xquic-removed and transport-released events finish
+         * cleanup (PR3 spec §5.1). */
+        assert(p->transport_attached == 0);
         assert(p->recreate_after_us == 0);
         assert(p->path_stable_since_us == 0);
         break;
     case PATH_LC_CLOSED_FREE:
-        /* All zero — slot reusable. */
-        assert(p->platform_attached == 0);
+        /* Full free gate + empty payload. transport_released is the
+         * lifecycle evidence; ctx == NULL is only its consequence (a
+         * stateless transport has ctx == NULL while attached). */
+        assert(p->transport_attached == 0);
+        assert(p->transport_released == 1);
         assert(p->xquic_path_live == 0);
-        assert(p->fd < 0);
         assert(p->xqc_path_id == 0);
+        assert(p->transport_ctx == NULL);
         assert(p->recreate_after_us == 0);
         assert(p->path_stable_since_us == 0);
         break;
@@ -271,9 +274,9 @@ path_event_name(path_event_t ev)
     case PATH_EVENT_MANUAL_REACTIVATE: return "MANUAL_REACTIVATE";
     case PATH_EVENT_PLATFORM_DROP: return "PLATFORM_DROP";
     case PATH_EVENT_REMOVE_API: return "REMOVE_API";
-    case PATH_EVENT_ADD_FD: return "ADD_FD";
+    case PATH_EVENT_ADD: return "ADD";
     case PATH_EVENT_CONN_RESET: return "CONN_RESET";
-    case PATH_EVENT_FD_CLOSED: return "FD_CLOSED";
+    case PATH_EVENT_TRANSPORT_RELEASED: return "TRANSPORT_RELEASED";
     }
     return "?";
 }
@@ -289,10 +292,11 @@ path_log_state_change(mqvpn_client_t *c, const path_entry_t *p,
 {
     client_log(c, MQVPN_LOG_DEBUG,
                "path[handle=%lld name=%s] %s -> %s reason=%s "
-               "retries=%d fd=%d xqc_path_id=%llu",
+               "retries=%d attached=%d released=%d xqc_path_id=%llu",
                (long long)p->handle, p->name, path_lifecycle_name(old_state),
                path_lifecycle_name(p->state), mqvpn_path_transition_reason_name(reason),
-               p->recreate_retries, p->fd, (unsigned long long)p->xqc_path_id);
+               p->recreate_retries, p->transport_attached, p->transport_released,
+               (unsigned long long)p->xqc_path_id);
 }
 
 /* PR2 — internal helper. Updates both `status` (public ABI projection) and
@@ -353,14 +357,14 @@ path_recreate_backoff(int retries)
 }
 
 /* PR4 - Slot zero-init helper used at allocation time in
- * mqvpn_client_add_path_fd. Spec §7.1 explicitly allows direct field writes
+ * mqvpn_client_add_path. Spec §7.1 explicitly allows direct field writes
  * here because the slot has no prior state to preserve. Starting state =
- * CLOSED_FREE so EVENT_ADD_FD transitions cleanly to PENDING. */
+ * CLOSED_FREE so EVENT_ADD transitions cleanly to PENDING. */
 void
 path_entry_init(path_entry_t *p)
 {
     memset(p, 0, sizeof(*p));
-    p->fd = -1;
+    p->transport_released = 1; /* nothing is owed a release on a fresh slot */
     p->state = PATH_LC_CLOSED_FREE;
     p->status = path_public_status_from_lifecycle(PATH_LC_CLOSED_FREE);
 }
@@ -411,10 +415,11 @@ static void path_on_platform_drop(mqvpn_client_t *, path_entry_t *,
                                   const path_event_ctx_t *);
 static void path_on_remove_api(mqvpn_client_t *, path_entry_t *,
                                const path_event_ctx_t *);
-static void path_on_add_fd(mqvpn_client_t *, path_entry_t *, const path_event_ctx_t *);
+static void path_on_add(mqvpn_client_t *, path_entry_t *, const path_event_ctx_t *);
 static void path_on_conn_reset(mqvpn_client_t *, path_entry_t *,
                                const path_event_ctx_t *);
-static void path_on_fd_closed(mqvpn_client_t *, path_entry_t *, const path_event_ctx_t *);
+static void path_on_transport_released(mqvpn_client_t *, path_entry_t *,
+                                       const path_event_ctx_t *);
 static void maybe_transition_dropped_to_free(mqvpn_client_t *, path_entry_t *,
                                              path_transition_reason_t);
 
@@ -438,9 +443,9 @@ path_on_event(mqvpn_client_t *c, path_entry_t *p, path_event_t ev,
     case PATH_EVENT_MANUAL_REACTIVATE: path_on_manual_reactivate(c, p, ctx); break;
     case PATH_EVENT_PLATFORM_DROP: path_on_platform_drop(c, p, ctx); break;
     case PATH_EVENT_REMOVE_API: path_on_remove_api(c, p, ctx); break;
-    case PATH_EVENT_ADD_FD: path_on_add_fd(c, p, ctx); break;
+    case PATH_EVENT_ADD: path_on_add(c, p, ctx); break;
     case PATH_EVENT_CONN_RESET: path_on_conn_reset(c, p, ctx); break;
-    case PATH_EVENT_FD_CLOSED: path_on_fd_closed(c, p, ctx); break;
+    case PATH_EVENT_TRANSPORT_RELEASED: path_on_transport_released(c, p, ctx); break;
     }
 
     /* Single invariant + path_event emission point. */
@@ -610,10 +615,10 @@ static void
 path_on_platform_drop(mqvpn_client_t *c, path_entry_t *p, const path_event_ctx_t *ctx)
 {
     (void)ctx;
-    /* Spec §4.3 CLOSED_DROPPED: platform_attached=0 strict, lazy xquic clear */
+    /* Spec §4.3 CLOSED_DROPPED: transport_attached=0 strict, lazy xquic clear */
     if (p->state == PATH_LC_CLOSED_DROPPED) return; /* idempotent */
     if (p->state == PATH_LC_CLOSED_FREE) return;    /* idempotent */
-    p->platform_attached = 0;
+    p->transport_attached = 0;
     p->recreate_after_us = 0;
     p->path_stable_since_us = 0;
     /* FSM stays xquic-API-free; the PATH_ABANDON for CID/path_id reuse is
@@ -628,27 +633,28 @@ path_on_remove_api(mqvpn_client_t *c, path_entry_t *p, const path_event_ctx_t *c
     (void)ctx;
     /* Spec §5.0: caller (mqvpn_client_remove_path) already invoked
      * xqc_conn_close_path() before dispatch. FSM only does state mutation.
-     * CLOSED_DROPPED invariant requires platform_attached=0. */
+     * CLOSED_DROPPED invariant requires transport_attached=0. */
     if (p->state == PATH_LC_CLOSED_DROPPED) return;
     if (p->state == PATH_LC_CLOSED_FREE) return;
-    p->platform_attached = 0;
+    p->transport_attached = 0;
     p->recreate_after_us = 0;
     p->path_stable_since_us = 0;
     set_path_state_with_log(c, p, PATH_LC_CLOSED_DROPPED, PATH_REASON_REMOVE_API);
 }
 
 static void
-path_on_add_fd(mqvpn_client_t *c, path_entry_t *p, const path_event_ctx_t *ctx)
+path_on_add(mqvpn_client_t *c, path_entry_t *p, const path_event_ctx_t *ctx)
 {
     (void)ctx;
     if (p->state != PATH_LC_CLOSED_FREE) {
         client_log(c, MQVPN_LOG_WARN,
-                   "path[%s] ADD_FD in unexpected state %s (expected CLOSED_FREE)",
-                   p->name, path_lifecycle_name(p->state));
+                   "path[%s] ADD in unexpected state %s (expected CLOSED_FREE)", p->name,
+                   path_lifecycle_name(p->state));
         return;
     }
-    p->platform_attached = 1;
-    set_path_state_with_log(c, p, PATH_LC_PENDING, PATH_REASON_ADD_FD);
+    p->transport_attached = 1;
+    p->transport_released = 0;
+    set_path_state_with_log(c, p, PATH_LC_PENDING, PATH_REASON_ADD);
 }
 
 static void
@@ -662,7 +668,7 @@ path_on_conn_reset(mqvpn_client_t *c, path_entry_t *p, const path_event_ctx_t *c
     p->recreate_retries = 0;
     p->path_stable_since_us = 0;
 
-    if (p->platform_attached) {
+    if (p->transport_attached) {
         set_path_state_with_log(c, p, PATH_LC_PENDING, PATH_REASON_CONN_RESET);
     } else {
         maybe_transition_dropped_to_free(c, p, PATH_REASON_CONN_RESET);
@@ -670,22 +676,21 @@ path_on_conn_reset(mqvpn_client_t *c, path_entry_t *p, const path_event_ctx_t *c
 }
 
 static void
-path_on_fd_closed(mqvpn_client_t *c, path_entry_t *p, const path_event_ctx_t *ctx)
+path_on_transport_released(mqvpn_client_t *c, path_entry_t *p,
+                           const path_event_ctx_t *ctx)
 {
     (void)ctx;
-    /* Spec sec 5.1 CLOSED_DROPPED:
-     *   [EVENT_FD_CLOSED] -> self (set fd=-1; re-evaluate cleanup)
-     * Other states: late async race - LOG_D + no-op (spec sec 5.1 tail
-     * "Late async callback no atsukai"). CLOSED_FREE also late-event
-     * idempotent (state unchanged, cleanup already complete). */
+    /* Only reachable from CLOSED_DROPPED: mqvpn_client_on_platform_path_released
+     * refuses every other state before finalising the ctx and dispatching. */
     if (p->state != PATH_LC_CLOSED_DROPPED) {
-        client_log(c, MQVPN_LOG_DEBUG, "path[%s] FD_CLOSED (late) in state %s, ignoring",
-                   p->name, path_lifecycle_name(p->state));
+        client_log(c, MQVPN_LOG_DEBUG,
+                   "path[%s] TRANSPORT_RELEASED (late) in state %s, ignoring", p->name,
+                   path_lifecycle_name(p->state));
         return;
     }
-    /* fd is NOT in spec sec 3.3 lifecycle field list - direct write allowed. */
-    p->fd = -1;
-    maybe_transition_dropped_to_free(c, p, PATH_REASON_FD_CLOSED);
+    p->transport_ctx = NULL;
+    p->transport_released = 1;
+    maybe_transition_dropped_to_free(c, p, PATH_REASON_TRANSPORT_RELEASED);
 }
 
 static void
@@ -693,7 +698,7 @@ maybe_transition_dropped_to_free(mqvpn_client_t *c, path_entry_t *p,
                                  path_transition_reason_t reason)
 {
     if (p->state != PATH_LC_CLOSED_DROPPED) return;
-    if (p->fd >= 0) return;
+    if (!p->transport_released) return;
     if (p->xquic_path_live) return;
     if (p->xqc_path_id != 0) return;
     set_path_state_with_log(c, p, PATH_LC_CLOSED_FREE, reason);

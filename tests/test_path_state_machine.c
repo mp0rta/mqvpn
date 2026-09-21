@@ -65,7 +65,7 @@ static path_entry_t
 make_slot(void)
 {
     path_entry_t p = {0};
-    p.fd = 7;
+    p.transport_released = 0;
     return p;
 }
 
@@ -91,7 +91,7 @@ test_status_name_unknown(void)
 static void
 test_reason_name_known(void)
 {
-    assert(strcmp(mqvpn_path_transition_reason_name(PATH_REASON_ADD_FD), "ADD_FD") == 0);
+    assert(strcmp(mqvpn_path_transition_reason_name(PATH_REASON_ADD), "ADD") == 0);
     assert(strcmp(mqvpn_path_transition_reason_name(PATH_REASON_ACTIVATE_OK),
                   "ACTIVATE_OK") == 0);
     assert(strcmp(mqvpn_path_transition_reason_name(PATH_REASON_RETRY_RESET),
@@ -115,8 +115,8 @@ test_reason_name_full_table(void)
                   "REACTIVATE") == 0);
     assert(strcmp(mqvpn_path_transition_reason_name(PATH_REASON_CONN_RESET),
                   "CONN_RESET") == 0);
-    assert(strcmp(mqvpn_path_transition_reason_name(PATH_REASON_FD_CLOSED),
-                  "FD_CLOSED") == 0);
+    assert(strcmp(mqvpn_path_transition_reason_name(PATH_REASON_TRANSPORT_RELEASED),
+                  "TRANSPORT_RELEASED") == 0);
 }
 
 static void
@@ -135,7 +135,7 @@ test_invariant_pending_legal(void)
 {
     path_entry_t p = make_slot();
     p.status = MQVPN_PATH_PENDING;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.xquic_path_live = 0;
     p.xqc_path_id = 0;
     p.recreate_after_us = 0;
@@ -148,7 +148,7 @@ test_invariant_active_legal(void)
 {
     path_entry_t p = make_slot();
     p.status = MQVPN_PATH_ACTIVE;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.xquic_path_live = 1;
     p.xqc_path_id = 42;
     p.recreate_after_us = 0;
@@ -161,7 +161,7 @@ test_invariant_standby_legal(void)
 {
     path_entry_t p = make_slot();
     p.status = MQVPN_PATH_STANDBY;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.xquic_path_live = 1;
     p.xqc_path_id = 99;
     p.recreate_after_us = 0;
@@ -173,7 +173,7 @@ test_invariant_degraded_legal(void)
 {
     path_entry_t p = make_slot();
     p.status = MQVPN_PATH_DEGRADED;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.xquic_path_live = 0;
     p.xqc_path_id = 0;
     p.recreate_after_us = 1000; /* MUST be != 0 */
@@ -186,7 +186,7 @@ test_invariant_closed_recoverable_legal(void)
 {
     path_entry_t p = make_slot();
     p.status = MQVPN_PATH_CLOSED;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.xquic_path_live = 0;
     p.xqc_path_id = 0;
     p.recreate_after_us = 0;
@@ -198,11 +198,11 @@ static void
 test_invariant_closed_dropped_legal(void)
 {
     path_entry_t p = {0};
-    p.fd = -1;
+    p.transport_released = 1;
     p.status = MQVPN_PATH_CLOSED;
-    p.platform_attached = 0;
+    p.transport_attached = 0;
     /* recreate_after_us = path_stable_since_us = 0 by zero-init.
-     * xquic_path_live / xqc_path_id / fd may be lazy — leave 0. */
+     * xquic_path_live / xqc_path_id / transport_released may be lazy — leave 0. */
     path_invariant_check_legacy(&p);
 }
 
@@ -226,7 +226,7 @@ test_should_warn_pending_below_threshold(void)
 {
     path_entry_t p = make_slot();
     p.status = MQVPN_PATH_PENDING;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.state_entered_at_us = 1000;
     assert(path_should_warn_residence(&p, 1000 + 10ULL * 1000000) == 0);
 }
@@ -240,7 +240,7 @@ test_should_warn_pending_at_threshold_exact(void)
      * around timer wake-ups that land on the boundary. */
     path_entry_t p = make_slot();
     p.status = MQVPN_PATH_PENDING;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.state_entered_at_us = 1000;
     assert(path_should_warn_residence(&p, 1000 + PATH_RESIDENCE_PENDING_WARN_US) == 0);
 }
@@ -250,7 +250,7 @@ test_should_warn_pending_above_threshold(void)
 {
     path_entry_t p = make_slot();
     p.status = MQVPN_PATH_PENDING;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.state_entered_at_us = 1000;
     assert(path_should_warn_residence(&p, 1000 + 31ULL * 1000000) == 1);
 }
@@ -260,7 +260,7 @@ test_should_warn_pending_debounce(void)
 {
     path_entry_t p = make_slot();
     p.status = MQVPN_PATH_PENDING;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.state_entered_at_us = 1000;
     p.last_residence_warn_at_us = 1000 + 31ULL * 1000000;
     assert(path_should_warn_residence(&p, 1000 + 36ULL * 1000000) == 0);
@@ -271,7 +271,7 @@ test_should_warn_active_never(void)
 {
     path_entry_t p = make_slot();
     p.status = MQVPN_PATH_ACTIVE;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.xquic_path_live = 1;
     p.xqc_path_id = 42;
     p.state_entered_at_us = 1000;
@@ -286,7 +286,7 @@ test_should_warn_standby_never(void)
      * the deliberately-quiescent path. */
     path_entry_t p = make_slot();
     p.status = MQVPN_PATH_STANDBY;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.xquic_path_live = 1;
     p.xqc_path_id = 99;
     p.state_entered_at_us = 1000;
@@ -301,7 +301,7 @@ test_should_warn_closed_never(void)
      * has already ended and observers were notified via path_event. */
     path_entry_t p = make_slot();
     p.status = MQVPN_PATH_CLOSED;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.state_entered_at_us = 1000;
     assert(path_should_warn_residence(&p, 1000 + 3600ULL * 1000000) == 0);
 }
@@ -312,7 +312,7 @@ test_should_warn_degraded_overdue(void)
     /* DEGRADED with retry timer overdue by > grace AND last warn was long ago. */
     path_entry_t p = make_slot();
     p.status = MQVPN_PATH_DEGRADED;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.state_entered_at_us = 1000;
     p.recreate_after_us = 1000 + 5ULL * 1000000; /* retry was scheduled for now+5s */
     /* now = 1000 + 70s — recreate_after_us was 5s in, so 65s overdue, > 60s grace */
@@ -325,7 +325,7 @@ test_should_warn_degraded_within_grace(void)
     /* DEGRADED retry overdue by less than grace — should NOT warn. */
     path_entry_t p = make_slot();
     p.status = MQVPN_PATH_DEGRADED;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.state_entered_at_us = 1000;
     p.recreate_after_us = 1000 + 5ULL * 1000000;
     /* now = 1000 + 30s — only 25s past recreate_after_us, well within 60s grace */
@@ -342,7 +342,7 @@ test_should_warn_degraded_no_retry_armed(void)
      * `now_us > 0 + GRACE` against an arbitrary now. */
     path_entry_t p = make_slot();
     p.status = MQVPN_PATH_DEGRADED;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.state_entered_at_us = 1000;
     p.recreate_after_us = 0;
     assert(path_should_warn_residence(&p, 1000 + 3600ULL * 1000000) == 0);
@@ -357,7 +357,7 @@ test_should_warn_degraded_debounce(void)
      * and flood the log on a stuck DEGRADED slot. */
     path_entry_t p = make_slot();
     p.status = MQVPN_PATH_DEGRADED;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.state_entered_at_us = 1000;
     p.recreate_after_us = 1000 + 5ULL * 1000000; /* retry was scheduled at +5s */
     /* Pretend a warn already fired at +70s. */
@@ -374,7 +374,7 @@ test_should_warn_degraded_rewarn_after_debounce(void)
      * once per state entry" is caught here. */
     path_entry_t p = make_slot();
     p.status = MQVPN_PATH_DEGRADED;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.state_entered_at_us = 1000;
     p.recreate_after_us = 1000 + 5ULL * 1000000;
     p.last_residence_warn_at_us = 1000 + 70ULL * 1000000;
@@ -428,9 +428,9 @@ test_invariant_pending_pass(void)
     path_entry_t p = {0};
     p.state = PATH_LC_PENDING;
     p.status = MQVPN_PATH_PENDING;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.xquic_path_live = 0;
-    p.fd = 42;
+    p.transport_released = 0;
     p.xqc_path_id = 0;
     p.recreate_after_us = 0;
     p.path_stable_since_us = 0;
@@ -444,9 +444,9 @@ test_invariant_create_wait_pass(void)
     path_entry_t p = {0};
     p.state = PATH_LC_CREATE_WAIT;
     p.status = MQVPN_PATH_PENDING;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.xquic_path_live = 0;
-    p.fd = 42;
+    p.transport_released = 0;
     /* xqc_path_id NOT pinned (see comment in invariant) */
     p.recreate_after_us = 100;
     p.path_stable_since_us = 0;
@@ -460,9 +460,9 @@ test_invariant_validating_pass(void)
     path_entry_t p = {0};
     p.state = PATH_LC_VALIDATING;
     p.status = MQVPN_PATH_PENDING;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.xquic_path_live = 1;
-    p.fd = 42;
+    p.transport_released = 0;
     p.xqc_path_id = 0; /* primary path keeps id=0 (PR2 carryover) */
     p.recreate_after_us = 0;
     p.path_stable_since_us = 0;
@@ -476,9 +476,9 @@ test_invariant_active_pass(void)
     path_entry_t p = {0};
     p.state = PATH_LC_ACTIVE;
     p.status = MQVPN_PATH_ACTIVE;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.xquic_path_live = 1;
-    p.fd = 42;
+    p.transport_released = 0;
     p.xqc_path_id = 7;
     p.recreate_after_us = 0;
     path_invariant_check(&p);
@@ -491,9 +491,9 @@ test_invariant_degraded_pass(void)
     path_entry_t p = {0};
     p.state = PATH_LC_DEGRADED;
     p.status = MQVPN_PATH_DEGRADED;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.xquic_path_live = 0;
-    p.fd = 42;
+    p.transport_released = 0;
     p.xqc_path_id = 0;
     p.recreate_after_us = 1234567; /* must be != 0 */
     p.path_stable_since_us = 0;
@@ -507,9 +507,9 @@ test_invariant_closed_recoverable_pass(void)
     path_entry_t p = {0};
     p.state = PATH_LC_CLOSED_RECOVERABLE;
     p.status = MQVPN_PATH_CLOSED;
-    p.platform_attached = 1; /* fd retained, manual reactivate possible */
+    p.transport_attached = 1; /* transport retained, manual reactivate possible */
     p.xquic_path_live = 0;
-    p.fd = 42;
+    p.transport_released = 0;
     p.xqc_path_id = 0;
     p.recreate_after_us = 0; /* retry NOT re-armed */
     p.path_stable_since_us = 0;
@@ -523,11 +523,11 @@ test_invariant_closed_dropped_lazy_pass(void)
     path_entry_t p = {0};
     p.state = PATH_LC_CLOSED_DROPPED;
     p.status = MQVPN_PATH_CLOSED;
-    p.platform_attached = 0; /* required */
+    p.transport_attached = 0; /* required */
     p.recreate_after_us = 0;
     p.path_stable_since_us = 0;
     /* lazy fields can be non-zero */
-    p.fd = 42;
+    p.transport_released = 0;
     p.xquic_path_live = 1;
     p.xqc_path_id = 5;
     path_invariant_check(&p);
@@ -537,17 +537,24 @@ test_invariant_closed_dropped_lazy_pass(void)
 static void
 test_invariant_closed_free_strict_pass(void)
 {
-    path_entry_t p = {0};
-    p.state = PATH_LC_CLOSED_FREE;
-    p.status = MQVPN_PATH_CLOSED;
-    p.platform_attached = 0;
-    p.xquic_path_live = 0;
-    p.fd = -1;
-    p.xqc_path_id = 0;
-    p.recreate_after_us = 0;
-    p.path_stable_since_us = 0;
+    path_entry_t p;
+    path_entry_init(&p);
     path_invariant_check(&p);
     printf("  test_invariant_closed_free_strict_pass: OK\n");
+}
+
+static void
+test_entry_init_satisfies_closed_free_invariant(void)
+{
+    path_entry_t p;
+    memset(&p, 0xAB, sizeof(p)); /* garbage in — init must fully reset */
+    path_entry_init(&p);
+    assert(p.state == PATH_LC_CLOSED_FREE);
+    assert(p.transport_attached == 0);
+    assert(p.transport_released == 1);
+    assert(p.transport_ctx == NULL);
+    path_invariant_check(&p);
+    printf("  test_entry_init_satisfies_closed_free_invariant: OK\n");
 }
 
 /* ─── path_is_real_transition: self-loop suppression + first-entry exception ─── */
@@ -580,9 +587,9 @@ test_is_real_transition_first_entry_zero_init(void)
     /* Same state, state_entered_at_us == 0 → first entry to fresh slot,
      * MUST be treated as real transition.
      *
-     * This pins down the I1 bug fix: mqvpn_client_add_path_fd memsets the
+     * This pins down the I1 bug fix: mqvpn_client_add_path memsets the
      * slot (status == MQVPN_PATH_PENDING == 0, state_entered_at_us == 0)
-     * then calls set_path_status_with_log(..., PENDING, ADD_FD). Without
+     * then calls set_path_status_with_log(..., PENDING, ADD). Without
      * the first-entry exception, this is suppressed as a self-loop and
      * state_entered_at_us never gets recorded — so the "stuck in PENDING"
      * residence-warn never fires. */
@@ -604,9 +611,9 @@ test_should_warn_state_entered_zero_is_silent(void)
      * This test pins down the contract here so the integration site cannot
      * regress without one of these tests changing. */
     path_entry_t p = {0};
-    p.fd = 7;
+    p.transport_released = 0;
     p.status = MQVPN_PATH_PENDING;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     /* state_entered_at_us is 0 by zero-init */
     assert(path_should_warn_residence(&p, 1000 + 3600ULL * 1000000) == 0);
 }
@@ -622,7 +629,7 @@ test_should_warn_state_entered_zero_is_silent(void)
 typedef struct {
     const char *name;
     path_lifecycle_t in_state;
-    int in_platform_attached;
+    int in_transport_attached;
     int in_xquic_path_live;
     uint64_t in_recreate_after_us;
     uint64_t in_path_stable_since_us;
@@ -638,9 +645,10 @@ static void
 run_dispatch_case(const dispatch_case_t *tc)
 {
     path_entry_t p = {0};
-    /* CLOSED_FREE strict invariant requires fd<0; all other states accept fd>=0. */
-    p.fd = (tc->in_state == PATH_LC_CLOSED_FREE) ? -1 : 7;
-    p.platform_attached = tc->in_platform_attached;
+    /* CLOSED_FREE strict invariant requires transport_released=1; all other
+     * states accept transport_released=0. */
+    p.transport_released = (tc->in_state == PATH_LC_CLOSED_FREE) ? 1 : 0;
+    p.transport_attached = tc->in_transport_attached;
     p.xquic_path_live = tc->in_xquic_path_live;
     p.xqc_path_id = tc->in_xqc_path_id;
     p.recreate_after_us = tc->in_recreate_after_us;
@@ -775,8 +783,8 @@ test_dispatch_table(void)
          {.result = ACTIVATE_OK, .new_xqc_path_id = 99, .now_us = 2000},
          PATH_LC_VALIDATING,
          0},
-        /* 9: ACTIVE + CONN_RESET (platform_attached, retries reset to 0) */
-        {"ACTIVE + CONN_RESET (platform_attached)",
+        /* 9: ACTIVE + CONN_RESET (transport_attached, retries reset to 0) */
+        {"ACTIVE + CONN_RESET (transport_attached)",
          PATH_LC_ACTIVE,
          /*pa=*/1,
          /*xpl=*/1,
@@ -788,8 +796,8 @@ test_dispatch_table(void)
          {.now_us = 1000},
          PATH_LC_PENDING,
          -2},
-        /* 10: CLOSED_DROPPED + CONN_RESET (!platform_attached, retries cleared) */
-        {"CLOSED_DROPPED + CONN_RESET (!platform_attached)",
+        /* 10: CLOSED_DROPPED + CONN_RESET (!transport_attached, retries cleared) */
+        {"CLOSED_DROPPED + CONN_RESET (!transport_attached)",
          PATH_LC_CLOSED_DROPPED,
          /*pa=*/0,
          /*xpl=*/0,
@@ -801,43 +809,43 @@ test_dispatch_table(void)
          {.now_us = 1000},
          PATH_LC_CLOSED_DROPPED,
          -1},
-        /* PR5: EVENT_FD_CLOSED handler - spec sec 5.1 + sec 8.4 ordering combos.
+        /* PR5: EVENT_TRANSPORT_RELEASED handler - spec sec 5.1 + sec 8.4 ordering combos.
          * Using designated initializers because the existing dispatch_case_t has
          * 12 fields (mixed int/uint64) and positional truncation lands on the
          * wrong field. The case name documents the intent. */
-        {.name = "CLOSED_DROPPED + FD_CLOSED (xquic still live) -> self",
+        {.name = "CLOSED_DROPPED + TRANSPORT_RELEASED (xquic still live) -> self",
          .in_state = PATH_LC_CLOSED_DROPPED,
-         .in_platform_attached = 0, /* CLOSED_DROPPED invariant */
-         .in_xquic_path_live = 1,   /* xquic still live - cleanup incomplete */
+         .in_transport_attached = 0, /* CLOSED_DROPPED invariant */
+         .in_xquic_path_live = 1,    /* xquic still live - cleanup incomplete */
          .in_xqc_path_id = 42,
-         .ev = PATH_EVENT_FD_CLOSED,
+         .ev = PATH_EVENT_TRANSPORT_RELEASED,
          .ctx = {.now_us = 1000},
          .out_state = PATH_LC_CLOSED_DROPPED,
          .out_retries_delta = 0},
-        {.name = "CLOSED_DROPPED + FD_CLOSED (xquic gone, id=0) -> CLOSED_FREE",
+        {.name = "CLOSED_DROPPED + TRANSPORT_RELEASED (xquic gone, id=0) -> CLOSED_FREE",
          .in_state = PATH_LC_CLOSED_DROPPED,
-         .in_platform_attached = 0,
+         .in_transport_attached = 0,
          .in_xquic_path_live = 0,
          .in_xqc_path_id = 0,
-         .ev = PATH_EVENT_FD_CLOSED,
+         .ev = PATH_EVENT_TRANSPORT_RELEASED,
          .ctx = {.now_us = 1000},
          .out_state = PATH_LC_CLOSED_FREE,
          .out_retries_delta = 0},
-        {.name = "CLOSED_FREE + FD_CLOSED (idempotent late race) -> CLOSED_FREE",
+        {.name = "CLOSED_FREE + TRANSPORT_RELEASED (idempotent late race) -> CLOSED_FREE",
          .in_state = PATH_LC_CLOSED_FREE,
-         .in_platform_attached = 0,
+         .in_transport_attached = 0,
          .in_xquic_path_live = 0,
          .in_xqc_path_id = 0,
-         .ev = PATH_EVENT_FD_CLOSED,
+         .ev = PATH_EVENT_TRANSPORT_RELEASED,
          .ctx = {.now_us = 1000},
          .out_state = PATH_LC_CLOSED_FREE,
          .out_retries_delta = 0},
-        {.name = "ACTIVE + FD_CLOSED (late async race) -> ACTIVE (no-op)",
+        {.name = "ACTIVE + TRANSPORT_RELEASED (late async race) -> ACTIVE (no-op)",
          .in_state = PATH_LC_ACTIVE,
-         .in_platform_attached = 1,
+         .in_transport_attached = 1,
          .in_xquic_path_live = 1,
          .in_xqc_path_id = 42,
-         .ev = PATH_EVENT_FD_CLOSED,
+         .ev = PATH_EVENT_TRANSPORT_RELEASED,
          .ctx = {.now_us = 1000},
          .out_state = PATH_LC_ACTIVE,
          .out_retries_delta = 0},
@@ -850,9 +858,9 @@ test_dispatch_table(void)
 
 /* PR5: spec sec 8.4 explicitly requires multi-event ordering tests.
  * Validates the full CLOSED_DROPPED -> CLOSED_FREE path through both
- * XQUIC_REMOVED and FD_CLOSED in sequence. */
+ * XQUIC_REMOVED and TRANSPORT_RELEASED in sequence. */
 static void
-test_fd_closed_sequence_to_free(void)
+test_transport_released_sequence_to_free(void)
 {
     /* mqvpn_client_t is opaque; the stubs above ignore the client pointer
      * entirely, so passing NULL through the FSM is safe in this unit-test
@@ -860,29 +868,30 @@ test_fd_closed_sequence_to_free(void)
     path_entry_t p = {0};
     p.state = PATH_LC_ACTIVE;
     p.status = MQVPN_PATH_ACTIVE;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.xquic_path_live = 1;
     p.xqc_path_id = 42;
-    p.fd = 7;
+    p.transport_released = 0;
 
     /* Step 1: PLATFORM_DROP -> CLOSED_DROPPED */
     path_event_ctx_t ctx = {.now_us = 1000};
     path_on_event(NULL, &p, PATH_EVENT_PLATFORM_DROP, &ctx);
     assert(p.state == PATH_LC_CLOSED_DROPPED);
-    assert(p.platform_attached == 0);
+    assert(p.transport_attached == 0);
     /* xquic-side still live (lazy invariant) */
     assert(p.xquic_path_live == 1);
 
-    /* Step 2: XQUIC_REMOVED -> still CLOSED_DROPPED (fd not yet closed) */
+    /* Step 2: XQUIC_REMOVED -> still CLOSED_DROPPED (transport not yet released) */
     path_on_event(NULL, &p, PATH_EVENT_XQUIC_REMOVED, &ctx);
     assert(p.state == PATH_LC_CLOSED_DROPPED);
     assert(p.xquic_path_live == 0);
     assert(p.xqc_path_id == 0);
 
-    /* Step 3: FD_CLOSED -> CLOSED_FREE (all cleanup conditions met) */
-    p.fd = -1; /* simulate caller close(fd) */
-    path_on_event(NULL, &p, PATH_EVENT_FD_CLOSED, &ctx);
+    /* Step 3: TRANSPORT_RELEASED -> CLOSED_FREE (all cleanup conditions met) */
+    p.transport_ctx = (void *)&p; /* prove the FSM clears a non-NULL ctx */
+    path_on_event(NULL, &p, PATH_EVENT_TRANSPORT_RELEASED, &ctx);
     assert(p.state == PATH_LC_CLOSED_FREE);
+    assert(p.transport_released == 1 && p.transport_ctx == NULL);
 }
 
 /* Spec sec 6.3: after 30s ACTIVE/STANDBY residency triggers the retry-reset,
@@ -899,10 +908,10 @@ test_stable_reset_rearms_timer(void)
     path_entry_t p = {0};
     p.state = PATH_LC_ACTIVE;
     p.status = MQVPN_PATH_ACTIVE;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
     p.xquic_path_live = 1;
     p.xqc_path_id = 42;
-    p.fd = 7;
+    p.transport_released = 0;
     p.path_stable_since_us = 0;
     p.recreate_retries = 3;
 
@@ -948,10 +957,10 @@ static void
 test_g_p15_lifecycle_notifies_xquic(void)
 {
     path_entry_t p = {0};
-    p.fd = 7;
+    p.transport_released = 0;
     p.xqc_path_id = 42;
     p.xquic_path_live = 1;
-    p.platform_attached = 1;
+    p.transport_attached = 1;
 
     /* ACTIVE -> STANDBY emits STANDBY (1) */
     p.state = PATH_LC_ACTIVE;
@@ -1032,9 +1041,10 @@ main(void)
     test_invariant_closed_recoverable_pass();
     test_invariant_closed_dropped_lazy_pass();
     test_invariant_closed_free_strict_pass();
+    test_entry_init_satisfies_closed_free_invariant();
     test_dispatch_table();
-    test_fd_closed_sequence_to_free();
-    printf("  test_fd_closed_sequence_to_free: OK\n");
+    test_transport_released_sequence_to_free();
+    printf("  test_transport_released_sequence_to_free: OK\n");
     test_stable_reset_rearms_timer();
     printf("  test_stable_reset_rearms_timer: OK\n");
     test_g_p15_lifecycle_notifies_xquic();

@@ -9,8 +9,8 @@
 # comment.
 #
 # Fields (spec §3.3, also see path_entry_internal.h):
-#   state | platform_attached | xquic_path_live | xqc_path_id
-#   recreate_after_us | recreate_retries | path_stable_since_us
+#   state | transport_attached | transport_released | xquic_path_live
+#   xqc_path_id | recreate_after_us | recreate_retries | path_stable_since_us
 #
 # Pointer-name anchor (avoids `c->state` collision with mqvpn_client_t
 # connection state):
@@ -25,7 +25,7 @@ set -eu
 REPO_ROOT=$(git rev-parse --show-toplevel)
 LINT_MODE=${LINT_MODE:-warning}
 
-FIELDS='state|platform_attached|xquic_path_live|xqc_path_id|recreate_after_us|recreate_retries|path_stable_since_us'
+FIELDS='state|transport_attached|transport_released|xquic_path_live|xqc_path_id|recreate_after_us|recreate_retries|path_stable_since_us'
 POINTERS='p|pp|entry|path|primary'
 # Match `PTR->FIELD <optional ws> = <NOT another =>` - rejects `==` comparisons.
 PATTERN="($POINTERS)->($FIELDS)[[:space:]]*=[^=]"
