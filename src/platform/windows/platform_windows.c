@@ -283,6 +283,17 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
             p->tun_up = 0;
             mqvpn_client_set_tun_active(p->client, 0, -1);
         }
+        /* A kill switch we could not tear down keeps blocking everything,
+         * and only process exit clears it (BFE runs down the dynamic session
+         * with its owner). Head for the exit instead of reconnecting into
+         * it — win_setup_killswitch() would refuse the new session anyway. */
+        if (p->wfp_close_failed && !p->shutting_down) {
+            LOG_ERR("kill switch teardown failed, aborting");
+            p->fatal_error = 1;
+            p->shutting_down = 1;
+            if (new_state != MQVPN_STATE_CLOSED) mqvpn_client_disconnect(p->client);
+        }
+
         if (new_state == MQVPN_STATE_CLOSED && p->shutting_down)
             event_base_loopbreak(p->eb);
     }

@@ -199,7 +199,18 @@ wfp_add_block_all(platform_win_ctx_t *p)
 int
 win_setup_killswitch(platform_win_ctx_t *p)
 {
-    if (!p->killswitch_enabled || p->killswitch_active) return 0;
+    if (!p->killswitch_enabled) return 0;
+
+    /* Checked before killswitch_active, which a failed close deliberately
+     * leaves set: the early return below would otherwise report success for a
+     * kill switch that is really the stale, unreachable session. */
+    if (p->wfp_close_failed) {
+        LOG_ERR("kill switch: the previous WFP session could not be closed; "
+                "refusing to open a second one on top of it");
+        return -1;
+    }
+
+    if (p->killswitch_active) return 0;
 
     DWORD err;
 
@@ -273,6 +284,10 @@ win_cleanup_killswitch(platform_win_ctx_t *p)
 {
     if (!p->killswitch_active || !p->wfp_engine) return;
 
+    /* Never close a handle whose close already failed: a WFP engine handle is
+     * an RPC context handle, and its state after a failed close is undefined. */
+    if (p->wfp_close_failed) return;
+
     /* Closing the engine ends the dynamic session, which deletes the sublayer
      * and every filter in it.
      *
@@ -282,17 +297,25 @@ win_cleanup_killswitch(platform_win_ctx_t *p)
      * Deleting the sublayer on its own therefore leaves the filters — and the
      * block-all rules among them — in place. */
     DWORD err = FwpmEngineClose0(p->wfp_engine);
+    if (err != ERROR_SUCCESS) {
+        /* The session may still be blocking everything, and nothing can reach
+         * it any more: the handle is the only reference to it, and the next
+         * setup overwrites wfp_sublayer_key with a fresh GUID. Keep
+         * wfp_engine and killswitch_active set so no second session is stacked
+         * on the stale one, and let the caller end the process — the one
+         * remedy that always works, because BFE runs down a dynamic session
+         * when its owner dies. That is why the session is dynamic at all. */
+        p->wfp_close_failed = 1;
+        LOG_ERR("FwpmEngineClose0: error %lu; kill switch filters are still "
+                "live and can no longer be addressed — shutting down so BFE "
+                "removes them",
+                err);
+        return;
+    }
 
     p->wfp_engine = NULL;
     p->killswitch_active = 0;
     p->n_wfp_filters = 0;
-
-    if (err != ERROR_SUCCESS) {
-        LOG_ERR("FwpmEngineClose0: error %lu; kill switch filters persist until "
-                "this process exits",
-                err);
-        return;
-    }
     LOG_INF("kill switch deactivated");
 }
 

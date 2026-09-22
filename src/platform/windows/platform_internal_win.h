@@ -83,6 +83,10 @@ typedef struct {
     int n_wfp_filters;
     int killswitch_active;
     int killswitch_enabled;
+    /* FwpmEngineClose0 failed: the dynamic session may still hold its
+     * block-all filters and nothing can address them any more. Only process
+     * exit clears them — see win_cleanup_killswitch(). */
+    int wfp_close_failed;
 
     /* Shutdown */
     int shutting_down;
