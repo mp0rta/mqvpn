@@ -28,6 +28,10 @@ typedef struct {
     fake_mode_t mode;
     int partial_k; /* FAKE_PARTIAL prefix length; must be >= 0 (compared unsigned) */
     int stats_rc;  /* return value of get_stats; MQVPN_OK by default */
+    /* Script a transient block: while > 0 every send returns WOULD_BLOCK and
+     * decrements this, then `mode` takes over. Lets a test watch the library
+     * re-offer the same datagram instead of only seeing one blocked call. */
+    unsigned block_first_n;
 
     /* observation */
     unsigned send_calls;     /* every ops.send invocation */

@@ -3235,6 +3235,42 @@ TEST(would_block_keeps_connection_alive_and_counts_nothing)
     mqvpn_client_destroy(c);
 }
 
+/* A block must be transient, not latching: after WOULD_BLOCK the core must
+ * keep offering to the same transport and take its next acceptance normally.
+ * The sibling half of the contract — the *same* datagram coming back — is
+ * deliberately not asserted here; see the make_connecting_client comment on
+ * why no re-offer can happen inside a tick (the connection's wakeup is 10-15s
+ * out and mqvpn never calls xqc_conn_continue_send). That half is covered by
+ * the netns e2e and the GSO bench parity. */
+TEST(would_block_does_not_latch_the_transport)
+{
+    fake_transport_t *t;
+    mqvpn_client_t *c = make_connecting_client(&t, FAKE_ACCEPT_ALL, 1);
+    t->block_first_n = 1; /* the Initial blocks, everything after is accepted */
+
+    ASSERT_EQ(mqvpn_client_connect(c), MQVPN_OK);
+    ASSERT_EQ(t->send_calls, 1u);
+    ASSERT_EQ(t->n_captured, 0u); /* blocked: nothing accepted */
+    ASSERT_EQ(t->sends_accepted, 0u);
+    ASSERT_EQ(mqvpn_client_get_state(c), MQVPN_STATE_CONNECTING);
+    ASSERT_EQ(mock_log_count_containing("socket exception"), 0);
+    mqvpn_client_tick(c);
+
+    /* The next datagram the core produces is offered to the same transport and
+     * is accepted — the block left no sticky state on either side. */
+    ASSERT_EQ(mqvpn_client_disconnect(c), MQVPN_OK);
+    ASSERT_EQ(t->send_calls, 2u);
+    ASSERT_EQ(t->sends_accepted, 1u);
+    ASSERT_EQ(t->n_captured, 1u);
+    ASSERT_NE(t->captured_len[0], 0u);
+
+    mqvpn_stats_t st;
+    ASSERT_EQ(mqvpn_client_get_stats(c, &st), MQVPN_OK);
+    ASSERT_EQ(st.udp_tx_sends, 1u); /* the blocked call is still not a send */
+    ASSERT_EQ(st.bytes_tx, (uint64_t)t->captured_len[0]);
+    mqvpn_client_destroy(c);
+}
+
 TEST(failed_with_sibling_attached_is_eagain_not_close)
 {
     fake_transport_t *t;
@@ -3535,6 +3571,7 @@ main(void)
     run_destroy_finalises_every_attached_ctx_once();
     run_send_accept_all_carries_initial_packet_and_bytes();
     run_would_block_keeps_connection_alive_and_counts_nothing();
+    run_would_block_does_not_latch_the_transport();
     run_failed_with_sibling_attached_is_eagain_not_close();
     run_failed_on_sole_attached_slot_is_downgraded_to_eagain();
     run_no_attached_slot_maps_to_socket_error_and_closes();

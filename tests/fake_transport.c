@@ -32,6 +32,10 @@ fake_send_common(fake_transport_t *t, const mqvpn_datagram_t *bufs, unsigned n)
     t->send_calls++;
     if (t->release_calls) t->send_after_release++;
     t->datagrams_offered += n;
+    if (t->block_first_n > 0) {
+        t->block_first_n--;
+        return MQVPN_TX_WOULD_BLOCK;
+    }
     switch (t->mode) {
     case FAKE_ACCEPT_ALL:
         capture(t, bufs, n);
