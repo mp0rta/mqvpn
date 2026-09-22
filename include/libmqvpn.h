@@ -145,9 +145,19 @@ typedef uint64_t mqvpn_server_tx_scope_t;
 
 typedef struct {
     uint32_t struct_size;
+    /* Same send contract as mqvpn_path_ops_t::send above, scope aside:
+     * precondition n >= 1, return the contiguous prefix synchronously
+     * consumed (1..n) or MQVPN_TX_WOULD_BLOCK / MQVPN_TX_FAILED when
+     * nothing was accepted, 0 is a contract violation, WOULD_BLOCK is
+     * recovered by the library re-offering the datagram, and `bufs`,
+     * every `bufs[i].data` and `peer` are valid ONLY for the call. */
     int (*send)(void *ctx, mqvpn_server_tx_scope_t scope, const mqvpn_datagram_t *bufs,
                 unsigned n, const struct sockaddr *peer,
-                socklen_t peer_len);                                 /* required */
+                socklen_t peer_len); /* required */
+    /* Called exactly once for every nonzero scope the library issued, during
+     * that connection's teardown — including a scope `send` was never called
+     * with, because the scope is issued when the connection is accepted.
+     * Never called with scope 0. */
     void (*release_scope)(void *ctx, mqvpn_server_tx_scope_t scope); /* optional */
     int (*get_stats)(void *ctx, mqvpn_transport_stats_t *out);       /* optional */
     void (*release)(void *ctx);                                      /* optional */
@@ -288,9 +298,14 @@ MQVPN_API const char *mqvpn_path_status_string(mqvpn_path_status_t status);
  *                     by freeing transport_ctx itself.
  *
  *   PERMANENT_FAIL  — xqc_conn_create_path returned -XQC_EMP_CREATE_PATH
- *                     (XQC_MAX_PATHS_COUNT cap hit or OOM). The slot is
- *                     marked CLOSED; recovery requires a Level-2 reconnect
- *                     that resets the path_id namespace.
+ *                     (path-id cap hit or OOM). "Permanent" describes that
+ *                     xquic return, not the slot: the slot is left in
+ *                     CLOSED_RECOVERABLE, so mqvpn_client_reactivate_path()
+ *                     accepts it and can succeed once the cause clears —
+ *                     under draft-21 the peer raises MAX_PATH_ID
+ *                     dynamically, so no reconnect may be needed. A Level-2
+ *                     reconnect, which resets the path_id namespace, is the
+ *                     fallback for when it does not.
  *
  * mqvpn_client_add_path()'s `outcome` parameter is optional. Passing NULL
  * leaves only the handle-layer result: the handle is still returned, but
@@ -964,11 +979,14 @@ MQVPN_API void mqvpn_server_destroy(mqvpn_server_t *server);
  * untouched (the offered ctx stays caller-owned). On MQVPN_OK the library
  * owns finalisation: ops.release(ctx) runs inside mqvpn_server_destroy()
  * after every connection's release_scope. Starting without a transport is
- * legal: every send then fails with a hard error until one is installed.
+ * legal but irreversible: mqvpn_server_start() also closes the install
+ * window, so every send fails with a hard error for the rest of the
+ * server's life.
  * Returns MQVPN_ERR_INVALID_ARG (server/ops NULL, struct_size not covering
- * `send`, send NULL, local_addrlen larger than the library's
- * sockaddr_storage) without touching the offered ctx.
- * local_addr (nullable) is the bound address reported to xquic.
+ * `send`, send NULL, or a non-NULL local_addr whose local_addrlen exceeds
+ * the library's sockaddr_storage) without touching the offered ctx.
+ * local_addr (nullable) is the bound address reported to xquic;
+ * local_addrlen is ignored when it is NULL.
  */
 MQVPN_API int mqvpn_server_set_transport(mqvpn_server_t *server,
                                          const mqvpn_server_transport_ops_t *ops,
