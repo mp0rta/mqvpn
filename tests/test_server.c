@@ -34,6 +34,7 @@
 
 #include "fake_transport.h"
 #include "libmqvpn.h"
+#include "mqvpn_bind_posix.h"
 #include "mqvpn_internal.h"
 
 /* Test infrastructure */
@@ -374,8 +375,27 @@ TEST(server_set_transport_args)
     ASSERT_EQ(mqvpn_server_set_transport(NULL, fake_server_ops(), &t, NULL, 0),
               MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_server_set_transport(s, NULL, &t, NULL, 0), MQVPN_ERR_INVALID_ARG);
+    /* An oversized local_addrlen is rejected, not clamped — but only when a
+     * local_addr actually accompanies it (a length passed with a NULL
+     * address is ignored, as it always was). */
+    static fake_transport_t t2;
+    fake_transport_init(&t2);
+    const socklen_t too_long = (socklen_t)(sizeof(struct sockaddr_storage) + 1);
+    ASSERT_EQ(mqvpn_server_set_transport(s, fake_server_ops(), &t2,
+                                         (struct sockaddr *)&laddr, too_long),
+              MQVPN_ERR_INVALID_ARG);
+    /* struct_size must cover `send`: a table declared shorter than that is
+     * rejected before any field past the size is read. */
+    mqvpn_server_transport_ops_t short_ops = *fake_server_ops();
+    short_ops.struct_size = (uint32_t)offsetof(mqvpn_server_transport_ops_t, send);
+    ASSERT_EQ(mqvpn_server_set_transport(s, &short_ops, &t2, NULL, 0),
+              MQVPN_ERR_INVALID_ARG);
 
     mqvpn_server_destroy(s);
+    /* Both refusals left the installed transport alone and never touched the
+     * offered ctx: destroy finalises the first install and only that one. */
+    ASSERT_EQ(t.release_calls, 1u);
+    ASSERT_EQ(t2.release_calls, 0u);
 }
 
 /* Scope-per-connection behaviour -- a unique non-zero scope per accepted
@@ -399,13 +419,19 @@ TEST(server_get_stats_failure_reports_zero)
     static fake_transport_t t;
     fake_transport_init(&t);
     t.sends_accepted = 9;
+    t.datagrams_accepted = 7;
     ASSERT_EQ(mqvpn_server_set_transport(s, fake_server_ops(), &t, NULL, 0), MQVPN_OK);
     mqvpn_stats_t st;
     ASSERT_EQ(mqvpn_server_get_stats(s, &st), MQVPN_OK);
     ASSERT_EQ(st.udp_tx_sends, 9u);
-    t.stats_rc = MQVPN_ERR_ENGINE; /* the fake scribbles 12345 before failing */
+    ASSERT_EQ(st.udp_tx_datagrams, 7u);
+    /* The fake scribbles 12345 into BOTH fields before failing, so each one
+     * has to be asserted: a core that dropped one field and consumed the
+     * other would otherwise pass. */
+    t.stats_rc = MQVPN_ERR_ENGINE;
     ASSERT_EQ(mqvpn_server_get_stats(s, &st), MQVPN_OK);
     ASSERT_EQ(st.udp_tx_sends, 0u); /* failure contributes zero, never the scribble */
+    ASSERT_EQ(st.udp_tx_datagrams, 0u);
     mqvpn_server_destroy(s);
 }
 
@@ -623,36 +649,12 @@ mock_cli_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
 /* Packet relay helper: drain sockets and tick both engines */
 
 static void
-drain_and_tick(mqvpn_server_t *svr, int svr_fd, mqvpn_client_t *cli, int cli_fd,
+drain_and_tick(mqvpn_server_t *svr, void *svr_tctx, mqvpn_client_t *cli, void *cli_tctx,
                mqvpn_path_handle_t path_h)
 {
-    uint8_t buf[65536];
-    struct sockaddr_storage from;
-    socklen_t from_len;
-
-    /* Drain server socket (packets from client) */
-    for (;;) {
-        from_len = sizeof(from);
-        // codeql[cpp/uncontrolled-allocation-size] buf bounded by sizeof(buf); xquic
-        // validates internally
-        ssize_t n = recvfrom(svr_fd, buf, sizeof(buf), MSG_DONTWAIT,
-                             (struct sockaddr *)&from, &from_len);
-        if (n <= 0) break;
-        mqvpn_server_on_socket_recv(svr, buf, (size_t)n, (struct sockaddr *)&from,
-                                    from_len);
-    }
-
-    /* Drain client socket (packets from server) */
-    for (;;) {
-        from_len = sizeof(from);
-        // codeql[cpp/uncontrolled-allocation-size] buf bounded by sizeof(buf); xquic
-        // validates internally
-        ssize_t n = recvfrom(cli_fd, buf, sizeof(buf), MSG_DONTWAIT,
-                             (struct sockaddr *)&from, &from_len);
-        if (n <= 0) break;
-        mqvpn_client_on_socket_recv(cli, path_h, buf, (size_t)n, (struct sockaddr *)&from,
-                                    from_len);
-    }
+    /* Drain server socket (packets from client), then the client's */
+    mqvpn_bind_posix_server_drain(svr_tctx, svr, 64);
+    mqvpn_bind_posix_path_drain(cli_tctx, cli, path_h, 64);
 
     mqvpn_server_tick(svr);
     mqvpn_client_tick(cli);
@@ -662,6 +664,10 @@ drain_and_tick(mqvpn_server_t *svr, int svr_fd, mqvpn_client_t *cli, int cli_fd,
 
 typedef struct {
     int svr_fd, cli_fd;
+    /* POSIX bind contexts over the two fds. Borrowed: the library finalises
+     * them inside destroy, the fds stay the fixture's to close. */
+    void *svr_tctx;
+    void *cli_tctx;
     struct sockaddr_in svr_addr, cli_addr;
     mqvpn_server_t *svr;
     mqvpn_client_t *cli;
@@ -730,8 +736,16 @@ loopback_setup(loopback_t *lb, void (*tweak)(mqvpn_config_t *cfg))
     lb->svr = mqvpn_server_new(svr_cfg, &svr_cbs, NULL);
     ASSERT_NOT_NULL(lb->svr);
     mqvpn_config_free(svr_cfg);
-    ASSERT_EQ(mqvpn_server_set_socket_fd(lb->svr, lb->svr_fd,
-                                         (struct sockaddr *)&lb->svr_addr,
+    lb->svr_tctx = NULL;
+    mqvpn_bind_posix_opts_t svr_bopts = {0};
+    svr_bopts.struct_size = sizeof(svr_bopts);
+    svr_bopts.udp_gso = 1;
+    svr_bopts.socket_buf_bytes = -1;
+    snprintf(svr_bopts.tag, sizeof(svr_bopts.tag), "server");
+    ASSERT_EQ(mqvpn_bind_posix_server_new(lb->svr_fd, &svr_bopts, &lb->svr_tctx),
+              MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_set_transport(lb->svr, mqvpn_bind_posix_server_ops(),
+                                         lb->svr_tctx, (struct sockaddr *)&lb->svr_addr,
                                          sizeof(lb->svr_addr)),
               MQVPN_OK);
     ASSERT_EQ(mqvpn_server_start(lb->svr), MQVPN_OK);
@@ -748,7 +762,6 @@ loopback_setup(loopback_t *lb, void (*tweak)(mqvpn_config_t *cfg))
     cli_cbs.tunnel_config_ready = mock_cli_tunnel_ready;
     cli_cbs.tunnel_closed = mock_cli_tunnel_closed;
     cli_cbs.log = mock_cli_log;
-    /* send_packet = NULL: fd-only mode */
     lb->cli = mqvpn_client_new(cli_cfg, &cli_cbs, NULL);
     ASSERT_NOT_NULL(lb->cli);
     mqvpn_config_free(cli_cfg);
@@ -758,7 +771,14 @@ loopback_setup(loopback_t *lb, void (*tweak)(mqvpn_config_t *cfg))
     desc.struct_size = sizeof(desc);
     memcpy(desc.local_addr, &lb->cli_addr, sizeof(lb->cli_addr));
     desc.local_addr_len = sizeof(lb->cli_addr);
-    lb->path_h = mqvpn_client_add_path_fd(lb->cli, lb->cli_fd, &desc);
+    lb->cli_tctx = NULL;
+    mqvpn_bind_posix_opts_t cli_bopts = {0};
+    cli_bopts.struct_size = sizeof(cli_bopts);
+    cli_bopts.udp_gso = 1;
+    cli_bopts.socket_buf_bytes = -1;
+    ASSERT_EQ(mqvpn_bind_posix_path_new(lb->cli_fd, &cli_bopts, &lb->cli_tctx), MQVPN_OK);
+    lb->path_h = mqvpn_client_add_path(lb->cli, &desc, mqvpn_bind_posix_path_ops(),
+                                       lb->cli_tctx, NULL);
     ASSERT_NE(lb->path_h, (mqvpn_path_handle_t)-1);
 
     mqvpn_client_set_server_addr(lb->cli, (struct sockaddr *)&lb->svr_addr,
@@ -775,7 +795,7 @@ static void
 loopback_pump_until(loopback_t *lb, int (*done)(loopback_t *lb), int max_ms)
 {
     for (int elapsed = 0; elapsed < max_ms;) {
-        drain_and_tick(lb->svr, lb->svr_fd, lb->cli, lb->cli_fd, lb->path_h);
+        drain_and_tick(lb->svr, lb->svr_tctx, lb->cli, lb->cli_tctx, lb->path_h);
         if (done(lb)) return;
 
         mqvpn_interest_t svr_int = {0}, cli_int = {0};
@@ -800,8 +820,13 @@ loopback_pump_until(loopback_t *lb, int (*done)(loopback_t *lb), int max_ms)
 static void
 loopback_teardown(loopback_t *lb)
 {
+    /* Destroy first: it finalises both transport ctxs (so no drain may run
+     * past this point), then the fds — which the fixture, not the library,
+     * owns — are closed. */
     mqvpn_client_destroy(lb->cli);
     mqvpn_server_destroy(lb->svr);
+    lb->cli_tctx = NULL;
+    lb->svr_tctx = NULL;
     close(lb->svr_fd);
     close(lb->cli_fd);
 }
@@ -1266,6 +1291,7 @@ TEST(server_session_quic_loopback)
     mqvpn_server_t *svr = lb.svr;
     mqvpn_client_t *cli = lb.cli;
     int svr_fd = lb.svr_fd, cli_fd = lb.cli_fd;
+    void *svr_tctx = lb.svr_tctx, *cli_tctx = lb.cli_tctx;
     mqvpn_path_handle_t path_h = lb.path_h;
 
     /* Verify: on_socket_recv() accepts the client connection */
@@ -1307,7 +1333,7 @@ TEST(server_session_quic_loopback)
 
     /* Pump to deliver the MASQUE DATAGRAM */
     for (int i = 0; i < 5000; i++) {
-        drain_and_tick(svr, svr_fd, cli, cli_fd, path_h);
+        drain_and_tick(svr, svr_tctx, cli, cli_tctx, path_h);
         if (g_cli_tun_output_called > baseline) break;
         struct pollfd pfds[2] = {
             {.fd = svr_fd, .events = POLLIN},
@@ -1339,7 +1365,7 @@ TEST(server_session_quic_loopback)
     ASSERT_EQ(g_tun_output_called, tun_baseline + 1);
     /* Client should NOT receive the expired packet */
     for (int i = 0; i < 30; i++) {
-        drain_and_tick(svr, svr_fd, cli, cli_fd, path_h);
+        drain_and_tick(svr, svr_tctx, cli, cli_tctx, path_h);
         struct pollfd pfds[2] = {
             {.fd = svr_fd, .events = POLLIN},
             {.fd = cli_fd, .events = POLLIN},
@@ -1353,7 +1379,7 @@ TEST(server_session_quic_loopback)
 
     /* Pump to deliver CONNECTION_CLOSE to server */
     for (int i = 0; i < 5000; i++) {
-        drain_and_tick(svr, svr_fd, cli, cli_fd, path_h);
+        drain_and_tick(svr, svr_tctx, cli, cli_tctx, path_h);
         if (g_client_disconnected_called > 0) break;
         struct pollfd pfds[2] = {
             {.fd = svr_fd, .events = POLLIN},
@@ -1370,36 +1396,18 @@ TEST(server_session_quic_loopback)
 
 /* ── Manual reconnect regression helpers ── */
 
-/* Two-path variant of drain_and_tick: attributes each client fd's packets to
- * its own path handle. svr may be NULL (dead-server phase — svr_fd is still
- * drained so the queue can't grow unbounded). */
+/* Two-path variant of drain_and_tick: attributes each client transport's
+ * packets to its own path handle. svr may be NULL (dead-server phase — with
+ * no server there is nothing to deliver into, so its socket is left alone).
+ * A NULL cli_tctx[k] means that leg is not in use. */
 static void
-drain_and_tick2(mqvpn_server_t *svr, int svr_fd, mqvpn_client_t *cli, const int cli_fd[2],
-                const mqvpn_path_handle_t ph[2])
+drain_and_tick2(mqvpn_server_t *svr, void *svr_tctx, mqvpn_client_t *cli,
+                void *const cli_tctx[2], const mqvpn_path_handle_t ph[2])
 {
-    uint8_t buf[65536];
-    struct sockaddr_storage from;
-    socklen_t from_len;
-
-    for (;;) {
-        from_len = sizeof(from);
-        ssize_t n = recvfrom(svr_fd, buf, sizeof(buf), MSG_DONTWAIT,
-                             (struct sockaddr *)&from, &from_len);
-        if (n <= 0) break;
-        if (svr)
-            mqvpn_server_on_socket_recv(svr, buf, (size_t)n, (struct sockaddr *)&from,
-                                        from_len);
-    }
+    if (svr) mqvpn_bind_posix_server_drain(svr_tctx, svr, 64);
     for (int k = 0; k < 2; k++) {
-        if (cli_fd[k] < 0) continue; /* single-path callers pass -1 */
-        for (;;) {
-            from_len = sizeof(from);
-            ssize_t n = recvfrom(cli_fd[k], buf, sizeof(buf), MSG_DONTWAIT,
-                                 (struct sockaddr *)&from, &from_len);
-            if (n <= 0) break;
-            mqvpn_client_on_socket_recv(cli, ph[k], buf, (size_t)n,
-                                        (struct sockaddr *)&from, from_len);
-        }
+        if (!cli_tctx[k]) continue; /* single-path callers pass NULL */
+        mqvpn_bind_posix_path_drain(cli_tctx[k], cli, ph[k], 64);
     }
     if (svr) mqvpn_server_tick(svr);
     mqvpn_client_tick(cli);
@@ -1523,8 +1531,22 @@ TEST(server_reconnect_manual_connect)
     mqvpn_server_t *svr = mqvpn_server_new(svr_cfg, &svr_cbs, NULL);
     ASSERT_NOT_NULL(svr);
     mqvpn_config_free(svr_cfg);
-    ASSERT_EQ(mqvpn_server_set_socket_fd(svr, svr_fd, (struct sockaddr *)&svr_addr,
-                                         sizeof(svr_addr)),
+    void *svr_tctx = NULL;
+    mqvpn_bind_posix_opts_t svr_bopts = {0};
+    svr_bopts.struct_size = sizeof(svr_bopts);
+    svr_bopts.udp_gso = 1;
+    svr_bopts.socket_buf_bytes = -1;
+    snprintf(svr_bopts.tag, sizeof(svr_bopts.tag), "server");
+    ASSERT_EQ(mqvpn_bind_posix_server_new(svr_fd, &svr_bopts, &svr_tctx), MQVPN_OK);
+    /* The core talks to the recorder, which forwards to the bind; the pump
+     * still drains RX through the bind ctx directly. This connection is
+     * killed and re-established below, so it is the only in-process fixture
+     * that sees TWO accepts — i.e. the only place the "unique scope per
+     * accepted connection" half of the contract is observable. */
+    static scope_rec_t g_rec;
+    scope_rec_init(&g_rec, svr_tctx);
+    ASSERT_EQ(mqvpn_server_set_transport(svr, scope_rec_ops(), &g_rec,
+                                         (struct sockaddr *)&svr_addr, sizeof(svr_addr)),
               MQVPN_OK);
     ASSERT_EQ(mqvpn_server_start(svr), MQVPN_OK);
 
@@ -1549,13 +1571,21 @@ TEST(server_reconnect_manual_connect)
     g_reentry_connect_rc = g_reentry_disconnect_rc = 12345;
 
     mqvpn_path_handle_t ph[2];
+    void *cli_tctx[2] = {NULL, NULL};
     for (int k = 0; k < 2; k++) {
         mqvpn_path_desc_t desc;
         memset(&desc, 0, sizeof(desc));
         desc.struct_size = sizeof(desc);
         memcpy(desc.local_addr, &cli_addr[k], sizeof(cli_addr[k]));
         desc.local_addr_len = sizeof(cli_addr[k]);
-        ph[k] = mqvpn_client_add_path_fd(cli, cli_fd[k], &desc);
+        mqvpn_bind_posix_opts_t cli_bopts = {0};
+        cli_bopts.struct_size = sizeof(cli_bopts);
+        cli_bopts.udp_gso = 1;
+        cli_bopts.socket_buf_bytes = -1;
+        ASSERT_EQ(mqvpn_bind_posix_path_new(cli_fd[k], &cli_bopts, &cli_tctx[k]),
+                  MQVPN_OK);
+        ph[k] = mqvpn_client_add_path(cli, &desc, mqvpn_bind_posix_path_ops(),
+                                      cli_tctx[k], NULL);
         ASSERT_NE(ph[k], (mqvpn_path_handle_t)-1);
     }
     mqvpn_client_set_server_addr(cli, (struct sockaddr *)&svr_addr, sizeof(svr_addr));
@@ -1563,7 +1593,7 @@ TEST(server_reconnect_manual_connect)
 
     /* Phase 1a: establish (tunnel_ready fires). */
     for (int elapsed = 0; elapsed < 15000;) {
-        drain_and_tick2(svr, svr_fd, cli, cli_fd, ph);
+        drain_and_tick2(svr, svr_tctx, cli, cli_tctx, ph);
         if (g_cli_tunnel_ready_called > 0) break;
         struct pollfd pfds[3] = {
             {.fd = svr_fd, .events = POLLIN},
@@ -1582,7 +1612,7 @@ TEST(server_reconnect_manual_connect)
 
     /* Phase 1b: both paths reach ACTIVE. */
     for (int elapsed = 0; elapsed < 15000;) {
-        drain_and_tick2(svr, svr_fd, cli, cli_fd, ph);
+        drain_and_tick2(svr, svr_tctx, cli, cli_tctx, ph);
         if (count_active_paths(cli) == 2) break;
         struct pollfd pfds[3] = {
             {.fd = svr_fd, .events = POLLIN},
@@ -1603,7 +1633,7 @@ TEST(server_reconnect_manual_connect)
      * for the manual re-connection. */
     ASSERT_EQ(mqvpn_client_test_kill_conn(cli), 0);
     for (int elapsed = 0; elapsed < 15000;) {
-        drain_and_tick2(svr, svr_fd, cli, cli_fd, ph);
+        drain_and_tick2(svr, svr_tctx, cli, cli_tctx, ph);
         if (mqvpn_client_get_state(cli) == MQVPN_STATE_RECONNECTING) break;
         struct pollfd pfds[3] = {
             {.fd = svr_fd, .events = POLLIN},
@@ -1646,7 +1676,7 @@ TEST(server_reconnect_manual_connect)
     /* Phase 4: discriminator (b) — full multipath must come back: both
      * paths ACTIVE on the NEW connection, tunnel re-established. */
     for (int elapsed = 0; elapsed < 20000;) {
-        drain_and_tick2(svr, svr_fd, cli, cli_fd, ph);
+        drain_and_tick2(svr, svr_tctx, cli, cli_tctx, ph);
         if (g_cli_tunnel_ready_called >= 2) break;
         struct pollfd pfds[3] = {
             {.fd = svr_fd, .events = POLLIN},
@@ -1662,7 +1692,7 @@ TEST(server_reconnect_manual_connect)
     mqvpn_client_set_tun_active(cli, 1, -1);
 
     for (int elapsed = 0; elapsed < 20000;) {
-        drain_and_tick2(svr, svr_fd, cli, cli_fd, ph);
+        drain_and_tick2(svr, svr_tctx, cli, cli_tctx, ph);
         if (count_active_paths(cli) == 2) break;
         struct pollfd pfds[3] = {
             {.fd = svr_fd, .events = POLLIN},
@@ -1674,13 +1704,28 @@ TEST(server_reconnect_manual_connect)
     }
     ASSERT_EQ(count_active_paths(cli), 2);
 
-    /* Cleanup */
+    /* Cleanup: destroy finalises every transport ctx (including the
+     * recorder's inner bind ctx, via the recorder's own release), so the
+     * scope assertions below read the final state and the fds close after. */
     g_reentry_cli = NULL;
     mqvpn_client_destroy(cli);
     mqvpn_server_destroy(svr);
     close(svr_fd);
     close(cli_fd[0]);
     close(cli_fd[1]);
+
+    /* Scope contract across TWO accepts: the kill/reconnect above makes the
+     * server accept a second connection, so a core that handed out one
+     * sticky scope for the whole server (or reused the dead connection's)
+     * fails here and nowhere else. */
+    ASSERT_EQ(g_rec.n_seen, 2);
+    ASSERT_NE(g_rec.seen[0], g_rec.seen[1]);
+    ASSERT_EQ(g_rec.n_released, 2);
+    for (int i = 0; i < g_rec.n_released; i++)
+        ASSERT_NE(g_rec.released[i], 0u);     /* release_scope(0) is never called */
+    ASSERT_EQ(g_rec.inner_released, 1);       /* the shared release ran ... */
+    ASSERT_EQ(g_rec.released_after_inner, 0); /* ... after every scope */
+    ASSERT_EQ(g_rec.sends_after_release, 0);
 }
 
 /* test_server_reconnect_manual_failure_rearm: a manual connect() from
@@ -1699,7 +1744,7 @@ TEST(server_reconnect_manual_failure_rearm)
     int svr_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
     int cli_fd[2];
     cli_fd[0] = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
-    cli_fd[1] = -1; /* single-path variant; drain_and_tick2 skips fd -1 */
+    cli_fd[1] = -1; /* single-path variant; drain_and_tick2 skips a NULL ctx */
     ASSERT_NE(svr_fd, -1);
     ASSERT_NE(cli_fd[0], -1);
 
@@ -1726,8 +1771,15 @@ TEST(server_reconnect_manual_failure_rearm)
     mqvpn_server_t *svr = mqvpn_server_new(svr_cfg, &svr_cbs, NULL);
     ASSERT_NOT_NULL(svr);
     mqvpn_config_free(svr_cfg);
-    ASSERT_EQ(mqvpn_server_set_socket_fd(svr, svr_fd, (struct sockaddr *)&svr_addr,
-                                         sizeof(svr_addr)),
+    void *svr_tctx = NULL;
+    mqvpn_bind_posix_opts_t svr_bopts = {0};
+    svr_bopts.struct_size = sizeof(svr_bopts);
+    svr_bopts.udp_gso = 1;
+    svr_bopts.socket_buf_bytes = -1;
+    snprintf(svr_bopts.tag, sizeof(svr_bopts.tag), "server");
+    ASSERT_EQ(mqvpn_bind_posix_server_new(svr_fd, &svr_bopts, &svr_tctx), MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_set_transport(svr, mqvpn_bind_posix_server_ops(), svr_tctx,
+                                         (struct sockaddr *)&svr_addr, sizeof(svr_addr)),
               MQVPN_OK);
     ASSERT_EQ(mqvpn_server_start(svr), MQVPN_OK);
 
@@ -1754,14 +1806,21 @@ TEST(server_reconnect_manual_failure_rearm)
     desc.struct_size = sizeof(desc);
     memcpy(desc.local_addr, &cli_addr, sizeof(cli_addr));
     desc.local_addr_len = sizeof(cli_addr);
-    ph[0] = mqvpn_client_add_path_fd(cli, cli_fd[0], &desc);
+    void *cli_tctx[2] = {NULL, NULL};
+    mqvpn_bind_posix_opts_t cli_bopts = {0};
+    cli_bopts.struct_size = sizeof(cli_bopts);
+    cli_bopts.udp_gso = 1;
+    cli_bopts.socket_buf_bytes = -1;
+    ASSERT_EQ(mqvpn_bind_posix_path_new(cli_fd[0], &cli_bopts, &cli_tctx[0]), MQVPN_OK);
+    ph[0] =
+        mqvpn_client_add_path(cli, &desc, mqvpn_bind_posix_path_ops(), cli_tctx[0], NULL);
     ph[1] = -1;
     ASSERT_NE(ph[0], (mqvpn_path_handle_t)-1);
     mqvpn_client_set_server_addr(cli, (struct sockaddr *)&svr_addr, sizeof(svr_addr));
     ASSERT_EQ(mqvpn_client_connect(cli), MQVPN_OK);
 
     for (int elapsed = 0; elapsed < 15000;) {
-        drain_and_tick2(svr, svr_fd, cli, cli_fd, ph);
+        drain_and_tick2(svr, svr_tctx, cli, cli_tctx, ph);
         if (g_cli_tunnel_ready_called > 0) break;
         struct pollfd pfds[2] = {
             {.fd = svr_fd, .events = POLLIN},
@@ -1777,7 +1836,7 @@ TEST(server_reconnect_manual_failure_rearm)
 
     ASSERT_EQ(mqvpn_client_test_kill_conn(cli), 0);
     for (int elapsed = 0; elapsed < 15000;) {
-        drain_and_tick2(svr, svr_fd, cli, cli_fd, ph);
+        drain_and_tick2(svr, svr_tctx, cli, cli_tctx, ph);
         if (mqvpn_client_get_state(cli) == MQVPN_STATE_RECONNECTING) break;
         struct pollfd pfds[2] = {
             {.fd = svr_fd, .events = POLLIN},

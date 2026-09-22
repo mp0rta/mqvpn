@@ -1055,9 +1055,9 @@ if(BUILD_TESTING)
     # real handshake, then sends a second connect-ip request on the same H3
     # connection, to prove the server rejects it (409) instead of leaking a
     # dangling sessions[] entry (xquic-dependent — needs XQUIC_INCLUDE_DIR).
-    add_executable(test_server_double_connectip tests/test_server_double_connectip.c)
+    add_executable(test_server_double_connectip tests/test_server_double_connectip.c tests/fake_transport.c)
     target_link_libraries(test_server_double_connectip mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
-    target_include_directories(test_server_double_connectip PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
+    target_include_directories(test_server_double_connectip PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${XQUIC_INCLUDE_DIR})
     target_compile_definitions(test_server_double_connectip PRIVATE
         TEST_CERT_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.crt"
         TEST_KEY_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.key"

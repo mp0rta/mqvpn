@@ -87,7 +87,9 @@
 #include <unistd.h>
 #include <poll.h>
 
+#include "fake_transport.h"
 #include "libmqvpn.h"
+#include "mqvpn_bind_posix.h"
 
 #include <xquic/xquic.h>
 #include <xquic/xquic_typedef.h>
@@ -403,20 +405,13 @@ make_udp_loopback(struct sockaddr_in *out_addr)
  * the matching engine, and tick the server. Mirrors
  * test_server_preaccept_dos.c's manual pump (no libevent dependency). */
 static void
-pump_once(mqvpn_server_t *svr, int svr_fd, struct sockaddr_in *cli_addr, int cli_fd)
+pump_once(mqvpn_server_t *svr, void *svr_tctx, struct sockaddr_in *cli_addr, int cli_fd)
 {
     uint8_t buf[65536];
 
     xqc_engine_main_logic(g_cli_engine);
 
-    for (;;) {
-        struct sockaddr_storage from;
-        socklen_t flen = sizeof(from);
-        ssize_t n = recvfrom(svr_fd, buf, sizeof(buf), MSG_DONTWAIT,
-                             (struct sockaddr *)&from, &flen);
-        if (n <= 0) break;
-        mqvpn_server_on_socket_recv(svr, buf, (size_t)n, (struct sockaddr *)&from, flen);
-    }
+    mqvpn_bind_posix_server_drain(svr_tctx, svr, 64);
 
     mqvpn_server_tick(svr);
 
@@ -433,11 +428,11 @@ pump_once(mqvpn_server_t *svr, int svr_fd, struct sockaddr_in *cli_addr, int cli
 }
 
 static void
-pump_wait(mqvpn_server_t *svr, int svr_fd, struct sockaddr_in *cli_addr, int cli_fd,
-          int max_iters, const volatile int *done)
+pump_wait(mqvpn_server_t *svr, void *svr_tctx, int svr_fd, struct sockaddr_in *cli_addr,
+          int cli_fd, int max_iters, const volatile int *done)
 {
     for (int i = 0; i < max_iters && !*done; i++) {
-        pump_once(svr, svr_fd, cli_addr, cli_fd);
+        pump_once(svr, svr_tctx, cli_addr, cli_fd);
         if (*done) return;
         struct pollfd pfds[2] = {
             {.fd = svr_fd, .events = POLLIN},
@@ -490,12 +485,12 @@ pump_cond(void *vctx)
  * this function being "success", so a timed-out wait degrades to a normal
  * (informative) assertion failure below rather than a silent hang. */
 static int
-pump_until(mqvpn_server_t *svr, int svr_fd, struct sockaddr_in *cli_addr, int cli_fd,
-           int max_iters, pump_cond_ctx_t *ctx)
+pump_until(mqvpn_server_t *svr, void *svr_tctx, int svr_fd, struct sockaddr_in *cli_addr,
+           int cli_fd, int max_iters, pump_cond_ctx_t *ctx)
 {
     if (pump_cond(ctx)) return 1;
     for (int i = 0; i < max_iters; i++) {
-        pump_once(svr, svr_fd, cli_addr, cli_fd);
+        pump_once(svr, svr_tctx, cli_addr, cli_fd);
         if (pump_cond(ctx)) return 1;
         struct pollfd pfds[2] = {
             {.fd = svr_fd, .events = POLLIN},
@@ -545,7 +540,22 @@ main(void)
         printf("FAIL: mqvpn_server_new\n");
         return 1;
     }
-    if (mqvpn_server_set_socket_fd(svr, svr_fd, (struct sockaddr *)&svr_addr,
+    void *svr_tctx = NULL;
+    mqvpn_bind_posix_opts_t svr_bopts = {0};
+    svr_bopts.struct_size = sizeof(svr_bopts);
+    svr_bopts.udp_gso = 1;
+    svr_bopts.socket_buf_bytes = -1;
+    snprintf(svr_bopts.tag, sizeof(svr_bopts.tag), "server");
+    /* The core sends through the scope recorder, which forwards to the bind;
+     * the pump still drains RX through the bind ctx itself. */
+    static scope_rec_t g_rec;
+    if (mqvpn_bind_posix_server_new(svr_fd, &svr_bopts, &svr_tctx) != MQVPN_OK) {
+        printf("FAIL: bind_posix_server_new\n");
+        return 1;
+    }
+    scope_rec_init(&g_rec, svr_tctx);
+    if (mqvpn_server_set_transport(svr, scope_rec_ops(), &g_rec,
+                                   (struct sockaddr *)&svr_addr,
                                    sizeof(svr_addr)) != MQVPN_OK ||
         mqvpn_server_start(svr) != MQVPN_OK) {
         printf("FAIL: server start\n");
@@ -646,7 +656,7 @@ main(void)
     /* 4. Pump until the handshake finishes (bounded — QUIC PTO
      * retransmission can be 1s+, so give this generous headroom), then fire
      * request #1. */
-    pump_wait(svr, svr_fd, &cli_addr, cli_fd, 2000, &g_handshake_finished);
+    pump_wait(svr, svr_tctx, svr_fd, &cli_addr, cli_fd, 2000, &g_handshake_finished);
 
     xqc_h3_request_t *req1 = NULL;
     /* Captured immediately after creation, before req1 is ever closed — the
@@ -682,7 +692,8 @@ main(void)
             .counter = NULL,
             .counter_target = 0,
         };
-        pump_until(svr, svr_fd, &cli_addr, cli_fd, PUMP_BUDGET_ITERS, &est1_cond);
+        pump_until(svr, svr_tctx, svr_fd, &cli_addr, cli_fd, PUMP_BUDGET_ITERS,
+                   &est1_cond);
 
         n_after_first = mqvpn_server_get_n_clients(svr);
         fprintf(stderr,
@@ -718,7 +729,7 @@ main(void)
         .counter = NULL,
         .counter_target = 0,
     };
-    pump_until(svr, svr_fd, &cli_addr, cli_fd, PUMP_BUDGET_ITERS, &req2_cond);
+    pump_until(svr, svr_tctx, svr_fd, &cli_addr, cli_fd, PUMP_BUDGET_ITERS, &req2_cond);
 
     int n_clients = mqvpn_server_get_n_clients(svr);
     fprintf(stderr,
@@ -787,7 +798,8 @@ main(void)
             .counter = NULL,
             .counter_target = 0,
         };
-        pump_until(svr, svr_fd, &cli_addr, cli_fd, PUMP_BUDGET_ITERS, &closed_cond);
+        pump_until(svr, svr_tctx, svr_fd, &cli_addr, cli_fd, PUMP_BUDGET_ITERS,
+                   &closed_cond);
 
         int n_after_close = mqvpn_server_get_n_clients(svr);
         fprintf(stderr, "[phase3a] n_clients=%d on_client_disconnected_calls=%d\n",
@@ -831,7 +843,8 @@ main(void)
             .counter = NULL,
             .counter_target = 0,
         };
-        pump_until(svr, svr_fd, &cli_addr, cli_fd, PUMP_BUDGET_ITERS, &reest_cond);
+        pump_until(svr, svr_tctx, svr_fd, &cli_addr, cli_fd, PUMP_BUDGET_ITERS,
+                   &reest_cond);
 
         int n_after_reest = mqvpn_server_get_n_clients(svr);
         fprintf(stderr,
@@ -919,12 +932,13 @@ main(void)
                     .counter = &g_tun_output_calls,
                     .counter_target = 1,
                 };
-                pump_until(svr, svr_fd, &cli_addr, cli_fd, PUMP_BUDGET_ITERS, &tun_cond);
+                pump_until(svr, svr_tctx, svr_fd, &cli_addr, cli_fd, PUMP_BUDGET_ITERS,
+                           &tun_cond);
                 /* Extra drain: give a wrongly-delivered stale-generation
                  * datagram a chance to surface as a SECOND tun_output call
                  * before asserting the count is exactly one. */
                 for (int i = 0; i < 20; i++) {
-                    pump_once(svr, svr_fd, &cli_addr, cli_fd);
+                    pump_once(svr, svr_tctx, &cli_addr, cli_fd);
                 }
 
                 fprintf(stderr, "[phase4] tun_output_calls=%d last_dst=%u.%u.%u.%u\n",
@@ -973,17 +987,68 @@ main(void)
 
         /* One more pump so a routed datagram (if any) reaches xquic's send
          * path before we tear the server down. */
-        pump_once(svr, svr_fd, &cli_addr, cli_fd);
+        pump_once(svr, svr_tctx, &cli_addr, cli_fd);
     } else {
         printf("  no client ever connected — cannot exercise sessions[] via TUN "
                "routing                                                    FAIL\n");
         rc = 1;
     }
 
+    /* 12. Unroutable short-header datagram (high bit clear so it is not
+     * parsed as an Initial), 64 bytes > the 23-byte stateless-reset floor:
+     * the engine finds no connection and answers with a stateless reset,
+     * which is the server core's only scope-0 send in a test. */
+    uint8_t junk[64];
+    for (size_t i = 0; i < sizeof(junk); i++)
+        junk[i] = (uint8_t)(0x40 + i);
+    junk[0] = 0x40;
+    mqvpn_server_on_socket_recv(svr, junk, sizeof(junk), (struct sockaddr *)&cli_addr,
+                                sizeof(cli_addr));
+    mqvpn_server_tick(svr);
+
     xqc_engine_destroy(g_cli_engine);
     mqvpn_server_destroy(svr);
     close(cli_fd);
     close(svr_fd);
+
+    /* 13. Server tx-scope contract, observed on a real handshake: a unique
+     * non-zero scope per accepted connection, release_scope exactly once per
+     * close, scope 0 used (stateless reset) but never released, and every
+     * scope released before the shared release. */
+    if (g_rec.n_seen < 1) {
+        printf("FAIL: no accepted scope observed\n");
+        return 1;
+    }
+    for (int i = 0; i < g_rec.n_seen; i++)
+        for (int j = i + 1; j < g_rec.n_seen; j++)
+            if (g_rec.seen[i] == g_rec.seen[j]) {
+                printf("FAIL: scope reused\n");
+                return 1;
+            }
+    if (g_rec.n_released != g_rec.n_seen) {
+        printf("FAIL: release_scope count %d != accepted scopes %d\n", g_rec.n_released,
+               g_rec.n_seen);
+        return 1;
+    }
+    for (int i = 0; i < g_rec.n_released; i++)
+        if (g_rec.released[i] == 0) {
+            printf("FAIL: release_scope(0) called\n");
+            return 1;
+        }
+    if (!g_rec.inner_released || g_rec.released_after_inner) {
+        printf("FAIL: shared release ordering\n");
+        return 1;
+    }
+    if (g_rec.sends_after_release) {
+        printf("FAIL: send after release\n");
+        return 1;
+    }
+    if (g_rec.scope0_sends < 1) {
+        printf("FAIL: no scope-0 send observed (stateless reset)\n");
+        return 1;
+    }
+    printf("scope contract: OK (%d scopes)\n", g_rec.n_seen);
+    printf("scope-0 sends (stateless reset): %d\n", g_rec.scope0_sends);
 
     printf(rc == 0 ? "test_server_double_connectip: PASS\n"
                    : "test_server_double_connectip: FAIL\n");

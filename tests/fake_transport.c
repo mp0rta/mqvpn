@@ -153,3 +153,72 @@ fake_server_ops(void)
     };
     return &ops;
 }
+
+/* ── Scope recorder (declared in fake_transport.h) ──
+ *
+ * A mqvpn_server_transport_ops_t that forwards every call to the bundled
+ * POSIX bind and records how the core used tx scopes on the way through. The
+ * ctx installed in the core is the recorder; the bind ctx it wraps is
+ * `inner`, so the test still drains RX through the bind directly. */
+
+void
+scope_rec_init(scope_rec_t *r, void *inner_bind_ctx)
+{
+    memset(r, 0, sizeof(*r));
+    r->inner = inner_bind_ctx;
+}
+
+static int
+rec_send(void *ctx, mqvpn_server_tx_scope_t scope, const mqvpn_datagram_t *bufs,
+         unsigned n, const struct sockaddr *peer, socklen_t peer_len)
+{
+    scope_rec_t *r = (scope_rec_t *)ctx;
+    if (r->inner_released) r->sends_after_release++;
+    if (scope == 0) {
+        r->scope0_sends++;
+    } else {
+        int known = 0;
+        for (int i = 0; i < r->n_seen; i++)
+            if (r->seen[i] == scope) known = 1;
+        if (!known && r->n_seen < 64) r->seen[r->n_seen++] = scope;
+    }
+    return mqvpn_bind_posix_server_ops()->send(r->inner, scope, bufs, n, peer, peer_len);
+}
+
+static void
+rec_release_scope(void *ctx, mqvpn_server_tx_scope_t scope)
+{
+    scope_rec_t *r = (scope_rec_t *)ctx;
+    if (r->inner_released) r->released_after_inner = 1;
+    if (r->n_released < 64) r->released[r->n_released] = scope;
+    r->n_released++;
+    mqvpn_bind_posix_server_ops()->release_scope(r->inner, scope);
+}
+
+static int
+rec_get_stats(void *ctx, mqvpn_transport_stats_t *out)
+{
+    return mqvpn_bind_posix_server_ops()->get_stats(((scope_rec_t *)ctx)->inner, out);
+}
+
+static void
+rec_release(void *ctx)
+{
+    scope_rec_t *r = (scope_rec_t *)ctx;
+    r->inner_released = 1;
+    mqvpn_bind_posix_server_ops()->release(r->inner);
+}
+
+static const mqvpn_server_transport_ops_t rec_ops = {
+    .struct_size = sizeof(mqvpn_server_transport_ops_t),
+    .send = rec_send,
+    .release_scope = rec_release_scope,
+    .get_stats = rec_get_stats,
+    .release = rec_release,
+};
+
+const mqvpn_server_transport_ops_t *
+scope_rec_ops(void)
+{
+    return &rec_ops;
+}

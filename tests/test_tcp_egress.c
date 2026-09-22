@@ -20,6 +20,7 @@
  */
 
 #include "libmqvpn.h"
+#include "mqvpn_bind_posix.h"
 #include "hybrid/tcp_egress.h"
 #include "mqvpn_conn_settings.h"
 #include "mqvpn_internal.h"
@@ -617,6 +618,9 @@ typedef struct {
 
 typedef struct {
     int svr_fd, cli_fd;
+    /* POSIX bind over svr_fd. Borrowed: mqvpn_server_destroy finalises it,
+     * harness_stop closes the fd afterwards. */
+    void *svr_tctx;
     struct sockaddr_in svr_addr, cli_addr;
     mqvpn_server_t *svr;
     probe_conn_t probe;
@@ -743,10 +747,22 @@ harness_start(harness_t *h, const char *protocol, size_t protocol_len, int auto_
         mqvpn_config_free(svr_cfg);
         if (!h->svr) goto fail_sockets;
 
-        if (mqvpn_server_set_socket_fd(h->svr, h->svr_fd, (struct sockaddr *)&h->svr_addr,
-                                       sizeof(h->svr_addr)) != MQVPN_OK ||
-            mqvpn_server_start(h->svr) != MQVPN_OK)
+        mqvpn_bind_posix_opts_t svr_bopts = {0};
+        svr_bopts.struct_size = sizeof(svr_bopts);
+        svr_bopts.udp_gso = 1;
+        svr_bopts.socket_buf_bytes = -1;
+        snprintf(svr_bopts.tag, sizeof(svr_bopts.tag), "server");
+        if (mqvpn_bind_posix_server_new(h->svr_fd, &svr_bopts, &h->svr_tctx) != MQVPN_OK)
             goto fail_server;
+        if (mqvpn_server_set_transport(h->svr, mqvpn_bind_posix_server_ops(), h->svr_tctx,
+                                       (struct sockaddr *)&h->svr_addr,
+                                       sizeof(h->svr_addr)) != MQVPN_OK) {
+            /* A refused install leaves the ctx caller-owned. */
+            mqvpn_bind_posix_server_free(h->svr_tctx);
+            h->svr_tctx = NULL;
+            goto fail_server;
+        }
+        if (mqvpn_server_start(h->svr) != MQVPN_OK) goto fail_server;
     }
 
     /* ── Raw H3 probe client ── */
@@ -808,14 +824,7 @@ harness_pump(harness_t *h, const int *done, int budget_ms)
         struct sockaddr_storage from;
         socklen_t from_len;
 
-        for (;;) {
-            from_len = sizeof(from);
-            ssize_t n = recvfrom(h->svr_fd, buf, sizeof(buf), MSG_DONTWAIT,
-                                 (struct sockaddr *)&from, &from_len);
-            if (n <= 0) break;
-            mqvpn_server_on_socket_recv(h->svr, buf, (size_t)n, (struct sockaddr *)&from,
-                                        from_len);
-        }
+        mqvpn_bind_posix_server_drain(h->svr_tctx, h->svr, 64);
         for (;;) {
             from_len = sizeof(from);
             ssize_t n = recvfrom(h->cli_fd, buf, sizeof(buf), MSG_DONTWAIT,
@@ -925,8 +934,11 @@ probe_send_fin_retry(harness_t *h, probe_conn_t *p, int iter_budget)
 static void
 harness_stop(harness_t *h)
 {
+    /* Destroy before close: mqvpn_server_destroy finalises the bind ctx (so
+     * no drain may follow), and only then is the fd the harness's to close. */
     xqc_engine_destroy(h->probe.engine);
     mqvpn_server_destroy(h->svr);
+    h->svr_tctx = NULL;
     close(h->svr_fd);
     close(h->cli_fd);
 }
