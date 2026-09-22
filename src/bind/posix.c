@@ -18,7 +18,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <unistd.h>
 
 #ifdef MQVPN_OFFLOAD_TEST_SEAM
 /* Allocation seam for the unit tests (NO_MEMORY constructor paths). */
@@ -46,6 +45,7 @@ typedef struct {
     mqvpn_transport_stats_t tx;
     uint64_t rx_receives;
     uint64_t rx_datagrams;
+    int send_err_logged; /* one-shot guard for the single-datagram errno log */
 } bind_common_t;
 
 typedef struct {
@@ -204,8 +204,20 @@ bind_send(bind_common_t *c, int *gso_disabled, int *warned, const mqvpn_datagram
             c->tx.tx_datagrams++;
             return 1;
         }
-        return (errno == EAGAIN || errno == EWOULDBLOCK) ? MQVPN_TX_WOULD_BLOCK
-                                                         : MQVPN_TX_FAILED;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return MQVPN_TX_WOULD_BLOCK;
+        /* Hard failure. The server logged this errno before the refactor
+         * (its single-datagram helper owned a sendto()); the client did not,
+         * because this arm carries every non-batched datagram and a dead
+         * interface would emit one line per packet. One-shot per ctx gives
+         * both sides the errno without the spam. */
+        if (!c->send_err_logged) {
+            int e = errno;
+            c->send_err_logged = 1;
+            char lbl1[32];
+            LOG_ERR("bind-posix: send on %s: %s", bind_label(c, lbl1, sizeof(lbl1)),
+                    strerror(e));
+        }
+        return MQVPN_TX_FAILED;
     }
     struct iovec iov[BIND_POSIX_MAX_BATCH];
     for (unsigned i = 0; i < n; i++) {
@@ -285,7 +297,9 @@ bind_recv_one(bind_common_t *c, bind_deliver_fn deliver, void *arg, unsigned *de
     n = mqvpn_udp_recv_segmented(c->fd, buf, sizeof(buf), (struct sockaddr *)&peer,
                                  &peer_len, &seg);
     if (n == MQVPN_RECV_DROP) {
-        LOG_DBG("bind-posix: truncated datagram dropped");
+        char dlbl[32];
+        LOG_DBG("bind-posix: truncated datagram dropped on %s",
+                bind_label(c, dlbl, sizeof(dlbl)));
         return 1;
     }
 #else
