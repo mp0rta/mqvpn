@@ -2991,9 +2991,10 @@ init_xquic_engine(mqvpn_client_t *c)
 #if defined(__linux__)
     /* tx_batch is recorded rather than re-derived: cli_start_connection()
      * feeds this same flag to conn_settings.defer_send_flush, so the deferred
-     * flush cannot outlive the batch callback it exists to fill. The GSO
-     * capability probe and its "udp-gso: " marker live in the POSIX bind
-     * (src/bind/posix.c), the only place that sets the kernel GSO sockopt. */
+     * flush cannot outlive the batch callback it exists to fill. Running the
+     * GSO capability probe and emitting its "udp-gso: " marker are the POSIX
+     * bind's job (src/bind/posix.c); the kernel GSO sockopt itself and the
+     * per-send cmsg live beside it in posix_offload.c. */
     if (mqvpn_tx_batch_register(cfg->udp_gso, cb_write_mmsg_ex, &tcbs, &xconfig))
         c->tx_batch = 1;
 #endif

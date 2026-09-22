@@ -18,23 +18,32 @@
 #         setsockopt|getsockopt|socket|close   immediately followed by `(`
 #       * the bare token SOCKET, UDP_SEGMENT or UDP_GRO
 #       * an #include of a bind header (udp_offload.h, bind/posix_offload.h,
-#         mqvpn_bind_posix.h) - the core is bind-agnostic
+#         mqvpn_bind_posix.h) in either delimiter, "..." or <...> - the core
+#         is bind-agnostic
 #     Exclusions, these two and no others:
 #       src/bind/*                the bundled transport implementations
 #       src/hybrid/tcp_egress.c   the server egress lane owns its TCP sockets
 #                                 (out of scope by design; see AGENTS.md)
 #     The other hybrid files are NOT excluded, so a regression there is caught.
-#     A listed source that does not exist is itself a failure: the list has to
-#     describe the tree it is scanned against.
+#     A listed source that is missing, or an entry with a stray CR, is itself
+#     a failure: the list has to describe the tree it is scanned against.
 #
 #  2. Public header - include/libmqvpn.h must not contain the token SOCKET,
-#     and no `int fd` / `int tun_fd` parameter except on a line that also
-#     names egress_fd_register, egress_fd_unregister,
-#     mqvpn_server_on_egress_fd_ready or mqvpn_client_set_tun_active. The
-#     first three are the hybrid egress API (out of scope); tun_fd is a
-#     platform-owned TUN descriptor the core discards. The allow-list is
-#     line-scoped on purpose: a new fd parameter - or a reflow that separates
-#     one from its function name - makes a human look.
+#     and no `int fd` / `int tun_fd` parameter unless one of
+#     egress_fd_register, egress_fd_unregister,
+#     mqvpn_server_on_egress_fd_ready or mqvpn_client_set_tun_active appears
+#     on that line or within the two lines above it. The first three are the
+#     hybrid egress API (out of scope); tun_fd is a platform-owned TUN
+#     descriptor the core discards. The lookback exists because these are
+#     real declarations that clang-format wraps at ColumnLimit: a parameter
+#     can legitimately sit on a continuation line, away from its function
+#     name.
+#
+# The subject of the scan is the source tree the BUILD DIR was configured
+# from (CMAKE_HOME_DIRECTORY in its CMakeCache.txt), not whatever repository
+# the caller happens to stand in; `git rev-parse --show-toplevel` and then
+# the script's own location are only fallbacks. The tree actually scanned is
+# printed on every run.
 #
 # Deliberate limits, so the header claim stays exactly as large as the check:
 #   * Comments match too. A comment is where the next sendto() starts.
@@ -49,17 +58,50 @@
 #   * The header check matches the literal spellings `int fd` and `int tun_fd`.
 #     A descriptor smuggled in as `int *fd`, `int sock` or inside a struct is
 #     not caught; only review is.
-#   * A run that scans zero files is "cannot run", never a pass.
+#   * The two-line lookback trades a little strictness for not going red on a
+#     reflow: a NEW fd parameter added within two lines of an allow-listed
+#     declaration would be accepted. Widening it would trade the other way.
+#   * A run that scans zero files, or that cannot read a file it was told to
+#     scan, is "cannot run" - never a pass.
 #
 # Exit status: 0 clean, 1 violation(s) reported, 2 cannot run.
 set -euo pipefail
 
+HDR_FD_LOOKBACK=2
+
+# grep with its exit status inspected. `if grep ...; then` folds "no match"
+# (1) and "cannot read the file" (>= 2) into the same false, which would
+# score an unreadable core source as clean; that is a vacuous pass, so an
+# I/O error is fatal instead. Sets GREP_OUT; returns 0 on match, 1 on none.
+GREP_OUT=
+grep_checked() {
+    local file=$1
+    shift
+    local st
+    set +e
+    GREP_OUT=$(grep "$@" -- "$file")
+    st=$?
+    set -e
+    if [ "$st" -ge 2 ]; then
+        echo "sansio-gate: cannot scan $file (grep exited $st) - refusing to report clean"
+        exit 2
+    fi
+    return "$st"
+}
+
 BUILD_DIR=${1:-build}
 LIST="$BUILD_DIR/mqvpn_lib_sources.txt"
 
+# -f before -r: a directory is readable but is not a source list, and an
+# unreadable file must not fall through to the redirect below, where `set -e`
+# would turn it into a bare rc=1 outside the documented exit contract.
 if [ ! -f "$LIST" ]; then
     echo "sansio-gate: source list not found: $LIST (cwd $PWD)"
     echo "sansio-gate: configure the build first, e.g. cmake -S . -B $BUILD_DIR"
+    exit 2
+fi
+if [ ! -r "$LIST" ]; then
+    echo "sansio-gate: source list not readable: $LIST"
     exit 2
 fi
 
@@ -72,24 +114,36 @@ list_dir=$(cd -- "$(dirname -- "$LIST")" && pwd -P) || {
 }
 LIST="$list_dir/$(basename -- "$LIST")"
 
-# pwd -P on both sides, and realpath on each entry below: the generated list
-# mixes relative entries (from set()) with absolute ones (from
-# list(APPEND ${CMAKE_SOURCE_DIR}/...)), and a checkout reached through a
-# symlink spells ${CMAKE_SOURCE_DIR} differently from
-# `git rev-parse --show-toplevel`. Without the normalisation the prefix strip
-# below would leave those entries absolute and the exclusions would silently
-# not apply.
-#
-# The git query is checked rather than interpolated bare: it fails when the
-# gate is invoked by absolute path from outside the checkout, and `cd ""` is
-# a silent no-op that would make the cwd the "repo root". Fall back to the
-# script's own location (scripts/lint/ -> root) in that case.
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || true)
+# Which tree to scan. The build dir knows: CMake records the source dir it
+# was configured from, and that is the tree whose file list we are holding.
+# Deriving it from the caller's cwd instead would scan a different checkout
+# than the one the list describes.
+CACHE="$list_dir/CMakeCache.txt"
+REPO_ROOT=
+root_from=
+if [ -r "$CACHE" ]; then
+    REPO_ROOT=$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$CACHE" | tail -n 1)
+    if [ -n "$REPO_ROOT" ]; then
+        root_from="CMAKE_HOME_DIRECTORY in $CACHE"
+    fi
+fi
+# Fallback 1: the caller's repository. Checked rather than interpolated bare -
+# unchecked it either aborts with git's own 128 (outside the documented 0/1/2)
+# or, wrapped in a `cd`, silently makes the cwd the "repo root".
+if [ -z "$REPO_ROOT" ]; then
+    REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || true)
+    if [ -n "$REPO_ROOT" ]; then
+        root_from="git rev-parse --show-toplevel"
+    fi
+fi
+# Fallback 2: scripts/lint/ -> repo root, for an invocation by absolute path
+# from outside any checkout.
 if [ -z "$REPO_ROOT" ]; then
     REPO_ROOT=$(dirname -- "$(dirname -- "$(dirname -- "$0")")")
+    root_from="the location of $0"
 fi
 REPO_ROOT=$(cd -- "$REPO_ROOT" && pwd -P) || {
-    echo "sansio-gate: cannot enter the repository root"
+    echo "sansio-gate: cannot enter the repository root (from $root_from)"
     exit 2
 }
 cd "$REPO_ROOT"
@@ -100,18 +154,33 @@ HDR=include/libmqvpn.h
 # than a listed-source-missing report per core file.
 if [ ! -f "$HDR" ]; then
     echo "sansio-gate: $REPO_ROOT does not look like an mqvpn checkout ($HDR missing)"
+    echo "sansio-gate: root came from $root_from"
     exit 2
 fi
 
-PATTERNS='\b(sendto|sendmsg|sendmmsg|recvfrom|recvmsg|recvmmsg|setsockopt|getsockopt|socket|close)\(|\bSOCKET\b|\bUDP_SEGMENT\b|\bUDP_GRO\b|#[[:space:]]*include[[:space:]]*"(udp_offload|bind/posix_offload|mqvpn_bind_posix)\.h"'
+echo "sansio-gate: scanning $REPO_ROOT (root from $root_from)"
+echo "sansio-gate: source list $LIST"
+
+PATTERNS='\b(sendto|sendmsg|sendmmsg|recvfrom|recvmsg|recvmmsg|setsockopt|getsockopt|socket|close)\(|\bSOCKET\b|\bUDP_SEGMENT\b|\bUDP_GRO\b|#[[:space:]]*include[[:space:]]*["<](udp_offload|bind/posix_offload|mqvpn_bind_posix)\.h[">]'
 HDR_FD_ALLOW='egress_fd_register|egress_fd_unregister|mqvpn_server_on_egress_fd_ready|mqvpn_client_set_tun_active'
 
 rc=0
 checked=0
 excluded=0
 
-while IFS= read -r src; do
+# `|| [ -n "$src" ]`: read returns false on a final line with no terminating
+# newline, and the body must still run for it - otherwise the last entry of a
+# list written without a trailing newline is silently never scanned.
+while IFS= read -r src || [ -n "$src" ]; do
     [ -n "$src" ] || continue
+    case "$src" in
+        *$'\r')
+            echo "sansio-gate: stray CR at the end of a list entry (CRLF list?): '${src%$'\r'}'"
+            echo "    from $LIST"
+            rc=1
+            continue
+            ;;
+    esac
     case "$src" in
         /*) abs=$src ;;
         *) abs="$REPO_ROOT/$src" ;;
@@ -130,14 +199,14 @@ while IFS= read -r src; do
     esac
     if [ ! -f "$abs" ]; then
         echo "sansio-gate: listed source is missing: $rel"
-        echo "    listed in $LIST as: $src"
+        echo "    listed in $LIST as: '$src'"
         rc=1
         continue
     fi
     checked=$((checked + 1))
-    if hits=$(grep -nE "$PATTERNS" "$abs"); then
+    if grep_checked "$abs" -nE "$PATTERNS"; then
         echo "sansio-gate: forbidden socket I/O in core file $rel:"
-        printf '%s\n' "$hits" | sed 's/^/    /'
+        printf '%s\n' "$GREP_OUT" | sed 's/^/    /'
         rc=1
     fi
 done < "$LIST"
@@ -145,29 +214,40 @@ done < "$LIST"
 # A gate that scanned nothing must not report success.
 if [ "$checked" -eq 0 ]; then
     echo "sansio-gate: no core files were scanned - $LIST holds $(wc -l <"$LIST") line(s),"
-    echo "sansio-gate: all of them excluded or missing; re-configure $BUILD_DIR"
+    echo "sansio-gate: all of them excluded, missing or malformed; re-configure $BUILD_DIR"
     exit 2
 fi
 
-if hdr_hits=$(grep -nE '\bSOCKET\b' "$HDR"); then
+if grep_checked "$HDR" -nE '\bSOCKET\b'; then
     echo "sansio-gate: SOCKET token in $HDR:"
-    printf '%s\n' "$hdr_hits" | sed 's/^/    /'
+    printf '%s\n' "$GREP_OUT" | sed 's/^/    /'
     rc=1
 fi
 
-# Two steps with a here-string rather than `grep | grep -v`: under pipefail a
-# second grep that filters every line out is indistinguishable from a first
-# grep that found nothing, and the unfiltered hits would be lost from the
-# report.
-fd_hits=$(grep -nE '\bint (fd|tun_fd)\b' "$HDR" || true)
-if [ -n "$fd_hits" ]; then
-    fd_hits=$(grep -vE "$HDR_FD_ALLOW" <<<"$fd_hits" || true)
+fd_matches=
+if grep_checked "$HDR" -nE '\bint (fd|tun_fd)\b'; then
+    fd_matches=$GREP_OUT
 fi
-if [ -n "$fd_hits" ]; then
-    echo "sansio-gate: unexpected fd parameter in $HDR"
-    echo "    allow-listed on the same line only: $HDR_FD_ALLOW"
-    printf '%s\n' "$fd_hits" | sed 's/^/    /'
-    rc=1
+if [ -n "$fd_matches" ]; then
+    # A window per hit rather than `grep | grep -v` over single lines: the
+    # allow-listed declarations are wrapped at ColumnLimit, so the function
+    # name can sit up to HDR_FD_LOOKBACK lines above its own parameter.
+    while IFS= read -r m; do
+        ln=${m%%:*}
+        start=$((ln > HDR_FD_LOOKBACK ? ln - HDR_FD_LOOKBACK : 1))
+        window=$(awk -v a="$start" -v b="$ln" 'NR >= a && NR <= b {printf "%d:%s\n", NR, $0}' "$HDR")
+        if [ -z "$window" ]; then
+            echo "sansio-gate: cannot read lines $start-$ln of $HDR - refusing to report"
+            exit 2
+        fi
+        if [[ ! $window =~ $HDR_FD_ALLOW ]]; then
+            echo "sansio-gate: unexpected fd parameter in $HDR:"
+            printf '%s\n' "$window" | sed 's/^/    /'
+            echo "    none of these appears in the ${HDR_FD_LOOKBACK}-line window above it:"
+            echo "    $HDR_FD_ALLOW"
+            rc=1
+        fi
+    done <<<"$fd_matches"
 fi
 
 if [ "$rc" -eq 0 ]; then
