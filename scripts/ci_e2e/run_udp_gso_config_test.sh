@@ -19,8 +19,9 @@
 # CFG_BOOL(SEC_ADVANCED, "UdpGro", "udp_gro", udp_gro); both default to 1 in
 # src/config.c's mqvpn_config_defaults(). udp_gso additionally has a
 # library-side default in src/mqvpn_config.c because it crosses the public
-# ABI — udp_gro deliberately has no library-side presence at all, so do not
-# go looking for one there). This
+# ABI — udp_gro has no mqvpn_config_t counterpart, but since ABI 3 it does
+# have a library-side knob: mqvpn_bind_posix_opts_t.udp_gro in
+# include/mqvpn_bind_posix.h, which the platform fills per bind ctx). This
 # mirrors run_reinjection_test.sh's rationale comment for the same reason
 # ([Multipath] Reinjection is also config-file-only).
 #
@@ -64,9 +65,14 @@
 # endpoint can carry traffic. The one-per-process "udp-gso: ..." line is
 # logged inside the first mqvpn_bind_posix_*_new() that is allowed GSO
 # (src/bind/posix.c); each "udp-gro: ..." line is logged by the platform
-# immediately after the matching *_new() returns. On the client both fire
-# per path inside the path-registration loop, strictly before
-# mqvpn_client_connect() is called. On the server both fire just after
+# immediately after the matching *_new() returns. On the client the
+# "udp-gro: ..." line therefore fires per path inside the
+# path-registration loop and the "udp-gso: ..." line on the first
+# iteration, both strictly before mqvpn_client_connect() is called. (A
+# path re-added at runtime by the netlink monitor logs its own
+# "udp-gro: ..." line from netlink_mon.c long after traffic starts; it is
+# gated on the same UdpGro value, so the absence arm is unaffected.)
+# On the server both fire just after
 # svr_create_udp_socket() returns — i.e. AFTER its "UDP socket bound to
 # ..." line, not before it — and strictly before event_base_dispatch() is
 # reached. "Tunnel is up" (first successful tunnel ping) can only happen

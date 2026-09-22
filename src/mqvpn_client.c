@@ -2600,10 +2600,14 @@ mqvpn_client_test_force_validating(mqvpn_client_t *c, mqvpn_path_handle_t handle
      * recreate_after_us=0 (see path_invariant_check in path_state_machine.c).
      * transport_released is the one input NOT seeded below: it comes from
      * mqvpn_client_add_path, which every caller runs first (as it used to
-     * supply the fd). That needs no runtime guard — path_entry_init leaves a
-     * fresh slot at transport_released=1, so a caller that skipped add_path
-     * fails VALIDATING's attached_ok assertion in the path_invariant_check
-     * at the end of this function. The wrapper is test-only and its callers
+     * supply the fd). That needs no runtime guard. A caller that skipped
+     * add_path entirely has no slot at all, so find_path_by_handle above
+     * returns NULL and this returns -1 before anything is seeded. The
+     * reachable misuse is a slot whose transport is not attached — never
+     * added, or already released, which path_entry_init and the release path
+     * both leave at transport_released=1 — and that fails VALIDATING's
+     * attached_ok assertion in the path_invariant_check at the end of this
+     * function. The wrapper is test-only and its callers
      * run from the Debug build, where that check is compiled in. */
     p->transport_attached = 1;    /* LINT-ALLOW: test wrapper seed */
     p->xquic_path_live = 1;       /* LINT-ALLOW: test wrapper seed */
