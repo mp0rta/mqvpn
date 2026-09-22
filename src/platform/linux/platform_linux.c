@@ -796,13 +796,18 @@ typedef struct server_platform_ctx_s {
     mqvpn_tun_t tun;
     int tun_up;
     int udp_fd;
+    /* mqvpn_bind_posix server transport over udp_fd; owned by the library
+     * after set_transport (finalised inside mqvpn_server_destroy). */
+    void *bind_ctx;
     int shutting_down;
     ctrl_socket_t *ctrl;
 
-    /* Receive-side offload telemetry — same meaning as platform_ctx_t's pair,
-     * written by svr_on_socket_read and read once at teardown. No udp_gro flag
-     * here: the listen socket is created exactly once, so the sockopt hook
-     * takes the flag as a parameter and teardown reads cfg->udp_gro. */
+    /* Receive-side offload telemetry — same meaning as platform_ctx_t's pair.
+     * Accumulators only: the bind counts inside the transport ctx, so these
+     * hold what has already been harvested (at teardown) and svr_rx_stats
+     * adds the live ctx numbers on top when the control API asks. No udp_gro
+     * flag here: the listen socket is created exactly once, so teardown reads
+     * cfg->udp_gro. */
     uint64_t gro_receives;  /* recvmsg calls whose data was delivered —
                              * same exclusions as platform_ctx_t's pair */
     uint64_t gro_datagrams; /* datagrams delivered to the library */
@@ -932,24 +937,17 @@ svr_on_tun_read(evutil_socket_t fd, short what, void *arg)
     svr_schedule_next_tick(sp);
 }
 
-/* drain_udp_rx deliver thunk: the server has one socket, no path handle. */
-static void
-svr_rx_deliver(void *arg, const uint8_t *pkt, size_t len, const struct sockaddr *peer,
-               socklen_t peer_len)
-{
-    mqvpn_server_on_socket_recv((mqvpn_server_t *)arg, pkt, len, peer, peer_len);
-}
-
 static void
 svr_on_socket_read(evutil_socket_t fd, short what, void *arg)
 {
+    (void)fd; /* the transport ctx owns the fd */
     (void)what;
     server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
 
-    /* Semantics (budget, truncation, GRO split, counters) live in
-     * drain_udp_rx — shared with the client's on_socket_read. */
-    drain_udp_rx(fd, "svr rx", svr_rx_deliver, sp->server, &sp->gro_receives,
-                 &sp->gro_datagrams);
+    /* Semantics (budget, truncation, GRO split, counters) live in the bind —
+     * shared with the client's on_socket_read. A hard error is ignored here,
+     * as before. */
+    (void)mqvpn_bind_posix_server_drain(sp->bind_ctx, sp->server, BULK_READ_COUNT);
 
     mqvpn_server_tick(sp->server);
     svr_schedule_next_tick(sp);
@@ -1066,7 +1064,7 @@ svr_on_signal(evutil_socket_t sig, short what, void *arg)
 
 static int
 svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_addr,
-                      socklen_t *out_addrlen, int udp_gro)
+                      socklen_t *out_addrlen)
 {
     sa_family_t af = AF_INET;
     struct in_addr addr4;
@@ -1097,19 +1095,11 @@ svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_a
 
     int optval = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+    /* The platform sizes its own listen socket, so the transport ctx is told
+     * to leave the buffers alone (socket_buf_bytes = -1). */
     int bufsize = 1 * 1024 * 1024;
     setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
-
-    if (udp_gro) {
-        if (mqvpn_udp_gro_enable(fd) == 0) {
-            /* marker asserted by scripts/ci_e2e/run_udp_gso_config_test.sh */
-            LOG_INF("udp-gro: enabled");
-        } else {
-            LOG_INF("udp-gro: unavailable (%s); receiving one datagram per syscall",
-                    strerror(errno));
-        }
-    }
 
     memset(out_addr, 0, sizeof(*out_addr));
     if (af == AF_INET6) {
@@ -1144,6 +1134,22 @@ svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_a
     LOG_INF("UDP socket bound to %s:%d",
             addr ? addr : (af == AF_INET6 ? "::" : "0.0.0.0"), port);
     return fd;
+}
+
+/* Control-API view of the receive-side offload counters (ctrl_rx_stats_fn).
+ * The live numbers sit in the transport ctx while sp holds the totals of
+ * whatever has already been harvested, so BOTH halves are added or the
+ * control API under-reports. Nothing can be counted twice: the teardown
+ * harvest runs after ctrl_socket_destroy, so no request survives to see a
+ * ctx's numbers both live and accumulated. */
+static void
+svr_rx_stats(void *arg, uint64_t *receives, uint64_t *datagrams)
+{
+    server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
+    mqvpn_bind_posix_stats_t st = {.struct_size = sizeof(st)};
+    if (sp->bind_ctx) mqvpn_bind_posix_server_get_stats(sp->bind_ctx, &st);
+    *receives = sp->gro_receives + st.rx_receives;
+    *datagrams = sp->gro_datagrams + st.rx_datagrams;
 }
 
 int
@@ -1203,7 +1209,6 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
     cbs.tun_output = svr_cb_tun_output;
     cbs.tunnel_config_ready = svr_cb_tunnel_config_ready;
-    cbs.send_packet = NULL; /* fd-only mode */
     cbs.log = svr_cb_log;
     cbs.egress_fd_register = platform_egress_fd_register;
     cbs.egress_fd_unregister = platform_egress_fd_unregister;
@@ -1235,11 +1240,35 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     struct sockaddr_storage local_addr;
     socklen_t local_addrlen;
     sp.udp_fd = svr_create_udp_socket(cfg->listen_addr, cfg->listen_port, &local_addr,
-                                      &local_addrlen, cfg->udp_gro);
+                                      &local_addrlen);
     if (sp.udp_fd < 0) goto cleanup;
 
-    mqvpn_server_set_socket_fd(sp.server, sp.udp_fd, (struct sockaddr *)&local_addr,
-                               local_addrlen);
+    mqvpn_bind_posix_opts_t bopts = {0};
+    bopts.struct_size = sizeof(bopts);
+    bopts.udp_gso = cfg->udp_gso;
+    bopts.udp_gro = cfg->udp_gro;
+    bopts.socket_buf_bytes = -1; /* svr_create_udp_socket sized them (1 MiB) */
+    snprintf(bopts.tag, sizeof(bopts.tag), "server");
+    if (mqvpn_bind_posix_server_new(sp.udp_fd, &bopts, &sp.bind_ctx) != MQVPN_OK) {
+        LOG_ERR("server transport setup failed");
+        goto cleanup;
+    }
+    if (cfg->udp_gro) {
+        /* marker asserted by scripts/ci_e2e/run_udp_gso_config_test.sh */
+        if (mqvpn_bind_posix_server_gro_enabled(sp.bind_ctx))
+            LOG_INF("udp-gro: enabled");
+        else
+            LOG_INF("udp-gro: unavailable (%s); receiving one datagram per syscall",
+                    strerror(mqvpn_bind_posix_server_gro_errno(sp.bind_ctx)));
+    }
+    if (mqvpn_server_set_transport(sp.server, mqvpn_bind_posix_server_ops(), sp.bind_ctx,
+                                   (struct sockaddr *)&local_addr,
+                                   local_addrlen) != MQVPN_OK) {
+        LOG_ERR("server transport install failed");
+        mqvpn_bind_posix_server_free(sp.bind_ctx); /* refused: still ours */
+        sp.bind_ctx = NULL;
+        goto cleanup;
+    }
 
     /* Create event base */
     sp.eb = event_base_new();
@@ -1272,11 +1301,11 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     /* Control API (optional) */
     if (cfg->control_port > 0) {
         /* sp outlives the control socket (both are torn down in this
-         * function's cleanup, ctrl first), so lending the RX counters is
-         * safe. They are written only by svr_on_socket_read, on this same
-         * event loop. */
+         * function's cleanup, ctrl first), so lending the RX-counter getter
+         * is safe: it reads the transport ctx and sp's accumulators, both
+         * still alive, from this same event loop. */
         sp.ctrl = ctrl_socket_create(sp.eb, cfg->control_addr, cfg->control_port,
-                                     sp.server, &sp.gro_receives, &sp.gro_datagrams);
+                                     sp.server, svr_rx_stats, &sp);
         if (!sp.ctrl) LOG_WRN("control API setup failed — continuing without it");
     }
 
@@ -1288,12 +1317,18 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     rc = 0;
 
 cleanup:
-    /* Receive-side offload summary — same contract as the client's line in
-     * linux_platform_run_client(). */
-    LOG_INF(UDP_RX_LINE_FMT, sp.gro_receives, sp.gro_datagrams, cfg->udp_gro);
-
+    /* Teardown contract (same as the client): RX quiesced (dispatch returned),
+     * harvest the transport's RX counters BEFORE server_destroy finalises the
+     * ctx, then destroy (final flush still sends on the open fd), then close
+     * the fd and emit the udp-rx line. */
     LOG_INF("server shutting down");
     ctrl_socket_destroy(sp.ctrl);
+    if (sp.bind_ctx) {
+        mqvpn_bind_posix_stats_t st = {.struct_size = sizeof(st)};
+        mqvpn_bind_posix_server_get_stats(sp.bind_ctx, &st);
+        sp.gro_receives += st.rx_receives;
+        sp.gro_datagrams += st.rx_datagrams;
+    }
 
     /* Library teardown FIRST, while the TUN, the UDP socket and the egress
      * fd registry are all still alive: the destroy-time deferred flush
@@ -1303,9 +1338,13 @@ cleanup:
      * first, so those late writes went to a closed — possibly recycled —
      * fd. After destroy returns no callback can fire, and the platform
      * frees everything at its leisure. */
-    mqvpn_server_destroy(sp.server);
+    if (sp.server) mqvpn_server_destroy(sp.server);
     sp.server = NULL;
+    sp.bind_ctx = NULL; /* finalised by destroy */
     if (sp.udp_fd >= 0) close(sp.udp_fd);
+
+    /* Receive-side offload summary — same contract as the client's line. */
+    LOG_INF(UDP_RX_LINE_FMT, sp.gro_receives, sp.gro_datagrams, cfg->udp_gro);
 
     if (sp.tun_up) {
         if (sp.ev_tun) {
