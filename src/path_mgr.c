@@ -47,20 +47,6 @@ mqvpn_path_mgr_add(mqvpn_path_mgr_t *mgr, const char *iface,
         return -1;
     }
 
-    int bufsize = 1 * 1024 * 1024;
-    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (const char *)&bufsize, sizeof(bufsize));
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, (const char *)&bufsize, sizeof(bufsize));
-#ifdef _WIN32
-    {
-        int actual_snd = 0, actual_rcv = 0;
-        int optlen = sizeof(actual_snd);
-        getsockopt(fd, SOL_SOCKET, SO_SNDBUF, (char *)&actual_snd, &optlen);
-        getsockopt(fd, SOL_SOCKET, SO_RCVBUF, (char *)&actual_rcv, &optlen);
-        LOG_INF("path_mgr: UDP socket buffers: SO_SNDBUF=%d SO_RCVBUF=%d", actual_snd,
-                actual_rcv);
-    }
-#endif
-
     /* Store iface label only. Pinning egress to the named interface is
      * the platform layer's responsibility (linux_pin_socket_to_iface /
      * win_pin_socket_to_iface), called after this returns. */
