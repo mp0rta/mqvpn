@@ -18,7 +18,7 @@
 #include "netlink_mon.h"
 #include "netmon_common.h"
 #include "log.h"
-#include "udp_offload.h" /* mqvpn_udp_gro_enable */
+#include "mqvpn_bind_posix.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,23 +45,31 @@ netmon_platform_pin_socket(int fd, const char *ifname, sa_family_t af)
     return linux_pin_socket_to_iface(fd, ifname);
 }
 
-/* Re-added paths get a brand-new fd: reproduce the startup sockopt or the
- * recovered path silently degrades to one datagram per recvmsg. The
- * "udp-gro: " prefix is asserted by scripts/ci_e2e/
- * run_udp_gso_config_test.sh; no script pins THIS line's wording (the
- * dellink wait regex /re.add/ matches it only incidentally, and matched
- * the failure-path lines above before it existed). The re-add path is
- * covered by reading the client log during the link-flap e2e run. */
-void
-netmon_platform_socket_created(platform_ctx_t *p, int fd, const char *ifname)
+void *
+netmon_platform_transport_create(platform_ctx_t *p, int fd, const char *ifname)
 {
-    if (!p->udp_gro) return;
-    if (mqvpn_udp_gro_enable(fd) == 0) {
-        LOG_INF("udp-gro: enabled on re-added path '%s'", ifname);
-    } else {
-        LOG_INF("udp-gro: unavailable on re-added path '%s' (%s)", ifname,
-                strerror(errno));
+    mqvpn_bind_posix_opts_t bopts = {0};
+    bopts.struct_size = sizeof(bopts);
+    bopts.udp_gso = p->udp_gso;
+    bopts.udp_gro = p->udp_gro;
+    bopts.socket_buf_bytes = 0;
+    snprintf(bopts.tag, sizeof(bopts.tag), "%s", ifname);
+    void *ctx = NULL;
+    if (mqvpn_bind_posix_path_new(fd, &bopts, &ctx) != MQVPN_OK) {
+        LOG_WRN("%s: transport setup for re-add %s failed", netmon_log_tag, ifname);
+        return NULL;
     }
+    /* Re-added paths get a brand-new fd: the startup GRO decision is
+     * reproduced by the bind; only the log line is ours. No script pins THIS
+     * wording (the "udp-gro: " prefix is what the config test greps). */
+    if (p->udp_gro) {
+        if (mqvpn_bind_posix_path_gro_enabled(ctx))
+            LOG_INF("udp-gro: enabled on re-added path '%s'", ifname);
+        else
+            LOG_INF("udp-gro: unavailable on re-added path '%s' (%s)", ifname,
+                    strerror(mqvpn_bind_posix_path_gro_errno(ctx)));
+    }
+    return ctx;
 }
 
 void

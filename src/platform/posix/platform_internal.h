@@ -73,6 +73,7 @@ typedef struct {
      * reproduce startup behavior on the fresh fd it creates. Linux-only:
      * GRO is a Linux sockopt and Darwin would carry a dead field. */
     int udp_gro;
+    int udp_gso; /* [Advanced] UdpGso policy, reproduced on re-add */
     /* Receive-side offload telemetry: cumulative PLATFORM totals, read once
      * at teardown for the udp-rx line. The bind counts per transport ctx and
      * those counters die with the ctx, so platform_read_rx_stats() folds a

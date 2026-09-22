@@ -41,11 +41,11 @@ extern const char *const netmon_log_tag;
  * Linux: SO_BINDTODEVICE (af unused); Darwin: IP_BOUND_IF/IPV6_BOUND_IF. */
 int netmon_platform_pin_socket(int fd, const char *ifname, sa_family_t af);
 
-/* Called after a re-add socket is fully created and pinned, before it is
- * registered with the library. Linux: re-applies UDP GRO (a re-added path
- * gets a brand-new fd, so the startup sockopt must be reproduced or the
- * path silently degrades to one datagram per recvmsg). Darwin: no-op. */
-void netmon_platform_socket_created(platform_ctx_t *p, int fd, const char *ifname);
+/* Build the transport ctx for a freshly created re-add socket (Linux: the
+ * POSIX bind with the startup GRO/GSO policy reproduced; logs the
+ * "udp-gro: ... re-added path" lines). Returns the ctx, or NULL on failure
+ * (already logged). The ctx is caller-owned until add_path succeeds. */
+void *netmon_platform_transport_create(platform_ctx_t *p, int fd, const char *ifname);
 
 /* Called inside netmon_try_readd_removed_path once a slot is resolved as a
  * genuine re-add candidate, before the socket is created. Darwin: restores
