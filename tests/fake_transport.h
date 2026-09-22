@@ -9,9 +9,6 @@
 #define MQVPN_FAKE_TRANSPORT_H
 
 #include "libmqvpn.h"
-#include "mqvpn_bind_posix.h" /* the recorder forwards to the bundled bind;
-                               * fake_transport.c therefore depends on the bind, which
-                               * mqvpn_lib contains */
 #include <stddef.h>
 #include <stdint.h>
 
@@ -57,6 +54,18 @@ const mqvpn_path_ops_t *fake_path_ops_minimal(void);
 extern unsigned g_fake_stateless_sends;
 const mqvpn_server_transport_ops_t *fake_server_ops(void);
 
+/* ── POSIX-bind-only ──
+ * The recorder forwards to mqvpn_bind_posix_server_ops(), which does not exist
+ * where MQVPN_BIND_SOURCES is empty (Windows, until mqvpn_bind_winsock lands).
+ * This file is linked into test targets that do not use the recorder at all, so
+ * the guard keeps them free of that symbol rather than making every consumer
+ * carry the dependency. */
+#ifndef _WIN32
+
+#  include "mqvpn_bind_posix.h" /* the recorder forwards to the bundled bind, which
+                               * mqvpn_lib contains only where MQVPN_BIND_SOURCES
+                               * is non-empty */
+
 /* Scope-recording wrapper around the POSIX bind: observes the server core's
  * use of tx scopes on a real handshake (unique per accept, released exactly
  * once, scope 0 only before accept, all released before the shared release).
@@ -74,5 +83,7 @@ typedef struct scope_rec_s {
 } scope_rec_t;
 void scope_rec_init(scope_rec_t *r, void *inner_bind_ctx); /* zero + set inner */
 const mqvpn_server_transport_ops_t *scope_rec_ops(void);
+
+#endif /* !_WIN32 */
 
 #endif /* MQVPN_FAKE_TRANSPORT_H */

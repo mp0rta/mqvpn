@@ -450,6 +450,23 @@ TEST(server_start_without_transport_is_legal)
     /* after start: refused */
     ASSERT_EQ(mqvpn_server_set_transport(s, fake_server_ops(), &t, NULL, 0),
               MQVPN_ERR_INVALID_STATE);
+    /* And a send with no transport installed must degrade, not crash. An
+     * unroutable short-header datagram of >= 23 bytes makes the engine answer
+     * with a stateless reset, which is the server's only send that needs no
+     * connection; svr_do_send's NULL check is the only thing between that and
+     * a call through a NULL ops.send. */
+    struct sockaddr_in from;
+    memset(&from, 0, sizeof(from));
+    from.sin_family = AF_INET;
+    from.sin_port = htons(12345);
+    from.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    uint8_t junk[64];
+    for (size_t i = 0; i < sizeof(junk); i++)
+        junk[i] = (uint8_t)(0x40 + i);
+    junk[0] = 0x40; /* short header: not parsed as an Initial */
+    mqvpn_server_on_socket_recv(s, junk, sizeof(junk), (struct sockaddr *)&from,
+                                sizeof(from));
+    mqvpn_server_tick(s);
     mqvpn_server_destroy(s);
     ASSERT_EQ(t.release_calls, 0u);
 }

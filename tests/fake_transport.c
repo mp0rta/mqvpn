@@ -161,6 +161,8 @@ fake_server_ops(void)
  * ctx installed in the core is the recorder; the bind ctx it wraps is
  * `inner`, so the test still drains RX through the bind directly. */
 
+#ifndef _WIN32
+
 void
 scope_rec_init(scope_rec_t *r, void *inner_bind_ctx)
 {
@@ -222,3 +224,5 @@ scope_rec_ops(void)
 {
     return &rec_ops;
 }
+
+#endif /* !_WIN32 */
