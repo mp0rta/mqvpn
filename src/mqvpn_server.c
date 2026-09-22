@@ -167,7 +167,7 @@ struct mqvpn_server_s {
     /* 1 = the batched send callback (cb_write_mmsg_ex) was registered. Also
      * drives conn_settings.defer_send_flush, so the two can never disagree — see
      * mqvpn_conn_settings.h. Independent of the transport's own GSO capability:
-     * a bind without UDP_SEGMENT still batches via sendmmsg. */
+     * a bind without GSO still batches its writes. */
     int tx_batch;
     struct sockaddr_storage local_addr;
     socklen_t local_addrlen;

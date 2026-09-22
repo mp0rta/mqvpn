@@ -250,7 +250,7 @@ struct mqvpn_client_s {
     /* 1 = the batched send callback (cb_write_mmsg_ex) was registered. Also
      * drives conn_settings.defer_send_flush, so the two can never disagree — see
      * mqvpn_conn_settings.h. Independent of the transport's own GSO capability:
-     * a bind without UDP_SEGMENT still batches via sendmmsg. */
+     * a bind without GSO still batches its writes. */
     int tx_batch;
 
     /* Multipath (Level 1) */
@@ -1128,7 +1128,7 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
  * on the SHARED routing tree. A failover on a DIFFERENT interface invalidates
  * cached routes, forcing surviving sockets to re-run the lookup, and while
  * the table is being reconstructed there may transiently be no route
- * consistent with the bound scope: sendto() on a perfectly healthy path
+ * consistent with the bound scope: a send on a perfectly healthy path
  * fails. This applies even to a sole remaining path (e.g. during the scoped
  * server-pin re-install window), so the downgrade deliberately covers the
  * single-path case too — do NOT "tighten" this guard to exclude the failing
@@ -2993,7 +2993,7 @@ init_xquic_engine(mqvpn_client_t *c)
      * feeds this same flag to conn_settings.defer_send_flush, so the deferred
      * flush cannot outlive the batch callback it exists to fill. The GSO
      * capability probe and its "udp-gso: " marker live in the POSIX bind
-     * (src/bind/posix.c), which is where UDP_SEGMENT is actually used. */
+     * (src/bind/posix.c), the only place that sets the kernel GSO sockopt. */
     if (mqvpn_tx_batch_register(cfg->udp_gso, cb_write_mmsg_ex, &tcbs, &xconfig))
         c->tx_batch = 1;
 #endif

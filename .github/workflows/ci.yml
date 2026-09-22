@@ -123,6 +123,11 @@ jobs:
                 -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
           make -j$(nproc)
 
+      # Needs the resolved mqvpn_lib source list, which the configure inside
+      # "Build mqvpn" writes to build/mqvpn_lib_sources.txt.
+      - name: Sans-I/O core gate
+        run: bash scripts/lint/check_sansio_core.sh build
+
       - name: Unit tests (ctest)
         run: cd build && ctest --output-on-failure
 
