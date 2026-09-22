@@ -502,6 +502,11 @@ scope_insert(bind_server_ctx_t *s, mqvpn_server_tx_scope_t scope, int gso_disabl
         LOG_WRN("udp-gso: scope table allocation failed, GSO disabled for all peers");
         return;
     }
+    /* 0 is the empty-slot marker, so it can never be a key: inserting it would
+     * bump s->n while leaving the slot indistinguishable from free, inflating
+     * the load factor and truncating later probe runs. Callers gate on
+     * scope != 0; this pins that they keep doing so. */
+    assert(scope != 0);
     size_t i = scope_hash(scope, s->cap);
     while (s->tab[i].scope)
         i = (i + 1) & (s->cap - 1);

@@ -900,7 +900,7 @@ if(BUILD_TESTING)
     # bare prefix — the sticky-fallback WARN shares the prefix by design and
     # fires in test_server_scope_sticky_state on kernels with UDP_SEGMENT.
     add_test(NAME test_bind_posix_marker_once
-             COMMAND sh -c "${CMAKE_BINARY_DIR}/tests/test_bind_posix 2>&1 | grep -c 'udp-gso: GSO ' | grep -qx 1")
+             COMMAND sh -c "n=$(${CMAKE_BINARY_DIR}/tests/test_bind_posix 2>&1 | grep -c 'udp-gso: GSO '); [ \"$n\" = 1 ] || { echo \"udp-gso marker count $n, want 1\"; exit 1; }")
 
     # Kernel-backed UDP GSO/GRO round trip (issue #167): built WITHOUT
     # MQVPN_OFFLOAD_TEST_SEAM, so every syscall is the real one — this pins

@@ -227,6 +227,7 @@ test_ctor_no_memory_leaves_fd_open_and_out_ctx_untouched(void)
                seam_sendmsg_calls == 0); /* every scope sticky now */
     }
     mqvpn_bind_posix_server_free(sctx);
+    assert(fcntl(fd, F_GETFD) >= 0); /* server release must not close the borrowed fd */
     close(fd);
     printf("  test_ctor_no_memory_leaves_fd_open_and_out_ctx_untouched: OK\n");
 }
@@ -380,6 +381,7 @@ test_server_scope_sticky_state(void)
         printf("  (UDP_SEGMENT unavailable on this kernel: sticky checks skipped)\n");
     }
     mqvpn_bind_posix_server_free(ctx);
+    assert(fcntl(fd, F_GETFD) >= 0); /* server release must not close the borrowed fd */
     close(fd);
     printf("  test_server_scope_sticky_state: OK\n");
 }
@@ -424,6 +426,7 @@ test_server_scope_table_many(void)
         ops->release_scope(ctx, sc);
     ops->release_scope(ctx, 4242); /* unknown scope: harmless */
     mqvpn_bind_posix_server_free(ctx);
+    assert(fcntl(fd, F_GETFD) >= 0); /* server release must not close the borrowed fd */
     close(fd);
     printf("  test_server_scope_table_many: OK\n");
 }
@@ -442,7 +445,14 @@ test_get_stats_struct_size_prefix(void)
     mqvpn_bind_posix_path_get_stats(ctx, &st);
     assert(st.struct_size == offsetof(mqvpn_bind_posix_stats_t, rx_receives));
     assert(st.rx_receives == 0xEEEEEEEEEEEEEEEEull); /* beyond the prefix: untouched */
-    /* Below the size field itself: nothing may be written at all. */
+    /* Below the size field itself. This pins the two properties a caller can
+     * observe: the bind must VALIDATE rather than assert (so a legal older
+     * caller does not abort a Debug build), and it must not fall back to
+     * copying sizeof(*out). The stronger "writes literally nothing" is not
+     * externally observable at any buffer size: dropping the guard makes the
+     * write-back store `copy`, which is exactly the value set here, so the
+     * result is indistinguishable. Do not try to sharpen this loop — sharpen
+     * the bind instead if that ever matters. */
     for (uint32_t tiny = 1; tiny <= 3; tiny++) {
         memset(&st, 0xEE, sizeof(st));
         st.struct_size = tiny;
