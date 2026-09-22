@@ -13,6 +13,7 @@
 #include "mqvpn_scheduler.h"
 #include "mqvpn_sched_names.h"
 
+#include <stdint.h>
 #include <string.h>
 
 #include <xquic/xquic.h>
@@ -20,6 +21,14 @@
 /* Send-queue cap. Same value the previous inline blocks used; kept here
  * so adding new mqvpn-wide xquic-tuning knobs lives next to the builder. */
 #define XQC_SNDQ_MAX_PKTS 16384
+
+/* xquic's own xqc_min() lives in src/common/xqc_config.h, which is NOT part
+ * of the installed public header set mqvpn compiles against. */
+static inline uint64_t
+mqvpn_clamp_u64(uint64_t v, uint64_t hi)
+{
+    return v > hi ? hi : v;
+}
 
 void
 mqvpn_apply_scheduler(xqc_conn_settings_t *cs, mqvpn_scheduler_t sched)
@@ -199,6 +208,35 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     if (in->init_max_path_id > 0) {
         out->init_max_path_id = in->init_max_path_id;
     }
+
+    /* --- [Advanced] receive-buffering limits ---
+     *
+     * Outside the is_server if/else above: these four are set on both sides,
+     * unlike recv_rate_bytes_per_sec, which that branch hard-zeroes for
+     * servers. tests/test_conn_settings.c pins both sides.
+     *
+     * Zero is carried through as zero: xquic reads 0 as "use my default" for
+     * all four, so an unset key leaves the previous behaviour. The clamp is
+     * each field's own type; the config surface caps every one of them at
+     * MQVPN_CONFIG_MAX_BUF_LIMIT, and this covers a caller that set the
+     * library config directly.
+     *
+     * xqc_conn_settings_t.max_body_buf_per_stream and .max_recv_window are
+     * not in the xquic this repository pins as of this commit, so CMake
+     * probes for each, and mqvpn_config_unsupported_buf_limit()
+     * (src/config.h) stops startup if the operator set the key. */
+#ifdef MQVPN_HAVE_XQC_MAX_BODY_BUF_PER_STREAM
+    out->max_body_buf_per_stream =
+        (size_t)mqvpn_clamp_u64(in->h3_body_buf_per_stream, (uint64_t)SIZE_MAX);
+#endif
+    out->max_blocked_buf_per_stream =
+        (size_t)mqvpn_clamp_u64(in->blocked_buf_per_stream, (uint64_t)SIZE_MAX);
+    out->max_blocked_buf_per_conn =
+        (size_t)mqvpn_clamp_u64(in->blocked_buf_per_conn, (uint64_t)SIZE_MAX);
+#ifdef MQVPN_HAVE_XQC_MAX_RECV_WINDOW
+    out->max_recv_window =
+        (uint32_t)mqvpn_clamp_u64(in->max_recv_window, (uint64_t)UINT32_MAX);
+#endif
 }
 
 #if defined(__linux__)

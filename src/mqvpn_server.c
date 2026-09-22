@@ -2150,6 +2150,13 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         /* set by the batched-send registration a few lines above; 0 on
          * non-Linux, where that block is compiled out entirely */
         .defer_send_flush = (s->tx_batch != 0),
+        /* [Advanced] buffer limits; all 0 = xquic's own defaults. Present
+         * here, unlike recv_rate_bytes_per_sec two fields up. The same four
+         * on the client side (mqvpn_client.c). */
+        .h3_body_buf_per_stream = cfg->h3_body_buf_per_stream,
+        .blocked_buf_per_stream = cfg->blocked_buf_per_stream,
+        .blocked_buf_per_conn = cfg->blocked_buf_per_conn,
+        .max_recv_window = cfg->max_recv_window,
     };
     mqvpn_build_conn_settings(&cs_input, &conn_settings);
     xqc_server_set_conn_settings(s->engine, &conn_settings);

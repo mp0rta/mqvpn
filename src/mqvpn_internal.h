@@ -146,6 +146,14 @@ struct mqvpn_config_s {
     uint64_t recv_rate_limit; /* 0 = off; client-only, see libmqvpn.h */
 
     int udp_gso; /* TX GSO/batch enable; default 1 */
+
+    /* [Advanced] receive-buffering limits; 0 = xquic's own default
+     * untouched. Both sides, unlike recv_rate_limit above. Consumed by
+     * mqvpn_build_conn_settings(); documented in src/config.h. */
+    uint64_t h3_body_buf_per_stream;
+    uint64_t blocked_buf_per_stream;
+    uint64_t blocked_buf_per_conn;
+    uint64_t max_recv_window;
 };
 
 /* ─── State transition validation (M0-5) ─── */
@@ -166,6 +174,18 @@ void mqvpn_config_apply_reorder(mqvpn_config_t *cfg, const mqvpn_reorder_config_
  * mqvpn_file_config_t) into `cfg`. Shared by the platform layers so every
  * surface honors hybrid config identically. */
 void mqvpn_config_apply_hybrid(mqvpn_config_t *cfg, const mqvpn_hybrid_config_t *src);
+
+/* ─── Receive-buffering limits bridge ([Advanced]) ─── */
+
+/* Set the four [Advanced] receive-buffer limits on `cfg`. Both bridges carry
+ * all of them: the client bridge (src/platform/client_config_bridge.c) and
+ * the server run loop (linux_platform_run_server). Values are passed through
+ * as given — the config surface range-checks them against
+ * MQVPN_CONFIG_MAX_BUF_LIMIT at parse time, and 0 is always legal (it means
+ * "leave xquic's own default alone"). */
+void mqvpn_config_set_buf_limits(mqvpn_config_t *cfg, uint64_t h3_body_buf_per_stream,
+                                 uint64_t blocked_buf_per_stream,
+                                 uint64_t blocked_buf_per_conn, uint64_t max_recv_window);
 
 /* ─── Scheduler precondition predicate ─── */
 
