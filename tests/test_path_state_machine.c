@@ -897,6 +897,63 @@ test_transport_released_sequence_to_free(void)
     assert(p.transport_released == 1 && p.transport_ctx == NULL);
 }
 
+/* The mirror of the sequence above: the two async completions can land in
+ * either order and whichever is last drives CLOSED_FREE, so the release-first
+ * order needs its own test — here path_on_xquic_removed() is what has to
+ * re-evaluate the gate. */
+static void
+test_transport_released_before_xquic_removed(void)
+{
+    path_entry_t p = {0};
+    p.state = PATH_LC_ACTIVE;
+    p.status = MQVPN_PATH_ACTIVE;
+    p.transport_attached = 1;
+    p.xquic_path_live = 1;
+    p.xqc_path_id = 42;
+    p.transport_released = 0;
+    p.transport_ctx = (void *)&p;
+
+    path_event_ctx_t ctx = {.now_us = 1000};
+    path_on_event(NULL, &p, PATH_EVENT_PLATFORM_DROP, &ctx);
+    assert(p.state == PATH_LC_CLOSED_DROPPED);
+
+    /* Release lands first: the ctx is finalised but xquic still holds the
+     * path, so the gate must not fire yet. */
+    path_on_event(NULL, &p, PATH_EVENT_TRANSPORT_RELEASED, &ctx);
+    assert(p.state == PATH_LC_CLOSED_DROPPED);
+    assert(p.transport_released == 1 && p.transport_ctx == NULL);
+    assert(p.xquic_path_live == 1 && p.xqc_path_id == 42);
+
+    /* PATH_ABANDON lands second and completes the transition. */
+    path_on_event(NULL, &p, PATH_EVENT_XQUIC_REMOVED, &ctx);
+    assert(p.state == PATH_LC_CLOSED_FREE);
+    assert(p.xquic_path_live == 0 && p.xqc_path_id == 0);
+}
+
+/* Reconnect fallback for when xquic never delivers the removal callback:
+ * CONN_RESET clears the xquic-side fields itself, so an already-released
+ * dropped slot reaches CLOSED_FREE through that path instead. The dispatch
+ * table's CLOSED_DROPPED + CONN_RESET case only covers transport_released
+ * == 0, where the slot correctly stays put. */
+static void
+test_conn_reset_frees_released_dropped_slot(void)
+{
+    path_entry_t p = {0};
+    p.state = PATH_LC_CLOSED_DROPPED;
+    p.status = MQVPN_PATH_CLOSED;
+    p.transport_attached = 0; /* CLOSED_DROPPED invariant */
+    p.transport_released = 1; /* platform already released the ctx */
+    p.xquic_path_live = 1;    /* ... but xquic never reported removal */
+    p.xqc_path_id = 42;
+    p.recreate_retries = 3;
+
+    path_event_ctx_t ctx = {.now_us = 1000};
+    path_on_event(NULL, &p, PATH_EVENT_CONN_RESET, &ctx);
+    assert(p.state == PATH_LC_CLOSED_FREE);
+    assert(p.xquic_path_live == 0 && p.xqc_path_id == 0);
+    assert(p.recreate_retries == 0);
+}
+
 /* Spec sec 6.3: after 30s ACTIVE/STANDBY residency triggers the retry-reset,
  * the timer MUST re-arm to `now` so subsequent 30s windows continue to fire.
  * Pre-fix code wrote `path_stable_since_us = 0` which disarmed the timer
@@ -1047,7 +1104,11 @@ main(void)
     test_entry_init_satisfies_closed_free_invariant();
     test_dispatch_table();
     test_transport_released_sequence_to_free();
+    test_transport_released_before_xquic_removed();
+    test_conn_reset_frees_released_dropped_slot();
     printf("  test_transport_released_sequence_to_free: OK\n");
+    printf("  test_transport_released_before_xquic_removed: OK\n");
+    printf("  test_conn_reset_frees_released_dropped_slot: OK\n");
     test_stable_reset_rearms_timer();
     printf("  test_stable_reset_rearms_timer: OK\n");
     test_g_p15_lifecycle_notifies_xquic();
