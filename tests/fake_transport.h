@@ -57,9 +57,9 @@ const mqvpn_server_transport_ops_t *fake_server_ops(void);
 /* ── POSIX-bind-only ──
  * The recorder forwards to mqvpn_bind_posix_server_ops(), which does not exist
  * where MQVPN_BIND_SOURCES is empty (Windows, until mqvpn_bind_winsock lands).
- * This file is linked into test targets that do not use the recorder at all, so
- * the guard keeps them free of that symbol rather than making every consumer
- * carry the dependency. */
+ * This file is linked into test targets that do not use the recorder at all
+ * (test_api), so the guard keeps those free of the symbol. Targets that use the
+ * recorder reference the bind directly anyway and stay POSIX-only. */
 #ifndef _WIN32
 
 #  include "mqvpn_bind_posix.h" /* the recorder forwards to the bundled bind, which

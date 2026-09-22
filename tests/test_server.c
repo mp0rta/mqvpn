@@ -381,9 +381,20 @@ TEST(server_set_transport_args)
     static fake_transport_t t2;
     fake_transport_init(&t2);
     const socklen_t too_long = (socklen_t)(sizeof(struct sockaddr_storage) + 1);
+    /* A full-size object, not the 16-byte laddr above: were the length ever
+     * clamped instead of rejected, the copy would then stay inside this object
+     * and the test would still fail cleanly in a build without ASan. */
+    struct sockaddr_storage big;
+    memset(&big, 0, sizeof(big));
+    big.ss_family = AF_INET;
     ASSERT_EQ(mqvpn_server_set_transport(s, fake_server_ops(), &t2,
-                                         (struct sockaddr *)&laddr, too_long),
+                                         (struct sockaddr *)&big, too_long),
               MQVPN_ERR_INVALID_ARG);
+    /* ...and the other half of that rule: the same length with a NULL address
+     * is ignored, so this reaches the state check and is refused for being a
+     * second install, not for its arguments. */
+    ASSERT_EQ(mqvpn_server_set_transport(s, fake_server_ops(), &t2, NULL, too_long),
+              MQVPN_ERR_INVALID_STATE);
     /* struct_size must cover `send`: a table declared shorter than that is
      * rejected before any field past the size is read. */
     mqvpn_server_transport_ops_t short_ops = *fake_server_ops();
@@ -1759,9 +1770,9 @@ TEST(server_reconnect_manual_failure_rearm)
     g_cli_tunnel_ready_called = 0;
 
     int svr_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
-    int cli_fd[2];
-    cli_fd[0] = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
-    cli_fd[1] = -1; /* single-path variant; drain_and_tick2 skips a NULL ctx */
+    /* Single-path variant. Only cli_fd[0] is bound, polled and closed;
+     * drain_and_tick2 skips the second leg on a NULL ctx, not on an fd. */
+    int cli_fd[2] = {socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0), -1};
     ASSERT_NE(svr_fd, -1);
     ASSERT_NE(cli_fd[0], -1);
 

@@ -179,11 +179,19 @@ rec_send(void *ctx, mqvpn_server_tx_scope_t scope, const mqvpn_datagram_t *bufs,
     if (scope == 0) {
         r->scope0_sends++;
     } else {
+        /* De-duplicated, so seen[] is distinct by construction and a caller's
+         * pairwise-difference check cannot fail. What actually pins uniqueness
+         * across accepts is n_seen: a core that reused one scope for every
+         * accept would leave n_seen at 1. */
         int known = 0;
         for (int i = 0; i < r->n_seen; i++)
             if (r->seen[i] == scope) known = 1;
         if (!known && r->n_seen < 64) r->seen[r->n_seen++] = scope;
     }
+    /* Do NOT forward once the shared release has run: the inner ctx is freed,
+     * so forwarding would surface the violation as a use-after-free inside the
+     * bind instead of as the flag the test asserts on. */
+    if (r->inner_released) return MQVPN_TX_FAILED;
     return mqvpn_bind_posix_server_ops()->send(r->inner, scope, bufs, n, peer, peer_len);
 }
 
@@ -194,6 +202,7 @@ rec_release_scope(void *ctx, mqvpn_server_tx_scope_t scope)
     if (r->inner_released) r->released_after_inner = 1;
     if (r->n_released < 64) r->released[r->n_released] = scope;
     r->n_released++;
+    if (r->inner_released) return; /* freed inner ctx — see rec_send */
     mqvpn_bind_posix_server_ops()->release_scope(r->inner, scope);
 }
 

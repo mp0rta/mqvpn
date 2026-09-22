@@ -559,6 +559,9 @@ main(void)
                                    sizeof(svr_addr)) != MQVPN_OK ||
         mqvpn_server_start(svr) != MQVPN_OK) {
         printf("FAIL: server start\n");
+        /* A refused set_transport leaves the ctx caller-owned (a successful one
+         * hands it to the library, which frees it in server_destroy). */
+        mqvpn_bind_posix_server_free(svr_tctx);
         return 1;
     }
 
