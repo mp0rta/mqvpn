@@ -413,9 +413,12 @@ typedef struct {
      * it is exactly 1.0 by construction.
      *
      * There is deliberately no receive-side pair here: RX offload (UDP GRO)
-     * is set up and un-coalesced entirely in the platform layer, which the
-     * library never sees — the server's control API reports those counters
-     * from the platform instead (see ctrl_socket_create). */
+     * is set up and un-coalesced by the bundled transport (mqvpn_bind_posix)
+     * — inside this library's .so, but outside the sans-I/O core, which only
+     * ever sees one datagram at a time because every receive arrives through
+     * mqvpn_client_on_socket_recv() / mqvpn_server_on_socket_recv(). The
+     * platform harvests those counters from the bind, and the server's
+     * control API reports them from there (see ctrl_socket_create). */
     uint64_t udp_tx_sends;
     uint64_t udp_tx_datagrams;
 } mqvpn_stats_t;

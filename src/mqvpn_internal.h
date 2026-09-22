@@ -48,7 +48,7 @@
  * deferring the flush there would move it for no benefit at all. Spelling the
  * condition out per call site is what would let the two drift — notably if
  * MQVPN_MAX_PKT_OUT_SIZE is ever raised past the single-run/no-splitting
- * bound that mqvpn_udp_send_batch() documents in udp_offload.h.
+ * bound that mqvpn_udp_send_batch() documents in src/bind/posix_offload.h.
  *
  * Callers still record the result on the client/server struct (tx_batch) and
  * read THAT when building conn settings: the stored flag also carries the
@@ -63,8 +63,8 @@ mqvpn_tx_batch_enabled(int udp_gso)
  * mqvpn_server_destroy. ONE format definition so the two endpoints'
  * script-parsed wording (benchmarks/bench_stream_gso.sh,
  * scripts/ci_e2e/run_udp_gso_bench.sh, run_udp_gso_config_test.sh's
- * check_teardown_line) cannot drift — same hazard class the
- * MQVPN_UDP_GSO_MARKER_* strings solve for the enablement marker.
+ * check_teardown_line) cannot drift — same hazard class the POSIX bind's
+ * enablement-marker strings solve in src/bind/posix_offload.h.
  * Callers pass (sends, datagrams, gso_config) as PRIu64/PRIu64/int and
  * must include <inttypes.h>. */
 #define MQVPN_UDP_TX_LINE_FMT \

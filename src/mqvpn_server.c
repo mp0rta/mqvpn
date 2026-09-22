@@ -2264,8 +2264,8 @@ mqvpn_server_destroy(mqvpn_server_t *s)
 
     /* Transmit-side offload summary; see the matching comment in
      * mqvpn_client_destroy — emitted after the flush above so a short run's
-     * final deferred burst is counted, before the engine teardown whose few
-     * close-frame sends fall outside the count. */
+     * final deferred burst is counted, and the engine teardown below sends
+     * nothing, so the totals are final here. */
     uint64_t tx_sends, tx_datagrams;
     svr_tx_totals(s, &tx_sends, &tx_datagrams);
     LOG_I(s, MQVPN_UDP_TX_LINE_FMT, tx_sends, tx_datagrams, s->config.udp_gso);

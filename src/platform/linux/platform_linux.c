@@ -682,7 +682,10 @@ cleanup:
      *   3. client_destroy: final flush (sends on the still-open fds), engine
      *      teardown, ctx finalisation. Never call on_platform_path_released
      *      after this.
-     *   4. Close the fds (path_mgr_destroy), emit the udp-rx line. */
+     *   4. Emit the udp-rx line, then close the fds (path_mgr_destroy).
+     *      Step 2 already took the numbers off the ctxs, so these last two
+     *      are order-independent — the server does them the other way
+     *      round, and both lines report the same totals either way. */
     for (int i = 0; i < ctx.path_mgr.n_paths; i++) {
         uint64_t r, d;
         platform_read_rx_stats(&ctx, i, &r, &d);
@@ -753,9 +756,8 @@ cleanup:
      * host resolve, config alloc, client create — emit nothing; every later
      * failure reaches here and emits zeros. Either way the run carried no
      * traffic, so a consumer must treat a missing line and a zero line the
-     * same.) Deliberately NOT prefixed "udp-gro: ": that
-     * prefix is an enablement marker whose absence is asserted when
-     * UdpGro=false. */
+     * same.) Deliberately NOT prefixed "udp-gro: ": that prefix is an
+     * enablement marker whose absence is asserted when UdpGro=false. */
     LOG_INF(UDP_RX_LINE_FMT, ctx.gro_receives, ctx.gro_datagrams, ctx.udp_gro);
 
     /* Path fds close only here, after the library is gone (see the destroy
@@ -1343,7 +1345,10 @@ cleanup:
     sp.bind_ctx = NULL; /* finalised by destroy */
     if (sp.udp_fd >= 0) close(sp.udp_fd);
 
-    /* Receive-side offload summary — same contract as the client's line. */
+    /* Receive-side offload summary. Same harvest-before-destroy contract as
+     * the client's line, but emitted AFTER the fd close rather than before
+     * it: the numbers came off the ctx in the harvest above, so neither
+     * order can change them. */
     LOG_INF(UDP_RX_LINE_FMT, sp.gro_receives, sp.gro_datagrams, cfg->udp_gro);
 
     if (sp.tun_up) {

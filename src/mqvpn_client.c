@@ -233,12 +233,14 @@ struct mqvpn_client_s {
      * every send is issued by an ops table, so the core no longer counts
      * syscalls itself and instead reads mqvpn_transport_stats_t. The ratio
      * tx_datagrams / tx_sends is still the achieved batching factor: 1.0
-     * means no GSO run and no sendmmsg batch ever formed, which the one-shot
-     * "udp-gso: GSO enabled" marker cannot distinguish because that marker
-     * only reports the kernel capability probe. The ratio stays meaningful
-     * with UdpGso=false and on platforms without the batched callback, where
-     * it is exactly 1.0 by construction. Reported by mqvpn_client_destroy as
-     * the "udp-tx: " line.
+     * means no GSO run and no sendmmsg batch ever formed, which the POSIX
+     * bind's one-shot "udp-gso: GSO enabled" marker cannot distinguish
+     * because that marker only reports the kernel capability probe — and it
+     * is emitted by the bind (src/bind/posix.c), not from here: the core no
+     * longer probes the kernel at all. The ratio stays meaningful with
+     * UdpGso=false and on platforms without the batched callback, where it is
+     * exactly 1.0 by construction. Reported by mqvpn_client_destroy as the
+     * "udp-tx: " line.
      *
      * Retired transport telemetry: harvested from ops.get_stats() exactly once
      * per ctx at release. Live ctxs are summed on demand (client_tx_totals),
@@ -605,8 +607,10 @@ mqvpn_client_first_active_handle(const mqvpn_client_t *c)
  *     so a dead first-configured path doesn't trap reconnect (issue #46).
  *   - After multipath setup, if the primary was dropped mid-session we
  *     must NOT hand back its stale slot — fall through to any active sibling
- *     (post-OMR-backport semantics protecting against EBADF / sendto-on-
- *     dead-iface).
+ *     (post-OMR-backport semantics; the core no longer issues the syscall
+ *     itself, but a detached slot's transport is being torn down under it —
+ *     the platform closes the socket — so offering datagrams there is the
+ *     same dead end the EBADF / send-on-dead-iface guard covered).
  *
  * The first branch is deliberately unconditional: a path_id bound to a
  * dropped slot returns that slot (transport_attached == 0) so the caller
@@ -1108,7 +1112,7 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
 
 /* ─── UDP write callback (xquic → network) ─── */
 
-/* Return code for a per-path send that failed on the transport socket.
+/* Return code for a per-path send the slot's transport reported as failed.
  *
  * Per xquic's write_socket_ex contract (xquic.h xqc_socket_write_ex_pt),
  * XQC_SOCKET_ERROR triggers xqc_conn_should_close(), which tears down the
@@ -1117,10 +1121,10 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
  *
  * Design: a send error is NEVER taken as proof of path death. Path life is
  * decided solely by the platform monitors (netlink_mon / route_mon), which
- * detach a dead path (transport_attached=0). While any path is
- * still attached, a failed send is downgraded to EAGAIN (xquic keeps the
- * connection and retries); only when the monitors have detached every path
- * does the hard XQC_SOCKET_ERROR propagate and close/reconnect.
+ * detach a dead path (transport_attached=0). While any path is still attached,
+ * a failed send is downgraded to EAGAIN (xquic keeps the connection and
+ * retries); only when the monitors have detached every path does the hard
+ * XQC_SOCKET_ERROR propagate and close/reconnect.
  *
  * Send errors are untrustworthy on macOS because IP_BOUND_IF does not
  * restrict the route lookup to the bound device up front the way Linux's
@@ -2594,8 +2598,13 @@ mqvpn_client_test_force_validating(mqvpn_client_t *c, mqvpn_path_handle_t handle
     /* Force the slot into VALIDATING — the invariants for VALIDATING
      * require transport_attached=1, transport_released=0, xquic_path_live=1,
      * recreate_after_us=0 (see path_invariant_check in path_state_machine.c).
-     * transport_released=0 comes from mqvpn_client_add_path, which every
-     * caller runs first (as it used to supply the fd). */
+     * transport_released is the one input NOT seeded below: it comes from
+     * mqvpn_client_add_path, which every caller runs first (as it used to
+     * supply the fd). That needs no runtime guard — path_entry_init leaves a
+     * fresh slot at transport_released=1, so a caller that skipped add_path
+     * fails VALIDATING's attached_ok assertion in the path_invariant_check
+     * at the end of this function. The wrapper is test-only and its callers
+     * run from the Debug build, where that check is compiled in. */
     p->transport_attached = 1;    /* LINT-ALLOW: test wrapper seed */
     p->xquic_path_live = 1;       /* LINT-ALLOW: test wrapper seed */
     p->xqc_path_id = xqc_path_id; /* LINT-ALLOW: test wrapper seed */
@@ -3128,10 +3137,12 @@ mqvpn_client_destroy(mqvpn_client_t *client)
 
     /* Transmit-side offload summary — the TX counterpart of the "udp-rx: "
      * line platform_linux.c emits at teardown. Emitted after the flush
-     * above so a short run's final deferred burst is counted, but before
-     * the engine teardown below, whose few close-frame sends fall outside
-     * the count. Unconditional — including udp_gso=0 — so e2e and bench
-     * parse one stable line per run regardless of configuration.
+     * above so a short run's final deferred burst is counted; the engine
+     * teardown below sends nothing (xqc_engine_destroy destroys its queued
+     * connections outright rather than closing them), so no datagram can
+     * land after this line and the totals are final here. Unconditional —
+     * including udp_gso=0 — so e2e and bench parse one stable line per run
+     * regardless of configuration.
      * Deliberately NOT prefixed "udp-gso: ": that prefix is an enablement
      * marker whose absence is asserted when UdpGso=false. */
     uint64_t tx_sends, tx_datagrams;
