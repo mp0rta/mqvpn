@@ -3156,8 +3156,11 @@ TEST(destroy_finalises_every_attached_ctx_once)
  * write_mmsg_ex), cb_write_socket_ex where that registration is skipped.
  * Never cb_write_socket. Server address 127.0.0.1:1 is never reached; only
  * the transport's view matters. What xquic does NOT do under mqvpn's tick
- * loop: re-offer an Initial that was never accepted (no PTO timer is armed
- * until a packet was sent, and mqvpn never calls xqc_conn_continue_send)
+ * loop: re-offer an Initial that was never accepted. Not because no timer is
+ * armed — the idle and keepalive timers are armed at connection create — but
+ * because xqc_engine_main_logic only pops connections whose wakeup time is
+ * due, and those are 10-15 s out; mqvpn also never calls
+ * xqc_conn_continue_send
  * — so tests must not assert a retry on tick; the "packet kept, re-offered
  * later" half of the WOULD_BLOCK contract is xquic's xqc_path_send_packets
  * contract and is covered end to end by the e2e / GSO bench parity.

@@ -114,11 +114,15 @@ typedef struct {
      * was accepted. 0 is a contract violation (logged once, treated as
      * FAILED).
      * WOULD_BLOCK recovery: the library re-offers the datagram from its own
-     * engine passes and timers (PTO, pacing, inbound packets), exactly as it
-     * always handled a socket EAGAIN; ABI 3 has no "writable again"
-     * notification. A transport that can stay blocked for long (relay,
-     * bounded queue) should therefore copy and report the datagram accepted
-     * rather than return WOULD_BLOCK.
+     * engine passes and timers (the next outbound write, inbound packets,
+     * pacing, PTO; in the worst case the keepalive/idle timer), exactly as
+     * it always handled a socket EAGAIN; ABI 3 has no "writable again"
+     * notification. Two out-of-band sends cannot express "later" at all and
+     * treat WOULD_BLOCK as a hard error: a server NAT-rebinding path
+     * challenge (lost; the next packet from the new address retries) and a
+     * server pre-accept send (requeued, not lost). A transport that can stay
+     * blocked for long (relay, bounded queue) should therefore copy and
+     * report the datagram accepted rather than return WOULD_BLOCK.
      * Buffer lifetime: `bufs`, every `bufs[i].data` and `peer` are valid
      * ONLY for the duration of the call. A transport that completes
      * asynchronously MUST copy the accepted prefix before returning. */

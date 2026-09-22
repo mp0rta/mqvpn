@@ -1174,6 +1174,15 @@ path_transport_send(mqvpn_client_t *c, path_entry_t *p, const mqvpn_datagram_t *
     return k;
 }
 
+/* Non-path-aware send. UNREACHABLE on the client by construction, and kept
+ * only so the callback table stays complete: xquic dispatches here solely in
+ * the `else` of `if (conn->transport_cbs.write_socket_ex)`, and
+ * init_xquic_engine always registers write_socket_ex — which xquic in turn
+ * requires (a NULL one makes a NAT-rebinding path challenge fail outright).
+ * `conn->transport_cbs` is a one-shot copy of the engine's table with no
+ * per-connection override, so no configuration can route traffic here. It is
+ * therefore also untestable; do not write a unit test against it, and do not
+ * let its slot selection drift from get_path_entry_for_send's. */
 static ssize_t
 cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *peer,
                 socklen_t peerlen, void *conn_user_data)
@@ -1219,7 +1228,15 @@ cb_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
 /* Batched send: xquic hands a burst (<= XQC_MAX_SEND_MSG_ONCE) for one path;
  * the transport decides how to put it on the wire (GSO / sendmmsg / one by
  * one) and reports the accepted prefix, which is exactly xquic's mmsg
- * contract. */
+ * contract.
+ *
+ * Return shape: a DATAGRAM COUNT, not a byte count. xquic's own header doc
+ * for write_mmsg_ex says "bytes of data which is successfully sent" and is
+ * wrong — xqc_send_burst feeds the value straight into
+ * xqc_on_packets_send_burst, which dequeues that many packet_outs. Trust the
+ * code, not the doc; "fixing" this to return bytes would corrupt the send
+ * queue. The single-datagram callbacks below do return bytes (xquic tests
+ * `sent != len`). */
 static ssize_t
 cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vlen,
                  const struct sockaddr *peer, socklen_t peerlen, void *conn_user_data)
@@ -3933,9 +3950,12 @@ mqvpn_client_on_socket_recv(mqvpn_client_t *c, mqvpn_path_handle_t path,
     ASSERT_TICK_THREAD(c);
     if (!c->engine) return MQVPN_ERR_ENGINE;
 
-    /* Find local address for this path */
+    /* Local address for this path, if the platform supplied one. Length 0 is
+     * how xquic is told "unknown" (it keeps conn->local_addrlen == 0 and
+     * retries on the next packet); handing it sizeof(sockaddr_storage) with a
+     * zeroed buffer would instead record a bogus all-zero local address. */
     struct sockaddr_storage local_addr;
-    socklen_t local_len = sizeof(local_addr);
+    socklen_t local_len = 0;
     memset(&local_addr, 0, sizeof(local_addr));
 
     path_entry_t *pe = find_path_by_handle(c, path);
