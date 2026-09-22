@@ -883,6 +883,25 @@ if(BUILD_TESTING)
     set_target_properties(test_bind_posix_offload PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_bind_posix_offload COMMAND test_bind_posix_offload)
 
+    # Bundled POSIX bind contract tests. Links the STATIC core like every other
+    # core-dependent unit test: the seam-compiled posix.o/posix_offload.o on the
+    # command line are the only definitions of mqvpn_bind_posix_* (the archive's
+    # copies are never pulled because nothing in the core references them),
+    # and mqvpn_log — hidden-visibility in the .so — resolves from log.c.o.
+    add_executable(test_bind_posix tests/test_bind_posix.c src/bind/posix.c src/bind/posix_offload.c)
+    target_compile_definitions(test_bind_posix PRIVATE MQVPN_OFFLOAD_TEST_SEAM)
+    target_link_libraries(test_bind_posix mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
+    target_include_directories(test_bind_posix PRIVATE src include)   # no xquic: the bind is xquic-free
+    set_target_properties(test_bind_posix PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_bind_posix COMMAND test_bind_posix)
+    # Exactly ONE capability marker for the whole binary: emitted by the first
+    # GSO-allowed ctx, never by the udp_gso = 0 ctxs (Arm-B absence contract).
+    # Greps the marker strings ("udp-gso: GSO enabled|unavailable"), not the
+    # bare prefix — the sticky-fallback WARN shares the prefix by design and
+    # fires in test_server_scope_sticky_state on kernels with UDP_SEGMENT.
+    add_test(NAME test_bind_posix_marker_once
+             COMMAND sh -c "${CMAKE_BINARY_DIR}/tests/test_bind_posix 2>&1 | grep -c 'udp-gso: GSO ' | grep -qx 1")
+
     # Kernel-backed UDP GSO/GRO round trip (issue #167): built WITHOUT
     # MQVPN_OFFLOAD_TEST_SEAM, so every syscall is the real one — this pins
     # the wrapper against the actual kernel rather than the fabricated seam
