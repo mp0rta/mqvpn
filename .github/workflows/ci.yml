@@ -991,6 +991,16 @@ jobs:
             -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON ..
           cmake --build . --config Release
 
+      # The only place the CryptoAPI half of the verifier is compiled and run.
+      # Both tests use their own checks, not assert(), so Release is fine.
+      - name: Certificate verifier tests
+        run: ctest --test-dir build -C Release -R "test_cert_(identity|verify_win)" --no-tests=error --output-on-failure
+
+      # Weak: presence and order of the install call only (see the script).
+      - name: Verifier wiring tripwire
+        shell: bash
+        run: bash scripts/ci_check_windows_verifier_wiring.sh
+
       - name: Verify binary
         run: |
           Test-Path build/Release/mqvpn.exe
@@ -1001,6 +1011,15 @@ jobs:
       # exits 0 without needing wintun or admin rights.
       - name: Smoke-run binary
         run: build/Release/mqvpn.exe --version
+
+      # For on-machine checks the runner cannot do (real certificate stores,
+      # a real server). Needs wintun.dll next to it: take it from a release zip.
+      - name: Upload mqvpn.exe
+        uses: actions/upload-artifact@v7
+        with:
+          name: mqvpn-windows-x64
+          path: build/Release/mqvpn.exe
+          retention-days: 7
 
   android:
     runs-on: ubuntu-latest
