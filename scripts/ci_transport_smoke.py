@@ -114,7 +114,7 @@ def main():
             if len(data) < 1200:
                 fail(f"first datagram is {len(data)} bytes, not a padded QUIC Initial")
             if not data[0] & 0x80:
-                fail("first datagram is not a QUIC long-header packet")
+                fail(f"first datagram starts with 0x{data[0]:02x}, not a QUIC long-header packet")
             lst.sendto(version_negotiation(*long_header_cids(data)), peer)
             deadline = time.monotonic() + 10
             while VN_REACTION not in read_log(args.log):
@@ -137,8 +137,10 @@ def main():
         if rc != 0:
             fail(f"client exit status {rc} after SIGTERM, want 0")
         m = re.search(r"udp-tx: sends=(\d+)", out)
-        if not m or int(m.group(1)) < 1:
-            fail("no 'udp-tx: sends=N' (N >= 1) teardown line in the client log")
+        if not m:
+            fail("no 'udp-tx: sends=N' teardown line in the client log")
+        if int(m.group(1)) < 1:
+            fail(f"teardown line reports udp-tx: sends={m.group(1)}, want N >= 1")
     print("transport smoke: PASS")
 
 
