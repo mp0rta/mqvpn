@@ -14,6 +14,7 @@
 #ifdef _WIN32
 
 #  include "libmqvpn.h"
+#  include "mqvpn_bind_winsock.h"
 #  include "tun_wintun.h"
 #  include "path_mgr.h"
 
@@ -41,6 +42,12 @@ typedef struct {
     mqvpn_path_mgr_t path_mgr;
     mqvpn_path_handle_t lib_path_handles[MQVPN_MAX_PATHS];
     struct event *ev_udp[MQVPN_MAX_PATHS];
+
+    /* Bundled transport ctx per path slot (mqvpn_bind_winsock). Borrows
+     * path_mgr.paths[i].fd; the library owns finalisation once add_path
+     * succeeded, so this pointer is only a handle for the RX helper. NULL
+     * when the slot has no live transport. */
+    void *bind_ctx[MQVPN_MAX_PATHS];
 
     /* Path recovery accelerator (net_mon.c) */
     /* Recovery backpressure; reset on reconnect. */

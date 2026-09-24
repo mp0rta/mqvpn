@@ -7,7 +7,8 @@
  * Bridges libmqvpn (sans-I/O) with Windows-specific I/O:
  *   - libevent event loop driving tick()
  *   - Wintun TUN device via reader thread + socketpair
- *   - UDP sockets via path_mgr
+ *   - UDP sockets via path_mgr; datagrams go through the bundled Winsock
+ *     transport (mqvpn_bind_winsock)
  *   - Ctrl+C handling via SetConsoleCtrlHandler
  *
  * Routing, killswitch, and DNS are in separate files.
@@ -25,6 +26,9 @@
 #  include <stdio.h>
 #  include <stdlib.h>
 #  include <string.h>
+
+/* UDP receive budget per readable event (same as the TUN read loop) */
+#  define BULK_READ_COUNT 64
 
 /* ── Global for Ctrl+C handler (single-instance) ── */
 static platform_win_ctx_t *g_signal_ctx = NULL;
@@ -425,28 +429,31 @@ on_socket_read(evutil_socket_t fd, short what, void *arg)
 {
     (void)what;
     platform_win_ctx_t *p = (platform_win_ctx_t *)arg;
-    uint8_t buf[65536];
-    struct sockaddr_storage peer;
-    int peer_len = sizeof(peer);
 
-    for (int i = 0; i < 64; i++) {
-        int n = recvfrom((SOCKET)fd, (char *)buf, sizeof(buf), 0,
-                         (struct sockaddr *)&peer, &peer_len);
-        if (n <= 0 || (size_t)n > sizeof(buf)) break;
-
-        /* Find which library path handle matches this fd */
-        mqvpn_path_handle_t handle = -1;
-        for (int j = 0; j < p->path_mgr.n_paths; j++) {
-            if (p->path_mgr.paths[j].fd == (int)fd) {
-                handle = p->lib_path_handles[j];
-                break;
-            }
+    /* fd is constant for this callback, so resolve the slot once. Safe to
+     * hoist: nothing on the receive path mutates path_mgr — the net_mon
+     * reconciler runs from its own timer event, never reentrantly here. */
+    int slot = -1;
+    for (int j = 0; j < p->path_mgr.n_paths; j++) {
+        if (p->path_mgr.paths[j].fd == (int)fd) {
+            slot = j;
+            break;
         }
-        if (handle < 0) break;
-
-        mqvpn_client_on_socket_recv(p->client, handle, buf, (size_t)n,
-                                    (struct sockaddr *)&peer, peer_len);
     }
+    if (slot < 0 || !p->bind_ctx[slot]) {
+        /* Unreachable by construction: read events are registered only after
+         * add_path succeeded (startup loop, net_mon re-add), path_mgr never
+         * shrinks, and remove_path_by_index frees the event before clearing
+         * bind_ctx. Kept anyway: a level-triggered event on a socket nobody
+         * drains would spin. */
+        LOG_WRN("path rx: no transport for fd=%d, disarming its event", (int)fd);
+        if (slot >= 0 && p->ev_udp[slot]) event_del(p->ev_udp[slot]);
+        return;
+    }
+    /* Budget and delivery live in the bind. A failed receive ends the drain
+     * and is otherwise ignored, as before: net_mon owns drop detection. */
+    (void)mqvpn_bind_winsock_path_drain(p->bind_ctx[slot], p->client,
+                                        p->lib_path_handles[slot], BULK_READ_COUNT);
     mqvpn_client_tick(p->client);
     schedule_next_tick(p);
 }
@@ -608,7 +615,6 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
     cbs.tun_output = cb_tun_output;
     cbs.tunnel_config_ready = cb_tunnel_config_ready;
-    cbs.send_packet = NULL; /* fd-only mode */
     cbs.tunnel_closed = cb_tunnel_closed;
     cbs.ready_for_tun = cb_ready_for_tun;
     cbs.state_changed = cb_state_changed;
@@ -692,18 +698,34 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
             }
         }
 
+        /* The transport ctx borrows the socket (path_mgr closes it at
+         * teardown) and applies the 7 MiB buffers the library used to set.
+         * path_mgr keeps sockets as int, this platform's convention; this is
+         * where the value becomes a native SOCKET again. */
+        mqvpn_bind_winsock_opts_t bopts = {0};
+        bopts.struct_size = sizeof(bopts);
+        bopts.socket_buf_bytes = 0;
+        snprintf(bopts.tag, sizeof(bopts.tag), "%s", mp->iface[0] ? mp->iface : "path");
+        if (mqvpn_bind_winsock_path_new((SOCKET)mp->fd, &bopts, &ctx.bind_ctx[i]) !=
+            MQVPN_OK) {
+            LOG_ERR("path[%d] transport setup failed", i);
+            goto cleanup;
+        }
+
         mqvpn_path_desc_t desc = {0};
         desc.struct_size = sizeof(desc);
-        desc.fd = mp->fd;
         snprintf(desc.iface, sizeof(desc.iface), "%s", mp->iface);
         if (mp->local_addrlen > 0 && mp->local_addrlen <= sizeof(desc.local_addr)) {
             memcpy(desc.local_addr, &mp->local_addr, mp->local_addrlen);
             desc.local_addr_len = mp->local_addrlen;
         }
 
-        ctx.lib_path_handles[i] = mqvpn_client_add_path_fd(ctx.client, mp->fd, &desc);
+        ctx.lib_path_handles[i] = mqvpn_client_add_path(
+            ctx.client, &desc, mqvpn_bind_winsock_path_ops(), ctx.bind_ctx[i], NULL);
         if (ctx.lib_path_handles[i] < 0) {
             LOG_ERR("failed to register path %d with library", i);
+            mqvpn_bind_winsock_path_free(ctx.bind_ctx[i]); /* add failed: still ours */
+            ctx.bind_ctx[i] = NULL;
             goto cleanup;
         }
 
@@ -757,9 +779,14 @@ cleanup:
      * After destroy returns no callback can fire, and the NULL/flag guards
      * below skip whatever the callbacks already released. Path fds must
      * also outlive the destroy (the flush sends on them), so
-     * path_mgr_destroy stays below. */
+     * path_mgr_destroy stays below. destroy also finalises every
+     * still-attached transport ctx — never call on_platform_path_released
+     * after it; Windows keeps no receive telemetry, so there is nothing to
+     * harvest from those ctxs first. */
     mqvpn_client_destroy(ctx.client);
     ctx.client = NULL;
+    for (int i = 0; i < MQVPN_MAX_PATHS; i++)
+        ctx.bind_ctx[i] = NULL; /* finalised by destroy */
 
     win_cleanup_killswitch(&ctx);
     if (ctx.manage_routes) win_cleanup_routes(&ctx);

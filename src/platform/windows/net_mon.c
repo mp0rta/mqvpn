@@ -85,26 +85,42 @@ remove_path_by_index(platform_win_ctx_t *p, int idx, mqvpn_platform_reason_t rea
             drop_reason_str(reason), idx);
 
     /* PR5: emit PLATFORM_DROP via new public API with diagnostic info.
-     * Library transitions slot to CLOSED_DROPPED; fd close is reported
-     * via mqvpn_client_on_platform_fd_closed() below. */
+     * Library transitions slot to CLOSED_DROPPED; the transport release is
+     * reported via mqvpn_client_on_platform_path_released() below. */
     mqvpn_platform_path_event_info_t info = {0};
     snprintf(info.iface, sizeof(info.iface), "%s", p->path_mgr.paths[idx].iface);
     info.reason = reason;
     mqvpn_client_on_platform_path_dropped(p->client, p->lib_path_handles[idx], &info);
 
-    /* Remove libevent watcher */
+    /* Remove libevent watcher (quiesce RX) */
     if (p->ev_udp[idx]) {
         event_del(p->ev_udp[idx]);
         event_free(p->ev_udp[idx]);
         p->ev_udp[idx] = NULL;
     }
 
-    /* Close dead socket + notify lib so CLOSED_DROPPED -> CLOSED_FREE
-     * cleanup can complete (once xquic-side also clears). */
+    /* Close the dead socket, then tell the lib the transport is gone so the
+     * CLOSED_DROPPED -> CLOSED_FREE cleanup can complete (once xquic-side
+     * also clears). On OK the library released the ctx; on any error it
+     * stays attached and library-owned (see below) — never free it here.
+     * Windows keeps no receive telemetry, so there is nothing to harvest
+     * first (the POSIX sibling reads the bind's RX counters here). */
     mqvpn_socket_close(p->path_mgr.paths[idx].fd);
     p->path_mgr.paths[idx].fd = -1;
     p->path_mgr.paths[idx].platform_attached = 0;
-    mqvpn_client_on_platform_fd_closed(p->client, p->lib_path_handles[idx]);
+    int rc = mqvpn_client_on_platform_path_released(p->client, p->lib_path_handles[idx]);
+    if (rc == MQVPN_OK) {
+        p->bind_ctx[idx] = NULL; /* finalised by the library */
+    } else {
+        /* INVALID_STATE: the library did not touch the ctx, which therefore
+         * stays ATTACHED and library-owned — client_destroy will release it.
+         * Never free it here (double free). INVALID_ARG cannot occur with a
+         * non-NULL bind_ctx (recycling a handle requires a prior successful
+         * release). */
+        LOG_WRN("netmon: path_released for %s returned %s; transport stays "
+                "library-owned",
+                p->path_mgr.paths[idx].iface, mqvpn_error_string(rc));
+    }
 }
 
 /* Drop every tracked path on `ifname`. Shared by the drop-decision branches
@@ -399,7 +415,7 @@ recovery_socket_create(ADDRESS_FAMILY af, const char *ifname, mqvpn_path_t *mp)
         goto fail;
     }
 
-    /* Socket buffers are set by mqvpn_client_add_path_fd() (7 MiB) */
+    /* Socket buffers are set by the transport ctx (7 MiB) */
 
     memset(&mp->local_addr, 0, sizeof(mp->local_addr));
     if (af == AF_INET6) {
@@ -430,47 +446,68 @@ fail:
     return -1;
 }
 
-/* Register a freshly-created socket with the library and capture the
- * synchronous activation outcome via the with_outcome API. Returns the
- * new handle and writes *outcome (MQVPN_ADD_PATH_OK / TRANSIENT / PERMANENT);
- * returns -1 on handle-allocation failure (already logged). */
+/* Build the transport ctx for a freshly created re-add socket — the same
+ * Winsock bind the startup loop builds (platform_windows.c). Returns the
+ * ctx, or NULL on failure (already logged). The ctx is caller-owned until
+ * add_path succeeds. Sibling of the POSIX netmon_platform_transport_create. */
+static void *
+recovery_transport_create(int fd, const char *ifname)
+{
+    mqvpn_bind_winsock_opts_t bopts = {0};
+    bopts.struct_size = sizeof(bopts);
+    bopts.socket_buf_bytes = 0;
+    snprintf(bopts.tag, sizeof(bopts.tag), "%s", ifname);
+    void *ctx = NULL;
+    if (mqvpn_bind_winsock_path_new((SOCKET)fd, &bopts, &ctx) != MQVPN_OK) {
+        LOG_WRN("netmon: transport setup for re-add %s failed", ifname);
+        return NULL;
+    }
+    return ctx;
+}
+
+/* Register a freshly-created transport ctx with the library and capture the
+ * synchronous activation outcome. Returns the new handle and writes *outcome
+ * (MQVPN_ADD_PATH_OK / TRANSIENT / PERMANENT); returns -1 on
+ * handle-allocation failure (already logged), in which case the ctx stays
+ * caller-owned. */
 static mqvpn_path_handle_t
-recovery_register_with_lib(platform_win_ctx_t *p, int slot, int fd, const char *ifname,
-                           mqvpn_add_path_outcome_t *outcome)
+recovery_register_with_lib(platform_win_ctx_t *p, int slot, void *tctx,
+                           const char *ifname, mqvpn_add_path_outcome_t *outcome)
 {
     mqvpn_path_t *mp = &p->path_mgr.paths[slot];
 
     mqvpn_path_desc_t desc = {0};
     desc.struct_size = sizeof(desc);
-    desc.fd = fd;
     snprintf(desc.iface, sizeof(desc.iface), "%s", mp->iface);
     if (mp->local_addrlen > 0 && mp->local_addrlen <= sizeof(desc.local_addr)) {
         memcpy(desc.local_addr, &mp->local_addr, mp->local_addrlen);
         desc.local_addr_len = mp->local_addrlen;
     }
 
-    mqvpn_path_handle_t handle =
-        mqvpn_client_add_path_fd_with_outcome(p->client, fd, &desc, outcome);
+    mqvpn_path_handle_t handle = mqvpn_client_add_path(
+        p->client, &desc, mqvpn_bind_winsock_path_ops(), tctx, outcome);
     if (handle < 0) {
-        LOG_WRN("netmon: add_path_fd() for re-add %s failed", ifname);
+        LOG_WRN("netmon: add_path() for re-add %s failed", ifname);
         return -1;
     }
     p->lib_path_handles[slot] = handle;
+    p->bind_ctx[slot] = tctx;
     return handle;
 }
 
 /* Roll back a failed re-add so the next attempt starts from a clean slate.
  *
  * Safe ordering: remove_path() first, then close(fd), then notify the lib the
- * fd is closed. remove_path() moves the slot to CLOSED_DROPPED; the
- * CLOSED_DROPPED -> CLOSED_FREE lazy gate only fires once the lib sees fd<0, so
- * the on_platform_fd_closed() call is required — without it the slot parks in
- * CLOSED_DROPPED and never becomes reusable via the FREE path. Mirrors the
- * close-then-notify handshake in remove_path_by_index. The xquic_path_live=0
- * invariant (enforced by apply_path_activation_failure /
- * apply_path_create_permanent_failure) makes remove_path() skip
- * xqc_conn_close_path(), so xquic never touches this fd during teardown.
- * Do NOT remove that defensive clear — it's what makes this rollback safe. */
+ * transport is released. remove_path() moves the slot to CLOSED_DROPPED; the
+ * CLOSED_DROPPED -> CLOSED_FREE lazy gate only fires once the lib sees the
+ * transport released, so the on_platform_path_released() call is required —
+ * without it the slot parks in CLOSED_DROPPED and never becomes reusable via
+ * the FREE path. Mirrors the close-then-notify handshake in
+ * remove_path_by_index. The xquic_path_live=0 invariant (enforced by
+ * apply_path_activation_failure / apply_path_create_permanent_failure) makes
+ * remove_path() skip xqc_conn_close_path(), so xquic never touches this fd
+ * during teardown. Do NOT remove that defensive clear — it's what makes this
+ * rollback safe. */
 static void
 recovery_rollback(platform_win_ctx_t *p, int slot, mqvpn_add_path_outcome_t outcome)
 {
@@ -481,7 +518,16 @@ recovery_rollback(platform_win_ctx_t *p, int slot, mqvpn_add_path_outcome_t outc
     mqvpn_socket_close(mp->fd);
     mp->fd = -1;
     mp->platform_attached = 0;
-    mqvpn_client_on_platform_fd_closed(p->client, p->lib_path_handles[slot]);
+    int rc = mqvpn_client_on_platform_path_released(p->client, p->lib_path_handles[slot]);
+    if (rc == MQVPN_OK) {
+        p->bind_ctx[slot] = NULL; /* finalised by the library */
+    } else {
+        /* INVALID_STATE: the ctx stays attached and library-owned —
+         * client_destroy will release it. Never free it here. */
+        LOG_WRN("netmon: path_released for %s returned %s; transport stays "
+                "library-owned",
+                ifname, mqvpn_error_string(rc));
+    }
 
     if (outcome == MQVPN_ADD_PATH_PERMANENT_FAIL) {
         /* Saturate the per-slot counter — recover_dropped_paths_cb will
@@ -510,10 +556,11 @@ recovery_rollback(platform_win_ctx_t *p, int slot, mqvpn_add_path_outcome_t outc
 /* PR5: replace path_removed_by_platform[] polling with lib state query.
  * The slot is considered "ready for re-add" if its public status is
  * MQVPN_PATH_CLOSED — i.e., lib has fully cleaned up the previous incarnation
- * (CLOSED_FREE) OR is mid-cleanup (CLOSED_DROPPED with all xquic-side fields
- * drained). add_path_fd_with_outcome will refuse to reuse a non-CLOSED slot;
- * if cleanup hasn't completed we get TRANSIENT_FAIL and bail — next netlink
- * event will retry.
+ * (CLOSED_FREE) OR is mid-cleanup (CLOSED_DROPPED). add_path reuses only a
+ * fully released (CLOSED_FREE) library slot and appends a fresh one
+ * otherwise, so the re-add can succeed while the old incarnation drains
+ * (POSIX canon: netmon_common.c); it fails only once MQVPN_MAX_PATHS is
+ * reached first.
  *
  * try_reactivate_by_ifname / try_readd_removed_path are orchestration
  * (consumers of the Layer C probes above), not probes themselves — kept in
@@ -579,10 +626,19 @@ try_readd_removed_path(platform_win_ctx_t *p, const char *ifname)
         mp->xquic_path_live = 0;
         mp->path_id = 0;
 
+        void *tctx = recovery_transport_create(fd, ifname);
+        if (!tctx) {
+            mqvpn_socket_close(fd);
+            mp->fd = -1;
+            mp->platform_attached = 0;
+            return 0;
+        }
+
         mqvpn_add_path_outcome_t outcome = MQVPN_ADD_PATH_OK;
         mqvpn_path_handle_t new_h =
-            recovery_register_with_lib(p, i, fd, ifname, &outcome);
+            recovery_register_with_lib(p, i, tctx, ifname, &outcome);
         if (new_h < 0) {
+            mqvpn_bind_winsock_path_free(tctx); /* add failed: still ours */
             mqvpn_socket_close(fd);
             mp->fd = -1;
             mp->platform_attached = 0;
