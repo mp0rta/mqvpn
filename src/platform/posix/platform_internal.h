@@ -74,18 +74,19 @@ typedef struct {
      * GRO is a Linux sockopt and Darwin would carry a dead field. */
     int udp_gro;
     int udp_gso; /* [Advanced] UdpGso policy, reproduced on re-add */
-    /* Receive-side offload telemetry: cumulative PLATFORM totals, read once
-     * at teardown for the udp-rx line. The bind counts per transport ctx and
-     * those counters die with the ctx, so platform_read_rx_stats() folds a
-     * ctx's totals in here — at drop and at teardown — while the bind keeps
-     * the per-ctx originals. The sockopt log proves GRO was requested; only
-     * gro_datagrams > gro_receives proves the kernel actually coalesced. */
+#endif
+    /* Receive-side telemetry: cumulative PLATFORM totals. The bind counts per
+     * transport ctx on every POSIX platform and those counters die with the
+     * ctx, so the release sites (netmon_common.c) and the teardown harvest
+     * fold each ctx's totals in here — while the bind keeps the per-ctx
+     * originals. Only Linux prints them, in the udp-rx line: the sockopt log
+     * proves GRO was requested, only gro_datagrams > gro_receives proves the
+     * kernel actually coalesced. Darwin accumulates them but reports nothing. */
     uint64_t gro_receives;  /* receives whose data was DELIVERED —
                              * truncated-dropped and drained-but-undelivered
                              * receives count toward neither counter, so the
                              * datagrams/receives factor cannot dip below 1.0 */
     uint64_t gro_datagrams; /* datagrams delivered to the library */
-#endif
     char orig_gateway[INET6_ADDRSTRLEN];
     char orig_iface[IFNAMSIZ];
     char server_ip_str[INET6_ADDRSTRLEN];
@@ -125,6 +126,13 @@ typedef struct {
  * netlink_mon.c (Linux) / route_mon.c (Darwin) */
 void on_socket_read(evutil_socket_t fd, short what, void *arg);
 void schedule_next_tick(platform_ctx_t *p);
+
+/* netmon_common.c — a slot's bind RX counters (cumulative since ctx
+ * creation). Must run BEFORE the ctx is finalised (on_platform_path_released
+ * / client_destroy); the accessor is invalid afterwards. Callers add the
+ * values to the gro_* totals only once the ctx is definitely gone (released()
+ * returned OK, or at teardown), so a ctx that outlives a refused release is
+ * never counted twice. */
 void platform_read_rx_stats(const platform_ctx_t *p, int slot, uint64_t *receives,
                             uint64_t *datagrams);
 

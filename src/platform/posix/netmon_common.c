@@ -46,6 +46,21 @@ netmon_drop_reason_str(mqvpn_platform_reason_t reason)
     }
 }
 
+/* Contract in platform_internal.h. Shared: the counters live in the POSIX
+ * bind, which every POSIX platform uses. */
+void
+platform_read_rx_stats(const platform_ctx_t *p, int slot, uint64_t *receives,
+                       uint64_t *datagrams)
+{
+    *receives = 0;
+    *datagrams = 0;
+    if (slot < 0 || slot >= MQVPN_MAX_PATHS || !p->bind_ctx[slot]) return;
+    mqvpn_bind_posix_stats_t st = {.struct_size = sizeof(st)};
+    mqvpn_bind_posix_path_get_stats(p->bind_ctx[slot], &st);
+    *receives = st.rx_receives;
+    *datagrams = st.rx_datagrams;
+}
+
 /* Remove a path because the kernel says it's no longer usable.
  * Four callers: interface-gone (RTM_DELLINK / detach fallback); carrier
  * lost; admin down; and address removed (no usable source address left).
