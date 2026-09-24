@@ -691,6 +691,16 @@ if(BUILD_TESTING)
         add_test(NAME ${t} COMMAND ${t})
     endforeach()
 
+    # Bundled POSIX transport over real loopback sockets — the only test of
+    # the bind's non-Linux branch, which macOS and iOS run. Links the bind
+    # alone (the test stubs its two delivery targets). Keep in sync with the
+    # Linux twin (the test_bind_posix_socket block in the Linux branch below).
+    add_executable(test_bind_posix_socket tests/test_bind_posix_socket.c
+        src/bind/posix.c src/bind/posix_offload.c src/log.c)
+    target_include_directories(test_bind_posix_socket PRIVATE
+        ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME test_bind_posix_socket COMMAND test_bind_posix_socket)
+
     # Hybrid TCP-lane unit test — keep in sync with the Linux twin (the
     # test_tcp_lane block in the Linux branch below). The test TU
     # #include's BOTH src/hybrid/tcp_lane.c AND src/hybrid/tcp_lane_uplink.c
@@ -933,6 +943,16 @@ if(BUILD_TESTING)
     # fires in test_server_scope_sticky_state on kernels with UDP_SEGMENT.
     add_test(NAME test_bind_posix_marker_once
              COMMAND sh -c "n=$(${CMAKE_BINARY_DIR}/tests/test_bind_posix 2>&1 | grep -c 'udp-gso: GSO '); [ \"$n\" = 1 ] || { echo \"udp-gso marker count $n, want 1\"; exit 1; }")
+
+    # The same bind over real loopback sockets with no seam — portable, and
+    # also built on Darwin, where it is the only test of the bind's non-Linux
+    # branch. Links the bind alone: the test stubs the two delivery targets,
+    # so no core or xquic is involved.
+    add_executable(test_bind_posix_socket tests/test_bind_posix_socket.c
+                   src/bind/posix.c src/bind/posix_offload.c src/log.c)
+    target_include_directories(test_bind_posix_socket PRIVATE src include)
+    set_target_properties(test_bind_posix_socket PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_bind_posix_socket COMMAND test_bind_posix_socket)
 
     # Kernel-backed UDP GSO/GRO round trip (issue #167): built WITHOUT
     # MQVPN_OFFLOAD_TEST_SEAM, so every syscall is the real one — this pins
