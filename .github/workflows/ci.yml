@@ -1017,6 +1017,11 @@ jobs:
       - name: Certificate verifier tests
         run: ctest --test-dir build -C Release -R "test_cert_(identity|verify_win)" --no-tests=error --output-on-failure
 
+      # Bundled Winsock transport (seam + real loopback sockets); own checks,
+      # not assert(), so Release is fine.
+      - name: Winsock transport tests
+        run: ctest --test-dir build -C Release -R "^test_bind_winsock$" --no-tests=error --output-on-failure
+
       # Weak: presence and order of the install call only (see the script).
       - name: Verifier wiring tripwire
         shell: bash

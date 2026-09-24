@@ -531,9 +531,19 @@ if(BUILD_TESTING)
     target_link_libraries(test_cert_verify_win crypt32)
     target_compile_definitions(test_cert_verify_win PRIVATE TEST_CERT_DIR="${CMAKE_SOURCE_DIR}/tests/certs")
     add_test(NAME test_cert_verify_win COMMAND test_cert_verify_win)
+    # Bundled Winsock transport: constructor contract and send error mapping
+    # through a sendto/calloc seam, send/drain over real loopback sockets.
+    # Links the bind alone (the test stubs its delivery target); own checks,
+    # not assert(), so the Release CI build is fine.
+    add_executable(test_bind_winsock tests/test_bind_winsock.c src/bind/winsock.c src/log.c)
+    target_compile_definitions(test_bind_winsock PRIVATE MQVPN_WINSOCK_TEST_SEAM)
+    target_include_directories(test_bind_winsock PRIVATE
+        ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(test_bind_winsock ws2_32)
+    add_test(NAME test_bind_winsock COMMAND test_bind_winsock)
     if(MSVC)
         # same gate as the product build; target-scoped options are not inherited
-        foreach(t test_cert_identity test_cert_verify_win)
+        foreach(t test_cert_identity test_cert_verify_win test_bind_winsock)
             target_compile_options(${t} PRIVATE /WX /utf-8)
             target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
         endforeach()
