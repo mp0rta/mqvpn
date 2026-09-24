@@ -1038,6 +1038,23 @@ jobs:
       - name: Smoke-run binary
         run: build/Release/mqvpn.exe --version
 
+      # The Windows platform's transport wiring on a real runner: the
+      # client's first QUIC Initial must leave through the Winsock bind and
+      # reach a local listener, and the listener's Version Negotiation reply
+      # must come back in through the bind's drain helper (the client
+      # abandons the attempt). Needs neither Wintun nor admin rights (the TUN
+      # only appears after a handshake, which never happens here). --path is
+      # mandatory on Windows: pin to the loopback interface. Stopped with
+      # TerminateProcess, so the teardown is covered by the on-machine checks
+      # instead.
+      - name: Transport smoke (Initial out, Version Negotiation back in)
+        shell: pwsh
+        run: |
+          $lo = (Get-NetIPInterface -AddressFamily IPv4 | Where-Object InterfaceAlias -like 'Loopback*' | Select-Object -First 1).InterfaceAlias
+          if (-not $lo) { throw "no IPv4 loopback interface alias found" }
+          python scripts/ci_transport_smoke.py --path "$lo" build/Release/mqvpn.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       # For on-machine checks the runner cannot do (real certificate stores,
       # a real server). Needs wintun.dll next to it: take it from a release zip.
       - name: Upload mqvpn.exe
