@@ -7,9 +7,12 @@
  * test_path_state_machine test target. NOT part of the public ABI —
  * never included from libmqvpn.h.
  *
- * Include policy (PR4 lint will enforce):
- *   ALLOWED:    mqvpn_client.c, path_state_machine.c, tests/test_path_state_machine.c
- *   FORBIDDEN:  platform layer, scheduler, public headers, all other modules
+ * Include policy (enforced by scripts/lint/check_lifecycle_field_writes.sh):
+ *   ALLOWED:    mqvpn_client.c, path_state_machine.h (which re-exports it to
+ *               path_state_machine.c), tests/test_path_state_machine.c
+ *   FORBIDDEN:  everything else - platform layers, binds, scheduler, public
+ *               headers, other modules and tests - and #including any .c
+ *               file named above as a translation unit
  *
  * Promoting this header is a deliberate PR1 tradeoff for testability.
  * Phase 4 reduces direct field access via the path_on_event() aggregator. */

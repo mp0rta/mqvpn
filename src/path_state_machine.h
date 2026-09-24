@@ -4,6 +4,11 @@
 /*
  * path_state_machine.h — Path lifecycle internal state machine.
  *
+ * This header includes path_entry_internal.h, re-exporting path_entry_t, so
+ * the same include policy applies to it: only mqvpn_client.c,
+ * path_state_machine.c and tests/test_path_state_machine.c may include it
+ * (enforced by scripts/lint/check_lifecycle_field_writes.sh).
+ *
  * PR1 (Phase 1) introduced invariant checks, transition logging, and
  * state-residence timers against the legacy 5-value `mqvpn_path_status_t`.
  * PR2 added the internal 7-value `path_lifecycle_t` (defined in
