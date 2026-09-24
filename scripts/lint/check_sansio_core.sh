@@ -18,8 +18,8 @@
 #         setsockopt|getsockopt|socket|close   immediately followed by `(`
 #       * the bare token SOCKET, UDP_SEGMENT or UDP_GRO
 #       * an #include of a bind header (udp_offload.h, bind/posix_offload.h,
-#         mqvpn_bind_posix.h) in either delimiter, "..." or <...> - the core
-#         is bind-agnostic
+#         mqvpn_bind_posix.h, mqvpn_bind_winsock.h) in either delimiter,
+#         "..." or <...> - the core is bind-agnostic
 #     Exclusions, these two and no others:
 #       src/bind/*                the bundled transport implementations
 #       src/hybrid/tcp_egress.c   the server egress lane owns its TCP sockets
@@ -161,7 +161,7 @@ fi
 echo "sansio-gate: scanning $REPO_ROOT (root from $root_from)"
 echo "sansio-gate: source list $LIST"
 
-PATTERNS='\b(sendto|sendmsg|sendmmsg|recvfrom|recvmsg|recvmmsg|setsockopt|getsockopt|socket|close)\(|\bSOCKET\b|\bUDP_SEGMENT\b|\bUDP_GRO\b|#[[:space:]]*include[[:space:]]*["<](udp_offload|bind/posix_offload|mqvpn_bind_posix)\.h[">]'
+PATTERNS='\b(sendto|sendmsg|sendmmsg|recvfrom|recvmsg|recvmmsg|setsockopt|getsockopt|socket|close)\(|\bSOCKET\b|\bUDP_SEGMENT\b|\bUDP_GRO\b|#[[:space:]]*include[[:space:]]*["<](udp_offload|bind/posix_offload|mqvpn_bind_posix|mqvpn_bind_winsock)\.h[">]'
 HDR_FD_ALLOW='egress_fd_register|egress_fd_unregister|mqvpn_server_on_egress_fd_ready|mqvpn_client_set_tun_active'
 
 rc=0

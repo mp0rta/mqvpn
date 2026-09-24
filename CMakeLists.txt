@@ -250,7 +250,9 @@ if(NOT WIN32)
         src/bind/posix.c
     )
 else()
-    set(MQVPN_BIND_SOURCES)   # mqvpn_bind_winsock lands in slice 2
+    set(MQVPN_BIND_SOURCES
+        src/bind/winsock.c
+    )
 endif()
 
 # ---------- lwIP (hybrid mode TCP lane — see MQVPN_HYBRID_TCP_LANE_BUILD) ----------
