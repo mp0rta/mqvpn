@@ -742,6 +742,27 @@ jobs:
       - name: Run Darwin unit tests
         run: ctest --test-dir build-darwin --output-on-failure
 
+      # The Darwin platform's transport wiring on a real runner: the client's
+      # first QUIC Initial must leave through the POSIX bind and reach a local
+      # listener, the listener's Version Negotiation reply must come back in
+      # through the bind's receive helper (the client abandons the attempt),
+      # and SIGTERM must run the whole teardown (the core prints its udp-tx
+      # line from client_destroy). No server and no utun — the handshake never
+      # completes. sudo: the client takes /var/run/mqvpn.lock and flushes its
+      # pf anchor at start.
+      - name: Transport smoke (Initial out, Version Negotiation back in)
+        run: python3 scripts/ci_transport_smoke.py --sudo --graceful build-darwin/mqvpn
+
+      # For on-machine checks the runner cannot do (a real server, interface
+      # drop/re-add). Links Homebrew's libevent dynamically: the target Mac
+      # needs `brew install libevent`.
+      - name: Upload mqvpn (macOS arm64)
+        uses: actions/upload-artifact@v7
+        with:
+          name: mqvpn-darwin-arm64
+          path: build-darwin/mqvpn
+          retention-days: 7
+
       # iOS lwIP profile coverage: the only other consumer of
       # MQVPN_LWIP_IOS_PROFILE is ios/build-ios.sh (not run in CI), so
       # without this step every iOS-only #if branch, _Static_assert, and
