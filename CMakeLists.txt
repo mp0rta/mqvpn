@@ -529,7 +529,7 @@ if(BUILD_TESTING)
     add_executable(test_cert_verify_win tests/test_cert_verify_win.c
         src/platform/windows/cert_verify.c src/platform/windows/cert_identity.c src/log.c)
     target_include_directories(test_cert_verify_win PRIVATE
-        ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/platform/windows)
+        ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/platform/windows)
     target_link_libraries(test_cert_verify_win crypt32)
     target_compile_definitions(test_cert_verify_win PRIVATE TEST_CERT_DIR="${CMAKE_SOURCE_DIR}/tests/certs")
     add_test(NAME test_cert_verify_win COMMAND test_cert_verify_win)

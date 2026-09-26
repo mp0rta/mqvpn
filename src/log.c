@@ -11,6 +11,8 @@
 #endif
 
 static mqvpn_log_level_t g_log_level = MQVPN_LOG_INFO;
+static mqvpn_log_fn g_log_sink = NULL;
+static void *g_log_sink_ctx = NULL;
 
 static const char *level_str[] = {
     [MQVPN_LOG_DEBUG] = "DBG",
@@ -26,9 +28,29 @@ mqvpn_log_set_level(mqvpn_log_level_t level)
 }
 
 void
+mqvpn_log_set_sink(mqvpn_log_fn fn, void *user_ctx)
+{
+    g_log_sink = fn;
+    g_log_sink_ctx = user_ctx;
+}
+
+void
 mqvpn_log(mqvpn_log_level_t level, const char *fmt, ...)
 {
     if (level < g_log_level) {
+        return;
+    }
+
+    mqvpn_log_fn sink = g_log_sink;
+    if (sink) {
+        /* Bounded buffer on the sink path only; the stderr path below keeps
+         * streaming through vfprintf as it always has. */
+        char buf[1024];
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(buf, sizeof(buf), fmt, ap);
+        va_end(ap);
+        sink(level, buf, g_log_sink_ctx);
         return;
     }
 

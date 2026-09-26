@@ -7,17 +7,21 @@
 #include <stdio.h>
 #include <stdarg.h>
 
-#ifndef MQVPN_LOG_LEVEL_DEFINED
-#  define MQVPN_LOG_LEVEL_DEFINED
-typedef enum {
-    MQVPN_LOG_DEBUG = 0,
-    MQVPN_LOG_INFO,
-    MQVPN_LOG_WARN,
-    MQVPN_LOG_ERROR,
-} mqvpn_log_level_t;
-#endif
+#include "libmqvpn.h" /* mqvpn_log_fn, mqvpn_log_level_t (sole definition) */
 
 void mqvpn_log_set_level(mqvpn_log_level_t level);
+
+/* Process-wide sink for every global log line (the bundled binds,
+ * path_state_machine, auth, ...). NULL restores the stderr writer, which is
+ * the default — Linux, macOS and Windows never call this. The sink receives
+ * the formatted message with no timestamp or level prefix and no trailing
+ * newline (at most 1023 bytes; longer lines are truncated), on the thread
+ * that logged, after the level filter; it must be safe from any thread and
+ * must not log through mqvpn_log() itself. Set it once, before any
+ * client exists. Hidden in libmqvpn.so like mqvpn_log itself: it exists
+ * for the static-archive consumers whose stderr goes nowhere (Android
+ * JNI -> logcat, iOS extension -> os_log). */
+void mqvpn_log_set_sink(mqvpn_log_fn fn, void *user_ctx);
 #ifdef _MSC_VER
 void mqvpn_log(mqvpn_log_level_t level, const char *fmt, ...);
 #else
