@@ -53,6 +53,9 @@ class PlatformTrustDeviceTest {
         assertEquals(-1, NativeBridgeTestSeams.nativeVerifyForTest(arrayOf(fixture("identity-dns")), "bücher.example"))
 
     @Test fun clientNew_installsThePlatformVerifier() {
+        // Destroy goes through the reactor (the only destroy entry point); a
+        // reactor with no paths is all it needs.
+        val reactor = NativeBridge.reactorNew()
         val cfg = NativeBridge.configNew()
         val client = NativeBridge.clientNew(cfg, NoopCallbacks())
         try {
@@ -60,8 +63,9 @@ class PlatformTrustDeviceTest {
             // clientNew installs on the handle; ordering vs the config copy is pinned by review (see nativeConfigHasPlatformVerifier)
             assertTrue(NativeBridgeTestSeams.nativeConfigHasPlatformVerifier(cfg))
         } finally {
-            if (client != 0L) NativeBridge.clientDestroy(client)
+            if (client != 0L) NativeBridge.reactorClientDestroy(reactor, client)
             NativeBridge.configFree(cfg)
+            NativeBridge.reactorFree(reactor)
         }
     }
 
