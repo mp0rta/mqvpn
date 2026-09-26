@@ -6,8 +6,9 @@
 Starts the client against a local UDP listener that is not a server and
 checks what the platform's transport wiring alone guarantees:
 
-  1. the client's first datagram reaches the listener and is a padded QUIC
-     Initial (>= 1200 bytes, RFC 9000 section 14.1) — socket creation, path
+  1. the client's first datagram reaches the listener and is a padded QUIC v1
+     Initial (long header, version 1, packet type Initial — RFC 9000
+     section 17.2.2 — and >= 1200 bytes, section 14.1) — socket creation, path
      registration and the bundled transport's send all worked;
   2. the listener answers with a Version Negotiation packet (RFC 9000
      section 17.2.1: the client's connection IDs echoed, only a reserved
@@ -115,6 +116,9 @@ def main():
                 fail(f"first datagram is {len(data)} bytes, not a padded QUIC Initial")
             if not data[0] & 0x80:
                 fail(f"first datagram starts with 0x{data[0]:02x}, not a QUIC long-header packet")
+            if data[1:5] != b"\x00\x00\x00\x01" or data[0] & 0x30:
+                fail(f"first datagram is not a QUIC v1 Initial (first byte 0x{data[0]:02x}, "
+                     f"version 0x{data[1:5].hex()})")
             lst.sendto(version_negotiation(*long_header_cids(data)), peer)
             deadline = time.monotonic() + 10
             while VN_REACTION not in read_log(args.log):
