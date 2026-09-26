@@ -14,6 +14,7 @@
 #ifdef _WIN32
 
 #  include "libmqvpn.h"
+#  include "mqvpn_bind_winsock.h"
 #  include "tun_wintun.h"
 #  include "path_mgr.h"
 
@@ -29,9 +30,6 @@
 /* Maximum number of routes we install */
 #  define MAX_INSTALLED_ROUTES 8
 
-/* Maximum number of WFP filters (loopback*2 + TUN*2 + server + block*2 + spare) */
-#  define MAX_WFP_FILTERS 10
-
 typedef struct {
     mqvpn_client_t *client;
 
@@ -44,6 +42,13 @@ typedef struct {
     mqvpn_path_mgr_t path_mgr;
     mqvpn_path_handle_t lib_path_handles[MQVPN_MAX_PATHS];
     struct event *ev_udp[MQVPN_MAX_PATHS];
+
+    /* Bundled transport ctx per path slot (mqvpn_bind_winsock). Borrows
+     * path_mgr.paths[i].fd; the library owns finalisation once add_path
+     * succeeded, so this pointer is only a handle for the RX helper. NULL
+     * once the library has finalised the ctx (path_released returned OK, or
+     * client_destroy); a refused release keeps it (still library-owned). */
+    void *bind_ctx[MQVPN_MAX_PATHS];
 
     /* Path recovery accelerator (net_mon.c) */
     /* Recovery backpressure; reset on reconnect. */
@@ -83,10 +88,13 @@ typedef struct {
     /* Kill switch (WFP) */
     HANDLE wfp_engine;
     GUID wfp_sublayer_key;
-    UINT64 wfp_filter_ids[MAX_WFP_FILTERS];
     int n_wfp_filters;
     int killswitch_active;
     int killswitch_enabled;
+    /* FwpmEngineClose0 failed: the dynamic session may still hold its
+     * block-all filters and nothing can address them any more. Only process
+     * exit clears them — see win_cleanup_killswitch(). */
+    int wfp_close_failed;
 
     /* Shutdown */
     int shutting_down;

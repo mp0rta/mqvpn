@@ -14,7 +14,7 @@ TunName = mqvpn0
 DNS = 1.1.1.1, 8.8.8.8
 LogLevel = info
 # MTU = 1280                   # TUN MTU (1280–9000, default: auto = ~1382)
-# KillSwitch = false
+# KillSwitch = false             # also stops interface-bound apps (e.g. Tailscale on Windows) from bypassing the tunnel
 # ManageRoutes = true            # set to false on router/embedded integrations to keep host routes untouched
 # Reconnect = true
 # ReconnectInterval = 5

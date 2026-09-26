@@ -1,0 +1,15 @@
+- Server certificates are now verified against the Android system CA
+  store. A server with an ordinary CA-signed certificate connects
+  without turning on "Insecure (skip TLS verify)"; previously such a
+  chain was rejected because the app had no trust store to check it
+  against.
+- Fix a tunnel stall that a silently failing network path could hold
+  open: traffic now keeps flowing over the remaining path.
+- Fix a receive-buffer limit that could throttle throughput on fast
+  links.
+- Fix the IPv6 address the server assigns, so the tunnel interface is
+  configured with the correct prefix length.
+- Reject a malformed server address or TLS server name before
+  connecting, instead of failing later in the handshake.
+- Update BoringSSL to 0.20260903.0, picking up upstream TLS/crypto
+  fixes since the previous pin.

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(mqvpn VERSION 0.16.2 LANGUAGES C)
+project(mqvpn VERSION 0.16.3 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -227,7 +227,6 @@ message(STATUS "SSL_LIB=${SSL_LIB} CRYPTO_LIB=${CRYPTO_LIB}")
 set(MQVPN_LIB_SOURCES
     src/mqvpn_config.c
     src/mqvpn_client.c
-    src/udp_offload.c
     src/mqvpn_server.c
     src/mqvpn_conn_settings.c
     src/mqvpn_util.c
@@ -241,6 +240,22 @@ set(MQVPN_LIB_SOURCES
     src/reorder_rx.c
     src/hybrid/classifier.c
 )
+
+# ---------- bundled transport implementations (NOT part of the sans-I/O core) ----------
+# Together with src/hybrid/tcp_egress.c (the server egress lane owns its TCP
+# sockets), the only library files that issue socket calls;
+# scripts/lint/check_sansio_core.sh excludes src/bind/* and that one file from
+# its scan.
+if(NOT WIN32)
+    set(MQVPN_BIND_SOURCES
+        src/bind/posix_offload.c
+        src/bind/posix.c
+    )
+else()
+    set(MQVPN_BIND_SOURCES
+        src/bind/winsock.c
+    )
+endif()
 
 # ---------- lwIP (hybrid mode TCP lane — see MQVPN_HYBRID_TCP_LANE_BUILD) ----------
 # Deliberately single-mode: no pre-built LWIP_BUILD_DIR variant (unlike
@@ -394,7 +409,11 @@ if(MQVPN_ENABLE_FUZZING AND NOT MQVPN_HYBRID_TCP_LANE_BUILD)
 endif()
 
 # ---------- libmqvpn (static library — no libevent, no platform I/O) ----------
-add_library(mqvpn_lib STATIC ${MQVPN_LIB_SOURCES})
+add_library(mqvpn_lib STATIC ${MQVPN_LIB_SOURCES} ${MQVPN_BIND_SOURCES})
+# Resolved (post-configure) core source list consumed by
+# scripts/lint/check_sansio_core.sh — includes the conditional hybrid appends.
+file(GENERATE OUTPUT ${CMAKE_BINARY_DIR}/mqvpn_lib_sources.txt
+     CONTENT "$<JOIN:$<TARGET_PROPERTY:mqvpn_lib,SOURCES>,\n>\n")
 if(WIN32)
     set_target_properties(mqvpn_lib PROPERTIES OUTPUT_NAME mqvpn_lib)
 else()
@@ -438,6 +457,8 @@ add_executable(mqvpn
     src/platform/windows/firewall.c
     src/platform/windows/dns.c
     src/platform/windows/net_mon.c
+    src/platform/windows/cert_identity.c
+    src/platform/windows/cert_verify.c
     src/path_mgr.c
     src/config.c
     src/compat/getopt.c
@@ -459,7 +480,7 @@ if(Libevent_FOUND)
         libevent::core libevent::extra
         ${SSL_LIB}
         ${CRYPTO_LIB}
-        ws2_32 iphlpapi fwpuclnt ole32
+        ws2_32 iphlpapi fwpuclnt ole32 crypt32
     )
 else()
     target_include_directories(mqvpn PRIVATE ${EVENT_INCLUDE_DIR})
@@ -469,7 +490,7 @@ else()
         ${EVENT_LIB}
         ${SSL_LIB}
         ${CRYPTO_LIB}
-        ws2_32 iphlpapi fwpuclnt ole32
+        ws2_32 iphlpapi fwpuclnt ole32 crypt32
     )
 endif()
 
@@ -489,6 +510,46 @@ if(MSVC)
     # explicit NUL termination (the _s variants are not portable C11).
     target_compile_definitions(mqvpn PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_compile_definitions(mqvpn_lib PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+
+# ---------- Tests (Windows) ----------
+# The Windows branch had no tests until the certificate verifier: the option
+# and enable_testing() are declared here because the Darwin and Linux
+# declarations below are inside their own branches.
+option(BUILD_TESTING "Build unit tests" ON)
+if(BUILD_TESTING)
+    enable_testing()
+    # Portable identity core: same test as on Linux.
+    add_executable(test_cert_identity tests/test_cert_identity.c src/platform/windows/cert_identity.c)
+    target_include_directories(test_cert_identity PRIVATE ${CMAKE_SOURCE_DIR}/src/platform/windows)
+    target_compile_definitions(test_cert_identity PRIVATE TEST_CERT_DIR="${CMAKE_SOURCE_DIR}/tests/certs")
+    add_test(NAME test_cert_identity COMMAND test_cert_identity)
+    # CryptoAPI half, driven with an exclusive-root chain engine. Links only
+    # what it needs.
+    add_executable(test_cert_verify_win tests/test_cert_verify_win.c
+        src/platform/windows/cert_verify.c src/platform/windows/cert_identity.c src/log.c)
+    target_include_directories(test_cert_verify_win PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/platform/windows)
+    target_link_libraries(test_cert_verify_win crypt32)
+    target_compile_definitions(test_cert_verify_win PRIVATE TEST_CERT_DIR="${CMAKE_SOURCE_DIR}/tests/certs")
+    add_test(NAME test_cert_verify_win COMMAND test_cert_verify_win)
+    # Bundled Winsock transport: constructor contract and send error mapping
+    # through a sendto/calloc seam, send/drain over real loopback sockets.
+    # Links the bind alone (the test stubs its delivery target); own checks,
+    # not assert(), so the Release CI build is fine.
+    add_executable(test_bind_winsock tests/test_bind_winsock.c src/bind/winsock.c src/log.c)
+    target_compile_definitions(test_bind_winsock PRIVATE MQVPN_WINSOCK_TEST_SEAM)
+    target_include_directories(test_bind_winsock PRIVATE
+        ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(test_bind_winsock ws2_32)
+    add_test(NAME test_bind_winsock COMMAND test_bind_winsock)
+    if(MSVC)
+        # same gate as the product build; target-scoped options are not inherited
+        foreach(t test_cert_identity test_cert_verify_win test_bind_winsock)
+            target_compile_options(${t} PRIVATE /WX /utf-8)
+            target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
+        endforeach()
+    endif()
 endif()
 
 elseif(APPLE)
@@ -567,7 +628,7 @@ target_include_directories(mqvpn_darwin_platform PRIVATE
 # included, is Linux-only; same SOVERSION rationale as the Linux block).
 # Links c++ (not stdc++) for BoringSSL's C++ internals — macOS SDKs ship
 # libc++ only, and a .dylib must fully resolve its symbols at link time.
-add_library(mqvpn_shared SHARED ${MQVPN_LIB_SOURCES})
+add_library(mqvpn_shared SHARED ${MQVPN_LIB_SOURCES} ${MQVPN_BIND_SOURCES})
 set_target_properties(mqvpn_shared PROPERTIES
     OUTPUT_NAME mqvpn
     SOVERSION ${MQVPN_SOVERSION}
@@ -644,6 +705,16 @@ if(BUILD_TESTING)
         add_test(NAME ${t} COMMAND ${t})
     endforeach()
 
+    # Bundled POSIX transport over real loopback sockets — the only test of
+    # the bind's non-Linux branch, which macOS and iOS run. Links the bind
+    # alone (the test stubs its two delivery targets). Keep in sync with the
+    # Linux twin (the test_bind_posix_socket block in the Linux branch below).
+    add_executable(test_bind_posix_socket tests/test_bind_posix_socket.c
+        src/bind/posix.c src/bind/posix_offload.c src/log.c)
+    target_include_directories(test_bind_posix_socket PRIVATE
+        ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME test_bind_posix_socket COMMAND test_bind_posix_socket)
+
     # Hybrid TCP-lane unit test — keep in sync with the Linux twin (the
     # test_tcp_lane block in the Linux branch below). The test TU
     # #include's BOTH src/hybrid/tcp_lane.c AND src/hybrid/tcp_lane_uplink.c
@@ -683,7 +754,7 @@ endif()
 else() # NOT WIN32, NOT APPLE — Linux
 
 # Shared library variant
-add_library(mqvpn_shared SHARED ${MQVPN_LIB_SOURCES})
+add_library(mqvpn_shared SHARED ${MQVPN_LIB_SOURCES} ${MQVPN_BIND_SOURCES})
 set_target_properties(mqvpn_shared PROPERTIES
     OUTPUT_NAME mqvpn
     # Defined once at the top of this file, with the bump history — both this
@@ -860,19 +931,48 @@ if(BUILD_TESTING)
     # UDP GSO TX offload (issue #167): pure syscall/mechanics layer, no xquic
     # dependency. MQVPN_OFFLOAD_TEST_SEAM is wired: it swaps sendmsg/sendmmsg
     # for mqvpn_seam_sendmsg/mqvpn_seam_sendmmsg (defined in
-    # tests/test_udp_offload.c), which the fault-injection tests use to force
-    # error/short-write/EAGAIN paths deterministically.
-    add_executable(test_udp_offload tests/test_udp_offload.c src/udp_offload.c)
-    target_compile_definitions(test_udp_offload PRIVATE MQVPN_OFFLOAD_TEST_SEAM)
-    target_include_directories(test_udp_offload PRIVATE src include)
-    set_target_properties(test_udp_offload PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
-    add_test(NAME test_udp_offload COMMAND test_udp_offload)
+    # tests/test_bind_posix_offload.c), which the fault-injection tests use to
+    # force error/short-write/EAGAIN paths deterministically.
+    add_executable(test_bind_posix_offload tests/test_bind_posix_offload.c src/bind/posix_offload.c)
+    target_compile_definitions(test_bind_posix_offload PRIVATE MQVPN_OFFLOAD_TEST_SEAM)
+    target_include_directories(test_bind_posix_offload PRIVATE src include)
+    set_target_properties(test_bind_posix_offload PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_bind_posix_offload COMMAND test_bind_posix_offload)
+
+    # Bundled POSIX bind contract tests. Links the STATIC core like every other
+    # core-dependent unit test: the seam-compiled posix.o/posix_offload.o on the
+    # command line are the only definitions of mqvpn_bind_posix_* (the archive's
+    # copies are never pulled because nothing in the core references them),
+    # and mqvpn_log — hidden-visibility in the .so — resolves from log.c.o.
+    add_executable(test_bind_posix tests/test_bind_posix.c src/bind/posix.c src/bind/posix_offload.c)
+    target_compile_definitions(test_bind_posix PRIVATE MQVPN_OFFLOAD_TEST_SEAM)
+    target_link_libraries(test_bind_posix mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
+    target_include_directories(test_bind_posix PRIVATE src include)   # no xquic: the bind is xquic-free
+    set_target_properties(test_bind_posix PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_bind_posix COMMAND test_bind_posix)
+    # Exactly ONE capability marker for the whole binary: emitted by the first
+    # GSO-allowed ctx, never by the udp_gso = 0 ctxs (Arm-B absence contract).
+    # Greps the marker strings ("udp-gso: GSO enabled|unavailable"), not the
+    # bare prefix — the sticky-fallback WARN shares the prefix by design and
+    # fires in test_server_scope_sticky_state on kernels with UDP_SEGMENT.
+    add_test(NAME test_bind_posix_marker_once
+             COMMAND sh -c "n=$(${CMAKE_BINARY_DIR}/tests/test_bind_posix 2>&1 | grep -c 'udp-gso: GSO '); [ \"$n\" = 1 ] || { echo \"udp-gso marker count $n, want 1\"; exit 1; }")
+
+    # The same bind over real loopback sockets with no seam — portable, and
+    # also built on Darwin, where it is the only test of the bind's non-Linux
+    # branch. Links the bind alone: the test stubs the two delivery targets,
+    # so no core or xquic is involved.
+    add_executable(test_bind_posix_socket tests/test_bind_posix_socket.c
+                   src/bind/posix.c src/bind/posix_offload.c src/log.c)
+    target_include_directories(test_bind_posix_socket PRIVATE src include)
+    set_target_properties(test_bind_posix_socket PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_bind_posix_socket COMMAND test_bind_posix_socket)
 
     # Kernel-backed UDP GSO/GRO round trip (issue #167): built WITHOUT
     # MQVPN_OFFLOAD_TEST_SEAM, so every syscall is the real one — this pins
     # the wrapper against the actual kernel rather than the fabricated seam
     # kernel above.
-    add_executable(test_udp_gro_kernel tests/test_udp_gro_kernel.c src/udp_offload.c)
+    add_executable(test_udp_gro_kernel tests/test_udp_gro_kernel.c src/bind/posix_offload.c)
     target_include_directories(test_udp_gro_kernel PRIVATE src include)
     set_target_properties(test_udp_gro_kernel PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_udp_gro_kernel COMMAND test_udp_gro_kernel)
@@ -966,9 +1066,9 @@ if(BUILD_TESTING)
     endif()
 
     # libmqvpn public API test (links libmqvpn + xquic)
-    add_executable(test_api tests/test_api.c)
+    add_executable(test_api tests/test_api.c tests/fake_transport.c)
     target_link_libraries(test_api mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
-    target_include_directories(test_api PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_include_directories(test_api PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
     if(MQVPN_HYBRID_TCP_LANE_BUILD)
         # Lets test_api compile the hybrid-only tests (tcp_max_flows
         # pool-bound warn); without it those #ifdef blocks are vacuous.
@@ -978,9 +1078,9 @@ if(BUILD_TESTING)
     add_test(NAME test_api COMMAND test_api)
 
     # Server API test (links libmqvpn + xquic)
-    add_executable(test_server tests/test_server.c)
+    add_executable(test_server tests/test_server.c tests/fake_transport.c)
     target_link_libraries(test_server mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
-    target_include_directories(test_server PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_include_directories(test_server PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
     target_compile_definitions(test_server PRIVATE
         TEST_CERT_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.crt"
         TEST_KEY_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.key"
@@ -999,6 +1099,15 @@ if(BUILD_TESTING)
     )
     set_target_properties(test_server PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_server COMMAND test_server)
+
+    # Portable core of the Windows certificate verifier (no Win32 headers):
+    # the host parser, SAN DER walker and identity match are unit-tested here
+    # as well as in the Windows CI job, which also tests the CryptoAPI half.
+    add_executable(test_cert_identity tests/test_cert_identity.c src/platform/windows/cert_identity.c)
+    target_include_directories(test_cert_identity PRIVATE ${CMAKE_SOURCE_DIR}/src/platform/windows)
+    target_compile_definitions(test_cert_identity PRIVATE TEST_CERT_DIR="${CMAKE_SOURCE_DIR}/tests/certs")
+    set_target_properties(test_cert_identity PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_cert_identity COMMAND test_cert_identity)
 
     # Pre-accept type-confusion DoS regression: drives a raw xquic client with
     # a bogus ALPN at the server to prove an unauthenticated pre-handshake
@@ -1021,9 +1130,9 @@ if(BUILD_TESTING)
     # real handshake, then sends a second connect-ip request on the same H3
     # connection, to prove the server rejects it (409) instead of leaking a
     # dangling sessions[] entry (xquic-dependent — needs XQUIC_INCLUDE_DIR).
-    add_executable(test_server_double_connectip tests/test_server_double_connectip.c)
+    add_executable(test_server_double_connectip tests/test_server_double_connectip.c tests/fake_transport.c)
     target_link_libraries(test_server_double_connectip mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
-    target_include_directories(test_server_double_connectip PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
+    target_include_directories(test_server_double_connectip PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${XQUIC_INCLUDE_DIR})
     target_compile_definitions(test_server_double_connectip PRIVATE
         TEST_CERT_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.crt"
         TEST_KEY_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.key"
@@ -1111,7 +1220,7 @@ if(XQUIC_BUILD_DIR)
     endif()
     install(FILES ${_XQUIC_BUILD_ABS}/libxquic.so DESTINATION lib)
 endif()
-install(FILES include/libmqvpn.h DESTINATION include)
+install(FILES include/libmqvpn.h include/mqvpn_bind_posix.h DESTINATION include)
 configure_file(systemd/mqvpn-server.service.in
     ${CMAKE_BINARY_DIR}/systemd/mqvpn-server.service @ONLY)
 configure_file(systemd/mqvpn-client@.service.in

@@ -222,7 +222,7 @@ ip netns exec "$NS_SERVER" ip link set "$VETH_A1" down
 
 # After RTM_NEWLINK with operstate=LOWERLAYERDOWN, handle_rtm_newlink
 # should call remove_path_by_index → public APIs
-# (on_platform_path_dropped + on_platform_fd_closed). Log marker:
+# (on_platform_path_dropped + on_platform_path_released). Log marker:
 #   "netlink: interface veth-a0-cf carrier lost, closing path"
 if ! wait_for_log "${WORK_DIR}/client.log" "netlink: interface ${VETH_A0}.*closing path" 15; then
     echo "=== FAIL: Carrier-loss event not handled ==="

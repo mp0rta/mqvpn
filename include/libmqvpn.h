@@ -5,10 +5,10 @@
  * libmqvpn — Multipath QUIC VPN library
  *
  * Public API header (single file).
- * Version: 0.16.2 (callback ABI version 2)
+ * Version: 0.16.3 (callback ABI version 3)
  *
  * Thread safety: All functions must be called from a single thread
- * (the "tick thread"). Debug builds assert this via MQVPN_ASSERT_TICK_THREAD.
+ * (the "tick thread"). Debug builds assert this (ASSERT_TICK_THREAD inside the library).
  */
 
 #ifndef LIBMQVPN_H
@@ -39,11 +39,11 @@ extern "C" {
 
 #define MQVPN_VERSION_MAJOR 0
 #define MQVPN_VERSION_MINOR 16
-#define MQVPN_VERSION_PATCH 2
+#define MQVPN_VERSION_PATCH 3
 
 /* ─── ABI ─── */
 
-#define MQVPN_CALLBACKS_ABI_VERSION 2
+#define MQVPN_CALLBACKS_ABI_VERSION 3
 
 /* ─── Capacity constants ─── */
 
@@ -68,6 +68,100 @@ typedef struct mqvpn_server_s mqvpn_server_t;
 typedef struct mqvpn_config_s mqvpn_config_t;
 
 typedef int64_t mqvpn_path_handle_t;
+
+/* ─── Transport contract (ABI 3) ───
+ *
+ * The library never touches an OS socket. Every path (client) and the
+ * shared listen socket (server) is reached through an ops table the
+ * platform installs. Bundled implementations: include/mqvpn_bind_posix.h
+ * (Linux/macOS/iOS/Android) and, on Windows, mqvpn_bind_winsock.h. */
+
+typedef struct {
+    const uint8_t *data;
+    size_t len;
+} mqvpn_datagram_t;
+
+enum {
+    MQVPN_TX_WOULD_BLOCK = -1, /* zero datagrams accepted; transient */
+    MQVPN_TX_FAILED = -2,      /* zero datagrams accepted; hard error */
+};
+
+/* Cumulative since ctx creation; never resets. FROZEN LAYOUT: embedded by
+ * value in mqvpn_bind_posix_stats_t, so growing it is an ABI bump. */
+typedef struct {
+    uint64_t tx_sends;     /* transport sends that accepted >= 1 datagram */
+    uint64_t tx_datagrams; /* datagrams accepted by the transport (bundled
+                            * binds: handed to the OS). Bytes are NOT reported
+                            * here — the core derives bytes_tx from the
+                            * accepted prefix itself. */
+} mqvpn_transport_stats_t;
+
+/* Callback execution contract for both client and server transport ops:
+ * libmqvpn invokes every callback synchronously on its single tick thread.
+ * A callback MUST NOT re-enter libmqvpn or block that thread. A send that
+ * cannot proceed immediately returns WOULD_BLOCK, or copies the datagram and
+ * reports it accepted; get_stats/release/release_scope return promptly. */
+
+/* Per-path transport ops (client). The library copies the recognised prefix
+ * (min(struct_size, sizeof)) at add_path time; the caller's table may be
+ * freed afterwards. `send` is required; the rest are optional (NULL). */
+typedef struct {
+    uint32_t struct_size;
+    /* Precondition n >= 1; all datagrams go to `peer`.
+     * Returns 1..n = contiguous prefix SYNCHRONOUSLY CONSUMED by the
+     * transport (partial success is a positive count even if the remainder
+     * would block), or MQVPN_TX_WOULD_BLOCK / MQVPN_TX_FAILED when nothing
+     * was accepted. 0 is a contract violation (logged once, treated as
+     * FAILED).
+     * WOULD_BLOCK recovery: the library re-offers the datagram from its own
+     * engine passes and timers (the next outbound write, inbound packets,
+     * pacing, PTO; in the worst case the keepalive/idle timer), exactly as
+     * it always handled a socket EAGAIN; ABI 3 has no "writable again"
+     * notification. Two out-of-band sends cannot express "later" at all and
+     * treat WOULD_BLOCK as a hard error: a server NAT-rebinding path
+     * challenge (lost; the next packet from the new address retries) and a
+     * server pre-accept send (requeued, not lost). A transport that can stay
+     * blocked for long (relay, bounded queue) should therefore copy and
+     * report the datagram accepted rather than return WOULD_BLOCK.
+     * Buffer lifetime: `bufs`, every `bufs[i].data` and `peer` are valid
+     * ONLY for the duration of the call. A transport that completes
+     * asynchronously MUST copy the accepted prefix before returning. */
+    int (*send)(void *ctx, const mqvpn_datagram_t *bufs, unsigned n,
+                const struct sockaddr *peer, socklen_t peer_len);
+    /* The library zero-initialises *out. MQVPN_OK = snapshot valid; any other
+     * return = nothing consumed. A failure never blocks release(). */
+    int (*get_stats)(void *ctx, mqvpn_transport_stats_t *out);
+    /* ctx destructor. NULL = the ctx needs no finalisation (NULL / static /
+     * externally owned). Must NOT close sockets — the platform owns them. */
+    void (*release)(void *ctx);
+} mqvpn_path_ops_t;
+
+/* Server: one shared transport, sends tagged with a per-connection scope so
+ * the implementation can keep per-destination sticky state (e.g. GSO
+ * fallback) with a lifetime equal to the QUIC connection. Scope 0 =
+ * transient (pre-accept / stateless reset): the transport MUST NOT create
+ * persistent state for it and release_scope(0) is never called. */
+typedef uint64_t mqvpn_server_tx_scope_t;
+
+typedef struct {
+    uint32_t struct_size;
+    /* Same send contract as mqvpn_path_ops_t::send above, scope aside:
+     * precondition n >= 1, return the contiguous prefix synchronously
+     * consumed (1..n) or MQVPN_TX_WOULD_BLOCK / MQVPN_TX_FAILED when
+     * nothing was accepted, 0 is a contract violation, WOULD_BLOCK is
+     * recovered by the library re-offering the datagram, and `bufs`,
+     * every `bufs[i].data` and `peer` are valid ONLY for the call. */
+    int (*send)(void *ctx, mqvpn_server_tx_scope_t scope, const mqvpn_datagram_t *bufs,
+                unsigned n, const struct sockaddr *peer,
+                socklen_t peer_len); /* required */
+    /* Called exactly once for every nonzero scope the library issued, during
+     * that connection's teardown — including a scope `send` was never called
+     * with, because the scope is issued when the connection is accepted.
+     * Never called with scope 0. */
+    void (*release_scope)(void *ctx, mqvpn_server_tx_scope_t scope); /* optional */
+    int (*get_stats)(void *ctx, mqvpn_transport_stats_t *out);       /* optional */
+    void (*release)(void *ctx);                                      /* optional */
+} mqvpn_server_transport_ops_t;
 
 /* ─── Error codes ─── */
 
@@ -157,15 +251,15 @@ typedef enum {
 
 /*
  * Path lifecycle:
- *   platform_attached = platform owns this path slot, fd is valid
+ *   transport_attached = platform provides I/O for this slot
  *   xquic_path_live   = xquic has a live QUIC path on this slot
  *
- *   PENDING   → add_path_fd() called, awaiting activation
+ *   PENDING   → add_path() called, awaiting activation
  *   ACTIVE    → xquic path created (validation async)
  *   DEGRADED  → transport failed, library timer retries with backoff (5s→60s, max 6)
  *   CLOSED    → retries exhausted (platform can still call reactivate_path if
- * platform_attached==1) OR explicitly removed via remove_path() (platform_attached==0, no
- * recovery)
+ * transport_attached==1) OR explicitly removed via remove_path() (transport_attached==0,
+ * no recovery)
  */
 typedef enum {
     MQVPN_PATH_PENDING = 0,
@@ -178,9 +272,9 @@ typedef enum {
 MQVPN_API const char *mqvpn_path_status_string(mqvpn_path_status_t status);
 
 /*
- * Outcome of the synchronous half of mqvpn_client_add_path_fd_with_outcome().
+ * Outcome of the synchronous half of mqvpn_client_add_path().
  *
- * After add_path_fd, the slot has been registered and (if multipath is
+ * After add_path, the slot has been registered and (if multipath is
  * already negotiated) activation has been attempted in the same call. The
  * outcome reports what that synchronous attempt produced:
  *
@@ -190,24 +284,34 @@ MQVPN_API const char *mqvpn_path_status_string(mqvpn_path_status_t status);
  *                     reports XQC_PATH_STATE_ACTIVE), OR multipath wasn't
  *                     ready yet and activation will fire from
  *                     cb_ready_to_create_path when handshake completes.
- *                     In both cases the caller should keep the fd.
+ *                     In both cases the caller keeps the transport (the ctx
+ *                     stays installed; the library releases it via
+ *                     mqvpn_client_on_platform_path_released() or destroy()).
  *
  *   TRANSIENT_FAIL  — xqc_conn_create_path returned a recoverable error
  *                     (e.g. -XQC_EMP_NO_AVAIL_PATH_ID — server hasn't
  *                     distributed CIDs yet). The library's tick recovery
- *                     loop will retry with exponential backoff. The
- *                     platform layer typically rolls back the fd here
- *                     so a fresh re-add starts from a clean state.
+ *                     loop will retry with exponential backoff. A handle
+ *                     was allocated, so the library owns the ctx: a
+ *                     platform that rolls back here must do it with
+ *                     remove_path() + on_platform_path_released(), never
+ *                     by freeing transport_ctx itself.
  *
  *   PERMANENT_FAIL  — xqc_conn_create_path returned -XQC_EMP_CREATE_PATH
- *                     (XQC_MAX_PATHS_COUNT cap hit or OOM). The slot is
- *                     marked CLOSED; recovery requires a Level-2 reconnect
- *                     that resets the path_id namespace.
+ *                     (path-id cap hit or OOM). "Permanent" describes that
+ *                     xquic return, not the slot: the slot is left in
+ *                     CLOSED_RECOVERABLE, so mqvpn_client_reactivate_path()
+ *                     accepts it and can succeed once the cause clears —
+ *                     under draft-21 the peer raises MAX_PATH_ID
+ *                     dynamically, so no reconnect may be needed. A Level-2
+ *                     reconnect, which resets the path_id namespace, is the
+ *                     fallback for when it does not.
  *
- * The legacy add_path_fd() always succeeds at the handle layer (returning
- * the handle) and silently swallows TRANSIENT_FAIL / PERMANENT_FAIL; the
- * caller has to poll status via mqvpn_client_get_paths to discover them.
- * The with_outcome variant exists because that poll loses information:
+ * mqvpn_client_add_path()'s `outcome` parameter is optional. Passing NULL
+ * leaves only the handle-layer result: the handle is still returned, but
+ * TRANSIENT_FAIL / PERMANENT_FAIL stay invisible until the caller polls
+ * status via mqvpn_client_get_paths to discover them. A non-NULL outcome
+ * exists because that poll loses information:
  * PR3's PATH_LC_VALIDATING and PATH_LC_CREATE_WAIT both project to
  * MQVPN_PATH_PENDING, so status alone cannot tell sync success from
  * sync transient failure. Platform recovery (RTM_NEWLINK after a
@@ -238,7 +342,7 @@ typedef enum {
  *
  * Future: `platform_net_id` (Android Network handle) is intentionally NOT
  * included now. Android path management uses existing
- * `mqvpn_client_add_path_fd` / `mqvpn_client_remove_path` per spec sec 3.4 /
+ * `mqvpn_client_add_path` / `mqvpn_client_remove_path` per spec sec 3.4 /
  * sec 10.2, so this struct's caller is currently Linux-only.
  *
  * Caller may pass NULL info to mqvpn_client_on_platform_path_dropped() for
@@ -324,9 +428,12 @@ typedef struct {
      * it is exactly 1.0 by construction.
      *
      * There is deliberately no receive-side pair here: RX offload (UDP GRO)
-     * is set up and un-coalesced entirely in the platform layer, which the
-     * library never sees — the server's control API reports those counters
-     * from the platform instead (see ctrl_socket_create). */
+     * is set up and un-coalesced by the bundled transport (mqvpn_bind_posix)
+     * — inside this library's .so, but outside the sans-I/O core, which only
+     * ever sees one datagram at a time because every receive arrives through
+     * mqvpn_client_on_socket_recv() / mqvpn_server_on_socket_recv(). The
+     * platform harvests those counters from the bind, and the server's
+     * control API reports them from there (see ctrl_socket_create). */
     uint64_t udp_tx_sends;
     uint64_t udp_tx_datagrams;
 } mqvpn_stats_t;
@@ -376,7 +483,6 @@ typedef struct {
 
 typedef struct {
     uint32_t struct_size;
-    int fd;                  /* UDP socket fd (-1 = ops path) */
     char iface[16];          /* interface name (optional) */
     uint8_t local_addr[128]; /* sockaddr storage */
     uint32_t local_addr_len;
@@ -390,10 +496,6 @@ typedef void (*mqvpn_tun_output_fn)(const uint8_t *pkt, size_t len, void *user_c
 
 typedef void (*mqvpn_tunnel_config_ready_fn)(const mqvpn_tunnel_info_t *info,
                                              void *user_ctx);
-
-typedef void (*mqvpn_send_packet_fn)(mqvpn_path_handle_t path, const uint8_t *pkt,
-                                     size_t len, const struct sockaddr *peer,
-                                     socklen_t peer_len, void *user_ctx);
 
 /* May be invoked synchronously from inside the TLS handshake (certificate
  * rejected by the platform verifier) on the thread that drives tick(); the
@@ -412,12 +514,12 @@ typedef void (*mqvpn_state_changed_fn)(mqvpn_client_state_t old_state,
  * source of truth for a handle's lifecycle.
  *
  * RE-ENTRANCY CONTRACT: this callback MAY be invoked synchronously from
- * inside `mqvpn_client_add_path_fd()`, `mqvpn_client_remove_path()`,
+ * inside `mqvpn_client_add_path()`, `mqvpn_client_remove_path()`,
  * `mqvpn_client_drop_path()` and `mqvpn_client_reactivate_path()` —
- * i.e. the event can fire BEFORE the call returns, and for `add_path_fd`
+ * i.e. the event can fire BEFORE the call returns, and for `add_path`
  * even before the caller receives the handle. Callers that store
  * handle → observer mappings must therefore either (a) ignore events
- * for handles they have not yet recorded (works for `add_path_fd`),
+ * for handles they have not yet recorded (works for `add_path`),
  * or (b) snapshot status via `mqvpn_client_get_paths()` after the call
  * returns (works for all four entry points). */
 typedef void (*mqvpn_path_event_fn)(mqvpn_path_handle_t path, mqvpn_path_status_t status,
@@ -436,7 +538,6 @@ typedef struct {
     /* REQUIRED */
     mqvpn_tun_output_fn tun_output;
     mqvpn_tunnel_config_ready_fn tunnel_config_ready;
-    mqvpn_send_packet_fn send_packet; /* NULL = fd-only mode */
 
     /* RECOMMENDED */
     mqvpn_tunnel_closed_fn tunnel_closed;
@@ -470,7 +571,6 @@ typedef struct {
 
     mqvpn_tun_output_fn tun_output;                   /* REQUIRED */
     mqvpn_tunnel_config_ready_fn tunnel_config_ready; /* REQUIRED */
-    mqvpn_send_packet_fn send_packet;                 /* NULL = fd-only mode */
 
     mqvpn_log_fn log;
     void (*on_client_connected)(const mqvpn_tunnel_info_t *info, uint32_t session_id,
@@ -482,8 +582,10 @@ typedef struct {
      * struct_size growth; OPTIONAL — NULL disables
      * tcp_egress; connect-tcp-style requests get 503 if unset). The core
      * (src/hybrid/tcp_egress.c) owns every egress fd's socket()/connect()/
-     * send()/recv()/close() syscalls directly — same "fd-path mode"
-     * convention the client's UDP path fds already use. These two
+     * send()/recv()/close() syscalls directly — a deliberate exception to
+     * the ABI 3 transport-ops split: the client's UDP paths and the
+     * server's UDP socket now go through mqvpn_path_ops_t /
+     * mqvpn_server_transport_ops_t instead. These two
      * callbacks only ask the platform to (un)register interest in an
      * ALREADY-OPEN fd with its reactor. want_read/want_write may be
      * updated on an already-registered fd (egress_fd_register is called
@@ -695,9 +797,10 @@ MQVPN_API mqvpn_client_t *mqvpn_client_new(const mqvpn_config_t *cfg,
  * tunnel_closed — never reconnect_scheduled) from inside the call: with the
  * batched send path engaged it first flushes datagrams already accepted by
  * mqvpn_client_on_tun_packet, and that engine pass can close the
- * connection. Callback-owned resources must therefore stay valid until
- * this returns, and nothing — including those callbacks — may use the
- * handle afterwards. */
+ * connection. Callback-owned resources — and every still-attached path's
+ * transport_ctx, released via ops.release() as part of this call — must
+ * therefore stay valid until this returns, and nothing — including those
+ * callbacks — may use the handle afterwards. */
 MQVPN_API void mqvpn_client_destroy(mqvpn_client_t *client);
 
 /* Start (or, from RECONNECTING, immediately restart) the connection.
@@ -714,33 +817,35 @@ MQVPN_API void mqvpn_client_destroy(mqvpn_client_t *client);
 MQVPN_API int mqvpn_client_connect(mqvpn_client_t *client);
 MQVPN_API int mqvpn_client_disconnect(mqvpn_client_t *client);
 
-MQVPN_API mqvpn_path_handle_t mqvpn_client_add_path_fd(mqvpn_client_t *client, int fd,
-                                                       const mqvpn_path_desc_t *desc);
-
 /*
- * Same as mqvpn_client_add_path_fd() but reports the outcome of the
- * synchronous activation attempt via *outcome. See mqvpn_add_path_outcome_t
- * for the three outcomes. If `outcome` is NULL, behaves identically to
- * mqvpn_client_add_path_fd().
+ * Register a path whose I/O is provided by `ops` + `transport_ctx`.
  *
- * Returns the path handle (>= 0) on success, or -1 if the slot table is
- * full / args are invalid (in which case *outcome is not written).
+ * desc (nullable): read field by field under its own `struct_size`, so a
+ *   caller built against an older header is safe. `local_addr_len` must not
+ *   exceed `local_addr` or the library's `sockaddr_storage`; an oversized
+ *   length is rejected before any slot is touched.
+ * ops: copied (min(ops->struct_size, sizeof)); `send` required.
+ * transport_ctx: opaque payload handed to every ops call. NULL is legal.
+ *   On SUCCESS the library owns finalisation: ops.release(ctx) is called
+ *   exactly once, on mqvpn_client_on_platform_path_released() or on
+ *   mqvpn_client_destroy(). On FAILURE (-1) ownership stays with the caller
+ *   and release is never called.
+ * outcome (nullable): written only when a handle was allocated; reports the
+ *   synchronous activation attempt (see mqvpn_add_path_outcome_t).
  *
- * Use this in platform recovery paths (RTM_NEWLINK / NotifyUnicastIpAddress
- * Change / NWPathMonitor) where the caller needs to distinguish:
- *   - sync activation succeeded → keep the fd
- *   - sync transient failure → close fd, let the recovery timer retry
- *   - permanent failure (xqc path budget exhausted) → give up on this conn
+ * Returns the handle (>= 0), or -1 on invalid arguments (client/ops NULL,
+ * struct_size not covering `send`, send NULL, oversized desc->local_addr_len)
+ * or a full slot table. Only slots whose previous transport has been fully
+ * released are reused; a dropped-but-not-yet-released slot is never recycled.
  *
- * Because PATH_LC_VALIDATING (xqc path created, async validation pending)
- * and PATH_LC_CREATE_WAIT (sync activate failed transiently) both project
- * to MQVPN_PATH_PENDING in the public 5-state status, querying status
- * via mqvpn_client_get_paths after add_path_fd cannot make this
- * distinction — this API does.
+ * RE-ENTRANCY: path_event may fire before this returns (see
+ * mqvpn_path_event_fn). Thread safety: tick thread only.
  */
-MQVPN_API mqvpn_path_handle_t mqvpn_client_add_path_fd_with_outcome(
-    mqvpn_client_t *client, int fd, const mqvpn_path_desc_t *desc,
-    mqvpn_add_path_outcome_t *outcome);
+MQVPN_API mqvpn_path_handle_t mqvpn_client_add_path(mqvpn_client_t *client,
+                                                    const mqvpn_path_desc_t *desc,
+                                                    const mqvpn_path_ops_t *ops,
+                                                    void *transport_ctx,
+                                                    mqvpn_add_path_outcome_t *outcome);
 
 MQVPN_API int mqvpn_client_remove_path(mqvpn_client_t *client, mqvpn_path_handle_t path);
 
@@ -748,20 +853,21 @@ MQVPN_API int mqvpn_client_remove_path(mqvpn_client_t *client, mqvpn_path_handle
  * Drop a path slot on platform-detected removal (carrier loss, RTM_DELLINK,
  * address loss). Moves the slot to the CLOSED_DROPPED cleanup state and emits
  * a non-blocking PATH_ABANDON so xquic releases the dead path's CID/path_id
- * slot for reuse (draft-21); this does not stall surviving paths. The fd is
- * assumed already dead: close it and call mqvpn_client_on_platform_fd_closed()
- * to drive the lazy cleanup to completion (CLOSED_FREE), after which the slot
- * is reusable by add_path_fd().
+ * slot for reuse (draft-21); this does not stall surviving paths. The
+ * transport is assumed already dead. The platform must then stop its
+ * I/O (unregister the reactor, close the native socket) and call
+ * mqvpn_client_on_platform_path_released() to let the lazy cleanup reach
+ * CLOSED_FREE, after which the slot is reusable by add_path().
  */
 MQVPN_API int mqvpn_client_drop_path(mqvpn_client_t *client, mqvpn_path_handle_t path);
 
 /*
- * Platform reports that a path is no longer reachable via its current fd
+ * Platform reports that a path is no longer reachable via its current transport
  * (carrier loss, RTM_DELLINK, NotifyIpInterfaceChange ifDown, etc).
  *
  * Library transitions the slot to PATH_CLOSED_DROPPED (via EVENT_PLATFORM_DROP).
- * The fd is left for the platform to close; call
- * mqvpn_client_on_platform_fd_closed() after close() to drive the lazy
+ * The platform must stop its I/O, close the native socket and call
+ * mqvpn_client_on_platform_path_released() to drive the lazy
  * CLOSED_DROPPED -> CLOSED_FREE cleanup.
  *
  * info may be NULL - in that case behaves identically to
@@ -773,26 +879,24 @@ mqvpn_client_on_platform_path_dropped(mqvpn_client_t *client, mqvpn_path_handle_
                                       const mqvpn_platform_path_event_info_t *info);
 
 /*
- * Platform reports that the fd for the given path has been closed.
+ * Platform has stopped all I/O for the path (reactor unregistered, reader
+ * stopped, native socket closed). The library harvests ops.get_stats, calls
+ * ops.release(ctx) exactly once and re-evaluates the CLOSED_DROPPED →
+ * CLOSED_FREE gate.
  *
- * Library sets p->fd = -1 and re-evaluates the CLOSED_DROPPED ->
- * CLOSED_FREE cleanup completion.
- *
- * Returns:
- *   MQVPN_OK              - handle found; FSM dispatched. Late-arrival on
- *                           a slot already past CLOSED_DROPPED is treated
- *                           as a benign race (LOG_D + no state change).
- *   MQVPN_ERR_INVALID_ARG - client is NULL, or handle is unknown to the
- *                           library (caller bug: handle freed and reused,
- *                           or never registered).
- *
- * Call this AFTER mqvpn_client_on_platform_path_dropped() (or the legacy
- * mqvpn_client_drop_path()), AFTER your close(fd). */
-MQVPN_API int mqvpn_client_on_platform_fd_closed(mqvpn_client_t *client,
-                                                 mqvpn_path_handle_t handle);
+ * Accepted only after drop_path()/remove_path() (slot in CLOSED_DROPPED):
+ *   unknown or recycled handle           → MQVPN_ERR_INVALID_ARG
+ *   CLOSED_DROPPED, not yet released     → OK (finalises the ctx)
+ *   already released / CLOSED_FREE       → OK, no-op (late duplicate)
+ *   any other lifecycle state            → MQVPN_ERR_INVALID_STATE, ctx untouched
+ * Never call this after mqvpn_client_destroy(); destroy finalises every
+ * still-attached ctx itself. Thread safety: tick thread only.
+ */
+MQVPN_API int mqvpn_client_on_platform_path_released(mqvpn_client_t *client,
+                                                     mqvpn_path_handle_t path);
 
 /*
- * Re-activate a DEGRADED or CLOSED path using the existing fd.
+ * Re-activate a DEGRADED or CLOSED path using the existing transport.
  * Called by the platform layer when it detects the path is viable again
  * (e.g., netlink RTM_NEWADDR on Linux, NotifyUnicastIpAddressChange on
  * Windows keyed by NET_LUID, NWPathMonitor on macOS for Wi-Fi/Ethernet flap).
@@ -801,10 +905,10 @@ MQVPN_API int mqvpn_client_on_platform_fd_closed(mqvpn_client_t *client,
  * and deliver a fresh handle on recovery (Android ConnectivityManager Network,
  * iOS NEPacketTunnelProvider where socket-to-interface bindings are invalidated
  * when the underlying interface re-attaches, e.g. cellular handoff). Those
- * platforms should call remove_path() + a new add_path_fd() with a fresh fd
+ * platforms should call remove_path() + a new add_path() with a fresh transport
  * instead.
  *
- * Preconditions: !xquic_path_live && platform_attached && (DEGRADED || CLOSED).
+ * Preconditions: !xquic_path_live && transport_attached && (DEGRADED || CLOSED).
  * On success: xquic creates a new path (validation is async). The library
  * recovery timer is cancelled. Retry counter resets after 30s stability.
  *
@@ -863,11 +967,30 @@ MQVPN_API mqvpn_server_t *mqvpn_server_new(const mqvpn_config_t *cfg,
 /* Destroy the server. Same callback contract as mqvpn_client_destroy: the
  * deferred-flush pass and engine teardown can still invoke callbacks
  * (tun_output, egress fd unregister, log), so callback-owned resources —
- * the TUN, the UDP socket, the egress registry — must stay valid until
- * this returns. */
+ * the TUN, the installed transport (and the socket it borrows), the
+ * egress registry — must stay valid until this returns. */
 MQVPN_API void mqvpn_server_destroy(mqvpn_server_t *server);
 
-MQVPN_API int mqvpn_server_set_socket_fd(mqvpn_server_t *server, int fd,
+/*
+ * Install the server's shared transport. Accepted exactly once, before
+ * mqvpn_server_start(); a second call, or a call while the server is running,
+ * returns
+ * MQVPN_ERR_INVALID_STATE and leaves both the installed and the offered ctx
+ * untouched (the offered ctx stays caller-owned). On MQVPN_OK the library
+ * owns finalisation: ops.release(ctx) runs inside mqvpn_server_destroy()
+ * after every connection's release_scope. Starting without a transport is
+ * legal but irreversible: mqvpn_server_start() also closes the install
+ * window, so every send fails with a hard error for the rest of the
+ * server's life.
+ * Returns MQVPN_ERR_INVALID_ARG (server/ops NULL, struct_size not covering
+ * `send`, send NULL, or a non-NULL local_addr whose local_addrlen exceeds
+ * the library's sockaddr_storage) without touching the offered ctx.
+ * local_addr (nullable) is the bound address reported to xquic;
+ * local_addrlen is ignored when it is NULL.
+ */
+MQVPN_API int mqvpn_server_set_transport(mqvpn_server_t *server,
+                                         const mqvpn_server_transport_ops_t *ops,
+                                         void *transport_ctx,
                                          const struct sockaddr *local_addr,
                                          socklen_t local_addrlen);
 MQVPN_API int mqvpn_server_start(mqvpn_server_t *server);

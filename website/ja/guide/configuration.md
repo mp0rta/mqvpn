@@ -131,7 +131,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 |------|------|-----------|
 | `Address` | サーバーアドレス（`HOST:PORT`、IPv6 は `[2001:db8::1]:443` 形式） | 必須 |
 | `ServerName` | TLS SNI および証明書検証名。IP 直接接続でドメイン証明書を検証する場合に使用 | Address のホスト部 |
-| `Insecure` | TLS 証明書検証を省略する (自己署名のテスト構成のみ)。`false` ではシステムのストア (`/etc/ssl`。`SSL_CERT_FILE` / `SSL_CERT_DIR` で上書き可) で検証する。IP アドレスで接続する場合は `ServerName` に証明書の DNS 名を設定する。Android では端末の CA ストアとアプリの network security config で検証する。証明書が一致すべき名前は `tlsServerName` (`ServerName` の SDK 版) で、ブラケットなしのホスト名か IP リテラルを指定する。 | `false` |
+| `Insecure` | TLS 証明書検証を省略する (自己署名のテスト構成のみ)。`false` ではシステムのストア (`/etc/ssl`。`SSL_CERT_FILE` / `SSL_CERT_DIR` で上書き可) で検証する。Linux/macOS (および custom trust path を使う Windows) では IP アドレス接続時に `ServerName` へ証明書の DNS 名を設定する。Windows の証明書ストアで検証する場合は IP literal が `iPAddress` SAN と直接照合される。Windows では Windows の証明書ストアで検証する。`SSL_CERT_FILE` (PEM バンドル) または `SSL_CERT_DIR` (ハッシュ化した証明書ディレクトリ) が設定されていれば、Linux と同様にそちらを使う。Android では端末の CA ストアとアプリの network security config で検証する。証明書が一致すべき名前は `tlsServerName` (`ServerName` の SDK 版) で、ブラケットなしのホスト名か IP リテラルを指定する。 | `false` |
 
 ### `[Interface]`
 
@@ -143,11 +143,17 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `TunName` | TUN デバイス名 | `mqvpn0` |
 | `DNS` | DNS サーバー（カンマ区切り） | — |
 | `LogLevel` | ログレベル（`debug`、`info`、`warn`、`error`） | `info` |
-| `KillSwitch` | VPN 外への通信を遮断（クライアントのみ） | `false` |
+| `KillSwitch` | VPN 外への通信を遮断（クライアントのみ）。特定のネットワークアダプタに bind するアプリケーションがトンネルを迂回するのも防ぐ | `false` |
 | `Reconnect` | 自動再接続を有効化（クライアントのみ） | `true` |
 | `ReconnectInterval` | 再接続の間隔（秒） | `5` |
-| `ManageRoutes` | ホストのルーティングテーブルを管理する（VPN ルートとサーバー pin ルート）。自前でルーティングを管理する場合は `false`（または `--no-manage-routes`）を指定 | `true` |
+| `ManageRoutes` | ホストのルーティングテーブルを管理する（VPN ルートとサーバー pin ルート）。自前でルーティングを管理する場合は `false`（または `--no-manage-routes`）を指定。経路の設定だけでは、ソケットを特定のアダプタに bind するアプリケーションは止められない — 下の注記を参照 | `true` |
 | `MTU` | TUN MTU（1280–9000）。クライアント: 上限指定 — ネゴシエーション値のほうが小さい場合はそちらが使われる。サーバー: TUN MTU を直接設定。 | auto（クライアント ~1382 ネゴシエーション、サーバー 1382） |
+
+> **注記: 経路管理はアダプタに bind するアプリケーションをカバーしない**
+>
+> mqvpn はシステムのデフォルトルートを置き換えるのではなく、split default ルート（`0.0.0.0/1` + `128.0.0.0/1`）を追加します。元のデフォルトルートはそのまま残るため、宛先への経路ではなく*システムのデフォルトルート*を見てネットワークアダプタを選ぶアプリケーションは、物理アダプタを使い続けてトンネルを迂回します。Windows 版の Tailscale は自身のソケットに対してこの方式を取ります。
+>
+> これは `ManageRoutes` とは独立した挙動です。こうしたアプリケーションを止めるには `KillSwitch = true` を設定してください。その場合、**トンネル経由になるのではなく遮断される**点に注意してください。
 
 ### `[TLS]`（サーバーのみ）
 

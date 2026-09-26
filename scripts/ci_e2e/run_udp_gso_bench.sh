@@ -5,12 +5,13 @@
 # CPU cost, receive-side counters, and latency
 #
 # Measures the win (or lack of one) from `udp_gso` (Linux TX UDP GSO /
-# batched-send registration — see src/udp_offload.{c,h}, wired in
-# init_xquic_engine() in mqvpn_client.c / mqvpn_server.c) and `udp_gro`
-# (Linux RX UDP GRO / recvmsg-based coalesced-datagram splitting — see
-# mqvpn_udp_gro_enable(), wired in the client's path-registration loop and
-# the server's svr_create_udp_socket() in src/platform/linux/platform_linux.c) on
-# the SAME binary, so every comparison is purely a runtime UdpGso/UdpGro
+# batched-send registration — see src/bind/posix_offload.{c,h}; the batch
+# callback is registered by init_xquic_engine() in mqvpn_client.c and by
+# mqvpn_server_new() in mqvpn_server.c) and `udp_gro` (Linux RX UDP GRO /
+# recvmsg-based coalesced-datagram splitting — see mqvpn_udp_gro_enable(),
+# called from mqvpn_bind_posix_path_new() / mqvpn_bind_posix_server_new()
+# in src/bind/posix.c) on the SAME binary, so every comparison is purely a
+# runtime UdpGso/UdpGro
 # toggle and never a rebuild artifact (G20 — see mqvpn-dev-gates skill:
 # compiler/flag drift between arms has produced false conclusions before).
 # The binary path and its sha256 are recorded in the output header for
@@ -36,9 +37,10 @@
 # All four arms pass -C to BOTH endpoints (empty extra_flags for arm A).
 # Per run we also grep both endpoints' logs for the "udp-gso: " AND
 # "udp-gro: " markers (pinned wording: the MQVPN_UDP_GSO_MARKER_* strings
-# in mqvpn_conn_settings.h, platform_linux.c's mqvpn_udp_gro_enable() call
-# sites, and run_udp_gso_config_test.sh's header comment) so the printed
-# table proves which code path actually ran in each row for BOTH knobs,
+# in src/bind/posix_offload.h, platform_linux.c's udp-gro logging beside
+# each mqvpn_bind_posix_*_new() call, and run_udp_gso_config_test.sh's
+# header comment) so the printed table proves which code path actually ran
+# in each row for BOTH knobs,
 # not just which flags were passed.
 #
 # Per run:
@@ -678,9 +680,10 @@ run_one() {
     fi
 
     # udp-gso: / udp-gro: marker checks. Wording pinned by the
-    # MQVPN_UDP_GSO_MARKER_* strings in mqvpn_conn_settings.h (udp-gso) and
-    # platform_linux.c's mqvpn_udp_gro_enable() call sites (udp-gro), and
-    # by run_udp_gso_config_test.sh; keep all in sync if either ever
+    # MQVPN_UDP_GSO_MARKER_* strings in src/bind/posix_offload.h (udp-gso)
+    # and platform_linux.c's udp-gro logging beside each
+    # mqvpn_bind_posix_*_new() call (udp-gro), and by
+    # run_udp_gso_config_test.sh; keep all in sync if either ever
     # changes. check_offload_marker is called directly (not via `x=$(...)`)
     # so its MARKER_FAIL=1 assignment isn't lost in a subshell.
     local gso_state gro_state

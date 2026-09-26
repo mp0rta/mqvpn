@@ -136,7 +136,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 |-----|-------------|---------|
 | `Address` | Server address (`HOST:PORT`, e.g. `[2001:db8::1]:443` for IPv6) | Required |
 | `ServerName` | TLS SNI and certificate verification name. Use when connecting by IP but verifying against a domain certificate | Address host |
-| `Insecure` | Skip TLS certificate verification (self-signed test setups only). With `false` the certificate is verified against the system store (`/etc/ssl`; override with `SSL_CERT_FILE` / `SSL_CERT_DIR`); when connecting by IP address, set `ServerName` to the certificate's DNS name. On Android the certificate is verified against the device's CA store and the app's network security config; `tlsServerName` (the SDK counterpart of `ServerName`) is the name it must match, and it must be a bare host name or IP literal (no brackets). | `false` |
+| `Insecure` | Skip TLS certificate verification (self-signed test setups only). With `false` the certificate is verified against the system store (`/etc/ssl`; override with `SSL_CERT_FILE` / `SSL_CERT_DIR`); on Linux/macOS (and on Windows with a custom trust path), when connecting by IP address set `ServerName` to the certificate's DNS name; with the Windows certificate store an IP literal matches an `iPAddress` SAN directly. On Windows the certificate is verified against the Windows certificate stores; if `SSL_CERT_FILE` (a PEM bundle) or `SSL_CERT_DIR` (a hashed certificate directory) is set, that custom trust path is used instead, as on Linux. On Android the certificate is verified against the device's CA store and the app's network security config; `tlsServerName` (the SDK counterpart of `ServerName`) is the name it must match, and it must be a bare host name or IP literal (no brackets). | `false` |
 
 ### `[Interface]`
 
@@ -148,11 +148,17 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `TunName` | TUN device name | `mqvpn0` |
 | `DNS` | DNS servers (comma-separated) | — |
 | `LogLevel` | Log level (`debug`, `info`, `warn`, `error`) | `info` |
-| `KillSwitch` | Block traffic outside the VPN tunnel (client only) | `false` |
+| `KillSwitch` | Block traffic outside the VPN tunnel (client only). Also stops applications that bind to a specific network adapter from bypassing the tunnel. | `false` |
 | `Reconnect` | Enable automatic reconnection (client only) | `true` |
 | `ReconnectInterval` | Seconds between reconnection attempts | `5` |
-| `ManageRoutes` | Manage the host routing table (VPN routes and server pin route). Set to `false` (or pass `--no-manage-routes`) to handle routing yourself | `true` |
+| `ManageRoutes` | Manage the host routing table (VPN routes and server pin route). Set to `false` (or pass `--no-manage-routes`) to handle routing yourself. Routing alone does not stop applications that bind their sockets to a specific adapter — see the note below. | `true` |
 | `MTU` | TUN MTU (1280–9000). Client: cap — if the negotiated MTU is lower, the negotiated value is used. Server: sets the TUN MTU directly. | auto (client ~1382 negotiated, server 1382) |
+
+> **Note: route management does not cover interface-bound applications**
+>
+> mqvpn adds a split default route (`0.0.0.0/1` + `128.0.0.0/1`) instead of replacing the system default route, so the original default route stays in place. Applications that pick a network adapter by looking up the *system default route* — rather than the route to the destination — keep using the physical adapter and bypass the tunnel. Tailscale on Windows does this for its own sockets.
+>
+> This is independent of `ManageRoutes`. To stop such applications, set `KillSwitch = true`. Note that they are then **blocked outright rather than routed through the tunnel**.
 
 ### `[TLS]` (server only)
 

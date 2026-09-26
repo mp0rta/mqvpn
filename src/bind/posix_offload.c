@@ -4,7 +4,7 @@
 #define _GNU_SOURCE    /* glibc gates sendmmsg/struct mmsghdr behind    \
                           _GNU_SOURCE, and no build target here defines \
                           it. Must precede every #include. */
-#include "udp_offload.h"
+#include "bind/posix_offload.h"
 #if defined(__linux__)
 /* All implementation, includes included, stays inside this __linux__
  * block: netinet/udp.h etc. do not exist on Windows/macOS, and the
@@ -25,8 +25,8 @@
 #  endif
 
 #  ifdef MQVPN_OFFLOAD_TEST_SEAM
-/* Fault-injection seam for unit tests: prototypes live in udp_offload.h
- * (tests/test_udp_offload.c defines these symbols; the header declaration
+/* Fault-injection seam for unit tests: prototypes live in posix_offload.h
+ * (tests/test_bind_posix_offload.c defines these symbols; the header declaration
  * makes those definitions compiler-checked against this mapping). */
 #    define OFFLOAD_SENDMSG  mqvpn_seam_sendmsg
 #    define OFFLOAD_SENDMMSG mqvpn_seam_sendmmsg
@@ -124,7 +124,7 @@ send_one_run(int fd, const struct iovec *iov, size_t run, uint16_t seg,
 /* Sends the whole batch via one sendmmsg() call (non-GSO fallback / GSO
  * disabled path). cnt is capped at MQVPN_OFFLOAD_MAX_BATCH (== 32 ==
  * XQC_MAX_SEND_MSG_ONCE) — see the forward-compat invariant on
- * mqvpn_udp_send_batch() in udp_offload.h. */
+ * mqvpn_udp_send_batch() in posix_offload.h. */
 static ssize_t
 send_batch_mmsg(int fd, const struct iovec *iov, unsigned int cnt,
                 const struct sockaddr *peer, socklen_t peerlen, mqvpn_tx_counters_t *tx)

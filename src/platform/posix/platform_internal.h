@@ -13,6 +13,7 @@
 #define MQVPN_PLATFORM_INTERNAL_H
 
 #include "libmqvpn.h"
+#include "mqvpn_bind_posix.h"
 #include "tun.h"
 #include "dns.h"
 #include "path_mgr.h"
@@ -38,6 +39,14 @@ typedef struct {
     mqvpn_path_mgr_t path_mgr;
     mqvpn_path_handle_t lib_path_handles[MQVPN_MAX_PATHS];
     struct event *ev_udp[MQVPN_MAX_PATHS];
+
+    /* Bundled transport ctx per path slot (mqvpn_bind_posix). Borrows
+     * path_mgr.paths[i].fd; the library owns finalisation once add_path
+     * succeeded, so this pointer is only a handle for RX helpers, stats
+     * harvest and GRO reporting. Set when add_path succeeds; NULL once the
+     * library has finalised the ctx (path_released returned OK, or
+     * client_destroy); a refused release keeps it (still library-owned). */
+    void *bind_ctx[MQVPN_MAX_PATHS];
 
     /* Per-slot consecutive re-add failure counter. Pure backpressure,
      * NOT a state mirror — lifecycle state is queried via
@@ -66,16 +75,21 @@ typedef struct {
      * reproduce startup behavior on the fresh fd it creates. Linux-only:
      * GRO is a Linux sockopt and Darwin would carry a dead field. */
     int udp_gro;
-    /* Receive-side offload telemetry, written by on_socket_read and read once
-     * at teardown. The sockopt log proves GRO was requested; only
-     * gro_datagrams > gro_receives proves the kernel actually coalesced. */
-    uint64_t gro_receives;  /* recvmsg calls whose data was DELIVERED —
+    int udp_gso; /* [Advanced] UdpGso policy, reproduced on re-add */
+#endif
+    /* Receive-side telemetry: cumulative PLATFORM totals. The bind counts per
+     * transport ctx on every POSIX platform and those counters die with the
+     * ctx, so the release sites (netmon_common.c) and, on Linux, the teardown harvest
+     * fold each ctx's totals in here — while the bind keeps the per-ctx
+     * originals. Only Linux prints them, in the udp-rx line: the sockopt log
+     * proves GRO was requested, only gro_datagrams > gro_receives proves the
+     * kernel actually coalesced. Darwin accumulates only what the release sites
+     * add and reports nothing. */
+    uint64_t gro_receives;  /* receives whose data was DELIVERED —
                              * truncated-dropped and drained-but-undelivered
                              * receives count toward neither counter, so the
-                             * datagrams/receives factor cannot dip below
-                             * 1.0 (see drain_udp_rx) */
+                             * datagrams/receives factor cannot dip below 1.0 */
     uint64_t gro_datagrams; /* datagrams delivered to the library */
-#endif
     char orig_gateway[INET6_ADDRSTRLEN];
     char orig_iface[IFNAMSIZ];
     char server_ip_str[INET6_ADDRSTRLEN];
@@ -115,6 +129,15 @@ typedef struct {
  * netlink_mon.c (Linux) / route_mon.c (Darwin) */
 void on_socket_read(evutil_socket_t fd, short what, void *arg);
 void schedule_next_tick(platform_ctx_t *p);
+
+/* netmon_common.c — a slot's bind RX counters (cumulative since ctx
+ * creation). Must run BEFORE the ctx is finalised (on_platform_path_released
+ * / client_destroy); the accessor is invalid afterwards. Callers add the
+ * values to the gro_* totals only once the ctx is definitely gone (released()
+ * returned OK, or at teardown), so a ctx that outlives a refused release is
+ * never counted twice. */
+void platform_read_rx_stats(const platform_ctx_t *p, int slot, uint64_t *receives,
+                            uint64_t *datagrams);
 
 /* routing.c */
 int setup_routes(platform_ctx_t *p);
