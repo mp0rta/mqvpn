@@ -21,6 +21,7 @@ swiftc -framework Security -o "$OUT" \
     "$SHARED/TunnelSessionCoordinator.swift" \
     "$SHARED/TeardownSequence.swift" \
     "$SHARED/SystemTrust.swift" \
+    "$SHARED/PathReadSource.swift" \
     "$APP/ReorderIngest.swift" \
     "$APP/EventLog.swift" \
     "$DIR/main.swift"

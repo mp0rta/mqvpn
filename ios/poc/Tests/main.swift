@@ -2,6 +2,9 @@
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 import Foundation
 
+// Unbuffered: a trap must not discard buffered FAIL: lines on CI's piped stdout.
+setvbuf(stdout, nil, _IONBF, 0)
+
 var failures = 0
 func check(_ cond: Bool, _ msg: String) { if !cond { failures += 1; print("FAIL: \(msg)") } }
 
@@ -347,5 +350,133 @@ let elReal = EventLog()
 elReal.ingest(evSnap([("en0", 1)]), now: t0)
 elReal.ingest(evSnap([("en0", 2)]), now: t0)
 check(countStatus(elReal) == 1, "genuine active->degraded transition still logged")
+
+// ── PathReadSource (the read-source chain) ─────────────────────────────────────────
+// A loopback UDP socket, a fake hop that queues closures for the "tick
+// thread" (this thread) and runs or refuses them on demand.
+do {
+    func udpSocket() -> (fd: Int32, addr: sockaddr_in) {
+        let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        check(fd >= 0, "socket()")
+        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK)
+        var a = sockaddr_in()
+        a.sin_family = sa_family_t(AF_INET)
+        a.sin_addr.s_addr = CFSwapInt32HostToBig(INADDR_LOOPBACK)
+        a.sin_port = 0
+        var bound = a
+        let rc = withUnsafePointer(to: &bound) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+        }
+        check(rc == 0, "bind()")
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &bound) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) }
+        }
+        return (fd, bound)
+    }
+    func sendDatagrams(_ n: Int, from: Int32, to: sockaddr_in) {
+        var dst = to
+        var byte: UInt8 = 0x5a
+        for _ in 0..<n {
+            let rc = withUnsafePointer(to: &dst) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sendto(from, &byte, 1, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+            }
+            check(rc == 1, "sendto()")
+        }
+    }
+    func drainAll(_ fd: Int32) -> Int {
+        var n = 0
+        var buf = [UInt8](repeating: 0, count: 64)
+        while recv(fd, &buf, buf.count, 0) > 0 { n += 1 }
+        return n
+    }
+    /// Wait until `cond` holds (polling; the sources run on their own queue).
+    func waitFor(_ what: String, _ cond: () -> Bool) {
+        for _ in 0..<200 { if cond() { return }; usleep(10_000) }
+        check(false, "timeout waiting for \(what)")
+    }
+    let queue = DispatchQueue(label: "test.pathmon")
+    let lock = NSLock()
+    var pending: [() -> Void] = []          // hops not yet run ("tick thread" queue)
+    var refuseNext = false
+    var refused = 0
+    let hop: (@escaping () -> Void) -> Bool = { c in
+        lock.lock(); defer { lock.unlock() }
+        if refuseNext { refuseNext = false; refused += 1; return false }
+        pending.append(c); return true
+    }
+    func pendingCount() -> Int { lock.lock(); defer { lock.unlock() }; return pending.count }
+    func runOneHop() {
+        lock.lock()
+        guard !pending.isEmpty else { lock.unlock(); check(false, "runOneHop: no pending hop"); return }
+        let c = pending.removeFirst()
+        lock.unlock()
+        c()
+    }
+
+    // 1. One readable burst → ONE hop (the source is suspended meanwhile), the
+    //    drain reads everything, and the resumed source does not re-fire.
+    let (fd, addr) = udpSocket()
+    let (peer, _) = udpSocket()
+    var events: [String] = []
+    var drained = 0
+    let fence = DispatchGroup()
+    var src: PathReadSource? = PathReadSource(
+        fd: fd, queue: queue, fence: fence, hop: hop,
+        drain: { drained += drainAll(fd); events.append("drain") },
+        released: { events.append(fcntl(fd, F_GETFD) == -1 ? "released(fd closed)" : "released(fd open!)") })
+    src!.resume()
+    sendDatagrams(3, from: peer, to: addr)
+    waitFor("first hop") { pendingCount() == 1 }
+    usleep(100_000)
+    check(pendingCount() == 1, "one readable burst = one hop (suspended source does not re-fire)")
+    runOneHop()
+    check(drained == 3, "the drain read the burst")
+    usleep(100_000)
+    check(pendingCount() == 0, "nothing left → no re-fire after the resume")
+
+    // 2. Cancel while a drain hop is pending: the release hop queues behind
+    //    it (the fake hop is FIFO), so the drain reads an open fd; then the
+    //    release hop closes the fd → released (fd already closed) → fence.
+    sendDatagrams(2, from: peer, to: addr)
+    waitFor("second hop") { pendingCount() == 1 }
+    src!.cancel()
+    usleep(100_000)
+    check(fcntl(fd, F_GETFD) != -1, "fd open while the drain hop is pending")
+    check(!events.contains { $0.hasPrefix("released") }, "no release before the drain")
+    runOneHop()                                  // drain → defer resume → cancel handler queues the release hop
+    check(drained == 5, "the drain read the second burst through the open fd")
+    waitFor("release hop") { pendingCount() == 1 }
+    check(fcntl(fd, F_GETFD) != -1, "fd still open after the drain, before the release hop")
+    runOneHop()                                  // close + released + fence.leave
+    check(fcntl(fd, F_GETFD) == -1, "the release hop closed the fd")
+    check(fence.wait(timeout: .now() + 2) == .success, "fence completes once the release was reported")
+    check(events == ["drain", "drain", "released(fd closed)"], "order: drain, drain, released — got \(events)")
+    src = nil                                    // released non-suspended: no crash
+
+    // 3. A refused hop still resumes the source: the pending data makes it
+    //    fire again, and that second hop is accepted; a later cancel completes.
+    let (fd2, addr2) = udpSocket()
+    var drained2 = 0
+    var released2 = 0
+    let fence2 = DispatchGroup()
+    var src2: PathReadSource? = PathReadSource(
+        fd: fd2, queue: queue, fence: fence2, hop: hop,
+        drain: { drained2 += drainAll(fd2) },
+        released: { released2 += 1 })
+    lock.lock(); refuseNext = true; lock.unlock()
+    src2!.resume()
+    sendDatagrams(1, from: peer, to: addr2)
+    waitFor("re-fire after the refused hop") { pendingCount() == 1 }
+    check(refused == 1, "the first hop was refused")
+    runOneHop()
+    check(drained2 == 1, "the accepted second hop drained")
+    src2!.cancel()
+    waitFor("release hop 2") { pendingCount() == 1 }
+    runOneHop()
+    check(fence2.wait(timeout: .now() + 2) == .success && released2 == 1, "cancel completes after a refused hop")
+    src2 = nil
+    close(peer)
+}
 
 if failures == 0 { print("host tests: ALL PASS") } else { print("host tests: \(failures) FAILURES"); exit(1) }
