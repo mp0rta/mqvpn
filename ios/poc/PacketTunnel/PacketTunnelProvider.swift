@@ -90,6 +90,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self?.feed(.startFailed(code: code), engine: engine,
                            metrics: metrics, snapshot: snapshot)
             }
+            // Path ledger corruption (the library does not know a handle we
+            // hold): the session ends like an engine-side close.
+            engine.onLedgerCorruption = { [weak self] in
+                self?.feed(.closed(reason: Int32(MQVPN_ERR_ENGINE.rawValue)), engine: engine,
+                           metrics: metrics, snapshot: snapshot)
+            }
             // Redundant trigger for path lifecycle: NWPathMonitor updates
             // have been observed to arrive minutes late inside the provider;
             // NEProvider.defaultPath is an independent KVO channel. Only the
@@ -118,6 +124,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                             engine.onTunnelConfig = nil
                             engine.onTunOutput = nil
                             engine.onStartFailed = nil
+                            engine.onLedgerCorruption = nil
                             observation.invalidate()
                         },
                         disconnect: { engine.disconnect() },
@@ -299,6 +306,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                         engine.onTunnelConfig = nil
                         engine.onTunOutput = nil
                         engine.onStartFailed = nil
+                        engine.onLedgerCorruption = nil
                         self?.defaultPathObservation?.invalidate()
                     },
                     disconnect: { engine.disconnect() },

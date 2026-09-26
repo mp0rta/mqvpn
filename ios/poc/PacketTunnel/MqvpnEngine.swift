@@ -6,6 +6,22 @@ import os.log
 
 let log = Logger(subsystem: "mqvpn.poc", category: "engine")
 
+/// Global library log sink (mqvpn_log_set_sink, declared in the bridging
+/// header): every global libmqvpn line — the bind's socket-buffer and
+/// send-error lines, the hybrid lwIP glue — reaches os_log instead of the
+/// extension's stderr, which nobody sees (per-client lines, the path state
+/// machine's included, already arrive through cbs.log). Installed once per
+/// process (the first start(), via MqvpnEngine.logSinkInstalled); runs on
+/// whichever thread logged (os_log is thread-safe).
+private let mqvpnLogSink: mqvpn_log_fn = { level, msg, _ in
+    let text = msg.map { String(cString: $0) } ?? ""
+    switch level {
+    case MQVPN_LOG_ERROR: log.error("[lib] \(text, privacy: .public)")
+    case MQVPN_LOG_WARN: log.warning("[lib] \(text, privacy: .public)")
+    default: log.notice("[lib] \(text, privacy: .public)")
+    }
+}
+
 /// C trampoline for mqvpn_config_set_cert_verifier (spec D9). Rebuilds the
 /// DER chain and asks SystemTrust; ctx is unused (SystemTrust is stateless).
 /// Runs on the tick thread inside the handshake — SystemTrust never touches
@@ -39,6 +55,14 @@ final class MqvpnEngine: NSObject {
     private(set) var reorderConfigured = false
     private(set) var hybridConfigured = false
     private var reorderStatsUnavailable = false
+    /// Once-token for the global log sink (src/log.h: set once per process,
+    /// before any client exists). A static let is initialised lazily and
+    /// thread-safely, exactly once: later sessions in the same extension
+    /// process reuse the installed sink.
+    private static let logSinkInstalled: Void = { mqvpn_log_set_sink(mqvpnLogSink, nil) }()
+    /// Bind ctx per path handle (tick-thread confined). Library-owned once
+    /// add_path succeeded; the pointer is read for stats and drains only.
+    private var bindCtx: [mqvpn_path_handle_t: UnsafeMutableRawPointer] = [:]
 
     // Injected by PacketTunnelProvider:
     var onTunOutput: ((Data) -> Void)?          // -> packetFlow.writePackets
@@ -59,6 +83,7 @@ final class MqvpnEngine: NSObject {
             log.error("[reorder] stats layout mismatch — monitor disabled")
             assert(false, "reorder stats ABI layout mismatch (stale libmqvpn.a?)")
         }
+        _ = MqvpnEngine.logSinkInstalled
         tickThread = Thread { [weak self] in
             guard let self else { return }
             self.runLoop = RunLoop.current
@@ -79,19 +104,32 @@ final class MqvpnEngine: NSObject {
     }
 
     /// Hop an arbitrary closure onto the tick thread (the ONLY entry point).
-    /// After destroy() the thread is gone — late hops (source cancel
-    /// handlers, monitor updates) are silently dropped.
-    func perform(_ body: @escaping () -> Void) {
-        guard let t = tickThread, !t.isFinished, !t.isCancelled else { return }
+    /// After destroy() the thread is gone — late hops (monitor updates) are
+    /// dropped and the caller is told: PathReadSource must still balance a
+    /// suspend when its hop is refused. Closures run one at a time on the
+    /// tick thread via performSelector(onThread:), whose submission order is
+    /// FIFO in practice but not documented by Apple. Path safety does not
+    /// rely on it (`drain` is a no-op once the path's release ran, or the
+    /// handle is poisoned). One residual does: destroy() ends the thread, so
+    /// a drain hop still queued behind the teardown completion would never
+    /// resume its suspended source. FIFO rules that out — each path's drain
+    /// hop is submitted before its release hop, and the completion only
+    /// after every release ran.
+    @discardableResult
+    func perform(_ body: @escaping () -> Void) -> Bool {
+        guard let t = tickThread, !t.isFinished, !t.isCancelled else { return false }
         let wrapped = BlockOperation(block: body)
         wrapped.perform(#selector(Operation.start), on: t,
                         with: nil, waitUntilDone: false)
+        return true
     }
 
-    /// Stops the session (tick thread) but keeps `client` alive: the
-    /// fd-closed hops still in flight after binder.stop() must reach the
-    /// core's slot cleanup, and disconnect's synchronous CONNECTION_CLOSE
-    /// needs live path fds. Reconnects are suppressed from here on.
+    /// Stops the session (tick thread) but keeps `client` alive:
+    /// binder.stop() runs after this, and its release hops must still reach
+    /// the library (on_platform_path_released); disconnect's synchronous
+    /// CONNECTION_CLOSE goes out through the paths' transports, still
+    /// attached (sockets open) at this point. Reconnects are suppressed from
+    /// here on.
     func disconnect() {
         tickTimer?.invalidate()
         if let c = client { mqvpn_client_disconnect(c) }
@@ -99,13 +137,32 @@ final class MqvpnEngine: NSObject {
 
     /// Final teardown (tick thread). client goes nil first so any
     /// already-queued hop on this run-loop pass sees the guard, not a freed
-    /// pointer.
+    /// pointer. Every path was released before this (binder.stop's fence);
+    /// a ctx still in the dictionary is one whose release the library
+    /// refused — its counters are read now (the pointer dangles after the
+    /// destroy, which finalises it); a poisoned ctx is neither read nor
+    /// ever freed (deliberately leaked: nobody can prove who owns it). The
+    /// dictionary is then cleared without touching any ctx again.
     func destroy() {
         if let c = client {
+            for (h, ctx) in bindCtx where !poisoned.contains(h) { logRxStats(h, ctx, tag: "at destroy") }
             client = nil
             mqvpn_client_destroy(c)
+            bindCtx.removeAll()
+            poisoned.removeAll()
         }
         tickThread.cancel()
+    }
+
+    /// Handles whose release the library did not recognise (path-ledger
+    /// corruption): never dereferenced or reused again; cleared by destroy.
+    private var poisoned: Set<mqvpn_path_handle_t> = []
+
+    private func logRxStats(_ h: mqvpn_path_handle_t, _ ctx: UnsafeMutableRawPointer, tag: String) {
+        var st = mqvpn_bind_posix_stats_t()
+        st.struct_size = UInt32(MemoryLayout<mqvpn_bind_posix_stats_t>.size)
+        mqvpn_bind_posix_path_get_stats(ctx, &st)
+        log.notice("[path] handle=\(h) \(tag, privacy: .public): rx receives=\(st.rx_receives) datagrams=\(st.rx_datagrams)")
     }
 
     private func setupClient(_ server: ServerSettings, reorder: ReorderSettings, hybrid: HybridSettings) {
@@ -177,7 +234,6 @@ final class MqvpnEngine: NSObject {
             let engine = Unmanaged<MqvpnEngine>.fromOpaque(ctx!).takeUnretainedValue()
             engine.onTunnelConfig?(info!.pointee)
         }
-        cbs.send_packet = nil                    // fd-path mode: core sends via sendto(fd)
         cbs.tunnel_closed = { reason, ctx in
             let engine = Unmanaged<MqvpnEngine>.fromOpaque(ctx!).takeUnretainedValue()
             engine.onTunnelClosed?(reason.rawValue)
@@ -198,15 +254,15 @@ final class MqvpnEngine: NSObject {
             onStartFailed?(Int32(MQVPN_ERR_ENGINE.rawValue))
             return
         }
-        // NOTE: no connect here. The core sends handshake packets via
-        // sendto() on path fds, and xquic needs the resolved peer address
-        // set before connect — so connection start is deferred until the
-        // first path fd is registered (connectIfNeeded, same ordering as
-        // the Android runtime: addPathFd -> setServerAddr -> connect).
+        // NOTE: no connect here. The core sends handshake packets through
+        // the first path's transport, and xquic needs the resolved peer
+        // address set before connect — so connection start is deferred until
+        // the first path is registered (connectIfNeeded, same ordering as
+        // the Android runtime: addPath -> setServerAddr -> connect).
         scheduleTick(afterMs: 0)
     }
 
-    /// Called by PathBinder after the FIRST successful add_path_fd
+    /// Called by PathBinder after the FIRST successful addPath
     /// (tick thread). Sets the resolved server address and connects, once.
     func connectIfNeeded() {
         guard !connected, !startFailed, let c = client else { return }
@@ -260,34 +316,76 @@ final class MqvpnEngine: NSObject {
         }
         scheduleTick(afterMs: 0)   // input may arm new engine work; tick soon
     }
-    /// Registers a path fd. Uses the _with_outcome variant: the legacy
-    /// add_path_fd can return a valid handle while a synchronous activation
-    /// failure is swallowed — the outcome is what the failover-flap gate
-    /// needs to observe.
-    func addPathFd(_ fd: Int32, desc: inout mqvpn_path_desc_t)
+    /// Registers a path: wraps the (borrowed) fd in the bundled POSIX bind
+    /// and hands ops + ctx to the library. Returns the handle and the
+    /// synchronous activation outcome — a valid handle with a failed outcome
+    /// is what the failover-flap gate observes; the path is kept either way
+    /// (the ctx is library-owned from here). On a refused registration the
+    /// ctx is freed here and the caller still owns the fd.
+    func addPath(_ fd: Int32, desc: inout mqvpn_path_desc_t)
         -> (handle: mqvpn_path_handle_t, outcome: mqvpn_add_path_outcome_t) {
         var outcome = MQVPN_ADD_PATH_OK
         guard let c = client else { return (-1, outcome) }  // post-shutdown hop
-        let h = mqvpn_client_add_path_fd_with_outcome(c, fd, &desc, &outcome)
+        var opts = mqvpn_bind_posix_opts_t()
+        opts.struct_size = UInt32(MemoryLayout<mqvpn_bind_posix_opts_t>.size)
+        // 7 MiB request, as the core used to make (same as the macOS
+        // platform); ENOBUFS keeps PathBinder's pre-set
+        opts.socket_buf_bytes = 0
+        withUnsafeMutableBytes(of: &opts.tag) { dst in
+            withUnsafeBytes(of: &desc.iface) { src in dst.copyBytes(from: src.prefix(dst.count - 1)) }
+        }
+        var ctx: UnsafeMutableRawPointer?
+        let brc = mqvpn_bind_posix_path_new(fd, &opts, &ctx)
+        guard brc == 0, let bctx = ctx else {
+            log.error("[path] bind_posix_path_new rc=\(brc)")
+            return (-1, outcome)
+        }
+        let h = mqvpn_client_add_path(c, &desc, mqvpn_bind_posix_path_ops(), bctx, &outcome)
+        if h < 0 {
+            mqvpn_bind_posix_path_free(bctx)   // add failed: still ours
+            return (h, outcome)
+        }
+        bindCtx[h] = bctx
         return (h, outcome)
     }
     func removePath(_ handle: mqvpn_path_handle_t) {
         guard let c = client else { return }
         mqvpn_client_remove_path(c, handle)
     }
-    func fdClosed(_ handle: mqvpn_path_handle_t) {
-        guard let c = client else { return }
-        mqvpn_client_on_platform_fd_closed(c, handle)
+    /// Reads the path's socket until it would block, delivering into the
+    /// library (tick thread). A hard error is ignored: NWPathMonitor and
+    /// reconcile own drop detection.
+    func drain(_ handle: mqvpn_path_handle_t) {
+        guard let c = client, let ctx = bindCtx[handle], !poisoned.contains(handle) else { return }
+        _ = mqvpn_bind_posix_path_drain(ctx, c, handle, 64)
+        scheduleTick(afterMs: 0)   // input may arm new engine work; tick soon
     }
-    func socketRecv(_ handle: mqvpn_path_handle_t, _ data: Data,
-                    _ peer: UnsafePointer<sockaddr>, _ peerLen: socklen_t) {
-        guard let c = client else { return }
-        _ = data.withUnsafeBytes { buf in
-            mqvpn_client_on_socket_recv(c, handle, buf.baseAddress?.assumingMemoryBound(to: UInt8.self),
-                                        data.count, peer, peerLen)
+    /// The platform closed the path's socket: report it. OK → the library
+    /// finalised the ctx, forget it. INVALID_STATE (no remove preceded) → it
+    /// stays library-owned until destroy. INVALID_ARG → the library does not
+    /// know a handle we hold: ledger corruption; the entry is poisoned and
+    /// the provider is asked to stop the tunnel.
+    func pathReleased(_ handle: mqvpn_path_handle_t) {
+        guard let c = client, let ctx = bindCtx[handle], !poisoned.contains(handle) else { return }
+        logRxStats(handle, ctx, tag: "released")   // read BEFORE the call: the library finalises the ctx inside
+        let rc = mqvpn_client_on_platform_path_released(c, handle)
+        switch rc {
+        case 0:
+            bindCtx.removeValue(forKey: handle)
+        case Int32(MQVPN_ERR_INVALID_ARG.rawValue):
+            log.error("[path] handle=\(handle) unknown to the library: poisoned, stopping the tunnel")
+            assertionFailure("path ledger corruption")
+            poisoned.insert(handle)
+            onLedgerCorruption?()
+        default:
+            // Unreachable: PathBinder removes before it cancels, so the slot
+            // is CLOSED_DROPPED here. Were it reached, the ctx would stay
+            // library-owned on an already-closed fd until destroy.
+            log.warning("[path] handle=\(handle) path_released rc=\(rc); transport stays library-owned")
         }
-        scheduleTick(afterMs: 0)
     }
+    /// Injected by PacketTunnelProvider: ends the session on ledger corruption.
+    var onLedgerCorruption: (() -> Void)?
 
     // Snapshot accessors for GateMetrics (tick thread only).
     func state() -> mqvpn_client_state_t {

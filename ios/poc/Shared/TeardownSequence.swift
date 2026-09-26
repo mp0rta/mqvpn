@@ -5,9 +5,9 @@ import Foundation
 
 /// The fixed stop order (spec D8), as a pure function so host tests can pin
 /// it. Only `stopPaths` is asynchronous: it receives a completion the
-/// callee invokes once every path fd is closed; `destroy` and `complete`
-/// run only after that. The caller supplies real closures and runs the
-/// whole thing on the tick thread.
+/// callee invokes once every path's fd is closed and its release reported;
+/// `destroy` and `complete` run only after that. The caller supplies real
+/// closures and runs the whole thing on the tick thread.
 enum TeardownSequence {
     static func run(detach: () -> Void,
                     disconnect: () -> Void,

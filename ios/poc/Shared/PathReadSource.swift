@@ -40,7 +40,8 @@ final class PathReadSource {
 
     /// - Parameters:
     ///   - hop: runs the closure on the tick thread — one thread, so closures
-    ///     never overlap. Submission order is not relied on (the extension's
+    ///     never overlap. Submission order is not relied on (except at the
+    ///     tick thread's exit — see MqvpnEngine.perform; the extension's
     ///     performSelector(onThread:) is FIFO in practice, but Apple documents
     ///     that only for the main thread). false if it cannot (thread gone).
     ///   - drain: tick thread; reads the socket until it would block. Must be a
