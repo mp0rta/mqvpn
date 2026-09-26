@@ -968,6 +968,17 @@ if(BUILD_TESTING)
     set_target_properties(test_bind_posix_socket PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_bind_posix_socket COMMAND test_bind_posix_socket)
 
+    # The Android platform's reactor (src/platform/android/, platform code:
+    # never in MQVPN_LIB_SOURCES) over real loopback sockets, a real
+    # unconnected client and the archive's own posix bind — no seam, so the
+    # bind sources are not re-listed. Linux only: eventfd.
+    add_executable(test_android_reactor tests/test_android_reactor.c
+                   src/platform/android/reactor.c)
+    target_include_directories(test_android_reactor PRIVATE src include src/platform/android)
+    target_link_libraries(test_android_reactor mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} pthread dl m stdc++)
+    set_target_properties(test_android_reactor PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_android_reactor COMMAND test_android_reactor)
+
     # Kernel-backed UDP GSO/GRO round trip (issue #167): built WITHOUT
     # MQVPN_OFFLOAD_TEST_SEAM, so every syscall is the real one — this pins
     # the wrapper against the actual kernel rather than the fabricated seam
