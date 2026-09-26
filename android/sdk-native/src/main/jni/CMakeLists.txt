@@ -39,7 +39,11 @@ include_directories(
 # JNI shared library
 # LINKER_LANGUAGE CXX: BoringSSL (libssl.a) is C++ and needs clang++ for linking
 # to resolve C++ ABI symbols (__cxa_begin_catch, __gxx_personality_v0, etc.)
-add_library(mqvpn_jni SHARED mqvpn_jni.c)
+# The reactor is platform code shared with the Linux host test
+# (tests/test_android_reactor); it is never part of libmqvpn.a.
+add_library(mqvpn_jni SHARED
+    mqvpn_jni.c
+    ${MQVPN_ROOT}/src/platform/android/reactor.c)
 set_target_properties(mqvpn_jni PROPERTIES LINKER_LANGUAGE CXX)
 
 target_link_libraries(mqvpn_jni

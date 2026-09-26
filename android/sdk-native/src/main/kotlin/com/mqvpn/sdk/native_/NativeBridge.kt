@@ -11,8 +11,14 @@ package com.mqvpn.sdk.native_
  * All methods map directly to C functions in mqvpn_jni.c.
  * This is an internal API — use sdk-core's public classes instead.
  *
- * Thread safety: All client methods (clientConnect, clientTick, etc.)
- * must be called from the same thread (the executor/poller thread).
+ * Thread safety: every client and reactor method (clientConnect, clientTick,
+ * reactorWait, reactorAddPath, ...) must be called from the engine thread
+ * (the MqvpnPoller thread); only [reactorWake] may be called from any thread.
+ *
+ * Transport (ABI 3): the library owns no socket. Kotlin creates and closes
+ * the path fds; the reactor (reactorNew) wraps each one in the bundled POSIX
+ * bind and polls/drains them on the engine thread inside [reactorWait].
+ * No datagram crosses JNI.
  */
 object NativeBridge {
 
@@ -91,12 +97,11 @@ object NativeBridge {
     /**
      * mqvpn_client_new(cfg, callbacks, user_ctx) → client pointer (long).
      * [callbackObj] receives JNI upcalls (tunnelConfigReady, stateChanged, log, etc.).
-     * A GlobalRef is created for callbackObj; it is released in clientDestroy.
+     * A GlobalRef is created for callbackObj; it is released in reactorClientDestroy.
      */
     external fun clientNew(cfg: Long, callbackObj: Any): Long
 
-    /** mqvpn_client_destroy(client) — also releases callback GlobalRef. */
-    external fun clientDestroy(client: Long)
+    // (destroy is reactorClientDestroy below: the only destroy entry point)
 
     /** mqvpn_client_connect(client) */
     external fun clientConnect(client: Long): Int
@@ -121,29 +126,77 @@ object NativeBridge {
     /** mqvpn_client_tick(client) */
     external fun clientTick(client: Long): Int
 
-    // ---- Path management ----
+    // ---- Reactor (engine-thread poll loop + path lifecycle) ----
 
     /**
-     * mqvpn_client_add_path_fd(client, fd, iface) → path_handle (long).
-     * Returns negative on error.
+     * Creates the reactor (one eventfd + a path table). Owned by the executor,
+     * not by a client: created before the poller thread starts, freed by the
+     * poller thread after its loop exits. Returns 0 on failure.
      */
-    external fun addPathFd(client: Long, fd: Int, iface: String): Long
+    external fun reactorNew(): Long
 
-    /** mqvpn_client_remove_path(client, pathHandle) */
-    external fun removePath(client: Long, pathHandle: Long): Int
-
-    // ---- I/O feed ----
+    /** Frees the reactor. Every client must have been destroyed first. */
+    external fun reactorFree(reactor: Long)
 
     /**
-     * mqvpn_client_on_socket_recv(client, pathHandle, buf, offset, len,
-     *     peerAddr, peerAddrLen).
-     * peerAddr is raw sockaddr_storage bytes from recvfrom().
+     * Wakes a [reactorWait] in progress (or the next one). Any thread, but never
+     * concurrently with or after [reactorFree]: the caller excludes them (the
+     * waiter's lock shared by wake and close). Returns 0 or -1.
      */
-    external fun onSocketRecv(
-        client: Long, pathHandle: Long,
-        buf: ByteArray, offset: Int, len: Int,
-        peerAddr: ByteArray, peerAddrLen: Int
-    ): Int
+    external fun reactorWake(reactor: Long): Int
+
+    /**
+     * poll() over the attached path fds and the eventfd, up to [timeoutMs];
+     * drains every readable path into the client on THIS thread. A negative
+     * [timeoutMs] is passed to poll() as is: it blocks until a path is
+     * readable or [reactorWake] is called. Returns the number of drains
+     * (>= 0; 0 also on EINTR) or -1. [client] may be 0 only while no path is
+     * attached.
+     */
+    external fun reactorWait(reactor: Long, client: Long, timeoutMs: Int): Int
+
+    /**
+     * The next path handle whose fd was found closed behind the platform
+     * (POLLNVAL), delivered once, or -1. The caller removes the path, drops
+     * the fd from its ledger WITHOUT closing it, and reports the release.
+     */
+    external fun reactorTakeBadFd(reactor: Long): Long
+
+    /**
+     * Wraps [fd] in a bundled POSIX bind and registers it with
+     * mqvpn_client_add_path() → path handle (>= 0), or -1 with the fd
+     * untouched (the caller closes it). The fd is borrowed: never closed here.
+     */
+    external fun reactorAddPath(reactor: Long, client: Long, fd: Int, iface: String): Long
+
+    /**
+     * mqvpn_client_remove_path() + stop polling the fd. Returns the library's
+     * code, or -1 (MQVPN_ERR_INVALID_ARG, nothing called) for an unknown or
+     * poisoned handle. Then the caller closes the fd — except on the bad-fd
+     * chain, where it drops the fd without closing it (see [reactorTakeBadFd])
+     * — and calls [reactorPathReleased].
+     */
+    external fun reactorRemovePath(reactor: Long, client: Long, pathHandle: Long): Int
+
+    /**
+     * mqvpn_client_on_platform_path_released(): 0 = released (entry freed);
+     * a library error = the transport stays library-owned until destroy;
+     * [REACTOR_POISONED] = ledger corruption, end the session.
+     */
+    external fun reactorPathReleased(reactor: Long, client: Long, pathHandle: Long): Int
+
+    /**
+     * Whole-client teardown: stop polling, harvest RX totals,
+     * mqvpn_client_destroy() (finalises every attached bind ctx), forget the
+     * table, release the callback GlobalRef. Close the path fds AFTER this.
+     * The [client] handle is invalid afterwards.
+     */
+    external fun reactorClientDestroy(reactor: Long, client: Long)
+
+    /** Returned by [reactorPathReleased] on ledger corruption (MQVPN_REACTOR_POISONED). */
+    const val REACTOR_POISONED: Int = -100
+
+    // ---- I/O feed (TUN only; path receive happens inside reactorWait) ----
 
     /** mqvpn_client_on_tun_packet(client, pkt, offset, len) */
     external fun onTunPacket(client: Long, pkt: ByteArray, offset: Int, len: Int): Int
@@ -179,14 +232,4 @@ object NativeBridge {
 
     /** mqvpn_generate_key(out, outLen) → generated PSK string */
     external fun generateKey(): String?
-
-    /**
-     * JNI recvfrom() wrapper: recvfrom(fd, buf, off, len, peerAddrOut, peerAddrLenOut).
-     * Returns bytes read, -1 on error. peerAddrOut filled with raw sockaddr_storage.
-     * peerAddrLenOut[0] set to actual peer address length.
-     */
-    external fun recvFrom(
-        fd: Int, buf: ByteArray, offset: Int, len: Int,
-        peerAddrOut: ByteArray, peerAddrLenOut: IntArray
-    ): Int
 }
