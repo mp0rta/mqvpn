@@ -740,7 +740,7 @@ jobs:
           file -L build-darwin/*.dylib
 
       - name: Run Darwin unit tests
-        run: ctest --test-dir build-darwin --output-on-failure
+        run: ctest --test-dir build-darwin --no-tests=error --output-on-failure
 
       # The Darwin platform's transport wiring on a real runner: the client's
       # first QUIC Initial must leave through the POSIX bind and reach a local
@@ -791,7 +791,7 @@ jobs:
       # would imply extra coverage this tree does not add.
       - name: Run iOS-profile TCP-lane tests
         run: |
-          ctest --test-dir build-darwin-ios -R "test_tcp_lane" --output-on-failure
+          ctest --test-dir build-darwin-ios -R "test_tcp_lane" --no-tests=error --output-on-failure
 
   # iOS: the real cross-build chain (BoringSSL -> xquic -> libmqvpn, all
   # iphoneos/arm64 static, iOS lwIP profile) plus the Swift host tests and
