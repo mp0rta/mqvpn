@@ -17,8 +17,8 @@
 
 #ifdef MQVPN_WINSOCK_TEST_SEAM
 /* Unit-test seam (tests/test_bind_winsock.c): the error mapping and the
- * NO_MEMORY constructor path need failures a healthy loopback socket never
- * produces. */
+ * NO_MEMORY constructor path need failures a loopback socket cannot be made
+ * to produce on demand. */
 int mqvpn_seam_ws_sendto(SOCKET s, const char *buf, int len, int flags,
                          const struct sockaddr *to, int tolen);
 void *mqvpn_seam_ws_calloc(size_t n, size_t sz);

@@ -113,8 +113,9 @@ remove_path_by_index(platform_ctx_t *p, int idx, mqvpn_platform_reason_t reason)
     } else {
         /* INVALID_STATE: the library did not touch the ctx, which therefore
          * stays ATTACHED and library-owned — client_destroy will release it.
-         * Never free it here (double free). Keep the pointer so the teardown
-         * harvest still sees it. INVALID_ARG cannot occur with a non-NULL
+         * Never free it here (double free). Keep the pointer: the ctx is still
+         * library-owned, and on Linux the teardown harvest still reads its
+         * counters. INVALID_ARG cannot occur with a non-NULL
          * bind_ctx (handles are never reused, and the library reuses a slot only
          * after a successful release). */
         LOG_WRN("%s: path_released for %s returned %s; transport stays library-owned",
@@ -376,8 +377,9 @@ recovery_rollback(platform_ctx_t *p, int slot, mqvpn_add_path_outcome_t outcome)
     } else {
         /* INVALID_STATE: the library did not touch the ctx, which therefore
          * stays ATTACHED and library-owned — client_destroy will release it.
-         * Never free it here (double free). Keep the pointer so the teardown
-         * harvest still sees it. INVALID_ARG cannot occur with a non-NULL
+         * Never free it here (double free). Keep the pointer: the ctx is still
+         * library-owned, and on Linux the teardown harvest still reads its
+         * counters. INVALID_ARG cannot occur with a non-NULL
          * bind_ctx (handles are never reused, and the library reuses a slot only
          * after a successful release). */
         LOG_WRN("%s: path_released for %s returned %s; transport stays library-owned",

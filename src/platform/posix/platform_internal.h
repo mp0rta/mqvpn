@@ -43,7 +43,9 @@ typedef struct {
     /* Bundled transport ctx per path slot (mqvpn_bind_posix). Borrows
      * path_mgr.paths[i].fd; the library owns finalisation once add_path
      * succeeded, so this pointer is only a handle for RX helpers, stats
-     * harvest and GRO reporting. NULL when the slot has no live transport. */
+     * harvest and GRO reporting. Set when add_path succeeds; NULL once the
+     * library has finalised the ctx (path_released returned OK, or
+     * client_destroy); a refused release keeps it (still library-owned). */
     void *bind_ctx[MQVPN_MAX_PATHS];
 
     /* Per-slot consecutive re-add failure counter. Pure backpressure,

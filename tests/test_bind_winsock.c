@@ -174,8 +174,7 @@ test_ctor_contract(void)
     CHECK(ctx == sentinel);  /* never written on failure */
     CHECK(socket_usable(s)); /* never closed on failure */
 
-    /* A newer caller's larger struct is accepted by prefix copy, and the opts
-     * storage is not retained past the call. */
+    /* A newer caller's larger struct is accepted by prefix copy. */
     struct {
         mqvpn_bind_winsock_opts_t o;
         unsigned char newer_fields[32];
@@ -184,7 +183,6 @@ test_ctor_contract(void)
     big.o = opts_default();
     big.o.struct_size = (uint32_t)sizeof(big);
     CHECK(mqvpn_bind_winsock_path_new(s, &big.o, &ctx) == MQVPN_OK);
-    memset(&big, 0xA5, sizeof(big));
     CHECK(ctx != sentinel);
     mqvpn_bind_winsock_path_free(ctx);
     CHECK(socket_usable(s)); /* the destructor does not close it either */

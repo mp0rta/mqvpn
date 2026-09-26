@@ -249,8 +249,8 @@ test_hard_send_error_is_failed_and_uncounted(void)
     mqvpn_bind_posix_opts_t o = opts_default();
     void *ctx = NULL;
     CHECK(mqvpn_bind_posix_path_new(tx, &o, &ctx) == MQVPN_OK);
-    /* An IPv6 destination on an IPv4 socket is refused by every POSIX kernel
-     * (EAFNOSUPPORT / EINVAL) — never EAGAIN. */
+    /* An IPv6 destination on an IPv4 socket fails on both CI kernels (Linux:
+     * EAFNOSUPPORT) — never EAGAIN, which is all this test relies on. */
     struct sockaddr_in6 v6;
     memset(&v6, 0, sizeof(v6));
     v6.sin6_family = AF_INET6;

@@ -66,9 +66,7 @@ const mqvpn_server_transport_ops_t *fake_server_ops(void);
  * recorder reference the bind directly anyway and stay POSIX-only. */
 #ifndef _WIN32
 
-#  include "mqvpn_bind_posix.h" /* the recorder forwards to the bundled bind, which
-                               * mqvpn_lib contains only where MQVPN_BIND_SOURCES
-                               * is non-empty */
+#  include "mqvpn_bind_posix.h"
 
 /* Scope-recording wrapper around the POSIX bind: observes the server core's
  * use of tx scopes on a real handshake (unique per accept, released exactly

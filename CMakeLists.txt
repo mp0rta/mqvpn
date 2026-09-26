@@ -242,8 +242,10 @@ set(MQVPN_LIB_SOURCES
 )
 
 # ---------- bundled transport implementations (NOT part of the sans-I/O core) ----------
-# These are the only files in the library allowed to issue socket syscalls;
-# scripts/lint/check_sansio_core.sh excludes exactly this list.
+# Together with src/hybrid/tcp_egress.c (the server egress lane owns its TCP
+# sockets), the only library files that issue socket calls;
+# scripts/lint/check_sansio_core.sh excludes src/bind/* and that one file from
+# its scan.
 if(NOT WIN32)
     set(MQVPN_BIND_SOURCES
         src/bind/posix_offload.c
