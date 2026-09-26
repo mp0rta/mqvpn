@@ -10,10 +10,12 @@ import com.mqvpn.sdk.network.NetworkEvent
 import com.mqvpn.sdk.network.NetworkMonitor
 import com.mqvpn.sdk.network.NetworkPath
 import com.mqvpn.sdk.network.PathType
+import com.mqvpn.sdk.runtime.ExecutorStoppedException
 import com.mqvpn.sdk.runtime.MqvpnExecutor
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -24,16 +26,18 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * Verifies the race-fix in [PathManager.handleEvent]:
  * if onLost fires while bindAndDetachUdp is running on Dispatchers.IO,
- * the post-bind executor block must NOT call addPathFd. Otherwise a path
+ * the post-bind executor block must NOT call addPath. Otherwise a path
  * slot would be leaked, bound to an already-dead Network handle.
+ * Also the bad-fd chain: the ledger is cleared WITHOUT a close.
  *
- * Tests use a synchronous [MqvpnExecutor], an injected [bindUdp] lambda
- * (so PathBinder is bypassed), and a real [NetworkMonitor] whose internal
- * map is manipulated via reflection to simulate the active set.
+ * Tests use a synchronous [MqvpnExecutor], injected [bindUdp] / [closeFd]
+ * lambdas (so PathBinder and Os.close are bypassed), and a real
+ * [NetworkMonitor] whose internal map is manipulated via reflection to
+ * simulate the active set.
  *
- * [MqvpnTunnel] is reflectively constructed with handle=0 and never invoked
- * — the abort branch fires before any JNI call, so `libmqvpn_jni` does not
- * need to be loaded.
+ * [MqvpnTunnel] is reflectively constructed with handle=0 (= destroyed):
+ * every method returns an error without a JNI call, so `libmqvpn_jni` is
+ * never loaded here.
  */
 @RunWith(RobolectricTestRunner::class)
 class PathManagerRaceTest {
@@ -42,26 +46,28 @@ class PathManagerRaceTest {
         override suspend fun <T> call(block: () -> T): T = block()
         override fun enqueue(block: () -> Unit) { block() }
         override fun start() {}
-        override fun stop() {}
+        override fun stop(finalizer: () -> Unit) { finalizer() }
     }
 
     @Test
-    fun `Lost-during-bind aborts addPathFd and leaves pathHandles empty`() = runBlocking {
+    fun `Lost-during-bind aborts addPath and leaves pathHandles empty`() = runBlocking {
         val monitor = NetworkMonitor(RuntimeEnvironment.getApplication())  // start() is NOT called
 
         val bindCalls = AtomicInteger(0)
+        val closed = mutableListOf<Int>()
         val pm = PathManager(
             executor = syncExecutor,
             tunnel = createDummyTunnel(),
-            udpReaderPool = UdpReaderPool(syncExecutor),
             networkMonitor = monitor,
             protector = { true },
             serverHost = "1.2.3.4",
             serverPort = 443,
+            onFatal = { fail("no fatal expected: $it") },
             bindUdp = { _, _, _, _ ->
                 bindCalls.incrementAndGet()
                 FAKE_FD  // simulate successful bind
             },
+            closeFd = { closed.add(it) },
         )
 
         // monitor.activeNetworks is empty → simulates "Lost fired during bind".
@@ -73,41 +79,148 @@ class PathManagerRaceTest {
         assertEquals("bindUdp should be invoked exactly once", 1, bindCalls.get())
         val handles = readPathHandles(pm)
         assertTrue("pathHandles must be empty after abort, got: $handles", handles.isEmpty())
+        assertEquals("the discarded fd is closed (it was never registered)", listOf(FAKE_FD), closed)
     }
 
     @Test
-    fun `bind into active network reaches addPathFd (proves abort is not always taken)`() = runBlocking {
+    fun `bind into active network reaches addPath (proves abort is not always taken)`() = runBlocking {
         val monitor = NetworkMonitor(RuntimeEnvironment.getApplication())
 
         val net = newNetwork(netId = 200)
         val path = NetworkPath(net, PathType.WIFI, "wifi-200", isMetered = false)
         injectActiveNetwork(monitor, net, path)
 
+        val closed = mutableListOf<Int>()
         val pm = PathManager(
             executor = syncExecutor,
             tunnel = createDummyTunnel(),
-            udpReaderPool = UdpReaderPool(syncExecutor),
             networkMonitor = monitor,
             protector = { true },
             serverHost = "1.2.3.4",
             serverPort = 443,
+            onFatal = { fail("no fatal expected: $it") },
             bindUdp = { _, _, _, _ -> FAKE_FD },
+            closeFd = { closed.add(it) },
         )
 
-        // Reaching addPathFd triggers NativeBridge <clinit> →
-        // System.loadLibrary("mqvpn_jni") → UnsatisfiedLinkError in unit-test JVM.
-        // Catching it proves the abort branch was NOT taken.
-        var nativeReached = false
-        try {
-            pm.handleEvent(NetworkEvent.Available(path))
-        } catch (e: UnsatisfiedLinkError) {
-            nativeReached = true
-        } catch (e: NoClassDefFoundError) {
-            nativeReached = true
-        } catch (e: ExceptionInInitializerError) {
-            nativeReached = true
+        // The abort branch is NOT taken: addPath is reached. The destroyed
+        // dummy tunnel answers -1 without a JNI call, so the manager takes
+        // the add-failure branch — the fd it still owns gets closed.
+        pm.handleEvent(NetworkEvent.Available(path))
+        assertEquals("addPath failed → the fd is closed by its owner", listOf(FAKE_FD), closed)
+        assertTrue(readPathHandles(pm).isEmpty())
+    }
+
+    @Test
+    fun `Lost removes the path, closes its fd and clears the ledger`() = runBlocking {
+        val monitor = NetworkMonitor(RuntimeEnvironment.getApplication())
+        val closed = mutableListOf<Int>()
+        val pm = PathManager(
+            executor = syncExecutor,
+            tunnel = createDummyTunnel(),
+            networkMonitor = monitor,
+            protector = { true },
+            serverHost = "1.2.3.4",
+            serverPort = 443,
+            onFatal = { fail("no fatal expected: $it") },
+            bindUdp = { _, _, _, _ -> FAKE_FD },
+            closeFd = { closed.add(it) },
+        )
+        val net = newNetwork(netId = 500)
+        val path = NetworkPath(net, PathType.WIFI, "wifi-500", isMetered = false)
+        // A registered path (ledger entries injected: the dummy tunnel cannot add one).
+        injectLedger(pm, net, handle = 42L, fd = FAKE_FD)
+
+        pm.handleEvent(NetworkEvent.Lost(path))
+
+        assertEquals("the platform closes its own fd", listOf(FAKE_FD), closed)
+        assertTrue("handle dropped from the ledger", readPathHandles(pm).isEmpty())
+        assertTrue("fd dropped from the ledger", readPathFds(pm).isEmpty())
+    }
+
+    @Test
+    fun `bad fd - ledger cleared without a close and no fatal`() = runBlocking {
+        val monitor = NetworkMonitor(RuntimeEnvironment.getApplication())
+        val closed = mutableListOf<Int>()
+        val fatal = mutableListOf<String>()
+        val pm = PathManager(
+            executor = syncExecutor,
+            tunnel = createDummyTunnel(),
+            networkMonitor = monitor,
+            protector = { true },
+            serverHost = "1.2.3.4",
+            serverPort = 443,
+            onFatal = { fatal.add(it) },
+            bindUdp = { _, _, _, _ -> FAKE_FD },
+            closeFd = { closed.add(it) },
+        )
+        val net = newNetwork(netId = 300)
+        // A registered path (ledger entries injected: the dummy tunnel cannot add one).
+        injectLedger(pm, net, handle = 42L, fd = FAKE_FD)
+
+        pm.handleBadFd(42L)
+
+        assertTrue("handle dropped from the ledger", readPathHandles(pm).isEmpty())
+        assertTrue("fd dropped from the ledger", readPathFds(pm).isEmpty())
+        assertTrue("the number may belong to another socket: never closed here, got $closed", closed.isEmpty())
+        // The destroyed dummy tunnel answers INVALID_STATE, not POISONED: no fatal.
+        assertTrue("no fatal, got $fatal", fatal.isEmpty())
+    }
+
+    @Test
+    fun `poisoned release ends the session`() = runBlocking {
+        val monitor = NetworkMonitor(RuntimeEnvironment.getApplication())
+        val fatal = mutableListOf<String>()
+        val tunnel = createDummyTunnel()
+        val pm = PathManager(
+            executor = syncExecutor,
+            tunnel = tunnel,
+            networkMonitor = monitor,
+            protector = { true },
+            serverHost = "1.2.3.4",
+            serverPort = 443,
+            onFatal = { fatal.add(it) },
+            bindUdp = { _, _, _, _ -> FAKE_FD },
+            closeFd = { },
+        )
+        // checkReleased is the seam that maps the reactor's code to the policy.
+        pm.checkReleased(com.mqvpn.sdk.native_.NativeBridge.REACTOR_POISONED, "wifi-1")
+        assertEquals(1, fatal.size)
+        assertTrue(fatal[0], fatal[0].contains("poisoned"))
+        pm.checkReleased(0, "wifi-1")
+        pm.checkReleased(-13, "wifi-1")
+        assertEquals("only POISONED is fatal", 1, fatal.size)
+    }
+
+    @Test
+    fun `executor stopped during bind - the fd is closed and nothing is registered`() = runBlocking {
+        val monitor = NetworkMonitor(RuntimeEnvironment.getApplication())
+        val net = newNetwork(netId = 400)
+        val path = NetworkPath(net, PathType.WIFI, "wifi-400", isMetered = false)
+        injectActiveNetwork(monitor, net, path)
+        val stoppedExecutor = object : MqvpnExecutor {
+            override suspend fun <T> call(block: () -> T): T = throw ExecutorStoppedException()
+            override fun enqueue(block: () -> Unit) {}
+            override fun start() {}
+            override fun stop(finalizer: () -> Unit) { finalizer() }
         }
-        assertTrue("addPathFd JNI call should have been attempted", nativeReached)
+        val closed = mutableListOf<Int>()
+        val pm = PathManager(
+            executor = stoppedExecutor,
+            tunnel = createDummyTunnel(),
+            networkMonitor = monitor,
+            protector = { true },
+            serverHost = "1.2.3.4",
+            serverPort = 443,
+            onFatal = { fail("no fatal expected: $it") },
+            bindUdp = { _, _, _, _ -> FAKE_FD },
+            closeFd = { closed.add(it) },
+        )
+        pm.handleEvent(NetworkEvent.Available(path))   // must not throw
+        assertEquals("the bound fd is still ours: closed", listOf(FAKE_FD), closed)
+        assertTrue(readPathHandles(pm).isEmpty())
+        pm.handleEvent(NetworkEvent.Lost(path))        // must not throw either
+        assertEquals("a refused Lost closes nothing", listOf(FAKE_FD), closed)
     }
 
     private fun newNetwork(netId: Int): Network {
@@ -126,6 +239,19 @@ class PathManagerRaceTest {
         val field = PathManager::class.java.getDeclaredField("pathHandles")
         field.isAccessible = true
         return field.get(pm) as Map<Network, Long>
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun readPathFds(pm: PathManager): Map<Long, Int> {
+        val field = PathManager::class.java.getDeclaredField("pathFds")
+        field.isAccessible = true
+        return field.get(pm) as Map<Long, Int>
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun injectLedger(pm: PathManager, network: Network, handle: Long, fd: Int) {
+        (readPathHandles(pm) as MutableMap<Network, Long>)[network] = handle
+        (readPathFds(pm) as MutableMap<Long, Int>)[handle] = fd
     }
 
     @Suppress("UNCHECKED_CAST")
