@@ -77,11 +77,12 @@ typedef struct {
 #endif
     /* Receive-side telemetry: cumulative PLATFORM totals. The bind counts per
      * transport ctx on every POSIX platform and those counters die with the
-     * ctx, so the release sites (netmon_common.c) and the teardown harvest
+     * ctx, so the release sites (netmon_common.c) and, on Linux, the teardown harvest
      * fold each ctx's totals in here — while the bind keeps the per-ctx
      * originals. Only Linux prints them, in the udp-rx line: the sockopt log
      * proves GRO was requested, only gro_datagrams > gro_receives proves the
-     * kernel actually coalesced. Darwin accumulates them but reports nothing. */
+     * kernel actually coalesced. Darwin accumulates only what the release sites
+     * add and reports nothing. */
     uint64_t gro_receives;  /* receives whose data was DELIVERED —
                              * truncated-dropped and drained-but-undelivered
                              * receives count toward neither counter, so the

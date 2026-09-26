@@ -3,7 +3,7 @@
 
 /* tests/test_bind_winsock.c — mqvpn_bind_winsock: the constructor contract,
  * the send error mapping (through a sendto/calloc seam — a healthy loopback
- * socket never fails) and the send/drain round trip over real loopback
+ * socket does not fail here) and the send/drain round trip over real loopback
  * sockets. Windows CI only. Links the bind alone: the delivery target below
  * is a stub, so no core, xquic or TLS is involved. Own CHECK, not assert():
  * the Windows job builds Release. */
@@ -65,7 +65,7 @@ script(int n, const int *errs)
     g_sendto_calls = 0;
 }
 
-/* ── delivery stub (the bind's only call into libmqvpn) ── */
+/* ── delivery stub (the bind's only call into the core) ── */
 
 #define MAX_RX 16
 static struct {

@@ -27,7 +27,7 @@
 #  include <stdlib.h>
 #  include <string.h>
 
-/* UDP receive budget per readable event (same as the TUN read loop) */
+/* UDP receive budget per readable event */
 #  define BULK_READ_COUNT 64
 
 /* ── Global for Ctrl+C handler (single-instance) ── */

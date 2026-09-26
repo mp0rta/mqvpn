@@ -1431,6 +1431,7 @@ cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_data)
     mqvpn_client_t *c = conn->client;
 
     int err = xqc_h3_conn_get_errno(h3_conn);
+    /* Grepped by scripts/ci_transport_smoke.py (VN_REACTION): reword it there too. */
     LOG_I(c, "connection closed (errno=%d)", err);
 
     /* Notify platform (skip if a pre-establishment failure already fired). */

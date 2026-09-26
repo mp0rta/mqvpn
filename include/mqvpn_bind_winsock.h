@@ -55,8 +55,8 @@ MQVPN_API void mqvpn_bind_winsock_path_free(void *ctx);
  * made (one unit each), pushing every datagram to
  * mqvpn_client_on_socket_recv (handle < 0: drains without delivering).
  * Returns the number of receives (>= 0), or -1 when a receive failed with
- * anything but WSAEWOULDBLOCK — WSAECONNRESET included, which is how Winsock
- * reports an ICMP port-unreachable for an earlier send. A zero-length
+ * anything but WSAEWOULDBLOCK or WSAEINTR (retried) — WSAECONNRESET included, which
+ * is how Winsock reports an ICMP port-unreachable for an earlier send. A zero-length
  * datagram also ends the drain. client must be non-NULL (-1 otherwise). */
 MQVPN_API int mqvpn_bind_winsock_path_drain(void *ctx, mqvpn_client_t *client,
                                             mqvpn_path_handle_t handle, int budget);

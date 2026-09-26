@@ -23,6 +23,7 @@
 #  include "route_mon.h"
 #  include "netmon_common.h"
 #  include "log.h"
+#  include "mqvpn_bind_posix.h"
 #  include "compat/socket_compat.h"
 
 #  include <stdio.h>

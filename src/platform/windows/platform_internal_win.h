@@ -46,7 +46,8 @@ typedef struct {
     /* Bundled transport ctx per path slot (mqvpn_bind_winsock). Borrows
      * path_mgr.paths[i].fd; the library owns finalisation once add_path
      * succeeded, so this pointer is only a handle for the RX helper. NULL
-     * when the slot has no live transport. */
+     * once the library has finalised the ctx (path_released returned OK, or
+     * client_destroy); a refused release keeps it (still library-owned). */
     void *bind_ctx[MQVPN_MAX_PATHS];
 
     /* Path recovery accelerator (net_mon.c) */

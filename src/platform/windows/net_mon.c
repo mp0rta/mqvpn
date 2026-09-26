@@ -115,8 +115,8 @@ remove_path_by_index(platform_win_ctx_t *p, int idx, mqvpn_platform_reason_t rea
         /* INVALID_STATE: the library did not touch the ctx, which therefore
          * stays ATTACHED and library-owned — client_destroy will release it.
          * Never free it here (double free). INVALID_ARG cannot occur with a
-         * non-NULL bind_ctx (recycling a handle requires a prior successful
-         * release). */
+         * non-NULL bind_ctx (handles are never reused, and the library reuses a
+         * slot only after a successful release). */
         LOG_WRN("netmon: path_released for %s returned %s; transport stays "
                 "library-owned",
                 p->path_mgr.paths[idx].iface, mqvpn_error_string(rc));
@@ -611,7 +611,7 @@ try_readd_removed_path(platform_win_ctx_t *p, const char *ifname)
         if (found && st != MQVPN_PATH_CLOSED) continue;
 
         /* Definite "no FIB route to the server via this iface": re-adding
-         * now would SO_BINDTODEVICE the challenge into the kernel's
+         * now would pin the challenge (IP_UNICAST_IF) into the kernel's
          * assume-on-link ARP blackhole (sendto succeeds, nothing on the
          * wire). The 3s recovery timer retries once a route exists.
          * -1 (probe unavailable) intentionally passes — fail open. */

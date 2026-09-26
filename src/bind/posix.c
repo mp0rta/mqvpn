@@ -3,7 +3,8 @@
 
 /* src/bind/posix.c — bundled POSIX transport (see include/mqvpn_bind_posix.h).
  * The ONLY place in the library, together with posix_offload.c, that issues
- * socket syscalls. */
+ * socket syscalls, apart from the Linux-only hybrid server egress lane
+ * src/hybrid/tcp_egress.c (by design; the sans-I/O gate's named exclusion). */
 
 #define _GNU_SOURCE /* sendmmsg / struct mmsghdr via posix_offload.h (Linux) */
 #include "mqvpn_bind_posix.h"

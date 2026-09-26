@@ -63,7 +63,8 @@ mqvpn_tx_batch_enabled(int udp_gso)
  * mqvpn_server_destroy. ONE format definition so the two endpoints'
  * script-parsed wording (benchmarks/bench_stream_gso.sh,
  * scripts/ci_e2e/run_udp_gso_bench.sh, run_udp_gso_config_test.sh's
- * check_teardown_line) cannot drift — same hazard class the POSIX bind's
+ * check_teardown_line, the macOS/Windows CI smoke scripts/ci_transport_smoke.py)
+ * cannot drift — same hazard class the POSIX bind's
  * enablement-marker strings solve in src/bind/posix_offload.h.
  * Callers pass (sends, datagrams, gso_config) as PRIu64/PRIu64/int and
  * must include <inttypes.h>. */

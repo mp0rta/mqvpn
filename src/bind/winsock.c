@@ -3,7 +3,9 @@
 
 /* src/bind/winsock.c — bundled Winsock transport (see
  * include/mqvpn_bind_winsock.h). With src/bind/posix*.c, the only place in
- * the library that issues socket calls. */
+ * the library that issues socket calls, apart from the Linux-only hybrid
+ * server egress lane src/hybrid/tcp_egress.c (by design; the sans-I/O gate's
+ * named exclusion). */
 
 #include "mqvpn_bind_winsock.h"
 #include "log.h"

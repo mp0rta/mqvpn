@@ -33,7 +33,7 @@
         }                                                                         \
     } while (0)
 
-/* ── delivery stubs (the bind's only calls into libmqvpn) ── */
+/* ── delivery stubs (the bind's only calls into the core) ── */
 
 #define MAX_RX        16
 #define SERVER_HANDLE (-1000) /* marks a delivery through the server entry point */

@@ -59,8 +59,8 @@ extern unsigned g_fake_stateless_sends;
 const mqvpn_server_transport_ops_t *fake_server_ops(void);
 
 /* ── POSIX-bind-only ──
- * The recorder forwards to mqvpn_bind_posix_server_ops(), which does not exist
- * where MQVPN_BIND_SOURCES is empty (Windows, until mqvpn_bind_winsock lands).
+ * The recorder forwards to mqvpn_bind_posix_server_ops(), which exists only on
+ * POSIX: the Winsock bind has no server flavour (no server mode on Windows).
  * This file is linked into test targets that do not use the recorder at all
  * (test_api), so the guard keeps those free of the symbol. Targets that use the
  * recorder reference the bind directly anyway and stay POSIX-only. */

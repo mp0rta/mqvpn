@@ -115,7 +115,8 @@ remove_path_by_index(platform_ctx_t *p, int idx, mqvpn_platform_reason_t reason)
          * stays ATTACHED and library-owned — client_destroy will release it.
          * Never free it here (double free). Keep the pointer so the teardown
          * harvest still sees it. INVALID_ARG cannot occur with a non-NULL
-         * bind_ctx (recycling a handle requires a prior successful release). */
+         * bind_ctx (handles are never reused, and the library reuses a slot only
+         * after a successful release). */
         LOG_WRN("%s: path_released for %s returned %s; transport stays library-owned",
                 netmon_log_tag, p->path_mgr.paths[idx].iface, mqvpn_error_string(rc));
     }
@@ -377,7 +378,8 @@ recovery_rollback(platform_ctx_t *p, int slot, mqvpn_add_path_outcome_t outcome)
          * stays ATTACHED and library-owned — client_destroy will release it.
          * Never free it here (double free). Keep the pointer so the teardown
          * harvest still sees it. INVALID_ARG cannot occur with a non-NULL
-         * bind_ctx (recycling a handle requires a prior successful release). */
+         * bind_ctx (handles are never reused, and the library reuses a slot only
+         * after a successful release). */
         LOG_WRN("%s: path_released for %s returned %s; transport stays library-owned",
                 netmon_log_tag, ifname, mqvpn_error_string(rc));
     }
