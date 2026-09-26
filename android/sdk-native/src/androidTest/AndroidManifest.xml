@@ -5,5 +5,10 @@
          process in which PlatformTrust.verify runs. It trusts the fixture root
          (chain-root.der → @raw/chain_root) so one instrumented case can drive
          the real platform trust manager to a positive verdict. Test APK only. -->
+    <!-- ReactorJniSmokeTest opens a loopback UDP socket; without INTERNET the
+         test process is not in the inet group and socket(AF_INET) fails with
+         EPERM. Declared here, not in the library manifest, so the SDK does not
+         merge the permission into its consumers. -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <application android:networkSecurityConfig="@xml/test_network_security_config" />
 </manifest>
