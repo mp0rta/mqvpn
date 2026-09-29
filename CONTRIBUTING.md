@@ -18,8 +18,8 @@ with the standard two-line header:
 
 ## 2. Where to ask
 
-- Questions and ideas: GitHub Discussions, or the Discord community linked
-  from the README (section "Community").
+- Questions and ideas: use GitHub Discussions or the Discord community (the
+  link is in the README, section "Community").
 - Security vulnerabilities: report them privately through GitHub, not in an
   issue or a discussion. See [SECURITY.md](SECURITY.md).
 
@@ -62,15 +62,15 @@ Cases and a maintainer will.
 ## 5. Branches and pull requests
 
 - Create your branch from `main` and open the pull request against `main`,
-  the default in GitHub's pull request form. If your change belongs to a
-  series that a maintainer is collecting on `dev`, the maintainer will ask
-  you to target `dev` instead.
+  the default in GitHub's pull request form. If a maintainer wants your
+  change on `dev` instead, they will tell you.
 - For a bug fix, say which released version reproduces the bug.
 - Title: `type: subject` or `type(scope): subject` with a lowercase type,
   as the history uses. The xquic fork's `[T] subject` / `[T]: subject` form
   (T one of `+` add, `-` remove, `=` no behaviour change, `~` behaviour
-  change) is also accepted. Imperative mood, no trailing period, at most 72
-  characters. Squash merges reuse the title as the commit subject.
+  change) is also accepted. Write it as a command (`Add X`, not `Added X`),
+  with no trailing period and at most 72 characters. Squash merges reuse the
+  title as the commit subject.
 - Fill in the pull request template. To link an issue, write `Refs #123`.
   To close it automatically when the pull request merges into `main`, write
   `Fixes #123`.

@@ -189,16 +189,19 @@ INFO stays one level lower. Users who want xquic's detail use
 
 ## §6 WLB scheduler (2026-09)
 
-The WLB scheduler is production-grade: weights learned from acknowledged
-goodput, smooth weighted round-robin, inner-TCP flow pinning, and soft
-spillover when a pinned path is cwnd-blocked. `Scheduler = wlb_udp_pin` also
-pins inner UDP flows (by a 5-tuple hash) instead of spreading their packets
-across paths one by one. WLB's measured behaviour lives in the benchmark
-results, not here: see `docs/benchmarks_netns.md` and the benchmark pages on
-the website, which are regenerated as the implementation changes. Do not
-casually add BLEST/LLHD-style schedulers. For jitter-sensitive real-time
-streams (SRT/RTP), recommend `Scheduler = minrtt` instead of writing a new
-scheduler.
+The WLB scheduler is production-grade. It learns path weights from
+acknowledged goodput, spreads traffic with smooth weighted round-robin, pins
+each inner TCP flow to one path, and spills over softly when a pinned path
+is cwnd-blocked. `Scheduler = wlb_udp_pin` also pins inner UDP flows (by a
+5-tuple hash), so the packets of one flow are not spread across paths.
+
+WLB's measured performance is in the benchmark results: see
+`docs/benchmarks_netns.md` and the benchmark pages on the website, which are
+regenerated as the implementation changes.
+
+Do not casually add BLEST/LLHD-style schedulers. For jitter-sensitive
+real-time streams (SRT/RTP), recommend `Scheduler = minrtt` instead of
+writing a new scheduler.
 
 ## §7 The hybrid TCP lane is scheduled by MinRTT, not by WLB — by construction (2026-09)
 
@@ -221,10 +224,10 @@ single path cannot absorb the offered load. On an unshaped pair,
 100%-on-one-path is correct behaviour, so a load-share assertion must shape
 the legs (see Test 8 in `tests/test_e2e_hybrid_h2.sh`).
 
-Both the conceptual case and the measured one favour the MinRTT fallback for
-the stream lane, so the bar for moving it toward WLB is a measurement on a
-shaped multi-path pair that beats MinRTT — not an argument from symmetry with
-the datagram lane. Without that measurement, leave the lane on MinRTT.
+Both the reasoning and the measurements favour MinRTT for the stream lane.
+Move it toward WLB only if a measurement on a shaped multi-path pair shows
+WLB beating MinRTT; that the datagram lane uses WLB is not a reason on its
+own. Without that measurement, leave the lane on MinRTT.
 
 ## §8 Reorder buffer scope (2026-06)
 
@@ -288,9 +291,11 @@ loop), so there is no fixed path cap to raise. The only limit,
   `xqc_h3_ctx_destroy()` as well is a double free (ASan-verified).
 - MTU config upper bound stays 9000 until `max_pkt_out_size` becomes
   configurable (then raise to 9216).
-- Adding a config key = one row in the config descriptor table
-  (`src/config.c`) + one key in the parity test (`test_ini_json_scalar_parity`
-  in `tests/test_config.c`) + the key on the website configuration pages.
+- To add a config key:
+  - add one row to the config descriptor table in `src/config.c`;
+  - add one key to the parity test (`test_ini_json_scalar_parity` in
+    `tests/test_config.c`);
+  - add the key to the website configuration pages.
 - Benchmark outputs: `ci_sweep_results/` is transient (gitignored);
   `bench_results/` is the tracked archive for results worth keeping.
 
@@ -313,15 +318,16 @@ commits instead.
 
 ## §12 Fork divergence is re-paid at every upstream merge (2026-09)
 
-Upstream is tracked by periodic full merges, not cherry-picks, so **every
-line of divergence is paid again at every merge**. Weigh a fork-local change
-against that recurring cost: prefer a fix that can land upstream, then one
-confined to files upstream rarely touches; treat divergence in a widely
-edited public header as the expensive option. This is why WLB lives in
-`src/transport/scheduler/` behind `xqc_scheduler_callback_t` instead of
-spreading through `xqc_conn.c` / `xqc_send_ctl.c`. The only WLB hooks outside
-that directory are the datagram flow hash (`xqc_packet_out.c`) and the
-`on_app_packet_acked` callback (`xqc_send_ctl.c`).
+The fork follows upstream by periodic full merges, not cherry-picks, so
+**every line of divergence is paid for again at every merge**. Weigh a
+fork-local change against that recurring cost. The best fix is one that can
+land upstream; the next best touches only files upstream rarely changes.
+Divergence in a widely edited public header is the most expensive kind. This
+is why WLB lives in `src/transport/scheduler/` behind
+`xqc_scheduler_callback_t` instead of spreading through `xqc_conn.c` and
+`xqc_send_ctl.c`. The only WLB hooks outside that directory are the datagram
+flow hash (`xqc_packet_out.c`) and the `on_app_packet_acked` callback
+(`xqc_send_ctl.c`).
 
 ## §13 In the fork, ABI breaks are cheap and public API is not (2026-09)
 

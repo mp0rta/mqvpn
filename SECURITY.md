@@ -26,6 +26,6 @@ supported; older releases do not get security fixes.
 
 This policy covers mqvpn's own code, including the forks of xquic and lwIP
 bundled under `third_party/`. If you use mqvpn through OpenMPTCProuter,
-which builds it from its own fork, report problems in mqvpn's code here, and
-problems in OpenMPTCProuter's packaging or its own additions to the
+which builds it from its own fork, report problems in mqvpn's code here.
+Report problems in OpenMPTCProuter's packaging or in its own additions to the
 OpenMPTCProuter project.
