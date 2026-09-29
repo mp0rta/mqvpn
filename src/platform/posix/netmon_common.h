@@ -8,8 +8,9 @@
  * previously maintained as two hand-synchronized copies in Linux
  * netlink_mon.c and Darwin route_mon.c. The platform files keep only the
  * kernel-ABI layer ("Layer A": netlink vs PF_ROUTE event parsing, carrier
- * probes, socket setup) and provide the small adapter functions declared
- * below; everything else lives once in netmon_common.c.
+ * probes, socket pinning, the transport ctx) and provide the small adapter
+ * functions declared below; everything else lives once in netmon_common.c
+ * (the slot mechanics in path_table.c).
  *
  * Windows net_mon.c is NOT a consumer: it keys paths by interface LUID on
  * a different ctx type (platform_win_ctx_t) — unifying it is a separate,
@@ -41,11 +42,12 @@ extern const char *const netmon_log_tag;
  * Linux: SO_BINDTODEVICE (af unused); Darwin: IP_BOUND_IF/IPV6_BOUND_IF. */
 int netmon_platform_pin_socket(int fd, const char *ifname, sa_family_t af);
 
-/* Called after a re-add socket is fully created and pinned, before it is
- * registered with the library. Linux: re-applies UDP GRO (a re-added path
- * gets a brand-new fd, so the startup sockopt must be reproduced or the
- * path silently degrades to one datagram per recvmsg). Darwin: no-op. */
-void netmon_platform_socket_created(platform_ctx_t *p, int fd, const char *ifname);
+/* Build the transport ctx for a freshly created re-add socket — the POSIX
+ * bind, configured as at startup (Linux reproduces the GRO/GSO policy and
+ * logs the "udp-gro: ... re-added path" lines; Darwin has neither). Returns
+ * the ctx, or NULL on failure (already logged). The ctx is caller-owned
+ * until add_path succeeds. */
+void *netmon_platform_transport_create(platform_ctx_t *p, int fd, const char *ifname);
 
 /* Called inside netmon_try_readd_removed_path once a slot is resolved as a
  * genuine re-add candidate, before the socket is created. Darwin: restores
@@ -53,15 +55,15 @@ void netmon_platform_socket_created(platform_ctx_t *p, int fd, const char *ifnam
  * doesn't die with ENETUNREACH. Linux: no-op. */
 void netmon_platform_pre_readd(platform_ctx_t *p, const char *ifname);
 
-/* Called inside netmon_try_reactivate_by_ifname once a slot passes the
- * shared status gate, before mqvpn_client_reactivate_path(). Return 0 to
- * proceed, -1 to skip this slot (the shared layer moves on silently — the
- * adapter may log its own reason; Darwin's fd<0 guard rejects silently).
- * Darwin: skips fd<0 slots, re-applies the iface pin (ifindex may have
- * been renumbered) and the scoped server pin. Linux: always proceeds (the
- * library's own state gate rejects ineligible slots with INVALID_STATE,
- * which the shared layer swallows). */
-int netmon_platform_pre_reactivate(platform_ctx_t *p, int slot, const char *ifname);
+/* Called inside netmon_try_reactivate_by_ifname once a slot with a socket
+ * passes the shared status gate, before mqvpn_client_reactivate_path().
+ * Return 0 to proceed, -1 to skip this slot (the shared layer moves on
+ * silently — the adapter may log its own reason). Darwin: re-applies the
+ * iface pin (ifindex may have been renumbered) and the scoped server pin.
+ * Linux: always proceeds (the library's own state gate rejects ineligible
+ * slots with INVALID_STATE, which the shared layer swallows). */
+int netmon_platform_pre_reactivate(platform_ctx_t *p, platform_path_t *s,
+                                   const char *ifname);
 
 /* Called at the top of recover_dropped_paths_cb, before the lib-state
  * query. Returns nonzero if it may have dropped/changed paths — in that
@@ -78,8 +80,9 @@ int netmon_platform_pre_scan(platform_ctx_t *p);
  * ("interface <if> <reason>, closing path"). */
 const char *netmon_drop_reason_str(mqvpn_platform_reason_t reason);
 
-/* Drop every tracked path on `ifname` (PLATFORM_DROP + fd close + lib
- * notify). Returns the number of paths matched. */
+/* Drop every tracked path on `ifname` (PLATFORM_DROP + socket close + lib
+ * notify; a refused release stops the process). Returns the number of
+ * paths matched. */
 int netmon_drop_paths_by_ifname(platform_ctx_t *p, const char *ifname,
                                 mqvpn_platform_reason_t reason);
 
@@ -90,11 +93,11 @@ int netmon_iface_is_up_and_running(const char *ifname);
  * -1 = getifaddrs failed (callers fail safe — see netmon_common.c). */
 int netmon_iface_has_usable_ip(const char *ifname, sa_family_t af);
 
-/* Reactivate DEGRADED/CLOSED slots on `ifname` (fd still owned). */
+/* Reactivate DEGRADED/CLOSED slots on `ifname` that still own a socket. */
 void netmon_try_reactivate_by_ifname(platform_ctx_t *p, const char *ifname);
 
-/* Re-add slots whose lib state is CLOSED (fd was closed on drop).
- * Returns 1 if a path was re-added. */
+/* Re-add slots on `ifname` without a socket whose library incarnation is
+ * gone (path_readd.h). Returns 1 if a path was re-added. */
 int netmon_try_readd_removed_path(platform_ctx_t *p, const char *ifname);
 
 /* Shared decision tail of the DELADDR handlers: drop `ifname`'s paths as

@@ -39,7 +39,11 @@ include_directories(
 # JNI shared library
 # LINKER_LANGUAGE CXX: BoringSSL (libssl.a) is C++ and needs clang++ for linking
 # to resolve C++ ABI symbols (__cxa_begin_catch, __gxx_personality_v0, etc.)
-add_library(mqvpn_jni SHARED mqvpn_jni.c)
+# The reactor is platform code shared with the Linux host test
+# (tests/test_android_reactor); it is never part of libmqvpn.a.
+add_library(mqvpn_jni SHARED
+    mqvpn_jni.c
+    ${MQVPN_ROOT}/src/platform/android/reactor.c)
 set_target_properties(mqvpn_jni PROPERTIES LINKER_LANGUAGE CXX)
 
 target_link_libraries(mqvpn_jni
@@ -50,3 +54,11 @@ target_link_libraries(mqvpn_jni
     crypto
     log           # Android __android_log_print
     c++_static)   # BoringSSL is C++ — needs libc++ for vtable/RTTI/exceptions
+
+# Test-only JNI entry points (NativeBridgeTestSeams, debug source set). The
+# debug build type passes -DMQVPN_JNI_TEST_SEAMS=ON from build.gradle.kts;
+# release compiles none of them.
+option(MQVPN_JNI_TEST_SEAMS "Compile test-only JNI entry points" OFF)
+if(MQVPN_JNI_TEST_SEAMS)
+    target_compile_definitions(mqvpn_jni PRIVATE MQVPN_JNI_TEST_SEAMS=1)
+endif()

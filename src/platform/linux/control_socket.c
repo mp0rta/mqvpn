@@ -93,10 +93,11 @@ struct ctrl_socket_s {
     struct event *ev_accept;
     struct event_base *eb;
     mqvpn_server_t *server;
-    /* Borrowed platform-owned RX offload counters; see ctrl_socket_create's
-     * doc for why these do not travel through mqvpn_stats_t. NULL = report 0. */
-    const uint64_t *gro_receives;
-    const uint64_t *gro_datagrams;
+    /* Getter into the platform's transport ctx for the RX offload counters;
+     * see ctrl_socket_create's doc for why these do not travel through
+     * mqvpn_stats_t. NULL fn = report 0. */
+    ctrl_rx_stats_fn rx_stats;
+    void *rx_ctx;
     int n_conns; /* active control connections */
 };
 
@@ -171,6 +172,8 @@ ctrl_cmd_get_stats(const char *req, char *resp, size_t resp_len, ctrl_socket_t *
     mqvpn_server_get_stats(server, &st);
     int nc = mqvpn_server_get_n_clients(server);
     uint64_t uptime = mqvpn_server_uptime_seconds(server);
+    uint64_t rx_receives = 0, rx_datagrams = 0;
+    if (cs->rx_stats) cs->rx_stats(cs->rx_ctx, &rx_receives, &rx_datagrams);
     return snprintf(
         resp, resp_len,
         "{\"ok\":true,\"n_clients\":%d,"
@@ -182,11 +185,12 @@ ctrl_cmd_get_stats(const char *req, char *resp, size_t resp_len, ctrl_socket_t *
         "\"tcp_flows_active\":%" PRIu64 ",\"tcp_flows_total\":%" PRIu64 ","
         "\"tcp_flows_rejected\":%" PRIu64 ",\"raw_markers_active\":%" PRIu64 ","
         /* udp_tx_* from the library (it issues those sends); udp_rx_* from the
-         * platform (GRO never crosses the library ABI). datagrams/sends and
-         * datagrams/receives are the achieved batching and coalescing factors
-         * — 1.0 means every datagram cost its own syscall, which the one-shot
-         * "udp-gso:"/"udp-gro:" startup markers cannot distinguish because
-         * they only report the kernel capability probe. */
+         * platform's transport getter (RX offload never crosses the library
+         * ABI). datagrams/sends and datagrams/receives are the achieved
+         * batching and coalescing factors — 1.0 means every datagram cost
+         * its own syscall, which the one-shot "udp-gso:"/"udp-gro:" startup
+         * markers cannot distinguish because they only report the kernel
+         * capability probe. */
         "\"udp_tx_sends\":%" PRIu64 ",\"udp_tx_datagrams\":%" PRIu64 ","
         "\"udp_rx_receives\":%" PRIu64 ",\"udp_rx_datagrams\":%" PRIu64 ","
         "\"uptime_sec\":%" PRIu64 "}",
@@ -194,8 +198,7 @@ ctrl_cmd_get_stats(const char *req, char *resp, size_t resp_len, ctrl_socket_t *
         st.dgram_acked, st.pkts_lane_tcp, st.pkts_lane_dgram, st.pkts_lane_raw,
         st.pkts_lane_tcp_dropped, st.tcp_flows_active, st.tcp_flows_total,
         st.tcp_flows_rejected, st.raw_markers_active, st.udp_tx_sends,
-        st.udp_tx_datagrams, cs->gro_receives ? *cs->gro_receives : 0,
-        cs->gro_datagrams ? *cs->gro_datagrams : 0, uptime);
+        st.udp_tx_datagrams, rx_receives, rx_datagrams, uptime);
 }
 
 static int
@@ -643,8 +646,7 @@ ctrl_on_accept(evutil_socket_t fd, short what, void *arg)
 
 ctrl_socket_t *
 ctrl_socket_create(struct event_base *eb, const char *addr, int port,
-                   mqvpn_server_t *server, const uint64_t *gro_receives,
-                   const uint64_t *gro_datagrams)
+                   mqvpn_server_t *server, ctrl_rx_stats_fn rx_stats, void *rx_ctx)
 {
     if (!eb || port <= 0 || port > 65535 || !server) return NULL;
 
@@ -660,9 +662,9 @@ ctrl_socket_create(struct event_base *eb, const char *addr, int port,
     if (!cs) return NULL;
     cs->eb = eb;
     cs->server = server;
-    /* Borrowed, not copied — the platform ctx outlives this socket. */
-    cs->gro_receives = gro_receives;
-    cs->gro_datagrams = gro_datagrams;
+    /* Borrowed getter — the platform ctx outlives this socket. */
+    cs->rx_stats = rx_stats;
+    cs->rx_ctx = rx_ctx;
 
     /* Determine address family */
     struct sockaddr_in sin4;

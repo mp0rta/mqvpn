@@ -34,6 +34,8 @@ IP_A_SERVER="10.100.0.1/24"
 IP_B_CLIENT="10.200.0.2/24"
 IP_B_SERVER="10.200.0.1/24"
 IP_A_SERVER_ADDR="10.100.0.1"
+IP_A_SUBNET="10.100.0.0/24"
+IP_B_SERVER_ADDR="10.200.0.1"
 TUNNEL_SERVER_IP="10.0.0.1"
 VPN_LISTEN_PORT="4433"
 CI_BENCH_SCHEDULER="${CI_BENCH_SCHEDULER:-wlb}"
@@ -74,6 +76,26 @@ ci_bench_cleanup_stale() {
     ip netns del "$NS_CLIENT" 2>/dev/null || true
     ip link del "$VETH_A0" 2>/dev/null || true
     ip link del "$VETH_B0" 2>/dev/null || true
+}
+
+# ── Path B route to the server ──
+
+# Backup route on the client so Path B can carry traffic to the server
+# address even when Path A is down. metric 200 keeps it as a fallback under
+# normal conditions. It is also what the client's path re-add gate
+# (route_check.c, RTM_F_FIB_MATCH) requires: without a FIB route via B the
+# gate defers the re-add forever, even though a SO_BINDTODEVICE socket would
+# still send through the kernel's on-link fallback. A benchmark that faults
+# Path B must call this again on recovery.
+#
+# `replace`, not `add`: an admin down flushes every route through the link
+# while a carrier loss keeps them and only flags them linkdown, so `add`
+# would succeed in one case and fail with EEXIST in the other. `replace`
+# states the intent ("this route must exist now") for both, which is what
+# lets callers drop the `|| true` that would otherwise hide a real failure.
+ci_bench_add_path_b_route() {
+    ip netns exec "$NS_CLIENT" ip route replace "$IP_A_SUBNET" via "$IP_B_SERVER_ADDR" \
+        dev "$VETH_B0" metric 200
 }
 
 # ── Network namespace setup ──
@@ -132,15 +154,15 @@ ci_bench_setup_netns() {
     # repair symbols on STANDBY, failover after Path A loss).
     ip netns exec "$NS_SERVER" ip addr add "${IP_A_SERVER_ADDR}/32" dev lo
 
-    # Backup route on the client so Path B can carry traffic to the server
-    # address even when Path A is down. metric 200 keeps it as a fallback
-    # under normal conditions.
-    ip netns exec "$NS_CLIENT" ip route add 10.100.0.0/24 via 10.200.0.1 \
-        dev "$VETH_B0" metric 200
+    ci_bench_add_path_b_route
 
     # Verify
     ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$IP_A_SERVER_ADDR" >/dev/null
-    ip netns exec "$NS_CLIENT" ping -c 1 -W 1 10.200.0.1 >/dev/null
+    ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$IP_B_SERVER_ADDR" >/dev/null
+    # The exact FIB query the client's path re-add gate performs
+    # (src/platform/linux/route_check.c). A ping via B cannot tell the
+    # difference (the kernel's on-link fallback also answers), this can.
+    ip netns exec "$NS_CLIENT" ip route get "$IP_A_SERVER_ADDR" oif "$VETH_B0" fibmatch >/dev/null
 
     echo "OK: netns created"
 }

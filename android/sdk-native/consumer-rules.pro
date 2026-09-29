@@ -6,3 +6,10 @@
 -keepclassmembers class * implements **.TunnelCallbacks {
     void onNative*(...);
 }
+
+# JNI upcall: PlatformTrust.verify is resolved by literal name in JNI_OnLoad
+# (mqvpn_jni.c). Keep exactly that member; the internal helpers stay strippable.
+-keep class com.mqvpn.sdk.native_.PlatformTrust
+-keepclassmembers class com.mqvpn.sdk.native_.PlatformTrust {
+    public static java.lang.String verify(byte[][], java.lang.String);
+}

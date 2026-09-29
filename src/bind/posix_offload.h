@@ -5,8 +5,8 @@
  * (TX) and GRO-coalesced receive used by the platform read loops (RX). Pure
  * syscall/mechanics layer — no xquic types, no client or server state.
  * (issue #167) */
-#ifndef MQVPN_UDP_OFFLOAD_H
-#define MQVPN_UDP_OFFLOAD_H
+#ifndef MQVPN_BIND_POSIX_OFFLOAD_H
+#define MQVPN_BIND_POSIX_OFFLOAD_H
 
 #if defined(__linux__)
 
@@ -16,13 +16,13 @@
 #  include <sys/uio.h>
 
 #  ifdef MQVPN_OFFLOAD_TEST_SEAM
-/* Fault-injection seam for unit tests: tests/test_udp_offload.c DEFINES these
+/* Fault-injection seam for unit tests: tests/test_bind_posix_offload.c DEFINES these
  * symbols; declaring them here (rather than as .c-local prototypes) makes
  * those definitions compiler-checked against the exact signatures
- * src/udp_offload.c maps OFFLOAD_SENDMSG/OFFLOAD_SENDMMSG to. Never defined
- * outside the test_udp_offload target. struct mmsghdr requires _GNU_SOURCE,
- * which every TU that reaches this header (src/udp_offload.c,
- * tests/test_udp_offload.c) already #defines before its first #include. */
+ * src/bind/posix_offload.c maps OFFLOAD_SENDMSG/OFFLOAD_SENDMMSG to. Never defined
+ * outside the test_bind_posix_offload target. struct mmsghdr requires _GNU_SOURCE,
+ * which every TU that reaches this header (src/bind/posix_offload.c,
+ * tests/test_bind_posix_offload.c) already #defines before its first #include. */
 ssize_t mqvpn_seam_sendmsg(int fd, const struct msghdr *msg, int flags);
 int mqvpn_seam_sendmmsg(int fd, struct mmsghdr *msgvec, unsigned int vlen, int flags);
 ssize_t mqvpn_seam_recvmsg(int fd, struct msghdr *msg, int flags);
@@ -45,6 +45,15 @@ ssize_t mqvpn_seam_recvmsg(int fd, struct msghdr *msg, int flags);
  * (Kernel property; callers store the result per client/server instance —
  * no global cache: probing is idempotent and engine creation is rare.) */
 int mqvpn_udp_gso_probe(void);
+
+/* Startup capability marker, emitted once per process by the POSIX bind the
+ * first time a ctx with GSO allowed is constructed. The "udp-gso: " wording
+ * is grepped by scripts/ci_e2e/run_udp_gso_config_test.sh as a
+ * presence/absence invariant (absent when UdpGso=false) and by
+ * run_udp_gso_bench.sh; the two strings stay byte-identical for client and
+ * server because both log from this one definition. */
+#  define MQVPN_UDP_GSO_MARKER_ENABLED     "udp-gso: GSO enabled"
+#  define MQVPN_UDP_GSO_MARKER_UNAVAILABLE "udp-gso: GSO unavailable, using sendmmsg"
 
 /* TX counters accumulated by mqvpn_udp_send_batch() over one socket's
  * lifetime. `datagrams / sends` is the achieved batching factor: 1.0 means
@@ -71,7 +80,7 @@ size_t mqvpn_gso_run_len(const struct iovec *iov, size_t cnt);
  *   - use_gso != 0 and *gso_disabled == 0: one sendmsg + UDP_SEGMENT cmsg
  *     per run (single-datagram runs skip the cmsg); GSO-class errors
  *     (EIO/EINVAL/ENOTSUP/EMSGSIZE — the last because GSO segments must fit
- *     the route PMTU while plain sends fragment locally, see udp_offload.c)
+ *     the route PMTU while plain sends fragment locally, see posix_offload.c)
  *     set *gso_disabled to the classifying errno (nonzero — the caller's
  *     one-shot fallback log reads it for the reason) and, iff nothing was
  *     sent yet, the whole batch is retried via sendmmsg within this call.
@@ -144,4 +153,4 @@ ssize_t mqvpn_udp_recv_segmented(int fd, void *buf, size_t buflen, struct sockad
                                  socklen_t *peerlen, size_t *seg_size);
 
 #endif /* __linux__ */
-#endif /* MQVPN_UDP_OFFLOAD_H */
+#endif /* MQVPN_BIND_POSIX_OFFLOAD_H */

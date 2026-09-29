@@ -7,9 +7,12 @@
  * test_path_state_machine test target. NOT part of the public ABI —
  * never included from libmqvpn.h.
  *
- * Include policy (PR4 lint will enforce):
- *   ALLOWED:    mqvpn_client.c, path_state_machine.c, tests/test_path_state_machine.c
- *   FORBIDDEN:  platform layer, scheduler, public headers, all other modules
+ * Include policy (enforced by scripts/lint/check_lifecycle_field_writes.sh):
+ *   ALLOWED:    mqvpn_client.c, path_state_machine.h (which re-exports it to
+ *               path_state_machine.c), tests/test_path_state_machine.c
+ *   FORBIDDEN:  everything else - platform layers, binds, scheduler, public
+ *               headers, other modules and tests - and #including any .c
+ *               file named above as a translation unit
  *
  * Promoting this header is a deliberate PR1 tradeoff for testability.
  * Phase 4 reduces direct field access via the path_on_event() aggregator. */
@@ -49,12 +52,21 @@ typedef enum {
 
 typedef struct path_entry_s {
     mqvpn_path_handle_t handle;
-    int fd;
+    /* Transport (ABI 3). ops is the copied table (send != NULL iff a
+     * transport is installed); transport_ctx is an opaque payload — NULL is a
+     * legal value and never a lifecycle signal. The two flags are the
+     * lifecycle evidence:
+     *   transport_attached  platform currently provides I/O for this slot
+     *   transport_released  no ctx is owed a release (fresh slot, or the ctx
+     *                       was finalised after the platform stopped I/O) */
+    mqvpn_path_ops_t ops;
+    void *transport_ctx;
+    int transport_attached;
+    int transport_released;
     char name[16];
     mqvpn_path_status_t status;
-    path_lifecycle_t state; /* PR2 — internal 7-state, must satisfy:
+    path_lifecycle_t state; /* PR2 — internal 9-state, must satisfy:
                                status == path_public_status_from_lifecycle(state) */
-    int platform_attached;  /* PR0 rename of `active` */
     struct sockaddr_storage local_addr;
     uint32_t local_addr_len;
     int64_t platform_net_id;
@@ -69,9 +81,6 @@ typedef struct path_entry_s {
     uint64_t path_stable_since_us;
     uint64_t state_entered_at_us;       /* PR1 — Phase 1 observability */
     uint64_t last_residence_warn_at_us; /* PR1 — residence-warn debounce, used in B10 */
-    int gso_disabled;                   /* runtime sticky: 0 = GSO usable, else the
-                                         * GSO-class errno that disabled it (see
-                                         * udp_offload.h); reset on fd assignment */
 } path_entry_t;
 
 #endif /* MQVPN_PATH_ENTRY_INTERNAL_H */

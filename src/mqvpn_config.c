@@ -542,6 +542,16 @@ mqvpn_config_set_clock(mqvpn_config_t *cfg, mqvpn_clock_fn clock_fn, void *clock
 }
 
 int
+mqvpn_config_set_cert_verifier(mqvpn_config_t *cfg, mqvpn_cert_verify_fn fn, void *ctx)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->cert_verify_fn = fn;
+    cfg->cert_verify_ctx =
+        fn ? ctx : NULL; /* no dangling ctx behind a cleared verifier */
+    return MQVPN_OK;
+}
+
+int
 mqvpn_config_set_listen(mqvpn_config_t *cfg, const char *addr, int port)
 {
     if (!cfg || !addr) return MQVPN_ERR_INVALID_ARG;

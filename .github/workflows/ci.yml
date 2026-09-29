@@ -123,6 +123,11 @@ jobs:
                 -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
           make -j$(nproc)
 
+      # Needs the resolved mqvpn_lib source list, which the configure inside
+      # "Build mqvpn" writes to build/mqvpn_lib_sources.txt.
+      - name: Sans-I/O core gate
+        run: bash scripts/lint/check_sansio_core.sh build
+
       - name: Unit tests (ctest)
         run: cd build && ctest --output-on-failure
 
@@ -299,19 +304,32 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_validation_blackhole_test.sh
 
-      # The one NEGATIVE suite in this recovery family: every sibling above
-      # proves drop -> successful re-add; this one proves re-add is REFUSED
-      # while the iface has an address but no route to the server. A
-      # regression that weakens that gate passes every other suite (their
-      # ifaces always have routes) while re-adding paths into the kernel's
-      # assume-on-link ARP blackhole on multi-homed routers. Also the only
-      # coverage of timer-driven recovery from a change (route appearing)
-      # that emits no netlink event, and of the deferral log marker.
+      # The route gate's NEGATIVE suite in this recovery family: every
+      # sibling above proves drop -> successful re-add; this one proves
+      # re-add is REFUSED while the iface has an address but no route to the
+      # server, and the recycled-slot suite below re-checks that refusal. A
+      # regression that weakens that gate passes every suite but these two
+      # (no other suite checks the refusal) while re-adding paths into the
+      # kernel's assume-on-link ARP blackhole on multi-homed routers. The two
+      # are also the only suites that deliberately cover timer-driven
+      # recovery from a change (route appearing) that emits no netlink event
+      # the client listens for, and the only ones that grep the deferral log
+      # marker.
       - name: E2E route-gate re-add deferral test (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_route_gate_test.sh
+
+      # Timer-driven re-add of a path whose library slot another path's
+      # re-add recycled: its old handle is gone from get_paths(), and its
+      # route returns with no netlink event, so only the recovery timer can
+      # bring it back.
+      - name: E2E re-add after library slot recycle test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_readd_recycled_slot_test.sh
 
       # Reorder shim end to end (~30s): the unit tests cover the engine in
       # isolation; only this suite exercises the client<->server negotiation
@@ -412,6 +430,16 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_udp_gso_config_test.sh
+
+      # The abort path reaches exit() for the first time, so this is where the
+      # sanitizers get to see it. The client under test exits non-zero by
+      # design; the suite keeps it away from stop_and_check_sanitizer and
+      # asserts the status and the absence of sanitizer reports itself.
+      - name: E2E setup-abort exit test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_setup_abort_exit_test.sh
 
   msan:
     runs-on: ubuntu-latest
@@ -535,6 +563,9 @@ jobs:
 
       - name: Smoke test (netns)
         run: sudo scripts/ci_e2e/run_test.sh
+
+      - name: Setup-abort exit test (netns)
+        run: sudo scripts/ci_e2e/run_setup_abort_exit_test.sh
 
       - name: Multi-client test (netns)
         run: sudo scripts/ci_e2e/test_multiclient.sh
@@ -713,7 +744,7 @@ jobs:
             --target mqvpn_lib mqvpn_shared mqvpn_darwin_platform \
                      mqvpn test_route_parse_darwin test_dns_backup_darwin \
                      test_dns_state_darwin test_routing_seq_darwin test_killswitch_rules_darwin \
-                     test_tcp_lane test_config test_conn_settings \
+                     test_tcp_lane test_config test_conn_settings test_bind_posix_socket \
             -j "$(sysctl -n hw.ncpu)"
 
       - name: Verify artifacts
@@ -722,7 +753,28 @@ jobs:
           file -L build-darwin/*.dylib
 
       - name: Run Darwin unit tests
-        run: ctest --test-dir build-darwin --output-on-failure
+        run: ctest --test-dir build-darwin --no-tests=error --output-on-failure
+
+      # The Darwin platform's transport wiring on a real runner: the client's
+      # first QUIC Initial must leave through the POSIX bind and reach a local
+      # listener, the listener's Version Negotiation reply must come back in
+      # through the bind's receive helper (the client abandons the attempt),
+      # and SIGTERM must run the whole teardown (the core prints its udp-tx
+      # line from client_destroy). No server and no utun — the handshake never
+      # completes. sudo: the client takes /var/run/mqvpn.lock and flushes its
+      # pf anchor at start.
+      - name: Transport smoke (Initial out, Version Negotiation back in)
+        run: python3 scripts/ci_transport_smoke.py --sudo --graceful build-darwin/mqvpn
+
+      # For on-machine checks the runner cannot do (a real server, interface
+      # drop/re-add). Links Homebrew's libevent dynamically: the target Mac
+      # needs `brew install libevent`.
+      - name: Upload mqvpn (macOS arm64)
+        uses: actions/upload-artifact@v7
+        with:
+          name: mqvpn-darwin-arm64
+          path: build-darwin/mqvpn
+          retention-days: 7
 
       # iOS lwIP profile coverage: the only other consumer of
       # MQVPN_LWIP_IOS_PROFILE is ios/build-ios.sh (not run in CI), so
@@ -752,7 +804,7 @@ jobs:
       # would imply extra coverage this tree does not add.
       - name: Run iOS-profile TCP-lane tests
         run: |
-          ctest --test-dir build-darwin-ios -R "test_tcp_lane" --output-on-failure
+          ctest --test-dir build-darwin-ios -R "test_tcp_lane" --no-tests=error --output-on-failure
 
   # iOS: the real cross-build chain (BoringSSL -> xquic -> libmqvpn, all
   # iphoneos/arm64 static, iOS lwIP profile) plus the Swift host tests and
@@ -973,6 +1025,22 @@ jobs:
             -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON ..
           cmake --build . --config Release
 
+      # The only place the CryptoAPI half of the verifier is compiled and run.
+      # Both tests use their own checks, not assert(), so Release is fine.
+      - name: Certificate verifier tests
+        run: ctest --test-dir build -C Release -R "test_cert_(identity|verify_win)" --no-tests=error --output-on-failure
+
+      # Bundled Winsock transport (seam + real loopback sockets) and the
+      # re-add decision shared with the POSIX path monitors; own checks, not
+      # assert(), so Release is fine.
+      - name: Winsock transport and path re-add tests
+        run: ctest --test-dir build -C Release -R "^(test_bind_winsock|test_path_readd)$" --no-tests=error --output-on-failure
+
+      # Weak: presence and order of the install call only (see the script).
+      - name: Verifier wiring tripwire
+        shell: bash
+        run: bash scripts/ci_check_windows_verifier_wiring.sh
+
       - name: Verify binary
         run: |
           Test-Path build/Release/mqvpn.exe
@@ -983,6 +1051,32 @@ jobs:
       # exits 0 without needing wintun or admin rights.
       - name: Smoke-run binary
         run: build/Release/mqvpn.exe --version
+
+      # The Windows platform's transport wiring on a real runner: the
+      # client's first QUIC Initial must leave through the Winsock bind and
+      # reach a local listener, and the listener's Version Negotiation reply
+      # must come back in through the bind's drain helper (the client
+      # abandons the attempt). Needs neither Wintun nor admin rights (the TUN
+      # only appears after a handshake, which never happens here). --path is
+      # mandatory on Windows: pin to the loopback interface. Stopped with
+      # TerminateProcess, so the teardown is covered by the on-machine checks
+      # instead.
+      - name: Transport smoke (Initial out, Version Negotiation back in)
+        shell: pwsh
+        run: |
+          $lo = (Get-NetIPInterface -AddressFamily IPv4 | Where-Object InterfaceAlias -like 'Loopback*' | Select-Object -First 1).InterfaceAlias
+          if (-not $lo) { throw "no IPv4 loopback interface alias found" }
+          python scripts/ci_transport_smoke.py --path "$lo" build/Release/mqvpn.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # For on-machine checks the runner cannot do (real certificate stores,
+      # a real server). Needs wintun.dll next to it: take it from a release zip.
+      - name: Upload mqvpn.exe
+        uses: actions/upload-artifact@v7
+        with:
+          name: mqvpn-windows-x64
+          path: build/Release/mqvpn.exe
+          retention-days: 7
 
   android:
     runs-on: ubuntu-latest
@@ -1062,6 +1156,7 @@ jobs:
             android/sdk-core/build/reports/tests/
             android/sdk-runtime/build/reports/tests/
             android/sdk-network/build/reports/tests/
+            android/sdk-native/build/reports/tests/
           retention-days: 7
 
   # Instrumented (androidTest) run on an x86_64 emulator. This is the only

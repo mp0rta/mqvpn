@@ -133,7 +133,7 @@ curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
     | sudo bash -s -- --start
 ```
 
-> **Note:** The self-signed certificate requires `--insecure` on the client. For production, replace with a trusted certificate (e.g. Let's Encrypt) and omit `--insecure`.
+> **Note:** The self-signed certificate requires `--insecure` on the client. For production, replace with a trusted certificate (e.g. Let's Encrypt) and omit `--insecure`. Point `--cert` (or `Cert` / `cert_file` in a config file) at the full chain file (for Let's Encrypt, `fullchain.pem`): clients do not fetch missing intermediates.
 
 Options can be combined:
 

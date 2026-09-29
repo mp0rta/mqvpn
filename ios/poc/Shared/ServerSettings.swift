@@ -22,7 +22,7 @@ struct ServerSettings: Equatable {
     }
 
     static let emptyDraft = ServerSettings(host: "", port: 443, serverName: "",
-                                           authKey: "", insecure: true)
+                                           authKey: "", insecure: false)
 
     private enum Key {
         static let host = "serverHost", port = "serverPort"

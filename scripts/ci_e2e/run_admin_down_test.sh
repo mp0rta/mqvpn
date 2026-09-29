@@ -243,7 +243,7 @@ echo "OK: dual-path active"
 #
 # Admin down clears IFF_UP; the platform treats this as an immediate
 # administrative drop and closes Path A right away (logged by
-# remove_path_by_index at WRN level). Path B keeps carrying tunnel
+# remove_path_by_slot at WRN level). Path B keeps carrying tunnel
 # traffic. The addr flush mimics what NetworkManager/netplan does on a
 # real box when an interface is admin-downed.
 

@@ -3,17 +3,32 @@
 # Copyright (c) 2026 mp0rta and mqvpn contributors
 # ci_stress_failover.sh — 100-cycle path fault/recover stress test
 #
-# Runs 100 fault/recover cycles alternating Path A and Path B while continuous
-# iperf3 traffic flows over the VPN tunnel. Odd cycles fault Path A (surviving
-# path = B, 80Mbps), even cycles fault Path B (surviving path = A, 300Mbps).
-# Each cycle: bring path down (2s), recover + wait revalidation (10s), verify.
-# Monitors RSS/fd for both VPN processes to detect resource leaks.
+# Runs 100 fault/recover cycles against a dual-path tunnel while continuous
+# iperf3 traffic flows over it. Each cycle breaks one path, restores it, and
+# verifies that the path itself came back — not merely that the surviving
+# path still answers. Monitors RSS/fd for both VPN processes.
+#
+# Three fault kinds, one per way a path dies in the field:
+#
+#   admin_down    the interface is switched off (UI / config change). The
+#                 client's own veth loses IFF_UP and the kernel flushes
+#                 every route through it.
+#   carrier_loss  the cable is pulled / the modem drops. Only the peer goes
+#                 down, so the client keeps IFF_UP, its address and its
+#                 routes, and loses IFF_RUNNING.
+#   blackhole     a middlebox starts discarding the path. Link, address and
+#                 route all stay valid and NO netlink event is emitted, so
+#                 the platform layer cannot react at all: staying connected
+#                 is entirely up to loss detection and the scheduler.
+#
+# The path alternates every cycle and the kind every two, so no path is
+# faulted twice in a row and each kind gets a third of the cycles.
 #
 # Flow:
 #   1. Setup dual-path netns with netem (Path A = 300Mbps/10ms, Path B = 80Mbps/30ms)
-#   2. Start VPN server (wlb) + multipath client
+#   2. Start VPN server (wlb) + multipath client, capturing both logs
 #   3. Start long-running iperf3 transfer (-t 3600)
-#   4. Loop 100 times: alternate fault Path A / Path B -> wait -> recover -> verify
+#   4. Loop 100 times: fault (path, kind) -> recover -> verify the path is back
 #   5. Check for resource leaks after all cycles complete
 #   6. Output summary JSON to ci_stress_results/failover_storm_<timestamp>.json
 #
@@ -24,12 +39,51 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# The per-cycle "did the path actually come back" check greps an INFO-level
+# marker out of the client log, so this suite needs info level. Set before
+# sourcing so ci_stress_env.sh's own warn default does not win; an explicit
+# CI_STRESS_LOG_LEVEL from the environment still overrides it (and disables
+# that check, with a notice).
+CI_STRESS_LOG_LEVEL="${CI_STRESS_LOG_LEVEL:-info}"
+
 source "${SCRIPT_DIR}/ci_stress_env.sh"
 
 MQVPN="${1:-${MQVPN}}"
 
-NUM_CYCLES=100
+NUM_CYCLES="${NUM_CYCLES:-100}"   # env override for short local runs
 SCHEDULER="wlb"
+# Which fault kinds this run exercises. `blackhole` is deliberately NOT in
+# the default set: it reproduces a live scheduling weakness rather than a
+# regression, so leaving it on would keep the weekly job permanently red.
+#
+# Measured 2026-09-09 (100 cycles, 2-path netns, iperf3 -P 4 saturating the
+# tunnel): blackholing Path B — the path carrying ~14% of the traffic — makes
+# every unpinned inner probe die, 20 of 20 echoes lost on 15 of 16 cycles,
+# while the tunnel itself keeps moving 170-250 Mbps on Path A. Blackholing
+# Path A instead never failed. WLB does guard against blackholed paths
+# (wlb_find_path_ctx drops a path once ctl_pto_count reaches
+# WLB_PTO_EVICT_THRESH), but that counter only advances when a path has
+# unacked data timing out, and QUIC rearms the PTO from the most recent
+# ack-eliciting packet — so a steady low-rate trickle onto a dead path can
+# keep the deadline in the future forever and the path never looks unhealthy.
+# Re-enable with CI_STRESS_FAULT_KINDS to reproduce.
+read -r -a FAULT_KINDS <<< "${CI_STRESS_FAULT_KINDS:-admin_down carrier_loss}"
+RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
+
+# Capture the VPN logs instead of letting them flood the console: the
+# per-cycle checks read the client log, and only the window around a failure
+# is printed (the whole file is archived when the run goes red) rather than
+# every line of a 30-minute run.
+VPN_SERVER_LOG="$(mktemp)"
+VPN_CLIENT_LOG="$(mktemp)"
+export CI_STRESS_SERVER_LOG="$VPN_SERVER_LOG"
+export CI_STRESS_CLIENT_LOG="$VPN_CLIENT_LOG"
+
+case "$CI_STRESS_LOG_LEVEL" in
+    info | debug | trace) ASSERT_PATH_RETURN=1 ;;
+    *) ASSERT_PATH_RETURN=0 ;;
+esac
 
 trap ci_stress_cleanup EXIT
 
@@ -40,9 +94,16 @@ echo "  mqvpn Failover Storm Stress Test (CI)"
 echo "  Binary:    $MQVPN"
 echo "  Scheduler: $SCHEDULER"
 echo "  Cycles:    $NUM_CYCLES"
+echo "  Kinds:     ${FAULT_KINDS[*]}"
+echo "  Log level: $CI_STRESS_LOG_LEVEL"
 echo "  Commit:    ${CI_STRESS_COMMIT:0:12}"
 echo "  Date:      $(date '+%Y-%m-%d %H:%M')"
 echo "================================================================"
+
+if [ "$ASSERT_PATH_RETURN" -eq 0 ]; then
+    echo "NOTE: log level '${CI_STRESS_LOG_LEVEL}' hides the path-return marker, so"
+    echo "      cycles cannot assert that a faulted path actually came back."
+fi
 
 # ── Setup netns + netem ──
 
@@ -85,12 +146,28 @@ echo "Monitoring VPN client (PID $_CS_CLIENT_PID) -> $CLIENT_MON_LOG"
 
 CYCLES_OK=0
 CYCLES_FAILED=0
+declare -A KIND_OK KIND_FAILED
+for _kind in "${FAULT_KINDS[@]}"; do
+    KIND_OK[$_kind]=0
+    KIND_FAILED[$_kind]=0
+done
+
+# tc netem with a named failure instead of a set -e abort mid-run. Reads TAG
+# and writes CYCLE_OK from the loop below, which is the only caller.
+netem_set() { # <netns> <dev> <netem args...>
+    local ns="$1" dev="$2"
+    shift 2
+    if ! ip netns exec "$ns" tc qdisc replace dev "$dev" root netem "$@"; then
+        echo "  [$TAG] FAIL: tc netem on $dev ($ns) failed"
+        CYCLE_OK=false
+    fi
+}
 
 echo ""
 echo "Starting $NUM_CYCLES fault/recover cycles..."
 
 for ((i = 1; i <= NUM_CYCLES; i++)); do
-    # Alternate: odd cycles fault Path A, even cycles fault Path B
+    # Path alternates every cycle, kind every two (see the header).
     if (( i % 2 == 1 )); then
         FAULT_VETH_C="$VETH_A0"
         FAULT_VETH_S="$VETH_A1"
@@ -106,46 +183,127 @@ for ((i = 1; i <= NUM_CYCLES; i++)); do
         FAULT_NETEM="$NETEM_B"
         FAULT_LABEL="B"
     fi
+    FAULT_KIND="${FAULT_KINDS[$(( ((i - 1) / 2) % ${#FAULT_KINDS[@]} ))]}"
+    TAG="cycle $i Path $FAULT_LABEL $FAULT_KIND"
+    CYCLE_OK=true
 
     # (a) Let traffic flow
     sleep 3
 
-    # (b) FAULT: bring down the selected path on both ends
-    ip netns exec "$NS_CLIENT" ip link set "$FAULT_VETH_C" down
-    ip netns exec "$NS_SERVER" ip link set "$FAULT_VETH_S" down
+    # Everything the client logs from here on belongs to this cycle.
+    LOG_MARK=$(wc -l < "$VPN_CLIENT_LOG")
 
-    # (c) Traffic on surviving path only
-    sleep 2
+    # (b) FAULT
+    case "$FAULT_KIND" in
+    admin_down)
+        # Local veth loses IFF_UP; the kernel flushes routes through it.
+        ip netns exec "$NS_CLIENT" ip link set "$FAULT_VETH_C" down
+        ;;
+    carrier_loss)
+        # Only the PEER goes down, so the client keeps IFF_UP, its address
+        # and its routes, and loses IFF_RUNNING. Downing the local end would
+        # be seen as an admin down instead — the same reason
+        # scripts/ci_e2e/run_carrier_flap_test.sh faults the peer.
+        ip netns exec "$NS_SERVER" ip link set "$FAULT_VETH_S" down
+        ;;
+    blackhole)
+        # Both directions, since a middlebox drops both. 100% loss makes the
+        # shaping irrelevant, so it is left off until recovery restores it.
+        netem_set "$NS_CLIENT" "$FAULT_VETH_C" loss 100%
+        netem_set "$NS_SERVER" "$FAULT_VETH_S" loss 100%
+        ;;
+    esac
 
-    # (d) RECOVER: bring up, re-add IPs (lost when link went down), re-apply netem
-    ip netns exec "$NS_CLIENT" ip link set "$FAULT_VETH_C" up
-    ip netns exec "$NS_SERVER" ip link set "$FAULT_VETH_S" up
-    ip netns exec "$NS_CLIENT" ip addr add "$FAULT_IP_C" dev "$FAULT_VETH_C" 2>/dev/null || true
-    ip netns exec "$NS_SERVER" ip addr add "$FAULT_IP_S" dev "$FAULT_VETH_S" 2>/dev/null || true
-    ip netns exec "$NS_CLIENT" tc qdisc add dev "$FAULT_VETH_C" root netem ${FAULT_NETEM} 2>/dev/null || true
-    ip netns exec "$NS_SERVER" tc qdisc add dev "$FAULT_VETH_S" root netem ${FAULT_NETEM} 2>/dev/null || true
+    # (c) Traffic on the surviving path only
+    if [ "$FAULT_KIND" = "blackhole" ]; then
+        # Assert the failover here rather than after recovery: with no kernel
+        # event to observe, "the tunnel stayed up while one path silently ate
+        # every packet" is the only thing this kind proves, and it is
+        # unobservable once the path is healthy again.
+        #
+        # The probe has to be a sample, not a single shot. ICMP is
+        # deliberately unpinned (src/flow_sched.c pins inner TCP, and UDP only
+        # under wlb_udp_pin), so WLB sprays these echoes across both paths per
+        # packet: while one path discards everything, an echo needs both its
+        # request and its reply to miss that path, which measured out at
+        # roughly a third of attempts. Five attempts lost that coin flip on 2
+        # of 16 cycles; twenty put a false red near 1e-4 per cycle while still
+        # fitting in the same ~5s window.
+        if ! PING_OUT=$(ip netns exec "$NS_CLIENT" ping -c 20 -i 0.2 -W 1 "$TUNNEL_SERVER_IP" 2>&1); then
+            echo "  [$TAG] FAIL: tunnel dead while the path was blackholed"
+            echo "$PING_OUT" | tail -n 3 | sed 's/^/    /'
+            ci_stress_dump_log_since "$VPN_CLIENT_LOG" "$LOG_MARK"
+            CYCLE_OK=false
+        fi
+    else
+        sleep 2
+    fi
+
+    # (d) RECOVER. IPv4 addresses survive a link down, so the addr add is a
+    #     no-op safety net rather than a restore.
+    case "$FAULT_KIND" in
+    admin_down)
+        ip netns exec "$NS_CLIENT" ip link set "$FAULT_VETH_C" up
+        ip netns exec "$NS_CLIENT" ip addr add "$FAULT_IP_C" dev "$FAULT_VETH_C" 2>/dev/null || true
+        ;;
+    carrier_loss)
+        ip netns exec "$NS_SERVER" ip link set "$FAULT_VETH_S" up
+        ip netns exec "$NS_SERVER" ip addr add "$FAULT_IP_S" dev "$FAULT_VETH_S" 2>/dev/null || true
+        ;;
+    blackhole)
+        netem_set "$NS_CLIENT" "$FAULT_VETH_C" ${FAULT_NETEM}
+        netem_set "$NS_SERVER" "$FAULT_VETH_S" ${FAULT_NETEM}
+        ;;
+    esac
+
+    if [ "$FAULT_KIND" != "blackhole" ]; then
+        # Path B reaches the server only through the via-route, which an
+        # admin down flushes. The carrier-up event has already fired without
+        # it, so the client's re-add gate deferred; the library's 3s recovery
+        # timer re-checks the FIB and re-adds the path once the route is
+        # back, well inside the wait below.
+        if [ "$FAULT_LABEL" = "B" ] && ! ci_stress_add_path_b_route; then
+            echo "  [$TAG] FAIL: could not restore Path B's route to the server"
+            CYCLE_OK=false
+        fi
+        ip netns exec "$NS_CLIENT" tc qdisc add dev "$FAULT_VETH_C" root netem ${FAULT_NETEM} 2>/dev/null || true
+        ip netns exec "$NS_SERVER" tc qdisc add dev "$FAULT_VETH_S" root netem ${FAULT_NETEM} 2>/dev/null || true
+    fi
 
     # (e) Let traffic recover (10s: QUIC path revalidation takes ~10-15s)
     sleep 10
 
-    # (f) Verify: iperf3 client still alive + tunnel ping
-    CYCLE_OK=true
+    # (f) Verify the faulted path is back, not just that the surviving one
+    #     still answers — a permanently dead path otherwise only surfaces
+    #     indirectly, cycles later, which is how the 2026-07 route-gate
+    #     regression stayed hidden for two months. A blackhole never removes
+    #     the path, so there is nothing to re-add in that case.
+    if [ "$FAULT_KIND" != "blackhole" ] && [ "$ASSERT_PATH_RETURN" -eq 1 ]; then
+        if ! ci_stress_wait_log_after "$VPN_CLIENT_LOG" \
+                "path\[[0-9]+\] activated:.*iface=${FAULT_VETH_C}" "$LOG_MARK" 5; then
+            echo "  [$TAG] FAIL: path never returned to active"
+            ci_stress_dump_log_since "$VPN_CLIENT_LOG" "$LOG_MARK"
+            CYCLE_OK=false
+        fi
+    fi
 
     if ! kill -0 "$IPERF_CLIENT_PID" 2>/dev/null; then
-        echo "  [cycle $i Path $FAULT_LABEL] FAIL: iperf3 client died"
+        echo "  [$TAG] FAIL: iperf3 client died"
         CYCLE_OK=false
     fi
 
     if ! ip netns exec "$NS_CLIENT" ping -c 1 -W 2 "$TUNNEL_SERVER_IP" >/dev/null 2>&1; then
-        echo "  [cycle $i Path $FAULT_LABEL] FAIL: tunnel ping failed"
+        echo "  [$TAG] FAIL: tunnel ping failed"
         CYCLE_OK=false
     fi
 
     # (g) Record result
     if [ "$CYCLE_OK" = true ]; then
         CYCLES_OK=$((CYCLES_OK + 1))
+        KIND_OK[$FAULT_KIND]=$(( ${KIND_OK[$FAULT_KIND]} + 1 ))
     else
         CYCLES_FAILED=$((CYCLES_FAILED + 1))
+        KIND_FAILED[$FAULT_KIND]=$(( ${KIND_FAILED[$FAULT_KIND]} + 1 ))
     fi
 
     # (h) Progress every 10 cycles
@@ -234,14 +392,25 @@ fi
 echo ""
 echo "── Summary ──"
 echo "  Cycles:             $NUM_CYCLES (ok=$CYCLES_OK failed=$CYCLES_FAILED)"
+for _kind in "${FAULT_KINDS[@]}"; do
+    printf '    %-14s ok=%s failed=%s\n' "$_kind" "${KIND_OK[$_kind]}" "${KIND_FAILED[$_kind]}"
+done
 echo "  Server RSS (KB):    initial=${SERVER_RSS_INITIAL} final=${SERVER_RSS_FINAL} max=${SERVER_RSS_MAX}"
 echo "  Client RSS (KB):    initial=${CLIENT_RSS_INITIAL} final=${CLIENT_RSS_FINAL} max=${CLIENT_RSS_MAX}"
 echo "  Status:             ${STATUS}"
 
 # ── Generate JSON output ──
 
+# Per-kind breakdown, built here so the JSON does not hardcode the kind list.
+KIND_JSON="{"
+for _kind in "${FAULT_KINDS[@]}"; do
+    [ "$KIND_JSON" = "{" ] || KIND_JSON="${KIND_JSON},"
+    KIND_JSON="${KIND_JSON}\"${_kind}\": {\"ok\": ${KIND_OK[$_kind]}, \"failed\": ${KIND_FAILED[$_kind]}}"
+done
+KIND_JSON="${KIND_JSON}}"
+
 TIMESTAMP="$(date -Iseconds)"
-OUTPUT_FILE="${CI_STRESS_RESULTS}/failover_storm_$(date +%Y%m%d_%H%M%S).json"
+OUTPUT_FILE="${CI_STRESS_RESULTS}/failover_storm_${RUN_STAMP}.json"
 
 python3 -c "
 import json
@@ -253,6 +422,7 @@ result = {
     'num_cycles': ${NUM_CYCLES},
     'cycles_ok': ${CYCLES_OK},
     'cycles_failed': ${CYCLES_FAILED},
+    'fault_kinds': json.loads('''${KIND_JSON}'''),
     'server_rss': {
         'initial_kb': ${SERVER_RSS_INITIAL},
         'final_kb': ${SERVER_RSS_FINAL},
@@ -272,9 +442,20 @@ with open('${OUTPUT_FILE}', 'w') as f:
 print(json.dumps(result, indent=2))
 "
 
+# ── Archive the VPN logs on a red run ──
+#
+# The console only carries the window around each failing cycle, and the
+# workflow uploads this directory — so keep the full picture next to the JSON
+# when there is something to explain.
+if [ "$STATUS" = "fail" ]; then
+    tail -n 5000 "$VPN_CLIENT_LOG" > "${CI_STRESS_RESULTS}/failover_storm_client_${RUN_STAMP}.log"
+    tail -n 5000 "$VPN_SERVER_LOG" > "${CI_STRESS_RESULTS}/failover_storm_server_${RUN_STAMP}.log"
+    echo "  VPN logs: ${CI_STRESS_RESULTS}/failover_storm_{client,server}_${RUN_STAMP}.log"
+fi
+
 # ── Cleanup temp files ──
 
-rm -f "$SERVER_MON_LOG" "$CLIENT_MON_LOG"
+rm -f "$SERVER_MON_LOG" "$CLIENT_MON_LOG" "$VPN_SERVER_LOG" "$VPN_CLIENT_LOG"
 
 echo ""
 echo "================================================================"

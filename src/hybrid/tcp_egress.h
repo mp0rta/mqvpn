@@ -16,6 +16,42 @@
 #include <xquic/xquic.h>
 #include <xquic/xqc_http3.h>
 
+/* Fairness budget: the most one readable event may relay out of a single
+ * egress socket before svr_tcp_egress_on_relay_ready() yields the reactor.
+ * 65536 is four TCP_EGRESS_RELAY_CHUNKs; tcp_egress.c carries a
+ * _Static_assert beside that chunk pinning the relationship. It sits in this
+ * header rather than next to the chunk because tests/test_tcp_egress.c
+ * asserts against it.
+ *
+ * Why the loop needs a budget. It reads until the egress socket is empty,
+ * and a busy egress socket is not empty: the far end refills it about as
+ * fast as the loop drains it. What stops the loop then is xquic's send
+ * queue, and that queue is not released smoothly. xqc_engine_process_conn()
+ * latches sndq_full and does not call xqc_process_write_streams() again
+ * until sndq_packets_used_max / XQC_SNDQ_RELEASE_ENOUGH_SPACE_TH packets
+ * have been freed (third_party/xquic/src/transport/xqc_send_queue.h; both
+ * call sites of xqc_process_write_streams sit under that check in
+ * xqc_engine.c). mqvpn asks for sndq_packets_used_max = 16384
+ * (mqvpn_conn_settings.c), so the room comes back in steps of 1638 packets.
+ *
+ * Without a budget the first flow the reactor reaches after a release puts
+ * that whole step back into the send queue before any other flow on the
+ * connection runs. The next flow's send_body then accepts nothing, so it
+ * stashes at most one TCP_EGRESS_RELAY_CHUNK and goes uplink_withheld -- which
+ * drops want_read via the interest helper -- so from there it moves only what
+ * svr_tcp_egress_on_h3_writable() pushes out of that stash, until a release
+ * lets it read again. The release is spent either way, so the connection's
+ * total is unaffected and what moves is the split between its flows.
+ *
+ * Why four chunks. The budget is a round-robin quantum, so one number sets
+ * both sides of the trade. Too large and it never binds: it has to stay well
+ * under one release divided by the flows sharing the connection. Too small
+ * and a flow with nobody to share with pays for nothing -- a lone transfer
+ * yields once per budget and gains no fairness from any of those yields.
+ * One chunk is the tightest quantum this loop can have, and yields four
+ * times as often as this one. */
+#define TCP_EGRESS_RELAY_BUDGET 65536
+
 /* Called from cb_request_read's header path once :protocol==mqvpn-tcp and
  * hdrs.is_connect are confirmed. Owns the full request lifecycle from here:
  * auth (reusing svr_auth_check) -> ACL -> connect -> relay.

@@ -58,6 +58,7 @@
 #include <poll.h>
 
 #include "libmqvpn.h"
+#include "mqvpn_bind_posix.h"
 
 #include <xquic/xquic.h>
 #include <xquic/xquic_typedef.h>
@@ -197,7 +198,15 @@ main(void)
         printf("FAIL: mqvpn_server_new\n");
         return 1;
     }
-    if (mqvpn_server_set_socket_fd(svr, svr_fd, (struct sockaddr *)&svr_addr,
+    void *svr_tctx = NULL;
+    mqvpn_bind_posix_opts_t svr_bopts = {0};
+    svr_bopts.struct_size = sizeof(svr_bopts);
+    svr_bopts.udp_gso = 1;
+    svr_bopts.socket_buf_bytes = -1;
+    snprintf(svr_bopts.tag, sizeof(svr_bopts.tag), "server");
+    if (mqvpn_bind_posix_server_new(svr_fd, &svr_bopts, &svr_tctx) != MQVPN_OK ||
+        mqvpn_server_set_transport(svr, mqvpn_bind_posix_server_ops(), svr_tctx,
+                                   (struct sockaddr *)&svr_addr,
                                    sizeof(svr_addr)) != MQVPN_OK ||
         mqvpn_server_start(svr) != MQVPN_OK) {
         printf("FAIL: server start\n");
@@ -281,17 +290,12 @@ main(void)
         /* attacker flushes queued packets (Initial + retransmits) */
         xqc_engine_main_logic(atk);
 
-        /* client -> server: feed the probe into the server engine */
-        for (;;) {
-            struct sockaddr_storage from;
-            socklen_t flen = sizeof(from);
-            ssize_t n = recvfrom(svr_fd, buf, sizeof(buf), MSG_DONTWAIT,
-                                 (struct sockaddr *)&from, &flen);
-            if (n <= 0) break;
-            svr_recv_pkts++;
-            mqvpn_server_on_socket_recv(svr, buf, (size_t)n, (struct sockaddr *)&from,
-                                        flen);
-        }
+        /* client -> server: feed the probe into the server engine. The bind
+         * returns the number of receives it performed; with GRO left off
+         * (svr_bopts.udp_gro == 0) that is one per datagram, which is what
+         * the [loop done] diagnostic below has always counted. */
+        int nrecv = mqvpn_bind_posix_server_drain(svr_tctx, svr, 64);
+        if (nrecv > 0) svr_recv_pkts += nrecv;
 
         /* server processes and, crucially, TRIES TO SEND its close here */
         mqvpn_server_tick(svr);

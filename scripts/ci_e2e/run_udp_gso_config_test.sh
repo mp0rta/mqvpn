@@ -8,27 +8,30 @@
 # spread diff noise for no functional gain.
 #
 # `udp_gso` (Linux TX UDP GSO / batched-send registration, see
-# src/udp_offload.{c,h} and the wiring in mqvpn_client.c / mqvpn_server.c's
-# init_xquic_engine()) and `udp_gro` (Linux RX UDP GRO / recvmsg-based
-# coalesced-datagram splitting, see mqvpn_udp_gro_enable() called from the
-# client's path-registration loop and the server's svr_create_udp_socket() in
-# src/platform/linux/platform_linux.c) both have NO CLI flag — the
+# src/bind/posix_offload.{c,h}; the batch callback is still registered by
+# mqvpn_client.c's init_xquic_engine() and mqvpn_server.c's
+# mqvpn_server_new()) and `udp_gro` (Linux RX UDP GRO / recvmsg-based
+# coalesced-datagram splitting, see mqvpn_udp_gro_enable() called from
+# mqvpn_bind_posix_path_new() / mqvpn_bind_posix_server_new() in
+# src/bind/posix.c) both have NO CLI flag — the
 # [Advanced] section of the INI config file is their only input surface
 # (src/config.c's CFG_BOOL(SEC_ADVANCED, "UdpGso", "udp_gso", udp_gso) /
 # CFG_BOOL(SEC_ADVANCED, "UdpGro", "udp_gro", udp_gro); both default to 1 in
 # src/config.c's mqvpn_config_defaults(). udp_gso additionally has a
 # library-side default in src/mqvpn_config.c because it crosses the public
-# ABI — udp_gro deliberately has no library-side presence at all, so do not
-# go looking for one there). This
+# ABI — udp_gro has no mqvpn_config_t counterpart, but since ABI 3 it does
+# have a library-side knob: mqvpn_bind_posix_opts_t.udp_gro in
+# include/mqvpn_bind_posix.h, which the platform fills per bind ctx). This
 # mirrors run_reinjection_test.sh's rationale comment for the same reason
 # ([Multipath] Reinjection is also config-file-only).
 #
 # G13 note — log wording is an observable invariant, pinned here for
 # UdpGso and extended to UdpGro in the same spirit: this script greps
 # both endpoints' startup logs for two disjoint literal prefixes:
-#     LOG_I(x, "%s", ...gso_available ? MQVPN_UDP_GSO_MARKER_ENABLED
-#                                     : MQVPN_UDP_GSO_MARKER_UNAVAILABLE);
-#         (both endpoints; strings defined once in mqvpn_conn_settings.h:
+#     LOG_INF("%s", g_gso_available ? MQVPN_UDP_GSO_MARKER_ENABLED
+#                                   : MQVPN_UDP_GSO_MARKER_UNAVAILABLE);
+#         (src/bind/posix.c, once per process for both endpoints; strings
+#          defined once in src/bind/posix_offload.h:
 #          "udp-gso: GSO enabled" / "udp-gso: GSO unavailable, using sendmmsg")
 #     LOG_INF("udp-gro: enabled on path[%d]", i);      /* client, per path */
 #     LOG_INF("udp-gro: unavailable on path[%d] (%s); ...", i, ...);
@@ -57,18 +60,26 @@
 # parses the same two lines into its result table.
 #
 # Race-freedom rationale (why asserting log-ABSENCE right after tunnel-up
-# is safe, not a best-effort poll): both LOG_I("udp-gso: ...") call sites
-# run inside init_xquic_engine(), synchronously before xqc_engine_create()
-# — i.e. strictly before the engine exists, and therefore strictly before
-# any handshake can begin. The udp-gro markers run even earlier in the
-# startup sequence: the client's fires per path inside the socket
-# registration loop, strictly before mqvpn_client_connect() is called;
-# the server's fires inside svr_create_udp_socket(), strictly before
-# event_base_dispatch() is reached. "Tunnel is up" (first successful
-# tunnel ping) can only happen after a completed handshake, which
-# happens-after engine creation and after the event loop starts running —
-# both of which happen-after every point above where a marker would have
-# been emitted had its knob been on. So by the time the tunnel-ping check
+# is safe, not a best-effort poll): BOTH markers are emitted while the
+# POSIX bind's transport contexts are being constructed, before either
+# endpoint can carry traffic. The one-per-process "udp-gso: ..." line is
+# logged inside the first mqvpn_bind_posix_*_new() that is allowed GSO
+# (src/bind/posix.c); each "udp-gro: ..." line is logged by the platform
+# immediately after the matching *_new() returns. On the client the
+# "udp-gro: ..." line therefore fires per path inside the
+# path-registration loop and the "udp-gso: ..." line on the first
+# iteration, both strictly before mqvpn_client_connect() is called. (A
+# path re-added at runtime by the netlink monitor logs its own
+# "udp-gro: ..." line from netlink_mon.c long after traffic starts; it is
+# gated on the same UdpGro value, so the absence arm is unaffected.)
+# On the server both fire just after
+# svr_create_udp_socket() returns — i.e. AFTER its "UDP socket bound to
+# ..." line, not before it — and strictly before event_base_dispatch() is
+# reached. "Tunnel is up" (first successful tunnel ping) can only happen
+# after a completed handshake, which happens-after connect() on the client
+# and after the event loop starts running on the server — both of which
+# happen-after every point above where a marker would have been emitted
+# had its knob been on. So by the time the tunnel-ping check
 # below passes, there is no remaining window where either marker could
 # still be about to appear — checking the log files at that point is
 # equivalent to checking them at any later time.

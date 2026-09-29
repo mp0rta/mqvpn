@@ -90,6 +90,11 @@ echo "================================================================"
 
 # --- Setup ---
 bench_setup_netns
+# /32 host route to the server via Path B. Without it a SO_BINDTODEVICE
+# socket on B still sends through the kernel's on-link fallback, but the
+# client's path re-add gate (src/platform/linux/route_check.c) sees no FIB
+# route and never re-adds B after a fault — `-p b` would never recover.
+bench_add_server_host_routes 2
 bench_apply_netem
 bench_start_vpn_server
 bench_start_vpn_client "--path $VETH_A0 --path $VETH_B0"
@@ -124,6 +129,18 @@ ip netns exec "$NS_CLIENT" ip link set "$FAULT_IF_CLIENT" up
 ip netns exec "$NS_SERVER" ip link set "$FAULT_IF_SERVER" up
 ip netns exec "$NS_CLIENT" ip addr add "$FAULT_IP_CLIENT" dev "$FAULT_IF_CLIENT" 2>/dev/null || true
 ip netns exec "$NS_SERVER" ip addr add "$FAULT_IP_SERVER" dev "$FAULT_IF_SERVER" 2>/dev/null || true
+if [ "$FAULT_PATH_LABEL" = "B" ]; then
+    # The link down flushed the client's /32 host route via Path B (only the
+    # on-link prefix route is auto-restored). Re-add it the way
+    # tests/test_e2e_hybrid_h2.sh Test 6 does — deliberately NOT
+    # bench_add_server_host_routes, whose server-side `ip addr add` is not
+    # idempotent under set -e.
+    if ! ip netns exec "$NS_CLIENT" ip route replace "${IP_A_SERVER_ADDR}/32" \
+            via "$(bench_path_server_ip 1)" dev "$FAULT_IF_CLIENT" metric 101; then
+        echo "[$(date +%T)] ERROR: could not restore Path B's host route —" \
+             "the recovery numbers below measure Path A alone"
+    fi
+fi
 ip netns exec "$NS_CLIENT" tc qdisc add dev "$FAULT_IF_CLIENT" root netem ${FAULT_NETEM} 2>/dev/null || true
 ip netns exec "$NS_SERVER" tc qdisc add dev "$FAULT_IF_SERVER" root netem ${FAULT_NETEM} 2>/dev/null || true
 

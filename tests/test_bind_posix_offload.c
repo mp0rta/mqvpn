@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 
-#define _GNU_SOURCE    /* sendmmsg / struct mmsghdr — see src/udp_offload.c header \
+#define _GNU_SOURCE    /* sendmmsg / struct mmsghdr — see src/bind/posix_offload.c header \
                           comment; must precede every #include, same as there. */
 /* Keep assert() live even in Release builds: CI runs ctest on Release too,
  * where NDEBUG would silently no-op every assertion in this file. */
@@ -16,7 +16,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include "udp_offload.h"
+#include "bind/posix_offload.h"
 
 #ifndef UDP_SEGMENT
 #  define UDP_SEGMENT 103
@@ -410,7 +410,7 @@ test_eintr_retries(void)
      * EINTR correctly with no extra seam state: seam_calls increments on
      * every physical invocation (success or failure), so failing exactly
      * call 1 with EINTR is inherently one-shot — the retried call (call 2,
-     * driven by src/udp_offload.c's own `while (r < 0 && errno == EINTR)`
+     * driven by src/bind/posix_offload.c's own `while (r < 0 && errno == EINTR)`
      * loop) does not match seam_fail_call again and proceeds normally. */
     seam_reset();
     struct iovec iov[4] = {iv(1400), iv(1400), iv(1400), iv(1400)};
@@ -439,7 +439,7 @@ test_fallback_eintr_retries(void)
     /* Fallback (use_gso=0) counterpart of test_eintr_retries: pins the
      * OTHER EINTR retry loop — send_batch_mmsg's own
      * `do { r = OFFLOAD_SENDMMSG(...); } while (r < 0 && errno == EINTR);`
-     * (src/udp_offload.c, inside send_batch_mmsg) — which was previously
+     * (src/bind/posix_offload.c, inside send_batch_mmsg) — which was previously
      * untested; only the GSO sendmsg loop's EINTR retry was pinned before
      * this. Same one-shot-via-seam_calls reasoning as test_eintr_retries
      * applies here, just against mqvpn_seam_sendmmsg instead of

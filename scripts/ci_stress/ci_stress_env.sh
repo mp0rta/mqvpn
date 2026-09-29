@@ -36,9 +36,18 @@ IP_A_SERVER="10.100.0.1/24"
 IP_B_CLIENT="10.200.0.2/24"
 IP_B_SERVER="10.200.0.1/24"
 IP_A_SERVER_ADDR="10.100.0.1"
+IP_A_SUBNET="10.100.0.0/24"
+IP_B_SERVER_ADDR="10.200.0.1"
 TUNNEL_SERVER_IP="10.0.0.1"
 VPN_LISTEN_PORT="4433"
 CI_STRESS_LOG_LEVEL="${CI_STRESS_LOG_LEVEL:-warn}"
+
+# Optional log capture. When a caller sets these before ci_stress_start_server
+# / ci_stress_start_client, that VPN process's stdout+stderr goes to the named
+# file instead of being inherited. Only scripts that assert on log content opt
+# in (ci_stress_failover.sh); the others keep today's inline console output.
+CI_STRESS_SERVER_LOG="${CI_STRESS_SERVER_LOG:-}"
+CI_STRESS_CLIENT_LOG="${CI_STRESS_CLIENT_LOG:-}"
 
 # Default netem
 NETEM_A="${NETEM_A:-delay 10ms rate 300mbit}"
@@ -82,6 +91,29 @@ ci_stress_cleanup_stale() {
     ip link del "$VETH_B0" 2>/dev/null || true
 }
 
+# ── Path B route to the server ──
+
+# The server (IP_A_SERVER_ADDR) lives on Path A's subnet, so Path B reaches it
+# only through this via-route. Without it a SO_BINDTODEVICE socket on B still
+# sends (the kernel assumes the destination is on-link and the veth peer
+# answers the ARP), but the client's path re-add gate
+# (src/platform/linux/route_check.c, RTM_F_FIB_MATCH) sees no FIB route and
+# defers the re-add forever — B never comes back after its first fault.
+# Same route as the ci_e2e dual-path suites. Any script that faults Path B
+# must call this again on recovery.
+#
+# `replace`, not `add`: whether the route survived the fault depends on how
+# the path was broken. An admin down flushes every route through the link,
+# but a carrier loss (peer down) keeps them and only flags them linkdown --
+# so `add` would succeed in one case and fail with EEXIST in the other.
+# `replace` states the intent ("this route must exist now") for both, which
+# is what lets callers drop the `|| true` that would otherwise hide a real
+# failure such as a missing namespace.
+ci_stress_add_path_b_route() {
+    ip netns exec "$NS_CLIENT" ip route replace "$IP_A_SUBNET" via "$IP_B_SERVER_ADDR" \
+        dev "$VETH_B0" metric 200
+}
+
 # ── Network namespace setup ──
 
 ci_stress_setup_netns() {
@@ -117,9 +149,15 @@ ci_stress_setup_netns() {
     # IP forwarding
     ip netns exec "$NS_SERVER" sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
+    ci_stress_add_path_b_route
+
     # Verify
     ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$IP_A_SERVER_ADDR" >/dev/null
-    ip netns exec "$NS_CLIENT" ping -c 1 -W 1 10.200.0.1 >/dev/null
+    ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$IP_B_SERVER_ADDR" >/dev/null
+    # The exact FIB query the re-add gate performs. A ping via B cannot tell
+    # the difference (the on-link fallback also answers), this can: it fails
+    # with "No route" when only the fallback would carry Path B.
+    ip netns exec "$NS_CLIENT" ip route get "$IP_A_SERVER_ADDR" oif "$VETH_B0" fibmatch >/dev/null
 
     echo "OK: netns created"
 }
@@ -157,6 +195,7 @@ ci_stress_start_server() {
         -keyout "${_CS_WORK_DIR}/server.key" -out "${_CS_WORK_DIR}/server.crt" \
         -days 365 -nodes -subj "/CN=ci-stress" 2>/dev/null
 
+    if [ -n "$CI_STRESS_SERVER_LOG" ]; then exec 3>>"$CI_STRESS_SERVER_LOG"; else exec 3>&1; fi
     ip netns exec "$NS_SERVER" "$MQVPN" \
         --mode server \
         --listen "0.0.0.0:${VPN_LISTEN_PORT}" \
@@ -165,8 +204,9 @@ ci_stress_start_server() {
         --key "${_CS_WORK_DIR}/server.key" \
         --auth-key "$_CS_PSK" \
         --scheduler "$scheduler" \
-        --log-level "$CI_STRESS_LOG_LEVEL" &
+        --log-level "$CI_STRESS_LOG_LEVEL" >&3 2>&1 &
     _CS_SERVER_PID=$!
+    exec 3>&-
     sleep 2
 
     if ! kill -0 "$_CS_SERVER_PID" 2>/dev/null; then
@@ -196,6 +236,7 @@ ci_stress_start_client() {
         sleep 1
     fi
 
+    if [ -n "$CI_STRESS_CLIENT_LOG" ]; then exec 3>>"$CI_STRESS_CLIENT_LOG"; else exec 3>&1; fi
     ip netns exec "$NS_CLIENT" "$MQVPN" \
         --mode client \
         --server "${server_addr}:${VPN_LISTEN_PORT}" \
@@ -203,8 +244,9 @@ ci_stress_start_client() {
         --auth-key "$_CS_PSK" \
         --scheduler "$scheduler" \
         --insecure \
-        --log-level "$CI_STRESS_LOG_LEVEL" &
+        --log-level "$CI_STRESS_LOG_LEVEL" >&3 2>&1 &
     _CS_CLIENT_PID=$!
+    exec 3>&-
     sleep 3
 
     if ! kill -0 "$_CS_CLIENT_PID" 2>/dev/null; then
@@ -287,6 +329,42 @@ ci_stress_check_sanitizer() {
     return $failed
 }
 
+# ── Log assertions (for captured VPN logs) ──
+
+# Wait until <pattern> (extended regex) appears in <log> after line
+# <start_line>. Returns 0 on match, 1 on timeout.
+#
+# G19: deliberately awk, not `tail -n +N | grep -q`. These scripts run under
+# `set -o pipefail`, where a grep that exits at its first match can SIGPIPE
+# the writer and turn a match into a spurious timeout -- the exact hazard
+# scripts/ci_e2e/e2e_lib.sh documents but does not have to handle, because no
+# consumer of that library sets pipefail. awk reads to EOF and uses no pipe
+# at all. The pattern travels through the environment so awk does not
+# reprocess its backslashes the way -v would.
+ci_stress_wait_log_after() {
+    local log="$1" pattern="$2" start_line="$3" timeout="${4:-15}"
+    local elapsed=0
+    while [ "$elapsed" -lt "$timeout" ]; do
+        if CS_LOG_PAT="$pattern" awk -v start="$start_line" \
+                'NR > start && $0 ~ ENVIRON["CS_LOG_PAT"] { found = 1 }
+                 END { exit !found }' "$log" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    return 1
+}
+
+# Echo the last <max> log lines a failing step produced, indented, so the
+# console explains the failure instead of only naming it.
+ci_stress_dump_log_since() {
+    local log="$1" start_line="$2" max="${3:-12}"
+    echo "    ── log since the fault (last ${max} lines) ──"
+    awk -v start="$start_line" 'NR > start' "$log" 2>/dev/null \
+        | tail -n "$max" | sed 's/^/    /'
+}
+
 # ── RSS/fd monitoring ──
 
 # Start background monitoring of a process's RSS and fd count.
@@ -321,6 +399,23 @@ ci_stress_monitor_stop() {
     _CS_MONITOR_PIDS=()
 }
 
+# True when the binary under test is an ASan build.
+#
+# ASan reserves a large shadow region and quarantines freed memory instead of
+# returning it, so a sanitizer build's RSS climbs by hundreds of percent with
+# nothing leaking -- which is why the growth check below is skipped for them.
+# Leak coverage does not depend on it: LeakSanitizer still runs at exit and
+# the fd check still applies.
+#
+# Detect it from the binary, not from ASAN_OPTIONS: that variable is a tuning
+# knob rather than a marker, and a caller who simply did not export it turns a
+# clean run red for the wrong reason. The variable is still honoured as a
+# fallback for when the binary cannot be read.
+ci_stress_is_asan_build() {
+    [ -n "${ASAN_OPTIONS:-}" ] && return 0
+    LC_ALL=C grep -qa "__asan_init" "$MQVPN" 2>/dev/null
+}
+
 # Check resource log for leaks.
 # Fails if RSS grew >50% from initial or fd count increased.
 # Usage: ci_stress_check_resources LOGFILE LABEL
@@ -334,7 +429,7 @@ ci_stress_check_resources() {
         return 0
     fi
 
-    python3 -c "
+    CS_ASAN="$(ci_stress_is_asan_build && echo 1 || echo 0)" python3 -c "
 import sys
 
 lines = open('${logfile}').read().strip().split('\n')
@@ -362,7 +457,7 @@ print(f'  $label: RSS initial={initial_rss}KB final={final_rss}KB max={max_rss}K
 print(f'  $label: fd  initial={initial_fd} final={final_fd}')
 
 import os
-asan_enabled = bool(os.environ.get('ASAN_OPTIONS', ''))
+asan_enabled = os.environ.get('CS_ASAN') == '1'
 
 failed = False
 

@@ -62,6 +62,12 @@ final class SnapshotCache {
         }
         var paths: [PathSnapshot] = []
         for p in engine.paths() {
+            // Skip reaped CLOSED slots: get_paths never shrinks n_paths, so a
+            // path removed on reconnect lingers as a frozen CLOSED entry for a
+            // poll or two, next to the live same-name path. Surfacing it makes
+            // the dashboard show a dead duplicate card and feeds EventLog a
+            // name collision (defense-in-depth with EventLog's own filter).
+            if p.status == MQVPN_PATH_CLOSED { continue }
             let name = withUnsafeBytes(of: p.name) { raw -> String in
                 String(cString: raw.baseAddress!.assumingMemoryBound(to: CChar.self))
             }

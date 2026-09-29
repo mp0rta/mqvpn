@@ -11,7 +11,6 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.mqvpn.sdk.core.internal.PathManager
 import com.mqvpn.sdk.core.internal.TunnelCallbacks
-import com.mqvpn.sdk.core.internal.UdpReaderPool
 import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.MqvpnError
 import com.mqvpn.sdk.core.model.MqvpnState
@@ -19,13 +18,12 @@ import com.mqvpn.sdk.core.model.ReconnectInfo
 import com.mqvpn.sdk.core.model.TunnelInfo
 import com.mqvpn.sdk.network.NetworkMonitor
 import com.mqvpn.sdk.runtime.MqvpnPoller
+import com.mqvpn.sdk.runtime.NativeReactorWaiter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeoutOrNull
 import java.net.InetAddress
 
 /**
@@ -50,10 +48,11 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
 
     internal var manager: MqvpnManager? = null
 
+    /** The native reactor (poll loop + path table); lives as long as the service. */
+    private lateinit var waiter: NativeReactorWaiter
     private lateinit var executor: MqvpnPoller
     private var tunnel: MqvpnTunnel? = null
     private var tunnelBridge: TunnelBridge? = null
-    private var udpReaderPool: UdpReaderPool? = null
     private var pathManager: PathManager? = null
     private var networkMonitor: NetworkMonitor? = null
     private var currentConfig: MqvpnConfig? = null
@@ -64,7 +63,8 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
 
     override fun onCreate() {
         super.onCreate()
-        executor = MqvpnPoller(scope,
+        waiter = NativeReactorWaiter()
+        executor = MqvpnPoller(waiter,
             tickFn = {
                 val t = tunnel
                 val result = t?.tick() ?: 0
@@ -78,31 +78,28 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
             },
             interestFn = {
                 val i = tunnel?.getInterest()
+                // No session: idle — the engine thread waits up to 25 s for the
+                // next enqueue instead of spinning a 1 ms poll() a thousand times a second.
                 if (i != null) intArrayOf(i.nextTimerMs, if (i.tunReadable) 1 else 0, if (i.isIdle) 1 else 0)
-                else intArrayOf(0, 0, 0)
-            })
+                else intArrayOf(25_000, 0, 1)
+            },
+            clientFn = { tunnel?.clientHandle ?: 0L },
+            onBadFd = { handle -> pathManager?.handleBadFd(handle) })
         executor.start()
     }
 
+    // Shutdown is atomic with the task queue: cleanup() is the LAST task the
+    // engine thread runs (nothing can follow it), later tasks are refused, and
+    // the thread frees the reactor itself; stop() waits at most 2 s.
     override fun onDestroy() {
-        runBlocking {
-            withTimeoutOrNull(2000) {
-                executor.call { cleanup() }
-            }
-        }
+        executor.stop { cleanup() }
         scope.cancel()
-        executor.stop()
         super.onDestroy()
     }
 
     override fun onRevoke() {
-        runBlocking {
-            withTimeoutOrNull(2000) {
-                executor.call { cleanup() }
-            }
-        }
+        executor.stop { cleanup() }
         scope.cancel()
-        executor.stop()
         stopSelf()
     }
 
@@ -113,22 +110,30 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
      * connect() is deferred until first network path is available.
      */
     protected fun startTunnel(config: MqvpnConfig) {
-        currentConfig = config
         executor.enqueue {
-            val t = MqvpnTunnel.create(config, this)
+            // A re-delivered start intent (START_STICKY) must not stack a
+            // second client on the reactor's table — nor replace the running
+            // session's config (onCreateTun reads it on the next config-ready).
+            if (tunnel != null) {
+                Log.w(TAG, "startTunnel: a session is already running")
+                return@enqueue
+            }
+            currentConfig = config
+            val t = MqvpnTunnel.create(config, this, waiter.reactorHandle)
             tunnel = t
-
-            val pool = UdpReaderPool(executor)
-            udpReaderPool = pool
 
             val monitor = NetworkMonitor(this)
             networkMonitor = monitor
 
             val pm = PathManager(
-                executor, t, pool, monitor,
+                executor, t, monitor,
                 protector = { fd -> protect(fd) },
                 serverHost = config.serverAddress,
                 serverPort = config.serverPort,
+                onFatal = { reason ->
+                    Log.e(TAG, "ending the session: $reason")
+                    stopTunnel()
+                },
             )
             pathManager = pm
 
@@ -151,22 +156,29 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
     // --- Internal cleanup (idempotent) ---
 
     private fun cleanup() {
-        if (tunnel == null) return // already cleaned up
-        networkMonitor?.stop()
-        tunnelBridge?.stop()
-        udpReaderPool?.stopAll()
-        tunnel?.disconnect()
-        tunnel?.tick() // send CONNECTION_CLOSE
-        tunnel?.destroy()
-        pathManager?.closeAllFds()
-        currentTunPfd?.close()
-        tunnel = null
-        tunnelBridge = null
-        udpReaderPool = null
-        pathManager = null
-        networkMonitor = null
-        currentTunPfd = null
-        emitState(MqvpnState.Disconnected)
+        val t = tunnel ?: return // already cleaned up
+        // The destroy and the fd closes run whatever the orderly half throws:
+        // this is the executor's finalizer, and the reactor it hands back to
+        // the poller must hold no live path when the poller frees it.
+        try {
+            networkMonitor?.stop()
+            tunnelBridge?.stop()
+            t.disconnect()
+            t.tick() // send CONNECTION_CLOSE
+        } finally {
+            try {
+                t.destroy() // reactor: stop polling → harvest → client_destroy → forget
+            } finally {
+                pathManager?.closeAllFds() // sockets are ours; closed AFTER the destroy
+                currentTunPfd?.close()
+                tunnel = null
+                tunnelBridge = null
+                pathManager = null
+                networkMonitor = null
+                currentTunPfd = null
+                emitState(MqvpnState.Disconnected)
+            }
+        }
     }
 
     // --- TunnelCallbacks implementation ---

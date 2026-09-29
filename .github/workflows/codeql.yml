@@ -64,7 +64,7 @@ jobs:
         run: bash scripts/ci_check_bssl_optimized.sh third_party/xquic/third_party/boringssl/build
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4.38.0
+        uses: github/codeql-action/init@v4.38.1
         with:
           languages: c-cpp
           queries: security-and-quality
@@ -104,6 +104,6 @@ jobs:
           make -j$(nproc)
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@v4.38.0
+        uses: github/codeql-action/analyze@v4.38.1
         with:
           category: "/language:c-cpp"

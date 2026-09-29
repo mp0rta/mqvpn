@@ -14,7 +14,7 @@
 #      t=40:  recover Path A (ip link set up + IP re-add + netem re-apply)
 #   5. Cycle 2 — Path B fault:
 #      t=55:  inject fault on Path B (ip link set down on both ends)
-#      t=75:  recover Path B (ip link set up + IP re-add + netem re-apply)
+#      t=75:  recover Path B (ip link set up + IP re-add + via-route re-add + netem re-apply)
 #   6. Parse iperf3 JSON intervals to calculate TTF, TTR, and phase averages
 #
 # Timeline:
@@ -155,6 +155,16 @@ for SCHED in $SCHEDULERS; do
         # Re-add IPs lost when link went down
         ip netns exec "$NS_CLIENT" ip addr add "$IP_B_CLIENT" dev "$VETH_B0" 2>/dev/null || true
         ip netns exec "$NS_SERVER" ip addr add "$IP_B_SERVER" dev "$VETH_B1" 2>/dev/null || true
+        # Restore the via-route the link down flushed; without it the client's
+        # re-add gate never lets Path B back and TTR B stays None
+        # (see ci_bench_add_path_b_route). The 3s recovery timer picks the
+        # path up once the route exists. This runs in a background subshell
+        # that cannot fail the run, so say so loudly instead of vanishing —
+        # a silent miss here reads as a scheduler regression in the numbers.
+        if ! ci_bench_add_path_b_route; then
+            echo "[$(date +%T)] ERROR ($SCHED): could not restore Path B's route —" \
+                 "the t=75 recovery numbers below measure Path A alone"
+        fi
         # Re-apply netem on restored interfaces
         ip netns exec "$NS_CLIENT" tc qdisc add dev "$VETH_B0" root netem delay 30ms rate 150mbit 2>/dev/null || true
         ip netns exec "$NS_SERVER" tc qdisc add dev "$VETH_B1" root netem delay 30ms rate 150mbit 2>/dev/null || true

@@ -34,25 +34,25 @@ struct event_base;
 
 typedef struct ctrl_socket_s ctrl_socket_t;
 
+/* Receive-side UDP offload counters are owned by the platform's transport
+ * ctx (mqvpn_bind_posix), so the control socket asks for them at request
+ * time through this getter instead of borrowing pointers. rx_ctx is
+ * opaque; fn may be NULL (reported as 0). No synchronization: the getter
+ * runs on the same libevent loop as the RX path. */
+typedef void (*ctrl_rx_stats_fn)(void *rx_ctx, uint64_t *receives, uint64_t *datagrams);
+
 /* addr defaults to "127.0.0.1" when NULL.
  *
- * gro_receives / gro_datagrams point at the platform's live receive-side UDP
- * offload counters, reported by get_stats as udp_rx_*. They are borrowed, not
- * copied: the caller must keep them alive for the socket's lifetime. Both may
- * be NULL (reported as 0).
- *
- * They come in as parameters rather than through mqvpn_stats_t because UDP
- * GRO is enabled and un-coalesced entirely in the platform layer — the
- * library never observes it, so routing these through the library ABI would
- * add fields nothing in the library produces. The transmit-side pair does
+ * rx_stats reports the live receive-side UDP offload counters, emitted by
+ * get_stats as udp_rx_*. They come in as a callback rather than through
+ * mqvpn_stats_t because RX offload is a transport-implementation detail
+ * (mqvpn_bind_posix), not a library concept: the library's mqvpn_stats_t
+ * carries the transport-agnostic TX pair only. The transmit-side pair does
  * cross that ABI (mqvpn_stats_t.udp_tx_*) precisely because the library
- * issues those sends itself. Same split as the ABI has for UdpGso vs UdpGro.
- *
- * No synchronization: the platform's read callbacks are the only writers and
- * run on the same libevent loop as this socket's handlers. */
+ * issues those sends itself. */
 ctrl_socket_t *ctrl_socket_create(struct event_base *eb, const char *addr, int port,
-                                  mqvpn_server_t *server, const uint64_t *gro_receives,
-                                  const uint64_t *gro_datagrams);
+                                  mqvpn_server_t *server, ctrl_rx_stats_fn rx_stats,
+                                  void *rx_ctx);
 
 void ctrl_socket_destroy(ctrl_socket_t *cs);
 

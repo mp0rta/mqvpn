@@ -8,7 +8,7 @@ MQVPN_POC_SERVER_NAME =
 // Auth key matching the test-server config (empty = no Authorization header)
 MQVPN_POC_AUTH_KEY = changeme
 // 1 = skip TLS certificate verification (test-server only)
-MQVPN_POC_TLS_INSECURE = 1
+MQVPN_POC_TLS_INSECURE = 0
 // HTTP URL fetched through the tunnel for the multipath load gate.
 // NOTE: "//" starts a comment ANYWHERE on an xcconfig line — URLs must
 // break it with an empty substitution, or the value truncates to "http:".

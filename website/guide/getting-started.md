@@ -30,6 +30,7 @@ To uninstall, re-run the script with `--uninstall` (add `--purge` to also remove
 
 ::: warning
 The install script generates a self-signed certificate. Clients must use `--insecure` to connect. For production, replace the certificate with a trusted one (e.g., Let's Encrypt) and omit `--insecure`.
+Point `--cert` (or `Cert` / `cert_file` in a config file) at the full chain file (for Let's Encrypt, `fullchain.pem`): clients do not fetch missing intermediates.
 :::
 
 ### Client (deb package)

@@ -23,6 +23,7 @@
 #  include "route_mon.h"
 #  include "netmon_common.h"
 #  include "log.h"
+#  include "mqvpn_bind_posix.h"
 #  include "compat/socket_compat.h"
 
 #  include <stdio.h>
@@ -63,12 +64,23 @@ netmon_platform_pin_socket(int fd, const char *ifname, sa_family_t af)
     return darwin_pin_socket_to_iface(fd, ifname, af);
 }
 
-void
-netmon_platform_socket_created(platform_ctx_t *p, int fd, const char *ifname)
+/* The same ctx the startup loop builds (platform_darwin.c): the POSIX bind
+ * with the library-default buffers; udp_gso/udp_gro are Linux-only and stay
+ * 0. The ctx is caller-owned until add_path succeeds. */
+void *
+netmon_platform_transport_create(platform_ctx_t *p, int fd, const char *ifname)
 {
     (void)p;
-    (void)fd;
-    (void)ifname; /* no Darwin equivalent of the Linux UDP GRO sockopt */
+    mqvpn_bind_posix_opts_t bopts = {0};
+    bopts.struct_size = sizeof(bopts);
+    bopts.socket_buf_bytes = 0;
+    snprintf(bopts.tag, sizeof(bopts.tag), "%s", ifname);
+    void *ctx = NULL;
+    if (mqvpn_bind_posix_path_new(fd, &bopts, &ctx) != MQVPN_OK) {
+        LOG_WRN("%s: transport setup for re-add %s failed", netmon_log_tag, ifname);
+        return NULL;
+    }
+    return ctx;
 }
 
 /* #F1: the interface flap that dropped this path also flushed its scoped
@@ -83,11 +95,8 @@ netmon_platform_pre_readd(platform_ctx_t *p, const char *ifname)
 }
 
 int
-netmon_platform_pre_reactivate(platform_ctx_t *p, int slot, const char *ifname)
+netmon_platform_pre_reactivate(platform_ctx_t *p, platform_path_t *s, const char *ifname)
 {
-    if (p->path_mgr.paths[slot].fd < 0)
-        return -1; /* CLOSED (dropped) slot: no socket to pin */
-
     /* Lesson from the Windows port: interface re-enable can renumber the ifindex,
      * and IP_BOUND_IF/IPV6_BOUND_IF pin by index — a stale pin would
      * silently send traffic out the wrong interface on the very fd
@@ -98,7 +107,7 @@ netmon_platform_pre_reactivate(platform_ctx_t *p, int slot, const char *ifname)
      * routeless or ineligible ifaces. If the pin fails, skip reactivate
      * for this slot; the recovery timer / next event will retry. */
     sa_family_t af = (sa_family_t)p->server_addr.ss_family;
-    if (darwin_pin_socket_to_iface(p->path_mgr.paths[slot].fd, ifname, af) < 0) {
+    if (darwin_pin_socket_to_iface(s->fd, ifname, af) < 0) {
         LOG_WRN("routemon: reactivate %s skipped: iface pin failed", ifname);
         return -1;
     }
@@ -269,8 +278,8 @@ route_resolve_ifname(platform_ctx_t *p, const struct sockaddr_dl *sdl, unsigned 
     }
     if (index != 0 && if_indextoname(index, ifname)) return 1;
 
-    for (int i = 0; i < p->path_mgr.n_paths; i++) {
-        const char *tracked_ifname = p->path_mgr.paths[i].iface;
+    for (int i = 0; i < p->n_paths; i++) {
+        const char *tracked_ifname = p->paths[i].iface;
         if (tracked_ifname[0] == '\0') continue;
         /* Only a definite ENXIO ("no such interface") counts as gone:
          * if_nametoindex is getifaddrs-backed on Darwin and can fail for
@@ -414,8 +423,8 @@ route_resync(platform_ctx_t *p)
         return;
     }
 
-    for (int i = 0; i < p->path_mgr.n_paths; i++) {
-        const char *ifname = p->path_mgr.paths[i].iface;
+    for (int i = 0; i < p->n_paths; i++) {
+        const char *ifname = p->paths[i].iface;
         if (ifname[0] == '\0') continue;
 
         /* Presence + admin state from the one snapshot. */

@@ -453,19 +453,20 @@ jobs:
             -DBORINGSSL_BUILD_DIR="${{ github.workspace }}/third_party/xquic/third_party/boringssl/build/Release" `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=${{ matrix.arch == 'amd64' && 'x64-windows-static' || 'arm64-windows-static' }} `
-            -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON ..
+            -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON `
+            -DBUILD_TESTING=OFF ..
           cmake --build . --config Release
 
       - name: Smoke test mqvpn.exe (Windows)
         if: matrix.os == 'windows'
         shell: pwsh
         run: |
-          # ctest is intentionally skipped on Windows: the registered tests
-          # (test_auth, test_config, test_dns, test_session) include POSIX
-          # headers / Linux-only platform sources, so they cannot be built
-          # under MSVC. The unit-test block lives in the Linux else() branch
-          # of CMakeLists.txt, so ctest registers nothing on WIN32 and would
-          # silently pass on zero tests. Skipping makes that explicit.
+          # ctest is intentionally skipped here: the Windows test targets
+          # (the certificate verifier tests) run in ci.yml's Windows job, and
+          # the release build configures with -DBUILD_TESTING=OFF so a tagged
+          # release compiles product code only. The Linux unit tests include
+          # POSIX headers / Linux-only platform sources and cannot be built
+          # under MSVC.
           # The smoke step below is the actual Windows build verification.
           $out = & "build/Release/mqvpn.exe" --help 2>&1 | Out-String
           if ($LASTEXITCODE -ne 0) {

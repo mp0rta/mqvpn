@@ -7,13 +7,15 @@ import Network
 /// Owns path sockets and their lifecycle. One instance per tunnel session.
 /// Mobile path model: add + remove only (no drop/reactivate — those are the
 /// desktop lifecycle). `slots` is confined to the tick thread: every mutation
-/// AND read happens inside `engine.perform{}`. DispatchSource handlers never
-/// touch it — they capture their own fd/handle at creation time.
+/// AND read happens inside `engine.perform{}`. The read sources
+/// (PathReadSource) never touch it — they capture their own fd/handle at
+/// creation time, and every datagram is read by the engine on the tick
+/// thread (the bundled bind's drain); Swift never touches one.
 final class PathBinder {
     private struct PathSlot {
         var handle: mqvpn_path_handle_t
         var fd: Int32
-        var source: DispatchSourceRead
+        var source: PathReadSource
         var ifname: String
     }
     private let engine: MqvpnEngine
@@ -21,8 +23,17 @@ final class PathBinder {
     private var monitors: [NWInterface.InterfaceType: NWPathMonitor] = [:]
     private var pollTimer: Timer?   // tick-thread confined
     private let monitorQueue = DispatchQueue(label: "mqvpn.poc.pathmon")
+    // One enter per read source (PathReadSource.init) against the leave at
+    // the end of its cancel chain: stop(completion:) notifies on it once
+    // every fd is closed AND its release was reported to the library.
+    private let fence = DispatchGroup()
 
     init(engine: MqvpnEngine) { self.engine = engine }
+    /// True once stop() emptied the monitors (start() has run by the time
+    /// any caller can observe this — reconcile/addPath are only reachable
+    /// through triggers start() arms). One predicate for both guards so
+    /// adding an interface type cannot desynchronize them (D8).
+    var isStopped: Bool { monitors.isEmpty }
 
     func start() {
         // One monitor per interface type: a single default NWPathMonitor only
@@ -75,7 +86,7 @@ final class PathBinder {
     /// Overlapping triggers are safe: results funnel into
     /// addPath/removePath, whose guards make repeats no-ops.
     func reconcile() {
-        guard monitors[.wifi] != nil else { return }   // after stop(): no-op
+        guard !isStopped else { return }   // after stop(): no-op
         probe(.wifi) { [weak self] in
             self?.probe(.cellular, then: nil)
         }
@@ -125,7 +136,11 @@ final class PathBinder {
 
     /// Socket preparation + registration. Runs on the tick thread.
     private func addPath(type: NWInterface.InterfaceType, iface: NWInterface) {
-        guard slots[type] == nil else { return }   // already bound
+        // isStopped: an in-flight probe chain can reach here after stop()
+        // (its hop was queued before); without this guard the new source
+        // would enter the fence after the notify was registered and the
+        // fence would never close.
+        guard !isStopped, slots[type] == nil else { return }   // stopped / already bound
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
         guard fd >= 0 else { log.error("socket() errno=\(errno)"); return }
         // 1. non-blocking (Darwin Swift imports fcntl with 3 args)
@@ -133,8 +148,9 @@ final class PathBinder {
         _ = fcntl(fd, F_SETFL, fl | O_NONBLOCK)
         // 2. Pre-set socket buffers. Darwin REJECTS oversize SO_SNDBUF/RCVBUF
         //    with ENOBUFS and keeps the previous value (no clamping like
-        //    Linux); the core later requests 7 MiB ignoring the result, so
-        //    this pre-set is what actually survives if that request fails.
+        //    Linux); the bind later requests 7 MiB (socket_buf_bytes = 0) and
+        //    only logs a WARN on refusal, so this pre-set is what actually
+        //    survives if that request fails.
         var buf: Int32 = 1 << 20
         setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf, socklen_t(MemoryLayout<Int32>.size))
         setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf, socklen_t(MemoryLayout<Int32>.size))
@@ -158,7 +174,6 @@ final class PathBinder {
         guard rc == 0 else { log.error("bind errno=\(errno)"); close(fd); return }
         var desc = mqvpn_path_desc_t()
         desc.struct_size = UInt32(MemoryLayout<mqvpn_path_desc_t>.size)
-        desc.fd = fd
         withUnsafeMutableBytes(of: &desc.iface) { dst in
             iface.name.utf8CString.withUnsafeBytes { src in
                 dst.copyBytes(from: src.prefix(dst.count - 1))
@@ -169,43 +184,41 @@ final class PathBinder {
             _ = getsockname(fd, la.baseAddress!.assumingMemoryBound(to: sockaddr.self), &lalen)
         }
         desc.local_addr_len = UInt32(lalen)
-        // 6. register with the engine (we are on the tick thread already)
-        let (handle, outcome) = engine.addPathFd(fd, desc: &desc)
+        // 6. register with the engine (we are on the tick thread already):
+        //    the fd is wrapped in the bundled bind and handed to the library
+        let (handle, outcome) = engine.addPath(fd, desc: &desc)
         guard handle >= 0 else {
-            // Registration refused (handle slot unavailable; outcome is NOT
-            // written in this case). Surface it — this is exactly what the
-            // failover-flap gate measures — and release the fd without any
-            // engine calls.
-            log.error("add_path_fd failed iface=\(iface.name, privacy: .public) handle=\(handle)")
+            // Registration refused (bind construction failed or no handle
+            // slot; outcome is NOT written). Surface it — this is exactly
+            // what the failover-flap gate measures — and release the fd,
+            // which is still ours (no ctx holds it any more).
+            log.error("add_path failed iface=\(iface.name, privacy: .public) handle=\(handle)")
             close(fd)
             return
         }
         log.notice("add_path outcome=\(outcome.rawValue) iface=\(iface.name, privacy: .public)")
         // First successful path unlocks the connection (server addr + connect).
         engine.connectIfNeeded()
-        // 7. Read source AFTER successful registration; the handler captures
-        //    fd/handle (immutable). Datagrams arriving between add and resume
-        //    just wait in the socket buffer.
-        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: monitorQueue)
-        source.setEventHandler { [weak self] in
-            self?.drainSocket(fd: fd, handle: handle)
-        }
-        source.setCancelHandler { [weak self] in
-            // close(fd) must happen HERE: cancelling and closing synchronously
-            // races an in-flight read handler against fd reuse (the classic
-            // DispatchSource bug). After the close, hop to the tick thread to
-            // report fd closure so the core can finish the slot's cleanup.
-            close(fd)
-            self?.engine.perform { self?.engine.fdClosed(handle) }
-        }
+        // 7. Read source AFTER successful registration; it captures fd/handle
+        //    (immutable). Readable → one hop → the engine drains the socket on
+        //    the tick thread; cancel → the cancel handler hops close(fd) and
+        //    the release report to the tick thread (never on monitorQueue,
+        //    never before the cancel handler ran) → the fence is left.
+        //    Datagrams arriving between add and resume just wait in the
+        //    socket buffer.
+        let source = PathReadSource(
+            fd: fd, queue: monitorQueue, fence: fence,
+            hop: { [engine] in engine.perform($0) },
+            drain: { [engine] in engine.drain(handle) },
+            released: { [engine] in engine.pathReleased(handle) })
         source.resume()
         slots[type] = PathSlot(handle: handle, fd: fd, source: source, ifname: iface.name)
         log.notice("path added type=\(String(describing: type), privacy: .public) fd=\(fd) handle=\(handle)")
     }
 
     /// Failover teardown. Runs on the tick thread.
-    /// Order: orderly engine removal first, then cancel (whose handler closes
-    /// the fd and reports fd-closed back on the tick thread).
+    /// Order: orderly engine removal first, then cancel (whose chain closes
+    /// the fd and reports the release back on the tick thread).
     private func removePath(type: NWInterface.InterfaceType) {
         guard let slot = slots.removeValue(forKey: type) else { return }
         engine.removePath(slot.handle)
@@ -213,11 +226,13 @@ final class PathBinder {
         log.notice("path removed type=\(String(describing: type), privacy: .public) handle=\(slot.handle)")
     }
 
-    /// Full teardown for stopTunnel. Runs on the tick thread. Mirrors
-    /// removePath(type:) for every live slot, then cancels the monitors
-    /// themselves (start() is the only other writer of `monitors`, on the
-    /// caller's thread, so this is safe without extra synchronization).
-    func stop() {
+    /// Full teardown for stopTunnel (tick thread). Mirrors removePath(type:)
+    /// for every live slot, cancels the monitors, then registers the
+    /// completion to run (hopped back to the tick thread) once every path's
+    /// release hop has closed its fd and reported the release. Returns
+    /// without waiting: blocking the tick thread here would deadlock the
+    /// very hops the fence waits on.
+    func stop(completion: @escaping () -> Void) {
         pollTimer?.invalidate()
         pollTimer = nil
         for type in Array(slots.keys) {
@@ -225,36 +240,14 @@ final class PathBinder {
         }
         for (_, m) in monitors { m.cancel() }
         monitors.removeAll()
+        fence.notify(queue: monitorQueue) { [engine] in
+            engine.perform(completion)
+        }
     }
 
     /// Current (ifname, fd) per live slot, for GateMetrics' getsockopt
     /// snapshot. Tick-thread only, like all other `slots` access.
     func currentFds() -> [(String, Int32)] {
         slots.values.map { ($0.ifname, $0.fd) }
-    }
-
-    /// Drain readable datagrams; runs on monitorQueue, hops each datagram to
-    /// the tick thread. Uses only its captured fd/handle — no shared state.
-    private func drainSocket(fd: Int32, handle: mqvpn_path_handle_t) {
-        var buf = [UInt8](repeating: 0, count: 65535)
-        while true {
-            var storage = sockaddr_storage()
-            var slen = socklen_t(MemoryLayout<sockaddr_storage>.size)  // reset per datagram
-            let n = withUnsafeMutablePointer(to: &storage) { sp in
-                sp.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                    recvfrom(fd, &buf, buf.count, 0, sa, &slen)
-                }
-            }
-            if n <= 0 { break }  // EAGAIN → drained
-            let data = Data(buf[0..<n])
-            var peer = storage
-            engine.perform {
-                withUnsafePointer(to: &peer) { sp in
-                    sp.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                        self.engine.socketRecv(handle, data, sa, slen)
-                    }
-                }
-            }
-        }
     }
 }

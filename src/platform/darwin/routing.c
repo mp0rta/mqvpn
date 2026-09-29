@@ -452,9 +452,9 @@ setup_routes(platform_ctx_t *p)
      * (follow-up #F1; doc block at darwin_scoped_server_pin). Best-effort:
      * an interface without upstream right now gets its pin from route_mon
      * at re-add/reactivate time instead. */
-    for (int i = 0; i < p->path_mgr.n_paths; i++) {
-        if (p->path_mgr.paths[i].iface[0] == '\0') continue;
-        (void)darwin_scoped_server_pin(p, p->path_mgr.paths[i].iface);
+    for (int i = 0; i < p->n_paths; i++) {
+        if (p->paths[i].iface[0] == '\0') continue;
+        (void)darwin_scoped_server_pin(p, p->paths[i].iface);
     }
     return 0;
 }
@@ -464,9 +464,9 @@ cleanup_routes(platform_ctx_t *p)
 {
     if (!p->routing_configured) return;
 
-    for (int i = 0; i < p->path_mgr.n_paths; i++) {
-        if (p->path_mgr.paths[i].iface[0] == '\0') continue;
-        scoped_server_pin_delete(p, p->path_mgr.paths[i].iface);
+    for (int i = 0; i < p->n_paths; i++) {
+        if (p->paths[i].iface[0] == '\0') continue;
+        scoped_server_pin_delete(p, p->paths[i].iface);
     }
 
     if (p->routing6_configured) {
