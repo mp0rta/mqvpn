@@ -2,6 +2,10 @@
 
 Rationale and history behind the rules in [AGENTS.md](../AGENTS.md). Sections
 are cited from AGENTS.md as `[DD §n]`. Keep rules there and reasons here.
+Section numbers are positional: when a section is inserted or removed,
+renumber every `DD §n` reference in the same change —
+`scripts/lint/check_dd_refs.sh` (CI) fails on a reference to a missing
+section.
 
 ## §1 Sans-I/O library and `tick()`
 

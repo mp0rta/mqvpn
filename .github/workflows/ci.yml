@@ -1264,6 +1264,14 @@ jobs:
           LINT_MODE: fail
         run: bash scripts/lint/check_lifecycle_field_writes.sh
 
+  lint-dd-refs:
+    name: Lint - design-decisions references
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run check_dd_refs.sh
+        run: bash scripts/lint/check_dd_refs.sh
+
   hybrid-e2e:
     # H2 hybrid TCP-lane end-to-end suite (7 scenarios, incl. iperf3
     # throughput ratios + a netem multipath-aggregation test). Runs in a
