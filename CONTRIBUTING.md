@@ -20,8 +20,8 @@ with the standard two-line header:
 
 - Questions and ideas: GitHub Discussions, or the Discord community linked
   from the README (section "Community").
-- Security vulnerabilities: do not open an issue; email
-  `3p0rta26@gmail.com`.
+- Security vulnerabilities: report them privately through GitHub, not in an
+  issue or a discussion. See [SECURITY.md](SECURITY.md).
 
 ## 3. Prerequisites and the Release build
 
