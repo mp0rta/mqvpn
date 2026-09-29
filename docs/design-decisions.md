@@ -5,72 +5,82 @@ are cited from AGENTS.md as `[DD §n]`. Keep rules there and reasons here.
 
 ## §1 Sans-I/O library and `tick()`
 
-libmqvpn contains no libevent. The platform layer owns the reactor
-(libevent/epoll/GCD/IOCP) and drives the xquic engine by calling `tick()`.
-`connect()` only performs connection setup — never call
-`xqc_engine_main_logic()` from `connect()`. Callbacks are ABI-versioned
-(currently v2). Platform layers: `src/platform/linux/` (libevent, netlink),
+libmqvpn contains no libevent. The platform layer owns the reactor (libevent
+on Linux, macOS and Windows; a `poll()` reactor on the engine thread on
+Android; a RunLoop thread in the iOS Network Extension) and drives the xquic
+engine by calling `tick()`. `connect()` only performs connection setup — never
+call `xqc_engine_main_logic()` from `connect()`. Callbacks are ABI-versioned
+(currently v3). Platform layers: `src/platform/linux/` (libevent, netlink),
 `src/platform/windows/` (wintun, IP Helper), `src/platform/darwin/`,
-`src/platform/posix/` (shared).
+`src/platform/android/` (the engine-thread reactor), `src/platform/posix/`
+(shared by Linux and macOS).
 
 The shared library links shared xquic because static xquic is built without
 `-fPIC`. Signal handling lives only in the CLI, never in the library.
 
-## §2 fd-path mode: RX belongs to the platform, TX to the library
+## §2 Sans-I/O in both directions: transport ops and bundled binds
 
-The library calls `sendto()`/`sendmsg()` directly on path fds. A
-`send_packet` callback exists in the ABI, but **every** consumer passes NULL —
-Linux, Windows, macOS, Android JNI and iOS alike — and new platforms should
-too. Do not "restore symmetry" by wiring it up. The decisive reason is the
-signature: `mqvpn_send_packet_fn` returns `void`, so a delegated send cannot
-report EAGAIN vs. hard error, and xquic requires exactly that distinction (an
-`XQC_SOCKET_ERROR` return reaches `xqc_conn_should_close()` and can tear down
-the whole connection — see `path_send_dead_retcode` in `src/mqvpn_client.c`).
-Cost is only a secondary reason, and a narrower one than it looks: delegating
-TX would add a per-packet **upcall** (C → Java, needing
-`GetEnv`/`AttachCurrentThread` per call), whereas RX only ever does
-**downcalls**. RX genuinely does cross the boundary per packet on Android —
-Kotlin calls `recvFrom()` and then `onSocketRecv()`, two JNI downcalls plus
-byte-array pinning — so "crossing is expensive" alone does not explain the
-split. The void return does.
+The core never holds an fd or a `SOCKET` and never issues a socket syscall.
+Every send goes through the per-path `mqvpn_path_ops_t` (client) or the shared
+`mqvpn_server_transport_ops_t` (server) that the platform installs with
+`mqvpn_client_add_path()` / `mqvpn_server_set_transport()`; every receive is
+pushed in with `mqvpn_client_on_socket_recv()` /
+`mqvpn_server_on_socket_recv()`. `send` returns the prefix it accepted
+synchronously, `MQVPN_TX_WOULD_BLOCK` or `MQVPN_TX_FAILED`. That result is
+what xquic needs — a send error reported to it as a socket error can close
+the whole connection — so the policy that downgrades a failed send to
+"would block" stays in the core: a send error is never proof that a path is
+dead. Buffers passed to `send` are valid only for the call.
 
-The platform owns the reactor, so only it can know when a socket is readable:
-packets enter via `mqvpn_client_on_socket_recv()` /
-`mqvpn_server_on_socket_recv()` and the library never calls `recv*()` on the
-QUIC path sockets itself (its hybrid egress reads its own TCP sockets, which
-is a different lane).
-Receive is a *push* into `xqc_engine_packet_process`, so no return value has
-to travel back — which is why RX keeps the sans-I/O rule while TX is its
-deliberate exception.
+For ordinary UDP sockets the library ships two implementations of those ops,
+outside the core: `include/mqvpn_bind_posix.h` (`src/bind/`: Linux GSO,
+`sendmmsg` and GRO, socket buffers, errno mapping, the `udp-gso:` probe
+marker; one `sendto()` per datagram elsewhere) and
+`include/mqvpn_bind_winsock.h` (one `sendto()` per datagram and a
+`recvfrom()` drain helper). A bind ctx borrows the platform's socket and never
+closes it. The platform creates, binds, pins and `protect()`s the socket, runs
+the reactor, and calls the bind's receive helpers when the socket is readable.
+`scripts/lint/check_sansio_core.sh` keeps socket syscalls out of the core
+sources; `src/hybrid/tcp_egress.c` is the one excluded core file (the server
+egress lane owns its TCP sockets by design).
 
-This split decides where a new socket feature belongs. UDP GSO crosses the
-public ABI (`mqvpn_config_set_udp_gso`) because the library issues the send;
-UDP GRO has **no public API at all**, because setting the sockopt and
-splitting the coalesced buffer both happen in the platform layer and the
-library only ever sees one datagram at a time. Adding a config knob for a
-platform-only feature would create ABI that nothing reads and SemVer will not
-let us remove.
+There are two teardown contracts, and they are never mixed. Platform drop:
+`drop_path()` / `remove_path()`, then the platform stops the path's I/O and
+closes its socket, then `mqvpn_client_on_platform_path_released()` — the core
+harvests `ops.get_stats` and calls `ops.release` exactly once (DD §3).
+Whole-object destroy: the platform stops receiving, then
+`mqvpn_client_destroy()` / `mqvpn_server_destroy()` (the final flush still
+sends, and every transport ctx not yet released is finalised inside,
+including a dropped or removed path whose release was never reported), then
+the platform closes its sockets; `on_platform_path_released()` is never
+called after destroy.
 
-**When to revisit the split.** It is a deliberate trade, not a debt on a
-schedule. Delegating TX buys conceptual symmetry and nothing else — no
-feature, and Android measures ~400ns per packet for the added upcall (~3.6%
-of a core at 1 Gbps; 1.09x what RX already pays per packet) — while costing
-FSM rewiring (~22 `fd` sites), a full path-lifecycle e2e pass, and
-formal-spec follow-up. Even a full migration would not remove the underlying
-constraint: xquic's callback contract still demands a synchronous send
-result. Reconsider only when one of these lands:
+**Why the 2026-08-08 decision was reversed.** Until ABI 3 the library sent on
+the platform's fds itself while receives were pushed in, and this section
+recorded the decision to keep that split: the only delegated-send hook,
+`send_packet`, returned `void` and could not report "would block" versus a
+hard error, and delegating TX looked like cost without a feature. A survey of
+20 production VPN, QUIC and netstack projects (2026-09-16) found none in which
+the library sends and the platform receives. Designs that delegate TX return a
+synchronous blocked/error status (Google quiche `WriteResult`, lsquic, quinn,
+gVisor); GSO lives behind the transport interface (wireguard-go `StdNetBind`,
+quiche `QuicGsoBatchWriter`); mobile stacks keep the socket in the core and
+let the platform only `protect()` it. ABI 3 took that shape: a send contract
+with a synchronous result removes the reason for the split, the TX features
+that had piled up on the library's side of it (GSO with its sticky fallback,
+send telemetry, socket buffers) moved into the POSIX bind, and a relay (issue
+#218) or a test transport now plugs into the same interface as a socket.
 
-1. a delegated send path (issue #218, pairbond) has run in production long
-   enough to be trusted — the cheapest on-ramp to a wider migration;
-2. the path-lifecycle formal specs are merged, so the FSM has a spec to
-   update rather than one to write from scratch;
-3. a **second** bug is traced to the split — the first was the TX
-   counterpart of the `udp-rx` telemetry going missing for a release; one is
-   chance, two is a pattern;
-4. a new platform cannot express its sockets as fds at all.
-
-Until one of those, the split stays a documented decision rather than an
-accident — which is the entire reason it is written down here.
+**Where a socket feature belongs.** `UdpGso` stays the single user-facing
+knob: the core derives from it whether to batch sends (Linux only, with the
+`MQVPN_MAX_PKT_OUT_SIZE <= 1500` guard for the GSO run bound), and the POSIX
+bind derives whether GSO is allowed from the same value, so the two cannot
+drift. UDP GRO has no library API: it is an option of the POSIX bind (fed
+by the CLI's `UdpGro` key, and by a JNI constant on Android), which sets the
+sockopt and splits the coalesced buffer, and the core only ever sees single
+datagrams. A socket feature that only a transport uses gets no library config
+knob — it would be ABI that nothing in the library reads and that SemVer does
+not let us remove.
 
 ## §3 Path removal: the platform drop lifecycle contract
 
@@ -82,26 +92,31 @@ to end:
 1. the caller emits a **non-blocking** `PATH_ABANDON` (`xqc_conn_close_path`,
    queued on an alternate path) while the slot is still xquic-live — *before*
    dispatching the FSM event;
-2. `EVENT_PLATFORM_DROP` → the FSM sets `platform_attached=0` and moves the
+2. `EVENT_PLATFORM_DROP` → the FSM sets `transport_attached=0` and moves the
    slot to `CLOSED_DROPPED`. The FSM itself never calls xquic — the caller
    already did (the FSM stays xquic-API-free by design);
-3. the platform `close()`s the fd, then calls
-   `mqvpn_client_on_platform_fd_closed()` → `EVENT_FD_CLOSED` sets `fd=-1`;
+3. the platform stops the path's I/O and closes its socket, then calls
+   `mqvpn_client_on_platform_path_released()`, which harvests the
+   transport's stats and calls `ops.release` itself before dispatching
+   `EVENT_TRANSPORT_RELEASED` (the event only clears the slot's fields);
 4. `CLOSED_DROPPED → CLOSED_FREE` is a **lazy gate**, not a direct edge: it
-   fires only once `fd<0 && xquic_path_live==0 && xqc_path_id==0`. Two
-   independent async completions each re-evaluate the gate — the fd-close
-   above, and the `PATH_ABANDON` landing as `EVENT_XQUIC_REMOVED` (which
-   clears the xquic-side fields). Whichever lands last drives `CLOSED_FREE`.
+   fires only once `transport_released && xquic_path_live==0 &&
+   xqc_path_id==0`. Two independent async completions each re-evaluate the
+   gate — the release above, and the `PATH_ABANDON` landing as
+   `EVENT_XQUIC_REMOVED` (which clears the xquic-side fields). Whichever
+   lands last drives `CLOSED_FREE`.
 
 `RTM_DELLINK`/`RTM_DELADDR` → `drop_path()`; `path_removed_by_platform` is
 *not* reset while RECONNECTING. `remove_path()` runs the same
 close-then-dispatch shape with an orderly reason code; since draft-21 (commit
 0cd4136) **both** drop and remove emit `PATH_ABANDON` to free the CID/path_id
-slot for reuse, so the `drop_path` vs `remove_path` distinction is now reason
-code + recoverability + fd ownership, *not* close_path avoidance. The old
-"never call close_path / 3×PTO stall" rationale is obsolete — the non-blocking
-abandon no longer stalls surviving paths (the `MAX_PATH_ID` dynamic grant lets
-the re-added path skip the drain wait — netns-verified, 0% loss).
+slot for reuse, and since ABI 3 both leave the socket with the platform, so
+the two differ only in the reason code (plus the diagnostic context
+`on_platform_path_dropped()` can log) — *not* in close_path avoidance. The
+old "never call close_path / 3×PTO stall" rationale is obsolete — the
+non-blocking abandon no longer stalls surviving paths (the `MAX_PATH_ID`
+dynamic grant lets the re-added path skip the drain wait — netns-verified, 0%
+loss).
 
 ## §4 Path lifecycle is per platform
 

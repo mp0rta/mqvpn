@@ -17,11 +17,13 @@ rules belong here, reasons there.
 
 ## Map
 
-- `include/libmqvpn.h` — public C API (callback ABI v2)
+- `include/libmqvpn.h` — public C API (callback ABI v3)
 - `src/mqvpn_client.c`, `src/mqvpn_server.c`, `src/mqvpn_internal.h`,
   `src/mqvpn_scheduler.h` — library core
-- `src/path_state_machine.c`, `src/path_mgr.c` — path lifecycle FSM
-- `src/platform/{linux,windows,darwin,posix}/` — platform layers
+- `src/path_state_machine.c` — path lifecycle FSM
+- `src/bind/`, `include/mqvpn_bind_posix.h`, `include/mqvpn_bind_winsock.h` —
+  bundled POSIX and Winsock transports
+- `src/platform/{linux,windows,darwin,android,posix}/` — platform layers
 - `src/hybrid/` — hybrid TCP lane on lwIP
 - `third_party/xquic` — fork `mp0rta/xquic`, branch `mqvpn-main`;
   `third_party/lwip` — fork `mp0rta/heiher-lwip`, branch `mqvpn-main`
@@ -37,11 +39,19 @@ rules belong here, reasons there.
 - libmqvpn is sans-I/O: the platform drives the xquic engine by calling
   `tick()`. `connect()` performs connection setup only and MUST NOT call
   `xqc_engine_main_logic()`. [DD §1]
-- On the QUIC path sockets RX belongs to the platform and TX to the library:
-  the library never calls `recv*()` on them, platforms never send on them.
-  Every platform passes NULL for the `send_packet` callback; do not wire it
-  up. Platform-only socket features (UDP GRO) get no library config knob.
+- libmqvpn is sans-I/O in both directions: the core never holds a socket or
+  issues a socket syscall. Sends go through the transport ops the platform
+  installs (`mqvpn_client_add_path()` / `mqvpn_server_set_transport()`);
+  receives are pushed in (`on_socket_recv()`). The bundled binds
+  (`src/bind/`) borrow the platform's socket and never close it; socket
+  features live there, and features only a transport uses get no library
+  config knob. `scripts/lint/check_sansio_core.sh` enforces the core side.
   [DD §2]
+- Two teardown contracts, never mixed: platform drop (`drop_path()` /
+  `remove_path()` → stop I/O and close the socket →
+  `on_platform_path_released()`) and whole-object destroy (stop receiving →
+  `*_destroy()` → close the sockets; never `on_platform_path_released()`
+  after destroy). [DD §2, DD §3]
 - Platform-triggered path removal uses `drop_path()`; orderly removal uses
   `remove_path()`. The FSM never calls xquic; the caller emits `PATH_ABANDON`
   before dispatching the event. Do not add a direct edge for
