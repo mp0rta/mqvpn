@@ -305,15 +305,22 @@ not a negotiated one.
 - Benchmark outputs: `ci_sweep_results/` is transient (gitignored);
   `bench_results/` is the tracked archive for results worth keeping.
 
-## §11 Git: branch bases and history (2026-04 – 2026-07)
+## §11 Git: branch bases and history (2026-04, revised 2026-09)
 
-`dev` and `main` can diverge in both directions (at times one is simply
-behind the other), so the base of a bug-fix branch is decided per fix: start
-from the tip of the release line where the bug was found, not from whatever
-checkout you happen to be on. External contributors
-target `dev`; maintainers backport. `main` is updated only via GitHub PRs
-merged in the web UI. No force-push once a PR is open; stack corrections as
-new commits and squash only when asked.
+`main` is the release line: releases are tagged on it, and ordinary fixes and
+features, outside contributions included, go to `main` through a pull
+request.
+
+`dev` collects a series of pull requests that belong together and must not
+reach a release half-done (the transport-symmetry slices, for example). Each
+part lands on `dev` through its own pull request; then `dev` merges into
+`main` in one pull request with a merge commit, and `dev` is fast-forwarded
+to `main` afterwards.
+
+Choose the base of a bug-fix branch per fix: start from the tip of the line
+where the bug was found. `main` is updated only by pull requests merged in
+the GitHub web UI. Do not force-push once a pull request is open; add new
+commits instead.
 
 ## §12 Fork divergence is re-paid at every upstream merge (2026-09)
 

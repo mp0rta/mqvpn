@@ -61,18 +61,19 @@ Cases and a maintainer will.
 
 ## 5. Branches and pull requests
 
-- Branch from `dev` and open the pull request against `dev`. GitHub's PR
-  form defaults the base to `main`; change it to `dev`. Maintainers backport
-  to release lines.
+- Create your branch from `main` and open the pull request against `main`,
+  the default in GitHub's pull request form. If your change belongs to a
+  series that a maintainer is collecting on `dev`, the maintainer will ask
+  you to target `dev` instead.
 - For a bug fix, say which released version reproduces the bug.
 - Title: `type: subject` or `type(scope): subject` with a lowercase type,
   as the history uses. The xquic fork's `[T] subject` / `[T]: subject` form
   (T one of `+` add, `-` remove, `=` no behaviour change, `~` behaviour
   change) is also accepted. Imperative mood, no trailing period, at most 72
   characters. Squash merges reuse the title as the commit subject.
-- Fill in the pull request template. Reference issues as `Refs #123`;
-  closing keywords only work on PRs that target `main`, so issues are closed
-  in the release PR.
+- Fill in the pull request template. To link an issue, write `Refs #123`.
+  To close it automatically when the pull request merges into `main`, write
+  `Fixes #123`.
 - Once the pull request is open, do not force-push; add commits instead.
 - CodeRabbit reviews every PR automatically. If new pushes stop getting
   reviewed, comment `@coderabbitai review`. Address each finding or explain
