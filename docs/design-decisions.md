@@ -132,8 +132,10 @@ per-packet logging.
 
 ## §6 WLB scheduler
 
-The WLB scheduler is production-grade (LATE + OLB + flow pinning + soft
-spillover). Its measured behaviour lives in the benchmark results, not here:
+The WLB scheduler is production-grade: weights learned from acknowledged
+goodput, smooth weighted round-robin, inner-TCP flow pinning, and soft
+spillover when a pinned path is cwnd-blocked. Its measured behaviour lives in
+the benchmark results, not here:
 see `docs/benchmarks_netns.md` and the benchmark pages on the website, which
 are regenerated as the implementation changes. Do not casually add
 BLEST/LLHD-style schedulers. For jitter-sensitive real-time streams
