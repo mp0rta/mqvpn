@@ -21,8 +21,7 @@ rules belong here, reasons there.
 - `src/mqvpn_client.c`, `src/mqvpn_server.c`, `src/mqvpn_internal.h`,
   `src/mqvpn_scheduler.h` — library core
 - `src/path_state_machine.c` — path lifecycle FSM
-- `src/bind/`, `include/mqvpn_bind_posix.h`, `include/mqvpn_bind_winsock.h` —
-  bundled POSIX and Winsock transports
+- `src/bind/`, `include/mqvpn_bind_{posix,winsock}.h` — bundled transports
 - `src/platform/{linux,windows,darwin,android,posix}/` — platform layers
 - `src/hybrid/` — hybrid TCP lane on lwIP
 - `third_party/xquic` — fork `mp0rta/xquic`, branch `mqvpn-main`;
@@ -36,22 +35,19 @@ rules belong here, reasons there.
 
 ## Rules — architecture
 
-- libmqvpn is sans-I/O: the platform drives the xquic engine by calling
-  `tick()`. `connect()` performs connection setup only and MUST NOT call
-  `xqc_engine_main_logic()`. [DD §1]
-- libmqvpn is sans-I/O in both directions: the core never holds a socket or
-  issues a socket syscall. Sends go through the transport ops the platform
-  installs (`mqvpn_client_add_path()` / `mqvpn_server_set_transport()`);
-  receives are pushed in (`on_socket_recv()`). The bundled binds
-  (`src/bind/`) borrow the platform's socket and never close it; socket
-  features live there, and features only a transport uses get no library
-  config knob. `scripts/lint/check_sansio_core.sh` enforces the core side.
-  [DD §2]
+- libmqvpn has no event loop: the platform drives the xquic engine with
+  `tick()`, and `connect()` performs setup only (MUST NOT call
+  `xqc_engine_main_logic()`). It links shared xquic; signal handling lives
+  only in the CLI. [DD §1]
+- The core is sans-I/O in both directions: it never holds a socket or issues
+  a socket syscall (`scripts/lint/check_sansio_core.sh`). Sends go through
+  the transport ops the platform installs; receives are pushed in. The
+  bundled binds (`src/bind/`) borrow the platform's socket and never close
+  it; a socket feature only a transport uses gets no library knob. [DD §2]
 - Two teardown contracts, never mixed: platform drop (`drop_path()` /
-  `remove_path()` → stop I/O and close the socket →
-  `on_platform_path_released()`) and whole-object destroy (stop receiving →
-  `*_destroy()` → close the sockets; never `on_platform_path_released()`
-  after destroy). [DD §2, DD §3]
+  `remove_path()` → close the socket → `on_platform_path_released()`) and
+  destroy (stop receiving → `*_destroy()` → close the sockets; never
+  `on_platform_path_released()` after it). [DD §2, DD §3]
 - Platform-triggered path removal uses `drop_path()`; orderly removal uses
   `remove_path()`. The FSM never calls xquic; the caller emits `PATH_ABANDON`
   before dispatching the event. Do not add a direct edge for
@@ -69,8 +65,6 @@ rules belong here, reasons there.
 - New per-path scheduler observability goes in the extended-metrics block of
   `xqc_path_metrics_t` (via `xqc_conn_get_stats()` → `paths_info[]`), not a
   scheduler-specific API. [DD §13]
-- The shared library links shared xquic. Signal handling lives only in the
-  CLI, never in the library. [DD §1]
 - `xqc_engine_destroy()` frees the h3 context; do not also call
   `xqc_h3_ctx_destroy()`.
 - mqvpn log levels map one step down into xquic (INFO → WARN). Do not
