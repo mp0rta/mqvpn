@@ -5,9 +5,11 @@ are cited from AGENTS.md as `[DD §n]`. Keep rules there and reasons here.
 Section numbers are positional: when a section is inserted or removed,
 renumber every `DD §n` reference in the same change —
 `scripts/lint/check_dd_refs.sh` (CI) fails on a reference to a missing
-section.
+section. The month after each title is when the decision was made and, if it
+has changed since, when it was last revised; a list section gives the span
+of its items. A reason older than the code it explains is worth re-checking.
 
-## §1 Sans-I/O library and `tick()`
+## §1 Sans-I/O library and `tick()` (2026-03, revised 2026-09)
 
 libmqvpn contains no libevent. The platform layer owns the reactor (libevent
 on Linux, macOS and Windows; a `poll()` reactor on the engine thread on
@@ -22,7 +24,7 @@ call `xqc_engine_main_logic()` from `connect()`. Callbacks are ABI-versioned
 The shared library links shared xquic because static xquic is built without
 `-fPIC`. Signal handling lives only in the CLI, never in the library.
 
-## §2 Sans-I/O in both directions: transport ops and bundled binds
+## §2 Sans-I/O in both directions: transport ops and bundled binds (2026-09)
 
 The core never holds an fd or a `SOCKET` and never issues a socket syscall.
 Every send goes through the per-path `mqvpn_path_ops_t` (client) or the shared
@@ -86,7 +88,7 @@ datagrams. A socket feature that only a transport uses gets no library config
 knob — it would be ABI that nothing in the library reads and that SemVer does
 not let us remove.
 
-## §3 Path removal: the platform drop lifecycle contract
+## §3 Path removal: the platform drop lifecycle contract (2026-04, revised 2026-09)
 
 Platform-triggered removal uses `drop_path()` (a thin wrapper of
 `mqvpn_client_on_platform_path_dropped(…, NULL)`), not `remove_path()`
@@ -122,19 +124,19 @@ non-blocking abandon no longer stalls surviving paths (the `MAX_PATH_ID`
 dynamic grant lets the re-added path skip the drain wait — netns-verified, 0%
 loss).
 
-## §4 Path lifecycle is per platform
+## §4 Path lifecycle is per platform (2026-04)
 
 Linux/Windows/macOS use drop + reactivate; Android/iOS use remove + add
 (ConnectivityManager semantics). Do not unify them. Windows keys paths by
 interface LUID.
 
-## §5 Log level mapping
+## §5 Log level mapping (2026-05)
 
 mqvpn levels map one step down into xquic (mqvpn INFO → xquic WARN).
 Reverting to a 1:1 mapping reintroduces a 5× throughput cliff on Windows from
 per-packet logging.
 
-## §6 WLB scheduler
+## §6 WLB scheduler (2026-02, revised 2026-09)
 
 The WLB scheduler is production-grade: weights learned from acknowledged
 goodput, smooth weighted round-robin, inner-TCP flow pinning, and soft
@@ -146,7 +148,7 @@ BLEST/LLHD-style schedulers. For jitter-sensitive real-time streams
 (SRT/RTP), recommend `Scheduler = minrtt` instead of writing a new
 scheduler.
 
-## §7 The hybrid TCP lane is scheduled by MinRTT, not by WLB — by construction
+## §7 The hybrid TCP lane is scheduled by MinRTT, not by WLB — by construction (2026-09)
 
 `po_flow_hash` is set only on the datagram write path
 (`xqc_packet_out.c`), so every QUIC STREAM packet — i.e. all TCP-lane
@@ -173,14 +175,14 @@ shaped multi-path pair that beats MinRTT — not an argument from symmetry with
 the datagram lane. This came out of WLB bug-fix work; without that
 measurement, leave the lane on MinRTT.
 
-## §8 Reorder buffer scope
+## §8 Reorder buffer scope (2026-06)
 
 The tunnel-layer reorder shim exists only for bandwidth-aggregating a *single
 inner QUIC connection*; inner TCP and FEC are out of scope. Invariant:
 in-order delivery is the QUIC STREAM layer's job; DATAGRAM bypasses ordering
 at every layer.
 
-## §9 Spec compliance, draft-21 and xquic naming
+## §9 Spec compliance, draft-21 and xquic naming (2026-05)
 
 IETF RFC/draft compliance is the top priority. Never make a library change
 that deviates from spec to suppress a symptom; if a deviation looks
@@ -195,7 +197,7 @@ semantics. draft-21 path management is dynamic (`PATHS_BLOCKED` ↔
 `MAX_PATH_ID` loop); the old "bump `XQC_MAX_PATHS_COUNT`" strategy is
 obsolete.
 
-## §10 Build, test and small decisions
+## §10 Build, test and small decisions (2026-04 – 2026-07)
 
 - `build.sh` forces `CMAKE_BUILD_TYPE=Release`, which defines `NDEBUG` and
   silently no-ops `assert()`-based unit tests. Never base a "tests pass"
@@ -224,7 +226,7 @@ obsolete.
 - Benchmark outputs: `ci_sweep_results/` is transient (gitignored);
   `bench_results/` is the tracked archive for results worth keeping.
 
-## §11 Git: branch bases and history
+## §11 Git: branch bases and history (2026-04 – 2026-07)
 
 `dev` and `main` can diverge in both directions (at times one is simply
 behind the other), so the base of a bug-fix branch is decided per fix: start
@@ -234,7 +236,7 @@ target `dev`; maintainers backport. `main` is updated only via GitHub PRs
 merged in the web UI. No force-push once a PR is open; stack corrections as
 new commits and squash only when asked.
 
-## §12 Fork divergence is re-paid at every upstream merge
+## §12 Fork divergence is re-paid at every upstream merge (2026-09)
 
 Upstream is tracked by periodic full merges, not cherry-picks, so **every
 line of divergence is paid again at every merge**. Weigh a fork-local change
@@ -244,7 +246,7 @@ edited public header as the expensive option. This is why WLB lives in
 `src/transport/scheduler/` behind `xqc_scheduler_callback_t` instead of
 spreading through `xqc_conn.c` / `xqc_send_ctl.c`.
 
-## §13 In the fork, ABI breaks are cheap and public API is not
+## §13 In the fork, ABI breaks are cheap and public API is not (2026-09)
 
 Growing a struct that a public struct embeds by value — `xqc_scheduler_callback_t`
 sits inside `xqc_conn_settings_t` — shifts every later field: source-compatible,
