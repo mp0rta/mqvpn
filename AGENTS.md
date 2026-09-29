@@ -48,14 +48,15 @@ rules belong here, reasons there.
   `remove_path()` → close the socket → `on_platform_path_released()`) and
   destroy (stop receiving → `*_destroy()` → close the sockets; never
   `on_platform_path_released()` after it). [DD §2, DD §3]
-- Platform-triggered path removal uses `drop_path()`; orderly removal uses
-  `remove_path()`. The FSM never calls xquic; the caller emits `PATH_ABANDON`
-  before dispatching the event. Do not add a direct edge for
-  `CLOSED_DROPPED → CLOSED_FREE` (it is a lazy gate). Since draft-21 both
-  drop and remove emit `PATH_ABANDON`; do not reintroduce close_path
-  avoidance. [DD §3]
-- Path lifecycle is per platform: Linux/Windows/macOS use drop + reactivate,
-  Android/iOS use remove + add. Do not unify them. [DD §4]
+- Desktop platforms drop a path with `on_platform_path_dropped()` and its
+  reason (`drop_path()` passes none); orderly removal uses `remove_path()`.
+  The FSM never calls xquic: the caller emits `PATH_ABANDON` first, and
+  `CLOSED_DROPPED → CLOSED_FREE` stays a lazy gate, not a direct edge. Both
+  drop and remove emit `PATH_ABANDON` (draft-21); do not reintroduce
+  close_path avoidance. [DD §3]
+- Path lifecycle is per platform: desktop drops, then re-adds the slot (or
+  reactivates one that still owns its socket; see `src/platform/path_readd.h`);
+  Android/iOS remove and add. Do not unify them. [DD §4]
 - Public structs that carry `struct_size` grow only by appending fields, each
   with an `appended under ABI N` comment. `MQVPN_MAX_PATHS` is ABI-frozen.
 - In the xquic fork the trade is reversed: growing a struct is an acceptable
@@ -67,8 +68,7 @@ rules belong here, reasons there.
   scheduler-specific API. [DD §13]
 - `xqc_engine_destroy()` frees the h3 context; do not also call
   `xqc_h3_ctx_destroy()`.
-- mqvpn log levels map one step down into xquic (INFO → WARN). Do not
-  revert to 1:1. [DD §5]
+- mqvpn INFO maps to xquic WARN (other levels map 1:1); keep it. [DD §5]
 - WLB is the production scheduler. Do not casually add BLEST/LLHD-style
   schedulers; for jitter-sensitive streams recommend `Scheduler = minrtt`.
   [DD §6]

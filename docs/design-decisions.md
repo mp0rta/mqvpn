@@ -11,141 +11,202 @@ of its items. A reason older than the code it explains is worth re-checking.
 
 ## §1 Sans-I/O library and `tick()` (2026-03, revised 2026-09)
 
-libmqvpn contains no libevent. The platform layer owns the reactor (libevent
-on Linux, macOS and Windows; a `poll()` reactor on the engine thread on
-Android; a RunLoop thread in the iOS Network Extension) and drives the xquic
-engine by calling `tick()`. `connect()` only performs connection setup — never
-call `xqc_engine_main_logic()` from `connect()`. Callbacks are ABI-versioned
-(currently v3). Platform layers: `src/platform/linux/` (libevent, netlink),
-`src/platform/windows/` (wintun, IP Helper), `src/platform/darwin/`,
-`src/platform/android/` (the engine-thread reactor), `src/platform/posix/`
-(shared by Linux and macOS).
+libmqvpn does not have its own event loop or threads. The platform layer runs
+the reactor: libevent on Linux, macOS and Windows, a `poll()` reactor on the
+engine thread on Android, and a RunLoop thread in the iOS Network Extension.
+The platform drives the xquic engine by calling `tick()`.
+
+`connect()` only sets up the connection. Do not call
+`xqc_engine_main_logic()` from `connect()`. Every API call and every callback
+runs on one thread, the tick thread, and Debug builds check this
+(`ASSERT_TICK_THREAD`). The rule is about staying on the same thread, not
+only about never running two calls at once. A GCD serial queue only gives the
+second, so it is not enough; iOS runs a dedicated `Thread` for this reason.
+Callbacks are ABI-versioned (currently v3).
+
+Platform layers:
+
+- `src/platform/linux/` (libevent, netlink)
+- `src/platform/windows/` (wintun, IP Helper)
+- `src/platform/darwin/`
+- `src/platform/android/` (the engine-thread reactor)
+- `src/platform/posix/` (shared by Linux and macOS)
 
 The shared library links shared xquic because static xquic is built without
 `-fPIC`. Signal handling lives only in the CLI, never in the library.
 
 ## §2 Sans-I/O in both directions: transport ops and bundled binds (2026-09)
 
-The core never holds an fd or a `SOCKET` and never issues a socket syscall.
-Every send goes through the per-path `mqvpn_path_ops_t` (client) or the shared
-`mqvpn_server_transport_ops_t` (server) that the platform installs with
-`mqvpn_client_add_path()` / `mqvpn_server_set_transport()`; every receive is
-pushed in with `mqvpn_client_on_socket_recv()` /
-`mqvpn_server_on_socket_recv()`. `send` returns the prefix it accepted
-synchronously, `MQVPN_TX_WOULD_BLOCK` or `MQVPN_TX_FAILED`. That result is
-what xquic needs — a send error reported to it as a socket error can close
-the whole connection — so the policy that downgrades a failed send to
-"would block" stays in the core: a send error is never proof that a path is
-dead. Buffers passed to `send` are valid only for the call.
+The core does not hold any file descriptors or `SOCKET`s, and it never makes
+a socket system call.
 
-For ordinary UDP sockets the library ships two implementations of those ops,
-outside the core: `include/mqvpn_bind_posix.h` (`src/bind/`: Linux GSO,
-`sendmmsg` and GRO, socket buffers, errno mapping, the `udp-gso:` probe
-marker; one `sendto()` per datagram elsewhere) and
-`include/mqvpn_bind_winsock.h` (one `sendto()` per datagram and a
-`recvfrom()` drain helper). A bind ctx borrows the platform's socket and never
-closes it. The platform creates, binds, pins and `protect()`s the socket, runs
-the reactor, and calls the bind's receive helpers when the socket is readable.
-`scripts/lint/check_sansio_core.sh` keeps socket syscalls out of the core
-sources; `src/hybrid/tcp_egress.c` is the one excluded core file (the server
-egress lane owns its TCP sockets by design).
+Every send goes through transport ops that the platform installs: a
+`mqvpn_path_ops_t` per path on the client (with `mqvpn_client_add_path()`),
+and one shared `mqvpn_server_transport_ops_t` on the server (with
+`mqvpn_server_set_transport()`). Every receive is pushed into the core with
+`mqvpn_client_on_socket_recv()` or `mqvpn_server_on_socket_recv()`.
 
-There are two teardown contracts, and they are never mixed. Platform drop:
-`drop_path()` / `remove_path()`, then the platform stops the path's I/O and
-closes its socket, then `mqvpn_client_on_platform_path_released()` — the core
-harvests `ops.get_stats` and calls `ops.release` exactly once (DD §3).
-Whole-object destroy: the platform stops receiving, then
-`mqvpn_client_destroy()` / `mqvpn_server_destroy()` (the final flush still
-sends, and every transport ctx not yet released is finalised inside,
-including a dropped or removed path whose release was never reported), then
-the platform closes its sockets; `on_platform_path_released()` is never
-called after destroy.
+`send` returns one of these:
 
-**Why the 2026-08-08 decision was reversed.** Until ABI 3 the library sent on
-the platform's fds itself while receives were pushed in, and this section
-recorded the decision to keep that split: the only delegated-send hook,
-`send_packet`, returned `void` and could not report "would block" versus a
-hard error, and delegating TX looked like cost without a feature. A survey of
-20 production VPN, QUIC and netstack projects (2026-09-16) found none in which
-the library sends and the platform receives. Designs that delegate TX return a
-synchronous blocked/error status (Google quiche `WriteResult`, lsquic, quinn,
-gVisor); GSO lives behind the transport interface (wireguard-go `StdNetBind`,
-quiche `QuicGsoBatchWriter`); mobile stacks keep the socket in the core and
-let the platform only `protect()` it. ABI 3 took that shape: a send contract
-with a synchronous result removes the reason for the split, the TX features
-that had piled up on the library's side of it (GSO with its sticky fallback,
-send telemetry, socket buffers) moved into the POSIX bind, and a relay (issue
-#218) or a test transport now plugs into the same interface as a socket.
+- the part of the data it accepted;
+- `MQVPN_TX_WOULD_BLOCK`;
+- `MQVPN_TX_FAILED`.
 
-**Where a socket feature belongs.** `UdpGso` stays the single user-facing
-knob: the core derives from it whether to batch sends (Linux only, with the
-`MQVPN_MAX_PKT_OUT_SIZE <= 1500` guard for the GSO run bound), and the POSIX
-bind derives whether GSO is allowed from the same value, so the two cannot
-drift. UDP GRO has no library API: it is an option of the POSIX bind (fed
-by the CLI's `UdpGro` key, and by a JNI constant on Android), which sets the
-sockopt and splits the coalesced buffer, and the core only ever sees single
-datagrams. A socket feature that only a transport uses gets no library config
-knob — it would be ABI that nothing in the library reads and that SemVer does
-not let us remove.
+xquic needs this result. If a send error reaches xquic as a socket error,
+xquic can close the whole connection. So the core keeps the rule that turns a
+failed send into "would block": a send error never proves that a path is
+dead. Buffers passed to `send` are valid only during that call.
+
+For ordinary UDP sockets the library ships two implementations of these ops,
+outside the core:
+
+1. `include/mqvpn_bind_posix.h` (`src/bind/`): Linux GSO, `sendmmsg` and
+   GRO, socket buffers, errno mapping, and the `udp-gso:` log marker. On
+   other POSIX systems it makes one `sendto()` call per datagram.
+2. `include/mqvpn_bind_winsock.h`: one `sendto()` per datagram, and a helper
+   that drains `recvfrom()`.
+
+A bind ctx borrows the platform's socket and never closes it. The platform
+creates, binds, pins and `protect()`s the socket, runs the reactor, and calls
+the bind's receive helpers when the socket is readable.
+
+`scripts/lint/check_sansio_core.sh` keeps socket system calls out of the core
+sources. The one exception is `src/hybrid/tcp_egress.c`: the server egress
+lane owns its TCP sockets by design.
+
+There are two ways to tear down, and they must never be mixed:
+
+- **Platform drop.** Call `drop_path()` or `remove_path()`. The platform stops
+  the path's I/O and closes its socket, then calls
+  `mqvpn_client_on_platform_path_released()`. The core collects the stats
+  with `ops.get_stats` and calls `ops.release` exactly once (DD §3).
+- **Whole-object destroy.** The platform stops receiving, then calls
+  `mqvpn_client_destroy()` or `mqvpn_server_destroy()`. The final flush still
+  sends, and every transport ctx that was not released yet is finished
+  inside, including a dropped or removed path whose release was never
+  reported. Then the platform closes its sockets.
+  `on_platform_path_released()` is never called after destroy.
+
+**Why the 2026-08-08 decision was reversed.** Before ABI 3, the library sent
+on the platform's fds itself while the platform pushed receives in, and this
+section recorded the decision to keep that split. The only hook for letting
+the platform send, `send_packet`, returned `void`, so it could not report
+"would block" apart from a hard error, and moving sends to the platform
+looked like cost without a feature.
+
+A survey of 20 production VPN, QUIC and network-stack projects (2026-09-16)
+found none where the library sends and the platform receives. Projects that
+let the platform send return a synchronous blocked-or-error status (Google
+quiche `WriteResult`, lsquic, quinn, gVisor). GSO lives behind the transport
+interface (wireguard-go `StdNetBind`, quiche `QuicGsoBatchWriter`). Mobile
+stacks keep the socket in the core and let the platform only `protect()` it.
+
+ABI 3 took that shape. Once `send` returns a result synchronously, no reason
+for the split is left. The send features that had piled up on the library's
+side (GSO with its sticky fallback, send telemetry, socket buffers) moved
+into the POSIX bind, and a relay (issue #218) or a test transport now uses
+the same interface as a socket.
+
+**Where a socket feature belongs.** `UdpGso` is still the only user setting
+for GSO. The core uses it to decide whether to batch sends (Linux only, with
+the `MQVPN_MAX_PKT_OUT_SIZE <= 1500` guard for the GSO run bound), and the
+POSIX bind uses the same value to decide whether GSO is allowed, so the two
+cannot drift apart.
+
+UDP GRO has no library API. It is an option of the POSIX bind, set by the
+CLI's `UdpGro` key or by a JNI constant on Android. The bind sets the socket
+option and splits the combined buffer, so the core only ever sees single
+datagrams.
+
+A socket feature that only a transport uses gets no library config setting.
+Such a setting would be ABI that nothing in the library reads, and SemVer
+would not let us remove it later.
 
 ## §3 Path removal: the platform drop lifecycle contract (2026-04, revised 2026-09)
 
-Platform-triggered removal uses `drop_path()` (a thin wrapper of
-`mqvpn_client_on_platform_path_dropped(…, NULL)`), not `remove_path()`
-(`EVENT_REMOVE_API`, orderly application-level close). The drop contract, end
-to end:
+When a platform loses an interface, it calls
+`mqvpn_client_on_platform_path_dropped()` with a
+`mqvpn_platform_path_event_info_t` that says why
+(`MQVPN_PLATFORM_REASON_*`: the interface was removed, the carrier was lost,
+an admin turned it off, or no usable address is left), so the drop is logged
+with its reason. `drop_path()` is the same call without the info, kept for
+ABI compatibility. Mobile platforms use `remove_path()`
+(`PATH_EVENT_REMOVE_API`), the orderly, application-level removal (DD §4).
 
-1. the caller emits a **non-blocking** `PATH_ABANDON` (`xqc_conn_close_path`,
-   queued on an alternate path) while the slot is still xquic-live — *before*
-   dispatching the FSM event;
-2. `EVENT_PLATFORM_DROP` → the FSM sets `transport_attached=0` and moves the
-   slot to `CLOSED_DROPPED`. The FSM itself never calls xquic — the caller
-   already did (the FSM stays xquic-API-free by design);
-3. the platform stops the path's I/O and closes its socket, then calls
-   `mqvpn_client_on_platform_path_released()`, which harvests the
-   transport's stats and calls `ops.release` itself before dispatching
-   `EVENT_TRANSPORT_RELEASED` (the event only clears the slot's fields);
-4. `CLOSED_DROPPED → CLOSED_FREE` is a **lazy gate**, not a direct edge: it
-   fires only once `transport_released && xquic_path_live==0 &&
-   xqc_path_id==0`. Two independent async completions each re-evaluate the
-   gate — the release above, and the `PATH_ABANDON` landing as
-   `EVENT_XQUIC_REMOVED` (which clears the xquic-side fields). Whichever
-   lands last drives `CLOSED_FREE`.
+The drop contract, end to end:
 
-`RTM_DELLINK`/`RTM_DELADDR` → `drop_path()`; `path_removed_by_platform` is
-*not* reset while RECONNECTING. `remove_path()` runs the same
-close-then-dispatch shape with an orderly reason code; since draft-21 (commit
-0cd4136) **both** drop and remove emit `PATH_ABANDON` to free the CID/path_id
-slot for reuse, and since ABI 3 both leave the socket with the platform, so
-the two differ only in the reason code (plus the diagnostic context
-`on_platform_path_dropped()` can log) — *not* in close_path avoidance. The
-old "never call close_path / 3×PTO stall" rationale is obsolete — the
-non-blocking abandon no longer stalls surviving paths (the `MAX_PATH_ID`
-dynamic grant lets the re-added path skip the drain wait — netns-verified, 0%
-loss).
+1. The caller sends a **non-blocking** `PATH_ABANDON` (`xqc_conn_close_path`,
+   queued on another path) while xquic still holds the path, *before* it
+   dispatches the FSM event.
+2. `PATH_EVENT_PLATFORM_DROP`: the FSM sets `transport_attached=0` and moves
+   the slot to `CLOSED_DROPPED`. The FSM itself never calls xquic; the caller
+   already did. This keeps the FSM free of xquic API calls by design.
+3. The platform stops the path's I/O and closes its socket, then calls
+   `mqvpn_client_on_platform_path_released()`. That function collects the
+   transport's stats and calls `ops.release` itself, then dispatches
+   `PATH_EVENT_TRANSPORT_RELEASED` (the event only clears the slot's fields).
+4. `CLOSED_DROPPED → CLOSED_FREE` is a **lazy gate**, not a direct step. It
+   fires only when `transport_released && xquic_path_live==0 &&
+   xqc_path_id==0`. Two independent async completions each check the gate:
+   the release above, and the `PATH_ABANDON` landing as
+   `PATH_EVENT_XQUIC_REMOVED` (which clears the xquic-side fields). Whichever
+   lands last moves the slot to `CLOSED_FREE`.
 
-## §4 Path lifecycle is per platform (2026-04)
+`remove_path()` follows the same close-then-dispatch pattern. Since draft-21
+(commit 0cd4136), both drop and remove send `PATH_ABANDON` to free the
+CID/path_id slot for reuse, and since ABI 3 both leave the socket with the
+platform. So the two FSM handlers differ only in the reason code. Avoiding
+`close_path` is no longer a difference between them: both call it. The old
+reason for avoiding it, a 3×PTO stall of the surviving paths, is gone: the
+non-blocking abandon does not stall them, and the `MAX_PATH_ID` dynamic grant
+lets the re-added path skip the drain wait (netns-verified, 0% loss).
 
-Linux/Windows/macOS use drop + reactivate; Android/iOS use remove + add
-(ConnectivityManager semantics). Do not unify them. Windows keys paths by
-interface LUID.
+## §4 Path lifecycle is per platform (2026-04, revised 2026-09)
+
+Desktop and mobile handle paths in two different ways. Do not unify them:
+desktop owns long-lived interface slots, while mobile is handed network
+objects that come and go.
+
+**Desktop (Linux, macOS, Windows).** The platform keeps one slot for each
+configured interface for the whole session. When an interface event happens,
+the path is dropped (DD §3) and the platform closes the socket. When the
+interface is usable again, the slot is re-added: a new socket, a new
+transport ctx, and `add_path()` under a new handle. A slot that still has its
+socket (a degraded path that was never dropped) is reactivated with
+`mqvpn_client_reactivate_path()` instead, and is never re-added: re-adding it
+would overwrite the socket and leave its read event behind. The test that
+chooses between re-add and reactivate lives in one place,
+`src/platform/path_readd.h`, shared by the POSIX network monitor and the
+Windows poll reconciler; the separate copies it replaced disagreed. On
+Windows a slot is named by the adapter's FriendlyName, and the platform looks
+up the LUID when it checks the adapter.
+
+**Android and iOS.** The platform follows the OS network callbacks
+(ConnectivityManager, NWPathMonitor). A network that goes away is removed
+with `remove_path()`, and a network that appears is added with `add_path()`.
+Nothing is reactivated.
 
 ## §5 Log level mapping (2026-05)
 
-mqvpn levels map one step down into xquic (mqvpn INFO → xquic WARN).
-Reverting to a 1:1 mapping reintroduces a 5× throughput cliff on Windows from
-per-packet logging.
+mqvpn INFO maps to xquic WARN. DEBUG, WARN and ERROR each map to xquic's
+level of the same name.
+
+xquic INFO logs every packet, which is DEBUG-level detail in practice. With a
+1:1 mapping this cut throughput by about 5× on a slow console (Windows
+PowerShell) and made `--log-level info` unusable. Users who want xquic's
+detail use `--log-level debug`. Do not go back to the 1:1 mapping.
 
 ## §6 WLB scheduler (2026-02, revised 2026-09)
 
 The WLB scheduler is production-grade: weights learned from acknowledged
 goodput, smooth weighted round-robin, inner-TCP flow pinning, and soft
-spillover when a pinned path is cwnd-blocked. Its measured behaviour lives in
-the benchmark results, not here:
-see `docs/benchmarks_netns.md` and the benchmark pages on the website, which
-are regenerated as the implementation changes. Do not casually add
-BLEST/LLHD-style schedulers. For jitter-sensitive real-time streams
-(SRT/RTP), recommend `Scheduler = minrtt` instead of writing a new
+spillover when a pinned path is cwnd-blocked. `Scheduler = wlb_udp_pin` also
+pins inner UDP flows (by a 5-tuple hash) instead of spreading their packets
+across paths one by one. WLB's measured behaviour lives in the benchmark
+results, not here: see `docs/benchmarks_netns.md` and the benchmark pages on
+the website, which are regenerated as the implementation changes. Do not
+casually add BLEST/LLHD-style schedulers. For jitter-sensitive real-time
+streams (SRT/RTP), recommend `Scheduler = minrtt` instead of writing a new
 scheduler.
 
 ## §7 The hybrid TCP lane is scheduled by MinRTT, not by WLB — by construction (2026-09)
@@ -177,10 +238,26 @@ measurement, leave the lane on MinRTT.
 
 ## §8 Reorder buffer scope (2026-06)
 
-The tunnel-layer reorder shim exists only for bandwidth-aggregating a *single
-inner QUIC connection*; inner TCP and FEC are out of scope. Invariant:
-in-order delivery is the QUIC STREAM layer's job; DATAGRAM bypasses ordering
-at every layer.
+QUIC delivers data in order at the STREAM layer (RFC 9000 §2.2), and
+multipath keeps that order across the whole connection. DATAGRAM frames have
+no ordering at any QUIC layer (RFC 9221). CONNECT-IP uses them for exactly
+that reason: no head-of-line blocking and no retransmission. The cost is that
+datagrams spread over paths with different RTTs arrive out of order.
+
+The optional `[Reorder]` buffer restores a bounded order for one case only: a
+single inner connection (usually inner QUIC / HTTP/3) that cannot be split
+into flows and is spread across paths for bandwidth. It only reorders: it
+waits at most `MaxWaitMs`, never retransmits, and moves past a gap when the
+time runs out.
+
+Out of scope:
+
+- inner TCP: WLB keeps each TCP flow on one path, and TCP handles reordering
+  itself;
+- latency-sensitive UDP such as DNS: waiting only adds delay;
+- RTP/SRT: their own jitter buffers handle this.
+
+FEC is a separate, sender-side mechanism in another layer.
 
 ## §9 Spec compliance, draft-21 and xquic naming (2026-05)
 
@@ -193,9 +270,11 @@ ECN counts are parsed and discarded.
 
 xquic's `MULTIPATH_xx` / `dev/multipath_xx` names are xquic-internal version
 labels, **not** IETF draft numbers — read the code to determine actual draft
-semantics. draft-21 path management is dynamic (`PATHS_BLOCKED` ↔
-`MAX_PATH_ID` loop); the old "bump `XQC_MAX_PATHS_COUNT`" strategy is
-obsolete.
+semantics. The draft-21 wire codepoints use the label `XQC_MULTIPATH_3E`.
+draft-21 path management is dynamic (`PATHS_BLOCKED` ↔ `MAX_PATH_ID` loop):
+the fixed `XQC_MAX_PATHS_COUNT` cap is gone, so the old "bump it" strategy is
+obsolete, and the remaining limit, `XQC_PATH_HARD_CAP`, is a safety bound,
+not a negotiated one.
 
 ## §10 Build, test and small decisions (2026-04 – 2026-07)
 
@@ -244,7 +323,9 @@ against that recurring cost: prefer a fix that can land upstream, then one
 confined to files upstream rarely touches; treat divergence in a widely
 edited public header as the expensive option. This is why WLB lives in
 `src/transport/scheduler/` behind `xqc_scheduler_callback_t` instead of
-spreading through `xqc_conn.c` / `xqc_send_ctl.c`.
+spreading through `xqc_conn.c` / `xqc_send_ctl.c`. The only WLB hooks outside
+that directory are the datagram flow hash (`xqc_packet_out.c`) and the
+`on_app_packet_acked` callback (`xqc_send_ctl.c`).
 
 ## §13 In the fork, ABI breaks are cheap and public API is not (2026-09)
 
@@ -253,8 +334,8 @@ sits inside `xqc_conn_settings_t` — shifts every later field: source-compatibl
 binary-incompatible, and *silent*, because `libxquic.so` carries no SONAME
 version. That is acceptable: xquic and mqvpn ship as a pinned pair per
 `mqvpn-vX.Y.Z`, and upstream grows `xqc_conn_settings_t` between releases too
-(63 fields at v1.8.3, 69 at main). A coordinated rebuild plus a SemVer bump
-covers it. Exported *functions* are the opposite — adding one is free (a new
+(63 fields at v1.8.3, 72 at upstream main in 2026-09). A coordinated rebuild
+plus a SemVer bump covers it. Exported *functions* are the opposite — adding one is free (a new
 symbol breaks nothing), removing one needs a major bump. So the irreversible
 direction is publishing API, not breaking ABI: never add public accessors
 speculatively, and do not bundle them into an unrelated ABI break on the
@@ -262,7 +343,8 @@ theory that the window is closing. It never closes.
 
 Per-path scheduler telemetry therefore has a home already: the "extended
 metrics" block in `xqc_path_metrics_t`, reached via `xqc_conn_get_stats()` →
-`paths_info[]`, which mqvpn already iterates (`mqvpn_server.c`) and forwards
+`paths_info[]`, which mqvpn already iterates (`mqvpn_client.c`,
+`mqvpn_server.c`) and forwards
 into `mqvpn_path_stats_t` and the control API. Put new scheduler
 observability there rather than in a scheduler-specific API, so the retrieval
 surface stays single. Caveat: `xqc_path_metrics_t` has no
