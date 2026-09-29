@@ -53,8 +53,8 @@ rules belong here, reasons there.
   reason (`drop_path()` passes none); orderly removal uses `remove_path()`.
   The FSM never calls xquic: the caller emits `PATH_ABANDON` first, and
   `CLOSED_DROPPED → CLOSED_FREE` stays a lazy gate, not a direct edge. Both
-  drop and remove emit `PATH_ABANDON` (draft-21); do not reintroduce
-  close_path avoidance. [DD §3]
+  drop and remove emit `PATH_ABANDON` (draft-21); neither may skip it.
+  [DD §3]
 - Path lifecycle is per platform: desktop drops, then re-adds the slot (or
   reactivates one that still owns its socket; see `src/platform/path_readd.h`);
   Android/iOS remove and add. Do not unify them. [DD §4]
@@ -86,8 +86,8 @@ rules belong here, reasons there.
   is out of scope: `PATH_ACK_ECN` keeps PATH_ACK recovery semantics and its
   ECN counts are parsed and discarded. [DD §9]
 - xquic's `MULTIPATH_xx` names are internal labels, not draft numbers.
-  draft-21 path management is dynamic (`PATHS_BLOCKED` / `MAX_PATH_ID`); the
-  fixed `XQC_MAX_PATHS_COUNT` cap was removed and must not return. [DD §9]
+  draft-21 path management is dynamic (`PATHS_BLOCKED` / `MAX_PATH_ID`); do
+  not add a fixed path cap. [DD §9]
 - The MTU config upper bound stays 9000 until `max_pkt_out_size` becomes
   configurable. [DD §10]
 
