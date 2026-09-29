@@ -18,10 +18,8 @@ with the standard two-line header:
 
 ## 2. Where to ask
 
-- Questions and ideas: the Discord community linked from the README
-  (section "Community").
-- Bugs and feature requests: please start in GitHub Discussions; a
-  maintainer opens the tracking issue from there.
+- Questions and ideas: GitHub Discussions, or the Discord community linked
+  from the README (section "Community").
 - Security vulnerabilities: do not open an issue; email
   `3p0rta26@gmail.com`.
 
