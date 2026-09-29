@@ -3,10 +3,11 @@
 mqvpn is a multipath QUIC VPN built on a vendored xquic fork, speaking MASQUE
 CONNECT-IP (RFC 9484). Components: libmqvpn (core C library), Linux CLI,
 Android SDK, Windows/macOS/iOS ports, and a hybrid TCP lane (lwIP). It is
-integrated into OpenMPTCProuter, so there are real users: the config format,
-the control API and log wording are compatibility surfaces, and a PR that
-renames or removes a config key or changes a default states the
-compatibility impact in its description.
+integrated into OpenMPTCProuter (built from a downstream fork), so there are
+real users: the config files, the control API, the command line and log
+wording are compatibility surfaces. A PR that renames or removes a config
+key, a control command or a reply field, or changes a default, states the
+compatibility impact in its description. [DD §14]
 
 Human contributors: start with [CONTRIBUTING.md](CONTRIBUTING.md). This file
 is the agent-facing map of the repository and the list of rules that must not

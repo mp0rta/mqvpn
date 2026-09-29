@@ -359,3 +359,27 @@ surface stays single. Caveat: `xqc_path_metrics_t` has no
 `paths_info[i]` stride — growing it is a coordinated-rebuild change like the
 one above. Adding such a field is itself upstream divergence; propose it
 upstream rather than carrying it.
+
+## §14 Compatibility surfaces (2026-04, revised 2026-09)
+
+mqvpn ships inside OpenMPTCProuter (OMR). OMR builds it from a downstream
+fork, `Ysurac/mqvpn`, which merges mqvpn releases and adds OMR-specific
+features. A change here therefore reaches OMR users when that fork next
+merges mqvpn.
+
+OMR relies on these parts of mqvpn, so they are compatibility surfaces:
+
+- **Config files.** The VPS runs the server from a JSON file (including the
+  `users` list and `control_listen`), which the installer edits with `grep`
+  and `jq`. The router generates the client's INI file from UCI.
+- **The control API.** OMR manages users with `add_user`, `remove_user` and
+  `list_users`, and reads status and statistics with `get_status`,
+  `get_stats`, `get_reorder_stats`, `get_build_info` and
+  `get_all_fec_stats`. OMR's UI and scripts parse the JSON replies.
+- **The command line**, `mqvpn --config <file>`.
+
+A pull request that renames or removes a config key, a control command or a
+reply field, or that changes a default, explains the compatibility impact in
+its description. Log wording is a compatibility surface for a different
+reason: the e2e tests wait for specific log lines (DD §10). OMR reads the
+control API, not the logs.
