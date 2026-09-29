@@ -66,11 +66,12 @@ reviews:
       mode: "off"
     title:
       requirements: >-
-        `[T] subject` or `[T]: subject`, where T is `+` add, `-` remove,
-        `=` no behaviour change or `~` behaviour change; or `type: subject`
-        / `type(scope): subject` with a lowercase type. Imperative mood, no
-        trailing period, at most 72 characters. Squash merges reuse the
-        title as the commit subject.
+        `type: subject` or `type(scope): subject` with a lowercase type is
+        the standard. The xquic fork's `[T] subject` or `[T]: subject`
+        form, where T is `+` add, `-` remove, `=` no behaviour change or `~`
+        behaviour change, is also accepted. Imperative mood, no trailing
+        period, at most 72 characters. Squash merges reuse the title as the
+        commit subject.
     custom_checks:
       - name: "Log markers in sync"
         instructions: >-

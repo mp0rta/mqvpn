@@ -119,9 +119,10 @@ rules belong here, reasons there.
 - `main` changes only through GitHub PRs; never push to it. Contributor
   branches start from `dev` and target `dev`. Never force-push once the PR
   is open; stack corrections as new commits. Commit subject is one line
-  (`type: subject`, `type(scope): subject` or `[T] subject`); body only when
-  the why is non-obvious; no tool or session trailers (CONTRIBUTING.md
-  sections 5 and 8 say the same). Squash only when asked.
+  (`type: subject` or `type(scope): subject`; the xquic fork's `[T] subject`
+  is also accepted); body only when the why is non-obvious; no tool or
+  session trailers (CONTRIBUTING.md sections 5 and 8 say the same). Squash
+  only when asked.
 - A maintainer backport branch starts from the tip of the release line where
   the bug was found; decide the base per fix (`dev` and `main` can diverge).
   [DD §11]
