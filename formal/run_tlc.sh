@@ -6,7 +6,8 @@
 # oracle (formal/README.md).
 #
 #   formal/run_tlc.sh sany     parse and check every module
-#   formal/run_tlc.sh safety   MqvpnPathSlot.cfg (invariants, action properties)
+#   formal/run_tlc.sh safety   MqvpnPathSlot.cfg (invariants, action properties,
+#                              no dead action)
 #   formal/run_tlc.sh live     MqvpnPathSlot_live.cfg (liveness under fairness)
 #   formal/run_tlc.sh oracle   regenerate formal/oracle/path_slot_oracle.inc
 #   formal/run_tlc.sh all      all of the above (the default)
@@ -74,11 +75,61 @@ sany() {
     esac
 }
 
+# The safety and liveness configurations must check the same model: their
+# CONSTANT lines must be identical.
+same_constants() {
+    safety_consts=$(awk '/^CONSTANT/' MqvpnPathSlot.cfg)
+    live_consts=$(awk '/^CONSTANT/' MqvpnPathSlot_live.cfg)
+    if [ "$safety_consts" != "$live_consts" ]; then
+        echo "run_tlc.sh: the two MqvpnPathSlot configurations set" \
+            "different constants" >&2
+        printf 'MqvpnPathSlot.cfg:\n%s\nMqvpnPathSlot_live.cfg:\n%s\n' \
+            "$safety_consts" "$live_consts" >&2
+        exit 1
+    fi
+}
+
+# Vacuity gate: every action of MqvpnPathSlot must take a step in the safety
+# run; a dead action (a guard that never holds) passes every property
+# unnoticed. TLC's coverage report has one line per action,
+# "<Name line ... of module MqvpnPathSlot>: d:t" (d new distinct states,
+# t steps taken; ApiDrop and ApiRemove share the line of DropLike). Only t
+# is tested: an action may add no state of its own (EnvPathIdleReap is
+# 0:t). awk reads the whole log and judges the last report only.
+vacuity() {
+    rc=0
+    dead=$(awk '
+        /^The coverage statistics/ { reports++; actions = 0; ndead = 0 }
+        /^<[A-Za-z0-9_]+ line .* of module MqvpnPathSlot>: [0-9]+:[0-9]+$/ {
+            actions++
+            split($NF, n, ":")
+            if (n[2] == 0) dead[++ndead] = $0
+        }
+        END {
+            if (reports == 0 || actions == 0) {
+                print "no coverage report in the safety log"
+                exit 2
+            }
+            for (i = 1; i <= ndead; i++) print dead[i]
+            if (ndead > 0) exit 1
+        }' "$1") || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "$dead" >&2
+        echo "run_tlc.sh: vacuity gate: an action never takes a step" >&2
+        exit 1
+    fi
+    echo "run_tlc.sh: vacuity gate passed: every action takes a step"
+}
+
 safety() {
-    tlc safety -workers auto -config MqvpnPathSlot.cfg MqvpnPathSlot.tla
+    same_constants
+    tlc safety -workers auto -coverage 60 -config MqvpnPathSlot.cfg \
+        MqvpnPathSlot.tla
+    vacuity "$META/safety.log"
 }
 
 live() {
+    same_constants
     tlc live -workers auto -config MqvpnPathSlot_live.cfg MqvpnPathSlot.tla
 }
 
