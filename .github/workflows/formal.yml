@@ -2,13 +2,18 @@ name: Formal
 
 # The TLA+ models, the transition oracle generated from them, and the CBMC
 # harnesses (formal/README.md). The exhaustive oracle test itself
-# (test_path_slot_oracle) is a unit test and runs in every Linux build of
-# ci.yml; this workflow checks the models and catches an oracle that was not
-# regenerated after a model change.
+# (test_path_slot_oracle) is a unit test and runs with ctest in ci.yml's
+# build, sanitizer, msan and hybrid-egress-off jobs; this workflow checks the
+# models and catches an oracle that was not regenerated after a model change.
+# Path-filtered: never make it a required check (it stays pending on PRs that
+# do not touch these paths).
 
 on:
   push:
     branches: [main, dev]
+    # The include closure of src/path_state_machine.c, the CBMC harness and
+    # tests/test_path_slot_oracle.c, plus formal/** and this file. The push
+    # and pull_request lists must stay identical (no YAML anchors).
     paths:
       - 'formal/**'
       - 'src/path_state_machine.c'
@@ -21,6 +26,7 @@ on:
       - 'tests/test_path_slot_oracle.c'
       - '.github/workflows/formal.yml'
   pull_request:
+    # Identical to the push list above.
     paths:
       - 'formal/**'
       - 'src/path_state_machine.c'
@@ -34,8 +40,14 @@ on:
       - '.github/workflows/formal.yml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   formal:
+    # Pinned, unlike ci.yml's ubuntu-latest: its apt cbmc is 5.95.1, the
+    # version formal/cbmc/run.sh is tested with (CBMC 6 enables more checks
+    # by default). "Install CBMC" enforces it.
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -46,12 +58,30 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      - name: Install CBMC
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cbmc
+          v=$(cbmc --version)
+          echo "$v"
+          case $v in
+          '5.95.1 '*) ;;
+          *)
+            echo "::error::cbmc is '$v', not 5.95.1, the version formal/cbmc/run.sh is tested with (CBMC 6 enables more checks by default)"
+            exit 1
+            ;;
+          esac
+
       - name: Fetch tla2tools.jar (tlaplus v1.7.4)
         run: |
-          curl -fsSL -o "$RUNNER_TEMP/tla2tools.jar" \
+          jar=$RUNNER_TEMP/tla2tools.jar
+          curl -fsSL --retry 3 -o "$jar" \
             https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
-          echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  $RUNNER_TEMP/tla2tools.jar" \
-            | sha256sum -c -
+          sha=936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+          if ! sha256sum -c - <<<"$sha  $jar"; then
+            echo "::error::the tlaplus v1.7.4 tla2tools.jar does not match the sha256 pinned here and in formal/run_tlc.sh (got $(sha256sum "$jar" | cut -d' ' -f1))"
+            exit 1
+          fi
 
       - name: TLC (parse, safety, liveness, oracle)
         env:
@@ -65,11 +95,11 @@ jobs:
             exit 1
           fi
 
-      - name: Install CBMC
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cbmc
-          cbmc --version
-
       - name: CBMC
-        run: formal/cbmc/run.sh
+        run: |
+          rc=0
+          formal/cbmc/run.sh || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::formal/cbmc/run.sh exited with $rc: the failing property, or run.sh's own message, is in the log above. If the behaviour change in src/path_state_machine.c is intended, change formal/PathSlotFsm.tla to match and regenerate the oracle with formal/run_tlc.sh oracle (formal/README.md)"
+            exit "$rc"
+          fi
