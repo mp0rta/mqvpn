@@ -406,7 +406,8 @@ check_canary(void)
 static void
 check_row(size_t i, const oracle_row_t *row)
 {
-    path_entry_t pre, p;
+    /* Static, not on the stack: the abort handler reads them through cur. */
+    static path_entry_t pre, p;
     oracle_slot_t got;
 
     cur.i = i;
