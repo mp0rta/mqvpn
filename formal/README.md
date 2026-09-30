@@ -99,7 +99,10 @@ Both scripts also fail in cases where the tools themselves would pass:
   - leaves CBMC's own errors visible;
   - fails when a harness calls a function without a body (CBMC only warns
     and treats the call as returning an arbitrary value, so an accessor the
-    harness does not stub would go unnoticed).
+    harness does not stub would go unnoticed);
+  - fails when a run does not report `VERIFICATION SUCCESSFUL` (an extra
+    argument that skips the verification, such as `--show-properties`,
+    makes cbmc exit 0 without proving anything).
 
 Last verified (TLC 2.19, CBMC 5.95.1):
 
@@ -188,12 +191,15 @@ The common failures print one of these messages:
 - `no path_invariant_check assertion among the properties`, from
   `cbmc/run.sh`'s canary: `NDEBUG` reached the CBMC flags, which removes
   every assertion.
+- `did not report VERIFICATION SUCCESSFUL`, from `cbmc/run.sh`: an extra
+  argument skipped the verification. Rerun without it.
 - A failed CBMC property (`VERIFICATION FAILED`, with the property marked
   `FAILURE`): for some slot of the domain the C code breaks one of the
   obligations of [the CBMC proof](#the-cbmc-proof) (the two runs disagree,
   or the invariant, the frame or an undefined-behaviour check fails). The
   log names the failing property; `cbmc/run.sh` passes extra arguments to
-  every cbmc run, so rerun it with `--trace` to see a trace.
+  every cbmc run, so rerun it with `--trace` to see a trace (an argument
+  that skips the verification fails the run instead).
 
 ## What is proved, and how the pieces fit
 

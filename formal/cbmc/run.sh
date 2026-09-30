@@ -3,7 +3,8 @@
 # Copyright (c) 2026 mp0rta and mqvpn contributors
 #
 # formal/cbmc/run.sh — prove the path_on_event harnesses (formal/README.md).
-# This flag set is normative. Extra arguments are passed to every cbmc run.
+# This flag set is normative. Extra arguments are passed to every cbmc run;
+# one that skips the verification (--show-properties, say) fails the run.
 #
 # Needs cbmc on PATH. Tested with cbmc 5.95.1, Ubuntu 24.04's package, which
 # CI installs (`apt install cbmc`; without root: `apt-get download cbmc
@@ -77,5 +78,12 @@ for fn in harness harness_null_ctx; do
     if [ "$rc" -ne 0 ]; then
         echo "run.sh: cbmc --function $fn exited with $rc" >&2
         exit "$rc"
+    fi
+    # An option that only inspects the program (--show-properties, say)
+    # makes cbmc exit 0 without proving anything.
+    if ! grep -qx 'VERIFICATION SUCCESSFUL' "$log"; then
+        echo "run.sh: cbmc --function $fn did not report VERIFICATION" \
+            "SUCCESSFUL (an option that skips verification?)" >&2
+        exit 1
     fi
 done
