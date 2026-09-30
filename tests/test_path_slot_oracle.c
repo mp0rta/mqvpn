@@ -37,7 +37,8 @@
 #include <unistd.h>
 
 _Static_assert(PATH_SLOT_ORACLE_MAX_RETRIES == PATH_RECREATE_MAX_RETRIES,
-               "oracle generated for a different PATH_RECREATE_MAX_RETRIES - rerun "
+               "oracle generated for a different PATH_RECREATE_MAX_RETRIES - set "
+               "MaxRetries in formal/oracle/PathSlotOracle.cfg, then rerun "
                "formal/run_tlc.sh oracle");
 _Static_assert(PATH_SLOT_ORACLE_N_ROWS ==
                    PATH_SLOT_ORACLE_N_PRE * PATH_SLOT_ORACLE_N_EVCTX,
@@ -518,7 +519,10 @@ main(void)
     }
 
     if (failures) {
-        fprintf(stderr, "test_path_slot_oracle: %d failure(s)\n", failures);
+        fprintf(stderr,
+                "test_path_slot_oracle: %d failure(s) (see formal/README.md, "
+                "\"Changing the FSM and reading failures\")\n",
+                failures);
         return 1;
     }
     printf("test_path_slot_oracle: %d rows OK; %u of %u abstract shapes illegal and "
