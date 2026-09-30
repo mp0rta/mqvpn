@@ -5,7 +5,8 @@
  *
  * harness: abstraction consistency by self-composition. Two arbitrary
  * concrete slots with the same abstract state receive the same event and
- * context class (with independent concrete now, new id and timer values);
+ * context class (with independent concrete now, accessor clock, new id and
+ * timer values);
  * their abstract post-states and observable calls must agree, and so must
  * their update classes where both runs meet Dom item 8.
  * With tests/test_path_slot_oracle.c (every row holds on the canonical slot)
@@ -31,11 +32,16 @@
 
 oracle_obs_t oracle_obs;
 
+/* What client_now_us returns during the current run. Each run draws its own
+ * (arbitrary_clock), so the proof covers every value the accessor can
+ * return, and the two runs of harness may see different ones. */
+static uint64_t stub_clock;
+
 uint64_t
 client_now_us(const struct mqvpn_client_s *c)
 {
     (void)c;
-    return ORACLE_T_STUB_CLOCK;
+    return stub_clock;
 }
 
 void
@@ -71,6 +77,18 @@ uint64_t nondet_u64(void);
 void *nondet_ptr(void);
 path_entry_t nondet_path_entry(void);
 mqvpn_path_ops_t nondet_path_ops(void);
+
+/* The accessor clock of one run: arbitrary, independent of the event's
+ * now_us, and nonzero. Nonzero is the injectable clock's contract
+ * (mqvpn_config_set_clock) that Dom item 9 rests on: the stamp an ADD
+ * records is never 0. */
+static uint64_t
+arbitrary_clock(void)
+{
+    const uint64_t t = nondet_u64();
+    __CPROVER_assume(t != 0);
+    return t;
+}
 
 /* A slot with every field arbitrary — handle, name, addresses, statistics,
  * every ops pointer and the ctx included — so the proof covers every slot
@@ -126,6 +144,7 @@ typedef struct {
     path_entry_t pre;
     path_entry_t post;
     uint64_t now;
+    uint64_t clock; /* what client_now_us returns during this run */
     uint64_t new_id;
     oracle_obs_t obs;
     oracle_slot_t abs_post;
@@ -134,14 +153,16 @@ typedef struct {
 /* One composed dispatch of (ev, ctx) on the Dom slot `pre`: the caller's
  * prefix where it applies, the handler, then every per-run obligation.
  * Per-run assumptions: now in [1, 2^62] and a new id that is neither 0 nor
- * the slot's id (both Dom item 7); for STABLE_TICK, whether the stable
- * window has elapsed at now is assumed to match ctx, the same class in both
- * runs. */
+ * the slot's id (both Dom item 7); an accessor clock of its own, arbitrary
+ * and nonzero (arbitrary_clock); for STABLE_TICK, whether the stable window
+ * has elapsed at now is assumed to match ctx, the same class in both runs. */
 static void
 run_one(run_t *r, int ev, int ctx, int prefix)
 {
     r->now = nondet_u64();
     __CPROVER_assume(r->now >= 1 && r->now <= (1ULL << 62)); /* Dom item 7 */
+    r->clock = arbitrary_clock();
+    stub_clock = r->clock;
     r->new_id = nondet_u64();
     __CPROVER_assume(r->new_id != 0 && r->new_id != r->pre.xqc_path_id);
     if (ev == OEV_STABLE_TICK) {
@@ -185,9 +206,8 @@ run_one(run_t *r, int ev, int ctx, int prefix)
      * state_entered_at_us == 0, set_path_state_with_log treats a same-state
      * write as a first entry and stamps both fields. */
     if (r->pre.state_entered_at_us != 0) {
-        assert(r->post.state_entered_at_us == (r->post.state != r->pre.state
-                                                   ? ORACLE_T_STUB_CLOCK
-                                                   : r->pre.state_entered_at_us));
+        assert(r->post.state_entered_at_us ==
+               (r->post.state != r->pre.state ? r->clock : r->pre.state_entered_at_us));
         assert(r->post.last_residence_warn_at_us ==
                oracle_expected_residence_warn(&r->pre, &r->post));
     }
@@ -242,6 +262,7 @@ harness_null_ctx(void)
     path_entry_t p;
     nondet_slot(&p);
     const path_entry_t before = p;
+    stub_clock = arbitrary_clock(); /* the branch reads no clock today */
 
     memset(&oracle_obs, 0, sizeof(oracle_obs));
     oracle_dispatch(&p, ev, NULL);
