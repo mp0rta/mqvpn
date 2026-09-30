@@ -93,6 +93,10 @@ Both scripts also fail in cases where the tools themselves would pass:
     (a guard written in `ApiRemove` itself gets a line of its own and is
     caught).
 - `cbmc/run.sh`:
+  - accepts no extra argument but `--trace`: any other cbmc option could
+    select or weaken the proof obligations (`--property`, `--unwind`, …)
+    and still verify. For other options, run cbmc directly; the command
+    lines are in `run.sh`;
   - first checks that `path_invariant_check()`'s assertions are among the
     proof obligations (an `NDEBUG` in the flags would remove every
     assertion, and the runs would still verify);
@@ -100,9 +104,9 @@ Both scripts also fail in cases where the tools themselves would pass:
   - fails when a harness calls a function without a body (CBMC only warns
     and treats the call as returning an arbitrary value, so an accessor the
     harness does not stub would go unnoticed);
-  - fails when a run does not report `VERIFICATION SUCCESSFUL` (an extra
-    argument that skips the verification, such as `--show-properties`,
-    makes cbmc exit 0 without proving anything).
+  - fails when a run exits 0 without reporting `VERIFICATION SUCCESSFUL`
+    (cbmc does that for an option that only inspects the program, such as
+    `--show-properties`).
 
 Last verified (TLC 2.19, CBMC 5.95.1):
 
@@ -191,15 +195,19 @@ The common failures print one of these messages:
 - `no path_invariant_check assertion among the properties`, from
   `cbmc/run.sh`'s canary: `NDEBUG` reached the CBMC flags, which removes
   every assertion.
-- `did not report VERIFICATION SUCCESSFUL`, from `cbmc/run.sh`: an extra
-  argument skipped the verification. Rerun without it.
+- `unsupported argument '…'`, from `cbmc/run.sh`: it accepts only
+  `--trace`. Run cbmc directly for other options (the command lines are
+  in `run.sh`).
+- `exited 0 without reporting VERIFICATION SUCCESSFUL`, from
+  `cbmc/run.sh`: cbmc ended without a verdict, for example after a change
+  to `run.sh`'s own flags, or with a cbmc whose output differs.
 - A failed CBMC property (`VERIFICATION FAILED`, with the property marked
   `FAILURE`): for some slot of the domain the C code breaks one of the
   obligations of [the CBMC proof](#the-cbmc-proof) (the two runs disagree,
   or the invariant, the frame or an undefined-behaviour check fails). The
-  log names the failing property; `cbmc/run.sh` passes extra arguments to
-  every cbmc run, so rerun it with `--trace` to see a trace (an argument
-  that skips the verification fails the run instead).
+  log names the failing property; rerun `cbmc/run.sh --trace` to see a
+  trace (`--trace` is the one extra argument `run.sh` accepts and passes
+  to every cbmc run).
 
 ## What is proved, and how the pieces fit
 
@@ -705,7 +713,7 @@ was applied to a scratch copy of the tree and caught as expected:
 | a handler writes a field it must not touch (`flags`) | CBMC: the frame check (the unit test's canonical slot already has 0 there) |
 | the NULL-context branch writes a field (`flags`) | CBMC `harness_null_ctx`: the frame check |
 | spontaneous abandon allowed on an xquic-ACTIVE path | TLC: liveness violated (with no path-id credit, a primary pushed into CREATE_WAIT or DEGRADED before readiness never retries) |
-| the invariant compiled out: `NDEBUG` defined (the unit test built with `-DNDEBUG` in place of the target's `-UNDEBUG`; `-DNDEBUG` passed to `cbmc/run.sh`) | the unit test's canary; `cbmc/run.sh`'s canary |
+| the invariant compiled out: `NDEBUG` defined (the unit test built with `-DNDEBUG` in place of the target's `-UNDEBUG`; `-DNDEBUG` added to `cbmc/run.sh`'s own flags) | the unit test's canary; `cbmc/run.sh`'s canary |
 
 ## Counterexample log
 

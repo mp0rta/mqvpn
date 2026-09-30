@@ -3,8 +3,9 @@
 # Copyright (c) 2026 mp0rta and mqvpn contributors
 #
 # formal/cbmc/run.sh — prove the path_on_event harnesses (formal/README.md).
-# This flag set is normative. Extra arguments are passed to every cbmc run;
-# one that skips the verification (--show-properties, say) fails the run.
+# This flag set is normative. The only extra argument it accepts is --trace
+# (a counterexample trace for a failed property), passed to every cbmc run.
+# For any other cbmc option, run cbmc directly with the command lines below.
 #
 # Needs cbmc on PATH. Tested with cbmc 5.95.1, Ubuntu 24.04's package, which
 # CI installs (`apt install cbmc`; without root: `apt-get download cbmc
@@ -26,17 +27,33 @@ cd "$(dirname "$0")/../.."
 SRC="formal/cbmc/harness_path_on_event.c src/path_state_machine.c"
 INC="-I src -I include -I formal/oracle"
 
+# Only --trace passes: any other option could select or weaken the proof
+# obligations (--property, --unwind, --no-*-check, ...) and still end in
+# VERIFICATION SUCCESSFUL.
+for arg in "$@"; do
+    case $arg in
+    --trace) ;;
+    *)
+        echo "run.sh: unsupported argument '$arg': run.sh runs the normative" \
+            "proof and accepts only --trace; call cbmc directly for other" \
+            "options" >&2
+        exit 2
+        ;;
+    esac
+done
+
 LOGS=$(mktemp -d)
 trap 'rm -rf "$LOGS"' EXIT
 # dash runs the EXIT trap on exit, not on a fatal signal.
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# Canary: the invariant's assertions are among the properties. An NDEBUG
-# slipped into the flags would remove every assert(), the harnesses' own
-# included, and the runs below would still verify "successfully". CBMC
-# reports errors on stderr, left visible here; the property list (stdout) is
-# only counted.
+# Canary: the invariant's assertions are among the properties. With the
+# arguments restricted to --trace, NDEBUG can reach the cbmc command line
+# only through this script's own flags, and the canary guards against that:
+# NDEBUG would remove every assert(), the harnesses' own included, and the
+# runs below would still verify "successfully". CBMC reports errors on
+# stderr, left visible here; the property list (stdout) is only counted.
 rc=0
 # shellcheck disable=SC2086
 cbmc $SRC $INC --function harness --show-properties "$@" \
@@ -79,11 +96,11 @@ for fn in harness harness_null_ctx; do
         echo "run.sh: cbmc --function $fn exited with $rc" >&2
         exit "$rc"
     fi
-    # An option that only inspects the program (--show-properties, say)
-    # makes cbmc exit 0 without proving anything.
+    # cbmc can exit 0 without a verdict (an option that only inspects the
+    # program, such as --show-properties, does): require the verdict line.
     if ! grep -qx 'VERIFICATION SUCCESSFUL' "$log"; then
-        echo "run.sh: cbmc --function $fn did not report VERIFICATION" \
-            "SUCCESSFUL (an option that skips verification?)" >&2
+        echo "run.sh: cbmc --function $fn exited 0 without reporting" \
+            "VERIFICATION SUCCESSFUL" >&2
         exit 1
     fi
 done
