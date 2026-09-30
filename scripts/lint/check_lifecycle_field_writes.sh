@@ -9,7 +9,11 @@
 # Enforce spec §3.3 / §7.1: direct assignment to path_entry_t lifecycle
 # fields is only allowed inside src/path_state_machine.c (path_on_event
 # body + helpers) and at lines tagged with a trailing /* LINT-ALLOW */
-# comment.
+# comment. It scans the tracked .c and .h files under src/ and tests/ only.
+# formal/ is outside its scope on purpose: the oracle and the CBMC harness
+# build the concrete slots they feed to the FSM (oracle_abs.h's oracle_conc
+# assigns the lifecycle fields; the harness makes every field arbitrary),
+# which is not a way around the FSM. Check 2 still covers formal/.
 #
 # Fields (spec §3.3, also see path_entry_internal.h):
 #   state | transport_attached | transport_released | xquic_path_live

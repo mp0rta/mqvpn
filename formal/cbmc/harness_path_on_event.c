@@ -6,16 +6,20 @@
  * harness: abstraction consistency by self-composition. Two arbitrary
  * concrete slots with the same abstract state receive the same event and
  * context class (with independent concrete now, new id and timer values);
- * their abstract post-states, observable calls and update classes must agree.
+ * their abstract post-states and observable calls must agree, and so must
+ * their update classes where both runs meet Dom item 8.
  * With tests/test_path_slot_oracle.c (every row holds on the canonical slot)
  * this extends the oracle to every slot in the domain (formal/README.md).
- * Along the way CBMC proves path_invariant_check()'s assertions and the
- * absence of undefined behaviour for every such input.
+ * Along the way CBMC proves path_invariant_check()'s assertions and, for
+ * every such input, the checks run.sh enables: array bounds, pointers,
+ * signed overflow, shifts and division by zero.
  *
- * harness_null_ctx: the defensive NULL-context branch changes nothing.
+ * harness_null_ctx: the defensive NULL-context branch changes no field of
+ * any slot, in the domain or not, and makes no call.
  *
- * NDEBUG must not be defined (run.sh): path_invariant_check()'s assert()s are
- * proof obligations here. "Dom item N" refers to the numbered domain in
+ * NDEBUG must not be defined (run.sh): it removes every assert(), this
+ * file's own and path_invariant_check()'s, and they are the proof
+ * obligations here. "Dom item N" refers to the numbered domain in
  * formal/README.md. */
 
 #include "oracle_abs.h"
@@ -70,8 +74,9 @@ mqvpn_path_ops_t nondet_path_ops(void);
 
 /* A slot with every field arbitrary — handle, name, addresses, statistics,
  * every ops pointer and the ctx included — so the proof covers every slot
- * of the domain, the unit test's canonical ones among them. The caller
- * narrows it with oracle_in_dom(). No pointer is ever dereferenced. */
+ * of the domain, the unit test's canonical ones among them. harness narrows
+ * it with oracle_in_dom(); harness_null_ctx takes it as it is. No pointer is
+ * ever dereferenced. */
 static void
 nondet_slot(path_entry_t *p)
 {
@@ -90,7 +95,13 @@ havoc_unread(path_event_ctx_t *e, int ctx)
         e->validated_target = (path_lifecycle_t)nondet_int();
 }
 
-/* The context classes an event reads (oracle_ctx_t). */
+/* The context classes an event reads (oracle_ctx_t). ctx_valid and
+ * havoc_unread copy the model's event/context pairs by hand; a new class
+ * would go unexplored. */
+_Static_assert(PATH_SLOT_ORACLE_N_EVCTX == 19,
+               "the model's event/context classes changed - review ctx_valid and "
+               "havoc_unread");
+
 static int
 ctx_valid(int ev, int ctx)
 {
@@ -115,7 +126,11 @@ typedef struct {
 } run_t;
 
 /* One composed dispatch of (ev, ctx) on the Dom slot `pre`: the caller's
- * prefix where it applies, the handler, then every per-run obligation. */
+ * prefix where it applies, the handler, then every per-run obligation.
+ * Per-run assumptions: now in [1, 2^62] and a new id that is neither 0 nor
+ * the slot's id (both Dom item 7); for STABLE_TICK, whether the stable
+ * window has elapsed at now is assumed to match ctx, the same class in both
+ * runs. */
 static void
 run_one(run_t *r, int ev, int ctx, int prefix)
 {
@@ -131,8 +146,9 @@ run_one(run_t *r, int ev, int ctx, int prefix)
 
     r->post = r->pre;
     if (prefix) {
-        /* Whatever transport the platform installs on ADD: send non-NULL,
-         * the optional callbacks and the ctx arbitrary. */
+        /* ADD: whatever transport the platform installs, send non-NULL, the
+         * optional callbacks and the ctx arbitrary. TRANSPORT_RELEASED's
+         * prefix ignores add_ops and the ctx (it clears both). */
         mqvpn_path_ops_t add_ops = nondet_path_ops();
         __CPROVER_assume(add_ops.send != NULL);
         oracle_prefix_apply(ev, &r->post, &add_ops, nondet_ptr());
@@ -146,13 +162,16 @@ run_one(run_t *r, int ev, int ctx, int prefix)
     oracle_dispatch(&r->post, ev, &e);
     r->obs = oracle_obs;
 
-    assert(oracle_abs_post(&r->post, r->pre.xqc_path_id, r->new_id, &r->abs_post));
+    const int abs_defined =
+        oracle_abs_post(&r->post, r->pre.xqc_path_id, r->new_id, &r->abs_post);
+    assert(abs_defined);
     assert(r->obs.fires <= 1 && r->obs.notifies <= 1);
     assert(oracle_conc_rule(&r->post));
     /* The whole invariant on every post-state, STABLE_TICK's included
      * (path_fsm_tick_confirm_stable does not check it itself), status among
-     * it; the fields the FSM must not write. */
+     * it. */
     path_invariant_check(&r->post);
+    /* The frame: the fields the FSM must not write. */
     assert(oracle_frame_eq(&r->pre, &r->post));
     assert(oracle_ops_eq(&r->post.ops, &ops_before));
     assert(r->post.transport_ctx == (r->post.transport_released ? NULL : ctx_before));
@@ -179,7 +198,9 @@ harness(void)
     run_t r1, r2;
     nondet_slot(&r1.pre);
     nondet_slot(&r2.pre);
-    __CPROVER_assume(oracle_in_dom(&r1.pre) && oracle_in_dom(&r2.pre)); /* Dom 1-6 */
+    /* Dom items 1-6 */
+    __CPROVER_assume(oracle_in_dom(&r1.pre) && oracle_in_dom(&r2.pre));
+    /* oracle_abs_pre succeeds on both: oracle_in_dom returns 0 when it fails. */
     oracle_slot_t a1, a2;
     oracle_abs_pre(&r1.pre, &a1);
     oracle_abs_pre(&r2.pre, &a2);
@@ -214,7 +235,6 @@ harness_null_ctx(void)
     __CPROVER_assume(ev >= 0 && ev < OEV_STABLE_TICK); /* path_on_event events */
     path_entry_t p;
     nondet_slot(&p);
-    __CPROVER_assume(oracle_in_dom(&p));
     const path_entry_t before = p;
 
     memset(&oracle_obs, 0, sizeof(oracle_obs));
@@ -222,8 +242,10 @@ harness_null_ctx(void)
 
     /* Field by field (a struct memcmp would also compare padding): the
      * lifecycle and bookkeeping fields, ops and ctx here, the rest through the
-     * frame — together every field of path_entry_t (see the size pin in
-     * oracle_abs.h). */
+     * frame — together the 22 fields path_entry_t has today. The size pin in
+     * oracle_abs.h catches only a new field that grows the struct; one of 4
+     * bytes or less placed in one of its three padding holes keeps the size
+     * and must be classified by hand (see the pin's comment). */
     assert(p.state == before.state && p.status == before.status &&
            p.transport_attached == before.transport_attached &&
            p.transport_released == before.transport_released &&
