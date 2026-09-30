@@ -11,18 +11,17 @@ name: Formal
 on:
   push:
     branches: [main, dev]
-    # The include closure of src/path_state_machine.c, the CBMC harness and
-    # tests/test_path_slot_oracle.c, plus formal/** and this file. The push
-    # and pull_request lists must stay identical (no YAML anchors).
+    # src/path_state_machine.c, tests/test_path_slot_oracle.c, formal/** and
+    # this file, plus every header under src/ and include/: an
+    # over-approximation of the include closure of the FSM, the CBMC harness
+    # and the unit test, so a newly included header under src/, include/ or
+    # formal/ cannot escape the filter. The push and pull_request lists must
+    # stay identical (no YAML anchors).
     paths:
       - 'formal/**'
       - 'src/path_state_machine.c'
-      - 'src/path_state_machine.h'
-      - 'src/path_entry_internal.h'
-      - 'src/mqvpn_internal.h'
-      - 'src/reorder.h'
-      - 'src/hybrid/classifier.h'
-      - 'include/libmqvpn.h'
+      - 'src/**/*.h'
+      - 'include/**'
       - 'tests/test_path_slot_oracle.c'
       - '.github/workflows/formal.yml'
   pull_request:
@@ -30,12 +29,8 @@ on:
     paths:
       - 'formal/**'
       - 'src/path_state_machine.c'
-      - 'src/path_state_machine.h'
-      - 'src/path_entry_internal.h'
-      - 'src/mqvpn_internal.h'
-      - 'src/reorder.h'
-      - 'src/hybrid/classifier.h'
-      - 'include/libmqvpn.h'
+      - 'src/**/*.h'
+      - 'include/**'
       - 'tests/test_path_slot_oracle.c'
       - '.github/workflows/formal.yml'
   workflow_dispatch:
