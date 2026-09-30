@@ -3,7 +3,9 @@
 
 # Formal verification of the path-slot lifecycle
 
-This directory checks the client's path-slot state machine
+A *path slot* is one entry of the client's path table (`path_entry_t`): the
+lifecycle state of one network path, its binding to an xquic path and its
+transport. This directory checks the slot's state machine
 (`src/path_state_machine.c`) at two levels and ties them together:
 
 1. **TLA+ / TLC** explores every interleaving of the slot's asynchronous
@@ -14,16 +16,24 @@ This directory checks the client's path-slot state machine
    every concrete input in a stated domain by a CBMC proof.
 
 The TLA+ transition operator is written once (`PathSlotFsm.tla`); nothing is
-transliterated by hand into C. A C change that disagrees with the model on
-the canonical slots fails the unit test, which runs with ctest in the
-`build`, `sanitizer`, `msan` and `hybrid-egress-off` jobs of `ci.yml`; one
-that disagrees only on other concrete slots fails the CBMC proof, which the
-`Formal` workflow runs on every change to the FSM sources. A model change
-that is not propagated to the generated table fails the `Formal` workflow
-too. That workflow is path-filtered: it runs only when `formal/`, the FSM's
-sources and headers, the unit test or the workflow itself change, so it must
-not be made a required check (it would stay pending on every other pull
-request).
+translated into C by hand. Three kinds of change fail CI:
+
+- a C change that disagrees with the model on the canonical slots fails the
+  unit test, which runs with ctest in the `build`, `sanitizer`, `msan` and
+  `hybrid-egress-off` jobs of `ci.yml`;
+- a C change that disagrees only on other concrete slots fails the CBMC
+  proof, which the `Formal` workflow runs on every change to the FSM
+  sources;
+- a model change that is not propagated to the generated table fails the
+  `Formal` workflow too.
+
+The `Formal` workflow is path-filtered: it runs only when `formal/`, the
+FSM's sources and headers, the unit test or the workflow itself change. So
+it must not be made a required check: it would stay pending on every other
+pull request.
+
+If a check failed on your change, see
+[Changing the FSM and reading failures](#changing-the-fsm-and-reading-failures).
 
 ## Files
 
@@ -42,40 +52,52 @@ request).
 
 ## How to run
 
-TLC needs Java 11+ and the `tla2tools.jar` of the tlaplus **v1.7.4** release
-(TLC 2.19); `run_tlc.sh` checks its hash, because the oracle is generated from
-TLC's state dump, whose format is not a stable interface.
+TLC needs Java 11+, python3 (for the oracle generator) and the
+`tla2tools.jar` of the tlaplus **v1.7.4** release (TLC 2.19). `run_tlc.sh`
+checks the jar's hash, because the oracle is generated from TLC's state
+dump, whose format is not a stable interface.
 
 ```bash
-curl -fsSLO https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
-export TLA2TOOLS_JAR=$PWD/tla2tools.jar
+curl -fsSL -o ~/tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+export TLA2TOOLS_JAR=~/tla2tools.jar
 formal/run_tlc.sh all        # sany, safety, live, oracle (about 1-4 minutes)
-git diff --exit-code formal/oracle/path_slot_oracle.inc
+git diff --exit-code formal/oracle/path_slot_oracle.inc   # the regenerated table must equal the committed one
 formal/cbmc/run.sh           # cbmc on PATH (Ubuntu 24.04: apt install cbmc)
 ```
 
-`test_path_slot_oracle` builds and runs with the other unit tests (`ctest`).
+`run_tlc.sh all` first runs SANY, the TLA+ parser and semantic checker in
+`tla2tools.jar`, on every module, then the safety run, the liveness run and
+the oracle generation. `test_path_slot_oracle` builds and runs with the
+other unit tests (`ctest`).
 
 CBMC is tested with 5.95.1, Ubuntu 24.04's package; the `Formal` workflow
 pins its runner to that release and checks the version. CBMC 6 documents
 more checks enabled by default, so its property count would differ.
 
-Both scripts fail on more than a reported error:
+Both scripts also fail in cases where the tools themselves would pass:
 
-- `run_tlc.sh` fails on any TLC `Warning:` line (TLC only warns, and passes,
-  when an EXCEPT names a record field that does not exist, i.e. a misspelt
-  field); when the safety and liveness configurations differ outside their
-  SPECIFICATION, INVARIANT and PROPERTY sections (the two runs must check the
-  same model); and, in the safety run, when an action of `MqvpnPathSlot`
-  never takes a step (the vacuity gate: a dead action passes every property
-  unnoticed). The gate works per action; `ApiDrop` and `ApiRemove` share the
-  line of `DropLike`, so it sees them as one.
-- `cbmc/run.sh` first checks that `path_invariant_check()`'s assertions are
-  among the proof obligations (an `NDEBUG` in the flags would remove every
-  assertion, and the runs would still verify); it leaves CBMC's own errors
-  visible, and it fails when a harness calls a function without a body (CBMC
-  only warns and treats the call as returning an arbitrary value, so an
-  accessor the harness does not stub would go unnoticed).
+- `run_tlc.sh` fails:
+  - on any TLC `Warning:` line (TLC only warns, and passes, when an EXCEPT
+    names a record field that does not exist, i.e. a misspelled field);
+  - when the safety and liveness configurations differ outside their
+    SPECIFICATION, INVARIANT and PROPERTY sections (the two runs must check
+    the same model);
+  - in the safety run, when an action of `MqvpnPathSlot` never takes a step
+    (the vacuity gate: a dead action passes every property unnoticed). The
+    gate works per action, on TLC's coverage report, which counts steps per
+    line of the model. `ApiDrop` and `ApiRemove` are both written as
+    `DropLike`, so they share one line and the gate sees them as one: a
+    guard inside `DropLike` that made only one of them dead goes unnoticed
+    (a guard written in `ApiRemove` itself gets a line of its own and is
+    caught).
+- `cbmc/run.sh`:
+  - first checks that `path_invariant_check()`'s assertions are among the
+    proof obligations (an `NDEBUG` in the flags would remove every
+    assertion, and the runs would still verify);
+  - leaves CBMC's own errors visible;
+  - fails when a harness calls a function without a body (CBMC only warns
+    and treats the call as returning an arbitrary value, so an accessor the
+    harness does not stub would go unnoticed).
 
 Last verified (TLC 2.19, CBMC 5.95.1):
 
@@ -93,97 +115,206 @@ Last verified (TLC 2.19, CBMC 5.95.1):
   assertions (about one minute, nearly all of it `harness`;
   `harness_null_ctx` takes about a second)
 
-## Changing the FSM
+## Changing the FSM and reading failures
 
-If `src/path_state_machine.c` changes behaviour on purpose, change
-`formal/PathSlotFsm.tla` to match, run `formal/run_tlc.sh all` (it rechecks
-both models and regenerates the table) and commit
-`formal/oracle/path_slot_oracle.inc` with the change. The unit test then
-checks the C code against the new table, and CBMC re-proves abstraction
-consistency over the table's pre-states (Dom item 5); CBMC never compares
-with the rows themselves. When the `Formal` workflow fails:
+To change the FSM's behaviour on purpose:
 
-- *a TLC invariant or property is violated* (the most likely failure after
-  a model edit): the log holds the counterexample, one state per step, each
-  named after its action;
-- *a TLC warning*, *the two configurations differ* or *a jar whose hash is
-  not v1.7.4's*: see How to run above;
-- *the CBMC version*: the workflow expects 5.95.1 (see How to run);
-- *the committed oracle is stale*: the model changed but the table did not;
-  run `formal/run_tlc.sh oracle` and commit the table;
-- *the vacuity gate*: an action of `MqvpnPathSlot` became dead (its guard
-  never holds); find the change that made it so;
-- *a called function without a body*: `path_state_machine.c` calls a new
-  function; stub it in `formal/cbmc/harness_path_on_event.c` (the unit test
-  has its own stubs in `tests/test_path_slot_oracle.c` and fails to link
-  without one);
-- *a failed CBMC property*: for some slot of the domain the C code breaks
-  one of the obligations of ② below (the two runs disagree, or the
-  invariant, the frame or an undefined-behaviour check fails); the property
-  and its trace are in the log.
+1. Change `src/path_state_machine.c`.
+2. Change `formal/PathSlotFsm.tla` to match.
+3. Run `formal/run_tlc.sh all`: it rechecks both models and regenerates the
+   table.
+4. Commit `formal/oracle/path_slot_oracle.inc` with the change.
+
+The unit test then checks the C code against the new table. CBMC does not
+read the rows; it only takes the table's pre-states as its domain (Dom
+item 5) and re-proves abstraction consistency over them.
+
+A failure names itself by one of these messages:
+
+- `FAIL row N (EVENT ctx=CLASS): <check>`, from the unit test
+  (`test_path_slot_oracle`, run by ctest in `ci.yml`): on its canonical
+  slot, the C code disagrees with row N of the table in the named check
+  (for example `abstract post-state`, `public path event` or
+  `recreate_after_us update`). The next lines print the got/want detail
+  when there is one, then the row's abstract pre-state and expected
+  post-state (`pre`, `want`) and the concrete slot (`got`, or `conc` before
+  the dispatch). Only the first 20 failures are printed. Either the C
+  change is a mistake, or the model must follow it (the steps above).
+- `ABORT while checking row N (EVENT ctx=CLASS)`, from the unit test: an
+  `assert()` fired while that row was checked, in `path_on_event`'s own
+  invariant check or in one of the test's `path_invariant_check()` calls;
+  the row's context follows, and the test aborts.
+- `FAIL policy: path_recreate_backoff(r) = … us, want … us`, from the unit
+  test: the retry schedule changed. If that is intended, update the values
+  pinned in the test.
+- `FAIL shape accepted by path_invariant_check but illegal in the model`,
+  from the unit test: the C invariant no longer rejects a shape that the
+  model's `Legal` rejects; the shape follows.
+- `FAIL canary: path_invariant_check() did not abort on an illegal slot`,
+  from the unit test: the FSM was compiled with `NDEBUG`, so the invariant
+  is not checked.
+- TLC's `Error:` report, then `run_tlc.sh: TLC (safety) exited with …` (or
+  `live`, `oracle`): an invariant or property is violated, the most likely
+  failure after a model edit. The log holds the counterexample, one state
+  per step, each named after its action.
+- `run_tlc.sh: SANY reported errors`, or SANY's own parse error: a module
+  does not parse or has a semantic error.
+- `printed warnings`, `configurations differ`, `is not tlaplus v1.7.4` (from
+  `run_tlc.sh`) or `cbmc is '…', not 5.95.1` (from the `Formal` workflow):
+  see [How to run](#how-to-run).
+- `path_slot_oracle.inc is stale`, from the `Formal` workflow: the model
+  changed but the table did not. Run `formal/run_tlc.sh oracle` and commit
+  the table.
+- `vacuity gate: an action never takes a step`, from `run_tlc.sh`, after
+  the coverage lines of the dead actions: an action of `MqvpnPathSlot`
+  became dead (its guard never holds). Find the change that made it so.
+- `called a function without a body`, from `cbmc/run.sh`:
+  `path_state_machine.c` calls a new function. Stub it in
+  `formal/cbmc/harness_path_on_event.c`; the unit test has its own stubs in
+  `tests/test_path_slot_oracle.c` and fails to link without one.
+- `no path_invariant_check assertion among the properties`, from
+  `cbmc/run.sh`'s canary: `NDEBUG` reached the CBMC flags, which removes
+  every assertion.
+- A failed CBMC property (`VERIFICATION FAILED`, with the property marked
+  `FAILURE`): for some slot of the domain the C code breaks one of the
+  obligations of [the CBMC proof](#the-cbmc-proof) (the two runs disagree,
+  or the invariant, the frame or an undefined-behaviour check fails). The
+  log names the failing property; `cbmc/run.sh` passes extra arguments to
+  every cbmc run, so rerun it with `--trace` to see a trace.
 
 ## What is proved, and how the pieces fit
 
-**The oracle.** `PathSlotOracle.tla` evaluates `Step` on every abstract slot
-that satisfies the model's invariant (`Legal`, a transcription of
-`path_invariant_check()`) and every event/context class. An abstract slot is
-`state × attached × live × released × id class × retries (saturated at
-PATH_RECREATE_MAX_RETRIES) × retry timer armed × stable timer armed`. Ids are
-classes: a pre-state id is ZERO or NZ, a post-state id is ZERO, OLD (the
-pre-state id) or NEW (the context's new id), so storing a wrong nonzero id is
-visible. Each row also records the observable calls (`path_fsm_fire_path_event`,
-the `client_notify_xqc_path_state` app-status) and an **update class** per
-timer and counter: KEEP / ZERO / NOW / ARM (`now + backoff`) / INC. The
-classes are derived from the operation, never from abstract values (the
-counter saturates, so an increment past the cap is still INC); writing 0 over
-0 is KEEP. They make "a required update was deleted" visible, which the
-abstract slot alone is not (deleting the stable-window re-arm leaves "armed"
-true).
+Citations from here on: a bare `:NNNN` is in `src/mqvpn_client.c`;
+`path_state_machine.c` is in `src/`; `xqc_*.c` files are in
+`third_party/xquic/src/transport/` at the pinned commit. Line numbers are as
+of the last edit of this file; the function named first is the stable
+reference.
 
-**① The unit test** (`tests/test_path_slot_oracle.c`) runs every row on the
-canonical concretization (`oracle_conc`) and checks the abstract post-state,
-the calls, the update classes (hence the exact timer and counter values), the
-state-entry stamp, the residence-warn debounce, the transport ops/ctx and the
-frame (every field the FSM must not write is unchanged; a size pin on
-`path_entry_t` catches a new field that grows the struct, but on LP64 the
-struct has three 4-byte padding holes, after `local_addr_len`, `flags` and
-`recreate_retries`, and a field placed in one of them must be classified by
-hand in `oracle_abs.h`), and it runs
-`path_invariant_check()` — public status included — on every post-state, the
-stable tick's too (that entry point does not check the invariant itself). It
-also checks that
-`path_invariant_check()` rejects every abstract shape the model calls illegal
-(fork per shape), so the model's invariant and the C one are the same set.
-A canary first proves the invariant is compiled in: CI runs this test on a
-Release build, and the target compiles its own copy of the FSM with
-`-UNDEBUG`. The model abstracts time away, and the update classes check that
-the FSM applies `path_recreate_backoff()` and `PATH_STABLE_THRESHOLD_US`, not
-what they are; the test therefore also pins their values (5, 5, 10, 20, 40,
-60 s …; 30 s), so a change to the retry schedule or the stability window is a
-deliberate edit of the test.
+### Terms used below
 
-**② CBMC** (`harness`) proves *abstraction consistency* by self-composition:
-two arbitrary concrete slots in the domain with the same abstract state —
-every field arbitrary, handle, name, every `ops` pointer and the ctx
-included, so the unit test's canonical slots are among them —
-given the same event and context class (with independent concrete now, new
-id and timer values, and arbitrary values in the context fields the class
-does not use), end in the same abstract state with the same calls and update
-classes; and each run meets the per-run checks of ① (the invariant on the
-post-state, the frame, ops/ctx, the stamps). For every such input it also
-proves the absence of the undefined behaviour `run.sh` checks for (array
-bounds, pointers, signed overflow, shifts, division by zero). A second
-harness, `harness_null_ctx`, proves that a NULL context changes nothing, for
-every slot, in the domain or not: no field of the slot (the frame included)
-and no call.
+- **incarnation**: one life of a slot. It starts when
+  `mqvpn_client_add_path` fills the slot with a new handle (`:3409`) and
+  ends when the next `mqvpn_client_add_path` reuses it. The model counts
+  incarnations (`inc`, the slot's handle).
+- **xquic-ACTIVE**: xquic's own state for a path that passed validation,
+  `XQC_PATH_STATE_ACTIVE` (xquic's initial path starts in it). It is not
+  the slot's ACTIVE lifecycle state (`PATH_LC_ACTIVE`).
+- **release call**: the platform's call to
+  `mqvpn_client_on_platform_path_released`, made after it stopped a dropped
+  path's I/O and closed its socket.
+- **finalize**: what `client_finalize_transport` (`:964-981`) does: it
+  clears the slot's ops and ctx, collects the transport's statistics and
+  calls the optional `ops.release`. A release call finalizes; so does
+  `mqvpn_client_destroy`, for a slot not yet released.
+- **owes a release**: a slot owes a release while a transport is installed
+  and not yet finalized (`transport_released == 0`, `ops.send != NULL`).
+- **orphan**: a CLOSED_DROPPED slot whose xquic path is still alive
+  (`xquic_path_live`), with no removal on its way, on a live connection
+  (the model's `Orphan`).
+- **caller prefix**: the slot writes that the only caller makes right
+  before it dispatches ADD (installing the platform's transport) or
+  TRANSPORT_RELEASED (finalizing the transport). The model's `CallerPrefix`
+  and its C twin `oracle_prefix_applies` say when one applies.
 
-**Together**, for every concrete slot `p` in the domain:
-`abs(step(p)) = abs(step(conc(abs(p))))` by ②, and that is the table's row by
-①, because `abs(conc(a)) = a` and `conc(a)` is in the domain (both checked by
-①). The same holds for the calls and the update classes.
+### The oracle
 
-**The domain.** The code (`oracle_abs.h`, the CBMC harness,
-`tests/test_path_slot_oracle.c`) refers to these items by number:
+`PathSlotOracle.tla` evaluates `Step` on every abstract slot that satisfies
+the model's invariant (`Legal`, a transcription of `path_invariant_check()`)
+and on every event/context class. An abstract slot is `state × attached ×
+live × released × id class × retries (saturated at
+PATH_RECREATE_MAX_RETRIES) × retry timer armed × stable timer armed`. Ids
+are classes: a pre-state id is ZERO or NZ; a post-state id is ZERO, OLD (the
+pre-state id) or NEW (the context's new id), so storing a wrong nonzero id
+is visible.
+
+Each row also records:
+
+- the observable calls (`path_fsm_fire_path_event`, the
+  `client_notify_xqc_path_state` app-status);
+- an **update class** per timer and counter: KEEP / ZERO / NOW / ARM
+  (`now + backoff`) / INC.
+
+The classes are derived from the operation, never from abstract values (the
+counter saturates, so an increment past the cap is still INC); writing 0
+over 0 is KEEP. They make "a required update was deleted" visible, which the
+abstract slot alone is not: deleting the stable-window re-arm leaves
+"armed" true.
+
+### The unit test
+
+`tests/test_path_slot_oracle.c` runs every row on the canonical
+concretization (`oracle_conc`). For each row it checks:
+
+- the abstract post-state and the observable calls;
+- the update classes, hence the exact timer and counter values;
+- the state-entry stamp and the residence-warn debounce;
+- the transport ops and ctx;
+- the frame: every field the FSM must not write is unchanged. A size pin on
+  `path_entry_t` catches a new field that grows the struct. On LP64,
+  though, the struct has three 4-byte padding holes, after
+  `local_addr_len`, `flags` and `recreate_retries`, and a field placed in
+  one of them must be classified by hand in `oracle_abs.h`;
+- `path_invariant_check()`, public status included, on every post-state,
+  the stable tick's too (that entry point does not check the invariant
+  itself).
+
+It also:
+
+- checks that `path_invariant_check()` rejects every abstract shape the
+  model calls illegal (a forked child per shape), so the model's invariant
+  and the C one are the same set;
+- first runs a canary that proves the invariant is compiled in: CI runs
+  this test on a Release build, and the target compiles its own copy of the
+  FSM with `-UNDEBUG`;
+- pins the values of `path_recreate_backoff()` (5, 5, 10, 20, 40, 60 s …)
+  and `PATH_STABLE_THRESHOLD_US` (30 s). The model abstracts time away, and
+  the update classes check that the FSM applies these, not what they are;
+  so a change to the retry schedule or the stability window is a
+  deliberate edit of the test.
+
+### The CBMC proof
+
+`harness` proves *abstraction consistency* by self-composition. It takes two
+arbitrary concrete slots in the domain with the same abstract state. Every
+field is arbitrary, the handle, the name, every `ops` pointer and the ctx
+included, so the unit test's canonical slots are among them. Both get the
+same event and context class, with independent concrete now, new id and
+timer values, and arbitrary values in the context fields the class does not
+use. CBMC proves that:
+
+- both end in the same abstract state, with the same calls and update
+  classes;
+- each run meets the per-run checks of the unit test (the invariant on the
+  post-state, the frame, ops/ctx, the stamps);
+- for every such input, the undefined behaviour `run.sh` checks for (array
+  bounds, pointers, signed overflow, shifts, division by zero) is absent.
+
+A second harness, `harness_null_ctx`, proves that a NULL context changes
+nothing, for every slot, in the domain or not: no field of the slot (the
+frame included) and no call.
+
+### How the two proofs combine
+
+Write `abs(p)` for the abstract slot of a concrete slot `p`, `conc(a)` for
+the canonical concrete slot of an abstract slot `a` (`oracle_conc`), and
+`step` for one dispatch of a given event and context class. For every
+concrete slot `p` in the domain:
+
+1. `conc(abs(p))` is in the domain and `abs(conc(abs(p))) = abs(p)`: the
+   unit test checks both for every pre-state of the table, and `abs(p)` is
+   one of them (Dom item 5).
+2. `abs(step(p)) = abs(step(conc(abs(p))))`: the CBMC proof, since `p` and
+   `conc(abs(p))` are two slots of the domain with the same abstract state.
+3. `abs(step(conc(abs(p))))` is the table's row for `abs(p)`: the unit
+   test.
+
+So `abs(step(p))` is the table's row. The same holds for the calls and the
+update classes.
+
+### The verified domain (Dom items)
+
+The code cites these items as `Dom item N` (`oracle_abs.h`, the CBMC
+harness, `tests/test_path_slot_oracle.c`):
 
 1. `state` is a `path_lifecycle_t` value;
 2. `transport_attached`, `transport_released`, `xquic_path_live` are 0 or 1;
@@ -192,104 +323,130 @@ and no call.
    short of overflowing its own increment (finding 3);
 5. the abstract state is legal (in the table's pre-states);
 6. the transport rule: a slot owes a release exactly while a transport is
-   installed (`released = 0` ⇔ `ops.send != NULL`, and a released slot has no
-   ctx);
-7. the context: `now_us` in `[1, 2^62]`; a new id that is nonzero and differs
-   from the slot's; a validation target of ACTIVE or STANDBY;
+   installed (`released = 0` ⇔ `ops.send != NULL`, and a released slot has
+   no ctx);
+7. the context: `now_us` in `[1, 2^62]`; a new id that is nonzero and
+   differs from the slot's; a validation target of ACTIVE or STANDBY;
 8. (update classes only) `now`, `now + backoff(r)` and the pre-state timers
-   do not coincide by accident — the handlers never read timer values, except
-   the stable tick, whose class fixes the comparison;
+   do not coincide by accident — the handlers never read timer values,
+   except the stable tick, whose class fixes the comparison;
 9. (state-entry stamp and residence-warn debounce only) a recorded entry,
    `state_entered_at_us != 0`.
 
-Items 8 and 9 guard only the checks that need them; everything else is proved
-without them. Item 9 holds for every event a slot receives after the ADD
-that creates it: `path_entry_init` zeroes the stamp (only in
-`mqvpn_client_add_path`, `:3408`), that ADD is a real transition
-(CLOSED_FREE → PENDING) stamped with `client_now_us()`, and no later write
-zeroes it: the only other write is the same stamp on each state change
-(`set_path_state_with_log`, `path_state_machine.c:343`). This assumes the
-injectable clock (`mqvpn_config_set_clock`) never returns 0, the same
-assumption as item 7. No test reaches the first-entry branch of
+Items 8 and 9 guard only the checks that need them; everything else is
+proved without them. Item 9 holds for every event a slot receives after the
+ADD that creates it:
+
+- `path_entry_init` zeroes the stamp (only in `mqvpn_client_add_path`,
+  `:3408`);
+- that ADD is a real transition (CLOSED_FREE → PENDING), stamped with
+  `client_now_us()`;
+- no later write zeroes the stamp: the only other write is the same stamp
+  on each state change (`set_path_state_with_log`,
+  `path_state_machine.c:343`).
+
+This assumes the injectable clock (`mqvpn_config_set_clock`) never returns
+0, the same assumption as item 7. No test reaches the first-entry branch of
 `set_path_state_with_log()` (a same-state write on a slot with no recorded
-entry): `tests/test_path_state_machine.c` tests the rule's helper
+entry). `tests/test_path_state_machine.c` tests the rule's helper
 `path_is_real_transition()`, which compares public statuses, and
 `path_mark_state_entry()` on their own.
 
-**Composed events.** Two events are checked with the caller's own slot
-writes in front, exactly where the only caller issues them:
-`mqvpn_client_add_path()` installs the platform's transport on a CLOSED_FREE
-slot before ADD (the unit test installs a canonical one, CBMC an arbitrary
-one with a non-NULL `send`) (`src/mqvpn_client.c:3410-3411`; the `path_entry_init` before it yields a
-legal CLOSED_FREE pre-state, one of the table's), and
-`mqvpn_client_on_platform_path_released()` finalises a CLOSED_DROPPED slot
-that still owes a release before TRANSPORT_RELEASED (`:964-981`, `:3512-3535`).
+### Composed events
+
+Two events are checked with the caller prefix in front, exactly where the
+only caller issues them:
+
+- ADD: `mqvpn_client_add_path()` installs the platform's transport on a
+  CLOSED_FREE slot before ADD (`:3410-3411`). The unit test installs a
+  canonical transport, CBMC an arbitrary one with a non-NULL `send`. The
+  `path_entry_init` before it yields a legal CLOSED_FREE pre-state, one of
+  the table's.
+- TRANSPORT_RELEASED: `mqvpn_client_on_platform_path_released()` finalizes
+  a CLOSED_DROPPED slot that still owes a release (`:964-981`,
+  `:3512-3535`).
+
 Every other row is the handler on its own. The condition is the model's
 `CallerPrefix`, emitted per row and checked against its C twin
 (`oracle_prefix_applies`) on every row. The abstract result always comes
 from `Step`; the prefix only affects the concrete ops and ctx.
 
-**Trusted, not proved:** `oracle_abs.h` (the abstraction, the concretization,
-the two caller prefixes, which are transcriptions of `mqvpn_client.c`), the
-update-class classifier and, for the classes only, the premise that handlers
-do not read timer values; the values of the backoff schedule and the 30 s
-window (pinned, not derived); `gen_oracle.py`; the accessor stubs; TLC and
-CBMC;
-and the correspondence between the environment actions of `MqvpnPathSlot.tla`
-and their callers in `src/mqvpn_client.c`, which is transcribed, not checked
-against the code (see Scope).
+### Trusted, not proved
+
+- `oracle_abs.h`: the abstraction, the concretization and the two caller
+  prefixes, which are transcriptions of `mqvpn_client.c`;
+- the update-class classifier and, for the classes only, the premise that
+  handlers do not read timer values;
+- the values of the backoff schedule and the 30 s window (pinned, not
+  derived);
+- `gen_oracle.py`, the accessor stubs, TLC and CBMC;
+- the correspondence between the environment actions of `MqvpnPathSlot.tla`
+  and their callers in `src/mqvpn_client.c`, which is transcribed, not
+  checked against the code (see [Scope](#scope)).
 
 ## The environment model (`MqvpnPathSlot.tla`)
 
 One slot, always the primary path. Each action is an as-is transcription of
-its caller, guards included, with two deliberate exceptions: a PATH_ABANDON
-may succeed on the slot's xquic-ACTIVE path (the `ApiDrop`, `ApiRemove`
-row), and the validation poll chooses its target (ACTIVE or STANDBY) at each
-poll, where the code takes it from the scheduler, fixed per connection
-(`:4075-4077`); both over-approximate. Work the code does synchronously
-inside one call is split into separate steps: the `activate_pending_paths`
-of `mqvpn_client_add_path` (`ApiAdd`, then `EnvActivate`) and of
-`cb_ready_to_create_path` (`EnvMpReady`, then `EnvActivate`), and the tick's
-validation, retry and stable passes (`EnvValidationPoll`, `EnvRetryFire`,
-`EnvStableConfirm`). Every action of the model's `Next` has a row below.
+its caller, guards included, with two deliberate exceptions, both
+over-approximations:
+
+1. A PATH_ABANDON may succeed on the slot's xquic-ACTIVE path, although
+   xquic refuses to abandon the only ACTIVE path
+   (`xqc_multipath.c:781-787`). The success stands for a slot among
+   several, with another path active. It is the only way the slot is
+   reused on a live connection: requiring the path not to be xquic-ACTIVE
+   there makes activation, CREATE_WAIT and DEGRADED unreachable while TLC
+   still reports no error, which the vacuity gate catches.
+2. The validation poll chooses its target (ACTIVE or STANDBY) at each poll,
+   where the code takes it from the scheduler, fixed per connection
+   (`:4075-4077`).
+
+Work the code does synchronously inside one call is split into separate
+steps:
+
+- the `activate_pending_paths` of `mqvpn_client_add_path` (`ApiAdd`, then
+  `EnvActivate`) and of `cb_ready_to_create_path` (`EnvMpReady`, then
+  `EnvActivate`);
+- the tick's validation, retry and stable passes (`EnvValidationPoll`,
+  `EnvRetryFire`, `EnvStableConfirm`).
+
+Every action of the model's `Next` has a row below.
 
 | Action | Code |
 |--------|------|
-| `ApiConnect` | `mqvpn_client_connect` from IDLE: no reset; `cli_start_connection` refuses a primary that is not attached (`src/mqvpn_client.c:2811-2818`); the primary bootstrap writes id 0, live, VALIDATING (`:2896-2902`), and xquic creates the initial path ACTIVE (`xqc_path_init`, `third_party/xquic/src/transport/xqc_multipath.c:351-353`) |
+| `ApiConnect` | `mqvpn_client_connect` from IDLE: no reset; `cli_start_connection` refuses a primary that is not attached (`:2811-2818`); the primary bootstrap writes id 0, live, VALIDATING (`:2896-2902`), and xquic creates the initial path ACTIVE (`xqc_path_init`, `xqc_multipath.c:351-353`) |
 | `EnvMpReady` | `cb_ready_to_create_path` (`:2531-2541`), only on a multipath connection once a path id is available (`xqc_engine.c:785-800`, `xqc_conn.c:5519-5542`); may precede ESTABLISHED |
 | `EnvTunnelReady`, `EnvEstablish` | `cli_connect_ip_on_body`, once the address is assigned: the primary, if still VALIDATING and attached, gets its handshake VALIDATION_OK (`:2143-2152`), then TUNNEL_READY (`:2154`); `mqvpn_client_set_tun_active` → ESTABLISHED (`:3611-3622`) |
 | `EnvConnClose` | `cb_h3_conn_close` (`:1426-1452`): slot untouched, RECONNECTING or CLOSED; xquic destroys its paths without notifying, so in-flight removals are dropped |
 | `EnvReconnect` | `tick_reconnect` (`:4108-4140`) / `mqvpn_client_connect` from RECONNECTING (`:3202-3262`): CONN_RESET to the slot, then start; the reset runs whether or not the start succeeds; success needs an attached primary, failure re-arms the timer |
 | `ApiDisconnectWhileReconnecting` | `mqvpn_client_disconnect` from RECONNECTING (`:3265-3310`): no connection exists then, so the client just goes CLOSED, which cancels the pending retry (`tick_reconnect` runs only while RECONNECTING, `:4110`). A disconnect of a live connection is one of the closes `EnvConnClose` stands for |
 | `EnvActivate` | `activate_pending_paths` (`:2519-2526`) once multipath is ready on a live connection |
-| `EnvRetryFire`, `EnvValidationPoll`, `EnvStableConfirm` | `tick_path_recovery` (`:4091-4103`), which needs multipath ready and ESTABLISHED: `tick_drive_retry_timer` (`:4002-4020`), `tick_check_all_validations` (`:4039-4083`; validates a VALIDATING slot whose path xquic reports ACTIVE) and `path_fsm_tick_confirm_stable` |
+| `EnvRetryFire`, `EnvValidationPoll`, `EnvStableConfirm` | `tick_path_recovery` (`:4091-4103`), which needs multipath ready and ESTABLISHED: `tick_drive_retry_timer` (`:4002-4020`), `tick_check_all_validations` (`:4039-4083`; validates a VALIDATING slot whose path is xquic-ACTIVE) and `path_fsm_tick_confirm_stable` |
 | `ApiManualReactivate` | `mqvpn_client_reactivate_path` and `reactivate_slot_eligible` (`:3549-3594`) |
-| `ApiDrop`, `ApiRemove` | `mqvpn_client_on_platform_path_dropped` / `mqvpn_client_remove_path` (`:3456-3508`): PATH_ABANDON for a live path when a connection exists; it can fail (`xqc_conn_close_path`, `xqc_multipath.c:751-787`) and the result is ignored. A deliberate departure from the code: xquic refuses to abandon the only ACTIVE path (`xqc_multipath.c:781-787`), but the model lets the abandon succeed on the slot's xquic-ACTIVE path, which stands for a slot among several with another path active. That success is the only way the slot is reused on a live connection: requiring the path not to be xquic-ACTIVE there makes activation, CREATE_WAIT and DEGRADED unreachable while TLC still reports no error, which the vacuity gate catches |
+| `ApiDrop`, `ApiRemove` | `mqvpn_client_on_platform_path_dropped` / `mqvpn_client_remove_path` (`:3456-3508`): PATH_ABANDON for a live path when a connection exists; it can fail (`xqc_conn_close_path`, `xqc_multipath.c:751-787`) and the result is ignored. xquic refuses to abandon the only ACTIVE path (`xqc_multipath.c:781-787`). The model departs from the code here (first exception above) |
 | `EnvXqcValidate` | xquic validates the slot's path: a matching PATH_RESPONSE (`xqc_process_path_response_frame`, `xqc_frame.c:2129`) moves a validating path to xquic-ACTIVE (`xqc_path_validate`, `xqc_multipath.c:1442-1448`); not fair (a black-holed path never validates) |
 | `EnvXqcSpontaneousAbandon` | a validation timeout (`xqc_path_validation_on_retx`, `xqc_multipath.c:460-484`) of a path that is not xquic-ACTIVE; bounded, not fair |
 | `DeliverRemoval` | `cb_path_removed` → `find_path_by_xqc_id` (`:2704-2721`, `:561-569`), whose lookup matches only a live slot with the same id. This one-slot model does not exercise that guard: every pending removal is the live slot's own (see `RemovalsBelongToCurrentIncarnation`), so the lookup always matches |
-| `EnvPathIdleReap`, `EnvConnIdleTimeout` | an orphan (a dropped slot whose xquic path is still alive) is closed by the path idle timeout only with multipath and when it is not the only xquic-ACTIVE path (`xqc_timer.c:137-161`; the model takes the slot's xquic-ACTIVE path to be the only one); otherwise the connection idles out |
+| `EnvPathIdleReap`, `EnvConnIdleTimeout` | an orphan is closed by the path idle timeout only with multipath and when it is not the only xquic-ACTIVE path (`xqc_timer.c:137-161`; the model takes the slot's xquic-ACTIVE path to be the only one); otherwise the connection idles out |
 | `ApiAdd` | `mqvpn_client_add_path` (`:3362-3441`): reuses only a CLOSED_FREE slot |
-| `PlatformRelease` | the platform's side of the drop contract: after a drop or remove it stops its I/O, closes its socket and calls `mqvpn_client_on_platform_path_released` (`include/libmqvpn.h:884-886`, `include/libmqvpn.h:908-910`); no library code runs until that call arrives (`DeliverRelease`) |
+| `PlatformRelease` | the platform's side of the drop contract: after a drop or remove it stops its I/O, closes its socket and makes the release call (`include/libmqvpn.h:884-886`, `include/libmqvpn.h:908-910`); no library code runs until that call arrives (`DeliverRelease`) |
 | `DeliverRelease`, `PlatformDupRelease` | `mqvpn_client_on_platform_path_released` (`:3512-3535`), its guards in order; late and duplicated calls for any handle ever issued |
-| `EnvDestroy` | `mqvpn_client_destroy` (`:3123-3170`): finalises a slot that still owes a release; nothing happens afterwards |
+| `EnvDestroy` | `mqvpn_client_destroy` (`:3123-3170`): finalizes a slot that still owes a release; nothing happens afterwards |
 
 ### Properties
 
-The Code column names the code each property is about, function first. As
-in the table above, a bare `:NNNN` is in `src/mqvpn_client.c`;
-`path_state_machine.c` is in `src/`.
+The Code column names the code each property is about, function first.
 
 | Property | Kind | Meaning | Code |
 |----------|------|---------|------|
 | `InvPerState` | invariant | `path_invariant_check()` holds in every reachable state | `path_invariant_check` (`path_state_machine.c:140-230`), which `path_on_event` runs after every handler (`path_state_machine.c:454`) |
 | `OpsConsistent` | invariant | while not destroyed, a transport is installed exactly while a release is owed | `mqvpn_client_add_path` installs the transport (`:3410-3411`) and `path_on_add` clears the release flag (`path_state_machine.c:657-658`); `client_finalize_transport` removes it (`:970-973`) and `path_on_transport_released` sets the flag (`path_state_machine.c:693-694`) |
-| `ReleaseAtMostOnce` | invariant | each incarnation's transport is finalised at most once. The release counts here count finalisations (`client_finalize_transport`), which call `ops.release` only when the platform supplied it (it is optional) | `mqvpn_client_on_platform_path_released` refuses a slot already released, then finalises (`:3525-3533`); `client_finalize_transport` clears the ops before calling out (`:964-981`); `mqvpn_client_destroy` finalises only a slot not yet released (`:3164-3167`) |
-| `EarlierIncarnationsReleased` | invariant | a slot is reused only after its previous transport was finalised | `mqvpn_client_add_path` reuses only a CLOSED_FREE slot (`:3386-3401`); `maybe_transition_dropped_to_free` enters CLOSED_FREE only once the release happened (`path_state_machine.c:699-707`) |
-| `ReleasedMeansFinalized` | invariant | while not destroyed, the slot's release flag matches the ghost count of finalisations | `mqvpn_client_on_platform_path_released` finalises, then dispatches TRANSPORT_RELEASED (`:3531-3533`), whose handler `path_on_transport_released` sets the flag (`path_state_machine.c:693-694`); `client_finalize_transport` (`:964-981`) |
-| `NoLeakAtDestroy` | invariant | after destroy, every installed transport was finalised (exactly once) | `mqvpn_client_destroy` finalises every slot not yet released (`:3164-3167`) |
+| `ReleaseAtMostOnce` | invariant | each incarnation's transport is finalized at most once. The release counts here count finalizations (`client_finalize_transport`), which call `ops.release` only when the platform supplied it (it is optional) | `mqvpn_client_on_platform_path_released` refuses a slot already released, then finalizes (`:3525-3533`); `client_finalize_transport` clears the ops before calling out (`:964-981`); `mqvpn_client_destroy` finalizes only a slot not yet released (`:3164-3167`) |
+| `EarlierIncarnationsReleased` | invariant | a slot is reused only after its previous transport was finalized | `mqvpn_client_add_path` reuses only a CLOSED_FREE slot (`:3386-3401`); `maybe_transition_dropped_to_free` enters CLOSED_FREE only once the release happened (`path_state_machine.c:699-707`) |
+| `ReleasedMeansFinalized` | invariant | while not destroyed, the slot's release flag matches the ghost count of finalizations | `mqvpn_client_on_platform_path_released` finalizes, then dispatches TRANSPORT_RELEASED (`:3531-3533`), whose handler `path_on_transport_released` sets the flag (`path_state_machine.c:693-694`); `client_finalize_transport` (`:964-981`) |
+| `NoLeakAtDestroy` | invariant | after destroy, every installed transport was finalized (exactly once) | `mqvpn_client_destroy` finalizes every slot not yet released (`:3164-3167`) |
 | `RemovalsBelongToCurrentIncarnation` | invariant | no removal notification outlives its incarnation | `cb_path_removed` → `find_path_by_xqc_id` (`:2710`, `:561-569`), the id-keyed lookup this protects; `mqvpn_client_add_path` reuses only a CLOSED_FREE slot (`:3386-3401`) |
-| `StaleEventHarmless` | action | a delayed event of an earlier incarnation never changes the slot. API calls are modelled with the current handle only, so what this checks is the handle guard of release delivery: a late release for an earlier handle changes nothing. The removal channel is closed structurally (`RemovalsBelongToCurrentIncarnation`) | `mqvpn_client_on_platform_path_released`'s guards (`:3516-3518`): `find_path_by_handle` (`:572-579`) finds no slot for an old handle, and a late duplicate on CLOSED_FREE is ignored |
+| `StaleEventHarmless` | action | a delayed event of an earlier incarnation never changes the slot. API calls are modelled with the current handle only, so what this checks is the handle guard of release delivery: a late release call for an earlier handle changes nothing. The removal channel is closed structurally (`RemovalsBelongToCurrentIncarnation`) | `mqvpn_client_on_platform_path_released`'s guards (`:3516-3518`): `find_path_by_handle` (`:572-579`) finds no slot for an old handle, and a late duplicate on CLOSED_FREE is ignored |
 | `FreeQuiescent` | action | CLOSED_FREE is left only by reuse | `path_on_add` (`path_state_machine.c:648-660`), the only handler that leaves CLOSED_FREE, dispatched only by `mqvpn_client_add_path` (`:3433`) |
 | `DroppedLeadsToFree` | liveness | a dropped slot reaches CLOSED_FREE, unless destroyed or the connection is closed for good | `maybe_transition_dropped_to_free` (`path_state_machine.c:699-707`), re-evaluated on removal (`path_on_xquic_removed`, `path_state_machine.c:557-560`), on release (`path_on_transport_released`, `path_state_machine.c:693-695`) and on reset (`path_on_conn_reset`, `path_state_machine.c:675-677`) |
 | `RetryEscapes` | liveness | CREATE_WAIT / DEGRADED always escape, unless destroyed or the connection is closed for good: to VALIDATING (a retry succeeds), CLOSED_RECOVERABLE (the retry cap or a permanent failure), CLOSED_DROPPED (drop or remove) or PENDING (the reset of a reconnect) | `path_on_retry_timer` (`path_state_machine.c:491-522`) and `apply_failure_with_retry_check` (`path_state_machine.c:387-403`), driven by `tick_drive_retry_timer` (`:4002-4020`) |
@@ -303,21 +460,21 @@ others:
   platform eventually releases a dropped transport (the drop contract)
   (`DeliverRemoval`, `DeliverRelease`, `PlatformRelease`);
 - a connection in progress completes its handshake, gets its address and is
-  activated by the platform (`EnvTunnelReady`, `EnvEstablish`); a multipath
-  connection whose peer grants path-id credit signals readiness
+  activated by the platform (`EnvTunnelReady`, `EnvEstablish`);
+- a multipath connection whose peer grants path-id credit signals readiness
   (`EnvMpReady`; xquic notifies only once a path id is available). Neither
-  property needs the readiness assumption today: on a live connection every
-  way into CREATE_WAIT or DEGRADED passes through an activation, which needs
+  property needs this assumption: on a live connection every way into
+  CREATE_WAIT or DEGRADED passes through an activation, which needs
   readiness, and the liveness run passes without it. Runs where the peer
-  never grants credit are explored too (`mpCredit = FALSE`): the client then
-  never becomes multipath-ready;
-- while RECONNECTING, the retry timer eventually fires (`EnvReconnect`);
-  since the reset runs before any start attempt, and a failed attempt on an
-  already-reset slot changes nothing, this also means that a primary that is
-  attached is eventually reconnected;
+  never grants credit are explored too (`mpCredit = FALSE`): the client
+  then never becomes multipath-ready;
+- while RECONNECTING, the retry timer eventually fires (`EnvReconnect`).
+  Since the reset runs before any start attempt, and a failed attempt on an
+  already-reset slot changes nothing, this also means that an attached
+  primary is eventually reconnected;
 - armed retry timers fire (`EnvRetryFire`);
-- an orphan is eventually resolved by the route xquic actually has: the path
-  idle timeout when multipath is on and the path is not xquic-ACTIVE,
+- an orphan is eventually resolved by the route xquic actually has: the
+  path idle timeout when multipath is on and the path is not xquic-ACTIVE,
   otherwise the connection idle timeout (`EnvPathIdleReap`,
   `EnvConnIdleTimeout`).
 
@@ -335,68 +492,78 @@ path to validate (a black-holed path never does).
   path is not xquic-ACTIVE; otherwise the connection idles out. The one
   departure from this reading is a drop or remove, whose abandon may also
   succeed on the xquic-ACTIVE path, as if another path were active (the
-  `ApiDrop`, `ApiRemove` row). (A spontaneous abandon hitting only a path
-  that is not xquic-ACTIVE does not come from this reading but from the
-  validation timeout itself; see **multipath_ready** below.) With several
-  paths the path idle timeout reaps an orphan whenever another path is
-  active. The route differs; the slot's outcome differs only with reconnect
-  off. When the connection idle timeout leads to RECONNECTING, the reset
-  frees the slot (CLOSED_FREE) just as the path idle timeout would; with
-  reconnect off it leaves the live binding of finding 2, which
-  `DroppedLeadsToFree` exempts. Primary rotation and cross-slot id lookups
-  are out of scope.
+  first exception above). With several paths the path idle timeout reaps an
+  orphan whenever another path is active. The route differs; the slot's
+  outcome differs only with reconnect off. When the connection idle timeout
+  leads to RECONNECTING, the reset frees the slot (CLOSED_FREE) as the path
+  idle timeout would, if the release already happened; otherwise the later
+  release does it (`maybe_transition_dropped_to_free` needs
+  `transport_released`, `path_state_machine.c:703`). With reconnect off it
+  leaves the live binding of finding 2, which `DroppedLeadsToFree` exempts.
+- **Spontaneous xquic abandons** are bounded and hit only a path that is not
+  xquic-ACTIVE. That follows from xquic, not from the one-slot reading: the
+  validation timeout behind them (`xqc_path_validation_on_retx`) acts only
+  on a path that is still validating (`xqc_multipath.c:468`).
+- **Multipath readiness.** `multipath_ready` is set once per connection and
+  cleared by the reconnect reset, as in the code. `mp` stands for a
+  negotiated multipath connection and `mpCredit` for a peer that grants
+  path-id credit.
 - **DEGRADED** is reached through one family of traces only: the slot is
   re-added while the connection is still connecting, activated, validated by
   the tunnel-ready dispatch while xquic is still validating its path, and
   then abandoned by xquic on its own. The other way into DEGRADED, xquic
-  removing an xquic-ACTIVE path, is outside the model (previous item).
-- **Time** is abstract: timers are armed or not and fire nondeterministically.
-  In C, the update classes check that the FSM applies the backoff schedule
-  and the 30 s window, and the unit test pins their values.
+  removing an xquic-ACTIVE path, is outside the model (see One slot, the
+  primary).
+- **Time** is abstract: timers are armed or not and fire
+  nondeterministically. In C, the update classes check that the FSM applies
+  the backoff schedule and the 30 s window, and the unit test pins their
+  values.
 - **Retry cap** is 2 in the environment configurations (6 in production and
   in the oracle, which `test_path_slot_oracle` checks against
   `PATH_RECREATE_MAX_RETRIES`).
 - **Bounds.** The environment configurations also bound the connection
   closes (`ConnCloseCap` 2), the spontaneous abandons (`AbandonCap` 1), the
   duplicated or late release calls (`DupReleaseCap` 1) and the slot reuses
-  (`MaxIncarnations` 3). Safety also holds with each bound raised by one, one
-  at a time (`ConnCloseCap` 3, `AbandonCap` 2, `DupReleaseCap` 2,
+  (`MaxIncarnations` 3). Safety also holds with each bound raised by one,
+  one at a time (`ConnCloseCap` 3, `AbandonCap` 2, `DupReleaseCap` 2,
   `MaxIncarnations` 4, `MaxRetries` 3), and liveness with `AbandonCap` 2 and
-  with `ConnCloseCap` 3 (checked on 2026-09-30). The `AbandonCap` 2 and
-  `MaxIncarnations` 4 safety runs need a larger `MaxXqcIds` (8 was used),
-  because their extra activations use up the ids (next item).
+  with `ConnCloseCap` 3; these runs are not part of `run_tlc.sh`. The
+  `AbandonCap` 2 and `MaxIncarnations` 4 safety runs need a larger
+  `MaxXqcIds` (8 suffices), because their extra activations use up the ids
+  (next item).
 - **Path ids** are drawn from one monotonic allocator across connections:
   real ids restart per connection, but removals are dropped at close, so a
-  cross-connection collision has no observable effect. `MaxXqcIds` limits no
-  action: a run that uses up the ids fails `TypeOK`, which only the safety
-  run checks.
-- **multipath_ready** is set once per connection and cleared by the reconnect
-  reset, as in the code. `mp` stands for a negotiated multipath connection
-  and `mpCredit` for a peer that grants path-id credit. Spontaneous xquic
-  abandons are bounded and hit only a path that is not xquic-ACTIVE: the
-  validation timeout behind them (`xqc_path_validation_on_retx`) acts only on
-  a path that is still validating (`xqc_multipath.c:468`).
+  cross-connection collision has no observable effect. `MaxXqcIds` limits
+  no action: a run that uses up the ids fails `TypeOK`, which only the
+  safety run checks.
 - **State transitions follow a Release build** (see finding 5).
 
 ## Scope
 
-Checked against the C code: `path_on_event()` and
-`path_fsm_tick_confirm_stable()` (with the two caller prefixes above).
-Transcribed but not checked against the code: every environment action,
-including the API entry points, the tick dispatch, the connection lifecycle
-and destroy. Not modelled: several slots, the scheduler, reinjection,
-`connect()` with no path at all (`cli_start_connection` then starts without a
-primary; the model's slot is always the primary), and the draining window
-after a disconnect. `mqvpn_client_disconnect` sets the client CLOSED while
+- Checked against the C code: `path_on_event()` and
+  `path_fsm_tick_confirm_stable()`, with the two caller prefixes above.
+- Transcribed but not checked against the code: every environment action,
+  including the API entry points, the tick dispatch, the connection
+  lifecycle and destroy.
+- Not modelled:
+  - several slots;
+  - primary rotation and cross-slot id lookups;
+  - the scheduler;
+  - reinjection;
+  - `connect()` with no path at all (`cli_start_connection` then starts
+    without a primary; the model's slot is always the primary);
+  - the draining window after a disconnect.
+
+The draining window: `mqvpn_client_disconnect` sets the client CLOSED while
 `c->conn` still drains (`:3302-3308`: `xqc_conn_close` only moves the
 connection to CLOSING; `cb_h3_conn_close` clears `c->conn` later). On a
 multipath-ready connection, an `add_path` in that window runs
-`activate_pending_paths` (`:3436-3437`), whose
-`-XQC_CLOSING` (`xqc_multipath.c:689-690`) is classified TRANSIENT
-(`src/mqvpn_client.c:2479-2481`): the new slot goes PENDING → CREATE_WAIT with the client
-CLOSED, and no tick retries it. The model closes a connection in one step
-(`EnvConnClose`); no checked property is affected (`RetryEscapes` exempts a
-client whose connection is closed for good).
+`activate_pending_paths` (`:3436-3437`), whose `-XQC_CLOSING`
+(`xqc_multipath.c:689-690`) is classified TRANSIENT
+(`src/mqvpn_client.c:2479-2481`). The new slot goes PENDING → CREATE_WAIT
+with the client CLOSED, and no tick retries it. The model closes a
+connection in one step (`EnvConnClose`); no checked property is affected
+(`RetryEscapes` exempts a client whose connection is closed for good).
 
 ## Findings
 
@@ -404,36 +571,34 @@ client whose connection is closed for good).
    from CLOSED_FREE, which needs the xquic path gone, and a reset follows a
    connection close that drops in-flight removals, the id-keyed lookup in
    `cb_path_removed` can never meet an earlier incarnation's removal
-   (`RemovalsBelongToCurrentIncarnation`). The earlier reuse rule (reuse from
-   any detached, xquic-drained CLOSED slot) left that channel open; it is now
-   closed structurally, not by the lookup guard.
-2. **A closed client can keep a live xquic binding.** With reconnect off (or
-   after disconnect), a dropped slot whose xquic path was never removed stays
-   CLOSED_DROPPED with `xquic_path_live` set until destroy. Either its
+   (`RemovalsBelongToCurrentIncarnation`). A reuse rule that also accepted
+   any detached, xquic-drained CLOSED slot would leave that channel open;
+   with the current rule it is closed structurally, not by the lookup guard.
+2. **A closed client can keep a live xquic binding.** With reconnect off
+   (or after disconnect), a dropped slot whose xquic path was never removed
+   stays CLOSED_DROPPED with `xquic_path_live` set until destroy. Either its
    PATH_ABANDON could not be sent or failed, or it succeeded but the removal
    was still pending when the connection closed: xquic then destroys its
    paths without notifying (`xqc_conn_destroy_paths_list`,
    `xqc_multipath.c:821-830`). Nothing resets the slot once the connection
-   is gone for good. It holds no
-   transport (the release still happens) and add_path appends rather than
-   reusing it, so this costs a table slot, nothing more.
-3. **`recreate_retries` has no upper bound** (carried over from the previous
-   CBMC harness). Each CLOSED_RECOVERABLE → manual reactivate → xquic removal
-   round trip increments it past the cap, so after about 2^31 round trips the
-   `int` would overflow. The CBMC domain covers every value below `INT_MAX`;
-   a saturating increment would remove the last caveat.
+   is gone for good. It holds no transport (the release call still happens)
+   and add_path appends rather than reusing it, so this costs a table slot,
+   nothing more.
+3. **`recreate_retries` has no upper bound.** Each CLOSED_RECOVERABLE →
+   manual reactivate → xquic removal round trip increments it past the cap,
+   so after about 2^31 round trips the `int` would overflow. The CBMC
+   domain covers every value below `INT_MAX`; a saturating increment would
+   remove the last caveat.
 4. **A new path id is trusted to be nonzero.** `activate_via_xquic_classify`
-   forwards xquic's id unchecked (`src/mqvpn_client.c:2473-2482`); the
-   guarantee is `xqc_conn_get_available_path_id`'s
-   (`third_party/xquic/src/transport/xqc_conn.c:5519-5542`).
+   forwards xquic's id unchecked (`:2473-2482`); the guarantee is
+   `xqc_conn_get_available_path_id`'s (`xqc_conn.c:5519-5542`).
 5. **A Debug build asserts on a close before the TUN is up.** The state
    transition table has no TUNNEL_READY → RECONNECTING entry
-   (`src/mqvpn_client.c:315-324`), but `cb_h3_conn_close` moves a
-   reconnecting client there from any live state (`:1442-1446`), so a
-   connection that closes after the address is assigned and before
-   `mqvpn_client_set_tun_active` trips the `client_set_state` assertion
-   (`:511`) in a Debug build; a Release build makes the transition. The model
-   follows the Release behaviour.
+   (`:315-324`), but `cb_h3_conn_close` moves a reconnecting client there
+   from any live state (`:1442-1446`). So a connection that closes after
+   the address is assigned and before `mqvpn_client_set_tun_active` trips
+   the `client_set_state` assertion (`:511`) in a Debug build; a Release
+   build makes the transition. The model follows the Release behaviour.
 
 ## Sensitivity checks
 
@@ -463,15 +628,17 @@ was applied to a scratch copy and caught as expected:
 
 ## Counterexample log
 
-Earlier model revisions produced two counterexamples that the code cannot
-reach; the model was tightened to match the code.
+TLC finds these two counterexamples in looser versions of the model. The
+code cannot reach them, so the model is written to exclude them.
 
-1. **id-0 ABA via activation.** A revision that let activation return id 0
-   let a stale removal of id 0 hit a later incarnation. Activation never
-   returns 0 (`xqc_conn_get_available_path_id`), and a connection's removals
-   are dropped when it closes (`xqc_conn_destroy_paths_list` does not notify).
-   The model now gives id 0 only to the primary bootstrap, per connection; the
-   current model checks the id-0 path of the primary through drop, close,
+1. **id-0 ABA via activation.** An ABA problem: the same id belongs first to
+   one incarnation, then to another, so a late event keyed by that id
+   reaches the wrong one. If activation could return id 0, a stale removal
+   of id 0 would hit a later incarnation. Activation never returns 0
+   (`xqc_conn_get_available_path_id`), and a connection's removals are
+   dropped when it closes (`xqc_conn_destroy_paths_list` does not notify).
+   The model therefore gives id 0 only to the primary bootstrap, per
+   connection, and checks the id-0 path of the primary through drop, close,
    reconnect and reuse.
 2. **CONN_RESET changes a CLOSED_FREE slot.** The reset clears a stale
    retry count on a free slot without leaving CLOSED_FREE and without an

@@ -9,10 +9,13 @@
 \* platform (drop / remove, the transport release it owes, late and
 \* duplicated release calls) and the whole-object destroy. Every environment
 \* action is an as-is transcription of its caller in src/mqvpn_client.c,
-\* guards included, with one deliberate exception: PATH_ABANDON may succeed
-\* on the slot's xquic-ACTIVE path (see DropLike). Work the code does
-\* synchronously inside one call is split into separate steps here:
-\* add_path's activate_pending_paths (ApiAdd, then EnvActivate) and the
+\* guards included, with two deliberate exceptions, both
+\* over-approximations: PATH_ABANDON may succeed on the slot's xquic-ACTIVE
+\* path (see DropLike), and the validation poll chooses its target per poll,
+\* where the code fixes it per connection (see EnvValidationPoll). Work the
+\* code does synchronously inside one call is split into separate steps
+\* here: the activate_pending_paths of add_path (ApiAdd, then EnvActivate)
+\* and of cb_ready_to_create_path (EnvMpReady, then EnvActivate), and the
 \* tick's validation, retry and stable passes (EnvValidationPoll,
 \* EnvRetryFire, EnvStableConfirm). See formal/README.md for the map and
 \* the assumptions.
@@ -660,7 +663,7 @@ FreeQuiescent ==
 
 \* A dropped slot reaches CLOSED_FREE, unless the client is destroyed or its
 \* connection is closed for good (then a live xquic binding may stay behind
-\* until destroy: README finding).
+\* until destroy: README finding 2).
 DroppedLeadsToFree ==
   (slot.state = "ClosedDropped")
     ~> (slot.state = "ClosedFree" \/ destroyed \/ conn = "Closed")
