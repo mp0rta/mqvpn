@@ -15,7 +15,8 @@
  * fields the FSM must not write), and path_invariant_check() on the
  * post-state. It then checks that path_invariant_check() rejects every
  * abstract shape the model calls illegal, so the model's invariant and the C
- * one are the same set. formal/cbmc/ extends the row results from the
+ * one agree on every abstract shape (checked on its canonical
+ * concretization). formal/cbmc/ extends the row results from the
  * canonical slot to every slot of the verified domain (formal/README.md).
  *
  * Linux-only (CMakeLists.txt builds unit tests in its Linux block): the

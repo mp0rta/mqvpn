@@ -79,9 +79,10 @@ path_entry_t nondet_path_entry(void);
 mqvpn_path_ops_t nondet_path_ops(void);
 
 /* The accessor clock of one run: arbitrary, independent of the event's
- * now_us, and nonzero. Nonzero is the injectable clock's contract
- * (mqvpn_config_set_clock) that Dom item 9 rests on: the stamp an ADD
- * records is never 0. */
+ * now_us, and nonzero. Nonzero is an assumption of the proof, the one Dom
+ * item 9 makes of the injectable clock (mqvpn_config_set_clock): the API
+ * does not enforce it, and client_now_us returns the clock's value
+ * unchecked. */
 static uint64_t
 arbitrary_clock(void)
 {

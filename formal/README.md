@@ -284,7 +284,13 @@ It also:
 
 - checks that `path_invariant_check()` rejects every abstract shape the
   model calls illegal (a forked child per shape), so the model's invariant
-  and the C one are the same set;
+  and the C one agree on every abstract shape, checked on each shape's
+  canonical concretization. A reading of `path_invariant_check()`, not a
+  proof, says why that slot stands for the others: the function reads only
+  `state`, `status`, the three transport and xquic flags, whether
+  `xqc_path_id`, `recreate_after_us` and `path_stable_since_us` are 0, and,
+  in CLOSED_FREE, whether `ops.send` and the ctx are NULL; each value it
+  reaches is fixed by the abstract slot and Dom items 3 and 6;
 - first runs a canary that proves the invariant is compiled in: CI runs
   this test on a Release build, and the target compiles its own copy of the
   FSM with `-UNDEBUG`;
@@ -384,9 +390,11 @@ ADD that creates it:
   `path_state_machine.c:343`).
 
 This assumes the injectable clock (`mqvpn_config_set_clock`) never returns
-0, the same assumption as item 7. The CBMC proof assumes the same of its
-accessor clock: `client_now_us()` returns an arbitrary nonzero value in
-each run. No test reaches the first-entry branch of
+0, the same assumption as item 7; the API does not enforce it
+(`client_now_us` returns the clock's value unchecked, `:358`). The CBMC
+proof makes the same assumption of its accessor clock: `client_now_us()`
+returns an arbitrary nonzero value in each run. No test reaches the
+first-entry branch of
 `set_path_state_with_log()` (a same-state write on a slot with no recorded
 entry). `tests/test_path_state_machine.c` tests the rule's helper
 `path_is_real_transition()`, which compares public statuses, and
