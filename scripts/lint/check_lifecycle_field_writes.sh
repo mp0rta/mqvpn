@@ -30,7 +30,8 @@
 #   path_state_machine.h   src/mqvpn_client.c, src/path_state_machine.c,
 #                          tests/test_path_state_machine.c,
 #                          formal/oracle/oracle_abs.h
-#   oracle_abs.h           tests/test_path_slot_oracle.c
+#   oracle_abs.h           tests/test_path_slot_oracle.c,
+#                          formal/cbmc/harness_path_on_event.c
 #                          (the formal-verification harnesses reach the FSM
 #                          through oracle_abs.h only)
 # Every file the table names is guarded the same way, by basename, and may
@@ -91,6 +92,7 @@ path_state_machine.h src/path_state_machine.c
 path_state_machine.h tests/test_path_state_machine.c
 path_state_machine.h formal/oracle/oracle_abs.h
 oracle_abs.h tests/test_path_slot_oracle.c
+oracle_abs.h formal/cbmc/harness_path_on_event.c
 '
 # Every basename the table names, once each; then as one ERE alternation,
 # dots escaped.
