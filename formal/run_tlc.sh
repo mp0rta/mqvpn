@@ -75,16 +75,31 @@ sany() {
     esac
 }
 
-# The safety and liveness configurations must check the same model: their
-# CONSTANT lines must be identical.
+# The safety and liveness configurations must check the same model. They may
+# differ only in their SPECIFICATION, INVARIANT(S) and PROPERTY/PROPERTIES
+# sections; every other non-blank, non-comment line (the constants, in the
+# one-line or the block form, and any other section) must match once
+# whitespace is normalised. A line whose first word is all capitals starts a
+# section, so an unknown keyword is compared too (fail closed).
+cfg_model() { # cfg_model <cfg>: the lines of <cfg> that must match
+    awk '
+        { $1 = $1 }
+        $0 == "" || $1 ~ /^\\\*/ { next }
+        $1 ~ /^[A-Z_]+$/ {
+            skip = ($1 ~ /^(SPECIFICATION|INVARIANTS?|PROPERT(Y|IES))$/)
+        }
+        !skip { print }
+    ' "$1"
+}
+
 same_constants() {
-    safety_consts=$(awk '/^CONSTANT/' MqvpnPathSlot.cfg)
-    live_consts=$(awk '/^CONSTANT/' MqvpnPathSlot_live.cfg)
-    if [ "$safety_consts" != "$live_consts" ]; then
-        echo "run_tlc.sh: the two MqvpnPathSlot configurations set" \
-            "different constants" >&2
+    safety_model=$(cfg_model MqvpnPathSlot.cfg)
+    live_model=$(cfg_model MqvpnPathSlot_live.cfg)
+    if [ "$safety_model" != "$live_model" ]; then
+        echo "run_tlc.sh: the two MqvpnPathSlot configurations differ" \
+            "outside SPECIFICATION, INVARIANT and PROPERTY" >&2
         printf 'MqvpnPathSlot.cfg:\n%s\nMqvpnPathSlot_live.cfg:\n%s\n' \
-            "$safety_consts" "$live_consts" >&2
+            "$safety_model" "$live_model" >&2
         exit 1
     fi
 }
@@ -93,9 +108,15 @@ same_constants() {
 # run; a dead action (a guard that never holds) passes every property
 # unnoticed. TLC's coverage report has one line per action,
 # "<Name line ... of module MqvpnPathSlot>: d:t" (d new distinct states,
-# t steps taken; ApiDrop and ApiRemove share the line of DropLike). Only t
-# is tested: an action may add no state of its own (EnvPathIdleReap is
-# 0:t). awk reads the whole log and judges the last report only.
+# t steps taken). Only t is tested: an action may add no state of its own
+# (EnvPathIdleReap is 0:t). awk reads the whole log and judges the last
+# report only.
+#
+# The gate is action-level. A dead branch inside an action is not caught,
+# since t also counts duplicate successors and stutters. ApiDrop and
+# ApiRemove share the line of DropLike, so a guard on ev inside DropLike is
+# not caught either; a guard written in ApiRemove itself gives ApiRemove a
+# line of its own and is caught.
 vacuity() {
     rc=0
     dead=$(awk '
@@ -106,18 +127,23 @@ vacuity() {
             if (n[2] == 0) dead[++ndead] = $0
         }
         END {
-            if (reports == 0 || actions == 0) {
-                print "no coverage report in the safety log"
-                exit 2
-            }
+            if (reports == 0 || actions == 0) exit 2
             for (i = 1; i <= ndead; i++) print dead[i]
             if (ndead > 0) exit 1
         }' "$1") || rc=$?
-    if [ "$rc" -ne 0 ]; then
+    case $rc in
+    0) ;;
+    1)
         echo "$dead" >&2
         echo "run_tlc.sh: vacuity gate: an action never takes a step" >&2
         exit 1
-    fi
+        ;;
+    *)
+        echo "run_tlc.sh: vacuity gate: $1 has no coverage report of" \
+            "MqvpnPathSlot's actions (awk exit $rc)" >&2
+        exit 1
+        ;;
+    esac
     echo "run_tlc.sh: vacuity gate passed: every action takes a step"
 }
 

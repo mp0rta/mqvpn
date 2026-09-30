@@ -10,8 +10,12 @@
 \* duplicated release calls) and the whole-object destroy. Every environment
 \* action is an as-is transcription of its caller in src/mqvpn_client.c,
 \* guards included, with one deliberate exception: PATH_ABANDON may succeed
-\* on the slot's xquic-ACTIVE path (see DropLike). See formal/README.md for
-\* the map and the assumptions.
+\* on the slot's xquic-ACTIVE path (see DropLike). Work the code does
+\* synchronously inside one call is split into separate steps here:
+\* add_path's activate_pending_paths (ApiAdd, then EnvActivate) and the
+\* tick's validation, retry and stable passes (EnvValidationPoll,
+\* EnvRetryFire, EnvStableConfirm). See formal/README.md for the map and
+\* the assumptions.
 \*
 \* With a single slot, the slot is always the primary path.
 
@@ -20,9 +24,9 @@ EXTENDS Naturals
 CONSTANTS
   MaxRetries,       \* PATH_RECREATE_MAX_RETRIES (6 in production, shrunk here)
   MaxIncarnations,  \* bound on add_path (slot reuse) calls
-  MaxXqcIds,        \* bound on fresh xquic path ids handed out by activation;
-                    \* not binding at the configured bounds: TypeOK fails
-                    \* once every id is used
+  MaxXqcIds,        \* the xquic path ids TypeOK allows (0..MaxXqcIds). It
+                    \* limits no action: a run that uses them all up fails
+                    \* TypeOK, which only the safety configuration checks
   ConnCloseCap,     \* bound on arbitrary connection closes (EnvConnClose)
   AbandonCap,       \* bound on spontaneous xquic abandons
   DupReleaseCap     \* bound on duplicated / late release calls
@@ -113,8 +117,9 @@ Orphan ==
 \* outcome, a fresh id on success, and a new path that starts unvalidated.
 \* xqc_conn_get_available_path_id returns the next unused id, never 0 (held
 \* by the initial path) and never an abandoned one (xqc_conn.c:5519-5542;
-\* the abandoned-id bitmap, xqc_multipath.c:109-137). TypeOK bounds
-\* nextXqcId by MaxXqcIds, so a run that needs more ids fails loudly.
+\* the abandoned-id bitmap, xqc_multipath.c:109-137). MaxXqcIds limits
+\* nothing here: a run that uses up the ids fails TypeOK, loudly but only in
+\* the safety run (the live configuration does not check TypeOK).
 Activation(ev) ==
   \E result \in Fsm!Results :
     IF result = "OK"
@@ -434,7 +439,8 @@ ApiAdd ==
 \* connection on which another path is active, the multi-slot case this
 \* one-slot model abstracts. It is the only way the slot is reused on a live
 \* connection: requiring ~xqcSideActive for success makes activation,
-\* CREATE_WAIT and DEGRADED unreachable while TLC still reports no error.
+\* CREATE_WAIT and DEGRADED unreachable while TLC still reports no error
+\* (the vacuity gate in formal/run_tlc.sh catches it).
 DropLike(ev) ==
   /\ ~destroyed
   /\ slot.state # "ClosedFree"
@@ -580,7 +586,7 @@ LiveSpec == Spec /\ Fairness
 \* Properties
 
 \* The types. nextXqcId \in 1..MaxXqcIds also checks that activation never
-\* uses up the ids, i.e. that MaxXqcIds does not bind.
+\* uses up the ids 1..MaxXqcIds.
 TypeOK ==
   /\ slot \in [state : Fsm!States, attached : BOOLEAN, live : BOOLEAN,
                released : BOOLEAN, xqcId : XqcIds, retries : 0..MaxRetries,
