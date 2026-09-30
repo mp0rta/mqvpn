@@ -25,6 +25,92 @@
 #include <stdint.h>
 #include <string.h>
 
+/* ─── The FSM's enums, as the model knows them ───
+ * A value appended to one of these enums is in neither PathSlotFsm.tla nor
+ * the table, so no row or shape would exercise it. Each switch below lists
+ * every enumerator and has no default, and -Wswitch is an error here: gcc
+ * and clang reject the unit test's compile with an error that names the new
+ * value on the line of its switch, with or without -Wall and -Werror. (CBMC
+ * does not check -Wswitch.) The existing pins on the last value of
+ * path_lifecycle_t and path_event_t (src/path_state_machine.h:93-99) catch
+ * an insertion or a reorder, not an appended value. The functions are never
+ * called. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic error "-Wswitch"
+
+/* A new event: add it to PathSlotFsm.tla (Events, Handle) and
+ * PathSlotOracle.tla's EvCtx, to oracle_event_t and oracle_dispatch below,
+ * and to gen_oracle.py (EVENTS, EVCTX). */
+static inline int
+oracle_known_event(path_event_t ev)
+{
+    switch (ev) {
+    case PATH_EVENT_ACTIVATE_REQUESTED:
+    case PATH_EVENT_RETRY_TIMER:
+    case PATH_EVENT_VALIDATION_OK:
+    case PATH_EVENT_XQUIC_REMOVED:
+    case PATH_EVENT_MANUAL_REACTIVATE:
+    case PATH_EVENT_PLATFORM_DROP:
+    case PATH_EVENT_REMOVE_API:
+    case PATH_EVENT_ADD:
+    case PATH_EVENT_CONN_RESET:
+    case PATH_EVENT_TRANSPORT_RELEASED: return 1;
+    }
+    return 0;
+}
+
+/* A new state: add it to PathSlotFsm.tla (States, Legal, Projection and the
+ * handlers), to gen_oracle.py's STATE_C, to the range check in
+ * oracle_abs_common below and to the shape loop (c) of
+ * tests/test_path_slot_oracle.c. */
+static inline int
+oracle_known_state(path_lifecycle_t s)
+{
+    switch (s) {
+    case PATH_LC_PENDING:
+    case PATH_LC_CREATE_WAIT:
+    case PATH_LC_VALIDATING:
+    case PATH_LC_ACTIVE:
+    case PATH_LC_STANDBY:
+    case PATH_LC_DEGRADED:
+    case PATH_LC_CLOSED_RECOVERABLE:
+    case PATH_LC_CLOSED_DROPPED:
+    case PATH_LC_CLOSED_FREE: return 1;
+    }
+    return 0;
+}
+
+/* A new activation result: add a context class for it (oracle_ctx_t and
+ * oracle_event_ctx below, PathSlotFsm.tla's Results, gen_oracle.py's CTX
+ * and EVCTX, and ctx_valid and havoc_unread in the CBMC harness). */
+static inline int
+oracle_known_result(activate_result_t r)
+{
+    switch (r) {
+    case ACTIVATE_OK:
+    case ACTIVATE_TRANSIENT_FAIL:
+    case ACTIVATE_PERMANENT_FAIL: return 1;
+    }
+    return 0;
+}
+
+/* A new public status: add it to PathSlotFsm.tla's Projection and to
+ * gen_oracle.py's STATUS_C. */
+static inline int
+oracle_known_status(mqvpn_path_status_t st)
+{
+    switch (st) {
+    case MQVPN_PATH_PENDING:
+    case MQVPN_PATH_ACTIVE:
+    case MQVPN_PATH_DEGRADED:
+    case MQVPN_PATH_STANDBY:
+    case MQVPN_PATH_CLOSED: return 1;
+    }
+    return 0;
+}
+
+#pragma GCC diagnostic pop
+
 /* An abstract slot, as in PathSlotFsm.tla. id: pre-state 0 = ZERO, 1 = NZ;
  * post-state 0 = ZERO, 1 = OLD (the pre-state id), 2 = NEW (the context's
  * new id). retries saturates at PATH_RECREATE_MAX_RETRIES. */
@@ -111,7 +197,7 @@ extern oracle_obs_t oracle_obs;
 #define ORACLE_T_RETRY      777ULL           /* an armed pre-state recreate_after_us */
 #define ORACLE_T_STABLE     3000000000ULL    /* an armed pre-state path_stable_since_us */
 #define ORACLE_T_ENTERED    99ULL     /* pre-state state_entered_at_us (Dom item 9) */
-#define ORACLE_T_STUB_CLOCK 424242ULL /* what the client_now_us stub returns */
+#define ORACLE_T_STUB_CLOCK 424242ULL /* the unit test's client_now_us stub clock */
 #define ORACLE_PRE_ID       7ULL      /* a nonzero pre-state xqc_path_id */
 #define ORACLE_NEW_ID       11ULL     /* the context's new xqc_path_id */
 
