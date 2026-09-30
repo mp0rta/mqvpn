@@ -9,7 +9,8 @@
  *
  * Include policy (enforced by scripts/lint/check_lifecycle_field_writes.sh):
  *   ALLOWED:    mqvpn_client.c, path_state_machine.h (which re-exports it to
- *               path_state_machine.c), tests/test_path_state_machine.c
+ *               path_state_machine.c and formal/oracle/oracle_abs.h),
+ *               tests/test_path_state_machine.c
  *   FORBIDDEN:  everything else - platform layers, binds, scheduler, public
  *               headers, other modules and tests - and #including any .c
  *               file named above as a translation unit
