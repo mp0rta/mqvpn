@@ -15,8 +15,9 @@ transport. This directory checks the slot's state machine
    compared with the C code, for every abstract input by a unit test and for
    every concrete input in a stated domain by a CBMC proof.
 
-The TLA+ transition operator is written once (`PathSlotFsm.tla`); nothing is
-translated into C by hand. Three kinds of change fail CI:
+The TLA+ transition operator is written once (`PathSlotFsm.tla`); the
+transition relation is never translated into C by hand. Three kinds of
+change fail CI:
 
 - a C change that disagrees with the model on the canonical slots fails the
   unit test, which runs with ctest in the `build`, `sanitizer`, `msan` and
@@ -112,7 +113,7 @@ Last verified (TLC 2.19, CBMC 5.95.1):
   illegal and rejected by `path_invariant_check()`; canary OK (the
   policy-constant check passes silently)
 - CBMC `harness` and `harness_null_ctx`: `VERIFICATION SUCCESSFUL`,
-  0 of 1959 properties failed in each, 42 of them `path_invariant_check()`
+  0 of 1977 properties failed in each, 42 of them `path_invariant_check()`
   assertions (about one minute, nearly all of it `harness`;
   `harness_null_ctx` takes about a second)
 
@@ -152,6 +153,10 @@ The common failures print one of these messages:
   `assert()` fired while that row was checked, in `path_on_event`'s own
   invariant check or in one of the test's `path_invariant_check()` calls;
   the row's context follows, and the test aborts.
+- `enumeration value '…' not handled in switch`, from the compiler, at a
+  line of `formal/oracle/oracle_abs.h`: one of the FSM's enums gained a
+  value the model does not know. The comment above that switch says what
+  to extend.
 - `FAIL policy: path_recreate_backoff(r) = … us, want … us`, from the unit
   test: the retry schedule changed. If that is intended, update the values
   pinned in the test.
@@ -239,6 +244,7 @@ Each row also records:
 
 - the observable calls (`path_fsm_fire_path_event`, the
   `client_notify_xqc_path_state` app-status);
+- the public status of the post-state (`status`), the model's `Projection`;
 - an **update class** per timer and counter: KEEP / ZERO / NOW / ARM
   (`now + backoff`) / INC.
 
@@ -254,6 +260,8 @@ abstract slot alone is not: deleting the stable-window re-arm leaves
 concretization (`oracle_conc`). For each row it checks:
 
 - the abstract post-state and the observable calls;
+- the public status, against the row's `status` (the model's
+  `Projection`, not the C function `path_public_status_from_lifecycle()`);
 - the update classes, hence the exact timer and counter values;
 - the state-entry stamp and the residence-warn debounce;
 - the transport ops and ctx;
@@ -262,9 +270,9 @@ concretization (`oracle_conc`). For each row it checks:
   though, the struct has three 4-byte padding holes, after
   `local_addr_len`, `flags` and `recreate_retries`, and a field placed in
   one of them must be classified by hand in `oracle_abs.h`;
-- `path_invariant_check()`, public status included, on every post-state,
-  the stable tick's too (that entry point does not check the invariant
-  itself).
+- `path_invariant_check()`, which pins the status to the C projection, on
+  every post-state, the stable tick's too (that entry point does not check
+  the invariant itself).
 
 It also:
 
@@ -274,6 +282,12 @@ It also:
 - first runs a canary that proves the invariant is compiled in: CI runs
   this test on a Release build, and the target compiles its own copy of the
   FSM with `-UNDEBUG`;
+- fails to compile when `path_event_t`, `path_lifecycle_t`,
+  `activate_result_t` or `mqvpn_path_status_t` gains a value: `oracle_abs.h`
+  lists each enum in a switch with no default and makes `-Wswitch` an error
+  there, so gcc and clang both reject the new value. The pins on the last
+  value of `path_lifecycle_t` and `path_event_t` in
+  `src/path_state_machine.h` catch only an insertion or a reorder;
 - pins the values of `path_recreate_backoff()` (5, 5, 10, 20, 40, 60 s …)
   and `PATH_STABLE_THRESHOLD_US` (30 s). The model abstracts time away, and
   the update classes check that the FSM applies these, not what they are;
@@ -288,7 +302,10 @@ field is arbitrary, including the handle, the name, every `ops` pointer and
 the ctx, so the unit test's canonical slots are among them. Both get the
 same event and context class, with independent concrete `now`, new id and
 timer values, and arbitrary values in the context fields the class does not
-use. CBMC proves that:
+use. Each run also has its own accessor clock: `client_now_us()` returns an
+arbitrary nonzero value, so the proof covers every value a handler may read
+from it (the state-entry stamp is checked against that run's value). CBMC
+proves that:
 
 - both end in the same abstract state, with the same calls and update
   classes;
@@ -316,8 +333,13 @@ concrete slot `p` in the domain:
 3. `abs(step(conc(abs(p))))` is the table's row for `abs(p)`: the unit
    test.
 
-So `abs(step(p))` is the table's row. The same holds for the calls and the
-update classes.
+So `abs(step(p))` is the table's row. The same holds for the calls, the
+update classes and the public status. For the status, CBMC carries the unit
+test's check to every slot of the domain: `path_invariant_check()` pins each
+post-state's status to the C projection of its state, and the state is part
+of the abstract slot; the unit test compares the canonical post-state's
+status with the row's `status`, the model's `Projection`. So the two
+projections agree on every state a row reaches, which is all nine.
 
 ### The verified domain (Dom items)
 
@@ -326,7 +348,9 @@ harness, `tests/test_path_slot_oracle.c`):
 
 1. `state` is a `path_lifecycle_t` value;
 2. `transport_attached`, `transport_released`, `xquic_path_live` are 0 or 1;
-3. `status` is the public projection of `state`;
+3. `status` is the C projection of `state`
+   (`path_public_status_from_lifecycle()`), which the unit test matches
+   against the model's `Projection`;
 4. `recreate_retries` is in `[0, INT_MAX)` — every value the code can reach
    short of overflowing its own increment (finding 3);
 5. the abstract state is legal (in the table's pre-states);
@@ -354,7 +378,9 @@ ADD that creates it:
   `path_state_machine.c:343`).
 
 This assumes the injectable clock (`mqvpn_config_set_clock`) never returns
-0, the same assumption as item 7. No test reaches the first-entry branch of
+0, the same assumption as item 7. The CBMC proof assumes the same of its
+accessor clock: `client_now_us()` returns an arbitrary nonzero value in
+each run. No test reaches the first-entry branch of
 `set_path_state_with_log()` (a same-state write on a slot with no recorded
 entry). `tests/test_path_state_machine.c` tests the rule's helper
 `path_is_real_transition()`, which compares public statuses, and
@@ -461,8 +487,8 @@ The Code column names the code each property is about, function first.
 
 ### Fairness: the environment assumptions
 
-The liveness results hold under these assumptions (weak fairness), and no
-others:
+The liveness results hold under these fairness assumptions (weak fairness)
+and the bounds listed under [Abstractions](#abstractions), and no others:
 
 - removal notifications and release calls, once due, are delivered; the
   platform eventually releases a dropped transport (the drop contract)
@@ -609,6 +635,36 @@ connection in one step (`EnvConnClose`); no checked property is affected
    the address is assigned and before `mqvpn_client_set_tun_active` trips
    the `client_set_state` assertion (`:511`) in a Debug build; a Release
    build makes the transition. The model follows the Release behaviour.
+6. **The tunnel-ready dispatch can mark a re-added primary ACTIVE too
+   early.** `cli_connect_ip_on_body` dispatches VALIDATION_OK to the
+   primary slot whenever it is attached and VALIDATING (`:2143-2152`); it
+   does not check that the slot's path is still the bootstrap path
+   (`xqc_path_id == 0`). A primary dropped and re-added, and activated on a
+   new xquic path, before the CONNECT-IP response can therefore be marked
+   ACTIVE while xquic is still validating that path. The re-add reuses the
+   slot when it is the first CLOSED_FREE one (`:3391-3401`); the activation
+   comes from the re-add itself or from `cb_ready_to_create_path`
+   (`:3436-3437`, `:2531-2541`). `tick_check_all_validations` polls only
+   VALIDATING slots (`:4058-4060`), so it stops watching the path, and a
+   later validation timeout removes it (`cb_path_removed`, `:2704-2720`),
+   which moves the slot to DEGRADED (CLOSED_RECOVERABLE at the retry cap).
+   In the model, freeing the primary before the response needs the abandon
+   of its xquic-ACTIVE bootstrap path to succeed, the first exception
+   above, which stands for a connection on which another path is active.
+   This is the model's only route to DEGRADED (see
+   [Abstractions](#abstractions)). Not fixed here: a check of
+   `xqc_path_id == 0` in that condition would close it.
+7. **The FSM's FROZEN mark never reaches xquic.** The FSM notifies xquic
+   from one place, `set_path_state_with_log` (`path_state_machine.c:347`).
+   In the table, only 40 rows notify, all with app_status 3 (FROZEN): an
+   ACTIVE or STANDBY slot moved to DEGRADED by XQUIC_REMOVED, and all with
+   `live = 0` in the post-state. That move happens inside
+   `apply_failure_with_retry_check`, after it clears `xquic_path_live`
+   (`path_state_machine.c:391`), and `client_notify_xqc_path_state` returns
+   early on a slot that is not live (`:460`). So the FROZEN mark is dead in
+   practice. No FSM transition produces app_status 1 or 2; the model's
+   `G15` keeps them only as the structure of `g_p15_xqc_app_status_for`.
+   Not fixed here.
 
 ## Sensitivity checks
 
