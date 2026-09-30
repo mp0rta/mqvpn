@@ -882,6 +882,15 @@ if(BUILD_TESTING)
         tests/test_path_state_machine.c
         src/path_state_machine.c
     )
+    # The FSM against the transition oracle generated from the TLA+ model
+    # (formal/oracle/). -UNDEBUG keeps path_invariant_check() live in this
+    # target's own copy of path_state_machine.c, Release builds included.
+    add_executable(test_path_slot_oracle
+        tests/test_path_slot_oracle.c
+        src/path_state_machine.c
+    )
+    target_include_directories(test_path_slot_oracle PRIVATE ${CMAKE_SOURCE_DIR}/formal/oracle)
+    target_compile_options(test_path_slot_oracle PRIVATE -UNDEBUG)
     add_executable(test_control_response_bound tests/test_control_response_bound.c)
     add_executable(test_reorder_common tests/test_reorder_common.c)
     add_executable(test_reorder_tx tests/test_reorder_tx.c src/reorder_tx.c src/log.c)
@@ -902,7 +911,7 @@ if(BUILD_TESTING)
     add_executable(test_reorder_gate tests/test_reorder_gate.c src/reorder_tx.c src/icmp.c src/log.c)
     # Re-add decision shared by the desktop path monitors (header only).
     add_executable(test_path_readd tests/test_path_readd.c)
-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_status test_path_state_machine test_path_slot_oracle test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd)
 
     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of
