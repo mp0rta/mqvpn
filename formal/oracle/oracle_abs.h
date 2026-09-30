@@ -114,6 +114,11 @@ extern oracle_obs_t oracle_obs;
 #define ORACLE_PRE_ID       7ULL      /* a nonzero pre-state xqc_path_id */
 #define ORACLE_NEW_ID       11ULL     /* the context's new xqc_path_id */
 
+/* A pre-state last_residence_warn_at_us (a debounce the client armed). Not 0,
+ * so a state change that fails to clear it is visible, and none of the stamp,
+ * now and timer values, so a stray copy of one of them is visible too. */
+#define ORACLE_T_RESIDENCE_WARN 555ULL
+
 _Static_assert(ORACLE_T_STUB_CLOCK != ORACLE_T_ENTERED,
                "state entry stamp must be distinguishable from the pre-state value");
 /* Every now: ORACLE_T_NOW and the four STABLE_TICK values oracle_conc_now
@@ -127,6 +132,18 @@ _Static_assert(
         ORACLE_T_STUB_CLOCK != ORACLE_T_STABLE + PATH_STABLE_THRESHOLD_US - 1 &&
         ORACLE_T_STUB_CLOCK != ORACLE_T_STABLE + PATH_STABLE_THRESHOLD_US,
     "state entry stamp must be distinguishable from every now and timer value");
+_Static_assert(
+    ORACLE_T_RESIDENCE_WARN != 0 && ORACLE_T_RESIDENCE_WARN != ORACLE_T_STUB_CLOCK &&
+        ORACLE_T_RESIDENCE_WARN != ORACLE_T_ENTERED &&
+        ORACLE_T_RESIDENCE_WARN != ORACLE_T_NOW &&
+        ORACLE_T_RESIDENCE_WARN != ORACLE_T_RETRY &&
+        ORACLE_T_RESIDENCE_WARN != ORACLE_T_STABLE &&
+        ORACLE_T_RESIDENCE_WARN != PATH_STABLE_THRESHOLD_US - 1 &&
+        ORACLE_T_RESIDENCE_WARN != PATH_STABLE_THRESHOLD_US &&
+        ORACLE_T_RESIDENCE_WARN != ORACLE_T_STABLE + PATH_STABLE_THRESHOLD_US - 1 &&
+        ORACLE_T_RESIDENCE_WARN != ORACLE_T_STABLE + PATH_STABLE_THRESHOLD_US,
+    "the pre-state residence-warn debounce must be distinguishable from 0 and from "
+    "every stamp, now and timer value");
 _Static_assert(ORACLE_PRE_ID != 0 && ORACLE_NEW_ID != 0 && ORACLE_PRE_ID != ORACLE_NEW_ID,
                "abstract id classes need distinct nonzero ids");
 _Static_assert(ORACLE_T_STABLE + PATH_STABLE_THRESHOLD_US < ORACLE_T_NOW,
@@ -251,6 +268,11 @@ oracle_in_dom(const path_entry_t *p)
 
 /* ─── Concretization ─── */
 
+/* The canonical concrete slot of an abstract one: the abstraction's fields
+ * take the constants above, the state entry is recorded (Dom item 9) and the
+ * residence-warn debounce is armed. The frame fields (flags, the byte
+ * counters, srtt_ms, platform_net_id, local_addr*) stay 0: a handler that
+ * reads or writes them is formal/cbmc/'s to catch, over arbitrary slots. */
 static inline void
 oracle_conc(const oracle_slot_t *a, path_entry_t *p)
 {
@@ -267,6 +289,7 @@ oracle_conc(const oracle_slot_t *a, path_entry_t *p)
     p->recreate_after_us = a->retry_armed ? ORACLE_T_RETRY : 0;
     p->path_stable_since_us = a->stable_armed ? ORACLE_T_STABLE : 0;
     p->state_entered_at_us = ORACLE_T_ENTERED;
+    p->last_residence_warn_at_us = ORACLE_T_RESIDENCE_WARN;
     if (!a->released) {
         p->ops.struct_size = sizeof(p->ops);
         p->ops.send = oracle_send_stub;
