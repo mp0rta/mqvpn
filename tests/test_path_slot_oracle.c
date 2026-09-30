@@ -517,9 +517,8 @@ main(void)
         fprintf(stderr, "test_path_slot_oracle: %d failure(s)\n", failures);
         return 1;
     }
-    // clang-format off
-    printf("test_path_slot_oracle: %d rows OK; %u of %u abstract shapes illegal and rejected; canary OK\n",
+    printf("test_path_slot_oracle: %d rows OK; %u of %u abstract shapes illegal and "
+           "rejected; canary OK\n",
            PATH_SLOT_ORACLE_N_ROWS, rejected, shapes);
-    // clang-format on
     return 0;
 }
