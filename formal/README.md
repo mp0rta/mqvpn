@@ -184,7 +184,10 @@ The common failures print one of these messages:
   see [How to run](#how-to-run).
 - `path_slot_oracle.inc is stale`, from the `Formal` workflow: the model
   changed but the table did not. Run `formal/run_tlc.sh oracle` and commit
-  the table.
+  the table. The same step prints `is not tracked` when the table is not
+  committed at all, and `left modified or untracked files in
+  formal/oracle/` when `run_tlc.sh all` changed or created another file
+  there.
 - `vacuity gate: an action never takes a step`, from `run_tlc.sh`, after
   the coverage lines of the dead actions: an action of `MqvpnPathSlot`
   became dead (its guard never holds). Find the change that made it so.

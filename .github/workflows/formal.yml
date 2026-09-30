@@ -46,9 +46,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-java@v6.0.1
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
           java-version: '21'
@@ -83,10 +85,24 @@ jobs:
           TLA2TOOLS_JAR: ${{ runner.temp }}/tla2tools.jar
         run: formal/run_tlc.sh all
 
+      # After run_tlc.sh all, formal/oracle/ must equal what is committed:
+      # the table tracked and unchanged, and no other file modified or left
+      # untracked (git diff alone does not see an untracked file).
       - name: The committed oracle is up to date
         run: |
-          if ! git diff --exit-code -- formal/oracle/path_slot_oracle.inc; then
-            echo "::error::formal/oracle/path_slot_oracle.inc is stale: run formal/run_tlc.sh oracle and commit it"
+          table=formal/oracle/path_slot_oracle.inc
+          if ! git ls-files --error-unmatch -- "$table" >/dev/null 2>&1; then
+            echo "::error::$table is not tracked: run formal/run_tlc.sh oracle and commit it"
+            exit 1
+          fi
+          changed=$(git status --porcelain -- formal/oracle/)
+          if [ -n "$changed" ]; then
+            echo "$changed"
+            if ! git diff --exit-code -- "$table"; then
+              echo "::error::$table is stale: run formal/run_tlc.sh oracle and commit it"
+            else
+              echo "::error::formal/run_tlc.sh all left modified or untracked files in formal/oracle/ (listed above): commit what the generator writes, or stop it writing them"
+            fi
             exit 1
           fi
 
