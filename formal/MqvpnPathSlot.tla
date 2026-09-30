@@ -2,615 +2,585 @@
 \* SPDX-License-Identifier: Apache-2.0
 \* Copyright (c) 2026 mp0rta and mqvpn contributors
 \*
-\* As-is model of a single mqvpn path-slot lifecycle FSM
-\* (src/path_state_machine.c, 9 states x 10 events, dispatched via
-\* path_on_event) composed with an abstract environment:
-\*   - platform (drop, fd close obligation and its delayed completion callback)
-\*   - abstract xquic (activation outcome, validation, spontaneous abandon,
-\*     delayed path-removed notification)
-\*   - API (remove_path, add_path_fd slot reuse, manual reactivate)
-\*   - connection reset
+\* One mqvpn client path slot (the FSM of PathSlotFsm.tla) inside an abstract
+\* environment: the connection lifecycle (connect, handshake, close,
+\* reconnect), an abstract xquic (activation outcome, path validation,
+\* PATH_ABANDON and the path-removed notification, idle timeouts), the
+\* platform (drop / remove, the transport release it owes, late and
+\* duplicated release calls) and the whole-object destroy. Every environment
+\* action is an as-is transcription of its caller in src/mqvpn_client.c,
+\* guards included; see formal/README.md for the map and the assumptions.
 \*
-\* The model encodes what the code does, including deliberately weak guards
-\* (e.g. the slot-reuse predicate does NOT require fd < 0), not an idealized
-\* design. Delivery guards (handle lookup, xqc_path_id lookup) are modeled
-\* as-is so that stale-callback safety is a checked theorem, not an
-\* assumption. See formal/README.md for the property <-> code map.
+\* With a single slot, the slot is always the primary path.
 
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
   MaxRetries,       \* PATH_RECREATE_MAX_RETRIES (6 in production, shrunk here)
-  MaxIncarnations,  \* bound on slot reuse count (>= 3 to exercise ABA shapes)
+  MaxIncarnations,  \* bound on add_path (slot reuse) calls
   MaxXqcIds,        \* bound on fresh xquic path ids handed out by activation
-  ConnResetCap,     \* bound on CONN_RESET occurrences (state-space control)
-  AbandonCap        \* bound on spontaneous xquic abandons
+  ConnCloseCap,     \* bound on arbitrary connection closes (EnvConnClose)
+  AbandonCap,       \* bound on spontaneous xquic abandons
+  DupReleaseCap     \* bound on duplicated / late release calls
+
+Fsm == INSTANCE PathSlotFsm
 
 NULL == 0
-
-States == {"Pending", "CreateWait", "Validating", "Active", "Standby",
-           "Degraded", "ClosedRecoverable", "ClosedDropped", "ClosedFree"}
-
-ClosedStates == {"ClosedRecoverable", "ClosedDropped", "ClosedFree"}
-
-\* path_public_status_from_lifecycle (src/path_state_machine.c:121-137)
-Projection(s) ==
-  CASE s \in {"Pending", "CreateWait", "Validating"} -> "PENDING"
-    [] s = "Active"   -> "ACTIVE"
-    [] s = "Standby"  -> "STANDBY"
-    [] s = "Degraded" -> "DEGRADED"
-    [] OTHER          -> "CLOSED"
-
-EventNames == {"NONE", "ACTIVATE", "RETRY", "VALIDATION_OK", "XQUIC_REMOVED",
-               "MANUAL_REACTIVATE", "PLATFORM_DROP", "REMOVE_API", "ADD_FD",
-               "CONN_RESET", "FD_CLOSED"}
-
-Results == {"OK", "TRANSIENT", "PERMANENT"}
 
 Incs   == 0..MaxIncarnations
 XqcIds == 0..MaxXqcIds
 
+\* mqvpn_state_t, reduced to what the slot's environment distinguishes:
+\* Idle (never connected), Connecting (xquic connection exists, handshake /
+\* tunnel setup in progress), TunnelReady (address assigned), Established
+\* (the platform activated the TUN; tick_path_recovery runs), Reconnecting
+\* (connection destroyed, retry timer armed), Closed (terminal).
+ConnStates == {"Idle", "Connecting", "TunnelReady", "Established",
+               "Reconnecting", "Closed"}
+ConnUp == {"Connecting", "TunnelReady", "Established"}
+
+TriggerNames == {"NONE", "ACTIVATE", "RETRY", "VALIDATION_OK", "XQUIC_REMOVED",
+                 "MANUAL_REACTIVATE", "PLATFORM_DROP", "REMOVE_API", "ADD",
+                 "CONN_RESET", "TRANSPORT_RELEASED", "STABLE_TICK", "BOOTSTRAP"}
+
+\* path_entry_init: what add_path starts from before dispatching ADD.
+FreshSlot == [state |-> "ClosedFree", attached |-> FALSE, live |-> FALSE,
+              released |-> TRUE, xqcId |-> NULL, retries |-> 0,
+              retryArmed |-> FALSE, stableArmed |-> FALSE]
+
 VARIABLES
-  \* --- slot fields (path_entry_t abstractions) ---
-  state,       \* path_lifecycle_t
-  attached,    \* platform_attached
-  live,        \* xquic_path_live
-  xqcId,       \* xqc_path_id (0 = unassigned / primary special case)
-  fdOwner,     \* "platform" iff p->fd >= 0 (platform-owned socket), "none" iff fd < 0
-  retries,     \* recreate_retries (saturating at MaxRetries)
-  retryArmed,  \* recreate_after_us != 0
-  stableArmed, \* path_stable_since_us != 0
-  \* --- ghost (verification only; handle == inc, p->handle is monotonic) ---
-  inc,         \* current incarnation (0 = slot never used); bumped by add_path_fd
-  lastTrigger, \* <<event, incarnation tag>> of the event that drove this step
-  \* --- environment ---
-  pendingXqcRemoval, \* set of <<id, incTag>>: abandon confirmed in xquic,
-                     \* cb_path_removed not yet delivered
-  pendingFdClose,    \* set of handles: platform close()d the fd,
-                     \* on_platform_fd_closed not yet delivered
-  fdObligations,     \* set of handles whose platform-owned fd must still be closed
-                     \* (drop-contract obligation created at drop/remove dispatch)
-  xqcSideActive,     \* abstract xquic: current path passed validation (poll source)
-  nextXqcId,         \* fresh path-id allocator (xquic never reuses abandoned ids)
-  resetCount, abandonCount
+  slot,          \* the abstract path_entry_t (PathSlotFsm record)
+  opsSet,        \* p->ops.send != NULL: a transport is installed
+  \* --- ghost ---
+  inc,           \* current incarnation = the slot's handle (0: never added)
+  lastTrigger,   \* <<event, incarnation>> of the event that drove this step
+  releaseCount,  \* ops.release() calls per incarnation
+  destroyed,     \* mqvpn_client_destroy() ran
+  \* --- connection ---
+  conn,          \* see ConnStates
+  mpReady,       \* c->multipath_ready
+  mp,            \* a negotiated multipath connection (fixed at Init)
+  mpCredit,      \* the peer grants path-id credit (fixed at Init; meaningful
+                 \* only with mp)
+  closeCount,    \* EnvConnClose occurrences (bounded)
+  \* --- abstract xquic ---
+  xqcSideActive, \* the slot's xquic path is ACTIVE on the xquic side
+  pendingXqcRemoval, \* <<id, incarnation>>: path closed in xquic, removal
+                     \* notification not yet delivered
+  nextXqcId,     \* fresh-id allocator (xquic never reuses a path id)
+  abandonCount,  \* spontaneous abandons (bounded)
+  \* --- platform ---
+  releaseObligations, \* handles whose release the platform still owes
+  pendingRelease,     \* release calls made, not yet processed
+  dupCount            \* duplicated / late release calls (bounded)
 
-vars == <<state, attached, live, xqcId, fdOwner, retries, retryArmed,
-          stableArmed, inc, lastTrigger, pendingXqcRemoval, pendingFdClose,
-          fdObligations, xqcSideActive, nextXqcId, resetCount, abandonCount>>
-
-slotVars == <<state, attached, live, xqcId, fdOwner, retries, retryArmed,
-              stableArmed>>
-
-envVars == <<pendingXqcRemoval, pendingFdClose, fdObligations, xqcSideActive,
-             nextXqcId, resetCount, abandonCount>>
+vars == <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed, conn,
+          mpReady, mp, mpCredit, closeCount, xqcSideActive, pendingXqcRemoval,
+          nextXqcId, abandonCount, releaseObligations, pendingRelease,
+          dupCount>>
 
 --------------------------------------------------------------------------------
-\* FSM internals (transliteration of src/path_state_machine.c; the table in
-\* the design doc is normative; guards mirror the code exactly)
+\* Helpers
 
-\* apply_failure_with_retry_check (path_state_machine.c:380-397).
-\* Increments retries first, then checks with >= (NOT >): with production
-\* MaxRetries=6 the 6th consecutive failure lands in CLOSED_RECOVERABLE.
-ApplyFailure(target) ==
-  /\ live'        = FALSE
-  /\ xqcId'       = NULL
-  /\ stableArmed' = FALSE
-  /\ retries'     = IF retries < MaxRetries THEN retries + 1 ELSE retries
-  /\ IF retries + 1 >= MaxRetries
-     THEN /\ retryArmed' = FALSE
-          /\ state'      = "ClosedRecoverable"
-     ELSE /\ retryArmed' = TRUE
-          /\ state'      = target
-  /\ UNCHANGED <<attached, fdOwner>>
+NoCtx == [result |-> "-", newId |-> NULL, target |-> "-", reached |-> FALSE]
 
-\* maybe_transition_dropped_to_free (path_state_machine.c:691-700), specialized
-\* per caller: each caller evaluates the gate after its own field update, so
-\* the gate condition below is expressed over the post-update values.
+\* Dispatch ev on the slot, stamping the trigger with the current incarnation.
+Fire(ev, ctx) ==
+  /\ slot' = Fsm!Step(slot, ev, ctx).slot
+  /\ lastTrigger' = <<ev, inc>>
 
-\* path_on_activate_requested (path_state_machine.c:452-481)
-OnActivateRequested(result, newId) ==
-  IF state = "Pending"
-  THEN CASE result = "OK" ->
-              /\ xqcId'      = newId
-              /\ live'       = TRUE
-              /\ retryArmed' = FALSE
-              /\ state'      = "Validating"
-              /\ UNCHANGED <<attached, fdOwner, retries, stableArmed>>
-         [] result = "TRANSIENT" -> ApplyFailure("CreateWait")
-         [] OTHER ->  \* PERMANENT: retries untouched, stable timer cleared
-              /\ live'        = FALSE
-              /\ xqcId'       = NULL
-              /\ stableArmed' = FALSE
-              /\ retryArmed'  = FALSE
-              /\ state'       = "ClosedRecoverable"
-              /\ UNCHANGED <<attached, fdOwner, retries>>
-  ELSE UNCHANGED slotVars  \* WARN no-op
+\* The primary bootstrap in cli_start_connection (mqvpn_client.c:2896-2902):
+\* direct writes, no public event. xquic creates the initial path ACTIVE
+\* (xqc_path_init, xqc_multipath.c:351-353).
+Bootstrapped(s) == [s EXCEPT !.xqcId = 0, !.live = TRUE, !.state = "Validating"]
 
-\* path_on_retry_timer (path_state_machine.c:483-515); retry target is the
-\* current state (self-loop on TRANSIENT below the retry cap)
-OnRetryTimer(result, newId) ==
-  IF state \in {"CreateWait", "Degraded"}
-  THEN CASE result = "OK" ->
-              /\ xqcId'      = newId
-              /\ live'       = TRUE
-              /\ retryArmed' = FALSE
-              /\ state'      = "Validating"
-              /\ UNCHANGED <<attached, fdOwner, retries, stableArmed>>
-         [] result = "TRANSIENT" -> ApplyFailure(state)
-         [] OTHER ->  \* PERMANENT: retries untouched, stable timer cleared
-              /\ live'        = FALSE
-              /\ xqcId'       = NULL
-              /\ stableArmed' = FALSE
-              /\ retryArmed'  = FALSE
-              /\ state'       = "ClosedRecoverable"
-              /\ UNCHANGED <<attached, fdOwner, retries>>
-  ELSE UNCHANGED slotVars  \* WARN no-op
+\* A dropped slot whose xquic path is still alive and not being removed.
+Orphan ==
+  /\ slot.state = "ClosedDropped"
+  /\ slot.live
+  /\ <<slot.xqcId, inc>> \notin pendingXqcRemoval
+  /\ conn \in ConnUp
 
-\* path_on_validation_ok (path_state_machine.c:517-531)
-OnValidationOk(target) ==
-  IF state = "Validating"
-  THEN /\ stableArmed' = TRUE
-       /\ state'       = target
-       /\ UNCHANGED <<attached, live, xqcId, fdOwner, retries, retryArmed>>
-  ELSE UNCHANGED slotVars  \* LOG_D no-op (late async after remove)
-
-\* path_on_xquic_removed (path_state_machine.c:533-560)
-OnXquicRemoved ==
-  CASE state = "Validating" -> ApplyFailure("CreateWait")
-    [] state \in {"Active", "Standby"} -> ApplyFailure("Degraded")
-    [] state = "ClosedDropped" ->
-         \* lazy cleanup re-evaluation branch + free gate
-         /\ live'  = FALSE
-         /\ xqcId' = NULL
-         /\ state' = IF fdOwner = "none" THEN "ClosedFree" ELSE "ClosedDropped"
-         /\ UNCHANGED <<attached, fdOwner, retries, retryArmed, stableArmed>>
-    [] OTHER -> UNCHANGED slotVars  \* WARN no-op
-
-\* path_on_manual_reactivate (path_state_machine.c:562-607).
-\* On failure: no state change, retries NOT incremented, recreate_after_us
-\* deliberately left intact.
-OnManualReactivate(result, newId) ==
-  IF state \in {"ClosedRecoverable", "CreateWait", "Degraded"}
-  THEN IF result = "OK"
-       THEN /\ xqcId'      = newId
-            /\ live'       = TRUE
-            /\ retryArmed' = FALSE
-            /\ state'      = "Validating"
-            /\ UNCHANGED <<attached, fdOwner, retries, stableArmed>>
-       ELSE UNCHANGED slotVars
-  ELSE UNCHANGED slotVars  \* WARN no-op (API-gate bug if reached)
-
-\* path_on_platform_drop (path_state_machine.c:609-623) and
-\* path_on_remove_api (path_state_machine.c:625-638): same field effects,
-\* different reason code. fd / xquic fields left intact (lazy).
-OnDropLike ==
-  IF state \in {"ClosedDropped", "ClosedFree"}
-  THEN UNCHANGED slotVars  \* idempotent
-  ELSE /\ attached'    = FALSE
-       /\ retryArmed'  = FALSE
-       /\ stableArmed' = FALSE
-       /\ state'       = "ClosedDropped"
-       /\ UNCHANGED <<live, xqcId, fdOwner, retries>>
-
-\* path_on_conn_reset (path_state_machine.c:654-670): unconditional clear,
-\* retries reset to 0; attached slots restart in PENDING, detached slots
-\* re-evaluate the free gate.
-OnConnReset ==
-  /\ live'        = FALSE
-  /\ xqcId'       = NULL
-  /\ retryArmed'  = FALSE
-  /\ retries'     = 0
-  /\ stableArmed' = FALSE
-  /\ state' = IF attached
-              THEN "Pending"
-              ELSE IF state = "ClosedDropped" /\ fdOwner = "none"
-                   THEN "ClosedFree"
-                   ELSE state
-  /\ UNCHANGED <<attached, fdOwner>>
-
-\* path_on_fd_closed (path_state_machine.c:672-689) + free gate evaluated
-\* after fd is cleared
-OnFdClosed ==
-  IF state = "ClosedDropped"
-  THEN /\ fdOwner' = "none"
-       /\ state'   = IF live = FALSE /\ xqcId = NULL
-                     THEN "ClosedFree" ELSE "ClosedDropped"
-       /\ UNCHANGED <<attached, live, xqcId, retries, retryArmed, stableArmed>>
-  ELSE UNCHANGED slotVars  \* LOG_D no-op (stale handle never reaches here;
-                           \* this branch exists for in-incarnation ordering)
-
---------------------------------------------------------------------------------
-\* Environment actions. Each action that dispatches an FSM event also stamps
-\* lastTrigger with <<event, incarnation tag>>; pure environment steps leave
-\* lastTrigger unchanged.
-
-\* Fresh-id selection for successful activations. Faithful to the code:
-\* xqc_conn_create_path allocates via xqc_conn_get_available_path_id
-\* (third_party/xquic/src/transport/xqc_conn.c:5444-5467), which returns the
-\* next UNUSED path id - id 0 is held by the initial path and abandoned ids
-\* are marked ABANDONED (abandoned_path_ids bitmap, xqc_multipath.c:109-137,
-\* 219-223), so the activate path can never yield 0 or a recycled id.
-\* An earlier model revision also offered id 0 here to explore the
-\* primary-slot special case; TLC immediately produced an id-0 ABA
-\* counterexample that is unreachable in the implementation (see
-\* formal/README.md, counterexample log #1). The primary slot's id-0
-\* lifecycle is bound at handshake, not via activation, and is deferred to
-\* the composed-model phase.
+\* Fresh id for a successful activation: xqc_conn_get_available_path_id
+\* returns the next unused id, never 0 (held by the initial path) and never
+\* an abandoned one (xqc_conn.c:5519-5542; the abandoned-id bitmap,
+\* xqc_multipath.c:109-137).
 OkIdChoices == IF nextXqcId <= MaxXqcIds THEN {nextXqcId} ELSE {}
 
-BumpAllocator(newId) ==
-  nextXqcId' = IF newId = nextXqcId THEN nextXqcId + 1 ELSE nextXqcId
+\* The three activation entry points share this shape: a nondeterministic
+\* outcome, a fresh id on success, and a new path that starts unvalidated.
+Activation(ev) ==
+  \E result \in Fsm!Results :
+    IF result = "OK"
+    THEN \E id \in OkIdChoices :
+           /\ Fire(ev, [NoCtx EXCEPT !.result = "OK", !.newId = id])
+           /\ nextXqcId' = nextXqcId + 1
+           /\ xqcSideActive' = FALSE
+    ELSE /\ Fire(ev, [NoCtx EXCEPT !.result = result])
+         /\ UNCHANGED <<nextXqcId, xqcSideActive>>
 
-\* activate_pending_paths -> ACTIVATE_REQUESTED (mqvpn_client.c, via
-\* cb_ready_to_create_path / activate_via_xquic_classify)
+\* The connection is gone: xquic destroys its paths without notifying
+\* (xqc_conn_destroy_paths_list), so in-flight removals are dropped.
+\* cb_h3_conn_close (mqvpn_client.c:1426-1452) leaves the slot as it is and
+\* goes to RECONNECTING, or to CLOSED when reconnect is off or shutting down.
+ConnDown ==
+  /\ conn' \in {"Reconnecting", "Closed"}
+  /\ pendingXqcRemoval' = {}
+  /\ xqcSideActive' = FALSE
+
+--------------------------------------------------------------------------------
+\* Connection
+
+\* mqvpn_client_connect from IDLE: no slot reset; cli_start_connection
+\* refuses a primary that is not attached (mqvpn_client.c:2811-2818), which
+\* leaves the client IDLE (a stutter, omitted).
+ApiConnect ==
+  /\ conn = "Idle"
+  /\ slot.attached
+  /\ slot' = Bootstrapped(slot)
+  /\ lastTrigger' = <<"BOOTSTRAP", inc>>
+  /\ conn' = "Connecting"
+  /\ xqcSideActive' = TRUE
+  /\ UNCHANGED <<opsSet, inc, releaseCount, destroyed, mpReady, mp, mpCredit, closeCount,
+                 pendingXqcRemoval, nextXqcId, abandonCount,
+                 releaseObligations, pendingRelease, dupCount>>
+
+\* cb_ready_to_create_path: xquic signals multipath readiness after the
+\* handshake, only on a multipath connection and only once a path id is
+\* available, i.e. the peer granted path-id credit (xqc_engine.c:785-800,
+\* xqc_conn_get_available_path_id, xqc_conn.c:5519-5542). It can precede the
+\* tunnel address and ESTABLISHED. Runs where the peer never grants credit
+\* (mpCredit = FALSE) are explored too: the client then never becomes ready.
+EnvMpReady ==
+  /\ conn \in ConnUp
+  /\ mp
+  /\ mpCredit
+  /\ ~mpReady
+  /\ mpReady' = TRUE
+  /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed, conn,
+                 mp, mpCredit, closeCount, xqcSideActive, pendingXqcRemoval, nextXqcId,
+                 abandonCount, releaseObligations, pendingRelease, dupCount>>
+
+\* Address assigned -> TUNNEL_READY; the primary, if still VALIDATING and
+\* attached, is validated by the handshake (mqvpn_client.c:2143-2152).
+EnvTunnelReady ==
+  /\ conn = "Connecting"
+  /\ conn' = "TunnelReady"
+  /\ IF slot.state = "Validating" /\ slot.attached
+     THEN Fire("VALIDATION_OK", [NoCtx EXCEPT !.target = "Active"])
+     ELSE UNCHANGED <<slot, lastTrigger>>
+  /\ UNCHANGED <<opsSet, inc, releaseCount, destroyed, mpReady, mp, mpCredit, closeCount,
+                 xqcSideActive, pendingXqcRemoval, nextXqcId, abandonCount,
+                 releaseObligations, pendingRelease, dupCount>>
+
+\* mqvpn_client_set_tun_active: TUNNEL_READY -> ESTABLISHED.
+EnvEstablish ==
+  /\ conn = "TunnelReady"
+  /\ conn' = "Established"
+  /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed,
+                 mpReady, mp, mpCredit, closeCount, xqcSideActive, pendingXqcRemoval,
+                 nextXqcId, abandonCount, releaseObligations, pendingRelease,
+                 dupCount>>
+
+\* Any connection close: peer, network, handshake failure, disconnect().
+EnvConnClose ==
+  /\ conn \in ConnUp
+  /\ closeCount < ConnCloseCap
+  /\ closeCount' = closeCount + 1
+  /\ ConnDown
+  /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed,
+                 mpReady, mp, mpCredit, nextXqcId, abandonCount, releaseObligations,
+                 pendingRelease, dupCount>>
+
+\* tick_reconnect, or mqvpn_client_connect from RECONNECTING (both reset the
+\* slots, then start: mqvpn_client.c:3202-3233, 4108-4140). The reset runs
+\* whether or not the start succeeds; the start fails when the primary is not
+\* attached, and may fail anyway (xqc_h3_connect), which re-arms the timer.
+EnvReconnect ==
+  /\ conn = "Reconnecting"
+  /\ LET reset == Fsm!Step(slot, "CONN_RESET", NoCtx).slot IN
+       \/ /\ reset.attached
+          /\ slot' = Bootstrapped(reset)
+          /\ conn' = "Connecting"
+          /\ xqcSideActive' = TRUE
+       \/ /\ slot' = reset
+          /\ UNCHANGED <<conn, xqcSideActive>>
+  /\ lastTrigger' = <<"CONN_RESET", inc>>
+  /\ mpReady' = FALSE
+  /\ UNCHANGED <<opsSet, inc, releaseCount, destroyed, mp, mpCredit, closeCount,
+                 pendingXqcRemoval, nextXqcId, abandonCount,
+                 releaseObligations, pendingRelease, dupCount>>
+
+\* disconnect() while RECONNECTING cancels the retry.
+ApiDisconnectWhileReconnecting ==
+  /\ conn = "Reconnecting"
+  /\ conn' = "Closed"
+  /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed,
+                 mpReady, mp, mpCredit, closeCount, xqcSideActive, pendingXqcRemoval,
+                 nextXqcId, abandonCount, releaseObligations, pendingRelease,
+                 dupCount>>
+
+--------------------------------------------------------------------------------
+\* Activation, retry, validation, stability (the client's own triggers)
+
+\* activate_pending_paths: from cb_ready_to_create_path and from add_path
+\* once multipath is ready on a live connection. PENDING only.
 EnvActivate ==
-  /\ inc >= 1
-  /\ state = "Pending"
-  /\ \E result \in Results :
-       IF result = "OK"
-       THEN \E newId \in OkIdChoices :
-              /\ OnActivateRequested("OK", newId)
-              /\ BumpAllocator(newId)
-              /\ xqcSideActive' = FALSE  \* new path starts unvalidated
-              /\ lastTrigger' = <<"ACTIVATE", inc>>
-              /\ UNCHANGED <<inc, pendingXqcRemoval, pendingFdClose,
-                             fdObligations, resetCount, abandonCount>>
-       ELSE /\ OnActivateRequested(result, NULL)
-            /\ lastTrigger' = <<"ACTIVATE", inc>>
-            /\ UNCHANGED <<inc, pendingXqcRemoval, pendingFdClose,
-                           fdObligations, xqcSideActive, nextXqcId,
-                           resetCount, abandonCount>>
+  /\ conn \in ConnUp
+  /\ mpReady
+  /\ slot.state = "Pending"
+  /\ Activation("ACTIVATE")
+  /\ UNCHANGED <<opsSet, inc, releaseCount, destroyed, conn, mpReady, mp, mpCredit,
+                 closeCount, pendingXqcRemoval, abandonCount,
+                 releaseObligations, pendingRelease, dupCount>>
 
-\* tick_drive_retry_timer -> RETRY_TIMER (mqvpn_client.c:3249-3273); the
-\* timer can only fire while armed, in the states the dispatcher checks
+\* tick_path_recovery runs only when multipath is ready and ESTABLISHED
+\* (mqvpn_client.c:4091-4103).
+Ticking == conn = "Established" /\ mpReady
+
+\* tick_drive_retry_timer (mqvpn_client.c:4002-4020)
 EnvRetryFire ==
-  /\ inc >= 1
-  /\ retryArmed
-  /\ state \in {"CreateWait", "Degraded"}
-  /\ \E result \in Results :
-       IF result = "OK"
-       THEN \E newId \in OkIdChoices :
-              /\ OnRetryTimer("OK", newId)
-              /\ BumpAllocator(newId)
-              /\ xqcSideActive' = FALSE
-              /\ lastTrigger' = <<"RETRY", inc>>
-              /\ UNCHANGED <<inc, pendingXqcRemoval, pendingFdClose,
-                             fdObligations, resetCount, abandonCount>>
-       ELSE /\ OnRetryTimer(result, NULL)
-            /\ lastTrigger' = <<"RETRY", inc>>
-            /\ UNCHANGED <<inc, pendingXqcRemoval, pendingFdClose,
-                           fdObligations, xqcSideActive, nextXqcId,
-                           resetCount, abandonCount>>
+  /\ Ticking
+  /\ slot.state \in {"CreateWait", "Degraded"}
+  /\ slot.retryArmed
+  /\ Activation("RETRY")
+  /\ UNCHANGED <<opsSet, inc, releaseCount, destroyed, conn, mpReady, mp, mpCredit,
+                 closeCount, pendingXqcRemoval, abandonCount,
+                 releaseObligations, pendingRelease, dupCount>>
 
-\* mqvpn_client_manual_reactivate path -> MANUAL_REACTIVATE
+\* tick_check_all_validations polls xquic (mqvpn_client.c:4039-4083); the
+\* target is ACTIVE or STANDBY per the scheduler.
+EnvValidationPoll ==
+  /\ Ticking
+  /\ slot.state = "Validating"
+  /\ xqcSideActive
+  /\ \E t \in {"Active", "Standby"} :
+       Fire("VALIDATION_OK", [NoCtx EXCEPT !.target = t])
+  /\ UNCHANGED <<opsSet, inc, releaseCount, destroyed, conn, mpReady, mp, mpCredit,
+                 closeCount, xqcSideActive, pendingXqcRemoval, nextXqcId,
+                 abandonCount, releaseObligations, pendingRelease, dupCount>>
+
+\* path_fsm_tick_confirm_stable once the 30 s window has elapsed.
+EnvStableConfirm ==
+  /\ Ticking
+  /\ slot.state \in {"Active", "Standby"}
+  /\ slot.stableArmed
+  /\ slot.live
+  /\ Fire("STABLE_TICK", [NoCtx EXCEPT !.reached = TRUE])
+  /\ UNCHANGED <<opsSet, inc, releaseCount, destroyed, conn, mpReady, mp, mpCredit,
+                 closeCount, xqcSideActive, pendingXqcRemoval, nextXqcId,
+                 abandonCount, releaseObligations, pendingRelease, dupCount>>
+
+\* mqvpn_client_reactivate_path: ESTABLISHED + multipath ready, then
+\* reactivate_slot_eligible (mqvpn_client.c:3549-3594).
 ApiManualReactivate ==
   /\ inc >= 1
-  /\ state \in {"ClosedRecoverable", "CreateWait", "Degraded"}
-  /\ \E result \in Results :
-       IF result = "OK"
-       THEN \E newId \in OkIdChoices :
-              /\ OnManualReactivate("OK", newId)
-              /\ BumpAllocator(newId)
-              /\ xqcSideActive' = FALSE
-              /\ lastTrigger' = <<"MANUAL_REACTIVATE", inc>>
-              /\ UNCHANGED <<inc, pendingXqcRemoval, pendingFdClose,
-                             fdObligations, resetCount, abandonCount>>
-       ELSE /\ OnManualReactivate(result, NULL)
-            /\ lastTrigger' = <<"MANUAL_REACTIVATE", inc>>
-            /\ UNCHANGED <<inc, pendingXqcRemoval, pendingFdClose,
-                           fdObligations, xqcSideActive, nextXqcId,
-                           resetCount, abandonCount>>
+  /\ Ticking
+  /\ ~slot.live
+  /\ slot.attached
+  /\ slot.state \in {"ClosedRecoverable", "CreateWait", "Degraded"}
+  /\ Activation("MANUAL_REACTIVATE")
+  /\ UNCHANGED <<opsSet, inc, releaseCount, destroyed, conn, mpReady, mp, mpCredit,
+                 closeCount, pendingXqcRemoval, abandonCount,
+                 releaseObligations, pendingRelease, dupCount>>
 
-\* Abstract xquic internal step: PATH_RESPONSE received, path becomes ACTIVE
-\* on the xquic side. Blocked once an abandon for the current path is in
-\* flight (a CLOSING path cannot validate).
+--------------------------------------------------------------------------------
+\* Abstract xquic
+
+\* The slot's path passes validation on the xquic side (PATH_RESPONSE).
 EnvXqcValidate ==
-  /\ inc >= 1
-  /\ live
+  /\ conn \in ConnUp
+  /\ slot.live
   /\ ~xqcSideActive
-  /\ <<xqcId, inc>> \notin pendingXqcRemoval
+  /\ <<slot.xqcId, inc>> \notin pendingXqcRemoval
   /\ xqcSideActive' = TRUE
-  /\ UNCHANGED <<state, attached, live, xqcId, fdOwner, retries, retryArmed,
-                 stableArmed, inc, lastTrigger, pendingXqcRemoval,
-                 pendingFdClose, fdObligations, nextXqcId, resetCount,
-                 abandonCount>>
+  /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed, conn,
+                 mpReady, mp, mpCredit, closeCount, pendingXqcRemoval, nextXqcId,
+                 abandonCount, releaseObligations, pendingRelease, dupCount>>
 
-\* tick_check_all_validations -> VALIDATION_OK (mqvpn_client.c:3286-3332).
-\* Dispatch-side guard state==VALIDATING (:3297,:3309) is modeled in addition
-\* to the FSM handler guard, matching the implementation's double check.
-\* Poll delay is the nondeterministic scheduling of this action.
-EnvValidationPoll ==
-  /\ inc >= 1
-  /\ state = "Validating"
-  /\ xqcSideActive
-  /\ \E target \in {"Active", "Standby"} :
-       /\ OnValidationOk(target)
-       /\ lastTrigger' = <<"VALIDATION_OK", inc>>
-  /\ UNCHANGED <<inc, pendingXqcRemoval, pendingFdClose, fdObligations,
-                 xqcSideActive, nextXqcId, resetCount, abandonCount>>
-
-\* xquic-originated abandon without any local close_path: validation timeout
-\* (xqc_path_validation_on_retx -> xqc_path_request_abandon,
-\* third_party/xquic/src/transport/xqc_multipath.c:460-484), idle timeout,
-\* etc. mqvpn learns about it only via the later cb_path_removed delivery.
+\* xquic abandons a path on its own when its validation times out
+\* (xqc_path_validation_on_retx, xqc_multipath.c:460-484): multipath only,
+\* and only a path that is not xquic-ACTIVE. With one slot an xquic-ACTIVE
+\* path is the only active path, which the path idle timeout never closes
+\* (xqc_timer.c:137-161); an orphan's idle routes are EnvPathIdleReap and
+\* EnvConnIdleTimeout. Bounded and not fair.
 EnvXqcSpontaneousAbandon ==
-  /\ inc >= 1
-  /\ live
+  /\ conn \in ConnUp
+  /\ mp
+  /\ ~xqcSideActive
+  /\ slot.live
   /\ abandonCount < AbandonCap
-  /\ <<xqcId, inc>> \notin pendingXqcRemoval
-  /\ pendingXqcRemoval' = pendingXqcRemoval \cup {<<xqcId, inc>>}
+  /\ <<slot.xqcId, inc>> \notin pendingXqcRemoval
+  /\ pendingXqcRemoval' = pendingXqcRemoval \cup {<<slot.xqcId, inc>>}
   /\ xqcSideActive' = FALSE
   /\ abandonCount' = abandonCount + 1
-  /\ UNCHANGED <<state, attached, live, xqcId, fdOwner, retries, retryArmed,
-                 stableArmed, inc, lastTrigger, pendingFdClose, fdObligations,
-                 nextXqcId, resetCount>>
+  /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed, conn,
+                 mpReady, mp, mpCredit, closeCount, nextXqcId, releaseObligations,
+                 pendingRelease, dupCount>>
 
-\* cb_path_removed -> find_path_by_xqc_id -> XQUIC_REMOVED
-\* (mqvpn_client.c:2184-2202). Delivery guard is as-is: the slot is found
-\* only if it is xquic-live with a matching id; otherwise the notification
-\* is silently discarded (:2191-2195). The incarnation tag rides along as
-\* ghost data only - the real lookup cannot see it.
+\* cb_path_removed -> find_path_by_xqc_id -> XQUIC_REMOVED (mqvpn_client.c:
+\* 561-569, 2704-2721). The lookup matches a live slot with the same id only;
+\* the incarnation rides along as ghost data the real lookup cannot see.
 DeliverRemoval ==
-  \E e \in pendingXqcRemoval :
-    /\ pendingXqcRemoval' = pendingXqcRemoval \ {e}
-    /\ IF live /\ xqcId = e[1]
-       THEN /\ OnXquicRemoved
-            /\ lastTrigger' = <<"XQUIC_REMOVED", e[2]>>
-       ELSE /\ UNCHANGED slotVars
-            /\ UNCHANGED lastTrigger
-    /\ UNCHANGED <<inc, pendingFdClose, fdObligations, xqcSideActive,
-                   nextXqcId, resetCount, abandonCount>>
+  /\ conn \in ConnUp
+  /\ \E e \in pendingXqcRemoval :
+       /\ pendingXqcRemoval' = pendingXqcRemoval \ {e}
+       /\ IF slot.live /\ slot.xqcId = e[1]
+          THEN /\ slot' = Fsm!Step(slot, "XQUIC_REMOVED", NoCtx).slot
+               /\ lastTrigger' = <<"XQUIC_REMOVED", e[2]>>
+          ELSE UNCHANGED <<slot, lastTrigger>>
+  /\ UNCHANGED <<opsSet, inc, releaseCount, destroyed, conn, mpReady, mp, mpCredit,
+                 closeCount, xqcSideActive, nextXqcId, abandonCount,
+                 releaseObligations, pendingRelease, dupCount>>
 
-\* mqvpn_client_on_platform_path_dropped (mqvpn_client.c:2726-2753):
-\* issues a non-blocking close_path while the slot is still xquic-live
-\* (queues the eventual removal notification), then dispatches PLATFORM_DROP.
-\* The platform now owes a close() of the slot's fd (drop contract).
-ApiDrop ==
-  /\ inc >= 1
-  /\ state /= "ClosedFree"
-  /\ pendingXqcRemoval' = IF live
-                          THEN pendingXqcRemoval \cup {<<xqcId, inc>>}
-                          ELSE pendingXqcRemoval
-  /\ fdObligations' = IF fdOwner = "platform"
-                      THEN fdObligations \cup {inc}
-                      ELSE fdObligations
-  /\ OnDropLike
-  /\ xqcSideActive' = FALSE
-  /\ lastTrigger' = <<"PLATFORM_DROP", inc>>
-  /\ UNCHANGED <<inc, pendingFdClose, nextXqcId, resetCount, abandonCount>>
+\* The two recovery routes of an orphan (a dropped slot whose PATH_ABANDON
+\* failed or was never sent), exactly as xqc_timer_path_idle_timeout
+\* (xqc_timer.c:137-161) splits them. With one slot, an xquic-ACTIVE path
+\* is the only active path, which the path idle timeout never closes, and
+\* neither does it without multipath: then the connection idles out.
+EnvPathIdleReap ==
+  /\ Orphan
+  /\ mp
+  /\ ~xqcSideActive
+  /\ pendingXqcRemoval' = pendingXqcRemoval \cup {<<slot.xqcId, inc>>}
+  /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed, conn,
+                 mpReady, mp, mpCredit, closeCount, xqcSideActive, nextXqcId,
+                 abandonCount, releaseObligations, pendingRelease, dupCount>>
 
-\* mqvpn_client_remove_path (mqvpn_client.c:2694-2724): same close-then-
-\* dispatch shape with an orderly reason code; returns early on CLOSED_FREE.
-ApiRemove ==
-  /\ inc >= 1
-  /\ state /= "ClosedFree"
-  /\ pendingXqcRemoval' = IF live
-                          THEN pendingXqcRemoval \cup {<<xqcId, inc>>}
-                          ELSE pendingXqcRemoval
-  /\ fdObligations' = IF fdOwner = "platform"
-                      THEN fdObligations \cup {inc}
-                      ELSE fdObligations
-  /\ OnDropLike
-  /\ xqcSideActive' = FALSE
-  /\ lastTrigger' = <<"REMOVE_API", inc>>
-  /\ UNCHANGED <<inc, pendingFdClose, nextXqcId, resetCount, abandonCount>>
+\* Not counted against ConnCloseCap: an orphan exists at most once per
+\* incarnation (after the close, a reset clears live or the client stays
+\* Closed), so this is bounded by MaxIncarnations.
+EnvConnIdleTimeout ==
+  /\ Orphan
+  /\ ~mp \/ xqcSideActive
+  /\ ConnDown
+  /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed,
+                 mpReady, mp, mpCredit, closeCount, nextXqcId, abandonCount,
+                 releaseObligations, pendingRelease, dupCount>>
 
-\* Platform closes an owed fd (drop contract step 3). Two-phase with
-\* delivery: close() happens here, the FD_CLOSED callback lands later.
-PlatformFdClose ==
-  \E h \in fdObligations :
-    /\ fdObligations' = fdObligations \ {h}
-    /\ pendingFdClose' = pendingFdClose \cup {h}
-    /\ UNCHANGED <<state, attached, live, xqcId, fdOwner, retries, retryArmed,
-                   stableArmed, inc, lastTrigger, pendingXqcRemoval,
-                   xqcSideActive, nextXqcId, resetCount, abandonCount>>
+--------------------------------------------------------------------------------
+\* Platform and API
 
-\* mqvpn_client_on_platform_fd_closed (mqvpn_client.c:2755-2766):
-\* find_path_by_handle succeeds only for the current handle - handles are
-\* monotonic and never reused, so a stale handle is rejected with
-\* MQVPN_ERR_INVALID_ARG and nothing is dispatched.
-DeliverFdClose ==
-  \E h \in pendingFdClose :
-    /\ pendingFdClose' = pendingFdClose \ {h}
-    /\ IF h = inc
-       THEN /\ OnFdClosed
-            /\ lastTrigger' = <<"FD_CLOSED", h>>
-       ELSE /\ UNCHANGED slotVars
-            /\ UNCHANGED lastTrigger
-    /\ UNCHANGED <<inc, pendingXqcRemoval, fdObligations, xqcSideActive,
-                   nextXqcId, resetCount, abandonCount>>
-
-\* mqvpn_client_add_path_fd_with_outcome (mqvpn_client.c:2616-2691), one
-\* atomic API call: weak reuse scan (public status CLOSED, not attached, not
-\* xquic-live - fd < 0 deliberately NOT required), path_entry_init (forced
-\* reset), fresh handle assignment (p->handle = c->next_path_handle++,
-\* :2651), new platform-owned fd, then the ADD_FD event lands in PENDING.
-\* Also covers the fresh-append case (initial inc = 0 slot).
-ApiAddFd ==
+\* mqvpn_client_add_path (mqvpn_client.c:3362-3441): reuses only a
+\* CLOSED_FREE slot (MQVPN_MAX_PATHS aside, a single-slot model has nowhere
+\* to append), path_entry_init, a fresh handle, the transport installed,
+\* then ADD. Covers the never-used slot too (inc = 0, FreshSlot).
+ApiAdd ==
   /\ inc < MaxIncarnations
-  /\ Projection(state) = "CLOSED"
-  /\ ~attached
-  /\ ~live
-  /\ state'       = "Pending"
-  /\ attached'    = TRUE
-  /\ live'        = FALSE
-  /\ xqcId'       = NULL
-  /\ fdOwner'     = "platform"
-  /\ retries'     = 0
-  /\ retryArmed'  = FALSE
-  /\ stableArmed' = FALSE
-  /\ inc'         = inc + 1
-  /\ lastTrigger' = <<"ADD_FD", inc + 1>>
-  /\ UNCHANGED <<pendingXqcRemoval, pendingFdClose, fdObligations,
-                 xqcSideActive, nextXqcId, resetCount, abandonCount>>
+  /\ slot.state = "ClosedFree"
+  /\ slot' = Fsm!Step(FreshSlot, "ADD", NoCtx).slot
+  /\ opsSet' = TRUE
+  /\ inc' = inc + 1
+  /\ lastTrigger' = <<"ADD", inc + 1>>
+  /\ UNCHANGED <<releaseCount, destroyed, conn, mpReady, mp, mpCredit, closeCount,
+                 xqcSideActive, pendingXqcRemoval, nextXqcId, abandonCount,
+                 releaseObligations, pendingRelease, dupCount>>
 
-\* client_reset_paths_for_reconnect -> client_reset_path_runtime ->
-\* CONN_RESET (mqvpn_client.c:774-800). In-flight removal notifications are
-\* FLUSHED: connection teardown destroys remaining paths without firing
-\* path_removed_notify (xqc_conn_destroy_paths_list -> xqc_path_destroy,
-\* xqc_multipath.c:821-830; the notify fires only in xqc_path_closed, :603),
-\* and after destroy no callback from the old connection can arrive. An
-\* earlier model revision retained them, producing an unreachable
-\* cross-connection stale-removal trace (README counterexample log #1).
-\* Platform-side obligations (fdObligations / pendingFdClose) survive the
-\* reset - they are independent of the connection. The fresh-id allocator is
-\* kept monotonic across resets: real ids restart per connection, but with
-\* removals flushed at reset an id collision across connections has no
-\* observable effect, and monotonicity keeps the model sound.
-EnvConnReset ==
+\* mqvpn_client_on_platform_path_dropped / mqvpn_client_remove_path
+\* (mqvpn_client.c:3456-3508): a live path is abandoned first, only when a
+\* connection exists; xqc_conn_close_path may fail (multipath off, only
+\* active path, closing: xqc_multipath.c:751-787) and the caller ignores
+\* that. A failed abandon leaves the xquic path as it was. Then the event;
+\* the platform now owes the release of an installed transport.
+DropLike(ev) ==
   /\ inc >= 1
-  /\ resetCount < ConnResetCap
-  /\ OnConnReset
-  /\ xqcSideActive' = FALSE
-  /\ pendingXqcRemoval' = {}
-  /\ resetCount' = resetCount + 1
-  /\ lastTrigger' = <<"CONN_RESET", inc>>
-  /\ UNCHANGED <<inc, pendingFdClose, fdObligations, nextXqcId, abandonCount>>
+  /\ slot.state # "ClosedFree"
+  /\ \E abandonOk \in (IF slot.live /\ conn \in ConnUp /\ mp
+                       THEN BOOLEAN ELSE {FALSE}) :
+       IF abandonOk
+       THEN /\ pendingXqcRemoval' = pendingXqcRemoval \cup {<<slot.xqcId, inc>>}
+            /\ xqcSideActive' = FALSE
+       ELSE UNCHANGED <<pendingXqcRemoval, xqcSideActive>>
+  /\ Fire(ev, NoCtx)
+  /\ releaseObligations' = IF opsSet /\ ~slot.released
+                           THEN releaseObligations \cup {inc}
+                           ELSE releaseObligations
+  /\ UNCHANGED <<opsSet, inc, releaseCount, destroyed, conn, mpReady, mp, mpCredit,
+                 closeCount, nextXqcId, abandonCount, pendingRelease, dupCount>>
+
+ApiDrop   == DropLike("PLATFORM_DROP")
+ApiRemove == DropLike("REMOVE_API")
+
+\* The platform stops I/O, closes its socket and reports the release.
+PlatformRelease ==
+  \E h \in releaseObligations :
+    /\ releaseObligations' = releaseObligations \ {h}
+    /\ pendingRelease' = pendingRelease \cup {h}
+    /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed,
+                   conn, mpReady, mp, mpCredit, closeCount, xqcSideActive,
+                   pendingXqcRemoval, nextXqcId, abandonCount, dupCount>>
+
+\* A release call for any handle ever issued, again or out of turn.
+PlatformDupRelease ==
+  /\ dupCount < DupReleaseCap
+  /\ \E h \in 1..inc :
+       /\ pendingRelease' = pendingRelease \cup {h}
+       /\ dupCount' = dupCount + 1
+  /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed, conn,
+                 mpReady, mp, mpCredit, closeCount, xqcSideActive, pendingXqcRemoval,
+                 nextXqcId, abandonCount, releaseObligations>>
+
+\* mqvpn_client_on_platform_path_released (mqvpn_client.c:3512-3535), its
+\* guards in order: unknown/recycled handle, CLOSED_FREE (late duplicate),
+\* not CLOSED_DROPPED (refused), already released or no transport; only
+\* then client_finalize_transport (ops.release) and TRANSPORT_RELEASED.
+DeliverRelease ==
+  \E h \in pendingRelease :
+    /\ pendingRelease' = pendingRelease \ {h}
+    /\ IF /\ h = inc
+          /\ slot.state = "ClosedDropped"
+          /\ ~slot.released
+          /\ opsSet
+       THEN /\ opsSet' = FALSE
+            /\ releaseCount' = [releaseCount EXCEPT ![h] = @ + 1]
+            /\ Fire("TRANSPORT_RELEASED", NoCtx)
+       ELSE UNCHANGED <<opsSet, releaseCount, slot, lastTrigger>>
+    /\ UNCHANGED <<inc, destroyed, conn, mpReady, mp, mpCredit, closeCount,
+                   xqcSideActive, pendingXqcRemoval, nextXqcId, abandonCount,
+                   releaseObligations, dupCount>>
+
+\* mqvpn_client_destroy (mqvpn_client.c:3123-3170) finalises every slot that
+\* still owes a release, without setting the flag. client_finalize_transport
+\* calls ops.release only through the ops it snapshots, which an earlier
+\* finalise already cleared (mqvpn_client.c:964-981): hence opsSet. Nothing
+\* happens after destroy.
+EnvDestroy ==
+  /\ destroyed' = TRUE
+  /\ IF ~slot.released /\ opsSet
+     THEN /\ releaseCount' = [releaseCount EXCEPT ![inc] = @ + 1]
+          /\ opsSet' = FALSE
+     ELSE UNCHANGED <<releaseCount, opsSet>>
+  /\ UNCHANGED <<slot, inc, lastTrigger, conn, mpReady, mp, mpCredit, closeCount,
+                 xqcSideActive, pendingXqcRemoval, nextXqcId, abandonCount,
+                 releaseObligations, pendingRelease, dupCount>>
 
 --------------------------------------------------------------------------------
 
 Init ==
-  /\ state = "ClosedFree"
-  /\ attached = FALSE
-  /\ live = FALSE
-  /\ xqcId = NULL
-  /\ fdOwner = "none"
-  /\ retries = 0
-  /\ retryArmed = FALSE
-  /\ stableArmed = FALSE
+  /\ slot = FreshSlot
+  /\ opsSet = FALSE
   /\ inc = 0
   /\ lastTrigger = <<"NONE", 0>>
-  /\ pendingXqcRemoval = {}
-  /\ pendingFdClose = {}
-  /\ fdObligations = {}
+  /\ releaseCount = [i \in 1..MaxIncarnations |-> 0]
+  /\ destroyed = FALSE
+  /\ conn = "Idle"
+  /\ mpReady = FALSE
+  /\ mp \in BOOLEAN
+  /\ mpCredit \in BOOLEAN
+  /\ closeCount = 0
   /\ xqcSideActive = FALSE
+  /\ pendingXqcRemoval = {}
   /\ nextXqcId = 1
-  /\ resetCount = 0
   /\ abandonCount = 0
+  /\ releaseObligations = {}
+  /\ pendingRelease = {}
+  /\ dupCount = 0
 
 Next ==
-  \/ EnvActivate
-  \/ EnvRetryFire
-  \/ ApiManualReactivate
-  \/ EnvXqcValidate
-  \/ EnvValidationPoll
-  \/ EnvXqcSpontaneousAbandon
-  \/ DeliverRemoval
-  \/ ApiDrop
-  \/ ApiRemove
-  \/ PlatformFdClose
-  \/ DeliverFdClose
-  \/ ApiAddFd
-  \/ EnvConnReset
+  /\ ~destroyed
+  /\ \/ ApiConnect \/ EnvMpReady \/ EnvTunnelReady \/ EnvEstablish
+     \/ EnvConnClose \/ EnvReconnect \/ ApiDisconnectWhileReconnecting
+     \/ EnvActivate \/ EnvRetryFire \/ EnvValidationPoll \/ EnvStableConfirm
+     \/ ApiManualReactivate
+     \/ EnvXqcValidate \/ EnvXqcSpontaneousAbandon \/ DeliverRemoval
+     \/ EnvPathIdleReap \/ EnvConnIdleTimeout
+     \/ ApiAdd \/ ApiDrop \/ ApiRemove
+     \/ PlatformRelease \/ PlatformDupRelease \/ DeliverRelease
+     \/ EnvDestroy
 
 Spec == Init /\ [][Next]_vars
 
-\* Fairness (liveness config only). Delivery actions are non-parameterized
-\* existentials, so WF on each guarantees the pending sets drain. WF on
-\* PlatformFdClose encodes the platform drop-contract obligation (the
-\* platform MUST close() a dropped fd and report it); a platform that
-\* violates the contract is out of verification scope.
+\* Fairness = the environment assumptions (formal/README.md). Destroy,
+\* arbitrary closes, disconnects, spontaneous abandons, API calls, duplicated
+\* releases, xquic-side validation and the validation poll may or may not
+\* happen: neither liveness property needs a path to validate.
 Fairness ==
-  /\ WF_vars(DeliverRemoval)
-  /\ WF_vars(DeliverFdClose)
-  /\ WF_vars(PlatformFdClose)
-  /\ WF_vars(EnvRetryFire)
-  /\ WF_vars(EnvValidationPoll)
-  /\ WF_vars(EnvXqcValidate)
+  /\ WF_vars(~destroyed /\ DeliverRemoval)
+  /\ WF_vars(~destroyed /\ PlatformRelease)
+  /\ WF_vars(~destroyed /\ DeliverRelease)
+  /\ WF_vars(~destroyed /\ EnvMpReady)
+  /\ WF_vars(~destroyed /\ EnvTunnelReady)
+  /\ WF_vars(~destroyed /\ EnvEstablish)
+  /\ WF_vars(~destroyed /\ EnvReconnect)
+  /\ WF_vars(~destroyed /\ EnvRetryFire)
+  /\ WF_vars(~destroyed /\ EnvPathIdleReap)
+  /\ WF_vars(~destroyed /\ EnvConnIdleTimeout)
 
-LiveSpec == Init /\ [][Next]_vars /\ Fairness
+LiveSpec == Spec /\ Fairness
 
 --------------------------------------------------------------------------------
 \* Properties
 
 TypeOK ==
-  /\ state \in States
-  /\ attached \in BOOLEAN
-  /\ live \in BOOLEAN
-  /\ xqcId \in XqcIds
-  /\ fdOwner \in {"none", "platform"}
-  /\ retries \in 0..MaxRetries
-  /\ retryArmed \in BOOLEAN
-  /\ stableArmed \in BOOLEAN
+  /\ slot \in [state : Fsm!States, attached : BOOLEAN, live : BOOLEAN,
+               released : BOOLEAN, xqcId : XqcIds, retries : 0..MaxRetries,
+               retryArmed : BOOLEAN, stableArmed : BOOLEAN]
+  /\ opsSet \in BOOLEAN
   /\ inc \in Incs
-  /\ lastTrigger \in EventNames \X Incs
-  /\ pendingXqcRemoval \subseteq (XqcIds \X (1..MaxIncarnations))
-  /\ pendingFdClose \subseteq (1..MaxIncarnations)
-  /\ fdObligations \subseteq (1..MaxIncarnations)
+  /\ lastTrigger \in TriggerNames \X Incs
+  /\ releaseCount \in [1..MaxIncarnations -> 0..2]
+  /\ destroyed \in BOOLEAN
+  /\ conn \in ConnStates
+  /\ mpReady \in BOOLEAN
+  /\ mp \in BOOLEAN
+  /\ mpCredit \in BOOLEAN
+  /\ closeCount \in 0..ConnCloseCap
   /\ xqcSideActive \in BOOLEAN
+  /\ pendingXqcRemoval \subseteq (XqcIds \X (1..MaxIncarnations))
   /\ nextXqcId \in 1..(MaxXqcIds + 1)
-  /\ resetCount \in 0..ConnResetCap
   /\ abandonCount \in 0..AbandonCap
+  /\ releaseObligations \subseteq 1..MaxIncarnations
+  /\ pendingRelease \subseteq 1..MaxIncarnations
+  /\ dupCount \in 0..DupReleaseCap
 
-\* path_invariant_check (src/path_state_machine.c:140-225), transliterated:
-\* only the constraints the code actually asserts (e.g. xqc_path_id is
-\* deliberately NOT asserted in CREATE_WAIT / VALIDATING / ACTIVE / STANDBY
-\* because the primary slot keeps id 0).
-InvPerState ==
-  /\ (state = "Pending") =>
-       (attached /\ ~live /\ fdOwner = "platform" /\ xqcId = NULL
-        /\ ~retryArmed /\ ~stableArmed)
-  /\ (state = "CreateWait") =>
-       (attached /\ ~live /\ fdOwner = "platform" /\ retryArmed)
-  /\ (state \in {"Validating", "Active", "Standby"}) =>
-       (attached /\ live /\ fdOwner = "platform" /\ ~retryArmed)
-  /\ (state = "Degraded") =>
-       (attached /\ ~live /\ fdOwner = "platform" /\ xqcId = NULL
-        /\ retryArmed /\ ~stableArmed)
-  /\ (state = "ClosedRecoverable") =>
-       (attached /\ ~live /\ fdOwner = "platform" /\ xqcId = NULL
-        /\ ~retryArmed /\ ~stableArmed)
-  /\ (state = "ClosedDropped") =>
-       (~attached /\ ~retryArmed /\ ~stableArmed)
-  /\ (state = "ClosedFree") =>
-       (~attached /\ ~live /\ fdOwner = "none" /\ xqcId = NULL
-        /\ ~retryArmed /\ ~stableArmed)
+\* path_invariant_check holds in every reachable state.
+InvPerState == Fsm!Legal(slot)
 
-\* P1a: a stale event never mutates a newer incarnation's slot. Every
-\* slot-mutating step must have been triggered by an event tagged with the
-\* (possibly just-bumped) current incarnation.
+\* The C concretization rule: a transport is installed exactly while a
+\* release is owed.
+OpsConsistent == ~destroyed => (opsSet <=> ~slot.released)
+
+\* ops.release() runs at most once per incarnation ...
+ReleaseAtMostOnce == \A i \in 1..MaxIncarnations : releaseCount[i] <= 1
+
+\* ... every earlier incarnation was released before its slot was reused ...
+EarlierIncarnationsReleased == \A i \in 1..MaxIncarnations : i < inc => releaseCount[i] = 1
+
+\* ... the release flag of the current incarnation is the ghost count ...
+ReleasedMeansFinalized ==
+  ~destroyed => (slot.released <=> (inc = 0 \/ releaseCount[inc] = 1))
+
+\* ... and after destroy nothing is leaked.
+NoLeakAtDestroy == destroyed => \A i \in 1..MaxIncarnations : i <= inc => releaseCount[i] = 1
+
+\* No removal notification outlives its incarnation. CLOSED_FREE, the only
+\* state a slot is reused from, needs live = 0, which only a delivered
+\* removal or a reset clears, and a reset follows a connection close, which
+\* discards the in-flight removals. So the id-keyed lookup of cb_path_removed
+\* can never meet a removal of an earlier incarnation.
+RemovalsBelongToCurrentIncarnation == \A e \in pendingXqcRemoval : e[2] = inc
+
+\* A delayed event of an earlier incarnation never changes the slot: every
+\* step that changes it was triggered by the current incarnation.
 StaleEventHarmless ==
-  [][ slotVars' /= slotVars => lastTrigger'[2] = inc' ]_vars
+  [][ slot' # slot => lastTrigger'[2] = inc' ]_vars
 
-\* P1b: fd ownership - only the FD_CLOSED completion of the current
-\* incarnation may clear the platform-owned fd. (Slot reuse hands the slot a
-\* NEW platform fd, so fdOwner stays "platform" across ApiAddFd.)
-FdOwnershipSafe ==
-  [][ (fdOwner = "platform" /\ fdOwner' = "none")
-        => lastTrigger' = <<"FD_CLOSED", inc>> ]_vars
-
-\* P4 (design doc rev4/rev6): ClosedFree is terminal for the incarnation -
-\* the only step that LEAVES it is reuse, which bumps inc. Formalized over
-\* `state` only: CONN_RESET legitimately dispatches to CLOSED_FREE slots too
-\* (client_reset_paths_for_reconnect iterates every slot) and its
-\* unconditional field clear may zero a stale recreate_retries value there
-\* without leaving the state and without firing a public event (prior ==
-\* state suppresses emission; CLOSED_FREE's invariant deliberately does not
-\* assert recreate_retries - see README counterexample log #2).
+\* CLOSED_FREE is left only by reuse.
 FreeQuiescent ==
-  [][ (state = "ClosedFree" /\ state' /= "ClosedFree")
-        => inc' = inc + 1 ]_vars
+  [][ (slot.state = "ClosedFree" /\ slot'.state # "ClosedFree") => inc' = inc + 1 ]_vars
 
-\* Design doc rev5: reuse is possible from exactly the weak-fence states
-\* (public CLOSED, detached, xquic-drained). ClosedDropped with an
-\* still-open fd IS legitimately reusable - the platform closes the old fd
-\* later and the stale FD_CLOSED is rejected by the handle lookup.
-ReuseOnlyFromFence ==
-  [][ inc' > inc =>
-        (state \in {"ClosedDropped", "ClosedFree"} /\ ~attached /\ ~live) ]_vars
-
-\* P3: a dropped slot eventually reaches ClosedFree, or is legitimately
-\* reused first (reuse does not require passing through ClosedFree - see
-\* ReuseOnlyFromFence).
+\* A dropped slot reaches CLOSED_FREE, unless the client is destroyed or its
+\* connection is closed for good (then a live xquic binding may stay behind
+\* until destroy: README finding).
 DroppedLeadsToFree ==
   \A i \in 1..MaxIncarnations :
-    (state = "ClosedDropped" /\ inc = i) ~> (state = "ClosedFree" \/ inc > i)
+    (slot.state = "ClosedDropped" /\ inc = i)
+      ~> (slot.state = "ClosedFree" \/ destroyed \/ conn = "Closed")
 
-\* P5: retry states always escape - either an activation eventually succeeds
-\* (Validating) or the retry cap forces ClosedRecoverable; external drops /
-\* resets exit to ClosedDropped / Pending.
+\* The retry states always escape.
 RetryEscapes ==
-  (state \in {"CreateWait", "Degraded"}) ~>
-    (state \in {"Validating", "ClosedRecoverable", "ClosedDropped", "Pending"})
+  (slot.state \in {"CreateWait", "Degraded"})
+    ~> (slot.state \in {"Validating", "ClosedRecoverable", "ClosedDropped", "Pending"}
+        \/ destroyed \/ conn = "Closed")
 
 ================================================================================
