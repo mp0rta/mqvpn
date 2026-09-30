@@ -27,8 +27,9 @@ translated into C by hand. Three kinds of change fail CI:
 - a model change that is not propagated to the generated table fails the
   `Formal` workflow too.
 
-The `Formal` workflow is path-filtered: it runs only when `formal/`, the
-FSM's sources and headers, the unit test or the workflow itself change. So
+The `Formal` workflow is path-filtered: it runs only when `formal/`,
+`src/path_state_machine.c`, any header under `src/` or `include/`, the unit
+test or the workflow itself change. So
 it must not be made a required check: it would stay pending on every other
 pull request.
 
