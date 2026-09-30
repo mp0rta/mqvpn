@@ -125,6 +125,12 @@ To change the FSM's behaviour on purpose:
    table.
 4. Commit `formal/oracle/path_slot_oracle.inc` with the change.
 
+If `PATH_RECREATE_MAX_RETRIES` changes, set `MaxRetries` in
+`formal/oracle/PathSlotOracle.cfg` to the same value before step 3: the unit
+test's static assert pins the table's value to the C constant. A larger
+table may need a larger `--unwind` in `formal/cbmc/run.sh`; the harness's
+static assert says so.
+
 The unit test then checks the C code against the new table. CBMC does not
 read the rows; it only takes the table's pre-states as its domain
 ([Dom item 5](#the-verified-domain-dom-items)) and re-proves
@@ -605,8 +611,9 @@ connection in one step (`EnvConnClose`); no checked property is affected
 
 ## Sensitivity checks
 
-A green run means something only if the checks can fail. Each mutation below
-was applied to a scratch copy and caught as expected:
+A green run means something only if the checks can fail. The table records
+one-off runs of deliberate mutations; they are not part of CI. Each mutation
+was applied to a scratch copy of the tree and caught as expected:
 
 | Mutation | Caught by |
 |----------|-----------|

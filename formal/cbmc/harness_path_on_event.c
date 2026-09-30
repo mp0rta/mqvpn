@@ -102,6 +102,12 @@ _Static_assert(PATH_SLOT_ORACLE_N_EVCTX == 19,
                "the model's event/context classes changed - review ctx_valid and "
                "havoc_unread");
 
+/* The longest loop, oracle_in_pre_set's scan, runs PATH_SLOT_ORACLE_N_PRE
+ * times; run.sh's --unwind 200 covers a loop of at most 199 iterations. */
+_Static_assert(
+    PATH_SLOT_ORACLE_N_PRE < 200,
+    "the pre-state table outgrew --unwind 200: raise it in formal/cbmc/run.sh");
+
 static int
 ctx_valid(int ev, int ctx)
 {

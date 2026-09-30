@@ -213,7 +213,7 @@ EnvConnClose ==
                  releaseObligations, pendingRelease, dupCount>>
 
 \* tick_reconnect (mqvpn_client.c:4108-4140), or mqvpn_client_connect from
-\* RECONNECTING (mqvpn_client.c:3202-3233): both reset the slots, then start.
+\* RECONNECTING (mqvpn_client.c:3202-3262): both reset the slots, then start.
 \* The reset runs whether or not the start succeeds; the start fails when
 \* the primary is not attached, and may fail anyway (xqc_h3_connect), which
 \* re-arms the timer.
@@ -436,14 +436,15 @@ ApiAdd ==
 \* that. A failed abandon leaves the xquic path as it was. Then the event;
 \* the platform now owes the release of an installed transport.
 \*
-\* The one deliberate departure from the code: the abandon may succeed on
-\* the slot's xquic-ACTIVE path, although xquic refuses to abandon the only
-\* ACTIVE path (xqc_multipath.c:781-787). Success there stands for a
-\* connection on which another path is active, the multi-slot case this
-\* one-slot model abstracts. It is the only way the slot is reused on a live
-\* connection: requiring ~xqcSideActive for success makes activation,
-\* CREATE_WAIT and DEGRADED unreachable while TLC still reports no error
-\* (the vacuity gate in formal/run_tlc.sh catches it).
+\* The first of the two deliberate departures from the code (the other is
+\* EnvValidationPoll's target): the abandon may succeed on the slot's
+\* xquic-ACTIVE path, although xquic refuses to abandon the only ACTIVE path
+\* (xqc_multipath.c:781-787). Success there stands for a connection on which
+\* another path is active, the multi-slot case this one-slot model
+\* abstracts. It is the only way the slot is reused on a live connection:
+\* requiring ~xqcSideActive for success makes activation, CREATE_WAIT and
+\* DEGRADED unreachable while TLC still reports no error (the vacuity gate
+\* in formal/run_tlc.sh catches it).
 DropLike(ev) ==
   /\ ~destroyed
   /\ slot.state # "ClosedFree"
