@@ -2,9 +2,9 @@
  * formal/oracle/PathSlotOracle.tla - do not edit. Regenerate with
  * `formal/run_tlc.sh oracle`. Inputs (sha256):
  *   38990d138e000d06d79d886fb3fcb8e3e3bda13d94f6d07ae97f078c67b37400  formal/PathSlotFsm.tla
- *   10c734ad5842edb4db6a4817e6e3a47a6e67c108b3ace7ff5d715dc7880e707b  formal/oracle/PathSlotOracle.tla
+ *   dda0a75d06b61b32e05e941677006b9ca9e425b50405b81a83671a939155a6dc  formal/oracle/PathSlotOracle.tla
  *   14a1b00c55c36fe72c8ad85af771fdaf29f46453660ee21dcd45780672ddf604  formal/oracle/PathSlotOracle.cfg
- *   37159e249b6a0e578850cca54a769072cf41346604aba60d4fb056c7dcc1e065  formal/oracle/gen_oracle.py
+ *   fb96f656c914fbc674f55e16ccdbaec64f0dfe9d9db72e53187f91e6df19522f  formal/oracle/gen_oracle.py
  */
 #define PATH_SLOT_ORACLE_MAX_RETRIES 6
 #define PATH_SLOT_ORACLE_N_PRE 196

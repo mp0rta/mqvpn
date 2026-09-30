@@ -43,7 +43,10 @@ EvCtx ==
 \* on a CLOSED_FREE slot; mqvpn_client_on_platform_path_released finalises
 \* (clears ops and ctx) only a CLOSED_DROPPED slot that still owes a release.
 \* Every other row is the handler on its own. oracle_abs.h holds the C twin
-\* (caller_prefix_applies), cross-checked on every row.
+\* (oracle_prefix_applies), cross-checked on every row. The ADD prefix is
+\* deliberately not all of add_path's setup (path_entry_init, then handle,
+\* name, address, net id, flags): ADD starts from every legal ClosedFree slot,
+\* a superset of the one path_entry_init leaves.
 CallerPrefix(pre, ev) ==
   \/ ev = "ADD" /\ pre.state = "ClosedFree"
   \/ ev = "TRANSPORT_RELEASED" /\ pre.state = "ClosedDropped" /\ ~pre.released

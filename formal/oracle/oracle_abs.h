@@ -116,6 +116,17 @@ extern oracle_obs_t oracle_obs;
 
 _Static_assert(ORACLE_T_STUB_CLOCK != ORACLE_T_ENTERED,
                "state entry stamp must be distinguishable from the pre-state value");
+/* Every now: ORACLE_T_NOW and the four STABLE_TICK values oracle_conc_now
+ * can produce (since 0 or ORACLE_T_STABLE, threshold reached or not). */
+_Static_assert(
+    ORACLE_T_STUB_CLOCK != ORACLE_T_NOW && ORACLE_T_STUB_CLOCK != ORACLE_T_RETRY &&
+        ORACLE_T_STUB_CLOCK != ORACLE_T_STABLE &&
+        ORACLE_T_STUB_CLOCK != ORACLE_T_ENTERED &&
+        ORACLE_T_STUB_CLOCK != PATH_STABLE_THRESHOLD_US - 1 &&
+        ORACLE_T_STUB_CLOCK != PATH_STABLE_THRESHOLD_US &&
+        ORACLE_T_STUB_CLOCK != ORACLE_T_STABLE + PATH_STABLE_THRESHOLD_US - 1 &&
+        ORACLE_T_STUB_CLOCK != ORACLE_T_STABLE + PATH_STABLE_THRESHOLD_US,
+    "state entry stamp must be distinguishable from every now and timer value");
 _Static_assert(ORACLE_PRE_ID != 0 && ORACLE_NEW_ID != 0 && ORACLE_PRE_ID != ORACLE_NEW_ID,
                "abstract id classes need distinct nonzero ids");
 _Static_assert(ORACLE_T_STABLE + PATH_STABLE_THRESHOLD_US < ORACLE_T_NOW,
@@ -124,7 +135,8 @@ _Static_assert(ORACLE_T_RETRY < PATH_RECREATE_DELAY_US,
                "an armed pre-state retry deadline must not equal any now + backoff");
 
 static char oracle_ctx_marker_pre; /* transport_ctx of an attached pre-state */
-static char oracle_ctx_marker_add; /* transport_ctx installed by the ADD prefix */
+/* transport_ctx installed by the ADD prefix; unused by a consumer without one */
+static char oracle_ctx_marker_add __attribute__((unused));
 
 static int
 oracle_send_stub(void *ctx, const mqvpn_datagram_t *bufs, unsigned n,
@@ -279,7 +291,15 @@ oracle_conc_now(const path_entry_t *pre, int ev, int ctx)
 /* Mirrors PathSlotOracle.tla's CallerPrefix: mqvpn_client_add_path installs
  * a transport on a CLOSED_FREE slot before ADD; on_platform_path_released
  * finalises only a CLOSED_DROPPED slot that still owes a release before
- * TRANSPORT_RELEASED. The ctest checks this against the table on every row. */
+ * TRANSPORT_RELEASED. The ctest checks this against the table on every row.
+ *
+ * The ADD prefix is deliberately not all of add_path's setup. add_path first
+ * runs path_entry_init, which zeroes the whole slot (the retry count, the
+ * timers and the stamps included) and sets transport_released and
+ * CLOSED_FREE, then writes the handle, name, address, net id and flags. The
+ * oracle instead starts ADD from every legal CLOSED_FREE slot, a superset of
+ * the one path_entry_init leaves, so add_path's slot is covered without
+ * modelling those writes: do not add them here. */
 static inline int
 oracle_prefix_applies(const oracle_slot_t *pre, int ev)
 {
@@ -317,11 +337,15 @@ oracle_canonical_add_ops(void)
 
 /* The frame: every path_entry_t field the FSM must not write. The others are
  * checked elsewhere — the abstract slot, the update classes, status (through
- * path_invariant_check), the state-entry bookkeeping, ops and ctx. The size
- * pin makes a new field a deliberate decision about which group it joins. */
-_Static_assert(
-    sizeof(path_entry_t) == 304,
-    "path_entry_t changed - classify the new field in formal/oracle/oracle_abs.h");
+ * path_invariant_check), the state-entry bookkeeping, ops and ctx.
+ *
+ * 304 is the LP64 size. The pin catches a new field that grows the struct,
+ * not one of 4 bytes or less placed in one of its three 4-byte padding holes
+ * (LP64: after local_addr_len, after flags and after recreate_retries): such
+ * a field keeps the size and must be classified here by hand. */
+_Static_assert(sizeof(path_entry_t) == 304,
+               "path_entry_t is no longer 304 bytes (its LP64 size) - classify the new "
+               "field in formal/oracle/oracle_abs.h");
 
 static inline int
 oracle_frame_eq(const path_entry_t *x, const path_entry_t *y)
@@ -335,7 +359,8 @@ oracle_frame_eq(const path_entry_t *x, const path_entry_t *y)
 }
 
 /* path_mark_state_entry clears the residence-warn debounce on every state
- * change; nothing else writes it. Valid for a recorded entry (Dom item 9):
+ * change; nothing else within a dispatch writes it (the client writes it
+ * outside the FSM). Valid for a recorded entry (Dom item 9):
  * a first entry (state_entered_at_us == 0) clears it without a change. */
 static inline uint64_t
 oracle_expected_residence_warn(const path_entry_t *pre, const path_entry_t *post)

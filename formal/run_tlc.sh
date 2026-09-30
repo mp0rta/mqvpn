@@ -32,12 +32,29 @@ fi
 
 META=$(mktemp -d)
 trap 'rm -rf "$META"' EXIT
+# dash runs the EXIT trap on exit, not on a fatal signal.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
+# A TLC warning fails the run: TLC only warns, and exits 0, when an EXCEPT
+# names a field the record does not have (a misspelt field), leaving the
+# record unchanged.
 tlc() {
     name=$1
     shift
+    log=$META/$name.log
+    rc=0
     java -XX:+UseParallelGC -DTLA-Library="$PWD" -cp "$JAR" tlc2.TLC \
-        -deadlock -nowarning -metadir "$META/$name" "$@"
+        -deadlock -metadir "$META/$name" "$@" >"$log" 2>&1 || rc=$?
+    cat "$log"
+    if [ "$rc" -ne 0 ]; then
+        echo "run_tlc.sh: TLC ($name) exited with $rc" >&2
+        exit "$rc"
+    fi
+    if grep '^Warning:' "$log" >&2; then
+        echo "run_tlc.sh: TLC ($name) printed warnings" >&2
+        exit 1
+    fi
 }
 
 # SANY exits 0 on semantic errors (only a parse error is non-zero), so its
@@ -65,8 +82,9 @@ live() {
     tlc live -workers auto -config MqvpnPathSlot_live.cfg MqvpnPathSlot.tla
 }
 
-# One worker: the dump is then written in a fixed order (the generator sorts
-# anyway, so this only keeps the intermediate file reproducible).
+# The table does not depend on the dump's order (the generator sorts the
+# rows); one worker keeps that order the same from run to run, so two dumps
+# can be diffed when debugging the generator.
 oracle() {
     tlc oracle -workers 1 -dump "$META/oracle" \
         -config oracle/PathSlotOracle.cfg oracle/PathSlotOracle.tla

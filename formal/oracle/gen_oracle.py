@@ -10,7 +10,8 @@ by field name, never by position: TLC prints fields in the order their names
 were first interned, which changes when the module is edited. Anything the
 generator does not expect (an unknown field, value or enum name, a duplicated
 row, a pre-state without exactly the 19 event/context classes) is a hard
-error, so a format change in TLC cannot silently produce a wrong table. The
+error, so a format change in TLC cannot silently produce a wrong table. A
+slot's retries is bounded by the MaxRetries PathSlotOracle.cfg sets. The
 output is byte-for-byte deterministic for a given dump and set of inputs.
 """
 
@@ -23,6 +24,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FORMAL = os.path.dirname(HERE)
 REPO = os.path.dirname(FORMAL)
 
+
+def die(msg):
+    sys.exit("gen_oracle: " + msg)
+
+
 # Every file whose content determines the table; their hashes go into the
 # header so a stale table is visible in review.
 INPUTS = [
@@ -32,8 +38,6 @@ INPUTS = [
     "formal/oracle/gen_oracle.py",
 ]
 
-STATES = ["Pending", "CreateWait", "Validating", "Active", "Standby",
-          "Degraded", "ClosedRecoverable", "ClosedDropped", "ClosedFree"]
 STATE_C = {
     "Pending": "PATH_LC_PENDING",
     "CreateWait": "PATH_LC_CREATE_WAIT",
@@ -45,6 +49,7 @@ STATE_C = {
     "ClosedDropped": "PATH_LC_CLOSED_DROPPED",
     "ClosedFree": "PATH_LC_CLOSED_FREE",
 }
+STATES = list(STATE_C)
 EVENTS = ["ACTIVATE", "RETRY", "VALIDATION_OK", "XQUIC_REMOVED",
           "MANUAL_REACTIVATE", "PLATFORM_DROP", "REMOVE_API", "ADD",
           "CONN_RESET", "TRANSPORT_RELEASED", "STABLE_TICK"]
@@ -76,11 +81,24 @@ EVCTX = sorted(
     + [(e, "OCTX_NONE") for e in ("XQUIC_REMOVED", "PLATFORM_DROP", "REMOVE_API",
                                    "ADD", "CONN_RESET", "TRANSPORT_RELEASED")]
     + [("STABLE_TICK", c) for c in ("OCTX_REACHED", "OCTX_BELOW")])
-assert len(EVCTX) == N_EVCTX
+if len(EVCTX) != N_EVCTX:
+    die("EVCTX has %d event/context classes, expected %d" % (len(EVCTX), N_EVCTX))
 
 
-def die(msg):
-    sys.exit("gen_oracle: " + msg)
+def is_int(v):
+    # A TLA Boolean parses to a Python bool, which is also an int.
+    return type(v) is int
+
+
+def cfg_max_retries():
+    with open(os.path.join(REPO, "formal/oracle/PathSlotOracle.cfg"),
+              encoding="utf-8") as f:
+        found = re.findall(r"^CONSTANTS?\s+MaxRetries\s*=\s*(\d+)\s*$",
+                           f.read(), flags=re.M)
+    if len(found) != 1:
+        die("PathSlotOracle.cfg sets MaxRetries %d times, expected once"
+            % len(found))
+    return int(found[0])
 
 
 TOKEN = re.compile(r'\s*(\[|\]|,|\|->|"[^"]*"|TRUE|FALSE|-?\d+|[A-Za-z_]\w*)')
@@ -149,16 +167,22 @@ def check_keys(rec, fields, what):
         die("%s fields %s, expected %s" % (what, sorted(rec), sorted(fields)))
 
 
-def slot_c(s, is_post):
+def check_slot(s, is_post, max_retries):
     check_keys(s, SLOT_FIELDS, "slot")
     if s["state"] not in STATE_C:
         die("unknown state %r" % s["state"])
     ids = (0, 1, 2) if is_post else (0, 1)
-    if s["xqcId"] not in ids:
+    if not is_int(s["xqcId"]) or s["xqcId"] not in ids:
         die("unexpected abstract id %r" % s["xqcId"])
+    if not is_int(s["retries"]) or not 0 <= s["retries"] <= max_retries:
+        die("retries %r outside 0..%d" % (s["retries"], max_retries))
     for b in ("attached", "live", "released", "retryArmed", "stableArmed"):
         if not isinstance(s[b], bool):
             die("field %s is not boolean" % b)
+
+
+# Formats a slot check_slot has accepted.
+def slot_c(s):
     return "{%s, %d, %d, %d, %d, %d, %d, %d}" % (
         STATE_C[s["state"]], s["attached"], s["live"], s["released"],
         s["xqcId"], s["retries"], s["retryArmed"], s["stableArmed"])
@@ -173,11 +197,14 @@ def main():
     if len(sys.argv) != 3:
         die("usage: gen_oracle.py <tlc-dump> <output.inc>")
     rows = read_rows(sys.argv[1])
+    cfg_retries = cfg_max_retries()
 
     max_retries = None
     keyed = {}
     for r in rows:
         check_keys(r, ROW_FIELDS, "row")
+        check_slot(r["pre"], False, cfg_retries)
+        check_slot(r["post"], True, cfg_retries)
         if r["ev"] not in EVENTS:
             die("unknown event %r" % r["ev"])
         ctx = CTX.get((r["result"], r["target"], r["reached"]))
@@ -186,7 +213,10 @@ def main():
         for u in ("retryUpd", "stableUpd", "retriesUpd"):
             if r[u] not in UPD:
                 die("unknown update class %r" % r[u])
-        if r["notify"] not in (0, 1, 2, 3):
+        for b in ("prefix", "fires"):
+            if not isinstance(r[b], bool):
+                die("field %s is not boolean: %r" % (b, r[b]))
+        if not is_int(r["notify"]) or r["notify"] not in (0, 1, 2, 3):
             die("notify out of range: %r" % r["notify"])
         for s in (r["pre"], r["post"]):
             if max_retries is None or s["retries"] > max_retries:
@@ -222,7 +252,7 @@ def main():
     out.append("/* {state, attached, live, released, id, retries, retry_armed, stable_armed} */")
     out.append("static const oracle_slot_t PATH_SLOT_ORACLE_PRE[PATH_SLOT_ORACLE_N_PRE] = {")
     for _, s in pres:
-        out.append("    %s," % slot_c(s, False))
+        out.append("    %s," % slot_c(s))
     out.append("};")
     out.append("")
     out.append("/* {pre, event, ctx, prefix, post, fires, notify, retry_upd, stable_upd, retries_upd} */")
@@ -230,8 +260,8 @@ def main():
     for key in sorted(keyed):
         r, ctx = keyed[key]
         out.append("    {%s, OEV_%s, %s, %d, %s, %d, %d, %s, %s, %s}," % (
-            slot_c(r["pre"], False), r["ev"], ctx, r["prefix"],
-            slot_c(r["post"], True), r["fires"], r["notify"],
+            slot_c(r["pre"]), r["ev"], ctx, r["prefix"],
+            slot_c(r["post"]), r["fires"], r["notify"],
             UPD[r["retryUpd"]], UPD[r["stableUpd"]], UPD[r["retriesUpd"]]))
     out.append("};")
 
