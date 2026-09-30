@@ -100,6 +100,6 @@ jobs:
           rc=0
           formal/cbmc/run.sh || rc=$?
           if [ "$rc" -ne 0 ]; then
-            echo "::error::formal/cbmc/run.sh exited with $rc: the failing property, or run.sh's own message, is in the log above. If the behaviour change in src/path_state_machine.c is intended, change formal/PathSlotFsm.tla to match and regenerate the oracle with formal/run_tlc.sh oracle (formal/README.md)"
+            echo "::error::formal/cbmc/run.sh exited with $rc: the failing property, or run.sh's own message, is in the log above. If the behaviour change in src/path_state_machine.c is intended, change formal/PathSlotFsm.tla to match, then run formal/run_tlc.sh all (it rechecks the models and regenerates the oracle) and commit the table (formal/README.md)"
             exit "$rc"
           fi
