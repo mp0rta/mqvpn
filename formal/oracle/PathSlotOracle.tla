@@ -51,13 +51,16 @@ CallerPrefix(pre, ev) ==
   \/ ev = "ADD" /\ pre.state = "ClosedFree"
   \/ ev = "TRANSPORT_RELEASED" /\ pre.state = "ClosedDropped" /\ ~pre.released
 
+\* status is the public status of the post-state, the model's Projection:
+\* the unit test compares the C slot's status with it.
 Row(pre, c) ==
   LET out == Fsm!Step(pre, c.ev, [result |-> c.result, newId |-> NEW_ID,
                                   target |-> c.target,
                                   reached |-> c.reached = "reached"])
   IN [pre |-> pre, ev |-> c.ev, result |-> c.result, target |-> c.target,
       reached |-> c.reached, prefix |-> CallerPrefix(pre, c.ev),
-      post |-> out.slot, fires |-> out.fires, notify |-> out.notify,
+      post |-> out.slot, status |-> Fsm!Projection(out.slot.state),
+      fires |-> out.fires, notify |-> out.notify,
       retryUpd |-> out.retryUpd, stableUpd |-> out.stableUpd,
       retriesUpd |-> out.retriesUpd]
 

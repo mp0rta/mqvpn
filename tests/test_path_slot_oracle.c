@@ -10,9 +10,10 @@
  * result against the row: the abstract post-state, the two observable calls
  * (public path event, xquic app-status mirror), how each timer and the retry
  * counter was updated, the state-entry stamp, the transport ops and ctx, the
- * concretization rule, the public status, the residence-warn debounce, the
- * frame (the fields the FSM must not write), and path_invariant_check() on
- * the post-state. It then checks that path_invariant_check() rejects every
+ * concretization rule, the public status (the model's Projection of the
+ * post-state, from the row), the residence-warn debounce, the frame (the
+ * fields the FSM must not write), and path_invariant_check() on the
+ * post-state. It then checks that path_invariant_check() rejects every
  * abstract shape the model calls illegal, so the model's invariant and the C
  * one are the same set. formal/cbmc/ extends the row results from the
  * canonical slot to every slot of the verified domain (formal/README.md).
@@ -455,10 +456,13 @@ check_row(size_t i, const oracle_row_t *row)
     expect(p.transport_ctx == (p.transport_released ? NULL : ctx_before),
            "transport_ctx");
     expect(oracle_conc_rule(&p), "post-state breaks the concretization rule");
-    if (p.status != path_public_status_from_lifecycle(p.state)) {
+    /* The model's Projection, not path_public_status_from_lifecycle():
+     * path_invariant_check() below pins status to the C projection, so a row
+     * that passes shows that the two projections agree on its post-state. */
+    if (p.status != (mqvpn_path_status_t)row->status) {
         char d[80];
         snprintf(d, sizeof(d), "got %s, want %s", mqvpn_path_status_name(p.status),
-                 mqvpn_path_status_name(path_public_status_from_lifecycle(p.state)));
+                 mqvpn_path_status_name((mqvpn_path_status_t)row->status));
         fail_row("public status", d);
     }
     expect_eq(p.last_residence_warn_at_us, oracle_expected_residence_warn(&pre, &p),

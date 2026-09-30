@@ -85,6 +85,7 @@ typedef struct {
     uint8_t ctx;    /* oracle_ctx_t */
     uint8_t prefix; /* the caller's slot writes precede this dispatch */
     oracle_slot_t post;
+    uint8_t status; /* mqvpn_path_status_t of post: the model's Projection */
     uint8_t fires;  /* path_fsm_fire_path_event called */
     uint8_t notify; /* client_notify_xqc_path_state app_status, 0 = not called */
     uint8_t retry_upd;
@@ -360,8 +361,9 @@ oracle_canonical_add_ops(void)
 }
 
 /* The frame: every path_entry_t field the FSM must not write. The others are
- * checked elsewhere — the abstract slot, the update classes, status (through
- * path_invariant_check), the state-entry bookkeeping, ops and ctx.
+ * checked elsewhere — the abstract slot, the update classes, status (against
+ * the row in the unit test, through path_invariant_check in both), the
+ * state-entry bookkeeping, ops and ctx.
  *
  * 304 is the LP64 size. The pin catches a new field that grows the struct,
  * not one of 4 bytes or less placed in one of its three 4-byte padding holes

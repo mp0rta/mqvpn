@@ -67,10 +67,15 @@ CTX = {
 CTX_ORDER = list(CTX.values())
 UPD = {"KEEP": "UPD_KEEP", "ZERO": "UPD_ZERO", "NOW": "UPD_NOW",
        "ARM": "UPD_ARM", "INC": "UPD_INC"}
+# PathSlotFsm!Projection's values -> mqvpn_path_status_t (include/libmqvpn.h)
+STATUS_C = {"PENDING": "MQVPN_PATH_PENDING", "ACTIVE": "MQVPN_PATH_ACTIVE",
+            "STANDBY": "MQVPN_PATH_STANDBY", "DEGRADED": "MQVPN_PATH_DEGRADED",
+            "CLOSED": "MQVPN_PATH_CLOSED"}
 SLOT_FIELDS = ["state", "attached", "live", "released", "xqcId", "retries",
                "retryArmed", "stableArmed"]
 ROW_FIELDS = ["pre", "ev", "result", "target", "reached", "prefix", "post",
-              "fires", "notify", "retryUpd", "stableUpd", "retriesUpd"]
+              "status", "fires", "notify", "retryUpd", "stableUpd",
+              "retriesUpd"]
 N_EVCTX = 19
 # The event/context classes every pre-state must have (as C constants): the
 # same set the CBMC harness's ctx_valid() accepts.
@@ -210,6 +215,8 @@ def main():
         ctx = CTX.get((r["result"], r["target"], r["reached"]))
         if ctx is None:
             die("unknown context %r" % ((r["result"], r["target"], r["reached"]),))
+        if r["status"] not in STATUS_C:
+            die("unknown public status %r" % (r["status"],))
         for u in ("retryUpd", "stableUpd", "retriesUpd"):
             if r[u] not in UPD:
                 die("unknown update class %r" % r[u])
@@ -259,13 +266,13 @@ def main():
         out.append("    %s," % slot_c(s))
     out.append("};")
     out.append("")
-    out.append("/* {pre, event, ctx, prefix, post, fires, notify, retry_upd, stable_upd, retries_upd} */")
+    out.append("/* {pre, event, ctx, prefix, post, status, fires, notify, retry_upd, stable_upd, retries_upd} */")
     out.append("static const oracle_row_t PATH_SLOT_ORACLE_ROWS[PATH_SLOT_ORACLE_N_ROWS] = {")
     for key in sorted(keyed):
         r, ctx = keyed[key]
-        out.append("    {%s, OEV_%s, %s, %d, %s, %d, %d, %s, %s, %s}," % (
+        out.append("    {%s, OEV_%s, %s, %d, %s, %s, %d, %d, %s, %s, %s}," % (
             slot_c(r["pre"]), r["ev"], ctx, r["prefix"],
-            slot_c(r["post"]), r["fires"], r["notify"],
+            slot_c(r["post"]), STATUS_C[r["status"]], r["fires"], r["notify"],
             UPD[r["retryUpd"]], UPD[r["stableUpd"]], UPD[r["retriesUpd"]]))
     out.append("};")
 
