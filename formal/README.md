@@ -130,7 +130,7 @@ read the rows; it only takes the table's pre-states as its domain
 ([Dom item 5](#the-verified-domain-dom-items)) and re-proves
 [abstraction consistency](#the-cbmc-proof) over them.
 
-Each failure prints one of these messages:
+The common failures print one of these messages:
 
 - `FAIL row N (EVENT ctx=CLASS): <check>`, from the unit test
   (`test_path_slot_oracle`, run by ctest in `ci.yml`): on its canonical
