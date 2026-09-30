@@ -126,10 +126,11 @@ To change the FSM's behaviour on purpose:
 4. Commit `formal/oracle/path_slot_oracle.inc` with the change.
 
 The unit test then checks the C code against the new table. CBMC does not
-read the rows; it only takes the table's pre-states as its domain (Dom
-item 5) and re-proves abstraction consistency over them.
+read the rows; it only takes the table's pre-states as its domain
+([Dom item 5](#the-verified-domain-dom-items)) and re-proves
+[abstraction consistency](#the-cbmc-proof) over them.
 
-A failure names itself by one of these messages:
+Each failure prints one of these messages:
 
 - `FAIL row N (EVENT ctx=CLASS): <check>`, from the unit test
   (`test_path_slot_oracle`, run by ctest in `ci.yml`): on its canonical
@@ -276,9 +277,9 @@ It also:
 
 `harness` proves *abstraction consistency* by self-composition. It takes two
 arbitrary concrete slots in the domain with the same abstract state. Every
-field is arbitrary, the handle, the name, every `ops` pointer and the ctx
-included, so the unit test's canonical slots are among them. Both get the
-same event and context class, with independent concrete now, new id and
+field is arbitrary, including the handle, the name, every `ops` pointer and
+the ctx, so the unit test's canonical slots are among them. Both get the
+same event and context class, with independent concrete `now`, new id and
 timer values, and arbitrary values in the context fields the class does not
 use. CBMC proves that:
 
@@ -366,10 +367,10 @@ only caller issues them:
   a CLOSED_DROPPED slot that still owes a release (`:964-981`,
   `:3512-3535`).
 
-Every other row is the handler on its own. The condition is the model's
-`CallerPrefix`, emitted per row and checked against its C twin
-(`oracle_prefix_applies`) on every row. The abstract result always comes
-from `Step`; the prefix only affects the concrete ops and ctx.
+Every other row is the handler on its own. `CallerPrefix` is emitted per
+row and checked against `oracle_prefix_applies` on every row. The abstract
+result always comes from `Step`; the prefix only affects the concrete ops
+and ctx.
 
 ### Trusted, not proved
 
@@ -488,18 +489,19 @@ path to validate (a black-holed path never does).
 ### Abstractions
 
 - **One slot, the primary.** The slot's xquic-ACTIVE path is read as the
-  only active path, so the path idle timeout reaps an orphan only when its
-  path is not xquic-ACTIVE; otherwise the connection idles out. The one
-  departure from this reading is a drop or remove, whose abandon may also
-  succeed on the xquic-ACTIVE path, as if another path were active (the
-  first exception above). With several paths the path idle timeout reaps an
-  orphan whenever another path is active. The route differs; the slot's
-  outcome differs only with reconnect off. When the connection idle timeout
-  leads to RECONNECTING, the reset frees the slot (CLOSED_FREE) as the path
-  idle timeout would, if the release already happened; otherwise the later
-  release does it (`maybe_transition_dropped_to_free` needs
-  `transport_released`, `path_state_machine.c:703`). With reconnect off it
-  leaves the live binding of finding 2, which `DroppedLeadsToFree` exempts.
+  only active path (drop and remove aside: the first exception above). So
+  the path idle timeout reaps an orphan only when its path is not
+  xquic-ACTIVE; otherwise the connection idles out. With several paths the
+  path idle timeout reaps an orphan whenever another path is active.
+
+  The route differs; the slot's outcome differs only with reconnect off.
+  When the connection idle timeout leads to RECONNECTING, the reset frees
+  the slot (CLOSED_FREE) as the path idle timeout would, if the release
+  already happened; otherwise the later release does
+  (`maybe_transition_dropped_to_free` needs `transport_released`,
+  `path_state_machine.c:703`). With reconnect off, the connection idle
+  timeout leaves the live binding of finding 2, which `DroppedLeadsToFree`
+  exempts.
 - **Spontaneous xquic abandons** are bounded and hit only a path that is not
   xquic-ACTIVE. That follows from xquic, not from the one-slot reading: the
   validation timeout behind them (`xqc_path_validation_on_retx`) acts only
@@ -559,21 +561,22 @@ The draining window: `mqvpn_client_disconnect` sets the client CLOSED while
 connection to CLOSING; `cb_h3_conn_close` clears `c->conn` later). On a
 multipath-ready connection, an `add_path` in that window runs
 `activate_pending_paths` (`:3436-3437`), whose `-XQC_CLOSING`
-(`xqc_multipath.c:689-690`) is classified TRANSIENT
-(`src/mqvpn_client.c:2479-2481`). The new slot goes PENDING → CREATE_WAIT
+(`xqc_multipath.c:689-690`) is classified TRANSIENT (`:2479-2481`). The
+new slot goes PENDING → CREATE_WAIT
 with the client CLOSED, and no tick retries it. The model closes a
 connection in one step (`EnvConnClose`); no checked property is affected
 (`RetryEscapes` exempts a client whose connection is closed for good).
 
 ## Findings
 
-1. **No removal outlives its incarnation.** Because a slot is reused only
-   from CLOSED_FREE, which needs the xquic path gone, and a reset follows a
-   connection close that drops in-flight removals, the id-keyed lookup in
-   `cb_path_removed` can never meet an earlier incarnation's removal
-   (`RemovalsBelongToCurrentIncarnation`). A reuse rule that also accepted
-   any detached, xquic-drained CLOSED slot would leave that channel open;
-   with the current rule it is closed structurally, not by the lookup guard.
+1. **No removal outlives its incarnation.** A slot is reused only once its
+   xquic path is gone (`live = 0`). The path goes only by delivering its
+   removal (`DeliverRemoval`) or by a reset, and a reset follows a
+   connection close, which drops the pending removals (`ConnDown`: xquic
+   destroys its paths without notifying). So a pending removal always
+   belongs to the current incarnation, and the id-keyed lookup in
+   `cb_path_removed` never meets a removal of an earlier incarnation
+   (`RemovalsBelongToCurrentIncarnation`).
 2. **A closed client can keep a live xquic binding.** With reconnect off
    (or after disconnect), a dropped slot whose xquic path was never removed
    stays CLOSED_DROPPED with `xquic_path_live` set until destroy. Either its
@@ -628,18 +631,20 @@ was applied to a scratch copy and caught as expected:
 
 ## Counterexample log
 
-TLC finds these two counterexamples in looser versions of the model. The
-code cannot reach them, so the model is written to exclude them.
+Earlier revisions of the model produced these two counterexamples.
 
 1. **id-0 ABA via activation.** An ABA problem: the same id belongs first to
    one incarnation, then to another, so a late event keyed by that id
-   reaches the wrong one. If activation could return id 0, a stale removal
-   of id 0 would hit a later incarnation. Activation never returns 0
+   reaches the wrong one. An earlier revision let activation return id 0,
+   and a stale removal of id 0 then hit a later incarnation. The code
+   cannot do this: activation never returns 0
    (`xqc_conn_get_available_path_id`), and a connection's removals are
    dropped when it closes (`xqc_conn_destroy_paths_list` does not notify).
-   The model therefore gives id 0 only to the primary bootstrap, per
-   connection, and checks the id-0 path of the primary through drop, close,
-   reconnect and reuse.
+   To stay faithful to that, the model gives id 0 only to the primary
+   bootstrap, per connection, and checks the id-0 path of the primary
+   through drop, close, reconnect and reuse. The id choice is not what
+   excludes the counterexample: in the current model the stale-removal
+   channel is closed by the rule of finding 1 on its own.
 2. **CONN_RESET changes a CLOSED_FREE slot.** The reset clears a stale
    retry count on a free slot without leaving CLOSED_FREE and without an
    event; `FreeQuiescent` is therefore stated over the state only.
