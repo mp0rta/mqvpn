@@ -1,0 +1,75 @@
+name: Formal
+
+# The TLA+ models, the transition oracle generated from them, and the CBMC
+# harnesses (formal/README.md). The exhaustive oracle test itself
+# (test_path_slot_oracle) is a unit test and runs in every Linux build of
+# ci.yml; this workflow checks the models and catches an oracle that was not
+# regenerated after a model change.
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - 'formal/**'
+      - 'src/path_state_machine.c'
+      - 'src/path_state_machine.h'
+      - 'src/path_entry_internal.h'
+      - 'src/mqvpn_internal.h'
+      - 'src/reorder.h'
+      - 'src/hybrid/classifier.h'
+      - 'include/libmqvpn.h'
+      - 'tests/test_path_slot_oracle.c'
+      - '.github/workflows/formal.yml'
+  pull_request:
+    paths:
+      - 'formal/**'
+      - 'src/path_state_machine.c'
+      - 'src/path_state_machine.h'
+      - 'src/path_entry_internal.h'
+      - 'src/mqvpn_internal.h'
+      - 'src/reorder.h'
+      - 'src/hybrid/classifier.h'
+      - 'include/libmqvpn.h'
+      - 'tests/test_path_slot_oracle.c'
+      - '.github/workflows/formal.yml'
+  workflow_dispatch:
+
+jobs:
+  formal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Fetch tla2tools.jar (tlaplus v1.7.4)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/tla2tools.jar" \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+          echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  $RUNNER_TEMP/tla2tools.jar" \
+            | sha256sum -c -
+
+      - name: TLC (parse, safety, liveness, oracle)
+        env:
+          TLA2TOOLS_JAR: ${{ runner.temp }}/tla2tools.jar
+        run: formal/run_tlc.sh all
+
+      - name: The committed oracle is up to date
+        run: |
+          if ! git diff --exit-code -- formal/oracle/path_slot_oracle.inc; then
+            echo "::error::formal/oracle/path_slot_oracle.inc is stale: run formal/run_tlc.sh oracle and commit it"
+            exit 1
+          fi
+
+      - name: Install CBMC
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cbmc
+          cbmc --version
+
+      - name: CBMC
+        run: formal/cbmc/run.sh
