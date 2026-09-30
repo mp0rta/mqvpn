@@ -272,7 +272,8 @@ oracle_in_dom(const path_entry_t *p)
  * take the constants above, the state entry is recorded (Dom item 9) and the
  * residence-warn debounce is armed. The frame fields (flags, the byte
  * counters, srtt_ms, platform_net_id, local_addr*) stay 0: a handler that
- * reads or writes them is formal/cbmc/'s to catch, over arbitrary slots. */
+ * reads them, or writes the 0 they already hold, is formal/cbmc/'s to catch,
+ * over arbitrary slots. */
 static inline void
 oracle_conc(const oracle_slot_t *a, path_entry_t *p)
 {

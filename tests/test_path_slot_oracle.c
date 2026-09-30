@@ -86,11 +86,15 @@ client_notify_xqc_path_state(struct mqvpn_client_s *c, const path_entry_t *p,
 }
 
 /* ─── Reporting ───
- * A failed check prints one line that starts with "FAIL" (an abort of this
- * process, one that starts with "ABORT"), then indented detail lines that
- * contain neither "FAIL" nor the test's name, so a filter on those two words
- * keeps one line per failure. A child rerun for its own report writes to
- * stderr as it is. */
+ * A failed check prints one line that starts with "FAIL", then indented
+ * detail lines that contain neither "FAIL" nor the test's name, so a filter
+ * on those two words keeps one line per failure, besides the summary lines
+ * that start with the test's name (a broken canary child thus leaves two).
+ * A child rerun for its own report writes to stderr as it is, and its stack
+ * frames may name this file. An in-process abort is announced by glibc's
+ * assertion line, which starts with the program name, so the filter keeps
+ * it only when the binary is named test_path_slot_oracle; the "ABORT" line
+ * after it names the row and contains neither word. */
 
 static const char *const EV_NAME[OEV_COUNT] = {
     [OEV_ACTIVATE] = "ACTIVATE",
