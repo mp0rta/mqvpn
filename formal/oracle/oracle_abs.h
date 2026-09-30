@@ -509,8 +509,12 @@ oracle_event_ctx(int ctx, uint64_t now, uint64_t new_id)
     return e;
 }
 
+/* One dispatch of ev on p for the client c. c must not be NULL: every
+ * production caller passes its client. The FSM never dereferences c, it only
+ * hands it to the four accessors, and both checks stub those, so c is
+ * opaque here. */
 static inline void
-oracle_dispatch(path_entry_t *p, int ev, const path_event_ctx_t *e)
+oracle_dispatch(mqvpn_client_t *c, path_entry_t *p, int ev, const path_event_ctx_t *e)
 {
     static const path_event_t map[OEV_COUNT] = {
         [OEV_ACTIVATE] = PATH_EVENT_ACTIVATE_REQUESTED,
@@ -525,9 +529,9 @@ oracle_dispatch(path_entry_t *p, int ev, const path_event_ctx_t *e)
         [OEV_TRANSPORT_RELEASED] = PATH_EVENT_TRANSPORT_RELEASED,
     };
     if (ev == OEV_STABLE_TICK)
-        path_fsm_tick_confirm_stable(NULL, p, e->now_us);
+        path_fsm_tick_confirm_stable(c, p, e->now_us);
     else
-        path_on_event(NULL, p, map[ev], e);
+        path_on_event(c, p, map[ev], e);
 }
 
 /* ─── Update classes ─── */

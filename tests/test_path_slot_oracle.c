@@ -6,7 +6,8 @@
  *
  * For every row of the table (every invariant-legal abstract pre-state x
  * every event/context class) it builds the canonical concrete slot, applies
- * the caller's own writes where the caller would, dispatches, and checks the
+ * the caller's own writes where the caller would, dispatches with a non-NULL
+ * client token (which every accessor call must receive), and checks the
  * result against the row: the abstract post-state, the two observable calls
  * (public path event, xquic app-status mirror), how each timer and the retry
  * counter was updated, the state-entry stamp, the transport ops and ctx, the
@@ -55,17 +56,30 @@ _Static_assert(sizeof(oracle_slot_t) == 8,
 
 oracle_obs_t oracle_obs;
 
+/* The client every dispatch passes: a non-NULL token, never dereferenced
+ * (mqvpn_client_t is incomplete here), as a production caller passes its
+ * client. The stubs count the calls that receive any other pointer. */
+static char client_token;
+#define ORACLE_CLIENT ((mqvpn_client_t *)&client_token)
+static unsigned foreign_client_calls;
+
+static void
+note_client(const struct mqvpn_client_s *c)
+{
+    if (c != ORACLE_CLIENT) foreign_client_calls++;
+}
+
 uint64_t
 client_now_us(const struct mqvpn_client_s *c)
 {
-    (void)c;
+    note_client(c);
     return ORACLE_T_STUB_CLOCK;
 }
 
 void
 client_log(struct mqvpn_client_s *c, mqvpn_log_level_t level, const char *fmt, ...)
 {
-    (void)c;
+    note_client(c);
     (void)level;
     (void)fmt;
 }
@@ -73,7 +87,7 @@ client_log(struct mqvpn_client_s *c, mqvpn_log_level_t level, const char *fmt, .
 void
 path_fsm_fire_path_event(struct mqvpn_client_s *c, const path_entry_t *p)
 {
-    (void)c;
+    note_client(c);
     (void)p;
     oracle_obs.fires++;
 }
@@ -82,7 +96,7 @@ void
 client_notify_xqc_path_state(struct mqvpn_client_s *c, const path_entry_t *p,
                              int app_status)
 {
-    (void)c;
+    note_client(c);
     (void)p;
     oracle_obs.notifies++;
     oracle_obs.notify_status = app_status;
@@ -426,9 +440,11 @@ check_row(size_t i, const oracle_row_t *row)
 
     const path_event_ctx_t e = oracle_event_ctx(row->ctx, now, ORACLE_NEW_ID);
     memset(&oracle_obs, 0, sizeof(oracle_obs));
+    foreign_client_calls = 0;
     cur.slot = &p;
     cur.post = 1;
-    oracle_dispatch(&p, row->ev, &e);
+    oracle_dispatch(ORACLE_CLIENT, &p, row->ev, &e);
+    expect_eq(foreign_client_calls, 0, "accessor calls with another client");
 
     expect(oracle_abs_post(&p, pre.xqc_path_id, ORACLE_NEW_ID, &got) &&
                oracle_slot_eq(&got, &row->post),

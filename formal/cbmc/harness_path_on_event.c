@@ -27,8 +27,9 @@
 #include <assert.h>
 
 /* ─── Accessor stubs ───
- * path_on_event is called with c == NULL; that is safe only because these
- * stubs never dereference it (the real accessors in mqvpn_client.c do). */
+ * The FSM is called with an arbitrary non-NULL c that points to no client;
+ * that is safe only because these stubs never dereference it (the real
+ * accessors in mqvpn_client.c do). */
 
 oracle_obs_t oracle_obs;
 
@@ -77,6 +78,18 @@ uint64_t nondet_u64(void);
 void *nondet_ptr(void);
 path_entry_t nondet_path_entry(void);
 mqvpn_path_ops_t nondet_path_ops(void);
+
+/* The client pointer of one run: arbitrary and non-NULL, as every production
+ * caller passes its client. The FSM only hands it to the stubs, which ignore
+ * it; with an independent pointer per run of harness, the abstract result
+ * cannot depend on its value. */
+static mqvpn_client_t *
+arbitrary_client(void)
+{
+    mqvpn_client_t *const c = (mqvpn_client_t *)nondet_ptr();
+    __CPROVER_assume(c != NULL);
+    return c;
+}
 
 /* The accessor clock of one run: arbitrary, independent of the event's
  * now_us, and nonzero. Nonzero is an assumption of the proof, the one Dom
@@ -145,7 +158,8 @@ typedef struct {
     path_entry_t pre;
     path_entry_t post;
     uint64_t now;
-    uint64_t clock; /* what client_now_us returns during this run */
+    uint64_t clock;         /* what client_now_us returns during this run */
+    mqvpn_client_t *client; /* the client pointer this run dispatches with */
     uint64_t new_id;
     oracle_obs_t obs;
     oracle_slot_t abs_post;
@@ -164,6 +178,7 @@ run_one(run_t *r, int ev, int ctx, int prefix)
     __CPROVER_assume(r->now >= 1 && r->now <= (1ULL << 62)); /* Dom item 7 */
     r->clock = arbitrary_clock();
     stub_clock = r->clock;
+    r->client = arbitrary_client();
     r->new_id = nondet_u64();
     __CPROVER_assume(r->new_id != 0 && r->new_id != r->pre.xqc_path_id);
     if (ev == OEV_STABLE_TICK) {
@@ -187,7 +202,7 @@ run_one(run_t *r, int ev, int ctx, int prefix)
     path_event_ctx_t e = oracle_event_ctx(ctx, r->now, r->new_id);
     havoc_unread(&e, ctx);
     memset(&oracle_obs, 0, sizeof(oracle_obs));
-    oracle_dispatch(&r->post, ev, &e);
+    oracle_dispatch(r->client, &r->post, ev, &e);
     r->obs = oracle_obs;
 
     const int abs_defined =
@@ -266,7 +281,7 @@ harness_null_ctx(void)
     stub_clock = arbitrary_clock(); /* the branch reads no clock today */
 
     memset(&oracle_obs, 0, sizeof(oracle_obs));
-    oracle_dispatch(&p, ev, NULL);
+    oracle_dispatch(arbitrary_client(), &p, ev, NULL);
 
     /* Field by field (a struct memcmp would also compare padding): the
      * lifecycle and bookkeeping fields, ops and ctx here, the rest through the

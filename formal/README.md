@@ -120,7 +120,7 @@ Last verified (TLC 2.19, CBMC 5.95.1):
   illegal and rejected by `path_invariant_check()`; canary OK (the
   policy-constant check passes silently)
 - CBMC `harness` and `harness_null_ctx`: `VERIFICATION SUCCESSFUL`,
-  0 of 1977 properties failed in each, 42 of them `path_invariant_check()`
+  0 of 1989 properties failed in each, 42 of them `path_invariant_check()`
   assertions (about one minute, nearly all of it `harness`;
   `harness_null_ctx` takes about a second)
 
@@ -271,9 +271,13 @@ abstract slot alone is not: deleting the stable-window re-arm leaves
 ### The unit test
 
 `tests/test_path_slot_oracle.c` runs every row on the canonical
-concretization (`oracle_conc`). For each row it checks:
+concretization (`oracle_conc`). It dispatches with a non-NULL client
+pointer, as every production caller does; the FSM only hands it to the
+accessors, which the test stubs, so it is an opaque token. For each row it
+checks:
 
 - the abstract post-state and the observable calls;
+- that every accessor call receives that same client pointer;
 - the public status, against the row's `status` (the model's
   `Projection`, not the C function `path_public_status_from_lifecycle()`);
 - the update classes, hence the exact timer and counter values;
@@ -324,8 +328,10 @@ same event and context class, with independent concrete `now`, new id and
 timer values, and arbitrary values in the context fields the class does not
 use. Each run also has its own accessor clock: `client_now_us()` returns an
 arbitrary nonzero value, so the proof covers every value a handler may read
-from it (the state-entry stamp is checked against that run's value). CBMC
-proves that:
+from it (the state-entry stamp is checked against that run's value). And
+each run has its own client pointer, arbitrary and non-NULL as in
+production, which the stubs never dereference, so the abstract result
+cannot depend on its value. CBMC proves that:
 
 - both end in the same abstract state, with the same calls and update
   classes;
@@ -335,8 +341,8 @@ proves that:
   bounds, pointers, signed overflow, shifts, division by zero) is absent.
 
 A second harness, `harness_null_ctx`, proves that a NULL context changes
-nothing, for every slot, in the domain or not: no field of the slot (the
-frame included) and no call.
+nothing, for every slot, in the domain or not, and for any non-NULL client
+pointer: no field of the slot (the frame included) and no call.
 
 ### How the two proofs combine
 
