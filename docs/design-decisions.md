@@ -274,7 +274,10 @@ loop), so there is no fixed path cap to raise. The only limit,
   silently no-ops `assert()`-based unit tests. Never base a "tests pass"
   claim on a Release build — use a Debug/sanitizer build. Test files that
   use `assert()` carry `#undef NDEBUG`; `tests/check_ndebug_guard.sh` (a
-  ctest target) enforces it.
+  ctest target) enforces it. A test that needs `assert()` live in a `src/`
+  file it compiles (`test_path_slot_oracle` builds its own copy of
+  `path_state_machine.c`) sets `-UNDEBUG` on its target and starts with a
+  canary that fails when the asserts are compiled out.
 - A plain gcc Debug build misses what the CI sanitizer job catches
   (`-Wcomment`, `-Wswitch`, alignment); that is why clang `-Werror` and
   ASan/UBSan are required before pushing non-trivial C changes (see the
