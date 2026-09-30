@@ -67,7 +67,9 @@ VARIABLES
   xqcSideActive, \* the slot's xquic path is ACTIVE on the xquic side
   pendingXqcRemoval, \* <<id, incarnation>>: path closed in xquic, removal
                      \* notification not yet delivered
-  nextXqcId,     \* fresh-id allocator (xquic never reuses a path id)
+  nextXqcId,     \* fresh-id allocator; xquic never reuses a path id within a
+                 \* connection, and one allocator for all connections is only
+                 \* a tighter bound, as ConnDown flushes pending removals
   abandonCount,  \* spontaneous abandons (bounded)
   \* --- platform ---
   releaseObligations, \* handles whose release the platform still owes
@@ -433,7 +435,10 @@ DeliverRelease ==
           /\ opsSet
        THEN /\ opsSet' = FALSE
             /\ releaseCount' = [releaseCount EXCEPT ![h] = @ + 1]
-            /\ Fire("TRANSPORT_RELEASED", NoCtx)
+            /\ slot' = Fsm!Step(slot, "TRANSPORT_RELEASED", NoCtx).slot
+            \* Stamped with the delivered handle, not inc, so that
+            \* StaleEventHarmless checks the handle guard.
+            /\ lastTrigger' = <<"TRANSPORT_RELEASED", h>>
        ELSE UNCHANGED <<opsSet, releaseCount, slot, lastTrigger>>
     /\ UNCHANGED <<inc, destroyed, conn, mpReady, mp, mpCredit, closeCount,
                    xqcSideActive, pendingXqcRemoval, nextXqcId, abandonCount,
