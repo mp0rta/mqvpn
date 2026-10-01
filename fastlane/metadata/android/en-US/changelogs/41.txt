@@ -1,0 +1,10 @@
+- Plugging in Ethernet no longer drops Wi-Fi: Wi-Fi, mobile data and
+  Ethernet stay up together.
+- New setting "Use Bluetooth tethering" adds a connection shared over
+  Bluetooth.
+- A network that gets its IPv4 address after IPv6 is now used once the
+  address arrives.
+- Fix the tunnel not starting again after Android refused a network
+  request.
+- Hybrid mode: heavy transfers no longer delay other tunnel traffic by
+  seconds.
