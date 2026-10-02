@@ -625,6 +625,12 @@ typedef struct {
     mqvpn_server_t *svr;
     probe_conn_t probe;
     harness_egress_fd_t egress_fds[HARNESS_MAX_EGRESS_FDS];
+    int egress_dispatches; /* mqvpn_server_on_egress_fd_ready calls made by
+                            * harness_pump — a test resets and reads it. */
+    int freeze_probe;      /* 1: harness_pump neither feeds nor runs the
+                            * probe engine, so nothing the server sends is
+                            * ever answered (keeps an H3 stream from ever
+                            * finishing its close). */
 } harness_t;
 
 /* mqvpn_server_callbacks_t.egress_fd_register implementation: records/
@@ -825,7 +831,7 @@ harness_pump(harness_t *h, const int *done, int budget_ms)
         socklen_t from_len;
 
         mqvpn_bind_posix_server_drain(h->svr_tctx, h->svr, 64);
-        for (;;) {
+        for (; !h->freeze_probe;) {
             from_len = sizeof(from);
             ssize_t n = recvfrom(h->cli_fd, buf, sizeof(buf), MSG_DONTWAIT,
                                  (struct sockaddr *)&from, &from_len);
@@ -856,6 +862,7 @@ harness_pump(harness_t *h, const int *done, int budget_ms)
             if (poll(&epfd, 1, 0) > 0 && epfd.revents != 0) {
                 int readable = (epfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
                 int writable = (epfd.revents & (POLLOUT | POLLERR)) != 0;
+                h->egress_dispatches++;
                 mqvpn_server_on_egress_fd_ready(h->svr, h->egress_fds[i].fd,
                                                 h->egress_fds[i].fd_ctx, readable,
                                                 writable);
@@ -863,7 +870,7 @@ harness_pump(harness_t *h, const int *done, int budget_ms)
         }
 
         mqvpn_server_tick(h->svr);
-        xqc_engine_main_logic(h->probe.engine);
+        if (!h->freeze_probe) xqc_engine_main_logic(h->probe.engine);
 
         if (*done) break;
 
@@ -2157,6 +2164,92 @@ TEST(mqvpn_tcp_downlink_backpressure_pause_resume)
     free(h.probe.raw_recv_buf);
 }
 
+/* 1 if any egress fd the server registered currently asks for writable
+ * events — tcp_egress.c only does that for a downlink-paused ACTIVE flow
+ * (svr_tcp_egress_update_fd_interest), so this is the harness-visible
+ * "the relay hit send() backpressure" signal. */
+static int
+harness_egress_wants_write(const harness_t *h)
+{
+    for (int i = 0; i < HARNESS_MAX_EGRESS_FDS; i++)
+        if (h->egress_fds[i].active && h->egress_fds[i].want_write) return 1;
+    return 0;
+}
+
+/* Relay-error busy loop (test server, 2026-10-03: ~64k "relay I/O error
+ * (errno=32)" lines in under two seconds). A downlink-paused flow keeps
+ * want_write armed; when the upstream RSTs the egress socket, a reset
+ * socket is level-triggered writable forever, so unless the relay error
+ * drops fd interest, every reactor pass re-runs flush_downlink_retry ->
+ * send() EPIPE -> on_relay_error until the H3 close notify finally destroys
+ * the flow — one round trip to the client away in production, never in
+ * this test (the probe is frozen after the RST). The flow must be
+ * dispatched at most once after the RST. */
+TEST(mqvpn_tcp_relay_error_stops_fd_dispatch)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0); /* never reads */
+    /* A small receive buffer (inherited by the accepted socket, so it must
+     * be set before the server connects) makes the server's send() block
+     * after a few KiB instead of after loopback's multi-MiB autotuned
+     * buffers. */
+    int rcvbuf = 4096;
+    ASSERT_EQ(setsockopt(sink.listen_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)),
+              0);
+
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    h.probe.path = path;
+    h.probe.raw_capture = 1;
+
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+    harness_pump_with_sink(&h, &sink, &h.probe.response_done, 10000);
+    ASSERT_EQ(h.probe.response_done, 1);
+    ASSERT_STREQ(h.probe.status, "200");
+    ASSERT_EQ(sink.conn_fd >= 0, 1);
+
+    /* Upload until the server's send() blocks and it parks the flow with
+     * want_write=1 (the same forcing as the backpressure test above, but
+     * open-ended: the same chunk is resent until the pause shows up). */
+    uint8_t chunk[16384];
+    memset(chunk, 0xA5, sizeof(chunk));
+    for (int i = 0; i < 2000 && !harness_egress_wants_write(&h); i++) {
+        ssize_t sent = xqc_h3_request_send_body(h.probe.req, chunk, sizeof(chunk), 0);
+        ASSERT_EQ(sent > 0 || sent == -XQC_EAGAIN, 1);
+        int never = 0;
+        harness_pump(&h, &never, 20);
+    }
+    ASSERT_EQ(harness_egress_wants_write(&h), 1);
+
+    /* RST the egress socket: SO_LINGER{on, 0} turns the close into a reset
+     * (unread data in the receive buffer would too — this makes it
+     * explicit). Freeze the probe first so the server's RESET_STREAM is
+     * never answered and the close notify cannot rescue the flow. */
+    h.freeze_probe = 1;
+    struct linger lg = {.l_onoff = 1, .l_linger = 0};
+    ASSERT_EQ(setsockopt(sink.conn_fd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg)), 0);
+    close(sink.conn_fd);
+    sink.conn_fd = -1;
+
+    h.egress_dispatches = 0;
+    for (int i = 0; i < 50; i++) {
+        int never = 0;
+        harness_pump(&h, &never, 1);
+    }
+    ASSERT_EQ(h.egress_dispatches <= 1, 1);
+
+    h.freeze_probe = 0;
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
 /* Closing-notify idempotency. (Uplink -XQC_EAGAIN coverage note: the
  * stash-WRITE half of that path — send_body backpressure parking the flow
  * via svr_tcp_egress_stash_uplink — IS exercised by
@@ -3105,6 +3198,7 @@ main(void)
     run_mqvpn_tcp_h3_fin_becomes_shut_wr();
     run_mqvpn_tcp_bodiless_fin_becomes_shut_wr();
     run_mqvpn_tcp_downlink_backpressure_pause_resume();
+    run_mqvpn_tcp_relay_error_stops_fd_dispatch();
     run_mqvpn_tcp_closing_notify_idempotent();
     run_mqvpn_tcp_active_idle_timeout_evicts();
     run_mqvpn_tcp_two_flow_same_conn_idle_eviction();
