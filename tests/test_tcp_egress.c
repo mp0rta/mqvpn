@@ -2184,7 +2184,9 @@ harness_egress_wants_write(const harness_t *h)
  * send() EPIPE -> on_relay_error until the H3 close notify finally destroys
  * the flow — one round trip to the client away in production, never in
  * this test (the probe is frozen after the RST). The flow must be
- * dispatched at most once after the RST. */
+ * dispatched exactly once after the RST: the first pass reaches the relay
+ * error (the slot is armed, the reset socket is writable, the send fails),
+ * and the teardown it triggers must leave nothing to dispatch again. */
 TEST(mqvpn_tcp_relay_error_stops_fd_dispatch)
 {
     tcp_sink_t sink;
@@ -2242,7 +2244,7 @@ TEST(mqvpn_tcp_relay_error_stops_fd_dispatch)
         int never = 0;
         harness_pump(&h, &never, 1);
     }
-    ASSERT_EQ(h.egress_dispatches <= 1, 1);
+    ASSERT_EQ(h.egress_dispatches, 1);
 
     h.freeze_probe = 0;
     harness_stop(&h);
