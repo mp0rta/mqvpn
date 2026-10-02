@@ -52,6 +52,13 @@ data class MqvpnConfig(
     val reorderPorts: List<Int> = emptyList(),
     val hybridEnabled: Boolean = false,
     val hybridTcpMode: HybridTcpMode = HybridTcpMode.AUTO,
+    /**
+     * Keep a Bluetooth-tethered network connected as a path next to the
+     * others. Wi-Fi, cellular and Ethernet are always kept. With `false`,
+     * Bluetooth is a path only when Android connects it on its own, which it
+     * normally does not do while Wi-Fi or Ethernet is connected.
+     */
+    val bluetoothPathEnabled: Boolean = false,
 ) : Parcelable {
 
     @Serializable

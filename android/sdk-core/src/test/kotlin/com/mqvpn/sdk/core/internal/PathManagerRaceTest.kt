@@ -178,14 +178,16 @@ class PathManagerRaceTest {
         val monitor = NetworkMonitor(context)
         val events = mutableListOf<NetworkEvent>()
         monitor.start { events.add(it) }
-        val cb = Shadows.shadowOf(context.getSystemService(ConnectivityManager::class.java))
-            .networkCallbacks.single()
+        // The monitor also registers its holds, which are no-op callbacks: an
+        // update goes to every callback, as the system delivers it.
+        val cbs = Shadows.shadowOf(context.getSystemService(ConnectivityManager::class.java))
+            .networkCallbacks.toList()
         val net = newNetwork(netId = 600)
         val caps = ShadowNetworkCapabilities.newInstance()
         Shadows.shadowOf(caps).addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
 
-        cb.onCapabilitiesChanged(net, caps)
-        cb.onCapabilitiesChanged(net, caps)
+        cbs.forEach { it.onCapabilitiesChanged(net, caps) }
+        cbs.forEach { it.onCapabilitiesChanged(net, caps) }
         assertEquals("a network that stays up is announced once", 1,
             events.count { it is NetworkEvent.Available })
 
@@ -203,7 +205,7 @@ class PathManagerRaceTest {
         injectLedger(pm, net, handle = 42L, fd = FAKE_FD)
 
         pm.handleBadFd(42L)
-        cb.onCapabilitiesChanged(net, caps)
+        cbs.forEach { it.onCapabilitiesChanged(net, caps) }
 
         assertEquals("no Lost comes while the network stays up: the next update re-adds it", 2,
             events.count { it is NetworkEvent.Available })

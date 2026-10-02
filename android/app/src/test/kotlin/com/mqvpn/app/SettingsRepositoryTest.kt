@@ -92,6 +92,7 @@ class SettingsRepositoryTest {
             reorderPorts = "443,8443",
             hybridEnabled = true,
             hybridTcpMode = "RAW",
+            bluetoothPathEnabled = true,
         )
 
         repo.save(nonDefault)
@@ -206,6 +207,7 @@ class SettingsRepositoryTest {
             reorderPorts = "443,8443",
             hybridEnabled = true,
             hybridTcpMode = "RAW",
+            bluetoothPathEnabled = true,
         )
 
         repo.save(nonDefault)

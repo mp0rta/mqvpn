@@ -89,6 +89,7 @@ fun SettingsScreen(
     var hybridTcpModeName by rememberSaveable {
         mutableStateOf(MqvpnConfig.HybridTcpMode.AUTO.name)
     }
+    var bluetoothPathEnabled by rememberSaveable { mutableStateOf(false) }
 
     // Seed during composition (not LaunchedEffect) to avoid a one-frame flash
     // of empty fields; seeded gate makes it write-once.
@@ -105,6 +106,7 @@ fun SettingsScreen(
         reorderPorts = current.reorderPorts
         hybridEnabled = current.hybridEnabled
         hybridTcpModeName = current.hybridTcpMode
+        bluetoothPathEnabled = current.bluetoothPathEnabled
         seeded = true
     }
 
@@ -120,6 +122,7 @@ fun SettingsScreen(
         reorderPorts = reorderPorts,
         hybridEnabled = hybridEnabled,
         hybridTcpMode = hybridTcpModeName,
+        bluetoothPathEnabled = bluetoothPathEnabled,
     )
 
     val fieldsEnabled = isEditable && !isSaving
@@ -332,6 +335,23 @@ fun SettingsScreen(
             Spacer(modifier = Modifier.height(4.dp))
             Text(
                 "Requires hybrid support on the server; TCP connections fail otherwise.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text("Connections", style = MaterialTheme.typography.titleSmall)
+            Spacer(modifier = Modifier.height(8.dp))
+            LabeledSwitchRow(
+                label = "Use Bluetooth tethering",
+                checked = bluetoothPathEnabled,
+                onCheckedChange = { bluetoothPathEnabled = it },
+                enabled = fieldsEnabled,
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "Wi-Fi, mobile data and Ethernet are always used together. Turn this on to " +
+                    "also use an internet connection shared over Bluetooth; set it up in the " +
+                    "system Bluetooth settings first.",
                 style = MaterialTheme.typography.bodySmall,
             )
 

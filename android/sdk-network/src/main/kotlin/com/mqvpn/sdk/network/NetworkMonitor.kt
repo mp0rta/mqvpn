@@ -13,12 +13,26 @@ import androidx.core.content.getSystemService
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Monitors WiFi / Cellular / Ethernet availability via ConnectivityManager.
+ * Monitors WiFi / Cellular / Ethernet / Bluetooth availability via
+ * ConnectivityManager.
  *
  * Uses NET_CAPABILITY_VALIDATED to filter out captive portals and
  * unvalidated networks that would cause packet loss if used as VPN paths.
+ *
+ * Android keeps a network connected only while a request is served by it,
+ * and the default request is served by one network at a time. The monitor
+ * therefore holds one request per transport while it runs: without them an
+ * Ethernet adapter takes Wi-Fi down, and a Bluetooth tether never comes up
+ * next to Wi-Fi. The holds only keep networks connected; paths still come
+ * from the listening callback.
+ *
+ * @param holdBluetooth Also hold a Bluetooth-tethered network. When false it
+ *   is still used as a path whenever Android connects it on its own.
  */
-class NetworkMonitor(private val context: Context) {
+class NetworkMonitor(
+    private val context: Context,
+    private val holdBluetooth: Boolean = false,
+) {
 
     private val cm = context.getSystemService<ConnectivityManager>()!!
 
@@ -26,6 +40,7 @@ class NetworkMonitor(private val context: Context) {
     val activeNetworks: Map<Network, NetworkPath> get() = _activeNetworks
 
     private var callback: ConnectivityManager.NetworkCallback? = null
+    private val holds = mutableListOf<ConnectivityManager.NetworkCallback>()
 
     fun start(listener: (NetworkEvent) -> Unit) {
         val request = NetworkRequest.Builder()
@@ -64,6 +79,18 @@ class NetworkMonitor(private val context: Context) {
 
         callback = cb
         cm.registerNetworkCallback(request, cb)
+
+        for (transport in holdTransports(holdBluetooth)) {
+            val hold = ConnectivityManager.NetworkCallback()
+            cm.requestNetwork(
+                NetworkRequest.Builder()
+                    .addTransportType(transport)
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .build(),
+                hold,
+            )
+            holds += hold
+        }
     }
 
     /** Remove a network so the next onCapabilitiesChanged treats it as new. */
@@ -74,6 +101,8 @@ class NetworkMonitor(private val context: Context) {
     fun stop() {
         callback?.let { cm.unregisterNetworkCallback(it) }
         callback = null
+        holds.forEach { cm.unregisterNetworkCallback(it) }
+        holds.clear()
         _activeNetworks.clear()
     }
 
@@ -84,7 +113,16 @@ class NetworkMonitor(private val context: Context) {
             caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> PathType.WIFI
             caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> PathType.CELLULAR
             caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> PathType.ETHERNET
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH) -> PathType.BLUETOOTH
             else -> PathType.OTHER
+        }
+
+        /** Transports whose network is held while the monitor runs. */
+        internal fun holdTransports(holdBluetooth: Boolean): List<Int> = buildList {
+            add(NetworkCapabilities.TRANSPORT_WIFI)
+            add(NetworkCapabilities.TRANSPORT_CELLULAR)
+            add(NetworkCapabilities.TRANSPORT_ETHERNET)
+            if (holdBluetooth) add(NetworkCapabilities.TRANSPORT_BLUETOOTH)
         }
 
         internal fun networkName(network: Network, type: PathType): String =

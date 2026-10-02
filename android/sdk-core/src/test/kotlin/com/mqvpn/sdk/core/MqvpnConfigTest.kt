@@ -152,4 +152,21 @@ class MqvpnConfigTest {
         p.recycle()
         assertEquals(c, back)
     }
+
+    @Test
+    fun bluetoothPath_defaultsToOff() {
+        assertFalse(MqvpnConfig(serverAddress = "h", authKey = "k").bluetoothPathEnabled)
+    }
+
+    @Test
+    fun bluetoothPath_jsonRoundTrip() {
+        val c = MqvpnConfig(serverAddress = "h", authKey = "k", bluetoothPathEnabled = true)
+        assertEquals(c, MqvpnConfig.fromJson(c.toJson()))
+    }
+
+    @Test
+    fun oldJsonWithoutBluetoothPath_decodesWithDefault() {
+        val oldJson = """{"serverAddress":"h","authKey":"k"}"""
+        assertFalse(MqvpnConfig.fromJson(oldJson).bluetoothPathEnabled)
+    }
 }

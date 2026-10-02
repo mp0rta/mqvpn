@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Cable
 import androidx.compose.material.icons.filled.SignalCellularAlt
 import androidx.compose.material.icons.filled.Wifi
@@ -49,6 +50,7 @@ fun PathCard(path: PathInfo) {
         path.iface.startsWith("wifi") || path.iface.startsWith("wlan") -> Icons.Default.Wifi
         path.iface.startsWith("cellular") || path.iface.startsWith("rmnet") || path.iface.startsWith("ccmni") ->
             Icons.Default.SignalCellularAlt
+        path.iface.startsWith("bluetooth") -> Icons.Default.Bluetooth
         else -> Icons.Default.Cable
     }
     val statusName = pathStatusName(path.status)

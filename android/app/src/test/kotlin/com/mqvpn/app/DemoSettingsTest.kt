@@ -150,6 +150,12 @@ class DemoSettingsTest {
         assertEquals(8443, settings.toMqvpnConfig().serverPort)
     }
 
+    @Test
+    fun `toMqvpnConfig passes bluetoothPathEnabled through`() {
+        assertEquals(false, DemoSettings().toMqvpnConfig().bluetoothPathEnabled)
+        assertEquals(true, DemoSettings(bluetoothPathEnabled = true).toMqvpnConfig().bluetoothPathEnabled)
+    }
+
     // -- validation predicates ------------------------------------------------
 
     @Test

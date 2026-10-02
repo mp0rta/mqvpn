@@ -23,6 +23,7 @@ data class DemoSettings(
     val reorderPorts: String = "443",
     val hybridEnabled: Boolean = false,
     val hybridTcpMode: String = MqvpnConfig.HybridTcpMode.AUTO.name,
+    val bluetoothPathEnabled: Boolean = false,
 ) {
     fun reorderProfileEnum(): MqvpnConfig.ReorderProfile =
         MqvpnConfig.ReorderProfile.entries.firstOrNull { it.name == reorderProfile }
@@ -57,6 +58,7 @@ data class DemoSettings(
         reorderPorts = parsedReorderPorts(),
         hybridEnabled = hybridEnabled,
         hybridTcpMode = hybridTcpModeEnum(),
+        bluetoothPathEnabled = bluetoothPathEnabled,
     )
 
     fun hostValid(): Boolean = serverAddress.trim().isNotBlank()
