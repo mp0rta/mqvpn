@@ -5,6 +5,7 @@ package com.mqvpn.sdk.network
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import org.junit.Assert.assertEquals
@@ -14,6 +15,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows
+import org.robolectric.shadow.api.Shadow
 import org.robolectric.shadows.ShadowConnectivityManager
 import org.robolectric.shadows.ShadowNetwork
 import org.robolectric.shadows.ShadowNetworkCapabilities
@@ -143,6 +145,63 @@ class NetworkMonitorTest {
         monitor.start { events.add(it) }
         monitor.stop()
         assertTrue(monitor.activeNetworks.isEmpty())
+    }
+
+    @Test
+    fun `a link-property update re-announces a network dropped after a failed bind`() {
+        val (monitor, events, update) = startedMonitor()
+        val net = ShadowNetwork.newInstance(700)
+        update { it.onCapabilitiesChanged(net, wifiCaps()) }
+        assertEquals(1, events.count { it is NetworkEvent.Available })
+
+        // The bind failed (e.g. the IPv4 address had not arrived yet).
+        monitor.removeNetwork(net)
+        update { it.onLinkPropertiesChanged(net, Shadow.newInstanceOf(LinkProperties::class.java)) }
+
+        assertEquals(2, events.count { it is NetworkEvent.Available })
+        monitor.stop()
+    }
+
+    @Test
+    fun `a link-property update does not re-announce an active network`() {
+        val (monitor, events, update) = startedMonitor()
+        val net = ShadowNetwork.newInstance(701)
+        update { it.onCapabilitiesChanged(net, wifiCaps()) }
+        update { it.onLinkPropertiesChanged(net, Shadow.newInstanceOf(LinkProperties::class.java)) }
+
+        assertEquals(1, events.count { it is NetworkEvent.Available })
+        monitor.stop()
+    }
+
+    @Test
+    fun `a link-property update after the loss announces nothing`() {
+        val (monitor, events, update) = startedMonitor()
+        val net = ShadowNetwork.newInstance(702)
+        update { it.onCapabilitiesChanged(net, wifiCaps()) }
+        update { it.onLost(net) }
+        update { it.onLinkPropertiesChanged(net, Shadow.newInstanceOf(LinkProperties::class.java)) }
+
+        assertEquals(1, events.count { it is NetworkEvent.Available })
+        assertEquals(1, events.count { it is NetworkEvent.Lost })
+        monitor.stop()
+    }
+
+    private fun wifiCaps(): NetworkCapabilities = ShadowNetworkCapabilities.newInstance().also {
+        Shadows.shadowOf(it).addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+    }
+
+    /**
+     * A started monitor, its events, and a way to deliver an update. The holds
+     * are no-op callbacks, so an update goes to every registered callback, as
+     * the system delivers it.
+     */
+    private fun startedMonitor(): Triple<NetworkMonitor, List<NetworkEvent>, ((ConnectivityManager.NetworkCallback) -> Unit) -> Unit> {
+        val context = RuntimeEnvironment.getApplication()
+        val monitor = NetworkMonitor(context)
+        val events = mutableListOf<NetworkEvent>()
+        monitor.start { events.add(it) }
+        val callbacks = registeredCallbacks(context).toList()
+        return Triple(monitor, events) { deliver -> callbacks.forEach(deliver) }
     }
 
     /** Live view of the callbacks registered with the shadow ConnectivityManager. */

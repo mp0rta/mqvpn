@@ -5,6 +5,7 @@ package com.mqvpn.sdk.network
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
@@ -39,6 +40,10 @@ class NetworkMonitor(
     private val _activeNetworks = ConcurrentHashMap<Network, NetworkPath>()
     val activeNetworks: Map<Network, NetworkPath> get() = _activeNetworks
 
+    // Every network the listener matches, active or not: a network dropped
+    // with removeNetwork() is announced again from here.
+    private val knownNetworks = ConcurrentHashMap<Network, NetworkPath>()
+
     private var callback: ConnectivityManager.NetworkCallback? = null
     private val holds = mutableListOf<ConnectivityManager.NetworkCallback>()
 
@@ -63,17 +68,31 @@ class NetworkMonitor(
                     NetworkCapabilities.NET_CAPABILITY_NOT_METERED,
                 )
                 val path = NetworkPath(network, type, name, metered)
-                val isNew = _activeNetworks.put(network, path) == null
+                knownNetworks[network] = path
+                announce(path)
+            }
+
+            // A dual-stack network can validate over IPv6 before DHCPv4
+            // finishes; an IPv4-only server name resolves only once the IPv4
+            // address arrives, and that changes the link properties, not the
+            // capabilities. A path whose bind failed is retried from here too.
+            override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+                knownNetworks[network]?.let { announce(it) }
+            }
+
+            override fun onLost(network: Network) {
+                knownNetworks.remove(network)
+                val path = _activeNetworks.remove(network) ?: return
+                Log.d(TAG, "Lost: $path")
+                listener(NetworkEvent.Lost(path))
+            }
+
+            private fun announce(path: NetworkPath) {
+                val isNew = _activeNetworks.put(path.network, path) == null
                 if (isNew) {
                     Log.d(TAG, "Available: $path")
                     listener(NetworkEvent.Available(path))
                 }
-            }
-
-            override fun onLost(network: Network) {
-                val path = _activeNetworks.remove(network) ?: return
-                Log.d(TAG, "Lost: $path")
-                listener(NetworkEvent.Lost(path))
             }
         }
 
@@ -93,7 +112,7 @@ class NetworkMonitor(
         }
     }
 
-    /** Remove a network so the next onCapabilitiesChanged treats it as new. */
+    /** Remove a network so the next capability or link-property update treats it as new. */
     fun removeNetwork(network: Network) {
         _activeNetworks.remove(network)
     }
@@ -104,6 +123,7 @@ class NetworkMonitor(
         holds.forEach { cm.unregisterNetworkCallback(it) }
         holds.clear()
         _activeNetworks.clear()
+        knownNetworks.clear()
     }
 
     companion object {
