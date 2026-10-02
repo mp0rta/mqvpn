@@ -96,8 +96,10 @@ class NetworkMonitor(
             }
         }
 
-        callback = cb
+        // Each callback is recorded only once registered: when a registration
+        // throws, stop() releases exactly the ones that went through.
         cm.registerNetworkCallback(request, cb)
+        callback = cb
 
         for (transport in holdTransports(holdBluetooth)) {
             val hold = ConnectivityManager.NetworkCallback()

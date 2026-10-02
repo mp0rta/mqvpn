@@ -8,13 +8,16 @@ import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
+import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows
+import org.robolectric.annotation.Config
 import org.robolectric.shadow.api.Shadow
 import org.robolectric.shadows.ShadowConnectivityManager
 import org.robolectric.shadows.ShadowNetwork
@@ -22,6 +25,9 @@ import org.robolectric.shadows.ShadowNetworkCapabilities
 
 @RunWith(RobolectricTestRunner::class)
 class NetworkMonitorTest {
+
+    @After
+    fun resetRefusals() = RefusingConnectivityManagerShadow.reset()
 
     @Test
     fun `classifyTransport returns WIFI for wifi transport`() {
@@ -184,6 +190,35 @@ class NetworkMonitorTest {
         assertEquals(1, events.count { it is NetworkEvent.Available })
         assertEquals(1, events.count { it is NetworkEvent.Lost })
         monitor.stop()
+    }
+
+    @Test
+    @Config(shadows = [RefusingConnectivityManagerShadow::class])
+    fun `stop releases what a start refused partway registered`() {
+        RefusingConnectivityManagerShadow.requestsBeforeRefusal = 1
+        val context = RuntimeEnvironment.getApplication()
+        val registered = registeredCallbacks(context)
+        val monitor = NetworkMonitor(context)
+
+        assertThrows(SecurityException::class.java) { monitor.start {} }
+        assertEquals("the listener and the first hold went through", 2, registered.size)
+
+        monitor.stop()
+        assertTrue("still registered: $registered", registered.isEmpty())
+    }
+
+    @Test
+    @Config(shadows = [RefusingConnectivityManagerShadow::class])
+    fun `stop after a refused listener does not unregister it`() {
+        RefusingConnectivityManagerShadow.refuseListen = true
+        val context = RuntimeEnvironment.getApplication()
+        val registered = registeredCallbacks(context)
+        val monitor = NetworkMonitor(context)
+
+        assertThrows(SecurityException::class.java) { monitor.start {} }
+
+        monitor.stop() // the framework throws on unregistering a callback it never registered
+        assertTrue("still registered: $registered", registered.isEmpty())
     }
 
     private fun wifiCaps(): NetworkCapabilities = ShadowNetworkCapabilities.newInstance().also {

@@ -137,8 +137,16 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
             )
             pathManager = pm
 
-            monitor.start { event ->
-                scope.launch(Dispatchers.IO) { pm.handleEvent(event) }
+            // A refused network request throws here. The executor only logs
+            // the exception, so without the cleanup the half-built session
+            // would keep `tunnel` set and refuse every later startTunnel.
+            try {
+                monitor.start { event ->
+                    scope.launch(Dispatchers.IO) { pm.handleEvent(event) }
+                }
+            } catch (e: Exception) {
+                cleanup()
+                throw e
             }
 
             emitState(MqvpnState.Connecting)
