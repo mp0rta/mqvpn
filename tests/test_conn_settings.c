@@ -383,6 +383,24 @@ test_defer_flush_tracks_batch_registration(void)
     return 0;
 }
 
+/* Both sides cap their stream backlog: the client's bounds the upload,
+ * the server's the download. */
+static int
+test_stream_unsent_cap_both_sides(void)
+{
+    for (int server = 0; server <= 1; server++) {
+        xqc_conn_settings_t cs;
+        mqvpn_conn_settings_input_t in = {
+            .is_server = server,
+            .enable_multipath = true,
+            .scheduler = MQVPN_SCHED_WLB,
+        };
+        mqvpn_build_conn_settings(&in, &cs);
+        ASSERT_EQ(cs.max_stream_unsent_packets, MQVPN_STREAM_UNSENT_PACKETS);
+    }
+    return 0;
+}
+
 int
 main(void)
 {
@@ -395,6 +413,7 @@ main(void)
     failed += test_server_forces_multipath_regardless_of_input();
     failed += test_recv_rate_limit_wiring();
     failed += test_reinjection_mapping();
+    failed += test_stream_unsent_cap_both_sides();
     if (failed) {
         fprintf(stderr, "test_conn_settings: %d FAILED\n", failed);
         return 1;

@@ -15,6 +15,11 @@
 #include <stdint.h>
 #include <xquic/xquic.h>
 
+/* Packets a connection may hold framed but unsent before a stream write
+ * gets -XQC_EAGAIN (xqc_conn_settings_t.max_stream_unsent_packets);
+ * mqvpn_conn_settings.c explains the number. */
+#define MQVPN_STREAM_UNSENT_PACKETS 1024
+
 /* Caller-driven inputs. The bools are parameterised (not a single
  * `is_server` flag) so each call site documents its intent. */
 typedef struct {

@@ -2252,6 +2252,62 @@ TEST(mqvpn_tcp_relay_error_stops_fd_dispatch)
     free(h.probe.raw_recv_buf);
 }
 
+/* Upload-direction backlog cap (test server, 2026-10-03 speedtest: one
+ * upload flow's client had handed xquic 11.1 MB while the server had
+ * received 1.78 MB, and the speedtest server reset the connection). A stream
+ * write frames data as far as flow control allows, and the stock windows are
+ * 16 MiB, so without a cap that much can wait unsent in the sender. Here no
+ * harness_pump runs after the 200, so no ACK reaches the probe: what it
+ * sends is held to its initial congestion window (32 packets under BBR2),
+ * and the rest of what send_body accepts is unsent backlog, which must stop
+ * at MQVPN_STREAM_UNSENT_PACKETS packets. */
+TEST(mqvpn_tcp_uplink_backlog_stops_at_unsent_cap)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0);
+
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    h.probe.path = path;
+    h.probe.raw_capture = 1;
+
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+    harness_pump_with_sink(&h, &sink, &h.probe.response_done, 10000);
+    ASSERT_EQ(h.probe.response_done, 1);
+    ASSERT_STREQ(h.probe.status, "200");
+
+    /* No harness_pump from here on. The 24 MiB stop is above the stock
+     * stream window, so an uncapped stream ends the loop instead of hanging
+     * the test. */
+    static uint8_t chunk[65536];
+    memset(chunk, 0xA5, sizeof(chunk));
+    size_t accepted = 0;
+    while (accepted < 24u * 1024 * 1024) {
+        ssize_t sent = xqc_h3_request_send_body(h.probe.req, chunk, sizeof(chunk), 0);
+        if (sent == -XQC_EAGAIN) break;
+        ASSERT_EQ(sent > 0, 1);
+        accepted += (size_t)sent;
+    }
+    /* The cap plus two initial windows: room for the packets already sent
+     * and for any cwnd growth from handshake ACKs. */
+    const size_t cap_bytes = (size_t)MQVPN_STREAM_UNSENT_PACKETS * MQVPN_MAX_PKT_OUT_SIZE;
+    const size_t bound = cap_bytes + 64u * MQVPN_MAX_PKT_OUT_SIZE;
+    size_t over_bound = accepted > bound ? accepted : 0;
+    ASSERT_EQ(over_bound, 0); /* on failure, prints what was accepted */
+    /* ...and it is the cap that stopped it, not something smaller. */
+    ASSERT_EQ(accepted > cap_bytes / 2, 1);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
 /* Closing-notify idempotency. (Uplink -XQC_EAGAIN coverage note: the
  * stash-WRITE half of that path — send_body backpressure parking the flow
  * via svr_tcp_egress_stash_uplink — IS exercised by
@@ -3201,6 +3257,7 @@ main(void)
     run_mqvpn_tcp_bodiless_fin_becomes_shut_wr();
     run_mqvpn_tcp_downlink_backpressure_pause_resume();
     run_mqvpn_tcp_relay_error_stops_fd_dispatch();
+    run_mqvpn_tcp_uplink_backlog_stops_at_unsent_cap();
     run_mqvpn_tcp_closing_notify_idempotent();
     run_mqvpn_tcp_active_idle_timeout_evicts();
     run_mqvpn_tcp_two_flow_same_conn_idle_eviction();

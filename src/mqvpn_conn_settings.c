@@ -129,6 +129,31 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     out->idle_time_out = 120000;
     out->init_idle_time_out = 10000;
 
+    /* --- stream backlog cap ---
+     * A stream write frames data as far as the peer's flow-control window
+     * allows, and xquic's windows (16 MiB per stream) are far above what the
+     * path can carry in one RTT. On the hybrid TCP lane the client lane takes
+     * all lwIP hands it and the server relay all the upstream socket has, so
+     * the excess waits framed but unsent in the send queue, and every packet
+     * sent after it, DATAGRAM-lane traffic included, waits behind it: a
+     * 2026-10-03 speedtest had one upload flow 9 MB ahead of what the server
+     * had received, and eight parallel flows on a 30 Mbit/s pair measured
+     * ~6 s of tunnel ping. Capping the unsent part, rather than shrinking the
+     * windows, leaves throughput to cwnd and the windows.
+     *
+     * 1024 packets (~1.4 MB), measured on a shaped two-path pair: eight
+     * flows on 20+10 Mbit/s keep their throughput with ~0.7 s of tunnel ping
+     * instead of ~6 s, and one flow on a lossy 40+100 Mbit/s pair and four
+     * on 300+80 Mbit/s keep theirs too. The known cost is at the top end:
+     * upload over a 1.5 Gbit/s internet path lost 5-10% (ping 70-120 ms
+     * down to ~18 ms); download there was within its run-to-run spread.
+     * 256 cut the ping further but lost 13-46% of the shaped throughput.
+     * Suspected, not yet confirmed: with a short queue the send list empties
+     * into the per-path buffers, and xqc_sample_check_app_limited (see its
+     * multipath FIXME) then marks a path with an empty buffer app-limited,
+     * so BBR stops raising its bandwidth estimate. */
+    out->max_stream_unsent_packets = MQVPN_STREAM_UNSENT_PACKETS;
+
     /* Caller-gated, never derived here: see the field comment in
      * mqvpn_conn_settings.h for why this must equal the batched-send
      * registration decision rather than any locally recomputed condition. */
