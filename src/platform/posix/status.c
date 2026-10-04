@@ -20,7 +20,12 @@
 #include <inttypes.h>
 #include <ctype.h>
 
-#define STATUS_BUF_SIZE 32768
+/* Read buffer for one control-API reply. It starts small and doubles up to
+ * STATUS_BUF_MAX: the server caps a reply at CTRL_MAX_RESP_BYTES (256 KiB,
+ * src/platform/linux/control_socket.h), and get_status reaches ~210 KB with
+ * MQVPN_MAX_USERS clients on MQVPN_MAX_PATHS paths each. */
+#define STATUS_BUF_INITIAL 32768
+#define STATUS_BUF_MAX     (1024 * 1024)
 
 /* JSON helpers (json_find_key, json_read_string, json_read_int64,
  * json_skip_ws) are provided by json_mini.h */
@@ -241,12 +246,25 @@ ctrl_query(const char *addr, int port, const char *cmd)
 
     shutdown(fd, SHUT_WR);
 
-    /* Read response (handle EINTR) */
-    buf = malloc(STATUS_BUF_SIZE);
+    /* Read the response to EOF (handle EINTR), growing the buffer as needed:
+     * a reply cut at a fixed size would be parsed as a shorter, valid-looking
+     * client list. */
+    size_t cap = STATUS_BUF_INITIAL;
+    buf = malloc(cap);
     if (!buf) goto fail;
     size_t total = 0;
-    while (total < STATUS_BUF_SIZE - 1) {
-        ssize_t n = read(fd, buf + total, STATUS_BUF_SIZE - 1 - total);
+    for (;;) {
+        if (total == cap - 1) {
+            if (cap >= STATUS_BUF_MAX) {
+                fprintf(stderr, "error: response larger than %d bytes\n", STATUS_BUF_MAX);
+                goto fail;
+            }
+            char *nb = realloc(buf, cap * 2);
+            if (!nb) goto fail;
+            buf = nb;
+            cap *= 2;
+        }
+        ssize_t n = read(fd, buf + total, cap - 1 - total);
         if (n < 0) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {

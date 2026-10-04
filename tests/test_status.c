@@ -16,6 +16,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 /* Pull in static functions from status.c */
 #include "../src/platform/posix/status.c"
@@ -297,6 +299,74 @@ TEST(json_find_key_empty_object)
     ASSERT_EQ((long long)(uintptr_t)val, 0);
 }
 
+/* ── ctrl_query reads the whole reply ── */
+
+/* Serve one connection on 127.0.0.1: read the request to EOF, answer with
+ * reply_len bytes ('x' * (reply_len - 1) + '\n'), close. Returns the child
+ * pid, and the port through *port. */
+static pid_t
+serve_one_reply(size_t reply_len, int *port)
+{
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    assert(lfd >= 0);
+    struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = 0};
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    assert(bind(lfd, (struct sockaddr *)&a, sizeof(a)) == 0);
+    assert(listen(lfd, 1) == 0);
+    socklen_t alen = sizeof(a);
+    assert(getsockname(lfd, (struct sockaddr *)&a, &alen) == 0);
+    *port = ntohs(a.sin_port);
+
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (pid == 0) {
+        signal(SIGPIPE, SIG_IGN); /* the cap test stops reading early */
+        int cfd = accept(lfd, NULL, NULL);
+        if (cfd < 0) _exit(1);
+        char req[256];
+        while (read(cfd, req, sizeof(req)) > 0) {}
+        char *reply = malloc(reply_len);
+        if (!reply) _exit(1);
+        memset(reply, 'x', reply_len - 1);
+        reply[reply_len - 1] = '\n';
+        size_t off = 0;
+        while (off < reply_len) {
+            ssize_t n = write(cfd, reply + off, reply_len - off);
+            if (n <= 0) break;
+            off += (size_t)n;
+        }
+        close(cfd);
+        _exit(0);
+    }
+    close(lfd);
+    return pid;
+}
+
+/* A get_status reply above the old fixed 32 KiB read buffer (the server
+ * allows up to 256 KiB) must come back whole, not cut mid-JSON. */
+TEST(ctrl_query_reads_reply_past_32k)
+{
+    int port = 0;
+    size_t len = 200 * 1024;
+    pid_t pid = serve_one_reply(len, &port);
+    char *buf = ctrl_query("127.0.0.1", port, "{\"cmd\":\"get_status\"}\n");
+    waitpid(pid, NULL, 0);
+    assert(buf != NULL);
+    ASSERT_EQ(strlen(buf), len);
+    ASSERT_EQ(buf[len - 1], '\n');
+    free(buf);
+}
+
+/* A reply past STATUS_BUF_MAX is reported as an error, not truncated. */
+TEST(ctrl_query_rejects_reply_past_max)
+{
+    int port = 0;
+    pid_t pid = serve_one_reply((size_t)STATUS_BUF_MAX + 4096, &port);
+    char *buf = ctrl_query("127.0.0.1", port, "{\"cmd\":\"get_status\"}\n");
+    waitpid(pid, NULL, 0);
+    assert(buf == NULL);
+}
+
 /* ── Main ── */
 
 int
@@ -346,6 +416,10 @@ main(void)
     /* JSON edge case tests */
     run_json_find_key_escaped_quotes();
     run_json_find_key_empty_object();
+
+    /* control-API reply reading */
+    run_ctrl_query_reads_reply_past_32k();
+    run_ctrl_query_rejects_reply_past_max();
 
     printf("\n  %d/%d tests passed\n", g_tests_passed, g_tests_run);
     return g_tests_passed == g_tests_run ? 0 : 1;
