@@ -707,6 +707,8 @@ typedef struct {
  * fixture and reset them after teardown. */
 static const char *g_lb_server_cert = NULL;
 static const char *g_lb_server_key = NULL;
+/* Server [Reorder] mode for the next loopback_setup; tests reset it. */
+static mqvpn_reorder_mode_t g_lb_server_reorder = MQVPN_REORDER_OFF;
 
 /* Sockets, server, client (with every client mock registered, tunnel_closed
  * and log included), one path, connect. `tweak` edits the client config
@@ -755,6 +757,9 @@ loopback_setup(loopback_t *lb, void (*tweak)(mqvpn_config_t *cfg))
     mqvpn_config_t *svr_cfg = make_server_config();
     if (g_lb_server_cert)
         ASSERT_EQ(mqvpn_config_set_tls_cert(svr_cfg, g_lb_server_cert, g_lb_server_key),
+                  MQVPN_OK);
+    if (g_lb_server_reorder != MQVPN_REORDER_OFF)
+        ASSERT_EQ(mqvpn_config_set_reorder_enabled(svr_cfg, g_lb_server_reorder),
                   MQVPN_OK);
     mqvpn_server_callbacks_t svr_cbs = MQVPN_SERVER_CALLBACKS_INIT;
     svr_cbs.tun_output = mock_tun_output;
@@ -1304,6 +1309,59 @@ TEST(server_session_on_tun_v6_no_sessions)
  *   - set_tun_active sends packet output through tun_output
  *   - client disconnect releases the session
  */
+/* ── Reorder shim: the MTU makes room for its header only when negotiated ── */
+
+static void
+tweak_reorder_on(mqvpn_config_t *cfg)
+{
+    ASSERT_EQ(mqvpn_config_set_reorder_enabled(cfg, MQVPN_REORDER_ON), MQVPN_OK);
+}
+
+/* One loopback tunnel with the given [Reorder] modes. *cli_mtu is the
+ * client's tunnel MTU (tunnel_config_ready), *svr_mtu the one the server
+ * reports for that client (on_client_connected, the last writer of
+ * g_last_tunnel_info once the tunnel is up). */
+static void
+reorder_mtu_run(mqvpn_reorder_mode_t cli_mode, mqvpn_reorder_mode_t svr_mode,
+                int *cli_mtu, int *svr_mtu)
+{
+    loopback_t lb;
+    g_lb_server_reorder = svr_mode;
+    loopback_setup(&lb, cli_mode == MQVPN_REORDER_ON ? tweak_reorder_on : NULL);
+    loopback_pump_until(&lb, done_established, 10000);
+    ASSERT_EQ(g_client_connected_called, 1);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+    *cli_mtu = g_cli_tunnel_info.mtu;
+    *svr_mtu = g_last_tunnel_info.mtu;
+    loopback_teardown(&lb);
+    g_lb_server_reorder = MQVPN_REORDER_OFF;
+}
+
+TEST(server_reorder_mtu_only_when_negotiated)
+{
+    int cli_off, svr_off, cli, svr;
+
+    reorder_mtu_run(MQVPN_REORDER_OFF, MQVPN_REORDER_OFF, &cli_off, &svr_off);
+    ASSERT_NE(cli_off, 0);
+    ASSERT_NE(svr_off, 0);
+
+    /* Client on, server off: no echo, so nothing is ever stamped. */
+    reorder_mtu_run(MQVPN_REORDER_ON, MQVPN_REORDER_OFF, &cli, &svr);
+    ASSERT_EQ(cli, cli_off);
+    ASSERT_EQ(svr, svr_off);
+
+    /* Server on, client off: the client did not offer it, no echo either. */
+    reorder_mtu_run(MQVPN_REORDER_OFF, MQVPN_REORDER_ON, &cli, &svr);
+    ASSERT_EQ(cli, cli_off);
+    ASSERT_EQ(svr, svr_off);
+
+    /* Both on: negotiated, so every stamped packet carries the 8-byte
+     * header (MQVPN_REORDER_HDR_LEN) and both ends make room for it. */
+    reorder_mtu_run(MQVPN_REORDER_ON, MQVPN_REORDER_ON, &cli, &svr);
+    ASSERT_EQ(cli, cli_off - 8);
+    ASSERT_EQ(svr, svr_off - 8);
+}
+
 TEST(server_session_quic_loopback)
 {
     loopback_t lb;
@@ -1967,6 +2025,7 @@ main(void)
 
     /* QUIC loopback integration test (test_server_session per impl_plan) */
     run_server_session_quic_loopback();
+    run_server_reorder_mtu_only_when_negotiated();
     run_client_verifier_accepts_presented_chain();
     run_client_verifier_is_the_hostname_judge();
     run_client_verifier_reject_signals_tls_once();
