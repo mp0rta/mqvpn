@@ -51,10 +51,11 @@ jobs:
           # not built: no CI coverage, and Apple silicon covers current Macs.
           - { os: darwin,  arch: arm64, runner: macos-14         }
           # amd64 pinned to windows-2022 (VS 2022): windows-latest migrated to
-          # VS 2026 in June 2026, breaking the hardcoded "Visual Studio 17 2022"
-          # generator. Revisit (bump generator / Ninja) before windows-2022 retires.
-          - { os: windows, arch: amd64, runner: windows-2022     }
-          - { os: windows, arch: arm64, runner: windows-11-arm   }
+          # VS 2026 in June 2026. windows-11-arm has no VS 2022 label and moved
+          # to VS 2026 by October 2026, so arm64 builds with that generator.
+          # Revisit amd64 (bump vs) before windows-2022 retires.
+          - { os: windows, arch: amd64, runner: windows-2022,   vs: "Visual Studio 17 2022" }
+          - { os: windows, arch: arm64, runner: windows-11-arm, vs: "Visual Studio 18 2026" }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -391,7 +392,7 @@ jobs:
           # CMakeLists still reads it: left empty, its `NOT ... MATCHES "rel"`
           # guard compiles BORINGSSL_DISPATCH_TEST instrumentation into an
           # otherwise /O2 build. Same fix as the Linux jobs.
-          cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
+          cmake -G "${{ matrix.vs }}" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
             -DBUILD_SHARED_LIBS=0 `
             -DCMAKE_BUILD_TYPE=Release `
             ${{ matrix.arch == 'arm64' && '-DOPENSSL_NO_ASM=1' || '' }} ..
@@ -425,7 +426,7 @@ jobs:
           # Does not fix the 64-bit enum issue (cl.exe always uses int as
           # enum underlying type regardless of /std:c11) — that's handled by
           # the xquic submodule patch (see fix/msvc-enum-truncation).
-          cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
+          cmake -G "${{ matrix.vs }}" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_C_STANDARD=11 `
             -DSSL_TYPE=boringssl `
@@ -446,7 +447,7 @@ jobs:
           cd build
           # Same C11 reasoning as the xquic build, kept consistent across
           # the two CMake invocations.
-          cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
+          cmake -G "${{ matrix.vs }}" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_C_STANDARD=11 `
             -DXQUIC_BUILD_DIR="${{ github.workspace }}/third_party/xquic/build/Release" `
