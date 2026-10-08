@@ -64,8 +64,8 @@ Scheduler = wlb
 Path = eth0
 Path = wlan0
 
-[Hybrid]
-Enabled = true
+# [Hybrid]                      # opt in to carry inner TCP over QUIC streams; see the [Hybrid] section
+# Enabled = true
 
 # [Reorder]                     # opt in for bulk inner QUIC; see the [Reorder] section
 # Enabled = on
@@ -119,8 +119,7 @@ JSON config is useful for structured management and automation tooling.
   "reconnect_interval": 5,
   "scheduler": "wlb",
   "cc": "bbr2",
-  "paths": ["eth0", "wlan0"],
-  "hybrid": { "enabled": true }
+  "paths": ["eth0", "wlan0"]
 }
 ```
 

@@ -59,8 +59,8 @@ Scheduler = wlb
 Path = eth0
 Path = wlan0
 
-[Hybrid]
-Enabled = true
+# [Hybrid]                      # 内側 TCP を QUIC の stream で運ぶ。詳細は [Hybrid] の節
+# Enabled = true
 
 # [Reorder]                     # 内側 QUIC などの大きな転送向け。詳細は [Reorder] の節
 # Enabled = on
@@ -114,8 +114,7 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
   "reconnect_interval": 5,
   "scheduler": "wlb",
   "cc": "bbr2",
-  "paths": ["eth0", "wlan0"],
-  "hybrid": { "enabled": true }
+  "paths": ["eth0", "wlan0"]
 }
 ```
 
