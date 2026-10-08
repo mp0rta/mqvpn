@@ -225,6 +225,12 @@ User = bob:bob-secret
 [Multipath]
 Scheduler = wlb
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none, default: bbr2)
+
+[Hybrid]
+Enabled = true
+
+[Reorder]
+Enabled = on
 ```
 
 ```ini
@@ -245,6 +251,12 @@ Scheduler = wlb
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none, default: bbr2)
 Path = eth0
 Path = wlan0
+
+[Hybrid]
+Enabled = true
+
+# [Reorder]                     # opt in for bulk inner QUIC; see the [Reorder] section
+# Enabled = on
 ```
 
 ### JSON config
@@ -268,7 +280,9 @@ Server example:
     ],
     "max_clients": 64,
     "scheduler": "wlb",
-    "cc": "bbr2"
+    "cc": "bbr2",
+    "hybrid": { "enabled": true },
+    "reorder": { "enabled": "on" }
 }
 ```
 
@@ -288,7 +302,8 @@ Client example:
     "kill_switch": false,
     "manage_routes": false,
     "scheduler": "wlb",
-    "cc": "bbr2"
+    "cc": "bbr2",
+    "hybrid": { "enabled": true }
 }
 ```
 

@@ -26,6 +26,12 @@ User = bob:<BOB_PSK>
 [Multipath]
 Scheduler = wlb
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+
+[Hybrid]
+Enabled = true
+
+[Reorder]
+Enabled = on
 ```
 
 CA が発行した証明書を使う場合、`Cert` (JSON では `cert_file`) にはサーバー証明書と中間証明書を連結した fullchain を指定します。Let's Encrypt では `cert.pem` ではなく `fullchain.pem` です。クライアントはサーバーが送った chain をそのまま検証し、足りない中間証明書を取りに行かないため、leaf だけのファイルでは、その中間証明書を元から信頼していないクライアントで検証に失敗します。
@@ -52,6 +58,12 @@ Scheduler = wlb
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
 Path = eth0
 Path = wlan0
+
+[Hybrid]
+Enabled = true
+
+# [Reorder]                     # 内側 QUIC などの大きな転送向け。詳細は [Reorder] の節
+# Enabled = on
 ```
 
 ## JSON 形式
@@ -77,7 +89,9 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
   ],
   "max_clients": 64,
   "scheduler": "wlb",
-  "cc": "bbr2"
+  "cc": "bbr2",
+  "hybrid": { "enabled": true },
+  "reorder": { "enabled": "on" }
 }
 ```
 
@@ -100,7 +114,8 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
   "reconnect_interval": 5,
   "scheduler": "wlb",
   "cc": "bbr2",
-  "paths": ["eth0", "wlan0"]
+  "paths": ["eth0", "wlan0"],
+  "hybrid": { "enabled": true }
 }
 ```
 

@@ -26,6 +26,12 @@ User = bob:<BOB_PSK>
 [Multipath]
 Scheduler = wlb
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+
+[Hybrid]
+Enabled = true
+
+[Reorder]
+Enabled = on
 ```
 
 When you use a CA-issued certificate, `Cert` (`cert_file` in JSON) must contain
@@ -57,6 +63,12 @@ Scheduler = wlb
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
 Path = eth0
 Path = wlan0
+
+[Hybrid]
+Enabled = true
+
+# [Reorder]                     # opt in for bulk inner QUIC; see the [Reorder] section
+# Enabled = on
 ```
 
 ## JSON Format
@@ -82,7 +94,9 @@ JSON config is useful for structured management and automation tooling.
   ],
   "max_clients": 64,
   "scheduler": "wlb",
-  "cc": "bbr2"
+  "cc": "bbr2",
+  "hybrid": { "enabled": true },
+  "reorder": { "enabled": "on" }
 }
 ```
 
@@ -105,7 +119,8 @@ JSON config is useful for structured management and automation tooling.
   "reconnect_interval": 5,
   "scheduler": "wlb",
   "cc": "bbr2",
-  "paths": ["eth0", "wlan0"]
+  "paths": ["eth0", "wlan0"],
+  "hybrid": { "enabled": true }
 }
 ```
 
