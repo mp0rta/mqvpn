@@ -41,7 +41,7 @@
 #   sudo PICOQUICDEMO=<path> ./sweep_reorder.sh [--out CSV] [--env NAME]
 #        [--axis rtt|jitter|loss|bw|profiles] [--stage 1|2]
 #        [--mode perf|scale] [--reorder on|off] [--quick]
-#   Env overrides: REPEATS, MQVPN, PICOQUICDEMO, PICO_FILE_BYTES.
+#   Env overrides: REPEATS, MQVPN, PICOQUICDEMO, PICO_FILE_BYTES, SWEEP_WAITS, SWEEP_CAPS, STAGE1_CAP.
 
 set -euo pipefail
 
@@ -70,8 +70,11 @@ declare -A AXIS_ENVS=(
 # Stage-2 (cap sweep) operates only over these representative environments.
 STAGE2_ENVS=(baseline dual_lte fiber_lte lte_starlink lte_geo congested)
 
-WAIT_VALUES=(10 20 30 50 80 120 200 300)
-CAP_VALUES=(256 512 1024 2048 4096)
+# SWEEP_WAITS (Stage 1 wait axis) / SWEEP_CAPS (Stage 2 cap axis), space-
+# separated, pin the axes; STAGE1_CAP pins the cap Stage 1 holds fixed. An A/B
+# of two binaries at one operating point: SWEEP_WAITS=50 STAGE1_CAP=1024 --stage 1.
+read -r -a WAIT_VALUES <<< "${SWEEP_WAITS:-10 20 30 50 80 120 200 300}"
+read -r -a CAP_VALUES <<< "${SWEEP_CAPS:-256 512 1024 2048 4096}"
 REPEATS="${REPEATS:-3}"
 
 # Per-env chosen wait for the Stage-2 cap sweep. Default 30 (engine default);
@@ -102,7 +105,7 @@ PICO_TIMEOUT="${PICO_TIMEOUT:-90}"   # seconds
 PICO_CERT="${PICO_CERT:-${REPO_ROOT}/third_party/picoquic/certs/cert.pem}"
 PICO_KEY="${PICO_KEY:-${REPO_ROOT}/third_party/picoquic/certs/key.pem}"
 PICO_SNI="${PICO_SNI:-test}"
-STAGE1_CAP=1024   # Stage 1 holds cap fixed at 1024 while sweeping wait
+STAGE1_CAP="${STAGE1_CAP:-1024}"   # Stage 1 holds cap fixed (default 1024) while sweeping wait
 
 # Scale-mode knobs (perf-mode ignores these). IngressIdleSec < EgressIdleSec is
 # a hard config-validation invariant (engine silently RAW-falls-back otherwise).
