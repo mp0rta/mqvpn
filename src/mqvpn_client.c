@@ -2017,11 +2017,14 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
         }
         if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU) tun_mtu = IPV6_MIN_MTU;
         tun_mtu = apply_mtu_cap(c->config.tun_mtu, tun_mtu, c);
-        /* §9: when the reorder shim is locally enabled, each stamped inner
-         * packet carries an 8-byte header, so the usable inner MTU shrinks
-         * by 8. Apply ONCE to the resolved inner MTU (after auto-MSS / cap).
-         * Floor at IPV6_MIN_MTU when v6 is in play. */
-        if (c->config.reorder.mode != MQVPN_REORDER_OFF) {
+        /* §9: when the reorder shim is in use, each stamped inner packet
+         * carries an 8-byte header, so the usable inner MTU shrinks by 8.
+         * Apply ONCE to the resolved inner MTU (after auto-MSS / cap).
+         * Floor at IPV6_MIN_MTU when v6 is in play. Only when the server
+         * echoed mqvpn-reorder (the response headers precede this capsule):
+         * without that echo nothing is ever stamped, and the 8 bytes would
+         * be lost for nothing. */
+        if (c->config.reorder.mode != MQVPN_REORDER_OFF && conn->peer_reorder_supported) {
             tun_mtu -= MQVPN_REORDER_HDR_LEN;
             if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU) tun_mtu = IPV6_MIN_MTU;
         }

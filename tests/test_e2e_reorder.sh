@@ -34,6 +34,10 @@
 #     NO reorder negotiation occurs (markers absent), proving the feature is a
 #     no-op when disabled.
 #
+#   Phase D (mixed): client Enabled=on, server Enabled=off. The server does not
+#     echo mqvpn-reorder, so the client never stamps; its TUN MTU must then be
+#     the reorder-OFF MTU, not 8 bytes less.
+#
 # How reorder is enabled: the harness (bench_start_vpn_*) only takes CLI flags,
 # and there is no CLI flag for the [Reorder] section — it is INI/JSON only
 # (src/config.c SEC_REORDER). mqvpn's --config loads the file as a base and CLI
@@ -59,12 +63,15 @@ CLIENT_LOG="$(mktemp)"
 SERVER_LOG="$(mktemp)"
 CLIENT_LOG_OFF="$(mktemp)"
 SERVER_LOG_OFF="$(mktemp)"
+CLIENT_LOG_MIX="$(mktemp)"
+SERVER_LOG_MIX="$(mktemp)"
 INI_ON="$(mktemp --suffix=.ini)"
 INI_OFF="$(mktemp --suffix=.ini)"
 IPERF_SRV_JSON="$(mktemp --suffix=.json)"
 
 trap 'bench_cleanup; rm -f "$CLIENT_LOG" "$SERVER_LOG" "$CLIENT_LOG_OFF" \
-    "$SERVER_LOG_OFF" "$INI_ON" "$INI_OFF" "$IPERF_SRV_JSON"' EXIT
+    "$SERVER_LOG_OFF" "$CLIENT_LOG_MIX" "$SERVER_LOG_MIX" "$INI_ON" "$INI_OFF" \
+    "$IPERF_SRV_JSON"' EXIT
 
 fail=0
 
@@ -112,10 +119,10 @@ bench_add_server_host_routes "$N_PATHS"
 bench_apply_netem "delay 1ms" "delay ${PATH_B_DELAY_MS}ms"
 
 # Helper: run one full server+client lifecycle with a given INI + log files.
-# $1 = INI path, $2 = server log, $3 = client log
+# $1 = INI path, $2 = server log, $3 = client log, $4 = server INI (default $1)
 reorder_run() {
-    local ini="$1" slog="$2" clog="$3"
-    bench_start_vpn_server "--control-port ${CTRL_PORT} --config ${ini}" "$slog"
+    local ini="$1" slog="$2" clog="$3" sini="${4:-$1}"
+    bench_start_vpn_server "--control-port ${CTRL_PORT} --config ${sini}" "$slog"
 
     local paths_arg=""
     local i
@@ -424,6 +431,40 @@ else
     echo "WARN: skipping MTU -8 check (ON='$mtu_on' OFF='$mtu_off' — one not parsed)"
 fi
 
+# ─── Phase D: client reorder ON, server OFF (not negotiated) ──────────────
+bench_stop_vpn
+echo ""
+echo "=== Phase D: client reorder ON, server reorder OFF ==="
+reorder_run "$INI_ON" "$SERVER_LOG_MIX" "$CLIENT_LOG_MIX" "$INI_OFF"
+
+if ip netns exec "$NS_CLIENT" ping -c 3 -W 2 "$TUNNEL_SERVER_IP" >/dev/null 2>&1; then
+    echo "PASS: tunnel established (client ON, server OFF)"
+else
+    echo "FAIL: tunnel did not establish with client ON, server OFF"
+    fail=1
+fi
+
+if grep -q "peer advertised mqvpn-reorder" "$CLIENT_LOG_MIX"; then
+    echo "FAIL: client saw a reorder echo from a server with reorder OFF"
+    fail=1
+else
+    echo "PASS: not negotiated (server has reorder OFF)"
+fi
+
+# Nothing is stamped without the server's echo, so no header to make room for.
+mtu_mix="$(extract_client_mtu "$CLIENT_LOG_MIX")"
+if [ -n "$mtu_mix" ] && [ -n "$mtu_off" ]; then
+    if [ "$mtu_mix" -eq "$mtu_off" ]; then
+        echo "PASS: no reorder MTU overhead without negotiation (MIX=$mtu_mix == OFF=$mtu_off)"
+    else
+        echo "FAIL: client lost $((mtu_off - mtu_mix)) bytes of MTU without negotiating reorder" \
+             "(MIX=$mtu_mix, OFF=$mtu_off)"
+        fail=1
+    fi
+else
+    echo "WARN: skipping the Phase D MTU check (MIX='$mtu_mix' OFF='$mtu_off' — one not parsed)"
+fi
+
 # ─── Verdict ───────────────────────────────────────────────────────────────
 echo ""
 if [ "$fail" -ne 0 ]; then
@@ -432,6 +473,7 @@ if [ "$fail" -ne 0 ]; then
     echo "--- Client log ON (last 25) ---";  tail -25 "$CLIENT_LOG"
     echo "--- Server log OFF (last 15) ---"; tail -15 "$SERVER_LOG_OFF"
     echo "--- Client log OFF (last 15) ---"; tail -15 "$CLIENT_LOG_OFF"
+    echo "--- Client log MIX (last 15) ---"; tail -15 "$CLIENT_LOG_MIX"
     exit 1
 fi
 echo "RESULT: PASS"
