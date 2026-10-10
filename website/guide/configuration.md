@@ -237,7 +237,7 @@ A flow-aware reorder buffer for inner UDP traffic. It targets a single inner con
 
 Demotion in the ACK direction is automatic: a flow that looks like an ACK/control stream (mostly small packets) is moved to pass-through so it is never delayed. This is internal behaviour, not a configurable knob — tune it indirectly via `ClassifyWindow` / `AckDemoteMaxLarge` / `SmallPacketThreshold`.
 
-Reorder is a throughput-vs-latency trade-off — it helps bulk transfers but adds up to `MaxWaitMs` of delay to every flow it touches. Since one tunnel usually carries both kinds of traffic, per-port `[ReorderRule]` sections let you enable it where it helps (bulk inner QUIC) and pass latency-sensitive traffic through (DNS, NTP, real-time UDP). Unmatched UDP is pass-through by default, so you only need rules for the ports you want reordered:
+Reorder is a throughput-vs-latency trade-off — it helps bulk transfers but delays every flow it touches: `MaxWaitMs` is how long the receiver waits for a missing datagram before skipping it; a gap that opens while another is already being waited for is deferred to the next wait, so a hold is nominally at most twice `MaxWaitMs` (buffer-limit flushes can release a gap earlier, and the deadline is checked when the engine ticks). Datagrams that arrive in order are never delayed. Since one tunnel usually carries both kinds of traffic, per-port `[ReorderRule]` sections let you enable it where it helps (bulk inner QUIC) and pass latency-sensitive traffic through (DNS, NTP, real-time UDP). Unmatched UDP is pass-through by default, so you only need rules for the ports you want reordered:
 
 ```ini
 [Reorder]

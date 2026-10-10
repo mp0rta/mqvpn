@@ -240,8 +240,12 @@ datagrams spread over paths with different RTTs arrive out of order.
 The optional `[Reorder]` buffer restores a bounded order for one case only: a
 single inner connection (usually inner QUIC / HTTP/3) that cannot be split
 into flows and is spread across paths for bandwidth. It only reorders: it
-waits at most `MaxWaitMs`, never retransmits, and moves past a gap when the
-time runs out.
+waits `MaxWaitMs` for a missing datagram before skipping it, never
+retransmits, and defers a gap that opens during an existing wait to the next
+one (the 3GPP PDCP t-Reordering scheme: a reordering mark is taken when the
+timer starts), so a hold is nominally at most twice `MaxWaitMs`; buffer
+limits can release a gap earlier, and the deadline is checked when the
+engine ticks.
 
 Out of scope:
 

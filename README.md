@@ -362,7 +362,7 @@ it) and a no-op when either side has it off.
 ```ini
 [Reorder]
 Enabled = on
-MaxWaitMs = 50           # reorder window: hold out-of-order datagrams up to this long
+MaxWaitMs = 50           # wait for a missing datagram this long (hold nominally <= 2x)
 CapPackets = 1024        # per-flow buffer cap (packets)
 
 # Optional: target specific inner flows with a tuned preset
