@@ -147,6 +147,119 @@ jobs:
             build/systemd/
           retention-days: 1
 
+  # 32-bit build guard (OpenWrt/OMR routers run armhf): cross-compiles with
+  # gcc and runs the unit tests under qemu-user. CI only; nothing is released.
+  armhf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      XC: >-
+        -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=armv7l
+        -DCMAKE_C_COMPILER=arm-linux-gnueabihf-gcc
+        -DCMAKE_CXX_COMPILER=arm-linux-gnueabihf-g++
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      # qemu-user-binfmt lets tests that exec the ARM mqvpn binary run too.
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake golang gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf qemu-user qemu-user-binfmt
+
+      - name: Compute xquic SHA
+        id: xqsha
+        run: echo "sha=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+-')" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve BoringSSL pin
+        id: bssl-pin
+        run: echo "sha=$(git -C third_party/xquic/third_party/boringssl rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache libevent (armhf)
+        id: libevent-cache
+        uses: actions/cache@v6
+        with:
+          path: /tmp/libevent-armhf
+          key: libevent-2.1.12-linux-armhf-gcc-v1
+
+      - name: Build libevent from source (armhf)
+        if: steps.libevent-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch release-2.1.12-stable https://github.com/libevent/libevent.git /tmp/libevent
+          cd /tmp/libevent && mkdir build && cd build
+          cmake $XC -DCMAKE_BUILD_TYPE=Release \
+                -DEVENT__DISABLE_OPENSSL=ON \
+                -DEVENT__DISABLE_BENCHMARK=ON \
+                -DEVENT__DISABLE_TESTS=ON \
+                -DEVENT__DISABLE_SAMPLES=ON \
+                -DCMAKE_INSTALL_PREFIX=/tmp/libevent-armhf ..
+          make -j$(nproc) && make install
+
+      - name: Cache BoringSSL (armhf gcc fPIC)
+        id: bssl-cache
+        uses: actions/cache@v6
+        with:
+          path: third_party/xquic/third_party/boringssl
+          key: bssl-${{ steps.bssl-pin.outputs.sha }}-linux-armhf-gcc-fpic-v1
+
+      # gcc's armhf -Wstringop-overflow false positive in slhdsa/thash.cc.inc
+      # trips BoringSSL's own -Werror.
+      - name: Build BoringSSL (armhf)
+        if: steps.bssl-cache.outputs.cache-hit != 'true'
+        run: |
+          cd third_party/xquic/third_party/boringssl
+          mkdir -p build && cd build
+          cmake $XC -DBUILD_SHARED_LIBS=0 -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_C_FLAGS="-fPIC -Wno-error=stringop-overflow" \
+                -DCMAKE_CXX_FLAGS="-fPIC -Wno-error=stringop-overflow" ..
+          make -j$(nproc) ssl crypto
+
+      - name: Cache xquic (armhf Release)
+        id: xquic-cache
+        uses: actions/cache@v6
+        with:
+          # See "Cache xquic (Release)" comment above re: xqc_configure.h.
+          path: |
+            third_party/xquic/build
+            third_party/xquic/include/xquic/xqc_configure.h
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-armhf-gcc-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v1
+
+      # shortcut: the fork is not 32-bit warning-clean (xqc_log.c prints a
+      # 64-bit tv_usec with %ld, xqc_send_ctl.c casts a pointer to a packet
+      # number), so those two warnings stay non-fatal; drop the -Wno-error=
+      # flags once the fork fixes them.
+      - name: Build xquic (armhf)
+        if: steps.xquic-cache.outputs.cache-hit != 'true'
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          cmake $XC -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
+                -DXQC_ENABLE_BBR2=ON \
+                -DXQC_ENABLE_UNLIMITED=ON \
+                -DXQC_ENABLE_FEC=ON \
+                -DXQC_ENABLE_XOR=ON \
+                -DCMAKE_C_FLAGS="-Wno-dangling-pointer -Wno-error=format -Wno-error=pointer-to-int-cast" ..
+          make -j$(nproc)
+
+      # -Werror catches 32-bit-only warnings (printf widths, pointer casts);
+      # format-truncation is excluded because gcc raises it on every arch.
+      - name: Build mqvpn (armhf)
+        run: |
+          mkdir -p build && cd build
+          cmake $XC -DCMAKE_BUILD_TYPE=Debug \
+                -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON \
+                -DCMAKE_PREFIX_PATH=/tmp/libevent-armhf \
+                -DCMAKE_C_FLAGS="-Werror -Wno-error=format-truncation" \
+                -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
+          make -j$(nproc)
+
+      - name: Unit tests (qemu-arm)
+        env:
+          QEMU_LD_PREFIX: /usr/arm-linux-gnueabihf
+          LD_LIBRARY_PATH: ${{ github.workspace }}/third_party/xquic/build:/tmp/libevent-armhf/lib
+        run: cd build && ctest --output-on-failure
+
   sanitizer:
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -224,7 +337,7 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: cd build && ctest --output-on-failure
 
-      - name: Fuzz tcp_lane (short budget)
+      - name: Build fuzz targets
         run: |
           mkdir -p build-fuzz && cd build-fuzz
           CC=clang cmake -DCMAKE_BUILD_TYPE=Debug \
@@ -233,6 +346,14 @@ jobs:
                 -DCMAKE_C_COMPILER=clang \
                 -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
           make -j$(nproc) fuzz_tcp_lane fuzz_control_dispatch
+
+      # Runs alongside the netns e2e steps below (one core, in-process, no
+      # sockets or files outside build-fuzz); "Wait for fuzz" collects it.
+      - name: Fuzz tcp_lane (short budget)
+        id: fuzz
+        background: true
+        run: |
+          cd build-fuzz
           ASAN_OPTIONS=abort_on_error=1 \
             ./fuzz_tcp_lane -max_total_time=120 ../fuzz/corpus/tcp_lane/
           ASAN_OPTIONS=abort_on_error=1 \
@@ -440,6 +561,9 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_setup_abort_exit_test.sh
+
+      - name: Wait for fuzz
+        wait: fuzz
 
   msan:
     runs-on: ubuntu-latest
