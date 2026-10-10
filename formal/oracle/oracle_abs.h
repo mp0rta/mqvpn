@@ -454,8 +454,10 @@ oracle_canonical_add_ops(void)
  * 304 is the LP64 size. The pin catches a new field that grows the struct,
  * not one of 4 bytes or less placed in one of its three 4-byte padding holes
  * (LP64: after local_addr_len, after flags and after recreate_retries): such
- * a field keeps the size and must be classified here by hand. */
-_Static_assert(sizeof(path_entry_t) == 304,
+ * a field keeps the size and must be classified here by hand. 32-bit targets
+ * lay the struct out differently, so the pin applies to 64-bit builds only
+ * and the unit test still builds and runs on armhf or i386. */
+_Static_assert(sizeof(void *) != 8 || sizeof(path_entry_t) == 304,
                "path_entry_t is no longer 304 bytes (its LP64 size) - classify the new "
                "field in formal/oracle/oracle_abs.h");
 
