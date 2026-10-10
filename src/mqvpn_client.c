@@ -138,6 +138,14 @@ struct cli_conn_s {
     mqvpn_reorder_rx_t *reorder_rx;
     int peer_reorder_supported;
 
+    /* Path IDs (draft-21 §3.2.1): when xqc_conn_create_path first failed
+     * with -XQC_EMP_NO_AVAIL_PATH_ID since the last path it created (xquic
+     * then sends PATHS_BLOCKED), and whether the server has since let a
+     * whole retry interval pass without granting one: 0 no, 1 yes (for
+     * tick_path_id_watchdog), 2 reported with auto-reconnect off. */
+    uint64_t path_id_blocked_since_us;
+    int path_ids_exhausted;
+
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
     /* H2: lwIP TCP-lane stack. Created at tunnel-ready (needs the resolved
      * inner MTU) when hybrid is enabled and tcp mode != raw; freed on conn
@@ -2479,8 +2487,26 @@ activate_via_xquic_classify(mqvpn_client_t *c, uint64_t *out_path_id)
     *out_path_id = 0;
     xqc_int_t ret =
         xqc_conn_create_path(c->engine, &c->conn->cid, out_path_id, path_status);
-    if (ret == 0) return ACTIVATE_OK;
+    if (ret == 0) {
+        c->conn->path_id_blocked_since_us = 0;
+        c->conn->path_ids_exhausted = 0;
+        return ACTIVATE_OK;
+    }
     if (ret == -XQC_EMP_CREATE_PATH) return ACTIVATE_PERMANENT_FAIL;
+    if (ret == -XQC_EMP_NO_AVAIL_PATH_ID) {
+        /* Transient while the server's grant is on its way: it answers
+         * PATHS_BLOCKED with MAX_PATH_ID within a round trip. If a whole
+         * retry interval later it still has not, it will not on this
+         * connection (its lifetime cap, max_path_id_grant_max_value, is
+         * reached): tick_path_id_watchdog reconnects. */
+        uint64_t now = client_now_us(c);
+        if (c->conn->path_id_blocked_since_us == 0) {
+            c->conn->path_id_blocked_since_us = now;
+        } else if (now - c->conn->path_id_blocked_since_us >= PATH_RECREATE_DELAY_US &&
+                   c->conn->path_ids_exhausted == 0) {
+            c->conn->path_ids_exhausted = 1;
+        }
+    }
     return ACTIVATE_TRANSIENT_FAIL;
 }
 
@@ -4177,6 +4203,35 @@ tick_handshake_watchdog(mqvpn_client_t *c)
     }
 }
 
+/* ─── Tick: path ID watchdog ─── */
+
+/* A server grants new path IDs only up to its lifetime cap for the
+ * connection (an mqvpn server: max_path_id_grant_max_value = 128), and a
+ * closed path keeps its ID until the connection ends, so every remove/add of
+ * a path (a WAN that failed and came back) uses one up. Past the cap a path
+ * can no longer be added to this connection; reconnect so it can join a new
+ * one (the slots are re-added as after any reconnect). */
+static void
+tick_path_id_watchdog(mqvpn_client_t *c)
+{
+    if (c->shutting_down || !c->engine || !c->conn || c->conn->path_ids_exhausted != 1)
+        return;
+
+    if (!c->config.reconnect_enable) {
+        c->conn->path_ids_exhausted = 2;
+        LOG_W(c, "no path ID left on this connection (PATHS_BLOCKED unanswered); "
+                 "new paths cannot join until it is rebuilt");
+        return;
+    }
+
+    c->conn->path_ids_exhausted = 0;
+    LOG_W(c, "no path ID left on this connection (PATHS_BLOCKED unanswered); "
+             "reconnecting so new paths can join");
+    /* As in tick_handshake_watchdog: the main_logic call below drains the
+     * close and fires cb_h3_conn_close, which arms the reconnect timer. */
+    xqc_h3_conn_close(c->engine, &c->conn->cid);
+}
+
 /* ─── Tick ─── */
 
 int
@@ -4186,6 +4241,7 @@ mqvpn_client_tick(mqvpn_client_t *c)
     ASSERT_TICK_THREAD(c);
 
     tick_handshake_watchdog(c);
+    tick_path_id_watchdog(c);
     if (c->engine) xqc_engine_main_logic(c->engine);
     tick_path_recovery(c);
     tick_reconnect(c);

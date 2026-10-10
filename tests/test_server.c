@@ -1962,6 +1962,250 @@ TEST(server_reconnect_manual_failure_rearm)
 
 /* max_clients config boundary */
 
+/* ── Path IDs: the client reconnects only once the server stops granting ──
+ *
+ * Every remove/add of a path (a WAN that failed and came back) takes a new
+ * path ID, closed paths keep theirs until the connection ends, and the
+ * server grants more on PATHS_BLOCKED (8 at a time) only up to its lifetime
+ * cap (max_path_id_grant_max_value, 128). Past the cap the re-added path can
+ * never be created on this connection, so the client must reconnect for it
+ * to join a new one; while a grant is merely on its way it must not. */
+
+static int g_path_ids_left_log = 0;
+
+static void
+path_ids_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
+{
+    (void)level;
+    (void)user_ctx;
+    if (msg && strstr(msg, "no path ID left on this connection")) g_path_ids_left_log++;
+}
+
+typedef struct {
+    int svr_fd;
+    void *svr_tctx;
+    mqvpn_server_t *svr;
+    mqvpn_client_t *cli;
+    int cli_fd[2];
+    void *cli_tctx[2];
+    mqvpn_path_handle_t ph[2];
+} churn_t;
+
+/* Pump both engines until the client has `want` ACTIVE paths or max_ms. */
+static int
+churn_pump_until_active(churn_t *f, int want, int max_ms)
+{
+    for (int elapsed = 0; elapsed < max_ms;) {
+        drain_and_tick2(f->svr, f->svr_tctx, f->cli, f->cli_tctx, f->ph);
+        if (count_active_paths(f->cli) == want) return 1;
+        struct pollfd pfds[3] = {
+            {.fd = f->svr_fd, .events = POLLIN},
+            {.fd = f->cli_fd[0], .events = POLLIN},
+            {.fd = f->cli_fd[1], .events = POLLIN},
+        };
+        int w = poll(pfds, 3, 20);
+        elapsed += (w == 0) ? 20 : 1;
+    }
+    return 0;
+}
+
+static void
+churn_open_path(churn_t *f, int k)
+{
+    f->cli_fd[k] = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    ASSERT_NE(f->cli_fd[k], -1);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ASSERT_EQ(bind(f->cli_fd[k], (struct sockaddr *)&a, sizeof(a)), 0);
+    socklen_t alen = sizeof(a);
+    getsockname(f->cli_fd[k], (struct sockaddr *)&a, &alen);
+    mqvpn_path_desc_t desc;
+    memset(&desc, 0, sizeof(desc));
+    desc.struct_size = sizeof(desc);
+    memcpy(desc.local_addr, &a, sizeof(a));
+    desc.local_addr_len = sizeof(a);
+    mqvpn_bind_posix_opts_t bopts = {0};
+    bopts.struct_size = sizeof(bopts);
+    bopts.socket_buf_bytes = -1;
+    void *tctx = NULL;
+    ASSERT_EQ(mqvpn_bind_posix_path_new(f->cli_fd[k], &bopts, &tctx), MQVPN_OK);
+    /* A removed slot is reused once xquic has closed its path too. */
+    f->ph[k] = (mqvpn_path_handle_t)-1;
+    for (int elapsed = 0; elapsed < 5000; elapsed += 10) {
+        f->ph[k] =
+            mqvpn_client_add_path(f->cli, &desc, mqvpn_bind_posix_path_ops(), tctx, NULL);
+        if (f->ph[k] != (mqvpn_path_handle_t)-1) break;
+        drain_and_tick2(f->svr, f->svr_tctx, f->cli, f->cli_tctx, f->ph);
+        poll(NULL, 0, 10);
+    }
+    ASSERT_NE(f->ph[k], (mqvpn_path_handle_t)-1);
+    f->cli_tctx[k] = tctx;
+}
+
+/* Remove the second path as a platform does when its network goes away:
+ * PATH_ABANDON, close the socket, report the release. */
+static void
+churn_remove_path(churn_t *f)
+{
+    ASSERT_EQ(mqvpn_client_remove_path(f->cli, f->ph[1]), MQVPN_OK);
+    close(f->cli_fd[1]);
+    ASSERT_EQ(mqvpn_client_on_platform_path_released(f->cli, f->ph[1]), MQVPN_OK);
+    f->cli_tctx[1] = NULL;
+    f->cli_fd[1] = -1;
+}
+
+/* Server and client (reconnect after 1 s) with the given initial maximum
+ * path ID on both ends, two loopback paths, tunnel up, both paths ACTIVE. */
+static void
+churn_setup(churn_t *f, uint64_t init_max_path_id)
+{
+    reset_mocks();
+    g_client_connected_called = 0;
+    g_client_disconnected_called = 0;
+    g_cli_tunnel_ready_called = 0;
+    g_path_ids_left_log = 0;
+    memset(f, 0, sizeof(*f));
+    f->cli_fd[0] = f->cli_fd[1] = -1;
+
+    f->svr_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    ASSERT_NE(f->svr_fd, -1);
+    struct sockaddr_in svr_addr;
+    memset(&svr_addr, 0, sizeof(svr_addr));
+    svr_addr.sin_family = AF_INET;
+    svr_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ASSERT_EQ(bind(f->svr_fd, (struct sockaddr *)&svr_addr, sizeof(svr_addr)), 0);
+    socklen_t alen = sizeof(svr_addr);
+    getsockname(f->svr_fd, (struct sockaddr *)&svr_addr, &alen);
+
+    mqvpn_config_t *svr_cfg = make_server_config();
+    mqvpn_config_set_multipath(svr_cfg, 1);
+    ASSERT_EQ(mqvpn_config_set_init_max_path_id(svr_cfg, init_max_path_id), MQVPN_OK);
+    mqvpn_server_callbacks_t svr_cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    svr_cbs.tun_output = mock_tun_output;
+    svr_cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    svr_cbs.on_client_connected = mock_on_client_connected;
+    svr_cbs.on_client_disconnected = mock_on_client_disconnected;
+    f->svr = mqvpn_server_new(svr_cfg, &svr_cbs, NULL);
+    ASSERT_NOT_NULL(f->svr);
+    mqvpn_config_free(svr_cfg);
+    mqvpn_bind_posix_opts_t svr_bopts = {0};
+    svr_bopts.struct_size = sizeof(svr_bopts);
+    svr_bopts.socket_buf_bytes = -1;
+    ASSERT_EQ(mqvpn_bind_posix_server_new(f->svr_fd, &svr_bopts, &f->svr_tctx), MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_set_transport(f->svr, mqvpn_bind_posix_server_ops(),
+                                         f->svr_tctx, (struct sockaddr *)&svr_addr,
+                                         sizeof(svr_addr)),
+              MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_start(f->svr), MQVPN_OK);
+
+    mqvpn_config_t *cli_cfg = mqvpn_config_new();
+    mqvpn_config_set_server(cli_cfg, "127.0.0.1", ntohs(svr_addr.sin_port));
+    mqvpn_config_set_insecure(cli_cfg, 1);
+    mqvpn_config_set_multipath(cli_cfg, 1);
+    ASSERT_EQ(mqvpn_config_set_init_max_path_id(cli_cfg, init_max_path_id), MQVPN_OK);
+    mqvpn_config_set_reconnect(cli_cfg, 1, 1);
+    mqvpn_config_set_log_level(cli_cfg, MQVPN_LOG_WARN);
+    mqvpn_client_callbacks_t cli_cbs = MQVPN_CLIENT_CALLBACKS_INIT;
+    cli_cbs.tun_output = mock_cli_tun_output;
+    cli_cbs.tunnel_config_ready = mock_cli_tunnel_ready;
+    cli_cbs.log = path_ids_log;
+    f->cli = mqvpn_client_new(cli_cfg, &cli_cbs, NULL);
+    ASSERT_NOT_NULL(f->cli);
+    mqvpn_config_free(cli_cfg);
+
+    churn_open_path(f, 0);
+    churn_open_path(f, 1);
+    mqvpn_client_set_server_addr(f->cli, (struct sockaddr *)&svr_addr, sizeof(svr_addr));
+    ASSERT_EQ(mqvpn_client_connect(f->cli), MQVPN_OK);
+    for (int elapsed = 0; elapsed < 15000 && g_cli_tunnel_ready_called == 0;) {
+        drain_and_tick2(f->svr, f->svr_tctx, f->cli, f->cli_tctx, f->ph);
+        struct pollfd pfds[3] = {
+            {.fd = f->svr_fd, .events = POLLIN},
+            {.fd = f->cli_fd[0], .events = POLLIN},
+            {.fd = f->cli_fd[1], .events = POLLIN},
+        };
+        int w = poll(pfds, 3, 20);
+        elapsed += (w == 0) ? 20 : 1;
+    }
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+    mqvpn_client_set_tun_active(f->cli, 1, -1);
+    ASSERT_EQ(churn_pump_until_active(f, 2, 15000), 1);
+}
+
+static void
+churn_teardown(churn_t *f)
+{
+    mqvpn_client_destroy(f->cli);
+    mqvpn_server_destroy(f->svr);
+    close(f->svr_fd);
+    for (int k = 0; k < 2; k++)
+        if (f->cli_fd[k] >= 0) close(f->cli_fd[k]);
+}
+
+/* Past the server's cap: the client reconnects one retry interval (5 s)
+ * after the first refusal, and the path joins the new connection. Both ends
+ * start at 128 path IDs so the cap is reached without grant round trips. */
+TEST(client_reconnects_when_path_ids_run_out)
+{
+    churn_t f;
+    churn_setup(&f, 128);
+
+    int cycles = 0;
+    for (; cycles < 200; cycles++) {
+        churn_remove_path(&f);
+        churn_open_path(&f, 1);
+        /* No path ID left: the path stays out (it would be up within ms). */
+        if (!churn_pump_until_active(&f, 2, 2000)) break;
+    }
+    /* Paths 0 and 1 plus one ID per cycle: the cycle that found none. */
+    ASSERT_EQ(cycles, 127);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+
+    /* The retry is refused too, the client reconnects, and the tunnel comes
+     * up again; the platform then brings the TUN up as after any connect. */
+    for (int elapsed = 0; elapsed < 20000 && g_cli_tunnel_ready_called < 2;) {
+        drain_and_tick2(f.svr, f.svr_tctx, f.cli, f.cli_tctx, f.ph);
+        struct pollfd pfds[3] = {
+            {.fd = f.svr_fd, .events = POLLIN},
+            {.fd = f.cli_fd[0], .events = POLLIN},
+            {.fd = f.cli_fd[1], .events = POLLIN},
+        };
+        int w = poll(pfds, 3, 20);
+        elapsed += (w == 0) ? 20 : 1;
+    }
+    ASSERT_EQ(g_path_ids_left_log, 1);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 2);
+    mqvpn_client_set_tun_active(f.cli, 1, -1);
+    ASSERT_EQ(churn_pump_until_active(&f, 2, 15000), 1);
+
+    churn_teardown(&f);
+}
+
+/* Not at the cap: a refusal only asks for a grant, the retry 5 s later uses
+ * it, and the connection stays. Both ends start at the default 8 IDs. */
+TEST(client_keeps_connection_while_path_ids_are_granted)
+{
+    churn_t f;
+    churn_setup(&f, 0);
+
+    int cycles = 0;
+    for (; cycles < 20; cycles++) {
+        churn_remove_path(&f);
+        churn_open_path(&f, 1);
+        if (!churn_pump_until_active(&f, 2, 2000)) break;
+    }
+    /* IDs 1..8 are available up front: the 8th re-creation needs a grant. */
+    ASSERT_EQ(cycles, 7);
+
+    ASSERT_EQ(churn_pump_until_active(&f, 2, 8000), 1);
+    ASSERT_EQ(g_path_ids_left_log, 0);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+
+    churn_teardown(&f);
+}
+
 TEST(server_max_clients_config)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
@@ -2035,6 +2279,8 @@ main(void)
     run_client_secure_without_verifier_rejects_unknown_issuer_as_closed();
     run_server_reconnect_manual_connect();
     run_server_reconnect_manual_failure_rearm();
+    run_client_reconnects_when_path_ids_run_out();
+    run_client_keeps_connection_while_path_ids_are_granted();
 
     /* max_clients config boundary */
     run_server_max_clients_config();
