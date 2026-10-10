@@ -775,6 +775,18 @@ mqvpn_config_apply_hybrid(mqvpn_config_t *cfg, const mqvpn_hybrid_config_t *src)
     cfg->hybrid = *src;
 }
 
+void
+mqvpn_config_set_buf_limits(mqvpn_config_t *cfg, uint64_t h3_body_buf_per_stream,
+                            uint64_t blocked_buf_per_stream,
+                            uint64_t blocked_buf_per_conn, uint64_t max_recv_window)
+{
+    if (!cfg) return;
+    cfg->h3_body_buf_per_stream = h3_body_buf_per_stream;
+    cfg->blocked_buf_per_stream = blocked_buf_per_stream;
+    cfg->blocked_buf_per_conn = blocked_buf_per_conn;
+    cfg->max_recv_window = max_recv_window;
+}
+
 int
 mqvpn_config_set_hybrid_connect_timeout(mqvpn_config_t *cfg, uint32_t sec)
 {

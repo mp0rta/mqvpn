@@ -21,6 +21,8 @@
 #define MQVPN_CONFIG_MAX_PATHS 8
 #define MQVPN_CONFIG_MAX_DNS   4
 #define MQVPN_CONFIG_MAX_USERS 64
+/* Largest value accepted for the four [Advanced] receive-buffer limits. */
+#define MQVPN_CONFIG_MAX_BUF_LIMIT 0xffffffffULL
 _Static_assert(MQVPN_CONFIG_MAX_PATHS == MQVPN_MAX_PATHS,
                "Config path cap must equal library cap (libmqvpn.h)");
 _Static_assert(MQVPN_CONFIG_MAX_USERS == MQVPN_MAX_USERS,
@@ -109,6 +111,29 @@ typedef struct mqvpn_file_config_s {
      * the library ABI. */
     int udp_gro;
 
+    /* [Advanced] H3BodyBufPerStream — buffered HTTP/3 DATA payload one
+     * request may hold. Bytes; 0 = leave xquic's own default alone. Client
+     * and server, unlike recv_rate_limit above. Sets
+     * xqc_conn_settings_t.max_body_buf_per_stream; a build whose xquic has no
+     * such field refuses to start when this is non-zero — see
+     * mqvpn_config_unsupported_buf_limit() below. */
+    uint64_t h3_body_buf_per_stream;
+
+    /* [Advanced] BlockedBufPerStream / BlockedBufPerConn — set
+     * xqc_conn_settings_t.max_blocked_buf_per_stream / _per_conn, the QPACK
+     * decode-blocked buffer per stream and per connection. Exceeding either
+     * closes the HTTP/3 connection with H3_EXCESSIVE_LOAD
+     * (third_party/xquic/src/http3/xqc_h3_stream.c). 0 leaves xquic's own
+     * defaults; website/guide/configuration.md has the rest. */
+    uint64_t blocked_buf_per_stream;
+    uint64_t blocked_buf_per_conn;
+
+    /* [Advanced] MaxRecvWindow — ceiling on the per-stream receive window,
+     * bytes; 0 = xquic's own default. Sets
+     * xqc_conn_settings_t.max_recv_window, with the same refusal as above
+     * where the field is absent. */
+    uint64_t max_recv_window;
+
     /* Inferred mode: 1=server, 0=client */
     int is_server;
 } mqvpn_file_config_t;
@@ -121,6 +146,18 @@ int mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path);
 
 /* Parse JSON text into CLI cfg. Returns 0 on success, -1 on error. */
 int mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text);
+
+/* Returns the [Advanced] key name of the first receive-buffer limit that is
+ * set to a non-zero value but whose xqc_conn_settings_t field is missing from
+ * the xquic this build links against, or NULL when every limit that is set
+ * can be applied. All-zero always returns NULL: 0 means "leave xquic's own
+ * default alone" and needs no field.
+ *
+ * CMake probes for the two fields that may be absent and defines
+ * MQVPN_HAVE_XQC_* for the ones it finds. src/main.c calls this once after
+ * the config is loaded, below the --status early exit, and refuses to
+ * start. */
+const char *mqvpn_config_unsupported_buf_limit(const mqvpn_file_config_t *cfg);
 
 /*
  * Resolve the effective control-API endpoint by merging INI/JSON config
