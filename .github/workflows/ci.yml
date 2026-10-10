@@ -243,14 +243,15 @@ jobs:
           make -j$(nproc)
 
       # -Werror catches 32-bit-only warnings (printf widths, pointer casts);
-      # format-truncation is excluded because gcc raises it on every arch.
+      # -Wformat is on by default only in distro-patched gcc (Ubuntu), so it is
+      # explicit; format-truncation is excluded because gcc raises it on every arch.
       - name: Build mqvpn (armhf)
         run: |
           mkdir -p build && cd build
           cmake $XC -DCMAKE_BUILD_TYPE=Debug \
                 -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON \
                 -DCMAKE_PREFIX_PATH=/tmp/libevent-armhf \
-                -DCMAKE_C_FLAGS="-Werror -Wno-error=format-truncation" \
+                -DCMAKE_C_FLAGS="-Werror -Wformat -Wno-error=format-truncation" \
                 -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
           make -j$(nproc)
 
