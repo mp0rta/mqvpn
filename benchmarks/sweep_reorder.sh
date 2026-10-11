@@ -72,7 +72,10 @@ STAGE2_ENVS=(baseline dual_lte fiber_lte lte_starlink lte_geo congested)
 
 # SWEEP_WAITS (Stage 1 wait axis) / SWEEP_CAPS (Stage 2 cap axis), space-
 # separated, pin the axes; STAGE1_CAP pins the cap Stage 1 holds fixed. An A/B
-# of two binaries at one operating point: SWEEP_WAITS=50 STAGE1_CAP=1024 --stage 1.
+# of two binaries at one operating point gives each run its own --out: resume
+# keys cells by env/wait/cap/repeat, not by binary, so a shared CSV skips the
+# second run (unless --force):
+#   sudo MQVPN=<bin> SWEEP_WAITS=50 STAGE1_CAP=1024 ./sweep_reorder.sh --stage 1 --out a.csv
 read -r -a WAIT_VALUES <<< "${SWEEP_WAITS:-10 20 30 50 80 120 200 300}"
 read -r -a CAP_VALUES <<< "${SWEEP_CAPS:-256 512 1024 2048 4096}"
 REPEATS="${REPEATS:-3}"
