@@ -41,7 +41,8 @@
 #   sudo PICOQUICDEMO=<path> ./sweep_reorder.sh [--out CSV] [--env NAME]
 #        [--axis rtt|jitter|loss|bw|profiles] [--stage 1|2]
 #        [--mode perf|scale] [--reorder on|off] [--quick]
-#   Env overrides: REPEATS, MQVPN, PICOQUICDEMO, PICO_FILE_BYTES, SWEEP_WAITS, SWEEP_CAPS, STAGE1_CAP.
+#   Env overrides: REPEATS, MQVPN, PICOQUICDEMO, PICO_FILE_BYTES, SWEEP_WAITS, SWEEP_CAPS, STAGE1_CAP,
+#   STAGE2_WAITS, MAX_BYTES_PER_FLOW.
 
 set -euo pipefail
 
@@ -91,6 +92,11 @@ declare -A ENV_CHOSEN_WAIT=(
   [congested]=80
 )
 DEFAULT_CHOSEN_WAIT=30
+# STAGE2_WAITS="env=wait ..." overrides the table above per run, so each
+# scheduler's Stage 2 can sit at its own Stage-1 knee without editing the file.
+for kv in ${STAGE2_WAITS:-}; do
+    ENV_CHOSEN_WAIT["${kv%%=*}"]="${kv#*=}"
+done
 
 # ─── Fixed knobs ─────────────────────────────────────────────────────────────
 N_PATHS=2
@@ -109,6 +115,10 @@ PICO_CERT="${PICO_CERT:-${REPO_ROOT}/third_party/picoquic/certs/cert.pem}"
 PICO_KEY="${PICO_KEY:-${REPO_ROOT}/third_party/picoquic/certs/key.pem}"
 PICO_SNI="${PICO_SNI:-test}"
 STAGE1_CAP="${STAGE1_CAP:-1024}"   # Stage 1 holds cap fixed (default 1024) while sweeping wait
+# MAX_BYTES_PER_FLOW sets [Reorder] MaxBytesPerFlow (unset = engine default).
+# The CSV has no bytes column and resume does not key on it: give each value
+# its own --out.
+MAX_BYTES_PER_FLOW="${MAX_BYTES_PER_FLOW:-}"
 
 # Scale-mode knobs (perf-mode ignores these). IngressIdleSec < EgressIdleSec is
 # a hard config-validation invariant (engine silently RAW-falls-back otherwise).
@@ -149,7 +159,9 @@ usage: sudo PICOQUICDEMO=<path> $0 [options]
                        the median over all samples per (env,wait,cap)). Use to
                        re-test; otherwise the resume cache skips done cells.
 Environments: ${!ENV_NETEM[*]}
-Env knobs: REPEATS (default 3), PICO_FILE_BYTES (default 20MiB), PICO_TIMEOUT (90s)
+Env knobs: REPEATS (default 3), PICO_FILE_BYTES (default 20MiB), PICO_TIMEOUT (90s),
+  STAGE2_WAITS ("env=wait ..." Stage-2 wait per env), MAX_BYTES_PER_FLOW
+  ([Reorder] MaxBytesPerFlow; use a separate --out per value)
 EOF
     exit 2
 }
@@ -283,6 +295,9 @@ write_ini() {
         echo "Enabled = on"
         echo "MaxWaitMs = ${wait}"
         echo "CapPackets = ${cap}"
+        if [ -n "$MAX_BYTES_PER_FLOW" ]; then
+            echo "MaxBytesPerFlow = ${MAX_BYTES_PER_FLOW}"
+        fi
         if [ "$MODE" = "scale" ]; then
             # IngressIdleSec < EgressIdleSec invariant enforced (else RAW fallback).
             echo "MaxFlows = ${SCALE_MAX_FLOWS}"
