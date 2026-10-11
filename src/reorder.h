@@ -519,9 +519,9 @@ typedef struct {
     uint64_t per_flow_limit_drop_count;
     uint64_t pool_drop_count;
     uint64_t reset_discard_count; /* §17: old-epoch buffered packets discarded on reset */
-    uint64_t gap_count;          /* §17: wait periods started (arm or restart, §12.2) */
-    uint64_t gap_filled_count;   /* §17: periods whose whole cohort arrived in time */
-    uint64_t gap_timeout_count;  /* §17: periods ended by timeout skip (§12.1) */
+    uint64_t gap_count;         /* §17: wait periods started (arm or restart, §12.2) */
+    uint64_t gap_filled_count;  /* §17: periods ended by in-order delivery to the mark */
+    uint64_t gap_timeout_count; /* §17: periods ended by timeout skip (§12.1) */
     uint64_t gap_overflow_count; /* §17: periods ended by overflow_flush (§12.3) */
     uint64_t gap_demote_count;   /* §17: periods ended by ACK demote flush (§11.6) */
     uint64_t gap_reset_count;    /* §17: periods ended by FLOW_RESET discard (§11.6) */
