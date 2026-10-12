@@ -1496,7 +1496,7 @@ test_phase_i_client_scheduler() {
     echo "  I.2 alice requests minrtt"
     _phase_i_client_up secret_a "$alice_log" "--scheduler minrtt --request-server-scheduler" || return 1
     _phase_i_expect alice minrtt 2 || return 1
-    _phase_i_log_has "$server_log" 'client requested scheduler minrtt: applied' "I.2 server log" || return 1
+    _phase_i_log_has "$server_log" 'client requested scheduler minrtt: applied \(user=alice\)' "I.2 server log" || return 1
     _phase_i_order "$alice_log" 0 'server scheduler: minrtt \(requested minrtt\)' || return 1
 
     # Step 3: server restart while alice stays up; she must renegotiate.
@@ -1541,7 +1541,7 @@ test_phase_i_client_scheduler() {
     _phase_i_client_up secret_a "$alice_log" "--scheduler minrtt --request-server-scheduler" || return 1
     _phase_i_expect alice wlb any || return 1
     _phase_i_log_has "${LOG_DIR}/phase_i_server_5.log" \
-        'client requested scheduler minrtt: not applied \(disabled\), using wlb' "I.5 server log" || return 1
+        'client requested scheduler minrtt: not applied \(disabled\), using wlb \(user=alice\)' "I.5 server log" || return 1
     _phase_i_log_has "$alice_log" 'server scheduler: wlb \(requested minrtt\)' "I.5 client log" || return 1
     _phase_i_stop_client
 

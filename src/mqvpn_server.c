@@ -1420,13 +1420,14 @@ svr_negotiate_scheduler(mqvpn_server_t *s, svr_conn_t *conn,
         if (rc == XQC_OK) {
             conn->eff_sched = (mqvpn_scheduler_t)requested;
             conn->sched_swapped = 1;
-            LOG_I(s, "client requested scheduler %s: applied", req_name);
+            LOG_I(s, "client requested scheduler %s: applied (user=%s)", req_name,
+                  conn->username);
             return;
         }
         reason = svr_sched_refusal_reason(rc);
     }
-    LOG_I(s, "client requested scheduler %s: not applied (%s), using %s", req_name,
-          reason, mqvpn_sched_to_name(conn->eff_sched));
+    LOG_I(s, "client requested scheduler %s: not applied (%s), using %s (user=%s)",
+          req_name, reason, mqvpn_sched_to_name(conn->eff_sched), conn->username);
 }
 
 /* CONNECT-IP request: header-phase handling (validate, auth, 200 response).
