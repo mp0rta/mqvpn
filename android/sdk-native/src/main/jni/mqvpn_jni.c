@@ -1499,8 +1499,9 @@ JNI_TEST_FN(nativeConfigHasPlatformVerifier)(JNIEnv *env, jobject thiz, jlong cf
 
 /* nativeFireUpcallsForTest(client): runs each upcall trampoline once, with
  * the fixed values below, on the callback object clientNew registered for
- * client. The values are pairwise distinct so a swapped argument shows.
- * False when client is not registered. */
+ * client; tunnel_config_ready runs twice, the second time with a pre-ABI-3
+ * struct_size. Same-typed arguments of one upcall differ in at least one of
+ * the calls, so a swap shows. False when client is not registered. */
 JNIEXPORT jboolean JNICALL
 JNI_TEST_FN(nativeFireUpcallsForTest)(JNIEnv *env, jobject thiz, jlong client)
 {
@@ -1521,6 +1522,9 @@ JNI_TEST_FN(nativeFireUpcallsForTest)(JNIEnv *env, jobject thiz, jlong client)
         .has_server_scheduler = 1,
         .server_scheduler = MQVPN_SCHED_WLB_UDP_PIN,
     };
+    jni_tunnel_config_ready(&info, ctx);
+    /* A caller built before ABI 3: the scheduler fields must read as absent. */
+    info.struct_size = offsetof(mqvpn_tunnel_info_t, has_server_scheduler);
     jni_tunnel_config_ready(&info, ctx);
     jni_state_changed(MQVPN_STATE_CONNECTING, MQVPN_STATE_AUTHENTICATING, ctx);
     jni_path_event((mqvpn_path_handle_t)7, MQVPN_PATH_DEGRADED, ctx);
