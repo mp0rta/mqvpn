@@ -1289,7 +1289,9 @@ jobs:
   # place the JNI boundary is executed in CI: assembleDebug + JVM `test`
   # never load libmqvpn_jni.so, so a Kotlin external fun <-> C JNI_FN drift
   # or a missing native symbol ships undetected without this job
-  # (ReorderJniSmokeTest resolves the externals against the real .so).
+  # (ReorderJniSmokeTest resolves the externals against the real .so;
+  # sdk-core's TunnelCallbacksJniTest runs the upcalls against the real
+  # TunnelCallbacks interface).
   # Builds its own x86_64 prebuilts (the release ABI is arm64-v8a only);
   # sdk-native reads -PmqvpnAbiFilters so release/F-Droid stay arm64-only.
   android-emulator:
@@ -1370,14 +1372,16 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot
           working-directory: android
-          script: ./gradlew :sdk-native:connectedAndroidTest -PmqvpnAbiFilters=x86_64 --no-daemon --stacktrace
+          script: ./gradlew :sdk-native:connectedAndroidTest :sdk-core:connectedAndroidTest -PmqvpnAbiFilters=x86_64 --no-daemon --stacktrace
 
       - name: Upload instrumented test reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: android-instrumented-test-reports
-          path: android/sdk-native/build/reports/androidTests/
+          path: |
+            android/sdk-native/build/reports/androidTests/
+            android/sdk-core/build/reports/androidTests/
           retention-days: 7
 
   lint-lifecycle-writes:

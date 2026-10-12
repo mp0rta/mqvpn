@@ -1496,4 +1496,37 @@ JNI_TEST_FN(nativeConfigHasPlatformVerifier)(JNIEnv *env, jobject thiz, jlong cf
     const mqvpn_config_t *c = (const mqvpn_config_t *)(intptr_t)cfg;
     return (c && c->cert_verify_fn == jni_cert_verify) ? JNI_TRUE : JNI_FALSE;
 }
+
+/* nativeFireUpcallsForTest(client): runs each upcall trampoline once, with
+ * the fixed values below, on the callback object clientNew registered for
+ * client. The values are pairwise distinct so a swapped argument shows.
+ * False when client is not registered. */
+JNIEXPORT jboolean JNICALL
+JNI_TEST_FN(nativeFireUpcallsForTest)(JNIEnv *env, jobject thiz, jlong client)
+{
+    (void)env;
+    (void)thiz;
+    jni_ctx_t *ctx = ctx_lookup((mqvpn_client_t *)(intptr_t)client, 0);
+    if (!ctx) return JNI_FALSE;
+    mqvpn_tunnel_info_t info = {
+        .struct_size = sizeof(info),
+        .assigned_ip = {10, 0, 0, 2},
+        .assigned_prefix = 24,
+        .server_ip = {10, 0, 0, 1},
+        .server_prefix = 30,
+        .mtu = 1280,
+        .assigned_ip6 = {0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2},
+        .assigned_prefix6 = 112,
+        .has_v6 = 1,
+        .has_server_scheduler = 1,
+        .server_scheduler = MQVPN_SCHED_WLB_UDP_PIN,
+    };
+    jni_tunnel_config_ready(&info, ctx);
+    jni_state_changed(MQVPN_STATE_CONNECTING, MQVPN_STATE_AUTHENTICATING, ctx);
+    jni_path_event((mqvpn_path_handle_t)7, MQVPN_PATH_DEGRADED, ctx);
+    jni_log(MQVPN_LOG_WARN, "upcall seam", ctx);
+    jni_reconnect_scheduled(9, ctx);
+    jni_tunnel_closed(MQVPN_ERR_AUTH, ctx);
+    return JNI_TRUE;
+}
 #endif /* MQVPN_JNI_TEST_SEAMS */
