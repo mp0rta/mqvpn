@@ -45,6 +45,12 @@ typedef struct mqvpn_client_cfg_s {
     uint64_t recv_rate_limit;     /* [Advanced] RecvRateLimit, bytes/sec; 0 = off */
     int udp_gso;                  /* [Advanced] UdpGso; default 1 */
     int udp_gro;                  /* [Advanced] UdpGro; default 1 */
+
+    /* INI [ClientManagement] — management IPC endpoint (unix socket) */
+    int client_mgmt_enabled;              /* 1=enabled (default), 0=off */
+    const char *client_mgmt_endpoint;     /* unix socket path, "" = platform default */
+    const char *client_mgmt_socket_mode;  /* octal string e.g. "0660", "" = default */
+    const char *client_mgmt_socket_group; /* "" = no chown, root-only access */
 } mqvpn_client_cfg_t;
 
 /* CLI → library config bridge (src/platform/client_config_bridge.c): forwards
