@@ -335,6 +335,36 @@ TEST(server_lifecycle_with_path_mtu)
     mqvpn_server_destroy(s);
 }
 
+/* PathMTU 1280 leaves 1182 for the tunnel. That stands on a v4-only server,
+ * but with a v6 subnet the TUN MTU is floored at 1280. */
+TEST(server_lifecycle_path_mtu_v6_floor)
+{
+    const char *subnet6[] = {NULL, "fd00::/112"};
+    const int want[] = {1182, 1280};
+
+    for (int i = 0; i < 2; i++) {
+        reset_mocks();
+        mqvpn_config_t *cfg = make_server_config();
+        ASSERT_EQ(mqvpn_config_set_path_mtu(cfg, 1280), MQVPN_OK);
+        if (subnet6[i]) mqvpn_config_set_subnet6(cfg, subnet6[i]);
+
+        mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+        cbs.tun_output = mock_tun_output;
+        cbs.tunnel_config_ready = mock_tunnel_config_ready;
+        cbs.log = mock_log;
+
+        mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+        ASSERT_NOT_NULL(s);
+        mqvpn_config_free(cfg);
+
+        ASSERT_EQ(mqvpn_server_start(s), MQVPN_OK);
+        ASSERT_EQ(g_last_tunnel_info.mtu, want[i]);
+
+        mqvpn_server_stop(s);
+        mqvpn_server_destroy(s);
+    }
+}
+
 TEST(server_lifecycle_with_v6)
 {
     reset_mocks();
@@ -2052,6 +2082,7 @@ main(void)
     run_server_lifecycle();
     run_server_lifecycle_with_tun_mtu();
     run_server_lifecycle_with_path_mtu();
+    run_server_lifecycle_path_mtu_v6_floor();
     run_server_lifecycle_with_v6();
     run_server_double_start();
 
