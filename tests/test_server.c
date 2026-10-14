@@ -313,6 +313,28 @@ TEST(server_lifecycle_with_tun_mtu)
     mqvpn_server_destroy(s);
 }
 
+TEST(server_lifecycle_with_path_mtu)
+{
+    reset_mocks();
+    mqvpn_config_t *cfg = make_server_config();
+    ASSERT_EQ(mqvpn_config_set_path_mtu(cfg, 1500), MQVPN_OK);
+
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    cbs.log = mock_log;
+
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    ASSERT_NOT_NULL(s);
+    mqvpn_config_free(cfg);
+
+    ASSERT_EQ(mqvpn_server_start(s), MQVPN_OK);
+    ASSERT_EQ(g_last_tunnel_info.mtu, 1402);
+
+    mqvpn_server_stop(s);
+    mqvpn_server_destroy(s);
+}
+
 TEST(server_lifecycle_with_v6)
 {
     reset_mocks();
@@ -711,6 +733,8 @@ static const char *g_lb_server_cert = NULL;
 static const char *g_lb_server_key = NULL;
 /* Server [Reorder] mode for the next loopback_setup; tests reset it. */
 static mqvpn_reorder_mode_t g_lb_server_reorder = MQVPN_REORDER_OFF;
+/* Server PathMTU for the next loopback_setup; tests reset it. */
+static int g_lb_server_path_mtu = 0;
 
 /* Sockets, server, client (with every client mock registered, tunnel_closed
  * and log included), one path, connect. `tweak` edits the client config
@@ -763,6 +787,8 @@ loopback_setup(loopback_t *lb, void (*tweak)(mqvpn_config_t *cfg))
     if (g_lb_server_reorder != MQVPN_REORDER_OFF)
         ASSERT_EQ(mqvpn_config_set_reorder_enabled(svr_cfg, g_lb_server_reorder),
                   MQVPN_OK);
+    if (g_lb_server_path_mtu)
+        ASSERT_EQ(mqvpn_config_set_path_mtu(svr_cfg, g_lb_server_path_mtu), MQVPN_OK);
     mqvpn_server_callbacks_t svr_cbs = MQVPN_SERVER_CALLBACKS_INIT;
     svr_cbs.tun_output = mock_tun_output;
     svr_cbs.tunnel_config_ready = mock_tunnel_config_ready;
@@ -1337,6 +1363,26 @@ reorder_mtu_run(mqvpn_reorder_mode_t cli_mode, mqvpn_reorder_mode_t svr_mode,
     *svr_mtu = g_last_tunnel_info.mtu;
     loopback_teardown(&lb);
     g_lb_server_reorder = MQVPN_REORDER_OFF;
+}
+
+static void
+tweak_path_mtu_1500(mqvpn_config_t *cfg)
+{
+    ASSERT_EQ(mqvpn_config_set_path_mtu(cfg, 1500), MQVPN_OK);
+}
+
+/* PathMTU on both ends raises the negotiated tunnel MTU from 1382 to 1402. */
+TEST(server_path_mtu_negotiated)
+{
+    loopback_t lb;
+    g_lb_server_path_mtu = 1500;
+    loopback_setup(&lb, tweak_path_mtu_1500);
+    loopback_pump_until(&lb, done_established, 10000);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+    ASSERT_EQ(g_cli_tunnel_info.mtu, 1402);
+    ASSERT_EQ(g_last_tunnel_info.mtu, 1402);
+    loopback_teardown(&lb);
+    g_lb_server_path_mtu = 0;
 }
 
 TEST(server_reorder_mtu_only_when_negotiated)
@@ -2005,6 +2051,7 @@ main(void)
     /* Lifecycle */
     run_server_lifecycle();
     run_server_lifecycle_with_tun_mtu();
+    run_server_lifecycle_with_path_mtu();
     run_server_lifecycle_with_v6();
     run_server_double_start();
 
@@ -2034,6 +2081,7 @@ main(void)
 
     /* QUIC loopback integration test (test_server_session per impl_plan) */
     run_server_session_quic_loopback();
+    run_server_path_mtu_negotiated();
     run_server_reorder_mtu_only_when_negotiated();
     run_client_verifier_accepts_presented_chain();
     run_client_verifier_is_the_hostname_judge();

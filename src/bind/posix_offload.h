@@ -99,15 +99,15 @@ size_t mqvpn_gso_run_len(const struct iovec *iov, size_t cnt);
  * iov_len >= 1 (QUIC packets are never empty).
  *
  * Forward-compat invariant: today's safety envelope is
- * MQVPN_OFFLOAD_MAX_BATCH (32) packets x 1400B = 44,800B, comfortably under
+ * MQVPN_OFFLOAD_MAX_BATCH (32) packets x 1452B = 46,464B, comfortably under
  * both the ~64KB kernel GSO/UDP ceiling and UDP_MAX_SEGMENTS (64) — cnt is
  * capped at MQVPN_OFFLOAD_MAX_BATCH (== XQC_MAX_SEND_MSG_ONCE). This module
- * never itself checks MQVPN_MAX_PKT_OUT_SIZE: the write_mmsg_ex registration
+ * never itself checks MQVPN_XQC_MAX_PKT_OUT_SIZE: the write_mmsg_ex registration
  * (mqvpn_tx_batch_register in mqvpn_conn_settings.c) already guards
- * entry to this whole batching path on MQVPN_MAX_PKT_OUT_SIZE <= 1500, so a
+ * entry to this whole batching path on MQVPN_XQC_MAX_PKT_OUT_SIZE <= 1500, so a
  * full run cannot approach the 64KB ceiling today. Run splitting inside this
  * module would only become necessary if that registration guard were lifted
- * (MQVPN_MAX_PKT_OUT_SIZE raised above ~2KB without adding splitting here
+ * (MQVPN_XQC_MAX_PKT_OUT_SIZE raised above ~2KB without adding splitting here
  * first) — otherwise a full run could exceed 64KB and fail EMSGSIZE, which
  * classifies as GSO-class and would permanently (and misleadingly)
  * sticky-disable GSO on that socket. */

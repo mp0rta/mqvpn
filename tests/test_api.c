@@ -306,6 +306,23 @@ TEST(config_set_tun_mtu)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_set_path_mtu)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(cfg->path_mtu, 0);
+    ASSERT_EQ(mqvpn_config_set_path_mtu(cfg, 1500), MQVPN_OK);
+    ASSERT_EQ(cfg->path_mtu, 1500);
+    ASSERT_EQ(mqvpn_config_set_path_mtu(cfg, 0), MQVPN_OK);
+    ASSERT_EQ(cfg->path_mtu, 0);
+    ASSERT_EQ(mqvpn_config_set_path_mtu(cfg, 1279), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_path_mtu(cfg, 9001), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_path_mtu(NULL, 1500), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"path_mtu\":1492}"), MQVPN_OK);
+    ASSERT_EQ(cfg->path_mtu, 1492);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"path_mtu\":100}"), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
 TEST(config_set_scheduler)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
@@ -3566,6 +3583,7 @@ main(void)
     run_config_set_tls_server_name();
     run_config_set_insecure();
     run_config_set_tun_mtu();
+    run_config_set_path_mtu();
     run_config_set_scheduler();
     run_config_sched_knob_setters();
     run_config_sched_knobs_from_json();

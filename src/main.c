@@ -88,6 +88,8 @@ usage(const char *prog)
         "                            to exercise G-P16 PATHS_BLOCKED).\n"
         "  --mtu N                   TUN MTU, 1280-9000 (client: cap on negotiated;\n"
         "                            server: sets TUN MTU; default: auto = ~1382)\n"
+        "  --path-mtu N              Underlay MTU to size QUIC packets for, 1280-9000\n"
+        "                            (default: 0 = 1400-byte packets)\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
         "  --version                 Show version and exit\n"
@@ -132,6 +134,21 @@ parse_host_port(const char *str, char *host, size_t host_len, int *port)
     return 0;
 }
 
+static int
+parse_mtu_arg(const char *opt, const char *str, int *out)
+{
+    char *end = NULL;
+    errno = 0;
+    long lv = strtol(str, &end, 10);
+    if (end == str || !end || *end != '\0' || errno == ERANGE ||
+        (lv != 0 && (lv < 1280 || lv > 9000))) {
+        fprintf(stderr, "error: %s must be 0 or 1280..9000\n", opt);
+        return -1;
+    }
+    *out = (int)lv;
+    return 0;
+}
+
 /* mqvpn_copy_str is provided by json_mini.h as mqvpn_copy_str */
 
 int
@@ -165,6 +182,7 @@ main(int argc, char *argv[])
         {"cc", required_argument, NULL, 0x101},
         {"init-max-path-id", required_argument, NULL, 0x100},
         {"mtu", required_argument, NULL, 0x102},
+        {"path-mtu", required_argument, NULL, 0x107},
         {"max-clients", required_argument, NULL, 'M'},
         {"log-level", required_argument, NULL, 'L'},
         {"no-reconnect", no_argument, NULL, 'R'},
@@ -204,7 +222,8 @@ main(int argc, char *argv[])
     const char *cc_str = NULL;
     uint64_t init_max_path_id = 0; /* 0 = unset → xquic default (8) */
     int init_max_path_id_set = 0;
-    int cli_mtu = -1;     /* -1 means "not set by CLI" */
+    int cli_mtu = -1; /* -1 means "not set by CLI" */
+    int cli_path_mtu = -1;
     int max_clients = -1; /* -1 means "not set by CLI" */
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES];
     int n_paths = 0;
@@ -297,23 +316,12 @@ main(int argc, char *argv[])
             init_max_path_id_set = 1;
             break;
         }
-        case 0x102: {
-            char *end = NULL;
-            errno = 0;
-            long lv = strtol(optarg, &end, 10);
-            if (end == optarg || !end || *end != '\0' || errno == ERANGE ||
-                lv < INT_MIN || lv > INT_MAX) {
-                fprintf(stderr, "error: --mtu must be 0 or 1280..9000\n");
-                return 1;
-            }
-            int v = (int)lv;
-            if (v != 0 && (v < 1280 || v > 9000)) {
-                fprintf(stderr, "error: --mtu must be 0 or 1280..9000\n");
-                return 1;
-            }
-            cli_mtu = v;
+        case 0x102:
+            if (parse_mtu_arg("--mtu", optarg, &cli_mtu) < 0) return 1;
             break;
-        }
+        case 0x107:
+            if (parse_mtu_arg("--path-mtu", optarg, &cli_path_mtu) < 0) return 1;
+            break;
         case 'M': max_clients = atoi(optarg); break;
         case 'R': no_reconnect = 1; break;
         case 'K': kill_switch = 1; break;
@@ -404,6 +412,7 @@ main(int argc, char *argv[])
                                        : file_cfg.request_server_scheduler;
     int eff_max_clients = max_clients >= 0 ? max_clients : file_cfg.max_clients;
     int eff_tun_mtu = cli_mtu >= 0 ? cli_mtu : file_cfg.tun_mtu;
+    int eff_path_mtu = cli_path_mtu >= 0 ? cli_path_mtu : file_cfg.path_mtu;
 
     /* Auth key: CLI > config (use auth_key for client, server_auth_key for server) */
     const char *eff_auth_key =
@@ -572,6 +581,7 @@ main(int argc, char *argv[])
             .manage_routes = manage_routes >= 0 ? manage_routes : file_cfg.manage_routes,
             .init_max_path_id = eff_init_max_path_id,
             .tun_mtu = eff_tun_mtu,
+            .path_mtu = eff_path_mtu,
             .cc = cc,
             .reinjection = reinjection,
             .reinj_srtt_factor_pct = file_cfg.reinjection_srtt_factor_pct,
@@ -636,6 +646,7 @@ main(int argc, char *argv[])
             .control_port = eff_control_port,
             .init_max_path_id = eff_init_max_path_id,
             .tun_mtu = eff_tun_mtu,
+            .path_mtu = eff_path_mtu,
             .cc = cc,
             .reinjection = reinjection,
             .reinj_srtt_factor_pct = file_cfg.reinjection_srtt_factor_pct,

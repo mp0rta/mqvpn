@@ -567,6 +567,7 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_INT(SEC_INTERFACE, "ReconnectInterval", "reconnect_interval", reconnect_interval,
             cfgk_int_positive),
     CFG_INT(SEC_INTERFACE, "MTU", "mtu", tun_mtu, cfgk_int_mtu),
+    CFG_INT(SEC_INTERFACE, "PathMTU", "path_mtu", path_mtu, cfgk_int_mtu),
     /* [Server] */
     CFG_STR(SEC_SERVER, "Address", "server_addr", server_addr),
     CFG_STR(SEC_SERVER, "ServerName", "tls_server_name", tls_server_name),
