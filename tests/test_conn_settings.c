@@ -187,8 +187,9 @@ test_path_mtu_sizes_packets(void)
         {0, MQVPN_MAX_PKT_OUT_SIZE},
         {1280, 1200},
         {1492, 1412},
-        {1500, 1420},
-        {9000, 1420},
+        {1499, 1419},
+        {1500, 1436},
+        {9000, 1436},
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -198,8 +199,9 @@ test_path_mtu_sizes_packets(void)
     }
     /* the largest packet on the wire fits the path, IPv6 header included */
     for (int mtu = 1280; mtu <= 1500; mtu++) {
-        ASSERT_EQ(mqvpn_pkt_out_size(mtu) + MQVPN_PKT_OUT_OVERHEAD + 48 <= (size_t)mtu,
-                  1);
+        size_t pkt = mqvpn_pkt_out_size(mtu);
+        size_t ack = pkt < MQVPN_XQC_MAX_PKT_OUT_SIZE ? 16 : 0;
+        ASSERT_EQ(pkt + ack + MQVPN_AEAD_TAG_LEN + 48 <= (size_t)mtu, 1);
     }
     return 0;
 }

@@ -333,7 +333,7 @@ TEST(server_lifecycle_with_path_mtu)
     mqvpn_config_free(cfg);
 
     ASSERT_EQ(mqvpn_server_start(s), MQVPN_OK);
-    ASSERT_EQ(g_last_tunnel_info.mtu, 1402);
+    ASSERT_EQ(g_last_tunnel_info.mtu, 1418);
 
     mqvpn_server_stop(s);
     mqvpn_server_destroy(s);
@@ -341,7 +341,7 @@ TEST(server_lifecycle_with_path_mtu)
 
 TEST(server_path_mtu_warning)
 {
-    const int mtus[] = {0, 1300, 1402, 1500};
+    const int mtus[] = {0, 1300, 1418, 1500};
     for (size_t i = 0; i < sizeof(mtus) / sizeof(mtus[0]); i++) {
         reset_mocks();
         mqvpn_config_t *cfg = make_server_config();
@@ -356,8 +356,8 @@ TEST(server_path_mtu_warning)
         ASSERT_NOT_NULL(s);
         mqvpn_config_free(cfg);
         ASSERT_EQ(mqvpn_server_start(s), MQVPN_OK);
-        ASSERT_EQ(g_mtu_warning_called, mtus[i] > 1402);
-        ASSERT_EQ(g_last_tunnel_info.mtu, mtus[i] ? mtus[i] : 1402);
+        ASSERT_EQ(g_mtu_warning_called, mtus[i] > 1418);
+        ASSERT_EQ(g_last_tunnel_info.mtu, mtus[i] ? mtus[i] : 1418);
         mqvpn_server_destroy(s);
     }
 }
@@ -1444,7 +1444,7 @@ tweak_path_mtu_1500(mqvpn_config_t *cfg)
     ASSERT_EQ(mqvpn_config_set_path_mtu(cfg, 1500), MQVPN_OK);
 }
 
-/* PathMTU on both ends raises the negotiated tunnel MTU from 1382 to 1402. */
+/* PathMTU on both ends raises the negotiated tunnel MTU from 1382 to 1418. */
 TEST(server_path_mtu_negotiated)
 {
     loopback_t lb;
@@ -1452,8 +1452,8 @@ TEST(server_path_mtu_negotiated)
     loopback_setup(&lb, tweak_path_mtu_1500);
     loopback_pump_until(&lb, done_established, 10000);
     ASSERT_EQ(g_cli_tunnel_ready_called, 1);
-    ASSERT_EQ(g_cli_tunnel_info.mtu, 1402);
-    ASSERT_EQ(g_last_tunnel_info.mtu, 1402);
+    ASSERT_EQ(g_cli_tunnel_info.mtu, 1418);
+    ASSERT_EQ(g_last_tunnel_info.mtu, 1418);
     loopback_teardown(&lb);
     g_lb_server_path_mtu = 0;
 }

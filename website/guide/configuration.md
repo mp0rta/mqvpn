@@ -395,7 +395,7 @@ For most setups, leave `MTU` unset. The auto-negotiated value (~1382) works on s
 |----------|----------------|
 | Standard Ethernet / mobile | Leave unset (auto ~1382) |
 | Deeply nested tunnels (mqvpn → WG → another tunnel) | Calculate remaining MTU; set if near 1280 |
-| Both ends on a clean 1500-byte path, larger tunnel MTU wanted | `PathMTU = 1500` on both ends (TUN MTU 1402) |
+| Both ends on a clean 1500-byte path, larger tunnel MTU wanted | `PathMTU = 1500` on both ends (TUN MTU 1418) |
 
 On the client, if `MTU` is set, mqvpn uses `min(config MTU, negotiated MTU)`; a warning is logged when the config value exceeds the negotiated value. On the server, `MTU` sets the TUN MTU directly (default 1382).
 
@@ -426,15 +426,14 @@ The default 1400-byte packet size leaves room for PPPoE and most mobile networks
 PathMTU                    1500 bytes
  − IPv6 + UDP header         48 bytes
  − encryption tag            16 bytes
- − room for an ACK frame     16 bytes
                            ─────────
- = max_pkt_out_size         1420 bytes (upper limit)
+ = max_pkt_out_size         1436 bytes (upper limit)
  − QUIC, DATAGRAM and MASQUE headers  18 bytes
                            ─────────
- = TUN MTU                  1402 bytes
+ = TUN MTU                  1418 bytes
 ```
 
-The QUIC library caps packets at 1420 bytes, so values above 1500 give the same result. If `PathMTU` is larger than what the network really carries, full-size packets get fragmented or dropped, so only set it when you know the path.
+A packet at the upper limit never carries an ACK frame. Below it, mqvpn also leaves 16 bytes of room for one, so `PathMTU = 1492` gives 1412-byte packets and a TUN MTU of 1394. The QUIC library caps packets at 1436 bytes, so values above 1500 give the same result. If `PathMTU` is larger than what the network really carries, full-size packets get fragmented or dropped, so only set it when you know the path.
 
 When an explicit `MTU` exceeds the available inner packet size, the client warns and limits it. The server also warns, but keeps the configured TUN MTU; oversized tunnel packets may be dropped.
 

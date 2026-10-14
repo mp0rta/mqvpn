@@ -39,11 +39,13 @@
  * 1500B, xqc_defs.h XQC_CONN_MAX_UDP_PAYLOAD_SIZE). */
 #define MQVPN_MAX_PKT_OUT_SIZE 1400
 
-/* xquic clamps max_pkt_out_size to this (XQC_QUIC_MAX_MSS). */
-#define MQVPN_XQC_MAX_PKT_OUT_SIZE 1420
+/* xquic clamps max_pkt_out_size to this (XQC_MAX_PACKET_OUT_SIZE). */
+#define MQVPN_XQC_MAX_PKT_OUT_SIZE 1436
 
 /* A sent packet can exceed max_pkt_out_size by the AEAD tag (16) plus the
- * room xquic keeps for a piggybacked ACK frame (XQC_ACK_SPACE, 16). */
+ * room xquic keeps for a piggybacked ACK frame (XQC_ACK_SPACE, 16). xquic
+ * never lets that ACK take a packet past MQVPN_XQC_MAX_PKT_OUT_SIZE. */
+#define MQVPN_AEAD_TAG_LEN     16
 #define MQVPN_PKT_OUT_OVERHEAD 32
 
 /* QUIC short header (8-byte CID, 4-byte packet number), DATAGRAM frame
@@ -56,6 +58,9 @@ static inline size_t
 mqvpn_pkt_out_size(int path_mtu)
 {
     if (path_mtu <= 0) return MQVPN_MAX_PKT_OUT_SIZE;
+    /* at the cap a full packet carries no ACK, so only the tag is added */
+    if (path_mtu - 40 - 8 - MQVPN_AEAD_TAG_LEN >= MQVPN_XQC_MAX_PKT_OUT_SIZE)
+        return MQVPN_XQC_MAX_PKT_OUT_SIZE;
     int v = path_mtu - 40 - 8 - MQVPN_PKT_OUT_OVERHEAD;
     if (v > MQVPN_XQC_MAX_PKT_OUT_SIZE) v = MQVPN_XQC_MAX_PKT_OUT_SIZE;
     if (v < 1200) v = 1200;
