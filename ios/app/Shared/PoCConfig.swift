@@ -19,11 +19,11 @@ struct PoCConfig {
         let d = Bundle.main.infoDictionary ?? [:]
         guard let host = d["MqvpnServerHost"] as? String, !host.isEmpty,
               let portS = d["MqvpnServerPort"] as? String, let port = Int(portS) else {
-            throw NSError(domain: "mqvpn.poc", code: 1,
+            throw NSError(domain: "org.mqvpn.app", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "server config missing"])
         }
         guard (1...65535).contains(port) else {
-            throw NSError(domain: "mqvpn.poc", code: 2,
+            throw NSError(domain: "org.mqvpn.app", code: 2,
                           userInfo: [NSLocalizedDescriptionKey: "server port out of range"])
         }
         let bulk = (d["MqvpnBulkURL"] as? String).flatMap(URL.init(string:))

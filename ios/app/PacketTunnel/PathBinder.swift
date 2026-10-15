@@ -22,7 +22,7 @@ final class PathBinder {
     private var slots: [NWInterface.InterfaceType: PathSlot] = [:]  // tick-thread confined
     private var monitors: [NWInterface.InterfaceType: NWPathMonitor] = [:]
     private var pollTimer: Timer?   // tick-thread confined
-    private let monitorQueue = DispatchQueue(label: "mqvpn.poc.pathmon")
+    private let monitorQueue = DispatchQueue(label: "org.mqvpn.app.pathmon")
     // One enter per read source (PathReadSource.init) against the leave at
     // the end of its cancel chain: stop(completion:) notifies on it once
     // every fd is closed AND its release was reported to the library.

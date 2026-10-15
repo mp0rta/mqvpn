@@ -1,4 +1,4 @@
-name: MqvpnPoC
+name: Mqvpn
 options:
   deploymentTarget:
     iOS: "15.0"
@@ -11,12 +11,12 @@ settings:
     LIBRARY_SEARCH_PATHS: "$(SRCROOT)/../build"
     HEADER_SEARCH_PATHS: "$(SRCROOT)/../../include $(SRCROOT)/../../src $(SRCROOT)/Shared"
 schemes:
-  MqvpnPoC:
+  Mqvpn:
     build:
       targets:
-        MqvpnPoC: all
+        Mqvpn: all
 targets:
-  MqvpnPoC:
+  Mqvpn:
     type: application
     platform: iOS
     sources:
@@ -27,7 +27,7 @@ targets:
         excludes: ["*.c"]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.mp0rta.mqvpnpoc
+        PRODUCT_BUNDLE_IDENTIFIER: org.mqvpn.app
     entitlements:
       path: App.entitlements
       properties:
@@ -55,7 +55,7 @@ targets:
         excludes: ["clock_shim_host_test.c"]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.mp0rta.mqvpnpoc.PacketTunnel
+        PRODUCT_BUNDLE_IDENTIFIER: org.mqvpn.app.PacketTunnel
         SWIFT_OBJC_BRIDGING_HEADER: PacketTunnel/BridgingHeader.h
         OTHER_LDFLAGS: "-lmqvpn -llwip_core -lxquic-static -lssl -lcrypto -lc++"
     entitlements:

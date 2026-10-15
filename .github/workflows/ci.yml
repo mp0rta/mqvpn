@@ -989,7 +989,7 @@ jobs:
       # bits and no dependency on the caches below — run first so a Swift
       # logic regression fails in seconds, not after the C-chain build.
       - name: Swift host tests
-        run: bash ios/poc/Tests/run-host-tests.sh
+        run: bash ios/app/Tests/run-host-tests.sh
 
       - name: Compute xquic SHA
         id: xqsha
@@ -1047,14 +1047,14 @@ jobs:
           brew install xcodegen
           # CI has no signing identity: the example config's placeholder
           # DEVELOPMENT_TEAM is fine because the build below disables signing.
-          cp ios/poc/Config.example.xcconfig ios/poc/Config.xcconfig
-          cd ios/poc && xcodegen generate
+          cp ios/app/Config.example.xcconfig ios/app/Config.xcconfig
+          cd ios/app && xcodegen generate
 
       - name: Build app + extension (unsigned)
         run: |
-          xcodebuild -project ios/poc/MqvpnPoC.xcodeproj -scheme MqvpnPoC \
+          xcodebuild -project ios/app/Mqvpn.xcodeproj -scheme Mqvpn \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath ios/poc/DerivedData \
+            -derivedDataPath ios/app/DerivedData \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
 
   windows:

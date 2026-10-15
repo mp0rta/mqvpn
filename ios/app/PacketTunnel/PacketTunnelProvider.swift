@@ -36,7 +36,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let providerConfig = (self.protocolConfiguration as? NETunnelProviderProtocol)?
             .providerConfiguration
         guard let server = ServerSettings(providerConfiguration: providerConfig) else {
-            throw NSError(domain: "mqvpn.poc", code: 10,
+            throw NSError(domain: "org.mqvpn.app", code: 10,
                           userInfo: [NSLocalizedDescriptionKey: "server not configured"])
         }
         let reorder = ReorderSettings(providerConfiguration: providerConfig) ?? .disabled
@@ -44,7 +44,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         guard let resolved = await Task.detached(priority: .userInitiated, operation: {
             resolveServer(server.host, server.port)
         }).value, let resolvedIP = resolved.ipString else {
-            throw NSError(domain: "mqvpn.poc", code: 11,
+            throw NSError(domain: "org.mqvpn.app", code: 11,
                           userInfo: [NSLocalizedDescriptionKey: "server unresolved: \(server.host)"])
         }
         self.resolvedIP = resolvedIP
@@ -211,10 +211,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // -4 == MQVPN_ERR_TLS: name it so the dashboard's failure line
             // is recognizably TLS (gate G-t1).
             let msg = code == -4 ? "TLS certificate rejected" : "tunnel closed"
-            return NSError(domain: "mqvpn.poc", code: Int(code),
+            return NSError(domain: "org.mqvpn.app", code: Int(code),
                            userInfo: [NSLocalizedDescriptionKey: msg])
         case .local(let code):
-            return NSError(domain: "mqvpn.poc", code: Int(code),
+            return NSError(domain: "org.mqvpn.app", code: Int(code),
                            userInfo: [NSLocalizedDescriptionKey: "engine start failed"])
         case .settings(let err):
             return err

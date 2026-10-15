@@ -5,7 +5,7 @@ import SwiftUI
 @preconcurrency import NetworkExtension
 
 @main
-struct MqvpnPoCApp: App {
+struct MqvpnApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var controller = TunnelController()
 
@@ -21,13 +21,13 @@ struct MqvpnPoCApp: App {
     }
 }
 
-/// PoC container controller: load/save the one NETunnelProviderManager,
+/// Container controller: load/save the one NETunnelProviderManager,
 /// start/stop it, and — while foregrounded and connected — poll the provider
 /// for a development snapshot over `sendProviderMessage`. Per-path transfer
 /// rates are derived here from consecutive snapshots.
 @MainActor
 final class TunnelController: ObservableObject {
-    static let providerBundleID = "com.mp0rta.mqvpnpoc.PacketTunnel"
+    static let providerBundleID = "org.mqvpn.app.PacketTunnel"
 
     @Published var status: NEVPNStatus = .invalid
     @Published var statusText = "not loaded"
@@ -69,7 +69,7 @@ final class TunnelController: ObservableObject {
                 proto.providerBundleIdentifier = Self.providerBundleID
                 proto.serverAddress = (try? ServerSettings.fromBundle())?.host ?? "mqvpn"
                 m.protocolConfiguration = proto
-                m.localizedDescription = "mqvpn PoC"
+                m.localizedDescription = "mqvpn"
                 m.isEnabled = true
                 try await m.saveToPreferences()
                 try await m.loadFromPreferences()

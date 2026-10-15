@@ -1,8 +1,8 @@
 build/
-poc/*.xcodeproj
-poc/Config.xcconfig
-poc/App/Info.plist
-poc/PacketTunnel/Info.plist
-poc/*.entitlements
+app/*.xcodeproj
+app/Config.xcconfig
+app/App/Info.plist
+app/PacketTunnel/Info.plist
+app/*.entitlements
 DerivedData/
 xcuserdata/

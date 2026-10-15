@@ -5,7 +5,7 @@ import Foundation
 import Darwin
 import os
 
-private let metricsLog = Logger(subsystem: "mqvpn.poc", category: "metrics")
+private let metricsLog = Logger(subsystem: "org.mqvpn.app", category: "metrics")
 
 /// Periodic (10s) memory + path snapshot dump for the on-device acceptance
 /// gate procedures.

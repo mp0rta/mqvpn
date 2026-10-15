@@ -7,7 +7,7 @@ import os.log
 
 // Shared/ compiles into the app target and the host tests, where
 // MqvpnEngine.swift's file-scope `log` is not visible — own Logger (D9).
-private let trustLog = Logger(subsystem: "mqvpn.poc", category: "trust")
+private let trustLog = Logger(subsystem: "org.mqvpn.app", category: "trust")
 
 /// Platform certificate verification via SecTrust (spec D9). The sole judge
 /// of chain and hostname when installed through

@@ -314,7 +314,7 @@ check(SystemTrust.evaluate(chain: [Data([0x30, 0x00])], hostname: "example.com")
 // Self-signed leaf: tests/certs/test.crt via #filePath (host-test cwd is the
 // caller's, so relative paths are unusable).
 let tdCertURL = URL(fileURLWithPath: #filePath)
-    .deletingLastPathComponent()                                   // ios/poc/Tests
+    .deletingLastPathComponent()                                   // ios/app/Tests
     .appendingPathComponent("../../../tests/certs/test.crt").standardized
 let tdPEM = try! String(contentsOf: tdCertURL, encoding: .utf8)
 let tdB64 = tdPEM.split(separator: "\n").filter { !$0.hasPrefix("-----") }.joined()

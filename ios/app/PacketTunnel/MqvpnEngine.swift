@@ -4,7 +4,7 @@
 import Foundation
 import os.log
 
-let log = Logger(subsystem: "mqvpn.poc", category: "engine")
+let log = Logger(subsystem: "org.mqvpn.app", category: "engine")
 
 /// Global library log sink (mqvpn_log_set_sink, declared in the bridging
 /// header): every global libmqvpn line — the bind's socket-buffer and
