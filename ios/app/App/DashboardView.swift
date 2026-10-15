@@ -3,8 +3,8 @@
 
 import SwiftUI
 
-/// Single-screen development dashboard: connection header, per-path cards, a
-/// one-line stats row, and the bulk-download load tool. Purely a view over the
+/// Single-screen dashboard: connection header, per-path cards, a one-line
+/// stats row, and the event log. Purely a view over the
 /// controller's published snapshot — no IPC or diff logic lives here.
 struct DashboardView: View {
     @ObservedObject var controller: TunnelController
@@ -21,7 +21,6 @@ struct DashboardView: View {
                     if let snap = controller.snapshot, snap.reorderConfigured, let r = snap.reorder {
                         ReorderStatsCard(stats: r)
                     }
-                    BulkDownloadView()
                     eventSection
                 }
                 .padding()
@@ -50,6 +49,9 @@ struct DashboardView: View {
             }
             if let ce = controller.configError {
                 Text(ce).font(.caption).foregroundColor(.red)
+            } else if controller.serverSettings == nil && controller.isEditable {
+                Text("Add a server in Settings to connect.")
+                    .font(.caption).foregroundColor(.secondary)
             }
             HStack(spacing: 12) {
                 Button("Start") { controller.start() }

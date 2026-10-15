@@ -16,7 +16,7 @@ struct ResolvedServerAddress {
     var len: socklen_t
 }
 
-/// Resolve host+port to an IPv4 sockaddr. AF_INET only (iOS PoC path fds and
+/// Resolve host+port to an IPv4 sockaddr. AF_INET only (the iOS path fds and
 /// the assigned tunnel address are v4). Returns nil on empty/whitespace host
 /// (getaddrinfo("") resolves to 127.0.0.1 — must self-guard), resolver failure,
 /// or a non-v4 / unexpected-length result.

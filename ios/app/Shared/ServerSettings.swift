@@ -4,7 +4,9 @@
 import Foundation
 
 /// Runtime server config, persisted in providerConfiguration alongside reorder
-/// settings. Mirrors ReorderSettings' validation-on-read discipline.
+/// settings. Mirrors ReorderSettings' validation-on-read discipline. The PSK is
+/// the exception: providerConfiguration is stored unencrypted, so `authKey`
+/// lives in the keychain (PSKStore) and the caller passes it in.
 struct ServerSettings: Equatable {
     let host: String        // hostname or IP literal
     let port: Int
@@ -27,18 +29,12 @@ struct ServerSettings: Equatable {
     private enum Key {
         static let host = "serverHost", port = "serverPort"
         static let serverName = "serverName"
-        static let authKey = "authKey", insecure = "tlsInsecure"
-        static let all = [host, port, serverName, authKey, insecure]
-    }
-
-    static func fromBundle() throws -> ServerSettings {
-        let c = try PoCConfig.fromBundle()
-        return ServerSettings(host: c.serverHost, port: c.serverPort, serverName: c.serverName,
-                              authKey: c.authKey, insecure: c.tlsInsecure)
+        static let insecure = "tlsInsecure"
+        static let all = [host, port, serverName, insecure]
     }
 
     /// EXISTENCE check (not typed parse): a present-but-wrong-type key must
-    /// route to corrupt, never absent, so seeding can't overwrite it (D4).
+    /// route to corrupt (reported), never absent (first run, silent).
     static func serverKeysPresent(in dict: [String: Any]?) -> Bool {
         guard let dict else { return false }
         return Key.all.contains { dict[$0] != nil }
@@ -47,13 +43,12 @@ struct ServerSettings: Equatable {
     /// All-or-nothing validated read. Reuses ReorderSettings' NSNumber discipline.
     /// serverName only: an ABSENT key reads as "" (configs saved before the key
     /// existed stay valid); a present-but-wrong-type key is still corrupt.
-    init?(providerConfiguration dict: [String: Any]?) {
+    init?(providerConfiguration dict: [String: Any]?, authKey: String) {
         guard let dict,
               let host = dict[Key.host] as? String,
               !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let portN = dict[Key.port] as? NSNumber, let port = ReorderSettings.exactInt(portN),
               (1...65535).contains(port),
-              let authKey = dict[Key.authKey] as? String,
               let insecureN = dict[Key.insecure] as? NSNumber, ReorderSettings.isBool(insecureN)
         else { return nil }
         let rawName = dict[Key.serverName]
@@ -64,7 +59,7 @@ struct ServerSettings: Equatable {
 
     func toProviderConfiguration() -> [String: Any] {
         [Key.host: host, Key.port: NSNumber(value: port), Key.serverName: serverName,
-         Key.authKey: authKey, Key.insecure: NSNumber(value: insecure)]
+         Key.insecure: NSNumber(value: insecure)]
     }
 
     var isValid: Bool {

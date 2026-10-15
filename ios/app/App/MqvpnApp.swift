@@ -23,7 +23,7 @@ struct MqvpnApp: App {
 
 /// Container controller: load/save the one NETunnelProviderManager,
 /// start/stop it, and — while foregrounded and connected — poll the provider
-/// for a development snapshot over `sendProviderMessage`. Per-path transfer
+/// for a status snapshot over `sendProviderMessage`. Per-path transfer
 /// rates are derived here from consecutive snapshots.
 @MainActor
 final class TunnelController: ObservableObject {
@@ -63,11 +63,10 @@ final class TunnelController: ObservableObject {
             let m = existing.first ?? NETunnelProviderManager()
             if existing.isEmpty {
                 // Placeholder only: NE rejects an empty serverAddress at save.
-                // Decoupled from the real peer, which the seeding step below
-                // (and ultimately the extension) resolves and sets itself.
+                // The extension resolves the real peer for tunnelRemoteAddress.
                 let proto = NETunnelProviderProtocol()
                 proto.providerBundleIdentifier = Self.providerBundleID
-                proto.serverAddress = (try? ServerSettings.fromBundle())?.host ?? "mqvpn"
+                proto.serverAddress = "mqvpn"
                 m.protocolConfiguration = proto
                 m.localizedDescription = "mqvpn"
                 m.isEnabled = true
@@ -79,16 +78,16 @@ final class TunnelController: ObservableObject {
                 statusText = "config error"; return
             }
             let pc = proto.providerConfiguration
-            if !ServerSettings.serverKeysPresent(in: pc) {                 // ABSENT → seed
-                let seed = try ServerSettings.fromBundle()
-                try await performAtomicSave(NEConfigStore(manager: m, proto: proto),
-                                            merge: seed.toProviderConfiguration())
-                serverSettings = seed
-            } else if let s = ServerSettings(providerConfiguration: pc) {  // VALID
+            if let s = ServerSettings(providerConfiguration: pc,
+                                      authKey: PSKStore.load(proto.passwordReference)) {
                 serverSettings = s
-            } else {                                                       // CORRUPT → D4: no overwrite
+            } else {
                 serverSettings = nil
-                configError = "server config invalid — re-enter in Settings"
+                // No keys = first run (the dashboard points to Settings);
+                // keys that do not parse = corrupt, reported, never overwritten.
+                if ServerSettings.serverKeysPresent(in: pc) {
+                    configError = "server config invalid — re-enter in Settings"
+                }
             }
             manager = m
             reorderSettings = ReorderSettings(providerConfiguration: pc) ?? .disabled
@@ -169,6 +168,9 @@ final class TunnelController: ObservableObject {
         }
         isSaving = true
         defer { isSaving = false }
+        // The keychain write is not rolled back if the commit below fails;
+        // the reference is stable, so a retry of the save converges.
+        proto.passwordReference = try PSKStore.save(server.authKey)
         var merged = server.toProviderConfiguration()
         for (k, v) in reorder.toProviderConfiguration() { merged[k] = v }
         for (k, v) in hybrid.toProviderConfiguration() { merged[k] = v }

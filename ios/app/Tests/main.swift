@@ -123,7 +123,8 @@ check(!IngestGate.accept(capturedEpoch: 1, currentEpoch: 1, isUp: true, snapSeq:
 
 // ── ServerSettings ──
 let ss = ServerSettings(host: "1.2.3.4", port: 443, serverName: "vpn.example.com", authKey: "k", insecure: true)
-check(ServerSettings(providerConfiguration: ss.toProviderConfiguration()) == ss, "server round-trip")
+check(ServerSettings(providerConfiguration: ss.toProviderConfiguration(), authKey: "k") == ss, "server round-trip")
+check(ss.toProviderConfiguration().values.contains { ($0 as? String) == "k" } == false, "PSK never stored in providerConfiguration")
 check(ServerSettings(host: " 1.2.3.4 ", port: 443, serverName: "", authKey: " k ", insecure: false).host == "1.2.3.4", "host trimmed")
 check(ServerSettings(host: " 1.2.3.4 ", port: 443, serverName: "", authKey: " k ", insecure: false).authKey == "k", "authKey trimmed")
 check(ServerSettings(host: "h", port: 443, serverName: " vpn.example.com ", authKey: "", insecure: false).serverName == "vpn.example.com", "serverName trimmed")
@@ -133,13 +134,13 @@ check(ServerSettings(host: "h", port: 0, serverName: "", authKey: "", insecure: 
 check(ServerSettings(host: "h", port: 70000, serverName: "", authKey: "", insecure: true).isValid == false, "port hi invalid")
 check(ServerSettings(host: "h", port: 443, serverName: "", authKey: "", insecure: true).isValid, "empty authKey ok")
 // read validation
-check(ServerSettings(providerConfiguration: ["serverHost": "h", "serverPort": NSNumber(value: 443), "authKey": "k"]) == nil, "missing tlsInsecure → nil")
-check(ServerSettings(providerConfiguration: ["serverHost": "h", "serverPort": NSNumber(value: true), "authKey": "k", "tlsInsecure": NSNumber(value: false)]) == nil, "bool port → nil")
-check(ServerSettings(providerConfiguration: ["serverHost": "", "serverPort": NSNumber(value: 443), "authKey": "k", "tlsInsecure": NSNumber(value: false)]) == nil, "empty host → nil")
+check(ServerSettings(providerConfiguration: ["serverHost": "h", "serverPort": NSNumber(value: 443)], authKey: "k") == nil, "missing tlsInsecure → nil")
+check(ServerSettings(providerConfiguration: ["serverHost": "h", "serverPort": NSNumber(value: true), "tlsInsecure": NSNumber(value: false)], authKey: "k") == nil, "bool port → nil")
+check(ServerSettings(providerConfiguration: ["serverHost": "", "serverPort": NSNumber(value: 443), "tlsInsecure": NSNumber(value: false)], authKey: "k") == nil, "empty host → nil")
 // serverName: pre-key configs (absent) stay valid and read as ""; wrong type is corrupt
-let preKey = ServerSettings(providerConfiguration: ["serverHost": "h", "serverPort": NSNumber(value: 443), "authKey": "k", "tlsInsecure": NSNumber(value: false)])
+let preKey = ServerSettings(providerConfiguration: ["serverHost": "h", "serverPort": NSNumber(value: 443), "tlsInsecure": NSNumber(value: false)], authKey: "k")
 check(preKey?.serverName == "", "absent serverName → \"\"")
-check(ServerSettings(providerConfiguration: ["serverHost": "h", "serverPort": NSNumber(value: 443), "serverName": NSNumber(value: 1), "authKey": "k", "tlsInsecure": NSNumber(value: false)]) == nil, "non-string serverName → nil")
+check(ServerSettings(providerConfiguration: ["serverHost": "h", "serverPort": NSNumber(value: 443), "serverName": NSNumber(value: 1), "tlsInsecure": NSNumber(value: false)], authKey: "k") == nil, "non-string serverName → nil")
 // existence (Rigor E): wrong-type key still counts as present → corrupt, not absent
 check(ServerSettings.serverKeysPresent(in: ["serverPort": "not-a-number"]) == true, "wrong-type key present")
 check(ServerSettings.serverKeysPresent(in: ["reorderEnabled": NSNumber(value: true)]) == false, "only reorder keys → absent")

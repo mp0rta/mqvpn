@@ -30,7 +30,7 @@ struct SettingsView: View {
         _profile = State(initialValue: s.profile)
         _portsText = State(initialValue: s.ports.map(String.init).joined(separator: ","))
 
-        let srv = controller.serverSettings ?? (try? ServerSettings.fromBundle()) ?? .emptyDraft
+        let srv = controller.serverSettings ?? .emptyDraft
         _hostText = State(initialValue: srv.host)
         _portText = State(initialValue: String(srv.port))
         _serverNameText = State(initialValue: srv.serverName)
