@@ -407,6 +407,324 @@ test_malformed(void)
 }
 
 
+/* ---- GRO ---- */
+
+typedef struct {
+    struct virtio_net_hdr vh;
+    size_t len;
+    uint8_t pkt[SEG_CAP];
+} emitted_t;
+
+static emitted_t out_q[512];
+static unsigned out_n;
+
+static int
+capture(void *ctx, const struct virtio_net_hdr *vh, const uint8_t *pkt, size_t len)
+{
+    (void)ctx;
+    assert(out_n < 512);
+    out_q[out_n].vh = *vh;
+    out_q[out_n].len = len;
+    memcpy(out_q[out_n].pkt, pkt, len);
+    out_n++;
+    return 0;
+}
+
+/* A fully valid TCP data packet: checksums, sequential IP ID. */
+static size_t
+mk_tcp(uint8_t *p, int v6, uint32_t seq, size_t payload, uint8_t flags, uint16_t id,
+       uint16_t sport, uint16_t ack_lo)
+{
+    spec_t s = {.v6 = v6,
+                .proto = IPPROTO_TCP,
+                .payload = payload,
+                .tcp_flags = flags,
+                .seq = seq,
+                .id = id};
+    size_t ip_hlen;
+    size_t total = build(p, &s, &ip_hlen);
+    uint8_t *l4 = p + ip_hlen;
+    l4[0] = (uint8_t)(sport >> 8);
+    l4[1] = (uint8_t)sport;
+    l4[10] = 0;
+    l4[11] = 0;
+    l4[8] = 0;
+    l4[9] = 0;
+    l4[10] = (uint8_t)(ack_lo >> 8);
+    l4[11] = (uint8_t)ack_lo;
+    if (!v6) {
+        p[10] = p[11] = 0;
+        uint16_t c = (uint16_t)~ref_fold(ref_sum(p, ip_hlen, 0));
+        p[10] = (uint8_t)(c >> 8);
+        p[11] = (uint8_t)c;
+    }
+    l4[16] = l4[17] = 0;
+    uint16_t c = (uint16_t)~ref_l4_sum(p, v6, IPPROTO_TCP, l4, total - ip_hlen);
+    l4[16] = (uint8_t)(c >> 8);
+    l4[17] = (uint8_t)c;
+    return total;
+}
+
+/* Expand everything captured into plain packets (re-segmenting supers) and
+ * verify each is a valid packet; returns them in order. */
+static unsigned
+expand(uint8_t (*pk)[2048], size_t *lens, unsigned max)
+{
+    unsigned n = 0;
+    for (unsigned i = 0; i < out_n; i++) {
+        emitted_t *e = &out_q[i];
+        if ((e->vh.gso_type & ~VIRTIO_NET_HDR_GSO_ECN) == VIRTIO_NET_HDR_GSO_NONE) {
+            assert(e->vh.flags == 0 && n < max && e->len <= 2048);
+            memcpy(pk[n], e->pkt, e->len);
+            lens[n++] = e->len;
+            continue;
+        }
+        assert(e->vh.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM);
+        assert(e->vh.csum_offset == 16 && e->len <= 65535);
+        int v6 = e->vh.gso_type == VIRTIO_NET_HDR_GSO_TCPV6;
+        assert(e->vh.csum_start == (v6 ? 40 : 20));
+        assert(e->vh.hdr_len == e->vh.csum_start + 20);
+        /* The kernel finishes the checksum from the pseudo-header sum left in
+         * the field: do that, then split with our own splitter. */
+        uint8_t tmp[SEG_CAP];
+        memcpy(tmp, e->pkt, e->len);
+        assert(mqvpn_vnet_finish_csum(tmp, e->len, &e->vh) == 0);
+        assert(ref_l4_sum(tmp, v6, IPPROTO_TCP, tmp + e->vh.csum_start,
+                          e->len - e->vh.csum_start) == 0xffff);
+        mqvpn_gso_iter_t it;
+        assert(mqvpn_gso_begin(&it, e->pkt, e->len, &e->vh) == 0);
+        int r;
+        while ((r = mqvpn_gso_next(&it, pk[n], 2048)) > 0) {
+            assert(n < max);
+            lens[n++] = (size_t)r;
+        }
+        assert(r == 0);
+    }
+    return n;
+}
+
+static void
+gro_run(int v6, unsigned npk, size_t mss, size_t last_len, int psh_last,
+        unsigned *supers_out)
+{
+    static uint8_t in[200][2048];
+    static size_t in_len[200];
+    static uint8_t ex[600][2048];
+    static size_t ex_len[600];
+    mqvpn_gro_t *g = mqvpn_gro_new(capture, NULL);
+    assert(g);
+    out_n = 0;
+    uint32_t seq = 0xffffff00u;
+    for (unsigned i = 0; i < npk; i++) {
+        size_t pay = (i == npk - 1) ? last_len : mss;
+        uint8_t fl = 0x10 | ((i == npk - 1 && psh_last) ? 0x08 : 0);
+        in_len[i] = mk_tcp(in[i], v6, seq, pay, fl, (uint16_t)(1000 + i), 5000, 0x1234);
+        seq += (uint32_t)pay;
+        mqvpn_gro_push(g, in[i], in_len[i]);
+    }
+    mqvpn_gro_flush(g);
+    assert(!mqvpn_gro_pending(g));
+    unsigned n = expand(ex, ex_len, 600);
+    assert(n == npk);
+    for (unsigned i = 0; i < n; i++) {
+        assert(ex_len[i] == in_len[i]);
+        assert(memcmp(ex[i], in[i], in_len[i]) == 0); /* byte-exact, IDs included */
+    }
+    if (supers_out) *supers_out = out_n;
+    mqvpn_gro_free(g);
+}
+
+static void
+test_gro_roundtrip(void)
+{
+    unsigned supers;
+    for (int v6 = 0; v6 < 2; v6++) {
+        gro_run(v6, 1, 1000, 1000, 0, &supers);
+        assert(supers == 1 && out_q[0].vh.gso_type == 0);
+        gro_run(v6, 2, 1000, 1000, 0, &supers);
+        assert(supers == 1 && out_q[0].vh.gso_type != 0);
+        gro_run(v6, 5, 1448, 300, 1, &supers);
+        assert(supers == 1);
+        gro_run(v6, 40, 1448, 1448, 1, &supers);
+        assert(supers == 1);
+        gro_run(v6, 100, 1448, 1, 0, &supers); /* > 64 KiB: several supers */
+        assert(supers >= 2);
+        for (unsigned i = 0; i < out_n; i++)
+            assert(out_q[i].len <= 65535);
+        gro_run(v6, 3, 7, 7, 0, &supers);
+    }
+}
+
+/* Packets that must not merge keep their order and content. */
+static void
+test_gro_order(void)
+{
+    static uint8_t in[16][2048];
+    static size_t in_len[16];
+    static uint8_t ex[64][2048];
+    static size_t ex_len[64];
+    mqvpn_gro_t *g = mqvpn_gro_new(capture, NULL);
+
+    for (int v6 = 0; v6 < 2; v6++) {
+        out_n = 0;
+        unsigned k = 0;
+        uint32_t seq = 100;
+        /* data, data, gap (lost segment), data, pure ACK, data, bigger than
+         * the first, other ACK number, other flow, FIN */
+        in_len[k] = mk_tcp(in[k], v6, seq, 1000, 0x10, 1, 5000, 1);
+        seq += 1000;
+        k++;
+        in_len[k] = mk_tcp(in[k], v6, seq, 1000, 0x10, 2, 5000, 1);
+        seq += 1000;
+        k++;
+        seq += 1000; /* gap */
+        in_len[k] = mk_tcp(in[k], v6, seq, 1000, 0x10, 4, 5000, 1);
+        seq += 1000;
+        k++;
+        in_len[k] = mk_tcp(in[k], v6, seq, 0, 0x10, 5, 5000, 1);
+        k++; /* pure ACK */
+        in_len[k] = mk_tcp(in[k], v6, seq, 1000, 0x10, 6, 5000, 1);
+        seq += 1000;
+        k++;
+        in_len[k] = mk_tcp(in[k], v6, seq, 1200, 0x10, 7, 5000, 1);
+        seq += 1200;
+        k++;
+        in_len[k] = mk_tcp(in[k], v6, seq, 500, 0x10, 8, 5000, 2);
+        seq += 500;
+        k++; /* ack differs */
+        in_len[k] = mk_tcp(in[k], v6, 9000, 600, 0x10, 9, 6000, 1);
+        k++; /* other flow */
+        in_len[k] = mk_tcp(in[k], v6, 9600, 600, 0x10, 10, 6000, 1);
+        k++;
+        in_len[k] = mk_tcp(in[k], v6, seq, 10, 0x11, 11, 5000, 2);
+        k++; /* FIN */
+        for (unsigned i = 0; i < k; i++)
+            mqvpn_gro_push(g, in[i], in_len[i]);
+        mqvpn_gro_flush(g);
+        unsigned n = expand(ex, ex_len, 64);
+        /* Every input comes out exactly once, per flow in input order. */
+        for (int flow = 0; flow < 2; flow++) {
+            unsigned j = 0;
+            for (unsigned i = 0; i < k; i++) {
+                uint16_t sport =
+                    (uint16_t)((in[i][(v6 ? 40 : 20)] << 8) | in[i][(v6 ? 41 : 21)]);
+                if ((sport == 6000) != flow) continue;
+                while (j < n) {
+                    uint16_t sp2 =
+                        (uint16_t)((ex[j][(v6 ? 40 : 20)] << 8) | ex[j][(v6 ? 41 : 21)]);
+                    if ((sp2 == 6000) == flow) break;
+                    j++;
+                }
+                assert(j < n && ex_len[j] == in_len[i] &&
+                       memcmp(ex[j], in[i], in_len[i]) == 0);
+                j++;
+            }
+        }
+        assert(n == k);
+    }
+    mqvpn_gro_free(g);
+}
+
+/* A short segment ends its super-packet: what follows it never joins. */
+static void
+test_gro_short_closes(void)
+{
+    static uint8_t in[3][2048];
+    size_t ln[3];
+    mqvpn_gro_t *g = mqvpn_gro_new(capture, NULL);
+    out_n = 0;
+    ln[0] = mk_tcp(in[0], 0, 0, 1000, 0x10, 1, 5000, 0);
+    ln[1] = mk_tcp(in[1], 0, 1000, 500, 0x10, 2, 5000, 0);
+    ln[2] = mk_tcp(in[2], 0, 1500, 500, 0x10, 3, 5000, 0);
+    for (int i = 0; i < 3; i++)
+        mqvpn_gro_push(g, in[i], ln[i]);
+    mqvpn_gro_flush(g);
+    assert(out_n == 2);
+    assert(out_q[0].vh.gso_type != 0 && out_q[0].vh.gso_size == 1000);
+    assert(out_q[0].len == ln[0] + 500);
+    assert(out_q[1].vh.gso_type == 0 && out_q[1].len == ln[2]);
+    mqvpn_gro_free(g);
+}
+
+/* Non-TCP, options, fragments, SYN: passed through untouched. */
+static void
+test_gro_passthrough(void)
+{
+    mqvpn_gro_t *g = mqvpn_gro_new(capture, NULL);
+    static uint8_t pk[8][2048];
+    size_t ln[8], ip_hlen;
+    unsigned k = 0;
+    out_n = 0;
+
+    spec_t u = {.v6 = 0, .proto = IPPROTO_UDP, .payload = 100};
+    ln[k] = build(pk[k], &u, &ip_hlen);
+    k++;
+    spec_t u6 = {.v6 = 1, .proto = IPPROTO_UDP, .payload = 100};
+    ln[k] = build(pk[k], &u6, &ip_hlen);
+    k++;
+    ln[k] = mk_tcp(pk[k], 0, 1, 100, 0x02, 1, 5000, 0);
+    k++; /* SYN */
+    spec_t o = {
+        .v6 = 0, .proto = IPPROTO_TCP, .ip_opts = 8, .payload = 100, .tcp_flags = 0x10};
+    ln[k] = build(pk[k], &o, &ip_hlen);
+    k++; /* IP options */
+    ln[k] = mk_tcp(pk[k], 0, 1, 100, 0x10, 1, 5000, 0);
+    pk[k][6] = 0x20; /* more fragments */
+    k++;
+    ln[k] = 10;
+    memset(pk[k], 0x45, 10);
+    k++; /* runt */
+    for (unsigned i = 0; i < k; i++)
+        mqvpn_gro_push(g, pk[i], ln[i]);
+    assert(!mqvpn_gro_pending(g));
+    assert(out_n == k);
+    for (unsigned i = 0; i < k; i++) {
+        assert(out_q[i].vh.gso_type == 0 && out_q[i].vh.flags == 0);
+        assert(out_q[i].len == ln[i] && memcmp(out_q[i].pkt, pk[i], ln[i]) == 0);
+    }
+    mqvpn_gro_free(g);
+}
+
+/* More flows than slots: nothing is lost or reordered within a flow. */
+static void
+test_gro_many_flows(void)
+{
+    static uint8_t in[40][2048];
+    static size_t in_len[40];
+    static uint8_t ex[100][2048];
+    static size_t ex_len[100];
+    mqvpn_gro_t *g = mqvpn_gro_new(capture, NULL);
+    out_n = 0;
+    unsigned k = 0;
+    for (int round = 0; round < 4; round++)
+        for (int f = 0; f < 10; f++) {
+            in_len[k] = mk_tcp(in[k], 0, 1000 + round * 500, 500, 0x10, (uint16_t)k,
+                               (uint16_t)(7000 + f), 0);
+            mqvpn_gro_push(g, in[k], in_len[k]);
+            k++;
+        }
+    mqvpn_gro_flush(g);
+    unsigned n = expand(ex, ex_len, 100);
+    assert(n == k);
+    for (int f = 0; f < 10; f++) {
+        unsigned j = 0, want = 0;
+        for (unsigned i = 0; i < k; i++) {
+            if ((i % 10) != (unsigned)f) continue;
+            for (; j < n; j++) {
+                uint16_t sp = (uint16_t)((ex[j][20] << 8) | ex[j][21]);
+                if (sp == 7000 + f) break;
+            }
+            assert(j < n);
+            uint32_t seq;
+            memcpy(&seq, ex[j] + 24, 4);
+            assert(ntohl(seq) == 1000 + want * 500);
+            want++;
+            j++;
+        }
+    }
+    mqvpn_gro_free(g);
+}
+
 int
 main(void)
 {
@@ -415,6 +733,11 @@ main(void)
     test_finish_csum();
     test_udp_zero_checksum();
     test_malformed();
+    test_gro_roundtrip();
+    test_gro_order();
+    test_gro_short_closes();
+    test_gro_passthrough();
+    test_gro_many_flows();
     printf("test_tun_offload: OK\n");
     return 0;
 }

@@ -356,6 +356,9 @@ schedule_next_tick(platform_ctx_t *p)
     mqvpn_interest_t interest;
     mqvpn_client_get_interest(p->client, &interest);
 
+    /* Every handler that can deliver packets to the TUN ends here. */
+    if (p->tun_up && p->tun.fd >= 0) mqvpn_tun_flush(&p->tun);
+
     int ms = interest.next_timer_ms;
     struct timeval tv = {
         .tv_sec = ms / 1000,
@@ -791,6 +794,8 @@ svr_schedule_next_tick(server_platform_ctx_t *sp)
 {
     mqvpn_interest_t interest;
     mqvpn_server_get_interest(sp->server, &interest);
+
+    if (sp->tun_up && sp->tun.fd >= 0) mqvpn_tun_flush(&sp->tun);
 
     int ms = interest.next_timer_ms;
     struct timeval tv = {

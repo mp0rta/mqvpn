@@ -43,14 +43,41 @@ struct mqvpn_tun_offload {
     uint64_t gso_segs;          /* segments they produced */
     uint64_t csum_pkts;         /* plain packets whose checksum we finished */
     uint64_t drops;             /* malformed vnet packets dropped */
+    int fd;                     /* the TUN, for the GRO emit callback */
+    mqvpn_gro_t *gro;           /* write-side TCP GRO, NULL when off */
 };
+
+static int
+env_off(const char *name)
+{
+    const char *e = getenv(name);
+    return e && (strcmp(e, "0") == 0 || strcmp(e, "off") == 0);
+}
 
 /* MQVPN_TUN_OFFLOAD=0 (or "off") keeps the plain one-packet-per-read TUN. */
 static int
 tun_offload_wanted(void)
 {
-    const char *e = getenv("MQVPN_TUN_OFFLOAD");
-    return !(e && (strcmp(e, "0") == 0 || strcmp(e, "off") == 0));
+    return !env_off("MQVPN_TUN_OFFLOAD");
+}
+
+/* MQVPN_TUN_GRO=0 keeps the offloaded reads but writes packets one by one. */
+static int
+tun_gro_wanted(void)
+{
+    return !env_off("MQVPN_TUN_GRO");
+}
+
+/* GRO sink: one packet (or one coalesced super-packet) to the TUN. */
+static int
+tun_gro_emit(void *ctx, const struct virtio_net_hdr *vh, const uint8_t *pkt, size_t len)
+{
+    struct mqvpn_tun_offload *off = ctx;
+    struct iovec iov[2] = {{(void *)vh, sizeof(*vh)}, {(void *)pkt, len}};
+    ssize_t n = writev(off->fd, iov, 2);
+    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
+        LOG_ERR("tun write: %s", strerror(errno));
+    return n < 0 ? -1 : 0;
 }
 
 /*
@@ -153,6 +180,10 @@ mqvpn_tun_create(mqvpn_tun_t *tun, const char *dev_name)
 
     tun->fd = fd;
     tun->offload = off;
+    if (off) {
+        off->fd = fd;
+        if (tun_gro_wanted()) off->gro = mqvpn_gro_new(tun_gro_emit, off);
+    }
     strncpy(tun->name, ifr.ifr_name, IFNAMSIZ - 1);
     tun->name[IFNAMSIZ - 1] = '\0';
     if (off)
@@ -566,6 +597,11 @@ mqvpn_tun_write(mqvpn_tun_t *tun, const uint8_t *buf, size_t len)
 {
     ssize_t n;
 
+    if (tun->offload && tun->offload->gro) {
+        /* Held until mqvpn_tun_flush(); a failed write is logged there. */
+        mqvpn_gro_push(tun->offload->gro, buf, len);
+        return (int)len;
+    }
     if (tun->offload) {
         /* All-zero header: no checksum to finish, no segmentation. */
         struct virtio_net_hdr vh;
@@ -587,9 +623,32 @@ mqvpn_tun_write(mqvpn_tun_t *tun, const uint8_t *buf, size_t len)
 }
 
 void
+mqvpn_tun_flush(mqvpn_tun_t *tun)
+{
+    if (tun->offload && tun->offload->gro && tun->fd >= 0)
+        mqvpn_gro_flush(tun->offload->gro);
+}
+
+int
+mqvpn_tun_gro_pending(const mqvpn_tun_t *tun)
+{
+    return tun->offload && tun->offload->gro && mqvpn_gro_pending(tun->offload->gro);
+}
+
+void
 mqvpn_tun_destroy(mqvpn_tun_t *tun)
 {
     if (tun->offload) {
+        if (tun->offload->gro) {
+            uint64_t pushed, supers, merged;
+            if (tun->fd >= 0) mqvpn_gro_flush(tun->offload->gro);
+            mqvpn_gro_stats(tun->offload->gro, &pushed, &supers, &merged);
+            LOG_INF("TUN %s: GRO: %llu packets written, %llu super-packets from %llu "
+                    "of them",
+                    tun->name, (unsigned long long)pushed, (unsigned long long)supers,
+                    (unsigned long long)merged);
+            mqvpn_gro_free(tun->offload->gro);
+        }
         LOG_INF("TUN %s: offload stats: %llu GSO packets split into %llu segments, %llu "
                 "checksums finished, %llu dropped",
                 tun->name, (unsigned long long)tun->offload->gso_pkts,
