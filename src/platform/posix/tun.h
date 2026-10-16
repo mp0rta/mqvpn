@@ -20,6 +20,10 @@ typedef struct {
     struct in6_addr addr6;
     int has_v6;
     int mtu;
+    /* Linux only: state of the IFF_VNET_HDR offloads (src/platform/linux/
+     * tun_offload.c); NULL when the TUN runs in plain mode and on every
+     * other platform. */
+    struct mqvpn_tun_offload *offload;
 } mqvpn_tun_t;
 
 /* Create a TUN device. dev_name may be NULL for auto-naming. */
@@ -35,7 +39,9 @@ int mqvpn_tun_set_mtu(mqvpn_tun_t *tun, int mtu);
 /* Bring the TUN interface up. */
 int mqvpn_tun_up(mqvpn_tun_t *tun);
 
-/* Read a single IP packet from the TUN device (non-blocking safe). */
+/* Read a single IP packet from the TUN device (non-blocking safe). With the
+ * Linux TUN offloads on, one kernel read can carry a TSO/USO super-packet;
+ * its segments come back one per call, so buf must hold 65536 bytes. */
 int mqvpn_tun_read(mqvpn_tun_t *tun, uint8_t *buf, size_t buf_len);
 
 /* Write a single IP packet to the TUN device. */

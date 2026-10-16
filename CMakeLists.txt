@@ -801,6 +801,7 @@ add_executable(mqvpn
     src/platform/linux/routing.c
     src/platform/linux/killswitch.c
     src/platform/linux/tun.c
+    src/platform/linux/tun_offload.c
     src/platform/linux/dns.c
     src/platform/posix/dns_common.c
     src/config.c
@@ -1007,6 +1008,13 @@ if(BUILD_TESTING)
     target_include_directories(test_udp_gro_kernel PRIVATE src include)
     set_target_properties(test_udp_gro_kernel PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_udp_gro_kernel COMMAND test_udp_gro_kernel)
+
+    # TUN offload helpers (GSO split, checksum completion): pure memory
+    # functions, no TUN device or root needed.
+    add_executable(test_tun_offload tests/test_tun_offload.c src/platform/linux/tun_offload.c)
+    target_include_directories(test_tun_offload PRIVATE src include src/platform/posix)
+    set_target_properties(test_tun_offload PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_tun_offload COMMAND test_tun_offload)
 
     # Darwin platform-twin PATH-stub state machine tests (Task 10), also
     # registered here on Linux: the twins (darwin/dns.c, darwin/routing.c,

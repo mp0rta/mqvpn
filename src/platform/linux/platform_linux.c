@@ -19,6 +19,7 @@
 #include "log.h"
 #include "mqvpn_internal.h" /* mqvpn_config_apply_reorder (INI reorder bridge) */
 #include "netlink_mon.h"
+#include "tun_offload.h"
 
 #include <stdio.h>
 #include <inttypes.h>
@@ -368,6 +369,10 @@ schedule_next_tick(platform_ctx_t *p)
             event_add(p->ev_tun, NULL);
         else if (!interest.tun_readable && event_pending(p->ev_tun, EV_READ, NULL))
             event_del(p->ev_tun);
+        /* Segments kept from before a backpressure stop are no longer in the
+         * fd, so it may never become readable for them: run the read handler. */
+        if (interest.tun_readable && mqvpn_tun_has_pending(&p->tun))
+            event_active(p->ev_tun, EV_READ, 1);
     }
 }
 
@@ -390,7 +395,9 @@ on_tun_read(evutil_socket_t fd, short what, void *arg)
     platform_ctx_t *p = (platform_ctx_t *)arg;
     uint8_t buf[TUN_BUF_SIZE];
 
-    for (int i = 0; i < BULK_READ_COUNT; i++) {
+    /* Finish the segments of a super-packet already split off the kernel
+     * read, even past the budget: they are not in the fd any more. */
+    for (int i = 0; i < BULK_READ_COUNT || mqvpn_tun_has_pending(&p->tun); i++) {
         int n = mqvpn_tun_read(&p->tun, buf, sizeof(buf));
         if (n <= 0) break;
 
@@ -798,6 +805,8 @@ svr_schedule_next_tick(server_platform_ctx_t *sp)
             event_add(sp->ev_tun, NULL);
         else if (!interest.tun_readable && event_pending(sp->ev_tun, EV_READ, NULL))
             event_del(sp->ev_tun);
+        if (interest.tun_readable && mqvpn_tun_has_pending(&sp->tun))
+            event_active(sp->ev_tun, EV_READ, 1);
     }
 }
 
@@ -879,7 +888,7 @@ svr_on_tun_read(evutil_socket_t fd, short what, void *arg)
     server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
     uint8_t buf[TUN_BUF_SIZE];
 
-    for (int i = 0; i < BULK_READ_COUNT; i++) {
+    for (int i = 0; i < BULK_READ_COUNT || mqvpn_tun_has_pending(&sp->tun); i++) {
         int n = mqvpn_tun_read(&sp->tun, buf, sizeof(buf));
         if (n <= 0) break;
 
