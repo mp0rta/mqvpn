@@ -1000,8 +1000,9 @@ typedef struct {
 static int
 capture_expect(void *ctx, const struct virtio_net_hdr *vh, const uint8_t *pkt, size_t len)
 {
+    static const struct virtio_net_hdr plain; /* all zero */
     expect_t *x = ctx;
-    assert(vh->gso_type == 0 && x->n < 2);
+    assert(memcmp(vh, &plain, sizeof(plain)) == 0 && x->n < 2);
     assert(len == x->len[x->n] && memcmp(pkt, x->pkt[x->n], len) == 0);
     x->n++;
     return 0;
