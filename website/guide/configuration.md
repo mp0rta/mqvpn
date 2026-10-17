@@ -432,6 +432,8 @@ PathMTU                    1500 bytes
 
 The QUIC library caps packets at 1420 bytes, so values above 1500 give the same result. If `PathMTU` is larger than what the network really carries, full-size packets get fragmented or dropped, so only set it when you know the path.
 
+When an explicit `MTU` exceeds the available inner packet size, the client warns and limits it. The server also warns, but keeps the configured TUN MTU; oversized tunnel packets may be dropped.
+
 IPv6 inside the tunnel requires room for a complete 1280-byte packet. With IPv6 enabled, a nonzero `PathMTU` must be at least **1378**, or **1386** when reorder is enabled. The server rejects a smaller setting at startup; the client closes the connection with an error if its available packet size is too small when IPv6 is assigned. Setting `MTU = 1280` does not increase the available capacity. IPv4-only tunnels can still use smaller values. The default `PathMTU = 0` remains supported.
 
 ### Running other tunnels inside mqvpn

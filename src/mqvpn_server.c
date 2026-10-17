@@ -2449,6 +2449,12 @@ mqvpn_server_start(mqvpn_server_t *s)
               s->config.path_mtu, inner_mtu);
         return MQVPN_ERR_INVALID_ARG;
     }
+    if (s->config.tun_mtu > inner_mtu) {
+        LOG_W(s,
+              "config MTU %d exceeds available inner MTU %d (PathMTU=%d); "
+              "oversized tunnel packets may be dropped",
+              s->config.tun_mtu, inner_mtu, s->config.path_mtu);
+    }
     s->started = 1;
 
     /* Notify platform of TUN configuration via callback */

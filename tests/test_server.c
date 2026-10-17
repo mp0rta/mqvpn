@@ -97,6 +97,7 @@ static size_t g_tun_output_len;
 static int g_tunnel_config_ready_called = 0;
 static mqvpn_tunnel_info_t g_last_tunnel_info;
 static int g_log_called = 0;
+static int g_mtu_warning_called = 0;
 
 static void
 mock_tun_output(const uint8_t *pkt, size_t len, void *user_ctx)
@@ -119,9 +120,9 @@ mock_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
 static void
 mock_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
 {
-    (void)level;
-    (void)msg;
     (void)user_ctx;
+    if (level == MQVPN_LOG_WARN && strstr(msg, "exceeds available inner MTU"))
+        g_mtu_warning_called++;
     g_log_called++;
 }
 
@@ -132,6 +133,7 @@ reset_mocks(void)
     g_tunnel_config_ready_called = 0;
     memset(&g_last_tunnel_info, 0, sizeof(g_last_tunnel_info));
     g_log_called = 0;
+    g_mtu_warning_called = 0;
 }
 
 /* Helper: create a valid server config */
@@ -335,6 +337,29 @@ TEST(server_lifecycle_with_path_mtu)
 
     mqvpn_server_stop(s);
     mqvpn_server_destroy(s);
+}
+
+TEST(server_path_mtu_warning)
+{
+    const int mtus[] = {0, 1300, 1402, 1500};
+    for (size_t i = 0; i < sizeof(mtus) / sizeof(mtus[0]); i++) {
+        reset_mocks();
+        mqvpn_config_t *cfg = make_server_config();
+        ASSERT_EQ(mqvpn_config_set_path_mtu(cfg, 1500), MQVPN_OK);
+        ASSERT_EQ(mqvpn_config_set_tun_mtu(cfg, mtus[i]), MQVPN_OK);
+        ASSERT_EQ(mqvpn_config_set_log_level(cfg, MQVPN_LOG_WARN), MQVPN_OK);
+        mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+        cbs.tun_output = mock_tun_output;
+        cbs.tunnel_config_ready = mock_tunnel_config_ready;
+        cbs.log = mock_log;
+        mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+        ASSERT_NOT_NULL(s);
+        mqvpn_config_free(cfg);
+        ASSERT_EQ(mqvpn_server_start(s), MQVPN_OK);
+        ASSERT_EQ(g_mtu_warning_called, mtus[i] > 1402);
+        ASSERT_EQ(g_last_tunnel_info.mtu, mtus[i] ? mtus[i] : 1402);
+        mqvpn_server_destroy(s);
+    }
 }
 
 TEST(server_lifecycle_path_mtu_v6_minimum)
@@ -2169,6 +2194,7 @@ main(void)
     run_server_lifecycle();
     run_server_lifecycle_with_tun_mtu();
     run_server_lifecycle_with_path_mtu();
+    run_server_path_mtu_warning();
     run_server_lifecycle_path_mtu_v6_minimum();
     run_server_lifecycle_with_v6();
     run_server_double_start();
