@@ -1885,8 +1885,8 @@ TEST(client_set_state_to_connecting_records_handshake_start)
     ASSERT_EQ(mqvpn_client_test_get_handshake_started_us(c), 0u);
 
     ASSERT_EQ(mqvpn_client_test_force_state(c, MQVPN_STATE_CONNECTING), 0);
-    /* Real wall clock used (no clock_fn injected on test client) — we can
-     * only assert non-zero, not a specific value. */
+    /* Real clock used (no clock_fn injected on test client) — we can only
+     * assert non-zero, not a specific value. */
     ASSERT_NE(mqvpn_client_test_get_handshake_started_us(c), 0u);
 
     mqvpn_client_destroy(c);

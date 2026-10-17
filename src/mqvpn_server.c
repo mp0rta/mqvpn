@@ -268,8 +268,9 @@ mqvpn_scheduler_label(int s)
     return mqvpn_sched_to_name((mqvpn_scheduler_t)s);
 }
 
+/* Wall clock, for the times the API reports as dates (connected_at_us). */
 static uint64_t
-now_us(void)
+wall_us(void)
 {
 #ifdef _WIN32
     FILETIME ft;
@@ -281,6 +282,31 @@ now_us(void)
     gettimeofday(&tv, NULL);
     return (uint64_t)tv.tv_sec * 1000000 + (uint64_t)tv.tv_usec;
 #endif
+}
+
+/* Clock of the server's timers and of its xquic engine, as in the client
+ * (mqvpn_client.c now_us): not the wall clock, which NTP or an admin can
+ * step. */
+static uint64_t
+now_us(void)
+{
+#ifdef _WIN32
+    return wall_us();
+#else
+    struct timespec ts;
+#  ifdef CLOCK_BOOTTIME
+    clock_gettime(CLOCK_BOOTTIME, &ts);
+#  else
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#  endif
+    return (uint64_t)ts.tv_sec * 1000000 + (uint64_t)ts.tv_nsec / 1000;
+#endif
+}
+
+static xqc_usec_t
+svr_xqc_timestamp(void)
+{
+    return now_us();
 }
 
 /* One-shot at mqvpn_server_new (rlimit-derived headroom under the
@@ -673,7 +699,7 @@ cb_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data)
  * present. TX stamping stays gated on peer_reorder_supported (set when the
  * client advertises in its CONNECT-IP request), so until then everything is
  * sent RAW. The hash seeds need not match the peer (§6.2); derive from
- * wall-clock time. Shared by cb_h3_conn_create (first tunnel) and
+ * now_us(). Shared by cb_h3_conn_create (first tunnel) and
  * svr_connect_ip_on_request (re-establishment after svr_session_release freed
  * the previous generation's engines — each tunnel generation gets fresh
  * sequence/flow state). On alloc failure both engines are left NULL (RAW
@@ -1454,7 +1480,7 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
             return -1;
         }
 
-        stream->conn->connected_at_us = now_us();
+        stream->conn->connected_at_us = wall_us();
         snprintf(stream->conn->username, sizeof(stream->conn->username), "%s", username);
 
         LOG_I(s, "client authenticated successfully (user=%s)", stream->conn->username);
@@ -2185,6 +2211,8 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
                 .xqc_log_write_err = cb_xqc_log_write,
                 .xqc_log_write_stat = cb_xqc_log_write,
             },
+        /* the receive times handed to xqc_engine_packet_process() */
+        .monotonic_ts = svr_xqc_timestamp,
     };
 
     xqc_transport_callbacks_t tcbs = {
