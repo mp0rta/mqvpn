@@ -2442,6 +2442,13 @@ mqvpn_server_start(mqvpn_server_t *s)
     ASSERT_TICK_THREAD(s);
 
     if (s->started) return MQVPN_ERR_INVALID_ARG;
+    int inner_mtu = (int)mqvpn_pkt_out_size(s->config.path_mtu) - MQVPN_DGRAM_HEADROOM;
+    if (s->config.reorder.mode != MQVPN_REORDER_OFF) inner_mtu -= MQVPN_REORDER_HDR_LEN;
+    if (s->pool.has_v6 && inner_mtu < IPV6_MIN_MTU) {
+        LOG_E(s, "IPv6 requires an inner MTU of at least 1280 (PathMTU=%d, available=%d)",
+              s->config.path_mtu, inner_mtu);
+        return MQVPN_ERR_INVALID_ARG;
+    }
     s->started = 1;
 
     /* Notify platform of TUN configuration via callback */
@@ -2457,10 +2464,6 @@ mqvpn_server_start(mqvpn_server_t *s)
     s->tun_mtu = s->config.tun_mtu > 0
                      ? s->config.tun_mtu
                      : (int)mqvpn_pkt_out_size(s->config.path_mtu) - MQVPN_DGRAM_HEADROOM;
-    /* a small PathMTU can put the auto value below 1280, where Linux turns
-     * IPv6 off on the TUN; floor it when v6 is in play, as the client does */
-    if (s->config.tun_mtu <= 0 && s->pool.has_v6 && s->tun_mtu < IPV6_MIN_MTU)
-        s->tun_mtu = IPV6_MIN_MTU;
     info.mtu = s->tun_mtu;
 
     if (s->pool.has_v6) {

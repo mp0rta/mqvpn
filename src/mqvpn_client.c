@@ -2039,6 +2039,20 @@ cli_connect_ip_on_headers(cli_stream_t *stream, xqc_h3_request_t *h3_request)
     if (headers) cli_connect_ip_scan_headers(stream->conn, headers);
 }
 
+static int
+cli_check_ipv6_mtu(cli_conn_t *conn, int mtu)
+{
+    mqvpn_client_t *c = conn->client;
+    if (c->config.reorder.mode != MQVPN_REORDER_OFF && conn->peer_reorder_supported)
+        mtu -= MQVPN_REORDER_HDR_LEN;
+    if (!conn->addr6_assigned || mtu >= IPV6_MIN_MTU) return 0;
+    LOG_E(c, "IPv6 requires an inner MTU of at least 1280 (available=%d)", mtu);
+    conn->tunnel_ok = 0;
+    xqc_conn_close(c->engine, &conn->cid);
+    cli_signal_connect_fail(conn, MQVPN_ERR_INVALID_ARG, 0);
+    return -1;
+}
+
 /* CONNECT-IP tunnel stream: capsule body + ADDRESS_ASSIGN → tunnel_config_ready.
  * Returns -1 on capsule buffer failure. */
 static int
@@ -2057,29 +2071,27 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
         process_capsules(stream);
     } while (!fin);
 
+    if (conn->tunnel_notified) return 0;
+
+    /* Validate even if IPv6 arrives in a later ADDRESS_ASSIGN capsule. */
+    int tun_mtu = IPV6_MIN_MTU;
+    if (conn->dgram_mss > 0) {
+        size_t udp_mss =
+            xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
+        if (udp_mss >= 68) tun_mtu = (int)udp_mss;
+    }
+    if (cli_check_ipv6_mtu(conn, tun_mtu) < 0) return 0;
+    tun_mtu = apply_mtu_cap(c->config.tun_mtu, tun_mtu, c);
+    /* Reserve reorder headroom only when negotiated; the capacity check above
+     * makes the IPv6 floor safe even when the configured cap is 1280. */
+    if (c->config.reorder.mode != MQVPN_REORDER_OFF && conn->peer_reorder_supported) {
+        tun_mtu -= MQVPN_REORDER_HDR_LEN;
+        if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU) tun_mtu = IPV6_MIN_MTU;
+    }
+
     /* Notify platform on ADDRESS_ASSIGN */
     if (conn->addr_assigned && c->state != MQVPN_STATE_ESTABLISHED &&
         c->state != MQVPN_STATE_TUNNEL_READY) {
-        /* Compute MTU */
-        int tun_mtu = IPV6_MIN_MTU;
-        if (conn->dgram_mss > 0) {
-            size_t udp_mss =
-                xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
-            if (udp_mss >= 68) tun_mtu = (int)udp_mss;
-        }
-        if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU) tun_mtu = IPV6_MIN_MTU;
-        tun_mtu = apply_mtu_cap(c->config.tun_mtu, tun_mtu, c);
-        /* §9: when the reorder shim is in use, each stamped inner packet
-         * carries an 8-byte header, so the usable inner MTU shrinks by 8.
-         * Apply ONCE to the resolved inner MTU (after auto-MSS / cap).
-         * Floor at IPV6_MIN_MTU when v6 is in play. Only when the server
-         * echoed mqvpn-reorder (the response headers precede this capsule):
-         * without that echo nothing is ever stamped, and the 8 bytes would
-         * be lost for nothing. */
-        if (c->config.reorder.mode != MQVPN_REORDER_OFF && conn->peer_reorder_supported) {
-            tun_mtu -= MQVPN_REORDER_HDR_LEN;
-            if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU) tun_mtu = IPV6_MIN_MTU;
-        }
         c->mtu = tun_mtu;
 
         /* Hybrid: learn the tunnel subnet for the classifier's TCP-lane
@@ -2518,7 +2530,7 @@ cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
         size_t udp_mss = xqc_h3_ext_masque_udp_mss(mss, conn->masque_stream_id);
         if (udp_mss >= 68) {
             int new_mtu = (int)udp_mss;
-            if (conn->addr6_assigned && new_mtu < IPV6_MIN_MTU) new_mtu = IPV6_MIN_MTU;
+            if (cli_check_ipv6_mtu(conn, new_mtu) < 0) return;
             new_mtu = apply_mtu_cap(c->config.tun_mtu, new_mtu, c);
             if (new_mtu != c->last_notified_mtu) {
                 c->mtu = new_mtu;
