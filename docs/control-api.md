@@ -322,7 +322,7 @@ Return per-client and per-path detail for all currently connected clients.
 | `bytes_tx`      | uint64 | TUN bytes sent to this client                      |
 | `bytes_rx`      | uint64 | TUN bytes received from this client                |
 | `n_paths`       | int    | Number of entries in `paths`                       |
-| `paths`         | array  | Per-path objects (see below)                       |
+| `paths`         | array  | Per-path objects (see below), at most 8. A closed path stays in the connection until it ends; when there are more than 8, the paths that are not closed are the ones listed. |
 
 **Path object**
 

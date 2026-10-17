@@ -357,6 +357,23 @@ if [ "$n" -ne "$N_PATHS" ]; then
 fi
 echo "OK: n_paths recovered to $N_PATHS"
 
+# The re-added path took a new path ID while the dropped one stays in the
+# connection, so the server now has N_PATHS + 1 paths for this client; its
+# status must list the N_PATHS live ones, the new path included.
+n_active=0
+for _ in $(seq 1 15); do
+    n_active=$(query_status | jq -r \
+        '[.clients[0].paths[] | select(.state_label == "active")] | length' 2>/dev/null || echo 0)
+    [ "$n_active" -eq "$N_PATHS" ] && break
+    sleep 1
+done
+if [ "$n_active" -ne "$N_PATHS" ]; then
+    echo "=== FAIL: Phase 3 status lists $n_active active paths (expected $N_PATHS) ==="
+    query_status | jq . || true
+    exit 1
+fi
+echo "OK: status lists all $N_PATHS live paths after re-add"
+
 if ! ip netns exec "$NS_CLIENT" ping -c 3 -W 2 "$TUNNEL_IP" >/dev/null 2>&1; then
     echo "=== FAIL: tunnel ping broken after re-add ==="
     cat "${WORK_DIR}/client.log"
