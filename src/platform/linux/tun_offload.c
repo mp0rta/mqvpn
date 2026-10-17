@@ -364,6 +364,7 @@ gro_parse(const uint8_t *p, size_t len, gro_pkt_t *g)
     const uint8_t *t = p + g->ip_hlen;
     g->tcp_hlen = (size_t)(t[12] >> 4) * 4;
     if (g->tcp_hlen < TCP_MIN_HLEN || g->ip_hlen + g->tcp_hlen >= len) return 0;
+    if (t[12] & 0x0f) return 0; /* reserved bits or AccECN's AE flag */
     g->flags = t[13];
     if ((g->flags & ~TCP_FLAG_PSH) != 0x10) return 0; /* ACK, optionally PSH */
     g->payload = len - g->ip_hlen - g->tcp_hlen;

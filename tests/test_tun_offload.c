@@ -725,6 +725,32 @@ test_gro_many_flows(void)
     mqvpn_gro_free(g);
 }
 
+/* A segment with a reserved bit or AccECN's AE flag set (TCP byte 12) is
+ * never merged: GRO would carry only the first segment's bits. */
+static void
+test_gro_reserved_bits(void)
+{
+    static uint8_t in[3][2048];
+    size_t ln[3];
+    mqvpn_gro_t *g = mqvpn_gro_new(capture, NULL);
+    for (int v6 = 0; v6 < 2; v6++) {
+        size_t th = v6 ? 40 : 20;
+        out_n = 0;
+        ln[0] = mk_tcp(in[0], v6, 0, 1000, 0x10, 1, 5000, 0);
+        ln[1] = mk_tcp(in[1], v6, 1000, 1000, 0x10, 2, 5000, 0);
+        in[1][th + 12] |= 0x01; /* AE; the checksum is not checked here */
+        ln[2] = mk_tcp(in[2], v6, 2000, 1000, 0x10, 3, 5000, 0);
+        for (int i = 0; i < 3; i++)
+            mqvpn_gro_push(g, in[i], ln[i]);
+        mqvpn_gro_flush(g);
+        assert(out_n == 3);
+        for (int i = 0; i < 3; i++)
+            assert(out_q[i].vh.gso_type == 0 && out_q[i].len == ln[i] &&
+                   memcmp(out_q[i].pkt, in[i], ln[i]) == 0);
+    }
+    mqvpn_gro_free(g);
+}
+
 int
 main(void)
 {
@@ -738,6 +764,7 @@ main(void)
     test_gro_short_closes();
     test_gro_passthrough();
     test_gro_many_flows();
+    test_gro_reserved_bits();
     printf("test_tun_offload: OK\n");
     return 0;
 }
