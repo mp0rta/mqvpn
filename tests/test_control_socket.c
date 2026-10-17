@@ -29,6 +29,9 @@
 /* ── Configurable stub state ──────────────────────────────────────────────── */
 
 static int g_add_user_rc = MQVPN_OK;
+static int g_add_user_calls = 0;
+static char g_add_user_ip[16];
+static int g_add_user_ip_null = 0;
 static int g_remove_user_rc = MQVPN_OK;
 
 static int g_list_users_n = 0;
@@ -54,11 +57,14 @@ static int g_reorder_rc = 0;
 /* ── Stubs for the server-facing API the handlers call ────────────────────── */
 
 int
-mqvpn_server_add_user(mqvpn_server_t *s, const char *u, const char *k)
+mqvpn_server_add_user_ip(mqvpn_server_t *s, const char *u, const char *k, const char *ip)
 {
     (void)s;
     (void)u;
     (void)k;
+    g_add_user_calls++;
+    g_add_user_ip_null = (ip == NULL);
+    snprintf(g_add_user_ip, sizeof(g_add_user_ip), "%s", ip ? ip : "");
     return g_add_user_rc;
 }
 
@@ -156,8 +162,11 @@ mqvpn_server_get_client_sched(const mqvpn_server_t *s, mqvpn_internal_client_sch
     (void)s;
     if (g_sched_n < 0) return -1;
     int n = g_sched_n < max ? g_sched_n : max;
-    for (int i = 0; i < n; i++)
+    for (int i = 0; i < n; i++) {
         snprintf(out[i].scheduler, sizeof(out[i].scheduler), "wlb");
+        snprintf(out[i].vpn_ip, sizeof(out[i].vpn_ip), "10.0.0.7");
+        out[i].vpn_ip6[0] = '\0';
+    }
     return n;
 }
 
@@ -319,6 +328,57 @@ test_add_user_server_failure(void)
     CHECK_HAS("add_user failed (-5)");
 }
 
+static void
+test_add_user_ip(void)
+{
+    g_add_user_rc = MQVPN_OK;
+    g_add_user_calls = 0;
+    call("{\"cmd\":\"add_user\",\"name\":\"alice\",\"key\":\"k\",\"ip\":\"10.0.0.10\"}");
+    CHECK_EQ_STR("{\"ok\":true}");
+    if (g_add_user_calls != 1 || g_add_user_ip_null ||
+        strcmp(g_add_user_ip, "10.0.0.10") != 0) {
+        fprintf(stderr, "FAIL: add_user ip not passed (calls=%d ip='%s')\n",
+                g_add_user_calls, g_add_user_ip);
+        g_failed++;
+    }
+
+    call("{\"cmd\":\"add_user\",\"name\":\"alice\",\"key\":\"k\"}");
+    if (g_add_user_calls != 2 || !g_add_user_ip_null) {
+        fprintf(stderr, "FAIL: add_user without ip must pass NULL\n");
+        g_failed++;
+    }
+}
+
+static void
+test_add_user_rejects(void)
+{
+    g_add_user_calls = 0;
+    call("{\"cmd\":\"add_user\",\"name\":\"alice\",\"key\":\"k\",\"ip\":5}");
+    CHECK_HAS("ip must be an IPv4 address string");
+    call("{\"cmd\":\"add_user\",\"name\":\"alice\",\"key\":\"k\","
+         "\"ip\":\"255.255.255.255junk\"}");
+    CHECK_HAS("ip must be an IPv4 address string");
+
+    char req[400];
+    char longname[65];
+    memset(longname, 'n', 64);
+    longname[64] = '\0';
+    snprintf(req, sizeof(req), "{\"cmd\":\"add_user\",\"name\":\"%s\",\"key\":\"k\"}",
+             longname);
+    call(req);
+    CHECK_HAS("name longer than 63 bytes");
+    longname[63] = '\0';
+    snprintf(req, sizeof(req), "{\"cmd\":\"add_user\",\"name\":\"%s\",\"key\":\"k\"}",
+             longname);
+    call(req);
+    CHECK_EQ_STR("{\"ok\":true}");
+    if (g_add_user_calls != 1) {
+        fprintf(stderr, "FAIL: rejected add_user reached the server (%d calls)\n",
+                g_add_user_calls);
+        g_failed++;
+    }
+}
+
 /* ── remove_user ──────────────────────────────────────────────────────────── */
 
 static void
@@ -417,7 +477,8 @@ test_get_status_one_client_with_path(void)
     CHECK_HAS("\"endpoint\":\"1.2.3.4:443\"");
     CHECK_HAS("\"path_id\":7");
     CHECK_HAS("\"state_label\":\"active\"");
-    CHECK_HAS("\"endpoint\":\"1.2.3.4:443\",\"scheduler\":\"wlb\"");
+    CHECK_HAS("\"endpoint\":\"1.2.3.4:443\",\"vpn_ip\":\"10.0.0.7\",\"vpn_ip6\":\"\","
+              "\"scheduler\":\"wlb\"");
 }
 
 /* Sched getter shorter than the client list (or failing): unknown. */
@@ -432,6 +493,7 @@ test_get_status_scheduler_missing(void)
         g_sched_n = n;
         call("{\"cmd\":\"get_status\"}");
         CHECK_HAS("\"scheduler\":\"unknown\"");
+        CHECK_HAS("\"vpn_ip\":\"\",\"vpn_ip6\":\"\"");
     }
     g_sched_n = 1;
 }
@@ -608,6 +670,8 @@ main(void)
     test_add_user_missing_name();
     test_add_user_missing_key();
     test_add_user_server_failure();
+    test_add_user_ip();
+    test_add_user_rejects();
 
     test_remove_user_success();
     test_remove_user_missing_name();

@@ -163,11 +163,16 @@ parse_dns_list(mqvpn_file_config_t *cfg, const char *val)
 }
 
 static void
-add_user_entry(mqvpn_file_config_t *cfg, const char *name, const char *key, int lineno,
-               const char *path)
+add_user_entry(mqvpn_file_config_t *cfg, const char *name, const char *key,
+               const char *ip, int lineno, const char *path)
 {
     if (!name || !key || name[0] == '\0' || key[0] == '\0') {
         LOG_WRN("%s:%d: invalid user entry", path, lineno);
+        return;
+    }
+
+    if (strlen(name) >= sizeof(cfg->user_names[0])) {
+        LOG_WRN("%s:%d: [Auth] User name longer than 63 bytes, ignoring", path, lineno);
         return;
     }
 
@@ -182,6 +187,7 @@ add_user_entry(mqvpn_file_config_t *cfg, const char *name, const char *key, int 
     for (int i = 0; i < cfg->n_users; i++) {
         if (strcmp(cfg->user_names[i], name) == 0) {
             snprintf(cfg->user_keys[i], sizeof(cfg->user_keys[i]), "%s", key);
+            if (ip) snprintf(cfg->user_ips[i], sizeof(cfg->user_ips[i]), "%s", ip);
             return;
         }
     }
@@ -196,6 +202,8 @@ add_user_entry(mqvpn_file_config_t *cfg, const char *name, const char *key, int 
              name);
     snprintf(cfg->user_keys[cfg->n_users], sizeof(cfg->user_keys[cfg->n_users]), "%s",
              key);
+    snprintf(cfg->user_ips[cfg->n_users], sizeof(cfg->user_ips[cfg->n_users]), "%s",
+             ip ? ip : "");
     cfg->n_users++;
 }
 
@@ -204,16 +212,13 @@ parse_user_pair(mqvpn_file_config_t *cfg, const char *val, int lineno, const cha
 {
     char pair[360];
     snprintf(pair, sizeof(pair), "%s", val);
-    char *sep = strchr(pair, ':');
-    if (!sep) {
+    char *name, *key, *ip;
+    if (mqvpn_user_spec_split(pair, &name, &key, &ip) < 0) {
         LOG_WRN("%s:%d: [Auth] User must be NAME:KEY", path, lineno);
         return;
     }
 
-    *sep = '\0';
-    char *name = trim(pair);
-    char *key = trim(sep + 1);
-    add_user_entry(cfg, name, key, lineno, path);
+    add_user_entry(cfg, trim(name), trim(key), ip ? trim(ip) : NULL, lineno, path);
 }
 
 /* json_skip_ws, json_find_key, json_read_string, json_read_bool,
@@ -261,11 +266,13 @@ json_read_string_array(const char *p, char out[][64], int max_items, int *n_item
 }
 
 static int
-json_add_user_cb(void *ctx, const char *name, const char *key)
+json_add_user_cb(void *ctx, const char *name, const char *key, const char *ip)
 {
+    struct in_addr a;
+    if (ip && inet_pton(AF_INET, ip, &a) != 1) return -1;
     /* add_user_entry() logs and skips invalid/duplicate/overflow entries
      * rather than failing the whole parse; preserve that here. */
-    add_user_entry((mqvpn_file_config_t *)ctx, name, key, 0, "json");
+    add_user_entry((mqvpn_file_config_t *)ctx, name, key, ip, 0, "json");
     return 0;
 }
 
@@ -1194,7 +1201,11 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     }
 
     v = json_find_key(json_text, "users");
-    if (v && json_read_users(cfg, v) < 0) return -1;
+    if (v && json_read_users(cfg, v) < 0) {
+        LOG_ERR("JSON: invalid \"users\" entry (malformed, name of 64 bytes or more, "
+                "or ip not an IPv4 address)");
+        return -1;
+    }
 
     v = json_find_key(json_text, "reorder_rules");
     if (v && json_read_reorder_rules(cfg, v) < 0) return -1;

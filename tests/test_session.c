@@ -736,6 +736,69 @@ test_cidr_non_aligned(void)
     ASSERT_EQ_INT(off, 2, "first alloc offset is 2");
 }
 
+static struct in_addr
+ip4(const char *s)
+{
+    struct in_addr a;
+    inet_pton(AF_INET, s, &a);
+    return a;
+}
+
+static void
+test_reserve_skipped_by_alloc(void)
+{
+    mqvpn_addr_pool_t pool;
+    mqvpn_addr_pool_init(&pool, "10.0.0.0/29");
+    struct in_addr r = ip4("10.0.0.2"), a;
+    ASSERT_EQ_INT(mqvpn_addr_pool_reserve(&pool, &r), 0, "reserve .2");
+    const char *want[] = {"10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6"};
+    for (int i = 0; i < 4; i++) {
+        ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &a), 0, "alloc around reservation");
+        char str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &a, str, sizeof(str));
+        ASSERT_EQ_STR(str, want[i], "alloc skips reserved .2");
+    }
+    ASSERT_TRUE(mqvpn_addr_pool_alloc(&pool, &a) < 0, "fifth alloc exhausted");
+    ASSERT_EQ_INT(mqvpn_addr_pool_claim(&pool, &r), 0, "claim reserved");
+    ASSERT_EQ_INT(mqvpn_addr_pool_claim(&pool, &r), -1, "claim already used");
+    mqvpn_addr_pool_release(&pool, &r);
+    ASSERT_EQ_INT(mqvpn_addr_pool_claim(&pool, &r), 0, "reservation outlives release");
+}
+
+static void
+test_reserve_range(void)
+{
+    mqvpn_addr_pool_t pool;
+    mqvpn_addr_pool_init(&pool, "10.0.0.0/29");
+    const char *bad[] = {"0.0.0.0", "10.0.0.0", "10.0.0.1", "10.0.0.7", "10.0.1.2"};
+    for (int i = 0; i < 5; i++) {
+        struct in_addr b = ip4(bad[i]);
+        ASSERT_EQ_INT(mqvpn_addr_pool_reserve(&pool, &b), -1, bad[i]);
+    }
+    struct in_addr r = ip4("10.0.0.4"), a;
+    ASSERT_EQ_INT(mqvpn_addr_pool_reserve(&pool, &r), 0, "reserve .4");
+    ASSERT_EQ_INT(mqvpn_addr_pool_reserve(&pool, &r), -1, "reserve twice");
+    ASSERT_EQ_INT(mqvpn_addr_pool_offset(&pool, &r), 4, "offset .4");
+    struct in_addr o1 = ip4("10.0.0.1"), o7 = ip4("10.0.0.7");
+    ASSERT_EQ_INT(mqvpn_addr_pool_offset(&pool, &o1), 0, "offset .1");
+    ASSERT_EQ_INT(mqvpn_addr_pool_offset(&pool, &o7), 0, "offset .7");
+    mqvpn_addr_pool_unreserve(&pool, &r);
+    ASSERT_EQ_INT(mqvpn_addr_pool_claim(&pool, &r), -1, "claim after unreserve");
+    int seen = 0;
+    for (int i = 0; i < 5; i++)
+        if (mqvpn_addr_pool_alloc(&pool, &a) == 0 && a.s_addr == r.s_addr) seen = 1;
+    ASSERT_TRUE(seen, "alloc can return unreserved .4");
+}
+
+static void
+test_claim_unreserved(void)
+{
+    mqvpn_addr_pool_t pool;
+    mqvpn_addr_pool_init(&pool, "10.0.0.0/29");
+    struct in_addr a = ip4("10.0.0.3");
+    ASSERT_EQ_INT(mqvpn_addr_pool_claim(&pool, &a), -1, "claim without reservation");
+}
+
 int
 main(void)
 {
@@ -775,6 +838,11 @@ main(void)
     test_pool_max_boundary();
     test_ipv6_large_offset_no_overflow();
     test_cidr_non_aligned();
+
+    /* Fixed-address reservations */
+    test_reserve_skipped_by_alloc();
+    test_reserve_range();
+    test_claim_unreserved();
 
     printf("\n=== test_session: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

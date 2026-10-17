@@ -842,6 +842,46 @@ svr_session_release(mqvpn_server_t *s, svr_conn_t *conn)
     svr_check_session_invariants(s);
 }
 
+/* Reserved tunnel address of `username` (network order), 0 when it has none. */
+static uint32_t
+svr_user_fixed_ip(const mqvpn_server_t *s, const char *username)
+{
+    if (!username || username[0] == '\0') return 0;
+    for (int i = 0; i < s->config.n_users; i++) {
+        if (strcmp(s->config.user_names[i], username) == 0) return s->config.user_ip4[i];
+    }
+    return 0;
+}
+
+/* Drop a live session now and close its connection. The release is synchronous,
+ * so the slot and the address are free before the caller continues; the
+ * connection's later cb_h3_conn_close finds assigned_ip == 0 and does nothing. */
+static void
+svr_evict_session(mqvpn_server_t *s, svr_conn_t *conn)
+{
+    svr_session_release(s, conn);
+    xqc_h3_conn_close(s->engine, &conn->cid);
+}
+
+/* svr_auth_check matches a login to the first user holding the key, so a later
+ * user with the same key is never selected. Warn when that hides a reservation. */
+static void
+svr_warn_shared_keys(mqvpn_server_t *s)
+{
+    for (int i = 0; i < s->config.n_users; i++) {
+        if (s->config.user_keys[i][0] == '\0') continue;
+        for (int j = i + 1; j < s->config.n_users; j++) {
+            if (strcmp(s->config.user_keys[i], s->config.user_keys[j]) != 0) continue;
+            if (!s->config.user_ip4[i] && !s->config.user_ip4[j]) continue;
+            LOG_W(s,
+                  "users %s and %s share a key: logins are matched to %s, so %s's "
+                  "settings are never used",
+                  s->config.user_names[i], s->config.user_names[j],
+                  s->config.user_names[i], s->config.user_names[j]);
+        }
+    }
+}
+
 static int
 cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_data)
 {
@@ -987,8 +1027,19 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream,
     stream->header_sent = 1;
     conn->masque_stream_id = xqc_h3_stream_id(h3_request);
 
-    /* 2. Allocate client IP */
-    if (mqvpn_addr_pool_alloc(&s->pool, &conn->assigned_ip) < 0) {
+    /* 2. Allocate client IP (a reserved user gets its own address) */
+    uint32_t fixed_ip = svr_user_fixed_ip(s, conn->username);
+    if (fixed_ip) {
+        struct in_addr fa = {.s_addr = fixed_ip};
+        char fstr[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &fa, fstr, sizeof(fstr));
+        if (mqvpn_addr_pool_claim(&s->pool, &fa) < 0) {
+            LOG_E(s, "fixed IP %s of user %s is in use", fstr, conn->username);
+            return -1;
+        }
+        conn->assigned_ip = fa;
+        LOG_I(s, "assigned fixed IP %s to user %s", fstr, conn->username);
+    } else if (mqvpn_addr_pool_alloc(&s->pool, &conn->assigned_ip) < 0) {
         LOG_E(s, "IP pool exhausted");
         return -1;
     }
@@ -1389,6 +1440,12 @@ svr_sched_refusal_reason(int xqc_rc)
     return xqc_rc == -XQC_ESTATE ? "paths" : "engine";
 }
 
+MQVPN_INTERNAL int
+mqvpn_server_test_pool_used(const mqvpn_server_t *s, uint32_t off)
+{
+    return off <= MQVPN_ADDR_POOL_MAX ? s->pool.used[off] : 0;
+}
+
 MQVPN_INTERNAL const char *
 mqvpn_server_test_sched_refusal_reason(int xqc_rc)
 {
@@ -1469,6 +1526,23 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
      * stale slot doesn't count against the max_clients check. The
      * live-tunnel case never reaches here (409 in cb_request_read). */
     svr_session_release(s, stream->conn);
+
+    /* A reserved user's previous session (another connection) still holds the
+     * address: take it over before the max_clients check, so a full server
+     * does not turn the reconnect away. */
+    uint32_t fixed_ip = svr_user_fixed_ip(s, stream->conn->username);
+    if (fixed_ip) {
+        struct in_addr fa = {.s_addr = fixed_ip};
+        uint32_t off = mqvpn_addr_pool_offset(&s->pool, &fa);
+        svr_conn_t *old = off ? s->sessions[off] : NULL;
+        if (old && old != stream->conn) {
+            char fstr[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &fa, fstr, sizeof(fstr));
+            LOG_I(s, "user %s reconnected: closing the previous session holding %s",
+                  stream->conn->username, fstr);
+            svr_evict_session(s, old);
+        }
+    }
 
     /* Re-provision the reorder engines for this tunnel generation (no-op on
      * first establishment — cb_h3_conn_create's engines are still in place;
@@ -2151,6 +2225,19 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
             goto cleanup;
         }
     }
+
+    for (int i = 0; i < s->config.n_users; i++) {
+        if (!s->config.user_ip4[i]) continue;
+        struct in_addr ua = {.s_addr = s->config.user_ip4[i]};
+        if (mqvpn_addr_pool_reserve(&s->pool, &ua) < 0) {
+            char ustr[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &ua, ustr, sizeof(ustr));
+            LOG_E(s, "user %s: fixed IP %s is not a free client address of %s",
+                  s->config.user_names[i], ustr, cfg->subnet);
+            goto cleanup;
+        }
+    }
+    svr_warn_shared_keys(s);
 
     /* Startup advisory, not a refusal: a pool wider than /24 is legal
      * (addr_pool.c allows prefix_len in [16,30]) and plenty of deployments
@@ -2978,29 +3065,54 @@ mqvpn_server_list_users(const mqvpn_server_t *s, char names[][64], int max)
 int
 mqvpn_server_add_user(mqvpn_server_t *s, const char *username, const char *key)
 {
-    if (!s || !username || !key || username[0] == '\0' || key[0] == '\0')
-        return MQVPN_ERR_INVALID_ARG;
+    return mqvpn_server_add_user_ip(s, username, key, NULL);
+}
 
-    /* Reject characters that would break JSON serialization in control API */
-    for (const char *p = username; *p; p++) {
-        if (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20)
+int
+mqvpn_server_add_user_ip(mqvpn_server_t *s, const char *username, const char *key,
+                         const char *ip)
+{
+    if (!s || !username || !key) return MQVPN_ERR_INVALID_ARG;
+
+    /* The pool check is the server's; every other check is the config's. */
+    if (ip) {
+        struct in_addr a;
+        if (inet_pton(AF_INET, ip, &a) == 1 && !mqvpn_addr_pool_offset(&s->pool, &a))
             return MQVPN_ERR_INVALID_ARG;
     }
 
-    for (int i = 0; i < s->config.n_users; i++) {
-        if (strcmp(s->config.user_names[i], username) == 0) {
-            snprintf(s->config.user_keys[i], sizeof(s->config.user_keys[i]), "%s", key);
-            return MQVPN_OK;
+    uint32_t old_ip = svr_user_fixed_ip(s, username);
+    int rc = mqvpn_config_add_user_ip(&s->config, username, key, ip);
+    if (rc != MQVPN_OK) return rc;
+
+    uint32_t new_ip = svr_user_fixed_ip(s, username);
+    if (new_ip != old_ip) {
+        if (old_ip) {
+            struct in_addr oa = {.s_addr = old_ip};
+            mqvpn_addr_pool_unreserve(&s->pool, &oa);
+        }
+        struct in_addr na = {.s_addr = new_ip};
+        mqvpn_addr_pool_reserve(&s->pool, &na);
+
+        /* Whoever holds the new address right now loses it. */
+        uint32_t off = mqvpn_addr_pool_offset(&s->pool, &na);
+        svr_conn_t *occupant = off ? s->sessions[off] : NULL;
+        if (occupant) {
+            LOG_I(s, "closing session of user %s: %s is now reserved for %s",
+                  occupant->username, ip, username);
+            svr_evict_session(s, occupant);
+        }
+        /* The user's other sessions hold the old address: reconnect. */
+        for (int i = 1; i <= MQVPN_ADDR_POOL_MAX; i++) {
+            svr_conn_t *conn = s->sessions[i];
+            if (conn && strcmp(conn->username, username) == 0) {
+                LOG_I(s, "closing session of user %s: fixed IP changed to %s", username,
+                      ip);
+                svr_evict_session(s, conn);
+            }
         }
     }
-
-    if (s->config.n_users >= MQVPN_MAX_USERS) return MQVPN_ERR_MAX_CLIENTS;
-
-    snprintf(s->config.user_names[s->config.n_users],
-             sizeof(s->config.user_names[s->config.n_users]), "%s", username);
-    snprintf(s->config.user_keys[s->config.n_users],
-             sizeof(s->config.user_keys[s->config.n_users]), "%s", key);
-    s->config.n_users++;
+    svr_warn_shared_keys(s);
     return MQVPN_OK;
 }
 
@@ -3009,21 +3121,13 @@ mqvpn_server_remove_user(mqvpn_server_t *s, const char *username)
 {
     if (!s || !username || username[0] == '\0') return MQVPN_ERR_INVALID_ARG;
 
-    int found = 0;
-    for (int i = 0; i < s->config.n_users; i++) {
-        if (strcmp(s->config.user_names[i], username) == 0) {
-            for (int j = i + 1; j < s->config.n_users; j++) {
-                memcpy(s->config.user_names[j - 1], s->config.user_names[j],
-                       sizeof(s->config.user_names[j - 1]));
-                memcpy(s->config.user_keys[j - 1], s->config.user_keys[j],
-                       sizeof(s->config.user_keys[j - 1]));
-            }
-            s->config.n_users--;
-            found = 1;
-            break;
-        }
+    uint32_t old_ip = svr_user_fixed_ip(s, username);
+    if (mqvpn_config_remove_user(&s->config, username) != MQVPN_OK)
+        return MQVPN_ERR_INVALID_ARG;
+    if (old_ip) {
+        struct in_addr oa = {.s_addr = old_ip};
+        mqvpn_addr_pool_unreserve(&s->pool, &oa);
     }
-    if (!found) return MQVPN_ERR_INVALID_ARG;
 
     /* Disconnect active sessions for the removed user */
     for (int i = 1; i <= MQVPN_ADDR_POOL_MAX; i++) {
@@ -3174,6 +3278,13 @@ mqvpn_server_get_client_sched(const mqvpn_server_t *s, mqvpn_internal_client_sch
         if (!conn || !conn->tunnel_established) continue;
         snprintf(out[count].scheduler, sizeof(out[count].scheduler), "%s",
                  mqvpn_sched_to_name(conn->eff_sched));
+        out[count].vpn_ip[0] = out[count].vpn_ip6[0] = '\0';
+        if (conn->assigned_ip.s_addr)
+            inet_ntop(AF_INET, &conn->assigned_ip, out[count].vpn_ip,
+                      sizeof(out[count].vpn_ip));
+        if (conn->has_v6)
+            inet_ntop(AF_INET6, &conn->assigned_ip6, out[count].vpn_ip6,
+                      sizeof(out[count].vpn_ip6));
         count++;
     }
     return count;

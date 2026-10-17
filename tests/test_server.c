@@ -31,6 +31,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <poll.h>
+#include <time.h>
 
 #include "fake_transport.h"
 #include "libmqvpn.h"
@@ -608,11 +609,47 @@ static uint32_t g_last_session_id = 0;
 static int g_client_disconnected_called = 0;
 static uint32_t g_last_disconnected_session_id = 0;
 
+/* Ordered record of server-side session events: 'C' connected, 'D' disconnected
+ * (id = session id = pool offset), 'X' = the server's "H3 connection closed" log
+ * line (only when the server logs at INFO). Reset by loopback_setup. */
+typedef struct {
+    char kind;
+    uint32_t id;
+} ev_t;
+#define EV_MAX 64
+static ev_t g_ev[EV_MAX];
+static int g_ev_n = 0;
+
+static void
+ev_add(char kind, uint32_t id)
+{
+    if (g_ev_n < EV_MAX) g_ev[g_ev_n++] = (ev_t){kind, id};
+}
+
+static int
+ev_count(char kind)
+{
+    int n = 0;
+    for (int i = 0; i < g_ev_n; i++)
+        if (g_ev[i].kind == kind) n++;
+    return n;
+}
+
+/* Index of the nth (0-based) event of `kind`, -1 when absent. */
+static int
+ev_index(char kind, int nth)
+{
+    for (int i = 0; i < g_ev_n; i++)
+        if (g_ev[i].kind == kind && nth-- == 0) return i;
+    return -1;
+}
+
 static void
 mock_on_client_connected(const mqvpn_tunnel_info_t *info, uint32_t session_id,
                          void *user_ctx)
 {
     (void)user_ctx;
+    ev_add('C', session_id);
     g_client_connected_called++;
     g_last_session_id = session_id;
     if (info) {
@@ -625,6 +662,7 @@ mock_on_client_disconnected(uint32_t session_id, mqvpn_error_t reason, void *use
 {
     (void)reason;
     (void)user_ctx;
+    ev_add('D', session_id);
     g_client_disconnected_called++;
     g_last_disconnected_session_id = session_id;
 }
@@ -709,8 +747,18 @@ typedef struct {
  * fixture and reset them after teardown. */
 static const char *g_lb_server_cert = NULL;
 static const char *g_lb_server_key = NULL;
+/* Edits the server config of the next loopback_setup; tests reset it. */
+static void (*g_lb_server_tweak)(mqvpn_config_t *cfg) = NULL;
 /* Server [Reorder] mode for the next loopback_setup; tests reset it. */
 static mqvpn_reorder_mode_t g_lb_server_reorder = MQVPN_REORDER_OFF;
+
+static void
+lb_server_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
+{
+    (void)level;
+    (void)user_ctx;
+    if (msg && strcmp(msg, "H3 connection closed") == 0) ev_add('X', 0);
+}
 
 /* Sockets, server, client (with every client mock registered, tunnel_closed
  * and log included), one path, connect. `tweak` edits the client config
@@ -728,6 +776,7 @@ loopback_setup(loopback_t *lb, void (*tweak)(mqvpn_config_t *cfg))
     g_cli_tunnel_closed_count = 0;
     g_cli_tunnel_closed_reason = MQVPN_OK;
     g_cli_tls_fail_log_count = 0;
+    g_ev_n = 0;
     memset(&g_cli_tunnel_info, 0, sizeof(g_cli_tunnel_info));
 
     lb->svr_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
@@ -763,11 +812,13 @@ loopback_setup(loopback_t *lb, void (*tweak)(mqvpn_config_t *cfg))
     if (g_lb_server_reorder != MQVPN_REORDER_OFF)
         ASSERT_EQ(mqvpn_config_set_reorder_enabled(svr_cfg, g_lb_server_reorder),
                   MQVPN_OK);
+    if (g_lb_server_tweak) g_lb_server_tweak(svr_cfg);
     mqvpn_server_callbacks_t svr_cbs = MQVPN_SERVER_CALLBACKS_INIT;
     svr_cbs.tun_output = mock_tun_output;
     svr_cbs.tunnel_config_ready = mock_tunnel_config_ready;
     svr_cbs.on_client_connected = mock_on_client_connected;
     svr_cbs.on_client_disconnected = mock_on_client_disconnected;
+    svr_cbs.log = lb_server_log;
     lb->svr = mqvpn_server_new(svr_cfg, &svr_cbs, NULL);
     ASSERT_NOT_NULL(lb->svr);
     mqvpn_config_free(svr_cfg);
@@ -1978,6 +2029,447 @@ TEST(server_max_clients_config)
     mqvpn_config_free(cfg);
 }
 
+/* ── Fixed per-user tunnel addresses ── */
+
+static void
+srv_alice50_bob(mqvpn_config_t *cfg)
+{
+    mqvpn_config_set_log_level(cfg, MQVPN_LOG_INFO);
+    ASSERT_EQ(mqvpn_config_add_user_ip(cfg, "alice", "ka", "10.0.0.50"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_add_user(cfg, "bob", "kb"), MQVPN_OK);
+}
+
+static void
+srv_alice50_bob_max1(mqvpn_config_t *cfg)
+{
+    srv_alice50_bob(cfg);
+    mqvpn_config_set_max_clients(cfg, 1);
+}
+
+static void
+cli_key_ka(mqvpn_config_t *cfg)
+{
+    mqvpn_config_set_auth_key(cfg, "ka");
+    mqvpn_config_set_reconnect(cfg, 0, 0); /* an evicted client must stay gone */
+}
+
+static void
+cli_key_kb(mqvpn_config_t *cfg)
+{
+    mqvpn_config_set_auth_key(cfg, "kb");
+    mqvpn_config_set_reconnect(cfg, 0, 0);
+}
+
+/* A further client of the loopback server: own socket and key. */
+typedef struct {
+    int fd;
+    void *tctx;
+    mqvpn_client_t *cli;
+    mqvpn_path_handle_t path_h;
+    int ready;
+    int tun_out;
+    mqvpn_tunnel_info_t info;
+} fx_cli_t;
+
+static void
+fx_cli_tun_output(const uint8_t *pkt, size_t len, void *user_ctx)
+{
+    (void)pkt;
+    (void)len;
+    ((fx_cli_t *)user_ctx)->tun_out++;
+}
+
+static void
+fx_cli_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
+{
+    fx_cli_t *c = user_ctx;
+    c->ready = 1;
+    c->info = *info;
+}
+
+static void
+fx_cli_start(loopback_t *lb, fx_cli_t *c, const char *key)
+{
+    memset(c, 0, sizeof(*c));
+    c->fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    ASSERT_NE(c->fd, -1);
+    struct sockaddr_in a = {.sin_family = AF_INET,
+                            .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    ASSERT_EQ(bind(c->fd, (struct sockaddr *)&a, sizeof(a)), 0);
+    socklen_t alen = sizeof(a);
+    getsockname(c->fd, (struct sockaddr *)&a, &alen);
+
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    mqvpn_config_set_server(cfg, "127.0.0.1", ntohs(lb->svr_addr.sin_port));
+    mqvpn_config_set_insecure(cfg, 1);
+    mqvpn_config_set_log_level(cfg, MQVPN_LOG_ERROR);
+    mqvpn_config_set_auth_key(cfg, key);
+    mqvpn_config_set_reconnect(cfg, 0, 0);
+    mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
+    cbs.tun_output = fx_cli_tun_output;
+    cbs.tunnel_config_ready = fx_cli_ready;
+    c->cli = mqvpn_client_new(cfg, &cbs, c);
+    ASSERT_NOT_NULL(c->cli);
+    mqvpn_config_free(cfg);
+
+    mqvpn_path_desc_t desc;
+    memset(&desc, 0, sizeof(desc));
+    desc.struct_size = sizeof(desc);
+    memcpy(desc.local_addr, &a, sizeof(a));
+    desc.local_addr_len = sizeof(a);
+    mqvpn_bind_posix_opts_t bo = {0};
+    bo.struct_size = sizeof(bo);
+    bo.udp_gso = 1;
+    bo.socket_buf_bytes = -1;
+    ASSERT_EQ(mqvpn_bind_posix_path_new(c->fd, &bo, &c->tctx), MQVPN_OK);
+    c->path_h =
+        mqvpn_client_add_path(c->cli, &desc, mqvpn_bind_posix_path_ops(), c->tctx, NULL);
+    ASSERT_NE(c->path_h, (mqvpn_path_handle_t)-1);
+    mqvpn_client_set_server_addr(c->cli, (struct sockaddr *)&lb->svr_addr,
+                                 sizeof(lb->svr_addr));
+    ASSERT_EQ(mqvpn_client_connect(c->cli), MQVPN_OK);
+}
+
+static void
+fx_cli_stop(fx_cli_t *c)
+{
+    mqvpn_client_destroy(c->cli);
+    close(c->fd);
+}
+
+/* The fixture's own client viewed as a pump participant (counters stay global). */
+static fx_cli_t
+fx_lb_view(const loopback_t *lb)
+{
+    fx_cli_t v = {
+        .fd = lb->cli_fd, .tctx = lb->cli_tctx, .cli = lb->cli, .path_h = lb->path_h};
+    return v;
+}
+
+/* Drive the server and the chosen clients until done(arg) or max_ms (wall clock);
+ * done == NULL runs the whole budget. Unlisted clients are left unpumped. */
+static void
+fx_pump(loopback_t *lb, fx_cli_t **cl, int n, int (*done)(void *), void *arg, int max_ms)
+{
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (;;) {
+        mqvpn_bind_posix_server_drain(lb->svr_tctx, lb->svr, 64);
+        for (int i = 0; i < n; i++)
+            mqvpn_bind_posix_path_drain(cl[i]->tctx, cl[i]->cli, cl[i]->path_h, 64);
+        mqvpn_server_tick(lb->svr);
+        for (int i = 0; i < n; i++)
+            mqvpn_client_tick(cl[i]->cli);
+        if (done && done(arg)) return;
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        if ((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000 >=
+            max_ms)
+            return;
+        struct pollfd pf[1 + 8];
+        pf[0] = (struct pollfd){.fd = lb->svr_fd, .events = POLLIN};
+        for (int i = 0; i < n; i++)
+            pf[1 + i] = (struct pollfd){.fd = cl[i]->fd, .events = POLLIN};
+        poll(pf, 1 + n, 5);
+    }
+}
+
+typedef struct {
+    char kind;
+    int n;
+} ev_want_t;
+
+static int
+done_ev(void *arg)
+{
+    const ev_want_t *w = arg;
+    return ev_count(w->kind) >= w->n;
+}
+
+static int
+done_ready(void *arg)
+{
+    return ((fx_cli_t *)arg)->ready;
+}
+
+/* Start `c`, pump it (plus `others`) until its tunnel is up, then activate it. */
+static void
+fx_connect(loopback_t *lb, fx_cli_t *c, const char *key, fx_cli_t **others, int n_others)
+{
+    fx_cli_start(lb, c, key);
+    fx_cli_t *cl[8];
+    int n = 0;
+    cl[n++] = c;
+    for (int i = 0; i < n_others; i++)
+        cl[n++] = others[i];
+    fx_pump(lb, cl, n, done_ready, c, 10000);
+    ASSERT_EQ(c->ready, 1);
+    ASSERT_EQ(mqvpn_client_set_tun_active(c->cli, 1, -1), MQVPN_OK);
+}
+
+static void
+fx_inner_pkt(uint8_t pkt[40], const uint8_t src[4], const uint8_t dst[4])
+{
+    memset(pkt, 0, 40);
+    pkt[0] = 0x45;
+    pkt[3] = 40;
+    pkt[8] = 64;
+    pkt[9] = 17;
+    memcpy(pkt + 12, src, 4);
+    memcpy(pkt + 16, dst, 4);
+}
+
+static void
+lb_connect(loopback_t *lb, void (*svr_tweak)(mqvpn_config_t *),
+           void (*cli_tweak)(mqvpn_config_t *))
+{
+    g_lb_server_tweak = svr_tweak;
+    loopback_setup(lb, cli_tweak);
+    g_lb_server_tweak = NULL;
+    loopback_pump_until(lb, done_established, 10000);
+    ASSERT_EQ(g_client_connected_called, 1);
+    ASSERT_EQ(mqvpn_client_set_tun_active(lb->cli, 1, -1), MQVPN_OK);
+}
+
+static mqvpn_server_t *
+fx_plain_server(void (*tweak)(mqvpn_config_t *))
+{
+    mqvpn_config_t *cfg = make_server_config();
+    if (tweak) tweak(cfg);
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    return s;
+}
+
+static void
+srv_alice_outside(mqvpn_config_t *cfg)
+{
+    ASSERT_EQ(mqvpn_config_add_user_ip(cfg, "alice", "ka", "10.0.1.5"), MQVPN_OK);
+}
+
+static void
+srv_alice_server_addr(mqvpn_config_t *cfg)
+{
+    ASSERT_EQ(mqvpn_config_add_user_ip(cfg, "alice", "ka", "10.0.0.1"), MQVPN_OK);
+}
+
+TEST(server_new_rejects_fixed_ip_outside_pool)
+{
+    ASSERT_NULL(fx_plain_server(srv_alice_outside));
+    ASSERT_NULL(fx_plain_server(srv_alice_server_addr));
+}
+
+TEST(fixed_ip_assigned)
+{
+    loopback_t lb;
+    lb_connect(&lb, srv_alice50_bob, cli_key_ka);
+    ASSERT_EQ(g_cli_tunnel_info.assigned_ip[3], 50);
+    ASSERT_EQ(g_ev_n, 1);
+    ASSERT_EQ(g_ev[0].kind, 'C');
+    ASSERT_EQ(g_ev[0].id, 50);
+    loopback_teardown(&lb);
+}
+
+static void
+run_takeover(void (*svr_tweak)(mqvpn_config_t *))
+{
+    loopback_t lb;
+    lb_connect(&lb, svr_tweak, cli_key_ka);
+    ASSERT_EQ(g_cli_tunnel_info.assigned_ip[3], 50);
+    fx_cli_t old1 = fx_lb_view(&lb);
+
+    /* alice #2 connects while alice #1 is not pumped. */
+    fx_cli_t a2;
+    fx_connect(&lb, &a2, "ka", NULL, 0);
+    ASSERT_EQ(a2.info.assigned_ip[3], 50);
+    ASSERT_EQ(mqvpn_server_get_n_clients(lb.svr), 1);
+
+    /* The evicted connection sends one packet before anything else happens. */
+    int tun0 = g_tun_output_called;
+    uint8_t pkt[40];
+    fx_inner_pkt(pkt, g_cli_tunnel_info.assigned_ip, (const uint8_t[]){8, 8, 8, 8});
+    ASSERT_EQ(mqvpn_client_on_tun_packet(lb.cli, pkt, sizeof(pkt)), MQVPN_OK);
+    fx_cli_t *all[] = {&old1, &a2};
+    ev_want_t x1 = {'X', 1};
+    fx_pump(&lb, all, 2, done_ev, &x1, 5000);
+    ASSERT_EQ(ev_count('X'), 1);
+    ASSERT_EQ(g_tun_output_called, tun0);
+
+    /* C50, D50, C50, X: one disconnect, teardown after the replacement. */
+    ASSERT_EQ(g_ev_n, 4);
+    const char want[] = "CDCX";
+    for (int i = 0; i < 4; i++)
+        ASSERT_EQ(g_ev[i].kind, want[i]);
+    ASSERT_EQ(g_ev[1].id, 50);
+    ASSERT_EQ(g_ev[2].id, 50);
+    ASSERT_EQ(mqvpn_server_get_n_clients(lb.svr), 1);
+    ASSERT_EQ(mqvpn_server_test_pool_used(lb.svr, 50), 1);
+
+    /* alice #2 owns the address in both directions. */
+    fx_inner_pkt(pkt, a2.info.assigned_ip, (const uint8_t[]){8, 8, 8, 8});
+    ASSERT_EQ(mqvpn_client_on_tun_packet(a2.cli, pkt, sizeof(pkt)), MQVPN_OK);
+    fx_cli_t *only2[] = {&a2};
+    for (int i = 0; i < 400 && g_tun_output_called == tun0; i++)
+        fx_pump(&lb, only2, 1, NULL, NULL, 5);
+    ASSERT_EQ(g_tun_output_called, tun0 + 1);
+
+    fx_inner_pkt(pkt, (const uint8_t[]){8, 8, 8, 8}, a2.info.assigned_ip);
+    ASSERT_EQ(mqvpn_server_on_tun_packet(lb.svr, pkt, sizeof(pkt)), MQVPN_OK);
+    for (int i = 0; i < 400 && a2.tun_out == 0; i++)
+        fx_pump(&lb, only2, 1, NULL, NULL, 5);
+    ASSERT_EQ(a2.tun_out, 1);
+
+    fx_cli_stop(&a2);
+    loopback_teardown(&lb);
+}
+
+TEST(fixed_ip_takeover)
+{
+    run_takeover(srv_alice50_bob);
+}
+
+TEST(fixed_ip_full_server_still_takes_over)
+{
+    run_takeover(srv_alice50_bob_max1);
+}
+
+TEST(fixed_ip_key_update_keeps_reservation)
+{
+    loopback_t lb;
+    lb_connect(&lb, srv_alice50_bob, cli_key_ka);
+    ASSERT_EQ(mqvpn_server_add_user_ip(lb.svr, "alice", "ka2", NULL), MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_get_n_clients(lb.svr), 1);
+    fx_cli_t v = fx_lb_view(&lb);
+    fx_cli_t *cl[] = {&v};
+    fx_pump(&lb, cl, 1, NULL, NULL, 300);
+    ASSERT_EQ(g_client_disconnected_called, 0);
+    ASSERT_EQ(mqvpn_server_get_n_clients(lb.svr), 1);
+    ASSERT_EQ(mqvpn_server_add_user_ip(lb.svr, "x", "kx", "10.0.0.50"),
+              MQVPN_ERR_INVALID_ARG);
+    loopback_teardown(&lb);
+}
+
+TEST(runtime_reserve_evicts_occupant)
+{
+    loopback_t lb;
+    lb_connect(&lb, srv_alice50_bob, cli_key_kb);
+    ASSERT_EQ(g_cli_tunnel_info.assigned_ip[3], 2);
+    ASSERT_EQ(mqvpn_server_add_user_ip(lb.svr, "carol", "kc", "10.0.0.2"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_get_n_clients(lb.svr), 0);
+    ASSERT_EQ(g_ev[g_ev_n - 1].kind, 'D');
+    ASSERT_EQ(g_ev[g_ev_n - 1].id, 2);
+    ASSERT_EQ(mqvpn_server_test_pool_used(lb.svr, 2), 0);
+
+    fx_cli_t v = fx_lb_view(&lb);
+    fx_cli_t *cl[] = {&v};
+    ev_want_t x1 = {'X', 1};
+    fx_pump(&lb, cl, 1, done_ev, &x1, 5000);
+    ASSERT_EQ(ev_count('X'), 1);
+    ASSERT_EQ(ev_count('D'), 1);
+    ASSERT_EQ(mqvpn_server_test_pool_used(lb.svr, 2), 0);
+    loopback_teardown(&lb);
+}
+
+TEST(runtime_reserve_change_two_sessions)
+{
+    loopback_t lb;
+    lb_connect(&lb, srv_alice50_bob, cli_key_ka);
+    fx_cli_t old_alice = fx_lb_view(&lb);
+    fx_cli_t old_bob;
+    fx_connect(&lb, &old_bob, "kb", NULL, 0);
+    ASSERT_EQ(old_bob.info.assigned_ip[3], 2);
+    ASSERT_EQ(mqvpn_server_get_n_clients(lb.svr), 2);
+
+    ASSERT_EQ(mqvpn_server_add_user_ip(lb.svr, "alice", "ka", "10.0.0.2"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_get_n_clients(lb.svr), 0);
+    ASSERT_EQ(ev_count('D'), 2);
+    ASSERT_EQ(mqvpn_server_test_pool_used(lb.svr, 2), 0);
+    ASSERT_EQ(mqvpn_server_test_pool_used(lb.svr, 50), 0);
+
+    fx_cli_t new_alice, new_bob;
+    fx_connect(&lb, &new_alice, "ka", NULL, 0);
+    fx_connect(&lb, &new_bob, "kb", (fx_cli_t *[]){&new_alice}, 1);
+    ASSERT_EQ(new_alice.info.assigned_ip[3], 2);
+    ASSERT_NE(new_bob.info.assigned_ip[3], 2);
+    ASSERT_EQ(ev_count('C'), 4);
+
+    fx_cli_t *all[] = {&old_alice, &old_bob, &new_alice, &new_bob};
+    ev_want_t x2 = {'X', 2};
+    fx_pump(&lb, all, 4, done_ev, &x2, 8000);
+    ASSERT_EQ(ev_count('X'), 2);
+    /* Both replacements (C #3, #4) precede both late teardowns; no D after them. */
+    int lastc = ev_index('C', 3);
+    ASSERT_EQ(lastc < ev_index('X', 0), 1);
+    ASSERT_EQ(ev_count('D'), 2);
+    ASSERT_EQ(g_ev_n, 8);
+    ASSERT_EQ(mqvpn_server_get_n_clients(lb.svr), 2);
+    ASSERT_EQ(mqvpn_server_test_pool_used(lb.svr, 2), 1);
+    ASSERT_EQ(mqvpn_server_test_pool_used(lb.svr, new_bob.info.assigned_ip[3]), 1);
+
+    fx_cli_stop(&old_bob);
+    fx_cli_stop(&new_alice);
+    fx_cli_stop(&new_bob);
+    loopback_teardown(&lb);
+}
+
+TEST(remove_then_reassign_while_old_conn_lingers)
+{
+    loopback_t lb;
+    lb_connect(&lb, srv_alice50_bob, cli_key_ka);
+    fx_cli_t v = fx_lb_view(&lb);
+    ASSERT_EQ(mqvpn_server_remove_user(lb.svr, "alice"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_add_user_ip(lb.svr, "carol", "kc", "10.0.0.50"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_get_n_clients(lb.svr), 0);
+    ASSERT_EQ(g_ev[g_ev_n - 1].kind, 'D');
+    ASSERT_EQ(g_ev[g_ev_n - 1].id, 50);
+
+    fx_cli_t carol;
+    fx_connect(&lb, &carol, "kc", NULL, 0);
+    ASSERT_EQ(carol.info.assigned_ip[3], 50);
+    fx_cli_t *cl[] = {&v, &carol};
+    ev_want_t x1 = {'X', 1};
+    fx_pump(&lb, cl, 2, done_ev, &x1, 5000);
+    ASSERT_EQ(ev_count('X'), 1);
+    ASSERT_EQ(g_ev[g_ev_n - 2].kind, 'C');
+    ASSERT_EQ(g_ev[g_ev_n - 1].kind, 'X');
+    ASSERT_EQ(mqvpn_server_get_n_clients(lb.svr), 1);
+    ASSERT_EQ(mqvpn_server_test_pool_used(lb.svr, 50), 1);
+
+    fx_cli_stop(&carol);
+    loopback_teardown(&lb);
+}
+
+TEST(add_user_ip_rejects_without_side_effects)
+{
+    mqvpn_server_t *s = fx_plain_server(srv_alice50_bob);
+    ASSERT_NOT_NULL(s);
+    char names[8][64];
+    int n = mqvpn_server_list_users(s, names, 8);
+    char long_name[65];
+    memset(long_name, 'n', 64);
+    long_name[64] = '\0';
+    ASSERT_EQ(mqvpn_server_add_user_ip(s, "y", "ky", "10.0.1.5"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_add_user_ip(s, "y", "ky", "10.0.0.1"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_add_user_ip(s, "y", "ky", "0.0.0.0"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_add_user_ip(s, "y", "ky", "bad"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_add_user_ip(s, long_name, "ky", "10.0.0.60"),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_list_users(s, names, 8), n);
+    ASSERT_EQ(mqvpn_server_add_user_ip(s, "y", "ky", "10.0.0.50"), MQVPN_ERR_INVALID_ARG);
+    mqvpn_server_destroy(s);
+}
+
+TEST(remove_user_frees_reservation)
+{
+    mqvpn_server_t *s = fx_plain_server(srv_alice50_bob);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(mqvpn_server_remove_user(s, "alice"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_add_user_ip(s, "y", "ky", "10.0.0.50"), MQVPN_OK);
+    mqvpn_server_destroy(s);
+}
+
 TEST(sched_refusal_reason)
 {
     ASSERT_EQ(strcmp(mqvpn_server_test_sched_refusal_reason(-XQC_ESTATE), "paths"), 0);
@@ -2044,6 +2536,17 @@ main(void)
     run_client_secure_without_verifier_rejects_unknown_issuer_as_closed();
     run_server_reconnect_manual_connect();
     run_server_reconnect_manual_failure_rearm();
+
+    run_server_new_rejects_fixed_ip_outside_pool();
+    run_fixed_ip_assigned();
+    run_fixed_ip_takeover();
+    run_fixed_ip_full_server_still_takes_over();
+    run_fixed_ip_key_update_keeps_reservation();
+    run_runtime_reserve_evicts_occupant();
+    run_runtime_reserve_change_two_sessions();
+    run_remove_then_reassign_while_old_conn_lingers();
+    run_add_user_ip_rejects_without_side_effects();
+    run_remove_user_frees_reservation();
 
     /* max_clients config boundary */
     run_server_max_clients_config();

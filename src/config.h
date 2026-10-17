@@ -56,6 +56,7 @@ typedef struct mqvpn_file_config_s {
     char server_auth_key[256];
     char user_names[MQVPN_CONFIG_MAX_USERS][64];
     char user_keys[MQVPN_CONFIG_MAX_USERS][256];
+    char user_ips[MQVPN_CONFIG_MAX_USERS][16]; /* "" = from the pool */
     int n_users;
     int max_clients;
 

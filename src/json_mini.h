@@ -16,6 +16,12 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#else
+#  include <arpa/inet.h>
+#endif
 
 static inline const char *
 json_skip_ws(const char *p)
@@ -201,32 +207,63 @@ mqvpn_copy_str(char *dst, size_t dst_len, const char *src)
     dst[dst_len - 1] = '\0';
 }
 
+/* Split "NAME:KEY" or "NAME:KEY:IPV4" in place. NAME ends at the first ':'. The text
+ * after the last ':' is the IP only when it parses as IPv4 and a non-empty KEY remains
+ * before it; otherwise the rest is the KEY (keys may contain ':'). *ip = NULL when
+ * absent. Returns 0, or -1 when there is no ':' or NAME or KEY is empty. */
+static inline int
+mqvpn_user_spec_split(char *spec, char **name, char **key, char **ip)
+{
+    char *sep = spec ? strchr(spec, ':') : NULL;
+    if (!sep || sep == spec || !sep[1]) return -1;
+    *sep = '\0';
+    *name = spec;
+    *key = sep + 1;
+    *ip = NULL;
+
+    char *last = strrchr(*key, ':');
+    struct in_addr a;
+    if (last && last > *key && inet_pton(AF_INET, last + 1, &a) == 1) {
+        *last = '\0';
+        *ip = last + 1;
+    }
+    return 0;
+}
+
 /* Parse a "users" JSON array shared by config.c (INI/JSON file config) and
  * mqvpn_config.c (control-API JSON config). Accepts two element forms:
- *   - "name:key" string form
- *   - {"name":"..","key":".."} object form
- * `arr` must point at the array's '[' character. Each parsed (name, key)
- * pair is handed to `add_user(ctx, name, key)`; a non-zero return aborts
- * the parse. Returns 0 on success, -1 on parse or add failure. */
+ *   - "name:key[:ip]" string form (see mqvpn_user_spec_split)
+ *   - {"name":"..","key":"..","ip":".."} object form; "ip" is optional but must
+ *     be a string when present
+ * `arr` must point at the array's '[' character. Each parsed entry is handed to
+ * `add_user(ctx, name, key, ip)` (ip is NULL when absent); a non-zero return
+ * aborts the parse. A name of 64 bytes or more fails the parse. Returns 0 on
+ * success, -1 on parse or add failure. */
 static inline int
 mqvpn_json_parse_users(const char *arr, void *ctx,
-                       int (*add_user)(void *ctx, const char *name, const char *key))
+                       int (*add_user)(void *ctx, const char *name, const char *key,
+                                       const char *ip))
 {
     if (!arr || *arr != '[' || !add_user) return -1;
     const char *p = json_skip_ws(arr + 1);
 
     while (*p && *p != ']') {
-        char name[64] = {0};
+        char name[128] = {0};
         char key[256] = {0};
+        char ipbuf[64] = {0};
+        const char *ip = NULL;
 
         if (*p == '"') {
             char pair[360] = {0};
             if (json_read_string(p, pair, sizeof(pair)) < 0) return -1;
-            char *sep = strchr(pair, ':');
-            if (!sep) return -1;
-            *sep = '\0';
-            mqvpn_copy_str(name, sizeof(name), pair);
-            mqvpn_copy_str(key, sizeof(key), sep + 1);
+            char *n, *k, *i;
+            if (mqvpn_user_spec_split(pair, &n, &k, &i) < 0) return -1;
+            mqvpn_copy_str(name, sizeof(name), n);
+            mqvpn_copy_str(key, sizeof(key), k);
+            if (i) {
+                mqvpn_copy_str(ipbuf, sizeof(ipbuf), i);
+                ip = ipbuf;
+            }
 
             const char *e = p + 1;
             while (*e && *e != '"') {
@@ -247,16 +284,25 @@ mqvpn_json_parse_users(const char *arr, void *ctx,
 
             const char *name_v = json_find_key(obj, "name");
             const char *key_v = json_find_key(obj, "key");
+            const char *ip_v = json_find_key(obj, "ip");
             if (!name_v || !key_v) return -1;
             if (json_read_string(name_v, name, sizeof(name)) < 0) return -1;
             if (json_read_string(key_v, key, sizeof(key)) < 0) return -1;
+            if (ip_v) {
+                /* 16+ bytes can never be IPv4; json_read_string truncates silently */
+                if (json_read_string(ip_v, ipbuf, sizeof(ipbuf)) < 0 ||
+                    strlen(ipbuf) >= 16)
+                    return -1;
+                ip = ipbuf;
+            }
 
             p = json_skip_ws(end + 1);
         } else {
             return -1;
         }
 
-        if (add_user(ctx, name, key) != 0) return -1;
+        if (strlen(name) >= 64) return -1;
+        if (add_user(ctx, name, key, ip) != 0) return -1;
 
         if (*p == ',')
             p = json_skip_ws(p + 1);

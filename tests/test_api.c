@@ -135,6 +135,89 @@ TEST(config_add_remove_user)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_add_user_ip_accepts)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_add_user_ip(cfg, "alice", "ka", "10.0.0.10"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_add_user_ip(cfg, "alice", "ka", "10.0.0.10"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_add_user_ip(cfg, "alice", "kb", NULL), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_add_user_ip(cfg, "bob", "kb2", "10.0.0.10"),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_remove_user(cfg, "alice"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_add_user_ip(cfg, "bob", "kb2", "10.0.0.10"), MQVPN_OK);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_add_user_ip_rejects)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    const char *bad[] = {"10.0.0.256", "fd00::1", "0.0.0.0", ""};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+        ASSERT_EQ(mqvpn_config_add_user_ip(cfg, "carol", "kc", bad[i]),
+                  MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_remove_user(cfg, "carol"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_add_user_ip(cfg, "(global)", "kg", "10.0.0.10"),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_add_user_ip(cfg, "(global)", "kg", NULL), MQVPN_OK);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_add_user_rejects_long_name)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    char n63[64], n64[65], n70[71];
+    memset(n63, 'p', 63);
+    n63[63] = '\0';
+    memset(n70, 'p', 70);
+    n70[70] = '\0';
+    memcpy(n64, n70, 64);
+    n64[64] = '\0';
+    ASSERT_EQ(mqvpn_config_add_user(cfg, n63, "k"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_add_user(cfg, n64, "k"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_add_user(cfg, n70, "k"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_add_user_ip(cfg, n64, "k", NULL), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_add_user_ip(cfg, n70, "k", "10.0.0.9"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(cfg->n_users, 1);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_users_json_long_name)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    char json[512];
+    char p[64];
+    memset(p, 'p', 63);
+    p[63] = '\0';
+    snprintf(json, sizeof(json),
+             "{\"users\":[{\"name\":\"%s\",\"key\":\"k1\",\"ip\":\"10.0.0.10\"},"
+             "{\"name\":\"%sx\",\"key\":\"k2\"}]}",
+             p, p);
+    ASSERT_NE(mqvpn_config_load_json(cfg, json), MQVPN_OK);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_users_json_ip)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_load_json(
+                  cfg, "{\"users\":[{\"name\":\"a\",\"key\":\"ka\",\"ip\":\"10.0.0.10\"},"
+                       "\"b:kb:10.0.0.11\",\"c:x:y\"]}"),
+              MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_add_user_ip(cfg, "z", "kz", "10.0.0.10"),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_add_user_ip(cfg, "z", "kz", "10.0.0.11"),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_add_user_ip(cfg, "z", "kz", "10.0.0.12"), MQVPN_OK);
+    const char *bad[] = {
+        "{\"users\":[{\"name\":\"a\",\"key\":\"ka\",\"ip\":5}]}",
+        "{\"users\":[{\"name\":\"a\",\"key\":\"ka\",\"ip\":\"nope\"}]}",
+        "{\"users\":[{\"name\":\"a\",\"key\":\"ka\",\"ip\":\"255.255.255.255junk\"}]}",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+        ASSERT_NE(mqvpn_config_load_json(cfg, bad[i]), MQVPN_OK);
+    mqvpn_config_free(cfg);
+}
+
 TEST(config_add_user_max_capacity)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
@@ -3557,6 +3640,11 @@ main(void)
     run_config_set_server();
     run_config_set_auth_key();
     run_config_add_remove_user();
+    run_config_add_user_ip_accepts();
+    run_config_add_user_ip_rejects();
+    run_config_add_user_rejects_long_name();
+    run_config_users_json_long_name();
+    run_config_users_json_ip();
     run_config_add_user_max_capacity();
     run_config_load_json();
     run_config_load_json_duplicate_users_last_wins();

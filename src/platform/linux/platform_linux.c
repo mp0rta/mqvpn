@@ -1155,7 +1155,14 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     if (cfg->auth_key) mqvpn_config_set_auth_key(lib_cfg, cfg->auth_key);
     for (int i = 0; i < cfg->n_users; i++) {
         if (cfg->user_names[i] && cfg->user_keys[i]) {
-            mqvpn_config_add_user(lib_cfg, cfg->user_names[i], cfg->user_keys[i]);
+            const char *uip = cfg->user_ips[i];
+            if (mqvpn_config_add_user_ip(lib_cfg, cfg->user_names[i], cfg->user_keys[i],
+                                         uip) != MQVPN_OK) {
+                LOG_ERR("invalid user '%s' (fixed IP %s)", cfg->user_names[i],
+                        uip ? uip : "none");
+                mqvpn_config_free(lib_cfg);
+                return 1;
+            }
         }
     }
     mqvpn_config_set_max_clients(lib_cfg, cfg->max_clients);

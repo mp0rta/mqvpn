@@ -1579,6 +1579,173 @@ test_phase_i_client_scheduler() {
     return 0
 }
 
+# --- Phase J: fixed user IP ---
+
+# _phase_j_status <user>  → prints "<n_entries> <vpn_ip>" for <user> in get_status
+_phase_j_status() {
+    local resp
+    resp=$(ctrl_local '{"cmd":"get_status"}') || return 1
+    python3 - "$resp" "$1" <<'PY'
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+except Exception:
+    print("0 <unparsable get_status>")
+    sys.exit(0)
+m = [c for c in d.get("clients", []) if c.get("user") == sys.argv[2]]
+print(len(m), m[0].get("vpn_ip", "") if m else "")
+PY
+}
+
+# _phase_j_user_ip_is <user> <ip>  → 0 when exactly one entry of <user> has vpn_ip <ip>
+_phase_j_user_ip_is() {
+    [[ "$(_phase_j_status "$1")" == "1 $2" ]]
+}
+
+# _phase_j_expect_ip <user> <ip>: wait up to 10s, print the real value on failure
+_phase_j_expect_ip() {
+    if wait_for 10 _phase_j_user_ip_is "$1" "$2"; then
+        echo "  get_status: $1 vpn_ip=$2 (one entry) OK"
+        return 0
+    fi
+    echo "  get_status: $1 expected '1 $2'; got '$(_phase_j_status "$1")'; full: $(ctrl_local '{"cmd":"get_status"}')"
+    return 1
+}
+
+# _phase_j_log_has <log> <ERE> <what>: assert match; print the log tail if absent
+_phase_j_log_has() {
+    if wait_for_log "$1" "$2" 10; then
+        echo "  $3: OK"
+        return 0
+    fi
+    echo "  $3: pattern '$2' not in $1; tail:"
+    tail -15 "$1"
+    return 1
+}
+
+# _phase_j_add_user <expected ok true|false> <json>: send add_user, check "ok"
+_phase_j_add_user() {
+    local want="$1" resp
+    resp=$(ctrl_local "$2") || return 1
+    if [[ "$(jget ok <<< "$resp")" != "$want" ]]; then
+        echo "  add_user $2: expected ok=$want; got: $resp"
+        return 1
+    fi
+    echo "  add_user $2 -> ok=$want OK"
+    return 0
+}
+
+test_phase_j_fixed_ip() {
+    local server_log="${LOG_DIR}/phase_j_server.log"
+    local alice_log="${LOG_DIR}/phase_j_alice.log"
+    local alice2_log="${LOG_DIR}/phase_j_alice2.log"
+    local bob_log="${LOG_DIR}/phase_j_bob.log"
+    local carol_log="${LOG_DIR}/phase_j_carol.log"
+    local out got rc n
+
+    # Step 1: fresh netns, alice reserved, bob dynamic.
+    bench_cleanup
+    bench_setup_netns
+    start_server_with_flags "$server_log" \
+        --auth-key "$_BENCH_PSK" --control-port "$CTRL_PORT" \
+        --user alice:secret_a:10.0.0.50 --user bob:secret_b \
+        || { echo "  server failed to start"; return 1; }
+    # Mirrors the argument list in start_server_with_flags.
+    local -a srv_base=(--mode server --listen "0.0.0.0:${VPN_LISTEN_PORT}"
+        --subnet 10.0.0.0/24 --cert "$_BENCH_WORK_DIR/server.crt"
+        --key "$_BENCH_WORK_DIR/server.key" --log-level "$BENCH_LOG_LEVEL"
+        --auth-key "$_BENCH_PSK" --control-port "$CTRL_PORT"
+        --user alice:secret_a:10.0.0.50 --user bob:secret_b)
+
+    # Step 2: alice gets her address; the server reaches it.
+    echo "  J.2 alice gets 10.0.0.50"
+    _phase_i_client_up secret_a "$alice_log" "" || return 1
+    _phase_j_log_has "$alice_log" 'ADDRESS_ASSIGN: IPv4 10\.0\.0\.50/' "J.2 client log" || return 1
+    _phase_j_log_has "$server_log" 'assigned fixed IP 10\.0\.0\.50 to user alice' "J.2 server log" || return 1
+    _phase_j_expect_ip alice 10.0.0.50 || return 1
+    if ! out=$(ip netns exec "$NS_SERVER" ping -c 3 -W 2 10.0.0.50 2>&1); then
+        echo "  J.2 server -> 10.0.0.50 ping failed: $out"
+        return 1
+    fi
+    echo "  J.2 server pings 10.0.0.50: OK"
+
+    # Step 3: takeover. kill -9 sends no close; the reconnect must evict the old session.
+    echo "  J.3 takeover after kill -9"
+    kill -9 "$_BENCH_CLIENT_PID" 2>/dev/null || true
+    wait "$_BENCH_CLIENT_PID" 2>/dev/null || true
+    _BENCH_CLIENT_PID=""
+    _phase_i_client_up secret_a "$alice2_log" "" || return 1
+    _phase_j_log_has "$alice2_log" 'ADDRESS_ASSIGN: IPv4 10\.0\.0\.50/' "J.3 client log" || return 1
+    _phase_j_log_has "$server_log" 'user alice reconnected: closing the previous session holding 10\.0\.0\.50' "J.3 server log" || return 1
+    _phase_j_expect_ip alice 10.0.0.50 || return 1
+    if ! out=$(ip netns exec "$NS_SERVER" ping -c 3 -W 2 10.0.0.50 2>&1); then
+        echo "  J.3 server -> 10.0.0.50 ping failed after takeover: $out"
+        return 1
+    fi
+    echo "  J.3 server pings 10.0.0.50 after takeover: OK"
+
+    # Step 4: bob (dynamic) never gets alice's address.
+    echo "  J.4 bob is not 10.0.0.50"
+    _phase_i_client_up secret_b "$bob_log" "" || return 1
+    got=""
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        got=$(_phase_j_status bob)
+        [[ "$got" == "1 "?* ]] && break
+        sleep 1
+    done
+    if [[ "$got" != "1 "?* || "$got" == "1 10.0.0.50" ]]; then
+        echo "  J.4 bob status '$got' (want one entry with a vpn_ip other than 10.0.0.50)"
+        return 1
+    fi
+    echo "  J.4 bob: '$got' OK"
+    _phase_i_stop_client
+
+    # Step 5: control API reservations.
+    echo "  J.5 control API add_user ip"
+    _phase_j_add_user false '{"cmd":"add_user","name":"carol","key":"secret_c","ip":"10.0.1.5"}' || return 1
+    _phase_j_add_user false '{"cmd":"add_user","name":"carol","key":"secret_c","ip":"10.0.0.50"}' || return 1
+    _phase_j_add_user true '{"cmd":"add_user","name":"carol","key":"secret_c","ip":"10.0.0.60"}' || return 1
+    _phase_i_client_up secret_c "$carol_log" "" || return 1
+    _phase_j_log_has "$carol_log" 'ADDRESS_ASSIGN: IPv4 10\.0\.0\.60/' "J.5 carol client log" || return 1
+    _phase_j_expect_ip carol 10.0.0.60 || return 1
+    _phase_j_add_user true '{"cmd":"add_user","name":"carol","key":"secret_c"}' || return 1
+    sleep 3
+    # No waiting: the client auto-reconnects, so a polled check would hide a cut session.
+    if ! _phase_j_user_ip_is carol 10.0.0.60; then
+        echo "  J.5 carol after key-only add_user: got '$(_phase_j_status carol)', want '1 10.0.0.60'"
+        return 1
+    fi
+    n=$(awk '/ADDRESS_ASSIGN: IPv4/{c++} END{print c+0}' "$carol_log")
+    if [[ "$n" != "1" ]]; then
+        echo "  J.5 carol saw $n ADDRESS_ASSIGN lines (session was cut?); tail:"
+        tail -15 "$carol_log"
+        return 1
+    fi
+    echo "  J.5 key-only add_user kept the session (1 ADDRESS_ASSIGN): OK"
+    _phase_i_stop_client
+
+    # Step 6: a reservation outside the pool refuses to start the server.
+    echo "  J.6 startup refusal"
+    rc=0
+    if relaunch_server_in_ns "${LOG_DIR}/phase_j_server_6.log" "${srv_base[@]}" \
+        --user dave:secret_d:10.0.1.5 2>/dev/null; then
+        # Still alive after 1 s: give it the rest of the 5 s budget to exit.
+        if ! wait_for 4 bash -c "! kill -0 $_BENCH_SERVER_PID"; then
+            echo "  J.6 server still running 5 s after a bad fixed IP; log:"
+            tail -15 "${LOG_DIR}/phase_j_server_6.log"
+            return 1
+        fi
+    fi
+    wait "$_BENCH_SERVER_PID" 2>/dev/null || rc=$?
+    if (( rc == 0 || rc == 127 )); then
+        echo "  J.6 server exit status $rc (0 = clean exit, 127 = not our child), want a real failure"
+        return 1
+    fi
+    _phase_j_log_has "${LOG_DIR}/phase_j_server_6.log" 'fixed IP 10\.0\.1\.5 is not a free client address' "J.6 server log" || return 1
+    echo "  J.6 server refused to start (exit $rc): OK"
+    return 0
+}
+
 # --- Main runner ---
 
 # (empty for this chunk; phases will be wired in their own chunks)
@@ -1613,6 +1780,7 @@ maybe_run "phase_e restart resilience"             E test_phase_e_restart
 maybe_run "phase_f scheduler matrix smoke"         F test_phase_f_scheduler_smoke
 maybe_run "phase_h new commands (build_info + extended get_stats + fec_stats + all_fec_stats)" H test_phase_h_new_commands
 maybe_run "phase_i per-user scheduler"            I test_phase_i_client_scheduler
+maybe_run "phase_j fixed user IP"                 J test_phase_j_fixed_ip
 maybe_run "phase_g INI-driven control-API config"  G test_phase_g_ini_config   # must be LAST
 
 echo ""

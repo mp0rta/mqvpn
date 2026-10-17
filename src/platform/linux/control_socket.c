@@ -109,15 +109,24 @@ static int
 ctrl_cmd_add_user(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
-    char name[64] = {0}, key[256] = {0};
+    char name[128] = {0}, key[256] = {0}, ip[64] = {0};
     const char *nv = json_find_key(req, "name");
     const char *kv = json_find_key(req, "key");
+    const char *iv = json_find_key(req, "ip");
     if (!nv || json_read_string(nv, name, sizeof(name)) < 0 || !kv ||
         json_read_string(kv, key, sizeof(key)) < 0)
         return snprintf(resp, resp_len,
                         "{\"ok\":false,\"error\":\"name and key required\"}");
+    if (strlen(name) >= 64)
+        return snprintf(resp, resp_len,
+                        "{\"ok\":false,\"error\":\"name longer than 63 bytes\"}");
+    /* The 64-byte read truncates silently, so check the length before the
+     * server sees it: a 16+ byte value is never a dotted quad. */
+    if (iv && (json_read_string(iv, ip, sizeof(ip)) < 0 || strlen(ip) >= 16))
+        return snprintf(resp, resp_len,
+                        "{\"ok\":false,\"error\":\"ip must be an IPv4 address string\"}");
 
-    int rc = mqvpn_server_add_user(server, name, key);
+    int rc = mqvpn_server_add_user_ip(server, name, key, iv ? ip : NULL);
     if (rc != MQVPN_OK)
         return snprintf(resp, resp_len,
                         "{\"ok\":false,\"error\":\"add_user failed (%d)\"}", rc);
@@ -258,12 +267,15 @@ ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, ctrl_socket_t 
                                 : 0;
 
         if (i > 0) APPEND(",");
-        APPEND("{\"user\":\"%s\",\"endpoint\":\"%s\",\"scheduler\":\"%s\","
+        APPEND("{\"user\":\"%s\",\"endpoint\":\"%s\",\"vpn_ip\":\"%s\","
+               "\"vpn_ip6\":\"%s\",\"scheduler\":\"%s\","
                "\"connected_sec\":%" PRIu64 ","
                "\"bytes_tx\":%" PRIu64 ",\"bytes_rx\":%" PRIu64 ","
                "\"n_paths\":%d,\"paths\":[",
-               ci->username, ci->endpoint, i < n_sched ? sched[i].scheduler : "unknown",
-               conn_sec, ci->bytes_tx, ci->bytes_rx, ci->n_paths);
+               ci->username, ci->endpoint, i < n_sched ? sched[i].vpn_ip : "",
+               i < n_sched ? sched[i].vpn_ip6 : "",
+               i < n_sched ? sched[i].scheduler : "unknown", conn_sec, ci->bytes_tx,
+               ci->bytes_rx, ci->n_paths);
 
         for (int p = 0; p < ci->n_paths; p++) {
             mqvpn_path_stats_t *ps = &ci->paths[p];

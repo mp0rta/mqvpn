@@ -105,7 +105,7 @@ mqvpn --mode client|server [options]
   --server HOST:PORT     サーバーアドレス（クライアント、IPv6 は `[2001:db8::1]:443` 形式）
   --path IFACE           マルチパスインターフェース（複数指定可）
   --auth-key KEY         PSK 認証
-  --user NAME:KEY        ユーザー個別の PSK（複数指定可、サーバー）
+  --user NAME:KEY[:IP]   ユーザー個別の PSK。IP でそのユーザーの VPN アドレスを固定（複数指定可、サーバー）
   --dns ADDR             DNS サーバー（複数指定可）
   --tls-server-name NAME TLS SNI / 証明書検証名（クライアント）
   --insecure             信頼されていない証明書を受け入れる（テスト用）

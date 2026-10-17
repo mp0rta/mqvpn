@@ -19,7 +19,8 @@ typedef struct {
     int prefix_len;      /* e.g. 24 */
     uint32_t pool_size;  /* number of usable addresses */
     uint32_t next;       /* next offset to try (starts at 2, .1=server) */
-    uint8_t used[MQVPN_ADDR_POOL_MAX + 1]; /* 1-indexed bitmap */
+    uint8_t used[MQVPN_ADDR_POOL_MAX + 1];     /* 1-indexed bitmap */
+    uint8_t reserved[MQVPN_ADDR_POOL_MAX + 1]; /* 1-indexed; fixed per-user addresses */
 
     /* IPv6 pool (optional, shares offsets with IPv4) */
     struct in6_addr base6;
@@ -39,6 +40,18 @@ int mqvpn_addr_pool_alloc(mqvpn_addr_pool_t *pool, struct in_addr *out);
 
 /* Release a previously allocated IP back to the pool. */
 void mqvpn_addr_pool_release(mqvpn_addr_pool_t *pool, const struct in_addr *addr);
+
+/* Offset of addr when it is a client address of the pool (2..pool_size), else 0. */
+uint32_t mqvpn_addr_pool_offset(const mqvpn_addr_pool_t *pool,
+                                const struct in_addr *addr);
+
+/* Mark a client address reserved: dynamic alloc never returns it. 0, or -1 when addr
+ * is not a client address or is already reserved. Does not touch used[]. */
+int mqvpn_addr_pool_reserve(mqvpn_addr_pool_t *pool, const struct in_addr *addr);
+void mqvpn_addr_pool_unreserve(mqvpn_addr_pool_t *pool, const struct in_addr *addr);
+
+/* Take a reserved, free address: 0, or -1 when not reserved or already used. */
+int mqvpn_addr_pool_claim(mqvpn_addr_pool_t *pool, const struct in_addr *addr);
 
 /* Get the server-side IP (.1) for this pool. */
 void mqvpn_addr_pool_server_addr(const mqvpn_addr_pool_t *pool, struct in_addr *out);

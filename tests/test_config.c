@@ -10,6 +10,7 @@
 #include "config.h"
 #include "libmqvpn.h" /* MQVPN_RECV_RATE_LIMIT_MAX */
 #include "mqvpn_sched_names.h"
+#include "json_mini.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1123,6 +1124,111 @@ test_auth_users_ini(void)
 }
 
 static void
+test_auth_users_key_update_keeps_ip(void)
+{
+    const char *ini = "[Auth]\n"
+                      "User = alice:k1:10.0.0.10\n"
+                      "User = alice:k2\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "key update parse ok");
+    ASSERT_EQ_INT(cfg.n_users, 1, "one user");
+    ASSERT_EQ_STR(cfg.user_keys[0], "k2", "key updated");
+    ASSERT_EQ_STR(cfg.user_ips[0], "10.0.0.10", "ip kept on key-only update");
+}
+
+static void
+check_fixed_ip_users(const mqvpn_file_config_t *cfg, const char *what)
+{
+    static const char *names[] = {"alice", "bob", "carol", "dave"};
+    static const char *keys[] = {"ka", "kb", "a:b", "a:b"};
+    static const char *ips[] = {"10.0.0.10", "", "", "10.0.0.11"};
+    ASSERT_EQ_INT(cfg->n_users, 4, what);
+    for (int i = 0; i < 4 && i < cfg->n_users; i++) {
+        ASSERT_EQ_STR(cfg->user_names[i], names[i], what);
+        ASSERT_EQ_STR(cfg->user_keys[i], keys[i], what);
+        ASSERT_EQ_STR(cfg->user_ips[i], ips[i], what);
+    }
+}
+
+static void
+test_auth_users_fixed_ip_ini(void)
+{
+    const char *ini = "[Auth]\n"
+                      "User = alice:ka:10.0.0.10\n"
+                      "User = bob:kb\n"
+                      "User = carol:a:b\n"
+                      "User = dave:a:b:10.0.0.11\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(rc, 0, "fixed ip ini parse ok");
+    check_fixed_ip_users(&cfg, "fixed ip ini");
+}
+
+static void
+test_auth_users_fixed_ip_json(void)
+{
+    const char *json = "{\"users\":[{\"name\":\"alice\",\"key\":\"ka\","
+                       "\"ip\":\"10.0.0.10\"},\"bob:kb\",\"carol:a:b\","
+                       "{\"name\":\"dave\",\"key\":\"a:b\",\"ip\":\"10.0.0.11\"}]}";
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load_json_filecfg(&cfg, json);
+    ASSERT_EQ_INT(rc, 0, "fixed ip json parse ok");
+    check_fixed_ip_users(&cfg, "fixed ip json");
+}
+
+static void
+test_auth_users_fixed_ip_json_invalid(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(
+        mqvpn_config_load_json_filecfg(&cfg, "{\"users\":[{\"name\":\"a\",\"key\":\"k\","
+                                             "\"ip\":\"10.0.0.300\"}]}"),
+        -1, "out-of-range ip rejected");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(
+        mqvpn_config_load_json_filecfg(&cfg, "{\"users\":[{\"name\":\"a\",\"key\":\"k\","
+                                             "\"ip\":\"255.255.255.255junk\"}]}"),
+        -1, "ip with trailing junk rejected");
+}
+
+static void
+test_auth_users_long_name_ini(void)
+{
+    char p63[64];
+    memset(p63, 'P', 63);
+    p63[63] = '\0';
+    char ini[512];
+    snprintf(ini, sizeof(ini), "[Auth]\nUser = %s:k1:10.0.0.10\nUser = %sx:k2\n", p63,
+             p63);
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(rc, 0, "long name ini parse ok");
+    ASSERT_EQ_INT(cfg.n_users, 1, "64-byte name ignored");
+    ASSERT_EQ_STR(cfg.user_keys[0], "k1", "first user key kept");
+    ASSERT_EQ_STR(cfg.user_ips[0], "10.0.0.10", "first user ip kept");
+
+    char json[512];
+    snprintf(json, sizeof(json), "{\"users\":[\"%s:k1:10.0.0.10\",\"%sx:k2\"]}", p63,
+             p63);
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, json), -1,
+                  "64-byte name fails json load");
+}
+
+static void
 test_auth_users_ini_invalid_ignored(void)
 {
     const char *ini = "[Interface]\n"
@@ -2205,6 +2311,36 @@ test_ini_json_invalid_scalar_parity(void)
                   "invalid hybrid tcp json falls back to auto");
 }
 
+static void
+test_user_spec_split(void)
+{
+    static const struct {
+        const char *in;
+        int rc;
+        const char *name, *key, *ip;
+    } t[] = {
+        {"alice:k", 0, "alice", "k", NULL},
+        {"alice:k:10.0.0.10", 0, "alice", "k", "10.0.0.10"},
+        {"alice:a:b", 0, "alice", "a:b", NULL},
+        {"alice:a:b:10.0.0.10", 0, "alice", "a:b", "10.0.0.10"},
+        {"alice::10.0.0.10", 0, "alice", ":10.0.0.10", NULL},
+        {"alice:10.0.0.10", 0, "alice", "10.0.0.10", NULL},
+        {"alice:k:10.0.0.256", 0, "alice", "k:10.0.0.256", NULL},
+        {"alice", -1, NULL, NULL, NULL},
+        {":k", -1, NULL, NULL, NULL},
+        {"alice:", -1, NULL, NULL, NULL},
+    };
+    for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
+        char buf[64], *n = NULL, *k = NULL, *ip = NULL;
+        snprintf(buf, sizeof(buf), "%s", t[i].in);
+        ASSERT_EQ_INT(mqvpn_user_spec_split(buf, &n, &k, &ip), t[i].rc, t[i].in);
+        if (t[i].rc != 0) continue;
+        ASSERT_EQ_STR(n, t[i].name, t[i].in);
+        ASSERT_EQ_STR(k, t[i].key, t[i].in);
+        ASSERT_TRUE(t[i].ip ? (ip && strcmp(ip, t[i].ip) == 0) : ip == NULL, t[i].in);
+    }
+}
+
 /* Table-driven round-trip test over MQVPN_SCHED_LIST / MQVPN_CC_LIST
  * (src/mqvpn_sched_names.h): every row must survive from_name(name) ==
  * enum and to_name(enum) == name. This is the mechanical parity check the
@@ -2250,6 +2386,7 @@ int
 main(void)
 {
     test_defaults();
+    test_user_spec_split();
     test_parse_server_config();
     test_parse_client_config();
     test_parse_scheduler_backup_fec();
@@ -2313,6 +2450,11 @@ main(void)
     test_subnet6_not_set();
     test_subnet6_duplicate_last_wins();
     test_auth_users_ini();
+    test_auth_users_key_update_keeps_ip();
+    test_auth_users_fixed_ip_ini();
+    test_auth_users_fixed_ip_json();
+    test_auth_users_fixed_ip_json_invalid();
+    test_auth_users_long_name_ini();
     test_auth_users_ini_invalid_ignored();
     test_json_config_load();
     test_json_client_config_load();

@@ -105,7 +105,7 @@ mqvpn --mode client|server [options]
   --server HOST:PORT     Server address (client, e.g. `[2001:db8::1]:443` for IPv6)
   --path IFACE           Multipath interface (repeatable)
   --auth-key KEY         PSK authentication
-  --user NAME:KEY        Per-user PSK (repeatable, server)
+  --user NAME:KEY[:IP]   Per-user PSK; IP fixes the user's VPN address (repeatable, server)
   --dns ADDR             DNS server (repeatable)
   --tls-server-name NAME TLS SNI / cert verify name (client)
   --insecure             Accept untrusted certs (testing only)

@@ -103,13 +103,14 @@ name already exists, the key is updated in place.
 **Request**
 
 ```json
-{"cmd":"add_user","name":"alice","key":"alice-secret"}
+{"cmd":"add_user","name":"alice","key":"alice-secret","ip":"10.0.0.10"}
 ```
 
 | Field  | Type   | Required | Description                          |
 |--------|--------|----------|--------------------------------------|
 | `name` | string | yes      | Username (max 63 chars)              |
 | `key`  | string | yes      | Pre-shared key (max 255 chars)       |
+| `ip`   | string | no       | Fixed VPN IPv4 address for this user, inside the server's subnet. Omitted: a new user gets addresses from the pool; an existing user keeps its current fixed address and only the key changes. Changing it closes the user's open sessions; if another client is using that address, that client's session is closed. Added in v0.18.0. |
 
 **Response — success**
 
@@ -121,21 +122,28 @@ name already exists, the key is updated in place.
 
 ```json
 {"ok":false,"error":"name and key required"}
+{"ok":false,"error":"name longer than 63 bytes"}
+{"ok":false,"error":"ip must be an IPv4 address string"}
 {"ok":false,"error":"add_user failed (-N)"}
 ```
 
 - `"name and key required"` — one or both fields are missing or cannot be
   parsed.
+- `"name longer than 63 bytes"` — the name is 64 bytes or longer.
+- `"ip must be an IPv4 address string"` — `ip` is present but is not a string,
+  or is too long to be an IPv4 address.
 - `"add_user failed (-N)"` — the underlying library call returned error code
-  `-N`; check server logs for details.
+  `-N`; check server logs for details. An `ip` outside the server's subnet,
+  the server's own address, or another user's fixed address returns
+  `add_user failed (-1)`, as does an `ip` that is not a valid IPv4 address (for
+  example `"abc"`, `""` or `"0.0.0.0"`).
 
 ---
 
 ### 5.2 `remove_user`
 
-Remove a user from the auth table. Does not forcibly disconnect an active
-session; the session expires naturally after authentication fails on the next
-reconnect.
+Remove a user from the auth table. Closes the user's active
+sessions (the connection is closed right away). Removing a user also frees its fixed address (§5.1 `ip`).
 
 **Request**
 
@@ -286,7 +294,8 @@ Return per-client and per-path detail for all currently connected clients.
   "n_clients":1,
   "clients":[
     {
-      "user":"alice","endpoint":"1.2.3.4:443","scheduler":"wlb",
+      "user":"alice","endpoint":"1.2.3.4:443",
+      "vpn_ip":"10.0.0.2","vpn_ip6":"fd00::2","scheduler":"wlb",
       "connected_sec":42,
       "bytes_tx":1000,"bytes_rx":2000,
       "n_paths":1,"paths":[
@@ -317,6 +326,8 @@ Return per-client and per-path detail for all currently connected clients.
 |-----------------|--------|----------------------------------------------------|
 | `user`          | string | Username                                           |
 | `endpoint`      | string | Client's remote address and port (`ip:port`)       |
+| `vpn_ip`        | string | Client's IPv4 address inside the VPN. Added in v0.18.0. |
+| `vpn_ip6`       | string | Client's IPv6 address inside the VPN, empty when the server has no IPv6 subnet. Added in v0.18.0. |
 | `scheduler`     | string | Scheduler this client's connection uses for the server-to-client direction. Equals the server default unless the client asked for another one, `AllowClientScheduler` is on, and none of the exceptions in the configuration guide applied. Added in v0.18.0. |
 | `connected_sec` | uint64 | Seconds since the session was established          |
 | `bytes_tx`      | uint64 | TUN bytes sent to this client                      |
@@ -488,6 +499,8 @@ Requires that the server was built with `XQC_ENABLE_FEC`.
 | `"too many connections"` | connection accepted when 8 slots already used  |
 | `"response too large"`   | any command (internal buffer overflow guard)   |
 | `"name and key required"`| `add_user`                                     |
+| `"name longer than 63 bytes"` | `add_user`                                |
+| `"ip must be an IPv4 address string"` | `add_user`                        |
 | `"add_user failed (-N)"` | `add_user` (N = underlying error code)         |
 | `"name required"`        | `remove_user`                                  |
 | `"user not found"`       | `remove_user`, `get_fec_stats`                 |
@@ -542,6 +555,14 @@ mqvpn follows semantic versioning for the control API:
   UDP GRO is configured and un-coalesced entirely in the platform layer, which
   the library never observes, so those two are read straight from the platform
   by the control socket (`ctrl_socket_create`) instead.
+- `add_user` now refuses a `name` of 64 bytes or more with
+  `name longer than 63 bytes`; it used to be truncated to 63 bytes and
+  accepted. Changed in v0.18.0.
+- `add_user` gained the optional request field `ip` in v0.18.0. Additive;
+  requests without it behave as before.
+- `get_status` client objects gained `vpn_ip` and `vpn_ip6` in v0.18.0 (JSON
+  only; the C struct `mqvpn_client_info_t` is unchanged). Additive; existing
+  JSON consumers remain unaffected.
 - `get_status` client objects gained `scheduler` in v0.18.0 (JSON only; the C
   struct `mqvpn_client_info_t` is unchanged). Additive; existing JSON
   consumers remain unaffected.

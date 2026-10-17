@@ -499,6 +499,14 @@ echo '{"cmd":"add_user","name":"carol","key":"carol-secret"}' | nc 127.0.0.1 909
 {"ok":true}
 ```
 
+To give the user a fixed VPN address, add `"ip"` (it must be inside the server's VPN subnet):
+
+```bash
+echo '{"cmd":"add_user","name":"carol","key":"carol-secret","ip":"10.0.0.10"}' | nc 127.0.0.1 9090
+```
+
+If you leave out `ip` for a user that already has a fixed address, the address is kept and only the key changes.
+
 Calling `add_user` with an existing name updates the key in place.
 
 #### Remove a user
@@ -709,7 +717,7 @@ mqvpn [--config PATH] --mode client|server [options]
   --server IP:PORT       Server address (client)
   --path IFACE           Multipath interface (repeatable)
   --auth-key KEY         PSK authentication
-  --user NAME:KEY        Add server user credential (repeatable)
+  --user NAME:KEY[:IP]   Add server user credential; IP fixes the user's VPN address (repeatable)
   --dns ADDR             DNS server (repeatable)
   --insecure             Accept untrusted certs (testing only)
   --listen BIND:PORT     Listen address (server, default: 0.0.0.0:443)
