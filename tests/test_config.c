@@ -1742,6 +1742,29 @@ test_advanced_udp_gro(void)
     ASSERT_EQ_INT(cfg.udp_gro, 0, "json udp_gro=false");
 }
 
+static void
+test_advanced_tun_offload(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(cfg.tun_offload, 1, "tun_offload default 1 (absent)");
+    ASSERT_EQ_INT(cfg.tun_gro, 1, "tun_gro default 1 (absent)");
+
+    char *p = write_tmp("[Advanced]\nTunOffload = false\nTunGro = false\n");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "advanced ini load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.tun_offload, 0, "ini TunOffload=false");
+    ASSERT_EQ_INT(cfg.tun_gro, 0, "ini TunGro=false");
+
+    p = write_tmp("{\"advanced\": {\"tun_offload\": false, \"tun_gro\": false}}");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "advanced json load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.tun_offload, 0, "json tun_offload=false");
+    ASSERT_EQ_INT(cfg.tun_gro, 0, "json tun_gro=false");
+}
+
 /* ── [Hybrid] EgressAllow/EgressDeny lists + TcpConnectTimeoutSec ───────── */
 
 static void
@@ -1917,7 +1940,9 @@ test_ini_json_scalar_parity(void)
                       "[Advanced]\n"
                       "RecvRateLimit = 77\n"
                       "UdpGso = false\n"
-                      "UdpGro = false\n";
+                      "UdpGro = false\n"
+                      "TunOffload = false\n"
+                      "TunGro = false\n";
     /* NOTE: [Auth] Key is INI-only dual-write (auth_key + server_auth_key);
      * mirror it in JSON by setting BOTH json keys to the same value. */
     const char *ini_auth_extra = "[Auth]\nKey = parity-secret\n";
@@ -1976,7 +2001,9 @@ test_ini_json_scalar_parity(void)
                        "\"advanced\":{"
                        "\"recv_rate_limit\":77,"
                        "\"udp_gso\":false,"
-                       "\"udp_gro\":false"
+                       "\"udp_gro\":false,"
+                       "\"tun_offload\":false,"
+                       "\"tun_gro\":false"
                        "}"
                        "}";
 
@@ -2042,6 +2069,8 @@ test_ini_json_scalar_parity(void)
                   "parity advanced recv_rate_limit");
     ASSERT_EQ_INT(a.udp_gso, b.udp_gso, "parity advanced udp_gso");
     ASSERT_EQ_INT(a.udp_gro, b.udp_gro, "parity advanced udp_gro");
+    ASSERT_EQ_INT(a.tun_offload, b.tun_offload, "parity advanced tun_offload");
+    ASSERT_EQ_INT(a.tun_gro, b.tun_gro, "parity advanced tun_gro");
 
     /* Non-default guards: prove these asserts pass because the value was
      * actually parsed, not because it silently failed to parse on BOTH
@@ -2072,6 +2101,8 @@ test_ini_json_scalar_parity(void)
                   "parity advanced recv_rate_limit is non-default");
     ASSERT_EQ_INT(a.udp_gso, 0, "parity advanced udp_gso is non-default");
     ASSERT_EQ_INT(a.udp_gro, 0, "parity advanced udp_gro is non-default");
+    ASSERT_EQ_INT(a.tun_offload, 0, "parity advanced tun_offload is non-default");
+    ASSERT_EQ_INT(a.tun_gro, 0, "parity advanced tun_gro is non-default");
 
     /* Both structs were memset by mqvpn_config_defaults → padding is zero
      * → whole-struct compare is deterministic. */
@@ -2319,6 +2350,7 @@ main(void)
     test_advanced_recv_rate_limit();
     test_advanced_udp_gso();
     test_advanced_udp_gro();
+    test_advanced_tun_offload();
     test_hybrid_egress_acl_ini();
     test_hybrid_egress_acl_ini_invalid_ignored();
     test_hybrid_egress_acl_ini_v6();

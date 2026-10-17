@@ -589,6 +589,9 @@ main(int argc, char *argv[])
             .udp_gso = file_cfg.udp_gso,
             /* [Advanced] UdpGro; default 1. Applies to client and server. */
             .udp_gro = file_cfg.udp_gro,
+            /* [Advanced] TunOffload / TunGro; default 1. Linux only. */
+            .tun_offload = file_cfg.tun_offload,
+            .tun_gro = file_cfg.tun_gro,
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];
@@ -651,6 +654,9 @@ main(int argc, char *argv[])
             .udp_gso = file_cfg.udp_gso,
             /* [Advanced] UdpGro; default 1. Applies to client and server. */
             .udp_gro = file_cfg.udp_gro,
+            /* [Advanced] TunOffload / TunGro; default 1. Linux only. */
+            .tun_offload = file_cfg.tun_offload,
+            .tun_gro = file_cfg.tun_gro,
         };
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];

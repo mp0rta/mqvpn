@@ -96,12 +96,14 @@ int mqvpn_gro_pending(const mqvpn_gro_t *g);
 void mqvpn_gro_stats(const mqvpn_gro_t *g, uint64_t *pushed, uint64_t *supers,
                      uint64_t *merged, uint64_t *acks);
 
+/* mqvpn_tun_create() with the offloads chosen by the caller ([Advanced]
+ * TunOffload / TunGro); mqvpn_tun_create() enables both. offload = 0 opens
+ * the plain TUN; gro has no effect without offload. */
+int mqvpn_tun_create_opts(mqvpn_tun_t *tun, const char *dev_name, int offload, int gro);
+
 /* Deliver the packets mqvpn_tun_write() held back for GRO. Call it before
  * returning to the event loop after anything that can produce TUN output. */
 void mqvpn_tun_flush(mqvpn_tun_t *tun);
-
-/* 1 when mqvpn_tun_flush() has packets to deliver. */
-int mqvpn_tun_gro_pending(const mqvpn_tun_t *tun);
 
 /* 1 when mqvpn_tun_read() still holds segments of an earlier super-packet.
  * The fd may not be readable then, so the caller must run its read handler

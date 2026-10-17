@@ -47,27 +47,6 @@ struct mqvpn_tun_offload {
     mqvpn_gro_t *gro;           /* write-side TCP GRO, NULL when off */
 };
 
-static int
-env_off(const char *name)
-{
-    const char *e = getenv(name);
-    return e && (strcmp(e, "0") == 0 || strcmp(e, "off") == 0);
-}
-
-/* MQVPN_TUN_OFFLOAD=0 (or "off") keeps the plain one-packet-per-read TUN. */
-static int
-tun_offload_wanted(void)
-{
-    return !env_off("MQVPN_TUN_OFFLOAD");
-}
-
-/* MQVPN_TUN_GRO=0 keeps the offloaded reads but writes packets one by one. */
-static int
-tun_gro_wanted(void)
-{
-    return !env_off("MQVPN_TUN_GRO");
-}
-
 /* GRO sink: one packet (or one coalesced super-packet) to the TUN. */
 static int
 tun_gro_emit(void *ctx, const struct virtio_net_hdr *vh, const uint8_t *pkt, size_t len)
@@ -109,8 +88,7 @@ tun_enable_offloads(int fd, unsigned int *flags_out)
 
 /* Open /dev/net/tun and attach it to dev_name. With vnet set, request the
  * virtio header and enable the offloads; returns -1 if any step fails so the
- * caller can fall back to a plain TUN. quiet suppresses the error logs of the
- * vnet attempt. */
+ * caller can fall back to a plain TUN. */
 static int
 tun_open(const char *name_buf, int vnet, struct ifreq *ifr, unsigned int *off_flags)
 {
@@ -143,6 +121,12 @@ tun_open(const char *name_buf, int vnet, struct ifreq *ifr, unsigned int *off_fl
 int
 mqvpn_tun_create(mqvpn_tun_t *tun, const char *dev_name)
 {
+    return mqvpn_tun_create_opts(tun, dev_name, 1, 1);
+}
+
+int
+mqvpn_tun_create_opts(mqvpn_tun_t *tun, const char *dev_name, int offload, int gro)
+{
     /* Copy dev_name before memset — caller may pass tun->name which aliases tun */
     char name_buf[IFNAMSIZ] = "";
     if (dev_name && dev_name[0]) snprintf(name_buf, sizeof(name_buf), "%s", dev_name);
@@ -157,7 +141,7 @@ mqvpn_tun_create(mqvpn_tun_t *tun, const char *dev_name)
 
     /* Prefer a TUN with the virtio header and TSO/USO offloads; if the
      * kernel refuses any part of it, fall back to the plain TUN. */
-    if (tun_offload_wanted()) {
+    if (offload) {
         off = calloc(1, sizeof(*off));
         if (off) fd = tun_open(name_buf, 1, &ifr, &off_flags);
         if (fd < 0) {
@@ -182,7 +166,7 @@ mqvpn_tun_create(mqvpn_tun_t *tun, const char *dev_name)
     tun->offload = off;
     if (off) {
         off->fd = fd;
-        if (tun_gro_wanted()) off->gro = mqvpn_gro_new(tun_gro_emit, off);
+        if (gro) off->gro = mqvpn_gro_new(tun_gro_emit, off);
     }
     strncpy(tun->name, ifr.ifr_name, IFNAMSIZ - 1);
     tun->name[IFNAMSIZ - 1] = '\0';
@@ -629,12 +613,6 @@ mqvpn_tun_flush(mqvpn_tun_t *tun)
 {
     if (tun->offload && tun->offload->gro && tun->fd >= 0)
         mqvpn_gro_flush(tun->offload->gro);
-}
-
-int
-mqvpn_tun_gro_pending(const mqvpn_tun_t *tun)
-{
-    return tun->offload && tun->offload->gro && mqvpn_gro_pending(tun->offload->gro);
 }
 
 void

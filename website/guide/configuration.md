@@ -375,8 +375,10 @@ In JSON, the section is a `"hybrid"` object with snake_case keys (`enabled`, `tc
 | `RecvRateLimit` | Conn-level receive-rate cap in bytes/sec; bounds the aggregate QUIC receive window to `rate x RTT`. Client-side only — the server ignores it (a server-side cap would throttle client upload). Maximum `10000000000` (10 GB/s); larger values are rejected with a warning and the key falls back to `0`. Leave `0` unless memory-constrained (mobile clients set this internally) | `0` (off) |
 | `UdpGso` | Batches UDP sends with kernel GSO for lower CPU use at high throughput. Automatically falls back to regular batched sends on kernels without support (< 4.18). Linux and Android only; no effect elsewhere. Set to `false` to restore the previous per-packet send path | `true` |
 | `UdpGro` | Lets the kernel hand over received packets in batches, lowering CPU use at high throughput. Automatically falls back to one-at-a-time receives on kernels without support (< 5.0). Linux only; no effect elsewhere. Set to `false` to restore the previous receive path | `true` |
+| `TunOffload` | Lets the kernel hand large batches of traffic to the tunnel interface in one read; mqvpn splits them, lowering CPU use at high throughput. Automatically falls back to one packet per read when the kernel does not support it. Linux only; no effect elsewhere. Set to `false` to restore the previous tunnel interface | `true` |
+| `TunGro` | Combines consecutive TCP packets headed for the tunnel interface into one larger write, lowering CPU use at high throughput. No effect when `TunOffload` is `false`. Linux only; no effect elsewhere. Set to `false` to write packets one at a time as before | `true` |
 
-In JSON, the section is an `"advanced"` object with snake_case keys (`recv_rate_limit`, `udp_gso`, `udp_gro`).
+In JSON, the section is an `"advanced"` object with snake_case keys (`recv_rate_limit`, `udp_gso`, `udp_gro`, `tun_offload`, `tun_gro`).
 
 ## MTU Guidelines
 

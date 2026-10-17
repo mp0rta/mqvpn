@@ -45,6 +45,8 @@ typedef struct mqvpn_client_cfg_s {
     uint64_t recv_rate_limit;     /* [Advanced] RecvRateLimit, bytes/sec; 0 = off */
     int udp_gso;                  /* [Advanced] UdpGso; default 1 */
     int udp_gro;                  /* [Advanced] UdpGro; default 1 */
+    int tun_offload;              /* [Advanced] TunOffload; default 1 */
+    int tun_gro;                  /* [Advanced] TunGro; default 1 */
 } mqvpn_client_cfg_t;
 
 /* CLI → library config bridge (src/platform/client_config_bridge.c): forwards

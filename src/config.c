@@ -642,6 +642,8 @@ static const cfg_key_desc_t cfg_keys[] = {
             MQVPN_RECV_RATE_LIMIT_MAX),
     CFG_BOOL(SEC_ADVANCED, "UdpGso", "udp_gso", udp_gso),
     CFG_BOOL(SEC_ADVANCED, "UdpGro", "udp_gro", udp_gro),
+    CFG_BOOL(SEC_ADVANCED, "TunOffload", "tun_offload", tun_offload),
+    CFG_BOOL(SEC_ADVANCED, "TunGro", "tun_gro", tun_gro),
 };
 
 /* Shared typed store. Returns 0 on success, -1 on invalid value (caller
@@ -1286,6 +1288,8 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
     cfg->manage_routes = 1;
     cfg->udp_gso = 1;
     cfg->udp_gro = 1;
+    cfg->tun_offload = 1;
+    cfg->tun_gro = 1;
     mqvpn_reorder_config_default(&cfg->reorder); /* §16: reorder defaults (mode OFF) */
     mqvpn_hybrid_config_default(&cfg->hybrid);   /* H1: hybrid defaults (disabled) */
 }

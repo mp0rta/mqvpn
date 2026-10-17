@@ -93,7 +93,7 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     }
 
     /* Create TUN device — use tun_name_cfg which survives destroy/recreate */
-    if (mqvpn_tun_create(&p->tun, p->tun_name_cfg) < 0) {
+    if (mqvpn_tun_create_opts(&p->tun, p->tun_name_cfg, p->tun_offload, p->tun_gro) < 0) {
         LOG_ERR("TUN create failed");
         goto fail;
     }
@@ -492,6 +492,8 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     ctx.manage_routes = cfg->manage_routes;
     ctx.udp_gro = cfg->udp_gro;
     ctx.udp_gso = cfg->udp_gso;
+    ctx.tun_offload = cfg->tun_offload;
+    ctx.tun_gro = cfg->tun_gro;
 
     /* Pre-set TUN name (save to tun_name_cfg too — survives TUN destroy/recreate) */
     if (cfg->tun_name) {
@@ -762,6 +764,8 @@ typedef struct server_platform_ctx_s {
     struct event *ev_sigterm;
     mqvpn_tun_t tun;
     int tun_up;
+    int tun_offload; /* [Advanced] TunOffload */
+    int tun_gro;     /* [Advanced] TunGro */
     int udp_fd;
     /* mqvpn_bind_posix server transport over udp_fd; owned by the library
      * after set_transport (finalised inside mqvpn_server_destroy). */
@@ -839,7 +843,7 @@ svr_cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
 
     /* Create TUN device */
     const char *tun_name = sp->tun.name[0] ? sp->tun.name : "mqvpn0";
-    if (mqvpn_tun_create(&sp->tun, tun_name) < 0) {
+    if (mqvpn_tun_create_opts(&sp->tun, tun_name, sp->tun_offload, sp->tun_gro) < 0) {
         LOG_ERR("TUN create failed");
         return;
     }
@@ -1131,6 +1135,8 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     memset(&sp, 0, sizeof(sp));
     sp.tun.fd = -1;
     sp.udp_fd = -1;
+    sp.tun_offload = cfg->tun_offload;
+    sp.tun_gro = cfg->tun_gro;
 
     if (cfg->tun_name) snprintf(sp.tun.name, sizeof(sp.tun.name), "%s", cfg->tun_name);
 
