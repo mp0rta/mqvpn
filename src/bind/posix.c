@@ -46,7 +46,9 @@ typedef struct {
     mqvpn_transport_stats_t tx;
     uint64_t rx_receives;
     uint64_t rx_datagrams;
-    int send_err_logged; /* one-shot guard for the single-datagram errno log */
+    uint64_t rx_queue_drops; /* summed from the kernel's 32-bit counter */
+    uint32_t rx_queue_last;  /* last value the kernel reported */
+    int send_err_logged;     /* one-shot guard for the single-datagram errno log */
 } bind_common_t;
 
 typedef struct {
@@ -147,6 +149,8 @@ bind_common_init(bind_common_t *c, int fd, const mqvpn_bind_posix_opts_t *opts_i
 
     bind_apply_sockbuf(fd, o.socket_buf_bytes, label);
 #if defined(__linux__)
+    /* Best effort and silent: only the rx_queue_drops counter depends on it. */
+    (void)mqvpn_udp_rxq_ovfl_enable(fd);
     if (o.udp_gro) {
         if (mqvpn_udp_gro_enable(fd) == 0)
             c->gro_enabled = 1;
@@ -294,9 +298,13 @@ bind_recv_one(bind_common_t *c, bind_deliver_fn deliver, void *arg, unsigned *de
     ssize_t n;
     *delivered = 0;
 #if defined(__linux__)
+    uint32_t drops = c->rx_queue_last;
     // codeql[cpp/uncontrolled-allocation-size] stack buffer bounded by sizeof(buf)
     n = mqvpn_udp_recv_segmented(c->fd, buf, sizeof(buf), (struct sockaddr *)&peer,
-                                 &peer_len, &seg);
+                                 &peer_len, &seg, &drops);
+    /* The kernel reports a wrapping 32-bit total; sum its increments. */
+    c->rx_queue_drops += (uint32_t)(drops - c->rx_queue_last);
+    c->rx_queue_last = drops;
     if (n == MQVPN_RECV_DROP) {
         char dlbl[32];
         LOG_DBG("bind-posix: truncated datagram dropped on %s",
@@ -433,6 +441,7 @@ bind_fill_stats(const bind_common_t *c, mqvpn_bind_posix_stats_t *out)
         .tx = c->tx,
         .rx_receives = c->rx_receives,
         .rx_datagrams = c->rx_datagrams,
+        .rx_queue_drops = c->rx_queue_drops,
     };
     size_t copy = out->struct_size < sizeof(full) ? out->struct_size : sizeof(full);
     memcpy(out, &full, copy);

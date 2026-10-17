@@ -226,8 +226,8 @@ ctrl_cmd_get_stats(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *
     mqvpn_server_get_stats(server, &st);
     int nc = mqvpn_server_get_n_clients(server);
     uint64_t uptime = mqvpn_server_uptime_seconds(server);
-    uint64_t rx_receives = 0, rx_datagrams = 0;
-    if (cs->rx_stats) cs->rx_stats(cs->rx_ctx, &rx_receives, &rx_datagrams);
+    uint64_t rx_receives = 0, rx_datagrams = 0, rx_drops = 0;
+    if (cs->rx_stats) cs->rx_stats(cs->rx_ctx, &rx_receives, &rx_datagrams, &rx_drops);
 
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
@@ -260,6 +260,9 @@ ctrl_cmd_get_stats(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *
     ok &= yyjson_mut_obj_add_uint(doc, root, "udp_tx_datagrams", st.udp_tx_datagrams);
     ok &= yyjson_mut_obj_add_uint(doc, root, "udp_rx_receives", rx_receives);
     ok &= yyjson_mut_obj_add_uint(doc, root, "udp_rx_datagrams", rx_datagrams);
+    /* Receive-queue drops on the listen socket (datagrams, or whole GRO
+     * batches): they never reach QUIC, so no other counter here sees them. */
+    ok &= yyjson_mut_obj_add_uint(doc, root, "udp_rx_drops", rx_drops);
     ok &= yyjson_mut_obj_add_uint(doc, root, "uptime_sec", uptime);
     if (!ok) {
         yyjson_mut_doc_free(doc);

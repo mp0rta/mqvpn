@@ -1295,7 +1295,8 @@ test_phase_h_new_commands() {
     RESP=$(ctrl_local '{"cmd":"get_stats"}')
     assert_json_field "$RESP" ok true        || { echo "FAIL H.2: ok ($RESP)"; return 1; }
     for k in n_clients bytes_tx bytes_rx dgram_sent dgram_recv dgram_lost dgram_acked \
-             udp_tx_sends udp_tx_datagrams udp_rx_receives udp_rx_datagrams uptime_sec; do
+             udp_tx_sends udp_tx_datagrams udp_rx_receives udp_rx_datagrams udp_rx_drops \
+             uptime_sec; do
         local v
         v=$(echo "$RESP" | jget "$k")
         [[ -n "$v" ]] || { echo "FAIL H.2: missing $k in $RESP"; return 1; }

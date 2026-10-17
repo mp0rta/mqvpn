@@ -214,6 +214,7 @@ datagram counters and uptime.
   "tcp_flows_rejected":2,"raw_markers_active":0,
   "udp_tx_sends":54120,"udp_tx_datagrams":889304,
   "udp_rx_receives":812004,"udp_rx_datagrams":1031887,
+  "udp_rx_drops":0,
   "uptime_sec":3601
 }
 ```
@@ -239,6 +240,7 @@ datagram counters and uptime.
 | `udp_tx_datagrams` | uint64 | Outer-UDP datagrams the kernel accepted. `udp_tx_datagrams / udp_tx_sends` is the achieved transmit batching factor; 1.0 means every datagram cost its own syscall. Exactly 1.0 with `UdpGso = false` and on platforms without the batched send path. |
 | `udp_rx_receives` | uint64 | Outer-UDP receive syscalls that returned data. |
 | `udp_rx_datagrams` | uint64 | Outer-UDP datagrams delivered to the library. `udp_rx_datagrams / udp_rx_receives` is the achieved receive coalescing factor. Exactly 1.0 with `UdpGro = false`; it also stays near 1.0 when the peer is not batching its sends, since the kernel then has nothing to coalesce, and over a loopback/veth path regardless of the peer. |
+| `udp_rx_drops` | uint64 | Receive-queue drops on the listen socket: outer-UDP datagrams the kernel discarded before the server could read them, nearly always because the queue was full (a burst the server could not read in time). With `UdpGro = true` one drop is a whole coalesced batch of up to 64 datagrams. They never reach QUIC, so no other field counts them, and inner packets carried in DATAGRAMs are lost for good (DATAGRAMs are not retransmitted). Learnt from the next datagram read after a drop (Linux `SO_RXQ_OVFL`); always 0 on other platforms. |
 | `uptime_sec` | uint64  | Seconds since `mqvpn_server_create` was called                 |
 
 Notes:
@@ -543,6 +545,11 @@ mqvpn follows semantic versioning for the control API:
   UDP GRO is configured and un-coalesced entirely in the platform layer, which
   the library never observes, so those two are read straight from the platform
   by the control socket (`ctrl_socket_create`) instead.
+- `get_stats` gained `udp_rx_drops` in v0.19.0. Additive; existing JSON
+  consumers remain unaffected. Like the other `udp_rx_*` fields it comes from
+  the POSIX bind, not from `mqvpn_stats_t`: `mqvpn_bind_posix_stats_t` gained
+  `rx_queue_drops`, appended under `struct_size`, so callers built against
+  the older header keep working without a recompile.
 - `get_status` client objects gained `scheduler` in v0.18.0 (JSON only; the C
   struct `mqvpn_client_info_t` is unchanged). Additive; existing JSON
   consumers remain unaffected.
