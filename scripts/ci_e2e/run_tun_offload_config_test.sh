@@ -11,9 +11,11 @@
 # G13 note: the arms assert on the TUN creation line in src/platform/linux/tun.c:
 #     "TUN device %s created (fd=%d, offloads: csum tso4 tso6[ uso4 uso6][ gro])"
 #     "TUN device %s created (fd=%d)"                   /* plain TUN */
-# If you reword it, update the "offloads: csum tso4" and " gro)" patterns
-# below in the same change. The line is logged before the tunnel can come up,
-# so checking it after tunnel-up is race-free.
+#     "TUN %s: MTU=%d"
+# If you reword them, update the "offloads: csum tso4" and " gro)" patterns
+# and the sed expressions in iperf3_tcp below in the same change. Both lines
+# are logged before the tunnel can come up, so checking them after tunnel-up
+# is race-free.
 #
 # Arms (fresh netns, PSK and cert each; -C goes to both endpoints):
 #   A. default: offloads on and gro on, on both ends.
@@ -21,8 +23,12 @@
 #   C. TunGro = false: offloads on, gro off, on both ends.
 # Each arm then pushes TCP both ways through the tunnel with iperf3, since
 # TSO reads, GRO writes and their checksum handling only show up on TCP.
+# tcpdump on the receiving TUN counts packets longer than the TUN MTU: only
+# GRO writes them, so the gro arms must see some and the others none. This
+# proves GRO merges real traffic without comparing speeds, which vary too
+# much on CI runners to assert on.
 #
-# REQUIRES: root (netns + TUN), openssl, iperf3, jq.
+# REQUIRES: root (netns + TUN), openssl, iperf3, jq, tcpdump.
 #
 # Run manually:
 #   sudo bash scripts/ci_e2e/run_tun_offload_config_test.sh [path/to/mqvpn]
@@ -62,7 +68,7 @@ if [[ "$EUID" -ne 0 ]]; then
     exit 2
 fi
 
-bench_check_test_deps openssl iperf3 jq
+bench_check_test_deps openssl iperf3 jq tcpdump
 
 PASS=0
 FAIL=0
@@ -146,10 +152,24 @@ check_marker() {
     return 0
 }
 
-# iperf3_tcp <label> [-R]: one TCP run through the tunnel; fails below MIN_MBPS.
+# iperf3_tcp <label> <expect_gro:0|1> <rx_ns> <rx_log> [-R]
+# One TCP run through the tunnel; fails below MIN_MBPS, or when the count of
+# over-MTU packets on the receiving end's TUN does not match expect_gro.
 iperf3_tcp() {
-    local label="$1" reverse="${2:-}"
-    local json="${LOG_DIR}/iperf3_${label}.json" mbps
+    local label="$1" expect_gro="$2" rx_ns="$3" rx_log="$4" reverse="${5:-}"
+    local json="${LOG_DIR}/iperf3_${label}.json" pcap="${LOG_DIR}/${label}.pcap"
+    local tun mtu mbps big
+
+    tun=$(sed -n 's/.*TUN device \([^ ]*\) created.*/\1/p' "$rx_log" | tail -1)
+    mtu=$(sed -n 's/.*TUN [^ ]*: MTU=\([0-9]*\).*/\1/p' "$rx_log" | tail -1)
+    if [ -z "$tun" ] || [ -z "$mtu" ]; then
+        echo "  FAIL: no TUN name/MTU in $rx_log (tun='$tun' mtu='$mtu')"
+        return 1
+    fi
+    # .pcap suffix: Ubuntu's tcpdump AppArmor profile only writes such files.
+    ip netns exec "$rx_ns" tcpdump -Z root -i "$tun" -s 64 -w "$pcap" \
+        "tcp and greater $((mtu + 1))" >/dev/null 2>&1 &
+    local dump_pid=$!
 
     ip netns exec "$NS_SERVER" iperf3 -s -B "$TUNNEL_SERVER_IP" -1 >/dev/null 2>&1 &
     local srv_pid=$!
@@ -160,6 +180,8 @@ iperf3_tcp() {
         >"$json" 2>&1 || true
     kill "$srv_pid" 2>/dev/null || true
     wait "$srv_pid" 2>/dev/null || true
+    kill -INT "$dump_pid" 2>/dev/null || true
+    wait "$dump_pid" 2>/dev/null || true
 
     mbps=$(jq -r '(.end.sum_received.bits_per_second // 0) / 1e6 | floor' "$json" 2>/dev/null || echo 0)
     mbps="${mbps:-0}"
@@ -169,6 +191,26 @@ iperf3_tcp() {
         return 1
     fi
     echo "  OK: iperf3 $label ${mbps} Mbps"
+
+    if [ ! -f "$pcap" ]; then
+        echo "  FAIL: tcpdump wrote no capture on $tun in $rx_ns"
+        return 1
+    fi
+    # A failed read would count 0 and pass the gro-off arms silently.
+    if ! tcpdump -Z root -r "$pcap" -nn >"${pcap}.txt" 2>/dev/null; then
+        echo "  FAIL: tcpdump could not read $pcap"
+        return 1
+    fi
+    big=$(wc -l <"${pcap}.txt")
+    if [ "$expect_gro" -eq 1 ] && [ "$big" -eq 0 ]; then
+        echo "  FAIL: no packet over MTU $mtu on $tun: GRO merged nothing"
+        return 1
+    fi
+    if [ "$expect_gro" -eq 0 ] && [ "$big" -ne 0 ]; then
+        echo "  FAIL: $big packets over MTU $mtu on $tun with GRO off"
+        return 1
+    fi
+    echo "  OK: $big packets over MTU $mtu on $tun"
     return 0
 }
 
@@ -201,8 +243,8 @@ run_arm() {
     check_marker "offloads: csum tso4" "$expect_offload" "$server_log" "$client_log" || rc=1
     check_marker " gro)" "$expect_gro" "$server_log" "$client_log" || rc=1
     if [ "$rc" -eq 0 ]; then
-        iperf3_tcp "${arm_id}_ul" || rc=1
-        iperf3_tcp "${arm_id}_dl" -R || rc=1
+        iperf3_tcp "${arm_id}_ul" "$expect_gro" "$NS_SERVER" "$server_log" || rc=1
+        iperf3_tcp "${arm_id}_dl" "$expect_gro" "$NS_CLIENT" "$client_log" -R || rc=1
     fi
 
     finish_arm "$arm_id" "$server_log" "$client_log"

@@ -272,7 +272,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake libevent-dev golang iptables conntrack clang iperf3 jq netcat-openbsd iproute2 curl python3
+          sudo apt-get install -y cmake libevent-dev golang iptables conntrack clang iperf3 jq netcat-openbsd iproute2 curl python3 tcpdump
 
       - name: Compute xquic SHA
         id: xqsha
