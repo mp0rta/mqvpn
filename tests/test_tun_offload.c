@@ -751,6 +751,217 @@ test_gro_reserved_bits(void)
     mqvpn_gro_free(g);
 }
 
+/* A fully valid pure ACK with any ACK number, window and TCP options. */
+static size_t
+mk_ack(uint8_t *p, int v6, uint32_t seq, uint32_t ack, uint16_t win, const uint8_t *opt,
+       size_t optlen, uint16_t sport)
+{
+    size_t ip_hlen = v6 ? 40 : 20;
+    size_t thl = 20 + optlen;
+    assert(optlen % 4 == 0 && thl <= 60);
+    size_t total = mk_tcp(p, v6, seq, 0, 0x10, (uint16_t)(ack ^ win), sport, 0);
+    assert(total == ip_hlen + 20);
+    uint8_t *l4 = p + ip_hlen;
+    if (optlen) memcpy(l4 + 20, opt, optlen);
+    total += optlen;
+    uint32_t a = htonl(ack);
+    memcpy(l4 + 8, &a, 4);
+    l4[12] = (uint8_t)((thl / 4) << 4);
+    l4[14] = (uint8_t)(win >> 8);
+    l4[15] = (uint8_t)win;
+    if (v6) {
+        p[4] = (uint8_t)((total - 40) >> 8);
+        p[5] = (uint8_t)(total - 40);
+    } else {
+        p[2] = (uint8_t)(total >> 8);
+        p[3] = (uint8_t)total;
+        p[10] = p[11] = 0;
+        uint16_t c = (uint16_t)~ref_fold(ref_sum(p, ip_hlen, 0));
+        p[10] = (uint8_t)(c >> 8);
+        p[11] = (uint8_t)c;
+    }
+    l4[16] = l4[17] = 0;
+    uint16_t c = (uint16_t)~ref_l4_sum(p, v6, IPPROTO_TCP, l4, thl);
+    l4[16] = (uint8_t)(c >> 8);
+    l4[17] = (uint8_t)c;
+    return total;
+}
+
+/* Run in[0..n) through a fresh GRO; the output must be exactly the inputs
+ * listed in want (by index, in that order), each written plain and
+ * byte-exact, with the other n - nwant counted as superseded. */
+static void
+ack_case(uint8_t (*in)[2048], const size_t *ln, unsigned n, const unsigned *want,
+         unsigned nwant)
+{
+    mqvpn_gro_t *g = mqvpn_gro_new(capture, NULL);
+    out_n = 0;
+    for (unsigned i = 0; i < n; i++)
+        mqvpn_gro_push(g, in[i], ln[i]);
+    mqvpn_gro_flush(g);
+    assert(!mqvpn_gro_pending(g));
+    assert(out_n == nwant);
+    for (unsigned i = 0; i < nwant; i++) {
+        const emitted_t *e = &out_q[i];
+        assert(e->vh.gso_type == 0 && e->vh.flags == 0);
+        assert(e->len == ln[want[i]] && memcmp(e->pkt, in[want[i]], e->len) == 0);
+    }
+    uint64_t pushed, supers, merged, acks;
+    mqvpn_gro_stats(g, &pushed, &supers, &merged, &acks);
+    assert(pushed == n && supers == 0 && merged == 0 && acks == n - nwant);
+    mqvpn_gro_free(g);
+}
+
+/* Pure ACKs: a later cumulative ACK of the flow replaces the held one;
+ * anything the sender would count (a duplicate ACK, a window update) or
+ * could tell apart (options, sequence number, IP header) is kept, and order
+ * within a flow is kept. */
+static void
+test_gro_acks(void)
+{
+    static uint8_t in[16][2048];
+    size_t ln[16];
+    const uint8_t sack1[12] = {1, 1, 5, 10, 0, 0, 0x10, 0, 0, 0, 0x20, 0};
+    const uint8_t sack2[12] = {1, 1, 5, 10, 0, 0, 0x10, 0, 0, 0, 0x30, 0};
+
+    for (int v6 = 0; v6 < 2; v6++) {
+        size_t th = v6 ? 40 : 20;
+
+        /* A run of advancing ACKs: only the last one is written. */
+        for (unsigned i = 0; i < 10; i++)
+            ln[i] = mk_ack(in[i], v6, 7, 1000 + 2896 * i, 0x4000, NULL, 0, 5000);
+        ack_case(in, ln, 10, (const unsigned[]){9}, 1);
+
+        /* One ACK alone is written as it is. */
+        ack_case(in, ln, 1, (const unsigned[]){0}, 1);
+
+        /* ACK numbers across the 2^32 wrap still advance. */
+        ln[0] = mk_ack(in[0], v6, 7, 0xfffffff0u, 0x4000, NULL, 0, 5000);
+        ln[1] = mk_ack(in[1], v6, 7, 0x10, 0x4000, NULL, 0, 5000);
+        ack_case(in, ln, 2, (const unsigned[]){1}, 1);
+
+        /* Duplicate ACKs: every one is written. */
+        for (unsigned i = 0; i < 4; i++)
+            ln[i] = mk_ack(in[i], v6, 7, 5000, 0x4000, NULL, 0, 5000);
+        ack_case(in, ln, 4, (const unsigned[]){0, 1, 2, 3}, 4);
+
+        /* Same ACK number, other window (window update): both. A smaller ACK
+         * number after a larger one: both, in their order. */
+        ln[0] = mk_ack(in[0], v6, 7, 5000, 0x1000, NULL, 0, 5000);
+        ln[1] = mk_ack(in[1], v6, 7, 5000, 0x4000, NULL, 0, 5000);
+        ln[2] = mk_ack(in[2], v6, 7, 4000, 0x4000, NULL, 0, 5000);
+        ack_case(in, ln, 3, (const unsigned[]){0, 1, 2}, 3);
+
+        /* A later ACK with a smaller window still replaces the held one: it
+         * is the receiver's newer state. */
+        ln[0] = mk_ack(in[0], v6, 7, 5000, 0x4000, NULL, 0, 5000);
+        ln[1] = mk_ack(in[1], v6, 7, 6000, 0x0100, NULL, 0, 5000);
+        ack_case(in, ln, 2, (const unsigned[]){1}, 1);
+
+        /* Options: only identical ones may be replaced. no-options, SACK A,
+         * SACK A (later), SACK B, then the same SACK B again but later. */
+        ln[0] = mk_ack(in[0], v6, 7, 1000, 0x4000, NULL, 0, 5000);
+        ln[1] = mk_ack(in[1], v6, 7, 2000, 0x4000, sack1, 12, 5000);
+        ln[2] = mk_ack(in[2], v6, 7, 3000, 0x4000, sack1, 12, 5000);
+        ln[3] = mk_ack(in[3], v6, 7, 4000, 0x4000, sack2, 12, 5000);
+        ln[4] = mk_ack(in[4], v6, 7, 5000, 0x4000, sack2, 12, 5000);
+        ack_case(in, ln, 5, (const unsigned[]){0, 2, 4}, 3);
+        /* ... and a held SACK is not replaced by a later ACK without one. */
+        ln[0] = mk_ack(in[0], v6, 7, 1000, 0x4000, sack1, 12, 5000);
+        ln[1] = mk_ack(in[1], v6, 7, 2000, 0x4000, NULL, 0, 5000);
+        ack_case(in, ln, 2, (const unsigned[]){0, 1}, 2);
+
+        /* Another sequence number, TTL or hop limit, or traffic class: kept. */
+        ln[0] = mk_ack(in[0], v6, 7, 1000, 0x4000, NULL, 0, 5000);
+        ln[1] = mk_ack(in[1], v6, 8, 2000, 0x4000, NULL, 0, 5000);
+        ln[2] = mk_ack(in[2], v6, 8, 3000, 0x4000, NULL, 0, 5000);
+        in[2][v6 ? 7 : 8]--;
+        ln[3] = mk_ack(in[3], v6, 8, 4000, 0x4000, NULL, 0, 5000);
+        in[3][v6 ? 7 : 8]--;
+        in[3][1] ^= 0x40; /* DSCP (v4), traffic class (v6) */
+        ack_case(in, ln, 4, (const unsigned[]){0, 1, 2, 3}, 4);
+
+        /* Flags other than ACK alone (PSH, ECE, FIN, RST) or a reserved bit:
+         * never held, never replaced; a held ACK of the flow goes first. */
+        const uint8_t odd[] = {0x18, 0x50, 0x11, 0x14};
+        for (unsigned f = 0; f < sizeof(odd) + 1; f++) {
+            ln[0] = mk_ack(in[0], v6, 7, 1000, 0x4000, NULL, 0, 5000);
+            ln[1] = mk_ack(in[1], v6, 7, 2000, 0x4000, NULL, 0, 5000);
+            if (f < sizeof(odd))
+                in[1][th + 13] = odd[f];
+            else
+                in[1][th + 12] |= 0x01;
+            ln[2] = mk_ack(in[2], v6, 7, 3000, 0x4000, NULL, 0, 5000);
+            ack_case(in, ln, 3, (const unsigned[]){0, 1, 2}, 3);
+        }
+
+        /* Data of the same flow between ACKs: nothing overtakes anything. */
+        ln[0] = mk_ack(in[0], v6, 7, 1000, 0x4000, NULL, 0, 5000);
+        ln[1] = mk_ack(in[1], v6, 7, 2000, 0x4000, NULL, 0, 5000);
+        ln[2] = mk_tcp(in[2], v6, 7, 100, 0x10, 3, 5000, 0);
+        ln[3] = mk_ack(in[3], v6, 107, 3000, 0x4000, NULL, 0, 5000);
+        ln[4] = mk_ack(in[4], v6, 107, 4000, 0x4000, NULL, 0, 5000);
+        ack_case(in, ln, 5, (const unsigned[]){1, 2, 4}, 3);
+
+        /* Two flows interleaved: each keeps only its last ACK. */
+        for (unsigned i = 0; i < 8; i++)
+            ln[i] = mk_ack(in[i], v6, 7, 1000 + 100 * i, 0x4000, NULL, 0,
+                           (uint16_t)(5000 + (i & 1)));
+        mqvpn_gro_t *g = mqvpn_gro_new(capture, NULL);
+        out_n = 0;
+        for (unsigned i = 0; i < 8; i++)
+            mqvpn_gro_push(g, in[i], ln[i]);
+        mqvpn_gro_flush(g);
+        assert(out_n == 2);
+        for (unsigned j = 0; j < 2; j++) {
+            unsigned last = out_q[j].pkt[th + 1] == (uint8_t)(5000 & 0xff) ? 6 : 7;
+            assert(out_q[j].len == ln[last] &&
+                   memcmp(out_q[j].pkt, in[last], ln[last]) == 0);
+        }
+        assert(out_q[0].pkt[th + 1] != out_q[1].pkt[th + 1]);
+        mqvpn_gro_free(g);
+    }
+}
+
+/* More flows than slots, ACKs only: every flow's last ACK is written, and a
+ * flow's ACKs come out in their order. */
+static void
+test_gro_acks_many_flows(void)
+{
+    static uint8_t in[60][2048];
+    static size_t in_len[60];
+    mqvpn_gro_t *g = mqvpn_gro_new(capture, NULL);
+    out_n = 0;
+    unsigned k = 0;
+    for (unsigned round = 0; round < 5; round++)
+        for (unsigned f = 0; f < 12; f++) {
+            in_len[k] = mk_ack(in[k], 0, 1, 1000 + round * 1000, 0x4000, NULL, 0,
+                               (uint16_t)(7000 + f));
+            mqvpn_gro_push(g, in[k], in_len[k]);
+            k++;
+        }
+    mqvpn_gro_flush(g);
+    uint64_t pushed, supers, merged, acks;
+    mqvpn_gro_stats(g, &pushed, &supers, &merged, &acks);
+    assert(pushed == k && out_n + acks == k);
+    for (unsigned f = 0; f < 12; f++) {
+        uint32_t prev = 0;
+        int seen_last = 0;
+        for (unsigned j = 0; j < out_n; j++) {
+            uint16_t sp = (uint16_t)((out_q[j].pkt[20] << 8) | out_q[j].pkt[21]);
+            if (sp != 7000 + f) continue;
+            uint32_t a;
+            memcpy(&a, out_q[j].pkt + 28, 4);
+            a = ntohl(a);
+            assert(a > prev);
+            prev = a;
+            if (a == 5000) seen_last = 1;
+        }
+        assert(seen_last);
+    }
+    mqvpn_gro_free(g);
+}
+
 int
 main(void)
 {
@@ -765,6 +976,8 @@ main(void)
     test_gro_passthrough();
     test_gro_many_flows();
     test_gro_reserved_bits();
+    test_gro_acks();
+    test_gro_acks_many_flows();
     printf("test_tun_offload: OK\n");
     return 0;
 }

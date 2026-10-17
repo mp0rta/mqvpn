@@ -642,13 +642,13 @@ mqvpn_tun_destroy(mqvpn_tun_t *tun)
 {
     if (tun->offload) {
         if (tun->offload->gro) {
-            uint64_t pushed, supers, merged;
+            uint64_t pushed, supers, merged, acks;
             if (tun->fd >= 0) mqvpn_gro_flush(tun->offload->gro);
-            mqvpn_gro_stats(tun->offload->gro, &pushed, &supers, &merged);
+            mqvpn_gro_stats(tun->offload->gro, &pushed, &supers, &merged, &acks);
             LOG_INF("TUN %s: GRO: %llu packets written, %llu super-packets from %llu "
-                    "of them",
+                    "of them, %llu ACKs superseded",
                     tun->name, (unsigned long long)pushed, (unsigned long long)supers,
-                    (unsigned long long)merged);
+                    (unsigned long long)merged, (unsigned long long)acks);
             mqvpn_gro_free(tun->offload->gro);
         }
         LOG_INF("TUN %s: offload stats: %llu GSO packets split into %llu segments, %llu "

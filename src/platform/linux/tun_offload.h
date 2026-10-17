@@ -66,10 +66,14 @@ int mqvpn_gso_next(mqvpn_gso_iter_t *it, uint8_t *out, size_t out_cap);
  * Receive side: TCP GRO. Packets headed for the TUN are held briefly and
  * consecutive data segments of one flow are merged into a single super-packet
  * that the kernel receives with a virtio_net_hdr (VIRTIO_NET_HDR_GSO_TCPV4/6,
- * partial checksum), the same shape a NIC GRO produces. Each push() may emit
- * packets through the callback; flush() must run before the caller returns to
- * its event loop. Order within a flow is preserved: a packet that cannot join
- * its flow's open super-packet flushes it first.
+ * partial checksum), the same shape a NIC GRO produces. Pure ACKs are held
+ * the same way, and one that a later cumulative ACK of its flow makes
+ * redundant (same headers and options, ACK number strictly ahead) is replaced
+ * by it, so a burst of ACKs reaches the kernel as one, as from a receiver
+ * that ACKs each GRO packet once; duplicate ACKs and window updates are all
+ * delivered. Each push() may emit packets through the callback; flush() must
+ * run before the caller returns to its event loop. Order within a flow is
+ * preserved: a packet that cannot join what its flow holds flushes it first.
  *
  * Inner checksums are not verified here (QUIC already authenticates the
  * packet), so a coalesced packet is accepted even if its own TCP checksum was
@@ -87,9 +91,10 @@ void mqvpn_gro_free(mqvpn_gro_t *g);
 void mqvpn_gro_push(mqvpn_gro_t *g, const uint8_t *pkt, size_t len);
 void mqvpn_gro_flush(mqvpn_gro_t *g);
 int mqvpn_gro_pending(const mqvpn_gro_t *g);
-/* Counters: packets pushed, super-packets emitted, packets merged into them. */
+/* Counters: packets pushed, super-packets emitted, packets merged into them,
+ * pure ACKs replaced by a later one (never written). */
 void mqvpn_gro_stats(const mqvpn_gro_t *g, uint64_t *pushed, uint64_t *supers,
-                     uint64_t *merged);
+                     uint64_t *merged, uint64_t *acks);
 
 /* Deliver the packets mqvpn_tun_write() held back for GRO. Call it before
  * returning to the event loop after anything that can produce TUN output. */

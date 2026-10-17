@@ -44,6 +44,7 @@
 
 #define TCP_FLAG_FIN 0x01
 #define TCP_FLAG_PSH 0x08
+#define TCP_FLAG_ACK 0x10
 #define TCP_FLAG_CWR 0x80
 
 /*
@@ -278,7 +279,8 @@ mqvpn_gso_next(mqvpn_gso_iter_t *it, uint8_t *out, size_t out_cap)
 
 typedef struct {
     int used;
-    int closed; /* nothing more may be merged (short segment or PSH) */
+    int closed;   /* nothing more may be merged (short segment or PSH) */
+    int ack_only; /* holds one pure ACK, which only a later ACK may replace */
     int v6;
     uint16_t ip_hlen;
     uint16_t tcp_hlen;
@@ -293,7 +295,7 @@ struct mqvpn_gro {
     mqvpn_gro_emit_fn emit;
     void *ctx;
     unsigned victim; /* round robin slot to evict when the table is full */
-    uint64_t pushed, supers, merged;
+    uint64_t pushed, supers, merged, acks;
     gro_entry_t e[GRO_SLOTS];
 };
 
@@ -316,11 +318,12 @@ mqvpn_gro_free(mqvpn_gro_t *g)
 
 void
 mqvpn_gro_stats(const mqvpn_gro_t *g, uint64_t *pushed, uint64_t *supers,
-                uint64_t *merged)
+                uint64_t *merged, uint64_t *acks)
 {
     *pushed = g->pushed;
     *supers = g->supers;
     *merged = g->merged;
+    *acks = g->acks;
 }
 
 int
@@ -341,8 +344,9 @@ typedef struct {
     uint8_t flags;
 } gro_pkt_t;
 
-/* A plain TCP data segment: no IP options or extension headers, not a
- * fragment, lengths consistent, only ACK (and PSH) set, payload present. */
+/* A plain TCP segment: no IP options or extension headers, not a fragment,
+ * lengths consistent; either data with only ACK (and PSH) set, or a pure ACK
+ * (no payload, only the ACK flag). */
 static int
 gro_parse(const uint8_t *p, size_t len, gro_pkt_t *g)
 {
@@ -363,11 +367,13 @@ gro_parse(const uint8_t *p, size_t len, gro_pkt_t *g)
     }
     const uint8_t *t = p + g->ip_hlen;
     g->tcp_hlen = (size_t)(t[12] >> 4) * 4;
-    if (g->tcp_hlen < TCP_MIN_HLEN || g->ip_hlen + g->tcp_hlen >= len) return 0;
+    if (g->tcp_hlen < TCP_MIN_HLEN || g->ip_hlen + g->tcp_hlen > len) return 0;
     if (t[12] & 0x0f) return 0; /* reserved bits or AccECN's AE flag */
     g->flags = t[13];
-    if ((g->flags & ~TCP_FLAG_PSH) != 0x10) return 0; /* ACK, optionally PSH */
     g->payload = len - g->ip_hlen - g->tcp_hlen;
+    /* Data: ACK, optionally PSH. Pure ACK: ACK alone. */
+    uint8_t flags = g->payload ? (uint8_t)(g->flags & ~TCP_FLAG_PSH) : g->flags;
+    if (flags != TCP_FLAG_ACK) return 0;
     uint32_t seq;
     memcpy(&seq, t + 4, 4);
     g->seq = ntohl(seq);
@@ -446,7 +452,7 @@ gro_same_flow(const gro_entry_t *e, const uint8_t *p, const gro_pkt_t *k)
 static int
 gro_can_append(const gro_entry_t *e, const uint8_t *p, const gro_pkt_t *k)
 {
-    if (e->closed || k->tcp_hlen != e->tcp_hlen) return 0;
+    if (e->closed || e->ack_only || k->tcp_hlen != e->tcp_hlen) return 0;
     if (k->payload > e->gso_size || k->seq != e->next_seq) return 0;
     if (e->len + k->payload > GRO_MAX_LEN) return 0;
     if (k->v6) {
@@ -464,6 +470,32 @@ gro_can_append(const gro_entry_t *e, const uint8_t *p, const gro_pkt_t *k)
     return 1;
 }
 
+/* Can the pure ACK p take the place of the one e holds? Only a later
+ * cumulative ACK of the flow can: same sequence number, TOS, DF and TTL
+ * (traffic class, flow label and hop limit), same TCP options (SACK blocks
+ * included), and an ACK number strictly ahead, so it acknowledges all the
+ * held one did and carries the newer window. A repeated ACK number is a
+ * duplicate ACK or a window update, events the sender counts, so such an ACK
+ * never replaces another. */
+static int
+gro_ack_supersedes(const gro_entry_t *e, const uint8_t *p, const gro_pkt_t *k)
+{
+    if (k->tcp_hlen != e->tcp_hlen) return 0;
+    if (k->v6) {
+        if (memcmp(e->buf, p, 4) != 0 || e->buf[7] != p[7]) return 0;
+    } else {
+        if (e->buf[1] != p[1] || e->buf[6] != p[6] || e->buf[8] != p[8]) return 0;
+    }
+    const uint8_t *a = e->buf + e->ip_hlen, *b = p + k->ip_hlen;
+    if (memcmp(a + 4, b + 4, 4) != 0) return 0; /* sequence number */
+    if (k->tcp_hlen > TCP_MIN_HLEN && memcmp(a + 20, b + 20, k->tcp_hlen - 20) != 0)
+        return 0; /* options */
+    uint32_t held, ack;
+    memcpy(&held, a + 8, 4);
+    memcpy(&ack, b + 8, 4);
+    return (int32_t)(ntohl(ack) - ntohl(held)) > 0;
+}
+
 void
 mqvpn_gro_push(mqvpn_gro_t *g, const uint8_t *p, size_t len)
 {
@@ -472,8 +504,8 @@ mqvpn_gro_push(mqvpn_gro_t *g, const uint8_t *p, size_t len)
 
     if (!gro_parse(p, len, &k)) {
         /* Not mergeable. Packets of other flows may pass; but a TCP packet we
-         * cannot merge (SYN, FIN, ACK-only, ...) must not overtake data of
-         * its own flow still held back. */
+         * cannot merge (SYN, FIN, RST, ...) must not overtake data or an ACK
+         * of its own flow still held back. */
         if ((p[0] >> 4) == 4 || (p[0] >> 4) == 6) {
             for (int i = 0; i < GRO_SLOTS; i++) {
                 gro_entry_t *e = &g->e[i];
@@ -500,7 +532,14 @@ mqvpn_gro_push(mqvpn_gro_t *g, const uint8_t *p, size_t len)
             continue;
         }
         if (!gro_same_flow(e, p, &k)) continue;
-        if (gro_can_append(e, p, &k)) {
+        if (k.payload == 0) {
+            if (e->ack_only && gro_ack_supersedes(e, p, &k)) {
+                memcpy(e->buf, p, len);
+                e->len = len;
+                g->acks++;
+                return;
+            }
+        } else if (gro_can_append(e, p, &k)) {
             memcpy(e->buf + e->len, p + k.ip_hlen + k.tcp_hlen, k.payload);
             e->len += k.payload;
             e->next_seq += (uint32_t)k.payload;
@@ -521,6 +560,7 @@ mqvpn_gro_push(mqvpn_gro_t *g, const uint8_t *p, size_t len)
     }
     gro_entry_t *e = free_slot;
     e->used = 1;
+    e->ack_only = k.payload == 0;
     e->v6 = k.v6;
     e->ip_hlen = (uint16_t)k.ip_hlen;
     e->tcp_hlen = (uint16_t)k.tcp_hlen;
