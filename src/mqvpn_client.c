@@ -340,6 +340,11 @@ mqvpn_state_transition_valid(mqvpn_client_state_t from, mqvpn_client_state_t to)
 
 /* ─── Helpers ─── */
 
+/* Default clock of the client and of its xquic engine (see init_xquic_engine).
+ * Not the wall clock: an NTP or manual step of it would reach xquic as an RTT
+ * sample (a backward step underflows to ~2^64 us) and as timer expiries.
+ * CLOCK_BOOTTIME keeps counting through a suspend, as Android's injected
+ * clock does, so the idle timeout still notices a dead connection on resume. */
 static uint64_t
 now_us(void)
 {
@@ -349,9 +354,13 @@ now_us(void)
     uint64_t t = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
     return t / 10 - 11644473600000000ULL; /* FILETIME epoch → Unix epoch, in µs */
 #else
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (uint64_t)tv.tv_sec * 1000000 + (uint64_t)tv.tv_usec;
+    struct timespec ts;
+#  ifdef CLOCK_BOOTTIME
+    clock_gettime(CLOCK_BOOTTIME, &ts);
+#  else
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#  endif
+    return (uint64_t)ts.tv_sec * 1000000 + (uint64_t)ts.tv_nsec / 1000;
 #endif
 }
 
@@ -2143,8 +2152,8 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
          * created only when lwip_ctx exists, and a tcp_lane alloc failure
          * tears lwip_ctx back down — the ingress path guards on tcp_lane
          * alone and dereferences lwip_ctx. Hash seed mirrors the reorder
-         * engines' per-conn derivation (wall clock ^ conn_id; §6.2 needs no
-         * peer agreement). */
+         * engines' per-conn derivation (client clock ^ conn_id; §6.2 needs
+         * no peer agreement). */
         if (conn->lwip_ctx && !conn->tcp_lane) {
             uint64_t lane_seed = client_now_us(c) ^ ((uint64_t)c->conn_id << 32);
             conn->tcp_lane = mqvpn_tcp_lane_new(&c->config.hybrid, lane_seed, c,
@@ -3004,7 +3013,7 @@ cli_start_connection(mqvpn_client_t *c)
      * stays gated on peer_reorder_supported (set later by negotiation), so until
      * then everything is sent RAW. RX is created so we can accept stamped
      * datagrams as soon as the peer advertises support. The hash seeds need not
-     * match the peer (§6.2); derive them from wall-clock time + conn_id. */
+     * match the peer (§6.2); derive them from the client clock + conn_id. */
     if (c->config.reorder.mode != MQVPN_REORDER_OFF) {
         uint64_t seed_base = client_now_us(c) ^ ((uint64_t)c->conn_id << 32);
         conn->reorder_tx = mqvpn_reorder_tx_new(&c->config.reorder, seed_base);
@@ -3081,8 +3090,11 @@ init_xquic_engine(mqvpn_client_t *c)
         s_xqc_clock_fn = cfg->clock_fn;
         s_xqc_clock_ctx = cfg->clock_ctx;
         engine_cbs.realtime_ts = xqc_custom_timestamp;
-        engine_cbs.monotonic_ts = xqc_custom_timestamp;
     }
+    /* Always: the receive times handed to xqc_engine_packet_process() come
+     * from client_now_us(), so xquic's timers must run on the same clock
+     * (its own default is gettimeofday()). */
+    engine_cbs.monotonic_ts = xqc_custom_timestamp;
 
     xqc_transport_callbacks_t tcbs = {
         .write_socket = cb_write_socket,
