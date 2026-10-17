@@ -2274,13 +2274,8 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
             LOG_W(s, "reinjection mode=deadline protects only stream traffic; hybrid "
                      "lane is disabled, effect limited to control streams");
         }
-    } else if (cfg->reinjection == MQVPN_REINJ_IDLE ||
-               cfg->reinjection == MQVPN_REINJ_DGRAM) {
+    } else if (cfg->reinjection == MQVPN_REINJ_IDLE) {
         LOG_I(s, "reinjection enabled: mode=%s", mqvpn_reinj_to_name(cfg->reinjection));
-        if (cfg->reinjection == MQVPN_REINJ_DGRAM) {
-            LOG_I(s, "reinjection mode=dgram duplicates every datagram: datagram-lane "
-                     "goodput is capped at one path's capacity");
-        }
     }
 
     /* H3 callbacks */

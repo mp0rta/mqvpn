@@ -106,6 +106,11 @@ struct mqvpn_config_s {
     int reinj_hard_deadline_ms;
     int reinj_deadline_lower_bound_ms;
 
+    /* Redundant mode (client only); empty port list = all UDP. */
+    int redundant;
+    uint16_t redundant_ports[MQVPN_REDUNDANT_MAX_PORTS];
+    int n_redundant_ports;
+
     mqvpn_log_level_t log_level;
     int multipath;
     int reconnect_enable;
@@ -206,6 +211,34 @@ MQVPN_INTERNAL const char *mqvpn_server_scheduler_label(const mqvpn_server_t *s)
  * If xquic re-orders this enum the labels become wrong; every value is
  * pinned to the real enum by tests/test_xquic_abi_pin.c. */
 MQVPN_INTERNAL const char *mqvpn_path_state_label(int state);
+
+/* ── Redundant-mode client test hooks (tests/test_api.c) ──
+ * The fixture gives the connection masque_stream_id 4.
+ * The send stub stands in for every xquic datagram send of the ingress →
+ * lane decision → tun_send_datagram sequence: a pinned copy gets the slot's
+ * xquic path id, the ordinary (non-pinned) send gets UINT64_MAX. Returns the
+ * xquic send result (0 or -XQC_*). */
+typedef int (*mqvpn_test_send_fn)(void *ud, uint64_t xqc_path_id, const uint8_t *frame,
+                                  size_t frame_len, uint64_t *dgram_id);
+MQVPN_INTERNAL int mqvpn_client_test_redundant_fixture(mqvpn_client_t *c, int n_paths,
+                                                       size_t dgram_mss,
+                                                       int reorder_peer);
+MQVPN_INTERNAL int mqvpn_client_test_reorder_peek_hdr(mqvpn_client_t *c,
+                                                      const uint8_t *pkt, size_t len,
+                                                      uint8_t hdr_out[8]);
+MQVPN_INTERNAL int mqvpn_client_test_redundant_send(mqvpn_client_t *c, const uint8_t *pkt,
+                                                    size_t len, mqvpn_test_send_fn send,
+                                                    void *ud);
+MQVPN_INTERNAL int mqvpn_client_test_decide_lane(mqvpn_client_t *c, const uint8_t *pkt,
+                                                 size_t len, int *do_stamp,
+                                                 int *redundant);
+MQVPN_INTERNAL void mqvpn_client_test_dgram_notify(mqvpn_client_t *c, uint64_t dgram_id,
+                                                   int acked);
+MQVPN_INTERNAL int mqvpn_client_test_redundant_outstanding(mqvpn_client_t *c, int idx);
+MQVPN_INTERNAL struct mqvpn_redundant_tx_s *
+mqvpn_client_test_redundant_tx(mqvpn_client_t *c);
+MQVPN_INTERNAL void mqvpn_client_test_set_slot(mqvpn_client_t *c, int idx, int live,
+                                               uint64_t xqc_path_id);
 
 /* Snapshot of FEC / multipath counters for one client.
  * INTERNAL — not in public libmqvpn.h. Field widths chosen to safely accept

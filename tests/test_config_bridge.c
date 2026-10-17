@@ -69,6 +69,9 @@ test_all_fields_forwarded(void)
     cfg.reinj_srtt_factor_pct = 111;
     cfg.reinj_hard_deadline_ms = 502;
     cfg.reinj_deadline_lower_bound_ms = 21;
+    cfg.redundant = 1;
+    cfg.redundant_ports[0] = 4200;
+    cfg.n_redundant_ports = 1;
     cfg.init_max_path_id = 17;
     cfg.tun_mtu = 1400;
     cfg.reorder.max_wait_ms = 33; /* spot-check: apply_reorder ran */
@@ -101,6 +104,9 @@ test_all_fields_forwarded(void)
     ASSERT_EQ_INT(lc->reinj_srtt_factor_pct, 111, "reinj_srtt_factor_pct");
     ASSERT_EQ_INT(lc->reinj_hard_deadline_ms, 502, "reinj_hard_deadline_ms");
     ASSERT_EQ_INT(lc->reinj_deadline_lower_bound_ms, 21, "reinj_deadline_lower_bound_ms");
+    ASSERT_EQ_INT(lc->redundant, 1, "redundant");
+    ASSERT_EQ_INT(lc->n_redundant_ports, 1, "n_redundant_ports");
+    ASSERT_EQ_INT(lc->redundant_ports[0], 4200, "redundant_ports[0]");
     ASSERT_EQ_INT(lc->init_max_path_id, 17, "init_max_path_id");
     ASSERT_EQ_INT(lc->tun_mtu, 1400, "tun_mtu");
     ASSERT_EQ_INT(lc->reorder.mode, cfg.reorder.mode, "reorder.mode bridged");

@@ -287,14 +287,13 @@ test_reinjection_mapping(void)
     ASSERT_EQ(cs.reinj_hard_deadline, 100000);
     ASSERT_EQ(cs.reinj_deadline_lower_bound, 100000);
 
-    /* dgram: AFTER_SEND only; scheduler_callback must NOT be overridden */
-    in.reinjection = MQVPN_REINJ_DGRAM;
+    /* 3 was the removed dgram value: now invalid -> off, WLB survives */
+    in.reinjection = (mqvpn_reinjection_t)3;
     mqvpn_build_conn_settings(&in, &cs);
-    ASSERT_EQ(cs.mp_enable_reinjection, XQC_REINJ_UNACK_AFTER_SEND);
-    ASSERT_PTR_EQ(cs.reinj_ctl_callback.xqc_reinj_ctl_can_reinject,
-                  xqc_dgram_reinj_ctl_cb.xqc_reinj_ctl_can_reinject);
+    ASSERT_EQ(cs.mp_enable_reinjection, 0);
+    ASSERT_PTR_EQ(cs.reinj_ctl_callback.xqc_reinj_ctl_can_reinject, NULL);
     ASSERT_PTR_EQ(cs.scheduler_callback.xqc_scheduler_get_path,
-                  xqc_wlb_scheduler_cb.xqc_scheduler_get_path); /* WLB survives */
+                  xqc_wlb_scheduler_cb.xqc_scheduler_get_path);
 
     /* invalid enum value -> off */
     in.reinjection = (mqvpn_reinjection_t)99;

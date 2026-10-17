@@ -217,7 +217,7 @@ typedef enum {
     MQVPN_REINJ_OFF = 0,
     MQVPN_REINJ_DEADLINE = 1, /* stream lane: lateness + LOW-class duplication */
     MQVPN_REINJ_IDLE = 2,     /* stream lane: duplicate unacked when send queue idle */
-    MQVPN_REINJ_DGRAM = 3,    /* datagram lane: duplicate every DATAGRAM once */
+    /* 3 was MQVPN_REINJ_DGRAM (removed); do not reuse */
 } mqvpn_reinjection_t;
 
 /* Flow-aware reorder-only datagram delivery (see reorder design spec).
@@ -668,6 +668,15 @@ MQVPN_API int mqvpn_config_set_reinjection_deadline_params(mqvpn_config_t *cfg,
                                                            int srtt_factor_pct,
                                                            int hard_deadline_ms,
                                                            int deadline_lower_bound_ms);
+
+/* Redundant mode (client only): send each uplink UDP packet on every usable
+ * path. An empty port list (n_ports == 0) duplicates all UDP; otherwise only
+ * the listed destination ports. Returns MQVPN_ERR_INVALID_ARG for a NULL cfg,
+ * n_ports > MQVPN_REDUNDANT_MAX_PORTS, ports == NULL with n_ports > 0, or a 0
+ * port; duplicates are removed after the count check. */
+#define MQVPN_REDUNDANT_MAX_PORTS 16
+MQVPN_API int mqvpn_config_set_redundant(mqvpn_config_t *cfg, int enabled,
+                                         const uint16_t *ports, size_t n_ports);
 MQVPN_API int mqvpn_config_set_log_level(mqvpn_config_t *cfg, mqvpn_log_level_t level);
 MQVPN_API int mqvpn_config_set_multipath(mqvpn_config_t *cfg, int enable);
 MQVPN_API int mqvpn_config_set_reconnect(mqvpn_config_t *cfg, int enable,

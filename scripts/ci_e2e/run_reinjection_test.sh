@@ -36,15 +36,16 @@
 #                  sampled while the client is still connected (closed
 #                  paths drop out of the get_status snapshot). Retry
 #                  rationale: see _deadline_body.
-#   3. dgram     — [Multipath] Reinjection = dgram on BOTH sides, [Hybrid]
-#                  left disabled (default). Reorder-off rationale: see
-#                  _dgram_body. MQVPN_REINJ_DGRAM duplicates every DATAGRAM
-#                  unconditionally (MQVPN_REINJ_DGRAM in libmqvpn.h), so no netem
-#                  degradation is needed to arm it — a sustained inner UDP
-#                  flow (iperf3 -u), server -> client, is enough. Asserts
-#                  the workload completes, inner reachability survives it,
-#                  and reinject_tx_bytes > 0 on at least one server-side
-#                  path.
+#   3. dgram_unrecognized — [Multipath] Reinjection = dgram on BOTH sides.
+#                  The mode was removed: config files that still carry it
+#                  warn "Reinjection 'dgram' not recognized" and run with
+#                  reinjection off. Asserts the tunnel comes up, both logs
+#                  carry the warning and neither logs "reinjection enabled:".
+#   4. redundant — client-only [Multipath] Redundant = on (server default).
+#                  Asserts the client logs "redundant mode enabled:
+#                  ports=all", then sends an inner UDP flow client -> server
+#                  and compares the server-side veth rx_bytes of both paths:
+#                  each must carry at least 1.4 MB and min/max >= 0.8.
 #
 # Every scenario ends with a sanitizer exit-code check (stop_and_check_sanitizer,
 # same as 22/25 sibling e2e scripts) on both the client and server PID —
@@ -598,26 +599,19 @@ test_scenario_deadline() {
     return "$rc"
 }
 
-# --- Scenario 3: dgram ---
+# --- Scenario 3: dgram_unrecognized ---
 
-_dgram_body() {
+_dgram_unrecognized_body() {
     local server_log="$1" client_log="$2"
-    local ini="${LOG_DIR}/dgram.ini"
-    local udp_port=5303
+    local ini="${LOG_DIR}/dgram_unrecognized.ini"
 
     bench_cleanup
     bench_setup_netns
 
-    # [Hybrid] and [Reorder] intentionally omitted: default Hybrid is
-    # disabled (so inner traffic rides the connect-ip DATAGRAM lane —
-    # dgram-mode reinjection's target, per MQVPN_REINJ_DGRAM in libmqvpn.h), and
-    # default Reorder is OFF (MQVPN_REORDER_OFF default in reorder.h) — the shim would dedup
-    # dgram-mode's duplicate datagrams at the tun, and this scenario
-    # exercises the documented un-deduped semantics with it off.
-    cat >"$ini" <<EOF
+    cat >"$ini" <<EOT
 [Multipath]
 Reinjection = dgram
-EOF
+EOT
 
     start_server_with_flags "$server_log" \
         --control-port "$CTRL_PORT" \
@@ -629,69 +623,122 @@ EOF
     if ! wait_for 10 ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$TUNNEL_SERVER_IP"; then
         echo "  tunnel never came up"; tail -30 "$client_log"; return 1
     fi
-    echo "  dgram: tunnel up"
+    echo "  dgram_unrecognized: tunnel up"
 
-    if ! grep -q "reinjection enabled: mode=dgram" "$server_log"; then
-        echo "  FAIL: server log missing 'reinjection enabled: mode=dgram'"; return 1
+    local f
+    for f in "$server_log" "$client_log"; do
+        if ! grep -F "Reinjection 'dgram' not recognized" "$f" >/dev/null; then
+            echo "  FAIL: $f missing the 'not recognized' warning"; return 1
+        fi
+        if grep -F "reinjection enabled:" "$f" >/dev/null; then
+            echo "  FAIL: $f has 'reinjection enabled:' although dgram is not recognized"
+            return 1
+        fi
+    done
+    echo "  dgram_unrecognized: warning present, reinjection stays off on both ends: OK"
+    return 0
+}
+
+test_scenario_dgram_unrecognized() {
+    local server_log="${LOG_DIR}/dgram_unrecognized_server.log"
+    local client_log="${LOG_DIR}/dgram_unrecognized_client.log"
+    local rc=0
+    _dgram_unrecognized_body "$server_log" "$client_log" || rc=1
+    finish_scenario "dgram_unrecognized" "$server_log" "$client_log"
+    return "$rc"
+}
+
+# --- Scenario 4: redundant ---
+
+_redundant_body() {
+    local server_log="$1" client_log="$2"
+    local ini="${LOG_DIR}/redundant.ini"
+    local udp_port=5304
+
+    bench_cleanup
+    bench_setup_netns
+
+    # Client only; the server runs with defaults and ignores the key.
+    cat >"$ini" <<EOT
+[Multipath]
+Redundant = on
+EOT
+
+    start_server_with_flags "$server_log" \
+        --control-port "$CTRL_PORT" \
+        || return 1
+
+    start_client_with_auth_key "$_BENCH_PSK" "$client_log" "--config $ini" || return 1
+
+    if ! wait_for 10 ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$TUNNEL_SERVER_IP"; then
+        echo "  tunnel never came up"; tail -30 "$client_log"; return 1
     fi
-    if ! grep -q "reinjection enabled: mode=dgram" "$client_log"; then
-        echo "  FAIL: client log missing 'reinjection enabled: mode=dgram'"; return 1
+    echo "  redundant: tunnel up"
+
+    if ! grep -F "redundant mode enabled: ports=all" "$client_log" >/dev/null; then
+        echo "  FAIL: client log missing 'redundant mode enabled: ports=all'"
+        return 1
     fi
-    echo "  dgram: marker present on both ends: OK"
+    echo "  redundant: client marker present: OK"
 
-    local tunnel_client_ip
-    tunnel_client_ip=$(get_client_tunnel_ip "$server_log")
+    # Sample only once both paths carry copies, or the second path's delta can miss.
+    if ! wait_for 10 grep -qE "activated:.*iface=${VETH_B0}" "$client_log"; then
+        echo "  FAIL: second path never activated"; tail -30 "$client_log"; return 1
+    fi
 
-    # Sustained inner UDP flow, server -> client: iperf3 server listens in
-    # NS_CLIENT on the tunnel address, iperf3 client sends from NS_SERVER.
-    # Mirrors tests/test_e2e_reorder.sh's run_inner_udp_workload, direction
-    # reversed per this task's server-is-sender convention.
-    ip netns exec "$NS_CLIENT" iperf3 -s -B "$tunnel_client_ip" -p "$udp_port" -1 \
+    # Inner UDP flow, client -> server: iperf3 server in NS_SERVER on the
+    # tunnel address. The server-side veth rx_bytes of each path show how
+    # many bytes arrived on it.
+    ip netns exec "$NS_SERVER" iperf3 -s -B "$TUNNEL_SERVER_IP" -p "$udp_port" -1 \
         >/dev/null 2>&1 &
     local iperf_srv_pid=$!
     sleep 1
 
+    local rx_a_0 rx_b_0 rx_a_1 rx_b_1
+    rx_a_0=$(ip netns exec "$NS_SERVER" cat "/sys/class/net/${VETH_A1}/statistics/rx_bytes")
+    rx_b_0=$(ip netns exec "$NS_SERVER" cat "/sys/class/net/${VETH_B1}/statistics/rx_bytes")
+
     local udp_ok=1
-    if ! ip netns exec "$NS_SERVER" iperf3 -c "$tunnel_client_ip" -p "$udp_port" \
-            -u -b 20M -l 1200 -t 6 >/dev/null 2>&1; then
+    if ! ip netns exec "$NS_CLIENT" iperf3 -c "$TUNNEL_SERVER_IP" -p "$udp_port" \
+            -u -b 2M -l 1200 -t 6 >/dev/null 2>&1; then
         udp_ok=0
     fi
+
+    rx_a_1=$(ip netns exec "$NS_SERVER" cat "/sys/class/net/${VETH_A1}/statistics/rx_bytes")
+    rx_b_1=$(ip netns exec "$NS_SERVER" cat "/sys/class/net/${VETH_B1}/statistics/rx_bytes")
     kill "$iperf_srv_pid" 2>/dev/null || true
     wait "$iperf_srv_pid" 2>/dev/null || true
 
     if (( udp_ok != 1 )); then
-        echo "  FAIL: inner UDP workload (server -> client) did not complete"
+        echo "  FAIL: inner UDP workload (client -> server) did not complete"
         return 1
     fi
-    echo "  dgram: inner UDP workload (server -> client) completed: OK"
 
-    # Inner reachability sanity, same direction.
-    if ! ip netns exec "$NS_SERVER" ping -c 3 -W 2 "$tunnel_client_ip" >/dev/null 2>&1; then
-        echo "  FAIL: server->client tunnel ping failed after the UDP workload"
+    local d_a=$(( rx_a_1 - rx_a_0 )) d_b=$(( rx_b_1 - rx_b_0 ))
+    echo "  redundant: server rx delta path A=${d_a} B=${d_b} bytes"
+    # 2 Mbit/s x 6 s is about 1.5 MB of payload per path; duplication puts the
+    # whole flow on each path, while a WLB split would give about 0.75 MB each.
+    local min_bytes=1400000
+    if (( d_a < min_bytes || d_b < min_bytes )); then
+        echo "  FAIL: a path received less than ${min_bytes} bytes (A=${d_a} B=${d_b})"
         return 1
     fi
-    echo "  dgram: server->client tunnel reachability intact: OK"
-
-    local resp max_bytes
-    resp=$(ctrl_local '{"cmd":"get_status"}') || return 1
-    max_bytes=$(max_reinject_tx_bytes "$resp")
-    if (( max_bytes <= 0 )); then
-        echo "  FAIL: no path shows reinject_tx_bytes > 0: $resp"
-        echo "  --- server_log reinjection lines (last 5) ---"
-        grep 'reinjection' "$server_log" | tail -5
+    local lo=$d_a hi=$d_b
+    if (( d_b < d_a )); then lo=$d_b; hi=$d_a; fi
+    if (( lo * 10 < hi * 8 )); then
+        echo "  FAIL: paths unbalanced, min/max < 0.8 (A=${d_a} B=${d_b})"
         return 1
     fi
-    echo "  dgram: reinject_tx_bytes=$max_bytes on at least one path: OK"
-
+    echo "  redundant: both paths carried the flow (A=${d_a} B=${d_b}): OK"
     return 0
 }
 
-test_scenario_dgram() {
-    local server_log="${LOG_DIR}/dgram_server.log"
-    local client_log="${LOG_DIR}/dgram_client.log"
+test_scenario_redundant() {
+    local server_log="${LOG_DIR}/redundant_server.log"
+    local client_log="${LOG_DIR}/redundant_client.log"
     local rc=0
-    _dgram_body "$server_log" "$client_log" || rc=1
-    finish_scenario "dgram" "$server_log" "$client_log"
+    _redundant_body "$server_log" "$client_log" || rc=1
+    finish_scenario "redundant" "$server_log" "$client_log"
     return "$rc"
 }
 
@@ -705,7 +752,8 @@ echo "================================================================"
 
 run_test "scenario off — no marker, reinject_tx_bytes==0"      test_scenario_off
 run_test "scenario deadline — stream lane reinjection on path degrade" test_scenario_deadline
-run_test "scenario dgram — datagram lane unconditional duplication"    test_scenario_dgram
+run_test "scenario dgram_unrecognized — removed mode warns, runs off" test_scenario_dgram_unrecognized
+run_test "scenario redundant — uplink UDP copied on every path"       test_scenario_redundant
 
 echo ""
 echo "================================================================"

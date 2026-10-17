@@ -79,6 +79,13 @@ class MqvpnConfigTest {
     }
 
     @Test
+    fun redundantFields_defaultsAreOff() {
+        val c = MqvpnConfig(serverAddress = "h", authKey = "k")
+        assertFalse(c.redundantEnabled)
+        assertTrue(c.redundantPorts.isEmpty())
+    }
+
+    @Test
     fun reorderFields_jsonRoundTrip() {
         val c = MqvpnConfig(serverAddress = "h", authKey = "k",
             reorderEnabled = true, reorderProfile = MqvpnConfig.ReorderProfile.FIBER_LTE,

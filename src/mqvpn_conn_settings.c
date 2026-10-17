@@ -107,10 +107,6 @@ mqvpn_apply_reinjection(const mqvpn_conn_settings_input_t *in, xqc_conn_settings
             cs->reinj_deadline_lower_bound = cs->reinj_hard_deadline;
         }
         break;
-    case MQVPN_REINJ_DGRAM:
-        cs->reinj_ctl_callback = xqc_dgram_reinj_ctl_cb;
-        cs->mp_enable_reinjection = XQC_REINJ_UNACK_AFTER_SEND;
-        break;
     }
 }
 

@@ -9,6 +9,7 @@
 #include "vpn_client.h"
 #include "vpn_server.h"
 #include "flow_sched.h"
+#include "redundant_tx.h"
 #include "mqvpn_sched_names.h"
 
 #include <xquic/xquic.h> /* for XQC_ENABLE_* compile-time defines */
@@ -509,10 +510,29 @@ main(int argc, char *argv[])
     if (reinj_lookup < 0) {
         fprintf(stderr,
                 "warning: [Multipath] Reinjection '%s' not recognized "
-                "(expected 'off', 'deadline', 'idle', or 'dgram'); using 'off'\n",
+                "(expected 'off', 'deadline', or 'idle'); using 'off'\n",
                 file_cfg.reinjection);
     } else {
         reinjection = reinj_lookup;
+    }
+
+    /* Redundant mode: a bad RedundantPorts list is fatal only when the mode is
+     * on; it never degrades to "all UDP". */
+    uint16_t redundant_ports[MQVPN_REDUNDANT_MAX_PORTS] = {0};
+    int n_redundant_ports = 0;
+    if (file_cfg.redundant && strcmp(eff_mode, "client") == 0) {
+        n_redundant_ports =
+            file_cfg.redundant_ports_err
+                ? -1
+                : mqvpn_redundant_parse_ports(file_cfg.redundant_ports, redundant_ports,
+                                              MQVPN_REDUNDANT_MAX_PORTS);
+        if (n_redundant_ports < 0) {
+            fprintf(stderr,
+                    "error: [Multipath] RedundantPorts '%s' is not a comma-separated "
+                    "list of up to 16 ports (1-65535)\n",
+                    file_cfg.redundant_ports);
+            return 1;
+        }
     }
 
     /* Paths: CLI paths override config paths entirely */
@@ -577,6 +597,8 @@ main(int argc, char *argv[])
             .reinj_srtt_factor_pct = file_cfg.reinjection_srtt_factor_pct,
             .reinj_hard_deadline_ms = file_cfg.reinjection_hard_deadline_ms,
             .reinj_deadline_lower_bound_ms = file_cfg.reinjection_deadline_lower_bound_ms,
+            .redundant = file_cfg.redundant,
+            .n_redundant_ports = n_redundant_ports,
             /* INI [Reorder]/[ReorderRule]; always valid (mqvpn_config_defaults
              * seeds mode OFF even with no [Reorder] section). No CLI flags in v1. */
             .reorder = file_cfg.reorder,
@@ -593,6 +615,8 @@ main(int argc, char *argv[])
             .tun_offload = file_cfg.tun_offload,
             .tun_gro = file_cfg.tun_gro,
         };
+        memcpy(cfg.redundant_ports, redundant_ports,
+               (size_t)n_redundant_ports * sizeof(redundant_ports[0]));
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];
         }

@@ -70,10 +70,13 @@ typedef struct mqvpn_file_config_s {
     int request_server_scheduler; /* client */
     char cc[16]; /* congestion control: bbr2 (default), bbr, cubic, none */
 
-    char reinjection[16];                    /* "off" | "deadline" | "idle" | "dgram" */
+    char reinjection[16];                    /* "off" | "deadline" | "idle" */
     int reinjection_srtt_factor_pct;         /* deadline mode only; [100,1000] */
     int reinjection_hard_deadline_ms;        /* deadline mode only; [1,60000] */
     int reinjection_deadline_lower_bound_ms; /* deadline mode only; [1,60000] */
+    int redundant;                           /* client: send UDP on every path */
+    char redundant_ports[256];               /* "4200,9000"; empty = all UDP */
+    int redundant_ports_err;                 /* 1 = RedundantPorts invalid */
 
     /* draft-21 §4.6 initial Maximum Path Identifier TP, 0 = use xquic default 8 */
     unsigned long long init_max_path_id;

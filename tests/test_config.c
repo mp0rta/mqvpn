@@ -1878,6 +1878,93 @@ test_hybrid_egress_acl_ini_v6(void)
 
 /* ── INI ↔ JSON scalar-key parity (pins the descriptor-table refactor) ──── */
 
+/* RedundantPorts is a complex key: errors set redundant_ports_err instead of
+ * being downgraded to warn-and-ignore. */
+static void
+redundant_ports_ini(const char *val, mqvpn_file_config_t *c)
+{
+    char ini[1536];
+    snprintf(ini, sizeof(ini), "[Multipath]\nRedundantPorts = %s\n", val);
+    char *path = write_tmp(ini);
+    mqvpn_config_defaults(c);
+    mqvpn_config_load(c, path);
+    unlink(path);
+}
+
+static void
+redundant_ports_json(const char *val, mqvpn_file_config_t *c)
+{
+    char js[1536];
+    snprintf(js, sizeof(js), "{\"redundant_ports\":%s}", val);
+    mqvpn_config_defaults(c);
+    mqvpn_config_load_json_filecfg(c, js);
+}
+
+static void
+test_redundant_ports_ini_json(void)
+{
+    mqvpn_file_config_t a, b;
+    redundant_ports_ini("4200,9000", &a);
+    redundant_ports_json("\"4200,9000\"", &b);
+    ASSERT_EQ_STR(a.redundant_ports, "4200,9000", "rports ini value");
+    ASSERT_EQ_STR(b.redundant_ports, "4200,9000", "rports json value");
+    ASSERT_EQ_INT(a.redundant_ports_err, 0, "rports ini ok");
+    ASSERT_EQ_INT(b.redundant_ports_err, 0, "rports json ok");
+
+    char longlist[512] = "", spaces[512] = "", huge[1200];
+    for (int i = 0; i < 60; i++)
+        strcat(longlist, "4200,"); /* 300 chars */
+    memset(spaces, ' ', 300);
+    memset(huge, '1', 1100);
+    huge[1100] = '\0';
+
+    redundant_ports_ini(longlist, &a);
+    ASSERT_EQ_INT(a.redundant_ports_err, 1, "rports ini 300 chars");
+    char q[1300];
+    snprintf(q, sizeof(q), "\"%s\"", longlist);
+    redundant_ports_json(q, &b);
+    ASSERT_EQ_INT(b.redundant_ports_err, 1, "rports json 300 chars");
+    snprintf(q, sizeof(q), "\"%sabc\"", spaces);
+    redundant_ports_json(q, &b);
+    ASSERT_EQ_INT(b.redundant_ports_err, 1, "rports json spaces then abc");
+    snprintf(q, sizeof(q), "\"%s\"", huge);
+    redundant_ports_json(q, &b);
+    ASSERT_EQ_INT(b.redundant_ports_err, 1, "rports json 1100 chars");
+    redundant_ports_json("[4200]", &b);
+    ASSERT_EQ_INT(b.redundant_ports_err, 1, "rports json non-string");
+    redundant_ports_json("\"4200,abc\"", &b);
+    ASSERT_EQ_INT(b.redundant_ports_err, 1, "rports json bad token");
+    redundant_ports_ini("4200,abc", &a);
+    ASSERT_EQ_INT(a.redundant_ports_err, 1, "rports ini bad token");
+    ASSERT_EQ_STR(a.redundant_ports, "4200,abc", "rports ini bad value kept");
+    ASSERT_EQ_STR(b.redundant_ports, "4200,abc", "rports json bad value kept");
+
+    redundant_ports_json("\"  4200  \"", &b);
+    ASSERT_EQ_STR(b.redundant_ports, "4200", "rports json trimmed");
+    ASSERT_EQ_INT(b.redundant_ports_err, 0, "rports json trimmed ok");
+    snprintf(q, sizeof(q), "\"%s4200\"", spaces);
+    redundant_ports_json(q, &b);
+    ASSERT_EQ_STR(b.redundant_ports, "4200", "rports json 300 spaces then 4200");
+    ASSERT_EQ_INT(b.redundant_ports_err, 0, "rports json 300 spaces ok");
+}
+
+static void
+test_redundant_ini_onoff(void)
+{
+    const char *vals[] = {"on", "off", "ON", "Off", "true", "no", "bogus"};
+    const int want[] = {1, 0, 1, 0, 1, 0, 0};
+    for (size_t i = 0; i < sizeof(vals) / sizeof(vals[0]); i++) {
+        char ini[64];
+        snprintf(ini, sizeof(ini), "[Multipath]\nRedundant = %s\n", vals[i]);
+        char *path = write_tmp(ini);
+        mqvpn_file_config_t c;
+        mqvpn_config_defaults(&c);
+        mqvpn_config_load(&c, path);
+        unlink(path);
+        ASSERT_EQ_INT(c.redundant, want[i], vals[i]);
+    }
+}
+
 static void
 test_ini_json_scalar_parity(void)
 {
@@ -1916,6 +2003,7 @@ test_ini_json_scalar_parity(void)
                       "ReinjectionSrttFactorPct = 150\n"
                       "ReinjectionHardDeadlineMs = 300\n"
                       "ReinjectionDeadlineLowerBoundMs = 10\n"
+                      "Redundant = true\n"
                       "[Reorder]\n"
                       "Enabled = on\n"
                       "MaxWaitMs = 55\n"
@@ -1975,6 +2063,7 @@ test_ini_json_scalar_parity(void)
                        "\"reinjection_srtt_factor_pct\":150,"
                        "\"reinjection_hard_deadline_ms\":300,"
                        "\"reinjection_deadline_lower_bound_ms\":10,"
+                       "\"redundant\":true,"
                        "\"reorder\":{"
                        "\"enabled\":\"on\","
                        "\"max_wait_ms\":55,"
@@ -2037,6 +2126,8 @@ test_ini_json_scalar_parity(void)
     ASSERT_EQ_INT(a.reinjection_deadline_lower_bound_ms,
                   b.reinjection_deadline_lower_bound_ms,
                   "parity reinjection_deadline_lower_bound_ms");
+    ASSERT_EQ_INT(a.redundant, 1, "parity ini redundant");
+    ASSERT_EQ_INT(b.redundant, 1, "parity json redundant");
     ASSERT_EQ_STR(a.auth_key, b.auth_key, "parity auth_key");
     ASSERT_EQ_STR(a.server_auth_key, b.server_auth_key, "parity server_auth_key");
     ASSERT_EQ_INT(a.reorder.mode, b.reorder.mode, "parity reorder mode");
@@ -2244,6 +2335,7 @@ test_sched_cc_name_roundtrip(void)
     ASSERT_EQ_INT(mqvpn_cc_from_name(NULL), -1, "cc from_name(NULL)");
     ASSERT_EQ_INT(mqvpn_reinj_from_name("bogus"), -1, "reinj from_name(bogus)");
     ASSERT_EQ_INT(mqvpn_reinj_from_name(NULL), -1, "reinj from_name(NULL)");
+    ASSERT_EQ_INT(mqvpn_reinj_from_name("dgram"), -1, "reinj from_name(dgram)");
 }
 
 int
@@ -2358,6 +2450,8 @@ main(void)
 
     /* INI/JSON scalar-key parity */
     test_ini_json_scalar_parity();
+    test_redundant_ports_ini_json();
+    test_redundant_ini_onoff();
     test_ini_json_invalid_scalar_parity();
 
     /* mqvpn_sched_names.h table parity */

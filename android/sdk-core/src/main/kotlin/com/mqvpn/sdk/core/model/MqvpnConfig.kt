@@ -52,6 +52,10 @@ data class MqvpnConfig(
     val reorderEnabled: Boolean = false,
     val reorderProfile: ReorderProfile = ReorderProfile.CELLULAR_BOND,
     val reorderPorts: List<Int> = emptyList(),
+    /** Send each UDP packet over every path at once (uplink). */
+    val redundantEnabled: Boolean = false,
+    /** Destination ports to duplicate; empty = all UDP. */
+    val redundantPorts: List<Int> = emptyList(),
     val hybridEnabled: Boolean = false,
     val hybridTcpMode: HybridTcpMode = HybridTcpMode.AUTO,
     /**

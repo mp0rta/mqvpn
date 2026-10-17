@@ -13,6 +13,7 @@
 #include "json_mini.h"
 #include "libmqvpn.h"
 #include "log.h"
+#include "redundant_tx.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -129,6 +130,30 @@ section_name(int section)
     case SEC_ADVANCED: return "Advanced";
     default: return "?";
     }
+}
+
+/* RedundantPorts: a bad list sets redundant_ports_err (the CLI then refuses to
+ * start) instead of degrading to "all UDP". `val` is already trimmed. */
+/* Bounded copy with an explicit NUL: a too-long value is kept truncated. */
+static void
+store_redundant_ports(mqvpn_file_config_t *cfg, const char *val)
+{
+    size_t n = strlen(val);
+    if (n > sizeof(cfg->redundant_ports) - 1) n = sizeof(cfg->redundant_ports) - 1;
+    memcpy(cfg->redundant_ports, val, n);
+    cfg->redundant_ports[n] = '\0';
+}
+
+static void
+set_redundant_ports(mqvpn_file_config_t *cfg, const char *val)
+{
+    uint16_t tmp[MQVPN_REDUNDANT_MAX_PORTS];
+    /* The value is stored even when bad (for the error message); consumers
+     * must check redundant_ports_err before using it. */
+    store_redundant_ports(cfg, val);
+    cfg->redundant_ports_err =
+        strlen(val) >= sizeof(cfg->redundant_ports) - 1 ||
+        mqvpn_redundant_parse_ports(val, tmp, MQVPN_REDUNDANT_MAX_PORTS) < 0;
 }
 
 /* Split comma-separated DNS list into cfg->dns_servers[] */
@@ -418,6 +443,7 @@ reorder_rule_begin(mqvpn_file_config_t *cfg, int lineno, const char *path)
 typedef enum {
     CFGK_STR,             /* char[]: snprintf copy, silent truncation          */
     CFGK_BOOL,            /* int: parse_bool / json_read_bool                  */
+    CFGK_BOOL_ONOFF,      /* int: INI also accepts on/off (any case); bad = ignored */
     CFGK_INT,             /* int: int_ok() gate; optional fallback on invalid  */
     CFGK_U32,             /* uint32_t: inclusive max bound                     */
     CFGK_U16,             /* uint16_t: max 0xffff                              */
@@ -596,6 +622,8 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_INT_FB(SEC_MULTIPATH, "ReinjectionDeadlineLowerBoundMs",
                "reinjection_deadline_lower_bound_ms", reinjection_deadline_lower_bound_ms,
                cfgk_int_reinj_deadline_ms, 20),
+    {SEC_MULTIPATH, "Redundant", "redundant", CFGK_BOOL_ONOFF, CFGK_OFF(redundant), 0, 0,
+     NULL, 0, 0, NULL},
     CFG_STR(SEC_MULTIPATH, "CC", "cc", cc),
     CFG_U64(SEC_MULTIPATH, "InitMaxPathId", "init_max_path_id", init_max_path_id,
             MQVPN_INIT_MAX_PATH_ID_MAX),
@@ -658,7 +686,8 @@ cfg_key_store(mqvpn_file_config_t *cfg, const cfg_key_desc_t *d, const char *v_s
      * int fields store via *(int *) since the offset names a real int member. */
     switch (d->type) {
     case CFGK_STR: snprintf(base, d->size, "%s", v_str); break;
-    case CFGK_BOOL: *(int *)base = v_int; break;
+    case CFGK_BOOL:
+    case CFGK_BOOL_ONOFF: *(int *)base = v_int; break;
     case CFGK_INT:
         /* forced-invalid sentinel from the walkers. Note: a genuine input of
          * -2147483648 collides with this sentinel and is rejected too;
@@ -725,6 +754,17 @@ cfg_key_apply_ini(mqvpn_file_config_t *cfg, int section, const char *key, const 
         case CFGK_REORDER_MODE:
         case CFGK_HYBRID_TCP_MODE: rc = cfg_key_store(cfg, d, val, 0, 0); break;
         case CFGK_BOOL: rc = cfg_key_store(cfg, d, NULL, parse_bool(val), 0); break;
+        case CFGK_BOOL_ONOFF: {
+            int bv = -1;
+            if (strcasecmp(val, "on") == 0 || strcasecmp(val, "true") == 0 ||
+                strcasecmp(val, "yes") == 0 || strcmp(val, "1") == 0)
+                bv = 1;
+            else if (strcasecmp(val, "off") == 0 || strcasecmp(val, "false") == 0 ||
+                     strcasecmp(val, "no") == 0 || strcmp(val, "0") == 0)
+                bv = 0;
+            rc = (bv < 0) ? -1 : cfg_key_store(cfg, d, NULL, bv, 0);
+            break;
+        }
         case CFGK_INT: {
             /* INT_MIN sentinel: forced-invalid marker so an unparseable value
              * takes the same fallback path as a parsed-but-rejected one
@@ -801,7 +841,8 @@ cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *
             else
                 rc = cfg_key_store(cfg, d, sbuf, 0, 0);
             break;
-        case CFGK_BOOL: {
+        case CFGK_BOOL:
+        case CFGK_BOOL_ONOFF: {
             int iv = 0;
             rc = (json_read_bool(v, &iv) < 0) ? -1 : cfg_key_store(cfg, d, NULL, iv, 0);
             break;
@@ -1011,6 +1052,10 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
             }
             return;
         }
+        if (strcasecmp(key, "RedundantPorts") == 0) {
+            set_redundant_ports(cfg, val);
+            return;
+        }
         break;
     case SEC_REORDER_RULE: {
         /* Keys fill the rule slot pushed by reorder_rule_begin() on section
@@ -1167,6 +1212,18 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
         if (ed_v && json_read_cidr_array(cfg->hybrid.egress_deny, MQVPN_EGRESS_ACL_MAX,
                                          &cfg->hybrid.n_egress_deny, ed_v) < 0)
             return -1;
+    }
+
+    v = json_find_key(json_text, "redundant_ports");
+    if (v) {
+        char rp[1024] = "";
+        /* json_read_string truncates silently: a full buffer means too long. */
+        if (json_read_string(v, rp, sizeof(rp)) != 0 || strlen(rp) >= sizeof(rp) - 1) {
+            store_redundant_ports(cfg, rp); /* may be partial/garbage; message only */
+            cfg->redundant_ports_err = 1;
+        } else {
+            set_redundant_ports(cfg, trim(rp));
+        }
     }
 
     char dns_buf[MQVPN_CONFIG_MAX_DNS][64];

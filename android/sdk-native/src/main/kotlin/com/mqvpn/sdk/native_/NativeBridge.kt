@@ -88,6 +88,9 @@ object NativeBridge {
     /** mqvpn_config_set_reorder_enabled(cfg, mode: 0=OFF, 1=ON) */
     external fun configSetReorderEnabled(cfg: Long, mode: Int): Int
 
+    /** mqvpn_config_set_redundant(cfg, enabled, ports); empty ports = all UDP. */
+    external fun configSetRedundant(cfg: Long, enabled: Boolean, ports: IntArray): Int
+
     /** mqvpn_config_add_reorder_rule(cfg, proto, port, profile) */
     external fun configAddReorderRule(cfg: Long, proto: Int, port: Int, profile: Int): Int
 
