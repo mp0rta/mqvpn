@@ -171,6 +171,39 @@ test_propagation_init_max_path_id(void)
     return 0;
 }
 
+static int
+test_path_mtu_sizes_packets(void)
+{
+    xqc_conn_settings_t cs;
+    mqvpn_conn_settings_input_t in = {
+        .is_server = false,
+        .enable_multipath = true,
+        .scheduler = MQVPN_SCHED_WLB,
+    };
+    static const struct {
+        int path_mtu;
+        size_t pkt;
+    } cases[] = {
+        {0, MQVPN_MAX_PKT_OUT_SIZE},
+        {1280, 1200},
+        {1492, 1412},
+        {1500, 1420},
+        {9000, 1420},
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        in.path_mtu = cases[i].path_mtu;
+        mqvpn_build_conn_settings(&in, &cs);
+        ASSERT_EQ(cs.max_pkt_out_size, cases[i].pkt);
+    }
+    /* the largest packet on the wire fits the path, IPv6 header included */
+    for (int mtu = 1280; mtu <= 1500; mtu++) {
+        ASSERT_EQ(mqvpn_pkt_out_size(mtu) + MQVPN_PKT_OUT_OVERHEAD + 48 <= (size_t)mtu,
+                  1);
+    }
+    return 0;
+}
+
 /* The server forces multipath ON unconditionally — mqvpn's client is the active
  * path creator, so the server allows MP regardless of its input flag
  * (src/mqvpn_conn_settings.c:88-95). test_asymmetry_server_vs_client only feeds
@@ -410,6 +443,7 @@ main(void)
     failed += test_propagation_scheduler();
     failed += test_propagation_cc();
     failed += test_propagation_init_max_path_id();
+    failed += test_path_mtu_sizes_packets();
     failed += test_server_forces_multipath_regardless_of_input();
     failed += test_recv_rate_limit_wiring();
     failed += test_reinjection_mapping();

@@ -71,6 +71,7 @@ test_all_fields_forwarded(void)
     cfg.reinj_deadline_lower_bound_ms = 21;
     cfg.init_max_path_id = 17;
     cfg.tun_mtu = 1400;
+    cfg.path_mtu = 1492;
     cfg.reorder.max_wait_ms = 33; /* spot-check: apply_reorder ran */
     cfg.hybrid.enabled = 1;       /* spot-check: apply_hybrid ran */
     cfg.hybrid.tcp_max_flows = 77;
@@ -103,6 +104,7 @@ test_all_fields_forwarded(void)
     ASSERT_EQ_INT(lc->reinj_deadline_lower_bound_ms, 21, "reinj_deadline_lower_bound_ms");
     ASSERT_EQ_INT(lc->init_max_path_id, 17, "init_max_path_id");
     ASSERT_EQ_INT(lc->tun_mtu, 1400, "tun_mtu");
+    ASSERT_EQ_INT(lc->path_mtu, 1492, "path_mtu");
     ASSERT_EQ_INT(lc->reorder.mode, cfg.reorder.mode, "reorder.mode bridged");
     ASSERT_EQ_INT(lc->reorder.max_wait_ms, 33, "reorder.max_wait_ms bridged");
     ASSERT_EQ_INT(lc->hybrid.enabled, 1, "hybrid.enabled bridged");

@@ -2249,6 +2249,7 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         .scheduler = cfg->scheduler,
         .cc = cfg->cc,
         .init_max_path_id = cfg->init_max_path_id,
+        .path_mtu = cfg->path_mtu,
         /* recv_rate_bytes_per_sec: intentionally absent (=0) — client-only knob */
         .reinjection = cfg->reinjection,
         .reinj_srtt_factor_pct = cfg->reinj_srtt_factor_pct,
@@ -2453,7 +2454,13 @@ mqvpn_server_start(mqvpn_server_t *s)
     info.assigned_prefix = (uint8_t)s->pool.prefix_len;
     memcpy(info.server_ip, &s->pool.base.s_addr, 4);
     info.server_prefix = (uint8_t)s->pool.prefix_len;
-    s->tun_mtu = s->config.tun_mtu > 0 ? s->config.tun_mtu : MQVPN_TUN_MTU_AUTO;
+    s->tun_mtu = s->config.tun_mtu > 0
+                     ? s->config.tun_mtu
+                     : (int)mqvpn_pkt_out_size(s->config.path_mtu) - MQVPN_DGRAM_HEADROOM;
+    /* a small PathMTU can put the auto value below 1280, where Linux turns
+     * IPv6 off on the TUN; floor it when v6 is in play, as the client does */
+    if (s->config.tun_mtu <= 0 && s->pool.has_v6 && s->tun_mtu < IPV6_MIN_MTU)
+        s->tun_mtu = IPV6_MIN_MTU;
     info.mtu = s->tun_mtu;
 
     if (s->pool.has_v6) {

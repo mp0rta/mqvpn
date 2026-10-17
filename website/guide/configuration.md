@@ -167,6 +167,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `ReconnectInterval` | Seconds between reconnection attempts | `5` |
 | `ManageRoutes` | Manage the host routing table (VPN routes and server pin route). Set to `false` (or pass `--no-manage-routes`) to handle routing yourself. Routing alone does not stop applications that bind their sockets to a specific adapter — see the note below. | `true` |
 | `MTU` | TUN MTU (1280–9000). Client: cap — if the negotiated MTU is lower, the negotiated value is used. Server: sets the TUN MTU directly. | auto (client ~1382 negotiated, server 1382) |
+| `PathMTU` | Largest IP packet the network between client and server carries without fragmenting (1280–9000). mqvpn sizes its QUIC packets to fit, assuming an IPv6 header so the value is safe for IPv4 too. Set the same value on both ends. See [Using a larger tunnel MTU](#using-a-larger-tunnel-mtu). | `0` (1400-byte packets) |
 
 > **Note: route management does not cover interface-bound applications**
 >
@@ -390,6 +391,7 @@ For most setups, leave `MTU` unset. The auto-negotiated value (~1382) works on s
 |----------|----------------|
 | Standard Ethernet / mobile | Leave unset (auto ~1382) |
 | Deeply nested tunnels (mqvpn → WG → another tunnel) | Calculate remaining MTU; set if near 1280 |
+| Both ends on a clean 1500-byte path, larger tunnel MTU wanted | `PathMTU = 1500` on both ends (TUN MTU 1402) |
 
 On the client, if `MTU` is set, mqvpn uses `min(config MTU, negotiated MTU)`; a warning is logged when the config value exceeds the negotiated value. On the server, `MTU` sets the TUN MTU directly (default 1382).
 
@@ -411,6 +413,24 @@ max_pkt_out_size           1400 bytes
 ```
 
 This negotiation happens at connection time on the **client**, and the client TUN MTU follows it. The **server** sets its TUN MTU once at startup (1382 by default, or the configured value). When a packet exceeds a particular client's negotiated MSS, the server returns ICMP Packet Too Big to the original sender, carrying that client's MSS as the MTU value; the sender's Path MTU Discovery then lowers its packet size. The shared server TUN MTU never needs to shrink for individual clients.
+
+### Using a larger tunnel MTU
+
+The default 1400-byte packet size leaves room for PPPoE and most mobile networks without any tuning. If you know the network between client and server carries larger packets, set `PathMTU` to that size on both ends and mqvpn sizes its packets to fit:
+
+```
+PathMTU                    1500 bytes
+ − IPv6 + UDP header         48 bytes
+ − encryption tag            16 bytes
+ − room for an ACK frame     16 bytes
+                           ─────────
+ = max_pkt_out_size         1420 bytes (upper limit)
+ − QUIC, DATAGRAM and MASQUE headers  18 bytes
+                           ─────────
+ = TUN MTU                  1402 bytes
+```
+
+The QUIC library caps packets at 1420 bytes, so values above 1500 give the same result. If `PathMTU` is larger than what the network really carries, full-size packets get fragmented or dropped, so only set it when you know the path.
 
 ### Running other tunnels inside mqvpn
 

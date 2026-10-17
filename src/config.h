@@ -84,7 +84,8 @@ typedef struct mqvpn_file_config_s {
     int kill_switch;        /* 1=block traffic outside tunnel, 0=off (default) */
     int manage_routes; /* 1=manage host routes (default), 0=skip routing table setup */
 
-    int tun_mtu; /* [Interface] MTU — 0=auto, >0=cap (floor 1280) */
+    int tun_mtu;  /* [Interface] MTU — 0=auto, >0=cap (floor 1280) */
+    int path_mtu; /* [Interface] PathMTU — 0=default packet size */
 
     /* [Reorder] / repeated [ReorderRule] — flow-aware reorder shim (§16.1).
      * Seeded with mqvpn_reorder_config_default() in mqvpn_config_defaults(). */

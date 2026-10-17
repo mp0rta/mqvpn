@@ -434,6 +434,14 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
         cfg->tun_mtu = iv;
     }
 
+    v = json_find_key(json_text, "path_mtu");
+    if (v) {
+        if (json_read_int_strict(v, &iv) != 0 || (iv != 0 && (iv < 1280 || iv > 9000))) {
+            return MQVPN_ERR_INVALID_ARG;
+        }
+        cfg->path_mtu = iv;
+    }
+
     /* "paths" sets the multipath flag; individual interface names are not stored
      * in the opaque config — callers must configure interface binding separately
      * via the platform layer. */
@@ -609,6 +617,15 @@ mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu)
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     if (mtu != 0 && (mtu < 1280 || mtu > 9000)) return MQVPN_ERR_INVALID_ARG;
     cfg->tun_mtu = mtu;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_path_mtu(mqvpn_config_t *cfg, int mtu)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    if (mtu != 0 && (mtu < 1280 || mtu > 9000)) return MQVPN_ERR_INVALID_ARG;
+    cfg->path_mtu = mtu;
     return MQVPN_OK;
 }
 
