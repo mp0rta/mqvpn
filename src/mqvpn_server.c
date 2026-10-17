@@ -3090,10 +3090,13 @@ mqvpn_server_get_client_info(const mqvpn_server_t *server, mqvpn_client_info_t *
         /* Get xquic per-path stats. paths_info is dynamically allocated
          * (xquic PR3 §4.3 Rev 4); caller must free(). */
         xqc_conn_stats_t st = xqc_conn_get_stats(s->engine, &conn->cid);
-        ci->bytes_tx = st.total_app_bytes;
+        /* Not st.total_app_bytes: that one adds the received bytes too. */
+        ci->bytes_tx = 0;
         ci->bytes_rx = 0;
-        for (uint32_t p = 0; st.paths_info && p < st.paths_info_count; p++)
+        for (uint32_t p = 0; st.paths_info && p < st.paths_info_count; p++) {
+            ci->bytes_tx += st.paths_info[p].path_send_bytes;
             ci->bytes_rx += st.paths_info[p].path_recv_bytes;
+        }
 
         int np = 0;
         for (uint32_t p = 0;

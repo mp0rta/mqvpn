@@ -553,6 +553,11 @@ if not paths:
 total_pkt_sent = sum(p.get("pkt_sent", 0) for p in paths)
 if total_pkt_sent <= 0:
     print(f"total pkt_sent across paths = {total_pkt_sent}"); sys.exit(1)
+# The client's bytes_tx is what the server sent it: the sum over its paths
+# (every path is listed here), not sent plus received.
+paths_tx = sum(p.get("bytes_tx", 0) for p in paths)
+if c.get("bytes_tx") != paths_tx:
+    print(f"bytes_tx={c.get('bytes_tx')} != sum of the paths' bytes_tx={paths_tx}"); sys.exit(1)
 # state_label was added in v0.5.0 — every path must carry one.
 ALLOWED_STATES = {"init", "validating", "active", "closing", "closed", "unknown"}
 for p in paths:

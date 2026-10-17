@@ -1482,6 +1482,56 @@ TEST(server_session_quic_loopback)
     loopback_teardown(&lb);
 }
 
+/* A client's bytes_tx in get_client_info (get_status) counts what the server
+ * sent to it, not what it sent plus what it received. */
+TEST(server_client_info_bytes_tx_is_sent_bytes)
+{
+    loopback_t lb;
+    loopback_setup(&lb, NULL);
+    loopback_pump_until(&lb, done_established, 10000);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+    mqvpn_client_set_tun_active(lb.cli, 1, -1);
+
+    /* Upload only: 20 packets of 1000 bytes from the client's address. */
+    uint8_t pkt[1000];
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x45;
+    pkt[2] = sizeof(pkt) >> 8;
+    pkt[3] = sizeof(pkt) & 0xff;
+    pkt[8] = 64;
+    pkt[9] = 17;
+    memcpy(pkt + 12, g_cli_tunnel_info.assigned_ip, 4);
+    pkt[16] = 8;
+    pkt[17] = 8;
+    pkt[18] = 8;
+    pkt[19] = 8;
+    int baseline = g_tun_output_called;
+    for (int k = 0; k < 20; k++)
+        ASSERT_EQ(mqvpn_client_on_tun_packet(lb.cli, pkt, sizeof(pkt)), MQVPN_OK);
+    for (int i = 0; i < 5000 && g_tun_output_called < baseline + 20;) {
+        drain_and_tick(lb.svr, lb.svr_tctx, lb.cli, lb.cli_tctx, lb.path_h);
+        struct pollfd pfds[2] = {
+            {.fd = lb.svr_fd, .events = POLLIN},
+            {.fd = lb.cli_fd, .events = POLLIN},
+        };
+        int w = poll(pfds, 2, 5);
+        i += (w == 0) ? 5 : 1;
+    }
+    ASSERT_EQ(g_tun_output_called, baseline + 20);
+
+    mqvpn_client_info_t ci[2];
+    int n = 0;
+    ASSERT_EQ(mqvpn_server_get_client_info(lb.svr, ci, 2, &n), MQVPN_OK);
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(ci[0].n_paths, 1);
+    ASSERT_EQ(ci[0].bytes_rx >= 20 * sizeof(pkt), 1);
+    ASSERT_EQ(ci[0].bytes_tx, ci[0].paths[0].bytes_tx);
+    ASSERT_EQ(ci[0].bytes_rx, ci[0].paths[0].bytes_rx);
+    ASSERT_EQ(ci[0].bytes_tx < ci[0].bytes_rx, 1);
+
+    loopback_teardown(&lb);
+}
+
 /* ── Manual reconnect regression helpers ── */
 
 /* Two-path variant of drain_and_tick: attributes each client transport's
@@ -2034,6 +2084,7 @@ main(void)
 
     /* QUIC loopback integration test (test_server_session per impl_plan) */
     run_server_session_quic_loopback();
+    run_server_client_info_bytes_tx_is_sent_bytes();
     run_server_reorder_mtu_only_when_negotiated();
     run_client_verifier_accepts_presented_chain();
     run_client_verifier_is_the_hostname_judge();
