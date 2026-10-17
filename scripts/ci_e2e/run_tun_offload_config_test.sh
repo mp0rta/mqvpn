@@ -178,10 +178,14 @@ iperf3_tcp() {
     timeout $((IPERF_SECONDS + 15)) ip netns exec "$NS_CLIENT" iperf3 \
         -c "$TUNNEL_SERVER_IP" -t "$IPERF_SECONDS" $reverse --json \
         >"$json" 2>&1 || true
+    # tcpdump must have run through the whole transfer, or an empty capture
+    # would pass the gro-off arms; it exits 0 on SIGINT.
+    local dump_alive=1 dump_rc=0
+    kill -0 "$dump_pid" 2>/dev/null || dump_alive=0
     kill "$srv_pid" 2>/dev/null || true
     wait "$srv_pid" 2>/dev/null || true
     kill -INT "$dump_pid" 2>/dev/null || true
-    wait "$dump_pid" 2>/dev/null || true
+    wait "$dump_pid" 2>/dev/null || dump_rc=$?
 
     mbps=$(jq -r '(.end.sum_received.bits_per_second // 0) / 1e6 | floor' "$json" 2>/dev/null || echo 0)
     mbps="${mbps:-0}"
@@ -192,8 +196,9 @@ iperf3_tcp() {
     fi
     echo "  OK: iperf3 $label ${mbps} Mbps"
 
-    if [ ! -f "$pcap" ]; then
-        echo "  FAIL: tcpdump wrote no capture on $tun in $rx_ns"
+    if [ "$dump_alive" -eq 0 ] || [ "$dump_rc" -ne 0 ] || [ ! -f "$pcap" ]; then
+        echo "  FAIL: tcpdump on $tun in $rx_ns did not capture the whole transfer" \
+            "(alive_at_end=$dump_alive rc=$dump_rc)"
         return 1
     fi
     # A failed read would count 0 and pass the gro-off arms silently.
