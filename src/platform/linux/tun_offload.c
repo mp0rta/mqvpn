@@ -502,21 +502,26 @@ mqvpn_gro_push(mqvpn_gro_t *g, const uint8_t *p, size_t len)
     gro_pkt_t k;
     g->pushed++;
 
-    if (!gro_parse(p, len, &k)) {
+    if (len == 0) {
+        gro_emit_plain(g, p, len);
+        return;
+    }
+
+    /* Longer than an entry's buffer: never merged, but still ordered. */
+    if (len > GRO_MAX_LEN || !gro_parse(p, len, &k)) {
         /* Not mergeable. Packets of other flows may pass; but a TCP packet we
          * cannot merge (SYN, FIN, RST, ...) must not overtake data or an ACK
-         * of its own flow still held back. */
-        if ((p[0] >> 4) == 4 || (p[0] >> 4) == 6) {
+         * of its own flow still held back. Its ports may sit behind IPv4
+         * options or IPv6 extension headers, so match on the addresses only;
+         * an IPv6 packet that is not UDP may be TCP behind such a header. */
+        int ver = p[0] >> 4;
+        if ((ver == 4 && len >= IPV4_MIN_HLEN && p[9] == IPPROTO_TCP) ||
+            (ver == 6 && len >= IPV6_HLEN && p[6] != IPPROTO_UDP)) {
+            int v6 = ver == 6;
+            size_t aoff = v6 ? 8 : 12, alen = v6 ? 32 : 8;
             for (int i = 0; i < GRO_SLOTS; i++) {
                 gro_entry_t *e = &g->e[i];
-                if (!e->used) continue;
-                size_t ip_hlen = e->ip_hlen;
-                int v6 = e->v6;
-                if ((int)((p[0] >> 4) == 6) != v6 || len < ip_hlen + 4) continue;
-                if (p[v6 ? 6 : 9] != IPPROTO_TCP) continue;
-                size_t aoff = v6 ? 8 : 12, alen = v6 ? 32 : 8;
-                if (memcmp(e->buf + aoff, p + aoff, alen) == 0 &&
-                    memcmp(e->buf + ip_hlen, p + ip_hlen, 4) == 0)
+                if (e->used && e->v6 == v6 && memcmp(e->buf + aoff, p + aoff, alen) == 0)
                     gro_flush_entry(g, e);
             }
         }
