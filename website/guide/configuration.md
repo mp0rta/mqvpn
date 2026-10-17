@@ -158,7 +158,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 |-----|-------------|---------|
 | `Listen` | Listen address (`HOST:PORT`, server only) | `0.0.0.0:443` |
 | `Subnet` | Client IPv4 pool (server only) | `10.0.0.0/24` |
-| `Subnet6` | Client IPv6 pool (server only) | — |
+| `Subnet6` | Client IPv6 pool (server only). Each client gets the same position in it as in `Subnet`, so it must have room for as many addresses: a prefix length of `/120` or shorter for a `/24`. | — |
 | `TunName` | TUN device name | `mqvpn0` |
 | `DNS` | DNS servers (comma-separated) | — |
 | `LogLevel` | Log level (`debug`, `info`, `warn`, `error`) | `info` |
