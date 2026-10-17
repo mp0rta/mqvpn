@@ -990,16 +990,20 @@ test_gro_long_header_keeps_order(void)
     }
 }
 
-static size_t len_q[4];
-static unsigned len_n;
+/* The packets an emit callback must see, in order. */
+typedef struct {
+    const uint8_t *pkt[2];
+    size_t len[2];
+    unsigned n;
+} expect_t;
 
 static int
-capture_len(void *ctx, const struct virtio_net_hdr *vh, const uint8_t *pkt, size_t len)
+capture_expect(void *ctx, const struct virtio_net_hdr *vh, const uint8_t *pkt, size_t len)
 {
-    (void)ctx;
-    (void)pkt;
-    assert(vh->gso_type == 0 && len_n < 4);
-    len_q[len_n++] = len;
+    expect_t *x = ctx;
+    assert(vh->gso_type == 0 && x->n < 2);
+    assert(len == x->len[x->n] && memcmp(pkt, x->pkt[x->n], len) == 0);
+    x->n++;
     return 0;
 }
 
@@ -1018,11 +1022,11 @@ test_gro_oversized(void)
     size_t ip_hlen;
     size_t len = build(big, &s, &ip_hlen);
     assert(len == sizeof(big));
-    mqvpn_gro_t *g = mqvpn_gro_new(capture_len, NULL);
-    len_n = 0;
+    expect_t x = {.pkt = {data, big}, .len = {dlen, len}};
+    mqvpn_gro_t *g = mqvpn_gro_new(capture_expect, &x);
     mqvpn_gro_push(g, data, dlen);
     mqvpn_gro_push(g, big, len);
-    assert(len_n == 2 && len_q[0] == dlen && len_q[1] == len && !mqvpn_gro_pending(g));
+    assert(x.n == 2 && !mqvpn_gro_pending(g));
     mqvpn_gro_free(g);
 }
 
