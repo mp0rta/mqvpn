@@ -63,10 +63,15 @@ int mqvpn_gso_begin(mqvpn_gso_iter_t *it, const uint8_t *pkt, size_t len,
 int mqvpn_gso_next(mqvpn_gso_iter_t *it, uint8_t *out, size_t out_cap);
 
 /*
- * Receive side: TCP GRO. Packets headed for the TUN are held briefly and
- * consecutive data segments of one flow are merged into a single super-packet
- * that the kernel receives with a virtio_net_hdr (VIRTIO_NET_HDR_GSO_TCPV4/6,
- * partial checksum), the same shape a NIC GRO produces. Pure ACKs are held
+ * Receive side: TCP and UDP GRO. Packets headed for the TUN are held briefly
+ * and consecutive data segments of one flow are merged into a single
+ * super-packet that the kernel receives with a virtio_net_hdr
+ * (VIRTIO_NET_HDR_GSO_TCPV4/6, partial checksum), the same shape a NIC GRO
+ * produces. Once mqvpn_gro_set_udp() allows it, consecutive UDP datagrams of
+ * one flow with the same payload size (the last one may be shorter) are
+ * merged the same way into a VIRTIO_NET_HDR_GSO_UDP_L4 packet, which a socket
+ * with UDP_GRO receives whole and the kernel splits back into the same
+ * datagrams for any other socket or for forwarding. Pure ACKs are held
  * the same way, and one that a later cumulative ACK of its flow makes
  * redundant (same headers and options, ACK number strictly ahead) is replaced
  * by it, so a burst of ACKs reaches the kernel as one, as from a receiver
@@ -82,7 +87,9 @@ int mqvpn_gso_next(mqvpn_gso_iter_t *it, uint8_t *out, size_t out_cap);
  */
 typedef struct mqvpn_gro mqvpn_gro_t;
 
-/* Deliver one packet to the TUN; vh is all-zero for a plain packet. */
+/* Deliver one packet to the TUN; vh is all-zero for a plain packet. Returns 0
+ * or -errno; -EINVAL for a UDP GSO packet turns UDP merging off and writes its
+ * datagrams one by one instead. */
 typedef int (*mqvpn_gro_emit_fn)(void *ctx, const struct virtio_net_hdr *vh,
                                  const uint8_t *pkt, size_t len);
 
@@ -95,6 +102,12 @@ int mqvpn_gro_pending(const mqvpn_gro_t *g);
  * pure ACKs replaced by a later one (never written). */
 void mqvpn_gro_stats(const mqvpn_gro_t *g, uint64_t *pushed, uint64_t *supers,
                      uint64_t *merged, uint64_t *acks);
+/* Allow merging UDP over IPv4 / IPv6: only when the TUN took TUN_F_USO4 /
+ * TUN_F_USO6, which kernels that parse VIRTIO_NET_HDR_GSO_UDP_L4 (6.2 and
+ * later) accept. Off by default. */
+void mqvpn_gro_set_udp(mqvpn_gro_t *g, int v4, int v6);
+/* The UDP share of the super-packet counters of mqvpn_gro_stats(). */
+void mqvpn_gro_udp_stats(const mqvpn_gro_t *g, uint64_t *supers, uint64_t *merged);
 
 /* mqvpn_tun_create() with the offloads chosen by the caller ([Advanced]
  * TunOffload / TunGro); mqvpn_tun_create() enables both. offload = 0 opens

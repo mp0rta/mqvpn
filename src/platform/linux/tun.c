@@ -44,7 +44,7 @@ struct mqvpn_tun_offload {
     uint64_t csum_pkts;         /* plain packets whose checksum we finished */
     uint64_t drops;             /* malformed vnet packets dropped */
     int fd;                     /* the TUN, for the GRO emit callback */
-    mqvpn_gro_t *gro;           /* write-side TCP GRO, NULL when off */
+    mqvpn_gro_t *gro;           /* write-side TCP/UDP GRO, NULL when off */
 };
 
 /* GRO sink: one packet (or one coalesced super-packet) to the TUN. */
@@ -53,10 +53,13 @@ tun_gro_emit(void *ctx, const struct virtio_net_hdr *vh, const uint8_t *pkt, siz
 {
     struct mqvpn_tun_offload *off = ctx;
     struct iovec iov[2] = {{(void *)vh, sizeof(*vh)}, {(void *)pkt, len}};
-    ssize_t n = writev(off->fd, iov, 2);
-    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
-        LOG_ERR("tun write: %s", strerror(errno));
-    return n < 0 ? -1 : 0;
+    if (writev(off->fd, iov, 2) >= 0) return 0;
+    int err = errno;
+    if (err == EINVAL && vh->gso_type == VIRTIO_NET_HDR_GSO_UDP_L4)
+        LOG_WRN("tun write: UDP GSO packet refused, writing UDP datagrams one by one");
+    else if (err != EAGAIN && err != EWOULDBLOCK)
+        LOG_ERR("tun write: %s", strerror(err));
+    return -err;
 }
 
 /*
@@ -167,6 +170,11 @@ mqvpn_tun_create_opts(mqvpn_tun_t *tun, const char *dev_name, int offload, int g
     if (off) {
         off->fd = fd;
         if (gro) off->gro = mqvpn_gro_new(tun_gro_emit, off);
+        /* UDP datagrams are merged into USO packets, which the kernel takes
+         * from the TUN only when it took the USO offload flags. */
+        if (off->gro)
+            mqvpn_gro_set_udp(off->gro, (off_flags & TUN_F_USO4) != 0,
+                              (off_flags & TUN_F_USO6) != 0);
     }
     strncpy(tun->name, ifr.ifr_name, IFNAMSIZ - 1);
     tun->name[IFNAMSIZ - 1] = '\0';
@@ -622,11 +630,14 @@ mqvpn_tun_destroy(mqvpn_tun_t *tun)
         if (tun->offload->gro) {
             uint64_t pushed, supers, merged, acks;
             if (tun->fd >= 0) mqvpn_gro_flush(tun->offload->gro);
+            uint64_t usupers, umerged;
             mqvpn_gro_stats(tun->offload->gro, &pushed, &supers, &merged, &acks);
+            mqvpn_gro_udp_stats(tun->offload->gro, &usupers, &umerged);
             LOG_INF("TUN %s: GRO: %llu packets written, %llu super-packets from %llu "
-                    "of them, %llu ACKs superseded",
+                    "of them (UDP: %llu from %llu), %llu ACKs superseded",
                     tun->name, (unsigned long long)pushed, (unsigned long long)supers,
-                    (unsigned long long)merged, (unsigned long long)acks);
+                    (unsigned long long)merged, (unsigned long long)usupers,
+                    (unsigned long long)umerged, (unsigned long long)acks);
             mqvpn_gro_free(tun->offload->gro);
         }
         LOG_INF("TUN %s: offload stats: %llu GSO packets split into %llu segments, %llu "

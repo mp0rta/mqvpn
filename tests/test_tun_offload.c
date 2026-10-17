@@ -11,6 +11,7 @@
 #undef NDEBUG
 #include <arpa/inet.h>
 #include <assert.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -480,17 +481,28 @@ expand(uint8_t (*pk)[2048], size_t *lens, unsigned max)
             continue;
         }
         assert(e->vh.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM);
-        assert(e->vh.csum_offset == 16 && e->len <= 65535);
-        int v6 = e->vh.gso_type == VIRTIO_NET_HDR_GSO_TCPV6;
+        assert(e->len <= 65535);
+        int udp = e->vh.gso_type == VIRTIO_NET_HDR_GSO_UDP_L4;
+        int v6 = udp ? (e->pkt[0] >> 4) == 6 : e->vh.gso_type == VIRTIO_NET_HDR_GSO_TCPV6;
+        assert(e->vh.csum_offset == (udp ? 6 : 16));
         assert(e->vh.csum_start == (v6 ? 40 : 20));
-        assert(e->vh.hdr_len == e->vh.csum_start + 20);
+        assert(e->vh.hdr_len == e->vh.csum_start + (udp ? 8 : 20));
+        if (udp) {
+            /* What Linux accepts: more than one segment, at most
+             * UDP_MAX_SEGMENTS (64 before 6.9), and a UDP length that is
+             * the run's, which the kernel takes out of the checksum. */
+            size_t pay = e->len - e->vh.hdr_len;
+            assert(pay > e->vh.gso_size && pay <= 64u * e->vh.gso_size);
+            const uint8_t *u = e->pkt + e->vh.csum_start;
+            assert((size_t)(u[4] << 8 | u[5]) == e->len - e->vh.csum_start);
+        }
         /* The kernel finishes the checksum from the pseudo-header sum left in
          * the field: do that, then split with our own splitter. */
         uint8_t tmp[SEG_CAP];
         memcpy(tmp, e->pkt, e->len);
         assert(mqvpn_vnet_finish_csum(tmp, e->len, &e->vh) == 0);
-        assert(ref_l4_sum(tmp, v6, IPPROTO_TCP, tmp + e->vh.csum_start,
-                          e->len - e->vh.csum_start) == 0xffff);
+        assert(ref_l4_sum(tmp, v6, udp ? IPPROTO_UDP : IPPROTO_TCP,
+                          tmp + e->vh.csum_start, e->len - e->vh.csum_start) == 0xffff);
         mqvpn_gso_iter_t it;
         assert(mqvpn_gso_begin(&it, e->pkt, e->len, &e->vh) == 0);
         int r;
@@ -1031,6 +1043,329 @@ test_gro_oversized(void)
     mqvpn_gro_free(g);
 }
 
+/* ---- UDP GRO ---- */
+
+/* Recompute the IPv4 header checksum and the UDP checksum after an edit. */
+static void
+udp_fix(uint8_t *p, size_t len)
+{
+    int v6 = (p[0] >> 4) == 6;
+    size_t ip_hlen = v6 ? 40 : (size_t)(p[0] & 0x0f) * 4;
+    if (!v6) {
+        p[10] = p[11] = 0;
+        uint16_t c = (uint16_t)~ref_fold(ref_sum(p, ip_hlen, 0));
+        p[10] = (uint8_t)(c >> 8);
+        p[11] = (uint8_t)c;
+    }
+    uint8_t *u = p + ip_hlen;
+    u[6] = u[7] = 0;
+    uint16_t c = (uint16_t)~ref_l4_sum(p, v6, IPPROTO_UDP, u, len - ip_hlen);
+    if (c == 0) c = 0xffff;
+    u[6] = (uint8_t)(c >> 8);
+    u[7] = (uint8_t)c;
+}
+
+/* A fully valid UDP datagram (DF, TTL 64); its payload depends on seed. */
+static size_t
+mk_udp(uint8_t *p, int v6, uint16_t id, size_t payload, uint16_t sport, uint8_t seed)
+{
+    spec_t s = {.v6 = v6, .proto = IPPROTO_UDP, .payload = payload, .id = id};
+    size_t ip_hlen;
+    size_t total = build(p, &s, &ip_hlen);
+    p[ip_hlen] = (uint8_t)(sport >> 8);
+    p[ip_hlen + 1] = (uint8_t)sport;
+    for (size_t i = 0; i < payload; i++)
+        p[ip_hlen + 8 + i] = (uint8_t)(seed + i * 13);
+    udp_fix(p, total);
+    return total;
+}
+
+static uint8_t u_in[160][2048];
+static size_t u_ln[160];
+static uint8_t u_ex[200][2048];
+static size_t u_exl[200];
+
+/* Push u_in[0..n) with UDP merging on for both families, flush, and check that
+ * nout packets came out and that, cut again as the kernel cuts them, they are
+ * the inputs, byte for byte and in order. */
+static void
+udp_case(unsigned n, unsigned nout)
+{
+    mqvpn_gro_t *g = mqvpn_gro_new(capture, NULL);
+    mqvpn_gro_set_udp(g, 1, 1);
+    out_n = 0;
+    for (unsigned i = 0; i < n; i++)
+        mqvpn_gro_push(g, u_in[i], u_ln[i]);
+    mqvpn_gro_flush(g);
+    assert(!mqvpn_gro_pending(g));
+    assert(out_n == nout);
+    unsigned m = expand(u_ex, u_exl, 200);
+    assert(m == n);
+    for (unsigned i = 0; i < n; i++)
+        assert(u_exl[i] == u_ln[i] && memcmp(u_ex[i], u_in[i], u_ln[i]) == 0);
+    uint64_t pushed, supers, merged, acks, usupers, umerged;
+    mqvpn_gro_stats(g, &pushed, &supers, &merged, &acks);
+    mqvpn_gro_udp_stats(g, &usupers, &umerged);
+    assert(pushed == n && usupers == supers && umerged == merged);
+    mqvpn_gro_free(g);
+}
+
+/* Datagrams of one size merge into one VIRTIO_NET_HDR_GSO_UDP_L4 packet, the
+ * last one may be shorter, and only that: a longer datagram, or anything after
+ * a shorter one, starts a new run. */
+static void
+test_udp_gro_sizes(void)
+{
+    for (int v6 = 0; v6 < 2; v6++) {
+        size_t ip_hlen = v6 ? 40 : 20;
+        unsigned k = 0;
+        for (; k < 5; k++)
+            u_ln[k] = mk_udp(u_in[k], v6, (uint16_t)(100 + k), 1200, 4433, (uint8_t)k);
+        u_ln[k] = mk_udp(u_in[k], v6, (uint16_t)(100 + k), 700, 4433, (uint8_t)k);
+        k++;
+        udp_case(k, 1);
+        assert(out_q[0].vh.gso_type == VIRTIO_NET_HDR_GSO_UDP_L4);
+        assert(out_q[0].vh.gso_size == 1200 && out_q[0].vh.csum_start == ip_hlen);
+        assert(out_q[0].len == ip_hlen + 8 + 5 * 1200 + 700);
+
+        /* 700 then 1200: the longer one cannot join. */
+        u_ln[0] = mk_udp(u_in[0], v6, 1, 700, 4433, 1);
+        u_ln[1] = mk_udp(u_in[1], v6, 2, 1200, 4433, 2);
+        udp_case(2, 2);
+        assert(out_q[0].vh.gso_type == 0 && out_q[1].vh.gso_type == 0);
+
+        /* 1200 1200 700 | 1200 1200: the short one ends the first run. */
+        size_t sz[5] = {1200, 1200, 700, 1200, 1200};
+        for (unsigned i = 0; i < 5; i++)
+            u_ln[i] = mk_udp(u_in[i], v6, (uint16_t)(7 + i), sz[i], 4433, (uint8_t)i);
+        udp_case(5, 2);
+        assert(out_q[0].vh.gso_size == 1200 && out_q[1].vh.gso_size == 1200);
+
+        /* A one-byte datagram after full ones still joins as the last. */
+        u_ln[0] = mk_udp(u_in[0], v6, 1, 1200, 4433, 1);
+        u_ln[1] = mk_udp(u_in[1], v6, 2, 1, 4433, 2);
+        udp_case(2, 1);
+    }
+}
+
+/* A run holds at most 64 datagrams (UDP_MAX_SEGMENTS before Linux 6.9) and
+ * at most 64 KiB. */
+static void
+test_udp_gro_limits(void)
+{
+    for (int v6 = 0; v6 < 2; v6++) {
+        for (unsigned i = 0; i < 70; i++)
+            u_ln[i] = mk_udp(u_in[i], v6, (uint16_t)(200 + i), 100, 53, (uint8_t)i);
+        udp_case(70, 2);
+        size_t ip_hlen = v6 ? 40 : 20;
+        assert(out_q[0].len == ip_hlen + 8 + 64 * 100);
+        for (unsigned i = 0; i < 60; i++)
+            u_ln[i] = mk_udp(u_in[i], v6, (uint16_t)(300 + i), 1200, 443, (uint8_t)i);
+        udp_case(60, 2);
+        assert(out_q[0].len <= 65535 && out_q[0].len + 1200 > 65535);
+    }
+}
+
+/* Header fields the kernel copies to every datagram it cuts must be the same
+ * across a run; IPv4 IDs must follow one another (the kernel numbers the cut
+ * datagrams first ID + i), across the 16-bit wrap too. */
+static void
+test_udp_gro_headers(void)
+{
+    /* IPv4: an ID gap splits the run; the wrap does not. */
+    uint16_t ids[4] = {1, 2, 4, 5};
+    for (unsigned i = 0; i < 4; i++)
+        u_ln[i] = mk_udp(u_in[i], 0, ids[i], 1000, 4433, (uint8_t)i);
+    udp_case(4, 2);
+    uint16_t wrap[4] = {0xfffe, 0xffff, 0, 1};
+    for (unsigned i = 0; i < 4; i++)
+        u_ln[i] = mk_udp(u_in[i], 0, wrap[i], 1000, 4433, (uint8_t)i);
+    udp_case(4, 1);
+    /* A fixed ID is kept as it is: no merge. */
+    for (unsigned i = 0; i < 3; i++)
+        u_ln[i] = mk_udp(u_in[i], 0, 0, 1000, 4433, (uint8_t)i);
+    udp_case(3, 3);
+
+    /* IPv4: DSCP, ECN, DF or TTL changing keeps the datagrams apart. */
+    const int v4off[4] = {1, 1, 6, 8};
+    const uint8_t v4x[4] = {0x20, 0x01, 0x40, 0x01};
+    for (unsigned f = 0; f < 4; f++) {
+        for (unsigned i = 0; i < 3; i++)
+            u_ln[i] = mk_udp(u_in[i], 0, (uint16_t)(10 + i), 1000, 4433, (uint8_t)i);
+        u_in[1][v4off[f]] ^= v4x[f];
+        udp_fix(u_in[1], u_ln[1]);
+        udp_case(3, 3);
+    }
+    /* IPv6: traffic class, flow label or hop limit changing. */
+    const int v6off[3] = {1, 3, 7};
+    for (unsigned f = 0; f < 3; f++) {
+        for (unsigned i = 0; i < 3; i++)
+            u_ln[i] = mk_udp(u_in[i], 1, 0, 1000, 4433, (uint8_t)i);
+        u_in[1][v6off[f]] ^= f == 0 ? 0x40 : 0x01;
+        udp_fix(u_in[1], u_ln[1]);
+        udp_case(3, 3);
+    }
+}
+
+/* Datagrams that are not merged pass through untouched and do not overtake
+ * the run their flow holds: no checksum, a UDP length short of the packet
+ * (surplus area), no payload, a fragment (the later ones carry no ports), IP
+ * options, an IPv6 extension header. */
+static void
+test_udp_gro_passthrough(void)
+{
+    for (unsigned f = 0; f < 5; f++) {
+        for (int v6 = 0; v6 < 2; v6++) {
+            if (v6 && f == 3) continue; /* fragments: IPv4 only here */
+            unsigned k = 0;
+            for (; k < 2; k++)
+                u_ln[k] = mk_udp(u_in[k], v6, (uint16_t)(50 + k), 800, 4433, (uint8_t)k);
+            size_t ip_hlen = v6 ? 40 : 20, ip_hlen2;
+            uint8_t *x = u_in[k];
+            if (f == 0) {
+                u_ln[k] = mk_udp(x, v6, 52, 800, 4433, 9);
+                x[ip_hlen + 6] = x[ip_hlen + 7] = 0;
+            } else if (f == 1) {
+                u_ln[k] = mk_udp(x, v6, 52, 800, 4433, 9);
+                x[ip_hlen + 4] = (uint8_t)((8 + 700) >> 8);
+                x[ip_hlen + 5] = (uint8_t)(8 + 700);
+            } else if (f == 2) {
+                u_ln[k] = mk_udp(x, v6, 52, 0, 4433, 9);
+            } else if (f == 3) {
+                u_ln[k] = mk_udp(x, 0, 52, 800, 4433, 9);
+                x[6] = 0x00;
+                x[7] = 0x10; /* offset 128: no UDP header here */
+                udp_fix(x, u_ln[k]);
+            } else {
+                spec_t s = {.v6 = v6,
+                            .proto = IPPROTO_UDP,
+                            .ip_opts = v6 ? 0 : 8,
+                            .ext = v6 ? 8 : 0,
+                            .payload = 800};
+                u_ln[k] = build(x, &s, &ip_hlen2);
+                if (!v6) udp_fix(x, u_ln[k]);
+            }
+            k++;
+            u_ln[k] = mk_udp(u_in[k], v6, 53, 800, 4433, 10);
+            k++;
+            mqvpn_gro_t *g = mqvpn_gro_new(capture, NULL);
+            mqvpn_gro_set_udp(g, 1, 1);
+            out_n = 0;
+            for (unsigned i = 0; i < k; i++)
+                mqvpn_gro_push(g, u_in[i], u_ln[i]);
+            mqvpn_gro_flush(g);
+            /* the first two merged, then the odd one, then the last alone */
+            assert(out_n == 3);
+            assert(out_q[0].vh.gso_type == VIRTIO_NET_HDR_GSO_UDP_L4);
+            assert(out_q[1].vh.gso_type == 0 && out_q[1].len == u_ln[2] &&
+                   memcmp(out_q[1].pkt, u_in[2], u_ln[2]) == 0);
+            assert(out_q[2].vh.gso_type == 0 && out_q[2].len == u_ln[3] &&
+                   memcmp(out_q[2].pkt, u_in[3], u_ln[3]) == 0);
+            mqvpn_gro_free(g);
+        }
+    }
+}
+
+/* UDP merging is per family and off unless set; flows (ports, and TCP vs UDP
+ * on the same ports) never mix, and each keeps its order. */
+static void
+test_udp_gro_flows(void)
+{
+    /* Off by default, and IPv6 off while IPv4 is on. */
+    for (unsigned i = 0; i < 3; i++)
+        u_ln[i] = mk_udp(u_in[i], 1, 0, 900, 4433, (uint8_t)i);
+    mqvpn_gro_t *g = mqvpn_gro_new(capture, NULL);
+    out_n = 0;
+    for (unsigned i = 0; i < 3; i++)
+        mqvpn_gro_push(g, u_in[i], u_ln[i]);
+    mqvpn_gro_set_udp(g, 1, 0);
+    for (unsigned i = 0; i < 3; i++)
+        mqvpn_gro_push(g, u_in[i], u_ln[i]);
+    mqvpn_gro_flush(g);
+    assert(out_n == 6);
+    for (unsigned i = 0; i < 6; i++)
+        assert(out_q[i].vh.gso_type == 0);
+    mqvpn_gro_free(g);
+
+    /* Two UDP flows and a TCP flow on the same addresses and ports, mixed. */
+    for (int v6 = 0; v6 < 2; v6++) {
+        size_t th = v6 ? 40 : 20;
+        unsigned k = 0;
+        uint32_t seq = 1000;
+        for (unsigned r = 0; r < 4; r++) {
+            u_ln[k] = mk_udp(u_in[k], v6, (uint16_t)(10 + r), 1000, 0x1234, (uint8_t)k);
+            k++;
+            u_ln[k] = mk_udp(u_in[k], v6, (uint16_t)(30 + r), 600, 0x1235, (uint8_t)k);
+            k++;
+            u_ln[k] = mk_tcp(u_in[k], v6, seq, 1000, 0x10, (uint16_t)(50 + r), 0x1234, 1);
+            seq += 1000;
+            k++;
+        }
+        g = mqvpn_gro_new(capture, NULL);
+        mqvpn_gro_set_udp(g, 1, 1);
+        out_n = 0;
+        for (unsigned i = 0; i < k; i++)
+            mqvpn_gro_push(g, u_in[i], u_ln[i]);
+        mqvpn_gro_flush(g);
+        assert(out_n == 3);
+        unsigned m = expand(u_ex, u_exl, 200);
+        assert(m == k);
+        /* per flow (protocol, source port), the inputs in their order */
+        for (unsigned f = 0; f < 3; f++) {
+            unsigned j = 0;
+            for (unsigned i = 0; i < k; i++) {
+                if (i % 3 != f) continue;
+                while (j < m && !(u_ex[j][v6 ? 6 : 9] == u_in[i][v6 ? 6 : 9] &&
+                                  u_ex[j][th + 1] == u_in[i][th + 1]))
+                    j++;
+                assert(j < m && u_exl[j] == u_ln[i] &&
+                       memcmp(u_ex[j], u_in[i], u_ln[i]) == 0);
+                j++;
+            }
+        }
+        mqvpn_gro_free(g);
+    }
+}
+
+/* A kernel that refuses the UDP GSO packet (EINVAL) gets its datagrams one by
+ * one, byte for byte and in order, and no UDP run after that. */
+static unsigned refused;
+
+static int
+capture_no_uso(void *ctx, const struct virtio_net_hdr *vh, const uint8_t *pkt, size_t len)
+{
+    if (vh->gso_type == VIRTIO_NET_HDR_GSO_UDP_L4) {
+        refused++;
+        return -EINVAL;
+    }
+    return capture(ctx, vh, pkt, len);
+}
+
+static void
+test_udp_gro_refused(void)
+{
+    for (int v6 = 0; v6 < 2; v6++) {
+        for (unsigned i = 0; i < 8; i++)
+            u_ln[i] = mk_udp(u_in[i], v6, (uint16_t)(70 + i), 1100, 4433, (uint8_t)i);
+        mqvpn_gro_t *g = mqvpn_gro_new(capture_no_uso, NULL);
+        mqvpn_gro_set_udp(g, 1, 1);
+        out_n = 0;
+        refused = 0;
+        for (unsigned i = 0; i < 4; i++)
+            mqvpn_gro_push(g, u_in[i], u_ln[i]);
+        mqvpn_gro_flush(g);
+        assert(out_n == 4 && refused == 1);
+        for (unsigned i = 4; i < 8; i++)
+            mqvpn_gro_push(g, u_in[i], u_ln[i]);
+        mqvpn_gro_flush(g);
+        assert(out_n == 8 && refused == 1);
+        for (unsigned i = 0; i < 8; i++)
+            assert(out_q[i].vh.gso_type == 0 && out_q[i].len == u_ln[i] &&
+                   memcmp(out_q[i].pkt, u_in[i], u_ln[i]) == 0);
+        mqvpn_gro_free(g);
+    }
+}
+
 int
 main(void)
 {
@@ -1049,6 +1384,12 @@ main(void)
     test_gro_acks_many_flows();
     test_gro_long_header_keeps_order();
     test_gro_oversized();
+    test_udp_gro_sizes();
+    test_udp_gro_limits();
+    test_udp_gro_headers();
+    test_udp_gro_passthrough();
+    test_udp_gro_flows();
+    test_udp_gro_refused();
     printf("test_tun_offload: OK\n");
     return 0;
 }

@@ -113,8 +113,9 @@ typedef struct mqvpn_file_config_s {
 
     /* [Advanced] TunOffload — Linux TUN with the virtio header and TSO/USO
      * reads; 1 (default) = use it when the kernel accepts it, 0 = plain TUN.
-     * TunGro — coalesce TCP written to that TUN; no effect when tun_offload
-     * is 0. Both apply to client and server and stay platform-side. */
+     * TunGro — coalesce TCP and UDP written to that TUN; no effect when
+     * tun_offload is 0. Both apply to client and server and stay
+     * platform-side. */
     int tun_offload;
     int tun_gro;
 
