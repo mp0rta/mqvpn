@@ -525,9 +525,10 @@ mqvpn_tun_read(mqvpn_tun_t *tun, uint8_t *buf, size_t buf_len)
         int n = mqvpn_gso_next(&off->it, buf, buf_len);
         if (n > 0) {
             off->gso_segs++;
+            off->active = !off->it.done;
             return n;
         }
-        off->active = 0; /* finished, or buf too small: drop the rest */
+        off->active = 0; /* buf too small: drop the rest */
         if (n < 0) off->drops++;
     }
 
@@ -568,6 +569,7 @@ mqvpn_tun_read(mqvpn_tun_t *tun, uint8_t *buf, size_t buf_len)
             int seg = mqvpn_gso_next(&off->it, buf, buf_len);
             if (seg > 0) {
                 off->gso_segs++;
+                off->active = !off->it.done;
                 return seg;
             }
             off->active = 0;
