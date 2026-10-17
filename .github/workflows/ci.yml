@@ -553,6 +553,8 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_udp_gso_config_test.sh
+      - name: E2E TunOffload config test (netns)
+        run: sudo -E scripts/ci_e2e/run_tun_offload_config_test.sh
 
       # The abort path reaches exit() for the first time, so this is where the
       # sanitizers get to see it. The client under test exits non-zero by

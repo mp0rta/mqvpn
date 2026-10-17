@@ -171,8 +171,9 @@ mqvpn_tun_create_opts(mqvpn_tun_t *tun, const char *dev_name, int offload, int g
     strncpy(tun->name, ifr.ifr_name, IFNAMSIZ - 1);
     tun->name[IFNAMSIZ - 1] = '\0';
     if (off)
-        LOG_INF("TUN device %s created (fd=%d, offloads: csum tso4 tso6%s)", tun->name,
-                tun->fd, (off_flags & TUN_F_USO4) ? " uso4 uso6" : "");
+        LOG_INF("TUN device %s created (fd=%d, offloads: csum tso4 tso6%s%s)", tun->name,
+                tun->fd, (off_flags & TUN_F_USO4) ? " uso4 uso6" : "",
+                off->gro ? " gro" : "");
     else
         LOG_INF("TUN device %s created (fd=%d)", tun->name, tun->fd);
     return 0;
