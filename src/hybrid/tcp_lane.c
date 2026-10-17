@@ -94,6 +94,8 @@ struct mqvpn_tcp_lane {
     uint64_t last_sweep_us; /* idle-sweep cadence gate — see
                              * mqvpn_tcp_lane_tick */
     mqvpn_tcp_lane_stats_t stats;
+    /* Flows whose f->stream is set; see flow_set_stream. */
+    mqvpn_tcp_flow_t *bound_head;
 };
 
 /* Defined with the downlink-relay machinery below; needed by
@@ -116,6 +118,30 @@ static int tcp_lane_silent_abort_pcb(mqvpn_tcp_flow_t *f);
 static void tcp_lane_remove_flow(mqvpn_tcp_lane_t *lane, mqvpn_tcp_flow_t *f);
 static void tcp_lane_close_h3(mqvpn_tcp_flow_t *f);
 static tcp_lane_flow_status_t tcp_lane_teardown_flow(mqvpn_tcp_flow_t *f, int close_h3);
+
+/* f->stream is set and cleared only here, which keeps every flow that has
+ * one on lane->bound_head: find_flow_by_stream walks those instead of every
+ * bucket of the table (8192 heads at the default sizing, on each H3 event
+ * of each flow). Markers never get a stream, so their NULL f->lane is never
+ * dereferenced. */
+static void
+flow_set_stream(mqvpn_tcp_lane_t *lane, mqvpn_tcp_flow_t *f, void *stream)
+{
+    if (stream && !f->stream) {
+        f->bound_prev = NULL;
+        f->bound_next = lane->bound_head;
+        if (lane->bound_head) lane->bound_head->bound_prev = f;
+        lane->bound_head = f;
+    } else if (!stream && f->stream) {
+        if (f->bound_prev)
+            f->bound_prev->bound_next = f->bound_next;
+        else
+            lane->bound_head = f->bound_next;
+        if (f->bound_next) f->bound_next->bound_prev = f->bound_prev;
+        f->bound_prev = f->bound_next = NULL;
+    }
+    f->stream = stream;
+}
 /* Defined at the very end of this file (thin dispatcher onto
  * tcp_lane_uplink.c); mqvpn_tcp_lane_lwip_accept registers it as the pcb's
  * recv callback before that point in the file. */
@@ -958,7 +984,7 @@ tcp_lane_close_h3(mqvpn_tcp_flow_t *f)
     if (f->h3_request) {
         cli_tcp_lane_h3_close(f->h3_request);
         f->h3_request = NULL;
-        f->stream = NULL;
+        flow_set_stream(f->lane, f, NULL);
     }
 }
 
@@ -982,7 +1008,7 @@ tcp_lane_teardown_flow(mqvpn_tcp_flow_t *f, int close_h3)
         tcp_lane_close_h3(f);
     } else {
         f->h3_request = NULL;
-        f->stream = NULL;
+        flow_set_stream(f->lane, f, NULL);
     }
     int aborted = tcp_lane_silent_abort_pcb(f);
     tcp_lane_remove_flow(f->lane, f);
@@ -1051,6 +1077,7 @@ tcp_lane_remove_flow(mqvpn_tcp_lane_t *lane, mqvpn_tcp_flow_t *f)
     } else {
         lane->n_tcp_flows--;
     }
+    flow_set_stream(lane, f, NULL); /* normally already cleared */
     tcp_lane_uplink_queue_free(f);
     tcp_lane_downlink_stash_free(f);
     free(f);
@@ -1185,7 +1212,7 @@ tcp_lane_finish_clean_close(mqvpn_tcp_flow_t *f)
         f->pcb = NULL;
     }
     f->h3_request = NULL;
-    f->stream = NULL;
+    flow_set_stream(f->lane, f, NULL);
     tcp_lane_mark_closing(f);
 }
 
@@ -1216,20 +1243,19 @@ mqvpn_tcp_lane_on_lwip_err(void *arg, err_t err)
     tcp_lane_remove_flow(f->lane, f);
 }
 
-/* O(n) walk scanning every bucket for the entry whose stored f->stream
+/* O(n) walk over the flows bound to a stream (lane->bound_head, at most
+ * cfg.tcp_max_flows of them) for the one whose stored f->stream
  * back-pointer matches — see the rationale in tcp_lane.h above
- * mqvpn_tcp_lane_on_stream_established. n <= cfg.tcp_max_flows +
- * TCP_LANE_RAW_MARKER_CAP (256 + 4096 by default; markers have
- * f->stream == NULL so never false-match), and this only runs once per H3
- * response/writable event (not per-packet), so the linear scan is cheap. */
+ * mqvpn_tcp_lane_on_stream_established. It runs on every H3 event of every
+ * flow (writable, response, body), so it must not walk the whole table:
+ * scanning all 8192 bucket heads per event took up to 7% of the client's
+ * CPU at 100 flows. */
 static mqvpn_tcp_flow_t *
 find_flow_by_stream(mqvpn_tcp_lane_t *lane, void *stream)
 {
-    for (uint32_t i = 0; i < lane->n_buckets; i++) {
-        for (mqvpn_tcp_flow_t *f = lane->buckets[i]; f; f = f->next) {
-            if (f->stream == stream) {
-                return f;
-            }
+    for (mqvpn_tcp_flow_t *f = lane->bound_head; f; f = f->bound_next) {
+        if (f->stream == stream) {
+            return f;
         }
     }
     return NULL;
@@ -1240,7 +1266,7 @@ mqvpn_tcp_lane_bind_h3_request(void *flow_handle, void *h3_request, void *stream
 {
     mqvpn_tcp_flow_t *f = (mqvpn_tcp_flow_t *)flow_handle;
     f->h3_request = h3_request;
-    f->stream = stream;
+    flow_set_stream(f->lane, f, stream);
     /* Stay PENDING_STREAM: the request is sent but no response has arrived.
      * mqvpn_tcp_lane_on_stream_established/_rejected do the actual
      * 2xx/4xx-gated transition. */

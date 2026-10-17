@@ -208,9 +208,8 @@ int mqvpn_tcp_lane_abort_pending(void *flow_handle);
 /* H3 response gating for a bound mqvpn-tcp stream. `stream` is the
  * opaque cli_stream_t* handed to mqvpn_tcp_lane_bind_h3_request — these
  * functions locate the owning flow by its stored f->stream back-pointer (a
- * bounded O(n) walk over the whole flow table, n <= cfg.tcp_max_flows +
- * TCP_LANE_RAW_MARKER_CAP, 256 + 4096 by default; markers have
- * f->stream == NULL so never false-match) rather than caching a flow
+ * bounded O(n) walk over the table's flows that have a stream, n <=
+ * cfg.tcp_max_flows; markers never have one) rather than caching a flow
  * pointer inside cli_stream_t.
  * That keeps the flow table the single source of truth: once a flow is
  * removed, the table walk simply stops finding it — no separate

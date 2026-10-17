@@ -213,6 +213,9 @@ typedef struct mqvpn_tcp_flow {
     mqvpn_tcp_lane_t *lane;
 
     struct mqvpn_tcp_flow *next; /* hash chain */
+    /* The lane's list of flows bound to an H3 stream (f->stream != NULL),
+     * which find_flow_by_stream walks instead of the whole table. */
+    struct mqvpn_tcp_flow *bound_prev, *bound_next;
 } mqvpn_tcp_flow_t;
 
 /* ─── Compile-time test-double hooks ───
