@@ -303,10 +303,7 @@ cb_path_event(mqvpn_path_handle_t path, mqvpn_path_status_t status, void *user_c
     /* PR5: path lifecycle state is owned entirely by libmqvpn. Platform
      * no longer mirrors recoverable / removed state — netmon_try_reactivate_by_ifname
      * queries lib state directly via mqvpn_client_get_paths(). */
-    /* Slot table lookup only: callbacks must not re-enter libmqvpn. */
-    const char *iface = NULL;
-    for (int i = 0; i < p->n_paths; i++)
-        if (p->paths[i].handle == path) iface = p->paths[i].iface;
+    const char *iface = PLATFORM_PATH_IFACE(p, path);
     char line[128];
     platform_fmt_path_line(line, sizeof(line), path, iface, status);
     LOG_INF("%s", line);
@@ -682,8 +679,10 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
         mqvpn_path_desc_t desc;
         platform_path_fill_desc(&ctx, s, &desc);
+        ctx.adding_iface = s->iface;
         s->handle = mqvpn_client_add_path(ctx.client, &desc, mqvpn_bind_posix_path_ops(),
                                           tctx, NULL);
+        ctx.adding_iface = NULL;
         if (s->handle < 0) {
             LOG_ERR("failed to register path %d with library", i);
             mqvpn_bind_posix_path_free(tctx); /* add failed: still ours */

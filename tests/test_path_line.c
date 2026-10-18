@@ -37,6 +37,25 @@ main(void)
     platform_fmt_path_line(buf, sizeof(buf), 2, "", MQVPN_PATH_CLOSED);
     check(buf, "path 2 (?) -> closed");
 
+    /* path_event fires inside add_path, before the slot stores the handle */
+    struct {
+        char iface[16];
+        mqvpn_path_handle_t handle;
+    } slots[2] = {{"eth0", 1}, {"wlan0", -1}};
+    const char *f;
+    f = platform_path_iface(slots[0].iface, &slots[0].handle, sizeof(slots[0]), 2, 3,
+                            "enp5s0");
+    platform_fmt_path_line(buf, sizeof(buf), 3, f, MQVPN_PATH_PENDING);
+    check(buf, "path 3 (enp5s0) -> pending");
+    f = platform_path_iface(slots[0].iface, &slots[0].handle, sizeof(slots[0]), 2, 1,
+                            "enp5s0");
+    platform_fmt_path_line(buf, sizeof(buf), 1, f, MQVPN_PATH_ACTIVE);
+    check(buf, "path 1 (eth0) -> active");
+    f = platform_path_iface(slots[0].iface, &slots[0].handle, sizeof(slots[0]), 2, 9,
+                            NULL);
+    platform_fmt_path_line(buf, sizeof(buf), 9, f, MQVPN_PATH_ACTIVE);
+    check(buf, "path 9 (?) -> active");
+
     printf("test_path_line: %s\n", g_fail ? "FAILED" : "ok");
     return g_fail ? 1 : 0;
 }

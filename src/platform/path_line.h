@@ -12,7 +12,27 @@
 
 #include "libmqvpn.h"
 
+#include <stddef.h>
 #include <stdio.h>
+
+/* The interface for `handle`: the slot holding it, else `adding` (the iface of
+ * the add_path in flight: it fires path_event before the platform has stored
+ * the new handle), else NULL. Slots are walked by stride so the POSIX and
+ * Windows slot types share this; use the PLATFORM_PATH_IFACE wrapper. Reads
+ * platform state only: callbacks must not re-enter libmqvpn. */
+static inline const char *
+platform_path_iface(const char *ifaces, const mqvpn_path_handle_t *handles, size_t stride,
+                    int n, mqvpn_path_handle_t handle, const char *adding)
+{
+    for (int i = 0; i < n; i++)
+        if (*(const mqvpn_path_handle_t *)((const char *)handles + i * stride) == handle)
+            return ifaces + i * stride;
+    return adding;
+}
+
+#define PLATFORM_PATH_IFACE(p, h)                                   \
+    platform_path_iface((p)->paths[0].iface, &(p)->paths[0].handle, \
+                        sizeof((p)->paths[0]), (p)->n_paths, (h), (p)->adding_iface)
 
 /* iface: the slot's configured name, or NULL when the handle has no slot. */
 static inline void

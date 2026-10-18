@@ -80,6 +80,7 @@ struct platform_win_ctx {
     /* Path slots (UDP sockets + their transports), append-only */
     platform_path_t paths[MQVPN_MAX_PATHS];
     int n_paths;
+    const char *adding_iface; /* iface of the add_path in flight, else NULL */
 
     /* Path recovery accelerator (net_mon.c) */
     struct event *ev_recover; /* 3s poll timer */

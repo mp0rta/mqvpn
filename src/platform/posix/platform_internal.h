@@ -69,6 +69,7 @@ struct platform_ctx {
     /* Path slots (UDP sockets + their transports), append-only */
     platform_path_t paths[MQVPN_MAX_PATHS];
     int n_paths;
+    const char *adding_iface; /* iface of the add_path in flight, else NULL */
 
     /* TUN device */
     mqvpn_tun_t tun;
