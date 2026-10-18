@@ -551,9 +551,13 @@ if(BUILD_TESTING)
     target_include_directories(test_path_readd PRIVATE
         ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
     add_test(NAME test_path_readd COMMAND test_path_readd)
+    add_executable(test_path_line tests/test_path_line.c src/mqvpn_util.c)
+    target_include_directories(test_path_line PRIVATE
+        ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME test_path_line COMMAND test_path_line)
     if(MSVC)
         # same gate as the product build; target-scoped options are not inherited
-        foreach(t test_cert_identity test_cert_verify_win test_bind_winsock test_path_readd)
+        foreach(t test_cert_identity test_cert_verify_win test_bind_winsock test_path_readd test_path_line)
             target_compile_options(${t} PRIVATE /WX /utf-8)
             target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
         endforeach()
@@ -914,7 +918,9 @@ if(BUILD_TESTING)
     add_executable(test_reorder_gate tests/test_reorder_gate.c src/reorder_tx.c src/icmp.c src/log.c)
     # Re-add decision shared by the desktop path monitors (header only).
     add_executable(test_path_readd tests/test_path_readd.c)
-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_status test_path_state_machine test_path_slot_oracle test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd)
+    # Path status log line (header only + the status-name helper).
+    add_executable(test_path_line tests/test_path_line.c src/mqvpn_util.c)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_status test_path_state_machine test_path_slot_oracle test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd test_path_line)
 
     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of

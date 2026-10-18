@@ -31,6 +31,7 @@
 #  include "route_mon.h"
 #  include "vpn_client.h"
 #  include "log.h"
+#  include "platform/path_line.h"
 #  include "mqvpn_internal.h" /* mqvpn_config_apply_reorder (INI reorder bridge) */
 
 #  include <stdio.h>
@@ -298,12 +299,17 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
 static void
 cb_path_event(mqvpn_path_handle_t path, mqvpn_path_status_t status, void *user_ctx)
 {
-    (void)user_ctx;
+    platform_ctx_t *p = (platform_ctx_t *)user_ctx;
     /* PR5: path lifecycle state is owned entirely by libmqvpn. Platform
      * no longer mirrors recoverable / removed state — netmon_try_reactivate_by_ifname
      * queries lib state directly via mqvpn_client_get_paths(). */
-    const char *sn = mqvpn_path_status_string(status);
-    LOG_INF("path %lld -> %s", (long long)path, sn);
+    /* Slot table lookup only: callbacks must not re-enter libmqvpn. */
+    const char *iface = NULL;
+    for (int i = 0; i < p->n_paths; i++)
+        if (p->paths[i].handle == path) iface = p->paths[i].iface;
+    char line[128];
+    platform_fmt_path_line(line, sizeof(line), path, iface, status);
+    LOG_INF("%s", line);
 }
 
 static void

@@ -291,6 +291,10 @@ loop), so there is no fixed path cap to raise. The only limit,
   shallow for those.
 - e2e scripts wait on log messages with greps, so existing log wording is an
   observable invariant.
+- The client's path status INFO line is `path <handle> (<iface>) -> <status>`
+  (`<status>` lowercase, from `mqvpn_path_status_string`; `<iface>` is the
+  slot's configured name, `?` if the handle has no slot or the slot is "any").
+  mqvpn-desktop parses it; format lives in `src/platform/path_line.h`.
 - When adding a new test target, make sure include paths resolve in a *clean
   checkout* — a stale system-installed `/usr/include/libmqvpn.h` can mask a
   missing `-I` locally and only fail in CI.
