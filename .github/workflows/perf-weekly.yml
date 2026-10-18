@@ -18,8 +18,7 @@ concurrency:
 jobs:
   perf-weekly:
     # Temporary: the perf-test runner is under maintenance. Revert this
-    # commit to go back to it and to the R2 publish (hosted-runner numbers
-    # are not comparable with the dashboard's history).
+    # change to go back to it.
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -111,6 +110,19 @@ jobs:
           name: perf-weekly-${{ github.sha }}
           path: ci_bench_results/*.json
           retention-days: 90
+
+      - name: Verify aws-cli is installed on runner
+        if: success()
+        run: aws --version
+
+      - name: Publish results to R2
+        if: success()
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: bash scripts/ci_publish/publish_to_r2.sh perf-data/weekly weekly
 
       - name: Post-job cleanup (root-owned files)
         if: always()
