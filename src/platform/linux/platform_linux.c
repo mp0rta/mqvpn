@@ -272,8 +272,9 @@ cb_path_event(mqvpn_path_handle_t path, mqvpn_path_status_t status, void *user_c
     /* PR5: path lifecycle state is owned entirely by libmqvpn. Platform
      * no longer mirrors recoverable / removed state — netmon_try_reactivate_by_ifname
      * queries lib state directly via mqvpn_client_get_paths(). */
-    const char *iface = PLATFORM_PATH_IFACE(p, path);
-    char line[128];
+    const char *iface;
+    PLATFORM_PATH_IFACE(iface, p, path);
+    char line[PLATFORM_PATH_LINE_MAX];
     platform_fmt_path_line(line, sizeof(line), path, iface, status);
     LOG_INF("%s", line);
 }

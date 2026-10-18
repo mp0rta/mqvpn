@@ -1157,10 +1157,11 @@ jobs:
         run: ctest --test-dir build -C Release -R "test_cert_(identity|verify_win)" --no-tests=error --output-on-failure
 
       # Bundled Winsock transport (seam + real loopback sockets) and the
-      # re-add decision shared with the POSIX path monitors; own checks, not
+      # re-add decision shared with the POSIX path monitors and the path status
+      # log line; own checks, not
       # assert(), so Release is fine.
       - name: Winsock transport and path re-add tests
-        run: ctest --test-dir build -C Release -R "^(test_bind_winsock|test_path_readd)$" --no-tests=error --output-on-failure
+        run: ctest --test-dir build -C Release -R "^(test_bind_winsock|test_path_readd|test_path_line)$" --no-tests=error --output-on-failure
 
       # Weak: presence and order of the install call only (see the script).
       - name: Verifier wiring tripwire

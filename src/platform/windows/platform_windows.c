@@ -435,8 +435,9 @@ static void
 cb_path_event(mqvpn_path_handle_t path, mqvpn_path_status_t status, void *user_ctx)
 {
     platform_win_ctx_t *p = (platform_win_ctx_t *)user_ctx;
-    const char *iface = PLATFORM_PATH_IFACE(p, path);
-    char line[128];
+    const char *iface;
+    PLATFORM_PATH_IFACE(iface, p, path);
+    char line[PLATFORM_PATH_LINE_MAX];
     platform_fmt_path_line(line, sizeof(line), path, iface, status);
     LOG_INF("%s", line);
 }

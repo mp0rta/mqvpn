@@ -706,9 +706,12 @@ if(BUILD_TESTING)
     # only log.c is needed alongside.
     add_executable(test_killswitch_rules_darwin
         tests/test_killswitch_rules_darwin.c src/log.c)
+    # Path status log line (header only + the status-name helper).
+    add_executable(test_path_line tests/test_path_line.c src/mqvpn_util.c)
 
     foreach(t test_route_parse_darwin test_dns_backup_darwin
-              test_dns_state_darwin test_routing_seq_darwin test_killswitch_rules_darwin)
+              test_dns_state_darwin test_routing_seq_darwin test_killswitch_rules_darwin
+              test_path_line)
         target_include_directories(${t} PRIVATE
             ${EVENT_INCLUDE_DIR}   # platform_internal.h includes <event2/event.h>;
                                    # brew's /opt/homebrew/include is not a default search path

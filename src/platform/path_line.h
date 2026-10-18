@@ -15,24 +15,26 @@
 #include <stddef.h>
 #include <stdio.h>
 
-/* The interface for `handle`: the slot holding it, else `adding` (the iface of
- * the add_path in flight: it fires path_event before the platform has stored
- * the new handle), else NULL. Slots are walked by stride so the POSIX and
- * Windows slot types share this; use the PLATFORM_PATH_IFACE wrapper. Reads
- * platform state only: callbacks must not re-enter libmqvpn. */
-static inline const char *
-platform_path_iface(const char *ifaces, const mqvpn_path_handle_t *handles, size_t stride,
-                    int n, mqvpn_path_handle_t handle, const char *adding)
-{
-    for (int i = 0; i < n; i++)
-        if (*(const mqvpn_path_handle_t *)((const char *)handles + i * stride) == handle)
-            return ifaces + i * stride;
-    return adding;
-}
+/* Longest line: "path " + 20-digit handle + " (" + iface (Windows slots hold
+ * up to 255 bytes) + ") -> " + status + NUL, with slack. Size every line
+ * buffer with this so a long name cannot truncate the ") -> status" suffix. */
+#define PLATFORM_PATH_LINE_MAX 320
 
-#define PLATFORM_PATH_IFACE(p, h)                                   \
-    platform_path_iface((p)->paths[0].iface, &(p)->paths[0].handle, \
-                        sizeof((p)->paths[0]), (p)->n_paths, (h), (p)->adding_iface)
+/* out = the interface for handle h: the slot of ctx p holding it, else the
+ * iface of the add_path in flight (it fires path_event before the platform
+ * has stored the new handle), else NULL. A statement macro, typed indexing:
+ * the POSIX and Windows slot types both have .iface/.handle. Reads platform
+ * state only: callbacks must not re-enter libmqvpn. */
+#define PLATFORM_PATH_IFACE(out, p, h)              \
+    do {                                            \
+        (out) = (p)->adding_iface;                  \
+        for (int i_ = 0; i_ < (p)->n_paths; i_++) { \
+            if ((p)->paths[i_].handle == (h)) {     \
+                (out) = (p)->paths[i_].iface;       \
+                break;                              \
+            }                                       \
+        }                                           \
+    } while (0)
 
 /* iface: the slot's configured name, or NULL when the handle has no slot. */
 static inline void

@@ -37,24 +37,44 @@ main(void)
     platform_fmt_path_line(buf, sizeof(buf), 2, "", MQVPN_PATH_CLOSED);
     check(buf, "path 2 (?) -> closed");
 
-    /* path_event fires inside add_path, before the slot stores the handle */
+    /* PLATFORM_PATH_IFACE: slot match (any slot), else adding iface, else NULL */
     struct {
-        char iface[16];
-        mqvpn_path_handle_t handle;
-    } slots[2] = {{"eth0", 1}, {"wlan0", -1}};
+        struct {
+            char iface[256];
+            mqvpn_path_handle_t handle;
+        } paths[3];
+        int n_paths;
+        const char *adding_iface;
+    } ctx = {{{"eth0", 1}, {"wlan0", -1}, {"wwan0", 7}}, 3, "enp5s0"};
     const char *f;
-    f = platform_path_iface(slots[0].iface, &slots[0].handle, sizeof(slots[0]), 2, 3,
-                            "enp5s0");
+
+    /* path_event fires inside add_path, before the slot stores the handle */
+    PLATFORM_PATH_IFACE(f, &ctx, 3);
     platform_fmt_path_line(buf, sizeof(buf), 3, f, MQVPN_PATH_PENDING);
     check(buf, "path 3 (enp5s0) -> pending");
-    f = platform_path_iface(slots[0].iface, &slots[0].handle, sizeof(slots[0]), 2, 1,
-                            "enp5s0");
+    PLATFORM_PATH_IFACE(f, &ctx, 1);
     platform_fmt_path_line(buf, sizeof(buf), 1, f, MQVPN_PATH_ACTIVE);
     check(buf, "path 1 (eth0) -> active");
-    f = platform_path_iface(slots[0].iface, &slots[0].handle, sizeof(slots[0]), 2, 9,
-                            NULL);
+    /* a later slot returns its own iface, not slot 0's */
+    PLATFORM_PATH_IFACE(f, &ctx, 7);
+    platform_fmt_path_line(buf, sizeof(buf), 7, f, MQVPN_PATH_STANDBY);
+    check(buf, "path 7 (wwan0) -> standby");
+    ctx.adding_iface = NULL;
+    PLATFORM_PATH_IFACE(f, &ctx, 9);
     platform_fmt_path_line(buf, sizeof(buf), 9, f, MQVPN_PATH_ACTIVE);
     check(buf, "path 9 (?) -> active");
+
+    /* 255-byte Windows name: the whole line, suffix included, must fit */
+    {
+        char longbuf[PLATFORM_PATH_LINE_MAX], want[PLATFORM_PATH_LINE_MAX + 8];
+        char name[256];
+        memset(name, 'x', 255);
+        name[255] = '\0';
+        platform_fmt_path_line(longbuf, sizeof(longbuf), 9223372036854775807LL, name,
+                               MQVPN_PATH_DEGRADED);
+        snprintf(want, sizeof(want), "path 9223372036854775807 (%s) -> degraded", name);
+        check(longbuf, want);
+    }
 
     printf("test_path_line: %s\n", g_fail ? "FAILED" : "ok");
     return g_fail ? 1 : 0;
