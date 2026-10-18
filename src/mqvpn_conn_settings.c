@@ -107,10 +107,6 @@ mqvpn_apply_reinjection(const mqvpn_conn_settings_input_t *in, xqc_conn_settings
             cs->reinj_deadline_lower_bound = cs->reinj_hard_deadline;
         }
         break;
-    case MQVPN_REINJ_DGRAM:
-        cs->reinj_ctl_callback = xqc_dgram_reinj_ctl_cb;
-        cs->mp_enable_reinjection = XQC_REINJ_UNACK_AFTER_SEND;
-        break;
     }
 }
 
@@ -123,7 +119,7 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     out->max_datagram_frame_size = 65535;
     out->proto_version = XQC_VERSION_V1;
     out->pacing_on = 1;
-    out->max_pkt_out_size = MQVPN_MAX_PKT_OUT_SIZE;
+    out->max_pkt_out_size = mqvpn_pkt_out_size(in->path_mtu);
     out->sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
     out->so_sndbuf = 8 * 1024 * 1024;
     out->idle_time_out = 120000;
@@ -238,7 +234,7 @@ int
 mqvpn_tx_batch_register(int udp_gso, xqc_send_mmsg_ex_pt cb,
                         xqc_transport_callbacks_t *tcbs, xqc_config_t *xconfig)
 {
-    /* mqvpn_tx_batch_enabled's MQVPN_MAX_PKT_OUT_SIZE <= 1500 term is a
+    /* mqvpn_tx_batch_enabled's MQVPN_XQC_MAX_PKT_OUT_SIZE <= 1500 term is a
      * compatibility guard for the Linux GSO run bound (a full burst of
      * XQC_MAX_SEND_MSG_ONCE datagrams must stay far below the ~64KB kernel
      * ceiling so the bind can skip run splitting). It is not an xquic

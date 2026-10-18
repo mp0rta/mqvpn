@@ -10,6 +10,7 @@
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
 #include "mqvpn_sched_names.h"
+#include "redundant_tx.h"
 #include "json_mini.h"
 
 #include <stdlib.h>
@@ -394,6 +395,34 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
         cfg->reinj_deadline_lower_bound_ms = iv;
     }
 
+    v = json_find_key(json_text, "redundant");
+    if (v && json_read_bool(v, &iv) == MQVPN_OK) {
+        cfg->redundant = iv;
+    }
+
+    /* The list is validated whenever the key is present, regardless of
+     * "redundant"; json_read_string truncates silently, so a result of
+     * sizeof-1 characters counts as too long. */
+    v = json_find_key(json_text, "redundant_ports");
+    if (v) {
+        char rp[1024];
+        uint16_t ports[MQVPN_REDUNDANT_MAX_PORTS];
+        if (json_read_string(v, rp, sizeof(rp)) != 0 || strlen(rp) >= sizeof(rp) - 1)
+            return MQVPN_ERR_INVALID_ARG;
+        const char *t = rp;
+        while (*t == ' ' || *t == '\t' || *t == '\r' || *t == '\n')
+            t++;
+        size_t tl = strlen(t);
+        while (tl > 0 && (t[tl - 1] == ' ' || t[tl - 1] == '\t' || t[tl - 1] == '\r' ||
+                          t[tl - 1] == '\n'))
+            tl--;
+        if (tl >= 255) return MQVPN_ERR_INVALID_ARG;
+        int n = mqvpn_redundant_parse_ports(t, ports, MQVPN_REDUNDANT_MAX_PORTS);
+        if (n < 0) return MQVPN_ERR_INVALID_ARG;
+        memcpy(cfg->redundant_ports, ports, sizeof(ports));
+        cfg->n_redundant_ports = n;
+    }
+
     v = json_find_key(json_text, "reconnect_enable");
     if (v && json_read_bool(v, &iv) == MQVPN_OK) {
         cfg->reconnect_enable = iv;
@@ -432,6 +461,14 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
             return MQVPN_ERR_INVALID_ARG;
         }
         cfg->tun_mtu = iv;
+    }
+
+    v = json_find_key(json_text, "path_mtu");
+    if (v) {
+        if (json_read_int_strict(v, &iv) != 0 || (iv != 0 && (iv < 1280 || iv > 9000))) {
+            return MQVPN_ERR_INVALID_ARG;
+        }
+        cfg->path_mtu = iv;
     }
 
     /* "paths" sets the multipath flag; individual interface names are not stored
@@ -497,6 +534,27 @@ mqvpn_config_set_reinjection_deadline_params(mqvpn_config_t *cfg, int srtt_facto
     cfg->reinj_srtt_factor_pct = srtt_factor_pct;
     cfg->reinj_hard_deadline_ms = hard_deadline_ms;
     cfg->reinj_deadline_lower_bound_ms = deadline_lower_bound_ms;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_redundant(mqvpn_config_t *cfg, int enabled, const uint16_t *ports,
+                           size_t n_ports)
+{
+    if (!cfg || n_ports > MQVPN_REDUNDANT_MAX_PORTS || (n_ports > 0 && !ports))
+        return MQVPN_ERR_INVALID_ARG;
+    uint16_t out[MQVPN_REDUNDANT_MAX_PORTS];
+    int n = 0;
+    for (size_t i = 0; i < n_ports; i++) {
+        if (ports[i] == 0) return MQVPN_ERR_INVALID_ARG;
+        int dup = 0;
+        for (int j = 0; j < n; j++)
+            if (out[j] == ports[i]) dup = 1;
+        if (!dup) out[n++] = ports[i];
+    }
+    cfg->redundant = enabled ? 1 : 0;
+    memcpy(cfg->redundant_ports, out, sizeof(out));
+    cfg->n_redundant_ports = n;
     return MQVPN_OK;
 }
 
@@ -609,6 +667,15 @@ mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu)
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     if (mtu != 0 && (mtu < 1280 || mtu > 9000)) return MQVPN_ERR_INVALID_ARG;
     cfg->tun_mtu = mtu;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_path_mtu(mqvpn_config_t *cfg, int mtu)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    if (mtu != 0 && (mtu < 1280 || mtu > 9000)) return MQVPN_ERR_INVALID_ARG;
+    cfg->path_mtu = mtu;
     return MQVPN_OK;
 }
 

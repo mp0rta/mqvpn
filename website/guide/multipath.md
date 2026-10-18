@@ -127,7 +127,7 @@ throughput vs WLB across loss rates 1%–10%.
 |----------|-------------|
 | General use, bandwidth aggregation | **WLB + [Hybrid Mode](./hybrid-mode)** |
 | Inner UDP needing single-path delivery | **`wlb_udp_pin`** |
-| Latency-sensitive applications | MinRTT (trades off bandwidth aggregation; if latency matters most, consider adding Reinjection (`dgram`)) |
+| Latency-sensitive applications | MinRTT (trades off bandwidth aggregation; for live streams, consider [redundant mode](#redundant-mode)) |
 | Combinations of poor-quality links | MinRTT + [Hybrid Mode](./hybrid-mode) (consider adding Reinjection or the reorder buffer as needed) |
 | Lossy primary + reliable standby (experimental) | `backup_fec` |
 
@@ -144,14 +144,13 @@ Ref: [XLINK (SIGCOMM 2021)](https://conferences.sigcomm.org/sigcomm/2021/files/p
 
 ```ini
 [Multipath]
-Reinjection = deadline   # off | deadline | idle | dgram
+Reinjection = deadline   # off | deadline | idle
 ```
 
 | Mode | What gets copied | Use it for |
 |------|------------------|------------|
 | `deadline` | Stream-lane (TCP-side) data still awaiting delivery confirmation that is running late, plus everything sent on a link judged unhealthy | Insurance for tunnels running [Hybrid Mode](./hybrid-mode), which carries TCP over QUIC streams: does nothing (and costs nothing) most of the time, and minimizes the hiccup at the moment a link suddenly goes bad |
 | `idle` | Recent still-unconfirmed stream data (TCP side only), in moments when the tunnel has nothing else to send | Low-cost smoothing of occasional hiccups in interactive use (SSH, browsing). No tuning needed |
-| `dgram` | Every packet on the datagram lane, always — hybrid-mode TCP is not copied | Tunnels dedicated to real-time traffic (VoIP, gaming): a lost packet or a dying link no longer causes dropouts or lag spikes. Note: since everything is always copied, this trades off against bandwidth aggregation |
 
 **Why a hiccup can happen at all**: when a link goes bad, the scheduler does
 steer new data to the healthy link — but data already sent on the failing
@@ -175,13 +174,65 @@ Notes:
 - Reinjection is sender-side: each side's setting protects the traffic it
   *sends*, so enable it on the **server** to protect download traffic (and on
   the client for upload).
-- `dgram` uses double the bandwidth for that traffic and is not recommended
-  for mixed tunnels: it duplicates *all* inner UDP — including HTTP/3 video
-  streams — so the usable speed of the datagram lane drops to a single
-  path's capacity.
 - Per-path duplicated bytes are reported as `reinject_tx_bytes` in the
   control API `get_status` response.
 - Requires two or more active paths; silently inactive otherwise.
+
+## Redundant Mode
+
+Redundant mode sends copies of outgoing UDP packets over more than one path at
+once. If one connection drops for a few seconds, the copies on the others
+usually keep a live stream going. Off by default.
+
+```ini
+[Multipath]
+Redundant = on
+RedundantPorts = 4200    # optional: only UDP to these destination ports
+```
+
+On Android, turn on the **Redundant Mode** switch (the port list is the
+**Redundant Ports** field).
+
+- **When to use it**: live streaming such as SRT over phone connections,
+  especially with a short latency setting, and connections that drop out for a
+  few seconds at a time.
+- **What it costs**: the traffic it covers uses up to twice the data with two
+  paths, three times with three. Set
+  `RedundantPorts` to cover only your stream, for example `4200`, or a
+  comma-separated list such as `4200,9000` (up to 16 ports). Without it, all
+  UDP is duplicated. TCP is never duplicated by this mode.
+- **Every connection should carry the whole stream (recommended)**: each connection sends a
+  full copy, so each one needs enough upload speed for the stream on its own,
+  with some room to spare. For a 20 Mbps stream, every connection must manage
+  at least 20 Mbps up. One connection slowing down for a while is fine as long
+  as another can still carry the stream. When none can, mqvpn stops copying
+  and sends each packet once, as with `Redundant = off`, and tries copying
+  again later once a connection looks fast enough; the log notes each switch
+  (`redundant mode: ...`). The stream can still lose more packets than with
+  `Redundant = off`, so if your connections are often slower than the stream,
+  leave redundant mode off.
+- **Duplicates reach the application**: mqvpn does not remove the extra
+  copies, so the receiving application sees every packet more than once. SRT
+  and similar protocols discard duplicates; check that your application does
+  before using this mode for other UDP traffic.
+- **Using Reorder together with redundant mode**: outgoing UDP packets covered
+  by redundant mode bypass Reorder, so Reorder neither puts them in order nor
+  removes their duplicates. With an empty `RedundantPorts` list, all outgoing
+  UDP bypasses Reorder. Reorder still follows its settings and rules for other
+  traffic and downloads.
+- **Upload only**: it applies to what the client sends. Download traffic is
+  unchanged. The server ignores the setting.
+- A path that is still starting up or has gone down gets no copies. A path
+  that falls behind the others gets none until it catches up. If only one path
+  is usable, packets are sent once on it.
+- Right after connecting, a stream can still lose a few packets for about the
+  first second while the connections speed up.
+- Redundant mode has no effect with `Scheduler = backup_fec`, because the
+  second path stays on standby.
+
+This replaces the former `Reinjection = dgram` mode, which has been removed.
+A config file that still says `dgram` prints a warning and runs with
+`Reinjection = off`; use `Redundant = on` instead.
 
 ## Path Weighting
 

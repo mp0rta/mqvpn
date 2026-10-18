@@ -387,7 +387,7 @@ or more active paths — silently inactive with only one.
 
 ```ini
 [Multipath]
-Reinjection = off                     # off (default) | deadline | idle | dgram
+Reinjection = off                     # off (default) | deadline | idle
 ReinjectionSrttFactorPct = 110        # deadline mode: duplicate an unacked packet older than factor x min_srtt (100-1000; 110 = 1.1x)
 ReinjectionHardDeadlineMs = 500       # deadline mode: upper clamp (1-60000)
 ReinjectionDeadlineLowerBoundMs = 20  # deadline mode: lower clamp (1-60000; clamped down to the hard deadline if it would exceed it)
@@ -395,7 +395,8 @@ ReinjectionDeadlineLowerBoundMs = 20  # deadline mode: lower clamp (1-60000; cla
 
 - `deadline` — insurance for bonded tunnels running the [hybrid TCP lane](#hybrid-mode-tcp-lane). Most of the time it does nothing and costs nothing. When a link suddenly goes bad, data already sent on it must be recovered before in-order delivery lets anything behind it through — even data that already arrived via the healthy link — which in bad cases stalls transfers for up to a second; `deadline` resends the late data on the healthy link right away, shrinking that stall to a barely noticeable blip. Protects stream (TCP-lane) traffic only — with the hybrid lane disabled its effect is limited to control streams and a warning is logged. Protects TCP/stream traffic only — with the hybrid lane disabled its effect is limited to control streams and a warning is logged.
 - `idle` — low-cost smoothing for interactive use (SSH, browsing): whenever the tunnel has nothing else to send, it uses that spare moment to send a copy of recent still-unconfirmed data over another link, shaving off occasional hiccups. No tuning needed.
-- `dgram` — for tunnels dedicated to real-time traffic (VoIP, gaming): every datagram-lane packet (UDP and other non-TCP traffic; hybrid-mode TCP is not duplicated) is sent over two links at once, so a lost packet or a dying link no longer causes dropouts or lag spikes. **Uses double the bandwidth for that traffic; not recommended for mixed tunnels** — it duplicates all inner UDP, including HTTP/3 video streams, so the usable speed of the datagram lane drops to a single link's capacity. Duplicates are delivered twice at the receiver's TUN unless the [reorder buffer](#reorder-buffer-datagram-lane) is enabled (it removes them); plain UDP apps may otherwise see duplicate packets.
+
+The former `dgram` value was removed. To keep live UDP streams alive across a dropped link, use redundant mode, which covers client uploads (`[Multipath] Redundant = on`; see the [website guide](https://docs.mqvpn.org/guide/multipath#redundant-mode)); every link should be able to carry the stream on its own (recommended).
 
 Per-path duplicated bytes are reported as `reinject_tx_bytes` in the control
 API `get_status` response.

@@ -33,7 +33,7 @@ const filteredAggregateRows = computed(() => {
 
 # Per-commit Benchmarks
 
-<p class="page-desc">Benchmarks run on every push to main. Latest 10 results.<br>Environment: Proxmox VM, i9-13900H, 4 vCPU (pinned), Ubuntu 24.04.</p>
+<p class="page-desc">Benchmarks run on every push to main. Latest 10 results.<br>Environment: Proxmox VM, i9-13900H, 4 vCPU (pinned), Ubuntu 24.04.<br>Since 2026-10-18 this machine has been down for maintenance, and the benchmarks run on GitHub Actions instead. Results from that date on may differ from earlier ones.</p>
 
 <ClientOnly>
 <div v-if="loading">Loading...</div>

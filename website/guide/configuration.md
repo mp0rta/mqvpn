@@ -167,6 +167,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `ReconnectInterval` | Seconds between reconnection attempts | `5` |
 | `ManageRoutes` | Manage the host routing table (VPN routes and server pin route). Set to `false` (or pass `--no-manage-routes`) to handle routing yourself. Routing alone does not stop applications that bind their sockets to a specific adapter — see the note below. | `true` |
 | `MTU` | TUN MTU (1280–9000). Client: cap — if the negotiated MTU is lower, the negotiated value is used. Server: sets the TUN MTU directly. | auto (client ~1382 negotiated, server 1382) |
+| `PathMTU` | Largest IP packet the network between client and server carries without fragmenting (1280–9000). mqvpn sizes its QUIC packets to fit, assuming an IPv6 header so the value is safe for IPv4 too. Set the same value on both ends. See [Using a larger tunnel MTU](#using-a-larger-tunnel-mtu). | `0` (1400-byte packets) |
 
 > **Note: route management does not cover interface-bound applications**
 >
@@ -201,10 +202,12 @@ In JSON, use `auth_key` on both client and server (as in the examples above).
 | `CC` | Congestion control algorithm (`bbr2`, `bbr`, `cubic`, or `none`) | `bbr2` |
 | `Path` | Network interface to bind (repeatable) | Default interface |
 | `InitMaxPathId` | MP-QUIC draft-21 test knob: initial Maximum Path Identifier advertised in transport parameters (`1`–`4294967295`; `0` = xquic default `8`) | `0` |
-| `Reinjection` | Speculative duplication mode (`off`, `deadline`, `idle`, or `dgram`) | `off` |
+| `Reinjection` | Speculative duplication mode (`off`, `deadline`, or `idle`). `dgram` is no longer supported; a config file that sets it gets a warning and runs with `off`. Use redundant mode (`Redundant = on`) to duplicate packets. | `off` |
 | `ReinjectionSrttFactorPct` | `deadline` mode: duplicate unacked packets older than factor × min_srtt, in percent (`100`–`1000`) | `110` |
 | `ReinjectionHardDeadlineMs` | `deadline` mode: upper clamp on the duplication deadline (`1`–`60000`) | `500` |
 | `ReinjectionDeadlineLowerBoundMs` | `deadline` mode: lower clamp; values above the hard deadline are clamped down to it (`1`–`60000`) | `20` |
+| `Redundant` | Client only. When `on`, copies of outgoing UDP packets are sent over more than one path at once, which helps live streams keep going when a path drops. That traffic uses up to twice the data with two paths, three times with three. Every connection should be fast enough to carry that traffic on its own (recommended); if your connections are often slower, leave it off. See [Redundant mode](./multipath#redundant-mode). | `off` |
+| `RedundantPorts` | Client only. Comma-separated destination ports (at most 16 entries) to duplicate when `Redundant = on`; empty duplicates all UDP. With `Redundant = on`, an invalid list stops the client at startup. | empty |
 
 A server of this version tells each connected client which scheduler it uses for that client, even when `AllowClientScheduler` is `false`. A client that sets `RequestServerScheduler` logs `server scheduler: <name> (requested <name>)` after it connects.
 
@@ -375,8 +378,10 @@ In JSON, the section is a `"hybrid"` object with snake_case keys (`enabled`, `tc
 | `RecvRateLimit` | Conn-level receive-rate cap in bytes/sec; bounds the aggregate QUIC receive window to `rate x RTT`. Client-side only — the server ignores it (a server-side cap would throttle client upload). Maximum `10000000000` (10 GB/s); larger values are rejected with a warning and the key falls back to `0`. Leave `0` unless memory-constrained (mobile clients set this internally) | `0` (off) |
 | `UdpGso` | Batches UDP sends with kernel GSO for lower CPU use at high throughput. Automatically falls back to regular batched sends on kernels without support (< 4.18). Linux and Android only; no effect elsewhere. Set to `false` to restore the previous per-packet send path | `true` |
 | `UdpGro` | Lets the kernel hand over received packets in batches, lowering CPU use at high throughput. Automatically falls back to one-at-a-time receives on kernels without support (< 5.0). Linux only; no effect elsewhere. Set to `false` to restore the previous receive path | `true` |
+| `TunOffload` | Lets the kernel hand large batches of traffic to the tunnel interface in one read; mqvpn splits them, lowering CPU use at high throughput. Automatically falls back to one packet per read when the kernel does not support it. Linux only; no effect elsewhere. Set to `false` to restore the previous tunnel interface | `true` |
+| `TunGro` | Combines consecutive TCP packets headed for the tunnel interface into one larger write, lowering CPU use at high throughput. No effect when `TunOffload` is `false`. Linux only; no effect elsewhere. Set to `false` to write packets one at a time as before | `true` |
 
-In JSON, the section is an `"advanced"` object with snake_case keys (`recv_rate_limit`, `udp_gso`, `udp_gro`).
+In JSON, the section is an `"advanced"` object with snake_case keys (`recv_rate_limit`, `udp_gso`, `udp_gro`, `tun_offload`, `tun_gro`).
 
 ## MTU Guidelines
 
@@ -390,6 +395,7 @@ For most setups, leave `MTU` unset. The auto-negotiated value (~1382) works on s
 |----------|----------------|
 | Standard Ethernet / mobile | Leave unset (auto ~1382) |
 | Deeply nested tunnels (mqvpn → WG → another tunnel) | Calculate remaining MTU; set if near 1280 |
+| Both ends on a clean 1500-byte path, larger tunnel MTU wanted | `PathMTU = 1500` on both ends (TUN MTU 1402) |
 
 On the client, if `MTU` is set, mqvpn uses `min(config MTU, negotiated MTU)`; a warning is logged when the config value exceeds the negotiated value. On the server, `MTU` sets the TUN MTU directly (default 1382).
 
@@ -411,6 +417,28 @@ max_pkt_out_size           1400 bytes
 ```
 
 This negotiation happens at connection time on the **client**, and the client TUN MTU follows it. The **server** sets its TUN MTU once at startup (1382 by default, or the configured value). When a packet exceeds a particular client's negotiated MSS, the server returns ICMP Packet Too Big to the original sender, carrying that client's MSS as the MTU value; the sender's Path MTU Discovery then lowers its packet size. The shared server TUN MTU never needs to shrink for individual clients.
+
+### Using a larger tunnel MTU
+
+The default 1400-byte packet size leaves room for PPPoE and most mobile networks without any tuning. If you know the network between client and server carries larger packets, set `PathMTU` to that size on both ends and mqvpn sizes its packets to fit:
+
+```
+PathMTU                    1500 bytes
+ − IPv6 + UDP header         48 bytes
+ − encryption tag            16 bytes
+ − room for an ACK frame     16 bytes
+                           ─────────
+ = max_pkt_out_size         1420 bytes (upper limit)
+ − QUIC, DATAGRAM and MASQUE headers  18 bytes
+                           ─────────
+ = TUN MTU                  1402 bytes
+```
+
+The QUIC library caps packets at 1420 bytes, so values above 1500 give the same result. If `PathMTU` is larger than what the network really carries, full-size packets get fragmented or dropped, so only set it when you know the path.
+
+When an explicit `MTU` exceeds the available inner packet size, the client warns and limits it. The server also warns, but keeps the configured TUN MTU; oversized tunnel packets may be dropped.
+
+IPv6 inside the tunnel requires room for a complete 1280-byte packet. With IPv6 enabled, a nonzero `PathMTU` must be at least **1378**, or **1386** when reorder is enabled. The server rejects a smaller setting at startup; the client closes the connection with an error if its available packet size is too small when IPv6 is assigned. Setting `MTU = 1280` does not increase the available capacity. IPv4-only tunnels can still use smaller values. The default `PathMTU = 0` remains supported.
 
 ### Running other tunnels inside mqvpn
 

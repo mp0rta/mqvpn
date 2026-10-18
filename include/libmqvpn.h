@@ -217,7 +217,7 @@ typedef enum {
     MQVPN_REINJ_OFF = 0,
     MQVPN_REINJ_DEADLINE = 1, /* stream lane: lateness + LOW-class duplication */
     MQVPN_REINJ_IDLE = 2,     /* stream lane: duplicate unacked when send queue idle */
-    MQVPN_REINJ_DGRAM = 3,    /* datagram lane: duplicate every DATAGRAM once */
+    /* 3 was MQVPN_REINJ_DGRAM (removed); do not reuse */
 } mqvpn_reinjection_t;
 
 /* Flow-aware reorder-only datagram delivery (see reorder design spec).
@@ -668,6 +668,15 @@ MQVPN_API int mqvpn_config_set_reinjection_deadline_params(mqvpn_config_t *cfg,
                                                            int srtt_factor_pct,
                                                            int hard_deadline_ms,
                                                            int deadline_lower_bound_ms);
+
+/* Redundant mode (client only): send each uplink UDP packet on every usable
+ * path. An empty port list (n_ports == 0) duplicates all UDP; otherwise only
+ * the listed destination ports. Returns MQVPN_ERR_INVALID_ARG for a NULL cfg,
+ * n_ports > MQVPN_REDUNDANT_MAX_PORTS, ports == NULL with n_ports > 0, or a 0
+ * port; duplicates are removed after the count check. */
+#define MQVPN_REDUNDANT_MAX_PORTS 16
+MQVPN_API int mqvpn_config_set_redundant(mqvpn_config_t *cfg, int enabled,
+                                         const uint16_t *ports, size_t n_ports);
 MQVPN_API int mqvpn_config_set_log_level(mqvpn_config_t *cfg, mqvpn_log_level_t level);
 MQVPN_API int mqvpn_config_set_multipath(mqvpn_config_t *cfg, int enable);
 MQVPN_API int mqvpn_config_set_reconnect(mqvpn_config_t *cfg, int enable,
@@ -681,6 +690,13 @@ MQVPN_API int mqvpn_config_set_killswitch_hint(mqvpn_config_t *cfg, int enable);
 MQVPN_API int mqvpn_config_set_init_max_path_id(mqvpn_config_t *cfg, uint64_t v);
 /* TUN MTU cap: 0 = auto (MSS-derived), 1280..9000 = upper bound. */
 MQVPN_API int mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu);
+/* Underlay path MTU the outer QUIC packets are sized for: 0 = default
+ * (1400-byte packets, TUN MTU ~1382), 1280..9000 = largest IP packet the
+ * path carries. Packets are capped at xquic's limit (TUN MTU 1402).
+ * IPv6 requires capacity for 1280 inner bytes, including room for reorder:
+ * insufficient capacity fails server_start or notifies client tunnel_closed
+ * with MQVPN_ERR_INVALID_ARG when IPv6 is assigned. */
+MQVPN_API int mqvpn_config_set_path_mtu(mqvpn_config_t *cfg, int mtu);
 
 /* ─── Flow-aware reorder shim config (§16.1) ───
  *

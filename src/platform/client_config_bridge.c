@@ -48,8 +48,11 @@ mqvpn_platform_apply_client_config(mqvpn_config_t *lib_cfg, const mqvpn_client_c
     mqvpn_config_set_reinjection_deadline_params(lib_cfg, cfg->reinj_srtt_factor_pct,
                                                  cfg->reinj_hard_deadline_ms,
                                                  cfg->reinj_deadline_lower_bound_ms);
+    mqvpn_config_set_redundant(lib_cfg, cfg->redundant, cfg->redundant_ports,
+                               (size_t)cfg->n_redundant_ports);
     mqvpn_config_set_init_max_path_id(lib_cfg, cfg->init_max_path_id);
     mqvpn_config_set_tun_mtu(lib_cfg, cfg->tun_mtu);
+    mqvpn_config_set_path_mtu(lib_cfg, cfg->path_mtu);
     mqvpn_config_apply_reorder(lib_cfg,
                                &cfg->reorder); /* INI [Reorder]/[ReorderRule] bridge */
     mqvpn_config_apply_hybrid(lib_cfg, &cfg->hybrid); /* INI [Hybrid] bridge */
