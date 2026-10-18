@@ -17,7 +17,10 @@ concurrency:
 
 jobs:
   perf-weekly:
-    runs-on: perf-test
+    # Temporary: the perf-test runner is under maintenance. Revert this
+    # commit to go back to it and to the R2 publish (hosted-runner numbers
+    # are not comparable with the dashboard's history).
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
       - name: Pre-checkout cleanup (root-owned files)
@@ -26,6 +29,11 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libevent-dev golang iptables iproute2 iperf3 python3 jq openssl
 
       - name: Cleanup stale state
         run: |
@@ -103,19 +111,6 @@ jobs:
           name: perf-weekly-${{ github.sha }}
           path: ci_bench_results/*.json
           retention-days: 90
-
-      - name: Verify aws-cli is installed on runner
-        if: success()
-        run: aws --version
-
-      - name: Publish results to R2
-        if: success()
-        env:
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
-        run: bash scripts/ci_publish/publish_to_r2.sh perf-data/weekly weekly
 
       - name: Post-job cleanup (root-owned files)
         if: always()
