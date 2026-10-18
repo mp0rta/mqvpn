@@ -23,7 +23,7 @@ const latestAggregate = computed(() => {
 
 # Benchmarks
 
-<p class="page-desc">Automated benchmark results from CI.<br>Environment: Proxmox VM, i9-13900H, 4 vCPU (pinned), Ubuntu 24.04.</p>
+<p class="page-desc">Automated benchmark results from CI.<br>Environment: Proxmox VM, i9-13900H, 4 vCPU (pinned), Ubuntu 24.04.<br>Since 2026-10-18 this machine has been down for maintenance, and the benchmarks run on GitHub Actions instead. Results from that date on may differ from earlier ones.</p>
 
 ## Per-commit Results
 
