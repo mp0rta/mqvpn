@@ -144,10 +144,8 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
      * upload over a 1.5 Gbit/s internet path lost 5-10% (ping 70-120 ms
      * down to ~18 ms); download there was within its run-to-run spread.
      * 256 cut the ping further but lost 13-46% of the shaped throughput.
-     * Suspected, not yet confirmed: with a short queue the send list empties
-     * into the per-path buffers, and xqc_sample_check_app_limited (see its
-     * multipath FIXME) then marks a path with an empty buffer app-limited,
-     * so BBR stops raising its bandwidth estimate. */
+     * These were measured before mp0rta/xquic#85 changed how a multipath
+     * path is marked app-limited, and have not been re-measured since. */
     out->max_stream_unsent_packets = MQVPN_STREAM_UNSENT_PACKETS;
 
     /* Caller-gated, never derived here: see the field comment in
