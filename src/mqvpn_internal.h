@@ -39,6 +39,29 @@
  * 1500B, xqc_defs.h XQC_CONN_MAX_UDP_PAYLOAD_SIZE). */
 #define MQVPN_MAX_PKT_OUT_SIZE 1400
 
+/* xquic clamps max_pkt_out_size to this (XQC_QUIC_MAX_MSS). */
+#define MQVPN_XQC_MAX_PKT_OUT_SIZE 1420
+
+/* A sent packet can exceed max_pkt_out_size by the AEAD tag (16) plus the
+ * room xquic keeps for a piggybacked ACK frame (XQC_ACK_SPACE, 16). */
+#define MQVPN_PKT_OUT_OVERHEAD 32
+
+/* QUIC short header (8-byte CID, 4-byte packet number), DATAGRAM frame
+ * header and MASQUE ids: max_pkt_out_size minus this is the TUN MTU. */
+#define MQVPN_DGRAM_HEADROOM 18
+
+/* max_pkt_out_size for a PathMTU. Assumes an IPv6 + UDP header so the
+ * result fits either family; 0 keeps MQVPN_MAX_PKT_OUT_SIZE. */
+static inline size_t
+mqvpn_pkt_out_size(int path_mtu)
+{
+    if (path_mtu <= 0) return MQVPN_MAX_PKT_OUT_SIZE;
+    int v = path_mtu - 40 - 8 - MQVPN_PKT_OUT_OVERHEAD;
+    if (v > MQVPN_XQC_MAX_PKT_OUT_SIZE) v = MQVPN_XQC_MAX_PKT_OUT_SIZE;
+    if (v < 1200) v = 1200;
+    return (size_t)v;
+}
+
 /* Is the Linux batched-send path engaged for this config?
  *
  * ONE definition, used by both the client and the server for two decisions
@@ -47,7 +70,7 @@
  * batch callback registered xquic sends one packet per syscall regardless, so
  * deferring the flush there would move it for no benefit at all. Spelling the
  * condition out per call site is what would let the two drift — notably if
- * MQVPN_MAX_PKT_OUT_SIZE is ever raised past the single-run/no-splitting
+ * MQVPN_XQC_MAX_PKT_OUT_SIZE is ever raised past the single-run/no-splitting
  * bound that mqvpn_udp_send_batch() documents in src/bind/posix_offload.h.
  *
  * Callers still record the result on the client/server struct (tx_batch) and
@@ -56,7 +79,7 @@
 static inline int
 mqvpn_tx_batch_enabled(int udp_gso)
 {
-    return udp_gso && MQVPN_MAX_PKT_OUT_SIZE <= 1500;
+    return udp_gso && MQVPN_XQC_MAX_PKT_OUT_SIZE <= 1500;
 }
 
 /* Teardown TX-offload telemetry line, emitted by mqvpn_client_destroy and
@@ -78,7 +101,7 @@ mqvpn_tx_batch_enabled(int udp_gso)
  * − DATAGRAM/MASQUE headers = 1382).  Clients that negotiated less are
  * handled per-client via ICMP PTB in mqvpn_server_on_tun_packet(), so a
  * high default is safe. */
-#define MQVPN_TUN_MTU_AUTO 1382
+#define MQVPN_TUN_MTU_AUTO (MQVPN_MAX_PKT_OUT_SIZE - MQVPN_DGRAM_HEADROOM)
 
 /* ─── Config (opaque to callers) ─── */
 
@@ -133,8 +156,9 @@ struct mqvpn_config_s {
      * 0 = use xquic default (XQC_DEFAULT_INIT_MAX_PATH_ID = 8). */
     uint64_t init_max_path_id;
 
-    int tun_mtu; /* 0 = auto (client: negotiated; server: 1382), >0 = client cap / server
-                    TUN MTU */
+    int tun_mtu;  /* 0 = auto (client: negotiated; server: 1382), >0 = client cap / server
+                     TUN MTU */
+    int path_mtu; /* 0 = default packet size, >0 = underlay MTU to size packets for */
 
     /* Flow-aware reorder shim config (§16). Seeded with
      * mqvpn_reorder_config_default() in mqvpn_config_new(); the library
