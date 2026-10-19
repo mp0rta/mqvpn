@@ -125,11 +125,11 @@ test_propagation_cc(void)
     ASSERT_EQ(cs.cc_params.cc_optimization_flags,
               XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE);
 
-    /* BBR — no optimization flags */
+    /* BBR — RTT-variance compensation, as BBR2 */
     in.cc = MQVPN_CC_BBR;
     mqvpn_build_conn_settings(&in, &cs);
     ASSERT_PTR_EQ(cs.cong_ctrl_callback.xqc_cong_ctl_init, xqc_bbr_cb.xqc_cong_ctl_init);
-    ASSERT_EQ(cs.cc_params.cc_optimization_flags, 0);
+    ASSERT_EQ(cs.cc_params.cc_optimization_flags, XQC_BBR_FLAG_RTTVAR_COMPENSATION);
 
     /* CUBIC — no optimization flags */
     in.cc = MQVPN_CC_CUBIC;

@@ -167,7 +167,12 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     if (cc == MQVPN_CC_NONE) cc = MQVPN_CC_BBR2;
 #endif
     switch (cc) {
-    case MQVPN_CC_BBR: out->cong_ctrl_callback = xqc_bbr_cb; break;
+    case MQVPN_CC_BBR:
+        out->cong_ctrl_callback = xqc_bbr_cb;
+        /* Without it, a link whose RTT swings past twice its min_rtt is held
+         * below its rate by a cwnd sized for min_rtt. */
+        out->cc_params.cc_optimization_flags = XQC_BBR_FLAG_RTTVAR_COMPENSATION;
+        break;
     case MQVPN_CC_CUBIC: out->cong_ctrl_callback = xqc_cubic_cb; break;
     case MQVPN_CC_NONE:
 #ifdef XQC_ENABLE_UNLIMITED
