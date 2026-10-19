@@ -188,10 +188,11 @@ usually keep a live stream going. Off by default.
 [Multipath]
 Redundant = on
 RedundantPorts = 4200    # optional: only UDP to these destination ports
+CC = bbr                 # recommended with redundant mode
 ```
 
 On Android, turn on the **Redundant Mode** switch (the port list is the
-**Redundant Ports** field).
+**Redundant Ports** field). The app then uses `CC = bbr` for you.
 
 - **When to use it**: live streaming such as SRT over phone connections,
   especially with a short latency setting, and connections that drop out for a
@@ -211,6 +212,12 @@ On Android, turn on the **Redundant Mode** switch (the port list is the
   (`redundant mode: ...`). The stream can still lose more packets than with
   `Redundant = off`, so if your connections are often slower than the stream,
   leave redundant mode off.
+- **Use `CC = bbr` on the client (recommended)**: `CC` decides how fast mqvpn
+  sends data. Cellular connections are wireless, so they can lose a few
+  packets even when they are not busy. The default, `bbr2`, slows down after
+  such losses, which can leave the connection too slow to carry the full
+  stream. `bbr` keeps its speed. In our benchmarks, `bbr` performed better
+  with redundant mode.
 - **Duplicates reach the application**: mqvpn does not remove the extra
   copies, so the receiving application sees every packet more than once. SRT
   and similar protocols discard duplicates; check that your application does
