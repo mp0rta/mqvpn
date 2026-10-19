@@ -696,6 +696,15 @@ JNI_FN(configSetRequestServerScheduler)(JNIEnv *env, jobject thiz, jlong cfg,
                                                      enable ? 1 : 0);
 }
 
+/* configSetCc(cfg, cc) → int */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetCc)(JNIEnv *env, jobject thiz, jlong cfg, jint cc)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_config_set_cc((mqvpn_config_t *)(intptr_t)cfg, (mqvpn_cc_t)cc);
+}
+
 /* configSetLogLevel(cfg, level) → int */
 JNIEXPORT jint JNICALL
 JNI_FN(configSetLogLevel)(JNIEnv *env, jobject thiz, jlong cfg, jint level)

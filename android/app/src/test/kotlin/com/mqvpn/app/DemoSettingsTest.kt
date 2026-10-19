@@ -124,6 +124,12 @@ class DemoSettingsTest {
     }
 
     @Test
+    fun `redundant mode sends with bbr, otherwise the default bbr2`() {
+        assertEquals(MqvpnConfig.CongestionControl.BBR, DemoSettings(redundantEnabled = true).toMqvpnConfig().cc)
+        assertEquals(MqvpnConfig.CongestionControl.BBR2, DemoSettings(redundantEnabled = false).toMqvpnConfig().cc)
+    }
+
+    @Test
     fun `blank redundantPorts is valid and maps to empty`() {
         val s = DemoSettings(serverAddress = "h", redundantEnabled = true, redundantPorts = "")
         assertTrue(s.redundantPortsValid())

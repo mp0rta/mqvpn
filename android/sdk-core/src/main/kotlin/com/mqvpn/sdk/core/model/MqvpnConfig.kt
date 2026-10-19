@@ -37,6 +37,8 @@ data class MqvpnConfig(
     val scheduler: Scheduler = Scheduler.MIN_RTT,
     /** Ask the server to use [scheduler] for this connection (it may refuse). */
     val requestServerScheduler: Boolean = false,
+    /** Congestion control for what this client sends; the server keeps its own for downloads. */
+    val cc: CongestionControl = CongestionControl.BBR2,
     /**
      * Minimum level of the library's log lines: this tunnel's own lines,
      * delivered to `MqvpnVpnService.onLog`, and the lines the library writes
@@ -73,6 +75,13 @@ data class MqvpnConfig(
         WLB(1),
         BACKUP_FEC(2),
         WLB_UDP_PIN(3),
+    }
+
+    @Serializable
+    enum class CongestionControl(val native: Int) {
+        BBR2(0),
+        BBR(1),
+        CUBIC(2),
     }
 
     @Serializable

@@ -63,6 +63,22 @@ class MqvpnConfigTest {
     }
 
     @Test
+    fun `cc native values match mqvpn_cc_t`() {
+        assertEquals(0, MqvpnConfig.CongestionControl.BBR2.native)
+        assertEquals(1, MqvpnConfig.CongestionControl.BBR.native)
+        assertEquals(2, MqvpnConfig.CongestionControl.CUBIC.native)
+    }
+
+    @Test
+    fun `cc defaults to bbr2 and survives json`() {
+        assertEquals(MqvpnConfig.CongestionControl.BBR2, MqvpnConfig(serverAddress = "h", authKey = "k").cc)
+        val c = MqvpnConfig(serverAddress = "h", authKey = "k", cc = MqvpnConfig.CongestionControl.BBR)
+        assertEquals(c, MqvpnConfig.fromJson(c.toJson()))
+        val old = MqvpnConfig.fromJson("""{"serverAddress":"h","authKey":"k"}""")
+        assertEquals(MqvpnConfig.CongestionControl.BBR2, old.cc)
+    }
+
+    @Test
     fun `log level native values are correct`() {
         assertEquals(0, MqvpnConfig.LogLevel.DEBUG.native)
         assertEquals(1, MqvpnConfig.LogLevel.INFO.native)

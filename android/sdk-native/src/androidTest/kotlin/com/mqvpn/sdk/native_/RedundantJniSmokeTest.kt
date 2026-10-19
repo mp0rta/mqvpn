@@ -27,4 +27,15 @@ class RedundantJniSmokeTest {
             NativeBridge.configFree(cfg)
         }
     }
+
+    @Test
+    fun configSetCc_acceptsAndRejects() {
+        val cfg = NativeBridge.configNew()
+        try {
+            for (cc in 0..2) assertEquals(0, NativeBridge.configSetCc(cfg, cc)) // bbr2, bbr, cubic
+            assertNotEquals(0, NativeBridge.configSetCc(cfg, 99))
+        } finally {
+            NativeBridge.configFree(cfg)
+        }
+    }
 }

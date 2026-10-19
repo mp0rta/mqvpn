@@ -95,6 +95,8 @@ data class DemoSettings(
                 else -> MqvpnConfig.Scheduler.MIN_RTT
             },
             requestServerScheduler = schedulerChoice() != SchedulerChoice.DEFAULT,
+            // bbr2 slows a path down after random losses, which can leave it too slow for its full copy.
+            cc = if (redundantEnabled) MqvpnConfig.CongestionControl.BBR else MqvpnConfig.CongestionControl.BBR2,
         )
     }
 

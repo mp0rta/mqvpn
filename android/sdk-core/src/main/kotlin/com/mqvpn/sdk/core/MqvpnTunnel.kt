@@ -197,6 +197,7 @@ class MqvpnTunnel internal constructor(
             NativeBridge.configSetInsecure(cfg, config.insecure)
             NativeBridge.configSetScheduler(cfg, config.scheduler.native)
             NativeBridge.configSetRequestServerScheduler(cfg, config.requestServerScheduler)
+            NativeBridge.configSetCc(cfg, config.cc.native)
             NativeBridge.configSetLogLevel(cfg, config.logLevel.native)
             NativeBridge.configSetMultipath(cfg, config.multipathEnabled)
             NativeBridge.configSetReconnect(cfg, config.reconnect, config.reconnectIntervalSec)
