@@ -186,46 +186,34 @@ ip netns exec vpn-client "$MQVPN" \
     --log-level "$LOG_LEVEL" > "${WORK_DIR}/client_strict.log" 2>&1 &
 CLIENT_STRICT_PID=$!
 
-# Wait for connection attempt — client should fail and exit
-sleep 5
+# The rejected client reaches CLOSED and exits by itself (~3 s: the alert,
+# then the drain). Still running after the bound is a failure either way: a
+# tunnel means the cert was accepted, no tunnel means it is retrying.
+for _ in $(seq 1 30); do
+    kill -0 "$CLIENT_STRICT_PID" 2>/dev/null || break
+    sleep 0.5
+done
 
 if kill -0 "$CLIENT_STRICT_PID" 2>/dev/null; then
-    # Still running — check if tunnel came up (it shouldn't)
     if ip netns exec vpn-client ip addr show dev mqvpn0 >/dev/null 2>&1; then
         echo "=== FAIL: Self-signed cert was accepted without --insecure ==="
-        kill "$CLIENT_STRICT_PID" 2>/dev/null || true
-        wait "$CLIENT_STRICT_PID" 2>/dev/null || true
-        echo ""
-        echo "--- Server log ---"
-        cat "${WORK_DIR}/server.log"
-        echo ""
-        echo "--- Client strict log ---"
-        cat "${WORK_DIR}/client_strict.log"
-        exit 1
     else
-        echo "OK: Client running but no tunnel (cert rejected)"
-        kill "$CLIENT_STRICT_PID" 2>/dev/null || true
-        wait "$CLIENT_STRICT_PID" 2>/dev/null || true
+        echo "=== FAIL: strict client still running 15s after the cert rejection ==="
     fi
-else
-    # A client that reaches CLOSED on its own exits 1 by design, so its status
-    # is asserted here instead of in cleanup's stop_and_check_sanitizer. ASan
-    # and UBSan exit 1 too, so look for their reports as well.
-    STRICT_RC=0
-    wait "$CLIENT_STRICT_PID" 2>/dev/null || STRICT_RC=$?
-    CLIENT_STRICT_PID=""
-    SAN_RE='ERROR: (Address|Leak|Memory|Thread)Sanitizer|runtime error:|SUMMARY: (Address|Leak|Memory|Thread|Undefined)'
-    if [ "$STRICT_RC" -ne 1 ] \
-        || ! grep -q "exiting: connection closed" "${WORK_DIR}/client_strict.log" \
-        || grep -qE "$SAN_RE" "${WORK_DIR}/client_strict.log"; then
-        echo "=== FAIL: strict client exited ${STRICT_RC}, want 1 with 'exiting: connection closed' and no sanitizer report ==="
-        tail -40 "${WORK_DIR}/client_strict.log"
-        exit 1
-    fi
-    echo "OK: Client exited (self-signed cert rejected)"
+    echo ""
+    echo "--- Server log ---"
+    cat "${WORK_DIR}/server.log"
+    echo ""
+    echo "--- Client strict log ---"
+    cat "${WORK_DIR}/client_strict.log"
+    exit 1
 fi
-
-if grep -q "certificate verification failed\|cert.*fail\|TLS.*fail" "${WORK_DIR}/client_strict.log" 2>/dev/null; then
-    echo "OK: Certificate rejection message found in log"
+check_closed_exit "$CLIENT_STRICT_PID" "client-strict" "${WORK_DIR}/client_strict.log" || exit 1
+CLIENT_STRICT_PID=""
+if ! grep -q "TLS certificate verification failed" "${WORK_DIR}/client_strict.log"; then
+    echo "=== FAIL: strict client exited without 'TLS certificate verification failed' ==="
+    tail -40 "${WORK_DIR}/client_strict.log"
+    exit 1
 fi
+echo "OK: Client exited (self-signed cert rejected)"
 echo "=== PASS: Self-signed cert correctly rejected without --insecure ==="
