@@ -208,7 +208,20 @@ if kill -0 "$CLIENT_STRICT_PID" 2>/dev/null; then
         wait "$CLIENT_STRICT_PID" 2>/dev/null || true
     fi
 else
-    wait "$CLIENT_STRICT_PID" 2>/dev/null || true
+    # A client that reaches CLOSED on its own exits 1 by design, so its status
+    # is asserted here instead of in cleanup's stop_and_check_sanitizer. ASan
+    # and UBSan exit 1 too, so look for their reports as well.
+    STRICT_RC=0
+    wait "$CLIENT_STRICT_PID" 2>/dev/null || STRICT_RC=$?
+    CLIENT_STRICT_PID=""
+    SAN_RE='ERROR: (Address|Leak|Memory|Thread)Sanitizer|runtime error:|SUMMARY: (Address|Leak|Memory|Thread|Undefined)'
+    if [ "$STRICT_RC" -ne 1 ] \
+        || ! grep -q "exiting: connection closed" "${WORK_DIR}/client_strict.log" \
+        || grep -qE "$SAN_RE" "${WORK_DIR}/client_strict.log"; then
+        echo "=== FAIL: strict client exited ${STRICT_RC}, want 1 with 'exiting: connection closed' and no sanitizer report ==="
+        tail -40 "${WORK_DIR}/client_strict.log"
+        exit 1
+    fi
     echo "OK: Client exited (self-signed cert rejected)"
 fi
 

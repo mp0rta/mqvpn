@@ -67,7 +67,16 @@ wait "$PID" 2>/dev/null
 status=$?
 PID=""
 
-# exit 1 with the line, not a crash (ASan/UBSan exit 1 too, without it)
+# ASan and UBSan also exit 1, and "exiting: connection closed" is printed
+# before the teardown, so a sanitizer report would land after it: look for the
+# reports themselves (as run_setup_abort_exit_test.sh does).
+SAN_RE='ERROR: (Address|Leak|Memory|Thread)Sanitizer|runtime error:|SUMMARY: (Address|Leak|Memory|Thread|Undefined)'
+if grep -qE "$SAN_RE" "$LOG"; then
+    echo "FAIL: sanitizer diagnostic on the exit path (status ${status})" >&2
+    grep -nE "$SAN_RE" "$LOG" | head -5 >&2
+    tail -40 "$LOG" >&2
+    exit 1
+fi
 if ! grep -q 'exiting: connection closed' "$LOG"; then
     echo "FAIL: client exited (status ${status}) without 'exiting: connection closed'" >&2
     tail -20 "$LOG" >&2
