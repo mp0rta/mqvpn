@@ -1127,19 +1127,106 @@ tweak_secure_no_verifier(mqvpn_config_t *cfg)
     mqvpn_config_set_reconnect(cfg, 0, 0);
 }
 
-TEST(client_secure_without_verifier_rejects_self_signed_as_closed)
+static void
+tweak_secure_no_verifier_sni(mqvpn_config_t *cfg)
+{
+    tweak_secure_no_verifier(cfg);
+    mqvpn_config_set_tls_server_name(cfg, "mqvpn-test"); /* == SAN of test.crt */
+}
+
+/* Run body with the client's root store pinned to path. SSL_CERT_FILE is read
+ * once, when the client engine's SSL_CTX is created (mqvpn_client_new →
+ * SSL_CTX_set_default_verify_paths). The fixture's server engine reads it
+ * too; harmless — it never verifies client certs. ASSERT_* exits the
+ * process, so the restore only matters on the success path. */
+static void
+with_ssl_cert_file(const char *path, void (*body)(void))
+{
+    const char *prev = getenv("SSL_CERT_FILE");
+    char saved[PATH_MAX];
+    int had = 0;
+    if (prev) {
+        snprintf(saved, sizeof(saved), "%s", prev);
+        had = 1;
+    }
+    ASSERT_EQ(setenv("SSL_CERT_FILE", path, 1), 0);
+    body();
+    if (had)
+        setenv("SSL_CERT_FILE", saved, 1);
+    else
+        unsetenv("SSL_CERT_FILE");
+}
+
+/* No verifier: the library rejects the server certificate inside the
+ * handshake, and the platform hears it once, as TLS — one ERROR line,
+ * tunnel_closed(MQVPN_ERR_TLS), and the conn-close notify after the drain
+ * suppressed by the once-gate. Every X509 error ends the same way. */
+static void
+expect_library_tls_rejection(void (*tweak)(mqvpn_config_t *cfg))
+{
+    loopback_t lb;
+    loopback_setup(&lb, tweak);
+    loopback_pump_until(&lb, done_client_closed, 10000);
+
+    ASSERT_EQ(mqvpn_client_get_state(lb.cli), MQVPN_STATE_CLOSED);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 0);
+    ASSERT_EQ(g_cli_tunnel_closed_count, 1);
+    ASSERT_EQ(g_cli_tunnel_closed_reason, MQVPN_ERR_TLS);
+    ASSERT_EQ(g_cli_tls_fail_log_count, 1);
+    loopback_teardown(&lb);
+}
+
+TEST(client_secure_without_verifier_rejects_self_signed_as_tls)
+{
+    /* X509 error 18, rejected inside the library before any callback */
+    expect_library_tls_rejection(tweak_secure_no_verifier);
+}
+
+static void
+hostname_mismatch_body(void)
+{
+    /* test.crt is trusted, but with no ServerName the name checked is the
+     * server host 127.0.0.1, which mqvpn-test does not match */
+    expect_library_tls_rejection(tweak_secure_no_verifier);
+}
+
+TEST(client_secure_without_verifier_rejects_hostname_mismatch_as_tls)
+{
+    with_ssl_cert_file(TEST_CERT_FILE, hostname_mismatch_body);
+}
+
+static void
+expired_body(void)
+{
+    /* expired.crt is its own trust anchor and matches the ServerName: the
+     * only error left is X509 error 10 (expired) */
+    g_lb_server_cert = TEST_EXPIRED_CERT_FILE;
+    g_lb_server_key = TEST_EXPIRED_KEY_FILE;
+    expect_library_tls_rejection(tweak_secure_no_verifier_sni);
+    g_lb_server_cert = NULL;
+    g_lb_server_key = NULL;
+}
+
+TEST(client_secure_without_verifier_rejects_expired_as_tls)
+{
+    with_ssl_cert_file(TEST_EXPIRED_CERT_FILE, expired_body);
+}
+
+TEST(client_unreachable_server_reports_closed)
 {
     loopback_t lb;
     loopback_setup(&lb, tweak_secure_no_verifier);
-    loopback_pump_until(&lb, done_client_closed, 10000);
 
-    /* Self-signed (X509 error 18) is rejected inside the library and never
-     * reaches cb_cert_verify, so the platform sees the plain connection close
-     * after the drain. (An unknown issuer, error 20, does reach
-     * cb_cert_verify via xquic's legacy route and ends the same way — see
-     * client_secure_without_verifier_rejects_unknown_issuer_as_closed.) */
+    /* Pump the client alone: the server never reads its socket, so no
+     * certificate is ever judged, and the handshake-stall close is a plain
+     * MQVPN_ERR_CLOSED, not TLS. */
+    for (int elapsed = 0; elapsed < 15000 && !done_client_closed(&lb); elapsed += 50) {
+        mqvpn_bind_posix_path_drain(lb.cli_tctx, lb.cli, lb.path_h, 64);
+        mqvpn_client_tick(lb.cli);
+        poll(NULL, 0, 50);
+    }
+
     ASSERT_EQ(mqvpn_client_get_state(lb.cli), MQVPN_STATE_CLOSED);
-    ASSERT_EQ(g_cli_tunnel_ready_called, 0);
     ASSERT_EQ(g_cli_tunnel_closed_count, 1);
     ASSERT_EQ(g_cli_tunnel_closed_reason, MQVPN_ERR_CLOSED);
     ASSERT_EQ(g_cli_tls_fail_log_count, 0);
@@ -1196,44 +1283,19 @@ TEST(client_verifier_receives_chain_leaf_first)
 static void
 unknown_issuer_body(void)
 {
+    /* A chain whose root is in no store: unknown issuer (X509 error 20),
+     * which xquic's legacy path routes through cb_cert_verify before
+     * rejecting. It must be reported once, like any other X509 error. */
     use_chain_server_cert();
-    loopback_t lb;
-    loopback_setup(&lb, tweak_secure_no_verifier);
-    loopback_pump_until(&lb, done_client_closed, 10000);
-
-    /* A chain whose root is in no store: unknown issuer (X509 error 20) is
-     * the one library-side failure xquic routes through cb_cert_verify. It
-     * must end exactly like the self-signed case above — one ERROR line from
-     * the verifier site, then the plain connection close — so the public
-     * reason does not depend on which X509 error the library hit. Only a
-     * configured verifier's rejection is MQVPN_ERR_TLS. */
-    ASSERT_EQ(mqvpn_client_get_state(lb.cli), MQVPN_STATE_CLOSED);
-    ASSERT_EQ(g_cli_tunnel_ready_called, 0);
-    ASSERT_EQ(g_cli_tls_fail_log_count, 1);
-    ASSERT_EQ(g_cli_tunnel_closed_count, 1);
-    ASSERT_EQ(g_cli_tunnel_closed_reason, MQVPN_ERR_CLOSED);
-    loopback_teardown(&lb);
+    expect_library_tls_rejection(tweak_secure_no_verifier);
     use_default_server_cert();
 }
 
-TEST(client_secure_without_verifier_rejects_unknown_issuer_as_closed)
+TEST(client_secure_without_verifier_rejects_unknown_issuer_as_tls)
 {
     /* Pin the client's store to test.crt so the chain's root is provably
-     * absent whatever the host's /etc/ssl holds (same save/restore shape as
-     * client_secure_without_verifier_uses_default_root_paths). */
-    const char *prev = getenv("SSL_CERT_FILE");
-    char saved[PATH_MAX];
-    int had = 0;
-    if (prev) {
-        snprintf(saved, sizeof(saved), "%s", prev);
-        had = 1;
-    }
-    ASSERT_EQ(setenv("SSL_CERT_FILE", TEST_CERT_FILE, 1), 0);
-    unknown_issuer_body();
-    if (had)
-        setenv("SSL_CERT_FILE", saved, 1);
-    else
-        unsetenv("SSL_CERT_FILE");
+     * absent whatever the host's /etc/ssl holds. */
+    with_ssl_cert_file(TEST_CERT_FILE, unknown_issuer_body);
 }
 
 static void
@@ -1267,24 +1329,7 @@ default_root_paths_body(void)
 
 TEST(client_secure_without_verifier_uses_default_root_paths)
 {
-    /* SSL_CERT_FILE is read once, when the client engine's SSL_CTX is created
-     * (mqvpn_client_new → SSL_CTX_set_default_verify_paths). The fixture's
-     * server engine reads it too; harmless — it never verifies client certs.
-     * ASSERT_* exits the process, so the restore below only matters on the
-     * success path. */
-    const char *prev = getenv("SSL_CERT_FILE");
-    char saved[PATH_MAX];
-    int had = 0;
-    if (prev) {
-        snprintf(saved, sizeof(saved), "%s", prev);
-        had = 1;
-    }
-    ASSERT_EQ(setenv("SSL_CERT_FILE", TEST_CERT_FILE, 1), 0);
-    default_root_paths_body();
-    if (had)
-        setenv("SSL_CERT_FILE", saved, 1);
-    else
-        unsetenv("SSL_CERT_FILE");
+    with_ssl_cert_file(TEST_CERT_FILE, default_root_paths_body);
 }
 
 /* Note: all pump loops below use poll() instead of usleep() for CI robustness.
@@ -1577,6 +1622,9 @@ TEST(server_session_quic_loopback)
     /* insecure=1: xquic never consults cb_cert_verify, so even a rejecting
      * verifier is never called (premise of cb_cert_verify's shape). */
     ASSERT_EQ(g_vrec.calls, 0);
+    /* ...and the self-signed cert is not reported as a TLS failure either */
+    ASSERT_EQ(g_cli_tls_fail_log_count, 0);
+    ASSERT_EQ(g_cli_tunnel_closed_count, 0);
     /* Client assigned IP should be 10.0.0.2 (first allocation in /24) */
     ASSERT_EQ(g_cli_tunnel_info.assigned_ip[0], 10);
     ASSERT_EQ(g_cli_tunnel_info.assigned_ip[1], 0);
@@ -2282,10 +2330,13 @@ main(void)
     run_client_verifier_accepts_presented_chain();
     run_client_verifier_is_the_hostname_judge();
     run_client_verifier_reject_signals_tls_once();
-    run_client_secure_without_verifier_rejects_self_signed_as_closed();
+    run_client_secure_without_verifier_rejects_self_signed_as_tls();
+    run_client_secure_without_verifier_rejects_hostname_mismatch_as_tls();
+    run_client_secure_without_verifier_rejects_expired_as_tls();
+    run_client_unreachable_server_reports_closed();
     run_client_secure_without_verifier_uses_default_root_paths();
     run_client_verifier_receives_chain_leaf_first();
-    run_client_secure_without_verifier_rejects_unknown_issuer_as_closed();
+    run_client_secure_without_verifier_rejects_unknown_issuer_as_tls();
     run_server_reconnect_manual_connect();
     run_server_reconnect_manual_failure_rearm();
 

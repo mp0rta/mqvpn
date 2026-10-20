@@ -819,10 +819,10 @@ MQVPN_API int mqvpn_config_set_clock(mqvpn_config_t *cfg, mqvpn_clock_fn clock_f
  * macOS that is the system-provided bundle, not the Keychain). Platforms
  * without an OS bundle at those paths (Windows, Android) must install a
  * verifier or set SSL_CERT_FILE; without one, every CA-signed chain is
- * rejected there. A library-side rejection (unknown issuer, self-signed,
- * expired, hostname mismatch) surfaces as the plain connection close,
- * tunnel_closed(MQVPN_ERR_CLOSED); only a verifier's rejection is reported
- * as MQVPN_ERR_TLS. insecure=1
+ * rejected there. A rejected certificate is reported once, as
+ * tunnel_closed(MQVPN_ERR_TLS), whether a verifier or the library (unknown
+ * issuer, self-signed, expired, hostname mismatch) rejected it. insecure=1
+ * checks nothing, so it never reports MQVPN_ERR_TLS, and
  * takes precedence over a verifier (a WARN is logged at client creation).
  * Passing fn=NULL restores library-side verification (ctx is ignored). ctx
  * must stay valid until the client is destroyed (the config is copied at

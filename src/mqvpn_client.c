@@ -1316,48 +1316,52 @@ cli_effective_sni(const mqvpn_config_t *cfg)
     return cfg->tls_server_name[0] ? cfg->tls_server_name : cfg->server_host;
 }
 
+/* A rejected server certificate, whoever judged it (the platform verifier or
+ * the library): one ERROR line and tunnel_closed(MQVPN_ERR_TLS) now, instead
+ * of a plain close after the 3-PTO drain that follows the handshake alert; the
+ * conn-close notify that comes later is gated by tunnel_notified. Runs inside
+ * xqc_engine_main_logic: the platform handler must not re-enter libmqvpn
+ * (documented on mqvpn_tunnel_closed_fn). */
+static void
+cli_report_cert_rejected(cli_conn_t *conn)
+{
+    LOG_E(conn->client, "TLS certificate verification failed");
+    cli_signal_connect_fail(conn, MQVPN_ERR_TLS, 0);
+}
+
 /* xquic hands us the chain the server presented (leaf first, DER). Reached
  * on every handshake when a verifier is configured (APP_VERIFY): the verifier
- * is the sole judge, and its rejection is the one TLS failure the platform
- * hears about immediately, as MQVPN_ERR_TLS. Without a verifier, xquic's
- * legacy path routes only an unknown issuer (X509 error 20) here; every
- * other library-side rejection (self-signed, expired, hostname mismatch) is
- * refused inside the library and never reaches this callback. Both are one
- * class of failure — the library verifying — so both surface the same way:
- * this site only logs and refuses, and the platform sees the plain
- * connection close (MQVPN_ERR_CLOSED) after the drain, exactly like the
- * rejections that never get here. Reporting error 20 alone as MQVPN_ERR_TLS
- * would make the public reason depend on which X509 error the library hit.
- * insecure never gets here: verify_mode is NONE and xquic installs no
- * callback. An empty chain is rejected by the ssl library before this point.
- * conn_user_data is always the cli_conn_t passed to xqc_h3_connect. */
+ * is the sole judge. Without a verifier, xquic's legacy path routes only an
+ * unknown issuer (X509 error 20) here; refusing it is a library-side
+ * rejection like any other, reported by cb_cert_verify_failed, so this site
+ * stays silent rather than report it twice. insecure never gets here:
+ * verify_mode is NONE and xquic installs no callback. An empty chain is
+ * rejected by the ssl library before this point. conn_user_data is always
+ * the cli_conn_t passed to xqc_h3_connect. */
 static int
 cb_cert_verify(const unsigned char *certs[], const size_t cert_len[], size_t certs_len,
                void *conn_user_data)
 {
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
-    mqvpn_client_t *c = conn->client;
-    const mqvpn_config_t *cfg = &c->config;
+    const mqvpn_config_t *cfg = &conn->client->config;
 
-    if (cfg->cert_verify_fn) {
-        if (cfg->cert_verify_fn(certs, cert_len, certs_len, cli_effective_sni(cfg),
-                                cfg->cert_verify_ctx) == 0)
-            return 0;
-
-        LOG_E(c, "TLS certificate verification failed");
-        /* Tell the platform now, once, instead of after the 3-PTO drain that
-         * follows the handshake alert; the conn-close notify that comes later
-         * is gated by tunnel_notified. Runs inside xqc_engine_main_logic: the
-         * platform handler must not re-enter libmqvpn (documented on
-         * mqvpn_tunnel_closed_fn). */
-        cli_signal_connect_fail(conn, MQVPN_ERR_TLS, 0);
-        return -1;
-    }
-
-    /* Library-side verification (no verifier): refuse and let the connection
-     * close report it, like every other library-side rejection. */
-    LOG_E(c, "TLS certificate verification failed");
+    if (!cfg->cert_verify_fn) return -1;
+    if (cfg->cert_verify_fn(certs, cert_len, certs_len, cli_effective_sni(cfg),
+                            cfg->cert_verify_ctx) == 0)
+        return 0;
+    cli_report_cert_rejected(conn);
     return -1;
+}
+
+/* xquic's library-side verification (no verifier) rejected the server
+ * certificate: self-signed, unknown issuer, expired, hostname mismatch. Notify
+ * only, once per handshake; never under APP_VERIFY (cb_cert_verify reported
+ * that) nor under insecure. */
+static void
+cb_cert_verify_failed(int x509_err, void *conn_user_data)
+{
+    (void)x509_err; /* xquic's own log carries it */
+    cli_report_cert_rejected((cli_conn_t *)conn_user_data);
 }
 
 static void
@@ -1424,12 +1428,11 @@ cli_classify_status(int status)
 
 /* Fire tunnel_closed(reason) exactly once per conn for a pre-establishment
  * failure: a non-200 CONNECT-IP status, the tunnel stream closing before 200,
- * or (TLS) the platform verifier rejecting the server certificate from inside
- * the handshake. Notifies only — it does not abort the request in-core
- * (cross-platform full-stop and non-iOS reconnect-suppression are a
- * documented follow-up); iOS's onTunnelClosed turns this into a startTunnel
- * throw, and the process teardown that follows stops any reconnect on the iOS
- * target. */
+ * or (TLS) the platform verifier or the library rejecting the server
+ * certificate from inside the handshake. Notifies only — it does not abort the request
+ * in-core (cross-platform full-stop and non-iOS reconnect-suppression are a documented
+ * follow-up); iOS's onTunnelClosed turns this into a startTunnel throw, and the process
+ * teardown that follows stops any reconnect on the iOS target. */
 static void
 cli_signal_connect_fail(cli_conn_t *conn, mqvpn_error_t reason, int status_for_log)
 {
@@ -1439,8 +1442,9 @@ cli_signal_connect_fail(cli_conn_t *conn, mqvpn_error_t reason, int status_for_l
     conn->tunnel_notified = 1;
     /* "CONNECT-IP request failed" is an e2e marker (tests/test_e2e_wrong_psk.sh)
      * and must keep printing once for the CONNECT-IP witnesses. A TLS
-     * rejection never sent a request, so it stays silent here — the verifier
-     * site already logged "TLS certificate verification failed". */
+     * rejection never sent a request, so it stays silent here —
+     * cli_report_cert_rejected already logged "TLS certificate verification
+     * failed". */
     if (reason != MQVPN_ERR_TLS)
         LOG_W(c, "CONNECT-IP request failed (status=%d) → tunnel_closed(%d)",
               status_for_log, (int)reason);
@@ -3141,6 +3145,7 @@ init_xquic_engine(mqvpn_client_t *c)
         .save_session_cb = cb_save_session,
         .save_tp_cb = cb_save_tp,
         .cert_verify_cb = cb_cert_verify,
+        .cert_verify_failed_notify = cb_cert_verify_failed,
         .ready_to_create_path_notify = cb_ready_to_create_path,
         .path_removed_notify = cb_path_removed,
     };
