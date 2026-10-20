@@ -1360,7 +1360,7 @@ cb_cert_verify(const unsigned char *certs[], const size_t cert_len[], size_t cer
 static void
 cb_cert_verify_failed(int x509_err, void *conn_user_data)
 {
-    (void)x509_err; /* xquic's own log carries it */
+    (void)x509_err; /* the public reason is TLS whichever X509 error it was */
     cli_report_cert_rejected((cli_conn_t *)conn_user_data);
 }
 
