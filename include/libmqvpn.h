@@ -821,7 +821,8 @@ MQVPN_API int mqvpn_config_set_clock(mqvpn_config_t *cfg, mqvpn_clock_fn clock_f
  * verifier or set SSL_CERT_FILE; without one, every CA-signed chain is
  * rejected there. A rejected certificate is reported once, as
  * tunnel_closed(MQVPN_ERR_TLS), whether a verifier or the library (unknown
- * issuer, self-signed, expired, hostname mismatch) rejected it. insecure=1
+ * issuer, self-signed, expired, hostname mismatch) rejected it, and the
+ * client then goes to CLOSED even with reconnect enabled. insecure=1
  * checks nothing, so it never reports MQVPN_ERR_TLS, and
  * takes precedence over a verifier (a WARN is logged at client creation).
  * Passing fn=NULL restores library-side verification (ctx is ignored). ctx

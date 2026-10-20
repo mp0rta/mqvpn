@@ -123,6 +123,7 @@ struct cli_conn_s {
     uint64_t masque_stream_id;
     int tunnel_ok;
     int tunnel_notified; /* one-shot: a tunnel_closed already fired for this conn */
+    mqvpn_error_t notified_reason; /* the reason it fired with */
     int addr_assigned;
     uint8_t assigned_ip[4];
     uint8_t assigned_prefix;
@@ -1430,9 +1431,9 @@ cli_classify_status(int status)
  * failure: a non-200 CONNECT-IP status, the tunnel stream closing before 200,
  * or (TLS) the platform verifier or the library rejecting the server
  * certificate from inside the handshake. Notifies only — it does not abort the request
- * in-core (cross-platform full-stop and non-iOS reconnect-suppression are a documented
- * follow-up); iOS's onTunnelClosed turns this into a startTunnel throw, and the process
- * teardown that follows stops any reconnect on the iOS target. */
+ * in-core (cross-platform full-stop is a documented follow-up); iOS's onTunnelClosed
+ * turns this into a startTunnel throw. A TLS reason also keeps cb_h3_conn_close from
+ * reconnecting. */
 static void
 cli_signal_connect_fail(cli_conn_t *conn, mqvpn_error_t reason, int status_for_log)
 {
@@ -1440,6 +1441,7 @@ cli_signal_connect_fail(cli_conn_t *conn, mqvpn_error_t reason, int status_for_l
     if (conn->tunnel_notified) return; /* once (calloc-zeroed at conn start) */
     assert(!conn->tunnel_ok);          /* every caller gates on !tunnel_ok / non-200 */
     conn->tunnel_notified = 1;
+    conn->notified_reason = reason;
     /* "CONNECT-IP request failed" is an e2e marker (tests/test_e2e_wrong_psk.sh)
      * and must keep printing once for the CONNECT-IP witnesses. A TLS
      * rejection never sent a request, so it stays silent here —
@@ -1482,9 +1484,11 @@ cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_data)
     /* Notify platform (skip if a pre-establishment failure already fired). */
     cli_notify_conn_closed(c, conn);
 
+    /* the same server would present the same certificate on every retry */
+    int cert_rejected = conn->tunnel_notified && conn->notified_reason == MQVPN_ERR_TLS;
     cli_conn_destroy(c);
 
-    if (!c->shutting_down && c->config.reconnect_enable) {
+    if (!c->shutting_down && c->config.reconnect_enable && !cert_rejected) {
         int delay = client_arm_reconnect_timer(c);
         LOG_I(c, "reconnecting in %d seconds (attempt %d)...", delay,
               c->reconnect_attempts);

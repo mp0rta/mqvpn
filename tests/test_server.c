@@ -1212,6 +1212,33 @@ TEST(client_secure_without_verifier_rejects_expired_as_tls)
     with_ssl_cert_file(TEST_EXPIRED_CERT_FILE, expired_body);
 }
 
+static void
+tweak_secure_no_verifier_reconnect(mqvpn_config_t *cfg)
+{
+    tweak_secure_no_verifier(cfg);
+    mqvpn_config_set_reconnect(cfg, 1, 1);
+}
+
+static void
+tweak_rejecting_verifier_reconnect(mqvpn_config_t *cfg)
+{
+    tweak_rejecting_verifier(cfg);
+    mqvpn_config_set_reconnect(cfg, 1, 1);
+}
+
+/* Reconnect on: a rejected certificate still ends in CLOSED, not
+ * RECONNECTING — the same server would present the same certificate. Both
+ * rejection sites: the library's own check and the platform verifier. */
+TEST(client_tls_rejection_does_not_reconnect)
+{
+    expect_library_tls_rejection(tweak_secure_no_verifier_reconnect);
+
+    memset(&g_vrec, 0, sizeof(g_vrec));
+    g_vrec.ret = -1;
+    expect_library_tls_rejection(tweak_rejecting_verifier_reconnect);
+    ASSERT_EQ(g_vrec.calls, 1);
+}
+
 TEST(client_unreachable_server_reports_closed)
 {
     loopback_t lb;
@@ -2333,6 +2360,7 @@ main(void)
     run_client_secure_without_verifier_rejects_self_signed_as_tls();
     run_client_secure_without_verifier_rejects_hostname_mismatch_as_tls();
     run_client_secure_without_verifier_rejects_expired_as_tls();
+    run_client_tls_rejection_does_not_reconnect();
     run_client_unreachable_server_reports_closed();
     run_client_secure_without_verifier_uses_default_root_paths();
     run_client_verifier_receives_chain_leaf_first();
