@@ -139,9 +139,11 @@ struct platform_win_ctx {
  * TUNNEL_SETUP: the host side of the tunnel could not be set up, or its kill
  * switch torn down. PATH_RELEASE: the library refused a transport release
  * the platform reported right after its own drop/remove of that path — an
- * invariant violation (net_mon.c). */
+ * invariant violation (net_mon.c). CLOSED: the client reached CLOSED without
+ * a shutdown of ours — the connection ended and will not be retried. */
 #  define PLATFORM_FATAL_TUNNEL_SETUP 1
 #  define PLATFORM_FATAL_PATH_RELEASE 2
+#  define PLATFORM_FATAL_CLOSED       3
 
 /* routing.c */
 int win_setup_routes(platform_win_ctx_t *p);
