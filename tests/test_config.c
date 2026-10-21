@@ -985,6 +985,24 @@ test_mtu_invalid_string_ignored(void)
 }
 
 static void
+test_path_mtu_parse(void)
+{
+    char *path = write_tmp("[Interface]\nPathMTU = 1492\n");
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(cfg.path_mtu, 0, "default path_mtu is 0");
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.path_mtu, 1492, "PathMTU 1492 parsed");
+
+    path = write_tmp("[Interface]\nPathMTU = 1000\n");
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.path_mtu, 0, "PathMTU < 1280 ignored");
+}
+
+static void
 test_mtu_json_parse(void)
 {
     const char *json = "{\"mtu\": 1400}";
@@ -1742,6 +1760,29 @@ test_advanced_udp_gro(void)
     ASSERT_EQ_INT(cfg.udp_gro, 0, "json udp_gro=false");
 }
 
+static void
+test_advanced_tun_offload(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(cfg.tun_offload, 1, "tun_offload default 1 (absent)");
+    ASSERT_EQ_INT(cfg.tun_gro, 1, "tun_gro default 1 (absent)");
+
+    char *p = write_tmp("[Advanced]\nTunOffload = false\nTunGro = false\n");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "advanced ini load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.tun_offload, 0, "ini TunOffload=false");
+    ASSERT_EQ_INT(cfg.tun_gro, 0, "ini TunGro=false");
+
+    p = write_tmp("{\"advanced\": {\"tun_offload\": false, \"tun_gro\": false}}");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "advanced json load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.tun_offload, 0, "json tun_offload=false");
+    ASSERT_EQ_INT(cfg.tun_gro, 0, "json tun_gro=false");
+}
+
 /* ── [Hybrid] EgressAllow/EgressDeny lists + TcpConnectTimeoutSec ───────── */
 
 static void
@@ -1855,6 +1896,93 @@ test_hybrid_egress_acl_ini_v6(void)
 
 /* ── INI ↔ JSON scalar-key parity (pins the descriptor-table refactor) ──── */
 
+/* RedundantPorts is a complex key: errors set redundant_ports_err instead of
+ * being downgraded to warn-and-ignore. */
+static void
+redundant_ports_ini(const char *val, mqvpn_file_config_t *c)
+{
+    char ini[1536];
+    snprintf(ini, sizeof(ini), "[Multipath]\nRedundantPorts = %s\n", val);
+    char *path = write_tmp(ini);
+    mqvpn_config_defaults(c);
+    mqvpn_config_load(c, path);
+    unlink(path);
+}
+
+static void
+redundant_ports_json(const char *val, mqvpn_file_config_t *c)
+{
+    char js[1536];
+    snprintf(js, sizeof(js), "{\"redundant_ports\":%s}", val);
+    mqvpn_config_defaults(c);
+    mqvpn_config_load_json_filecfg(c, js);
+}
+
+static void
+test_redundant_ports_ini_json(void)
+{
+    mqvpn_file_config_t a, b;
+    redundant_ports_ini("4200,9000", &a);
+    redundant_ports_json("\"4200,9000\"", &b);
+    ASSERT_EQ_STR(a.redundant_ports, "4200,9000", "rports ini value");
+    ASSERT_EQ_STR(b.redundant_ports, "4200,9000", "rports json value");
+    ASSERT_EQ_INT(a.redundant_ports_err, 0, "rports ini ok");
+    ASSERT_EQ_INT(b.redundant_ports_err, 0, "rports json ok");
+
+    char longlist[512] = "", spaces[512] = "", huge[1200];
+    for (int i = 0; i < 60; i++)
+        strcat(longlist, "4200,"); /* 300 chars */
+    memset(spaces, ' ', 300);
+    memset(huge, '1', 1100);
+    huge[1100] = '\0';
+
+    redundant_ports_ini(longlist, &a);
+    ASSERT_EQ_INT(a.redundant_ports_err, 1, "rports ini 300 chars");
+    char q[1300];
+    snprintf(q, sizeof(q), "\"%s\"", longlist);
+    redundant_ports_json(q, &b);
+    ASSERT_EQ_INT(b.redundant_ports_err, 1, "rports json 300 chars");
+    snprintf(q, sizeof(q), "\"%sabc\"", spaces);
+    redundant_ports_json(q, &b);
+    ASSERT_EQ_INT(b.redundant_ports_err, 1, "rports json spaces then abc");
+    snprintf(q, sizeof(q), "\"%s\"", huge);
+    redundant_ports_json(q, &b);
+    ASSERT_EQ_INT(b.redundant_ports_err, 1, "rports json 1100 chars");
+    redundant_ports_json("[4200]", &b);
+    ASSERT_EQ_INT(b.redundant_ports_err, 1, "rports json non-string");
+    redundant_ports_json("\"4200,abc\"", &b);
+    ASSERT_EQ_INT(b.redundant_ports_err, 1, "rports json bad token");
+    redundant_ports_ini("4200,abc", &a);
+    ASSERT_EQ_INT(a.redundant_ports_err, 1, "rports ini bad token");
+    ASSERT_EQ_STR(a.redundant_ports, "4200,abc", "rports ini bad value kept");
+    ASSERT_EQ_STR(b.redundant_ports, "4200,abc", "rports json bad value kept");
+
+    redundant_ports_json("\"  4200  \"", &b);
+    ASSERT_EQ_STR(b.redundant_ports, "4200", "rports json trimmed");
+    ASSERT_EQ_INT(b.redundant_ports_err, 0, "rports json trimmed ok");
+    snprintf(q, sizeof(q), "\"%s4200\"", spaces);
+    redundant_ports_json(q, &b);
+    ASSERT_EQ_STR(b.redundant_ports, "4200", "rports json 300 spaces then 4200");
+    ASSERT_EQ_INT(b.redundant_ports_err, 0, "rports json 300 spaces ok");
+}
+
+static void
+test_redundant_ini_onoff(void)
+{
+    const char *vals[] = {"on", "off", "ON", "Off", "true", "no", "bogus"};
+    const int want[] = {1, 0, 1, 0, 1, 0, 0};
+    for (size_t i = 0; i < sizeof(vals) / sizeof(vals[0]); i++) {
+        char ini[64];
+        snprintf(ini, sizeof(ini), "[Multipath]\nRedundant = %s\n", vals[i]);
+        char *path = write_tmp(ini);
+        mqvpn_file_config_t c;
+        mqvpn_config_defaults(&c);
+        mqvpn_config_load(&c, path);
+        unlink(path);
+        ASSERT_EQ_INT(c.redundant, want[i], vals[i]);
+    }
+}
+
 static void
 test_ini_json_scalar_parity(void)
 {
@@ -1872,6 +2000,7 @@ test_ini_json_scalar_parity(void)
                       "Reconnect = false\n"
                       "ReconnectInterval = 17\n"
                       "MTU = 1420\n"
+                      "PathMTU = 1492\n"
                       "[Server]\n"
                       "Address = vpn.parity.test:4433\n"
                       "ServerName = sni.parity.test\n"
@@ -1893,6 +2022,7 @@ test_ini_json_scalar_parity(void)
                       "ReinjectionSrttFactorPct = 150\n"
                       "ReinjectionHardDeadlineMs = 300\n"
                       "ReinjectionDeadlineLowerBoundMs = 10\n"
+                      "Redundant = true\n"
                       "[Reorder]\n"
                       "Enabled = on\n"
                       "MaxWaitMs = 55\n"
@@ -1917,7 +2047,9 @@ test_ini_json_scalar_parity(void)
                       "[Advanced]\n"
                       "RecvRateLimit = 77\n"
                       "UdpGso = false\n"
-                      "UdpGro = false\n";
+                      "UdpGro = false\n"
+                      "TunOffload = false\n"
+                      "TunGro = false\n";
     /* NOTE: [Auth] Key is INI-only dual-write (auth_key + server_auth_key);
      * mirror it in JSON by setting BOTH json keys to the same value. */
     const char *ini_auth_extra = "[Auth]\nKey = parity-secret\n";
@@ -1932,6 +2064,7 @@ test_ini_json_scalar_parity(void)
                        "\"reconnect\":false,"
                        "\"reconnect_interval\":17,"
                        "\"mtu\":1420,"
+                       "\"path_mtu\":1492,"
                        "\"server_addr\":\"vpn.parity.test:4433\","
                        "\"tls_server_name\":\"sni.parity.test\","
                        "\"insecure\":true,"
@@ -1950,6 +2083,7 @@ test_ini_json_scalar_parity(void)
                        "\"reinjection_srtt_factor_pct\":150,"
                        "\"reinjection_hard_deadline_ms\":300,"
                        "\"reinjection_deadline_lower_bound_ms\":10,"
+                       "\"redundant\":true,"
                        "\"reorder\":{"
                        "\"enabled\":\"on\","
                        "\"max_wait_ms\":55,"
@@ -1976,7 +2110,9 @@ test_ini_json_scalar_parity(void)
                        "\"advanced\":{"
                        "\"recv_rate_limit\":77,"
                        "\"udp_gso\":false,"
-                       "\"udp_gro\":false"
+                       "\"udp_gro\":false,"
+                       "\"tun_offload\":false,"
+                       "\"tun_gro\":false"
                        "}"
                        "}";
 
@@ -1999,6 +2135,7 @@ test_ini_json_scalar_parity(void)
     ASSERT_EQ_STR(a.tun_name, b.tun_name, "parity tun_name");
     ASSERT_EQ_INT(a.is_server, b.is_server, "parity is_server");
     ASSERT_EQ_INT(a.tun_mtu, b.tun_mtu, "parity mtu");
+    ASSERT_EQ_INT(a.path_mtu, b.path_mtu, "parity path_mtu");
     ASSERT_EQ_INT(a.max_clients, b.max_clients, "parity max_clients");
     ASSERT_EQ_INT((int)a.init_max_path_id, (int)b.init_max_path_id,
                   "parity init_max_path_id");
@@ -2010,6 +2147,8 @@ test_ini_json_scalar_parity(void)
     ASSERT_EQ_INT(a.reinjection_deadline_lower_bound_ms,
                   b.reinjection_deadline_lower_bound_ms,
                   "parity reinjection_deadline_lower_bound_ms");
+    ASSERT_EQ_INT(a.redundant, 1, "parity ini redundant");
+    ASSERT_EQ_INT(b.redundant, 1, "parity json redundant");
     ASSERT_EQ_STR(a.auth_key, b.auth_key, "parity auth_key");
     ASSERT_EQ_STR(a.server_auth_key, b.server_auth_key, "parity server_auth_key");
     ASSERT_EQ_INT(a.reorder.mode, b.reorder.mode, "parity reorder mode");
@@ -2042,11 +2181,14 @@ test_ini_json_scalar_parity(void)
                   "parity advanced recv_rate_limit");
     ASSERT_EQ_INT(a.udp_gso, b.udp_gso, "parity advanced udp_gso");
     ASSERT_EQ_INT(a.udp_gro, b.udp_gro, "parity advanced udp_gro");
+    ASSERT_EQ_INT(a.tun_offload, b.tun_offload, "parity advanced tun_offload");
+    ASSERT_EQ_INT(a.tun_gro, b.tun_gro, "parity advanced tun_gro");
 
     /* Non-default guards: prove these asserts pass because the value was
      * actually parsed, not because it silently failed to parse on BOTH
      * sides and both structs just kept the (equal) default. */
     ASSERT_EQ_INT(a.tun_mtu, 1420, "parity mtu is non-default");
+    ASSERT_EQ_INT(a.path_mtu, 1492, "parity path_mtu is non-default");
     ASSERT_EQ_STR(a.reinjection, "deadline", "parity reinjection is non-default");
     ASSERT_EQ_INT(a.reinjection_srtt_factor_pct, 150,
                   "parity reinjection_srtt_factor_pct is non-default");
@@ -2072,6 +2214,8 @@ test_ini_json_scalar_parity(void)
                   "parity advanced recv_rate_limit is non-default");
     ASSERT_EQ_INT(a.udp_gso, 0, "parity advanced udp_gso is non-default");
     ASSERT_EQ_INT(a.udp_gro, 0, "parity advanced udp_gro is non-default");
+    ASSERT_EQ_INT(a.tun_offload, 0, "parity advanced tun_offload is non-default");
+    ASSERT_EQ_INT(a.tun_gro, 0, "parity advanced tun_gro is non-default");
 
     /* Both structs were memset by mqvpn_config_defaults → padding is zero
      * → whole-struct compare is deterministic. */
@@ -2213,6 +2357,7 @@ test_sched_cc_name_roundtrip(void)
     ASSERT_EQ_INT(mqvpn_cc_from_name(NULL), -1, "cc from_name(NULL)");
     ASSERT_EQ_INT(mqvpn_reinj_from_name("bogus"), -1, "reinj from_name(bogus)");
     ASSERT_EQ_INT(mqvpn_reinj_from_name(NULL), -1, "reinj from_name(NULL)");
+    ASSERT_EQ_INT(mqvpn_reinj_from_name("dgram"), -1, "reinj from_name(dgram)");
 }
 
 int
@@ -2273,6 +2418,7 @@ main(void)
     test_mtu_above_ceiling_ignored();
     test_mtu_invalid_string_ignored();
     test_mtu_json_parse();
+    test_path_mtu_parse();
 
     /* subnet6 tests */
     test_subnet6_default();
@@ -2319,6 +2465,7 @@ main(void)
     test_advanced_recv_rate_limit();
     test_advanced_udp_gso();
     test_advanced_udp_gro();
+    test_advanced_tun_offload();
     test_hybrid_egress_acl_ini();
     test_hybrid_egress_acl_ini_invalid_ignored();
     test_hybrid_egress_acl_ini_v6();
@@ -2326,6 +2473,8 @@ main(void)
 
     /* INI/JSON scalar-key parity */
     test_ini_json_scalar_parity();
+    test_redundant_ports_ini_json();
+    test_redundant_ini_onoff();
     test_ini_json_invalid_scalar_parity();
 
     /* mqvpn_sched_names.h table parity */

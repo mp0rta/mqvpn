@@ -34,17 +34,23 @@ typedef struct mqvpn_client_cfg_s {
     int manage_routes; /* 1=manage host routes (default 1), 0=skip routing setup */
     uint64_t init_max_path_id;         /* draft-21 §4.6 TP cap, 0=use xquic default 8 */
     int tun_mtu;                       /* 0=auto (MSS-derived), >0=cap (floor 1280) */
+    int path_mtu;                      /* 0=default packet size, >0=underlay MTU */
     int cc;                            /* mqvpn_cc_t: congestion control algorithm */
     int reinjection;                   /* mqvpn_reinjection_t; 0=off (default) */
     int reinj_srtt_factor_pct;         /* deadline mode; percent, e.g. 110 = 1.10x srtt */
     int reinj_hard_deadline_ms;        /* deadline mode */
     int reinj_deadline_lower_bound_ms; /* deadline mode */
+    int redundant;                     /* send UDP on every path */
+    uint16_t redundant_ports[MQVPN_REDUNDANT_MAX_PORTS]; /* empty = all UDP */
+    int n_redundant_ports;
     mqvpn_reorder_config_t
         reorder;                  /* INI [Reorder]/[ReorderRule] (mode OFF by default) */
     mqvpn_hybrid_config_t hybrid; /* INI [Hybrid] (disabled by default) */
     uint64_t recv_rate_limit;     /* [Advanced] RecvRateLimit, bytes/sec; 0 = off */
     int udp_gso;                  /* [Advanced] UdpGso; default 1 */
     int udp_gro;                  /* [Advanced] UdpGro; default 1 */
+    int tun_offload;              /* [Advanced] TunOffload; default 1 */
+    int tun_gro;                  /* [Advanced] TunGro; default 1 */
 } mqvpn_client_cfg_t;
 
 /* CLI → library config bridge (src/platform/client_config_bridge.c): forwards

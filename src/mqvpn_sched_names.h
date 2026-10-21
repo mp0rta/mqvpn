@@ -46,8 +46,7 @@
 #define MQVPN_REINJ_LIST(X)             \
     X(MQVPN_REINJ_OFF, "off")           \
     X(MQVPN_REINJ_DEADLINE, "deadline") \
-    X(MQVPN_REINJ_IDLE, "idle")         \
-    X(MQVPN_REINJ_DGRAM, "dgram")
+    X(MQVPN_REINJ_IDLE, "idle")
 
 /* mqvpn_sched_from_name: returns the enum value, or -1 if unrecognized. */
 static inline int

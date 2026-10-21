@@ -355,8 +355,10 @@ recovery_register_with_lib(platform_ctx_t *p, platform_path_t *s, void *tctx,
     mqvpn_path_desc_t desc;
     platform_path_fill_desc(p, s, &desc);
 
+    p->adding_iface = s->iface;
     mqvpn_path_handle_t handle = mqvpn_client_add_path(
         p->client, &desc, mqvpn_bind_posix_path_ops(), tctx, outcome);
+    p->adding_iface = NULL;
     if (handle < 0) {
         LOG_WRN("%s: add_path() for re-add %s failed", netmon_log_tag, ifname);
         return -1;

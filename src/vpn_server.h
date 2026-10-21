@@ -35,6 +35,7 @@ typedef struct mqvpn_server_cfg_s {
     int control_port;          /* TCP port for JSON control API (0 = disabled) */
     uint64_t init_max_path_id; /* draft-21 §4.6 TP cap, 0=use xquic default 8 */
     int tun_mtu;               /* 0=auto (1382 at startup), >0=override (floor 1280) */
+    int path_mtu;              /* 0=default packet size, >0=underlay MTU */
     int cc;                    /* mqvpn_cc_t: congestion control algorithm */
     int reinjection;           /* mqvpn_reinjection_t; 0=off (default) */
     int reinj_srtt_factor_pct; /* deadline mode; percent, e.g. 110 = 1.10x srtt */
@@ -45,6 +46,8 @@ typedef struct mqvpn_server_cfg_s {
     mqvpn_hybrid_config_t hybrid; /* INI [Hybrid] (disabled by default) */
     int udp_gso;                  /* [Advanced] UdpGso; default 1 */
     int udp_gro;                  /* [Advanced] UdpGro; default 1 */
+    int tun_offload;              /* [Advanced] TunOffload; default 1 */
+    int tun_gro;                  /* [Advanced] TunGro; default 1 */
 } mqvpn_server_cfg_t;
 
 #endif /* MQVPN_VPN_SERVER_H */

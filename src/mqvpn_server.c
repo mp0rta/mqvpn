@@ -2277,6 +2277,7 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         .scheduler = cfg->scheduler,
         .cc = cfg->cc,
         .init_max_path_id = cfg->init_max_path_id,
+        .path_mtu = cfg->path_mtu,
         /* recv_rate_bytes_per_sec: intentionally absent (=0) — client-only knob */
         .reinjection = cfg->reinjection,
         .reinj_srtt_factor_pct = cfg->reinj_srtt_factor_pct,
@@ -2302,13 +2303,8 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
             LOG_W(s, "reinjection mode=deadline protects only stream traffic; hybrid "
                      "lane is disabled, effect limited to control streams");
         }
-    } else if (cfg->reinjection == MQVPN_REINJ_IDLE ||
-               cfg->reinjection == MQVPN_REINJ_DGRAM) {
+    } else if (cfg->reinjection == MQVPN_REINJ_IDLE) {
         LOG_I(s, "reinjection enabled: mode=%s", mqvpn_reinj_to_name(cfg->reinjection));
-        if (cfg->reinjection == MQVPN_REINJ_DGRAM) {
-            LOG_I(s, "reinjection mode=dgram duplicates every datagram: datagram-lane "
-                     "goodput is capped at one path's capacity");
-        }
     }
 
     /* H3 callbacks */
@@ -2469,6 +2465,19 @@ mqvpn_server_start(mqvpn_server_t *s)
     ASSERT_TICK_THREAD(s);
 
     if (s->started) return MQVPN_ERR_INVALID_ARG;
+    int inner_mtu = (int)mqvpn_pkt_out_size(s->config.path_mtu) - MQVPN_DGRAM_HEADROOM;
+    if (s->config.reorder.mode != MQVPN_REORDER_OFF) inner_mtu -= MQVPN_REORDER_HDR_LEN;
+    if (s->pool.has_v6 && inner_mtu < IPV6_MIN_MTU) {
+        LOG_E(s, "IPv6 requires an inner MTU of at least 1280 (PathMTU=%d, available=%d)",
+              s->config.path_mtu, inner_mtu);
+        return MQVPN_ERR_INVALID_ARG;
+    }
+    if (s->config.tun_mtu > inner_mtu) {
+        LOG_W(s,
+              "config MTU %d exceeds available inner MTU %d (PathMTU=%d); "
+              "oversized tunnel packets may be dropped",
+              s->config.tun_mtu, inner_mtu, s->config.path_mtu);
+    }
     s->started = 1;
 
     /* Notify platform of TUN configuration via callback */
@@ -2481,7 +2490,9 @@ mqvpn_server_start(mqvpn_server_t *s)
     info.assigned_prefix = (uint8_t)s->pool.prefix_len;
     memcpy(info.server_ip, &s->pool.base.s_addr, 4);
     info.server_prefix = (uint8_t)s->pool.prefix_len;
-    s->tun_mtu = s->config.tun_mtu > 0 ? s->config.tun_mtu : MQVPN_TUN_MTU_AUTO;
+    s->tun_mtu = s->config.tun_mtu > 0
+                     ? s->config.tun_mtu
+                     : (int)mqvpn_pkt_out_size(s->config.path_mtu) - MQVPN_DGRAM_HEADROOM;
     info.mtu = s->tun_mtu;
 
     if (s->pool.has_v6) {
@@ -3118,10 +3129,13 @@ mqvpn_server_get_client_info(const mqvpn_server_t *server, mqvpn_client_info_t *
         /* Get xquic per-path stats. paths_info is dynamically allocated
          * (xquic PR3 §4.3 Rev 4); caller must free(). */
         xqc_conn_stats_t st = xqc_conn_get_stats(s->engine, &conn->cid);
-        ci->bytes_tx = st.total_app_bytes;
+        /* Not st.total_app_bytes: that one adds the received bytes too. */
+        ci->bytes_tx = 0;
         ci->bytes_rx = 0;
-        for (uint32_t p = 0; st.paths_info && p < st.paths_info_count; p++)
+        for (uint32_t p = 0; st.paths_info && p < st.paths_info_count; p++) {
+            ci->bytes_tx += st.paths_info[p].path_send_bytes;
             ci->bytes_rx += st.paths_info[p].path_recv_bytes;
+        }
 
         int np = 0;
         for (uint32_t p = 0;

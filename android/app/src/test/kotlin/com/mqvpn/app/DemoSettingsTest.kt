@@ -8,6 +8,7 @@ import com.mqvpn.sdk.core.model.MqvpnConfig
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -111,6 +112,50 @@ class DemoSettingsTest {
     fun `invalidPortTokens trims surrounding whitespace before reporting`() {
         val settings = DemoSettings(reorderPorts = " abc ,443")
         assertEquals(listOf("abc"), settings.invalidPortTokens())
+    }
+
+    // -- redundant mode ----------------------------------------------------------
+
+    @Test
+    fun `toMqvpnConfig maps redundant fields`() {
+        val c = DemoSettings(redundantEnabled = true, redundantPorts = " 4200, 9000 ").toMqvpnConfig()
+        assertTrue(c.redundantEnabled)
+        assertEquals(listOf(4200, 9000), c.redundantPorts)
+    }
+
+    @Test
+    fun `redundant mode sends with bbr, otherwise the default bbr2`() {
+        assertEquals(MqvpnConfig.CongestionControl.BBR, DemoSettings(redundantEnabled = true).toMqvpnConfig().cc)
+        assertEquals(MqvpnConfig.CongestionControl.BBR2, DemoSettings(redundantEnabled = false).toMqvpnConfig().cc)
+    }
+
+    @Test
+    fun `blank redundantPorts is valid and maps to empty`() {
+        val s = DemoSettings(serverAddress = "h", redundantEnabled = true, redundantPorts = "")
+        assertTrue(s.redundantPortsValid())
+        assertTrue(s.isValid())
+        assertEquals(emptyList<Int>(), s.toMqvpnConfig().redundantPorts)
+    }
+
+    @Test
+    fun `invalid redundantPorts are rejected, never degraded to all UDP`() {
+        listOf("4200,abc", "4200,", "0", "65536", List(17) { "4200" }.joinToString(","), "4".repeat(300))
+            .forEach { v ->
+                assertFalse(v, DemoSettings(redundantPorts = v).redundantPortsValid())
+                assertFalse(v, DemoSettings(serverAddress = "h", redundantEnabled = true, redundantPorts = v).isValid())
+                // connecting with it fails instead of duplicating all UDP
+                val enabled = DemoSettings(serverAddress = "h", redundantEnabled = true, redundantPorts = v)
+                assertThrows(v, IllegalArgumentException::class.java) { enabled.toMqvpnConfig() }
+                // ignored when the switch is off
+                assertTrue(v, DemoSettings(serverAddress = "h", redundantEnabled = false, redundantPorts = v).isValid())
+            }
+    }
+
+    @Test
+    fun `sixteen tokens are valid and deduplicated`() {
+        val s = DemoSettings(redundantPorts = List(16) { "4200" }.joinToString(","))
+        assertTrue(s.redundantPortsValid())
+        assertEquals(listOf(4200), s.parsedRedundantPorts())
     }
 
     // -- toMqvpnConfig field mapping ------------------------------------------
