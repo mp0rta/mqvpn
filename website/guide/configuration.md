@@ -74,6 +74,7 @@ Path = wlan0
 ## JSON Format
 
 JSON config is useful for structured management and automation tooling.
+The file must be strict JSON (RFC 8259): no comments, no trailing commas, and keys and strings in double quotes.
 
 ### Server
 
