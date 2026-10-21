@@ -392,14 +392,16 @@ control API, not the logs.
 
 ## §15 JSON goes through yyjson (2026-10)
 
-The config file, the Config API, the control API and `--status` parse JSON
-with vendored yyjson 0.13.0, only through `src/json_util.h`. A hand-rolled
-parser cannot follow nesting or decode escapes, and each workaround spread
-to another consumer. Config and requests are strict RFC 8259: malformed JSON
-that a lax parser lets through fails, and a key is looked up only in its own
-object. `--status` alone also accepts the invalid UTF-8 bytes the server
-writes into user names (it copies names byte for byte). The first duplicate
-key in one object wins; for same-named entries in the `users` array the last
-wins, which is a separate rule. Replies keep the key order and types of the
-original string literals (DD §14); a reply over 256 KiB becomes the
-`response too large` envelope.
+The config file, the Config API, the control API and `--status` parse and
+write JSON with vendored yyjson 0.13.0, included only via `src/json_util.h`.
+The only hand-written JSON literals are the control API's
+`response too large` envelope and `--status`'s fixed request strings. A
+hand-rolled parser cannot follow nesting or decode escapes, and each
+workaround spreads to another consumer. Config and requests are strict
+RFC 8259: malformed JSON that a lax parser lets through fails, and a key is
+looked up only in its own object. `--status` alone accepts the invalid UTF-8
+bytes the server writes into user names (it copies names byte for byte). The
+first duplicate key in one object wins; for same-named entries in the
+`users` array the last wins, which is a separate rule. Replies keep the key
+order and types of the original string literals (DD §14); a reply over
+256 KiB becomes the `response too large` envelope.

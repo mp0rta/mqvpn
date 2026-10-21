@@ -28,8 +28,8 @@ rules belong here, reasons there.
 - `third_party/xquic` — fork `mp0rta/xquic`, branch `mqvpn-main`;
   `third_party/lwip` — fork `mp0rta/heiher-lwip`, branch `mqvpn-main`
   (`git submodule update --init --recursive` after checkout)
-- `third_party/yyjson` — vendored yyjson 0.13.0 (JSON parse/serialize; used
-  only through `src/json_util.h`)
+- `third_party/yyjson` — vendored yyjson 0.13.0 (JSON parse/serialize;
+  included only via `src/json_util.h`)
 - `tests/` (unit tests, e2e shell scripts), `scripts/ci_e2e/` (netns e2e),
   `.github/workflows/ci.yml`; build and test commands are in CONTRIBUTING.md
   sections 3 and 4 (the CI `sanitizer` job uses the same configure)
@@ -109,9 +109,10 @@ rules belong here, reasons there.
   ASan/UBSan (the CI `sanitizer` job). Control API or connection-lifecycle
   changes need the sudo netns e2e suite (`scripts/ci_e2e/`). [DD §10]
 - A new test target must resolve its includes in a clean checkout. [DD §10]
-- All JSON parsing and serialization goes through yyjson via
-  `src/json_util.h`; never hand-roll JSON text or scan JSON with
-  `strchr`/`strstr`. [DD §15]
+- All JSON parsing and serialization goes through yyjson, included only via
+  `src/json_util.h`; the only hand-written JSON literals are the control
+  API's `response too large` envelope and `--status`'s fixed request
+  strings; never scan JSON with `strchr`/`strstr`. [DD §15]
 - `ci_sweep_results/` is transient; `bench_results/` is the tracked archive.
 
 ## Rules — git

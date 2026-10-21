@@ -484,7 +484,7 @@ Requires that the server was built with `XQC_ENABLE_FEC`.
 
 | Error string             | Returned by                                    |
 |--------------------------|------------------------------------------------|
-| `"missing cmd"`          | any request (no `cmd` field present)           |
+| `"missing cmd"`          | any request that is not a JSON object with a string `cmd` (unparseable JSON, a non-object root, a missing or non-string `cmd`) |
 | `"unknown cmd"`          | any request with an unrecognised `cmd` value   |
 | `"too many connections"` | connection accepted when 8 slots already used  |
 | `"response too large"`   | any command (internal buffer overflow guard)   |
