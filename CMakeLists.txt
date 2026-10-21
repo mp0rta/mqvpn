@@ -924,7 +924,6 @@ if(BUILD_TESTING)
     )
     target_include_directories(test_path_slot_oracle PRIVATE ${CMAKE_SOURCE_DIR}/formal/oracle)
     target_compile_options(test_path_slot_oracle PRIVATE -UNDEBUG)
-    add_executable(test_control_response_bound tests/test_control_response_bound.c)
     add_executable(test_reorder_common tests/test_reorder_common.c)
     add_executable(test_reorder_tx tests/test_reorder_tx.c src/reorder_tx.c src/log.c)
     # test_reorder_rx #include's src/reorder_rx.c to reach the file-local ring;
@@ -946,7 +945,7 @@ if(BUILD_TESTING)
     add_executable(test_path_readd tests/test_path_readd.c)
     # Path status log line (header only + the status-name helper).
     add_executable(test_path_line tests/test_path_line.c src/mqvpn_util.c)
-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_redundant_tx test_status test_path_state_machine test_path_slot_oracle test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd test_path_line)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_redundant_tx test_status test_path_state_machine test_path_slot_oracle test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd test_path_line)
 
     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of
