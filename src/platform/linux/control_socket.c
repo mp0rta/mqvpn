@@ -167,7 +167,9 @@ ctrl_cmd_add_user(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *c
 {
     mqvpn_server_t *server = cs->server;
     char name[64] = {0}, key[256] = {0};
-    if (json_copy_str(yyjson_obj_get(req, "name"), name, sizeof(name)) < 0 ||
+    yyjson_val *name_val = yyjson_obj_get(req, "name");
+    if (yyjson_get_len(name_val) >= sizeof(name) ||
+        json_copy_str(name_val, name, sizeof(name)) < 0 ||
         json_copy_str(yyjson_obj_get(req, "key"), key, sizeof(key)) < 0)
         return ctrl_error(resp, resp_len, "name and key required");
 
@@ -185,7 +187,9 @@ ctrl_cmd_remove_user(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t
 {
     mqvpn_server_t *server = cs->server;
     char name[64] = {0};
-    if (json_copy_str(yyjson_obj_get(req, "name"), name, sizeof(name)) < 0)
+    yyjson_val *name_val = yyjson_obj_get(req, "name");
+    if (yyjson_get_len(name_val) >= sizeof(name) ||
+        json_copy_str(name_val, name, sizeof(name)) < 0)
         return ctrl_error(resp, resp_len, "name required");
 
     int rc = mqvpn_server_remove_user(server, name);
@@ -393,7 +397,9 @@ ctrl_cmd_get_fec_stats(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket
 {
     mqvpn_server_t *server = cs->server;
     char user[64] = {0};
-    if (json_copy_str(yyjson_obj_get(req, "user"), user, sizeof(user)) < 0)
+    yyjson_val *user_val = yyjson_obj_get(req, "user");
+    if (yyjson_get_len(user_val) >= sizeof(user) ||
+        json_copy_str(user_val, user, sizeof(user)) < 0)
         return ctrl_error(resp, resp_len, "user required");
 
     mqvpn_internal_fec_stats_t fs;

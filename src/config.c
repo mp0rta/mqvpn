@@ -193,6 +193,11 @@ add_user_entry(mqvpn_file_config_t *cfg, const char *name, const char *key, int 
         LOG_WRN("%s:%d: invalid user entry", path, lineno);
         return;
     }
+    if (strlen(name) >= sizeof(cfg->user_names[0])) {
+        LOG_WRN("%s:%d: username exceeds %zu bytes; ignoring", path, lineno,
+                sizeof(cfg->user_names[0]) - 1);
+        return;
+    }
 
     /* Reject characters that would break JSON serialization in control API */
     for (const char *p = name; *p; p++) {
@@ -1213,8 +1218,8 @@ out:
 /* Split "host:port" or "[host]:port" (IPv6 bracket form). Pure — no I/O.
  * Returns 0 on success, -1 on malformed input.
  */
-static int
-split_addr_port(const char *str, char *host, size_t host_len, int *port)
+int
+mqvpn_parse_host_port(const char *str, char *host, size_t host_len, int *port)
 {
     if (!str || !host || !port || host_len == 0) return -1;
     const char *port_start;
@@ -1239,8 +1244,9 @@ split_addr_port(const char *str, char *host, size_t host_len, int *port)
      * silently accept. Port must be a bare unsigned decimal. */
     if (!isdigit((unsigned char)*port_start)) return -1;
     char *end;
+    errno = 0;
     long p = strtol(port_start, &end, 10);
-    if (*end != '\0' || p <= 0 || p > 65535) return -1;
+    if (errno == ERANGE || *end != '\0' || p <= 0 || p > 65535) return -1;
     *port = (int)p;
     return 0;
 }
@@ -1258,7 +1264,7 @@ mqvpn_resolve_control_endpoint(const char *file_listen, const char *cli_addr,
     /* Step 1: INI base. */
     if (file_listen && file_listen[0] != '\0') {
         int port_buf = 0;
-        if (split_addr_port(file_listen, addr_buf, addr_buf_len, &port_buf) < 0) {
+        if (mqvpn_parse_host_port(file_listen, addr_buf, addr_buf_len, &port_buf) < 0) {
             return -1;
         }
         *out_addr = addr_buf;
@@ -1305,13 +1311,16 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
 int
 mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
 {
-    FILE *fp = fopen(path, "r");
+    FILE *fp = fopen(path, "rb");
     if (!fp) {
         LOG_ERR("config: cannot open '%s': %m", path);
         return -1;
     }
 
-    fseek(fp, 0, SEEK_END);
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return -1;
+    }
     long sz = ftell(fp);
     if (sz < 0) {
         fclose(fp);
@@ -1326,20 +1335,28 @@ mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
     }
 
     size_t got = fread(buf, 1, (size_t)sz, fp);
+    if (ferror(fp)) {
+        LOG_ERR("config: cannot read '%s': %m", path);
+        fclose(fp);
+        free(buf);
+        return -1;
+    }
     fclose(fp);
     buf[got] = '\0';
 
-    const char *s = buf;
+    /* Reject a truncated C string before either parser can apply any keys. */
+    if (strlen(buf) != got) {
+        LOG_ERR("config: NUL byte at byte %zu", strlen(buf));
+        free(buf);
+        return -1;
+    }
+    char *start = buf;
+    if (got >= 3 && memcmp(start, "\xef\xbb\xbf", 3) == 0) start += 3;
+    const char *s = start;
     while (*s && isspace((unsigned char)*s))
         s++;
 
     if (*s == '{') {
-        /* The loader sees a C string; a raw NUL would silently cut the file. */
-        if (strlen(buf) != got) {
-            LOG_ERR("config: invalid JSON: NUL byte at byte %zu", strlen(buf));
-            free(buf);
-            return -1;
-        }
         int rc = mqvpn_config_load_json_filecfg(cfg, s);
         free(buf);
         return rc;
@@ -1347,13 +1364,13 @@ mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
 
     int lineno = 0;
     int section = SEC_NONE;
-    char *line = strtok(buf, "\n");
-    while (line) {
+    for (char *line = start, *next; line; line = next) {
+        next = strchr(line, '\n');
+        if (next) *next++ = '\0';
         lineno++;
         char *t = trim(line);
 
         if (*t == '\0' || *t == '#' || *t == ';') {
-            line = strtok(NULL, "\n");
             continue;
         }
 
@@ -1361,7 +1378,7 @@ mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
             char *end = strchr(t, ']');
             if (!end) {
                 LOG_WRN("%s:%d: malformed section header", path, lineno);
-                line = strtok(NULL, "\n");
+                section = SEC_NONE;
                 continue;
             }
             *end = '\0';
@@ -1382,20 +1399,16 @@ mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
                     }
                 }
             }
-            line = strtok(NULL, "\n");
             continue;
         }
 
         char *eq = strchr(t, '=');
         if (!eq) {
             LOG_WRN("%s:%d: malformed line (no '=')", path, lineno);
-            line = strtok(NULL, "\n");
             continue;
         }
         *eq = '\0';
         handle_kv(cfg, section, trim(t), trim(eq + 1), lineno, path);
-
-        line = strtok(NULL, "\n");
     }
 
     free(buf);

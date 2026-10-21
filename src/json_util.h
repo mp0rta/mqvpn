@@ -86,12 +86,13 @@ mqvpn_json_parse_users(yyjson_val *arr, void *ctx,
             char pair[360];
             if (json_copy_str(el, pair, sizeof(pair)) < 0) return -1;
             char *sep = strchr(pair, ':');
-            if (!sep) return -1;
+            if (!sep || (size_t)(sep - pair) >= sizeof(name)) return -1;
             *sep = '\0';
             snprintf(name, sizeof(name), "%.*s", (int)(sizeof(name) - 1), pair);
             snprintf(key, sizeof(key), "%.*s", (int)(sizeof(key) - 1), sep + 1);
         } else if (yyjson_is_obj(el)) {
-            if (json_copy_str(yyjson_obj_get(el, "name"), name, sizeof(name)) < 0 ||
+            if (yyjson_get_len(yyjson_obj_get(el, "name")) >= sizeof(name) ||
+                json_copy_str(yyjson_obj_get(el, "name"), name, sizeof(name)) < 0 ||
                 json_copy_str(yyjson_obj_get(el, "key"), key, sizeof(key)) < 0)
                 return -1;
         } else {

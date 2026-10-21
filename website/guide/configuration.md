@@ -2,6 +2,11 @@
 
 mqvpn supports both INI and JSON config files. If the file content starts with `{`, it is parsed as JSON; otherwise as INI. CLI arguments override config values.
 
+UTF-8 files with or without a BOM and Windows (CRLF) line endings are supported.
+Files containing a NUL byte are rejected. INI section and key names are
+case-insensitive. A malformed section header produces a warning; its keys are
+ignored until the next valid section header.
+
 ## INI Format
 
 ### Server
@@ -127,6 +132,9 @@ The file must be strict JSON (RFC 8259): no comments, no trailing commas, and ke
 ## Multi-User Authentication
 
 The server can authenticate multiple users, each with their own PSK. In JSON config, add a `users` array where each entry is either an object (`{"name":"alice","key":"..."}`) or a shorthand string (`"alice:key"`). In INI config, use repeatable `User = NAME:KEY` lines in the `[Auth]` section. You can also use the [Control API](#control-api) to manage users at runtime.
+
+Config usernames can be at most 63 bytes. Longer names are rejected instead of
+shortened: INI skips the entry with a warning; JSON and `--user` return an error.
 
 When both `auth_key` (global key) and `users` are set, clients can authenticate with either. To restrict access to named users only, remove `auth_key` from the config.
 
@@ -568,5 +576,10 @@ sudo systemctl enable --now mqvpn-client@home
 ```
 
 ::: info
-The systemd units expect INI `.conf` files. The server unit's NAT helper scripts also parse the INI config directly, so JSON cannot be used with the standard units as-is.
+The systemd units use the `.conf` paths shown above, which can contain INI or
+JSON. The server's NAT helper uses the same configuration parser as mqvpn
+at startup. At shutdown, it removes its firewall rules and restores saved
+forwarding settings even if the configuration has been changed or deleted.
+When installing manually, keep `mqvpn-server-nat.sh` and `mqvpn-nat-config`
+together in the installation's `lib/mqvpn` directory.
 :::

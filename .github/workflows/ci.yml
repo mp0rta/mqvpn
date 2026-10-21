@@ -140,6 +140,7 @@ jobs:
           name: build
           path: |
             build/mqvpn
+            build/mqvpn-nat-config
             build/libmqvpn.a
             build/libmqvpn.so*
             build/libxquic.so

@@ -22,37 +22,6 @@ if [ -z "$ACTION" ] || [ -z "$CONFIG" ]; then
     exit 1
 fi
 
-if [ ! -f "$CONFIG" ]; then
-    echo "Error: config file not found: $CONFIG" >&2
-    exit 1
-fi
-
-# Detect config format once (matches mqvpn_config_load() in src/config.c).
-# JSON if first non-whitespace character is '{', INI otherwise.
-config_is_json=0
-[ "$(tr -d '[:space:]' < "$CONFIG" | head -c 1)" = "{" ] && config_is_json=1
-
-# Read a value from the config, supporting both INI and JSON formats.
-read_config_value() {
-    local json_key="$1" ini_key="$2" default="$3"
-    local value=""
-
-    if [ "$config_is_json" -eq 1 ]; then
-        value=$(sed -n 's/.*"'"${json_key}"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CONFIG" | tail -1 || true)
-    else
-        value=$(sed -n 's/^[[:space:]]*'"$ini_key"'[[:space:]]*=[[:space:]]*\(.*\)/\1/p' "$CONFIG" | tail -1 | tr -d '[:space:]')
-    fi
-
-    echo "${value:-$default}"
-}
-
-# Read Subnet from config (fallback: 10.0.0.0/24)
-SUBNET=$(read_config_value "subnet"   "Subnet"   "10.0.0.0/24")
-# Read Subnet6 from config (optional, empty if not set)
-SUBNET6=$(read_config_value "subnet6"  "Subnet6"  "")
-# Read TunName from config (fallback: mqvpn0)
-TUN_NAME=$(read_config_value "tun_name" "TunName"  "mqvpn0")
-
 COMMENT="mqvpn-server-nat"
 STATE_DIR="/run/mqvpn"
 
@@ -62,6 +31,18 @@ detect_iface() {
 }
 
 setup() {
+    if [ ! -f "$CONFIG" ]; then
+        echo "Error: config file not found: $CONFIG" >&2
+        exit 1
+    fi
+
+    # Capture the status before mapfile (process substitution would hide it).
+    local nat_config
+    nat_config=$("$(dirname "$0")/mqvpn-nat-config" "$CONFIG")
+    local -a nat_values
+    mapfile -t nat_values <<< "$nat_config"
+    local SUBNET="${nat_values[0]}" SUBNET6="${nat_values[1]}" TUN_NAME="${nat_values[2]}"
+
     mkdir -p "$STATE_DIR"
 
     # Save and enable IP forwarding
@@ -133,15 +114,18 @@ teardown() {
     delete_by_comment_v6 nat POSTROUTING
     delete_by_comment_v6 filter FORWARD
 
-    # Restore forwarding settings
-    if [ -f "$STATE_DIR/orig_ip_forward.$TUN_NAME" ]; then
-        sysctl -w net.ipv4.ip_forward="$(cat "$STATE_DIR/orig_ip_forward.$TUN_NAME")" >/dev/null
-        rm -f "$STATE_DIR/orig_ip_forward.$TUN_NAME"
-    fi
-    if [ -f "$STATE_DIR/orig_ip6_forward.$TUN_NAME" ]; then
-        sysctl -w net.ipv6.conf.all.forwarding="$(cat "$STATE_DIR/orig_ip6_forward.$TUN_NAME")" >/dev/null
-        rm -f "$STATE_DIR/orig_ip6_forward.$TUN_NAME"
-    fi
+    # The config may have changed or disappeared since setup.
+    local state_file
+    for state_file in "$STATE_DIR"/orig_ip_forward.*; do
+        [ -f "$state_file" ] || continue
+        sysctl -w net.ipv4.ip_forward="$(cat "$state_file")" >/dev/null
+        rm -f "$state_file"
+    done
+    for state_file in "$STATE_DIR"/orig_ip6_forward.*; do
+        [ -f "$state_file" ] || continue
+        sysctl -w net.ipv6.conf.all.forwarding="$(cat "$state_file")" >/dev/null
+        rm -f "$state_file"
+    done
 }
 
 case "$ACTION" in

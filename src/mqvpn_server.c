@@ -2991,6 +2991,7 @@ mqvpn_server_add_user(mqvpn_server_t *s, const char *username, const char *key)
 {
     if (!s || !username || !key || username[0] == '\0' || key[0] == '\0')
         return MQVPN_ERR_INVALID_ARG;
+    if (strlen(username) >= sizeof(s->config.user_names[0])) return MQVPN_ERR_INVALID_ARG;
 
     /* Reject characters that would break JSON serialization in control API */
     for (const char *p = username; *p; p++) {

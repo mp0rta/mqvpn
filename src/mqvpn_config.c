@@ -166,7 +166,8 @@ mqvpn_config_set_auth_key(mqvpn_config_t *cfg, const char *key)
 int
 mqvpn_config_add_user(mqvpn_config_t *cfg, const char *username, const char *key)
 {
-    if (!cfg || !username || !key || username[0] == '\0' || key[0] == '\0') {
+    if (!cfg || !username || !key || username[0] == '\0' || key[0] == '\0' ||
+        strlen(username) >= sizeof(cfg->user_names[0])) {
         return MQVPN_ERR_INVALID_ARG;
     }
 

@@ -102,33 +102,8 @@ usage(const char *prog)
 static int
 parse_host_port(const char *str, char *host, size_t host_len, int *port)
 {
-    if (str[0] == '[') {
-        /* Bracket notation for IPv6: [host]:port */
-        const char *close = strchr(str, ']');
-        if (!close || close[1] != ':') {
-            fprintf(stderr, "error: expected [HOST]:PORT, got '%s'\n", str);
-            return -1;
-        }
-        size_t hlen = (size_t)(close - str - 1);
-        if (hlen >= host_len) hlen = host_len - 1;
-        memcpy(host, str + 1, hlen);
-        host[hlen] = '\0';
-        *port = atoi(close + 2);
-    } else {
-        /* Legacy: host:port (last colon) */
-        const char *colon = strrchr(str, ':');
-        if (!colon) {
-            fprintf(stderr, "error: expected HOST:PORT, got '%s'\n", str);
-            return -1;
-        }
-        size_t hlen = (size_t)(colon - str);
-        if (hlen >= host_len) hlen = host_len - 1;
-        memcpy(host, str, hlen);
-        host[hlen] = '\0';
-        *port = atoi(colon + 1);
-    }
-    if (*port <= 0 || *port > 65535) {
-        fprintf(stderr, "error: invalid port in '%s'\n", str);
+    if (mqvpn_parse_host_port(str, host, host_len, port) < 0) {
+        fprintf(stderr, "error: invalid address '%s' (expected HOST:PORT)\n", str);
         return -1;
     }
     return 0;
@@ -264,6 +239,11 @@ main(int argc, char *argv[])
                 return 1;
             }
             *sep = '\0';
+            if (strlen(pair) >= sizeof(cli_user_names[0])) {
+                fprintf(stderr, "error: --user name exceeds %zu bytes\n",
+                        sizeof(cli_user_names[0]) - 1);
+                return 1;
+            }
             snprintf(cli_user_names[n_cli_users], sizeof(cli_user_names[n_cli_users]),
                      "%.*s", (int)(sizeof(cli_user_names[n_cli_users]) - 1), pair);
             snprintf(cli_user_keys[n_cli_users], sizeof(cli_user_keys[n_cli_users]),
@@ -436,13 +416,16 @@ main(int argc, char *argv[])
         }
     }
 
+    /* Server address: CLI > config */
+    const char *eff_server = server_str ? server_str : file_cfg.server_addr;
+
     /* Determine mode: CLI > config file > error */
     const char *eff_mode = mode;
     if (!eff_mode) {
         if (config_path) {
             eff_mode = file_cfg.is_server ? "server" : "client";
             /* Client mode needs server address */
-            if (!file_cfg.is_server && file_cfg.server_addr[0] == '\0') {
+            if (!file_cfg.is_server && eff_server[0] == '\0') {
                 fprintf(
                     stderr,
                     "error: config has no [Server] Address and no --mode specified\n");
@@ -455,9 +438,6 @@ main(int argc, char *argv[])
             return 1;
         }
     }
-
-    /* Server address: CLI > config */
-    const char *eff_server = server_str ? server_str : file_cfg.server_addr;
 
     /* Set log level */
     mqvpn_log_level_t log_level = MQVPN_LOG_INFO;

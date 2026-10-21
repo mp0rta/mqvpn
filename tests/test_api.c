@@ -153,6 +153,26 @@ TEST(config_add_user_max_capacity)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_username_length)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_NOT_NULL(cfg);
+    char name[65];
+    memset(name, 'a', 63);
+    name[63] = '\0';
+    ASSERT_EQ(mqvpn_config_add_user(cfg, name, "original"), MQVPN_OK);
+    name[63] = 'X';
+    name[64] = '\0';
+    ASSERT_EQ(mqvpn_config_add_user(cfg, name, "wrong"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(cfg->n_users, 1);
+    ASSERT_STR_EQ(cfg->user_keys[0], "original");
+    char json[256];
+    snprintf(json, sizeof(json), "{\"users\":[{\"name\":\"%s\",\"key\":\"wrong\"}]}",
+             name);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, json), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
 TEST(config_load_json)
 {
     const char *json = "{"
@@ -388,16 +408,15 @@ TEST(api_json_users_reset_and_partial)
     ASSERT_EQ(cfg->n_users, 1);
     ASSERT_STR_EQ(cfg->user_names[0], "a");
 
-    /* "name:key" strings are capped at 359 bytes, like the INI User= parser */
+    /* Long usernames must not turn into a different, truncated identity. */
     char name[201], key[201], longa[361], json[600];
     memset(name, 'n', 200);
     name[200] = '\0';
     memset(key, 'k', 200);
     key[200] = '\0';
     snprintf(json, sizeof(json), "{\"users\":[\"%s:%s\"]}", name, key);
-    ASSERT_EQ(mqvpn_config_load_json(cfg, json), MQVPN_OK);
-    ASSERT_EQ(cfg->n_users, 1);
-    ASSERT_EQ((int)strlen(cfg->user_keys[0]), 158);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, json), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(cfg->n_users, 0);
     memset(longa, 'a', 360);
     longa[360] = '\0';
     snprintf(json, sizeof(json), "{\"users\":[\"%s:k\"]}", longa);
@@ -4175,6 +4194,7 @@ main(void)
     run_config_set_auth_key();
     run_config_add_remove_user();
     run_config_add_user_max_capacity();
+    run_config_username_length();
     run_config_load_json();
     run_config_set_redundant_validates();
     run_config_json_redundant();

@@ -109,7 +109,7 @@ name already exists, the key is updated in place.
 
 | Field  | Type   | Required | Description                          |
 |--------|--------|----------|--------------------------------------|
-| `name` | string | yes      | Username (max 63 chars)              |
+| `name` | string | yes      | Username (max 63 UTF-8 bytes)        |
 | `key`  | string | yes      | Pre-shared key (max 255 chars)       |
 
 **Response — success**
@@ -126,7 +126,8 @@ name already exists, the key is updated in place.
 ```
 
 - `"name and key required"` — one or both fields are missing or cannot be
-  parsed.
+  parsed, or the decoded username exceeds 63 bytes. Overlong names are
+  rejected rather than truncated; existing users and their keys are unchanged.
 - `"add_user failed (-N)"` — the underlying library call returned error code
   `-N`; check server logs for details.
 
@@ -146,7 +147,7 @@ reconnect.
 
 | Field  | Type   | Required | Description |
 |--------|--------|----------|-------------|
-| `name` | string | yes      | Username    |
+| `name` | string | yes      | Username (max 63 UTF-8 bytes) |
 
 **Response — success**
 
@@ -161,7 +162,9 @@ reconnect.
 {"ok":false,"error":"user not found"}
 ```
 
-- `"name required"` — the `name` field is missing or cannot be parsed.
+- `"name required"` — the `name` field is missing, cannot be parsed, or
+  exceeds 63 decoded bytes. Overlong names do not remove a user with a
+  matching prefix.
 - `"user not found"` — no user with that name is registered.
 
 ---
@@ -388,7 +391,7 @@ that the server was built with `XQC_ENABLE_FEC`.
 
 | Field  | Type   | Required | Description                  |
 |--------|--------|----------|------------------------------|
-| `user` | string | yes      | Username of the active session |
+| `user` | string | yes      | Username of the active session (max 63 UTF-8 bytes) |
 
 **Response — success**
 
@@ -422,7 +425,8 @@ that the server was built with `XQC_ENABLE_FEC`.
 {"ok":false,"error":"fec not built"}
 ```
 
-- `"user required"` — the `user` field is missing or cannot be parsed.
+- `"user required"` — the `user` field is missing, cannot be parsed, or
+  exceeds 63 decoded bytes.
 - `"user not found"` — no active session exists for that username.
 - `"fec not built"` — the server was compiled without `XQC_ENABLE_FEC`, or an
   internal null-pointer guard was triggered. Check `get_build_info` first.

@@ -225,6 +225,34 @@ TEST(server_destroy_null)
     mqvpn_server_destroy(NULL);
 }
 
+TEST(server_user_name_length)
+{
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    ASSERT_NOT_NULL(s);
+    mqvpn_config_free(cfg);
+
+    char name[65], names[2][64];
+    memset(name, 'n', sizeof(name) - 1);
+    name[63] = '\0';
+    ASSERT_EQ(mqvpn_server_add_user(s, name, "original"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_add_user(s, name, "updated"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_list_users(s, names, 2), 1);
+    ASSERT_EQ(strcmp(names[0], name), 0);
+
+    name[63] = 'n';
+    name[64] = '\0';
+    ASSERT_EQ(mqvpn_server_add_user(s, name, "other"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_list_users(s, names, 2), 1);
+    name[63] = '\0';
+    ASSERT_EQ(strcmp(names[0], name), 0);
+
+    mqvpn_server_destroy(s);
+}
+
 TEST(server_egress_fd_budget)
 {
     reset_mocks();
@@ -2312,6 +2340,7 @@ main(void)
     run_server_new_missing_tunnel_config_ready();
     run_server_new_destroy();
     run_server_destroy_null();
+    run_server_user_name_length();
     run_server_egress_fd_budget();
     run_sched_refusal_reason();
 
