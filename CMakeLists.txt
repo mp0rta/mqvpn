@@ -85,6 +85,10 @@ else()
     add_subdirectory(third_party/xquic)
 endif()
 
+# yyjson's own visibility("default") on definitions would beat the hidden
+# preset of mqvpn_shared; an empty yyjson_api keeps its symbols out of the .so.
+add_definitions(-Dyyjson_api=)
+
 # ---------- libevent (not needed for Android / library-only builds) ----------
 option(ANDROID_CROSS_COMPILE "Cross-compiling for Android (skip libevent + CLI)" OFF)
 
@@ -243,7 +247,23 @@ set(MQVPN_LIB_SOURCES
     src/reorder_tx.c
     src/reorder_rx.c
     src/hybrid/classifier.c
+    third_party/yyjson/yyjson.c
 )
+
+include_directories(${CMAKE_SOURCE_DIR}/third_party/yyjson)
+
+# Vendored code: silence its warnings only (first-party -Werror / /WX stay).
+# COMPILE_FLAGS (a string) because the COMPILE_OPTIONS source property needs
+# CMake 3.11. COMPILE_FLAGS lands after the directory-level flags (-Werror
+# etc.) on the command line, so -w wins.
+if(MSVC)
+    set(YYJSON_WARN_FLAGS "/w")
+else()
+    set(YYJSON_WARN_FLAGS "-w")
+endif()
+set_source_files_properties(third_party/yyjson/yyjson.c PROPERTIES
+    COMPILE_FLAGS "${YYJSON_WARN_FLAGS}"
+    COMPILE_DEFINITIONS "YYJSON_DISABLE_FILE;YYJSON_DISABLE_UTILS;YYJSON_DISABLE_INCR_READER;YYJSON_READER_DEPTH_LIMIT=32")
 
 # ---------- bundled transport implementations (NOT part of the sans-I/O core) ----------
 # Together with src/hybrid/tcp_egress.c (the server egress lane owns its TCP
@@ -753,7 +773,7 @@ if(BUILD_TESTING)
     # below (:681 / :866); kept in sync so Tasks 6-8's red/green loops are
     # not vacuous on darwin. Link diff vs Linux: dl/m are folded into
     # libSystem here, and stdc++ becomes c++ (libc++).
-    add_executable(test_config tests/test_config.c src/config.c src/redundant_tx.c src/log.c)
+    add_executable(test_config tests/test_config.c src/config.c src/redundant_tx.c src/log.c third_party/yyjson/yyjson.c)
     target_include_directories(test_config PRIVATE
         ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
     add_test(NAME test_config COMMAND test_config)
@@ -843,11 +863,11 @@ target_link_libraries(mqvpn
 # control_socket.c to reach the file-local dispatch(); mqvpn_lib resolves
 # the NULL-guarded mqvpn_server_* calls (log.c is inside mqvpn_lib — do
 # not add it here). Only the fuzz TU is instrumented — that covers the
-# dispatch + argument-extraction surface (json_mini.h is header-inline, so
-# it compiles into the TU); library-side validation of extracted strings
+# dispatch + argument-extraction surface (yyjson.c is listed on the target
+# so the parser is instrumented too); library-side validation of extracted strings
 # short-circuits at the server=NULL guard and is out of scope (see the TU).
 if(MQVPN_ENABLE_FUZZING)
-    add_executable(fuzz_control_dispatch fuzz/fuzz_control_dispatch.c)
+    add_executable(fuzz_control_dispatch fuzz/fuzz_control_dispatch.c third_party/yyjson/yyjson.c)
     target_compile_options(fuzz_control_dispatch PRIVATE -fsanitize=fuzzer,address)
     target_link_options(fuzz_control_dispatch PRIVATE -fsanitize=fuzzer,address)
     target_link_libraries(fuzz_control_dispatch PRIVATE
@@ -883,14 +903,14 @@ if(BUILD_TESTING)
              COMMAND bash ${CMAKE_SOURCE_DIR}/tests/check_cert_fixtures.sh)
 
     # Each test links only the source files it needs (no xquic dependency)
-    add_executable(test_config  tests/test_config.c  src/config.c  src/redundant_tx.c src/log.c)
+    add_executable(test_config  tests/test_config.c  src/config.c  src/redundant_tx.c src/log.c third_party/yyjson/yyjson.c)
     add_executable(test_auth    tests/test_auth.c    src/auth.c    src/log.c)
     add_executable(test_session tests/test_session.c src/addr_pool.c src/log.c)
     add_executable(test_dns     tests/test_dns.c     src/platform/linux/dns.c     src/platform/posix/dns_common.c     src/log.c)
     add_executable(test_route_check tests/test_route_check.c src/platform/linux/route_check.c src/log.c)
     add_executable(test_flow_sched tests/test_flow_sched.c src/flow_sched.c src/log.c)
     add_executable(test_redundant_tx tests/test_redundant_tx.c src/redundant_tx.c)
-    add_executable(test_status tests/test_status.c)
+    add_executable(test_status tests/test_status.c third_party/yyjson/yyjson.c)
     add_executable(test_path_state_machine
         tests/test_path_state_machine.c
         src/path_state_machine.c
@@ -910,12 +930,12 @@ if(BUILD_TESTING)
     # test_reorder_rx #include's src/reorder_rx.c to reach the file-local ring;
     # do NOT also list reorder_rx.c here (it would compile the TU twice).
     # mqvpn_config.c is linked (separate TU) for the composed-builder bridge test.
-    add_executable(test_reorder_rx tests/test_reorder_rx.c src/mqvpn_config.c src/redundant_tx.c src/log.c)
-    add_executable(test_reorder_config tests/test_reorder_config.c src/mqvpn_config.c src/config.c src/redundant_tx.c src/log.c)
+    add_executable(test_reorder_rx tests/test_reorder_rx.c src/mqvpn_config.c src/redundant_tx.c src/log.c third_party/yyjson/yyjson.c)
+    add_executable(test_reorder_config tests/test_reorder_config.c src/mqvpn_config.c src/config.c src/redundant_tx.c src/log.c third_party/yyjson/yyjson.c)
     # Parity test for the shared CLI→library config bridge: pins every field
     # forwarded by mqvpn_platform_apply_client_config so a new knob cannot be
     # bridged on one platform and dropped on another (see the bridge TU).
-    add_executable(test_config_bridge tests/test_config_bridge.c src/platform/client_config_bridge.c src/mqvpn_config.c src/redundant_tx.c src/log.c)
+    add_executable(test_config_bridge tests/test_config_bridge.c src/platform/client_config_bridge.c src/mqvpn_config.c src/redundant_tx.c src/log.c third_party/yyjson/yyjson.c)
     add_executable(test_classifier tests/test_classifier.c src/hybrid/classifier.c)
     add_executable(test_icmp tests/test_icmp.c src/icmp.c)
     # test_reorder_gate exercises src/reorder_gate.h (shared STAMP/RAW/DROP_MTU
@@ -1098,7 +1118,7 @@ if(BUILD_TESTING)
     # because the connection handlers in the same TU reference event2; gated on
     # libevent being available (Linux test builds only, never Android).
     if(Libevent_FOUND OR EVENT_LIB)
-        add_executable(test_control_socket tests/test_control_socket.c src/log.c)
+        add_executable(test_control_socket tests/test_control_socket.c src/log.c third_party/yyjson/yyjson.c)
         target_include_directories(test_control_socket PRIVATE
             ${CMAKE_SOURCE_DIR}/src
             ${CMAKE_SOURCE_DIR}/src/platform/linux
