@@ -322,6 +322,15 @@ capture_run_status(int port, char *out, size_t out_cap, char *err, size_t err_ca
     return rc;
 }
 
+static int
+count_substr(const char *hay, const char *needle)
+{
+    int n = 0;
+    for (const char *p = hay; (p = strstr(p, needle)) != NULL; p += strlen(needle))
+        n++;
+    return n;
+}
+
 static void
 reap(pid_t pid)
 {
@@ -493,6 +502,61 @@ TEST(run_status_skips_non_object_entries)
     const char *p0 = strstr(out, "  path 0:");
     assert(p0 != NULL && strstr(p0 + 1, "  path 0:") == NULL);
     assert(strstr(out, "  path 1:") == NULL);
+    /* A non-object client prints no heading (bob's endpoint line has "(unknown)"). */
+    ASSERT_EQ(count_substr(out, "client: "), 1);
+    assert(strstr(out, "client: (unknown)") == NULL);
+    ASSERT_STR_EQ(err, "");
+}
+
+/* Display edges of the integers a reply can carry: a signed n_clients prints
+ * as is, an out-of-int-range one reads as 0, an RTT above INT64_MAX prints
+ * negative and one above UINT64_MAX reads as 0. */
+TEST(run_status_numeric_display_edges)
+{
+    const char *const neg_status =
+        "{\"ok\":true,\"n_clients\":-5,\"clients\":["
+        "{\"user\":\"bob\",\"endpoint\":\"10.0.0.3:2\",\"connected_sec\":0,"
+        "\"bytes_tx\":0,\"bytes_rx\":0,\"n_paths\":1,\"paths\":["
+        "{\"srtt_ms\":9223372036854775808,\"min_rtt_ms\":18446744073709551616,"
+        "\"cwnd\":2048,\"state_label\":\"active\"}]}]}\n";
+    const char *const big_status =
+        "{\"ok\":true,\"n_clients\":2147483648,\"clients\":[]}\n";
+    const char *const stats_lines = "server: lanes tcp/dgram/raw=1/2/3 (tcp_dropped=4) "
+                                    "flows act/tot/rej=5/6/7 raw_markers=8\n"
+                                    "server: udp tx=20/10 (x2.00) rx=60/30 (x2.00)\n";
+
+    const char *const bodies[] = {STATS_BODY, neg_status};
+    const size_t lens[] = {strlen(bodies[0]), strlen(bodies[1])};
+    int port = 0;
+    pid_t pid = serve_bodies(bodies, lens, 2, &port);
+    char out[4096], err[512];
+    int rc = capture_run_status(port, out, sizeof(out), err, sizeof(err));
+    reap(pid);
+
+    ASSERT_EQ(rc, 0);
+    char want[1024];
+    snprintf(want, sizeof(want),
+             "%smqvpn server  clients: -5\n"
+             "\nclient: bob\n"
+             "  endpoint: 10.0.0.3:2\n"
+             "  connected: 0s ago\n"
+             "  transfer: 0 B received, 0 B sent\n"
+             "  path 0: srtt=-9223372036854775808ms min_rtt=0ms cwnd=2K active\n",
+             stats_lines);
+    ASSERT_STR_EQ(out, want);
+    ASSERT_STR_EQ(err, "");
+
+    const char *const bodies2[] = {STATS_BODY, big_status};
+    const size_t lens2[] = {strlen(bodies2[0]), strlen(bodies2[1])};
+    pid = serve_bodies(bodies2, lens2, 2, &port);
+    rc = capture_run_status(port, out, sizeof(out), err, sizeof(err));
+    reap(pid);
+
+    ASSERT_EQ(rc, 0);
+    snprintf(want, sizeof(want),
+             "%smqvpn server  clients: 0\n\n  (no connected clients)\n", stats_lines);
+    ASSERT_STR_EQ(out, want);
+    ASSERT_STR_EQ(err, "");
 }
 
 /* ── Main ── */
@@ -540,6 +604,7 @@ main(void)
     run_run_status_bad_json_reports_unknown_error();
     run_run_status_invalid_utf8_user_passthrough();
     run_run_status_skips_non_object_entries();
+    run_run_status_numeric_display_edges();
 
     printf("\n  %d/%d tests passed\n", g_tests_passed, g_tests_run);
     return g_tests_passed == g_tests_run ? 0 : 1;
