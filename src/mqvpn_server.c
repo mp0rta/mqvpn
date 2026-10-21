@@ -3038,13 +3038,13 @@ mqvpn_server_remove_user(mqvpn_server_t *s, const char *username)
     return MQVPN_OK;
 }
 
-/* The paths_info entries a client's status reports, in xquic's order: every
- * path not yet CLOSED, then closed ones while room is left. xquic lists every
- * path that reached ACTIVE, closed ones included, until the connection ends,
- * and each network that comes back takes a new path ID, so on a long-lived
- * connection the first MQVPN_MAX_PATHS entries can all be closed paths while
- * the paths that carry the traffic come after them. Writes up to
- * MQVPN_MAX_PATHS indices to idx and returns how many. */
+/* The paths_info entries a client's status reports, kept in xquic's order:
+ * every path not yet CLOSED, and closed ones while room is left. xquic
+ * lists every path that reached ACTIVE, closed ones included, until the
+ * connection ends, and each network that comes back takes a new path ID, so
+ * on a long-lived connection the first MQVPN_MAX_PATHS entries can all be
+ * closed paths while the paths that carry the traffic come after them.
+ * Writes up to MQVPN_MAX_PATHS indices to idx and returns how many. */
 static int
 svr_status_paths(const xqc_conn_stats_t *st, uint32_t idx[MQVPN_MAX_PATHS])
 {
