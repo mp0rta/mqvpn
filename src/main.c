@@ -4,7 +4,6 @@
 #include "libmqvpn.h"
 #include "log.h"
 #include "config.h"
-#include "json_mini.h"
 #include "auth.h"
 #include "vpn_client.h"
 #include "vpn_server.h"
@@ -150,8 +149,6 @@ parse_mtu_arg(const char *opt, const char *str, int *out)
     return 0;
 }
 
-/* mqvpn_copy_str is provided by json_mini.h as mqvpn_copy_str */
-
 int
 main(int argc, char *argv[])
 {
@@ -267,10 +264,10 @@ main(int argc, char *argv[])
                 return 1;
             }
             *sep = '\0';
-            mqvpn_copy_str(cli_user_names[n_cli_users],
-                           sizeof(cli_user_names[n_cli_users]), pair);
-            mqvpn_copy_str(cli_user_keys[n_cli_users], sizeof(cli_user_keys[n_cli_users]),
-                           sep + 1);
+            snprintf(cli_user_names[n_cli_users], sizeof(cli_user_names[n_cli_users]),
+                     "%s", pair);
+            snprintf(cli_user_keys[n_cli_users], sizeof(cli_user_keys[n_cli_users]), "%s",
+                     sep + 1);
             if (cli_user_names[n_cli_users][0] == '\0' ||
                 cli_user_keys[n_cli_users][0] == '\0') {
                 fprintf(stderr, "error: --user must be NAME:KEY\n");
