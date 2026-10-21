@@ -27,7 +27,7 @@
 /* ── Configurable stub state ──────────────────────────────────────────────── */
 
 static int g_add_user_rc = MQVPN_OK;
-static char g_last_add_name[64]; /* name the add_user stub last received */
+static char g_last_add_name[128]; /* wider than the handler name[64]: its cut shows */
 static int g_remove_user_rc = MQVPN_OK;
 
 static int g_list_users_n = 0;
