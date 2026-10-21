@@ -15,6 +15,10 @@
  *     after a reboot, although CLOCK_BOOTTIME started again from zero, and
  *     one issued a day ago is still accepted.
  * The clock does not follow a step of the wall clock.
+ *
+ * Process clock. xquic's clock is process-wide: an injected client clock
+ * goes away with its client, and an engine on another clock is refused
+ * while others run.
  */
 
 #include "libmqvpn.h"
@@ -233,6 +237,38 @@ new_server(void)
     return s;
 }
 
+static uint64_t
+fake_client_clock(void *ctx)
+{
+    (void)ctx;
+    return 42 * SEC;
+}
+
+static mqvpn_client_t *
+new_client(mqvpn_clock_fn clock)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    mqvpn_config_set_server(cfg, "127.0.0.1", 4433);
+    mqvpn_config_set_log_level(cfg, MQVPN_LOG_ERROR);
+    if (clock) mqvpn_config_set_clock(cfg, clock, NULL);
+    mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
+    cbs.tun_output = dummy_tun_output;
+    cbs.tunnel_config_ready = dummy_tunnel_config_ready;
+    mqvpn_client_t *c = mqvpn_client_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    return c;
+}
+
+/* xquic's clock reads the library clock, not an injected one */
+static int
+xquic_on_library_clock(void)
+{
+    uint64_t a = mqvpn_clock_us();
+    uint64_t x = xqc_monotonic_timestamp();
+    uint64_t b = mqvpn_clock_us();
+    return x >= a && x <= b;
+}
+
 /* ─── cases ─── */
 
 static void
@@ -291,6 +327,42 @@ test_token_reboot(void)
     mqvpn_clock_test_sources(NULL, NULL);
 }
 
+static void
+test_process_clock(mqvpn_server_t **svr)
+{
+    printf("process clock:\n");
+    /* the token cases ran next to a server; start from no engine */
+    mqvpn_server_destroy(*svr);
+    *svr = NULL;
+
+    mqvpn_client_t *a = new_client(fake_client_clock);
+    CHECK(a != NULL && xqc_monotonic_timestamp() == 42 * SEC,
+          "a client's injected clock is xquic's clock while it runs");
+    mqvpn_server_t *s = new_server();
+    CHECK(s == NULL, "a server is refused while a client runs on another clock");
+    if (s) mqvpn_server_destroy(s);
+    mqvpn_client_t *b = new_client(NULL);
+    CHECK(b == NULL, "a client on the default clock is refused next to it");
+    if (b) mqvpn_client_destroy(b);
+    mqvpn_client_t *a2 = new_client(fake_client_clock);
+    CHECK(a2 != NULL, "a second client on the same injected clock is accepted");
+    if (a2) mqvpn_client_destroy(a2);
+    mqvpn_client_destroy(a);
+
+    b = new_client(NULL);
+    CHECK(b != NULL && xquic_on_library_clock(),
+          "after that client, a default client runs xquic on the library clock");
+    s = new_server();
+    CHECK(s != NULL && xquic_on_library_clock(),
+          "a server runs next to a client on the default clock");
+    a = new_client(fake_client_clock);
+    CHECK(a == NULL && xquic_on_library_clock(),
+          "a client with an injected clock is refused next to them");
+    if (a) mqvpn_client_destroy(a);
+    mqvpn_client_destroy(b);
+    *svr = s;
+}
+
 int
 main(void)
 {
@@ -307,10 +379,11 @@ main(void)
     }
     test_token_upgrade();
     test_token_reboot();
+    test_process_clock(&svr);
 
     free(g_conn);
     xqc_engine_destroy(g_eng);
-    mqvpn_server_destroy(svr);
+    if (svr) mqvpn_server_destroy(svr);
     printf(g_failed ? "test_clock: FAIL\n" : "test_clock: PASS\n");
     return g_failed;
 }

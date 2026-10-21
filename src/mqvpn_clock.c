@@ -91,3 +91,47 @@ mqvpn_clock_test_sources(uint64_t (*boot_us)(void), uint64_t (*wall_us)(void))
     __atomic_store_n(&s_unix_offset_us, 0, __ATOMIC_RELEASE); /* a new process */
 #endif
 }
+
+/*
+ * xquic's clock is process-wide: xqc_engine_set_callback() stores
+ * monotonic_ts in one global pointer, and the callback gets no context, so
+ * every engine of the process runs on the clock of the engine created last.
+ * All of mqvpn's engines in a process therefore share one clock: this
+ * file's, or the clock_fn that clients inject (mqvpn_config_set_clock). An
+ * engine on another clock is refused while others run, since switching the
+ * pointer would retime their pending timers; the clock goes back to the
+ * default when the last engine is gone. Not locked: like xquic's pointers,
+ * this assumes that clients and servers are created and destroyed from one
+ * thread at a time.
+ */
+static mqvpn_clock_fn s_xqc_clock_fn;
+static void *s_xqc_clock_ctx;
+static unsigned s_xqc_clock_users;
+
+int
+mqvpn_xqc_clock_acquire(mqvpn_clock_fn fn, void *ctx)
+{
+    if (s_xqc_clock_users > 0 && (fn != s_xqc_clock_fn || ctx != s_xqc_clock_ctx))
+        return -1;
+    s_xqc_clock_fn = fn;
+    s_xqc_clock_ctx = ctx;
+    s_xqc_clock_users++;
+    return 0;
+}
+
+void
+mqvpn_xqc_clock_release(void)
+{
+    if (s_xqc_clock_users == 0) return;
+    if (--s_xqc_clock_users == 0) {
+        s_xqc_clock_fn = NULL;
+        s_xqc_clock_ctx = NULL;
+    }
+}
+
+uint64_t
+mqvpn_xqc_clock_now(void)
+{
+    if (s_xqc_clock_fn) return s_xqc_clock_fn(s_xqc_clock_ctx);
+    return mqvpn_clock_us();
+}

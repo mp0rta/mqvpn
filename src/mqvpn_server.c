@@ -159,6 +159,8 @@ struct mqvpn_server_s {
 
     /* xquic engine */
     xqc_engine_t *engine;
+    /* holds a share of the process's xquic clock (mqvpn_xqc_clock_acquire) */
+    int xqc_clock_held;
 
     /* Shared transport (installed once via set_transport). tops.send != NULL
      * iff installed; transport_ctx is an opaque payload (NULL legal). The
@@ -290,12 +292,6 @@ static uint64_t
 now_us(void)
 {
     return mqvpn_clock_us();
-}
-
-static xqc_usec_t
-svr_xqc_timestamp(void)
-{
-    return now_us();
 }
 
 /* One-shot at mqvpn_server_new (rlimit-derived headroom under the
@@ -2200,8 +2196,9 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
                 .xqc_log_write_err = cb_xqc_log_write,
                 .xqc_log_write_stat = cb_xqc_log_write,
             },
-        /* the receive times handed to xqc_engine_packet_process() */
-        .monotonic_ts = svr_xqc_timestamp,
+        /* the clock of the receive times handed to
+         * xqc_engine_packet_process(): now_us() */
+        .monotonic_ts = mqvpn_xqc_clock_now,
     };
 
     xqc_transport_callbacks_t tcbs = {
@@ -2248,6 +2245,14 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         s->tx_batch = 1;
 #endif
 
+    /* xquic's clock is process-wide (see mqvpn_clock.c): refused while a
+     * client of this process runs on an injected clock */
+    if (mqvpn_xqc_clock_acquire(NULL, NULL) != 0) {
+        LOG_E(s, "a client of this process runs on a different clock (xquic's "
+                 "clock is process-wide)");
+        goto cleanup;
+    }
+    s->xqc_clock_held = 1;
     s->engine = xqc_engine_create(XQC_ENGINE_SERVER, &xconfig, &engine_ssl, &engine_cbs,
                                   &tcbs, s);
     if (!s->engine) goto cleanup;
@@ -2340,6 +2345,7 @@ cleanup:
         xqc_engine_destroy(s->engine);
         s->engine = NULL;
     }
+    if (s->xqc_clock_held) mqvpn_xqc_clock_release();
     free(s);
     return NULL;
 }
@@ -2368,6 +2374,10 @@ mqvpn_server_destroy(mqvpn_server_t *s)
     if (s->engine) {
         xqc_engine_destroy(s->engine);
         s->engine = NULL;
+    }
+    if (s->xqc_clock_held) {
+        mqvpn_xqc_clock_release();
+        s->xqc_clock_held = 0;
     }
 
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED

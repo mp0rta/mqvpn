@@ -798,7 +798,11 @@ MQVPN_API int mqvpn_config_set_recv_rate_limit(mqvpn_config_t *cfg,
  * value is stored as 1. */
 MQVPN_API int mqvpn_config_set_udp_gso(mqvpn_config_t *cfg, int enabled);
 
-/* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock) */
+/* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock). xquic's
+ * clock is process-wide: while a client or a server of the process runs,
+ * mqvpn_client_new() fails for a client on another clock, and
+ * mqvpn_server_new() (always on the library's clock) fails next to a client
+ * with an injected one. */
 typedef uint64_t (*mqvpn_clock_fn)(void *ctx);
 MQVPN_API int mqvpn_config_set_clock(mqvpn_config_t *cfg, mqvpn_clock_fn clock_fn,
                                      void *clock_ctx);

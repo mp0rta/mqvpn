@@ -200,6 +200,8 @@ struct mqvpn_client_s {
 
     /* xquic engine (Level 1) */
     xqc_engine_t *engine;
+    /* holds a share of the process's xquic clock (mqvpn_xqc_clock_acquire) */
+    int xqc_clock_held;
 
     /* Connection (Level 2, NULL when disconnected) */
     cli_conn_t *conn;
@@ -359,21 +361,6 @@ uint64_t
 client_now_us(const mqvpn_client_t *c)
 {
     if (c->config.clock_fn) return c->config.clock_fn(c->config.clock_ctx);
-    return mqvpn_clock_us();
-}
-
-/*
- * xquic timestamp adapter.
- * xqc_timestamp_pt is void→uint64_t (no user_ctx), so we use a global.
- * Safe for single-client-per-process (Android VpnService model).
- */
-static mqvpn_clock_fn s_xqc_clock_fn = NULL;
-static void *s_xqc_clock_ctx = NULL;
-
-static xqc_usec_t
-xqc_custom_timestamp(void)
-{
-    if (s_xqc_clock_fn) return s_xqc_clock_fn(s_xqc_clock_ctx);
     return mqvpn_clock_us();
 }
 
@@ -976,9 +963,15 @@ client_init_handle(mqvpn_client_t *c, const mqvpn_config_t *cfg,
 static void
 client_destroy_engine(mqvpn_client_t *c)
 {
-    if (!c || !c->engine) return;
-    xqc_engine_destroy(c->engine);
-    c->engine = NULL;
+    if (!c) return;
+    if (c->engine) {
+        xqc_engine_destroy(c->engine);
+        c->engine = NULL;
+    }
+    if (c->xqc_clock_held) {
+        mqvpn_xqc_clock_release();
+        c->xqc_clock_held = 0;
+    }
 }
 
 /* Finalise a slot's transport exactly once: harvest ops.get_stats into the
@@ -3112,16 +3105,19 @@ init_xquic_engine(mqvpn_client_t *c)
             },
     };
 
-    /* Inject custom clock — critical for Android CLOCK_BOOTTIME */
-    if (cfg->clock_fn) {
-        s_xqc_clock_fn = cfg->clock_fn;
-        s_xqc_clock_ctx = cfg->clock_ctx;
-        engine_cbs.realtime_ts = xqc_custom_timestamp;
+    /* The receive times handed to xqc_engine_packet_process() come from
+     * client_now_us(), so xquic's timers must run on the same clock: the
+     * injected one (Android: CLOCK_BOOTTIME) or the library's. xquic's clock
+     * is process-wide (see mqvpn_clock.c), so take a share of it; it is
+     * refused while another client or a server runs on a different clock. */
+    if (mqvpn_xqc_clock_acquire(cfg->clock_fn, cfg->clock_ctx) != 0) {
+        LOG_E(c, "another client or server of this process runs on a different "
+                 "clock (xquic's clock is process-wide)");
+        return -1;
     }
-    /* Always: the receive times handed to xqc_engine_packet_process() come
-     * from client_now_us(), so xquic's timers must run on the same clock
-     * (its own default is gettimeofday()). */
-    engine_cbs.monotonic_ts = xqc_custom_timestamp;
+    c->xqc_clock_held = 1;
+    if (cfg->clock_fn) engine_cbs.realtime_ts = mqvpn_xqc_clock_now;
+    engine_cbs.monotonic_ts = mqvpn_xqc_clock_now;
 
     xqc_transport_callbacks_t tcbs = {
         .write_socket = cb_write_socket,
