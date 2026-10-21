@@ -825,15 +825,15 @@ test_phase_d_security() {
     fi
     echo "  D4 unknown cmd: OK"
 
-    # D5a — partial JSON closed by EOF (returns "name and key required")
+    # D5a — partial JSON closed by EOF (the truncated document does not parse; returns "missing cmd")
     resp=$(ctrl_local '{"cmd":"add_user"')
-    if [[ "$resp" != *"required"* ]]; then
+    if [[ "$resp" != *"missing cmd"* ]]; then
         echo "  D5a truncated EOF: $resp"; return 1
     fi
     # Server still responsive
     resp=$(ctrl_local '{"cmd":"list_users"}')
     if ! assert_json_field "$resp" ok true; then echo "  D5a follow-up failed: $resp"; return 1; fi
-    echo "  D5a partial JSON via EOF returns 'required' error: OK"
+    echo "  D5a partial JSON via EOF returns 'missing cmd' error: OK"
 
     # D5b — partial JSON held open (no EOF, idle timeout closes silently with no response)
     local d5b_out

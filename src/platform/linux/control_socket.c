@@ -40,7 +40,7 @@
  */
 
 #include "control_socket.h"
-#include "json_mini.h"
+#include "json_util.h"
 #include "log.h"
 
 #include <event2/event.h>
@@ -75,9 +75,6 @@
 /* CTRL_MAX_RESP_BYTES moved to control_socket.h so test_control_response_bound
  * can verify the worst-case JSON size fits. */
 
-/* JSON helpers (json_find_key → json_find_key, json_read_string → json_read_string)
- * are provided by json_mini.h */
-
 /* ── Per-connection state ────────────────────────────────────────────────── */
 
 typedef struct {
@@ -106,14 +103,12 @@ struct ctrl_socket_s {
 /* ── Command dispatch ────────────────────────────────────────────────────── */
 
 static int
-ctrl_cmd_add_user(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
+ctrl_cmd_add_user(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
     char name[64] = {0}, key[256] = {0};
-    const char *nv = json_find_key(req, "name");
-    const char *kv = json_find_key(req, "key");
-    if (!nv || json_read_string(nv, name, sizeof(name)) < 0 || !kv ||
-        json_read_string(kv, key, sizeof(key)) < 0)
+    if (json_copy_str(yyjson_obj_get(req, "name"), name, sizeof(name)) < 0 ||
+        json_copy_str(yyjson_obj_get(req, "key"), key, sizeof(key)) < 0)
         return snprintf(resp, resp_len,
                         "{\"ok\":false,\"error\":\"name and key required\"}");
 
@@ -125,12 +120,11 @@ ctrl_cmd_add_user(const char *req, char *resp, size_t resp_len, ctrl_socket_t *c
 }
 
 static int
-ctrl_cmd_remove_user(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
+ctrl_cmd_remove_user(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
     char name[64] = {0};
-    const char *nv = json_find_key(req, "name");
-    if (!nv || json_read_string(nv, name, sizeof(name)) < 0)
+    if (json_copy_str(yyjson_obj_get(req, "name"), name, sizeof(name)) < 0)
         return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"name required\"}");
 
     int rc = mqvpn_server_remove_user(server, name);
@@ -140,7 +134,7 @@ ctrl_cmd_remove_user(const char *req, char *resp, size_t resp_len, ctrl_socket_t
 }
 
 static int
-ctrl_cmd_list_users(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
+ctrl_cmd_list_users(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
     (void)req;
@@ -165,7 +159,7 @@ ctrl_cmd_list_users(const char *req, char *resp, size_t resp_len, ctrl_socket_t 
 }
 
 static int
-ctrl_cmd_get_stats(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
+ctrl_cmd_get_stats(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
     (void)req;
@@ -204,7 +198,7 @@ ctrl_cmd_get_stats(const char *req, char *resp, size_t resp_len, ctrl_socket_t *
 }
 
 static int
-ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
+ctrl_cmd_get_status(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
     (void)req;
@@ -314,7 +308,7 @@ get_status_done:
 }
 
 static int
-ctrl_cmd_get_build_info(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
+ctrl_cmd_get_build_info(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
     (void)req;
@@ -332,12 +326,11 @@ ctrl_cmd_get_build_info(const char *req, char *resp, size_t resp_len, ctrl_socke
 }
 
 static int
-ctrl_cmd_get_fec_stats(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
+ctrl_cmd_get_fec_stats(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
     char user[64] = {0};
-    const char *uv = json_find_key(req, "user");
-    if (!uv || json_read_string(uv, user, sizeof(user)) < 0)
+    if (json_copy_str(yyjson_obj_get(req, "user"), user, sizeof(user)) < 0)
         return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"user required\"}");
 
     mqvpn_internal_fec_stats_t fs;
@@ -368,7 +361,7 @@ ctrl_cmd_get_fec_stats(const char *req, char *resp, size_t resp_len, ctrl_socket
 }
 
 static int
-ctrl_cmd_get_all_fec_stats(const char *req, char *resp, size_t resp_len,
+ctrl_cmd_get_all_fec_stats(yyjson_val *req, char *resp, size_t resp_len,
                            ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
@@ -428,7 +421,7 @@ get_all_fec_done:
 }
 
 static int
-ctrl_cmd_get_reorder_stats(const char *req, char *resp, size_t resp_len,
+ctrl_cmd_get_reorder_stats(yyjson_val *req, char *resp, size_t resp_len,
                            ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
@@ -468,7 +461,7 @@ ctrl_cmd_get_reorder_stats(const char *req, char *resp, size_t resp_len,
  * answers (get_stats' udp_rx_* pair) come from platform-owned state that
  * never crosses the library ABI. Handlers that only need the server open
  * with `mqvpn_server_t *server = cs->server;` and are otherwise unchanged. */
-typedef int (*ctrl_cmd_fn)(const char *req, char *resp, size_t resp_len,
+typedef int (*ctrl_cmd_fn)(yyjson_val *req, char *resp, size_t resp_len,
                            ctrl_socket_t *cs);
 
 /* Keep in sync (and in order) with the file-header command list. */
@@ -490,16 +483,30 @@ static const struct {
 static int
 dispatch(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
+    /* STOP_WHEN_DONE: bytes after the first complete value (read together
+     * with the request) are ignored, like the brace framing in ctrl_on_read.
+     * Without INSITU yyjson only reads the buffer, hence the cast. */
+    yyjson_doc *doc = yyjson_read_opts((char *)req, strlen(req),
+                                       YYJSON_READ_STOP_WHEN_DONE, NULL, NULL);
+    yyjson_val *root = yyjson_doc_get_root(doc);
     char cmd[32] = {0};
-    const char *v = json_find_key(req, "cmd");
-    if (!v || json_read_string(v, cmd, sizeof(cmd)) < 0)
-        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"missing cmd\"}");
+    int rc;
 
-    for (size_t i = 0; i < sizeof(ctrl_cmds) / sizeof(ctrl_cmds[0]); i++)
-        if (strcmp(cmd, ctrl_cmds[i].name) == 0)
-            return ctrl_cmds[i].fn(req, resp, resp_len, cs);
-
-    return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"unknown cmd\"}");
+    /* NULL doc or non-object root: yyjson_obj_get returns NULL -> -1. */
+    if (json_copy_str(yyjson_obj_get(root, "cmd"), cmd, sizeof(cmd)) < 0) {
+        rc = snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"missing cmd\"}");
+    } else {
+        ctrl_cmd_fn fn = NULL;
+        for (size_t i = 0; i < sizeof(ctrl_cmds) / sizeof(ctrl_cmds[0]); i++)
+            if (strcmp(cmd, ctrl_cmds[i].name) == 0) {
+                fn = ctrl_cmds[i].fn;
+                break;
+            }
+        rc = fn ? fn(root, resp, resp_len, cs)
+                : snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"unknown cmd\"}");
+    }
+    yyjson_doc_free(doc); /* handlers neither free nor keep the request doc */
+    return rc;
 }
 
 /* ── Connection read handler ─────────────────────────────────────────────── */

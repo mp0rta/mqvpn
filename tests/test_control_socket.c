@@ -29,6 +29,7 @@
 /* ── Configurable stub state ──────────────────────────────────────────────── */
 
 static int g_add_user_rc = MQVPN_OK;
+static char g_last_add_name[64]; /* name the add_user stub last received */
 static int g_remove_user_rc = MQVPN_OK;
 
 static int g_list_users_n = 0;
@@ -57,8 +58,8 @@ int
 mqvpn_server_add_user(mqvpn_server_t *s, const char *u, const char *k)
 {
     (void)s;
-    (void)u;
     (void)k;
+    snprintf(g_last_add_name, sizeof(g_last_add_name), "%s", u);
     return g_add_user_rc;
 }
 
@@ -287,6 +288,50 @@ test_unknown_cmd(void)
     CHECK_EQ_STR("{\"ok\":false,\"error\":\"unknown cmd\"}");
 }
 
+/* A request whose first JSON value is not a complete object with a top-level
+ * string "cmd" gets "missing cmd": truncated documents (incl. the EOF-closed
+ * {"cmd":"add_user" of e2e D5a), a non-object root, a cmd only in a nested
+ * object, a non-string cmd, and empty input. */
+static void
+test_missing_cmd_variants(void)
+{
+    static const char *reqs[] = {
+        "{\"cmd\":",     "{\"cmd\":\"add_user\"",
+        "[1]",           "{\"x\":{\"cmd\":\"get_stats\"}}",
+        "{\"cmd\":123}", "",
+        "  \n",
+    };
+    for (size_t i = 0; i < sizeof(reqs) / sizeof(reqs[0]); i++) {
+        call(reqs[i]);
+        CHECK_EQ_STR("{\"ok\":false,\"error\":\"missing cmd\"}");
+    }
+}
+
+static void
+test_duplicate_cmd_first_wins(void)
+{
+    call("{\"cmd\":\"get_stats\",\"cmd\":\"list_users\"}");
+    CHECK_HAS("\"bytes_tx\":111");
+}
+
+/* Bytes after the first complete object (same read as the request) are
+ * ignored, matching the brace framing in ctrl_on_read(). */
+static void
+test_trailing_bytes_ignored(void)
+{
+    call("{\"cmd\":\"get_stats\"} junk");
+    CHECK_HAS("\"bytes_tx\":111");
+    call("{\"cmd\":\"get_stats\"}\n");
+    CHECK_HAS("\"bytes_tx\":111");
+}
+
+static void
+test_escaped_cmd_decoded(void)
+{
+    call("{\"cmd\":\"get\\u005fstats\"}");
+    CHECK_HAS("\"bytes_tx\":111");
+}
+
 /* ── add_user ─────────────────────────────────────────────────────────────── */
 
 static void
@@ -317,6 +362,26 @@ test_add_user_server_failure(void)
     g_add_user_rc = -5;
     call("{\"cmd\":\"add_user\",\"name\":\"alice\",\"key\":\"secret\"}");
     CHECK_HAS("add_user failed (-5)");
+}
+
+/* The handler passes the decoded name, cut to name[64] (63 bytes). */
+static void
+test_add_user_name_decoded_and_truncated(void)
+{
+    g_add_user_rc = MQVPN_OK;
+    call("{\"cmd\":\"add_user\",\"name\":\"a}b\\\"c\",\"key\":\"k\"}");
+    CHECK_EQ_STR("{\"ok\":true}");
+    CHECK(strcmp(g_last_add_name, "a}b\"c") == 0);
+
+    char name[101];
+    char req[192];
+    memset(name, 'n', 100);
+    name[100] = '\0';
+    snprintf(req, sizeof(req), "{\"cmd\":\"add_user\",\"name\":\"%s\",\"key\":\"k\"}",
+             name);
+    call(req);
+    CHECK_EQ_STR("{\"ok\":true}");
+    CHECK(strlen(g_last_add_name) == 63);
 }
 
 /* ── remove_user ──────────────────────────────────────────────────────────── */
@@ -603,11 +668,16 @@ main(void)
 {
     test_missing_cmd();
     test_unknown_cmd();
+    test_missing_cmd_variants();
+    test_duplicate_cmd_first_wins();
+    test_trailing_bytes_ignored();
+    test_escaped_cmd_decoded();
 
     test_add_user_success();
     test_add_user_missing_name();
     test_add_user_missing_key();
     test_add_user_server_failure();
+    test_add_user_name_decoded_and_truncated();
 
     test_remove_user_success();
     test_remove_user_missing_name();
