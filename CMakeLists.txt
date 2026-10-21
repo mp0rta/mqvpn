@@ -229,6 +229,7 @@ message(STATUS "SSL_LIB=${SSL_LIB} CRYPTO_LIB=${CRYPTO_LIB}")
 # ---------- libmqvpn source files (shared between static and shared targets) ----------
 set(MQVPN_LIB_SOURCES
     src/mqvpn_config.c
+    src/mqvpn_clock.c
     src/mqvpn_client.c
     src/mqvpn_server.c
     src/mqvpn_conn_settings.c
@@ -1175,6 +1176,24 @@ if(BUILD_TESTING)
     # under ASan's signal handler, can hang instead of exiting — cap it so a
     # regression fails fast rather than stalling the suite for ctest's default.
     set_tests_properties(test_server_preaccept_dos PROPERTIES TIMEOUT 60)
+
+    # Clock of the xquic engines (src/mqvpn_clock.c): token expiry across an
+    # upgrade and a reboot, wall-clock steps, the process-wide clock. Calls
+    # xquic's private token functions, so it reaches into xquic's source and
+    # BoringSSL headers, as SYSTEM directories (not warning-clean under
+    # mqvpn's flags).
+    add_executable(test_clock tests/test_clock.c)
+    target_link_libraries(test_clock mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
+    target_include_directories(test_clock PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
+    target_include_directories(test_clock SYSTEM PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party/xquic
+        ${CMAKE_SOURCE_DIR}/third_party/xquic/third_party/boringssl/include)
+    target_compile_definitions(test_clock PRIVATE
+        TEST_CERT_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.crt"
+        TEST_KEY_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.key"
+    )
+    set_target_properties(test_clock PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_clock COMMAND test_clock)
 
     # Duplicate CONNECT-IP regression: drives a raw xquic H3 client through a
     # real handshake, then sends a second connect-ip request on the same H3

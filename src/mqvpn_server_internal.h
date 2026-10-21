@@ -167,9 +167,9 @@ int svr_egress_fd_register_is_set(mqvpn_server_t *s);
 void svr_egress_fd_unregister(mqvpn_server_t *s, int fd);
 
 /* Microseconds on the server's clock — the SAME source mqvpn_server.c uses
- * everywhere else (CLOCK_BOOTTIME, not the wall clock; see now_us() in
- * mqvpn_server.c). Exposed so tcp_egress.c's connect-deadline computation
- * doesn't introduce a second clock idiom. */
+ * everywhere else (the library's clock, mqvpn_clock.c: not the wall clock;
+ * see now_us() in mqvpn_server.c). Exposed so tcp_egress.c's connect-deadline
+ * computation doesn't introduce a second clock idiom. */
 uint64_t svr_now_us(void);
 
 /* Drive the engine once if (and only if) the deferred send flush is engaged

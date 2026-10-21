@@ -350,31 +350,8 @@ mqvpn_state_transition_valid(mqvpn_client_state_t from, mqvpn_client_state_t to)
 
 /* ─── Helpers ─── */
 
-/* Default clock of the client and of its xquic engine (see init_xquic_engine).
- * Not the wall clock: an NTP or manual step of it would reach xquic as an RTT
- * sample (a backward step underflows to ~2^64 us) and as timer expiries.
- * CLOCK_BOOTTIME keeps counting through a suspend, as Android's injected
- * clock does, so the idle timeout still notices a dead connection on resume. */
-static uint64_t
-now_us(void)
-{
-#ifdef _WIN32
-    FILETIME ft;
-    GetSystemTimeAsFileTime(&ft);
-    uint64_t t = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
-    return t / 10 - 11644473600000000ULL; /* FILETIME epoch → Unix epoch, in µs */
-#else
-    struct timespec ts;
-#  ifdef CLOCK_BOOTTIME
-    clock_gettime(CLOCK_BOOTTIME, &ts);
-#  else
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-#  endif
-    return (uint64_t)ts.tv_sec * 1000000 + (uint64_t)ts.tv_nsec / 1000;
-#endif
-}
-
-/* Injectable clock: use config clock_fn if set, else default now_us().
+/* Injectable clock: use config clock_fn if set, else the library's clock
+ * (mqvpn_clock.c), which is also the default clock of the xquic engine.
  * PR4 — non-static + visibility hidden so path_state_machine.c can call it
  * without exporting from libmqvpn.so. MSVC ignores visibility(). */
 MQVPN_INTERNAL
@@ -382,7 +359,7 @@ uint64_t
 client_now_us(const mqvpn_client_t *c)
 {
     if (c->config.clock_fn) return c->config.clock_fn(c->config.clock_ctx);
-    return now_us();
+    return mqvpn_clock_us();
 }
 
 /*
@@ -397,7 +374,7 @@ static xqc_usec_t
 xqc_custom_timestamp(void)
 {
     if (s_xqc_clock_fn) return s_xqc_clock_fn(s_xqc_clock_ctx);
-    return now_us();
+    return mqvpn_clock_us();
 }
 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED

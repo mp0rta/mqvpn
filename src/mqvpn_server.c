@@ -284,23 +284,12 @@ wall_us(void)
 #endif
 }
 
-/* Clock of the server's timers and of its xquic engine, as in the client
- * (mqvpn_client.c now_us): not the wall clock, which NTP or an admin can
- * step. */
+/* Clock of the server's timers and of its xquic engine: the library's
+ * (mqvpn_clock.c), not the wall clock, which NTP or an admin can step. */
 static uint64_t
 now_us(void)
 {
-#ifdef _WIN32
-    return wall_us();
-#else
-    struct timespec ts;
-#  ifdef CLOCK_BOOTTIME
-    clock_gettime(CLOCK_BOOTTIME, &ts);
-#  else
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-#  endif
-    return (uint64_t)ts.tv_sec * 1000000 + (uint64_t)ts.tv_nsec / 1000;
-#endif
+    return mqvpn_clock_us();
 }
 
 static xqc_usec_t

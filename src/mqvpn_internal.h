@@ -221,6 +221,16 @@ bool mqvpn_check_scheduler_preconditions(mqvpn_scheduler_t scheduler, int n_path
 #  define MQVPN_INTERNAL
 #endif
 
+/* ── Clock (mqvpn_clock.c) ──
+ * mqvpn_clock_us: the clock of the library's timers and of its xquic
+ * engines, CLOCK_BOOTTIME offset to read Unix time at its first reading.
+ * mqvpn_clock_test_sources (tests only) replaces the CLOCK_BOOTTIME and wall
+ * clock readings, NULL for the real ones, and takes the offset again as a
+ * new process would. */
+MQVPN_INTERNAL uint64_t mqvpn_clock_us(void);
+MQVPN_INTERNAL void mqvpn_clock_test_sources(uint64_t (*boot_us)(void),
+                                             uint64_t (*wall_us)(void));
+
 /* Returns "minrtt" / "wlb" / "wlb_udp_pin" / "backup_fec" / "unknown" —
  * caller-owned static string, do not free.
  * Used by control_socket.c for get_build_info JSON. */
