@@ -1346,7 +1346,7 @@ mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
 
     /* Reject a truncated C string before either parser can apply any keys. */
     if (strlen(buf) != got) {
-        LOG_ERR("config: NUL byte at byte %zu", strlen(buf));
+        LOG_ERR("%s: NUL byte at byte %zu", path, strlen(buf));
         free(buf);
         return -1;
     }

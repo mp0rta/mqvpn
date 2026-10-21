@@ -9,26 +9,37 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 check() {
-    local expected="$1" actual
+    local subnet="$1" subnet6="$2" tun="$3" actual
+    local expected="$subnet"$'\n'"$subnet6"$'\n'"$tun"
     actual=$("$HELPER" "$tmp/config")
     if [ "$actual" != "$expected" ]; then
         printf 'FAIL: expected <%s>, got <%s>\n' "$expected" "$actual" >&2
         exit 1
     fi
-}
 
-# BOM, CRLF, lowercase keys, last key wins, and section scoping.
-printf '\357\273\277[interface]\r\nsubnet=10.22.0.0/24\r\nsubnet=10.23.0.0/24\r\ntunname=mqvpn9\r\n[Other]\r\nSubnet=10.99.0.0/24\r\n' >"$tmp/config"
-check $'10.23.0.0/24\n\nmqvpn9'
-
-cat >"$tmp/config" <<'EOF'
-{"subnet":"10.23.0.0/24","subnet":"10.99.0.0/24",
- "subnet6":"fd00::/112","tun_name":"mqvpn\u0039",
- "unused":{"subnet":"10.88.0.0/24"}}
+    : >"$tmp/calls"
+    PATH="$tmp/bin:$PATH" bash "$tmp/mqvpn-server-nat.sh" setup "$tmp/config"
+    test "$(cat "$tmp/state/orig_ip_forward.$tun")" = 0
+    cat >"$tmp/expected" <<EOF
+sysctl -w net.ipv4.ip_forward=1
+iptables -t nat -A POSTROUTING -s $subnet -o wan4 -j MASQUERADE -m comment --comment mqvpn-server-nat
+iptables -I FORWARD -i $tun -s $subnet -j ACCEPT -m comment --comment mqvpn-server-nat
+iptables -I FORWARD -o $tun -d $subnet -j ACCEPT -m comment --comment mqvpn-server-nat
 EOF
-check $'10.23.0.0/24\nfd00::/112\nmqvpn9'
-: >"$tmp/config"
-check $'10.0.0.0/24\n\nmqvpn0'
+    if [ -n "$subnet6" ]; then
+        test "$(cat "$tmp/state/orig_ip6_forward.$tun")" = 1
+        cat >>"$tmp/expected" <<EOF
+sysctl -w net.ipv6.conf.all.forwarding=1
+ip6tables -I FORWARD -i $tun -s $subnet6 -j ACCEPT -m comment --comment mqvpn-server-nat
+ip6tables -I FORWARD -o $tun -d $subnet6 -j ACCEPT -m comment --comment mqvpn-server-nat
+ip6tables -t nat -A POSTROUTING -s $subnet6 -o wan6 -j MASQUERADE -m comment --comment mqvpn-server-nat
+EOF
+    else
+        test ! -f "$tmp/state/orig_ip6_forward.$tun"
+    fi
+    diff -u "$tmp/expected" "$tmp/calls"
+    rm -f "$tmp/state/"orig_ip*_forward.*
+}
 
 # Invalid input must stop the shell helper before any firewall/forwarding work.
 ln -s "$HELPER" "$tmp/mqvpn-nat-config"
@@ -95,4 +106,43 @@ for state in broken missing renamed; do
     PATH="$tmp/bin:$PATH" bash "$tmp/mqvpn-server-nat.sh" teardown "$tmp/config"
     test "$(wc -l <"$tmp/sysctl.log")" -eq 2
 done
+
+# Exercise the real setup/mapfile path without touching host networking.
+rm "$tmp/bin/mkdir"
+cat >"$tmp/bin/iptables" <<'EOF'
+#!/bin/sh
+echo "$(basename "$0") $*" >>"$NAT_TEST_DIR/calls"
+EOF
+cat >"$tmp/bin/sysctl" <<'EOF'
+#!/bin/sh
+case "$*" in
+    '-n net.ipv4.ip_forward') echo 0 ;;
+    '-n net.ipv6.conf.all.forwarding') echo 1 ;;
+    '-w net.ipv4.ip_forward=1'|'-w net.ipv6.conf.all.forwarding=1')
+        echo "sysctl $*" >>"$NAT_TEST_DIR/calls" ;;
+    *) exit 99 ;;
+esac
+EOF
+cat >"$tmp/bin/ip" <<'EOF'
+#!/bin/sh
+case "$*" in
+    'route get 8.8.8.8') echo '8.8.8.8 dev wan4' ;;
+    '-6 route get 2001:4860:4860::8888') echo '2001:4860:4860::8888 dev wan6' ;;
+    *) exit 99 ;;
+esac
+EOF
+chmod +x "$tmp/bin/ip"
+
+# BOM, CRLF, lowercase keys, last key wins, and section scoping.
+printf '\357\273\277[interface]\r\nsubnet=10.22.0.0/24\r\nsubnet=10.23.0.0/24\r\ntunname=mqvpn9\r\n[Other]\r\nSubnet=10.99.0.0/24\r\n' >"$tmp/config"
+check '10.23.0.0/24' '' mqvpn9
+
+cat >"$tmp/config" <<'EOF'
+{"subnet":"10.23.0.0/24","subnet":"10.99.0.0/24",
+ "subnet6":"fd00::/112","tun_name":"mqvpn\u0039",
+ "unused":{"subnet":"10.88.0.0/24"}}
+EOF
+check '10.23.0.0/24' 'fd00::/112' mqvpn9
+: >"$tmp/config"
+check '10.0.0.0/24' '' mqvpn0
 echo 'PASS: NAT uses the shared parser for setup and saved state for teardown'

@@ -1514,7 +1514,14 @@ test_json_file_raw_nul_fails(void)
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     cfg.tun_mtu = 1300;
-    ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), -1, "raw NUL in JSON file fails");
+    char error[1024] = "";
+    mqvpn_log_set_sink(capture_warning, error);
+    int rc = mqvpn_config_load(&cfg, path);
+    mqvpn_log_set_sink(NULL, NULL);
+    ASSERT_EQ_INT(rc, -1, "raw NUL in JSON file fails");
+    ASSERT_TRUE(strstr(error, path) != NULL, "raw NUL: log identifies the file");
+    ASSERT_TRUE(strstr(error, "NUL byte at byte 12") != NULL,
+                "raw NUL: log identifies the byte offset");
     ASSERT_EQ_INT(cfg.tun_mtu, 1300, "raw NUL: cfg untouched");
     unlink(path);
 }
