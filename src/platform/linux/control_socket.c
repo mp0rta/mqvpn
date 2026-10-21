@@ -488,6 +488,7 @@ ctrl_cmd_get_reorder_stats(yyjson_val *req, char *resp, size_t resp_len,
     yyjson_mut_doc_set_root(doc, root);
     bool ok = yyjson_mut_obj_add_bool(doc, root, "ok", true);
     yyjson_mut_val *r = yyjson_mut_obj_add_obj(doc, root, "reorder");
+    ok &= r != NULL;
     ok &= yyjson_mut_obj_add_uint(doc, r, "gap_count", rs.gap_count);
     ok &= yyjson_mut_obj_add_uint(doc, r, "gap_filled_count", rs.gap_filled_count);
     ok &= yyjson_mut_obj_add_uint(doc, r, "gap_timeout_count", rs.gap_timeout_count);
@@ -653,7 +654,7 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
     if (rlen <= 0) {
         /* dispatch failed to format anything — close silently. */
     } else if ((size_t)rlen >= sizeof(resp) - 2) {
-        /* snprintf would have truncated. Send a small error JSON instead so the
+        /* The reply did not fit in resp. Send a small error JSON instead so the
          * client doesn't see a malformed body, and emit a warning. */
         static const char too_large[] =
             "{\"ok\":false,\"error\":\"response too large\"}\n";

@@ -1605,6 +1605,7 @@ test_json_reorder_rules_types(void)
     ASSERT_EQ_INT(
         mqvpn_config_load_json_filecfg(&cfg, "{\"reorder_rules\":[{\"max_wait_ms\":0}]}"),
         0, "max_wait_ms 0: rc");
+    ASSERT_EQ_INT(cfg.reorder.n_rules, 1, "max_wait_ms 0: rule added");
     ASSERT_EQ_INT(cfg.reorder.rules[0].explicit_wait_ms, 0, "max_wait_ms 0 rejected");
 
     static const char *cap_bad[] = {"{\"reorder_rules\":[{\"cap_packets\":0}]}",
@@ -1612,6 +1613,7 @@ test_json_reorder_rules_types(void)
     for (size_t i = 0; i < sizeof(cap_bad) / sizeof(cap_bad[0]); i++) {
         mqvpn_config_defaults(&cfg);
         ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, cap_bad[i]), 0, cap_bad[i]);
+        ASSERT_EQ_INT(cfg.reorder.n_rules, 1, cap_bad[i]);
         ASSERT_EQ_INT(cfg.reorder.rules[0].explicit_cap, 0, cap_bad[i]);
     }
 
@@ -1623,7 +1625,7 @@ test_json_reorder_rules_types(void)
 
     mqvpn_config_defaults(&cfg);
     ASSERT_EQ_INT(
-        mqvpn_config_load_json_filecfg(&cfg, "{\"reorder_rules\":[{\"proto\":17}]}"), 0,
+        mqvpn_config_load_json_filecfg(&cfg, "{\"reorder_rules\":[{\"proto\":6}]}"), 0,
         "numeric proto: rc");
     ASSERT_EQ_INT(cfg.reorder.rules[0].proto, 17, "numeric proto: default UDP kept");
 }

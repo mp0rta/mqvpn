@@ -265,9 +265,9 @@ main(int argc, char *argv[])
             }
             *sep = '\0';
             snprintf(cli_user_names[n_cli_users], sizeof(cli_user_names[n_cli_users]),
-                     "%s", pair);
-            snprintf(cli_user_keys[n_cli_users], sizeof(cli_user_keys[n_cli_users]), "%s",
-                     sep + 1);
+                     "%.*s", (int)(sizeof(cli_user_names[n_cli_users]) - 1), pair);
+            snprintf(cli_user_keys[n_cli_users], sizeof(cli_user_keys[n_cli_users]),
+                     "%.*s", (int)(sizeof(cli_user_keys[n_cli_users]) - 1), sep + 1);
             if (cli_user_names[n_cli_users][0] == '\0' ||
                 cli_user_keys[n_cli_users][0] == '\0') {
                 fprintf(stderr, "error: --user must be NAME:KEY\n");

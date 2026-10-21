@@ -21,14 +21,18 @@
 #  error "mqvpn expects the vendored yyjson 0.13.0 (third_party/yyjson)"
 #endif
 
-/* String without an embedded NUL: copy it into out, truncating like
- * snprintf("%s"), and return 0. Anything else: -1, out unchanged. */
+/* String without an embedded NUL: copy at most out_len - 1 bytes into out,
+ * NUL-terminate it and return 0. Anything else (or out_len 0): -1, out
+ * unchanged. */
 static inline int
 json_copy_str(const yyjson_val *val, char *out, size_t out_len)
 {
     const char *s = yyjson_get_str(val);
-    if (!s || strlen(s) != yyjson_get_len(val)) return -1;
-    snprintf(out, out_len, "%s", s);
+    size_t len = yyjson_get_len(val);
+    if (!s || strlen(s) != len || out_len == 0) return -1;
+    if (len > out_len - 1) len = out_len - 1;
+    memcpy(out, s, len);
+    out[len] = '\0';
     return 0;
 }
 
@@ -84,8 +88,8 @@ mqvpn_json_parse_users(yyjson_val *arr, void *ctx,
             char *sep = strchr(pair, ':');
             if (!sep) return -1;
             *sep = '\0';
-            snprintf(name, sizeof(name), "%s", pair);
-            snprintf(key, sizeof(key), "%s", sep + 1);
+            snprintf(name, sizeof(name), "%.*s", (int)(sizeof(name) - 1), pair);
+            snprintf(key, sizeof(key), "%.*s", (int)(sizeof(key) - 1), sep + 1);
         } else if (yyjson_is_obj(el)) {
             if (json_copy_str(yyjson_obj_get(el, "name"), name, sizeof(name)) < 0 ||
                 json_copy_str(yyjson_obj_get(el, "key"), key, sizeof(key)) < 0)

@@ -245,6 +245,7 @@ serve_bodies(const char *const bodies[], const size_t lens[], int n, int *port)
     pid_t pid = fork();
     assert(pid >= 0);
     if (pid == 0) {
+        alarm(30); /* if the client never connects, die (reap fails) instead of hanging */
         signal(SIGPIPE, SIG_IGN); /* the cap test stops reading early */
         for (int i = 0; i < n; i++) {
             int cfd = accept(lfd, NULL, NULL);

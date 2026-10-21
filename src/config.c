@@ -1192,8 +1192,8 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     if (v && json_read_string_array(v, path_buf, MQVPN_CONFIG_MAX_PATHS, &n_paths) == 0) {
         cfg->n_paths = 0;
         for (int i = 0; i < n_paths; i++) {
-            snprintf(cfg->paths[cfg->n_paths], sizeof(cfg->paths[cfg->n_paths]), "%s",
-                     path_buf[i]);
+            snprintf(cfg->paths[cfg->n_paths], sizeof(cfg->paths[cfg->n_paths]), "%.*s",
+                     (int)(sizeof(cfg->paths[cfg->n_paths]) - 1), path_buf[i]);
             cfg->n_paths++;
         }
     }
