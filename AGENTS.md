@@ -111,8 +111,9 @@ rules belong here, reasons there.
 - A new test target must resolve its includes in a clean checkout. [DD §10]
 - All JSON parsing and serialization goes through yyjson, included only via
   `src/json_util.h`; the only hand-written JSON literals are the control
-  API's `response too large` envelope and `--status`'s fixed request
-  strings; never scan JSON with `strchr`/`strstr`. [DD §15]
+  API's fixed `response too large` and `too many connections` replies and
+  `--status`'s fixed request strings; never scan JSON with
+  `strchr`/`strstr`. [DD §15]
 - `ci_sweep_results/` is transient; `bench_results/` is the tracked archive.
 
 ## Rules — git
