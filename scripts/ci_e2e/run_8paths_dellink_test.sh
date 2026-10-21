@@ -362,8 +362,14 @@ echo "OK: n_paths recovered to $N_PATHS"
 # status must list the N_PATHS live ones, the new path included.
 n_active=0
 for _ in $(seq 1 15); do
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "=== FAIL: server died during Phase 3 ==="
+        exit 1
+    fi
     n_active=$(query_status | jq -r \
         '[.clients[0].paths[] | select(.state_label == "active")] | length' 2>/dev/null || echo 0)
+    # jq prints nothing for an empty reply; that must count as 0, not pass
+    n_active=${n_active:-0}
     [ "$n_active" -eq "$N_PATHS" ] && break
     sleep 1
 done
