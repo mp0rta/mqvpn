@@ -301,7 +301,8 @@ struct mqvpn_gro {
     mqvpn_gro_emit_fn emit;
     void *ctx;
     unsigned victim; /* round robin slot to evict when the table is full */
-    int udp4, udp6;  /* UDP datagrams may be merged (the TUN takes USO) */
+    int udp4, udp6;  /* UDP runs may be held (the TUN took USO) */
+    int udp_refused; /* a UDP GSO packet was refused: merge no more UDP */
     uint64_t pushed, supers, merged, acks;
     uint64_t udp_supers, udp_merged; /* the UDP part of supers / merged */
     gro_entry_t e[GRO_SLOTS];
@@ -330,6 +331,7 @@ mqvpn_gro_set_udp(mqvpn_gro_t *g, int v4, int v6)
     mqvpn_gro_flush(g);
     g->udp4 = v4 != 0;
     g->udp6 = v6 != 0;
+    g->udp_refused = 0;
 }
 
 void
@@ -393,7 +395,8 @@ gro_parse(const mqvpn_gro_t *gro, const uint8_t *p, size_t len, gro_pkt_t *g)
         return 0;
     }
     if (g->proto == IPPROTO_UDP) {
-        if (!(g->v6 ? gro->udp6 : gro->udp4) || len < g->ip_hlen + UDP_HLEN) return 0;
+        if (!(g->v6 ? gro->udp6 : gro->udp4) || gro->udp_refused) return 0;
+        if (len < g->ip_hlen + UDP_HLEN) return 0;
         const uint8_t *u = p + g->ip_hlen;
         if (get_be16(u + 4) != len - g->ip_hlen) return 0;
         if (u[6] == 0 && u[7] == 0) return 0;
@@ -429,7 +432,9 @@ gro_emit_plain(mqvpn_gro_t *g, const uint8_t *p, size_t len)
 
 /* The kernel refused a UDP GSO packet: stop merging UDP and write the
  * datagrams one by one, as the splitter cuts them back (IPv4 IDs were
- * consecutive, so they come out as they went in). */
+ * consecutive, so they come out as they went in). udp4/udp6 stay set: runs
+ * of other flows, and a datagram parsed before the refusal, may still be
+ * held, and a later datagram of their flow must flush them first. */
 static void
 gro_udp_fallback(mqvpn_gro_t *g, gro_entry_t *e, const struct virtio_net_hdr *vh)
 {
@@ -437,7 +442,7 @@ gro_udp_fallback(mqvpn_gro_t *g, gro_entry_t *e, const struct virtio_net_hdr *vh
     mqvpn_gso_iter_t it;
     int n;
 
-    g->udp4 = g->udp6 = 0;
+    g->udp_refused = 1;
     if (mqvpn_gso_begin(&it, e->buf, e->len, vh) < 0) return;
     while ((n = mqvpn_gso_next(&it, seg, sizeof(seg))) > 0)
         gro_emit_plain(g, seg, (size_t)n);
@@ -578,6 +583,27 @@ gro_udp_can_append(const gro_entry_t *e, const uint8_t *p, const gro_pkt_t *k)
            get_be16(p + 4) == e->next_id;
 }
 
+/* Can a packet we do not merge belong to a flow with something held? Then
+ * whatever its addresses hold goes out first. A TCP packet can, and a UDP one
+ * once UDP runs may be held (even after a refused write ended merging). Its
+ * ports may sit behind IPv4 options or IPv6 extension headers, or in another
+ * fragment, so the caller matches on the addresses only; an IPv6 packet that
+ * is not UDP may be TCP or UDP behind such a header. */
+static int
+gro_may_follow_held(const mqvpn_gro_t *g, const uint8_t *p, size_t len)
+{
+    int ver = p[0] >> 4;
+    if (ver == 4) {
+        if (len < IPV4_MIN_HLEN) return 0;
+        return p[9] == IPPROTO_TCP || (p[9] == IPPROTO_UDP && g->udp4);
+    }
+    if (ver == 6) {
+        if (len < IPV6_HLEN) return 0;
+        return p[6] != IPPROTO_UDP || g->udp6;
+    }
+    return 0;
+}
+
 void
 mqvpn_gro_push(mqvpn_gro_t *g, const uint8_t *p, size_t len)
 {
@@ -594,15 +620,10 @@ mqvpn_gro_push(mqvpn_gro_t *g, const uint8_t *p, size_t len)
         /* Not mergeable. Packets of other flows may pass; but a TCP packet we
          * cannot merge (SYN, FIN, RST, ...) must not overtake data or an ACK
          * of its own flow still held back, nor a UDP datagram we cannot merge
-         * (a fragment, no checksum, ...) the datagrams held for its flow. Its
-         * ports may sit behind IPv4 options or IPv6 extension headers, or in
-         * another fragment, so match on the addresses only; an IPv6 packet
-         * that is not UDP may be TCP or UDP behind such a header. */
-        int ver = p[0] >> 4;
-        if ((ver == 4 && len >= IPV4_MIN_HLEN &&
-             (p[9] == IPPROTO_TCP || (p[9] == IPPROTO_UDP && g->udp4))) ||
-            (ver == 6 && len >= IPV6_HLEN && (p[6] != IPPROTO_UDP || g->udp6))) {
-            int v6 = ver == 6;
+         * (a fragment, no checksum, any after a refused write, ...) the
+         * datagrams held for its flow. */
+        if (gro_may_follow_held(g, p, len)) {
+            int v6 = (p[0] >> 4) == 6;
             size_t aoff = v6 ? 8 : 12, alen = v6 ? 32 : 8;
             for (int i = 0; i < GRO_SLOTS; i++) {
                 gro_entry_t *e = &g->e[i];

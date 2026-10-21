@@ -1366,6 +1366,300 @@ test_udp_gro_refused(void)
     }
 }
 
+/* The order a refused UDP GSO write must keep: mp0rta's case on PR #398. Four
+ * datagrams of one flow, payloads 1000 1000 1200 1200: the 1200 cannot join
+ * the 1000 run, flushing it is refused, and the datagrams must still come out
+ * 1 2 3 4, as must every datagram after that. */
+static void
+test_udp_gro_refused_in_push(void)
+{
+    const size_t sz[4] = {1000, 1000, 1200, 1200};
+    for (int v6 = 0; v6 < 2; v6++) {
+        for (unsigned i = 0; i < 4; i++)
+            u_ln[i] = mk_udp(u_in[i], v6, (uint16_t)(40 + i), sz[i], 4433, (uint8_t)i);
+        mqvpn_gro_t *g = mqvpn_gro_new(capture_no_uso, NULL);
+        mqvpn_gro_set_udp(g, 1, 1);
+        out_n = 0;
+        refused = 0;
+        for (unsigned i = 0; i < 4; i++)
+            mqvpn_gro_push(g, u_in[i], u_ln[i]);
+        mqvpn_gro_flush(g);
+        assert(out_n == 4 && refused == 1);
+        for (unsigned i = 0; i < 4; i++)
+            assert(out_q[i].vh.gso_type == 0 && out_q[i].len == u_ln[i] &&
+                   memcmp(out_q[i].pkt, u_in[i], u_ln[i]) == 0);
+        mqvpn_gro_free(g);
+    }
+}
+
+/* Datagram i of a UDP flow for the ordering tests: flow f has its own source
+ * port and one of two destination addresses; the payload starts with i, so
+ * every datagram is unique. */
+static size_t
+mk_flow_udp(uint8_t *p, int v6, unsigned f, unsigned i, uint16_t id, size_t payload)
+{
+    size_t len = mk_udp(p, v6, id, payload, (uint16_t)(5000 + f), (uint8_t)i);
+    size_t ip_hlen = v6 ? 40 : 20;
+    p[v6 ? 39 : 19] ^= (uint8_t)(f & 1); /* destination address */
+    if (payload >= 2) {
+        p[ip_hlen + 8] = (uint8_t)(i >> 8);
+        p[ip_hlen + 9] = (uint8_t)i;
+    }
+    udp_fix(p, len);
+    return len;
+}
+
+/* Everything pushed came out exactly once, byte for byte, and in input order
+ * within each flow (flow[i] names input i's flow); flows may interleave. */
+static void
+check_per_flow(unsigned n, const unsigned *flow)
+{
+    static int seen[160];
+    unsigned last[16] = {0};
+    unsigned m = expand(u_ex, u_exl, 200);
+    assert(m == n);
+    memset(seen, 0, sizeof(seen));
+    for (unsigned j = 0; j < m; j++) {
+        unsigned i = 0;
+        while (i < n &&
+               (seen[i] || u_exl[j] != u_ln[i] || memcmp(u_ex[j], u_in[i], u_ln[i]) != 0))
+            i++;
+        assert(i < n);
+        seen[i] = 1;
+        assert(i + 1 > last[flow[i]]);
+        last[flow[i]] = i + 1;
+    }
+}
+
+/* UDP GSO writes allowed before every later one is refused; -1: none refused. */
+static int refuse_after = -1;
+static unsigned uso_written;
+
+static int
+capture_refuse_after(void *ctx, const struct virtio_net_hdr *vh, const uint8_t *pkt,
+                     size_t len)
+{
+    if (vh->gso_type == VIRTIO_NET_HDR_GSO_UDP_L4) {
+        if (refuse_after >= 0 && uso_written >= (unsigned)refuse_after) {
+            refused++;
+            return -EINVAL;
+        }
+        uso_written++;
+    }
+    return capture(ctx, vh, pkt, len);
+}
+
+static mqvpn_gro_t *
+refusing_gro(int after)
+{
+    mqvpn_gro_t *g = mqvpn_gro_new(capture_refuse_after, NULL);
+    mqvpn_gro_set_udp(g, 1, 1);
+    out_n = 0;
+    refused = 0;
+    uso_written = 0;
+    refuse_after = after;
+    return g;
+}
+
+/* A refused write in the middle of push() with other runs held: the restart
+ * of one flow is refused, the held run of another flow (same or other
+ * addresses) still goes out before that flow's next datagram, every flow in
+ * order; the same when the refusal hits a victim eviction (more flows than
+ * slots) or the address-match flush of a datagram that is not merged. */
+static void
+test_udp_gro_refused_flows(void)
+{
+    static unsigned flow[160];
+    for (int v6 = 0; v6 < 2; v6++) {
+        for (unsigned pair = 0; pair < 2; pair++) {
+            /* A: 1000 1000; B: 800 800; A: 1200 (restart, refused); B: 800 */
+            unsigned fa = 0, fb = pair ? 1 : 2; /* flow 1: other addresses */
+            const unsigned fl[6] = {fa, fa, fb, fb, fa, fb};
+            const size_t sz[6] = {1000, 1000, 800, 800, 1200, 800};
+            uint16_t ida = 10, idb = 50;
+            for (unsigned i = 0; i < 6; i++) {
+                flow[i] = fl[i];
+                u_ln[i] = mk_flow_udp(u_in[i], v6, fl[i], i, fl[i] == fa ? ida++ : idb++,
+                                      sz[i]);
+            }
+            mqvpn_gro_t *g = refusing_gro(0);
+            for (unsigned i = 0; i < 6; i++)
+                mqvpn_gro_push(g, u_in[i], u_ln[i]);
+            mqvpn_gro_flush(g);
+            assert(out_n == 6 && refused == 2);
+            check_per_flow(6, flow);
+            mqvpn_gro_free(g);
+        }
+
+        /* Runs of two in all eight slots; a ninth flow evicts one, refused;
+         * then one more datagram of every flow. */
+        unsigned k = 0;
+        for (unsigned f = 0; f < 8; f++)
+            for (unsigned r = 0; r < 2; r++) {
+                flow[k] = f;
+                u_ln[k] = mk_flow_udp(u_in[k], v6, f, k, (uint16_t)(100 * f + r), 900);
+                k++;
+            }
+        flow[k] = 8;
+        u_ln[k] = mk_flow_udp(u_in[k], v6, 8, k, 800, 900);
+        k++;
+        for (unsigned f = 0; f < 9; f++) {
+            flow[k] = f;
+            u_ln[k] = mk_flow_udp(u_in[k], v6, f, k,
+                                  (uint16_t)(100 * f + (f == 8 ? 1 : 2)), 900);
+            k++;
+        }
+        mqvpn_gro_t *g = refusing_gro(0);
+        for (unsigned i = 0; i < 17; i++)
+            mqvpn_gro_push(g, u_in[i], u_ln[i]);
+        assert(refused == 1 && out_n == 2); /* the evicted run, one by one */
+        for (unsigned i = 17; i < k; i++)
+            mqvpn_gro_push(g, u_in[i], u_ln[i]);
+        mqvpn_gro_flush(g);
+        assert(out_n == k);
+        check_per_flow(k, flow);
+        mqvpn_gro_free(g);
+
+        /* A datagram without checksum of flow C flushes its addresses, which
+         * hold a run of flow A: refused; A's next datagram still comes last. */
+        const unsigned fl2[4] = {0, 0, 2, 0};
+        for (unsigned i = 0; i < 4; i++) {
+            flow[i] = fl2[i];
+            u_ln[i] = mk_flow_udp(u_in[i], v6, fl2[i], i, (uint16_t)(20 + i), 700);
+        }
+        size_t ip_hlen = v6 ? 40 : 20;
+        u_in[2][ip_hlen + 6] = u_in[2][ip_hlen + 7] = 0;
+        g = refusing_gro(0);
+        for (unsigned i = 0; i < 4; i++)
+            mqvpn_gro_push(g, u_in[i], u_ln[i]);
+        mqvpn_gro_flush(g);
+        assert(out_n == 4 && refused == 1);
+        check_per_flow(4, flow);
+        mqvpn_gro_free(g);
+
+        /* Refused at the end of a pass with two runs held; the next pass
+         * merges nothing: no GSO write is even tried. */
+        const unsigned fl3[8] = {0, 0, 1, 1, 0, 0, 1, 1};
+        for (unsigned i = 0; i < 8; i++) {
+            flow[i] = fl3[i];
+            u_ln[i] = mk_flow_udp(u_in[i], v6, fl3[i], i, (uint16_t)(30 + i), 1100);
+        }
+        g = refusing_gro(0);
+        for (unsigned i = 0; i < 4; i++)
+            mqvpn_gro_push(g, u_in[i], u_ln[i]);
+        mqvpn_gro_flush(g);
+        assert(out_n == 4 && refused == 2);
+        for (unsigned i = 4; i < 8; i++)
+            mqvpn_gro_push(g, u_in[i], u_ln[i]);
+        mqvpn_gro_flush(g);
+        assert(out_n == 8 && refused == 2);
+        check_per_flow(8, flow);
+        mqvpn_gro_free(g);
+    }
+}
+
+/* With UDP merging off, nothing UDP can be held, so UDP datagrams between the
+ * same addresses leave a TCP run alone; and after a refusal, set_udp() turns
+ * UDP merging on again. */
+static void
+test_udp_gro_off_and_reenable(void)
+{
+    for (int v6 = 0; v6 < 2; v6++) {
+        unsigned k = 0;
+        uint32_t seq = 1000;
+        for (unsigned r = 0; r < 4; r++) {
+            u_ln[k] = mk_tcp(u_in[k], v6, seq, 1000, 0x10, (uint16_t)(60 + r), 0x1234, 1);
+            seq += 1000;
+            k++;
+            u_ln[k] = mk_udp(u_in[k], v6, (uint16_t)(90 + r), 500, 4433, (uint8_t)k);
+            k++;
+        }
+        mqvpn_gro_t *g = mqvpn_gro_new(capture, NULL);
+        out_n = 0;
+        for (unsigned i = 0; i < k; i++)
+            mqvpn_gro_push(g, u_in[i], u_ln[i]);
+        mqvpn_gro_flush(g);
+        assert(out_n == 5);
+        unsigned tcp_runs = 0;
+        for (unsigned j = 0; j < out_n; j++)
+            tcp_runs += out_q[j].vh.gso_type ==
+                        (v6 ? VIRTIO_NET_HDR_GSO_TCPV6 : VIRTIO_NET_HDR_GSO_TCPV4);
+        assert(tcp_runs == 1);
+        mqvpn_gro_free(g);
+
+        for (unsigned i = 0; i < 4; i++)
+            u_ln[i] = mk_udp(u_in[i], v6, (uint16_t)(70 + i), 800, 4433, (uint8_t)i);
+        g = refusing_gro(0);
+        mqvpn_gro_push(g, u_in[0], u_ln[0]);
+        mqvpn_gro_push(g, u_in[1], u_ln[1]);
+        mqvpn_gro_flush(g);
+        assert(refused == 1 && out_n == 2);
+        refuse_after = -1;
+        mqvpn_gro_set_udp(g, 1, 1);
+        mqvpn_gro_push(g, u_in[2], u_ln[2]);
+        mqvpn_gro_push(g, u_in[3], u_ln[3]);
+        mqvpn_gro_flush(g);
+        assert(out_n == 3 && out_q[2].vh.gso_type == VIRTIO_NET_HDR_GSO_UDP_L4);
+        mqvpn_gro_free(g);
+    }
+}
+
+static uint32_t rng_state = 0x9e3779b9u;
+
+static uint32_t
+rng(void)
+{
+    rng_state ^= rng_state << 13;
+    rng_state ^= rng_state >> 17;
+    rng_state ^= rng_state << 5;
+    return rng_state;
+}
+
+/* Random mixes of UDP flows: runs that grow, shrink, change size or DSCP,
+ * skip an IPv4 ID, datagrams without checksum and fragments, flushes at
+ * random points, and the kernel refusing UDP GSO packets never, always or
+ * from some point on. Every datagram must come out once, byte for byte, in
+ * order within its flow. */
+static void
+test_udp_gro_random_order(void)
+{
+    static unsigned flow[160];
+    static const size_t sizes[] = {1000, 1000, 1000, 1000, 1200, 600, 64, 2};
+    for (unsigned iter = 0; iter < 3000; iter++) {
+        int v6 = iter & 1;
+        unsigned nflows = 1 + rng() % 6, n = 8 + rng() % 40;
+        uint16_t ids[6];
+        for (unsigned f = 0; f < 6; f++)
+            ids[f] = (uint16_t)rng();
+        int after = (int)(rng() % 8) - 2; /* -2, -1: never; 0: always */
+        mqvpn_gro_t *g = refusing_gro(after < 0 ? -1 : after);
+        size_t ip_hlen = v6 ? 40 : 20;
+        for (unsigned i = 0; i < n; i++) {
+            unsigned f = rng() % nflows;
+            flow[i] = f;
+            if (rng() % 16 == 0) ids[f]++; /* an ID gap */
+            size_t pay = sizes[rng() % (sizeof(sizes) / sizeof(sizes[0]))];
+            u_ln[i] = mk_flow_udp(u_in[i], v6, f, i, ids[f]++, pay);
+            unsigned x = rng() % 24;
+            if (x == 0) {
+                u_in[i][ip_hlen + 6] = u_in[i][ip_hlen + 7] = 0; /* no checksum */
+            } else if (x == 1) {
+                u_in[i][1] ^= 0x20; /* DSCP */
+                udp_fix(u_in[i], u_ln[i]);
+            } else if (x == 2 && !v6) {
+                u_in[i][6] = 0x20; /* first fragment: more fragments follow */
+                udp_fix(u_in[i], u_ln[i]);
+            }
+            mqvpn_gro_push(g, u_in[i], u_ln[i]);
+            if (rng() % 10 == 0) mqvpn_gro_flush(g);
+        }
+        mqvpn_gro_flush(g);
+        assert(!mqvpn_gro_pending(g));
+        check_per_flow(n, flow);
+        mqvpn_gro_free(g);
+    }
+}
+
 int
 main(void)
 {
@@ -1390,6 +1684,10 @@ main(void)
     test_udp_gro_passthrough();
     test_udp_gro_flows();
     test_udp_gro_refused();
+    test_udp_gro_refused_in_push();
+    test_udp_gro_refused_flows();
+    test_udp_gro_off_and_reenable();
+    test_udp_gro_random_order();
     printf("test_tun_offload: OK\n");
     return 0;
 }
