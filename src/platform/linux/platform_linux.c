@@ -504,7 +504,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     ctx.tun_gro = cfg->tun_gro;
 
     /* Pre-set TUN name (save to tun_name_cfg too — survives TUN destroy/recreate) */
-    if (cfg->tun_name) {
+    if (cfg->tun_name && cfg->tun_name[0]) {
         snprintf(ctx.tun.name, sizeof(ctx.tun.name), "%s", cfg->tun_name);
         snprintf(ctx.tun_name_cfg, sizeof(ctx.tun_name_cfg), "%s", cfg->tun_name);
     } else {

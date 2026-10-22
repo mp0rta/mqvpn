@@ -82,11 +82,12 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
     -days 1 -nodes -subj "/CN=mqvpn-systemd-test" 2>/dev/null
 echo "OK: cert generated"
 
+# Empty TunName must resolve to mqvpn0 in the server, client and NAT helper.
 cat > /etc/mqvpn/server.conf <<EOF
 [Interface]
 Listen = 192.168.100.2:4433
 Subnet = 10.0.0.0/24
-TunName = mqvpn0
+TunName =
 LogLevel = debug
 
 [TLS]
@@ -106,7 +107,7 @@ Insecure = true
 Key = ${PSK}
 
 [Interface]
-TunName  = mqvpn0
+TunName  =
 LogLevel = debug
 Reconnect = true
 ReconnectInterval = 2
