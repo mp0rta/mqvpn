@@ -41,7 +41,7 @@ setup() {
     nat_config=$("$(dirname "$0")/mqvpn-nat-config" "$CONFIG")
     local -a nat_values
     mapfile -t nat_values <<< "$nat_config"
-    local SUBNET="${nat_values[0]}" SUBNET6="${nat_values[1]}" TUN_NAME="${nat_values[2]}"
+    local SUBNET="${nat_values[0]}" SUBNET6="${nat_values[1]}" TUN_NAME="${nat_values[2]:-mqvpn0}"
 
     mkdir -p "$STATE_DIR"
 

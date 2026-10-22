@@ -9,8 +9,9 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 check() {
-    local subnet="$1" subnet6="$2" tun="$3" actual
-    local expected="$subnet"$'\n'"$subnet6"$'\n'"$tun"
+    local subnet="$1" subnet6="$2" tun="$3" actual expected
+    # An explicit fourth argument checks the raw name before setup's default.
+    expected=$(printf '%s\n%s\n%s\n' "$subnet" "$subnet6" "${4-$tun}")
     actual=$("$HELPER" "$tmp/config")
     if [ "$actual" != "$expected" ]; then
         printf 'FAIL: expected <%s>, got <%s>\n' "$expected" "$actual" >&2
@@ -145,4 +146,12 @@ EOF
 check '10.23.0.0/24' 'fd00::/112' mqvpn9
 : >"$tmp/config"
 check '10.0.0.0/24' '' mqvpn0
+
+# Empty names must use the same default as the server, with or without IPv6.
+for subnet6 in '' 'fd00::/112'; do
+    printf '[Interface]\nTunName=\nSubnet6=%s\n' "$subnet6" >"$tmp/config"
+    check '10.0.0.0/24' "$subnet6" mqvpn0 ''
+    printf '{"tun_name":"","subnet6":"%s"}\n' "$subnet6" >"$tmp/config"
+    check '10.0.0.0/24' "$subnet6" mqvpn0 ''
+done
 echo 'PASS: NAT uses the shared parser for setup and saved state for teardown'
