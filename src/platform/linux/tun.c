@@ -187,6 +187,19 @@ mqvpn_tun_create_opts(mqvpn_tun_t *tun, const char *dev_name, int offload, int g
     return 0;
 }
 
+/*
+ * Write a value to a procfs sysctl path (best-effort).
+ */
+static int
+tun_write_proc(const char *path, const char *value)
+{
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return -1;
+    ssize_t n = write(fd, value, strlen(value));
+    close(fd);
+    return (n > 0) ? 0 : -1;
+}
+
 int
 mqvpn_tun_set_addr(mqvpn_tun_t *tun, const char *addr, const char *peer_addr,
                    int prefix_len)
@@ -243,6 +256,18 @@ mqvpn_tun_set_addr(mqvpn_tun_t *tun, const char *addr, const char *peer_addr,
     }
 
     close(sock);
+
+    /* ICMP errors for forwarded packets (Fragmentation Needed, Time Exceeded,
+     * Dest Unreachable) are written to the TUN with this address as source.
+     * Linux drops an arriving IPv4 packet whose source is a local address
+     * unless accept_local is set, so without it they never reach the sender. */
+    char path[128];
+    snprintf(path, sizeof(path), "/proc/sys/net/ipv4/conf/%s/accept_local", tun->name);
+    if (tun_write_proc(path, "1") < 0)
+        LOG_WRN("TUN %s: cannot set accept_local, ICMP errors to forwarded traffic "
+                "will be dropped",
+                tun->name);
+
     LOG_INF("TUN %s: addr=%s peer=%s/%d", tun->name, addr, peer_addr, prefix_len);
     return 0;
 }
@@ -414,19 +439,6 @@ tun_netlink_add_addr6(unsigned int ifindex, const struct in6_addr *addr, int pre
     /* Return the negated errno (kernel sends negative errno) */
     errno = -nlerr->error;
     return -1;
-}
-
-/*
- * Write a value to a procfs sysctl path (best-effort).
- */
-static int
-tun_write_proc(const char *path, const char *value)
-{
-    int fd = open(path, O_WRONLY);
-    if (fd < 0) return -1;
-    ssize_t n = write(fd, value, strlen(value));
-    close(fd);
-    return (n > 0) ? 0 : -1;
 }
 
 int
