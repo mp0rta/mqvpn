@@ -67,6 +67,10 @@ done
 
 # Teardown must use saved state even if the config was broken, removed or edited.
 sed "s|^STATE_DIR=.*|STATE_DIR=\"$tmp/state\"|" "$SCRIPT" >"$tmp/mqvpn-server-nat.sh"
+grep -qxF "STATE_DIR=\"$tmp/state\"" "$tmp/mqvpn-server-nat.sh" || {
+    echo 'FAIL: STATE_DIR override did not apply' >&2
+    exit 1
+}
 mkdir "$tmp/state"
 export NAT_TEST_DIR="$tmp"
 cat >"$tmp/bin/iptables" <<'EOF'
