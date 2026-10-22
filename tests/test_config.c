@@ -1407,10 +1407,17 @@ test_json_invalid_users_error(void)
     char *path = write_tmp(json);
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
+    char error[1024] = "";
+    mqvpn_log_set_sink(capture_warning, error);
     int rc = mqvpn_config_load(&cfg, path);
+    mqvpn_log_set_sink(NULL, NULL);
     unlink(path);
 
     ASSERT_TRUE(rc != 0, "json invalid users returns error");
+    ASSERT_TRUE(strstr(error, "config: invalid \"users\"") != NULL,
+                "invalid users identifies the setting");
+    ASSERT_TRUE(strstr(error, "names up to 63 bytes") != NULL,
+                "invalid users explains the name limit");
 }
 
 static void
@@ -1520,8 +1527,10 @@ test_json_file_raw_nul_fails(void)
     mqvpn_log_set_sink(NULL, NULL);
     ASSERT_EQ_INT(rc, -1, "raw NUL in JSON file fails");
     ASSERT_TRUE(strstr(error, path) != NULL, "raw NUL: log identifies the file");
-    ASSERT_TRUE(strstr(error, "NUL byte at byte 12") != NULL,
+    ASSERT_TRUE(strstr(error, "NUL byte at offset 12") != NULL,
                 "raw NUL: log identifies the byte offset");
+    ASSERT_TRUE(strstr(error, "save the file as UTF-8 (not UTF-16)") != NULL,
+                "raw NUL: log explains how to fix the encoding");
     ASSERT_EQ_INT(cfg.tun_mtu, 1300, "raw NUL: cfg untouched");
     unlink(path);
 }

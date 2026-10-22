@@ -410,12 +410,19 @@ test_phase_a_basic() {
         echo "  add_user 63-byte name failed: $resp"; return 1
     fi
     resp=$(ctrl_local "{\"cmd\":\"add_user\",\"name\":\"${name}x\",\"key\":\"other_key\"}")
-    if ! assert_json_field "$resp" ok false; then
-        echo "  add_user accepted 64-byte name: $resp"; return 1
+    if ! assert_json_field "$resp" ok false ||
+       ! assert_json_field "$resp" error 'name exceeds 63 bytes'; then
+        echo "  add_user 64-byte name error incorrect: $resp"; return 1
     fi
     resp=$(ctrl_local "{\"cmd\":\"remove_user\",\"name\":\"${name}x\"}")
-    if ! assert_json_field "$resp" ok false; then
-        echo "  remove_user accepted 64-byte name: $resp"; return 1
+    if ! assert_json_field "$resp" ok false ||
+       ! assert_json_field "$resp" error 'name exceeds 63 bytes'; then
+        echo "  remove_user 64-byte name error incorrect: $resp"; return 1
+    fi
+    resp=$(ctrl_local "{\"cmd\":\"get_fec_stats\",\"user\":\"${name}x\"}")
+    if ! assert_json_field "$resp" ok false ||
+       ! assert_json_field "$resp" error 'name exceeds 63 bytes'; then
+        echo "  get_fec_stats 64-byte name error incorrect: $resp"; return 1
     fi
     resp=$(ctrl_local '{"cmd":"list_users"}')
     if ! assert_json_users_eq "$resp" "alice,bob,$name"; then

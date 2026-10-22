@@ -100,10 +100,14 @@ usage(const char *prog)
 }
 
 static int
-parse_host_port(const char *str, char *host, size_t host_len, int *port)
+parse_host_port(const char *str, char *host, size_t host_len, int *port,
+                const char *label)
 {
     if (mqvpn_parse_host_port(str, host, host_len, port) < 0) {
-        fprintf(stderr, "error: invalid address '%s' (expected HOST:PORT)\n", str);
+        fprintf(stderr,
+                "error: invalid %s address '%s': use HOST:PORT or [IPv6]:PORT, "
+                "port 1-65535\n",
+                label, str);
         return -1;
     }
     return 0;
@@ -545,7 +549,7 @@ main(int argc, char *argv[])
 
         char host[256];
         int port;
-        if (parse_host_port(eff_server, host, sizeof(host), &port) < 0) {
+        if (parse_host_port(eff_server, host, sizeof(host), &port, "server") < 0) {
             return 1;
         }
 
@@ -628,7 +632,8 @@ main(int argc, char *argv[])
 
         char bind_addr[256] = "0.0.0.0";
         int bind_port = 443;
-        if (parse_host_port(eff_listen, bind_addr, sizeof(bind_addr), &bind_port) < 0) {
+        if (parse_host_port(eff_listen, bind_addr, sizeof(bind_addr), &bind_port,
+                            "listen") < 0) {
             return 1;
         }
 

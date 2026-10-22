@@ -1204,7 +1204,11 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     }
 
     v = yyjson_obj_get(root, "users");
-    if (v && json_read_users(cfg, v) < 0) goto out;
+    if (v && json_read_users(cfg, v) < 0) {
+        LOG_ERR("config: invalid \"users\": use an array of \"name:key\" or "
+                "{\"name\":...,\"key\":...} entries, with names up to 63 bytes");
+        goto out;
+    }
 
     v = yyjson_obj_get(root, "reorder_rules");
     if (v && json_read_reorder_rules(cfg, v) < 0) goto out;
@@ -1346,7 +1350,9 @@ mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
 
     /* Reject a truncated C string before either parser can apply any keys. */
     if (strlen(buf) != got) {
-        LOG_ERR("%s: NUL byte at byte %zu", path, strlen(buf));
+        LOG_ERR("%s: contains a NUL byte at offset %zu; save the file as UTF-8 "
+                "(not UTF-16)",
+                path, strlen(buf));
         free(buf);
         return -1;
     }

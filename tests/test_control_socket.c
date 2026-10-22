@@ -391,7 +391,7 @@ test_add_user_name_decoded_and_bounded(void)
              name);
     g_last_add_name[0] = '\0';
     call(req);
-    CHECK_EQ_STR("{\"ok\":false,\"error\":\"name and key required\"}");
+    CHECK_EQ_STR("{\"ok\":false,\"error\":\"name exceeds 63 bytes\"}");
     CHECK(g_last_add_name[0] == '\0');
 
     /* The limit counts decoded UTF-8 bytes, not JSON escape characters. */
@@ -407,7 +407,7 @@ test_add_user_name_decoded_and_bounded(void)
              "{\"cmd\":\"add_user\",\"name\":\"%s\\u00e9\",\"key\":\"k\"}", name);
     g_last_add_name[0] = '\0';
     call(req);
-    CHECK_EQ_STR("{\"ok\":false,\"error\":\"name and key required\"}");
+    CHECK_EQ_STR("{\"ok\":false,\"error\":\"name exceeds 63 bytes\"}");
     CHECK(g_last_add_name[0] == '\0');
 }
 
@@ -446,10 +446,10 @@ test_user_lookup_name_length(void)
     g_fec_rc = 1;
     snprintf(req, sizeof(req), "{\"cmd\":\"remove_user\",\"name\":\"%s\"}", name);
     call(req);
-    CHECK_EQ_STR("{\"ok\":false,\"error\":\"name required\"}");
+    CHECK_EQ_STR("{\"ok\":false,\"error\":\"name exceeds 63 bytes\"}");
     snprintf(req, sizeof(req), "{\"cmd\":\"get_fec_stats\",\"user\":\"%s\"}", name);
     call(req);
-    CHECK_EQ_STR("{\"ok\":false,\"error\":\"user required\"}");
+    CHECK_EQ_STR("{\"ok\":false,\"error\":\"name exceeds 63 bytes\"}");
 
     name[63] = '\0';
     snprintf(req, sizeof(req), "{\"cmd\":\"remove_user\",\"name\":\"%s\"}", name);

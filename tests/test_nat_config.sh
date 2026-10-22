@@ -52,8 +52,11 @@ echo 'FAIL: NAT setup reached mkdir after invalid config' >&2
 exit 99
 EOF
 chmod +x "$tmp/bin/mkdir"
+printf -v long_name '%064d' 0
 for bad in $'[Interface]\nSubnet=10.23.0.0/24' \
-           '{"tun_name":"first\nsecond"}' '{"subnet":'; do
+           '{"tun_name":"first\nsecond"}' '{"subnet":' '{"users":"x"}' \
+           "{\"users\":[{\"name\":\"$long_name\",\"key\":\"k\"}]}" \
+           "{\"users\":[\"$long_name:k\"]}"; do
     # Bash strings cannot carry NUL, so append one explicitly in the first case.
     printf '%s' "$bad" >"$tmp/config"
     if [[ "$bad" == '[Interface]'* ]]; then printf '\0' >>"$tmp/config"; fi
@@ -63,6 +66,10 @@ for bad in $'[Interface]\nSubnet=10.23.0.0/24' \
         exit 1
     fi
     if grep -q 'FAIL:' "$tmp/out"; then cat "$tmp/out" >&2; exit 1; fi
+    if [[ "$bad" == '{"users":'* ]]; then
+        grep -Fq 'config: invalid "users"' "$tmp/out"
+        grep -Fq 'names up to 63 bytes' "$tmp/out"
+    fi
 done
 
 # Teardown must use saved state even if the config was broken, removed or edited.
