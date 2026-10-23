@@ -48,8 +48,8 @@ int
 cmp_endpoint_resolve(const char *configured, char *out, size_t out_len)
 {
     if (!out || out_len == 0) return -1;
+    if (configured && strncmp(configured, "unix://", 7) == 0) configured += 7;
     if (!configured || configured[0] == '\0') return cmp_endpoint_default(out, out_len);
-    if (strncmp(configured, "unix://", 7) == 0) configured += 7;
     size_t n = strlen(configured);
     if (n >= out_len || n >= CMP_ENDPOINT_MAX) return -1;
     memcpy(out, configured, n + 1);

@@ -38,6 +38,8 @@ endpoint_resolve_empty_is_default(void)
     CHECK(strcmp(out, def) == 0);
     CHECK(cmp_endpoint_resolve("", out, sizeof(out)) == 0);
     CHECK(strcmp(out, def) == 0);
+    CHECK(cmp_endpoint_resolve("unix://", out, sizeof(out)) == 0);
+    CHECK(strcmp(out, def) == 0);
 }
 
 static void

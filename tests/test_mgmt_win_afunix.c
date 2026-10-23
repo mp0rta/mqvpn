@@ -70,7 +70,7 @@ static void
 bev_event_cb(struct bufferevent *bev, short events, void *arg)
 {
     (void)bev;
-    printf("%s bufferevent: events=0x%x err=%s\n", (const char *)arg, events,
+    printf("%s bufferevent: events=0x%x err=%s\n", (const char *)arg, (unsigned)events,
            evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
 }
 

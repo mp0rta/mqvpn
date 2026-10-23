@@ -12,11 +12,12 @@
  * Linux: "/run/mqvpn/client.sock" if /run exists, else "/var/run/mqvpn/client.sock".
  * macOS: "/var/run/mqvpn/client.sock".
  * Windows: "%ProgramData%\mqvpn\client.sock" ("C:\ProgramData" if unset).
- * 0 = ok, -1 = out_len too small. */
+ * 0 = ok, -1 = out_len too small (out is then set to ""). */
 int cmp_endpoint_default(char *out, size_t out_len);
 
-/* NULL / "" -> default; a "unix://" prefix is stripped.
- * 0 = ok, -1 = does not fit out_len (out is left untouched). */
+/* NULL / "" -> default; a "unix://" prefix is stripped ("unix://" alone = default).
+ * 0 = ok, -1 = too long (>= CMP_ENDPOINT_MAX) or does not fit out_len. On -1 an
+ * explicit path leaves out untouched; the default branch sets out to "". */
 int cmp_endpoint_resolve(const char *configured, char *out, size_t out_len);
 
 #endif /* CMP_ENDPOINT_H */

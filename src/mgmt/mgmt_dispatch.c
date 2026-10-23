@@ -7,10 +7,6 @@
 
 #include <stdlib.h>
 
-/* params stand-in when the request omitted them: yyjson readers treat a zero-length
- * object as empty without touching it. */
-static yyjson_val g_empty_params = {YYJSON_TYPE_OBJ | YYJSON_SUBTYPE_NONE, {0}};
-
 const char *
 mgmt_role_name(mgmt_role_t r)
 {
@@ -25,6 +21,9 @@ mgmt_dispatch_line_ex(const mgmt_method_t *table, size_t n_methods,
     mgmt_request_t req;
     yyjson_val *eid = NULL;
     int code = 0;
+    /* params stand-in when the request omitted them: yyjson readers treat a zero-length
+     * object as empty without touching it. Per call, so handlers cannot share it. */
+    yyjson_val empty_params = {YYJSON_TYPE_OBJ | YYJSON_SUBTYPE_NONE, {0}};
     *err_code = 0;
 
     int pr = mgmt_rpc_parse(line, len, &req, &code, &eid);
@@ -51,8 +50,9 @@ mgmt_dispatch_line_ex(const mgmt_method_t *table, size_t n_methods,
         else if (conn->role < m->min_role)
             code = CMP_E_PERMISSION_DENIED;
         else {
-            mgmt_call_t call = {ep, conn, req.params ? req.params : &g_empty_params, doc};
+            mgmt_call_t call = {ep, conn, req.params ? req.params : &empty_params, doc};
             code = m->fn(&call, &result, &emsg, &edata);
+            if (code != 0 && !cmp_error_name(code)) code = CMP_E_INTERNAL_ERROR;
             if (code == 0 && !result) code = CMP_E_INTERNAL_ERROR;
         }
     }

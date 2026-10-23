@@ -241,6 +241,77 @@ dispatch_hello_idempotent(void)
 }
 
 static void
+dispatch_hello_second_incompatible_still_ok(void)
+{
+    puts("dispatch_hello_second_incompatible_still_ok");
+    mgmt_conn_state_t conn = {MGMT_ROLE_ADMIN, 0};
+    yyjson_doc *d = run("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"system.hello\","
+                        "\"params\":{\"cmp_versions\":[\"1.0\"]}}",
+                        &conn);
+    CHECK(d && get(d, "result") != NULL);
+    yyjson_doc_free(d);
+    d = run("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"system.hello\","
+            "\"params\":{\"cmp_versions\":[\"2.0\"]}}",
+            &conn);
+    CHECK(d && get(d, "result") != NULL && get(d, "error") == NULL);
+    CHECK(conn.handshake_done == 1);
+    yyjson_doc_free(d);
+}
+
+static int
+h_unknown_code(mgmt_call_t *call, yyjson_mut_val **result, const char **err_msg,
+               yyjson_mut_val **err_data)
+{
+    (void)call;
+    (void)result;
+    (void)err_msg;
+    (void)err_data;
+    return 424242;
+}
+
+static void
+dispatch_unknown_handler_code_is_internal_error(void)
+{
+    puts("dispatch_unknown_handler_code_is_internal_error");
+    const mgmt_method_t tbl[] = {{"t.odd", 0, MGMT_ROLE_USER, h_unknown_code}};
+    mgmt_conn_state_t conn = {MGMT_ROLE_ADMIN, 1};
+    yyjson_doc *d =
+        run_ex(tbl, 1, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"t.odd\"}", &conn);
+    CHECK(d && err_code(d) == -32603);
+    CHECK(g_last_err_code == -32603);
+    yyjson_val *nm =
+        d ? yyjson_obj_get(yyjson_obj_get(get(d, "error"), "data"), "name") : NULL;
+    CHECK(nm && strcmp(yyjson_get_str(nm), "MQVPN_CLIENT_INTERNAL_ERROR") == 0);
+    yyjson_doc_free(d);
+}
+
+static void
+dispatch_notification_line_shape(void)
+{
+    puts("dispatch_notification_line_shape");
+    yyjson_mut_doc *md = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *params = yyjson_mut_obj(md);
+    CHECK(md && params && yyjson_mut_obj_add_int(md, params, "a", 1));
+    mgmt_line_t line = {0};
+    CHECK(mgmt_rpc_notification_line(md, "event.x", params, &line) == 0);
+    CHECK(line.buf && line.len > 1 && line.buf[line.len - 1] == '\n');
+    CHECK(line.buf && memchr(line.buf, '\n', line.len) == line.buf + line.len - 1);
+    yyjson_doc *d = line.buf ? yyjson_read(line.buf, line.len, YYJSON_READ_NOFLAG) : NULL;
+    CHECK(d != NULL);
+    if (d) {
+        CHECK(strcmp(yyjson_get_str(get(d, "jsonrpc")), "2.0") == 0);
+        CHECK(strcmp(yyjson_get_str(get(d, "method")), "event.x") == 0);
+        yyjson_val *p = get(d, "params");
+        CHECK(yyjson_is_obj(p) && yyjson_obj_size(p) == 1 &&
+              yyjson_get_int(yyjson_obj_get(p, "a")) == 1);
+        CHECK(get(d, "id") == NULL);
+        yyjson_doc_free(d);
+    }
+    free(line.buf);
+    yyjson_mut_doc_free(md);
+}
+
+static void
 dispatch_handshake_required(void)
 {
     puts("dispatch_handshake_required");
@@ -485,6 +556,9 @@ main(void)
     dispatch_hello_ok();
     dispatch_hello_incompatible();
     dispatch_hello_idempotent();
+    dispatch_hello_second_incompatible_still_ok();
+    dispatch_unknown_handler_code_is_internal_error();
+    dispatch_notification_line_shape();
     dispatch_handshake_required();
     dispatch_method_not_found();
     dispatch_role_denied_handler_not_called();

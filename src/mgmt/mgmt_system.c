@@ -43,7 +43,8 @@ sys_hello(mgmt_call_t *c, yyjson_mut_val **result, const char **err_msg,
         if (!yyjson_is_str(v)) return CMP_E_INVALID_PARAMS;
         if (strcmp(yyjson_get_str(v), CMP_VERSION) == 0) found = 1;
     }
-    if (!found) {
+    /* the first successful hello fixes the negotiation; repeats are idempotent */
+    if (!found && !c->conn->handshake_done) {
         yyjson_mut_doc *d = c->doc;
         yyjson_mut_val *extra = yyjson_mut_obj(d), *det = yyjson_mut_obj(d),
                        *sup = yyjson_mut_arr(d);
