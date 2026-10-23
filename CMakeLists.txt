@@ -482,6 +482,27 @@ if(MSVC)
     target_compile_definitions(mqvpn_mgmt PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
+# ---------- mqvpnctl: client management CLI ----------
+# Standalone: yyjson + src/common/ipc + its own socket layer. Must not link
+# mqvpn_lib / xquic / libevent (gate below; runtime check in
+# scripts/ci_e2e/run_client_mgmt_ipc_test.sh). libmqvpn.h is included for
+# MQVPN_VERSION_* only.
+if(NOT WIN32)   # Windows gets src/cli/ctl_sock_win.c and drops this guard later
+    add_executable(mqvpnctl
+        src/cli/ctl_main.c src/cli/ctl_rpc.c src/cli/ctl_cmd_version.c
+        src/cli/ctl_sock_posix.c
+        src/common/ipc/cmp_error.c src/common/ipc/cmp_endpoint.c
+        third_party/yyjson/yyjson.c)
+    target_include_directories(mqvpnctl PRIVATE
+        ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/cli ${CMAKE_SOURCE_DIR}/src/common/ipc)
+    # Configure-time gate: the link list may name only system libraries.
+    get_target_property(_ctl_libs mqvpnctl LINK_LIBRARIES)
+    if(_ctl_libs MATCHES "mqvpn_lib|xquic|event")
+        message(FATAL_ERROR "mqvpnctl must not link libmqvpn, xquic or libevent: ${_ctl_libs}")
+    endif()
+endif()
+
 # Everything below requires libevent and a platform layer — skip for Android
 if(NOT ANDROID_CROSS_COMPILE)
 
@@ -994,6 +1015,10 @@ if(BUILD_TESTING)
     add_executable(test_cmp_endpoint tests/test_cmp_endpoint.c src/common/ipc/cmp_endpoint.c)
     target_include_directories(test_cmp_error PRIVATE ${CMAKE_SOURCE_DIR}/src/common/ipc)
     target_include_directories(test_cmp_endpoint PRIVATE ${CMAKE_SOURCE_DIR}/src/common/ipc)
+    add_executable(test_ctl_rpc tests/test_ctl_rpc.c src/cli/ctl_rpc.c src/cli/ctl_sock_posix.c
+                   src/common/ipc/cmp_error.c third_party/yyjson/yyjson.c)
+    target_include_directories(test_ctl_rpc PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/cli ${CMAKE_SOURCE_DIR}/src/common/ipc)
     add_executable(test_mgmt_dispatch tests/test_mgmt_dispatch.c third_party/yyjson/yyjson.c)
     target_link_libraries(test_mgmt_dispatch mqvpn_mgmt)
     # test_reorder_gate exercises src/reorder_gate.h (shared STAMP/RAW/DROP_MTU
@@ -1004,7 +1029,7 @@ if(BUILD_TESTING)
     add_executable(test_path_readd tests/test_path_readd.c)
     # Path status log line (header only + the status-name helper).
     add_executable(test_path_line tests/test_path_line.c src/mqvpn_util.c)
-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_redundant_tx test_status test_path_state_machine test_path_slot_oracle test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd test_path_line test_cmp_error test_cmp_endpoint test_mgmt_dispatch)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_redundant_tx test_status test_path_state_machine test_path_slot_oracle test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd test_path_line test_cmp_error test_cmp_endpoint test_mgmt_dispatch test_ctl_rpc)
 
     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of
@@ -1401,6 +1426,9 @@ endif()
 
 # ---------- Install ----------
 install(TARGETS mqvpn DESTINATION bin)
+if(NOT WIN32)
+    install(TARGETS mqvpnctl DESTINATION bin)
+endif()
 install(TARGETS mqvpn_lib DESTINATION lib)
 install(TARGETS mqvpn_shared DESTINATION lib)
 # Bundle xquic shared library (no standalone deb exists)
