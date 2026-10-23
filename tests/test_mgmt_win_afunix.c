@@ -43,7 +43,7 @@ static int g_failed;
           }                                                                         \
       } while (0)
 
-static int g_udp_ok, g_wake_ok, g_afunix_ok;
+static int g_udp_ok, g_wake_ok, g_afunix_ok, g_accepted;
 static struct event_base *g_eb;
 static struct bufferevent *g_server_bev;
 
@@ -67,9 +67,26 @@ wake_cb(evutil_socket_t fd, short what, void *arg)
 }
 
 static void
+bev_event_cb(struct bufferevent *bev, short events, void *arg)
+{
+    (void)bev;
+    printf("%s bufferevent: events=0x%x err=%s\n", (const char *)arg, events,
+           evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
+}
+
+static void
+listener_error_cb(struct evconnlistener *l, void *arg)
+{
+    (void)l;
+    (void)arg;
+    printf("listener error: %s\n", evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
+}
+
+static void
 server_read_cb(struct bufferevent *bev, void *arg)
 {
     (void)arg;
+    if (evbuffer_get_length(bufferevent_get_input(bev)) < 5) return;
     evbuffer_add_buffer(bufferevent_get_output(bev), bufferevent_get_input(bev));
 }
 
@@ -81,10 +98,11 @@ accept_cb(struct evconnlistener *l, evutil_socket_t fd, struct sockaddr *sa, int
     (void)sa;
     (void)len;
     (void)arg;
+    g_accepted++;
     g_server_bev = bufferevent_socket_new(g_eb, fd, BEV_OPT_CLOSE_ON_FREE);
     CHECK(g_server_bev != NULL);
     if (!g_server_bev) return;
-    bufferevent_setcb(g_server_bev, server_read_cb, NULL, NULL, NULL);
+    bufferevent_setcb(g_server_bev, server_read_cb, NULL, bev_event_cb, "server");
     bufferevent_enable(g_server_bev, EV_READ | EV_WRITE);
 }
 
@@ -92,6 +110,7 @@ static void
 client_read_cb(struct bufferevent *bev, void *arg)
 {
     (void)arg;
+    if (evbuffer_get_length(bufferevent_get_input(bev)) < 5) return;
     char buf[16];
     size_t n = bufferevent_read(bev, buf, sizeof(buf));
     if (n == 5 && memcmp(buf, "ping\n", 5) == 0) g_afunix_ok = 1;
@@ -161,6 +180,7 @@ main(void)
     CHECK(evutil_make_socket_nonblocking(lfd) == 0);
     struct evconnlistener *lis = evconnlistener_new(g_eb, accept_cb, NULL, 0, 0, lfd);
     CHECK(lis != NULL);
+    if (lis) evconnlistener_set_error_cb(lis, listener_error_cb);
 
     evutil_socket_t cfd = socket(AF_UNIX, SOCK_STREAM, 0);
     CHECK(cfd != INVALID_SOCKET);
@@ -169,7 +189,7 @@ main(void)
     struct bufferevent *cbev = bufferevent_socket_new(g_eb, cfd, BEV_OPT_CLOSE_ON_FREE);
     CHECK(cbev != NULL);
     if (cbev) {
-        bufferevent_setcb(cbev, client_read_cb, NULL, NULL, NULL);
+        bufferevent_setcb(cbev, client_read_cb, NULL, bev_event_cb, "client");
         bufferevent_enable(cbev, EV_READ | EV_WRITE);
         CHECK(bufferevent_write(cbev, "ping\n", 5) == 0);
     }
@@ -180,7 +200,8 @@ main(void)
 
     event_base_dispatch(g_eb);
 
-    printf("udp=%d wake=%d afunix=%d\n", g_udp_ok, g_wake_ok, g_afunix_ok);
+    printf("udp=%d wake=%d afunix=%d accepted=%d\n", g_udp_ok, g_wake_ok, g_afunix_ok,
+           g_accepted);
     CHECK(g_udp_ok && g_wake_ok && g_afunix_ok);
 
     if (tm) event_free(tm);
