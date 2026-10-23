@@ -197,8 +197,10 @@ main(int argc, char **argv)
         long sz = ftell(f);
         fseek(f, 0, SEEK_SET);
         payload = malloc((size_t)sz + 1);
-        if (!payload || (plen = fread(payload, 1, (size_t)sz, f)) != (size_t)sz)
+        if (!payload || (plen = fread(payload, 1, (size_t)sz, f)) != (size_t)sz) {
+            fclose(f);
             return finish(1);
+        }
         fclose(f);
     } else if (fill >= 0) {
         payload = malloc((size_t)fill + 1);

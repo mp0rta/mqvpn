@@ -91,6 +91,14 @@ for f in src/cli/*.[ch]; do
         inc=${line#*\"}
         inc=${inc%%\"*}
         case "$inc" in json_util.h | yyjson.h) continue ;; esac
+        # A relative path can step out of src/cli/ into any other layer.
+        case "$inc" in
+            *..*)
+                echo "mgmt-layering: $f includes \"$inc\": '..' in a CLI include is not allowed"
+                rc=1
+                continue
+                ;;
+        esac
         if [ -f "src/cli/$inc" ] || [ -f "src/common/ipc/$inc" ]; then continue; fi
         hit=$(find src -type f -name "$(basename -- "$inc")" -print)
         if [ -n "$hit" ]; then

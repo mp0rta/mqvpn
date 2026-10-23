@@ -25,8 +25,8 @@
 #  include <winsock2.h>
 #else
 #  include <sys/socket.h>
-#  include <sys/stat.h>
 #endif
+#include <sys/stat.h>
 
 #define SILENT_MAX 64
 
@@ -61,7 +61,7 @@ silent_accept_cb(evutil_socket_t lfd, short what, void *arg)
     (void)what;
     (void)arg;
     evutil_socket_t c = accept(lfd, NULL, NULL);
-    if (c < 0) return;
+    if (c == (evutil_socket_t)-1) return;
     if (g_silent_n < SILENT_MAX)
         g_silent_fds[g_silent_n++] = c;
     else

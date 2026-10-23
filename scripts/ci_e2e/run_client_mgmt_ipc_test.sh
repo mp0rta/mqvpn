@@ -34,8 +34,20 @@ for b in "$HOST" "$RAW" "$CTL"; do
 done
 
 # Short path: AF_UNIX sun_path is 104 bytes on macOS.
-BASE=${RUNNER_TEMP:-$(mktemp -d)}
-if [ "${#BASE}" -gt 50 ]; then BASE=$(mktemp -d /tmp/mgmt.XXXXXX); fi
+# T13 (root) also needs the build dir to be world-traversable so that
+# $CTL is executable by nobody.
+OWN_BASE=
+if [ -n "${RUNNER_TEMP:-}" ]; then
+    BASE=$RUNNER_TEMP
+else
+    BASE=$(mktemp -d)
+    OWN_BASE=1
+fi
+if [ "${#BASE}" -gt 50 ]; then
+    BASE=$(mktemp -d /tmp/mgmt.XXXXXX)
+    OWN_BASE=1
+fi
+[ -z "$OWN_BASE" ] || chmod 755 "$BASE"
 TMPD=$BASE/mgmt-$$
 mkdir -p "$TMPD" && chmod 755 "$TMPD"
 
@@ -50,6 +62,7 @@ cleanup() {
     for p in ${PIDS[@]+"${PIDS[@]}"}; do kill -KILL "$p" 2>/dev/null; done
     wait 2>/dev/null
     rm -rf "$TMPD"
+    if [ -n "$OWN_BASE" ]; then rmdir "$BASE" 2>/dev/null; fi
 }
 trap cleanup EXIT
 
