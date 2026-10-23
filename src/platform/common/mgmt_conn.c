@@ -132,7 +132,7 @@ conn_destroy(mgmt_conn_t *c)
     free(c);
 }
 
-/* Log budget (D16): count now, log from a one-shot timer, never on the input path. */
+/* Log budget: count now, log from a one-shot timer, never on the input path. */
 static void
 log_note(mgmt_listener_t *l, uint32_t *delta)
 {
@@ -177,7 +177,7 @@ wq_push(mgmt_conn_t *c)
     ep->wq_len++;
 }
 
-/* Queue the error line, then wait for the peer to close (D12 oversized path). */
+/* Queue the error line, then wait for the peer to close (oversized line). */
 static void
 conn_oversized(mgmt_conn_t *c)
 {
@@ -204,7 +204,7 @@ conn_oversized(mgmt_conn_t *c)
     evtimer_add(c->deadline, &tv);
 }
 
-/* Look for a complete line; never dispatches (D12). */
+/* Look for a complete line; never dispatches. */
 static void
 conn_check_input(mgmt_conn_t *c)
 {
@@ -274,7 +274,7 @@ conn_deadline_cb(evutil_socket_t fd, short what, void *arg)
     conn_destroy(c);
 }
 
-/* D13: one best-effort BUSY line, then close. */
+/* Over the connection limit: one best-effort BUSY line, then close. */
 static void
 reject_busy(mgmt_listener_t *l, evutil_socket_t fd)
 {

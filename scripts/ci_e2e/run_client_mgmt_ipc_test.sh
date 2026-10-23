@@ -165,6 +165,22 @@ else
     fail "T2  mqvpnctl version (text)" "exit=$rc lines=$n" "stdout: $out" "stderr: $(cat "$TMPD/err")"
 fi
 
+# ---- T2b: --help / -h
+out=$("$CTL" --help 2>"$TMPD/err")
+rc=$?
+if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
+    pass "T2b mqvpnctl --help: exit 0, non-empty stdout"
+else
+    fail "T2b mqvpnctl --help" "exit=$rc" "stdout: $out" "stderr: $(cat "$TMPD/err")"
+fi
+"$CTL" -h >/dev/null 2>"$TMPD/err"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+    pass "T2b mqvpnctl -h: exit 0"
+else
+    fail "T2b mqvpnctl -h" "exit=$rc" "stderr: $(cat "$TMPD/err")"
+fi
+
 # ---- T3: version, --json
 out=$("$CTL" --endpoint "$S" --json version 2>"$TMPD/err")
 rc=$?
@@ -327,7 +343,14 @@ if [ "$IS_WIN" -eq 0 ] && [ "$(id -u)" -eq 0 ] && id nobody >/dev/null 2>&1; the
 p = pwd.getpwnam("nobody")
 os.setgroups([]); os.setgid(p.pw_gid); os.setuid(p.pw_uid)
 os.execv(sys.argv[1], sys.argv[1:])'
-    P13=$TMPD/perm.sock
+    # nobody must traverse every parent of the binary and the socket: a runner
+    # checkout or RUNNER_TEMP may sit under a 0750 home, so use a fresh /tmp dir
+    # and a copy of the CLI there (absolute path, no cwd dependence).
+    T13D=$(mktemp -d /tmp/mgmt13.XXXXXX)
+    chmod 755 "$T13D"
+    cp "$CTL" "$T13D/mqvpnctl" && chmod 755 "$T13D/mqvpnctl"
+    CTL13=$T13D/mqvpnctl
+    P13=$T13D/perm.sock
     ok=1
     detail=
     for m in 0600 0666; do
@@ -336,12 +359,13 @@ os.execv(sys.argv[1], sys.argv[1:])'
             detail+=" host($m) failed: $(cat "$TMPD/h13.err");"
             continue
         fi
-        out=$("$PY" -c "$AS_NOBODY" "$CTL" --endpoint "$P13" version 2>&1)
+        out=$("$PY" -c "$AS_NOBODY" "$CTL13" --endpoint "$P13" version 2>&1)
         rc=$?
-        if [ "$m" = 0600 ] && [ "$rc" -eq 0 ]; then ok=0; detail+=" mode 0600: nobody got in (rc=0);"; fi
+        if [ "$m" = 0600 ] && [ "$rc" -eq 0 ]; then ok=0; detail+=" mode 0600: nobody got in (rc=0: $out);"; fi
         if [ "$m" = 0666 ] && [ "$rc" -ne 0 ]; then ok=0; detail+=" mode 0666: nobody denied (rc=$rc: $out);"; fi
         stop_host "$HPID"
     done
+    rm -rf "$T13D"
     if [ "$ok" -eq 1 ]; then
         pass "T13 nobody is denied on 0600 and allowed on 0666"
     else

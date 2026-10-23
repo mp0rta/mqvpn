@@ -52,7 +52,7 @@ ctl_emit_error(const ctl_opts_t *o, int code, const char *message,
     yyjson_mut_doc_free(d);
 }
 
-/* Maps a failed call onto D7 codes (remote errors pass through) and returns
+/* Maps a failed call onto the CLI exit codes (remote errors pass through) and returns
  * the exit code. */
 static int
 fail(const ctl_opts_t *o, ctl_rpc_status_t st, ctl_sock_err_t se, ctl_reply_t *reply,
