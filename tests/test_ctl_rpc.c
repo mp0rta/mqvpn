@@ -14,6 +14,10 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifndef MSG_NOSIGNAL
+#  define MSG_NOSIGNAL 0 /* macOS: the test ignores SIGPIPE instead */
+#endif
+
 #define CHECK(c)                                                                  \
     do {                                                                          \
         if (!(c)) {                                                               \

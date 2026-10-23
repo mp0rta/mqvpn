@@ -37,6 +37,10 @@ main(void)
 #  include <time.h>
 #  include <unistd.h>
 
+#  ifndef MSG_NOSIGNAL
+#    define MSG_NOSIGNAL 0 /* macOS: the test ignores SIGPIPE instead */
+#  endif
+
 static int g_failed = 0;
 
 #  define CHECK(cond)                                                         \
