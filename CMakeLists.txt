@@ -956,6 +956,10 @@ if(BUILD_TESTING)
     add_executable(test_config_bridge tests/test_config_bridge.c src/platform/client_config_bridge.c src/mqvpn_config.c src/redundant_tx.c src/log.c third_party/yyjson/yyjson.c)
     add_executable(test_classifier tests/test_classifier.c src/hybrid/classifier.c)
     add_executable(test_icmp tests/test_icmp.c src/icmp.c)
+    add_executable(test_cmp_error tests/test_cmp_error.c src/common/ipc/cmp_error.c)
+    add_executable(test_cmp_endpoint tests/test_cmp_endpoint.c src/common/ipc/cmp_endpoint.c)
+    target_include_directories(test_cmp_error PRIVATE ${CMAKE_SOURCE_DIR}/src/common/ipc)
+    target_include_directories(test_cmp_endpoint PRIVATE ${CMAKE_SOURCE_DIR}/src/common/ipc)
     # test_reorder_gate exercises src/reorder_gate.h (shared STAMP/RAW/DROP_MTU
     # gate + PTB token bucket, extracted from mqvpn_client.c/mqvpn_server.c) —
     # links reorder_tx.c (for the peek it wraps) + icmp.c (for the PTB send).
@@ -964,7 +968,7 @@ if(BUILD_TESTING)
     add_executable(test_path_readd tests/test_path_readd.c)
     # Path status log line (header only + the status-name helper).
     add_executable(test_path_line tests/test_path_line.c src/mqvpn_util.c)
-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_redundant_tx test_status test_path_state_machine test_path_slot_oracle test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd test_path_line)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_redundant_tx test_status test_path_state_machine test_path_slot_oracle test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd test_path_line test_cmp_error test_cmp_endpoint)
 
     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of
