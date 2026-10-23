@@ -452,12 +452,13 @@ readd_open_socket(platform_win_ctx_t *p, platform_path_t *s, const char *ifname)
  * ctx, or NULL on failure (already logged). The ctx is caller-owned until
  * add_path succeeds. Sibling of the POSIX netmon_platform_transport_create. */
 static void *
-recovery_transport_create(SOCKET sock, const char *ifname)
+recovery_transport_create(platform_win_ctx_t *p, SOCKET sock, const char *ifname)
 {
     mqvpn_bind_winsock_opts_t bopts = {0};
     bopts.struct_size = sizeof(bopts);
     bopts.socket_buf_bytes = 0;
     snprintf(bopts.tag, sizeof(bopts.tag), "%s", ifname);
+    bopts.dont_fragment = mqvpn_client_pmtud_enabled(p->client);
     void *ctx = NULL;
     if (mqvpn_bind_winsock_path_new(sock, &bopts, &ctx) != MQVPN_OK) {
         LOG_WRN("netmon: transport setup for re-add %s failed", ifname);
@@ -590,7 +591,7 @@ try_readd_removed_path(platform_win_ctx_t *p, const char *ifname)
 
         if (readd_open_socket(p, s, ifname) < 0) return 0;
 
-        void *tctx = recovery_transport_create(s->sock, ifname);
+        void *tctx = recovery_transport_create(p, s->sock, ifname);
         if (!tctx) {
             platform_path_close_socket(s);
             return 0;

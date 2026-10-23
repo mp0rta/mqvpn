@@ -34,6 +34,10 @@ typedef struct {
     /* Optional label used in the bind's own log lines (adapter
      * FriendlyName). Empty = the socket value is used. */
     char tag[64];
+    /* Appended under ABI 3. Nonzero: set IP_DONTFRAGMENT / IPV6_DONTFRAG on
+     * the socket, for PMTUD. A datagram the interface cannot carry is then
+     * dropped as lost. */
+    int dont_fragment;
 } mqvpn_bind_winsock_opts_t;
 
 /* Copies the recognised prefix of *opts (min(struct_size, sizeof)) and never

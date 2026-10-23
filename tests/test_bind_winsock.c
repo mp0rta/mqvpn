@@ -218,6 +218,37 @@ test_socket_buffers(void)
 }
 
 static void
+test_dont_fragment_only_when_asked(void)
+{
+    SOCKET s = udp_socket(NULL);
+    DWORD v = 0;
+    int len = (int)sizeof(v);
+    CHECK(getsockopt(s, IPPROTO_IP, IP_DONTFRAGMENT, (char *)&v, &len) == 0 && v == 0);
+
+    mqvpn_bind_winsock_opts_t o = opts_default();
+    void *ctx = NULL;
+    CHECK(mqvpn_bind_winsock_path_new(s, &o, &ctx) == MQVPN_OK);
+    len = (int)sizeof(v);
+    CHECK(getsockopt(s, IPPROTO_IP, IP_DONTFRAGMENT, (char *)&v, &len) == 0 && v == 0);
+    mqvpn_bind_winsock_path_free(ctx);
+
+    /* a caller built before the field never asks */
+    o.dont_fragment = 1;
+    o.struct_size = (uint32_t)offsetof(mqvpn_bind_winsock_opts_t, dont_fragment);
+    CHECK(mqvpn_bind_winsock_path_new(s, &o, &ctx) == MQVPN_OK);
+    len = (int)sizeof(v);
+    CHECK(getsockopt(s, IPPROTO_IP, IP_DONTFRAGMENT, (char *)&v, &len) == 0 && v == 0);
+    mqvpn_bind_winsock_path_free(ctx);
+
+    o.struct_size = sizeof(o);
+    CHECK(mqvpn_bind_winsock_path_new(s, &o, &ctx) == MQVPN_OK);
+    len = (int)sizeof(v);
+    CHECK(getsockopt(s, IPPROTO_IP, IP_DONTFRAGMENT, (char *)&v, &len) == 0 && v != 0);
+    mqvpn_bind_winsock_path_free(ctx);
+    closesocket(s);
+}
+
+static void
 test_send_error_mapping(void)
 {
     struct sockaddr_in dst;
@@ -259,6 +290,16 @@ test_send_error_mapping(void)
     CHECK(ops->send(ctx, three, 3, to, tolen) == 2);
     st = tx_stats(ctx);
     CHECK(st.tx_sends == 4 && st.tx_datagrams == 4);
+
+    /* too large with DF set (PMTUD): lost, not a send failure */
+    const int second_too_big[] = {0, WSAEMSGSIZE, 0};
+    script(3, second_too_big);
+    CHECK(ops->send(ctx, three, 3, to, tolen) == 3);
+    const int too_big[] = {WSAEMSGSIZE};
+    script(1, too_big);
+    CHECK(ops->send(ctx, three, 1, to, tolen) == 1);
+    st = tx_stats(ctx);
+    CHECK(st.tx_sends == 6 && st.tx_datagrams == 6);
 
     script(0, NULL);
     CHECK(ops->send(ctx, three, 0, to, tolen) == MQVPN_TX_FAILED); /* n == 0 */
@@ -334,6 +375,7 @@ main(void)
     CHECK(WSAStartup(MAKEWORD(2, 2), &wsa) == 0);
     test_ctor_contract();
     test_socket_buffers();
+    test_dont_fragment_only_when_asked();
     test_send_error_mapping();
     test_real_round_trip_and_drain();
     WSACleanup();
