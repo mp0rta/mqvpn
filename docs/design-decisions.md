@@ -405,3 +405,16 @@ names byte for byte). The first duplicate key in one object wins; for
 same-named entries in the `users` array the last wins, which is a separate
 rule. Replies keep the key order and types of the original string literals
 (DD §14); a reply over 256 KiB becomes the `response too large` envelope.
+
+## §16 Client management IPC: JSON-RPC over AF_UNIX, layered (2026-10)
+
+The client's management endpoint speaks JSON-RPC 2.0, one request per line,
+over an AF_UNIX socket. The
+protocol core (`src/mgmt/`, `src/common/ipc/`) knows neither libevent nor any
+platform; the connection layer (`mgmt_conn.c`) knows no OS; the listener owns
+the socket file; `mqvpnctl` links neither libmqvpn, xquic nor libevent. Each
+layer is testable alone, and `scripts/lint/check_mgmt_layering.sh` enforces
+the directions. Permission is the listener's role, stamped on the connection,
+not a per-call check. There is no fixed buffer: one response is in flight per
+connection, and a per-loop request budget keeps the data plane running while
+clients flood the socket.

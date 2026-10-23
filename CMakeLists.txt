@@ -849,6 +849,39 @@ if(BUILD_TESTING)
     set_target_properties(test_conn_settings PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_conn_settings COMMAND test_conn_settings)
+
+    # Management IPC: unit tests and the helpers driven by
+    # scripts/ci_e2e/run_client_mgmt_ipc_test.sh. Keep in sync with the Linux
+    # twins (the test_mgmt_conn / test_mgmt_listen blocks below).
+    add_executable(test_cmp_error tests/test_cmp_error.c src/common/ipc/cmp_error.c)
+    add_executable(test_cmp_endpoint tests/test_cmp_endpoint.c src/common/ipc/cmp_endpoint.c)
+    add_executable(test_ctl_rpc tests/test_ctl_rpc.c src/cli/ctl_rpc.c src/cli/ctl_sock_posix.c
+                   src/common/ipc/cmp_error.c third_party/yyjson/yyjson.c)
+    add_executable(test_mgmt_dispatch tests/test_mgmt_dispatch.c third_party/yyjson/yyjson.c)
+    target_link_libraries(test_mgmt_dispatch mqvpn_mgmt)
+    add_executable(test_mgmt_conn tests/test_mgmt_conn.c src/platform/common/mgmt_conn.c
+        src/log.c third_party/yyjson/yyjson.c)
+    target_link_libraries(test_mgmt_conn mqvpn_mgmt ${EVENT_LIB})
+    add_executable(test_mgmt_listen tests/test_mgmt_listen.c tests/test_mgmt_listen_real.c src/log.c)
+    add_executable(mgmt_endpoint_host tests/mgmt_endpoint_host.c
+        src/platform/common/mgmt_conn.c src/platform/posix/mgmt_listen.c
+        src/log.c third_party/yyjson/yyjson.c)
+    target_link_libraries(mgmt_endpoint_host mqvpn_mgmt ${EVENT_LIB})
+    add_executable(mgmt_raw_client tests/mgmt_raw_client.c src/cli/ctl_sock_posix.c)
+    foreach(t test_cmp_error test_cmp_endpoint test_ctl_rpc test_mgmt_dispatch test_mgmt_conn
+              test_mgmt_listen mgmt_endpoint_host mgmt_raw_client)
+        target_include_directories(${t} PRIVATE
+            ${EVENT_INCLUDE_DIR}
+            ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/src/platform/common
+            ${CMAKE_SOURCE_DIR}/src/platform/posix
+            ${CMAKE_SOURCE_DIR}/src/cli ${CMAKE_SOURCE_DIR}/src/common/ipc)
+        set_target_properties(${t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    endforeach()
+    foreach(t test_cmp_error test_cmp_endpoint test_ctl_rpc test_mgmt_dispatch test_mgmt_conn
+              test_mgmt_listen)
+        add_test(NAME ${t} COMMAND ${t})
+    endforeach()
 endif()
 
 else() # NOT WIN32, NOT APPLE — Linux
@@ -1255,6 +1288,33 @@ if(BUILD_TESTING)
         set_target_properties(test_mgmt_conn PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
         add_test(NAME test_mgmt_conn COMMAND test_mgmt_conn)
+
+        # Test helpers driven by scripts/ci_e2e/run_client_mgmt_ipc_test.sh
+        # (no add_test: the script is the test).
+        add_executable(mgmt_endpoint_host tests/mgmt_endpoint_host.c
+            src/platform/common/mgmt_conn.c src/platform/posix/mgmt_listen.c
+            src/log.c third_party/yyjson/yyjson.c)
+        target_include_directories(mgmt_endpoint_host PRIVATE
+            ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/src/platform/common
+            ${CMAKE_SOURCE_DIR}/src/platform/posix
+            ${CMAKE_SOURCE_DIR}/src/common/ipc
+            ${CMAKE_SOURCE_DIR}/include
+        )
+        if(Libevent_FOUND)
+            target_link_libraries(mgmt_endpoint_host mqvpn_mgmt libevent::core libevent::extra)
+        else()
+            target_include_directories(mgmt_endpoint_host PRIVATE ${EVENT_INCLUDE_DIR})
+            target_link_libraries(mgmt_endpoint_host mqvpn_mgmt ${EVENT_LIB})
+        endif()
+        set_target_properties(mgmt_endpoint_host PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+
+        add_executable(mgmt_raw_client tests/mgmt_raw_client.c src/cli/ctl_sock_posix.c)
+        target_include_directories(mgmt_raw_client PRIVATE
+            ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/cli ${CMAKE_SOURCE_DIR}/src/common/ipc)
+        set_target_properties(mgmt_raw_client PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     endif()
 
     # libmqvpn public API test (links libmqvpn + xquic)

@@ -23,6 +23,8 @@ rules belong here, reasons there.
   `src/mqvpn_scheduler.h` — library core
 - `src/path_state_machine.c` — path lifecycle FSM
 - `src/bind/`, `include/mqvpn_bind_{posix,winsock}.h` — bundled transports
+- `src/mgmt/` (client management IPC protocol core), `src/common/ipc/`
+  (wire constants and errors shared with the CLI), `src/cli/` (`mqvpnctl`)
 - `src/platform/{linux,windows,darwin,android,posix}/` — platform layers
 - `src/hybrid/` — hybrid TCP lane on lwIP
 - `third_party/xquic` — fork `mp0rta/xquic`, branch `mqvpn-main`;
@@ -92,6 +94,10 @@ rules belong here, reasons there.
   not add a fixed path cap. [DD §9]
 - The MTU config upper bound stays 9000 until `max_pkt_out_size` becomes
   configurable. [DD §10]
+- The client management IPC is layered: `src/mgmt/` includes neither libevent
+  nor platform headers, `src/platform/common/mgmt_conn.c` includes no
+  OS-specific headers, and `mqvpnctl` links neither libmqvpn, xquic nor
+  libevent (`scripts/lint/check_mgmt_layering.sh`). [DD §16]
 
 ## Rules — change hygiene
 
