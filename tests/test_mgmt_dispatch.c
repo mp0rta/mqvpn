@@ -226,6 +226,19 @@ dispatch_hello_incompatible(void)
 }
 
 static void
+dispatch_hello_embedded_nul_version_rejected(void)
+{
+    puts("dispatch_hello_embedded_nul_version_rejected");
+    mgmt_conn_state_t conn = {MGMT_ROLE_ADMIN, 0};
+    yyjson_doc *d = run("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"system.hello\","
+                        "\"params\":{\"cmp_versions\":[\"1.0\\u0000junk\"]}}",
+                        &conn);
+    CHECK(d && err_code(d) == -32002);
+    yyjson_doc_free(d);
+    CHECK(conn.handshake_done == 0);
+}
+
+static void
 dispatch_hello_idempotent(void)
 {
     puts("dispatch_hello_idempotent");
@@ -555,6 +568,7 @@ main(void)
     dispatch_nested_keys_ignored();
     dispatch_hello_ok();
     dispatch_hello_incompatible();
+    dispatch_hello_embedded_nul_version_rejected();
     dispatch_hello_idempotent();
     dispatch_hello_second_incompatible_still_ok();
     dispatch_unknown_handler_code_is_internal_error();

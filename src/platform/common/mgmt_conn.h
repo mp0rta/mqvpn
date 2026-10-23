@@ -43,7 +43,8 @@ void mgmt_endpoint_free(mgmt_endpoint_t *ep);
 
 typedef struct {
     uint64_t accepted, open, rejected_limit, invalid_requests, oversized,
-        handshake_timeouts, budget_deferrals, accept_deferrals, dispatched, log_lines;
+        handshake_timeouts, budget_deferrals, accept_deferrals, dispatched, log_lines,
+        accept_errors;      /* accept_errors: appended; accept() failed, e.g. EMFILE */
 } mgmt_listener_counters_t; /* dispatched = mgmt_dispatch_line() calls (notifications too)
                              */
 void mgmt_listener_counters(const mgmt_listener_t *l, mgmt_listener_counters_t *out);

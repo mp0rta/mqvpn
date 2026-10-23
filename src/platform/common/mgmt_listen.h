@@ -39,6 +39,9 @@ typedef struct mgmt_listen mgmt_listen_t;
  *   7. listen
  * On failure returns NULL with a reason in errbuf, releases the lock and
  * unlinks the socket only if step 4 created it.
+ * Trust assumption: the endpoint's parent directory must not be writable by
+ * untrusted users (the default directory is root-owned; a custom path is the
+ * operator's responsibility).
  */
 mgmt_listen_t *mgmt_listen_open(const mgmt_listen_opts_t *opts, char *errbuf,
                                 size_t errlen);

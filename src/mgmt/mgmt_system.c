@@ -41,7 +41,8 @@ sys_hello(mgmt_call_t *c, yyjson_mut_val **result, const char **err_msg,
     yyjson_val *v;
     while ((v = yyjson_arr_iter_next(&it)) != NULL) {
         if (!yyjson_is_str(v)) return CMP_E_INVALID_PARAMS;
-        if (strcmp(yyjson_get_str(v), CMP_VERSION) == 0) found = 1;
+        if (yyjson_equals_str(v, CMP_VERSION))
+            found = 1; /* length-aware: no embedded NUL */
     }
     /* the first successful hello fixes the negotiation; repeats are idempotent */
     if (!found && !c->conn->handshake_done) {

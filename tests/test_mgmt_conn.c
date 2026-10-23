@@ -26,11 +26,13 @@ main(void)
 #  include <errno.h>
 #  include <fcntl.h>
 #  include <netinet/in.h>
+#  include <dirent.h>
 #  include <signal.h>
 #  include <stdint.h>
 #  include <stdio.h>
 #  include <stdlib.h>
 #  include <string.h>
+#  include <sys/resource.h>
 #  include <sys/socket.h>
 #  include <sys/stat.h>
 #  include <sys/un.h>
@@ -914,6 +916,72 @@ conn_accept_flood_is_budgeted(void)
     fixture_stop();
 }
 
+/* Highest open fd of this process, or -1 when /proc/self/fd is unavailable. */
+static int
+max_open_fd(void)
+{
+    int mx = -1;
+    DIR *d = opendir("/proc/self/fd");
+    struct dirent *e;
+    if (!d) return -1;
+    while ((e = readdir(d)) != NULL) {
+        int fd = atoi(e->d_name);
+        if (e->d_name[0] != '.' && fd != dirfd(d) && fd > mx) mx = fd;
+    }
+    closedir(d);
+    return mx;
+}
+
+static void
+conn_accept_error_backs_off(void)
+{
+    enum { MAXDUP = 4096 };
+    mgmt_conn_limits_t lim;
+    struct rlimit old, lo;
+    static int dups[MAXDUP];
+    int nd = 0, i, mx;
+    cl_t *c;
+    uint64_t accept_errors;
+    puts("conn_accept_error_backs_off");
+    small_limits(&lim);
+    fixture_start(&lim);
+    c = cl_new(); /* connected, not yet accepted: loop has not run */
+    mx = max_open_fd();
+    if (mx < 0 || getrlimit(RLIMIT_NOFILE, &old) != 0) {
+        puts("SKIP conn_accept_error_backs_off: /proc/self/fd or getrlimit unavailable");
+        cl_free(c);
+        fixture_stop();
+        return;
+    }
+    lo = old;
+    lo.rlim_cur = (rlim_t)mx + 1;
+    if (setrlimit(RLIMIT_NOFILE, &lo) != 0) {
+        printf("SKIP conn_accept_error_backs_off: setrlimit failed: %s\n",
+               strerror(errno));
+        cl_free(c);
+        fixture_stop();
+        return;
+    }
+    /* fill the holes below the limit so accept() gets EMFILE */
+    while (nd < MAXDUP && (dups[nd] = dup(0)) >= 0)
+        nd++;
+    CHECK(errno == EMFILE);
+
+    run_for_ms(50);
+    accept_errors = counters().accept_errors;
+    CHECK(accept_errors >= 1 && accept_errors <= 3); /* unbounded without the backoff */
+    CHECK(counters().accepted == 0);
+
+    CHECK(setrlimit(RLIMIT_NOFILE, &old) == 0);
+    for (i = 0; i < nd; i++)
+        close(dups[i]);
+    run_for_ms(300);
+    CHECK(counters().accepted == 1);
+    do_hello(c, 1);
+    cl_free(c);
+    fixture_stop();
+}
+
 #  define MAX_CAP_LINES 8
 static char g_cap[MAX_CAP_LINES][1024];
 static int g_cap_n;
@@ -1070,6 +1138,7 @@ main(void)
     conn_budget_defers_and_resumes();
     conn_32_connections_hammer_keeps_loop_alive();
     conn_accept_flood_is_budgeted();
+    conn_accept_error_backs_off();
     conn_invalid_requests_log_budget();
     conn_notification_no_reply();
     conn_peer_closes_mid_response();

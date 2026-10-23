@@ -58,6 +58,10 @@ ln_push_tail(lnode_t *head, lnode_t *n)
 
 #define CONTAINER_OF(p, type, member) ((type *)((char *)(p) - offsetof(type, member)))
 
+/* Pause between an accept() failure (fd exhaustion) and the next attempt; without it
+ * libevent retries on every loop pass and spins the shared VPN loop. */
+#define MGMT_ACCEPT_BACKOFF_MS 200
+
 typedef struct mgmt_conn {
     mgmt_listener_t *l;
     struct bufferevent *bev;
@@ -85,6 +89,7 @@ struct mgmt_endpoint {
     mgmt_endpoint_ctx_t ctx;
     mgmt_conn_limits_t lim;
     struct event *resume;
+    struct event *backoff; /* one-shot: listeners stay disabled after an accept error */
     uint32_t requests_used, accepts_used;
     lnode_t wq;
     size_t wq_len;
@@ -391,6 +396,33 @@ dispatch_one(mgmt_conn_t *c)
 }
 
 static void
+accept_error_cb(struct evconnlistener *lev, void *arg)
+{
+    mgmt_listener_t *l = arg;
+    mgmt_endpoint_t *ep = l->ep;
+    mgmt_listener_t *x;
+    struct timeval tv;
+    (void)lev;
+
+    l->cnt.accept_errors++;
+    for (x = ep->listeners; x; x = x->next)
+        evconnlistener_disable(x->lev);
+    tv_from_ms(&tv, MGMT_ACCEPT_BACKOFF_MS);
+    if (!evtimer_pending(ep->backoff, NULL)) evtimer_add(ep->backoff, &tv);
+}
+
+static void
+backoff_cb(evutil_socket_t fd, short what, void *arg)
+{
+    mgmt_endpoint_t *ep = arg;
+    mgmt_listener_t *l;
+    (void)fd;
+    (void)what;
+    for (l = ep->listeners; l; l = l->next)
+        evconnlistener_enable(l->lev);
+}
+
+static void
 resume_cb(evutil_socket_t fd, short what, void *arg)
 {
     mgmt_endpoint_t *ep = arg;
@@ -400,8 +432,9 @@ resume_cb(evutil_socket_t fd, short what, void *arg)
 
     ep->requests_used = 0;
     ep->accepts_used = 0;
-    for (l = ep->listeners; l; l = l->next)
-        evconnlistener_enable(l->lev);
+    if (!evtimer_pending(ep->backoff, NULL))
+        for (l = ep->listeners; l; l = l->next)
+            evconnlistener_enable(l->lev);
     while (ep->wq_len && ep->requests_used < ep->lim.request_budget_per_loop) {
         mgmt_conn_t *c = CONTAINER_OF(ep->wq.next, mgmt_conn_t, wq);
         wq_remove(c);
@@ -430,7 +463,10 @@ mgmt_endpoint_new(struct event_base *eb, const mgmt_endpoint_ctx_t *ctx,
     if (ep->lim.accept_budget_per_loop < 1) ep->lim.accept_budget_per_loop = 1;
     ln_init(&ep->wq);
     ep->resume = evtimer_new(eb, resume_cb, ep);
-    if (!ep->resume) {
+    ep->backoff = evtimer_new(eb, backoff_cb, ep);
+    if (!ep->resume || !ep->backoff) {
+        if (ep->resume) event_free(ep->resume);
+        if (ep->backoff) event_free(ep->backoff);
         free(ep);
         return NULL;
     }
@@ -460,6 +496,7 @@ mgmt_endpoint_add_listener(mgmt_endpoint_t *ep, evutil_socket_t listen_fd,
     l->lev =
         evconnlistener_new(ep->eb, accept_cb, l, LEV_OPT_CLOSE_ON_EXEC, 0, listen_fd);
     if (!l->lev) goto fail;
+    evconnlistener_set_error_cb(l->lev, accept_error_cb);
     l->next = ep->listeners;
     ep->listeners = l;
     return l;
@@ -485,6 +522,7 @@ mgmt_endpoint_free(mgmt_endpoint_t *ep)
         free(l);
     }
     event_free(ep->resume);
+    event_free(ep->backoff);
     free(ep);
 }
 

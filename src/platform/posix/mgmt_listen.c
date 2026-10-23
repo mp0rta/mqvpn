@@ -184,12 +184,16 @@ mgmt_listen_open(const mgmt_listen_opts_t *opts, char *errbuf, size_t errlen)
     bound = 1;
 
     /* Record ownership before anything else can fail or crash. */
-    if (stat(path, &st) == 0) {
+    if (lstat(path, &st) == 0 && S_ISSOCK(st.st_mode)) {
         have_id = 1;
         dev = (unsigned long long)st.st_dev;
         ino = (unsigned long long)st.st_ino;
     }
-    if (!have_id || write_record(lock_fd, dev, ino) != 0) {
+    if (!have_id) {
+        SET_ERR("endpoint path replaced after bind: %s", path);
+        goto fail_unlock;
+    }
+    if (write_record(lock_fd, dev, ino) != 0) {
         SET_ERR("cannot record socket ownership for %s: %s", path, strerror(errno));
         goto fail_unlock;
     }
