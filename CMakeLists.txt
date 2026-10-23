@@ -695,6 +695,8 @@ target_include_directories(mqvpn_darwin_platform PRIVATE
     ${CMAKE_SOURCE_DIR}/src/platform/posix
     ${CMAKE_SOURCE_DIR}/src/platform/darwin
     ${CMAKE_SOURCE_DIR}/src/platform/common
+    ${CMAKE_SOURCE_DIR}/src/common/ipc
+    ${CMAKE_SOURCE_DIR}/src/mgmt
 )
 
 # Shared library variant — mirrors the Linux mqvpn_shared block below (kept

@@ -518,9 +518,9 @@ test_parse_mode(void)
     CHECK(mgmt_listen_parse_mode("abc") == 0660);
     CHECK(g_logcount == 1);
     CHECK(strstr(g_logbuf, "invalid ClientManagement SocketMode 'abc'") != NULL);
-    mqvpn_log_set_sink(log_sink, NULL);
     CHECK(mgmt_listen_parse_mode("10000") == 0660);
     CHECK(mgmt_listen_parse_mode("0660x") == 0660);
+    CHECK(g_logcount == 3);
     mqvpn_log_set_sink(NULL, NULL);
     printf("PASS listen_parse_mode\n");
 }

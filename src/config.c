@@ -462,7 +462,8 @@ _Static_assert(sizeof(unsigned long long) == sizeof(uint64_t),
                "CFGK_U64 stores through a single 8-byte write");
 _Static_assert(sizeof(((mqvpn_file_config_t *)0)->listen) <= 280 &&
                    sizeof(((mqvpn_file_config_t *)0)->server_addr) <= 280 &&
-                   sizeof(((mqvpn_file_config_t *)0)->control_listen) <= 280,
+                   sizeof(((mqvpn_file_config_t *)0)->control_listen) <= 280 &&
+                   sizeof(((mqvpn_file_config_t *)0)->client_mgmt_endpoint) <= 280,
                "cfg_key_apply_json sbuf must cover the largest CFGK_STR field");
 
 /* int_ok gates */
@@ -599,7 +600,7 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_INT_FB(SEC_AUTH, "MaxClients", "max_clients", max_clients, cfgk_int_positive, 64),
     /* [Control] */
     CFG_STR(SEC_CONTROL, "Listen", "control_listen", control_listen),
-    /* [ClientManagement] — client-side management IPC (spec: Enabled defaults to off) */
+    /* [ClientManagement] — client-side management IPC (off by default) */
     CFG_BOOL(SEC_CLIENT_MGMT, "Enabled", "client_mgmt_enabled", client_mgmt_enabled),
     CFG_STR(SEC_CLIENT_MGMT, "Endpoint", "client_mgmt_endpoint", client_mgmt_endpoint),
     CFG_STR(SEC_CLIENT_MGMT, "SocketMode", "client_mgmt_socket_mode",
@@ -805,7 +806,7 @@ cfg_key_apply_json(mqvpn_file_config_t *cfg, yyjson_val *root, yyjson_val *ro,
                    yyjson_val *hy, yyjson_val *adv)
 {
     /* Must cover the largest CFGK_STR destination (listen/server_addr/
-     * control_listen, all char[280]) or JSON strings would truncate
+     * control_listen/client_mgmt_endpoint, all char[280]) or JSON strings would truncate
      * shorter than INI ones. */
     char sbuf[280];
     for (size_t i = 0; i < sizeof(cfg_keys) / sizeof(cfg_keys[0]); i++) {

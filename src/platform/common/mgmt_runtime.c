@@ -12,7 +12,7 @@ mgmt_runtime_start(mgmt_runtime_t *rt, struct event_base *eb,
                    const char *endpoint_version, int enabled, const char *endpoint,
                    const char *socket_mode, const char *socket_group)
 {
-    char err[256];
+    char err[256] = {0};
     mgmt_conn_limits_t limits;
     mgmt_listen_opts_t lo;
 
