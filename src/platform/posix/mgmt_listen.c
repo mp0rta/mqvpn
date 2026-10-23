@@ -38,8 +38,8 @@ mkdir_parents(const char *path)
 {
     char *d = strdup(path);
     if (!d) return -1;
-    for (char *p = d + 1; *p; p++) {
-        if (*p != '/') continue;
+    for (char *p = d; *p; p++) {
+        if (p == d || *p != '/') continue;
         *p = '\0';
         if (mkdir(d, 0755) != 0 && errno != EEXIST) {
             int e = errno;
@@ -97,7 +97,8 @@ mgmt_listen_open(const mgmt_listen_opts_t *opts, char *errbuf, size_t errlen)
     struct sockaddr_un sa;
     struct stat st;
     char *lock_path = NULL;
-    int lock_fd = -1, fd = -1, bound = 0;
+    int lock_fd = -1, fd = -1, bound = 0, have_id = 0;
+    unsigned long long dev = 0, ino = 0;
     mgmt_listen_t *l = NULL;
 
     if (strlen(path) > sizeof(sa.sun_path) - 1) {
@@ -117,7 +118,7 @@ mgmt_listen_open(const mgmt_listen_opts_t *opts, char *errbuf, size_t errlen)
     }
     snprintf(lock_path, lplen, "%s.lock", path);
 
-    lock_fd = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC, 0644);
+    lock_fd = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0644);
     if (lock_fd < 0) {
         SET_ERR("cannot open lock file %s: %s", lock_path, strerror(errno));
         goto fail;
@@ -138,15 +139,15 @@ mgmt_listen_open(const mgmt_listen_opts_t *opts, char *errbuf, size_t errlen)
             path_is_ours(path, rdev, rino)) {
             if (unlink(path) != 0) {
                 SET_ERR("cannot remove stale socket %s: %s", path, strerror(errno));
-                goto fail_unlock;
+                goto fail_keep;
             }
         } else {
             SET_ERR("%s exists and is not a socket owned by mqvpn", path);
-            goto fail_unlock;
+            goto fail_keep;
         }
     } else if (errno != ENOENT) {
         SET_ERR("cannot stat %s: %s", path, strerror(errno));
-        goto fail_unlock;
+        goto fail_keep;
     }
 
     fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -164,8 +165,12 @@ mgmt_listen_open(const mgmt_listen_opts_t *opts, char *errbuf, size_t errlen)
     bound = 1;
 
     /* Record ownership before anything else can fail or crash. */
-    if (stat(path, &st) != 0 || write_record(lock_fd, (unsigned long long)st.st_dev,
-                                             (unsigned long long)st.st_ino) != 0) {
+    if (stat(path, &st) == 0) {
+        have_id = 1;
+        dev = (unsigned long long)st.st_dev;
+        ino = (unsigned long long)st.st_ino;
+    }
+    if (!have_id || write_record(lock_fd, dev, ino) != 0) {
         SET_ERR("cannot record socket ownership for %s: %s", path, strerror(errno));
         goto fail_unlock;
     }
@@ -208,10 +213,14 @@ mgmt_listen_open(const mgmt_listen_opts_t *opts, char *errbuf, size_t errlen)
     return l;
 
 fail_unlock:
-    if (bound) unlink(path); /* our own socket */
+    /* Unlink only a socket verified as ours; if the post-bind stat failed the
+     * identity is unknown, so leave the path alone rather than risk a foreign file. */
+    if (bound && have_id && path_is_ours(path, dev, ino)) unlink(path);
     if (fd >= 0) close(fd);
     release_lock(lock_fd);
-    lock_fd = -1;
+    goto fail;
+fail_keep: /* nothing of ours on disk: keep the record, just drop the lock */
+    close(lock_fd);
 fail:
     free(lock_path);
     return NULL;

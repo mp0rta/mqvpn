@@ -77,7 +77,7 @@ mgmt_test_listen(int fd, int backlog)
 {
     g_listen_calls++;
     CHECK(record_matches_path(g_path));
-    if (g_crash_in_listen) _exit(0);
+    if (g_crash_in_listen) _exit(g_failed ? 4 : 0);
     return real_listen(fd, backlog);
 }
 
@@ -234,6 +234,7 @@ test_second_opener_does_not_steal(void)
     mgmt_listen_t *b = open_at(p, 0660, NULL, err, sizeof(err));
     CHECK(b == NULL);
     CHECK(strstr(err, "another endpoint") != NULL);
+    CHECK(record_matches_path(p)); /* a losing opener leaves the record alone */
     CHECK(connectable(p));
     CHECK(ino_of(p) == ino);
     mgmt_listen_close(a);
@@ -276,6 +277,13 @@ test_stopped_between_bind_and_listen_not_stolen(void)
     snprintf(lp, sizeof(lp), "%s.lock", p);
     CHECK(pipe(pp) == 0);
     pid_t pid = fork();
+    CHECK(pid >= 0);
+    if (pid < 0) {
+        close(pp[0]);
+        close(pp[1]);
+        rm_dir();
+        return;
+    }
     if (pid == 0) {
         int lf = open(lp, O_CREAT | O_RDWR, 0644);
         if (lf < 0 || flock(lf, LOCK_EX | LOCK_NB) != 0) _exit(1);
@@ -286,6 +294,7 @@ test_stopped_between_bind_and_listen_not_stolen(void)
         for (;;)
             pause();
     }
+    close(pp[1]); /* a dead child now yields EOF instead of a hang */
     char c;
     CHECK(read(pp[0], &c, 1) == 1);
     ino_t ino = ino_of(p);
@@ -299,7 +308,6 @@ test_stopped_between_bind_and_listen_not_stolen(void)
     CHECK(connectable(p));
     mgmt_listen_close(r);
     close(pp[0]);
-    close(pp[1]);
     rm_dir();
     printf("PASS listen_owner_stopped_between_bind_and_listen_not_stolen\n");
 }
@@ -327,6 +335,11 @@ test_crash_after_bind_before_listen_recovered(void)
     fresh_dir();
     sock_path(p, sizeof(p), "a.sock");
     pid_t pid = fork();
+    CHECK(pid >= 0);
+    if (pid < 0) {
+        rm_dir();
+        return;
+    }
     if (pid == 0) {
         g_crash_in_listen = 1;
         open_at(p, 0660, NULL, err, sizeof(err));
@@ -372,6 +385,11 @@ test_own_stale_socket_recovered(void)
     fresh_dir();
     sock_path(p, sizeof(p), "a.sock");
     pid_t pid = fork();
+    CHECK(pid >= 0);
+    if (pid < 0) {
+        rm_dir();
+        return;
+    }
     if (pid == 0) {
         mgmt_listen_t *l = open_at(p, 0660, NULL, err, sizeof(err));
         _exit(l ? 0 : 1); /* no close: simulated crash */
