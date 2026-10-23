@@ -158,7 +158,7 @@ ctl_sock_recv_line(ctl_sock_t *s, size_t max_line, int timeout_ms, const char **
         if (lf) {
             size_t n = (size_t)(lf - s->rbuf);
             s->rpos = n + 1;
-            if (n > max_line) return CTL_SOCK_E_TOO_LONG;
+            if (n >= max_line) return CTL_SOCK_E_TOO_LONG; /* max_line counts the LF */
             if (n > 0 && s->rbuf[n - 1] == '\r') n--;
             s->rbuf[n] = '\0'; /* overwrites the CR or LF */
             *line = s->rbuf;
@@ -166,10 +166,12 @@ ctl_sock_recv_line(ctl_sock_t *s, size_t max_line, int timeout_ms, const char **
             return CTL_SOCK_OK;
         }
         scanned = s->rlen;
-        if (s->rlen > max_line) return CTL_SOCK_E_TOO_LONG;
+        if (s->rlen >= max_line) return CTL_SOCK_E_TOO_LONG;
 
         if (s->rlen == s->rcap) {
             size_t ncap = s->rcap ? s->rcap * 2 : 4096;
+            if (ncap > max_line + 1)
+                ncap = max_line + 1; /* rlen < max_line, so it grows */
             char *nb = realloc(s->rbuf, ncap);
             if (!nb) return CTL_SOCK_E_IO;
             s->rbuf = nb;

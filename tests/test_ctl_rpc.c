@@ -148,6 +148,7 @@ expect_protocol(const char *reply_line)
     ctl_reply_t r;
     ctl_sock_err_t se = CTL_SOCK_OK;
     CHECK(call_ping(&p, 1000, &r, &se) == CTL_RPC_E_PROTOCOL);
+    ctl_reply_free(&r); /* the command code frees the reply on every status */
     pair_close(&p);
 }
 
@@ -167,6 +168,24 @@ rpc_call_malformed_is_protocol(void)
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":1,\"error\":{\"code\":1}}\n");
     expect_protocol("{\"jsonrpc\":\"1.0\",\"id\":1,\"result\":1}\n");
     expect_protocol("{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":\"x\"}}\n");
+}
+
+static void
+rpc_null_id_error_is_remote(void)
+{
+    pair_t p;
+    pair_open(&p);
+    peer_write(&p, "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32004,"
+                   "\"message\":\"busy\",\"data\":{\"name\":\"MQVPN_CLIENT_BUSY\"}}}\n");
+    ctl_reply_t r;
+    ctl_sock_err_t se = CTL_SOCK_OK;
+    CHECK(call_ping(&p, 1000, &r, &se) == CTL_RPC_E_REMOTE);
+    CHECK(r.error_code == -32004);
+    CHECK(ctl_exit_code_for(CTL_RPC_E_REMOTE, 0, -32004) == 1);
+    ctl_reply_free(&r);
+    pair_close(&p);
+    /* a null id on a result reply stays a protocol error */
+    expect_protocol("{\"jsonrpc\":\"2.0\",\"id\":null,\"result\":{}}\n");
 }
 
 static void
@@ -237,8 +256,34 @@ rpc_recv_line_grows_heap(void)
     int st = call_ping(&p, 5000, &r, &se);
     CHECK(st == CTL_RPC_E_SOCK && se == CTL_SOCK_E_TOO_LONG);
     CHECK(ctl_exit_code_for(CTL_RPC_E_SOCK, CTL_SOCK_E_TOO_LONG, 0) == 1);
+    CHECK(p.s.rcap <= 256 * 1024 + 1);
     pair_close(&p);
     waitpid(pid, NULL, 0);
+
+    /* max_line counts the LF: max_line - 1 payload bytes pass, max_line do not */
+    enum { MAXL = 5000 };
+    static char buf[MAXL + 2];
+    const char *line;
+    size_t n;
+    for (int over = 0; over < 2; over++) {
+        pair_open(&p);
+        memset(buf, 'a', MAXL - 1 + over);
+        buf[MAXL - 1 + over] = '\n';
+        buf[MAXL + over] = '\0';
+        peer_write(&p, buf);
+        int e = ctl_sock_recv_line(&p.s, MAXL, 1000, &line, &n);
+        CHECK(over ? e == CTL_SOCK_E_TOO_LONG : (e == CTL_SOCK_OK && n == MAXL - 1));
+        CHECK(p.s.rcap <= MAXL + 1);
+        pair_close(&p);
+    }
+    /* no LF at all: stops at max_line instead of growing past it */
+    pair_open(&p);
+    memset(buf, 'a', MAXL);
+    buf[MAXL] = '\0';
+    peer_write(&p, buf);
+    CHECK(ctl_sock_recv_line(&p.s, MAXL, 1000, &line, &n) == CTL_SOCK_E_TOO_LONG);
+    CHECK(p.s.rcap <= MAXL + 1);
+    pair_close(&p);
 }
 
 static void
@@ -342,6 +387,7 @@ main(void)
     rpc_call_remote_error();
     rpc_call_id_mismatch_is_protocol();
     rpc_call_malformed_is_protocol();
+    rpc_null_id_error_is_remote();
     rpc_recv_line_keeps_trailing_bytes();
     rpc_recv_line_grows_heap();
     rpc_timeout();

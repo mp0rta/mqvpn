@@ -5,6 +5,7 @@
 
 #include "cmp_endpoint.h"
 #include "cmp_error.h"
+#include "cmp_proto.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -180,7 +181,9 @@ ctl_cmd_version(const ctl_opts_t *o)
     yyjson_val *c;
     size_t i, n;
     int shape = str_of(r, "endpoint_name") && str_of(r, "endpoint_version") &&
-                str_of(r, "cmp_version") && str_of(r, "role") && yyjson_is_arr(caps);
+                str_of(r, "cmp_version") &&
+                yyjson_equals_str(yyjson_obj_get(r, "cmp_version"), CMP_VERSION) &&
+                str_of(r, "role") && yyjson_is_arr(caps);
     if (shape) yyjson_arr_foreach(caps, i, n, c) shape = shape && yyjson_is_str(c);
     if (!shape) {
         rc = fail(o, CTL_RPC_E_PROTOCOL, 0, &reply, o->endpoint);

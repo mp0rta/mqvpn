@@ -20,7 +20,7 @@ ctl_rpc_connect(ctl_sock_t *s, const char *path, int timeout_ms, ctl_sock_err_t 
 void
 ctl_reply_free(ctl_reply_t *r)
 {
-    yyjson_doc_free(r->doc);
+    if (r->doc) yyjson_doc_free(r->doc); /* tolerates an already-zeroed reply */
     memset(r, 0, sizeof(*r));
 }
 
@@ -51,6 +51,7 @@ build_request(int id, const char *method, yyjson_mut_doc *pdoc, yyjson_mut_val *
     return out;
 }
 
+/* Fills *reply only on OK / E_REMOTE; the caller frees the doc on any other status. */
 static int
 validate_reply(yyjson_doc *doc, int id, ctl_reply_t *reply)
 {
@@ -59,21 +60,26 @@ validate_reply(yyjson_doc *doc, int id, ctl_reply_t *reply)
     yyjson_val *ver = yyjson_obj_get(root, "jsonrpc");
     if (!yyjson_is_str(ver) || strcmp(yyjson_get_str(ver), "2.0") != 0)
         return CTL_RPC_E_PROTOCOL;
-    int rid;
-    if (json_get_int(yyjson_obj_get(root, "id"), &rid) != 0 || rid != id)
-        return CTL_RPC_E_PROTOCOL;
     yyjson_val *res = yyjson_obj_get(root, "result");
     yyjson_val *err = yyjson_obj_get(root, "error");
     if ((res != NULL) == (err != NULL)) return CTL_RPC_E_PROTOCOL;
+    yyjson_val *idv = yyjson_obj_get(root, "id");
+    int ecode = 0;
+    if (err && (!yyjson_is_obj(err) || json_get_int(yyjson_obj_get(err, "code"), &ecode)))
+        return CTL_RPC_E_PROTOCOL;
+    /* a connection-level error (BUSY, unparsable line) carries "id": null */
+    if (!err || !yyjson_is_null(idv)) {
+        int rid;
+        if (json_get_int(idv, &rid) != 0 || rid != id) return CTL_RPC_E_PROTOCOL;
+    }
+    memset(reply, 0, sizeof(*reply));
     reply->doc = doc;
     if (res) {
         reply->result = res;
         return CTL_RPC_OK;
     }
-    if (!yyjson_is_obj(err) ||
-        json_get_int(yyjson_obj_get(err, "code"), &reply->error_code))
-        return CTL_RPC_E_PROTOCOL;
     reply->error = err;
+    reply->error_code = ecode;
     return CTL_RPC_E_REMOTE;
 }
 
