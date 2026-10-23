@@ -2036,6 +2036,22 @@ cli_connect_ip_on_headers(cli_stream_t *stream, xqc_h3_request_t *h3_request)
     if (headers) cli_connect_ip_scan_headers(stream->conn, headers);
 }
 
+/* The TUN MTU for @mtu, the largest inner packet a DATAGRAM carries: capped
+ * by the configured MTU, less the reorder header when negotiated. Call after
+ * cli_check_ipv6_mtu(), whose capacity check makes the IPv6 floor safe even
+ * when the configured cap is 1280. */
+static int
+cli_tun_mtu(cli_conn_t *conn, int mtu)
+{
+    mqvpn_client_t *c = conn->client;
+    mtu = apply_mtu_cap(c->config.tun_mtu, mtu, c);
+    if (c->config.reorder.mode != MQVPN_REORDER_OFF && conn->peer_reorder_supported) {
+        mtu -= MQVPN_REORDER_HDR_LEN;
+        if (conn->addr6_assigned && mtu < IPV6_MIN_MTU) mtu = IPV6_MIN_MTU;
+    }
+    return mtu;
+}
+
 static int
 cli_check_ipv6_mtu(cli_conn_t *conn, int mtu)
 {
@@ -2078,13 +2094,7 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
         if (udp_mss >= 68) tun_mtu = (int)udp_mss;
     }
     if (cli_check_ipv6_mtu(conn, tun_mtu) < 0) return 0;
-    tun_mtu = apply_mtu_cap(c->config.tun_mtu, tun_mtu, c);
-    /* Reserve reorder headroom only when negotiated; the capacity check above
-     * makes the IPv6 floor safe even when the configured cap is 1280. */
-    if (c->config.reorder.mode != MQVPN_REORDER_OFF && conn->peer_reorder_supported) {
-        tun_mtu -= MQVPN_REORDER_HDR_LEN;
-        if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU) tun_mtu = IPV6_MIN_MTU;
-    }
+    tun_mtu = cli_tun_mtu(conn, tun_mtu);
 
     /* Notify platform on ADDRESS_ASSIGN */
     if (conn->addr_assigned && c->state != MQVPN_STATE_ESTABLISHED &&
@@ -2530,16 +2540,17 @@ cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
 {
     (void)h;
     cli_conn_t *conn = (cli_conn_t *)ud;
-    if (conn) conn->dgram_mss = mss;
+    if (!conn) return;
+    conn->dgram_mss = mss;
     mqvpn_client_t *c = conn->client;
     LOG_I(c, "datagram MSS updated: %zu", mss);
 
-    if (conn && c->tun_active) {
+    if (c->tun_active) {
         size_t udp_mss = xqc_h3_ext_masque_udp_mss(mss, conn->masque_stream_id);
         if (udp_mss >= 68) {
             int new_mtu = (int)udp_mss;
             if (cli_check_ipv6_mtu(conn, new_mtu) < 0) return;
-            new_mtu = apply_mtu_cap(c->config.tun_mtu, new_mtu, c);
+            new_mtu = cli_tun_mtu(conn, new_mtu);
             if (new_mtu != c->last_notified_mtu) {
                 c->mtu = new_mtu;
                 c->last_notified_mtu = new_mtu;
@@ -4733,6 +4744,20 @@ mqvpn_client_test_redundant_fixture(mqvpn_client_t *c, int n_paths, size_t dgram
     }
     if (c->n_paths < n_paths) c->n_paths = n_paths; /* LINT-ALLOW: test wrapper seed */
     return 0;
+}
+
+MQVPN_INTERNAL
+int
+mqvpn_client_test_mss_updated(mqvpn_client_t *c, size_t dgram_mss, int reorder_peer)
+{
+    if (!c) return -1;
+    if (!c->conn && mqvpn_client_test_conn_alloc(c) != 0) return -1;
+    cli_conn_t *conn = c->conn;
+    conn->masque_stream_id = 4;
+    conn->peer_reorder_supported = reorder_peer;
+    c->tun_active = 1;
+    cb_dgram_mss_updated(NULL, dgram_mss, conn);
+    return c->mtu;
 }
 
 MQVPN_INTERNAL

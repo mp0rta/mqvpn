@@ -3895,6 +3895,32 @@ rt_client(const uint16_t *ports, size_t n_ports, int reorder, int reorder_peer)
     return c;
 }
 
+/* A datagram MSS change while the tunnel is up (PMTUD) keeps the reorder
+ * header out of the TUN MTU, like the MTU set when the tunnel came up. */
+TEST(mss_update_reserves_reorder_header)
+{
+    int mtu[2][2]; /* [reorder configured][peer supports it] */
+    for (int cfg_on = 0; cfg_on < 2; cfg_on++) {
+        for (int peer = 0; peer < 2; peer++) {
+            mqvpn_config_t *cfg = mqvpn_config_new();
+            mqvpn_config_set_server(cfg, "1.2.3.4", 443);
+            if (cfg_on) mqvpn_config_set_reorder_enabled(cfg, MQVPN_REORDER_ON);
+            mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
+            cbs.tun_output = dummy_tun_output;
+            cbs.tunnel_config_ready = dummy_config_ready;
+            mqvpn_client_t *c = mqvpn_client_new(cfg, &cbs, NULL);
+            mqvpn_config_free(cfg);
+            ASSERT_NOT_NULL(c);
+            mtu[cfg_on][peer] = mqvpn_client_test_mss_updated(c, 1400, peer);
+            mqvpn_client_destroy(c);
+        }
+    }
+    ASSERT_EQ(mtu[0][0] > 1300, 1);
+    ASSERT_EQ(mtu[0][1], mtu[0][0]); /* not configured: no header */
+    ASSERT_EQ(mtu[1][0], mtu[0][0]); /* not negotiated: no header */
+    ASSERT_EQ(mtu[1][1], mtu[0][0] - 8);
+}
+
 static void
 rt_done(mqvpn_client_t *c)
 {
@@ -4345,6 +4371,7 @@ main(void)
     run_headers_malformed_status_length_latches_failure();
     run_reorder_echo_ignored_outside_deciding_200_section();
     run_reorder_echo_in_deciding_200_section_sets_flag();
+    run_mss_update_reserves_reorder_header();
     run_scan_headers_sched_echo_on_200();
     run_scan_headers_sched_echo_ignored_on_403();
     run_scan_headers_sched_echo_interim_ignored();

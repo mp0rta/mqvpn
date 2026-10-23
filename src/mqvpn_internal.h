@@ -268,6 +268,10 @@ typedef int (*mqvpn_test_send_fn)(void *ud, uint64_t xqc_path_id, const uint8_t 
 MQVPN_INTERNAL int mqvpn_client_test_redundant_fixture(mqvpn_client_t *c, int n_paths,
                                                        size_t dgram_mss,
                                                        int reorder_peer);
+/* Drives the datagram MSS update callback on a test connection (masque
+ * stream 4, TUN active) and returns the client's TUN MTU after it, or -1. */
+MQVPN_INTERNAL int mqvpn_client_test_mss_updated(mqvpn_client_t *c, size_t dgram_mss,
+                                                 int reorder_peer);
 MQVPN_INTERNAL int mqvpn_client_test_reorder_peek_hdr(mqvpn_client_t *c,
                                                       const uint8_t *pkt, size_t len,
                                                       uint8_t hdr_out[8]);
