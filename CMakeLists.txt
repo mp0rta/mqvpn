@@ -548,6 +548,18 @@ if(BUILD_TESTING)
     target_include_directories(test_cert_identity PRIVATE ${CMAKE_SOURCE_DIR}/src/platform/windows)
     target_compile_definitions(test_cert_identity PRIVATE TEST_CERT_DIR="${CMAKE_SOURCE_DIR}/tests/certs")
     add_test(NAME test_cert_identity COMMAND test_cert_identity)
+    # Phase 0 of the client management IPC: AF_UNIX listener, UDP and the
+    # AF_INET wake pair on one win32 select() event_base.
+    add_executable(test_mgmt_win_afunix tests/test_mgmt_win_afunix.c)
+    target_include_directories(test_mgmt_win_afunix PRIVATE ${CMAKE_SOURCE_DIR}/src/compat)
+    if(Libevent_FOUND)
+        target_link_libraries(test_mgmt_win_afunix libevent::core libevent::extra ws2_32)
+    else()
+        target_include_directories(test_mgmt_win_afunix PRIVATE ${EVENT_INCLUDE_DIR})
+        target_link_libraries(test_mgmt_win_afunix ${EVENT_LIB} ws2_32)
+    endif()
+    target_compile_options(test_mgmt_win_afunix PRIVATE /WX /utf-8)
+    add_test(NAME test_mgmt_win_afunix COMMAND test_mgmt_win_afunix)
     # CryptoAPI half, driven with an exclusive-root chain engine. Links only
     # what it needs.
     add_executable(test_cert_verify_win tests/test_cert_verify_win.c

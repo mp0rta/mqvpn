@@ -1166,6 +1166,12 @@ jobs:
       - name: Winsock transport and path re-add tests
         run: ctest --test-dir build -C Release -R "^(test_bind_winsock|test_path_readd|test_path_line)$" --no-tests=error --output-on-failure
 
+      # Phase 0 of the client management IPC: AF_UNIX listener + UDP + the
+      # AF_INET wake pair on one win32 select() event_base. A FAIL here means
+      # the Windows transport becomes a named pipe (separate design).
+      - name: AF_UNIX on libevent smoke test
+        run: ctest --test-dir build -C Release -R "^test_mgmt_win_afunix$" --no-tests=error --output-on-failure
+
       # Weak: presence and order of the install call only (see the script).
       - name: Verifier wiring tripwire
         shell: bash
