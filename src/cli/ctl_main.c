@@ -4,6 +4,7 @@
 #include "ctl_cmd.h"
 
 #include "cmp_endpoint.h"
+#include "ctl_sock.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -76,6 +77,10 @@ main(int argc, char **argv)
     if (!o.endpoint) o.endpoint = getenv("MQVPN_CLIENT_ENDPOINT");
     if (cmp_endpoint_resolve(o.endpoint, ep, sizeof(ep)) != 0) {
         fprintf(stderr, "mqvpnctl: endpoint path too long\n");
+        return 2;
+    }
+    if (strlen(ep) > ctl_sock_max_path()) {
+        fprintf(stderr, "mqvpnctl: endpoint path too long for AF_UNIX\n");
         return 2;
     }
     o.endpoint = ep;

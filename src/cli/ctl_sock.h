@@ -26,6 +26,9 @@ typedef struct {
     size_t rpos; /* bytes of rbuf already handed out as lines */
 } ctl_sock_t;
 
+/* Longest endpoint path the OS socket address can hold. */
+size_t ctl_sock_max_path(void);
+
 /* All four return 0 (CTL_SOCK_OK) or a ctl_sock_err_t. */
 int ctl_sock_connect(ctl_sock_t *s, const char *path, int timeout_ms);
 int ctl_sock_send_all(ctl_sock_t *s, const void *buf, size_t len, int timeout_ms);

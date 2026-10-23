@@ -487,7 +487,7 @@ endif()
 # mqvpn_lib / xquic / libevent (gate below; runtime check in
 # scripts/ci_e2e/run_client_mgmt_ipc_test.sh). libmqvpn.h is included for
 # MQVPN_VERSION_* only.
-if(NOT WIN32)   # Windows gets src/cli/ctl_sock_win.c and drops this guard later
+if(NOT WIN32 AND NOT ANDROID_CROSS_COMPILE)   # Windows (ctl_sock_win.c) drops only the NOT WIN32 part
     add_executable(mqvpnctl
         src/cli/ctl_main.c src/cli/ctl_rpc.c src/cli/ctl_cmd_version.c
         src/cli/ctl_sock_posix.c
@@ -1426,7 +1426,7 @@ endif()
 
 # ---------- Install ----------
 install(TARGETS mqvpn DESTINATION bin)
-if(NOT WIN32)
+if(NOT WIN32 AND NOT ANDROID_CROSS_COMPILE)   # as above: Windows drops only the NOT WIN32 part
     install(TARGETS mqvpnctl DESTINATION bin)
 endif()
 install(TARGETS mqvpn_lib DESTINATION lib)

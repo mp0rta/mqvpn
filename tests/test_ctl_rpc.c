@@ -191,6 +191,7 @@ spawn_big_writer(pair_t *p, size_t len)
     pid_t pid = fork();
     CHECK(pid >= 0);
     if (pid == 0) {
+        close((int)p->s.fd); /* else the parent's close never reaches EPIPE here */
         const char *head = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"";
         const char *tail = "\"}\n";
         char *chunk = malloc(8192);

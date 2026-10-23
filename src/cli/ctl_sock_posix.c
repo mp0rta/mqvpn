@@ -58,6 +58,12 @@ map_errno(int e)
     }
 }
 
+size_t
+ctl_sock_max_path(void)
+{
+    return sizeof(((struct sockaddr_un *)0)->sun_path) - 1;
+}
+
 int
 ctl_sock_connect(ctl_sock_t *s, const char *path, int timeout_ms)
 {
@@ -85,7 +91,9 @@ ctl_sock_connect(ctl_sock_t *s, const char *path, int timeout_ms)
 
     int err = 0;
     if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        if (errno == EINPROGRESS || errno == EAGAIN) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            err = CTL_SOCK_E_REFUSED; /* AF_UNIX: listener backlog full */
+        } else if (errno == EINPROGRESS) {
             err = wait_fd(fd, POLLOUT, now_ms() + timeout_ms);
             if (err == 0) {
                 int soerr = 0;
