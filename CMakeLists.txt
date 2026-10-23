@@ -1022,6 +1022,26 @@ if(BUILD_TESTING)
         add_test(NAME ${t} COMMAND ${t})
     endforeach()
 
+    # Management IPC POSIX listener. The production .c is #included by the test
+    # (listen() is intercepted); libevent is needed for <event2/util.h> only.
+    add_executable(test_mgmt_listen tests/test_mgmt_listen.c tests/test_mgmt_listen_real.c src/log.c)
+    target_include_directories(test_mgmt_listen PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/platform/posix
+        ${CMAKE_SOURCE_DIR}/src/platform/common
+        ${CMAKE_SOURCE_DIR}/src/common/ipc
+        ${CMAKE_SOURCE_DIR}/include
+    )
+    if(Libevent_FOUND)
+        target_include_directories(test_mgmt_listen PRIVATE
+            $<TARGET_PROPERTY:libevent::core,INTERFACE_INCLUDE_DIRECTORIES>)
+    else()
+        target_include_directories(test_mgmt_listen PRIVATE ${EVENT_INCLUDE_DIR})
+    endif()
+    set_target_properties(test_mgmt_listen PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_mgmt_listen COMMAND test_mgmt_listen)
+
     # UDP GSO TX offload (issue #167): pure syscall/mechanics layer, no xquic
     # dependency. MQVPN_OFFLOAD_TEST_SEAM is wired: it swaps sendmsg/sendmmsg
     # for mqvpn_seam_sendmsg/mqvpn_seam_sendmmsg (defined in
