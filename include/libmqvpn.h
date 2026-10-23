@@ -698,6 +698,12 @@ MQVPN_API int mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu);
  * with MQVPN_ERR_INVALID_ARG when IPv6 is assigned. */
 MQVPN_API int mqvpn_config_set_path_mtu(mqvpn_config_t *cfg, int mtu);
 
+/* Discover the path MTU (both ends must enable it): packets start at a size
+ * any path carries and grow while larger probes are acknowledged, up to the
+ * PathMTU size (or the default cap). UDP sockets are sent with DF set, so
+ * nothing is fragmented on the way. Default 0 (off). */
+MQVPN_API int mqvpn_config_set_pmtud(mqvpn_config_t *cfg, int enable);
+
 /* ─── Flow-aware reorder shim config (§16.1) ───
  *
  * These mirror the reorder design spec's builder surface. Values are validated

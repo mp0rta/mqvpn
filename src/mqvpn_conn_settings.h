@@ -29,6 +29,7 @@ typedef struct {
     mqvpn_cc_t cc;             /* congestion control algorithm */
     uint64_t init_max_path_id; /* 0 = leave xquic default */
     int path_mtu;              /* 0 = MQVPN_MAX_PKT_OUT_SIZE, see mqvpn_pkt_out_size() */
+    bool pmtud;                /* discover the path MTU, path_mtu sizes the cap */
     uint64_t recv_rate_bytes_per_sec; /* 0 = no cap. Client-only: the
         builder hard-zeroes it for servers (a server-side conn-level cap
         would throttle client uplink). */

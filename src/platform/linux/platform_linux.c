@@ -17,6 +17,7 @@
 #include "platform_linux.h"
 #include "control_socket.h"
 #include "log.h"
+#include "compat/socket_compat.h"
 #include "platform/path_line.h"
 #include "mqvpn_internal.h" /* mqvpn_config_apply_reorder (INI reorder bridge) */
 #include "netlink_mon.h"
@@ -498,6 +499,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     ctx.server_port = cfg->server_port;
     ctx.killswitch_enabled = cfg->kill_switch;
     ctx.manage_routes = cfg->manage_routes;
+    ctx.pmtud = cfg->pmtud;
     ctx.udp_gro = cfg->udp_gro;
     ctx.udp_gso = cfg->udp_gso;
     ctx.tun_offload = cfg->tun_offload;
@@ -1188,6 +1190,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     mqvpn_config_set_init_max_path_id(lib_cfg, cfg->init_max_path_id);
     mqvpn_config_set_tun_mtu(lib_cfg, cfg->tun_mtu);
     mqvpn_config_set_path_mtu(lib_cfg, cfg->path_mtu);
+    mqvpn_config_set_pmtud(lib_cfg, cfg->pmtud);
     mqvpn_config_apply_reorder(lib_cfg,
                                &cfg->reorder); /* INI [Reorder]/[ReorderRule] bridge */
     mqvpn_config_apply_hybrid(lib_cfg, &cfg->hybrid); /* INI [Hybrid] bridge */
@@ -1233,6 +1236,9 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     sp.udp_fd = svr_create_udp_socket(cfg->listen_addr, cfg->listen_port, &local_addr,
                                       &local_addrlen);
     if (sp.udp_fd < 0) goto cleanup;
+    if (cfg->pmtud && mqvpn_socket_set_dontfrag(sp.udp_fd, local_addr.ss_family) < 0)
+        LOG_WRN("cannot set DF on the UDP socket: %s, PMTUD probes may be fragmented",
+                strerror(errno));
 
     mqvpn_bind_posix_opts_t bopts = {0};
     bopts.struct_size = sizeof(bopts);

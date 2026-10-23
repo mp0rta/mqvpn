@@ -89,6 +89,7 @@ typedef struct mqvpn_file_config_s {
 
     int tun_mtu;  /* [Interface] MTU — 0=auto, >0=cap (floor 1280) */
     int path_mtu; /* [Interface] PathMTU — 0=default packet size */
+    int pmtud;    /* [Interface] PMTUD — discover the path MTU, PathMTU is the cap */
 
     /* [Reorder] / repeated [ReorderRule] — flow-aware reorder shim (§16.1).
      * Seeded with mqvpn_reorder_config_default() in mqvpn_config_defaults(). */

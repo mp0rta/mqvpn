@@ -32,6 +32,7 @@
 #  include <unistd.h>
 #  include <fcntl.h>
 #  include <sys/socket.h>
+#  include <netinet/in.h>
 #endif
 
 #if defined(_MSC_VER)
@@ -62,6 +63,43 @@ mqvpn_socket_set_nonblock(int fd)
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) return -1;
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+#endif
+}
+
+/* Send with DF set and never fragment locally, so a datagram that does not
+ * fit the path is lost instead of fragmented: what PMTUD probes rely on.
+ * On Linux the kernel's cached path MTU is ignored (PMTUDISC_PROBE): QUIC
+ * sizes its own packets. Returns 0 on success, -1 on failure. */
+static inline int
+mqvpn_socket_set_dontfrag(int fd, int af)
+{
+#if defined(__linux__)
+    if (af == AF_INET6) {
+        int v = IPV6_PMTUDISC_PROBE;
+        return setsockopt(fd, IPPROTO_IPV6, IPV6_MTU_DISCOVER, &v, sizeof(v));
+    }
+    int v = IP_PMTUDISC_PROBE;
+    return setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &v, sizeof(v));
+#elif defined(__APPLE__)
+    int on = 1;
+    if (af == AF_INET6)
+        return setsockopt(fd, IPPROTO_IPV6, IPV6_DONTFRAG, &on, sizeof(on));
+    return setsockopt(fd, IPPROTO_IP, IP_DONTFRAG, &on, sizeof(on));
+#elif defined(_WIN32)
+    DWORD on = 1;
+    if (af == AF_INET6)
+        return setsockopt((SOCKET)fd, IPPROTO_IPV6, IPV6_DONTFRAG, (const char *)&on,
+                          sizeof(on)) == 0
+                   ? 0
+                   : -1;
+    return setsockopt((SOCKET)fd, IPPROTO_IP, IP_DONTFRAGMENT, (const char *)&on,
+                      sizeof(on)) == 0
+               ? 0
+               : -1;
+#else
+    (void)fd;
+    (void)af;
+    return -1;
 #endif
 }
 

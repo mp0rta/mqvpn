@@ -206,6 +206,8 @@ bind_send(bind_common_t *c, int *gso_disabled, int *warned, const mqvpn_datagram
             return 1;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) return MQVPN_TX_WOULD_BLOCK;
+        /* too large for the interface with DF set (PMTUD): a lost packet */
+        if (errno == EMSGSIZE) return 1;
         /* Hard failure. The server logged this errno before the refactor
          * (its single-datagram helper owned a sendto()); the client did not,
          * because this arm carries every non-batched datagram and a dead
@@ -265,6 +267,8 @@ bind_send(bind_common_t *c, int *gso_disabled, int *warned, const mqvpn_datagram
             r = sendto(c->fd, bufs[sent].data, bufs[sent].len, MSG_DONTWAIT, peer,
                        peer_len);
         } while (r < 0 && errno == EINTR);
+        /* too large for the interface with DF set (PMTUD): a lost packet */
+        if (r < 0 && errno == EMSGSIZE) continue;
         if (r < 0) break;
         c->tx.tx_sends++;
         c->tx.tx_datagrams++;

@@ -19,6 +19,7 @@
 #include "mqvpn_bind_posix.h"
 #include "platform/path_readd.h"
 #include "log.h"
+#include "compat/socket_compat.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -288,6 +289,9 @@ platform_paths_open(platform_ctx_t *p, int n_ifaces, const char *const *ifaces)
         } else {
             int step = 0;
             s->fd = platform_path_socket_open(p->server_addr.ss_family, &step);
+            if (s->fd >= 0 && p->pmtud &&
+                mqvpn_socket_set_dontfrag(s->fd, p->server_addr.ss_family) < 0)
+                LOG_WRN("path_mgr: cannot set DF: %s", strerror(errno));
             if (s->fd < 0) {
                 if (step == PLATFORM_PATH_STEP_SOCKET)
                     LOG_ERR("path_mgr: socket: %s", strerror(errno));
@@ -321,6 +325,9 @@ readd_open_socket(platform_ctx_t *p, platform_path_t *s, const char *ifname)
     sa_family_t af = p->server_addr.ss_family;
     int step = 0;
     int fd = platform_path_socket_open(af, &step);
+    if (fd >= 0 && p->pmtud && mqvpn_socket_set_dontfrag(fd, af) < 0)
+        LOG_WRN("%s: cannot set DF for re-add %s: %s", netmon_log_tag, ifname,
+                strerror(errno));
     if (fd < 0) {
         if (step == PLATFORM_PATH_STEP_SOCKET)
             LOG_WRN("%s: socket() for re-add %s: %s", netmon_log_tag, ifname,

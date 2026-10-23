@@ -120,6 +120,18 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     out->proto_version = XQC_VERSION_V1;
     out->pacing_on = 1;
     out->max_pkt_out_size = mqvpn_pkt_out_size(in->path_mtu);
+    /* PMTUD: start at the smallest size that still gives an IPv6 inner MTU
+     * of 1280, and let xquic grow it while its probes are acknowledged, up
+     * to the PathMTU size, or the xquic cap when no PathMTU is set. */
+    if (in->pmtud) {
+        size_t cap =
+            in->path_mtu > 0 ? out->max_pkt_out_size : MQVPN_XQC_MAX_PKT_OUT_SIZE;
+
+        out->enable_pmtud = 0x3;
+        out->probing_pkt_out_size = cap;
+        if (out->max_pkt_out_size > MQVPN_PMTUD_BASE_PKT_OUT_SIZE)
+            out->max_pkt_out_size = MQVPN_PMTUD_BASE_PKT_OUT_SIZE;
+    }
     out->sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
     out->so_sndbuf = 8 * 1024 * 1024;
     out->idle_time_out = 120000;

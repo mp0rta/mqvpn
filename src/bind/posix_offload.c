@@ -193,6 +193,9 @@ mqvpn_udp_send_batch(int fd, const struct iovec *iov, unsigned int cnt,
     if (!use_gso || *gso_disabled) {
         ssize_t r = send_batch_mmsg(fd, iov, cnt, peer, peerlen, tx);
         if (r > 0) return r;
+        /* The first datagram is larger than the interface allows and DF is
+         * set (PMTUD): drop it, QUIC sees a lost packet. */
+        if (errno == EMSGSIZE) return 1;
         return (errno == EAGAIN || errno == EWOULDBLOCK) ? MQVPN_SEND_EAGAIN
                                                          : MQVPN_SEND_ERR;
     }
@@ -202,6 +205,42 @@ mqvpn_udp_send_batch(int fd, const struct iovec *iov, unsigned int cnt,
         size_t run = mqvpn_gso_run_len(&iov[sent], cnt - sent);
         ssize_t r =
             send_one_run(fd, &iov[sent], run, (uint16_t)iov[sent].iov_len, peer, peerlen);
+        if (r < 0 && errno == EMSGSIZE && run == 1) {
+            /* too large for the interface with DF set (PMTUD): drop it */
+            sent++;
+            continue;
+        }
+        if (r < 0 && errno == EMSGSIZE) {
+            /* With DF set (PMTUD), a run fails when one datagram, a probe,
+             * does not fit the interface: send the run one by one and drop
+             * what does not fit. Without DF those single sends are
+             * fragmented locally and all go through, so it was GSO that
+             * failed: disable it, as for the other GSO-class errors. */
+            int dropped = 0;
+            size_t k;
+
+            for (k = 0; k < run; k++) {
+                ssize_t r1 = send_one_run(fd, &iov[sent + k], 1,
+                                          (uint16_t)iov[sent + k].iov_len, peer, peerlen);
+                if (r1 < 0) {
+                    if (errno != EMSGSIZE) break;
+                    dropped = 1;
+                    continue;
+                }
+                tx->bytes += (uint64_t)r1;
+                tx->sends++;
+                tx->datagrams++;
+            }
+            if (k < run) {
+                sent += (unsigned int)k;
+                if (sent > 0) return sent;
+                return (errno == EAGAIN || errno == EWOULDBLOCK) ? MQVPN_SEND_EAGAIN
+                                                                 : MQVPN_SEND_ERR;
+            }
+            if (!dropped) *gso_disabled = EMSGSIZE;
+            sent += (unsigned int)run;
+            continue;
+        }
         if (r < 0) {
             /* A GSO-class errno is only evidence of a GSO failure when this
              * send actually carried the UDP_SEGMENT cmsg (run > 1); a plain

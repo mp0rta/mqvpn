@@ -52,6 +52,10 @@
  * header and MASQUE ids: max_pkt_out_size minus this is the TUN MTU. */
 #define MQVPN_DGRAM_HEADROOM 18
 
+/* With PMTUD, packets start at this size: the smallest that still gives
+ * IPv6's minimum inner MTU of 1280. */
+#define MQVPN_PMTUD_BASE_PKT_OUT_SIZE (1280 + MQVPN_DGRAM_HEADROOM)
+
 /* max_pkt_out_size for a PathMTU. Assumes an IPv6 + UDP header so the
  * result fits either family; 0 keeps MQVPN_MAX_PKT_OUT_SIZE. */
 static inline size_t
@@ -169,6 +173,7 @@ struct mqvpn_config_s {
     int tun_mtu;  /* 0 = auto (client: negotiated; server: 1382), >0 = client cap / server
                      TUN MTU */
     int path_mtu; /* 0 = default packet size, >0 = underlay MTU to size packets for */
+    int pmtud;    /* 1 = discover the path MTU, path_mtu is the upper bound */
 
     /* Flow-aware reorder shim config (§16). Seeded with
      * mqvpn_reorder_config_default() in mqvpn_config_new(); the library

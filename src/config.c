@@ -581,6 +581,7 @@ static const cfg_key_desc_t cfg_keys[] = {
             cfgk_int_positive),
     CFG_INT(SEC_INTERFACE, "MTU", "mtu", tun_mtu, cfgk_int_mtu),
     CFG_INT(SEC_INTERFACE, "PathMTU", "path_mtu", path_mtu, cfgk_int_mtu),
+    CFG_BOOL(SEC_INTERFACE, "PMTUD", "pmtud", pmtud),
     /* [Server] */
     CFG_STR(SEC_SERVER, "Address", "server_addr", server_addr),
     CFG_STR(SEC_SERVER, "ServerName", "tls_server_name", tls_server_name),

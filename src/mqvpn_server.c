@@ -2272,6 +2272,7 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         .cc = cfg->cc,
         .init_max_path_id = cfg->init_max_path_id,
         .path_mtu = cfg->path_mtu,
+        .pmtud = cfg->pmtud != 0,
         /* recv_rate_bytes_per_sec: intentionally absent (=0) — client-only knob */
         .reinjection = cfg->reinjection,
         .reinj_srtt_factor_pct = cfg->reinj_srtt_factor_pct,
