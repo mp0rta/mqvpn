@@ -638,6 +638,9 @@ add_executable(mqvpn
     src/platform/darwin/killswitch.c
     src/platform/posix/status.c
     src/platform/posix/dns_common.c
+    src/platform/common/mgmt_conn.c
+    src/platform/common/mgmt_runtime.c
+    src/platform/posix/mgmt_listen.c
     src/config.c
 )
 
@@ -648,9 +651,11 @@ target_include_directories(mqvpn PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/platform/posix
     ${CMAKE_SOURCE_DIR}/src/platform/darwin
+    ${CMAKE_SOURCE_DIR}/src/platform/common
 )
 
 target_link_libraries(mqvpn
+    mqvpn_mgmt
     mqvpn_lib
     ${XQUIC_LIB}
     ${EVENT_LIB}
@@ -677,6 +682,9 @@ add_library(mqvpn_darwin_platform OBJECT
     src/platform/darwin/killswitch.c
     src/platform/posix/status.c
     src/platform/posix/dns_common.c
+    src/platform/common/mgmt_conn.c
+    src/platform/common/mgmt_runtime.c
+    src/platform/posix/mgmt_listen.c
 )
 
 target_include_directories(mqvpn_darwin_platform PRIVATE
@@ -686,6 +694,7 @@ target_include_directories(mqvpn_darwin_platform PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/platform/posix
     ${CMAKE_SOURCE_DIR}/src/platform/darwin
+    ${CMAKE_SOURCE_DIR}/src/platform/common
 )
 
 # Shared library variant — mirrors the Linux mqvpn_shared block below (kept
@@ -863,6 +872,9 @@ add_executable(mqvpn
     src/platform/linux/tun_offload.c
     src/platform/linux/dns.c
     src/platform/posix/dns_common.c
+    src/platform/common/mgmt_conn.c
+    src/platform/common/mgmt_runtime.c
+    src/platform/posix/mgmt_listen.c
     src/config.c
 )
 
@@ -873,9 +885,11 @@ target_include_directories(mqvpn PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/platform/posix
     ${CMAKE_SOURCE_DIR}/src/platform/linux
+    ${CMAKE_SOURCE_DIR}/src/platform/common
 )
 
 target_link_libraries(mqvpn
+    mqvpn_mgmt
     mqvpn_lib
     ${XQUIC_LIB}
     ${EVENT_LIB}

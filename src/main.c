@@ -565,6 +565,10 @@ main(int argc, char *argv[])
                                        : NULL;
 
         mqvpn_client_cfg_t cfg = {
+            .client_mgmt_enabled = file_cfg.client_mgmt_enabled,
+            .client_mgmt_endpoint = file_cfg.client_mgmt_endpoint,
+            .client_mgmt_socket_mode = file_cfg.client_mgmt_socket_mode,
+            .client_mgmt_socket_group = file_cfg.client_mgmt_socket_group,
             .server_addr = host,
             .server_port = port,
             .tls_server_name = eff_tls_name,

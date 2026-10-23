@@ -505,6 +505,26 @@ test_parent_dir_created_0755(void)
     printf("PASS listen_parent_dir_created_0755\n");
 }
 
+static void
+test_parse_mode(void)
+{
+    g_logcount = 0;
+    mqvpn_log_set_sink(log_sink, NULL);
+    CHECK(mgmt_listen_parse_mode("") == 0660);
+    CHECK(mgmt_listen_parse_mode(NULL) == 0660);
+    CHECK(mgmt_listen_parse_mode("0640") == 0640);
+    CHECK(mgmt_listen_parse_mode("640") == 0640);
+    CHECK(g_logcount == 0); /* valid and empty inputs are silent */
+    CHECK(mgmt_listen_parse_mode("abc") == 0660);
+    CHECK(g_logcount == 1);
+    CHECK(strstr(g_logbuf, "invalid ClientManagement SocketMode 'abc'") != NULL);
+    mqvpn_log_set_sink(log_sink, NULL);
+    CHECK(mgmt_listen_parse_mode("10000") == 0660);
+    CHECK(mgmt_listen_parse_mode("0660x") == 0660);
+    mqvpn_log_set_sink(NULL, NULL);
+    printf("PASS listen_parse_mode\n");
+}
+
 int
 main(void)
 {
@@ -523,6 +543,7 @@ main(void)
     test_unknown_group_warns_and_continues();
     test_path_too_long();
     test_parent_dir_created_0755();
+    test_parse_mode();
     if (g_failed) {
         fprintf(stderr, "%d check(s) failed\n", g_failed);
         return 1;

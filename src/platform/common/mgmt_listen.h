@@ -50,4 +50,12 @@ evutil_socket_t mgmt_listen_fd(const mgmt_listen_t *l);
  */
 void mgmt_listen_close(mgmt_listen_t *l);
 
+/*
+ * "0660"-style octal string -> mode. NULL / "" give 0660 without a log. A
+ * non-empty value that is not octal, has trailing characters or exceeds 07777
+ * logs a warning and gives 0660. The Windows implementation always returns
+ * 0660 (the value is unused there).
+ */
+int mgmt_listen_parse_mode(const char *s);
+
 #endif /* MQVPN_MGMT_LISTEN_H */

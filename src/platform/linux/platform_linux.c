@@ -16,6 +16,7 @@
 #include "platform_internal.h"
 #include "platform_linux.h"
 #include "control_socket.h"
+#include "mgmt_runtime.h"
 #include "log.h"
 #include "platform/path_line.h"
 #include "mqvpn_internal.h" /* mqvpn_config_apply_reorder (INI reorder bridge) */
@@ -491,6 +492,10 @@ int
 linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
 {
     int rc = 1;
+    /* libevent's bufferevent writes do not use MSG_NOSIGNAL: a management
+     * client that vanishes mid-reply must not kill the process. */
+    signal(SIGPIPE, SIG_IGN);
+    mgmt_runtime_t mgmt = {0};
     platform_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.tun.fd = -1;
@@ -639,6 +644,12 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     /* Tick timer */
     ctx.ev_tick = event_new(ctx.eb, -1, 0, on_tick_timer, &ctx);
 
+    /* Management endpoint (off unless [ClientManagement] Enabled); a failure
+     * is logged and the VPN carries on without it. */
+    mgmt_runtime_start(&mgmt, ctx.eb, mqvpn_version_string(), cfg->client_mgmt_enabled,
+                       cfg->client_mgmt_endpoint, cfg->client_mgmt_socket_mode,
+                       cfg->client_mgmt_socket_group);
+
     /* Connect */
     if (mqvpn_client_connect(ctx.client) != MQVPN_OK) {
         LOG_ERR("client connect failed");
@@ -659,6 +670,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
         LOG_ERR("exiting: tunnel setup failed");
 
 cleanup:
+    mgmt_runtime_stop(&mgmt);
     /* Whole-client teardown contract:
      *   1. RX is quiesced (the loop has exited; events are freed below, but
      *      no callback runs anymore because dispatch returned).

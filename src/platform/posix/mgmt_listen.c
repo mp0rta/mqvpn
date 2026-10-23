@@ -33,6 +33,19 @@ struct mgmt_listen {
         if (errbuf && errlen) snprintf(errbuf, errlen, __VA_ARGS__); \
     } while (0)
 
+int
+mgmt_listen_parse_mode(const char *s)
+{
+    if (!s || !*s) return 0660;
+    char *end;
+    unsigned long v = strtoul(s, &end, 8);
+    if (end == s || *end != '\0' || v > 07777) {
+        LOG_WRN("invalid ClientManagement SocketMode '%s'; using 0660", s);
+        return 0660;
+    }
+    return (int)v;
+}
+
 static int
 mkdir_parents(const char *path)
 {

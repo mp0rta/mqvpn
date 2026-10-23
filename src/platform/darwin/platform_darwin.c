@@ -31,6 +31,7 @@
 #  include "route_mon.h"
 #  include "vpn_client.h"
 #  include "log.h"
+#  include "mgmt_runtime.h"
 #  include "platform/path_line.h"
 #  include "mqvpn_internal.h" /* mqvpn_config_apply_reorder (INI reorder bridge) */
 
@@ -555,6 +556,7 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
     signal(SIGPIPE, SIG_IGN);
 
     int rc = 1;
+    mgmt_runtime_t mgmt = {0};
     platform_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.tun.fd = -1;
@@ -714,6 +716,12 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
     /* Tick timer */
     ctx.ev_tick = event_new(ctx.eb, -1, 0, on_tick_timer, &ctx);
 
+    /* Management endpoint (off unless [ClientManagement] Enabled); a failure
+     * is logged and the VPN carries on without it. */
+    mgmt_runtime_start(&mgmt, ctx.eb, mqvpn_version_string(), cfg->client_mgmt_enabled,
+                       cfg->client_mgmt_endpoint, cfg->client_mgmt_socket_mode,
+                       cfg->client_mgmt_socket_group);
+
     /* Connect */
     if (mqvpn_client_connect(ctx.client) != MQVPN_OK) {
         LOG_ERR("client connect failed");
@@ -734,6 +742,7 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
         LOG_ERR("exiting: tunnel setup failed");
 
 cleanup:
+    mgmt_runtime_stop(&mgmt);
     /* Library teardown FIRST, while every callback-owned platform object is
      * still alive: the destroy-time deferred flush drives the engine, which
      * can fire the same callbacks as normal operation — cb_state_changed
