@@ -496,11 +496,6 @@ if(NOT WIN32 AND NOT ANDROID_CROSS_COMPILE)   # Windows (ctl_sock_win.c) drops o
     target_include_directories(mqvpnctl PRIVATE
         ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/src/cli ${CMAKE_SOURCE_DIR}/src/common/ipc)
-    # Configure-time gate: the link list may name only system libraries.
-    get_target_property(_ctl_libs mqvpnctl LINK_LIBRARIES)
-    if(_ctl_libs MATCHES "mqvpn_lib|xquic|event")
-        message(FATAL_ERROR "mqvpnctl must not link libmqvpn, xquic or libevent: ${_ctl_libs}")
-    endif()
 endif()
 
 # Everything below requires libevent and a platform layer — skip for Android
@@ -1571,3 +1566,12 @@ endif()
 endif() # WIN32 / APPLE / Linux
 
 endif() # NOT ANDROID_CROSS_COMPILE
+
+# Configure-time gate, evaluated after every target_link_libraries(mqvpnctl ...):
+# the link list may name only system libraries.
+if(NOT WIN32 AND NOT ANDROID_CROSS_COMPILE)
+    get_target_property(_ctl_libs mqvpnctl LINK_LIBRARIES)
+    if(_ctl_libs MATCHES "mqvpn_lib|xquic|event")
+        message(FATAL_ERROR "mqvpnctl must not link libmqvpn, xquic or libevent: ${_ctl_libs}")
+    endif()
+endif()

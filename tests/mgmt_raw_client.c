@@ -18,6 +18,7 @@
 #include "ctl_sock.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,6 +30,8 @@
 #  define CLOSE_FD(fd)     closesocket((SOCKET)(fd))
 #  define IO_AGAIN()       (WSAGetLastError() == WSAEWOULDBLOCK)
 #  define SLEEP_MS(ms)     Sleep(ms)
+#  define SOCK_ARG(h)      ((SOCKET)(h)) /* ctl_sock_t.fd is an intptr_t */
+#  define IO_LEN(n)        ((int)((n) > INT_MAX ? INT_MAX : (n)))
 typedef int io_len_t;
 #else
 #  include <fcntl.h>
@@ -42,10 +45,13 @@ typedef int io_len_t;
 #  define CLOSE_FD(fd)     close((int)(fd))
 #  define IO_AGAIN()       (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
 #  define SLEEP_MS(ms)     usleep((ms) * 1000)
+#  define SOCK_ARG(h)      ((int)(h))
+#  define IO_LEN(n)        (n)
 typedef ssize_t io_len_t;
-#  ifndef MSG_NOSIGNAL
-#    define MSG_NOSIGNAL 0
-#  endif
+#endif
+
+#ifndef MSG_NOSIGNAL
+#  define MSG_NOSIGNAL 0 /* Windows and macOS: no such flag */
 #endif
 
 static long long
@@ -224,7 +230,7 @@ main(int argc, char **argv)
 
     for (;;) {
         if (want > 0 && got >= want) return finish(0);
-        struct pollfd p = {.fd = (int)s.fd, .events = POLLIN};
+        struct pollfd p = {.fd = SOCK_ARG(s.fd), .events = POLLIN};
         if (sent < plen) p.events |= POLLOUT;
         long long left = last + timeout_ms - now_ms();
         if (left <= 0) return finish(8);
@@ -237,7 +243,7 @@ main(int argc, char **argv)
 
         if ((p.revents & POLLOUT) && sent < plen) {
             io_len_t w =
-                send((int)s.fd, payload + sent, (size_t)(plen - sent), MSG_NOSIGNAL);
+                send(SOCK_ARG(s.fd), payload + sent, IO_LEN(plen - sent), MSG_NOSIGNAL);
             if (w > 0) {
                 sent += (size_t)w;
                 last = now_ms();
@@ -252,7 +258,7 @@ main(int argc, char **argv)
                 if (!nb) return finish(1);
                 rbuf = nb;
             }
-            io_len_t r = recv((int)s.fd, rbuf + rlen, cap - rlen, 0);
+            io_len_t r = recv(SOCK_ARG(s.fd), rbuf + rlen, IO_LEN(cap - rlen), 0);
             if (r == 0 || (r < 0 && !IO_AGAIN())) return finish(want == 0 ? 0 : 3);
             if (r > 0) {
                 last = now_ms();

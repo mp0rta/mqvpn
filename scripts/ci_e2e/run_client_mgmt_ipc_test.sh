@@ -295,6 +295,28 @@ for i in 1 2 3 4; do
 done
 if [ -z "$bad" ]; then pass "T10 4 concurrent mqvpnctl version: all exit 0"; else fail "T10 concurrent versions" "$bad"; fi
 
+# ---- T10b: connection limit reached -> BUSY reply (id null) -> exit 1, MQVPN_CLIENT_BUSY
+BS=$TMPD/busy.sock
+if start_host h10b "$BS" --max-conn 1 --handshake-ms 30000; then
+    H10B=$HPID
+    "$RAW" "$BS" --lines 0 --timeout-ms 20000 >/dev/null 2>&1 &
+    HOLD=$!
+    PIDS+=("$HOLD")
+    sleep 0.5 # let the holder occupy the only slot
+    out=$("$CTL" --endpoint "$BS" --json version 2>&1)
+    rc=$?
+    if [ "$rc" -eq 1 ] && [[ $out == *'"name":"MQVPN_CLIENT_BUSY"'* ]]; then
+        pass "T10b --max-conn 1 held: mqvpnctl --json version -> exit 1, MQVPN_CLIENT_BUSY"
+    else
+        fail "T10b busy endpoint" "exit=$rc" "output: $out"
+    fi
+    kill -TERM "$HOLD" 2>/dev/null
+    wait "$HOLD" 2>/dev/null
+    stop_host "$H10B"
+else
+    fail "T10b host start" "stderr: $(cat "$TMPD/h10b.err")"
+fi
+
 # ---- T11: silent host, --timeout 1 -> exit 8 within 3 s
 SS=$TMPD/silent.sock
 if start_host h11 "$SS" --silent; then

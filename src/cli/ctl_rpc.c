@@ -95,12 +95,16 @@ ctl_rpc_call(ctl_sock_t *s, int id, const char *method, yyjson_mut_doc *pdoc,
         *sock_err = CTL_SOCK_E_IO;
         return CTL_RPC_E_SOCK;
     }
-    int e = ctl_sock_send_all(s, req, len, timeout_ms);
+    int se = ctl_sock_send_all(s, req, len, timeout_ms);
     free(req);
-    if (e == CTL_SOCK_OK) {
+    int e = se;
+    /* A full endpoint answers BUSY and closes at accept, so the request can fail with
+     * EPIPE while that reply is already waiting: read it before reporting the error. */
+    if (se == CTL_SOCK_OK || se == CTL_SOCK_E_IO) {
         const char *line;
         size_t line_len;
         e = ctl_sock_recv_line(s, CMP_MAX_RESPONSE_LINE, timeout_ms, &line, &line_len);
+        if (e != CTL_SOCK_OK && se != CTL_SOCK_OK) e = se;
         if (e == CTL_SOCK_OK) {
             yyjson_doc *doc = yyjson_read(line, line_len, 0);
             if (!doc) return CTL_RPC_E_PROTOCOL;
