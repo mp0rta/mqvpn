@@ -85,6 +85,10 @@ else()
     add_subdirectory(third_party/xquic)
 endif()
 
+# yyjson's own visibility("default") on definitions would beat the hidden
+# preset of mqvpn_shared; an empty yyjson_api keeps its symbols out of the .so.
+add_definitions(-Dyyjson_api=)
+
 # ---------- libevent (not needed for Android / library-only builds) ----------
 option(ANDROID_CROSS_COMPILE "Cross-compiling for Android (skip libevent + CLI)" OFF)
 
@@ -229,6 +233,7 @@ message(STATUS "SSL_LIB=${SSL_LIB} CRYPTO_LIB=${CRYPTO_LIB}")
 # ---------- libmqvpn source files (shared between static and shared targets) ----------
 set(MQVPN_LIB_SOURCES
     src/mqvpn_config.c
+    src/mqvpn_clock.c
     src/mqvpn_client.c
     src/mqvpn_server.c
     src/mqvpn_conn_settings.c
@@ -243,7 +248,23 @@ set(MQVPN_LIB_SOURCES
     src/reorder_tx.c
     src/reorder_rx.c
     src/hybrid/classifier.c
+    third_party/yyjson/yyjson.c
 )
+
+include_directories(${CMAKE_SOURCE_DIR}/third_party/yyjson)
+
+# Vendored code: silence its warnings only (first-party -Werror / /WX stay).
+# COMPILE_FLAGS (a string) because the COMPILE_OPTIONS source property needs
+# CMake 3.11. COMPILE_FLAGS lands after the directory-level flags (-Werror
+# etc.) on the command line, so -w wins.
+if(MSVC)
+    set(YYJSON_WARN_FLAGS "/w")
+else()
+    set(YYJSON_WARN_FLAGS "-w")
+endif()
+set_source_files_properties(third_party/yyjson/yyjson.c PROPERTIES
+    COMPILE_FLAGS "${YYJSON_WARN_FLAGS}"
+    COMPILE_DEFINITIONS "YYJSON_DISABLE_FILE;YYJSON_DISABLE_UTILS;YYJSON_DISABLE_INCR_READER;YYJSON_READER_DEPTH_LIMIT=32")
 
 # ---------- bundled transport implementations (NOT part of the sans-I/O core) ----------
 # Together with src/hybrid/tcp_egress.c (the server egress lane owns its TCP
@@ -753,7 +774,7 @@ if(BUILD_TESTING)
     # below (:681 / :866); kept in sync so Tasks 6-8's red/green loops are
     # not vacuous on darwin. Link diff vs Linux: dl/m are folded into
     # libSystem here, and stdc++ becomes c++ (libc++).
-    add_executable(test_config tests/test_config.c src/config.c src/redundant_tx.c src/log.c)
+    add_executable(test_config tests/test_config.c src/config.c src/redundant_tx.c src/log.c third_party/yyjson/yyjson.c)
     target_include_directories(test_config PRIVATE
         ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
     add_test(NAME test_config COMMAND test_config)
@@ -836,18 +857,24 @@ target_link_libraries(mqvpn
     stdc++
 )
 
+# Private systemd/NAT helper; deliberately shares the CLI config parser.
+add_executable(mqvpn-nat-config src/nat_config.c src/config.c
+    src/redundant_tx.c src/log.c third_party/yyjson/yyjson.c)
+target_include_directories(mqvpn-nat-config PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
+
 # libFuzzer target: control-API request parsing crash-safety (see
 # fuzz/fuzz_control_dispatch.c for scope). Lives here — not in the
 # fuzz_tcp_lane block above — because control_socket.c is Linux-only and
 # needs libevent, both guaranteed in this branch. The TU #include's
 # control_socket.c to reach the file-local dispatch(); mqvpn_lib resolves
 # the NULL-guarded mqvpn_server_* calls (log.c is inside mqvpn_lib — do
-# not add it here). Only the fuzz TU is instrumented — that covers the
-# dispatch + argument-extraction surface (json_mini.h is header-inline, so
-# it compiles into the TU); library-side validation of extracted strings
-# short-circuits at the server=NULL guard and is out of scope (see the TU).
+# not add it here). Only the fuzz TU and yyjson.c are instrumented — that
+# covers the dispatch + argument-extraction surface and the JSON parser;
+# library-side validation of extracted strings short-circuits at the
+# server=NULL guard and is out of scope (see the TU).
 if(MQVPN_ENABLE_FUZZING)
-    add_executable(fuzz_control_dispatch fuzz/fuzz_control_dispatch.c)
+    add_executable(fuzz_control_dispatch fuzz/fuzz_control_dispatch.c third_party/yyjson/yyjson.c)
     target_compile_options(fuzz_control_dispatch PRIVATE -fsanitize=fuzzer,address)
     target_link_options(fuzz_control_dispatch PRIVATE -fsanitize=fuzzer,address)
     target_link_libraries(fuzz_control_dispatch PRIVATE
@@ -883,14 +910,14 @@ if(BUILD_TESTING)
              COMMAND bash ${CMAKE_SOURCE_DIR}/tests/check_cert_fixtures.sh)
 
     # Each test links only the source files it needs (no xquic dependency)
-    add_executable(test_config  tests/test_config.c  src/config.c  src/redundant_tx.c src/log.c)
+    add_executable(test_config  tests/test_config.c  src/config.c  src/redundant_tx.c src/log.c third_party/yyjson/yyjson.c)
     add_executable(test_auth    tests/test_auth.c    src/auth.c    src/log.c)
     add_executable(test_session tests/test_session.c src/addr_pool.c src/log.c)
     add_executable(test_dns     tests/test_dns.c     src/platform/linux/dns.c     src/platform/posix/dns_common.c     src/log.c)
     add_executable(test_route_check tests/test_route_check.c src/platform/linux/route_check.c src/log.c)
     add_executable(test_flow_sched tests/test_flow_sched.c src/flow_sched.c src/log.c)
     add_executable(test_redundant_tx tests/test_redundant_tx.c src/redundant_tx.c)
-    add_executable(test_status tests/test_status.c)
+    add_executable(test_status tests/test_status.c third_party/yyjson/yyjson.c)
     add_executable(test_path_state_machine
         tests/test_path_state_machine.c
         src/path_state_machine.c
@@ -904,18 +931,17 @@ if(BUILD_TESTING)
     )
     target_include_directories(test_path_slot_oracle PRIVATE ${CMAKE_SOURCE_DIR}/formal/oracle)
     target_compile_options(test_path_slot_oracle PRIVATE -UNDEBUG)
-    add_executable(test_control_response_bound tests/test_control_response_bound.c)
     add_executable(test_reorder_common tests/test_reorder_common.c)
     add_executable(test_reorder_tx tests/test_reorder_tx.c src/reorder_tx.c src/log.c)
     # test_reorder_rx #include's src/reorder_rx.c to reach the file-local ring;
     # do NOT also list reorder_rx.c here (it would compile the TU twice).
     # mqvpn_config.c is linked (separate TU) for the composed-builder bridge test.
-    add_executable(test_reorder_rx tests/test_reorder_rx.c src/mqvpn_config.c src/redundant_tx.c src/log.c)
-    add_executable(test_reorder_config tests/test_reorder_config.c src/mqvpn_config.c src/config.c src/redundant_tx.c src/log.c)
+    add_executable(test_reorder_rx tests/test_reorder_rx.c src/mqvpn_config.c src/redundant_tx.c src/log.c third_party/yyjson/yyjson.c)
+    add_executable(test_reorder_config tests/test_reorder_config.c src/mqvpn_config.c src/config.c src/redundant_tx.c src/log.c third_party/yyjson/yyjson.c)
     # Parity test for the shared CLI→library config bridge: pins every field
     # forwarded by mqvpn_platform_apply_client_config so a new knob cannot be
     # bridged on one platform and dropped on another (see the bridge TU).
-    add_executable(test_config_bridge tests/test_config_bridge.c src/platform/client_config_bridge.c src/mqvpn_config.c src/redundant_tx.c src/log.c)
+    add_executable(test_config_bridge tests/test_config_bridge.c src/platform/client_config_bridge.c src/mqvpn_config.c src/redundant_tx.c src/log.c third_party/yyjson/yyjson.c)
     add_executable(test_classifier tests/test_classifier.c src/hybrid/classifier.c)
     add_executable(test_icmp tests/test_icmp.c src/icmp.c)
     # test_reorder_gate exercises src/reorder_gate.h (shared STAMP/RAW/DROP_MTU
@@ -926,7 +952,7 @@ if(BUILD_TESTING)
     add_executable(test_path_readd tests/test_path_readd.c)
     # Path status log line (header only + the status-name helper).
     add_executable(test_path_line tests/test_path_line.c src/mqvpn_util.c)
-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_redundant_tx test_status test_path_state_machine test_path_slot_oracle test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd test_path_line)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_redundant_tx test_status test_path_state_machine test_path_slot_oracle test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd test_path_line)
 
     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of
@@ -1098,7 +1124,7 @@ if(BUILD_TESTING)
     # because the connection handlers in the same TU reference event2; gated on
     # libevent being available (Linux test builds only, never Android).
     if(Libevent_FOUND OR EVENT_LIB)
-        add_executable(test_control_socket tests/test_control_socket.c src/log.c)
+        add_executable(test_control_socket tests/test_control_socket.c src/log.c third_party/yyjson/yyjson.c)
         target_include_directories(test_control_socket PRIVATE
             ${CMAKE_SOURCE_DIR}/src
             ${CMAKE_SOURCE_DIR}/src/platform/linux
@@ -1146,6 +1172,9 @@ if(BUILD_TESTING)
         TEST_CHAIN_KEY_FILE="${CMAKE_SOURCE_DIR}/tests/certs/chain-leaf.key"
         TEST_CHAIN_LEAF_DER_FILE="${CMAKE_SOURCE_DIR}/tests/certs/chain-leaf.der"
         TEST_CHAIN_INTERMEDIATE_DER_FILE="${CMAKE_SOURCE_DIR}/tests/certs/chain-intermediate.der"
+        # Self-signed mqvpn-test that expired in 2020 (tests/certs/gen_expired.sh)
+        TEST_EXPIRED_CERT_FILE="${CMAKE_SOURCE_DIR}/tests/certs/expired.crt"
+        TEST_EXPIRED_KEY_FILE="${CMAKE_SOURCE_DIR}/tests/certs/expired.key"
     )
     set_target_properties(test_server PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_server COMMAND test_server)
@@ -1175,6 +1204,24 @@ if(BUILD_TESTING)
     # under ASan's signal handler, can hang instead of exiting — cap it so a
     # regression fails fast rather than stalling the suite for ctest's default.
     set_tests_properties(test_server_preaccept_dos PROPERTIES TIMEOUT 60)
+
+    # Clock of the xquic engines (src/mqvpn_clock.c): token expiry across an
+    # upgrade and a reboot, wall-clock steps, the process-wide clock. Calls
+    # xquic's private token functions, so it reaches into xquic's source and
+    # BoringSSL headers, as SYSTEM directories (not warning-clean under
+    # mqvpn's flags).
+    add_executable(test_clock tests/test_clock.c)
+    target_link_libraries(test_clock mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
+    target_include_directories(test_clock PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
+    target_include_directories(test_clock SYSTEM PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party/xquic
+        ${CMAKE_SOURCE_DIR}/third_party/xquic/third_party/boringssl/include)
+    target_compile_definitions(test_clock PRIVATE
+        TEST_CERT_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.crt"
+        TEST_KEY_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.key"
+    )
+    set_target_properties(test_clock PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_clock COMMAND test_clock)
 
     # Duplicate CONNECT-IP regression: drives a raw xquic H3 client through a
     # real handshake, then sends a second connect-ip request on the same H3
@@ -1243,12 +1290,17 @@ if(BUILD_TESTING)
     add_test(NAME test_cli_path_argv
         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_cli_path_argv.sh $<TARGET_FILE:mqvpn>)
 
-    # SIGTERM-while-CLOSED shell test (runs the built mqvpn binary). Needs no
-    # root, no server and no TUN — the client reaches CLOSED on a handshake
-    # that times out — so it runs here rather than in the sudo+netns suite.
-    # ~10s: the failed handshake waits out xquic's init_idle_time_out.
-    add_test(NAME test_cli_sigterm_closed
-        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_cli_sigterm_closed.sh $<TARGET_FILE:mqvpn>)
+    add_test(NAME test_cli_config
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_cli_config.sh $<TARGET_FILE:mqvpn>)
+    add_test(NAME test_nat_config
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_nat_config.sh
+            $<TARGET_FILE:mqvpn-nat-config> ${CMAKE_SOURCE_DIR}/scripts/mqvpn-server-nat.sh)
+
+    # Exit-at-CLOSED shell test (runs the built mqvpn binary). Needs no root,
+    # no server and no TUN — the client reaches CLOSED on a handshake that is
+    # abandoned — so it runs here rather than in the sudo+netns suite. ~7s.
+    add_test(NAME test_cli_closed_exits
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_cli_closed_exits.sh $<TARGET_FILE:mqvpn>)
 
     # Guard: every tests/test_*.c using bare assert() must #undef NDEBUG,
     # since CI also runs ctest on a Release (-DNDEBUG) build.
@@ -1283,6 +1335,7 @@ install(FILES systemd/server.conf.example systemd/client.conf.example
     DESTINATION /etc/mqvpn)
 install(PROGRAMS scripts/mqvpn-server-nat.sh
         DESTINATION lib/mqvpn)
+install(TARGETS mqvpn-nat-config DESTINATION lib/mqvpn)
 
 # Bundle the project license and NOTICE in /usr/share/doc/mqvpn/ inside the
 # generated deb (and any tarball that runs `cmake --install`). Required by

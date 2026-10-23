@@ -261,8 +261,12 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
             p->tun_up = 0;
             mqvpn_client_set_tun_active(p->client, 0, -1);
         }
-        if (new_state == MQVPN_STATE_CLOSED && p->shutting_down)
-            event_base_loopbreak(p->eb);
+        /* CLOSED we did not ask for: the connection ended and the library
+         * will not retry it (reconnect off, or a rejected certificate), so
+         * exit non-zero rather than idle on a dead client. */
+        if (new_state == MQVPN_STATE_CLOSED && !p->shutting_down)
+            p->fatal_error = PLATFORM_FATAL_CLOSED;
+        if (new_state == MQVPN_STATE_CLOSED) event_base_loopbreak(p->eb);
     }
 }
 
@@ -649,6 +653,8 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     rc = ctx.fatal_error ? 1 : 0;
     if (ctx.fatal_error == PLATFORM_FATAL_PATH_RELEASE)
         LOG_ERR("exiting: path release refused by the library");
+    else if (ctx.fatal_error == PLATFORM_FATAL_CLOSED)
+        LOG_ERR("exiting: connection closed");
     else if (rc)
         LOG_ERR("exiting: tunnel setup failed");
 

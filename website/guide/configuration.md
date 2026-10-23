@@ -2,6 +2,11 @@
 
 mqvpn supports both INI and JSON config files. If the file content starts with `{`, it is parsed as JSON; otherwise as INI. CLI arguments override config values.
 
+UTF-8 files with or without a BOM and Windows (CRLF) line endings are supported.
+Files containing a NUL byte are rejected. INI section and key names are
+case-insensitive. A malformed section header produces a warning; its keys are
+ignored until the next valid section header.
+
 ## INI Format
 
 ### Server
@@ -74,6 +79,7 @@ Path = wlan0
 ## JSON Format
 
 JSON config is useful for structured management and automation tooling.
+The file must be strict JSON (RFC 8259): no comments, no trailing commas, and keys and strings in double quotes.
 
 ### Server
 
@@ -126,6 +132,9 @@ JSON config is useful for structured management and automation tooling.
 ## Multi-User Authentication
 
 The server can authenticate multiple users, each with their own PSK. In JSON config, add a `users` array where each entry is either an object (`{"name":"alice","key":"..."}`) or a shorthand string (`"alice:key"`). In INI config, use repeatable `User = NAME:KEY` lines in the `[Auth]` section. You can also use the [Control API](#control-api) to manage users at runtime.
+
+Config usernames can be at most 63 bytes. Longer names are rejected instead of
+shortened: INI skips the entry with a warning; JSON and `--user` return an error.
 
 When both `auth_key` (global key) and `users` are set, clients can authenticate with either. To restrict access to named users only, remove `auth_key` from the config.
 
@@ -379,7 +388,7 @@ In JSON, the section is a `"hybrid"` object with snake_case keys (`enabled`, `tc
 | `UdpGso` | Batches UDP sends with kernel GSO for lower CPU use at high throughput. Automatically falls back to regular batched sends on kernels without support (< 4.18). Linux and Android only; no effect elsewhere. Set to `false` to restore the previous per-packet send path | `true` |
 | `UdpGro` | Lets the kernel hand over received packets in batches, lowering CPU use at high throughput. Automatically falls back to one-at-a-time receives on kernels without support (< 5.0). Linux only; no effect elsewhere. Set to `false` to restore the previous receive path | `true` |
 | `TunOffload` | Lets the kernel hand large batches of traffic to the tunnel interface in one read; mqvpn splits them, lowering CPU use at high throughput. Automatically falls back to one packet per read when the kernel does not support it. Linux only; no effect elsewhere. Set to `false` to restore the previous tunnel interface | `true` |
-| `TunGro` | Combines consecutive TCP packets headed for the tunnel interface into one larger write, lowering CPU use at high throughput. No effect when `TunOffload` is `false`. Linux only; no effect elsewhere. Set to `false` to write packets one at a time as before | `true` |
+| `TunGro` | Combines consecutive TCP packets, and consecutive UDP datagrams of the same size, headed for the tunnel interface into one larger write, lowering CPU use at high throughput. UDP datagrams are combined only on kernels 6.2 and later; older kernels keep writing them one at a time. No effect when `TunOffload` is `false`. Linux only; no effect elsewhere. Set to `false` to write packets one at a time as before | `true` |
 
 In JSON, the section is an `"advanced"` object with snake_case keys (`recv_rate_limit`, `udp_gso`, `udp_gro`, `tun_offload`, `tun_gro`).
 
@@ -395,7 +404,7 @@ For most setups, leave `MTU` unset. The auto-negotiated value (~1382) works on s
 |----------|----------------|
 | Standard Ethernet / mobile | Leave unset (auto ~1382) |
 | Deeply nested tunnels (mqvpn → WG → another tunnel) | Calculate remaining MTU; set if near 1280 |
-| Both ends on a clean 1500-byte path, larger tunnel MTU wanted | `PathMTU = 1500` on both ends (TUN MTU 1402) |
+| Both ends on a clean 1500-byte path, larger tunnel MTU wanted | `PathMTU = 1500` on both ends (TUN MTU 1418) |
 
 On the client, if `MTU` is set, mqvpn uses `min(config MTU, negotiated MTU)`; a warning is logged when the config value exceeds the negotiated value. On the server, `MTU` sets the TUN MTU directly (default 1382).
 
@@ -426,15 +435,14 @@ The default 1400-byte packet size leaves room for PPPoE and most mobile networks
 PathMTU                    1500 bytes
  − IPv6 + UDP header         48 bytes
  − encryption tag            16 bytes
- − room for an ACK frame     16 bytes
                            ─────────
- = max_pkt_out_size         1420 bytes (upper limit)
+ = max_pkt_out_size         1436 bytes (upper limit)
  − QUIC, DATAGRAM and MASQUE headers  18 bytes
                            ─────────
- = TUN MTU                  1402 bytes
+ = TUN MTU                  1418 bytes
 ```
 
-The QUIC library caps packets at 1420 bytes, so values above 1500 give the same result. If `PathMTU` is larger than what the network really carries, full-size packets get fragmented or dropped, so only set it when you know the path.
+A packet at the upper limit never carries an ACK frame. Below it, mqvpn also leaves 16 bytes of room for one, so `PathMTU = 1492` gives 1412-byte packets and a TUN MTU of 1394. The QUIC library caps packets at 1436 bytes, so values above 1500 give the same result. If `PathMTU` is larger than what the network really carries, full-size packets get fragmented or dropped, so only set it when you know the path.
 
 When an explicit `MTU` exceeds the available inner packet size, the client warns and limits it. The server also warns, but keeps the configured TUN MTU; oversized tunnel packets may be dropped.
 
@@ -567,5 +575,10 @@ sudo systemctl enable --now mqvpn-client@home
 ```
 
 ::: info
-The systemd units expect INI `.conf` files. The server unit's NAT helper scripts also parse the INI config directly, so JSON cannot be used with the standard units as-is.
+The systemd units use the `.conf` paths shown above, which can contain INI or
+JSON. The server's NAT helper uses the same configuration parser as mqvpn
+at startup. At shutdown, it removes its firewall rules and restores saved
+forwarding settings even if the configuration has been changed or deleted.
+When installing manually, keep `mqvpn-server-nat.sh` and `mqvpn-nat-config`
+together in the installation's `lib/mqvpn` directory.
 :::

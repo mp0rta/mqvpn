@@ -77,6 +77,11 @@ static int g_tests_passed = 0;
         }                                                                            \
     } while (0)
 
+/* xquic's process-wide clock, which the mqvpn server engine sets: the probe
+ * engine's timers run on it, so its receive times must too (exported by the
+ * static lib, not part of the public xquic.h). */
+extern xqc_timestamp_pt xqc_monotonic_timestamp;
+
 static uint64_t
 test_now_us(void)
 {
@@ -839,7 +844,7 @@ harness_pump(harness_t *h, const int *done, int budget_ms)
             xqc_engine_packet_process(h->probe.engine, buf, (size_t)n,
                                       (struct sockaddr *)&h->cli_addr,
                                       sizeof(h->cli_addr), (struct sockaddr *)&from,
-                                      from_len, (xqc_usec_t)test_now_us(), NULL);
+                                      from_len, xqc_monotonic_timestamp(), NULL);
         }
 
         /* Egress fd events (connect-tcp connect()/relay I/O the server
@@ -2408,7 +2413,7 @@ TEST(mqvpn_tcp_active_idle_timeout_evicts)
      * in intended poll-timeout ms (elapsed += wait_ms), which decouples from
      * real time whenever poll returns early — exactly what QUIC-timer churn
      * on a loaded sanitizer-CI runner produces. The idle sweep is gated on
-     * real gettimeofday time (svr_now_us), so this wait must be too, or the
+     * real time (svr_now_us), so this wait must be too, or the
      * iteration budget can expire in <1s of real time and the sweep never
      * fires. 4s real ceiling: a working sweep fires ~1s in; a broken one is
      * still bounded so the suite can't hang. */
@@ -2631,7 +2636,7 @@ TEST(mqvpn_tcp_parked_flow_idle_eviction)
      * subject to the very stream-data flow control that's stuck full here,
      * so it isn't blocked by the probe's own non-draining). */
     /* Real-wall-clock bound, not iteration count — the idle sweep fires on
-     * real gettimeofday time, while harness_pump's budget accounting can run
+     * real time (svr_now_us), while harness_pump's budget accounting can run
      * ahead of real time under CI poll churn (see idle-timeout-evicts). */
     int sink_eof = 0;
     uint64_t wait_start_us = test_now_us();

@@ -71,12 +71,15 @@ static int g_cli_fd = -1;
 static struct sockaddr_storage g_svr_addr;
 static socklen_t g_svr_addrlen;
 
+/* xquic's process-wide clock, which the mqvpn server engine sets: the
+ * attacker engine's timers run on it, so its receive times must too
+ * (exported by the static lib, not part of the public xquic.h). */
+extern xqc_timestamp_pt xqc_monotonic_timestamp;
+
 static xqc_usec_t
 now_us(void)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (xqc_usec_t)ts.tv_sec * 1000000 + (xqc_usec_t)ts.tv_nsec / 1000;
+    return xqc_monotonic_timestamp();
 }
 
 static ssize_t

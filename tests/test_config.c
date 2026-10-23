@@ -10,6 +10,7 @@
 #include "config.h"
 #include "libmqvpn.h" /* MQVPN_RECV_RATE_LIMIT_MAX */
 #include "mqvpn_sched_names.h"
+#include "log.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -491,6 +492,94 @@ test_malformed_section_header(void)
     ASSERT_EQ_INT(rc, 0, "malformed section no error");
     /* First TunName is under malformed section (skipped), second is valid */
     ASSERT_EQ_STR(cfg.tun_name, "fixed", "valid section parsed after malformed");
+
+    path = write_tmp("[Interface]\nListen=0.0.0.0:443\n"
+                     "[Control\nListen=127.0.0.1:9090\n");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), 0, "malformed section skipped");
+    unlink(path);
+    ASSERT_EQ_STR(cfg.listen, "0.0.0.0:443", "malformed section cannot clobber previous");
+    ASSERT_EQ_STR(cfg.control_listen, "", "malformed control section not applied");
+}
+
+static void
+test_file_encoding(void)
+{
+    mqvpn_file_config_t cfg;
+    const char *bom_files[] = {
+        "\xef\xbb\xbf[Server]\r\nAddress=host:443\r\n[Interface]\r\nKillSwitch=true",
+        "\xef\xbb\xbf {\"server_addr\":\"host:443\",\"kill_switch\":true}",
+    };
+    for (size_t i = 0; i < sizeof(bom_files) / sizeof(bom_files[0]); i++) {
+        char *path = write_tmp(bom_files[i]);
+        mqvpn_config_defaults(&cfg);
+        ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), 0, "UTF-8 BOM accepted");
+        unlink(path);
+        ASSERT_EQ_STR(cfg.server_addr, "host:443", "first BOM section parsed");
+        ASSERT_EQ_INT(cfg.kill_switch, 1, "CRLF and final line without newline parsed");
+    }
+
+    const char ini[] = "[Server]\nAddress=host:443\n\0\n[Interface]\nKillSwitch=true\n";
+    char *path = write_tmp("");
+    FILE *fp = fopen(path, "wb");
+    ASSERT_TRUE(fp != NULL, "open raw INI");
+    if (!fp) return;
+    ASSERT_EQ_INT((int)fwrite(ini, 1, sizeof(ini) - 1, fp), (int)sizeof(ini) - 1,
+                  "write raw INI");
+    fclose(fp);
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), -1, "raw NUL in INI rejected");
+    unlink(path);
+    ASSERT_EQ_STR(cfg.server_addr, "", "NUL rejected before applying config");
+}
+
+static void
+capture_warning(mqvpn_log_level_t level, const char *msg, void *ctx)
+{
+    (void)level;
+    snprintf(ctx, 1024, "%s", msg);
+}
+
+static void
+test_physical_line_numbers(void)
+{
+    char *path = write_tmp("[Interface]\n\n\n\nMTU=bad\n");
+    char warning[1024] = "";
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_log_set_sink(capture_warning, warning);
+    int rc = mqvpn_config_load(&cfg, path);
+    mqvpn_log_set_sink(NULL, NULL);
+    unlink(path);
+    ASSERT_EQ_INT(rc, 0, "invalid MTU is warning-only");
+    ASSERT_TRUE(strstr(warning, ":5: invalid MTU") != NULL, "blank lines are counted");
+}
+
+static void
+test_host_port_strict(void)
+{
+    char host[256];
+    int port = 0;
+    ASSERT_EQ_INT(mqvpn_parse_host_port("example.com:1", host, sizeof(host), &port), 0,
+                  "lowest port accepted");
+    ASSERT_EQ_STR(host, "example.com", "host retained");
+    ASSERT_EQ_INT(port, 1, "lowest port");
+    ASSERT_EQ_INT(mqvpn_parse_host_port("[::1]:65535", host, sizeof(host), &port), 0,
+                  "IPv6 and highest port accepted");
+    ASSERT_EQ_STR(host, "::1", "IPv6 brackets removed");
+    ASSERT_EQ_INT(port, 65535, "highest port");
+    const char *bad[] = {"host:443oops",  "host:4294967739",
+                         "[::1]:443oops", "host:99999999999999999999999",
+                         "host:0",        "host:65536",
+                         "host:-1",       "host:+443",
+                         "host: 443",     "host:",
+                         ":443",          "[]:443",
+                         "[::1]443",      "host"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+        ASSERT_EQ_INT(mqvpn_parse_host_port(bad[i], host, sizeof(host), &port), -1,
+                      bad[i]);
+    ASSERT_EQ_INT(mqvpn_parse_host_port("longhost:443", host, 4, &port), -1,
+                  "host cannot be silently truncated");
 }
 
 static void
@@ -1161,6 +1250,37 @@ test_auth_users_ini_invalid_ignored(void)
 }
 
 static void
+test_username_length(void)
+{
+    char name[64], ini[512], json[512];
+    memset(name, 'a', sizeof(name) - 1);
+    name[sizeof(name) - 1] = '\0';
+    snprintf(ini, sizeof(ini),
+             "[Auth]\nUser=%s:original\nUser=%sX:wrong\n"
+             "User=%sY:also-wrong\n",
+             name, name, name);
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), 0, "long INI usernames skipped");
+    unlink(path);
+    ASSERT_EQ_INT(cfg.n_users, 1, "only 63-byte username accepted");
+    ASSERT_EQ_STR(cfg.user_keys[0], "original", "long name cannot overwrite prefix");
+
+    const char *forms[] = {"{\"users\":[\"%s:original\",\"%sX:wrong\"]}",
+                           "{\"users\":[{\"name\":\"%s\",\"key\":\"original\"},"
+                           "{\"name\":\"%sX\",\"key\":\"wrong\"}]}"};
+    for (size_t i = 0; i < sizeof(forms) / sizeof(forms[0]); i++) {
+        snprintf(json, sizeof(json), forms[i], name, name);
+        mqvpn_config_defaults(&cfg);
+        ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, json), -1,
+                      "long JSON username rejected");
+        ASSERT_EQ_INT(cfg.n_users, 1, "JSON only applied valid prefix entry");
+        ASSERT_EQ_STR(cfg.user_keys[0], "original", "JSON prefix key retained");
+    }
+}
+
+static void
 test_json_config_load(void)
 {
     const char *json = "{"
@@ -1287,10 +1407,17 @@ test_json_invalid_users_error(void)
     char *path = write_tmp(json);
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
+    char error[1024] = "";
+    mqvpn_log_set_sink(capture_warning, error);
     int rc = mqvpn_config_load(&cfg, path);
+    mqvpn_log_set_sink(NULL, NULL);
     unlink(path);
 
     ASSERT_TRUE(rc != 0, "json invalid users returns error");
+    ASSERT_TRUE(strstr(error, "config: invalid \"users\"") != NULL,
+                "invalid users identifies the setting");
+    ASSERT_TRUE(strstr(error, "names up to 63 bytes") != NULL,
+                "invalid users explains the name limit");
 }
 
 static void
@@ -1337,6 +1464,306 @@ test_json_users_escaped_quote_in_value(void)
     ASSERT_EQ_INT(cfg.n_users, 1, "json users escaped-quote count");
     ASSERT_EQ_STR(cfg.user_names[0], "dave", "json users escaped-quote name");
     ASSERT_EQ_STR(cfg.user_keys[0], "k\"2", "json users escaped-quote key");
+}
+
+/* ================================================================
+ *  JSON parser strictness (whole-document validation)
+ * ================================================================ */
+
+static void
+test_json_syntax_error_fails(void)
+{
+    char opens[41], closes[41], deep[128];
+    memset(opens, '[', 40);
+    opens[40] = '\0';
+    memset(closes, ']', 40);
+    closes[40] = '\0';
+    snprintf(deep, sizeof(deep), "{\"unused\":%s%s}", opens, closes);
+
+    const char *bad[] = {
+        "{\"mtu\":1400",
+        "{\"mtu\":1400} x",
+        "{\"mtu\":1400,}",
+        "{\"mtu\":1400 // c\n}",
+        "{\"tun_name\":\"a\xff"
+        "b\"}",
+        "{\"tun_name\":\"\\ud800\"}",
+        "{\"unused\":1e400}",
+        deep,
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        mqvpn_file_config_t cfg;
+        mqvpn_config_defaults(&cfg);
+        cfg.tun_mtu = 1300;
+        ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, bad[i]), -1, bad[i]);
+        ASSERT_EQ_INT(cfg.tun_mtu, 1300, "syntax error: cfg untouched");
+
+        char *path = write_tmp(bad[i]);
+        mqvpn_config_defaults(&cfg);
+        cfg.tun_mtu = 1300;
+        ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), -1, bad[i]);
+        ASSERT_EQ_INT(cfg.tun_mtu, 1300, "syntax error via file: cfg untouched");
+        unlink(path);
+    }
+}
+
+static void
+test_json_file_raw_nul_fails(void)
+{
+    char path[] = "/tmp/test_config_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT_TRUE(fd >= 0, "raw NUL: mkstemp");
+    if (fd < 0) return;
+    ssize_t w = write(fd, "{\"mtu\":1400}\0 x", 15);
+    close(fd);
+    ASSERT_EQ_INT((int)w, 15, "raw NUL: file written");
+
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    cfg.tun_mtu = 1300;
+    char error[1024] = "";
+    mqvpn_log_set_sink(capture_warning, error);
+    int rc = mqvpn_config_load(&cfg, path);
+    mqvpn_log_set_sink(NULL, NULL);
+    ASSERT_EQ_INT(rc, -1, "raw NUL in JSON file fails");
+    ASSERT_TRUE(strstr(error, path) != NULL, "raw NUL: log identifies the file");
+    ASSERT_TRUE(strstr(error, "NUL byte at offset 12") != NULL,
+                "raw NUL: log identifies the byte offset");
+    ASSERT_TRUE(strstr(error, "save the file as UTF-8 (not UTF-16)") != NULL,
+                "raw NUL: log explains how to fix the encoding");
+    ASSERT_EQ_INT(cfg.tun_mtu, 1300, "raw NUL: cfg untouched");
+    unlink(path);
+}
+
+static void
+test_json_nested_key_not_lifted(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc =
+        mqvpn_config_load_json_filecfg(&cfg, "{\"hybrid\":{\"mtu\":1500},\"mtu\":1400}");
+    ASSERT_EQ_INT(rc, 0, "nested mtu + top mtu: rc");
+    ASSERT_EQ_INT(cfg.tun_mtu, 1400, "top-level mtu wins over nested");
+
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load_json_filecfg(&cfg, "{\"hybrid\":{\"mtu\":1500}}");
+    ASSERT_EQ_INT(rc, 0, "nested mtu only: rc");
+    ASSERT_EQ_INT(cfg.tun_mtu, 0, "nested mtu is not top-level mtu");
+
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load_json_filecfg(&cfg,
+                                        "{\"reorder_rules\":[{\"max_wait_ms\":77}]}");
+    ASSERT_EQ_INT(rc, 0, "rule max_wait_ms: rc");
+    ASSERT_EQ_INT(cfg.reorder.has_explicit_wait, 0,
+                  "rule max_wait_ms does not leak into reorder");
+}
+
+static void
+test_json_duplicate_key_first_wins(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load_json_filecfg(&cfg, "{\"mtu\":1400,\"mtu\":1500}");
+    ASSERT_EQ_INT(rc, 0, "duplicate key: rc");
+    ASSERT_EQ_INT(cfg.tun_mtu, 1400, "duplicate key: first wins");
+}
+
+static void
+test_json_numeric_type_strict(void)
+{
+    char json[128];
+    mqvpn_file_config_t cfg;
+
+    static const char *mtu_bad[] = {"1400.0", "\"1400\"", "true", "1.4e3"};
+    for (size_t i = 0; i < sizeof(mtu_bad) / sizeof(mtu_bad[0]); i++) {
+        snprintf(json, sizeof(json), "{\"mtu\":%s}", mtu_bad[i]);
+        mqvpn_config_defaults(&cfg);
+        ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, json), 0, json);
+        ASSERT_EQ_INT(cfg.tun_mtu, 0, json);
+    }
+
+    static const char *mc_bad[] = {"2147483648", "-2147483648", "4294967297", "\"abc\""};
+    for (size_t i = 0; i < sizeof(mc_bad) / sizeof(mc_bad[0]); i++) {
+        snprintf(json, sizeof(json), "{\"max_clients\":%s}", mc_bad[i]);
+        mqvpn_config_defaults(&cfg);
+        cfg.max_clients = 99;
+        ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, json), 0, json);
+        ASSERT_EQ_INT(cfg.max_clients, 64, json);
+    }
+
+    static const char *pid_bad[] = {"18446744073709551615", "18446744073709551616", "-1"};
+    for (size_t i = 0; i < sizeof(pid_bad) / sizeof(pid_bad[0]); i++) {
+        snprintf(json, sizeof(json), "{\"init_max_path_id\":%s}", pid_bad[i]);
+        mqvpn_config_defaults(&cfg);
+        ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, json), 0, json);
+        ASSERT_EQ_ULL(cfg.init_max_path_id, 0ULL, json);
+    }
+}
+
+static void
+test_json_string_decoding(void)
+{
+    char json[512];
+    char longname[301];
+    memset(longname, 't', 300);
+    longname[300] = '\0';
+    snprintf(json, sizeof(json), "{\"tun_name\":\"%s\"}", longname);
+
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, json), 0, "long tun_name: rc");
+    ASSERT_EQ_INT((int)strlen(cfg.tun_name), (int)sizeof(cfg.tun_name) - 1,
+                  "long tun_name truncated");
+
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, "{\"tun_name\":\"a\\u0000b\"}"), 0,
+                  "tun_name with \\u0000: rc");
+    ASSERT_EQ_STR(cfg.tun_name, "mqvpn0", "tun_name with \\u0000 rejected");
+
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(
+        mqvpn_config_load_json_filecfg(&cfg, "{\"auth_key\":\"a\\\"b\\\\c\\u00e9\\n\"}"),
+        0, "escaped auth_key: rc");
+    ASSERT_EQ_STR(cfg.auth_key, "a\"b\\c\xc3\xa9\n", "escapes decoded");
+}
+
+static void
+test_json_users_shapes(void)
+{
+    char json[1024];
+    char pad[601];
+    memset(pad, 'x', 600);
+    pad[600] = '\0';
+    snprintf(json, sizeof(json),
+             "{\"users\":[{\"name\":\"u1\",\"key\":\"k1\",\"pad\":\"%s\"}]}", pad);
+
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, json), 0, "600-byte user object");
+    ASSERT_EQ_INT(cfg.n_users, 1, "600-byte user object: n_users");
+
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, "{\"users\":[5]}"), -1,
+                  "numeric user element");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, "{\"users\":[\"nocolon\"]}"), -1,
+                  "user string without colon");
+
+    char name[201], key[201];
+    memset(name, 'n', 200);
+    name[200] = '\0';
+    memset(key, 'k', 200);
+    key[200] = '\0';
+    snprintf(json, sizeof(json), "{\"users\":[\"%s:%s\"]}", name, key);
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, json), -1,
+                  "200-byte username rejected before pair truncation");
+    ASSERT_EQ_INT(cfg.n_users, 0, "long username not added");
+
+    char longa[361];
+    memset(longa, 'a', 360);
+    longa[360] = '\0';
+    snprintf(json, sizeof(json), "{\"users\":[\"%s:k\"]}", longa);
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, json), -1,
+                  "colon past the 359-byte pair cap");
+
+    static const char *preload = "{\"users\":[\"alice:a1\",\"bob:b2\"]}";
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, preload), 0, "preload users");
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, "{\"users\":\"x\"}"), -1,
+                  "non-array users");
+    ASSERT_EQ_INT(cfg.n_users, 2, "non-array users: n_users kept");
+    ASSERT_EQ_STR(cfg.user_names[0], "alice", "non-array users: name[0] kept");
+    ASSERT_EQ_STR(cfg.user_names[1], "bob", "non-array users: name[1] kept");
+
+    static const char *unterminated = "{\"users\":[\"zed:1\",";
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load_json_filecfg(&cfg, preload);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, unterminated), -1,
+                  "unterminated users");
+    ASSERT_EQ_INT(cfg.n_users, 2, "unterminated users: n_users kept");
+    ASSERT_EQ_STR(cfg.user_names[0], "alice", "unterminated users: name[0] kept");
+    ASSERT_EQ_STR(cfg.user_names[1], "bob", "unterminated users: name[1] kept");
+
+    char *path = write_tmp(unterminated);
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load_json_filecfg(&cfg, preload);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), -1, "unterminated users via file");
+    unlink(path);
+    ASSERT_EQ_INT(cfg.n_users, 2, "unterminated users via file: n_users kept");
+    ASSERT_EQ_STR(cfg.user_names[0], "alice", "unterminated users via file: name[0]");
+    ASSERT_EQ_STR(cfg.user_names[1], "bob", "unterminated users via file: name[1]");
+}
+
+static void
+test_json_dns_paths_atomic(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(
+        mqvpn_config_load_json_filecfg(
+            &cfg, "{\"dns\":[\"1.1.1.1\",\"8.8.8.8\"],\"paths\":[\"eth0\",\"wlan0\"]}"),
+        0, "preload dns/paths");
+
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, "{\"dns\":[\"9.9.9.9\",123]}"), 0,
+                  "bad dns element: rc");
+    ASSERT_EQ_INT(cfg.n_dns, 2, "bad dns element: n_dns kept");
+    ASSERT_EQ_STR(cfg.dns_servers[0], "1.1.1.1", "bad dns element: dns[0] kept");
+
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, "{\"paths\":[\"eth9\",123]}"), 0,
+                  "bad path element: rc");
+    ASSERT_EQ_INT(cfg.n_paths, 2, "bad path element: n_paths kept");
+    ASSERT_EQ_STR(cfg.paths[0], "eth0", "bad path element: paths[0] kept");
+
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(
+        mqvpn_config_load_json_filecfg(&cfg, "{\"hybrid\":{\"egress_allow\":[1]}}"), -1,
+        "non-string egress_allow element");
+}
+
+static void
+test_json_reorder_rules_types(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, "{\"reorder_rules\":[1]}"), -1,
+                  "non-object reorder rule");
+
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(
+        mqvpn_config_load_json_filecfg(&cfg, "{\"reorder_rules\":[{\"port\":\"443\"}]}"),
+        0, "string port: rc");
+    ASSERT_EQ_INT(cfg.reorder.n_rules, 1, "string port: rule added");
+    ASSERT_EQ_INT(cfg.reorder.rules[0].port, 0, "string port: begin-time default");
+
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(
+        mqvpn_config_load_json_filecfg(&cfg, "{\"reorder_rules\":[{\"max_wait_ms\":0}]}"),
+        0, "max_wait_ms 0: rc");
+    ASSERT_EQ_INT(cfg.reorder.n_rules, 1, "max_wait_ms 0: rule added");
+    ASSERT_EQ_INT(cfg.reorder.rules[0].explicit_wait_ms, 0, "max_wait_ms 0 rejected");
+
+    static const char *cap_bad[] = {"{\"reorder_rules\":[{\"cap_packets\":0}]}",
+                                    "{\"reorder_rules\":[{\"cap_packets\":3}]}"};
+    for (size_t i = 0; i < sizeof(cap_bad) / sizeof(cap_bad[0]); i++) {
+        mqvpn_config_defaults(&cfg);
+        ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, cap_bad[i]), 0, cap_bad[i]);
+        ASSERT_EQ_INT(cfg.reorder.n_rules, 1, cap_bad[i]);
+        ASSERT_EQ_INT(cfg.reorder.rules[0].explicit_cap, 0, cap_bad[i]);
+    }
+
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(
+                      &cfg, "{\"reorder_rules\":[{\"cap_packets\":4096}]}"),
+                  0, "cap_packets 4096: rc");
+    ASSERT_EQ_INT(cfg.reorder.rules[0].explicit_cap, 4096, "cap_packets 4096 accepted");
+
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(
+        mqvpn_config_load_json_filecfg(&cfg, "{\"reorder_rules\":[{\"proto\":6}]}"), 0,
+        "numeric proto: rc");
+    ASSERT_EQ_INT(cfg.reorder.rules[0].proto, 17, "numeric proto: default UDP kept");
 }
 
 /* ================================================================
@@ -2364,6 +2791,10 @@ int
 main(void)
 {
     test_defaults();
+    test_file_encoding();
+    test_physical_line_numbers();
+    test_host_port_strict();
+    test_username_length();
     test_parse_server_config();
     test_parse_client_config();
     test_parse_scheduler_backup_fec();
@@ -2476,6 +2907,17 @@ main(void)
     test_redundant_ports_ini_json();
     test_redundant_ini_onoff();
     test_ini_json_invalid_scalar_parity();
+
+    /* JSON parser strictness */
+    test_json_syntax_error_fails();
+    test_json_file_raw_nul_fails();
+    test_json_nested_key_not_lifted();
+    test_json_duplicate_key_first_wins();
+    test_json_numeric_type_strict();
+    test_json_string_decoding();
+    test_json_users_shapes();
+    test_json_dns_paths_atomic();
+    test_json_reorder_rules_types();
 
     /* mqvpn_sched_names.h table parity */
     test_sched_cc_name_roundtrip();

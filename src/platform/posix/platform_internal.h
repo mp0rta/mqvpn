@@ -145,9 +145,11 @@ struct platform_ctx {
  * the tunnel the server handed over (TUN, addressing, MTU, routes, kill
  * switch). PATH_RELEASE: the library refused a transport release the
  * platform reported right after its own drop/remove of that path — an
- * invariant violation (netmon_common.c). */
+ * invariant violation (netmon_common.c). CLOSED: the client reached CLOSED
+ * without a shutdown of ours — the connection ended and will not be retried. */
 #define PLATFORM_FATAL_TUNNEL_SETUP 1
 #define PLATFORM_FATAL_PATH_RELEASE 2
+#define PLATFORM_FATAL_CLOSED       3
 
 /* platform_{linux,darwin}.c (netmon_common.c, and netlink_mon.c on Linux or
  * route_mon.c on Darwin, call schedule_next_tick; on_socket_read is the read

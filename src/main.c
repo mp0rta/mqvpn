@@ -4,7 +4,6 @@
 #include "libmqvpn.h"
 #include "log.h"
 #include "config.h"
-#include "json_mini.h"
 #include "auth.h"
 #include "vpn_client.h"
 #include "vpn_server.h"
@@ -101,35 +100,14 @@ usage(const char *prog)
 }
 
 static int
-parse_host_port(const char *str, char *host, size_t host_len, int *port)
+parse_host_port(const char *str, char *host, size_t host_len, int *port,
+                const char *label)
 {
-    if (str[0] == '[') {
-        /* Bracket notation for IPv6: [host]:port */
-        const char *close = strchr(str, ']');
-        if (!close || close[1] != ':') {
-            fprintf(stderr, "error: expected [HOST]:PORT, got '%s'\n", str);
-            return -1;
-        }
-        size_t hlen = (size_t)(close - str - 1);
-        if (hlen >= host_len) hlen = host_len - 1;
-        memcpy(host, str + 1, hlen);
-        host[hlen] = '\0';
-        *port = atoi(close + 2);
-    } else {
-        /* Legacy: host:port (last colon) */
-        const char *colon = strrchr(str, ':');
-        if (!colon) {
-            fprintf(stderr, "error: expected HOST:PORT, got '%s'\n", str);
-            return -1;
-        }
-        size_t hlen = (size_t)(colon - str);
-        if (hlen >= host_len) hlen = host_len - 1;
-        memcpy(host, str, hlen);
-        host[hlen] = '\0';
-        *port = atoi(colon + 1);
-    }
-    if (*port <= 0 || *port > 65535) {
-        fprintf(stderr, "error: invalid port in '%s'\n", str);
+    if (mqvpn_parse_host_port(str, host, host_len, port) < 0) {
+        fprintf(stderr,
+                "error: invalid %s address '%s': use HOST:PORT or [IPv6]:PORT, "
+                "port 1-65535\n",
+                label, str);
         return -1;
     }
     return 0;
@@ -149,8 +127,6 @@ parse_mtu_arg(const char *opt, const char *str, int *out)
     *out = (int)lv;
     return 0;
 }
-
-/* mqvpn_copy_str is provided by json_mini.h as mqvpn_copy_str */
 
 int
 main(int argc, char *argv[])
@@ -267,10 +243,15 @@ main(int argc, char *argv[])
                 return 1;
             }
             *sep = '\0';
-            mqvpn_copy_str(cli_user_names[n_cli_users],
-                           sizeof(cli_user_names[n_cli_users]), pair);
-            mqvpn_copy_str(cli_user_keys[n_cli_users], sizeof(cli_user_keys[n_cli_users]),
-                           sep + 1);
+            if (strlen(pair) >= sizeof(cli_user_names[0])) {
+                fprintf(stderr, "error: --user name exceeds %zu bytes\n",
+                        sizeof(cli_user_names[0]) - 1);
+                return 1;
+            }
+            snprintf(cli_user_names[n_cli_users], sizeof(cli_user_names[n_cli_users]),
+                     "%.*s", (int)(sizeof(cli_user_names[n_cli_users]) - 1), pair);
+            snprintf(cli_user_keys[n_cli_users], sizeof(cli_user_keys[n_cli_users]),
+                     "%.*s", (int)(sizeof(cli_user_keys[n_cli_users]) - 1), sep + 1);
             if (cli_user_names[n_cli_users][0] == '\0' ||
                 cli_user_keys[n_cli_users][0] == '\0') {
                 fprintf(stderr, "error: --user must be NAME:KEY\n");
@@ -439,13 +420,16 @@ main(int argc, char *argv[])
         }
     }
 
+    /* Server address: CLI > config */
+    const char *eff_server = server_str ? server_str : file_cfg.server_addr;
+
     /* Determine mode: CLI > config file > error */
     const char *eff_mode = mode;
     if (!eff_mode) {
         if (config_path) {
             eff_mode = file_cfg.is_server ? "server" : "client";
             /* Client mode needs server address */
-            if (!file_cfg.is_server && file_cfg.server_addr[0] == '\0') {
+            if (!file_cfg.is_server && eff_server[0] == '\0') {
                 fprintf(
                     stderr,
                     "error: config has no [Server] Address and no --mode specified\n");
@@ -458,9 +442,6 @@ main(int argc, char *argv[])
             return 1;
         }
     }
-
-    /* Server address: CLI > config */
-    const char *eff_server = server_str ? server_str : file_cfg.server_addr;
 
     /* Set log level */
     mqvpn_log_level_t log_level = MQVPN_LOG_INFO;
@@ -568,7 +549,7 @@ main(int argc, char *argv[])
 
         char host[256];
         int port;
-        if (parse_host_port(eff_server, host, sizeof(host), &port) < 0) {
+        if (parse_host_port(eff_server, host, sizeof(host), &port, "server") < 0) {
             return 1;
         }
 
@@ -651,7 +632,8 @@ main(int argc, char *argv[])
 
         char bind_addr[256] = "0.0.0.0";
         int bind_port = 443;
-        if (parse_host_port(eff_listen, bind_addr, sizeof(bind_addr), &bind_port) < 0) {
+        if (parse_host_port(eff_listen, bind_addr, sizeof(bind_addr), &bind_port,
+                            "listen") < 0) {
             return 1;
         }
 

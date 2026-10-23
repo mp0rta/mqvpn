@@ -428,9 +428,9 @@ EgressAllow = 10.0.5.0/24  # server: punch a hole through the default-deny egres
 ```
 
 Disabled by default; existing users see no behavior change. See
-[docs/control-api.md §9](docs/control-api.md#9-hybrid-mode-configuration-keys)
-for the full `[Hybrid]` config key reference and the `get_stats` counters
-this mode exposes.
+[Configuration → `[Hybrid]`](website/guide/configuration.md#hybrid)
+for the full config key reference, and
+[Control API §5.4](docs/control-api.md#54-get_stats) for runtime counters.
 
 ## systemd
 

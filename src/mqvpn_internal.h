@@ -39,11 +39,13 @@
  * 1500B, xqc_defs.h XQC_CONN_MAX_UDP_PAYLOAD_SIZE). */
 #define MQVPN_MAX_PKT_OUT_SIZE 1400
 
-/* xquic clamps max_pkt_out_size to this (XQC_QUIC_MAX_MSS). */
-#define MQVPN_XQC_MAX_PKT_OUT_SIZE 1420
+/* xquic clamps max_pkt_out_size to this (XQC_MAX_PACKET_OUT_SIZE). */
+#define MQVPN_XQC_MAX_PKT_OUT_SIZE 1436
 
 /* A sent packet can exceed max_pkt_out_size by the AEAD tag (16) plus the
- * room xquic keeps for a piggybacked ACK frame (XQC_ACK_SPACE, 16). */
+ * room xquic keeps for a piggybacked ACK frame (XQC_ACK_SPACE, 16). xquic
+ * never lets that ACK take a packet past MQVPN_XQC_MAX_PKT_OUT_SIZE. */
+#define MQVPN_AEAD_TAG_LEN     16
 #define MQVPN_PKT_OUT_OVERHEAD 32
 
 /* QUIC short header (8-byte CID, 4-byte packet number), DATAGRAM frame
@@ -56,6 +58,9 @@ static inline size_t
 mqvpn_pkt_out_size(int path_mtu)
 {
     if (path_mtu <= 0) return MQVPN_MAX_PKT_OUT_SIZE;
+    /* at the cap a full packet carries no ACK, so only the tag is added */
+    if (path_mtu - 40 - 8 - MQVPN_AEAD_TAG_LEN >= MQVPN_XQC_MAX_PKT_OUT_SIZE)
+        return MQVPN_XQC_MAX_PKT_OUT_SIZE;
     int v = path_mtu - 40 - 8 - MQVPN_PKT_OUT_OVERHEAD;
     if (v > MQVPN_XQC_MAX_PKT_OUT_SIZE) v = MQVPN_XQC_MAX_PKT_OUT_SIZE;
     if (v < 1200) v = 1200;
@@ -220,6 +225,22 @@ bool mqvpn_check_scheduler_preconditions(mqvpn_scheduler_t scheduler, int n_path
 #else
 #  define MQVPN_INTERNAL
 #endif
+
+/* ── Clock (mqvpn_clock.c) ──
+ * mqvpn_clock_us: the clock of the library's timers and of its xquic
+ * engines, CLOCK_BOOTTIME offset to read Unix time at its first reading.
+ * mqvpn_xqc_clock_*: the one clock all engines of a process share (xquic's
+ * clock is process-wide). acquire returns -1 while engines on another clock
+ * run; mqvpn_xqc_clock_now is the monotonic_ts callback of every engine.
+ * mqvpn_clock_test_sources (tests only) replaces the CLOCK_BOOTTIME and wall
+ * clock readings, NULL for the real ones, and takes the offset again as a
+ * new process would. */
+MQVPN_INTERNAL uint64_t mqvpn_clock_us(void);
+MQVPN_INTERNAL int mqvpn_xqc_clock_acquire(mqvpn_clock_fn fn, void *ctx);
+MQVPN_INTERNAL void mqvpn_xqc_clock_release(void);
+MQVPN_INTERNAL uint64_t mqvpn_xqc_clock_now(void);
+MQVPN_INTERNAL void mqvpn_clock_test_sources(uint64_t (*boot_us)(void),
+                                             uint64_t (*wall_us)(void));
 
 /* Returns "minrtt" / "wlb" / "wlb_udp_pin" / "backup_fec" / "unknown" —
  * caller-owned static string, do not free.

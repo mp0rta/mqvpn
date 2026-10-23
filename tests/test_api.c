@@ -153,6 +153,26 @@ TEST(config_add_user_max_capacity)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_username_length)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_NOT_NULL(cfg);
+    char name[65];
+    memset(name, 'a', 63);
+    name[63] = '\0';
+    ASSERT_EQ(mqvpn_config_add_user(cfg, name, "original"), MQVPN_OK);
+    name[63] = 'X';
+    name[64] = '\0';
+    ASSERT_EQ(mqvpn_config_add_user(cfg, name, "wrong"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(cfg->n_users, 1);
+    ASSERT_STR_EQ(cfg->user_keys[0], "original");
+    char json[256];
+    snprintf(json, sizeof(json), "{\"users\":[{\"name\":\"%s\",\"key\":\"wrong\"}]}",
+             name);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, json), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
 TEST(config_load_json)
 {
     const char *json = "{"
@@ -263,6 +283,144 @@ TEST(config_load_json_invalid_tuning)
               MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"cc\":\"reno\"}"), MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"mtu\":\"bad\"}"), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
+TEST(api_json_syntax_error_rejected)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"mtu\":1400"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"mtu\":1400} x"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "[1]"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(cfg->tun_mtu, 0);
+    mqvpn_config_free(cfg);
+}
+
+TEST(api_json_nested_and_duplicate)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"server_port\":4433}"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"x\":{\"server_port\":1}}"), MQVPN_OK);
+    ASSERT_EQ(cfg->server_port, 4433);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"server_port\":1,\"server_port\":2}"),
+              MQVPN_OK);
+    ASSERT_EQ(cfg->server_port, 1);
+    mqvpn_config_free(cfg);
+}
+
+TEST(api_json_skip_vs_hard_error)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"server_port\":4433,\"max_clients\":7}"),
+              MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_insecure(cfg, 1), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_scheduler(cfg, MQVPN_SCHED_MINRTT), MQVPN_OK);
+
+    /* skip keys: a mistyped value leaves the field as it was */
+    ASSERT_EQ(
+        mqvpn_config_load_json(
+            cfg, "{\"server_port\":\"x\",\"max_clients\":1.5,\"insecure\":\"yes\"}"),
+        MQVPN_OK);
+    ASSERT_EQ(cfg->server_port, 4433);
+    ASSERT_EQ(cfg->max_clients, 7);
+    ASSERT_EQ(cfg->insecure, 1);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"server_port\":4294967297}"), MQVPN_OK);
+    ASSERT_EQ(cfg->server_port, 4433);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"scheduler\":7}"), MQVPN_OK);
+    ASSERT_EQ(cfg->scheduler, MQVPN_SCHED_MINRTT);
+
+    /* strict keys: a mistyped value is a hard error */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"mtu\":1400.0}"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"mtu\":1.4e3}"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"init_max_path_id\":-1}"),
+              MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
+TEST(api_json_redundant_ports_decoded_length)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    char list[1100], buf[2200];
+
+    /* 254 characters after the trim pass, 255 do not */
+    memset(list, '0', 250);
+    strcpy(list + 250, "4200");
+    snprintf(buf, sizeof(buf), "{\"redundant_ports\":\"%s\"}", list);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, buf), MQVPN_OK);
+    ASSERT_EQ(cfg->n_redundant_ports, 1);
+    ASSERT_EQ(cfg->redundant_ports[0], 4200);
+    memset(list, '0', 251);
+    strcpy(list + 251, "4200");
+    snprintf(buf, sizeof(buf), "{\"redundant_ports\":\"%s\"}", list);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, buf), MQVPN_ERR_INVALID_ARG);
+
+    /* 1022 decoded characters pass on their trimmed length, 1023 do not */
+    memset(list, ' ', 1022);
+    memcpy(list + 1000, "443", 3);
+    list[1022] = '\0';
+    snprintf(buf, sizeof(buf), "{\"redundant_ports\":\"%s\"}", list);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, buf), MQVPN_OK);
+    ASSERT_EQ(cfg->n_redundant_ports, 1);
+    ASSERT_EQ(cfg->redundant_ports[0], 443);
+    list[1022] = ' ';
+    list[1023] = '\0';
+    snprintf(buf, sizeof(buf), "{\"redundant_ports\":\"%s\"}", list);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, buf), MQVPN_ERR_INVALID_ARG);
+
+    /* the cap counts decoded characters: 1000 "\t" escapes are 1000, not 2000 */
+    char *p = buf + snprintf(buf, sizeof(buf), "{\"redundant_ports\":\"");
+    for (int i = 0; i < 1000; i++, p += 2)
+        memcpy(p, "\\t", 2);
+    snprintf(p, sizeof(buf) - (size_t)(p - buf), "4200%18s\"}", "");
+    ASSERT_EQ(mqvpn_config_load_json(cfg, buf), MQVPN_OK);
+    ASSERT_EQ(cfg->redundant_ports[0], 4200);
+
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"redundant_ports\":\"a\\u0000b\"}"),
+              MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
+TEST(api_json_users_reset_and_partial)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_add_user(cfg, "alice", "a1"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_add_user(cfg, "bob", "b2"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"users\":[]}"), MQVPN_OK);
+    ASSERT_EQ(cfg->n_users, 0);
+
+    ASSERT_EQ(mqvpn_config_add_user(cfg, "alice", "a1"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_add_user(cfg, "bob", "b2"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"users\":\"x\"}"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(cfg->n_users, 2);
+    ASSERT_STR_EQ(cfg->user_names[0], "alice");
+    ASSERT_STR_EQ(cfg->user_names[1], "bob");
+
+    /* a syntax error leaves the config untouched */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"users\":[\"zed:1\","),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(cfg->n_users, 2);
+    ASSERT_STR_EQ(cfg->user_names[0], "alice");
+    ASSERT_STR_EQ(cfg->user_names[1], "bob");
+
+    /* a bad element in valid JSON keeps the elements before it */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"users\":[\"a:1\",5]}"),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(cfg->n_users, 1);
+    ASSERT_STR_EQ(cfg->user_names[0], "a");
+
+    /* Long usernames must not turn into a different, truncated identity. */
+    char name[201], key[201], longa[361], json[600];
+    memset(name, 'n', 200);
+    name[200] = '\0';
+    memset(key, 'k', 200);
+    key[200] = '\0';
+    snprintf(json, sizeof(json), "{\"users\":[\"%s:%s\"]}", name, key);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, json), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(cfg->n_users, 0);
+    memset(longa, 'a', 360);
+    longa[360] = '\0';
+    snprintf(json, sizeof(json), "{\"users\":[\"%s:k\"]}", longa);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, json), MQVPN_ERR_INVALID_ARG);
     mqvpn_config_free(cfg);
 }
 
@@ -1970,8 +2128,8 @@ TEST(client_set_state_to_connecting_records_handshake_start)
     ASSERT_EQ(mqvpn_client_test_get_handshake_started_us(c), 0u);
 
     ASSERT_EQ(mqvpn_client_test_force_state(c, MQVPN_STATE_CONNECTING), 0);
-    /* Real wall clock used (no clock_fn injected on test client) — we can
-     * only assert non-zero, not a specific value. */
+    /* Real clock used (no clock_fn injected on test client) — we can only
+     * assert non-zero, not a specific value. */
     ASSERT_NE(mqvpn_client_test_get_handshake_started_us(c), 0u);
 
     mqvpn_client_destroy(c);
@@ -4036,6 +4194,7 @@ main(void)
     run_config_set_auth_key();
     run_config_add_remove_user();
     run_config_add_user_max_capacity();
+    run_config_username_length();
     run_config_load_json();
     run_config_set_redundant_validates();
     run_config_json_redundant();
@@ -4043,6 +4202,11 @@ main(void)
     run_config_load_json_invalid_users();
     run_config_load_json_users_brace_in_string_value();
     run_config_load_json_invalid_tuning();
+    run_api_json_syntax_error_rejected();
+    run_api_json_nested_and_duplicate();
+    run_api_json_skip_vs_hard_error();
+    run_api_json_redundant_ports_decoded_length();
+    run_api_json_users_reset_and_partial();
     run_config_set_tls_server_name();
     run_config_set_insecure();
     run_config_set_tun_mtu();

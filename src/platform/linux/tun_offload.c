@@ -33,6 +33,7 @@
 #include "tun_offload.h"
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <stdlib.h>
 #include <string.h>
@@ -271,20 +272,25 @@ mqvpn_gso_next(mqvpn_gso_iter_t *it, uint8_t *out, size_t out_cap)
 }
 
 /* ---------------------------------------------------------------------------
- * TCP GRO
+ * TCP and UDP GRO
  * ------------------------------------------------------------------------- */
 
 #define GRO_SLOTS   8
 #define GRO_MAX_LEN 65535
+/* Segments in one UDP GSO packet: UDP_MAX_SEGMENTS, which is 64 before Linux
+ * 6.9 (128 after); the kernel rejects a larger virtio GSO packet. */
+#define GRO_UDP_MAX_SEGS 64
 
 typedef struct {
     int used;
     int closed;   /* nothing more may be merged (short segment or PSH) */
     int ack_only; /* holds one pure ACK, which only a later ACK may replace */
     int v6;
+    uint8_t proto; /* IPPROTO_TCP or IPPROTO_UDP */
     uint16_t ip_hlen;
-    uint16_t tcp_hlen;
+    uint16_t l4_hlen;  /* TCP header with options, or the UDP header */
     uint16_t gso_size; /* payload of the first segment */
+    uint16_t next_id;  /* UDP over IPv4: IP ID the next datagram must carry */
     uint32_t nseg;
     uint32_t next_seq; /* host order */
     size_t len;
@@ -295,7 +301,10 @@ struct mqvpn_gro {
     mqvpn_gro_emit_fn emit;
     void *ctx;
     unsigned victim; /* round robin slot to evict when the table is full */
+    int udp4, udp6;  /* UDP runs may be held (the TUN took USO) */
+    int udp_refused; /* a UDP GSO packet was refused: merge no more UDP */
     uint64_t pushed, supers, merged, acks;
+    uint64_t udp_supers, udp_merged; /* the UDP part of supers / merged */
     gro_entry_t e[GRO_SLOTS];
 };
 
@@ -314,6 +323,22 @@ void
 mqvpn_gro_free(mqvpn_gro_t *g)
 {
     free(g);
+}
+
+void
+mqvpn_gro_set_udp(mqvpn_gro_t *g, int v4, int v6)
+{
+    mqvpn_gro_flush(g);
+    g->udp4 = v4 != 0;
+    g->udp6 = v6 != 0;
+    g->udp_refused = 0;
+}
+
+void
+mqvpn_gro_udp_stats(const mqvpn_gro_t *g, uint64_t *supers, uint64_t *merged)
+{
+    *supers = g->udp_supers;
+    *merged = g->udp_merged;
 }
 
 void
@@ -337,40 +362,57 @@ mqvpn_gro_pending(const mqvpn_gro_t *g)
 /* What a packet looks like to the merger. */
 typedef struct {
     int v6;
+    uint8_t proto;
     size_t ip_hlen;
-    size_t tcp_hlen;
+    size_t l4_hlen;
     size_t payload;
     uint32_t seq;
     uint8_t flags;
 } gro_pkt_t;
 
-/* A plain TCP segment: no IP options or extension headers, not a fragment,
- * lengths consistent; either data with only ACK (and PSH) set, or a pure ACK
- * (no payload, only the ACK flag). */
+/* A plain TCP segment or UDP datagram: no IP options or extension headers,
+ * not a fragment, lengths consistent. TCP: either data with only ACK (and
+ * PSH) set, or a pure ACK (no payload, only the ACK flag). UDP, only when
+ * the TUN takes USO for the family: a payload, a checksum (a zero one would
+ * become a computed one when the kernel splits the datagrams again) and a UDP
+ * length that covers the whole packet (no surplus area). */
 static int
-gro_parse(const uint8_t *p, size_t len, gro_pkt_t *g)
+gro_parse(const mqvpn_gro_t *gro, const uint8_t *p, size_t len, gro_pkt_t *g)
 {
     if (len < IPV4_MIN_HLEN) return 0;
     if ((p[0] >> 4) == 4) {
-        if (p[0] != 0x45 || len < IPV4_MIN_HLEN + TCP_MIN_HLEN || p[9] != IPPROTO_TCP)
-            return 0;
+        if (p[0] != 0x45) return 0;
         if ((get_be16(p + 6) & 0x3fff) != 0 || get_be16(p + 2) != len) return 0;
         g->v6 = 0;
+        g->proto = p[9];
         g->ip_hlen = IPV4_MIN_HLEN;
     } else if ((p[0] >> 4) == 6) {
-        if (len < IPV6_HLEN + TCP_MIN_HLEN || p[6] != IPPROTO_TCP) return 0;
-        if (get_be16(p + 4) != len - IPV6_HLEN) return 0;
+        if (len < IPV6_HLEN || get_be16(p + 4) != len - IPV6_HLEN) return 0;
         g->v6 = 1;
+        g->proto = p[6];
         g->ip_hlen = IPV6_HLEN;
     } else {
         return 0;
     }
+    if (g->proto == IPPROTO_UDP) {
+        if (!(g->v6 ? gro->udp6 : gro->udp4) || gro->udp_refused) return 0;
+        if (len < g->ip_hlen + UDP_HLEN) return 0;
+        const uint8_t *u = p + g->ip_hlen;
+        if (get_be16(u + 4) != len - g->ip_hlen) return 0;
+        if (u[6] == 0 && u[7] == 0) return 0;
+        g->l4_hlen = UDP_HLEN;
+        g->payload = len - g->ip_hlen - UDP_HLEN;
+        g->seq = 0;
+        g->flags = 0;
+        return g->payload > 0;
+    }
+    if (g->proto != IPPROTO_TCP || len < g->ip_hlen + TCP_MIN_HLEN) return 0;
     const uint8_t *t = p + g->ip_hlen;
-    g->tcp_hlen = (size_t)(t[12] >> 4) * 4;
-    if (g->tcp_hlen < TCP_MIN_HLEN || g->ip_hlen + g->tcp_hlen > len) return 0;
+    g->l4_hlen = (size_t)(t[12] >> 4) * 4;
+    if (g->l4_hlen < TCP_MIN_HLEN || g->ip_hlen + g->l4_hlen > len) return 0;
     if (t[12] & 0x0f) return 0; /* reserved bits or AccECN's AE flag */
     g->flags = t[13];
-    g->payload = len - g->ip_hlen - g->tcp_hlen;
+    g->payload = len - g->ip_hlen - g->l4_hlen;
     /* Data: ACK, optionally PSH. Pure ACK: ACK alone. */
     uint8_t flags = g->payload ? (uint8_t)(g->flags & ~TCP_FLAG_PSH) : g->flags;
     if (flags != TCP_FLAG_ACK) return 0;
@@ -388,6 +430,24 @@ gro_emit_plain(mqvpn_gro_t *g, const uint8_t *p, size_t len)
     g->emit(g->ctx, &vh, p, len);
 }
 
+/* The kernel refused a UDP GSO packet: stop merging UDP and write the
+ * datagrams one by one, as the splitter cuts them back (IPv4 IDs were
+ * consecutive, so they come out as they went in). udp4/udp6 stay set: runs
+ * of other flows, and a datagram parsed before the refusal, may still be
+ * held, and a later datagram of their flow must flush them first. */
+static void
+gro_udp_fallback(mqvpn_gro_t *g, gro_entry_t *e, const struct virtio_net_hdr *vh)
+{
+    static uint8_t seg[GRO_MAX_LEN];
+    mqvpn_gso_iter_t it;
+    int n;
+
+    g->udp_refused = 1;
+    if (mqvpn_gso_begin(&it, e->buf, e->len, vh) < 0) return;
+    while ((n = mqvpn_gso_next(&it, seg, sizeof(seg))) > 0)
+        gro_emit_plain(g, seg, (size_t)n);
+}
+
 static void
 gro_flush_entry(mqvpn_gro_t *g, gro_entry_t *e)
 {
@@ -399,8 +459,9 @@ gro_flush_entry(mqvpn_gro_t *g, gro_entry_t *e)
     }
 
     uint8_t *ip = e->buf;
-    uint8_t *tcp = ip + e->ip_hlen;
+    uint8_t *l4 = ip + e->ip_hlen;
     size_t l4len = e->len - e->ip_hlen;
+    int udp = e->proto == IPPROTO_UDP;
 
     if (e->v6) {
         put_be16(ip + 4, (uint16_t)(e->len - IPV6_HLEN));
@@ -410,21 +471,32 @@ gro_flush_entry(mqvpn_gro_t *g, gro_entry_t *e)
         csum_store(ip + 10, csum_sum(ip, e->ip_hlen, 0));
     }
     /* Partial checksum: the field carries the pseudo-header sum, not
-     * complemented, for the kernel (or a NIC) to finish. */
-    uint16_t ph = csum_fold(csum_pseudo(ip, e->v6, IPPROTO_TCP, l4len));
-    memcpy(tcp + 16, &ph, 2);
+     * complemented, for the kernel (or a NIC) to finish. For UDP the kernel
+     * takes the length out of that sum again for each datagram it cuts, so
+     * the header carries the length of the whole run. */
+    if (udp) put_be16(l4 + 4, (uint16_t)l4len);
+    uint16_t ph = csum_fold(csum_pseudo(ip, e->v6, e->proto, l4len));
+    memcpy(l4 + (udp ? 6 : 16), &ph, 2);
 
     struct virtio_net_hdr vh;
     memset(&vh, 0, sizeof(vh));
     vh.flags = VIRTIO_NET_HDR_F_NEEDS_CSUM;
-    vh.gso_type = e->v6 ? VIRTIO_NET_HDR_GSO_TCPV6 : VIRTIO_NET_HDR_GSO_TCPV4;
-    vh.hdr_len = (uint16_t)(e->ip_hlen + e->tcp_hlen);
+    if (udp)
+        vh.gso_type = VIRTIO_NET_HDR_GSO_UDP_L4;
+    else
+        vh.gso_type = e->v6 ? VIRTIO_NET_HDR_GSO_TCPV6 : VIRTIO_NET_HDR_GSO_TCPV4;
+    vh.hdr_len = (uint16_t)(e->ip_hlen + e->l4_hlen);
     vh.gso_size = e->gso_size;
     vh.csum_start = e->ip_hlen;
-    vh.csum_offset = 16;
+    vh.csum_offset = udp ? 6 : 16;
     g->supers++;
     g->merged += e->nseg;
-    g->emit(g->ctx, &vh, e->buf, e->len);
+    if (udp) {
+        g->udp_supers++;
+        g->udp_merged += e->nseg;
+    }
+    if (g->emit(g->ctx, &vh, e->buf, e->len) == -EINVAL && udp)
+        gro_udp_fallback(g, e, &vh);
 }
 
 void
@@ -434,11 +506,11 @@ mqvpn_gro_flush(mqvpn_gro_t *g)
         gro_flush_entry(g, &g->e[i]);
 }
 
-/* Same flow: addresses and ports. */
+/* Same flow: protocol, addresses and ports. */
 static int
 gro_same_flow(const gro_entry_t *e, const uint8_t *p, const gro_pkt_t *k)
 {
-    if (e->v6 != k->v6) return 0;
+    if (e->v6 != k->v6 || e->proto != k->proto) return 0;
     size_t alen = k->v6 ? 32 : 8;
     size_t aoff = k->v6 ? 8 : 12;
     return memcmp(e->buf + aoff, p + aoff, alen) == 0 &&
@@ -452,7 +524,7 @@ gro_same_flow(const gro_entry_t *e, const uint8_t *p, const gro_pkt_t *k)
 static int
 gro_can_append(const gro_entry_t *e, const uint8_t *p, const gro_pkt_t *k)
 {
-    if (e->closed || e->ack_only || k->tcp_hlen != e->tcp_hlen) return 0;
+    if (e->closed || e->ack_only || k->l4_hlen != e->l4_hlen) return 0;
     if (k->payload > e->gso_size || k->seq != e->next_seq) return 0;
     if (e->len + k->payload > GRO_MAX_LEN) return 0;
     if (k->v6) {
@@ -465,7 +537,7 @@ gro_can_append(const gro_entry_t *e, const uint8_t *p, const gro_pkt_t *k)
     if (memcmp(a + 8, b + 8, 4) != 0) return 0; /* ACK number */
     if ((a[13] & (uint8_t)~TCP_FLAG_PSH) != (b[13] & (uint8_t)~TCP_FLAG_PSH)) return 0;
     if (memcmp(a + 14, b + 14, 2) != 0) return 0; /* window */
-    if (k->tcp_hlen > TCP_MIN_HLEN && memcmp(a + 20, b + 20, k->tcp_hlen - 20) != 0)
+    if (k->l4_hlen > TCP_MIN_HLEN && memcmp(a + 20, b + 20, k->l4_hlen - 20) != 0)
         return 0; /* options */
     return 1;
 }
@@ -480,7 +552,7 @@ gro_can_append(const gro_entry_t *e, const uint8_t *p, const gro_pkt_t *k)
 static int
 gro_ack_supersedes(const gro_entry_t *e, const uint8_t *p, const gro_pkt_t *k)
 {
-    if (k->tcp_hlen != e->tcp_hlen) return 0;
+    if (k->l4_hlen != e->l4_hlen) return 0;
     if (k->v6) {
         if (memcmp(e->buf, p, 4) != 0 || e->buf[7] != p[7]) return 0;
     } else {
@@ -488,12 +560,48 @@ gro_ack_supersedes(const gro_entry_t *e, const uint8_t *p, const gro_pkt_t *k)
     }
     const uint8_t *a = e->buf + e->ip_hlen, *b = p + k->ip_hlen;
     if (memcmp(a + 4, b + 4, 4) != 0) return 0; /* sequence number */
-    if (k->tcp_hlen > TCP_MIN_HLEN && memcmp(a + 20, b + 20, k->tcp_hlen - 20) != 0)
+    if (k->l4_hlen > TCP_MIN_HLEN && memcmp(a + 20, b + 20, k->l4_hlen - 20) != 0)
         return 0; /* options */
     uint32_t held, ack;
     memcpy(&held, a + 8, 4);
     memcpy(&ack, b + 8, 4);
     return (int32_t)(ntohl(ack) - ntohl(held)) > 0;
+}
+
+/* Can the UDP datagram p join the run e holds? Same IP header fields (TOS,
+ * DF and TTL, or traffic class, flow label and hop limit), an IPv4 ID one
+ * past the last one (the kernel numbers the datagrams it cuts that way), and
+ * a payload of the run's size, or a smaller one that ends the run: the GSO
+ * size is that of every datagram but the last. */
+static int
+gro_udp_can_append(const gro_entry_t *e, const uint8_t *p, const gro_pkt_t *k)
+{
+    if (e->closed || k->payload > e->gso_size) return 0;
+    if (e->nseg >= GRO_UDP_MAX_SEGS || e->len + k->payload > GRO_MAX_LEN) return 0;
+    if (k->v6) return memcmp(e->buf, p, 4) == 0 && e->buf[7] == p[7];
+    return e->buf[1] == p[1] && e->buf[6] == p[6] && e->buf[8] == p[8] &&
+           get_be16(p + 4) == e->next_id;
+}
+
+/* Can a packet we do not merge belong to a flow with something held? Then
+ * whatever its addresses hold goes out first. A TCP packet can, and a UDP one
+ * once UDP runs may be held (even after a refused write ended merging). Its
+ * ports may sit behind IPv4 options or IPv6 extension headers, or in another
+ * fragment, so the caller matches on the addresses only; an IPv6 packet that
+ * is not UDP may be TCP or UDP behind such a header. */
+static int
+gro_may_follow_held(const mqvpn_gro_t *g, const uint8_t *p, size_t len)
+{
+    int ver = p[0] >> 4;
+    if (ver == 4) {
+        if (len < IPV4_MIN_HLEN) return 0;
+        return p[9] == IPPROTO_TCP || (p[9] == IPPROTO_UDP && g->udp4);
+    }
+    if (ver == 6) {
+        if (len < IPV6_HLEN) return 0;
+        return p[6] != IPPROTO_UDP || g->udp6;
+    }
+    return 0;
 }
 
 void
@@ -508,16 +616,14 @@ mqvpn_gro_push(mqvpn_gro_t *g, const uint8_t *p, size_t len)
     }
 
     /* Longer than an entry's buffer: never merged, but still ordered. */
-    if (len > GRO_MAX_LEN || !gro_parse(p, len, &k)) {
+    if (len > GRO_MAX_LEN || !gro_parse(g, p, len, &k)) {
         /* Not mergeable. Packets of other flows may pass; but a TCP packet we
          * cannot merge (SYN, FIN, RST, ...) must not overtake data or an ACK
-         * of its own flow still held back. Its ports may sit behind IPv4
-         * options or IPv6 extension headers, so match on the addresses only;
-         * an IPv6 packet that is not UDP may be TCP behind such a header. */
-        int ver = p[0] >> 4;
-        if ((ver == 4 && len >= IPV4_MIN_HLEN && p[9] == IPPROTO_TCP) ||
-            (ver == 6 && len >= IPV6_HLEN && p[6] != IPPROTO_UDP)) {
-            int v6 = ver == 6;
+         * of its own flow still held back, nor a UDP datagram we cannot merge
+         * (a fragment, no checksum, any after a refused write, ...) the
+         * datagrams held for its flow. */
+        if (gro_may_follow_held(g, p, len)) {
+            int v6 = (p[0] >> 4) == 6;
             size_t aoff = v6 ? 8 : 12, alen = v6 ? 32 : 8;
             for (int i = 0; i < GRO_SLOTS; i++) {
                 gro_entry_t *e = &g->e[i];
@@ -537,7 +643,16 @@ mqvpn_gro_push(mqvpn_gro_t *g, const uint8_t *p, size_t len)
             continue;
         }
         if (!gro_same_flow(e, p, &k)) continue;
-        if (k.payload == 0) {
+        if (k.proto == IPPROTO_UDP) {
+            if (gro_udp_can_append(e, p, &k)) {
+                memcpy(e->buf + e->len, p + k.ip_hlen + UDP_HLEN, k.payload);
+                e->len += k.payload;
+                e->nseg++;
+                e->next_id++;
+                if (k.payload < e->gso_size) e->closed = 1;
+                return;
+            }
+        } else if (k.payload == 0) {
             if (e->ack_only && gro_ack_supersedes(e, p, &k)) {
                 memcpy(e->buf, p, len);
                 e->len = len;
@@ -545,7 +660,7 @@ mqvpn_gro_push(mqvpn_gro_t *g, const uint8_t *p, size_t len)
                 return;
             }
         } else if (gro_can_append(e, p, &k)) {
-            memcpy(e->buf + e->len, p + k.ip_hlen + k.tcp_hlen, k.payload);
+            memcpy(e->buf + e->len, p + k.ip_hlen + k.l4_hlen, k.payload);
             e->len += k.payload;
             e->next_seq += (uint32_t)k.payload;
             e->nseg++;
@@ -565,10 +680,12 @@ mqvpn_gro_push(mqvpn_gro_t *g, const uint8_t *p, size_t len)
     }
     gro_entry_t *e = free_slot;
     e->used = 1;
-    e->ack_only = k.payload == 0;
+    e->ack_only = k.proto == IPPROTO_TCP && k.payload == 0;
     e->v6 = k.v6;
+    e->proto = k.proto;
+    e->next_id = k.v6 ? 0 : (uint16_t)(get_be16(p + 4) + 1);
     e->ip_hlen = (uint16_t)k.ip_hlen;
-    e->tcp_hlen = (uint16_t)k.tcp_hlen;
+    e->l4_hlen = (uint16_t)k.l4_hlen;
     e->gso_size = (uint16_t)k.payload;
     e->nseg = 1;
     e->next_seq = k.seq + (uint32_t)k.payload;

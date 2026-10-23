@@ -5,12 +5,10 @@
  * test_control_socket.c — unit tests for the control-API command dispatch
  * (src/platform/linux/control_socket.c::dispatch).
  *
- * dispatch()'s command routing, argument validation, error codes, and response
- * JSON shape had no unit-level test — test_control_response_bound.c only checks
- * the worst-case get_status buffer bound and never calls dispatch(). This test
- * drives dispatch() end to end with the server-facing API mocked, covering
- * handler logic (missing-arg handling, failure propagation, JSON shape) without
- * sudo/netns.
+ * Drives dispatch() end to end with the server-facing API mocked, covering
+ * command routing, argument validation, error codes and the response JSON
+ * (shape, escaping, the worst-case get_status size bound, the too-large
+ * envelope) without sudo/netns.
  *
  * dispatch() is static, so — following the test_reorder_rx / test_tcp_lane
  * idiom — this file #include's the .c directly and satisfies the mqvpn_server_*
@@ -29,6 +27,7 @@
 /* ── Configurable stub state ──────────────────────────────────────────────── */
 
 static int g_add_user_rc = MQVPN_OK;
+static char g_last_add_name[128];
 static int g_remove_user_rc = MQVPN_OK;
 
 static int g_list_users_n = 0;
@@ -41,7 +40,9 @@ static int g_client_info_n = 0;
 static mqvpn_client_info_t g_client_info_tmpl;
 
 static mqvpn_internal_client_reinject_t g_reinject_tmpl; /* configured per test */
-static int g_sched_n = 1; /* entries the sched getter returns */
+static int g_reinject_n = 1;           /* copies the reinject getter returns */
+static int g_sched_n = 1;              /* entries the sched getter returns */
+static char g_sched_label[16] = "wlb"; /* scheduler name each entry carries */
 
 static int g_fec_rc = 1;
 static mqvpn_internal_fec_stats_t g_fec_tmpl;
@@ -50,6 +51,7 @@ static int g_all_fec_rc = 0;
 static int g_all_fec_n = 0;
 
 static int g_reorder_rc = 0;
+static double g_reorder_p99 = 1.5;
 
 /* ── Stubs for the server-facing API the handlers call ────────────────────── */
 
@@ -57,8 +59,8 @@ int
 mqvpn_server_add_user(mqvpn_server_t *s, const char *u, const char *k)
 {
     (void)s;
-    (void)u;
     (void)k;
+    snprintf(g_last_add_name, sizeof(g_last_add_name), "%s", u);
     return g_add_user_rc;
 }
 
@@ -145,8 +147,10 @@ mqvpn_server_get_client_reinject(const mqvpn_server_t *s,
                                  mqvpn_internal_client_reinject_t *out, int max)
 {
     (void)s;
-    if (max > 0) out[0] = g_reinject_tmpl;
-    return max > 0 ? 1 : 0;
+    int n = g_reinject_n < max ? g_reinject_n : max;
+    for (int i = 0; i < n; i++)
+        out[i] = g_reinject_tmpl;
+    return n;
 }
 
 int
@@ -157,7 +161,7 @@ mqvpn_server_get_client_sched(const mqvpn_server_t *s, mqvpn_internal_client_sch
     if (g_sched_n < 0) return -1;
     int n = g_sched_n < max ? g_sched_n : max;
     for (int i = 0; i < n; i++)
-        snprintf(out[i].scheduler, sizeof(out[i].scheduler), "wlb");
+        snprintf(out[i].scheduler, sizeof(out[i].scheduler), "%s", g_sched_label);
     return n;
 }
 
@@ -199,7 +203,7 @@ mqvpn_reorder_latency_percentile(const mqvpn_reorder_stats_t *st, double q)
 {
     (void)st;
     (void)q;
-    return 1.5;
+    return g_reorder_p99;
 }
 
 double
@@ -287,6 +291,50 @@ test_unknown_cmd(void)
     CHECK_EQ_STR("{\"ok\":false,\"error\":\"unknown cmd\"}");
 }
 
+/* A request whose first JSON value is not a complete object with a top-level
+ * string "cmd" gets "missing cmd": truncated documents (incl. the EOF-closed
+ * {"cmd":"add_user" of e2e D5a), a non-object root, a cmd only in a nested
+ * object, a non-string cmd, and empty input. */
+static void
+test_missing_cmd_variants(void)
+{
+    static const char *reqs[] = {
+        "{\"cmd\":",     "{\"cmd\":\"add_user\"",
+        "[1]",           "{\"x\":{\"cmd\":\"get_stats\"}}",
+        "{\"cmd\":123}", "",
+        "  \n",
+    };
+    for (size_t i = 0; i < sizeof(reqs) / sizeof(reqs[0]); i++) {
+        call(reqs[i]);
+        CHECK_EQ_STR("{\"ok\":false,\"error\":\"missing cmd\"}");
+    }
+}
+
+static void
+test_duplicate_cmd_first_wins(void)
+{
+    call("{\"cmd\":\"get_stats\",\"cmd\":\"list_users\"}");
+    CHECK_HAS("\"bytes_tx\":111");
+}
+
+/* Bytes after the first complete object (same read as the request) are
+ * ignored, matching the brace framing in ctrl_on_read(). */
+static void
+test_trailing_bytes_ignored(void)
+{
+    call("{\"cmd\":\"get_stats\"} junk");
+    CHECK_HAS("\"bytes_tx\":111");
+    call("{\"cmd\":\"get_stats\"}\n");
+    CHECK_HAS("\"bytes_tx\":111");
+}
+
+static void
+test_escaped_cmd_decoded(void)
+{
+    call("{\"cmd\":\"get\\u005fstats\"}");
+    CHECK_HAS("\"bytes_tx\":111");
+}
+
 /* ── add_user ─────────────────────────────────────────────────────────────── */
 
 static void
@@ -319,6 +367,50 @@ test_add_user_server_failure(void)
     CHECK_HAS("add_user failed (-5)");
 }
 
+static void
+test_add_user_name_decoded_and_bounded(void)
+{
+    g_add_user_rc = MQVPN_OK;
+    call("{\"cmd\":\"add_user\",\"name\":\"a}b\\\"c\",\"key\":\"k\"}");
+    CHECK_EQ_STR("{\"ok\":true}");
+    CHECK(strcmp(g_last_add_name, "a}b\"c") == 0);
+
+    char name[65];
+    char req[256];
+    memset(name, 'n', 63);
+    name[63] = '\0';
+    snprintf(req, sizeof(req), "{\"cmd\":\"add_user\",\"name\":\"%s\",\"key\":\"k\"}",
+             name);
+    call(req);
+    CHECK_EQ_STR("{\"ok\":true}");
+    CHECK(strcmp(g_last_add_name, name) == 0);
+
+    name[63] = 'n';
+    name[64] = '\0';
+    snprintf(req, sizeof(req), "{\"cmd\":\"add_user\",\"name\":\"%s\",\"key\":\"k\"}",
+             name);
+    g_last_add_name[0] = '\0';
+    call(req);
+    CHECK_EQ_STR("{\"ok\":false,\"error\":\"name exceeds 63 bytes\"}");
+    CHECK(g_last_add_name[0] == '\0');
+
+    /* The limit counts decoded UTF-8 bytes, not JSON escape characters. */
+    name[61] = '\0';
+    snprintf(req, sizeof(req),
+             "{\"cmd\":\"add_user\",\"name\":\"%s\\u00e9\",\"key\":\"k\"}", name);
+    call(req);
+    CHECK_EQ_STR("{\"ok\":true}");
+    CHECK(strlen(g_last_add_name) == 63);
+    name[61] = 'n';
+    name[62] = '\0';
+    snprintf(req, sizeof(req),
+             "{\"cmd\":\"add_user\",\"name\":\"%s\\u00e9\",\"key\":\"k\"}", name);
+    g_last_add_name[0] = '\0';
+    call(req);
+    CHECK_EQ_STR("{\"ok\":false,\"error\":\"name exceeds 63 bytes\"}");
+    CHECK(g_last_add_name[0] == '\0');
+}
+
 /* ── remove_user ──────────────────────────────────────────────────────────── */
 
 static void
@@ -342,6 +434,31 @@ test_remove_user_not_found(void)
     g_remove_user_rc = -1;
     call("{\"cmd\":\"remove_user\",\"name\":\"ghost\"}");
     CHECK_HAS("user not found");
+}
+
+static void
+test_user_lookup_name_length(void)
+{
+    char name[65], req[160];
+    memset(name, 'n', 64);
+    name[64] = '\0';
+    g_remove_user_rc = MQVPN_OK;
+    g_fec_rc = 1;
+    snprintf(req, sizeof(req), "{\"cmd\":\"remove_user\",\"name\":\"%s\"}", name);
+    call(req);
+    CHECK_EQ_STR("{\"ok\":false,\"error\":\"name exceeds 63 bytes\"}");
+    snprintf(req, sizeof(req), "{\"cmd\":\"get_fec_stats\",\"user\":\"%s\"}", name);
+    call(req);
+    CHECK_EQ_STR("{\"ok\":false,\"error\":\"name exceeds 63 bytes\"}");
+
+    name[63] = '\0';
+    snprintf(req, sizeof(req), "{\"cmd\":\"remove_user\",\"name\":\"%s\"}", name);
+    call(req);
+    CHECK_EQ_STR("{\"ok\":true}");
+    snprintf(req, sizeof(req), "{\"cmd\":\"get_fec_stats\",\"user\":\"%s\"}", name);
+    call(req);
+    CHECK_HAS("\"ok\":true");
+    CHECK_HAS(name);
 }
 
 /* ── list_users ───────────────────────────────────────────────────────────── */
@@ -380,7 +497,7 @@ test_get_stats(void)
     /* Offload counters reach the JSON from BOTH sources: udp_tx_* through
      * mqvpn_stats_t (the library issues those sends), udp_rx_* from the
      * platform's transport getter (RX offload never crosses the library ABI).
-     * The get_stats body is a hand-written field-by-field snprintf, so a new
+     * The get_stats body is a hand-written field-by-field list, so a new
      * mqvpn_stats_t field silently reads 0 here unless it is added in both
      * places — that is exactly the failure this pins. */
     CHECK_HAS("\"udp_tx_sends\":1234");
@@ -598,20 +715,196 @@ test_get_reorder_stats_internal_error(void)
     CHECK_HAS("internal error");
 }
 
+/* ── Response encoding ────────────────────────────────────────────────────── */
+
+/* g_resp as one JSON document (invalid UTF-8 accepted: the server passes name
+ * bytes through), or NULL. Free with yyjson_doc_free. */
+static yyjson_doc *
+parse_resp(void)
+{
+    return yyjson_read(g_resp, strlen(g_resp), YYJSON_READ_ALLOW_INVALID_UNICODE);
+}
+
+static void
+test_response_strings_escaped(void)
+{
+    g_list_users_n = 1;
+    strcpy(g_list_users_names[0], "a\"b\\c");
+    call("{\"cmd\":\"list_users\"}");
+    CHECK_EQ_STR("{\"ok\":true,\"users\":[\"a\\\"b\\\\c\"]}");
+    yyjson_doc *d = parse_resp();
+    yyjson_val *root = yyjson_doc_get_root(d);
+    CHECK(yyjson_equals_str(yyjson_arr_get(yyjson_obj_get(root, "users"), 0), "a\"b\\c"));
+    yyjson_doc_free(d);
+
+    memset(&g_client_info_tmpl, 0, sizeof(g_client_info_tmpl));
+    strcpy(g_client_info_tmpl.username, "alice");
+    strcpy(g_client_info_tmpl.endpoint, "1.2.3.4:5\"\\");
+    g_client_info_n = 1;
+    call("{\"cmd\":\"get_status\"}");
+    d = parse_resp();
+    root = yyjson_doc_get_root(d);
+    yyjson_val *c0 = yyjson_arr_get(yyjson_obj_get(root, "clients"), 0);
+    CHECK(yyjson_equals_str(yyjson_obj_get(c0, "endpoint"), "1.2.3.4:5\"\\"));
+    yyjson_doc_free(d);
+
+    seed_fec_tmpl();
+    g_fec_rc = 1;
+    call("{\"cmd\":\"get_fec_stats\",\"user\":\"x\\\"y\"}");
+    d = parse_resp();
+    CHECK(yyjson_equals_str(yyjson_obj_get(yyjson_doc_get_root(d), "user"), "x\"y"));
+    yyjson_doc_free(d);
+}
+
+/* A name cut mid-character by name[64] is passed through byte for byte, not
+ * turned into an error envelope for the whole list. */
+static void
+test_response_invalid_utf8_passthrough(void)
+{
+    char name[64];
+    memset(name, 'a', 62);
+    name[62] = '\xC3'; /* first byte of a 2-byte UTF-8 sequence */
+    name[63] = '\0';
+    g_list_users_n = 1;
+    memcpy(g_list_users_names[0], name, sizeof(name));
+    call("{\"cmd\":\"list_users\"}");
+    CHECK_HAS("\"ok\":true");
+    CHECK(strstr(g_resp, name) != NULL);
+    yyjson_doc *d = parse_resp();
+    yyjson_val *u0 = yyjson_arr_get(yyjson_obj_get(yyjson_doc_get_root(d), "users"), 0);
+    CHECK(yyjson_get_len(u0) == 63 && memcmp(yyjson_get_str(u0), name, 63) == 0);
+    yyjson_doc_free(d);
+}
+
+/* added_latency_*_ms keep at most 3 decimals; compared as a value, not text. */
+static void
+test_reorder_stats_fixed3(void)
+{
+    g_reorder_rc = 0;
+    g_reorder_p99 = 1.23456;
+    call("{\"cmd\":\"get_reorder_stats\"}");
+    yyjson_doc *d = parse_resp();
+    yyjson_val *reorder = yyjson_obj_get(yyjson_doc_get_root(d), "reorder");
+    yyjson_val *p99 = yyjson_obj_get(reorder, "added_latency_p99_ms");
+    CHECK(yyjson_is_real(p99) && yyjson_get_real(p99) == 1.235);
+    yyjson_doc_free(d);
+}
+
+/* MQVPN_MAX_USERS clients x MQVPN_MAX_PATHS paths, every number at its widest
+ * and every string at its longest. */
+static void
+seed_worst_case(void)
+{
+    memset(&g_client_info_tmpl, 0, sizeof(g_client_info_tmpl));
+    memset(g_client_info_tmpl.username, 'u', 63);
+    memset(g_client_info_tmpl.endpoint, 'e', 63);
+    g_client_info_tmpl.connected_at_us = UINT64_MAX;
+    g_client_info_tmpl.bytes_tx = UINT64_MAX;
+    g_client_info_tmpl.bytes_rx = UINT64_MAX;
+    g_client_info_tmpl.n_paths = MQVPN_MAX_PATHS;
+    memset(&g_reinject_tmpl, 0, sizeof(g_reinject_tmpl));
+    g_reinject_tmpl.n_paths = MQVPN_MAX_PATHS;
+    for (int p = 0; p < MQVPN_MAX_PATHS; p++) {
+        mqvpn_path_stats_t *ps = &g_client_info_tmpl.paths[p];
+        ps->path_id = (uint64_t)p;
+        ps->srtt_us = ps->min_rtt_us = ps->cwnd = ps->bytes_in_flight = UINT64_MAX;
+        ps->bytes_tx = ps->bytes_rx = UINT64_MAX;
+        ps->pkt_sent = ps->pkt_recv = ps->pkt_lost = UINT64_MAX;
+        ps->state = UINT8_MAX; /* 3 digits, and the stub's longer label */
+        g_reinject_tmpl.paths[p].path_id = (uint64_t)p;
+        g_reinject_tmpl.paths[p].reinject_tx_bytes = UINT64_MAX;
+    }
+    g_client_info_n = MQVPN_MAX_USERS;
+    g_reinject_n = MQVPN_MAX_USERS;
+    g_sched_n = MQVPN_MAX_USERS;
+    memset(g_sched_label, 's', 15);
+    g_sched_label[15] = '\0';
+}
+
+static void
+test_get_status_worst_case_fits(void)
+{
+    seed_worst_case();
+    call("{\"cmd\":\"get_status\"}");
+    CHECK_HAS("\"ok\":true");
+    CHECK(strlen(g_resp) < CTRL_MAX_RESP_BYTES - 2);
+    printf("worst-case get_status: %zu bytes (limit %d)\n", strlen(g_resp),
+           CTRL_MAX_RESP_BYTES - 2);
+
+    yyjson_doc *d = parse_resp();
+    yyjson_val *root = yyjson_doc_get_root(d);
+    CHECK(yyjson_get_int(yyjson_obj_get(root, "n_clients")) == MQVPN_MAX_USERS);
+    yyjson_val *last =
+        yyjson_arr_get(yyjson_obj_get(root, "clients"), MQVPN_MAX_USERS - 1);
+    yyjson_val *paths = yyjson_obj_get(last, "paths");
+    for (int p = 0; p < MQVPN_MAX_PATHS; p++) {
+        yyjson_val *rb =
+            yyjson_obj_get(yyjson_arr_get(paths, (size_t)p), "reinject_tx_bytes");
+        CHECK(yyjson_is_uint(rb) && yyjson_get_uint(rb) == UINT64_MAX);
+    }
+    yyjson_doc_free(d);
+}
+
+/* A response that does not fit resp_len is the fixed envelope, never a cut
+ * JSON prefix. */
+static void
+test_get_status_too_large_envelope(void)
+{
+    seed_worst_case();
+    char small[64];
+    ctrl_socket_t cs = {
+        .server = (mqvpn_server_t *)&g_dummy_server,
+        .rx_stats = test_rx_stats,
+        .rx_ctx = NULL,
+    };
+    dispatch("{\"cmd\":\"get_status\"}", small, sizeof(small), &cs);
+    CHECK(strcmp(small, "{\"ok\":false,\"error\":\"response too large\"}") == 0);
+}
+
+/* Byte-exact fixed-shape replies (OMR clients parse these). */
+static void
+test_exact_shapes(void)
+{
+    g_add_user_rc = MQVPN_OK;
+    call("{\"cmd\":\"add_user\",\"name\":\"alice\",\"key\":\"secret\"}");
+    CHECK_EQ_STR("{\"ok\":true}");
+
+    call("{\"cmd\":\"remove_user\"}");
+    CHECK_EQ_STR("{\"ok\":false,\"error\":\"name required\"}");
+
+#ifdef XQC_ENABLE_FEC
+    const int fec_enabled = 1;
+#else
+    const int fec_enabled = 0;
+#endif
+    char want[128];
+    snprintf(want, sizeof(want),
+             "{\"ok\":true,\"version\":\"%s\",\"scheduler\":\"%s\",\"fec_enabled\":%d}",
+             mqvpn_version_string(), mqvpn_server_scheduler_label(NULL), fec_enabled);
+    call("{\"cmd\":\"get_build_info\"}");
+    CHECK_EQ_STR(want);
+}
+
 int
 main(void)
 {
     test_missing_cmd();
     test_unknown_cmd();
+    test_missing_cmd_variants();
+    test_duplicate_cmd_first_wins();
+    test_trailing_bytes_ignored();
+    test_escaped_cmd_decoded();
 
     test_add_user_success();
     test_add_user_missing_name();
     test_add_user_missing_key();
     test_add_user_server_failure();
+    test_add_user_name_decoded_and_bounded();
 
     test_remove_user_success();
     test_remove_user_missing_name();
     test_remove_user_not_found();
+    test_user_lookup_name_length();
 
     test_list_users_empty();
     test_list_users_two_entries();
@@ -636,6 +929,13 @@ main(void)
 
     test_get_reorder_stats();
     test_get_reorder_stats_internal_error();
+
+    test_response_strings_escaped();
+    test_response_invalid_utf8_passthrough();
+    test_reorder_stats_fixed3();
+    test_get_status_worst_case_fits();
+    test_get_status_too_large_envelope();
+    test_exact_shapes();
 
     if (g_failed) {
         fprintf(stderr, "test_control_socket: %d CHECK(s) FAILED\n", g_failed);

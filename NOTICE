@@ -18,3 +18,7 @@ Third-party software included:
   * Wintun userspace header (https://www.wintun.net)
     Copyright (C) 2018-2021 WireGuard LLC
     MIT License — see third_party/wintun/LICENSE
+
+  * yyjson (https://github.com/ibireme/yyjson)
+    Copyright (c) 2020 YaoYuan <ibireme@gmail.com>
+    MIT License — see third_party/yyjson/LICENSE

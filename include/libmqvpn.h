@@ -692,7 +692,7 @@ MQVPN_API int mqvpn_config_set_init_max_path_id(mqvpn_config_t *cfg, uint64_t v)
 MQVPN_API int mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu);
 /* Underlay path MTU the outer QUIC packets are sized for: 0 = default
  * (1400-byte packets, TUN MTU ~1382), 1280..9000 = largest IP packet the
- * path carries. Packets are capped at xquic's limit (TUN MTU 1402).
+ * path carries. Packets are capped at xquic's limit (TUN MTU 1418).
  * IPv6 requires capacity for 1280 inner bytes, including room for reorder:
  * insufficient capacity fails server_start or notifies client tunnel_closed
  * with MQVPN_ERR_INVALID_ARG when IPv6 is assigned. */
@@ -798,7 +798,11 @@ MQVPN_API int mqvpn_config_set_recv_rate_limit(mqvpn_config_t *cfg,
  * value is stored as 1. */
 MQVPN_API int mqvpn_config_set_udp_gso(mqvpn_config_t *cfg, int enabled);
 
-/* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock) */
+/* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock). xquic's
+ * clock is process-wide: while a client or a server of the process runs,
+ * mqvpn_client_new() fails for a client on another clock, and
+ * mqvpn_server_new() (always on the library's clock) fails next to a client
+ * with an injected one. */
 typedef uint64_t (*mqvpn_clock_fn)(void *ctx);
 MQVPN_API int mqvpn_config_set_clock(mqvpn_config_t *cfg, mqvpn_clock_fn clock_fn,
                                      void *clock_ctx);
@@ -819,10 +823,11 @@ MQVPN_API int mqvpn_config_set_clock(mqvpn_config_t *cfg, mqvpn_clock_fn clock_f
  * macOS that is the system-provided bundle, not the Keychain). Platforms
  * without an OS bundle at those paths (Windows, Android) must install a
  * verifier or set SSL_CERT_FILE; without one, every CA-signed chain is
- * rejected there. A library-side rejection (unknown issuer, self-signed,
- * expired, hostname mismatch) surfaces as the plain connection close,
- * tunnel_closed(MQVPN_ERR_CLOSED); only a verifier's rejection is reported
- * as MQVPN_ERR_TLS. insecure=1
+ * rejected there. A rejected certificate is reported once, as
+ * tunnel_closed(MQVPN_ERR_TLS), whether a verifier or the library (unknown
+ * issuer, self-signed, expired, hostname mismatch) rejected it, and the
+ * client then goes to CLOSED even with reconnect enabled. insecure=1
+ * checks nothing, so it never reports MQVPN_ERR_TLS, and
  * takes precedence over a verifier (a WARN is logged at client creation).
  * Passing fn=NULL restores library-side verification (ctx is ignored). ctx
  * must stay valid until the client is destroyed (the config is copied at

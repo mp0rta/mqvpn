@@ -123,6 +123,7 @@ struct cli_conn_s {
     uint64_t masque_stream_id;
     int tunnel_ok;
     int tunnel_notified; /* one-shot: a tunnel_closed already fired for this conn */
+    mqvpn_error_t notified_reason; /* the reason it fired with */
     int addr_assigned;
     uint8_t assigned_ip[4];
     uint8_t assigned_prefix;
@@ -200,6 +201,8 @@ struct mqvpn_client_s {
 
     /* xquic engine (Level 1) */
     xqc_engine_t *engine;
+    /* holds a share of the process's xquic clock (mqvpn_xqc_clock_acquire) */
+    int xqc_clock_held;
 
     /* Connection (Level 2, NULL when disconnected) */
     cli_conn_t *conn;
@@ -350,22 +353,8 @@ mqvpn_state_transition_valid(mqvpn_client_state_t from, mqvpn_client_state_t to)
 
 /* ─── Helpers ─── */
 
-static uint64_t
-now_us(void)
-{
-#ifdef _WIN32
-    FILETIME ft;
-    GetSystemTimeAsFileTime(&ft);
-    uint64_t t = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
-    return t / 10 - 11644473600000000ULL; /* FILETIME epoch → Unix epoch, in µs */
-#else
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (uint64_t)tv.tv_sec * 1000000 + (uint64_t)tv.tv_usec;
-#endif
-}
-
-/* Injectable clock: use config clock_fn if set, else default now_us().
+/* Injectable clock: use config clock_fn if set, else the library's clock
+ * (mqvpn_clock.c), which is also the default clock of the xquic engine.
  * PR4 — non-static + visibility hidden so path_state_machine.c can call it
  * without exporting from libmqvpn.so. MSVC ignores visibility(). */
 MQVPN_INTERNAL
@@ -373,22 +362,7 @@ uint64_t
 client_now_us(const mqvpn_client_t *c)
 {
     if (c->config.clock_fn) return c->config.clock_fn(c->config.clock_ctx);
-    return now_us();
-}
-
-/*
- * xquic timestamp adapter.
- * xqc_timestamp_pt is void→uint64_t (no user_ctx), so we use a global.
- * Safe for single-client-per-process (Android VpnService model).
- */
-static mqvpn_clock_fn s_xqc_clock_fn = NULL;
-static void *s_xqc_clock_ctx = NULL;
-
-static xqc_usec_t
-xqc_custom_timestamp(void)
-{
-    if (s_xqc_clock_fn) return s_xqc_clock_fn(s_xqc_clock_ctx);
-    return now_us();
+    return mqvpn_clock_us();
 }
 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
@@ -990,9 +964,15 @@ client_init_handle(mqvpn_client_t *c, const mqvpn_config_t *cfg,
 static void
 client_destroy_engine(mqvpn_client_t *c)
 {
-    if (!c || !c->engine) return;
-    xqc_engine_destroy(c->engine);
-    c->engine = NULL;
+    if (!c) return;
+    if (c->engine) {
+        xqc_engine_destroy(c->engine);
+        c->engine = NULL;
+    }
+    if (c->xqc_clock_held) {
+        mqvpn_xqc_clock_release();
+        c->xqc_clock_held = 0;
+    }
 }
 
 /* Finalise a slot's transport exactly once: harvest ops.get_stats into the
@@ -1316,48 +1296,52 @@ cli_effective_sni(const mqvpn_config_t *cfg)
     return cfg->tls_server_name[0] ? cfg->tls_server_name : cfg->server_host;
 }
 
+/* A rejected server certificate, whoever judged it (the platform verifier or
+ * the library): one ERROR line and tunnel_closed(MQVPN_ERR_TLS) now, instead
+ * of a plain close after the 3-PTO drain that follows the handshake alert; the
+ * conn-close notify that comes later is gated by tunnel_notified. Runs inside
+ * xqc_engine_main_logic: the platform handler must not re-enter libmqvpn
+ * (documented on mqvpn_tunnel_closed_fn). */
+static void
+cli_report_cert_rejected(cli_conn_t *conn)
+{
+    LOG_E(conn->client, "TLS certificate verification failed");
+    cli_signal_connect_fail(conn, MQVPN_ERR_TLS, 0);
+}
+
 /* xquic hands us the chain the server presented (leaf first, DER). Reached
  * on every handshake when a verifier is configured (APP_VERIFY): the verifier
- * is the sole judge, and its rejection is the one TLS failure the platform
- * hears about immediately, as MQVPN_ERR_TLS. Without a verifier, xquic's
- * legacy path routes only an unknown issuer (X509 error 20) here; every
- * other library-side rejection (self-signed, expired, hostname mismatch) is
- * refused inside the library and never reaches this callback. Both are one
- * class of failure — the library verifying — so both surface the same way:
- * this site only logs and refuses, and the platform sees the plain
- * connection close (MQVPN_ERR_CLOSED) after the drain, exactly like the
- * rejections that never get here. Reporting error 20 alone as MQVPN_ERR_TLS
- * would make the public reason depend on which X509 error the library hit.
- * insecure never gets here: verify_mode is NONE and xquic installs no
- * callback. An empty chain is rejected by the ssl library before this point.
- * conn_user_data is always the cli_conn_t passed to xqc_h3_connect. */
+ * is the sole judge. Without a verifier, xquic's legacy path routes only an
+ * unknown issuer (X509 error 20) here; refusing it is a library-side
+ * rejection like any other, reported by cb_cert_verify_failed, so this site
+ * stays silent rather than report it twice. insecure never gets here:
+ * verify_mode is NONE and xquic installs no callback. An empty chain is
+ * rejected by the ssl library before this point. conn_user_data is always
+ * the cli_conn_t passed to xqc_h3_connect. */
 static int
 cb_cert_verify(const unsigned char *certs[], const size_t cert_len[], size_t certs_len,
                void *conn_user_data)
 {
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
-    mqvpn_client_t *c = conn->client;
-    const mqvpn_config_t *cfg = &c->config;
+    const mqvpn_config_t *cfg = &conn->client->config;
 
-    if (cfg->cert_verify_fn) {
-        if (cfg->cert_verify_fn(certs, cert_len, certs_len, cli_effective_sni(cfg),
-                                cfg->cert_verify_ctx) == 0)
-            return 0;
-
-        LOG_E(c, "TLS certificate verification failed");
-        /* Tell the platform now, once, instead of after the 3-PTO drain that
-         * follows the handshake alert; the conn-close notify that comes later
-         * is gated by tunnel_notified. Runs inside xqc_engine_main_logic: the
-         * platform handler must not re-enter libmqvpn (documented on
-         * mqvpn_tunnel_closed_fn). */
-        cli_signal_connect_fail(conn, MQVPN_ERR_TLS, 0);
-        return -1;
-    }
-
-    /* Library-side verification (no verifier): refuse and let the connection
-     * close report it, like every other library-side rejection. */
-    LOG_E(c, "TLS certificate verification failed");
+    if (!cfg->cert_verify_fn) return -1;
+    if (cfg->cert_verify_fn(certs, cert_len, certs_len, cli_effective_sni(cfg),
+                            cfg->cert_verify_ctx) == 0)
+        return 0;
+    cli_report_cert_rejected(conn);
     return -1;
+}
+
+/* xquic's library-side verification (no verifier) rejected the server
+ * certificate: self-signed, unknown issuer, expired, hostname mismatch. Notify
+ * only, once per handshake; never under APP_VERIFY (cb_cert_verify reported
+ * that) nor under insecure. */
+static void
+cb_cert_verify_failed(int x509_err, void *conn_user_data)
+{
+    (void)x509_err; /* the public reason is TLS whichever X509 error it was */
+    cli_report_cert_rejected((cli_conn_t *)conn_user_data);
 }
 
 static void
@@ -1424,12 +1408,11 @@ cli_classify_status(int status)
 
 /* Fire tunnel_closed(reason) exactly once per conn for a pre-establishment
  * failure: a non-200 CONNECT-IP status, the tunnel stream closing before 200,
- * or (TLS) the platform verifier rejecting the server certificate from inside
- * the handshake. Notifies only — it does not abort the request in-core
- * (cross-platform full-stop and non-iOS reconnect-suppression are a
- * documented follow-up); iOS's onTunnelClosed turns this into a startTunnel
- * throw, and the process teardown that follows stops any reconnect on the iOS
- * target. */
+ * or (TLS) the platform verifier or the library rejecting the server
+ * certificate from inside the handshake. Notifies only — it does not abort the request
+ * in-core (cross-platform full-stop is a documented follow-up); iOS's onTunnelClosed
+ * turns this into a startTunnel throw. A TLS reason also keeps cb_h3_conn_close from
+ * reconnecting. */
 static void
 cli_signal_connect_fail(cli_conn_t *conn, mqvpn_error_t reason, int status_for_log)
 {
@@ -1437,10 +1420,12 @@ cli_signal_connect_fail(cli_conn_t *conn, mqvpn_error_t reason, int status_for_l
     if (conn->tunnel_notified) return; /* once (calloc-zeroed at conn start) */
     assert(!conn->tunnel_ok);          /* every caller gates on !tunnel_ok / non-200 */
     conn->tunnel_notified = 1;
+    conn->notified_reason = reason;
     /* "CONNECT-IP request failed" is an e2e marker (tests/test_e2e_wrong_psk.sh)
      * and must keep printing once for the CONNECT-IP witnesses. A TLS
-     * rejection never sent a request, so it stays silent here — the verifier
-     * site already logged "TLS certificate verification failed". */
+     * rejection never sent a request, so it stays silent here —
+     * cli_report_cert_rejected already logged "TLS certificate verification
+     * failed". */
     if (reason != MQVPN_ERR_TLS)
         LOG_W(c, "CONNECT-IP request failed (status=%d) → tunnel_closed(%d)",
               status_for_log, (int)reason);
@@ -1478,9 +1463,11 @@ cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_data)
     /* Notify platform (skip if a pre-establishment failure already fired). */
     cli_notify_conn_closed(c, conn);
 
+    /* the same server would present the same certificate on every retry */
+    int cert_rejected = conn->tunnel_notified && conn->notified_reason == MQVPN_ERR_TLS;
     cli_conn_destroy(c);
 
-    if (!c->shutting_down && c->config.reconnect_enable) {
+    if (!c->shutting_down && c->config.reconnect_enable && !cert_rejected) {
         int delay = client_arm_reconnect_timer(c);
         LOG_I(c, "reconnecting in %d seconds (attempt %d)...", delay,
               c->reconnect_attempts);
@@ -2165,8 +2152,8 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
          * created only when lwip_ctx exists, and a tcp_lane alloc failure
          * tears lwip_ctx back down — the ingress path guards on tcp_lane
          * alone and dereferences lwip_ctx. Hash seed mirrors the reorder
-         * engines' per-conn derivation (wall clock ^ conn_id; §6.2 needs no
-         * peer agreement). */
+         * engines' per-conn derivation (client clock ^ conn_id; §6.2 needs
+         * no peer agreement). */
         if (conn->lwip_ctx && !conn->tcp_lane) {
             uint64_t lane_seed = client_now_us(c) ^ ((uint64_t)c->conn_id << 32);
             conn->tcp_lane = mqvpn_tcp_lane_new(&c->config.hybrid, lane_seed, c,
@@ -3054,7 +3041,7 @@ cli_start_connection(mqvpn_client_t *c)
      * stays gated on peer_reorder_supported (set later by negotiation), so until
      * then everything is sent RAW. RX is created so we can accept stamped
      * datagrams as soon as the peer advertises support. The hash seeds need not
-     * match the peer (§6.2); derive them from wall-clock time + conn_id. */
+     * match the peer (§6.2); derive them from the client clock + conn_id. */
     if (c->config.reorder.mode != MQVPN_REORDER_OFF) {
         uint64_t seed_base = client_now_us(c) ^ ((uint64_t)c->conn_id << 32);
         conn->reorder_tx = mqvpn_reorder_tx_new(&c->config.reorder, seed_base);
@@ -3126,13 +3113,19 @@ init_xquic_engine(mqvpn_client_t *c)
             },
     };
 
-    /* Inject custom clock — critical for Android CLOCK_BOOTTIME */
-    if (cfg->clock_fn) {
-        s_xqc_clock_fn = cfg->clock_fn;
-        s_xqc_clock_ctx = cfg->clock_ctx;
-        engine_cbs.realtime_ts = xqc_custom_timestamp;
-        engine_cbs.monotonic_ts = xqc_custom_timestamp;
+    /* The receive times handed to xqc_engine_packet_process() come from
+     * client_now_us(), so xquic's timers must run on the same clock: the
+     * injected one (Android: CLOCK_BOOTTIME) or the library's. xquic's clock
+     * is process-wide (see mqvpn_clock.c), so take a share of it; it is
+     * refused while another client or a server runs on a different clock. */
+    if (mqvpn_xqc_clock_acquire(cfg->clock_fn, cfg->clock_ctx) != 0) {
+        LOG_E(c, "another client or server of this process runs on a different "
+                 "clock (xquic's clock is process-wide)");
+        return -1;
     }
+    c->xqc_clock_held = 1;
+    if (cfg->clock_fn) engine_cbs.realtime_ts = mqvpn_xqc_clock_now;
+    engine_cbs.monotonic_ts = mqvpn_xqc_clock_now;
 
     xqc_transport_callbacks_t tcbs = {
         .write_socket = cb_write_socket,
@@ -3141,6 +3134,7 @@ init_xquic_engine(mqvpn_client_t *c)
         .save_session_cb = cb_save_session,
         .save_tp_cb = cb_save_tp,
         .cert_verify_cb = cb_cert_verify,
+        .cert_verify_failed_notify = cb_cert_verify_failed,
         .ready_to_create_path_notify = cb_ready_to_create_path,
         .path_removed_notify = cb_path_removed,
     };
