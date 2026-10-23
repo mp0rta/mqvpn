@@ -1092,6 +1092,18 @@ test_path_mtu_parse(void)
 }
 
 static void
+test_pmtud_parse(void)
+{
+    char *path = write_tmp("[Interface]\nPMTUD = true\n");
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(cfg.pmtud, 0, "default pmtud is off");
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.pmtud, 1, "PMTUD true parsed");
+}
+
+static void
 test_mtu_json_parse(void)
 {
     const char *json = "{\"mtu\": 1400}";
@@ -2428,6 +2440,7 @@ test_ini_json_scalar_parity(void)
                       "ReconnectInterval = 17\n"
                       "MTU = 1420\n"
                       "PathMTU = 1492\n"
+                      "PMTUD = true\n"
                       "[Server]\n"
                       "Address = vpn.parity.test:4433\n"
                       "ServerName = sni.parity.test\n"
@@ -2492,6 +2505,7 @@ test_ini_json_scalar_parity(void)
                        "\"reconnect_interval\":17,"
                        "\"mtu\":1420,"
                        "\"path_mtu\":1492,"
+                       "\"pmtud\":true,"
                        "\"server_addr\":\"vpn.parity.test:4433\","
                        "\"tls_server_name\":\"sni.parity.test\","
                        "\"insecure\":true,"
@@ -2563,6 +2577,7 @@ test_ini_json_scalar_parity(void)
     ASSERT_EQ_INT(a.is_server, b.is_server, "parity is_server");
     ASSERT_EQ_INT(a.tun_mtu, b.tun_mtu, "parity mtu");
     ASSERT_EQ_INT(a.path_mtu, b.path_mtu, "parity path_mtu");
+    ASSERT_EQ_INT(a.pmtud, b.pmtud, "parity pmtud");
     ASSERT_EQ_INT(a.max_clients, b.max_clients, "parity max_clients");
     ASSERT_EQ_INT((int)a.init_max_path_id, (int)b.init_max_path_id,
                   "parity init_max_path_id");
@@ -2616,6 +2631,7 @@ test_ini_json_scalar_parity(void)
      * sides and both structs just kept the (equal) default. */
     ASSERT_EQ_INT(a.tun_mtu, 1420, "parity mtu is non-default");
     ASSERT_EQ_INT(a.path_mtu, 1492, "parity path_mtu is non-default");
+    ASSERT_EQ_INT(a.pmtud, 1, "parity pmtud is non-default");
     ASSERT_EQ_STR(a.reinjection, "deadline", "parity reinjection is non-default");
     ASSERT_EQ_INT(a.reinjection_srtt_factor_pct, 150,
                   "parity reinjection_srtt_factor_pct is non-default");
@@ -2850,6 +2866,7 @@ main(void)
     test_mtu_invalid_string_ignored();
     test_mtu_json_parse();
     test_path_mtu_parse();
+    test_pmtud_parse();
 
     /* subnet6 tests */
     test_subnet6_default();
