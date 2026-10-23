@@ -163,7 +163,13 @@ mgmt_listen_open(const mgmt_listen_opts_t *opts, char *errbuf, size_t errlen)
         goto fail_keep;
     }
 
+#ifdef SOCK_CLOEXEC
     fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+#else
+    /* Darwin: no SOCK_CLOEXEC; set FD_CLOEXEC after socket(). */
+    fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd >= 0) fcntl(fd, F_SETFD, FD_CLOEXEC);
+#endif
     if (fd < 0) {
         SET_ERR("socket(AF_UNIX) failed for %s: %s", path, strerror(errno));
         goto fail_unlock;
@@ -250,8 +256,15 @@ mgmt_listen_close(mgmt_listen_t *l)
 {
     if (!l) return;
     close(l->fd);
-    if (path_is_ours(l->path, l->dev, l->ino)) unlink(l->path);
-    release_lock(l->lock_fd);
+    int unlinked = 1;
+    if (path_is_ours(l->path, l->dev, l->ino)) unlinked = unlink(l->path) == 0;
+    /* If unlink failed the socket is still ours: keep the record for the next start. */
+    if (unlinked)
+        release_lock(l->lock_fd);
+    else {
+        flock(l->lock_fd, LOCK_UN);
+        close(l->lock_fd);
+    }
     free(l->path);
     free(l);
 }

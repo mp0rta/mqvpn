@@ -425,6 +425,9 @@ mgmt_endpoint_new(struct event_base *eb, const mgmt_endpoint_ctx_t *ctx,
     ep->eb = eb;
     ep->ctx = *ctx;
     ep->lim = *limits;
+    /* a 0 budget would re-arm the 0 ms resume timer forever */
+    if (ep->lim.request_budget_per_loop < 1) ep->lim.request_budget_per_loop = 1;
+    if (ep->lim.accept_budget_per_loop < 1) ep->lim.accept_budget_per_loop = 1;
     ln_init(&ep->wq);
     ep->resume = evtimer_new(eb, resume_cb, ep);
     if (!ep->resume) {
@@ -451,9 +454,11 @@ mgmt_endpoint_add_listener(mgmt_endpoint_t *ep, evutil_socket_t listen_fd,
     l->log_timer = evtimer_new(ep->eb, log_timer_cb, l);
     if (!l->name || !l->log_timer || evutil_make_socket_nonblocking(listen_fd) != 0)
         goto fail;
-    /* flags 0: the listener neither closes the fd nor changes it; backlog 0: already
-     * listening */
-    l->lev = evconnlistener_new(ep->eb, accept_cb, l, 0, 0, listen_fd);
+    /* No CLOSE_ON_FREE (the fd stays caller-owned); backlog 0: already listening.
+     * CLOSE_ON_EXEC keeps helper processes the client execs from inheriting
+     * admin connections. */
+    l->lev =
+        evconnlistener_new(ep->eb, accept_cb, l, LEV_OPT_CLOSE_ON_EXEC, 0, listen_fd);
     if (!l->lev) goto fail;
     l->next = ep->listeners;
     ep->listeners = l;

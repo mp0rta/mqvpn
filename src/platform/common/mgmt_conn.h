@@ -33,7 +33,8 @@ void mgmt_conn_limits_default(mgmt_conn_limits_t *l);
 mgmt_endpoint_t *mgmt_endpoint_new(struct event_base *eb, const mgmt_endpoint_ctx_t *ctx,
                                    const mgmt_conn_limits_t *limits);
 /* Takes a bound+listening fd (made nonblocking here). Closing it is the caller's job,
- * after mgmt_endpoint_free(). name is for logs. NULL = failure; fd untouched. */
+ * after mgmt_endpoint_free(). name is for logs. NULL = failure; fd is left open (it may
+ * have been switched to nonblocking). */
 mgmt_listener_t *mgmt_endpoint_add_listener(mgmt_endpoint_t *ep,
                                             evutil_socket_t listen_fd, mgmt_role_t role,
                                             const char *name);
