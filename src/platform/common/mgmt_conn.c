@@ -243,10 +243,13 @@ conn_write_cb(struct bufferevent *bev, void *arg)
     if (c->draining) {
         struct timeval tv;
         shutdown(bufferevent_getfd(bev), MGMT_SHUT_WR);
-        tv_from_ms(&tv, c->l->ep->lim.drain_deadline_ms);
-        evtimer_add(c->deadline, &tv);
+        if (!evtimer_pending(c->deadline, NULL)) {
+            tv_from_ms(&tv, c->l->ep->lim.drain_deadline_ms);
+            evtimer_add(c->deadline, &tv);
+        }
         return;
     }
+    if (ln_linked(&c->wq)) return; /* a request is queued: reads stay off */
     bufferevent_enable(bev, EV_READ);
     conn_check_input(c);
 }
@@ -439,7 +442,11 @@ mgmt_endpoint_add_listener(mgmt_endpoint_t *ep, evutil_socket_t listen_fd,
     if (!l) return NULL;
     l->ep = ep;
     l->role = role;
-    l->name = strdup(name ? name : "");
+    {
+        const char *nm = name ? name : "";
+        l->name = malloc(strlen(nm) + 1);
+        if (l->name) memcpy(l->name, nm, strlen(nm) + 1);
+    }
     ln_init(&l->conns);
     l->log_timer = evtimer_new(ep->eb, log_timer_cb, l);
     if (!l->name || !l->log_timer || evutil_make_socket_nonblocking(listen_fd) != 0)

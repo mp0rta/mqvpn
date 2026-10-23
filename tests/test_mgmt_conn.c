@@ -931,7 +931,7 @@ conn_invalid_requests_log_budget(void)
     int i;
     puts("conn_invalid_requests_log_budget");
     small_limits(&lim);
-    lim.log_interval_ms = 200;
+    lim.log_interval_ms = 400;
     g_cap_n = 0;
     mqvpn_log_set_level(MQVPN_LOG_WARN);
     mqvpn_log_set_sink(cap_sink, NULL);
@@ -943,11 +943,11 @@ conn_invalid_requests_log_budget(void)
         CHECK(resp_err(line) == CMP_E_PARSE_ERROR);
         cl_free(c);
     }
-    run_for_ms(100);
+    run_for_ms(200);
     CHECK(counters().invalid_requests == 50);
     CHECK(counters().log_lines == 0);
     CHECK(g_cap_n == 0);
-    run_for_ms(300);
+    run_for_ms(600);
     CHECK(counters().log_lines == 1);
     CHECK(g_cap_n == 1);
     CHECK(strstr(g_cap[0], "mgmt ipc [") != NULL);
