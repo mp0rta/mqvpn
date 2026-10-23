@@ -184,6 +184,7 @@ fun DashboardScreen(
                                 Text("IPv6: ${s.tunnelInfo.assignedIp6}/${s.tunnelInfo.prefix6}")
                             }
                             Text("MTU: ${s.tunnelInfo.mtu}")
+                            serverSchedulerLine(s.tunnelInfo)?.let { Text(it) }
                             Spacer(modifier = Modifier.height(8.dp))
                             Text("RTT: ${stats.srttMs}ms")
                             Text("TX: ${formatBytes(stats.bytesTx)} | RX: ${formatBytes(stats.bytesRx)}")

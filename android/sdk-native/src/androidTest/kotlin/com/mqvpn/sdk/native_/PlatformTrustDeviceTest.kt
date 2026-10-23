@@ -89,7 +89,8 @@ class PlatformTrustDeviceTest {
     @Suppress("UNUSED_PARAMETER", "unused")
     private class NoopCallbacks {
         fun onNativeTunnelConfigReady(assignedIp: ByteArray, prefix: Int, assignedIp6: ByteArray?, prefix6: Int,
-                                      serverIp: ByteArray, serverPrefix: Int, mtu: Int, hasV6: Boolean) {}
+                                      serverIp: ByteArray, serverPrefix: Int, mtu: Int, hasV6: Boolean,
+                                      hasServerScheduler: Boolean, serverScheduler: Int) {}
         fun onNativeTunnelClosed(errorCode: Int) {}
         fun onNativeStateChanged(oldState: Int, newState: Int) {}
         fun onNativePathEvent(pathHandle: Long, newStatus: Int) {}

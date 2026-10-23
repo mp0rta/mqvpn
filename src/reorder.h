@@ -497,9 +497,11 @@ mqvpn_reorder_config_finalize(mqvpn_reorder_config_t *cfg)
  *
  * Per-flow receiver counters (§17). Lives here (not in reorder_rx.c) so the RX
  * snapshot accessor (mqvpn_reorder_rx_get_stats) can return it across the TU
- * boundary. One wait period corresponds to one arm_gap_timer call; each period
- * ends in exactly one of filled / timeout / overflow / demote / reset, giving the
- * §17 identity:
+ * boundary. One wait period is one run of the gap timer (§12.2): it is armed
+ * when the buffer goes non-empty or restarts after a period ends with packets
+ * still buffered, and it waits for the cohort of gaps present at that moment
+ * (every missing seq below the reordering mark). Each period ends in exactly one
+ * of filled / timeout / overflow / demote / reset, giving the §17 identity:
  *
  *   gap_count = gap_filled_count + gap_timeout_count + gap_overflow_count
  *             + gap_demote_count  + gap_reset_count
@@ -517,13 +519,13 @@ typedef struct {
     uint64_t per_flow_limit_drop_count;
     uint64_t pool_drop_count;
     uint64_t reset_discard_count; /* §17: old-epoch buffered packets discarded on reset */
-    uint64_t gap_count;           /* gap episodes opened (buffer went empty→nonempty) */
-    uint64_t gap_filled_count;    /* gap episodes closed by the missing seq arriving */
-    uint64_t gap_timeout_count;   /* §17: periods ended by timeout skip (§12.1) */
-    uint64_t gap_overflow_count;  /* §17: periods ended by overflow_flush (§12.3) */
-    uint64_t gap_demote_count;    /* §17: periods ended by ACK demote flush (§11.6) */
-    uint64_t gap_reset_count;     /* §17: periods ended by FLOW_RESET discard (§11.6) */
-    uint64_t ack_demote_count;    /* §17: flows demoted to pass-through (§11.6) */
+    uint64_t gap_count;         /* §17: wait periods started (arm or restart, §12.2) */
+    uint64_t gap_filled_count;  /* §17: periods ended by in-order delivery to the mark */
+    uint64_t gap_timeout_count; /* §17: periods ended by timeout skip (§12.1) */
+    uint64_t gap_overflow_count; /* §17: periods ended by overflow_flush (§12.3) */
+    uint64_t gap_demote_count;   /* §17: periods ended by ACK demote flush (§11.6) */
+    uint64_t gap_reset_count;    /* §17: periods ended by FLOW_RESET discard (§11.6) */
+    uint64_t ack_demote_count;   /* §17: flows demoted to pass-through (§11.6) */
     uint64_t residence_bucket[MQVPN_REORDER_LAT_BUCKETS]; /* added-latency histogram */
     uint64_t residence_max_us;                            /* exact max residence */
 } mqvpn_reorder_stats_t;

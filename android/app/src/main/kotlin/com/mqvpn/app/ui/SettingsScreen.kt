@@ -85,11 +85,14 @@ fun SettingsScreen(
         mutableStateOf(MqvpnConfig.ReorderProfile.CELLULAR_BOND.name)
     }
     var reorderPorts by rememberSaveable { mutableStateOf("") }
+    var redundantEnabled by rememberSaveable { mutableStateOf(false) }
+    var redundantPorts by rememberSaveable { mutableStateOf("") }
     var hybridEnabled by rememberSaveable { mutableStateOf(false) }
     var hybridTcpModeName by rememberSaveable {
         mutableStateOf(MqvpnConfig.HybridTcpMode.AUTO.name)
     }
     var bluetoothPathEnabled by rememberSaveable { mutableStateOf(false) }
+    var schedulerName by rememberSaveable { mutableStateOf(DemoSettings.SchedulerChoice.DEFAULT.name) }
 
     // Seed during composition (not LaunchedEffect) to avoid a one-frame flash
     // of empty fields; seeded gate makes it write-once.
@@ -104,9 +107,12 @@ fun SettingsScreen(
         reorderEnabled = current.reorderEnabled
         reorderProfileName = current.reorderProfile
         reorderPorts = current.reorderPorts
+        redundantEnabled = current.redundantEnabled
+        redundantPorts = current.redundantPorts
         hybridEnabled = current.hybridEnabled
         hybridTcpModeName = current.hybridTcpMode
         bluetoothPathEnabled = current.bluetoothPathEnabled
+        schedulerName = current.scheduler
         seeded = true
     }
 
@@ -120,9 +126,12 @@ fun SettingsScreen(
         reorderEnabled = reorderEnabled,
         reorderProfile = reorderProfileName,
         reorderPorts = reorderPorts,
+        redundantEnabled = redundantEnabled,
+        redundantPorts = redundantPorts,
         hybridEnabled = hybridEnabled,
         hybridTcpMode = hybridTcpModeName,
         bluetoothPathEnabled = bluetoothPathEnabled,
+        scheduler = schedulerName,
     )
 
     val fieldsEnabled = isEditable && !isSaving
@@ -308,6 +317,62 @@ fun SettingsScreen(
                         "Invalid ports ignored: " + invalidTokens.joinToString(", "),
                         style = MaterialTheme.typography.bodySmall,
                         color = WarningColor,
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+
+            EnumDropdownField(
+                label = "Scheduler",
+                options = DemoSettings.SchedulerChoice.entries,
+                selected = draft.schedulerChoice(),
+                displayName = {
+                    when (it) {
+                        DemoSettings.SchedulerChoice.DEFAULT -> "Default"
+                        DemoSettings.SchedulerChoice.MIN_RTT -> "minrtt"
+                        DemoSettings.SchedulerChoice.WLB -> "wlb"
+                    }
+                },
+                onSelect = { schedulerName = it.name },
+                enabled = fieldsEnabled,
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "minrtt: lowest delay. wlb: combines connections for speed. " +
+                    "The server follows only if it allows it.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+
+            LabeledSwitchRow(
+                label = "Redundant Mode",
+                checked = redundantEnabled,
+                onCheckedChange = { redundantEnabled = it },
+                enabled = fieldsEnabled,
+            )
+            Text(
+                "Sends copies of UDP packets over more than one connection at once, which " +
+                    "helps live streams keep going when a connection drops. Uses up to twice " +
+                    "the data with two connections, three times with three.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (redundantEnabled) {
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = redundantPorts,
+                    onValueChange = { redundantPorts = it },
+                    label = { Text("Redundant Ports (blank = all UDP)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = fieldsEnabled,
+                    singleLine = true,
+                    isError = !draft.redundantPortsValid(),
+                )
+                if (!draft.redundantPortsValid()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "Enter up to ${DemoSettings.MAX_REDUNDANT_PORTS} ports (1-65535), separated by commas",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
                     )
                 }
             }

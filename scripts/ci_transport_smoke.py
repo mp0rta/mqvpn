@@ -96,8 +96,10 @@ def main():
     lst.settimeout(20)
     port = lst.getsockname()[1]
 
+    # Reconnect stays on: with it off the client exits by itself once the
+    # attempt is abandoned, and there would be nothing left for SIGTERM to stop.
     cmd = [args.binary, "--mode", "client", "--server", f"127.0.0.1:{port}",
-           "--auth-key", "ci-transport-smoke", "--insecure", "--no-reconnect"]
+           "--auth-key", "ci-transport-smoke", "--insecure"]
     if args.path:
         cmd += ["--path", args.path]
     if args.sudo:

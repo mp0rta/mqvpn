@@ -5,7 +5,7 @@
  * libmqvpn — Multipath QUIC VPN library
  *
  * Public API header (single file).
- * Version: 0.17.0 (callback ABI version 3)
+ * Version: 0.18.0 (callback ABI version 3)
  *
  * Thread safety: All functions must be called from a single thread
  * (the "tick thread"). Debug builds assert this (ASSERT_TICK_THREAD inside the library).
@@ -38,7 +38,7 @@ extern "C" {
 /* ─── Version ─── */
 
 #define MQVPN_VERSION_MAJOR 0
-#define MQVPN_VERSION_MINOR 17
+#define MQVPN_VERSION_MINOR 18
 #define MQVPN_VERSION_PATCH 0
 
 /* ─── ABI ─── */
@@ -217,7 +217,7 @@ typedef enum {
     MQVPN_REINJ_OFF = 0,
     MQVPN_REINJ_DEADLINE = 1, /* stream lane: lateness + LOW-class duplication */
     MQVPN_REINJ_IDLE = 2,     /* stream lane: duplicate unacked when send queue idle */
-    MQVPN_REINJ_DGRAM = 3,    /* datagram lane: duplicate every DATAGRAM once */
+    /* 3 was MQVPN_REINJ_DGRAM (removed); do not reuse */
 } mqvpn_reinjection_t;
 
 /* Flow-aware reorder-only datagram delivery (see reorder design spec).
@@ -406,6 +406,12 @@ typedef struct {
      * in on_client_connected. */
     uint8_t assigned_prefix6;
     int has_v6; /* 1 = IPv6 assigned */
+    /* Server's effective scheduler for this connection — appended under ABI 3.
+     * Client only (the server leaves both 0). has_server_scheduler = 0: the
+     * server did not report one (older server). Read only when struct_size
+     * covers these fields. */
+    int has_server_scheduler;
+    int server_scheduler; /* mqvpn_scheduler_t */
 } mqvpn_tunnel_info_t;
 
 typedef struct {
@@ -644,6 +650,12 @@ MQVPN_API int mqvpn_config_remove_user(mqvpn_config_t *cfg, const char *username
 MQVPN_API int mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text);
 MQVPN_API int mqvpn_config_set_insecure(mqvpn_config_t *cfg, int insecure);
 MQVPN_API int mqvpn_config_set_scheduler(mqvpn_config_t *cfg, mqvpn_scheduler_t sched);
+/* Server only: when non-zero, a client that asks for a scheduler gets it for its
+ * own connection's download direction. Default 0 (off). */
+MQVPN_API int mqvpn_config_set_allow_client_scheduler(mqvpn_config_t *cfg, int enabled);
+/* Client only: when non-zero, ask the server to use this config's scheduler for the
+ * download direction too. Needs a server with the knob above on. Default 0 (off). */
+MQVPN_API int mqvpn_config_set_request_server_scheduler(mqvpn_config_t *cfg, int enabled);
 MQVPN_API int mqvpn_config_set_cc(mqvpn_config_t *cfg, mqvpn_cc_t cc);
 
 /* Reinjection (speculative multipath duplication of unacked data). OFF by
@@ -656,6 +668,15 @@ MQVPN_API int mqvpn_config_set_reinjection_deadline_params(mqvpn_config_t *cfg,
                                                            int srtt_factor_pct,
                                                            int hard_deadline_ms,
                                                            int deadline_lower_bound_ms);
+
+/* Redundant mode (client only): send each uplink UDP packet on every usable
+ * path. An empty port list (n_ports == 0) duplicates all UDP; otherwise only
+ * the listed destination ports. Returns MQVPN_ERR_INVALID_ARG for a NULL cfg,
+ * n_ports > MQVPN_REDUNDANT_MAX_PORTS, ports == NULL with n_ports > 0, or a 0
+ * port; duplicates are removed after the count check. */
+#define MQVPN_REDUNDANT_MAX_PORTS 16
+MQVPN_API int mqvpn_config_set_redundant(mqvpn_config_t *cfg, int enabled,
+                                         const uint16_t *ports, size_t n_ports);
 MQVPN_API int mqvpn_config_set_log_level(mqvpn_config_t *cfg, mqvpn_log_level_t level);
 MQVPN_API int mqvpn_config_set_multipath(mqvpn_config_t *cfg, int enable);
 MQVPN_API int mqvpn_config_set_reconnect(mqvpn_config_t *cfg, int enable,
@@ -669,6 +690,13 @@ MQVPN_API int mqvpn_config_set_killswitch_hint(mqvpn_config_t *cfg, int enable);
 MQVPN_API int mqvpn_config_set_init_max_path_id(mqvpn_config_t *cfg, uint64_t v);
 /* TUN MTU cap: 0 = auto (MSS-derived), 1280..9000 = upper bound. */
 MQVPN_API int mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu);
+/* Underlay path MTU the outer QUIC packets are sized for: 0 = default
+ * (1400-byte packets, TUN MTU ~1382), 1280..9000 = largest IP packet the
+ * path carries. Packets are capped at xquic's limit (TUN MTU 1418).
+ * IPv6 requires capacity for 1280 inner bytes, including room for reorder:
+ * insufficient capacity fails server_start or notifies client tunnel_closed
+ * with MQVPN_ERR_INVALID_ARG when IPv6 is assigned. */
+MQVPN_API int mqvpn_config_set_path_mtu(mqvpn_config_t *cfg, int mtu);
 
 /* ─── Flow-aware reorder shim config (§16.1) ───
  *
@@ -770,7 +798,11 @@ MQVPN_API int mqvpn_config_set_recv_rate_limit(mqvpn_config_t *cfg,
  * value is stored as 1. */
 MQVPN_API int mqvpn_config_set_udp_gso(mqvpn_config_t *cfg, int enabled);
 
-/* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock) */
+/* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock). xquic's
+ * clock is process-wide: while a client or a server of the process runs,
+ * mqvpn_client_new() fails for a client on another clock, and
+ * mqvpn_server_new() (always on the library's clock) fails next to a client
+ * with an injected one. */
 typedef uint64_t (*mqvpn_clock_fn)(void *ctx);
 MQVPN_API int mqvpn_config_set_clock(mqvpn_config_t *cfg, mqvpn_clock_fn clock_fn,
                                      void *clock_ctx);
@@ -791,10 +823,11 @@ MQVPN_API int mqvpn_config_set_clock(mqvpn_config_t *cfg, mqvpn_clock_fn clock_f
  * macOS that is the system-provided bundle, not the Keychain). Platforms
  * without an OS bundle at those paths (Windows, Android) must install a
  * verifier or set SSL_CERT_FILE; without one, every CA-signed chain is
- * rejected there. A library-side rejection (unknown issuer, self-signed,
- * expired, hostname mismatch) surfaces as the plain connection close,
- * tunnel_closed(MQVPN_ERR_CLOSED); only a verifier's rejection is reported
- * as MQVPN_ERR_TLS. insecure=1
+ * rejected there. A rejected certificate is reported once, as
+ * tunnel_closed(MQVPN_ERR_TLS), whether a verifier or the library (unknown
+ * issuer, self-signed, expired, hostname mismatch) rejected it, and the
+ * client then goes to CLOSED even with reconnect enabled. insecure=1
+ * checks nothing, so it never reports MQVPN_ERR_TLS, and
  * takes precedence over a verifier (a WARN is logged at client creation).
  * Passing fn=NULL restores library-side verification (ctx is ignored). ctx
  * must stay valid until the client is destroyed (the config is copied at

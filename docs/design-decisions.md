@@ -240,8 +240,12 @@ datagrams spread over paths with different RTTs arrive out of order.
 The optional `[Reorder]` buffer restores a bounded order for one case only: a
 single inner connection (usually inner QUIC / HTTP/3) that cannot be split
 into flows and is spread across paths for bandwidth. It only reorders: it
-waits at most `MaxWaitMs`, never retransmits, and moves past a gap when the
-time runs out.
+waits `MaxWaitMs` for a missing datagram before skipping it, never
+retransmits, and defers a gap that opens during an existing wait to the next
+one (the 3GPP PDCP t-Reordering scheme: a reordering mark is taken when the
+timer starts), so a hold is nominally at most twice `MaxWaitMs`; buffer
+limits can release a gap earlier, and the deadline is checked when the
+engine ticks.
 
 Out of scope:
 
@@ -287,6 +291,10 @@ loop), so there is no fixed path cap to raise. The only limit,
   shallow for those.
 - e2e scripts wait on log messages with greps, so existing log wording is an
   observable invariant.
+- The client's path status INFO line is `path <handle> (<iface>) -> <status>`
+  (`<status>` lowercase, from `mqvpn_path_status_string`; `<iface>` is the
+  slot's configured name, `?` if the handle has no slot or the slot is "any").
+  mqvpn-desktop parses it; format lives in `src/platform/path_line.h`.
 - When adding a new test target, make sure include paths resolve in a *clean
   checkout* — a stale system-installed `/usr/include/libmqvpn.h` can mask a
   missing `-I` locally and only fail in CI.
@@ -381,3 +389,19 @@ reply field, or that changes a default, explains the compatibility impact in
 its description. Log wording is a compatibility surface for a different
 reason: the e2e tests wait for specific log lines (DD §10). OMR reads the
 control API, not the logs.
+
+## §15 JSON goes through yyjson (2026-10)
+
+The config file, the Config API, the control API and `--status` parse and
+write JSON with vendored yyjson 0.13.0, included only via `src/json_util.h`.
+The only hand-written JSON literals are the control API's fixed
+`response too large` and `too many connections` replies and `--status`'s
+fixed request strings. A hand-rolled parser cannot follow nesting or decode
+escapes, and each workaround spreads to another consumer. Config and
+requests are strict RFC 8259: malformed JSON that a lax parser lets through
+fails, and a key is looked up only in its own object. `--status` alone
+accepts the invalid UTF-8 bytes the server writes into user names (it copies
+names byte for byte). The first duplicate key in one object wins; for
+same-named entries in the `users` array the last wins, which is a separate
+rule. Replies keep the key order and types of the original string literals
+(DD §14); a reply over 256 KiB becomes the `response too large` envelope.

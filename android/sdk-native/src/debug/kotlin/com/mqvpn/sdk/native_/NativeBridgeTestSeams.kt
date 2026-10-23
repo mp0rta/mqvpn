@@ -22,6 +22,9 @@ object NativeBridgeTestSeams {
     /** True when NativeBridge.clientNew installed the platform verifier on this config handle (check after clientNew returned non-zero). */
     external fun nativeConfigHasPlatformVerifier(cfg: Long): Boolean
 
+    /** Runs every libmqvpn → Kotlin upcall once, with fixed values, on the callback object of [client] (a clientNew handle). False when the handle is unknown. */
+    external fun nativeFireUpcallsForTest(client: Long): Boolean
+
     @JvmStatic
     @Suppress("UNUSED_PARAMETER")
     fun throwingVerify(chainDer: Array<ByteArray>, host: String): String? = throw IllegalStateException("test")

@@ -9,7 +9,7 @@
 # works.
 # Phase 2 (control API): get_status JSON is valid, n_paths reflects all 8,
 # and at least one path reports srtt_ms>0 (proves traffic flowed). Per-field
-# coverage and size bound are covered by tests/test_control_response_bound.c
+# coverage and size bound are covered by tests/test_control_socket.c
 # at the unit level.
 #
 # rev2: consolidated from test_e2e_8paths_handshake.sh +

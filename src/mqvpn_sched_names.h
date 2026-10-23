@@ -46,8 +46,7 @@
 #define MQVPN_REINJ_LIST(X)             \
     X(MQVPN_REINJ_OFF, "off")           \
     X(MQVPN_REINJ_DEADLINE, "deadline") \
-    X(MQVPN_REINJ_IDLE, "idle")         \
-    X(MQVPN_REINJ_DGRAM, "dgram")
+    X(MQVPN_REINJ_IDLE, "idle")
 
 /* mqvpn_sched_from_name: returns the enum value, or -1 if unrecognized. */
 static inline int
@@ -58,6 +57,20 @@ mqvpn_sched_from_name(const char *s)
     if (strcmp(s, str) == 0) return (int)(enum_val);
     MQVPN_SCHED_LIST(MQVPN_SCHED_FROM_NAME_CASE)
 #undef MQVPN_SCHED_FROM_NAME_CASE
+    return -1;
+}
+
+/* mqvpn_sched_from_name_n: like from_name() for a non-NUL-terminated token of
+ * exactly len bytes (header value). Exact match, no trimming; never reads
+ * past len. Returns the enum value, or -1. */
+static inline int
+mqvpn_sched_from_name_n(const char *s, size_t len)
+{
+    if (!s) return -1;
+#define MQVPN_SCHED_FROM_NAME_N_CASE(enum_val, str) \
+    if (len == sizeof(str) - 1 && memcmp(s, str, len) == 0) return (int)(enum_val);
+    MQVPN_SCHED_LIST(MQVPN_SCHED_FROM_NAME_N_CASE)
+#undef MQVPN_SCHED_FROM_NAME_N_CASE
     return -1;
 }
 
@@ -200,6 +213,49 @@ mqvpn_reinj_list_covers_enum_(mqvpn_reinjection_t reinj)
 case enum_val: break;
         MQVPN_REINJ_LIST(MQVPN_REINJ_COVERAGE_CASE)
 #undef MQVPN_REINJ_COVERAGE_CASE
+    }
+}
+
+/* CONNECT-IP header that carries the scheduler name (request and response). */
+#define MQVPN_SCHED_HDR_NAME "mqvpn-scheduler"
+
+typedef enum {
+    MQVPN_SCHED_NEG_NONE = 0, /* no request header: nothing to do */
+    MQVPN_SCHED_NEG_APPLY,
+    MQVPN_SCHED_NEG_DISABLED,
+    MQVPN_SCHED_NEG_INVALID,
+    MQVPN_SCHED_NEG_BACKUP_FEC,
+    MQVPN_SCHED_NEG_SERVER_BACKUP_FEC,
+    MQVPN_SCHED_NEG_ALREADY_SET,
+} mqvpn_sched_neg_t;
+
+/* Server-side decision for a client scheduler request. `requested` is the
+ * from_name_n() result (-1 when the value is not a known name). */
+static inline mqvpn_sched_neg_t
+mqvpn_sched_negotiate(int allow, mqvpn_scheduler_t server_default, int has_request,
+                      int requested, int already_swapped)
+{
+    if (!has_request) return MQVPN_SCHED_NEG_NONE;
+    if (!allow) return MQVPN_SCHED_NEG_DISABLED;
+    if (requested < 0) return MQVPN_SCHED_NEG_INVALID;
+    if (requested == (int)MQVPN_SCHED_BACKUP_FEC) return MQVPN_SCHED_NEG_BACKUP_FEC;
+    if (server_default == MQVPN_SCHED_BACKUP_FEC)
+        return MQVPN_SCHED_NEG_SERVER_BACKUP_FEC;
+    if (already_swapped) return MQVPN_SCHED_NEG_ALREADY_SET;
+    return MQVPN_SCHED_NEG_APPLY;
+}
+
+/* Log token for a refusal; "" for NONE/APPLY. */
+static inline const char *
+mqvpn_sched_neg_reason(mqvpn_sched_neg_t n)
+{
+    switch (n) {
+    case MQVPN_SCHED_NEG_DISABLED: return "disabled";
+    case MQVPN_SCHED_NEG_INVALID: return "invalid";
+    case MQVPN_SCHED_NEG_BACKUP_FEC: return "backup_fec";
+    case MQVPN_SCHED_NEG_SERVER_BACKUP_FEC: return "server_backup_fec";
+    case MQVPN_SCHED_NEG_ALREADY_SET: return "already_set";
+    default: return "";
     }
 }
 

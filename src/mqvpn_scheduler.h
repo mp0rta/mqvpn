@@ -41,6 +41,18 @@
 MQVPN_INTERNAL void mqvpn_apply_scheduler(xqc_conn_settings_t *cs,
                                           mqvpn_scheduler_t sched);
 
+/* The scheduler a connection actually runs: backup_fec degrades to minrtt on
+ * builds without FEC (same condition as mqvpn_apply_scheduler). */
+static inline mqvpn_scheduler_t
+mqvpn_sched_effective(mqvpn_scheduler_t s)
+{
+#if defined(XQC_ENABLE_FEC) && defined(XQC_ENABLE_XOR)
+    return s;
+#else
+    return s == MQVPN_SCHED_BACKUP_FEC ? MQVPN_SCHED_MINRTT : s;
+#endif
+}
+
 /* Map scheduler choice → DATAGRAM send-time QoS level.
  *
  * xquic only enables FEC encoding for DATAGRAMs when qos > XQC_DATA_QOS_HIGH

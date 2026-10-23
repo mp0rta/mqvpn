@@ -252,6 +252,14 @@ typedef struct mqvpn_reorder_flow {
     uint64_t gap_deadline_us;
     uint64_t gap_armed_us;
     uint32_t wait_ms; /* receiver-local; v1 = max_wait_ms (§16.3) */
+    /* §12.2 reordering mark (3GPP TS 38.323 t-Reordering, RX_NEXT / RX_REORD).
+     * rx_next: highest seq buffered in this epoch + 1; written only on a
+     * successful ring_insert (so reord-1 is always a buffered seq) and cleared
+     * by FLOW_RESET. reord: the mark of the armed period — the timeout skips
+     * every gap below it and leaves gaps at or above it to the next period.
+     * Meaningful only while gap_timer_active. */
+    uint64_t rx_next;
+    uint64_t reord;
 
     uint64_t last_seen_us;     /* observation time (stats) */
     uint64_t last_progress_us; /* deliver/buffer/advance time (eviction) */
@@ -424,8 +432,16 @@ flow_get_or_create(mqvpn_reorder_rx_t *rx, const mqvpn_flow_key_t *key)
 /* ─────────────────────────── timer helpers (§12) ──────────────────────────
  *
  * Maintains the §11.1 invariant: gap_timer_active is set exactly when the buffer
- * is non-empty. The deadline is informational in part A (the real timeout
- * handler + tick driver land in part B).
+ * is non-empty. One armed timer = one "period" (§17): it waits for the cohort of
+ * gaps present when it was armed (every missing seq below `reord`), stays
+ * anchored while the cohort is incomplete, ends when expected reaches `reord`
+ * (filled / overflow) or the deadline passes (timeout), and restarts with a
+ * fresh mark if anything is still buffered (§12.2). The invariants below hold at
+ * operation boundaries (after a packet, a tick, a reset or a demote is fully
+ * processed), not in the middle of a drain:
+ *
+ *   gap_timer_active  ⟺  !ring_empty
+ *   gap_timer_active  ⟹  expected < reord <= rx_next  ∧  ring_contains(reord-1)
  */
 
 static void
@@ -440,6 +456,31 @@ static void
 stop_gap_timer(mqvpn_reorder_flow_t *f)
 {
     f->gap_timer_active = 0;
+}
+
+/* §12.2: called after expected advanced. If the armed period's cohort is done
+ * (expected reached the mark, or the buffer drained), end it on the caller's
+ * §17 counter and stop the timer. ring_empty implies expected >= reord (reord-1
+ * is buffered until delivered) but is spelled out to keep §11.1 self-evident. */
+static void
+period_end_if_done(mqvpn_reorder_flow_t *f, uint64_t *end_counter)
+{
+    if (f->gap_timer_active && (ring_empty(&f->buffer) || f->expected >= f->reord)) {
+        (*end_counter)++;
+        stop_gap_timer(f);
+    }
+}
+
+/* §12.2: with the timer stopped and packets still buffered, start a new period
+ * whose cohort is everything missing below rx_next. */
+static void
+period_start_if_needed(mqvpn_reorder_flow_t *f, uint64_t now_us)
+{
+    if (!f->gap_timer_active && !ring_empty(&f->buffer)) {
+        f->reord = f->rx_next;
+        arm_gap_timer(f, now_us, f->wait_ms);
+        f->stats.gap_count++;
+    }
 }
 
 /* ───────────────── deliver helpers + contiguous drain (§11.3) ──────────────
@@ -567,10 +608,10 @@ drain_contiguous(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t now_u
 
 /* ───────────────── §12: timeout handler + overflow flush ───────────────────
  *
- * Both share the same skip-then-drain core: jump `expected` to the lowest
- * occupied seq (§13.3 bounded scan), deliver the now-contiguous run, and update
- * last_progress. They differ only in (a) which §17 period counter they charge
- * and (b) whether they rearm the timer afterwards.
+ * Both deliver buffered packets ascending and skip missing seqs; they differ in
+ * how far they skip and which §17 counter they charge. The timeout skips the
+ * whole cohort (everything below `reord`); the overflow flush skips one head gap
+ * to free space and lets period_end_if_done decide whether that reached the mark.
  */
 
 /* Skip the current gap: advance expected to the lowest buffered seq, then drain
@@ -587,8 +628,11 @@ skip_to_lowest_and_drain(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64
 }
 
 /* §12.1 gap-timeout handler. Precondition: timer armed (⟺ buffer non-empty,
- * §11.1). Skip the missing seq, drain, then either stop (buffer drained) or
- * rearm (timeout-skip advanced expected → a fresh period may start, §12.2). */
+ * §11.1). Deliver every buffered packet below the mark, skipping each missing
+ * seq, then whatever is contiguous from the mark on. While expected < reord the
+ * seq reord-1 is still buffered, so each iteration delivers at least one packet
+ * and the scan is bounded by the ring size (§13.3). The period ended by timeout;
+ * a new one starts if anything (above the old mark) is still waiting (§12.2). */
 static void
 on_gap_timeout(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t now_us)
 {
@@ -598,41 +642,34 @@ on_gap_timeout(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t now_us)
     }
     f->stats.gap_timeout_count++; /* §17: this period ends by timeout */
 
-    skip_to_lowest_and_drain(rx, f, now_us);
-
-    if (ring_empty(&f->buffer)) {
-        stop_gap_timer(f);
-    } else {
-        /* §12.2: timeout-skip made forward progress, so a new period may arm. */
-        arm_gap_timer(f, now_us, f->wait_ms);
-        f->stats.gap_count++;
+    while (!ring_empty(&f->buffer) && f->expected < f->reord) {
+        f->expected =
+            ring_lowest_seq(&f->buffer, f->expected); /* < reord: reord-1 is buffered */
+        drain_contiguous(rx, f, now_us);              /* may run on past reord */
     }
+    f->last_progress_us = now_us;
+
+    stop_gap_timer(f);
+    period_start_if_needed(f, now_us);
 }
 
-/* §12.3 overflow_flush: force-skip the current gap to free buffer space without
- * halting processing. Precondition: buffer non-empty (§11.3/§13.5 — empty-buffer
- * limit/pool exhaustion is a drop, never a flush).
+/* §12.3 overflow_flush: force-skip the current head gap to free buffer space
+ * without halting processing. Precondition: buffer non-empty (§11.3/§13.5 —
+ * empty-buffer limit/pool exhaustion is a drop, never a flush). The head gap is
+ * always inside the cohort (reord-1 is buffered, so lowest <= reord-1).
  *
- * §17 accounting: gap_overflow_count is charged only when the flush actually
- * ENDS the armed period — i.e. it drains the buffer to empty and stops the
- * timer. A partial flush that leaves a higher gap exposed keeps the SAME
- * anchored period alive (no rearm, §12.3 unlike §12.1), so it has not ended a
- * period and must not be counted; counting it would make the §17 identity
- * gap_count = filled + timeout + overflow (+ open) over-count by one. */
+ * §17 accounting: the flush ends the period as overflow only if it carried
+ * expected to the mark; a partial flush that stops at a lower gap keeps the same
+ * anchored period alive (no rearm, no terminator). Either way the mark for any
+ * new period is taken NOW — before the arriving packet that triggered the flush
+ * is classified and inserted — so a gap that packet opens belongs to the next
+ * cohort (bounded by 2W like every deferred gap, §12.2). */
 static void
 overflow_flush(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t now_us)
 {
-    int was_armed = f->gap_timer_active;
     skip_to_lowest_and_drain(rx, f, now_us);
-    if (ring_empty(&f->buffer)) {
-        if (was_armed) {
-            f->stats.gap_overflow_count++; /* §17: period ended by this flush */
-        }
-        stop_gap_timer(f);
-    }
-    /* else: buffer still non-empty → the anchored period continues unbroken (no
-     * rearm, no terminator); the §11.1 invariant is held by the timer staying
-     * active. */
+    period_end_if_done(f, &f->stats.gap_overflow_count);
+    period_start_if_needed(f, now_us);
 }
 
 /* ─────────────────── §11.6: FLOW_RESET buffer discard + reset ──────────────
@@ -666,6 +703,8 @@ discard_buffer_for_reset(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f)
         }
     }
     stop_gap_timer(f);
+    f->rx_next = 0; /* §12.2: the new epoch's seqs may be far below the old ones */
+    f->reord = 0;
     ring_free(&f->buffer); /* frees slots, zeroes size/count/bytes; cap preserved */
 }
 
@@ -819,8 +858,8 @@ pool_would_exhaust(const mqvpn_reorder_rx_t *rx, uint16_t len)
 }
 
 /* Commit an in-window, non-duplicate, within-limits ahead packet to the ring:
- * heap-copy, charge the pool, insert, arm the gap timer on empty→non-empty
- * (§11.1/§11.3). Returns REORDER_BUFFERED, or REORDER_DROPPED_LIMIT on a
+ * heap-copy, charge the pool, insert, advance rx_next, arm the gap timer on
+ * empty→non-empty (§11.1/§12.2). Returns REORDER_BUFFERED, or REORDER_DROPPED_LIMIT on a
  * (defensive) copy/insert allocation failure. */
 static reorder_process_result
 buffer_insert_committed(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t seq,
@@ -833,7 +872,6 @@ buffer_insert_committed(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_
     }
     memcpy(copy, pkt, len);
 
-    int was_empty = ring_empty(&f->buffer);
     if (ring_insert(&f->buffer, seq, copy, len, f->expected, now_us) != 0) {
         free(copy);
         f->stats.pool_drop_count++;
@@ -841,10 +879,13 @@ buffer_insert_committed(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_
     }
     rx->pool_bytes_used += len; /* §13.2 charge after a successful insert */
     f->last_progress_us = now_us;
-    if (was_empty) {
-        arm_gap_timer(f, now_us, f->wait_ms);
-        f->stats.gap_count++;
+    /* §12.2: rx_next tracks the highest BUFFERED seq + 1, so it moves only after
+     * a successful insert (a failed insert must not make reord point at a seq
+     * that is not in the ring). Then arm if this made the buffer non-empty. */
+    if (seq + 1 > f->rx_next) {
+        f->rx_next = seq + 1;
     }
+    period_start_if_needed(f, now_us);
     return REORDER_BUFFERED;
 }
 
@@ -864,10 +905,8 @@ reclassify_after_flush(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t
         f->expected++;
         f->last_progress_us = now_us;
         drain_contiguous(rx, f, now_us);
-        if (ring_empty(&f->buffer) && f->gap_timer_active) {
-            stop_gap_timer(f);
-            f->stats.gap_filled_count++;
-        }
+        period_end_if_done(f, &f->stats.gap_filled_count);
+        period_start_if_needed(f, now_us);
         return REORDER_DELIVERED;
     }
     if (ring_far_ahead(&f->buffer, seq, f->expected)) {
@@ -949,11 +988,11 @@ process_reorder_packet(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t
         f->expected++;
         f->last_progress_us = now_us;
         drain_contiguous(rx, f, now_us);
-        if (ring_empty(&f->buffer) && f->gap_timer_active) {
-            stop_gap_timer(f);
-            f->stats.gap_filled_count++;
-        }
-        return REORDER_DELIVERED; /* non-empty → keep anchored timer (§12.2) */
+        /* §12.2: cohort complete → filled (+ restart if more is buffered);
+         * cohort incomplete → the anchored timer keeps its deadline. */
+        period_end_if_done(f, &f->stats.gap_filled_count);
+        period_start_if_needed(f, now_us);
+        return REORDER_DELIVERED;
     }
 
     if (seq < f->expected) { /* late */

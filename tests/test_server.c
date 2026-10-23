@@ -36,6 +36,8 @@
 #include "libmqvpn.h"
 #include "mqvpn_bind_posix.h"
 #include "mqvpn_internal.h"
+#include "mqvpn_server_internal.h"
+#include <xquic/xquic.h>
 
 /* Test infrastructure */
 
@@ -91,9 +93,11 @@ static int g_tests_passed = 0;
 /* Mock callback state */
 
 static int g_tun_output_called = 0;
+static size_t g_tun_output_len;
 static int g_tunnel_config_ready_called = 0;
 static mqvpn_tunnel_info_t g_last_tunnel_info;
 static int g_log_called = 0;
+static int g_mtu_warning_called = 0;
 
 static void
 mock_tun_output(const uint8_t *pkt, size_t len, void *user_ctx)
@@ -102,6 +106,7 @@ mock_tun_output(const uint8_t *pkt, size_t len, void *user_ctx)
     (void)len;
     (void)user_ctx;
     g_tun_output_called++;
+    g_tun_output_len = len;
 }
 
 static void
@@ -115,9 +120,9 @@ mock_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
 static void
 mock_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
 {
-    (void)level;
-    (void)msg;
     (void)user_ctx;
+    if (level == MQVPN_LOG_WARN && strstr(msg, "exceeds available inner MTU"))
+        g_mtu_warning_called++;
     g_log_called++;
 }
 
@@ -128,6 +133,7 @@ reset_mocks(void)
     g_tunnel_config_ready_called = 0;
     memset(&g_last_tunnel_info, 0, sizeof(g_last_tunnel_info));
     g_log_called = 0;
+    g_mtu_warning_called = 0;
 }
 
 /* Helper: create a valid server config */
@@ -217,6 +223,34 @@ TEST(server_destroy_null)
 {
     /* Must not crash */
     mqvpn_server_destroy(NULL);
+}
+
+TEST(server_user_name_length)
+{
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    ASSERT_NOT_NULL(s);
+    mqvpn_config_free(cfg);
+
+    char name[65], names[2][64];
+    memset(name, 'n', sizeof(name) - 1);
+    name[63] = '\0';
+    ASSERT_EQ(mqvpn_server_add_user(s, name, "original"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_add_user(s, name, "updated"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_list_users(s, names, 2), 1);
+    ASSERT_EQ(strcmp(names[0], name), 0);
+
+    name[63] = 'n';
+    name[64] = '\0';
+    ASSERT_EQ(mqvpn_server_add_user(s, name, "other"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_list_users(s, names, 2), 1);
+    name[63] = '\0';
+    ASSERT_EQ(strcmp(names[0], name), 0);
+
+    mqvpn_server_destroy(s);
 }
 
 TEST(server_egress_fd_budget)
@@ -309,6 +343,92 @@ TEST(server_lifecycle_with_tun_mtu)
 
     mqvpn_server_stop(s);
     mqvpn_server_destroy(s);
+}
+
+TEST(server_lifecycle_with_path_mtu)
+{
+    reset_mocks();
+    mqvpn_config_t *cfg = make_server_config();
+    ASSERT_EQ(mqvpn_config_set_path_mtu(cfg, 1500), MQVPN_OK);
+
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    cbs.log = mock_log;
+
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    ASSERT_NOT_NULL(s);
+    mqvpn_config_free(cfg);
+
+    ASSERT_EQ(mqvpn_server_start(s), MQVPN_OK);
+    ASSERT_EQ(g_last_tunnel_info.mtu, 1418);
+
+    mqvpn_server_stop(s);
+    mqvpn_server_destroy(s);
+}
+
+TEST(server_path_mtu_warning)
+{
+    const int mtus[] = {0, 1300, 1418, 1500};
+    for (size_t i = 0; i < sizeof(mtus) / sizeof(mtus[0]); i++) {
+        reset_mocks();
+        mqvpn_config_t *cfg = make_server_config();
+        ASSERT_EQ(mqvpn_config_set_path_mtu(cfg, 1500), MQVPN_OK);
+        ASSERT_EQ(mqvpn_config_set_tun_mtu(cfg, mtus[i]), MQVPN_OK);
+        ASSERT_EQ(mqvpn_config_set_log_level(cfg, MQVPN_LOG_WARN), MQVPN_OK);
+        mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+        cbs.tun_output = mock_tun_output;
+        cbs.tunnel_config_ready = mock_tunnel_config_ready;
+        cbs.log = mock_log;
+        mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+        ASSERT_NOT_NULL(s);
+        mqvpn_config_free(cfg);
+        ASSERT_EQ(mqvpn_server_start(s), MQVPN_OK);
+        ASSERT_EQ(g_mtu_warning_called, mtus[i] > 1418);
+        ASSERT_EQ(g_last_tunnel_info.mtu, mtus[i] ? mtus[i] : 1418);
+        mqvpn_server_destroy(s);
+    }
+}
+
+TEST(server_lifecycle_path_mtu_v6_minimum)
+{
+    static const struct {
+        int path_mtu, v6, tun_mtu, reorder, result;
+    } cases[] = {
+        {1280, 0, 0, 0, MQVPN_OK},
+        {1280, 1, 0, 0, MQVPN_ERR_INVALID_ARG},
+        {1280, 1, 1500, 0, MQVPN_ERR_INVALID_ARG},
+        {1377, 1, 0, 0, MQVPN_ERR_INVALID_ARG},
+        {1378, 1, 0, 0, MQVPN_OK},
+        {1385, 1, 0, 1, MQVPN_ERR_INVALID_ARG},
+        {1386, 1, 0, 1, MQVPN_OK},
+        {0, 1, 0, 0, MQVPN_OK},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        reset_mocks();
+        mqvpn_config_t *cfg = make_server_config();
+        ASSERT_EQ(mqvpn_config_set_path_mtu(cfg, cases[i].path_mtu), MQVPN_OK);
+        ASSERT_EQ(mqvpn_config_set_tun_mtu(cfg, cases[i].tun_mtu), MQVPN_OK);
+        if (cases[i].v6) ASSERT_EQ(mqvpn_config_set_subnet6(cfg, "fd00::/112"), MQVPN_OK);
+        if (cases[i].reorder)
+            ASSERT_EQ(mqvpn_config_set_reorder_enabled(cfg, MQVPN_REORDER_ON), MQVPN_OK);
+        mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+        cbs.tun_output = mock_tun_output;
+        cbs.tunnel_config_ready = mock_tunnel_config_ready;
+        cbs.log = mock_log;
+        mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+        ASSERT_NOT_NULL(s);
+        mqvpn_config_free(cfg);
+        ASSERT_EQ(mqvpn_server_start(s), cases[i].result);
+        ASSERT_EQ(g_tunnel_config_ready_called, cases[i].result == MQVPN_OK);
+        if (cases[i].result != MQVPN_OK) {
+            ASSERT_EQ(mqvpn_server_start(s), MQVPN_ERR_INVALID_ARG);
+            ASSERT_EQ(g_tunnel_config_ready_called, 0);
+        } else if (!cases[i].v6) {
+            ASSERT_EQ(g_last_tunnel_info.mtu, 1182);
+        }
+        mqvpn_server_destroy(s);
+    }
 }
 
 TEST(server_lifecycle_with_v6)
@@ -630,6 +750,7 @@ mock_on_client_disconnected(uint32_t session_id, mqvpn_error_t reason, void *use
 /* Client mock callbacks for loopback test */
 
 static int g_cli_tun_output_called = 0;
+static size_t g_cli_tun_output_len;
 static int g_cli_tunnel_ready_called = 0;
 static mqvpn_tunnel_info_t g_cli_tunnel_info;
 
@@ -640,6 +761,7 @@ mock_cli_tun_output(const uint8_t *pkt, size_t len, void *user_ctx)
     (void)len;
     (void)user_ctx;
     g_cli_tun_output_called++;
+    g_cli_tun_output_len = len;
 }
 
 static void
@@ -707,6 +829,11 @@ typedef struct {
  * fixture and reset them after teardown. */
 static const char *g_lb_server_cert = NULL;
 static const char *g_lb_server_key = NULL;
+/* Server [Reorder] mode for the next loopback_setup; tests reset it. */
+static mqvpn_reorder_mode_t g_lb_server_reorder = MQVPN_REORDER_OFF;
+/* Server PathMTU for the next loopback_setup; tests reset it. */
+static int g_lb_server_path_mtu = 0;
+static int g_lb_server_v6 = 0;
 
 /* Sockets, server, client (with every client mock registered, tunnel_closed
  * and log included), one path, connect. `tweak` edits the client config
@@ -753,9 +880,16 @@ loopback_setup(loopback_t *lb, void (*tweak)(mqvpn_config_t *cfg))
 
     /* Server */
     mqvpn_config_t *svr_cfg = make_server_config();
+    if (g_lb_server_v6)
+        ASSERT_EQ(mqvpn_config_set_subnet6(svr_cfg, "fd00::/112"), MQVPN_OK);
     if (g_lb_server_cert)
         ASSERT_EQ(mqvpn_config_set_tls_cert(svr_cfg, g_lb_server_cert, g_lb_server_key),
                   MQVPN_OK);
+    if (g_lb_server_reorder != MQVPN_REORDER_OFF)
+        ASSERT_EQ(mqvpn_config_set_reorder_enabled(svr_cfg, g_lb_server_reorder),
+                  MQVPN_OK);
+    if (g_lb_server_path_mtu)
+        ASSERT_EQ(mqvpn_config_set_path_mtu(svr_cfg, g_lb_server_path_mtu), MQVPN_OK);
     mqvpn_server_callbacks_t svr_cbs = MQVPN_SERVER_CALLBACKS_INIT;
     svr_cbs.tun_output = mock_tun_output;
     svr_cbs.tunnel_config_ready = mock_tunnel_config_ready;
@@ -1021,19 +1155,133 @@ tweak_secure_no_verifier(mqvpn_config_t *cfg)
     mqvpn_config_set_reconnect(cfg, 0, 0);
 }
 
-TEST(client_secure_without_verifier_rejects_self_signed_as_closed)
+static void
+tweak_secure_no_verifier_sni(mqvpn_config_t *cfg)
+{
+    tweak_secure_no_verifier(cfg);
+    mqvpn_config_set_tls_server_name(cfg, "mqvpn-test"); /* == SAN of test.crt */
+}
+
+/* Run body with the client's root store pinned to path. SSL_CERT_FILE is read
+ * once, when the client engine's SSL_CTX is created (mqvpn_client_new →
+ * SSL_CTX_set_default_verify_paths). The fixture's server engine reads it
+ * too; harmless — it never verifies client certs. ASSERT_* exits the
+ * process, so the restore only matters on the success path. */
+static void
+with_ssl_cert_file(const char *path, void (*body)(void))
+{
+    const char *prev = getenv("SSL_CERT_FILE");
+    char saved[PATH_MAX];
+    int had = 0;
+    if (prev) {
+        snprintf(saved, sizeof(saved), "%s", prev);
+        had = 1;
+    }
+    ASSERT_EQ(setenv("SSL_CERT_FILE", path, 1), 0);
+    body();
+    if (had)
+        setenv("SSL_CERT_FILE", saved, 1);
+    else
+        unsetenv("SSL_CERT_FILE");
+}
+
+/* No verifier: the library rejects the server certificate inside the
+ * handshake, and the platform hears it once, as TLS — one ERROR line,
+ * tunnel_closed(MQVPN_ERR_TLS), and the conn-close notify after the drain
+ * suppressed by the once-gate. Every X509 error ends the same way. */
+static void
+expect_library_tls_rejection(void (*tweak)(mqvpn_config_t *cfg))
+{
+    loopback_t lb;
+    loopback_setup(&lb, tweak);
+    loopback_pump_until(&lb, done_client_closed, 10000);
+
+    ASSERT_EQ(mqvpn_client_get_state(lb.cli), MQVPN_STATE_CLOSED);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 0);
+    ASSERT_EQ(g_cli_tunnel_closed_count, 1);
+    ASSERT_EQ(g_cli_tunnel_closed_reason, MQVPN_ERR_TLS);
+    ASSERT_EQ(g_cli_tls_fail_log_count, 1);
+    loopback_teardown(&lb);
+}
+
+TEST(client_secure_without_verifier_rejects_self_signed_as_tls)
+{
+    /* X509 error 18, rejected inside the library before any callback */
+    expect_library_tls_rejection(tweak_secure_no_verifier);
+}
+
+static void
+hostname_mismatch_body(void)
+{
+    /* test.crt is trusted, but with no ServerName the name checked is the
+     * server host 127.0.0.1, which mqvpn-test does not match */
+    expect_library_tls_rejection(tweak_secure_no_verifier);
+}
+
+TEST(client_secure_without_verifier_rejects_hostname_mismatch_as_tls)
+{
+    with_ssl_cert_file(TEST_CERT_FILE, hostname_mismatch_body);
+}
+
+static void
+expired_body(void)
+{
+    /* expired.crt is its own trust anchor and matches the ServerName: the
+     * only error left is X509 error 10 (expired) */
+    g_lb_server_cert = TEST_EXPIRED_CERT_FILE;
+    g_lb_server_key = TEST_EXPIRED_KEY_FILE;
+    expect_library_tls_rejection(tweak_secure_no_verifier_sni);
+    g_lb_server_cert = NULL;
+    g_lb_server_key = NULL;
+}
+
+TEST(client_secure_without_verifier_rejects_expired_as_tls)
+{
+    with_ssl_cert_file(TEST_EXPIRED_CERT_FILE, expired_body);
+}
+
+static void
+tweak_secure_no_verifier_reconnect(mqvpn_config_t *cfg)
+{
+    tweak_secure_no_verifier(cfg);
+    mqvpn_config_set_reconnect(cfg, 1, 1);
+}
+
+static void
+tweak_rejecting_verifier_reconnect(mqvpn_config_t *cfg)
+{
+    tweak_rejecting_verifier(cfg);
+    mqvpn_config_set_reconnect(cfg, 1, 1);
+}
+
+/* Reconnect on: a rejected certificate still ends in CLOSED, not
+ * RECONNECTING — the same server would present the same certificate. Both
+ * rejection sites: the library's own check and the platform verifier. */
+TEST(client_tls_rejection_does_not_reconnect)
+{
+    expect_library_tls_rejection(tweak_secure_no_verifier_reconnect);
+
+    memset(&g_vrec, 0, sizeof(g_vrec));
+    g_vrec.ret = -1;
+    expect_library_tls_rejection(tweak_rejecting_verifier_reconnect);
+    ASSERT_EQ(g_vrec.calls, 1);
+}
+
+TEST(client_unreachable_server_reports_closed)
 {
     loopback_t lb;
     loopback_setup(&lb, tweak_secure_no_verifier);
-    loopback_pump_until(&lb, done_client_closed, 10000);
 
-    /* Self-signed (X509 error 18) is rejected inside the library and never
-     * reaches cb_cert_verify, so the platform sees the plain connection close
-     * after the drain. (An unknown issuer, error 20, does reach
-     * cb_cert_verify via xquic's legacy route and ends the same way — see
-     * client_secure_without_verifier_rejects_unknown_issuer_as_closed.) */
+    /* Pump the client alone: the server never reads its socket, so no
+     * certificate is ever judged, and the handshake-stall close is a plain
+     * MQVPN_ERR_CLOSED, not TLS. */
+    for (int elapsed = 0; elapsed < 15000 && !done_client_closed(&lb); elapsed += 50) {
+        mqvpn_bind_posix_path_drain(lb.cli_tctx, lb.cli, lb.path_h, 64);
+        mqvpn_client_tick(lb.cli);
+        poll(NULL, 0, 50);
+    }
+
     ASSERT_EQ(mqvpn_client_get_state(lb.cli), MQVPN_STATE_CLOSED);
-    ASSERT_EQ(g_cli_tunnel_ready_called, 0);
     ASSERT_EQ(g_cli_tunnel_closed_count, 1);
     ASSERT_EQ(g_cli_tunnel_closed_reason, MQVPN_ERR_CLOSED);
     ASSERT_EQ(g_cli_tls_fail_log_count, 0);
@@ -1090,44 +1338,19 @@ TEST(client_verifier_receives_chain_leaf_first)
 static void
 unknown_issuer_body(void)
 {
+    /* A chain whose root is in no store: unknown issuer (X509 error 20),
+     * which xquic's legacy path routes through cb_cert_verify before
+     * rejecting. It must be reported once, like any other X509 error. */
     use_chain_server_cert();
-    loopback_t lb;
-    loopback_setup(&lb, tweak_secure_no_verifier);
-    loopback_pump_until(&lb, done_client_closed, 10000);
-
-    /* A chain whose root is in no store: unknown issuer (X509 error 20) is
-     * the one library-side failure xquic routes through cb_cert_verify. It
-     * must end exactly like the self-signed case above — one ERROR line from
-     * the verifier site, then the plain connection close — so the public
-     * reason does not depend on which X509 error the library hit. Only a
-     * configured verifier's rejection is MQVPN_ERR_TLS. */
-    ASSERT_EQ(mqvpn_client_get_state(lb.cli), MQVPN_STATE_CLOSED);
-    ASSERT_EQ(g_cli_tunnel_ready_called, 0);
-    ASSERT_EQ(g_cli_tls_fail_log_count, 1);
-    ASSERT_EQ(g_cli_tunnel_closed_count, 1);
-    ASSERT_EQ(g_cli_tunnel_closed_reason, MQVPN_ERR_CLOSED);
-    loopback_teardown(&lb);
+    expect_library_tls_rejection(tweak_secure_no_verifier);
     use_default_server_cert();
 }
 
-TEST(client_secure_without_verifier_rejects_unknown_issuer_as_closed)
+TEST(client_secure_without_verifier_rejects_unknown_issuer_as_tls)
 {
     /* Pin the client's store to test.crt so the chain's root is provably
-     * absent whatever the host's /etc/ssl holds (same save/restore shape as
-     * client_secure_without_verifier_uses_default_root_paths). */
-    const char *prev = getenv("SSL_CERT_FILE");
-    char saved[PATH_MAX];
-    int had = 0;
-    if (prev) {
-        snprintf(saved, sizeof(saved), "%s", prev);
-        had = 1;
-    }
-    ASSERT_EQ(setenv("SSL_CERT_FILE", TEST_CERT_FILE, 1), 0);
-    unknown_issuer_body();
-    if (had)
-        setenv("SSL_CERT_FILE", saved, 1);
-    else
-        unsetenv("SSL_CERT_FILE");
+     * absent whatever the host's /etc/ssl holds. */
+    with_ssl_cert_file(TEST_CERT_FILE, unknown_issuer_body);
 }
 
 static void
@@ -1161,24 +1384,7 @@ default_root_paths_body(void)
 
 TEST(client_secure_without_verifier_uses_default_root_paths)
 {
-    /* SSL_CERT_FILE is read once, when the client engine's SSL_CTX is created
-     * (mqvpn_client_new → SSL_CTX_set_default_verify_paths). The fixture's
-     * server engine reads it too; harmless — it never verifies client certs.
-     * ASSERT_* exits the process, so the restore below only matters on the
-     * success path. */
-    const char *prev = getenv("SSL_CERT_FILE");
-    char saved[PATH_MAX];
-    int had = 0;
-    if (prev) {
-        snprintf(saved, sizeof(saved), "%s", prev);
-        had = 1;
-    }
-    ASSERT_EQ(setenv("SSL_CERT_FILE", TEST_CERT_FILE, 1), 0);
-    default_root_paths_body();
-    if (had)
-        setenv("SSL_CERT_FILE", saved, 1);
-    else
-        unsetenv("SSL_CERT_FILE");
+    with_ssl_cert_file(TEST_CERT_FILE, default_root_paths_body);
 }
 
 /* Note: all pump loops below use poll() instead of usleep() for CI robustness.
@@ -1304,6 +1510,148 @@ TEST(server_session_on_tun_v6_no_sessions)
  *   - set_tun_active sends packet output through tun_output
  *   - client disconnect releases the session
  */
+/* ── Reorder shim: the MTU makes room for its header only when negotiated ── */
+
+static void
+tweak_reorder_on(mqvpn_config_t *cfg)
+{
+    ASSERT_EQ(mqvpn_config_set_reorder_enabled(cfg, MQVPN_REORDER_ON), MQVPN_OK);
+}
+
+/* One loopback tunnel with the given [Reorder] modes. *cli_mtu is the
+ * client's tunnel MTU (tunnel_config_ready), *svr_mtu the one the server
+ * reports for that client (on_client_connected, the last writer of
+ * g_last_tunnel_info once the tunnel is up). */
+static void
+reorder_mtu_run(mqvpn_reorder_mode_t cli_mode, mqvpn_reorder_mode_t svr_mode,
+                int *cli_mtu, int *svr_mtu)
+{
+    loopback_t lb;
+    g_lb_server_reorder = svr_mode;
+    loopback_setup(&lb, cli_mode == MQVPN_REORDER_ON ? tweak_reorder_on : NULL);
+    loopback_pump_until(&lb, done_established, 10000);
+    ASSERT_EQ(g_client_connected_called, 1);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+    *cli_mtu = g_cli_tunnel_info.mtu;
+    *svr_mtu = g_last_tunnel_info.mtu;
+    loopback_teardown(&lb);
+    g_lb_server_reorder = MQVPN_REORDER_OFF;
+}
+
+static void
+tweak_path_mtu_1500(mqvpn_config_t *cfg)
+{
+    ASSERT_EQ(mqvpn_config_set_path_mtu(cfg, 1500), MQVPN_OK);
+}
+
+/* PathMTU on both ends raises the negotiated tunnel MTU from 1382 to 1418. */
+TEST(server_path_mtu_negotiated)
+{
+    loopback_t lb;
+    g_lb_server_path_mtu = 1500;
+    loopback_setup(&lb, tweak_path_mtu_1500);
+    loopback_pump_until(&lb, done_established, 10000);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+    ASSERT_EQ(g_cli_tunnel_info.mtu, 1418);
+    ASSERT_EQ(g_last_tunnel_info.mtu, 1418);
+    loopback_teardown(&lb);
+    g_lb_server_path_mtu = 0;
+}
+
+static int g_small_client_path_mtu;
+static void
+tweak_small_path_mtu(mqvpn_config_t *cfg)
+{
+    ASSERT_EQ(mqvpn_config_set_reconnect(cfg, 0, 0), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_path_mtu(cfg, g_small_client_path_mtu), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_reorder_enabled(cfg, g_lb_server_reorder), MQVPN_OK);
+    if (g_lb_server_reorder != MQVPN_REORDER_OFF)
+        ASSERT_EQ(mqvpn_config_set_tun_mtu(cfg, 1280), MQVPN_OK);
+}
+
+static int
+done_v6_packet(loopback_t *lb)
+{
+    (void)lb;
+    return g_cli_tun_output_called > 0 && g_tun_output_called > 0;
+}
+
+TEST(client_path_mtu_v6_minimum)
+{
+    static const struct {
+        int path_mtu, reorder, v6, ok;
+    } cases[] = {
+        {1280, 0, 0, 1}, {1280, 0, 1, 0}, {1377, 0, 1, 0},
+        {1378, 0, 1, 1}, {1385, 1, 1, 0}, {1386, 1, 1, 1},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        loopback_t lb;
+        g_small_client_path_mtu = cases[i].path_mtu;
+        g_lb_server_v6 = cases[i].v6;
+        g_lb_server_reorder = cases[i].reorder ? MQVPN_REORDER_ON : MQVPN_REORDER_OFF;
+        /* Use a valid server MTU to isolate client-side rejection. */
+        g_lb_server_path_mtu = cases[i].ok ? cases[i].path_mtu : 0;
+        loopback_setup(&lb, tweak_small_path_mtu);
+        loopback_pump_until(&lb, cases[i].ok ? done_established : done_client_closed,
+                            10000);
+        ASSERT_EQ(g_cli_tunnel_ready_called, cases[i].ok);
+        if (!cases[i].ok) {
+            ASSERT_EQ(g_cli_tunnel_closed_count, 1);
+            ASSERT_EQ(g_cli_tunnel_closed_reason, MQVPN_ERR_INVALID_ARG);
+        } else if (cases[i].v6) {
+            ASSERT_EQ(g_cli_tunnel_info.mtu, 1280);
+            ASSERT_EQ(mqvpn_client_set_tun_active(lb.cli, 1, -1), MQVPN_OK);
+            uint8_t pkt[1280] = {0x60};
+            pkt[4] = 4;
+            pkt[5] = 216; /* 1240-byte IPv6 payload */
+            pkt[6] = 59;  /* No Next Header */
+            pkt[7] = 64;
+            memcpy(pkt + 8, g_cli_tunnel_info.assigned_ip6, 16);
+            ASSERT_EQ(inet_pton(AF_INET6, "2001:db8::1", pkt + 24), 1);
+            ASSERT_EQ(mqvpn_client_on_tun_packet(lb.cli, pkt, sizeof(pkt)), MQVPN_OK);
+            memcpy(pkt + 8, pkt + 24, 16);
+            memcpy(pkt + 24, g_cli_tunnel_info.assigned_ip6, 16);
+            ASSERT_EQ(mqvpn_server_on_tun_packet(lb.svr, pkt, sizeof(pkt)), MQVPN_OK);
+            loopback_pump_until(&lb, done_v6_packet, 10000);
+            ASSERT_EQ(g_tun_output_called, 1);
+            ASSERT_EQ(g_cli_tun_output_called, 1);
+            ASSERT_EQ(g_tun_output_len, sizeof(pkt));
+            ASSERT_EQ(g_cli_tun_output_len, sizeof(pkt));
+        } else {
+            ASSERT_EQ(g_cli_tunnel_info.mtu, 1182);
+        }
+        loopback_teardown(&lb);
+    }
+    g_lb_server_v6 = 0;
+    g_lb_server_path_mtu = 0;
+    g_lb_server_reorder = MQVPN_REORDER_OFF;
+}
+
+TEST(server_reorder_mtu_only_when_negotiated)
+{
+    int cli_off, svr_off, cli, svr;
+
+    reorder_mtu_run(MQVPN_REORDER_OFF, MQVPN_REORDER_OFF, &cli_off, &svr_off);
+    ASSERT_NE(cli_off, 0);
+    ASSERT_NE(svr_off, 0);
+
+    /* Client on, server off: no echo, so nothing is ever stamped. */
+    reorder_mtu_run(MQVPN_REORDER_ON, MQVPN_REORDER_OFF, &cli, &svr);
+    ASSERT_EQ(cli, cli_off);
+    ASSERT_EQ(svr, svr_off);
+
+    /* Server on, client off: the client did not offer it, no echo either. */
+    reorder_mtu_run(MQVPN_REORDER_OFF, MQVPN_REORDER_ON, &cli, &svr);
+    ASSERT_EQ(cli, cli_off);
+    ASSERT_EQ(svr, svr_off);
+
+    /* Both on: negotiated, so every stamped packet carries the 8-byte
+     * header (MQVPN_REORDER_HDR_LEN) and both ends make room for it. */
+    reorder_mtu_run(MQVPN_REORDER_ON, MQVPN_REORDER_ON, &cli, &svr);
+    ASSERT_EQ(cli, cli_off - 8);
+    ASSERT_EQ(svr, svr_off - 8);
+}
+
 TEST(server_session_quic_loopback)
 {
     loopback_t lb;
@@ -1329,6 +1677,9 @@ TEST(server_session_quic_loopback)
     /* insecure=1: xquic never consults cb_cert_verify, so even a rejecting
      * verifier is never called (premise of cb_cert_verify's shape). */
     ASSERT_EQ(g_vrec.calls, 0);
+    /* ...and the self-signed cert is not reported as a TLS failure either */
+    ASSERT_EQ(g_cli_tls_fail_log_count, 0);
+    ASSERT_EQ(g_cli_tunnel_closed_count, 0);
     /* Client assigned IP should be 10.0.0.2 (first allocation in /24) */
     ASSERT_EQ(g_cli_tunnel_info.assigned_ip[0], 10);
     ASSERT_EQ(g_cli_tunnel_info.assigned_ip[1], 0);
@@ -1418,6 +1769,56 @@ TEST(server_session_quic_loopback)
     }
     ASSERT_EQ(g_client_disconnected_called, 1);
     ASSERT_EQ(g_last_disconnected_session_id, g_last_session_id);
+
+    loopback_teardown(&lb);
+}
+
+/* A client's bytes_tx in get_client_info (get_status) counts what the server
+ * sent to it, not what it sent plus what it received. */
+TEST(server_client_info_bytes_tx_is_sent_bytes)
+{
+    loopback_t lb;
+    loopback_setup(&lb, NULL);
+    loopback_pump_until(&lb, done_established, 10000);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+    mqvpn_client_set_tun_active(lb.cli, 1, -1);
+
+    /* Upload only: 20 packets of 1000 bytes from the client's address. */
+    uint8_t pkt[1000];
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x45;
+    pkt[2] = sizeof(pkt) >> 8;
+    pkt[3] = sizeof(pkt) & 0xff;
+    pkt[8] = 64;
+    pkt[9] = 17;
+    memcpy(pkt + 12, g_cli_tunnel_info.assigned_ip, 4);
+    pkt[16] = 8;
+    pkt[17] = 8;
+    pkt[18] = 8;
+    pkt[19] = 8;
+    int baseline = g_tun_output_called;
+    for (int k = 0; k < 20; k++)
+        ASSERT_EQ(mqvpn_client_on_tun_packet(lb.cli, pkt, sizeof(pkt)), MQVPN_OK);
+    for (int i = 0; i < 5000 && g_tun_output_called < baseline + 20;) {
+        drain_and_tick(lb.svr, lb.svr_tctx, lb.cli, lb.cli_tctx, lb.path_h);
+        struct pollfd pfds[2] = {
+            {.fd = lb.svr_fd, .events = POLLIN},
+            {.fd = lb.cli_fd, .events = POLLIN},
+        };
+        int w = poll(pfds, 2, 5);
+        i += (w == 0) ? 5 : 1;
+    }
+    ASSERT_EQ(g_tun_output_called, baseline + 20);
+
+    mqvpn_client_info_t ci[2];
+    int n = 0;
+    ASSERT_EQ(mqvpn_server_get_client_info(lb.svr, ci, 2, &n), MQVPN_OK);
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(ci[0].n_paths, 1);
+    ASSERT_EQ(ci[0].bytes_rx >= 20 * sizeof(pkt), 1);
+    ASSERT_EQ(ci[0].bytes_tx, ci[0].paths[0].bytes_tx);
+    ASSERT_EQ(ci[0].bytes_rx, ci[0].paths[0].bytes_rx);
+    ASSERT_EQ(ci[0].bytes_tx < ci[0].bytes_rx, 1);
 
     loopback_teardown(&lb);
 }
@@ -1904,24 +2305,12 @@ TEST(server_reconnect_manual_failure_rearm)
 
 /* max_clients config boundary */
 
-/* ── Path IDs: the client reconnects only once the server stops granting ──
+/* ── A client's status lists its live paths, however many it closed ──
  *
- * Every remove/add of a path (a WAN that failed and came back) takes a new
- * path ID, closed paths keep theirs until the connection ends, and the
- * server grants more on PATHS_BLOCKED (8 at a time) only up to its lifetime
- * cap (max_path_id_grant_max_value, 128). Past the cap the re-added path can
- * never be created on this connection, so the client must reconnect for it
- * to join a new one; while a grant is merely on its way it must not. */
-
-static int g_path_ids_left_log = 0;
-
-static void
-path_ids_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
-{
-    (void)level;
-    (void)user_ctx;
-    if (msg && strstr(msg, "no path ID left on this connection")) g_path_ids_left_log++;
-}
+ * xquic keeps a closed path in the connection's path list, and so in
+ * xqc_conn_get_stats()'s paths_info, until the connection ends, and a
+ * network that comes back takes a new path ID. The status has room for
+ * MQVPN_MAX_PATHS paths, so the paths still open come first. */
 
 typedef struct {
     int svr_fd;
@@ -1931,28 +2320,35 @@ typedef struct {
     int cli_fd[2];
     void *cli_tctx[2];
     mqvpn_path_handle_t ph[2];
-} churn_t;
+} status_churn_t;
 
-/* Pump both engines until the client has `want` ACTIVE paths or max_ms. */
-static int
-churn_pump_until_active(churn_t *f, int want, int max_ms)
+static void
+status_churn_pump(status_churn_t *f, int ms)
 {
-    for (int elapsed = 0; elapsed < max_ms;) {
+    for (int elapsed = 0; elapsed < ms;) {
         drain_and_tick2(f->svr, f->svr_tctx, f->cli, f->cli_tctx, f->ph);
-        if (count_active_paths(f->cli) == want) return 1;
         struct pollfd pfds[3] = {
             {.fd = f->svr_fd, .events = POLLIN},
             {.fd = f->cli_fd[0], .events = POLLIN},
             {.fd = f->cli_fd[1], .events = POLLIN},
         };
-        int w = poll(pfds, 3, 20);
-        elapsed += (w == 0) ? 20 : 1;
+        int w = poll(pfds, 3, 10);
+        elapsed += (w == 0) ? 10 : 1;
+    }
+}
+
+static int
+status_churn_pump_until_active(status_churn_t *f, int want, int max_ms)
+{
+    for (int elapsed = 0; elapsed < max_ms; elapsed += 20) {
+        status_churn_pump(f, 20);
+        if (count_active_paths(f->cli) == want) return 1;
     }
     return 0;
 }
 
 static void
-churn_open_path(churn_t *f, int k)
+status_churn_open_path(status_churn_t *f, int k)
 {
     f->cli_fd[k] = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
     ASSERT_NE(f->cli_fd[k], -1);
@@ -1979,17 +2375,130 @@ churn_open_path(churn_t *f, int k)
         f->ph[k] =
             mqvpn_client_add_path(f->cli, &desc, mqvpn_bind_posix_path_ops(), tctx, NULL);
         if (f->ph[k] != (mqvpn_path_handle_t)-1) break;
-        drain_and_tick2(f->svr, f->svr_tctx, f->cli, f->cli_tctx, f->ph);
-        poll(NULL, 0, 10);
+        status_churn_pump(f, 10);
     }
     ASSERT_NE(f->ph[k], (mqvpn_path_handle_t)-1);
     f->cli_tctx[k] = tctx;
 }
 
+TEST(server_status_lists_live_paths_after_path_churn)
+{
+    status_churn_t f;
+    reset_mocks();
+    g_cli_tunnel_ready_called = 0;
+    memset(&f, 0, sizeof(f));
+    f.cli_fd[0] = f.cli_fd[1] = -1;
+
+    f.svr_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    ASSERT_NE(f.svr_fd, -1);
+    struct sockaddr_in svr_addr;
+    memset(&svr_addr, 0, sizeof(svr_addr));
+    svr_addr.sin_family = AF_INET;
+    svr_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ASSERT_EQ(bind(f.svr_fd, (struct sockaddr *)&svr_addr, sizeof(svr_addr)), 0);
+    socklen_t alen = sizeof(svr_addr);
+    getsockname(f.svr_fd, (struct sockaddr *)&svr_addr, &alen);
+
+    /* 16 path IDs up front on both ends, so no re-creation below waits for
+     * a MAX_PATH_ID grant. */
+    mqvpn_config_t *svr_cfg = make_server_config();
+    mqvpn_config_set_multipath(svr_cfg, 1);
+    ASSERT_EQ(mqvpn_config_set_init_max_path_id(svr_cfg, 16), MQVPN_OK);
+    mqvpn_server_callbacks_t svr_cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    svr_cbs.tun_output = mock_tun_output;
+    svr_cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    f.svr = mqvpn_server_new(svr_cfg, &svr_cbs, NULL);
+    ASSERT_NOT_NULL(f.svr);
+    mqvpn_config_free(svr_cfg);
+    mqvpn_bind_posix_opts_t svr_bopts = {0};
+    svr_bopts.struct_size = sizeof(svr_bopts);
+    svr_bopts.socket_buf_bytes = -1;
+    ASSERT_EQ(mqvpn_bind_posix_server_new(f.svr_fd, &svr_bopts, &f.svr_tctx), MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_set_transport(f.svr, mqvpn_bind_posix_server_ops(), f.svr_tctx,
+                                         (struct sockaddr *)&svr_addr, sizeof(svr_addr)),
+              MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_start(f.svr), MQVPN_OK);
+
+    mqvpn_config_t *cli_cfg = mqvpn_config_new();
+    mqvpn_config_set_server(cli_cfg, "127.0.0.1", ntohs(svr_addr.sin_port));
+    mqvpn_config_set_insecure(cli_cfg, 1);
+    mqvpn_config_set_multipath(cli_cfg, 1);
+    ASSERT_EQ(mqvpn_config_set_init_max_path_id(cli_cfg, 16), MQVPN_OK);
+    mqvpn_config_set_log_level(cli_cfg, MQVPN_LOG_ERROR);
+    mqvpn_client_callbacks_t cli_cbs = MQVPN_CLIENT_CALLBACKS_INIT;
+    cli_cbs.tun_output = mock_cli_tun_output;
+    cli_cbs.tunnel_config_ready = mock_cli_tunnel_ready;
+    f.cli = mqvpn_client_new(cli_cfg, &cli_cbs, NULL);
+    ASSERT_NOT_NULL(f.cli);
+    mqvpn_config_free(cli_cfg);
+
+    status_churn_open_path(&f, 0);
+    status_churn_open_path(&f, 1);
+    mqvpn_client_set_server_addr(f.cli, (struct sockaddr *)&svr_addr, sizeof(svr_addr));
+    ASSERT_EQ(mqvpn_client_connect(f.cli), MQVPN_OK);
+    for (int elapsed = 0; elapsed < 15000 && g_cli_tunnel_ready_called == 0;
+         elapsed += 20)
+        status_churn_pump(&f, 20);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+    mqvpn_client_set_tun_active(f.cli, 1, -1);
+    ASSERT_EQ(status_churn_pump_until_active(&f, 2, 15000), 1);
+
+    /* Eight times, the second path's network goes away and comes back. */
+    for (int cycle = 0; cycle < 8; cycle++) {
+        ASSERT_EQ(mqvpn_client_remove_path(f.cli, f.ph[1]), MQVPN_OK);
+        close(f.cli_fd[1]);
+        ASSERT_EQ(mqvpn_client_on_platform_path_released(f.cli, f.ph[1]), MQVPN_OK);
+        f.cli_tctx[1] = NULL;
+        f.cli_fd[1] = -1;
+        status_churn_open_path(&f, 1);
+        ASSERT_EQ(status_churn_pump_until_active(&f, 2, 5000), 1);
+    }
+
+    /* Both live paths are in the server's status of this client, ACTIVE. */
+    int active = 0;
+    for (int elapsed = 0; elapsed < 5000 && active != 2; elapsed += 100) {
+        status_churn_pump(&f, 100);
+        mqvpn_client_info_t ci[2];
+        int n = 0;
+        ASSERT_EQ(mqvpn_server_get_client_info(f.svr, ci, 2, &n), MQVPN_OK);
+        ASSERT_EQ(n, 1);
+        ASSERT_EQ(ci[0].n_paths <= MQVPN_MAX_PATHS, 1);
+        active = 0;
+        for (int p = 0; p < ci[0].n_paths; p++)
+            if (ci[0].paths[p].state == MQVPN_XQC_PATH_STATE_ACTIVE) active++;
+    }
+    ASSERT_EQ(active, 2);
+
+    mqvpn_client_destroy(f.cli);
+    mqvpn_server_destroy(f.svr);
+    close(f.svr_fd);
+    for (int k = 0; k < 2; k++)
+        if (f.cli_fd[k] >= 0) close(f.cli_fd[k]);
+}
+
+/* ── Path IDs: the client reconnects only once the server stops granting ──
+ *
+ * Every remove/add of a path (a WAN that failed and came back) takes a new
+ * path ID, closed paths keep theirs until the connection ends, and the
+ * server grants more on PATHS_BLOCKED (8 at a time) only up to its lifetime
+ * cap (max_path_id_grant_max_value, 128). Past the cap the re-added path can
+ * never be created on this connection, so the client must reconnect for it
+ * to join a new one; while a grant is merely on its way it must not. */
+
+static int g_path_ids_left_log = 0;
+
+static void
+path_ids_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
+{
+    (void)level;
+    (void)user_ctx;
+    if (msg && strstr(msg, "no path ID left on this connection")) g_path_ids_left_log++;
+}
+
 /* Remove the second path as a platform does when its network goes away:
  * PATH_ABANDON, close the socket, report the release. */
 static void
-churn_remove_path(churn_t *f)
+status_churn_remove_path(status_churn_t *f)
 {
     ASSERT_EQ(mqvpn_client_remove_path(f->cli, f->ph[1]), MQVPN_OK);
     close(f->cli_fd[1]);
@@ -2001,7 +2510,7 @@ churn_remove_path(churn_t *f)
 /* Server and client (reconnect after 1 s) with the given initial maximum
  * path ID on both ends, two loopback paths, tunnel up, both paths ACTIVE. */
 static void
-churn_setup(churn_t *f, uint64_t init_max_path_id)
+status_churn_setup(status_churn_t *f, uint64_t init_max_path_id)
 {
     reset_mocks();
     g_client_connected_called = 0;
@@ -2057,27 +2566,20 @@ churn_setup(churn_t *f, uint64_t init_max_path_id)
     ASSERT_NOT_NULL(f->cli);
     mqvpn_config_free(cli_cfg);
 
-    churn_open_path(f, 0);
-    churn_open_path(f, 1);
+    status_churn_open_path(f, 0);
+    status_churn_open_path(f, 1);
     mqvpn_client_set_server_addr(f->cli, (struct sockaddr *)&svr_addr, sizeof(svr_addr));
     ASSERT_EQ(mqvpn_client_connect(f->cli), MQVPN_OK);
-    for (int elapsed = 0; elapsed < 15000 && g_cli_tunnel_ready_called == 0;) {
-        drain_and_tick2(f->svr, f->svr_tctx, f->cli, f->cli_tctx, f->ph);
-        struct pollfd pfds[3] = {
-            {.fd = f->svr_fd, .events = POLLIN},
-            {.fd = f->cli_fd[0], .events = POLLIN},
-            {.fd = f->cli_fd[1], .events = POLLIN},
-        };
-        int w = poll(pfds, 3, 20);
-        elapsed += (w == 0) ? 20 : 1;
-    }
+    for (int elapsed = 0; elapsed < 15000 && g_cli_tunnel_ready_called == 0;
+         elapsed += 20)
+        status_churn_pump(f, 20);
     ASSERT_EQ(g_cli_tunnel_ready_called, 1);
     mqvpn_client_set_tun_active(f->cli, 1, -1);
-    ASSERT_EQ(churn_pump_until_active(f, 2, 15000), 1);
+    ASSERT_EQ(status_churn_pump_until_active(f, 2, 15000), 1);
 }
 
 static void
-churn_teardown(churn_t *f)
+status_churn_teardown(status_churn_t *f)
 {
     mqvpn_client_destroy(f->cli);
     mqvpn_server_destroy(f->svr);
@@ -2091,15 +2593,15 @@ churn_teardown(churn_t *f)
  * start at 128 path IDs so the cap is reached without grant round trips. */
 TEST(client_reconnects_when_path_ids_run_out)
 {
-    churn_t f;
-    churn_setup(&f, 128);
+    status_churn_t f;
+    status_churn_setup(&f, 128);
 
     int cycles = 0;
     for (; cycles < 200; cycles++) {
-        churn_remove_path(&f);
-        churn_open_path(&f, 1);
+        status_churn_remove_path(&f);
+        status_churn_open_path(&f, 1);
         /* No path ID left: the path stays out (it would be up within ms). */
-        if (!churn_pump_until_active(&f, 2, 2000)) break;
+        if (!status_churn_pump_until_active(&f, 2, 2000)) break;
     }
     /* Paths 0 and 1 plus one ID per cycle: the cycle that found none. */
     ASSERT_EQ(cycles, 127);
@@ -2107,45 +2609,37 @@ TEST(client_reconnects_when_path_ids_run_out)
 
     /* The retry is refused too, the client reconnects, and the tunnel comes
      * up again; the platform then brings the TUN up as after any connect. */
-    for (int elapsed = 0; elapsed < 20000 && g_cli_tunnel_ready_called < 2;) {
-        drain_and_tick2(f.svr, f.svr_tctx, f.cli, f.cli_tctx, f.ph);
-        struct pollfd pfds[3] = {
-            {.fd = f.svr_fd, .events = POLLIN},
-            {.fd = f.cli_fd[0], .events = POLLIN},
-            {.fd = f.cli_fd[1], .events = POLLIN},
-        };
-        int w = poll(pfds, 3, 20);
-        elapsed += (w == 0) ? 20 : 1;
-    }
+    for (int elapsed = 0; elapsed < 20000 && g_cli_tunnel_ready_called < 2; elapsed += 20)
+        status_churn_pump(&f, 20);
     ASSERT_EQ(g_path_ids_left_log, 1);
     ASSERT_EQ(g_cli_tunnel_ready_called, 2);
     mqvpn_client_set_tun_active(f.cli, 1, -1);
-    ASSERT_EQ(churn_pump_until_active(&f, 2, 15000), 1);
+    ASSERT_EQ(status_churn_pump_until_active(&f, 2, 15000), 1);
 
-    churn_teardown(&f);
+    status_churn_teardown(&f);
 }
 
 /* Not at the cap: a refusal only asks for a grant, the retry 5 s later uses
  * it, and the connection stays. Both ends start at the default 8 IDs. */
 TEST(client_keeps_connection_while_path_ids_are_granted)
 {
-    churn_t f;
-    churn_setup(&f, 0);
+    status_churn_t f;
+    status_churn_setup(&f, 0);
 
     int cycles = 0;
     for (; cycles < 20; cycles++) {
-        churn_remove_path(&f);
-        churn_open_path(&f, 1);
-        if (!churn_pump_until_active(&f, 2, 2000)) break;
+        status_churn_remove_path(&f);
+        status_churn_open_path(&f, 1);
+        if (!status_churn_pump_until_active(&f, 2, 2000)) break;
     }
     /* IDs 1..8 are available up front: the 8th re-creation needs a grant. */
     ASSERT_EQ(cycles, 7);
 
-    ASSERT_EQ(churn_pump_until_active(&f, 2, 8000), 1);
+    ASSERT_EQ(status_churn_pump_until_active(&f, 2, 8000), 1);
     ASSERT_EQ(g_path_ids_left_log, 0);
     ASSERT_EQ(g_cli_tunnel_ready_called, 1);
 
-    churn_teardown(&f);
+    status_churn_teardown(&f);
 }
 
 TEST(server_max_clients_config)
@@ -2160,6 +2654,12 @@ TEST(server_max_clients_config)
     ASSERT_EQ(cfg->max_clients, 0);
 
     mqvpn_config_free(cfg);
+}
+
+TEST(sched_refusal_reason)
+{
+    ASSERT_EQ(strcmp(mqvpn_server_test_sched_refusal_reason(-XQC_ESTATE), "paths"), 0);
+    ASSERT_EQ(strcmp(mqvpn_server_test_sched_refusal_reason(-XQC_EMALLOC), "engine"), 0);
 }
 
 /* Main */
@@ -2177,11 +2677,16 @@ main(void)
     run_server_new_missing_tunnel_config_ready();
     run_server_new_destroy();
     run_server_destroy_null();
+    run_server_user_name_length();
     run_server_egress_fd_budget();
+    run_sched_refusal_reason();
 
     /* Lifecycle */
     run_server_lifecycle();
     run_server_lifecycle_with_tun_mtu();
+    run_server_lifecycle_with_path_mtu();
+    run_server_path_mtu_warning();
+    run_server_lifecycle_path_mtu_v6_minimum();
     run_server_lifecycle_with_v6();
     run_server_double_start();
 
@@ -2211,15 +2716,25 @@ main(void)
 
     /* QUIC loopback integration test (test_server_session per impl_plan) */
     run_server_session_quic_loopback();
+    run_server_client_info_bytes_tx_is_sent_bytes();
+    run_server_path_mtu_negotiated();
+    run_client_path_mtu_v6_minimum();
+    run_server_reorder_mtu_only_when_negotiated();
     run_client_verifier_accepts_presented_chain();
     run_client_verifier_is_the_hostname_judge();
     run_client_verifier_reject_signals_tls_once();
-    run_client_secure_without_verifier_rejects_self_signed_as_closed();
+    run_client_secure_without_verifier_rejects_self_signed_as_tls();
+    run_client_secure_without_verifier_rejects_hostname_mismatch_as_tls();
+    run_client_secure_without_verifier_rejects_expired_as_tls();
+    run_client_tls_rejection_does_not_reconnect();
+    run_client_unreachable_server_reports_closed();
     run_client_secure_without_verifier_uses_default_root_paths();
     run_client_verifier_receives_chain_leaf_first();
-    run_client_secure_without_verifier_rejects_unknown_issuer_as_closed();
+    run_client_secure_without_verifier_rejects_unknown_issuer_as_tls();
     run_server_reconnect_manual_connect();
     run_server_reconnect_manual_failure_rearm();
+
+    run_server_status_lists_live_paths_after_path_churn();
     run_client_reconnects_when_path_ids_run_out();
     run_client_keeps_connection_while_path_ids_are_granted();
 

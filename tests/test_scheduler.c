@@ -6,7 +6,8 @@
 #include <string.h>
 
 #include "libmqvpn.h"
-#include "mqvpn_internal.h"  /* mqvpn_check_scheduler_preconditions (xquic-free) */
+#include "mqvpn_internal.h" /* mqvpn_check_scheduler_preconditions (xquic-free) */
+#include "mqvpn_sched_names.h"
 #include "mqvpn_scheduler.h" /* xquic-dependent helper + macros */
 
 #include <xquic/xquic.h>
@@ -175,6 +176,84 @@ test_dgram_qos_for_other_schedulers(void)
     return 0;
 }
 
+static int
+test_sched_from_name_n_exact(void)
+{
+    ASSERT_EQ(mqvpn_sched_from_name_n("minrtt", 6), MQVPN_SCHED_MINRTT);
+    ASSERT_EQ(mqvpn_sched_from_name_n("wlb", 3), MQVPN_SCHED_WLB);
+    ASSERT_EQ(mqvpn_sched_from_name_n("wlb_udp_pin", 11), MQVPN_SCHED_WLB_UDP_PIN);
+    ASSERT_EQ(mqvpn_sched_from_name_n("backup_fec", 10), MQVPN_SCHED_BACKUP_FEC);
+    return 0;
+}
+
+static int
+test_sched_from_name_n_rejects_trailing_space(void)
+{
+    ASSERT_EQ(mqvpn_sched_from_name_n("minrtt ", 7), -1);
+    ASSERT_EQ(mqvpn_sched_from_name_n("minrt", 5), -1);
+    ASSERT_EQ(mqvpn_sched_from_name_n("", 0), -1);
+    ASSERT_EQ(mqvpn_sched_from_name_n(NULL, 0), -1);
+    return 0;
+}
+
+static int
+test_sched_from_name_n_rejects_long(void)
+{
+    char buf[4096];
+    memset(buf, 'w', sizeof(buf));
+    ASSERT_EQ(mqvpn_sched_from_name_n(buf, sizeof(buf)), -1);
+    return 0;
+}
+
+static int
+test_sched_negotiate_order(void)
+{
+    mqvpn_scheduler_t def = MQVPN_SCHED_MINRTT;
+    ASSERT_EQ(mqvpn_sched_negotiate(1, def, 0, -1, 1), MQVPN_SCHED_NEG_NONE);
+    ASSERT_EQ(mqvpn_sched_negotiate(0, def, 1, -1, 0), MQVPN_SCHED_NEG_DISABLED);
+    ASSERT_EQ(mqvpn_sched_negotiate(1, def, 1, -1, 0), MQVPN_SCHED_NEG_INVALID);
+    ASSERT_EQ(mqvpn_sched_negotiate(1, def, 1, MQVPN_SCHED_BACKUP_FEC, 0),
+              MQVPN_SCHED_NEG_BACKUP_FEC);
+    ASSERT_EQ(mqvpn_sched_negotiate(1, MQVPN_SCHED_BACKUP_FEC, 1, MQVPN_SCHED_WLB, 0),
+              MQVPN_SCHED_NEG_SERVER_BACKUP_FEC);
+    ASSERT_EQ(mqvpn_sched_negotiate(1, def, 1, MQVPN_SCHED_WLB, 1),
+              MQVPN_SCHED_NEG_ALREADY_SET);
+    ASSERT_EQ(mqvpn_sched_negotiate(1, def, 1, MQVPN_SCHED_WLB, 0),
+              MQVPN_SCHED_NEG_APPLY);
+    return 0;
+}
+
+static int
+test_sched_neg_reason_names(void)
+{
+    ASSERT_EQ(strcmp(mqvpn_sched_neg_reason(MQVPN_SCHED_NEG_DISABLED), "disabled"), 0);
+    ASSERT_EQ(strcmp(mqvpn_sched_neg_reason(MQVPN_SCHED_NEG_INVALID), "invalid"), 0);
+    ASSERT_EQ(strcmp(mqvpn_sched_neg_reason(MQVPN_SCHED_NEG_BACKUP_FEC), "backup_fec"),
+              0);
+    ASSERT_EQ(strcmp(mqvpn_sched_neg_reason(MQVPN_SCHED_NEG_SERVER_BACKUP_FEC),
+                     "server_backup_fec"),
+              0);
+    ASSERT_EQ(strcmp(mqvpn_sched_neg_reason(MQVPN_SCHED_NEG_ALREADY_SET), "already_set"),
+              0);
+    ASSERT_EQ(strcmp(mqvpn_sched_neg_reason(MQVPN_SCHED_NEG_NONE), ""), 0);
+    ASSERT_EQ(strcmp(mqvpn_sched_neg_reason(MQVPN_SCHED_NEG_APPLY), ""), 0);
+    return 0;
+}
+
+static int
+test_sched_effective(void)
+{
+    ASSERT_EQ(mqvpn_sched_effective(MQVPN_SCHED_MINRTT), MQVPN_SCHED_MINRTT);
+    ASSERT_EQ(mqvpn_sched_effective(MQVPN_SCHED_WLB), MQVPN_SCHED_WLB);
+    ASSERT_EQ(mqvpn_sched_effective(MQVPN_SCHED_WLB_UDP_PIN), MQVPN_SCHED_WLB_UDP_PIN);
+#if defined(XQC_ENABLE_FEC) && defined(XQC_ENABLE_XOR)
+    ASSERT_EQ(mqvpn_sched_effective(MQVPN_SCHED_BACKUP_FEC), MQVPN_SCHED_BACKUP_FEC);
+#else
+    ASSERT_EQ(mqvpn_sched_effective(MQVPN_SCHED_BACKUP_FEC), MQVPN_SCHED_MINRTT);
+#endif
+    return 0;
+}
+
 int
 main(void)
 {
@@ -198,6 +277,12 @@ main(void)
     failed += test_dgram_qos_for_other_schedulers();
     failed += test_wlb_single_path_no_warn();
     failed += test_minrtt_zero_paths_no_warn();
+    failed += test_sched_from_name_n_exact();
+    failed += test_sched_from_name_n_rejects_trailing_space();
+    failed += test_sched_from_name_n_rejects_long();
+    failed += test_sched_negotiate_order();
+    failed += test_sched_neg_reason_names();
+    failed += test_sched_effective();
     if (failed) {
         fprintf(stderr, "test_scheduler: %d FAILED\n", failed);
         return 1;

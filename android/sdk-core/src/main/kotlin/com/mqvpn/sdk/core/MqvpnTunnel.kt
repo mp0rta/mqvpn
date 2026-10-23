@@ -7,6 +7,7 @@ import android.util.Log
 import com.mqvpn.sdk.core.internal.ReorderPlan
 import com.mqvpn.sdk.core.internal.TunnelCallbacks
 import com.mqvpn.sdk.core.internal.planReorder
+import com.mqvpn.sdk.core.internal.planRedundant
 import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.PathInfo
 import com.mqvpn.sdk.core.model.ReorderStats
@@ -171,6 +172,18 @@ class MqvpnTunnel internal constructor(
             }
         }
 
+        /** Null when disabled. A failure is logged and the tunnel continues with redundant off. */
+        internal fun applyRedundant(
+            cfg: Long,
+            config: MqvpnConfig,
+            set: (Long, Boolean, IntArray) -> Int = NativeBridge::configSetRedundant,
+        ): Int? {
+            val plan = planRedundant(config) ?: return null
+            val rc = set(cfg, true, plan.ports)
+            if (rc != 0) Log.w(TAG, "configSetRedundant failed (rc=$rc)")
+            return rc
+        }
+
         /** [reactorHandle]: the executor's NativeReactorWaiter.reactorHandle. */
         internal fun create(config: MqvpnConfig, callbacks: TunnelCallbacks, reactorHandle: Long): MqvpnTunnel {
             // Also guards startTunnel callers that bypass MqvpnManager.connect() (restored-config
@@ -183,6 +196,8 @@ class MqvpnTunnel internal constructor(
             NativeBridge.configSetAuthKey(cfg, config.authKey)
             NativeBridge.configSetInsecure(cfg, config.insecure)
             NativeBridge.configSetScheduler(cfg, config.scheduler.native)
+            NativeBridge.configSetRequestServerScheduler(cfg, config.requestServerScheduler)
+            NativeBridge.configSetCc(cfg, config.cc.native)
             NativeBridge.configSetLogLevel(cfg, config.logLevel.native)
             NativeBridge.configSetMultipath(cfg, config.multipathEnabled)
             NativeBridge.configSetReconnect(cfg, config.reconnect, config.reconnectIntervalSec)
@@ -192,6 +207,7 @@ class MqvpnTunnel internal constructor(
             NativeBridge.configSetAndroidClock(cfg)
             val plan = planReorder(config)
             applyReorder(cfg, plan)
+            applyRedundant(cfg, config)
             val handle = NativeBridge.clientNew(cfg, callbacks)
             if (handle == 0L) {
                 NativeBridge.configFree(cfg) // the config is ours until a client owns a copy

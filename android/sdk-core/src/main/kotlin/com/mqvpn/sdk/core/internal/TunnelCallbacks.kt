@@ -15,6 +15,7 @@ internal interface TunnelCallbacks {
         assignedIp6: ByteArray?, prefix6: Int,
         serverIp: ByteArray, serverPrefix: Int,
         mtu: Int, hasV6: Boolean,
+        hasServerScheduler: Boolean, serverScheduler: Int,
     )
 
     fun onNativeTunnelClosed(errorCode: Int)

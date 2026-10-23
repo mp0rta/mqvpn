@@ -287,10 +287,11 @@ checks:
 - the state-entry stamp and the residence-warn debounce;
 - the transport ops and ctx;
 - the frame: every field the FSM must not write is unchanged. A size pin on
-  `path_entry_t` catches a new field that grows the struct. On LP64,
-  though, the struct has three 4-byte padding holes, after
-  `local_addr_len`, `flags` and `recreate_retries`, and a field placed in
-  one of them must be classified by hand in `oracle_abs.h`;
+  `path_entry_t` catches a new field that grows the struct (64-bit builds
+  only; 32-bit targets lay the struct out differently). On LP64, though,
+  the struct has three 4-byte padding holes, after `local_addr_len`,
+  `flags` and `recreate_retries`, and a field placed in one of them must
+  be classified by hand in `oracle_abs.h`;
 - `path_invariant_check()`, which pins the status to the C projection, on
   every post-state, the stable tick's too (that entry point does not check
   the invariant itself).

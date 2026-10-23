@@ -40,7 +40,7 @@
  */
 
 #include "control_socket.h"
-#include "json_mini.h"
+#include "json_util.h"
 #include "log.h"
 
 #include <event2/event.h>
@@ -52,7 +52,9 @@
                                mqvpn_server_get_reorder_stats,
                                mqvpn_reorder_stats_t (via reorder.h),
                                mqvpn_internal_client_reinject_t,
-                               mqvpn_server_get_client_reinject */
+                               mqvpn_server_get_client_reinject,
+                               mqvpn_internal_client_sched_t,
+                               mqvpn_server_get_client_sched */
 
 #include <stdlib.h>
 #include <string.h>
@@ -61,7 +63,6 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <ctype.h>
-#include <inttypes.h>
 #include <sys/time.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -70,11 +71,8 @@
 #define CTRL_MAX_REQ          4096 /* per-connection request buffer */
 #define CTRL_MAX_CONNS        8    /* max concurrent control connections */
 #define CTRL_READ_TIMEOUT_SEC 5    /* close idle connections after 5s */
-/* CTRL_MAX_RESP_BYTES moved to control_socket.h so test_control_response_bound
- * can verify the worst-case JSON size fits. */
-
-/* JSON helpers (json_find_key → json_find_key, json_read_string → json_read_string)
- * are provided by json_mini.h */
+/* CTRL_MAX_RESP_BYTES is in control_socket.h; test_control_socket checks that
+ * the worst-case get_status fits. */
 
 /* ── Per-connection state ────────────────────────────────────────────────── */
 
@@ -101,69 +99,131 @@ struct ctrl_socket_s {
     int n_conns; /* active control connections */
 };
 
+/* ── Response building ───────────────────────────────────────────────────── */
+
+/* Writes doc into resp as compact JSON and frees it. A NULL doc (a handler's
+ * malloc failure) or a response that does not fit resp_len gives the fixed
+ * envelope, never a cut-off prefix. Invalid UTF-8 passes through byte for
+ * byte: intake does not validate it, and name[64] can cut a character. */
+static int
+ctrl_reply(yyjson_mut_doc *doc, char *resp, size_t resp_len)
+{
+    size_t n = yyjson_mut_write_buf(resp, resp_len, doc,
+                                    YYJSON_WRITE_ALLOW_INVALID_UNICODE, NULL);
+    yyjson_mut_doc_free(doc);
+    if (n == 0)
+        return snprintf(resp, resp_len,
+                        "{\"ok\":false,\"error\":\"response too large\"}");
+    return (int)n;
+}
+
+/* {"ok":false,"error":msg} */
+static int
+ctrl_error(char *resp, size_t resp_len, const char *msg)
+{
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    bool ok = yyjson_mut_obj_add_bool(doc, root, "ok", false);
+    ok &= yyjson_mut_obj_add_strcpy(doc, root, "error", msg);
+    if (!ok) {
+        yyjson_mut_doc_free(doc);
+        return ctrl_reply(NULL, resp, resp_len);
+    }
+    return ctrl_reply(doc, resp, resp_len);
+}
+
+/* {"ok":true} */
+static int
+ctrl_ok(char *resp, size_t resp_len)
+{
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    if (!yyjson_mut_obj_add_bool(doc, root, "ok", true)) {
+        yyjson_mut_doc_free(doc);
+        return ctrl_reply(NULL, resp, resp_len);
+    }
+    return ctrl_reply(doc, resp, resp_len);
+}
+
+/* A latency in ms as a number with at most 3 decimals (the old "%.3f"). */
+static bool
+ctrl_add_ms(yyjson_mut_doc *doc, yyjson_mut_val *obj, const char *key, double ms)
+{
+    yyjson_mut_val *v = yyjson_mut_real(doc, ms);
+    return yyjson_mut_set_fp_to_fixed(v, 3) && yyjson_mut_obj_add_val(doc, obj, key, v);
+}
+
 /* ── Command dispatch ────────────────────────────────────────────────────── */
 
+/* Each handler creates a doc for its reply, adds the keys in wire order (keys,
+ * order and JSON types are a compatibility surface), and hands the doc to
+ * ctrl_reply, which frees it. Every add result is folded into `ok`; a failed
+ * add (malloc) turns the reply into the envelope. */
+
 static int
-ctrl_cmd_add_user(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
+ctrl_cmd_add_user(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
     char name[64] = {0}, key[256] = {0};
-    const char *nv = json_find_key(req, "name");
-    const char *kv = json_find_key(req, "key");
-    if (!nv || json_read_string(nv, name, sizeof(name)) < 0 || !kv ||
-        json_read_string(kv, key, sizeof(key)) < 0)
-        return snprintf(resp, resp_len,
-                        "{\"ok\":false,\"error\":\"name and key required\"}");
+    yyjson_val *name_val = yyjson_obj_get(req, "name");
+    if (json_copy_str(name_val, name, sizeof(name)) < 0 ||
+        json_copy_str(yyjson_obj_get(req, "key"), key, sizeof(key)) < 0)
+        return ctrl_error(resp, resp_len, "name and key required");
+    if (yyjson_get_len(name_val) >= sizeof(name))
+        return ctrl_error(resp, resp_len, "name exceeds 63 bytes");
 
     int rc = mqvpn_server_add_user(server, name, key);
-    if (rc != MQVPN_OK)
-        return snprintf(resp, resp_len,
-                        "{\"ok\":false,\"error\":\"add_user failed (%d)\"}", rc);
-    return snprintf(resp, resp_len, "{\"ok\":true}");
+    if (rc != MQVPN_OK) {
+        char m[48];
+        snprintf(m, sizeof(m), "add_user failed (%d)", rc);
+        return ctrl_error(resp, resp_len, m);
+    }
+    return ctrl_ok(resp, resp_len);
 }
 
 static int
-ctrl_cmd_remove_user(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
+ctrl_cmd_remove_user(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
     char name[64] = {0};
-    const char *nv = json_find_key(req, "name");
-    if (!nv || json_read_string(nv, name, sizeof(name)) < 0)
-        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"name required\"}");
+    yyjson_val *name_val = yyjson_obj_get(req, "name");
+    if (json_copy_str(name_val, name, sizeof(name)) < 0)
+        return ctrl_error(resp, resp_len, "name required");
+    if (yyjson_get_len(name_val) >= sizeof(name))
+        return ctrl_error(resp, resp_len, "name exceeds 63 bytes");
 
     int rc = mqvpn_server_remove_user(server, name);
-    if (rc != MQVPN_OK)
-        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"user not found\"}");
-    return snprintf(resp, resp_len, "{\"ok\":true}");
+    if (rc != MQVPN_OK) return ctrl_error(resp, resp_len, "user not found");
+    return ctrl_ok(resp, resp_len);
 }
 
 static int
-ctrl_cmd_list_users(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
+ctrl_cmd_list_users(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
     (void)req;
     char unames[MQVPN_MAX_USERS][64];
     int n_users = mqvpn_server_list_users(server, unames, MQVPN_MAX_USERS);
 
-    char users[MQVPN_MAX_USERS * 68 + 8];
-    int pos = 0;
-    users[pos++] = '[';
-    for (int i = 0; i < n_users; i++) {
-        if (i > 0) users[pos++] = ',';
-        /* Clamp pos to prevent underflow on sizeof(users) - pos */
-        int w = snprintf(users + pos, sizeof(users) - (size_t)pos, "\"%s\"", unames[i]);
-        if (w > 0 && (size_t)(pos + w) < sizeof(users))
-            pos += w;
-        else
-            break; /* truncated — stop appending */
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    bool ok = yyjson_mut_obj_add_bool(doc, root, "ok", true);
+    yyjson_mut_val *users = yyjson_mut_obj_add_arr(doc, root, "users");
+    ok &= users != NULL;
+    for (int i = 0; i < n_users; i++)
+        ok &= yyjson_mut_arr_add_strcpy(doc, users, unames[i]);
+    if (!ok) {
+        yyjson_mut_doc_free(doc);
+        return ctrl_reply(NULL, resp, resp_len);
     }
-    users[pos++] = ']';
-    users[pos] = '\0';
-    return snprintf(resp, resp_len, "{\"ok\":true,\"users\":%s}", users);
+    return ctrl_reply(doc, resp, resp_len);
 }
 
 static int
-ctrl_cmd_get_stats(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
+ctrl_cmd_get_stats(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
     (void)req;
@@ -174,35 +234,48 @@ ctrl_cmd_get_stats(const char *req, char *resp, size_t resp_len, ctrl_socket_t *
     uint64_t uptime = mqvpn_server_uptime_seconds(server);
     uint64_t rx_receives = 0, rx_datagrams = 0;
     if (cs->rx_stats) cs->rx_stats(cs->rx_ctx, &rx_receives, &rx_datagrams);
-    return snprintf(
-        resp, resp_len,
-        "{\"ok\":true,\"n_clients\":%d,"
-        "\"bytes_tx\":%" PRIu64 ",\"bytes_rx\":%" PRIu64 ","
-        "\"dgram_sent\":%" PRIu64 ",\"dgram_recv\":%" PRIu64 ","
-        "\"dgram_lost\":%" PRIu64 ",\"dgram_acked\":%" PRIu64 ","
-        "\"pkts_lane_tcp\":%" PRIu64 ",\"pkts_lane_dgram\":%" PRIu64 ","
-        "\"pkts_lane_raw\":%" PRIu64 ",\"pkts_lane_tcp_dropped\":%" PRIu64 ","
-        "\"tcp_flows_active\":%" PRIu64 ",\"tcp_flows_total\":%" PRIu64 ","
-        "\"tcp_flows_rejected\":%" PRIu64 ",\"raw_markers_active\":%" PRIu64 ","
-        /* udp_tx_* from the library (it issues those sends); udp_rx_* from the
-         * platform's transport getter (RX offload never crosses the library
-         * ABI). datagrams/sends and datagrams/receives are the achieved
-         * batching and coalescing factors — 1.0 means every datagram cost
-         * its own syscall, which the one-shot "udp-gso:"/"udp-gro:" startup
-         * markers cannot distinguish because they only report the kernel
-         * capability probe. */
-        "\"udp_tx_sends\":%" PRIu64 ",\"udp_tx_datagrams\":%" PRIu64 ","
-        "\"udp_rx_receives\":%" PRIu64 ",\"udp_rx_datagrams\":%" PRIu64 ","
-        "\"uptime_sec\":%" PRIu64 "}",
-        nc, st.bytes_tx, st.bytes_rx, st.dgram_sent, st.dgram_recv, st.dgram_lost,
-        st.dgram_acked, st.pkts_lane_tcp, st.pkts_lane_dgram, st.pkts_lane_raw,
-        st.pkts_lane_tcp_dropped, st.tcp_flows_active, st.tcp_flows_total,
-        st.tcp_flows_rejected, st.raw_markers_active, st.udp_tx_sends,
-        st.udp_tx_datagrams, rx_receives, rx_datagrams, uptime);
+
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    bool ok = yyjson_mut_obj_add_bool(doc, root, "ok", true);
+    ok &= yyjson_mut_obj_add_int(doc, root, "n_clients", nc);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "bytes_tx", st.bytes_tx);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "bytes_rx", st.bytes_rx);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "dgram_sent", st.dgram_sent);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "dgram_recv", st.dgram_recv);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "dgram_lost", st.dgram_lost);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "dgram_acked", st.dgram_acked);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "pkts_lane_tcp", st.pkts_lane_tcp);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "pkts_lane_dgram", st.pkts_lane_dgram);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "pkts_lane_raw", st.pkts_lane_raw);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "pkts_lane_tcp_dropped",
+                                  st.pkts_lane_tcp_dropped);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "tcp_flows_active", st.tcp_flows_active);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "tcp_flows_total", st.tcp_flows_total);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "tcp_flows_rejected", st.tcp_flows_rejected);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "raw_markers_active", st.raw_markers_active);
+    /* udp_tx_* from the library (it issues those sends); udp_rx_* from the
+     * platform's transport getter (RX offload never crosses the library
+     * ABI). datagrams/sends and datagrams/receives are the achieved
+     * batching and coalescing factors — 1.0 means every datagram cost
+     * its own syscall, which the one-shot "udp-gso:"/"udp-gro:" startup
+     * markers cannot distinguish because they only report the kernel
+     * capability probe. */
+    ok &= yyjson_mut_obj_add_uint(doc, root, "udp_tx_sends", st.udp_tx_sends);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "udp_tx_datagrams", st.udp_tx_datagrams);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "udp_rx_receives", rx_receives);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "udp_rx_datagrams", rx_datagrams);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "uptime_sec", uptime);
+    if (!ok) {
+        yyjson_mut_doc_free(doc);
+        return ctrl_reply(NULL, resp, resp_len);
+    }
+    return ctrl_reply(doc, resp, resp_len);
 }
 
 static int
-ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
+ctrl_cmd_get_status(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
     (void)req;
@@ -217,32 +290,23 @@ ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, ctrl_socket_t 
     int n_reinj = mqvpn_server_get_client_reinject(server, reinj, MQVPN_MAX_USERS);
     if (n_reinj < 0) n_reinj = 0;
 
+    /* Same index alignment, see mqvpn_server_get_client_sched(). */
+    mqvpn_internal_client_sched_t sched[MQVPN_MAX_USERS];
+    int n_sched = mqvpn_server_get_client_sched(server, sched, MQVPN_MAX_USERS);
+    if (n_sched < 0) n_sched = 0;
+
     uint64_t now = 0;
     struct timeval tv;
     if (gettimeofday(&tv, NULL) == 0)
         now = (uint64_t)tv.tv_sec * 1000000 + (uint64_t)tv.tv_usec;
 
-    /* Truncation discipline: any append that would not fit sets
-     * `truncated = 1`. After both loops we check the flag once and
-     * substitute a small "response too large" envelope so a malformed
-     * inner JSON never escapes. The caller-side guard is now defence
-     * in depth, not the only line of defence. */
-    char buf[CTRL_MAX_RESP_BYTES];
-    int pos = 0;
-    int truncated = 0;
-    int w;
-
-#define APPEND(...)                                                      \
-    do {                                                                 \
-        w = snprintf(buf + pos, sizeof(buf) - (size_t)pos, __VA_ARGS__); \
-        if (w < 0 || (size_t)(pos + w) >= sizeof(buf)) {                 \
-            truncated = 1;                                               \
-            goto get_status_done;                                        \
-        }                                                                \
-        pos += w;                                                        \
-    } while (0)
-
-    APPEND("{\"ok\":true,\"n_clients\":%d,\"clients\":[", n_clients);
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    bool ok = yyjson_mut_obj_add_bool(doc, root, "ok", true);
+    ok &= yyjson_mut_obj_add_int(doc, root, "n_clients", n_clients);
+    yyjson_mut_val *jclients = yyjson_mut_obj_add_arr(doc, root, "clients");
+    ok &= jclients != NULL;
 
     for (int i = 0; i < n_clients; i++) {
         mqvpn_client_info_t *ci = &clients[i];
@@ -250,22 +314,24 @@ ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, ctrl_socket_t 
                                 ? (now - ci->connected_at_us) / 1000000
                                 : 0;
 
-        if (i > 0) APPEND(",");
-        APPEND("{\"user\":\"%s\",\"endpoint\":\"%s\","
-               "\"connected_sec\":%" PRIu64 ","
-               "\"bytes_tx\":%" PRIu64 ",\"bytes_rx\":%" PRIu64 ","
-               "\"n_paths\":%d,\"paths\":[",
-               ci->username, ci->endpoint, conn_sec, ci->bytes_tx, ci->bytes_rx,
-               ci->n_paths);
+        yyjson_mut_val *jc = yyjson_mut_arr_add_obj(doc, jclients);
+        ok &= yyjson_mut_obj_add_strcpy(doc, jc, "user", ci->username);
+        ok &= yyjson_mut_obj_add_strcpy(doc, jc, "endpoint", ci->endpoint);
+        ok &= yyjson_mut_obj_add_strcpy(doc, jc, "scheduler",
+                                        i < n_sched ? sched[i].scheduler : "unknown");
+        ok &= yyjson_mut_obj_add_uint(doc, jc, "connected_sec", conn_sec);
+        ok &= yyjson_mut_obj_add_uint(doc, jc, "bytes_tx", ci->bytes_tx);
+        ok &= yyjson_mut_obj_add_uint(doc, jc, "bytes_rx", ci->bytes_rx);
+        ok &= yyjson_mut_obj_add_int(doc, jc, "n_paths", ci->n_paths);
+        yyjson_mut_val *jpaths = yyjson_mut_obj_add_arr(doc, jc, "paths");
+        ok &= jpaths != NULL;
 
         for (int p = 0; p < ci->n_paths; p++) {
             mqvpn_path_stats_t *ps = &ci->paths[p];
-            if (p > 0) APPEND(",");
 
             /* Emit 0 on mismatch/absence (index out of range, or no path_id
-             * match within reinj[i]) rather than skipping the field — the
-             * JSON shape must stay constant so test_control_response_bound's
-             * worst-case model holds. */
+             * match within reinj[i]) rather than skipping the field — every
+             * path object keeps the same shape. */
             uint64_t reinject_tx_bytes = 0;
             if (i < n_reinj) {
                 mqvpn_internal_client_reinject_t *re = &reinj[i];
@@ -277,37 +343,33 @@ ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, ctrl_socket_t 
                 }
             }
 
-            APPEND(
-                "{\"path_id\":%" PRIu64 ",\"srtt_ms\":%" PRIu64 ",\"min_rtt_ms\":%" PRIu64
-                ",\"cwnd\":%" PRIu64 ",\"in_flight\":%" PRIu64 ",\"bytes_tx\":%" PRIu64
-                ",\"bytes_rx\":%" PRIu64 ",\"pkt_sent\":%" PRIu64 ",\"pkt_recv\":%" PRIu64
-                ",\"pkt_lost\":%" PRIu64 ",\"state\":%u,\"state_label\":\"%s\","
-                "\"reinject_tx_bytes\":%" PRIu64 "}",
-                ps->path_id, ps->srtt_us / 1000, ps->min_rtt_us / 1000, ps->cwnd,
-                ps->bytes_in_flight, ps->bytes_tx, ps->bytes_rx, ps->pkt_sent,
-                ps->pkt_recv, ps->pkt_lost, ps->state, mqvpn_path_state_label(ps->state),
-                reinject_tx_bytes);
+            yyjson_mut_val *jp = yyjson_mut_arr_add_obj(doc, jpaths);
+            ok &= yyjson_mut_obj_add_uint(doc, jp, "path_id", ps->path_id);
+            ok &= yyjson_mut_obj_add_uint(doc, jp, "srtt_ms", ps->srtt_us / 1000);
+            ok &= yyjson_mut_obj_add_uint(doc, jp, "min_rtt_ms", ps->min_rtt_us / 1000);
+            ok &= yyjson_mut_obj_add_uint(doc, jp, "cwnd", ps->cwnd);
+            ok &= yyjson_mut_obj_add_uint(doc, jp, "in_flight", ps->bytes_in_flight);
+            ok &= yyjson_mut_obj_add_uint(doc, jp, "bytes_tx", ps->bytes_tx);
+            ok &= yyjson_mut_obj_add_uint(doc, jp, "bytes_rx", ps->bytes_rx);
+            ok &= yyjson_mut_obj_add_uint(doc, jp, "pkt_sent", ps->pkt_sent);
+            ok &= yyjson_mut_obj_add_uint(doc, jp, "pkt_recv", ps->pkt_recv);
+            ok &= yyjson_mut_obj_add_uint(doc, jp, "pkt_lost", ps->pkt_lost);
+            ok &= yyjson_mut_obj_add_uint(doc, jp, "state", ps->state);
+            ok &= yyjson_mut_obj_add_strcpy(doc, jp, "state_label",
+                                            mqvpn_path_state_label(ps->state));
+            ok &=
+                yyjson_mut_obj_add_uint(doc, jp, "reinject_tx_bytes", reinject_tx_bytes);
         }
-
-        APPEND("]}");
     }
-
-    APPEND("]}");
-
-get_status_done:
-#undef APPEND
-    if (truncated) {
-        /* The envelope is 41 bytes — well under any plausible resp_len
-         * (callers pass CTRL_MAX_RESP_BYTES - 2 = 256 KB - 2). The same
-         * guard exists at the connection layer as defence in depth. */
-        return snprintf(resp, resp_len,
-                        "{\"ok\":false,\"error\":\"response too large\"}");
+    if (!ok) {
+        yyjson_mut_doc_free(doc);
+        return ctrl_reply(NULL, resp, resp_len);
     }
-    return snprintf(resp, resp_len, "%.*s", pos, buf);
+    return ctrl_reply(doc, resp, resp_len);
 }
 
 static int
-ctrl_cmd_get_build_info(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
+ctrl_cmd_get_build_info(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
     (void)req;
@@ -318,50 +380,59 @@ ctrl_cmd_get_build_info(const char *req, char *resp, size_t resp_len, ctrl_socke
 #else
     int fec_enabled = 0;
 #endif
-    return snprintf(resp, resp_len,
-                    "{\"ok\":true,\"version\":\"%s\","
-                    "\"scheduler\":\"%s\",\"fec_enabled\":%d}",
-                    ver ? ver : "unknown", sched, fec_enabled);
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    bool ok = yyjson_mut_obj_add_bool(doc, root, "ok", true);
+    ok &= yyjson_mut_obj_add_strcpy(doc, root, "version", ver ? ver : "unknown");
+    ok &= yyjson_mut_obj_add_strcpy(doc, root, "scheduler", sched);
+    ok &= yyjson_mut_obj_add_int(doc, root, "fec_enabled", fec_enabled);
+    if (!ok) {
+        yyjson_mut_doc_free(doc);
+        return ctrl_reply(NULL, resp, resp_len);
+    }
+    return ctrl_reply(doc, resp, resp_len);
 }
 
 static int
-ctrl_cmd_get_fec_stats(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
+ctrl_cmd_get_fec_stats(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
     char user[64] = {0};
-    const char *uv = json_find_key(req, "user");
-    if (!uv || json_read_string(uv, user, sizeof(user)) < 0)
-        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"user required\"}");
+    yyjson_val *user_val = yyjson_obj_get(req, "user");
+    if (json_copy_str(user_val, user, sizeof(user)) < 0)
+        return ctrl_error(resp, resp_len, "user required");
+    if (yyjson_get_len(user_val) >= sizeof(user))
+        return ctrl_error(resp, resp_len, "name exceeds 63 bytes");
 
     mqvpn_internal_fec_stats_t fs;
     int rc = mqvpn_server_get_client_fec_stats(server, user, &fs);
-    if (rc < 0)
-        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"fec not built\"}");
-    if (rc == 0)
-        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"user not found\"}");
+    if (rc < 0) return ctrl_error(resp, resp_len, "fec not built");
+    if (rc == 0) return ctrl_error(resp, resp_len, "user not found");
 
-    /* `user` is echoed without explicit JSON-escape: mqvpn_server_add_user
-     * and add_user_entry reject quote, backslash, and control bytes at
-     * intake (src/auth.c), so any user that survived to the sessions[]
-     * table cannot produce JSON-unsafe output here. If a future code path
-     * registers users via an unvalidated source (e.g., LDAP bridge), this
-     * point must add a JSON-safe escape pass. */
-    return snprintf(resp, resp_len,
-                    "{\"ok\":true,\"user\":\"%s\","
-                    "\"enable_fec\":%u,\"mp_state\":%u,"
-                    "\"mp_state_label\":\"%s\","
-                    "\"fec_send_cnt\":%" PRIu64 ",\"fec_recover_cnt\":%" PRIu64 ","
-                    "\"lost_dgram_cnt\":%" PRIu64 ","
-                    "\"total_app_bytes\":%" PRIu64 ","
-                    "\"standby_app_bytes\":%" PRIu64 "}",
-                    user, (unsigned)fs.enable_fec, (unsigned)fs.mp_state,
-                    fs.mp_state_label ? fs.mp_state_label : "unknown", fs.fec_send_cnt,
-                    fs.fec_recover_cnt, fs.lost_dgram_cnt, fs.total_app_bytes,
-                    fs.standby_app_bytes);
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    bool ok = yyjson_mut_obj_add_bool(doc, root, "ok", true);
+    ok &= yyjson_mut_obj_add_strcpy(doc, root, "user", user);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "enable_fec", fs.enable_fec);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "mp_state", fs.mp_state);
+    ok &= yyjson_mut_obj_add_strcpy(doc, root, "mp_state_label",
+                                    fs.mp_state_label ? fs.mp_state_label : "unknown");
+    ok &= yyjson_mut_obj_add_uint(doc, root, "fec_send_cnt", fs.fec_send_cnt);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "fec_recover_cnt", fs.fec_recover_cnt);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "lost_dgram_cnt", fs.lost_dgram_cnt);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "total_app_bytes", fs.total_app_bytes);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "standby_app_bytes", fs.standby_app_bytes);
+    if (!ok) {
+        yyjson_mut_doc_free(doc);
+        return ctrl_reply(NULL, resp, resp_len);
+    }
+    return ctrl_reply(doc, resp, resp_len);
 }
 
 static int
-ctrl_cmd_get_all_fec_stats(const char *req, char *resp, size_t resp_len,
+ctrl_cmd_get_all_fec_stats(yyjson_val *req, char *resp, size_t resp_len,
                            ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
@@ -372,96 +443,96 @@ ctrl_cmd_get_all_fec_stats(const char *req, char *resp, size_t resp_len,
      * stop probing for the rest of the scrape. */
     mqvpn_internal_fec_entry_t entries[MQVPN_MAX_USERS];
     int n = mqvpn_server_get_all_fec_stats(server, entries, MQVPN_MAX_USERS);
-    if (n < 0)
-        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"fec not built\"}");
-
-    char buf[CTRL_MAX_RESP_BYTES];
-    int pos = 0;
-    int truncated = 0;
-    int w;
-
-#define APPEND(...)                                                      \
-    do {                                                                 \
-        w = snprintf(buf + pos, sizeof(buf) - (size_t)pos, __VA_ARGS__); \
-        if (w < 0 || (size_t)(pos + w) >= sizeof(buf)) {                 \
-            truncated = 1;                                               \
-            goto get_all_fec_done;                                       \
-        }                                                                \
-        pos += w;                                                        \
-    } while (0)
+    if (n < 0) return ctrl_error(resp, resp_len, "fec not built");
 
     /* Field name parity with get_status: "n_clients" + "clients[]". A
      * connected user IS a client in mqvpn nomenclature; "users" is used
      * by list_users for the registered auth-table users (a superset). */
-    APPEND("{\"ok\":true,\"n_clients\":%d,\"clients\":[", n);
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    bool ok = yyjson_mut_obj_add_bool(doc, root, "ok", true);
+    ok &= yyjson_mut_obj_add_int(doc, root, "n_clients", n);
+    yyjson_mut_val *jclients = yyjson_mut_obj_add_arr(doc, root, "clients");
+    ok &= jclients != NULL;
     for (int i = 0; i < n; i++) {
-        mqvpn_internal_fec_entry_t *e = &entries[i];
-        if (i > 0) APPEND(",");
-        APPEND("{\"user\":\"%s\","
-               "\"enable_fec\":%u,\"mp_state\":%u,"
-               "\"mp_state_label\":\"%s\","
-               "\"fec_send_cnt\":%" PRIu64 ",\"fec_recover_cnt\":%" PRIu64 ","
-               "\"lost_dgram_cnt\":%" PRIu64 ","
-               "\"total_app_bytes\":%" PRIu64 ","
-               "\"standby_app_bytes\":%" PRIu64 "}",
-               e->user, (unsigned)e->stats.enable_fec, (unsigned)e->stats.mp_state,
-               e->stats.mp_state_label ? e->stats.mp_state_label : "unknown",
-               e->stats.fec_send_cnt, e->stats.fec_recover_cnt, e->stats.lost_dgram_cnt,
-               e->stats.total_app_bytes, e->stats.standby_app_bytes);
+        const mqvpn_internal_fec_stats_t *fs = &entries[i].stats;
+        yyjson_mut_val *jc = yyjson_mut_arr_add_obj(doc, jclients);
+        ok &= yyjson_mut_obj_add_strcpy(doc, jc, "user", entries[i].user);
+        ok &= yyjson_mut_obj_add_uint(doc, jc, "enable_fec", fs->enable_fec);
+        ok &= yyjson_mut_obj_add_uint(doc, jc, "mp_state", fs->mp_state);
+        ok &= yyjson_mut_obj_add_strcpy(doc, jc, "mp_state_label",
+                                        fs->mp_state_label ? fs->mp_state_label
+                                                           : "unknown");
+        ok &= yyjson_mut_obj_add_uint(doc, jc, "fec_send_cnt", fs->fec_send_cnt);
+        ok &= yyjson_mut_obj_add_uint(doc, jc, "fec_recover_cnt", fs->fec_recover_cnt);
+        ok &= yyjson_mut_obj_add_uint(doc, jc, "lost_dgram_cnt", fs->lost_dgram_cnt);
+        ok &= yyjson_mut_obj_add_uint(doc, jc, "total_app_bytes", fs->total_app_bytes);
+        ok &=
+            yyjson_mut_obj_add_uint(doc, jc, "standby_app_bytes", fs->standby_app_bytes);
     }
-    APPEND("]}");
-
-get_all_fec_done:
-#undef APPEND
-    if (truncated) {
-        return snprintf(resp, resp_len,
-                        "{\"ok\":false,\"error\":\"response too large\"}");
+    if (!ok) {
+        yyjson_mut_doc_free(doc);
+        return ctrl_reply(NULL, resp, resp_len);
     }
-    return snprintf(resp, resp_len, "%.*s", pos, buf);
+    return ctrl_reply(doc, resp, resp_len);
 }
 
 static int
-ctrl_cmd_get_reorder_stats(const char *req, char *resp, size_t resp_len,
+ctrl_cmd_get_reorder_stats(yyjson_val *req, char *resp, size_t resp_len,
                            ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
     (void)req;
     /* Aggregate reorder-shim RX counters across all live conns (§17). One
-     * fixed-shape object, no per-conn array, so a single snprintf with a
-     * bounded resp_len is sufficient — no APPEND/truncation dance needed.
-     * The getter zero-fills when no conn has reorder enabled, so the JSON
-     * is always well-formed (all-zero counters). */
+     * fixed-shape object, no per-conn array. The getter zero-fills when no
+     * conn has reorder enabled, so the JSON is always well-formed (all-zero
+     * counters). */
     mqvpn_reorder_stats_t rs;
     if (mqvpn_server_get_reorder_stats(server, &rs) < 0)
-        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"internal error\"}");
+        return ctrl_error(resp, resp_len, "internal error");
 
-    return snprintf(
-        resp, resp_len,
-        "{\"ok\":true,\"reorder\":{"
-        "\"gap_count\":%" PRIu64 ",\"gap_filled_count\":%" PRIu64 ","
-        "\"gap_timeout_count\":%" PRIu64 ",\"gap_overflow_count\":%" PRIu64 ","
-        "\"gap_demote_count\":%" PRIu64 ",\"gap_reset_count\":%" PRIu64 ","
-        "\"ack_demote_count\":%" PRIu64 ",\"too_late_drop_count\":%" PRIu64 ","
-        "\"too_far_ahead_drop_count\":%" PRIu64 ",\"duplicate_drop_count\":%" PRIu64 ","
-        "\"pool_drop_count\":%" PRIu64 ",\"per_flow_limit_drop_count\":%" PRIu64 ","
-        "\"reset_discard_count\":%" PRIu64 ",\"delivered_count\":%" PRIu64 ","
-        "\"added_latency_p99_ms\":%.3f,\"added_latency_max_ms\":%.3f,"
-        "\"added_latency_buffered_p99_ms\":%.3f"
-        "}}",
-        rs.gap_count, rs.gap_filled_count, rs.gap_timeout_count, rs.gap_overflow_count,
-        rs.gap_demote_count, rs.gap_reset_count, rs.ack_demote_count,
-        rs.too_late_drop_count, rs.too_far_ahead_drop_count, rs.duplicate_drop_count,
-        rs.pool_drop_count, rs.per_flow_limit_drop_count, rs.reset_discard_count,
-        rs.delivered_count, mqvpn_reorder_latency_percentile(&rs, 0.99),
-        (double)rs.residence_max_us / 1000.0,
-        mqvpn_reorder_latency_buffered_percentile(&rs, 0.99));
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    bool ok = yyjson_mut_obj_add_bool(doc, root, "ok", true);
+    yyjson_mut_val *r = yyjson_mut_obj_add_obj(doc, root, "reorder");
+    ok &= r != NULL;
+    ok &= yyjson_mut_obj_add_uint(doc, r, "gap_count", rs.gap_count);
+    ok &= yyjson_mut_obj_add_uint(doc, r, "gap_filled_count", rs.gap_filled_count);
+    ok &= yyjson_mut_obj_add_uint(doc, r, "gap_timeout_count", rs.gap_timeout_count);
+    ok &= yyjson_mut_obj_add_uint(doc, r, "gap_overflow_count", rs.gap_overflow_count);
+    ok &= yyjson_mut_obj_add_uint(doc, r, "gap_demote_count", rs.gap_demote_count);
+    ok &= yyjson_mut_obj_add_uint(doc, r, "gap_reset_count", rs.gap_reset_count);
+    ok &= yyjson_mut_obj_add_uint(doc, r, "ack_demote_count", rs.ack_demote_count);
+    ok &= yyjson_mut_obj_add_uint(doc, r, "too_late_drop_count", rs.too_late_drop_count);
+    ok &= yyjson_mut_obj_add_uint(doc, r, "too_far_ahead_drop_count",
+                                  rs.too_far_ahead_drop_count);
+    ok &=
+        yyjson_mut_obj_add_uint(doc, r, "duplicate_drop_count", rs.duplicate_drop_count);
+    ok &= yyjson_mut_obj_add_uint(doc, r, "pool_drop_count", rs.pool_drop_count);
+    ok &= yyjson_mut_obj_add_uint(doc, r, "per_flow_limit_drop_count",
+                                  rs.per_flow_limit_drop_count);
+    ok &= yyjson_mut_obj_add_uint(doc, r, "reset_discard_count", rs.reset_discard_count);
+    ok &= yyjson_mut_obj_add_uint(doc, r, "delivered_count", rs.delivered_count);
+    ok &= ctrl_add_ms(doc, r, "added_latency_p99_ms",
+                      mqvpn_reorder_latency_percentile(&rs, 0.99));
+    ok &=
+        ctrl_add_ms(doc, r, "added_latency_max_ms", (double)rs.residence_max_us / 1000.0);
+    ok &= ctrl_add_ms(doc, r, "added_latency_buffered_p99_ms",
+                      mqvpn_reorder_latency_buffered_percentile(&rs, 0.99));
+    if (!ok) {
+        yyjson_mut_doc_free(doc);
+        return ctrl_reply(NULL, resp, resp_len);
+    }
+    return ctrl_reply(doc, resp, resp_len);
 }
 
 /* Commands take the whole socket context, not just the server handle: some
  * answers (get_stats' udp_rx_* pair) come from platform-owned state that
  * never crosses the library ABI. Handlers that only need the server open
  * with `mqvpn_server_t *server = cs->server;` and are otherwise unchanged. */
-typedef int (*ctrl_cmd_fn)(const char *req, char *resp, size_t resp_len,
+typedef int (*ctrl_cmd_fn)(yyjson_val *req, char *resp, size_t resp_len,
                            ctrl_socket_t *cs);
 
 /* Keep in sync (and in order) with the file-header command list. */
@@ -483,16 +554,30 @@ static const struct {
 static int
 dispatch(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
+    /* STOP_WHEN_DONE: bytes after the first complete value (read together
+     * with the request) are ignored, like the brace framing in ctrl_on_read.
+     * Without INSITU yyjson only reads the buffer, hence the cast. */
+    yyjson_doc *doc = yyjson_read_opts((char *)req, strlen(req),
+                                       YYJSON_READ_STOP_WHEN_DONE, NULL, NULL);
+    yyjson_val *root = yyjson_doc_get_root(doc);
     char cmd[32] = {0};
-    const char *v = json_find_key(req, "cmd");
-    if (!v || json_read_string(v, cmd, sizeof(cmd)) < 0)
-        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"missing cmd\"}");
+    int rc;
 
-    for (size_t i = 0; i < sizeof(ctrl_cmds) / sizeof(ctrl_cmds[0]); i++)
-        if (strcmp(cmd, ctrl_cmds[i].name) == 0)
-            return ctrl_cmds[i].fn(req, resp, resp_len, cs);
-
-    return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"unknown cmd\"}");
+    /* NULL doc or non-object root: yyjson_obj_get returns NULL -> -1. */
+    if (json_copy_str(yyjson_obj_get(root, "cmd"), cmd, sizeof(cmd)) < 0) {
+        rc = ctrl_error(resp, resp_len, "missing cmd");
+    } else {
+        ctrl_cmd_fn fn = NULL;
+        for (size_t i = 0; i < sizeof(ctrl_cmds) / sizeof(ctrl_cmds[0]); i++)
+            if (strcmp(cmd, ctrl_cmds[i].name) == 0) {
+                fn = ctrl_cmds[i].fn;
+                break;
+            }
+        rc =
+            fn ? fn(root, resp, resp_len, cs) : ctrl_error(resp, resp_len, "unknown cmd");
+    }
+    yyjson_doc_free(doc); /* handlers neither free nor keep the request doc */
+    return rc;
 }
 
 /* ── Connection read handler ─────────────────────────────────────────────── */
@@ -578,7 +663,7 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
     if (rlen <= 0) {
         /* dispatch failed to format anything — close silently. */
     } else if ((size_t)rlen >= sizeof(resp) - 2) {
-        /* snprintf would have truncated. Send a small error JSON instead so the
+        /* The reply did not fit in resp. Send a small error JSON instead so the
          * client doesn't see a malformed body, and emit a warning. */
         static const char too_large[] =
             "{\"ok\":false,\"error\":\"response too large\"}\n";

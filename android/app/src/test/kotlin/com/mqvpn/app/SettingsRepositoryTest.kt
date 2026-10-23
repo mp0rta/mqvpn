@@ -90,9 +90,12 @@ class SettingsRepositoryTest {
             reorderEnabled = true,
             reorderProfile = "FIBER_LTE",
             reorderPorts = "443,8443",
+            redundantEnabled = true,
+            redundantPorts = "4200,9000",
             hybridEnabled = true,
             hybridTcpMode = "RAW",
             bluetoothPathEnabled = true,
+            scheduler = "WLB",
         )
 
         repo.save(nonDefault)
@@ -205,9 +208,12 @@ class SettingsRepositoryTest {
             reorderEnabled = true,
             reorderProfile = "FIBER_LTE",
             reorderPorts = "443,8443",
+            redundantEnabled = true,
+            redundantPorts = "4200,9000",
             hybridEnabled = true,
             hybridTcpMode = "RAW",
             bluetoothPathEnabled = true,
+            scheduler = "WLB",
         )
 
         repo.save(nonDefault)

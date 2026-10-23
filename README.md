@@ -96,7 +96,7 @@ https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
 | [Windows (amd64/arm64)](#windows-client) | Windows 10 | ✅ | 📋 | Release archive |
 | [macOS arm64](https://github.com/mp0rta/homebrew-tap#install) | macOS 14 (Sonoma) | ✅ | 📋 | Homebrew / Release archive |
 | iOS | iOS 15 | — | 🚧 | App Store planned |
-| [Android](https://f-droid.org/packages/org.mqvpn.app/) | Android 8.0 (API 26) | — | 🧪 | F-Droid / APK / Play Store planned |
+| [Android](https://f-droid.org/packages/org.mqvpn.app/) | Android 8.0 (API 26) | — | 🧪 | F-Droid / APK / Play Store |
 
 > ✅ Supported · 🧪 Experimental · 🚧 In development · 📋 Planned
 
@@ -225,6 +225,12 @@ User = bob:bob-secret
 [Multipath]
 Scheduler = wlb
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none, default: bbr2)
+
+[Hybrid]
+Enabled = true
+
+[Reorder]
+Enabled = on
 ```
 
 ```ini
@@ -245,6 +251,12 @@ Scheduler = wlb
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none, default: bbr2)
 Path = eth0
 Path = wlan0
+
+# [Hybrid]                      # opt in to carry inner TCP over QUIC streams; see the [Hybrid] section
+# Enabled = true
+
+# [Reorder]                     # opt in for bulk inner QUIC; see the [Reorder] section
+# Enabled = on
 ```
 
 ### JSON config
@@ -268,7 +280,9 @@ Server example:
     ],
     "max_clients": 64,
     "scheduler": "wlb",
-    "cc": "bbr2"
+    "cc": "bbr2",
+    "hybrid": { "enabled": true },
+    "reorder": { "enabled": "on" }
 }
 ```
 
@@ -348,7 +362,7 @@ it) and a no-op when either side has it off.
 ```ini
 [Reorder]
 Enabled = on
-MaxWaitMs = 50           # reorder window: hold out-of-order datagrams up to this long
+MaxWaitMs = 50           # wait for a missing datagram this long (hold nominally <= 2x)
 CapPackets = 1024        # per-flow buffer cap (packets)
 
 # Optional: target specific inner flows with a tuned preset
@@ -373,7 +387,7 @@ or more active paths — silently inactive with only one.
 
 ```ini
 [Multipath]
-Reinjection = off                     # off (default) | deadline | idle | dgram
+Reinjection = off                     # off (default) | deadline | idle
 ReinjectionSrttFactorPct = 110        # deadline mode: duplicate an unacked packet older than factor x min_srtt (100-1000; 110 = 1.1x)
 ReinjectionHardDeadlineMs = 500       # deadline mode: upper clamp (1-60000)
 ReinjectionDeadlineLowerBoundMs = 20  # deadline mode: lower clamp (1-60000; clamped down to the hard deadline if it would exceed it)
@@ -381,7 +395,8 @@ ReinjectionDeadlineLowerBoundMs = 20  # deadline mode: lower clamp (1-60000; cla
 
 - `deadline` — insurance for bonded tunnels running the [hybrid TCP lane](#hybrid-mode-tcp-lane). Most of the time it does nothing and costs nothing. When a link suddenly goes bad, data already sent on it must be recovered before in-order delivery lets anything behind it through — even data that already arrived via the healthy link — which in bad cases stalls transfers for up to a second; `deadline` resends the late data on the healthy link right away, shrinking that stall to a barely noticeable blip. Protects stream (TCP-lane) traffic only — with the hybrid lane disabled its effect is limited to control streams and a warning is logged. Protects TCP/stream traffic only — with the hybrid lane disabled its effect is limited to control streams and a warning is logged.
 - `idle` — low-cost smoothing for interactive use (SSH, browsing): whenever the tunnel has nothing else to send, it uses that spare moment to send a copy of recent still-unconfirmed data over another link, shaving off occasional hiccups. No tuning needed.
-- `dgram` — for tunnels dedicated to real-time traffic (VoIP, gaming): every datagram-lane packet (UDP and other non-TCP traffic; hybrid-mode TCP is not duplicated) is sent over two links at once, so a lost packet or a dying link no longer causes dropouts or lag spikes. **Uses double the bandwidth for that traffic; not recommended for mixed tunnels** — it duplicates all inner UDP, including HTTP/3 video streams, so the usable speed of the datagram lane drops to a single link's capacity. Duplicates are delivered twice at the receiver's TUN unless the [reorder buffer](#reorder-buffer-datagram-lane) is enabled (it removes them); plain UDP apps may otherwise see duplicate packets.
+
+The former `dgram` value was removed. To keep live UDP streams alive across a dropped link, use redundant mode, which covers client uploads (`[Multipath] Redundant = on`; see the [website guide](https://docs.mqvpn.org/guide/multipath#redundant-mode)); every link should be able to carry the stream on its own (recommended).
 
 Per-path duplicated bytes are reported as `reinject_tx_bytes` in the control
 API `get_status` response.
@@ -413,9 +428,9 @@ EgressAllow = 10.0.5.0/24  # server: punch a hole through the default-deny egres
 ```
 
 Disabled by default; existing users see no behavior change. See
-[docs/control-api.md §9](docs/control-api.md#9-hybrid-mode-configuration-keys)
-for the full `[Hybrid]` config key reference and the `get_stats` counters
-this mode exposes.
+[Configuration → `[Hybrid]`](website/guide/configuration.md#hybrid)
+for the full config key reference, and
+[Control API §5.4](docs/control-api.md#54-get_stats) for runtime counters.
 
 ## systemd
 

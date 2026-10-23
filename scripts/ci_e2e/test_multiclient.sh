@@ -8,6 +8,7 @@
 #   2. All clients can ping through the tunnel
 #   3. One client disconnect doesn't affect others
 #   4. Wrong PSK is rejected (client exits)
+#   5. Per-client scheduler (--request-server-scheduler) shows in get_status
 #
 # Usage: sudo ./test_multiclient.sh [path-to-mqvpn-binary]
 
@@ -115,6 +116,7 @@ ip netns exec mc-server "$MQVPN" \
     --key "${WORK_DIR}/server.key" \
     --auth-key "$PSK" \
     --max-clients 3 \
+    --scheduler wlb --allow-client-scheduler --control-port 9191 \
     --log-level debug > "${WORK_DIR}/server.log" 2>&1 &
 SERVER_PID=$!
 sleep 2
@@ -134,11 +136,19 @@ echo "=== Test 1: Connect 3 clients with correct PSK ==="
 
 for i in 1 2 3; do
     echo "Starting client ${i}..."
+    # Per-client scheduler request: client1 minrtt, client2 wlb_udp_pin, client3 none.
+    case "$i" in
+        1) SCHED_FLAGS="--scheduler minrtt --request-server-scheduler" ;;
+        2) SCHED_FLAGS="--scheduler wlb_udp_pin --request-server-scheduler" ;;
+        *) SCHED_FLAGS="" ;;
+    esac
+    # shellcheck disable=SC2086
     ip netns exec "mc-client${i}" "$MQVPN" \
         --mode client \
         --server "192.168.${i}0.2:4433" \
         --auth-key "$PSK" \
         --insecure \
+        $SCHED_FLAGS \
         --log-level debug > "${WORK_DIR}/client${i}.log" 2>&1 &
     eval "CLIENT${i}_PID=$!"
     sleep 3
@@ -201,6 +211,58 @@ if [ "$PING_PASS" -eq 0 ]; then
     exit 1
 fi
 echo "=== PASS: All 3 clients can ping through tunnel ==="
+
+# ========================================
+# Test 2b: Per-client scheduler (server wlb, clients may request)
+# ========================================
+echo ""
+echo "=== Test 2b: Per-client scheduler in get_status ==="
+STATUS_JSON=$(printf '%s' '{"cmd":"get_status"}' \
+    | ip netns exec mc-server nc -q1 127.0.0.1 9191 2>/dev/null || true)
+SCHED_PASS=1
+for i in 1 2 3; do
+    case "$i" in
+        1) want="minrtt" ;;
+        2) want="wlb_udp_pin" ;;
+        *) want="wlb" ;;
+    esac
+    got=$(python3 -c '
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+except Exception:
+    print("<unparsable>"); sys.exit(0)
+for c in d.get("clients", []):
+    if c.get("endpoint", "").startswith(sys.argv[2]):
+        print(c.get("scheduler", "<none>")); break
+else:
+    print("<no client>")
+' "$STATUS_JSON" "192.168.${i}0.1:")
+    if [ "$got" = "$want" ]; then
+        echo "OK: Client ${i} scheduler=${got}"
+    else
+        echo "FAIL: Client ${i} scheduler=${got} (want ${want})"
+        SCHED_PASS=0
+    fi
+done
+# An earlier client must still work after a later client negotiated.
+for i in 1 2 3; do
+    out=$(ip netns exec "mc-client${i}" ping -c 10 -W 2 10.0.0.1 2>&1 || true)
+    if grep -q ' 0% packet loss' <<< "$out"; then
+        echo "OK: Client ${i} ping 0% loss after scheduler negotiation"
+    else
+        echo "FAIL: Client ${i} ping loss after scheduler negotiation: $(tail -2 <<< "$out")"
+        SCHED_PASS=0
+    fi
+done
+if [ "$SCHED_PASS" -eq 0 ]; then
+    echo "=== FAIL: Per-client scheduler check ==="
+    echo "get_status: ${STATUS_JSON}"
+    echo "--- Server log (scheduler lines) ---"
+    grep 'requested scheduler' "${WORK_DIR}/server.log" || true
+    exit 1
+fi
+echo "=== PASS: Per-client scheduler (minrtt / wlb_udp_pin / wlb) ==="
 
 # ========================================
 # Test 3: Disconnect client 2, others survive
@@ -336,6 +398,7 @@ echo "  Multi-client Test Summary"
 echo "=========================================="
 echo "  Test 1 (3 clients connect): PASS"
 echo "  Test 2 (All ping):          PASS"
+echo "  Test 2b (Client scheduler): PASS"
 [ "$SURVIVE_PASS" -eq 1 ] \
     && echo "  Test 3 (Disconnect):        PASS" \
     || echo "  Test 3 (Disconnect):        FAIL"

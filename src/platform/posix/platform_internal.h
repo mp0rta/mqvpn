@@ -69,6 +69,7 @@ struct platform_ctx {
     /* Path slots (UDP sockets + their transports), append-only */
     platform_path_t paths[MQVPN_MAX_PATHS];
     int n_paths;
+    const char *adding_iface; /* iface of the add_path in flight, else NULL */
 
     /* TUN device */
     mqvpn_tun_t tun;
@@ -89,7 +90,9 @@ struct platform_ctx {
      * reproduce startup behavior on the fresh fd it creates. Linux-only:
      * GRO is a Linux sockopt and Darwin would carry a dead field. */
     int udp_gro;
-    int udp_gso; /* [Advanced] UdpGso policy, reproduced on re-add */
+    int udp_gso;     /* [Advanced] UdpGso policy, reproduced on re-add */
+    int tun_offload; /* [Advanced] TunOffload, applied on every TUN create */
+    int tun_gro;     /* [Advanced] TunGro, likewise */
 #endif
     /* Receive-side telemetry: cumulative PLATFORM totals. The bind counts per
      * transport ctx on every POSIX platform and those counters die with the
@@ -142,9 +145,11 @@ struct platform_ctx {
  * the tunnel the server handed over (TUN, addressing, MTU, routes, kill
  * switch). PATH_RELEASE: the library refused a transport release the
  * platform reported right after its own drop/remove of that path — an
- * invariant violation (netmon_common.c). */
+ * invariant violation (netmon_common.c). CLOSED: the client reached CLOSED
+ * without a shutdown of ours — the connection ended and will not be retried. */
 #define PLATFORM_FATAL_TUNNEL_SETUP 1
 #define PLATFORM_FATAL_PATH_RELEASE 2
+#define PLATFORM_FATAL_CLOSED       3
 
 /* platform_{linux,darwin}.c (netmon_common.c, and netlink_mon.c on Linux or
  * route_mon.c on Darwin, call schedule_next_tick; on_socket_read is the read

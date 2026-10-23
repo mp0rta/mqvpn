@@ -196,6 +196,7 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
         assignedIp6: ByteArray?, prefix6: Int,
         serverIp: ByteArray, serverPrefix: Int,
         mtu: Int, hasV6: Boolean,
+        hasServerScheduler: Boolean, serverScheduler: Int,
     ) {
         val info = TunnelInfo(
             assignedIp = formatIp4(assignedIp),
@@ -206,6 +207,12 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
             assignedIp6 = assignedIp6?.let { formatIp6(it) },
             prefix6 = prefix6,
             hasV6 = hasV6,
+            serverScheduler = if (hasServerScheduler) {
+                MqvpnConfig.Scheduler.entries.firstOrNull { it.native == serverScheduler }
+            } else null,
+            requestedScheduler = currentConfig?.let { c ->
+                c.scheduler.takeIf { c.requestServerScheduler }
+            },
         )
 
         val tunPfd = try {

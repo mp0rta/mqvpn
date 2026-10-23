@@ -18,6 +18,7 @@
 #define MQVPN_SERVER_INTERNAL_H
 
 #include "libmqvpn.h"          /* mqvpn_server_t */
+#include "mqvpn_internal.h"    /* MQVPN_INTERNAL */
 #include "hybrid/classifier.h" /* mqvpn_cidr_entry_t */
 
 #include <stddef.h>
@@ -40,12 +41,18 @@ typedef struct {
     size_t path_len;
     const char *auth_token; /* Bearer payload, not NUL-terminated */
     size_t auth_token_len;
+    int has_sched_hdr; /* request carried mqvpn-scheduler */
+    const char *sched; /* raw value, not NUL-terminated */
+    size_t sched_len;
     int has_reorder_hdr; /* request advertised mqvpn-reorder (§19.3). Applied to
                           * conn->peer_reorder_supported ONLY when this request
                           * establishes the CONNECT-IP tunnel — a rejected
                           * duplicate or unrelated request must not mutate the
                           * live tunnel's negotiated stamping. */
 } svr_req_headers_t;
+
+/* Test hook (mqvpn_server.c). */
+MQVPN_INTERNAL const char *mqvpn_server_test_sched_refusal_reason(int xqc_rc);
 
 /* Whether request-level auth (Bearer PSK) must be checked before granting a
  * MASQUE request. Identical condition for CONNECT-IP and connect-tcp on
@@ -159,10 +166,10 @@ int svr_egress_fd_register_is_set(mqvpn_server_t *s);
  * platform never installed the callback. */
 void svr_egress_fd_unregister(mqvpn_server_t *s, int fd);
 
-/* Wall-clock microseconds — the SAME source mqvpn_server.c uses everywhere
- * else (gettimeofday-based; see now_us() in mqvpn_server.c). Exposed so
- * tcp_egress.c's connect-deadline computation doesn't introduce a second
- * clock idiom. */
+/* Microseconds on the server's clock — the SAME source mqvpn_server.c uses
+ * everywhere else (the library's clock, mqvpn_clock.c: not the wall clock;
+ * see now_us() in mqvpn_server.c). Exposed so tcp_egress.c's connect-deadline
+ * computation doesn't introduce a second clock idiom. */
 uint64_t svr_now_us(void);
 
 /* Drive the engine once if (and only if) the deferred send flush is engaged

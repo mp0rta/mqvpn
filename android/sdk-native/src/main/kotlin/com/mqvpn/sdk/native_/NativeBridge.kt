@@ -52,6 +52,12 @@ object NativeBridge {
     /** mqvpn_config_set_scheduler(cfg, scheduler: 0=MINRTT, 1=WLB, 2=BACKUP_FEC, 3=WLB_UDP_PIN) */
     external fun configSetScheduler(cfg: Long, scheduler: Int): Int
 
+    /** mqvpn_config_set_request_server_scheduler(cfg, enable) */
+    external fun configSetRequestServerScheduler(cfg: Long, enable: Boolean): Int
+
+    /** mqvpn_config_set_cc(cfg, cc: 0=BBR2, 1=BBR, 2=CUBIC) */
+    external fun configSetCc(cfg: Long, cc: Int): Int
+
     /**
      * mqvpn_config_set_log_level(cfg, level: 0=DEBUG..3=ERROR). On success it
      * also stores the process-wide threshold of the library's global log lines
@@ -84,6 +90,9 @@ object NativeBridge {
 
     /** mqvpn_config_set_reorder_enabled(cfg, mode: 0=OFF, 1=ON) */
     external fun configSetReorderEnabled(cfg: Long, mode: Int): Int
+
+    /** mqvpn_config_set_redundant(cfg, enabled, ports); empty ports = all UDP. */
+    external fun configSetRedundant(cfg: Long, enabled: Boolean, ports: IntArray): Int
 
     /** mqvpn_config_add_reorder_rule(cfg, proto, port, profile) */
     external fun configAddReorderRule(cfg: Long, proto: Int, port: Int, profile: Int): Int

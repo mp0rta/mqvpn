@@ -35,6 +35,10 @@ data class MqvpnConfig(
     val insecure: Boolean = false,
     val multipathEnabled: Boolean = true,
     val scheduler: Scheduler = Scheduler.MIN_RTT,
+    /** Ask the server to use [scheduler] for this connection (it may refuse). */
+    val requestServerScheduler: Boolean = false,
+    /** Congestion control for what this client sends; the server keeps its own for downloads. */
+    val cc: CongestionControl = CongestionControl.BBR2,
     /**
      * Minimum level of the library's log lines: this tunnel's own lines,
      * delivered to `MqvpnVpnService.onLog`, and the lines the library writes
@@ -50,6 +54,10 @@ data class MqvpnConfig(
     val reorderEnabled: Boolean = false,
     val reorderProfile: ReorderProfile = ReorderProfile.CELLULAR_BOND,
     val reorderPorts: List<Int> = emptyList(),
+    /** Send each UDP packet over every path at once (uplink). */
+    val redundantEnabled: Boolean = false,
+    /** Destination ports to duplicate; empty = all UDP. */
+    val redundantPorts: List<Int> = emptyList(),
     val hybridEnabled: Boolean = false,
     val hybridTcpMode: HybridTcpMode = HybridTcpMode.AUTO,
     /**
@@ -67,6 +75,13 @@ data class MqvpnConfig(
         WLB(1),
         BACKUP_FEC(2),
         WLB_UDP_PIN(3),
+    }
+
+    @Serializable
+    enum class CongestionControl(val native: Int) {
+        BBR2(0),
+        BBR(1),
+        CUBIC(2),
     }
 
     @Serializable

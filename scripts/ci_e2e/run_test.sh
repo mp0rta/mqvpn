@@ -186,33 +186,34 @@ ip netns exec vpn-client "$MQVPN" \
     --log-level "$LOG_LEVEL" > "${WORK_DIR}/client_strict.log" 2>&1 &
 CLIENT_STRICT_PID=$!
 
-# Wait for connection attempt — client should fail and exit
-sleep 5
+# The rejected client reaches CLOSED and exits by itself (~3 s: the alert,
+# then the drain). Still running after the bound is a failure either way: a
+# tunnel means the cert was accepted, no tunnel means it is retrying.
+for _ in $(seq 1 30); do
+    kill -0 "$CLIENT_STRICT_PID" 2>/dev/null || break
+    sleep 0.5
+done
 
 if kill -0 "$CLIENT_STRICT_PID" 2>/dev/null; then
-    # Still running — check if tunnel came up (it shouldn't)
     if ip netns exec vpn-client ip addr show dev mqvpn0 >/dev/null 2>&1; then
         echo "=== FAIL: Self-signed cert was accepted without --insecure ==="
-        kill "$CLIENT_STRICT_PID" 2>/dev/null || true
-        wait "$CLIENT_STRICT_PID" 2>/dev/null || true
-        echo ""
-        echo "--- Server log ---"
-        cat "${WORK_DIR}/server.log"
-        echo ""
-        echo "--- Client strict log ---"
-        cat "${WORK_DIR}/client_strict.log"
-        exit 1
     else
-        echo "OK: Client running but no tunnel (cert rejected)"
-        kill "$CLIENT_STRICT_PID" 2>/dev/null || true
-        wait "$CLIENT_STRICT_PID" 2>/dev/null || true
+        echo "=== FAIL: strict client still running 15s after the cert rejection ==="
     fi
-else
-    wait "$CLIENT_STRICT_PID" 2>/dev/null || true
-    echo "OK: Client exited (self-signed cert rejected)"
+    echo ""
+    echo "--- Server log ---"
+    cat "${WORK_DIR}/server.log"
+    echo ""
+    echo "--- Client strict log ---"
+    cat "${WORK_DIR}/client_strict.log"
+    exit 1
 fi
-
-if grep -q "certificate verification failed\|cert.*fail\|TLS.*fail" "${WORK_DIR}/client_strict.log" 2>/dev/null; then
-    echo "OK: Certificate rejection message found in log"
+check_closed_exit "$CLIENT_STRICT_PID" "client-strict" "${WORK_DIR}/client_strict.log" || exit 1
+CLIENT_STRICT_PID=""
+if ! grep -q "TLS certificate verification failed" "${WORK_DIR}/client_strict.log"; then
+    echo "=== FAIL: strict client exited without 'TLS certificate verification failed' ==="
+    tail -40 "${WORK_DIR}/client_strict.log"
+    exit 1
 fi
+echo "OK: Client exited (self-signed cert rejected)"
 echo "=== PASS: Self-signed cert correctly rejected without --insecure ==="

@@ -222,6 +222,7 @@ fi
 install -m 644 lib/libxquic.so "$INSTALL_PREFIX/lib/"
 mkdir -p "$INSTALL_PREFIX/lib/mqvpn"
 install -m 755 lib/mqvpn/mqvpn-server-nat.sh "$INSTALL_PREFIX/lib/mqvpn/"
+install -m 755 lib/mqvpn/mqvpn-nat-config "$INSTALL_PREFIX/lib/mqvpn/"
 install -m 644 systemd/mqvpn-server.service /lib/systemd/system/
 install -m 644 systemd/mqvpn-client@.service /lib/systemd/system/
 

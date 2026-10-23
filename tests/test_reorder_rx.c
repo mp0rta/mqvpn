@@ -242,6 +242,10 @@ only_flow(mqvpn_reorder_rx_t *rx)
 }
 
 /* §11.1 invariant check: gap_timer_active ⟺ buffer non-empty, over all flows.
+ * §12.2 (reordering mark): while a period is armed, expected < reord <= rx_next
+ * and the packet with seq reord-1 is still buffered (it is what the timeout
+ * drains up to). Checked at operation boundaries only — the helpers may see
+ * it false transiently while a drain is in progress.
  * Hardening item 3: also assert pool_bytes_used == Σ over flows of buffer.bytes,
  * which catches any charge/release asymmetry that ASan cannot see (the bytes are
  * still individually malloc'd, so a mis-charge leaks accounting, not memory). */
@@ -254,6 +258,14 @@ invariant_holds(mqvpn_reorder_rx_t *rx)
             int nonempty = !ring_empty(&f->buffer);
             if (f->gap_timer_active != nonempty) {
                 return 0;
+            }
+            if (f->gap_timer_active) {
+                if (!(f->expected < f->reord && f->reord <= f->rx_next)) {
+                    return 0;
+                }
+                if (!ring_contains(&f->buffer, f->reord - 1)) {
+                    return 0;
+                }
             }
             sum_bytes += f->buffer.bytes;
         }
@@ -510,6 +522,8 @@ accounting_holds_33(mqvpn_reorder_flow_t *f)
     return f->stats.gap_count == closed + open;
 }
 
+static int accounting_holds_full(mqvpn_reorder_flow_t *f);
+
 static void
 test_rx_timeout_skip_advances(void)
 {
@@ -586,8 +600,10 @@ test_rx_timeout_skip_rearms_when_nonempty(void)
 static void
 test_rx_anchored_timer_no_rearm(void)
 {
-    /* §12.2: in-order arrival that advances expected but leaves the buffer
-     * non-empty (new gap exposed) keeps the ORIGINAL deadline (no rearm). */
+    /* §12.2: in-order progress that leaves part of the COHORT missing keeps the
+     * original deadline (no rearm). Cohort = gaps present when the timer armed:
+     * here seq 1,2 are missing when seq 3 arms the timer (reord = 4); seq 1
+     * then arrives, expected moves to 2 < reord, and the period continues. */
     recorder_t rec = {0};
     mqvpn_reorder_config_t c = rx_cfg();
     c.max_wait_ms = 30;
@@ -597,24 +613,24 @@ test_rx_anchored_timer_no_rearm(void)
     size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 443, 100);
     mqvpn_reorder_rx_on_packet(rx, buf, n, 1000); /* expected=1 */
 
-    /* buffer seq 2 (gap at 1) and seq 4 (gap at 3). One period, armed at 2000. */
-    n = build_reorder_dgram(buf, 0, 2, 3, 5000, 443, 100);
+    /* seq 3 ahead (gap at 1,2) → period armed at 2000, reord = 4. */
+    n = build_reorder_dgram(buf, 0, 3, 4, 5000, 443, 100);
     mqvpn_reorder_rx_on_packet(rx, buf, n, 2000);
-    n = build_reorder_dgram(buf, 0, 4, 5, 5000, 443, 100);
-    mqvpn_reorder_rx_on_packet(rx, buf, n, 2500);
     mqvpn_reorder_flow_t *f = only_flow(rx);
     uint64_t deadline0 = f->gap_deadline_us;
     ASSERT_EQ_INT(f->stats.gap_count, 1, "single period");
+    ASSERT_EQ_INT((long long)f->reord, 4, "mark = highest buffered + 1");
 
-    /* in-order seq 1 arrives at 5000: delivers 1, drains 2, exposes gap at 3
-     * (seq4 still buffered). Timer must NOT rearm — original deadline kept. */
+    /* seq 1 arrives at 5000: delivered, expected=2; seq 2 still missing and
+     * 2 < reord=4, so the period is NOT done: deadline and gap_count unchanged. */
     n = build_reorder_dgram(buf, 0, 1, 2, 5000, 443, 100);
     mqvpn_reorder_rx_on_packet(rx, buf, n, 5000);
-    ASSERT_EQ_INT(f->expected, 3, "expected advanced past 1,2 to 3");
-    ASSERT_TRUE(f->gap_timer_active, "still armed (seq4 buffered)");
+    ASSERT_EQ_INT(f->expected, 2, "expected advanced to 2 (seq 2 still missing)");
+    ASSERT_TRUE(f->gap_timer_active, "still armed (seq3 buffered)");
     ASSERT_EQ_INT((long long)f->gap_deadline_us, (long long)deadline0,
-                  "anchored: deadline unchanged (no rearm)");
+                  "anchored: deadline unchanged while the cohort is incomplete");
     ASSERT_EQ_INT(f->stats.gap_count, 1, "no new period (anchored)");
+    ASSERT_EQ_INT(f->stats.gap_filled_count, 0, "cohort not filled yet");
     ASSERT_TRUE(invariant_holds(rx), "invariant after anchored advance");
     ASSERT_TRUE(accounting_holds_33(f), "accounting after anchored advance");
     mqvpn_reorder_rx_free(rx);
@@ -661,13 +677,16 @@ test_rx_overflow_flush_reclassify(void)
 }
 
 static void
-test_rx_overflow_partial_drain_anchored(void)
+test_rx_overflow_ends_period_and_restarts(void)
 {
-    /* §12.3/§17: an overflow flush that only PARTIALLY drains (a higher gap is
-     * exposed) keeps the same anchored period alive — no rearm, and NOT counted
-     * as a terminator (the §17 identity must stay exact via the open-period +1). */
+    /* §12.3/§17: an overflow flush that advances expected to (or past) the
+     * mark ENDS the period as overflow — even though the buffer stays non-empty
+     * — and a fresh period starts with a new mark. The mark is taken before the
+     * arriving packet is inserted (it is still unclassified during the flush),
+     * so reord = rx_next = 6 here, not 7. */
     recorder_t rec = {0};
     mqvpn_reorder_config_t c = rx_cfg();
+    c.max_wait_ms = 30;
     c.cap_packets_per_flow = 1024;
     c.max_buffer_bytes_per_flow = 256; /* exactly two 128-byte packets */
     mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
@@ -676,29 +695,301 @@ test_rx_overflow_partial_drain_anchored(void)
     size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 443, 100);
     mqvpn_reorder_rx_on_packet(rx, buf, n, 1000); /* expected=1 */
 
-    /* buffer seq 2 (gap at 1) and seq 5 (gap at 3,4) → two packets, at the limit. */
+    /* buffer seq 2 (gap at 1; arms, reord=3) and seq 5 (gap at 3,4; rx_next=6). */
     n = build_reorder_dgram(buf, 0, 2, 3, 5000, 443, 100);
     mqvpn_reorder_rx_on_packet(rx, buf, n, 2000);
     n = build_reorder_dgram(buf, 0, 5, 6, 5000, 443, 100);
     mqvpn_reorder_rx_on_packet(rx, buf, n, 2000);
     mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_EQ_INT(f->stats.gap_count, 1, "one period opened");
+    ASSERT_EQ_INT((long long)f->reord, 3, "mark = 3");
+
+    /* seq 6 ahead exceeds the byte limit → overflow_flush: skip gap at 1,
+     * deliver seq2 (tag3), expected=3 == reord → period ends (overflow=1),
+     * restarts at 3000 with reord = rx_next = 6. Then seq6 reclassifies to
+     * ahead and is buffered (rx_next=7). */
+    n = build_reorder_dgram(buf, 0, 6, 7, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 3000);
+    ASSERT_EQ_INT(rec.tags[rec.n - 1], 3, "seq2 delivered by the flush");
+    ASSERT_EQ_INT(f->expected, 3, "expected advanced to 3 (gap at 3,4 remains)");
+    ASSERT_TRUE(f->gap_timer_active, "armed (seq5,6 buffered)");
+    ASSERT_EQ_INT((long long)f->gap_deadline_us, 3000 + 30000,
+                  "restarted at the flush time");
+    ASSERT_EQ_INT(f->stats.gap_overflow_count, 1, "overflow ended the period");
+    ASSERT_EQ_INT(f->stats.gap_count, 2, "a second period opened");
+    ASSERT_EQ_INT((long long)f->reord, 6, "mark taken before seq6 was inserted");
+    ASSERT_EQ_INT((long long)f->rx_next, 7, "rx_next after seq6");
+    ASSERT_EQ_INT(f->buffer.count, 2, "seq5 and seq6 buffered");
+    ASSERT_TRUE(invariant_holds(rx), "invariant after overflow restart");
+    ASSERT_TRUE(accounting_holds_33(f), "accounting after overflow restart");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_overflow_partial_keeps_period(void)
+{
+    /* §12.3: an overflow flush that leaves expected BELOW the mark keeps the
+     * same period alive — no rearm, no terminator counted. Cohort can split:
+     * seq5 arms (reord=6), seq3 then lands inside the cohort, so the flush
+     * skips only the gap at 1,2 and stops at the gap at 4 (< reord). */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.max_wait_ms = 30;
+    c.cap_packets_per_flow = 1024;
+    c.max_buffer_bytes_per_flow = 256; /* exactly two 128-byte packets */
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+
+    size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000); /* expected=1 */
+
+    n = build_reorder_dgram(buf, 0, 5, 6, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 2000); /* arms: reord=6, rx_next=6 */
+    n = build_reorder_dgram(buf, 0, 3, 4, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 2000); /* inside the cohort */
+    mqvpn_reorder_flow_t *f = only_flow(rx);
     uint64_t deadline0 = f->gap_deadline_us;
     ASSERT_EQ_INT(f->stats.gap_count, 1, "one period opened");
 
-    /* seq 6 ahead exceeds the byte limit → overflow_flush. lowest=2, skip gap at
-     * 1, deliver seq2 (tag3), then gap at 3 stops the drain → seq5 still buffered.
-     * Then reclassify seq6 → ahead, buffered. Period continues, anchored. */
-    n = build_reorder_dgram(buf, 0, 6, 7, 5000, 443, 100);
+    /* seq 7 exceeds the byte limit → flush: lowest=3, deliver seq3 (tag4),
+     * expected=4 < reord=6 → period continues. seq7 reclassifies ahead → buffered. */
+    n = build_reorder_dgram(buf, 0, 7, 8, 5000, 443, 100);
     mqvpn_reorder_rx_on_packet(rx, buf, n, 3000);
-    ASSERT_EQ_INT(f->expected, 3, "expected advanced to 3 (partial drain)");
-    ASSERT_TRUE(f->gap_timer_active, "still armed (seq5,6 buffered)");
+    ASSERT_EQ_INT(rec.tags[rec.n - 1], 4, "seq3 delivered by the flush");
+    ASSERT_EQ_INT(f->expected, 4, "expected stopped at the gap at 4");
+    ASSERT_TRUE(f->gap_timer_active, "still armed (seq5,7 buffered)");
     ASSERT_EQ_INT((long long)f->gap_deadline_us, (long long)deadline0,
-                  "anchored: deadline unchanged after partial overflow");
-    ASSERT_EQ_INT(f->stats.gap_overflow_count, 0,
-                  "partial overflow does NOT end a period → not counted");
-    ASSERT_EQ_INT(f->stats.gap_count, 1, "no new period (no rearm)");
-    ASSERT_TRUE(invariant_holds(rx), "invariant after partial overflow");
-    ASSERT_TRUE(accounting_holds_33(f), "accounting after partial overflow");
+                  "partial flush below the mark: deadline unchanged");
+    ASSERT_EQ_INT(f->stats.gap_overflow_count, 0, "partial flush is not a terminator");
+    ASSERT_EQ_INT(f->stats.gap_count, 1, "no new period");
+    ASSERT_EQ_INT((long long)f->reord, 6, "mark unchanged");
+    ASSERT_EQ_INT(f->buffer.count, 2, "seq5 and seq7 buffered");
+    ASSERT_TRUE(invariant_holds(rx), "invariant after partial flush");
+    ASSERT_TRUE(accounting_holds_33(f), "accounting after partial flush");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_filled_cohort_restarts(void)
+{
+    /* §12.2 stop/restart: once expected reaches the mark the period ends as
+     * FILLED and, with the buffer still non-empty, a new period starts with a
+     * fresh mark and a fresh deadline (the old anchored timer never rearmed). */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.max_wait_ms = 30;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+
+    size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000); /* expected=1 */
+
+    n = build_reorder_dgram(buf, 0, 2, 3, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 2000); /* arms at 2000, reord=3 */
+    n = build_reorder_dgram(buf, 0, 4, 5, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 2500); /* rx_next=5, outside the cohort */
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_EQ_INT((long long)f->gap_deadline_us, 2000 + 30000, "first deadline");
+
+    /* seq 1 at 5000: delivers 1, drains 2 → expected=3 == reord → filled;
+     * seq4 still buffered → restart with reord=5 at 5000. */
+    n = build_reorder_dgram(buf, 0, 1, 2, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 5000);
+    ASSERT_EQ_INT(f->expected, 3, "expected advanced past 1,2 to 3");
+    ASSERT_TRUE(f->gap_timer_active, "armed again (seq4 buffered)");
+    ASSERT_EQ_INT((long long)f->gap_deadline_us, 5000 + 30000,
+                  "restarted at the fill time");
+    ASSERT_EQ_INT((long long)f->reord, 5, "new mark = rx_next");
+    ASSERT_EQ_INT(f->stats.gap_filled_count, 1, "first period ended by fill");
+    ASSERT_EQ_INT(f->stats.gap_count, 2, "second period opened");
+    ASSERT_TRUE(invariant_holds(rx), "invariant after restart");
+    ASSERT_TRUE(accounting_holds_33(f), "accounting after restart");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_restart_timeout_folds_cohort(void)
+{
+    /* §12.1: a timeout skips EVERY gap below the mark in one go (one
+     * gap_timeout increment), not just the head gap. */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.max_wait_ms = 30;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+
+    size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000); /* expected=1 */
+    n = build_reorder_dgram(buf, 0, 2, 3, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 2000); /* arms, reord=3 */
+    n = build_reorder_dgram(buf, 0, 4, 5, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 2100); /* gap at 3 */
+    n = build_reorder_dgram(buf, 0, 7, 8, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 2200); /* gap at 5,6; rx_next=8 */
+    /* fill seq 1 → cohort done → restart with reord=8 at 5000, deadline 35000. */
+    n = build_reorder_dgram(buf, 0, 1, 2, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 5000);
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_EQ_INT(f->expected, 3, "expected=3 after the fill");
+    ASSERT_EQ_INT((long long)f->reord, 8, "restart mark covers both gaps");
+    ASSERT_EQ_INT(f->stats.gap_count, 2, "two periods so far");
+
+    mqvpn_reorder_rx_tick(rx, 34999);
+    ASSERT_EQ_INT(rec.n, 3, "nothing released before the deadline");
+    mqvpn_reorder_rx_tick(rx, 35000);
+    ASSERT_EQ_INT(rec.n, 5, "one timeout released seq4 and seq7");
+    ASSERT_EQ_INT(rec.tags[3], 5, "seq4 (tag5) then");
+    ASSERT_EQ_INT(rec.tags[4], 8, "seq7 (tag8), ascending");
+    ASSERT_EQ_INT(f->expected, 8, "expected jumped to the mark");
+    ASSERT_EQ_INT(f->stats.gap_timeout_count, 1, "ONE timeout for two gaps");
+    ASSERT_TRUE(!f->gap_timer_active, "buffer drained → timer off");
+    ASSERT_EQ_INT(f->stats.gap_count, 2, "no third period (empty)");
+    ASSERT_TRUE(invariant_holds(rx), "invariant after folding timeout");
+    ASSERT_TRUE(accounting_holds_33(f), "accounting after folding timeout");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_timeout_spares_gap_opened_after_arm(void)
+{
+    /* §12.1/§12.2: a gap that opened AFTER the timer armed is above the mark;
+     * the timeout does not touch it — it is deferred to the next period and can
+     * still be filled. */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.max_wait_ms = 30;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+
+    size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000); /* expected=1 */
+    n = build_reorder_dgram(buf, 0, 2, 3, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 2000); /* arms at 2000, reord=3 */
+    n = build_reorder_dgram(buf, 0, 5, 6, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 10000); /* gap at 3,4 opened late; rx_next=6 */
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+
+    /* timeout at 32000: skips gap 1, delivers seq2; seq5 stays buffered;
+     * new period reord=6, deadline 62000. */
+    mqvpn_reorder_rx_tick(rx, 32000);
+    ASSERT_EQ_INT(rec.n, 2, "only seq2 released (seq5 above the mark)");
+    ASSERT_EQ_INT(rec.tags[1], 3, "seq2 (tag3)");
+    ASSERT_TRUE(ring_contains(&f->buffer, 5), "seq5 still waiting");
+    ASSERT_EQ_INT(f->expected, 3, "expected at the late gap");
+    ASSERT_TRUE(f->gap_timer_active, "restarted");
+    ASSERT_EQ_INT((long long)f->gap_deadline_us, 32000 + 30000, "new deadline");
+    ASSERT_EQ_INT((long long)f->reord, 6, "new mark");
+    ASSERT_EQ_INT(f->stats.gap_timeout_count, 1, "one timeout");
+    ASSERT_EQ_INT(f->stats.gap_count, 2, "second period");
+
+    /* the late gap fills in time: 3, 4 arrive → drain 5 → cohort done, empty. */
+    n = build_reorder_dgram(buf, 0, 3, 4, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 40000);
+    n = build_reorder_dgram(buf, 0, 4, 5, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 40001);
+    ASSERT_EQ_INT(rec.n, 5, "3, 4, 5 delivered");
+    ASSERT_EQ_INT(rec.tags[4], 6, "seq5 (tag6) last, in order");
+    ASSERT_EQ_INT(f->stats.gap_filled_count, 1, "second period ended by fill");
+    ASSERT_TRUE(!f->gap_timer_active, "timer off (empty)");
+    ASSERT_TRUE(invariant_holds(rx), "invariant after late fill");
+    ASSERT_TRUE(accounting_holds_33(f), "accounting after late fill");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_residence_bounded_2w(void)
+{
+    /* §12.2 bound: an adversary that keeps opening gaps and never fills them
+     * cannot hold any packet longer than 2W (+ tick). Each ahead packet is
+     * either in the current cohort (released at its deadline, <= W after
+     * arming) or deferred once (released at the next deadline, <= 2W after it
+     * arrived). seq2 and seq4 arrive at the same instant: seq2 arms (reord=3),
+     * seq4 is outside the cohort and is released exactly 2W later — the
+     * equality case. Every admitted packet must be delivered: residence_max
+     * alone would miss a packet that never leaves the buffer. */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.max_wait_ms = 30; /* W = 30000 us */
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+    const uint64_t W = 30000;
+
+    size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 0); /* expected=1 */
+    n = build_reorder_dgram(buf, 0, 2, 3, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000); /* arms at 1000, reord=3 */
+    n = build_reorder_dgram(buf, 0, 4, 5, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000); /* same instant, above the mark */
+    int sent = 3;
+
+    /* every 5 ms: open one more gap (even seqs only), then tick. Deadlines at
+     * 31000, 61000, 91000 coincide with ticks (k = 6, 12, 18). */
+    for (uint64_t k = 1; k <= 20; k++) {
+        uint64_t t = 1000 + k * 5000;
+        uint64_t seq = 2 * k + 4;
+        n = build_reorder_dgram(buf, 0, seq, (uint16_t)(seq + 1), 5000, 443, 100);
+        mqvpn_reorder_rx_on_packet(rx, buf, n, t);
+        sent++;
+        mqvpn_reorder_rx_tick(rx, t);
+        ASSERT_TRUE(invariant_holds(rx), "invariant each step");
+    }
+    /* no more arrivals: let the remaining periods expire at their deadlines. */
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    int guard = 0;
+    while (f->gap_timer_active && guard++ < 8) {
+        mqvpn_reorder_rx_tick(rx, f->gap_deadline_us);
+    }
+
+    ASSERT_EQ_INT(rec.n, sent, "every admitted packet was delivered");
+    ASSERT_TRUE(ring_empty(&f->buffer), "buffer empty at the end");
+    ASSERT_TRUE(!f->gap_timer_active, "timer off at the end");
+    ASSERT_EQ_INT((long long)rx->pool_bytes_used, 0, "pool fully released");
+    ASSERT_TRUE(f->stats.residence_max_us <= 2 * W, "no packet held longer than 2W");
+    ASSERT_EQ_INT((long long)f->stats.residence_max_us, (long long)(2 * W),
+                  "the same-instant packet hit exactly 2W");
+    ASSERT_EQ_INT(f->stats.gap_filled_count, 0, "nothing was ever filled");
+    ASSERT_TRUE(invariant_holds(rx), "invariant at the end");
+    ASSERT_TRUE(accounting_holds_33(f), "accounting at the end");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static void
+test_rx_reset_clears_rx_next(void)
+{
+    /* §11.6 + §12.2: FLOW_RESET starts a new seq epoch that can be far below
+     * the old one; rx_next must restart from 0 or the first mark of the new
+     * epoch would be the OLD epoch's rx_next (and reord-1 would not be
+     * buffered). Asserted directly on reord: the counters cannot see it. */
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.max_wait_ms = 30;
+    c.reset_idle_grace_ms = 10000; /* 10s grace */
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+
+    /* epoch 1: 1000 (cold), 1002 (buffered, rx_next=1003), 1001 (fills → empty). */
+    size_t n = build_reorder_dgram(buf, 0, 1000, 1, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000000);
+    n = build_reorder_dgram(buf, 0, 1002, 3, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1001000);
+    n = build_reorder_dgram(buf, 0, 1001, 2, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1002000);
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_TRUE(!f->gap_timer_active, "epoch 1 drained");
+    ASSERT_EQ_INT((long long)f->rx_next, 1003, "stale rx_next from epoch 1");
+
+    /* epoch 2: FLOW_RESET seq 0 after the grace → honored; then seq 2 arms. */
+    n = build_reorder_dgram(buf, MQVPN_REORDER_FLAG_RESET, 0, 10, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1002000 + 20000000ULL);
+    ASSERT_EQ_INT(f->expected, 1, "new epoch expected=1");
+    ASSERT_EQ_INT((long long)f->rx_next, 0, "rx_next cleared by reset");
+    n = build_reorder_dgram(buf, 0, 2, 12, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1002000 + 20001000ULL);
+    ASSERT_TRUE(f->gap_timer_active, "armed in the new epoch");
+    ASSERT_EQ_INT((long long)f->reord, 3, "mark from the NEW epoch (seq 2 + 1)");
+    ASSERT_EQ_INT((long long)f->rx_next, 3, "rx_next from the new epoch");
+    ASSERT_TRUE(invariant_holds(rx), "invariant in the new epoch");
+    ASSERT_TRUE(accounting_holds_full(f), "accounting across the reset");
     mqvpn_reorder_rx_free(rx);
 }
 
@@ -1866,7 +2157,13 @@ main(void)
     test_rx_timeout_skip_rearms_when_nonempty();
     test_rx_anchored_timer_no_rearm();
     test_rx_overflow_flush_reclassify();
-    test_rx_overflow_partial_drain_anchored();
+    test_rx_overflow_ends_period_and_restarts();
+    test_rx_overflow_partial_keeps_period();
+    test_rx_filled_cohort_restarts();
+    test_rx_restart_timeout_folds_cohort();
+    test_rx_timeout_spares_gap_opened_after_arm();
+    test_rx_residence_bounded_2w();
+    test_rx_reset_clears_rx_next();
     test_rx_per_flow_limit_drop_when_empty();
     test_rx_pool_drop_when_empty();
     test_rx_overflow_does_not_halt();
