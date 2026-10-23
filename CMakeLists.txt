@@ -1175,6 +1175,25 @@ if(BUILD_TESTING)
         set_target_properties(test_control_socket PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
         add_test(NAME test_control_socket COMMAND test_control_socket)
+
+        # Management IPC connection layer (libevent). The listener is created by
+        # the test itself, so no platform listener source is needed.
+        add_executable(test_mgmt_conn tests/test_mgmt_conn.c src/platform/common/mgmt_conn.c
+            src/log.c third_party/yyjson/yyjson.c)
+        target_include_directories(test_mgmt_conn PRIVATE
+            ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/src/platform/common
+            ${CMAKE_SOURCE_DIR}/include
+        )
+        if(Libevent_FOUND)
+            target_link_libraries(test_mgmt_conn mqvpn_mgmt libevent::core libevent::extra)
+        else()
+            target_include_directories(test_mgmt_conn PRIVATE ${EVENT_INCLUDE_DIR})
+            target_link_libraries(test_mgmt_conn mqvpn_mgmt ${EVENT_LIB})
+        endif()
+        set_target_properties(test_mgmt_conn PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+        add_test(NAME test_mgmt_conn COMMAND test_mgmt_conn)
     endif()
 
     # libmqvpn public API test (links libmqvpn + xquic)
