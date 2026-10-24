@@ -273,7 +273,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake libevent-dev golang iptables conntrack clang iperf3 jq netcat-openbsd iproute2 curl python3 tcpdump
+          sudo apt-get install -y cmake libevent-dev golang iptables conntrack clang iperf3 jq netcat-openbsd iproute2 curl python3 tcpdump nftables ethtool
 
       - name: Compute xquic SHA
         id: xqsha
@@ -384,6 +384,24 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_killswitch_test.sh
+
+      - name: E2E PMTUD test, IPv4 underlay (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_pmtud_test.sh
+
+      - name: E2E PMTUD test, IPv6 underlay (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_pmtud_test.sh --ipv6
+
+      - name: E2E PMTUD test, two paths (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_pmtud_multipath_test.sh
 
       - name: E2E reconnect test (netns)
         env:
