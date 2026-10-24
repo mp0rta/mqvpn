@@ -30,6 +30,9 @@ typedef struct {
     uint64_t init_max_path_id; /* 0 = leave xquic default */
     int path_mtu;              /* 0 = MQVPN_MAX_PKT_OUT_SIZE, see mqvpn_pkt_out_size() */
     bool pmtud;                /* discover the path MTU, path_mtu sizes the cap */
+    /* local reorder on: the PMTUD start size leaves room for its header
+     * (MQVPN_REORDER_HDR_LEN), so IPv6 still gets 1280 */
+    bool reorder;
     uint64_t recv_rate_bytes_per_sec; /* 0 = no cap. Client-only: the
         builder hard-zeroes it for servers (a server-side conn-level cap
         would throttle client uplink). */

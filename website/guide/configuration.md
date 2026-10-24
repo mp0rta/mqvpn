@@ -454,7 +454,7 @@ IPv6 inside the tunnel requires room for a complete 1280-byte packet. With IPv6 
 
 With `PMTUD = true` on both ends, mqvpn finds the packet size the path carries instead of relying on a fixed one:
 
-- Packets start at the smallest size that still gives a 1280-byte inner MTU (IPv6's minimum): 1358 bytes on the path over IPv4, 1378 over IPv6.
+- Packets start at the smallest size that still gives a 1280-byte inner MTU (IPv6's minimum): 1358 bytes on the path over IPv4, 1378 over IPv6, and 8 bytes more with `[Reorder]` on, for its header.
 - If the path is smaller than that, mqvpn goes down to QUIC's minimum packet size (1200 bytes) and searches up from there, so an IPv4-only tunnel keeps working with a TUN MTU below 1280. A tunnel that carries IPv6 cannot: the client closes the connection with an error saying IPv6 needs an inner MTU of 1280.
 - Larger probe packets are sent at increasing sizes. A probe that gets through raises the packet size; a lost one only means it does not fit, and does not slow the connection down. The search takes a few round trips per size tried and stops within 4 bytes of the largest size that fits, at most the `PathMTU` size if one is set, or 1436 bytes (TUN MTU 1418).
 - The UDP sockets send with the Don't Fragment bit set, so packets are never fragmented on the way. Discovery does not need ICMP: it works on networks that filter it.

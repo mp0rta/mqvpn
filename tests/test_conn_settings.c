@@ -248,6 +248,28 @@ test_pmtud_sizes(void)
     /* the base size still gives IPv6 its 1280-byte inner MTU */
     ASSERT_EQ(MQVPN_PMTUD_BASE_PKT_OUT_SIZE - MQVPN_DGRAM_HEADROOM, 1280);
 
+    /* with reorder, the start size (also where xquic goes back to when a
+     * path shrinks) leaves room for its header, PathMTU still capping it */
+    static const struct {
+        int path_mtu;
+        size_t start;
+    } reorder_cases[] = {
+        {0, MQVPN_PMTUD_BASE_PKT_OUT_SIZE + MQVPN_REORDER_HDR_LEN},
+        {1280, 1200},
+        {1380, 1300}, /* between the two start sizes: the PathMTU size */
+        {1400, MQVPN_PMTUD_BASE_PKT_OUT_SIZE + MQVPN_REORDER_HDR_LEN},
+    };
+    in.reorder = true;
+    for (size_t i = 0; i < sizeof(reorder_cases) / sizeof(reorder_cases[0]); i++) {
+        in.path_mtu = reorder_cases[i].path_mtu;
+        for (int server = 0; server <= 1; server++) {
+            in.is_server = server;
+            mqvpn_build_conn_settings(&in, &cs);
+            ASSERT_EQ(cs.max_pkt_out_size, reorder_cases[i].start);
+        }
+    }
+    in.reorder = false;
+
     in.pmtud = false;
     in.is_server = false;
     in.path_mtu = 1500;

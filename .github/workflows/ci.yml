@@ -397,6 +397,12 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_pmtud_test.sh --ipv6
 
+      - name: E2E PMTUD test, IPv6 and reorder in the tunnel (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_pmtud_test.sh --inner-ipv6-reorder
+
       - name: E2E PMTUD test, two paths (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1

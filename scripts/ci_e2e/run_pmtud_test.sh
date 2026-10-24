@@ -17,7 +17,13 @@
 #
 # With --ipv6 the underlay between client and server is IPv6.
 #
-# Usage: sudo ./run_pmtud_test.sh [path-to-mqvpn] [--ipv6] [--log-level LEVEL]
+# With --inner-ipv6-reorder the tunnel also carries IPv6 and both ends turn
+# on reorder, whose 8-byte header the start size must leave room for: the
+# tunnel comes up, and in step 4 the link shrinks to the start size, the
+# smallest an IPv6 tunnel can use, instead of below it.
+#
+# Usage: sudo ./run_pmtud_test.sh [path-to-mqvpn] [--ipv6] [--inner-ipv6-reorder]
+#        [--log-level LEVEL]
 
 set -e
 
@@ -28,11 +34,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MQVPN=""
 LOG_LEVEL="info"
 IPV6=0
+INNER6=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --log-level) LOG_LEVEL="$2"; shift 2 ;;
         --ipv6) IPV6=1; shift ;;
+        --inner-ipv6-reorder) INNER6=1; shift ;;
         *) [ -z "$MQVPN" ] && MQVPN="$1"; shift ;;
     esac
 done
@@ -69,6 +77,19 @@ TUNNEL_IP="10.0.0.1"
 MID_MTU=1450
 SHRUNK_MTU=1400
 SMALL_MTU=$((1340 + OVERHEAD - 78)) # below the start size (1358 / 1378)
+TUNNEL_IP6="fd00:abcd::1"
+REORDER_HDR=8
+INNER_HDR=$((INNER6 * REORDER_HDR)) # what reorder takes from the TUN MTU
+# the link that carries packets of the start size and no larger: a TUN MTU
+# of 1280 plus the reorder header
+BASE_MTU=$((1280 + REORDER_HDR + OVERHEAD))
+if [ "$INNER6" -eq 1 ]; then
+    # every step is 40 bytes or more: a full packet without an ACK is 16
+    # bytes below the largest, and 8 more when its flow carries no reorder
+    # header (no [ReorderRule] here), so it still fits a link shrunk by less
+    SHRUNK_MTU=$((BASE_MTU + 40))
+    MID_MTU=$((SHRUNK_MTU + 50))
+fi
 
 SERVER_PID=""
 CLIENT_PID=""
@@ -104,6 +125,13 @@ for ns in "$NS_CLIENT" "$NS_ROUTER" "$NS_SERVER"; do
 done
 
 PSK=$("$MQVPN" --genkey 2>/dev/null)
+SERVER_EXTRA=()
+CLIENT_EXTRA=()
+if [ "$INNER6" -eq 1 ]; then
+    printf '[Reorder]\nEnabled = on\n' >"${WORK_DIR}/reorder.ini"
+    SERVER_EXTRA=(--subnet6 fd00:abcd::/112 --config "${WORK_DIR}/reorder.ini")
+    CLIENT_EXTRA=(--config "${WORK_DIR}/reorder.ini")
+fi
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
     -keyout "${WORK_DIR}/server.key" -out "${WORK_DIR}/server.crt" \
     -days 365 -nodes -subj "/CN=mqvpn-pmtud-test" 2>/dev/null
@@ -182,6 +210,7 @@ ip netns exec "$NS_SERVER" "$MQVPN" \
     --key "${WORK_DIR}/server.key" \
     --auth-key "$PSK" \
     --pmtud \
+    "${SERVER_EXTRA[@]}" \
     --log-level "$LOG_LEVEL" >"${WORK_DIR}/server.log" 2>&1 &
 SERVER_PID=$!
 sleep 2
@@ -198,6 +227,7 @@ ip netns exec "$NS_CLIENT" "$MQVPN" \
     --auth-key "$PSK" \
     --insecure \
     --pmtud \
+    "${CLIENT_EXTRA[@]}" \
     --log-level "$LOG_LEVEL" >"${WORK_DIR}/client.log" 2>&1 &
 CLIENT_PID=$!
 
@@ -222,12 +252,25 @@ for _ in $(seq 30); do
 done
 if ! ip netns exec "$NS_CLIENT" ping -c 2 -W 2 "$TUNNEL_IP" >/dev/null; then
     echo "FAIL: tunnel did not come up"
+    grep -E "IPv6 requires|ERR" "${WORK_DIR}/client.log" | head -5
     exit 1
 fi
 echo "PASS: tunnel up"
+if [ "$INNER6" -eq 1 ]; then
+    if ! grep -q "peer advertised mqvpn-reorder" "${WORK_DIR}/client.log"; then
+        echo "FAIL: reorder not negotiated"
+        exit 1
+    fi
+    if ! ip netns exec "$NS_CLIENT" ping -6 -c 2 -W 2 "$TUNNEL_IP6" >/dev/null; then
+        echo "FAIL: IPv6 through the tunnel with reorder"
+        grep -i "IPv6 requires" "${WORK_DIR}/client.log" || true
+        exit 1
+    fi
+    echo "PASS: IPv6 tunnel up with reorder"
+fi
 
 # ── 1. the TUN MTU grows to what the 1450-byte link carries ──
-max_mtu=$((MID_MTU - OVERHEAD))
+max_mtu=$((MID_MTU - OVERHEAD - INNER_HDR))
 mtu=0
 for _ in $(seq 20); do
     mtu=$(tun_mtu)
@@ -292,13 +335,54 @@ else
     cat "${WORK_DIR}/iperf2.txt"
     FAIL=1
 fi
-max_mtu=$((SHRUNK_MTU - OVERHEAD))
+max_mtu=$((SHRUNK_MTU - OVERHEAD - INNER_HDR))
 mtu=$(tun_mtu)
 if [ "$mtu" -ge 1280 ] && [ "$mtu" -le "$max_mtu" ]; then
     echo "PASS: TUN MTU went down to $mtu (link carries up to $max_mtu)"
 else
     echo "FAIL: TUN MTU $mtu after the shrink, expected 1280..$max_mtu"
     FAIL=1
+fi
+
+if [ "$INNER6" -eq 1 ]; then
+    # ── 4. the link shrinks to the start size: back to a TUN MTU of 1280 ──
+    ip netns exec "$NS_ROUTER" ip link set pm-r1 mtu "$BASE_MTU"
+    ip netns exec "$NS_SERVER" ip link set pm-s0 mtu "$BASE_MTU"
+    iperf_server 5203
+    if ip netns exec "$NS_CLIENT" iperf3 -c "$TUNNEL_IP" -p 5203 -t 5 >"${WORK_DIR}/iperf3.txt" 2>&1; then
+        echo "PASS: TCP transfer with the link at the start size ($BASE_MTU)"
+    else
+        echo "FAIL: TCP transfer with the link at the start size ($BASE_MTU)"
+        cat "${WORK_DIR}/iperf3.txt"
+        FAIL=1
+    fi
+    for _ in $(seq 20); do
+        mtu=$(tun_mtu)
+        [ "$mtu" -eq 1280 ] && break
+        sleep 0.5
+    done
+    if [ "$mtu" -eq 1280 ]; then
+        echo "PASS: TUN MTU back to 1280"
+    else
+        echo "FAIL: TUN MTU $mtu with the link at the start size, expected 1280"
+        FAIL=1
+    fi
+    if ip netns exec "$NS_CLIENT" ping -6 -c 3 -W 2 -M do -s $((1280 - 48)) "$TUNNEL_IP6" >/dev/null; then
+        echo "PASS: DF IPv6 ping of 1280 bytes through the tunnel"
+    else
+        echo "FAIL: DF IPv6 ping of 1280 bytes through the tunnel"
+        FAIL=1
+    fi
+    if grep -q "IPv6 requires" "${WORK_DIR}/client.log"; then
+        echo "FAIL: client closed the IPv6 tunnel"
+        FAIL=1
+    fi
+    if [ "$FAIL" -ne 0 ]; then
+        echo "=== PMTUD test FAILED ==="
+        exit 1
+    fi
+    echo "=== PMTUD test PASSED ($([ "$IPV6" -eq 1 ] && echo IPv6 || echo IPv4) underlay, IPv6 + reorder inside) ==="
+    exit 0
 fi
 
 # ── 4. the link shrinks below the start size ──
