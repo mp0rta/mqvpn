@@ -187,6 +187,7 @@ enum {
     PLATFORM_PATH_STEP_SOCKET = 1,
     PLATFORM_PATH_STEP_NONBLOCK,
     PLATFORM_PATH_STEP_BIND,
+    PLATFORM_PATH_STEP_DONTFRAG, /* PMTUD on, and DF could not be set */
 };
 
 /* A non-blocking UDP socket bound to the af wildcard (ephemeral port), or -1

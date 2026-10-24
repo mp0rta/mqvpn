@@ -700,8 +700,11 @@ MQVPN_API int mqvpn_config_set_path_mtu(mqvpn_config_t *cfg, int mtu);
 
 /* Discover the path MTU (both ends must enable it): packets start at a size
  * any path carries and grow while larger probes are acknowledged, up to the
- * PathMTU size (or the default cap). UDP sockets are sent with DF set, so
- * nothing is fragmented on the way. Default 0 (off). */
+ * PathMTU size (or the default cap). Default 0 (off).
+ * The UDP sockets must send with DF set, so that a probe that does not fit
+ * is lost rather than fragmented: the bundled binds and platform layers do
+ * it (mqvpn_bind_posix_opts_t / mqvpn_bind_winsock_opts_t dont_fragment); a
+ * caller with its own transport must set DF on its sockets itself. */
 MQVPN_API int mqvpn_config_set_pmtud(mqvpn_config_t *cfg, int enable);
 
 /* ─── Flow-aware reorder shim config (§16.1) ───

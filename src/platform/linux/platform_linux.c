@@ -1236,9 +1236,13 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     sp.udp_fd = svr_create_udp_socket(cfg->listen_addr, cfg->listen_port, &local_addr,
                                       &local_addrlen);
     if (sp.udp_fd < 0) goto cleanup;
-    if (cfg->pmtud && mqvpn_socket_set_dontfrag(sp.udp_fd, local_addr.ss_family) < 0)
-        LOG_WRN("cannot set DF on the UDP socket: %s, PMTUD probes may be fragmented",
+    /* without DF a fragmented probe could be acknowledged and raise the size
+     * beyond what the path carries */
+    if (cfg->pmtud && mqvpn_socket_set_dontfrag(sp.udp_fd, local_addr.ss_family) < 0) {
+        LOG_ERR("cannot set DF on the UDP socket, which PMTUD needs: %s",
                 strerror(errno));
+        goto cleanup;
+    }
 
     mqvpn_bind_posix_opts_t bopts = {0};
     bopts.struct_size = sizeof(bopts);

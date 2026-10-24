@@ -169,14 +169,14 @@ send_batch_mmsg(int fd, const struct iovec *iov, unsigned int cnt,
  * pre-GSO delivery behavior. Only run > 1 sends classify (see the caller):
  * a cmsg-less EMSGSIZE stays a plain hard error.
  *
- * Deliberate stopgap, not the end state: the fallback delivers by local IP
+ * Without PMTUD this is the end state: the fallback delivers by local IP
  * fragmentation (Linux default IP_PMTUDISC_WANT), a pre-existing RFC 9000
  * §14 deviation this module inherits rather than introduces, and one that
- * still blackholes on fragment-dropping middleboxes. The EMSGSIZE consumed
- * here is exactly the signal a PLPMTU reduction would want; routing it to
- * the QUIC layer requires a PLPMTUD that can lower max_pkt_out_size, which
- * xquic does not have yet (issue #7). When that lands, packets shrink
- * below the route PMTU and this classification simply stops firing. */
+ * still blackholes on fragment-dropping middleboxes. With PMTUD on, the
+ * sockets have DF set, an EMSGSIZE is a lost packet (see the callers), and
+ * xquic lowers its packet size when larger ones stop getting through, so
+ * packets shrink below the route PMTU and this classification stops
+ * firing. */
 static int
 gso_class_error(int e)
 {
