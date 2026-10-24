@@ -880,6 +880,9 @@ MQVPN_API void mqvpn_client_destroy(mqvpn_client_t *client);
  * state_changed) may call them normally — e.g. cancelling further retries
  * via disconnect() from reconnect_scheduled is supported. */
 MQVPN_API int mqvpn_client_connect(mqvpn_client_t *client);
+/* 1 when the client's config enables PMTUD: a platform that opens its own
+ * path sockets sets DF on them (mqvpn_bind_posix_opts_t.dont_fragment). */
+MQVPN_API int mqvpn_client_pmtud_enabled(const mqvpn_client_t *client);
 MQVPN_API int mqvpn_client_disconnect(mqvpn_client_t *client);
 
 /*

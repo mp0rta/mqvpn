@@ -4170,6 +4170,12 @@ tun_send_datagram(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_
 }
 
 int
+mqvpn_client_pmtud_enabled(const mqvpn_client_t *client)
+{
+    return client && client->config.pmtud ? 1 : 0;
+}
+
+int
 mqvpn_client_on_tun_packet(mqvpn_client_t *c, const uint8_t *pkt, size_t len)
 {
     if (!c || !pkt || len == 0) return MQVPN_ERR_INVALID_ARG;

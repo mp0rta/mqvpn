@@ -195,6 +195,42 @@ test_socket_buffers_untouched_and_explicit(void)
 }
 
 static void
+test_dont_fragment_only_when_asked(void)
+{
+#if defined(__linux__)
+    int fd = udp_socket(NULL);
+    int v = 0;
+    socklen_t ol = sizeof(v);
+    CHECK(getsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &v, &ol) == 0);
+    const int before = v;
+    CHECK(before != IP_PMTUDISC_PROBE);
+
+    /* off by default, and a caller built before the field never asks */
+    mqvpn_bind_posix_opts_t o = opts_default();
+    void *ctx = NULL;
+    CHECK(mqvpn_bind_posix_path_new(fd, &o, &ctx) == MQVPN_OK);
+    ol = sizeof(v);
+    CHECK(getsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &v, &ol) == 0 && v == before);
+    mqvpn_bind_posix_path_free(ctx);
+
+    o.dont_fragment = 1;
+    o.struct_size = (uint32_t)offsetof(mqvpn_bind_posix_opts_t, dont_fragment);
+    CHECK(mqvpn_bind_posix_path_new(fd, &o, &ctx) == MQVPN_OK);
+    ol = sizeof(v);
+    CHECK(getsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &v, &ol) == 0 && v == before);
+    mqvpn_bind_posix_path_free(ctx);
+
+    o.struct_size = sizeof(o);
+    CHECK(mqvpn_bind_posix_path_new(fd, &o, &ctx) == MQVPN_OK);
+    ol = sizeof(v);
+    CHECK(getsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &v, &ol) == 0);
+    CHECK(v == IP_PMTUDISC_PROBE);
+    mqvpn_bind_posix_path_free(ctx);
+    close(fd);
+#endif
+}
+
+static void
 test_send_one_and_burst_reach_the_peer(void)
 {
     struct sockaddr_in dst;
@@ -400,6 +436,7 @@ main(void)
 {
     test_ctor_rejects_bad_args_and_leaves_fd_open();
     test_socket_buffers_untouched_and_explicit();
+    test_dont_fragment_only_when_asked();
     test_send_one_and_burst_reach_the_peer();
     test_hard_send_error_is_failed_and_uncounted();
     test_drain_delivers_counts_and_honours_budget();

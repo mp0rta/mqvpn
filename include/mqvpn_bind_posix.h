@@ -37,6 +37,10 @@ typedef struct {
     /* Optional label used in the bind's own log lines (ifname, "server").
      * Empty = the fd number is used. */
     char tag[16];
+    /* Appended under ABI 3. Send with DF set and never fragment locally
+     * (PMTUD needs it: a probe that does not fit must be lost). Best effort:
+     * a failure is logged at WARN and construction continues. */
+    int dont_fragment;
 } mqvpn_bind_posix_opts_t;
 
 /* Additive growth under struct_size, like every public struct. The embedded

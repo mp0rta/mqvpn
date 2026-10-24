@@ -11,6 +11,7 @@
 #include "bind/posix_offload.h"
 #include "mqvpn_internal.h" /* mqvpn_tx_batch_enabled — the single batching rule */
 #include "log.h"
+#include "compat/socket_compat.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -137,6 +138,7 @@ bind_common_init(bind_common_t *c, int fd, const mqvpn_bind_posix_opts_t *opts_i
     if (OPT_HAS(udp_gro)) o.udp_gro = opts_in->udp_gro;
     if (OPT_HAS(socket_buf_bytes)) o.socket_buf_bytes = opts_in->socket_buf_bytes;
     if (OPT_HAS(tag)) memcpy(o.tag, opts_in->tag, sizeof(o.tag));
+    if (OPT_HAS(dont_fragment)) o.dont_fragment = opts_in->dont_fragment;
 #undef OPT_HAS
 
     c->fd = fd;
@@ -146,6 +148,13 @@ bind_common_init(bind_common_t *c, int fd, const mqvpn_bind_posix_opts_t *opts_i
     const char *label = bind_label(c, lbl, sizeof(lbl));
 
     bind_apply_sockbuf(fd, o.socket_buf_bytes, label);
+    if (o.dont_fragment) {
+        struct sockaddr_storage ss;
+        socklen_t ss_len = sizeof(ss);
+        if (getsockname(fd, (struct sockaddr *)&ss, &ss_len) < 0 ||
+            mqvpn_socket_set_dontfrag(fd, ss.ss_family) < 0)
+            LOG_WRN("bind-posix: cannot set DF on %s: %s", label, strerror(errno));
+    }
 #if defined(__linux__)
     if (o.udp_gro) {
         if (mqvpn_udp_gro_enable(fd) == 0)

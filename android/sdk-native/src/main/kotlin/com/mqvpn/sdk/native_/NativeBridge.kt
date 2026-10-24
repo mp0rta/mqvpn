@@ -88,6 +88,12 @@ object NativeBridge {
     /** mqvpn_config_set_killswitch_hint(cfg, enable) */
     external fun configSetKillswitchHint(cfg: Long, enable: Boolean): Int
 
+    /** mqvpn_config_set_path_mtu(cfg, mtu): 0 or 1280-9000 */
+    external fun configSetPathMtu(cfg: Long, mtu: Int): Int
+
+    /** mqvpn_config_set_pmtud(cfg, enable) */
+    external fun configSetPmtud(cfg: Long, enable: Boolean): Int
+
     /** mqvpn_config_set_reorder_enabled(cfg, mode: 0=OFF, 1=ON) */
     external fun configSetReorderEnabled(cfg: Long, mode: Int): Int
 
