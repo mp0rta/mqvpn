@@ -88,6 +88,11 @@ mqvpn_socket_set_dontfrag(int fd, int af)
     int v = IP_PMTUDISC_PROBE;
     return setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &v, sizeof(v));
 #elif defined(__APPLE__)
+/* <netinet6/in6.h> declares it only under __APPLE_USE_RFC_3542, which must
+ * come before the first include of <netinet/in.h> in each file */
+#  ifndef IPV6_DONTFRAG
+#    define IPV6_DONTFRAG 62
+#  endif
     int on = 1;
     if (af == AF_INET6)
         return setsockopt(fd, IPPROTO_IPV6, IPV6_DONTFRAG, &on, sizeof(on));
