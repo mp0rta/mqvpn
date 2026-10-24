@@ -7,8 +7,10 @@
 # server side of each link is where the MTU shrinks: larger frames are
 # dropped there without any ICMP error. During one transfer:
 #   1. both paths carry 1500: the TUN MTU grows to what that fits;
-#   2. path B shrinks to 1400: the connection uses the smaller size;
-#   3. path B shrinks to 1340, below the start size: the size goes down to
+#   2. path B goes down and comes back carrying only 1400: a smaller path
+#      added once the connection has grown validates, starts from the start
+#      size, and the connection uses the smaller size;
+#   3. path B shrinks to 1330, below the start size: the size goes down to
 #      what B still carries and the transfer keeps going on both paths.
 #
 # Usage: sudo ./run_pmtud_multipath_test.sh [path-to-mqvpn] [--log-level LEVEL]
@@ -118,6 +120,12 @@ done
 
 ip netns exec "$NS_CLIENT" ping -c 1 -W 2 10.110.1.2 >/dev/null
 ip netns exec "$NS_CLIENT" ping -c 1 -W 2 10.110.2.2 >/dev/null
+# the server address over path B too, as a second uplink would have it: a
+# path is only re-added when it has a route to the server
+b_route() {
+    ip netns exec "$NS_CLIENT" ip route replace 10.110.1.2/32 dev pmm-bc metric 200
+}
+b_route
 
 ip netns exec "$NS_SERVER" "$MQVPN" \
     --mode server \
@@ -171,7 +179,7 @@ for _ in $(seq 20); do
     ip netns exec "$NS_SERVER" ss -ltn "sport = :5201" | grep -q LISTEN && break
     sleep 0.2
 done
-timeout 40 ip netns exec "$NS_CLIENT" iperf3 -c "$TUNNEL_IP" -p 5201 -t 18 -i 1 \
+timeout 50 ip netns exec "$NS_CLIENT" iperf3 -c "$TUNNEL_IP" -p 5201 -t 24 -i 1 \
     >"${WORK_DIR}/iperf.txt" 2>&1 &
 IPERF_PID=$!
 
@@ -186,32 +194,45 @@ else
     FAIL=1
 fi
 
-# ── 2. path B shrinks to 1400 ──
+# ── 2. path B comes back as a new path, carrying only 1400 ──
+ip netns exec "$NS_CLIENT" ip link set pmm-bc down
+sleep 2
 ip netns exec "$NS_SERVER" ip link set pmm-bs mtu 1400
-sleep 5
+ip netns exec "$NS_CLIENT" ip link set pmm-bc up
+b_route
+sleep 6
+b0=$(rx_bytes b)
+sleep 2
+b1=$(rx_bytes b)
 max_mtu=$((1400 + SLACK - OVERHEAD))
 mtu=$(tun_mtu)
 if [ "$mtu" -ge 1280 ] && [ "$mtu" -le "$max_mtu" ]; then
-    echo "PASS: TUN MTU went down to $mtu with path B at 1400 (up to $max_mtu)"
+    echo "PASS: TUN MTU went down to $mtu with path B added at 1400 (up to $max_mtu)"
 else
-    echo "FAIL: TUN MTU $mtu with path B at 1400, expected 1280..$max_mtu"
+    echo "FAIL: TUN MTU $mtu with path B added at 1400, expected 1280..$max_mtu"
+    FAIL=1
+fi
+if [ $((b1 - b0)) -gt 50000 ]; then
+    echo "PASS: the added path carries data ($(((b1 - b0) / 1000)) kB in 2 s)"
+else
+    echo "FAIL: the added path carries no data ($(((b1 - b0) / 1000)) kB in 2 s)"
     FAIL=1
 fi
 
 # ── 3. path B shrinks below the start size ──
-ip netns exec "$NS_SERVER" ip link set pmm-bs mtu 1340
+ip netns exec "$NS_SERVER" ip link set pmm-bs mtu 1330
 sleep 3
 a0=$(rx_bytes a)
 b0=$(rx_bytes b)
 sleep 3
 a1=$(rx_bytes a)
 b1=$(rx_bytes b)
-max_mtu=$((1340 + SLACK - OVERHEAD))
+max_mtu=$((1330 + SLACK - OVERHEAD))
 mtu=$(tun_mtu)
 if [ "$mtu" -ge 1150 ] && [ "$mtu" -le "$max_mtu" ]; then
-    echo "PASS: TUN MTU went down to $mtu with path B at 1340 (up to $max_mtu)"
+    echo "PASS: TUN MTU went down to $mtu with path B at 1330 (up to $max_mtu)"
 else
-    echo "FAIL: TUN MTU $mtu with path B at 1340, expected 1150..$max_mtu"
+    echo "FAIL: TUN MTU $mtu with path B at 1330, expected 1150..$max_mtu"
     FAIL=1
 fi
 # data keeps flowing, and path B is still used: how much it gets is up to
