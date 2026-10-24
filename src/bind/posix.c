@@ -280,22 +280,25 @@ bind_send(bind_common_t *c, int *gso_disabled, int *warned, const mqvpn_datagram
 typedef void (*bind_deliver_fn)(void *arg, const uint8_t *pkt, size_t len,
                                 const struct sockaddr *peer, socklen_t peer_len);
 
-/* One receive; deliver == NULL drains without delivering. Returns 1/0/-1 per
- * the header contract and reports the delivered-datagram count for the
- * caller's budget accounting. Truncated aggregates are dropped (counted as
- * one unit of work, delivered 0) exactly as the platform loop did. */
+/* One receive into buf (BIND_POSIX_RX_BUF bytes); deliver == NULL drains
+ * without delivering. Returns 1/0/-1 per the header contract and reports the
+ * delivered-datagram count for the caller's budget accounting. Truncated
+ * aggregates are dropped (counted as one unit of work, delivered 0) exactly
+ * as the platform loop did. The caller owns buf so that a drain loop reserves
+ * the 64 KiB once, not once per receive (with -fstack-clash-protection each
+ * reservation writes to all 16 of its pages). */
 static int
-bind_recv_one(bind_common_t *c, bind_deliver_fn deliver, void *arg, unsigned *delivered)
+bind_recv_one(bind_common_t *c, uint8_t *buf, bind_deliver_fn deliver, void *arg,
+              unsigned *delivered)
 {
-    uint8_t buf[BIND_POSIX_RX_BUF];
     struct sockaddr_storage peer;
     socklen_t peer_len = sizeof(peer);
     size_t seg = 0;
     ssize_t n;
     *delivered = 0;
 #if defined(__linux__)
-    // codeql[cpp/uncontrolled-allocation-size] stack buffer bounded by sizeof(buf)
-    n = mqvpn_udp_recv_segmented(c->fd, buf, sizeof(buf), (struct sockaddr *)&peer,
+    // codeql[cpp/uncontrolled-allocation-size] caller buffer of BIND_POSIX_RX_BUF bytes
+    n = mqvpn_udp_recv_segmented(c->fd, buf, BIND_POSIX_RX_BUF, (struct sockaddr *)&peer,
                                  &peer_len, &seg);
     if (n == MQVPN_RECV_DROP) {
         char dlbl[32];
@@ -305,8 +308,8 @@ bind_recv_one(bind_common_t *c, bind_deliver_fn deliver, void *arg, unsigned *de
     }
 #else
     do {
-        n = recvfrom(c->fd, buf, sizeof(buf), MSG_DONTWAIT, (struct sockaddr *)&peer,
-                     &peer_len);
+        n = recvfrom(c->fd, buf, BIND_POSIX_RX_BUF, MSG_DONTWAIT,
+                     (struct sockaddr *)&peer, &peer_len);
     } while (n < 0 && errno == EINTR);
 #endif
     if (n < 0) return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
@@ -327,10 +330,11 @@ bind_recv_one(bind_common_t *c, bind_deliver_fn deliver, void *arg, unsigned *de
 static int
 bind_drain(bind_common_t *c, bind_deliver_fn deliver, void *arg, int budget)
 {
+    uint8_t buf[BIND_POSIX_RX_BUF];
     int receives = 0;
     while (budget > 0) {
         unsigned delivered = 0;
-        int r = bind_recv_one(c, deliver, arg, &delivered);
+        int r = bind_recv_one(c, buf, deliver, arg, &delivered);
         if (r < 0) return -1;
         if (r == 0) break;
         receives++;
@@ -452,8 +456,9 @@ mqvpn_bind_posix_path_recv_one(void *vctx, mqvpn_client_t *client,
     bind_path_ctx_t *ctx = (bind_path_ctx_t *)vctx;
     if (!ctx || !client) return -1;
     path_deliver_arg_t a = {client, handle};
+    uint8_t buf[BIND_POSIX_RX_BUF];
     unsigned delivered;
-    return bind_recv_one(&ctx->c, handle >= 0 ? path_deliver : NULL, &a, &delivered);
+    return bind_recv_one(&ctx->c, buf, handle >= 0 ? path_deliver : NULL, &a, &delivered);
 }
 
 int
@@ -660,8 +665,9 @@ mqvpn_bind_posix_server_recv_one(void *vctx, mqvpn_server_t *server)
 {
     bind_server_ctx_t *s = (bind_server_ctx_t *)vctx;
     if (!s || !server) return -1;
+    uint8_t buf[BIND_POSIX_RX_BUF];
     unsigned delivered;
-    return bind_recv_one(&s->c, server_deliver, server, &delivered);
+    return bind_recv_one(&s->c, buf, server_deliver, server, &delivered);
 }
 
 int
