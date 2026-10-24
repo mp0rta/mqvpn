@@ -34,7 +34,8 @@ iv(size_t len)
 }
 
 /* --- seam control -------------------------------------------------- */
-static int seam_fail_call; /* 1-based syscall index to fail; 0 = never */
+static int seam_fail_call;  /* 1-based syscall index to fail; 0 = never */
+static int seam_fail_call2; /* a second one, same errno */
 static int seam_fail_errno;
 static int seam_mmsg_partial; /* if >0, sendmmsg reports only this many */
 static int seam_calls;
@@ -72,7 +73,7 @@ mqvpn_seam_sendmsg(int fd, const struct msghdr *msg, int flags)
         assert(seam_last_seg == msg->msg_iov[0].iov_len);
         seam_last_was_gso = 1;
     }
-    if (seam_fail_call == seam_calls) {
+    if (seam_fail_call == seam_calls || seam_fail_call2 == seam_calls) {
         errno = seam_fail_errno;
         return -1;
     }
@@ -115,7 +116,7 @@ static void
 seam_reset(void)
 {
     memset(seam_ops, 0, sizeof(seam_ops));
-    seam_fail_call = seam_fail_errno = seam_mmsg_partial = 0;
+    seam_fail_call = seam_fail_call2 = seam_fail_errno = seam_mmsg_partial = 0;
     seam_calls = seam_last_was_gso = 0;
     seam_last_seg = 0;
     seam_bytes = 0;
@@ -358,7 +359,9 @@ test_gso_error_emsgsize_resends(void)
      * the route's cached PMTU, while the same datagrams without the cmsg
      * are locally fragmented and delivered. Without this classification the
      * engine retried the failing burst forever (uplink collapsed to ~1
-     * Mbps); with it, the sticky sendmmsg fallback restores delivery. */
+     * Mbps); with it, the sticky sendmmsg fallback restores delivery. The
+     * failed run is resent one datagram at a time: all of them get through,
+     * so it was GSO that failed. */
     seam_reset();
     struct iovec iov[4] = {iv(1400), iv(1400), iv(1400), iv(1400)};
     struct sockaddr_in peer;
@@ -373,10 +376,61 @@ test_gso_error_emsgsize_resends(void)
                                      &sticky, &tx);
     assert(r == 4);
     assert(sticky == EMSGSIZE);
-    assert(seam_ops[0] == 'm' && seam_ops[1] == 'M');
-    assert(tx.sends == 1);
+    assert(strcmp(seam_ops, "mmmmm") == 0);
+    assert(tx.sends == 4);
     assert(tx.datagrams == 4);
     printf("test_gso_error_emsgsize_resends OK\n");
+}
+
+static void
+test_gso_error_emsgsize_df_drops(void)
+{
+    /* With DF set (PMTUD), the run fails because one datagram, a probe, is
+     * larger than the interface allows. Sent one by one, that datagram
+     * fails alone: it is dropped (counted as sent, a lost packet for QUIC),
+     * the other goes out, and GSO stays on. */
+    seam_reset();
+    struct iovec iov[2] = {iv(1500), iv(1400)};
+    struct sockaddr_in peer;
+    memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(4433);
+    int sticky = 0;
+    mqvpn_tx_counters_t tx = {0};
+    seam_fail_call = 1;  /* the GSO run */
+    seam_fail_call2 = 2; /* the 1500-byte datagram alone */
+    seam_fail_errno = EMSGSIZE;
+    ssize_t r = mqvpn_udp_send_batch(3, iov, 2, (struct sockaddr *)&peer, sizeof peer, 1,
+                                     &sticky, &tx);
+    assert(r == 2);
+    assert(sticky == 0);
+    assert(strcmp(seam_ops, "mmm") == 0);
+    assert(tx.sends == 1);
+    assert(tx.datagrams == 1);
+    assert(tx.bytes == 1400u);
+    printf("test_gso_error_emsgsize_df_drops OK\n");
+}
+
+static void
+test_single_emsgsize_drops(void)
+{
+    /* a single datagram too large for the interface with DF set: dropped,
+     * not a send error that would close the connection */
+    seam_reset();
+    struct iovec iov[2] = {iv(1500), iv(1400)};
+    struct sockaddr_in peer;
+    memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(4433);
+    int sticky = 0;
+    mqvpn_tx_counters_t tx = {0};
+    seam_fail_call = 1;
+    seam_fail_errno = EMSGSIZE;
+    ssize_t r = mqvpn_udp_send_batch(3, iov, 2, (struct sockaddr *)&peer, sizeof peer, 0,
+                                     &sticky, &tx);
+    assert(r == 1);
+    assert(sticky == 0);
+    printf("test_single_emsgsize_drops OK\n");
 }
 
 static void
@@ -1018,6 +1072,8 @@ main(void)
     test_gso_error_einval_resends();
     test_gso_error_enotsup_resends();
     test_gso_error_emsgsize_resends();
+    test_gso_error_emsgsize_df_drops();
+    test_single_emsgsize_drops();
     test_gso_error_after_progress_stops();
     test_eintr_retries();
     test_fallback_eintr_retries();

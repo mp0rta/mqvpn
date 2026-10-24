@@ -120,6 +120,7 @@ mqvpn --mode client|server [options]
   --cc ALGO              Congestion control: bbr2|bbr|cubic|none (default: bbr2)
   --mtu N                TUN MTU (1280-9000, default: auto)
   --path-mtu N           Underlay MTU to size QUIC packets for (1280-9000, default: 0)
+  --pmtud                Discover the path MTU (both ends); --path-mtu is the upper limit
   --max-clients N        Max concurrent clients (server, default: 64)
   --control-port PORT    TCP port for control API (server)
   --control-addr ADDR    Bind address for control API (default: 127.0.0.1)

@@ -37,6 +37,10 @@ typedef struct {
     /* Optional label used in the bind's own log lines (ifname, "server").
      * Empty = the fd number is used. */
     char tag[16];
+    /* Appended under ABI 3. Send with DF set and never fragment locally
+     * (PMTUD needs it: a probe that does not fit must be lost). When DF
+     * cannot be set, construction fails with MQVPN_ERR_INVALID_STATE. */
+    int dont_fragment;
 } mqvpn_bind_posix_opts_t;
 
 /* Additive growth under struct_size, like every public struct. The embedded
@@ -53,7 +57,8 @@ typedef struct {
  * Constructors copy the recognised prefix of *opts (min(struct_size,
  * sizeof)) and never retain the pointer. Returns MQVPN_OK and writes
  * *out_ctx; MQVPN_ERR_INVALID_ARG (fd < 0, opts/out_ctx NULL, struct_size not
- * covering udp_gso); MQVPN_ERR_NO_MEMORY. On failure *out_ctx is untouched
+ * covering udp_gso); MQVPN_ERR_NO_MEMORY; MQVPN_ERR_INVALID_STATE (dont_fragment
+ * set and DF cannot be set). On failure *out_ctx is untouched
  * and the fd is left exactly as it was — it is never closed by this module.
  * A NULL ctx can therefore never mean "failed" (NULL is a legal ctx for
  * generic transports). GRO unsupported is NOT a failure: construction

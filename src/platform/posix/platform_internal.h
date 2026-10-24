@@ -84,6 +84,7 @@ struct platform_ctx {
     int routing_configured;
     int routing6_configured;
     int manage_routes; /* 1=run setup_routes/cleanup_routes (default 1) */
+    int pmtud;         /* 1=PMTUD: path sockets send with DF set */
 #if defined(__linux__)
     /* [Advanced] UdpGro — effective RX GRO mode. Config-derived state kept
      * here (pattern: manage_routes above) so the netlink re-add path can
@@ -186,6 +187,7 @@ enum {
     PLATFORM_PATH_STEP_SOCKET = 1,
     PLATFORM_PATH_STEP_NONBLOCK,
     PLATFORM_PATH_STEP_BIND,
+    PLATFORM_PATH_STEP_DONTFRAG, /* PMTUD on, and DF could not be set */
 };
 
 /* A non-blocking UDP socket bound to the af wildcard (ephemeral port), or -1

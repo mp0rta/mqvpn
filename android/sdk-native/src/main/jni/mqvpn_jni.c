@@ -783,6 +783,25 @@ JNI_FN(configSetKillswitchHint)(JNIEnv *env, jobject thiz, jlong cfg, jboolean e
                                             enable ? 1 : 0);
 }
 
+/* configSetPathMtu(cfg, mtu) → int */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetPathMtu)(JNIEnv *env, jobject thiz, jlong cfg, jint mtu)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_config_set_path_mtu((mqvpn_config_t *)(intptr_t)cfg, (int)mtu);
+}
+
+/* configSetPmtud(cfg, enable) → int. The reactor then sets DF on the path
+ * sockets (mqvpn_client_pmtud_enabled). */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetPmtud)(JNIEnv *env, jobject thiz, jlong cfg, jboolean enable)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_config_set_pmtud((mqvpn_config_t *)(intptr_t)cfg, enable ? 1 : 0);
+}
+
 /* configSetReorderEnabled(cfg, mode) → int */
 JNIEXPORT jint JNICALL
 JNI_FN(configSetReorderEnabled)(JNIEnv *env, jobject thiz, jlong cfg, jint mode)

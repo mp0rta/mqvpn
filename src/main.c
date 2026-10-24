@@ -90,6 +90,8 @@ usage(const char *prog)
         "                            server: sets TUN MTU; default: auto = ~1382)\n"
         "  --path-mtu N              Underlay MTU to size QUIC packets for, 1280-9000\n"
         "                            (default: 0 = 1400-byte packets)\n"
+        "  --pmtud                   Discover the path MTU (both ends, default off);\n"
+        "                            --path-mtu is the cap\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
         "  --version                 Show version and exit\n"
@@ -160,6 +162,7 @@ main(int argc, char *argv[])
         {"init-max-path-id", required_argument, NULL, 0x100},
         {"mtu", required_argument, NULL, 0x102},
         {"path-mtu", required_argument, NULL, 0x107},
+        {"pmtud", no_argument, NULL, 0x10f},
         {"max-clients", required_argument, NULL, 'M'},
         {"log-level", required_argument, NULL, 'L'},
         {"no-reconnect", no_argument, NULL, 'R'},
@@ -201,6 +204,7 @@ main(int argc, char *argv[])
     int init_max_path_id_set = 0;
     int cli_mtu = -1; /* -1 means "not set by CLI" */
     int cli_path_mtu = -1;
+    int cli_pmtud = -1;
     int max_clients = -1; /* -1 means "not set by CLI" */
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES];
     int n_paths = 0;
@@ -304,6 +308,7 @@ main(int argc, char *argv[])
         case 0x107:
             if (parse_mtu_arg("--path-mtu", optarg, &cli_path_mtu) < 0) return 1;
             break;
+        case 0x10f: cli_pmtud = 1; break;
         case 'M': max_clients = atoi(optarg); break;
         case 'R': no_reconnect = 1; break;
         case 'K': kill_switch = 1; break;
@@ -395,6 +400,7 @@ main(int argc, char *argv[])
     int eff_max_clients = max_clients >= 0 ? max_clients : file_cfg.max_clients;
     int eff_tun_mtu = cli_mtu >= 0 ? cli_mtu : file_cfg.tun_mtu;
     int eff_path_mtu = cli_path_mtu >= 0 ? cli_path_mtu : file_cfg.path_mtu;
+    int eff_pmtud = cli_pmtud >= 0 ? cli_pmtud : file_cfg.pmtud;
 
     /* Auth key: CLI > config (use auth_key for client, server_auth_key for server) */
     const char *eff_auth_key =
@@ -583,6 +589,7 @@ main(int argc, char *argv[])
             .init_max_path_id = eff_init_max_path_id,
             .tun_mtu = eff_tun_mtu,
             .path_mtu = eff_path_mtu,
+            .pmtud = eff_pmtud,
             .cc = cc,
             .reinjection = reinjection,
             .reinj_srtt_factor_pct = file_cfg.reinjection_srtt_factor_pct,
@@ -656,6 +663,7 @@ main(int argc, char *argv[])
             .init_max_path_id = eff_init_max_path_id,
             .tun_mtu = eff_tun_mtu,
             .path_mtu = eff_path_mtu,
+            .pmtud = eff_pmtud,
             .cc = cc,
             .reinjection = reinjection,
             .reinj_srtt_factor_pct = file_cfg.reinjection_srtt_factor_pct,

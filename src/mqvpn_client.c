@@ -2956,6 +2956,8 @@ cli_start_connection(mqvpn_client_t *c)
         .cc = c->config.cc,
         .init_max_path_id = c->config.init_max_path_id,
         .path_mtu = c->config.path_mtu,
+        .pmtud = c->config.pmtud != 0,
+        .reorder = c->config.reorder.mode != MQVPN_REORDER_OFF,
         .recv_rate_bytes_per_sec = c->config.recv_rate_limit,
         .reinjection = c->config.reinjection,
         .reinj_srtt_factor_pct = c->config.reinj_srtt_factor_pct,
@@ -4177,6 +4179,12 @@ tun_send_datagram(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_
 
     c->dgram_sent++;
     return MQVPN_OK;
+}
+
+int
+mqvpn_client_pmtud_enabled(const mqvpn_client_t *client)
+{
+    return client && client->config.pmtud ? 1 : 0;
 }
 
 int

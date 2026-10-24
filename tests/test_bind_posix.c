@@ -207,6 +207,23 @@ test_ctor_no_memory_leaves_fd_open_and_out_ctx_untouched(void)
     assert(mqvpn_bind_posix_server_new(fd, &o, &ctx) == MQVPN_ERR_NO_MEMORY);
     assert(ctx == (void *)0x1);
     assert(fcntl(fd, F_GETFD) >= 0);
+#ifdef __linux__
+    /* asked for DF: a failed allocation does not leave DF set */
+    int pmtu_before = -1, pmtu_after = -1;
+    socklen_t plen = sizeof(pmtu_before);
+    assert(getsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &pmtu_before, &plen) == 0);
+    assert(pmtu_before != IP_PMTUDISC_PROBE);
+    o.dont_fragment = 1;
+    seam_calloc_fail_next = 1;
+    assert(mqvpn_bind_posix_path_new(fd, &o, &ctx) == MQVPN_ERR_NO_MEMORY);
+    seam_calloc_fail_next = 1;
+    assert(mqvpn_bind_posix_server_new(fd, &o, &ctx) == MQVPN_ERR_NO_MEMORY);
+    plen = sizeof(pmtu_after);
+    assert(getsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &pmtu_after, &plen) == 0);
+    assert(pmtu_after == pmtu_before);
+    assert(ctx == (void *)0x1);
+    o.dont_fragment = 0;
+#endif
     /* scope-table growth failure degrades to bind-wide sticky, never crashes */
     void *sctx = NULL;
     mqvpn_bind_posix_opts_t og = opts_default(1, 0);

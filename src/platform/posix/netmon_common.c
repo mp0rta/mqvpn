@@ -19,6 +19,7 @@
 #include "mqvpn_bind_posix.h"
 #include "platform/path_readd.h"
 #include "log.h"
+#include "compat/socket_compat.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -272,6 +273,24 @@ netmon_try_reactivate_by_ifname(platform_ctx_t *p, const char *ifname)
     }
 }
 
+/* A path socket, with DF set when PMTUD is on: without it a fragmented
+ * probe could be acknowledged and raise the size beyond what the path
+ * carries, so a socket that cannot have it is closed again. -1 and *step
+ * on failure, errno set. */
+static int
+path_socket_open(platform_ctx_t *p, sa_family_t af, int *step)
+{
+    int fd = platform_path_socket_open(af, step);
+    if (fd >= 0 && p->pmtud && mqvpn_socket_set_dontfrag(fd, af) < 0) {
+        int e = errno;
+        close(fd);
+        errno = e;
+        *step = PLATFORM_PATH_STEP_DONTFRAG;
+        return -1;
+    }
+    return fd;
+}
+
 /* The startup slots: one per configured interface, or one "any" slot when
  * none is configured, each with its socket (readd_open_socket() below is the
  * re-add sibling). The "path_mgr:" lines keep the label of the module these
@@ -287,9 +306,12 @@ platform_paths_open(platform_ctx_t *p, int n_ifaces, const char *const *ifaces)
             LOG_ERR("path_mgr: max paths (%d) reached", MQVPN_MAX_PATHS);
         } else {
             int step = 0;
-            s->fd = platform_path_socket_open(p->server_addr.ss_family, &step);
+            s->fd = path_socket_open(p, p->server_addr.ss_family, &step);
             if (s->fd < 0) {
-                if (step == PLATFORM_PATH_STEP_SOCKET)
+                if (step == PLATFORM_PATH_STEP_DONTFRAG)
+                    LOG_ERR("path_mgr: cannot set DF, which PMTUD needs: %s",
+                            strerror(errno));
+                else if (step == PLATFORM_PATH_STEP_SOCKET)
                     LOG_ERR("path_mgr: socket: %s", strerror(errno));
                 else if (step == PLATFORM_PATH_STEP_NONBLOCK)
                     LOG_ERR("path_mgr: set_nonblock: %s", strerror(errno));
@@ -320,9 +342,12 @@ readd_open_socket(platform_ctx_t *p, platform_path_t *s, const char *ifname)
 {
     sa_family_t af = p->server_addr.ss_family;
     int step = 0;
-    int fd = platform_path_socket_open(af, &step);
+    int fd = path_socket_open(p, af, &step);
     if (fd < 0) {
-        if (step == PLATFORM_PATH_STEP_SOCKET)
+        if (step == PLATFORM_PATH_STEP_DONTFRAG)
+            LOG_WRN("%s: cannot set DF for re-add %s, which PMTUD needs: %s",
+                    netmon_log_tag, ifname, strerror(errno));
+        else if (step == PLATFORM_PATH_STEP_SOCKET)
             LOG_WRN("%s: socket() for re-add %s: %s", netmon_log_tag, ifname,
                     strerror(errno));
         else if (step == PLATFORM_PATH_STEP_NONBLOCK)

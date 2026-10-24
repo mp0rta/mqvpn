@@ -120,6 +120,7 @@ mqvpn --mode client|server [options]
   --cc ALGO              輻輳制御アルゴリズム: bbr2|bbr|cubic|none（デフォルト: bbr2）
   --mtu N                TUN MTU（1280-9000、デフォルト: auto）
   --path-mtu N           QUIC パケットのサイズを合わせる経路 MTU（1280-9000、デフォルト: 0）
+  --pmtud                経路 MTU を探索する（両端で指定）。--path-mtu が上限になる
   --max-clients N        最大同時接続クライアント数（サーバー、デフォルト: 64）
   --control-port PORT    Control API の TCP ポート（サーバー）
   --control-addr ADDR    Control API のバインドアドレス（デフォルト: 127.0.0.1）

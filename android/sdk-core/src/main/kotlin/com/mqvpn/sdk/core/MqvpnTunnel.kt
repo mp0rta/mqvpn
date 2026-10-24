@@ -190,6 +190,11 @@ class MqvpnTunnel internal constructor(
             // path); note the service executor only logs a throw here.
             config.hostIdentifierError()?.let { throw IllegalArgumentException(it) }
             require(reactorHandle != 0L) { "reactor handle required" }
+            // the native setter refuses anything else, and a tunnel with the
+            // default size instead would not be what was asked for
+            require(config.pathMtu == 0 || config.pathMtu in 1280..9000) {
+                "pathMtu must be 0 or 1280-9000, not ${config.pathMtu}"
+            }
             val cfg = NativeBridge.configNew()
             NativeBridge.configSetServer(cfg, config.serverAddress, config.serverPort)
             config.tlsServerName?.let { NativeBridge.configSetTlsServerName(cfg, it) }
@@ -202,6 +207,8 @@ class MqvpnTunnel internal constructor(
             NativeBridge.configSetMultipath(cfg, config.multipathEnabled)
             NativeBridge.configSetReconnect(cfg, config.reconnect, config.reconnectIntervalSec)
             NativeBridge.configSetKillswitchHint(cfg, config.killSwitch)
+            NativeBridge.configSetPathMtu(cfg, config.pathMtu)
+            NativeBridge.configSetPmtud(cfg, config.pmtud)
             NativeBridge.configSetHybridEnabled(cfg, config.hybridEnabled)
             NativeBridge.configSetHybridTcpMode(cfg, config.hybridTcpMode.native)
             NativeBridge.configSetAndroidClock(cfg)

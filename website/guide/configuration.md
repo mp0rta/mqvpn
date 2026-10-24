@@ -177,6 +177,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `ManageRoutes` | Manage the host routing table (VPN routes and server pin route). Set to `false` (or pass `--no-manage-routes`) to handle routing yourself. Routing alone does not stop applications that bind their sockets to a specific adapter — see the note below. | `true` |
 | `MTU` | TUN MTU (1280–9000). Client: cap — if the negotiated MTU is lower, the negotiated value is used. Server: sets the TUN MTU directly. | auto (client ~1382 negotiated, server 1382) |
 | `PathMTU` | Largest IP packet the network between client and server carries without fragmenting (1280–9000). mqvpn sizes its QUIC packets to fit, assuming an IPv6 header so the value is safe for IPv4 too. Set the same value on both ends. See [Using a larger tunnel MTU](#using-a-larger-tunnel-mtu). | `0` (1400-byte packets) |
+| `PMTUD` | Discover the path MTU instead of trusting a fixed size. Packets start small and grow while larger probes get through; `PathMTU`, when set, is the upper limit. Both ends must enable it. See [Discovering the path MTU](#discovering-the-path-mtu). | `false` |
 
 > **Note: route management does not cover interface-bound applications**
 >
@@ -405,6 +406,7 @@ For most setups, leave `MTU` unset. The auto-negotiated value (~1382) works on s
 | Standard Ethernet / mobile | Leave unset (auto ~1382) |
 | Deeply nested tunnels (mqvpn → WG → another tunnel) | Calculate remaining MTU; set if near 1280 |
 | Both ends on a clean 1500-byte path, larger tunnel MTU wanted | `PathMTU = 1500` on both ends (TUN MTU 1418) |
+| Path MTU unknown or changing (mobile, PPPoE, tunnels, ICMP filtered) | `PMTUD = true` on both ends |
 
 On the client, if `MTU` is set, mqvpn uses `min(config MTU, negotiated MTU)`; a warning is logged when the config value exceeds the negotiated value. On the server, `MTU` sets the TUN MTU directly (default 1382).
 
@@ -447,6 +449,23 @@ A packet at the upper limit never carries an ACK frame. Below it, mqvpn also lea
 When an explicit `MTU` exceeds the available inner packet size, the client warns and limits it. The server also warns, but keeps the configured TUN MTU; oversized tunnel packets may be dropped.
 
 IPv6 inside the tunnel requires room for a complete 1280-byte packet. With IPv6 enabled, a nonzero `PathMTU` must be at least **1378**, or **1386** when reorder is enabled. The server rejects a smaller setting at startup; the client closes the connection with an error if its available packet size is too small when IPv6 is assigned. Setting `MTU = 1280` does not increase the available capacity. IPv4-only tunnels can still use smaller values. The default `PathMTU = 0` remains supported.
+
+### Discovering the path MTU
+
+With `PMTUD = true` on both ends, mqvpn finds the packet size the path carries instead of relying on a fixed one:
+
+- Packets start at the smallest size that still gives a 1280-byte inner MTU (IPv6's minimum): 1358 bytes on the path over IPv4, 1378 over IPv6, and 8 bytes more with `[Reorder]` on, for its header.
+- If the path is smaller than that, mqvpn goes down to QUIC's minimum packet size (1200 bytes) and searches up from there, so an IPv4-only tunnel keeps working with a TUN MTU below 1280. A tunnel that carries IPv6 cannot: the client closes the connection with an error saying IPv6 needs an inner MTU of 1280.
+- Larger probe packets are sent at increasing sizes. A probe that gets through raises the packet size; a lost one only means it does not fit, and does not slow the connection down. The search takes a few round trips per size tried and stops within 4 bytes of the largest size that fits, at most the `PathMTU` size if one is set, or 1436 bytes (TUN MTU 1418).
+- The UDP sockets send with the Don't Fragment bit set, so packets are never fragmented on the way. Discovery does not need ICMP: it works on networks that filter it.
+- If the path gets smaller during a connection, larger packets stop arriving while smaller ones still do. mqvpn checks with a few probes at the current size, and if they are lost too, goes back to the start size within a few round trips (about a second on a 100 ms path) and searches again. Lost data sent at the old size is resent in packets that fit.
+- Ten minutes after a search ends below the limit, a new one starts from the top, in case the path got larger.
+
+The client's TUN MTU follows the discovered size, down as well as up. The server keeps its TUN MTU and answers packets that are too large for one client with ICMP Packet Too Big carrying that client's size.
+
+With multipath, every path is probed, and the connection uses the size of the smallest one. A path that is added later starts from the start size, so the connection goes back down to it until the new path is probed. A path that is still being validated does not count, so one that never gets through does not hold the connection back.
+
+PMTUD works on Linux, macOS and Windows clients and on Linux servers. In the Android SDK, set `pmtud = true` (and `pathMtu` for the upper limit) in `MqvpnConfig`. Android sets the TUN MTU only when the tunnel comes up, so there it stays at 1280: PMTUD still keeps the tunnel working when the path gets smaller, but uploads do not use a larger discovered size.
 
 ### Running other tunnels inside mqvpn
 

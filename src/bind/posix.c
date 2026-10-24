@@ -11,6 +11,7 @@
 #include "bind/posix_offload.h"
 #include "mqvpn_internal.h" /* mqvpn_tx_batch_enabled — the single batching rule */
 #include "log.h"
+#include "compat/socket_compat.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -124,6 +125,22 @@ gro_seg_len_portable(size_t len, size_t seg, size_t off)
 #endif
 }
 
+/* dont_fragment: DF on @fd. Called after the allocation and before anything
+ * else touches the fd, so that any failure leaves the fd as it was. 0, or -1
+ * with errno set. */
+static int
+bind_apply_dontfrag(int fd, const mqvpn_bind_posix_opts_t *opts)
+{
+    if (opts->struct_size < offsetof(mqvpn_bind_posix_opts_t, dont_fragment) +
+                                sizeof(opts->dont_fragment) ||
+        !opts->dont_fragment)
+        return 0;
+    struct sockaddr_storage ss;
+    socklen_t ss_len = sizeof(ss);
+    if (getsockname(fd, (struct sockaddr *)&ss, &ss_len) < 0) return -1;
+    return mqvpn_socket_set_dontfrag(fd, ss.ss_family);
+}
+
 static void
 bind_common_init(bind_common_t *c, int fd, const mqvpn_bind_posix_opts_t *opts_in)
 {
@@ -137,6 +154,7 @@ bind_common_init(bind_common_t *c, int fd, const mqvpn_bind_posix_opts_t *opts_i
     if (OPT_HAS(udp_gro)) o.udp_gro = opts_in->udp_gro;
     if (OPT_HAS(socket_buf_bytes)) o.socket_buf_bytes = opts_in->socket_buf_bytes;
     if (OPT_HAS(tag)) memcpy(o.tag, opts_in->tag, sizeof(o.tag));
+    if (OPT_HAS(dont_fragment)) o.dont_fragment = opts_in->dont_fragment;
 #undef OPT_HAS
 
     c->fd = fd;
@@ -206,6 +224,8 @@ bind_send(bind_common_t *c, int *gso_disabled, int *warned, const mqvpn_datagram
             return 1;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) return MQVPN_TX_WOULD_BLOCK;
+        /* too large for the interface with DF set (PMTUD): a lost packet */
+        if (errno == EMSGSIZE) return 1;
         /* Hard failure. The server logged this errno before the refactor
          * (its single-datagram helper owned a sendto()); the client did not,
          * because this arm carries every non-batched datagram and a dead
@@ -265,6 +285,8 @@ bind_send(bind_common_t *c, int *gso_disabled, int *warned, const mqvpn_datagram
             r = sendto(c->fd, bufs[sent].data, bufs[sent].len, MSG_DONTWAIT, peer,
                        peer_len);
         } while (r < 0 && errno == EINTR);
+        /* too large for the interface with DF set (PMTUD): a lost packet */
+        if (r < 0 && errno == EMSGSIZE) continue;
         if (r < 0) break;
         c->tx.tx_sends++;
         c->tx.tx_datagrams++;
@@ -384,6 +406,11 @@ mqvpn_bind_posix_path_new(int fd, const mqvpn_bind_posix_opts_t *opts, void **ou
     if (!bind_opts_valid(fd, opts, out_ctx)) return MQVPN_ERR_INVALID_ARG;
     bind_path_ctx_t *ctx = BIND_CALLOC(1, sizeof(*ctx));
     if (!ctx) return MQVPN_ERR_NO_MEMORY;
+    if (bind_apply_dontfrag(fd, opts) < 0) {
+        LOG_ERR("bind-posix: cannot set DF on fd %d: %s", fd, strerror(errno));
+        free(ctx);
+        return MQVPN_ERR_INVALID_STATE;
+    }
     bind_common_init(&ctx->c, fd, opts);
     *out_ctx = ctx;
     return MQVPN_OK;
@@ -606,6 +633,11 @@ mqvpn_bind_posix_server_new(int fd, const mqvpn_bind_posix_opts_t *opts, void **
     if (!bind_opts_valid(fd, opts, out_ctx)) return MQVPN_ERR_INVALID_ARG;
     bind_server_ctx_t *s = BIND_CALLOC(1, sizeof(*s));
     if (!s) return MQVPN_ERR_NO_MEMORY;
+    if (bind_apply_dontfrag(fd, opts) < 0) {
+        LOG_ERR("bind-posix: cannot set DF on fd %d: %s", fd, strerror(errno));
+        free(s);
+        return MQVPN_ERR_INVALID_STATE;
+    }
     bind_common_init(&s->c, fd, opts);
     *out_ctx = s;
     return MQVPN_OK;

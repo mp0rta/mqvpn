@@ -235,6 +235,7 @@ mqvpn_android_reactor_add_path(mqvpn_android_reactor_t *r, mqvpn_client_t *clien
     bopts.udp_gro = gro_policy;
     bopts.socket_buf_bytes = 0; /* 0 = the bind's default 7 MiB request */
     snprintf(bopts.tag, sizeof(bopts.tag), "%s", e->tag);
+    bopts.dont_fragment = mqvpn_client_pmtud_enabled(client);
 
     void *ctx = NULL;
     int brc = mqvpn_bind_posix_path_new(fd, &bopts, &ctx);
