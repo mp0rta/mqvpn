@@ -2132,6 +2132,100 @@ test_stats_accumulate_carries_residence(void)
     ASSERT_TRUE(a.residence_max_us == 60000, "max takes the larger");
 }
 
+/* mqvpn_reorder_rx_tick sweeps the table only when next_gap_us /
+ * next_idle_us say something may be due. Whatever it skips, a tick must leave
+ * no gap timer past its deadline and no flow past its idle timeout, exactly as
+ * sweeping on every tick did. Random traffic over several flows (gaps that
+ * time out, gaps that fill, idle stretches) with the check after every tick. */
+static void
+test_rx_tick_skips_nothing_due(void)
+{
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.ingress_idle_timeout_sec = 1;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    const uint64_t idle_us = 1000000;
+    uint8_t buf[256];
+    uint64_t next_seq[6] = {0}, missing[6] = {0};
+    int has_missing[6] = {0};
+    uint64_t now = 1000000;
+    unsigned x = 12345; /* LCG: the same sequence on every platform */
+#define RND() (x = x * 1103515245u + 12345u, (x >> 16) & 0x7fff)
+    int overdue = 0, ticks = 0, timeouts_seen = 0, evictions_seen = 0;
+    for (int step = 0; step < 50000; step++) {
+        now += RND() % 4000;                   /* 0..4 ms */
+        if (RND() % 2000 == 0) now += 1500000; /* idle past the timeout */
+        int fl = (int)(RND() % 6);
+        unsigned op = RND() % 8;
+        if (op < 5) {
+            uint64_t seq = next_seq[fl]++;
+            if (RND() % 8 == 0 && !has_missing[fl]) { /* open a gap */
+                missing[fl] = seq;
+                has_missing[fl] = 1;
+                seq = next_seq[fl]++;
+            }
+            size_t n = build_reorder_dgram(buf, 0, seq, (uint16_t)step,
+                                           (uint16_t)(5000 + fl), 443, 100);
+            mqvpn_reorder_rx_on_packet(rx, buf, n, now);
+        } else if (op == 5 && has_missing[fl]) { /* fill it (maybe too late) */
+            size_t n = build_reorder_dgram(buf, 0, missing[fl], (uint16_t)step,
+                                           (uint16_t)(5000 + fl), 443, 100);
+            mqvpn_reorder_rx_on_packet(rx, buf, n, now);
+            has_missing[fl] = 0;
+        } else {
+            uint64_t to_before = rx->evicted_stats.gap_timeout_count;
+            uint32_t flows_before = rx->n_flows;
+            for (uint32_t i = 0; i < rx->n_buckets; i++)
+                for (mqvpn_reorder_flow_t *f = rx->buckets[i]; f; f = f->next)
+                    to_before += f->stats.gap_timeout_count;
+            mqvpn_reorder_rx_tick(rx, now);
+            ticks++;
+            uint64_t to_after = rx->evicted_stats.gap_timeout_count;
+            for (uint32_t i = 0; i < rx->n_buckets; i++) {
+                for (mqvpn_reorder_flow_t *f = rx->buckets[i]; f; f = f->next) {
+                    to_after += f->stats.gap_timeout_count;
+                    if (f->gap_timer_active && f->gap_deadline_us <= now) overdue++;
+                    if (now > f->last_progress_us && now - f->last_progress_us > idle_us)
+                        overdue++;
+                }
+            }
+            if (to_after > to_before) timeouts_seen++;
+            if (rx->n_flows < flows_before) evictions_seen++;
+        }
+    }
+#undef RND
+    ASSERT_EQ_INT(overdue, 0, "no gap timer or idle flow left overdue by a tick");
+    ASSERT_TRUE(ticks > 1000, "ticks exercised");
+    ASSERT_TRUE(timeouts_seen > 0, "gap timeouts fired from ticks");
+    ASSERT_TRUE(evictions_seen > 0, "idle evictions fired from ticks");
+    ASSERT_TRUE(invariant_holds(rx), "invariant after random ticks");
+    mqvpn_reorder_rx_free(rx);
+
+    /* Exact boundaries, with the bounds already computed by an earlier
+     * sweep: a gap times out on the first tick at its deadline, an idle flow
+     * goes on the first tick strictly past its timeout. */
+    recorder_t rec2 = {0};
+    rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec2);
+    const uint64_t t0 = 5000000, wait_us = (uint64_t)c.max_wait_ms * 1000;
+    size_t n = build_reorder_dgram(buf, 0, 0, 1, 6000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, t0); /* cold start, delivered */
+    mqvpn_reorder_rx_tick(rx, t0);              /* first sweep sets the bounds */
+    n = build_reorder_dgram(buf, 0, 2, 2, 6000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, t0 + 10); /* seq 1 missing: armed */
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_TRUE(f && f->gap_timer_active, "gap armed");
+    mqvpn_reorder_rx_tick(rx, t0 + 10 + wait_us - 1);
+    ASSERT_EQ_INT(rec2.n, 1, "gap still waiting one microsecond before its deadline");
+    mqvpn_reorder_rx_tick(rx, t0 + 10 + wait_us);
+    ASSERT_EQ_INT(rec2.n, 2, "gap timed out on the tick at its deadline");
+    uint64_t lp = f->last_progress_us;
+    mqvpn_reorder_rx_tick(rx, lp + idle_us);
+    ASSERT_TRUE(only_flow(rx) != NULL, "flow kept at exactly the idle timeout");
+    mqvpn_reorder_rx_tick(rx, lp + idle_us + 1);
+    ASSERT_TRUE(only_flow(rx) == NULL, "flow evicted on the first tick past it");
+    mqvpn_reorder_rx_free(rx);
+}
+
 int
 main(void)
 {
@@ -2174,6 +2268,7 @@ main(void)
     test_rx_short_flow_reset();
     test_rx_reset_discard_not_deliver();
     test_rx_backstop_recovery();
+    test_rx_tick_skips_nothing_due();
 
     /* Task 3.5: ACK demotion + 2-mode pass-through */
     test_rx_ack_demote_small_flow();
