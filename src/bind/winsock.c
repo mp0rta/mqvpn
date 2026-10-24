@@ -129,7 +129,7 @@ mqvpn_bind_winsock_path_new(SOCKET sock, const mqvpn_bind_winsock_opts_t *opts,
         struct sockaddr_storage ss;
         int ss_len = (int)sizeof(ss);
         if (getsockname(sock, (struct sockaddr *)&ss, &ss_len) != 0 ||
-            mqvpn_socket_set_dontfrag((int)sock, ss.ss_family) < 0) {
+            mqvpn_socket_set_dontfrag(sock, ss.ss_family) < 0) {
             LOG_ERR("bind-winsock: cannot set DF on socket %llu: WSA %d",
                     (unsigned long long)sock, WSAGetLastError());
             return MQVPN_ERR_INVALID_STATE;

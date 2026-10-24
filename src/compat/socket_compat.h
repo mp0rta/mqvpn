@@ -70,8 +70,13 @@ mqvpn_socket_set_nonblock(int fd)
  * fit the path is lost instead of fragmented: what PMTUD probes rely on.
  * On Linux the kernel's cached path MTU is ignored (PMTUDISC_PROBE): QUIC
  * sizes its own packets. Returns 0 on success, -1 on failure. */
+#ifdef _WIN32
+static inline int
+mqvpn_socket_set_dontfrag(SOCKET fd, int af) /* SOCKET is pointer-sized */
+#else
 static inline int
 mqvpn_socket_set_dontfrag(int fd, int af)
+#endif
 {
 #if defined(__linux__)
     if (af == AF_INET6) {
@@ -100,12 +105,11 @@ mqvpn_socket_set_dontfrag(int fd, int af)
 #elif defined(_WIN32)
     DWORD on = 1;
     if (af == AF_INET6)
-        return setsockopt((SOCKET)fd, IPPROTO_IPV6, IPV6_DONTFRAG, (const char *)&on,
+        return setsockopt(fd, IPPROTO_IPV6, IPV6_DONTFRAG, (const char *)&on,
                           sizeof(on)) == 0
                    ? 0
                    : -1;
-    return setsockopt((SOCKET)fd, IPPROTO_IP, IP_DONTFRAGMENT, (const char *)&on,
-                      sizeof(on)) == 0
+    return setsockopt(fd, IPPROTO_IP, IP_DONTFRAGMENT, (const char *)&on, sizeof(on)) == 0
                ? 0
                : -1;
 #else
