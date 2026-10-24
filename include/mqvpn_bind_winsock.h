@@ -36,14 +36,16 @@ typedef struct {
     char tag[64];
     /* Appended under ABI 3. Nonzero: set IP_DONTFRAGMENT / IPV6_DONTFRAG on
      * the socket, for PMTUD. A datagram the interface cannot carry is then
-     * dropped as lost. */
+     * dropped as lost. When DF cannot be set, construction fails with
+     * MQVPN_ERR_INVALID_STATE. */
     int dont_fragment;
 } mqvpn_bind_winsock_opts_t;
 
 /* Copies the recognised prefix of *opts (min(struct_size, sizeof)) and never
  * retains the pointer. Returns MQVPN_OK and writes *out_ctx;
  * MQVPN_ERR_INVALID_ARG (sock == INVALID_SOCKET, opts/out_ctx NULL,
- * struct_size not covering socket_buf_bytes); MQVPN_ERR_NO_MEMORY. On failure
+ * struct_size not covering socket_buf_bytes); MQVPN_ERR_NO_MEMORY;
+ * MQVPN_ERR_INVALID_STATE (dont_fragment set and DF cannot be set). On failure
  * *out_ctx is untouched and the socket is left exactly as it was — this
  * module never closes it. */
 MQVPN_API int mqvpn_bind_winsock_path_new(SOCKET sock,

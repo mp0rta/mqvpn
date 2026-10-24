@@ -123,6 +123,18 @@ mqvpn_bind_winsock_path_new(SOCKET sock, const mqvpn_bind_winsock_opts_t *opts,
 {
     if (sock == INVALID_SOCKET || !opts || !out_ctx) return MQVPN_ERR_INVALID_ARG;
     if (!WS_OPT_HAS(opts, socket_buf_bytes)) return MQVPN_ERR_INVALID_ARG;
+    /* DF first, before anything else changes the socket: PMTUD cannot work
+     * on a socket that fragments, so the bind is refused (as the POSIX bind) */
+    if (WS_OPT_HAS(opts, dont_fragment) && opts->dont_fragment) {
+        struct sockaddr_storage ss;
+        int ss_len = (int)sizeof(ss);
+        if (getsockname(sock, (struct sockaddr *)&ss, &ss_len) != 0 ||
+            mqvpn_socket_set_dontfrag((int)sock, ss.ss_family) < 0) {
+            LOG_ERR("bind-winsock: cannot set DF on socket %llu: WSA %d",
+                    (unsigned long long)sock, WSAGetLastError());
+            return MQVPN_ERR_INVALID_STATE;
+        }
+    }
     bind_winsock_ctx_t *c = WS_CALLOC(1, sizeof(*c));
     if (!c) return MQVPN_ERR_NO_MEMORY;
     c->sock = sock;
@@ -134,14 +146,6 @@ mqvpn_bind_winsock_path_new(SOCKET sock, const mqvpn_bind_winsock_opts_t *opts,
     }
     char lbl[32];
     ws_apply_sockbuf(sock, opts->socket_buf_bytes, ws_label(c, lbl, sizeof(lbl)));
-    if (WS_OPT_HAS(opts, dont_fragment) && opts->dont_fragment) {
-        struct sockaddr_storage ss;
-        int ss_len = (int)sizeof(ss);
-        if (getsockname(sock, (struct sockaddr *)&ss, &ss_len) != 0 ||
-            mqvpn_socket_set_dontfrag((int)sock, ss.ss_family) < 0)
-            LOG_WRN("bind-winsock: cannot set DF on %s: WSA %d",
-                    ws_label(c, lbl, sizeof(lbl)), WSAGetLastError());
-    }
     *out_ctx = c;
     return MQVPN_OK;
 }

@@ -249,6 +249,27 @@ test_dont_fragment_only_when_asked(void)
 }
 
 static void
+test_dont_fragment_failure_refuses_the_socket(void)
+{
+    /* not bound: getsockname fails, so DF cannot be set and a bind that
+     * asked for it is refused, the socket left open */
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    CHECK(s != INVALID_SOCKET);
+    mqvpn_bind_winsock_opts_t o = opts_default();
+    o.dont_fragment = 1;
+    void *sentinel = &o;
+    void *ctx = sentinel;
+    CHECK(mqvpn_bind_winsock_path_new(s, &o, &ctx) == MQVPN_ERR_INVALID_STATE);
+    CHECK(ctx == sentinel);
+
+    /* not asked for: the same socket is fine */
+    o.dont_fragment = 0;
+    CHECK(mqvpn_bind_winsock_path_new(s, &o, &ctx) == MQVPN_OK);
+    mqvpn_bind_winsock_path_free(ctx);
+    closesocket(s);
+}
+
+static void
 test_send_error_mapping(void)
 {
     struct sockaddr_in dst;
@@ -376,6 +397,7 @@ main(void)
     test_ctor_contract();
     test_socket_buffers();
     test_dont_fragment_only_when_asked();
+    test_dont_fragment_failure_refuses_the_socket();
     test_send_error_mapping();
     test_real_round_trip_and_drain();
     WSACleanup();
