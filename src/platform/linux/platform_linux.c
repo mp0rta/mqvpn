@@ -1082,11 +1082,8 @@ svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_a
 
     int optval = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
-    /* The platform sizes its own listen socket, so the transport ctx is told
-     * to leave the buffers alone (socket_buf_bytes = -1). */
-    int bufsize = 1 * 1024 * 1024;
-    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+    /* Socket buffers are sized by the transport ctx (bind default), as on
+     * the client paths. */
 
     memset(out_addr, 0, sizeof(*out_addr));
     if (af == AF_INET6) {
@@ -1238,7 +1235,11 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     bopts.struct_size = sizeof(bopts);
     bopts.udp_gso = cfg->udp_gso;
     bopts.udp_gro = cfg->udp_gro;
-    bopts.socket_buf_bytes = -1; /* svr_create_udp_socket sized them (1 MiB) */
+    /* The bind's default (7 MiB, forced past rmem_max/wmem_max when
+     * privileged), as on every client path: this one socket takes every
+     * client's traffic, and each overflow of its receive queue drops a whole
+     * GRO batch of datagrams that nothing retransmits. */
+    bopts.socket_buf_bytes = 0;
     snprintf(bopts.tag, sizeof(bopts.tag), "server");
     if (mqvpn_bind_posix_server_new(sp.udp_fd, &bopts, &sp.bind_ctx) != MQVPN_OK) {
         LOG_ERR("server transport setup failed");
