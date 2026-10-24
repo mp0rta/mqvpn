@@ -125,8 +125,9 @@ gro_seg_len_portable(size_t len, size_t seg, size_t off)
 #endif
 }
 
-/* dont_fragment: DF on @fd, before anything else touches it, so that a
- * failure leaves the fd as it was. 0, or -1 with errno set. */
+/* dont_fragment: DF on @fd. Called after the allocation and before anything
+ * else touches the fd, so that any failure leaves the fd as it was. 0, or -1
+ * with errno set. */
 static int
 bind_apply_dontfrag(int fd, const mqvpn_bind_posix_opts_t *opts)
 {
@@ -403,12 +404,13 @@ int
 mqvpn_bind_posix_path_new(int fd, const mqvpn_bind_posix_opts_t *opts, void **out_ctx)
 {
     if (!bind_opts_valid(fd, opts, out_ctx)) return MQVPN_ERR_INVALID_ARG;
-    if (bind_apply_dontfrag(fd, opts) < 0) {
-        LOG_ERR("bind-posix: cannot set DF on fd %d: %s", fd, strerror(errno));
-        return MQVPN_ERR_INVALID_STATE;
-    }
     bind_path_ctx_t *ctx = BIND_CALLOC(1, sizeof(*ctx));
     if (!ctx) return MQVPN_ERR_NO_MEMORY;
+    if (bind_apply_dontfrag(fd, opts) < 0) {
+        LOG_ERR("bind-posix: cannot set DF on fd %d: %s", fd, strerror(errno));
+        free(ctx);
+        return MQVPN_ERR_INVALID_STATE;
+    }
     bind_common_init(&ctx->c, fd, opts);
     *out_ctx = ctx;
     return MQVPN_OK;
@@ -629,12 +631,13 @@ int
 mqvpn_bind_posix_server_new(int fd, const mqvpn_bind_posix_opts_t *opts, void **out_ctx)
 {
     if (!bind_opts_valid(fd, opts, out_ctx)) return MQVPN_ERR_INVALID_ARG;
-    if (bind_apply_dontfrag(fd, opts) < 0) {
-        LOG_ERR("bind-posix: cannot set DF on fd %d: %s", fd, strerror(errno));
-        return MQVPN_ERR_INVALID_STATE;
-    }
     bind_server_ctx_t *s = BIND_CALLOC(1, sizeof(*s));
     if (!s) return MQVPN_ERR_NO_MEMORY;
+    if (bind_apply_dontfrag(fd, opts) < 0) {
+        LOG_ERR("bind-posix: cannot set DF on fd %d: %s", fd, strerror(errno));
+        free(s);
+        return MQVPN_ERR_INVALID_STATE;
+    }
     bind_common_init(&s->c, fd, opts);
     *out_ctx = s;
     return MQVPN_OK;

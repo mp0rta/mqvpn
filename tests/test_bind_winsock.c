@@ -173,6 +173,15 @@ test_ctor_contract(void)
     CHECK(mqvpn_bind_winsock_path_new(s, &o, &ctx) == MQVPN_ERR_NO_MEMORY);
     CHECK(ctx == sentinel);  /* never written on failure */
     CHECK(socket_usable(s)); /* never closed on failure */
+    /* asked for DF: a failed allocation does not leave DF set either */
+    o.dont_fragment = 1;
+    g_fail_calloc = 1;
+    CHECK(mqvpn_bind_winsock_path_new(s, &o, &ctx) == MQVPN_ERR_NO_MEMORY);
+    DWORD df = 1;
+    int df_len = (int)sizeof(df);
+    CHECK(getsockopt(s, IPPROTO_IP, IP_DONTFRAGMENT, (char *)&df, &df_len) == 0 &&
+          df == 0);
+    o.dont_fragment = 0;
 
     /* A newer caller's larger struct is accepted by prefix copy. */
     struct {

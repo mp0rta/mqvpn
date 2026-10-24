@@ -80,6 +80,10 @@ mqvpn_socket_set_dontfrag(int fd, int af)
 {
 #if defined(__linux__)
     if (af == AF_INET6) {
+        int old = 0;
+        socklen_t old_len = sizeof(old);
+        if (getsockopt(fd, IPPROTO_IPV6, IPV6_MTU_DISCOVER, &old, &old_len) < 0)
+            return -1;
         int v = IPV6_PMTUDISC_PROBE;
         if (setsockopt(fd, IPPROTO_IPV6, IPV6_MTU_DISCOVER, &v, sizeof(v)) < 0) return -1;
         /* a dual-stack socket also carries IPv4-mapped traffic */
@@ -88,7 +92,12 @@ mqvpn_socket_set_dontfrag(int fd, int af)
         if (getsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, &len) == 0 && v6only)
             return 0;
         int v4 = IP_PMTUDISC_PROBE;
-        return setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &v4, sizeof(v4));
+        if (setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &v4, sizeof(v4)) == 0) return 0;
+        /* half set: put the IPv6 option back, so a failure changes nothing */
+        int err = errno;
+        (void)setsockopt(fd, IPPROTO_IPV6, IPV6_MTU_DISCOVER, &old, sizeof(old));
+        errno = err;
+        return -1;
     }
     int v = IP_PMTUDISC_PROBE;
     return setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &v, sizeof(v));
