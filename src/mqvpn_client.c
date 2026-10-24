@@ -337,7 +337,7 @@ static const uint8_t state_transitions[MQVPN_STATE__COUNT][MQVPN_STATE__COUNT] =
     /* IDLE           */ {0, 1, 0, 0, 0, 0, 0},
     /* CONNECTING     */ {0, 0, 1, 0, 0, 1, 1},
     /* AUTHENTICATING */ {0, 0, 0, 1, 0, 1, 1},
-    /* TUNNEL_READY   */ {0, 0, 0, 0, 1, 0, 1},
+    /* TUNNEL_READY   */ {0, 0, 0, 0, 1, 1, 1},
     /* ESTABLISHED    */ {0, 0, 0, 0, 0, 1, 1},
     /* RECONNECTING   */ {0, 1, 0, 0, 0, 0, 1},
     /* CLOSED         */ {0, 0, 0, 0, 0, 0, 0},
