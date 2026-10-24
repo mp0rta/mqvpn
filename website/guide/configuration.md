@@ -463,7 +463,7 @@ With `PMTUD = true` on both ends, mqvpn finds the packet size the path carries i
 
 The client's TUN MTU follows the discovered size, down as well as up. The server keeps its TUN MTU and answers packets that are too large for one client with ICMP Packet Too Big carrying that client's size.
 
-With multipath, every path is probed, and the connection uses the size of the smallest one. A path that is added later starts from the start size, so the connection goes back down to it until the new path is probed. A path that is still being validated counts too: while one never gets through, the connection stays at the start size (an inner MTU of 1280), which works but uses smaller packets than the fixed 1400-byte default.
+With multipath, every path is probed, and the connection uses the size of the smallest one. A path that is added later starts from the start size, so the connection goes back down to it until the new path is probed. A path that is still being validated does not count, so one that never gets through does not hold the connection back.
 
 PMTUD works on Linux, macOS and Windows clients and on Linux servers. In the Android SDK, set `pmtud = true` (and `pathMtu` for the upper limit) in `MqvpnConfig`. Android sets the TUN MTU only when the tunnel comes up, so there it stays at 1280: PMTUD still keeps the tunnel working when the path gets smaller, but uploads do not use a larger discovered size.
 
