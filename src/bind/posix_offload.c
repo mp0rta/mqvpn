@@ -65,6 +65,13 @@ mqvpn_udp_gso_probe(void)
 }
 
 int
+mqvpn_udp_rxq_ovfl_enable(int fd)
+{
+    int one = 1;
+    return setsockopt(fd, SOL_SOCKET, SO_RXQ_OVFL, &one, sizeof(one)) == 0 ? 0 : -1;
+}
+
+int
 mqvpn_udp_gro_enable(int fd)
 {
     int one = 1;
@@ -234,14 +241,15 @@ mqvpn_udp_send_batch(int fd, const struct iovec *iov, unsigned int cnt,
 
 ssize_t
 mqvpn_udp_recv_segmented(int fd, void *buf, size_t buflen, struct sockaddr *peer,
-                         socklen_t *peerlen, size_t *seg_size)
+                         socklen_t *peerlen, size_t *seg_size, uint32_t *rxq_drops)
 {
     struct msghdr msg;
     struct iovec iov;
     /* union, not a bare char[]: CMSG_FIRSTHDR casts this to struct cmsghdr*,
-     * which is UB on an alignment-1 array (same fix as the TX path). */
+     * which is UB on an alignment-1 array (same fix as the TX path). Room
+     * for both cmsgs the socket may carry: UDP_GRO and SO_RXQ_OVFL. */
     union {
-        char buf[CMSG_SPACE(sizeof(int))];
+        char buf[CMSG_SPACE(sizeof(int)) + CMSG_SPACE(sizeof(uint32_t))];
         struct cmsghdr align;
     } ctrl;
     const socklen_t peerlen_in = *peerlen;
@@ -278,12 +286,16 @@ mqvpn_udp_recv_segmented(int fd, void *buf, size_t buflen, struct sockaddr *peer
 
     for (struct cmsghdr *cm = CMSG_FIRSTHDR(&msg); cm != NULL;
          cm = CMSG_NXTHDR(&msg, cm)) {
+        if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SO_RXQ_OVFL) {
+            if (rxq_drops && cm->cmsg_len == CMSG_LEN(sizeof(uint32_t)))
+                memcpy(rxq_drops, CMSG_DATA(cm), sizeof(*rxq_drops));
+            continue;
+        }
         if (cm->cmsg_level != SOL_UDP || cm->cmsg_type != UDP_GRO) continue;
         if (cm->cmsg_len != CMSG_LEN(sizeof(int))) continue; /* kernel ABI */
         int gso = 0;
         memcpy(&gso, CMSG_DATA(cm), sizeof(gso)); /* alignment-safe copy-out */
         if (gso > 0) *seg_size = (size_t)gso;
-        break;
     }
     return n;
 }

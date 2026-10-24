@@ -35,6 +35,66 @@ capability_errno(int e)
     return e == ENOPROTOOPT || e == EOPNOTSUPP;
 }
 
+/* SO_RXQ_OVFL end to end: overflow a minimal receive queue, then read the
+ * drop count from the next datagram queued after the drops. */
+static int
+rxq_ovfl_test(void)
+{
+    int rx = socket(AF_INET, SOCK_DGRAM, 0);
+    int tx = socket(AF_INET, SOCK_DGRAM, 0);
+    assert(rx >= 0 && tx >= 0);
+    int small = 1; /* the kernel raises it to its minimum */
+    assert(setsockopt(rx, SOL_SOCKET, SO_RCVBUF, &small, sizeof(small)) == 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    assert(bind(rx, (struct sockaddr *)&a, sizeof(a)) == 0);
+    socklen_t alen = sizeof(a);
+    assert(getsockname(rx, (struct sockaddr *)&a, &alen) == 0);
+    if (mqvpn_udp_rxq_ovfl_enable(rx) < 0) {
+        assert(capability_errno(errno));
+        printf("SKIP: SO_RXQ_OVFL unavailable (%s)\n", strerror(errno));
+        return 0;
+    }
+
+    enum { BURST = 64 };
+    uint8_t payload[1000];
+    memset(payload, 'x', sizeof(payload));
+    for (int i = 0; i < BURST; i++)
+        assert(sendto(tx, payload, sizeof(payload), 0, (struct sockaddr *)&a,
+                      sizeof(a)) == (ssize_t)sizeof(payload));
+
+    uint8_t buf[65536];
+    struct sockaddr_storage peer;
+    socklen_t plen;
+    size_t seg;
+    uint32_t drops = 0;
+    int queued = 0;
+    for (;;) { /* what fitted before the queue filled: no drops seen yet */
+        plen = sizeof(peer);
+        ssize_t n = mqvpn_udp_recv_segmented(
+            rx, buf, sizeof(buf), (struct sockaddr *)&peer, &plen, &seg, &drops);
+        if (n < 0) {
+            assert(errno == EAGAIN || errno == EWOULDBLOCK);
+            break;
+        }
+        queued++;
+    }
+    assert(queued > 0 && queued < BURST); /* the minimal queue must have overflowed */
+    assert(sendto(tx, payload, sizeof(payload), 0, (struct sockaddr *)&a, sizeof(a)) ==
+           (ssize_t)sizeof(payload));
+    plen = sizeof(peer);
+    assert(mqvpn_udp_recv_segmented(rx, buf, sizeof(buf), (struct sockaddr *)&peer, &plen,
+                                    &seg, &drops) == (ssize_t)sizeof(payload));
+    assert(drops == (uint32_t)(BURST - queued));
+    printf("  ok: SO_RXQ_OVFL reported %u drops (%d of %d datagrams queued)\n", drops,
+           queued, BURST);
+    close(rx);
+    close(tx);
+    return 0;
+}
+
 int
 main(void)
 {
@@ -107,7 +167,7 @@ main(void)
         socklen_t plen = sizeof(peer);
         size_t seg = 0;
         ssize_t n = mqvpn_udp_recv_segmented(rx, buf, sizeof(buf),
-                                             (struct sockaddr *)&peer, &plen, &seg);
+                                             (struct sockaddr *)&peer, &plen, &seg, NULL);
         /* MQVPN_RECV_DROP is negative, so it must be tested BEFORE the error
          * branch or it is swallowed there as a stale-errno retry. A 64 KB
          * buffer cannot truncate a single UDP aggregate — seeing this means
@@ -155,5 +215,5 @@ main(void)
     }
     close(rx);
     close(tx);
-    return 0;
+    return rxq_ovfl_test();
 }
