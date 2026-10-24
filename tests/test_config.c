@@ -1101,6 +1101,13 @@ test_pmtud_parse(void)
     mqvpn_config_load(&cfg, path);
     unlink(path);
     ASSERT_EQ_INT(cfg.pmtud, 1, "PMTUD true parsed");
+
+    /* not a boolean: ignored with a warning, not read as off */
+    path = write_tmp("[Interface]\nPMTUD = on\nPMTUD = 2\n");
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.pmtud, 1, "PMTUD 2 ignored, on kept");
 }
 
 static void
