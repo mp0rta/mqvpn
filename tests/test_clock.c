@@ -14,7 +14,7 @@
  *   - reboot: a token issued 8 days ago at 100 days of uptime is refused
  *     after a reboot, although CLOCK_BOOTTIME started again from zero, and
  *     one issued a day ago is still accepted.
- * The clock does not follow a step of the wall clock.
+ * Steps of the wall clock: test_clock_source.c.
  *
  * Process clock. xquic's clock is process-wide: an injected client clock
  * goes away with its client, and an engine on another clock is refused
@@ -272,25 +272,6 @@ xquic_on_library_clock(void)
 /* ─── cases ─── */
 
 static void
-test_wall_step(void)
-{
-    printf("wall clock step:\n");
-    uint64_t w = wall_now_us();
-    start_process_at(1000 * SEC, w);
-    uint64_t t0 = mqvpn_clock_us();
-    CHECK(t0 == w, "the clock reads Unix time at its first reading");
-    g_boot_us += SEC;
-    g_wall_us -= 60 * SEC; /* NTP steps the wall clock back */
-    uint64_t t1 = mqvpn_clock_us();
-    g_boot_us += SEC;
-    g_wall_us += 180 * SEC; /* and forward */
-    uint64_t t2 = mqvpn_clock_us();
-    CHECK(t1 == t0 + SEC && t2 == t1 + SEC,
-          "steps of the wall clock do not move the clock");
-    mqvpn_clock_test_sources(NULL, NULL);
-}
-
-static void
 test_token_upgrade(void)
 {
     printf("token from a release timed with the wall clock:\n");
@@ -368,8 +349,6 @@ main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
     printf("test_clock: the clock of mqvpn's xquic engines\n");
-
-    test_wall_step();
 
     /* the server installs the process clock that the token functions use */
     mqvpn_server_t *svr = new_server();

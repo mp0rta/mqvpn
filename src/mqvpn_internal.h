@@ -233,11 +233,12 @@ bool mqvpn_check_scheduler_preconditions(mqvpn_scheduler_t scheduler, int n_path
 
 /* ── Clock (mqvpn_clock.c) ──
  * mqvpn_clock_us: the clock of the library's timers and of its xquic
- * engines, CLOCK_BOOTTIME offset to read Unix time at its first reading.
+ * engines, CLOCK_BOOTTIME (Windows: the interrupt time) offset to read Unix
+ * time at its first reading.
  * mqvpn_xqc_clock_*: the one clock all engines of a process share (xquic's
  * clock is process-wide). acquire returns -1 while engines on another clock
  * run; mqvpn_xqc_clock_now is the monotonic_ts callback of every engine.
- * mqvpn_clock_test_sources (tests only) replaces the CLOCK_BOOTTIME and wall
+ * mqvpn_clock_test_sources (tests only) replaces the boot clock and wall
  * clock readings, NULL for the real ones, and takes the offset again as a
  * new process would. */
 MQVPN_INTERNAL uint64_t mqvpn_clock_us(void);
