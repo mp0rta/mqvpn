@@ -285,9 +285,20 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
     }
 
     override fun onNativeTunnelClosed(errorCode: Int) {
-        if (errorCode != 0) {
+        if (errorCode == 0) return
+        if (errorCode == NATIVE_ERR_CLOSED) {
+            // MQVPN_ERR_CLOSED comes from the connection-close notify, which
+            // always follows up in the same native call with either a
+            // reconnect schedule or the CLOSED state: defer to that decision.
             pendingCloseError = MqvpnError.fromNativeCode(errorCode)
+            return
         }
+        // Any other reason is a request-level connect failure (bad key,
+        // non-200 response, rejected certificate) that can arrive while the
+        // QUIC connection stays open, with no follow-up callback guaranteed:
+        // terminal here. The teardown also closes a lingering connection.
+        emitTerminalError(MqvpnError.fromNativeCode(errorCode))
+        stopTunnel()
     }
 
     override fun onNativeStateChanged(oldState: Int, newState: Int) {
@@ -315,7 +326,7 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
             // the server is down): show the close error instead of retrying
             // behind an endless Reconnecting. The teardown also cancels the
             // armed reconnect timer.
-            emitTerminalError(pendingCloseError ?: MqvpnError.fromNativeCode(-10))
+            emitTerminalError(pendingCloseError ?: MqvpnError.fromNativeCode(NATIVE_ERR_CLOSED))
             stopTunnel()
             return
         }
@@ -382,5 +393,8 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
 
     companion object {
         private const val TAG = "MqvpnVpnService"
+
+        /** MQVPN_ERR_CLOSED in libmqvpn.h: connection closed. */
+        private const val NATIVE_ERR_CLOSED = -10
     }
 }

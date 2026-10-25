@@ -348,12 +348,34 @@ class MqvpnManagerTest {
         manager.attach(TestVpnService::class.java)
         shadowOf(Looper.getMainLooper()).idle()
 
-        svc.onNativeTunnelClosed(-4)
+        svc.onNativeTunnelClosed(-10)
         svc.onNativeStateChanged(2, 6) // CLOSED, no reconnect scheduled
 
         val state = manager.vpnState.value
         assertTrue(state is MqvpnState.Error)
-        assertEquals(MqvpnError.TlsError("TLS handshake failed"), (state as MqvpnState.Error).error)
+        assertEquals(
+            MqvpnError.ConnectionClosed("Connection to the server failed"),
+            (state as MqvpnState.Error).error,
+        )
+    }
+
+    @Test
+    fun requestFailure_withoutFollowUpCallback_showsErrorAndStopsSession() {
+        // e.g. the server rejects the CONNECT-IP request (bad key) but keeps
+        // the QUIC connection open: no close/reconnect callback ever follows
+        val svc = bindableService()
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        svc.onNativeTunnelClosed(-5)
+
+        val state = manager.vpnState.value
+        assertTrue(state is MqvpnState.Error)
+        assertEquals(
+            MqvpnError.AuthFailed("PSK authentication failed"),
+            (state as MqvpnState.Error).error,
+        )
+        assertEquals(1, svc.stopTunnelCalls)
     }
 
     @Test
@@ -362,9 +384,8 @@ class MqvpnManagerTest {
         manager.attach(TestVpnService::class.java)
         shadowOf(Looper.getMainLooper()).idle()
 
-        svc.onNativeTunnelClosed(-4)
-        svc.onNativeStateChanged(2, 6)
-        svc.onNativeTunnelClosed(-10)
+        svc.onNativeTunnelClosed(-4) // terminal on arrival
+        svc.onNativeTunnelClosed(-10) // close notify from the teardown
         svc.onNativeStateChanged(2, 6)
 
         val state = manager.vpnState.value as MqvpnState.Error
