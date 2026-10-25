@@ -2588,9 +2588,10 @@ status_churn_teardown(status_churn_t *f)
         if (f->cli_fd[k] >= 0) close(f->cli_fd[k]);
 }
 
-/* Past the server's cap: the client reconnects one retry interval (5 s)
- * after the first refusal, and the path joins the new connection. Both ends
- * start at 128 path IDs so the cap is reached without grant round trips. */
+/* Past the server's cap: the client reconnects 15 s after the first refusal,
+ * at the path's second retry, and the path joins the new connection. Both
+ * ends start at 128 path IDs so the cap is reached without grant round
+ * trips. */
 TEST(client_reconnects_when_path_ids_run_out)
 {
     status_churn_t f;
@@ -2607,9 +2608,10 @@ TEST(client_reconnects_when_path_ids_run_out)
     ASSERT_EQ(cycles, 127);
     ASSERT_EQ(g_cli_tunnel_ready_called, 1);
 
-    /* The retry is refused too, the client reconnects, and the tunnel comes
-     * up again; the platform then brings the TUN up as after any connect. */
-    for (int elapsed = 0; elapsed < 20000 && g_cli_tunnel_ready_called < 2; elapsed += 20)
+    /* The retries are refused too, the client reconnects, and the tunnel
+     * comes up again; the platform then brings the TUN up as after any
+     * connect. */
+    for (int elapsed = 0; elapsed < 30000 && g_cli_tunnel_ready_called < 2; elapsed += 20)
         status_churn_pump(&f, 20);
     ASSERT_EQ(g_path_ids_left_log, 1);
     ASSERT_EQ(g_cli_tunnel_ready_called, 2);
@@ -2636,6 +2638,45 @@ TEST(client_keeps_connection_while_path_ids_are_granted)
     ASSERT_EQ(cycles, 7);
 
     ASSERT_EQ(status_churn_pump_until_active(&f, 2, 8000), 1);
+    ASSERT_EQ(g_path_ids_left_log, 0);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+
+    status_churn_teardown(&f);
+}
+
+/* A grant that loss or an outage holds up past the first retry (5 s after
+ * the refusal): the second retry (15 s after) uses it, and the connection
+ * stays. */
+TEST(client_keeps_connection_while_a_grant_is_late)
+{
+    status_churn_t f;
+    status_churn_setup(&f, 0);
+
+    /* IDs 2..8 go to the first seven re-creations; the eighth finds none. */
+    for (int cycle = 0; cycle < 7; cycle++) {
+        status_churn_remove_path(&f);
+        status_churn_open_path(&f, 1);
+        ASSERT_EQ(status_churn_pump_until_active(&f, 2, 2000), 1);
+    }
+    status_churn_remove_path(&f);
+    status_churn_open_path(&f, 1);
+
+    /* The server does not run for 9 s: the PATHS_BLOCKED, and the one the
+     * retry 5 s later sends, wait in its socket. */
+    uint64_t refused_us = mqvpn_clock_us();
+    while (mqvpn_clock_us() - refused_us < 9000000) {
+        drain_and_tick2(NULL, NULL, f.cli, f.cli_tctx, f.ph);
+        struct pollfd pfds[2] = {
+            {.fd = f.cli_fd[0], .events = POLLIN},
+            {.fd = f.cli_fd[1], .events = POLLIN},
+        };
+        poll(pfds, 2, 10);
+    }
+    ASSERT_EQ(g_path_ids_left_log, 0);
+    ASSERT_EQ(count_active_paths(f.cli), 1);
+
+    /* It runs again and grants; the next retry creates the path. */
+    ASSERT_EQ(status_churn_pump_until_active(&f, 2, 15000), 1);
     ASSERT_EQ(g_path_ids_left_log, 0);
     ASSERT_EQ(g_cli_tunnel_ready_called, 1);
 
@@ -2737,6 +2778,7 @@ main(void)
     run_server_status_lists_live_paths_after_path_churn();
     run_client_reconnects_when_path_ids_run_out();
     run_client_keeps_connection_while_path_ids_are_granted();
+    run_client_keeps_connection_while_a_grant_is_late();
 
     /* max_clients config boundary */
     run_server_max_clients_config();

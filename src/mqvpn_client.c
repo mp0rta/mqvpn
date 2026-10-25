@@ -63,6 +63,11 @@
  * this window, so a dead first-listed path triggers reconnect (and primary_path_idx
  * rotation, issue #46) rather than waiting for xquic's idle_time_out (120s). */
 #define HANDSHAKE_STALL_TIMEOUT_MS 5000
+/* How long path creation may keep failing for want of a path ID before the
+ * client takes it that the server grants no more on this connection (see
+ * activate_via_xquic_classify): the second retry of a new path (5 s, then
+ * 10 s later), well within its retry budget (about two minutes). */
+#define PATH_ID_GRANT_TIMEOUT_US (15ULL * 1000000)
 /* PATH_RECREATE_* and PATH_STABLE_THRESHOLD_US relocated to path_state_machine.h
  * for PR4 — shared with path_state_machine.c. */
 
@@ -155,8 +160,8 @@ struct cli_conn_s {
 
     /* Path IDs (draft-21 §3.2.1): when xqc_conn_create_path first failed
      * with -XQC_EMP_NO_AVAIL_PATH_ID since the last path it created (xquic
-     * then sends PATHS_BLOCKED), and whether the server has since let a
-     * whole retry interval pass without granting one: 0 no, 1 yes (for
+     * then sends PATHS_BLOCKED), and whether the server has since let
+     * PATH_ID_GRANT_TIMEOUT_US pass without granting one: 0 no, 1 yes (for
      * tick_path_id_watchdog), 2 reported with auto-reconnect off. */
     uint64_t path_id_blocked_since_us;
     int path_ids_exhausted;
@@ -2577,15 +2582,18 @@ activate_via_xquic_classify(mqvpn_client_t *c, uint64_t *out_path_id)
     }
     if (ret == -XQC_EMP_CREATE_PATH) return ACTIVATE_PERMANENT_FAIL;
     if (ret == -XQC_EMP_NO_AVAIL_PATH_ID) {
-        /* Transient while the server's grant is on its way: it answers
-         * PATHS_BLOCKED with MAX_PATH_ID within a round trip. If a whole
-         * retry interval later it still has not, it will not on this
-         * connection (its lifetime cap, max_path_id_grant_max_value, is
-         * reached): tick_path_id_watchdog reconnects. */
+        /* Transient while the server's grant is on its way. A grant takes
+         * two round trips (MAX_PATH_ID, then the new path IDs' connection
+         * IDs both ways), and each frame lost on the way waits for a
+         * retransmission, so a lossy link or a short outage can hold it up
+         * for seconds. No frame says that a server grants no more (an mqvpn
+         * server stops at max_path_id_grant_max_value, its lifetime cap), so
+         * only PATH_ID_GRANT_TIMEOUT_US of refusals is taken to mean that it
+         * will not on this connection: tick_path_id_watchdog reconnects. */
         uint64_t now = client_now_us(c);
         if (c->conn->path_id_blocked_since_us == 0) {
             c->conn->path_id_blocked_since_us = now;
-        } else if (now - c->conn->path_id_blocked_since_us >= PATH_RECREATE_DELAY_US &&
+        } else if (now - c->conn->path_id_blocked_since_us >= PATH_ID_GRANT_TIMEOUT_US &&
                    c->conn->path_ids_exhausted == 0) {
             c->conn->path_ids_exhausted = 1;
         }
