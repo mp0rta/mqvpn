@@ -81,12 +81,10 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
     private var currentConfig: MqvpnConfig? = null
     private var currentTunPfd: ParcelFileDescriptor? = null
 
-    // Close/reconnect bookkeeping, executor thread only. The native client
-    // reports a close (tunnel_closed) and only afterwards reveals the
-    // session's fate: a reconnect schedule (it keeps retrying) or CLOSED (it
-    // gave up). The Error emit is deferred to that decision point — the app
-    // treats Error as terminal and stops the service, which must not kill a
-    // scheduled reconnect.
+    // Close/reconnect bookkeeping, executor thread only. A close is reported
+    // before the native client reveals whether it will retry, so the Error
+    // emit waits for that decision: the app stops the service on Error,
+    // which must not kill a scheduled reconnect.
     private var pendingCloseError: MqvpnError? = null
     private var tearingDown = false
 
@@ -203,9 +201,7 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
 
     private fun cleanup() {
         val t = tunnel ?: return // already cleaned up
-        // The close callbacks the teardown below fires are deliberate, not
-        // session errors: keep emitTerminalError quiet.
-        tearingDown = true
+        tearingDown = true // the teardown's own close callbacks are not session errors
         // The destroy and the fd closes run whatever the orderly half throws:
         // this is the executor's finalizer, and the reactor it hands back to
         // the poller must hold no live path when the poller frees it.
@@ -287,16 +283,13 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
     override fun onNativeTunnelClosed(errorCode: Int) {
         if (errorCode == 0) return
         if (errorCode == NATIVE_ERR_CLOSED) {
-            // MQVPN_ERR_CLOSED comes from the connection-close notify, which
-            // always follows up in the same native call with either a
-            // reconnect schedule or the CLOSED state: defer to that decision.
+            // close notify: a reconnect schedule or CLOSED follows in the
+            // same native call — defer to that decision
             pendingCloseError = MqvpnError.fromNativeCode(errorCode)
             return
         }
-        // Any other reason is a request-level connect failure (bad key,
-        // non-200 response, rejected certificate) that can arrive while the
-        // QUIC connection stays open, with no follow-up callback guaranteed:
-        // terminal here. The teardown also closes a lingering connection.
+        // request-level failure (bad key, non-200, rejected cert): the QUIC
+        // conn may stay open with no follow-up callback, so terminal here
         emitTerminalError(MqvpnError.fromNativeCode(errorCode))
         stopTunnel()
     }
@@ -321,16 +314,12 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
     }
 
     override fun onNativeReconnectScheduled(delaySec: Int) {
-        // A terminal Error may have been emitted in the same native call
-        // (request-level failure), with the teardown still queued behind
-        // this callback: the schedule is moot and must not overwrite the
-        // Error (or re-post a notification while tearing down).
+        // a terminal Error emitted in the same native call, or a teardown in
+        // progress, makes the schedule moot — it must not overwrite the Error
         if (tearingDown || synchronized(stateLock) { lastState } is MqvpnState.Error) return
         if (!sessionEstablished) {
-            // This session never connected (wrong address, port or key, or
-            // the server is down): show the close error instead of retrying
-            // behind an endless Reconnecting. The teardown also cancels the
-            // armed reconnect timer.
+            // never connected (bad address or server down): fail fast instead
+            // of an endless Reconnecting; the teardown cancels the armed timer
             emitTerminalError(pendingCloseError ?: MqvpnError.fromNativeCode(NATIVE_ERR_CLOSED))
             stopTunnel()
             return
@@ -341,9 +330,8 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
     }
 
     /**
-     * Emit a terminal [MqvpnState.Error]. Keeps the first Error of the
-     * session (an earlier emit such as TunCreationFailed is more specific)
-     * and stays quiet during a deliberate teardown. Executor thread only.
+     * Terminal [MqvpnState.Error]: the session's first Error wins (it is the
+     * most specific), silent while tearing down. Executor thread only.
      */
     private fun emitTerminalError(error: MqvpnError) {
         if (tearingDown) return
