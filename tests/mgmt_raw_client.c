@@ -95,7 +95,7 @@ bind_only(const char *path, int hold_lock, const char *stop_file)
         fprintf(stderr, "mgmt_raw_client: path too long\n");
         return 1;
     }
-    strcpy(sa.sun_path, path);
+    snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", path);
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0 || bind(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
         fprintf(stderr, "mgmt_raw_client: bind %s: %s\n", path, strerror(errno));

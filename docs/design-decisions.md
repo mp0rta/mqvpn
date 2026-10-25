@@ -411,10 +411,15 @@ rule. Replies keep the key order and types of the original string literals
 The client's management endpoint speaks JSON-RPC 2.0, one request per line,
 over an AF_UNIX socket. The
 protocol core (`src/mgmt/`, `src/common/ipc/`) knows neither libevent nor any
-platform; the connection layer (`mgmt_conn.c`) knows no OS; the listener owns
-the socket file; `mqvpnctl` links neither libmqvpn, xquic nor libevent. Each
-layer is testable alone, and `scripts/lint/check_mgmt_layering.sh` enforces
-the directions. Permission is the listener's role, stamped on the connection,
+platform; the connection layer (`mgmt_conn.c`) never touches the socket file;
+the listener owns it; `mqvpnctl` links neither libmqvpn, xquic nor libevent.
+Each layer is testable alone, and `scripts/lint/check_mgmt_layering.sh`
+enforces the directions. The listener trusts the socket's parent directory,
+which it creates `0755`: a process that can write there can swap the path
+between `lstat` and `chmod` or `unlink`, and such a process already controls
+the endpoint. The socket's group is set explicitly (`SocketGroup`, else the
+client's effective group), because BSD gives a new file the directory's group.
+Permission is the listener's role, stamped on the connection,
 not a per-call check. There is no fixed buffer: one response is in flight per
 connection, and a per-loop request budget keeps the data plane running while
 clients flood the socket.

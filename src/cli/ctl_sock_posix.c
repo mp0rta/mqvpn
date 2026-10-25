@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -74,7 +75,7 @@ ctl_sock_connect(ctl_sock_t *s, const char *path, int timeout_ms)
     memset(&sa, 0, sizeof(sa));
     sa.sun_family = AF_UNIX;
     if (strlen(path) >= sizeof(sa.sun_path)) return CTL_SOCK_E_IO;
-    strcpy(sa.sun_path, path);
+    snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", path);
 
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return CTL_SOCK_E_IO;

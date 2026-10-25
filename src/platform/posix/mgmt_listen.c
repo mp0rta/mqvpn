@@ -202,15 +202,19 @@ mgmt_listen_open(const mgmt_listen_opts_t *opts, char *errbuf, size_t errlen)
         SET_ERR("chmod %s failed: %s", path, strerror(errno));
         goto fail_unlock;
     }
+    /* BSD gives a new socket the parent directory's group; pin ours instead. */
+    gid_t gid = getegid();
     if (opts->group && opts->group[0]) {
         struct group *gr = getgrnam(opts->group);
-        if (!gr) {
+        if (!gr)
             LOG_WRN("mgmt ipc: group %s not found, leaving socket group unchanged",
                     opts->group);
-        } else if (chown(path, (uid_t)-1, gr->gr_gid) != 0) {
-            SET_ERR("chown %s failed: %s", path, strerror(errno));
-            goto fail_unlock;
-        }
+        else
+            gid = gr->gr_gid;
+    }
+    if (chown(path, (uid_t)-1, gid) != 0) {
+        SET_ERR("chown %s failed: %s", path, strerror(errno));
+        goto fail_unlock;
     }
 
     if (listen(fd, CMP_LISTEN_BACKLOG) != 0) {

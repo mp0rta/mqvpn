@@ -95,9 +95,9 @@ rules belong here, reasons there.
 - The MTU config upper bound stays 9000 until `max_pkt_out_size` becomes
   configurable. [DD §10]
 - The client management IPC is layered: `src/mgmt/` includes neither libevent
-  nor platform headers, `src/platform/common/mgmt_conn.c` includes no
-  OS-specific headers, and `mqvpnctl` links neither libmqvpn, xquic nor
-  libevent (`scripts/lint/check_mgmt_layering.sh`). [DD §16]
+  nor platform headers, `src/platform/common/mgmt_conn.c` never creates,
+  chmods or unlinks the socket file, and `mqvpnctl` links neither libmqvpn,
+  xquic nor libevent (`scripts/lint/check_mgmt_layering.sh`). [DD §16]
 
 ## Rules — change hygiene
 

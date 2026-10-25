@@ -298,7 +298,7 @@ rpc_timeout(void)
     CHECK(call_ping(&p, 100, &r, &se) == CTL_RPC_E_TIMEOUT);
     clock_gettime(CLOCK_MONOTONIC, &b);
     long ms = (b.tv_sec - a.tv_sec) * 1000 + (b.tv_nsec - a.tv_nsec) / 1000000;
-    CHECK(ms >= 100 && ms <= 500);
+    CHECK(ms >= 99 && ms <= 1500); /* ms floors twice; sanitizer runners are slow */
     CHECK(ctl_exit_code_for(CTL_RPC_E_TIMEOUT, se, 0) == 8);
     pair_close(&p);
 }

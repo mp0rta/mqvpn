@@ -11,10 +11,12 @@
 #     <winsock2.h>.
 #  2. src/platform/common/mgmt_conn.c (connection layer) includes none of
 #     sys/un.h, afunix.h, sys/stat.h, unistd.h, windows.h, aclapi.h, sddl.h:
-#     it never creates, chmods or unlinks a listener.
+#     it never creates, chmods or unlinks a listener. The socket header it
+#     needs for shutdown() and send() is allowed.
 #  3. Every #include "..." in src/cli/*.[ch] that resolves to a file under
 #     src/ lives in src/cli/, src/common/ipc/ or is src/json_util.h.
-#     (yyjson.h and libmqvpn.h are outside src/ and allowed.)
+#     (libmqvpn.h is outside src/ and allowed.) yyjson.h is reached only
+#     through json_util.h, here and in the protocol core.
 #  4. The mqvpnctl source list in CMakeLists.txt names nothing from
 #     src/mgmt/, src/platform/ or mqvpn_lib.
 #
@@ -74,7 +76,7 @@ INC='^[[:space:]]*#[[:space:]]*include[[:space:]]*[<"]([^>"]*/)?'
 
 # 1. protocol core
 scan_files "forbidden include (protocol core)" \
-    "${INC}(event2/|platform/|mqvpn_internal\\.h|sys/socket\\.h|winsock2\\.h)" \
+    "${INC}(event2/|platform/|mqvpn_internal\\.h|sys/socket\\.h|winsock2\\.h|yyjson\\.h)" \
     src/mgmt/*.[ch] src/common/ipc/*.[ch]
 
 # 2. connection layer
@@ -90,7 +92,14 @@ for f in src/cli/*.[ch]; do
     while IFS= read -r line; do
         inc=${line#*\"}
         inc=${inc%%\"*}
-        case "$inc" in json_util.h | yyjson.h) continue ;; esac
+        case "$inc" in
+            json_util.h) continue ;;
+            yyjson.h)
+                echo "mgmt-layering: $f includes \"yyjson.h\" directly; include json_util.h"
+                rc=1
+                continue
+                ;;
+        esac
         # A relative path can step out of src/cli/ into any other layer.
         case "$inc" in
             *..*)

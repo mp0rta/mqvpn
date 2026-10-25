@@ -37,13 +37,10 @@ done
 # T13 (root) also needs the build dir to be world-traversable so that
 # $CTL is executable by nobody.
 OWN_BASE=
-if [ -n "${RUNNER_TEMP:-}" ]; then
+T13D=
+if [ -n "${RUNNER_TEMP:-}" ] && [ "${#RUNNER_TEMP}" -le 50 ]; then
     BASE=$RUNNER_TEMP
 else
-    BASE=$(mktemp -d)
-    OWN_BASE=1
-fi
-if [ "${#BASE}" -gt 50 ]; then
     BASE=$(mktemp -d /tmp/mgmt.XXXXXX)
     OWN_BASE=1
 fi
@@ -61,6 +58,7 @@ cleanup() {
     touch "$TMPD/t18.stop" 2>/dev/null
     for p in ${PIDS[@]+"${PIDS[@]}"}; do kill -KILL "$p" 2>/dev/null; done
     wait 2>/dev/null
+    [ -z "$T13D" ] || rm -rf "$T13D"
     rm -rf "$TMPD"
     if [ -n "$OWN_BASE" ]; then rmdir "$BASE" 2>/dev/null; fi
 }

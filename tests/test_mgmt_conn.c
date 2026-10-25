@@ -308,6 +308,7 @@ static cl_t *
 cl_new(void)
 {
     cl_t *c = calloc(1, sizeof(*c));
+    CHECK(c != NULL);
     c->fd = unix_connect(g_path);
     CHECK(c->fd >= 0);
     return c;
