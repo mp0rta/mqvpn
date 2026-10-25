@@ -28,6 +28,12 @@ class MqvpnErrorTest {
     }
 
     @Test
+    fun `fromNativeCode maps closed`() {
+        val err = MqvpnError.fromNativeCode(-10)
+        assertTrue(err is MqvpnError.ConnectionClosed)
+    }
+
+    @Test
     fun `fromNativeCode maps unknown code`() {
         val err = MqvpnError.fromNativeCode(-99)
         assertTrue(err is MqvpnError.Unknown)

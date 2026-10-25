@@ -320,7 +320,10 @@ class MqvpnManagerTest {
         // session is torn down (which cancels the native reconnect timer)
         val state = manager.vpnState.value
         assertTrue(state is MqvpnState.Error)
-        assertEquals(MqvpnError.Unknown(-10, "Error code -10"), (state as MqvpnState.Error).error)
+        assertEquals(
+            MqvpnError.ConnectionClosed("Connection to the server failed"),
+            (state as MqvpnState.Error).error,
+        )
         assertEquals(1, svc.stopTunnelCalls)
     }
 
