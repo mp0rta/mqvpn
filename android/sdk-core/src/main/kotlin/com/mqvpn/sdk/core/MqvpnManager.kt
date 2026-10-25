@@ -10,6 +10,7 @@ import android.content.ServiceConnection
 import android.net.VpnService
 import android.os.IBinder
 import android.util.Log
+import androidx.annotation.MainThread
 import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.PathInfo
@@ -61,6 +62,7 @@ class MqvpnManager(private val context: Context) {
      *   [MqvpnConfig.hostIdentifierError]). Thrown before any state change or
      *   service start.
      */
+    @MainThread
     fun connect(config: MqvpnConfig, serviceClass: Class<out MqvpnVpnService>) {
         // synchronous: a bad host must fail here, not inside the service (whose executor only logs)
         config.hostIdentifierError()?.let { throw IllegalArgumentException(it) }
@@ -85,6 +87,7 @@ class MqvpnManager(private val context: Context) {
      * not spun up, and a dormant binding connects if the service starts later.
      * No-op while a binding already exists.
      */
+    @MainThread
     fun attach(serviceClass: Class<out MqvpnVpnService>) {
         if (serviceConnection != null) return
         bind(Intent(context, serviceClass), 0)
@@ -133,6 +136,7 @@ class MqvpnManager(private val context: Context) {
     }
 
     /** Disconnect the VPN. */
+    @MainThread
     fun disconnect() {
         boundService?.stopTunnel()
         // Release the binding now instead of waiting for the stopping
@@ -186,6 +190,7 @@ class MqvpnManager(private val context: Context) {
         _reorderStats.value = ReorderStats()
     }
 
+    @MainThread
     fun destroy() {
         boundService?.manager = null
         serviceConnection?.let { conn ->
