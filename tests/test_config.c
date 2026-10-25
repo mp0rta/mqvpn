@@ -10,6 +10,7 @@
 #include "config.h"
 #include "libmqvpn.h" /* MQVPN_RECV_RATE_LIMIT_MAX */
 #include "mqvpn_sched_names.h"
+#include "log.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -491,6 +492,94 @@ test_malformed_section_header(void)
     ASSERT_EQ_INT(rc, 0, "malformed section no error");
     /* First TunName is under malformed section (skipped), second is valid */
     ASSERT_EQ_STR(cfg.tun_name, "fixed", "valid section parsed after malformed");
+
+    path = write_tmp("[Interface]\nListen=0.0.0.0:443\n"
+                     "[Control\nListen=127.0.0.1:9090\n");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), 0, "malformed section skipped");
+    unlink(path);
+    ASSERT_EQ_STR(cfg.listen, "0.0.0.0:443", "malformed section cannot clobber previous");
+    ASSERT_EQ_STR(cfg.control_listen, "", "malformed control section not applied");
+}
+
+static void
+test_file_encoding(void)
+{
+    mqvpn_file_config_t cfg;
+    const char *bom_files[] = {
+        "\xef\xbb\xbf[Server]\r\nAddress=host:443\r\n[Interface]\r\nKillSwitch=true",
+        "\xef\xbb\xbf {\"server_addr\":\"host:443\",\"kill_switch\":true}",
+    };
+    for (size_t i = 0; i < sizeof(bom_files) / sizeof(bom_files[0]); i++) {
+        char *path = write_tmp(bom_files[i]);
+        mqvpn_config_defaults(&cfg);
+        ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), 0, "UTF-8 BOM accepted");
+        unlink(path);
+        ASSERT_EQ_STR(cfg.server_addr, "host:443", "first BOM section parsed");
+        ASSERT_EQ_INT(cfg.kill_switch, 1, "CRLF and final line without newline parsed");
+    }
+
+    const char ini[] = "[Server]\nAddress=host:443\n\0\n[Interface]\nKillSwitch=true\n";
+    char *path = write_tmp("");
+    FILE *fp = fopen(path, "wb");
+    ASSERT_TRUE(fp != NULL, "open raw INI");
+    if (!fp) return;
+    ASSERT_EQ_INT((int)fwrite(ini, 1, sizeof(ini) - 1, fp), (int)sizeof(ini) - 1,
+                  "write raw INI");
+    fclose(fp);
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), -1, "raw NUL in INI rejected");
+    unlink(path);
+    ASSERT_EQ_STR(cfg.server_addr, "", "NUL rejected before applying config");
+}
+
+static void
+capture_warning(mqvpn_log_level_t level, const char *msg, void *ctx)
+{
+    (void)level;
+    snprintf(ctx, 1024, "%s", msg);
+}
+
+static void
+test_physical_line_numbers(void)
+{
+    char *path = write_tmp("[Interface]\n\n\n\nMTU=bad\n");
+    char warning[1024] = "";
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_log_set_sink(capture_warning, warning);
+    int rc = mqvpn_config_load(&cfg, path);
+    mqvpn_log_set_sink(NULL, NULL);
+    unlink(path);
+    ASSERT_EQ_INT(rc, 0, "invalid MTU is warning-only");
+    ASSERT_TRUE(strstr(warning, ":5: invalid MTU") != NULL, "blank lines are counted");
+}
+
+static void
+test_host_port_strict(void)
+{
+    char host[256];
+    int port = 0;
+    ASSERT_EQ_INT(mqvpn_parse_host_port("example.com:1", host, sizeof(host), &port), 0,
+                  "lowest port accepted");
+    ASSERT_EQ_STR(host, "example.com", "host retained");
+    ASSERT_EQ_INT(port, 1, "lowest port");
+    ASSERT_EQ_INT(mqvpn_parse_host_port("[::1]:65535", host, sizeof(host), &port), 0,
+                  "IPv6 and highest port accepted");
+    ASSERT_EQ_STR(host, "::1", "IPv6 brackets removed");
+    ASSERT_EQ_INT(port, 65535, "highest port");
+    const char *bad[] = {"host:443oops",  "host:4294967739",
+                         "[::1]:443oops", "host:99999999999999999999999",
+                         "host:0",        "host:65536",
+                         "host:-1",       "host:+443",
+                         "host: 443",     "host:",
+                         ":443",          "[]:443",
+                         "[::1]443",      "host"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+        ASSERT_EQ_INT(mqvpn_parse_host_port(bad[i], host, sizeof(host), &port), -1,
+                      bad[i]);
+    ASSERT_EQ_INT(mqvpn_parse_host_port("longhost:443", host, 4, &port), -1,
+                  "host cannot be silently truncated");
 }
 
 static void
@@ -1003,6 +1092,26 @@ test_path_mtu_parse(void)
 }
 
 static void
+test_pmtud_parse(void)
+{
+    char *path = write_tmp("[Interface]\nPMTUD = true\n");
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(cfg.pmtud, 0, "default pmtud is off");
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.pmtud, 1, "PMTUD true parsed");
+
+    /* "on" is accepted; "2" is not a boolean, so it is ignored with a
+     * warning and not read as off */
+    path = write_tmp("[Interface]\nPMTUD = on\nPMTUD = 2\n");
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.pmtud, 1, "PMTUD 2 ignored, on kept");
+}
+
+static void
 test_mtu_json_parse(void)
 {
     const char *json = "{\"mtu\": 1400}";
@@ -1161,6 +1270,37 @@ test_auth_users_ini_invalid_ignored(void)
 }
 
 static void
+test_username_length(void)
+{
+    char name[64], ini[512], json[512];
+    memset(name, 'a', sizeof(name) - 1);
+    name[sizeof(name) - 1] = '\0';
+    snprintf(ini, sizeof(ini),
+             "[Auth]\nUser=%s:original\nUser=%sX:wrong\n"
+             "User=%sY:also-wrong\n",
+             name, name, name);
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), 0, "long INI usernames skipped");
+    unlink(path);
+    ASSERT_EQ_INT(cfg.n_users, 1, "only 63-byte username accepted");
+    ASSERT_EQ_STR(cfg.user_keys[0], "original", "long name cannot overwrite prefix");
+
+    const char *forms[] = {"{\"users\":[\"%s:original\",\"%sX:wrong\"]}",
+                           "{\"users\":[{\"name\":\"%s\",\"key\":\"original\"},"
+                           "{\"name\":\"%sX\",\"key\":\"wrong\"}]}"};
+    for (size_t i = 0; i < sizeof(forms) / sizeof(forms[0]); i++) {
+        snprintf(json, sizeof(json), forms[i], name, name);
+        mqvpn_config_defaults(&cfg);
+        ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, json), -1,
+                      "long JSON username rejected");
+        ASSERT_EQ_INT(cfg.n_users, 1, "JSON only applied valid prefix entry");
+        ASSERT_EQ_STR(cfg.user_keys[0], "original", "JSON prefix key retained");
+    }
+}
+
+static void
 test_json_config_load(void)
 {
     const char *json = "{"
@@ -1287,10 +1427,17 @@ test_json_invalid_users_error(void)
     char *path = write_tmp(json);
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
+    char error[1024] = "";
+    mqvpn_log_set_sink(capture_warning, error);
     int rc = mqvpn_config_load(&cfg, path);
+    mqvpn_log_set_sink(NULL, NULL);
     unlink(path);
 
     ASSERT_TRUE(rc != 0, "json invalid users returns error");
+    ASSERT_TRUE(strstr(error, "config: invalid \"users\"") != NULL,
+                "invalid users identifies the setting");
+    ASSERT_TRUE(strstr(error, "names up to 63 bytes") != NULL,
+                "invalid users explains the name limit");
 }
 
 static void
@@ -1394,7 +1541,16 @@ test_json_file_raw_nul_fails(void)
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     cfg.tun_mtu = 1300;
-    ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), -1, "raw NUL in JSON file fails");
+    char error[1024] = "";
+    mqvpn_log_set_sink(capture_warning, error);
+    int rc = mqvpn_config_load(&cfg, path);
+    mqvpn_log_set_sink(NULL, NULL);
+    ASSERT_EQ_INT(rc, -1, "raw NUL in JSON file fails");
+    ASSERT_TRUE(strstr(error, path) != NULL, "raw NUL: log identifies the file");
+    ASSERT_TRUE(strstr(error, "NUL byte at offset 12") != NULL,
+                "raw NUL: log identifies the byte offset");
+    ASSERT_TRUE(strstr(error, "save the file as UTF-8 (not UTF-16)") != NULL,
+                "raw NUL: log explains how to fix the encoding");
     ASSERT_EQ_INT(cfg.tun_mtu, 1300, "raw NUL: cfg untouched");
     unlink(path);
 }
@@ -1520,9 +1676,9 @@ test_json_users_shapes(void)
     key[200] = '\0';
     snprintf(json, sizeof(json), "{\"users\":[\"%s:%s\"]}", name, key);
     mqvpn_config_defaults(&cfg);
-    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, json), 0, "359-byte pair: rc");
-    ASSERT_EQ_INT(cfg.n_users, 1, "359-byte pair: n_users");
-    ASSERT_EQ_INT((int)strlen(cfg.user_keys[0]), 158, "359-byte pair: key truncated");
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, json), -1,
+                  "200-byte username rejected before pair truncation");
+    ASSERT_EQ_INT(cfg.n_users, 0, "long username not added");
 
     char longa[361];
     memset(longa, 'a', 360);
@@ -2292,6 +2448,7 @@ test_ini_json_scalar_parity(void)
                       "ReconnectInterval = 17\n"
                       "MTU = 1420\n"
                       "PathMTU = 1492\n"
+                      "PMTUD = true\n"
                       "[Server]\n"
                       "Address = vpn.parity.test:4433\n"
                       "ServerName = sni.parity.test\n"
@@ -2356,6 +2513,7 @@ test_ini_json_scalar_parity(void)
                        "\"reconnect_interval\":17,"
                        "\"mtu\":1420,"
                        "\"path_mtu\":1492,"
+                       "\"pmtud\":true,"
                        "\"server_addr\":\"vpn.parity.test:4433\","
                        "\"tls_server_name\":\"sni.parity.test\","
                        "\"insecure\":true,"
@@ -2427,6 +2585,7 @@ test_ini_json_scalar_parity(void)
     ASSERT_EQ_INT(a.is_server, b.is_server, "parity is_server");
     ASSERT_EQ_INT(a.tun_mtu, b.tun_mtu, "parity mtu");
     ASSERT_EQ_INT(a.path_mtu, b.path_mtu, "parity path_mtu");
+    ASSERT_EQ_INT(a.pmtud, b.pmtud, "parity pmtud");
     ASSERT_EQ_INT(a.max_clients, b.max_clients, "parity max_clients");
     ASSERT_EQ_INT((int)a.init_max_path_id, (int)b.init_max_path_id,
                   "parity init_max_path_id");
@@ -2480,6 +2639,7 @@ test_ini_json_scalar_parity(void)
      * sides and both structs just kept the (equal) default. */
     ASSERT_EQ_INT(a.tun_mtu, 1420, "parity mtu is non-default");
     ASSERT_EQ_INT(a.path_mtu, 1492, "parity path_mtu is non-default");
+    ASSERT_EQ_INT(a.pmtud, 1, "parity pmtud is non-default");
     ASSERT_EQ_STR(a.reinjection, "deadline", "parity reinjection is non-default");
     ASSERT_EQ_INT(a.reinjection_srtt_factor_pct, 150,
                   "parity reinjection_srtt_factor_pct is non-default");
@@ -2655,6 +2815,10 @@ int
 main(void)
 {
     test_defaults();
+    test_file_encoding();
+    test_physical_line_numbers();
+    test_host_port_strict();
+    test_username_length();
     test_parse_server_config();
     test_parse_client_config();
     test_parse_scheduler_backup_fec();
@@ -2710,6 +2874,7 @@ main(void)
     test_mtu_invalid_string_ignored();
     test_mtu_json_parse();
     test_path_mtu_parse();
+    test_pmtud_parse();
 
     /* subnet6 tests */
     test_subnet6_default();

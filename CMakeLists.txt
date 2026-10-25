@@ -857,6 +857,12 @@ target_link_libraries(mqvpn
     stdc++
 )
 
+# Private systemd/NAT helper; deliberately shares the CLI config parser.
+add_executable(mqvpn-nat-config src/nat_config.c src/config.c
+    src/redundant_tx.c src/log.c third_party/yyjson/yyjson.c)
+target_include_directories(mqvpn-nat-config PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
+
 # libFuzzer target: control-API request parsing crash-safety (see
 # fuzz/fuzz_control_dispatch.c for scope). Lives here — not in the
 # fuzz_tcp_lane block above — because control_socket.c is Linux-only and
@@ -1284,6 +1290,12 @@ if(BUILD_TESTING)
     add_test(NAME test_cli_path_argv
         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_cli_path_argv.sh $<TARGET_FILE:mqvpn>)
 
+    add_test(NAME test_cli_config
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_cli_config.sh $<TARGET_FILE:mqvpn>)
+    add_test(NAME test_nat_config
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_nat_config.sh
+            $<TARGET_FILE:mqvpn-nat-config> ${CMAKE_SOURCE_DIR}/scripts/mqvpn-server-nat.sh)
+
     # Exit-at-CLOSED shell test (runs the built mqvpn binary). Needs no root,
     # no server and no TUN — the client reaches CLOSED on a handshake that is
     # abandoned — so it runs here rather than in the sudo+netns suite. ~7s.
@@ -1323,6 +1335,7 @@ install(FILES systemd/server.conf.example systemd/client.conf.example
     DESTINATION /etc/mqvpn)
 install(PROGRAMS scripts/mqvpn-server-nat.sh
         DESTINATION lib/mqvpn)
+install(TARGETS mqvpn-nat-config DESTINATION lib/mqvpn)
 
 # Bundle the project license and NOTICE in /usr/share/doc/mqvpn/ inside the
 # generated deb (and any tarball that runs `cmake --install`). Required by

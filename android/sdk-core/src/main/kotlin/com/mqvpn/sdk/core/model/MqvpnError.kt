@@ -16,6 +16,7 @@ sealed interface MqvpnError {
     data class EngineError(val code: Int, override val message: String) : MqvpnError
     data class AbiMismatch(override val message: String) : MqvpnError
     data class Timeout(override val message: String) : MqvpnError
+    data class ConnectionClosed(override val message: String) : MqvpnError
     data class Unknown(val nativeCode: Int, override val message: String) : MqvpnError
 
     companion object {
@@ -26,6 +27,9 @@ sealed interface MqvpnError {
             -6 -> ProtocolError(code, "MASQUE not supported")
             -11 -> AbiMismatch("Callback ABI version mismatch")
             -12 -> Timeout("Connection timeout")
+            // MQVPN_ERR_CLOSED: the connection was closed before or instead
+            // of establishing — on screen this is "the server didn't answer"
+            -10 -> ConnectionClosed("Connection to the server failed")
             -3 -> EngineError(code, "Engine error")
             else -> Unknown(code, "Error code $code")
         }

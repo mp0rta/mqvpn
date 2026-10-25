@@ -43,6 +43,7 @@
 
 #include "addr_pool.h"
 #include "auth.h"
+#include "dgram_frame.h"
 #include "flow_sched.h"
 #include "icmp.h"
 #include "reorder.h"
@@ -1938,8 +1939,7 @@ forward_inner_ip(svr_conn_t *conn, const uint8_t *pkt, size_t len)
     if (len < 1) return;
 
     uint8_t ip_ver = pkt[0] >> 4;
-    uint8_t fwd_pkt[PACKET_BUF_SIZE];
-    if (len > sizeof(fwd_pkt)) return;
+    if (len > PACKET_BUF_SIZE) return;
 
     if (ip_ver == 4) {
         if (len < 20) return;
@@ -1947,8 +1947,7 @@ forward_inner_ip(svr_conn_t *conn, const uint8_t *pkt, size_t len)
             LOG_W(s, "dropping packet: src IP mismatch");
             return;
         }
-        memcpy(fwd_pkt, pkt, len);
-        if (fwd_pkt[8] <= 1) {
+        if (pkt[8] <= 1) {
             if (ptb_rate_allow(s)) {
                 struct in_addr srv;
                 mqvpn_addr_pool_server_addr(&s->pool, &srv);
@@ -1958,19 +1957,13 @@ forward_inner_ip(svr_conn_t *conn, const uint8_t *pkt, size_t len)
             }
             return;
         }
-        fwd_pkt[8]--;
-        uint32_t sum = ((uint32_t)fwd_pkt[10] << 8 | fwd_pkt[11]) + 0x0100;
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        fwd_pkt[10] = (sum >> 8) & 0xFF;
-        fwd_pkt[11] = sum & 0xFF;
     } else if (ip_ver == 6) {
         if (len < 40) return;
         if (!conn->has_v6 || memcmp(pkt + 8, &conn->assigned_ip6, 16) != 0) {
             LOG_W(s, "dropping IPv6 packet: src IP mismatch");
             return;
         }
-        memcpy(fwd_pkt, pkt, len);
-        if (fwd_pkt[7] <= 1) {
+        if (pkt[7] <= 1) {
             if (s->pool.has_v6 && ptb_rate_allow(s)) {
                 struct in6_addr srv6;
                 mqvpn_addr_pool_server_addr6(&s->pool, &srv6);
@@ -1980,14 +1973,29 @@ forward_inner_ip(svr_conn_t *conn, const uint8_t *pkt, size_t len)
             }
             return;
         }
-        fwd_pkt[7]--;
     } else {
         return;
+    }
+
+    /* The TTL / hop limit is decremented in a copy: pkt is xquic's buffer. */
+    uint8_t stack_buf[MQVPN_DGRAM_STACK_BUF];
+    uint8_t *fwd_pkt = len <= sizeof(stack_buf) ? stack_buf : malloc(len);
+    if (!fwd_pkt) return;
+    memcpy(fwd_pkt, pkt, len);
+    if (ip_ver == 4) {
+        fwd_pkt[8]--;
+        uint32_t sum = ((uint32_t)fwd_pkt[10] << 8 | fwd_pkt[11]) + 0x0100;
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        fwd_pkt[10] = (sum >> 8) & 0xFF;
+        fwd_pkt[11] = sum & 0xFF;
+    } else {
+        fwd_pkt[7]--;
     }
 
     s->bytes_rx += len;
     s->dgram_recv++;
     s->cbs.tun_output(fwd_pkt, len, s->user_ctx);
+    if (fwd_pkt != stack_buf) free(fwd_pkt);
 }
 
 /* Reorder RX deliver() trampoline: routes in-order packets from the reorder
@@ -2272,6 +2280,8 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         .cc = cfg->cc,
         .init_max_path_id = cfg->init_max_path_id,
         .path_mtu = cfg->path_mtu,
+        .pmtud = cfg->pmtud != 0,
+        .reorder = cfg->reorder.mode != MQVPN_REORDER_OFF,
         /* recv_rate_bytes_per_sec: intentionally absent (=0) — client-only knob */
         .reinjection = cfg->reinjection,
         .reinj_srtt_factor_pct = cfg->reinj_srtt_factor_pct,
@@ -2660,12 +2670,10 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
     }
 
     /* §7.3 step 4: TTL / Hop Limit decrement (RFC 9484 §4.3) */
-    uint8_t fwd_pkt[PACKET_BUF_SIZE];
-    if (len > sizeof(fwd_pkt)) return MQVPN_ERR_INVALID_ARG;
-    memcpy(fwd_pkt, pkt, len);
+    if (len > PACKET_BUF_SIZE) return MQVPN_ERR_INVALID_ARG;
 
     if (ip_ver == 4) {
-        if (fwd_pkt[8] <= 1) {
+        if (pkt[8] <= 1) {
             /* DL: source is on TUN side → ICMP goes via tun_output */
             if (ptb_rate_allow(s)) {
                 struct in_addr srv;
@@ -2676,13 +2684,8 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
             }
             return MQVPN_OK;
         }
-        fwd_pkt[8]--;
-        uint32_t sum = ((uint32_t)fwd_pkt[10] << 8 | fwd_pkt[11]) + 0x0100;
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        fwd_pkt[10] = (sum >> 8) & 0xFF;
-        fwd_pkt[11] = sum & 0xFF;
     } else {
-        if (fwd_pkt[7] <= 1) {
+        if (pkt[7] <= 1) {
             if (s->pool.has_v6 && ptb_rate_allow(s)) {
                 struct in6_addr srv6;
                 mqvpn_addr_pool_server_addr6(&s->pool, &srv6);
@@ -2692,29 +2695,40 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
             }
             return MQVPN_OK;
         }
-        fwd_pkt[7]--;
     }
 
-    /* On STAMP, prepend the 8-byte reorder header to the TTL-decremented inner
-     * IP packet; the framed payload is then [hdr || fwd_pkt]. On RAW, frame the
-     * bare fwd_pkt (current behavior). */
-    const uint8_t *frame_src = fwd_pkt;
-    size_t frame_src_len = len;
-    uint8_t stamped[MQVPN_REORDER_HDR_LEN + PACKET_BUF_SIZE];
-    if (do_stamp) {
-        memcpy(stamped, peek.hdr, MQVPN_REORDER_HDR_LEN);
-        memcpy(stamped + MQVPN_REORDER_HDR_LEN, fwd_pkt, len);
-        frame_src = stamped;
-        frame_src_len = len + MQVPN_REORDER_HDR_LEN;
+    /* MASQUE frame: on STAMP the 8-byte reorder header goes between the
+     * MASQUE header and the inner IP packet, on RAW the bare packet is
+     * framed. The TTL is then decremented in the frame's copy of the packet
+     * (one copy of pkt; see dgram_frame.h). */
+    uint8_t stack_buf[MQVPN_DGRAM_STACK_BUF];
+    uint8_t *frame_buf = stack_buf;
+    size_t cap = mqvpn_dgram_frame_cap(len, do_stamp);
+    if (cap > MASQUE_FRAME_BUF) cap = MASQUE_FRAME_BUF; /* larger never framed */
+    if (cap > sizeof(stack_buf)) {
+        frame_buf = malloc(cap);
+        if (!frame_buf) return MQVPN_ERR_NO_MEMORY;
+    } else {
+        cap = sizeof(stack_buf);
     }
-
-    /* MASQUE frame and send */
-    uint8_t frame_buf[MASQUE_FRAME_BUF];
     size_t frame_written = 0;
     xqc_int_t xret =
-        xqc_h3_ext_masque_frame_udp(frame_buf, sizeof(frame_buf), &frame_written,
-                                    target->masque_stream_id, frame_src, frame_src_len);
-    if (xret != XQC_OK) return MQVPN_ERR_ENGINE;
+        mqvpn_dgram_frame(frame_buf, cap, target->masque_stream_id,
+                          do_stamp ? peek.hdr : NULL, pkt, len, &frame_written);
+    if (xret != XQC_OK) {
+        if (frame_buf != stack_buf) free(frame_buf);
+        return MQVPN_ERR_ENGINE;
+    }
+    uint8_t *fwd_pkt = frame_buf + frame_written - len;
+    if (ip_ver == 4) {
+        fwd_pkt[8]--;
+        uint32_t sum = ((uint32_t)fwd_pkt[10] << 8 | fwd_pkt[11]) + 0x0100;
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        fwd_pkt[10] = (sum >> 8) & 0xFF;
+        fwd_pkt[11] = sum & 0xFF;
+    } else {
+        fwd_pkt[7]--;
+    }
 
     uint64_t dgram_id;
     uint32_t fh =
@@ -2722,6 +2736,7 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
     xqc_conn_set_dgram_flow_hash(xqc_h3_conn_get_xqc_conn(target->h3_conn), fh);
     xret = xqc_h3_ext_datagram_send(target->h3_conn, frame_buf, frame_written, &dgram_id,
                                     mqvpn_dgram_qos_level(target->eff_sched));
+    if (frame_buf != stack_buf) free(frame_buf);
 
     if (xret == -XQC_EAGAIN) {
         s->tun_paused = 1;
@@ -3018,6 +3033,7 @@ mqvpn_server_add_user(mqvpn_server_t *s, const char *username, const char *key)
 {
     if (!s || !username || !key || username[0] == '\0' || key[0] == '\0')
         return MQVPN_ERR_INVALID_ARG;
+    if (strlen(username) >= sizeof(s->config.user_names[0])) return MQVPN_ERR_INVALID_ARG;
 
     /* Reject characters that would break JSON serialization in control API */
     for (const char *p = username; *p; p++) {

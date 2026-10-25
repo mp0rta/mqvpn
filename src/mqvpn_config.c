@@ -166,7 +166,8 @@ mqvpn_config_set_auth_key(mqvpn_config_t *cfg, const char *key)
 int
 mqvpn_config_add_user(mqvpn_config_t *cfg, const char *username, const char *key)
 {
-    if (!cfg || !username || !key || username[0] == '\0' || key[0] == '\0') {
+    if (!cfg || !username || !key || username[0] == '\0' || key[0] == '\0' ||
+        strlen(username) >= sizeof(cfg->user_names[0])) {
         return MQVPN_ERR_INVALID_ARG;
     }
 
@@ -387,6 +388,12 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
         cfg->path_mtu = iv;
     }
 
+    v = yyjson_obj_get(root, "pmtud");
+    if (v) {
+        if (!yyjson_is_bool(v)) goto out;
+        cfg->pmtud = yyjson_get_bool(v) ? 1 : 0;
+    }
+
     v = yyjson_obj_get(root, "users");
     if (v && json_read_users(cfg, v) != MQVPN_OK) goto out;
 
@@ -585,6 +592,14 @@ mqvpn_config_set_path_mtu(mqvpn_config_t *cfg, int mtu)
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     if (mtu != 0 && (mtu < 1280 || mtu > 9000)) return MQVPN_ERR_INVALID_ARG;
     cfg->path_mtu = mtu;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_pmtud(mqvpn_config_t *cfg, int enable)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->pmtud = enable ? 1 : 0;
     return MQVPN_OK;
 }
 

@@ -27,7 +27,7 @@
 /* ── Configurable stub state ──────────────────────────────────────────────── */
 
 static int g_add_user_rc = MQVPN_OK;
-static char g_last_add_name[128]; /* wider than the handler name[64]: its cut shows */
+static char g_last_add_name[128];
 static int g_remove_user_rc = MQVPN_OK;
 
 static int g_list_users_n = 0;
@@ -368,24 +368,48 @@ test_add_user_server_failure(void)
     CHECK_HAS("add_user failed (-5)");
 }
 
-/* The handler passes the decoded name, cut to name[64] (63 bytes). */
 static void
-test_add_user_name_decoded_and_truncated(void)
+test_add_user_name_decoded_and_bounded(void)
 {
     g_add_user_rc = MQVPN_OK;
     call("{\"cmd\":\"add_user\",\"name\":\"a}b\\\"c\",\"key\":\"k\"}");
     CHECK_EQ_STR("{\"ok\":true}");
     CHECK(strcmp(g_last_add_name, "a}b\"c") == 0);
 
-    char name[101];
-    char req[192];
-    memset(name, 'n', 100);
-    name[100] = '\0';
+    char name[65];
+    char req[256];
+    memset(name, 'n', 63);
+    name[63] = '\0';
     snprintf(req, sizeof(req), "{\"cmd\":\"add_user\",\"name\":\"%s\",\"key\":\"k\"}",
              name);
     call(req);
     CHECK_EQ_STR("{\"ok\":true}");
+    CHECK(strcmp(g_last_add_name, name) == 0);
+
+    name[63] = 'n';
+    name[64] = '\0';
+    snprintf(req, sizeof(req), "{\"cmd\":\"add_user\",\"name\":\"%s\",\"key\":\"k\"}",
+             name);
+    g_last_add_name[0] = '\0';
+    call(req);
+    CHECK_EQ_STR("{\"ok\":false,\"error\":\"name exceeds 63 bytes\"}");
+    CHECK(g_last_add_name[0] == '\0');
+
+    /* The limit counts decoded UTF-8 bytes, not JSON escape characters. */
+    name[61] = '\0';
+    snprintf(req, sizeof(req),
+             "{\"cmd\":\"add_user\",\"name\":\"%s\\u00e9\",\"key\":\"k\"}", name);
+    call(req);
+    CHECK_EQ_STR("{\"ok\":true}");
     CHECK(strlen(g_last_add_name) == 63);
+    name[61] = 'n';
+    name[62] = '\0';
+    snprintf(req, sizeof(req),
+             "{\"cmd\":\"add_user\",\"name\":\"%s\\u00e9\",\"key\":\"k\"}", name);
+    g_last_add_name[0] = '\0';
+    call(req);
+    CHECK_EQ_STR("{\"ok\":false,\"error\":\"name exceeds 63 bytes\"}");
+    CHECK(g_last_add_name[0] == '\0');
 }
 
 /* ── remove_user ──────────────────────────────────────────────────────────── */
@@ -411,6 +435,31 @@ test_remove_user_not_found(void)
     g_remove_user_rc = -1;
     call("{\"cmd\":\"remove_user\",\"name\":\"ghost\"}");
     CHECK_HAS("user not found");
+}
+
+static void
+test_user_lookup_name_length(void)
+{
+    char name[65], req[160];
+    memset(name, 'n', 64);
+    name[64] = '\0';
+    g_remove_user_rc = MQVPN_OK;
+    g_fec_rc = 1;
+    snprintf(req, sizeof(req), "{\"cmd\":\"remove_user\",\"name\":\"%s\"}", name);
+    call(req);
+    CHECK_EQ_STR("{\"ok\":false,\"error\":\"name exceeds 63 bytes\"}");
+    snprintf(req, sizeof(req), "{\"cmd\":\"get_fec_stats\",\"user\":\"%s\"}", name);
+    call(req);
+    CHECK_EQ_STR("{\"ok\":false,\"error\":\"name exceeds 63 bytes\"}");
+
+    name[63] = '\0';
+    snprintf(req, sizeof(req), "{\"cmd\":\"remove_user\",\"name\":\"%s\"}", name);
+    call(req);
+    CHECK_EQ_STR("{\"ok\":true}");
+    snprintf(req, sizeof(req), "{\"cmd\":\"get_fec_stats\",\"user\":\"%s\"}", name);
+    call(req);
+    CHECK_HAS("\"ok\":true");
+    CHECK_HAS(name);
 }
 
 /* ── list_users ───────────────────────────────────────────────────────────── */
@@ -852,11 +901,12 @@ main(void)
     test_add_user_missing_name();
     test_add_user_missing_key();
     test_add_user_server_failure();
-    test_add_user_name_decoded_and_truncated();
+    test_add_user_name_decoded_and_bounded();
 
     test_remove_user_success();
     test_remove_user_missing_name();
     test_remove_user_not_found();
+    test_user_lookup_name_length();
 
     test_list_users_empty();
     test_list_users_two_entries();

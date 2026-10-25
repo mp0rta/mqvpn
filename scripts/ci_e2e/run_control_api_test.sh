@@ -402,6 +402,38 @@ test_phase_a_basic() {
     fi
     echo "  remove_user carol: OK"
 
+    # A 64-byte name must neither alias nor duplicate an existing 63-byte name.
+    local name
+    printf -v name '%063d' 0
+    resp=$(ctrl_local "{\"cmd\":\"add_user\",\"name\":\"$name\",\"key\":\"boundary_key\"}")
+    if ! assert_json_field "$resp" ok true; then
+        echo "  add_user 63-byte name failed: $resp"; return 1
+    fi
+    resp=$(ctrl_local "{\"cmd\":\"add_user\",\"name\":\"${name}x\",\"key\":\"other_key\"}")
+    if ! assert_json_field "$resp" ok false ||
+       ! assert_json_field "$resp" error '"name exceeds 63 bytes"'; then
+        echo "  add_user 64-byte name error incorrect: $resp"; return 1
+    fi
+    resp=$(ctrl_local "{\"cmd\":\"remove_user\",\"name\":\"${name}x\"}")
+    if ! assert_json_field "$resp" ok false ||
+       ! assert_json_field "$resp" error '"name exceeds 63 bytes"'; then
+        echo "  remove_user 64-byte name error incorrect: $resp"; return 1
+    fi
+    resp=$(ctrl_local "{\"cmd\":\"get_fec_stats\",\"user\":\"${name}x\"}")
+    if ! assert_json_field "$resp" ok false ||
+       ! assert_json_field "$resp" error '"name exceeds 63 bytes"'; then
+        echo "  get_fec_stats 64-byte name error incorrect: $resp"; return 1
+    fi
+    resp=$(ctrl_local '{"cmd":"list_users"}')
+    if ! assert_json_users_eq "$resp" "alice,bob,$name"; then
+        echo "  user table changed after overlong name: $resp"; return 1
+    fi
+    resp=$(ctrl_local "{\"cmd\":\"remove_user\",\"name\":\"$name\"}")
+    if ! assert_json_field "$resp" ok true; then
+        echo "  remove_user 63-byte name failed: $resp"; return 1
+    fi
+    echo "  user name length boundary: OK"
+
     # add_user with missing key
     resp=$(ctrl_local '{"cmd":"add_user","name":"eve"}')
     if ! assert_json_field "$resp" ok false; then

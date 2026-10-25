@@ -67,6 +67,20 @@ data class MqvpnConfig(
      * normally does not do while Wi-Fi or Ethernet is connected.
      */
     val bluetoothPathEnabled: Boolean = false,
+    /**
+     * Largest IP packet the network carries (1280-9000), to size QUIC packets
+     * for; 0 = the default packet size. With [pmtud] it is the upper limit.
+     */
+    val pathMtu: Int = 0,
+    /**
+     * Discover the path MTU: packets start at a size every path carries and
+     * grow while larger probes get through, and go back down if the path
+     * gets smaller. The server must enable it too. Android sets the TUN MTU
+     * once, when the tunnel comes up, so it stays at 1280 here: the tunnel
+     * survives a path that gets smaller, but uploads do not use a larger
+     * discovered size.
+     */
+    val pmtud: Boolean = false,
 ) : Parcelable {
 
     @Serializable

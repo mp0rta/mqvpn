@@ -153,6 +153,26 @@ TEST(config_add_user_max_capacity)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_username_length)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_NOT_NULL(cfg);
+    char name[65];
+    memset(name, 'a', 63);
+    name[63] = '\0';
+    ASSERT_EQ(mqvpn_config_add_user(cfg, name, "original"), MQVPN_OK);
+    name[63] = 'X';
+    name[64] = '\0';
+    ASSERT_EQ(mqvpn_config_add_user(cfg, name, "wrong"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(cfg->n_users, 1);
+    ASSERT_STR_EQ(cfg->user_keys[0], "original");
+    char json[256];
+    snprintf(json, sizeof(json), "{\"users\":[{\"name\":\"%s\",\"key\":\"wrong\"}]}",
+             name);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, json), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
 TEST(config_load_json)
 {
     const char *json = "{"
@@ -388,16 +408,15 @@ TEST(api_json_users_reset_and_partial)
     ASSERT_EQ(cfg->n_users, 1);
     ASSERT_STR_EQ(cfg->user_names[0], "a");
 
-    /* "name:key" strings are capped at 359 bytes, like the INI User= parser */
+    /* Long usernames must not turn into a different, truncated identity. */
     char name[201], key[201], longa[361], json[600];
     memset(name, 'n', 200);
     name[200] = '\0';
     memset(key, 'k', 200);
     key[200] = '\0';
     snprintf(json, sizeof(json), "{\"users\":[\"%s:%s\"]}", name, key);
-    ASSERT_EQ(mqvpn_config_load_json(cfg, json), MQVPN_OK);
-    ASSERT_EQ(cfg->n_users, 1);
-    ASSERT_EQ((int)strlen(cfg->user_keys[0]), 158);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, json), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(cfg->n_users, 0);
     memset(longa, 'a', 360);
     longa[360] = '\0';
     snprintf(json, sizeof(json), "{\"users\":[\"%s:k\"]}", longa);
@@ -3876,6 +3895,32 @@ rt_client(const uint16_t *ports, size_t n_ports, int reorder, int reorder_peer)
     return c;
 }
 
+/* A datagram MSS change while the tunnel is up (PMTUD) keeps the reorder
+ * header out of the TUN MTU, like the MTU set when the tunnel came up. */
+TEST(mss_update_reserves_reorder_header)
+{
+    int mtu[2][2]; /* [reorder configured][peer supports it] */
+    for (int cfg_on = 0; cfg_on < 2; cfg_on++) {
+        for (int peer = 0; peer < 2; peer++) {
+            mqvpn_config_t *cfg = mqvpn_config_new();
+            mqvpn_config_set_server(cfg, "1.2.3.4", 443);
+            if (cfg_on) mqvpn_config_set_reorder_enabled(cfg, MQVPN_REORDER_ON);
+            mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
+            cbs.tun_output = dummy_tun_output;
+            cbs.tunnel_config_ready = dummy_config_ready;
+            mqvpn_client_t *c = mqvpn_client_new(cfg, &cbs, NULL);
+            mqvpn_config_free(cfg);
+            ASSERT_NOT_NULL(c);
+            mtu[cfg_on][peer] = mqvpn_client_test_mss_updated(c, 1400, peer);
+            mqvpn_client_destroy(c);
+        }
+    }
+    ASSERT_EQ(mtu[0][0] > 1300, 1);
+    ASSERT_EQ(mtu[0][1], mtu[0][0]); /* not configured: no header */
+    ASSERT_EQ(mtu[1][0], mtu[0][0]); /* not negotiated: no header */
+    ASSERT_EQ(mtu[1][1], mtu[0][0] - 8);
+}
+
 static void
 rt_done(mqvpn_client_t *c)
 {
@@ -4175,6 +4220,7 @@ main(void)
     run_config_set_auth_key();
     run_config_add_remove_user();
     run_config_add_user_max_capacity();
+    run_config_username_length();
     run_config_load_json();
     run_config_set_redundant_validates();
     run_config_json_redundant();
@@ -4325,6 +4371,7 @@ main(void)
     run_headers_malformed_status_length_latches_failure();
     run_reorder_echo_ignored_outside_deciding_200_section();
     run_reorder_echo_in_deciding_200_section_sets_flag();
+    run_mss_update_reserves_reorder_header();
     run_scan_headers_sched_echo_on_200();
     run_scan_headers_sched_echo_ignored_on_403();
     run_scan_headers_sched_echo_interim_ignored();

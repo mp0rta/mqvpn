@@ -52,6 +52,10 @@
  * header and MASQUE ids: max_pkt_out_size minus this is the TUN MTU. */
 #define MQVPN_DGRAM_HEADROOM 18
 
+/* With PMTUD, packets start at this size: the smallest that still gives
+ * IPv6's minimum inner MTU of 1280. */
+#define MQVPN_PMTUD_BASE_PKT_OUT_SIZE (1280 + MQVPN_DGRAM_HEADROOM)
+
 /* max_pkt_out_size for a PathMTU. Assumes an IPv6 + UDP header so the
  * result fits either family; 0 keeps MQVPN_MAX_PKT_OUT_SIZE. */
 static inline size_t
@@ -169,6 +173,7 @@ struct mqvpn_config_s {
     int tun_mtu;  /* 0 = auto (client: negotiated; server: 1382), >0 = client cap / server
                      TUN MTU */
     int path_mtu; /* 0 = default packet size, >0 = underlay MTU to size packets for */
+    int pmtud;    /* 1 = discover the path MTU, path_mtu is the upper bound */
 
     /* Flow-aware reorder shim config (§16). Seeded with
      * mqvpn_reorder_config_default() in mqvpn_config_new(); the library
@@ -268,6 +273,10 @@ typedef int (*mqvpn_test_send_fn)(void *ud, uint64_t xqc_path_id, const uint8_t 
 MQVPN_INTERNAL int mqvpn_client_test_redundant_fixture(mqvpn_client_t *c, int n_paths,
                                                        size_t dgram_mss,
                                                        int reorder_peer);
+/* Drives the datagram MSS update callback on a test connection (masque
+ * stream 4, TUN active) and returns the client's TUN MTU after it, or -1. */
+MQVPN_INTERNAL int mqvpn_client_test_mss_updated(mqvpn_client_t *c, size_t dgram_mss,
+                                                 int reorder_peer);
 MQVPN_INTERNAL int mqvpn_client_test_reorder_peek_hdr(mqvpn_client_t *c,
                                                       const uint8_t *pkt, size_t len,
                                                       uint8_t hdr_out[8]);

@@ -195,6 +195,82 @@ test_socket_buffers_untouched_and_explicit(void)
 }
 
 static void
+test_dont_fragment_only_when_asked(void)
+{
+#if defined(__linux__)
+    int fd = udp_socket(NULL);
+    int v = 0;
+    socklen_t ol = sizeof(v);
+    CHECK(getsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &v, &ol) == 0);
+    const int before = v;
+    CHECK(before != IP_PMTUDISC_PROBE);
+
+    /* off by default, and a caller built before the field never asks */
+    mqvpn_bind_posix_opts_t o = opts_default();
+    void *ctx = NULL;
+    CHECK(mqvpn_bind_posix_path_new(fd, &o, &ctx) == MQVPN_OK);
+    ol = sizeof(v);
+    CHECK(getsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &v, &ol) == 0 && v == before);
+    mqvpn_bind_posix_path_free(ctx);
+
+    o.dont_fragment = 1;
+    o.struct_size = (uint32_t)offsetof(mqvpn_bind_posix_opts_t, dont_fragment);
+    CHECK(mqvpn_bind_posix_path_new(fd, &o, &ctx) == MQVPN_OK);
+    ol = sizeof(v);
+    CHECK(getsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &v, &ol) == 0 && v == before);
+    mqvpn_bind_posix_path_free(ctx);
+
+    o.struct_size = sizeof(o);
+    CHECK(mqvpn_bind_posix_path_new(fd, &o, &ctx) == MQVPN_OK);
+    ol = sizeof(v);
+    CHECK(getsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &v, &ol) == 0);
+    CHECK(v == IP_PMTUDISC_PROBE);
+    mqvpn_bind_posix_path_free(ctx);
+    close(fd);
+
+    /* a dual-stack IPv6 socket gets the IPv4 option too, for mapped traffic */
+    int fd6 = socket(AF_INET6, SOCK_DGRAM, 0);
+    if (fd6 >= 0) {
+        int off = 0;
+        CHECK(setsockopt(fd6, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off)) == 0);
+        CHECK(mqvpn_bind_posix_path_new(fd6, &o, &ctx) == MQVPN_OK);
+        ol = sizeof(v);
+        CHECK(getsockopt(fd6, IPPROTO_IPV6, IPV6_MTU_DISCOVER, &v, &ol) == 0);
+        CHECK(v == IPV6_PMTUDISC_PROBE);
+        ol = sizeof(v);
+        CHECK(getsockopt(fd6, IPPROTO_IP, IP_MTU_DISCOVER, &v, &ol) == 0);
+        CHECK(v == IP_PMTUDISC_PROBE);
+        mqvpn_bind_posix_path_free(ctx);
+        close(fd6);
+    }
+#endif
+}
+
+static void
+test_dont_fragment_failure_refuses_the_socket(void)
+{
+    /* a socket without the IP options: DF cannot be set, so a bind that
+     * asked for it is refused and the fd is left open */
+    int sv[2];
+    CHECK(socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) == 0);
+    mqvpn_bind_posix_opts_t o = opts_default();
+    o.dont_fragment = 1;
+    void *sentinel = &o;
+    void *ctx = sentinel;
+    CHECK(mqvpn_bind_posix_path_new(sv[0], &o, &ctx) == MQVPN_ERR_INVALID_STATE);
+    CHECK(ctx == sentinel);
+    CHECK(mqvpn_bind_posix_server_new(sv[0], &o, &ctx) == MQVPN_ERR_INVALID_STATE);
+    CHECK(fd_is_open(sv[0]));
+
+    /* not asked for: the same socket is fine */
+    o.dont_fragment = 0;
+    CHECK(mqvpn_bind_posix_path_new(sv[0], &o, &ctx) == MQVPN_OK);
+    mqvpn_bind_posix_path_free(ctx);
+    close(sv[0]);
+    close(sv[1]);
+}
+
+static void
 test_send_one_and_burst_reach_the_peer(void)
 {
     struct sockaddr_in dst;
@@ -452,6 +528,8 @@ main(void)
 {
     test_ctor_rejects_bad_args_and_leaves_fd_open();
     test_socket_buffers_untouched_and_explicit();
+    test_dont_fragment_only_when_asked();
+    test_dont_fragment_failure_refuses_the_socket();
     test_send_one_and_burst_reach_the_peer();
     test_hard_send_error_is_failed_and_uncounted();
     test_drain_delivers_counts_and_honours_budget();

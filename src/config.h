@@ -89,6 +89,7 @@ typedef struct mqvpn_file_config_s {
 
     int tun_mtu;  /* [Interface] MTU — 0=auto, >0=cap (floor 1280) */
     int path_mtu; /* [Interface] PathMTU — 0=default packet size */
+    int pmtud;    /* [Interface] PMTUD — discover the path MTU, PathMTU is the cap */
 
     /* [Reorder] / repeated [ReorderRule] — flow-aware reorder shim (§16.1).
      * Seeded with mqvpn_reorder_config_default() in mqvpn_config_defaults(). */
@@ -135,6 +136,9 @@ int mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path);
 
 /* Parse JSON text into CLI cfg. Returns 0 on success, -1 on error. */
 int mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text);
+
+/* Parse HOST:PORT / [HOST]:PORT without truncation; port must be 1..65535. */
+int mqvpn_parse_host_port(const char *str, char *host, size_t host_len, int *port);
 
 /*
  * Resolve the effective control-API endpoint by merging INI/JSON config

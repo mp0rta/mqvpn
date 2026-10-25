@@ -90,6 +90,8 @@ usage(const char *prog)
         "                            server: sets TUN MTU; default: auto = ~1382)\n"
         "  --path-mtu N              Underlay MTU to size QUIC packets for, 1280-9000\n"
         "                            (default: 0 = 1400-byte packets)\n"
+        "  --pmtud                   Discover the path MTU (both ends, default off);\n"
+        "                            --path-mtu is the cap\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
         "  --version                 Show version and exit\n"
@@ -100,35 +102,14 @@ usage(const char *prog)
 }
 
 static int
-parse_host_port(const char *str, char *host, size_t host_len, int *port)
+parse_host_port(const char *str, char *host, size_t host_len, int *port,
+                const char *label)
 {
-    if (str[0] == '[') {
-        /* Bracket notation for IPv6: [host]:port */
-        const char *close = strchr(str, ']');
-        if (!close || close[1] != ':') {
-            fprintf(stderr, "error: expected [HOST]:PORT, got '%s'\n", str);
-            return -1;
-        }
-        size_t hlen = (size_t)(close - str - 1);
-        if (hlen >= host_len) hlen = host_len - 1;
-        memcpy(host, str + 1, hlen);
-        host[hlen] = '\0';
-        *port = atoi(close + 2);
-    } else {
-        /* Legacy: host:port (last colon) */
-        const char *colon = strrchr(str, ':');
-        if (!colon) {
-            fprintf(stderr, "error: expected HOST:PORT, got '%s'\n", str);
-            return -1;
-        }
-        size_t hlen = (size_t)(colon - str);
-        if (hlen >= host_len) hlen = host_len - 1;
-        memcpy(host, str, hlen);
-        host[hlen] = '\0';
-        *port = atoi(colon + 1);
-    }
-    if (*port <= 0 || *port > 65535) {
-        fprintf(stderr, "error: invalid port in '%s'\n", str);
+    if (mqvpn_parse_host_port(str, host, host_len, port) < 0) {
+        fprintf(stderr,
+                "error: invalid %s address '%s': use HOST:PORT or [IPv6]:PORT, "
+                "port 1-65535\n",
+                label, str);
         return -1;
     }
     return 0;
@@ -181,6 +162,7 @@ main(int argc, char *argv[])
         {"init-max-path-id", required_argument, NULL, 0x100},
         {"mtu", required_argument, NULL, 0x102},
         {"path-mtu", required_argument, NULL, 0x107},
+        {"pmtud", no_argument, NULL, 0x10f},
         {"max-clients", required_argument, NULL, 'M'},
         {"log-level", required_argument, NULL, 'L'},
         {"no-reconnect", no_argument, NULL, 'R'},
@@ -222,6 +204,7 @@ main(int argc, char *argv[])
     int init_max_path_id_set = 0;
     int cli_mtu = -1; /* -1 means "not set by CLI" */
     int cli_path_mtu = -1;
+    int cli_pmtud = -1;
     int max_clients = -1; /* -1 means "not set by CLI" */
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES];
     int n_paths = 0;
@@ -264,6 +247,11 @@ main(int argc, char *argv[])
                 return 1;
             }
             *sep = '\0';
+            if (strlen(pair) >= sizeof(cli_user_names[0])) {
+                fprintf(stderr, "error: --user name exceeds %zu bytes\n",
+                        sizeof(cli_user_names[0]) - 1);
+                return 1;
+            }
             snprintf(cli_user_names[n_cli_users], sizeof(cli_user_names[n_cli_users]),
                      "%.*s", (int)(sizeof(cli_user_names[n_cli_users]) - 1), pair);
             snprintf(cli_user_keys[n_cli_users], sizeof(cli_user_keys[n_cli_users]),
@@ -320,6 +308,7 @@ main(int argc, char *argv[])
         case 0x107:
             if (parse_mtu_arg("--path-mtu", optarg, &cli_path_mtu) < 0) return 1;
             break;
+        case 0x10f: cli_pmtud = 1; break;
         case 'M': max_clients = atoi(optarg); break;
         case 'R': no_reconnect = 1; break;
         case 'K': kill_switch = 1; break;
@@ -411,6 +400,7 @@ main(int argc, char *argv[])
     int eff_max_clients = max_clients >= 0 ? max_clients : file_cfg.max_clients;
     int eff_tun_mtu = cli_mtu >= 0 ? cli_mtu : file_cfg.tun_mtu;
     int eff_path_mtu = cli_path_mtu >= 0 ? cli_path_mtu : file_cfg.path_mtu;
+    int eff_pmtud = cli_pmtud >= 0 ? cli_pmtud : file_cfg.pmtud;
 
     /* Auth key: CLI > config (use auth_key for client, server_auth_key for server) */
     const char *eff_auth_key =
@@ -436,13 +426,16 @@ main(int argc, char *argv[])
         }
     }
 
+    /* Server address: CLI > config */
+    const char *eff_server = server_str ? server_str : file_cfg.server_addr;
+
     /* Determine mode: CLI > config file > error */
     const char *eff_mode = mode;
     if (!eff_mode) {
         if (config_path) {
             eff_mode = file_cfg.is_server ? "server" : "client";
             /* Client mode needs server address */
-            if (!file_cfg.is_server && file_cfg.server_addr[0] == '\0') {
+            if (!file_cfg.is_server && eff_server[0] == '\0') {
                 fprintf(
                     stderr,
                     "error: config has no [Server] Address and no --mode specified\n");
@@ -455,9 +448,6 @@ main(int argc, char *argv[])
             return 1;
         }
     }
-
-    /* Server address: CLI > config */
-    const char *eff_server = server_str ? server_str : file_cfg.server_addr;
 
     /* Set log level */
     mqvpn_log_level_t log_level = MQVPN_LOG_INFO;
@@ -565,7 +555,7 @@ main(int argc, char *argv[])
 
         char host[256];
         int port;
-        if (parse_host_port(eff_server, host, sizeof(host), &port) < 0) {
+        if (parse_host_port(eff_server, host, sizeof(host), &port, "server") < 0) {
             return 1;
         }
 
@@ -599,6 +589,7 @@ main(int argc, char *argv[])
             .init_max_path_id = eff_init_max_path_id,
             .tun_mtu = eff_tun_mtu,
             .path_mtu = eff_path_mtu,
+            .pmtud = eff_pmtud,
             .cc = cc,
             .reinjection = reinjection,
             .reinj_srtt_factor_pct = file_cfg.reinjection_srtt_factor_pct,
@@ -648,7 +639,8 @@ main(int argc, char *argv[])
 
         char bind_addr[256] = "0.0.0.0";
         int bind_port = 443;
-        if (parse_host_port(eff_listen, bind_addr, sizeof(bind_addr), &bind_port) < 0) {
+        if (parse_host_port(eff_listen, bind_addr, sizeof(bind_addr), &bind_port,
+                            "listen") < 0) {
             return 1;
         }
 
@@ -671,6 +663,7 @@ main(int argc, char *argv[])
             .init_max_path_id = eff_init_max_path_id,
             .tun_mtu = eff_tun_mtu,
             .path_mtu = eff_path_mtu,
+            .pmtud = eff_pmtud,
             .cc = cc,
             .reinjection = reinjection,
             .reinj_srtt_factor_pct = file_cfg.reinjection_srtt_factor_pct,

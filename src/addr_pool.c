@@ -145,6 +145,22 @@ mqvpn_addr_pool_init6(mqvpn_addr_pool_t *pool, const char *cidr6)
         return -1;
     }
 
+    /* Clients get the same offsets as in the IPv4 pool, up to pool_size,
+     * added to the low 32 bits of the base (mqvpn_addr_pool_get6). Reject a
+     * prefix those offsets would leave, as the IPv4 pool rejects a wrap:
+     * clients would be handed addresses outside Subnet6, or, past the top
+     * of the low 32 bits, addresses wrapped back to the start of it. */
+    uint32_t low;
+    memcpy(&low, &pool->base6.s6_addr[12], sizeof(low));
+    low = ntohl(low);
+    uint32_t host_bits = 128 - (uint32_t)plen;
+    uint64_t host_mask = host_bits >= 32 ? 0xffffffffULL : (1ULL << host_bits) - 1;
+    if ((uint64_t)(low & host_mask) + pool->pool_size > host_mask) {
+        LOG_ERR("addr_pool6: %s cannot hold the %u addresses of the IPv4 pool", cidr6,
+                pool->pool_size);
+        return -1;
+    }
+
     pool->prefix6 = (int)plen;
     pool->has_v6 = 1;
 
