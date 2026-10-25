@@ -79,6 +79,13 @@ class MqvpnViewModelTest {
         Dispatchers.resetMain()
     }
 
+    @Test
+    fun `init re-attaches the manager to a running service`() {
+        // a ViewModel recreated while the VPN kept running must restore the
+        // manager-service binding, or the UI stays frozen
+        verify { mockManager.attach(MyVpnService::class.java) }
+    }
+
     /** runTest cleanup drains the scheduler to empty; a live ticker never idles it. */
     private fun TestScope.stopTicker() {
         stateFlow.value = MqvpnState.Disconnected

@@ -71,8 +71,24 @@ class MqvpnManager(private val context: Context) {
             putExtra(EXTRA_CONFIG_JSON, config.toJson())
         }
         context.startForegroundService(intent)
+        bind(intent, Context.BIND_AUTO_CREATE)
+    }
 
-        // Bind to service for lifecycle observation
+    /**
+     * Re-attach to a service that may already be running. Call when the UI
+     * (re)starts: a ViewModel or process recreated while the VPN kept running
+     * has no binding, so [vpnState]/[stats] would stay stale and [disconnect]
+     * could not reach the service. Without BIND_AUTO_CREATE an idle service is
+     * not spun up, and a dormant binding connects if the service starts later.
+     * No-op while a binding already exists.
+     */
+    fun attach(serviceClass: Class<out MqvpnVpnService>) {
+        if (serviceConnection != null) return
+        bind(Intent(context, serviceClass), 0)
+    }
+
+    // Bind to service for lifecycle observation
+    private fun bind(intent: Intent, flags: Int) {
         val conn = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
                 val binder = service as? MqvpnVpnService.LocalBinder ?: return
@@ -91,7 +107,7 @@ class MqvpnManager(private val context: Context) {
         }
         serviceConnection = conn
         try {
-            context.bindService(intent, conn, Context.BIND_AUTO_CREATE)
+            context.bindService(intent, conn, flags)
         } catch (e: Exception) {
             Log.w(TAG, "bindService failed: ${e.message}")
         }

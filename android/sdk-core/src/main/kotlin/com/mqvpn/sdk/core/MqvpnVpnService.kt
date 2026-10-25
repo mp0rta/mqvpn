@@ -46,7 +46,24 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
 
     override fun onBind(intent: Intent?): IBinder = binder
 
+    /**
+     * Set by [MqvpnManager] on (re)bind. A manager attaching to a mid-session
+     * service gets the current state pushed so a recreated UI resyncs; the
+     * Disconnected default is skipped so binding to a fresh service does not
+     * clobber the Connecting state [MqvpnManager.connect] just set.
+     */
     internal var manager: MqvpnManager? = null
+        set(value) {
+            field = value
+            val state = lastState
+            if (value != null && state != MqvpnState.Disconnected) {
+                value.updateState(state)
+            }
+        }
+
+    /** Last state given to emitState; read from the binder thread on attach. */
+    @Volatile
+    private var lastState: MqvpnState = MqvpnState.Disconnected
 
     /** The native reactor (poll loop + path table); lives as long as the service. */
     private lateinit var waiter: NativeReactorWaiter
@@ -271,6 +288,7 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
      * Emit state to both Manager (StateFlow → UI) and app callback.
      */
     private fun emitState(newState: MqvpnState) {
+        lastState = newState
         manager?.updateState(newState)
         onVpnStateChanged(newState)
     }

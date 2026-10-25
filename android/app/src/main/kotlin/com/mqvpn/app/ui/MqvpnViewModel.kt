@@ -79,6 +79,11 @@ class MqvpnViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), ReorderStats())
 
     init {
+        // Re-attach to a VPN service that kept running while the UI was gone
+        // (task swiped away, activity destroyed in background): without this
+        // the graph gets no path updates and disconnect() cannot reach the
+        // service. No-op when nothing is running.
+        manager.attach(MyVpnService::class.java)
         viewModelScope.launch {
             manager.vpnState.collect {
                 eventLog.ingestState(it, clock())
@@ -148,7 +153,8 @@ class MqvpnViewModel(
 
     fun prepareVpn(): Intent? = manager.prepareVpn()
 
-    override fun onCleared() {
-        manager.destroy()
-    }
+    // No onCleared teardown: the manager is a process-wide singleton and the
+    // service outlives this ViewModel. Destroying the manager here severed the
+    // service binding permanently (frozen stats, disconnect no-op) whenever
+    // the activity was destroyed while the VPN kept running.
 }

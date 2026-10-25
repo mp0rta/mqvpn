@@ -3,14 +3,19 @@
 
 package com.mqvpn.sdk.core
 
+import android.content.ComponentName
+import android.os.Looper
+import android.os.ParcelFileDescriptor
 import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.MqvpnError
 import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.PathInfo
+import com.mqvpn.sdk.core.model.ReconnectInfo
 import com.mqvpn.sdk.core.model.ReorderStats
 import com.mqvpn.sdk.core.model.TunnelInfo
 import com.mqvpn.sdk.core.model.VpnStats
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -18,6 +23,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 
 @RunWith(RobolectricTestRunner::class)
 class MqvpnManagerTest {
@@ -148,6 +154,62 @@ class MqvpnManagerTest {
         val s = ReorderStats(delivered = 10, gapFilled = 3)
         mgr.updateReorderStats(s)
         assertEquals(s, mgr.reorderStats.value)
+    }
+
+    // --- attach (re-bind to an already-running service) ---
+
+    private class TestVpnService : MqvpnVpnService() {
+        override fun onCreateTun(info: TunnelInfo, config: MqvpnConfig): ParcelFileDescriptor =
+            throw UnsupportedOperationException("not used in tests")
+
+        override fun onVpnStateChanged(newState: MqvpnState) {}
+    }
+
+    /** A service instance whose LocalBinder the shadow hands to any bind. */
+    private fun bindableService(): TestVpnService {
+        val svc = TestVpnService()
+        val app = RuntimeEnvironment.getApplication()
+        shadowOf(app).setComponentNameAndServiceForBindService(
+            ComponentName(app, TestVpnService::class.java),
+            svc.LocalBinder(),
+        )
+        return svc
+    }
+
+    @Test
+    fun attach_toMidSessionService_resyncsStateAndWiresService() {
+        val svc = bindableService()
+        svc.onNativeReconnectScheduled(3) // service's current state: Reconnecting
+
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(MqvpnState.Reconnecting(ReconnectInfo(3)), manager.vpnState.value)
+        assertSame(manager, svc.manager)
+    }
+
+    @Test
+    fun attach_toFreshService_keepsManagerState() {
+        val svc = bindableService()
+        manager.updateState(MqvpnState.Connecting)
+
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        // the service's Disconnected default must not clobber Connecting
+        assertEquals(MqvpnState.Connecting, manager.vpnState.value)
+        assertSame(manager, svc.manager)
+    }
+
+    @Test
+    fun attach_isNoOpWhileBindingExists() {
+        bindableService()
+        manager.attach(TestVpnService::class.java)
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        val app = RuntimeEnvironment.getApplication()
+        assertEquals(1, shadowOf(app).boundServiceConnections.size)
     }
 
     @Test
