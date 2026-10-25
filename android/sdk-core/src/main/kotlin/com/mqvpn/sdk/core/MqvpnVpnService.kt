@@ -321,6 +321,11 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
     }
 
     override fun onNativeReconnectScheduled(delaySec: Int) {
+        // A terminal Error may have been emitted in the same native call
+        // (request-level failure), with the teardown still queued behind
+        // this callback: the schedule is moot and must not overwrite the
+        // Error (or re-post a notification while tearing down).
+        if (tearingDown || synchronized(stateLock) { lastState } is MqvpnState.Error) return
         if (!sessionEstablished) {
             // This session never connected (wrong address, port or key, or
             // the server is down): show the close error instead of retrying

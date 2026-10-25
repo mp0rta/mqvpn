@@ -379,6 +379,28 @@ class MqvpnManagerTest {
     }
 
     @Test
+    fun requestFailureDuringReconnect_keepsTerminalError() {
+        // mid-session reconnect: the retried CONNECT-IP request fails (-6),
+        // and the same native call then schedules another reconnect — the
+        // schedule must not overwrite the terminal Error
+        val svc = bindableService()
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+        svc.sessionEstablished = true
+
+        svc.onNativeTunnelClosed(-6)
+        svc.onNativeReconnectScheduled(3)
+
+        val state = manager.vpnState.value
+        assertTrue(state is MqvpnState.Error)
+        assertEquals(
+            MqvpnError.ProtocolError(-6, "MASQUE not supported"),
+            (state as MqvpnState.Error).error,
+        )
+        assertEquals(1, svc.stopTunnelCalls)
+    }
+
+    @Test
     fun terminalError_keepsTheFirstError() {
         val svc = bindableService()
         manager.attach(TestVpnService::class.java)
