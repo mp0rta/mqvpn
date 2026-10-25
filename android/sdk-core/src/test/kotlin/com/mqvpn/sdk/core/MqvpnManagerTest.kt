@@ -159,10 +159,17 @@ class MqvpnManagerTest {
     // --- attach (re-bind to an already-running service) ---
 
     private class TestVpnService : MqvpnVpnService() {
+        var stopTunnelCalls = 0
+
         override fun onCreateTun(info: TunnelInfo, config: MqvpnConfig): ParcelFileDescriptor =
             throw UnsupportedOperationException("not used in tests")
 
         override fun onVpnStateChanged(newState: MqvpnState) {}
+
+        // the real one enqueues on the executor, which only exists after onCreate
+        override fun stopTunnel() {
+            stopTunnelCalls++
+        }
     }
 
     /** A service instance whose LocalBinder the shadow hands to any bind. */
@@ -196,9 +203,70 @@ class MqvpnManagerTest {
         manager.attach(TestVpnService::class.java)
         shadowOf(Looper.getMainLooper()).idle()
 
-        // the service's Disconnected default must not clobber Connecting
+        // a service that never emitted a state must not clobber Connecting
         assertEquals(MqvpnState.Connecting, manager.vpnState.value)
         assertSame(manager, svc.manager)
+    }
+
+    @Test
+    fun disconnect_afterAttach_reachesTheRunningService() {
+        val svc = bindableService()
+        svc.onNativeReconnectScheduled(1)
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        manager.disconnect()
+
+        assertEquals(1, svc.stopTunnelCalls)
+        assertEquals(MqvpnState.Disconnected, manager.vpnState.value)
+    }
+
+    @Test
+    fun connect_afterAttach_replacesTheBinding() {
+        val svc = bindableService()
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        val config = MqvpnConfig(serverAddress = "10.0.0.1", authKey = "test-key")
+        manager.connect(config, TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        // the attach binding was released, exactly one live binding remains
+        val shadow = shadowOf(RuntimeEnvironment.getApplication())
+        assertEquals(1, shadow.boundServiceConnections.size)
+        assertEquals(1, shadow.unboundServiceConnections.size)
+        assertSame(manager, svc.manager)
+    }
+
+    @Test
+    fun serviceDisconnectCallback_keepsTerminalError_resetsMetrics() {
+        bindableService()
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+        val error = MqvpnState.Error(MqvpnError.AuthFailed("bad key"))
+        manager.updateState(error)
+        manager.updateStats(VpnStats(bytesTx = 7))
+
+        val app = RuntimeEnvironment.getApplication()
+        shadowOf(app).boundServiceConnections.last()
+            .onServiceDisconnected(ComponentName(app, TestVpnService::class.java))
+
+        assertEquals(error, manager.vpnState.value)
+        assertEquals(VpnStats(), manager.stats.value)
+    }
+
+    @Test
+    fun serviceDisconnectCallback_resetsStaleLiveState() {
+        bindableService()
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+        manager.updateState(MqvpnState.Connecting)
+
+        val app = RuntimeEnvironment.getApplication()
+        shadowOf(app).boundServiceConnections.last()
+            .onServiceDisconnected(ComponentName(app, TestVpnService::class.java))
+
+        assertEquals(MqvpnState.Disconnected, manager.vpnState.value)
     }
 
     @Test

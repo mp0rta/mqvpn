@@ -71,7 +71,10 @@ class MqvpnManager(private val context: Context) {
             putExtra(EXTRA_CONFIG_JSON, config.toJson())
         }
         context.startForegroundService(intent)
-        bind(intent, Context.BIND_AUTO_CREATE)
+        // No BIND_AUTO_CREATE: a binding that keeps the service alive would
+        // pin it after it stops itself on a terminal state, so onDestroy —
+        // and with it the session cleanup that closes the TUN — never runs.
+        bind(intent, 0)
     }
 
     /**
@@ -98,10 +101,13 @@ class MqvpnManager(private val context: Context) {
             }
 
             override fun onServiceDisconnected(name: ComponentName?) {
-                // Service crashed or was killed — reset state to prevent UI divergence
+                // Service stopped or crashed. Keep a terminal Error on
+                // display; reset anything else to prevent UI divergence.
                 boundService?.manager = null
                 boundService = null
-                _vpnState.value = MqvpnState.Disconnected
+                if (_vpnState.value !is MqvpnState.Error) {
+                    _vpnState.value = MqvpnState.Disconnected
+                }
                 resetMetrics()
             }
         }
@@ -116,9 +122,8 @@ class MqvpnManager(private val context: Context) {
     /** Disconnect the VPN. */
     fun disconnect() {
         boundService?.stopTunnel()
-        // Release the binding: a started+bound service is not destroyed by
-        // stopSelf() while a BIND_AUTO_CREATE binding remains, so keeping it
-        // would leave the foreground service (and its notification) running.
+        // Release the binding now instead of waiting for the stopping
+        // service's callbacks, so they cannot race the state set below.
         unbind()
         _vpnState.value = MqvpnState.Disconnected
         resetMetrics()

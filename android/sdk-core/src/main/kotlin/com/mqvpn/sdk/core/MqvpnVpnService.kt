@@ -47,23 +47,29 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
     override fun onBind(intent: Intent?): IBinder = binder
 
     /**
-     * Set by [MqvpnManager] on (re)bind. A manager attaching to a mid-session
-     * service gets the current state pushed so a recreated UI resyncs; the
-     * Disconnected default is skipped so binding to a fresh service does not
-     * clobber the Connecting state [MqvpnManager.connect] just set.
+     * Set by [MqvpnManager] on (re)bind. A manager attaching to a service
+     * that already emitted a state gets it replayed so a recreated UI
+     * resyncs; a fresh service (null) replays nothing, so binding to it does
+     * not clobber the Connecting state [MqvpnManager.connect] just set.
+     * stateLock serializes the replay against [emitState]: the setter runs on
+     * the main thread while the executor emits, and an unserialized replay
+     * could overwrite a newer state with the one it read.
      */
     internal var manager: MqvpnManager? = null
         set(value) {
-            field = value
-            val state = lastState
-            if (value != null && state != MqvpnState.Disconnected) {
-                value.updateState(state)
+            synchronized(stateLock) {
+                field = value
+                val state = lastState
+                if (value != null && state != null) {
+                    value.updateState(state)
+                }
             }
         }
 
-    /** Last state given to emitState; read from the binder thread on attach. */
-    @Volatile
-    private var lastState: MqvpnState = MqvpnState.Disconnected
+    private val stateLock = Any()
+
+    /** Last state given to emitState, null until the first emit; guarded by [stateLock]. */
+    private var lastState: MqvpnState? = null
 
     /** The native reactor (poll loop + path table); lives as long as the service. */
     private lateinit var waiter: NativeReactorWaiter
@@ -174,7 +180,7 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
      * Stop VPN tunnel. Called by [MqvpnManager.disconnect].
      * Do NOT call from onDestroy — cleanup runs automatically.
      */
-    internal fun stopTunnel() {
+    internal open fun stopTunnel() {
         executor.enqueue { cleanup() }
     }
 
@@ -201,7 +207,11 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
                 pathManager = null
                 networkMonitor = null
                 currentTunPfd = null
-                emitState(MqvpnState.Disconnected)
+                // keep a terminal Error on display: cleanup after an error
+                // emit (service stopping) must not downgrade it
+                if (synchronized(stateLock) { lastState } !is MqvpnState.Error) {
+                    emitState(MqvpnState.Disconnected)
+                }
             }
         }
     }
@@ -288,8 +298,11 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
      * Emit state to both Manager (StateFlow → UI) and app callback.
      */
     private fun emitState(newState: MqvpnState) {
-        lastState = newState
-        manager?.updateState(newState)
+        synchronized(stateLock) {
+            lastState = newState
+            manager?.updateState(newState)
+        }
+        // app callback outside the lock: it may be slow or call back into us
         onVpnStateChanged(newState)
     }
 
