@@ -256,6 +256,27 @@ class MqvpnManagerTest {
     }
 
     @Test
+    fun bindingDied_releasesBindingAndAllowsReattach() {
+        // no binder registered: the service "died" before publishing one
+        val app = RuntimeEnvironment.getApplication()
+        val config = MqvpnConfig(serverAddress = "10.0.0.1", authKey = "test-key")
+        manager.connect(config, TestVpnService::class.java)
+        assertEquals(MqvpnState.Connecting, manager.vpnState.value)
+
+        shadowOf(app).boundServiceConnections.last()
+            .onBindingDied(ComponentName(app, TestVpnService::class.java))
+
+        assertEquals(MqvpnState.Disconnected, manager.vpnState.value)
+
+        // the dead binding is gone, so a later attach binds and resyncs
+        val svc = bindableService()
+        svc.onNativeReconnectScheduled(2)
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(MqvpnState.Reconnecting(ReconnectInfo(2)), manager.vpnState.value)
+    }
+
+    @Test
     fun serviceDisconnectCallback_resetsStaleLiveState() {
         bindableService()
         manager.attach(TestVpnService::class.java)

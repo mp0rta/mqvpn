@@ -110,6 +110,19 @@ class MqvpnManager(private val context: Context) {
                 }
                 resetMetrics()
             }
+
+            override fun onBindingDied(name: ComponentName?) {
+                // The service died before delivering its binder (e.g. a
+                // startup failure stopped it right away): Android then skips
+                // onServiceDisconnected. Release the dead binding — it would
+                // make every later attach() an early-returning no-op — and
+                // stop showing a live state.
+                unbind()
+                if (_vpnState.value !is MqvpnState.Error) {
+                    _vpnState.value = MqvpnState.Disconnected
+                }
+                resetMetrics()
+            }
         }
         serviceConnection = conn
         try {
