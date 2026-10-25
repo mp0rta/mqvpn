@@ -80,6 +80,18 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
     private var networkMonitor: NetworkMonitor? = null
     private var currentConfig: MqvpnConfig? = null
     private var currentTunPfd: ParcelFileDescriptor? = null
+
+    // Close/reconnect bookkeeping, executor thread only. The native client
+    // reports a close (tunnel_closed) and only afterwards reveals the
+    // session's fate: a reconnect schedule (it keeps retrying) or CLOSED (it
+    // gave up). The Error emit is deferred to that decision point — the app
+    // treats Error as terminal and stops the service, which must not kill a
+    // scheduled reconnect.
+    private var pendingCloseError: MqvpnError? = null
+    private var tearingDown = false
+
+    /** True once this session emitted Connected; internal for tests. */
+    internal var sessionEstablished = false
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     // --- Lifecycle ---
@@ -142,6 +154,9 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
                 return@enqueue
             }
             currentConfig = config
+            pendingCloseError = null
+            sessionEstablished = false
+            tearingDown = false
             val t = MqvpnTunnel.create(config, this, waiter.reactorHandle)
             tunnel = t
 
@@ -188,6 +203,9 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
 
     private fun cleanup() {
         val t = tunnel ?: return // already cleaned up
+        // The close callbacks the teardown below fires are deliberate, not
+        // session errors: keep emitTerminalError quiet.
+        tearingDown = true
         // The destroy and the fd closes run whatever the orderly half throws:
         // this is the executor's finalizer, and the reactor it hands back to
         // the poller must hold no live path when the poller frees it.
@@ -268,7 +286,7 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
 
     override fun onNativeTunnelClosed(errorCode: Int) {
         if (errorCode != 0) {
-            emitState(MqvpnState.Error(MqvpnError.fromNativeCode(errorCode)))
+            pendingCloseError = MqvpnError.fromNativeCode(errorCode)
         }
     }
 
@@ -277,7 +295,9 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
         when (newState) {
             1, 2 -> emitState(MqvpnState.Connecting)
             5 -> {} // RECONNECTING — handled by onNativeReconnectScheduled
-            6 -> {} // CLOSED — handled by onNativeTunnelClosed or cleanup
+            // CLOSED with no reconnect scheduled (e.g. the server certificate
+            // was rejected): terminal. A clean close leaves no pending error.
+            6 -> pendingCloseError?.let { emitTerminalError(it) }
         }
     }
 
@@ -290,14 +310,39 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
     }
 
     override fun onNativeReconnectScheduled(delaySec: Int) {
+        if (!sessionEstablished) {
+            // This session never connected (wrong address, port or key, or
+            // the server is down): show the close error instead of retrying
+            // behind an endless Reconnecting. The teardown also cancels the
+            // armed reconnect timer.
+            emitTerminalError(pendingCloseError ?: MqvpnError.fromNativeCode(-10))
+            stopTunnel()
+            return
+        }
+        pendingCloseError = null
         emitState(MqvpnState.Reconnecting(ReconnectInfo(delaySec)))
         onReconnectScheduled(delaySec)
+    }
+
+    /**
+     * Emit a terminal [MqvpnState.Error]. Keeps the first Error of the
+     * session (an earlier emit such as TunCreationFailed is more specific)
+     * and stays quiet during a deliberate teardown. Executor thread only.
+     */
+    private fun emitTerminalError(error: MqvpnError) {
+        if (tearingDown) return
+        if (synchronized(stateLock) { lastState } is MqvpnState.Error) return
+        emitState(MqvpnState.Error(error))
     }
 
     /**
      * Emit state to both Manager (StateFlow → UI) and app callback.
      */
     private fun emitState(newState: MqvpnState) {
+        if (newState is MqvpnState.Connected) {
+            sessionEstablished = true
+            pendingCloseError = null
+        }
         synchronized(stateLock) {
             lastState = newState
             manager?.updateState(newState)
