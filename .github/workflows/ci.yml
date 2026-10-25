@@ -128,6 +128,9 @@ jobs:
       - name: Sans-I/O core gate
         run: bash scripts/lint/check_sansio_core.sh build
 
+      - name: Management IPC layering gate
+        run: bash scripts/lint/check_mgmt_layering.sh
+
       - name: Unit tests (ctest)
         run: cd build && ctest --output-on-failure
 
@@ -141,6 +144,7 @@ jobs:
           path: |
             build/mqvpn
             build/mqvpn-nat-config
+            build/mqvpnctl
             build/libmqvpn.a
             build/libmqvpn.so*
             build/libxquic.so
@@ -338,6 +342,20 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: cd build && ctest --output-on-failure
+
+      - name: Client management IPC integration test (no sudo/netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: bash scripts/ci_e2e/run_client_mgmt_ipc_test.sh build
+
+      # T13 (socket mode/group is the only access control) needs root plus a
+      # `nobody` user; the unprivileged run above skips it.
+      - name: Client management IPC integration test (root, permission boundary)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E bash scripts/ci_e2e/run_client_mgmt_ipc_test.sh build
 
       - name: Build fuzz targets
         run: |
@@ -796,7 +814,7 @@ jobs:
           path: build
 
       - name: Make binary executable
-        run: chmod +x build/mqvpn
+        run: chmod +x build/mqvpn build/mqvpnctl
 
       - name: Restore libxquic.so for cmake install
         run: |
@@ -898,6 +916,8 @@ jobs:
                      mqvpn test_route_parse_darwin test_dns_backup_darwin \
                      test_dns_state_darwin test_routing_seq_darwin test_killswitch_rules_darwin \
                      test_tcp_lane test_config test_conn_settings test_bind_posix_socket test_path_line \
+                     mqvpnctl mgmt_endpoint_host mgmt_raw_client test_cmp_error test_cmp_endpoint \
+                     test_mgmt_dispatch test_mgmt_conn test_mgmt_listen test_ctl_rpc \
             -j "$(sysctl -n hw.ncpu)"
 
       - name: Verify artifacts
@@ -907,6 +927,9 @@ jobs:
 
       - name: Run Darwin unit tests
         run: ctest --test-dir build-darwin --no-tests=error --output-on-failure
+
+      - name: Client management IPC integration test
+        run: bash scripts/ci_e2e/run_client_mgmt_ipc_test.sh build-darwin
 
       # The Darwin platform's transport wiring on a real runner: the client's
       # first QUIC Initial must leave through the POSIX bind and reach a local
@@ -1189,6 +1212,12 @@ jobs:
       # assert(), so Release is fine.
       - name: Winsock transport and path re-add tests
         run: ctest --test-dir build -C Release -R "^(test_bind_winsock|test_path_readd|test_path_line)$" --no-tests=error --output-on-failure
+
+      # Phase 0 of the client management IPC: AF_UNIX listener + UDP + the
+      # AF_INET wake pair on one win32 select() event_base. A FAIL here means
+      # the Windows transport becomes a named pipe (separate design).
+      - name: AF_UNIX on libevent smoke test
+        run: ctest --test-dir build -C Release -R "^test_mgmt_win_afunix$" --no-tests=error --output-on-failure
 
       # Weak: presence and order of the install call only (see the script).
       - name: Verifier wiring tripwire

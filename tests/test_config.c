@@ -2431,6 +2431,18 @@ test_redundant_ini_onoff(void)
 }
 
 static void
+test_client_mgmt_defaults(void)
+{
+    mqvpn_file_config_t c;
+    mqvpn_config_defaults(&c);
+    ASSERT_EQ_INT(c.client_mgmt_enabled, 0, "client_mgmt off by default");
+    ASSERT_EQ_STR(c.client_mgmt_endpoint, "", "client_mgmt_endpoint default empty");
+    ASSERT_EQ_STR(c.client_mgmt_socket_mode, "", "client_mgmt_socket_mode default empty");
+    ASSERT_EQ_STR(c.client_mgmt_socket_group, "",
+                  "client_mgmt_socket_group default empty");
+}
+
+static void
 test_ini_json_scalar_parity(void)
 {
     /* Every scalar key, non-default value. Complex keys (DNS/User/Path/
@@ -2460,6 +2472,11 @@ test_ini_json_scalar_parity(void)
                       "MaxClients = 120\n"
                       "[Control]\n"
                       "Listen = 127.0.0.2:9091\n"
+                      "[ClientManagement]\n"
+                      "Enabled = true\n"
+                      "Endpoint = /run/mqvpn/parity.sock\n"
+                      "SocketMode = 0640\n"
+                      "SocketGroup = mqvpnparity\n"
                       "[Multipath]\n"
                       "Scheduler = min_srtt\n"
                       "AllowClientScheduler = true\n"
@@ -2523,6 +2540,10 @@ test_ini_json_scalar_parity(void)
                        "\"server_auth_key\":\"parity-secret\","
                        "\"max_clients\":120,"
                        "\"control_listen\":\"127.0.0.2:9091\","
+                       "\"client_mgmt_enabled\":true,"
+                       "\"client_mgmt_endpoint\":\"/run/mqvpn/parity.sock\","
+                       "\"client_mgmt_socket_mode\":\"0640\","
+                       "\"client_mgmt_socket_group\":\"mqvpnparity\","
                        "\"scheduler\":\"min_srtt\","
                        "\"allow_client_scheduler\":true,"
                        "\"request_server_scheduler\":true,"
@@ -2616,6 +2637,19 @@ test_ini_json_scalar_parity(void)
                   "parity allow_client_scheduler");
     ASSERT_EQ_INT(a.request_server_scheduler, b.request_server_scheduler,
                   "parity request_server_scheduler");
+    ASSERT_EQ_INT(a.client_mgmt_enabled, b.client_mgmt_enabled,
+                  "parity client_mgmt_enabled");
+    ASSERT_EQ_INT(a.client_mgmt_enabled, 1, "parity client_mgmt_enabled is non-default");
+    ASSERT_EQ_STR(a.client_mgmt_endpoint, b.client_mgmt_endpoint,
+                  "parity client_mgmt_endpoint");
+    ASSERT_EQ_STR(a.client_mgmt_endpoint, "/run/mqvpn/parity.sock",
+                  "parity client_mgmt_endpoint is non-default");
+    ASSERT_EQ_STR(a.client_mgmt_socket_mode, b.client_mgmt_socket_mode,
+                  "parity client_mgmt_socket_mode");
+    ASSERT_EQ_STR(a.client_mgmt_socket_group, b.client_mgmt_socket_group,
+                  "parity client_mgmt_socket_group");
+    ASSERT_EQ_STR(a.client_mgmt_socket_group, "mqvpnparity",
+                  "parity client_mgmt_socket_group is non-default");
     ASSERT_EQ_INT(a.hybrid.enabled, b.hybrid.enabled, "parity hybrid enabled");
     ASSERT_EQ_INT(a.hybrid.tcp_mode, b.hybrid.tcp_mode, "parity hybrid tcp_mode");
     ASSERT_EQ_INT((int)a.hybrid.tcp_max_flows, (int)b.hybrid.tcp_max_flows,
@@ -2928,6 +2962,7 @@ main(void)
     test_hybrid_egress_acl_json();
 
     /* INI/JSON scalar-key parity */
+    test_client_mgmt_defaults();
     test_ini_json_scalar_parity();
     test_redundant_ports_ini_json();
     test_redundant_ini_onoff();

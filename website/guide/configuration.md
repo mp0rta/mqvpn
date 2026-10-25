@@ -393,6 +393,19 @@ In JSON, the section is a `"hybrid"` object with snake_case keys (`enabled`, `tc
 
 In JSON, the section is an `"advanced"` object with snake_case keys (`recv_rate_limit`, `udp_gso`, `udp_gro`, `tun_offload`, `tun_gro`).
 
+### `[ClientManagement]` (client only)
+
+Lets the `mqvpnctl` tool talk to a running client over a local socket. Off by default; turn it on per deployment. Currently `mqvpnctl version` is the only command; status and path commands are planned.
+
+| Key | Description | Default |
+|---|---|---|
+| `Enabled` | Start the management socket (`client_mgmt_enabled` in JSON) | `false` |
+| `Endpoint` | Socket path (`client_mgmt_endpoint`). Empty means the system default: `/run/mqvpn/client.sock` on Linux, `/var/run/mqvpn/client.sock` on macOS, `%ProgramData%\mqvpn\client.sock` on Windows | empty |
+| `SocketMode` | File mode of the socket, octal (`client_mgmt_socket_mode`). Linux and macOS only | `0660` |
+| `SocketGroup` | Group that may connect (`client_mgmt_socket_group`). Linux and macOS only; empty keeps the socket root-only | empty |
+
+On Windows the socket is restricted to administrators, so `mqvpnctl` must run from an elevated prompt. If the socket cannot be created, the client logs the reason and keeps running without it.
+
 ## MTU Guidelines
 
 ### Default (auto)

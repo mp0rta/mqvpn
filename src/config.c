@@ -90,6 +90,7 @@ enum {
     SEC_AUTH,
     SEC_MULTIPATH,
     SEC_CONTROL,
+    SEC_CLIENT_MGMT,
     SEC_REORDER,
     SEC_REORDER_RULE,
     SEC_HYBRID,
@@ -105,6 +106,7 @@ parse_section(const char *name)
     if (strcasecmp(name, "Auth") == 0) return SEC_AUTH;
     if (strcasecmp(name, "Multipath") == 0) return SEC_MULTIPATH;
     if (strcasecmp(name, "Control") == 0) return SEC_CONTROL;
+    if (strcasecmp(name, "ClientManagement") == 0) return SEC_CLIENT_MGMT;
     if (strcasecmp(name, "Reorder") == 0) return SEC_REORDER;
     if (strcasecmp(name, "ReorderRule") == 0) return SEC_REORDER_RULE;
     if (strcasecmp(name, "Hybrid") == 0) return SEC_HYBRID;
@@ -122,6 +124,7 @@ section_name(int section)
     case SEC_AUTH: return "Auth";
     case SEC_MULTIPATH: return "Multipath";
     case SEC_CONTROL: return "Control";
+    case SEC_CLIENT_MGMT: return "ClientManagement";
     case SEC_REORDER: return "Reorder";
     case SEC_REORDER_RULE: return "ReorderRule";
     case SEC_HYBRID: return "Hybrid";
@@ -459,7 +462,8 @@ _Static_assert(sizeof(unsigned long long) == sizeof(uint64_t),
                "CFGK_U64 stores through a single 8-byte write");
 _Static_assert(sizeof(((mqvpn_file_config_t *)0)->listen) <= 280 &&
                    sizeof(((mqvpn_file_config_t *)0)->server_addr) <= 280 &&
-                   sizeof(((mqvpn_file_config_t *)0)->control_listen) <= 280,
+                   sizeof(((mqvpn_file_config_t *)0)->control_listen) <= 280 &&
+                   sizeof(((mqvpn_file_config_t *)0)->client_mgmt_endpoint) <= 280,
                "cfg_key_apply_json sbuf must cover the largest CFGK_STR field");
 
 /* int_ok gates */
@@ -599,6 +603,13 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_INT_FB(SEC_AUTH, "MaxClients", "max_clients", max_clients, cfgk_int_positive, 64),
     /* [Control] */
     CFG_STR(SEC_CONTROL, "Listen", "control_listen", control_listen),
+    /* [ClientManagement] — client-side management IPC (off by default) */
+    CFG_BOOL(SEC_CLIENT_MGMT, "Enabled", "client_mgmt_enabled", client_mgmt_enabled),
+    CFG_STR(SEC_CLIENT_MGMT, "Endpoint", "client_mgmt_endpoint", client_mgmt_endpoint),
+    CFG_STR(SEC_CLIENT_MGMT, "SocketMode", "client_mgmt_socket_mode",
+            client_mgmt_socket_mode),
+    CFG_STR(SEC_CLIENT_MGMT, "SocketGroup", "client_mgmt_socket_group",
+            client_mgmt_socket_group),
     /* [Multipath] */
     CFG_STR(SEC_MULTIPATH, "Scheduler", "scheduler", scheduler),
     CFG_BOOL(SEC_MULTIPATH, "AllowClientScheduler", "allow_client_scheduler",
@@ -798,7 +809,7 @@ cfg_key_apply_json(mqvpn_file_config_t *cfg, yyjson_val *root, yyjson_val *ro,
                    yyjson_val *hy, yyjson_val *adv)
 {
     /* Must cover the largest CFGK_STR destination (listen/server_addr/
-     * control_listen, all char[280]) or JSON strings would truncate
+     * control_listen/client_mgmt_endpoint, all char[280]) or JSON strings would truncate
      * shorter than INI ones. */
     char sbuf[280];
     for (size_t i = 0; i < sizeof(cfg_keys) / sizeof(cfg_keys[0]); i++) {

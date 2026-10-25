@@ -464,6 +464,40 @@ if(MQVPN_HYBRID_TCP_EGRESS_BUILD)
     target_compile_definitions(mqvpn_lib PRIVATE MQVPN_HYBRID_TCP_EGRESS_ENABLED)
 endif()
 
+# Client management protocol core: yyjson + libmqvpn.h only, no libevent, no
+# platform headers (scripts/lint/check_mgmt_layering.sh). yyjson symbols
+# resolve from mqvpn_lib (or yyjson.c) in the final link.
+add_library(mqvpn_mgmt STATIC
+    src/common/ipc/cmp_error.c
+    src/common/ipc/cmp_endpoint.c
+    src/mgmt/mgmt_rpc.c
+    src/mgmt/mgmt_dispatch.c
+    src/mgmt/mgmt_system.c
+)
+target_include_directories(mqvpn_mgmt PUBLIC
+    ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/common/ipc ${CMAKE_SOURCE_DIR}/src/mgmt)
+if(MSVC)
+    target_compile_options(mqvpn_mgmt PRIVATE /WX /utf-8)
+    target_compile_definitions(mqvpn_mgmt PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+
+# ---------- mqvpnctl: client management CLI ----------
+# Standalone: yyjson + src/common/ipc + its own socket layer. Must not link
+# mqvpn_lib / xquic / libevent (gate below; runtime check in
+# scripts/ci_e2e/run_client_mgmt_ipc_test.sh). libmqvpn.h is included for
+# MQVPN_VERSION_* only.
+if(NOT WIN32 AND NOT ANDROID_CROSS_COMPILE)   # Windows (ctl_sock_win.c) drops only the NOT WIN32 part
+    add_executable(mqvpnctl
+        src/cli/ctl_main.c src/cli/ctl_rpc.c src/cli/ctl_cmd_version.c
+        src/cli/ctl_sock_posix.c
+        src/common/ipc/cmp_error.c src/common/ipc/cmp_endpoint.c
+        third_party/yyjson/yyjson.c)
+    target_include_directories(mqvpnctl PRIVATE
+        ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/cli ${CMAKE_SOURCE_DIR}/src/common/ipc)
+endif()
+
 # Everything below requires libevent and a platform layer — skip for Android
 if(NOT ANDROID_CROSS_COMPILE)
 
@@ -548,6 +582,18 @@ if(BUILD_TESTING)
     target_include_directories(test_cert_identity PRIVATE ${CMAKE_SOURCE_DIR}/src/platform/windows)
     target_compile_definitions(test_cert_identity PRIVATE TEST_CERT_DIR="${CMAKE_SOURCE_DIR}/tests/certs")
     add_test(NAME test_cert_identity COMMAND test_cert_identity)
+    # Phase 0 of the client management IPC: AF_UNIX listener, UDP and the
+    # AF_INET wake pair on one win32 select() event_base.
+    add_executable(test_mgmt_win_afunix tests/test_mgmt_win_afunix.c)
+    target_include_directories(test_mgmt_win_afunix PRIVATE ${CMAKE_SOURCE_DIR}/src/compat)
+    if(Libevent_FOUND)
+        target_link_libraries(test_mgmt_win_afunix libevent::core libevent::extra ws2_32)
+    else()
+        target_include_directories(test_mgmt_win_afunix PRIVATE ${EVENT_INCLUDE_DIR})
+        target_link_libraries(test_mgmt_win_afunix ${EVENT_LIB} ws2_32)
+    endif()
+    target_compile_options(test_mgmt_win_afunix PRIVATE /WX /utf-8)
+    add_test(NAME test_mgmt_win_afunix COMMAND test_mgmt_win_afunix)
     # CryptoAPI half, driven with an exclusive-root chain engine. Links only
     # what it needs.
     add_executable(test_cert_verify_win tests/test_cert_verify_win.c
@@ -608,6 +654,9 @@ add_executable(mqvpn
     src/platform/darwin/killswitch.c
     src/platform/posix/status.c
     src/platform/posix/dns_common.c
+    src/platform/common/mgmt_conn.c
+    src/platform/common/mgmt_runtime.c
+    src/platform/posix/mgmt_listen.c
     src/config.c
 )
 
@@ -618,9 +667,11 @@ target_include_directories(mqvpn PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/platform/posix
     ${CMAKE_SOURCE_DIR}/src/platform/darwin
+    ${CMAKE_SOURCE_DIR}/src/platform/common
 )
 
 target_link_libraries(mqvpn
+    mqvpn_mgmt
     mqvpn_lib
     ${XQUIC_LIB}
     ${EVENT_LIB}
@@ -647,6 +698,9 @@ add_library(mqvpn_darwin_platform OBJECT
     src/platform/darwin/killswitch.c
     src/platform/posix/status.c
     src/platform/posix/dns_common.c
+    src/platform/common/mgmt_conn.c
+    src/platform/common/mgmt_runtime.c
+    src/platform/posix/mgmt_listen.c
 )
 
 target_include_directories(mqvpn_darwin_platform PRIVATE
@@ -656,6 +710,9 @@ target_include_directories(mqvpn_darwin_platform PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/platform/posix
     ${CMAKE_SOURCE_DIR}/src/platform/darwin
+    ${CMAKE_SOURCE_DIR}/src/platform/common
+    ${CMAKE_SOURCE_DIR}/src/common/ipc
+    ${CMAKE_SOURCE_DIR}/src/mgmt
 )
 
 # Shared library variant — mirrors the Linux mqvpn_shared block below (kept
@@ -787,6 +844,39 @@ if(BUILD_TESTING)
     set_target_properties(test_conn_settings PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_conn_settings COMMAND test_conn_settings)
+
+    # Management IPC: unit tests and the helpers driven by
+    # scripts/ci_e2e/run_client_mgmt_ipc_test.sh. Keep in sync with the Linux
+    # twins (the test_mgmt_conn / test_mgmt_listen blocks below).
+    add_executable(test_cmp_error tests/test_cmp_error.c src/common/ipc/cmp_error.c)
+    add_executable(test_cmp_endpoint tests/test_cmp_endpoint.c src/common/ipc/cmp_endpoint.c)
+    add_executable(test_ctl_rpc tests/test_ctl_rpc.c src/cli/ctl_rpc.c src/cli/ctl_sock_posix.c
+                   src/common/ipc/cmp_error.c third_party/yyjson/yyjson.c)
+    add_executable(test_mgmt_dispatch tests/test_mgmt_dispatch.c third_party/yyjson/yyjson.c)
+    target_link_libraries(test_mgmt_dispatch mqvpn_mgmt)
+    add_executable(test_mgmt_conn tests/test_mgmt_conn.c src/platform/common/mgmt_conn.c
+        src/log.c third_party/yyjson/yyjson.c)
+    target_link_libraries(test_mgmt_conn mqvpn_mgmt ${EVENT_LIB})
+    add_executable(test_mgmt_listen tests/test_mgmt_listen.c tests/test_mgmt_listen_real.c src/log.c)
+    add_executable(mgmt_endpoint_host tests/mgmt_endpoint_host.c
+        src/platform/common/mgmt_conn.c src/platform/posix/mgmt_listen.c
+        src/log.c third_party/yyjson/yyjson.c)
+    target_link_libraries(mgmt_endpoint_host mqvpn_mgmt ${EVENT_LIB})
+    add_executable(mgmt_raw_client tests/mgmt_raw_client.c src/cli/ctl_sock_posix.c)
+    foreach(t test_cmp_error test_cmp_endpoint test_ctl_rpc test_mgmt_dispatch test_mgmt_conn
+              test_mgmt_listen mgmt_endpoint_host mgmt_raw_client)
+        target_include_directories(${t} PRIVATE
+            ${EVENT_INCLUDE_DIR}
+            ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/src/platform/common
+            ${CMAKE_SOURCE_DIR}/src/platform/posix
+            ${CMAKE_SOURCE_DIR}/src/cli ${CMAKE_SOURCE_DIR}/src/common/ipc)
+        set_target_properties(${t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    endforeach()
+    foreach(t test_cmp_error test_cmp_endpoint test_ctl_rpc test_mgmt_dispatch test_mgmt_conn
+              test_mgmt_listen)
+        add_test(NAME ${t} COMMAND ${t})
+    endforeach()
 endif()
 
 else() # NOT WIN32, NOT APPLE — Linux
@@ -833,6 +923,9 @@ add_executable(mqvpn
     src/platform/linux/tun_offload.c
     src/platform/linux/dns.c
     src/platform/posix/dns_common.c
+    src/platform/common/mgmt_conn.c
+    src/platform/common/mgmt_runtime.c
+    src/platform/posix/mgmt_listen.c
     src/config.c
 )
 
@@ -843,9 +936,11 @@ target_include_directories(mqvpn PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/platform/posix
     ${CMAKE_SOURCE_DIR}/src/platform/linux
+    ${CMAKE_SOURCE_DIR}/src/platform/common
 )
 
 target_link_libraries(mqvpn
+    mqvpn_mgmt
     mqvpn_lib
     ${XQUIC_LIB}
     ${EVENT_LIB}
@@ -944,6 +1039,16 @@ if(BUILD_TESTING)
     add_executable(test_config_bridge tests/test_config_bridge.c src/platform/client_config_bridge.c src/mqvpn_config.c src/redundant_tx.c src/log.c third_party/yyjson/yyjson.c)
     add_executable(test_classifier tests/test_classifier.c src/hybrid/classifier.c)
     add_executable(test_icmp tests/test_icmp.c src/icmp.c)
+    add_executable(test_cmp_error tests/test_cmp_error.c src/common/ipc/cmp_error.c)
+    add_executable(test_cmp_endpoint tests/test_cmp_endpoint.c src/common/ipc/cmp_endpoint.c)
+    target_include_directories(test_cmp_error PRIVATE ${CMAKE_SOURCE_DIR}/src/common/ipc)
+    target_include_directories(test_cmp_endpoint PRIVATE ${CMAKE_SOURCE_DIR}/src/common/ipc)
+    add_executable(test_ctl_rpc tests/test_ctl_rpc.c src/cli/ctl_rpc.c src/cli/ctl_sock_posix.c
+                   src/common/ipc/cmp_error.c third_party/yyjson/yyjson.c)
+    target_include_directories(test_ctl_rpc PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/cli ${CMAKE_SOURCE_DIR}/src/common/ipc)
+    add_executable(test_mgmt_dispatch tests/test_mgmt_dispatch.c third_party/yyjson/yyjson.c)
+    target_link_libraries(test_mgmt_dispatch mqvpn_mgmt)
     # test_reorder_gate exercises src/reorder_gate.h (shared STAMP/RAW/DROP_MTU
     # gate + PTB token bucket, extracted from mqvpn_client.c/mqvpn_server.c) —
     # links reorder_tx.c (for the peek it wraps) + icmp.c (for the PTB send).
@@ -952,7 +1057,7 @@ if(BUILD_TESTING)
     add_executable(test_path_readd tests/test_path_readd.c)
     # Path status log line (header only + the status-name helper).
     add_executable(test_path_line tests/test_path_line.c src/mqvpn_util.c)
-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_redundant_tx test_status test_path_state_machine test_path_slot_oracle test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd test_path_line)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_redundant_tx test_status test_path_state_machine test_path_slot_oracle test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd test_path_line test_cmp_error test_cmp_endpoint test_mgmt_dispatch test_ctl_rpc)
 
     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of
@@ -985,6 +1090,26 @@ if(BUILD_TESTING)
         set_target_properties(${t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
         add_test(NAME ${t} COMMAND ${t})
     endforeach()
+
+    # Management IPC POSIX listener. The production .c is #included by the test
+    # (listen() is intercepted); libevent is needed for <event2/util.h> only.
+    add_executable(test_mgmt_listen tests/test_mgmt_listen.c tests/test_mgmt_listen_real.c src/log.c)
+    target_include_directories(test_mgmt_listen PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/platform/posix
+        ${CMAKE_SOURCE_DIR}/src/platform/common
+        ${CMAKE_SOURCE_DIR}/src/common/ipc
+        ${CMAKE_SOURCE_DIR}/include
+    )
+    if(Libevent_FOUND)
+        target_include_directories(test_mgmt_listen PRIVATE
+            $<TARGET_PROPERTY:libevent::core,INTERFACE_INCLUDE_DIRECTORIES>)
+    else()
+        target_include_directories(test_mgmt_listen PRIVATE ${EVENT_INCLUDE_DIR})
+    endif()
+    set_target_properties(test_mgmt_listen PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_mgmt_listen COMMAND test_mgmt_listen)
 
     # UDP GSO TX offload (issue #167): pure syscall/mechanics layer, no xquic
     # dependency. MQVPN_OFFLOAD_TEST_SEAM is wired: it swaps sendmsg/sendmmsg
@@ -1139,6 +1264,52 @@ if(BUILD_TESTING)
         set_target_properties(test_control_socket PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
         add_test(NAME test_control_socket COMMAND test_control_socket)
+
+        # Management IPC connection layer (libevent). The listener is created by
+        # the test itself, so no platform listener source is needed.
+        add_executable(test_mgmt_conn tests/test_mgmt_conn.c src/platform/common/mgmt_conn.c
+            src/log.c third_party/yyjson/yyjson.c)
+        target_include_directories(test_mgmt_conn PRIVATE
+            ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/src/platform/common
+            ${CMAKE_SOURCE_DIR}/include
+        )
+        if(Libevent_FOUND)
+            target_link_libraries(test_mgmt_conn mqvpn_mgmt libevent::core libevent::extra)
+        else()
+            target_include_directories(test_mgmt_conn PRIVATE ${EVENT_INCLUDE_DIR})
+            target_link_libraries(test_mgmt_conn mqvpn_mgmt ${EVENT_LIB})
+        endif()
+        set_target_properties(test_mgmt_conn PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+        add_test(NAME test_mgmt_conn COMMAND test_mgmt_conn)
+
+        # Test helpers driven by scripts/ci_e2e/run_client_mgmt_ipc_test.sh
+        # (no add_test: the script is the test).
+        add_executable(mgmt_endpoint_host tests/mgmt_endpoint_host.c
+            src/platform/common/mgmt_conn.c src/platform/posix/mgmt_listen.c
+            src/log.c third_party/yyjson/yyjson.c)
+        target_include_directories(mgmt_endpoint_host PRIVATE
+            ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/src/platform/common
+            ${CMAKE_SOURCE_DIR}/src/platform/posix
+            ${CMAKE_SOURCE_DIR}/src/common/ipc
+            ${CMAKE_SOURCE_DIR}/include
+        )
+        if(Libevent_FOUND)
+            target_link_libraries(mgmt_endpoint_host mqvpn_mgmt libevent::core libevent::extra)
+        else()
+            target_include_directories(mgmt_endpoint_host PRIVATE ${EVENT_INCLUDE_DIR})
+            target_link_libraries(mgmt_endpoint_host mqvpn_mgmt ${EVENT_LIB})
+        endif()
+        set_target_properties(mgmt_endpoint_host PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+
+        add_executable(mgmt_raw_client tests/mgmt_raw_client.c src/cli/ctl_sock_posix.c)
+        target_include_directories(mgmt_raw_client PRIVATE
+            ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/cli ${CMAKE_SOURCE_DIR}/src/common/ipc)
+        set_target_properties(mgmt_raw_client PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     endif()
 
     # libmqvpn public API test (links libmqvpn + xquic)
@@ -1310,6 +1481,9 @@ endif()
 
 # ---------- Install ----------
 install(TARGETS mqvpn DESTINATION bin)
+if(NOT WIN32 AND NOT ANDROID_CROSS_COMPILE)   # as above: Windows drops only the NOT WIN32 part
+    install(TARGETS mqvpnctl DESTINATION bin)
+endif()
 install(TARGETS mqvpn_lib DESTINATION lib)
 install(TARGETS mqvpn_shared DESTINATION lib)
 # Bundle xquic shared library (no standalone deb exists)
@@ -1392,3 +1566,12 @@ endif()
 endif() # WIN32 / APPLE / Linux
 
 endif() # NOT ANDROID_CROSS_COMPILE
+
+# Configure-time gate, evaluated after every target_link_libraries(mqvpnctl ...):
+# the link list may name only system libraries.
+if(NOT WIN32 AND NOT ANDROID_CROSS_COMPILE)
+    get_target_property(_ctl_libs mqvpnctl LINK_LIBRARIES)
+    if(_ctl_libs MATCHES "mqvpn_lib|xquic|event")
+        message(FATAL_ERROR "mqvpnctl must not link libmqvpn, xquic or libevent: ${_ctl_libs}")
+    endif()
+endif()

@@ -385,6 +385,19 @@ JSON では `"hybrid"` オブジェクトに snake_case キーで指定します
 
 JSON では `"advanced"` オブジェクトに snake_case キーで指定します（`recv_rate_limit`, `udp_gso`, `udp_gro`, `tun_offload`, `tun_gro`）。
 
+### `[ClientManagement]`（クライアントのみ）
+
+実行中のクライアントに、ローカルのソケット経由で `mqvpnctl` ツールから接続できるようにします。既定では無効なので、使う環境ごとに有効にしてください。現在使えるコマンドは `mqvpnctl version` だけで、状態やパスを調べるコマンドは今後追加する予定です。
+
+| キー | 説明 | 既定値 |
+|---|---|---|
+| `Enabled` | 管理用ソケットを開始します（JSON では `client_mgmt_enabled`） | `false` |
+| `Endpoint` | ソケットのパス（`client_mgmt_endpoint`）。空の場合はシステムの既定パスを使います。Linux は `/run/mqvpn/client.sock`、macOS は `/var/run/mqvpn/client.sock`、Windows は `%ProgramData%\mqvpn\client.sock` です | 空 |
+| `SocketMode` | ソケットファイルのアクセス権を 8 進数で指定します（`client_mgmt_socket_mode`）。Linux と macOS のみ | `0660` |
+| `SocketGroup` | 接続を許可するグループ（`client_mgmt_socket_group`）。Linux と macOS のみ。空の場合は root だけが接続できます | 空 |
+
+Windows ではソケットへの接続が管理者に限られるため、`mqvpnctl` は管理者権限で開いたプロンプトから実行してください。ソケットを作れなかった場合、クライアントは理由をログに書き、管理用ソケットなしで動作を続けます。
+
 ## MTU ガイドライン
 
 ### デフォルト（auto)
