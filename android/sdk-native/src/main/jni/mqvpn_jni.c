@@ -1270,7 +1270,7 @@ JNI_FN(getStats)(JNIEnv *env, jobject thiz, jlong client)
     int rc = mqvpn_client_get_stats((const mqvpn_client_t *)(intptr_t)client, &stats);
     if (rc != MQVPN_OK) return NULL;
 
-    jlong values[7] = {
+    jlong values[19] = {
         (jlong)stats.bytes_tx,   (jlong)stats.bytes_rx,   (jlong)stats.dgram_sent,
         (jlong)stats.dgram_recv, (jlong)stats.dgram_lost, (jlong)stats.dgram_acked,
         (jlong)stats.srtt_ms,
@@ -1391,7 +1391,8 @@ JNI_FN(getInterest)(JNIEnv *env, jobject thiz, jlong client)
 /*
  * getReorderStats(client) → LongArray:
  * [deliveredCount, gapCount, gapFilledCount, gapTimeoutCount,
- *  ackDemoteCount, p50Ms, p99Ms]
+ *  ackDemoteCount, p50Ms, p99Ms,
+ *  residence_bucket[0..11]]   (19 entries; buckets at indices 7-18)
  */
 JNIEXPORT jlongArray JNICALL
 JNI_FN(getReorderStats)(JNIEnv *env, jobject thiz, jlong client)
@@ -1411,8 +1412,10 @@ JNI_FN(getReorderStats)(JNIEnv *env, jobject thiz, jlong client)
         (jlong)st.ack_demote_count, (jlong)(p50 + 0.5),
         (jlong)(p99 + 0.5),
     };
-    jlongArray arr = (*env)->NewLongArray(env, 7);
-    if (arr) (*env)->SetLongArrayRegion(env, arr, 0, 7, values);
+    for (int i = 0; i < 12; i++)
+        values[7 + i] = (jlong)st.residence_bucket[i];
+    jlongArray arr = (*env)->NewLongArray(env, 19);
+    if (arr) (*env)->SetLongArrayRegion(env, arr, 0, 19, values);
     return arr;
 }
 

@@ -5,6 +5,7 @@ package com.mqvpn.sdk.native_
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -15,6 +16,8 @@ class ReorderJniSmokeTest {
     @Test
     fun externalsResolve_noUnsatisfiedLinkError() {
         assertNull(NativeBridge.getReorderStats(0L))
+        // Any non-null result must carry the 7 counters plus 12 residence buckets.
+        NativeBridge.getReorderStats(0L)?.let { assertTrue(it.size >= 19) }
 
         val cfg = NativeBridge.configNew()
         try {

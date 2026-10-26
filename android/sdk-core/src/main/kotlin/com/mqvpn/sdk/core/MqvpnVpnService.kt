@@ -8,6 +8,7 @@ import android.net.VpnService
 import android.os.Binder
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.util.Log
 import com.mqvpn.sdk.core.internal.PathManager
 import com.mqvpn.sdk.core.internal.TunnelCallbacks
@@ -75,6 +76,7 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
     private lateinit var waiter: NativeReactorWaiter
     private lateinit var executor: MqvpnPoller
     private var tunnel: MqvpnTunnel? = null
+    private var lastReorderStatsMs = 0L
     private var tunnelBridge: TunnelBridge? = null
     private var pathManager: PathManager? = null
     private var networkMonitor: NetworkMonitor? = null
@@ -105,7 +107,12 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
                 if (t != null) {
                     manager?.updateStats(t.getStats())
                     manager?.updatePaths(t.getPaths())
-                    manager?.updateReorderStats(t.getReorderStats())
+                    // JNI array + boxed list: once per wall-clock second, not per poll
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - lastReorderStatsMs >= 1000) {
+                        lastReorderStatsMs = now
+                        manager?.updateReorderStats(t.getReorderStats())
+                    }
                 }
                 result
             },

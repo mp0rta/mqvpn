@@ -73,4 +73,18 @@ class MqvpnTunnelTest {
         t.destroy()
         assertEquals(0L, t.clientHandle)
     }
+
+    @Test
+    fun `decodeReorderStats marshals the 12 residence buckets from indices 7 to 18`() {
+        val a = LongArray(19) { it.toLong() }
+        val s = decodeReorderStats(a)
+        assertEquals(0L, s.delivered)
+        assertEquals(6L, s.bufferedP99Ms)
+        assertEquals((7L..18L).toList(), s.residenceBuckets)
+    }
+
+    @Test
+    fun `decodeReorderStats of a stale 7-entry array is the empty default`() {
+        assertEquals(ReorderStats(), decodeReorderStats(LongArray(7) { 1L }))
+    }
 }
