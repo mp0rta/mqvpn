@@ -54,7 +54,12 @@ fun AppShell(vm: MqvpnViewModel, settingsVm: SettingsViewModel, nav: NavHostCont
     // Frozen at first load: saving a server later must not re-route the live NavHost.
     val start = rememberSaveable { startDestination(settings) }
     NavHost(nav, startDestination = start) {
-        composable("setup") { SetupScreen() }
+        composable("setup") {
+            SetupScreen(vm, settingsVm, onDone = {
+                // Never leave a dead Setup in the back stack; singleTop avoids a duplicate "main" when re-run from Settings.
+                nav.navigate("main") { popUpTo("setup") { inclusive = true }; launchSingleTop = true }
+            })
+        }
         composable("main") { MainTabs(vm, settingsVm) }
         composable("reorderDetail") { DetailStub("Reorder") }
         composable("redundantDetail") { DetailStub("Redundant") }
