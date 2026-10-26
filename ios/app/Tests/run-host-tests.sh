@@ -26,6 +26,8 @@ swiftc -framework Security -o "$OUT" \
     "$SHARED/PathReadSource.swift" \
     "$APP/ReorderIngest.swift" \
     "$APP/EventLog.swift" \
+    "$APP/BandwidthHistory.swift" \
+    "$APP/ReorderHistory.swift" \
     "$DIR/PureCases.swift" \
     "$DIR/main.swift"
 "$OUT"

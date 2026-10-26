@@ -183,5 +183,172 @@ func runPureCases() -> Int {
         check(!r.reset && r.fresh.isEmpty && cur.request?.sinceSeq == 1, "cursor empty keeps position")
     }
 
+    // MARK: BandwidthHistory (ports of BandwidthHistoryTest.kt, 11 cases)
+    do {
+        func p(_ n: String, _ tx: UInt64, _ rx: UInt64) -> (name: String, tx: UInt64, rx: UInt64) { (n, tx, rx) }
+        let sec: UInt64 = 1000
+        func tick(_ h: BandwidthHistory, _ ps: [(name: String, tx: UInt64, rx: UInt64)], _ mono: UInt64) {
+            h.onTick(paths: ps, monoMs: mono, wallMs: Int64(mono))
+        }
+        var h = BandwidthHistory()
+        tick(h, [p("wlan0", 1000, 2000)], sec)
+        check(h.samples.count == 1 && h.samples.last!.dlBps == 0 && h.samples.last!.ulBps == 0
+              && h.samples.last!.perPathUl["wlan0"] == 0 && h.samples.last!.wallMs == 1000, "bw first tick baseline")
+
+        h = BandwidthHistory()
+        tick(h, [p("wlan0", 0, 0)], sec)
+        tick(h, [p("wlan0", 1000, 250)], 2 * sec)
+        var s = h.samples.last!
+        check(s.perPathUl["wlan0"] == 8000 && s.perPathDl["wlan0"] == 2000 && s.ulBps == 8000 && s.dlBps == 2000, "bw delta bps")
+
+        h = BandwidthHistory()
+        tick(h, [p("wlan0", 0, 0)], sec)
+        tick(h, [p("wlan0", 2500, 0)], 3 * sec)
+        check(h.samples.last!.perPathUl["wlan0"] == 10000, "bw longer elapsed scales")
+
+        h = BandwidthHistory()
+        tick(h, [p("wlan0", 0, 0), p("rmnet0", 0, 0)], sec)
+        tick(h, [p("wlan0", 1250, 0), p("rmnet0", 250, 0)], 2 * sec)
+        s = h.samples.last!
+        check(s.perPathUl["wlan0"] == 10000 && s.perPathUl["rmnet0"] == 2000 && s.ulBps == 12000, "bw total sums paths")
+
+        h = BandwidthHistory()
+        tick(h, [p("wlan0", 100, 0), p("wlan0", 200, 0)], sec)
+        tick(h, [p("wlan0", 600, 0), p("wlan0", 325, 0)], 2 * sec)
+        check(h.samples.last!.perPathUl["wlan0"] == 5000, "bw duplicate ifaces summed")
+
+        h = BandwidthHistory()
+        tick(h, [p("wlan0", 9999, 0)], sec)
+        tick(h, [p("wlan0", 10, 0)], 2 * sec)
+        check(h.samples.last!.perPathUl["wlan0"] == 0, "bw regression re-baselines")
+        tick(h, [p("wlan0", 1260, 0)], 3 * sec)
+        check(h.samples.last!.perPathUl["wlan0"] == 10000, "bw new baseline used")
+
+        h = BandwidthHistory()
+        tick(h, [p("wlan0", 1000, 0)], sec)
+        tick(h, [], 2 * sec)
+        check(h.samples.last!.perPathUl.isEmpty && h.samples.last!.perPathDl.isEmpty, "bw vanished iface empty")
+        tick(h, [p("wlan0", 9_000_000, 0)], 3 * sec)
+        check(h.samples.last!.perPathUl["wlan0"] == 0, "bw reappear restarts at zero")
+
+        h = BandwidthHistory()
+        tick(h, [p("wlan0", 0, 0)], sec)
+        tick(h, [p("wlan0", 999_999, 0)], sec)
+        check(h.samples.count == 1 && h.samples.last!.ulBps == 0, "bw non-positive elapsed ignored")
+
+        h = BandwidthHistory(windowMs: 3000)
+        for i in 1...5 { tick(h, [p("wlan0", UInt64(i) * 100, 0)], UInt64(i) * sec) }
+        tick(h, [p("wlan0", 600, 0)], 6 * sec)
+        check(h.samples.map { $0.wallMs } == [3000, 4000, 5000, 6000], "bw samples expire by timestamp")
+
+        h = BandwidthHistory()
+        tick(h, [p("wlan0", 500, 500)], sec)
+        tick(h, [p("wlan0", 1750, 10)], 2 * sec)
+        check(h.samples.last!.dlBps == 0 && h.samples.last!.ulBps == 10000, "bw separate baselines")
+
+        h = BandwidthHistory(windowMs: 1500)
+        tick(h, [p("wlan0", 0, 0)], sec)
+        tick(h, [p("wlan0", 0, 0), p("rmnet0", 0, 0)], 2 * sec)
+        check(h.slots["wlan0"] == 0 && h.slots["rmnet0"] == 1, "bw slots first-seen order")
+        tick(h, [p("rmnet0", 0, 0)], 3 * sec)
+        tick(h, [p("rmnet0", 0, 0)], 4 * sec)
+        check(h.slots["rmnet0"] == 1, "bw slots stable across scroll")
+        h.clear()
+        check(h.slots.isEmpty, "bw clear empties slots")
+        tick(h, [p("rmnet0", 500, 0)], 5 * sec)
+        check(h.samples.last!.ulBps == 0 && h.slots["rmnet0"] == 0, "bw after clear restarts")
+    }
+
+    // MARK: ReorderHistory + DgramLossWindow (ports of ReorderHistoryTest.kt, 14 cases)
+    do {
+        func bk(_ at: (Int, UInt64)...) -> [UInt64] {
+            var l = [UInt64](repeating: 0, count: 12)
+            for (i, v) in at { l[i] = v }
+            return l
+        }
+        func tick(_ h: ReorderHistory, delivered: UInt64 = 0, gapCount: UInt64 = 0, filled: UInt64 = 0,
+                  timeout: UInt64 = 0, b: [UInt64]? = nil, _ ms: Int64) {
+            h.onTick(delivered: delivered, gapCount: gapCount, gapFilled: filled, gapTimeout: timeout,
+                     ackDemote: 0, buckets: b ?? bk(), wallMs: ms)
+        }
+        func near(_ a: Double?, _ b: Double) -> Bool { a != nil && abs(a! - b) < 1e-9 }
+
+        var h = ReorderHistory()
+        tick(h, delivered: 100, 1000)
+        check(h.samples.isEmpty, "rh first tick no sample")
+
+        h = ReorderHistory()
+        tick(h, filled: 10, timeout: 1, 1000)
+        tick(h, filled: 15, timeout: 3, 2000)
+        check(h.samples.count == 1 && near(h.samples[0].recoveredPerSec, 5) && near(h.samples[0].lostPerSec, 2)
+              && h.samples[0].wallMs == 2000, "rh per-second deltas")
+
+        h = ReorderHistory()
+        tick(h, filled: 0, 1000)
+        tick(h, filled: 30, 4000)
+        check(near(h.samples.first?.recoveredPerSec, 10), "rh late tick real elapsed")
+
+        h = ReorderHistory()
+        tick(h, delivered: 500, filled: 50, 1000)
+        tick(h, delivered: 10, filled: 2, 2000)
+        check(h.samples.isEmpty, "rh reset no sample")
+        tick(h, delivered: 20, filled: 4, 3000)
+        check(h.samples.count == 1 && near(h.samples[0].recoveredPerSec, 2), "rh after reset rate")
+
+        h = ReorderHistory()
+        tick(h, delivered: 100, gapCount: 9, 1000)
+        tick(h, delivered: 900, gapCount: 1, 2000)
+        check(h.samples.isEmpty, "rh gapCount decrease re-baselines")
+
+        h = ReorderHistory()
+        tick(h, delivered: 100, b: bk((3, 10), (4, 10)), 1000)
+        tick(h, delivered: 900, b: bk((3, 50), (4, 9)), 2000)
+        check(h.samples.isEmpty, "rh one bucket decrease re-baselines")
+
+        h = ReorderHistory()
+        tick(h, b: bk((0, 5)), 1000)
+        tick(h, b: bk((0, 500)), 2000)
+        check(h.samples.count == 1 && h.samples[0].p50Ms == nil && h.samples[0].p99Ms == nil, "rh bucket0 only nil percentiles")
+
+        h = ReorderHistory()
+        tick(h, b: bk((0, 1000)), 1000)
+        tick(h, b: bk((0, 2000), (1, 50), (2, 40), (3, 10)), 2000)
+        check(near(h.samples.first?.p50Ms, 1.0) && near(h.samples.first?.p99Ms, 3.8), "rh percentiles interpolate")
+
+        h = ReorderHistory()
+        tick(h, 1000)
+        tick(h, b: bk((1, 90), (11, 10)), 2000)
+        check(h.samples.first?.p99Ms == Double.infinity && (h.samples.first?.p50Ms ?? 9) < 1.0 + 1e-9, "rh overflow bucket infinity")
+
+        h = ReorderHistory()
+        tick(h, filled: 1, b: [], 1000)
+        tick(h, filled: 3, b: [], 2000)
+        check(h.samples.count == 1 && near(h.samples[0].recoveredPerSec, 2) && h.samples[0].p50Ms == nil
+              && h.samples[0].p99Ms == nil, "rh empty buckets nil percentiles")
+
+        h = ReorderHistory(windowMs: 3000)
+        tick(h, 0)
+        for t in 1...5 { tick(h, filled: UInt64(t), Int64(t) * 1000) }
+        check(h.samples.map { $0.wallMs } == [2000, 3000, 4000, 5000], "rh samples expire")
+
+        h = ReorderHistory()
+        tick(h, filled: 5, 1000)
+        h.clear()
+        tick(h, filled: 50, 2000)
+        check(h.samples.isEmpty, "rh clear forgets baseline")
+
+        var w = DgramLossWindow()
+        check(w.onTick(sent: 100, lost: 1, wallMs: 1000) == nil, "dg first nil")
+        check(w.onTick(sent: 100, lost: 1, wallMs: 2000) == nil, "dg no sends nil")
+        check(near(w.onTick(sent: 200, lost: 11, wallMs: 3000), 0.1), "dg delta ratio")
+
+        w = DgramLossWindow(windowMs: 2000)
+        _ = w.onTick(sent: 0, lost: 0, wallMs: 0)
+        _ = w.onTick(sent: 100, lost: 50, wallMs: 1000)
+        check(near(w.onTick(sent: 300, lost: 50, wallMs: 4000), 0.0), "dg window drops old points")
+        check(w.onTick(sent: 10, lost: 0, wallMs: 5000) == nil, "dg reset nil")
+        check(near(w.onTick(sent: 20, lost: 5, wallMs: 6000), 0.5), "dg after reset")
+    }
+
     return failures
 }

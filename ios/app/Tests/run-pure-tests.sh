@@ -12,6 +12,8 @@ PURE_SOURCES=(
     "$SHARED/TunnelPolicies.swift"
     "$SHARED/ProviderMessage.swift"
     "$SHARED/SampleRing.swift"
+    "$APP/BandwidthHistory.swift"
+    "$APP/ReorderHistory.swift"
 )
 if command -v swiftc >/dev/null 2>&1; then
     SWIFTC=(swiftc)
