@@ -97,12 +97,12 @@ func fmtInt<T: BinaryInteger>(_ v: T) -> String {
 }
 
 /// Session seconds from provider-clock fields; nil while reconnecting / no data.
-func elapsedText(_ c: TunnelController, _ vs: VpnViewState) -> String? {
+@MainActor func elapsedText(_ c: TunnelController, _ vs: VpnViewState) -> String? {
     guard vs == .connected, let s = c.snapshot, let since = s.connectedSince else { return nil }
     return fmtElapsed(Int64(max(0, s.timestamp - since)))
 }
 
-func viewState(_ c: TunnelController) -> VpnViewState {
+@MainActor func viewState(_ c: TunnelController) -> VpnViewState {
     deriveViewState(neStatus: c.status.rawValue, clientState: c.snapshot?.clientState, surfacedError: c.surfacedError)
 }
 

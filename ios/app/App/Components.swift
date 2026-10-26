@@ -68,7 +68,7 @@ struct ToggleRow: View {
                 }
                 .contentShape(Rectangle())
                 .onTapGesture { onOpen?() }
-                Toggle("", isOn: $isOn).labelsHidden().tint(mq.accent).disabled(!enabled)
+                Toggle(title, isOn: $isOn).labelsHidden().tint(mq.accent).disabled(!enabled)
             }.padding(.vertical, 11)
             if !last { Hairline() }
         }

@@ -114,7 +114,7 @@ struct SetupScreen: View {
                         Text("Only for test servers you own. Turn off once your server has a real certificate.")
                             .font(.system(size: 11)).lineSpacing(3).foregroundColor(mq.t2)
                     }
-                    Toggle("", isOn: m.binding(\.insecure)).labelsHidden().tint(mq.accent)
+                    Toggle("Trust self-signed certificate", isOn: m.binding(\.insecure)).labelsHidden().tint(mq.accent)
                 }
             }
             Text("iOS will ask for permission to add a VPN configuration when you finish setup.")

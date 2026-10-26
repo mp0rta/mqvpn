@@ -698,6 +698,19 @@ func runSettingsCoreCases() async -> Int {
         c.update { $0.insecure = true }
         check(await c.flush() && st.persisted.count == 2, "autosave on after commitFirst")
     }
+    // edit during in-flight commitFirst => returns only after the newer draft persisted
+    do {
+        let (c, st) = make(AppDraft(), persisted: false)
+        c.autosave = false
+        c.update { $0.addressText = "example.net" }
+        var edited = false
+        st.onPersist = { _ in
+            if !edited { edited = true; c.update { $0.insecure = true } }
+        }
+        let ok = await c.commitFirst()
+        check(ok && st.persisted.count == 2 && st.persisted.last?.insecure == true
+              && c.lastPersisted == c.draft, "commitFirst drains mid-persist edit")
+    }
     // commitFirst refuses an invalid draft; surfaces failure
     do {
         let (c, st) = make(AppDraft(), persisted: false)

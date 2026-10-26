@@ -77,15 +77,10 @@ final class FakeStore: ReorderConfigStore {
     func commit() async throws { if commitThrows { throw TestErr.boom } }
     func refresh() async throws { if refreshThrows { throw TestErr.boom } }
 }
-func runAsync(_ body: @escaping () async -> Void) {
-    let sem = DispatchSemaphore(value: 0)
-    Task { await body(); sem.signal() }
-    sem.wait()
-}
 func boolOf(_ store: FakeStore, _ k: String) -> Bool? {
     (store.providerConfiguration?[k] as? NSNumber)?.boolValue
 }
-runAsync {
+do {
     // commit fails -> providerConfiguration rolled back to the backup value
     let store = FakeStore(); store.providerConfiguration = ["reorderEnabled": NSNumber(value: false)]
     store.commitThrows = true
@@ -94,7 +89,7 @@ runAsync {
     catch { threw = true }
     check(threw && boolOf(store, "reorderEnabled") == false, "commit fail -> rethrow + rollback")
 }
-runAsync {
+do {
     // commit ok but refresh fails -> committed value stays (refresh non-fatal)
     let store = FakeStore(); store.providerConfiguration = [:]
     store.refreshThrows = true

@@ -16,9 +16,7 @@ struct PathsScreen: View {
     var body: some View {
         let live = viewState(controller) == .connected
         let paths = (controller.snapshot?.paths ?? []).map { DerivePath(iface: $0.name, status: Int($0.status)) }
-        var avail = Set<TransportKind>()
-        if availability.wifi { avail.insert(.wifi) }
-        if availability.cellular { avail.insert(.cellular) }
+        let avail = Set<TransportKind>([availability.wifi ? .wifi : nil, availability.cellular ? .cellular : nil].compactMap { $0 })
         let cards = pathCardViews(paths: paths, available: avail, sample: controller.bandwidthHistory.samples.last)
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {

@@ -137,10 +137,12 @@ final class SettingsCore {
 
     /// Explicit persist of the current valid draft (Finish Setup); enables autosave on success.
     func commitFirst() async -> Bool {
-        if let w = worker { await w.value }
-        let d = draft
-        guard d.isValid else { return false }
-        if lastPersisted != d {
+        // Re-check after every persist: edits made mid-persist must land before success.
+        while true {
+            if let w = worker { await w.value }
+            let d = draft
+            guard d.isValid else { return false }
+            if lastPersisted == d { break }
             do { try await store.persist(d) } catch {
                 saveError = "Save failed: \(error.localizedDescription)"; onChange(); return false
             }

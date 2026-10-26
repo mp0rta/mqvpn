@@ -276,6 +276,10 @@ final class TunnelController: ObservableObject {
     /// the connection state.
     func setScenePhaseActive(_ active: Bool) {
         scenePhaseActive = active
+        if active, case .loadFailed = state {
+            state = .loading   // set synchronously: guards against overlapping loads
+            Task { await loadOrCreateManager() }
+        }
         reconcilePolling()
     }
 
