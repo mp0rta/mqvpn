@@ -66,12 +66,6 @@ data class MqvpnConfig(
      * when Android connects it on its own.
      */
     val bluetoothPathEnabled: Boolean = false,
-    /** Use Wi-Fi networks as paths. Fixed when the tunnel starts. */
-    val wifiPathEnabled: Boolean = true,
-    /** Use cellular networks as paths. Fixed when the tunnel starts. */
-    val cellularPathEnabled: Boolean = true,
-    /** Use Ethernet networks as paths. Fixed when the tunnel starts. */
-    val ethernetPathEnabled: Boolean = true,
     /**
      * Largest IP packet the network carries (1280-9000), to size QUIC packets
      * for; 0 = the default packet size. With [pmtud] it is the upper limit.
@@ -86,6 +80,13 @@ data class MqvpnConfig(
      * discovered size.
      */
     val pmtud: Boolean = false,
+    // Appended fields only below this line: callers may construct positionally.
+    /** Use Wi-Fi networks as paths. Fixed when the tunnel starts. */
+    val wifiPathEnabled: Boolean = true,
+    /** Use cellular networks as paths. Fixed when the tunnel starts. */
+    val cellularPathEnabled: Boolean = true,
+    /** Use Ethernet networks as paths. Fixed when the tunnel starts. */
+    val ethernetPathEnabled: Boolean = true,
 ) : Parcelable {
 
     @Serializable
