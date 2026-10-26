@@ -48,7 +48,11 @@ jobs:
           submodules: recursive
 
       - name: Install dependencies
+        # A stuck mirror otherwise eats the whole job timeout.
+        timeout-minutes: 5
         run: |
+          # The Azure mirror is often throttled and stalls apt for 10+ minutes.
+          sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-get install -y cmake libevent-dev golang iptables
 
@@ -165,7 +169,11 @@ jobs:
 
       # qemu-user-binfmt lets tests that exec the ARM mqvpn binary run too.
       - name: Install dependencies
+        # A stuck mirror otherwise eats the whole job timeout.
+        timeout-minutes: 5
         run: |
+          # The Azure mirror is often throttled and stalls apt for 10+ minutes.
+          sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-get install -y cmake golang gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf qemu-user qemu-user-binfmt
 
@@ -271,7 +279,11 @@ jobs:
           submodules: recursive
 
       - name: Install dependencies
+        # A stuck mirror otherwise eats the whole job timeout.
+        timeout-minutes: 5
         run: |
+          # The Azure mirror is often throttled and stalls apt for 10+ minutes.
+          sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-get install -y cmake libevent-dev golang iptables conntrack clang iperf3 jq netcat-openbsd iproute2 curl python3 tcpdump nftables ethtool
 
@@ -603,7 +615,11 @@ jobs:
           submodules: recursive
 
       - name: Install dependencies
+        # A stuck mirror otherwise eats the whole job timeout.
+        timeout-minutes: 5
         run: |
+          # The Azure mirror is often throttled and stalls apt for 10+ minutes.
+          sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-get install -y cmake golang iptables clang
 
@@ -1445,7 +1461,11 @@ jobs:
           submodules: recursive
 
       - name: Install dependencies
+        # A stuck mirror otherwise eats the whole job timeout.
+        timeout-minutes: 5
         run: |
+          # The Azure mirror is often throttled and stalls apt for 10+ minutes.
+          sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-get install -y cmake libevent-dev golang iptables conntrack clang iperf3 jq netcat-openbsd curl python3
 
@@ -1545,7 +1565,11 @@ jobs:
           submodules: recursive
 
       - name: Install dependencies
+        # A stuck mirror otherwise eats the whole job timeout.
+        timeout-minutes: 5
         run: |
+          # The Azure mirror is often throttled and stalls apt for 10+ minutes.
+          sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-get install -y cmake libevent-dev golang iptables conntrack clang iperf3 jq netcat-openbsd curl python3
 
