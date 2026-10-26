@@ -1270,7 +1270,7 @@ JNI_FN(getStats)(JNIEnv *env, jobject thiz, jlong client)
     int rc = mqvpn_client_get_stats((const mqvpn_client_t *)(intptr_t)client, &stats);
     if (rc != MQVPN_OK) return NULL;
 
-    jlong values[19] = {
+    jlong values[7] = {
         (jlong)stats.bytes_tx,   (jlong)stats.bytes_rx,   (jlong)stats.dgram_sent,
         (jlong)stats.dgram_recv, (jlong)stats.dgram_lost, (jlong)stats.dgram_acked,
         (jlong)stats.srtt_ms,
@@ -1406,7 +1406,7 @@ JNI_FN(getReorderStats)(JNIEnv *env, jobject thiz, jlong client)
     double p50 = mqvpn_reorder_latency_buffered_percentile(&st, 0.50);
     double p99 = mqvpn_reorder_latency_buffered_percentile(&st, 0.99);
 
-    jlong values[7] = {
+    jlong values[19] = {
         (jlong)st.delivered_count,  (jlong)st.gap_count,
         (jlong)st.gap_filled_count, (jlong)st.gap_timeout_count,
         (jlong)st.ack_demote_count, (jlong)(p50 + 0.5),
