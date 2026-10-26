@@ -72,6 +72,7 @@ android {
 
 dependencies {
     implementation(project(":sdk-core"))
+    implementation(project(":sdk-network"))
 
     // Compose
     implementation(platform("androidx.compose:compose-bom:2026.09.00"))

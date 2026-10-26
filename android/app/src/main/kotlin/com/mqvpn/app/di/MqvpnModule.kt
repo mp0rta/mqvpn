@@ -12,6 +12,7 @@ import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.preferencesDataStoreFile
 import com.mqvpn.app.data.SettingsRepository
 import com.mqvpn.sdk.core.MqvpnManager
+import com.mqvpn.sdk.network.TransportAvailability
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -26,6 +27,12 @@ object MqvpnModule {
     @Singleton
     fun provideMqvpnManager(@ApplicationContext context: Context): MqvpnManager {
         return MqvpnManager(context)
+    }
+
+    @Provides
+    @Singleton
+    fun provideTransportAvailability(@ApplicationContext context: Context): TransportAvailability {
+        return TransportAvailability(context)
     }
 
     @Provides

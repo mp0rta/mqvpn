@@ -131,6 +131,11 @@ fun SettingsScreen(
         hybridEnabled = hybridEnabled,
         hybridTcpMode = hybridTcpModeName,
         bluetoothPathEnabled = bluetoothPathEnabled,
+        // Not edited here (Paths/Setup own them): carry the saved values over.
+        pathWifi = loaded?.pathWifi ?: true,
+        pathCellular = loaded?.pathCellular ?: true,
+        pathEthernet = loaded?.pathEthernet ?: true,
+        autoReconnect = loaded?.autoReconnect ?: true,
         scheduler = schedulerName,
     )
 

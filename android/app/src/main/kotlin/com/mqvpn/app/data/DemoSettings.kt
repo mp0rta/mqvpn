@@ -26,6 +26,10 @@ data class DemoSettings(
     val hybridEnabled: Boolean = false,
     val hybridTcpMode: String = MqvpnConfig.HybridTcpMode.AUTO.name,
     val bluetoothPathEnabled: Boolean = false,
+    val pathWifi: Boolean = true,
+    val pathCellular: Boolean = true,
+    val pathEthernet: Boolean = true,
+    val autoReconnect: Boolean = true,
     val scheduler: String = SchedulerChoice.DEFAULT.name,
 ) {
     enum class SchedulerChoice { DEFAULT, MIN_RTT, WLB }
@@ -90,6 +94,10 @@ data class DemoSettings(
             hybridEnabled = hybridEnabled,
             hybridTcpMode = hybridTcpModeEnum(),
             bluetoothPathEnabled = bluetoothPathEnabled,
+            wifiPathEnabled = pathWifi,
+            cellularPathEnabled = pathCellular,
+            ethernetPathEnabled = pathEthernet,
+            reconnect = autoReconnect,
             scheduler = when (schedulerChoice()) {
                 SchedulerChoice.WLB -> MqvpnConfig.Scheduler.WLB
                 else -> MqvpnConfig.Scheduler.MIN_RTT
@@ -106,8 +114,11 @@ data class DemoSettings(
 
     fun reorderPortsValid(): Boolean = !reorderEnabled || parsedReorderPorts().isNotEmpty()
 
+    /** With every transport off no path is admitted and the tunnel never connects. */
+    fun pathPolicyValid(): Boolean = pathWifi || pathCellular || pathEthernet || bluetoothPathEnabled
+
     fun isValid(): Boolean = hostValid() && portValid() && reorderPortsValid() &&
-        (!redundantEnabled || redundantPortsValid())
+        (!redundantEnabled || redundantPortsValid()) && pathPolicyValid()
 
     companion object {
         /**

@@ -18,6 +18,7 @@ import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.ReconnectInfo
 import com.mqvpn.sdk.core.model.TunnelInfo
 import com.mqvpn.sdk.network.NetworkMonitor
+import com.mqvpn.sdk.network.PathPolicy
 import com.mqvpn.sdk.runtime.MqvpnPoller
 import com.mqvpn.sdk.runtime.NativeReactorWaiter
 import kotlinx.coroutines.CoroutineScope
@@ -165,7 +166,15 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
             val t = MqvpnTunnel.create(config, this, waiter.reactorHandle)
             tunnel = t
 
-            val monitor = NetworkMonitor(this, holdBluetooth = config.bluetoothPathEnabled)
+            val monitor = NetworkMonitor(
+                this,
+                PathPolicy(
+                    config.wifiPathEnabled,
+                    config.cellularPathEnabled,
+                    config.ethernetPathEnabled,
+                    config.bluetoothPathEnabled,
+                ),
+            )
             networkMonitor = monitor
 
             val pm = PathManager(

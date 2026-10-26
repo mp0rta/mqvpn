@@ -8,6 +8,7 @@ import com.mqvpn.app.data.SettingsRepository
 import com.mqvpn.app.service.MyVpnService
 import com.mqvpn.app.ui.LogEvent
 import com.mqvpn.app.ui.MqvpnViewModel
+import com.mqvpn.sdk.network.TransportAvailability
 import com.mqvpn.sdk.core.MqvpnManager
 import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.PathInfo
@@ -61,6 +62,10 @@ class MqvpnViewModelTest {
         every { it.settings } returns MutableStateFlow(testSettings)
     }
 
+    private val mockAvailability = mockk<TransportAvailability>(relaxed = true).also {
+        every { it.available } returns MutableStateFlow(emptySet())
+    }
+
     private val fixedClock: () -> Long = { 42L }
 
     private var fakeNanos = 0L
@@ -71,7 +76,7 @@ class MqvpnViewModelTest {
     @Before
     fun setUp() {
         Dispatchers.setMain(testDispatcher)
-        viewModel = MqvpnViewModel(mockManager, mockRepository, fixedClock, fakeNanoClock)
+        viewModel = MqvpnViewModel(mockManager, mockRepository, mockAvailability, fixedClock, fakeNanoClock)
     }
 
     @After
@@ -244,7 +249,7 @@ class MqvpnViewModelTest {
         val slowRepository = mockk<SettingsRepository>(relaxed = true).also {
             every { it.settings } returns signal
         }
-        val slowViewModel = MqvpnViewModel(mockManager, slowRepository, fixedClock, fakeNanoClock)
+        val slowViewModel = MqvpnViewModel(mockManager, slowRepository, mockAvailability, fixedClock, fakeNanoClock)
 
         slowViewModel.connectWithSavedSettings()
         slowViewModel.connectWithSavedSettings()
@@ -266,7 +271,7 @@ class MqvpnViewModelTest {
         val failingRepository = mockk<SettingsRepository>(relaxed = true).also {
             every { it.settings } returns flow { throw IllegalStateException("boom") }
         }
-        val failingViewModel = MqvpnViewModel(mockManager, failingRepository, fixedClock, fakeNanoClock)
+        val failingViewModel = MqvpnViewModel(mockManager, failingRepository, mockAvailability, fixedClock, fakeNanoClock)
 
         failingViewModel.connectWithSavedSettings()
         advanceUntilIdle()

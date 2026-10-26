@@ -95,6 +95,10 @@ class SettingsRepositoryTest {
             hybridEnabled = true,
             hybridTcpMode = "RAW",
             bluetoothPathEnabled = true,
+            pathWifi = false,
+            pathCellular = false,
+            pathEthernet = false,
+            autoReconnect = false,
             scheduler = "WLB",
         )
 
@@ -213,6 +217,10 @@ class SettingsRepositoryTest {
             hybridEnabled = true,
             hybridTcpMode = "RAW",
             bluetoothPathEnabled = true,
+            pathWifi = false,
+            pathCellular = false,
+            pathEthernet = false,
+            autoReconnect = false,
             scheduler = "WLB",
         )
 

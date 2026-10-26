@@ -13,6 +13,8 @@ import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.PathInfo
 import com.mqvpn.sdk.core.model.ReorderStats
 import com.mqvpn.sdk.core.model.VpnStats
+import com.mqvpn.sdk.network.PathType
+import com.mqvpn.sdk.network.TransportAvailability
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -30,6 +32,7 @@ import javax.inject.Inject
 class MqvpnViewModel(
     private val manager: MqvpnManager,
     private val repository: SettingsRepository,
+    transportAvailability: TransportAvailability,
     private val clock: () -> Long,
     private val nanoClock: () -> Long,
 ) : ViewModel() {
@@ -45,8 +48,14 @@ class MqvpnViewModel(
     // unaffected; tests use the primary constructor directly with fixed
     // clocks. See G6: injectable-clock is a pre-approved exception, not a
     // test-only production flag.
-    @Inject constructor(manager: MqvpnManager, repository: SettingsRepository) :
-        this(manager, repository, System::currentTimeMillis, System::nanoTime)
+    @Inject constructor(
+        manager: MqvpnManager,
+        repository: SettingsRepository,
+        transportAvailability: TransportAvailability,
+    ) : this(manager, repository, transportAvailability, System::currentTimeMillis, System::nanoTime)
+
+    /** Transports with a connected network now; valid with or without a tunnel. */
+    val availableTransports: StateFlow<Set<PathType>> = transportAvailability.available
 
     private val eventLog = EventLog()
 

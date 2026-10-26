@@ -201,6 +201,33 @@ class DemoSettingsTest {
         assertEquals(true, DemoSettings(bluetoothPathEnabled = true).toMqvpnConfig().bluetoothPathEnabled)
     }
 
+    @Test
+    fun `path flags default on and reach the config`() {
+        val c = DemoSettings().toMqvpnConfig()
+        assertTrue(c.wifiPathEnabled && c.cellularPathEnabled && c.ethernetPathEnabled)
+        val off = DemoSettings(pathWifi = false, pathCellular = false, pathEthernet = false).toMqvpnConfig()
+        assertFalse(off.wifiPathEnabled || off.cellularPathEnabled || off.ethernetPathEnabled)
+    }
+
+    @Test
+    fun `autoReconnect maps to reconnect`() {
+        assertTrue(DemoSettings().toMqvpnConfig().reconnect)
+        assertFalse(DemoSettings(autoReconnect = false).toMqvpnConfig().reconnect)
+    }
+
+    @Test
+    fun `pathPolicyValid needs at least one of the four transports`() {
+        val allOff = DemoSettings(
+            serverAddress = "h", pathWifi = false, pathCellular = false,
+            pathEthernet = false, bluetoothPathEnabled = false,
+        )
+        assertFalse(allOff.pathPolicyValid())
+        assertFalse(allOff.isValid())
+        val btOnly = allOff.copy(bluetoothPathEnabled = true)
+        assertTrue(btOnly.pathPolicyValid())
+        assertTrue(btOnly.isValid())
+    }
+
     // -- validation predicates ------------------------------------------------
 
     @Test
