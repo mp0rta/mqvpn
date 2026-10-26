@@ -48,17 +48,26 @@ struct ToggleRow: View {
     @Binding var isOn: Bool
     var enabled: Bool = true
     var last: Bool = false
+    /// Makes the text part a link to a detail screen (stays tappable while the switch is locked).
+    var onOpen: (() -> Void)? = nil
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.system(size: 13)).foregroundColor(mq.text)
-                    if let caption {
-                        Text(caption).font(.system(size: 11)).foregroundColor(mq.t2).lineSpacing(2)
-                            .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 0) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title).font(.system(size: 13)).foregroundColor(mq.text)
+                        if let caption {
+                            Text(caption).font(.system(size: 11)).foregroundColor(mq.t2).lineSpacing(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    if onOpen != nil {
+                        Text("›").font(.system(size: 18)).foregroundColor(mq.t2).padding(.leading, 8)
                     }
                 }
-                Spacer(minLength: 0)
+                .contentShape(Rectangle())
+                .onTapGesture { onOpen?() }
                 Toggle("", isOn: $isOn).labelsHidden().tint(mq.accent).disabled(!enabled)
             }.padding(.vertical, 11)
             if !last { Hairline() }
@@ -160,22 +169,24 @@ struct UseOffSegmented: View {
     }
 }
 
+/// Android SettingsScreen SplitRadio: ring 16/1.5, dot 8, one wrapping text (label + dim in t2) at 12.5 / lh 17.
 struct RadioRow: View {
     @Environment(\.mq) private var mq
     let label: String
-    var dim: String? = nil
+    let dim: String
     let selected: Bool
+    var enabled: Bool = true
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(alignment: .top, spacing: 10) {
             ZStack {
-                Circle().stroke(selected ? mq.accent : mq.fill2, lineWidth: 2).frame(width: 18, height: 18)
-                if selected { Circle().fill(mq.accent).frame(width: 10, height: 10) }
-            }
-            Text(label).font(.system(size: 13)).foregroundColor(mq.text)
-            if let dim { Text(dim).font(.system(size: 11)).foregroundColor(mq.t2) }
-            Spacer(minLength: 0)
+                Circle().stroke(selected ? mq.accent : mq.t2, lineWidth: 1.5).frame(width: 16, height: 16)
+                if selected { Circle().fill(mq.accent).frame(width: 8, height: 8) }
+            }.padding(.top, 1)
+            (Text("\(label) ").foregroundColor(mq.text) + Text(dim).foregroundColor(mq.t2))
+                .font(.system(size: 12.5)).lineSpacing(17 - 12.5 * 1.19)
+                .frame(maxWidth: .infinity, alignment: .leading).fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.vertical, 8).contentShape(Rectangle())
+        .padding(.vertical, 2).contentShape(Rectangle()).opacity(enabled ? 1 : 0.5)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
     }
