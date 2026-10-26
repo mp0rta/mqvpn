@@ -274,7 +274,7 @@ def decode(label, pre, post):
         if post.slot.state not in ("Active", "Standby"):
             die("EnvValidationPoll: target %s" % post.slot.state)
         return Step(label, "POLL", "NONE", 0, 0)
-    if label in ("EnvXqcSpontaneousAbandon", "EnvPathIdleReap"):
+    if label in ("EnvXqcSpontaneousAbandon", "EnvXqcRemoveActive", "EnvPathIdleReap"):
         e = one(set(post.pendingXqcRemoval) - set(pre.pendingXqcRemoval), label)
         return Step(label, "XQC_LOSE", "NONE", e[0], e[1])
     if label == "DeliverRemoval":
@@ -378,7 +378,7 @@ def class_of(step, op, pre, post):
     if L == "EnvDestroy":
         return [k(L, owed=not s.released and pre.opsSet, connup=pre.conn in CONN_UP)]
     if L in ("EnvActivate", "EnvXqcValidate", "EnvXqcSpontaneousAbandon",
-             "EnvPathIdleReap") + SILENT:
+             "EnvXqcRemoveActive", "EnvPathIdleReap") + SILENT:
         return []
     die("no coverage rule for %r" % L)
 
@@ -757,8 +757,7 @@ def build(g, require=True):
 
 
 # The spec table's classes whose key values it enumerates outright. Those the
-# model never reaches are listed in the header (DeliverRemoval from STANDBY
-# is a spec-table class this model does not reach).
+# model never reaches are listed in the header.
 SPEC_ENUMERATED = (
     ["DeliverRemoval:state=" + x for x in ("Validating", "Active", "Standby", "ClosedDropped")]
     + ["EnvRetryFire:state=%s,result=%s,capped=%d" % (st, r, cap)

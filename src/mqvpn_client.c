@@ -2187,14 +2187,14 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
         info.has_server_scheduler = conn->has_peer_sched;
         info.server_scheduler = conn->has_peer_sched ? conn->peer_sched : 0;
 
-        /* Primary path is now validated by handshake — drive
-         * VALIDATING -> ACTIVE via the standard event. tick_check_all_validations
-         * may also fire VALIDATION_OK if it polls between now and the next
-         * tick boundary; path_on_validation_ok's `if (state != VALIDATING)`
-         * guard makes the second dispatch a LOG_D no-op. */
+        /* The handshake validates only the bootstrap path (xquic path id 0):
+         * drive it VALIDATING -> ACTIVE via the standard event. A replacement
+         * path in the primary slot is still being validated by xquic and
+         * waits for the validation poll after ESTABLISHED. */
         int pidx = c->primary_path_idx;
         if (c->n_paths > 0 && pidx < c->n_paths && c->paths[pidx].transport_attached &&
-            c->paths[pidx].state == PATH_LC_VALIDATING) {
+            c->paths[pidx].state == PATH_LC_VALIDATING &&
+            c->paths[pidx].xqc_path_id == 0) {
             path_entry_t *pp = &c->paths[pidx];
             path_event_ctx_t v_ctx = {
                 .validated_target = PATH_LC_ACTIVE,

@@ -190,14 +190,14 @@ EnvMpReady ==
                  nextXqcId, abandonCount, releaseObligations, pendingRelease,
                  dupCount, reqSched, hold>>
 
-\* Address assigned -> TUNNEL_READY; the primary, if still VALIDATING and
-\* attached, is validated by the handshake (cli_connect_ip_on_body,
-\* mqvpn_client.c:2143-2152).
+\* Address assigned -> TUNNEL_READY; the primary, if still VALIDATING,
+\* attached and on the bootstrap path (xquic id 0), is validated by the
+\* handshake (cli_connect_ip_on_body). A replacement path waits for the poll.
 EnvTunnelReady ==
   /\ ~destroyed
   /\ conn = "Connecting"
   /\ conn' = "TunnelReady"
-  /\ IF slot.state = "Validating" /\ slot.attached
+  /\ IF slot.state = "Validating" /\ slot.attached /\ slot.xqcId = 0
      THEN Fire("VALIDATION_OK", [NoCtx EXCEPT !.target = "Active"])
      ELSE UNCHANGED <<slot, lastTrigger>>
   \* client_release_path_hold runs after the primary's VALIDATION_OK and the
@@ -372,7 +372,26 @@ EnvXqcSpontaneousAbandon ==
                  mpReady, mp, mpCredit, closeCount, xqcSideActive, nextXqcId,
                  releaseObligations, pendingRelease, dupCount, reqSched, hold>>
 
-\* cb_path_removed (mqvpn_client.c:2704-2721) -> find_path_by_xqc_id
+\* xquic removes the slot's xquic-ACTIVE path: the peer abandons it, or the
+\* path idle timeout closes it while another path is active. Like DropLike's
+\* successful abandon, this stands for a connection on which another path is
+\* active; mpReady restricts it to connections that could have one.
+EnvXqcRemoveActive ==
+  /\ ~destroyed
+  /\ conn \in ConnUp
+  /\ mp /\ mpReady
+  /\ slot.live
+  /\ xqcSideActive
+  /\ <<slot.xqcId, inc>> \notin pendingXqcRemoval
+  /\ abandonCount < AbandonCap
+  /\ pendingXqcRemoval' = pendingXqcRemoval \cup {<<slot.xqcId, inc>>}
+  /\ xqcSideActive' = FALSE
+  /\ abandonCount' = abandonCount + 1
+  /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed, conn,
+                 mpReady, mp, mpCredit, closeCount, nextXqcId,
+                 releaseObligations, pendingRelease, dupCount, reqSched, hold>>
+
+\* cb_path_removed (mqvpn_client.c:2815-2832) -> find_path_by_xqc_id
 \* (mqvpn_client.c:561-569) -> XQUIC_REMOVED. The lookup matches a live slot
 \* with the same id only; the incarnation rides along as ghost data the real
 \* lookup cannot see. This one-slot model does not exercise that guard: every
@@ -582,7 +601,8 @@ Next ==
   \/ EnvConnClose \/ EnvReconnect \/ ApiDisconnectWhileReconnecting
   \/ EnvActivate \/ EnvRetryFire \/ EnvValidationPoll \/ EnvStableConfirm
   \/ ApiManualReactivate
-  \/ EnvXqcValidate \/ EnvXqcSpontaneousAbandon \/ DeliverRemoval
+  \/ EnvXqcValidate \/ EnvXqcSpontaneousAbandon \/ EnvXqcRemoveActive
+  \/ DeliverRemoval
   \/ EnvPathIdleReap \/ EnvConnIdleTimeout
   \/ ApiAdd \/ ApiDrop \/ ApiRemove
   \/ PlatformRelease \/ PlatformDupRelease \/ DeliverRelease

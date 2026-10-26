@@ -471,7 +471,7 @@ and ctx.
 ## The environment model (`MqvpnPathSlot.tla`)
 
 One slot, always the primary path. Each action is an as-is transcription of
-its caller, guards included, with two deliberate exceptions, both
+its caller, guards included, with three deliberate exceptions, all
 over-approximations:
 
 1. A PATH_ABANDON may succeed on the slot's xquic-ACTIVE path, although
@@ -484,6 +484,14 @@ over-approximations:
 2. The validation poll chooses its target (ACTIVE or STANDBY) at each poll,
    where the code takes it from the scheduler, fixed per connection
    (`:4075-4077`).
+3. xquic may remove the slot's xquic-ACTIVE path (`EnvXqcRemoveActive`):
+   the peer abandons it, or the path idle timeout closes it while another
+   path is active. Like the first exception, it stands for a connection on
+   which another path is active, a premise the model cannot state; `mpReady`
+   restricts it to connections that could have one. Without that guard,
+   removing the only ACTIVE path on a connection with no path-id credit
+   leaves a CREATE_WAIT or DEGRADED primary whose retry never runs
+   (`RetryEscapes`).
 
 Two variables model the client's request for a server scheduler.
 `reqSched` is `config.request_server_scheduler`, chosen at Init and never
@@ -509,7 +517,7 @@ Every action of the model's `Next` has a row below.
 |--------|------|
 | `ApiConnect` | `mqvpn_client_connect` from IDLE: no reset; `cli_start_connection` refuses a primary that is not attached (`:2811-2818`); the primary bootstrap writes id 0, live, VALIDATING (`:2896-2902`), and xquic creates the initial path ACTIVE (`xqc_path_init`, `xqc_multipath.c:351-353`); `cli_masque_start_tunnel` sets `hold` when `reqSched` (the handshake is folded into the connect: C sets it after the handshake, and the excluded run, where `cli_masque_start_tunnel` fails first, sends no CONNECT-IP request and only closes; `mpReady` cannot precede the handshake) |
 | `EnvMpReady` | `cb_ready_to_create_path` (`:2531-2541`), only on a multipath connection once a path id is available (`xqc_engine.c:785-800`, `xqc_conn.c:5519-5542`); may precede ESTABLISHED; while `hold` is set it only records readiness (`:2628`), and `client_release_path_hold` activates later |
-| `EnvTunnelReady`, `EnvEstablish` | `cli_connect_ip_on_body`, once the address is assigned: the primary, if still VALIDATING and attached, gets its handshake VALIDATION_OK (`:2143-2152`), then TUNNEL_READY (`:2154`), then `client_release_path_hold` clears `hold` (`:2218`; when multipath is ready its `activate_pending_paths` is the next `EnvActivate` step); `mqvpn_client_set_tun_active` → ESTABLISHED (`:3611-3622`) |
+| `EnvTunnelReady`, `EnvEstablish` | `cli_connect_ip_on_body`, once the address is assigned: the primary, if still VALIDATING, attached and on the bootstrap path (`xqc_path_id == 0`), gets its handshake VALIDATION_OK (`:2190-2204`; a replacement path in the slot waits for the validation poll instead), then TUNNEL_READY (`:2206`), then `client_release_path_hold` clears `hold` (`:2218`; when multipath is ready its `activate_pending_paths` is the next `EnvActivate` step); `mqvpn_client_set_tun_active` → ESTABLISHED (`:3749-3760`) |
 | `EnvConnClose` | `cb_h3_conn_close` (`:1426-1452`): slot untouched, RECONNECTING or CLOSED; xquic destroys its paths without notifying, so in-flight removals are dropped |
 | `EnvReconnect` | `tick_reconnect` (`:4108-4140`) / `mqvpn_client_connect` from RECONNECTING (`:3202-3262`): CONN_RESET to the slot, then start; the reset runs whether or not the start succeeds; success needs an attached primary, failure re-arms the timer. The reset clears `hold` (`client_reset_paths_for_reconnect`, `:1035`); a successful start sets it again when `reqSched` |
 | `ApiDisconnectWhileReconnecting` | `mqvpn_client_disconnect` from RECONNECTING (`:3265-3310`): no connection exists then, so the client just goes CLOSED, which cancels the pending retry (`tick_reconnect` runs only while RECONNECTING, `:4110`). A disconnect of a live connection is one of the closes `EnvConnClose` stands for |
@@ -519,6 +527,7 @@ Every action of the model's `Next` has a row below.
 | `ApiDrop`, `ApiRemove` | `mqvpn_client_on_platform_path_dropped` / `mqvpn_client_remove_path` (`:3456-3508`): PATH_ABANDON for a live path when a connection exists; it can fail (`xqc_conn_close_path`, `xqc_multipath.c:751-787`) and the result is ignored. xquic refuses to abandon the only ACTIVE path (`xqc_multipath.c:781-787`). The model departs from the code here (first exception above) |
 | `EnvXqcValidate` | xquic validates the slot's path: a matching PATH_RESPONSE (`xqc_process_path_response_frame`, `xqc_frame.c:2129`) moves a validating path to xquic-ACTIVE (`xqc_path_validate`, `xqc_multipath.c:1442-1448`); not fair (a black-holed path never validates) |
 | `EnvXqcSpontaneousAbandon` | a validation timeout (`xqc_path_validation_on_retx`, `xqc_multipath.c:460-484`) of a path that is not xquic-ACTIVE; bounded, not fair |
+| `EnvXqcRemoveActive` | xquic removes the slot's xquic-ACTIVE path: a PATH_ABANDON from the peer, or the path idle timeout while another path is active (`xqc_timer_path_idle_timeout`, `xqc_timer.c:160-184`); multipath and `mpReady` only (third exception above); shares the `AbandonCap` bound, not fair |
 | `DeliverRemoval` | `cb_path_removed` → `find_path_by_xqc_id` (`:2704-2721`, `:561-569`), whose lookup matches only a live slot with the same id. This one-slot model does not exercise that guard: every pending removal is the live slot's own (see `RemovalsBelongToCurrentIncarnation`), so the lookup always matches |
 | `EnvPathIdleReap`, `EnvConnIdleTimeout` | an orphan is closed by the path idle timeout only with multipath and when it is not the only xquic-ACTIVE path (`xqc_timer.c:137-161`; the model takes the slot's xquic-ACTIVE path to be the only one); otherwise the connection idles out |
 | `ApiAdd` | `mqvpn_client_add_path` (`:3362-3441`): reuses only a CLOSED_FREE slot; its own activation is skipped while `hold` is set (`:3573`, expressed by `EnvActivate`'s `~hold`) |
@@ -579,7 +588,8 @@ and the bounds listed under [Abstractions](#abstractions), and no others:
 
 Every other action may or may not happen: destroy, arbitrary connection
 closes, disconnect, the API calls (connect, add, drop, remove, manual
-reactivation), duplicated releases, spontaneous xquic abandons, xquic-side
+reactivation), duplicated releases, spontaneous xquic abandons, xquic's
+removal of an xquic-ACTIVE path, xquic-side
 path validation, and the client's own activation of a PENDING slot,
 validation poll and stable confirmation. Neither liveness property needs a
 path to validate (a black-holed path never does).
@@ -587,7 +597,8 @@ path to validate (a black-holed path never does).
 ### Abstractions
 
 - **One slot, the primary.** The slot's xquic-ACTIVE path is read as the
-  only active path (drop and remove aside: the first exception above). So
+  only active path (drop, remove and `EnvXqcRemoveActive` aside: the first
+  and third exceptions above). So
   the path idle timeout reaps an orphan only when its path is not
   xquic-ACTIVE; otherwise the connection idles out. With several paths the
   path idle timeout reaps an orphan whenever another path is active.
@@ -608,12 +619,13 @@ path to validate (a black-holed path never does).
   cleared by the reconnect reset, as in the code. `mp` stands for a
   negotiated multipath connection and `mpCredit` for a peer that grants
   path-id credit.
-- **DEGRADED** is reached through one family of traces only: the slot is
-  re-added while the connection is still connecting, activated, validated by
-  the tunnel-ready dispatch while xquic is still validating its path, and
-  then abandoned by xquic on its own. The other way into DEGRADED, xquic
-  removing an xquic-ACTIVE path, is outside the model (see One slot, the
-  primary).
+- **DEGRADED** is reached through xquic's removal of an ACTIVE or STANDBY
+  slot's path, which is xquic-ACTIVE, so only through `EnvXqcRemoveActive`
+  (the third exception), for example connect, multipath ready, tunnel
+  ready, the removal, its delivery. Before finding 6 was fixed, the
+  tunnel-ready dispatch was a second route: it marked a replacement path
+  ACTIVE while xquic was still validating it, and xquic's own validation
+  timeout then removed it.
 - **Time** is abstract: timers are armed or not and fire
   nondeterministically. In C, the update classes check that the FSM applies
   the backoff schedule and the 30 s window, and the unit test pins their
@@ -622,7 +634,8 @@ path to validate (a black-holed path never does).
   in the oracle, which `test_path_slot_oracle` checks against
   `PATH_RECREATE_MAX_RETRIES`).
 - **Bounds.** The environment configurations also bound the connection
-  closes (`ConnCloseCap` 2), the spontaneous abandons (`AbandonCap` 1), the
+  closes (`ConnCloseCap` 2), the spontaneous abandons and removals of an
+  xquic-ACTIVE path together (`AbandonCap` 1), the
   duplicated or late release calls (`DupReleaseCap` 1) and the slot reuses
   (`MaxIncarnations` 3). Safety also holds with each bound raised by one,
   one at a time (`ConnCloseCap` 3, `AbandonCap` 2, `DupReleaseCap` 2,
@@ -777,25 +790,26 @@ connection in one step (`EnvConnClose`); no checked property is affected
 5. **A Debug build asserts on a close before the TUN is up.** Fixed by
    #416 (`f8810ac1`): the transition table now has TUNNEL_READY →
    RECONNECTING.
-6. **The tunnel-ready dispatch can mark a re-added primary ACTIVE too
-   early.** `cli_connect_ip_on_body` dispatches VALIDATION_OK to the
-   primary slot whenever it is attached and VALIDATING (`:2143-2152`); it
-   does not check that the slot's path is still the bootstrap path
+6. **The tunnel-ready dispatch could mark a re-added primary ACTIVE too
+   early.** Fixed: `cli_connect_ip_on_body` dispatched VALIDATION_OK to the
+   primary slot whenever it was attached and VALIDATING (`:2190-2204`),
+   without checking that the slot's path was still the bootstrap path
    (`xqc_path_id == 0`). A primary dropped and re-added, and activated on a
-   new xquic path, before the CONNECT-IP response can therefore be marked
-   ACTIVE while xquic is still validating that path. The re-add reuses the
-   slot when it is the first CLOSED_FREE one (`:3391-3401`); the activation
+   new xquic path, before the CONNECT-IP response could therefore be marked
+   ACTIVE while xquic was still validating that path. The re-add reuses the
+   slot when it is the first CLOSED_FREE one (`:3528-3538`); the activation
    comes from the re-add itself or from `cb_ready_to_create_path`
-   (`:3436-3437`, `:2531-2541`). `tick_check_all_validations` polls only
-   VALIDATING slots (`:4058-4060`), so it stops watching the path, and a
-   later validation timeout removes it (`cb_path_removed`, `:2704-2720`),
-   which moves the slot to DEGRADED (CLOSED_RECOVERABLE at the retry cap).
+   (`:3573-3574`, `:2621-2631`). `tick_check_all_validations` (`:4284`)
+   polls only VALIDATING slots (`:4306`), so it stopped watching the path,
+   and a later validation timeout removed it (`cb_path_removed`, `:2815-2832`),
+   which moved the slot to DEGRADED (CLOSED_RECOVERABLE at the retry cap).
    In the model, freeing the primary before the response needs the abandon
    of its xquic-ACTIVE bootstrap path to succeed, the first exception
    above, which stands for a connection on which another path is active.
-   This is the model's only route to DEGRADED (see
-   [Abstractions](#abstractions)). Not fixed here: a check of
-   `xqc_path_id == 0` in that condition would close it.
+   The condition now also requires `xqc_path_id == 0`: the handshake
+   validates only the bootstrap path, and a replacement path waits for the
+   validation poll after ESTABLISHED. The MBT's `EnvTunnelReady` classes
+   with `id0=0` cover the replacement path.
 7. **The FSM's FROZEN mark never reached xquic.** Removed: the FSM no
    longer notifies xquic. The mark was sent after xquic had already
    dropped the path, and draft-21 §3.3 has no "frozen" wire status.
@@ -842,6 +856,7 @@ was applied to a scratch copy of the tree and caught as expected:
 | `tick_reconnect` failure does not re-arm the reconnect timer | MBT: `RECONNECT_TICK step, slot.state got=0 want=2` |
 | the public `path_event` forwarding removed from `path_fsm_fire_path_event` | MBT: `ADD step, path_event delivered got=0 want=1` |
 | `tick_reconnect` without the RECONNECTING check | MBT: abort in `client_set_state()` (`invalid state transition`) |
+| the finding-6 fix reverted (`xqc_path_id == 0` dropped from the tunnel-ready dispatch) | MBT: `TUNNEL_READY step, slot.state got=3 want=2` |
 
 ## Counterexample log
 
