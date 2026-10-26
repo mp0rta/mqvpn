@@ -17,6 +17,7 @@ struct LogEvent: Identifiable {
         case pathAdded(name: String, status: Int32)        // (a) path appeared
         case pathRemoved(name: String)                     // (a) path disappeared
         case pathStatus(name: String, from: Int32, to: Int32)  // (b) status change
+        case error(String)                                 // surfaced connect/disconnect error
     }
 }
 
@@ -65,6 +66,10 @@ final class EventLog: ObservableObject {
         prevPaths = cur
     }
 
+    func logError(_ message: String, now: Date = Date()) {
+        append(LogEvent(time: now, kind: .error(message)))
+    }
+
     /// Forget the diff baseline (e.g. on disconnect) so a later reconnect logs
     /// its paths as fresh additions. The event history is intentionally kept.
     func resetBaseline() {
@@ -77,5 +82,54 @@ final class EventLog: ObservableObject {
         if events.count > capacity {
             events.removeLast(events.count - capacity)
         }
+    }
+}
+
+// Display text/levels (Foundation only; the Settings view maps level -> color).
+// Raw values mirror mqvpn_client_state_t / mqvpn_path_status_t in libmqvpn.h.
+
+func clientStateName(_ s: Int32) -> String {
+    switch s {
+    case 0: return "IDLE"
+    case 1: return "CONNECTING"
+    case 2: return "AUTHENTICATING"
+    case 3: return "TUNNEL_READY"
+    case 4: return "ESTABLISHED"
+    case 5: return "RECONNECTING"
+    case 6: return "CLOSED"
+    default: return "?(\(s))"
+    }
+}
+
+func pathStatusName(_ s: Int32) -> String {
+    switch s {
+    case 0: return "Pending"
+    case 1: return "Active"
+    case 2: return "Degraded"
+    case 3: return "Standby"
+    case 4: return "Closed"
+    default: return "Unknown"
+    }
+}
+
+func eventText(_ k: LogEvent.Kind) -> String {
+    switch k {
+    case .coreState(let s): return "core → \(clientStateName(s))"
+    case .pathAdded(let n, let s): return "\(n) added (\(pathStatusName(s)))"
+    case .pathRemoved(let n): return "\(n) removed"
+    case .pathStatus(let n, let from, let to): return "\(n): \(pathStatusName(from)) → \(pathStatusName(to))"
+    case .error(let m): return "error: \(m)"
+    }
+}
+
+enum EventLevel { case error, warn, info }
+
+/// Android levelDot: red error; orange RECONNECTING and path removed; else muted.
+func eventLevel(_ k: LogEvent.Kind) -> EventLevel {
+    switch k {
+    case .error: return .error
+    case .pathRemoved: return .warn
+    case .coreState(let s): return s == 5 ? .warn : .info
+    default: return .info
     }
 }

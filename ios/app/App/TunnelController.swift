@@ -184,6 +184,7 @@ final class TunnelController: ObservableObject {
             Task { @MainActor in
                 guard let self, self.status == .disconnected else { return }
                 self.statusText = "disconnected: \(err.localizedDescription)"
+                self.eventLog.logError(err.localizedDescription)
             }
         }
     }
@@ -201,6 +202,7 @@ final class TunnelController: ObservableObject {
                 try manager.connection.startVPNTunnel()
             } catch {
                 statusText = "start error: \(error.localizedDescription)"
+                eventLog.logError(error.localizedDescription)
             }
         }
     }
@@ -208,22 +210,6 @@ final class TunnelController: ObservableObject {
     func stop() {
         manager?.connection.stopVPNTunnel()
     }
-
-    /// Transitional entry for the pre-redesign Settings sheet: routes through the
-    /// same single writer (SettingsCore -> ManagerDraftStore -> performAtomicSave).
-    func saveSettings(server: ServerSettings, reorder: ReorderSettings, hybrid: HybridSettings) async throws {
-        guard isEditable else { throw SaveError.notEditable }
-        settings.update {
-            $0.addressText = ServerAddressField.format(host: server.host, port: server.port)
-            $0.tlsServerName = server.serverName; $0.authKey = server.authKey; $0.insecure = server.insecure
-            $0.reorder = ReorderDraft(enabled: reorder.enabled, profile: reorder.profile,
-                                      portsText: reorder.ports.map(String.init).joined(separator: ","))
-            $0.hybrid = HybridDraft(enabled: hybrid.enabled, tcpMode: hybrid.tcpMode)
-        }
-        if !(await settings.flush()) { throw LegacySaveFailure(message: settings.saveError ?? "settings not saved") }
-    }
-
-    struct LegacySaveFailure: Error, CustomStringConvertible { let message: String; var description: String { message } }
 
     /// DraftStore body: snapshot -> merge -> mutate -> commit -> refresh via
     /// performAtomicSave (the function the host tests fault-inject), creating the
