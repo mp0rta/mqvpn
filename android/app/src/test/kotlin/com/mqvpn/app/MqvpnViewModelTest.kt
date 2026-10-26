@@ -334,7 +334,7 @@ class MqvpnViewModelTest {
         }
         assertEquals(3, viewModel.bandwidthHistory.value.samples.size)
         // idle counters -> all-zero samples, but they still flow
-        assertTrue(viewModel.bandwidthHistory.value.samples.all { it.totalBps == 0L })
+        assertTrue(viewModel.bandwidthHistory.value.samples.all { it.dlBps + it.ulBps == 0L })
     }
 
     @Test

@@ -124,7 +124,7 @@ class MqvpnViewModel(
     private suspend fun bandwidthTickerLoop() {
         while (true) {
             delay(1_000)
-            val samples = bandwidth.onTick(latestPaths, nanoClock())
+            val samples = bandwidth.onTick(latestPaths, nanoClock(), clock())
             _bandwidthHistory.value = BandwidthHistoryState(samples, bandwidth.ifaceSlots())
         }
     }

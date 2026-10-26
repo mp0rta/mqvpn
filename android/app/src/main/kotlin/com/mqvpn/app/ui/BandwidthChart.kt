@@ -43,7 +43,7 @@ fun BandwidthChart(state: BandwidthHistoryState) {
     val samples = state.samples
     if (samples.isEmpty()) return
 
-    val activeIfaces = samples.asSequence().flatMap { it.perPathBps.keys }.distinct().toList()
+    val activeIfaces = samples.asSequence().flatMap { it.perPathDlBps.keys + it.perPathUlBps.keys }.distinct().toList()
     // onSurface, not primary: dynamic (Material You) primary can collide with the
     // per-path palette hues; black/white never does
     val totalColor = MaterialTheme.colorScheme.onSurface
@@ -73,7 +73,7 @@ fun BandwidthChart(state: BandwidthHistoryState) {
             drawRect(surfaceColor)
 
             val windowMax = samples.maxOf { s ->
-                maxOf(s.totalBps, s.perPathBps.values.maxOrNull() ?: 0L)
+                maxOf(s.dlBps + s.ulBps, s.pathBps().values.maxOrNull() ?: 0L)
             }
             val top = ceilNice(windowMax)
 
@@ -102,12 +102,12 @@ fun BandwidthChart(state: BandwidthHistoryState) {
 
             activeIfaces.forEach { iface ->
                 drawSeries(
-                    samples.map { it.perPathBps[iface] },
+                    samples.map { it.pathBps()[iface] },
                     slotColor(state.ifaceSlots[iface] ?: 0),
                     strokeDp = 1.5f,
                 )
             }
-            drawSeries(samples.map { it.totalBps }, totalColor, strokeDp = 3f)
+            drawSeries(samples.map { it.dlBps + it.ulBps }, totalColor, strokeDp = 3f)
 
             drawGridLabels(top, strokeInset, textMeasurer, labelStyle)
         }
@@ -174,3 +174,7 @@ private fun DrawScope.drawGridLabels(
     drawText(midLayout, topLeft = Offset((size.width - midLayout.size.width) / 2f, yTime))
     drawText(nowLayout, topLeft = Offset(size.width - nowLayout.size.width - pad, yTime))
 }
+
+// Old single-series chart (until the redesign replaces it): tx+rx summed per iface.
+private fun BandwidthSample.pathBps(): Map<String, Long> =
+    (perPathDlBps.keys + perPathUlBps.keys).associateWith { (perPathDlBps[it] ?: 0L) + (perPathUlBps[it] ?: 0L) }
