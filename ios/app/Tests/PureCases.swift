@@ -454,7 +454,7 @@ func runPureCases() -> Int {
         check(un.allSatisfy { $0.rateBps == 0 && $0.barFraction == 0 }, "pc no sample")
         check(pathCardViews(paths: [], available: [.wifi], sample: nil)[0].sub == "Ready", "pc ready")
         let uc = usingCounts(cards: cards)
-        check(uc.n == 2 && uc.m == 1, "using counts \(uc)")
+        check(uc.n == 1 && uc.m == 1, "using counts \(uc)")
 
         check(fmtMbps(46_300_000) == "46.3" && fmtMbps(123_400_000) == "123", "dv fmtMbps")
         check(fmtElapsed(761) == "12:41" && fmtElapsed(3600) == "1:00:00" && fmtElapsed(45) == "00:45", "dv fmtElapsed")

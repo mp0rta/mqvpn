@@ -84,7 +84,8 @@ func pathCardViews(paths: [DerivePath], available: Set<TransportKind>, sample: B
 
 /// Android HomeScreen: m = available && active cards, n = those moving > 1 Mbps.
 func usingCounts(cards: [PathCardView2]) -> (n: Int, m: Int) {
-    (cards.filter { $0.rateBps > 1_000_000 }.count, cards.filter { $0.available && $0.active }.count)
+    let used = cards.filter { $0.available && $0.active }
+    return (used.filter { $0.rateBps > 1_000_000 }.count, used.count)
 }
 
 func fmtMbps(_ bps: Double) -> String {
