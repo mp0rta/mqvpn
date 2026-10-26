@@ -25,6 +25,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -32,6 +34,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
@@ -90,6 +93,13 @@ fun SettingsScreen(
     var addr by rememberSaveable {
         mutableStateOf(if (s.serverAddress.isBlank()) "" else ServerAddressField.format(s.serverAddress, s.serverPort))
     }
+    var addrFocused by remember { mutableStateOf(false) }
+    // Re-seed after the stored server changes elsewhere (setup assistant); never while typing.
+    LaunchedEffect(s.serverAddress, s.serverPort) {
+        if (!addrFocused && ServerAddressField.parse(addr) != ServerAddressField.Parsed(s.serverAddress, s.serverPort)) {
+            addr = if (s.serverAddress.isBlank()) "" else ServerAddressField.format(s.serverAddress, s.serverPort)
+        }
+    }
     var keyShown by rememberSaveable { mutableStateOf(false) }
     var advOpen by rememberSaveable { mutableStateOf(false) }
     var logOpen by rememberSaveable { mutableStateOf(false) }
@@ -129,7 +139,7 @@ fun SettingsScreen(
                             singleLine = true,
                             enabled = editable,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier.fillMaxWidth().onFocusChanged { addrFocused = it.isFocused },
                         )
                     }
                     Hairline()
@@ -189,7 +199,10 @@ fun SettingsScreen(
                         Text("How traffic is split", color = c.text, fontSize = 13.sp)
                         val choice = s.splitChoice()
                         for ((opt, label, dim) in SPLIT_OPTIONS) {
-                            SplitRadio(opt == choice, editable, label, dim, c) { settingsVm.update { it.applySplitChoice(opt) } }
+                            SplitRadio(opt == choice, editable, label, dim, c) {
+                                // Re-clicking the shown option must not rewrite a preserved legacy combo.
+                                if (opt != choice) settingsVm.update { it.applySplitChoice(opt) }
+                            }
                             if (opt == choice && applied != null) {
                                 val note = if (applied) "✓ applied by the server" else info?.let(::serverSchedulerLine) ?: "not applied by the server"
                                 Text(note, color = if (applied) c.t2 else c.orange, fontSize = 11.sp, modifier = Modifier.padding(start = 26.dp))

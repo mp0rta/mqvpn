@@ -96,8 +96,10 @@ class SettingsViewModel @Inject constructor(
     /**
      * Applies [transform] to the draft at once; persists the whole draft only while
      * every field is valid (any invalid field blocks all persists, its error is in [fieldErrors]).
+     * Ignored while a session is live ([isEditable] false).
      */
     fun update(transform: (DemoSettings) -> DemoSettings) {
+        if (!isEditable.value) return
         val next = transform(_draft.value ?: return)
         _draft.value = next
         _fieldErrors.value = next.fieldErrors()

@@ -124,7 +124,7 @@ fun HomeScreen(
     val status = statusView(state, elapsed?.let(::fmtElapsed))
     val last = history.samples.lastOrNull()
     val cards = pathCardViews(paths, available, last).filter { it.available && it.active }
-    val usingCount = cards.count { it.rateBps > 1 }
+    val usingCount = cards.count { it.rateBps > 1_000_000 }
     val canConnect = draft?.isValid() == true
 
     Column(

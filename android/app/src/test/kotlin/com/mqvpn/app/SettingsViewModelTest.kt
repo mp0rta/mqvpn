@@ -108,6 +108,18 @@ class SettingsViewModelTest {
     }
 
     @Test
+    fun `update while connected changes neither draft nor storage`() = runTest(testDispatcher) {
+        advanceUntilIdle()
+        val before = viewModel.draft.value
+        stateFlow.value = MqvpnState.Connected(mockk(relaxed = true))
+        advanceUntilIdle()
+        viewModel.update { it.copy(killSwitch = !it.killSwitch) }
+        advanceUntilIdle()
+        assertEquals(before, viewModel.draft.value)
+        coVerify(exactly = 0) { mockRepository.save(any()) }
+    }
+
+    @Test
     fun `legacy combo survives an unrelated update byte-identically`() = runTest(testDispatcher) {
         val legacy = testSettings.copy(scheduler = "WLB", redundantEnabled = true, redundantPorts = "443, 8443")
         val repo = mockk<SettingsRepository>(relaxed = true).also {
