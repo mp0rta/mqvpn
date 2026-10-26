@@ -51,3 +51,45 @@ enum IngestGate {
         return snapSeq > lastSeq
     }
 }
+
+/// Per-reply ingest decision, owned state: session epoch, seq/timestamp
+/// baselines and the sample cursor. Pure so the boot-change ordering is tested.
+struct SnapshotIngestState {
+    enum Verdict: Equatable {
+        case drop
+        case ingest(fresh: [TunnelSample], resetHistories: Bool, newEpoch: Int)
+    }
+
+    private(set) var epoch = 0
+    private var lastSeq: UInt64 = 0
+    private var lastTimestamp: Double = 0
+    private(set) var cursor = SampleCursor()
+
+    /// up -> down: invalidate in-flight replies, restart ordering baselines.
+    mutating func sessionEnded() { epoch += 1; lastSeq = 0; lastTimestamp = 0 }
+
+    /// Snapshot cleared (tunnel down / backgrounded-down): baselines + cursor restart.
+    mutating func clear() { lastSeq = 0; lastTimestamp = 0; cursor = SampleCursor() }
+
+    /// Order: epoch/up pre-check; on a bootId change bump the epoch (dropping every
+    /// other in-flight reply), adopt it for THIS reply, reset baselines and ask for
+    /// a history reset - all before the seq comparison; then IngestGate; then cursor dedup.
+    mutating func accept(replyEpoch: Int, isUp: Bool, snapshot snap: TunnelSnapshot) -> Verdict {
+        guard replyEpoch == epoch, isUp else { return .drop }
+        var captured = replyEpoch
+        var reset = false
+        if snap.bootId != cursor.request?.bootId {
+            epoch += 1; captured = epoch
+            lastSeq = 0; lastTimestamp = 0
+            reset = true
+        }
+        guard IngestGate.accept(capturedEpoch: captured, currentEpoch: epoch, isUp: isUp,
+                                snapSeq: snap.seq, snapTimestamp: snap.timestamp,
+                                lastSeq: lastSeq, lastTimestamp: lastTimestamp) else {
+            return .drop
+        }
+        if snap.seq == 0 { lastTimestamp = snap.timestamp } else { lastSeq = snap.seq }
+        let (_, fresh) = cursor.accept(bootId: snap.bootId, samples: snap.samples)
+        return .ingest(fresh: fresh, resetHistories: reset, newEpoch: epoch)
+    }
+}

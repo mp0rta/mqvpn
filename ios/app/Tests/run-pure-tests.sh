@@ -17,6 +17,7 @@ PURE_SOURCES=(
     "$APP/ReorderHistory.swift"
     "$APP/ChartGeometry.swift"
     "$APP/Derive.swift"
+    "$APP/ReorderIngest.swift"
     "$APP/SettingsCore.swift"
 )
 if command -v swiftc >/dev/null 2>&1; then

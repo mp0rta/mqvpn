@@ -44,20 +44,13 @@ final class TunnelController: ObservableObject {
     let settings: SettingsCore
     private(set) var settingsModel: SettingsModel!
 
-    private var cursor = SampleCursor()
+    /// Epoch, seq/timestamp baselines and sample cursor (pure, tested).
+    private var ingestState = SnapshotIngestState()
     private var prevSnapshot: TunnelSnapshot?
     private var manager: NETunnelProviderManager?
     private var observer: NSObjectProtocol?
     private var pollTimer: Timer?
     private var scenePhaseActive = true            // WindowGroup starts active
-    /// Bumped on every up->down transition and on every accepted provider boot
-    /// change; a poll response captured under a stale epoch is discarded even
-    /// if it arrives after the tunnel comes back up, since it may describe the
-    /// wrong session.
-    private var sessionEpoch = 0
-    /// Ordering key for accepted poll responses, reset at each session boundary.
-    private var lastIngestedSeq: UInt64 = 0
-    private var lastIngestedTimestamp: Double = 0
     /// First-run setup cover is on screen (suppresses autosave while no manager exists).
     var setupPresented = false { didSet { recomputeAutosave() } }
 
@@ -174,9 +167,7 @@ final class TunnelController: ObservableObject {
         statusText = Self.describe(s)
         if s == .disconnected { surfaceDisconnectError() }
         if wasUp && !Self.isUp(s) {          // up -> down session boundary
-            sessionEpoch += 1
-            lastIngestedSeq = 0
-            lastIngestedTimestamp = 0
+            ingestState.sessionEnded()
         }
         reconcilePolling()
         objectWillChange.send()              // isEditable/isConnectable depend on status
@@ -347,9 +338,7 @@ final class TunnelController: ObservableObject {
         snapshot = nil
         pathRates = [:]
         prevSnapshot = nil
-        lastIngestedSeq = 0
-        lastIngestedTimestamp = 0
-        cursor = SampleCursor()
+        ingestState.clear()
         clearHistories()
         eventLog.resetBaseline()
     }
@@ -364,38 +353,23 @@ final class TunnelController: ObservableObject {
 
     private func poll() {
         guard let session = manager?.connection as? NETunnelProviderSession else { return }
-        let polledEpoch = sessionEpoch
+        let polledEpoch = ingestState.epoch
         do {
             // The cursor tells the provider which ring samples are still needed.
-            try session.sendProviderMessage(SnapshotRequest.encode(cursor: cursor.request)) { [weak self] resp in
+            try session.sendProviderMessage(SnapshotRequest.encode(cursor: ingestState.cursor.request)) { [weak self] resp in
                 Task { @MainActor in
                     guard let self else { return }
-                    var epoch = polledEpoch
-                    // Pre-decode session check: a stale/late response must never
-                    // clear the live snapshot of a newer session.
-                    guard self.sessionEpoch == epoch, Self.isUp(self.status) else { return }
+                    // Pre-decode check: a stale/late response must never clear the live
+                    // snapshot of a newer session (the verdict re-checks after decode).
+                    guard self.ingestState.epoch == polledEpoch, Self.isUp(self.status) else { return }
                     guard let resp, let snap = try? ProviderMessage.decode(resp) else { return }
-                    // Provider restarted (new bootId): accept the boot change BEFORE
-                    // any seq comparison, so the restarted provider's low seq is not
-                    // rejected by the old baseline. Bumping the epoch drops every other
-                    // in-flight reply (a delayed OLD-boot reply can never reset the app
-                    // backwards); this reply adopts the new epoch so it does not reject itself.
-                    if snap.bootId != self.cursor.request?.bootId {
-                        self.sessionEpoch += 1
-                        epoch = self.sessionEpoch
-                        self.lastIngestedSeq = 0
-                        self.lastIngestedTimestamp = 0
-                        self.prevSnapshot = nil
-                        self.clearHistories()
+                    switch self.ingestState.accept(replyEpoch: polledEpoch, isUp: Self.isUp(self.status),
+                                                   snapshot: snap) {
+                    case .drop: return
+                    case .ingest(let fresh, let reset, _):
+                        if reset { self.prevSnapshot = nil; self.clearHistories() }
+                        self.ingest(snap, fresh: fresh)
                     }
-                    guard IngestGate.accept(capturedEpoch: epoch, currentEpoch: self.sessionEpoch,
-                                            isUp: Self.isUp(self.status), snapSeq: snap.seq,
-                                            snapTimestamp: snap.timestamp,
-                                            lastSeq: self.lastIngestedSeq,
-                                            lastTimestamp: self.lastIngestedTimestamp) else { return }
-                    if snap.seq == 0 { self.lastIngestedTimestamp = snap.timestamp }
-                    else { self.lastIngestedSeq = snap.seq }
-                    self.ingest(snap)
                 }
             }
         } catch { /* transient; keep the current snapshot */ }
@@ -403,8 +377,7 @@ final class TunnelController: ObservableObject {
 
     /// Feed fresh ring samples to the histories, compute per-path rates from the
     /// previous snapshot, then publish.
-    private func ingest(_ snap: TunnelSnapshot) {
-        let (_, fresh) = cursor.accept(bootId: snap.bootId, samples: snap.samples)
+    private func ingest(_ snap: TunnelSnapshot, fresh: [TunnelSample]) {
         for s in fresh {
             let wall = Int64(s.wallMs)
             bandwidthHistory.onTick(paths: s.paths.map { (name: $0.name, tx: $0.txBytes, rx: $0.rxBytes) },

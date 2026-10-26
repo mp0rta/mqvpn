@@ -495,6 +495,40 @@ func runPureCases() -> Int {
         check(h.handle(.closed(reason: -4)) == [.cancelTunnel(.core(-4))] && h.phase == .terminal, "coord off: -4 terminal")
     }
 
+    // SnapshotIngestState: boot change ordering
+    do {
+        func smp(_ seq: UInt64) -> TunnelSample {
+            TunnelSample(seq: seq, wallMs: seq * 1000, monoMs: seq * 1000, paths: [], bytesTx: 0, bytesRx: 0,
+                         dgramSent: 0, dgramLost: 0, delivered: 0, gapCount: 0, gapFilled: 0,
+                         gapTimeout: 0, ackDemote: 0, residenceBuckets: [])
+        }
+        func snap(boot: UInt64, seq: UInt64, ts: Double, samples: [UInt64]) -> TunnelSnapshot {
+            TunnelSnapshot(timestamp: ts, clientState: 2, connectedSince: nil, footprint: 0, paths: [],
+                           seq: seq, samples: samples.map(smp), bootId: boot)
+        }
+        var st = SnapshotIngestState()
+        // Self-accept: first reply (and a restart with LOW seq) ingests under the bumped epoch.
+        let e0 = st.epoch
+        let v1 = st.accept(replyEpoch: e0, isUp: true, snapshot: snap(boot: 1, seq: 500, ts: 10, samples: [1, 2]))
+        check(v1 == .ingest(fresh: [1, 2].map(smp), resetHistories: true, newEpoch: e0 + 1), "ingest: first reply self-accepts")
+        // Same boot, same-epoch (adopted) reply: normal path, dedup, no reset.
+        let v2 = st.accept(replyEpoch: st.epoch, isUp: true, snapshot: snap(boot: 1, seq: 501, ts: 11, samples: [2, 3]))
+        check(v2 == .ingest(fresh: [smp(3)], resetHistories: false, newEpoch: e0 + 1), "ingest: dedup, no reset")
+        // Restart to boot B with a LOW seq: not rejected by old baseline.
+        let eA = st.epoch
+        let vB = st.accept(replyEpoch: eA, isUp: true, snapshot: snap(boot: 2, seq: 3, ts: 20, samples: [1]))
+        check(vB == .ingest(fresh: [smp(1)], resetHistories: true, newEpoch: eA + 1), "ingest: restarted provider low seq accepted")
+        check(st.cursor.request?.bootId == 2 && st.cursor.request?.sinceSeq == 1, "cursor on B")
+        // Delayed reply from boot A captured under the OLD epoch: dropped; cursor stays on B.
+        let late = st.accept(replyEpoch: eA, isUp: true, snapshot: snap(boot: 1, seq: 600, ts: 21, samples: [9]))
+        check(late == .drop, "ingest: delayed old-boot reply dropped")
+        check(st.cursor.request?.bootId == 2 && st.cursor.request?.sinceSeq == 1, "cursor stays on B after delayed A")
+        // Not up => drop; session end bumps epoch so in-flight replies die.
+        check(st.accept(replyEpoch: st.epoch, isUp: false, snapshot: snap(boot: 2, seq: 4, ts: 22, samples: [])) == .drop, "ingest: down drops")
+        let eb = st.epoch; st.sessionEnded()
+        check(st.accept(replyEpoch: eb, isUp: true, snapshot: snap(boot: 2, seq: 4, ts: 22, samples: [])) == .drop, "ingest: pre-session reply dropped")
+    }
+
     return failures
 }
 
