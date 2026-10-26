@@ -17,7 +17,6 @@ struct SetupScreen: View {
     var body: some View {
         let m = controller.settingsModel!
         let s = m.draft
-        let parsed = s.server != nil
         VStack(alignment: .leading, spacing: 0) {
             Text("Step \(step + 1) of 3").font(.system(size: 11, weight: .semibold)).foregroundColor(mq.t2)
             ScrollView {
@@ -39,7 +38,7 @@ struct SetupScreen: View {
                     HStack(spacing: 10) {
                         SecondaryButton("Back") { step -= 1 }.frame(width: 90)
                         if step == 1 {
-                            PrimaryButton("Continue") { commitThen { step = 2 } }.disabled(!parsed)
+                            PrimaryButton("Continue") { commitThen { if m.draft.server != nil { step = 2 } } }
                         } else {
                             PrimaryButton("Finish Setup") { finish(m) }.disabled(!s.paths.anyEnabled || finishing)
                         }
@@ -51,7 +50,7 @@ struct SetupScreen: View {
         .background(mq.win.ignoresSafeArea())
     }
 
-    /// Run focus-loss commits before an action reads the draft.
+    /// Resign focus so the field commits, then run `next` against the committed draft.
     private func commitThen(_ next: @escaping () -> Void) {
         endEditing()
         Task { @MainActor in
@@ -62,9 +61,7 @@ struct SetupScreen: View {
 
     private func finish(_ m: SettingsModel) {
         finishing = true; finishError = nil
-        endEditing()
         Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 60_000_000)
             if await m.commitFirst() { onDone() }
             else { finishError = m.saveError ?? m.fieldErrors.values.sorted().first ?? "Settings could not be saved" }
             finishing = false
