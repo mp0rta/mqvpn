@@ -3,6 +3,7 @@
 
 package com.mqvpn.app
 
+import androidx.lifecycle.SavedStateHandle
 import com.mqvpn.app.data.DemoSettings
 import com.mqvpn.app.data.SettingsRepository
 import com.mqvpn.app.ui.SettingsViewModel
@@ -55,7 +56,7 @@ class SettingsViewModelTest {
     @Before
     fun setUp() {
         Dispatchers.setMain(testDispatcher)
-        viewModel = SettingsViewModel(mockRepository, mockManager)
+        viewModel = SettingsViewModel(mockRepository, mockManager, SavedStateHandle())
     }
 
     @After
@@ -68,7 +69,7 @@ class SettingsViewModelTest {
         val failingRepository = mockk<SettingsRepository>(relaxed = true).also {
             every { it.settings } returns flow { throw IllegalStateException("boom") }
         }
-        val failingViewModel = SettingsViewModel(failingRepository, mockManager)
+        val failingViewModel = SettingsViewModel(failingRepository, mockManager, SavedStateHandle())
         advanceUntilIdle()
 
         assertNull(failingViewModel.draft.value)
@@ -126,7 +127,7 @@ class SettingsViewModelTest {
             every { it.settings } returns MutableStateFlow(legacy)
             coEvery { it.save(any()) } returns Unit
         }
-        val vm = SettingsViewModel(repo, mockManager)
+        val vm = SettingsViewModel(repo, mockManager, SavedStateHandle())
         advanceUntilIdle()
         vm.update { it.copy(killSwitch = true) }
         advanceUntilIdle()
@@ -222,5 +223,16 @@ class SettingsViewModelTest {
         assertEquals("vpn.example.com", viewModel.draft.value?.serverAddress)
         assertEquals(8443, viewModel.draft.value?.serverPort)
         assertFalse(viewModel.addressTextInvalid.value)
+    }
+
+    @Test
+    fun `restored unparsable address text re-flags invalid after process recreation`() = runTest(testDispatcher) {
+        val restored = SettingsViewModel(
+            mockRepository, mockManager, SavedStateHandle(mapOf("address_text" to "vpn.example:abc")),
+        )
+        advanceUntilIdle()
+
+        assertEquals("vpn.example:abc", restored.addressText.value)
+        assertTrue(restored.addressTextInvalid.value)
     }
 }

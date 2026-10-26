@@ -3,6 +3,7 @@
 
 package com.mqvpn.app.ui
 
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.mqvpn.app.data.DemoSettings
@@ -33,6 +34,7 @@ import javax.inject.Inject
 class SettingsViewModel @Inject constructor(
     private val repository: SettingsRepository,
     manager: MqvpnManager,
+    private val savedState: SavedStateHandle,
 ) : ViewModel() {
 
     private val _loadError = MutableStateFlow<String?>(null)
@@ -94,25 +96,29 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    private val _addressText = MutableStateFlow<String?>(null)
     /**
      * The address box's raw text once edited; null = mirror the draft. Setup and
      * Settings share it, so an unparsable entry stays visible across screens while
      * the draft keeps the last valid server (which must never be connected to then).
+     * Saved state, so an entry in progress survives process recreation too.
      */
-    val addressText: StateFlow<String?> = _addressText.asStateFlow()
+    val addressText: StateFlow<String?> = savedState.getStateFlow(ADDRESS_TEXT_KEY, null)
 
-    private val _addressTextInvalid = MutableStateFlow(false)
     /** The address box holds text that doesn't parse; Home blocks connect on it. */
-    val addressTextInvalid: StateFlow<Boolean> = _addressTextInvalid.asStateFlow()
+    val addressTextInvalid: StateFlow<Boolean> = addressText
+        .map { it != null && ServerAddressField.parse(it) == null }
+        .stateIn(
+            viewModelScope, SharingStarted.Eagerly,
+            addressText.value.let { it != null && ServerAddressField.parse(it) == null },
+        )
 
     /** The one entry point for address-box edits (the address and port are one text field). */
     fun editAddress(text: String) {
         if (!isEditable.value) return
-        _addressText.value = text
-        val p = ServerAddressField.parse(text)
-        _addressTextInvalid.value = p == null
-        if (p != null) update { it.copy(serverAddress = p.address, serverPort = p.port) }
+        savedState[ADDRESS_TEXT_KEY] = text
+        ServerAddressField.parse(text)?.let { p ->
+            update { it.copy(serverAddress = p.address, serverPort = p.port) }
+        }
     }
 
     /**
@@ -136,6 +142,10 @@ class SettingsViewModel @Inject constructor(
     suspend fun flush() {
         val target = requestedGen
         landedGen.first { it >= target }
+    }
+
+    companion object {
+        private const val ADDRESS_TEXT_KEY = "address_text"
     }
 }
 
