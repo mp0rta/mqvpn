@@ -13,7 +13,7 @@ data class LegendEntry(val label: String, val slot: Int, val valueText: String)
 data class LineChart(
     val yMaxLabel: String,
     val gridYs: List<Float>,               // top, mid, zero line
-    val total: List<ChartPoint>,           // empty when the chart has no total series
+    val total: List<ChartPoint?>,          // null = gap; empty when the chart has no total series
     val series: List<List<ChartPoint?>>,   // per slot; null = gap (break the polyline)
     val legend: List<LegendEntry>,
 )
@@ -25,8 +25,21 @@ const val CHART_WINDOW_MS = 30_000L
 const val TOTAL_SLOT = -1
 /** Residence above the last finite bucket bound; drawn at this height and labelled ">512 ms". */
 private const val OVERFLOW_MS = 512.0
-/** A longer silence than this between samples (counter reset) breaks the polyline. */
-private const val GAP_MS = 2_500L
+const val TICK_MS = 1_000L
+/** Samples further apart than this (1.5 ticks: tolerates jitter, catches one missed tick) break the polyline. */
+const val GAP_MS = TICK_MS * 3 / 2
+
+/** One entry per sample, with a null inserted wherever a tick is missing between two samples. */
+private fun <S, T> List<S>.withGaps(wallMs: (S) -> Long, map: (S) -> T?): List<T?> {
+    val out = ArrayList<T?>()
+    var prev: Long? = null
+    for (s in this) {
+        if (prev != null && wallMs(s) - prev > GAP_MS) out.add(null)
+        prev = wallMs(s)
+        out.add(map(s))
+    }
+    return out
+}
 
 private fun xFor(wallMs: Long, nowMs: Long, w: Float): Float =
     (wallMs - (nowMs - CHART_WINDOW_MS)).toFloat() / CHART_WINDOW_MS * w
@@ -45,7 +58,7 @@ fun rateChart(
     val slotCount = (slots.values.maxOrNull() ?: -1) + 1
     val series = List(slotCount) { slot ->
         val iface = slots.entries.firstOrNull { it.value == slot }?.key
-        vis.map { s -> per(s)[iface]?.let { ChartPoint(xFor(s.wallMs, nowMs, w), y(it)) } }
+        vis.withGaps({ it.wallMs }) { s -> per(s)[iface]?.let { ChartPoint(xFor(s.wallMs, nowMs, w), y(it)) } }
     }
     val last = vis.lastOrNull()
     val legend = listOf(LegendEntry("total", TOTAL_SLOT, formatBps(last?.let(::tot) ?: 0L))) +
@@ -54,7 +67,7 @@ fun rateChart(
         }
     return LineChart(
         formatBps(top), gridYs(h),
-        vis.map { ChartPoint(xFor(it.wallMs, nowMs, w), y(tot(it))) }, series, legend,
+        vis.withGaps({ it.wallMs }) { ChartPoint(xFor(it.wallMs, nowMs, w), y(tot(it))) }, series, legend,
     )
 }
 
@@ -86,15 +99,8 @@ fun waitLines(samples: List<ReorderSample>, nowMs: Long, w: Float, h: Float): Li
         for (m in doubleArrayOf(1.0, 2.0, 5.0)) if (maxMs <= top * m) { top *= m; break@search }
         top *= 10
     }
-    fun line(pick: (ReorderSample) -> Double?): List<ChartPoint?> {
-        val out = ArrayList<ChartPoint?>()
-        var prevMs: Long? = null
-        for (s in vis) {
-            if (prevMs != null && s.wallMs - prevMs > GAP_MS) out.add(null)
-            prevMs = s.wallMs
-            out.add(capped(pick(s))?.let { ChartPoint(xFor(s.wallMs, nowMs, w), (h - it / top * h).toFloat()) })
-        }
-        return out
+    fun line(pick: (ReorderSample) -> Double?): List<ChartPoint?> = vis.withGaps({ it.wallMs }) { s ->
+        capped(pick(s))?.let { ChartPoint(xFor(s.wallMs, nowMs, w), (h - it / top * h).toFloat()) }
     }
     val last = vis.lastOrNull()
     fun txt(v: Double?) = when {

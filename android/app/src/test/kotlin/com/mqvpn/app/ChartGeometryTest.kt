@@ -32,16 +32,16 @@ class ChartGeometryTest {
             mapOf("wlan0" to 0, "rmnet0" to 1), Direction.DOWNLOAD, now, 300f, 100f,
         )
         assertEquals("5 Mbps", c.yMaxLabel)
-        assertEquals(3, c.total.size)
-        assertEquals(0f, c.total[0].x, 0.01f)
-        assertEquals(150f, c.total[1].x, 0.01f)
-        assertEquals(300f, c.total[2].x, 0.01f)
-        assertEquals(20f, c.total[1].y, 0.01f)   // 4 of 5 Mbps from the top
-        assertEquals(100f, c.total[2].y, 0.01f)  // zero line at bottom
+        assertEquals(5, c.total.size) // 15 s spacing: a break between each pair
+        assertEquals(0f, c.total[0]!!.x, 0.01f)
+        assertEquals(150f, c.total[2]!!.x, 0.01f)
+        assertEquals(300f, c.total[4]!!.x, 0.01f)
+        assertEquals(20f, c.total[2]!!.y, 0.01f)   // 4 of 5 Mbps from the top
+        assertEquals(100f, c.total[4]!!.y, 0.01f)  // zero line at bottom
         assertEquals(listOf(0f, 50f, 100f), c.gridYs)
         assertEquals(2, c.series.size)
         assertNull(c.series[0][0])               // wlan0 absent in first dl sample -> gap
-        assertNotNull(c.series[0][1])
+        assertNotNull(c.series[0][2])
         assertEquals("total", c.legend[0].label)
     }
 
@@ -90,5 +90,19 @@ class ChartGeometryTest {
         assertEquals(2, c.bars.size)
         assertEquals(60f, c.bars[0].greenH, 0.01f)
         assertEquals(20f, c.bars[0].redH, 0.01f)
+    }
+
+    @Test fun `one missed tick breaks the line but jitter does not`() {
+        fun wait(gap: Long) = waitLines(
+            listOf(rs(100_000 - gap, 0.0, 0.0, 1.0, 2.0), rs(100_000, 0.0, 0.0, 1.0, 2.0)), now, 300f, 100f,
+        ).series[0]
+        assertEquals(3, wait(2_000).size)   // one missing tick at 1 Hz
+        assertNull(wait(2_000)[1])
+        assertEquals(2, wait(1_400).size)   // jitter under 1.5 ticks
+        fun rate(gap: Long) = rateChart(
+            listOf(bw(100_000 - gap, 1, 1), bw(100_000, 1, 1)), emptyMap(), Direction.DOWNLOAD, now, 300f, 100f,
+        ).total
+        assertNull(rate(2_000)[1])
+        assertEquals(2, rate(1_400).size)
     }
 }
