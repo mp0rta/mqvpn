@@ -9,6 +9,7 @@ SHARED="$DIR/../Shared"
 APP="$DIR/../App"
 PURE_SOURCES=(
     "$SHARED/ServerAddressField.swift"
+    "$SHARED/TunnelPolicies.swift"
 )
 if command -v swiftc >/dev/null 2>&1; then
     SWIFTC=(swiftc)

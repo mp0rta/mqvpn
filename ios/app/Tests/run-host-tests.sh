@@ -16,6 +16,7 @@ swiftc -framework Security -o "$OUT" \
     "$SHARED/ServerResolve.swift" \
     "$SHARED/ServerAddressField.swift" \
     "$SHARED/ReorderSettings.swift" \
+    "$SHARED/TunnelPolicies.swift" \
     "$SHARED/HybridSettings.swift" \
     "$SHARED/ProviderMessage.swift" \
     "$SHARED/TunnelSessionCoordinator.swift" \
