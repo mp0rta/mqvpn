@@ -83,7 +83,7 @@ struct svr_conn_s {
     size_t dgram_mss;
     uint64_t dgram_lost_cnt;
     uint64_t dgram_acked_cnt;
-    uint64_t dgram_dropped_cnt; /* refused by xquic (send queue full) */
+    uint64_t dgram_dropped_cnt; /* refused by xquic (-XQC_EAGAIN) */
 
     /* Auth identity (set on CONNECT-IP auth success) */
     char username[64];
@@ -190,8 +190,8 @@ struct mqvpn_server_s {
     int n_sessions;
     int max_clients;
 
-    /* Backpressure: TUN packets dropped because their client's QUIC send
-     * queue was full (all clients) */
+    /* Backpressure: TUN packets dropped because xquic returned -XQC_EAGAIN
+     * for their client (all clients) */
     uint64_t tun_drop_cnt;
 
     /* Timer: next wake (from xquic set_event_timer) */
@@ -2725,13 +2725,14 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
     if (frame_buf != stack_buf) free(frame_buf);
 
     if (xret == -XQC_EAGAIN) {
-        /* This client's send queue is full: drop its packet, as the client
-         * does. The TUN is shared by every client, so pausing it here would
-         * stall all of them until this one drains. */
+        /* xquic cannot take this client's datagram now (its send queue is
+         * full, or 1-RTT is not ready yet): drop it, as the client does. The
+         * TUN is shared by every client, so pausing it here would stall all
+         * of them until this one could send again. */
         target->dgram_dropped_cnt++;
         s->tun_drop_cnt++;
         if ((target->dgram_dropped_cnt % 1024) == 1) {
-            LOG_I(s, "datagram dropped, send queue full: dropped=%" PRIu64,
+            LOG_I(s, "datagram dropped on EAGAIN: dropped=%" PRIu64,
                   target->dgram_dropped_cnt);
         }
         return MQVPN_OK;

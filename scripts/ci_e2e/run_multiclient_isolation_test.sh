@@ -163,6 +163,15 @@ timeout -k 2 16 ip netns exec mi-client1 iperf3 -c 10.0.0.1 -u -b 30M -l 1200 -R
     > "${WORK_DIR}/iperf_c.log" 2>&1 || true
 wait "$PING_PID" || true
 
+# The flood must have run, or client 2's pings prove nothing.
+FLOOD_RX=$(awk '/receiver/ { print $5 }' "${WORK_DIR}/iperf_c.log" | tail -1)
+if [ -z "$FLOOD_RX" ] || ! awk -v b="$FLOOD_RX" 'BEGIN { exit !(b > 0) }'; then
+    echo "=== FAIL: client 1's flood did not run (received: ${FLOOD_RX:-nothing}) ==="
+    cat "${WORK_DIR}/iperf_c.log"
+    exit 1
+fi
+echo "OK: client 1's flood ran (${FLOOD_RX} received)"
+
 # Client 2's pings sent between t=4 s and t=11 s, while the flood is running.
 RESULT=$(python3 - "${WORK_DIR}/ping.log" "$T0" <<'PY'
 import re, sys
@@ -183,7 +192,6 @@ PY
 )
 read -r LOSS P95 GOT EXPECTED <<< "$RESULT"
 echo "client 2 during the flood: ${GOT}/${EXPECTED} answered, loss ${LOSS}%, p95 RTT ${P95} ms"
-grep -E "receiver|sender" "${WORK_DIR}/iperf_c.log" | tail -1 || true
 
 FAIL=0
 if ! awk -v l="$LOSS" -v m="$MAX_LOSS_PCT" 'BEGIN { exit !(l <= m) }'; then
@@ -196,6 +204,14 @@ if [ "$P95" -gt "$MAX_P95_MS" ]; then
 fi
 if [ "$FAIL" -ne 0 ]; then
     echo "=== FAIL: one client's flood stalled another client ==="
+    tail -20 "${WORK_DIR}/server.log"
+    exit 1
+fi
+# And the server must have dropped client 1's excess (client 2 only pings,
+# so the drops can only be client 1's), or the flood never reached the
+# point this test is about.
+if ! grep -q "datagram dropped on EAGAIN" "${WORK_DIR}/server.log"; then
+    echo "=== FAIL: the server never had to drop client 1's excess ==="
     tail -20 "${WORK_DIR}/server.log"
     exit 1
 fi
