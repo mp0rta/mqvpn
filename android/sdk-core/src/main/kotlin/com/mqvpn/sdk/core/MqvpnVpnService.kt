@@ -270,6 +270,7 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
             requestedScheduler = currentConfig?.let { c ->
                 c.scheduler.takeIf { c.requestServerScheduler }
             },
+            connectedAtMs = System.currentTimeMillis(),
         )
 
         val tunPfd = try {

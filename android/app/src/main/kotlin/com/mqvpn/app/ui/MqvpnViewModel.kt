@@ -114,7 +114,13 @@ class MqvpnViewModel(
                 when (it) {
                     is MqvpnState.Connected, is MqvpnState.Reconnecting -> {
                         if (it is MqvpnState.Connected) {
-                            if (connectedAt == null) connectedAt = clock()
+                            // Prefer the service's timestamp: a re-attached UI
+                            // (activity recreated, task swiped away) then shows
+                            // the session's real elapsed time, not time-since-replay.
+                            if (connectedAt == null) {
+                                connectedAt = it.tunnelInfo.connectedAtMs
+                                    .takeIf { ms -> ms > 0 } ?: clock()
+                            }
                         } else {
                             connectedAt = null
                             _elapsedSec.value = null

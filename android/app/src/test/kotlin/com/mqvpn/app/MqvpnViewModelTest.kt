@@ -402,4 +402,17 @@ class MqvpnViewModelTest {
         fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent()
         assertEquals(5L, vm.elapsedSec.value)
     }
+
+    @Test
+    fun `elapsed counts from the service connect timestamp on re-attach`() = tickerTest {
+        // A re-attached UI (new ViewModel) replays a Connected state that the
+        // service emitted earlier; elapsed must span the whole session, not
+        // the time since the replay.
+        stateFlow.value = MqvpnState.Connected(connectedInfo().copy(connectedAtMs = 4_000L))
+        var now = 10_000L
+        val vm = MqvpnViewModel(mockManager, mockAvailability, { now }, fakeNanoClock)
+        runCurrent()
+        now += 1_000; fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent()
+        assertEquals(7L, vm.elapsedSec.value) // (11_000 - 4_000) / 1000
+    }
 }
