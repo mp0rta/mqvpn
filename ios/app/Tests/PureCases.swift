@@ -109,5 +109,79 @@ func runPureCases() -> Int {
         }
     }
 
+    // MARK: snapshot v2 wire / SampleRing / SampleCursor
+    do {
+        func mk(_ seq: UInt64, tx: UInt64 = 0) -> TunnelSample {
+            TunnelSample(seq: seq, wallMs: seq, monoMs: seq, paths: [SamplePath(name: "en0", txBytes: tx, rxBytes: tx)],
+                         bytesTx: tx, bytesRx: tx, dgramSent: 0, dgramLost: 0, delivered: 0,
+                         gapCount: 0, gapFilled: 0, gapTimeout: 0, ackDemote: 0, residenceBuckets: [1, 2])
+        }
+        let old = #"{"timestamp":1,"clientState":2,"footprint":3,"paths":[{"name":"en0","status":1,"txBytes":1,"rxBytes":2}]}"#
+        if let d = try? ProviderMessage.decode(Data(old.utf8)) {
+            check(d.tunnel == nil && d.stats == nil && d.samples.isEmpty && d.bootId == 0, "v2 old-wire defaults")
+        } else { check(false, "v2 old-wire decode") }
+        let big = UInt64.max
+        var snap = TunnelSnapshot(timestamp: 1, clientState: 2, connectedSince: nil, footprint: big, paths: [],
+                                  seq: big, reorderConfigured: true,
+                                  reorder: ReorderStatsSnapshot(delivered: big, gapCount: 1, gapFilled: 2, gapTimeout: 3, ackDemote: 4,
+                                                                bufferedP50Ms: 1, bufferedP99Ms: 2, residenceBuckets: [big]),
+                                  tunnel: TunnelInfoSnapshot(assignedIp: "10.0.0.2", prefix: 24, assignedIp6: nil, prefix6: 0,
+                                                             hasV6: false, mtu: 1280, serverScheduler: 1, requestedScheduler: nil),
+                                  stats: StatsSnapshot(bytesTx: big, bytesRx: big, dgramSent: big, dgramLost: big, srttMs: 1.5),
+                                  samples: [mk(big, tx: big)], bootId: big)
+        if let d = try? ProviderMessage.decode(try! ProviderMessage.encode(snap)) {
+            check(d.samples == snap.samples && d.samples[0].bytesTx == big && d.bootId == big, "v2 UInt64.max samples")
+            check(d.stats == snap.stats && d.tunnel == snap.tunnel, "v2 tunnel/stats round-trip")
+            check(d.reorder == snap.reorder && d.reorder?.residenceBuckets == [big], "v2 reorder buckets")
+        } else { check(false, "v2 round-trip decode") }
+        snap = TunnelSnapshot(timestamp: 1, clientState: 2, connectedSince: nil, footprint: 3, paths: [])
+        check(snap.samples.isEmpty && snap.bootId == 0, "v2 init defaults")
+
+        // request codec
+        check(SnapshotRequest.encode(cursor: nil).isEmpty, "req nil -> empty")
+        check(SnapshotRequest.decode(Data()) == nil, "req empty -> nil")
+        check(SnapshotRequest.decode(Data("garbage".utf8)) == nil, "req garbage -> nil")
+        let rd = SnapshotRequest.decode(SnapshotRequest.encode(cursor: (sinceSeq: big, bootId: 7)))
+        check(rd?.sinceSeq == big && rd?.bootId == 7, "req round-trip")
+
+        // ring
+        let ring = SampleRing()
+        check(ring.since(nil).isEmpty && ring.since(5).isEmpty, "ring empty")
+        for i in 1...40 { ring.append(mk(UInt64(i))) }
+        check(ring.since(nil).count == 31 && ring.since(nil).first?.seq == 10, "ring keeps last 31")
+        check(ring.since(35).map { $0.seq } == [36, 37, 38, 39, 40], "ring since mid")
+        check(ring.since(40).isEmpty, "ring since newest")
+        check(ring.since(41).count == 31, "ring since ahead -> all (restart)")
+        check(ring.since(9).count == 31, "ring since oldest-1 contiguous")
+        check(ring.since(8).count == 31, "ring since older than oldest-1 -> all")
+        ring.clear()
+        check(ring.since(nil).isEmpty, "ring clear")
+
+        // provider rule: bootId mismatch -> full ring
+        for i in 1...5 { ring.append(mk(UInt64(i))) }
+        func provider(_ req: (sinceSeq: UInt64, bootId: UInt64)?, boot: UInt64) -> [TunnelSample] {
+            guard let r = req, r.bootId == boot else { return ring.since(nil) }
+            return ring.since(r.sinceSeq)
+        }
+        check(provider((sinceSeq: 4, bootId: 9), boot: 9).map { $0.seq } == [5], "provider matching boot filters")
+        check(provider((sinceSeq: 4, bootId: 8), boot: 9).count == 5, "provider boot mismatch -> full")
+        check(provider(nil, boot: 9).count == 5, "provider nil -> full")
+
+        // cursor
+        var cur = SampleCursor()
+        check(cur.request == nil, "cursor initial request nil")
+        var r = cur.accept(bootId: 1, samples: [mk(1), mk(2)])
+        check(r.reset && r.fresh.count == 2, "cursor first accept resets")
+        check(cur.request?.sinceSeq == 2 && cur.request?.bootId == 1, "cursor request after accept")
+        r = cur.accept(bootId: 1, samples: [mk(1), mk(2)])
+        check(!r.reset && r.fresh.isEmpty, "cursor dedup")
+        r = cur.accept(bootId: 1, samples: [mk(2), mk(3)])
+        check(!r.reset && r.fresh.map { $0.seq } == [3] && cur.request?.sinceSeq == 3, "cursor overlap")
+        r = cur.accept(bootId: 2, samples: [mk(1)])
+        check(r.reset && r.fresh.count == 1 && cur.request?.sinceSeq == 1 && cur.request?.bootId == 2, "cursor bootId change resets")
+        r = cur.accept(bootId: 2, samples: [])
+        check(!r.reset && r.fresh.isEmpty && cur.request?.sinceSeq == 1, "cursor empty keeps position")
+    }
+
     return failures
 }

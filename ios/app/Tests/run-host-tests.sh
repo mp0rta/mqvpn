@@ -19,6 +19,7 @@ swiftc -framework Security -o "$OUT" \
     "$SHARED/TunnelPolicies.swift" \
     "$SHARED/HybridSettings.swift" \
     "$SHARED/ProviderMessage.swift" \
+    "$SHARED/SampleRing.swift" \
     "$SHARED/TunnelSessionCoordinator.swift" \
     "$SHARED/TeardownSequence.swift" \
     "$SHARED/SystemTrust.swift" \
