@@ -86,6 +86,7 @@ fun HomeScreen(
     val elapsed by vm.elapsedSec.collectAsStateWithLifecycle()
     val pending by vm.connectPending.collectAsStateWithLifecycle()
     val connectError by vm.connectError.collectAsStateWithLifecycle()
+    val saveError by settingsVm.saveError.collectAsStateWithLifecycle()
     val draft by settingsVm.draft.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
@@ -175,6 +176,11 @@ fun HomeScreen(
             modifier = Modifier.padding(top = 5.dp).alpha(if (status.pulsing) 0.7f else 1f),
         )
         connectError?.let {
+            Text(it, color = c.red, fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 6.dp))
+        }
+        // Connect still goes ahead (the service runs on the config it is handed), but a
+        // failed save means the next launch shows the older settings: say so here too.
+        saveError?.let {
             Text(it, color = c.red, fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 6.dp))
         }
 
