@@ -171,7 +171,7 @@ oracle() {
     echo "run_tlc.sh: wrote formal/oracle/path_slot_oracle.inc"
 }
 
-# The client-glue traces: TLC writes the whole state graph (about 3 GB of DOT
+# The client-glue traces: TLC writes the whole state graph (about 4 GB of DOT
 # in the temporary directory) and gen_traces.py picks the traces from it. One
 # worker keeps the dump's order fixed, though the output does not depend on
 # it (the generator sorts by content).

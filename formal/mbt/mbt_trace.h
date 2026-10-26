@@ -57,7 +57,7 @@ typedef enum {
     MBT_OP_STABLE,
     MBT_OP_REACTIVATE,
     MBT_OP_XQC_VALIDATE, /* fake path -> xquic-ACTIVE, no client call */
-    MBT_OP_XQC_LOSE,     /* spontaneous abandon / idle reap: fake path not
+    MBT_OP_XQC_LOSE,     /* spontaneous abandon / idle reap / remove-active: fake path not
                             ACTIVE, no client call */
     MBT_OP_DELIVER_REMOVAL,
     MBT_OP_ADD,

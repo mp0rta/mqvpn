@@ -86,8 +86,9 @@ formal/cbmc/run.sh           # cbmc on PATH (Ubuntu 24.04: apt install cbmc)
 `run_tlc.sh all` first runs SANY, the TLA+ parser and semantic checker in
 `tla2tools.jar`, on every module, then the safety run, the liveness run and
 the oracle generation and the trace generation (`mbt`; `run_tlc.sh mbt`
-runs it alone). The `mbt` run writes the whole state graph (about 3 GB of
-DOT) into a temporary directory and needs about 4 GB of Java heap.
+runs it alone). The `mbt` run writes the whole state graph (about 4 GB of
+DOT) into a temporary directory, takes about 5 minutes, and needs about 4 GB
+of Java heap (`-Xmx4g` works; the process peaks near 2.7 GB resident).
 `test_path_slot_oracle` and `test_path_slot_mbt` build and run with the other
 unit tests (`ctest`).
 
@@ -129,10 +130,10 @@ Both scripts also fail in cases where the tools themselves would pass:
 
 Last verified (TLC 2.19, CBMC 5.95.1):
 
-- safety: 8,626,511 states generated, 1,839,456 distinct — no error; every
+- safety: 10,461,112 states generated, 2,215,404 distinct — no error; every
   action takes a step
 - liveness: the same state space; 2 temporal branches, checked over
-  3,678,912 total distinct states — no error
+  4,430,808 total distinct states — no error
 - oracle: 196 legal pre-states × 19 event/context classes = 3,724 rows;
   every post-state legal
 - `test_path_slot_oracle`: 3,724 rows OK; 3,836 of 4,032 abstract shapes
@@ -516,19 +517,19 @@ Every action of the model's `Next` has a row below.
 | Action | Code |
 |--------|------|
 | `ApiConnect` | `mqvpn_client_connect` from IDLE: no reset; `cli_start_connection` refuses a primary that is not attached (`:2811-2818`); the primary bootstrap writes id 0, live, VALIDATING (`:2896-2902`), and xquic creates the initial path ACTIVE (`xqc_path_init`, `xqc_multipath.c:351-353`); `cli_masque_start_tunnel` sets `hold` when `reqSched` (the handshake is folded into the connect: C sets it after the handshake, and the excluded run, where `cli_masque_start_tunnel` fails first, sends no CONNECT-IP request and only closes; `mpReady` cannot precede the handshake) |
-| `EnvMpReady` | `cb_ready_to_create_path` (`:2531-2541`), only on a multipath connection once a path id is available (`xqc_engine.c:785-800`, `xqc_conn.c:5519-5542`); may precede ESTABLISHED; while `hold` is set it only records readiness (`:2628`), and `client_release_path_hold` activates later |
+| `EnvMpReady` | `cb_ready_to_create_path` (`:2621-2631`), only on a multipath connection once a path id is available (`xqc_engine.c:785-800`, `xqc_conn.c:5519-5542`); may precede ESTABLISHED; while `hold` is set it only records readiness (`:2628`), and `client_release_path_hold` activates later |
 | `EnvTunnelReady`, `EnvEstablish` | `cli_connect_ip_on_body`, once the address is assigned: the primary, if still VALIDATING, attached and on the bootstrap path (`xqc_path_id == 0`), gets its handshake VALIDATION_OK (`:2190-2204`; a replacement path in the slot waits for the validation poll instead), then TUNNEL_READY (`:2206`), then `client_release_path_hold` clears `hold` (`:2218`; when multipath is ready its `activate_pending_paths` is the next `EnvActivate` step); `mqvpn_client_set_tun_active` → ESTABLISHED (`:3749-3760`) |
 | `EnvConnClose` | `cb_h3_conn_close` (`:1426-1452`): slot untouched, RECONNECTING or CLOSED; xquic destroys its paths without notifying, so in-flight removals are dropped |
 | `EnvReconnect` | `tick_reconnect` (`:4108-4140`) / `mqvpn_client_connect` from RECONNECTING (`:3202-3262`): CONN_RESET to the slot, then start; the reset runs whether or not the start succeeds; success needs an attached primary, failure re-arms the timer. The reset clears `hold` (`client_reset_paths_for_reconnect`, `:1035`); a successful start sets it again when `reqSched` |
 | `ApiDisconnectWhileReconnecting` | `mqvpn_client_disconnect` from RECONNECTING (`:3265-3310`): no connection exists then, so the client just goes CLOSED, which cancels the pending retry (`tick_reconnect` runs only while RECONNECTING, `:4110`). A disconnect of a live connection is one of the closes `EnvConnClose` stands for |
 | `EnvActivate` | `activate_pending_paths` (`:2519-2526`) once multipath is ready on a live connection and `hold` is clear (`:3573`, `:2628`) |
-| `EnvRetryFire`, `EnvValidationPoll`, `EnvStableConfirm` | `tick_path_recovery` (`:4091-4103`), which needs multipath ready and ESTABLISHED: `tick_drive_retry_timer` (`:4002-4020`), `tick_check_all_validations` (`:4039-4083`; validates a VALIDATING slot whose path is xquic-ACTIVE) and `path_fsm_tick_confirm_stable` |
+| `EnvRetryFire`, `EnvValidationPoll`, `EnvStableConfirm` | `tick_path_recovery` (`:4091-4103`), which needs multipath ready and ESTABLISHED: `tick_drive_retry_timer` (`:4002-4020`), `tick_check_all_validations` (`:4284-4329`; validates a VALIDATING slot whose path is xquic-ACTIVE) and `path_fsm_tick_confirm_stable` |
 | `ApiManualReactivate` | `mqvpn_client_reactivate_path` and `reactivate_slot_eligible` (`:3549-3594`) |
 | `ApiDrop`, `ApiRemove` | `mqvpn_client_on_platform_path_dropped` / `mqvpn_client_remove_path` (`:3456-3508`): PATH_ABANDON for a live path when a connection exists; it can fail (`xqc_conn_close_path`, `xqc_multipath.c:751-787`) and the result is ignored. xquic refuses to abandon the only ACTIVE path (`xqc_multipath.c:781-787`). The model departs from the code here (first exception above) |
 | `EnvXqcValidate` | xquic validates the slot's path: a matching PATH_RESPONSE (`xqc_process_path_response_frame`, `xqc_frame.c:2129`) moves a validating path to xquic-ACTIVE (`xqc_path_validate`, `xqc_multipath.c:1442-1448`); not fair (a black-holed path never validates) |
 | `EnvXqcSpontaneousAbandon` | a validation timeout (`xqc_path_validation_on_retx`, `xqc_multipath.c:460-484`) of a path that is not xquic-ACTIVE; bounded, not fair |
 | `EnvXqcRemoveActive` | xquic removes the slot's xquic-ACTIVE path: a PATH_ABANDON from the peer, or the path idle timeout while another path is active (`xqc_timer_path_idle_timeout`, `xqc_timer.c:160-184`); multipath and `mpReady` only (third exception above); shares the `AbandonCap` bound, not fair |
-| `DeliverRemoval` | `cb_path_removed` → `find_path_by_xqc_id` (`:2704-2721`, `:561-569`), whose lookup matches only a live slot with the same id. This one-slot model does not exercise that guard: every pending removal is the live slot's own (see `RemovalsBelongToCurrentIncarnation`), so the lookup always matches |
+| `DeliverRemoval` | `cb_path_removed` → `find_path_by_xqc_id` (`:2815-2832`, `:528-536`), whose lookup matches only a live slot with the same id. This one-slot model does not exercise that guard: every pending removal is the live slot's own (see `RemovalsBelongToCurrentIncarnation`), so the lookup always matches |
 | `EnvPathIdleReap`, `EnvConnIdleTimeout` | an orphan is closed by the path idle timeout only with multipath and when it is not the only xquic-ACTIVE path (`xqc_timer.c:137-161`; the model takes the slot's xquic-ACTIVE path to be the only one); otherwise the connection idles out |
 | `ApiAdd` | `mqvpn_client_add_path` (`:3362-3441`): reuses only a CLOSED_FREE slot; its own activation is skipped while `hold` is set (`:3573`, expressed by `EnvActivate`'s `~hold`) |
 | `PlatformRelease` | the platform's side of the drop contract: after a drop or remove it stops its I/O, closes its socket and makes the release call (`include/libmqvpn.h:884-886`, `include/libmqvpn.h:908-910`); no library code runs until that call arrives (`DeliverRelease`) |
@@ -548,7 +549,7 @@ The Code column names the code each property is about, function first.
 | `EarlierIncarnationsReleased` | invariant | a slot is reused only after its previous transport was finalized | `mqvpn_client_add_path` reuses only a CLOSED_FREE slot (`:3386-3401`); `maybe_transition_dropped_to_free` enters CLOSED_FREE only once the release happened (`path_state_machine.c:699-707`) |
 | `ReleasedMeansFinalized` | invariant | while not destroyed, the slot's release flag matches the ghost count of finalizations | `mqvpn_client_on_platform_path_released` finalizes, then dispatches TRANSPORT_RELEASED (`:3531-3533`), whose handler `path_on_transport_released` sets the flag (`path_state_machine.c:693-694`); `client_finalize_transport` (`:964-981`) |
 | `NoLeakAtDestroy` | invariant | after destroy, every installed transport was finalized (exactly once) | `mqvpn_client_destroy` finalizes every slot not yet released (`:3164-3167`) |
-| `RemovalsBelongToCurrentIncarnation` | invariant | no removal notification outlives its incarnation | `cb_path_removed` → `find_path_by_xqc_id` (`:2710`, `:561-569`), the id-keyed lookup this protects; `mqvpn_client_add_path` reuses only a CLOSED_FREE slot (`:3386-3401`) |
+| `RemovalsBelongToCurrentIncarnation` | invariant | no removal notification outlives its incarnation | `cb_path_removed` → `find_path_by_xqc_id` (`:2821`, `:528-536`), the id-keyed lookup this protects; `mqvpn_client_add_path` reuses only a CLOSED_FREE slot (`:3386-3401`) |
 | `StaleEventHarmless` | action | a delayed event of an earlier incarnation never changes the slot. API calls are modelled with the current handle only, so what this checks is the handle guard of release delivery: a late release call for an earlier handle changes nothing. The removal channel is closed structurally (`RemovalsBelongToCurrentIncarnation`) | `mqvpn_client_on_platform_path_released`'s guards (`:3516-3518`): `find_path_by_handle` (`:572-579`) finds no slot for an old handle, and a late duplicate on CLOSED_FREE is ignored |
 | `FreeQuiescent` | action | CLOSED_FREE is left only by reuse | `path_on_add` (`path_state_machine.c:648-660`), the only handler that leaves CLOSED_FREE, dispatched only by `mqvpn_client_add_path` (`:3433`) |
 | `DroppedLeadsToFree` | liveness | a dropped slot reaches CLOSED_FREE, unless destroyed or the connection is closed for good | `maybe_transition_dropped_to_free` (`path_state_machine.c:699-707`), re-evaluated on removal (`path_on_xquic_removed`, `path_state_machine.c:557-560`), on release (`path_on_transport_released`, `path_state_machine.c:693-695`) and on reset (`path_on_conn_reset`, `path_state_machine.c:675-677`) |
@@ -678,8 +679,8 @@ step, compares with the model's post-state:
 action with the values of the variables it branches on). The generator picks
 the shortest trace for each, greedily, per client configuration (`mp`,
 `mpCredit`, `reqSched`, scheduler, `reconnect`); the header of
-`path_slot_traces.inc` lists them and gives the counts (125 classes, 82
-traces, 551 steps). A required class with no trace fails generation; it is not skipped.
+`path_slot_traces.inc` lists them and gives the counts (126 classes, 83
+traces, 522 steps). A required class with no trace fails generation; it is not skipped.
 
 **Probes.** A negative probe is a trace that ends in a call the code must
 refuse, placed in a state where only the guard under test refuses it: the
