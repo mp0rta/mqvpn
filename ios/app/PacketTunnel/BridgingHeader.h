@@ -26,5 +26,7 @@ int mqvpn_client_get_reorder_stats(const mqvpn_client_t *c, mqvpn_reorder_stats_
 
 // Extension-side layout fingerprint (reorder_layout_shim.c).
 uint64_t mqvpn_ext_reorder_layout_id(void);
+// Residence-histogram bucket i (0 when out of range); reorder_layout_shim.c.
+uint64_t mqvpn_shim_reorder_bucket(const mqvpn_reorder_stats_t *s, int i);
 
 #endif

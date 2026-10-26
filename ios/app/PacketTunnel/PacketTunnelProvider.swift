@@ -11,6 +11,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // lock covers `published` and the continuation so the terminal check
     // and the registration are one critical section.
     private let lock = NSLock()
+    // Rebuilt in startTunnel once ProtectionSettings are parsed (before the
+    // continuation is registered, so nothing can have used the default).
     private var coordinator = Coordinator()
     private var published = false
     private var startContinuation: CheckedContinuation<Void, Error>?
@@ -49,6 +51,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         let reorder = ReorderSettings(providerConfiguration: providerConfig) ?? .disabled
         let hybrid = HybridSettings(providerConfiguration: providerConfig) ?? .disabled
+        let split = SplitSettings(providerConfiguration: providerConfig)
+        let protection = ProtectionSettings(providerConfiguration: providerConfig)
+        let policy = PathPolicy(providerConfiguration: providerConfig)
+        guard policy.anyEnabled else {
+            throw NSError(domain: "org.mqvpn.app", code: 13,
+                          userInfo: [NSLocalizedDescriptionKey: "no connection types enabled"])
+        }
         guard let resolved = await Task.detached(priority: .userInitiated, operation: {
             resolveServer(server.host, server.port)
         }).value, let resolvedIP = resolved.ipString else {
@@ -68,13 +77,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 cont.resume(throwing: CancellationError())
                 return
             }
+            coordinator = Coordinator(reconnectEnabled: protection.autoReconnect)
             startContinuation = cont
             lock.unlock()
 
             // (2) Locals, not properties (D6 rule 4): nothing below reads
             // self.engine & co. until the publish in (3).
             let engine = MqvpnEngine()
-            let binder = PathBinder(engine: engine)
+            let binder = PathBinder(engine: engine, policy: policy)
             let metrics = GateMetrics(engine: engine, binder: binder)
             let snapshot = SnapshotCache(engine: engine)
 
@@ -113,7 +123,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 engine.perform { binder.reconcile() }
             }
             engine.start(server: server, reorder: reorder, hybrid: hybrid,
-                         serverAddr: resolved)
+                         split: split, protection: protection, serverAddr: resolved)
             binder.start()
 
             // (3) Publish, or fold the locals if a stop or failure already
@@ -245,12 +255,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     static func makeSettings(from info: mqvpn_tunnel_info_t,
                              server: String) -> NEPacketTunnelNetworkSettings {
-        func ip4(_ b: (UInt8, UInt8, UInt8, UInt8)) -> String {
-            "\(b.0).\(b.1).\(b.2).\(b.3)"
-        }
         let s = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: server)
         let v4 = NEIPv4Settings(
-            addresses: [ip4(info.assigned_ip)],
+            addresses: [MqvpnEngine.ip4String(info.assigned_ip)],
             subnetMasks: [Self.prefixToMask(info.assigned_prefix)])
         v4.includedRoutes = [NEIPv4Route.default()]
         s.ipv4Settings = v4
@@ -262,8 +269,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // route captures and the server NATs to an unroutable private
         // address — name resolution dies and every app looks offline.
         s.dnsSettings = NEDNSSettings(servers: ["1.1.1.1", "8.8.8.8"])
-        // IPv6 (info.has_v6 / assigned_ip6 / assigned_prefix6) is not
-        // applied yet: inner traffic is IPv4 only.
+        // Always claim the v6 default route so no v6 traffic bypasses the
+        // tunnel. Unassigned: placeholder ULA — a blackhole (the core drops
+        // v6 TUN ingress when no v6 address was assigned).
+        let v6 = info.has_v6 != 0
+        let ip6 = v6 ? MqvpnEngine.ip6String(info.assigned_ip6) : "fd76:7670:6e00::2"
+        let prefix6 = v6 ? NSNumber(value: info.assigned_prefix6) : NSNumber(value: 64)
+        let v6s = NEIPv6Settings(addresses: [ip6], networkPrefixLengths: [prefix6])
+        v6s.includedRoutes = [NEIPv6Route.default()]
+        s.ipv6Settings = v6s
         return s
     }
 
@@ -280,12 +294,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// app renders as "no data".
     override func handleAppMessage(_ messageData: Data,
                                    completionHandler: ((Data?) -> Void)?) {
-        guard let snap = snapshot?.read(),
-              let data = try? ProviderMessage.encode(snap) else {
-            completionHandler?(nil)
-            return
-        }
-        completionHandler?(data)
+        completionHandler?(snapshot?.read(request: SnapshotRequest.decode(messageData)))
     }
 
     override func stopTunnel(with reason: NEProviderStopReason) async {

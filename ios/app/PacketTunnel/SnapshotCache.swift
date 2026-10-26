@@ -23,6 +23,11 @@ final class SnapshotCache {
     /// Tick-thread-confined: provider-side monotonic ordering key, one per
     /// produced snapshot (lets the app detect stalls/reordered reads).
     private var seq: UInt64 = 0
+    /// Tick-thread-confined; the reader gets copies through `lock`.
+    private let ring = SampleRing()
+    /// Random per provider start: lets the app tell a restarted provider
+    /// (seq back at 1) from a continuing one. 0 is reserved for "legacy".
+    private let bootId = UInt64.random(in: 1...UInt64.max)
 
     init(engine: MqvpnEngine) {
         self.engine = engine
@@ -42,10 +47,19 @@ final class SnapshotCache {
 
     /// Reader for `handleAppMessage` (any thread). Returns nil until the first
     /// snapshot is produced.
-    func read() -> TunnelSnapshot? {
+    /// Samples: nil request or a different bootId => the full ring, else
+    /// only those newer than request.sinceSeq.
+    func read(request: (sinceSeq: UInt64, bootId: UInt64)?) -> Data? {
         lock.lock()
         defer { lock.unlock() }
-        return latest
+        guard let l = latest else { return nil }
+        let since: UInt64? = (request?.bootId == bootId) ? request?.sinceSeq : nil
+        let snap = TunnelSnapshot(
+            timestamp: l.timestamp, clientState: l.clientState,
+            connectedSince: l.connectedSince, footprint: l.footprint, paths: l.paths,
+            seq: l.seq, reorderConfigured: l.reorderConfigured, reorder: l.reorder,
+            tunnel: l.tunnel, stats: l.stats, samples: ring.since(since), bootId: bootId)
+        return try? ProviderMessage.encode(snap)
     }
 
     /// Tick thread only (fired by the Timer added in `start()`).
@@ -74,13 +88,27 @@ final class SnapshotCache {
             paths.append(PathSnapshot(name: name, status: Int32(p.status.rawValue),
                                       txBytes: p.bytes_tx, rxBytes: p.bytes_rx))
         }
+        // seq must stay >= 1: SampleRing treats seq 0 as its "nothing seen" hazard.
         seq &+= 1
+        let stats = engine.stats()
+        let reorder = engine.reorderStats()
+        let sample = TunnelSample(
+            seq: seq, wallMs: UInt64(now * 1000),
+            monoMs: UInt64(mqvpn_ios_clock_us(nil) / 1000),
+            paths: paths.map { SamplePath(name: $0.name, txBytes: $0.txBytes, rxBytes: $0.rxBytes) },
+            bytesTx: stats?.bytesTx ?? 0, bytesRx: stats?.bytesRx ?? 0,
+            dgramSent: stats?.dgramSent ?? 0, dgramLost: stats?.dgramLost ?? 0,
+            delivered: reorder?.delivered ?? 0, gapCount: reorder?.gapCount ?? 0,
+            gapFilled: reorder?.gapFilled ?? 0, gapTimeout: reorder?.gapTimeout ?? 0,
+            ackDemote: reorder?.ackDemote ?? 0,
+            residenceBuckets: reorder?.residenceBuckets ?? [])
         let snap = TunnelSnapshot(timestamp: now, clientState: Int32(state.rawValue),
                                   connectedSince: connectedSince,
                                   footprint: Self.physFootprint(), paths: paths,
                                   seq: seq, reorderConfigured: engine.reorderConfigured,
-                                  reorder: engine.reorderStats())
+                                  reorder: reorder, tunnel: engine.tunnelInfo, stats: stats)
         lock.lock()
+        ring.append(sample)
         latest = snap
         lock.unlock()
     }

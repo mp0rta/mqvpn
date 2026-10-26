@@ -58,6 +58,10 @@ final class MqvpnEngine: NSObject {
     private(set) var reorderConfigured = false
     private(set) var hybridConfigured = false
     private var reorderStatsUnavailable = false
+    /// Latched by tunnel_config_ready (tick thread); read by SnapshotCache
+    /// on the same thread. Overwritten on every (re)connect.
+    private(set) var tunnelInfo: TunnelInfoSnapshot?
+    private var requestedScheduler: Int32?
     /// Once-token for the global log sink (src/log.h: set once per process,
     /// before any client exists). A static let is initialised lazily and
     /// thread-safely, exactly once: later sessions in the same extension
@@ -76,7 +80,10 @@ final class MqvpnEngine: NSObject {
     /// Blocks until the client exists on the tick thread — callers may start
     /// PathBinder immediately after return without ordering assumptions.
     func start(server: ServerSettings, reorder: ReorderSettings = .disabled,
-               hybrid: HybridSettings = .disabled, serverAddr: ResolvedServerAddress) {
+               hybrid: HybridSettings = .disabled,
+               split: SplitSettings = SplitSettings(providerConfiguration: nil),
+               protection: ProtectionSettings = ProtectionSettings(),
+               serverAddr: ResolvedServerAddress) {
         self.serverAddr = serverAddr
         // Provenance-independent ABI guard: the linked libmqvpn.a and this
         // extension must share the mqvpn_reorder_stats_t layout. On mismatch,
@@ -102,7 +109,11 @@ final class MqvpnEngine: NSObject {
         tickThread.start()
         runLoopReady.wait()
         let ready = DispatchSemaphore(value: 0)
-        perform { self.setupClient(server, reorder: reorder, hybrid: hybrid); ready.signal() }
+        perform {
+            self.setupClient(server, reorder: reorder, hybrid: hybrid,
+                             split: split, protection: protection)
+            ready.signal()
+        }
         ready.wait()
     }
 
@@ -168,7 +179,8 @@ final class MqvpnEngine: NSObject {
         log.notice("[path] handle=\(h) \(tag, privacy: .public): rx receives=\(st.rx_receives) datagrams=\(st.rx_datagrams)")
     }
 
-    private func setupClient(_ server: ServerSettings, reorder: ReorderSettings, hybrid: HybridSettings) {
+    private func setupClient(_ server: ServerSettings, reorder: ReorderSettings, hybrid: HybridSettings,
+                             split: SplitSettings, protection: ProtectionSettings) {
         let cfg = mqvpn_config_new()
         mqvpn_config_set_server(cfg, server.host, Int32(server.port))
         // "" = unset: the core then uses server.host for SNI / cert verify,
@@ -226,6 +238,32 @@ final class MqvpnEngine: NSObject {
         }
         hybridConfigured = hybridOK
         log.notice("[hybrid] applied enabled=\(hybrid.enabled) mode=\(hybrid.tcpMode) configured=\(hybridOK)")
+        // Split: a nil scheduler is the legacy config (no scheduler / cc call,
+        // library defaults). Redundant fails closed on a malformed port list.
+        requestedScheduler = split.scheduler
+        var redundantActive = false
+        if split.redundantEnabled {
+            if split.redundantPortsMalformed {
+                log.warning("[split] redundant ports invalid — redundant disabled")
+            } else {
+                let rc = split.redundantPorts.withUnsafeBufferPointer {
+                    mqvpn_config_set_redundant(cfg, 1, $0.baseAddress, $0.count)
+                }
+                redundantActive = (rc == 0)
+                if rc != 0 { log.error("[split] set_redundant rc=\(rc)") }
+            }
+        }
+        if let sched = split.scheduler {
+            mqvpn_config_set_scheduler(cfg, mqvpn_scheduler_t(rawValue: UInt32(sched)))
+            mqvpn_config_set_request_server_scheduler(cfg, 1)
+        }
+        if split.scheduler != nil || redundantActive {
+            mqvpn_config_set_cc(cfg, redundantActive ? MQVPN_CC_BBR : MQVPN_CC_BBR2)
+        }
+        // Paired with the coordinator's reconnectEnabled: the core must never
+        // arm a reconnect the coordinator would cancel.
+        mqvpn_config_set_reconnect(cfg, protection.autoReconnect ? 1 : 0, 5)
+        log.notice("[split] applied scheduler=\(split.scheduler.map(String.init) ?? "legacy", privacy: .public) redundant=\(redundantActive) reconnect=\(protection.autoReconnect)")
         var cbs = mqvpn_client_callbacks_t()
         cbs.abi_version = UInt32(MQVPN_CALLBACKS_ABI_VERSION)
         cbs.struct_size = UInt32(MemoryLayout<mqvpn_client_callbacks_t>.size)
@@ -235,6 +273,7 @@ final class MqvpnEngine: NSObject {
         }
         cbs.tunnel_config_ready = { info, ctx in
             let engine = Unmanaged<MqvpnEngine>.fromOpaque(ctx!).takeUnretainedValue()
+            engine.latchTunnelInfo(info!.pointee)
             engine.onTunnelConfig?(info!.pointee)
         }
         cbs.tunnel_closed = { reason, ctx in
@@ -259,6 +298,36 @@ final class MqvpnEngine: NSObject {
         // the first path is registered (connectIfNeeded, same ordering as
         // the Android runtime: addPath -> setServerAddr -> connect).
         scheduleTick(afterMs: 0)
+    }
+
+    /// Tick thread (tunnel_config_ready). v6 and server-scheduler fields were
+    /// appended later: read them only when the library's struct_size covers
+    /// them.
+    private func latchTunnelInfo(_ info: mqvpn_tunnel_info_t) {
+        func covers<T>(_ kp: KeyPath<mqvpn_tunnel_info_t, T>) -> Bool {
+            guard let off = MemoryLayout<mqvpn_tunnel_info_t>.offset(of: kp) else { return false }
+            return Int(info.struct_size) >= off + MemoryLayout<T>.size
+        }
+        let v6 = covers(\.has_v6) && info.has_v6 != 0
+        let hasSched = covers(\.server_scheduler) && info.has_server_scheduler != 0
+        tunnelInfo = TunnelInfoSnapshot(
+            assignedIp: Self.ip4String(info.assigned_ip), prefix: Int32(info.assigned_prefix),
+            assignedIp6: v6 ? Self.ip6String(info.assigned_ip6) : nil,
+            prefix6: v6 ? Int32(info.assigned_prefix6) : 0, hasV6: v6, mtu: Int32(info.mtu),
+            serverScheduler: hasSched ? Int32(info.server_scheduler) : nil,
+            requestedScheduler: requestedScheduler)
+    }
+
+    static func ip4String(_ b: (UInt8, UInt8, UInt8, UInt8)) -> String {
+        "\(b.0).\(b.1).\(b.2).\(b.3)"
+    }
+
+    static func ip6String<T>(_ addr: T) -> String {
+        var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+        return withUnsafeBytes(of: addr) { raw in
+            inet_ntop(AF_INET6, raw.baseAddress, &buf, socklen_t(buf.count)) == nil
+                ? "" : String(cString: buf)
+        }
     }
 
     /// Called by PathBinder after the FIRST successful addPath
@@ -402,6 +471,17 @@ final class MqvpnEngine: NSObject {
         return Array(out.prefix(Int(n)))
     }
 
+    /// Tick-thread only. nil when the client is gone or the call fails.
+    func stats() -> StatsSnapshot? {
+        guard let c = client else { return nil }
+        var st = mqvpn_stats_t()
+        st.struct_size = UInt32(MemoryLayout<mqvpn_stats_t>.size)
+        guard mqvpn_client_get_stats(c, &st) == 0 else { return nil }
+        return StatsSnapshot(bytesTx: st.bytes_tx, bytesRx: st.bytes_rx,
+                             dgramSent: st.dgram_sent, dgramLost: st.dgram_lost,
+                             srttMs: Double(st.srtt_ms))
+    }
+
     /// Tick-thread only. nil when the ABI layout check failed (never misread)
     /// or the client is gone; else the current counters (get_reorder_stats
     /// always succeeds, zero-filled if RX absent).
@@ -414,6 +494,9 @@ final class MqvpnEngine: NSObject {
         return ReorderStatsSnapshot(
             delivered: st.delivered_count, gapCount: st.gap_count,
             gapFilled: st.gap_filled_count, gapTimeout: st.gap_timeout_count,
-            ackDemote: st.ack_demote_count, bufferedP50Ms: p50, bufferedP99Ms: p99)
+            ackDemote: st.ack_demote_count, bufferedP50Ms: p50, bufferedP99Ms: p99,
+            residenceBuckets: (0..<Int32(MQVPN_REORDER_LAT_BUCKETS)).map {
+                mqvpn_shim_reorder_bucket(&st, $0)
+            })
     }
 }
