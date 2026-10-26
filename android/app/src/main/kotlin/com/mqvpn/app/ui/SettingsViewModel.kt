@@ -65,8 +65,8 @@ class SettingsViewModel @Inject constructor(
     init {
         viewModelScope.launch {
             try {
-                repository.settings.collect {
-                    if (_draft.value == null) _draft.value = it
+                repository.settings.collect { loaded ->
+                    if (_draft.value == null) _draft.value = withRestoredAddress(loaded)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -81,6 +81,22 @@ class SettingsViewModel @Inject constructor(
                 landedGen.value = gen
             }
         }
+    }
+
+    /**
+     * Replays a restored in-progress address edit onto the freshly loaded settings:
+     * the box text survives process recreation (saved state) but a queued save may
+     * not have landed, and the box must never show one server while connect uses
+     * another. An unparsable restored text changes nothing (the draft keeps the
+     * stored server and [addressTextInvalid] blocks connect).
+     */
+    private fun withRestoredAddress(loaded: DemoSettings): DemoSettings {
+        val p = addressText.value?.let(ServerAddressField::parse) ?: return loaded
+        if (p.address == loaded.serverAddress && p.port == loaded.serverPort) return loaded
+        val d = loaded.copy(serverAddress = p.address, serverPort = p.port)
+        _fieldErrors.value = d.fieldErrors()
+        if (d.isValid()) queue.trySend(++requestedGen to d)
+        return d
     }
 
     private suspend fun persist(d: DemoSettings) {

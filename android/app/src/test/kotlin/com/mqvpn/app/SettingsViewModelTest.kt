@@ -235,4 +235,19 @@ class SettingsViewModelTest {
         assertEquals("vpn.example:abc", restored.addressText.value)
         assertTrue(restored.addressTextInvalid.value)
     }
+
+    @Test
+    fun `restored valid address text is replayed onto the loaded draft`() = runTest(testDispatcher) {
+        val restored = SettingsViewModel(
+            mockRepository, mockManager, SavedStateHandle(mapOf("address_text" to "new.example.com:9000")),
+        )
+        advanceUntilIdle()
+
+        assertEquals("new.example.com", restored.draft.value?.serverAddress)
+        assertEquals(9000, restored.draft.value?.serverPort)
+        assertFalse(restored.addressTextInvalid.value)
+        coVerify(exactly = 1) {
+            mockRepository.save(match { it.serverAddress == "new.example.com" && it.serverPort == 9000 })
+        }
+    }
 }
