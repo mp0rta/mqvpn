@@ -91,6 +91,11 @@ func runPureCases() -> Int {
             check(SplitSettings(providerConfiguration: ["redundantPorts": b]).redundantPortsMalformed, "malformed ports \(b)")
         }
         check(SplitSettings(providerConfiguration: ["redundantPorts": "80"]).redundantPortsMalformed, "ports not array")
+        let badDict: [String: Any] = ["redundantPorts": [NSNumber(value: 0)]]
+        var saved = badDict
+        SplitSettings(providerConfiguration: badDict).tapped(.throughput).merged(into: &saved)
+        check(SplitSettings(providerConfiguration: saved).redundantPortsMalformed, "malformed ports survive save")
+        check(SplitSettings(providerConfiguration: saved).scheduler == 1, "save still writes scheduler")
         let okp = SplitSettings(providerConfiguration: ["redundantPorts": [NSNumber(value: 80), NSNumber(value: 443)]])
         check(!okp.redundantPortsMalformed && okp.redundantPorts == [80, 443], "valid ports")
         // parse

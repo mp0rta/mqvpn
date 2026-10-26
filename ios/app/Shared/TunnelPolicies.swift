@@ -70,7 +70,8 @@ struct SplitSettings: Equatable {
     func merged(into dict: inout [String: Any]) {
         if let scheduler { dict[Key.scheduler] = NSNumber(value: scheduler) }
         dict[Key.enabled] = NSNumber(value: redundantEnabled)
-        dict[Key.ports] = redundantPorts.map { NSNumber(value: $0) }
+        // Malformed stored list is left as-is so the provider keeps failing closed.
+        if !redundantPortsMalformed { dict[Key.ports] = redundantPorts.map { NSNumber(value: $0) } }
     }
 
     /// All-or-nothing (Android rule): nil = invalid, blank = [] (all UDP).
