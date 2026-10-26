@@ -10,6 +10,7 @@ struct SetupScreen: View {
     @ObservedObject var availability: TransportAvailability
     let onDone: () -> Void
     @State private var step = 0
+    @State private var tried = false
     @State private var keyShown = false
     @State private var finishing = false
     @State private var finishError: String?
@@ -38,7 +39,7 @@ struct SetupScreen: View {
                     HStack(spacing: 10) {
                         SecondaryButton("Back") { step -= 1 }.frame(width: 90)
                         if step == 1 {
-                            PrimaryButton("Continue") { commitThen { if m.draft.server != nil { step = 2 } } }
+                            PrimaryButton("Continue") { commitThen { if m.draft.server != nil { step = 2 } else { tried = true } } }
                         } else {
                             PrimaryButton("Finish Setup") { finish(m) }.disabled(!s.paths.anyEnabled || finishing)
                         }
@@ -95,7 +96,7 @@ struct SetupScreen: View {
     }
 
     private func server(_ m: SettingsModel, _ s: AppDraft) -> some View {
-        let bad = !s.addressText.trimmingCharacters(in: .whitespaces).isEmpty && s.server == nil
+        let bad = (tried || !s.addressText.trimmingCharacters(in: .whitespaces).isEmpty) && s.server == nil
         return VStack(alignment: .leading, spacing: 16) {
             heading("Connect to your server")
             Text("Your server admin gives you these two values. On your own server, run mqvpn --genkey to create a key.")

@@ -352,6 +352,15 @@ elReal.ingest(evSnap([("en0", 1)]), now: t0)
 elReal.ingest(evSnap([("en0", 2)]), now: t0)
 check(countStatus(elReal) == 1, "genuine active->degraded transition still logged")
 
+// Core-state lines use Android's class names; 1->2->3 collapses to one line.
+// (EventLog.swift is host-test (macOS) only; not runnable on Linux.)
+let elNames = EventLog()
+for st in [Int32(1), 2, 3, 4, 5] { elNames.ingest(evSnap([], state: st), now: t0) }
+check(elNames.events.map { eventText($0.kind) } == ["core → Reconnecting", "core → Connected", "core → Connecting"],
+      "core-state labels use Android class names, deduped")
+check(eventText(.error("boom")) == "error: boom" && eventLevel(.error("boom")) == .error, "error event text/level")
+check(eventLevel(.coreState(5)) == .warn && eventLevel(.coreState(4)) == .info, "coreState level")
+
 // ── PathReadSource (the read-source chain) ─────────────────────────────────────────
 // A loopback UDP socket, a fake hop that queues closures for the "tick
 // thread" (this thread) and runs or refuses them on demand.

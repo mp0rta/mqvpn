@@ -63,9 +63,9 @@ struct StatsScreen: View {
         MqCard(vPad: 4) {
             VStack(spacing: 0) {
                 KvRow(key: "Session time", value: elapsedText(controller, vs) ?? "—")
-                KvRow(key: "Data received", value: fmtBytes(stats?.bytesRx ?? 0))
-                KvRow(key: "Data sent", value: fmtBytes(stats?.bytesTx ?? 0))
-                KvRow(key: "Latency", value: "\(Int((stats?.srttMs ?? 0).rounded())) ms")
+                KvRow(key: "Data received", value: stats.map { fmtBytes($0.bytesRx) } ?? "—")
+                KvRow(key: "Data sent", value: stats.map { fmtBytes($0.bytesTx) } ?? "—")
+                KvRow(key: "Latency", value: stats.map { "\(Int($0.srttMs.rounded())) ms" } ?? "—")
                 KvRow(key: "Packet loss", value: controller.dgramLoss.map { String(format: "%.1f%%", $0 * 100) } ?? "—", last: true)
             }
         }

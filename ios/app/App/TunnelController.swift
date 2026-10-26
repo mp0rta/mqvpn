@@ -9,8 +9,7 @@ enum ManagerState: Equatable { case loading, loadFailed(String), absent, loaded 
 /// Container controller: load/create the one NETunnelProviderManager,
 /// start/stop it, persist the settings draft, and — while foregrounded and
 /// connected — poll the provider for a status snapshot over
-/// `sendProviderMessage`. Per-path transfer rates are derived here from
-/// consecutive snapshots; the 30 s histories are fed from the provider's
+/// `sendProviderMessage`. The 30 s histories are fed from the provider's
 /// sample ring.
 @MainActor
 final class TunnelController: ObservableObject {
@@ -22,13 +21,8 @@ final class TunnelController: ObservableObject {
     @Published var status: NEVPNStatus = .invalid
     @Published var statusText = "not loaded"
     @Published var snapshot: TunnelSnapshot?       // nil = no data
-    @Published var pathRates: [String: Double] = [:]   // iface name -> Mbps
-    @Published var reorderSettings: ReorderSettings = .disabled
-    @Published var hybridSettings = HybridSettings.disabled
-    @Published var splitSettings = SplitSettings(providerConfiguration: nil)
-    @Published var protectionSettings = ProtectionSettings()
-    @Published var pathPolicy = PathPolicy()
-    @Published var serverSettings: ServerSettings?   // nil = unset/corrupt → Connect disabled
+    /// Last surfaced error (disconnect / start / save); nil once statusText resets.
+    @Published var surfacedError: String?
     @Published var configError: String?              // separate from statusText (updateStatus overwrites)
     @Published private(set) var isSaving = false
     /// Upload DATAGRAM loss over the last 30 s; nil = no data.
@@ -46,7 +40,6 @@ final class TunnelController: ObservableObject {
 
     /// Epoch, seq/timestamp baselines and sample cursor (pure, tested).
     private var ingestState = SnapshotIngestState()
-    private var prevSnapshot: TunnelSnapshot?
     private var manager: NETunnelProviderManager?
     private var observer: NSObjectProtocol?
     private var pollTimer: Timer?
@@ -78,12 +71,12 @@ final class TunnelController: ObservableObject {
 
     func loadOrCreateManager() async {
         state = .loading
+        var serverSettings: ServerSettings?   // nil = unset/corrupt
         do {
             let existing = try await NETunnelProviderManager.loadAllFromPreferences()
             guard let m = existing.first else {
                 // No manager yet: it is created by the first persist (never here).
                 manager = nil
-                serverSettings = nil
                 settings.load(initial: AppDraft(), persisted: false)
                 state = .absent
                 return
@@ -107,7 +100,6 @@ final class TunnelController: ObservableObject {
                 }
             }
             manager = m
-            adoptPublished(from: pc)
             settings.load(initial: Self.draft(from: pc, server: serverSettings), persisted: true)
             attachObserver(to: m)
             state = .loaded
@@ -116,14 +108,6 @@ final class TunnelController: ObservableObject {
             statusText = "load error: \(error.localizedDescription)"
             state = .loadFailed(error.localizedDescription)
         }
-    }
-
-    private func adoptPublished(from pc: [String: Any]?) {
-        reorderSettings = ReorderSettings(providerConfiguration: pc) ?? .disabled
-        hybridSettings = HybridSettings(providerConfiguration: pc) ?? .disabled
-        splitSettings = SplitSettings(providerConfiguration: pc)
-        protectionSettings = ProtectionSettings(providerConfiguration: pc)
-        pathPolicy = PathPolicy(providerConfiguration: pc)
     }
 
     static func draft(from pc: [String: Any]?, server: ServerSettings?) -> AppDraft {
@@ -165,6 +149,7 @@ final class TunnelController: ObservableObject {
         let wasUp = Self.isUp(status)
         status = s
         statusText = Self.describe(s)
+        if s != .disconnected { surfacedError = nil }
         if s == .disconnected { surfaceDisconnectError() }
         if wasUp && !Self.isUp(s) {          // up -> down session boundary
             ingestState.sessionEnded()
@@ -183,7 +168,7 @@ final class TunnelController: ObservableObject {
             guard let err else { return }
             Task { @MainActor in
                 guard let self, self.status == .disconnected else { return }
-                self.statusText = "disconnected: \(err.localizedDescription)"
+                self.statusText = "disconnected: \(err.localizedDescription)"; self.surfacedError = err.localizedDescription
                 self.eventLog.logError(err.localizedDescription)
             }
         }
@@ -194,14 +179,16 @@ final class TunnelController: ObservableObject {
         guard isConnectable else { return }
         Task { @MainActor in
             guard await settings.flush() else {
-                statusText = "save error: \(settings.saveError ?? "settings not saved")"
+                let m = "save error: \(settings.saveError ?? "settings not saved")"
+                statusText = m; surfacedError = m
                 return
             }
             guard isConnectable, let manager else { return }
             do {
                 try manager.connection.startVPNTunnel()
             } catch {
-                statusText = "start error: \(error.localizedDescription)"
+                let m = "start error: \(error.localizedDescription)"
+                statusText = m; surfacedError = m
                 eventLog.logError(error.localizedDescription)
             }
         }
@@ -274,8 +261,6 @@ final class TunnelController: ObservableObject {
             throw error
         }
         PSKStore.delete(oldRef)
-        serverSettings = server; reorderSettings = reorder; hybridSettings = hybrid
-        splitSettings = split; protectionSettings = d.protection; pathPolicy = d.paths
         configError = nil   // only on success
         if creating {
             manager = m
@@ -309,7 +294,7 @@ final class TunnelController: ObservableObject {
     private func startPolling() {
         guard pollTimer == nil else { return }
         poll()   // immediate first sample
-        let t = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+        let t = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
         }
         pollTimer = t
@@ -322,8 +307,6 @@ final class TunnelController: ObservableObject {
 
     private func clearSnapshot() {
         snapshot = nil
-        pathRates = [:]
-        prevSnapshot = nil
         ingestState.clear()
         clearHistories()
         eventLog.resetBaseline()
@@ -353,7 +336,7 @@ final class TunnelController: ObservableObject {
                                                    snapshot: snap) {
                     case .drop: return
                     case .ingest(let fresh, let reset, _):
-                        if reset { self.prevSnapshot = nil; self.clearHistories() }
+                        if reset { self.clearHistories() }
                         self.ingest(snap, fresh: fresh)
                     }
                 }
@@ -361,8 +344,7 @@ final class TunnelController: ObservableObject {
         } catch { /* transient; keep the current snapshot */ }
     }
 
-    /// Feed fresh ring samples to the histories, compute per-path rates from the
-    /// previous snapshot, then publish.
+    /// Feed fresh ring samples to the histories, then publish.
     private func ingest(_ snap: TunnelSnapshot, fresh: [TunnelSample]) {
         for s in fresh {
             let wall = Int64(s.wallMs)
@@ -376,25 +358,6 @@ final class TunnelController: ObservableObject {
             dgramLoss = dgramLossWindow.onTick(sent: s.dgramSent, lost: s.dgramLost, wallMs: wall)
         }
         if !fresh.isEmpty { historyVersion += 1 }
-        if let prev = prevSnapshot {
-            let dt = snap.timestamp - prev.timestamp
-            if dt > 0.05 {
-                var prevByName: [String: PathSnapshot] = [:]
-                for pp in prev.paths { prevByName[pp.name] = pp }
-                var rates: [String: Double] = [:]
-                for p in snap.paths {
-                    guard let pp = prevByName[p.name] else { continue }
-                    // Double avoids UInt64 wrap; a counter reset (path re-add)
-                    // yields a negative delta which we clamp to 0.
-                    let curBytes = Double(p.txBytes) + Double(p.rxBytes)
-                    let oldBytes = Double(pp.txBytes) + Double(pp.rxBytes)
-                    let delta = curBytes - oldBytes
-                    rates[p.name] = delta > 0 ? delta * 8.0 / dt / 1_000_000.0 : 0.0
-                }
-                pathRates = rates
-            }
-        }
-        prevSnapshot = snap
         snapshot = snap
         eventLog.ingest(snap)
     }

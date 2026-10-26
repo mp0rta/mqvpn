@@ -51,14 +51,15 @@ final class SnapshotCache {
     /// only those newer than request.sinceSeq.
     func read(request: (sinceSeq: UInt64, bootId: UInt64)?) -> Data? {
         lock.lock()
-        defer { lock.unlock() }
-        guard let l = latest else { return nil }
+        guard let l = latest else { lock.unlock(); return nil }
         let since: UInt64? = (request?.bootId == bootId) ? request?.sinceSeq : nil
+        let samples = ring.since(since)
+        lock.unlock()
         let snap = TunnelSnapshot(
             timestamp: l.timestamp, clientState: l.clientState,
             connectedSince: l.connectedSince, footprint: l.footprint, paths: l.paths,
             seq: l.seq, reorderConfigured: l.reorderConfigured, reorder: l.reorder,
-            tunnel: l.tunnel, stats: l.stats, samples: ring.since(since), bootId: bootId)
+            tunnel: l.tunnel, stats: l.stats, samples: samples, bootId: bootId)
         return try? ProviderMessage.encode(snap)
     }
 

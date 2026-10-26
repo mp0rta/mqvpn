@@ -116,7 +116,7 @@ struct HomeScreen: View {
                 KvRow(key: "VPN address", value: info?.assignedIp ?? "—")
                 if let v6 = info?.assignedIp6 { KvRow(key: "IPv6 address", value: v6) }
                 KvRow(key: "How traffic is split", value: Self.splitLabel(controller.draft.split.choice), tick: applied)
-                KvRow(key: "Ping", value: "\(Int((controller.snapshot?.stats?.srttMs ?? 0).rounded())) ms")
+                KvRow(key: "Ping", value: controller.snapshot?.stats.map { "\(Int($0.srttMs.rounded())) ms" } ?? "—")
                 KvRow(key: "MTU", value: info.map { fmtInt($0.mtu) } ?? "—", last: true)
             }
         }.padding(.top, 10)

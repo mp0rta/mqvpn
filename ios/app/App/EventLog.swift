@@ -31,13 +31,14 @@ final class EventLog: ObservableObject {
     @Published private(set) var events: [LogEvent] = []
     private let capacity = 20
     private var prevPaths: [String: Int32] = [:]   // name -> status raw
-    private var prevState: Int32?
+    private var prevState: String?
 
     func ingest(_ snap: TunnelSnapshot, now: Date = Date()) {
         // (c) core state change
-        if prevState != snap.clientState {
+        let label = clientStateName(snap.clientState)   // Android class names: 1->2->3 is one line
+        if prevState != label {
             append(LogEvent(time: now, kind: .coreState(snap.clientState)))
-            prevState = snap.clientState
+            prevState = label
         }
         // Diff LIVE paths only. After a reconnect the core can transiently
         // return a stale CLOSED slot (mqvpn_path_status_t CLOSED = 4) next to
@@ -90,13 +91,10 @@ final class EventLog: ObservableObject {
 
 func clientStateName(_ s: Int32) -> String {
     switch s {
-    case 0: return "IDLE"
-    case 1: return "CONNECTING"
-    case 2: return "AUTHENTICATING"
-    case 3: return "TUNNEL_READY"
-    case 4: return "ESTABLISHED"
-    case 5: return "RECONNECTING"
-    case 6: return "CLOSED"
+    case 0, 6: return "Disconnected"
+    case 1, 2, 3: return "Connecting"
+    case 4: return "Connected"
+    case 5: return "Reconnecting"
     default: return "?(\(s))"
     }
 }

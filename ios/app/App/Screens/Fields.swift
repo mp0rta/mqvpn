@@ -88,9 +88,12 @@ func endEditing() {
 }
 
 /// Grouped number with thousands separators (Android "%,d").
-func fmtInt<T: BinaryInteger>(_ v: T) -> String {
+private let intFormatter: NumberFormatter = {
     let f = NumberFormatter(); f.numberStyle = .decimal; f.locale = Locale(identifier: "en_US")
-    return f.string(from: NSNumber(value: Int64(v))) ?? "\(v)"
+    return f
+}()
+func fmtInt<T: BinaryInteger>(_ v: T) -> String {
+    intFormatter.string(from: NSNumber(value: Int64(v))) ?? "\(v)"
 }
 
 /// Session seconds from provider-clock fields; nil while reconnecting / no data.
@@ -100,10 +103,7 @@ func elapsedText(_ c: TunnelController, _ vs: VpnViewState) -> String? {
 }
 
 func viewState(_ c: TunnelController) -> VpnViewState {
-    let t = c.statusText
-    let err: String? = t.hasPrefix("disconnected: ") ? String(t.dropFirst("disconnected: ".count))
-        : (t.hasPrefix("start error") || t.hasPrefix("save error") ? t : nil)
-    return deriveViewState(neStatus: c.status.rawValue, clientState: c.snapshot?.clientState, surfacedError: err)
+    deriveViewState(neStatus: c.status.rawValue, clientState: c.snapshot?.clientState, surfacedError: c.surfacedError)
 }
 
 extension TunnelController {
