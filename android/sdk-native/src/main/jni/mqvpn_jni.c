@@ -1412,6 +1412,8 @@ JNI_FN(getReorderStats)(JNIEnv *env, jobject thiz, jlong client)
         (jlong)st.ack_demote_count, (jlong)(p50 + 0.5),
         (jlong)(p99 + 0.5),
     };
+    _Static_assert(MQVPN_REORDER_LAT_BUCKETS == 12,
+                   "bucket count changed: update this array and the Kotlin decoder");
     for (int i = 0; i < 12; i++)
         values[7 + i] = (jlong)st.residence_bucket[i];
     jlongArray arr = (*env)->NewLongArray(env, 19);

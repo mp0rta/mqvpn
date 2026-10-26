@@ -61,8 +61,10 @@ fun ReorderRateCard(history: ReorderHistoryState, nowMs: Long, modifier: Modifie
             drawGrid(mq)
             val barW = (size.width / 30f * 0.6f)
             chart.bars.forEach { b ->
-                drawRect(mq.green, Offset(b.x - barW / 2, size.height - b.greenH), Size(barW, b.greenH))
-                drawRect(mq.red, Offset(b.x - barW / 2, size.height - b.greenH - b.redH), Size(barW, b.redH))
+                // Samples at the window edges (x = 0 or width) stay fully on the canvas.
+                val x = b.x.coerceIn(barW / 2, size.width - barW / 2)
+                drawRect(mq.green, Offset(x - barW / 2, size.height - b.greenH), Size(barW, b.greenH))
+                drawRect(mq.red, Offset(x - barW / 2, size.height - b.greenH - b.redH), Size(barW, b.redH))
             }
             drawText(measurer.measure(chart.yMaxLabel, axisStyle(mq)), topLeft = Offset(4.dp.toPx(), 0f))
         }
@@ -83,8 +85,9 @@ fun BufferWaitCard(history: ReorderHistoryState, nowMs: Long, modifier: Modifier
             // a p50|p99 pair around the sample's x.
             val barW = (size.width / 30f * 0.3f)
             chart.bars.forEach { b ->
-                b.h0?.let { drawRect(mq.accent, Offset(b.x - barW, size.height - it), Size(barW, it)) }
-                b.h1?.let { drawRect(mq.orange, Offset(b.x, size.height - it), Size(barW, it)) }
+                val x = b.x.coerceIn(barW, size.width - barW)
+                b.h0?.let { drawRect(mq.accent, Offset(x - barW, size.height - it), Size(barW, it)) }
+                b.h1?.let { drawRect(mq.orange, Offset(x, size.height - it), Size(barW, it)) }
             }
             drawText(measurer.measure(chart.yMaxLabel, axisStyle(mq)), topLeft = Offset(4.dp.toPx(), 0f))
         }
