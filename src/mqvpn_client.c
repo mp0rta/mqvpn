@@ -272,6 +272,9 @@ struct mqvpn_client_s {
      * mqvpn_conn_settings.h. Independent of the transport's own GSO capability:
      * a bind without GSO still batches its writes. */
     int tx_batch;
+    /* 1 once the BBR2 flag set has been logged; reconnects rebuild the same
+     * settings and need not repeat it. */
+    int bbr2_flags_logged;
 
     /* Multipath (Level 1) */
     path_entry_t paths[MQVPN_MAX_PATHS];
@@ -2949,8 +2952,20 @@ cli_start_connection(mqvpn_client_t *c)
         /* set by init_xquic_engine, which runs in mqvpn_client_new() before
          * any cli_start_connection() — connect and reconnect alike */
         .defer_send_flush = (c->tx_batch != 0),
+        .disable_bbr2_fast_convergence = (c->config.bbr2_fast_convergence == 0),
+        .disable_bbr2_rttvar_compensation = (c->config.bbr2_rttvar_compensation == 0),
     };
     mqvpn_build_conn_settings(&cs_input, &cs);
+    /* Read back from the built settings, so this is the flag set xquic is
+     * handed. The "bbr2 flags: " line is byte-identical on both endpoints. */
+    if (!c->bbr2_flags_logged &&
+        cs.cong_ctrl_callback.xqc_cong_ctl_init == xqc_bbr2_cb.xqc_cong_ctl_init) {
+        uint32_t f = cs.cc_params.cc_optimization_flags;
+        LOG_I(c, "bbr2 flags: fast_convergence=%s rttvar_compensation=%s",
+              (f & XQC_BBR2_FLAG_FAST_CONVERGENCE) ? "on" : "off",
+              (f & XQC_BBR2_FLAG_RTTVAR_COMPENSATION) ? "on" : "off");
+        c->bbr2_flags_logged = 1;
+    }
 
     if (c->config.reinjection == MQVPN_REINJ_DEADLINE) {
         /* Read back from the just-built cs, not the raw config: this

@@ -258,6 +258,79 @@ test_parse_cc_json(void)
     ASSERT_EQ_STR(cfg.cc, "cubic", "cc cubic from JSON");
 }
 
+/* [Multipath] Bbr2FastConvergence / Bbr2RttvarCompensation: default ON (the
+ * flags mqvpn has always set), each switchable off on its own, on/off
+ * spelling accepted, JSON flat at top level like the other [Multipath] keys. */
+static void
+test_parse_bbr2_flags(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 1, "Bbr2FastConvergence defaults on");
+    ASSERT_EQ_INT(cfg.bbr2_rttvar_compensation, 1, "Bbr2RttvarCompensation defaults on");
+
+    /* A file that never names the keys keeps them on. */
+    char *p = write_tmp("[Multipath]\nCC = bbr2\n");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "bbr2 flags absent load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 1, "Bbr2FastConvergence absent stays on");
+    ASSERT_EQ_INT(cfg.bbr2_rttvar_compensation, 1,
+                  "Bbr2RttvarCompensation absent stays on");
+
+    const char *spellings_off[] = {"false", "no", "0", "off"};
+    for (size_t i = 0; i < sizeof(spellings_off) / sizeof(spellings_off[0]); i++) {
+        char ini[128];
+        snprintf(ini, sizeof(ini), "[Multipath]\nBbr2FastConvergence = %s\n",
+                 spellings_off[i]);
+        p = write_tmp(ini);
+        mqvpn_config_defaults(&cfg);
+        ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "Bbr2FastConvergence off load ok");
+        unlink(p);
+        ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 0, spellings_off[i]);
+        /* independent: the other flag is untouched */
+        ASSERT_EQ_INT(cfg.bbr2_rttvar_compensation, 1, "rttvar untouched by fastconv");
+    }
+
+    p = write_tmp("[Multipath]\nBbr2RttvarCompensation = off\n");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "Bbr2RttvarCompensation off load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.bbr2_rttvar_compensation, 0, "ini Bbr2RttvarCompensation=off");
+    ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 1, "fastconv untouched by rttvar");
+
+    const char *spellings_on[] = {"true", "yes", "1", "on"};
+    for (size_t i = 0; i < sizeof(spellings_on) / sizeof(spellings_on[0]); i++) {
+        char ini[160];
+        snprintf(ini, sizeof(ini),
+                 "[Multipath]\nBbr2FastConvergence = %s\nBbr2RttvarCompensation = %s\n",
+                 spellings_on[i], spellings_on[i]);
+        p = write_tmp(ini);
+        mqvpn_config_defaults(&cfg);
+        cfg.bbr2_fast_convergence = 0;
+        cfg.bbr2_rttvar_compensation = 0;
+        ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "bbr2 flags on load ok");
+        unlink(p);
+        ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 1, spellings_on[i]);
+        ASSERT_EQ_INT(cfg.bbr2_rttvar_compensation, 1, spellings_on[i]);
+    }
+
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg,
+                                                 "{\"bbr2_fast_convergence\": false,"
+                                                 " \"bbr2_rttvar_compensation\": true}"),
+                  0, "bbr2 flags json load ok");
+    ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 0, "json bbr2_fast_convergence=false");
+    ASSERT_EQ_INT(cfg.bbr2_rttvar_compensation, 1, "json bbr2_rttvar_compensation=true");
+
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(
+        mqvpn_config_load_json_filecfg(&cfg, "{\"bbr2_rttvar_compensation\": false}"), 0,
+        "bbr2 rttvar json load ok");
+    ASSERT_EQ_INT(cfg.bbr2_rttvar_compensation, 0, "json bbr2_rttvar_compensation=false");
+    ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 1, "json fastconv absent stays on");
+}
+
 static void
 test_parse_init_max_path_id_bounds(void)
 {
@@ -2825,6 +2898,7 @@ main(void)
     test_parse_scheduler_wlb_udp_pin();
     test_parse_cc_ini();
     test_parse_cc_json();
+    test_parse_bbr2_flags();
     test_parse_init_max_path_id_bounds();
     test_parse_init_max_path_id_json_bounds();
     test_comments_whitespace();

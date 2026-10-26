@@ -253,6 +253,66 @@ TEST(server_user_name_length)
     mqvpn_server_destroy(s);
 }
 
+/* The server announces the BBR2 flag set it handed xquic, read back from the
+ * built settings, so the line proves the config -> conn-settings input
+ * wiring on this endpoint. Same text as the client's line. */
+static int g_bbr2_lines = 0;
+static char g_bbr2_line[160];
+
+static void
+bbr2_flags_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
+{
+    (void)user_ctx;
+    const char *p = strstr(msg, "bbr2 flags: ");
+    if (!p || level != MQVPN_LOG_INFO) return;
+    g_bbr2_lines++;
+    snprintf(g_bbr2_line, sizeof(g_bbr2_line), "%s", p);
+}
+
+static int
+server_bbr2_flags_logged_for(int fast_convergence, int rttvar_compensation,
+                             const char *want)
+{
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_config_set_log_level(cfg, MQVPN_LOG_INFO);
+    if (fast_convergence >= 0)
+        mqvpn_config_set_bbr2_fast_convergence(cfg, fast_convergence);
+    if (rttvar_compensation >= 0)
+        mqvpn_config_set_bbr2_rttvar_compensation(cfg, rttvar_compensation);
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    cbs.log = bbr2_flags_log;
+
+    g_bbr2_lines = 0;
+    g_bbr2_line[0] = '\0';
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    if (!s) return 0;
+    int ok = g_bbr2_lines == 1 && strcmp(g_bbr2_line, want) == 0;
+    if (!ok)
+        fprintf(stderr, "    bbr2 flags: lines=%d got='%s' want='%s'\n", g_bbr2_lines,
+                g_bbr2_line, want);
+    mqvpn_server_destroy(s);
+    return ok;
+}
+
+TEST(server_logs_bbr2_flags)
+{
+    ASSERT_EQ(server_bbr2_flags_logged_for(
+                  -1, -1, "bbr2 flags: fast_convergence=on rttvar_compensation=on"),
+              1);
+    ASSERT_EQ(server_bbr2_flags_logged_for(
+                  0, -1, "bbr2 flags: fast_convergence=off rttvar_compensation=on"),
+              1);
+    ASSERT_EQ(server_bbr2_flags_logged_for(
+                  -1, 0, "bbr2 flags: fast_convergence=on rttvar_compensation=off"),
+              1);
+    ASSERT_EQ(server_bbr2_flags_logged_for(
+                  0, 0, "bbr2 flags: fast_convergence=off rttvar_compensation=off"),
+              1);
+}
+
 TEST(server_egress_fd_budget)
 {
     reset_mocks();
@@ -2545,6 +2605,7 @@ main(void)
     run_server_new_destroy();
     run_server_destroy_null();
     run_server_user_name_length();
+    run_server_logs_bbr2_flags();
     run_server_egress_fd_budget();
     run_sched_refusal_reason();
 

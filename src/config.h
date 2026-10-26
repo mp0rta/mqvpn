@@ -81,6 +81,13 @@ typedef struct mqvpn_file_config_s {
     /* draft-21 §4.6 initial Maximum Path Identifier TP, 0 = use xquic default 8 */
     unsigned long long init_max_path_id;
 
+    /* [Multipath] Bbr2FastConvergence / Bbr2RttvarCompensation — xquic's two
+     * BBRv2 extensions that mqvpn has always enabled. 1 (default) = enabled,
+     * unchanged; 0 = standard BBRv2 behaviour for that aspect. Ignored
+     * unless CC is bbr2. */
+    int bbr2_fast_convergence;
+    int bbr2_rttvar_compensation;
+
     /* [Interface] — client reconnection */
     int reconnect;          /* 1=auto-reconnect (default), 0=exit on disconnect */
     int reconnect_interval; /* base interval in seconds (default 5) */

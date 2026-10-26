@@ -33,6 +33,8 @@ typedef struct mqvpn_client_cfg_s {
     int kill_switch;            /* 1=block traffic outside tunnel (default 0) */
     int manage_routes; /* 1=manage host routes (default 1), 0=skip routing setup */
     uint64_t init_max_path_id;         /* draft-21 §4.6 TP cap, 0=use xquic default 8 */
+    int bbr2_fast_convergence;         /* [Multipath] Bbr2FastConvergence; default 1 */
+    int bbr2_rttvar_compensation;      /* [Multipath] Bbr2RttvarCompensation; default 1 */
     int tun_mtu;                       /* 0=auto (MSS-derived), >0=cap (floor 1280) */
     int path_mtu;                      /* 0=default packet size, >0=underlay MTU */
     int pmtud;                         /* 1=discover the path MTU, path_mtu is the cap */

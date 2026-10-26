@@ -212,6 +212,8 @@ In JSON, use `auth_key` on both client and server (as in the examples above).
 | `CC` | Congestion control algorithm (`bbr2`, `bbr`, `cubic`, or `none`) | `bbr2` |
 | `Path` | Network interface to bind (repeatable) | Default interface |
 | `InitMaxPathId` | MP-QUIC draft-21 test knob: initial Maximum Path Identifier advertised in transport parameters (`1`–`4294967295`; `0` = xquic default `8`) | `0` |
+| `Bbr2FastConvergence` | With `CC = bbr2`, enables xquic's BBRv2 fast-convergence extension, which also advances the max-bandwidth filter whenever a round's smoothed RTT exceeds the previous round's by a quarter and probes for bandwidth every 5 to 8 round trips instead of every 2 to 3 seconds; `off` gives standard BBRv2 behaviour (`on`/`off`; ignored for other `CC` values) | `on` |
+| `Bbr2RttvarCompensation` | With `CC = bbr2`, enables xquic's BBRv2 extension that adds congestion-window headroom for recent RTT variation; `off` gives standard BBRv2 cwnd sizing (`on`/`off`; ignored for other `CC` values) | `on` |
 | `Reinjection` | Speculative duplication mode (`off`, `deadline`, or `idle`). `dgram` is no longer supported; a config file that sets it gets a warning and runs with `off`. Use redundant mode (`Redundant = on`) to duplicate packets. | `off` |
 | `ReinjectionSrttFactorPct` | `deadline` mode: duplicate unacked packets older than factor × min_srtt, in percent (`100`–`1000`) | `110` |
 | `ReinjectionHardDeadlineMs` | `deadline` mode: upper clamp on the duplication deadline (`1`–`60000`) | `500` |

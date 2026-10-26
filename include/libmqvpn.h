@@ -688,6 +688,22 @@ MQVPN_API int mqvpn_config_set_killswitch_hint(mqvpn_config_t *cfg, int enable);
  * values are 1..MQVPN_INIT_MAX_PATH_ID_MAX. Set lower (e.g. 2) to
  * deterministically trigger G-P16 PATHS_BLOCKED. */
 MQVPN_API int mqvpn_config_set_init_max_path_id(mqvpn_config_t *cfg, uint64_t v);
+
+/* [Multipath] Bbr2FastConvergence. Non-zero (default) enables xquic's BBRv2
+ * fast-convergence extension: in PROBE_BW cruise and down the max-bandwidth
+ * filter also advances whenever a round's smoothed RTT exceeds the previous
+ * round's by a quarter, probing is gated on an extra RTT-check round, and
+ * the wall-clock wait between bandwidth probes is not applied. 0 gives
+ * standard BBRv2 behaviour for all three. Ignored unless the congestion
+ * controller is BBR2. */
+MQVPN_API int mqvpn_config_set_bbr2_fast_convergence(mqvpn_config_t *cfg, int on);
+
+/* [Multipath] Bbr2RttvarCompensation. Non-zero (default) enables xquic's
+ * BBRv2 extension that adds congestion-window headroom for the windowed RTT
+ * variation. 0 gives standard BBRv2 cwnd sizing. Ignored unless the
+ * congestion controller is BBR2. */
+MQVPN_API int mqvpn_config_set_bbr2_rttvar_compensation(mqvpn_config_t *cfg, int on);
+
 /* TUN MTU cap: 0 = auto (MSS-derived), 1280..9000 = upper bound. */
 MQVPN_API int mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu);
 /* Underlay path MTU the outer QUIC packets are sized for: 0 = default

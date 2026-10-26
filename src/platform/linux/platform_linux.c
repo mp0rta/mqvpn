@@ -1185,6 +1185,8 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
                                                  cfg->reinj_hard_deadline_ms,
                                                  cfg->reinj_deadline_lower_bound_ms);
     mqvpn_config_set_init_max_path_id(lib_cfg, cfg->init_max_path_id);
+    mqvpn_config_set_bbr2_fast_convergence(lib_cfg, cfg->bbr2_fast_convergence);
+    mqvpn_config_set_bbr2_rttvar_compensation(lib_cfg, cfg->bbr2_rttvar_compensation);
     mqvpn_config_set_tun_mtu(lib_cfg, cfg->tun_mtu);
     mqvpn_config_set_path_mtu(lib_cfg, cfg->path_mtu);
     mqvpn_config_set_pmtud(lib_cfg, cfg->pmtud);

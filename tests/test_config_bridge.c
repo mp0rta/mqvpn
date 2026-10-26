@@ -73,6 +73,8 @@ test_all_fields_forwarded(void)
     cfg.redundant_ports[0] = 4200;
     cfg.n_redundant_ports = 1;
     cfg.init_max_path_id = 17;
+    cfg.bbr2_fast_convergence = 0;    /* library default is 1 */
+    cfg.bbr2_rttvar_compensation = 0; /* library default is 1 */
     cfg.tun_mtu = 1400;
     cfg.path_mtu = 1492;
     cfg.pmtud = 1;
@@ -110,6 +112,8 @@ test_all_fields_forwarded(void)
     ASSERT_EQ_INT(lc->n_redundant_ports, 1, "n_redundant_ports");
     ASSERT_EQ_INT(lc->redundant_ports[0], 4200, "redundant_ports[0]");
     ASSERT_EQ_INT(lc->init_max_path_id, 17, "init_max_path_id");
+    ASSERT_EQ_INT(lc->bbr2_fast_convergence, 0, "bbr2_fast_convergence");
+    ASSERT_EQ_INT(lc->bbr2_rttvar_compensation, 0, "bbr2_rttvar_compensation");
     ASSERT_EQ_INT(lc->tun_mtu, 1400, "tun_mtu");
     ASSERT_EQ_INT(lc->path_mtu, 1492, "path_mtu");
     ASSERT_EQ_INT(lc->pmtud, 1, "pmtud");

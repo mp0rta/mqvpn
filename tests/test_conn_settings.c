@@ -503,6 +503,52 @@ test_stream_unsent_cap_both_sides(void)
     return 0;
 }
 
+/* The two BBR2 optimisation flags are independent opt-outs. A zeroed input
+ * keeps both set (the long-standing behaviour); each disable clears exactly
+ * its own bit, on both endpoints, and never leaks onto another CC. */
+static int
+test_bbr2_flag_opt_outs(void)
+{
+    const uint32_t both =
+        XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
+
+    for (int side = 0; side < 2; side++) {
+        xqc_conn_settings_t cs;
+        mqvpn_conn_settings_input_t in = {
+            .is_server = (side == 1),
+            .enable_multipath = true,
+            .scheduler = MQVPN_SCHED_WLB,
+            .cc = MQVPN_CC_BBR2,
+        };
+
+        mqvpn_build_conn_settings(&in, &cs);
+        ASSERT_EQ(cs.cc_params.cc_optimization_flags, both);
+
+        in.disable_bbr2_fast_convergence = true;
+        mqvpn_build_conn_settings(&in, &cs);
+        ASSERT_EQ(cs.cc_params.cc_optimization_flags, XQC_BBR2_FLAG_RTTVAR_COMPENSATION);
+
+        in.disable_bbr2_fast_convergence = false;
+        in.disable_bbr2_rttvar_compensation = true;
+        mqvpn_build_conn_settings(&in, &cs);
+        ASSERT_EQ(cs.cc_params.cc_optimization_flags, XQC_BBR2_FLAG_FAST_CONVERGENCE);
+
+        in.disable_bbr2_fast_convergence = true;
+        mqvpn_build_conn_settings(&in, &cs);
+        ASSERT_EQ(cs.cc_params.cc_optimization_flags, 0);
+        ASSERT_PTR_EQ(cs.cong_ctrl_callback.xqc_cong_ctl_init,
+                      xqc_bbr2_cb.xqc_cong_ctl_init);
+
+        /* Inert on any other congestion controller. */
+        in.disable_bbr2_fast_convergence = false;
+        in.disable_bbr2_rttvar_compensation = false;
+        in.cc = MQVPN_CC_CUBIC;
+        mqvpn_build_conn_settings(&in, &cs);
+        ASSERT_EQ(cs.cc_params.cc_optimization_flags, 0);
+    }
+    return 0;
+}
+
 int
 main(void)
 {
@@ -511,6 +557,7 @@ main(void)
     failed += test_defer_flush_tracks_batch_registration();
     failed += test_propagation_scheduler();
     failed += test_propagation_cc();
+    failed += test_bbr2_flag_opt_outs();
     failed += test_propagation_init_max_path_id();
     failed += test_path_mtu_sizes_packets();
     failed += test_pmtud_sizes();

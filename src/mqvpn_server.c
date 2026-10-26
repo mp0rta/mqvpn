@@ -2290,8 +2290,20 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         /* set by the batched-send registration a few lines above; 0 on
          * non-Linux, where that block is compiled out entirely */
         .defer_send_flush = (s->tx_batch != 0),
+        .disable_bbr2_fast_convergence = (s->config.bbr2_fast_convergence == 0),
+        .disable_bbr2_rttvar_compensation = (s->config.bbr2_rttvar_compensation == 0),
     };
     mqvpn_build_conn_settings(&cs_input, &conn_settings);
+    /* Read back from the built settings, so this is the flag set xquic is
+     * handed (xqc_server_set_conn_settings copies cc_params whole). The
+     * "bbr2 flags: " line is byte-identical on both endpoints. */
+    if (conn_settings.cong_ctrl_callback.xqc_cong_ctl_init ==
+        xqc_bbr2_cb.xqc_cong_ctl_init) {
+        uint32_t f = conn_settings.cc_params.cc_optimization_flags;
+        LOG_I(s, "bbr2 flags: fast_convergence=%s rttvar_compensation=%s",
+              (f & XQC_BBR2_FLAG_FAST_CONVERGENCE) ? "on" : "off",
+              (f & XQC_BBR2_FLAG_RTTVAR_COMPENSATION) ? "on" : "off");
+    }
     xqc_server_set_conn_settings(s->engine, &conn_settings);
 
     if (cfg->reinjection == MQVPN_REINJ_DEADLINE) {
