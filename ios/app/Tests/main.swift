@@ -480,4 +480,6 @@ do {
     close(peer)
 }
 
+failures += runPureCases()
+
 if failures == 0 { print("host tests: ALL PASS") } else { print("host tests: \(failures) FAILURES"); exit(1) }
