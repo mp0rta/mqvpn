@@ -134,3 +134,19 @@ data class DemoSettings(
         const val MAX_REDUNDANT_PORTS = 16
     }
 }
+
+/** The three desktop-style "how to split traffic" choices. */
+enum class SplitChoice { THROUGHPUT, LOW_LATENCY, REDUNDANT }
+
+/** DEFAULT is shown as LOW_LATENCY (its real conversion is MIN_RTT without a server request). */
+fun DemoSettings.splitChoice(): SplitChoice = when {
+    redundantEnabled -> SplitChoice.REDUNDANT
+    schedulerChoice() == DemoSettings.SchedulerChoice.WLB -> SplitChoice.THROUGHPUT
+    else -> SplitChoice.LOW_LATENCY
+}
+
+fun DemoSettings.applySplitChoice(c: SplitChoice): DemoSettings = when (c) {
+    SplitChoice.THROUGHPUT -> copy(scheduler = DemoSettings.SchedulerChoice.WLB.name, redundantEnabled = false)
+    SplitChoice.LOW_LATENCY -> copy(scheduler = DemoSettings.SchedulerChoice.MIN_RTT.name, redundantEnabled = false)
+    SplitChoice.REDUNDANT -> copy(scheduler = DemoSettings.SchedulerChoice.MIN_RTT.name, redundantEnabled = true)
+}

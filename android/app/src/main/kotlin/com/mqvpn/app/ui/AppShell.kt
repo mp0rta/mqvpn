@@ -49,9 +49,8 @@ fun startDestination(settings: DemoSettings): String =
 @Composable
 fun AppShell(vm: MqvpnViewModel, settingsVm: SettingsViewModel, nav: NavHostController) {
     // Wait for the persisted settings so an upgrader is never routed to Setup by defaults.
-    // Task 7 migrates this wait source to the new draft flow.
-    val loaded by settingsVm.loaded.collectAsState()
-    val settings = loaded ?: return
+    val draft by settingsVm.draft.collectAsState()
+    val settings = draft ?: return
     // Frozen at first load: saving a server later must not re-route the live NavHost.
     val start = rememberSaveable { startDestination(settings) }
     NavHost(nav, startDestination = start) {

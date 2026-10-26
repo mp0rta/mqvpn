@@ -11,10 +11,12 @@ import com.mqvpn.sdk.core.MqvpnManager
 import com.mqvpn.sdk.core.model.MqvpnState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -49,51 +51,108 @@ class SettingsViewModel @Inject constructor(
     val isSaving: StateFlow<Boolean> = _isSaving.asStateFlow()
 
     private val _saveError = MutableStateFlow<String?>(null)
+    /** A failed DataStore write; the draft keeps the edit. */
     val saveError: StateFlow<String?> = _saveError.asStateFlow()
 
     private val _saveDone = MutableStateFlow(false)
     val saveDone: StateFlow<Boolean> = _saveDone.asStateFlow()
 
+    private val _draft = MutableStateFlow<DemoSettings?>(null)
+    /** Source of truth once set: first repository emission, then local edits (later echoes ignored). */
+    val draft: StateFlow<DemoSettings?> = _draft.asStateFlow()
+
+    private val _fieldErrors = MutableStateFlow<Map<String, String>>(emptyMap())
+    val fieldErrors: StateFlow<Map<String, String>> = _fieldErrors.asStateFlow()
+
+    // G6: the only path to repository.save. Conflated, so the latest draft wins.
+    private val queue = Channel<Pair<Long, DemoSettings>>(Channel.CONFLATED)
+    private var requestedGen = 0L
+    private val landedGen = MutableStateFlow(0L)
+    private var lastPersisted: DemoSettings? = null
+
     init {
         viewModelScope.launch {
             try {
-                repository.settings.collect { _loaded.value = it }
+                repository.settings.collect {
+                    _loaded.value = it
+                    if (_draft.value == null) _draft.value = it
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (t: Throwable) {
                 _loadError.value = "Load failed: ${t.message}"
             }
         }
+        viewModelScope.launch {
+            for ((gen, d) in queue) {
+                // Same value already on disk (e.g. a duplicate save()): nothing to do.
+                if (d != lastPersisted) persist(d)
+                landedGen.value = gen
+            }
+        }
     }
 
-    fun save(draft: DemoSettings) {
-        // Belt-and-braces: the UI's Save button already gates on loaded !=
-        // null && loadError == null, but re-check here so a stale/racy
-        // caller can never save over an unloaded or failed-to-load baseline
-        // (e.g. right after process recreation, before the repository
-        // emission lands).
-        if (_loaded.value == null || _loadError.value != null) return
-        if (_isSaving.value || !isEditable.value || !draft.isValid()) return
+    private suspend fun persist(d: DemoSettings) {
         _isSaving.value = true
         _saveError.value = null
         _saveDone.value = false
-        viewModelScope.launch {
-            try {
-                repository.save(draft)
-                _saveDone.value = true
-            } catch (e: CancellationException) {
-                throw e
-            } catch (t: Throwable) {
-                _saveError.value = "Save failed: ${t.message}"
-            } finally {
-                _isSaving.value = false
-            }
+        try {
+            repository.save(d)
+            lastPersisted = d
+            _saveDone.value = true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            lastPersisted = null
+            _saveError.value = "Save failed: ${t.message}"
+        } finally {
+            _isSaving.value = false
         }
+    }
+
+    /**
+     * Applies [transform] to the draft at once; persists the whole draft only while
+     * every field is valid (any invalid field blocks all persists, its error is in [fieldErrors]).
+     */
+    fun update(transform: (DemoSettings) -> DemoSettings) {
+        val next = transform(_draft.value ?: return)
+        _draft.value = next
+        _fieldErrors.value = next.fieldErrors()
+        if (next.isValid()) queue.trySend(++requestedGen to next)
+    }
+
+    /**
+     * Returns once the latest queued save has landed (success or failure). With an
+     * invalid draft nothing was queued, so it returns after any earlier save drains
+     * and persists nothing; it never hangs.
+     */
+    suspend fun flush() {
+        val target = requestedGen
+        landedGen.first { it >= target }
+    }
+
+    /** Legacy entry point for the old screen; funnels into the single writer. */
+    fun save(draft: DemoSettings) {
+        // Belt-and-braces: re-check the old screen's gates so a stale/racy caller can never
+        // save over an unloaded or failed-to-load baseline.
+        if (_loaded.value == null || _loadError.value != null) return
+        if (!isEditable.value || !draft.isValid()) return
+        _draft.value = draft
+        _fieldErrors.value = draft.fieldErrors()
+        queue.trySend(++requestedGen to draft)
     }
 
     fun consumeSaveDone() {
         _saveDone.value = false
     }
+}
+
+private fun DemoSettings.fieldErrors(): Map<String, String> = buildMap {
+    if (!hostValid()) put("serverAddress", "Enter a server address")
+    if (!portValid()) put("serverPort", "Port must be 1-65535")
+    if (!reorderPortsValid()) put("reorderPorts", "Enter at least one valid port")
+    if (redundantEnabled && !redundantPortsValid()) put("redundantPorts", "Enter ports as a comma-separated list (1-65535)")
+    if (!pathPolicyValid()) put("paths", "Turn on at least one connection type")
 }
 
 private fun MqvpnState.isEditableState(): Boolean = when (this) {

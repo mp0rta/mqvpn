@@ -263,4 +263,95 @@ class SettingsViewModelTest {
         advanceUntilIdle()
         assertTrue(viewModel.isEditable.value)
     }
+
+    // -- autosave draft (Task 7) -------------------------------------------
+
+    @Test
+    fun `draft initializes from first emission and ignores later echoes`() = runTest(testDispatcher) {
+        advanceUntilIdle()
+        assertEquals(testSettings, viewModel.draft.value)
+        settingsFlow.value = testSettings.copy(serverAddress = "echo.example.com")
+        advanceUntilIdle()
+        assertEquals(testSettings, viewModel.draft.value)
+    }
+
+    @Test
+    fun `legacy combo survives an unrelated update byte-identically`() = runTest(testDispatcher) {
+        val legacy = testSettings.copy(scheduler = "WLB", redundantEnabled = true, redundantPorts = "443, 8443")
+        val repo = mockk<SettingsRepository>(relaxed = true).also {
+            every { it.settings } returns MutableStateFlow(legacy)
+            coEvery { it.save(any()) } returns Unit
+        }
+        val vm = SettingsViewModel(repo, mockManager)
+        advanceUntilIdle()
+        vm.update { it.copy(killSwitch = true) }
+        advanceUntilIdle()
+        coVerify(exactly = 1) { repo.save(legacy.copy(killSwitch = true)) }
+    }
+
+    @Test
+    fun `second update while the first save is suspended is not lost`() = runTest(testDispatcher) {
+        val gate = CompletableDeferred<Unit>()
+        val saved = mutableListOf<DemoSettings>()
+        coEvery { mockRepository.save(any()) } coAnswers {
+            saved += firstArg<DemoSettings>()
+            if (saved.size == 1) gate.await()
+        }
+        advanceUntilIdle()
+        viewModel.update { it.copy(killSwitch = true) }
+        advanceUntilIdle()
+        viewModel.update { it.copy(insecure = true) }
+        advanceUntilIdle()
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(testSettings.copy(killSwitch = true, insecure = true), saved.last())
+        assertEquals(testSettings.copy(killSwitch = true, insecure = true), viewModel.draft.value)
+    }
+
+    @Test
+    fun `invalid field blocks every persist until fixed`() = runTest(testDispatcher) {
+        advanceUntilIdle()
+        viewModel.update { it.copy(redundantEnabled = true, redundantPorts = "abc") }
+        viewModel.update { it.copy(killSwitch = true) }
+        advanceUntilIdle()
+        assertTrue(viewModel.draft.value!!.killSwitch)
+        assertTrue(viewModel.fieldErrors.value.containsKey("redundantPorts"))
+        coVerify(exactly = 0) { mockRepository.save(any()) }
+
+        viewModel.update { it.copy(redundantPorts = "443") }
+        advanceUntilIdle()
+        assertTrue(viewModel.fieldErrors.value.isEmpty())
+        coVerify(exactly = 1) {
+            mockRepository.save(testSettings.copy(redundantEnabled = true, redundantPorts = "443", killSwitch = true))
+        }
+    }
+
+    @Test
+    fun `failed autosave surfaces saveError and keeps the draft`() = runTest(testDispatcher) {
+        coEvery { mockRepository.save(any()) } throws IllegalStateException("boom")
+        advanceUntilIdle()
+        viewModel.update { it.copy(killSwitch = true) }
+        advanceUntilIdle()
+        assertEquals("Save failed: boom", viewModel.saveError.value)
+        assertTrue(viewModel.draft.value!!.killSwitch)
+    }
+
+    @Test
+    fun `flush suspends until the pending write landed and returns when draft is invalid`() = runTest(testDispatcher) {
+        val gate = CompletableDeferred<Unit>()
+        coEvery { mockRepository.save(any()) } coAnswers { gate.await() }
+        advanceUntilIdle()
+        viewModel.update { it.copy(killSwitch = true) }
+        var flushed = false
+        launch { viewModel.flush(); flushed = true }
+        advanceUntilIdle()
+        assertFalse(flushed)
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertTrue(flushed)
+
+        viewModel.update { it.copy(serverAddress = "") }
+        viewModel.flush()
+        coVerify(exactly = 1) { mockRepository.save(any()) }
+    }
 }
