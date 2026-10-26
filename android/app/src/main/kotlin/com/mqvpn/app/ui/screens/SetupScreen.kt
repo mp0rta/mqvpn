@@ -89,7 +89,7 @@ fun SetupScreen(vm: MqvpnViewModel, settingsVm: SettingsViewModel, onDone: () ->
                         )
                     }
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Bullet("Uses Wi‑Fi, Ethernet and Cellular at the same time for more speed")
+                        Bullet("Uses Wi‑Fi and Cellular at the same time for more speed")
                         Bullet("If one connection drops, the others take over instantly — calls and downloads keep going")
                         Bullet("All traffic is encrypted, end to end")
                     }
