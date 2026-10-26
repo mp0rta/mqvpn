@@ -3,19 +3,15 @@
 
 package com.mqvpn.app.ui.theme
 
-import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 
 // Design handoff tokens, verbatim from mqvpn-desktop/src/theme.css.
 // segsh is the segmented-control shadow colour (offset 0,1 blur 3 is applied by the caller).
@@ -43,22 +39,31 @@ object MqTokens {
 
 val LocalMqColors = staticCompositionLocalOf { MqTokens.light }
 
-private val DarkColorScheme = darkColorScheme()
-private val LightColorScheme = lightColorScheme()
+// No dynamic (Material You) color: the design pins the accent, and wallpaper
+// palettes bleed into every M3 component default (Switch, text-field outlines).
+private val DarkColorScheme = darkColorScheme(
+    primary = MqTokens.dark.accent,
+    onPrimary = Color.White,
+    background = MqTokens.dark.win,
+    onBackground = MqTokens.dark.text,
+    surface = MqTokens.dark.card,
+    onSurface = MqTokens.dark.text,
+)
+private val LightColorScheme = lightColorScheme(
+    primary = MqTokens.light.accent,
+    onPrimary = Color.White,
+    background = MqTokens.light.win,
+    onBackground = MqTokens.light.text,
+    surface = MqTokens.light.card,
+    onSurface = MqTokens.light.text,
+)
 
 @Composable
 fun MqvpnTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     content: @Composable () -> Unit,
 ) {
-    val colorScheme = when {
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-        darkTheme -> DarkColorScheme
-        else -> LightColorScheme
-    }
+    val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
 
     CompositionLocalProvider(LocalMqColors provides if (darkTheme) MqTokens.dark else MqTokens.light) {
         MaterialTheme(
