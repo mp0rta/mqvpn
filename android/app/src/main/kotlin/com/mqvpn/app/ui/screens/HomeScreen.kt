@@ -92,11 +92,15 @@ fun HomeScreen(
     val scope = rememberCoroutineScope()
 
     // Flush first so an edit still queued in autosave is what we connect with; a null or
-    // invalid draft connects nothing (the button is disabled for both).
+    // invalid draft connects nothing (the button is disabled for both). An unparsable
+    // address box also blocks: the draft then holds a server the user already typed over.
+    val addrInvalid by settingsVm.addressTextInvalid.collectAsStateWithLifecycle()
     val connectNow = {
         scope.launch {
             settingsVm.flush()
-            settingsVm.draft.value?.takeIf { it.isValid() }?.let(vm::connect)
+            if (!settingsVm.addressTextInvalid.value) {
+                settingsVm.draft.value?.takeIf { it.isValid() }?.let(vm::connect)
+            }
         }
         Unit
     }
@@ -125,7 +129,7 @@ fun HomeScreen(
     val last = history.samples.lastOrNull()
     val cards = pathCardViews(paths, available, last).filter { it.available && it.active }
     val usingCount = cards.count { it.rateBps > 1_000_000 }
-    val canConnect = draft?.isValid() == true
+    val canConnect = draft?.isValid() == true && !addrInvalid
 
     Column(
         modifier.fillMaxSize().background(c.win).verticalScroll(rememberScrollState())

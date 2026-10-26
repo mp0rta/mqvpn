@@ -198,4 +198,29 @@ class SettingsViewModelTest {
         viewModel.flush()
         coVerify(exactly = 1) { mockRepository.save(any()) }
     }
+
+    @Test
+    fun `unparsable address text keeps the draft and flags invalid`() = runTest(testDispatcher) {
+        advanceUntilIdle()
+        viewModel.editAddress("vpn.example:abc")
+        advanceUntilIdle()
+
+        assertEquals("repo.example.com", viewModel.draft.value?.serverAddress)
+        assertEquals(1234, viewModel.draft.value?.serverPort)
+        assertEquals("vpn.example:abc", viewModel.addressText.value)
+        assertTrue(viewModel.addressTextInvalid.value)
+        coVerify(exactly = 0) { mockRepository.save(any()) }
+    }
+
+    @Test
+    fun `valid address text updates the draft and clears the invalid flag`() = runTest(testDispatcher) {
+        advanceUntilIdle()
+        viewModel.editAddress("vpn.example:abc")
+        viewModel.editAddress("vpn.example.com:8443")
+        advanceUntilIdle()
+
+        assertEquals("vpn.example.com", viewModel.draft.value?.serverAddress)
+        assertEquals(8443, viewModel.draft.value?.serverPort)
+        assertFalse(viewModel.addressTextInvalid.value)
+    }
 }

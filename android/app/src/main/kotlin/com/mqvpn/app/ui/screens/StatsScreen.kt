@@ -59,12 +59,18 @@ fun StatsScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("Statistics", color = c.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-        if (state is MqvpnState.Connected) {
+        // Reconnecting keeps the session's history (the VM holds it): show the
+        // charts through an outage instead of dropping to the empty state.
+        if (state is MqvpnState.Connected || state is MqvpnState.Reconnecting) {
+            if (state is MqvpnState.Reconnecting) {
+                Text("Reconnecting…", color = c.orange, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            }
             RateChartCard("Download", history, Direction.DOWNLOAD, nowMs)
             RateChartCard("Upload", history, Direction.UPLOAD, nowMs)
             MqCard(padding = PaddingValuesRows) {
                 Column {
-                    KvRow("Session time", fmtElapsed(elapsed ?: 0), c, false)
+                    // elapsed is null while Reconnecting (it restarts on the new session)
+                    KvRow("Session time", elapsed?.let(::fmtElapsed) ?: "—", c, false)
                     KvRow("Data received", fmtBytes(stats.bytesRx), c, false)
                     KvRow("Data sent", fmtBytes(stats.bytesTx), c, false)
                     KvRow("Latency", "${stats.srttMs} ms", c, false)

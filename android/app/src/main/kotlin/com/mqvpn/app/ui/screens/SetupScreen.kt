@@ -65,9 +65,10 @@ fun SetupScreen(vm: MqvpnViewModel, settingsVm: SettingsViewModel, onDone: () ->
     val available by vm.availableTransports.collectAsStateWithLifecycle()
     val s = draft ?: return
 
-    var addr by rememberSaveable {
-        mutableStateOf(if (s.serverAddress.isBlank()) "" else ServerAddressField.format(s.serverAddress, s.serverPort))
-    }
+    // Shared with Settings via the ViewModel (same box, same text, one validity).
+    val addrText by settingsVm.addressText.collectAsStateWithLifecycle()
+    val addr = addrText
+        ?: if (s.serverAddress.isBlank()) "" else ServerAddressField.format(s.serverAddress, s.serverPort)
     var keyShown by rememberSaveable { mutableStateOf(false) }
     val parsed = ServerAddressField.parse(addr)
 
@@ -100,13 +101,7 @@ fun SetupScreen(vm: MqvpnViewModel, settingsVm: SettingsViewModel, onDone: () ->
                     )
                     OutlinedTextField(
                         value = addr,
-                        onValueChange = { t ->
-                            addr = t
-                            // Single logical field: the address and port come from one text box.
-                            ServerAddressField.parse(t)?.let { p ->
-                                settingsVm.update { it.copy(serverAddress = p.address, serverPort = p.port) }
-                            }
-                        },
+                        onValueChange = settingsVm::editAddress,
                         label = { Text("Server address") },
                         isError = addr.isNotEmpty() && parsed == null,
                         supportingText = { if (addr.isNotEmpty() && parsed == null) Text("Enter a server address, e.g. vpn.example.com:443") },
@@ -220,6 +215,10 @@ private fun PrimaryButton(label: String, enabled: Boolean, modifier: Modifier = 
 /** The mqvpn mark without its tile (geometry from ic_launcher_foreground.xml, 64x64 source). */
 @Composable
 private fun MqvpnMark(modifier: Modifier = Modifier) {
+    // The joint dot is #FBFAFF in the launcher icon, where it sits on a pale tile
+    // and reads as a cutout; on the app's own background it must follow the theme
+    // or dark mode shows a stark white blob.
+    val joint = LocalMqColors.current.win
     Canvas(modifier) {
         val k = size.width / 64f
         fun pill(x: Float, y: Float, brush: Brush? = null, color: Color = Color.Unspecified) {
@@ -231,6 +230,6 @@ private fun MqvpnMark(modifier: Modifier = Modifier) {
             22f, 36f,
             Brush.linearGradient(listOf(Color(0xFF8B5CF6), Color(0xFF5B21B6)), Offset(22f * k, 36f * k), Offset(56f * k, 50f * k)),
         )
-        drawCircle(Color(0xFFFBFAFF), 4f * k, Offset(32f * k, 32f * k))
+        drawCircle(joint, 4f * k, Offset(32f * k, 32f * k))
     }
 }

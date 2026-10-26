@@ -6,6 +6,7 @@ package com.mqvpn.app.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.mqvpn.app.data.DemoSettings
+import com.mqvpn.app.data.ServerAddressField
 import com.mqvpn.app.data.SettingsRepository
 import com.mqvpn.sdk.core.MqvpnManager
 import com.mqvpn.sdk.core.model.MqvpnState
@@ -91,6 +92,27 @@ class SettingsViewModel @Inject constructor(
             lastPersisted = null
             _saveError.value = "Save failed: ${t.message}"
         }
+    }
+
+    private val _addressText = MutableStateFlow<String?>(null)
+    /**
+     * The address box's raw text once edited; null = mirror the draft. Setup and
+     * Settings share it, so an unparsable entry stays visible across screens while
+     * the draft keeps the last valid server (which must never be connected to then).
+     */
+    val addressText: StateFlow<String?> = _addressText.asStateFlow()
+
+    private val _addressTextInvalid = MutableStateFlow(false)
+    /** The address box holds text that doesn't parse; Home blocks connect on it. */
+    val addressTextInvalid: StateFlow<Boolean> = _addressTextInvalid.asStateFlow()
+
+    /** The one entry point for address-box edits (the address and port are one text field). */
+    fun editAddress(text: String) {
+        if (!isEditable.value) return
+        _addressText.value = text
+        val p = ServerAddressField.parse(text)
+        _addressTextInvalid.value = p == null
+        if (p != null) update { it.copy(serverAddress = p.address, serverPort = p.port) }
     }
 
     /**

@@ -25,8 +25,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -34,7 +32,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
@@ -90,16 +87,11 @@ fun SettingsScreen(
     val uriHandler = LocalUriHandler.current
     val s = draft ?: return
 
-    var addr by rememberSaveable {
-        mutableStateOf(if (s.serverAddress.isBlank()) "" else ServerAddressField.format(s.serverAddress, s.serverPort))
-    }
-    var addrFocused by remember { mutableStateOf(false) }
-    // Re-seed after the stored server changes elsewhere (setup assistant); never while typing.
-    LaunchedEffect(s.serverAddress, s.serverPort) {
-        if (!addrFocused && ServerAddressField.parse(addr) != ServerAddressField.Parsed(s.serverAddress, s.serverPort)) {
-            addr = if (s.serverAddress.isBlank()) "" else ServerAddressField.format(s.serverAddress, s.serverPort)
-        }
-    }
+    // Shared with Setup via the ViewModel, so an unparsable entry follows the user
+    // across screens instead of silently reverting to the last saved server.
+    val addrText by settingsVm.addressText.collectAsStateWithLifecycle()
+    val addr = addrText
+        ?: if (s.serverAddress.isBlank()) "" else ServerAddressField.format(s.serverAddress, s.serverPort)
     var keyShown by rememberSaveable { mutableStateOf(false) }
     var advOpen by rememberSaveable { mutableStateOf(false) }
     var logOpen by rememberSaveable { mutableStateOf(false) }
@@ -123,13 +115,7 @@ fun SettingsScreen(
                     Column(Modifier.padding(vertical = 8.dp)) {
                         OutlinedTextField(
                             value = addr,
-                            onValueChange = { t ->
-                                addr = t
-                                // Single logical field: the address and port come from one text box.
-                                ServerAddressField.parse(t)?.let { p ->
-                                    settingsVm.update { it.copy(serverAddress = p.address, serverPort = p.port) }
-                                }
-                            },
+                            onValueChange = settingsVm::editAddress,
                             label = { Text("Address") },
                             isError = parsed == null || errors.containsKey("serverAddress") || errors.containsKey("serverPort"),
                             supportingText = {
@@ -139,7 +125,7 @@ fun SettingsScreen(
                             singleLine = true,
                             enabled = editable,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                            modifier = Modifier.fillMaxWidth().onFocusChanged { addrFocused = it.isFocused },
+                            modifier = Modifier.fillMaxWidth(),
                         )
                     }
                     Hairline()
