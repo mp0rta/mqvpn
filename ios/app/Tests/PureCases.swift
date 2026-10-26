@@ -350,5 +350,71 @@ func runPureCases() -> Int {
         check(near(w.onTick(sent: 20, lost: 5, wallMs: 6000), 0.5), "dg after reset")
     }
 
+    do { // ChartGeometry + BandwidthFormat (port of ChartGeometryTest / BandwidthFormatTest)
+        let now: Int64 = 100_000
+        func nr(_ a: Double, _ b: Double) -> Bool { abs(a - b) < 0.01 }
+        func bw(_ ms: Int64, _ dl: Double, _ ul: Double, wl: Double? = nil) -> BandwidthSample {
+            BandwidthSample(wallMs: ms, dlBps: dl, ulBps: ul,
+                            perPathDl: wl != nil ? ["wlan0": wl!, "rmnet0": dl - wl!] : ["rmnet0": dl],
+                            perPathUl: ["wlan0": ul])
+        }
+        func rs(_ ms: Int64, _ rec: Double, _ lost: Double, _ p50: Double?, _ p99: Double?) -> ReorderSample {
+            ReorderSample(wallMs: ms, recoveredPerSec: rec, lostPerSec: lost, p50Ms: p50, p99Ms: p99)
+        }
+
+        var c = rateChart(samples: [bw(70_000, 1_000_000, 0), bw(85_000, 4_000_000, 500_000, wl: 1_000_000), bw(100_000, 0, 0)],
+                          slots: ["wlan0": 0, "rmnet0": 1], dir: .down, nowMs: now, w: 300, h: 100)
+        check(c.yMaxLabel == "5 Mbps", "cg rate label")
+        check(c.total.count == 5, "cg rate total count")
+        if c.total.count == 5, let p0 = c.total[0], let p2 = c.total[2], let p4 = c.total[4] {
+            check(nr(p0.x, 0) && nr(p2.x, 150) && nr(p4.x, 300), "cg rate x")
+            check(nr(p2.y, 20) && nr(p4.y, 100), "cg rate y")
+        } else { check(false, "cg rate points present") }
+        check(c.gridYs == [0, 50, 100], "cg grid")
+        check(c.series.count == 2, "cg series count")
+        if c.series.count == 2, c.series[0].count > 2 {
+            check(c.series[0][0] == nil && c.series[0][2] != nil, "cg series gap")
+        } else { check(false, "cg series shape") }
+        check(c.legend[0].label == "total", "cg legend total")
+
+        c = rateChart(samples: [bw(100_000, 9_000_000, 20_000)], slots: ["wlan0": 0], dir: .up, nowMs: now, w: 300, h: 100)
+        check(c.yMaxLabel == "20 Kbps", "cg upload fields")
+
+        c = rateChart(samples: [bw(60_000, 1, 1), bw(100_000, 1, 1)], slots: [:], dir: .down, nowMs: now, w: 300, h: 100)
+        check(c.total.count == 1, "cg window drop")
+
+        var wb = waitBars(samples: [rs(98_000, 0, 0, 4, 8), rs(99_000, 0, 0, nil, nil), rs(100_000, 0, 0, 4, 8)],
+                          nowMs: now, w: 300, h: 100)
+        check(wb.yMaxLabel == "10 ms" && wb.bars.count == 3, "cg wait label/count")
+        if wb.bars.count == 3 {
+            check(wb.bars[1].h0 == nil && wb.bars[1].h1 == nil, "cg null percentile empty")
+            check(nr(wb.bars[0].h0 ?? -1, 40) && nr(wb.bars[0].h1 ?? -1, 80), "cg wait heights")
+        }
+
+        wb = waitBars(samples: [rs(90_000, 0, 0, 1, 2), rs(100_000, 0, 0, 1, 2)], nowMs: now, w: 300, h: 100)
+        check(wb.bars.count == 2 && nr(wb.bars[0].x, 200) && nr(wb.bars[1].x, 300), "cg missing tick spacing")
+
+        wb = waitBars(samples: [rs(100_000, 0, 0, 1, .infinity)], nowMs: now, w: 300, h: 100)
+        check(wb.yMaxLabel == "1000 ms" && wb.legend[1].valueText == ">512 ms", "cg overflow")
+
+        let rb = reorderBars(samples: [rs(100_000, 6, 2, nil, nil), rs(99_000, 1, 0, nil, nil)], nowMs: now, w: 300, h: 80)
+        check(rb.yMaxLabel == "8/s" && rb.bars.count == 2, "cg reorder label")
+        if rb.bars.count == 2 { check(nr(rb.bars[0].greenH, 60) && nr(rb.bars[0].redH, 20), "cg reorder heights") }
+
+        func rate(_ gap: Int64) -> [ChartPoint?] {
+            rateChart(samples: [bw(100_000 - gap, 1, 1), bw(100_000, 1, 1)], slots: [:], dir: .down,
+                      nowMs: now, w: 300, h: 100).total
+        }
+        check(rate(2_000).count == 3 && rate(2_000)[1] == nil, "cg missed tick breaks")
+        check(rate(1_400).count == 2, "cg jitter keeps line")
+
+        check(ceilNice(0) == 10_000 && ceilNice(9_999) == 10_000 && ceilNice(10_000) == 10_000, "bf ceil floor")
+        check(ceilNice(10_001) == 20_000 && ceilNice(20_001) == 50_000 && ceilNice(50_001) == 100_000, "bf ceil ladder")
+        check(ceilNice(42_100_000) == 50_000_000 && ceilNice(1_500_000_000) == 2_000_000_000, "bf ceil big")
+        check(formatBps(0) == "0" && formatBps(750) == "750 bps" && formatBps(1_000) == "1 Kbps", "bf fmt small")
+        check(formatBps(12_500) == "12.5 Kbps" && formatBps(250_000) == "250 Kbps", "bf fmt K")
+        check(formatBps(42_100_000) == "42.1 Mbps" && formatBps(1_500_000_000) == "1.5 Gbps", "bf fmt M/G")
+    }
+
     return failures
 }
