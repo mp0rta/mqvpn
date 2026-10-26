@@ -72,6 +72,23 @@ class MqvpnViewModel(
     private var latestPaths: List<PathInfo> = emptyList()
     private var tickerJob: Job? = null
 
+    // Ticker inputs come from eagerly collected manager flows (see init); the
+    // stateIn(WhileSubscribed) views below freeze when no tab subscribes.
+    private var latestStats: VpnStats = VpnStats()
+    private var latestReorderStats: ReorderStats = ReorderStats()
+    private val reorder = ReorderHistory()
+    private val dgramLoss = DgramLossWindow()
+    private var connectedAt: Long? = null
+
+    private val _reorderHistory = MutableStateFlow(ReorderHistoryState())
+    val reorderHistory: StateFlow<ReorderHistoryState> = _reorderHistory.asStateFlow()
+
+    private val _lossPct = MutableStateFlow<Double?>(null)
+    val lossPct: StateFlow<Double?> = _lossPct.asStateFlow()
+
+    private val _elapsedSec = MutableStateFlow<Long?>(null)
+    val elapsedSec: StateFlow<Long?> = _elapsedSec.asStateFlow()
+
     private val _bandwidthHistory = MutableStateFlow(BandwidthHistoryState())
     val bandwidthHistory: StateFlow<BandwidthHistoryState> = _bandwidthHistory.asStateFlow()
 
@@ -99,6 +116,12 @@ class MqvpnViewModel(
                 publishEvents()
                 when (it) {
                     is MqvpnState.Connected, is MqvpnState.Reconnecting -> {
+                        if (it is MqvpnState.Connected) {
+                            if (connectedAt == null) connectedAt = clock()
+                        } else {
+                            connectedAt = null
+                            _elapsedSec.value = null
+                        }
                         if (tickerJob?.isActive != true) {
                             tickerJob = viewModelScope.launch { bandwidthTickerLoop() }
                         }
@@ -108,15 +131,25 @@ class MqvpnViewModel(
                         tickerJob = null
                         bandwidth.clear()
                         _bandwidthHistory.value = BandwidthHistoryState()
+                        reorder.clear()
+                        dgramLoss.clear()
+                        connectedAt = null
+                        _reorderHistory.value = ReorderHistoryState()
+                        _lossPct.value = null
+                        _elapsedSec.value = null
                     }
                     is MqvpnState.Connecting -> {
                         // mid-session handshake re-emits Connecting: pause ticks, keep history
                         tickerJob?.cancel()
                         tickerJob = null
+                        connectedAt = null
+                        _elapsedSec.value = null
                     }
                 }
             }
         }
+        viewModelScope.launch { manager.stats.collect { latestStats = it } }
+        viewModelScope.launch { manager.reorderStats.collect { latestReorderStats = it } }
         viewModelScope.launch {
             manager.paths.collect {
                 latestPaths = it
@@ -133,8 +166,12 @@ class MqvpnViewModel(
     private suspend fun bandwidthTickerLoop() {
         while (true) {
             delay(1_000)
-            val samples = bandwidth.onTick(latestPaths, nanoClock(), clock())
+            val now = clock()
+            val samples = bandwidth.onTick(latestPaths, nanoClock(), now)
             _bandwidthHistory.value = BandwidthHistoryState(samples, bandwidth.ifaceSlots())
+            _reorderHistory.value = reorder.onTick(latestReorderStats, now)
+            _lossPct.value = dgramLoss.onTick(latestStats.dgramSent, latestStats.dgramLost, now)
+            _elapsedSec.value = connectedAt?.let { (now - it) / 1000 }
         }
     }
 

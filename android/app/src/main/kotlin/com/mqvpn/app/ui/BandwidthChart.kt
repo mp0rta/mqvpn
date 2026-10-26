@@ -36,7 +36,7 @@ private val PATH_PALETTE = listOf(
     Color(0xFF9CCC65), // light green
 )
 
-private fun slotColor(slot: Int): Color = PATH_PALETTE[slot % PATH_PALETTE.size]
+internal fun slotColor(slot: Int): Color = PATH_PALETTE[slot % PATH_PALETTE.size]
 
 @Composable
 fun BandwidthChart(state: BandwidthHistoryState) {

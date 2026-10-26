@@ -385,4 +385,45 @@ class MqvpnViewModelTest {
         fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent()
         assertEquals(2, viewModel.bandwidthHistory.value.samples.size) // resumed
     }
+
+    private fun reorder(delivered: Long, filled: Long) =
+        ReorderStats(delivered = delivered, gapCount = filled, gapFilled = filled)
+
+    @Test
+    fun `reorder history lossPct and elapsed follow eager flows and clear on disconnect`() = tickerTest {
+        var now = 1_000L
+        val vm = MqvpnViewModel(mockManager, mockRepository, mockAvailability, { now }, fakeNanoClock)
+        runCurrent()
+        stateFlow.value = MqvpnState.Connected(connectedInfo())
+        runCurrent() // connectedAt = 1000
+        reorderStatsFlow.value = reorder(10, 1)
+        statsFlow.value = VpnStats(dgramSent = 100, dgramLost = 1)
+        now += 1_000; fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent() // baseline
+        reorderStatsFlow.value = reorder(20, 3)
+        statsFlow.value = VpnStats(dgramSent = 200, dgramLost = 3)
+        now += 1_000; fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent()
+        // no subscriber on any stateIn view was attached
+        assertEquals(1, vm.reorderHistory.value.samples.size)
+        assertEquals(2L, vm.elapsedSec.value)
+        assertEquals(0.02, vm.lossPct.value!!, 1e-9) // (3-1)/(200-100)
+        stateFlow.value = MqvpnState.Disconnected
+        runCurrent()
+        assertTrue(vm.reorderHistory.value.samples.isEmpty())
+        assertNull(vm.lossPct.value)
+        assertNull(vm.elapsedSec.value)
+    }
+
+    @Test
+    fun `elapsed is anchored at the transition into Connected not at each emission`() = tickerTest {
+        var now = 1_000L
+        val vm = MqvpnViewModel(mockManager, mockRepository, mockAvailability, { now }, fakeNanoClock)
+        runCurrent()
+        stateFlow.value = MqvpnState.Connected(connectedInfo())
+        runCurrent()
+        now += 5_000
+        stateFlow.value = MqvpnState.Connected(connectedInfo().copy(mtu = 1300)) // re-emission
+        runCurrent()
+        fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent()
+        assertEquals(5L, vm.elapsedSec.value)
+    }
 }
