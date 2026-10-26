@@ -1,7 +1,7 @@
 name: Mqvpn
 options:
   deploymentTarget:
-    iOS: "15.0"
+    iOS: "16.0"
 configFiles:
   Debug: Config.xcconfig
   Release: Config.xcconfig
