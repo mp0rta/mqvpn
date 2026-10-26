@@ -416,5 +416,59 @@ func runPureCases() -> Int {
         check(formatBps(42_100_000) == "42.1 Mbps" && formatBps(1_500_000_000) == "1.5 Gbps", "bf fmt M/G")
     }
 
+    do { // Derive port (DeriveTest.kt + SchedulerStatusTest.kt + view-state matrix)
+        var v = statusView(.connected, elapsed: "00:12:41")
+        check(v.title == "Connected" && v.sub == "Protected · 00:12:41" && v.tone == .ok && !v.pulsing, "dv connected")
+        v = statusView(.connected, elapsed: nil)
+        check(v.sub == "Protected · 00:00", "dv connected nil elapsed")
+        v = statusView(.disconnected, elapsed: nil)
+        check(v.title == "Not Connected" && v.sub == "Tap the button to connect and protect your traffic" && !v.pulsing, "dv disconnected")
+        for s in [VpnViewState.connecting, .reconnecting] {
+            v = statusView(s, elapsed: nil)
+            check(v.title == "Connecting…" && v.sub == "Contacting server…" && v.pulsing && v.tone == .muted, "dv pulse \(s)")
+        }
+        v = statusView(.error("PSK authentication failed"), elapsed: nil)
+        check(v.title == "Not Connected" && v.sub == "PSK authentication failed" && v.tone == .warn, "dv error")
+
+        check(deriveViewState(neStatus: 2, clientState: nil, surfacedError: nil) == .connecting, "vs connecting")
+        check(deriveViewState(neStatus: 4, clientState: nil, surfacedError: nil) == .reconnecting, "vs reasserting")
+        check(deriveViewState(neStatus: 3, clientState: 5, surfacedError: nil) == .reconnecting, "vs connected+reconnecting")
+        check(deriveViewState(neStatus: 3, clientState: 3, surfacedError: "x") == .connected, "vs connected")
+        check(deriveViewState(neStatus: 3, clientState: nil, surfacedError: nil) == .connected, "vs connected nil")
+        for n in [0, 1, 5, 9] {
+            check(deriveViewState(neStatus: n, clientState: nil, surfacedError: nil) == .disconnected, "vs disc \(n)")
+            check(deriveViewState(neStatus: n, clientState: nil, surfacedError: "boom") == .error("boom"), "vs err \(n)")
+        }
+
+        func p(_ i: String, _ st: Int = 1) -> DerivePath { DerivePath(iface: i, status: st) }
+        let smp = BandwidthSample(wallMs: 0, dlBps: 0, ulBps: 0,
+                                  perPathDl: ["en0": 40_000_000, "pdp_ip0": 10_000_000, "utun9": 99_000_000],
+                                  perPathUl: ["en0": 5_000_000])
+        let cards = pathCardViews(paths: [p("en0"), p("pdp_ip0", 3), p("utun9")], available: [.wifi, .cellular], sample: smp)
+        check(cards.map { $0.kind } == [.wifi, .cellular] && cards.map { $0.name } == ["Wi-Fi", "Cellular"], "pc order/names")
+        check(cards.map { $0.available } == [true, true] && cards.map { $0.active } == [true, false], "pc avail/active")
+        check(cards[0].rateBps == 40_000_000 && cards[0].barFraction == 1 && cards[1].barFraction == 0.25, "pc rate/bar")
+        check(cards[0].sub == "en0" && cards[1].sub == "May use mobile data", "pc subs")
+        let un = pathCardViews(paths: [], available: [.wifi], sample: nil)
+        check(un[1].sub == "Not connected" && !un[1].available, "pc unavailable sub")
+        check(un.allSatisfy { $0.rateBps == 0 && $0.barFraction == 0 }, "pc no sample")
+        check(pathCardViews(paths: [], available: [.wifi], sample: nil)[0].sub == "Ready", "pc ready")
+        let uc = usingCounts(cards: cards)
+        check(uc.n == 2 && uc.m == 1, "using counts \(uc)")
+
+        check(fmtMbps(46_300_000) == "46.3" && fmtMbps(123_400_000) == "123", "dv fmtMbps")
+        check(fmtElapsed(761) == "12:41" && fmtElapsed(3600) == "1:00:00" && fmtElapsed(45) == "00:45", "dv fmtElapsed")
+        check(fmtBytes(999_000_000) == "999 MB" && fmtBytes(1_000_000_000) == "1.00 GB" && fmtBytes(2_345_000_000) == "2.35 GB", "dv fmtBytes")
+
+        check(serverSchedulerLine(requested: nil, server: nil) == nil, "ss none")
+        check(serverSchedulerLine(requested: 1, server: nil) == "Server scheduler: unknown (the server does not report it)", "ss unknown")
+        check(serverSchedulerLine(requested: nil, server: 0) == "Server scheduler: minrtt", "ss minrtt")
+        check(serverSchedulerLine(requested: nil, server: 3) == "Server scheduler: wlb_udp_pin", "ss pin")
+        check(serverSchedulerLine(requested: 1, server: 1) == "Server scheduler: wlb", "ss equal")
+        check(serverSchedulerLine(requested: 1, server: 2) == "Server scheduler: backup_fec (your setting wlb is not applied — the server's backup_fec cannot be switched)", "ss fec")
+        check(serverSchedulerLine(requested: 1, server: 0) == "Server scheduler: minrtt (your setting wlb is not applied — check AllowClientScheduler on the server)", "ss allow")
+        check(!schedulerApplied(requested: nil, server: 0) && schedulerApplied(requested: 1, server: 1) && !schedulerApplied(requested: 1, server: 0) && !schedulerApplied(requested: 1, server: nil), "ss applied")
+    }
+
     return failures
 }

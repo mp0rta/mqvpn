@@ -15,6 +15,7 @@ PURE_SOURCES=(
     "$APP/BandwidthHistory.swift"
     "$APP/ReorderHistory.swift"
     "$APP/ChartGeometry.swift"
+    "$APP/Derive.swift"
 )
 if command -v swiftc >/dev/null 2>&1; then
     SWIFTC=(swiftc)
