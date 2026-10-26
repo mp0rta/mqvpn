@@ -101,7 +101,7 @@ class MqvpnManagerTest {
 
     @Test
     fun `updateState with Error`() {
-        val error = MqvpnError.AuthFailed("PSK authentication failed")
+        val error = MqvpnError.AuthFailed("Access key rejected by the server")
         manager.updateState(MqvpnState.Error(error))
         val state = manager.vpnState.value
         assertTrue(state is MqvpnState.Error)
@@ -372,7 +372,7 @@ class MqvpnManagerTest {
         val state = manager.vpnState.value
         assertTrue(state is MqvpnState.Error)
         assertEquals(
-            MqvpnError.AuthFailed("PSK authentication failed"),
+            MqvpnError.AuthFailed("Access key rejected by the server"),
             (state as MqvpnState.Error).error,
         )
         assertEquals(1, svc.stopTunnelCalls)
@@ -394,7 +394,7 @@ class MqvpnManagerTest {
         val state = manager.vpnState.value
         assertTrue(state is MqvpnState.Error)
         assertEquals(
-            MqvpnError.ProtocolError(-6, "MASQUE not supported"),
+            MqvpnError.ProtocolError(-6, "Connection rejected — check the access key and server address"),
             (state as MqvpnState.Error).error,
         )
         assertEquals(1, svc.stopTunnelCalls)
