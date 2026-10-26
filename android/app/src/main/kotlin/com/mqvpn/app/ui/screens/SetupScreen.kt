@@ -5,9 +5,7 @@ package com.mqvpn.app.ui.screens
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
@@ -35,7 +33,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -54,6 +51,7 @@ import com.mqvpn.app.data.DemoSettings
 import com.mqvpn.app.data.ServerAddressField
 import com.mqvpn.app.ui.MqvpnViewModel
 import com.mqvpn.app.ui.SettingsViewModel
+import com.mqvpn.app.ui.components.UseOffSegmented
 import com.mqvpn.app.ui.theme.LocalMqColors
 import com.mqvpn.sdk.network.PathType
 
@@ -155,7 +153,7 @@ fun SetupScreen(vm: MqvpnViewModel, settingsVm: SettingsViewModel, onDone: () ->
                                     Text(t.name, color = c.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                                     Text(if (found) t.sub else "Not available", color = c.t2, fontSize = 11.sp)
                                 }
-                                if (found) UseOff(on) { want ->
+                                if (found) UseOffSegmented(on) { want ->
                                     // Turning the last connection Off would leave no path (never persistable): refuse.
                                     if (want || t.set(s, false).pathPolicyValid()) settingsVm.update { t.set(it, want) }
                                 }
@@ -185,12 +183,12 @@ fun SetupScreen(vm: MqvpnViewModel, settingsVm: SettingsViewModel, onDone: () ->
     }
 }
 
-private class Transport(
+internal class Transport(
     val type: PathType, val name: String, val sub: String,
     val get: (DemoSettings) -> Boolean, val set: (DemoSettings, Boolean) -> DemoSettings,
 )
 
-private val TRANSPORTS = listOf(
+internal val TRANSPORTS = listOf(
     Transport(PathType.WIFI, "Wi‑Fi", "Wireless network", { it.pathWifi }, { d, v -> d.copy(pathWifi = v) }),
     Transport(PathType.CELLULAR, "Cellular", "May use mobile data", { it.pathCellular }, { d, v -> d.copy(pathCellular = v) }),
     Transport(PathType.ETHERNET, "Ethernet", "Wired or USB network", { it.pathEthernet }, { d, v -> d.copy(pathEthernet = v) }),
@@ -217,22 +215,6 @@ private fun PrimaryButton(label: String, enabled: Boolean, modifier: Modifier = 
         onClick, modifier.fillMaxWidth(), enabled = enabled, shape = RoundedCornerShape(10.dp),
         colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = Color.White),
     ) { Text(label, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(vertical = 4.dp)) }
-}
-
-@Composable
-private fun UseOff(use: Boolean, onChange: (Boolean) -> Unit) {
-    val c = LocalMqColors.current
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(c.fill).padding(2.dp)) {
-        for ((label, v) in listOf("Use" to true, "Off" to false)) {
-            val sel = use == v
-            Box(
-                Modifier.weight(1f).clip(RoundedCornerShape(6.dp))
-                    .background(if (sel) c.card else Color.Transparent)
-                    .clickable { onChange(v) }.padding(vertical = 6.dp),
-                contentAlignment = Alignment.Center,
-            ) { Text(label, color = c.text, fontSize = 13.sp, fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal) }
-        }
-    }
 }
 
 /** The mqvpn mark without its tile (geometry from ic_launcher_foreground.xml, 64x64 source). */

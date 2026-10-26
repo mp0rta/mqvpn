@@ -3,9 +3,6 @@
 
 package com.mqvpn.app.ui
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BarChart
@@ -30,6 +27,9 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import com.mqvpn.app.data.DemoSettings
 import com.mqvpn.app.ui.screens.HomeScreen
+import com.mqvpn.app.ui.screens.HybridDetailScreen
+import com.mqvpn.app.ui.screens.RedundantDetailScreen
+import com.mqvpn.app.ui.screens.ReorderDetailScreen
 import com.mqvpn.app.ui.screens.PathsScreen
 import com.mqvpn.app.ui.screens.SettingsScreen
 import com.mqvpn.app.ui.screens.SetupScreen
@@ -60,15 +60,15 @@ fun AppShell(vm: MqvpnViewModel, settingsVm: SettingsViewModel, nav: NavHostCont
                 nav.navigate("main") { popUpTo("setup") { inclusive = true }; launchSingleTop = true }
             })
         }
-        composable("main") { MainTabs(vm, settingsVm) }
-        composable("reorderDetail") { DetailStub("Reorder") }
-        composable("redundantDetail") { DetailStub("Redundant") }
-        composable("hybridDetail") { DetailStub("Hybrid") }
+        composable("main") { MainTabs(vm, settingsVm, nav) }
+        composable("reorderDetail") { ReorderDetailScreen(settingsVm, onBack = { nav.popBackStack() }) }
+        composable("redundantDetail") { RedundantDetailScreen(settingsVm, onBack = { nav.popBackStack() }) }
+        composable("hybridDetail") { HybridDetailScreen(settingsVm, onBack = { nav.popBackStack() }) }
     }
 }
 
 @Composable
-private fun MainTabs(vm: MqvpnViewModel, settingsVm: SettingsViewModel) {
+private fun MainTabs(vm: MqvpnViewModel, settingsVm: SettingsViewModel, nav: NavHostController) {
     val c = LocalMqColors.current
     var tab by rememberSaveable { mutableStateOf(Tab.HOME) }
     Scaffold(
@@ -94,15 +94,9 @@ private fun MainTabs(vm: MqvpnViewModel, settingsVm: SettingsViewModel) {
         val m = Modifier.padding(pad)
         when (tab) {
             Tab.HOME -> HomeScreen(vm, settingsVm, { tab = Tab.PATHS }, { tab = Tab.SETTINGS }, m)
-            Tab.PATHS -> PathsScreen(m)
+            Tab.PATHS -> PathsScreen(vm, settingsVm, m)
             Tab.STATS -> StatsScreen(vm, settingsVm, { tab = Tab.HOME }, m)
-            Tab.SETTINGS -> SettingsScreen(m)
+            Tab.SETTINGS -> SettingsScreen(vm, settingsVm, { nav.navigate(it) }, m)
         }
     }
-}
-
-@Composable
-private fun DetailStub(title: String) {
-    val c = LocalMqColors.current
-    Box(Modifier.fillMaxSize().background(c.win)) { Text(title, color = c.text) }
 }

@@ -17,7 +17,6 @@ import io.mockk.mockk
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
@@ -65,182 +64,15 @@ class SettingsViewModelTest {
     }
 
     @Test
-    fun `repository emission populates loaded`() = runTest(testDispatcher) {
-        advanceUntilIdle()
-
-        assertEquals(testSettings, viewModel.loaded.value)
-        assertNull(viewModel.loadError.value)
-    }
-
-    @Test
-    fun `repository read failure surfaces loadError and leaves loaded null`() = runTest(testDispatcher) {
+    fun `repository read failure surfaces loadError and leaves draft null`() = runTest(testDispatcher) {
         val failingRepository = mockk<SettingsRepository>(relaxed = true).also {
             every { it.settings } returns flow { throw IllegalStateException("boom") }
         }
         val failingViewModel = SettingsViewModel(failingRepository, mockManager)
         advanceUntilIdle()
 
-        assertNull(failingViewModel.loaded.value)
+        assertNull(failingViewModel.draft.value)
         assertEquals("Load failed: boom", failingViewModel.loadError.value)
-    }
-
-    @Test
-    fun `save with valid draft persists and sets saveDone until consumed`() = runTest(testDispatcher) {
-        advanceUntilIdle()
-        val draft = testSettings.copy(serverAddress = "new.example.com")
-
-        viewModel.save(draft)
-        advanceUntilIdle()
-
-        coVerify(exactly = 1) { mockRepository.save(draft) }
-        assertFalse(viewModel.isSaving.value)
-        assertTrue(viewModel.saveDone.value)
-        assertNull(viewModel.saveError.value)
-
-        viewModel.consumeSaveDone()
-        assertFalse(viewModel.saveDone.value)
-    }
-
-    @Test
-    fun `save failure surfaces saveError and leaves saveDone false`() = runTest(testDispatcher) {
-        advanceUntilIdle()
-        val failingRepository = mockk<SettingsRepository>(relaxed = true).also {
-            every { it.settings } returns settingsFlow
-            coEvery { it.save(any()) } throws IllegalStateException("boom")
-        }
-        val failingViewModel = SettingsViewModel(failingRepository, mockManager)
-        advanceUntilIdle()
-
-        failingViewModel.save(testSettings)
-        advanceUntilIdle()
-
-        assertEquals("Save failed: boom", failingViewModel.saveError.value)
-        assertFalse(failingViewModel.saveDone.value)
-        assertFalse(failingViewModel.isSaving.value)
-    }
-
-    @Test
-    fun `save after unconsumed success resets saveDone when the new attempt fails`() = runTest(testDispatcher) {
-        advanceUntilIdle()
-
-        // First save succeeds; saveDone stays true because the UI hasn't
-        // consumed it yet.
-        viewModel.save(testSettings)
-        advanceUntilIdle()
-        assertTrue(viewModel.saveDone.value)
-        assertNull(viewModel.saveError.value)
-
-        // Second attempt fails while the first success is still unconsumed:
-        // saveDone must flip back to false so the UI does not navigate away
-        // on a failed save.
-        coEvery { mockRepository.save(any()) } throws IllegalStateException("boom")
-        viewModel.save(testSettings.copy(serverAddress = "other.example.com"))
-        advanceUntilIdle()
-
-        assertFalse(viewModel.saveDone.value)
-        assertEquals("Save failed: boom", viewModel.saveError.value)
-        assertFalse(viewModel.isSaving.value)
-
-        // A subsequent successful save clears saveError.
-        coEvery { mockRepository.save(any()) } returns Unit
-        viewModel.save(testSettings)
-        advanceUntilIdle()
-
-        assertNull(viewModel.saveError.value)
-        assertTrue(viewModel.saveDone.value)
-    }
-
-    @Test
-    fun `second save while first is in flight is ignored`() = runTest(testDispatcher) {
-        advanceUntilIdle()
-        val gate = CompletableDeferred<Unit>()
-        val slowRepository = mockk<SettingsRepository>(relaxed = true).also {
-            every { it.settings } returns settingsFlow
-            coEvery { it.save(any()) } coAnswers { gate.await() }
-        }
-        val slowViewModel = SettingsViewModel(slowRepository, mockManager)
-        advanceUntilIdle()
-
-        slowViewModel.save(testSettings)
-        slowViewModel.save(testSettings)
-        advanceUntilIdle()
-
-        assertTrue(slowViewModel.isSaving.value)
-        coVerify(exactly = 1) { slowRepository.save(any()) }
-
-        gate.complete(Unit)
-        advanceUntilIdle()
-    }
-
-    @Test
-    fun `save while not editable is ignored`() = runTest(testDispatcher) {
-        val info = TunnelInfo(
-            assignedIp = "10.0.0.2",
-            prefix = 24,
-            serverIp = "1.2.3.4",
-            serverPrefix = 24,
-            mtu = 1400,
-        )
-        stateFlow.value = MqvpnState.Connected(info)
-        advanceUntilIdle()
-
-        assertFalse(viewModel.isEditable.value)
-
-        viewModel.save(testSettings)
-        advanceUntilIdle()
-
-        coVerify(exactly = 0) { mockRepository.save(any()) }
-    }
-
-    @Test
-    fun `save with invalid draft is ignored`() = runTest(testDispatcher) {
-        advanceUntilIdle()
-        val invalidDraft = testSettings.copy(serverAddress = "   ")
-
-        viewModel.save(invalidDraft)
-        advanceUntilIdle()
-
-        coVerify(exactly = 0) { mockRepository.save(any()) }
-    }
-
-    @Test
-    fun `save before the initial load completes is ignored`() = runTest(testDispatcher) {
-        // Repository emission is gated behind a signal that never fires in
-        // this test, so `loaded` stays null — simulates a save() call that
-        // races ahead of the first repository read (e.g. right after
-        // process recreation with a rememberSaveable-restored draft).
-        val signal = MutableSharedFlow<DemoSettings>()
-        val neverLoadedRepository = mockk<SettingsRepository>(relaxed = true).also {
-            every { it.settings } returns signal
-            coEvery { it.save(any()) } returns Unit
-        }
-        val neverLoadedViewModel = SettingsViewModel(neverLoadedRepository, mockManager)
-        advanceUntilIdle()
-
-        assertNull(neverLoadedViewModel.loaded.value)
-
-        neverLoadedViewModel.save(testSettings)
-        advanceUntilIdle()
-
-        coVerify(exactly = 0) { neverLoadedRepository.save(any()) }
-        assertFalse(neverLoadedViewModel.isSaving.value)
-    }
-
-    @Test
-    fun `save while loadError is set is ignored`() = runTest(testDispatcher) {
-        val failingRepository = mockk<SettingsRepository>(relaxed = true).also {
-            every { it.settings } returns flow { throw IllegalStateException("boom") }
-            coEvery { it.save(any()) } returns Unit
-        }
-        val failingViewModel = SettingsViewModel(failingRepository, mockManager)
-        advanceUntilIdle()
-
-        assertEquals("Load failed: boom", failingViewModel.loadError.value)
-
-        failingViewModel.save(testSettings)
-        advanceUntilIdle()
-
-        coVerify(exactly = 0) { failingRepository.save(any()) }
     }
 
     @Test

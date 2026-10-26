@@ -43,7 +43,7 @@ private fun PathType.cardName() = when (this) {
     PathType.OTHER -> "Other"
 }
 
-/** Iface names are "<type>-<n>" (NetworkMonitor.networkName); the legacy prefixes match PathCard.kt. */
+/** Iface names are "<type>-<n>" (NetworkMonitor.networkName); legacy prefixes kept. */
 private fun ifaceType(iface: String): PathType = when {
     iface.startsWith("wifi") || iface.startsWith("wlan") -> PathType.WIFI
     iface.startsWith("cellular") || iface.startsWith("rmnet") || iface.startsWith("ccmni") -> PathType.CELLULAR
@@ -52,7 +52,7 @@ private fun ifaceType(iface: String): PathType = when {
     else -> PathType.OTHER
 }
 
-private const val PATH_STATUS_ACTIVE = 1 // see pathStatusName in PathCard.kt
+private const val PATH_STATUS_ACTIVE = 1 // see pathStatusName in EventLog.kt
 
 /** Unavailable sub-lines: desktop "No cable" (backend.ts:86) and the phone mock's Bluetooth line. */
 private fun PathType.unavailableSub() = when (this) {
