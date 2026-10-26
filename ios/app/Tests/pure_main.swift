@@ -7,7 +7,7 @@ import Foundation
 @main struct PureMain {
     static func main() async {
         setvbuf(stdout, nil, _IONBF, 0)
-        let n = runPureCases()
+        let n = runPureCases() + (await runSettingsCoreCases())
         print(n == 0 ? "pure tests: ALL PASS" : "pure tests: \(n) FAILURES")
         exit(n == 0 ? 0 : 1)
     }

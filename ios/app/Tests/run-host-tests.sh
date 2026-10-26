@@ -30,6 +30,7 @@ swiftc -framework Security -o "$OUT" \
     "$APP/ReorderHistory.swift" \
     "$APP/ChartGeometry.swift" \
     "$APP/Derive.swift" \
+    "$APP/SettingsCore.swift" \
     "$DIR/PureCases.swift" \
     "$DIR/main.swift"
 "$OUT"

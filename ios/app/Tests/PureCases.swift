@@ -497,3 +497,187 @@ func runPureCases() -> Int {
 
     return failures
 }
+
+// MARK: - SettingsCore (async, @MainActor)
+
+private final class FakeDraftStore: DraftStore {
+    var persisted: [AppDraft] = []
+    var failNext = false
+    var onPersist: ((AppDraft) async -> Void)?
+    struct Boom: Error {}
+    func persist(_ draft: AppDraft) async throws {
+        await onPersist?(draft)
+        await Task.yield()
+        if failNext { failNext = false; throw Boom() }
+        persisted.append(draft)
+    }
+}
+
+/// Returns the failure count. Separate from runPureCases() because the
+/// SettingsCore contract is async; both runners call both.
+@MainActor
+func runSettingsCoreCases() async -> Int {
+    var failures = 0
+    func check(_ cond: Bool, _ msg: String) { if !cond { failures += 1; print("FAIL: \(msg)") } }
+
+    func good() -> AppDraft {
+        var d = AppDraft()
+        d.addressText = "example.net:443"
+        return d
+    }
+    func make(_ d0: AppDraft? = nil, persisted: Bool = true) -> (SettingsCore, FakeDraftStore) {
+        let d = d0 ?? good()
+        let st = FakeDraftStore()
+        let c = SettingsCore(store: st)
+        c.load(initial: d, persisted: persisted)
+        return (c, st)
+    }
+
+    // fieldErrors matrix
+    var d = AppDraft()
+    check(d.fieldErrors()["address"] == "Enter a server address" && !d.isValid, "err blank address")
+    d.addressText = "host:99999"
+    check(d.fieldErrors()["address"] == "Port must be 1-65535", "err bad port")
+    d.addressText = "[fd00::1]:0"
+    check(d.fieldErrors()["address"] == "Port must be 1-65535", "err bad v6 port")
+    d.addressText = "a b"
+    check(d.fieldErrors()["address"] == "Enter a server address", "err whitespace address")
+    d.addressText = "host"
+    check(d.isValid, "bare host valid")
+    d.reorder.enabled = true
+    check(d.fieldErrors()["reorderPorts"] == "Enter at least one valid port", "err reorder no ports")
+    d.reorder.portsText = "bad, 99999"
+    check(d.fieldErrors()["reorderPorts"] != nil, "err reorder no valid ports")
+    d.reorder.portsText = "bad, 443"
+    check(d.isValid && d.reorderPorts == [443], "reorder skips bad tokens")
+    d.split.redundantEnabled = true
+    d.redundantPortsText = "443,bad"
+    check(d.fieldErrors()["redundantPorts"] == "Enter ports as a comma-separated list (1-65535)", "err redundant raw")
+    d.redundantPortsText = ""
+    check(d.isValid, "redundant blank = all UDP valid")
+    d.split.redundantEnabled = false
+    d.redundantPortsText = "443,bad"
+    check(d.isValid, "redundant text ignored when off")
+    d.paths = PathPolicy(wifi: false, cellular: false)
+    check(d.fieldErrors()["paths"] == "Turn on at least one connection type", "err paths")
+
+    // derivedSplit: valid edit never carries a stale malformed flag
+    var m = good()
+    m.split = SplitSettings(scheduler: 1, redundantEnabled: true, redundantPorts: [], redundantPortsMalformed: true)
+    check(m.derivedSplit.redundantPortsMalformed, "untouched malformed stays fail-closed")
+    m.redundantPortsText = "443, 8443"
+    check(!m.derivedSplit.redundantPortsMalformed && m.derivedSplit.redundantPorts == [443, 8443], "valid text clears malformed")
+    check(m.derivedSplit.scheduler == 1, "derivedSplit keeps scheduler")
+
+    // lastPersisted init => flush true immediately, nothing persisted
+    do {
+        let (c, st) = make()
+        check(await c.flush() && st.persisted.isEmpty, "flush true immediately when persisted")
+        let (c2, _) = make(good(), persisted: false)
+        check(c2.lastPersisted == nil, "absent: lastPersisted nil")
+    }
+    // locked via editable
+    do {
+        let (c, st) = make()
+        c.editable = { false }
+        c.update { $0.insecure = true }
+        check(!c.draft.insecure && st.persisted.isEmpty, "locked: update ignored")
+        _ = await c.flush()
+        check(st.persisted.isEmpty, "locked: nothing saved")
+    }
+    // valid edit autosaves
+    do {
+        let (c, st) = make()
+        c.update { $0.insecure = true }
+        check(await c.flush(), "autosave flush true")
+        check(st.persisted.last?.insecure == true && c.lastPersisted == c.draft, "autosave persisted")
+    }
+    // invalid blocks saves, incl raw 443,bad
+    do {
+        let (c, st) = make()
+        c.update { $0.split = $0.split.tapped(.redundant); $0.redundantPortsText = "443,bad" }
+        check(c.fieldErrors["redundantPorts"] != nil, "invalid: error shown")
+        check(!(await c.flush()) && st.persisted.isEmpty, "invalid: flush false, nothing saved")
+        c.update { $0.redundantPortsText = "443" }
+        check(await c.flush() && st.persisted.last?.derivedSplit.redundantPorts == [443], "fixed text saves")
+    }
+    // latest wins, no lost update (edit lands mid-persist)
+    do {
+        let (c, st) = make()
+        var first = true
+        st.onPersist = { _ in
+            if first { first = false; await MainActor.run { c.update { $0.tlsServerName = "b" } } }
+        }
+        c.update { $0.insecure = true }
+        check(await c.flush(), "latest-wins flush true")
+        check(st.persisted.count == 2 && st.persisted.last?.tlsServerName == "b" && st.persisted.last?.insecure == true,
+              "latest-wins: both edits land, last persisted is newest")
+        check(c.lastPersisted == c.draft, "latest-wins lastPersisted == draft")
+    }
+    // conflation: sync burst => one persist
+    do {
+        let (c, st) = make()
+        c.update { $0.tlsServerName = "a" }
+        c.update { $0.tlsServerName = "ab" }
+        c.update { $0.tlsServerName = "abc" }
+        check(await c.flush() && st.persisted.count == 1 && st.persisted[0].tlsServerName == "abc", "burst conflates to one persist")
+    }
+    // saveError surfaces, flush false, recovers
+    do {
+        let (c, st) = make()
+        st.failNext = true
+        c.update { $0.insecure = true }
+        check(!(await c.flush()), "failure: flush false")
+        check(c.saveError != nil && c.lastPersisted != c.draft, "failure: saveError set")
+        c.update { $0.tlsServerName = "x" }
+        check(await c.flush() && c.saveError == nil, "failure: next edit recovers")
+    }
+    // legacy combo (scheduler nil) preserved on unrelated edit
+    do {
+        var l = good()
+        l.split = SplitSettings(scheduler: nil, redundantEnabled: false, redundantPorts: [], redundantPortsMalformed: false)
+        let (c, st) = make(l)
+        c.update { $0.insecure = true }
+        _ = await c.flush()
+        check(st.persisted.last?.derivedSplit.scheduler == nil, "legacy scheduler nil preserved")
+    }
+    // valid ports edit over a malformed list persists malformed=false
+    do {
+        var l = good()
+        l.split = SplitSettings(scheduler: 0, redundantEnabled: true, redundantPorts: [], redundantPortsMalformed: true)
+        let (c, st) = make(l)
+        c.update { $0.insecure = true }
+        _ = await c.flush()
+        check(st.persisted.last?.derivedSplit.redundantPortsMalformed == true, "unrelated edit keeps malformed")
+        c.update { $0.redundantPortsText = "4433" }
+        _ = await c.flush()
+        check(st.persisted.last?.derivedSplit.redundantPortsMalformed == false
+              && st.persisted.last?.derivedSplit.redundantPorts == [4433], "valid ports edit clears malformed")
+    }
+    // autosave=false queues nothing until commitFirst
+    do {
+        let (c, st) = make(AppDraft(), persisted: false)
+        c.autosave = false
+        c.update { $0.addressText = "example.net" }
+        check(!(await c.flush()) && st.persisted.isEmpty, "setup: flush persists nothing")
+        check(await c.commitFirst() && st.persisted.count == 1 && c.autosave && c.lastPersisted == c.draft, "commitFirst persists + enables autosave")
+        c.update { $0.insecure = true }
+        check(await c.flush() && st.persisted.count == 2, "autosave on after commitFirst")
+    }
+    // commitFirst refuses an invalid draft; surfaces failure
+    do {
+        let (c, st) = make(AppDraft(), persisted: false)
+        c.autosave = false
+        check(!(await c.commitFirst()) && st.persisted.isEmpty && !c.autosave, "commitFirst invalid refused")
+        c.update { $0.addressText = "example.net" }
+        st.failNext = true
+        check(!(await c.commitFirst()) && c.saveError != nil && !c.autosave, "commitFirst failure")
+    }
+    // skip: autosave true in absent => first valid edit persists
+    do {
+        let (c, st) = make(AppDraft(), persisted: false)
+        c.update { $0.addressText = "example.net" }
+        check(await c.flush() && st.persisted.count == 1, "post-skip valid edit autosaves")
+    }
+    return failures
+}

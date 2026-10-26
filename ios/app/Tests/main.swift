@@ -481,5 +481,6 @@ do {
 }
 
 failures += runPureCases()
+failures += await runSettingsCoreCases()
 
 if failures == 0 { print("host tests: ALL PASS") } else { print("host tests: \(failures) FAILURES"); exit(1) }
