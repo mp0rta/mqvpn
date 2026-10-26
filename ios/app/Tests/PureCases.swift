@@ -470,5 +470,30 @@ func runPureCases() -> Int {
         check(!schedulerApplied(requested: nil, server: 0) && schedulerApplied(requested: 1, server: 1) && !schedulerApplied(requested: 1, server: 0) && !schedulerApplied(requested: 1, server: nil), "ss applied")
     }
 
+    // TunnelSessionCoordinator reconnectEnabled
+    do {
+        typealias C = TunnelSessionCoordinator<Int>
+        func established(_ reconnect: Bool) -> C {
+            var c = C(reconnectEnabled: reconnect)
+            _ = c.handle(.configReady(1)); _ = c.handle(.settingsApplied(nil))
+            return c
+        }
+        // regression pins (reconnectEnabled defaults to true)
+        var t = established(true)
+        check(t.handle(.closed(reason: -10)) == [.enterReasserting] && t.phase == .reasserting, "coord on: -10 reasserts")
+        var d = C()
+        _ = d.handle(.configReady(1)); _ = d.handle(.settingsApplied(nil))
+        check(d.handle(.closed(reason: -6)) == [.enterReasserting], "coord default: -6 reasserts")
+        var s = C()
+        check(s.handle(.closed(reason: -6)) == [.failStart(.core(-6))], "coord on: -6 during start fails start")
+        // reconnect off
+        var f = established(false)
+        check(f.handle(.closed(reason: -10)) == [.cancelTunnel(.core(-10))] && f.phase == .terminal, "coord off: -10 terminal")
+        var g = C(reconnectEnabled: false)
+        check(g.handle(.closed(reason: -6)) == [.failStart(.core(-6))] && g.phase == .terminal, "coord off: -6 during start failStart")
+        var h = established(false)
+        check(h.handle(.closed(reason: -4)) == [.cancelTunnel(.core(-4))] && h.phase == .terminal, "coord off: -4 terminal")
+    }
+
     return failures
 }

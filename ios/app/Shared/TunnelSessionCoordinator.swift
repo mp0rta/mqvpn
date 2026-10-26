@@ -56,6 +56,16 @@ struct TunnelSessionCoordinator<Info> {
     /// Shared/ compiles without the C module; T5 pins the values.
     private static var transientReasons: Set<Int32> { [-10, -6] }
 
+    /// False when the user turned auto-reconnect off: any close after
+    /// establishment is terminal. Pre-establishment closes are unaffected.
+    private let reconnectEnabled: Bool
+
+    init(reconnectEnabled: Bool = true) { self.reconnectEnabled = reconnectEnabled }
+
+    private func transient(reason: Int32) -> Bool {
+        reconnectEnabled && Self.transientReasons.contains(reason)
+    }
+
     private(set) var phase: Phase = .starting
     private(set) var apply: Apply = .idle
 
@@ -116,7 +126,7 @@ struct TunnelSessionCoordinator<Info> {
                 phase = .terminal
                 return [.failStart(.core(reason))]
             }
-            if Self.transientReasons.contains(reason) {
+            if transient(reason: reason) {
                 if case .applying = apply {
                     // The in-flight apply belongs to the dead connection.
                     apply = .applying(pending: nil, stale: true)
