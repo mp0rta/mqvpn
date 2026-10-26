@@ -186,7 +186,7 @@ usually keep a live stream going. Off by default.
 
 ```ini
 [Multipath]
-Redundant = on
+Redundant = true
 RedundantPorts = 4200    # optional: only UDP to these destination ports
 CC = bbr                 # recommended with redundant mode
 ```
@@ -207,10 +207,10 @@ On Android, turn on the **Redundant Mode** switch (the port list is the
   with some room to spare. For a 20 Mbps stream, every connection must manage
   at least 20 Mbps up. One connection slowing down for a while is fine as long
   as another can still carry the stream. When none can, mqvpn stops copying
-  and sends each packet once, as with `Redundant = off`, and tries copying
+  and sends each packet once, as with `Redundant = false`, and tries copying
   again later once a connection looks fast enough; the log notes each switch
   (`redundant mode: ...`). The stream can still lose more packets than with
-  `Redundant = off`, so if your connections are often slower than the stream,
+  `Redundant = false`, so if your connections are often slower than the stream,
   leave redundant mode off.
 - **Use `CC = bbr` on the client (recommended)**: `CC` decides how fast mqvpn
   sends data. Cellular connections are wireless, so they can lose a few
@@ -239,7 +239,7 @@ On Android, turn on the **Redundant Mode** switch (the port list is the
 
 This replaces the former `Reinjection = dgram` mode, which has been removed.
 A config file that still says `dgram` prints a warning and runs with
-`Reinjection = off`; use `Redundant = on` instead.
+`Reinjection = off`; use `Redundant = true` instead.
 
 ## Path Weighting
 

@@ -128,7 +128,7 @@ PSK=$("$MQVPN" --genkey 2>/dev/null)
 SERVER_EXTRA=()
 CLIENT_EXTRA=()
 if [ "$INNER6" -eq 1 ]; then
-    printf '[Reorder]\nEnabled = on\n' >"${WORK_DIR}/reorder.ini"
+    printf '[Reorder]\nEnabled = true\n' >"${WORK_DIR}/reorder.ini"
     SERVER_EXTRA=(--subnet6 fd00:abcd::/112 --config "${WORK_DIR}/reorder.ini")
     CLIENT_EXTRA=(--config "${WORK_DIR}/reorder.ini")
 fi

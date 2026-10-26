@@ -515,7 +515,7 @@ def build_off_comparison(rows_on, off_rows, knee_frac=KNEE_FRAC_DEFAULT,
             f"{_fmt(d_rec, 1)} | {verdict} |"
         )
     md.append("")
-    md.append("- OFF goodput = median across `--off-csv` repeats (Enabled=off, RAW).")
+    md.append("- OFF goodput = median across `--off-csv` repeats (Enabled=false, RAW).")
     md.append("- best-ON = max-goodput frontier point (ceiling, latency ignored); "
               "rec-ON = recommended default = goodput knee (smallest wait, "
               f"tie-break smallest cap, reaching >={knee_frac:.0%} of peak goodput).")

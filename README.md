@@ -230,7 +230,7 @@ Scheduler = wlb
 Enabled = true
 
 [Reorder]
-Enabled = on
+Enabled = true
 ```
 
 ```ini
@@ -256,7 +256,7 @@ Path = wlan0
 # Enabled = true
 
 # [Reorder]                     # opt in for bulk inner QUIC; see the [Reorder] section
-# Enabled = on
+# Enabled = true
 ```
 
 ### JSON config
@@ -282,7 +282,7 @@ Server example:
     "scheduler": "wlb",
     "cc": "bbr2",
     "hybrid": { "enabled": true },
-    "reorder": { "enabled": "on" }
+    "reorder": { "enabled": true }
 }
 ```
 
@@ -361,7 +361,7 @@ it) and a no-op when either side has it off.
 
 ```ini
 [Reorder]
-Enabled = on
+Enabled = true
 MaxWaitMs = 50           # wait for a missing datagram this long (hold nominally <= 2x)
 CapPackets = 1024        # per-flow buffer cap (packets)
 
@@ -396,7 +396,7 @@ ReinjectionDeadlineLowerBoundMs = 20  # deadline mode: lower clamp (1-60000; cla
 - `deadline` — insurance for bonded tunnels running the [hybrid TCP lane](#hybrid-mode-tcp-lane). Most of the time it does nothing and costs nothing. When a link suddenly goes bad, data already sent on it must be recovered before in-order delivery lets anything behind it through — even data that already arrived via the healthy link — which in bad cases stalls transfers for up to a second; `deadline` resends the late data on the healthy link right away, shrinking that stall to a barely noticeable blip. Protects stream (TCP-lane) traffic only — with the hybrid lane disabled its effect is limited to control streams and a warning is logged. Protects TCP/stream traffic only — with the hybrid lane disabled its effect is limited to control streams and a warning is logged.
 - `idle` — low-cost smoothing for interactive use (SSH, browsing): whenever the tunnel has nothing else to send, it uses that spare moment to send a copy of recent still-unconfirmed data over another link, shaving off occasional hiccups. No tuning needed.
 
-The former `dgram` value was removed. To keep live UDP streams alive across a dropped link, use redundant mode, which covers client uploads (`[Multipath] Redundant = on`; see the [website guide](https://docs.mqvpn.org/guide/multipath#redundant-mode)); every link should be able to carry the stream on its own (recommended).
+The former `dgram` value was removed. To keep live UDP streams alive across a dropped link, use redundant mode, which covers client uploads (`[Multipath] Redundant = true`; see the [website guide](https://docs.mqvpn.org/guide/multipath#redundant-mode)); every link should be able to carry the stream on its own (recommended).
 
 Per-path duplicated bytes are reported as `reinject_tx_bytes` in the control
 API `get_status` response.

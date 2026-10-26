@@ -119,17 +119,17 @@ run_vpn() {
 
     local server_conf="" client_conf=""
     if [ "${SRT_BENCH_REORDER:-off}" = "on" ]; then
-        server_conf+=$'[Reorder]\nEnabled = on\n'
-        client_conf+=$'[Reorder]\nEnabled = on\n'
+        server_conf+=$'[Reorder]\nEnabled = true\n'
+        client_conf+=$'[Reorder]\nEnabled = true\n'
     fi
     # VPN_REINJ=<mode> sets [Multipath] Reinjection on the client only (no CLI
     # flag exists): the client is the SRT sender, and a phone would enable it
     # in its own config while the shared server keeps the default.
-    # VPN_REINJ=redundant sets Redundant = on instead (RedundantPorts from
+    # VPN_REINJ=redundant sets Redundant = true instead (RedundantPorts from
     # SRT_BENCH_RED_PORTS when set).
     local reinj="${VPN_REINJ:-off}"
     if [ "$reinj" = "redundant" ]; then
-        client_conf+=$'[Multipath]\nRedundant = on\n'
+        client_conf+=$'[Multipath]\nRedundant = true\n'
         if [ -n "${SRT_BENCH_RED_PORTS:-}" ]; then
             client_conf+="RedundantPorts = ${SRT_BENCH_RED_PORTS}"$'\n'
         fi

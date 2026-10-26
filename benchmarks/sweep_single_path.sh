@@ -15,7 +15,7 @@
 #
 # Differences from sweep_reorder.sh:
 #   * N_PATHS=1 (only veth-a0/veth-a1 exist).
-#   * No reorder-param sweep — [Reorder] Enabled=off (a single path has no
+#   * No reorder-param sweep — [Reorder] Enabled=false (a single path has no
 #     cross-path reordering for the buffer to fix).
 #   * Per env, two cells: the CSV `leg` column carries A for Path A's netem
 #     and B for Path B's netem, both applied to the same lone veth pair.
@@ -143,7 +143,7 @@ apply_single_netem() {
 write_ini_off() {
     {
         echo "[Reorder]"
-        echo "Enabled = off"
+        echo "Enabled = false"
     } >"$INI_FILE"
 }
 
