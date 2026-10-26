@@ -373,6 +373,12 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/test_multiclient.sh
 
+      - name: E2E multi-client isolation test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_multiclient_isolation_test.sh
+
       - name: E2E NAT test (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
@@ -722,6 +728,9 @@ jobs:
 
       - name: Multi-client test (netns)
         run: sudo scripts/ci_e2e/test_multiclient.sh
+
+      - name: Multi-client isolation test (netns)
+        run: sudo scripts/ci_e2e/run_multiclient_isolation_test.sh
 
       - name: NAT test (netns)
         run: sudo scripts/ci_e2e/run_nat_test.sh
