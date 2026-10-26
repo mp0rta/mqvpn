@@ -6,7 +6,7 @@ mqvpn は MASQUE CONNECT-IP (RFC 9484) と、Multipath QUIC をベースとし�
 
 ### サーバー
 
-Ubuntu/Debian の VPS で以下を実行すると、バイナリのインストールから証明書・認証キー・設定ファイルの生成までを一括で行います。
+Ubuntu/Debian の VPS で以下を実行すると、バイナリのインストールから証明書・認証キー・設定ファイルの生成までを一括で行います。生成される設定ではサーバー側のハイブリッドモードと reorder バッファが有効になっており、クライアント側でも有効にしたときだけ動作します。
 
 ```bash
 curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh | sudo bash

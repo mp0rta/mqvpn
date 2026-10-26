@@ -126,7 +126,7 @@ https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
 curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh | sudo bash
 ```
 
-This downloads the latest release, installs the binary, and generates a self-signed TLS certificate, auth key, and server config at `/etc/mqvpn/server.conf`. Add `--start` to start the server and register it for automatic startup on boot:
+This downloads the latest release, installs the binary, and generates a self-signed TLS certificate, auth key, and server config at `/etc/mqvpn/server.conf`. The generated config turns on hybrid mode and the reorder buffer on the server side; each takes effect only for clients that also turn it on. Add `--start` to start the server and register it for automatic startup on boot:
 
 ```bash
 curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \

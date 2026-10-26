@@ -301,6 +301,14 @@ if [ ! -f /etc/mqvpn/server.conf ]; then
         echo "[Multipath]"
         echo "Scheduler = wlb"
         echo
+        # Server side only offers these; each takes effect for a client that
+        # also enables it.
+        echo "[Hybrid]"
+        echo "Enabled = true"
+        echo
+        echo "[Reorder]"
+        echo "Enabled = true"
+        echo
         if [ "$ENABLE_CONTROL" -eq 1 ]; then
             echo "[Control]"
             echo "Listen = 127.0.0.1:$CONTROL_PORT"
