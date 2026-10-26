@@ -717,7 +717,11 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install runtime dependencies
+        # A stuck mirror otherwise eats the whole job timeout.
+        timeout-minutes: 5
         run: |
+          # The Azure mirror is often throttled and stalls apt for 10+ minutes.
+          sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-get install -y libevent-dev iptables iperf3 netcat-openbsd
 
@@ -768,7 +772,11 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install runtime dependencies
+        # A stuck mirror otherwise eats the whole job timeout.
+        timeout-minutes: 5
         run: |
+          # The Azure mirror is often throttled and stalls apt for 10+ minutes.
+          sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-get install -y libevent-dev iptables
 
@@ -801,7 +809,11 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install runtime dependencies
+        # A stuck mirror otherwise eats the whole job timeout.
+        timeout-minutes: 5
         run: |
+          # The Azure mirror is often throttled and stalls apt for 10+ minutes.
+          sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-get install -y cmake libevent-dev iptables
 
