@@ -35,8 +35,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     override func startTunnel(options: [String: NSObject]?) async throws {
         let proto = self.protocolConfiguration as? NETunnelProviderProtocol
         let providerConfig = proto?.providerConfiguration
+        let authKey: String
+        do {
+            authKey = try PSKStore.load(proto?.passwordReference)
+        } catch {
+            throw NSError(domain: "org.mqvpn.app", code: 12,
+                          userInfo: [NSLocalizedDescriptionKey: "access key unavailable — unlock the device and retry"])
+        }
         guard let server = ServerSettings(providerConfiguration: providerConfig,
-                                          authKey: PSKStore.load(proto?.passwordReference)) else {
+                                          authKey: authKey) else {
             throw NSError(domain: "org.mqvpn.app", code: 10,
                           userInfo: [NSLocalizedDescriptionKey: "server not configured"])
         }

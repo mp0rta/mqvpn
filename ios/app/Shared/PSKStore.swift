@@ -4,52 +4,51 @@
 import Foundation
 import Security
 
-/// The PSK as one keychain item, shared by the app (writes) and the extension
+/// The PSK as keychain items, shared by the app (writes) and the extension
 /// (reads) through the keychain-access-groups entitlement both targets carry:
 /// its first entry is the default group new items land in. The extension finds
 /// the item by NETunnelProviderProtocol.passwordReference.
+///
+/// Each save adds a NEW item and the caller deletes the old one only after the
+/// VPN configuration that references the new one is committed, so a failed
+/// commit never leaves the saved configuration pointing at a changed PSK.
 enum PSKStore {
-    private static let item: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: "org.mqvpn.app",
-        kSecAttrAccount as String: "psk",
-    ]
-
-    /// Stores `psk` in place (the persistent reference stays the same across
-    /// updates) and returns that reference; an empty PSK deletes the item.
-    static func save(_ psk: String) throws -> Data? {
-        guard !psk.isEmpty else {
-            let st = SecItemDelete(item as CFDictionary)
-            guard st == errSecSuccess || st == errSecItemNotFound else { throw error(st) }
-            return nil
-        }
-        let value = Data(psk.utf8)
-        var st = SecItemUpdate(item as CFDictionary,
-                               [kSecValueData as String: value] as CFDictionary)
-        if st == errSecItemNotFound {
-            var add = item
-            add[kSecValueData as String] = value
+    /// Adds `psk` as a new item and returns its persistent reference; an empty
+    /// PSK stores nothing and returns nil.
+    static func add(_ psk: String) throws -> Data? {
+        guard !psk.isEmpty else { return nil }
+        let attrs: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "org.mqvpn.app",
+            kSecAttrAccount as String: "psk-\(UUID().uuidString)",
+            kSecValueData as String: Data(psk.utf8),
             // The extension may start before the user unlocks (on-demand).
-            add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            st = SecItemAdd(add as CFDictionary, nil)
-        }
-        guard st == errSecSuccess else { throw error(st) }
-        var query = item
-        query[kSecReturnPersistentRef as String] = true
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecReturnPersistentRef as String: true,
+        ]
         var ref: CFTypeRef?
-        st = SecItemCopyMatching(query as CFDictionary, &ref)
+        let st = SecItemAdd(attrs as CFDictionary, &ref)
         guard st == errSecSuccess, let data = ref as? Data else { throw error(st) }
         return data
     }
 
-    /// The PSK behind `ref`; "" when there is no reference or no item.
-    static func load(_ ref: Data?) -> String {
+    /// Best-effort removal of the item behind `ref` (an orphan only wastes a
+    /// keychain slot).
+    static func delete(_ ref: Data?) {
+        guard let ref else { return }
+        SecItemDelete([kSecValuePersistentRef as String: ref] as CFDictionary)
+    }
+
+    /// The PSK behind `ref`; "" when there is no reference (no PSK configured).
+    /// Throws when a reference exists but its item cannot be read, e.g. before
+    /// the first unlock, so a tunnel never starts without its configured PSK.
+    static func load(_ ref: Data?) throws -> String {
         guard let ref else { return "" }
         let query: [String: Any] = [kSecValuePersistentRef as String: ref,
                                     kSecReturnData as String: true]
         var out: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess,
-              let data = out as? Data else { return "" }
+        let st = SecItemCopyMatching(query as CFDictionary, &out)
+        guard st == errSecSuccess, let data = out as? Data else { throw error(st) }
         return String(decoding: data, as: UTF8.self)
     }
 

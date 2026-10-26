@@ -78,14 +78,16 @@ final class TunnelController: ObservableObject {
                 statusText = "config error"; return
             }
             let pc = proto.providerConfiguration
-            if let s = ServerSettings(providerConfiguration: pc,
-                                      authKey: PSKStore.load(proto.passwordReference)) {
+            let psk = try? PSKStore.load(proto.passwordReference)
+            if let psk, let s = ServerSettings(providerConfiguration: pc, authKey: psk) {
                 serverSettings = s
             } else {
                 serverSettings = nil
                 // No keys = first run (the dashboard points to Settings);
                 // keys that do not parse = corrupt, reported, never overwritten.
-                if ServerSettings.serverKeysPresent(in: pc) {
+                if psk == nil {
+                    configError = "access key unreadable — re-enter in Settings"
+                } else if ServerSettings.serverKeysPresent(in: pc) {
                     configError = "server config invalid — re-enter in Settings"
                 }
             }
@@ -168,13 +170,22 @@ final class TunnelController: ObservableObject {
         }
         isSaving = true
         defer { isSaving = false }
-        // The keychain write is not rolled back if the commit below fails;
-        // the reference is stable, so a retry of the save converges.
-        proto.passwordReference = try PSKStore.save(server.authKey)
+        // New keychain item first; the old one goes only after the commit, so
+        // a failed save leaves the saved configuration and its PSK untouched.
+        let oldRef = proto.passwordReference
+        let newRef = try PSKStore.add(server.authKey)
+        proto.passwordReference = newRef
         var merged = server.toProviderConfiguration()
         for (k, v) in reorder.toProviderConfiguration() { merged[k] = v }
         for (k, v) in hybrid.toProviderConfiguration() { merged[k] = v }
-        try await performAtomicSave(NEConfigStore(manager: manager, proto: proto), merge: merged)
+        do {
+            try await performAtomicSave(NEConfigStore(manager: manager, proto: proto), merge: merged)
+        } catch {
+            proto.passwordReference = oldRef
+            PSKStore.delete(newRef)
+            throw error
+        }
+        PSKStore.delete(oldRef)
         serverSettings = server; reorderSettings = reorder; hybridSettings = hybrid; configError = nil   // only on success
     }
 
