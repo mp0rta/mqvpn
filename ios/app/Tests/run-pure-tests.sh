@@ -7,7 +7,9 @@ set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 SHARED="$DIR/../Shared"
 APP="$DIR/../App"
-PURE_SOURCES=()  # e.g. "$SHARED/Foo.swift"
+PURE_SOURCES=(
+    "$SHARED/ServerAddressField.swift"
+)
 if command -v swiftc >/dev/null 2>&1; then
     SWIFTC=(swiftc)
 else
