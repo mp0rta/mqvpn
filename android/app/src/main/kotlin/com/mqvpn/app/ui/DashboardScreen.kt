@@ -60,6 +60,7 @@ import java.util.Locale
 fun DashboardScreen(
     viewModel: MqvpnViewModel,
     onOpenSettings: () -> Unit,
+    onConnect: () -> Unit,
 ) {
     val state by viewModel.vpnState.collectAsStateWithLifecycle()
     val stats by viewModel.stats.collectAsStateWithLifecycle()
@@ -76,7 +77,7 @@ fun DashboardScreen(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
-            viewModel.connectWithSavedSettings()
+            onConnect()
         }
     }
 
@@ -85,7 +86,7 @@ fun DashboardScreen(
         if (prepareIntent != null) {
             vpnPermissionLauncher.launch(prepareIntent)
         } else {
-            viewModel.connectWithSavedSettings()
+            onConnect()
         }
     }
 

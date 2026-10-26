@@ -55,7 +55,7 @@ fun AppShell(vm: MqvpnViewModel, settingsVm: SettingsViewModel, nav: NavHostCont
     val start = rememberSaveable { startDestination(settings) }
     NavHost(nav, startDestination = start) {
         composable("setup") { SetupScreen() }
-        composable("main") { MainTabs() }
+        composable("main") { MainTabs(vm, settingsVm) }
         composable("reorderDetail") { DetailStub("Reorder") }
         composable("redundantDetail") { DetailStub("Redundant") }
         composable("hybridDetail") { DetailStub("Hybrid") }
@@ -63,7 +63,7 @@ fun AppShell(vm: MqvpnViewModel, settingsVm: SettingsViewModel, nav: NavHostCont
 }
 
 @Composable
-private fun MainTabs() {
+private fun MainTabs(vm: MqvpnViewModel, settingsVm: SettingsViewModel) {
     val c = LocalMqColors.current
     var tab by rememberSaveable { mutableStateOf(Tab.HOME) }
     Scaffold(
@@ -88,9 +88,9 @@ private fun MainTabs() {
     ) { pad ->
         val m = Modifier.padding(pad)
         when (tab) {
-            Tab.HOME -> HomeScreen(m)
+            Tab.HOME -> HomeScreen(vm, settingsVm, { tab = Tab.PATHS }, { tab = Tab.SETTINGS }, m)
             Tab.PATHS -> PathsScreen(m)
-            Tab.STATS -> StatsScreen(m)
+            Tab.STATS -> StatsScreen(vm, settingsVm, { tab = Tab.HOME }, m)
             Tab.SETTINGS -> SettingsScreen(m)
         }
     }

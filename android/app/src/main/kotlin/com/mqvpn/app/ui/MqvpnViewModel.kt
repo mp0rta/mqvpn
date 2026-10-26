@@ -6,7 +6,7 @@ package com.mqvpn.app.ui
 import android.content.Intent
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.mqvpn.app.data.SettingsRepository
+import com.mqvpn.app.data.DemoSettings
 import com.mqvpn.app.service.MyVpnService
 import com.mqvpn.sdk.core.MqvpnManager
 import com.mqvpn.sdk.core.model.MqvpnState
@@ -23,7 +23,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -31,7 +30,6 @@ import javax.inject.Inject
 @HiltViewModel
 class MqvpnViewModel(
     private val manager: MqvpnManager,
-    private val repository: SettingsRepository,
     transportAvailability: TransportAvailability,
     private val clock: () -> Long,
     private val nanoClock: () -> Long,
@@ -50,9 +48,8 @@ class MqvpnViewModel(
     // test-only production flag.
     @Inject constructor(
         manager: MqvpnManager,
-        repository: SettingsRepository,
         transportAvailability: TransportAvailability,
-    ) : this(manager, repository, transportAvailability, System::currentTimeMillis, System::nanoTime)
+    ) : this(manager, transportAvailability, System::currentTimeMillis, System::nanoTime)
 
     /** Transports with a connected network now; valid with or without a tunnel. */
     val availableTransports: StateFlow<Set<PathType>> = transportAvailability.available
@@ -175,13 +172,13 @@ class MqvpnViewModel(
         }
     }
 
-    fun connectWithSavedSettings() {
+    fun connect(settings: DemoSettings) {
         if (_connectPending.value) return
         _connectPending.value = true
         _connectError.value = null
         viewModelScope.launch {
             try {
-                val cfg = repository.settings.first().toMqvpnConfig()
+                val cfg = settings.toMqvpnConfig()
                 manager.connect(cfg, MyVpnService::class.java)
             } catch (e: CancellationException) {
                 throw e
