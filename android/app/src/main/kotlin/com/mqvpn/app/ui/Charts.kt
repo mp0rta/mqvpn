@@ -73,10 +73,21 @@ fun ReorderRateCard(history: ReorderHistoryState, nowMs: Long, modifier: Modifie
 fun BufferWaitCard(history: ReorderHistoryState, nowMs: Long, modifier: Modifier = Modifier) {
     val mq = LocalMqColors.current
     ChartCard("Buffer wait", modifier) { w, h ->
-        val chart = waitLines(history.samples, nowMs, w, h)
+        val chart = waitBars(history.samples, nowMs, w, h)
         val color = { slot: Int -> if (slot == 0) mq.accent else mq.orange }
         Legend(chart.legend, mq, color)
-        LineCanvas(chart, mq, color, nowMs)
+        val measurer = rememberTextMeasurer()
+        Canvas(Modifier.fillMaxWidth().height(CHART_HEIGHT)) {
+            drawGrid(mq)
+            // Same footprint as the stacked bars (0.6 of a 1 s slot), split into
+            // a p50|p99 pair around the sample's x.
+            val barW = (size.width / 30f * 0.3f)
+            chart.bars.forEach { b ->
+                b.h0?.let { drawRect(mq.accent, Offset(b.x - barW, size.height - it), Size(barW, it)) }
+                b.h1?.let { drawRect(mq.orange, Offset(b.x, size.height - it), Size(barW, it)) }
+            }
+            drawText(measurer.measure(chart.yMaxLabel, axisStyle(mq)), topLeft = Offset(4.dp.toPx(), 0f))
+        }
     }
 }
 

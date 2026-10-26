@@ -19,6 +19,8 @@ data class LineChart(
 )
 data class StackedBar(val x: Float, val greenH: Float, val redH: Float)
 data class BarChart(val yMaxLabel: String, val bars: List<StackedBar>, val legend: List<LegendEntry>)
+data class PairedBar(val x: Float, val h0: Float?, val h1: Float?)   // null = no data that tick
+data class PairedBarChart(val yMaxLabel: String, val bars: List<PairedBar>, val legend: List<LegendEntry>)
 enum class Direction { DOWNLOAD, UPLOAD }
 
 const val CHART_WINDOW_MS = 30_000L
@@ -90,7 +92,7 @@ fun reorderBars(samples: List<ReorderSample>, nowMs: Long, w: Float, h: Float): 
     )
 }
 
-fun waitLines(samples: List<ReorderSample>, nowMs: Long, w: Float, h: Float): LineChart {
+fun waitBars(samples: List<ReorderSample>, nowMs: Long, w: Float, h: Float): PairedBarChart {
     val vis = samples.filter { it.wallMs >= nowMs - CHART_WINDOW_MS }
     fun capped(v: Double?) = v?.let { if (it.isInfinite()) OVERFLOW_MS else it }
     val maxMs = vis.maxOfOrNull { maxOf(capped(it.p50Ms) ?: 0.0, capped(it.p99Ms) ?: 0.0) } ?: 0.0
@@ -99,18 +101,16 @@ fun waitLines(samples: List<ReorderSample>, nowMs: Long, w: Float, h: Float): Li
         for (m in doubleArrayOf(1.0, 2.0, 5.0)) if (maxMs <= top * m) { top *= m; break@search }
         top *= 10
     }
-    fun line(pick: (ReorderSample) -> Double?): List<ChartPoint?> = vis.withGaps({ it.wallMs }) { s ->
-        capped(pick(s))?.let { ChartPoint(xFor(s.wallMs, nowMs, w), (h - it / top * h).toFloat()) }
-    }
+    fun bar(v: Double?): Float? = capped(v)?.let { (it / top * h).toFloat() }
     val last = vis.lastOrNull()
     fun txt(v: Double?) = when {
         v == null -> "-"
         v.isInfinite() -> ">512 ms"
         else -> String.format(Locale.US, "%.1f ms", v)
     }
-    return LineChart(
-        "${top.toLong().coerceAtLeast(1)} ms", gridYs(h), emptyList(),
-        listOf(line { it.p50Ms }, line { it.p99Ms }),
+    return PairedBarChart(
+        "${top.toLong().coerceAtLeast(1)} ms",
+        vis.map { PairedBar(xFor(it.wallMs, nowMs, w), bar(it.p50Ms), bar(it.p99Ms)) },
         listOf(LegendEntry("p50", 0, txt(last?.p50Ms)), LegendEntry("p99", 1, txt(last?.p99Ms))),
     )
 }
