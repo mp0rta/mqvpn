@@ -87,7 +87,8 @@ class DeriveTest {
     @Test fun formats() {
         assertEquals("46.3", fmtMbps(46_300_000))
         assertEquals("123", fmtMbps(123_400_000))
-        assertEquals("00:12:41", fmtElapsed(761))
-        assertEquals("01:02:03", fmtElapsed(3723))
+        assertEquals("12:41", fmtElapsed(761))
+        assertEquals("1:00:00", fmtElapsed(3600))
+        assertEquals("00:45", fmtElapsed(45))
     }
 }

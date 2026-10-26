@@ -95,6 +95,10 @@ fun fmtMbps(bps: Long): String {
     return String.format(Locale.US, if (v >= 100) "%.0f" else "%.1f", v)
 }
 
-/** Brief pins "00:12:41" (HH:MM:SS always); desktop fmtEl (derive.ts:213) drops the hours below one hour. */
-fun fmtElapsed(sec: Long): String =
-    String.format(Locale.US, "%02d:%02d:%02d", sec / 3600, (sec % 3600) / 60, sec % 60)
+/** derive.ts fmtEl (213-220): mm:ss, h:mm:ss (hours unpadded) from one hour. */
+fun fmtElapsed(sec: Long): String {
+    val h = sec / 3600
+    val m = (sec % 3600) / 60
+    val s = sec % 60
+    return if (h > 0) String.format(Locale.US, "%d:%02d:%02d", h, m, s) else String.format(Locale.US, "%02d:%02d", m, s)
+}
