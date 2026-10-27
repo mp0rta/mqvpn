@@ -34,6 +34,7 @@ final class TunnelController: ObservableObject {
     private var manager: NETunnelProviderManager?
     private var observer: NSObjectProtocol?
     private var scenePhaseActive = true            // WindowGroup starts active
+    private var resyncTask: Task<Void, Never>?
     /// First-run setup cover is on screen (suppresses autosave while no manager exists).
     var setupPresented = false { didSet { recomputeAutosave() } }
 
@@ -72,10 +73,14 @@ final class TunnelController: ObservableObject {
         do {
             let existing = try await NETunnelProviderManager.loadAllFromPreferences()
             guard let m = existing.first else {
-                // No manager yet: it is created by the first persist (never here).
+                // No manager yet (or it was removed in iOS Settings): it is created
+                // by the first persist (never here).
                 manager = nil
+                if let observer { NotificationCenter.default.removeObserver(observer) }
+                observer = nil
                 settings.load(initial: AppDraft(), persisted: false)
                 state = .absent
+                updateStatus(.invalid)
                 return
             }
             manager = nil  // reset until we decide the manager is usable
@@ -265,12 +270,37 @@ final class TunnelController: ObservableObject {
     /// Called by the scene on activation changes; gates polling together with
     /// the connection state.
     func setScenePhaseActive(_ active: Bool) {
+        let becameActive = active && !scenePhaseActive
         scenePhaseActive = active
         if active, case .loadFailed = state {
             state = .loading   // set synchronously: guards against overlapping loads
             Task { await loadOrCreateManager() }
+        } else if becameActive {
+            resyncWithSystem()
         }
         reconcilePolling()
+    }
+
+    /// Back in the foreground: while the app was away, iOS Settings may have
+    /// turned the VPN off, disabled this configuration (another VPN enabled) or
+    /// removed it, and a status notification is not guaranteed to arrive. Re-read
+    /// the stored configuration; a removed one goes through the launch load,
+    /// which shows setup. The draft is untouched otherwise.
+    private func resyncWithSystem() {
+        guard resyncTask == nil, let m = manager else { return }
+        resyncTask = Task {
+            defer { resyncTask = nil }
+            let stillStored = (try? await NETunnelProviderManager.loadAllFromPreferences())
+                .map { !$0.isEmpty }
+            guard manager === m else { return }   // a load or first save replaced it meanwhile
+            if stillStored == false {
+                await loadOrCreateManager()
+                return
+            }
+            try? await m.loadFromPreferences()
+            guard manager === m else { return }
+            updateStatus(m.connection.status)
+        }
     }
 
     private func reconcilePolling() {
