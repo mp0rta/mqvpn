@@ -9,8 +9,8 @@ settings:
   base:
     SWIFT_VERSION: "5.9"
     # App and extension must carry the same version; bump with each release.
-    MARKETING_VERSION: "0.17.0"
-    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "0.19.0"
+    CURRENT_PROJECT_VERSION: "2"
     LIBRARY_SEARCH_PATHS: "$(SRCROOT)/../build"
     HEADER_SEARCH_PATHS: "$(SRCROOT)/../../include $(SRCROOT)/../../src $(SRCROOT)/Shared"
 schemes:
