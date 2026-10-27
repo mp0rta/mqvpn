@@ -21,7 +21,7 @@ jobs:
   perf-test:
     # Temporary: the perf-test runner is under maintenance. Revert this
     # change to go back to it.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - name: Pre-checkout cleanup (root-owned files)
