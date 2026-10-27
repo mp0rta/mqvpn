@@ -15,6 +15,9 @@ no analytics, advertising, or crash-reporting SDKs.
 To provide its VPN functionality, mqvpn transmits network traffic to the VPN
 server explicitly configured by the user, as described below.
 
+Vortric Labs does not sell, use, or disclose to third parties any user data
+for any purpose.
+
 ## VPN traffic
 
 mqvpn connects only to the VPN server that you configure. When the VPN is

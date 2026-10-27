@@ -38,6 +38,11 @@ struct SetupScreen: View {
             }
             VStack(spacing: 10) {
                 if step == 0 {
+                    // App Review 5.4: the data declaration must be on screen before
+                    // any use, so it sits above both Get Started and Skip.
+                    Text("mqvpn collects no data. Your traffic goes only to the server you set up. [Privacy policy](https://docs.mqvpn.org/privacy)")
+                        .mqFont(12).foregroundColor(mq.t2).tint(mq.accent)
+                        .multilineTextAlignment(.center).frame(maxWidth: .infinity)
                     PrimaryButton("Get Started") { step = 1 }
                     Button(action: onDone) {
                         Text("Skip setup").mqFont(13).foregroundColor(mq.t2).frame(maxWidth: .infinity).padding(8)
