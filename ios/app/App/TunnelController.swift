@@ -180,6 +180,14 @@ final class TunnelController: ObservableObject {
             }
             guard isConnectable, let manager else { return }
             do {
+                // iOS clears isEnabled when another VPN configuration is turned on, and
+                // the in-memory manager only sees that after a reload; a disabled
+                // manager fails startVPNTunnel with configurationDisabled.
+                try await manager.loadFromPreferences()
+                if !manager.isEnabled {
+                    manager.isEnabled = true
+                    try await manager.saveToPreferences()
+                }
                 try manager.connection.startVPNTunnel()
             } catch {
                 surfacedError = "start error: \(error.localizedDescription)"

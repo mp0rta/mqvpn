@@ -272,10 +272,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // Always claim the v6 default route so no v6 traffic bypasses the
         // tunnel. Unassigned: placeholder ULA — a blackhole (the core drops
         // v6 TUN ingress when no v6 address was assigned).
-        let v6 = info.has_v6 != 0
-        let ip6 = v6 ? MqvpnEngine.ip6String(info.assigned_ip6) : "fd76:7670:6e00::2"
-        let prefix6 = v6 ? NSNumber(value: info.assigned_prefix6) : NSNumber(value: 64)
-        let v6s = NEIPv6Settings(addresses: [ip6], networkPrefixLengths: [prefix6])
+        let v6 = MqvpnEngine.assignedV6(info)
+        let v6s = NEIPv6Settings(addresses: [v6?.ip ?? "fd76:7670:6e00::2"],
+                                 networkPrefixLengths: [NSNumber(value: v6?.prefix ?? 64)])
         v6s.includedRoutes = [NEIPv6Route.default()]
         s.ipv6Settings = v6s
         return s

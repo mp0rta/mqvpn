@@ -300,20 +300,30 @@ final class MqvpnEngine: NSObject {
         scheduleTick(afterMs: 0)
     }
 
-    /// Tick thread (tunnel_config_ready). v6 and server-scheduler fields were
-    /// appended later: read them only when the library's struct_size covers
-    /// them.
+    /// v6 and server-scheduler fields were appended later: read them only when
+    /// the library's struct_size covers them.
+    private static func covers<T>(_ info: mqvpn_tunnel_info_t,
+                                  _ kp: KeyPath<mqvpn_tunnel_info_t, T>) -> Bool {
+        guard let off = MemoryLayout<mqvpn_tunnel_info_t>.offset(of: kp) else { return false }
+        return Int(info.struct_size) >= off + MemoryLayout<T>.size
+    }
+
+    /// The assigned IPv6 address and TUN prefix; nil when none was assigned or
+    /// the library's struct predates the fields. The one reader of the v6 fields.
+    static func assignedV6(_ info: mqvpn_tunnel_info_t) -> (ip: String, prefix: UInt8)? {
+        guard covers(info, \.has_v6), info.has_v6 != 0 else { return nil }
+        let ip = ip6String(info.assigned_ip6)
+        return ip.isEmpty ? nil : (ip, info.assigned_prefix6)
+    }
+
+    /// Tick thread (tunnel_config_ready).
     private func latchTunnelInfo(_ info: mqvpn_tunnel_info_t) {
-        func covers<T>(_ kp: KeyPath<mqvpn_tunnel_info_t, T>) -> Bool {
-            guard let off = MemoryLayout<mqvpn_tunnel_info_t>.offset(of: kp) else { return false }
-            return Int(info.struct_size) >= off + MemoryLayout<T>.size
-        }
-        let v6 = covers(\.has_v6) && info.has_v6 != 0
-        let hasSched = covers(\.server_scheduler) && info.has_server_scheduler != 0
+        let v6 = Self.assignedV6(info)
+        let hasSched = Self.covers(info, \.server_scheduler) && info.has_server_scheduler != 0
         tunnelInfo = TunnelInfoSnapshot(
             assignedIp: Self.ip4String(info.assigned_ip), prefix: Int32(info.assigned_prefix),
-            assignedIp6: v6 ? Self.ip6String(info.assigned_ip6) : nil,
-            prefix6: v6 ? Int32(info.assigned_prefix6) : 0, hasV6: v6, mtu: Int32(info.mtu),
+            assignedIp6: v6?.ip, prefix6: Int32(v6?.prefix ?? 0), hasV6: v6 != nil,
+            mtu: Int32(info.mtu),
             serverScheduler: hasSched ? Int32(info.server_scheduler) : nil,
             requestedScheduler: requestedScheduler)
     }
