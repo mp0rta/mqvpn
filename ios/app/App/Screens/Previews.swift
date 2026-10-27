@@ -26,21 +26,33 @@ private enum PreviewData {
                  rateBps: 12_000_000, barFraction: 0.29),
     ]
 
+    /// Wall time of the i-th of 30 one-second samples ending at `nowMs`.
+    private static func wall(_ i: Int) -> Int64 { nowMs - Int64(29 - i) * 1_000 }
+
+    private static func bandwidthSample(_ i: Int) -> BandwidthSample {
+        let wifi: Double = 30_000_000 + Double(i % 7) * 2_000_000
+        let cell: Double = 10_000_000 + Double(i % 5) * 1_000_000
+        let total: Double = wifi + cell
+        return BandwidthSample(wallMs: wall(i), dlBps: total, ulBps: total / 8,
+                               perPathDl: ["en0": wifi, "pdp_ip0": cell],
+                               perPathUl: ["en0": wifi / 8, "pdp_ip0": cell / 8])
+    }
+
+    private static func reorderSample(_ i: Int) -> ReorderSample {
+        let lost: Double = i % 9 == 0 ? 1 : 0
+        return ReorderSample(wallMs: wall(i), recoveredPerSec: Double(i % 4), lostPerSec: lost,
+                             p50Ms: 3, p99Ms: 18)
+    }
+
     static let frame: LiveFrame = {
-        let bandwidth = (0..<30).map { i -> BandwidthSample in
-            let wifi = 30_000_000 + Double(i % 7) * 2_000_000, cell = 10_000_000 + Double(i % 5) * 1_000_000
-            return BandwidthSample(wallMs: nowMs - Int64(29 - i) * 1_000, dlBps: wifi + cell, ulBps: (wifi + cell) / 8,
-                                   perPathDl: ["en0": wifi, "pdp_ip0": cell], perPathUl: ["en0": wifi / 8, "pdp_ip0": cell / 8])
-        }
-        let reorder = (0..<30).map { i in
-            ReorderSample(wallMs: nowMs - Int64(29 - i) * 1_000, recoveredPerSec: Double(i % 4), lostPerSec: i % 9 == 0 ? 1 : 0,
-                          p50Ms: 3, p99Ms: 18)
-        }
-        let snap = TunnelSnapshot(timestamp: Double(nowMs) / 1000, clientState: CoreClientState.established.rawValue,
-                                  connectedSince: Double(nowMs) / 1000 - 761, paths: [], seq: 1, reorderConfigured: true,
-                                  tunnel: tunnel,
-                                  stats: StatsSnapshot(bytesTx: 120_000_000, bytesRx: 1_400_000_000,
-                                                       dgramSent: 1_000, dgramLost: 3, srttMs: 38))
+        let now: Double = Double(nowMs) / 1000
+        let stats = StatsSnapshot(bytesTx: 120_000_000, bytesRx: 1_400_000_000,
+                                  dgramSent: 1_000, dgramLost: 3, srttMs: 38)
+        let snap = TunnelSnapshot(timestamp: now, clientState: CoreClientState.established.rawValue,
+                                  connectedSince: now - 761, paths: [], seq: 1, reorderConfigured: true,
+                                  tunnel: tunnel, stats: stats)
+        let bandwidth: [BandwidthSample] = (0..<30).map(bandwidthSample)
+        let reorder: [ReorderSample] = (0..<30).map(reorderSample)
         return LiveFrame(snapshot: snap, bandwidth: bandwidth, slots: ["en0": 0, "pdp_ip0": 1],
                          reorder: reorder, dgramLoss: 0.003)
     }()
