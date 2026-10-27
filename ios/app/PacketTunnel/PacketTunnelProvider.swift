@@ -77,7 +77,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 cont.resume(throwing: CancellationError())
                 return
             }
-            coordinator = Coordinator(reconnectEnabled: protection.autoReconnect)
+            coordinator = Coordinator(reconnectEnabled: protection.reconnects,
+                                      holdOnFailure: protection.killSwitch)
             startContinuation = cont
             lock.unlock()
 

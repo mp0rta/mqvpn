@@ -242,10 +242,12 @@ final class TunnelController: ObservableObject {
         let oldIAN = proto.includeAllNetworks, oldELN = proto.excludeLocalNetworks
         let newRef = try PSKStore.add(server.authKey)
         proto.passwordReference = newRef
-        // Kill switch = includeAllNetworks + excludeLocalNetworks; the cellular /
-        // APN exclusions are deliberately left at their defaults.
-        proto.includeAllNetworks = d.protection.killSwitch
-        proto.excludeLocalNetworks = d.protection.killSwitch
+        // The kill switch lives in the provider (a protected session never
+        // ends itself), never in includeAllNetworks: that flag makes NECP deny
+        // the provider's cellular-bound socket while Wi-Fi is up (no
+        // multipath) and cuts all connectivity during an App Store update.
+        proto.includeAllNetworks = false
+        proto.excludeLocalNetworks = false
         do {
             try await performAtomicSave(NEConfigStore(manager: m, proto: proto), merge: merged)
         } catch {

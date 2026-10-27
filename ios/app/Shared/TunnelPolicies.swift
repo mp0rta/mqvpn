@@ -116,6 +116,12 @@ struct ProtectionSettings: Equatable, ProviderConfigSection {
     var killSwitch: Bool = false
     var autoReconnect: Bool = true
 
+    /// Whether the session reconnects after a transient close. The kill
+    /// switch implies it: a protected session never ends itself, so it keeps
+    /// trying instead of holding a dead tunnel. The core's reconnect flag and
+    /// the coordinator's reconnectEnabled both read this.
+    var reconnects: Bool { autoReconnect || killSwitch }
+
     private enum Key {
         static let killSwitch = "killSwitch"
         static let autoReconnect = "autoReconnect"

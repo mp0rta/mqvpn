@@ -262,8 +262,8 @@ final class MqvpnEngine: NSObject {
         }
         // Paired with the coordinator's reconnectEnabled: the core must never
         // arm a reconnect the coordinator would cancel.
-        mqvpn_config_set_reconnect(cfg, protection.autoReconnect ? 1 : 0, 5)
-        log.notice("[split] applied scheduler=\(split.scheduler.map { String($0.rawValue) } ?? "legacy", privacy: .public) redundant=\(redundantActive) reconnect=\(protection.autoReconnect)")
+        mqvpn_config_set_reconnect(cfg, protection.reconnects ? 1 : 0, 5)
+        log.notice("[split] applied scheduler=\(split.scheduler.map { String($0.rawValue) } ?? "legacy", privacy: .public) redundant=\(redundantActive) reconnect=\(protection.reconnects)")
         var cbs = mqvpn_client_callbacks_t()
         cbs.abi_version = UInt32(MQVPN_CALLBACKS_ABI_VERSION)
         cbs.struct_size = UInt32(MemoryLayout<mqvpn_client_callbacks_t>.size)

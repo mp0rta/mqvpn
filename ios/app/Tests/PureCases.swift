@@ -509,6 +509,39 @@ func runPureCases() -> Int {
         check(h.handle(.closed(reason: -4)) == [.cancelTunnel(.core(-4))] && h.phase == .terminal, "coord off: -4 terminal")
     }
 
+    // TunnelSessionCoordinator holdOnFailure (kill switch)
+    do {
+        typealias C = TunnelSessionCoordinator<Int>
+        func held() -> C {
+            var c = C(reconnectEnabled: true, holdOnFailure: true)
+            _ = c.handle(.configReady(1)); _ = c.handle(.settingsApplied(nil))
+            return c
+        }
+        var a = held()
+        check(a.handle(.closed(reason: -5)) == [.enterReasserting] && a.phase == .reasserting, "hold: auth close holds")
+        check(a.handle(.closed(reason: -4)) == [] && a.phase == .reasserting, "hold: second fatal close stays held")
+        check(a.handle(.configReady(2)) == [.applySettings(2)], "hold: a later connection applies")
+        check(a.handle(.settingsApplied(nil)) == [.tunActive, .exitReasserting] && a.phase == .established, "hold: recovers")
+        var b = held()
+        check(b.handle(.startFailed(code: -1)) == [.enterReasserting] && b.phase == .reasserting, "hold: local failure holds")
+        check(b.handle(.stopRequested) == [] && b.phase == .terminal, "hold: stop ends it")
+        var c = held()
+        _ = c.handle(.closed(reason: -10)); _ = c.handle(.configReady(2)); _ = c.handle(.configReady(3))
+        check(c.handle(.settingsApplied(NSError(domain: "t", code: 1))) == [.applySettings(3)] && c.phase == .reasserting,
+              "hold: failed apply while reasserting retries the queued config")
+        check(c.handle(.settingsApplied(nil)) == [.tunActive, .exitReasserting], "hold: retried config recovers")
+        var d = held()
+        _ = d.handle(.configReady(2))
+        check(d.handle(.settingsApplied(NSError(domain: "t", code: 1))) == [.enterReasserting] && d.phase == .reasserting,
+              "hold: failed apply holds")
+        check(d.handle(.settingsApplied(nil)) == [], "hold: no apply left in flight")
+        var s = C(reconnectEnabled: true, holdOnFailure: true)
+        check(s.handle(.closed(reason: -5)) == [.failStart(.core(-5))] && s.phase == .terminal, "hold: start failure still fails start")
+        check(ProtectionSettings(killSwitch: false, autoReconnect: false).reconnects == false
+              && ProtectionSettings(killSwitch: true, autoReconnect: false).reconnects
+              && ProtectionSettings(killSwitch: false, autoReconnect: true).reconnects, "reconnects = auto || kill switch")
+    }
+
     // SnapshotIngestState: boot change ordering
     do {
         func smp(_ seq: UInt64) -> TunnelSample {
