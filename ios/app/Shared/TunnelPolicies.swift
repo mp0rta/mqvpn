@@ -32,17 +32,17 @@ struct SplitSettings: Equatable {
 
     init(providerConfiguration dict: [String: Any]?) {
         var sched: Int32?
-        if let n = dict?[Key.scheduler] as? NSNumber, let v = tpExactInt(n), v == 0 || v == 1 {
+        if let n = dict?[Key.scheduler] as? NSNumber, let v = ReorderSettings.exactInt(n), v == 0 || v == 1 {
             sched = Int32(v)
         }
         var enabled = false
-        if let n = dict?[Key.enabled] as? NSNumber, tpIsBool(n) { enabled = n.boolValue }
+        if let n = dict?[Key.enabled] as? NSNumber, ReorderSettings.isBool(n) { enabled = n.boolValue }
         var ports: [UInt16] = []
         var malformed = false
         if let raw = dict?[Key.ports] {
             if let arr = raw as? [NSNumber], arr.count <= Self.maxRedundantPorts {
                 for n in arr {
-                    if let v = tpExactInt(n), (1...65535).contains(v) {
+                    if let v = ReorderSettings.exactInt(n), (1...65535).contains(v) {
                         if !ports.contains(UInt16(v)) { ports.append(UInt16(v)) }
                     } else { malformed = true }
                 }
@@ -134,25 +134,6 @@ struct PathPolicy: Equatable {
 }
 
 private func readBool(_ dict: [String: Any]?, _ key: String, _ def: Bool) -> Bool {
-    if let n = dict?[key] as? NSNumber, tpIsBool(n) { return n.boolValue }
+    if let n = dict?[key] as? NSNumber, ReorderSettings.isBool(n) { return n.boolValue }
     return def
-}
-
-// Same strictness as ReorderSettings.exactInt/isBool (bool and float-backed
-// NSNumbers rejected). Duplicated because CoreFoundation bridging does not
-// compile on Linux, where the pure tests run; there a Bool is told apart by
-// objCType "c" (also matches Int8, which providerConfiguration never holds).
-private func tpIsBool(_ n: NSNumber) -> Bool {
-    #if canImport(Darwin)
-    return CFGetTypeID(n as CFTypeRef) == CFBooleanGetTypeID()
-    #else
-    return String(cString: n.objCType) == "c"
-    #endif
-}
-
-private func tpExactInt(_ n: NSNumber) -> Int? {
-    if tpIsBool(n) { return nil }
-    let t = String(cString: n.objCType)
-    if t == "f" || t == "d" { return nil }
-    return n.intValue
 }

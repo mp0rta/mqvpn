@@ -28,9 +28,10 @@ let GAP_MS: Int64 = TICK_MS * 3 / 2
 /// Residence above the last finite bucket bound; drawn at this height and labelled ">512 ms".
 private let overflowMs = 512.0
 
-/// Round up to 1/2/5 x 10^n, minimum 10_000 (10 Kbps) so an idle chart keeps a stable axis.
-func ceilNice(_ v: Double) -> Double {
-    var scale = 10_000.0
+/// Round up to 1/2/5 x 10^n, at least `floor` (default 10 Kbps, so an idle rate
+/// chart keeps a stable axis).
+func ceilNice(_ v: Double, floor: Double = 10_000) -> Double {
+    var scale = floor
     while true {
         for m in [1.0, 2.0, 5.0] where v <= scale * m { return scale * m }
         scale *= 10
@@ -107,11 +108,7 @@ func waitBars(samples: [ReorderSample], nowMs: Int64, w: Double, h: Double) -> P
     let vis = samples.filter { $0.wallMs >= nowMs - WINDOW_MS }
     func capped(_ v: Double?) -> Double? { v.map { $0.isInfinite ? overflowMs : $0 } }
     let maxMs = vis.map { max(capped($0.p50Ms) ?? 0, capped($0.p99Ms) ?? 0) }.max() ?? 0
-    var top = 1.0
-    search: while true {
-        for m in [1.0, 2.0, 5.0] where maxMs <= top * m { top *= m; break search }
-        top *= 10
-    }
+    let top = ceilNice(maxMs, floor: 1)
     func bar(_ v: Double?) -> Double? { capped(v).map { $0 / top * h } }
     func txt(_ v: Double?) -> String {
         guard let v else { return "-" }

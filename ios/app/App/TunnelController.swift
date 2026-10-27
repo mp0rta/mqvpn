@@ -19,24 +19,23 @@ final class TunnelController: ObservableObject {
         didSet { recomputeAutosave() }
     }
     @Published var status: NEVPNStatus = .invalid
-    @Published var statusText = "not loaded"
     @Published var snapshot: TunnelSnapshot?       // nil = no data
-    /// Last surfaced error (disconnect / start / save); nil once statusText resets.
+    /// Last disconnect / start / save error; cleared once the tunnel leaves .disconnected.
     @Published var surfacedError: String?
-    @Published var configError: String?              // separate from statusText (updateStatus overwrites)
-    @Published private(set) var isSaving = false
+    /// Stored server config unreadable; cleared by the next successful save.
+    @Published var configError: String?
     /// Upload DATAGRAM loss over the last 30 s; nil = no data.
     @Published private(set) var dgramLoss: Double?
     /// Bumped whenever the histories gain a sample (they are plain classes).
     @Published private(set) var historyVersion = 0
-    /// Observed directly by the dashboard; fed the same snapshot stream.
+    /// Observed directly by the Settings event log; fed the same snapshot stream.
     let eventLog = EventLog()
     let bandwidthHistory = BandwidthHistory()
     let reorderHistory = ReorderHistory()
     private let dgramLossWindow = DgramLossWindow()
-    /// Autosaving edit model; its DraftStore persists into the manager.
+    /// Autosaving edit model; its DraftStore persists into the manager. Views
+    /// observe the controller, which republishes every settings change.
     let settings: SettingsCore
-    private(set) var settingsModel: SettingsModel!
 
     /// Epoch, seq/timestamp baselines and sample cursor (pure, tested).
     private var ingestState = SnapshotIngestState()
@@ -53,15 +52,14 @@ final class TunnelController: ObservableObject {
         store.owner = self
         settings.editable = { [weak self] in self?.isEditable ?? false }
         settings.onChange = { [weak self] in self?.objectWillChange.send() }
-        settingsModel = SettingsModel(core: settings)
     }
 
     var isEditable: Bool {
         state == .absent || (state == .loaded && status == .disconnected)
     }
+    /// A pending or failed autosave does not block Connect: start() flushes first.
     var isConnectable: Bool {
-        state == .loaded && status == .disconnected && !isSaving
-            && settings.draft.isValid && settings.lastPersisted == settings.draft
+        state == .loaded && status == .disconnected && settings.draft.isValid
     }
     static func isUp(_ s: NEVPNStatus) -> Bool { s == .connected || s == .reasserting }
 
@@ -83,7 +81,7 @@ final class TunnelController: ObservableObject {
             }
             manager = nil  // reset until we decide the manager is usable
             guard let proto = m.protocolConfiguration as? NETunnelProviderProtocol else {
-                statusText = "config error"; state = .loadFailed("config error"); return
+                state = .loadFailed("config error"); return
             }
             let pc = proto.providerConfiguration
             let psk = try? PSKStore.load(proto.passwordReference)
@@ -105,8 +103,7 @@ final class TunnelController: ObservableObject {
             state = .loaded
             updateStatus(m.connection.status)
         } catch {
-            statusText = "load error: \(error.localizedDescription)"
-            state = .loadFailed(error.localizedDescription)
+            state = .loadFailed("load error: \(error.localizedDescription)")
         }
     }
 
@@ -148,7 +145,6 @@ final class TunnelController: ObservableObject {
     private func updateStatus(_ s: NEVPNStatus) {
         let wasUp = Self.isUp(status)
         status = s
-        statusText = Self.describe(s)
         if s != .disconnected { surfacedError = nil }
         if s == .disconnected { surfaceDisconnectError() }
         if wasUp && !Self.isUp(s) {          // up -> down session boundary
@@ -168,7 +164,7 @@ final class TunnelController: ObservableObject {
             guard let err else { return }
             Task { @MainActor in
                 guard let self, self.status == .disconnected else { return }
-                self.statusText = "disconnected: \(err.localizedDescription)"; self.surfacedError = err.localizedDescription
+                self.surfacedError = err.localizedDescription
                 self.eventLog.logError(err.localizedDescription)
             }
         }
@@ -179,16 +175,14 @@ final class TunnelController: ObservableObject {
         guard isConnectable else { return }
         Task { @MainActor in
             guard await settings.flush() else {
-                let m = "save error: \(settings.saveError ?? "settings not saved")"
-                statusText = m; surfacedError = m
+                surfacedError = "save error: \(settings.saveError ?? "settings not saved")"
                 return
             }
             guard isConnectable, let manager else { return }
             do {
                 try manager.connection.startVPNTunnel()
             } catch {
-                let m = "start error: \(error.localizedDescription)"
-                statusText = m; surfacedError = m
+                surfacedError = "start error: \(error.localizedDescription)"
                 eventLog.logError(error.localizedDescription)
             }
         }
@@ -202,8 +196,7 @@ final class TunnelController: ObservableObject {
     /// performAtomicSave (the function the host tests fault-inject), creating the
     /// manager on the first persist from `.absent`.
     fileprivate func persistDraft(_ d: AppDraft) async throws {
-        if let e = saveGuard(isSaving: isSaving, isEditable: isEditable,
-                             hasManager: manager != nil || state == .absent) {
+        if let e = saveGuard(isEditable: isEditable, hasManager: manager != nil || state == .absent) {
             throw e
         }
         guard let addr = d.server else { throw SaveError.notReady }
@@ -226,9 +219,6 @@ final class TunnelController: ObservableObject {
             m.localizedDescription = "mqvpn"
             m.isEnabled = true
         }
-        isSaving = true
-        defer { isSaving = false }
-
         let server = ServerSettings(host: addr.host, port: addr.port, serverName: d.tlsServerName,
                                     authKey: d.authKey, insecure: d.insecure)
         let reorder = ReorderSettings(enabled: d.reorder.enabled, profile: d.reorder.profile, ports: d.reorderPorts)
@@ -286,7 +276,7 @@ final class TunnelController: ObservableObject {
     /// Single decision point: poll only while foregrounded AND the tunnel is
     /// up. When the tunnel is down, drop the snapshot so the UI shows no data.
     private func reconcilePolling() {
-        let up = (status == .connected || status == .reasserting)
+        let up = Self.isUp(status)
         if scenePhaseActive && up {
             startPolling()
         } else {
@@ -332,14 +322,13 @@ final class TunnelController: ObservableObject {
             try session.sendProviderMessage(SnapshotRequest.encode(cursor: ingestState.cursor.request)) { [weak self] resp in
                 Task { @MainActor in
                     guard let self else { return }
-                    // Pre-decode check: a stale/late response must never clear the live
-                    // snapshot of a newer session (the verdict re-checks after decode).
+                    // Cheap early-out before decoding; accept() is the authoritative gate.
                     guard self.ingestState.epoch == polledEpoch, Self.isUp(self.status) else { return }
                     guard let resp, let snap = try? ProviderMessage.decode(resp) else { return }
                     switch self.ingestState.accept(replyEpoch: polledEpoch, isUp: Self.isUp(self.status),
                                                    snapshot: snap) {
                     case .drop: return
-                    case .ingest(let fresh, let reset, _):
+                    case .ingest(let fresh, let reset):
                         if reset { self.clearHistories() }
                         self.ingest(snap, fresh: fresh)
                     }
@@ -365,18 +354,6 @@ final class TunnelController: ObservableObject {
         snapshot = snap
         eventLog.ingest(snap)
     }
-
-    private static func describe(_ s: NEVPNStatus) -> String {
-        switch s {
-        case .invalid: return "invalid"
-        case .disconnected: return "disconnected"
-        case .connecting: return "connecting"
-        case .connected: return "connected"
-        case .reasserting: return "reasserting"
-        case .disconnecting: return "disconnecting"
-        @unknown default: return "unknown(\(s.rawValue))"
-        }
-    }
 }
 
 /// DraftStore adapter: forwards to the controller's single persist routine.
@@ -389,8 +366,8 @@ final class ManagerDraftStore: DraftStore {
     }
 }
 
-/// Binds performAtomicSave's ReorderConfigStore to the live NE objects.
-final class NEConfigStore: ReorderConfigStore {
+/// Binds performAtomicSave's ProviderConfigStore to the live NE objects.
+final class NEConfigStore: ProviderConfigStore {
     private let manager: NETunnelProviderManager
     private let proto: NETunnelProviderProtocol
     init(manager: NETunnelProviderManager, proto: NETunnelProviderProtocol) {

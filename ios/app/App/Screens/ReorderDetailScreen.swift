@@ -9,20 +9,11 @@ struct ReorderDetailScreen: View {
     @ObservedObject var controller: TunnelController
     let back: () -> Void
 
-    /// Trimmed non-empty tokens that are not a valid port (1-65535).
-    private static func invalidTokens(_ text: String) -> [String] {
-        text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty && !(Int($0).map { (1...65535).contains($0) } ?? false) }
-    }
-
     var body: some View {
-        let m = controller.settingsModel!
+        let m = controller.settings
         let d = m.draft
         let editable = controller.isEditable
-        let distinct = Set(d.reorder.portsText.split(separator: ",").compactMap {
-            Int($0.trimmingCharacters(in: .whitespaces)).flatMap { (1...65535).contains($0) ? $0 : nil }
-        }).count
-        let invalid = Self.invalidTokens(d.reorder.portsText)
+        let scan = ReorderSettings.scanPorts(d.reorder.portsText)
         DetailScaffold(title: "Smooth out packet order", back: back) {
             Text("Re-orders packets that arrive mixed-up across connections, so apps see them in order. It only touches UDP traffic on the ports below.")
                 .font(.system(size: 13)).lineSpacing(5).foregroundColor(mq.t2)
@@ -40,11 +31,11 @@ struct ReorderDetailScreen: View {
                     m.update { $0.reorder.portsText = t }
                 }
             }
-            if distinct > ReorderSettings.maxRules {
+            if scan.valid.count > ReorderSettings.maxRules {
                 Text("Only the first \(ReorderSettings.maxRules) ports take effect").font(.system(size: 12)).foregroundColor(MqTheme.warning)
             }
-            if !invalid.isEmpty {
-                Text("Invalid ports ignored: " + invalid.joined(separator: ", ")).font(.system(size: 12)).foregroundColor(MqTheme.warning)
+            if !scan.invalid.isEmpty {
+                Text("Invalid ports ignored: " + scan.invalid.joined(separator: ", ")).font(.system(size: 12)).foregroundColor(MqTheme.warning)
             }
         }
     }

@@ -5,13 +5,13 @@ import Foundation
 
 struct ReorderDraft: Equatable {
     var enabled = false
-    var profile = 3            // ReorderSettings.profileCellularBond
+    var profile = ReorderSettings.profileCellularBond
     var portsText = ""
 }
 
 struct HybridDraft: Equatable {
     var enabled = false
-    var tcpMode = 2            // HybridSettings.modeAuto
+    var tcpMode = HybridSettings.modeAuto
 }
 
 /// Everything the Settings screen edits. Port fields keep the RAW text so an
@@ -39,15 +39,9 @@ struct AppDraft: Equatable {
     /// nil = not a valid host[:port].
     var server: (host: String, port: Int)? { ServerAddressField.parse(addressText) }
 
-    /// Valid unique reorder ports (non-numeric / out-of-range entries dropped, cap 16),
-    /// the same rule as ReorderSettings.planReorder.
+    /// The reorder ports that take effect: valid, unique, capped at maxRules.
     var reorderPorts: [Int] {
-        var out: [Int] = []
-        for raw in reorder.portsText.split(separator: ",") {
-            if let v = Int(raw.trimmingCharacters(in: .whitespaces)), (1...65535).contains(v),
-               !out.contains(v) { out.append(v) }
-        }
-        return Array(out.prefix(16))
+        Array(ReorderSettings.scanPorts(reorder.portsText).valid.prefix(ReorderSettings.maxRules))
     }
 
     /// SplitSettings to persist. A valid ports text always yields malformed=false
@@ -97,7 +91,7 @@ protocol DraftStore {
 
 /// The SettingsViewModel contract (Android parity): immediate local edits,
 /// serialized conflated latest-wins autosave of VALID drafts. Foundation +
-/// concurrency only; the ObservableObject adapter is SettingsModel.
+/// concurrency only; TunnelController republishes `onChange` to SwiftUI.
 @MainActor
 final class SettingsCore {
     private(set) var draft = AppDraft()
@@ -135,22 +129,17 @@ final class SettingsCore {
         if autosave && d.isValid { startWorker() }
     }
 
-    /// Explicit persist of the current valid draft (Finish Setup); enables autosave on success.
+    /// Explicit persist of the current valid draft (Finish Setup); leaves autosave
+    /// on when it succeeds. Runs on the same worker as autosave, so persists never overlap
+    /// and edits made mid-persist land before success.
     func commitFirst() async -> Bool {
-        // Re-check after every persist: edits made mid-persist must land before success.
-        while true {
-            if let w = worker { await w.value }
-            let d = draft
-            guard d.isValid else { return false }
-            if lastPersisted == d { break }
-            do { try await store.persist(d) } catch {
-                saveError = "Save failed: \(error.localizedDescription)"; onChange(); return false
-            }
-            lastPersisted = d; saveError = nil
-        }
+        guard draft.isValid else { return false }
+        let wasAutosave = autosave
         autosave = true
+        let ok = await flush()
+        if !ok { autosave = wasAutosave }
         onChange()
-        return true
+        return ok
     }
 
     /// True iff everything edited so far is persisted.

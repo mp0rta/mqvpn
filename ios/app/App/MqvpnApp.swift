@@ -64,7 +64,7 @@ private struct RootView: View {
         .tint(mq.accent)
         .task { await controller.loadOrCreateManager() }
         .onChange(of: controller.state) { st in
-            if st == .absent { controller.setupPresented = true; showSetup = true }
+            if st == .absent { showSetup = true }
         }
         .onChange(of: showSetup) { controller.setupPresented = $0 }
         .fullScreenCover(isPresented: $showSetup) {

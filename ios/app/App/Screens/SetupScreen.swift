@@ -14,9 +14,10 @@ struct SetupScreen: View {
     @State private var keyShown = false
     @State private var finishing = false
     @State private var finishError: String?
+    @State private var lastPathBlocked = false
 
     var body: some View {
-        let m = controller.settingsModel!
+        let m = controller.settings
         let s = m.draft
         VStack(alignment: .leading, spacing: 0) {
             Text("Step \(step + 1) of 3").font(.system(size: 11, weight: .semibold)).foregroundColor(mq.t2)
@@ -60,7 +61,7 @@ struct SetupScreen: View {
         }
     }
 
-    private func finish(_ m: SettingsModel) {
+    private func finish(_ m: SettingsCore) {
         finishing = true; finishError = nil
         Task { @MainActor in
             if await m.commitFirst() { onDone() }
@@ -95,7 +96,7 @@ struct SetupScreen: View {
         Text(t).font(.system(size: 20, weight: .bold)).foregroundColor(mq.text)
     }
 
-    private func server(_ m: SettingsModel, _ s: AppDraft) -> some View {
+    private func server(_ m: SettingsCore, _ s: AppDraft) -> some View {
         let bad = (tried || !s.addressText.trimmingCharacters(in: .whitespaces).isEmpty) && s.server == nil
         return VStack(alignment: .leading, spacing: 16) {
             heading("Connect to your server")
@@ -122,7 +123,7 @@ struct SetupScreen: View {
         }
     }
 
-    private func connections(_ m: SettingsModel, _ s: AppDraft) -> some View {
+    private func connections(_ m: SettingsCore, _ s: AppDraft) -> some View {
         let rows: [(TransportKind, String, String, Bool, Bool)] = [
             (.wifi, "Wi\u{2011}Fi", "Wireless network", availability.wifi, s.paths.wifi),
             (.cellular, "Cellular", "May use mobile data", availability.cellular, s.paths.cellular),
@@ -140,15 +141,15 @@ struct SetupScreen: View {
                         }
                         if found {
                             UseOffSegmented(isOn: on) { want in
-                                var p = s.paths
-                                if kind == .wifi { p.wifi = want } else { p.cellular = want }
-                                // Turning the last connection Off would leave no path (never persistable): refuse.
-                                if want || p.anyEnabled { m.update { $0.paths = p } }
+                                guard let p = s.paths.setting(kind, on: want) else { lastPathBlocked = true; return }
+                                lastPathBlocked = false
+                                m.update { $0.paths = p }
                             }
                         }
                     }
                 }.opacity(found ? 1 : 0.5)
             }
+            if lastPathBlocked { Text(lastPathCaption).font(.system(size: 12)).foregroundColor(mq.red) }
             if let e = m.fieldErrors["paths"] { Text(e).font(.system(size: 12)).foregroundColor(mq.red) }
             if let e = finishError { Text(e).font(.system(size: 12)).foregroundColor(mq.red) }
         }

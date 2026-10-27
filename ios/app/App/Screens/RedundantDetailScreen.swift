@@ -10,7 +10,7 @@ struct RedundantDetailScreen: View {
     let back: () -> Void
 
     var body: some View {
-        let m = controller.settingsModel!
+        let m = controller.settings
         let d = m.draft
         let e = m.fieldErrors["redundantPorts"]
         // A stored list that could not be read shows blank while the provider copies no UDP.

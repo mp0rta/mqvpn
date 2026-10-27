@@ -18,7 +18,7 @@ struct HybridDetailScreen: View {
     }
 
     var body: some View {
-        let m = controller.settingsModel!
+        let m = controller.settings
         DetailScaffold(title: "TCP boost", back: back) {
             Text("Carries TCP over its own lane so it can use several connections. Needs hybrid support on the server; TCP connections fail otherwise.")
                 .font(.system(size: 13)).lineSpacing(5).foregroundColor(mq.t2)

@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 mp0rta and mqvpn contributors
 # Compile the Foundation-only logic + PureCases.swift and run on Linux or macOS.
-# Later tasks append their pure source files to PURE_SOURCES.
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 SHARED="$DIR/../Shared"
 APP="$DIR/../App"
 PURE_SOURCES=(
     "$SHARED/ServerAddressField.swift"
+    "$SHARED/ReorderSettings.swift"
+    "$SHARED/HybridSettings.swift"
     "$SHARED/TunnelPolicies.swift"
     "$SHARED/ProviderMessage.swift"
     "$SHARED/SampleRing.swift"
@@ -17,7 +18,7 @@ PURE_SOURCES=(
     "$APP/ReorderHistory.swift"
     "$APP/ChartGeometry.swift"
     "$APP/Derive.swift"
-    "$APP/ReorderIngest.swift"
+    "$APP/ControllerCore.swift"
     "$APP/SettingsCore.swift"
 )
 if command -v swiftc >/dev/null 2>&1; then

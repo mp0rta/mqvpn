@@ -24,7 +24,7 @@ swiftc -framework Security -o "$OUT" \
     "$SHARED/TeardownSequence.swift" \
     "$SHARED/SystemTrust.swift" \
     "$SHARED/PathReadSource.swift" \
-    "$APP/ReorderIngest.swift" \
+    "$APP/ControllerCore.swift" \
     "$APP/EventLog.swift" \
     "$APP/BandwidthHistory.swift" \
     "$APP/ReorderHistory.swift" \

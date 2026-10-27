@@ -13,6 +13,13 @@ final class TransportAvailability: ObservableObject {
     private let wifiMonitor = NWPathMonitor(requiredInterfaceType: .wifi)
     private let cellularMonitor = NWPathMonitor(requiredInterfaceType: .cellular)
 
+    var kinds: Set<TransportKind> {
+        var s = Set<TransportKind>()
+        if wifi { s.insert(.wifi) }
+        if cellular { s.insert(.cellular) }
+        return s
+    }
+
     init() {
         wifiMonitor.pathUpdateHandler = { [weak self] path in
             let ok = path.status == .satisfied

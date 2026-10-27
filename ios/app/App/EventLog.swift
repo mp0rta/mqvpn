@@ -46,7 +46,7 @@ final class EventLog: ObservableObject {
         // n_paths, so a reaped slot lingers a poll or two. Keyed by interface
         // name, that duplicate would fabricate en0 active<->closed churn every
         // tick. A path leaving the live set is logged as a removal instead.
-        let live = snap.paths.filter { $0.status != 4 }
+        let live = snap.paths.filter { $0.status != CorePathStatus.closed.rawValue }
         var cur: [String: Int32] = [:]
         for p in live { cur[p.name] = p.status }
         // (a) additions + (b) status transitions
@@ -87,26 +87,25 @@ final class EventLog: ObservableObject {
 }
 
 // Display text/levels (Foundation only; the Settings view maps level -> color).
-// Raw values mirror mqvpn_client_state_t / mqvpn_path_status_t in libmqvpn.h.
 
 func clientStateName(_ s: Int32) -> String {
-    switch s {
-    case 0, 6: return "Disconnected"
-    case 1, 2, 3: return "Connecting"
-    case 4: return "Connected"
-    case 5: return "Reconnecting"
-    default: return "?(\(s))"
+    switch CoreClientState(rawValue: s) {
+    case .idle, .closed: return "Disconnected"
+    case .connecting, .authenticating, .tunnelReady: return "Connecting"
+    case .established: return "Connected"
+    case .reconnecting: return "Reconnecting"
+    case nil: return "?(\(s))"
     }
 }
 
 func pathStatusName(_ s: Int32) -> String {
-    switch s {
-    case 0: return "Pending"
-    case 1: return "Active"
-    case 2: return "Degraded"
-    case 3: return "Standby"
-    case 4: return "Closed"
-    default: return "Unknown"
+    switch CorePathStatus(rawValue: s) {
+    case .pending: return "Pending"
+    case .active: return "Active"
+    case .degraded: return "Degraded"
+    case .standby: return "Standby"
+    case .closed: return "Closed"
+    case nil: return "Unknown"
     }
 }
 
@@ -127,7 +126,7 @@ func eventLevel(_ k: LogEvent.Kind) -> EventLevel {
     switch k {
     case .error: return .error
     case .pathRemoved: return .warn
-    case .coreState(let s): return s == 5 ? .warn : .info
+    case .coreState(let s): return s == CoreClientState.reconnecting.rawValue ? .warn : .info
     default: return .info
     }
 }

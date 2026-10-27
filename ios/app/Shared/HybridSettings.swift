@@ -2,7 +2,6 @@
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 
 import Foundation
-import CoreFoundation
 
 /// Hybrid-mode wire schema shared by app (writes providerConfiguration) and
 /// extension (reads it). tcpMode is the native enum's plain int (0=stream /

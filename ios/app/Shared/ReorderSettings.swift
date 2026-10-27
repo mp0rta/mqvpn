@@ -2,7 +2,9 @@
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 
 import Foundation
+#if canImport(Darwin)
 import CoreFoundation
+#endif
 
 /// Single source of the reorder wire schema + validation, shared by the app
 /// (writes providerConfiguration) and the extension (reads it, emits setter
@@ -68,12 +70,40 @@ struct ReorderSettings: Equatable {
     /// float/double-backed — CFNumberIsFloatType catches `NSNumber(3.0)`).
     static func exactInt(_ n: NSNumber) -> Int? {
         if isBool(n) { return nil }
+        #if canImport(Darwin)
         if CFNumberIsFloatType(n as CFNumber) { return nil }
+        #else
+        let t = String(cString: n.objCType)
+        if t == "f" || t == "d" { return nil }
+        #endif
         return n.intValue
     }
 
+    /// CoreFoundation bridging is Darwin-only; the Linux pure-test build tells a
+    /// Bool apart by objCType "c" (also Int8, which providerConfiguration never holds).
     static func isBool(_ n: NSNumber) -> Bool {
-        CFGetTypeID(n as CFTypeRef) == CFBooleanGetTypeID()
+        #if canImport(Darwin)
+        return CFGetTypeID(n as CFTypeRef) == CFBooleanGetTypeID()
+        #else
+        return String(cString: n.objCType) == "c"
+        #endif
+    }
+
+    /// The ports field as typed: distinct in-range ports in input order (not yet
+    /// capped at maxRules) and the non-empty tokens that are not a port.
+    static func scanPorts(_ text: String) -> (valid: [Int], invalid: [String]) {
+        var valid: [Int] = []
+        var invalid: [String] = []
+        for raw in text.split(separator: ",") {
+            let t = raw.trimmingCharacters(in: .whitespaces)
+            if t.isEmpty { continue }
+            if let v = Int(t), (1...65535).contains(v) {
+                if !valid.contains(v) { valid.append(v) }
+            } else {
+                invalid.append(t)
+            }
+        }
+        return (valid, invalid)
     }
 
     /// Parse the comma-separated ports field. Non-numeric entries are skipped

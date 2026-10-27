@@ -15,9 +15,7 @@ struct PathsScreen: View {
 
     var body: some View {
         let live = viewState(controller) == .connected
-        let paths = (controller.snapshot?.paths ?? []).map { DerivePath(iface: $0.name, status: Int($0.status)) }
-        let avail = Set<TransportKind>([availability.wifi ? .wifi : nil, availability.cellular ? .cellular : nil].compactMap { $0 })
-        let cards = pathCardViews(paths: paths, available: avail, sample: controller.bandwidthHistory.samples.last)
+        let cards = controller.transportCards(available: availability.kinds)
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Paths").font(.system(size: 20, weight: .bold)).foregroundColor(mq.text)
@@ -61,12 +59,9 @@ struct PathsScreen: View {
         }.background(mq.win.ignoresSafeArea())
     }
 
-    /// Turning the last connection Off would leave no path (never persistable): refuse.
     private func set(_ kind: TransportKind, _ want: Bool) {
-        var p = controller.draft.paths
-        if kind == .wifi { p.wifi = want } else { p.cellular = want }
-        guard want || p.anyEnabled else { blocked = true; return }
+        guard let p = controller.draft.paths.setting(kind, on: want) else { blocked = true; return }
         blocked = false
-        controller.settingsModel.update { $0.paths = p }
+        controller.settings.update { $0.paths = p }
     }
 }

@@ -75,7 +75,7 @@ struct ShowHide: View {
     }
 }
 
-extension SettingsModel {
+extension SettingsCore {
     /// Two-way binding into one draft field; writes go through the autosaving single writer.
     func binding<T>(_ kp: WritableKeyPath<AppDraft, T>) -> Binding<T> {
         Binding(get: { self.draft[keyPath: kp] }, set: { v in self.update { $0[keyPath: kp] = v } })
@@ -107,5 +107,11 @@ func fmtInt<T: BinaryInteger>(_ v: T) -> String {
 }
 
 extension TunnelController {
-    var draft: AppDraft { settingsModel.draft }
+    var draft: AppDraft { settings.draft }
+
+    /// Wi-Fi / Cellular cards from the live snapshot and the newest bandwidth sample.
+    func transportCards(available: Set<TransportKind>) -> [PathCard] {
+        let paths = (snapshot?.paths ?? []).map { LivePath(iface: $0.name, status: $0.status) }
+        return pathCards(paths: paths, available: available, sample: bandwidthHistory.samples.last)
+    }
 }

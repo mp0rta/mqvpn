@@ -116,10 +116,6 @@ func runPureCases() -> Int {
                          bytesTx: tx, bytesRx: tx, dgramSent: 0, dgramLost: 0, delivered: 0,
                          gapCount: 0, gapFilled: 0, gapTimeout: 0, ackDemote: 0, residenceBuckets: [1, 2])
         }
-        let old = #"{"timestamp":1,"clientState":2,"footprint":3,"paths":[{"name":"en0","status":1,"txBytes":1,"rxBytes":2}]}"#
-        if let d = try? ProviderMessage.decode(Data(old.utf8)) {
-            check(d.tunnel == nil && d.stats == nil && d.samples.isEmpty && d.bootId == 0, "v2 old-wire defaults")
-        } else { check(false, "v2 old-wire decode") }
         let big = UInt64.max
         var snap = TunnelSnapshot(timestamp: 1, clientState: 2, connectedSince: nil, footprint: big, paths: [],
                                   seq: big, reorderConfigured: true,
@@ -417,17 +413,17 @@ func runPureCases() -> Int {
     }
 
     do { // Derive port (DeriveTest.kt + SchedulerStatusTest.kt + view-state matrix)
-        var v = statusView(.connected, elapsed: "00:12:41")
+        var v = statusLine(.connected, elapsed: "00:12:41")
         check(v.title == "Connected" && v.sub == "Protected · 00:12:41" && v.tone == .ok && !v.pulsing, "dv connected")
-        v = statusView(.connected, elapsed: nil)
+        v = statusLine(.connected, elapsed: nil)
         check(v.sub == "Protected · 00:00", "dv connected nil elapsed")
-        v = statusView(.disconnected, elapsed: nil)
+        v = statusLine(.disconnected, elapsed: nil)
         check(v.title == "Not Connected" && v.sub == "Tap the button to connect and protect your traffic" && !v.pulsing, "dv disconnected")
         for s in [VpnViewState.connecting, .reconnecting] {
-            v = statusView(s, elapsed: nil)
+            v = statusLine(s, elapsed: nil)
             check(v.title == "Connecting…" && v.sub == "Contacting server…" && v.pulsing && v.tone == .muted, "dv pulse \(s)")
         }
-        v = statusView(.error("PSK authentication failed"), elapsed: nil)
+        v = statusLine(.error("PSK authentication failed"), elapsed: nil)
         check(v.title == "Not Connected" && v.sub == "PSK authentication failed" && v.tone == .warn, "dv error")
 
         check(deriveViewState(neStatus: 2, clientState: nil, surfacedError: nil) == .connecting, "vs connecting")
@@ -440,21 +436,25 @@ func runPureCases() -> Int {
             check(deriveViewState(neStatus: n, clientState: nil, surfacedError: "boom") == .error("boom"), "vs err \(n)")
         }
 
-        func p(_ i: String, _ st: Int = 1) -> DerivePath { DerivePath(iface: i, status: st) }
+        func p(_ i: String, _ st: Int32 = 1) -> LivePath { LivePath(iface: i, status: st) }
         let smp = BandwidthSample(wallMs: 0, dlBps: 0, ulBps: 0,
                                   perPathDl: ["en0": 40_000_000, "pdp_ip0": 10_000_000, "utun9": 99_000_000],
                                   perPathUl: ["en0": 5_000_000])
-        let cards = pathCardViews(paths: [p("en0"), p("pdp_ip0", 3), p("utun9")], available: [.wifi, .cellular], sample: smp)
+        let cards = pathCards(paths: [p("en0"), p("pdp_ip0", 3), p("utun9")], available: [.wifi, .cellular], sample: smp)
         check(cards.map { $0.kind } == [.wifi, .cellular] && cards.map { $0.name } == ["Wi-Fi", "Cellular"], "pc order/names")
         check(cards.map { $0.available } == [true, true] && cards.map { $0.active } == [true, false], "pc avail/active")
         check(cards[0].rateBps == 40_000_000 && cards[0].barFraction == 1 && cards[1].barFraction == 0.25, "pc rate/bar")
         check(cards[0].sub == "en0" && cards[1].sub == "May use mobile data", "pc subs")
-        let un = pathCardViews(paths: [], available: [.wifi], sample: nil)
+        let un = pathCards(paths: [], available: [.wifi], sample: nil)
         check(un[1].sub == "Not connected" && !un[1].available, "pc unavailable sub")
         check(un.allSatisfy { $0.rateBps == 0 && $0.barFraction == 0 }, "pc no sample")
-        check(pathCardViews(paths: [], available: [.wifi], sample: nil)[0].sub == "Ready", "pc ready")
+        check(pathCards(paths: [], available: [.wifi], sample: nil)[0].sub == "Ready", "pc ready")
         let uc = usingCounts(cards: cards)
         check(uc.n == 1 && uc.m == 1, "using counts \(uc)")
+        let both = PathPolicy(wifi: true, cellular: true)
+        check(both.setting(.wifi, on: false) == PathPolicy(wifi: false, cellular: true), "policy wifi off")
+        check(PathPolicy(wifi: false, cellular: true).setting(.cellular, on: false) == nil, "policy refuses last off")
+        check(PathPolicy(wifi: false, cellular: true).setting(.wifi, on: true) == both, "policy wifi back on")
 
         check(fmtMbps(46_300_000) == "46.3" && fmtMbps(123_400_000) == "123", "dv fmtMbps")
         check(fmtElapsed(761) == "12:41" && fmtElapsed(3600) == "1:00:00" && fmtElapsed(45) == "00:45", "dv fmtElapsed")
@@ -510,20 +510,23 @@ func runPureCases() -> Int {
         // Self-accept: first reply (and a restart with LOW seq) ingests under the bumped epoch.
         let e0 = st.epoch
         let v1 = st.accept(replyEpoch: e0, isUp: true, snapshot: snap(boot: 1, seq: 500, ts: 10, samples: [1, 2]))
-        check(v1 == .ingest(fresh: [1, 2].map(smp), resetHistories: true, newEpoch: e0 + 1), "ingest: first reply self-accepts")
+        check(v1 == .ingest(fresh: [1, 2].map(smp), resetHistories: true), "ingest: first reply self-accepts")
         // Same boot, same-epoch (adopted) reply: normal path, dedup, no reset.
         let v2 = st.accept(replyEpoch: st.epoch, isUp: true, snapshot: snap(boot: 1, seq: 501, ts: 11, samples: [2, 3]))
-        check(v2 == .ingest(fresh: [smp(3)], resetHistories: false, newEpoch: e0 + 1), "ingest: dedup, no reset")
+        check(v2 == .ingest(fresh: [smp(3)], resetHistories: false), "ingest: dedup, no reset")
         // Restart to boot B with a LOW seq: not rejected by old baseline.
         let eA = st.epoch
         let vB = st.accept(replyEpoch: eA, isUp: true, snapshot: snap(boot: 2, seq: 3, ts: 20, samples: [1]))
-        check(vB == .ingest(fresh: [smp(1)], resetHistories: true, newEpoch: eA + 1), "ingest: restarted provider low seq accepted")
+        check(vB == .ingest(fresh: [smp(1)], resetHistories: true), "ingest: restarted provider low seq accepted")
         check(st.cursor.request?.bootId == 2 && st.cursor.request?.sinceSeq == 1, "cursor on B")
         // Delayed reply from boot A captured under the OLD epoch: dropped; cursor stays on B.
         let late = st.accept(replyEpoch: eA, isUp: true, snapshot: snap(boot: 1, seq: 600, ts: 21, samples: [9]))
         check(late == .drop, "ingest: delayed old-boot reply dropped")
         check(st.cursor.request?.bootId == 2 && st.cursor.request?.sinceSeq == 1, "cursor stays on B after delayed A")
         // Not up => drop; session end bumps epoch so in-flight replies die.
+        // Same boot, older or repeated seq: dropped (out-of-order reply).
+        check(st.accept(replyEpoch: st.epoch, isUp: true, snapshot: snap(boot: 2, seq: 3, ts: 21, samples: [])) == .drop,
+              "ingest: seq regression dropped")
         check(st.accept(replyEpoch: st.epoch, isUp: false, snapshot: snap(boot: 2, seq: 4, ts: 22, samples: [])) == .drop, "ingest: down drops")
         let eb = st.epoch; st.sessionEnded()
         check(st.accept(replyEpoch: eb, isUp: true, snapshot: snap(boot: 2, seq: 4, ts: 22, samples: [])) == .drop, "ingest: pre-session reply dropped")
@@ -584,6 +587,11 @@ func runSettingsCoreCases() async -> Int {
     check(d.fieldErrors()["reorderPorts"] != nil, "err reorder no valid ports")
     d.reorder.portsText = "bad, 443"
     check(d.isValid && d.reorderPorts == [443], "reorder skips bad tokens")
+    let scan = ReorderSettings.scanPorts(" 443, x ,443, 0, 70000, ,5401")
+    check(scan.valid == [443, 5401] && scan.invalid == ["x", "0", "70000"], "scanPorts valid/invalid")
+    d.reorder.portsText = (1...20).map(String.init).joined(separator: ",")
+    check(d.reorderPorts == Array(1...16), "reorder ports capped at maxRules")
+    d.reorder.portsText = "bad, 443"
     d.split.redundantEnabled = true
     d.redundantPortsText = "443,bad"
     check(d.fieldErrors()["redundantPorts"] == "Enter ports as a comma-separated list (1-65535)", "err redundant raw")

@@ -47,30 +47,24 @@ check(ReorderSettings.reorderEnableDecision(ruleResults: [false, false]).enable 
 check(ReorderSettings.reorderEnableDecision(ruleResults: [false, true]) == (true, 1), "partial -> enabled, added=1")
 check(ReorderSettings.reorderEnableDecision(ruleResults: []).enable == false, "no rules -> disabled")
 
-// old-wire decode: JSON missing the new keys -> safe defaults, no throw
-let oldWire = #"{"timestamp":1.0,"clientState":4,"connectedSince":0.5,"footprint":100,"paths":[]}"#
-    .data(using: .utf8)!
-let old = try! JSONDecoder().decode(TunnelSnapshot.self, from: oldWire)
-check(old.seq == 0 && old.reorderConfigured == false && old.reorder == nil, "old-wire safe defaults")
-
-// new-wire round-trip
+// wire round-trip
 let full = TunnelSnapshot(timestamp: 2, clientState: 4, connectedSince: 1, footprint: 1, paths: [],
                           seq: 7, reorderConfigured: true,
                           reorder: ReorderStatsSnapshot(delivered: 5, gapCount: 1, gapFilled: 1,
                                                         gapTimeout: 0, ackDemote: 0,
-                                                        bufferedP50Ms: 1.5, bufferedP99Ms: 9.0))
+                                                        bufferedP50Ms: 1.5, bufferedP99Ms: 9.0,
+                                                        residenceBuckets: [1, 2]))
 let rt = try! JSONDecoder().decode(TunnelSnapshot.self, from: try! JSONEncoder().encode(full))
-check(rt.seq == 7 && rt.reorderConfigured && rt.reorder == full.reorder, "new-wire round-trip")
+check(rt.seq == 7 && rt.reorderConfigured && rt.reorder == full.reorder, "wire round-trip")
 
 // saveGuard order
-check(saveGuard(isSaving: true, isEditable: false, hasManager: false) == .inProgress, "inProgress first")
-check(saveGuard(isSaving: false, isEditable: false, hasManager: true) == .notEditable, "notEditable")
-check(saveGuard(isSaving: false, isEditable: true, hasManager: false) == .notReady, "notReady")
-check(saveGuard(isSaving: false, isEditable: true, hasManager: true) == nil, "proceed")
+check(saveGuard(isEditable: false, hasManager: false) == .notEditable, "notEditable first")
+check(saveGuard(isEditable: true, hasManager: false) == .notReady, "notReady")
+check(saveGuard(isEditable: true, hasManager: true) == nil, "proceed")
 
 // performAtomicSave (real rollback logic, fault-injected via a fake store)
 enum TestErr: Error { case boom }
-final class FakeStore: ReorderConfigStore {
+final class FakeStore: ProviderConfigStore {
     var providerConfiguration: [String: Any]?
     var commitThrows = false
     var refreshThrows = false
@@ -98,23 +92,6 @@ do {
     catch { threw = true }
     check(!threw && boolOf(store, "reorderEnabled") == true, "refresh fail -> committed")
 }
-
-// IngestGate
-check(!IngestGate.accept(capturedEpoch: 1, currentEpoch: 2, isUp: true, snapSeq: 5,
-                         snapTimestamp: 9, lastSeq: 0, lastTimestamp: 0), "stale epoch rejected")
-check(!IngestGate.accept(capturedEpoch: 1, currentEpoch: 1, isUp: false, snapSeq: 5,
-                         snapTimestamp: 9, lastSeq: 0, lastTimestamp: 0), "not-up rejected")
-check(!IngestGate.accept(capturedEpoch: 1, currentEpoch: 1, isUp: true, snapSeq: 5,
-                         snapTimestamp: 9, lastSeq: 5, lastTimestamp: 0), "seq regression rejected")
-check(IngestGate.accept(capturedEpoch: 1, currentEpoch: 1, isUp: true, snapSeq: 6,
-                        snapTimestamp: 9, lastSeq: 5, lastTimestamp: 0), "seq advance accepted")
-check(IngestGate.accept(capturedEpoch: 1, currentEpoch: 1, isUp: true, snapSeq: 0,
-                        snapTimestamp: 2, lastSeq: 0, lastTimestamp: 1), "legacy ts advance accepted")
-check(!IngestGate.accept(capturedEpoch: 1, currentEpoch: 1, isUp: true, snapSeq: 0,
-                         snapTimestamp: 1, lastSeq: 0, lastTimestamp: 2), "legacy ts regression rejected")
-// legacy response must NOT slip in after a modern snapshot (lastSeq != 0)
-check(!IngestGate.accept(capturedEpoch: 1, currentEpoch: 1, isUp: true, snapSeq: 0,
-                         snapTimestamp: 99, lastSeq: 5, lastTimestamp: 0), "legacy rejected once modern seen")
 
 // ── ServerSettings ──
 let ss = ServerSettings(host: "1.2.3.4", port: 443, serverName: "vpn.example.com", authKey: "k", insecure: true)

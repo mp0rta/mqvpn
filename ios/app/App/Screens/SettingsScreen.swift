@@ -26,7 +26,7 @@ struct SettingsScreen: View {
     }
 
     var body: some View {
-        let m = controller.settingsModel!
+        let m = controller.settings
         let s = m.draft
         let errors = m.fieldErrors
         let editable = controller.isEditable
@@ -57,7 +57,7 @@ struct SettingsScreen: View {
 
     // MARK: Server
 
-    private func server(_ m: SettingsModel, _ s: AppDraft, _ errors: [String: String], _ editable: Bool) -> some View {
+    private func server(_ m: SettingsCore, _ s: AppDraft, _ errors: [String: String], _ editable: Bool) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             SectionLabel("Server")
             MqCard(vPad: 4) {
@@ -89,7 +89,7 @@ struct SettingsScreen: View {
         }
     }
 
-    private func protection(_ m: SettingsModel, _ s: AppDraft, _ editable: Bool) -> some View {
+    private func protection(_ m: SettingsCore, _ s: AppDraft, _ editable: Bool) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             SectionLabel("Protection")
             MqCard(vPad: 4) {
@@ -112,7 +112,7 @@ struct SettingsScreen: View {
          "— sends UDP uploads on every connection at once, for streams that tolerate duplicates (SRT, RIST, RTP); uses more data"),
     ]
 
-    private func advanced(_ m: SettingsModel, _ s: AppDraft, _ errors: [String: String], _ editable: Bool) -> some View {
+    private func advanced(_ m: SettingsCore, _ s: AppDraft, _ errors: [String: String], _ editable: Bool) -> some View {
         let choice = s.split.choice
         let info = viewState(controller) == .connected ? controller.snapshot?.tunnel : nil
         let applied: Bool? = info?.requestedScheduler == nil ? nil

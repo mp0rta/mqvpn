@@ -9,44 +9,50 @@ enum Tone: Equatable { case ok, warn, muted }
 
 enum VpnViewState: Equatable { case disconnected, connecting, connected, reconnecting, error(String) }
 
-/// neStatus = NEVPNStatus.rawValue (invalid 0, disconnected 1, connecting 2,
-/// connected 3, reasserting 4, disconnecting 5); clientState 5 = RECONNECTING.
+/// NEVPNStatus raw values: NetworkExtension is not importable in the pure build.
+enum NEStatusRaw {
+    static let connecting = 2, connected = 3, reasserting = 4
+}
+
 /// Disconnecting is a brief passthrough (the power button is inert there).
 func deriveViewState(neStatus: Int, clientState: Int32?, surfacedError: String?) -> VpnViewState {
     switch neStatus {
-    case 2: return .connecting
-    case 4: return .reconnecting
-    case 3: return clientState == 5 ? .reconnecting : .connected
+    case NEStatusRaw.connecting: return .connecting
+    case NEStatusRaw.reasserting: return .reconnecting
+    case NEStatusRaw.connected:
+        return clientState == CoreClientState.reconnecting.rawValue ? .reconnecting : .connected
     default: return surfacedError.map { .error($0) } ?? .disconnected
     }
 }
 
-struct StatusView: Equatable { var title: String; var sub: String; var tone: Tone; var pulsing: Bool }
+/// Title + subtitle under the power button.
+struct StatusLine: Equatable { var title: String; var sub: String; var tone: Tone; var pulsing: Bool }
 
-func statusView(_ state: VpnViewState, elapsed: String?) -> StatusView {
+func statusLine(_ state: VpnViewState, elapsed: String?) -> StatusLine {
     switch state {
     case .connecting, .reconnecting:
-        return StatusView(title: "Connecting…", sub: "Contacting server…", tone: .muted, pulsing: true)
+        return StatusLine(title: "Connecting…", sub: "Contacting server…", tone: .muted, pulsing: true)
     case .connected:
-        return StatusView(title: "Connected", sub: "Protected · \(elapsed ?? fmtElapsed(0))", tone: .ok, pulsing: false)
+        return StatusLine(title: "Connected", sub: "Protected · \(elapsed ?? fmtElapsed(0))", tone: .ok, pulsing: false)
     case .error(let m):
-        return StatusView(title: "Not Connected", sub: m, tone: .warn, pulsing: false)
+        return StatusLine(title: "Not Connected", sub: m, tone: .warn, pulsing: false)
     case .disconnected:
-        return StatusView(title: "Not Connected", sub: "Tap the button to connect and protect your traffic",
+        return StatusLine(title: "Not Connected", sub: "Tap the button to connect and protect your traffic",
                           tone: .muted, pulsing: false)
     }
 }
 
 enum TransportKind: Equatable { case wifi, cellular }
 
-struct DerivePath: Equatable { var iface: String; var status: Int }
+/// One live path from the snapshot: interface name + raw mqvpn_path_status_t.
+struct LivePath: Equatable { var iface: String; var status: Int32 }
 
-struct PathCardView2: Equatable {
+/// Display model of one transport (Wi-Fi / Cellular) row.
+struct PathCard: Equatable {
     var kind: TransportKind
     var name: String
     var sub: String
     var available: Bool
-    var on: Bool
     var active: Bool
     var rateBps: Int64
     var barFraction: Double
@@ -59,31 +65,36 @@ func transportKind(iface: String) -> TransportKind? {
     return nil
 }
 
-private let pathStatusActive = 1
-
-func pathCardViews(paths: [DerivePath], available: Set<TransportKind>, sample: BandwidthSample?) -> [PathCardView2] {
-    let kinds: [TransportKind] = [.wifi, .cellular]
-    let rates = kinds.map { k in
-        paths.filter { transportKind(iface: $0.iface) == k }
-            .reduce(Int64(0)) { $0 + Int64(sample?.perPathDl[$1.iface] ?? 0) }
-    }
-    let maxRate = rates.max() ?? 0
-    return kinds.enumerated().map { i, k in
+func pathCards(paths: [LivePath], available: Set<TransportKind>, sample: BandwidthSample?) -> [PathCard] {
+    var cards = [TransportKind.wifi, .cellular].map { k -> PathCard in
         let mine = paths.filter { transportKind(iface: $0.iface) == k }
         let avail = available.contains(k)
         let sub: String
         if !avail { sub = "Not connected" }
         else if k == .cellular { sub = "May use mobile data" }
         else { sub = mine.first?.iface ?? "Ready" }
-        let act = mine.contains { $0.status == pathStatusActive }
-        return PathCardView2(kind: k, name: k == .wifi ? "Wi-Fi" : "Cellular", sub: sub, available: avail,
-                             on: avail, active: act, rateBps: rates[i],
-                             barFraction: maxRate > 0 ? Double(rates[i]) / Double(maxRate) : 0)
+        return PathCard(kind: k, name: k == .wifi ? "Wi-Fi" : "Cellular", sub: sub, available: avail,
+                        active: mine.contains { $0.status == CorePathStatus.active.rawValue },
+                        rateBps: mine.reduce(Int64(0)) { $0 + Int64(sample?.perPathDl[$1.iface] ?? 0) },
+                        barFraction: 0)
+    }
+    let maxRate = cards.map(\.rateBps).max() ?? 0
+    if maxRate > 0 { for i in cards.indices { cards[i].barFraction = Double(cards[i].rateBps) / Double(maxRate) } }
+    return cards
+}
+
+extension PathPolicy {
+    /// The policy with `kind` set to `on`, or nil when that would turn the last
+    /// connection off (never persistable).
+    func setting(_ kind: TransportKind, on: Bool) -> PathPolicy? {
+        var p = self
+        if kind == .wifi { p.wifi = on } else { p.cellular = on }
+        return p.anyEnabled ? p : nil
     }
 }
 
 /// Android HomeScreen: m = available && active cards, n = those moving > 1 Mbps.
-func usingCounts(cards: [PathCardView2]) -> (n: Int, m: Int) {
+func usingCounts(cards: [PathCard]) -> (n: Int, m: Int) {
     let used = cards.filter { $0.available && $0.active }
     return (used.filter { $0.rateBps > 1_000_000 }.count, used.count)
 }

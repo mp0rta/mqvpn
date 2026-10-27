@@ -26,7 +26,7 @@ final class SnapshotCache {
     /// Tick-thread-confined; the reader gets copies through `lock`.
     private let ring = SampleRing()
     /// Random per provider start: lets the app tell a restarted provider
-    /// (seq back at 1) from a continuing one. 0 is reserved for "legacy".
+    /// (seq back at 1) from a continuing one.
     private let bootId = UInt64.random(in: 1...UInt64.max)
 
     init(engine: MqvpnEngine) {
@@ -55,11 +55,8 @@ final class SnapshotCache {
         let since: UInt64? = (request?.bootId == bootId) ? request?.sinceSeq : nil
         let samples = ring.since(since)
         lock.unlock()
-        let snap = TunnelSnapshot(
-            timestamp: l.timestamp, clientState: l.clientState,
-            connectedSince: l.connectedSince, footprint: l.footprint, paths: l.paths,
-            seq: l.seq, reorderConfigured: l.reorderConfigured, reorder: l.reorder,
-            tunnel: l.tunnel, stats: l.stats, samples: samples, bootId: bootId)
+        var snap = l
+        snap.samples = samples
         return try? ProviderMessage.encode(snap)
     }
 
@@ -107,7 +104,8 @@ final class SnapshotCache {
                                   connectedSince: connectedSince,
                                   footprint: Self.physFootprint(), paths: paths,
                                   seq: seq, reorderConfigured: engine.reorderConfigured,
-                                  reorder: reorder, tunnel: engine.tunnelInfo, stats: stats)
+                                  reorder: reorder, tunnel: engine.tunnelInfo, stats: stats,
+                                  bootId: bootId)
         lock.lock()
         ring.append(sample)
         latest = snap

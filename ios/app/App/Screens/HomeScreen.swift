@@ -12,21 +12,14 @@ struct HomeScreen: View {
     let onOpenSettings: () -> Void
 
     private var vs: VpnViewState { viewState(controller) }
-    private var available: Set<TransportKind> {
-        var s = Set<TransportKind>()
-        if availability.wifi { s.insert(.wifi) }
-        if availability.cellular { s.insert(.cellular) }
-        return s
-    }
-    private var cards: [PathCardView2] {
-        let paths = (controller.snapshot?.paths ?? []).map { DerivePath(iface: $0.name, status: Int($0.status)) }
-        return pathCardViews(paths: paths, available: available, sample: controller.bandwidthHistory.samples.last)
-            .filter { $0.available && $0.active }
+    /// The cards in use: available and carrying an active path.
+    private var cards: [PathCard] {
+        controller.transportCards(available: availability.kinds).filter { $0.available && $0.active }
     }
 
     var body: some View {
         let vs = self.vs
-        let status = statusView(vs, elapsed: elapsedText(controller, vs))
+        let status = statusLine(vs, elapsed: elapsedText(controller, vs))
         let isOn = vs == .connected
         let isConnecting = vs == .connecting
         let canConnect = controller.isConnectable
@@ -50,9 +43,9 @@ struct HomeScreen: View {
                 Text(status.title).font(.system(size: 22, weight: .bold)).foregroundColor(mq.text).padding(.top, 22)
                 Text(status.sub).font(.system(size: 13)).multilineTextAlignment(.center)
                     .foregroundColor(mq.color(status.tone)).opacity(status.pulsing ? 0.7 : 1).padding(.top, 5)
-                if case .loadFailed = controller.state { errorLine(controller.statusText) }
+                if case .loadFailed(let e) = controller.state { errorLine(e) }
                 if let e = controller.configError { errorLine(e) }
-                if let e = controller.settingsModel.saveError { errorLine(e) }
+                if let e = controller.settings.saveError { errorLine(e) }
 
                 if vs == .connected { connectedBlock }
                 if Self.notProtected(vs) {
