@@ -54,7 +54,7 @@ struct PathCard: Equatable {
     var sub: String
     var available: Bool
     var active: Bool
-    var rateBps: Int64
+    var rateBps: Int64            // download only (perPathDl), as on Android
     var barFraction: Double
 }
 
@@ -103,6 +103,9 @@ func fmtMbps(_ bps: Double) -> String {
     let v = bps / 1_000_000.0
     return String(format: v >= 100 ? "%.0f" : "%.1f", v)
 }
+
+/// A path card's rate: download only, so it carries the ↓ the Home rate tile uses.
+func fmtDownloadRate(_ bps: Int64) -> String { "↓ \(fmtMbps(Double(bps))) Mbps" }
 
 func fmtElapsed(_ sec: Int64) -> String {
     let h = sec / 3600, m = (sec % 3600) / 60, s = sec % 60

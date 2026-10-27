@@ -96,8 +96,9 @@ struct HomeScreen: View {
                     HStack(spacing: 8) {
                         Text(p.name).font(.system(size: 12)).foregroundColor(mq.text).frame(width: 62, alignment: .leading)
                         UsageBar(fraction: p.barFraction, color: p.kind == .cellular ? mq.green : mq.accent)
-                        Text("\(fmtMbps(Double(p.rateBps))) Mbps").font(.system(size: 11)).foregroundColor(mq.t2)
-                            .frame(width: 66, alignment: .trailing)
+                        Text(fmtDownloadRate(p.rateBps)).font(.system(size: 11)).foregroundColor(mq.t2)
+                            .frame(width: 78, alignment: .trailing)
+                            .accessibilityLabel("Download \(fmtMbps(Double(p.rateBps))) Mbps")
                     }
                 }
             }

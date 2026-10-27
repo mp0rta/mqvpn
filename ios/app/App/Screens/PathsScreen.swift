@@ -44,7 +44,8 @@ struct PathsScreen: View {
                             if live && card.available && on {
                                 HStack(spacing: 8) {
                                     UsageBar(fraction: card.barFraction, color: mq.accent)
-                                    Text("\(fmtMbps(Double(card.rateBps))) Mbps").font(.system(size: 11)).foregroundColor(mq.t2)
+                                    Text(fmtDownloadRate(card.rateBps)).font(.system(size: 11)).foregroundColor(mq.t2)
+                                        .accessibilityLabel("Download \(fmtMbps(Double(card.rateBps))) Mbps")
                                         .frame(width: 78, alignment: .trailing)
                                 }
                             }

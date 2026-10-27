@@ -457,6 +457,7 @@ func runPureCases() -> Int {
         check(PathPolicy(wifi: false, cellular: true).setting(.wifi, on: true) == both, "policy wifi back on")
 
         check(fmtMbps(46_300_000) == "46.3" && fmtMbps(123_400_000) == "123", "dv fmtMbps")
+        check(fmtDownloadRate(46_300_000) == "↓ 46.3 Mbps" && fmtDownloadRate(0) == "↓ 0.0 Mbps", "dv download rate label")
         check(fmtElapsed(761) == "12:41" && fmtElapsed(3600) == "1:00:00" && fmtElapsed(45) == "00:45", "dv fmtElapsed")
         check(fmtBytes(999_000_000) == "999 MB" && fmtBytes(1_000_000_000) == "1.00 GB" && fmtBytes(2_345_000_000) == "2.35 GB", "dv fmtBytes")
 
