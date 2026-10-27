@@ -82,7 +82,7 @@ struct SetupScreen: View {
     private var welcome: some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(spacing: 18) {
-                MqvpnMark(joint: mq.win).frame(width: 96, height: 96).accessibilityHidden(true)
+                MqvpnMark().frame(width: 96, height: 96).accessibilityHidden(true)
                 Text("All your connections.\nOne stronger connection.").mqFont(22, .bold)
                     .foregroundColor(mq.text).multilineTextAlignment(.center)
             }.frame(maxWidth: .infinity).padding(.top, 28)
@@ -174,13 +174,15 @@ private extension TransportKind {
     }
 }
 
-/// The mqvpn mark without its tile (geometry from ic_launcher_foreground.xml, 64x64 source).
-/// The joint dot follows the background so dark mode shows no stark blob.
+/// The mqvpn mark on its app-icon tile (geometry from ic_launcher_foreground.xml,
+/// 64x64 source). The tile keeps the joint dot visible in both themes; on the
+/// bare background a theme-colored dot vanishes into the gap between the pills.
 private struct MqvpnMark: View {
-    let joint: Color
     var body: some View {
         Canvas { ctx, size in
             let k = size.width / 64
+            ctx.fill(Path(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: 14 * k, style: .continuous),
+                     with: .color(Color(argb: 0xFFE9E1FB)))
             func pill(_ x: CGFloat, _ y: CGFloat) -> Path {
                 Path(roundedRect: CGRect(x: x * k, y: y * k, width: 34 * k, height: 14 * k), cornerRadius: 7 * k)
             }
@@ -188,7 +190,7 @@ private struct MqvpnMark: View {
             ctx.fill(pill(22, 36), with: .linearGradient(
                 Gradient(colors: [Color(argb: 0xFF8B5CF6), Color(argb: 0xFF5B21B6)]),
                 startPoint: CGPoint(x: 22 * k, y: 36 * k), endPoint: CGPoint(x: 56 * k, y: 50 * k)))
-            ctx.fill(Path(ellipseIn: CGRect(x: 28 * k, y: 28 * k, width: 8 * k, height: 8 * k)), with: .color(joint))
+            ctx.fill(Path(ellipseIn: CGRect(x: 28 * k, y: 28 * k, width: 8 * k, height: 8 * k)), with: .color(Color(argb: 0xFFFBFAFF)))
         }
     }
 }
