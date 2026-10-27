@@ -6,7 +6,7 @@ import SwiftUI
 /// Port of android HybridDetailScreen.kt.
 struct HybridDetailScreen: View {
     @Environment(\.mq) private var mq
-    @ObservedObject var controller: TunnelController
+    let form: SettingsForm
     let back: () -> Void
 
     static func modeName(_ mode: Int) -> String {
@@ -18,21 +18,20 @@ struct HybridDetailScreen: View {
     }
 
     var body: some View {
-        let m = controller.settings
         DetailScaffold(title: "TCP boost", back: back) {
             Text("Carries TCP over its own lane so it can use several connections. Needs hybrid support on the server; TCP connections fail otherwise.")
-                .font(.system(size: 13)).lineSpacing(5).foregroundColor(mq.t2)
+                .mqFont(13).lineSpacing(5).foregroundColor(mq.t2)
             HStack {
-                Text("TCP mode").font(.system(size: 13)).foregroundColor(mq.text)
+                Text("TCP mode").mqFont(13).foregroundColor(mq.text)
                 Spacer()
-                Picker("TCP mode", selection: m.binding(\.hybrid.tcpMode)) {
+                Picker("TCP mode", selection: form.binding(\.hybrid.tcpMode)) {
                     ForEach([HybridSettings.modeAuto, HybridSettings.modeStream, HybridSettings.modeRaw], id: \.self) {
                         Text(Self.modeName($0)).tag($0)
                     }
-                }.pickerStyle(.menu).tint(mq.accent).disabled(!controller.isEditable)
+                }.pickerStyle(.menu).tint(mq.accent).disabled(!form.editable)
             }
             Text("Auto decides per connection. Stream always uses the lane. Raw never does.")
-                .font(.system(size: 12)).lineSpacing(3).foregroundColor(mq.t2)
+                .mqFont(12).lineSpacing(3).foregroundColor(mq.t2)
         }
     }
 }

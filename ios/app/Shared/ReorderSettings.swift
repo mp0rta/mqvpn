@@ -11,7 +11,7 @@ import CoreFoundation
 /// calls). Plain Foundation — the app target does not link libmqvpn, so profile
 /// values are plain ints matching the native enum (3=CELLULAR_BOND,
 /// 4=FIBER_LTE) and proto is 17 (UDP).
-struct ReorderSettings: Equatable {
+struct ReorderSettings: Equatable, ProviderConfigSection {
     var enabled: Bool
     var profile: Int          // 3 = CELLULAR_BOND, 4 = FIBER_LTE
     var ports: [Int]
@@ -37,10 +37,10 @@ struct ReorderSettings: Equatable {
         static let ports = "reorderPorts"
     }
 
-    func toProviderConfiguration() -> [String: Any] {
-        [Key.enabled: NSNumber(value: enabled),
-         Key.profile: NSNumber(value: profile),
-         Key.ports: ports.map { NSNumber(value: $0) }]
+    func merged(into dict: inout [String: Any]) {
+        dict[Key.enabled] = NSNumber(value: enabled)
+        dict[Key.profile] = NSNumber(value: profile)
+        dict[Key.ports] = ports.map { NSNumber(value: $0) }
     }
 
     /// Validates on read. A malformed top-level dict yields nil (caller falls

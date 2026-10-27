@@ -28,51 +28,36 @@ struct MqvpnApp: App {
 
 /// TabView shell + first-run setup cover. `showSetup` is explicit state (not derived from
 /// manager existence) so "Run setup assistant again" works with an existing manager.
+/// Observes nothing itself: each tab container observes what its screen shows.
 private struct RootView: View {
     @Environment(\.mq) private var mq
-    @ObservedObject var controller: TunnelController
-    @ObservedObject var availability: TransportAvailability
+    let controller: TunnelController
+    let availability: TransportAvailability
     @State private var tab = Tab.home
     @State private var showSetup = false
-    @State private var path: [SettingsRoute] = []
 
     var body: some View {
         TabView(selection: $tab) {
-            HomeScreen(controller: controller, availability: availability,
-                       onManage: { tab = .paths }, onOpenSettings: { tab = .settings })
+            HomeTab(controller: controller, live: controller.live, availability: availability,
+                    onManage: { tab = .paths }, onOpenSettings: { tab = .settings })
                 .tabItem { Label("Home", systemImage: "power") }.tag(Tab.home)
-            PathsScreen(controller: controller, availability: availability)
+            PathsTab(controller: controller, live: controller.live, availability: availability)
                 .tabItem { Label("Paths", systemImage: "point.3.connected.trianglepath.dotted") }.tag(Tab.paths)
-            StatsScreen(controller: controller, onGoHome: { tab = .home })
+            StatsTab(controller: controller, live: controller.live, onGoHome: { tab = .home })
                 .tabItem { Label("Stats", systemImage: "chart.bar") }.tag(Tab.stats)
-            NavigationStack(path: $path) {
-                SettingsScreen(controller: controller, eventLog: controller.eventLog,
-                               onNavigate: { path.append($0) }, onRunSetup: { showSetup = true })
-                    .toolbar(.hidden, for: .navigationBar)
-                    .navigationDestination(for: SettingsRoute.self) { route in
-                        Group {
-                            switch route {
-                            case .reorder: ReorderDetailScreen(controller: controller, back: pop)
-                            case .hybrid: HybridDetailScreen(controller: controller, back: pop)
-                            case .redundant: RedundantDetailScreen(controller: controller, back: pop)
-                            }
-                        }.toolbar(.hidden, for: .navigationBar)
-                    }
-            }
-            .tabItem { Label("Settings", systemImage: "gearshape") }.tag(Tab.settings)
+            SettingsTab(controller: controller, eventLog: controller.eventLog, onRunSetup: { showSetup = true })
+                .tabItem { Label("Settings", systemImage: "gearshape") }.tag(Tab.settings)
         }
         .tint(mq.accent)
         .task { await controller.loadOrCreateManager() }
-        .onChange(of: controller.state) { st in
+        .onReceive(controller.$state) { st in
             if st == .absent { showSetup = true }
         }
         .onChange(of: showSetup) { controller.setupPresented = $0 }
         .fullScreenCover(isPresented: $showSetup) {
             MqThemeRoot {
-                SetupScreen(controller: controller, availability: availability) { showSetup = false }
+                SetupTab(controller: controller, availability: availability) { showSetup = false }
             }
         }
     }
-
-    private func pop() { if !path.isEmpty { path.removeLast() } }
 }

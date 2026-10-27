@@ -240,7 +240,7 @@ final class MqvpnEngine: NSObject {
         log.notice("[hybrid] applied enabled=\(hybrid.enabled) mode=\(hybrid.tcpMode) configured=\(hybridOK)")
         // Split: a nil scheduler is the legacy config (no scheduler / cc call,
         // library defaults). Redundant fails closed on a malformed port list.
-        requestedScheduler = split.scheduler
+        requestedScheduler = split.scheduler?.rawValue
         var redundantActive = false
         if split.redundantEnabled {
             if split.redundantPortsMalformed {
@@ -254,7 +254,7 @@ final class MqvpnEngine: NSObject {
             }
         }
         if let sched = split.scheduler {
-            mqvpn_config_set_scheduler(cfg, mqvpn_scheduler_t(rawValue: UInt32(sched)))
+            mqvpn_config_set_scheduler(cfg, mqvpn_scheduler_t(rawValue: UInt32(sched.rawValue)))
             mqvpn_config_set_request_server_scheduler(cfg, 1)
         }
         if split.scheduler != nil || redundantActive {
@@ -263,7 +263,7 @@ final class MqvpnEngine: NSObject {
         // Paired with the coordinator's reconnectEnabled: the core must never
         // arm a reconnect the coordinator would cancel.
         mqvpn_config_set_reconnect(cfg, protection.autoReconnect ? 1 : 0, 5)
-        log.notice("[split] applied scheduler=\(split.scheduler.map(String.init) ?? "legacy", privacy: .public) redundant=\(redundantActive) reconnect=\(protection.autoReconnect)")
+        log.notice("[split] applied scheduler=\(split.scheduler.map { String($0.rawValue) } ?? "legacy", privacy: .public) redundant=\(redundantActive) reconnect=\(protection.autoReconnect)")
         var cbs = mqvpn_client_callbacks_t()
         cbs.abi_version = UInt32(MQVPN_CALLBACKS_ABI_VERSION)
         cbs.struct_size = UInt32(MemoryLayout<mqvpn_client_callbacks_t>.size)
@@ -321,8 +321,7 @@ final class MqvpnEngine: NSObject {
         let v6 = Self.assignedV6(info)
         let hasSched = Self.covers(info, \.server_scheduler) && info.has_server_scheduler != 0
         tunnelInfo = TunnelInfoSnapshot(
-            assignedIp: Self.ip4String(info.assigned_ip), prefix: Int32(info.assigned_prefix),
-            assignedIp6: v6?.ip, prefix6: Int32(v6?.prefix ?? 0), hasV6: v6 != nil,
+            assignedIp: Self.ip4String(info.assigned_ip), assignedIp6: v6?.ip,
             mtu: Int32(info.mtu),
             serverScheduler: hasSched ? Int32(info.server_scheduler) : nil,
             requestedScheduler: requestedScheduler)
@@ -499,12 +498,10 @@ final class MqvpnEngine: NSObject {
         guard !reorderStatsUnavailable, let c = client else { return nil }
         var st = mqvpn_reorder_stats_t()
         guard mqvpn_client_get_reorder_stats(c, &st) == 0 else { return nil }
-        let p50 = mqvpn_reorder_latency_buffered_percentile(&st, 0.50)
-        let p99 = mqvpn_reorder_latency_buffered_percentile(&st, 0.99)
         return ReorderStatsSnapshot(
             delivered: st.delivered_count, gapCount: st.gap_count,
             gapFilled: st.gap_filled_count, gapTimeout: st.gap_timeout_count,
-            ackDemote: st.ack_demote_count, bufferedP50Ms: p50, bufferedP99Ms: p99,
+            ackDemote: st.ack_demote_count,
             residenceBuckets: (0..<Int32(MQVPN_REORDER_LAT_BUCKETS)).map {
                 mqvpn_shim_reorder_bucket(&st, $0)
             })

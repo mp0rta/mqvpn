@@ -15,9 +15,6 @@ struct BandwidthSample: Equatable {
 /// Port of android BandwidthHistory.kt. Rates use the monotonic clock; the
 /// window uses wall time. Single writer (the UI ticker).
 final class BandwidthHistory {
-    /// Samples visible in the default 30 s window at 1 Hz.
-    static let maxSamples = 30
-
     private let windowMs: Int64
     private var lastMono: UInt64?
     private var rxBase: [String: UInt64] = [:]

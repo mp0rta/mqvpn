@@ -6,8 +6,11 @@ import SwiftUI
 /// Port of android SetupScreen.kt (three steps). `onDone` dismisses the cover (Skip / Finish).
 struct SetupScreen: View {
     @Environment(\.mq) private var mq
-    @ObservedObject var controller: TunnelController
-    @ObservedObject var availability: TransportAvailability
+    @ScaledMetric(relativeTo: .subheadline) private var backWidth: CGFloat = 90
+    let form: SettingsForm
+    let available: Set<TransportKind>
+    /// Persists the draft (creating the VPN configuration); nil on success, else the error to show.
+    let finish: @MainActor () async -> String?
     let onDone: () -> Void
     @State private var step = 0
     @State private var tried = false
@@ -21,16 +24,15 @@ struct SetupScreen: View {
     @State private var typedKey: String?
 
     var body: some View {
-        let m = controller.settings
-        let s = m.draft
+        let s = form.draft
         VStack(alignment: .leading, spacing: 0) {
-            Text("Step \(step + 1) of 3").font(.system(size: 11, weight: .semibold)).foregroundColor(mq.t2)
+            Text("Step \(step + 1) of 3").mqFont(11, .semibold).foregroundColor(mq.t2)
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     switch step {
                     case 0: welcome
-                    case 1: server(m, s)
-                    default: connections(m, s)
+                    case 1: server(s)
+                    default: connections(s)
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
             }
@@ -38,15 +40,15 @@ struct SetupScreen: View {
                 if step == 0 {
                     PrimaryButton("Get Started") { step = 1 }
                     Button(action: onDone) {
-                        Text("Skip setup").font(.system(size: 13)).foregroundColor(mq.t2).frame(maxWidth: .infinity).padding(8)
+                        Text("Skip setup").mqFont(13).foregroundColor(mq.t2).frame(maxWidth: .infinity).padding(8)
                     }.buttonStyle(.plain)
                 } else {
                     HStack(spacing: 10) {
-                        SecondaryButton("Back") { step -= 1 }.frame(width: 90)
+                        SecondaryButton("Back") { step -= 1 }.frame(width: backWidth)
                         if step == 1 {
-                            PrimaryButton("Continue") { continueFromServer(m) }
+                            PrimaryButton("Continue") { continueFromServer() }
                         } else {
-                            PrimaryButton("Finish Setup") { finish(m) }.disabled(!s.paths.anyEnabled || finishing)
+                            PrimaryButton("Finish Setup") { runFinish() }.disabled(!s.paths.anyEnabled || finishing)
                         }
                     }
                 }
@@ -56,22 +58,23 @@ struct SetupScreen: View {
         .background(mq.win.ignoresSafeArea())
     }
 
-    private func continueFromServer(_ m: SettingsCore) {
+    private func continueFromServer() {
         endEditing()
-        if typedAddress != nil || typedKey != nil {
-            m.update { d in
-                if let a = typedAddress { d.addressText = a }
-                if let k = typedKey { d.authKey = k }
-            }
+        // Decide on the typed text itself: `form` is this render's value, not the edited draft.
+        var d = form.draft
+        if let a = typedAddress { d.addressText = a }
+        if let k = typedKey { d.authKey = k }
+        if d != form.draft {
+            let (a, k) = (d.addressText, d.authKey)
+            form.update { $0.addressText = a; $0.authKey = k }
         }
-        if m.draft.server != nil { step = 2 } else { tried = true }
+        if d.server != nil { step = 2 } else { tried = true }
     }
 
-    private func finish(_ m: SettingsCore) {
+    private func runFinish() {
         finishing = true; finishError = nil
         Task { @MainActor in
-            if await m.commitFirst() { onDone() }
-            else { finishError = m.saveError ?? m.fieldErrors.values.sorted().first ?? "Settings could not be saved" }
+            if let e = await finish() { finishError = e } else { onDone() }
             finishing = false
         }
     }
@@ -79,8 +82,8 @@ struct SetupScreen: View {
     private var welcome: some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(spacing: 18) {
-                MqvpnMark(joint: mq.win).frame(width: 96, height: 96)
-                Text("All your connections.\nOne stronger connection.").font(.system(size: 22, weight: .bold))
+                MqvpnMark(joint: mq.win).frame(width: 96, height: 96).accessibilityHidden(true)
+                Text("All your connections.\nOne stronger connection.").mqFont(22, .bold)
                     .foregroundColor(mq.text).multilineTextAlignment(.center)
             }.frame(maxWidth: .infinity).padding(.top, 28)
             VStack(alignment: .leading, spacing: 12) {
@@ -93,73 +96,80 @@ struct SetupScreen: View {
 
     private func bullet(_ t: String) -> some View {
         HStack(alignment: .top, spacing: 10) {
-            Text("✓").fontWeight(.bold).foregroundColor(mq.green)
-            Text(t).font(.system(size: 13)).lineSpacing(5).foregroundColor(mq.text)
+            Image(systemName: "checkmark").mqFont(13, .bold).foregroundColor(mq.green).accessibilityHidden(true)
+            Text(t).mqFont(13).lineSpacing(5).foregroundColor(mq.text)
         }
     }
 
     private func heading(_ t: String) -> some View {
-        Text(t).font(.system(size: 20, weight: .bold)).foregroundColor(mq.text)
+        Text(t).mqFont(20, .bold).foregroundColor(mq.text).accessibilityAddTraits(.isHeader)
     }
 
-    private func server(_ m: SettingsCore, _ s: AppDraft) -> some View {
+    private func server(_ s: AppDraft) -> some View {
         let bad = (tried || !s.addressText.trimmingCharacters(in: .whitespaces).isEmpty) && s.server == nil
         return VStack(alignment: .leading, spacing: 16) {
             heading("Connect to your server")
             Text("Your server admin gives you these two values. On your own server, run mqvpn --genkey to create a key.")
-                .font(.system(size: 13)).lineSpacing(5).foregroundColor(mq.t2)
+                .mqFont(13).lineSpacing(5).foregroundColor(mq.t2)
             FieldBox(label: "Server address", note: bad ? "Enter a server address, e.g. vpn.example.com:443" : nil, noteIsError: bad) {
                 CommitField(label: "Server address", value: s.addressText, keyboard: .URL,
-                            onType: { typedAddress = $0 }) { t in m.update { $0.addressText = t } }
+                            onType: { typedAddress = $0 }) { t in form.update { $0.addressText = t } }
             }
             FieldBox(label: "Access key", trailing: AnyView(ShowHide(shown: $keyShown))) {
                 CommitField(label: "Access key", value: s.authKey, secure: !keyShown,
-                            onType: { typedKey = $0 }) { t in m.update { $0.authKey = t } }
+                            onType: { typedKey = $0 }) { t in form.update { $0.authKey = t } }
             }
             MqCard {
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 0) {
-                        Text("Trust self-signed certificate").font(.system(size: 13)).foregroundColor(mq.text)
+                        Text("Trust self-signed certificate").mqFont(13).foregroundColor(mq.text)
                         Text("Only for test servers you own. Turn off once your server has a real certificate.")
-                            .font(.system(size: 11)).lineSpacing(3).foregroundColor(mq.t2)
+                            .mqFont(11).lineSpacing(3).foregroundColor(mq.t2)
                     }
-                    Toggle("Trust self-signed certificate", isOn: m.binding(\.insecure)).labelsHidden().tint(mq.accent)
+                    Toggle("Trust self-signed certificate", isOn: form.binding(\.insecure)).labelsHidden().tint(mq.accent)
                 }
             }
             Text("iOS will ask for permission to add a VPN configuration when you finish setup.")
-                .font(.system(size: 12)).lineSpacing(3).foregroundColor(mq.t2)
+                .mqFont(12).lineSpacing(3).foregroundColor(mq.t2)
         }
     }
 
-    private func connections(_ m: SettingsCore, _ s: AppDraft) -> some View {
-        let rows: [(TransportKind, String, String, Bool, Bool)] = [
-            (.wifi, "Wi\u{2011}Fi", "Wireless network", availability.wifi, s.paths.wifi),
-            (.cellular, "Cellular", "May use mobile data", availability.cellular, s.paths.cellular),
-        ]
-        return VStack(alignment: .leading, spacing: 16) {
+    private func connections(_ s: AppDraft) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
             heading("Your connections")
             Text("We found these on your device. Use carries traffic; Off leaves a connection out. Change this anytime in Paths.")
-                .font(.system(size: 13)).lineSpacing(5).foregroundColor(mq.t2)
-            ForEach(rows, id: \.0.hashValue) { kind, name, sub, found, on in
+                .mqFont(13).lineSpacing(5).foregroundColor(mq.t2)
+            ForEach(TransportKind.allCases, id: \.self) { kind in
+                let found = available.contains(kind)
                 MqCard {
                     VStack(alignment: .leading, spacing: 10) {
                         VStack(alignment: .leading, spacing: 0) {
-                            Text(name).font(.system(size: 13, weight: .semibold)).foregroundColor(mq.text)
-                            Text(found ? sub : "Not available").font(.system(size: 11)).foregroundColor(mq.t2)
+                            Text(kind.title).mqFont(13, .semibold).foregroundColor(mq.text)
+                            Text(found ? kind.setupCaption : "Not available").mqFont(11).foregroundColor(mq.t2)
                         }
                         if found {
-                            UseOffSegmented(isOn: on) { want in
+                            UseOffSegmented(isOn: s.paths[kind]) { want in
                                 guard let p = s.paths.setting(kind, on: want) else { lastPathBlocked = true; return }
                                 lastPathBlocked = false
-                                m.update { $0.paths = p }
+                                form.update { $0.paths = p }
                             }
+                            .accessibilityLabel(kind.title)
                         }
                     }
                 }.opacity(found ? 1 : 0.5)
             }
-            if lastPathBlocked { Text(lastPathCaption).font(.system(size: 12)).foregroundColor(mq.red) }
-            if let e = m.fieldErrors[.paths] { Text(e).font(.system(size: 12)).foregroundColor(mq.red) }
-            if let e = finishError { Text(e).font(.system(size: 12)).foregroundColor(mq.red) }
+            if lastPathBlocked { Text(lastPathCaption).mqFont(12).foregroundColor(mq.red) }
+            if let e = form.errors[.paths] { Text(e).mqFont(12).foregroundColor(mq.red) }
+            if let e = finishError { Text(e).mqFont(12).foregroundColor(mq.red) }
+        }
+    }
+}
+
+private extension TransportKind {
+    var setupCaption: String {
+        switch self {
+        case .wifi: return "Wireless network"
+        case .cellular: return "May use mobile data"
         }
     }
 }

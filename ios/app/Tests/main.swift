@@ -48,11 +48,10 @@ check(ReorderSettings.reorderEnableDecision(ruleResults: [false, true]) == (true
 check(ReorderSettings.reorderEnableDecision(ruleResults: []).enable == false, "no rules -> disabled")
 
 // wire round-trip
-let full = TunnelSnapshot(timestamp: 2, clientState: 4, connectedSince: 1, footprint: 1, paths: [],
+let full = TunnelSnapshot(timestamp: 2, clientState: 4, connectedSince: 1, paths: [],
                           seq: 7, reorderConfigured: true,
                           reorder: ReorderStatsSnapshot(delivered: 5, gapCount: 1, gapFilled: 1,
                                                         gapTimeout: 0, ackDemote: 0,
-                                                        bufferedP50Ms: 1.5, bufferedP99Ms: 9.0,
                                                         residenceBuckets: [1, 2]))
 let rt = try! JSONDecoder().decode(TunnelSnapshot.self, from: try! JSONEncoder().encode(full))
 check(rt.seq == 7 && rt.reorderConfigured && rt.reorder == full.reorder, "wire round-trip")
@@ -303,7 +302,7 @@ check(ServerSettings.emptyDraft.insecure == false, "emptyDraft defaults to Insec
 // one + a stale CLOSED slot, since get_paths never shrinks n_paths). Keyed by
 // interface name, that duplicate would fabricate en0 active<->closed churn.
 func evSnap(_ paths: [(String, Int32)], state: Int32 = 4) -> TunnelSnapshot {
-    TunnelSnapshot(timestamp: 0, clientState: state, connectedSince: nil, footprint: 0,
+    TunnelSnapshot(timestamp: 0, clientState: state, connectedSince: nil,
                    paths: paths.map { PathSnapshot(name: $0.0, status: $0.1, txBytes: 0, rxBytes: 0) })
 }
 func countStatus(_ log: EventLog) -> Int {

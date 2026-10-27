@@ -42,38 +42,39 @@ func statusLine(_ state: VpnViewState, elapsed: String?) -> StatusLine {
     }
 }
 
-enum TransportKind: Equatable { case wifi, cellular }
+extension TransportKind {
+    var title: String {
+        switch self {
+        case .wifi: return "Wi-Fi"
+        case .cellular: return "Cellular"
+        }
+    }
+}
 
-/// One live path from the snapshot: interface name + raw mqvpn_path_status_t.
-struct LivePath: Equatable { var iface: String; var status: Int32 }
+/// One live path from the snapshot: interface name, raw mqvpn_path_status_t and
+/// the transport the provider bound it to (nil = charted, but no card).
+struct LivePath: Equatable { var iface: String; var status: Int32; var kind: TransportKind? }
 
-/// Display model of one transport (Wi-Fi / Cellular) row.
+/// Display model of one transport row (one per TransportKind).
 struct PathCard: Equatable {
     var kind: TransportKind
-    var name: String
     var sub: String
     var available: Bool
     var active: Bool
     var rateBps: Int64            // download only (perPathDl), as on Android
     var barFraction: Double
-}
-
-/// en* -> wifi, pdp_ip* -> cellular, else nil ("other": charted but no card).
-func transportKind(iface: String) -> TransportKind? {
-    if iface.hasPrefix("en") { return .wifi }
-    if iface.hasPrefix("pdp_ip") { return .cellular }
-    return nil
+    var name: String { kind.title }
 }
 
 func pathCards(paths: [LivePath], available: Set<TransportKind>, sample: BandwidthSample?) -> [PathCard] {
-    var cards = [TransportKind.wifi, .cellular].map { k -> PathCard in
-        let mine = paths.filter { transportKind(iface: $0.iface) == k }
+    var cards = TransportKind.allCases.map { k -> PathCard in
+        let mine = paths.filter { $0.kind == k }
         let avail = available.contains(k)
         let sub: String
         if !avail { sub = "Not connected" }
         else if k == .cellular { sub = "May use mobile data" }
         else { sub = mine.first?.iface ?? "Ready" }
-        return PathCard(kind: k, name: k == .wifi ? "Wi-Fi" : "Cellular", sub: sub, available: avail,
+        return PathCard(kind: k, sub: sub, available: avail,
                         active: mine.contains { $0.status == CorePathStatus.active.rawValue },
                         rateBps: mine.reduce(Int64(0)) { $0 + Int64(sample?.perPathDl[$1.iface] ?? 0) },
                         barFraction: 0)
@@ -88,7 +89,7 @@ extension PathPolicy {
     /// connection off (never persistable).
     func setting(_ kind: TransportKind, on: Bool) -> PathPolicy? {
         var p = self
-        if kind == .wifi { p.wifi = on } else { p.cellular = on }
+        p[kind] = on
         return p.anyEnabled ? p : nil
     }
 }
@@ -117,15 +118,8 @@ func fmtBytes(_ b: UInt64) -> String {
     return mb < 1000 ? String(format: "%.0f MB", mb) : String(format: "%.2f GB", mb / 1000)
 }
 
-/// mqvpn_scheduler_t: MINRTT 0, WLB 1, BACKUP_FEC 2, WLB_UDP_PIN 3.
 private func schedulerLabel(_ v: Int32) -> String {
-    switch v {
-    case 0: return "minrtt"
-    case 1: return "wlb"
-    case 2: return "backup_fec"
-    case 3: return "wlb_udp_pin"
-    default: return "unknown(\(v))"
-    }
+    Scheduler(rawValue: v)?.label ?? "unknown(\(v))"
 }
 
 func serverSchedulerLine(requested: Int32?, server: Int32?) -> String? {
@@ -134,7 +128,7 @@ func serverSchedulerLine(requested: Int32?, server: Int32?) -> String? {
     }
     let base = "Server scheduler: \(schedulerLabel(server))"
     guard let requested = requested, requested != server else { return base }
-    let why = server == 2 ? "the server's backup_fec cannot be switched" : "check AllowClientScheduler on the server"
+    let why = Scheduler(rawValue: server) == .backupFec ? "the server's backup_fec cannot be switched" : "check AllowClientScheduler on the server"
     return "\(base) (your setting \(schedulerLabel(requested)) is not applied — \(why))"
 }
 

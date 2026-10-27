@@ -86,7 +86,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let engine = MqvpnEngine()
             let binder = PathBinder(engine: engine, policy: policy)
             let metrics = GateMetrics(engine: engine, binder: binder)
-            let snapshot = SnapshotCache(engine: engine)
+            let snapshot = SnapshotCache(engine: engine, binder: binder)
 
             engine.onTunOutput = { [weak self] data in
                 // NEPacketTunnelFlow requires a protocol family per packet;

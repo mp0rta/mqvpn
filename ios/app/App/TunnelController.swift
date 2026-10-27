@@ -7,10 +7,8 @@ import SwiftUI
 enum ManagerState: Equatable { case loading, loadFailed(String), absent, loaded }
 
 /// Container controller: load/create the one NETunnelProviderManager,
-/// start/stop it, persist the settings draft, and — while foregrounded and
-/// connected — poll the provider for a status snapshot over
-/// `sendProviderMessage`. The 30 s histories are fed from the provider's
-/// sample ring.
+/// start/stop it and persist the settings draft. State here changes on user
+/// actions and session events only; the 1 Hz telemetry lives in `live`.
 @MainActor
 final class TunnelController: ObservableObject {
     static let providerBundleID = "org.mqvpn.app.PacketTunnel"
@@ -18,40 +16,41 @@ final class TunnelController: ObservableObject {
     @Published private(set) var state: ManagerState = .loading {
         didSet { recomputeAutosave() }
     }
-    @Published var status: NEVPNStatus = .invalid
-    @Published var snapshot: TunnelSnapshot?       // nil = no data
+    @Published private(set) var status: NEVPNStatus = .invalid
     /// Last disconnect / start / save error; cleared once the tunnel leaves .disconnected.
-    @Published var surfacedError: String?
+    @Published private(set) var surfacedError: String?
     /// Stored server config unreadable; cleared by the next successful save.
-    @Published var configError: String?
-    /// Upload DATAGRAM loss over the last 30 s; nil = no data.
-    @Published private(set) var dgramLoss: Double?
-    /// Bumped whenever the histories gain a sample (they are plain classes).
-    @Published private(set) var historyVersion = 0
+    @Published private(set) var configError: String?
+    /// Core state + tunnel info of the live session (nil = no data), republished
+    /// from `live` only when they change.
+    @Published private(set) var facts: SessionFacts?
     /// Observed directly by the Settings event log; fed the same snapshot stream.
-    let eventLog = EventLog()
-    let bandwidthHistory = BandwidthHistory()
-    let reorderHistory = ReorderHistory()
-    private let dgramLossWindow = DgramLossWindow()
+    let eventLog: EventLog
+    let live: LiveSession
     /// Autosaving edit model; its DraftStore persists into the manager. Views
     /// observe the controller, which republishes every settings change.
     let settings: SettingsCore
 
-    /// Epoch, seq/timestamp baselines and sample cursor (pure, tested).
-    private var ingestState = SnapshotIngestState()
     private var manager: NETunnelProviderManager?
     private var observer: NSObjectProtocol?
-    private var pollTimer: Timer?
     private var scenePhaseActive = true            // WindowGroup starts active
     /// First-run setup cover is on screen (suppresses autosave while no manager exists).
     var setupPresented = false { didSet { recomputeAutosave() } }
 
     init() {
+        let log = EventLog()
+        eventLog = log
+        live = LiveSession(eventLog: log)
         let store = ManagerDraftStore()
         settings = SettingsCore(store: store)
         store.owner = self
         settings.editable = { [weak self] in self?.isEditable ?? false }
         settings.onChange = { [weak self] in self?.objectWillChange.send() }
+        live.onFacts = { [weak self] in self?.facts = $0 }
+    }
+
+    var viewState: VpnViewState {
+        deriveViewState(neStatus: status.rawValue, clientState: facts?.clientState, surfacedError: surfacedError)
     }
 
     var isEditable: Bool {
@@ -59,7 +58,7 @@ final class TunnelController: ObservableObject {
     }
     /// A pending or failed autosave does not block Connect: start() flushes first.
     var isConnectable: Bool {
-        state == .loaded && status == .disconnected && settings.draft.isValid
+        state == .loaded && status == .disconnected && settings.isValid
     }
     static func isUp(_ s: NEVPNStatus) -> Bool { s == .connected || s == .reasserting }
 
@@ -116,8 +115,7 @@ final class TunnelController: ObservableObject {
         let r = ReorderSettings(providerConfiguration: pc) ?? .disabled
         d.reorder = ReorderDraft(enabled: r.enabled, profile: r.profile,
                                  portsText: r.ports.map(String.init).joined(separator: ","))
-        let h = HybridSettings(providerConfiguration: pc) ?? .disabled
-        d.hybrid = HybridDraft(enabled: h.enabled, tcpMode: h.tcpMode)
+        d.hybrid = HybridSettings(providerConfiguration: pc) ?? .disabled
         d.split = SplitSettings(providerConfiguration: pc)
         // A malformed stored list shows as empty text and stays fail-closed until edited.
         d.redundantPortsText = d.split.redundantPortsMalformed
@@ -143,15 +141,10 @@ final class TunnelController: ObservableObject {
     }
 
     private func updateStatus(_ s: NEVPNStatus) {
-        let wasUp = Self.isUp(status)
         status = s
         if s != .disconnected { surfacedError = nil }
         if s == .disconnected { surfaceDisconnectError() }
-        if wasUp && !Self.isUp(s) {          // up -> down session boundary
-            ingestState.sessionEnded()
-        }
         reconcilePolling()
-        objectWillChange.send()              // isEditable/isConnectable depend on status
     }
 
     /// The provider's startTunnel throw / cancelTunnelWithError NSError is
@@ -175,7 +168,7 @@ final class TunnelController: ObservableObject {
         guard isConnectable else { return }
         Task { @MainActor in
             guard await settings.flush() else {
-                surfacedError = "save error: \(settings.saveError ?? "settings not saved")"
+                surfacedError = settings.saveError ?? "Settings could not be saved"
                 return
             }
             guard isConnectable, let manager else { return }
@@ -229,15 +222,14 @@ final class TunnelController: ObservableObject {
         }
         let server = ServerSettings(host: addr.host, port: addr.port, serverName: d.tlsServerName,
                                     authKey: d.authKey, insecure: d.insecure)
-        let reorder = ReorderSettings(enabled: d.reorder.enabled, profile: d.reorder.profile, ports: d.reorderPorts)
-        let hybrid = HybridSettings(enabled: d.hybrid.enabled, tcpMode: d.hybrid.tcpMode)
-        let split = d.derivedSplit
-        var merged = server.toProviderConfiguration()
-        for (k, v) in reorder.toProviderConfiguration() { merged[k] = v }
-        for (k, v) in hybrid.toProviderConfiguration() { merged[k] = v }
-        split.merged(into: &merged)
-        d.protection.merged(into: &merged)
-        d.paths.merged(into: &merged)
+        // Every providerConfiguration section the draft owns; a new setting adds one entry.
+        let sections: [ProviderConfigSection] = [
+            server,
+            ReorderSettings(enabled: d.reorder.enabled, profile: d.reorder.profile, ports: d.reorderPorts),
+            d.hybrid, d.derivedSplit, d.protection, d.paths,
+        ]
+        var merged: [String: Any] = [:]
+        for section in sections { section.merged(into: &merged) }
 
         // New keychain item first; the old one goes only after the commit, so
         // a failed save leaves the saved configuration and its PSK untouched.
@@ -268,7 +260,7 @@ final class TunnelController: ObservableObject {
         }
     }
 
-    // MARK: - Snapshot polling
+    // MARK: - Live telemetry gate
 
     /// Called by the scene on activation changes; gates polling together with
     /// the connection state.
@@ -281,86 +273,9 @@ final class TunnelController: ObservableObject {
         reconcilePolling()
     }
 
-    /// Single decision point: poll only while foregrounded AND the tunnel is
-    /// up. When the tunnel is down, drop the snapshot so the UI shows no data.
     private func reconcilePolling() {
-        let up = Self.isUp(status)
-        if scenePhaseActive && up {
-            startPolling()
-        } else {
-            stopPolling()
-            if !up { clearSnapshot() }
-        }
-    }
-
-    private func startPolling() {
-        guard pollTimer == nil else { return }
-        poll()   // immediate first sample
-        let t = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.poll() }
-        }
-        pollTimer = t
-    }
-
-    private func stopPolling() {
-        pollTimer?.invalidate()
-        pollTimer = nil
-    }
-
-    private func clearSnapshot() {
-        snapshot = nil
-        ingestState.clear()
-        clearHistories()
-        eventLog.resetBaseline()
-    }
-
-    private func clearHistories() {
-        bandwidthHistory.clear()
-        reorderHistory.clear()
-        dgramLossWindow.clear()
-        dgramLoss = nil
-        historyVersion += 1
-    }
-
-    private func poll() {
-        guard let session = manager?.connection as? NETunnelProviderSession else { return }
-        let polledEpoch = ingestState.epoch
-        do {
-            // The cursor tells the provider which ring samples are still needed.
-            try session.sendProviderMessage(SnapshotRequest.encode(cursor: ingestState.cursor.request)) { [weak self] resp in
-                Task { @MainActor in
-                    guard let self else { return }
-                    // Cheap early-out before decoding; accept() is the authoritative gate.
-                    guard self.ingestState.epoch == polledEpoch, Self.isUp(self.status) else { return }
-                    guard let resp, let snap = try? ProviderMessage.decode(resp) else { return }
-                    switch self.ingestState.accept(replyEpoch: polledEpoch, isUp: Self.isUp(self.status),
-                                                   snapshot: snap) {
-                    case .drop: return
-                    case .ingest(let fresh, let reset):
-                        if reset { self.clearHistories() }
-                        self.ingest(snap, fresh: fresh)
-                    }
-                }
-            }
-        } catch { /* transient; keep the current snapshot */ }
-    }
-
-    /// Feed fresh ring samples to the histories, then publish.
-    private func ingest(_ snap: TunnelSnapshot, fresh: [TunnelSample]) {
-        for s in fresh {
-            let wall = Int64(s.wallMs)
-            bandwidthHistory.onTick(paths: s.paths.map { (name: $0.name, tx: $0.txBytes, rx: $0.rxBytes) },
-                                    monoMs: s.monoMs, wallMs: wall)
-            if snap.reorderConfigured {
-                reorderHistory.onTick(delivered: s.delivered, gapCount: s.gapCount, gapFilled: s.gapFilled,
-                                      gapTimeout: s.gapTimeout, ackDemote: s.ackDemote,
-                                      buckets: s.residenceBuckets, wallMs: wall)
-            }
-            dgramLoss = dgramLossWindow.onTick(sent: s.dgramSent, lost: s.dgramLost, wallMs: wall)
-        }
-        if !fresh.isEmpty { historyVersion += 1 }
-        snapshot = snap
-        eventLog.ingest(snap)
+        live.update(session: manager?.connection as? NETunnelProviderSession,
+                    isUp: Self.isUp(status), foreground: scenePhaseActive)
     }
 }
 

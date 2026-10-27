@@ -45,28 +45,41 @@ func runPureCases() -> Int {
         var out: [String: Any] = [:]
         ls.merged(into: &out)
         check(out["scheduler"] == nil, "legacy nil scheduler stays absent")
-        check(ls.tapped(.throughput).scheduler == 1, "tap throughput writes wlb")
+        check(ls.tapped(.throughput).scheduler == .wlb, "tap throughput writes wlb")
         let pr = ProtectionSettings(providerConfiguration: legacy)
         check(!pr.killSwitch && pr.autoReconnect, "protection defaults")
         let pp = PathPolicy(providerConfiguration: legacy)
         check(pp.wifi && pp.cellular && pp.anyEnabled, "path defaults")
+        var kp = PathPolicy()
+        kp[.wifi] = false
+        check(kp == PathPolicy(wifi: false, cellular: true) && kp.enabledKinds == [.cellular] && kp[.cellular], "policy subscript")
+        check(PathPolicy().enabledKinds == TransportKind.allCases, "enabledKinds in primary order")
+        for raw in [2, 3, -1, Int(Int32.max) + 1] {
+            check(SplitSettings(providerConfiguration: ["scheduler": NSNumber(value: raw)]).scheduler == nil, "scheduler \(raw) rejected")
+        }
+        check(SplitSettings(providerConfiguration: ["scheduler": NSNumber(value: 0)]).scheduler == .minrtt, "scheduler minrtt read")
+        var merged: [String: Any] = [:]
+        for section: ProviderConfigSection in [ProtectionSettings(killSwitch: true), PathPolicy(wifi: false, cellular: true)] {
+            section.merged(into: &merged)
+        }
+        check(merged.count == 4 && ProtectionSettings(providerConfiguration: merged).killSwitch, "sections merge into one dict")
         for (w, c, any) in [(true, true, true), (true, false, true), (false, true, true), (false, false, false)] {
             check(PathPolicy(wifi: w, cellular: c).anyEnabled == any, "anyEnabled \(w) \(c)")
         }
         // read matrix
-        func ch(_ s: Int32?, _ r: Bool) -> SplitChoice {
+        func ch(_ s: Scheduler?, _ r: Bool) -> SplitChoice {
             SplitSettings(scheduler: s, redundantEnabled: r, redundantPorts: [], redundantPortsMalformed: false).choice
         }
-        check(ch(1, false) == .throughput, "choice wlb")
-        check(ch(0, false) == .lowLatency, "choice minrtt")
+        check(ch(.wlb, false) == .throughput, "choice wlb")
+        check(ch(.minrtt, false) == .lowLatency, "choice minrtt")
         check(ch(nil, false) == .throughput, "choice nil")
-        check(ch(1, true) == .redundant && ch(0, true) == .redundant && ch(nil, true) == .redundant, "choice redundant")
+        check(ch(.wlb, true) == .redundant && ch(.minrtt, true) == .redundant && ch(nil, true) == .redundant, "choice redundant")
         // write matrix; ports kept
         let base = SplitSettings(scheduler: nil, redundantEnabled: false, redundantPorts: [4200], redundantPortsMalformed: false)
         let t1 = base.tapped(.throughput), t2 = base.tapped(.lowLatency), t3 = base.tapped(.redundant)
-        check(t1.scheduler == 1 && !t1.redundantEnabled, "tap throughput")
-        check(t2.scheduler == 0 && !t2.redundantEnabled, "tap lowLatency")
-        check(t3.scheduler == 0 && t3.redundantEnabled, "tap redundant")
+        check(t1.scheduler == .wlb && !t1.redundantEnabled, "tap throughput")
+        check(t2.scheduler == .minrtt && !t2.redundantEnabled, "tap lowLatency")
+        check(t3.scheduler == .minrtt && t3.redundantEnabled, "tap redundant")
         check(t1.redundantPorts == [4200] && t2.redundantPorts == [4200] && t3.redundantPorts == [4200], "tap keeps ports")
         // round trip
         for s in [base, t1, t2, t3] {
@@ -95,7 +108,7 @@ func runPureCases() -> Int {
         var saved = badDict
         SplitSettings(providerConfiguration: badDict).tapped(.throughput).merged(into: &saved)
         check(SplitSettings(providerConfiguration: saved).redundantPortsMalformed, "malformed ports survive save")
-        check(SplitSettings(providerConfiguration: saved).scheduler == 1, "save still writes scheduler")
+        check(SplitSettings(providerConfiguration: saved).scheduler == .wlb, "save still writes scheduler")
         let okp = SplitSettings(providerConfiguration: ["redundantPorts": [NSNumber(value: 80), NSNumber(value: 443)]])
         check(!okp.redundantPortsMalformed && okp.redundantPorts == [80, 443], "valid ports")
         // parse
@@ -117,12 +130,11 @@ func runPureCases() -> Int {
                          gapCount: 0, gapFilled: 0, gapTimeout: 0, ackDemote: 0, residenceBuckets: [1, 2])
         }
         let big = UInt64.max
-        var snap = TunnelSnapshot(timestamp: 1, clientState: 2, connectedSince: nil, footprint: big, paths: [],
+        var snap = TunnelSnapshot(timestamp: 1, clientState: 2, connectedSince: nil, paths: [],
                                   seq: big, reorderConfigured: true,
                                   reorder: ReorderStatsSnapshot(delivered: big, gapCount: 1, gapFilled: 2, gapTimeout: 3, ackDemote: 4,
-                                                                bufferedP50Ms: 1, bufferedP99Ms: 2, residenceBuckets: [big]),
-                                  tunnel: TunnelInfoSnapshot(assignedIp: "10.0.0.2", prefix: 24, assignedIp6: nil, prefix6: 0,
-                                                             hasV6: false, mtu: 1280, serverScheduler: 1, requestedScheduler: nil),
+                                                                residenceBuckets: [big]),
+                                  tunnel: TunnelInfoSnapshot(assignedIp: "10.0.0.2", assignedIp6: nil, mtu: 1280, serverScheduler: 1, requestedScheduler: nil),
                                   stats: StatsSnapshot(bytesTx: big, bytesRx: big, dgramSent: big, dgramLost: big, srttMs: 1.5),
                                   samples: [mk(big, tx: big)], bootId: big)
         if let d = try? ProviderMessage.decode(try! ProviderMessage.encode(snap)) {
@@ -130,7 +142,7 @@ func runPureCases() -> Int {
             check(d.stats == snap.stats && d.tunnel == snap.tunnel, "v2 tunnel/stats round-trip")
             check(d.reorder == snap.reorder && d.reorder?.residenceBuckets == [big], "v2 reorder buckets")
         } else { check(false, "v2 round-trip decode") }
-        snap = TunnelSnapshot(timestamp: 1, clientState: 2, connectedSince: nil, footprint: 3, paths: [])
+        snap = TunnelSnapshot(timestamp: 1, clientState: 2, connectedSince: nil, paths: [])
         check(snap.samples.isEmpty && snap.bootId == 0, "v2 init defaults")
 
         // request codec
@@ -371,7 +383,8 @@ func runPureCases() -> Int {
         if c.series.count == 2, c.series[0].count > 2 {
             check(c.series[0][0] == nil && c.series[0][2] != nil, "cg series gap")
         } else { check(false, "cg series shape") }
-        check(c.legend[0].label == "total", "cg legend total")
+        check(rateLegend(samples: [bw(100_000, 1_000_000, 0)], slots: ["wlan0": 0], dir: .down, nowMs: now).map(\.label)
+              == ["total", "wlan0"], "cg legend total")
 
         c = rateChart(samples: [bw(100_000, 9_000_000, 20_000)], slots: ["wlan0": 0], dir: .up, nowMs: now, w: 300, h: 100)
         check(c.yMaxLabel == "20 Kbps", "cg upload fields")
@@ -391,7 +404,7 @@ func runPureCases() -> Int {
         check(wb.bars.count == 2 && nr(wb.bars[0].x, 200) && nr(wb.bars[1].x, 300), "cg missing tick spacing")
 
         wb = waitBars(samples: [rs(100_000, 0, 0, 1, .infinity)], nowMs: now, w: 300, h: 100)
-        check(wb.yMaxLabel == "1000 ms" && wb.legend[1].valueText == ">512 ms", "cg overflow")
+        check(wb.yMaxLabel == "1000 ms" && waitLegend(samples: [rs(100_000, 0, 0, 1, .infinity)], nowMs: now)[1].valueText == ">512 ms", "cg overflow")
 
         let rb = reorderBars(samples: [rs(100_000, 6, 2, nil, nil), rs(99_000, 1, 0, nil, nil)], nowMs: now, w: 300, h: 80)
         check(rb.yMaxLabel == "8/s" && rb.bars.count == 2, "cg reorder label")
@@ -436,11 +449,11 @@ func runPureCases() -> Int {
             check(deriveViewState(neStatus: n, clientState: nil, surfacedError: "boom") == .error("boom"), "vs err \(n)")
         }
 
-        func p(_ i: String, _ st: Int32 = 1) -> LivePath { LivePath(iface: i, status: st) }
+        func p(_ i: String, _ st: Int32 = 1, _ k: TransportKind? = nil) -> LivePath { LivePath(iface: i, status: st, kind: k) }
         let smp = BandwidthSample(wallMs: 0, dlBps: 0, ulBps: 0,
                                   perPathDl: ["en0": 40_000_000, "pdp_ip0": 10_000_000, "utun9": 99_000_000],
                                   perPathUl: ["en0": 5_000_000])
-        let cards = pathCards(paths: [p("en0"), p("pdp_ip0", 3), p("utun9")], available: [.wifi, .cellular], sample: smp)
+        let cards = pathCards(paths: [p("en0", 1, .wifi), p("pdp_ip0", 3, .cellular), p("utun9")], available: [.wifi, .cellular], sample: smp)
         check(cards.map { $0.kind } == [.wifi, .cellular] && cards.map { $0.name } == ["Wi-Fi", "Cellular"], "pc order/names")
         check(cards.map { $0.available } == [true, true] && cards.map { $0.active } == [true, false], "pc avail/active")
         check(cards[0].rateBps == 40_000_000 && cards[0].barFraction == 1 && cards[1].barFraction == 0.25, "pc rate/bar")
@@ -504,7 +517,7 @@ func runPureCases() -> Int {
                          gapTimeout: 0, ackDemote: 0, residenceBuckets: [])
         }
         func snap(boot: UInt64, seq: UInt64, ts: Double, samples: [UInt64]) -> TunnelSnapshot {
-            TunnelSnapshot(timestamp: ts, clientState: 2, connectedSince: nil, footprint: 0, paths: [],
+            TunnelSnapshot(timestamp: ts, clientState: 2, connectedSince: nil, paths: [],
                            seq: seq, samples: samples.map(smp), bootId: boot)
         }
         var st = SnapshotIngestState()
@@ -606,11 +619,11 @@ func runSettingsCoreCases() async -> Int {
 
     // derivedSplit: valid edit never carries a stale malformed flag
     var m = good()
-    m.split = SplitSettings(scheduler: 1, redundantEnabled: true, redundantPorts: [], redundantPortsMalformed: true)
+    m.split = SplitSettings(scheduler: .wlb, redundantEnabled: true, redundantPorts: [], redundantPortsMalformed: true)
     check(m.derivedSplit.redundantPortsMalformed, "untouched malformed stays fail-closed")
     m.redundantPortsText = "443, 8443"
     check(!m.derivedSplit.redundantPortsMalformed && m.derivedSplit.redundantPorts == [443, 8443], "valid text clears malformed")
-    check(m.derivedSplit.scheduler == 1, "derivedSplit keeps scheduler")
+    check(m.derivedSplit.scheduler == .wlb, "derivedSplit keeps scheduler")
 
     // lastPersisted init => flush true immediately, nothing persisted
     do {
@@ -687,7 +700,7 @@ func runSettingsCoreCases() async -> Int {
     // valid ports edit over a malformed list persists malformed=false
     do {
         var l = good()
-        l.split = SplitSettings(scheduler: 0, redundantEnabled: true, redundantPorts: [], redundantPortsMalformed: true)
+        l.split = SplitSettings(scheduler: .minrtt, redundantEnabled: true, redundantPorts: [], redundantPortsMalformed: true)
         let (c, st) = make(l)
         c.update { $0.insecure = true }
         _ = await c.flush()

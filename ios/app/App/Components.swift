@@ -30,7 +30,7 @@ struct SectionLabel: View {
     let text: String
     init(_ text: String) { self.text = text }
     var body: some View {
-        Text(text.uppercased()).font(.system(size: 11, weight: .semibold)).tracking(0.5)
+        Text(text.uppercased()).mqFont(11, .semibold).tracking(0.5)
             .foregroundColor(mq.t2).padding(.horizontal, 4)
     }
 }
@@ -53,25 +53,32 @@ struct ToggleRow: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                HStack(spacing: 0) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(title).font(.system(size: 13)).foregroundColor(mq.text)
-                        if let caption {
-                            Text(caption).font(.system(size: 11)).foregroundColor(mq.t2).lineSpacing(2)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                    Spacer(minLength: 0)
-                    if onOpen != nil {
-                        Text("›").font(.system(size: 18)).foregroundColor(mq.t2).padding(.leading, 8)
-                    }
+                if let onOpen {
+                    Button(action: onOpen) { label }.buttonStyle(.plain)
+                        .accessibilityHint("Opens details")
+                } else {
+                    label
                 }
-                .contentShape(Rectangle())
-                .onTapGesture { onOpen?() }
                 Toggle(title, isOn: $isOn).labelsHidden().tint(mq.accent).disabled(!enabled)
             }.padding(.vertical, 11)
             if !last { Hairline() }
         }
+    }
+
+    private var label: some View {
+        HStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).mqFont(13).foregroundColor(mq.text)
+                if let caption {
+                    Text(caption).mqFont(11).foregroundColor(mq.t2).lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
+            if onOpen != nil {
+                Image(systemName: "chevron.right").mqFont(13, .semibold).foregroundColor(mq.t2).padding(.leading, 8)
+            }
+        }.contentShape(Rectangle())
     }
 }
 
@@ -88,7 +95,7 @@ struct KvRow: View {
                 Spacer(minLength: 8)
                 (Text(value).foregroundColor(mq.text) + Text(tick ? " ✓" : "").foregroundColor(mq.green))
                     .fontWeight(.medium)
-            }.font(.system(size: 12.5)).padding(.vertical, 10)
+            }.mqFont(12.5).padding(.vertical, 10)
             if !last { Hairline() }
         }
     }
@@ -104,11 +111,15 @@ struct RateTile: View {
         MqCard {
             VStack(alignment: .leading, spacing: 2) {
                 (Text(arrow).fontWeight(.bold).foregroundColor(arrowColor) + Text(" \(label)").foregroundColor(mq.t2))
-                    .font(.system(size: 11))
-                (Text(mbps).font(.system(size: 19, weight: .bold)).foregroundColor(mq.text)
-                    + Text(" Mbps").font(.system(size: 11, weight: .medium)).foregroundColor(mq.t2))
+                    .mqFont(11)
+                HStack(alignment: .firstTextBaseline, spacing: 3) {
+                    Text(mbps).mqFont(19, .bold).foregroundColor(mq.text)
+                    Text("Mbps").mqFont(11, .medium).foregroundColor(mq.t2)
+                }
             }
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label) \(mbps) megabits per second")
     }
 }
 
@@ -120,7 +131,7 @@ struct PrimaryButton: View {
     init(_ title: String, action: @escaping () -> Void) { self.title = title; self.action = action }
     var body: some View {
         Button(action: action) {
-            Text(title).font(.system(size: 15, weight: .semibold)).foregroundColor(.white)
+            Text(title).mqFont(15, .semibold).foregroundColor(.white)
                 .padding(.vertical, 12).frame(maxWidth: .infinity)
                 .background(mq.accent.opacity(isEnabled ? 1 : 0.4), in: RoundedRectangle(cornerRadius: 10))
         }.buttonStyle(.plain)
@@ -135,7 +146,7 @@ struct SecondaryButton: View {
     init(_ title: String, action: @escaping () -> Void) { self.title = title; self.action = action }
     var body: some View {
         Button(action: action) {
-            Text(title).font(.system(size: 15, weight: .semibold)).foregroundColor(mq.accent.opacity(isEnabled ? 1 : 0.4))
+            Text(title).mqFont(15, .semibold).foregroundColor(mq.accent.opacity(isEnabled ? 1 : 0.4))
                 .padding(.vertical, 12).frame(maxWidth: .infinity)
                 .background(mq.fill, in: RoundedRectangle(cornerRadius: 10))
         }.buttonStyle(.plain)
@@ -150,22 +161,27 @@ struct UseOffSegmented: View {
     let onChange: (Bool) -> Void
     var body: some View {
         HStack(spacing: 0) {
-            ForEach([("Use", true), ("Off", false)], id: \.0) { label, v in
-                let sel = isOn == v
-                Text(label).font(.system(size: 13, weight: sel ? .semibold : .regular)).foregroundColor(mq.text)
-                    .padding(.vertical, 6).frame(maxWidth: .infinity)
-                    .background {
-                        if sel {
-                            RoundedRectangle(cornerRadius: 6).fill(mq.card).shadow(color: mq.segsh, radius: 3, x: 0, y: 1)
-                        }
-                    }
-                    .contentShape(Rectangle())
-                    .onTapGesture { if enabled { onChange(v) } }
-                    .accessibilityAddTraits(sel ? [.isButton, .isSelected] : .isButton)
-            }
+            segment("Use", true)
+            segment("Off", false)
         }
         .padding(2).background(mq.fill, in: RoundedRectangle(cornerRadius: 8))
-        .opacity(enabled ? 1 : 0.5)
+        .disabled(!enabled).opacity(enabled ? 1 : 0.5)
+    }
+
+    private func segment(_ label: String, _ value: Bool) -> some View {
+        let sel = isOn == value
+        return Button { if !sel { onChange(value) } } label: {
+            Text(label).mqFont(13, sel ? .semibold : .regular).foregroundColor(mq.text)
+                .padding(.vertical, 6).frame(maxWidth: .infinity)
+                .background {
+                    if sel {
+                        RoundedRectangle(cornerRadius: 6).fill(mq.card).shadow(color: mq.segsh, radius: 3, x: 0, y: 1)
+                    }
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(sel ? .isSelected : [])
     }
 }
 
@@ -176,19 +192,22 @@ struct RadioRow: View {
     let dim: String
     let selected: Bool
     var enabled: Bool = true
+    let onSelect: () -> Void
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            ZStack {
-                Circle().stroke(selected ? mq.accent : mq.t2, lineWidth: 1.5).frame(width: 16, height: 16)
-                if selected { Circle().fill(mq.accent).frame(width: 8, height: 8) }
-            }.padding(.top, 1)
-            (Text("\(label) ").foregroundColor(mq.text) + Text(dim).foregroundColor(mq.t2))
-                .font(.system(size: 12.5)).lineSpacing(17 - 12.5 * 1.19)
-                .frame(maxWidth: .infinity, alignment: .leading).fixedSize(horizontal: false, vertical: true)
+        Button(action: onSelect) {
+            HStack(alignment: .top, spacing: 10) {
+                ZStack {
+                    Circle().stroke(selected ? mq.accent : mq.t2, lineWidth: 1.5).frame(width: 16, height: 16)
+                    if selected { Circle().fill(mq.accent).frame(width: 8, height: 8) }
+                }.padding(.top, 1)
+                (Text("\(label) ").foregroundColor(mq.text) + Text(dim).foregroundColor(mq.t2))
+                    .mqFont(12.5).lineSpacing(17 - 12.5 * 1.19)
+                    .frame(maxWidth: .infinity, alignment: .leading).fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.vertical, 2).contentShape(Rectangle())
         }
-        .padding(.vertical, 2).contentShape(Rectangle()).opacity(enabled ? 1 : 0.5)
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+        .buttonStyle(.plain).disabled(!enabled).opacity(enabled ? 1 : 0.5)
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
@@ -204,9 +223,11 @@ struct DetailScaffold<Content: View>: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                Button(action: back) { Text("‹ Settings").font(.system(size: 14)).foregroundColor(mq.accent) }
-                    .buttonStyle(.plain)
-                Text(title).font(.system(size: 20, weight: .bold)).foregroundColor(mq.text)
+                Button(action: back) {
+                    Label("Settings", systemImage: "chevron.left").mqFont(14).foregroundColor(mq.accent)
+                }.buttonStyle(.plain)
+                Text(title).mqFont(20, .bold).foregroundColor(mq.text)
+                    .accessibilityAddTraits(.isHeader)
                 content
             }.padding(.horizontal, 20).padding(.vertical, 12).frame(maxWidth: .infinity, alignment: .leading)
         }.background(mq.win.ignoresSafeArea())

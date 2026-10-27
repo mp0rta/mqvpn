@@ -34,7 +34,7 @@ final class PathBinder {
 
     init(engine: MqvpnEngine, policy: PathPolicy = PathPolicy()) {
         self.engine = engine
-        monitoredTypes = (policy.wifi ? [.wifi] : []) + (policy.cellular ? [.cellular] : [])
+        monitoredTypes = policy.enabledKinds.map(\.interfaceType)
     }
     /// True once stop() emptied the monitors (start() has run by the time
     /// any caller can observe this — reconcile/addPath are only reachable
@@ -253,6 +253,13 @@ final class PathBinder {
         fence.notify(queue: monitorQueue) { [engine] in
             engine.perform(completion)
         }
+    }
+
+    /// ifname -> transport of every bound path, for the app snapshot (tick thread).
+    func pathKinds() -> [String: TransportKind] {
+        var out: [String: TransportKind] = [:]
+        for (type, slot) in slots { out[slot.ifname] = TransportKind(interfaceType: type) }
+        return out
     }
 
     /// Current (ifname, fd) per live slot, for GateMetrics' getsockopt

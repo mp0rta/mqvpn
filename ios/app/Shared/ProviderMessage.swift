@@ -14,7 +14,6 @@ struct TunnelSnapshot: Codable {
     let timestamp: Double          // Date().timeIntervalSince1970 (provider side)
     let clientState: Int32         // mqvpn_client_get_state raw value
     let connectedSince: Double?    // first-ESTABLISHED wall-clock (uptime display)
-    let footprint: UInt64          // task_vm_info phys_footprint, bytes
     let paths: [PathSnapshot]
     let seq: UInt64                    // provider-monotonic ordering key
     let reorderConfigured: Bool        // core enabled with >=1 rule (provider truth)
@@ -26,13 +25,13 @@ struct TunnelSnapshot: Codable {
 
     // The producer (SnapshotCache) passes every field; the defaults keep test fixtures short.
     init(timestamp: Double, clientState: Int32, connectedSince: Double?,
-         footprint: UInt64, paths: [PathSnapshot],
+         paths: [PathSnapshot],
          seq: UInt64 = 0, reorderConfigured: Bool = false,
          reorder: ReorderStatsSnapshot? = nil,
          tunnel: TunnelInfoSnapshot? = nil, stats: StatsSnapshot? = nil,
          samples: [TunnelSample] = [], bootId: UInt64 = 0) {
         self.timestamp = timestamp; self.clientState = clientState
-        self.connectedSince = connectedSince; self.footprint = footprint
+        self.connectedSince = connectedSince
         self.paths = paths; self.seq = seq
         self.reorderConfigured = reorderConfigured; self.reorder = reorder
         self.tunnel = tunnel; self.stats = stats
@@ -51,11 +50,29 @@ enum CorePathStatus: Int32 {
     case pending, active, degraded, standby, closed
 }
 
+/// mqvpn_scheduler_t raw values (libmqvpn.h). The wire keeps the Int32 so an
+/// unknown future value still decodes; map it with `init(rawValue:)`.
+enum Scheduler: Int32 {
+    case minrtt = 0, wlb = 1, backupFec = 2, wlbUdpPin = 3
+
+    /// The config-file spelling (`Scheduler = ...`).
+    var label: String {
+        switch self {
+        case .minrtt: return "minrtt"
+        case .wlb: return "wlb"
+        case .backupFec: return "backup_fec"
+        case .wlbUdpPin: return "wlb_udp_pin"
+        }
+    }
+}
+
 struct PathSnapshot: Codable {
     let name: String               // interface name (en0 / pdp_ip0)
     let status: Int32              // mqvpn_path_status_t raw value
     let txBytes: UInt64
     let rxBytes: UInt64
+    /// The transport the provider bound this path to; nil = not one it manages.
+    var kind: TransportKind? = nil
 }
 
 struct SamplePath: Codable, Equatable {
@@ -83,10 +100,7 @@ struct TunnelSample: Codable, Equatable {
 
 struct TunnelInfoSnapshot: Codable, Equatable {
     let assignedIp: String
-    let prefix: Int32
-    let assignedIp6: String?
-    let prefix6: Int32
-    let hasV6: Bool
+    let assignedIp6: String?       // nil = no IPv6 assigned
     let mtu: Int32
     let serverScheduler: Int32?
     let requestedScheduler: Int32?
@@ -106,8 +120,6 @@ struct ReorderStatsSnapshot: Codable, Equatable {
     let gapFilled: UInt64      // gap_filled_count
     let gapTimeout: UInt64     // gap_timeout_count
     let ackDemote: UInt64      // ack_demote_count
-    let bufferedP50Ms: Double  // buffered_percentile(0.50)
-    let bufferedP99Ms: Double  // buffered_percentile(0.99)
     let residenceBuckets: [UInt64]
 }
 

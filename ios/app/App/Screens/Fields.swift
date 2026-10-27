@@ -25,7 +25,7 @@ struct CommitField: View {
             if secure { SecureField(placeholder, text: $text) } else { TextField(placeholder, text: $text) }
         }
         .focused($focused).accessibilityLabel(label)
-        .font(.system(size: 14)).foregroundColor(mq.text)
+        .mqFont(14).foregroundColor(mq.text)
         .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(keyboard)
         .disabled(!enabled).opacity(enabled ? 1 : 0.5)
         .submitLabel(.done)
@@ -55,12 +55,12 @@ struct FieldBox<Field: View>: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(label).font(.system(size: 11)).foregroundColor(mq.t2)
+            Text(label).mqFont(11).foregroundColor(mq.t2)
             HStack { field; if let trailing { trailing } }
                 .padding(.horizontal, 10).padding(.vertical, 9)
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(noteIsError ? mq.red : mq.fill2, lineWidth: 1))
             if let note {
-                Text(note).font(.system(size: 11)).foregroundColor(noteIsError ? mq.red : mq.t2)
+                Text(note).mqFont(11).foregroundColor(noteIsError ? mq.red : mq.t2)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -73,15 +73,39 @@ struct ShowHide: View {
     @Binding var shown: Bool
     var body: some View {
         Button { shown.toggle() } label: {
-            Text(shown ? "Hide" : "Show").font(.system(size: 12)).foregroundColor(mq.accent)
+            Text(shown ? "Hide" : "Show").mqFont(12).foregroundColor(mq.accent)
         }.buttonStyle(.plain)
     }
 }
 
-extension SettingsCore {
-    /// Two-way binding into one draft field; writes go through the autosaving single writer.
+/// What a settings form reads, and its one way to edit: a value built per
+/// render by the tab container, so forms take no controller and preview with a
+/// plain draft.
+struct SettingsForm {
+    var draft: AppDraft
+    var errors: [AppDraft.Field: String] = [:]
+    var saveError: String?
+    var editable = true
+    /// Applies one edit through SettingsCore's autosaving single writer.
+    var update: ((inout AppDraft) -> Void) -> Void
+
+    @MainActor init(_ core: SettingsCore, editable: Bool) {
+        draft = core.draft; errors = core.fieldErrors; saveError = core.saveError
+        self.editable = editable
+        update = { core.update($0) }
+    }
+
+    init(draft: AppDraft, errors: [AppDraft.Field: String] = [:], saveError: String? = nil, editable: Bool = true,
+         update: @escaping ((inout AppDraft) -> Void) -> Void = { _ in }) {
+        self.draft = draft; self.errors = errors; self.saveError = saveError
+        self.editable = editable; self.update = update
+    }
+
+    /// Two-way binding into one draft field.
     func binding<T>(_ kp: WritableKeyPath<AppDraft, T>) -> Binding<T> {
-        Binding(get: { self.draft[keyPath: kp] }, set: { v in self.update { $0[keyPath: kp] = v } })
+        let current = draft[keyPath: kp]
+        let update = update
+        return Binding(get: { current }, set: { v in update { $0[keyPath: kp] = v } })
     }
 }
 
@@ -97,24 +121,4 @@ private let intFormatter: NumberFormatter = {
 }()
 func fmtInt<T: BinaryInteger>(_ v: T) -> String {
     intFormatter.string(from: NSNumber(value: Int64(v))) ?? "\(v)"
-}
-
-/// Session seconds from provider-clock fields; nil while reconnecting / no data.
-@MainActor func elapsedText(_ c: TunnelController, _ vs: VpnViewState) -> String? {
-    guard vs == .connected, let s = c.snapshot, let since = s.connectedSince else { return nil }
-    return fmtElapsed(Int64(max(0, s.timestamp - since)))
-}
-
-@MainActor func viewState(_ c: TunnelController) -> VpnViewState {
-    deriveViewState(neStatus: c.status.rawValue, clientState: c.snapshot?.clientState, surfacedError: c.surfacedError)
-}
-
-extension TunnelController {
-    var draft: AppDraft { settings.draft }
-
-    /// Wi-Fi / Cellular cards from the live snapshot and the newest bandwidth sample.
-    func transportCards(available: Set<TransportKind>) -> [PathCard] {
-        let paths = (snapshot?.paths ?? []).map { LivePath(iface: $0.name, status: $0.status) }
-        return pathCards(paths: paths, available: available, sample: bandwidthHistory.samples.last)
-    }
 }

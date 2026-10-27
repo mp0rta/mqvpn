@@ -3,120 +3,130 @@
 
 import SwiftUI
 
+/// Everything Home shows; built by HomeTab from the controller and live data.
+struct HomeModel {
+    var viewState: VpnViewState
+    var elapsed: String?
+    var canConnect: Bool
+    var errors: [String]              // manager load / stored config / autosave
+    var serverAddress: String
+    var cards: [PathCard]             // the transports in use (available, carrying an active path)
+    var dlBps: Double
+    var ulBps: Double
+    var tunnel: TunnelInfoSnapshot?
+    var srttMs: Double?
+    var split: SplitChoice
+}
+
+struct HomeActions {
+    var connect: () -> Void = {}
+    var disconnect: () -> Void = {}
+    var manage: () -> Void = {}
+    var openSettings: () -> Void = {}
+}
+
 /// Port of android HomeScreen.kt.
 struct HomeScreen: View {
     @Environment(\.mq) private var mq
-    @ObservedObject var controller: TunnelController
-    @ObservedObject var availability: TransportAvailability
-    let onManage: () -> Void
-    let onOpenSettings: () -> Void
-
-    private var vs: VpnViewState { viewState(controller) }
-    /// The cards in use: available and carrying an active path.
-    private var cards: [PathCard] {
-        controller.transportCards(available: availability.kinds).filter { $0.available && $0.active }
-    }
+    let model: HomeModel
+    let actions: HomeActions
 
     var body: some View {
-        let vs = self.vs
-        let status = statusLine(vs, elapsed: elapsedText(controller, vs))
+        let vs = model.viewState
+        let status = statusLine(vs, elapsed: model.elapsed)
         let isOn = vs == .connected
-        let isConnecting = vs == .connecting
-        let canConnect = controller.isConnectable
-        let tappable = !isConnecting && (isOn || vs == .reconnecting || canConnect)
+        let canStop = isOn || vs == .reconnecting
+        let tappable = vs != .connecting && (canStop || model.canConnect)
         let btn = isOn ? mq.green : mq.accent
         ScrollView {
             VStack(spacing: 0) {
                 ZStack {
                     Button {
-                        if isOn || vs == .reconnecting { controller.stop() } else { controller.start() }
+                        if canStop { actions.disconnect() } else { actions.connect() }
                     } label: {
+                        // Fixed size by design: the button is the screen's anchor, not text.
                         Image(systemName: "power").font(.system(size: 52, weight: .regular)).foregroundColor(.white)
                             .frame(width: 148, height: 148).background(btn, in: Circle())
                             .shadow(color: btn.opacity(0.5), radius: 14)
-                            .opacity(!isOn && !canConnect ? 0.5 : 1)
+                            .opacity(!isOn && !model.canConnect ? 0.5 : 1)
                     }
                     .buttonStyle(.plain).disabled(!tappable)
-                    .accessibilityLabel(isOn ? "Disconnect" : "Connect")
-                    if isConnecting { ProgressView().progressViewStyle(.circular).scaleEffect(2).tint(mq.accent) }
+                    .accessibilityLabel(canStop ? "Disconnect" : "Connect")
+                    if vs == .connecting { ProgressView().progressViewStyle(.circular).scaleEffect(2).tint(mq.accent) }
                 }
-                Text(status.title).font(.system(size: 22, weight: .bold)).foregroundColor(mq.text).padding(.top, 22)
-                Text(status.sub).font(.system(size: 13)).multilineTextAlignment(.center)
+                Text(status.title).mqFont(22, .bold).foregroundColor(mq.text).padding(.top, 22)
+                Text(status.sub).mqFont(13).multilineTextAlignment(.center)
                     .foregroundColor(mq.color(status.tone)).opacity(status.pulsing ? 0.7 : 1).padding(.top, 5)
-                if case .loadFailed(let e) = controller.state { errorLine(e) }
-                if let e = controller.configError { errorLine(e) }
-                if let e = controller.settings.saveError { errorLine(e) }
+                ForEach(model.errors, id: \.self) { e in
+                    Text(e).mqFont(12).foregroundColor(mq.red).multilineTextAlignment(.center).padding(.top, 6)
+                }
 
-                if vs == .connected { connectedBlock }
+                if isOn { connectedBlock }
                 if Self.notProtected(vs) {
                     MqCard {
                         HStack(alignment: .top, spacing: 12) {
-                            Image(systemName: "shield.slash").font(.system(size: 18)).foregroundColor(mq.t2)
+                            Image(systemName: "shield.slash").mqFont(18).foregroundColor(mq.t2)
                             (Text("Your traffic is ").foregroundColor(mq.t2)
                                 + Text("not encrypted").fontWeight(.semibold).foregroundColor(mq.text)
                                 + Text(" right now. Connect to protect it and combine your connections.").foregroundColor(mq.t2))
-                                .font(.system(size: 12.5)).lineSpacing(4)
+                                .mqFont(12.5).lineSpacing(4)
                         }
                     }.padding(.top, 22)
                 }
 
-                Button(action: onOpenSettings) {
+                Button(action: actions.openSettings) {
                     (Text("Server ").foregroundColor(mq.t2)
-                        + Text(controller.draft.addressText).fontWeight(.medium).foregroundColor(mq.text)
+                        + Text(model.serverAddress).fontWeight(.medium).foregroundColor(mq.text)
                         + Text(" ").foregroundColor(mq.t2) + Text("Change").foregroundColor(mq.accent))
-                        .font(.system(size: 12)).padding(8)
+                        .mqFont(12).padding(8)
                 }.buttonStyle(.plain).padding(.top, 12)
             }
             .padding(.horizontal, 20).padding(.top, 26).padding(.bottom, 16)
         }.background(mq.win.ignoresSafeArea())
     }
 
-    private func errorLine(_ t: String) -> some View {
-        Text(t).font(.system(size: 12)).foregroundColor(mq.red).multilineTextAlignment(.center).padding(.top, 6)
-    }
-
     @ViewBuilder private var connectedBlock: some View {
-        let last = controller.bandwidthHistory.samples.last
-        let cards = self.cards
-        let used = usingCounts(cards: cards)
+        let used = usingCounts(cards: model.cards)
+        let applied = schedulerApplied(requested: model.tunnel?.requestedScheduler, server: model.tunnel?.serverScheduler)
         HStack(spacing: 10) {
-            RateTile(label: "Download", mbps: fmtMbps(last?.dlBps ?? 0), arrowColor: mq.accent, arrow: "↓")
-            RateTile(label: "Upload", mbps: fmtMbps(last?.ulBps ?? 0), arrowColor: mq.green)
+            RateTile(label: "Download", mbps: fmtMbps(model.dlBps), arrowColor: mq.accent, arrow: "↓")
+            RateTile(label: "Upload", mbps: fmtMbps(model.ulBps), arrowColor: mq.green)
         }.padding(.top, 22)
         MqCard {
             VStack(spacing: 10) {
                 HStack {
-                    Text("Using \(used.n) of \(cards.count) connections").font(.system(size: 12, weight: .semibold))
+                    Text("Using \(used.n) of \(model.cards.count) connections").mqFont(12, .semibold)
                         .foregroundColor(mq.text)
                     Spacer()
-                    Button(action: onManage) { Text("Manage").font(.system(size: 12)).foregroundColor(mq.accent) }
+                    Button(action: actions.manage) { Text("Manage").mqFont(12).foregroundColor(mq.accent) }
                         .buttonStyle(.plain)
                 }
-                ForEach(cards, id: \.name) { p in
-                    HStack(spacing: 8) {
-                        Text(p.name).font(.system(size: 12)).foregroundColor(mq.text).frame(width: 62, alignment: .leading)
-                        UsageBar(fraction: p.barFraction, color: p.kind == .cellular ? mq.green : mq.accent)
-                        Text(fmtDownloadRate(p.rateBps)).font(.system(size: 11)).foregroundColor(mq.t2)
-                            .frame(width: 78, alignment: .trailing)
-                            .accessibilityLabel("Download \(fmtMbps(Double(p.rateBps))) Mbps")
+                // Grid sizes the name and rate columns to their text, so larger type never truncates.
+                Grid(horizontalSpacing: 8, verticalSpacing: 10) {
+                    ForEach(model.cards, id: \.kind) { p in
+                        GridRow {
+                            Text(p.name).mqFont(12).foregroundColor(mq.text).gridColumnAlignment(.leading)
+                            UsageBar(fraction: p.barFraction, color: p.kind == .cellular ? mq.green : mq.accent)
+                            Text(fmtDownloadRate(p.rateBps)).mqFont(11).foregroundColor(mq.t2)
+                                .gridColumnAlignment(.trailing)
+                                .accessibilityLabel("Download \(fmtMbps(Double(p.rateBps))) megabits per second")
+                        }
                     }
                 }
             }
         }.padding(.top, 10)
-        let info = controller.snapshot?.tunnel
-        let applied = schedulerApplied(requested: info?.requestedScheduler, server: info?.serverScheduler)
         MqCard(vPad: 4) {
             VStack(spacing: 0) {
-                KvRow(key: "VPN address", value: info?.assignedIp ?? "—")
-                if let v6 = info?.assignedIp6 { KvRow(key: "IPv6 address", value: v6) }
-                KvRow(key: "How traffic is split", value: Self.splitLabel(controller.draft.split.choice), tick: applied)
-                KvRow(key: "Ping", value: controller.snapshot?.stats.map { "\(Int($0.srttMs.rounded())) ms" } ?? "—")
-                KvRow(key: "MTU", value: info.map { fmtInt($0.mtu) } ?? "—", last: true)
+                KvRow(key: "VPN address", value: model.tunnel?.assignedIp ?? "—")
+                if let v6 = model.tunnel?.assignedIp6 { KvRow(key: "IPv6 address", value: v6) }
+                KvRow(key: "How traffic is split", value: model.split.title, tick: applied)
+                KvRow(key: "Ping", value: model.srttMs.map { "\(Int($0.rounded())) ms" } ?? "—")
+                KvRow(key: "MTU", value: model.tunnel.map { fmtInt($0.mtu) } ?? "—", last: true)
             }
         }.padding(.top, 10)
-        if !applied, info?.requestedScheduler != nil,
-           let line = serverSchedulerLine(requested: info?.requestedScheduler, server: info?.serverScheduler) {
-            Text(line).font(.system(size: 11)).foregroundColor(mq.t2).frame(maxWidth: .infinity, alignment: .leading)
+        if !applied, model.tunnel?.requestedScheduler != nil,
+           let line = serverSchedulerLine(requested: model.tunnel?.requestedScheduler, server: model.tunnel?.serverScheduler) {
+            Text(line).mqFont(11).foregroundColor(mq.t2).frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 6)
         }
     }
@@ -124,9 +134,11 @@ struct HomeScreen: View {
     static func notProtected(_ vs: VpnViewState) -> Bool {
         switch vs { case .disconnected, .error: return true; default: return false }
     }
+}
 
-    static func splitLabel(_ c: SplitChoice) -> String {
-        switch c { case .throughput: return "Throughput"; case .lowLatency: return "Low latency"; case .redundant: return "Redundant" }
+extension SplitChoice {
+    var title: String {
+        switch self { case .throughput: return "Throughput"; case .lowLatency: return "Low latency"; case .redundant: return "Redundant" }
     }
 }
 
@@ -141,6 +153,8 @@ struct UsageBar: View {
                 Capsule().fill(mq.fill)
                 Capsule().fill(color).frame(width: g.size.width * CGFloat(min(max(fraction, 0), 1)))
             }
-        }.frame(height: 6)
+        }
+        .frame(height: 6)
+        .accessibilityHidden(true)
     }
 }

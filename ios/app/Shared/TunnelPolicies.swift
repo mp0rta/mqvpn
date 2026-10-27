@@ -3,13 +3,34 @@
 
 import Foundation
 
+/// One group of keys in NETunnelProviderProtocol.providerConfiguration. The
+/// container merges every section into one dict, so a new section is one
+/// conformance plus one entry in the persist list (TunnelController).
+protocol ProviderConfigSection {
+    func merged(into dict: inout [String: Any])
+}
+
+extension ProviderConfigSection {
+    func toProviderConfiguration() -> [String: Any] {
+        var d: [String: Any] = [:]
+        merged(into: &d)
+        return d
+    }
+}
+
+/// A transport the user can turn on or off. Declaration order is the primary
+/// path preference (Wi-Fi first); the provider binds paths in this order.
+enum TransportKind: String, CaseIterable, Codable {
+    case wifi, cellular
+}
+
 enum SplitChoice: Equatable { case throughput, lowLatency, redundant }
 
-/// Traffic-split settings. `scheduler` is the raw mqvpn_scheduler_t
-/// (0 = minrtt, 1 = wlb); nil = key absent (legacy), which reads as
-/// throughput and is never written back until the user taps a choice.
-struct SplitSettings: Equatable {
-    var scheduler: Int32?
+/// Traffic-split settings. `scheduler` is minrtt or wlb; nil = key absent
+/// (legacy), which reads as throughput and is never written back until the
+/// user taps a choice.
+struct SplitSettings: Equatable, ProviderConfigSection {
+    var scheduler: Scheduler?
     var redundantEnabled: Bool
     var redundantPorts: [UInt16]          // [] = all UDP
     var redundantPortsMalformed: Bool     // stored array invalid -> provider fails closed
@@ -22,7 +43,7 @@ struct SplitSettings: Equatable {
         static let ports = "redundantPorts"
     }
 
-    init(scheduler: Int32?, redundantEnabled: Bool, redundantPorts: [UInt16],
+    init(scheduler: Scheduler?, redundantEnabled: Bool, redundantPorts: [UInt16],
          redundantPortsMalformed: Bool) {
         self.scheduler = scheduler
         self.redundantEnabled = redundantEnabled
@@ -31,9 +52,10 @@ struct SplitSettings: Equatable {
     }
 
     init(providerConfiguration dict: [String: Any]?) {
-        var sched: Int32?
-        if let n = dict?[Key.scheduler] as? NSNumber, let v = ReorderSettings.exactInt(n), v == 0 || v == 1 {
-            sched = Int32(v)
+        var sched: Scheduler?
+        if let n = dict?[Key.scheduler] as? NSNumber, let v = ReorderSettings.exactInt(n),
+           let s = Int32(exactly: v).flatMap(Scheduler.init(rawValue:)), s == .minrtt || s == .wlb {
+            sched = s
         }
         var enabled = false
         if let n = dict?[Key.enabled] as? NSNumber, ReorderSettings.isBool(n) { enabled = n.boolValue }
@@ -54,21 +76,21 @@ struct SplitSettings: Equatable {
 
     var choice: SplitChoice {
         if redundantEnabled { return .redundant }
-        return scheduler == 0 ? .lowLatency : .throughput
+        return scheduler == .minrtt ? .lowLatency : .throughput
     }
 
     func tapped(_ c: SplitChoice) -> SplitSettings {
         var s = self
         switch c {
-        case .throughput: s.scheduler = 1; s.redundantEnabled = false
-        case .lowLatency: s.scheduler = 0; s.redundantEnabled = false
-        case .redundant: s.scheduler = 0; s.redundantEnabled = true
+        case .throughput: s.scheduler = .wlb; s.redundantEnabled = false
+        case .lowLatency: s.scheduler = .minrtt; s.redundantEnabled = false
+        case .redundant: s.scheduler = .minrtt; s.redundantEnabled = true
         }
         return s
     }
 
     func merged(into dict: inout [String: Any]) {
-        if let scheduler { dict[Key.scheduler] = NSNumber(value: scheduler) }
+        if let scheduler { dict[Key.scheduler] = NSNumber(value: scheduler.rawValue) }
         dict[Key.enabled] = NSNumber(value: redundantEnabled)
         // Malformed stored list is left as-is so the provider keeps failing closed.
         if !redundantPortsMalformed { dict[Key.ports] = redundantPorts.map { NSNumber(value: $0) } }
@@ -90,9 +112,14 @@ struct SplitSettings: Equatable {
     }
 }
 
-struct ProtectionSettings: Equatable {
+struct ProtectionSettings: Equatable, ProviderConfigSection {
     var killSwitch: Bool = false
     var autoReconnect: Bool = true
+
+    private enum Key {
+        static let killSwitch = "killSwitch"
+        static let autoReconnect = "autoReconnect"
+    }
 
     init(killSwitch: Bool = false, autoReconnect: Bool = true) {
         self.killSwitch = killSwitch
@@ -100,21 +127,27 @@ struct ProtectionSettings: Equatable {
     }
 
     init(providerConfiguration dict: [String: Any]?) {
-        self.init(killSwitch: readBool(dict, "killSwitch", false),
-                  autoReconnect: readBool(dict, "autoReconnect", true))
+        self.init(killSwitch: readBool(dict, Key.killSwitch, false),
+                  autoReconnect: readBool(dict, Key.autoReconnect, true))
     }
 
     func merged(into dict: inout [String: Any]) {
-        dict["killSwitch"] = NSNumber(value: killSwitch)
-        dict["autoReconnect"] = NSNumber(value: autoReconnect)
+        dict[Key.killSwitch] = NSNumber(value: killSwitch)
+        dict[Key.autoReconnect] = NSNumber(value: autoReconnect)
     }
 }
 
-/// All-off is a configuration error the provider refuses to start with; it is
-/// never silently widened.
-struct PathPolicy: Equatable {
+/// Which transports a session may use. All-off is a configuration error the
+/// provider refuses to start with; it is never silently widened. A new
+/// TransportKind adds one stored flag, one key and one subscript case here.
+struct PathPolicy: Equatable, ProviderConfigSection {
     var wifi: Bool = true
     var cellular: Bool = true
+
+    private enum Key {
+        static let wifi = "pathWifi"
+        static let cellular = "pathCellular"
+    }
 
     init(wifi: Bool = true, cellular: Bool = true) {
         self.wifi = wifi
@@ -122,14 +155,32 @@ struct PathPolicy: Equatable {
     }
 
     init(providerConfiguration dict: [String: Any]?) {
-        self.init(wifi: readBool(dict, "pathWifi", true), cellular: readBool(dict, "pathCellular", true))
+        self.init(wifi: readBool(dict, Key.wifi, true), cellular: readBool(dict, Key.cellular, true))
     }
 
-    var anyEnabled: Bool { wifi || cellular }
+    subscript(kind: TransportKind) -> Bool {
+        get {
+            switch kind {
+            case .wifi: return wifi
+            case .cellular: return cellular
+            }
+        }
+        set {
+            switch kind {
+            case .wifi: wifi = newValue
+            case .cellular: cellular = newValue
+            }
+        }
+    }
+
+    /// Enabled transports in primary-path order.
+    var enabledKinds: [TransportKind] { TransportKind.allCases.filter { self[$0] } }
+
+    var anyEnabled: Bool { !enabledKinds.isEmpty }
 
     func merged(into dict: inout [String: Any]) {
-        dict["pathWifi"] = NSNumber(value: wifi)
-        dict["pathCellular"] = NSNumber(value: cellular)
+        dict[Key.wifi] = NSNumber(value: wifi)
+        dict[Key.cellular] = NSNumber(value: cellular)
     }
 }
 

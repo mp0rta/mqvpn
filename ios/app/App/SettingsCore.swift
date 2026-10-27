@@ -9,11 +9,6 @@ struct ReorderDraft: Equatable {
     var portsText = ""
 }
 
-struct HybridDraft: Equatable {
-    var enabled = false
-    var tcpMode = HybridSettings.modeAuto
-}
-
 /// Everything the Settings screen edits. Port fields keep the RAW text so an
 /// invalid edit ("443,bad") is representable, shows its error and blocks
 /// autosave; validated values derive at persist time.
@@ -23,7 +18,7 @@ struct AppDraft: Equatable {
     var authKey = ""
     var insecure = false
     var reorder = ReorderDraft()
-    var hybrid = HybridDraft()
+    var hybrid = HybridSettings.disabled
     var split = SplitSettings(scheduler: nil, redundantEnabled: false,
                               redundantPorts: [], redundantPortsMalformed: false)
     var redundantPortsText = ""
@@ -101,6 +96,8 @@ final class SettingsCore {
     private(set) var fieldErrors: [AppDraft.Field: String] = [:]
     private(set) var saveError: String?
     private(set) var lastPersisted: AppDraft?
+    /// Cached `draft.fieldErrors().isEmpty`, for per-render callers.
+    var isValid: Bool { fieldErrors.isEmpty }
     /// False only while first-run setup is presented with no manager.
     var autosave = true
     var editable: () -> Bool = { true }
@@ -129,7 +126,7 @@ final class SettingsCore {
         draft = d
         fieldErrors = d.fieldErrors()
         onChange()
-        if autosave && d.isValid { startWorker() }
+        if autosave && fieldErrors.isEmpty { startWorker() }
     }
 
     /// Explicit persist of the current valid draft (Finish Setup); leaves autosave

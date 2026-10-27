@@ -60,3 +60,41 @@ struct MqThemeRoot<Content: View>: View {
         content.environment(\.mq, MqTheme.resolve(scheme)).background(MqTheme.resolve(scheme).win.ignoresSafeArea())
     }
 }
+
+// MARK: - Type
+
+/// System font at a design size (pt at the default Dynamic Type setting) that
+/// scales with the user's text size. The text style it scales with is picked
+/// from the size, so a 12 pt caption and a 20 pt title grow like their UIKit
+/// counterparts.
+private struct MqFont: ViewModifier {
+    @ScaledMetric private var size: CGFloat
+    private let weight: Font.Weight
+
+    init(size: CGFloat, weight: Font.Weight) {
+        _size = ScaledMetric(wrappedValue: size, relativeTo: MqFont.style(for: size))
+        self.weight = weight
+    }
+
+    func body(content: Content) -> some View { content.font(.system(size: size, weight: weight)) }
+
+    static func style(for size: CGFloat) -> Font.TextStyle {
+        switch size {
+        case ..<11.5: return .caption2
+        case ..<12.5: return .caption
+        case ..<14: return .footnote
+        case ..<15.5: return .subheadline
+        case ..<18: return .body
+        case ..<21: return .title3
+        case ..<25: return .title2
+        default: return .title
+        }
+    }
+}
+
+extension View {
+    /// The app's only way to set a font: design size in, Dynamic Type out.
+    func mqFont(_ size: CGFloat, _ weight: Font.Weight = .regular) -> some View {
+        modifier(MqFont(size: size, weight: weight))
+    }
+}

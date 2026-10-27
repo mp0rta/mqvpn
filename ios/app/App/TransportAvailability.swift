@@ -4,32 +4,29 @@
 import SwiftUI
 import Network
 
-/// Whether Wi-Fi / cellular currently has a satisfied path. Two monitors
-/// (requiredInterfaceType), alive for the app process.
+/// Which transports currently have a satisfied path: one NWPathMonitor per
+/// TransportKind (requiredInterfaceType), alive for the app process.
 @MainActor
 final class TransportAvailability: ObservableObject {
-    @Published var wifi = false
-    @Published var cellular = false
-    private let wifiMonitor = NWPathMonitor(requiredInterfaceType: .wifi)
-    private let cellularMonitor = NWPathMonitor(requiredInterfaceType: .cellular)
-
-    var kinds: Set<TransportKind> {
-        var s = Set<TransportKind>()
-        if wifi { s.insert(.wifi) }
-        if cellular { s.insert(.cellular) }
-        return s
-    }
+    @Published private(set) var kinds: Set<TransportKind> = []
+    private let monitors: [TransportKind: NWPathMonitor]
 
     init() {
-        wifiMonitor.pathUpdateHandler = { [weak self] path in
-            let ok = path.status == .satisfied
-            Task { @MainActor in self?.wifi = ok }
+        monitors = Dictionary(uniqueKeysWithValues: TransportKind.allCases.map {
+            ($0, NWPathMonitor(requiredInterfaceType: $0.interfaceType))
+        })
+        let queue = DispatchQueue(label: "org.mqvpn.avail")
+        for (kind, m) in monitors {
+            m.pathUpdateHandler = { [weak self] path in
+                let ok = path.status == .satisfied
+                Task { @MainActor in self?.set(kind, ok) }
+            }
+            m.start(queue: queue)
         }
-        cellularMonitor.pathUpdateHandler = { [weak self] path in
-            let ok = path.status == .satisfied
-            Task { @MainActor in self?.cellular = ok }
-        }
-        wifiMonitor.start(queue: DispatchQueue(label: "org.mqvpn.avail.wifi"))
-        cellularMonitor.start(queue: DispatchQueue(label: "org.mqvpn.avail.cellular"))
+    }
+
+    private func set(_ kind: TransportKind, _ ok: Bool) {
+        guard kinds.contains(kind) != ok else { return }
+        if ok { kinds.insert(kind) } else { kinds.remove(kind) }
     }
 }
