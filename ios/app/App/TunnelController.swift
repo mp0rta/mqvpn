@@ -244,20 +244,25 @@ final class TunnelController: ObservableObject {
         // a failed save leaves the saved configuration and its PSK untouched.
         let oldRef = proto.passwordReference
         let oldIAN = proto.includeAllNetworks, oldELN = proto.excludeLocalNetworks
+        let oldER = proto.enforceRoutes
         let newRef = try PSKStore.add(server.authKey)
         proto.passwordReference = newRef
         // The kill switch lives in the provider (a protected session never
         // ends itself), never in includeAllNetworks: that flag makes NECP deny
         // the provider's cellular-bound socket while Wi-Fi is up (no
         // multipath) and cuts all connectivity during an App Store update.
+        // With the kill switch, enforceRoutes keeps apps' interface-scoped
+        // traffic in the tunnel too; local-network hosts stay outside it.
         proto.includeAllNetworks = false
-        proto.excludeLocalNetworks = false
+        proto.enforceRoutes = d.protection.killSwitch
+        proto.excludeLocalNetworks = d.protection.killSwitch
         do {
             try await performAtomicSave(NEConfigStore(manager: m, proto: proto), merge: merged)
         } catch {
             proto.passwordReference = oldRef
             proto.includeAllNetworks = oldIAN
             proto.excludeLocalNetworks = oldELN
+            proto.enforceRoutes = oldER
             PSKStore.delete(newRef)
             throw error
         }
