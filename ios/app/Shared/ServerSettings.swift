@@ -7,7 +7,7 @@ import Foundation
 /// settings. Mirrors ReorderSettings' validation-on-read discipline. The PSK is
 /// the exception: providerConfiguration is stored unencrypted, so `authKey`
 /// lives in the keychain (PSKStore) and the caller passes it in.
-struct ServerSettings: Equatable {
+struct ServerSettings: Equatable, ProviderConfigSection {
     let host: String        // hostname or IP literal
     let port: Int
     let serverName: String  // TLS SNI / cert verify name; "" = use host (client.conf ServerName parity)
@@ -57,9 +57,11 @@ struct ServerSettings: Equatable {
                   authKey: authKey, insecure: insecureN.boolValue)
     }
 
-    func toProviderConfiguration() -> [String: Any] {
-        [Key.host: host, Key.port: NSNumber(value: port), Key.serverName: serverName,
-         Key.insecure: NSNumber(value: insecure)]
+    func merged(into dict: inout [String: Any]) {
+        dict[Key.host] = host
+        dict[Key.port] = NSNumber(value: port)
+        dict[Key.serverName] = serverName
+        dict[Key.insecure] = NSNumber(value: insecure)
     }
 
     var isValid: Bool {

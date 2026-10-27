@@ -2,12 +2,11 @@
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 
 import Foundation
-import CoreFoundation
 
 /// Hybrid-mode wire schema shared by app (writes providerConfiguration) and
 /// extension (reads it). tcpMode is the native enum's plain int (0=stream /
 /// 1=raw / 2=auto) — the app target does not link libmqvpn.
-struct HybridSettings: Equatable {
+struct HybridSettings: Equatable, ProviderConfigSection {
     var enabled: Bool
     var tcpMode: Int
 
@@ -26,9 +25,9 @@ struct HybridSettings: Equatable {
         self.tcpMode = tcpMode
     }
 
-    func toProviderConfiguration() -> [String: Any] {
-        [Key.enabled: NSNumber(value: enabled),
-         Key.tcpMode: NSNumber(value: tcpMode)]
+    func merged(into dict: inout [String: Any]) {
+        dict[Key.enabled] = NSNumber(value: enabled)
+        dict[Key.tcpMode] = NSNumber(value: tcpMode)
     }
 
     /// Validates on read; malformed dict -> nil (caller falls back to

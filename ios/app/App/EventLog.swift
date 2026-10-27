@@ -17,6 +17,7 @@ struct LogEvent: Identifiable {
         case pathAdded(name: String, status: Int32)        // (a) path appeared
         case pathRemoved(name: String)                     // (a) path disappeared
         case pathStatus(name: String, from: Int32, to: Int32)  // (b) status change
+        case error(String)                                 // surfaced connect/disconnect error
     }
 }
 
@@ -30,13 +31,14 @@ final class EventLog: ObservableObject {
     @Published private(set) var events: [LogEvent] = []
     private let capacity = 20
     private var prevPaths: [String: Int32] = [:]   // name -> status raw
-    private var prevState: Int32?
+    private var prevState: String?
 
     func ingest(_ snap: TunnelSnapshot, now: Date = Date()) {
         // (c) core state change
-        if prevState != snap.clientState {
+        let label = clientStateName(snap.clientState)   // Android class names: 1->2->3 is one line
+        if prevState != label {
             append(LogEvent(time: now, kind: .coreState(snap.clientState)))
-            prevState = snap.clientState
+            prevState = label
         }
         // Diff LIVE paths only. After a reconnect the core can transiently
         // return a stale CLOSED slot (mqvpn_path_status_t CLOSED = 4) next to
@@ -44,7 +46,7 @@ final class EventLog: ObservableObject {
         // n_paths, so a reaped slot lingers a poll or two. Keyed by interface
         // name, that duplicate would fabricate en0 active<->closed churn every
         // tick. A path leaving the live set is logged as a removal instead.
-        let live = snap.paths.filter { $0.status != 4 }
+        let live = snap.paths.filter { $0.status != CorePathStatus.closed.rawValue }
         var cur: [String: Int32] = [:]
         for p in live { cur[p.name] = p.status }
         // (a) additions + (b) status transitions
@@ -65,6 +67,10 @@ final class EventLog: ObservableObject {
         prevPaths = cur
     }
 
+    func logError(_ message: String, now: Date = Date()) {
+        append(LogEvent(time: now, kind: .error(message)))
+    }
+
     /// Forget the diff baseline (e.g. on disconnect) so a later reconnect logs
     /// its paths as fresh additions. The event history is intentionally kept.
     func resetBaseline() {
@@ -77,5 +83,50 @@ final class EventLog: ObservableObject {
         if events.count > capacity {
             events.removeLast(events.count - capacity)
         }
+    }
+}
+
+// Display text/levels (Foundation only; the Settings view maps level -> color).
+
+func clientStateName(_ s: Int32) -> String {
+    switch CoreClientState(rawValue: s) {
+    case .idle, .closed: return "Disconnected"
+    case .connecting, .authenticating, .tunnelReady: return "Connecting"
+    case .established: return "Connected"
+    case .reconnecting: return "Reconnecting"
+    case nil: return "?(\(s))"
+    }
+}
+
+func pathStatusName(_ s: Int32) -> String {
+    switch CorePathStatus(rawValue: s) {
+    case .pending: return "Pending"
+    case .active: return "Active"
+    case .degraded: return "Degraded"
+    case .standby: return "Standby"
+    case .closed: return "Closed"
+    case nil: return "Unknown"
+    }
+}
+
+func eventText(_ k: LogEvent.Kind) -> String {
+    switch k {
+    case .coreState(let s): return "core → \(clientStateName(s))"
+    case .pathAdded(let n, let s): return "\(n) added (\(pathStatusName(s)))"
+    case .pathRemoved(let n): return "\(n) removed"
+    case .pathStatus(let n, let from, let to): return "\(n): \(pathStatusName(from)) → \(pathStatusName(to))"
+    case .error(let m): return "error: \(m)"
+    }
+}
+
+enum EventLevel { case error, warn, info }
+
+/// Android levelDot: red error; orange RECONNECTING and path removed; else muted.
+func eventLevel(_ k: LogEvent.Kind) -> EventLevel {
+    switch k {
+    case .error: return .error
+    case .pathRemoved: return .warn
+    case .coreState(let s): return s == CoreClientState.reconnecting.rawValue ? .warn : .info
+    default: return .info
     }
 }

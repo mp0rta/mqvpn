@@ -2,7 +2,6 @@
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 
 import Foundation
-import Darwin
 
 /// Tick-thread producer of the app-facing `TunnelSnapshot`.
 ///
@@ -15,6 +14,7 @@ import Darwin
 /// only inside `collect()`, never from the reader.
 final class SnapshotCache {
     private let engine: MqvpnEngine
+    private let binder: PathBinder
     private let lock = NSLock()
     private var latest: TunnelSnapshot?
     private var timer: Timer?
@@ -23,9 +23,15 @@ final class SnapshotCache {
     /// Tick-thread-confined: provider-side monotonic ordering key, one per
     /// produced snapshot (lets the app detect stalls/reordered reads).
     private var seq: UInt64 = 0
+    /// Tick-thread-confined; the reader gets copies through `lock`.
+    private let ring = SampleRing()
+    /// Random per provider start: lets the app tell a restarted provider
+    /// (seq back at 1) from a continuing one.
+    private let bootId = UInt64.random(in: 1...UInt64.max)
 
-    init(engine: MqvpnEngine) {
+    init(engine: MqvpnEngine, binder: PathBinder) {
         self.engine = engine
+        self.binder = binder
     }
 
     /// MUST be called on the tick thread (inside `engine.perform{}`), like
@@ -42,10 +48,17 @@ final class SnapshotCache {
 
     /// Reader for `handleAppMessage` (any thread). Returns nil until the first
     /// snapshot is produced.
-    func read() -> TunnelSnapshot? {
+    /// Samples: nil request or a different bootId => the full ring, else
+    /// only those newer than request.sinceSeq.
+    func read(request: (sinceSeq: UInt64, bootId: UInt64)?) -> Data? {
         lock.lock()
-        defer { lock.unlock() }
-        return latest
+        guard let l = latest else { lock.unlock(); return nil }
+        let since: UInt64? = (request?.bootId == bootId) ? request?.sinceSeq : nil
+        let samples = ring.since(since)
+        lock.unlock()
+        var snap = l
+        snap.samples = samples
+        return try? ProviderMessage.encode(snap)
     }
 
     /// Tick thread only (fired by the Timer added in `start()`).
@@ -61,6 +74,7 @@ final class SnapshotCache {
             connectedSince = nil
         }
         var paths: [PathSnapshot] = []
+        let kinds = binder.pathKinds()
         for p in engine.paths() {
             // Skip reaped CLOSED slots: get_paths never shrinks n_paths, so a
             // path removed on reconnect lingers as a frozen CLOSED entry for a
@@ -72,32 +86,30 @@ final class SnapshotCache {
                 String(cString: raw.baseAddress!.assumingMemoryBound(to: CChar.self))
             }
             paths.append(PathSnapshot(name: name, status: Int32(p.status.rawValue),
-                                      txBytes: p.bytes_tx, rxBytes: p.bytes_rx))
+                                      txBytes: p.bytes_tx, rxBytes: p.bytes_rx, kind: kinds[name]))
         }
+        // seq must stay >= 1: SampleRing treats seq 0 as its "nothing seen" hazard.
         seq &+= 1
+        let stats = engine.stats()
+        let reorder = engine.reorderStats()
+        let sample = TunnelSample(
+            seq: seq, wallMs: UInt64(now * 1000),
+            monoMs: UInt64(mqvpn_ios_clock_us(nil) / 1000),
+            paths: paths.map { SamplePath(name: $0.name, txBytes: $0.txBytes, rxBytes: $0.rxBytes) },
+            bytesTx: stats?.bytesTx ?? 0, bytesRx: stats?.bytesRx ?? 0,
+            dgramSent: stats?.dgramSent ?? 0, dgramLost: stats?.dgramLost ?? 0,
+            delivered: reorder?.delivered ?? 0, gapCount: reorder?.gapCount ?? 0,
+            gapFilled: reorder?.gapFilled ?? 0, gapTimeout: reorder?.gapTimeout ?? 0,
+            ackDemote: reorder?.ackDemote ?? 0,
+            residenceBuckets: reorder?.residenceBuckets ?? [])
         let snap = TunnelSnapshot(timestamp: now, clientState: Int32(state.rawValue),
-                                  connectedSince: connectedSince,
-                                  footprint: Self.physFootprint(), paths: paths,
+                                  connectedSince: connectedSince, paths: paths,
                                   seq: seq, reorderConfigured: engine.reorderConfigured,
-                                  reorder: engine.reorderStats())
+                                  reorder: reorder, tunnel: engine.tunnelInfo, stats: stats,
+                                  bootId: bootId)
         lock.lock()
+        ring.append(sample)
         latest = snap
         lock.unlock()
-    }
-
-    /// task_info(TASK_VM_INFO) phys_footprint, bytes. Replicated from
-    /// GateMetrics (which the UI task must not modify) — a self-contained read
-    /// with no shared state, so duplication carries no coupling.
-    private static func physFootprint() -> UInt64 {
-        var info = task_vm_info_data_t()
-        var count = mach_msg_type_number_t(
-            MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
-        let kr = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
-            }
-        }
-        guard kr == KERN_SUCCESS else { return 0 }
-        return info.phys_footprint
     }
 }

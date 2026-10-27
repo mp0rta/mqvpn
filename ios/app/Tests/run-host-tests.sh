@@ -14,14 +14,23 @@ trap 'rm -rf "$TMPD"' EXIT
 swiftc -framework Security -o "$OUT" \
     "$SHARED/ServerSettings.swift" \
     "$SHARED/ServerResolve.swift" \
+    "$SHARED/ServerAddressField.swift" \
     "$SHARED/ReorderSettings.swift" \
+    "$SHARED/TunnelPolicies.swift" \
     "$SHARED/HybridSettings.swift" \
     "$SHARED/ProviderMessage.swift" \
+    "$SHARED/SampleRing.swift" \
     "$SHARED/TunnelSessionCoordinator.swift" \
     "$SHARED/TeardownSequence.swift" \
     "$SHARED/SystemTrust.swift" \
     "$SHARED/PathReadSource.swift" \
-    "$APP/ReorderIngest.swift" \
+    "$APP/ControllerCore.swift" \
     "$APP/EventLog.swift" \
+    "$APP/BandwidthHistory.swift" \
+    "$APP/ReorderHistory.swift" \
+    "$APP/ChartGeometry.swift" \
+    "$APP/Derive.swift" \
+    "$APP/SettingsCore.swift" \
+    "$DIR/PureCases.swift" \
     "$DIR/main.swift"
 "$OUT"
