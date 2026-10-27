@@ -162,8 +162,12 @@ final class TunnelController: ObservableObject {
             guard let err else { return }
             Task { @MainActor in
                 guard let self, self.status == .disconnected else { return }
-                self.surfacedError = err.localizedDescription
-                self.eventLog.logError(err.localizedDescription)
+                // The provider keeps the last error until the next session, and
+                // every foreground resync fetches it again: log it once.
+                let msg = err.localizedDescription
+                guard self.surfacedError != msg else { return }
+                self.surfacedError = msg
+                self.eventLog.logError(msg)
             }
         }
     }
