@@ -598,6 +598,19 @@ test_rx_queue_drops_reordered_and_wrapping(void)
     printf("  test_rx_queue_drops_reordered_and_wrapping: OK\n");
 }
 
+/* The step is a signed 32-bit difference, so it assumes fewer than 2^31 drops
+ * between two datagrams read: a step of 2^31 - 1 is counted, while one of
+ * 2^31 cannot be told from a stale count and is skipped. The baseline stays
+ * put, as for any stale count, so the next small step still counts. */
+static void
+test_rx_queue_drops_step_limit(void)
+{
+    static const uint32_t jump[] = {0x7FFFFFFF, 0xFFFFFFFF, 0x80000000};
+    static const uint32_t jump_step[] = {0x7FFFFFFF, 0, 1};
+    assert(rx_queue_drops_expect(jump, jump_step, 3) == 0x80000000u);
+    printf("  test_rx_queue_drops_step_limit: OK\n");
+}
+
 int
 main(void)
 {
@@ -618,6 +631,7 @@ main(void)
     test_get_stats_struct_size_prefix();
     test_rx_drain_budget_and_counters();
     test_rx_queue_drops_reordered_and_wrapping();
+    test_rx_queue_drops_step_limit();
     printf("test_bind_posix: all OK\n");
     return 0;
 }

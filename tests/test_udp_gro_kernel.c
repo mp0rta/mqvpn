@@ -55,6 +55,8 @@ rxq_ovfl_test(void)
     if (mqvpn_udp_rxq_ovfl_enable(rx) < 0) {
         assert(capability_errno(errno));
         printf("SKIP: SO_RXQ_OVFL unavailable (%s)\n", strerror(errno));
+        close(rx);
+        close(tx);
         return 0;
     }
 

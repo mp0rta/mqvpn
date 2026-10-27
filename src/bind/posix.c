@@ -329,7 +329,10 @@ bind_recv_one(bind_common_t *c, uint8_t *buf, bind_deliver_fn deliver, void *arg
                                  &peer_len, &seg, &drops);
     /* The kernel reports a wrapping 32-bit total; sum its forward steps. Since
      * Linux 6.18 an older total can arrive after a newer one (each NUMA node
-     * reads it before taking the queue lock), so a backward step is skipped. */
+     * reads it before taking the queue lock), so a backward step is skipped.
+     * The step is a signed 32-bit difference, which assumes fewer than 2^31
+     * drops between two datagrams read: a larger jump looks like a stale
+     * total, so it is skipped too and the baseline stays where it was. */
     int32_t d = (int32_t)(drops - c->rx_queue_last);
     if (d > 0) {
         c->rx_queue_drops += (uint32_t)d;
