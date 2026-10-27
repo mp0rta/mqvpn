@@ -334,8 +334,10 @@ check(eventLevel(.coreState(5)) == .warn && eventLevel(.coreState(4)) == .info, 
 
 // ── PathReadSource (the read-source chain) ─────────────────────────────────────────
 // A loopback UDP socket, a fake hop that queues closures for the "tick
-// thread" (this thread) and runs or refuses them on demand.
-do {
+// thread" (this thread) and runs or refuses them on demand. A sync function,
+// not a top-level do block: top-level await makes top-level code async, where
+// DispatchGroup.wait and NSLock are unavailable.
+func runPathReadSourceCases() {
     func udpSocket() -> (fd: Int32, addr: sockaddr_in) {
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
         check(fd >= 0, "socket()")
@@ -459,6 +461,7 @@ do {
     src2 = nil
     close(peer)
 }
+runPathReadSourceCases()
 
 failures += runPureCases()
 failures += await runSettingsCoreCases()
