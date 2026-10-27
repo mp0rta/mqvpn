@@ -9,7 +9,7 @@ on:
 
 jobs:
   format-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v7
@@ -40,7 +40,7 @@ jobs:
     # affected job whenever you change CMake flags, configure commands, or
     # compiler versions for the cached artifact — otherwise stale build
     # outputs from a different configuration will be silently restored.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -155,7 +155,7 @@ jobs:
   # 32-bit build guard (OpenWrt/OMR routers run armhf): cross-compiles with
   # gcc and runs the unit tests under qemu-user. CI only; nothing is released.
   armhf:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       XC: >-
@@ -271,7 +271,7 @@ jobs:
         run: cd build && ctest --output-on-failure
 
   sanitizer:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
@@ -607,7 +607,7 @@ jobs:
         wait: fuzz
 
   msan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -711,7 +711,7 @@ jobs:
 
   netns-tests:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -766,7 +766,7 @@ jobs:
 
   ipv6-tests:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -803,7 +803,7 @@ jobs:
 
   systemd-test:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -1261,7 +1261,7 @@ jobs:
           retention-days: 7
 
   android:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -1351,7 +1351,7 @@ jobs:
   # Builds its own x86_64 prebuilts (the release ABI is arm64-v8a only);
   # sdk-native reads -PmqvpnAbiFilters so release/F-Droid stay arm64-only.
   android-emulator:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v7
@@ -1442,7 +1442,7 @@ jobs:
 
   lint-lifecycle-writes:
     name: Lint - lifecycle field writes (spec §3.3)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - name: Run check_lifecycle_field_writes.sh
@@ -1452,7 +1452,7 @@ jobs:
 
   lint-dd-refs:
     name: Lint - design-decisions references
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - name: Run check_dd_refs.sh
@@ -1465,7 +1465,7 @@ jobs:
     # unreliable under ASan on shared runners (same reason the control-API
     # e2e skips its data-plane phases in the sanitizer job). Reuses the same
     # clang-Debug BoringSSL/xquic cache artifacts as the sanitizer job.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
@@ -1569,7 +1569,7 @@ jobs:
     # plus a plain LANE=OFF configure-compatibility check. Reuses the same
     # clang-Debug BoringSSL/xquic cache artifacts as the hybrid-e2e and
     # sanitizer jobs.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7

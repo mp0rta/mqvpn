@@ -36,8 +36,8 @@ jobs:
     strategy:
       matrix:
         include:
-          # amd64 deb is intentionally built on 22.04, not ubuntu-latest.
-          # ubuntu-latest (24.04) links against libevent-2.1-7t64 (the t64
+          # amd64 deb is intentionally built on 22.04, not 24.04.
+          # 24.04 links against libevent-2.1-7t64 (the t64
           # transition rename), so dpkg-shlibdeps pins Depends: to a package
           # name that does not exist on Ubuntu 22.04 / Debian 12. Building on
           # 22.04 yields Depends: libevent-2.1-7, which is satisfied natively
@@ -589,7 +589,7 @@ jobs:
             mqvpn_*_${{ matrix.arch }}.tar.gz
 
   build-android:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     # The upload-key secrets live in the protected `release` environment whose
     # deployment rule admits only v* tags, so GitHub — not a check inside this
@@ -833,7 +833,7 @@ jobs:
   publish-release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [build-release, build-android, android-repro]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: write
