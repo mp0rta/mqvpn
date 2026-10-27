@@ -32,20 +32,22 @@ _Static_assert(MBT_GEN_MAX_RETRIES == PATH_RECREATE_MAX_RETRIES,
                "traces generated for a different PATH_RECREATE_MAX_RETRIES - set "
                "MaxRetries in formal/mbt/MqvpnPathSlotMbt.cfg, then rerun "
                "formal/run_tlc.sh mbt");
-_Static_assert(MBT_ST_PENDING == PATH_LC_PENDING &&
-                   MBT_ST_CREATE_WAIT == PATH_LC_CREATE_WAIT &&
-                   MBT_ST_VALIDATING == PATH_LC_VALIDATING &&
-                   MBT_ST_ACTIVE == PATH_LC_ACTIVE && MBT_ST_STANDBY == PATH_LC_STANDBY &&
-                   MBT_ST_DEGRADED == PATH_LC_DEGRADED &&
-                   MBT_ST_CLOSED_RECOVERABLE == PATH_LC_CLOSED_RECOVERABLE &&
-                   MBT_ST_CLOSED_DROPPED == PATH_LC_CLOSED_DROPPED &&
-                   MBT_ST_CLOSED_FREE == PATH_LC_CLOSED_FREE,
+/* (int) casts: newer clang rejects comparing different enum types (-Wenum-compare). */
+_Static_assert((int)MBT_ST_PENDING == (int)PATH_LC_PENDING &&
+                   (int)MBT_ST_CREATE_WAIT == (int)PATH_LC_CREATE_WAIT &&
+                   (int)MBT_ST_VALIDATING == (int)PATH_LC_VALIDATING &&
+                   (int)MBT_ST_ACTIVE == (int)PATH_LC_ACTIVE &&
+                   (int)MBT_ST_STANDBY == (int)PATH_LC_STANDBY &&
+                   (int)MBT_ST_DEGRADED == (int)PATH_LC_DEGRADED &&
+                   (int)MBT_ST_CLOSED_RECOVERABLE == (int)PATH_LC_CLOSED_RECOVERABLE &&
+                   (int)MBT_ST_CLOSED_DROPPED == (int)PATH_LC_CLOSED_DROPPED &&
+                   (int)MBT_ST_CLOSED_FREE == (int)PATH_LC_CLOSED_FREE,
                "mbt_state_t drifted from path_lifecycle_t");
-_Static_assert(MBT_STATUS_PENDING == MQVPN_PATH_PENDING &&
-                   MBT_STATUS_ACTIVE == MQVPN_PATH_ACTIVE &&
-                   MBT_STATUS_DEGRADED == MQVPN_PATH_DEGRADED &&
-                   MBT_STATUS_STANDBY == MQVPN_PATH_STANDBY &&
-                   MBT_STATUS_CLOSED == MQVPN_PATH_CLOSED,
+_Static_assert((int)MBT_STATUS_PENDING == (int)MQVPN_PATH_PENDING &&
+                   (int)MBT_STATUS_ACTIVE == (int)MQVPN_PATH_ACTIVE &&
+                   (int)MBT_STATUS_DEGRADED == (int)MQVPN_PATH_DEGRADED &&
+                   (int)MBT_STATUS_STANDBY == (int)MQVPN_PATH_STANDBY &&
+                   (int)MBT_STATUS_CLOSED == (int)MQVPN_PATH_CLOSED,
                "mbt_status_t drifted from mqvpn_path_status_t");
 
 #define SEC           1000000ULL
