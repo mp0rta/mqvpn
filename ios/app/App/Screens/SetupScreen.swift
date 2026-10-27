@@ -15,6 +15,10 @@ struct SetupScreen: View {
     @State private var finishing = false
     @State private var finishError: String?
     @State private var lastPathBlocked = false
+    /// Step 2 text as typed; nil = untouched. Continue applies it itself, since the
+    /// fields' focus-loss commit lands only on a later SwiftUI update.
+    @State private var typedAddress: String?
+    @State private var typedKey: String?
 
     var body: some View {
         let m = controller.settings
@@ -40,7 +44,7 @@ struct SetupScreen: View {
                     HStack(spacing: 10) {
                         SecondaryButton("Back") { step -= 1 }.frame(width: 90)
                         if step == 1 {
-                            PrimaryButton("Continue") { commitThen { if m.draft.server != nil { step = 2 } else { tried = true } } }
+                            PrimaryButton("Continue") { continueFromServer(m) }
                         } else {
                             PrimaryButton("Finish Setup") { finish(m) }.disabled(!s.paths.anyEnabled || finishing)
                         }
@@ -52,13 +56,15 @@ struct SetupScreen: View {
         .background(mq.win.ignoresSafeArea())
     }
 
-    /// Resign focus so the field commits, then run `next` against the committed draft.
-    private func commitThen(_ next: @escaping () -> Void) {
+    private func continueFromServer(_ m: SettingsCore) {
         endEditing()
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 60_000_000)
-            next()
+        if typedAddress != nil || typedKey != nil {
+            m.update { d in
+                if let a = typedAddress { d.addressText = a }
+                if let k = typedKey { d.authKey = k }
+            }
         }
+        if m.draft.server != nil { step = 2 } else { tried = true }
     }
 
     private func finish(_ m: SettingsCore) {
@@ -103,10 +109,12 @@ struct SetupScreen: View {
             Text("Your server admin gives you these two values. On your own server, run mqvpn --genkey to create a key.")
                 .font(.system(size: 13)).lineSpacing(5).foregroundColor(mq.t2)
             FieldBox(label: "Server address", note: bad ? "Enter a server address, e.g. vpn.example.com:443" : nil, noteIsError: bad) {
-                CommitField(label: "Server address", value: s.addressText, keyboard: .URL) { t in m.update { $0.addressText = t } }
+                CommitField(label: "Server address", value: s.addressText, keyboard: .URL,
+                            onType: { typedAddress = $0 }) { t in m.update { $0.addressText = t } }
             }
             FieldBox(label: "Access key", trailing: AnyView(ShowHide(shown: $keyShown))) {
-                CommitField(label: "Access key", value: s.authKey, secure: !keyShown) { t in m.update { $0.authKey = t } }
+                CommitField(label: "Access key", value: s.authKey, secure: !keyShown,
+                            onType: { typedKey = $0 }) { t in m.update { $0.authKey = t } }
             }
             MqCard {
                 HStack(spacing: 12) {
@@ -150,7 +158,7 @@ struct SetupScreen: View {
                 }.opacity(found ? 1 : 0.5)
             }
             if lastPathBlocked { Text(lastPathCaption).font(.system(size: 12)).foregroundColor(mq.red) }
-            if let e = m.fieldErrors["paths"] { Text(e).font(.system(size: 12)).foregroundColor(mq.red) }
+            if let e = m.fieldErrors[.paths] { Text(e).font(.system(size: 12)).foregroundColor(mq.red) }
             if let e = finishError { Text(e).font(.system(size: 12)).foregroundColor(mq.red) }
         }
     }

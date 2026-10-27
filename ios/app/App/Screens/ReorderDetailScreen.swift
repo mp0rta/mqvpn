@@ -25,7 +25,7 @@ struct ReorderDetailScreen: View {
                     Text("FIBER LTE").tag(ReorderSettings.profileFiberLTE)
                 }.pickerStyle(.menu).tint(mq.accent).disabled(!editable)
             }
-            let e = m.fieldErrors["reorderPorts"]
+            let e = m.fieldErrors[.reorderPorts]
             FieldBox(label: "UDP ports", note: e ?? "Comma-separated, e.g. 443", noteIsError: e != nil) {
                 CommitField(label: "UDP ports", value: d.reorder.portsText, enabled: editable) { t in
                     m.update { $0.reorder.portsText = t }

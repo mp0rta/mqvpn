@@ -12,7 +12,7 @@ struct RedundantDetailScreen: View {
     var body: some View {
         let m = controller.settings
         let d = m.draft
-        let e = m.fieldErrors["redundantPorts"]
+        let e = m.fieldErrors[.redundantPorts]
         // A stored list that could not be read shows blank while the provider copies no UDP.
         let unreadable = d.split.redundantEnabled && d.split.redundantPortsMalformed
             && d.redundantPortsText.trimmingCharacters(in: .whitespaces).isEmpty

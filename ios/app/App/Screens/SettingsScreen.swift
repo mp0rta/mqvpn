@@ -57,13 +57,13 @@ struct SettingsScreen: View {
 
     // MARK: Server
 
-    private func server(_ m: SettingsCore, _ s: AppDraft, _ errors: [String: String], _ editable: Bool) -> some View {
+    private func server(_ m: SettingsCore, _ s: AppDraft, _ errors: [AppDraft.Field: String], _ editable: Bool) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             SectionLabel("Server")
             MqCard(vPad: 4) {
                 VStack(alignment: .leading, spacing: 0) {
                     let addrNote: String? = s.server == nil
-                        ? (errors["address"] == AppDraft.errPort ? AppDraft.errPort : addressHint) : nil
+                        ? (errors[.address] == AppDraft.errPort ? AppDraft.errPort : addressHint) : nil
                     FieldBox(label: "Address", note: addrNote, noteIsError: addrNote != nil) {
                         CommitField(label: "Address", value: s.addressText, enabled: editable, keyboard: .URL) { t in
                             m.update { $0.addressText = t }
@@ -112,7 +112,7 @@ struct SettingsScreen: View {
          "— sends UDP uploads on every connection at once, for streams that tolerate duplicates (SRT, RIST, RTP); uses more data"),
     ]
 
-    private func advanced(_ m: SettingsCore, _ s: AppDraft, _ errors: [String: String], _ editable: Bool) -> some View {
+    private func advanced(_ m: SettingsCore, _ s: AppDraft, _ errors: [AppDraft.Field: String], _ editable: Bool) -> some View {
         let choice = s.split.choice
         let info = viewState(controller) == .connected ? controller.snapshot?.tunnel : nil
         let applied: Bool? = info?.requestedScheduler == nil ? nil
@@ -150,7 +150,7 @@ struct SettingsScreen: View {
                                   caption: "Re-order packets that arrive mixed-up across connections"
                                     + (portsNote.isEmpty ? "" : " (UDP port\(portsNote.contains(",") ? "s" : "") \(portsNote))"),
                                   isOn: m.binding(\.reorder.enabled), enabled: editable, onOpen: { onNavigate(.reorder) })
-                        if let e = errors["reorderPorts"] {
+                        if let e = errors[.reorderPorts] {
                             Text(e).font(.system(size: 11)).foregroundColor(mq.red).padding(.bottom, 8)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }

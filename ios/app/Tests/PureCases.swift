@@ -572,19 +572,19 @@ func runSettingsCoreCases() async -> Int {
 
     // fieldErrors matrix
     var d = AppDraft()
-    check(d.fieldErrors()["address"] == "Enter a server address" && !d.isValid, "err blank address")
+    check(d.fieldErrors()[.address] == "Enter a server address" && !d.isValid, "err blank address")
     d.addressText = "host:99999"
-    check(d.fieldErrors()["address"] == "Port must be 1-65535", "err bad port")
+    check(d.fieldErrors()[.address] == "Port must be 1-65535", "err bad port")
     d.addressText = "[fd00::1]:0"
-    check(d.fieldErrors()["address"] == "Port must be 1-65535", "err bad v6 port")
+    check(d.fieldErrors()[.address] == "Port must be 1-65535", "err bad v6 port")
     d.addressText = "a b"
-    check(d.fieldErrors()["address"] == "Enter a server address", "err whitespace address")
+    check(d.fieldErrors()[.address] == "Enter a server address", "err whitespace address")
     d.addressText = "host"
     check(d.isValid, "bare host valid")
     d.reorder.enabled = true
-    check(d.fieldErrors()["reorderPorts"] == "Enter at least one valid port", "err reorder no ports")
+    check(d.fieldErrors()[.reorderPorts] == "Enter at least one valid port", "err reorder no ports")
     d.reorder.portsText = "bad, 99999"
-    check(d.fieldErrors()["reorderPorts"] != nil, "err reorder no valid ports")
+    check(d.fieldErrors()[.reorderPorts] != nil, "err reorder no valid ports")
     d.reorder.portsText = "bad, 443"
     check(d.isValid && d.reorderPorts == [443], "reorder skips bad tokens")
     let scan = ReorderSettings.scanPorts(" 443, x ,443, 0, 70000, ,5401")
@@ -594,14 +594,14 @@ func runSettingsCoreCases() async -> Int {
     d.reorder.portsText = "bad, 443"
     d.split.redundantEnabled = true
     d.redundantPortsText = "443,bad"
-    check(d.fieldErrors()["redundantPorts"] == "Enter ports as a comma-separated list (1-65535)", "err redundant raw")
+    check(d.fieldErrors()[.redundantPorts] == "Enter ports as a comma-separated list (1-65535)", "err redundant raw")
     d.redundantPortsText = ""
     check(d.isValid, "redundant blank = all UDP valid")
     d.split.redundantEnabled = false
     d.redundantPortsText = "443,bad"
     check(d.isValid, "redundant text ignored when off")
     d.paths = PathPolicy(wifi: false, cellular: false)
-    check(d.fieldErrors()["paths"] == "Turn on at least one connection type", "err paths")
+    check(d.fieldErrors()[.paths] == "Turn on at least one connection type", "err paths")
 
     // derivedSplit: valid edit never carries a stale malformed flag
     var m = good()
@@ -638,7 +638,7 @@ func runSettingsCoreCases() async -> Int {
     do {
         let (c, st) = make()
         c.update { $0.split = $0.split.tapped(.redundant); $0.redundantPortsText = "443,bad" }
-        check(c.fieldErrors["redundantPorts"] != nil, "invalid: error shown")
+        check(c.fieldErrors[.redundantPorts] != nil, "invalid: error shown")
         check(!(await c.flush()) && st.persisted.isEmpty, "invalid: flush false, nothing saved")
         c.update { $0.redundantPortsText = "443" }
         check(await c.flush() && st.persisted.last?.derivedSplit.redundantPorts == [443], "fixed text saves")

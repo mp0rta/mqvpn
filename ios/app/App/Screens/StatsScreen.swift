@@ -69,7 +69,7 @@ struct StatsScreen: View {
                 KvRow(key: "Packet loss", value: controller.dgramLoss.map { String(format: "%.1f%%", $0 * 100) } ?? "—", last: true)
             }
         }
-        if controller.draft.reorder.enabled {
+        if controller.snapshot?.reorderConfigured == true {   // provider truth, as the history ingest uses
             Measured { w in ReorderBarsCard(model: reorderBars(samples: ro.samples, nowMs: nowMs, w: w, h: 120)) }
             Measured { w in WaitBarsCard(model: waitBars(samples: ro.samples, nowMs: nowMs, w: w, h: 120)) }
             let r = controller.snapshot?.reorder   // cumulative counters: latest snapshot, not history

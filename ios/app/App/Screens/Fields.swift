@@ -14,6 +14,8 @@ struct CommitField: View {
     var enabled = true
     var secure = false
     var keyboard: UIKeyboardType = .default
+    /// Every keystroke, for a caller that must read the text before focus loss commits it.
+    var onType: ((String) -> Void)? = nil
     let commit: (String) -> Void
     @State private var text = ""
     @FocusState private var focused: Bool
@@ -29,6 +31,7 @@ struct CommitField: View {
         .submitLabel(.done)
         .onSubmit(flush)
         .onChange(of: focused) { f in if !f { flush() } }
+        .onChange(of: text) { onType?($0) }
         .onChange(of: value) { v in if !focused { text = v } }
         .onAppear { text = value }
         .onDisappear(perform: flush)
@@ -82,7 +85,7 @@ extension SettingsCore {
     }
 }
 
-/// Resign the first responder so focus-loss commits run before an action reads the draft.
+/// Resign the first responder: dismisses the keyboard; the focus-loss commit lands on a later update.
 func endEditing() {
     UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
 }

@@ -30,6 +30,9 @@ struct AppDraft: Equatable {
     var protection = ProtectionSettings()
     var paths = PathPolicy()
 
+    /// Fields that can carry a validation error.
+    enum Field: Hashable { case address, reorderPorts, redundantPorts, paths }
+
     static let errAddress = "Enter a server address"
     static let errPort = "Port must be 1-65535"
     static let errReorderPorts = "Enter at least one valid port"
@@ -59,14 +62,14 @@ struct AppDraft: Equatable {
         return s
     }
 
-    func fieldErrors() -> [String: String] {
-        var e: [String: String] = [:]
-        if server == nil { e["address"] = Self.addressError(addressText) }
-        if reorder.enabled && reorderPorts.isEmpty { e["reorderPorts"] = Self.errReorderPorts }
+    func fieldErrors() -> [Field: String] {
+        var e: [Field: String] = [:]
+        if server == nil { e[.address] = Self.addressError(addressText) }
+        if reorder.enabled && reorderPorts.isEmpty { e[.reorderPorts] = Self.errReorderPorts }
         if split.redundantEnabled && SplitSettings.parseRedundantPorts(redundantPortsText) == nil {
-            e["redundantPorts"] = Self.errRedundantPorts
+            e[.redundantPorts] = Self.errRedundantPorts
         }
-        if !paths.anyEnabled { e["paths"] = Self.errPaths }
+        if !paths.anyEnabled { e[.paths] = Self.errPaths }
         return e
     }
 
@@ -95,7 +98,7 @@ protocol DraftStore {
 @MainActor
 final class SettingsCore {
     private(set) var draft = AppDraft()
-    private(set) var fieldErrors: [String: String] = [:]
+    private(set) var fieldErrors: [AppDraft.Field: String] = [:]
     private(set) var saveError: String?
     private(set) var lastPersisted: AppDraft?
     /// False only while first-run setup is presented with no manager.
