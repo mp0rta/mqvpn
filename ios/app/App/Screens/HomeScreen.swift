@@ -81,6 +81,7 @@ struct HomeScreen: View {
                         .mqFont(12).padding(8)
                 }.buttonStyle(.plain).padding(.top, 12)
             }
+            .frame(maxWidth: .infinity)
             .padding(.horizontal, 20).padding(.top, 26).padding(.bottom, 16)
         }.background(mq.win.ignoresSafeArea())
     }
