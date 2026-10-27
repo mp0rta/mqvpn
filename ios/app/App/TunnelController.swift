@@ -251,11 +251,11 @@ final class TunnelController: ObservableObject {
         // ends itself), never in includeAllNetworks: that flag makes NECP deny
         // the provider's cellular-bound socket while Wi-Fi is up (no
         // multipath) and cuts all connectivity during an App Store update.
-        // With the kill switch, enforceRoutes keeps apps' interface-scoped
-        // traffic in the tunnel too; local-network hosts stay outside it.
+        // enforceRoutes stays off too: with it on, paths came up but no tunnel
+        // traffic flowed on device. All three are written on every save.
         proto.includeAllNetworks = false
-        proto.enforceRoutes = d.protection.killSwitch
-        proto.excludeLocalNetworks = d.protection.killSwitch
+        proto.excludeLocalNetworks = false
+        proto.enforceRoutes = false
         do {
             try await performAtomicSave(NEConfigStore(manager: m, proto: proto), merge: merged)
         } catch {
