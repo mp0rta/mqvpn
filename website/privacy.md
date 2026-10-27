@@ -1,9 +1,9 @@
-# Privacy Policy — mqvpn Android app
+# Privacy Policy — mqvpn apps
 
-*Effective date: 2026-08-24*
+*Effective date: 2026-10-28*
 
-This policy covers the mqvpn Android application (`org.mqvpn.app`), published
-by Vortric Labs.
+This policy covers the mqvpn applications for Android and iOS
+(`org.mqvpn.app`), published by Vortric Labs.
 
 ## What we collect
 
@@ -32,7 +32,10 @@ using QUIC with TLS 1.3.
 
 Connection settings you enter (server address, port, pre-shared key, tunnel
 options) are stored locally on your device only. They leave the device only
-as part of connecting to the server you configured.
+as part of connecting to the server you configured. On iOS, the pre-shared
+key is stored in the iOS Keychain and the other settings in the app's VPN
+configuration. The Keychain item never leaves this device: it is not synced to
+iCloud Keychain or restored to another device.
 
 ## Data retention and deletion
 
@@ -40,16 +43,29 @@ Vortric Labs does not retain any personal data because the app does not send
 such data to Vortric Labs.
 
 Connection settings are stored locally on your device and remain there until
-you change them, clear the app's data, or uninstall the app. Uninstalling the
-app or clearing its storage removes these locally stored settings.
+you change them, clear the app's data, or uninstall the app. On Android,
+uninstalling the app or clearing its storage removes these locally stored
+settings. On iOS, deleting the app removes its settings and its VPN
+configuration; iOS may keep Keychain items, such as the pre-shared key, after
+an app is deleted.
 
 ## Permissions the app uses
+
+On Android:
 
 - **VPN service** — required to establish the tunnel. Android shows a system
   consent dialog before the first connection.
 - **Network state** — used to detect available networks (Wi-Fi, cellular) for
   multipath bonding and failover.
 - **Notifications** — used to show the ongoing connection status.
+
+On iOS:
+
+- **VPN configuration** — required to establish the tunnel. iOS asks for
+  permission to add a VPN configuration the first time you save your settings.
+- The app also uses which networks are available (Wi-Fi, cellular) for
+  multipath bonding and failover; iOS does not ask for a separate permission
+  for this. The app does not use notifications, location, or tracking.
 
 ## Changes
 
