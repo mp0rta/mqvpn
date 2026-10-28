@@ -344,6 +344,7 @@ reorder は**デフォルトで無効**であり、有効な範囲の中での�
 | `TcpIdleTimeoutSec` | TCP レーンフローのアイドル破棄タイムアウト。`0` で無効化 | client + server | `300` |
 | `TcpConnectTimeoutSec` | サーバの egress `connect()` タイムアウト。超過時クライアントは HTTP `504` を受け取ります | server | `10` |
 | `TcpMaxGlobalFlows` | 全セッション合計の egress TCP フロー数のサーバ全体上限 | server | `4096` |
+| `ResetHoldMs` | 宛先がデータ送信の直後に TCP 接続をリセットした場合（いわゆる "lingering close"）、既定ではサーバがレーンのストリームを即座にリセットするため、まだ転送中のレスポンスの末尾が失われます。この値（ミリ秒）を設定すると、サーバは宛先が送ったデータを最後まで届けてからストリームを通常どおり閉じ、この時間内に閉じなかった場合にだけリセットします（`0` = 無効、最大 `60000`）。データを伴わないリセットには影響しません。目安は `2000`。`get_stats` の `tcp_reset_held`・`tcp_reset_held_fin`・`tcp_reset_held_expired` に計上されます | server | `0` |
 | `EgressAllow` | プライベートレンジ向けデフォルト拒否 egress ACL を通す CIDR（繰り返し可、最大 32） | server | — |
 | `EgressDeny` | 追加で拒否する CIDR。`EgressAllow` の後に評価されます（繰り返し可、最大 32） | server | — |
 

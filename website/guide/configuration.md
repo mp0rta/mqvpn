@@ -349,6 +349,7 @@ Terminates inner TCP locally and relays it over an HTTP/3 request stream so a si
 | `TcpIdleTimeoutSec` | Idle-eviction timeout for TCP-lane flows; `0` disables idle eviction | client + server | `300` |
 | `TcpConnectTimeoutSec` | Timeout for the server's egress `connect()`; on expiry the client gets HTTP `504` | server | `10` |
 | `TcpMaxGlobalFlows` | Whole-server cap on concurrent egress TCP flows across all sessions | server | `4096` |
+| `ResetHoldMs` | When a destination resets a TCP connection right after sending data (a "lingering close"), the server would otherwise reset the lane stream at once and the end of the response still in flight is lost. With this set (milliseconds), the server instead finishes delivering what the destination sent and closes the stream normally, resetting it only if it has not closed within this time (`0` = off; up to `60000`). Resets with nothing behind them are unaffected. A starting point is `2000`. Counted in `get_stats` as `tcp_reset_held`, `tcp_reset_held_fin` and `tcp_reset_held_expired` | server | `0` |
 | `EgressAllow` | CIDR allowed through the default-deny egress ACL for private ranges (repeatable, up to 32) | server | — |
 | `EgressDeny` | Additional CIDR to block, evaluated after `EgressAllow` (repeatable, up to 32) | server | — |
 

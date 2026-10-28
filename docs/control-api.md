@@ -221,6 +221,11 @@ datagram counters and uptime.
   "tcp_flows_rejected":2,"raw_markers_active":0,
   "udp_tx_sends":54120,"udp_tx_datagrams":889304,
   "udp_rx_receives":812004,"udp_rx_datagrams":1031887,
+  "tcp_reset_econnreset":4,"tcp_reset_econnreset_tail_flows":1,
+  "tcp_reset_econnreset_tail_bytes":65536,
+  "tcp_reset_error":1,"tcp_reset_error_tail_flows":0,
+  "tcp_reset_error_tail_bytes":0,"tcp_idle_evicted":12,
+  "tcp_reset_held":1,"tcp_reset_held_fin":1,"tcp_reset_held_expired":0,
   "uptime_sec":3601
 }
 ```
@@ -246,6 +251,16 @@ datagram counters and uptime.
 | `udp_tx_datagrams` | uint64 | Outer-UDP datagrams the kernel accepted. `udp_tx_datagrams / udp_tx_sends` is the achieved transmit batching factor; 1.0 means every datagram cost its own syscall. Exactly 1.0 with `UdpGso = false` and on platforms without the batched send path. |
 | `udp_rx_receives` | uint64 | Outer-UDP receive syscalls that returned data. |
 | `udp_rx_datagrams` | uint64 | Outer-UDP datagrams delivered to the library. `udp_rx_datagrams / udp_rx_receives` is the achieved receive coalescing factor. Exactly 1.0 with `UdpGro = false`; it also stays near 1.0 when the peer is not batching its sends, since the kernel then has nothing to coalesce, and over a loopback/veth path regardless of the peer. |
+| `tcp_reset_econnreset` | uint64 | Hybrid mode: TCP-lane streams the server reset because its egress socket reported `ECONNRESET` (the origin reset the connection). A stream reset discards the data the transport still holds for that stream, so one that follows data can truncate it. A counter. |
+| `tcp_reset_econnreset_tail_flows` | uint64 | The subset of `tcp_reset_econnreset` whose reset left origin bytes behind (a non-zero tail, below). |
+| `tcp_reset_econnreset_tail_bytes` | uint64 | Summed tails of `tcp_reset_econnreset`. The tail is an estimate, because the transport exposes no per-stream acknowledged offset: the bytes the stream accepted within one second before the reset, plus bytes read from the origin that it had not accepted yet. It overstates the loss when the path drains that second's bytes sooner, and understates it when the send queue holds more than a second. |
+| `tcp_reset_error` | uint64 | As `tcp_reset_econnreset`, for every other relay error on the egress socket or the stream. |
+| `tcp_reset_error_tail_flows` | uint64 | As `tcp_reset_econnreset_tail_flows`, for `tcp_reset_error`. |
+| `tcp_reset_error_tail_bytes` | uint64 | As `tcp_reset_econnreset_tail_bytes`, for `tcp_reset_error`. |
+| `tcp_idle_evicted` | uint64 | Hybrid mode: TCP-lane flows closed by the `[Hybrid] TcpIdleTimeoutSec` sweep. They move no bytes for the whole timeout, so their reset loses nothing; counted apart from the relay errors above. |
+| `tcp_reset_held` | uint64 | `[Hybrid] ResetHoldMs`: origin resets the server held instead of propagating, because they came after data (a non-zero tail, origin bytes accepted within the hold, or origin bytes not yet read). The server stopped writing to the origin, relayed what it had sent, and ended the stream with FIN. Each is also counted under `tcp_reset_econnreset`, or under `tcp_reset_error` when the origin sent FIN before its reset (seen as `EPIPE`). A counter; always `0` with the key at `0` (the default). |
+| `tcp_reset_held_fin` | uint64 | Of `tcp_reset_held`, the streams whose FIN was handed to the transport: the whole response is queued and the stream ends normally once delivered. |
+| `tcp_reset_held_expired` | uint64 | Of `tcp_reset_held`, the streams that had not closed within `ResetHoldMs` and were reset as they would have been without the key. Not exclusive with `tcp_reset_held_fin` (a FIN can be followed by expiry). After a FIN this loses only what the client had not yet acknowledged; if it is a large share of `tcp_reset_held`, the hold is shorter than the path needs to deliver a stream window. |
 | `uptime_sec` | uint64  | Seconds since `mqvpn_server_create` was called                 |
 
 Notes:
@@ -556,6 +571,18 @@ mqvpn follows semantic versioning for the control API:
 - `get_status` client objects gained `scheduler` in v0.18.0 (JSON only; the C
   struct `mqvpn_client_info_t` is unchanged). Additive; existing JSON
   consumers remain unaffected.
+- `get_stats` gained `tcp_reset_econnreset`, `tcp_reset_error` (each with
+  `_tail_flows` and `_tail_bytes`) and `tcp_idle_evicted`: the TCP-lane stream
+  resets the server issues, by cause, and how many left origin bytes behind.
+  Additive; existing JSON consumers remain unaffected. The fields grow
+  `mqvpn_stats_t` (which also gains the client's `tcp_reset_by_peer*`
+  counters, read through `mqvpn_client_get_stats`), so the C-API caveat of
+  the v0.9.0 and v0.16.0 entries above applies: binaries linked against the
+  shared library must be recompiled against the new header.
+- `get_stats` gained `tcp_reset_held`, `tcp_reset_held_fin` and
+  `tcp_reset_held_expired` for the `[Hybrid] ResetHoldMs` key. Additive;
+  existing JSON consumers remain unaffected. They grow `mqvpn_stats_t` with
+  the same recompile caveat as the entry above.
 - `get_status` path objects gained `reinject_tx_bytes` in v0.15.0 — the
   per-path bytes speculatively duplicated by reinjection. Additive; existing
   JSON consumers remain unaffected. The value is read from the server's

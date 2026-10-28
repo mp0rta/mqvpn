@@ -120,6 +120,39 @@ int *svr_conn_tcp_flow_count_ptr(void *stream);
  * catches misuse) while the layout stays opaque to mqvpn_server.c. */
 struct svr_tcp_egress_flow_s;
 
+/* How egress flows ended by the server's own decision: a relay error
+ * (split by whether the egress socket reported ECONNRESET, i.e. the origin
+ * reset the connection, or anything else) or an idle eviction. Every one of
+ * them resets the H3 stream, and a stream reset drops the STREAM data the
+ * transport still holds for it, so each relay-error class also records how
+ * many of its resets left origin bytes behind ("tail") and how many bytes.
+ *
+ * The tail is an estimate. xquic exposes no per-stream acknowledged offset
+ * (xqc_request_stats_t carries send_body_size, the bytes send_body()
+ * accepted, but nothing about what the peer has ACKed), so the tail is the
+ * bytes send_body() accepted within TCP_EGRESS_TAIL_WINDOW_US before the
+ * reset, plus any bytes read from the origin that the transport had not
+ * accepted yet (the uplink stash, which a reset always loses). It
+ * overstates the loss when the path drains that window's bytes in less
+ * than the window, and understates it when the send queue holds more than
+ * the window. Idle evictions move no bytes for the whole idle timeout, so
+ * they have no tail by construction and are counted on their own. */
+typedef struct {
+    uint64_t econnreset;            /* relay errors with errno ECONNRESET */
+    uint64_t econnreset_tail_flows; /* ... of which had a non-zero tail */
+    uint64_t econnreset_tail_bytes; /* ... summed tails */
+    uint64_t other;                 /* every other relay error */
+    uint64_t other_tail_flows;
+    uint64_t other_tail_bytes;
+    uint64_t idle_evicted; /* idle-timeout evictions (no tail) */
+    /* [Hybrid] ResetHoldMs: origin resets held instead of propagated
+     * (svr_tcp_egress_hold_reset), of which the ones whose FIN reached the
+     * transport and the ones reset anyway when the hold ran out. */
+    uint64_t held;
+    uint64_t held_fin;
+    uint64_t held_expired;
+} svr_tcp_reset_counters_t;
+
 /* Server-scope egress state + config, bundled (svr_get_egress_policy
  * precedent). Pointer fields: tcp_egress.c owns the CONTENTS (global
  * in-flight-connect fd count + the D3 intrusive tick-list head) but not
@@ -132,11 +165,14 @@ typedef struct {
     int *global_fd_count;                          /* in-flight + active egress fds */
     uint64_t *flows_total_opened;     /* cumulative admitted egress flows (get_stats) */
     uint64_t *flows_rejected_cap;     /* cumulative cap-503 rejections (get_stats) */
+    svr_tcp_reset_counters_t *resets; /* server-initiated stream resets (get_stats) */
     uint32_t tcp_max_flows;           /* per-session cap (config.hybrid) */
     uint32_t tcp_connect_timeout_sec; /* connect() deadline (config.hybrid) */
     uint32_t tcp_idle_timeout_sec;    /* ACTIVE-flow idle eviction, shared with the
                                        * client's tcp_lane (config.hybrid); 0 = disabled,
                                        * see the field comment in classifier.h */
+    uint32_t reset_hold_ms;           /* [Hybrid] ResetHoldMs; 0 = propagate an
+                                       * origin reset at once (config.hybrid) */
     int global_fd_budget;             /* mqvpn_server_egress_fd_budget(s) */
 } svr_tcp_egress_srv_ctx_t;
 

@@ -266,6 +266,27 @@ ctrl_cmd_get_stats(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *
     ok &= yyjson_mut_obj_add_uint(doc, root, "udp_tx_datagrams", st.udp_tx_datagrams);
     ok &= yyjson_mut_obj_add_uint(doc, root, "udp_rx_receives", rx_receives);
     ok &= yyjson_mut_obj_add_uint(doc, root, "udp_rx_datagrams", rx_datagrams);
+    /* Stream resets the server issued on relay errors, by cause, with how
+     * many left origin bytes behind (the tail estimate; see mqvpn_stats_t),
+     * and idle evictions, which lose nothing. */
+    ok &= yyjson_mut_obj_add_uint(doc, root, "tcp_reset_econnreset",
+                                  st.tcp_reset_econnreset);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "tcp_reset_econnreset_tail_flows",
+                                  st.tcp_reset_econnreset_tail_flows);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "tcp_reset_econnreset_tail_bytes",
+                                  st.tcp_reset_econnreset_tail_bytes);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "tcp_reset_error", st.tcp_reset_error);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "tcp_reset_error_tail_flows",
+                                  st.tcp_reset_error_tail_flows);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "tcp_reset_error_tail_bytes",
+                                  st.tcp_reset_error_tail_bytes);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "tcp_idle_evicted", st.tcp_idle_evicted);
+    /* [Hybrid] ResetHoldMs: origin resets held behind a FIN, and how they
+     * ended. */
+    ok &= yyjson_mut_obj_add_uint(doc, root, "tcp_reset_held", st.tcp_reset_held);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "tcp_reset_held_fin", st.tcp_reset_held_fin);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "tcp_reset_held_expired",
+                                  st.tcp_reset_held_expired);
     ok &= yyjson_mut_obj_add_uint(doc, root, "uptime_sec", uptime);
     if (!ok) {
         yyjson_mut_doc_free(doc);

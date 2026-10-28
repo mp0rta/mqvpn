@@ -94,6 +94,16 @@ mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *out)
     out->tcp_flows_total = 7;
     out->udp_tx_sends = 1234;
     out->udp_tx_datagrams = 5678;
+    out->tcp_reset_econnreset = 6101;
+    out->tcp_reset_econnreset_tail_flows = 3707;
+    out->tcp_reset_econnreset_tail_bytes = 1048583;
+    out->tcp_reset_error = 1301;
+    out->tcp_reset_error_tail_flows = 307;
+    out->tcp_reset_error_tail_bytes = 16411;
+    out->tcp_idle_evicted = 2027;
+    out->tcp_reset_held = 3011;
+    out->tcp_reset_held_fin = 2999;
+    out->tcp_reset_held_expired = 13;
     return 0;
 }
 
@@ -504,6 +514,15 @@ test_get_stats(void)
     CHECK_HAS("\"udp_tx_datagrams\":5678");
     CHECK_HAS("\"udp_rx_receives\":61");
     CHECK_HAS("\"udp_rx_datagrams\":83");
+    /* Stream resets by cause, added between the offload counters and
+     * uptime_sec; one adjacent pin so a swapped or dropped field fails. */
+    CHECK_HAS("\"udp_rx_datagrams\":83,\"tcp_reset_econnreset\":6101,"
+              "\"tcp_reset_econnreset_tail_flows\":3707,"
+              "\"tcp_reset_econnreset_tail_bytes\":1048583,\"tcp_reset_error\":1301,"
+              "\"tcp_reset_error_tail_flows\":307,\"tcp_reset_error_tail_bytes\":16411,"
+              "\"tcp_idle_evicted\":2027,\"tcp_reset_held\":3011,"
+              "\"tcp_reset_held_fin\":2999,\"tcp_reset_held_expired\":13,"
+              "\"uptime_sec\":4242");
 }
 
 /* ── get_status ───────────────────────────────────────────────────────────── */

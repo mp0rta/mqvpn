@@ -260,6 +260,17 @@ typedef struct {
                                        * the whole server). Ignored by client-side
                                        * classify(), like the egress ACL fields below. */
 
+    /* [Hybrid] ResetHoldMs: server-only, consumed by tcp_egress.c. When the
+     * origin resets an egress connection after sending data,
+     * the reset would discard every byte the transport still holds for the
+     * stream. With this set, the server instead stops writing to the
+     * origin, relays what the origin sent, ends the stream with FIN, and
+     * resets it only if it has not closed within this many milliseconds.
+     * Resets with no data behind them, other relay errors and idle
+     * evictions are unaffected. 0 = off: today's behaviour. Bounded above by
+     * MQVPN_RESET_HOLD_MS_MAX at load time. */
+    uint32_t reset_hold_ms;
+
     /* Server-only egress ACL (connect-tcp destination policy).
      * egress_allow punches holes through the mandatory default-deny;
      * egress_deny adds extra blocks. Ignored by client-side classify(). */
@@ -309,6 +320,7 @@ mqvpn_hybrid_config_default(mqvpn_hybrid_config_t *cfg)
     cfg->tcp_idle_timeout_sec = 300;
     cfg->tcp_connect_timeout_sec = MQVPN_TCP_CONNECT_TIMEOUT_SEC_DEFAULT;
     cfg->tcp_max_global_flows = MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT;
+    cfg->reset_hold_ms = 0; /* MQVPN_RESET_HOLD_MS_DEFAULT: off */
     /* n_egress_allow / n_egress_deny already 0 from the memset above. */
 }
 

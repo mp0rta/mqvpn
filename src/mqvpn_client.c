@@ -2870,6 +2870,16 @@ cli_conn_destroy(mqvpn_client_t *c)
     /* Teardown contract: tcp_lane BEFORE lwip_ctx — flow teardown will
      * eventually abort pcbs, which needs the stack still alive. */
     if (conn->tcp_lane) {
+        mqvpn_tcp_lane_stats_t ls;
+        mqvpn_tcp_lane_get_stats(conn->tcp_lane, &ls);
+        if (ls.reset_by_peer || ls.flows_idle_evicted)
+            LOG_I(c,
+                  "tcp-lane: stream resets: by_peer=%" PRIu64 " (uplink %" PRIu64
+                  " flows, %" PRIu64 " bytes; downlink %" PRIu64 " flows, %" PRIu64
+                  " bytes) idle_evicted=%" PRIu64,
+                  ls.reset_by_peer, ls.reset_by_peer_uplink_flows,
+                  ls.reset_by_peer_uplink_bytes, ls.reset_by_peer_downlink_flows,
+                  ls.reset_by_peer_downlink_bytes, ls.flows_idle_evicted);
         mqvpn_tcp_lane_free(conn->tcp_lane);
         conn->tcp_lane = NULL;
     }
@@ -4530,6 +4540,12 @@ mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
         out->tcp_flows_active = lane_stats.flows_active;
         out->tcp_flows_total = lane_stats.flows_total;
         out->raw_markers_active = lane_stats.raw_markers_active;
+        out->tcp_idle_evicted = lane_stats.flows_idle_evicted;
+        out->tcp_reset_by_peer = lane_stats.reset_by_peer;
+        out->tcp_reset_by_peer_uplink_flows = lane_stats.reset_by_peer_uplink_flows;
+        out->tcp_reset_by_peer_uplink_bytes = lane_stats.reset_by_peer_uplink_bytes;
+        out->tcp_reset_by_peer_downlink_flows = lane_stats.reset_by_peer_downlink_flows;
+        out->tcp_reset_by_peer_downlink_bytes = lane_stats.reset_by_peer_downlink_bytes;
     }
 #endif
 

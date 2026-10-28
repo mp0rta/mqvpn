@@ -1360,6 +1360,17 @@ mqvpn_tcp_lane_on_h3_closing(mqvpn_tcp_lane_t *lane, void *stream)
         return; /* already gone — idempotent (races with any other
                  * teardown path, or a stale/duplicate notify) */
     }
+    lane->stats.reset_by_peer++;
+    if (f->uplink_queued_bytes) {
+        lane->stats.reset_by_peer_uplink_flows++;
+        lane->stats.reset_by_peer_uplink_bytes += f->uplink_queued_bytes;
+    }
+    uint64_t down = f->downlink_stash_len;
+    if (f->pcb) down += (uint32_t)(f->pcb->snd_lbb - f->pcb->lastack);
+    if (down) {
+        lane->stats.reset_by_peer_downlink_flows++;
+        lane->stats.reset_by_peer_downlink_bytes += down;
+    }
     /* Status discarded — xquic-context frame, no ERR_ABRT translation. */
     (void)tcp_lane_teardown_flow(f, /*close_h3=*/0);
 }

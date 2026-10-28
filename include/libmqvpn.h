@@ -60,6 +60,13 @@ extern "C" {
  * at compile time, so a bump cannot build without meeting this comment. */
 #define MQVPN_MAX_PATHS            8
 #define MQVPN_INIT_MAX_PATH_ID_MAX UINT64_C(0xffffffff)
+/* [Hybrid] ResetHoldMs: how long the server may hold an origin reset that
+ * follows data, finishing the response with FIN first, before resetting the
+ * stream anyway. 0 (default) = off: the reset is propagated at once. The
+ * ceiling rejects typos; a useful value covers the time the path needs to
+ * deliver a full stream window. */
+#define MQVPN_RESET_HOLD_MS_DEFAULT UINT32_C(0)
+#define MQVPN_RESET_HOLD_MS_MAX     UINT32_C(60000)
 
 /* ─── Opaque handles ─── */
 
@@ -467,6 +474,60 @@ typedef struct {
      * control API reports them from there (see ctrl_socket_create). */
     uint64_t udp_tx_sends;
     uint64_t udp_tx_datagrams;
+
+    /* TCP-lane stream resets and what each left undelivered. A stream reset
+     * discards the data the transport still holds for that stream, so a
+     * reset that follows data can truncate it. All counters; all 0 without
+     * hybrid mode. Appended under ABI 3.
+     *
+     * Server: resets the server issued after a relay I/O error on the egress
+     * socket, split by cause: tcp_reset_econnreset (the origin reset the
+     * connection) and tcp_reset_error (any other error). *_tail_flows counts
+     * those resets that left origin bytes behind, *_tail_bytes sums them.
+     * The tail is an estimate, since the transport exposes no per-stream
+     * acknowledged offset: the bytes the stream accepted within one second
+     * before the reset, plus bytes read from the origin that it had not yet
+     * accepted. Always 0 client-side.
+     *
+     * tcp_idle_evicted: flows closed by the [Hybrid] TcpIdleTimeoutSec sweep,
+     * on either side. They move no bytes for the whole timeout, so they lose
+     * nothing; counted apart so they are never mistaken for the above.
+     *
+     * Client: tcp_reset_by_peer counts lane flows torn down because the
+     * server reset the stream. Of those, *_uplink_flows/_bytes are the ones
+     * holding bytes the local host had sent and lwIP had acknowledged but
+     * that had not reached the stream yet, and *_downlink_flows/_bytes the
+     * ones holding bytes received from the stream that the local host had
+     * not acknowledged yet (lwIP's send queue plus the lane's own retry
+     * stash). Bytes the transport itself discarded are not visible here.
+     * Always 0 server-side. */
+    uint64_t tcp_reset_econnreset;
+    uint64_t tcp_reset_econnreset_tail_flows;
+    uint64_t tcp_reset_econnreset_tail_bytes;
+    uint64_t tcp_reset_error;
+    uint64_t tcp_reset_error_tail_flows;
+    uint64_t tcp_reset_error_tail_bytes;
+    uint64_t tcp_idle_evicted;
+    uint64_t tcp_reset_by_peer;
+    uint64_t tcp_reset_by_peer_uplink_flows;
+    uint64_t tcp_reset_by_peer_uplink_bytes;
+    uint64_t tcp_reset_by_peer_downlink_flows;
+    uint64_t tcp_reset_by_peer_downlink_bytes;
+
+    /* [Hybrid] ResetHoldMs (server; always 0 client-side and with the key
+     * at 0). tcp_reset_held: origin resets that came after data and were
+     * held instead of propagated: the server stopped writing to the origin,
+     * kept relaying what the origin had sent, and ended the stream with FIN.
+     * Each is also counted under tcp_reset_econnreset, or under
+     * tcp_reset_error when the origin sent FIN before resetting (EPIPE).
+     * tcp_reset_held_fin: held resets whose FIN was handed to the transport.
+     * tcp_reset_held_expired: held resets whose stream had not closed within
+     * ResetHoldMs, reset as without the key; after a FIN that loses only what
+     * the peer had not yet acknowledged. The last two are not exclusive (a
+     * FIN can be followed by expiry). Counters, appended under ABI 3. */
+    uint64_t tcp_reset_held;
+    uint64_t tcp_reset_held_fin;
+    uint64_t tcp_reset_held_expired;
 } mqvpn_stats_t;
 
 typedef struct {

@@ -67,7 +67,26 @@
 #     connecting) and (b) tears down promptly (<5s, far under the 300s
 #     tcp_idle_timeout_sec default) — proof the RST propagates through the
 #     server's RESET_STREAM error-mapping rather than the client hanging
-#     toward the idle-eviction sweep.
+#     toward the idle-eviction sweep. Test 5-hold repeats it with
+#     [Hybrid] ResetHoldMs set: the reset follows data, so it is held and the
+#     reader sees FIN instead, just as promptly.
+#   Test 5b (data then RST, bytes delivered): an egress-side origin writes
+#     RST_TAIL_BYTES (4 MiB) of a position-dependent pattern, waits until its
+#     own kernel has every byte acknowledged by the server's egress socket,
+#     then closes with SO_LINGER{1,0} (the "lingering close" a server does
+#     when part of a request was left unread). The client-netns reader counts
+#     the bytes that arrive and how the connection ended (FIN or RST). A
+#     stream reset discards the data the transport still holds for that
+#     stream, so the tail that was still in flight is lost: byte-exact
+#     delivery is an EXPECTED FAILURE without [Hybrid] ResetHoldMs, reported
+#     as XFAIL with the count so the number stays visible. Hard checks: the
+#     bytes that did arrive match the pattern (no corruption), the reader
+#     ended by FIN or RST (not a hang), and the server counted the reset
+#     under tcp_reset_econnreset (and held none of them).
+#     Test 5b-hold repeats it with ResetHoldMs = 2000: the server holds the
+#     reset and must deliver every byte, ending with FIN; the startup line
+#     'connect-tcp: reset-hold: 2000 ms' and tcp_reset_held / _held_fin
+#     (with _held_expired 0) prove the key reached the relay and acted.
 #   Test 6 (tcp=auto sticky per-flow lane decision across a live path
 #     bring-up): the one test that exercises the whole sticky-lane invariant
 #     end-to-end — active_paths_count(c) >= 2 (src/mqvpn_client.c) is
@@ -202,6 +221,10 @@ INNER_TCP_PORT=5402   # distinct from h1's 5401 — same CI job may run both
 # other port already claimed above.
 HALFCLOSE_PORT=8071
 RST_PORT=8072
+# Test 5b (data then RST): own port, same loopback alias.
+RST_TAIL_PORT=8077
+RST_TAIL_BYTES="${HYBRID_H2_RST_TAIL_BYTES:-4194304}"
+RST_TAIL_HOLD_MS=2000
 
 # Ports for Test 6 (tcp=auto sticky lane) — flow_a and flow_b each get their
 # own port on HTTP_TARGET_IP so the two connections are never ambiguous by
@@ -244,6 +267,14 @@ SERVER_LOG_T4="$(mktemp)"
 CLIENT_LOG_T5="$(mktemp)"
 SERVER_LOG_T5="$(mktemp)"
 RST_CLIENT_OUT="$(mktemp)"
+CLIENT_LOG_T5B="$(mktemp)"
+SERVER_LOG_T5B="$(mktemp)"
+CLIENT_LOG_T5B_HOLD="$(mktemp)"
+CLIENT_LOG_T5_HOLD="$(mktemp)"
+SERVER_LOG_T5_HOLD="$(mktemp)"
+SERVER_LOG_T5B_HOLD="$(mktemp)"
+RST_TAIL_TARGET_OUT="$(mktemp)"
+RST_TAIL_READER_OUT="$(mktemp)"
 CLIENT_LOG_T6="$(mktemp)"
 SERVER_LOG_T6="$(mktemp)"
 CLIENT_LOG_T8="$(mktemp)"
@@ -255,6 +286,7 @@ INI_T7A="$(mktemp --suffix=.ini)"
 INI_T7B="$(mktemp --suffix=.ini)"
 INI_T2A="$(mktemp --suffix=.ini)"
 INI_STREAM="$(mktemp --suffix=.ini)"   # shared by Test 2 Phase B and Test 3
+INI_T5B_HOLD="$(mktemp --suffix=.ini)"
 INI_T6="$(mktemp --suffix=.ini)"
 INI_T8="$(mktemp --suffix=.ini)"
 CURL_OUT="$(mktemp)"
@@ -282,6 +314,7 @@ cleanup_http_server() {
 HALFCLOSE_RESPONDER_PID=""
 RST_TARGET_PID=""
 RST_CLIENT_PID=""
+RST_TAIL_TARGET_PID=""
 LANE_RESPONDER_A_PID=""
 LANE_RESPONDER_B_PID=""
 LANE_SENDER_A_PID=""
@@ -293,6 +326,7 @@ V6_SOURCE_PID=""
 cleanup_bg_procs() {
     local pid
     for pid in "$HALFCLOSE_RESPONDER_PID" "$RST_TARGET_PID" "$RST_CLIENT_PID" \
+        "$RST_TAIL_TARGET_PID" \
         "$LANE_RESPONDER_A_PID" "$LANE_RESPONDER_B_PID" \
         "$LANE_SENDER_A_PID" "$LANE_SENDER_B_PID" \
         "$LANE_CAP_PID1" "$LANE_CAP_PID2" \
@@ -313,7 +347,10 @@ trap 'cleanup_bg_procs; cleanup_http_server; bench_cleanup; rm -rf "$HTTP_DOCROO
     "$CLIENT_LOG_T3A" "$SERVER_LOG_T3A" "$CLIENT_LOG_T3B" "$SERVER_LOG_T3B" \
     "$CLIENT_LOG_T4" "$SERVER_LOG_T4" "$CLIENT_LOG_T5" "$SERVER_LOG_T5" \
     "$CLIENT_LOG_T6" "$SERVER_LOG_T6" "$CLIENT_LOG_T8" "$SERVER_LOG_T8" \
-    "$RST_CLIENT_OUT" \
+    "$RST_CLIENT_OUT" "$CLIENT_LOG_T5B" "$SERVER_LOG_T5B" \
+    "$CLIENT_LOG_T5B_HOLD" "$SERVER_LOG_T5B_HOLD" "$INI_T5B_HOLD" \
+    "$CLIENT_LOG_T5_HOLD" "$SERVER_LOG_T5_HOLD" \
+    "$RST_TAIL_TARGET_OUT" "$RST_TAIL_READER_OUT" \
     "$INI_T1" "$INI_T1B" "$INI_T1C" "$INI_T7A" "$INI_T7B" "$INI_T2A" "$INI_STREAM" "$INI_T6" "$INI_T8" \
     "$CURL_OUT" "$SENT_FILE_A" "$RECV_FILE_A" "$SENT_FILE_B" "$RECV_FILE_B" \
     "$LANE_PEER_A_FILE" "$LANE_BYTES_A_FILE" "$LANE_PEER_B_FILE" "$LANE_BYTES_B_FILE" \
@@ -392,6 +429,16 @@ cat >"$INI_STREAM" <<EOF
 Enabled = true
 Tcp = stream
 EgressAllow = 10.222.0.0/24
+EOF
+
+# INI_T5B_HOLD: INI_STREAM plus [Hybrid] ResetHoldMs, for Test 5b's second
+# run (the server holds an origin reset that follows data).
+cat >"$INI_T5B_HOLD" <<EOF
+[Hybrid]
+Enabled = true
+Tcp = stream
+EgressAllow = 10.222.0.0/24
+ResetHoldMs = ${RST_TAIL_HOLD_MS}
 EOF
 
 # INI_T6: Tcp=auto — the only phase in this file that exercises the AUTO
@@ -1307,94 +1354,250 @@ assert_stream_lane_used "$CLIENT_LOG_T4" "Test4 half-close stream"
 bench_stop_vpn
 
 # ─── Test 5: RST propagation (abortive-close row: RESET_STREAM) ──────────
-echo ""
-echo "=== Test 5: RST propagation (SO_LINGER{1,0} -> prompt client teardown) ==="
-hybrid_run "$INI_STREAM" "$SERVER_LOG_T5" "$CLIENT_LOG_T5"
+# Run twice: without [Hybrid] ResetHoldMs, and with it. The target streams
+# data until it is killed, so its reset follows data and the second run holds
+# it (the reader sees FIN after the data instead of RST); either way the
+# reader must have seen data and must be torn down promptly.
+# $1 label, $2 INI, $3 server log, $4 client log.
+run_rst_prop_test() {
+    local label="$1" ini="$2" slog="$3" clog="$4"
+    local rst_target_ready reader_alive nc_rc
+    echo ""
+    echo "=== ${label}: RST propagation (SO_LINGER{1,0} -> prompt client teardown) ==="
+    hybrid_run "$ini" "$slog" "$clog"
 
-ip netns exec "$NS_SERVER" python3 "${SCRIPT_DIR}/hybrid_h2_rst_target.py" \
-    "$RST_PORT" &
-RST_TARGET_PID=$!
+    ip netns exec "$NS_SERVER" python3 "${SCRIPT_DIR}/hybrid_h2_rst_target.py" \
+        "$RST_PORT" &
+    RST_TARGET_PID=$!
 
-rst_target_ready=0
-for _ in $(seq 1 20); do
-    if ip netns exec "$NS_SERVER" ss -ltn 2>/dev/null | grep -q ":${RST_PORT} "; then
-        rst_target_ready=1
-        break
-    fi
-    sleep 0.5
-done
+    rst_target_ready=0
+    for _ in $(seq 1 20); do
+        if ip netns exec "$NS_SERVER" ss -ltn 2>/dev/null | grep -q ":${RST_PORT} "; then
+            rst_target_ready=1
+            break
+        fi
+        sleep 0.5
+    done
 
-if [ "$rst_target_ready" -ne 1 ]; then
-    echo "FAIL: RST target never became ready (port ${RST_PORT} not listening)"
-    fail=1
-    kill "$RST_TARGET_PID" 2>/dev/null || true
-    wait "$RST_TARGET_PID" 2>/dev/null || true
-    RST_TARGET_PID=""
-else
-    # Client-side reader, through the tunnel's TCP lane. Guarded with
-    # `timeout 10` so a genuine hang (client never sees the RST) FAILs at
-    # 10s instead of stalling the suite forever. `</dev/null` keeps the read
-    # deterministic across nc variants (some treat an open stdin as a
-    # half-duplex write channel and linger on it).
-    ip netns exec "$NS_CLIENT" timeout 10 nc "$HTTP_TARGET_IP" "$RST_PORT" \
-        </dev/null >"$RST_CLIENT_OUT" 2>/dev/null &
-    RST_CLIENT_PID=$!
-
-    # Let real data flow before the abort — proves "flowing -> RST -> prompt
-    # teardown", not "never connected -> instant exit" (an instant exit for
-    # the wrong reason would also read as <5s and be a false pass).
-    sleep 1
-
-    # Reader-liveness guard: if a spurious teardown already killed the reader
-    # during the 1s warm-up (e.g. the target exited via BrokenPipeError -> a
-    # graceful close, no RST), the kill -TERM below would no-op and elapsed
-    # would read ~0 < 5s -> false pass. Flag it here and skip the elapsed
-    # assertion so the result isn't a confusing double-report.
-    reader_alive=1
-    if ! kill -0 "$RST_CLIENT_PID" 2>/dev/null; then
-        echo "FAIL: Test 5 reader died before RST (spurious teardown during warm-up?)"
+    if [ "$rst_target_ready" -ne 1 ]; then
+        echo "FAIL: RST target never became ready (port ${RST_PORT} not listening)"
         fail=1
-        reader_alive=0
-    fi
-
-    kill -TERM "$RST_TARGET_PID" 2>/dev/null || true
-    RST_KILL_TS="$(date +%s.%N)"
-
-    nc_rc=0
-    wait "$RST_CLIENT_PID" 2>/dev/null || nc_rc=$?
-    RST_CLIENT_PID=""
-    RST_DONE_TS="$(date +%s.%N)"
-    wait "$RST_TARGET_PID" 2>/dev/null || true
-    RST_TARGET_PID=""
-
-    RST_ELAPSED="$(awk -v a="$RST_KILL_TS" -v b="$RST_DONE_TS" 'BEGIN{printf "%.2f", b-a}')"
-    RST_DATA_LINES="$(grep -c '^data$' "$RST_CLIENT_OUT" 2>/dev/null || true)"
-    [ -n "$RST_DATA_LINES" ] || RST_DATA_LINES=0
-
-    echo "  reader: exit_code=${nc_rc} (0=clean EOF, nonzero=reset/error — either is a valid abortive-close teardown)"
-    echo "  reader: data_lines_before_teardown=${RST_DATA_LINES} elapsed=${RST_ELAPSED}s (threshold <5.0s)"
-
-    if [ "$RST_DATA_LINES" -lt 1 ]; then
-        echo "FAIL: client reader saw no data before teardown — can't distinguish RST-cut-a-live-flow from never-connected"
-        fail=1
+        kill "$RST_TARGET_PID" 2>/dev/null || true
+        wait "$RST_TARGET_PID" 2>/dev/null || true
+        RST_TARGET_PID=""
     else
-        echo "PASS: client reader saw data flowing before the abort (${RST_DATA_LINES} lines)"
+        # Client-side reader, through the tunnel's TCP lane. Guarded with
+        # `timeout 10` so a genuine hang (client never sees the RST) FAILs at
+        # 10s instead of stalling the suite forever. `</dev/null` keeps the read
+        # deterministic across nc variants (some treat an open stdin as a
+        # half-duplex write channel and linger on it).
+        ip netns exec "$NS_CLIENT" timeout 10 nc "$HTTP_TARGET_IP" "$RST_PORT" \
+            </dev/null >"$RST_CLIENT_OUT" 2>/dev/null &
+        RST_CLIENT_PID=$!
+
+        # Let real data flow before the abort — proves "flowing -> RST -> prompt
+        # teardown", not "never connected -> instant exit" (an instant exit for
+        # the wrong reason would also read as <5s and be a false pass).
+        sleep 1
+
+        # Reader-liveness guard: if a spurious teardown already killed the reader
+        # during the 1s warm-up (e.g. the target exited via BrokenPipeError -> a
+        # graceful close, no RST), the kill -TERM below would no-op and elapsed
+        # would read ~0 < 5s -> false pass. Flag it here and skip the elapsed
+        # assertion so the result isn't a confusing double-report.
+        reader_alive=1
+        if ! kill -0 "$RST_CLIENT_PID" 2>/dev/null; then
+            echo "FAIL: ${label} reader died before RST (spurious teardown during warm-up?)"
+            fail=1
+            reader_alive=0
+        fi
+
+        kill -TERM "$RST_TARGET_PID" 2>/dev/null || true
+        RST_KILL_TS="$(date +%s.%N)"
+
+        nc_rc=0
+        wait "$RST_CLIENT_PID" 2>/dev/null || nc_rc=$?
+        RST_CLIENT_PID=""
+        RST_DONE_TS="$(date +%s.%N)"
+        wait "$RST_TARGET_PID" 2>/dev/null || true
+        RST_TARGET_PID=""
+
+        RST_ELAPSED="$(awk -v a="$RST_KILL_TS" -v b="$RST_DONE_TS" 'BEGIN{printf "%.2f", b-a}')"
+        RST_DATA_LINES="$(grep -c '^data$' "$RST_CLIENT_OUT" 2>/dev/null || true)"
+        [ -n "$RST_DATA_LINES" ] || RST_DATA_LINES=0
+
+        echo "  reader: exit_code=${nc_rc} (0=clean EOF, nonzero=reset/error — either is a valid abortive-close teardown)"
+        echo "  reader: data_lines_before_teardown=${RST_DATA_LINES} elapsed=${RST_ELAPSED}s (threshold <5.0s)"
+
+        if [ "$RST_DATA_LINES" -lt 1 ]; then
+            echo "FAIL: client reader saw no data before teardown — can't distinguish RST-cut-a-live-flow from never-connected"
+            fail=1
+        else
+            echo "PASS: client reader saw data flowing before the abort (${RST_DATA_LINES} lines)"
+        fi
+
+        if [ "$reader_alive" -ne 1 ]; then
+            echo "  (skipping elapsed assertion — reader was already dead before the RST, see FAIL above)"
+        elif awk -v e="$RST_ELAPSED" 'BEGIN{exit !(e<5.0)}'; then
+            echo "PASS: client-side teardown was prompt (${RST_ELAPSED}s < 5.0s, well under the 300s idle-eviction default)"
+        else
+            echo "FAIL: client-side teardown took ${RST_ELAPSED}s (>=5.0s) — RST may not have propagated, client may have hung toward the idle sweep"
+            fail=1
+        fi
     fi
 
-    if [ "$reader_alive" -ne 1 ]; then
-        echo "  (skipping elapsed assertion — reader was already dead before the RST, see FAIL above)"
-    elif awk -v e="$RST_ELAPSED" 'BEGIN{exit !(e<5.0)}'; then
-        echo "PASS: client-side teardown was prompt (${RST_ELAPSED}s < 5.0s, well under the 300s idle-eviction default)"
+    # Confirm the traffic actually took the TCP lane.
+    assert_stream_lane_used "$clog" "${label} RST stream"
+
+    bench_stop_vpn
+}
+
+run_rst_prop_test "Test 5" "$INI_STREAM" "$SERVER_LOG_T5" "$CLIENT_LOG_T5"
+run_rst_prop_test "Test 5-hold" "$INI_T5B_HOLD" "$SERVER_LOG_T5_HOLD" "$CLIENT_LOG_T5_HOLD"
+
+# ─── Test 5b: data then RST — bytes delivered ───────────────────────────
+# Run twice. Without [Hybrid] ResetHoldMs the stream reset discards the
+# bytes still in flight, so byte-exact delivery is an expected failure
+# (XFAIL, with the count). With ResetHoldMs the server holds the reset,
+# delivers every byte and ends the stream with FIN: byte-exact is required.
+# $1 label, $2 INI, $3 server log, $4 client log, $5 hold_ms (0 = key unset).
+run_rst_tail_test() {
+    local label="$1" ini="$2" slog="$3" clog="$4" hold_ms="$5"
+    echo ""
+    if [ "$hold_ms" -eq 0 ]; then
+        echo "=== ${label}: origin sends ${RST_TAIL_BYTES} bytes then RST (bytes delivered; byte-exact is an expected failure) ==="
     else
-        echo "FAIL: client-side teardown took ${RST_ELAPSED}s (>=5.0s) — RST may not have propagated, client may have hung toward the idle sweep"
+        echo "=== ${label}: origin sends ${RST_TAIL_BYTES} bytes then RST, ResetHoldMs=${hold_ms} (byte-exact delivery ending in FIN) ==="
+    fi
+    hybrid_run "$ini" "$slog" "$clog"
+
+    if [ "$hold_ms" -eq 0 ]; then
+        if grep -q 'connect-tcp: reset-hold:' "$slog"; then
+            echo "FAIL: ${label} server logged a reset-hold line with the key unset"
+            fail=1
+        fi
+    elif grep -q "connect-tcp: reset-hold: ${hold_ms} ms" "$slog"; then
+        echo "PASS: ${label} server startup line 'connect-tcp: reset-hold: ${hold_ms} ms' (the key reached the egress relay)"
+    else
+        echo "FAIL: ${label} server never logged 'connect-tcp: reset-hold: ${hold_ms} ms'"
         fail=1
     fi
-fi
 
-# Confirm the traffic actually took the TCP lane.
-assert_stream_lane_used "$CLIENT_LOG_T5" "Test5 RST stream"
+    ip netns exec "$NS_SERVER" python3 "${SCRIPT_DIR}/hybrid_h2_rst_tail_target.py" \
+        "$RST_TAIL_PORT" "$RST_TAIL_BYTES" >"$RST_TAIL_TARGET_OUT" 2>&1 &
+    RST_TAIL_TARGET_PID=$!
 
-bench_stop_vpn
+    local rst_tail_ready=0
+    for _ in $(seq 1 20); do
+        if ip netns exec "$NS_SERVER" ss -ltn 2>/dev/null | grep -q ":${RST_TAIL_PORT} "; then
+            rst_tail_ready=1
+            break
+        fi
+        sleep 0.5
+    done
+
+    if [ "$rst_tail_ready" -ne 1 ]; then
+        echo "FAIL: ${label} origin never became ready (port ${RST_TAIL_PORT} not listening)"
+        fail=1
+        kill "$RST_TAIL_TARGET_PID" 2>/dev/null || true
+        wait "$RST_TAIL_TARGET_PID" 2>/dev/null || true
+        RST_TAIL_TARGET_PID=""
+    else
+        # The reader's own idle timeout (20 s) ends a hang as end=TIMEOUT; the
+        # outer timeout only guards against the reader itself wedging.
+        ip netns exec "$NS_CLIENT" timeout 40 python3 \
+            "${SCRIPT_DIR}/hybrid_h2_rst_tail_reader.py" \
+            "$HTTP_TARGET_IP" "$RST_TAIL_PORT" 20 >"$RST_TAIL_READER_OUT" 2>&1 || true
+        wait "$RST_TAIL_TARGET_PID" 2>/dev/null || true
+        RST_TAIL_TARGET_PID=""
+
+        local tail_sent tail_drained tail_drain_ms tail_recv tail_end tail_ok
+        tail_sent="$(grep -oE 'sent=[0-9]+' "$RST_TAIL_TARGET_OUT" | cut -d= -f2)"
+        tail_drained="$(grep -oE 'drained=[01]' "$RST_TAIL_TARGET_OUT" | cut -d= -f2)"
+        tail_drain_ms="$(grep -oE 'drain_ms=[0-9]+' "$RST_TAIL_TARGET_OUT" | cut -d= -f2)"
+        tail_recv="$(grep -oE 'received=[0-9]+' "$RST_TAIL_READER_OUT" | cut -d= -f2)"
+        tail_end="$(grep -oE 'end=[A-Z]+' "$RST_TAIL_READER_OUT" | cut -d= -f2)"
+        tail_ok="$(grep -oE 'pattern_ok=[01]' "$RST_TAIL_READER_OUT" | cut -d= -f2)"
+        : "${tail_sent:=0}" "${tail_drained:=0}" "${tail_drain_ms:=-1}"
+        : "${tail_recv:=0}" "${tail_end:=NONE}" "${tail_ok:=0}"
+
+        # A held flow ends once the reader has closed its side; let the
+        # counters settle before reading them.
+        [ "$hold_ms" -eq 0 ] || sleep 1
+        local stats_json srv_cr srv_cr_tail srv_held srv_held_fin srv_held_exp
+        stats_json="$(bench_query_control "$CTRL_PORT" get_stats)"
+        srv_cr="$(echo "$stats_json" | jq -r '.tcp_reset_econnreset // -1' 2>/dev/null || echo -1)"
+        srv_cr_tail="$(echo "$stats_json" | jq -r '.tcp_reset_econnreset_tail_bytes // -1' 2>/dev/null || echo -1)"
+        srv_held="$(echo "$stats_json" | jq -r '.tcp_reset_held // -1' 2>/dev/null || echo -1)"
+        srv_held_fin="$(echo "$stats_json" | jq -r '.tcp_reset_held_fin // -1' 2>/dev/null || echo -1)"
+        srv_held_exp="$(echo "$stats_json" | jq -r '.tcp_reset_held_expired // -1' 2>/dev/null || echo -1)"
+
+        echo "  origin: sent=${tail_sent} drained=${tail_drained} (${tail_drain_ms} ms to an empty send queue)"
+        echo "  reader: received=${tail_recv} end=${tail_end} pattern_ok=${tail_ok}"
+        echo "  server: tcp_reset_econnreset=${srv_cr} tail_bytes=${srv_cr_tail} held=${srv_held} held_fin=${srv_held_fin} held_expired=${srv_held_exp}"
+        echo "RST-TAIL: hold_ms=${hold_ms} sent=${tail_sent} received=${tail_recv} lost=$((tail_sent - tail_recv)) end=${tail_end} server_tail_bytes=${srv_cr_tail} held=${srv_held} held_fin=${srv_held_fin} held_expired=${srv_held_exp}"
+
+        if [ "$tail_drained" != 1 ]; then
+            echo "FAIL: ${label} origin's send queue never drained — the RST would discard origin-side bytes and the count would not measure the tunnel"
+            fail=1
+        fi
+        if [ "$tail_recv" -lt 1 ] || [ "$tail_ok" != 1 ]; then
+            echo "FAIL: ${label} reader got no data or bytes that do not match the origin's pattern (received=${tail_recv} pattern_ok=${tail_ok})"
+            fail=1
+        fi
+        case "$tail_end" in
+            RST | FIN) echo "PASS: ${label} reader's connection ended promptly (${tail_end})" ;;
+            *)
+                echo "FAIL: ${label} reader did not see the connection end (end=${tail_end}) — the reset did not propagate"
+                fail=1
+                ;;
+        esac
+        if [ "$srv_cr" -ge 1 ] 2>/dev/null; then
+            echo "PASS: ${label} server counted the origin reset (tcp_reset_econnreset=${srv_cr})"
+        else
+            echo "FAIL: ${label} server get_stats tcp_reset_econnreset=${srv_cr} (expected >= 1)"
+            echo "      raw response: $stats_json"
+            fail=1
+        fi
+        if [ "$hold_ms" -eq 0 ]; then
+            if [ "$srv_held" = 0 ]; then
+                echo "PASS: ${label} nothing held with the key unset (tcp_reset_held=0)"
+            else
+                echo "FAIL: ${label} tcp_reset_held=${srv_held} with the key unset (expected 0)"
+                fail=1
+            fi
+            if [ "$tail_recv" -lt "$tail_sent" ]; then
+                echo "XFAIL: byte-exact delivery after an origin RST: received ${tail_recv} of ${tail_sent} bytes (lost $((tail_sent - tail_recv)), end=${tail_end}) — the stream reset discards the bytes still in flight"
+            else
+                echo "XPASS: all ${tail_sent} bytes arrived before the reset (end=${tail_end}); this run did not reproduce the truncation"
+            fi
+        else
+            if [ "$tail_recv" -eq "$tail_sent" ] && [ "$tail_end" = FIN ]; then
+                echo "PASS: ${label} byte-exact delivery after an origin RST: ${tail_recv} of ${tail_sent} bytes, end=FIN"
+            else
+                echo "FAIL: ${label} received ${tail_recv} of ${tail_sent} bytes, end=${tail_end} (expected all of them, end=FIN)"
+                fail=1
+            fi
+            if [ "$srv_held" -ge 1 ] 2>/dev/null && [ "$srv_held_fin" -ge 1 ] 2>/dev/null \
+                    && [ "$srv_held_exp" = 0 ]; then
+                echo "PASS: ${label} server held the reset and ended the stream with FIN (held=${srv_held} held_fin=${srv_held_fin} held_expired=0)"
+            else
+                echo "FAIL: ${label} server counters held=${srv_held} held_fin=${srv_held_fin} held_expired=${srv_held_exp} (expected >= 1, >= 1, 0)"
+                echo "      raw response: $stats_json"
+                fail=1
+            fi
+        fi
+    fi
+
+    assert_stream_lane_used "$clog" "${label} data-then-RST stream"
+
+    bench_stop_vpn
+    grep -h 'stream resets:\|reset-hold:' "$slog" "$clog" 2>/dev/null | sed 's/^/  /' || true
+}
+
+run_rst_tail_test "Test 5b" "$INI_STREAM" "$SERVER_LOG_T5B" "$CLIENT_LOG_T5B" 0
+run_rst_tail_test "Test 5b-hold" "$INI_T5B_HOLD" "$SERVER_LOG_T5B_HOLD" "$CLIENT_LOG_T5B_HOLD" \
+    "$RST_TAIL_HOLD_MS"
 
 # ─── Test 6: tcp=auto sticky per-flow lane decision across a live path
 #      bring-up ───────────────────────────────────────────────────────────

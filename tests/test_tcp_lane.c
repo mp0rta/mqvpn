@@ -2834,6 +2834,52 @@ test_h3_closing_notify_teardown(void)
     mqvpn_tcp_lane_free(lane);
 }
 
+/* A server reset counts every flow it tears down, and separately the ones
+ * that still held bytes the reset made undeliverable: uplink bytes lwIP had
+ * acknowledged to the host but not handed to the stream, and downlink bytes
+ * the host had not acknowledged yet. A flow with neither counts only once. */
+static void
+test_h3_closing_reset_counters(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xe00aULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb_a, pcb_b, pcb_c;
+    int req_a, req_b, req_c, stream_a, stream_b, stream_c;
+    mqvpn_tcp_flow_t *a = setup_flow(lane, &pcb_a, 8210, &req_a, &stream_a, 1);
+    mqvpn_tcp_flow_t *b = setup_flow(lane, &pcb_b, 8211, &req_b, &stream_b, 1);
+    mqvpn_tcp_flow_t *c = setup_flow(lane, &pcb_c, 8212, &req_c, &stream_c, 1);
+    ASSERT_TRUE(a && b && c, "three flows established");
+
+    /* a: 1200 uplink bytes queued, and 5000 downlink bytes in lwIP's send
+     * queues not yet acknowledged by the host (sequence space wraps). */
+    a->uplink_queued_bytes = 1200;
+    pcb_a.lastack = 0xfffff000u;
+    pcb_a.snd_lbb = 0xfffff000u + 5000u;
+    /* b: downlink only. */
+    pcb_b.lastack = 7000;
+    pcb_b.snd_lbb = 7000 + 300;
+    /* c: nothing pending. */
+
+    mqvpn_tcp_lane_on_h3_closing(lane, &stream_a);
+    mqvpn_tcp_lane_on_h3_closing(lane, &stream_b);
+    mqvpn_tcp_lane_on_h3_closing(lane, &stream_c);
+    /* A repeated notify for a removed flow counts nothing. */
+    mqvpn_tcp_lane_on_h3_closing(lane, &stream_c);
+
+    mqvpn_tcp_lane_stats_t st;
+    mqvpn_tcp_lane_get_stats(lane, &st);
+    ASSERT_EQ_INT(st.reset_by_peer, 3, "every reset teardown counted once");
+    ASSERT_EQ_INT(st.reset_by_peer_uplink_flows, 1, "one flow held uplink bytes");
+    ASSERT_EQ_INT(st.reset_by_peer_uplink_bytes, 1200, "its queued uplink bytes");
+    ASSERT_EQ_INT(st.reset_by_peer_downlink_flows, 2, "two flows held downlink bytes");
+    ASSERT_EQ_INT(st.reset_by_peer_downlink_bytes, 5300, "their unacknowledged bytes");
+    ASSERT_EQ_INT(st.flows_idle_evicted, 0, "resets are not idle evictions");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
 static void
 test_abort_pending_real(void)
 {
@@ -3816,6 +3862,7 @@ main(void)
     test_connect_path_format_truncation();
     test_lwip_err_teardown();
     test_h3_closing_notify_teardown();
+    test_h3_closing_reset_counters();
     test_abort_pending_real();
     test_accept_open_stream_fail_returns_abrt();
     test_lwip_sent_teardown_returns_abrt();

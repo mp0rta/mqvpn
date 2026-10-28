@@ -2119,6 +2119,62 @@ test_hybrid_section_parse(void)
     ASSERT_EQ_INT((int)cfg.hybrid.tcp_idle_timeout_sec, 60, "hybrid json idle timeout");
 }
 
+/* [Hybrid] ResetHoldMs: opt-in, default off (resets propagate at once),
+ * range-checked against MQVPN_RESET_HOLD_MS_MAX like the other ranged keys,
+ * and the JSON key sits in "hybrid". */
+static void
+test_hybrid_reset_hold_ms(void)
+{
+    mqvpn_file_config_t cfg;
+
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_ULL(cfg.hybrid.reset_hold_ms, MQVPN_RESET_HOLD_MS_DEFAULT,
+                  "ResetHoldMs default");
+    ASSERT_EQ_ULL(cfg.hybrid.reset_hold_ms, 0, "ResetHoldMs defaults off");
+
+    char *p = write_tmp("[Hybrid]\nEnabled = true\n");
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "ResetHoldMs unset load ok");
+    ASSERT_EQ_ULL(cfg.hybrid.reset_hold_ms, 0, "ResetHoldMs unset stays off");
+
+    p = write_tmp("[Hybrid]\nEnabled = true\nResetHoldMs = 2000\n");
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "ResetHoldMs in-range load ok");
+    ASSERT_EQ_ULL(cfg.hybrid.reset_hold_ms, 2000, "ResetHoldMs in-range stored");
+
+    p = write_tmp("[Hybrid]\nResetHoldMs = 60000\n");
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "ResetHoldMs ceiling load ok");
+    ASSERT_EQ_ULL(cfg.hybrid.reset_hold_ms, MQVPN_RESET_HOLD_MS_MAX,
+                  "ResetHoldMs ceiling accepted");
+
+    p = write_tmp("[Hybrid]\nEnabled = true\nResetHoldMs = 0\n");
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "ResetHoldMs zero load ok");
+    ASSERT_EQ_ULL(cfg.hybrid.reset_hold_ms, 0, "ResetHoldMs explicit 0");
+
+    /* Above the ceiling: warning-only, the value is never written. */
+    p = write_tmp("[Hybrid]\nEnabled = true\nResetHoldMs = 60001\n");
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "ResetHoldMs overflow is warning-only");
+    ASSERT_EQ_ULL(cfg.hybrid.reset_hold_ms, 0, "ResetHoldMs overflow ignored");
+
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load_json_filecfg(&cfg, "{\"hybrid\":{\"reset_hold_ms\":1500}}");
+    ASSERT_EQ_INT(rc, 0, "ResetHoldMs json load ok");
+    ASSERT_EQ_ULL(cfg.hybrid.reset_hold_ms, 1500, "ResetHoldMs json stored");
+}
+
 static void
 test_advanced_recv_rate_limit(void)
 {
@@ -2518,6 +2574,7 @@ test_ini_json_scalar_parity(void)
                       "TcpIdleTimeoutSec = 60\n"
                       "TcpConnectTimeoutSec = 20\n"
                       "TcpMaxGlobalFlows = 8192\n"
+                      "ResetHoldMs = 2500\n"
                       "[Advanced]\n"
                       "RecvRateLimit = 77\n"
                       "UdpGso = false\n"
@@ -2580,7 +2637,8 @@ test_ini_json_scalar_parity(void)
                        "\"tcp_max_flows\":128,"
                        "\"tcp_idle_timeout_sec\":60,"
                        "\"tcp_connect_timeout_sec\":20,"
-                       "\"tcp_max_global_flows\":8192"
+                       "\"tcp_max_global_flows\":8192,"
+                       "\"reset_hold_ms\":2500"
                        "},"
                        "\"advanced\":{"
                        "\"recv_rate_limit\":77,"
@@ -2653,6 +2711,8 @@ test_ini_json_scalar_parity(void)
                   "parity hybrid tcp_connect_timeout_sec");
     ASSERT_EQ_INT((int)a.hybrid.tcp_max_global_flows, (int)b.hybrid.tcp_max_global_flows,
                   "parity hybrid tcp_max_global_flows");
+    ASSERT_EQ_INT((int)a.hybrid.reset_hold_ms, (int)b.hybrid.reset_hold_ms,
+                  "parity hybrid reset_hold_ms");
     ASSERT_EQ_INT((int)a.recv_rate_limit, (int)b.recv_rate_limit,
                   "parity advanced recv_rate_limit");
     ASSERT_EQ_INT(a.udp_gso, b.udp_gso, "parity advanced udp_gso");
@@ -2687,6 +2747,8 @@ test_ini_json_scalar_parity(void)
                   "parity hybrid tcp_connect_timeout_sec is non-default");
     ASSERT_EQ_INT((int)a.hybrid.tcp_max_global_flows, 8192,
                   "parity hybrid tcp_max_global_flows is non-default");
+    ASSERT_EQ_INT((int)a.hybrid.reset_hold_ms, 2500,
+                  "parity hybrid reset_hold_ms is non-default");
     ASSERT_EQ_INT((int)a.recv_rate_limit, 77,
                   "parity advanced recv_rate_limit is non-default");
     ASSERT_EQ_INT(a.udp_gso, 0, "parity advanced udp_gso is non-default");
@@ -2944,6 +3006,7 @@ main(void)
     /* [Hybrid] section tests */
     test_hybrid_defaults_when_absent();
     test_hybrid_section_parse();
+    test_hybrid_reset_hold_ms();
     test_advanced_recv_rate_limit();
     test_advanced_udp_gso();
     test_advanced_udp_gro();

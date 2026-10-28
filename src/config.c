@@ -538,6 +538,10 @@ cfgk_post_explicit_cap(mqvpn_file_config_t *cfg)
         (sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, \
             (post)                                                                  \
     }
+#define CFG_U32_MAX(sec, ik, jk, field, maxv)                                     \
+    {                                                                             \
+        (sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, (maxv), NULL, 0, 0, NULL \
+    }
 #define CFG_U16(sec, ik, jk, field)                                                  \
     {                                                                                \
         (sec), (ik), (jk), CFGK_U16, CFGK_OFF(field), 0, 0xffffULL, NULL, 0, 0, NULL \
@@ -630,6 +634,11 @@ static const cfg_key_desc_t cfg_keys[] = {
             hybrid.tcp_connect_timeout_sec),
     CFG_U32(SEC_HYBRID, "TcpMaxGlobalFlows", "tcp_max_global_flows",
             hybrid.tcp_max_global_flows),
+    /* [Hybrid] ResetHoldMs: server-consumed only (tcp_egress.c); a client
+     * build loads and bridges it but never reads it. 0 = off. Above
+     * MQVPN_RESET_HOLD_MS_MAX is rejected as a typo. */
+    CFG_U32_MAX(SEC_HYBRID, "ResetHoldMs", "reset_hold_ms", hybrid.reset_hold_ms,
+                MQVPN_RESET_HOLD_MS_MAX),
     /* [Advanced] — JSON side lives inside the bounded "advanced" object.
      * Max mirrors the public setter: above it, xquic's rate x srtt(us)
      * u64 window product overflows (see MQVPN_RECV_RATE_LIMIT_MAX). */
