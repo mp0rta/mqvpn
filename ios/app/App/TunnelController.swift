@@ -263,6 +263,7 @@ final class TunnelController: ObservableObject {
             proto.includeAllNetworks = oldIAN
             proto.excludeLocalNetworks = oldELN
             proto.enforceRoutes = oldER
+            m.protocolConfiguration = proto   // commit attached the edited copy
             PSKStore.delete(newRef)
             throw error
         }
@@ -341,6 +342,11 @@ final class NEConfigStore: ProviderConfigStore {
         get { proto.providerConfiguration }
         set { proto.providerConfiguration = newValue }
     }
-    func commit() async throws { try await manager.saveToPreferences() }
+    // Re-attach before saving: iOS 27 copies the protocol on get/set, so edits
+    // to `proto` after it was read or attached never reach a bare save.
+    func commit() async throws {
+        manager.protocolConfiguration = proto
+        try await manager.saveToPreferences()
+    }
     func refresh() async throws { try await manager.loadFromPreferences() }
 }
