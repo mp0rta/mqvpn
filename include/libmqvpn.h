@@ -1127,7 +1127,9 @@ MQVPN_API int mqvpn_server_egress_fd_budget(mqvpn_server_t *server);
 /* Feed data from platform into the engine. Same accepted-not-sent contract
  * as mqvpn_client_on_tun_packet: with the batched send path engaged the
  * datagram may wait for the caller's next mqvpn_server_tick() — feed, then
- * tick promptly. */
+ * tick promptly. Unlike the client, it never returns MQVPN_ERR_AGAIN for
+ * backpressure: the TUN is shared by every client, so a packet xquic cannot
+ * take for its client right now is dropped and the TUN keeps being read. */
 MQVPN_API int mqvpn_server_on_tun_packet(mqvpn_server_t *server, const uint8_t *pkt,
                                          size_t len);
 

@@ -83,6 +83,7 @@ struct svr_conn_s {
     size_t dgram_mss;
     uint64_t dgram_lost_cnt;
     uint64_t dgram_acked_cnt;
+    uint64_t dgram_dropped_cnt; /* refused by xquic (-XQC_EAGAIN) */
 
     /* Auth identity (set on CONNECT-IP auth success) */
     char username[64];
@@ -189,8 +190,8 @@ struct mqvpn_server_s {
     int n_sessions;
     int max_clients;
 
-    /* Backpressure */
-    int tun_paused;
+    /* Backpressure: TUN packets dropped because xquic returned -XQC_EAGAIN
+     * for their client (all clients) */
     uint64_t tun_drop_cnt;
 
     /* Timer: next wake (from xquic set_event_timer) */
@@ -863,8 +864,8 @@ cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_d
 
     mqvpn_server_t *s = conn->server;
     svr_log_conn_stats(s, "server conn stats", cid ? cid : &conn->cid);
-    LOG_I(s, "server dgram summary: acked=%" PRIu64 " lost=%" PRIu64,
-          conn->dgram_acked_cnt, conn->dgram_lost_cnt);
+    LOG_I(s, "server dgram summary: acked=%" PRIu64 " lost=%" PRIu64 " dropped=%" PRIu64,
+          conn->dgram_acked_cnt, conn->dgram_lost_cnt, conn->dgram_dropped_cnt);
 
     svr_session_release(s, conn);
 
@@ -2051,19 +2052,6 @@ cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *u
 }
 
 static void
-cb_dgram_write(xqc_h3_conn_t *h3_conn, void *user_data)
-{
-    (void)h3_conn;
-    svr_conn_t *conn = (svr_conn_t *)user_data;
-    if (!conn) return;
-    mqvpn_server_t *s = conn->server;
-    if (s->tun_paused) {
-        s->tun_paused = 0;
-        LOG_D(s, "TUN read resumed (QUIC queue has space)");
-    }
-}
-
-static void
 cb_dgram_acked(xqc_h3_conn_t *h, uint64_t id, void *ud)
 {
     (void)h;
@@ -2330,7 +2318,6 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         .h3_ext_dgram_cbs =
             {
                 .dgram_read_notify = cb_dgram_read,
-                .dgram_write_notify = cb_dgram_write,
                 .dgram_acked_notify = cb_dgram_acked,
                 .dgram_lost_notify = cb_dgram_lost,
                 .dgram_mss_updated_notify = cb_dgram_mss_updated,
@@ -2581,7 +2568,6 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
     ASSERT_TICK_THREAD(s);
 
     if (s->n_sessions == 0) return MQVPN_OK;
-    if (s->tun_paused) return MQVPN_ERR_AGAIN;
     uint8_t ip_ver = pkt[0] >> 4;
     svr_conn_t *target = NULL;
 
@@ -2739,9 +2725,17 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
     if (frame_buf != stack_buf) free(frame_buf);
 
     if (xret == -XQC_EAGAIN) {
-        s->tun_paused = 1;
-        LOG_D(s, "TUN read paused (QUIC backpressure)");
-        return MQVPN_ERR_AGAIN;
+        /* xquic cannot take this client's datagram now (its send queue is
+         * full, or 1-RTT is not ready yet): drop it, as the client does. The
+         * TUN is shared by every client, so pausing it here would stall all
+         * of them until this one could send again. */
+        target->dgram_dropped_cnt++;
+        s->tun_drop_cnt++;
+        if ((target->dgram_dropped_cnt % 1024) == 1) {
+            LOG_I(s, "datagram dropped on EAGAIN: dropped=%" PRIu64,
+                  target->dgram_dropped_cnt);
+        }
+        return MQVPN_OK;
     }
     if (xret == XQC_OK) {
         s->dgram_sent++;
@@ -3284,7 +3278,7 @@ mqvpn_server_get_interest(const mqvpn_server_t *s, mqvpn_interest_t *out)
     if (s->tcp_egress_flow_list_head != NULL && out->next_timer_ms > 1000)
         out->next_timer_ms = 1000;
 #endif
-    out->tun_readable = s->tun_paused ? 0 : 1;
+    out->tun_readable = 1;
     out->is_idle = (s->n_sessions == 0) ? 1 : 0;
     return MQVPN_OK;
 }
