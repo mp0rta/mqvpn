@@ -208,7 +208,7 @@ JSON ではクライアント・サーバーとも `auth_key` を使います（
 | `RequestServerScheduler` | クライアントのみ (JSON では `request_server_scheduler`、コマンドラインでは `--request-server-scheduler`)。`true` にすると、このクライアントの `Scheduler` をダウンロード方向にも使うようサーバーに依頼します。`Scheduler` だけを設定した場合は、従来どおりアップロード方向にのみ影響します。`AllowClientScheduler = true` のサーバーでのみ有効です。 | `false` |
 | `CC` | 輻輳制御アルゴリズム（`bbr2`, `bbr`, `cubic`, または `none`） | `bbr2` |
 | `Path` | バインドするネットワークインターフェース（複数指定可） | デフォルトインターフェース |
-| `InitMaxPathId` | MP-QUIC draft-21 テスト用ノブ: transport parameters で広告する初期 Maximum Path Identifier（`1`–`4294967295`、`0` = xquic デフォルト `8`） | `0` |
+| `InitMaxPathId` | 接続を通して使えるパス ID の初期数（番号は 0〜N。パスを作るたびに、作り直しも含めて新しい番号を使う。足りなくなるとサーバーが 128 まで追加する）。`1`–`128`。未設定（`0`）なら `8` | `0` |
 | `Reinjection` | 投機的複製モード（`off`, `deadline`, または `idle`）。`dgram` は廃止されました。設定ファイルで指定すると警告が出て `off` で動作します。パケットを複製するには冗長モード（`Redundant = true`）を使ってください。 | `off` |
 | `ReinjectionSrttFactorPct` | `deadline` モード: factor × min_srtt を超えた未 ACK パケットを複製、パーセント指定（`100`–`1000`） | `110` |
 | `ReinjectionHardDeadlineMs` | `deadline` モード: 複製デッドラインの上限クランプ（`1`–`60000`） | `500` |
