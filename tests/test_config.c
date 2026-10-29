@@ -262,7 +262,7 @@ static void
 test_parse_init_max_path_id_bounds(void)
 {
     const char *ini_ok = "[Multipath]\n"
-                         "InitMaxPathId = 4294967295\n";
+                         "InitMaxPathId = 128\n";
     char *path = write_tmp(ini_ok);
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
@@ -270,10 +270,10 @@ test_parse_init_max_path_id_bounds(void)
     unlink(path);
 
     ASSERT_EQ_INT(rc, 0, "InitMaxPathId max parse ok");
-    ASSERT_EQ_ULL(cfg.init_max_path_id, 4294967295ULL, "InitMaxPathId max stored");
+    ASSERT_EQ_ULL(cfg.init_max_path_id, 128ULL, "InitMaxPathId max stored");
 
     const char *ini_bad = "[Multipath]\n"
-                          "InitMaxPathId = 4294967296\n";
+                          "InitMaxPathId = 129\n";
     path = write_tmp(ini_bad);
     mqvpn_config_defaults(&cfg);
     rc = mqvpn_config_load(&cfg, path);
@@ -288,12 +288,12 @@ test_parse_init_max_path_id_json_bounds(void)
 {
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
-    int rc = mqvpn_config_load_json_filecfg(&cfg, "{\"init_max_path_id\":4294967295}");
+    int rc = mqvpn_config_load_json_filecfg(&cfg, "{\"init_max_path_id\":128}");
     ASSERT_EQ_INT(rc, 0, "JSON init_max_path_id max parse ok");
-    ASSERT_EQ_ULL(cfg.init_max_path_id, 4294967295ULL, "JSON init_max_path_id max");
+    ASSERT_EQ_ULL(cfg.init_max_path_id, 128ULL, "JSON init_max_path_id max");
 
     mqvpn_config_defaults(&cfg);
-    rc = mqvpn_config_load_json_filecfg(&cfg, "{\"init_max_path_id\":4294967296}");
+    rc = mqvpn_config_load_json_filecfg(&cfg, "{\"init_max_path_id\":129}");
     ASSERT_EQ_INT(rc, 0, "JSON init_max_path_id overflow is warning-only");
     ASSERT_EQ_ULL(cfg.init_max_path_id, 0, "JSON init_max_path_id overflow ignored");
 }
@@ -2748,13 +2748,13 @@ test_ini_json_invalid_scalar_parity(void)
     ASSERT_EQ_INT(b.max_clients, 64, "parse-fail max_clients json -> 64");
 
     /* InitMaxPathId over bound → keep default 0 on both sides */
-    p = write_tmp("[Multipath]\nInitMaxPathId = 4294967296\n");
+    p = write_tmp("[Multipath]\nInitMaxPathId = 129\n");
     mqvpn_config_defaults(&a);
     rc = mqvpn_config_load(&a, p);
     unlink(p);
     ASSERT_EQ_INT(rc, 0, "over-bound impid ini load rc 0");
     mqvpn_config_defaults(&b);
-    mqvpn_config_load_json_filecfg(&b, "{\"init_max_path_id\":4294967296}");
+    mqvpn_config_load_json_filecfg(&b, "{\"init_max_path_id\":129}");
     ASSERT_EQ_INT((int)a.init_max_path_id, 0, "over-bound impid ini keeps 0");
     ASSERT_EQ_INT((int)b.init_max_path_id, 0, "over-bound impid json keeps 0");
 
