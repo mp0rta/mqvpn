@@ -330,7 +330,7 @@ Return per-client and per-path detail for all currently connected clients.
 | `bytes_tx`      | uint64 | TUN bytes sent to this client                      |
 | `bytes_rx`      | uint64 | TUN bytes received from this client                |
 | `n_paths`       | int    | Number of entries in `paths`                       |
-| `paths`         | array  | Per-path objects (see below), at most 8, in xquic's order. A closed path stays in the connection until it ends, so a client can have more than 8: then every path that is not closed is listed (the first 8 if there are more), and the first closed ones fill the entries left. Closed and open entries can alternate. |
+| `paths`         | array  | Per-path objects (see below), at most 8, in xquic's order: the paths that are not closed first, in the order they were created, then the closed ones, in the order they closed. A closed path stays in the connection until it ends, so a client can have more than 8: then every path that is not closed is listed (the first 8 if there are more), and the first closed ones fill the entries left. |
 
 **Path object**
 
