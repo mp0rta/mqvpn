@@ -257,6 +257,7 @@ private fun SplitChoice.label() = when (this) {
     SplitChoice.THROUGHPUT -> "Throughput"
     SplitChoice.LOW_LATENCY -> "Low latency"
     SplitChoice.REDUNDANT -> "Redundant"
+    SplitChoice.BACKUP -> "Backup"
 }
 
 internal val PaddingValues14 = PaddingValues(horizontal = 14.dp, vertical = 12.dp)

@@ -94,7 +94,7 @@ mqvpn_path_handle_t mqvpn_android_reactor_take_bad_fd(mqvpn_android_reactor_t *r
 mqvpn_path_handle_t mqvpn_android_reactor_add_path(mqvpn_android_reactor_t *r,
                                                    mqvpn_client_t *client, int fd,
                                                    const char *iface, int gso_policy,
-                                                   int gro_policy);
+                                                   int gro_policy, uint32_t path_flags);
 
 /* mqvpn_client_remove_path() for every entry that is not FREE or POISONED
  * (ATTACHED, INVALID or already DETACHED — the library call is idempotent);
