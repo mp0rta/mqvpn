@@ -331,6 +331,7 @@ sudo mqvpn --config /etc/mqvpn/client.conf
 | `minrtt`        | min RTT    | min RTT    | latency-first                                   |
 | `wlb` (default) | flow pin   | unpinned   | general use; UDP packets distributed per-packet |
 | `wlb_udp_pin`   | flow pin   | flow pin   | each UDP connection kept on a single path       |
+| `failover`      | primary    | primary    | backup paths idle until the primary fails       |
 | `backup_fec`    | redundant  | redundant  | resilience-first (requires XQC_ENABLE_FEC)      |
 
 **Choosing wlb vs wlb_udp_pin:** Plain `wlb` distributes UDP packets across
@@ -709,6 +710,7 @@ mqvpn [--config PATH] --mode client|server [options]
 
   --server IP:PORT       Server address (client)
   --path IFACE           Multipath interface (repeatable)
+  --backup-path IFACE    Backup interface for --scheduler failover (repeatable)
   --auth-key KEY         PSK authentication
   --user NAME:KEY        Add server user credential (repeatable)
   --dns ADDR             DNS server (repeatable)
@@ -716,7 +718,7 @@ mqvpn [--config PATH] --mode client|server [options]
   --listen BIND:PORT     Listen address (server, default: 0.0.0.0:443)
   --subnet CIDR          Client IPv4 pool (server)
   --subnet6 CIDR         Client IPv6 pool (server)
-  --scheduler minrtt|wlb|wlb_udp_pin|backup_fec
+  --scheduler minrtt|wlb|wlb_udp_pin|failover|backup_fec
                          Multipath scheduler (default: wlb)
   --cc bbr2|bbr|cubic|none
                          Congestion control algorithm (default: bbr2)

@@ -89,6 +89,42 @@ MinRTT は各パケットを現在の RTT が最も低いパスで送信しま�
 --scheduler minrtt
 ```
 
+### Failover
+
+1 本のパスがすべてのトラフィックを運びます。バックアップパスは約 1 秒ごとの
+小さなプローブで維持されますが、プライマリが使える間はデータを運びません。
+プライマリが届かなくなるとトラフィックはバックアップに移り、プライマリが
+戻るとトラフィックもプライマリに戻ります。バックアップ回線が従量制や低速の
+場合に使います（例: 有線のプライマリと LTE のバックアップ）。
+
+```bash
+sudo ./build/mqvpn --mode client --server 203.0.113.1:443 \
+    --auth-key <key> --scheduler failover --request-server-scheduler \
+    --path eth0 --backup-path wwan0
+```
+
+```ini
+[Multipath]
+Scheduler = failover
+RequestServerScheduler = true
+Path = eth0
+BackupPath = wwan0
+```
+
+- `--backup-path` / `BackupPath` がない場合は、最初のパスがプライマリで、
+  2 番目以降のパスはすべてバックアップです。`BackupPath` を指定した場合は
+  すべての `Path` がプライマリになり、トラフィックは `minrtt` のように
+  プライマリに分散され、どのプライマリも使えないときだけバックアップを
+  使います。
+- パスはダウンして戻っても役割が変わりません。戻ったプライマリが
+  再びトラフィックを運びます。
+- ダウンロード方向はサーバーのスケジューラに従います。サーバーで
+  `Scheduler = failover` を設定するか、サーバーで
+  `AllowClientScheduler = true`、クライアントで
+  `RequestServerScheduler = true` を設定してください。
+- リンクが上がったまますべてのパケットを失うプライマリは、数回の
+  プローブタイムアウトで検出されます（10 ms のパスでは通常 1 秒未満）。
+
 ### Backup FEC (experimental)
 
 通常のトラフィックを AVAILABLE パスに送り、FEC リペアシンボルを STANDBY
@@ -125,6 +161,7 @@ FEC パラメータの CLI フラグは公開されていません。
 | 単一パスでの配送が必要な内部 UDP | **`wlb_udp_pin`** |
 | レイテンシ重視のアプリケーション | MinRTT (帯域集約とのトレードオフだが、ライブ配信などでは[冗長モード](#冗長モード)の利用を検討してください。)|
 | 品質の悪い回線の組み合わせ | MinRTT + [hybrid mode](./hybrid-mode)（場合に応じて Reinjection や Reorder buffer の併用も検討） |
+| 従量制や低速のバックアップを、プライマリの障害時だけ使う | `failover` |
 | ロスの多いプライマリ + 信頼できるスタンバイ（実験的） | `backup_fec` |
 
 

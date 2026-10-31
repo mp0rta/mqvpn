@@ -139,7 +139,12 @@ struct HomeScreen: View {
 
 extension SplitChoice {
     var title: String {
-        switch self { case .throughput: return "Throughput"; case .lowLatency: return "Low latency"; case .redundant: return "Redundant" }
+        switch self {
+        case .throughput: return "Throughput"
+        case .lowLatency: return "Low latency"
+        case .redundant: return "Redundant"
+        case .backup: return "Backup"
+        }
     }
 }
 

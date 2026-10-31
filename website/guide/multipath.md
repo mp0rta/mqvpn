@@ -93,6 +93,40 @@ MinRTT sends each packet on the path with the lowest current RTT. It is simpler 
 --scheduler minrtt
 ```
 
+### Failover
+
+One path carries all traffic. Backup paths are kept up, with a small probe
+about once a second, but carry no data while the primary works. When the
+primary stops delivering, traffic moves to a backup; when the primary comes
+back, traffic moves back to it. Use it when a backup link is metered or slow
+(e.g., wired primary with an LTE backup).
+
+```bash
+sudo ./build/mqvpn --mode client --server 203.0.113.1:443 \
+    --auth-key <key> --scheduler failover --request-server-scheduler \
+    --path eth0 --backup-path wwan0
+```
+
+```ini
+[Multipath]
+Scheduler = failover
+RequestServerScheduler = true
+Path = eth0
+BackupPath = wwan0
+```
+
+- With no `--backup-path` / `BackupPath`, the first path is the primary and
+  every later path is a backup. With `BackupPath` entries, every `Path` is a
+  primary: traffic is spread over the primaries like `minrtt`, and the
+  backups are used only when no primary works.
+- A path keeps its role when it goes down and comes back: a primary that
+  returns carries the traffic again.
+- The download direction follows the server's scheduler: set
+  `Scheduler = failover` on the server, or `AllowClientScheduler = true` on
+  the server and `RequestServerScheduler = true` on the client.
+- A primary that loses every packet while its link stays up is detected after
+  a few probe timeouts, typically well under a second on a 10 ms path.
+
 ### Backup FEC (experimental)
 
 Sends regular traffic on the AVAILABLE path and FEC repair symbols on the
@@ -129,6 +163,7 @@ throughput vs WLB across loss rates 1%–10%.
 | Inner UDP needing single-path delivery | **`wlb_udp_pin`** |
 | Latency-sensitive applications | MinRTT (trades off bandwidth aggregation; for live streams, consider [redundant mode](#redundant-mode)) |
 | Combinations of poor-quality links | MinRTT + [Hybrid Mode](./hybrid-mode) (consider adding Reinjection or the reorder buffer as needed) |
+| Metered or slow backup, used only when the primary fails | `failover` |
 | Lossy primary + reliable standby (experimental) | `backup_fec` |
 
 

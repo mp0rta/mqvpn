@@ -57,9 +57,16 @@ class MqvpnTunnel internal constructor(
 
     // --- Path management (through the reactor) ---
 
-    /** Path handle (>= 0) or -1; on -1 the caller still owns and closes [fd]. */
-    fun addPath(fd: Int, iface: String): Long =
-        live(-1L) { NativeBridge.reactorAddPath(reactorHandle, it, fd, iface) }
+    /**
+     * Path handle (>= 0) or -1; on -1 the caller still owns and closes [fd].
+     * [backup]: a backup path, idle under the failover scheduler while a
+     * path without the flag works.
+     */
+    fun addPath(fd: Int, iface: String, backup: Boolean = false): Long = live(-1L) {
+        NativeBridge.reactorAddPath(
+            reactorHandle, it, fd, iface, if (backup) NativeBridge.PATH_FLAG_BACKUP else 0,
+        )
+    }
 
     /** Orderly removal; the caller closes the fd afterwards, then calls [pathReleased]. */
     fun removePath(pathHandle: Long): Int =

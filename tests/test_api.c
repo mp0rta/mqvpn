@@ -2005,6 +2005,111 @@ TEST(get_send_handle_falls_back_to_first_active_when_primary_dropped)
     mqvpn_client_destroy(c);
 }
 
+/* ── Backup paths (MQVPN_PATH_FLAG_BACKUP) ──
+ *
+ * Which paths run STANDBY under the failover scheduler, through the hidden
+ * mqvpn_client_test_path_is_backup hook. `bootstrap` = the path the
+ * connection starts on (xquic path id 0). */
+
+extern int mqvpn_client_test_path_is_backup(mqvpn_client_t *c, mqvpn_path_handle_t h,
+                                            int bootstrap);
+
+static mqvpn_client_t *
+make_sched_test_client(mqvpn_scheduler_t sched)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    mqvpn_config_set_server(cfg, "1.2.3.4", 443);
+    mqvpn_config_set_scheduler(cfg, sched);
+    mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
+    cbs.tun_output = dummy_tun_output;
+    cbs.tunnel_config_ready = dummy_config_ready;
+    cbs.state_changed = mock_state_changed;
+    cbs.path_event = mock_path_event;
+    mqvpn_client_t *c = mqvpn_client_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    return c;
+}
+
+static mqvpn_path_handle_t
+add_flagged_path(mqvpn_client_t *c, const char *iface, uint32_t flags)
+{
+    mqvpn_path_desc_t d = {0};
+    d.struct_size = sizeof(d);
+    snprintf(d.iface, sizeof(d.iface), "%s", iface);
+    d.flags = flags;
+    return add_fake_path(c, &d, NULL);
+}
+
+TEST(failover_backup_flag_decides_standby)
+{
+    mqvpn_client_t *c = make_sched_test_client(MQVPN_SCHED_FAILOVER);
+    mqvpn_path_handle_t h0 = add_flagged_path(c, "eth0", 0);
+    mqvpn_path_handle_t h1 = add_flagged_path(c, "wwan0", MQVPN_PATH_FLAG_BACKUP);
+    mqvpn_path_handle_t h2 = add_flagged_path(c, "eth1", 0);
+    ASSERT_NE(h0, (mqvpn_path_handle_t)-1);
+    ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
+    ASSERT_NE(h2, (mqvpn_path_handle_t)-1);
+
+    ASSERT_EQ(mqvpn_client_test_path_is_backup(c, h0, 1), 0);
+    ASSERT_EQ(mqvpn_client_test_path_is_backup(c, h1, 0), 1);
+    /* A second primary is AVAILABLE, not STANDBY, though it is added later. */
+    ASSERT_EQ(mqvpn_client_test_path_is_backup(c, h2, 0), 0);
+    /* The connection started on the backup path: it is still a backup. */
+    ASSERT_EQ(mqvpn_client_test_path_is_backup(c, h1, 1), 1);
+    mqvpn_client_destroy(c);
+}
+
+/* Under failover only the flag decides: an unflagged path added before the
+ * first flagged one stays a primary (it was AVAILABLE when it was created). */
+TEST(failover_unflagged_paths_are_primaries)
+{
+    mqvpn_client_t *c = make_sched_test_client(MQVPN_SCHED_FAILOVER);
+    mqvpn_path_handle_t h0 = add_flagged_path(c, "wlan0", 0);
+    mqvpn_path_handle_t h1 = add_flagged_path(c, "eth0", 0);
+    ASSERT_EQ(mqvpn_client_test_path_is_backup(c, h0, 1), 0);
+    ASSERT_EQ(mqvpn_client_test_path_is_backup(c, h1, 0), 0);
+    mqvpn_path_handle_t h2 = add_flagged_path(c, "wwan0", MQVPN_PATH_FLAG_BACKUP);
+    ASSERT_EQ(mqvpn_client_test_path_is_backup(c, h1, 0), 0);
+    ASSERT_EQ(mqvpn_client_test_path_is_backup(c, h2, 0), 1);
+    mqvpn_client_destroy(c);
+}
+
+/* backup_fec without the flag: every path but the bootstrap one, as before. */
+TEST(backup_fec_without_flag_backs_up_on_secondaries)
+{
+    mqvpn_client_t *c = make_sched_test_client(MQVPN_SCHED_BACKUP_FEC);
+    mqvpn_path_handle_t h0 = add_flagged_path(c, "eth0", 0);
+    mqvpn_path_handle_t h1 = add_flagged_path(c, "wwan0", 0);
+    ASSERT_EQ(mqvpn_client_test_path_is_backup(c, h0, 1), 0);
+    ASSERT_EQ(mqvpn_client_test_path_is_backup(c, h1, 0), 1);
+    mqvpn_client_destroy(c);
+}
+
+TEST(backup_flag_has_no_effect_with_wlb)
+{
+    mqvpn_client_t *c = make_sched_test_client(MQVPN_SCHED_WLB);
+    mqvpn_path_handle_t h0 = add_flagged_path(c, "eth0", 0);
+    mqvpn_path_handle_t h1 = add_flagged_path(c, "wwan0", MQVPN_PATH_FLAG_BACKUP);
+    ASSERT_EQ(mqvpn_client_test_path_is_backup(c, h0, 1), 0);
+    ASSERT_EQ(mqvpn_client_test_path_is_backup(c, h1, 0), 0);
+    mqvpn_client_destroy(c);
+}
+
+/* A primary dropped and added again while the backup is gone too comes
+ * back AVAILABLE: the flag, once used, decides, not the order. */
+TEST(failover_readded_primary_is_not_backup)
+{
+    mqvpn_client_t *c = make_sched_test_client(MQVPN_SCHED_FAILOVER);
+    mqvpn_path_handle_t h0 = add_flagged_path(c, "eth0", 0);
+    mqvpn_path_handle_t h1 = add_flagged_path(c, "wwan0", MQVPN_PATH_FLAG_BACKUP);
+    ASSERT_EQ(mqvpn_client_remove_path(c, h0), MQVPN_OK);
+    ASSERT_EQ(mqvpn_client_remove_path(c, h1), MQVPN_OK);
+    mqvpn_path_handle_t h2 = add_flagged_path(c, "eth0", 0);
+    ASSERT_NE(h2, (mqvpn_path_handle_t)-1);
+    ASSERT_EQ(mqvpn_client_test_path_is_backup(c, h2, 0), 0);
+    mqvpn_client_destroy(c);
+}
+
 TEST(client_next_primary_idx_skips_closed_and_inactive)
 {
     mqvpn_client_t *c = make_test_client();
@@ -4335,6 +4440,11 @@ main(void)
     run_rollback_after_activation_failure_emits_event_then_closed();
 
     /* Primary-path rotation (issue #46) + OMR fallback composite */
+    run_failover_backup_flag_decides_standby();
+    run_failover_unflagged_paths_are_primaries();
+    run_backup_fec_without_flag_backs_up_on_secondaries();
+    run_backup_flag_has_no_effect_with_wlb();
+    run_failover_readded_primary_is_not_backup();
     run_get_send_handle_prefers_rotated_primary_when_active();
     run_get_send_handle_falls_back_to_first_active_when_primary_dropped();
     run_client_next_primary_idx_skips_closed_and_inactive();

@@ -653,7 +653,8 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
     }
 
     /* Create UDP sockets: one slot per configured interface, or one "any" slot */
-    if (platform_paths_open(&ctx, cfg->n_paths, cfg->path_ifaces) < 0) goto cleanup;
+    if (platform_paths_open(&ctx, cfg->n_paths, cfg->path_ifaces, cfg->path_backup) < 0)
+        goto cleanup;
 
     /* Register paths with library and create socket events */
     for (int i = 0; i < ctx.n_paths; i++) {

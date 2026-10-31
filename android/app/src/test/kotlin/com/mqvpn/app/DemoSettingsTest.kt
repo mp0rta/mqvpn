@@ -312,6 +312,9 @@ class DemoSettingsTest {
         val c2 = DemoSettings(scheduler = "WLB").toMqvpnConfig()
         assertEquals(MqvpnConfig.Scheduler.WLB, c2.scheduler)
         assertTrue(c2.requestServerScheduler)
+        val c3 = DemoSettings(scheduler = "FAILOVER").toMqvpnConfig()
+        assertEquals(MqvpnConfig.Scheduler.FAILOVER, c3.scheduler)
+        assertTrue(c3.requestServerScheduler)
     }
 
     @Test
@@ -329,6 +332,7 @@ class DemoSettingsTest {
         assertEquals(SplitChoice.LOW_LATENCY, c("DEFAULT", false))
         assertEquals(SplitChoice.REDUNDANT, c("WLB", true))
         assertEquals(SplitChoice.REDUNDANT, c("MIN_RTT", true))
+        assertEquals(SplitChoice.BACKUP, c("FAILOVER", false))
     }
 
     @Test
@@ -337,5 +341,6 @@ class DemoSettingsTest {
         assertEquals(DemoSettings(scheduler = "WLB"), b.applySplitChoice(SplitChoice.THROUGHPUT))
         assertEquals(DemoSettings(scheduler = "MIN_RTT"), b.applySplitChoice(SplitChoice.LOW_LATENCY))
         assertEquals(DemoSettings(scheduler = "MIN_RTT", redundantEnabled = true), b.applySplitChoice(SplitChoice.REDUNDANT))
+        assertEquals(DemoSettings(scheduler = "FAILOVER"), b.applySplitChoice(SplitChoice.BACKUP))
     }
 }

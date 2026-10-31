@@ -248,7 +248,7 @@ MQVPN_INTERNAL uint64_t mqvpn_xqc_clock_now(void);
 MQVPN_INTERNAL void mqvpn_clock_test_sources(uint64_t (*boot_us)(void),
                                              uint64_t (*wall_us)(void));
 
-/* Returns "minrtt" / "wlb" / "wlb_udp_pin" / "backup_fec" / "unknown" —
+/* Returns "minrtt" / "wlb" / "wlb_udp_pin" / "failover" / "backup_fec" / "unknown" —
  * caller-owned static string, do not free.
  * Used by control_socket.c for get_build_info JSON. */
 MQVPN_INTERNAL const char *mqvpn_server_scheduler_label(const mqvpn_server_t *s);

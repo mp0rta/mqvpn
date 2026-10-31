@@ -40,6 +40,13 @@ mqvpn_apply_scheduler(xqc_conn_settings_t *cs, mqvpn_scheduler_t sched)
     switch (sched) {
     case MQVPN_SCHED_WLB:
     case MQVPN_SCHED_WLB_UDP_PIN: cs->scheduler_callback = xqc_wlb_scheduler_cb; break;
+    case MQVPN_SCHED_FAILOVER:
+        /* xquic's backup scheduler: a STANDBY path is used only when no
+         * AVAILABLE path is usable, and STANDBY paths are probed so their
+         * RTT and liveness are known when they are needed. */
+        cs->scheduler_callback = xqc_backup_scheduler_cb;
+        cs->standby_path_probe_timeout = MQVPN_STANDBY_PROBE_MS;
+        break;
     case MQVPN_SCHED_BACKUP_FEC:
 #if defined(XQC_ENABLE_FEC) && defined(XQC_ENABLE_XOR)
         cs->scheduler_callback = xqc_backup_fec_scheduler_cb;

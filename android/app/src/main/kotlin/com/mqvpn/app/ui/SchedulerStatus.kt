@@ -11,6 +11,7 @@ private fun Scheduler.label(): String = when (this) {
     Scheduler.WLB -> "wlb"
     Scheduler.WLB_UDP_PIN -> "wlb_udp_pin"
     Scheduler.BACKUP_FEC -> "backup_fec"
+    Scheduler.FAILOVER -> "failover"
 }
 
 /** Dashboard line for the server's effective scheduler; null when there is nothing to say. */

@@ -965,9 +965,10 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
         }
         break;
     case SEC_MULTIPATH:
-        if (strcasecmp(key, "Path") == 0) {
+        if (strcasecmp(key, "Path") == 0 || strcasecmp(key, "BackupPath") == 0) {
             if (cfg->n_paths < MQVPN_CONFIG_MAX_PATHS) {
                 snprintf(cfg->paths[cfg->n_paths], sizeof(cfg->paths[0]), "%s", val);
+                cfg->path_backup[cfg->n_paths] = strcasecmp(key, "BackupPath") == 0;
                 cfg->n_paths++;
             } else {
                 LOG_WRN("%s:%d: max %d paths supported, ignoring '%s'", path, lineno,
@@ -1179,6 +1180,19 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
         for (int i = 0; i < n_paths; i++) {
             snprintf(cfg->paths[cfg->n_paths], sizeof(cfg->paths[cfg->n_paths]), "%.*s",
                      (int)(sizeof(cfg->paths[cfg->n_paths]) - 1), path_buf[i]);
+            cfg->path_backup[cfg->n_paths] = 0;
+            cfg->n_paths++;
+        }
+    }
+    /* "backup_paths" come after "paths", flagged as backups. */
+    n_paths = 0;
+    v = yyjson_obj_get(root, "backup_paths");
+    if (v && json_read_string_array(v, path_buf, MQVPN_CONFIG_MAX_PATHS, &n_paths) == 0) {
+        if (!yyjson_obj_get(root, "paths")) cfg->n_paths = 0;
+        for (int i = 0; i < n_paths && cfg->n_paths < MQVPN_CONFIG_MAX_PATHS; i++) {
+            snprintf(cfg->paths[cfg->n_paths], sizeof(cfg->paths[cfg->n_paths]), "%.*s",
+                     (int)(sizeof(cfg->paths[cfg->n_paths]) - 1), path_buf[i]);
+            cfg->path_backup[cfg->n_paths] = 1;
             cfg->n_paths++;
         }
     }
