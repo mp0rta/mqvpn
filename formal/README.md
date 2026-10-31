@@ -527,7 +527,7 @@ Every action of the model's `Next` has a row below.
 | `ApiManualReactivate` | `mqvpn_client_reactivate_path` and `reactivate_slot_eligible` (`:3549-3594`) |
 | `ApiDrop`, `ApiRemove` | `mqvpn_client_on_platform_path_dropped` / `mqvpn_client_remove_path` (`:3456-3508`): PATH_ABANDON for a live path when a connection exists; it can fail (`xqc_conn_close_path`, `xqc_multipath.c:751-787`) and the result is ignored. xquic refuses to abandon the only ACTIVE path (`xqc_multipath.c:781-787`). The model departs from the code here (first exception above) |
 | `EnvXqcValidate` | xquic validates the slot's path: a matching PATH_RESPONSE (`xqc_process_path_response_frame`, `xqc_frame.c:2129`) moves a validating path to xquic-ACTIVE (`xqc_path_validate`, `xqc_multipath.c:1442-1448`); not fair (a black-holed path never validates) |
-| `EnvXqcSpontaneousAbandon` | a validation timeout (`xqc_path_validation_on_retx`, `xqc_multipath.c:460-484`) of a path that is not xquic-ACTIVE; bounded, not fair |
+| `EnvXqcSpontaneousAbandon` | a validation timeout (`xqc_timer_path_idle_timeout`, `xqc_timer.c:179-184`) of a path that is not xquic-ACTIVE; bounded, not fair |
 | `EnvXqcRemoveActive` | xquic removes the slot's xquic-ACTIVE path: a PATH_ABANDON from the peer, or the path idle timeout while another path is active (`xqc_timer_path_idle_timeout`, `xqc_timer.c:160-184`); multipath and `mpReady` only (third exception above); shares the `AbandonCap` bound, not fair |
 | `DeliverRemoval` | `cb_path_removed` → `find_path_by_xqc_id` (`:2815-2832`, `:528-536`), whose lookup matches only a live slot with the same id. This one-slot model does not exercise that guard: every pending removal is the live slot's own (see `RemovalsBelongToCurrentIncarnation`), so the lookup always matches |
 | `EnvPathIdleReap`, `EnvConnIdleTimeout` | an orphan is closed by the path idle timeout only with multipath and when it is not the only xquic-ACTIVE path (`xqc_timer.c:137-161`; the model takes the slot's xquic-ACTIVE path to be the only one); otherwise the connection idles out |
@@ -614,8 +614,8 @@ path to validate (a black-holed path never does).
   exempts.
 - **Spontaneous xquic abandons** are bounded and hit only a path that is not
   xquic-ACTIVE. That follows from xquic, not from the one-slot reading: the
-  validation timeout behind them (`xqc_path_validation_on_retx`) acts only
-  on a path that is still validating (`xqc_multipath.c:468`).
+  validation timeout behind them (`xqc_timer_path_idle_timeout`) acts only
+  on a path that is still validating (`xqc_timer.c:179`).
 - **Multipath readiness.** `multipath_ready` is set once per connection and
   cleared by the reconnect reset, as in the code. `mp` stands for a
   negotiated multipath connection and `mpCredit` for a peer that grants
