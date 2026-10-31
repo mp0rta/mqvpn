@@ -525,9 +525,10 @@ typedef struct {
 
 /* mqvpn_path_desc_t.flags: a backup path. Under MQVPN_SCHED_FAILOVER and
  * MQVPN_SCHED_BACKUP_FEC it runs STANDBY: failover sends no data on it while
- * a path without the flag works. Once any path is added with the flag, only
- * flagged paths are STANDBY, also a path added again after a drop. With the
- * flag on no path, every path but the one the connection starts on is. */
+ * a path without the flag works. Under failover only flagged paths are
+ * STANDBY. Under backup_fec, once any path is added with the flag, only
+ * flagged paths are; with the flag on no path, every path but the one the
+ * connection starts on is. */
 #define MQVPN_PATH_FLAG_BACKUP (1u << 0)
 
 /* ─── Callback function types ─── */

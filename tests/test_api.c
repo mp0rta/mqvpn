@@ -2059,9 +2059,25 @@ TEST(failover_backup_flag_decides_standby)
     mqvpn_client_destroy(c);
 }
 
-TEST(failover_without_flag_backs_up_on_secondaries)
+/* Under failover only the flag decides: an unflagged path added before the
+ * first flagged one stays a primary (it was AVAILABLE when it was created). */
+TEST(failover_unflagged_paths_are_primaries)
 {
     mqvpn_client_t *c = make_sched_test_client(MQVPN_SCHED_FAILOVER);
+    mqvpn_path_handle_t h0 = add_flagged_path(c, "wlan0", 0);
+    mqvpn_path_handle_t h1 = add_flagged_path(c, "eth0", 0);
+    ASSERT_EQ(mqvpn_client_test_path_is_backup(c, h0, 1), 0);
+    ASSERT_EQ(mqvpn_client_test_path_is_backup(c, h1, 0), 0);
+    mqvpn_path_handle_t h2 = add_flagged_path(c, "wwan0", MQVPN_PATH_FLAG_BACKUP);
+    ASSERT_EQ(mqvpn_client_test_path_is_backup(c, h1, 0), 0);
+    ASSERT_EQ(mqvpn_client_test_path_is_backup(c, h2, 0), 1);
+    mqvpn_client_destroy(c);
+}
+
+/* backup_fec without the flag: every path but the bootstrap one, as before. */
+TEST(backup_fec_without_flag_backs_up_on_secondaries)
+{
+    mqvpn_client_t *c = make_sched_test_client(MQVPN_SCHED_BACKUP_FEC);
     mqvpn_path_handle_t h0 = add_flagged_path(c, "eth0", 0);
     mqvpn_path_handle_t h1 = add_flagged_path(c, "wwan0", 0);
     ASSERT_EQ(mqvpn_client_test_path_is_backup(c, h0, 1), 0);
@@ -4425,7 +4441,8 @@ main(void)
 
     /* Primary-path rotation (issue #46) + OMR fallback composite */
     run_failover_backup_flag_decides_standby();
-    run_failover_without_flag_backs_up_on_secondaries();
+    run_failover_unflagged_paths_are_primaries();
+    run_backup_fec_without_flag_backs_up_on_secondaries();
     run_backup_flag_has_no_effect_with_wlb();
     run_failover_readded_primary_is_not_backup();
     run_get_send_handle_prefers_rotated_primary_when_active();

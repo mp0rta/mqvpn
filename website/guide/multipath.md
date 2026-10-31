@@ -115,9 +115,10 @@ Path = eth0
 BackupPath = wwan0
 ```
 
-- With no `--backup-path` / `BackupPath`, every path after the first is a
-  backup. With several `Path` entries, traffic is spread over them like
-  `minrtt`, and backups are used only when none of them works.
+- With no `--backup-path` / `BackupPath`, the first path is the primary and
+  every later path is a backup. With `BackupPath` entries, every `Path` is a
+  primary: traffic is spread over the primaries like `minrtt`, and the
+  backups are used only when no primary works.
 - A path keeps its role when it goes down and comes back: a primary that
   returns carries the traffic again.
 - The download direction follows the server's scheduler: set

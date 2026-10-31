@@ -282,7 +282,7 @@ struct mqvpn_client_s {
      * the server sees only path 0 when it swaps its scheduler. */
     int hold_extra_paths;
     /* A path was added with MQVPN_PATH_FLAG_BACKUP: from then on only flagged
-     * paths are backups (client_path_is_backup). */
+     * paths are backups under backup_fec (client_path_is_backup). */
     int backup_flag_seen;
     /* Path index used for the QUIC handshake. Rotated on each reconnect so a
      * dead first path doesn't trap the client forever. */
@@ -2572,16 +2572,18 @@ cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
 
 /* ─── Multipath helpers ─── */
 
-/* Whether a path runs STANDBY. Under a scheduler with backup paths, a path
- * is a backup when it carries MQVPN_PATH_FLAG_BACKUP; when no path was ever
- * added with the flag, every path but the bootstrap one (xquic path id 0) is,
- * as before the flag existed. The flag, not the order, decides once it is
- * used: a primary that is dropped and added again comes back AVAILABLE. */
+/* Whether a path runs STANDBY. Under failover, a path is a backup when it
+ * carries MQVPN_PATH_FLAG_BACKUP, so a primary that is dropped and added
+ * again comes back AVAILABLE, and a path's role never depends on the paths
+ * added before or after it. Under backup_fec the flag decides once a path
+ * was added with it; until then every path but the bootstrap one (xquic
+ * path id 0) is a backup, as before the flag existed. */
 static int
 client_path_is_backup(const mqvpn_client_t *c, const path_entry_t *p, int bootstrap)
 {
     if (!mqvpn_sched_secondary_standby(c->config.scheduler)) return 0;
-    if (c->backup_flag_seen) return (p->flags & MQVPN_PATH_FLAG_BACKUP) != 0;
+    if (c->config.scheduler == MQVPN_SCHED_FAILOVER || c->backup_flag_seen)
+        return (p->flags & MQVPN_PATH_FLAG_BACKUP) != 0;
     return !bootstrap;
 }
 
