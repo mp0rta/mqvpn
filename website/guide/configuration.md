@@ -32,7 +32,9 @@ User = bob:<BOB_PSK>
 
 [Multipath]
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+AllowClientScheduler = true
+# Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2
 
 [Hybrid]
 Enabled = true
@@ -54,7 +56,8 @@ intermediate.
 # /etc/mqvpn/client.conf
 [Server]
 Address = 203.0.113.1:443
-# ServerName = vpn.example.com  # TLS SNI / cert verify name (default: use Address host)
+# TLS SNI / cert verify name (default: use Address host)
+# ServerName = vpn.example.com
 
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
@@ -67,7 +70,11 @@ LogLevel = info
 
 [Multipath]
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+# Override the server's scheduler with Scheduler above for this client's downloads
+# (needs AllowClientScheduler = true on the server):
+# RequestServerScheduler = true
+# Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2
 Path = eth0
 Path = wlan0
 
@@ -102,6 +109,7 @@ The file must be strict JSON (RFC 8259): no comments, no trailing commas, and ke
   ],
   "max_clients": 64,
   "scheduler": "wlb",
+  "allow_client_scheduler": true,
   "cc": "bbr2",
   "hybrid": { "enabled": true },
   "reorder": { "enabled": true }

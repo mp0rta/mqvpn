@@ -126,7 +126,7 @@ https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
 curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh | sudo bash
 ```
 
-This downloads the latest release, installs the binary, and generates a self-signed TLS certificate, auth key, and server config at `/etc/mqvpn/server.conf`. The generated config turns on hybrid mode and the reorder buffer on the server side; each takes effect only for clients that also turn it on. Add `--start` to start the server and register it for automatic startup on boot:
+This downloads the latest release, installs the binary, and generates a self-signed TLS certificate, auth key, and server config at `/etc/mqvpn/server.conf`. The generated config turns on hybrid mode and the reorder buffer on the server side; each takes effect only for clients that also turn it on. It also sets `AllowClientScheduler = true`, so a client can ask for its own download scheduler. Add `--start` to start the server and register it for automatic startup on boot:
 
 ```bash
 curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
@@ -211,20 +211,25 @@ Config files support both INI and JSON. CLI arguments override config values.
 Listen = 0.0.0.0:443
 Subnet = 10.0.0.0/24
 Subnet6 = 2001:db8:1::/112
-# MTU = 1280                   # TUN MTU (1280–9000, default: auto = ~1382)
+# TUN MTU (1280–9000, default: auto = ~1382)
+# MTU = 1280
 
 [TLS]
 Cert = /etc/mqvpn/server.crt
-Key = /etc/mqvpn/server.key       # TLS private key (PEM file)
+# TLS private key (PEM file)
+Key = /etc/mqvpn/server.key
 
 [Auth]
-Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=   # PSK example (mqvpn --genkey)
+# PSK example (mqvpn --genkey)
+Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
 User = alice:alice-secret
 User = bob:bob-secret
 
 [Multipath]
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none, default: bbr2)
+AllowClientScheduler = true
+# Congestion control (bbr2|bbr|cubic|none, default: bbr2)
+# CC = bbr2
 
 [Hybrid]
 Enabled = true
@@ -237,18 +242,24 @@ Enabled = true
 # /etc/mqvpn/client.conf
 [Server]
 Address = 203.0.113.1:443
-# ServerName = vpn.example.com  # TLS SNI / cert verify name (default: use Address host)
+# TLS SNI / cert verify name (default: use Address host)
+# ServerName = vpn.example.com
 
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
 
 [Interface]
 DNS = 1.1.1.1, 8.8.8.8
-# MTU = 1280                   # TUN MTU (1280–9000, default: auto = ~1382)
+# TUN MTU (1280–9000, default: auto = ~1382)
+# MTU = 1280
 
 [Multipath]
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none, default: bbr2)
+# Override the server's scheduler with Scheduler above for this client's downloads
+# (needs AllowClientScheduler = true on the server):
+# RequestServerScheduler = true
+# Congestion control (bbr2|bbr|cubic|none, default: bbr2)
+# CC = bbr2
 Path = eth0
 Path = wlan0
 
@@ -280,6 +291,7 @@ Server example:
     ],
     "max_clients": 64,
     "scheduler": "wlb",
+    "allow_client_scheduler": true,
     "cc": "bbr2",
     "hybrid": { "enabled": true },
     "reorder": { "enabled": true }
@@ -362,14 +374,17 @@ it) and a no-op when either side has it off.
 ```ini
 [Reorder]
 Enabled = true
-MaxWaitMs = 50           # wait for a missing datagram this long (hold nominally <= 2x)
-CapPackets = 1024        # per-flow buffer cap (packets)
+# wait for a missing datagram this long (hold nominally <= 2x)
+MaxWaitMs = 50
+# per-flow buffer cap (packets)
+CapPackets = 1024
 
 # Optional: target specific inner flows with a tuned preset
 [ReorderRule]
 Proto = udp
 Port = 443
-Profile = cellular_bond  # cellular_bond (wait=50ms, cap=1024) | fiber_lte (wait=50ms, cap=2048)
+# cellular_bond (wait=50ms, cap=1024) | fiber_lte (wait=50ms, cap=2048)
+Profile = cellular_bond
 ```
 
 INI/JSON only (no CLI flag). Best on asymmetric-RTT path pairs (e.g. Wi-Fi +
@@ -387,10 +402,14 @@ or more active paths — silently inactive with only one.
 
 ```ini
 [Multipath]
-Reinjection = off                     # off (default) | deadline | idle
-ReinjectionSrttFactorPct = 110        # deadline mode: duplicate an unacked packet older than factor x min_srtt (100-1000; 110 = 1.1x)
-ReinjectionHardDeadlineMs = 500       # deadline mode: upper clamp (1-60000)
-ReinjectionDeadlineLowerBoundMs = 20  # deadline mode: lower clamp (1-60000; clamped down to the hard deadline if it would exceed it)
+# off (default) | deadline | idle
+Reinjection = off
+# deadline mode: duplicate an unacked packet older than factor x min_srtt (100-1000; 110 = 1.1x)
+ReinjectionSrttFactorPct = 110
+# deadline mode: upper clamp (1-60000)
+ReinjectionHardDeadlineMs = 500
+# deadline mode: lower clamp (1-60000; clamped down to the hard deadline if it would exceed it)
+ReinjectionDeadlineLowerBoundMs = 20
 ```
 
 - `deadline` — insurance for bonded tunnels running the [hybrid TCP lane](#hybrid-mode-tcp-lane). Most of the time it does nothing and costs nothing. When a link suddenly goes bad, data already sent on it must be recovered before in-order delivery lets anything behind it through — even data that already arrived via the healthy link — which in bad cases stalls transfers for up to a second; `deadline` resends the late data on the healthy link right away, shrinking that stall to a barely noticeable blip. Protects stream (TCP-lane) traffic only — with the hybrid lane disabled its effect is limited to control streams and a warning is logged. Protects TCP/stream traffic only — with the hybrid lane disabled its effect is limited to control streams and a warning is logged.
@@ -422,9 +441,12 @@ classifier (per packet: protocol + Tcp mode + tunnel-subnet carve-out)
 ```ini
 [Hybrid]
 Enabled = true
-Tcp = auto              # stream | raw | auto (per-flow: TCP lane once >=2 paths are active)
-TcpMaxFlows = 256        # concurrent TCP-lane flow cap (client, up to 4096) / per-session cap (server)
-EgressAllow = 10.0.5.0/24  # server: punch a hole through the default-deny egress ACL
+# stream | raw | auto (per-flow: TCP lane once >=2 paths are active)
+Tcp = auto
+# concurrent TCP-lane flow cap (client, up to 4096) / per-session cap (server)
+TcpMaxFlows = 256
+# server: punch a hole through the default-deny egress ACL
+EgressAllow = 10.0.5.0/24
 ```
 
 Disabled by default; existing users see no behavior change. See

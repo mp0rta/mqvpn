@@ -36,7 +36,8 @@ Hybrid mode is **disabled by default**; existing deployments see no behavior cha
 # /etc/mqvpn/server.conf
 [Hybrid]
 Enabled = true
-# EgressAllow = 10.0.5.0/24   # only if relayed TCP must reach private ranges
+# only if relayed TCP must reach private ranges
+# EgressAllow = 10.0.5.0/24
 ```
 
 ### Client
@@ -45,7 +46,8 @@ Enabled = true
 # /etc/mqvpn/client.conf
 [Hybrid]
 Enabled = true
-Tcp = auto        # stream | raw | auto (default)
+# stream | raw | auto (default)
+Tcp = auto
 ```
 
 …or the JSON equivalent (`"hybrid": {"enabled": true, "tcp": "auto"}`). The full key reference (flow caps, timeouts, egress ACL) is in [Configuration → `[Hybrid]`](./configuration#hybrid).
@@ -60,7 +62,8 @@ If relayed TCP legitimately needs to reach a private target, punch an explicit h
 [Hybrid]
 Enabled = true
 EgressAllow = 10.0.5.0/24
-EgressDeny = 10.0.5.13/32   # evaluated after EgressAllow
+# evaluated after EgressAllow
+EgressDeny = 10.0.5.13/32
 ```
 
 ## Monitoring
