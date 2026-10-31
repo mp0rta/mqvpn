@@ -224,6 +224,7 @@ User = bob:bob-secret
 
 [Multipath]
 Scheduler = wlb
+AllowClientScheduler = true
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none, default: bbr2)
 
 [Hybrid]
@@ -280,6 +281,7 @@ Server example:
     ],
     "max_clients": 64,
     "scheduler": "wlb",
+    "allow_client_scheduler": true,
     "cc": "bbr2",
     "hybrid": { "enabled": true },
     "reorder": { "enabled": true }

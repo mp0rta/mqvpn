@@ -32,6 +32,7 @@ User = bob:<BOB_PSK>
 
 [Multipath]
 Scheduler = wlb
+AllowClientScheduler = true
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
 
 [Hybrid]
@@ -102,6 +103,7 @@ The file must be strict JSON (RFC 8259): no comments, no trailing commas, and ke
   ],
   "max_clients": 64,
   "scheduler": "wlb",
+  "allow_client_scheduler": true,
   "cc": "bbr2",
   "hybrid": { "enabled": true },
   "reorder": { "enabled": true }

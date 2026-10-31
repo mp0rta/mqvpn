@@ -32,6 +32,7 @@ User = bob:<BOB_PSK>
 
 [Multipath]
 Scheduler = wlb
+AllowClientScheduler = true
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
 
 [Hybrid]
@@ -97,6 +98,7 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
   ],
   "max_clients": 64,
   "scheduler": "wlb",
+  "allow_client_scheduler": true,
   "cc": "bbr2",
   "hybrid": { "enabled": true },
   "reorder": { "enabled": true }
