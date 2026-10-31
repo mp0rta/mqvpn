@@ -33,7 +33,8 @@ User = bob:<BOB_PSK>
 [Multipath]
 Scheduler = wlb
 AllowClientScheduler = true
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+# Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2
 
 [Hybrid]
 Enabled = true
@@ -50,7 +51,8 @@ CA が発行した証明書を使う場合、`Cert` (JSON では `cert_file`) �
 # /etc/mqvpn/client.conf
 [Server]
 Address = 203.0.113.1:443
-# ServerName = vpn.example.com  # TLS SNI / 証明書検証名（デフォルト: Address のホスト部）
+# TLS SNI / 証明書検証名（デフォルト: Address のホスト部）
+# ServerName = vpn.example.com
 
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
@@ -63,7 +65,11 @@ LogLevel = info
 
 [Multipath]
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+# このクライアントのダウンロード方向では、サーバーのスケジューラを上の Scheduler で上書きする
+# (サーバー側で AllowClientScheduler = true が必要):
+# RequestServerScheduler = true
+# Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2
 Path = eth0
 Path = wlan0
 
