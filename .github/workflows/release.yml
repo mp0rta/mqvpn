@@ -46,10 +46,10 @@ jobs:
           # those. arm64 stays on 24.04 because GitHub has no 22.04 ARM runner.
           - { os: linux,   arch: amd64, runner: ubuntu-22.04     }
           - { os: linux,   arch: arm64, runner: ubuntu-24.04-arm }
-          # macos-14 (arm64) matches ci.yml's darwin job — the only Darwin
+          # macos-15 (arm64) matches ci.yml's darwin job — the only Darwin
           # config that is continuously tested. Intel (x86_64) is deliberately
           # not built: no CI coverage, and Apple silicon covers current Macs.
-          - { os: darwin,  arch: arm64, runner: macos-14         }
+          - { os: darwin,  arch: arm64, runner: macos-15         }
           # amd64 pinned to windows-2022 (VS 2022): windows-latest migrated to
           # VS 2026 in June 2026. windows-11-arm has no VS 2022 label and moved
           # to VS 2026 by October 2026, so arm64 builds with that generator.

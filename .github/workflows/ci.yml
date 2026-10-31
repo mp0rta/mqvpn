@@ -844,7 +844,7 @@ jobs:
     # Darwin platform TUs, the full mqvpn CLI (client mode; server mode +
     # control_socket are intentionally not ported — see CMakeLists.txt),
     # and the Darwin unit test binaries (run via ctest below).
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -867,7 +867,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: third_party/xquic/third_party/boringssl
-          key: bssl-${{ steps.bssl-pin.outputs.sha }}-darwin-arm64-clang-v2
+          key: bssl-${{ steps.bssl-pin.outputs.sha }}-darwin-arm64-macos15-clang-v2
 
       - name: Build BoringSSL
         if: steps.bssl-cache.outputs.cache-hit != 'true'
@@ -892,7 +892,7 @@ jobs:
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
           # v2: bumped with the BoringSSL cache — see the linux-build job.
-          key: xquic-${{ steps.xqsha.outputs.sha }}-darwin-arm64-clang-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v2
+          key: xquic-${{ steps.xqsha.outputs.sha }}-darwin-arm64-macos15-clang-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v2
 
       - name: Build xquic
         if: steps.xquic-cache.outputs.cache-hit != 'true'
