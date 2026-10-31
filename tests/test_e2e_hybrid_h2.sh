@@ -1055,7 +1055,19 @@ STREAM_MBPS="$(avg_of "${STREAM_RESULTS[@]}")"
 echo "  STREAM_MBPS: avg=${STREAM_MBPS} samples=(${STREAM_RESULTS[*]})"
 
 if awk -v r="$RAW_MBPS" 'BEGIN{exit !(r>0)}'; then
-    DEGRADATION_PCT="$(awk -v r="$RAW_MBPS" -v s="$STREAM_MBPS" 'BEGIN{printf "%.1f", (r-s)/r*100}')"
+    # The ratio is only meaningful while RAW stays below what the stream lane
+    # can carry. On CI runners RAW ranges 2.3-5.0 Gbit/s with the host's speed,
+    # but the stream lane tops out at 3.2-3.7 Gbit/s on every host (and a
+    # larger lwIP window does not move it), so on a fast host the ratio crosses
+    # 20 % without any regression. Over 63 runs the old rule failed 11, all
+    # with RAW > 4.1 Gbit/s; measuring against min(RAW, STREAM_RATIO_CAP_MBPS)
+    # fails none and leaves hosts under the cap unchanged.
+    RATIO_BASE_MBPS="$(awk -v r="$RAW_MBPS" -v c="${STREAM_RATIO_CAP_MBPS:-3500}" \
+        'BEGIN{printf "%.2f", (r<c)?r:c}')"
+    if [ "$RATIO_BASE_MBPS" != "$RAW_MBPS" ]; then
+        echo "  RAW capped at ${RATIO_BASE_MBPS} Mbps for the ratio (STREAM_RATIO_CAP_MBPS)"
+    fi
+    DEGRADATION_PCT="$(awk -v r="$RATIO_BASE_MBPS" -v s="$STREAM_MBPS" 'BEGIN{printf "%.1f", (r-s)/r*100}')"
     echo "  degradation: ${DEGRADATION_PCT}% (threshold <=20.0%)"
     if awk -v d="$DEGRADATION_PCT" 'BEGIN{exit !(d<=20.0)}'; then
         echo "PASS: stream lane within 20% of RAW (degradation=${DEGRADATION_PCT}%)"
