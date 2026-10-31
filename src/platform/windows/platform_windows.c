@@ -189,6 +189,7 @@ platform_path_fill_desc(const platform_win_ctx_t *p, const platform_path_t *s,
     memset(desc, 0, sizeof(*desc));
     desc->struct_size = sizeof(*desc);
     snprintf(desc->iface, sizeof(desc->iface), "%s", s->iface);
+    if (s->backup) desc->flags |= MQVPN_PATH_FLAG_BACKUP;
     struct sockaddr_storage ss;
     int len = wildcard_addr(p->server_addr.ss_family, &ss);
     memcpy(desc->local_addr, &ss, (size_t)len);
@@ -803,6 +804,7 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
         for (int i = 0; i < want; i++) {
             const char *iface = cfg->n_paths > 0 ? cfg->path_ifaces[i] : NULL;
             platform_path_t *s = platform_path_append(&ctx, iface);
+            if (s) s->backup = cfg->n_paths > 0 && cfg->path_backup[i];
             if (!s) {
                 LOG_ERR("path_mgr: max paths (%d) reached", MQVPN_MAX_PATHS);
             } else {

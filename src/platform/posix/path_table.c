@@ -89,6 +89,7 @@ platform_path_fill_desc(const platform_ctx_t *p, const platform_path_t *s,
     memset(desc, 0, sizeof(*desc));
     desc->struct_size = sizeof(*desc);
     snprintf(desc->iface, sizeof(desc->iface), "%s", s->iface);
+    if (s->backup) desc->flags |= MQVPN_PATH_FLAG_BACKUP;
     struct sockaddr_storage ss;
     socklen_t len = wildcard_addr(p->server_addr.ss_family, &ss);
     memcpy(desc->local_addr, &ss, len);

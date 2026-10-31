@@ -211,6 +211,7 @@ typedef enum {
     MQVPN_SCHED_BACKUP_FEC =
         2, /* FEC repair on standby path. Requires XQC_ENABLE_FEC build. */
     MQVPN_SCHED_WLB_UDP_PIN = 3, /* WLB + 5-tuple pin for UDP flows. */
+    MQVPN_SCHED_FAILOVER = 4,    /* Backup paths idle until the others fail. */
 } mqvpn_scheduler_t;
 
 typedef enum {
@@ -266,8 +267,9 @@ typedef enum {
  *               with the path PENDING (CLOSED on a permanent create failure).
  *   ACTIVE    → validated and usable. Entered only from PENDING, once
  *               validation completes asynchronously.
- *   STANDBY   → validated backup path: under MQVPN_SCHED_BACKUP_FEC, paths
- *               validated after connection setup land here instead of ACTIVE.
+ *   STANDBY   → validated backup path: under MQVPN_SCHED_FAILOVER and
+ *               MQVPN_SCHED_BACKUP_FEC, a backup path (MQVPN_PATH_FLAG_BACKUP)
+ *               lands here instead of ACTIVE.
  *   DEGRADED  → xquic closed a validated path (xquic_path_live==0); the
  *               transport is still attached and the library retries it.
  *   CLOSED    → one of:
@@ -518,8 +520,15 @@ typedef struct {
     uint8_t local_addr[128]; /* sockaddr storage */
     uint32_t local_addr_len;
     int64_t platform_net_id; /* Android: Network handle */
-    uint32_t flags;
+    uint32_t flags;          /* MQVPN_PATH_FLAG_* */
 } mqvpn_path_desc_t;
+
+/* mqvpn_path_desc_t.flags: a backup path. Under MQVPN_SCHED_FAILOVER and
+ * MQVPN_SCHED_BACKUP_FEC it runs STANDBY: failover sends no data on it while
+ * a path without the flag works. Once any path is added with the flag, only
+ * flagged paths are STANDBY, also a path added again after a drop. With the
+ * flag on no path, every path but the one the connection starts on is. */
+#define MQVPN_PATH_FLAG_BACKUP (1u << 0)
 
 /* ─── Callback function types ─── */
 
