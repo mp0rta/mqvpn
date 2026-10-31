@@ -300,6 +300,7 @@ if [ ! -f /etc/mqvpn/server.conf ]; then
         echo
         echo "[Multipath]"
         echo "Scheduler = wlb"
+        echo "AllowClientScheduler = true"
         echo
         # Server side only offers these; each takes effect for a client that
         # also enables it.
