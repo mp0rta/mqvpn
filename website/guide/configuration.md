@@ -186,7 +186,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `ReconnectInterval` | Seconds between reconnection attempts | `5` |
 | `ManageRoutes` | Manage the host routing table (VPN routes and server pin route). Set to `false` (or pass `--no-manage-routes`) to handle routing yourself. Routing alone does not stop applications that bind their sockets to a specific adapter — see the note below. | `true` |
 | `MTU` | TUN MTU (1280–9000). Client: cap — if the negotiated MTU is lower, the negotiated value is used. Server: sets the TUN MTU directly. | auto (client ~1382 negotiated, server 1382) |
-| `PathMTU` | Largest IP packet the network between client and server carries without fragmenting (1280–9000). mqvpn sizes its QUIC packets to fit, assuming an IPv6 header so the value is safe for IPv4 too. Set the same value on both ends. See [Using a larger tunnel MTU](#using-a-larger-tunnel-mtu). | `0` (1400-byte packets) |
+| `PathMTU` | Largest IP packet the network between client and server carries without fragmenting (1280–9000). mqvpn sizes its QUIC packets to fit, assuming an IPv6 header so the value is safe for IPv4 too. Each end tells the other a value below 1500, so a client's smaller value also limits what the server sends it. See [Using a larger tunnel MTU](#using-a-larger-tunnel-mtu). | `0` (1400-byte packets) |
 | `PMTUD` | Discover the path MTU instead of trusting a fixed size. Packets start small and grow while larger probes get through; `PathMTU`, when set, is the upper limit. Both ends must enable it. See [Discovering the path MTU](#discovering-the-path-mtu). | `false` |
 
 > **Note: route management does not cover interface-bound applications**
@@ -455,6 +455,8 @@ PathMTU                    1500 bytes
 ```
 
 A packet at the upper limit never carries an ACK frame. Below it, mqvpn also leaves 16 bytes of room for one, so `PathMTU = 1492` gives 1412-byte packets and a TUN MTU of 1394. The QUIC library caps packets at 1436 bytes, so values above 1500 give the same result. If `PathMTU` is larger than what the network really carries, full-size packets get fragmented or dropped, so only set it when you know the path.
+
+A value below 1500 is also sent to the other end as the largest packet this end receives, and the other end keeps its packets within it. One server with `PathMTU = 1500` can then serve clients on smaller paths: each client sets its own `PathMTU`, and gets packets sized for it.
 
 When an explicit `MTU` exceeds the available inner packet size, the client warns and limits it. The server also warns, but keeps the configured TUN MTU; oversized tunnel packets may be dropped.
 
