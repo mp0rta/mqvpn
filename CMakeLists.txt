@@ -1308,7 +1308,8 @@ if(BUILD_TESTING)
     add_test(NAME test_conn_settings COMMAND test_conn_settings)
 
     add_executable(test_engine_keys tests/test_engine_keys.c)
-    target_link_libraries(test_engine_keys mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
+    target_link_libraries(test_engine_keys mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++
+        -Wl,--wrap=xqc_engine_create)
     target_include_directories(test_engine_keys PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
     set_target_properties(test_engine_keys PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_engine_keys COMMAND test_engine_keys)
