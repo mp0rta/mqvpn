@@ -595,13 +595,11 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_STR(SEC_MULTIPATH, "CC", "cc", cc),
     CFG_U64(SEC_MULTIPATH, "InitMaxPathId", "init_max_path_id", init_max_path_id,
             MQVPN_INIT_MAX_PATH_ID_MAX),
-    /* xquic BBRv2 extensions, default on (mqvpn_config_defaults). On/off
-     * rows: a plain CFG_BOOL would read "on" as false and silently clear a
-     * flag that is on by default. */
-    {SEC_MULTIPATH, "Bbr2FastConvergence", "bbr2_fast_convergence", CFGK_BOOL_ONOFF,
-     CFGK_OFF(bbr2_fast_convergence), 0, 0, NULL, 0, 0, NULL},
-    {SEC_MULTIPATH, "Bbr2RttvarCompensation", "bbr2_rttvar_compensation", CFGK_BOOL_ONOFF,
-     CFGK_OFF(bbr2_rttvar_compensation), 0, 0, NULL, 0, 0, NULL},
+    /* xquic BBRv2 extensions, default true (mqvpn_config_defaults). */
+    CFG_BOOL(SEC_MULTIPATH, "Bbr2FastConvergence", "bbr2_fast_convergence",
+             bbr2_fast_convergence),
+    CFG_BOOL(SEC_MULTIPATH, "Bbr2RttvarCompensation", "bbr2_rttvar_compensation",
+             bbr2_rttvar_compensation),
     /* [Reorder] — JSON side lives inside the bounded "reorder" object */
     CFG_BOOL(SEC_REORDER, "Enabled", "enabled", reorder.mode),
     CFG_U32_POST(SEC_REORDER, "MaxWaitMs", "max_wait_ms", reorder.max_wait_ms,

@@ -258,61 +258,67 @@ test_parse_cc_json(void)
     ASSERT_EQ_STR(cfg.cc, "cubic", "cc cubic from JSON");
 }
 
-/* [Multipath] Bbr2FastConvergence / Bbr2RttvarCompensation: default ON (the
- * flags mqvpn has always set), each switchable off on its own, on/off
- * spelling accepted, JSON flat at top level like the other [Multipath] keys. */
+/* [Multipath] Bbr2FastConvergence / Bbr2RttvarCompensation: default true (the
+ * flags mqvpn has always set), each switchable to false on its own, JSON flat
+ * at top level like the other [Multipath] keys. Only true/false are accepted;
+ * any other value fails the load and leaves the flag at its default. */
 static void
 test_parse_bbr2_flags(void)
 {
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
-    ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 1, "Bbr2FastConvergence defaults on");
-    ASSERT_EQ_INT(cfg.bbr2_rttvar_compensation, 1, "Bbr2RttvarCompensation defaults on");
+    ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 1, "Bbr2FastConvergence defaults true");
+    ASSERT_EQ_INT(cfg.bbr2_rttvar_compensation, 1,
+                  "Bbr2RttvarCompensation defaults true");
 
-    /* A file that never names the keys keeps them on. */
+    /* A file that never names the keys keeps them true. */
     char *p = write_tmp("[Multipath]\nCC = bbr2\n");
     mqvpn_config_defaults(&cfg);
     ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "bbr2 flags absent load ok");
     unlink(p);
-    ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 1, "Bbr2FastConvergence absent stays on");
+    ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 1, "Bbr2FastConvergence absent stays true");
     ASSERT_EQ_INT(cfg.bbr2_rttvar_compensation, 1,
-                  "Bbr2RttvarCompensation absent stays on");
+                  "Bbr2RttvarCompensation absent stays true");
 
-    const char *spellings_off[] = {"false", "no", "0", "off"};
-    for (size_t i = 0; i < sizeof(spellings_off) / sizeof(spellings_off[0]); i++) {
-        char ini[128];
-        snprintf(ini, sizeof(ini), "[Multipath]\nBbr2FastConvergence = %s\n",
-                 spellings_off[i]);
-        p = write_tmp(ini);
-        mqvpn_config_defaults(&cfg);
-        ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "Bbr2FastConvergence off load ok");
-        unlink(p);
-        ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 0, spellings_off[i]);
-        /* independent: the other flag is untouched */
-        ASSERT_EQ_INT(cfg.bbr2_rttvar_compensation, 1, "rttvar untouched by fastconv");
-    }
-
-    p = write_tmp("[Multipath]\nBbr2RttvarCompensation = off\n");
+    /* Each key is independent: false on one leaves the other untouched. */
+    p = write_tmp("[Multipath]\nBbr2FastConvergence = false\n");
     mqvpn_config_defaults(&cfg);
-    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "Bbr2RttvarCompensation off load ok");
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "Bbr2FastConvergence false load ok");
     unlink(p);
-    ASSERT_EQ_INT(cfg.bbr2_rttvar_compensation, 0, "ini Bbr2RttvarCompensation=off");
+    ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 0, "ini Bbr2FastConvergence=false");
+    ASSERT_EQ_INT(cfg.bbr2_rttvar_compensation, 1, "rttvar untouched by fastconv");
+
+    p = write_tmp("[Multipath]\nBbr2RttvarCompensation = false\n");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "Bbr2RttvarCompensation false load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.bbr2_rttvar_compensation, 0, "ini Bbr2RttvarCompensation=false");
     ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 1, "fastconv untouched by rttvar");
 
-    const char *spellings_on[] = {"true", "yes", "1", "on"};
-    for (size_t i = 0; i < sizeof(spellings_on) / sizeof(spellings_on[0]); i++) {
-        char ini[160];
-        snprintf(ini, sizeof(ini),
-                 "[Multipath]\nBbr2FastConvergence = %s\nBbr2RttvarCompensation = %s\n",
-                 spellings_on[i], spellings_on[i]);
-        p = write_tmp(ini);
-        mqvpn_config_defaults(&cfg);
-        cfg.bbr2_fast_convergence = 0;
-        cfg.bbr2_rttvar_compensation = 0;
-        ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "bbr2 flags on load ok");
-        unlink(p);
-        ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 1, spellings_on[i]);
-        ASSERT_EQ_INT(cfg.bbr2_rttvar_compensation, 1, spellings_on[i]);
+    p = write_tmp(
+        "[Multipath]\nBbr2FastConvergence = true\nBbr2RttvarCompensation = true\n");
+    mqvpn_config_defaults(&cfg);
+    cfg.bbr2_fast_convergence = 0;
+    cfg.bbr2_rttvar_compensation = 0;
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "bbr2 flags true load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 1, "ini Bbr2FastConvergence=true");
+    ASSERT_EQ_INT(cfg.bbr2_rttvar_compensation, 1, "ini Bbr2RttvarCompensation=true");
+
+    /* Any other value is a load error, and the flag keeps its default. */
+    const char *keys[] = {"Bbr2FastConvergence", "Bbr2RttvarCompensation"};
+    const char *rejected[] = {"on", "off", "yes", "no", "1", "0", "auto", ""};
+    for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); k++) {
+        for (size_t i = 0; i < sizeof(rejected) / sizeof(rejected[0]); i++) {
+            char ini[96];
+            snprintf(ini, sizeof(ini), "[Multipath]\n%s = %s\n", keys[k], rejected[i]);
+            p = write_tmp(ini);
+            mqvpn_config_defaults(&cfg);
+            ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), -1, ini);
+            unlink(p);
+            ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 1, ini);
+            ASSERT_EQ_INT(cfg.bbr2_rttvar_compensation, 1, ini);
+        }
     }
 
     mqvpn_config_defaults(&cfg);
@@ -328,7 +334,15 @@ test_parse_bbr2_flags(void)
         mqvpn_config_load_json_filecfg(&cfg, "{\"bbr2_rttvar_compensation\": false}"), 0,
         "bbr2 rttvar json load ok");
     ASSERT_EQ_INT(cfg.bbr2_rttvar_compensation, 0, "json bbr2_rttvar_compensation=false");
-    ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 1, "json fastconv absent stays on");
+    ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 1, "json fastconv absent stays true");
+
+    /* JSON takes booleans only. */
+    const char *bad_json[] = {"{\"bbr2_fast_convergence\": \"false\"}",
+                              "{\"bbr2_rttvar_compensation\": 0}"};
+    for (size_t i = 0; i < sizeof(bad_json) / sizeof(bad_json[0]); i++) {
+        mqvpn_config_defaults(&cfg);
+        ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, bad_json[i]), -1, bad_json[i]);
+    }
 }
 
 static void
@@ -2570,6 +2584,8 @@ test_ini_json_scalar_parity(void)
                       "ReinjectionHardDeadlineMs = 300\n"
                       "ReinjectionDeadlineLowerBoundMs = 10\n"
                       "Redundant = true\n"
+                      "Bbr2FastConvergence = false\n"
+                      "Bbr2RttvarCompensation = false\n"
                       "[Reorder]\n"
                       "Enabled = true\n"
                       "MaxWaitMs = 55\n"
@@ -2632,6 +2648,8 @@ test_ini_json_scalar_parity(void)
                        "\"reinjection_hard_deadline_ms\":300,"
                        "\"reinjection_deadline_lower_bound_ms\":10,"
                        "\"redundant\":true,"
+                       "\"bbr2_fast_convergence\":false,"
+                       "\"bbr2_rttvar_compensation\":false,"
                        "\"reorder\":{"
                        "\"enabled\":true,"
                        "\"max_wait_ms\":55,"
