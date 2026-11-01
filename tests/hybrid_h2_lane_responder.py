@@ -48,6 +48,7 @@
 # to skip peer recording entirely. It also binds a real v6 literal instead of
 # "0.0.0.0", so the optional host argv selects the listening socket's address
 # family (a literal containing ':' is v6) instead of hardcoding AF_INET.
+import os
 import socket
 import sys
 
@@ -67,9 +68,19 @@ if peer_file:
     with open(peer_file, "w") as f:
         f.write(addr[0])
 
+
+def write_total(n):
+    # Replace the file in one rename: rewriting it in place truncates it
+    # first, and a caller reading between the truncation and the write gets
+    # an empty file, which it takes as 0 bytes received.
+    tmp = bytes_file + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(str(n))
+    os.replace(tmp, bytes_file)
+
+
 total = 0
-with open(bytes_file, "w") as f:
-    f.write("0")
+write_total(0)
 
 conn.settimeout(120)
 try:
@@ -78,7 +89,6 @@ try:
         if not chunk:
             break
         total += len(chunk)
-        with open(bytes_file, "w") as f:
-            f.write(str(total))
+        write_total(total)
 except (socket.timeout, OSError):
     pass

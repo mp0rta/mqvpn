@@ -1164,7 +1164,9 @@ import sys, json
 FLOOR = 100000
 try:
     d = json.load(sys.stdin)
-    paths = d['clients'][0]['paths']
+    # A path that closed (e.g. replaced after a failed validation) stays in
+    # the list with the bytes it had; only live paths show the spread.
+    paths = [p for p in d['clients'][0]['paths'] if p.get('state_label') != 'closed']
 except Exception as e:
     print('FAIL parse: %s' % e); sys.exit()
 loads = sorted(p.get('bytes_tx', 0) + p.get('bytes_rx', 0) for p in paths)
@@ -1736,7 +1738,9 @@ import sys, json
 FLOOR = 50000
 try:
     d = json.load(sys.stdin)
-    paths = d['clients'][0]['paths']
+    # A path that closed (e.g. replaced after a failed validation) stays in
+    # the list with the bytes it had; only live paths show the spread.
+    paths = [p for p in d['clients'][0]['paths'] if p.get('state_label') != 'closed']
 except Exception as e:
     print('FAIL parse: %s' % e); sys.exit()
 loads = sorted(p.get('bytes_tx', 0) + p.get('bytes_rx', 0) for p in paths)
