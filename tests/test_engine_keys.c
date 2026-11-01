@@ -191,7 +191,9 @@ test_server_passes_its_keys_to_the_engine(void)
     creates = 0;
     assert(new_server(path) == NULL);
     assert(creates == 1);
-    assert(created.reset_token_keylen == 32);
+    xqc_config_t expected = fixed;
+    assert(mqvpn_engine_keys_set_server(&expected, path) == 0);
+    assert(same_reset_key(&created, &expected));
     for (int i = 0; i < XQC_TOKEN_MAX_KEY_VERSION; i++) {
         assert(created.tk_len_list[i] == 32);
         assert(memcmp(created.token_key_list[i], fixed.token_key_list[i], 32) != 0);
