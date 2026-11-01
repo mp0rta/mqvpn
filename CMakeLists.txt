@@ -237,6 +237,7 @@ set(MQVPN_LIB_SOURCES
     src/mqvpn_client.c
     src/mqvpn_server.c
     src/mqvpn_conn_settings.c
+    src/mqvpn_engine_keys.c
     src/mqvpn_util.c
     src/path_state_machine.c
     src/flow_sched.c
@@ -265,6 +266,11 @@ endif()
 set_source_files_properties(third_party/yyjson/yyjson.c PROPERTIES
     COMPILE_FLAGS "${YYJSON_WARN_FLAGS}"
     COMPILE_DEFINITIONS "YYJSON_DISABLE_FILE;YYJSON_DISABLE_UTILS;YYJSON_DISABLE_INCR_READER;YYJSON_READER_DEPTH_LIMIT=32")
+
+# The only library file that calls BoringSSL directly: xquic exports neither a
+# random source nor a MAC.
+set_source_files_properties(src/mqvpn_engine_keys.c PROPERTIES
+    COMPILE_FLAGS "-I\"${CMAKE_SOURCE_DIR}/third_party/xquic/third_party/boringssl/include\"")
 
 # ---------- bundled transport implementations (NOT part of the sans-I/O core) ----------
 # Together with src/hybrid/tcp_egress.c (the server egress lane owns its TCP
@@ -1300,6 +1306,13 @@ if(BUILD_TESTING)
     target_include_directories(test_conn_settings PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
     set_target_properties(test_conn_settings PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_conn_settings COMMAND test_conn_settings)
+
+    add_executable(test_engine_keys tests/test_engine_keys.c)
+    target_link_libraries(test_engine_keys mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++
+        -Wl,--wrap=xqc_engine_create)
+    target_include_directories(test_engine_keys PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
+    set_target_properties(test_engine_keys PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_engine_keys COMMAND test_engine_keys)
 
     # Server-side mqvpn-tcp dispatch test (real xquic engine, gated on the
     # server-side egress being built — see SVR_STREAM_ROLE_CONNECT_TCP).
