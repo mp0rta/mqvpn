@@ -5,7 +5,7 @@
  * libmqvpn — Multipath QUIC VPN library
  *
  * Public API header (single file).
- * Version: 0.18.0 (callback ABI version 3)
+ * Version: 0.19.0 (callback ABI version 3)
  *
  * Thread safety: All functions must be called from a single thread
  * (the "tick thread"). Debug builds assert this (ASSERT_TICK_THREAD inside the library).
@@ -38,7 +38,7 @@ extern "C" {
 /* ─── Version ─── */
 
 #define MQVPN_VERSION_MAJOR 0
-#define MQVPN_VERSION_MINOR 18
+#define MQVPN_VERSION_MINOR 19
 #define MQVPN_VERSION_PATCH 0
 
 /* ─── ABI ─── */
@@ -59,7 +59,7 @@ extern "C" {
  * model to follow). Enforced: tests/test_xquic_abi_pin.c pins this value
  * at compile time, so a bump cannot build without meeting this comment. */
 #define MQVPN_MAX_PATHS            8
-#define MQVPN_INIT_MAX_PATH_ID_MAX UINT64_C(0xffffffff)
+#define MQVPN_INIT_MAX_PATH_ID_MAX UINT64_C(128)
 
 /* ─── Opaque handles ─── */
 
@@ -685,7 +685,9 @@ MQVPN_API int mqvpn_config_set_killswitch_hint(mqvpn_config_t *cfg, int enable);
 
 /* draft-21 §4.6: set the initial Maximum Path Identifier advertised in TP.
  * 0 = use xquic default (XQC_DEFAULT_INIT_MAX_PATH_ID = 8). Valid explicit
- * values are 1..MQVPN_INIT_MAX_PATH_ID_MAX. Set lower (e.g. 2) to
+ * values are 1..MQVPN_INIT_MAX_PATH_ID_MAX (128): xquic provisions
+ * connection ID sets for every path ID up to it at handshake, at a cost
+ * that grows with the square of the value. Set lower (e.g. 2) to
  * deterministically trigger G-P16 PATHS_BLOCKED. */
 MQVPN_API int mqvpn_config_set_init_max_path_id(mqvpn_config_t *cfg, uint64_t v);
 
@@ -1143,7 +1145,9 @@ MQVPN_API int mqvpn_server_egress_fd_budget(mqvpn_server_t *server);
 /* Feed data from platform into the engine. Same accepted-not-sent contract
  * as mqvpn_client_on_tun_packet: with the batched send path engaged the
  * datagram may wait for the caller's next mqvpn_server_tick() — feed, then
- * tick promptly. */
+ * tick promptly. Unlike the client, it never returns MQVPN_ERR_AGAIN for
+ * backpressure: the TUN is shared by every client, so a packet xquic cannot
+ * take for its client right now is dropped and the TUN keeps being read. */
 MQVPN_API int mqvpn_server_on_tun_packet(mqvpn_server_t *server, const uint8_t *pkt,
                                          size_t len);
 

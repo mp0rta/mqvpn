@@ -488,7 +488,7 @@ fi
 if [ "$SUITE" = "redundant" ]; then
 # Redundant mode: every datagram on both paths, so the send rate must fit
 # the slower path (30M in the C5 shape); 10 Mbps is a typical phone uplink
-# stream. The question is what Redundant = on buys over
+# stream. The question is what Redundant = true buys over
 # the plain default (wlb, off). Low-latency budgets
 # (120ms) leave SRT little or no time to retransmit, so the second copy is
 # the only recovery.

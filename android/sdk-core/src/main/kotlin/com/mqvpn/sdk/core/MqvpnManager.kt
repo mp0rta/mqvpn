@@ -10,6 +10,7 @@ import android.content.ServiceConnection
 import android.net.VpnService
 import android.os.IBinder
 import android.util.Log
+import androidx.annotation.MainThread
 import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.PathInfo
@@ -61,6 +62,7 @@ class MqvpnManager(private val context: Context) {
      *   [MqvpnConfig.hostIdentifierError]). Thrown before any state change or
      *   service start.
      */
+    @MainThread
     fun connect(config: MqvpnConfig, serviceClass: Class<out MqvpnVpnService>) {
         // synchronous: a bad host must fail here, not inside the service (whose executor only logs)
         config.hostIdentifierError()?.let { throw IllegalArgumentException(it) }
@@ -71,8 +73,28 @@ class MqvpnManager(private val context: Context) {
             putExtra(EXTRA_CONFIG_JSON, config.toJson())
         }
         context.startForegroundService(intent)
+        // No BIND_AUTO_CREATE: a binding that keeps the service alive would
+        // pin it after it stops itself on a terminal state, so onDestroy —
+        // and with it the session cleanup that closes the TUN — never runs.
+        bind(intent, 0)
+    }
 
-        // Bind to service for lifecycle observation
+    /**
+     * Re-attach to a service that may already be running. Call when the UI
+     * (re)starts: a ViewModel or process recreated while the VPN kept running
+     * has no binding, so [vpnState]/[stats] would stay stale and [disconnect]
+     * could not reach the service. Without BIND_AUTO_CREATE an idle service is
+     * not spun up, and a dormant binding connects if the service starts later.
+     * No-op while a binding already exists.
+     */
+    @MainThread
+    fun attach(serviceClass: Class<out MqvpnVpnService>) {
+        if (serviceConnection != null) return
+        bind(Intent(context, serviceClass), 0)
+    }
+
+    // Bind to service for lifecycle observation
+    private fun bind(intent: Intent, flags: Int) {
         val conn = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
                 val binder = service as? MqvpnVpnService.LocalBinder ?: return
@@ -82,27 +104,43 @@ class MqvpnManager(private val context: Context) {
             }
 
             override fun onServiceDisconnected(name: ComponentName?) {
-                // Service crashed or was killed — reset state to prevent UI divergence
+                // Service stopped or crashed. Keep a terminal Error on
+                // display; reset anything else to prevent UI divergence.
                 boundService?.manager = null
                 boundService = null
-                _vpnState.value = MqvpnState.Disconnected
+                if (_vpnState.value !is MqvpnState.Error) {
+                    _vpnState.value = MqvpnState.Disconnected
+                }
+                resetMetrics()
+            }
+
+            override fun onBindingDied(name: ComponentName?) {
+                // The service died before delivering its binder (e.g. a
+                // startup failure stopped it right away): Android then skips
+                // onServiceDisconnected. Release the dead binding — it would
+                // make every later attach() an early-returning no-op — and
+                // stop showing a live state.
+                unbind()
+                if (_vpnState.value !is MqvpnState.Error) {
+                    _vpnState.value = MqvpnState.Disconnected
+                }
                 resetMetrics()
             }
         }
         serviceConnection = conn
         try {
-            context.bindService(intent, conn, Context.BIND_AUTO_CREATE)
+            context.bindService(intent, conn, flags)
         } catch (e: Exception) {
             Log.w(TAG, "bindService failed: ${e.message}")
         }
     }
 
     /** Disconnect the VPN. */
+    @MainThread
     fun disconnect() {
         boundService?.stopTunnel()
-        // Release the binding: a started+bound service is not destroyed by
-        // stopSelf() while a BIND_AUTO_CREATE binding remains, so keeping it
-        // would leave the foreground service (and its notification) running.
+        // Release the binding now instead of waiting for the stopping
+        // service's callbacks, so they cannot race the state set below.
         unbind()
         _vpnState.value = MqvpnState.Disconnected
         resetMetrics()
@@ -152,6 +190,7 @@ class MqvpnManager(private val context: Context) {
         _reorderStats.value = ReorderStats()
     }
 
+    @MainThread
     fun destroy() {
         boundService?.manager = null
         serviceConnection?.let { conn ->

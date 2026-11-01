@@ -1,0 +1,84 @@
+name: Mqvpn
+options:
+  deploymentTarget:
+    iOS: "16.0"
+configFiles:
+  Debug: Config.xcconfig
+  Release: Config.xcconfig
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    # App and extension must carry the same version; bump with each release.
+    MARKETING_VERSION: "0.19.0"
+    CURRENT_PROJECT_VERSION: "5"
+    LIBRARY_SEARCH_PATHS: "$(SRCROOT)/../build"
+    HEADER_SEARCH_PATHS: "$(SRCROOT)/../../include $(SRCROOT)/../../src $(SRCROOT)/Shared"
+schemes:
+  Mqvpn:
+    build:
+      targets:
+        Mqvpn: all
+targets:
+  Mqvpn:
+    type: application
+    platform: iOS
+    sources:
+      - App
+      # The Swift files are shared with the extension; the C files are not
+      # needed by the app (and the host test defines main()) — exclude them.
+      - path: Shared
+        excludes: ["*.c"]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.mqvpn.app
+        # iPhone only: the UI is a portrait phone layout (iPad would require
+        # every orientation for multitasking, and App Store upload rejects it
+        # without). Per target: XcodeGen's target default ("1,2") wins over
+        # project-level settings.
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    entitlements:
+      path: App.entitlements
+      properties:
+        com.apple.developer.networking.networkextension: [packet-tunnel-provider]
+        # Shared with the extension for the PSK (PSKStore).
+        keychain-access-groups: ["$(AppIdentifierPrefix)org.mqvpn.app"]
+    dependencies:
+      - target: PacketTunnel
+        embed: true
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: mqvpn
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+  PacketTunnel:
+    type: app-extension
+    platform: iOS
+    sources:
+      - PacketTunnel
+      # host test defines main() — never compile it into a target
+      - path: Shared
+        excludes: ["clock_shim_host_test.c"]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.mqvpn.app.PacketTunnel
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_OBJC_BRIDGING_HEADER: PacketTunnel/BridgingHeader.h
+        OTHER_LDFLAGS: "-lmqvpn -llwip_core -lxquic-static -lssl -lcrypto -lc++"
+    entitlements:
+      path: PacketTunnel.entitlements
+      properties:
+        com.apple.developer.networking.networkextension: [packet-tunnel-provider]
+        keychain-access-groups: ["$(AppIdentifierPrefix)org.mqvpn.app"]
+    info:
+      path: PacketTunnel/Info.plist
+      properties:
+        CFBundleDisplayName: mqvpn
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider

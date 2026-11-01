@@ -89,8 +89,7 @@ class MqvpnTunnel internal constructor(
     fun getReorderStats(): ReorderStats {
         if (!reorderEnabled) return ReorderStats()
         val a = live(null) { NativeBridge.getReorderStats(it) } ?: return ReorderStats()
-        if (a.size < REORDER_STATS_FIELDS) return ReorderStats()
-        return ReorderStats(a[0], a[1], a[2], a[3], a[4], a[5], a[6])
+        return decodeReorderStats(a)
     }
 
     fun getStats(): VpnStats {
@@ -156,7 +155,7 @@ class MqvpnTunnel internal constructor(
 
     companion object {
         private const val TAG = "MqvpnTunnel"
-        private const val REORDER_STATS_FIELDS = 7
+        internal const val REORDER_STATS_FIELDS = 19
         const val ERR_AGAIN = -9
         /** MQVPN_ERR_INVALID_STATE: also what every call returns after [destroy]. */
         const val ERR_INVALID_STATE = -13
@@ -223,4 +222,10 @@ class MqvpnTunnel internal constructor(
             return MqvpnTunnel(handle, cfg, reactorHandle, plan.enabled)
         }
     }
+}
+
+/** Native layout: 0-6 counters and percentiles, 7-18 residence_bucket[0..11]. */
+internal fun decodeReorderStats(a: LongArray): ReorderStats {
+    if (a.size < MqvpnTunnel.REORDER_STATS_FIELDS) return ReorderStats()
+    return ReorderStats(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a.copyOfRange(7, 19).toList())
 }

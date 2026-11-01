@@ -499,6 +499,32 @@ test_ipv6_pool_init_bad_prefix(void)
 }
 
 static void
+test_ipv6_pool_must_hold_v4_pool(void)
+{
+    /* Offsets 1..254 of a /24 are reused for IPv6: a /120 holds them, a
+     * /121 (128 addresses) does not. */
+    mqvpn_addr_pool_t pool;
+    mqvpn_addr_pool_init(&pool, "10.0.0.0/24");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init6(&pool, "fd00::/120"), 0, "/120 holds a /24 pool");
+    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::/121") < 0,
+                "/121 rejected for a /24");
+    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::/126") < 0,
+                "/126 rejected for a /24");
+
+    /* A small IPv4 pool fits a small IPv6 prefix: a /29 hands out 1..6. */
+    mqvpn_addr_pool_init(&pool, "10.0.0.0/29");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init6(&pool, "fd00::/125"), 0, "/125 holds a /29 pool");
+
+    /* A base whose low 32 bits are near the top would wrap: offset 32 of
+     * fd00::ffff:fff0 came out as fd00::10. */
+    mqvpn_addr_pool_init(&pool, "10.0.0.0/24");
+    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::ffff:fff0/96") < 0,
+                "base that wraps the low 32 bits rejected");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init6(&pool, "fd00::ffff:ff00/96"), 0,
+                  "base with room for the pool accepted");
+}
+
+static void
 test_ipv6_shared_offset(void)
 {
     /* Verify IPv4 and IPv6 share the same offset */
@@ -595,7 +621,9 @@ test_ipv6_pool_init_prefix_boundaries(void)
     /* Reset has_v6 for next test */
     pool.has_v6 = 0;
 
-    /* /126 → accepted (upper bound) */
+    /* /126 → accepted (upper bound), with an IPv4 pool it can hold: a /30
+     * hands out offsets 1..2. */
+    mqvpn_addr_pool_init(&pool, "10.0.0.0/30");
     ASSERT_EQ_INT(mqvpn_addr_pool_init6(&pool, "fd00:abcd::/126"), 0,
                   "/126 prefix accepted");
 
@@ -762,6 +790,7 @@ main(void)
     test_ipv6_pool_get6();
     test_ipv6_pool_offset6();
     test_ipv6_pool_init_bad_prefix();
+    test_ipv6_pool_must_hold_v4_pool();
     test_ipv6_shared_offset();
     test_ipv6_pool_exhaustion_shared();
     test_ipv6_release_realloc_shared();

@@ -25,7 +25,11 @@ data class LogEvent(val time: Long, val kind: Kind) {
     }
 }
 
-/** Plain-text rendering of one [LogEvent.Kind], shared by the dashboard's event rows. */
+private val PATH_STATUS_NAMES = mapOf(0 to "Pending", 1 to "Active", 2 to "Degraded", 3 to "Standby", 4 to "Closed")
+
+internal fun pathStatusName(status: Int): String = PATH_STATUS_NAMES[status] ?: "Unknown"
+
+/** Plain-text rendering of one [LogEvent.Kind], shared by the Settings event log rows. */
 internal fun eventText(kind: LogEvent.Kind): String = when (kind) {
     is LogEvent.Kind.CoreState -> "core → ${kind.label}"
     is LogEvent.Kind.PathAdded -> "${kind.iface} added (${pathStatusName(kind.status)})"

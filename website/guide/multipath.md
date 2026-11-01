@@ -144,7 +144,8 @@ Ref: [XLINK (SIGCOMM 2021)](https://conferences.sigcomm.org/sigcomm/2021/files/p
 
 ```ini
 [Multipath]
-Reinjection = deadline   # off | deadline | idle
+# off | deadline | idle
+Reinjection = deadline
 ```
 
 | Mode | What gets copied | Use it for |
@@ -164,9 +165,12 @@ reducing that wait.
 Deadline-mode tuning (defaults shown):
 
 ```ini
-ReinjectionSrttFactorPct = 110        # duplicate when older than 1.1 × min_srtt (100–1000)
-ReinjectionHardDeadlineMs = 500       # upper clamp on the deadline (1–60000)
-ReinjectionDeadlineLowerBoundMs = 20  # lower clamp (1–60000; clamped down to the hard deadline)
+# duplicate when older than 1.1 × min_srtt (100–1000)
+ReinjectionSrttFactorPct = 110
+# upper clamp on the deadline (1–60000)
+ReinjectionHardDeadlineMs = 500
+# lower clamp (1–60000; clamped down to the hard deadline)
+ReinjectionDeadlineLowerBoundMs = 20
 ```
 
 Notes:
@@ -186,9 +190,11 @@ usually keep a live stream going. Off by default.
 
 ```ini
 [Multipath]
-Redundant = on
-RedundantPorts = 4200    # optional: only UDP to these destination ports
-CC = bbr                 # recommended with redundant mode
+Redundant = true
+# optional: only UDP to these destination ports
+RedundantPorts = 4200
+# recommended with redundant mode
+CC = bbr
 ```
 
 On Android, turn on the **Redundant Mode** switch (the port list is the
@@ -207,10 +213,10 @@ On Android, turn on the **Redundant Mode** switch (the port list is the
   with some room to spare. For a 20 Mbps stream, every connection must manage
   at least 20 Mbps up. One connection slowing down for a while is fine as long
   as another can still carry the stream. When none can, mqvpn stops copying
-  and sends each packet once, as with `Redundant = off`, and tries copying
+  and sends each packet once, as with `Redundant = false`, and tries copying
   again later once a connection looks fast enough; the log notes each switch
   (`redundant mode: ...`). The stream can still lose more packets than with
-  `Redundant = off`, so if your connections are often slower than the stream,
+  `Redundant = false`, so if your connections are often slower than the stream,
   leave redundant mode off.
 - **Use `CC = bbr` on the client (recommended)**: `CC` decides how fast mqvpn
   sends data. Cellular connections are wireless, so they can lose a few
@@ -239,7 +245,7 @@ On Android, turn on the **Redundant Mode** switch (the port list is the
 
 This replaces the former `Reinjection = dgram` mode, which has been removed.
 A config file that still says `dgram` prints a warning and runs with
-`Reinjection = off`; use `Redundant = on` instead.
+`Reinjection = off`; use `Redundant = true` instead.
 
 ## Path Weighting
 

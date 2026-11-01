@@ -3,14 +3,19 @@
 
 package com.mqvpn.sdk.core
 
+import android.content.ComponentName
+import android.os.Looper
+import android.os.ParcelFileDescriptor
 import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.MqvpnError
 import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.PathInfo
+import com.mqvpn.sdk.core.model.ReconnectInfo
 import com.mqvpn.sdk.core.model.ReorderStats
 import com.mqvpn.sdk.core.model.TunnelInfo
 import com.mqvpn.sdk.core.model.VpnStats
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -18,6 +23,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 
 @RunWith(RobolectricTestRunner::class)
 class MqvpnManagerTest {
@@ -95,7 +101,7 @@ class MqvpnManagerTest {
 
     @Test
     fun `updateState with Error`() {
-        val error = MqvpnError.AuthFailed("PSK authentication failed")
+        val error = MqvpnError.AuthFailed("Access key rejected by the server")
         manager.updateState(MqvpnState.Error(error))
         val state = manager.vpnState.value
         assertTrue(state is MqvpnState.Error)
@@ -148,6 +154,264 @@ class MqvpnManagerTest {
         val s = ReorderStats(delivered = 10, gapFilled = 3)
         mgr.updateReorderStats(s)
         assertEquals(s, mgr.reorderStats.value)
+    }
+
+    // --- attach (re-bind to an already-running service) ---
+
+    private class TestVpnService : MqvpnVpnService() {
+        var stopTunnelCalls = 0
+
+        override fun onCreateTun(info: TunnelInfo, config: MqvpnConfig): ParcelFileDescriptor =
+            throw UnsupportedOperationException("not used in tests")
+
+        override fun onVpnStateChanged(newState: MqvpnState) {}
+
+        // the real one enqueues on the executor, which only exists after onCreate
+        override fun stopTunnel() {
+            stopTunnelCalls++
+        }
+    }
+
+    /** A service instance whose LocalBinder the shadow hands to any bind. */
+    private fun bindableService(): TestVpnService {
+        val svc = TestVpnService()
+        val app = RuntimeEnvironment.getApplication()
+        shadowOf(app).setComponentNameAndServiceForBindService(
+            ComponentName(app, TestVpnService::class.java),
+            svc.LocalBinder(),
+        )
+        return svc
+    }
+
+    @Test
+    fun attach_toMidSessionService_resyncsStateAndWiresService() {
+        val svc = bindableService()
+        svc.sessionEstablished = true
+        svc.onNativeReconnectScheduled(3) // service's current state: Reconnecting
+
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(MqvpnState.Reconnecting(ReconnectInfo(3)), manager.vpnState.value)
+        assertSame(manager, svc.manager)
+    }
+
+    @Test
+    fun attach_toFreshService_keepsManagerState() {
+        val svc = bindableService()
+        manager.updateState(MqvpnState.Connecting)
+
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        // a service that never emitted a state must not clobber Connecting
+        assertEquals(MqvpnState.Connecting, manager.vpnState.value)
+        assertSame(manager, svc.manager)
+    }
+
+    @Test
+    fun disconnect_afterAttach_reachesTheRunningService() {
+        val svc = bindableService()
+        svc.sessionEstablished = true
+        svc.onNativeReconnectScheduled(1)
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        manager.disconnect()
+
+        assertEquals(1, svc.stopTunnelCalls)
+        assertEquals(MqvpnState.Disconnected, manager.vpnState.value)
+    }
+
+    @Test
+    fun connect_afterAttach_replacesTheBinding() {
+        val svc = bindableService()
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        val config = MqvpnConfig(serverAddress = "10.0.0.1", authKey = "test-key")
+        manager.connect(config, TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        // the attach binding was released, exactly one live binding remains
+        val shadow = shadowOf(RuntimeEnvironment.getApplication())
+        assertEquals(1, shadow.boundServiceConnections.size)
+        assertEquals(1, shadow.unboundServiceConnections.size)
+        assertSame(manager, svc.manager)
+    }
+
+    @Test
+    fun serviceDisconnectCallback_keepsTerminalError_resetsMetrics() {
+        bindableService()
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+        val error = MqvpnState.Error(MqvpnError.AuthFailed("bad key"))
+        manager.updateState(error)
+        manager.updateStats(VpnStats(bytesTx = 7))
+
+        val app = RuntimeEnvironment.getApplication()
+        shadowOf(app).boundServiceConnections.last()
+            .onServiceDisconnected(ComponentName(app, TestVpnService::class.java))
+
+        assertEquals(error, manager.vpnState.value)
+        assertEquals(VpnStats(), manager.stats.value)
+    }
+
+    @Test
+    fun bindingDied_releasesBindingAndAllowsReattach() {
+        // no binder registered: the service "died" before publishing one
+        val app = RuntimeEnvironment.getApplication()
+        val config = MqvpnConfig(serverAddress = "10.0.0.1", authKey = "test-key")
+        manager.connect(config, TestVpnService::class.java)
+        assertEquals(MqvpnState.Connecting, manager.vpnState.value)
+
+        shadowOf(app).boundServiceConnections.last()
+            .onBindingDied(ComponentName(app, TestVpnService::class.java))
+
+        assertEquals(MqvpnState.Disconnected, manager.vpnState.value)
+
+        // the dead binding is gone, so a later attach binds and resyncs
+        val svc = bindableService()
+        svc.sessionEstablished = true
+        svc.onNativeReconnectScheduled(2)
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(MqvpnState.Reconnecting(ReconnectInfo(2)), manager.vpnState.value)
+    }
+
+    @Test
+    fun serviceDisconnectCallback_resetsStaleLiveState() {
+        bindableService()
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+        manager.updateState(MqvpnState.Connecting)
+
+        val app = RuntimeEnvironment.getApplication()
+        shadowOf(app).boundServiceConnections.last()
+            .onServiceDisconnected(ComponentName(app, TestVpnService::class.java))
+
+        assertEquals(MqvpnState.Disconnected, manager.vpnState.value)
+    }
+
+    @Test
+    fun attach_isNoOpWhileBindingExists() {
+        bindableService()
+        manager.attach(TestVpnService::class.java)
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        val app = RuntimeEnvironment.getApplication()
+        assertEquals(1, shadowOf(app).boundServiceConnections.size)
+    }
+
+    // --- terminal vs. retryable close (Error emission is deferred until the
+    //     native client reveals whether a reconnect follows) ---
+
+    @Test
+    fun neverEstablishedClose_showsTerminalErrorAndStopsSession() {
+        val svc = bindableService()
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        svc.onNativeTunnelClosed(-10)
+        svc.onNativeReconnectScheduled(5)
+
+        // retrying a server that never accepted us stays an Error, and the
+        // session is torn down (which cancels the native reconnect timer)
+        val state = manager.vpnState.value
+        assertTrue(state is MqvpnState.Error)
+        assertEquals(
+            MqvpnError.ConnectionClosed("Connection to the server failed"),
+            (state as MqvpnState.Error).error,
+        )
+        assertEquals(1, svc.stopTunnelCalls)
+    }
+
+    @Test
+    fun establishedClose_reconnectKeepsSessionAlive() {
+        val svc = bindableService()
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+        svc.sessionEstablished = true
+
+        svc.onNativeTunnelClosed(-10)
+        svc.onNativeReconnectScheduled(5)
+
+        // a session that was Connected reconnects: no Error, no teardown
+        assertEquals(MqvpnState.Reconnecting(ReconnectInfo(5)), manager.vpnState.value)
+        assertEquals(0, svc.stopTunnelCalls)
+    }
+
+    @Test
+    fun closedWithoutReconnect_showsCloseError() {
+        val svc = bindableService()
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        svc.onNativeTunnelClosed(-10)
+        svc.onNativeStateChanged(2, 6) // CLOSED, no reconnect scheduled
+
+        val state = manager.vpnState.value
+        assertTrue(state is MqvpnState.Error)
+        assertEquals(
+            MqvpnError.ConnectionClosed("Connection to the server failed"),
+            (state as MqvpnState.Error).error,
+        )
+    }
+
+    @Test
+    fun requestFailure_withoutFollowUpCallback_showsErrorAndStopsSession() {
+        // e.g. the server rejects the CONNECT-IP request (bad key) but keeps
+        // the QUIC connection open: no close/reconnect callback ever follows
+        val svc = bindableService()
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        svc.onNativeTunnelClosed(-5)
+
+        val state = manager.vpnState.value
+        assertTrue(state is MqvpnState.Error)
+        assertEquals(
+            MqvpnError.AuthFailed("Access key rejected by the server"),
+            (state as MqvpnState.Error).error,
+        )
+        assertEquals(1, svc.stopTunnelCalls)
+    }
+
+    @Test
+    fun requestFailureDuringReconnect_keepsTerminalError() {
+        // mid-session reconnect: the retried CONNECT-IP request fails (-6),
+        // and the same native call then schedules another reconnect — the
+        // schedule must not overwrite the terminal Error
+        val svc = bindableService()
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+        svc.sessionEstablished = true
+
+        svc.onNativeTunnelClosed(-6)
+        svc.onNativeReconnectScheduled(3)
+
+        val state = manager.vpnState.value
+        assertTrue(state is MqvpnState.Error)
+        assertEquals(
+            MqvpnError.ProtocolError(-6, "Connection rejected — check the access key and server address"),
+            (state as MqvpnState.Error).error,
+        )
+        assertEquals(1, svc.stopTunnelCalls)
+    }
+
+    @Test
+    fun terminalError_keepsTheFirstError() {
+        val svc = bindableService()
+        manager.attach(TestVpnService::class.java)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        svc.onNativeTunnelClosed(-4) // terminal on arrival
+        svc.onNativeTunnelClosed(-10) // close notify from the teardown
+        svc.onNativeStateChanged(2, 6)
+
+        val state = manager.vpnState.value as MqvpnState.Error
+        assertEquals(MqvpnError.TlsError("TLS handshake failed"), state.error)
     }
 
     @Test

@@ -4,10 +4,10 @@
 package com.mqvpn.app
 
 import com.mqvpn.app.data.DemoSettings
-import com.mqvpn.app.data.SettingsRepository
 import com.mqvpn.app.service.MyVpnService
 import com.mqvpn.app.ui.LogEvent
 import com.mqvpn.app.ui.MqvpnViewModel
+import com.mqvpn.sdk.network.TransportAvailability
 import com.mqvpn.sdk.core.MqvpnManager
 import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.PathInfo
@@ -57,8 +57,8 @@ class MqvpnViewModelTest {
     }
 
     private val testSettings = DemoSettings(serverAddress = "repo.example.com", serverPort = 1234)
-    private val mockRepository = mockk<SettingsRepository>(relaxed = true).also {
-        every { it.settings } returns MutableStateFlow(testSettings)
+    private val mockAvailability = mockk<TransportAvailability>(relaxed = true).also {
+        every { it.available } returns MutableStateFlow(emptySet())
     }
 
     private val fixedClock: () -> Long = { 42L }
@@ -71,12 +71,32 @@ class MqvpnViewModelTest {
     @Before
     fun setUp() {
         Dispatchers.setMain(testDispatcher)
-        viewModel = MqvpnViewModel(mockManager, mockRepository, fixedClock, fakeNanoClock)
+        viewModel = MqvpnViewModel(mockManager, mockAvailability, fixedClock, fakeNanoClock)
     }
 
     @After
     fun tearDown() {
         Dispatchers.resetMain()
+    }
+
+    @Test
+    fun `init re-attaches the manager to a running service`() {
+        // a ViewModel recreated while the VPN kept running must restore the
+        // manager-service binding, or the UI stays frozen
+        verify { mockManager.attach(MyVpnService::class.java) }
+    }
+
+    @Test
+    fun `onCleared must not sever the singleton manager`() {
+        // regression guard: onCleared() used to call manager.destroy(), which
+        // froze the dashboard and broke disconnect once the activity died
+        // while the VPN kept running
+        val onCleared = androidx.lifecycle.ViewModel::class.java.getDeclaredMethod("onCleared")
+        onCleared.isAccessible = true
+        onCleared.invoke(viewModel)
+
+        verify(exactly = 0) { mockManager.destroy() }
+        verify(exactly = 0) { mockManager.disconnect() }
     }
 
     /** runTest cleanup drains the scheduler to empty; a live ticker never idles it. */
@@ -209,8 +229,8 @@ class MqvpnViewModelTest {
     }
 
     @Test
-    fun `connectWithSavedSettings connects using config built from repository settings`() = runTest(testDispatcher) {
-        viewModel.connectWithSavedSettings()
+    fun `connect builds the config from the passed settings`() = runTest(testDispatcher) {
+        viewModel.connect(testSettings)
         advanceUntilIdle()
 
         verify(exactly = 1) { mockManager.connect(testSettings.toMqvpnConfig(), MyVpnService::class.java) }
@@ -219,49 +239,30 @@ class MqvpnViewModelTest {
     }
 
     @Test
-    fun `repeated connectWithSavedSettings calls while read is suspended only connect once`() = runTest(testDispatcher) {
-        val signal = MutableSharedFlow<DemoSettings>()
-        val slowRepository = mockk<SettingsRepository>(relaxed = true).also {
-            every { it.settings } returns signal
-        }
-        val slowViewModel = MqvpnViewModel(mockManager, slowRepository, fixedClock, fakeNanoClock)
-
-        slowViewModel.connectWithSavedSettings()
-        slowViewModel.connectWithSavedSettings()
-        slowViewModel.connectWithSavedSettings()
-        advanceUntilIdle()
-
-        assertEquals(true, slowViewModel.connectPending.value)
-        verify(exactly = 0) { mockManager.connect(any(), any()) }
-
-        signal.emit(testSettings)
+    fun `repeated connect calls while one is pending only connect once`() = runTest(testDispatcher) {
+        viewModel.connect(testSettings)
+        viewModel.connect(testSettings)
+        viewModel.connect(testSettings)
         advanceUntilIdle()
 
         verify(exactly = 1) { mockManager.connect(any(), any()) }
-        assertEquals(false, slowViewModel.connectPending.value)
+        assertEquals(false, viewModel.connectPending.value)
     }
 
     @Test
-    fun `connectWithSavedSettings surfaces repository failure without connecting`() = runTest(testDispatcher) {
-        val failingRepository = mockk<SettingsRepository>(relaxed = true).also {
-            every { it.settings } returns flow { throw IllegalStateException("boom") }
-        }
-        val failingViewModel = MqvpnViewModel(mockManager, failingRepository, fixedClock, fakeNanoClock)
-
-        failingViewModel.connectWithSavedSettings()
+    fun `connect surfaces a manager failure and a later attempt clears it`() = runTest(testDispatcher) {
+        every { mockManager.connect(any(), any()) } throws IllegalStateException("boom")
+        viewModel.connect(testSettings)
         advanceUntilIdle()
 
-        assertEquals("Connect failed: boom", failingViewModel.connectError.value)
-        assertEquals(false, failingViewModel.connectPending.value)
-        verify(exactly = 0) { mockManager.connect(any(), any()) }
+        assertEquals("Connect failed: boom", viewModel.connectError.value)
+        assertEquals(false, viewModel.connectPending.value)
 
-        // A subsequent successful attempt clears the error.
-        every { failingRepository.settings } returns MutableStateFlow(testSettings)
-        failingViewModel.connectWithSavedSettings()
+        every { mockManager.connect(any(), any()) } returns Unit
+        viewModel.connect(testSettings)
         advanceUntilIdle()
 
-        assertNull(failingViewModel.connectError.value)
-        verify(exactly = 1) { mockManager.connect(testSettings.toMqvpnConfig(), MyVpnService::class.java) }
+        assertNull(viewModel.connectError.value)
     }
 
     @Test
@@ -314,7 +315,7 @@ class MqvpnViewModelTest {
         }
         assertEquals(3, viewModel.bandwidthHistory.value.samples.size)
         // idle counters -> all-zero samples, but they still flow
-        assertTrue(viewModel.bandwidthHistory.value.samples.all { it.totalBps == 0L })
+        assertTrue(viewModel.bandwidthHistory.value.samples.all { it.dlBps + it.ulBps == 0L })
     }
 
     @Test
@@ -359,5 +360,59 @@ class MqvpnViewModelTest {
         runCurrent()
         fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent()
         assertEquals(2, viewModel.bandwidthHistory.value.samples.size) // resumed
+    }
+
+    private fun reorder(delivered: Long, filled: Long) =
+        ReorderStats(delivered = delivered, gapCount = filled, gapFilled = filled)
+
+    @Test
+    fun `reorder history lossPct and elapsed follow eager flows and clear on disconnect`() = tickerTest {
+        var now = 1_000L
+        val vm = MqvpnViewModel(mockManager, mockAvailability, { now }, fakeNanoClock)
+        runCurrent()
+        stateFlow.value = MqvpnState.Connected(connectedInfo())
+        runCurrent() // connectedAt = 1000
+        reorderStatsFlow.value = reorder(10, 1)
+        statsFlow.value = VpnStats(dgramSent = 100, dgramLost = 1)
+        now += 1_000; fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent() // baseline
+        reorderStatsFlow.value = reorder(20, 3)
+        statsFlow.value = VpnStats(dgramSent = 200, dgramLost = 3)
+        now += 1_000; fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent()
+        // no subscriber on any stateIn view was attached
+        assertEquals(1, vm.reorderHistory.value.samples.size)
+        assertEquals(2L, vm.elapsedSec.value)
+        assertEquals(0.02, vm.lossPct.value!!, 1e-9) // (3-1)/(200-100)
+        stateFlow.value = MqvpnState.Disconnected
+        runCurrent()
+        assertTrue(vm.reorderHistory.value.samples.isEmpty())
+        assertNull(vm.lossPct.value)
+        assertNull(vm.elapsedSec.value)
+    }
+
+    @Test
+    fun `elapsed is anchored at the transition into Connected not at each emission`() = tickerTest {
+        var now = 1_000L
+        val vm = MqvpnViewModel(mockManager, mockAvailability, { now }, fakeNanoClock)
+        runCurrent()
+        stateFlow.value = MqvpnState.Connected(connectedInfo())
+        runCurrent()
+        now += 5_000
+        stateFlow.value = MqvpnState.Connected(connectedInfo().copy(mtu = 1300)) // re-emission
+        runCurrent()
+        fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent()
+        assertEquals(5L, vm.elapsedSec.value)
+    }
+
+    @Test
+    fun `elapsed counts from the service connect timestamp on re-attach`() = tickerTest {
+        // A re-attached UI (new ViewModel) replays a Connected state that the
+        // service emitted earlier; elapsed must span the whole session, not
+        // the time since the replay.
+        stateFlow.value = MqvpnState.Connected(connectedInfo().copy(connectedAtMs = 4_000L))
+        var now = 10_000L
+        val vm = MqvpnViewModel(mockManager, mockAvailability, { now }, fakeNanoClock)
+        runCurrent()
+        now += 1_000; fakeNanos += 1_000_000_000L; advanceTimeBy(1_000); runCurrent()
+        assertEquals(7L, vm.elapsedSec.value) // (11_000 - 4_000) / 1000
     }
 }

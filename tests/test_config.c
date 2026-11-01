@@ -335,7 +335,7 @@ static void
 test_parse_init_max_path_id_bounds(void)
 {
     const char *ini_ok = "[Multipath]\n"
-                         "InitMaxPathId = 4294967295\n";
+                         "InitMaxPathId = 128\n";
     char *path = write_tmp(ini_ok);
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
@@ -343,10 +343,10 @@ test_parse_init_max_path_id_bounds(void)
     unlink(path);
 
     ASSERT_EQ_INT(rc, 0, "InitMaxPathId max parse ok");
-    ASSERT_EQ_ULL(cfg.init_max_path_id, 4294967295ULL, "InitMaxPathId max stored");
+    ASSERT_EQ_ULL(cfg.init_max_path_id, 128ULL, "InitMaxPathId max stored");
 
     const char *ini_bad = "[Multipath]\n"
-                          "InitMaxPathId = 4294967296\n";
+                          "InitMaxPathId = 129\n";
     path = write_tmp(ini_bad);
     mqvpn_config_defaults(&cfg);
     rc = mqvpn_config_load(&cfg, path);
@@ -361,12 +361,12 @@ test_parse_init_max_path_id_json_bounds(void)
 {
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
-    int rc = mqvpn_config_load_json_filecfg(&cfg, "{\"init_max_path_id\":4294967295}");
+    int rc = mqvpn_config_load_json_filecfg(&cfg, "{\"init_max_path_id\":128}");
     ASSERT_EQ_INT(rc, 0, "JSON init_max_path_id max parse ok");
-    ASSERT_EQ_ULL(cfg.init_max_path_id, 4294967295ULL, "JSON init_max_path_id max");
+    ASSERT_EQ_ULL(cfg.init_max_path_id, 128ULL, "JSON init_max_path_id max");
 
     mqvpn_config_defaults(&cfg);
-    rc = mqvpn_config_load_json_filecfg(&cfg, "{\"init_max_path_id\":4294967296}");
+    rc = mqvpn_config_load_json_filecfg(&cfg, "{\"init_max_path_id\":129}");
     ASSERT_EQ_INT(rc, 0, "JSON init_max_path_id overflow is warning-only");
     ASSERT_EQ_ULL(cfg.init_max_path_id, 0, "JSON init_max_path_id overflow ignored");
 }
@@ -478,25 +478,30 @@ test_boolean_parsing(void)
     unlink(path);
     ASSERT_EQ_INT(cfg.insecure, 1, "insecure=true");
 
-    const char *ini_yes = "[Server]\n"
-                          "Address = host:443\n"
-                          "Insecure = yes\n";
+    /* Only true/false (any case) are booleans; anything else fails the load
+     * instead of being read as false. */
+    const char *rejected[] = {"yes", "no", "1", "0", "on", "off", "auto", ""};
+    for (size_t i = 0; i < sizeof(rejected) / sizeof(rejected[0]); i++) {
+        char ini[96];
+        snprintf(ini, sizeof(ini), "[Server]\nAddress = host:443\nInsecure = %s\n",
+                 rejected[i]);
+        path = write_tmp(ini);
+        mqvpn_config_defaults(&cfg);
+        ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), -1, rejected[i]);
+        unlink(path);
+    }
 
-    path = write_tmp(ini_yes);
+    /* A later valid duplicate does not cancel an earlier invalid line. */
+    path = write_tmp("[Server]\nAddress = host:443\nInsecure = on\nInsecure = true\n");
     mqvpn_config_defaults(&cfg);
-    mqvpn_config_load(&cfg, path);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), -1, "invalid then valid duplicate");
     unlink(path);
-    ASSERT_EQ_INT(cfg.insecure, 1, "insecure=yes");
 
-    const char *ini_one = "[Server]\n"
-                          "Address = host:443\n"
-                          "Insecure = 1\n";
-
-    path = write_tmp(ini_one);
+    path = write_tmp("[Server]\nAddress = host:443\nInsecure = TRUE\n");
     mqvpn_config_defaults(&cfg);
-    mqvpn_config_load(&cfg, path);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), 0, "insecure=TRUE loads");
     unlink(path);
-    ASSERT_EQ_INT(cfg.insecure, 1, "insecure=1");
+    ASSERT_EQ_INT(cfg.insecure, 1, "insecure=TRUE");
 
     const char *ini_false = "[Server]\n"
                             "Address = host:443\n"
@@ -1175,13 +1180,10 @@ test_pmtud_parse(void)
     unlink(path);
     ASSERT_EQ_INT(cfg.pmtud, 1, "PMTUD true parsed");
 
-    /* "on" is accepted; "2" is not a boolean, so it is ignored with a
-     * warning and not read as off */
-    path = write_tmp("[Interface]\nPMTUD = on\nPMTUD = 2\n");
+    path = write_tmp("[Interface]\nPMTUD = on\n");
     mqvpn_config_defaults(&cfg);
-    mqvpn_config_load(&cfg, path);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), -1, "PMTUD on fails the load");
     unlink(path);
-    ASSERT_EQ_INT(cfg.pmtud, 1, "PMTUD 2 ignored, on kept");
 }
 
 static void
@@ -2487,20 +2489,44 @@ test_redundant_ports_ini_json(void)
 }
 
 static void
-test_redundant_ini_onoff(void)
+test_redundant_ini_bool(void)
 {
-    const char *vals[] = {"on", "off", "ON", "Off", "true", "no", "bogus"};
-    const int want[] = {1, 0, 1, 0, 1, 0, 0};
+    const char *vals[] = {"true", "false", "TRUE", "False", "on", "off", "no", "bogus"};
+    const int want_rc[] = {0, 0, 0, 0, -1, -1, -1, -1};
+    const int want[] = {1, 0, 1, 0, 0, 0, 0, 0};
     for (size_t i = 0; i < sizeof(vals) / sizeof(vals[0]); i++) {
         char ini[64];
         snprintf(ini, sizeof(ini), "[Multipath]\nRedundant = %s\n", vals[i]);
         char *path = write_tmp(ini);
         mqvpn_file_config_t c;
         mqvpn_config_defaults(&c);
-        mqvpn_config_load(&c, path);
+        ASSERT_EQ_INT(mqvpn_config_load(&c, path), want_rc[i], vals[i]);
         unlink(path);
         ASSERT_EQ_INT(c.redundant, want[i], vals[i]);
     }
+}
+
+static void
+test_json_bool_strict(void)
+{
+    /* A bool key must be a JSON true/false; a string such as "on" (or even
+     * "true") fails the load, in every scope. */
+    const char *bad[] = {
+        "{\"insecure\":\"true\"}",
+        "{\"hybrid\":{\"enabled\":\"on\"}}",
+        "{\"reorder\":{\"enabled\":\"on\"}}",
+        "{\"advanced\":{\"udp_gso\":1}}",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        mqvpn_file_config_t c;
+        mqvpn_config_defaults(&c);
+        ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&c, bad[i]), -1, bad[i]);
+    }
+    mqvpn_file_config_t c;
+    mqvpn_config_defaults(&c);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&c, "{\"hybrid\":{\"enabled\":true}}"),
+                  0, "hybrid enabled true loads");
+    ASSERT_EQ_INT(c.hybrid.enabled, 1, "hybrid enabled true");
 }
 
 static void
@@ -2545,7 +2571,7 @@ test_ini_json_scalar_parity(void)
                       "ReinjectionDeadlineLowerBoundMs = 10\n"
                       "Redundant = true\n"
                       "[Reorder]\n"
-                      "Enabled = on\n"
+                      "Enabled = true\n"
                       "MaxWaitMs = 55\n"
                       "CapPackets = 256\n"
                       "MaxBytesPerFlow = 5000000\n"
@@ -2607,7 +2633,7 @@ test_ini_json_scalar_parity(void)
                        "\"reinjection_deadline_lower_bound_ms\":10,"
                        "\"redundant\":true,"
                        "\"reorder\":{"
-                       "\"enabled\":\"on\","
+                       "\"enabled\":true,"
                        "\"max_wait_ms\":55,"
                        "\"cap_packets\":256,"
                        "\"max_bytes_per_flow\":5000000,"
@@ -2795,13 +2821,13 @@ test_ini_json_invalid_scalar_parity(void)
     ASSERT_EQ_INT(b.max_clients, 64, "parse-fail max_clients json -> 64");
 
     /* InitMaxPathId over bound → keep default 0 on both sides */
-    p = write_tmp("[Multipath]\nInitMaxPathId = 4294967296\n");
+    p = write_tmp("[Multipath]\nInitMaxPathId = 129\n");
     mqvpn_config_defaults(&a);
     rc = mqvpn_config_load(&a, p);
     unlink(p);
     ASSERT_EQ_INT(rc, 0, "over-bound impid ini load rc 0");
     mqvpn_config_defaults(&b);
-    mqvpn_config_load_json_filecfg(&b, "{\"init_max_path_id\":4294967296}");
+    mqvpn_config_load_json_filecfg(&b, "{\"init_max_path_id\":129}");
     ASSERT_EQ_INT((int)a.init_max_path_id, 0, "over-bound impid ini keeps 0");
     ASSERT_EQ_INT((int)b.init_max_path_id, 0, "over-bound impid json keeps 0");
 
@@ -3004,7 +3030,8 @@ main(void)
     /* INI/JSON scalar-key parity */
     test_ini_json_scalar_parity();
     test_redundant_ports_ini_json();
-    test_redundant_ini_onoff();
+    test_redundant_ini_bool();
+    test_json_bool_strict();
     test_ini_json_invalid_scalar_parity();
 
     /* JSON parser strictness */

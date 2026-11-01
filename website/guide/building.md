@@ -199,7 +199,7 @@ android/
 ## iOS
 
 ::: info
-iOS support is client-only and in development: the app and PacketTunnel extension live under `ios/poc/`. CI cross-builds the full chain and compiles the app unsigned; running on a device requires your own signing identity.
+iOS support is client-only and in development: the app and PacketTunnel extension live under `ios/app/`. CI cross-builds the full chain and compiles the app unsigned; running on a device requires your own signing identity.
 :::
 
 ### Prerequisites
@@ -221,10 +221,10 @@ The script builds everything for `iphoneos`/arm64 with deployment target 15.0, e
 ### Build the app and PacketTunnel extension
 
 ```bash
-bash ios/poc/Tests/run-host-tests.sh                         # Swift host tests (no SDK required)
+bash ios/app/Tests/run-host-tests.sh                         # Swift host tests (no SDK required)
 
-cp ios/poc/Config.example.xcconfig ios/poc/Config.xcconfig   # set your DEVELOPMENT_TEAM
-(cd ios/poc && xcodegen generate)                            # generate the Xcode project
+cp ios/app/Config.example.xcconfig ios/app/Config.xcconfig   # set your DEVELOPMENT_TEAM
+(cd ios/app && xcodegen generate)                            # generate the Xcode project
 ```
 
 CI builds the same project unsigned (`CODE_SIGNING_ALLOWED=NO`); device and simulator execution remain a manual step.

@@ -15,8 +15,9 @@
 # happens when a re-added path's validation traffic is silently dropped:
 #
 #   - A black-holed PATH_CHALLENGE must NOT wedge the path in VALIDATING
-#     forever. xquic retransmits the challenge at PTO cadence and, after
-#     3 attempts, abandons the path with a WARN containing
+#     forever. xquic retransmits the challenge in PTO probes and, at the
+#     validation deadline (three times the larger PTO, RFC 9000 Section
+#     8.2.4), abandons the path with a WARN containing
 #     "G-P3 validation timeout". The mqvpn FSM then transitions the slot
 #     VALIDATING -> CREATE_WAIT (reason=XQUIC_REMOVED) and schedules a
 #     backoff retry.
@@ -55,8 +56,9 @@
 #   4. within 20s of link-up the client logs "G-P3 validation timeout"
 #      AND an FSM "-> CREATE_WAIT" transition for veth-a0-vb
 #   5. between link-up and the first G-P3 line, count PATH_CHALLENGE
-#      packet-send lines (xquic "|<==|...|frame:...PATH_CHALLENGE"):
-#      expect >= 3 (PTO retransmits)
+#      packet-send lines on the abandoned path
+#      (xquic "|<==|...|path:N|...|frame:...PATH_CHALLENGE"):
+#      expect >= 3 (the first send and its PTO probe copies)
 #   6. Remove the black hole ~25s after link-up (within the retry budget)
 #   7. Recovery: within 45s of removal the path returns to ACTIVE/STANDBY
 #
@@ -279,7 +281,7 @@ ip netns exec "$NS_CLIENT" ip link set "$VETH_A0" up
 LINKUP_TS=$(date +%s)
 
 # ─── Assertion 1: challenge abandoned, slot -> CREATE_WAIT ───
-# xquic WARN: "|G-P3 validation timeout|path_id:N|attempts:M|"
+# xquic WARN: "|G-P3 validation timeout|path_id:N|"
 # mqvpn DEBUG: "path[handle=N name=veth-a0-vb] VALIDATING -> CREATE_WAIT reason=XQUIC_REMOVED ..."
 if ! wait_for_log_after "${WORK_DIR}/client.log" \
         "G-P3 validation timeout" "$LINKUP_MARK" 20; then
@@ -296,6 +298,8 @@ echo "OK: black-holed challenge abandoned with G-P3 validation timeout"
 GP3_REL=$(tail -n "+$((LINKUP_MARK + 1))" "${WORK_DIR}/client.log" \
     | grep -nE "G-P3 validation timeout" | head -1 | cut -d: -f1)
 GP3_LINE=$((LINKUP_MARK + GP3_REL))
+GP3_PATH_ID=$(sed -n "${GP3_LINE}p" "${WORK_DIR}/client.log" \
+    | sed -nE 's/.*G-P3 validation timeout\|path_id:([0-9]+)\|.*/\1/p')
 
 # 30s, not 10s: the abandon now arms a draining backstop (xquic fix N3)
 # before CLOSING -> CLOSED -> path_removed_notify fires. The backstop is
@@ -312,14 +316,14 @@ if ! wait_for_log_after "${WORK_DIR}/client.log" \
 fi
 echo "OK: FSM transitioned Path A to CREATE_WAIT (reason=XQUIC_REMOVED)"
 
-# ─── Assertion 2: challenge retransmitted at PTO cadence ───
-# Count PATH_CHALLENGE packet-SEND lines (xquic send marker "|<==|")
-# between link-up and the first G-P3 line, so receive/loss lines that
-# also mention PATH_CHALLENGE cannot inflate the count. Expect >= 3
-# (the initial send plus PTO retransmits before the path is abandoned).
+# ─── Assertion 2: challenge retransmitted before the deadline ───
+# Count PATH_CHALLENGE packet-SEND lines (xquic send marker "|<==|") on
+# the abandoned path between link-up and the first G-P3 line, so
+# receive/loss lines and other paths cannot inflate the count. Expect
+# >= 3 (the initial send plus the PTO probe copies before the deadline).
 CHALLENGE_COUNT=$(sed -n "$((LINKUP_MARK + 1)),${GP3_LINE}p" \
     "${WORK_DIR}/client.log" \
-    | grep -cE "\|<==\|.*frame:.*PATH_CHALLENGE" || true)
+    | grep -cE "\|<==\|.*\|path:${GP3_PATH_ID}\|.*frame:.*PATH_CHALLENGE" || true)
 echo "Path A PATH_CHALLENGE sends before abandon: ${CHALLENGE_COUNT}"
 if [ "${CHALLENGE_COUNT:-0}" -lt 3 ]; then
     echo "=== FAIL: expected >= 3 PATH_CHALLENGE retransmits, saw ${CHALLENGE_COUNT} ==="
@@ -327,7 +331,7 @@ if [ "${CHALLENGE_COUNT:-0}" -lt 3 ]; then
     tail -n "+$((LINKUP_MARK + 1))" "${WORK_DIR}/client.log"
     exit 1
 fi
-echo "OK: PATH_CHALLENGE retransmitted at PTO cadence"
+echo "OK: PATH_CHALLENGE retransmitted before the validation deadline"
 
 # Hold the black hole in place until ~25s after link-up so the slot has
 # cycled through a couple of backoff retries (5s, 10s, ...) and is still

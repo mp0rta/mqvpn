@@ -287,7 +287,8 @@ main(int argc, char *argv[])
             /* Reject leading '-' explicitly: strtoull silently wraps "-1" to
              * UINT64_MAX rather than failing. */
             if (optarg[0] == '-' || optarg[0] == '\0') {
-                fprintf(stderr, "error: --init-max-path-id must be 0..4294967295\n");
+                fprintf(stderr, "error: --init-max-path-id must be 0..%llu\n",
+                        (unsigned long long)MQVPN_INIT_MAX_PATH_ID_MAX);
                 return 1;
             }
             char *end = NULL;
@@ -295,7 +296,8 @@ main(int argc, char *argv[])
             unsigned long long v = strtoull(optarg, &end, 10);
             if (!end || *end != '\0' || errno == ERANGE ||
                 v > MQVPN_INIT_MAX_PATH_ID_MAX) {
-                fprintf(stderr, "error: --init-max-path-id must be 0..4294967295\n");
+                fprintf(stderr, "error: --init-max-path-id must be 0..%llu\n",
+                        (unsigned long long)MQVPN_INIT_MAX_PATH_ID_MAX);
                 return 1;
             }
             init_max_path_id = (uint64_t)v;

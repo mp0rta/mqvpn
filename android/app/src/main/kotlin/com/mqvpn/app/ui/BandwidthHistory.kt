@@ -5,10 +5,12 @@ package com.mqvpn.app.ui
 
 import com.mqvpn.sdk.core.model.PathInfo
 
-/** One 1 s chart sample: total and per-iface throughput in bits per second. */
+/** One 1 s chart sample: per-direction total and per-iface throughput in bits per second. */
 data class BandwidthSample(
-    val totalBps: Long,
-    val perPathBps: Map<String, Long>,
+    val wallMs: Long,                      // time axis
+    val dlBps: Long, val ulBps: Long,      // totals per direction
+    val perPathDlBps: Map<String, Long>,
+    val perPathUlBps: Map<String, Long>,
 )
 
 /** History + stable per-iface palette slots, published together for the chart. */
@@ -22,51 +24,59 @@ data class BandwidthHistoryState(
  * per-second bps samples. Pure logic — no coroutines, no Android types.
  * Single-writer: only the ViewModel ticker calls into this class.
  */
-class BandwidthHistory(private val maxSamples: Int = MAX_SAMPLES) {
+class BandwidthHistory(private val windowMs: Long = 30_000) {
 
     private var lastNanos: Long? = null
-    private val baselines = mutableMapOf<String, Long>() // iface -> cumulative tx+rx bytes
-    private val slots = mutableMapOf<String, Int>()      // iface -> palette slot, first-ever order
+    private val rxBase = mutableMapOf<String, Long>() // iface -> cumulative rx bytes (download)
+    private val txBase = mutableMapOf<String, Long>() // iface -> cumulative tx bytes (upload)
+    private val slots = mutableMapOf<String, Int>()   // iface -> palette slot, first-ever order
     private val samples = ArrayDeque<BandwidthSample>()
 
-    fun onTick(paths: List<PathInfo>, nowNanos: Long): List<BandwidthSample> {
+    fun onTick(paths: List<PathInfo>, nowNanos: Long, nowMs: Long): List<BandwidthSample> {
         val prevNanos = lastNanos
         if (prevNanos != null && nowNanos <= prevNanos) return samples.toList()
 
-        val bytesByIface = paths
-            .groupBy { it.iface }
-            .mapValues { (_, ps) -> ps.sumOf { it.bytesTx + it.bytesRx } }
-
-        val perPath = mutableMapOf<String, Long>()
-        for ((iface, bytes) in bytesByIface) {
-            slots.getOrPut(iface) { slots.size }
-            val base = baselines[iface]
-            perPath[iface] = if (prevNanos == null || base == null || bytes < base) {
-                0L // first tick, reappeared path, or counter reset: (re-)baseline only
-            } else {
-                ((bytes - base) * 8.0 * NANOS_PER_SEC / (nowNanos - prevNanos)).toLong()
-            }
-            baselines[iface] = bytes
-        }
-        baselines.keys.retainAll(bytesByIface.keys)
+        val byIface = paths.groupBy { it.iface }
+        for (iface in byIface.keys) slots.getOrPut(iface) { slots.size }
+        val dl = rates(byIface.mapValues { (_, ps) -> ps.sumOf { it.bytesRx } }, rxBase, prevNanos, nowNanos)
+        val ul = rates(byIface.mapValues { (_, ps) -> ps.sumOf { it.bytesTx } }, txBase, prevNanos, nowNanos)
         lastNanos = nowNanos
 
-        samples.addLast(BandwidthSample(perPath.values.sum(), perPath))
-        while (samples.size > maxSamples) samples.removeFirst()
+        samples.addLast(BandwidthSample(nowMs, dl.values.sum(), ul.values.sum(), dl, ul))
+        while (samples.isNotEmpty() && samples.first().wallMs < nowMs - windowMs) samples.removeFirst()
         return samples.toList()
+    }
+
+    private fun rates(
+        bytes: Map<String, Long>, base: MutableMap<String, Long>, prevNanos: Long?, nowNanos: Long,
+    ): Map<String, Long> {
+        val out = mutableMapOf<String, Long>()
+        for ((iface, b) in bytes) {
+            val prev = base[iface]
+            out[iface] = if (prevNanos == null || prev == null || b < prev) {
+                0L // first tick, reappeared path, or counter reset: (re-)baseline only
+            } else {
+                ((b - prev) * 8.0 * NANOS_PER_SEC / (nowNanos - prevNanos)).toLong()
+            }
+            base[iface] = b
+        }
+        base.keys.retainAll(bytes.keys)
+        return out
     }
 
     fun ifaceSlots(): Map<String, Int> = slots.toMap()
 
     fun clear() {
         lastNanos = null
-        baselines.clear()
+        rxBase.clear()
+        txBase.clear()
         slots.clear()
         samples.clear()
     }
 
     companion object {
-        const val MAX_SAMPLES = 60
+        /** Samples visible in the default 30 s window at 1 Hz (chart x-scale). */
+        const val MAX_SAMPLES = 30
         private const val NANOS_PER_SEC = 1e9
     }
 }

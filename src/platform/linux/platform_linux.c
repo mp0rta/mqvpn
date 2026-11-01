@@ -1084,11 +1084,8 @@ svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_a
 
     int optval = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
-    /* The platform sizes its own listen socket, so the transport ctx is told
-     * to leave the buffers alone (socket_buf_bytes = -1). */
-    int bufsize = 1 * 1024 * 1024;
-    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+    /* Socket buffers are sized by the transport ctx (bind default), as on
+     * the client paths. */
 
     memset(out_addr, 0, sizeof(*out_addr));
     if (af == AF_INET6) {
@@ -1132,13 +1129,16 @@ svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_a
  * harvest runs after ctrl_socket_destroy, so no request survives to see a
  * ctx's numbers both live and accumulated. */
 static void
-svr_rx_stats(void *arg, uint64_t *receives, uint64_t *datagrams)
+svr_rx_stats(void *arg, uint64_t *receives, uint64_t *datagrams, uint64_t *queue_drops)
 {
     server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
     mqvpn_bind_posix_stats_t st = {.struct_size = sizeof(st)};
     if (sp->bind_ctx) mqvpn_bind_posix_server_get_stats(sp->bind_ctx, &st);
     *receives = sp->gro_receives + st.rx_receives;
     *datagrams = sp->gro_datagrams + st.rx_datagrams;
+    /* A property of the one listen socket, which outlives every control
+     * request: nothing to accumulate across transport ctxs. */
+    *queue_drops = st.rx_queue_drops;
 }
 
 int
@@ -1250,7 +1250,11 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     bopts.struct_size = sizeof(bopts);
     bopts.udp_gso = cfg->udp_gso;
     bopts.udp_gro = cfg->udp_gro;
-    bopts.socket_buf_bytes = -1; /* svr_create_udp_socket sized them (1 MiB) */
+    /* The bind's default (7 MiB, forced past rmem_max/wmem_max when
+     * privileged), as on every client path: this one socket takes every
+     * client's traffic, and each overflow of its receive queue drops a whole
+     * GRO batch of datagrams that nothing retransmits. */
+    bopts.socket_buf_bytes = 0;
     snprintf(bopts.tag, sizeof(bopts.tag), "server");
     if (mqvpn_bind_posix_server_new(sp.udp_fd, &bopts, &sp.bind_ctx) != MQVPN_OK) {
         LOG_ERR("server transport setup failed");

@@ -3,13 +3,14 @@
 # Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_g_p15_standby_signal_test.sh — G-P15 (mqvpn lifecycle -> xquic path-status glue).
 #
-# When mqvpn marks the secondary path as STANDBY (backup_fec scheduler), the
-# client emits PATH_STATUS_BACKUP and the server's xqc_process_path_status_frame
-# must log:
+# When mqvpn creates the secondary path as STANDBY (backup_fec scheduler), the
+# path_status passed to xqc_conn_create_path makes the client emit
+# PATH_STATUS_BACKUP, and the server's xqc_process_path_status_frame must log:
 #   |path status:1|path_id:1|   (path_status=1 == STANDBY enum)
 #
-# This is wire-level proof of the glue; the parent backup_fec test only
-# verifies the client-side log marker.
+# The BACKUP status the server observes comes only from that creation-time
+# path_status. This is wire-level proof of the glue; the parent backup_fec
+# test only verifies the client-side log marker.
 #
 # Topology: standard dual-path veth (-gp15 suffix).
 #

@@ -35,13 +35,17 @@
 #                          tests/test_path_state_machine.c,
 #                          formal/oracle/oracle_abs.h
 #   oracle_abs.h           tests/test_path_slot_oracle.c,
+#                          tests/test_path_slot_mbt.c,
 #                          formal/cbmc/harness_path_on_event.c
 #                          (the formal-verification harnesses reach the FSM
 #                          through oracle_abs.h only)
+#   mqvpn_client.c         tests/mbt_client_tu.c (the model-based test's
+#                          private copy of the client, against a fake xquic)
 # Every file the table names is guarded the same way, by basename, and may
 # be #included only where the table allows it. So #including any of those
 # .c files as a translation unit, which would smuggle the definition in, is
-# allowed nowhere, and a header added as an includer needs rows of its own.
+# allowed nowhere but in the one row above, and a header added as an
+# includer needs rows of its own.
 # An allowlist entry that is not a tracked file is itself a violation: the
 # allowlist has to describe the tree. So is a guarded basename that no
 # tracked file bears, or renaming a guarded file would switch its guard off
@@ -96,7 +100,9 @@ path_state_machine.h src/path_state_machine.c
 path_state_machine.h tests/test_path_state_machine.c
 path_state_machine.h formal/oracle/oracle_abs.h
 oracle_abs.h tests/test_path_slot_oracle.c
+oracle_abs.h tests/test_path_slot_mbt.c
 oracle_abs.h formal/cbmc/harness_path_on_event.c
+mqvpn_client.c tests/mbt_client_tu.c
 '
 # Every basename the table names, once each; then as one ERE alternation,
 # dots escaped.

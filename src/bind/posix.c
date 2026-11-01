@@ -47,7 +47,9 @@ typedef struct {
     mqvpn_transport_stats_t tx;
     uint64_t rx_receives;
     uint64_t rx_datagrams;
-    int send_err_logged; /* one-shot guard for the single-datagram errno log */
+    uint64_t rx_queue_drops; /* summed from the kernel's 32-bit counter */
+    uint32_t rx_queue_last;  /* last value counted; stale values are skipped */
+    int send_err_logged;     /* one-shot guard for the single-datagram errno log */
 } bind_common_t;
 
 typedef struct {
@@ -165,6 +167,8 @@ bind_common_init(bind_common_t *c, int fd, const mqvpn_bind_posix_opts_t *opts_i
 
     bind_apply_sockbuf(fd, o.socket_buf_bytes, label);
 #if defined(__linux__)
+    /* Best effort and silent: only the rx_queue_drops counter depends on it. */
+    (void)mqvpn_udp_rxq_ovfl_enable(fd);
     if (o.udp_gro) {
         if (mqvpn_udp_gro_enable(fd) == 0)
             c->gro_enabled = 1;
@@ -302,23 +306,38 @@ bind_send(bind_common_t *c, int *gso_disabled, int *warned, const mqvpn_datagram
 typedef void (*bind_deliver_fn)(void *arg, const uint8_t *pkt, size_t len,
                                 const struct sockaddr *peer, socklen_t peer_len);
 
-/* One receive; deliver == NULL drains without delivering. Returns 1/0/-1 per
- * the header contract and reports the delivered-datagram count for the
- * caller's budget accounting. Truncated aggregates are dropped (counted as
- * one unit of work, delivered 0) exactly as the platform loop did. */
+/* One receive into buf (BIND_POSIX_RX_BUF bytes); deliver == NULL drains
+ * without delivering. Returns 1/0/-1 per the header contract and reports the
+ * delivered-datagram count for the caller's budget accounting. Truncated
+ * aggregates are dropped (counted as one unit of work, delivered 0) exactly
+ * as the platform loop did. The caller owns buf so that a drain loop reserves
+ * the 64 KiB once, not once per receive (with -fstack-clash-protection each
+ * reservation writes to all 16 of its pages). */
 static int
-bind_recv_one(bind_common_t *c, bind_deliver_fn deliver, void *arg, unsigned *delivered)
+bind_recv_one(bind_common_t *c, uint8_t *buf, bind_deliver_fn deliver, void *arg,
+              unsigned *delivered)
 {
-    uint8_t buf[BIND_POSIX_RX_BUF];
     struct sockaddr_storage peer;
     socklen_t peer_len = sizeof(peer);
     size_t seg = 0;
     ssize_t n;
     *delivered = 0;
 #if defined(__linux__)
-    // codeql[cpp/uncontrolled-allocation-size] stack buffer bounded by sizeof(buf)
-    n = mqvpn_udp_recv_segmented(c->fd, buf, sizeof(buf), (struct sockaddr *)&peer,
-                                 &peer_len, &seg);
+    uint32_t drops = c->rx_queue_last;
+    // codeql[cpp/uncontrolled-allocation-size] caller buffer of BIND_POSIX_RX_BUF bytes
+    n = mqvpn_udp_recv_segmented(c->fd, buf, BIND_POSIX_RX_BUF, (struct sockaddr *)&peer,
+                                 &peer_len, &seg, &drops);
+    /* The kernel reports a wrapping 32-bit total; sum its forward steps. Since
+     * Linux 6.18 an older total can arrive after a newer one (each NUMA node
+     * reads it before taking the queue lock), so a backward step is skipped.
+     * The step is a signed 32-bit difference, which assumes fewer than 2^31
+     * drops between two datagrams read: a larger jump looks like a stale
+     * total, so it is skipped too and the baseline stays where it was. */
+    int32_t d = (int32_t)(drops - c->rx_queue_last);
+    if (d > 0) {
+        c->rx_queue_drops += (uint32_t)d;
+        c->rx_queue_last = drops;
+    }
     if (n == MQVPN_RECV_DROP) {
         char dlbl[32];
         LOG_DBG("bind-posix: truncated datagram dropped on %s",
@@ -327,8 +346,8 @@ bind_recv_one(bind_common_t *c, bind_deliver_fn deliver, void *arg, unsigned *de
     }
 #else
     do {
-        n = recvfrom(c->fd, buf, sizeof(buf), MSG_DONTWAIT, (struct sockaddr *)&peer,
-                     &peer_len);
+        n = recvfrom(c->fd, buf, BIND_POSIX_RX_BUF, MSG_DONTWAIT,
+                     (struct sockaddr *)&peer, &peer_len);
     } while (n < 0 && errno == EINTR);
 #endif
     if (n < 0) return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
@@ -349,10 +368,11 @@ bind_recv_one(bind_common_t *c, bind_deliver_fn deliver, void *arg, unsigned *de
 static int
 bind_drain(bind_common_t *c, bind_deliver_fn deliver, void *arg, int budget)
 {
+    uint8_t buf[BIND_POSIX_RX_BUF];
     int receives = 0;
     while (budget > 0) {
         unsigned delivered = 0;
-        int r = bind_recv_one(c, deliver, arg, &delivered);
+        int r = bind_recv_one(c, buf, deliver, arg, &delivered);
         if (r < 0) return -1;
         if (r == 0) break;
         receives++;
@@ -460,6 +480,7 @@ bind_fill_stats(const bind_common_t *c, mqvpn_bind_posix_stats_t *out)
         .tx = c->tx,
         .rx_receives = c->rx_receives,
         .rx_datagrams = c->rx_datagrams,
+        .rx_queue_drops = c->rx_queue_drops,
     };
     size_t copy = out->struct_size < sizeof(full) ? out->struct_size : sizeof(full);
     memcpy(out, &full, copy);
@@ -479,8 +500,9 @@ mqvpn_bind_posix_path_recv_one(void *vctx, mqvpn_client_t *client,
     bind_path_ctx_t *ctx = (bind_path_ctx_t *)vctx;
     if (!ctx || !client) return -1;
     path_deliver_arg_t a = {client, handle};
+    uint8_t buf[BIND_POSIX_RX_BUF];
     unsigned delivered;
-    return bind_recv_one(&ctx->c, handle >= 0 ? path_deliver : NULL, &a, &delivered);
+    return bind_recv_one(&ctx->c, buf, handle >= 0 ? path_deliver : NULL, &a, &delivered);
 }
 
 int
@@ -692,8 +714,9 @@ mqvpn_bind_posix_server_recv_one(void *vctx, mqvpn_server_t *server)
 {
     bind_server_ctx_t *s = (bind_server_ctx_t *)vctx;
     if (!s || !server) return -1;
+    uint8_t buf[BIND_POSIX_RX_BUF];
     unsigned delivered;
-    return bind_recv_one(&s->c, server_deliver, server, &delivered);
+    return bind_recv_one(&s->c, buf, server_deliver, server, &delivered);
 }
 
 int
