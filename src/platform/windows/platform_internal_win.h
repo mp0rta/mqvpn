@@ -57,6 +57,7 @@ typedef struct platform_win_ctx platform_win_ctx_t;
 typedef struct platform_path {
     platform_win_ctx_t *p;      /* back pointer: the read event's arg is the slot */
     char iface[IFNAMSIZ];       /* adapter FriendlyName, "" = any; kept across drops */
+    int backup;                 /* MQVPN_PATH_FLAG_BACKUP; kept across drops */
     SOCKET sock;                /* INVALID_SOCKET = the platform holds no open socket */
     struct event *ev;           /* read event; non-NULL implies a socket */
     mqvpn_path_handle_t handle; /* last successfully registered incarnation */

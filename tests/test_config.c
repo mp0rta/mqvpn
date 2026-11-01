@@ -371,6 +371,52 @@ test_path_accumulation(void)
 }
 
 static void
+test_backup_path_ini(void)
+{
+    const char *ini = "[Multipath]\n"
+                      "Scheduler = failover\n"
+                      "Path = eth0\n"
+                      "BackupPath = wwan0\n"
+                      "Path = eth1\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "backup path parse ok");
+    ASSERT_EQ_STR(cfg.scheduler, "failover", "scheduler failover");
+    ASSERT_EQ_INT(cfg.n_paths, 3, "3 paths");
+    ASSERT_EQ_STR(cfg.paths[1], "wwan0", "path[1]");
+    ASSERT_EQ_INT(cfg.path_backup[0], 0, "path[0] not backup");
+    ASSERT_EQ_INT(cfg.path_backup[1], 1, "path[1] backup");
+    ASSERT_EQ_INT(cfg.path_backup[2], 0, "path[2] not backup");
+}
+
+static void
+test_backup_paths_json(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load_json_filecfg(
+        &cfg, "{\"paths\":[\"eth0\"],\"backup_paths\":[\"wwan0\",\"wwan1\"]}");
+    ASSERT_EQ_INT(rc, 0, "backup_paths json parse ok");
+    ASSERT_EQ_INT(cfg.n_paths, 3, "3 paths");
+    ASSERT_EQ_STR(cfg.paths[0], "eth0", "path[0]");
+    ASSERT_EQ_STR(cfg.paths[2], "wwan1", "path[2]");
+    ASSERT_EQ_INT(cfg.path_backup[0], 0, "path[0] not backup");
+    ASSERT_EQ_INT(cfg.path_backup[1], 1, "path[1] backup");
+    ASSERT_EQ_INT(cfg.path_backup[2], 1, "path[2] backup");
+
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load_json_filecfg(&cfg, "{\"backup_paths\":[\"wwan0\"]}");
+    ASSERT_EQ_INT(rc, 0, "backup_paths alone parse ok");
+    ASSERT_EQ_INT(cfg.n_paths, 1, "1 path");
+    ASSERT_EQ_INT(cfg.path_backup[0], 1, "path[0] backup");
+}
+
+static void
 test_dns_comma_split(void)
 {
     const char *ini = "[Interface]\n"
@@ -2857,6 +2903,8 @@ main(void)
     test_unknown_key_warns();
     test_missing_file_error();
     test_path_accumulation();
+    test_backup_path_ini();
+    test_backup_paths_json();
     test_dns_comma_split();
     test_boolean_parsing();
     test_mode_detection();

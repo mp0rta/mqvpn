@@ -570,7 +570,8 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     }
 
     /* Create UDP sockets: one slot per configured interface, or one "any" slot */
-    if (platform_paths_open(&ctx, cfg->n_paths, cfg->path_ifaces) < 0) goto cleanup;
+    if (platform_paths_open(&ctx, cfg->n_paths, cfg->path_ifaces, cfg->path_backup) < 0)
+        goto cleanup;
 
     /* Register paths with library and create socket events */
     for (int i = 0; i < ctx.n_paths; i++) {
@@ -1178,6 +1179,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     case 1: lib_sched = MQVPN_SCHED_WLB; break;
     case 2: lib_sched = MQVPN_SCHED_BACKUP_FEC; break;
     case 3: lib_sched = MQVPN_SCHED_WLB_UDP_PIN; break;
+    case 4: lib_sched = MQVPN_SCHED_FAILOVER; break;
     default: lib_sched = MQVPN_SCHED_MINRTT; break;
     }
     mqvpn_config_set_scheduler(lib_cfg, lib_sched);

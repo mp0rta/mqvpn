@@ -515,6 +515,12 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_backup_fec_test.sh
 
+      - name: E2E failover scheduler test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_failover_test.sh
+
       - name: E2E G-P10 proactive CID issuance (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1

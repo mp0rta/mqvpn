@@ -59,6 +59,9 @@ usage(const char *prog)
         "  --genkey                  Generate a random PSK and exit\n"
         "  --path IFACE              Network interface for multipath (repeatable, client "
         "mode)\n"
+        "  --backup-path IFACE       Like --path, as a backup path: with --scheduler "
+        "failover\n"
+        "                            it carries traffic only while no --path works\n"
         "  --dns ADDR                DNS server to use (repeatable, client mode, max 4)\n"
         "  --no-reconnect            Disable automatic reconnection (client mode)\n"
         "  --kill-switch             Block traffic outside the VPN tunnel (client mode)\n"
@@ -72,7 +75,7 @@ usage(const char *prog)
         "                            (uses --control-port, or [Control] Listen from "
         "--config)\n"
         "  --cc bbr2|bbr|cubic|none  Congestion control algorithm (default bbr2)\n"
-        "  --scheduler minrtt|wlb|wlb_udp_pin|backup_fec\n"
+        "  --scheduler minrtt|wlb|wlb_udp_pin|failover|backup_fec\n"
         "                            Multipath scheduler (default wlb)\n"
         "  --allow-client-scheduler  Let clients pick the download scheduler for their "
         "own\n"
@@ -156,6 +159,7 @@ main(int argc, char *argv[])
         {"user", required_argument, NULL, 'u'},
         {"genkey", no_argument, NULL, 'G'},
         {"path", required_argument, NULL, 'p'},
+        {"backup-path", required_argument, NULL, 0x108},
         {"dns", required_argument, NULL, 'd'},
         {"scheduler", required_argument, NULL, 'S'},
         {"cc", required_argument, NULL, 0x101},
@@ -207,6 +211,7 @@ main(int argc, char *argv[])
     int cli_pmtud = -1;
     int max_clients = -1; /* -1 means "not set by CLI" */
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES];
+    int path_backup[MQVPN_MAX_PATH_IFACES] = {0};
     int n_paths = 0;
     const char *dns_servers[4];
     int n_dns = 0;
@@ -266,7 +271,9 @@ main(int argc, char *argv[])
         }
         case 'G': genkey = 1; break;
         case 'p':
+        case 0x108: /* --backup-path */
             if (n_paths < MQVPN_MAX_PATH_IFACES) {
+                path_backup[n_paths] = (opt == 0x108);
                 path_ifaces[n_paths++] = optarg;
             } else {
                 fprintf(stderr, "error: max %d paths supported\n", MQVPN_MAX_PATH_IFACES);
@@ -469,8 +476,8 @@ main(int argc, char *argv[])
      * "backup_fec" unconditionally; see that file's parse_scheduler_name). */
     int sched_lookup = mqvpn_sched_from_name(eff_scheduler);
     if (sched_lookup < 0) {
-        fprintf(stderr, "error: --scheduler must be 'minrtt', 'wlb', 'wlb_udp_pin', or "
-                        "'backup_fec'\n");
+        fprintf(stderr, "error: --scheduler must be 'minrtt', 'wlb', 'wlb_udp_pin', "
+                        "'failover', or 'backup_fec'\n");
         return 1;
     }
     int scheduler = sched_lookup;
@@ -538,6 +545,7 @@ main(int argc, char *argv[])
         n_paths = file_cfg.n_paths;
         for (int i = 0; i < n_paths; i++) {
             path_ifaces[i] = file_cfg.paths[i];
+            path_backup[i] = file_cfg.path_backup[i];
         }
     }
 
@@ -617,8 +625,25 @@ main(int argc, char *argv[])
         };
         memcpy(cfg.redundant_ports, redundant_ports,
                (size_t)n_redundant_ports * sizeof(redundant_ports[0]));
+        /* Backup paths: with no path marked, every path but the first is
+         * one under the schedulers that use them, so a path keeps its role
+         * when it is dropped and added again. */
+        int sched_backup =
+            scheduler == MQVPN_SCHED_FAILOVER || scheduler == MQVPN_SCHED_BACKUP_FEC;
+        int n_backup = 0;
+        for (int i = 0; i < n_paths; i++)
+            n_backup += path_backup[i];
+        if (n_backup && !sched_backup)
+            fprintf(stderr,
+                    "warning: backup paths have no effect with --scheduler %s; "
+                    "they are used like any other path\n",
+                    mqvpn_sched_to_name((mqvpn_scheduler_t)scheduler));
+        if (n_backup && n_backup == n_paths)
+            fprintf(stderr, "warning: every path is a backup path; they are used "
+                            "together\n");
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];
+            cfg.path_backup[i] = sched_backup && (n_backup ? path_backup[i] : i > 0);
         }
         for (int i = 0; i < n_dns; i++) {
             cfg.dns_servers[i] = dns_servers[i];
