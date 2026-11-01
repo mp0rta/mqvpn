@@ -380,6 +380,58 @@ test_drain_delivers_counts_and_honours_budget(void)
     close(rx);
 }
 
+#if defined(__linux__)
+/* A full receive queue drops datagrams in the kernel, where nothing above
+ * the socket sees them: rx_queue_drops reports them (SO_RXQ_OVFL), learnt
+ * from the next datagram queued after the drops. Linux only: elsewhere the
+ * counter stays 0. */
+static void
+test_queue_drops_counted(void)
+{
+    struct sockaddr_in dst;
+    int rx = udp_socket(&dst);
+    int tx = udp_socket(NULL);
+    /* qemu's user-mode emulation, which the armhf job runs the tests in,
+     * does not implement SO_RXQ_OVFL: the bind then counts nothing. */
+    int one = 1;
+    if (setsockopt(rx, SOL_SOCKET, SO_RXQ_OVFL, &one, sizeof(one)) != 0) {
+        CHECK(errno == ENOPROTOOPT || errno == EOPNOTSUPP);
+        printf("SKIP test_queue_drops_counted: SO_RXQ_OVFL unavailable (%s)\n",
+               strerror(errno));
+        close(tx);
+        close(rx);
+        return;
+    }
+    mqvpn_bind_posix_opts_t o = opts_default();
+    o.socket_buf_bytes = 1; /* the kernel's minimum receive queue */
+    void *ctx = NULL;
+    CHECK(mqvpn_bind_posix_path_new(rx, &o, &ctx) == MQVPN_OK);
+    mqvpn_client_t *client = (mqvpn_client_t *)(void *)&g_rx;
+    uint8_t d[1000];
+    memset(d, 'q', sizeof(d));
+    enum { BURST = 64 };
+    for (int i = 0; i < BURST; i++)
+        CHECK(sendto(tx, d, sizeof(d), 0, (struct sockaddr *)&dst, sizeof(dst)) ==
+              (ssize_t)sizeof(d));
+    settle();
+    memset(&g_rx, 0, sizeof(g_rx));
+    CHECK(mqvpn_bind_posix_path_drain(ctx, client, 1, 4 * BURST) > 0);
+    mqvpn_bind_posix_stats_t st = path_stats(ctx);
+    uint64_t queued = st.rx_datagrams;
+    CHECK(queued > 0 && queued < BURST); /* the minimal queue overflowed */
+    CHECK(st.rx_queue_drops == 0);       /* no datagram queued after a drop yet */
+    CHECK(sendto(tx, d, sizeof(d), 0, (struct sockaddr *)&dst, sizeof(dst)) ==
+          (ssize_t)sizeof(d));
+    wait_readable(rx);
+    CHECK(mqvpn_bind_posix_path_drain(ctx, client, 1, 4 * BURST) == 1);
+    st = path_stats(ctx);
+    CHECK(st.rx_queue_drops == BURST - queued);
+    mqvpn_bind_posix_path_free(ctx);
+    close(tx);
+    close(rx);
+}
+#endif
+
 static void
 test_negative_handle_drains_without_delivering(void)
 {
@@ -481,6 +533,9 @@ main(void)
     test_send_one_and_burst_reach_the_peer();
     test_hard_send_error_is_failed_and_uncounted();
     test_drain_delivers_counts_and_honours_budget();
+#if defined(__linux__)
+    test_queue_drops_counted();
+#endif
     test_negative_handle_drains_without_delivering();
     test_free_and_release_leave_the_fd_open();
     test_server_ctx_send_scope_and_drain();

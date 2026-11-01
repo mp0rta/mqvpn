@@ -3,8 +3,9 @@
 
 /* Contract tests for the bundled POSIX bind: constructor failure classes,
  * borrowed-fd rule, opts prefix copy / non-retention, per-scope sticky state,
- * get_stats struct_size prefix, RX budget accounting, and the once-per-process
- * "udp-gso: " marker (checked by the ctest wrapper on this binary's output). */
+ * get_stats struct_size prefix, RX budget accounting, the receive-queue drop
+ * count, and the once-per-process "udp-gso: " marker (checked by the ctest
+ * wrapper on this binary's output). */
 #define _GNU_SOURCE
 #undef NDEBUG
 #include <arpa/inet.h>
@@ -34,6 +35,8 @@ static int seam_sendmsg_calls, seam_sendmmsg_calls, seam_recvmsg_calls;
 static int seam_recv_queue;  /* how many datagrams recvmsg still returns */
 static size_t seam_recv_len; /* bytes per fake datagram */
 static int seam_recv_seg;    /* UDP_GRO segment size to report, 0 = none */
+/* SO_RXQ_OVFL count to report, one per datagram, in order; NULL = none */
+static const uint32_t *seam_recv_drops;
 
 ssize_t
 mqvpn_seam_sendmsg(int fd, const struct msghdr *msg, int flags)
@@ -89,16 +92,25 @@ mqvpn_seam_recvmsg(int fd, struct msghdr *msg, int flags)
     msg->msg_namelen = sizeof(*sin);
     memset(msg->msg_iov[0].iov_base, 0x5A, seam_recv_len);
     msg->msg_flags = 0;
-    if (seam_recv_seg > 0) {
+    /* The kernel puts SO_RXQ_OVFL (sock_recv_drops) before UDP_GRO. */
+    size_t used = 0;
+    if (seam_recv_drops) {
         struct cmsghdr *cm = CMSG_FIRSTHDR(msg);
+        cm->cmsg_level = SOL_SOCKET;
+        cm->cmsg_type = SO_RXQ_OVFL;
+        cm->cmsg_len = CMSG_LEN(sizeof(uint32_t));
+        memcpy(CMSG_DATA(cm), seam_recv_drops++, sizeof(uint32_t));
+        used += CMSG_SPACE(sizeof(uint32_t));
+    }
+    if (seam_recv_seg > 0) {
+        struct cmsghdr *cm = (struct cmsghdr *)((char *)msg->msg_control + used);
         cm->cmsg_level = SOL_UDP;
         cm->cmsg_type = UDP_GRO;
         cm->cmsg_len = CMSG_LEN(sizeof(int));
         memcpy(CMSG_DATA(cm), &seam_recv_seg, sizeof(int));
-        msg->msg_controllen = CMSG_SPACE(sizeof(int));
-    } else {
-        msg->msg_controllen = 0;
+        used += CMSG_SPACE(sizeof(int));
     }
+    msg->msg_controllen = used;
     return (ssize_t)seam_recv_len;
 }
 
@@ -124,6 +136,7 @@ seam_reset(void)
     seam_recv_queue = 0;
     seam_recv_len = 100;
     seam_recv_seg = 0;
+    seam_recv_drops = NULL;
 }
 
 static int
@@ -538,6 +551,66 @@ test_rx_drain_budget_and_counters(void)
     printf("  test_rx_drain_budget_and_counters: OK\n");
 }
 
+static int g_no_client; /* sentinel: handle -1 never delivers, so never dereferenced */
+
+/* RX drop count, on a fresh ctx: datagram i carries the SO_RXQ_OVFL count
+ * counts[i], after which rx_queue_drops must have grown by steps[i]. Returns
+ * the final rx_queue_drops. */
+static uint64_t
+rx_queue_drops_expect(const uint32_t *counts, const uint32_t *steps, size_t n)
+{
+    int fd = make_udp_fd();
+    void *ctx = NULL;
+    mqvpn_bind_posix_opts_t o = opts_default(0, 0);
+    assert(mqvpn_bind_posix_path_new(fd, &o, &ctx) == MQVPN_OK);
+    seam_reset();
+    seam_recv_queue = (int)n;
+    seam_recv_drops = counts;
+    uint64_t total = 0;
+    for (size_t i = 0; i < n; i++) {
+        assert(mqvpn_bind_posix_path_recv_one(ctx, (mqvpn_client_t *)(void *)&g_no_client,
+                                              -1) == 1);
+        total += steps[i];
+        mqvpn_bind_posix_stats_t st = {.struct_size = sizeof(st)};
+        mqvpn_bind_posix_path_get_stats(ctx, &st);
+        assert(st.rx_queue_drops == total);
+    }
+    mqvpn_bind_posix_path_free(ctx);
+    close(fd);
+    return total;
+}
+
+/* Since Linux 6.18 the kernel's count can arrive out of order: each NUMA
+ * node's producer reads it before taking the receive-queue lock. */
+static void
+test_rx_queue_drops_reordered_and_wrapping(void)
+{
+    /* A stale 100 queued after 101: one drop after the first 100, not 2^32 more. */
+    static const uint32_t reordered[] = {100, 101, 100, 101};
+    static const uint32_t reordered_step[] = {100, 1, 0, 0};
+    assert(rx_queue_drops_expect(reordered, reordered_step, 4) == 101);
+    /* Two steps of INT32_MAX, the largest step counted, climb near UINT32_MAX.
+     * The count then wraps (0 is never reported: no cmsg while it is 0), and
+     * a stale count on either side of the wrap is skipped. */
+    static const uint32_t wrap[] = {0x7FFFFFFF, 0xFFFFFFFE, 0xFFFFFFFD, 1, 0xFFFFFFFF, 2};
+    static const uint32_t wrap_step[] = {0x7FFFFFFF, 0x7FFFFFFF, 0, 3, 0, 1};
+    assert(rx_queue_drops_expect(wrap, wrap_step, 6) == (1ull << 32) + 2);
+    printf("  test_rx_queue_drops_reordered_and_wrapping: OK\n");
+}
+
+/* The step is a signed 32-bit difference, so it assumes fewer than 2^31 drops
+ * between two datagrams read: a step of 2^31 - 1 is counted, while one of
+ * 2^31 cannot be told from a stale count and is skipped. The baseline stays
+ * put, as for any stale count, so the next small step still counts. */
+static void
+test_rx_queue_drops_step_limit(void)
+{
+    static const uint32_t jump[] = {0x7FFFFFFF, 0xFFFFFFFF, 0x80000000};
+    static const uint32_t jump_step[] = {0x7FFFFFFF, 0, 1};
+    assert(rx_queue_drops_expect(jump, jump_step, 3) == 0x80000000u);
+    printf("  test_rx_queue_drops_step_limit: OK\n");
+}
+
 int
 main(void)
 {
@@ -557,6 +630,8 @@ main(void)
     test_server_scope_table_many(); /* also GSO-allowed; no 2nd marker */
     test_get_stats_struct_size_prefix();
     test_rx_drain_budget_and_counters();
+    test_rx_queue_drops_reordered_and_wrapping();
+    test_rx_queue_drops_step_limit();
     printf("test_bind_posix: all OK\n");
     return 0;
 }
