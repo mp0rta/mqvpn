@@ -343,6 +343,7 @@ static void server_log(mqvpn_server_t *s, mqvpn_log_level_t level, const char *f
 #endif
 
 #include "mqvpn_conn_settings.h"
+#include "mqvpn_engine_keys.h"
 
 static void
 server_log(mqvpn_server_t *s, mqvpn_log_level_t level, const char *fmt, ...)
@@ -2225,6 +2226,10 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     xqc_config_t xconfig;
     if (xqc_engine_get_default_config(&xconfig, XQC_ENGINE_SERVER) < 0) goto cleanup;
     xconfig.cfg_log_level = (xqc_log_level_t)xqc_log_level;
+    if (mqvpn_engine_keys_set_server(&xconfig, cfg->tls_key) != 0) {
+        LOG_E(s, "cannot make the engine keys from the TLS key file '%s'", cfg->tls_key);
+        goto cleanup;
+    }
 
 #if defined(__linux__)
     /* `cfg` is mqvpn_server_new's own parameter, holding the same udp_gso
