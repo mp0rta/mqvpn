@@ -137,13 +137,10 @@ static void
 test_server_refuses_an_unusable_key_file(void)
 {
     char empty[64], big[64];
+    static char big_content[64 * 1024 + 1];
+    memset(big_content, 'k', sizeof(big_content) - 1);
     write_key_file(empty, "");
-    write_key_file(big, "");
-    FILE *f = fopen(big, "wb");
-    assert(f);
-    for (int i = 0; i < 64 * 1024; i++)
-        fputc('k', f);
-    fclose(f);
+    write_key_file(big, big_content);
 
     xqc_config_t c = default_config(XQC_ENGINE_SERVER);
     assert(mqvpn_engine_keys_set_server(&c, "/nonexistent/key.pem") != 0);
