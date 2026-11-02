@@ -1,0 +1,138 @@
+mqvpn-server for Debian and Ubuntu
+==================================
+
+What the package does
+---------------------
+
+On the first install, the package runs /usr/lib/mqvpn/mqvpn-server-setup:
+
+ * If /etc/mqvpn/server.crt and /etc/mqvpn/server.key are both absent, it
+   creates a self-signed EC P-256 certificate (365 days). If both exist (for
+   example from certbot or your own CA), it keeps them.
+ * If /etc/mqvpn/server.conf is absent, it creates it with a new PSK from
+   "mqvpn --genkey". It never changes an existing server.conf.
+
+Then the package enables and starts mqvpn-server.service and prints the
+connection summary. To print the summary again, run:
+
+    sudo mqvpn-server-info
+
+The summary contains the PSK. apt also writes it to /var/log/apt/term.log
+(mode 0640, root:adm).
+
+Settings before the install
+---------------------------
+
+debconf asks for the public hostname. It asks for the client subnet only
+when the default 10.0.0.0/24 overlaps a network of this host, and for the
+UDP port only when port 443 is already in use. The other settings take their
+defaults. For automation, preseed debconf:
+
+    echo 'mqvpn-server mqvpn-server/subnet string 10.8.0.0/24' | sudo debconf-set-selections
+    echo 'mqvpn-server mqvpn-server/hostname string vpn.example.org' | sudo debconf-set-selections
+    sudo apt install ./mqvpn_<version>_<arch>.deb ./mqvpn-server_<version>_<arch>.deb
+
+The other debconf keys are mqvpn-server/port, mqvpn-server/enable_control
+(boolean), mqvpn-server/control_port and mqvpn-server/autostart (boolean).
+
+Environment variables also work. Default sudoers settings drop variables
+from the "sudo VAR=value command" form, so use "sudo env":
+
+    sudo env MQVPN_PORT=10020 MQVPN_SERVER_AUTOSTART=no apt-get install -y ./mqvpn-server_<version>_<arch>.deb
+
+The variables are MQVPN_PORT, MQVPN_SUBNET, MQVPN_SUBNET6, MQVPN_HOSTNAME,
+MQVPN_ENABLE_CONTROL, MQVPN_CONTROL_PORT and MQVPN_SERVER_AUTOSTART.
+
+Precedence, lowest first: built-in defaults, debconf answers,
+/etc/default/mqvpn-server, environment variables, mqvpn-server-setup
+options.
+
+To use a specific PSK, write /etc/mqvpn/server.conf before the install. The
+package never puts the PSK in debconf.
+
+Settings after the install
+--------------------------
+
+/etc/mqvpn/server.conf is the authority. Edit it, then run:
+
+    sudo systemctl restart mqvpn-server
+
+To enable the local control API in an existing server.conf, run:
+
+    sudo /usr/lib/mqvpn/mqvpn-server-setup --enable-control [PORT]
+
+The control API has no authentication and no TLS.
+
+Debconf answers and /etc/default/mqvpn-server apply only when
+mqvpn-server-setup creates a new server.conf. "dpkg-reconfigure
+mqvpn-server" changes the debconf answers, but it does not change an
+existing server.conf, and it does not restart the server. To create a new
+server.conf from new answers, delete /etc/mqvpn/server.conf (this also
+deletes the PSK, so each client needs the new key) and run:
+
+    sudo dpkg-reconfigure mqvpn-server
+
+mqvpn-server-setup alone does not read the debconf answers. It uses
+/etc/default/mqvpn-server, the environment and its options.
+
+/etc/default/mqvpn-server and unattended upgrades
+-------------------------------------------------
+
+/etc/default/mqvpn-server is a dpkg conffile. All its settings are comments.
+If you change it, and a later package version also changes it, dpkg asks
+which version to keep. Without a terminal, that question makes the upgrade
+fail. Automation must give dpkg a default answer:
+
+    sudo apt-get -o Dpkg::Options::=--force-confdef \
+        -o Dpkg::Options::=--force-confold install ./mqvpn-server_<version>_<arch>.deb
+
+With these options, dpkg keeps your file and writes the package version as
+/etc/default/mqvpn-server.dpkg-dist.
+
+If you create /etc/default/mqvpn-server before the first install, dpkg also
+asks. Use debconf or environment variables before the first install.
+
+Remove and purge
+----------------
+
+"apt remove mqvpn-server" stops the server, reverts the NAT rules and the IP
+forwarding sysctls, and keeps all files in /etc/mqvpn. If the server was
+enabled and running, a later reinstall starts it again.
+
+"apt purge mqvpn-server" also deletes the files that mqvpn-server-setup
+created: server.conf, which contains the PSK, and the self-signed certificate
+and key. It deletes them also if you edited them. Each client then needs a
+new key. Purge never deletes a file that mqvpn-server-setup did not create,
+for example a server.conf that you wrote before the install, and never a
+symlink, for example a certbot link that replaced the self-signed
+certificate. It deletes /etc/mqvpn only when the directory is empty.
+
+Autostart and containers
+------------------------
+
+The package enables and starts the service on the first install. To prevent
+this, preseed mqvpn-server/autostart to false or set
+MQVPN_SERVER_AUTOSTART=no. The package uses deb-systemd-invoke, so a
+policy-rc.d that refuses starts (containers, chroots, image builds) also
+prevents the start.
+
+On an upgrade, the package restarts the server only if it is running. A
+server that you stopped stays stopped.
+
+Migration from install.sh
+-------------------------
+
+install.sh puts its files in /usr/local, and the package puts them in /usr.
+/usr/local/bin/mqvpn comes first in PATH. Before you install the package,
+run the old install.sh with --uninstall. It removes the old files and keeps
+/etc/mqvpn. The package then uses your existing server.conf and certificate
+without a change, and purge does not delete them.
+
+Do not run "install.sh --uninstall" after you install the package. It
+deletes /lib/systemd/system/mqvpn-server.service and
+mqvpn-client@.service, and on a merged-/usr system these are the unit files
+of the packages. To delete only the install.sh files, run:
+
+    sudo rm -rf /usr/local/bin/mqvpn /usr/local/lib/libmqvpn.so* \
+        /usr/local/lib/libxquic.so /usr/local/lib/mqvpn /usr/local/share/doc/mqvpn
+    sudo ldconfig

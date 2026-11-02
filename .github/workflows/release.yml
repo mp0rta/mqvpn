@@ -88,7 +88,8 @@ jobs:
         if: matrix.os == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake libevent-dev golang iptables
+          # The build dependencies are in packaging/build-deps.control.
+          sudo apt-get -y satisfy "$(sed -n 's/^Build-Depends: *//p' packaging/build-deps.control)" iptables
 
       - name: Build BoringSSL
         if: matrix.os == 'linux'
@@ -200,9 +201,29 @@ jobs:
             exit 1
           fi
 
+      # install.sh installs the server from the tarball, not from the debs:
+      # the deb split must not take the server files out of the tarball.
+      - name: Verify server files in tarball
+        if: matrix.os == 'linux'
+        run: |
+          set -e
+          tarball=$(ls mqvpn_*.tar.gz)
+          for f in lib/mqvpn/mqvpn-server-nat.sh lib/mqvpn/mqvpn-nat-config \
+                   systemd/mqvpn-server.service etc/mqvpn/server.conf.example; do
+            if ! tar tzf "$tarball" | grep -qxF "./$f"; then
+              echo "::error::tarball is missing $f (install.sh needs it)"
+              exit 1
+            fi
+          done
+
+      # Placement, Depends/Breaks/Replaces and conffiles of all three debs.
+      - name: Check deb contents
+        if: matrix.os == 'linux'
+        run: scripts/ci_e2e/check_deb_contents.sh build
+
       - name: Stage release artifacts
         if: matrix.os == 'linux'
-        run: cp build/mqvpn_*.deb .
+        run: cp build/mqvpn_*.deb build/mqvpn-server_*.deb build/mqvpn-dev_*.deb .
 
       - name: Install libevent (macOS)
         if: matrix.os == 'darwin'
@@ -576,6 +597,8 @@ jobs:
           name: release-${{ matrix.arch }}
           path: |
             mqvpn_*.deb
+            mqvpn-server_*.deb
+            mqvpn-dev_*.deb
             mqvpn_*_${{ matrix.arch }}.tar.gz
 
   build-android:
@@ -884,7 +907,8 @@ jobs:
           # nullglob so missing pattern → empty rather than the literal pattern
           # passed to sha256sum (would fail "No such file or directory").
           shopt -s nullglob
-          sha256sum mqvpn_*.tar.gz mqvpn_*.deb mqvpn_*.zip mqvpn_*_android.apk > SHA256SUMS
+          sha256sum mqvpn_*.tar.gz mqvpn_*.deb mqvpn-server_*.deb mqvpn-dev_*.deb \
+            mqvpn_*.zip mqvpn_*_android.apk > SHA256SUMS
           cat SHA256SUMS
 
       - name: Attest build provenance
@@ -896,6 +920,8 @@ jobs:
           subject-path: |
             artifacts/mqvpn_*.tar.gz
             artifacts/mqvpn_*.deb
+            artifacts/mqvpn-server_*.deb
+            artifacts/mqvpn-dev_*.deb
             artifacts/mqvpn_*.zip
             artifacts/mqvpn_*_android.apk
 
@@ -906,7 +932,7 @@ jobs:
           shopt -s nullglob
           VERSION="${GITHUB_REF_NAME#v}"
           TARS=(artifacts/mqvpn_*.tar.gz)
-          DEBS=(artifacts/mqvpn_*.deb)
+          DEBS=(artifacts/mqvpn_*.deb artifacts/mqvpn-server_*.deb artifacts/mqvpn-dev_*.deb)
           ZIPS=(artifacts/mqvpn_*.zip)
           APKS=(artifacts/mqvpn_*_android.apk)
           # SemVer pre-release identifier (anything after '-') → mark as

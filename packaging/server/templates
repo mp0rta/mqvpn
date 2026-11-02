@@ -1,0 +1,60 @@
+Template: mqvpn-server/subnet
+Type: string
+Default: 10.0.0.0/24
+Description: IPv4 subnet for VPN clients:
+ The server gives each VPN client an address from this subnet. The subnet
+ must not overlap a network that this host already uses, for example the
+ LAN, a cloud private network or a Docker bridge.
+ .
+ The installation compares the default subnet with the routes and addresses
+ of this host. If they overlap, it proposes a subnet that overlaps none of
+ them, when it finds one.
+ .
+ This answer applies only when the package creates a new
+ /etc/mqvpn/server.conf.
+
+Template: mqvpn-server/hostname
+Type: string
+Default:
+Description: Public hostname or IP address of this server (optional):
+ The self-signed TLS certificate gets this name. The client command that
+ the installation prints also uses it as the server address.
+ .
+ If you leave this empty, the certificate gets the name "mqvpn", and the
+ client command uses the detected public IP address.
+ .
+ If /etc/mqvpn/server.crt and /etc/mqvpn/server.key already exist (for
+ example from certbot), the package keeps them and creates no certificate.
+ .
+ This answer applies only when the package creates a new
+ /etc/mqvpn/server.conf.
+
+Template: mqvpn-server/port
+Type: string
+Default: 443
+Description: UDP port for the VPN server:
+ This answer applies only when the package creates a new
+ /etc/mqvpn/server.conf.
+
+Template: mqvpn-server/enable_control
+Type: boolean
+Default: false
+Description: Enable the local control API?
+ The control API listens on 127.0.0.1 only. It has no authentication and no
+ TLS. Any local user can use it to add or remove VPN users.
+ .
+ This answer applies only when the package creates a new
+ /etc/mqvpn/server.conf. For an existing configuration, run
+ "/usr/lib/mqvpn/mqvpn-server-setup --enable-control".
+
+Template: mqvpn-server/control_port
+Type: string
+Default: 9090
+Description: TCP port for the local control API:
+ This answer applies only when the package creates a new
+ /etc/mqvpn/server.conf.
+
+Template: mqvpn-server/autostart
+Type: boolean
+Default: true
+Description: Enable and start mqvpn-server.service on first installation?

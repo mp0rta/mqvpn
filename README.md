@@ -49,7 +49,7 @@ https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
 - [Key Use Cases](#key-use-cases)
 - [Installation](#installation)
   - [Server](#server)
-  - [Client (deb package)](#client-deb-package)
+  - [Client (Debian and Ubuntu)](#client-debian-and-ubuntu)
   - [Windows client](#windows-client)
   - [macOS client](#macos-client)
   - [Verifying downloads](#verifying-downloads)
@@ -92,7 +92,7 @@ https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
 
 | Platform | Minimum version | CLI | GUI/App | Distribution |
 |---|---|---:|---:|---:|
-| [Ubuntu/Debian (amd64/arm64)](#client-deb-package) | Ubuntu 22.04 / Debian 12 | ✅ | 📋 | Release package |
+| [Ubuntu/Debian (amd64/arm64)](#client-debian-and-ubuntu) | Ubuntu 22.04 / Debian 12 | ✅ | 📋 | Release package |
 | [Arch Linux (amd64/arm64)](https://aur.archlinux.org/packages/mqvpn) | rolling | ✅ | 📋 | AUR |
 | [Windows (amd64/arm64)](#windows-client) | Windows 10 | ✅ | 📋 | Release archive |
 | [macOS arm64](https://github.com/mp0rta/homebrew-tap#install) | macOS 14 (Sonoma) | ✅ | 📋 | Homebrew / Release archive |
@@ -123,18 +123,55 @@ https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
 
 ### Server
 
+#### Debian and Ubuntu (deb packages)
+
+The `mqvpn` deb contains the VPN program for both client and server; `mqvpn-server` adds the server service, NAT setup, and first-run configuration. Download the `mqvpn` and `mqvpn-server` debs of the same version from [Releases](https://github.com/mp0rta/mqvpn/releases/latest), then install both:
+
+```bash
+# Replace VERSION and ARCH as needed (e.g., 0.19.3, amd64)
+curl -LO https://github.com/mp0rta/mqvpn/releases/latest/download/mqvpn_VERSION_ARCH.deb
+curl -LO https://github.com/mp0rta/mqvpn/releases/latest/download/mqvpn-server_VERSION_ARCH.deb
+sudo apt install ./mqvpn_VERSION_ARCH.deb ./mqvpn-server_VERSION_ARCH.deb
+```
+
+The install generates a self-signed TLS certificate, an auth key, and the server config at `/etc/mqvpn/server.conf`, then starts the server and registers it for automatic startup on boot. It keeps a certificate or config that already exists. The generated config turns on hybrid mode and the reorder buffer on the server side; each takes effect only for clients that also turn it on. It also sets `AllowClientScheduler = true`, so a client can ask for its own download scheduler.
+
+The install prints the auth key and a client command. To show them again:
+
+```bash
+sudo mqvpn-server-info
+```
+
+The install asks for an optional public hostname for the certificate. It asks for a client subnet only when the default `10.0.0.0/24` overlaps a network of the server, and for the port only when UDP 443 is already in use. To set values in advance, for example in automation:
+
+```bash
+echo 'mqvpn-server mqvpn-server/subnet string 10.8.0.0/24' | sudo debconf-set-selections
+sudo env MQVPN_PORT=10020 apt install ./mqvpn_VERSION_ARCH.deb ./mqvpn-server_VERSION_ARCH.deb
+```
+
+These values apply only to a new `/etc/mqvpn/server.conf`. To change a running server, edit `/etc/mqvpn/server.conf` and run `sudo systemctl restart mqvpn-server`.
+
+- `sudo apt remove mqvpn-server` stops the server and keeps `/etc/mqvpn`.
+- `sudo apt purge mqvpn-server` also deletes the generated config, auth key, and certificate. Every client then needs the new auth key. Files that you created yourself stay.
+
+More details, including all settings: `/usr/share/doc/mqvpn-server/README.Debian`.
+
+> **Upgrading from 0.19.2 or earlier:** the server files moved from the `mqvpn` deb to the new `mqvpn-server` deb. Install both debs together. Your `/etc/mqvpn` config stays as it is.
+>
+> **Switching from `install.sh`:** first run the install script with `--uninstall` (it keeps `/etc/mqvpn`), then install the debs. The debs use your existing config and certificate.
+
+#### Other Linux distributions (install script)
+
 ```bash
 curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh | sudo bash
 ```
 
-This downloads the latest release, installs the binary, and generates a self-signed TLS certificate, auth key, and server config at `/etc/mqvpn/server.conf`. The generated config turns on hybrid mode and the reorder buffer on the server side; each takes effect only for clients that also turn it on. It also sets `AllowClientScheduler = true`, so a client can ask for its own download scheduler. Add `--start` to start the server and register it for automatic startup on boot:
+This downloads the latest release, installs the binary to `/usr/local`, and generates the same certificate, auth key, and server config as the deb. Add `--start` to start the server and register it for automatic startup on boot:
 
 ```bash
 curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
     | sudo bash -s -- --start
 ```
-
-> **Note:** The self-signed certificate requires `--insecure` on the client. For production, replace with a trusted certificate (e.g. Let's Encrypt) and omit `--insecure`. Point `--cert` (or `Cert` / `cert_file` in a config file) at the full chain file (for Let's Encrypt, `fullchain.pem`): clients do not fetch missing intermediates.
 
 Options can be combined:
 
@@ -149,9 +186,11 @@ curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
     | sudo bash -s -- --uninstall
 ```
 
-### Client (deb package)
+> **Note:** The self-signed certificate requires `--insecure` on the client. For production, replace with a trusted certificate (e.g. Let's Encrypt) and omit `--insecure`. Point `--cert` (or `Cert` / `cert_file` in a config file) at the full chain file (for Let's Encrypt, `fullchain.pem`): clients do not fetch missing intermediates.
 
-Download the latest `.deb` from [Releases](https://github.com/mp0rta/mqvpn/releases/latest):
+### Client (Debian and Ubuntu)
+
+Download the latest `mqvpn` deb from [Releases](https://github.com/mp0rta/mqvpn/releases/latest):
 
 ```bash
 # Replace VERSION and ARCH as needed (e.g., 0.6.0, amd64)
@@ -457,6 +496,8 @@ for the full config key reference, and
 
 ## systemd
 
+The `mqvpn-server` deb and `install.sh` generate the server config for you. To set up the server by hand instead:
+
 ```bash
 # Server
 sudo cp /etc/mqvpn/server.conf.example /etc/mqvpn/server.conf
@@ -478,6 +519,14 @@ Control API: see [docs/control-api.md](docs/control-api.md) for the full wire-pr
 ### Enable
 
 The control API is **disabled by default**. Enable it via any of the following:
+
+#### From the `mqvpn-server` deb
+
+```bash
+sudo /usr/lib/mqvpn/mqvpn-server-setup --enable-control        # port 9090
+sudo /usr/lib/mqvpn/mqvpn-server-setup --enable-control 9091
+sudo systemctl restart mqvpn-server
+```
 
 #### From `install.sh`
 
@@ -656,6 +705,13 @@ Full report with all numbers: [`docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bond
 Requirements: Linux, CMake 3.10+, GCC/Clang (C11), libevent 2.x
 
 ```bash
+# Debian/Ubuntu: install the build dependencies (packaging/build-deps.control)
+sudo apt-get satisfy "$(sed -n 's/^Build-Depends: *//p' packaging/build-deps.control)"
+# or, with devscripts and equivs installed:
+sudo mk-build-deps --install --remove packaging/build-deps.control
+```
+
+```bash
 git clone --recurse-submodules https://github.com/mp0rta/mqvpn.git
 cd mqvpn
 ./build.sh            # builds BoringSSL, xquic, and mqvpn
@@ -695,6 +751,17 @@ make -j$(nproc)
 ```
 
 </details>
+
+### Building against libmqvpn (Debian and Ubuntu)
+
+The `mqvpn-dev` deb has the headers and the `libmqvpn.so` link. Install it together with the `mqvpn` deb of the same version:
+
+```bash
+sudo apt install ./mqvpn_VERSION_ARCH.deb ./mqvpn-dev_VERSION_ARCH.deb
+cc -o app app.c -lmqvpn
+```
+
+No deb has the static `libmqvpn.a`. To link statically, build from source.
 
 ### Android SDK
 

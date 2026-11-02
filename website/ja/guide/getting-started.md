@@ -6,7 +6,39 @@ mqvpn は MASQUE CONNECT-IP (RFC 9484) と、Multipath QUIC をベースとし�
 
 ### サーバー
 
-Ubuntu/Debian の VPS で以下を実行すると、バイナリのインストールから証明書・認証キー・設定ファイルの生成までを一括で行います。生成される設定ではサーバー側のハイブリッドモードと reorder バッファが有効になっており、クライアント側でも有効にしたときだけ動作します。`AllowClientScheduler = true` も設定されるので、クライアントは自分のダウンロード方向のスケジューラを指定できます。
+#### Debian / Ubuntu（deb パッケージ）
+
+`mqvpn` deb にはクライアントとサーバーの両方で使う VPN プログラムが含まれ、`mqvpn-server` deb はサーバーのサービス・NAT 設定・初回設定を追加します。[Releases](https://github.com/mp0rta/mqvpn/releases/latest) から同じバージョンの `mqvpn` と `mqvpn-server` の deb をダウンロードし、両方をインストールします。
+
+```bash
+# VERSION と ARCH は環境に合わせて置き換えてください（例: 0.19.3, amd64）
+curl -LO https://github.com/mp0rta/mqvpn/releases/latest/download/mqvpn_VERSION_ARCH.deb
+curl -LO https://github.com/mp0rta/mqvpn/releases/latest/download/mqvpn-server_VERSION_ARCH.deb
+sudo apt install ./mqvpn_VERSION_ARCH.deb ./mqvpn-server_VERSION_ARCH.deb
+```
+
+インストール時に証明書・認証キー・設定ファイルを生成し、サーバーを起動して OS 起動時の自動起動も登録します。証明書や設定ファイルがすでにある場合は、そのまま使います。生成される設定ではサーバー側のハイブリッドモードと reorder バッファが有効になっており、クライアント側でも有効にしたときだけ動作します。`AllowClientScheduler = true` も設定されるので、クライアントは自分のダウンロード方向のスケジューラを指定できます。
+
+インストール時に認証キーとクライアント用のコマンドが表示されます。あとから `sudo mqvpn-server-info` で再表示できます。
+
+インストール中には、証明書に使う公開ホスト名（省略可）を尋ねます。クライアント用サブネットは、デフォルトの `10.0.0.0/24` がサーバーのネットワークと重なる場合のみ、ポートは UDP 443 がすでに使用中の場合のみ尋ねます。自動化などで事前に値を指定するには、次のようにします。
+
+```bash
+echo 'mqvpn-server mqvpn-server/subnet string 10.8.0.0/24' | sudo debconf-set-selections
+sudo env MQVPN_PORT=10020 apt install ./mqvpn_VERSION_ARCH.deb ./mqvpn-server_VERSION_ARCH.deb
+```
+
+これらの値は `/etc/mqvpn/server.conf` を新しく生成するときだけ使われます。稼働中のサーバーの設定を変えるには、`/etc/mqvpn/server.conf` を編集して `sudo systemctl restart mqvpn-server` を実行します。
+
+`sudo apt remove mqvpn-server` はサーバーを停止し、`/etc/mqvpn` は残します。`sudo apt purge mqvpn-server` は生成された設定ファイル・認証キー・証明書も削除するため、すべてのクライアントに新しい認証キーが必要になります。自分で作成したファイルは削除されません。詳細は `/usr/share/doc/mqvpn-server/README.Debian` を参照してください。
+
+::: tip 0.19.2 以前からのアップグレード
+サーバー用のファイルは `mqvpn` deb から新しい `mqvpn-server` deb に移りました。両方の deb をまとめてインストールしてください。`/etc/mqvpn` の設定はそのまま残ります。以前に install.sh を使っていた場合は、先に `--uninstall` を付けて実行してください（`/etc/mqvpn` は残ります）。
+:::
+
+#### その他の Linux ディストリビューション（インストールスクリプト）
+
+以下を実行すると、バイナリを `/usr/local` にインストールし、deb と同じ証明書・認証キー・設定ファイルを生成します。
 
 ```bash
 curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh | sudo bash
@@ -29,13 +61,13 @@ curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
 アンインストールするには `--uninstall` を付けて再実行します（`--purge` で設定ファイルも削除）。
 
 ::: warning
-install.sh は自己署名証明書を生成します。クライアント接続時には `--insecure` が必要です。本番環境では Let's Encrypt などの信頼された証明書に置き換え、`--insecure` を省略してください。
+どちらのインストール方法でも自己署名証明書が生成されます。クライアント接続時には `--insecure` が必要です。本番環境では Let's Encrypt などの信頼された証明書に置き換え、`--insecure` を省略してください。
 `--cert` (設定ファイルでは `Cert` / `cert_file`) には fullchain (Let's Encrypt では `fullchain.pem`) を指定してください。クライアントは足りない中間証明書を取りに行きません。
 :::
 
-### クライアント（deb パッケージ）
+### クライアント（Debian / Ubuntu）
 
-[Releases](https://github.com/mp0rta/mqvpn/releases/latest) から `.deb` をダウンロードしてインストールします。
+[Releases](https://github.com/mp0rta/mqvpn/releases/latest) から `mqvpn` の deb をダウンロードしてインストールします。
 
 ```bash
 # VERSION と ARCH は環境に合わせて置き換えてください（例: 0.6.0, amd64）
@@ -57,7 +89,7 @@ Apple silicon (arm64) 向けにビルド済みバイナリを配布していま�
 
 ## クイックスタート
 
-インストールが済んだら、クライアントからサーバーに接続します。サーバーの install.sh 出力に表示された認証キーとアドレスを使います。
+インストールが済んだら、クライアントからサーバーに接続します。サーバーのインストール時に表示された認証キーとアドレスを使います。deb でインストールした場合は `sudo mqvpn-server-info` で再表示できます。
 
 シングルパス：
 

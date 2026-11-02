@@ -1,0 +1,93 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
+
+set -e
+
+# shellcheck source=/dev/null
+. /usr/share/debconf/confmodule
+
+SETUP=/usr/lib/mqvpn/mqvpn-server-setup
+UNIT=mqvpn-server.service
+STATE_DIR=/var/lib/mqvpn-server
+setup_ok=1
+autostart=yes
+had_conf=0
+
+if [ "$1" = configure ]; then
+    if [ ! -x /usr/bin/mqvpn ]; then
+        echo "mqvpn-server: /usr/bin/mqvpn is missing (broken mqvpn install)" >&2
+        exit 1
+    fi
+    if [ -x /usr/local/bin/mqvpn ]; then
+        # Not 'install.sh --uninstall': with merged /usr it deletes the units of this package.
+        echo "mqvpn-server: warning: /usr/local/bin/mqvpn from install.sh comes before /usr/bin/mqvpn in PATH. Delete the install.sh files: rm -rf /usr/local/bin/mqvpn /usr/local/lib/libmqvpn.so* /usr/local/lib/libxquic.so /usr/local/lib/mqvpn /usr/local/share/doc/mqvpn && ldconfig. Do not run 'install.sh --uninstall' now: it also deletes the unit files of this package." >&2
+    fi
+
+    # MQVPN_DEBCONF_* and not MQVPN_*: debconf ranks below /etc/default and the environment (D5).
+    db_get mqvpn-server/subnet;         MQVPN_DEBCONF_SUBNET=$RET
+    db_get mqvpn-server/hostname;       MQVPN_DEBCONF_HOSTNAME=$RET
+    db_get mqvpn-server/port;           MQVPN_DEBCONF_PORT=$RET
+    db_get mqvpn-server/enable_control; MQVPN_DEBCONF_ENABLE_CONTROL=$RET
+    db_get mqvpn-server/control_port;   MQVPN_DEBCONF_CONTROL_PORT=$RET
+    db_get mqvpn-server/autostart;      MQVPN_DEBCONF_SERVER_AUTOSTART=$RET
+    export MQVPN_DEBCONF_SUBNET MQVPN_DEBCONF_HOSTNAME MQVPN_DEBCONF_PORT \
+        MQVPN_DEBCONF_ENABLE_CONTROL MQVPN_DEBCONF_CONTROL_PORT MQVPN_DEBCONF_SERVER_AUTOSTART
+    # A child that keeps the debconf file descriptors open stalls debconf (debconf-devel(7)).
+    db_stop
+
+    [ -e /etc/mqvpn/server.conf ] && had_conf=1
+    if ! "$SETUP" --from-postinst; then
+        setup_ok=0
+        echo "mqvpn-server: setup failed; the service is not started. Fix the error, then run $SETUP --start" >&2
+    fi
+    if [ "$had_conf" = 1 ] && [ "${DEBCONF_RECONFIGURE:-0}" = 1 ]; then
+        echo "mqvpn-server: /etc/mqvpn/server.conf exists and was not changed. To apply the new answers, delete /etc/mqvpn/server.conf (this also deletes the auth key) and run dpkg-reconfigure mqvpn-server again."
+    fi
+    autostart=$("$SETUP" --print-autostart) || autostart=yes
+fi
+
+# The deb-systemd-helper and deb-systemd-invoke calls follow the dh_installsystemd snippets.
+case "$1" in
+configure|abort-upgrade|abort-deconfigure|abort-remove)
+    deb-systemd-helper unmask "$UNIT" >/dev/null || true
+    if [ "$1" = configure ] && [ -z "$2" ] && [ "$autostart" = no ]; then
+        deb-systemd-helper update-state "$UNIT" >/dev/null || true
+    elif deb-systemd-helper --quiet was-enabled "$UNIT"; then
+        # was-enabled is true when there is no state yet, so a first install enables the unit.
+        deb-systemd-helper enable "$UNIT" >/dev/null || true
+    else
+        deb-systemd-helper update-state "$UNIT" >/dev/null || true
+    fi
+
+    if [ -d /run/systemd/system ]; then
+        systemctl --system daemon-reload >/dev/null || true
+        if [ "$setup_ok" != 1 ]; then
+            :
+        elif [ -z "$2" ]; then
+            if systemctl --quiet is-active "$UNIT"; then
+                # A server from a pre-split mqvpn deb or from install.sh still runs the old binary.
+                deb-systemd-invoke restart "$UNIT" >/dev/null || true
+            elif [ "$autostart" != no ]; then
+                deb-systemd-invoke start "$UNIT" >/dev/null || true
+            fi
+        elif [ "${DEBCONF_RECONFIGURE:-0}" = 1 ] && [ "$had_conf" = 1 ]; then
+            # dpkg-reconfigure did not change server.conf, so the clients stay connected.
+            :
+        elif [ -e "$STATE_DIR/start-after-reinstall" ]; then
+            # prerm stopped a running server on remove; this is the reinstall.
+            deb-systemd-invoke start "$UNIT" >/dev/null || true
+        elif systemctl --quiet is-active "$UNIT"; then
+            # Restart only an active server, so that a server the admin stopped stays stopped.
+            deb-systemd-invoke restart "$UNIT" >/dev/null || true
+        fi
+    fi
+    rm -f "$STATE_DIR/start-after-reinstall"
+    ;;
+esac
+
+if [ "$1" = configure ] && [ "$setup_ok" = 1 ]; then
+    /usr/bin/mqvpn-server-info || true
+fi
+
+exit 0

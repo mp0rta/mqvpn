@@ -1,0 +1,59 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
+
+set -e
+
+UNIT=mqvpn-server.service
+STATE_DIR=/var/lib/mqvpn-server
+
+# Sourcing confmodule runs this script again under debconf. Do it first, so
+# that the purge steps and their messages run once.
+if [ "$1" = purge ] && [ -e /usr/share/debconf/confmodule ]; then
+    # shellcheck source=/dev/null
+    . /usr/share/debconf/confmodule
+fi
+
+case "$1" in
+remove)
+    # dpkg also runs this step first on a purge, so the text must hold for both.
+    echo "mqvpn-server: removed. A purge deletes the generated server.conf (with the PSK) and the self-signed certificate; a remove keeps them in /etc/mqvpn."
+    ;;
+purge)
+    if [ -x /usr/bin/deb-systemd-helper ]; then
+        deb-systemd-helper purge "$UNIT" >/dev/null || true
+    fi
+    # Delete only the paths that mqvpn-server-setup created (D7, the openssh-server pattern).
+    # A symlink at such a path is the admin's replacement (certbot), so it stays.
+    if [ -f "$STATE_DIR/generated.list" ]; then
+        while IFS= read -r path; do
+            case "$path" in
+            /etc/mqvpn/*)
+                if [ -L "$path" ]; then
+                    echo "mqvpn-server: kept $path (a symlink, not the generated file)"
+                elif [ -e "$path" ]; then
+                    rm -f "$path"
+                    echo "mqvpn-server: deleted $path"
+                fi
+                ;;
+            esac
+        done < "$STATE_DIR/generated.list"
+    fi
+    rm -rf "$STATE_DIR"
+    # /etc/mqvpn also holds the client examples of mqvpn and admin files.
+    rmdir --ignore-fail-on-non-empty /etc/mqvpn 2>/dev/null || true
+    if [ -d /etc/mqvpn ]; then
+        echo "mqvpn-server: kept /etc/mqvpn: it has files that mqvpn-server did not generate"
+    fi
+    ;;
+esac
+
+if [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null || true
+fi
+
+if [ "$1" = purge ] && [ -e /usr/share/debconf/confmodule ]; then
+    db_purge
+fi
+
+exit 0

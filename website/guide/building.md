@@ -11,6 +11,15 @@
 - libevent 2.x
 - Network access to fetch submodules (`git submodule update --init --recursive`, which includes BoringSSL)
 
+On Debian and Ubuntu, `packaging/build-deps.control` lists the build dependencies, including the tools that build the deb packages:
+
+```bash
+# Debian/Ubuntu: install the build dependencies (packaging/build-deps.control)
+sudo apt-get satisfy "$(sed -n 's/^Build-Depends: *//p' packaging/build-deps.control)"
+# or, with devscripts and equivs installed:
+sudo mk-build-deps --install --remove packaging/build-deps.control
+```
+
 ### Quick Build
 
 ```bash

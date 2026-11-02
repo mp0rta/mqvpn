@@ -1,0 +1,114 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
+#
+# debconf config script for mqvpn-server. At the default priority it asks for
+# the hostname, and for the subnet or the port only when the default collides.
+
+set -e
+
+# shellcheck source=/dev/null
+. /usr/share/debconf/confmodule
+
+CONF=/etc/mqvpn/server.conf
+
+ip4_to_int() {
+    _ifs=$IFS
+    IFS=.
+    # shellcheck disable=SC2086 # split on the dots on purpose
+    set -- $1
+    IFS=$_ifs
+    echo $(( ($1 << 24) + ($2 << 16) + ($3 << 8) + $4 ))
+}
+
+# Two IPv4 CIDRs overlap if their networks are equal at the shorter prefix.
+cidr4_overlap() {
+    _a_len=${1#*/}; [ "$_a_len" = "$1" ] && _a_len=32
+    _b_len=${2#*/}; [ "$_b_len" = "$2" ] && _b_len=32
+    _len=$_a_len; [ "$_b_len" -lt "$_len" ] && _len=$_b_len
+    [ "$_len" -eq 0 ] && return 0
+    _mask=$(( (0xffffffff << (32 - _len)) & 0xffffffff ))
+    [ $(( $(ip4_to_int "${1%/*}") & _mask )) -eq $(( $(ip4_to_int "${2%/*}") & _mask )) ]
+}
+
+# dpkg-preconfigure can run this script before iproute2 is unpacked.
+host_networks() {
+    command -v ip >/dev/null 2>&1 || return 0
+    ip -4 route show table all 2>/dev/null | awk '
+        $1 ~ /^(local|broadcast|unicast|anycast|multicast|blackhole|unreachable|prohibit|throw|nat)$/ { $1 = $2 }
+        $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/ { print $1 }'
+    ip -4 -o addr show 2>/dev/null | awk '{ print $4 }'
+}
+
+subnet_collides() {
+    # A malformed value goes to mqvpn-server-setup, which rejects it with a message.
+    echo "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$' || return 1
+    for _net in $(host_networks); do
+        case "$_net" in 127.*) continue ;; esac
+        cidr4_overlap "$1" "$_net" && return 0
+    done
+    return 1
+}
+
+pick_free_subnet() {
+    for _octet in 8 66 77 88 99 123 166 199 233 250; do
+        if ! subnet_collides "10.$_octet.0.0/24"; then
+            echo "10.$_octet.0.0/24"
+            return 0
+        fi
+    done
+    return 1
+}
+
+conf_value() { # $1 = section, $2 = key
+    sed -n "/^\\[$1\\]/,/^\\[/ s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*\\([^[:space:]#]*\\).*/\\1/p" "$CONF" | head -n 1
+}
+
+if [ -r "$CONF" ]; then
+    # server.conf is the authority (D5): seed the answers from it, so that
+    # dpkg-reconfigure does not show stale values.
+    listen=$(conf_value Interface Listen)
+    subnet=$(conf_value Interface Subnet)
+    control=$(conf_value Control Listen)
+    [ -n "${listen##*:}" ] && db_set mqvpn-server/port "${listen##*:}"
+    [ -n "$subnet" ] && db_set mqvpn-server/subnet "$subnet"
+    if [ -n "$control" ]; then
+        db_set mqvpn-server/enable_control true
+        db_set mqvpn-server/control_port "${control##*:}"
+    else
+        db_set mqvpn-server/enable_control false
+    fi
+    # An existing config ignores the answers, so ask only on dpkg-reconfigure.
+    [ "$1" = reconfigure ] || exit 0
+fi
+
+subnet_priority=low
+db_fget mqvpn-server/subnet seen
+if [ "$RET" != true ]; then
+    db_get mqvpn-server/subnet
+    if subnet_collides "$RET"; then
+        if free=$(pick_free_subnet); then
+            db_set mqvpn-server/subnet "$free"
+        fi
+        subnet_priority=high
+    fi
+fi
+db_input "$subnet_priority" mqvpn-server/subnet || true
+
+db_input high mqvpn-server/hostname || true
+
+port_priority=medium
+db_get mqvpn-server/port
+if command -v ss >/dev/null 2>&1 && [ -n "$(ss -Hlun "sport = :$RET" 2>/dev/null)" ]; then
+    port_priority=high
+fi
+db_input "$port_priority" mqvpn-server/port || true
+
+db_input low mqvpn-server/enable_control || true
+db_get mqvpn-server/enable_control
+if [ "$RET" = true ]; then
+    db_input low mqvpn-server/control_port || true
+fi
+db_input low mqvpn-server/autostart || true
+
+db_go || true

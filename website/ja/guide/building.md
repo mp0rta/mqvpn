@@ -14,6 +14,15 @@
 サブモジュール取得（`git submodule update --init --recursive`、BoringSSL を含む）にインターネット接続が必要です。
 :::
 
+Debian / Ubuntu では、deb パッケージのビルドに使うツールを含むビルド依存パッケージが `packaging/build-deps.control` にまとめてあります。
+
+```bash
+# Debian/Ubuntu: ビルド依存パッケージをインストール（packaging/build-deps.control）
+sudo apt-get satisfy "$(sed -n 's/^Build-Depends: *//p' packaging/build-deps.control)"
+# devscripts と equivs がある場合は次でも可:
+sudo mk-build-deps --install --remove packaging/build-deps.control
+```
+
 ### クイックビルド
 
 ```bash
