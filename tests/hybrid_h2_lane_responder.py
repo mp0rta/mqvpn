@@ -51,6 +51,7 @@
 import os
 import socket
 import sys
+import tempfile
 
 port = int(sys.argv[1])
 peer_file = sys.argv[2]
@@ -73,8 +74,8 @@ def write_total(n):
     # Replace the file in one rename: rewriting it in place truncates it
     # first, and a caller reading between the truncation and the write gets
     # an empty file, which it takes as 0 bytes received.
-    tmp = bytes_file + ".tmp"
-    with open(tmp, "w") as f:
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(bytes_file) or ".")
+    with os.fdopen(fd, "w") as f:
         f.write(str(n))
     os.replace(tmp, bytes_file)
 
