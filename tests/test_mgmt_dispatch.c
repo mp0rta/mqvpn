@@ -126,6 +126,10 @@ dispatch_invalid_envelope(void)
     expect_err("{\"jsonrpc\":\"2.0\",\"id\":1}", -32600, 1, 1);
     expect_err("\"not an object\"", -32600, 0, 0);
     expect_err("42", -32600, 0, 0);
+    /* no id, but not a valid request either: an error, not a silent drop */
+    expect_err("{}", -32600, 0, 0);
+    expect_err("{\"method\":\"system.ping\"}", -32600, 0, 0);
+    expect_err("{\"jsonrpc\":\"2.0\",\"method\":5}", -32600, 0, 0);
 }
 
 static void
@@ -141,9 +145,8 @@ static void
 dispatch_notification_no_reply(void)
 {
     puts("dispatch_notification_no_reply");
-    const char *lines[] = {
-        "{\"jsonrpc\":\"2.0\",\"method\":\"system.ping\"}",
-        "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"system.ping\"}"};
+    const char *lines[] = {"{\"jsonrpc\":\"2.0\",\"method\":\"system.ping\"}",
+                           "{\"jsonrpc\":\"2.0\",\"method\":\"no.such\",\"params\":[1]}"};
     for (int i = 0; i < 2; i++) {
         mgmt_conn_state_t conn = {MGMT_ROLE_ADMIN, 1};
         yyjson_doc *d = run(lines[i], &conn);
@@ -151,6 +154,21 @@ dispatch_notification_no_reply(void)
         CHECK(g_last_rc == 1);
         CHECK(g_line.buf == NULL);
     }
+}
+
+/* "id": null is a request (JSON-RPC 2.0), not a notification: it gets a reply. */
+static void
+dispatch_null_id_replies(void)
+{
+    puts("dispatch_null_id_replies");
+    mgmt_conn_state_t conn = {MGMT_ROLE_ADMIN, 1};
+    yyjson_doc *d =
+        run("{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"system.ping\"}", &conn);
+    CHECK(d != NULL);
+    if (!d) return;
+    CHECK(get(d, "result") != NULL);
+    CHECK(yyjson_is_null(get(d, "id")));
+    yyjson_doc_free(d);
 }
 
 static void
@@ -565,6 +583,7 @@ main(void)
     dispatch_invalid_envelope();
     dispatch_params_array_invalid();
     dispatch_notification_no_reply();
+    dispatch_null_id_replies();
     dispatch_nested_keys_ignored();
     dispatch_hello_ok();
     dispatch_hello_incompatible();

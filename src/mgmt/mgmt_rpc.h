@@ -16,7 +16,7 @@ typedef struct {
 
 typedef struct {
     yyjson_doc *doc;    /* parsed request; release with mgmt_rpc_request_free() */
-    yyjson_val *id;     /* integer or string */
+    yyjson_val *id;     /* integer, string or null */
     const char *method; /* NUL-terminated inside doc */
     yyjson_val *params; /* object, or NULL when absent */
 } mgmt_request_t;

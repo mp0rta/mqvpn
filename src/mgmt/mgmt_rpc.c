@@ -24,12 +24,10 @@ mgmt_rpc_parse(const char *line, size_t len, mgmt_request_t *req, int *err_code,
         *err_code = CMP_E_INVALID_REQUEST;
         return -1;
     }
+    /* JSON-RPC 2.0: only a valid request without an "id" member is a notification;
+     * "id": null is a request, and an invalid envelope gets an error (id null). */
     yyjson_val *id = yyjson_obj_get(root, "id");
-    if (!id || yyjson_is_null(id)) {
-        mgmt_rpc_request_free(req);
-        return 1;
-    }
-    if (!yyjson_is_int(id) && !yyjson_is_str(id)) {
+    if (id && !yyjson_is_null(id) && !yyjson_is_int(id) && !yyjson_is_str(id)) {
         *err_code = CMP_E_INVALID_REQUEST;
         return -1;
     }
@@ -43,6 +41,10 @@ mgmt_rpc_parse(const char *line, size_t len, mgmt_request_t *req, int *err_code,
         strlen(yyjson_get_str(m)) != yyjson_get_len(m)) {
         *err_code = CMP_E_INVALID_REQUEST;
         return -1;
+    }
+    if (!id) {
+        mgmt_rpc_request_free(req);
+        return 1;
     }
     req->method = yyjson_get_str(m);
 
