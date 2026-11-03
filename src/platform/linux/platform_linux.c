@@ -648,9 +648,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
     /* Management endpoint (off unless [ClientManagement] Enabled); a failure
      * is logged and the VPN carries on without it. */
-    mgmt_runtime_start(&mgmt, ctx.eb, mqvpn_version_string(), cfg->client_mgmt_enabled,
-                       cfg->client_mgmt_endpoint, cfg->client_mgmt_socket_mode,
-                       cfg->client_mgmt_socket_group);
+    mgmt_runtime_start(&mgmt, ctx.eb, cfg);
 
     /* Connect */
     if (mqvpn_client_connect(ctx.client) != MQVPN_OK) {

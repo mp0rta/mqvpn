@@ -14,6 +14,7 @@
 #include "mgmt_listen.h"
 
 struct event_base;
+struct mqvpn_client_cfg_s;
 
 typedef struct {
     mgmt_listen_t *listener;
@@ -23,15 +24,15 @@ typedef struct {
 } mgmt_runtime_t;
 
 /*
- * enabled == 0: does nothing and returns 1. Otherwise resolves the path,
- * parses the mode, opens the listener and the endpoint. A failure logs
- * "mgmt ipc disabled: <reason>" once, undoes what was created and returns -1;
- * the caller carries on without the endpoint. 0 = listening.
- * endpoint_version must outlive the runtime. Zero-initialise rt first.
+ * cfg->client_mgmt_enabled == 0: does nothing and returns 1. Otherwise
+ * resolves the path, parses the mode, opens the listener and the endpoint.
+ * A failure logs "mgmt ipc disabled: <reason>" once, undoes what was created
+ * and returns -1; the caller carries on without the endpoint. 0 = listening.
+ * Only the client_mgmt_* fields of cfg are read, during the call.
+ * Zero-initialise rt first.
  */
 int mgmt_runtime_start(mgmt_runtime_t *rt, struct event_base *eb,
-                       const char *endpoint_version, int enabled, const char *endpoint,
-                       const char *socket_mode, const char *socket_group);
+                       const struct mqvpn_client_cfg_s *cfg);
 
 /* Endpoint first (connections), then the listener (fd, unlink, lock). No-op
  * when not started. */

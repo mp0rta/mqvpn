@@ -3,36 +3,37 @@
 
 #include "mgmt_runtime.h"
 #include "log.h"
+#include "vpn_client.h"
 
 #include <stdio.h>
 #include <string.h>
 
 int
 mgmt_runtime_start(mgmt_runtime_t *rt, struct event_base *eb,
-                   const char *endpoint_version, int enabled, const char *endpoint,
-                   const char *socket_mode, const char *socket_group)
+                   const mqvpn_client_cfg_t *cfg)
 {
     char err[256] = {0};
     mgmt_conn_limits_t limits;
     mgmt_listen_opts_t lo;
 
-    if (!enabled) return 1;
+    if (!cfg->client_mgmt_enabled) return 1;
 
-    if (cmp_endpoint_resolve(endpoint, rt->path, sizeof(rt->path)) != 0) {
+    if (cmp_endpoint_resolve(cfg->client_mgmt_endpoint, rt->path, sizeof(rt->path)) !=
+        0) {
         LOG_ERR("mgmt ipc disabled: endpoint path is invalid or too long");
         return -1;
     }
 
     lo.path = rt->path;
-    lo.mode = mgmt_listen_parse_mode(socket_mode);
-    lo.group = socket_group;
+    lo.mode = mgmt_listen_parse_mode(cfg->client_mgmt_socket_mode);
+    lo.group = cfg->client_mgmt_socket_group;
     rt->listener = mgmt_listen_open(&lo, err, sizeof(err));
     if (!rt->listener) {
         LOG_ERR("mgmt ipc disabled: %s", err);
         return -1;
     }
 
-    rt->ctx.endpoint_version = endpoint_version;
+    rt->ctx.endpoint_version = mqvpn_version_string();
     rt->ctx.capabilities = NULL;
     rt->ctx.n_capabilities = 0;
     mgmt_conn_limits_default(&limits);
