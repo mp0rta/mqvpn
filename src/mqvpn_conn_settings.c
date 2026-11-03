@@ -186,6 +186,15 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
      * path is marked app-limited, and have not been re-measured since. */
     out->max_stream_unsent_packets = MQVPN_STREAM_UNSENT_PACKETS;
 
+    /* The same for DATAGRAMs (#447): without a cap one inner UDP flow
+     * faster than the paths fills xquic's send queue, and every other packet
+     * in the tunnel waits ~2.5 s behind it. At the cap xquic refuses the
+     * datagram with -XQC_EAGAIN and mqvpn drops that packet, so the queue
+     * stays short. The client then stops reading the TUN until
+     * dgram_write_notify (half of the cap sent); the server keeps reading
+     * its shared TUN and drops that client's packets meanwhile. */
+    out->max_dgram_unsent_packets = MQVPN_DGRAM_UNSENT_PACKETS;
+
     /* Caller-gated, never derived here: see the field comment in
      * mqvpn_conn_settings.h for why this must equal the batched-send
      * registration decision rather than any locally recomputed condition. */
