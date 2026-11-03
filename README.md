@@ -15,7 +15,8 @@
 
   <p>
     <a href="https://docs.mqvpn.org/">Documentation</a> |
-    <a href="https://discord.gg/5rsqnZfBqu">Discord community</a>
+    <a href="https://discord.gg/5rsqnZfBqu">Discord community</a> |
+    <a href="https://x.com/m9vpn">Official X account</a>
   </p>
 
   <p>
