@@ -55,6 +55,9 @@ IPERF_PORT=5216
 # B may carry a keep-alive and its ACK while A works: a few hundred bytes.
 # Anything near the iperf3 rate means B carried data.
 B_IDLE_MAX=65536
+# and only a few packets in the 4 s window (a keep-alive every 15 s, its
+# ACK, ARP): a probe every second would send about twice as many
+B_IDLE_PKTS=6
 A_BUSY_MIN=1000000
 
 SERVER_PID=""
@@ -98,6 +101,13 @@ srv_bytes() {
              $(ip netns exec "$NS_SERVER" cat "/sys/class/net/$d/statistics/tx_bytes") ))
 }
 
+# rx+tx packets of a server-side veth
+srv_pkts() {
+    local d="$1"
+    echo $(( $(ip netns exec "$NS_SERVER" cat "/sys/class/net/$d/statistics/rx_packets") +
+             $(ip netns exec "$NS_SERVER" cat "/sys/class/net/$d/statistics/tx_packets") ))
+}
+
 # iperf3 through the tunnel for $2 seconds ($1 = "" upload, "-R" download)
 run_iperf() {
     ip netns exec "$NS_CLIENT" iperf3 -c "$TUNNEL_IP" -p "$IPERF_PORT" -t "$2" ${1:+"$1"} \
@@ -106,17 +116,17 @@ run_iperf() {
 
 # B idle and A busy while iperf3 runs: $1 label, $2 iperf3 flag
 check_primary_only() {
-    local a0 b0 a1 b1
-    a0=$(srv_bytes "$VETH_A1"); b0=$(srv_bytes "$VETH_B1")
+    local a0 b0 a1 b1 p0 p1
+    a0=$(srv_bytes "$VETH_A1"); b0=$(srv_bytes "$VETH_B1"); p0=$(srv_pkts "$VETH_B1")
     if ! run_iperf "$2" 4; then
         fail "$1: iperf3 failed"; tail -5 "${WORK_DIR}/iperf.log"; return
     fi
-    a1=$(srv_bytes "$VETH_A1"); b1=$(srv_bytes "$VETH_B1")
-    local da=$((a1 - a0)) db=$((b1 - b0))
-    if [ "$da" -ge "$A_BUSY_MIN" ] && [ "$db" -le "$B_IDLE_MAX" ]; then
-        pass "$1: A carried $da bytes, B $db"
+    a1=$(srv_bytes "$VETH_A1"); b1=$(srv_bytes "$VETH_B1"); p1=$(srv_pkts "$VETH_B1")
+    local da=$((a1 - a0)) db=$((b1 - b0)) dp=$((p1 - p0))
+    if [ "$da" -ge "$A_BUSY_MIN" ] && [ "$db" -le "$B_IDLE_MAX" ] && [ "$dp" -le "$B_IDLE_PKTS" ]; then
+        pass "$1: A carried $da bytes, B $db bytes in $dp packets"
     else
-        fail "$1: A carried $da bytes, B $db (want A >= $A_BUSY_MIN, B <= $B_IDLE_MAX)"
+        fail "$1: A carried $da bytes, B $db bytes in $dp packets (want A >= $A_BUSY_MIN, B <= $B_IDLE_MAX bytes and <= $B_IDLE_PKTS packets)"
     fi
 }
 
