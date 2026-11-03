@@ -95,8 +95,8 @@ MinRTT sends each packet on the path with the lowest current RTT. It is simpler 
 
 ### Failover
 
-One path carries all traffic. Backup paths are kept up, with a small probe
-about once a second, but carry no data while the primary works. When the
+One path carries all traffic. Backup paths are kept up, but stay idle while
+the primary works, so a cellular backup does not keep its radio awake. When the
 primary stops delivering, traffic moves to a backup; when the primary comes
 back, traffic moves back to it. Use it when a backup link is metered or slow
 (e.g., wired primary with an LTE backup).

@@ -41,12 +41,6 @@
 MQVPN_INTERNAL void mqvpn_apply_scheduler(xqc_conn_settings_t *cs,
                                           mqvpn_scheduler_t sched);
 
-/* Standby probe interval for the failover scheduler, in ms: a PING on an
- * idle backup path keeps its RTT and liveness known. */
-#ifndef MQVPN_STANDBY_PROBE_MS
-#  define MQVPN_STANDBY_PROBE_MS 1000
-#endif
-
 /* Schedulers whose secondary paths are created STANDBY (backup paths). */
 static inline bool
 mqvpn_sched_secondary_standby(mqvpn_scheduler_t s)

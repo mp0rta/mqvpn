@@ -42,10 +42,10 @@ mqvpn_apply_scheduler(xqc_conn_settings_t *cs, mqvpn_scheduler_t sched)
     case MQVPN_SCHED_WLB_UDP_PIN: cs->scheduler_callback = xqc_wlb_scheduler_cb; break;
     case MQVPN_SCHED_FAILOVER:
         /* xquic's backup scheduler: a STANDBY path is used only when no
-         * AVAILABLE path is usable, and STANDBY paths are probed so their
-         * RTT and liveness are known when they are needed. */
+         * AVAILABLE path is usable. STANDBY paths are not probed
+         * (standby_path_probe_timeout stays 0): a PING every second keeps a
+         * cellular radio awake, and failing over is as fast without it. */
         cs->scheduler_callback = xqc_backup_scheduler_cb;
-        cs->standby_path_probe_timeout = MQVPN_STANDBY_PROBE_MS;
         break;
     case MQVPN_SCHED_BACKUP_FEC:
 #if defined(XQC_ENABLE_FEC) && defined(XQC_ENABLE_XOR)

@@ -6,7 +6,7 @@
 # The client runs --scheduler failover with --path A --path B (B a backup by
 # default) and asks the server, which runs wlb, to use failover for its
 # download direction too. One connection goes through:
-#   1. A healthy: B carries only the standby probes, upload and download.
+#   1. A healthy: B stays idle (no data, no standby probes), upload and download.
 #   2. A loses every packet, link up: the tunnel keeps working over B.
 #   3. A delivers again: traffic goes back to it, B is idle again.
 #   4. A's link goes down and up (the path is closed and added again): A comes
@@ -52,8 +52,8 @@ SERVER_ADDR="10.116.0.1"
 TUNNEL_IP="10.0.0.1"
 IPERF_PORT=5216
 
-# B may carry standby probes and their ACKs while A works: a few hundred
-# bytes a second. Anything near the iperf3 rate means B carried data.
+# B may carry a keep-alive and its ACK while A works: a few hundred bytes.
+# Anything near the iperf3 rate means B carried data.
 B_IDLE_MAX=65536
 A_BUSY_MIN=1000000
 
