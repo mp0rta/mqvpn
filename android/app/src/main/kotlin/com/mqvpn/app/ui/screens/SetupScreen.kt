@@ -212,15 +212,12 @@ private fun PrimaryButton(label: String, enabled: Boolean, modifier: Modifier = 
     ) { Text(label, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(vertical = 4.dp)) }
 }
 
-/** The mqvpn mark without its tile (geometry from ic_launcher_foreground.xml, 64x64 source). */
+/** The mqvpn mark on its tile (website/public/img/mqvpn-mark-violet.svg, 64x64 source). */
 @Composable
 private fun MqvpnMark(modifier: Modifier = Modifier) {
-    // The joint dot is #FBFAFF in the launcher icon, where it sits on a pale tile
-    // and reads as a cutout; on the app's own background it must follow the theme
-    // or dark mode shows a stark white blob.
-    val joint = LocalMqColors.current.win
     Canvas(modifier) {
         val k = size.width / 64f
+        drawRoundRect(Color(0xFFE9E1FB), cornerRadius = CornerRadius(14.08f * k))
         fun pill(x: Float, y: Float, brush: Brush? = null, color: Color = Color.Unspecified) {
             val tl = Offset(x * k, y * k); val sz = Size(34f * k, 14f * k); val r = CornerRadius(7f * k)
             if (brush != null) drawRoundRect(brush, tl, sz, r) else drawRoundRect(color, tl, sz, r)
@@ -230,6 +227,6 @@ private fun MqvpnMark(modifier: Modifier = Modifier) {
             22f, 36f,
             Brush.linearGradient(listOf(Color(0xFF8B5CF6), Color(0xFF5B21B6)), Offset(22f * k, 36f * k), Offset(56f * k, 50f * k)),
         )
-        drawCircle(joint, 4f * k, Offset(32f * k, 32f * k))
+        drawCircle(Color(0xFFFBFAFF), 4f * k, Offset(32f * k, 32f * k))
     }
 }
