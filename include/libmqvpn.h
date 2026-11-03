@@ -5,7 +5,7 @@
  * libmqvpn — Multipath QUIC VPN library
  *
  * Public API header (single file).
- * Version: 0.18.0 (callback ABI version 3)
+ * Version: 0.19.1 (callback ABI version 3)
  *
  * Thread safety: All functions must be called from a single thread
  * (the "tick thread"). Debug builds assert this (ASSERT_TICK_THREAD inside the library).
@@ -38,8 +38,8 @@ extern "C" {
 /* ─── Version ─── */
 
 #define MQVPN_VERSION_MAJOR 0
-#define MQVPN_VERSION_MINOR 18
-#define MQVPN_VERSION_PATCH 0
+#define MQVPN_VERSION_MINOR 19
+#define MQVPN_VERSION_PATCH 1
 
 /* ─── ABI ─── */
 
@@ -59,7 +59,7 @@ extern "C" {
  * model to follow). Enforced: tests/test_xquic_abi_pin.c pins this value
  * at compile time, so a bump cannot build without meeting this comment. */
 #define MQVPN_MAX_PATHS            8
-#define MQVPN_INIT_MAX_PATH_ID_MAX UINT64_C(0xffffffff)
+#define MQVPN_INIT_MAX_PATH_ID_MAX UINT64_C(128)
 
 /* ─── Opaque handles ─── */
 
@@ -685,7 +685,9 @@ MQVPN_API int mqvpn_config_set_killswitch_hint(mqvpn_config_t *cfg, int enable);
 
 /* draft-21 §4.6: set the initial Maximum Path Identifier advertised in TP.
  * 0 = use xquic default (XQC_DEFAULT_INIT_MAX_PATH_ID = 8). Valid explicit
- * values are 1..MQVPN_INIT_MAX_PATH_ID_MAX. Set lower (e.g. 2) to
+ * values are 1..MQVPN_INIT_MAX_PATH_ID_MAX (128): xquic provisions
+ * connection ID sets for every path ID up to it at handshake, at a cost
+ * that grows with the square of the value. Set lower (e.g. 2) to
  * deterministically trigger G-P16 PATHS_BLOCKED. */
 MQVPN_API int mqvpn_config_set_init_max_path_id(mqvpn_config_t *cfg, uint64_t v);
 /* TUN MTU cap: 0 = auto (MSS-derived), 1280..9000 = upper bound. */
@@ -697,6 +699,15 @@ MQVPN_API int mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu);
  * insufficient capacity fails server_start or notifies client tunnel_closed
  * with MQVPN_ERR_INVALID_ARG when IPv6 is assigned. */
 MQVPN_API int mqvpn_config_set_path_mtu(mqvpn_config_t *cfg, int mtu);
+
+/* Discover the path MTU (both ends must enable it): packets start at a size
+ * any path carries and grow while larger probes are acknowledged, up to the
+ * PathMTU size (or the default cap). Default 0 (off).
+ * The UDP sockets must send with DF set, so that a probe that does not fit
+ * is lost rather than fragmented: the bundled binds and platform layers do
+ * it (mqvpn_bind_posix_opts_t / mqvpn_bind_winsock_opts_t dont_fragment); a
+ * caller with its own transport must set DF on its sockets itself. */
+MQVPN_API int mqvpn_config_set_pmtud(mqvpn_config_t *cfg, int enable);
 
 /* ─── Flow-aware reorder shim config (§16.1) ───
  *
@@ -874,6 +885,9 @@ MQVPN_API void mqvpn_client_destroy(mqvpn_client_t *client);
  * state_changed) may call them normally — e.g. cancelling further retries
  * via disconnect() from reconnect_scheduled is supported. */
 MQVPN_API int mqvpn_client_connect(mqvpn_client_t *client);
+/* 1 when the client's config enables PMTUD: a platform that opens its own
+ * path sockets sets DF on them (mqvpn_bind_posix_opts_t.dont_fragment). */
+MQVPN_API int mqvpn_client_pmtud_enabled(const mqvpn_client_t *client);
 MQVPN_API int mqvpn_client_disconnect(mqvpn_client_t *client);
 
 /*
@@ -1115,7 +1129,9 @@ MQVPN_API int mqvpn_server_egress_fd_budget(mqvpn_server_t *server);
 /* Feed data from platform into the engine. Same accepted-not-sent contract
  * as mqvpn_client_on_tun_packet: with the batched send path engaged the
  * datagram may wait for the caller's next mqvpn_server_tick() — feed, then
- * tick promptly. */
+ * tick promptly. Unlike the client, it never returns MQVPN_ERR_AGAIN for
+ * backpressure: the TUN is shared by every client, so a packet xquic cannot
+ * take for its client right now is dropped and the TUN keeps being read. */
 MQVPN_API int mqvpn_server_on_tun_packet(mqvpn_server_t *server, const uint8_t *pkt,
                                          size_t len);
 

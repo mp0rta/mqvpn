@@ -262,7 +262,7 @@ static void
 test_parse_init_max_path_id_bounds(void)
 {
     const char *ini_ok = "[Multipath]\n"
-                         "InitMaxPathId = 4294967295\n";
+                         "InitMaxPathId = 128\n";
     char *path = write_tmp(ini_ok);
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
@@ -270,10 +270,10 @@ test_parse_init_max_path_id_bounds(void)
     unlink(path);
 
     ASSERT_EQ_INT(rc, 0, "InitMaxPathId max parse ok");
-    ASSERT_EQ_ULL(cfg.init_max_path_id, 4294967295ULL, "InitMaxPathId max stored");
+    ASSERT_EQ_ULL(cfg.init_max_path_id, 128ULL, "InitMaxPathId max stored");
 
     const char *ini_bad = "[Multipath]\n"
-                          "InitMaxPathId = 4294967296\n";
+                          "InitMaxPathId = 129\n";
     path = write_tmp(ini_bad);
     mqvpn_config_defaults(&cfg);
     rc = mqvpn_config_load(&cfg, path);
@@ -288,12 +288,12 @@ test_parse_init_max_path_id_json_bounds(void)
 {
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
-    int rc = mqvpn_config_load_json_filecfg(&cfg, "{\"init_max_path_id\":4294967295}");
+    int rc = mqvpn_config_load_json_filecfg(&cfg, "{\"init_max_path_id\":128}");
     ASSERT_EQ_INT(rc, 0, "JSON init_max_path_id max parse ok");
-    ASSERT_EQ_ULL(cfg.init_max_path_id, 4294967295ULL, "JSON init_max_path_id max");
+    ASSERT_EQ_ULL(cfg.init_max_path_id, 128ULL, "JSON init_max_path_id max");
 
     mqvpn_config_defaults(&cfg);
-    rc = mqvpn_config_load_json_filecfg(&cfg, "{\"init_max_path_id\":4294967296}");
+    rc = mqvpn_config_load_json_filecfg(&cfg, "{\"init_max_path_id\":129}");
     ASSERT_EQ_INT(rc, 0, "JSON init_max_path_id overflow is warning-only");
     ASSERT_EQ_ULL(cfg.init_max_path_id, 0, "JSON init_max_path_id overflow ignored");
 }
@@ -405,25 +405,30 @@ test_boolean_parsing(void)
     unlink(path);
     ASSERT_EQ_INT(cfg.insecure, 1, "insecure=true");
 
-    const char *ini_yes = "[Server]\n"
-                          "Address = host:443\n"
-                          "Insecure = yes\n";
+    /* Only true/false (any case) are booleans; anything else fails the load
+     * instead of being read as false. */
+    const char *rejected[] = {"yes", "no", "1", "0", "on", "off", "auto", ""};
+    for (size_t i = 0; i < sizeof(rejected) / sizeof(rejected[0]); i++) {
+        char ini[96];
+        snprintf(ini, sizeof(ini), "[Server]\nAddress = host:443\nInsecure = %s\n",
+                 rejected[i]);
+        path = write_tmp(ini);
+        mqvpn_config_defaults(&cfg);
+        ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), -1, rejected[i]);
+        unlink(path);
+    }
 
-    path = write_tmp(ini_yes);
+    /* A later valid duplicate does not cancel an earlier invalid line. */
+    path = write_tmp("[Server]\nAddress = host:443\nInsecure = on\nInsecure = true\n");
     mqvpn_config_defaults(&cfg);
-    mqvpn_config_load(&cfg, path);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), -1, "invalid then valid duplicate");
     unlink(path);
-    ASSERT_EQ_INT(cfg.insecure, 1, "insecure=yes");
 
-    const char *ini_one = "[Server]\n"
-                          "Address = host:443\n"
-                          "Insecure = 1\n";
-
-    path = write_tmp(ini_one);
+    path = write_tmp("[Server]\nAddress = host:443\nInsecure = TRUE\n");
     mqvpn_config_defaults(&cfg);
-    mqvpn_config_load(&cfg, path);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), 0, "insecure=TRUE loads");
     unlink(path);
-    ASSERT_EQ_INT(cfg.insecure, 1, "insecure=1");
+    ASSERT_EQ_INT(cfg.insecure, 1, "insecure=TRUE");
 
     const char *ini_false = "[Server]\n"
                             "Address = host:443\n"
@@ -1089,6 +1094,23 @@ test_path_mtu_parse(void)
     mqvpn_config_load(&cfg, path);
     unlink(path);
     ASSERT_EQ_INT(cfg.path_mtu, 0, "PathMTU < 1280 ignored");
+}
+
+static void
+test_pmtud_parse(void)
+{
+    char *path = write_tmp("[Interface]\nPMTUD = true\n");
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(cfg.pmtud, 0, "default pmtud is off");
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.pmtud, 1, "PMTUD true parsed");
+
+    path = write_tmp("[Interface]\nPMTUD = on\n");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), -1, "PMTUD on fails the load");
+    unlink(path);
 }
 
 static void
@@ -2394,17 +2416,18 @@ test_redundant_ports_ini_json(void)
 }
 
 static void
-test_redundant_ini_onoff(void)
+test_redundant_ini_bool(void)
 {
-    const char *vals[] = {"on", "off", "ON", "Off", "true", "no", "bogus"};
-    const int want[] = {1, 0, 1, 0, 1, 0, 0};
+    const char *vals[] = {"true", "false", "TRUE", "False", "on", "off", "no", "bogus"};
+    const int want_rc[] = {0, 0, 0, 0, -1, -1, -1, -1};
+    const int want[] = {1, 0, 1, 0, 0, 0, 0, 0};
     for (size_t i = 0; i < sizeof(vals) / sizeof(vals[0]); i++) {
         char ini[64];
         snprintf(ini, sizeof(ini), "[Multipath]\nRedundant = %s\n", vals[i]);
         char *path = write_tmp(ini);
         mqvpn_file_config_t c;
         mqvpn_config_defaults(&c);
-        mqvpn_config_load(&c, path);
+        ASSERT_EQ_INT(mqvpn_config_load(&c, path), want_rc[i], vals[i]);
         unlink(path);
         ASSERT_EQ_INT(c.redundant, want[i], vals[i]);
     }
@@ -2420,6 +2443,29 @@ test_client_mgmt_defaults(void)
     ASSERT_EQ_STR(c.client_mgmt_socket_mode, "", "client_mgmt_socket_mode default empty");
     ASSERT_EQ_STR(c.client_mgmt_socket_group, "",
                   "client_mgmt_socket_group default empty");
+}
+
+static void
+test_json_bool_strict(void)
+{
+    /* A bool key must be a JSON true/false; a string such as "on" (or even
+     * "true") fails the load, in every scope. */
+    const char *bad[] = {
+        "{\"insecure\":\"true\"}",
+        "{\"hybrid\":{\"enabled\":\"on\"}}",
+        "{\"reorder\":{\"enabled\":\"on\"}}",
+        "{\"advanced\":{\"udp_gso\":1}}",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        mqvpn_file_config_t c;
+        mqvpn_config_defaults(&c);
+        ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&c, bad[i]), -1, bad[i]);
+    }
+    mqvpn_file_config_t c;
+    mqvpn_config_defaults(&c);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&c, "{\"hybrid\":{\"enabled\":true}}"),
+                  0, "hybrid enabled true loads");
+    ASSERT_EQ_INT(c.hybrid.enabled, 1, "hybrid enabled true");
 }
 
 static void
@@ -2440,6 +2486,7 @@ test_ini_json_scalar_parity(void)
                       "ReconnectInterval = 17\n"
                       "MTU = 1420\n"
                       "PathMTU = 1492\n"
+                      "PMTUD = true\n"
                       "[Server]\n"
                       "Address = vpn.parity.test:4433\n"
                       "ServerName = sni.parity.test\n"
@@ -2468,7 +2515,7 @@ test_ini_json_scalar_parity(void)
                       "ReinjectionDeadlineLowerBoundMs = 10\n"
                       "Redundant = true\n"
                       "[Reorder]\n"
-                      "Enabled = on\n"
+                      "Enabled = true\n"
                       "MaxWaitMs = 55\n"
                       "CapPackets = 256\n"
                       "MaxBytesPerFlow = 5000000\n"
@@ -2509,6 +2556,7 @@ test_ini_json_scalar_parity(void)
                        "\"reconnect_interval\":17,"
                        "\"mtu\":1420,"
                        "\"path_mtu\":1492,"
+                       "\"pmtud\":true,"
                        "\"server_addr\":\"vpn.parity.test:4433\","
                        "\"tls_server_name\":\"sni.parity.test\","
                        "\"insecure\":true,"
@@ -2533,7 +2581,7 @@ test_ini_json_scalar_parity(void)
                        "\"reinjection_deadline_lower_bound_ms\":10,"
                        "\"redundant\":true,"
                        "\"reorder\":{"
-                       "\"enabled\":\"on\","
+                       "\"enabled\":true,"
                        "\"max_wait_ms\":55,"
                        "\"cap_packets\":256,"
                        "\"max_bytes_per_flow\":5000000,"
@@ -2584,6 +2632,7 @@ test_ini_json_scalar_parity(void)
     ASSERT_EQ_INT(a.is_server, b.is_server, "parity is_server");
     ASSERT_EQ_INT(a.tun_mtu, b.tun_mtu, "parity mtu");
     ASSERT_EQ_INT(a.path_mtu, b.path_mtu, "parity path_mtu");
+    ASSERT_EQ_INT(a.pmtud, b.pmtud, "parity pmtud");
     ASSERT_EQ_INT(a.max_clients, b.max_clients, "parity max_clients");
     ASSERT_EQ_INT((int)a.init_max_path_id, (int)b.init_max_path_id,
                   "parity init_max_path_id");
@@ -2650,6 +2699,7 @@ test_ini_json_scalar_parity(void)
      * sides and both structs just kept the (equal) default. */
     ASSERT_EQ_INT(a.tun_mtu, 1420, "parity mtu is non-default");
     ASSERT_EQ_INT(a.path_mtu, 1492, "parity path_mtu is non-default");
+    ASSERT_EQ_INT(a.pmtud, 1, "parity pmtud is non-default");
     ASSERT_EQ_STR(a.reinjection, "deadline", "parity reinjection is non-default");
     ASSERT_EQ_INT(a.reinjection_srtt_factor_pct, 150,
                   "parity reinjection_srtt_factor_pct is non-default");
@@ -2732,13 +2782,13 @@ test_ini_json_invalid_scalar_parity(void)
     ASSERT_EQ_INT(b.max_clients, 64, "parse-fail max_clients json -> 64");
 
     /* InitMaxPathId over bound → keep default 0 on both sides */
-    p = write_tmp("[Multipath]\nInitMaxPathId = 4294967296\n");
+    p = write_tmp("[Multipath]\nInitMaxPathId = 129\n");
     mqvpn_config_defaults(&a);
     rc = mqvpn_config_load(&a, p);
     unlink(p);
     ASSERT_EQ_INT(rc, 0, "over-bound impid ini load rc 0");
     mqvpn_config_defaults(&b);
-    mqvpn_config_load_json_filecfg(&b, "{\"init_max_path_id\":4294967296}");
+    mqvpn_config_load_json_filecfg(&b, "{\"init_max_path_id\":129}");
     ASSERT_EQ_INT((int)a.init_max_path_id, 0, "over-bound impid ini keeps 0");
     ASSERT_EQ_INT((int)b.init_max_path_id, 0, "over-bound impid json keeps 0");
 
@@ -2884,6 +2934,7 @@ main(void)
     test_mtu_invalid_string_ignored();
     test_mtu_json_parse();
     test_path_mtu_parse();
+    test_pmtud_parse();
 
     /* subnet6 tests */
     test_subnet6_default();
@@ -2940,7 +2991,8 @@ main(void)
     test_client_mgmt_defaults();
     test_ini_json_scalar_parity();
     test_redundant_ports_ini_json();
-    test_redundant_ini_onoff();
+    test_redundant_ini_bool();
+    test_json_bool_strict();
     test_ini_json_invalid_scalar_parity();
 
     /* JSON parser strictness */

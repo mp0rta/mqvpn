@@ -86,12 +86,16 @@ VARIABLES
   \* --- platform ---
   releaseObligations, \* handles whose release the platform still owes
   pendingRelease,     \* release calls made, not yet processed
-  dupCount            \* duplicated / late release calls (bounded)
+  dupCount,           \* duplicated / late release calls (bounded)
+  \* --- client config and the post-request hold ---
+  reqSched,      \* config.request_server_scheduler (fixed at Init)
+  hold           \* c->hold_extra_paths: while set, add_path and
+                 \* cb_ready_to_create_path do not activate a secondary
 
 vars == <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed, conn,
           mpReady, mp, mpCredit, closeCount, xqcSideActive, pendingXqcRemoval,
           nextXqcId, abandonCount, releaseObligations, pendingRelease,
-          dupCount>>
+          dupCount, reqSched, hold>>
 
 --------------------------------------------------------------------------------
 \* Helpers
@@ -155,9 +159,16 @@ ApiConnect ==
   /\ lastTrigger' = <<"BOOTSTRAP", inc>>
   /\ conn' = "Connecting"
   /\ xqcSideActive' = TRUE
+  \* cli_masque_start_tunnel (handshake done, CONNECT-IP request sent) sets
+  \* hold_extra_paths when request_server_scheduler is configured. The
+  \* handshake is folded into the connect, as the bootstrap is. The model
+  \* thus sets hold at connect where C sets it after the handshake; the
+  \* excluded run (start_tunnel fails before setting it) sends no CONNECT-IP
+  \* request and can only close, and mpReady cannot precede the handshake.
+  /\ hold' = reqSched
   /\ UNCHANGED <<opsSet, inc, releaseCount, destroyed, mpReady, mp, mpCredit,
                  closeCount, pendingXqcRemoval, nextXqcId, abandonCount,
-                 releaseObligations, pendingRelease, dupCount>>
+                 releaseObligations, pendingRelease, dupCount, reqSched>>
 
 \* cb_ready_to_create_path: xquic signals multipath readiness after the
 \* handshake, only on a multipath connection and only once a path id is
@@ -165,6 +176,8 @@ ApiConnect ==
 \* xqc_conn_get_available_path_id, xqc_conn.c:5519-5542). It can precede the
 \* tunnel address and ESTABLISHED. Runs where the peer never grants credit
 \* (mpCredit = FALSE) are explored too: the client then never becomes ready.
+\* While hold is set the callback only records readiness (it returns before
+\* activate_pending_paths); client_release_path_hold activates later.
 EnvMpReady ==
   /\ ~destroyed
   /\ conn \in ConnUp
@@ -175,21 +188,26 @@ EnvMpReady ==
   /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed, conn,
                  mp, mpCredit, closeCount, xqcSideActive, pendingXqcRemoval,
                  nextXqcId, abandonCount, releaseObligations, pendingRelease,
-                 dupCount>>
+                 dupCount, reqSched, hold>>
 
-\* Address assigned -> TUNNEL_READY; the primary, if still VALIDATING and
-\* attached, is validated by the handshake (cli_connect_ip_on_body,
-\* mqvpn_client.c:2143-2152).
+\* Address assigned -> TUNNEL_READY; the primary, if still VALIDATING,
+\* attached and on the bootstrap path (xquic id 0), is validated by the
+\* handshake (cli_connect_ip_on_body). A replacement path waits for the poll.
 EnvTunnelReady ==
   /\ ~destroyed
   /\ conn = "Connecting"
   /\ conn' = "TunnelReady"
-  /\ IF slot.state = "Validating" /\ slot.attached
+  /\ IF slot.state = "Validating" /\ slot.attached /\ slot.xqcId = 0
      THEN Fire("VALIDATION_OK", [NoCtx EXCEPT !.target = "Active"])
      ELSE UNCHANGED <<slot, lastTrigger>>
+  \* client_release_path_hold runs after the primary's VALIDATION_OK and the
+  \* tunnel_config_ready callback. If multipath is ready it activates the
+  \* pending slots in the same call; that shows as an EnvActivate step next.
+  /\ hold' = FALSE
   /\ UNCHANGED <<opsSet, inc, releaseCount, destroyed, mpReady, mp, mpCredit,
                  closeCount, xqcSideActive, pendingXqcRemoval, nextXqcId,
-                 abandonCount, releaseObligations, pendingRelease, dupCount>>
+                 abandonCount, releaseObligations, pendingRelease, dupCount,
+                 reqSched>>
 
 \* mqvpn_client_set_tun_active: TUNNEL_READY -> ESTABLISHED.
 EnvEstablish ==
@@ -199,7 +217,7 @@ EnvEstablish ==
   /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed,
                  mpReady, mp, mpCredit, closeCount, xqcSideActive,
                  pendingXqcRemoval, nextXqcId, abandonCount,
-                 releaseObligations, pendingRelease, dupCount>>
+                 releaseObligations, pendingRelease, dupCount, reqSched, hold>>
 
 \* Any connection close: peer, network, handshake failure, disconnect().
 EnvConnClose ==
@@ -210,7 +228,7 @@ EnvConnClose ==
   /\ ConnDown
   /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed,
                  mpReady, mp, mpCredit, nextXqcId, abandonCount,
-                 releaseObligations, pendingRelease, dupCount>>
+                 releaseObligations, pendingRelease, dupCount, reqSched, hold>>
 
 \* tick_reconnect (mqvpn_client.c:4108-4140), or mqvpn_client_connect from
 \* RECONNECTING (mqvpn_client.c:3202-3262): both reset the slots, then start.
@@ -225,13 +243,15 @@ EnvReconnect ==
           /\ slot' = Bootstrapped(reset)
           /\ conn' = "Connecting"
           /\ xqcSideActive' = TRUE
+          /\ hold' = reqSched      \* cli_masque_start_tunnel, as in ApiConnect
        \/ /\ slot' = reset
           /\ UNCHANGED <<conn, xqcSideActive>>
+          /\ hold' = FALSE         \* client_reset_paths_for_reconnect clears it
   /\ lastTrigger' = <<"CONN_RESET", inc>>
   /\ mpReady' = FALSE
   /\ UNCHANGED <<opsSet, inc, releaseCount, destroyed, mp, mpCredit,
                  closeCount, pendingXqcRemoval, nextXqcId, abandonCount,
-                 releaseObligations, pendingRelease, dupCount>>
+                 releaseObligations, pendingRelease, dupCount, reqSched>>
 
 \* disconnect() while RECONNECTING cancels the retry.
 ApiDisconnectWhileReconnecting ==
@@ -241,7 +261,7 @@ ApiDisconnectWhileReconnecting ==
   /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed,
                  mpReady, mp, mpCredit, closeCount, xqcSideActive,
                  pendingXqcRemoval, nextXqcId, abandonCount,
-                 releaseObligations, pendingRelease, dupCount>>
+                 releaseObligations, pendingRelease, dupCount, reqSched, hold>>
 
 --------------------------------------------------------------------------------
 \* Activation, retry, validation, stability (the client's own triggers)
@@ -252,11 +272,12 @@ EnvActivate ==
   /\ ~destroyed
   /\ conn \in ConnUp
   /\ mpReady
+  /\ ~hold    \* add_path and cb_ready_to_create_path skip it while held
   /\ slot.state = "Pending"
   /\ Activation("ACTIVATE")
   /\ UNCHANGED <<opsSet, inc, releaseCount, destroyed, conn, mpReady, mp,
                  mpCredit, closeCount, pendingXqcRemoval, abandonCount,
-                 releaseObligations, pendingRelease, dupCount>>
+                 releaseObligations, pendingRelease, dupCount, reqSched, hold>>
 
 \* tick_path_recovery (mqvpn_client.c:4091-4103) runs only when multipath is
 \* ready and ESTABLISHED.
@@ -271,7 +292,7 @@ EnvRetryFire ==
   /\ Activation("RETRY")
   /\ UNCHANGED <<opsSet, inc, releaseCount, destroyed, conn, mpReady, mp,
                  mpCredit, closeCount, pendingXqcRemoval, abandonCount,
-                 releaseObligations, pendingRelease, dupCount>>
+                 releaseObligations, pendingRelease, dupCount, reqSched, hold>>
 
 \* tick_check_all_validations (mqvpn_client.c:4039-4083) polls xquic and
 \* validates a slot whose path is xquic-ACTIVE. The code takes the target
@@ -287,7 +308,7 @@ EnvValidationPoll ==
   /\ UNCHANGED <<opsSet, inc, releaseCount, destroyed, conn, mpReady, mp,
                  mpCredit, closeCount, xqcSideActive, pendingXqcRemoval,
                  nextXqcId, abandonCount, releaseObligations, pendingRelease,
-                 dupCount>>
+                 dupCount, reqSched, hold>>
 
 \* path_fsm_tick_confirm_stable once the 30 s window has elapsed.
 EnvStableConfirm ==
@@ -300,7 +321,7 @@ EnvStableConfirm ==
   /\ UNCHANGED <<opsSet, inc, releaseCount, destroyed, conn, mpReady, mp,
                  mpCredit, closeCount, xqcSideActive, pendingXqcRemoval,
                  nextXqcId, abandonCount, releaseObligations, pendingRelease,
-                 dupCount>>
+                 dupCount, reqSched, hold>>
 
 \* mqvpn_client_reactivate_path and reactivate_slot_eligible
 \* (mqvpn_client.c:3549-3594): ESTABLISHED and multipath ready, then an
@@ -315,7 +336,7 @@ ApiManualReactivate ==
   /\ Activation("MANUAL_REACTIVATE")
   /\ UNCHANGED <<opsSet, inc, releaseCount, destroyed, conn, mpReady, mp,
                  mpCredit, closeCount, pendingXqcRemoval, abandonCount,
-                 releaseObligations, pendingRelease, dupCount>>
+                 releaseObligations, pendingRelease, dupCount, reqSched, hold>>
 
 --------------------------------------------------------------------------------
 \* Abstract xquic
@@ -331,10 +352,10 @@ EnvXqcValidate ==
   /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed, conn,
                  mpReady, mp, mpCredit, closeCount, pendingXqcRemoval,
                  nextXqcId, abandonCount, releaseObligations, pendingRelease,
-                 dupCount>>
+                 dupCount, reqSched, hold>>
 
 \* xquic abandons a path on its own when its validation times out
-\* (xqc_path_validation_on_retx, xqc_multipath.c:460-484): multipath only,
+\* (xqc_timer_path_idle_timeout, xqc_timer.c:179-184): multipath only,
 \* and only a path that is still validating, so never an xquic-ACTIVE one.
 \* Bounded and not fair.
 EnvXqcSpontaneousAbandon ==
@@ -349,9 +370,28 @@ EnvXqcSpontaneousAbandon ==
   /\ abandonCount' = abandonCount + 1
   /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed, conn,
                  mpReady, mp, mpCredit, closeCount, xqcSideActive, nextXqcId,
-                 releaseObligations, pendingRelease, dupCount>>
+                 releaseObligations, pendingRelease, dupCount, reqSched, hold>>
 
-\* cb_path_removed (mqvpn_client.c:2704-2721) -> find_path_by_xqc_id
+\* xquic removes the slot's xquic-ACTIVE path: the peer abandons it, or the
+\* path idle timeout closes it while another path is active. Like DropLike's
+\* successful abandon, this stands for a connection on which another path is
+\* active; mpReady restricts it to connections that could have one.
+EnvXqcRemoveActive ==
+  /\ ~destroyed
+  /\ conn \in ConnUp
+  /\ mp /\ mpReady
+  /\ slot.live
+  /\ xqcSideActive
+  /\ <<slot.xqcId, inc>> \notin pendingXqcRemoval
+  /\ abandonCount < AbandonCap
+  /\ pendingXqcRemoval' = pendingXqcRemoval \cup {<<slot.xqcId, inc>>}
+  /\ xqcSideActive' = FALSE
+  /\ abandonCount' = abandonCount + 1
+  /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed, conn,
+                 mpReady, mp, mpCredit, closeCount, nextXqcId,
+                 releaseObligations, pendingRelease, dupCount, reqSched, hold>>
+
+\* cb_path_removed (mqvpn_client.c:2815-2832) -> find_path_by_xqc_id
 \* (mqvpn_client.c:561-569) -> XQUIC_REMOVED. The lookup matches a live slot
 \* with the same id only; the incarnation rides along as ghost data the real
 \* lookup cannot see. This one-slot model does not exercise that guard: every
@@ -368,7 +408,7 @@ DeliverRemoval ==
           ELSE UNCHANGED <<slot, lastTrigger>>
   /\ UNCHANGED <<opsSet, inc, releaseCount, destroyed, conn, mpReady, mp,
                  mpCredit, closeCount, xqcSideActive, nextXqcId, abandonCount,
-                 releaseObligations, pendingRelease, dupCount>>
+                 releaseObligations, pendingRelease, dupCount, reqSched, hold>>
 
 \* The two recovery routes of an orphan (a dropped slot whose PATH_ABANDON
 \* failed or was never sent), exactly as xqc_timer_path_idle_timeout
@@ -389,7 +429,7 @@ EnvPathIdleReap ==
   /\ pendingXqcRemoval' = pendingXqcRemoval \cup {<<slot.xqcId, inc>>}
   /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed, conn,
                  mpReady, mp, mpCredit, closeCount, xqcSideActive, nextXqcId,
-                 abandonCount, releaseObligations, pendingRelease, dupCount>>
+                 abandonCount, releaseObligations, pendingRelease, dupCount, reqSched, hold>>
 
 \* The connection idles out. Not counted against ConnCloseCap: an orphan
 \* exists at most once per incarnation (after the close, a reset clears live
@@ -401,7 +441,7 @@ EnvConnIdleTimeout ==
   /\ ConnDown
   /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed,
                  mpReady, mp, mpCredit, closeCount, nextXqcId, abandonCount,
-                 releaseObligations, pendingRelease, dupCount>>
+                 releaseObligations, pendingRelease, dupCount, reqSched, hold>>
 
 --------------------------------------------------------------------------------
 \* Platform and API
@@ -417,6 +457,8 @@ EnvConnIdleTimeout ==
 \* CLOSED_FREE slot (MQVPN_MAX_PATHS aside, a single-slot model has nowhere
 \* to append), path_entry_init, a fresh handle, the transport installed,
 \* then ADD. Covers the never-used slot too (inc = 0, FreshSlot).
+\* add_path's own activate_pending_paths needs ~hold_extra_paths too; that is
+\* EnvActivate's ~hold.
 ApiAdd ==
   /\ ~destroyed
   /\ inc < MaxIncarnations
@@ -427,7 +469,7 @@ ApiAdd ==
   /\ lastTrigger' = <<"ADD", inc + 1>>
   /\ UNCHANGED <<releaseCount, destroyed, conn, mpReady, mp, mpCredit,
                  closeCount, xqcSideActive, pendingXqcRemoval, nextXqcId,
-                 abandonCount, releaseObligations, pendingRelease, dupCount>>
+                 abandonCount, releaseObligations, pendingRelease, dupCount, reqSched, hold>>
 
 \* mqvpn_client_on_platform_path_dropped / mqvpn_client_remove_path
 \* (mqvpn_client.c:3456-3508): a live path is abandoned first, only when a
@@ -460,7 +502,7 @@ DropLike(ev) ==
                            ELSE releaseObligations
   /\ UNCHANGED <<opsSet, inc, releaseCount, destroyed, conn, mpReady, mp,
                  mpCredit, closeCount, nextXqcId, abandonCount, pendingRelease,
-                 dupCount>>
+                 dupCount, reqSched, hold>>
 
 ApiDrop   == DropLike("PLATFORM_DROP")
 ApiRemove == DropLike("REMOVE_API")
@@ -473,7 +515,7 @@ PlatformRelease ==
        /\ pendingRelease' = pendingRelease \cup {h}
   /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed,
                  conn, mpReady, mp, mpCredit, closeCount, xqcSideActive,
-                 pendingXqcRemoval, nextXqcId, abandonCount, dupCount>>
+                 pendingXqcRemoval, nextXqcId, abandonCount, dupCount, reqSched, hold>>
 
 \* A release call for any handle ever issued, again or out of turn.
 PlatformDupRelease ==
@@ -485,7 +527,7 @@ PlatformDupRelease ==
   /\ UNCHANGED <<slot, opsSet, inc, lastTrigger, releaseCount, destroyed,
                  conn, mpReady, mp, mpCredit, closeCount, xqcSideActive,
                  pendingXqcRemoval, nextXqcId, abandonCount,
-                 releaseObligations>>
+                 releaseObligations, reqSched, hold>>
 
 \* mqvpn_client_on_platform_path_released (mqvpn_client.c:3512-3535), its
 \* guards in order: unknown/recycled handle (find_path_by_handle),
@@ -509,7 +551,7 @@ DeliverRelease ==
           ELSE UNCHANGED <<opsSet, releaseCount, slot, lastTrigger>>
   /\ UNCHANGED <<inc, destroyed, conn, mpReady, mp, mpCredit, closeCount,
                  xqcSideActive, pendingXqcRemoval, nextXqcId, abandonCount,
-                 releaseObligations, dupCount>>
+                 releaseObligations, dupCount, reqSched, hold>>
 
 \* mqvpn_client_destroy (mqvpn_client.c:3123-3170) finalises every slot that
 \* still owes a release, without setting the flag. client_finalize_transport
@@ -525,7 +567,7 @@ EnvDestroy ==
      ELSE UNCHANGED <<releaseCount, opsSet>>
   /\ UNCHANGED <<slot, inc, lastTrigger, conn, mpReady, mp, mpCredit,
                  closeCount, xqcSideActive, pendingXqcRemoval, nextXqcId,
-                 abandonCount, releaseObligations, pendingRelease, dupCount>>
+                 abandonCount, releaseObligations, pendingRelease, dupCount, reqSched, hold>>
 
 --------------------------------------------------------------------------------
 
@@ -548,6 +590,8 @@ Init ==
   /\ releaseObligations = {}
   /\ pendingRelease = {}
   /\ dupCount = 0
+  /\ reqSched \in BOOLEAN
+  /\ hold = FALSE
 
 \* A plain disjunction of the named actions, so that TLC names each step and
 \* each coverage line after its action (ApiDrop and ApiRemove both as
@@ -557,7 +601,8 @@ Next ==
   \/ EnvConnClose \/ EnvReconnect \/ ApiDisconnectWhileReconnecting
   \/ EnvActivate \/ EnvRetryFire \/ EnvValidationPoll \/ EnvStableConfirm
   \/ ApiManualReactivate
-  \/ EnvXqcValidate \/ EnvXqcSpontaneousAbandon \/ DeliverRemoval
+  \/ EnvXqcValidate \/ EnvXqcSpontaneousAbandon \/ EnvXqcRemoveActive
+  \/ DeliverRemoval
   \/ EnvPathIdleReap \/ EnvConnIdleTimeout
   \/ ApiAdd \/ ApiDrop \/ ApiRemove
   \/ PlatformRelease \/ PlatformDupRelease \/ DeliverRelease
@@ -612,6 +657,16 @@ TypeOK ==
   /\ releaseObligations \subseteq 1..MaxIncarnations
   /\ pendingRelease \subseteq 1..MaxIncarnations
   /\ dupCount \in 0..DupReleaseCap
+  /\ reqSched \in BOOLEAN
+  /\ hold \in BOOLEAN
+
+\* hold exists only before the tunnel is ready: set while connecting, cleared
+\* by EnvTunnelReady. A close leaves it set, so it may outlive the connection
+\* (Reconnecting / Closed), but never reaches TunnelReady or Established.
+\* The tick-driven activations (EnvRetryFire, ApiManualReactivate) run only
+\* when Established, hence need no ~hold.
+HoldNotAfterTunnelReady ==
+  hold => conn \in {"Connecting", "Reconnecting", "Closed"}
 
 \* path_invariant_check holds in every reachable state.
 InvPerState == Fsm!Legal(slot)

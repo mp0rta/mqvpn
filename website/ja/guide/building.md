@@ -203,7 +203,7 @@ android/
 ## iOS
 
 ::: info
-iOS 対応はクライアントのみで開発中です。アプリと PacketTunnel 拡張は `ios/poc/` 配下にあります。CI はフルチェーンのクロスビルドとアプリの未署名ビルドを行いますが、実機での実行には各自の署名 ID が必要です。
+iOS 対応はクライアントのみで開発中です。アプリと PacketTunnel 拡張は `ios/app/` 配下にあります。CI はフルチェーンのクロスビルドとアプリの未署名ビルドを行いますが、実機での実行には各自の署名 ID が必要です。
 :::
 
 ### 前提条件
@@ -225,10 +225,10 @@ iOS 対応はクライアントのみで開発中です。アプリと PacketTun
 ### アプリと PacketTunnel 拡張のビルド
 
 ```bash
-bash ios/poc/Tests/run-host-tests.sh                         # Swift ホストテスト（SDK 不要）
+bash ios/app/Tests/run-host-tests.sh                         # Swift ホストテスト（SDK 不要）
 
-cp ios/poc/Config.example.xcconfig ios/poc/Config.xcconfig   # DEVELOPMENT_TEAM を設定
-(cd ios/poc && xcodegen generate)                            # Xcode プロジェクトを生成
+cp ios/app/Config.example.xcconfig ios/app/Config.xcconfig   # DEVELOPMENT_TEAM を設定
+(cd ios/app && xcodegen generate)                            # Xcode プロジェクトを生成
 ```
 
 CI は同じプロジェクトを未署名（`CODE_SIGNING_ALLOWED=NO`）でビルドし、実機・シミュレータでの実行は手動ステップです。

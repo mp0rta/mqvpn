@@ -2303,6 +2303,39 @@ TEST(server_reconnect_manual_failure_rearm)
     close(cli_fd[0]);
 }
 
+static void
+tweak_reconnect_hourly(mqvpn_config_t *cfg)
+{
+    mqvpn_config_set_reconnect(cfg, 1, 3600);
+}
+
+static int
+done_client_reconnecting(loopback_t *lb)
+{
+    return mqvpn_client_get_state(lb->cli) == MQVPN_STATE_RECONNECTING;
+}
+
+/* The connection can end while the client is TUNNEL_READY, before its
+ * platform calls mqvpn_client_set_tun_active(): an embedder may activate the
+ * TUN after tunnel_config_ready returns, as this harness does, and Android
+ * stays there when it fails to create the TUN until its queued disconnect
+ * runs. The client reconnects, as it does from AUTHENTICATING or
+ * ESTABLISHED. */
+TEST(client_conn_lost_in_tunnel_ready_reconnects)
+{
+    loopback_t lb;
+    loopback_setup(&lb, tweak_reconnect_hourly);
+    loopback_pump_until(&lb, done_established, 10000);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+    ASSERT_EQ(mqvpn_client_get_state(lb.cli), MQVPN_STATE_TUNNEL_READY);
+
+    ASSERT_EQ(mqvpn_client_test_kill_conn(lb.cli), 0);
+    loopback_pump_until(&lb, done_client_reconnecting, 5000);
+    ASSERT_EQ(mqvpn_client_get_state(lb.cli), MQVPN_STATE_RECONNECTING);
+
+    loopback_teardown(&lb);
+}
+
 /* max_clients config boundary */
 
 /* ── A client's status lists its live paths, however many it closed ──
@@ -2567,6 +2600,7 @@ main(void)
     run_client_secure_without_verifier_rejects_unknown_issuer_as_tls();
     run_server_reconnect_manual_connect();
     run_server_reconnect_manual_failure_rearm();
+    run_client_conn_lost_in_tunnel_ready_reconnects();
 
     run_server_status_lists_live_paths_after_path_churn();
 

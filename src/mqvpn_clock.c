@@ -17,7 +17,8 @@
  * wall clock after that first reading moves token expiry by the step until
  * the process restarts; the timers never see it.
  *
- * Windows keeps the wall clock.
+ * On Windows the clock counts the interrupt time (QueryInterruptTimePrecise),
+ * which likewise never steps and keeps counting through sleep and hibernate.
  */
 
 #include "mqvpn_internal.h"
@@ -29,7 +30,39 @@
 #  include <time.h>
 #endif
 
-#ifndef _WIN32
+#ifdef _WIN32
+typedef VOID(WINAPI *query_interrupt_time_fn)(PULONGLONG);
+
+static uint64_t
+real_boot_us(void)
+{
+    /* Resolved at run time: kernel32.dll exports it from Windows 10 on, but
+     * not every SDK's kernel32.lib does. Racing threads store the same value. */
+    static query_interrupt_time_fn query;
+    if (!query)
+        query = (query_interrupt_time_fn)(void (*)(void))GetProcAddress(
+            GetModuleHandleW(L"kernel32.dll"), "QueryInterruptTimePrecise");
+    if (!query) return GetTickCount64() * 1000; /* before Windows 10; counts sleep too */
+    ULONGLONG t;
+    query(&t);
+    return t / 10; /* 100 ns units */
+}
+
+static uint64_t
+real_wall_us(void)
+{
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    uint64_t t = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    return t / 10 - 11644473600000000ULL; /* FILETIME epoch → Unix epoch, in µs */
+}
+
+#  define OFFSET_LOAD(p) \
+      ((uint64_t)InterlockedCompareExchange64((volatile LONG64 *)(p), 0, 0))
+#  define OFFSET_INIT(p, mine) \
+      ((uint64_t)InterlockedCompareExchange64((volatile LONG64 *)(p), (LONG64)(mine), 0))
+#  define OFFSET_RESET(p) InterlockedExchange64((volatile LONG64 *)(p), 0)
+#else
 static uint64_t
 real_boot_us(void)
 {
@@ -50,46 +83,46 @@ real_wall_us(void)
     return (uint64_t)tv.tv_sec * 1000000 + (uint64_t)tv.tv_usec;
 }
 
+static uint64_t
+offset_init(uint64_t *p, uint64_t mine)
+{
+    uint64_t prev = 0;
+    __atomic_compare_exchange_n(p, &prev, mine, false, __ATOMIC_ACQ_REL,
+                                __ATOMIC_ACQUIRE);
+    return prev;
+}
+
+#  define OFFSET_LOAD(p)       __atomic_load_n((p), __ATOMIC_ACQUIRE)
+#  define OFFSET_INIT(p, mine) offset_init((p), (mine))
+#  define OFFSET_RESET(p)      __atomic_store_n((p), 0, __ATOMIC_RELEASE)
+#endif
+
 static uint64_t (*s_boot_us)(void) = real_boot_us;
 static uint64_t (*s_wall_us)(void) = real_wall_us;
 
-/* Unix time minus CLOCK_BOOTTIME at the first reading, modulo 2^64; 0 until
+/* Unix time minus the boot clock at the first reading, modulo 2^64; 0 until
  * then. The first reading in the process wins. */
 static uint64_t s_unix_offset_us;
-#endif
 
 uint64_t
 mqvpn_clock_us(void)
 {
-#ifdef _WIN32
-    FILETIME ft;
-    GetSystemTimeAsFileTime(&ft);
-    uint64_t t = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
-    return t / 10 - 11644473600000000ULL; /* FILETIME epoch → Unix epoch, in µs */
-#else
     uint64_t boot = s_boot_us();
-    uint64_t off = __atomic_load_n(&s_unix_offset_us, __ATOMIC_ACQUIRE);
+    uint64_t off = OFFSET_LOAD(&s_unix_offset_us);
     if (off == 0) {
         uint64_t mine = s_wall_us() - boot;
-        if (__atomic_compare_exchange_n(&s_unix_offset_us, &off, mine, false,
-                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-            off = mine;
+        uint64_t prev = OFFSET_INIT(&s_unix_offset_us, mine);
+        off = prev ? prev : mine;
     }
     return boot + off;
-#endif
 }
 
 void
 mqvpn_clock_test_sources(uint64_t (*boot_us)(void), uint64_t (*wall_us)(void))
 {
-#ifdef _WIN32
-    (void)boot_us;
-    (void)wall_us;
-#else
     s_boot_us = boot_us ? boot_us : real_boot_us;
     s_wall_us = wall_us ? wall_us : real_wall_us;
-    __atomic_store_n(&s_unix_offset_us, 0, __ATOMIC_RELEASE); /* a new process */
-#endif
+    OFFSET_RESET(&s_unix_offset_us); /* a new process */
 }
 
 /*

@@ -23,6 +23,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 FORMAL = os.path.dirname(HERE)
 REPO = os.path.dirname(FORMAL)
+sys.path.insert(0, FORMAL)
+import tla_values  # noqa: E402  (formal/tla_values.py, shared with formal/mbt)
 
 
 def die(msg):
@@ -36,6 +38,7 @@ INPUTS = [
     "formal/oracle/PathSlotOracle.tla",
     "formal/oracle/PathSlotOracle.cfg",
     "formal/oracle/gen_oracle.py",
+    "formal/tla_values.py",
 ]
 
 STATE_C = {
@@ -74,7 +77,7 @@ STATUS_C = {"PENDING": "MQVPN_PATH_PENDING", "ACTIVE": "MQVPN_PATH_ACTIVE",
 SLOT_FIELDS = ["state", "attached", "live", "released", "xqcId", "retries",
                "retryArmed", "stableArmed"]
 ROW_FIELDS = ["pre", "ev", "result", "target", "reached", "prefix", "post",
-              "status", "fires", "notify", "retryUpd", "stableUpd",
+              "status", "fires", "retryUpd", "stableUpd",
               "retriesUpd"]
 N_EVCTX = 19
 # The event/context classes every pre-state must have (as C constants): the
@@ -106,49 +109,6 @@ def cfg_max_retries():
     return int(found[0])
 
 
-TOKEN = re.compile(r'\s*(\[|\]|,|\|->|"[^"]*"|TRUE|FALSE|-?\d+|[A-Za-z_]\w*)')
-
-
-def tokenize(text):
-    pos, out = 0, []
-    text = text.rstrip()
-    while pos < len(text):
-        m = TOKEN.match(text, pos)
-        if not m:
-            die("cannot tokenize near: %r" % text[pos:pos + 40])
-        out.append(m.group(1))
-        pos = m.end()
-    return out
-
-
-def parse_value(toks, i):
-    t = toks[i]
-    if t == "[":
-        rec, i = {}, i + 1
-        while True:
-            key = toks[i]
-            if not re.fullmatch(r"[A-Za-z_]\w*", key) or toks[i + 1] != "|->":
-                die("malformed record near %r" % key)
-            if key in rec:
-                die("duplicate field %r" % key)
-            rec[key], i = parse_value(toks, i + 2)
-            if toks[i] == ",":
-                i += 1
-            elif toks[i] == "]":
-                return rec, i + 1
-            else:
-                die("unexpected token %r in record" % toks[i])
-    if t.startswith('"'):
-        return t[1:-1], i + 1
-    if t == "TRUE":
-        return True, i + 1
-    if t == "FALSE":
-        return False, i + 1
-    if re.fullmatch(r"-?\d+", t):
-        return int(t), i + 1
-    die("unexpected token %r" % t)
-
-
 def read_rows(path):
     with open(path, encoding="utf-8") as f:
         text = f.read()
@@ -157,11 +117,10 @@ def read_rows(path):
         block = block.strip()
         if not block.startswith("row = "):
             die("state block does not start with 'row = '")
-        toks = tokenize(block[len("row = "):])
-        row, end = parse_value(toks, 0)
-        if end != len(toks):
-            die("trailing tokens after a row")
-        rows.append(row)
+        try:
+            rows.append(tla_values.parse(block[len("row = "):]))
+        except ValueError as e:
+            die(str(e))
     if not rows:
         die("no rows in %s" % path)
     return rows
@@ -223,8 +182,6 @@ def main():
         for b in ("prefix", "fires"):
             if not isinstance(r[b], bool):
                 die("field %s is not boolean: %r" % (b, r[b]))
-        if not is_int(r["notify"]) or r["notify"] not in (0, 1, 2, 3):
-            die("notify out of range: %r" % r["notify"])
         for s in (r["pre"], r["post"]):
             if max_retries is None or s["retries"] > max_retries:
                 max_retries = s["retries"]
@@ -266,13 +223,13 @@ def main():
         out.append("    %s," % slot_c(s))
     out.append("};")
     out.append("")
-    out.append("/* {pre, event, ctx, prefix, post, status, fires, notify, retry_upd, stable_upd, retries_upd} */")
+    out.append("/* {pre, event, ctx, prefix, post, status, fires, retry_upd, stable_upd, retries_upd} */")
     out.append("static const oracle_row_t PATH_SLOT_ORACLE_ROWS[PATH_SLOT_ORACLE_N_ROWS] = {")
     for key in sorted(keyed):
         r, ctx = keyed[key]
-        out.append("    {%s, OEV_%s, %s, %d, %s, %s, %d, %d, %s, %s, %s}," % (
+        out.append("    {%s, OEV_%s, %s, %d, %s, %s, %d, %s, %s, %s}," % (
             slot_c(r["pre"]), r["ev"], ctx, r["prefix"],
-            slot_c(r["post"]), STATUS_C[r["status"]], r["fires"], r["notify"],
+            slot_c(r["post"]), STATUS_C[r["status"]], r["fires"],
             UPD[r["retryUpd"]], UPD[r["stableUpd"]], UPD[r["retriesUpd"]]))
     out.append("};")
 

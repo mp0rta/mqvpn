@@ -10,11 +10,13 @@
 #                              no dead action)
 #   formal/run_tlc.sh live     MqvpnPathSlot_live.cfg (liveness under fairness)
 #   formal/run_tlc.sh oracle   regenerate formal/oracle/path_slot_oracle.inc
+#   formal/run_tlc.sh mbt      regenerate formal/mbt/path_slot_traces.inc
 #   formal/run_tlc.sh all      all of the above (the default)
 #
 # Needs Java 11+, python3 and TLA2TOOLS_JAR = the tla2tools.jar of the
 # tlaplus v1.7.4 release (TLC 2.19); the hash is checked because the oracle
-# is generated from TLC's state dump, whose format is not a stable interface.
+# and the traces are generated from TLC's state dumps, whose format is not a
+# stable interface.
 
 set -eu
 
@@ -165,8 +167,19 @@ live() {
 oracle() {
     tlc oracle -workers 1 -dump "$META/oracle" \
         -config oracle/PathSlotOracle.cfg oracle/PathSlotOracle.tla
-    python3 oracle/gen_oracle.py "$META/oracle.dump" oracle/path_slot_oracle.inc
+    python3 -B oracle/gen_oracle.py "$META/oracle.dump" oracle/path_slot_oracle.inc
     echo "run_tlc.sh: wrote formal/oracle/path_slot_oracle.inc"
+}
+
+# The client-glue traces: TLC writes the whole state graph (about 4 GB of DOT
+# in the temporary directory) and gen_traces.py picks the traces from it. One
+# worker keeps the dump's order fixed, though the output does not depend on
+# it (the generator sorts by content).
+mbt() {
+    tlc mbt -workers 1 -dump dot,actionlabels "$META/mbt.dot" \
+        -config mbt/MqvpnPathSlotMbt.cfg MqvpnPathSlot.tla
+    python3 -B mbt/gen_traces.py "$META/mbt.dot" mbt/path_slot_traces.inc
+    echo "run_tlc.sh: wrote formal/mbt/path_slot_traces.inc"
 }
 
 case ${1:-all} in
@@ -174,14 +187,16 @@ sany) sany ;;
 safety) safety ;;
 live) live ;;
 oracle) oracle ;;
+mbt) mbt ;;
 all)
     sany
     safety
     live
     oracle
+    mbt
     ;;
 *)
-    echo "usage: $0 [sany|safety|live|oracle|all]" >&2
+    echo "usage: $0 [sany|safety|live|oracle|mbt|all]" >&2
     exit 2
     ;;
 esac

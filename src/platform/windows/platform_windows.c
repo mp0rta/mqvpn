@@ -851,6 +851,7 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
         bopts.struct_size = sizeof(bopts);
         bopts.socket_buf_bytes = 0;
         snprintf(bopts.tag, sizeof(bopts.tag), "%s", s->iface[0] ? s->iface : "path");
+        bopts.dont_fragment = mqvpn_client_pmtud_enabled(ctx.client);
         void *tctx = NULL;
         if (mqvpn_bind_winsock_path_new(s->sock, &bopts, &tctx) != MQVPN_OK) {
             LOG_ERR("path[%d] transport setup failed", i);

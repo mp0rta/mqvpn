@@ -212,6 +212,74 @@ test_path_mtu_sizes_packets(void)
  * the server enable_multipath=true; this pins the "ignore the input flag" half,
  * so a regression that made the server honour in->enable_multipath (silently
  * disabling server-side multipath when a caller passes false) fails here. */
+/* PMTUD: packets start at the base size, probing goes up to the PathMTU
+ * size (or the xquic cap), both ends probe, and nothing changes without it */
+static int
+test_pmtud_sizes(void)
+{
+    xqc_conn_settings_t cs;
+    mqvpn_conn_settings_input_t in = {
+        .is_server = false,
+        .enable_multipath = true,
+        .scheduler = MQVPN_SCHED_WLB,
+    };
+    static const struct {
+        int path_mtu;
+        size_t start;
+        size_t cap;
+    } cases[] = {
+        {0, MQVPN_PMTUD_BASE_PKT_OUT_SIZE, MQVPN_XQC_MAX_PKT_OUT_SIZE},
+        {1280, 1200, 1200},
+        {1400, MQVPN_PMTUD_BASE_PKT_OUT_SIZE, 1320},
+        {1500, MQVPN_PMTUD_BASE_PKT_OUT_SIZE, MQVPN_XQC_MAX_PKT_OUT_SIZE},
+    };
+
+    in.pmtud = true;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        in.path_mtu = cases[i].path_mtu;
+        for (int server = 0; server <= 1; server++) {
+            in.is_server = server;
+            mqvpn_build_conn_settings(&in, &cs);
+            ASSERT_EQ(cs.enable_pmtud, 0x3);
+            ASSERT_EQ(cs.max_pkt_out_size, cases[i].start);
+            ASSERT_EQ(cs.probing_pkt_out_size, cases[i].cap);
+        }
+    }
+    /* the base size still gives IPv6 its 1280-byte inner MTU */
+    ASSERT_EQ(MQVPN_PMTUD_BASE_PKT_OUT_SIZE - MQVPN_DGRAM_HEADROOM, 1280);
+
+    /* with reorder, the start size (also where xquic goes back to when a
+     * path shrinks) leaves room for its header, PathMTU still capping it */
+    static const struct {
+        int path_mtu;
+        size_t start;
+    } reorder_cases[] = {
+        {0, MQVPN_PMTUD_BASE_PKT_OUT_SIZE + MQVPN_REORDER_HDR_LEN},
+        {1280, 1200},
+        {1380, 1300}, /* between the two start sizes: the PathMTU size */
+        {1400, MQVPN_PMTUD_BASE_PKT_OUT_SIZE + MQVPN_REORDER_HDR_LEN},
+    };
+    in.reorder = true;
+    for (size_t i = 0; i < sizeof(reorder_cases) / sizeof(reorder_cases[0]); i++) {
+        in.path_mtu = reorder_cases[i].path_mtu;
+        for (int server = 0; server <= 1; server++) {
+            in.is_server = server;
+            mqvpn_build_conn_settings(&in, &cs);
+            ASSERT_EQ(cs.max_pkt_out_size, reorder_cases[i].start);
+        }
+    }
+    in.reorder = false;
+
+    in.pmtud = false;
+    in.is_server = false;
+    in.path_mtu = 1500;
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_EQ(cs.enable_pmtud, 0);
+    ASSERT_EQ(cs.probing_pkt_out_size, 0);
+    ASSERT_EQ(cs.max_pkt_out_size, MQVPN_XQC_MAX_PKT_OUT_SIZE);
+    return 0;
+}
+
 static int
 test_server_forces_multipath_regardless_of_input(void)
 {
@@ -445,6 +513,7 @@ main(void)
     failed += test_propagation_cc();
     failed += test_propagation_init_max_path_id();
     failed += test_path_mtu_sizes_packets();
+    failed += test_pmtud_sizes();
     failed += test_server_forces_multipath_regardless_of_input();
     failed += test_recv_rate_limit_wiring();
     failed += test_reinjection_mapping();

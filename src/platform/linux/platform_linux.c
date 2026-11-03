@@ -18,6 +18,7 @@
 #include "control_socket.h"
 #include "mgmt_runtime.h"
 #include "log.h"
+#include "compat/socket_compat.h"
 #include "platform/path_line.h"
 #include "mqvpn_internal.h" /* mqvpn_config_apply_reorder (INI reorder bridge) */
 #include "netlink_mon.h"
@@ -503,6 +504,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     ctx.server_port = cfg->server_port;
     ctx.killswitch_enabled = cfg->kill_switch;
     ctx.manage_routes = cfg->manage_routes;
+    ctx.pmtud = cfg->pmtud;
     ctx.udp_gro = cfg->udp_gro;
     ctx.udp_gso = cfg->udp_gso;
     ctx.tun_offload = cfg->tun_offload;
@@ -1094,11 +1096,8 @@ svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_a
 
     int optval = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
-    /* The platform sizes its own listen socket, so the transport ctx is told
-     * to leave the buffers alone (socket_buf_bytes = -1). */
-    int bufsize = 1 * 1024 * 1024;
-    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+    /* Socket buffers are sized by the transport ctx (bind default), as on
+     * the client paths. */
 
     memset(out_addr, 0, sizeof(*out_addr));
     if (af == AF_INET6) {
@@ -1142,13 +1141,16 @@ svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_a
  * harvest runs after ctrl_socket_destroy, so no request survives to see a
  * ctx's numbers both live and accumulated. */
 static void
-svr_rx_stats(void *arg, uint64_t *receives, uint64_t *datagrams)
+svr_rx_stats(void *arg, uint64_t *receives, uint64_t *datagrams, uint64_t *queue_drops)
 {
     server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
     mqvpn_bind_posix_stats_t st = {.struct_size = sizeof(st)};
     if (sp->bind_ctx) mqvpn_bind_posix_server_get_stats(sp->bind_ctx, &st);
     *receives = sp->gro_receives + st.rx_receives;
     *datagrams = sp->gro_datagrams + st.rx_datagrams;
+    /* A property of the one listen socket, which outlives every control
+     * request: nothing to accumulate across transport ctxs. */
+    *queue_drops = st.rx_queue_drops;
 }
 
 int
@@ -1200,6 +1202,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     mqvpn_config_set_init_max_path_id(lib_cfg, cfg->init_max_path_id);
     mqvpn_config_set_tun_mtu(lib_cfg, cfg->tun_mtu);
     mqvpn_config_set_path_mtu(lib_cfg, cfg->path_mtu);
+    mqvpn_config_set_pmtud(lib_cfg, cfg->pmtud);
     mqvpn_config_apply_reorder(lib_cfg,
                                &cfg->reorder); /* INI [Reorder]/[ReorderRule] bridge */
     mqvpn_config_apply_hybrid(lib_cfg, &cfg->hybrid); /* INI [Hybrid] bridge */
@@ -1245,12 +1248,23 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     sp.udp_fd = svr_create_udp_socket(cfg->listen_addr, cfg->listen_port, &local_addr,
                                       &local_addrlen);
     if (sp.udp_fd < 0) goto cleanup;
+    /* without DF a fragmented probe could be acknowledged and raise the size
+     * beyond what the path carries */
+    if (cfg->pmtud && mqvpn_socket_set_dontfrag(sp.udp_fd, local_addr.ss_family) < 0) {
+        LOG_ERR("cannot set DF on the UDP socket, which PMTUD needs: %s",
+                strerror(errno));
+        goto cleanup;
+    }
 
     mqvpn_bind_posix_opts_t bopts = {0};
     bopts.struct_size = sizeof(bopts);
     bopts.udp_gso = cfg->udp_gso;
     bopts.udp_gro = cfg->udp_gro;
-    bopts.socket_buf_bytes = -1; /* svr_create_udp_socket sized them (1 MiB) */
+    /* The bind's default (7 MiB, forced past rmem_max/wmem_max when
+     * privileged), as on every client path: this one socket takes every
+     * client's traffic, and each overflow of its receive queue drops a whole
+     * GRO batch of datagrams that nothing retransmits. */
+    bopts.socket_buf_bytes = 0;
     snprintf(bopts.tag, sizeof(bopts.tag), "server");
     if (mqvpn_bind_posix_server_new(sp.udp_fd, &bopts, &sp.bind_ctx) != MQVPN_OK) {
         LOG_ERR("server transport setup failed");

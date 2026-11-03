@@ -3,8 +3,9 @@ name: Formal
 # The TLA+ models, the transition oracle generated from them, and the CBMC
 # harnesses (formal/README.md). The exhaustive oracle test itself
 # (test_path_slot_oracle) is a unit test and runs with ctest in ci.yml's
-# build, sanitizer, msan and hybrid-egress-off jobs; this workflow checks the
-# models and catches an oracle that was not regenerated after a model change.
+# build, sanitizer, msan and hybrid-egress-off jobs, as is the client-glue
+# test (test_path_slot_mbt); this workflow checks the models and catches an
+# oracle or a trace table that was not regenerated after a model change.
 # Path-filtered: never make it a required check (it stays pending on PRs that
 # do not touch these paths).
 
@@ -40,11 +41,11 @@ permissions:
 
 jobs:
   formal:
-    # Pinned, unlike ci.yml's ubuntu-latest: its apt cbmc is 5.95.1, the
+    # Pinned to 24.04 for its apt cbmc 5.95.1, the
     # version formal/cbmc/run.sh is tested with (CBMC 6 enables more checks
     # by default). "Install CBMC" enforces it.
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -80,7 +81,7 @@ jobs:
             exit 1
           fi
 
-      - name: TLC (parse, safety, liveness, oracle)
+      - name: TLC (parse, safety, liveness, oracle, client-glue traces)
         env:
           TLA2TOOLS_JAR: ${{ runner.temp }}/tla2tools.jar
         run: formal/run_tlc.sh all
@@ -105,6 +106,20 @@ jobs:
             fi
             exit 1
           fi
+
+      # run_tlc.sh all also ran the mbt step: formal/mbt/ must equal what is
+      # committed (needs ~3 GB of TLC metadata on the runner's disk).
+      - name: The committed client-glue traces are up to date
+        run: |
+          changed=$(git status --porcelain -- formal/mbt/)
+          if [ -n "$changed" ]; then
+            echo "$changed"
+            echo "::error::formal/mbt/path_slot_traces.inc is stale: run formal/run_tlc.sh mbt and commit it"
+            exit 1
+          fi
+
+      - name: Trace generator unit tests
+        run: python3 -B -m unittest discover -s formal/mbt -p 'test_*.py'
 
       - name: CBMC
         run: |

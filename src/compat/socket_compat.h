@@ -32,6 +32,7 @@
 #  include <unistd.h>
 #  include <fcntl.h>
 #  include <sys/socket.h>
+#  include <netinet/in.h>
 #endif
 
 #if defined(_MSC_VER)
@@ -62,6 +63,68 @@ mqvpn_socket_set_nonblock(int fd)
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) return -1;
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+#endif
+}
+
+/* Send with DF set and never fragment locally, so a datagram that does not
+ * fit the path is lost instead of fragmented: what PMTUD probes rely on.
+ * On Linux the kernel's cached path MTU is ignored (PMTUDISC_PROBE): QUIC
+ * sizes its own packets. Returns 0 on success, -1 on failure. */
+#ifdef _WIN32
+static inline int
+mqvpn_socket_set_dontfrag(SOCKET fd, int af) /* SOCKET is pointer-sized */
+#else
+static inline int
+mqvpn_socket_set_dontfrag(int fd, int af)
+#endif
+{
+#if defined(__linux__)
+    if (af == AF_INET6) {
+        int old = 0;
+        socklen_t old_len = sizeof(old);
+        if (getsockopt(fd, IPPROTO_IPV6, IPV6_MTU_DISCOVER, &old, &old_len) < 0)
+            return -1;
+        int v = IPV6_PMTUDISC_PROBE;
+        if (setsockopt(fd, IPPROTO_IPV6, IPV6_MTU_DISCOVER, &v, sizeof(v)) < 0) return -1;
+        /* a dual-stack socket also carries IPv4-mapped traffic */
+        int v6only = 0;
+        socklen_t len = sizeof(v6only);
+        if (getsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, &len) == 0 && v6only)
+            return 0;
+        int v4 = IP_PMTUDISC_PROBE;
+        if (setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &v4, sizeof(v4)) == 0) return 0;
+        /* half set: put the IPv6 option back, so a failure changes nothing */
+        int err = errno;
+        (void)setsockopt(fd, IPPROTO_IPV6, IPV6_MTU_DISCOVER, &old, sizeof(old));
+        errno = err;
+        return -1;
+    }
+    int v = IP_PMTUDISC_PROBE;
+    return setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &v, sizeof(v));
+#elif defined(__APPLE__)
+/* <netinet6/in6.h> declares it only under __APPLE_USE_RFC_3542, which must
+ * come before the first include of <netinet/in.h> in each file */
+#  ifndef IPV6_DONTFRAG
+#    define IPV6_DONTFRAG 62
+#  endif
+    int on = 1;
+    if (af == AF_INET6)
+        return setsockopt(fd, IPPROTO_IPV6, IPV6_DONTFRAG, &on, sizeof(on));
+    return setsockopt(fd, IPPROTO_IP, IP_DONTFRAG, &on, sizeof(on));
+#elif defined(_WIN32)
+    DWORD on = 1;
+    if (af == AF_INET6)
+        return setsockopt(fd, IPPROTO_IPV6, IPV6_DONTFRAG, (const char *)&on,
+                          sizeof(on)) == 0
+                   ? 0
+                   : -1;
+    return setsockopt(fd, IPPROTO_IP, IP_DONTFRAGMENT, (const char *)&on, sizeof(on)) == 0
+               ? 0
+               : -1;
+#else
+    (void)fd;
+    (void)af;
+    return -1;
 #endif
 }
 

@@ -61,12 +61,32 @@ data class MqvpnConfig(
     val hybridEnabled: Boolean = false,
     val hybridTcpMode: HybridTcpMode = HybridTcpMode.AUTO,
     /**
-     * Keep a Bluetooth-tethered network connected as a path next to the
-     * others. Wi-Fi, cellular and Ethernet are always kept. With `false`,
-     * Bluetooth is a path only when Android connects it on its own, which it
-     * normally does not do while Wi-Fi or Ethernet is connected.
+     * Use a Bluetooth-tethered network as a path, and keep it connected next
+     * to the others. With `false` a Bluetooth network is never a path, even
+     * when Android connects it on its own.
      */
     val bluetoothPathEnabled: Boolean = false,
+    /**
+     * Largest IP packet the network carries (1280-9000), to size QUIC packets
+     * for; 0 = the default packet size. With [pmtud] it is the upper limit.
+     */
+    val pathMtu: Int = 0,
+    /**
+     * Discover the path MTU: packets start at a size every path carries and
+     * grow while larger probes get through, and go back down if the path
+     * gets smaller. The server must enable it too. Android sets the TUN MTU
+     * once, when the tunnel comes up, so it stays at 1280 here: the tunnel
+     * survives a path that gets smaller, but uploads do not use a larger
+     * discovered size.
+     */
+    val pmtud: Boolean = false,
+    // Appended fields only below this line: callers may construct positionally.
+    /** Use Wi-Fi networks as paths. Fixed when the tunnel starts. */
+    val wifiPathEnabled: Boolean = true,
+    /** Use cellular networks as paths. Fixed when the tunnel starts. */
+    val cellularPathEnabled: Boolean = true,
+    /** Use Ethernet networks as paths. Fixed when the tunnel starts. */
+    val ethernetPathEnabled: Boolean = true,
 ) : Parcelable {
 
     @Serializable

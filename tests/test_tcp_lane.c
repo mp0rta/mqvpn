@@ -3702,6 +3702,76 @@ test_idle_eviction_sweep_cadence_gate(void)
     mqvpn_tcp_lane_free(lane);
 }
 
+/* find_flow_by_stream walks lane->bound_head, not the table: the list must
+ * hold exactly the flows that have a stream, through binds and both teardown
+ * flavours, with consistent back links. */
+static int
+bound_list_ok(mqvpn_tcp_lane_t *lane, int *n_out)
+{
+    int n = 0, in_table = 0;
+    mqvpn_tcp_flow_t *prev = NULL;
+    for (mqvpn_tcp_flow_t *f = lane->bound_head; f; f = f->bound_next) {
+        if (f->bound_prev != prev || f->stream == NULL) return 0;
+        prev = f;
+        n++;
+    }
+    for (uint32_t i = 0; i < lane->n_buckets; i++)
+        for (mqvpn_tcp_flow_t *f = lane->buckets[i]; f; f = f->next)
+            if (f->stream) in_table++;
+    *n_out = n;
+    return n == in_table;
+}
+
+static void
+test_bound_list_tracks_streams(void)
+{
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.enabled = 1;
+    cfg.tcp_mode = MQVPN_HYBRID_TCP_STREAM;
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0x6161ULL, NULL, NULL, NULL);
+    ASSERT_TRUE(lane != NULL, "lane_new succeeds");
+
+    enum { N = 6 };
+    struct tcp_pcb pcbs[N];
+    int reqs[N], streams[N];
+    mqvpn_tcp_flow_t *flows[N];
+    int n = -1;
+    for (int i = 0; i < N; i++) {
+        flows[i] =
+            setup_flow(lane, &pcbs[i], (uint16_t)(5100 + i), &reqs[i], &streams[i], 0);
+        ASSERT_TRUE(flows[i] != NULL, "flow set up and bound");
+    }
+    ASSERT_TRUE(bound_list_ok(lane, &n) && n == N, "every bound flow is listed once");
+
+    /* Every stream reaches its own flow. */
+    for (int i = 0; i < N; i++)
+        mqvpn_tcp_lane_on_stream_established(lane, &streams[i]);
+    for (int i = 0; i < N; i++)
+        ASSERT_EQ_INT(flows[i]->state, TCP_FLOW_ACTIVE, "2xx reached the right flow");
+
+    /* Both teardown flavours unlink: the H3 side resetting (close_h3=0), at
+     * the head, middle and tail of the list, and a rejection (close_h3=1). */
+    mqvpn_tcp_lane_on_h3_closing(lane, &streams[N - 1]); /* list head */
+    mqvpn_tcp_lane_on_h3_closing(lane, &streams[2]);
+    mqvpn_tcp_lane_on_h3_closing(lane, &streams[0]); /* list tail */
+    ASSERT_TRUE(bound_list_ok(lane, &n) && n == N - 3, "torn-down flows unlinked");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_h3_writable(lane, &streams[2]), 0,
+                  "a torn-down flow's stream finds nothing");
+
+    int req_x, stream_x;
+    struct tcp_pcb pcb_x;
+    mqvpn_tcp_flow_t *fx = setup_flow(lane, &pcb_x, 5200, &req_x, &stream_x, 0);
+    ASSERT_TRUE(fx != NULL && bound_list_ok(lane, &n) && n == N - 2, "re-grown list");
+    mqvpn_tcp_lane_on_stream_rejected(lane, &stream_x);
+    ASSERT_TRUE(bound_list_ok(lane, &n) && n == N - 3, "rejected flow unlinked");
+    for (int i = 1; i < N - 1; i++) {
+        if (i == 2) continue;
+        flows[i]->pcb = NULL; /* stack-fake pcbs: keep lane_free off them */
+    }
+    mqvpn_tcp_lane_free(lane);
+}
+
 int
 main(void)
 {
@@ -3715,6 +3785,7 @@ main(void)
     test_markers_dont_consume_tcp_budget();
     test_marker_cap();
     test_accept_key_correspondence();
+    test_bound_list_tracks_streams();
     test_relay_full_accept();
     test_relay_eagain_then_writable_flush();
     test_relay_partial_accept();

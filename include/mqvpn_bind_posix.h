@@ -37,6 +37,10 @@ typedef struct {
     /* Optional label used in the bind's own log lines (ifname, "server").
      * Empty = the fd number is used. */
     char tag[16];
+    /* Appended under ABI 3. Send with DF set and never fragment locally
+     * (PMTUD needs it: a probe that does not fit must be lost). When DF
+     * cannot be set, construction fails with MQVPN_ERR_INVALID_STATE. */
+    int dont_fragment;
 } mqvpn_bind_posix_opts_t;
 
 /* Additive growth under struct_size, like every public struct. The embedded
@@ -46,6 +50,15 @@ typedef struct {
     mqvpn_transport_stats_t tx; /* same numbers ops.get_stats reports */
     uint64_t rx_receives;       /* receive calls that delivered data */
     uint64_t rx_datagrams;      /* datagrams pushed to on_socket_recv */
+    /* Receive-queue drops — appended under ABI 3. The socket's SO_RXQ_OVFL
+     * count, learnt from the next datagram read after a drop: datagrams the
+     * kernel discarded before they could be read, nearly always because the
+     * receive queue was full (SO_RCVBUF too small for a burst, or the reader
+     * too slow). With UDP GRO on, one drop is a whole coalesced batch.
+     * The kernel's count is 32 bits and can arrive out of order, so a step
+     * back is ignored; a jump of 2^31 or more between two datagrams read
+     * looks the same and is not counted. Linux only; always 0 elsewhere. */
+    uint64_t rx_queue_drops;
 } mqvpn_bind_posix_stats_t;
 
 /* ── Client path transport ──
@@ -53,7 +66,8 @@ typedef struct {
  * Constructors copy the recognised prefix of *opts (min(struct_size,
  * sizeof)) and never retain the pointer. Returns MQVPN_OK and writes
  * *out_ctx; MQVPN_ERR_INVALID_ARG (fd < 0, opts/out_ctx NULL, struct_size not
- * covering udp_gso); MQVPN_ERR_NO_MEMORY. On failure *out_ctx is untouched
+ * covering udp_gso); MQVPN_ERR_NO_MEMORY; MQVPN_ERR_INVALID_STATE (dont_fragment
+ * set and DF cannot be set). On failure *out_ctx is untouched
  * and the fd is left exactly as it was — it is never closed by this module.
  * A NULL ctx can therefore never mean "failed" (NULL is a legal ctx for
  * generic transports). GRO unsupported is NOT a failure: construction

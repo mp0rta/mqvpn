@@ -89,8 +89,7 @@ class MqvpnTunnel internal constructor(
     fun getReorderStats(): ReorderStats {
         if (!reorderEnabled) return ReorderStats()
         val a = live(null) { NativeBridge.getReorderStats(it) } ?: return ReorderStats()
-        if (a.size < REORDER_STATS_FIELDS) return ReorderStats()
-        return ReorderStats(a[0], a[1], a[2], a[3], a[4], a[5], a[6])
+        return decodeReorderStats(a)
     }
 
     fun getStats(): VpnStats {
@@ -156,7 +155,7 @@ class MqvpnTunnel internal constructor(
 
     companion object {
         private const val TAG = "MqvpnTunnel"
-        private const val REORDER_STATS_FIELDS = 7
+        internal const val REORDER_STATS_FIELDS = 19
         const val ERR_AGAIN = -9
         /** MQVPN_ERR_INVALID_STATE: also what every call returns after [destroy]. */
         const val ERR_INVALID_STATE = -13
@@ -190,6 +189,11 @@ class MqvpnTunnel internal constructor(
             // path); note the service executor only logs a throw here.
             config.hostIdentifierError()?.let { throw IllegalArgumentException(it) }
             require(reactorHandle != 0L) { "reactor handle required" }
+            // the native setter refuses anything else, and a tunnel with the
+            // default size instead would not be what was asked for
+            require(config.pathMtu == 0 || config.pathMtu in 1280..9000) {
+                "pathMtu must be 0 or 1280-9000, not ${config.pathMtu}"
+            }
             val cfg = NativeBridge.configNew()
             NativeBridge.configSetServer(cfg, config.serverAddress, config.serverPort)
             config.tlsServerName?.let { NativeBridge.configSetTlsServerName(cfg, it) }
@@ -202,6 +206,8 @@ class MqvpnTunnel internal constructor(
             NativeBridge.configSetMultipath(cfg, config.multipathEnabled)
             NativeBridge.configSetReconnect(cfg, config.reconnect, config.reconnectIntervalSec)
             NativeBridge.configSetKillswitchHint(cfg, config.killSwitch)
+            NativeBridge.configSetPathMtu(cfg, config.pathMtu)
+            NativeBridge.configSetPmtud(cfg, config.pmtud)
             NativeBridge.configSetHybridEnabled(cfg, config.hybridEnabled)
             NativeBridge.configSetHybridTcpMode(cfg, config.hybridTcpMode.native)
             NativeBridge.configSetAndroidClock(cfg)
@@ -216,4 +222,10 @@ class MqvpnTunnel internal constructor(
             return MqvpnTunnel(handle, cfg, reactorHandle, plan.enabled)
         }
     }
+}
+
+/** Native layout: 0-6 counters and percentiles, 7-18 residence_bucket[0..11]. */
+internal fun decodeReorderStats(a: LongArray): ReorderStats {
+    if (a.size < MqvpnTunnel.REORDER_STATS_FIELDS) return ReorderStats()
+    return ReorderStats(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a.copyOfRange(7, 19).toList())
 }

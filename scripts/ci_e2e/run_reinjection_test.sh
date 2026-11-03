@@ -41,7 +41,7 @@
 #                  warn "Reinjection 'dgram' not recognized" and run with
 #                  reinjection off. Asserts the tunnel comes up, both logs
 #                  carry the warning and neither logs "reinjection enabled:".
-#   4. redundant — client-only [Multipath] Redundant = on (server default).
+#   4. redundant — client-only [Multipath] Redundant = true (server default).
 #                  Asserts the client logs "redundant mode enabled:
 #                  ports=all", then sends an inner UDP flow client -> server
 #                  and compares the server-side veth rx_bytes of both paths:
@@ -661,7 +661,7 @@ _redundant_body() {
     # Client only; the server runs with defaults and ignores the key.
     cat >"$ini" <<EOT
 [Multipath]
-Redundant = on
+Redundant = true
 EOT
 
     start_server_with_flags "$server_log" \

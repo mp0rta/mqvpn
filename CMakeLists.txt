@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(mqvpn VERSION 0.18.0 LANGUAGES C)
+project(mqvpn VERSION 0.19.1 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -237,6 +237,7 @@ set(MQVPN_LIB_SOURCES
     src/mqvpn_client.c
     src/mqvpn_server.c
     src/mqvpn_conn_settings.c
+    src/mqvpn_engine_keys.c
     src/mqvpn_util.c
     src/path_state_machine.c
     src/flow_sched.c
@@ -265,6 +266,11 @@ endif()
 set_source_files_properties(third_party/yyjson/yyjson.c PROPERTIES
     COMPILE_FLAGS "${YYJSON_WARN_FLAGS}"
     COMPILE_DEFINITIONS "YYJSON_DISABLE_FILE;YYJSON_DISABLE_UTILS;YYJSON_DISABLE_INCR_READER;YYJSON_READER_DEPTH_LIMIT=32")
+
+# The only library file that calls BoringSSL directly: xquic exports neither a
+# random source nor a MAC.
+set_source_files_properties(src/mqvpn_engine_keys.c PROPERTIES
+    COMPILE_FLAGS "-I\"${CMAKE_SOURCE_DIR}/third_party/xquic/third_party/boringssl/include\"")
 
 # ---------- bundled transport implementations (NOT part of the sans-I/O core) ----------
 # Together with src/hybrid/tcp_egress.c (the server egress lane owns its TCP
@@ -623,9 +629,14 @@ if(BUILD_TESTING)
     target_include_directories(test_path_line PRIVATE
         ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
     add_test(NAME test_path_line COMMAND test_path_line)
+    # Library clock on the interrupt time (own checks, not assert()).
+    add_executable(test_clock_source tests/test_clock_source.c src/mqvpn_clock.c)
+    target_include_directories(test_clock_source PRIVATE
+        ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME test_clock_source COMMAND test_clock_source)
     if(MSVC)
         # same gate as the product build; target-scoped options are not inherited
-        foreach(t test_cert_identity test_cert_verify_win test_bind_winsock test_path_readd test_path_line)
+        foreach(t test_cert_identity test_cert_verify_win test_bind_winsock test_path_readd test_path_line test_clock_source)
             target_compile_options(${t} PRIVATE /WX /utf-8)
             target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
         endforeach()
@@ -1057,7 +1068,9 @@ if(BUILD_TESTING)
     add_executable(test_path_readd tests/test_path_readd.c)
     # Path status log line (header only + the status-name helper).
     add_executable(test_path_line tests/test_path_line.c src/mqvpn_util.c)
-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_redundant_tx test_status test_path_state_machine test_path_slot_oracle test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd test_path_line test_cmp_error test_cmp_endpoint test_mgmt_dispatch test_ctl_rpc)
+    # Library clock on its own (test_clock covers it with xquic's tokens).
+    add_executable(test_clock_source tests/test_clock_source.c src/mqvpn_clock.c)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_redundant_tx test_status test_path_state_machine test_path_slot_oracle test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd test_path_line test_clock_source test_cmp_error test_cmp_endpoint test_mgmt_dispatch test_ctl_rpc)
 
     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of
@@ -1324,6 +1337,28 @@ if(BUILD_TESTING)
     set_target_properties(test_api PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_api COMMAND test_api)
 
+    # Model-based test of the client's path-slot glue: its own copies of
+    # mqvpn_client.c (via tests/mbt_client_tu.c, against the scripted fake
+    # xquic) and path_state_machine.c, both with asserts on; never mqvpn_lib's.
+    set(MBT_LIB_SOURCES ${MQVPN_LIB_SOURCES})
+    list(REMOVE_ITEM MBT_LIB_SOURCES src/mqvpn_client.c src/mqvpn_server.c
+         src/path_state_machine.c ${CMAKE_SOURCE_DIR}/src/hybrid/tcp_egress.c)
+    add_executable(test_path_slot_mbt tests/test_path_slot_mbt.c tests/mbt_client_tu.c
+        tests/fake_xquic.c tests/fake_transport.c src/path_state_machine.c
+        ${MBT_LIB_SOURCES} ${MQVPN_BIND_SOURCES})
+    target_include_directories(test_path_slot_mbt PRIVATE ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${XQUIC_INCLUDE_DIR}
+        ${CMAKE_SOURCE_DIR}/formal/oracle ${CMAKE_SOURCE_DIR}/formal/mbt)
+    target_link_libraries(test_path_slot_mbt ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB}
+        pthread dl m stdc++)
+    if(MQVPN_HYBRID_TCP_LANE_BUILD)
+        target_link_libraries(test_path_slot_mbt lwip_core)
+        target_compile_definitions(test_path_slot_mbt PRIVATE MQVPN_HYBRID_TCP_LANE_ENABLED)
+    endif()
+    target_compile_options(test_path_slot_mbt PRIVATE -UNDEBUG)
+    set_target_properties(test_path_slot_mbt PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_path_slot_mbt COMMAND test_path_slot_mbt)
+
     # Server API test (links libmqvpn + xquic)
     add_executable(test_server tests/test_server.c tests/fake_transport.c)
     target_link_libraries(test_server mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
@@ -1442,6 +1477,13 @@ if(BUILD_TESTING)
     target_include_directories(test_conn_settings PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
     set_target_properties(test_conn_settings PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_conn_settings COMMAND test_conn_settings)
+
+    add_executable(test_engine_keys tests/test_engine_keys.c)
+    target_link_libraries(test_engine_keys mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++
+        -Wl,--wrap=xqc_engine_create)
+    target_include_directories(test_engine_keys PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
+    set_target_properties(test_engine_keys PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_engine_keys COMMAND test_engine_keys)
 
     # Server-side mqvpn-tcp dispatch test (real xquic engine, gated on the
     # server-side egress being built — see SVR_STREAM_ROLE_CONNECT_TCP).

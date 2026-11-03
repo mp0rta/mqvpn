@@ -783,6 +783,25 @@ JNI_FN(configSetKillswitchHint)(JNIEnv *env, jobject thiz, jlong cfg, jboolean e
                                             enable ? 1 : 0);
 }
 
+/* configSetPathMtu(cfg, mtu) → int */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetPathMtu)(JNIEnv *env, jobject thiz, jlong cfg, jint mtu)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_config_set_path_mtu((mqvpn_config_t *)(intptr_t)cfg, (int)mtu);
+}
+
+/* configSetPmtud(cfg, enable) → int. The reactor then sets DF on the path
+ * sockets (mqvpn_client_pmtud_enabled). */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetPmtud)(JNIEnv *env, jobject thiz, jlong cfg, jboolean enable)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_config_set_pmtud((mqvpn_config_t *)(intptr_t)cfg, enable ? 1 : 0);
+}
+
 /* configSetReorderEnabled(cfg, mode) → int */
 JNIEXPORT jint JNICALL
 JNI_FN(configSetReorderEnabled)(JNIEnv *env, jobject thiz, jlong cfg, jint mode)
@@ -1372,7 +1391,8 @@ JNI_FN(getInterest)(JNIEnv *env, jobject thiz, jlong client)
 /*
  * getReorderStats(client) → LongArray:
  * [deliveredCount, gapCount, gapFilledCount, gapTimeoutCount,
- *  ackDemoteCount, p50Ms, p99Ms]
+ *  ackDemoteCount, p50Ms, p99Ms,
+ *  residence_bucket[0..11]]   (19 entries; buckets at indices 7-18)
  */
 JNIEXPORT jlongArray JNICALL
 JNI_FN(getReorderStats)(JNIEnv *env, jobject thiz, jlong client)
@@ -1386,14 +1406,18 @@ JNI_FN(getReorderStats)(JNIEnv *env, jobject thiz, jlong client)
     double p50 = mqvpn_reorder_latency_buffered_percentile(&st, 0.50);
     double p99 = mqvpn_reorder_latency_buffered_percentile(&st, 0.99);
 
-    jlong values[7] = {
+    jlong values[19] = {
         (jlong)st.delivered_count,  (jlong)st.gap_count,
         (jlong)st.gap_filled_count, (jlong)st.gap_timeout_count,
         (jlong)st.ack_demote_count, (jlong)(p50 + 0.5),
         (jlong)(p99 + 0.5),
     };
-    jlongArray arr = (*env)->NewLongArray(env, 7);
-    if (arr) (*env)->SetLongArrayRegion(env, arr, 0, 7, values);
+    _Static_assert(MQVPN_REORDER_LAT_BUCKETS == 12,
+                   "bucket count changed: update this array and the Kotlin decoder");
+    for (int i = 0; i < 12; i++)
+        values[7 + i] = (jlong)st.residence_bucket[i];
+    jlongArray arr = (*env)->NewLongArray(env, 19);
+    if (arr) (*env)->SetLongArrayRegion(env, arr, 0, 19, values);
     return arr;
 }
 

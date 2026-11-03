@@ -9,7 +9,7 @@ on:
 
 jobs:
   format-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v7
@@ -40,7 +40,7 @@ jobs:
     # affected job whenever you change CMake flags, configure commands, or
     # compiler versions for the cached artifact — otherwise stale build
     # outputs from a different configuration will be silently restored.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -48,7 +48,11 @@ jobs:
           submodules: recursive
 
       - name: Install dependencies
+        # A stuck mirror otherwise eats the whole job timeout.
+        timeout-minutes: 5
         run: |
+          # The Azure mirror is often throttled and stalls apt for 10+ minutes.
+          sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-get install -y cmake libevent-dev golang iptables
 
@@ -155,7 +159,7 @@ jobs:
   # 32-bit build guard (OpenWrt/OMR routers run armhf): cross-compiles with
   # gcc and runs the unit tests under qemu-user. CI only; nothing is released.
   armhf:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       XC: >-
@@ -169,7 +173,11 @@ jobs:
 
       # qemu-user-binfmt lets tests that exec the ARM mqvpn binary run too.
       - name: Install dependencies
+        # A stuck mirror otherwise eats the whole job timeout.
+        timeout-minutes: 5
         run: |
+          # The Azure mirror is often throttled and stalls apt for 10+ minutes.
+          sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-get install -y cmake golang gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf qemu-user qemu-user-binfmt
 
@@ -267,7 +275,7 @@ jobs:
         run: cd build && ctest --output-on-failure
 
   sanitizer:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
@@ -275,9 +283,13 @@ jobs:
           submodules: recursive
 
       - name: Install dependencies
+        # A stuck mirror otherwise eats the whole job timeout.
+        timeout-minutes: 5
         run: |
+          # The Azure mirror is often throttled and stalls apt for 10+ minutes.
+          sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update
-          sudo apt-get install -y cmake libevent-dev golang iptables conntrack clang iperf3 jq netcat-openbsd iproute2 curl python3 tcpdump
+          sudo apt-get install -y cmake libevent-dev golang iptables conntrack clang iperf3 jq netcat-openbsd iproute2 curl python3 tcpdump nftables ethtool
 
       - name: Compute xquic SHA
         id: xqsha
@@ -391,6 +403,12 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/test_multiclient.sh
 
+      - name: E2E multi-client isolation test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_multiclient_isolation_test.sh
+
       - name: E2E NAT test (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
@@ -402,6 +420,30 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_killswitch_test.sh
+
+      - name: E2E PMTUD test, IPv4 underlay (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_pmtud_test.sh
+
+      - name: E2E PMTUD test, IPv6 underlay (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_pmtud_test.sh --ipv6
+
+      - name: E2E PMTUD test, IPv6 and reorder in the tunnel (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_pmtud_test.sh --inner-ipv6-reorder
+
+      - name: E2E PMTUD test, two paths (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_pmtud_multipath_test.sh
 
       - name: E2E reconnect test (netns)
         env:
@@ -589,7 +631,7 @@ jobs:
         wait: fuzz
 
   msan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -597,7 +639,11 @@ jobs:
           submodules: recursive
 
       - name: Install dependencies
+        # A stuck mirror otherwise eats the whole job timeout.
+        timeout-minutes: 5
         run: |
+          # The Azure mirror is often throttled and stalls apt for 10+ minutes.
+          sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-get install -y cmake golang iptables clang
 
@@ -689,13 +735,17 @@ jobs:
 
   netns-tests:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
       - name: Install runtime dependencies
+        # A stuck mirror otherwise eats the whole job timeout.
+        timeout-minutes: 5
         run: |
+          # The Azure mirror is often throttled and stalls apt for 10+ minutes.
+          sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-get install -y libevent-dev iptables iperf3 netcat-openbsd
 
@@ -716,6 +766,9 @@ jobs:
 
       - name: Multi-client test (netns)
         run: sudo scripts/ci_e2e/test_multiclient.sh
+
+      - name: Multi-client isolation test (netns)
+        run: sudo scripts/ci_e2e/run_multiclient_isolation_test.sh
 
       - name: NAT test (netns)
         run: sudo scripts/ci_e2e/run_nat_test.sh
@@ -740,13 +793,17 @@ jobs:
 
   ipv6-tests:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
       - name: Install runtime dependencies
+        # A stuck mirror otherwise eats the whole job timeout.
+        timeout-minutes: 5
         run: |
+          # The Azure mirror is often throttled and stalls apt for 10+ minutes.
+          sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-get install -y libevent-dev iptables
 
@@ -773,13 +830,17 @@ jobs:
 
   systemd-test:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
       - name: Install runtime dependencies
+        # A stuck mirror otherwise eats the whole job timeout.
+        timeout-minutes: 5
         run: |
+          # The Azure mirror is often throttled and stalls apt for 10+ minutes.
+          sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-get install -y cmake libevent-dev iptables
 
@@ -810,7 +871,7 @@ jobs:
     # Darwin platform TUs, the full mqvpn CLI (client mode; server mode +
     # control_socket are intentionally not ported — see CMakeLists.txt),
     # and the Darwin unit test binaries (run via ctest below).
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -833,7 +894,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: third_party/xquic/third_party/boringssl
-          key: bssl-${{ steps.bssl-pin.outputs.sha }}-darwin-arm64-clang-v2
+          key: bssl-${{ steps.bssl-pin.outputs.sha }}-darwin-arm64-macos15-clang-v2
 
       - name: Build BoringSSL
         if: steps.bssl-cache.outputs.cache-hit != 'true'
@@ -858,7 +919,7 @@ jobs:
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
           # v2: bumped with the BoringSSL cache — see the linux-build job.
-          key: xquic-${{ steps.xqsha.outputs.sha }}-darwin-arm64-clang-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v2
+          key: xquic-${{ steps.xqsha.outputs.sha }}-darwin-arm64-macos15-clang-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v2
 
       - name: Build xquic
         if: steps.xquic-cache.outputs.cache-hit != 'true'
@@ -988,7 +1049,7 @@ jobs:
       # bits and no dependency on the caches below — run first so a Swift
       # logic regression fails in seconds, not after the C-chain build.
       - name: Swift host tests
-        run: bash ios/poc/Tests/run-host-tests.sh
+        run: bash ios/app/Tests/run-host-tests.sh
 
       - name: Compute xquic SHA
         id: xqsha
@@ -1046,14 +1107,14 @@ jobs:
           brew install xcodegen
           # CI has no signing identity: the example config's placeholder
           # DEVELOPMENT_TEAM is fine because the build below disables signing.
-          cp ios/poc/Config.example.xcconfig ios/poc/Config.xcconfig
-          cd ios/poc && xcodegen generate
+          cp ios/app/Config.example.xcconfig ios/app/Config.xcconfig
+          cd ios/app && xcodegen generate
 
       - name: Build app + extension (unsigned)
         run: |
-          xcodebuild -project ios/poc/MqvpnPoC.xcodeproj -scheme MqvpnPoC \
+          xcodebuild -project ios/app/Mqvpn.xcodeproj -scheme Mqvpn \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath ios/poc/DerivedData \
+            -derivedDataPath ios/app/DerivedData \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
 
   windows:
@@ -1187,7 +1248,7 @@ jobs:
       # log line; own checks, not
       # assert(), so Release is fine.
       - name: Winsock transport and path re-add tests
-        run: ctest --test-dir build -C Release -R "^(test_bind_winsock|test_path_readd|test_path_line)$" --no-tests=error --output-on-failure
+        run: ctest --test-dir build -C Release -R "^(test_bind_winsock|test_path_readd|test_path_line|test_clock_source)$" --no-tests=error --output-on-failure
 
       # Phase 0 of the client management IPC: AF_UNIX listener + UDP + the
       # AF_INET wake pair on one win32 select() event_base. A FAIL here means
@@ -1238,7 +1299,7 @@ jobs:
           retention-days: 7
 
   android:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -1328,7 +1389,7 @@ jobs:
   # Builds its own x86_64 prebuilts (the release ABI is arm64-v8a only);
   # sdk-native reads -PmqvpnAbiFilters so release/F-Droid stay arm64-only.
   android-emulator:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v7
@@ -1419,7 +1480,7 @@ jobs:
 
   lint-lifecycle-writes:
     name: Lint - lifecycle field writes (spec §3.3)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - name: Run check_lifecycle_field_writes.sh
@@ -1429,7 +1490,7 @@ jobs:
 
   lint-dd-refs:
     name: Lint - design-decisions references
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - name: Run check_dd_refs.sh
@@ -1442,7 +1503,7 @@ jobs:
     # unreliable under ASan on shared runners (same reason the control-API
     # e2e skips its data-plane phases in the sanitizer job). Reuses the same
     # clang-Debug BoringSSL/xquic cache artifacts as the sanitizer job.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
@@ -1450,7 +1511,11 @@ jobs:
           submodules: recursive
 
       - name: Install dependencies
+        # A stuck mirror otherwise eats the whole job timeout.
+        timeout-minutes: 5
         run: |
+          # The Azure mirror is often throttled and stalls apt for 10+ minutes.
+          sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-get install -y cmake libevent-dev golang iptables conntrack clang iperf3 jq netcat-openbsd curl python3
 
@@ -1542,7 +1607,7 @@ jobs:
     # plus a plain LANE=OFF configure-compatibility check. Reuses the same
     # clang-Debug BoringSSL/xquic cache artifacts as the hybrid-e2e and
     # sanitizer jobs.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
@@ -1550,7 +1615,11 @@ jobs:
           submodules: recursive
 
       - name: Install dependencies
+        # A stuck mirror otherwise eats the whole job timeout.
+        timeout-minutes: 5
         run: |
+          # The Azure mirror is often throttled and stalls apt for 10+ minutes.
+          sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-get install -y cmake libevent-dev golang iptables conntrack clang iperf3 jq netcat-openbsd curl python3
 
