@@ -249,12 +249,18 @@ test_tcp_close_hook(struct tcp_pcb *pcb)
 
 static int g_h3_close_calls;
 static void *g_h3_close_last_req;
+/* When set, the close runs the closing notify inline, as xquic does for a
+ * request whose transport stream has already closed. */
+static mqvpn_tcp_lane_t *g_h3_close_reenter_lane;
+static void *g_h3_close_reenter_stream;
 
 void
 cli_tcp_lane_h3_close(void *h3_request)
 {
     g_h3_close_calls++;
     g_h3_close_last_req = h3_request;
+    if (g_h3_close_reenter_lane)
+        mqvpn_tcp_lane_on_h3_closing(g_h3_close_reenter_lane, g_h3_close_reenter_stream);
 }
 
 /* ─── cli_tcp_lane_h3_recv test double (real impl: mqvpn_client.c) ───
@@ -481,6 +487,8 @@ relay_reset(void)
     g_tcp_close_last_pcb = NULL;
     g_h3_close_calls = 0;
     g_h3_close_last_req = NULL;
+    g_h3_close_reenter_lane = NULL;
+    g_h3_close_reenter_stream = NULL;
     g_open_stream_fail = 0;
 }
 
@@ -2834,6 +2842,45 @@ test_h3_closing_notify_teardown(void)
     mqvpn_tcp_lane_free(lane);
 }
 
+/* The H3 close may run the closing notify inline (xquic does when the
+ * transport stream has already closed). The flow must be removed exactly
+ * once; under ASan a use-after-free or double free fails this test. */
+static void
+test_h3_close_runs_closing_notify_inline(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xe003ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb1, pcb2;
+    int req1, stream1, req2, stream2;
+
+    /* lwIP error path: close_h3, then remove_flow. */
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb1, 8300, &req1, &stream1, 1);
+    ASSERT_TRUE(f != NULL, "flow 1 established");
+    g_h3_close_reenter_lane = lane;
+    g_h3_close_reenter_stream = &stream1;
+    mqvpn_tcp_lane_on_lwip_err(f, ERR_RST);
+    mqvpn_flow_key_t k1 = mk_std_key(8300);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k1, NULL, NULL), 0, "flow 1 removed");
+    ASSERT_EQ_INT(g_h3_close_calls, 1, "flow 1 request closed once");
+    ASSERT_EQ_INT(g_tcp_abort_calls, 0, "lwIP already freed pcb 1");
+
+    /* Relay-error path: close_h3, then abort the pcb, then remove_flow. */
+    f = setup_flow(lane, &pcb2, 8301, &req2, &stream2, 1);
+    ASSERT_TRUE(f != NULL, "flow 2 established");
+    g_h3_close_reenter_stream = &stream2;
+    (void)mqvpn_tcp_lane_on_relay_error(f);
+    mqvpn_flow_key_t k2 = mk_std_key(8301);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k2, NULL, NULL), 0, "flow 2 removed");
+    ASSERT_EQ_INT(g_h3_close_calls, 2, "flow 2 request closed once");
+    ASSERT_EQ_INT(g_tcp_abort_calls, 1, "pcb 2 aborted once");
+    ASSERT_TRUE(g_tcp_abort_last_pcb == &pcb2, "the right pcb was aborted");
+
+    g_h3_close_reenter_lane = NULL;
+    mqvpn_tcp_lane_free(lane);
+}
+
 static void
 test_abort_pending_real(void)
 {
@@ -2868,8 +2915,8 @@ test_abort_pending_real(void)
     ASSERT_EQ_INT(g_h3_close_calls, 0, "abort_pending never closes H3 (none existed)");
 
     /* Case 2: abort AFTER bind — a request DOES exist (the send-headers-
-     * failure shape: the caller already closed it itself before calling
-     * abort_pending). abort_pending must still not close it again. */
+     * failure shape: the caller closes it itself after abort_pending).
+     * abort_pending must not close it. */
     mqvpn_flow_key_t key2 = mk_std_key(8301);
     ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &key2, 1, 0), 0, "flow2 SYN-time commit");
     struct tcp_pcb pcb2;
@@ -3816,6 +3863,7 @@ main(void)
     test_connect_path_format_truncation();
     test_lwip_err_teardown();
     test_h3_closing_notify_teardown();
+    test_h3_close_runs_closing_notify_inline();
     test_abort_pending_real();
     test_accept_open_stream_fail_returns_abrt();
     test_lwip_sent_teardown_returns_abrt();

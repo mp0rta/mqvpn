@@ -1665,12 +1665,12 @@ cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_k
     ssize_t ret = xqc_h3_request_send_headers(req, &headers, 0);
     if (ret < 0 && ret != -XQC_EAGAIN) {
         LOG_E(c, "connect-tcp: send headers failed (%zd)", ret);
-        xqc_h3_request_close(req); /* close notify frees stream */
-        /* abort_pending clears f->h3_request/f->stream (they point at the
-         * just-closed request) and never closes H3 itself — bind ran before
-         * send per the plan order, and we already closed the request one
-         * line up. */
-        return mqvpn_tcp_lane_abort_pending(flow_handle);
+        /* Remove the flow before closing: the close notify (it frees
+         * `stream`) may run inside the close call and must not find it.
+         * abort_pending never closes H3 itself. */
+        int aborted = mqvpn_tcp_lane_abort_pending(flow_handle);
+        xqc_h3_request_close(req);
+        return aborted;
     }
 
     LOG_D(c, "connect-tcp: stream %" PRIu64 " opened for %s", xqc_h3_stream_id(req),

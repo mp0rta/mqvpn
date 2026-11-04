@@ -191,8 +191,8 @@ void mqvpn_tcp_lane_bind_h3_request(void *flow_handle, void *h3_request, void *s
 /* Reject a flow whose H3 stream open failed after lwIP already accepted it.
  * Post-SYN-ACK, so abort-only — RAW fallback is forbidden. Never closes the
  * H3 request itself (the caller, cli_tcp_lane_open_stream, either never
- * created one yet or already closed the one it did create on its own
- * failure path) — just tears the pcb + flow down.
+ * created one yet or closes the one it did create after this call) — just
+ * tears the pcb + flow down.
  *
  * Returns 1 if the flow's pcb was tcp_abort()ed inside this call, 0
  * otherwise (NULL handle, or a flow with no live pcb). This matters because
