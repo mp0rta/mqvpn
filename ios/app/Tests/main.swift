@@ -463,6 +463,27 @@ func runPathReadSourceCases() {
 }
 runPathReadSourceCases()
 
+// ProviderMessage.swift copies these raw values from libmqvpn.h.
+let stateMirror: [(CoreClientState, mqvpn_client_state_t)] = [
+    (.idle, MQVPN_STATE_IDLE), (.connecting, MQVPN_STATE_CONNECTING),
+    (.authenticating, MQVPN_STATE_AUTHENTICATING), (.tunnelReady, MQVPN_STATE_TUNNEL_READY),
+    (.established, MQVPN_STATE_ESTABLISHED), (.reconnecting, MQVPN_STATE_RECONNECTING),
+    (.closed, MQVPN_STATE_CLOSED),
+]
+for (s, c) in stateMirror { check(Int(s.rawValue) == Int(c.rawValue), "CoreClientState.\(s)") }
+check(stateMirror.count == Int(MQVPN_STATE__COUNT.rawValue), "CoreClientState covers every state")
+let pathMirror: [(CorePathStatus, mqvpn_path_status_t)] = [
+    (.pending, MQVPN_PATH_PENDING), (.active, MQVPN_PATH_ACTIVE), (.degraded, MQVPN_PATH_DEGRADED),
+    (.standby, MQVPN_PATH_STANDBY), (.closed, MQVPN_PATH_CLOSED),
+]
+for (s, c) in pathMirror { check(Int(s.rawValue) == Int(c.rawValue), "CorePathStatus.\(s)") }
+let schedMirror: [(Scheduler, mqvpn_scheduler_t)] = [
+    (.minrtt, MQVPN_SCHED_MINRTT), (.wlb, MQVPN_SCHED_WLB), (.backupFec, MQVPN_SCHED_BACKUP_FEC),
+    (.wlbUdpPin, MQVPN_SCHED_WLB_UDP_PIN),
+]
+for (s, c) in schedMirror { check(Int(s.rawValue) == Int(c.rawValue), "Scheduler.\(s)") }
+check(SplitSettings.maxRedundantPorts == Int(MQVPN_REDUNDANT_MAX_PORTS), "maxRedundantPorts")
+
 failures += runPureCases()
 failures += await runSettingsCoreCases()
 
