@@ -96,6 +96,33 @@ Cases and a maintainer will.
 | Android | `cd android && ./gradlew test` |
 | Docs / website | keep English and `website/ja` in step |
 
+### Adding a config key
+
+Steps 1–3 apply to every key. A key the library reads also needs steps 4–6.
+A key only the platform code reads (for example `UdpGro`) skips step 4 and,
+in step 5, ends in the platform code that uses it instead of a setter call.
+
+1. `src/config.h`: the field in `mqvpn_file_config_t`, and a non-zero default
+   in `mqvpn_config_defaults()` (`src/config.c`). `[Reorder]` and `[Hybrid]`
+   keys go in the struct it embeds and in that struct's own default function.
+2. `src/config.c`: one row in the descriptor table, with the INI and the JSON
+   name. `tests/test_config.c`: the key in `test_ini_json_scalar_parity`.
+3. `website/guide/configuration.md` and `website/ja/guide/configuration.md`:
+   both names. `scripts/lint/check_config_docs.sh` (CI) checks this.
+4. The library: a `mqvpn_config_set_*()` setter that checks the value
+   (`include/libmqvpn.h`, `src/mqvpn_config.c`), the field and its default in
+   `struct mqvpn_config_s` (`src/mqvpn_internal.h`) and `mqvpn_config_new()`.
+   `[Reorder]` and `[Hybrid]` keys are fields of the structs that
+   `mqvpn_config_apply_reorder()` / `mqvpn_config_apply_hybrid()` copy, so the
+   CLI needs no setter for them.
+5. The CLI: the field in `src/vpn_client.h` and/or `src/vpn_server.h`, the copy
+   in `src/main.c` (and a flag there, if the key has one), and the setter call
+   in `src/platform/client_config_bridge.c` (client; `tests/test_config_bridge.c`
+   pins it) and/or `linux_platform_run_server()` (server).
+6. If the mobile apps expose it: Android `MqvpnConfig.kt`, `MqvpnTunnel.kt`,
+   `NativeBridge.kt` and `mqvpn_jni.c`; iOS `MqvpnEngine.swift` and a settings
+   section in `ios/app/Shared/`.
+
 ## 7. Design constraints
 
 The rules are in [AGENTS.md](AGENTS.md); the reasons are in

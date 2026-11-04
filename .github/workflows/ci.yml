@@ -1443,6 +1443,14 @@ jobs:
       - name: Run check_dd_refs.sh
         run: bash scripts/lint/check_dd_refs.sh
 
+  lint-config-docs:
+    name: Lint - config keys documented
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run check_config_docs.sh
+        run: bash scripts/lint/check_config_docs.sh
+
   hybrid-e2e:
     # H2 hybrid TCP-lane end-to-end suite (7 scenarios, incl. iperf3
     # throughput ratios + a netem multipath-aggregation test). Runs in a

@@ -105,7 +105,8 @@ rules belong here, reasons there.
 - Adding a config key = one row in the descriptor table (`src/config.c`) +
   one key in `test_ini_json_scalar_parity` (`tests/test_config.c`) + the key
   in `website/guide/configuration.md` and `website/ja/guide/configuration.md`.
-  [DD §10]
+  A key the library reads also needs the setter and CLI steps listed under
+  "Adding a config key" in CONTRIBUTING.md. [DD §10]
 - Test files that call `assert()` carry `#undef NDEBUG` (CI-checked). Claim
   test results only from a Debug or sanitizer build, never from `build.sh`'s
   Release build. [DD §10]

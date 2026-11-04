@@ -139,6 +139,16 @@ The file must be strict JSON (RFC 8259): no comments, no trailing commas, and ke
 }
 ```
 
+The `[Interface]` and `[Multipath]` keys these examples leave out are also
+top-level keys in JSON: `mtu` (`MTU`), `path_mtu` (`PathMTU`), `pmtud`
+(`PMTUD`), `manage_routes` (`ManageRoutes`), `init_max_path_id`
+(`InitMaxPathId`), `bbr2_fast_convergence` (`Bbr2FastConvergence`),
+`bbr2_rttvar_compensation` (`Bbr2RttvarCompensation`), `reinjection`
+(`Reinjection`), `reinjection_srtt_factor_pct` (`ReinjectionSrttFactorPct`),
+`reinjection_hard_deadline_ms` (`ReinjectionHardDeadlineMs`),
+`reinjection_deadline_lower_bound_ms` (`ReinjectionDeadlineLowerBoundMs`),
+`redundant` (`Redundant`) and `redundant_ports` (`RedundantPorts`).
+
 ## Multi-User Authentication
 
 The server can authenticate multiple users, each with their own PSK. In JSON config, add a `users` array where each entry is either an object (`{"name":"alice","key":"..."}`) or a shorthand string (`"alice:key"`). In INI config, use repeatable `User = NAME:KEY` lines in the `[Auth]` section. You can also use the [Control API](#control-api) to manage users at runtime.
