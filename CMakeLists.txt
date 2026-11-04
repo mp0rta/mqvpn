@@ -13,7 +13,8 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # Bump whenever mqvpn_stats_t (or any struct the public API fills in place)
 # grows: the getters write sizeof(*out) without consulting the caller's
 # struct_size, so a binary built against an older header must not resolve to
-# the newer library. Bump as well whenever an exported function is removed: a
+# the newer library (tests/test_abi_sizes.c fails until the bump is made).
+# Bump as well whenever an exported function is removed: a
 # binary linked against it would otherwise resolve to this library and fail
 # with an undefined symbol at run time.
 #   1 -> 2  hybrid lane/flow counters
@@ -974,7 +975,10 @@ if(BUILD_TESTING)
     add_executable(test_path_line tests/test_path_line.c src/mqvpn_util.c)
     # Library clock on its own (test_clock covers it with xquic's tokens).
     add_executable(test_clock_source tests/test_clock_source.c src/mqvpn_clock.c)
-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_redundant_tx test_status test_path_state_machine test_path_slot_oracle test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd test_path_line test_clock_source)
+    # Sizes of the structs the getters fill in, per soname (compile-time only).
+    add_executable(test_abi_sizes tests/test_abi_sizes.c)
+    target_compile_definitions(test_abi_sizes PRIVATE MQVPN_SOVERSION=${MQVPN_SOVERSION})
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_redundant_tx test_status test_path_state_machine test_path_slot_oracle test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd test_path_line test_clock_source test_abi_sizes)
 
     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of

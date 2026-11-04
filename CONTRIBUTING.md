@@ -91,7 +91,7 @@ Cases and a maintainer will.
 | Connection lifecycle (paths, reconnect) | sudo netns e2e suite (`scripts/ci_e2e/`) |
 | Any log message | search `tests/test_e2e_*.sh`, `scripts/ci_e2e/`, `.github/workflows/ci.yml` for the old wording and update every hit (no hits is fine) |
 | Config key or default | companion changes per AGENTS.md (config key rule); compatibility impact stated in the PR description |
-| `include/libmqvpn.h` | ABI-additive per AGENTS.md; no version bump in a feature PR |
+| `include/libmqvpn.h` | ABI-additive per AGENTS.md; no release version bump in a feature PR, but bump `MQVPN_SOVERSION` when `tests/test_abi_sizes.c` asks for it |
 | xquic or lwIP submodule pin | name the fork PR or tag in the PR description |
 | Android | `cd android && ./gradlew test` |
 | Docs / website | keep English and `website/ja` in step |
