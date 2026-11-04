@@ -242,6 +242,20 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     }
 }
 
+xqc_log_level_t
+mqvpn_xqc_log_level(mqvpn_log_level_t level)
+{
+    /* mqvpn INFO maps to xquic WARN (DD §5): xquic INFO logs every packet,
+     * which floods slow consoles. --log-level debug gives the xquic detail. */
+    switch (level) {
+    case MQVPN_LOG_DEBUG: return XQC_LOG_DEBUG;
+    case MQVPN_LOG_INFO: return XQC_LOG_WARN;
+    case MQVPN_LOG_WARN: return XQC_LOG_WARN;
+    case MQVPN_LOG_ERROR: return XQC_LOG_ERROR;
+    default: return XQC_LOG_WARN;
+    }
+}
+
 #if defined(__linux__)
 
 /* The bundled binds accept at most 32 datagrams per send (BIND_POSIX_MAX_BATCH

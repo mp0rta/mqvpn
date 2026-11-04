@@ -2209,23 +2209,9 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         .path_removed_notify = cb_path_removed,
     };
 
-    /* xquic INFO emits per-packet logs (effectively DEBUG-grade noise that
-     * also tanks throughput on slow consoles like Windows PowerShell). Map
-     * mqvpn INFO -> xquic WARN so --log-level info shows mqvpn state without
-     * the per-packet flood; users who want xquic detail use --log-level debug.
-     * Mirrors the client-side mapping in mqvpn_client.c. */
-    int xqc_log_level;
-    switch (cfg->log_level) {
-    case MQVPN_LOG_DEBUG: xqc_log_level = XQC_LOG_DEBUG; break;
-    case MQVPN_LOG_INFO: xqc_log_level = XQC_LOG_WARN; break;
-    case MQVPN_LOG_WARN: xqc_log_level = XQC_LOG_WARN; break;
-    case MQVPN_LOG_ERROR: xqc_log_level = XQC_LOG_ERROR; break;
-    default: xqc_log_level = XQC_LOG_WARN; break;
-    }
-
     xqc_config_t xconfig;
     if (xqc_engine_get_default_config(&xconfig, XQC_ENGINE_SERVER) < 0) goto cleanup;
-    xconfig.cfg_log_level = (xqc_log_level_t)xqc_log_level;
+    xconfig.cfg_log_level = mqvpn_xqc_log_level(cfg->log_level);
     if (mqvpn_engine_keys_set_server(&xconfig, cfg->tls_key) != 0) {
         LOG_E(s, "cannot make the engine keys from the TLS key file '%s'", cfg->tls_key);
         goto cleanup;
