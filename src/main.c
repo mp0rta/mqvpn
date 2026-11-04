@@ -122,8 +122,9 @@ parse_mtu_arg(const char *opt, const char *str, int *out)
     errno = 0;
     long lv = strtol(str, &end, 10);
     if (end == str || !end || *end != '\0' || errno == ERANGE ||
-        (lv != 0 && (lv < 1280 || lv > 9000))) {
-        fprintf(stderr, "error: %s must be 0 or 1280..9000\n", opt);
+        (lv != 0 && (lv < MQVPN_MTU_MIN || lv > MQVPN_MTU_MAX))) {
+        fprintf(stderr, "error: %s must be 0 or %d..%d\n", opt, MQVPN_MTU_MIN,
+                MQVPN_MTU_MAX);
         return -1;
     }
     *out = (int)lv;

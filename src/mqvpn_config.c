@@ -365,35 +365,37 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
     v = yyjson_obj_get(root, "killswitch_hint");
     if (yyjson_is_bool(v)) cfg->killswitch_hint = yyjson_get_bool(v);
 
+    /* The setters below hold the range checks. */
     v = yyjson_obj_get(root, "init_max_path_id");
     if (v) {
         uint64_t uv = 0;
-        if (json_get_u64(v, &uv) != 0 || uv > MQVPN_INIT_MAX_PATH_ID_MAX) goto out;
-        cfg->init_max_path_id = uv;
+        if (json_get_u64(v, &uv) != 0 ||
+            mqvpn_config_set_init_max_path_id(cfg, uv) != MQVPN_OK)
+            goto out;
     }
 
     v = yyjson_obj_get(root, "mtu");
     if (v) {
-        if (json_get_int(v, &iv) != 0 || (iv != 0 && (iv < 1280 || iv > 9000))) goto out;
-        cfg->tun_mtu = iv;
+        if (json_get_int(v, &iv) != 0 || mqvpn_config_set_tun_mtu(cfg, iv) != MQVPN_OK)
+            goto out;
     }
 
     v = yyjson_obj_get(root, "tun_mtu");
     if (v) {
-        if (json_get_int(v, &iv) != 0 || (iv != 0 && (iv < 1280 || iv > 9000))) goto out;
-        cfg->tun_mtu = iv;
+        if (json_get_int(v, &iv) != 0 || mqvpn_config_set_tun_mtu(cfg, iv) != MQVPN_OK)
+            goto out;
     }
 
     v = yyjson_obj_get(root, "path_mtu");
     if (v) {
-        if (json_get_int(v, &iv) != 0 || (iv != 0 && (iv < 1280 || iv > 9000))) goto out;
-        cfg->path_mtu = iv;
+        if (json_get_int(v, &iv) != 0 || mqvpn_config_set_path_mtu(cfg, iv) != MQVPN_OK)
+            goto out;
     }
 
     v = yyjson_obj_get(root, "pmtud");
     if (v) {
         if (!yyjson_is_bool(v)) goto out;
-        cfg->pmtud = yyjson_get_bool(v) ? 1 : 0;
+        mqvpn_config_set_pmtud(cfg, yyjson_get_bool(v));
     }
 
     v = yyjson_obj_get(root, "users");
@@ -595,11 +597,16 @@ mqvpn_config_set_max_clients(mqvpn_config_t *cfg, int max)
     return MQVPN_OK;
 }
 
+static int
+mtu_ok(int mtu)
+{
+    return mtu == 0 || (mtu >= MQVPN_MTU_MIN && mtu <= MQVPN_MTU_MAX);
+}
+
 int
 mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu)
 {
-    if (!cfg) return MQVPN_ERR_INVALID_ARG;
-    if (mtu != 0 && (mtu < 1280 || mtu > 9000)) return MQVPN_ERR_INVALID_ARG;
+    if (!cfg || !mtu_ok(mtu)) return MQVPN_ERR_INVALID_ARG;
     cfg->tun_mtu = mtu;
     return MQVPN_OK;
 }
@@ -607,8 +614,7 @@ mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu)
 int
 mqvpn_config_set_path_mtu(mqvpn_config_t *cfg, int mtu)
 {
-    if (!cfg) return MQVPN_ERR_INVALID_ARG;
-    if (mtu != 0 && (mtu < 1280 || mtu > 9000)) return MQVPN_ERR_INVALID_ARG;
+    if (!cfg || !mtu_ok(mtu)) return MQVPN_ERR_INVALID_ARG;
     cfg->path_mtu = mtu;
     return MQVPN_OK;
 }

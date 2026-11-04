@@ -452,7 +452,7 @@ cfgk_int_positive(int v)
 static int
 cfgk_int_mtu(int v)
 {
-    return v == 0 || (v >= 1280 && v <= 9000);
+    return v == 0 || (v >= MQVPN_MTU_MIN && v <= MQVPN_MTU_MAX);
 }
 
 static int

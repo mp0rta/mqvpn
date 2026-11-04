@@ -809,6 +809,8 @@ JNI_FN(configSetKillswitchHint)(JNIEnv *env, jobject thiz, jlong cfg, jboolean e
 }
 
 /* configSetPathMtu(cfg, mtu) → int */
+_Static_assert(MQVPN_MTU_MIN == 1280 && MQVPN_MTU_MAX == 9000,
+               "MqvpnTunnel.kt checks pathMtu against 1280..9000");
 JNIEXPORT jint JNICALL
 JNI_FN(configSetPathMtu)(JNIEnv *env, jobject thiz, jlong cfg, jint mtu)
 {
