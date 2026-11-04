@@ -256,12 +256,8 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
                  void *user_ctx)
 {
     platform_ctx_t *p = (platform_ctx_t *)user_ctx;
-    static const char *names[] = {"IDLE",         "CONNECTING",  "AUTHENTICATING",
-                                  "TUNNEL_READY", "ESTABLISHED", "RECONNECTING",
-                                  "CLOSED"};
-    const char *os = (old_state < 7) ? names[old_state] : "?";
-    const char *ns = (new_state < 7) ? names[new_state] : "?";
-    LOG_INF("state: %s → %s", os, ns);
+    LOG_INF("state: %s → %s", mqvpn_client_state_string(old_state),
+            mqvpn_client_state_string(new_state));
 
     /* On RECONNECTING or CLOSED, tear down TUN and platform resources so
      * that stale fd events don't fire ("tun read: Bad file descriptor").

@@ -920,6 +920,16 @@ TEST(error_string)
     ASSERT_NOT_NULL(mqvpn_error_string((mqvpn_error_t)-99));
 }
 
+TEST(client_state_string)
+{
+    /* The CLI logs these names; e2e scripts grep "state: .* CLOSED". */
+    ASSERT_STR_EQ(mqvpn_client_state_string(MQVPN_STATE_IDLE), "IDLE");
+    ASSERT_STR_EQ(mqvpn_client_state_string(MQVPN_STATE_TUNNEL_READY), "TUNNEL_READY");
+    ASSERT_STR_EQ(mqvpn_client_state_string(MQVPN_STATE_CLOSED), "CLOSED");
+    ASSERT_STR_EQ(mqvpn_client_state_string(MQVPN_STATE__COUNT), "?");
+    ASSERT_STR_EQ(mqvpn_client_state_string((mqvpn_client_state_t)-1), "?");
+}
+
 /* ── Version string test ── */
 
 #define STRINGIFY2(x) #x
@@ -4293,6 +4303,7 @@ main(void)
 
     /* Error/version tests */
     run_error_string();
+    run_client_state_string();
     run_version_string();
 
     /* Client lifecycle tests */

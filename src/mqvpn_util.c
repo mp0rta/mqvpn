@@ -121,3 +121,19 @@ mqvpn_path_status_string(mqvpn_path_status_t status)
     default: return "unknown";
     }
 }
+
+/* ─── Client state string ─── */
+
+static const char *const client_state_names[] = {
+    "IDLE",        "CONNECTING",   "AUTHENTICATING", "TUNNEL_READY",
+    "ESTABLISHED", "RECONNECTING", "CLOSED",
+};
+_Static_assert(sizeof(client_state_names) / sizeof(client_state_names[0]) ==
+                   MQVPN_STATE__COUNT,
+               "one name per mqvpn_client_state_t value");
+
+const char *
+mqvpn_client_state_string(mqvpn_client_state_t state)
+{
+    return (unsigned)state < MQVPN_STATE__COUNT ? client_state_names[state] : "?";
+}

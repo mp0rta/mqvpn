@@ -387,12 +387,8 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
                  void *user_ctx)
 {
     platform_win_ctx_t *p = (platform_win_ctx_t *)user_ctx;
-    static const char *names[] = {"IDLE",         "CONNECTING",  "AUTHENTICATING",
-                                  "TUNNEL_READY", "ESTABLISHED", "RECONNECTING",
-                                  "CLOSED"};
-    const char *os = (old_state < 7) ? names[old_state] : "?";
-    const char *ns = (new_state < 7) ? names[new_state] : "?";
-    LOG_INF("state: %s -> %s", os, ns);
+    LOG_INF("state: %s -> %s", mqvpn_client_state_string(old_state),
+            mqvpn_client_state_string(new_state));
 
     if (new_state == MQVPN_STATE_RECONNECTING || new_state == MQVPN_STATE_CLOSED) {
         /* Pause the recovery poll and reset its failure budget — reused on
@@ -911,6 +907,8 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
         LOG_ERR("exiting: path release refused by the library");
     else if (ctx.fatal_error == PLATFORM_FATAL_CLOSED)
         LOG_ERR("exiting: connection closed");
+    else if (rc)
+        LOG_ERR("exiting: tunnel setup failed");
 
 cleanup:
     SetConsoleCtrlHandler(console_ctrl_handler, FALSE);

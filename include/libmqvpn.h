@@ -255,6 +255,9 @@ typedef enum {
     MQVPN_STATE__COUNT = 7,
 } mqvpn_client_state_t;
 
+/* State name as the CLI logs it ("IDLE" ... "CLOSED"); "?" for other values. */
+MQVPN_API const char *mqvpn_client_state_string(mqvpn_client_state_t state);
+
 /*
  * Path lifecycle:
  *   transport_attached = platform provides I/O for this slot
