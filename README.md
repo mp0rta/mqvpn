@@ -220,7 +220,7 @@ A `SHA256SUMS` file is also attached to each release.
 
 ## Quick Start
 
-After installing the server and client (see [Installation](#installation)):
+After installing the server and client (see [Installation](#installation)), run the commands below. They use `--insecure` for a self-signed certificate; omit it if the server has a trusted certificate.
 
 ```bash
 # Client (single path)

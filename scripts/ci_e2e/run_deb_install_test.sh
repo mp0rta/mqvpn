@@ -91,10 +91,13 @@ mode_is() { [ "$(stat -c %a "$1")" = "$2" ]; }
 conf_has() { grep -qxF "$1" "$CONF"; }
 auth_key() { sed -n '/^\[Auth\]/,/^\[/ s/^Key = //p' "$CONF"; }
 cert_fp() { openssl x509 -in "$CRT" -noout -fingerprint -sha256; }
-# grep -c reads to EOF: an early grep -q exit can fail iptables with SIGPIPE under pipefail.
-nat_rule_count() { iptables -t nat -S POSTROUTING | grep -c mqvpn-server-nat || true; }
-nat_rule_present() { [ "$(nat_rule_count)" -gt 0 ]; }
-nat_rule_absent() { [ "$(nat_rule_count)" -eq 0 ]; }
+nat_rule_count() {
+    local rules
+    rules=$(iptables -t nat -S POSTROUTING) || return 1
+    grep -c mqvpn-server-nat <<< "$rules" || true
+}
+nat_rule_present() { local n; n=$(nat_rule_count) && [ "$n" -gt 0 ]; }
+nat_rule_absent() { local n; n=$(nat_rule_count) && [ "$n" -eq 0 ]; }
 log_has() { grep -qF "$1" "$LOG"; }
 main_pid() { systemctl show -p MainPID --value "$UNIT"; }
 make_admin_cert() { # $1 = CN
@@ -229,6 +232,16 @@ apt_run MQVPN_SERVER_AUTOSTART=no MQVPN_PORT=10443 install "$SRV" || fail "apt-g
 check "6: $UNIT is not active" is_inactive
 check "6: $UNIT is not enabled" bash -c "[ \"\$(systemctl is-enabled $UNIT 2>/dev/null)\" != enabled ]"
 check "6: server.conf exists" test -f "$CONF"
+apt_run purge mqvpn-server || fail "apt-get purge mqvpn-server"
+
+# ── 6b: setup fails on a first install ───────────────────────────────────────
+
+phase "6b: install with an invalid MQVPN_SUBNET"
+apt_run MQVPN_SUBNET=10.77.0.0/8 MQVPN_PORT=10443 install "$SRV" || fail "postinst failed after a failed setup"
+check "6b: postinst reported the failed setup" log_has "mqvpn-server: setup failed"
+check "6b: $UNIT is not active" is_inactive
+check "6b: $UNIT is not enabled" bash -c "[ \"\$(systemctl is-enabled $UNIT 2>/dev/null)\" != enabled ]"
+check "6b: no server.conf" test ! -e "$CONF"
 apt_run purge mqvpn-server || fail "apt-get purge mqvpn-server"
 
 # ── 10: policy-rc.d refuses the start ────────────────────────────────────────

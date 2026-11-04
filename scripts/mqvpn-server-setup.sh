@@ -22,6 +22,7 @@ KEY=$CONF_DIR/server.key
 DEFAULTS_FILE=/etc/default/mqvpn-server
 STATE_DIR=/var/lib/mqvpn-server
 GENERATED_LIST=$STATE_DIR/generated.list
+GENERATED_HASHES=$STATE_DIR/generated.sha256
 # Installed as <prefix>/lib/mqvpn/mqvpn-server-setup.
 PREFIX=$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)
 MQVPN=$PREFIX/bin/mqvpn
@@ -128,16 +129,22 @@ valid_subnet4() {
     (( 10#${BASH_REMATCH[5]} >= 16 && 10#${BASH_REMATCH[5]} <= 30 ))
 }
 valid_subnet6() {
-    local addr=${1%/*} group
-    local -a groups
+    local addr=${1%/*} part colons n=0 groups='[0-9A-Fa-f]{1,4}(:[0-9A-Fa-f]{1,4})*'
     [[ "$1" =~ ^[0-9A-Fa-f:]+/([0-9]{1,3})$ ]] || return 1
     (( 10#${BASH_REMATCH[1]} >= 96 && 10#${BASH_REMATCH[1]} <= 126 )) || return 1
-    [[ "$addr" != *::*::* && "$addr" != *:::* ]] || return 1
-    IFS=: read -ra groups <<< "$addr"
-    (( ${#groups[@]} <= 8 )) || return 1
-    for group in "${groups[@]}"; do
-        (( ${#group} <= 4 )) || return 1
+    if [[ "$addr" != *::* ]]; then
+        [[ "$addr" =~ ^[0-9A-Fa-f]{1,4}(:[0-9A-Fa-f]{1,4}){7}$ ]]
+        return
+    fi
+    [[ "$addr" != *::*::* ]] || return 1
+    # The groups on each side of "::": none, or groups with single colons between them.
+    for part in "${addr%%::*}" "${addr#*::}"; do
+        [ -n "$part" ] || continue
+        [[ "$part" =~ ^${groups}$ ]] || return 1
+        colons=${part//[^:]/}
+        n=$(( n + ${#colons} + 1 ))
     done
+    (( n <= 7 ))
 }
 valid_port "$MQVPN_PORT" || err "Invalid port: $MQVPN_PORT"
 valid_port "$MQVPN_CONTROL_PORT" || err "Invalid control port: $MQVPN_CONTROL_PORT"
@@ -175,24 +182,28 @@ record_generated() {
     touch "$GENERATED_LIST"
     grep -qxF "$1" "$GENERATED_LIST" || echo "$1" >> "$GENERATED_LIST"
 }
-is_generated() { [ -f "$GENERATED_LIST" ] && grep -qxF "$1" "$GENERATED_LIST"; }
+# The hash and not the path: an admin can put an own file at a listed path.
+record_hash() { mkdir -p "$STATE_DIR"; echo "$(sha256sum < "$1" | cut -d' ' -f1)  $2" >> "$GENERATED_HASHES"; }
+is_generated_file() {
+    [ -f "$GENERATED_HASHES" ] && grep -qxF "$(sha256sum < "$1" | cut -d' ' -f1)  $1" "$GENERATED_HASHES"
+}
 
 umask 077
 mkdir -p "$CONF_DIR"
 
 # --- TLS certificate ---
-# `-e` so that symlinks to certbot/letsencrypt count as present.
+# A symlink counts as present, also a dangling one (certbot/letsencrypt).
 # - both present: the admin set them up (own CA, certbot, ...) — skip
 # - neither present: create a self-signed pair
 # - only one present: the admin is mid-setup — change nothing, only warn
 crt_exists=0; key_exists=0
-[ -e "$CRT" ] && crt_exists=1
-[ -e "$KEY" ] && key_exists=1
-# One file of a pair that this script listed is left from an interrupted run.
+if [ -e "$CRT" ] || [ -L "$CRT" ]; then crt_exists=1; fi
+if [ -e "$KEY" ] || [ -L "$KEY" ]; then key_exists=1; fi
+# One file of a pair that this script generated is left from an interrupted run.
 if [ "$crt_exists" -ne "$key_exists" ]; then
     present=$CRT
     [ "$key_exists" -eq 1 ] && present=$KEY
-    if [ ! -L "$present" ] && is_generated "$present"; then
+    if [ ! -L "$present" ] && is_generated_file "$present"; then
         warn "$present is left from an interrupted run; creating the certificate again"
         rm -f "$present"
         crt_exists=0; key_exists=0
@@ -220,6 +231,8 @@ elif [ "$crt_exists" -eq 0 ] && [ "$key_exists" -eq 0 ]; then
     # List the paths before the files appear, so that an interrupted run is recoverable.
     record_generated "$CRT"
     record_generated "$KEY"
+    record_hash "$tmp_crt" "$CRT"
+    record_hash "$tmp_key" "$KEY"
     mv "$tmp_key" "$KEY"
     mv "$tmp_crt" "$CRT"
     trap - EXIT

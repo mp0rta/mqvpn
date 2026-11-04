@@ -8,12 +8,16 @@ On the first install, the package runs /usr/lib/mqvpn/mqvpn-server-setup:
 
  * If /etc/mqvpn/server.crt and /etc/mqvpn/server.key are both absent, it
    creates a self-signed EC P-256 certificate (365 days). If both exist (for
-   example from certbot or your own CA), it keeps them.
+   example from certbot or your own CA), it keeps them. A symlink counts as
+   present, also a symlink to a file that does not exist.
  * If /etc/mqvpn/server.conf is absent, it creates it with a new PSK from
    "mqvpn --genkey". It never changes an existing server.conf.
 
 Then the package enables and starts mqvpn-server.service and prints the
-connection summary. To print the summary again, run:
+connection summary. If the setup fails, the package does not enable or start
+the service: fix the error, then run
+"sudo /usr/lib/mqvpn/mqvpn-server-setup --start". To print the summary again,
+run:
 
     sudo mqvpn-server-info
 

@@ -51,12 +51,18 @@ NOTE=
 if [ -r "$CERT" ]; then
     cn=$(openssl x509 -in "$CERT" -noout -subject -nameopt multiline 2>/dev/null \
         | sed -n 's/^[[:space:]]*commonName[[:space:]]*=[[:space:]]*//p' | head -n 1) || cn=
-    if [ "$cn" != mqvpn ] && { is_host_name "$cn" || is_ipv6 "$cn"; }; then
-        SERVER=$cn
-    fi
+    # A CA certificate can have its names only in subjectAltName, with no CN.
+    mapfile -t dns < <(openssl x509 -in "$CERT" -noout -ext subjectAltName 2>/dev/null \
+        | tr ',' '\n' | sed -n 's/^[[:space:]]*DNS://p')
+    for name in "$cn" "${dns[@]}"; do
+        if [ "$name" != mqvpn ] && { is_host_name "$name" || is_ipv6 "$name"; }; then
+            SERVER=$name
+            break
+        fi
+    done
 fi
 if [ -z "$SERVER" ] && command -v curl >/dev/null 2>&1; then
-    public=$(curl -fsS -4 --max-time 5 ifconfig.me 2>/dev/null) || public=
+    public=$(curl -fsS -4 --max-time 5 https://ifconfig.me 2>/dev/null) || public=
     if is_ipv4 "$public"; then
         SERVER=$public
     fi
@@ -98,6 +104,10 @@ echo ""
 echo "  Client:"
 echo "    sudo mqvpn --mode client --server ${SERVER}:${PORT} \\"
 echo "        --auth-key \"$AUTH_KEY\"${INSECURE}"
+if [ -n "$INSECURE" ]; then
+    echo ""
+    echo "  Note: --insecure turns off the certificate check. Omit it if the client trusts this certificate."
+fi
 if [ -n "$NOTE" ]; then
     echo ""
     echo "  Note: $NOTE"

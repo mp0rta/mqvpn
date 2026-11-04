@@ -89,7 +89,7 @@ See [Building](./building) for instructions.
 
 ## Quick Start
 
-After installing the server and client, connect using the auth key and address that the server install showed. On a deb install, `sudo mqvpn-server-info` shows them again.
+After installing the server and client, connect using the auth key and address that the server install showed. On a deb install, `sudo mqvpn-server-info` shows them again. The commands below use `--insecure` for a self-signed certificate; omit it if the server has a trusted certificate.
 
 Single path:
 

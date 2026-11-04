@@ -57,7 +57,8 @@ configure|abort-upgrade|abort-deconfigure|abort-remove)
         keep_disabled=1
         echo "mqvpn-server: $UNIT was disabled before this install, so it stays disabled. To enable and start it: systemctl enable --now mqvpn-server"
     fi
-    if [ "$1" = configure ] && [ -z "$2" ] && { [ "$autostart" = no ] || [ "$keep_disabled" = 1 ]; }; then
+    # A failed setup leaves no server.conf, so an enabled unit would fail at every boot.
+    if [ "$1" = configure ] && [ -z "$2" ] && { [ "$autostart" = no ] || [ "$keep_disabled" = 1 ] || [ "$setup_ok" != 1 ]; }; then
         deb-systemd-helper update-state "$UNIT" >/dev/null || true
     elif deb-systemd-helper --quiet was-enabled "$UNIT"; then
         # was-enabled is true when there is no state yet, so a first install enables the unit.
