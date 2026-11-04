@@ -117,11 +117,33 @@ fi
 # The values go into server.conf and the openssl subject, so reject anything
 # that is not plainly a port, a CIDR or a host name.
 valid_port() { [[ "$1" =~ ^[0-9]{1,5}$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
+# Prefix ranges: the address pool accepts only these (src/addr_pool.c).
+valid_subnet4() {
+    local octet
+    # No leading zeros: inet_pton rejects them.
+    [[ "$1" =~ ^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})/([0-9]{1,2})$ ]] || return 1
+    for octet in "${BASH_REMATCH[@]:1:4}"; do
+        (( 10#$octet <= 255 )) || return 1
+    done
+    (( 10#${BASH_REMATCH[5]} >= 16 && 10#${BASH_REMATCH[5]} <= 30 ))
+}
+valid_subnet6() {
+    local addr=${1%/*} group
+    local -a groups
+    [[ "$1" =~ ^[0-9A-Fa-f:]+/([0-9]{1,3})$ ]] || return 1
+    (( 10#${BASH_REMATCH[1]} >= 96 && 10#${BASH_REMATCH[1]} <= 126 )) || return 1
+    [[ "$addr" != *::*::* && "$addr" != *:::* ]] || return 1
+    IFS=: read -ra groups <<< "$addr"
+    (( ${#groups[@]} <= 8 )) || return 1
+    for group in "${groups[@]}"; do
+        (( ${#group} <= 4 )) || return 1
+    done
+}
 valid_port "$MQVPN_PORT" || err "Invalid port: $MQVPN_PORT"
 valid_port "$MQVPN_CONTROL_PORT" || err "Invalid control port: $MQVPN_CONTROL_PORT"
-[[ "$MQVPN_SUBNET" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]] || err "Invalid subnet: $MQVPN_SUBNET"
-[ -z "$MQVPN_SUBNET6" ] || [[ "$MQVPN_SUBNET6" =~ ^[0-9A-Fa-f:]+/[0-9]{1,3}$ ]] \
-    || err "Invalid subnet6: $MQVPN_SUBNET6"
+valid_subnet4 "$MQVPN_SUBNET" || err "Invalid subnet (an IPv4 CIDR from /16 to /30): $MQVPN_SUBNET"
+[ -z "$MQVPN_SUBNET6" ] || valid_subnet6 "$MQVPN_SUBNET6" \
+    || err "Invalid subnet6 (an IPv6 CIDR from /96 to /126): $MQVPN_SUBNET6"
 [ -z "$MQVPN_HOSTNAME" ] || [[ "$MQVPN_HOSTNAME" =~ ^[A-Za-z0-9.:-]{1,253}$ ]] \
     || err "Invalid hostname: $MQVPN_HOSTNAME"
 
@@ -153,6 +175,7 @@ record_generated() {
     touch "$GENERATED_LIST"
     grep -qxF "$1" "$GENERATED_LIST" || echo "$1" >> "$GENERATED_LIST"
 }
+is_generated() { [ -f "$GENERATED_LIST" ] && grep -qxF "$1" "$GENERATED_LIST"; }
 
 umask 077
 mkdir -p "$CONF_DIR"
@@ -165,6 +188,16 @@ mkdir -p "$CONF_DIR"
 crt_exists=0; key_exists=0
 [ -e "$CRT" ] && crt_exists=1
 [ -e "$KEY" ] && key_exists=1
+# One file of a pair that this script listed is left from an interrupted run.
+if [ "$crt_exists" -ne "$key_exists" ]; then
+    present=$CRT
+    [ "$key_exists" -eq 1 ] && present=$KEY
+    if [ ! -L "$present" ] && is_generated "$present"; then
+        warn "$present is left from an interrupted run; creating the certificate again"
+        rm -f "$present"
+        crt_exists=0; key_exists=0
+    fi
+fi
 if [ "$crt_exists" -eq 1 ] && [ "$key_exists" -eq 1 ]; then
     ok "Certificate already in place, skipping (managed by admin / certbot / etc.)"
 elif [ "$crt_exists" -eq 0 ] && [ "$key_exists" -eq 0 ]; then
@@ -176,13 +209,20 @@ elif [ "$crt_exists" -eq 0 ] && [ "$key_exists" -eq 0 ]; then
             san_args=(-addext "subjectAltName=DNS:$MQVPN_HOSTNAME")
         fi
     fi
+    tmp_key=$(mktemp "$CONF_DIR/.server.key.XXXXXX")
+    tmp_crt=$(mktemp "$CONF_DIR/.server.crt.XXXXXX")
+    trap 'rm -f "$tmp_key" "$tmp_crt"' EXIT
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-        -keyout "$KEY" -out "$CRT" -days 365 -nodes \
+        -keyout "$tmp_key" -out "$tmp_crt" -days 365 -nodes \
         -subj "/CN=${MQVPN_HOSTNAME:-mqvpn}" "${san_args[@]}" 2>/dev/null \
         || err "Failed to generate the self-signed certificate"
-    chmod 600 "$KEY" "$CRT"
+    chmod 600 "$tmp_key" "$tmp_crt"
+    # List the paths before the files appear, so that an interrupted run is recoverable.
     record_generated "$CRT"
     record_generated "$KEY"
+    mv "$tmp_key" "$KEY"
+    mv "$tmp_crt" "$CRT"
+    trap - EXIT
     ok "Generated self-signed certificate (CN=${MQVPN_HOSTNAME:-mqvpn})"
 else
     missing=$([ "$crt_exists" -eq 0 ] && echo server.crt || echo server.key)

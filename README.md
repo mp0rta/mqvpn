@@ -705,15 +705,12 @@ Full report with all numbers: [`docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bond
 Requirements: Linux, CMake 3.10+, GCC/Clang (C11), libevent 2.x
 
 ```bash
+git clone --recurse-submodules https://github.com/mp0rta/mqvpn.git
+cd mqvpn
 # Debian/Ubuntu: install the build dependencies (packaging/build-deps.control)
 sudo apt-get satisfy "$(sed -n 's/^Build-Depends: *//p' packaging/build-deps.control)"
 # or, with devscripts and equivs installed:
-sudo mk-build-deps --install --remove packaging/build-deps.control
-```
-
-```bash
-git clone --recurse-submodules https://github.com/mp0rta/mqvpn.git
-cd mqvpn
+#   sudo mk-build-deps --install --remove packaging/build-deps.control
 ./build.sh            # builds BoringSSL, xquic, and mqvpn
 ./build.sh --clean    # full rebuild
 ```

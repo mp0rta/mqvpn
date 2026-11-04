@@ -61,7 +61,7 @@ curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
 To uninstall, re-run the script with `--uninstall` (add `--purge` to also remove config files).
 
 ::: warning
-Both install methods generate a self-signed certificate. Clients must use `--insecure` to connect. For production, replace the certificate with a trusted one (e.g., Let's Encrypt) and omit `--insecure`.
+Both install methods generate a self-signed certificate when the server has none. With that certificate, clients must use `--insecure` to connect. For production, replace the certificate with a trusted one (e.g., Let's Encrypt) and omit `--insecure`. The deb keeps a certificate that is already in place, and `sudo mqvpn-server-info` adds `--insecure` to the client command only for a self-signed certificate.
 Point `--cert` (or `Cert` / `cert_file` in a config file) at the full chain file (for Let's Encrypt, `fullchain.pem`): clients do not fetch missing intermediates.
 :::
 

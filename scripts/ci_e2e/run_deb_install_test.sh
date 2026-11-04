@@ -91,7 +91,10 @@ mode_is() { [ "$(stat -c %a "$1")" = "$2" ]; }
 conf_has() { grep -qxF "$1" "$CONF"; }
 auth_key() { sed -n '/^\[Auth\]/,/^\[/ s/^Key = //p' "$CONF"; }
 cert_fp() { openssl x509 -in "$CRT" -noout -fingerprint -sha256; }
-nat_rule_present() { iptables -t nat -S POSTROUTING | grep -q mqvpn-server-nat; }
+# grep -c reads to EOF: an early grep -q exit can fail iptables with SIGPIPE under pipefail.
+nat_rule_count() { iptables -t nat -S POSTROUTING | grep -c mqvpn-server-nat || true; }
+nat_rule_present() { [ "$(nat_rule_count)" -gt 0 ]; }
+nat_rule_absent() { [ "$(nat_rule_count)" -eq 0 ]; }
 log_has() { grep -qF "$1" "$LOG"; }
 main_pid() { systemctl show -p MainPID --value "$UNIT"; }
 make_admin_cert() { # $1 = CN
@@ -185,7 +188,7 @@ check "18: the program still runs" "$WORK/devtest"
 phase "7, 19.4: apt-get remove mqvpn-server"
 apt_run remove mqvpn-server || fail "apt-get remove mqvpn-server"
 check "7: $UNIT is not active" is_inactive
-check "7: the NAT rule is gone" bash -c "! iptables -t nat -S POSTROUTING | grep -q mqvpn-server-nat"
+check "7: the NAT rule is gone" nat_rule_absent
 check "7: server.conf stays" test -f "$CONF"
 check "7: postrm printed the purge note" log_has "mqvpn-server: removed. A purge deletes the generated server.conf"
 check "19.4: remove keeps $DEFAULTS" test -f "$DEFAULTS"
@@ -340,6 +343,10 @@ apt_run MQVPN_PORT=10443 install "$RT" "$SRV" "$DEV" || fail "17.5: one-transact
 check "17.5: dpkg reported no file conflict" bash -c "! grep -q 'trying to overwrite' $LOG"
 check "17.5: mqvpn-dev owns libmqvpn.h" bash -c "dpkg -S /usr/include/libmqvpn.h | grep -q '^mqvpn-dev:'"
 check "17.5: libmqvpn.a is gone" test ! -e /usr/lib/libmqvpn.a
+check "17.5: the unit that was disabled in the old deb stays disabled" bash -c "[ \"\$(systemctl is-enabled $UNIT 2>/dev/null)\" != enabled ]"
+check "17.5: the unit that was disabled in the old deb does not start" is_inactive
+check "17.5: postinst said why the unit stays disabled" log_has "was disabled before this install, so it stays disabled"
+check "17.5: postinst deleted the keep-disabled marker" test ! -e /var/lib/mqvpn-server/keep-disabled
 purge_all
 rm -f "$CONF" "$CRT" "$KEY"
 

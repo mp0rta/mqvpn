@@ -15,7 +15,7 @@ On Debian and Ubuntu, `packaging/build-deps.control` lists the build dependencie
 
 ```bash
 # Debian/Ubuntu: install the build dependencies (packaging/build-deps.control)
-sudo apt-get satisfy "$(sed -n 's/^Build-Depends: *//p' packaging/build-deps.control)"
+sudo apt-get satisfy "$(sed -n 's/^Build-Depends: *//p' packaging/build-deps.control)"   # from the repository root
 # or, with devscripts and equivs installed:
 sudo mk-build-deps --install --remove packaging/build-deps.control
 ```

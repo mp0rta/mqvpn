@@ -51,7 +51,13 @@ fi
 case "$1" in
 configure|abort-upgrade|abort-deconfigure|abort-remove)
     deb-systemd-helper unmask "$UNIT" >/dev/null || true
-    if [ "$1" = configure ] && [ -z "$2" ] && [ "$autostart" = no ]; then
+    keep_disabled=0
+    # The mqvpn preinst writes this marker on an upgrade from a pre-split deb whose unit was disabled.
+    if [ "$1" = configure ] && [ -z "$2" ] && [ -e "$STATE_DIR/keep-disabled" ]; then
+        keep_disabled=1
+        echo "mqvpn-server: $UNIT was disabled before this install, so it stays disabled. To enable and start it: systemctl enable --now mqvpn-server"
+    fi
+    if [ "$1" = configure ] && [ -z "$2" ] && { [ "$autostart" = no ] || [ "$keep_disabled" = 1 ]; }; then
         deb-systemd-helper update-state "$UNIT" >/dev/null || true
     elif deb-systemd-helper --quiet was-enabled "$UNIT"; then
         # was-enabled is true when there is no state yet, so a first install enables the unit.
@@ -68,8 +74,10 @@ configure|abort-upgrade|abort-deconfigure|abort-remove)
             if systemctl --quiet is-active "$UNIT"; then
                 # A server from a pre-split mqvpn deb or from install.sh still runs the old binary.
                 deb-systemd-invoke restart "$UNIT" >/dev/null || true
-            elif [ "$autostart" != no ]; then
-                deb-systemd-invoke start "$UNIT" >/dev/null || true
+            elif [ "$autostart" != no ] && [ "$keep_disabled" = 0 ]; then
+                # A refusal by policy-rc.d exits 0; only a failed start reaches the message.
+                deb-systemd-invoke start "$UNIT" >/dev/null \
+                    || echo "mqvpn-server: $UNIT failed to start. Check: journalctl -u mqvpn-server" >&2
             fi
         elif [ "${DEBCONF_RECONFIGURE:-0}" = 1 ] && [ "$had_conf" = 1 ]; then
             # dpkg-reconfigure did not change server.conf, so the clients stay connected.
@@ -82,7 +90,10 @@ configure|abort-upgrade|abort-deconfigure|abort-remove)
             deb-systemd-invoke restart "$UNIT" >/dev/null || true
         fi
     fi
-    rm -f "$STATE_DIR/start-after-reinstall"
+    # Keep the marker after a failed setup, so that the next configure starts the server.
+    if [ "$setup_ok" = 1 ]; then
+        rm -f "$STATE_DIR/start-after-reinstall" "$STATE_DIR/keep-disabled"
+    fi
     ;;
 esac
 

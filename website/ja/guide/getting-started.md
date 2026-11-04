@@ -61,7 +61,7 @@ curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
 アンインストールするには `--uninstall` を付けて再実行します（`--purge` で設定ファイルも削除）。
 
 ::: warning
-どちらのインストール方法でも自己署名証明書が生成されます。クライアント接続時には `--insecure` が必要です。本番環境では Let's Encrypt などの信頼された証明書に置き換え、`--insecure` を省略してください。
+どちらのインストール方法でも、サーバーに証明書がない場合は自己署名証明書が生成されます。その証明書では、クライアント接続時に `--insecure` が必要です。本番環境では Let's Encrypt などの信頼された証明書に置き換え、`--insecure` を省略してください。deb はすでにある証明書をそのまま使い、`sudo mqvpn-server-info` は自己署名証明書の場合のみクライアント用コマンドに `--insecure` を付けます。
 `--cert` (設定ファイルでは `Cert` / `cert_file`) には fullchain (Let's Encrypt では `fullchain.pem`) を指定してください。クライアントは足りない中間証明書を取りに行きません。
 :::
 

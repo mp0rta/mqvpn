@@ -11,7 +11,6 @@
 set -euo pipefail
 
 CONF=/etc/mqvpn/server.conf
-GENERATED_LIST=/var/lib/mqvpn-server/generated.list
 
 err() { echo "mqvpn-server-info: $*" >&2; exit 1; }
 
@@ -33,30 +32,56 @@ PORT=${PORT:-443}
 SUBNET=${SUBNET:-10.0.0.0/24}
 CERT=${CERT:-/etc/mqvpn/server.crt}
 
+is_ipv4() {
+    local octet
+    [[ "$1" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    for octet in "${BASH_REMATCH[@]:1:4}"; do
+        (( 10#$octet <= 255 )) || return 1
+    done
+}
+# Admins paste the client command into a root shell, so a value from the
+# certificate or the network goes into it only if it is a plain name or address.
+is_host_name() { [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$ ]]; }
+is_ipv6() { [[ "$1" =~ ^[0-9A-Fa-f:]{2,39}$ && "$1" == *:* ]]; }
+
 # A certificate name other than the default "mqvpn" is the public hostname
 # that mqvpn-server-setup got (--hostname, debconf or MQVPN_HOSTNAME).
 SERVER=
+NOTE=
 if [ -r "$CERT" ]; then
-    SERVER=$(openssl x509 -in "$CERT" -noout -subject -nameopt multiline 2>/dev/null \
-        | sed -n 's/^[[:space:]]*commonName[[:space:]]*=[[:space:]]*//p' | head -n 1) || SERVER=
-    [ "$SERVER" = mqvpn ] && SERVER=
+    cn=$(openssl x509 -in "$CERT" -noout -subject -nameopt multiline 2>/dev/null \
+        | sed -n 's/^[[:space:]]*commonName[[:space:]]*=[[:space:]]*//p' | head -n 1) || cn=
+    if [ "$cn" != mqvpn ] && { is_host_name "$cn" || is_ipv6 "$cn"; }; then
+        SERVER=$cn
+    fi
 fi
 if [ -z "$SERVER" ] && command -v curl >/dev/null 2>&1; then
-    SERVER=$(curl -fsS -4 --max-time 5 ifconfig.me 2>/dev/null) || SERVER=
+    public=$(curl -fsS -4 --max-time 5 ifconfig.me 2>/dev/null) || public=
+    if is_ipv4 "$public"; then
+        SERVER=$public
+    fi
 fi
 if [ -z "$SERVER" ]; then
-    SERVER=$(hostname -I 2>/dev/null | awk '{ print $1 }') || SERVER=
+    local_addr=$(hostname -I 2>/dev/null | awk '{ print $1 }') || local_addr=
+    if is_ipv4 "$local_addr"; then
+        SERVER=$local_addr
+        NOTE="The public address lookup failed. $local_addr is an address of this host: if clients reach the server through NAT, use its public address."
+    fi
 fi
 SERVER=${SERVER:-<server-address>}
 case "$SERVER" in
     *:*) SERVER="[$SERVER]" ;;
 esac
 
-# The client must skip certificate verification only for the self-signed
-# certificate that mqvpn-server-setup created.
+# Only a self-signed certificate needs --insecure on the client. A certificate
+# that replaced the generated one at the same path (certbot) does not.
 INSECURE=
-if [ -f "$GENERATED_LIST" ] && grep -qxF "$CERT" "$GENERATED_LIST"; then
-    INSECURE=" --insecure"
+if [ -r "$CERT" ]; then
+    subject=$(openssl x509 -in "$CERT" -noout -subject -nameopt RFC2253 2>/dev/null) || subject=
+    issuer=$(openssl x509 -in "$CERT" -noout -issuer -nameopt RFC2253 2>/dev/null) || issuer=
+    if [ -n "$subject" ] && [ "${subject#subject=}" = "${issuer#issuer=}" ]; then
+        INSECURE=" --insecure"
+    fi
 fi
 
 STATUS=$(systemctl is-active mqvpn-server 2>/dev/null) || true
@@ -73,6 +98,10 @@ echo ""
 echo "  Client:"
 echo "    sudo mqvpn --mode client --server ${SERVER}:${PORT} \\"
 echo "        --auth-key \"$AUTH_KEY\"${INSECURE}"
+if [ -n "$NOTE" ]; then
+    echo ""
+    echo "  Note: $NOTE"
+fi
 echo ""
 echo "  Show this again: sudo mqvpn-server-info"
 echo ""

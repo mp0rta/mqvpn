@@ -1511,8 +1511,9 @@ if(DPKG_CMD)
     set(CPACK_DEBIAN_SERVER_PACKAGE_REPLACES "mqvpn (<< ${MQVPN_DEB_SPLIT_VERSION}~)")
     set(CPACK_DEBIAN_SERVER_DESCRIPTION
         "Multipath QUIC VPN server (systemd unit, NAT helper, TLS/PSK bootstrap)")
+    configure_file(packaging/server/preinst ${CMAKE_BINARY_DIR}/packaging/server/preinst @ONLY)
     set(CPACK_DEBIAN_SERVER_PACKAGE_CONTROL_EXTRA
-        "${CMAKE_SOURCE_DIR}/packaging/server/postinst;${CMAKE_SOURCE_DIR}/packaging/server/prerm;${CMAKE_SOURCE_DIR}/packaging/server/postrm;${CMAKE_SOURCE_DIR}/packaging/server/templates;${CMAKE_SOURCE_DIR}/packaging/server/config;${CMAKE_SOURCE_DIR}/packaging/server/conffiles")
+        "${CMAKE_BINARY_DIR}/packaging/server/preinst;${CMAKE_SOURCE_DIR}/packaging/server/postinst;${CMAKE_SOURCE_DIR}/packaging/server/prerm;${CMAKE_SOURCE_DIR}/packaging/server/postrm;${CMAKE_SOURCE_DIR}/packaging/server/templates;${CMAKE_SOURCE_DIR}/packaging/server/config;${CMAKE_SOURCE_DIR}/packaging/server/conffiles")
 
     set(CPACK_DEBIAN_DEV_PACKAGE_NAME "mqvpn-dev")
     set(CPACK_DEBIAN_DEV_FILE_NAME "mqvpn-dev_${PROJECT_VERSION}_${DPKG_ARCH}.deb")

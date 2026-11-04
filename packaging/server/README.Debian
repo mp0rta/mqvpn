@@ -38,7 +38,8 @@ The other debconf keys are mqvpn-server/port, mqvpn-server/enable_control
 Environment variables also work. Default sudoers settings drop variables
 from the "sudo VAR=value command" form, so use "sudo env":
 
-    sudo env MQVPN_PORT=10020 MQVPN_SERVER_AUTOSTART=no apt-get install -y ./mqvpn-server_<version>_<arch>.deb
+    sudo env MQVPN_PORT=10020 MQVPN_SERVER_AUTOSTART=no apt-get install -y \
+        ./mqvpn_<version>_<arch>.deb ./mqvpn-server_<version>_<arch>.deb
 
 The variables are MQVPN_PORT, MQVPN_SUBNET, MQVPN_SUBNET6, MQVPN_HOSTNAME,
 MQVPN_ENABLE_CONTROL, MQVPN_CONTROL_PORT and MQVPN_SERVER_AUTOSTART.

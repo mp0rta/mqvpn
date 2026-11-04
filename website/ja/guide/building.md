@@ -18,7 +18,7 @@ Debian / Ubuntu では、deb パッケージのビルドに使うツールを含
 
 ```bash
 # Debian/Ubuntu: ビルド依存パッケージをインストール（packaging/build-deps.control）
-sudo apt-get satisfy "$(sed -n 's/^Build-Depends: *//p' packaging/build-deps.control)"
+sudo apt-get satisfy "$(sed -n 's/^Build-Depends: *//p' packaging/build-deps.control)"   # リポジトリのルートで実行
 # devscripts と equivs がある場合は次でも可:
 sudo mk-build-deps --install --remove packaging/build-deps.control
 ```

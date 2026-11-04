@@ -1,0 +1,32 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
+
+set -e
+
+UNIT=mqvpn-server.service
+STATE_DIR=/var/lib/mqvpn-server
+
+# A first install must not enable a server unit that the admin left disabled.
+# A pre-split mqvpn deb or install.sh can have installed that unit already.
+if [ "$1" = install ] && [ -z "$2" ]; then
+    # Config-Version stays at the old version while apt unpacks the new mqvpn in the same run.
+    old_mqvpn=$(dpkg-query -W -f='${Config-Version}' mqvpn 2>/dev/null) || old_mqvpn=
+    had_unit=0
+    # CMake replaces @MQVPN_DEB_SPLIT_VERSION@ (configure_file).
+    if [ -n "$old_mqvpn" ] && dpkg --compare-versions "$old_mqvpn" lt "@MQVPN_DEB_SPLIT_VERSION@~"; then
+        had_unit=1
+    elif [ -e "/lib/systemd/system/$UNIT" ] || [ -e "/usr/lib/systemd/system/$UNIT" ]; then
+        had_unit=1
+    fi
+    wanted=0
+    for link in /etc/systemd/system/*.wants/"$UNIT"; do
+        [ -L "$link" ] && wanted=1
+    done
+    if [ "$had_unit" = 1 ] && [ "$wanted" = 0 ]; then
+        mkdir -p "$STATE_DIR"
+        touch "$STATE_DIR/keep-disabled"
+    fi
+fi
+
+exit 0
