@@ -10,8 +10,7 @@
 # copies (one pair had already drifted cosmetically before extraction).
 # Deliberate NON-consumers, left with their local definitions:
 #   - run_dellink_test.sh: case-insensitive grep (-qiE) variant;
-#   - tests/test_e2e_*.sh: different default timeouts (40s/10s) and, in
-#     test_e2e_dellink.sh, a different signature (global $CLIENT_LOG).
+#   - tests/test_e2e_*.sh: a different default timeout (40s).
 # Fold those in only by preserving their exact semantics.
 
 # wait_for_log <log_file> <extended-regex> [timeout_sec=15]

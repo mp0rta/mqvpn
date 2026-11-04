@@ -7,7 +7,7 @@
 #   1. All 3 clients connect with correct PSK and get unique IPs
 #   2. All clients can ping through the tunnel
 #   3. One client disconnect doesn't affect others
-#   4. Wrong PSK is rejected (client exits)
+#   4. Wrong PSK is rejected within seconds, without a tunnel
 #   5. Per-client scheduler (--request-server-scheduler) shows in get_status
 #
 # Usage: sudo ./test_multiclient.sh [path-to-mqvpn-binary]
@@ -15,6 +15,7 @@
 set -e
 
 source "$(dirname "$0")/sanitizer_check.sh"
+source "$(dirname "$0")/e2e_lib.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MQVPN="${1:-${SCRIPT_DIR}/../../build/mqvpn}"
@@ -196,6 +197,10 @@ for i in 1 2 3; do
         echo "FAIL: Client ${i} → 10.0.0.1 ping failed"
         PING_PASS=0
     fi
+    if ! grep -q "tunnel 200 OK" "${WORK_DIR}/client${i}.log"; then
+        echo "FAIL: Client ${i} log lacks the 'tunnel 200 OK' marker"
+        PING_PASS=0
+    fi
 done
 
 if [ "$PING_PASS" -eq 0 ]; then
@@ -334,33 +339,24 @@ ip netns exec mc-client-bad "$MQVPN" \
     --log-level debug > "${WORK_DIR}/client_bad.log" 2>&1 &
 CLIENT_BAD_PID=$!
 
-# Wait for the client to attempt connection and get rejected
-sleep 5
-
-if kill -0 "$CLIENT_BAD_PID" 2>/dev/null; then
-    # Client might still be running if it retries — check if tunnel is NOT up
-    if ip netns exec mc-client-bad ip addr show dev mqvpn0 >/dev/null 2>&1; then
-        echo "FAIL: Bad client got a TUN device (should have been rejected)"
-        AUTH_PASS=0
-    else
-        echo "OK: Bad client running but no tunnel established"
-        kill "$CLIENT_BAD_PID" 2>/dev/null || true
-        wait "$CLIENT_BAD_PID" 2>/dev/null || true
-        CLIENT_BAD_PID=""
-        AUTH_PASS=1
-    fi
+# The rejection must reach the client quickly (its failure marker), not hang.
+if ! wait_for_log "${WORK_DIR}/client_bad.log" "CONNECT-IP request failed" 10; then
+    echo "FAIL: Bad client did not report 'CONNECT-IP request failed' within 10s"
+    AUTH_PASS=0
+elif ip netns exec mc-client-bad ip addr show dev mqvpn0 >/dev/null 2>&1; then
+    echo "FAIL: Bad client got a TUN device (should have been rejected)"
+    AUTH_PASS=0
 else
-    # Client exited — check server log for 403
-    wait "$CLIENT_BAD_PID" 2>/dev/null || true
-    CLIENT_BAD_PID=""
-    if grep -q "auth.*fail\|403\|unauthorized\|authentication" "${WORK_DIR}/server.log" 2>/dev/null || \
-       grep -q "auth.*fail\|403\|unauthorized\|authentication" "${WORK_DIR}/client_bad.log" 2>/dev/null; then
-        echo "OK: Bad client rejected (auth failure in logs)"
-        AUTH_PASS=1
-    else
-        echo "OK: Bad client exited (no tunnel established)"
-        AUTH_PASS=1
-    fi
+    echo "OK: Bad client rejected fast, no tunnel established"
+    AUTH_PASS=1
+fi
+stop_and_check_sanitizer "$CLIENT_BAD_PID" "client-bad" "${WORK_DIR}/client_bad.log" ||
+    SANITIZER_FAIL=1
+CLIENT_BAD_PID=""
+# A tunnel that came up and went away before the check above is a failure too.
+if grep -q "tunnel 200 OK" "${WORK_DIR}/client_bad.log"; then
+    echo "FAIL: Bad client established a tunnel at some point"
+    AUTH_PASS=0
 fi
 
 if [ "$AUTH_PASS" -eq 1 ]; then

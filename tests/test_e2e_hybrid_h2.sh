@@ -1489,8 +1489,7 @@ echo "  flow_a bytes received at target before path bring-up: ${LANE_BYTES_A_BEF
 # ── Bring path 1 up live ──
 ip netns exec "$NS_CLIENT" ip link set "$LANE_PATH1_CLIENT_VETH" up
 # Re-add ONLY path 1's client-side host route to the server: taking veth-b0
-# down flushed the /32 route bound to it (same lesson as
-# test_e2e_dellink.sh's Test 2), and without it path 1's PATH_CHALLENGE has
+# down flushed the /32 route bound to it, and without it path 1's PATH_CHALLENGE has
 # no route to the VPN listen address. `ip route replace` + `|| true` is
 # idempotent whether or not the kernel kept it — deliberately NOT
 # bench_add_server_host_routes (its server-side `ip addr add .../32 dev lo`

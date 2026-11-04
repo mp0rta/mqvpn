@@ -1400,7 +1400,7 @@ cli_signal_connect_fail(cli_conn_t *conn, mqvpn_error_t reason, int status_for_l
     assert(!conn->tunnel_ok);          /* every caller gates on !tunnel_ok / non-200 */
     conn->tunnel_notified = 1;
     conn->notified_reason = reason;
-    /* "CONNECT-IP request failed" is an e2e marker (tests/test_e2e_wrong_psk.sh)
+    /* "CONNECT-IP request failed" is an e2e marker (scripts/ci_e2e/test_multiclient.sh)
      * and must keep printing once for the CONNECT-IP witnesses. A TLS
      * rejection never sent a request, so it stays silent here —
      * cli_report_cert_rejected already logged "TLS certificate verification

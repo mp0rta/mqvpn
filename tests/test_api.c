@@ -2349,9 +2349,8 @@ mock_tunnel_closed(mqvpn_error_t reason, void *u)
     g_last_tunnel_closed_reason = reason;
 }
 
-/* "CONNECT-IP request failed" is the marker tests/test_e2e_wrong_psk.sh waits
- * for; count it so its once-per-conn contract is pinned here (the e2e is not
- * in CI). */
+/* "CONNECT-IP request failed" is the marker scripts/ci_e2e/test_multiclient.sh
+ * waits for; count it so its once-per-conn contract is pinned here. */
 static int g_connect_fail_marker_count = 0;
 
 static void
