@@ -111,11 +111,8 @@ jobs:
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
-          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
-                -DXQC_ENABLE_BBR2=ON \
-                -DXQC_ENABLE_UNLIMITED=ON \
-                -DXQC_ENABLE_FEC=ON \
-                -DXQC_ENABLE_XOR=ON \
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                $(cat "$GITHUB_WORKSPACE/scripts/xquic-cmake-flags") \
                 -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
           make -j$(nproc)
 
@@ -233,11 +230,8 @@ jobs:
           # gcc-only -Wno-dangling-pointer for every non-MSVC compiler;
           # AppleClang would otherwise error on the unknown warning flag
           # (same workaround as ci.yml's darwin job).
-          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
-                -DXQC_ENABLE_BBR2=ON \
-                -DXQC_ENABLE_UNLIMITED=ON \
-                -DXQC_ENABLE_FEC=ON \
-                -DXQC_ENABLE_XOR=ON \
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                $(cat "$GITHUB_WORKSPACE/scripts/xquic-cmake-flags") \
                 -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
           make -j"$(sysctl -n hw.ncpu)"
 
@@ -430,12 +424,8 @@ jobs:
           cmake -G "${{ matrix.vs }}" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_C_STANDARD=11 `
-            -DSSL_TYPE=boringssl `
-            -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" `
-            -DXQC_ENABLE_BBR2=ON `
-            -DXQC_ENABLE_UNLIMITED=ON `
-            -DXQC_ENABLE_FEC=ON `
-            -DXQC_ENABLE_XOR=ON ..
+            $(Get-Content "${{ github.workspace }}/scripts/xquic-cmake-flags") `
+            -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" ..
           cmake --build . --config Release
 
       - name: Build mqvpn (Windows)
