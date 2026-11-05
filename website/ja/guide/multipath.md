@@ -140,7 +140,8 @@ Ref: [XLINK (SIGCOMM 2021)](https://conferences.sigcomm.org/sigcomm/2021/files/p
 
 ```ini
 [Multipath]
-Reinjection = deadline   # off | deadline | idle
+# off | deadline | idle
+Reinjection = deadline
 ```
 
 | モード | 何をコピーするか | 用途 |
@@ -159,9 +160,12 @@ head-of-line blocking）。無音で死んだ回線は最悪数百 ms のタイ�
 deadline モードのチューニング（デフォルト値）：
 
 ```ini
-ReinjectionSrttFactorPct = 110        # 最小往復時間（min_srtt）の 1.1 倍を超えて未確認ならコピー（100–1000）
-ReinjectionHardDeadlineMs = 500       # 待ち時間の上限 ms（1–60000）
-ReinjectionDeadlineLowerBoundMs = 20  # 待ち時間の下限 ms（1–60000。上限を超える設定は上限に切り詰め）
+# 最小往復時間（min_srtt）の 1.1 倍を超えて未確認ならコピー（100–1000）
+ReinjectionSrttFactorPct = 110
+# 待ち時間の上限 ms（1–60000）
+ReinjectionHardDeadlineMs = 500
+# 待ち時間の下限 ms（1–60000。上限を超える設定は上限に切り詰め）
+ReinjectionDeadlineLowerBoundMs = 20
 ```
 
 注意：
@@ -181,9 +185,11 @@ ReinjectionDeadlineLowerBoundMs = 20  # 待ち時間の下限 ms（1–60000。�
 
 ```ini
 [Multipath]
-Redundant = on
-RedundantPorts = 4200    # 任意: 宛先がこのポートの UDP だけ複製
-CC = bbr                 # 冗長モードでの推奨
+Redundant = true
+# 任意: 宛先がこのポートの UDP だけ複製
+RedundantPorts = 4200
+# 冗長モードでの推奨
+CC = bbr
 ```
 
 Android では **Redundant Mode** スイッチをオンにします（ポートの指定は
@@ -200,10 +206,10 @@ Android では **Redundant Mode** スイッチをオンにします（ポート�
   1 本ずつが配信のビットレートを余裕を持って上回るアップロード速度を必要とします。
   20 Mbps の配信なら、どの回線も 20 Mbps 以上が必要です。1 本が一時的に遅く
   なっても、ほかの回線が配信を運べるあいだは問題ありません。どの回線も運べなく
-  なると、mqvpn はコピーをやめて `Redundant = off` と同じように各パケットを
+  なると、mqvpn はコピーをやめて `Redundant = false` と同じように各パケットを
   1 回だけ送り、運べそうな回線が出てきたら、しばらくしてコピーを再開します。
   切り替えるたびにログに `redundant mode: ...` と出ます。それでも
-  `Redundant = off` より多くのパケットが失われることがあるので、回線が配信より
+  `Redundant = false` より多くのパケットが失われることがあるので、回線が配信より
   遅いことが多い場合はオフのままにしてください。
 - **クライアントは `CC = bbr` に（推奨）**: `CC` は mqvpn が送る速さの決め方です。
   セルラー回線は、無線のため混んでいなくても少しパケットが失われることが
@@ -231,7 +237,7 @@ Android では **Redundant Mode** スイッチをオンにします（ポート�
 
 以前の `Reinjection = dgram` は廃止され、この冗長モードに置き換わりました。
 設定ファイルに `dgram` が残っていると警告が出て `Reinjection = off` で
-動作します。代わりに `Redundant = on` を使ってください。
+動作します。代わりに `Redundant = true` を使ってください。
 
 ## パスの重み付け
 

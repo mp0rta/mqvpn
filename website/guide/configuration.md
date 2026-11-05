@@ -5,7 +5,9 @@ mqvpn supports both INI and JSON config files. If the file content starts with `
 UTF-8 files with or without a BOM and Windows (CRLF) line endings are supported.
 Files containing a NUL byte are rejected. INI section and key names are
 case-insensitive. A malformed section header produces a warning; its keys are
-ignored until the next valid section header.
+ignored until the next valid section header. On/off keys take `true` or
+`false` (any case; JSON uses `true`/`false` without quotes); any other value,
+such as `on`, `yes` or `1`, is an error and mqvpn does not start.
 
 ## INI Format
 
@@ -30,13 +32,15 @@ User = bob:<BOB_PSK>
 
 [Multipath]
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+AllowClientScheduler = true
+# Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2
 
 [Hybrid]
 Enabled = true
 
 [Reorder]
-Enabled = on
+Enabled = true
 ```
 
 When you use a CA-issued certificate, `Cert` (`cert_file` in JSON) must contain
@@ -52,7 +56,8 @@ intermediate.
 # /etc/mqvpn/client.conf
 [Server]
 Address = 203.0.113.1:443
-# ServerName = vpn.example.com  # TLS SNI / cert verify name (default: use Address host)
+# TLS SNI / cert verify name (default: use Address host)
+# ServerName = vpn.example.com
 
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
@@ -65,7 +70,11 @@ LogLevel = info
 
 [Multipath]
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+# Override the server's scheduler with Scheduler above for this client's downloads
+# (needs AllowClientScheduler = true on the server):
+# RequestServerScheduler = true
+# Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2
 Path = eth0
 Path = wlan0
 
@@ -73,7 +82,7 @@ Path = wlan0
 # Enabled = true
 
 # [Reorder]                     # opt in for bulk inner QUIC; see the [Reorder] section
-# Enabled = on
+# Enabled = true
 ```
 
 ## JSON Format
@@ -100,9 +109,10 @@ The file must be strict JSON (RFC 8259): no comments, no trailing commas, and ke
   ],
   "max_clients": 64,
   "scheduler": "wlb",
+  "allow_client_scheduler": true,
   "cc": "bbr2",
   "hybrid": { "enabled": true },
-  "reorder": { "enabled": "on" }
+  "reorder": { "enabled": true }
 }
 ```
 
@@ -211,13 +221,13 @@ In JSON, use `auth_key` on both client and server (as in the examples above).
 | `RequestServerScheduler` | Client only (`request_server_scheduler` in JSON, or pass `--request-server-scheduler`). When `true`, the client asks the server to use this client's `Scheduler` for its download direction too. Setting `Scheduler` alone still affects only the upload direction, as before. Takes effect only on servers with `AllowClientScheduler = true`. | `false` |
 | `CC` | Congestion control algorithm (`bbr2`, `bbr`, `cubic`, or `none`) | `bbr2` |
 | `Path` | Network interface to bind (repeatable) | Default interface |
-| `InitMaxPathId` | MP-QUIC draft-21 test knob: initial Maximum Path Identifier advertised in transport parameters (`1`–`4294967295`; `0` = xquic default `8`) | `0` |
-| `Reinjection` | Speculative duplication mode (`off`, `deadline`, or `idle`). `dgram` is no longer supported; a config file that sets it gets a warning and runs with `off`. Use redundant mode (`Redundant = on`) to duplicate packets. | `off` |
+| `InitMaxPathId` | Initial number of path IDs the connection may use over its lifetime (IDs 0–N; each new path, including a re-added one, uses a fresh ID; the server grants more as needed, up to 128). `1`–`128`; unset or `0` uses `8` | `0` |
+| `Reinjection` | Speculative duplication mode (`off`, `deadline`, or `idle`). `dgram` is no longer supported; a config file that sets it gets a warning and runs with `off`. Use redundant mode (`Redundant = true`) to duplicate packets. | `off` |
 | `ReinjectionSrttFactorPct` | `deadline` mode: duplicate unacked packets older than factor × min_srtt, in percent (`100`–`1000`) | `110` |
 | `ReinjectionHardDeadlineMs` | `deadline` mode: upper clamp on the duplication deadline (`1`–`60000`) | `500` |
 | `ReinjectionDeadlineLowerBoundMs` | `deadline` mode: lower clamp; values above the hard deadline are clamped down to it (`1`–`60000`) | `20` |
-| `Redundant` | Client only. When `on`, copies of outgoing UDP packets are sent over more than one path at once, which helps live streams keep going when a path drops. That traffic uses up to twice the data with two paths, three times with three. Every connection should be fast enough to carry that traffic on its own (recommended); if your connections are often slower, leave it off. See [Redundant mode](./multipath#redundant-mode). | `off` |
-| `RedundantPorts` | Client only. Comma-separated destination ports (at most 16 entries) to duplicate when `Redundant = on`; empty duplicates all UDP. With `Redundant = on`, an invalid list stops the client at startup. | empty |
+| `Redundant` | Client only. When `true`, copies of outgoing UDP packets are sent over more than one path at once, which helps live streams keep going when a path drops. That traffic uses up to twice the data with two paths, three times with three. Every connection should be fast enough to carry that traffic on its own (recommended); if your connections are often slower, leave it off. See [Redundant mode](./multipath#redundant-mode). | `false` |
+| `RedundantPorts` | Client only. Comma-separated destination ports (at most 16 entries) to duplicate when `Redundant = true`; empty duplicates all UDP. With `Redundant = true`, an invalid list stops the client at startup. | empty |
 
 A server of this version tells each connected client which scheduler it uses for that client, even when `AllowClientScheduler` is `false`. A client that sets `RequestServerScheduler` logs `server scheduler: <name> (requested <name>)` after it connects.
 
@@ -232,13 +242,13 @@ See [Multipath](./multipath) for scheduler details and
 
 ### `[Reorder]`
 
-A flow-aware reorder buffer for inner UDP traffic. It targets a single inner connection (e.g. inner QUIC) that is itself spread across multiple paths by mqvpn's multipath aggregation: by holding briefly out-of-order datagrams and delivering them in order, it reduces the reordering the inner endpoint sees. Disabled by default (`Enabled = off`); when off the section has no effect and packets are forwarded unchanged. It only takes effect when both the server and the client set `Enabled = on`; the client log then shows `peer advertised mqvpn-reorder`.
+A flow-aware reorder buffer for inner UDP traffic. It targets a single inner connection (e.g. inner QUIC) that is itself spread across multiple paths by mqvpn's multipath aggregation: by holding briefly out-of-order datagrams and delivering them in order, it reduces the reordering the inner endpoint sees. Disabled by default (`Enabled = false`); when off the section has no effect and packets are forwarded unchanged. It only takes effect when both the server and the client set `Enabled = true`; the client log then shows `peer advertised mqvpn-reorder`.
 
 > **Scope:** the reorder buffer applies to **inner UDP flows only. Inner TCP is not handled by the reorder buffer.** For inner TCP, enable hybrid mode ([`[Hybrid]`](#hybrid) below) instead — the QUIC stream layer restores ordering.
 
 | Key | Description | Default |
 |-----|-------------|---------|
-| `Enabled` | Master switch (`on` / `off`) | `off` |
+| `Enabled` | Master switch (`true` / `false`) | `false` |
 | `MaxWaitMs` | How long to hold a gap before skipping the missing datagram (ms) | `30` |
 | `CapPackets` | Max buffered datagrams per flow (power of two) | `1024` |
 | `MaxBytesPerFlow` | Max buffered bytes per flow | `1572864` |
@@ -258,7 +268,7 @@ Reorder is a throughput-vs-latency trade-off — it helps bulk transfers but del
 
 ```ini
 [Reorder]
-Enabled = on
+Enabled = true
 
 [ReorderRule]          # bulk inner QUIC: reorder on
 Proto = udp
@@ -276,7 +286,7 @@ The same works in JSON. The `reorder` object uses snake_case keys mapping 1:1 to
 ```json
 {
   "reorder": {
-    "enabled": "on",
+    "enabled": true,
     "max_wait_ms": 30,
     "cap_packets": 1024,
     "max_bytes_per_flow": 1572864,

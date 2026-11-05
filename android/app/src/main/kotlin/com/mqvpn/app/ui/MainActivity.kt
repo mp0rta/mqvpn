@@ -8,8 +8,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
-import androidx.navigation.compose.NavHost
-import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.mqvpn.app.ui.theme.MqvpnTheme
 import dagger.hilt.android.AndroidEntryPoint
@@ -25,15 +23,8 @@ class MainActivity : ComponentActivity() {
                 // destroys the singleton manager, so it must never be scoped to a
                 // NavBackStackEntry (it would be torn down on every back-navigation).
                 val vm: MqvpnViewModel = hiltViewModel()
-                val nav = rememberNavController()
-                NavHost(nav, startDestination = "dashboard") {
-                    composable("dashboard") {
-                        DashboardScreen(vm, onOpenSettings = { nav.navigate("settings") })
-                    }
-                    composable("settings") {
-                        SettingsScreen(onNavigateUp = { nav.navigateUp() })
-                    }
-                }
+                val settingsVm: SettingsViewModel = hiltViewModel()
+                AppShell(vm, settingsVm, rememberNavController())
             }
         }
     }

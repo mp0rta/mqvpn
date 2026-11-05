@@ -279,7 +279,7 @@ TEST(config_load_json_users_brace_in_string_value)
 TEST(config_load_json_invalid_tuning)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
-    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"init_max_path_id\":4294967296}"),
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"init_max_path_id\":129}"),
               MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"cc\":\"reno\"}"), MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"mtu\":\"bad\"}"), MQVPN_ERR_INVALID_ARG);

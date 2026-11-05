@@ -1,0 +1,2 @@
+- Fix the logo on the setup screen.
+- Security and stability fixes in the connection layer.

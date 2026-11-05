@@ -8,6 +8,7 @@ import android.net.VpnService
 import android.os.Binder
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.util.Log
 import com.mqvpn.sdk.core.internal.PathManager
 import com.mqvpn.sdk.core.internal.TunnelCallbacks
@@ -17,6 +18,7 @@ import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.ReconnectInfo
 import com.mqvpn.sdk.core.model.TunnelInfo
 import com.mqvpn.sdk.network.NetworkMonitor
+import com.mqvpn.sdk.network.PathPolicy
 import com.mqvpn.sdk.runtime.MqvpnPoller
 import com.mqvpn.sdk.runtime.NativeReactorWaiter
 import kotlinx.coroutines.CoroutineScope
@@ -75,6 +77,7 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
     private lateinit var waiter: NativeReactorWaiter
     private lateinit var executor: MqvpnPoller
     private var tunnel: MqvpnTunnel? = null
+    private var lastReorderStatsMs = 0L
     private var tunnelBridge: TunnelBridge? = null
     private var pathManager: PathManager? = null
     private var networkMonitor: NetworkMonitor? = null
@@ -105,7 +108,12 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
                 if (t != null) {
                     manager?.updateStats(t.getStats())
                     manager?.updatePaths(t.getPaths())
-                    manager?.updateReorderStats(t.getReorderStats())
+                    // JNI array + boxed list: once per wall-clock second, not per poll
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - lastReorderStatsMs >= 1000) {
+                        lastReorderStatsMs = now
+                        manager?.updateReorderStats(t.getReorderStats())
+                    }
                 }
                 result
             },
@@ -158,7 +166,15 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
             val t = MqvpnTunnel.create(config, this, waiter.reactorHandle)
             tunnel = t
 
-            val monitor = NetworkMonitor(this, holdBluetooth = config.bluetoothPathEnabled)
+            val monitor = NetworkMonitor(
+                this,
+                PathPolicy(
+                    config.wifiPathEnabled,
+                    config.cellularPathEnabled,
+                    config.ethernetPathEnabled,
+                    config.bluetoothPathEnabled,
+                ),
+            )
             networkMonitor = monitor
 
             val pm = PathManager(
@@ -254,6 +270,7 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
             requestedScheduler = currentConfig?.let { c ->
                 c.scheduler.takeIf { c.requestServerScheduler }
             },
+            connectedAtMs = System.currentTimeMillis(),
         )
 
         val tunPfd = try {

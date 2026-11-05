@@ -1391,7 +1391,8 @@ JNI_FN(getInterest)(JNIEnv *env, jobject thiz, jlong client)
 /*
  * getReorderStats(client) → LongArray:
  * [deliveredCount, gapCount, gapFilledCount, gapTimeoutCount,
- *  ackDemoteCount, p50Ms, p99Ms]
+ *  ackDemoteCount, p50Ms, p99Ms,
+ *  residence_bucket[0..11]]   (19 entries; buckets at indices 7-18)
  */
 JNIEXPORT jlongArray JNICALL
 JNI_FN(getReorderStats)(JNIEnv *env, jobject thiz, jlong client)
@@ -1405,14 +1406,18 @@ JNI_FN(getReorderStats)(JNIEnv *env, jobject thiz, jlong client)
     double p50 = mqvpn_reorder_latency_buffered_percentile(&st, 0.50);
     double p99 = mqvpn_reorder_latency_buffered_percentile(&st, 0.99);
 
-    jlong values[7] = {
+    jlong values[19] = {
         (jlong)st.delivered_count,  (jlong)st.gap_count,
         (jlong)st.gap_filled_count, (jlong)st.gap_timeout_count,
         (jlong)st.ack_demote_count, (jlong)(p50 + 0.5),
         (jlong)(p99 + 0.5),
     };
-    jlongArray arr = (*env)->NewLongArray(env, 7);
-    if (arr) (*env)->SetLongArrayRegion(env, arr, 0, 7, values);
+    _Static_assert(MQVPN_REORDER_LAT_BUCKETS == 12,
+                   "bucket count changed: update this array and the Kotlin decoder");
+    for (int i = 0; i < 12; i++)
+        values[7 + i] = (jlong)st.residence_bucket[i];
+    jlongArray arr = (*env)->NewLongArray(env, 19);
+    if (arr) (*env)->SetLongArrayRegion(env, arr, 0, 19, values);
     return arr;
 }
 

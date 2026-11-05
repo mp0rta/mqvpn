@@ -82,7 +82,7 @@ echo "[hybrid-h1] N=$N_PATHS binary=$MQVPN inner-tcp-port=$INNER_TCP_PORT"
 bench_check_test_deps nc
 
 # ── Phase INIs. Keys cross-checked against src/config.c cfg_keys[]:
-#    [Hybrid] Enabled true|false -> CFG_BOOL (parse_bool: true/yes/1)
+#    [Hybrid] Enabled true|false -> CFG_BOOL (true/false only)
 #    [Hybrid] Tcp stream|raw|auto -> parse_hybrid_tcp_mode
 cat >"$INI_P1" <<EOF
 [Hybrid]

@@ -2892,6 +2892,7 @@ mqvpn_check_scheduler_preconditions(mqvpn_scheduler_t scheduler, int n_paths)
 }
 
 #include "mqvpn_conn_settings.h"
+#include "mqvpn_engine_keys.h"
 
 /* ─── Start a QUIC/H3 connection ─── */
 
@@ -3138,6 +3139,7 @@ init_xquic_engine(mqvpn_client_t *c)
     xqc_config_t xconfig;
     if (xqc_engine_get_default_config(&xconfig, XQC_ENGINE_CLIENT) < 0) goto fail;
     xconfig.cfg_log_level = (xqc_log_level_t)map_log_level_to_xquic(cfg->log_level);
+    if (mqvpn_engine_keys_set_client(&xconfig) != 0) goto fail;
 
 #if defined(__linux__)
     /* tx_batch is recorded rather than re-derived: cli_start_connection()

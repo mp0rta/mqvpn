@@ -9,9 +9,9 @@
  *     each writing the right field of the embedded mqvpn_reorder_config_t,
  *     with the result still passing mqvpn_reorder_config_validate().
  *   - Task 4.2: INI [Reorder] / repeated [ReorderRule] parsing into the
- *     file-config struct, including the Enabled off/on/true/auto mapping
- *     (auto → ON with a LOG_WRN, per the §16 scope decision) and the
- *     unknown-key-warns-but-does-not-fail forward-compat rule.
+ *     file-config struct, including the Enabled true/false mapping (any other
+ *     value fails the load) and the unknown-key-warns-but-does-not-fail
+ *     forward-compat rule.
  *
  * Builder-side tests reach the embedded config through mqvpn_internal.h
  * (the test links src/mqvpn_config.c, so the opaque struct is visible).
@@ -275,7 +275,7 @@ static void
 test_ini_reorder_full(void)
 {
     const char *ini = "[Reorder]\n"
-                      "Enabled = on\n"
+                      "Enabled = true\n"
                       "MaxWaitMs = 40\n"
                       "CapPackets = 2048\n"
                       "MaxBytesPerFlow = 3145728\n"
@@ -295,7 +295,7 @@ test_ini_reorder_full(void)
     if (path) unlink(path);
 
     ASSERT_EQ_INT(rc, 0, "parse ok");
-    ASSERT_EQ_INT(cfg.reorder.mode, MQVPN_REORDER_ON, "Enabled=on → ON");
+    ASSERT_EQ_INT(cfg.reorder.mode, MQVPN_REORDER_ON, "Enabled=true → ON");
     ASSERT_EQ_INT(cfg.reorder.max_wait_ms, 40, "MaxWaitMs");
     ASSERT_EQ_INT(cfg.reorder.cap_packets_per_flow, 2048, "CapPackets");
     ASSERT_TRUE(cfg.reorder.max_buffer_bytes_per_flow == 3145728ULL, "MaxBytesPerFlow");
@@ -316,11 +316,12 @@ test_ini_enabled_mapping(void)
 {
     struct {
         const char *val;
+        int want_rc;
         mqvpn_reorder_mode_t want;
     } cases[] = {
-        {"off", MQVPN_REORDER_OFF}, {"false", MQVPN_REORDER_OFF},
-        {"on", MQVPN_REORDER_ON},   {"true", MQVPN_REORDER_ON},
-        {"auto", MQVPN_REORDER_ON}, /* §16 scope: auto → ON + LOG_WRN */
+        {"false", 0, MQVPN_REORDER_OFF}, {"true", 0, MQVPN_REORDER_ON},
+        {"TRUE", 0, MQVPN_REORDER_ON},   {"off", -1, MQVPN_REORDER_OFF},
+        {"on", -1, MQVPN_REORDER_OFF},   {"auto", -1, MQVPN_REORDER_OFF},
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         char ini[64];
@@ -330,7 +331,7 @@ test_ini_enabled_mapping(void)
         mqvpn_config_defaults(&cfg);
         int rc = mqvpn_config_load(&cfg, path);
         if (path) unlink(path);
-        ASSERT_EQ_INT(rc, 0, "parse ok");
+        ASSERT_EQ_INT(rc, cases[i].want_rc, cases[i].val);
         ASSERT_EQ_INT(cfg.reorder.mode, cases[i].want, cases[i].val);
     }
 }
@@ -339,7 +340,7 @@ static void
 test_ini_reorder_rules(void)
 {
     const char *ini = "[Reorder]\n"
-                      "Enabled = on\n"
+                      "Enabled = true\n"
                       "[ReorderRule]\n"
                       "Proto = udp\n"
                       "Port = 443\n"
@@ -369,7 +370,7 @@ test_ini_reorder_profile_names(void)
 {
     /* cellular_bond / fiber_lte profile names parse into the new enum values. */
     const char *ini = "[Reorder]\n"
-                      "Enabled = on\n"
+                      "Enabled = true\n"
                       "[ReorderRule]\n"
                       "Proto = udp\n"
                       "Port = 443\n"
@@ -399,7 +400,7 @@ test_ini_reorder_invalid_profile_keeps_quic_bulk(void)
     /* A typo'd profile name warns (no hard error) and the rule keeps its
      * begin-time default MQVPN_RPROF_QUIC_BULK (still reorder-eligible). */
     const char *ini = "[Reorder]\n"
-                      "Enabled = on\n"
+                      "Enabled = true\n"
                       "[ReorderRule]\n"
                       "Proto = udp\n"
                       "Port = 443\n"
@@ -422,7 +423,7 @@ test_ini_unknown_key_warns_no_fail(void)
     /* Unknown keys in [Reorder] / [ReorderRule] warn but do not fail (forward
      * compat), mirroring the existing section behaviour. */
     const char *ini = "[Reorder]\n"
-                      "Enabled = on\n"
+                      "Enabled = true\n"
                       "FutureKnob = 123\n"
                       "[ReorderRule]\n"
                       "Proto = udp\n"
@@ -446,7 +447,7 @@ test_ini_validate_rejects_idle_inversion(void)
     /* ingress >= egress must be rejected by validate (§14.2). The parser stores
      * the raw values; validate is the gate. */
     const char *ini = "[Reorder]\n"
-                      "Enabled = on\n"
+                      "Enabled = true\n"
                       "IngressIdleSec = 300\n"
                       "EgressIdleSec = 300\n";
     char *path = write_tmp(ini);
@@ -473,7 +474,7 @@ test_ini_over_cap_rule_rejected(void)
      * to 8000 + cap (the 17th port). */
     char ini[2048];
     size_t n = 0;
-    cfg_append(ini, sizeof(ini), &n, "[Reorder]\nEnabled = on\n");
+    cfg_append(ini, sizeof(ini), &n, "[Reorder]\nEnabled = true\n");
     for (int i = 0; i <= MQVPN_REORDER_MAX_RULES; i++) {
         cfg_append(ini, sizeof(ini), &n,
                    "[ReorderRule]\nProto = udp\nPort = %d\nProfile = quic_bulk\n",
@@ -499,7 +500,7 @@ test_ini_rule_out_of_range_keeps_defaults(void)
      * warn (not fail); the rule keeps its begin-time defaults (proto UDP,
      * profile QUIC_BULK). */
     const char *ini = "[Reorder]\n"
-                      "Enabled = on\n"
+                      "Enabled = true\n"
                       "[ReorderRule]\n"
                       "Proto = 999\n"
                       "Profile = bogus\n"
@@ -524,7 +525,7 @@ test_ini_rule_out_of_range_keeps_defaults(void)
  *
  * The JSON loader (mqvpn_config_load_json_filecfg) must populate
  * file_cfg.reorder identically to the INI parser, reusing the same value
- * mappers (parse_reorder_enabled/proto/profile). JSON keys are snake_case;
+ * mappers (parse_reorder_proto/profile). JSON keys are snake_case;
  * the reorder object holds the flat scalar knobs and "reorder_rules" is an array
  * of {proto, port, profile} objects. */
 
@@ -534,7 +535,7 @@ test_json_reorder_basic(void)
     const char *json = "{\n"
                        "  \"mode\": \"client\",\n"
                        "  \"reorder\": {\n"
-                       "    \"enabled\": \"on\",\n"
+                       "    \"enabled\": true,\n"
                        "    \"max_wait_ms\": 40,\n"
                        "    \"cap_packets\": 2048,\n"
                        "    \"max_bytes_per_flow\": 3145728,\n"
@@ -558,7 +559,7 @@ test_json_reorder_basic(void)
      * test_json_ini_parity. */
     ASSERT_EQ_INT(rc, 0, "json parse ok");
     ASSERT_EQ_INT(mqvpn_reorder_config_validate(&cfg.reorder), 0, "json config valid");
-    ASSERT_EQ_INT(cfg.reorder.mode, MQVPN_REORDER_ON, "json enabled=on → ON");
+    ASSERT_EQ_INT(cfg.reorder.mode, MQVPN_REORDER_ON, "json enabled=true → ON");
     ASSERT_EQ_INT(cfg.reorder.max_wait_ms, 40, "json max_wait_ms");
     ASSERT_EQ_INT(cfg.reorder.cap_packets_per_flow, 2048, "json cap_packets");
 }
@@ -566,21 +567,23 @@ test_json_reorder_basic(void)
 static void
 test_json_reorder_enabled_mapping(void)
 {
+    /* JSON bools only; a string (even "true") fails the load. */
     struct {
         const char *val;
+        int want_rc;
         mqvpn_reorder_mode_t want;
     } cases[] = {
-        {"off", MQVPN_REORDER_OFF}, {"false", MQVPN_REORDER_OFF},
-        {"on", MQVPN_REORDER_ON},   {"true", MQVPN_REORDER_ON},
-        {"auto", MQVPN_REORDER_ON}, /* §16 scope: auto → ON + LOG_WRN, same as INI */
+        {"false", 0, MQVPN_REORDER_OFF},   {"true", 0, MQVPN_REORDER_ON},
+        {"\"on\"", -1, MQVPN_REORDER_OFF}, {"\"true\"", -1, MQVPN_REORDER_OFF},
+        {"1", -1, MQVPN_REORDER_OFF},
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         char json[128];
-        snprintf(json, sizeof(json), "{\"reorder\":{\"enabled\":\"%s\"}}", cases[i].val);
+        snprintf(json, sizeof(json), "{\"reorder\":{\"enabled\":%s}}", cases[i].val);
         mqvpn_file_config_t cfg;
         mqvpn_config_defaults(&cfg);
         int rc = mqvpn_config_load_json_filecfg(&cfg, json);
-        ASSERT_EQ_INT(rc, 0, "json parse ok");
+        ASSERT_EQ_INT(rc, cases[i].want_rc, cases[i].val);
         ASSERT_EQ_INT(cfg.reorder.mode, cases[i].want, cases[i].val);
     }
 }
@@ -594,7 +597,7 @@ test_json_reorder_rules_over_cap(void)
     char json[4096];
     size_t n = 0;
     cfg_append(json, sizeof(json), &n,
-               "{ \"reorder\": {\"enabled\":\"on\"}, \"reorder_rules\": [");
+               "{ \"reorder\": {\"enabled\":true}, \"reorder_rules\": [");
     for (int i = 0; i <= MQVPN_REORDER_MAX_RULES; i++) {
         cfg_append(json, sizeof(json), &n,
                    "%s{\"proto\":\"udp\",\"port\":%d,\"profile\":\"quic_bulk\"}",
@@ -642,7 +645,7 @@ test_json_reorder_large_object_not_dropped(void)
         "{\n"
         "  \"mode\"            : \"client\",\n"
         "  \"reorder\"        : {\n"
-        "      \"enabled\"                 : \"on\"        ,\n"
+        "      \"enabled\"                 : true        ,\n"
         "      \"max_wait_ms\"             : 44          ,\n"
         "      \"cap_packets\"             : 4096        ,\n"
         "      \"max_bytes_per_flow\"      : 3145728     ,\n"
@@ -695,7 +698,7 @@ static void
 test_json_ini_parity(void)
 {
     const char *ini = "[Reorder]\n"
-                      "Enabled = on\n"
+                      "Enabled = true\n"
                       "MaxWaitMs = 40\n"
                       "CapPackets = 2048\n"
                       "MaxBytesPerFlow = 3145728\n"
@@ -719,7 +722,7 @@ test_json_ini_parity(void)
     const char *json =
         "{\n"
         "  \"reorder\": {\n"
-        "    \"enabled\": \"on\", \"max_wait_ms\": 40, \"cap_packets\": 2048,\n"
+        "    \"enabled\": true, \"max_wait_ms\": 40, \"cap_packets\": 2048,\n"
         "    \"max_bytes_per_flow\": 3145728, \"classify_window\": 96,\n"
         "    \"ack_demote_max_large\": 4, \"small_packet_threshold\": 220,\n"
         "    \"reset_mark_packets\": 6, \"reset_idle_grace_ms\": 9000,\n"
@@ -759,7 +762,7 @@ static void
 test_bridge_ini_reaches_libmqvpn_config(void)
 {
     const char *ini = "[Reorder]\n"
-                      "Enabled = on\n"
+                      "Enabled = true\n"
                       "MaxWaitMs = 45\n"
                       "CapPackets = 2048\n"
                       "ClassifyWindow = 80\n"
@@ -933,7 +936,7 @@ test_ini_rule_profile_only_resolves_preset(void)
 {
     /* (a) Profile=fiber_lte, no explicit keys → preset 50/2048 after finalize. */
     const char *ini = "[Reorder]\n"
-                      "Enabled = on\n"
+                      "Enabled = true\n"
                       "[ReorderRule]\n"
                       "Proto = udp\n"
                       "Port = 443\n"
@@ -955,7 +958,7 @@ test_ini_global_explicit_beats_preset(void)
     /* (b) harness-compat: global MaxWaitMs=30 sets has_explicit_wait and masks
      * the quic_bulk preset (50). Pins benchmarks/sweep_reorder.sh. */
     const char *ini = "[Reorder]\n"
-                      "Enabled = on\n"
+                      "Enabled = true\n"
                       "MaxWaitMs = 30\n"
                       "CapPackets = 1024\n"
                       "[ReorderRule]\n"
@@ -977,7 +980,7 @@ test_ini_rule_explicit_wait(void)
 {
     /* (c) per-rule MaxWaitMs=80 → explicit_wait_ms set, resolves to 80. */
     const char *ini = "[Reorder]\n"
-                      "Enabled = on\n"
+                      "Enabled = true\n"
                       "[ReorderRule]\n"
                       "Profile = cellular_bond\n"
                       "MaxWaitMs = 80\n";
@@ -998,7 +1001,7 @@ test_ini_rule_cap_nonpow2_rejected(void)
     /* (d) per-rule CapPackets=1000 (non-pow2) → warns, explicit_cap stays 0,
      * resolves to a pow2 preset/builtin. */
     const char *ini = "[Reorder]\n"
-                      "Enabled = on\n"
+                      "Enabled = true\n"
                       "[ReorderRule]\n"
                       "Profile = fiber_lte\n"
                       "CapPackets = 1000\n";
@@ -1019,7 +1022,7 @@ test_ini_rule_wait_zero_rejected(void)
     /* (e) per-rule MaxWaitMs=0 → warns, explicit_wait_ms stays 0 (unset),
      * resolves to profile/global/builtin, NOT 0. */
     const char *ini = "[Reorder]\n"
-                      "Enabled = on\n"
+                      "Enabled = true\n"
                       "[ReorderRule]\n"
                       "Profile = fiber_lte\n"
                       "MaxWaitMs = 0\n";
@@ -1043,12 +1046,12 @@ test_json_rule_params_and_parity(void)
     /* (a) JSON per-rule max_wait_ms/cap_packets parse into explicit_*, and
      * JSON↔INI parity for these keys. */
     const char *ini = "[Reorder]\n"
-                      "Enabled = on\n"
+                      "Enabled = true\n"
                       "[ReorderRule]\n"
                       "Proto = udp\nPort = 443\nProfile = fiber_lte\n"
                       "MaxWaitMs = 80\nCapPackets = 2048\n";
     const char *json = "{\n"
-                       "  \"reorder\": {\"enabled\":\"on\"},\n"
+                       "  \"reorder\": {\"enabled\":true},\n"
                        "  \"reorder_rules\": [\n"
                        "    {\"proto\":\"udp\",\"port\":443,\"profile\":\"fiber_lte\",\n"
                        "     \"max_wait_ms\":80,\"cap_packets\":2048}\n"
@@ -1073,7 +1076,7 @@ static void
 test_json_global_explicit_flag(void)
 {
     /* (b) JSON global max_wait_ms sets has_explicit_wait. */
-    const char *json = "{\"reorder\":{\"enabled\":\"on\",\"max_wait_ms\":40}}";
+    const char *json = "{\"reorder\":{\"enabled\":true,\"max_wait_ms\":40}}";
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load_json_filecfg(&cfg, json);

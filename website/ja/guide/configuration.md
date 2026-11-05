@@ -5,7 +5,9 @@ mqvpn は INI と JSON の両方の設定ファイルに対応しています。
 BOM の有無にかかわらず UTF-8 ファイルと Windows の改行（CRLF）に対応します。
 NUL バイトを含むファイルはエラーになります。INI のセクション名とキー名は
 大文字・小文字を区別しません。壊れたセクション見出しには警告を出し、
-次の有効なセクション見出しまで、その下のキーを無視します。
+次の有効なセクション見出しまで、その下のキーを無視します。オン・オフを指定するキーには
+`true` か `false` を書きます（大文字・小文字は区別しません。JSON では引用符なしの
+`true`/`false`）。`on`・`yes`・`1` など、それ以外の値はエラーになり mqvpn は起動しません。
 
 ## INI 形式
 
@@ -30,13 +32,15 @@ User = bob:<BOB_PSK>
 
 [Multipath]
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+AllowClientScheduler = true
+# Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2
 
 [Hybrid]
 Enabled = true
 
 [Reorder]
-Enabled = on
+Enabled = true
 ```
 
 CA が発行した証明書を使う場合、`Cert` (JSON では `cert_file`) にはサーバー証明書と中間証明書を連結した fullchain を指定します。Let's Encrypt では `cert.pem` ではなく `fullchain.pem` です。クライアントはサーバーが送った chain をそのまま検証し、足りない中間証明書を取りに行かないため、leaf だけのファイルでは、その中間証明書を元から信頼していないクライアントで検証に失敗します。
@@ -47,7 +51,8 @@ CA が発行した証明書を使う場合、`Cert` (JSON では `cert_file`) �
 # /etc/mqvpn/client.conf
 [Server]
 Address = 203.0.113.1:443
-# ServerName = vpn.example.com  # TLS SNI / 証明書検証名（デフォルト: Address のホスト部）
+# TLS SNI / 証明書検証名（デフォルト: Address のホスト部）
+# ServerName = vpn.example.com
 
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
@@ -60,7 +65,11 @@ LogLevel = info
 
 [Multipath]
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+# このクライアントのダウンロード方向では、サーバーのスケジューラを上の Scheduler で上書きする
+# (サーバー側で AllowClientScheduler = true が必要):
+# RequestServerScheduler = true
+# Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2
 Path = eth0
 Path = wlan0
 
@@ -68,7 +77,7 @@ Path = wlan0
 # Enabled = true
 
 # [Reorder]                     # 内側 QUIC などの大きな転送向け。詳細は [Reorder] の節
-# Enabled = on
+# Enabled = true
 ```
 
 ## JSON 形式
@@ -95,9 +104,10 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
   ],
   "max_clients": 64,
   "scheduler": "wlb",
+  "allow_client_scheduler": true,
   "cc": "bbr2",
   "hybrid": { "enabled": true },
-  "reorder": { "enabled": "on" }
+  "reorder": { "enabled": true }
 }
 ```
 
@@ -206,13 +216,13 @@ JSON ではクライアント・サーバーとも `auth_key` を使います（
 | `RequestServerScheduler` | クライアントのみ (JSON では `request_server_scheduler`、コマンドラインでは `--request-server-scheduler`)。`true` にすると、このクライアントの `Scheduler` をダウンロード方向にも使うようサーバーに依頼します。`Scheduler` だけを設定した場合は、従来どおりアップロード方向にのみ影響します。`AllowClientScheduler = true` のサーバーでのみ有効です。 | `false` |
 | `CC` | 輻輳制御アルゴリズム（`bbr2`, `bbr`, `cubic`, または `none`） | `bbr2` |
 | `Path` | バインドするネットワークインターフェース（複数指定可） | デフォルトインターフェース |
-| `InitMaxPathId` | MP-QUIC draft-21 テスト用ノブ: transport parameters で広告する初期 Maximum Path Identifier（`1`–`4294967295`、`0` = xquic デフォルト `8`） | `0` |
-| `Reinjection` | 投機的複製モード（`off`, `deadline`, または `idle`）。`dgram` は廃止されました。設定ファイルで指定すると警告が出て `off` で動作します。パケットを複製するには冗長モード（`Redundant = on`）を使ってください。 | `off` |
+| `InitMaxPathId` | 接続を通して使えるパス ID の初期数（番号は 0〜N。パスを作るたびに、作り直しも含めて新しい番号を使う。足りなくなるとサーバーが 128 まで追加する）。`1`–`128`。未設定（`0`）なら `8` | `0` |
+| `Reinjection` | 投機的複製モード（`off`, `deadline`, または `idle`）。`dgram` は廃止されました。設定ファイルで指定すると警告が出て `off` で動作します。パケットを複製するには冗長モード（`Redundant = true`）を使ってください。 | `off` |
 | `ReinjectionSrttFactorPct` | `deadline` モード: factor × min_srtt を超えた未 ACK パケットを複製、パーセント指定（`100`–`1000`） | `110` |
 | `ReinjectionHardDeadlineMs` | `deadline` モード: 複製デッドラインの上限クランプ（`1`–`60000`） | `500` |
 | `ReinjectionDeadlineLowerBoundMs` | `deadline` モード: 下限クランプ。上限を超える値は上限に切り詰め（`1`–`60000`） | `20` |
-| `Redundant` | クライアント専用。`on` にすると、送信する UDP パケットのコピーを複数の回線で同時に送り、1 本の回線が切れてもライブ配信などが途切れにくくなります。そのトラフィックのデータ使用量は、2 本なら最大 2 倍、3 本なら最大 3 倍です。どの回線もそのトラフィックを単独で運べる速度があることを推奨します。回線が足りないことが多い場合はオフにしてください。[冗長モード](./multipath#冗長モード)を参照してください。 | `off` |
-| `RedundantPorts` | クライアント専用。`Redundant = on` のとき複製する宛先ポートをカンマ区切りで指定します（最大 16 個）。空の場合はすべての UDP を複製します。`Redundant = on` のとき、不正な値を指定するとクライアントは起動時に停止します。 | 空 |
+| `Redundant` | クライアント専用。`true` にすると、送信する UDP パケットのコピーを複数の回線で同時に送り、1 本の回線が切れてもライブ配信などが途切れにくくなります。そのトラフィックのデータ使用量は、2 本なら最大 2 倍、3 本なら最大 3 倍です。どの回線もそのトラフィックを単独で運べる速度があることを推奨します。回線が足りないことが多い場合はオフにしてください。[冗長モード](./multipath#冗長モード)を参照してください。 | `false` |
+| `RedundantPorts` | クライアント専用。`Redundant = true` のとき複製する宛先ポートをカンマ区切りで指定します（最大 16 個）。空の場合はすべての UDP を複製します。`Redundant = true` のとき、不正な値を指定するとクライアントは起動時に停止します。 | 空 |
 
 このバージョンのサーバーは、`AllowClientScheduler` が `false` の場合でも、接続中の各クライアントに、そのクライアントに対して使っているスケジューラを通知します。`RequestServerScheduler` を設定したクライアントは、接続後に `server scheduler: <name> (requested <name>)` とログに出力します。
 
@@ -227,13 +237,13 @@ JSON ではクライアント・サーバーとも `auth_key` を使います（
 
 ### `[Reorder]`
 
-内側 UDP トラフィック向けの、フロー単位の reorder バッファです。mqvpn のマルチパス集約によって複数経路に分散される単一の内側コネクション（例: 内側 QUIC）を対象とし、順序が乱れたデータグラムを短時間だけ保持して順序どおりに配送することで、内側エンドポイントが受け取る順序の乱れを軽減します。デフォルトは無効（`Enabled = off`）で、無効時はこのセクションは効果を持たず、パケットはそのまま転送されます。サーバーとクライアントの両方で `Enabled = on` のときだけ有効になり、そのときクライアントのログに `peer advertised mqvpn-reorder` が出ます。
+内側 UDP トラフィック向けの、フロー単位の reorder バッファです。mqvpn のマルチパス集約によって複数経路に分散される単一の内側コネクション（例: 内側 QUIC）を対象とし、順序が乱れたデータグラムを短時間だけ保持して順序どおりに配送することで、内側エンドポイントが受け取る順序の乱れを軽減します。デフォルトは無効（`Enabled = false`）で、無効時はこのセクションは効果を持たず、パケットはそのまま転送されます。サーバーとクライアントの両方で `Enabled = true` のときだけ有効になり、そのときクライアントのログに `peer advertised mqvpn-reorder` が出ます。
 
 > **対象範囲:** reorder バッファは **内側 UDP フローのみ** に適用されます。**内側 TCP は reorder バッファでは扱いません。** 内側 TCP は代わりに、後述する hybrid mode（[`[Hybrid]`](#hybrid)）を有効化してください。QUIC stream によって reordering されます。
 
 | キー | 説明 | デフォルト |
 |------|------|-----------|
-| `Enabled` | マスタースイッチ（`on` / `off`） | `off` |
+| `Enabled` | マスタースイッチ（`true` / `false`） | `false` |
 | `MaxWaitMs` | 欠落データグラムをスキップするまで、ギャップを保持する時間（ms） | `30` |
 | `CapPackets` | フローあたりの最大バッファデータグラム数（2 のべき乗） | `1024` |
 | `MaxBytesPerFlow` | フローあたりの最大バッファバイト数 | `1572864` |
@@ -253,7 +263,7 @@ reorder はスループットとレイテンシのトレードオフで、bulk �
 
 ```ini
 [Reorder]
-Enabled = on
+Enabled = true
 
 [ReorderRule]          # bulk な内側 QUIC: reorder 有効
 Proto = udp
@@ -271,7 +281,7 @@ JSON でも同様に設定できます。`reorder` オブジェクトは上記 I
 ```json
 {
   "reorder": {
-    "enabled": "on",
+    "enabled": true,
     "max_wait_ms": 30,
     "cap_packets": 1024,
     "max_bytes_per_flow": 1572864,

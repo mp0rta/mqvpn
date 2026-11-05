@@ -23,8 +23,10 @@ sealed interface MqvpnError {
         /** Map C error code to MqvpnError. */
         fun fromNativeCode(code: Int): MqvpnError = when (code) {
             -4 -> TlsError("TLS handshake failed")
-            -5 -> AuthFailed("PSK authentication failed")
-            -6 -> ProtocolError(code, "MASQUE not supported")
+            -5 -> AuthFailed("Access key rejected by the server")
+            // Also what a wrong access key looks like when the server closes
+            // without a status (403 would be -5), so name that cause first.
+            -6 -> ProtocolError(code, "Connection rejected — check the access key and server address")
             -11 -> AbiMismatch("Callback ABI version mismatch")
             -12 -> Timeout("Connection timeout")
             // MQVPN_ERR_CLOSED: the connection was closed before or instead
