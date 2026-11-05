@@ -20,6 +20,8 @@
  * receiver reads again, whether lwIP gets there through the persist timer
  * or through the retransmission timer.
  */
+/* Keep the lane TUs' assert() checks in Release builds too. */
+#undef NDEBUG
 #include "hybrid/tcp_lane.c"
 #include "hybrid/tcp_lane_uplink.c"
 
