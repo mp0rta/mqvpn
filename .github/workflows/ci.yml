@@ -986,10 +986,10 @@ jobs:
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DCMAKE_C_FLAGS="-Wall -Wextra -Werror"
           cmake --build build-darwin-ios --target mqvpn_lib test_tcp_lane \
-            -j "$(sysctl -n hw.ncpu)"
+            test_tcp_lane_rto -j "$(sysctl -n hw.ncpu)"
           python3 tests/check_profile_propagation.py build-darwin-ios
 
-      # Only test_tcp_lane: check_lwip_profile_invariance preprocesses BOTH
+      # Only the lane tests: check_lwip_profile_invariance preprocesses BOTH
       # profiles from source itself (build-dir-independent), so the default
       # tree's unfiltered ctest above already covers it — re-running it here
       # would imply extra coverage this tree does not add.
