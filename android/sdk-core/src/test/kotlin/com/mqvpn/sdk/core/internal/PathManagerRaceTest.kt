@@ -8,6 +8,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import com.mqvpn.sdk.core.MqvpnTunnel
 import com.mqvpn.sdk.core.TestReflection
+import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.network.NetworkEvent
 import com.mqvpn.sdk.network.NetworkMonitor
 import com.mqvpn.sdk.network.NetworkPath
@@ -16,6 +17,7 @@ import com.mqvpn.sdk.runtime.ExecutorStoppedException
 import com.mqvpn.sdk.runtime.MqvpnExecutor
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -114,6 +116,42 @@ class PathManagerRaceTest {
         pm.handleEvent(NetworkEvent.Available(path))
         assertEquals("addPath failed → the fd is closed by its owner", listOf(FAKE_FD), closed)
         assertTrue(readPathHandles(pm).isEmpty())
+    }
+
+    @Test
+    fun `addPath is asked whether the network is a backup`() = runBlocking {
+        val monitor = NetworkMonitor(RuntimeEnvironment.getApplication())
+        val net = newNetwork(netId = 300)
+        val path = NetworkPath(net, PathType.CELLULAR, "rmnet-300", isMetered = true)
+        injectActiveNetwork(monitor, net, path)
+
+        val asked = mutableListOf<NetworkPath>()
+        val pm = PathManager(
+            executor = syncExecutor,
+            tunnel = createDummyTunnel(),
+            networkMonitor = monitor,
+            protector = { true },
+            serverHost = "1.2.3.4",
+            serverPort = 443,
+            onFatal = { fail("no fatal expected: $it") },
+            bindUdp = { _, _, _, _ -> FAKE_FD },
+            closeFd = { },
+            isBackup = { asked.add(it); true },
+        )
+        pm.handleEvent(NetworkEvent.Available(path))
+        assertEquals(listOf(path), asked)
+    }
+
+    @Test
+    fun `under failover only cellular is a backup`() {
+        val net = newNetwork(netId = 400)
+        fun p(t: PathType) = NetworkPath(net, t, "n", isMetered = false)
+        val fo = MqvpnConfig.Scheduler.FAILOVER
+        assertTrue(isBackupPath(fo, p(PathType.CELLULAR)))
+        assertFalse(isBackupPath(fo, p(PathType.WIFI)))
+        assertFalse(isBackupPath(fo, p(PathType.ETHERNET)))
+        assertFalse(isBackupPath(MqvpnConfig.Scheduler.WLB, p(PathType.CELLULAR)))
+        assertFalse(isBackupPath(MqvpnConfig.Scheduler.BACKUP_FEC, p(PathType.CELLULAR)))
     }
 
     @Test

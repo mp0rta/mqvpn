@@ -62,6 +62,8 @@ final class MqvpnEngine: NSObject {
     /// on the same thread. Overwritten on every (re)connect.
     private(set) var tunnelInfo: TunnelInfoSnapshot?
     private var requestedScheduler: Int32?
+    /// Failover: a cellular path joins as a backup (MQVPN_PATH_FLAG_BACKUP).
+    var cellularIsBackup: Bool { requestedScheduler == Scheduler.failover.rawValue }
     /// Once-token for the global log sink (src/log.h: set once per process,
     /// before any client exists). A static let is initialised lazily and
     /// thread-safely, exactly once: later sessions in the same extension

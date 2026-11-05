@@ -216,11 +216,12 @@ In JSON, use `auth_key` on both client and server (as in the examples above).
 
 | Key | Description | Default |
 |-----|-------------|---------|
-| `Scheduler` | Scheduler algorithm (`minrtt`, `wlb`, `wlb_udp_pin`, or `backup_fec`) | `wlb` |
+| `Scheduler` | Scheduler algorithm (`minrtt`, `wlb`, `wlb_udp_pin`, `failover`, or `backup_fec`) | `wlb` |
 | `AllowClientScheduler` | Server only (`allow_client_scheduler` in JSON, or pass `--allow-client-scheduler`). When `true`, a client that asks for a scheduler gets it for its own connection's download direction; other clients keep the server's `Scheduler`. The request is not applied, and the connection keeps the scheduler it already has (at first, the server's `Scheduler`), when the client asks for `backup_fec`, when the server's `Scheduler` is `backup_fec`, when the same connection already changed its scheduler once, or when the connection already uses more than one path. | `false` |
 | `RequestServerScheduler` | Client only (`request_server_scheduler` in JSON, or pass `--request-server-scheduler`). When `true`, the client asks the server to use this client's `Scheduler` for its download direction too. Setting `Scheduler` alone still affects only the upload direction, as before. Takes effect only on servers with `AllowClientScheduler = true`. | `false` |
 | `CC` | Congestion control algorithm (`bbr2`, `bbr`, `cubic`, or `none`) | `bbr2` |
 | `Path` | Network interface to bind (repeatable) | Default interface |
+| `BackupPath` | Client only (`backup_paths` in JSON, or pass `--backup-path`). Like `Path`, for a backup path: with `Scheduler = failover` it carries traffic only while no `Path` works. With no `BackupPath`, every path after the first is a backup. See [Failover](./multipath#failover). | none |
 | `InitMaxPathId` | Initial number of path IDs the connection may use over its lifetime (IDs 0–N; each new path, including a re-added one, uses a fresh ID; the server grants more as needed, up to 128). `1`–`128`; unset or `0` uses `8` | `0` |
 | `Bbr2FastConvergence` | With `CC = bbr2`, enables xquic's BBRv2 fast-convergence extension, which lets the bandwidth estimate drop sooner when the round-trip time rises by more than a quarter from one round trip to the next, and probes for more bandwidth every 5 to 8 round trips instead of every 2 to 3 seconds. `false` gives standard BBRv2 behaviour. Ignored for other `CC` values. | `true` |
 | `Bbr2RttvarCompensation` | With `CC = bbr2`, enables xquic's BBRv2 extension that allows more data in flight (sent but not yet acknowledged) when the round-trip time varies. `false` gives the standard BBRv2 limit on data in flight. Ignored for other `CC` values. | `true` |

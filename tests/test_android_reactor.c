@@ -254,7 +254,7 @@ test_rx_delivery_and_budget(void)
     int fd = udp_socket(&addr);
     int peer = udp_socket(NULL);
 
-    mqvpn_path_handle_t h = mqvpn_android_reactor_add_path(r, c, fd, "test0", 1, 0);
+    mqvpn_path_handle_t h = mqvpn_android_reactor_add_path(r, c, fd, "test0", 1, 0, 0);
     CHECK(h >= 0);
     CHECK(mqvpn_android_reactor_entry_state(r, h) == MQVPN_REACTOR_ENTRY_ATTACHED);
     /* The bind's construction line reaches the sink (global logger). */
@@ -287,7 +287,7 @@ test_rx_delivery_and_budget(void)
      * advances both; the second pass finishes A. */
     struct sockaddr_in addr_b;
     int fd_b = udp_socket(&addr_b);
-    mqvpn_path_handle_t hb = mqvpn_android_reactor_add_path(r, c, fd_b, "test1", 1, 0);
+    mqvpn_path_handle_t hb = mqvpn_android_reactor_add_path(r, c, fd_b, "test1", 1, 0, 0);
     CHECK(hb >= 0 && hb != h);
     send_n(peer, &addr, 65);
     send_n(peer, &addr_b, 1);
@@ -343,12 +343,12 @@ test_add_failure_ownership(void)
     mqvpn_path_handle_t hs[MQVPN_MAX_PATHS];
     for (int i = 0; i < MQVPN_MAX_PATHS; i++) {
         fds[i] = udp_socket(NULL);
-        hs[i] = mqvpn_android_reactor_add_path(r1, c, fds[i], "full", 0, 0);
+        hs[i] = mqvpn_android_reactor_add_path(r1, c, fds[i], "full", 0, 0, 0);
         CHECK(hs[i] >= 0);
     }
     /* Reactor table full: -1, nothing built, fd untouched. */
     int extra = udp_socket(NULL);
-    CHECK(mqvpn_android_reactor_add_path(r1, c, extra, "extra", 0, 0) == -1);
+    CHECK(mqvpn_android_reactor_add_path(r1, c, extra, "extra", 0, 0, 0) == -1);
     CHECK(fd_is_open(extra));
     CHECK(sink_count("table full") == 1);
     CHECK(sink_count("bind-posix: socket buffers on extra") == 0); /* nothing built */
@@ -357,7 +357,7 @@ test_add_failure_ownership(void)
      * the ctx is freed here (ASan proves it), the reservation is released
      * and the fd is untouched. */
     sink_reset();
-    CHECK(mqvpn_android_reactor_add_path(r2, c, extra, "ninth", 0, 0) == -1);
+    CHECK(mqvpn_android_reactor_add_path(r2, c, extra, "ninth", 0, 0, 0) == -1);
     CHECK(fd_is_open(extra));
     CHECK(sink_count("bind-posix: socket buffers on ninth") == 1); /* ctx was built */
     CHECK(sink_count("library refused the path") == 1);
@@ -382,7 +382,7 @@ test_released_state_errors(void)
     CHECK(r);
     mqvpn_client_t *c = make_client();
     int fd = udp_socket(NULL);
-    mqvpn_path_handle_t h = mqvpn_android_reactor_add_path(r, c, fd, "st", 0, 0);
+    mqvpn_path_handle_t h = mqvpn_android_reactor_add_path(r, c, fd, "st", 0, 0, 0);
     CHECK(h >= 0);
     /* Released on an ATTACHED entry: reactor argument error, nothing called. */
     CHECK(mqvpn_android_reactor_path_released(r, c, h) == MQVPN_ERR_INVALID_ARG);
@@ -418,7 +418,7 @@ test_bad_fd_reuse(void)
     mqvpn_client_t *c = make_client();
     int fd = udp_socket(NULL);
     int peer = udp_socket(NULL);
-    mqvpn_path_handle_t h = mqvpn_android_reactor_add_path(r, c, fd, "bad", 0, 0);
+    mqvpn_path_handle_t h = mqvpn_android_reactor_add_path(r, c, fd, "bad", 0, 0, 0);
     CHECK(h >= 0);
 
     /* 1. Closed behind the platform: the next wait sees POLLNVAL -> INVALID. */
@@ -472,7 +472,7 @@ test_poisoned(void)
     mqvpn_client_t *a = make_client();
     mqvpn_client_t *b = make_client(); /* never saw the handle */
     int fd = udp_socket(NULL);
-    mqvpn_path_handle_t h = mqvpn_android_reactor_add_path(r, a, fd, "poison", 0, 0);
+    mqvpn_path_handle_t h = mqvpn_android_reactor_add_path(r, a, fd, "poison", 0, 0, 0);
     CHECK(h >= 0);
     CHECK(mqvpn_android_reactor_remove_path(r, a, h) == MQVPN_OK);
     /* Released against the wrong client: the library answers INVALID_ARG ->
@@ -507,15 +507,15 @@ test_error_branches(void)
     int fds[MQVPN_MAX_PATHS];
     for (int i = 0; i < MQVPN_MAX_PATHS - 1; i++) {
         fds[i] = udp_socket(NULL);
-        CHECK(mqvpn_android_reactor_add_path(r, c, fds[i], "err", 0, 0) >= 0);
+        CHECK(mqvpn_android_reactor_add_path(r, c, fds[i], "err", 0, 0, 0) >= 0);
     }
     sink_reset();
-    CHECK(mqvpn_android_reactor_add_path(r, c, -1, "badfd", 0, 0) == -1);
+    CHECK(mqvpn_android_reactor_add_path(r, c, -1, "badfd", 0, 0, 0) == -1);
     CHECK(sink_count("transport setup failed") == 1);
     CHECK(sink_count("getsockname") == 1);
     fds[MQVPN_MAX_PATHS - 1] = udp_socket(NULL);
-    CHECK(mqvpn_android_reactor_add_path(r, c, fds[MQVPN_MAX_PATHS - 1], "last", 0, 0) >=
-          0);
+    CHECK(mqvpn_android_reactor_add_path(r, c, fds[MQVPN_MAX_PATHS - 1], "last", 0, 0,
+                                         0) >= 0);
     mqvpn_android_reactor_client_destroy(r, c);
     for (int i = 0; i < MQVPN_MAX_PATHS; i++)
         CHECK(close(fds[i]) == 0);
@@ -528,7 +528,7 @@ test_error_branches(void)
     CHECK(r);
     c = make_client();
     int fd = udp_socket(NULL);
-    mqvpn_path_handle_t h = mqvpn_android_reactor_add_path(r, c, fd, "inv", 0, 0);
+    mqvpn_path_handle_t h = mqvpn_android_reactor_add_path(r, c, fd, "inv", 0, 0, 0);
     CHECK(h >= 0);
     CHECK(close(fd) == 0); /* behind the reactor; nothing opened before the wait */
     CHECK(mqvpn_android_reactor_wait(r, c, 50) == 0);
@@ -549,7 +549,7 @@ test_error_branches(void)
     struct sockaddr_in addr;
     fd = udp_socket(&addr);
     int peer = udp_socket(NULL);
-    h = mqvpn_android_reactor_add_path(r, c, fd, "inv2", 0, 0);
+    h = mqvpn_android_reactor_add_path(r, c, fd, "inv2", 0, 0, 0);
     CHECK(h >= 0);
     send_n(peer, &addr, 2);
     settle();

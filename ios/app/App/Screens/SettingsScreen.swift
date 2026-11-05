@@ -112,6 +112,7 @@ struct SettingsScreen: View {
         (.lowLatency, "Low latency", "— always pick the fastest-responding path"),
         (.redundant, "Redundant",
          "— sends UDP uploads on every connection at once, for streams that tolerate duplicates (SRT, RIST, RTP); uses more data"),
+        (.backup, "Backup", "— one connection at a time; cellular only while Wi-Fi is down"),
     ]
 
     private var advanced: some View {

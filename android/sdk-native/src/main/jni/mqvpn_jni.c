@@ -1161,12 +1161,12 @@ JNI_FN(reactorTakeBadFd)(JNIEnv *env, jobject thiz, jlong reactor)
         (mqvpn_android_reactor_t *)(intptr_t)reactor);
 }
 
-/* reactorAddPath(reactor, client, fd, iface) → long (path handle), -1 on
+/* reactorAddPath(reactor, client, fd, iface, flags) → long (path handle), -1 on
  * failure with the fd untouched (Kotlin closes it). The fd is BORROWED: the
  * bind ctx never closes it. */
 JNIEXPORT jlong JNICALL
 JNI_FN(reactorAddPath)(JNIEnv *env, jobject thiz, jlong reactor, jlong client, jint fd,
-                       jstring iface)
+                       jstring iface, jint flags)
 {
     (void)thiz;
     char name[16] = {0};
@@ -1179,7 +1179,7 @@ JNI_FN(reactorAddPath)(JNIEnv *env, jobject thiz, jlong reactor, jlong client, j
     }
     return (jlong)mqvpn_android_reactor_add_path(
         (mqvpn_android_reactor_t *)(intptr_t)reactor, (mqvpn_client_t *)(intptr_t)client,
-        (int)fd, name, ANDROID_UDP_GSO, ANDROID_UDP_GRO);
+        (int)fd, name, ANDROID_UDP_GSO, ANDROID_UDP_GRO, (uint32_t)flags);
 }
 
 /* reactorRemovePath(reactor, client, pathHandle) → int. Orderly removal:

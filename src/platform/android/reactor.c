@@ -196,7 +196,8 @@ mqvpn_android_reactor_take_bad_fd(mqvpn_android_reactor_t *r)
 
 mqvpn_path_handle_t
 mqvpn_android_reactor_add_path(mqvpn_android_reactor_t *r, mqvpn_client_t *client, int fd,
-                               const char *iface, int gso_policy, int gro_policy)
+                               const char *iface, int gso_policy, int gro_policy,
+                               uint32_t path_flags)
 {
     entry_t *e = NULL;
     for (int i = 0; i < MQVPN_MAX_PATHS; i++) {
@@ -216,6 +217,7 @@ mqvpn_android_reactor_add_path(mqvpn_android_reactor_t *r, mqvpn_client_t *clien
     memset(&desc, 0, sizeof(desc));
     desc.struct_size = sizeof(desc);
     snprintf(desc.iface, sizeof(desc.iface), "%s", iface ? iface : "");
+    desc.flags = path_flags; /* MQVPN_PATH_FLAG_* */
     struct sockaddr_storage ss;
     socklen_t ss_len = sizeof(ss);
     if (getsockname(fd, (struct sockaddr *)&ss, &ss_len) == 0 &&

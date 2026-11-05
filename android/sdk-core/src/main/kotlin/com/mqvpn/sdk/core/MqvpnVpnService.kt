@@ -11,6 +11,7 @@ import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.util.Log
 import com.mqvpn.sdk.core.internal.PathManager
+import com.mqvpn.sdk.core.internal.isBackupPath
 import com.mqvpn.sdk.core.internal.TunnelCallbacks
 import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.MqvpnError
@@ -186,6 +187,7 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
                     Log.e(TAG, "ending the session: $reason")
                     stopTunnel()
                 },
+                isBackup = { path -> isBackupPath(config.scheduler, path) },
             )
             pathManager = pm
 

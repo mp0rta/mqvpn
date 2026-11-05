@@ -53,7 +53,7 @@ enum CorePathStatus: Int32 {
 /// mqvpn_scheduler_t raw values (libmqvpn.h). The wire keeps the Int32 so an
 /// unknown future value still decodes; map it with `init(rawValue:)`.
 enum Scheduler: Int32 {
-    case minrtt = 0, wlb = 1, backupFec = 2, wlbUdpPin = 3
+    case minrtt = 0, wlb = 1, backupFec = 2, wlbUdpPin = 3, failover = 4
 
     /// The config-file spelling (`Scheduler = ...`).
     var label: String {
@@ -62,6 +62,7 @@ enum Scheduler: Int32 {
         case .wlb: return "wlb"
         case .backupFec: return "backup_fec"
         case .wlbUdpPin: return "wlb_udp_pin"
+        case .failover: return "failover"
         }
     }
 }

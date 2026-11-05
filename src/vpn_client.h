@@ -22,9 +22,10 @@ typedef struct mqvpn_client_cfg_s {
     int insecure;                /* skip TLS cert verification */
     int log_level;               /* mqvpn_log_level_t */
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES]; /* network interfaces for multipath */
+    int path_backup[MQVPN_MAX_PATH_IFACES];         /* 1 = backup path */
     int n_paths;                  /* number of path interfaces (0 = single-path) */
     int request_server_scheduler; /* 1=ask the server to use our scheduler (default 0) */
-    int scheduler;        /* 0=minrtt, 1=wlb (default), 2=backup_fec, 3=wlb_udp_pin */
+    int scheduler;        /* mqvpn_scheduler_t; 0=minrtt, 1=wlb (default), 4=failover */
     const char *auth_key; /* PSK for server authentication (NULL = no auth) */
     const char *dns_servers[4]; /* DNS servers to configure (NULL = no DNS override) */
     int n_dns;                  /* number of DNS servers */
