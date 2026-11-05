@@ -199,7 +199,9 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     case MQVPN_CC_BBR2:
         out->cong_ctrl_callback = xqc_bbr2_cb;
         out->cc_params.cc_optimization_flags =
-            XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
+            (in->disable_bbr2_rttvar_compensation ? 0
+                                                  : XQC_BBR2_FLAG_RTTVAR_COMPENSATION) |
+            (in->disable_bbr2_fast_convergence ? 0 : XQC_BBR2_FLAG_FAST_CONVERGENCE);
         break;
     }
 

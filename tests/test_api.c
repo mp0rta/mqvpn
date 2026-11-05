@@ -866,6 +866,27 @@ TEST(config_set_udp_gso)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_set_bbr2_flags)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_NOT_NULL(cfg);
+    ASSERT_EQ(cfg->bbr2_fast_convergence, 1);    /* default on */
+    ASSERT_EQ(cfg->bbr2_rttvar_compensation, 1); /* default on */
+    ASSERT_EQ(mqvpn_config_set_bbr2_fast_convergence(NULL, 0), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_bbr2_rttvar_compensation(NULL, 0), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_bbr2_fast_convergence(cfg, 0), MQVPN_OK);
+    ASSERT_EQ(cfg->bbr2_fast_convergence, 0);
+    ASSERT_EQ(cfg->bbr2_rttvar_compensation, 1); /* independent */
+    ASSERT_EQ(mqvpn_config_set_bbr2_rttvar_compensation(cfg, 0), MQVPN_OK);
+    ASSERT_EQ(cfg->bbr2_rttvar_compensation, 0);
+    ASSERT_EQ(mqvpn_config_set_bbr2_fast_convergence(cfg, 7), MQVPN_OK);
+    ASSERT_EQ(cfg->bbr2_fast_convergence, 1); /* nonzero normalizes to 1 */
+    ASSERT_EQ(mqvpn_config_set_bbr2_rttvar_compensation(cfg, 7), MQVPN_OK);
+    ASSERT_EQ(cfg->bbr2_rttvar_compensation, 1);
+
+    mqvpn_config_free(cfg);
+}
+
 /* ── Callback ABI tests ── */
 
 TEST(callbacks_abi_init)
@@ -1143,6 +1164,67 @@ TEST(client_tick_ok)
     mqvpn_client_t *c = make_test_client();
     ASSERT_EQ(mqvpn_client_tick(c), MQVPN_OK);
     mqvpn_client_destroy(c);
+}
+
+/* The client announces the BBR2 flag set it handed xquic. Driven through
+ * mqvpn_client_connect so the line proves the config -> conn-settings input
+ * wiring at the call site, not just the builder. */
+static int g_bbr2_lines = 0;
+static char g_bbr2_line[160];
+
+static void
+bbr2_flags_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
+{
+    (void)user_ctx;
+    const char *p = strstr(msg, "bbr2 flags: ");
+    if (!p || level != MQVPN_LOG_INFO) return;
+    g_bbr2_lines++;
+    snprintf(g_bbr2_line, sizeof(g_bbr2_line), "%s", p);
+}
+
+static int
+bbr2_flags_logged_for(int fast_convergence, int rttvar_compensation, const char *want)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    mqvpn_config_set_server(cfg, "1.2.3.4", 443);
+    mqvpn_config_set_log_level(cfg, MQVPN_LOG_INFO);
+    if (fast_convergence >= 0)
+        mqvpn_config_set_bbr2_fast_convergence(cfg, fast_convergence);
+    if (rttvar_compensation >= 0)
+        mqvpn_config_set_bbr2_rttvar_compensation(cfg, rttvar_compensation);
+    mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
+    cbs.tun_output = dummy_tun_output;
+    cbs.tunnel_config_ready = dummy_config_ready;
+    cbs.log = bbr2_flags_log;
+
+    g_bbr2_lines = 0;
+    g_bbr2_line[0] = '\0';
+    mqvpn_client_t *c = mqvpn_client_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    if (!c) return 0;
+    int ok = mqvpn_client_connect(c) == MQVPN_OK && g_bbr2_lines == 1 &&
+             strcmp(g_bbr2_line, want) == 0;
+    if (!ok)
+        fprintf(stderr, "    bbr2 flags: lines=%d got='%s' want='%s'\n", g_bbr2_lines,
+                g_bbr2_line, want);
+    mqvpn_client_destroy(c);
+    return ok;
+}
+
+TEST(client_logs_bbr2_flags)
+{
+    ASSERT_EQ(bbr2_flags_logged_for(
+                  -1, -1, "bbr2 flags: fast_convergence=on rttvar_compensation=on"),
+              1);
+    ASSERT_EQ(bbr2_flags_logged_for(
+                  0, -1, "bbr2 flags: fast_convergence=off rttvar_compensation=on"),
+              1);
+    ASSERT_EQ(bbr2_flags_logged_for(
+                  -1, 0, "bbr2 flags: fast_convergence=on rttvar_compensation=off"),
+              1);
+    ASSERT_EQ(bbr2_flags_logged_for(
+                  0, 0, "bbr2 flags: fast_convergence=off rttvar_compensation=off"),
+              1);
 }
 
 /* ── Query functions ── */
@@ -4258,6 +4340,7 @@ main(void)
     run_config_set_multipath();
     run_config_set_hybrid();
     run_config_set_udp_gso();
+    run_config_set_bbr2_flags();
 
     /* ABI tests */
     run_callbacks_abi_init();
@@ -4281,6 +4364,7 @@ main(void)
     run_client_disconnect_from_idle();
     run_client_tick_null_safety();
     run_client_tick_ok();
+    run_client_logs_bbr2_flags();
 
     /* Query tests */
     run_client_get_state_null();

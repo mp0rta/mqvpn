@@ -170,6 +170,11 @@ struct mqvpn_config_s {
      * 0 = use xquic default (XQC_DEFAULT_INIT_MAX_PATH_ID = 8). */
     uint64_t init_max_path_id;
 
+    /* [Multipath] Bbr2FastConvergence / Bbr2RttvarCompensation: xquic BBRv2
+     * optimisation flags. 1 (default) = set, unchanged; 0 = cleared. */
+    int bbr2_fast_convergence;
+    int bbr2_rttvar_compensation;
+
     int tun_mtu;  /* 0 = auto (client: negotiated; server: 1382), >0 = client cap / server
                      TUN MTU */
     int path_mtu; /* 0 = default packet size, >0 = underlay MTU to size packets for */

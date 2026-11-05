@@ -112,8 +112,10 @@ mqvpn_config_new(void)
     cfg->reconnect_interval_sec = 5;
     cfg->max_clients = 64;
     cfg->listen_port = 443;
-    cfg->init_max_path_id = 0; /* 0 = use xquic default (8) */
-    cfg->udp_gso = 1;          /* TX GSO/batch enabled by default */
+    cfg->init_max_path_id = 0;         /* 0 = use xquic default (8) */
+    cfg->bbr2_fast_convergence = 1;    /* xquic BBRv2 fast convergence, as always */
+    cfg->bbr2_rttvar_compensation = 1; /* xquic BBRv2 rttvar compensation, as always */
+    cfg->udp_gso = 1;                  /* TX GSO/batch enabled by default */
 
     /* §16: reorder shim defaults (mode OFF until explicitly enabled). */
     mqvpn_reorder_config_default(&cfg->reorder);
@@ -480,6 +482,22 @@ mqvpn_config_set_init_max_path_id(mqvpn_config_t *cfg, uint64_t v)
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     if (v > MQVPN_INIT_MAX_PATH_ID_MAX) return MQVPN_ERR_INVALID_ARG;
     cfg->init_max_path_id = v;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_bbr2_fast_convergence(mqvpn_config_t *cfg, int on)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->bbr2_fast_convergence = on ? 1 : 0;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_bbr2_rttvar_compensation(mqvpn_config_t *cfg, int on)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->bbr2_rttvar_compensation = on ? 1 : 0;
     return MQVPN_OK;
 }
 

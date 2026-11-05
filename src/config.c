@@ -595,6 +595,11 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_STR(SEC_MULTIPATH, "CC", "cc", cc),
     CFG_U64(SEC_MULTIPATH, "InitMaxPathId", "init_max_path_id", init_max_path_id,
             MQVPN_INIT_MAX_PATH_ID_MAX),
+    /* xquic BBRv2 extensions, default true (mqvpn_config_defaults). */
+    CFG_BOOL(SEC_MULTIPATH, "Bbr2FastConvergence", "bbr2_fast_convergence",
+             bbr2_fast_convergence),
+    CFG_BOOL(SEC_MULTIPATH, "Bbr2RttvarCompensation", "bbr2_rttvar_compensation",
+             bbr2_rttvar_compensation),
     /* [Reorder] — JSON side lives inside the bounded "reorder" object */
     CFG_BOOL(SEC_REORDER, "Enabled", "enabled", reorder.mode),
     CFG_U32_POST(SEC_REORDER, "MaxWaitMs", "max_wait_ms", reorder.max_wait_ms,
@@ -1288,6 +1293,8 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
     cfg->udp_gro = 1;
     cfg->tun_offload = 1;
     cfg->tun_gro = 1;
+    cfg->bbr2_fast_convergence = 1;
+    cfg->bbr2_rttvar_compensation = 1;
     mqvpn_reorder_config_default(&cfg->reorder); /* §16: reorder defaults (mode OFF) */
     mqvpn_hybrid_config_default(&cfg->hybrid);   /* H1: hybrid defaults (disabled) */
 }

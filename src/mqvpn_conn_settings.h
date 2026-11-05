@@ -62,6 +62,14 @@ typedef struct {
      * registration on — never a re-derived condition, which is what would let
      * them drift apart. */
     bool defer_send_flush;
+
+    /* disable_bbr2_fast_convergence / disable_bbr2_rttvar_compensation:
+     * clear the corresponding xquic BBRv2 optimisation flag, which is
+     * otherwise set whenever the congestion controller is BBR2. Phrased as
+     * opt-outs so that a zeroed input keeps the flags mqvpn has always set.
+     * No effect on any other congestion controller. */
+    bool disable_bbr2_fast_convergence;
+    bool disable_bbr2_rttvar_compensation;
 } mqvpn_conn_settings_input_t;
 
 /* Populates *out with mqvpn-canonical xquic conn settings. Always begins
