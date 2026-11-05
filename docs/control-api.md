@@ -555,7 +555,7 @@ mqvpn follows semantic versioning for the control API:
   UDP GRO is configured and un-coalesced entirely in the platform layer, which
   the library never observes, so those two are read straight from the platform
   by the control socket (`ctrl_socket_create`) instead.
-- `get_stats` gained `udp_rx_drops` in v0.19.0. Additive; existing JSON
+- `get_stats` gained `udp_rx_drops` in v0.19.1. Additive; existing JSON
   consumers remain unaffected. Like the other `udp_rx_*` fields it comes from
   the POSIX bind, not from `mqvpn_stats_t`: `mqvpn_bind_posix_stats_t` gained
   `rx_queue_drops`, appended under `struct_size`, so callers built against

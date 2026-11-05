@@ -5,7 +5,7 @@
  * libmqvpn — Multipath QUIC VPN library
  *
  * Public API header (single file).
- * Version: 0.19.0 (callback ABI version 3)
+ * Version: 0.19.2 (callback ABI version 3)
  *
  * Thread safety: All functions must be called from a single thread
  * (the "tick thread"). Debug builds assert this (ASSERT_TICK_THREAD inside the library).
@@ -39,7 +39,7 @@ extern "C" {
 
 #define MQVPN_VERSION_MAJOR 0
 #define MQVPN_VERSION_MINOR 19
-#define MQVPN_VERSION_PATCH 0
+#define MQVPN_VERSION_PATCH 2
 
 /* ─── ABI ─── */
 
