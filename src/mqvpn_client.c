@@ -1085,11 +1085,11 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
 
     /* Reverse map: xquic→mqvpn for display severity. xquic enum is
      * REPORT=0, FATAL=1, ERROR=2, WARN=3, STATS=4, INFO=5, DEBUG=6.
-     * This is intentionally NOT the inverse of map_log_level_to_xquic
-     * below — the forward map shifts INFO→WARN to suppress xquic's
-     * per-packet noise at the engine level; this reverse map keeps
-     * incoming severity honest so a real xquic warning is shown as a
-     * warning, not relabelled as INFO. Don't symmetrize the two. */
+     * This is intentionally NOT the inverse of mqvpn_xqc_log_level
+     * (mqvpn_conn_settings.c) — the forward map shifts INFO→WARN to
+     * suppress xquic's per-packet noise at the engine level; this reverse
+     * map keeps incoming severity honest so a real xquic warning is shown
+     * as a warning, not relabelled as INFO. Don't symmetrize the two. */
     mqvpn_log_level_t ml;
     switch (lvl) {
     case XQC_LOG_REPORT:
@@ -1400,7 +1400,7 @@ cli_signal_connect_fail(cli_conn_t *conn, mqvpn_error_t reason, int status_for_l
     assert(!conn->tunnel_ok);          /* every caller gates on !tunnel_ok / non-200 */
     conn->tunnel_notified = 1;
     conn->notified_reason = reason;
-    /* "CONNECT-IP request failed" is an e2e marker (tests/test_e2e_wrong_psk.sh)
+    /* "CONNECT-IP request failed" is an e2e marker (scripts/ci_e2e/test_multiclient.sh)
      * and must keep printing once for the CONNECT-IP witnesses. A TLS
      * rejection never sent a request, so it stays silent here —
      * cli_report_cert_rejected already logged "TLS certificate verification
@@ -1665,12 +1665,12 @@ cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_k
     ssize_t ret = xqc_h3_request_send_headers(req, &headers, 0);
     if (ret < 0 && ret != -XQC_EAGAIN) {
         LOG_E(c, "connect-tcp: send headers failed (%zd)", ret);
-        xqc_h3_request_close(req); /* close notify frees stream */
-        /* abort_pending clears f->h3_request/f->stream (they point at the
-         * just-closed request) and never closes H3 itself — bind ran before
-         * send per the plan order, and we already closed the request one
-         * line up. */
-        return mqvpn_tcp_lane_abort_pending(flow_handle);
+        /* Remove the flow before closing: the close notify (it frees
+         * `stream`) may run inside the close call and must not find it.
+         * abort_pending never closes H3 itself. */
+        int aborted = mqvpn_tcp_lane_abort_pending(flow_handle);
+        xqc_h3_request_close(req);
+        return aborted;
     }
 
     LOG_D(c, "connect-tcp: stream %" PRIu64 " opened for %s", xqc_h3_stream_id(req),
@@ -3087,24 +3087,6 @@ cleanup:
  *  Public API — Lifecycle
  * ================================================================ */
 
-static int
-map_log_level_to_xquic(mqvpn_log_level_t level)
-{
-    /* xqc_log_level_t: REPORT=0, FATAL=1, ERROR=2, WARN=3, STATS=4, INFO=5, DEBUG=6
-     *
-     * mqvpn INFO is intentionally mapped to xquic WARN (one tier lower).
-     * xquic INFO emits per-packet logs (effectively DEBUG-grade), which
-     * tanks throughput on slow consoles like Windows PowerShell. Shifting
-     * keeps --log-level info usable; users who want xquic detail use
-     * --log-level debug. Do not restore the 1:1 mapping. */
-    switch (level) {
-    case MQVPN_LOG_DEBUG: return XQC_LOG_DEBUG;
-    case MQVPN_LOG_INFO: return XQC_LOG_WARN;
-    case MQVPN_LOG_WARN: return XQC_LOG_WARN;
-    case MQVPN_LOG_ERROR: return XQC_LOG_ERROR;
-    default: return XQC_LOG_WARN;
-    }
-}
 
 /* Create xquic engine with transport + H3 + datagram callbacks. Returns 0 on success. */
 static int
@@ -3153,7 +3135,7 @@ init_xquic_engine(mqvpn_client_t *c)
 
     xqc_config_t xconfig;
     if (xqc_engine_get_default_config(&xconfig, XQC_ENGINE_CLIENT) < 0) goto fail;
-    xconfig.cfg_log_level = (xqc_log_level_t)map_log_level_to_xquic(cfg->log_level);
+    xconfig.cfg_log_level = mqvpn_xqc_log_level(cfg->log_level);
     if (mqvpn_engine_keys_set_client(&xconfig) != 0) goto fail;
 
 #if defined(__linux__)

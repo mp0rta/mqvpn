@@ -920,6 +920,21 @@ TEST(error_string)
     ASSERT_NOT_NULL(mqvpn_error_string((mqvpn_error_t)-99));
 }
 
+TEST(client_state_string)
+{
+    /* The CLI logs these names; e2e scripts grep "state: .* CLOSED". */
+    ASSERT_STR_EQ(mqvpn_client_state_string(MQVPN_STATE_IDLE), "IDLE");
+    ASSERT_STR_EQ(mqvpn_client_state_string(MQVPN_STATE_CONNECTING), "CONNECTING");
+    ASSERT_STR_EQ(mqvpn_client_state_string(MQVPN_STATE_AUTHENTICATING),
+                  "AUTHENTICATING");
+    ASSERT_STR_EQ(mqvpn_client_state_string(MQVPN_STATE_TUNNEL_READY), "TUNNEL_READY");
+    ASSERT_STR_EQ(mqvpn_client_state_string(MQVPN_STATE_ESTABLISHED), "ESTABLISHED");
+    ASSERT_STR_EQ(mqvpn_client_state_string(MQVPN_STATE_RECONNECTING), "RECONNECTING");
+    ASSERT_STR_EQ(mqvpn_client_state_string(MQVPN_STATE_CLOSED), "CLOSED");
+    ASSERT_STR_EQ(mqvpn_client_state_string(MQVPN_STATE__COUNT), "?");
+    ASSERT_STR_EQ(mqvpn_client_state_string((mqvpn_client_state_t)-1), "?");
+}
+
 /* ── Version string test ── */
 
 #define STRINGIFY2(x) #x
@@ -1564,7 +1579,6 @@ TEST(drop_path_double_drop)
 /* Internal accessor — used to verify the active-path fallback that
  * get_path_entry_for_send relies on when the current primary slot has been
  * dropped. */
-extern mqvpn_path_handle_t mqvpn_client_first_active_handle(const mqvpn_client_t *c);
 
 TEST(first_active_handle_with_no_paths_is_minus_one)
 {
@@ -1619,9 +1633,6 @@ TEST(first_active_handle_skips_dropped_primary)
  * picks it up (issue #4271 Bug 1, ysurac/mqvpn 86c275c).
  *
  * Returns 0 on success, -1 if handle is not found. */
-extern int mqvpn_client_apply_path_activation_failure(mqvpn_client_t *c,
-                                                      mqvpn_path_handle_t handle,
-                                                      uint64_t now_us);
 
 TEST(activation_failure_first_retry_marks_create_wait)
 {
@@ -1657,9 +1668,6 @@ TEST(activation_failure_first_retry_marks_create_wait)
  * MQVPN_PATH_DEGRADED, so a future regression away from CREATE_WAIT would
  * actually surface in the public projection too — but pinning the internal
  * name guards against any other state transposition.) */
-extern const char *mqvpn_client_test_get_path_state_name(mqvpn_client_t *c,
-                                                         mqvpn_path_handle_t handle,
-                                                         int *out_retries);
 
 TEST(activation_failure_pins_create_wait_internal)
 {
@@ -1727,9 +1735,6 @@ TEST(activation_failure_eventually_closes_path)
  * This is the path xquic takes when validation fails after we entered
  * VALIDATING. ACTIVE/STANDBY (validated) must instead go to DEGRADED;
  * VALIDATING (never validated) starts retry from CREATE_WAIT. */
-extern int mqvpn_client_test_force_validating_then_remove(mqvpn_client_t *c,
-                                                          mqvpn_path_handle_t handle,
-                                                          uint64_t xqc_path_id);
 
 TEST(cb_path_removed_validating_to_create_wait)
 {
@@ -1758,10 +1763,6 @@ TEST(cb_path_removed_validating_to_create_wait)
  * (PATH_ABANDON) exactly like a secondary's; the id-0 guard introduced by
  * the PR4 refactor (#116) skipped it and cost a ~95-115 s server-side
  * downlink blackout on primary loss (iOS PoC gate G-i3). */
-extern int mqvpn_client_test_force_validating(mqvpn_client_t *c,
-                                              mqvpn_path_handle_t handle,
-                                              uint64_t xqc_path_id);
-extern int mqvpn_client_test_abandon_due(mqvpn_client_t *c, mqvpn_path_handle_t handle);
 
 TEST(remove_live_primary_emits_abandon)
 {
@@ -1792,9 +1793,6 @@ TEST(remove_live_primary_emits_abandon)
  * (no DEGRADED retry path) so the recovery timer / tick recovery loop
  * stop busy-looping on calls that will never succeed. */
 
-extern int
-mqvpn_client_test_apply_path_create_permanent_failure(mqvpn_client_t *c,
-                                                      mqvpn_path_handle_t handle);
 
 TEST(path_create_permanent_failure_marks_closed_immediately)
 {
@@ -2030,10 +2028,6 @@ TEST(rollback_after_activation_failure_emits_event_then_closed)
  * Mutation-checked: abort() at the top of cb_write_socket leaves the whole
  * suite green, multipath on or off. */
 
-extern int mqvpn_client_test_set_primary_path_idx(mqvpn_client_t *c, int idx);
-extern mqvpn_path_handle_t
-mqvpn_client_test_get_send_handle_for_path(mqvpn_client_t *c, uint64_t xqc_path_id);
-extern int mqvpn_client_test_next_primary_idx(const mqvpn_client_t *c, int from_idx);
 
 TEST(get_send_handle_prefers_rotated_primary_when_active)
 {
@@ -2139,10 +2133,6 @@ TEST(client_next_primary_idx_skips_closed_and_inactive)
  * primary_path_idx rotates (issue #46 mechanism), so a dead first-listed path
  * recovers in ~15s instead of waiting 120s for xquic's idle_time_out. */
 
-extern uint64_t mqvpn_client_test_get_handshake_started_us(const mqvpn_client_t *c);
-extern int mqvpn_client_test_set_handshake_started_us(mqvpn_client_t *c, uint64_t us);
-extern int mqvpn_client_test_handshake_stalled(const mqvpn_client_t *c, uint64_t now_us);
-extern int mqvpn_client_test_force_state(mqvpn_client_t *c, mqvpn_client_state_t s);
 
 #define STALL_THRESHOLD_US ((uint64_t)5 * 1000 * 1000)
 
@@ -2238,7 +2228,6 @@ TEST(client_set_state_leaving_connecting_clears_handshake_start)
  * else (incl. 0 = no headers seen) -> PROTOCOL. Pure function, no live
  * connection needed. */
 
-extern int mqvpn_client_test_classify_status(int status);
 
 TEST(classify_status_401_is_auth)
 {
@@ -2363,12 +2352,6 @@ TEST(client_new_warns_when_insecure_overrides_verifier)
  * cli_signal_connect_fail / cli_notify_conn_closed via test hooks, on a bare
  * conn attached by mqvpn_client_test_conn_alloc. */
 
-extern int mqvpn_client_test_conn_alloc(mqvpn_client_t *c);
-extern int mqvpn_client_test_conn_free(mqvpn_client_t *c);
-extern int mqvpn_client_test_conn_tunnel_notified(const mqvpn_client_t *c);
-extern int mqvpn_client_test_signal_connect_fail(mqvpn_client_t *c, int reason,
-                                                 int status);
-extern int mqvpn_client_test_notify_conn_closed(mqvpn_client_t *c);
 
 static int g_tunnel_closed_count = 0;
 static mqvpn_error_t g_last_tunnel_closed_reason;
@@ -2381,9 +2364,8 @@ mock_tunnel_closed(mqvpn_error_t reason, void *u)
     g_last_tunnel_closed_reason = reason;
 }
 
-/* "CONNECT-IP request failed" is the marker tests/test_e2e_wrong_psk.sh waits
- * for; count it so its once-per-conn contract is pinned here (the e2e is not
- * in CI). */
+/* "CONNECT-IP request failed" is the marker scripts/ci_e2e/test_multiclient.sh
+ * waits for; count it so its once-per-conn contract is pinned here. */
 static int g_connect_fail_marker_count = 0;
 
 static void
@@ -2496,11 +2478,6 @@ TEST(conn_close_fires_closed_when_not_latched)
  * failures. A locally initiated shutdown must keep reporting
  * MQVPN_ERR_CLOSED, not a spurious PROTOCOL connect-fail. */
 
-extern int mqvpn_client_test_conn_tunnel_ok(const mqvpn_client_t *c);
-extern int mqvpn_client_test_set_shutting_down(mqvpn_client_t *c, int v);
-extern int mqvpn_client_test_scan_headers(mqvpn_client_t *c, const char **names,
-                                          const char **values, int n);
-extern int mqvpn_client_test_conn_peer_reorder(const mqvpn_client_t *c);
 
 /* All-":status" convenience wrapper over the (name, value) scan hook. */
 static int
@@ -2511,7 +2488,6 @@ scan_status_headers(mqvpn_client_t *c, const char **values, int n)
         names[i] = ":status";
     return mqvpn_client_test_scan_headers(c, names, values, n);
 }
-extern int mqvpn_client_test_request_close_connect_ip(mqvpn_client_t *c);
 
 TEST(headers_duplicate_status_first_final_wins)
 {
@@ -2648,13 +2624,6 @@ TEST(reorder_echo_in_deciding_200_section_sets_flag)
 }
 
 /* ── Per-user scheduler negotiation (client side) ── */
-extern int mqvpn_client_test_conn_peer_sched(mqvpn_client_t *c, int *out_sched);
-extern void mqvpn_client_test_set_hold_extra_paths(mqvpn_client_t *c, int v);
-extern int mqvpn_client_test_hold_extra_paths(mqvpn_client_t *c);
-extern void mqvpn_client_test_reset_paths_for_reconnect(mqvpn_client_t *c);
-extern void mqvpn_client_test_ready_to_create_path(mqvpn_client_t *c);
-extern void mqvpn_client_test_release_path_hold(mqvpn_client_t *c);
-extern int mqvpn_client_test_force_established(mqvpn_client_t *c);
 
 /* Scan an optional interim section, then the final section; return
  * has_peer_sched. NULL = header absent. */
@@ -2992,8 +2961,6 @@ make_recovery_test_client(void)
     return c;
 }
 
-extern int mqvpn_client_test_force_established(mqvpn_client_t *c);
-extern int mqvpn_client_test_set_next_wake_us(mqvpn_client_t *c, uint64_t us);
 
 /* Case 1: CREATE_WAIT slot with recreate_after_us = now + 5s. The retry
  * deadline (5000 ms) must clamp next_timer_ms below the 30s xquic wake. */
@@ -3108,9 +3075,6 @@ TEST(get_interest_recovery_inert_when_not_established)
  * documented ~3-4x throughput regression when it EXTENDED `ms` (0 -> 30000);
  * these tests pin the shorten-only / force-1ms / inert-guard behaviour so that
  * regression cannot silently return. Seeded via the fixed injected clock. */
-extern int mqvpn_client_test_set_path_stable_us(mqvpn_client_t *c,
-                                                mqvpn_path_handle_t handle,
-                                                uint64_t stable_since_us, int xquic_live);
 
 /* Deadline in the future: clamp next_timer_ms down to the remaining time,
  * never past it. base-10s anchor -> stable_at = base+20s -> 20000 ms, below
@@ -3333,8 +3297,6 @@ TEST(reactivate_path_not_established)
  * each burning a unique xqc path_id, XQC_MAX_PATHS_COUNT (=8) was exhausted
  * within seconds and the connection collapsed when the surviving path also
  * faulted. Seen in ci_bench_failover.sh on commit 3956522. */
-extern int mqvpn_client_test_reactivate_slot_eligible(mqvpn_client_t *c,
-                                                      mqvpn_path_handle_t handle);
 
 TEST(reactivate_slot_eligible_create_wait)
 {
@@ -3451,8 +3413,6 @@ TEST(server_get_client_info_null_safety)
 
 /* ── ABI 3 transport contract ── */
 
-extern int mqvpn_client_test_transport_send(mqvpn_client_t *c, mqvpn_path_handle_t h,
-                                            const mqvpn_datagram_t *bufs, unsigned n);
 
 TEST(add_path_rejects_bad_ops)
 {
@@ -4348,6 +4308,7 @@ main(void)
 
     /* Error/version tests */
     run_error_string();
+    run_client_state_string();
     run_version_string();
 
     /* Client lifecycle tests */

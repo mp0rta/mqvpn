@@ -105,18 +105,15 @@ jobs:
           # v5: libxquic.so statically absorbs BoringSSL (hidden-visibility
           # symbols), so a cached xquic build outlives a BoringSSL flag change
           # unless this key moves with it.
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-gcc-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v5
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-gcc-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v5-${{ hashFiles('scripts/xquic-cmake-flags') }}
 
       - name: Build xquic
         if: steps.xquic-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
-          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
-                -DXQC_ENABLE_BBR2=ON \
-                -DXQC_ENABLE_UNLIMITED=ON \
-                -DXQC_ENABLE_FEC=ON \
-                -DXQC_ENABLE_XOR=ON \
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                $(cat "$GITHUB_WORKSPACE/scripts/xquic-cmake-flags") \
                 -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
           make -j$(nproc)
 
@@ -232,7 +229,7 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-armhf-gcc-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v1
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-armhf-gcc-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v1-${{ hashFiles('scripts/xquic-cmake-flags') }}
 
       # shortcut: the fork is not 32-bit warning-clean (xqc_log.c prints a
       # 64-bit tv_usec with %ld, xqc_send_ctl.c casts a pointer to a packet
@@ -243,11 +240,8 @@ jobs:
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
-          cmake $XC -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
-                -DXQC_ENABLE_BBR2=ON \
-                -DXQC_ENABLE_UNLIMITED=ON \
-                -DXQC_ENABLE_FEC=ON \
-                -DXQC_ENABLE_XOR=ON \
+          cmake $XC -DCMAKE_BUILD_TYPE=Release \
+                $(cat "$GITHUB_WORKSPACE/scripts/xquic-cmake-flags") \
                 -DCMAKE_C_FLAGS="-Wno-dangling-pointer -Wno-error=format -Wno-error=pointer-to-int-cast" ..
           make -j$(nproc)
 
@@ -321,18 +315,15 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-${{ steps.bssl-pin.outputs.sha }}-v4
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-${{ steps.bssl-pin.outputs.sha }}-v4-${{ hashFiles('scripts/xquic-cmake-flags') }}
 
       - name: Build xquic (clang)
         if: steps.xquic-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
-          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug -DSSL_TYPE=boringssl \
-                -DXQC_ENABLE_BBR2=ON \
-                -DXQC_ENABLE_UNLIMITED=ON \
-                -DXQC_ENABLE_FEC=ON \
-                -DXQC_ENABLE_XOR=ON \
+          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug \
+                $(cat "$GITHUB_WORKSPACE/scripts/xquic-cmake-flags") \
                 -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
           make -j$(nproc)
 
@@ -686,18 +677,15 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-msan-bssl-${{ steps.bssl-pin.outputs.sha }}-v4
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-msan-bssl-${{ steps.bssl-pin.outputs.sha }}-v4-${{ hashFiles('scripts/xquic-cmake-flags') }}
 
       - name: Build xquic (clang + MSan)
         if: steps.xquic-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
-          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug -DSSL_TYPE=boringssl \
-                -DXQC_ENABLE_BBR2=ON \
-                -DXQC_ENABLE_UNLIMITED=ON \
-                -DXQC_ENABLE_FEC=ON \
-                -DXQC_ENABLE_XOR=ON \
+          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug \
+                $(cat "$GITHUB_WORKSPACE/scripts/xquic-cmake-flags") \
                 -DCMAKE_C_FLAGS="-fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins -Wno-unknown-warning-option" ..
           make -j$(nproc)
 
@@ -901,7 +889,7 @@ jobs:
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
           # v2: bumped with the BoringSSL cache — see the linux-build job.
-          key: xquic-${{ steps.xqsha.outputs.sha }}-darwin-arm64-macos15-clang-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v2
+          key: xquic-${{ steps.xqsha.outputs.sha }}-darwin-arm64-macos15-clang-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v2-${{ hashFiles('scripts/xquic-cmake-flags') }}
 
       - name: Build xquic
         if: steps.xquic-cache.outputs.cache-hit != 'true'
@@ -912,11 +900,8 @@ jobs:
           # gcc-only -Wno-dangling-pointer for every non-MSVC compiler;
           # AppleClang would otherwise error on the unknown warning flag
           # (same workaround as the sanitizer job's clang xquic build).
-          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
-                -DXQC_ENABLE_BBR2=ON \
-                -DXQC_ENABLE_UNLIMITED=ON \
-                -DXQC_ENABLE_FEC=ON \
-                -DXQC_ENABLE_XOR=ON \
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                $(cat "$GITHUB_WORKSPACE/scripts/xquic-cmake-flags") \
                 -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
           make -j"$(sysctl -n hw.ncpu)"
 
@@ -1173,7 +1158,7 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-windows-msvc-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v5
+          key: xquic-${{ steps.xqsha.outputs.sha }}-windows-msvc-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v5-${{ hashFiles('scripts/xquic-cmake-flags') }}
 
       - name: Build xquic
         if: steps.xquic-cache.outputs.cache-hit != 'true'
@@ -1188,12 +1173,8 @@ jobs:
           cmake -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_C_STANDARD=11 `
-            -DSSL_TYPE=boringssl `
-            -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" `
-            -DXQC_ENABLE_BBR2=ON `
-            -DXQC_ENABLE_UNLIMITED=ON `
-            -DXQC_ENABLE_FEC=ON `
-            -DXQC_ENABLE_XOR=ON ..
+            $(Get-Content "${{ github.workspace }}/scripts/xquic-cmake-flags") `
+            -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" ..
           cmake --build . --config Release
 
       - name: Build mqvpn
@@ -1216,17 +1197,11 @@ jobs:
             -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON ..
           cmake --build . --config Release
 
-      # The only place the CryptoAPI half of the verifier is compiled and run.
-      # Both tests use their own checks, not assert(), so Release is fine.
-      - name: Certificate verifier tests
-        run: ctest --test-dir build -C Release -R "test_cert_(identity|verify_win)" --no-tests=error --output-on-failure
-
-      # Bundled Winsock transport (seam + real loopback sockets) and the
-      # re-add decision shared with the POSIX path monitors and the path status
-      # log line; own checks, not
-      # assert(), so Release is fine.
-      - name: Winsock transport and path re-add tests
-        run: ctest --test-dir build -C Release -R "^(test_bind_winsock|test_path_readd|test_path_line|test_clock_source)$" --no-tests=error --output-on-failure
+      # Every test the Windows block of CMakeLists.txt registers, including
+      # the only run of the CryptoAPI half of the certificate verifier. Release
+      # is fine: the tests use their own checks or #undef NDEBUG.
+      - name: Unit tests (ctest)
+        run: ctest --test-dir build -C Release --no-tests=error --output-on-failure
 
       # Weak: presence and order of the install call only (see the script).
       - name: Verifier wiring tripwire
@@ -1468,6 +1443,14 @@ jobs:
       - name: Run check_dd_refs.sh
         run: bash scripts/lint/check_dd_refs.sh
 
+  lint-config-docs:
+    name: Lint - config keys documented
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run check_config_docs.sh
+        run: bash scripts/lint/check_config_docs.sh
+
   hybrid-e2e:
     # H2 hybrid TCP-lane end-to-end suite (7 scenarios, incl. iperf3
     # throughput ratios + a netem multipath-aggregation test). Runs in a
@@ -1524,18 +1507,15 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-${{ steps.bssl-pin.outputs.sha }}-v4
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-${{ steps.bssl-pin.outputs.sha }}-v4-${{ hashFiles('scripts/xquic-cmake-flags') }}
 
       - name: Build xquic (clang)
         if: steps.xquic-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
-          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug -DSSL_TYPE=boringssl \
-                -DXQC_ENABLE_BBR2=ON \
-                -DXQC_ENABLE_UNLIMITED=ON \
-                -DXQC_ENABLE_FEC=ON \
-                -DXQC_ENABLE_XOR=ON \
+          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug \
+                $(cat "$GITHUB_WORKSPACE/scripts/xquic-cmake-flags") \
                 -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
           make -j$(nproc)
 
@@ -1628,18 +1608,15 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-${{ steps.bssl-pin.outputs.sha }}-v4
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-${{ steps.bssl-pin.outputs.sha }}-v4-${{ hashFiles('scripts/xquic-cmake-flags') }}
 
       - name: Build xquic (clang)
         if: steps.xquic-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
-          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug -DSSL_TYPE=boringssl \
-                -DXQC_ENABLE_BBR2=ON \
-                -DXQC_ENABLE_UNLIMITED=ON \
-                -DXQC_ENABLE_FEC=ON \
-                -DXQC_ENABLE_XOR=ON \
+          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug \
+                $(cat "$GITHUB_WORKSPACE/scripts/xquic-cmake-flags") \
                 -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
           make -j$(nproc)
 

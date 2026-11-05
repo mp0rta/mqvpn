@@ -134,6 +134,8 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
 }
 ```
 
+上の例にない `[Interface]` と `[Multipath]` のキーも、JSON では最上位に書きます。JSON での名前は `mtu` (`MTU`)、`path_mtu` (`PathMTU`)、`pmtud` (`PMTUD`)、`manage_routes` (`ManageRoutes`)、`init_max_path_id` (`InitMaxPathId`)、`bbr2_fast_convergence` (`Bbr2FastConvergence`)、`bbr2_rttvar_compensation` (`Bbr2RttvarCompensation`)、`reinjection` (`Reinjection`)、`reinjection_srtt_factor_pct` (`ReinjectionSrttFactorPct`)、`reinjection_hard_deadline_ms` (`ReinjectionHardDeadlineMs`)、`reinjection_deadline_lower_bound_ms` (`ReinjectionDeadlineLowerBoundMs`)、`redundant` (`Redundant`)、`redundant_ports` (`RedundantPorts`) です。
+
 ## マルチユーザー認証
 
 サーバーでは複数のユーザーをそれぞれ個別の PSK で認証できます。JSON config では `users` 配列で設定します。各要素はオブジェクト形式（`{"name":"alice","key":"..."}`）または省略形の文字列（`"alice:key"`）のどちらでも指定可能です。INI config では `[Auth]` セクションに `User = NAME:KEY` 行を複数書きます。[Control API](#control-api) を使って実行中にユーザーを管理することもできます。

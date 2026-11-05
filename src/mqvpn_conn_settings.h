@@ -77,6 +77,9 @@ typedef struct {
 MQVPN_INTERNAL void mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in,
                                               xqc_conn_settings_t *out);
 
+/* xquic engine log level for an mqvpn level, for client and server. */
+MQVPN_INTERNAL xqc_log_level_t mqvpn_xqc_log_level(mqvpn_log_level_t level);
+
 #if defined(__linux__)
 /* One definition of the batched-send registration for both endpoints (it is
  * the engine-create half of the decision defer_send_flush mirrors above, so

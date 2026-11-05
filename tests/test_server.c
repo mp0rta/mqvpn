@@ -1902,8 +1902,6 @@ drain_and_tick2(mqvpn_server_t *svr, void *svr_tctx, mqvpn_client_t *cli,
     mqvpn_client_tick(cli);
 }
 
-extern int mqvpn_client_test_kill_conn(mqvpn_client_t *c);
-extern uint64_t mqvpn_client_test_get_reconnect_scheduled_us(const mqvpn_client_t *c);
 
 /* Re-entrancy probe for the manual-reconnect transaction: when armed, the
  * FIRST path_event fired inside mqvpn_client_connect()'s pre-start reset

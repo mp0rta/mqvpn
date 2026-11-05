@@ -34,14 +34,8 @@ mqvpn_platform_apply_client_config(mqvpn_config_t *lib_cfg, const mqvpn_client_c
 
     mqvpn_config_set_log_level(lib_cfg, (mqvpn_log_level_t)cfg->log_level);
 
-    mqvpn_scheduler_t lib_sched;
-    switch (cfg->scheduler) {
-    case 1: lib_sched = MQVPN_SCHED_WLB; break;
-    case 2: lib_sched = MQVPN_SCHED_BACKUP_FEC; break;
-    case 3: lib_sched = MQVPN_SCHED_WLB_UDP_PIN; break;
-    default: lib_sched = MQVPN_SCHED_MINRTT; break;
-    }
-    mqvpn_config_set_scheduler(lib_cfg, lib_sched);
+    /* main.c fills scheduler from the name table; the setter rejects others. */
+    mqvpn_config_set_scheduler(lib_cfg, (mqvpn_scheduler_t)cfg->scheduler);
     mqvpn_config_set_request_server_scheduler(lib_cfg, cfg->request_server_scheduler);
     mqvpn_config_set_cc(lib_cfg, (mqvpn_cc_t)cfg->cc);
     mqvpn_config_set_reinjection(lib_cfg, (mqvpn_reinjection_t)cfg->reinjection);

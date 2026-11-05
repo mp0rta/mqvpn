@@ -255,6 +255,9 @@ typedef enum {
     MQVPN_STATE__COUNT = 7,
 } mqvpn_client_state_t;
 
+/* State name as the CLI logs it ("IDLE" ... "CLOSED"); "?" for other values. */
+MQVPN_API const char *mqvpn_client_state_string(mqvpn_client_state_t state);
+
 /*
  * Path lifecycle:
  *   transport_attached = platform provides I/O for this slot
@@ -706,11 +709,14 @@ MQVPN_API int mqvpn_config_set_bbr2_fast_convergence(mqvpn_config_t *cfg, int on
  * congestion controller is BBR2. */
 MQVPN_API int mqvpn_config_set_bbr2_rttvar_compensation(mqvpn_config_t *cfg, int on);
 
-/* TUN MTU cap: 0 = auto (MSS-derived), 1280..9000 = upper bound. */
+/* Range of the two MTU settings below; 0 is also accepted. */
+#define MQVPN_MTU_MIN 1280
+#define MQVPN_MTU_MAX 9000
+/* TUN MTU cap: 0 = auto (MSS-derived), MQVPN_MTU_MIN..MAX = upper bound. */
 MQVPN_API int mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu);
 /* Underlay path MTU the outer QUIC packets are sized for: 0 = default
- * (1400-byte packets, TUN MTU ~1382), 1280..9000 = largest IP packet the
- * path carries. Packets are capped at xquic's limit (TUN MTU 1418).
+ * (1400-byte packets, TUN MTU ~1382), MQVPN_MTU_MIN..MAX = largest IP packet
+ * the path carries. Packets are capped at xquic's limit (TUN MTU 1418).
  * IPv6 requires capacity for 1280 inner bytes, including room for reorder:
  * insufficient capacity fails server_start or notifies client tunnel_closed
  * with MQVPN_ERR_INVALID_ARG when IPv6 is assigned. */
