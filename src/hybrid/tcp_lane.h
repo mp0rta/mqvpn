@@ -150,6 +150,18 @@ typedef struct {
                                   * currently in the table — surfaced through
                                   * mqvpn_client_get_stats as the public
                                   * raw_markers_active stat */
+    /* Counters: flows torn down because the server reset their stream
+     * (mqvpn_tcp_lane_on_h3_closing), and among them the ones that still
+     * held bytes the reset made undeliverable. Uplink: bytes the local host
+     * sent that lwIP had already acknowledged to it but that had not reached
+     * the stream (the uplink queue). Downlink: bytes received from the
+     * stream that the local host had not acknowledged (lwIP's unsent and
+     * unacked queues, snd_lbb - lastack) plus the downlink stash. */
+    uint64_t reset_by_peer;
+    uint64_t reset_by_peer_uplink_flows;
+    uint64_t reset_by_peer_uplink_bytes;
+    uint64_t reset_by_peer_downlink_flows;
+    uint64_t reset_by_peer_downlink_bytes;
 } mqvpn_tcp_lane_stats_t;
 
 /* client_ctx is opaque to tcp_lane.c's callers outside mqvpn_client.c; it is

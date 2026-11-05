@@ -34,6 +34,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <linux/sockios.h> /* SIOCOUTQ */
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -89,6 +90,13 @@ test_now_us(void)
     gettimeofday(&tv, NULL);
     return (uint64_t)tv.tv_sec * 1000000ull + (uint64_t)tv.tv_usec;
 }
+
+/* The probe is a test client, not the system under test: it runs without
+ * the stream backlog cap mqvpn_build_conn_settings sets
+ * (max_stream_unsent_packets), which also holds back a FIN-only write,
+ * except in the test of that cap itself, which sets this before
+ * harness_start and resets it after. */
+static int g_probe_keep_unsent_cap = 0;
 
 /* Counts inner-IP packets the server forwarded out of the tunnel — the
  * observable the tunnel-survival regression test asserts on. */
@@ -171,6 +179,10 @@ typedef struct {
      * parks a server-side connect-tcp flow in uplink_withheld. Independent
      * of raw_capture (checked first) so the two knobs don't fight. */
     int suppress_body_drain;
+
+    /* The probe's request saw a RESET_STREAM from the server (xquic's
+     * closing notify fires on RESET_STREAM reception only). */
+    int closing_notified;
 } probe_conn_t;
 
 static void
@@ -533,7 +545,8 @@ probe_cb_request_closing_notify(xqc_h3_request_t *h3_request, xqc_int_t err,
 {
     (void)h3_request;
     (void)err;
-    (void)user_data;
+    probe_conn_t *p = (probe_conn_t *)user_data;
+    if (p) p->closing_notified = 1;
 }
 
 static xqc_engine_t *
@@ -630,12 +643,17 @@ typedef struct {
     mqvpn_server_t *svr;
     probe_conn_t probe;
     harness_egress_fd_t egress_fds[HARNESS_MAX_EGRESS_FDS];
-    int egress_dispatches; /* mqvpn_server_on_egress_fd_ready calls made by
-                            * harness_pump — a test resets and reads it. */
-    int freeze_probe;      /* 1: harness_pump neither feeds nor runs the
-                            * probe engine, so nothing the server sends is
-                            * ever answered (keeps an H3 stream from ever
-                            * finishing its close). */
+    int egress_dispatches;       /* mqvpn_server_on_egress_fd_ready calls made by
+                                  * harness_pump — a test resets and reads it. */
+    int egress_write_dispatches; /* of those, the ones reporting the fd
+                                  * writable (the only way the relay
+                                  * send()s to its egress socket outside an
+                                  * H3 body notify) — reset and read the
+                                  * same way. */
+    int freeze_probe;            /* 1: harness_pump neither feeds nor runs the
+                                  * probe engine, so nothing the server sends is
+                                  * ever answered (keeps an H3 stream from ever
+                                  * finishing its close). */
 } harness_t;
 
 /* mqvpn_server_callbacks_t.egress_fd_register implementation: records/
@@ -797,6 +815,7 @@ harness_start(harness_t *h, const char *protocol, size_t protocol_len, int auto_
             .init_max_path_id = 0,
         };
         mqvpn_build_conn_settings(&cs_in, &cs);
+        if (!g_probe_keep_unsent_cap) cs.max_stream_unsent_packets = 0;
 
         xqc_conn_ssl_config_t ssl_cfg;
         memset(&ssl_cfg, 0, sizeof(ssl_cfg));
@@ -868,6 +887,7 @@ harness_pump(harness_t *h, const int *done, int budget_ms)
                 int readable = (epfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
                 int writable = (epfd.revents & (POLLOUT | POLLERR)) != 0;
                 h->egress_dispatches++;
+                if (writable) h->egress_write_dispatches++;
                 mqvpn_server_on_egress_fd_ready(h->svr, h->egress_fds[i].fd,
                                                 h->egress_fds[i].fd_ctx, readable,
                                                 writable);
@@ -934,6 +954,9 @@ static int
 probe_send_fin_retry(harness_t *h, probe_conn_t *p, int iter_budget)
 {
     for (int i = 0; i < iter_budget; i++) {
+        /* A request the server has already closed must not be written to:
+         * xquic frees its transport stream at the close notify. */
+        if (p->request_closed || p->closing_notified) return -1;
         ssize_t sent = xqc_h3_request_send_body(p->req, NULL, 0, 1);
         if (sent >= 0) return 0;
         if (sent != -XQC_EAGAIN) return -1;
@@ -2275,8 +2298,10 @@ TEST(mqvpn_tcp_uplink_backlog_stops_at_unsent_cap)
     snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
 
     harness_t h;
+    g_probe_keep_unsent_cap = 1;
     ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
               0);
+    g_probe_keep_unsent_cap = 0;
     h.probe.path = path;
     h.probe.raw_capture = 1;
 
@@ -2307,6 +2332,648 @@ TEST(mqvpn_tcp_uplink_backlog_stops_at_unsent_cap)
     ASSERT_EQ(over_bound, 0); /* on failure, prints what was accepted */
     /* ...and it is the cap that stopped it, not something smaller. */
     ASSERT_EQ(accepted > cap_bytes / 2, 1);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
+/* An origin that sends data and then resets (SO_LINGER{1,0}) makes the
+ * server's recv() fail with ECONNRESET and reset the stream. That reset is
+ * counted under its cause, and the bytes the stream accepted just before it
+ * are counted as its tail: they may still be unacknowledged when the reset
+ * drops them. Nothing else may move: no idle eviction, no other error. */
+TEST(mqvpn_tcp_origin_reset_counts_tail)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/1), 0);
+
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    h.probe.path = path;
+    h.probe.raw_capture = 1;
+
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+    harness_pump_with_sink(&h, &sink, &h.probe.response_done, 10000);
+    ASSERT_EQ(h.probe.response_done, 1);
+    ASSERT_STREQ(h.probe.status, "200");
+
+    const char *msg = "response then reset";
+    size_t msg_len = strlen(msg);
+    ASSERT_EQ(probe_send_body_retry(&h, &h.probe, (const uint8_t *)msg, msg_len, 500), 0);
+    int got_echo = 0;
+    for (int i = 0; i < 500 && !got_echo; i++) {
+        int never = 0;
+        harness_pump_with_sink(&h, &sink, &never, 20);
+        got_echo = h.probe.raw_recv_len >= msg_len;
+    }
+    ASSERT_EQ(got_echo, 1);
+
+    struct linger lg = {.l_onoff = 1, .l_linger = 0};
+    ASSERT_EQ(setsockopt(sink.conn_fd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg)), 0);
+    close(sink.conn_fd);
+    sink.conn_fd = -1;
+    harness_pump(&h, &h.probe.request_closed, 5000);
+    ASSERT_EQ(h.probe.request_closed, 1);
+
+    mqvpn_stats_t st;
+    memset(&st, 0, sizeof(st));
+    ASSERT_EQ(mqvpn_server_get_stats(h.svr, &st), MQVPN_OK);
+    ASSERT_EQ(st.tcp_reset_econnreset, 1);
+    ASSERT_EQ(st.tcp_reset_econnreset_tail_flows, 1);
+    ASSERT_EQ(st.tcp_reset_econnreset_tail_bytes, msg_len);
+    ASSERT_EQ(st.tcp_reset_error, 0);
+    ASSERT_EQ(st.tcp_reset_error_tail_flows, 0);
+    ASSERT_EQ(st.tcp_reset_error_tail_bytes, 0);
+    ASSERT_EQ(st.tcp_idle_evicted, 0);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
+/* ── [Hybrid] ResetHoldMs ──
+ *
+ * The origin side of these tests writes `len` bytes of a position-dependent
+ * pattern on the accepted sink connection (pumping the harness so the
+ * server keeps reading), waits until its kernel has every byte acknowledged
+ * by the server's egress socket (SIOCOUTQ == 0), so the origin itself
+ * discards nothing, and then closes with SO_LINGER{1,0}: a real RST after
+ * data, the lingering close a server does when part of a request was left
+ * unread. len == 0 resets with nothing sent. */
+static uint8_t
+reset_hold_pattern(size_t i)
+{
+    return (uint8_t)((i * 131u) ^ (i >> 11));
+}
+
+static int
+sink_send_then_reset(harness_t *h, tcp_sink_t *sink, size_t len)
+{
+    uint8_t chunk[16384];
+    size_t off = 0;
+    for (int i = 0; i < 2000 && off < len; i++) {
+        while (off < len) {
+            size_t n = len - off < sizeof(chunk) ? len - off : sizeof(chunk);
+            for (size_t k = 0; k < n; k++)
+                chunk[k] = reset_hold_pattern(off + k);
+            ssize_t sent = send(sink->conn_fd, chunk, n, MSG_DONTWAIT | MSG_NOSIGNAL);
+            if (sent <= 0) break;
+            off += (size_t)sent;
+        }
+        int never = 0;
+        harness_pump(h, &never, 20);
+    }
+    if (off < len) return -1;
+    int drained = 0;
+    for (int i = 0; i < 500 && !drained; i++) {
+        int outq = -1;
+        drained = ioctl(sink->conn_fd, SIOCOUTQ, &outq) == 0 && outq == 0;
+        if (!drained) {
+            int never = 0;
+            harness_pump(h, &never, 10);
+        }
+    }
+    if (!drained) return -1;
+    struct linger lg = {.l_onoff = 1, .l_linger = 0};
+    if (setsockopt(sink->conn_fd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg)) != 0) return -1;
+    close(sink->conn_fd);
+    sink->conn_fd = -1;
+    return 0;
+}
+
+static int
+reset_hold_pattern_ok(const uint8_t *buf, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+        if (buf[i] != reset_hold_pattern(i)) return 0;
+    return 1;
+}
+
+static uint32_t g_reset_hold_ms;
+
+static void
+harness_cfg_allow_127_reset_hold(mqvpn_config_t *cfg)
+{
+    harness_cfg_allow_127(cfg);
+    cfg->hybrid.reset_hold_ms = g_reset_hold_ms;
+}
+
+/* Opens one connect-tcp flow to `sink` (sink mode: accept only) and drives
+ * it to its 200 with the sink connection accepted. */
+static void
+reset_hold_open_flow(harness_t *h, tcp_sink_t *sink, char *path, size_t path_sz)
+{
+    snprintf(path, path_sz, "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink->port);
+    h->probe.path = path;
+    h->probe.raw_capture = 1;
+    harness_pump(h, &h->probe.handshake_done, 10000);
+    ASSERT_EQ(h->probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request_with_body(&h->probe), 0);
+    harness_pump_with_sink(h, sink, &h->probe.response_done, 10000);
+    ASSERT_EQ(h->probe.response_done, 1);
+    ASSERT_STREQ(h->probe.status, "200");
+    for (int i = 0; i < 100 && sink->conn_fd < 0; i++) {
+        int never = 0;
+        harness_pump_with_sink(h, sink, &never, 20);
+    }
+    ASSERT_EQ(sink->conn_fd >= 0, 1);
+}
+
+static void
+reset_hold_stats(harness_t *h, mqvpn_stats_t *st)
+{
+    memset(st, 0, sizeof(*st));
+    ASSERT_EQ(mqvpn_server_get_stats(h->svr, st), MQVPN_OK);
+}
+
+/* harness_pump with a wall-clock budget: harness_pump counts its own poll
+ * timeouts, which run short while packets keep arriving (a bulk transfer),
+ * so its budget can lapse long before budget_ms of real time. */
+static void
+reset_hold_pump_wall(harness_t *h, const int *done, int budget_ms)
+{
+    uint64_t end = test_now_us() + (uint64_t)budget_ms * 1000;
+    while (!*done && test_now_us() < end)
+        harness_pump(h, done, 20);
+}
+
+/* Pumps until the server holds no egress flow, or budget_ms passes. */
+static void
+reset_hold_pump_until_flow_gone(harness_t *h, int budget_ms)
+{
+    uint64_t end = test_now_us() + (uint64_t)budget_ms * 1000;
+    while (test_now_us() < end) {
+        mqvpn_stats_t st;
+        reset_hold_stats(h, &st);
+        if (st.tcp_flows_active == 0) return;
+        int never = 0;
+        harness_pump(h, &never, 20);
+    }
+}
+
+#define RESET_HOLD_BYTES (1024 * 1024)
+
+/* Key 0 (the default): an origin reset after data resets the stream at once,
+ * exactly as before the key existed. No FIN reaches the client, nothing is
+ * counted as held, and the flow is gone promptly. */
+TEST(mqvpn_tcp_reset_hold_off_resets_at_once)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0);
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    char path[64];
+    reset_hold_open_flow(&h, &sink, path, sizeof(path));
+
+    ASSERT_EQ(sink_send_then_reset(&h, &sink, RESET_HOLD_BYTES), 0);
+    reset_hold_pump_until_flow_gone(&h, 2000);
+
+    mqvpn_stats_t st;
+    reset_hold_stats(&h, &st);
+    ASSERT_EQ(st.tcp_flows_active, 0);
+    ASSERT_EQ(st.tcp_reset_econnreset, 1);
+    ASSERT_EQ(st.tcp_reset_held, 0);
+    ASSERT_EQ(st.tcp_reset_held_fin, 0);
+    ASSERT_EQ(st.tcp_reset_held_expired, 0);
+    reset_hold_pump_wall(&h, &h.probe.closing_notified, 2000);
+    ASSERT_EQ(h.probe.closing_notified, 1);
+    ASSERT_EQ(h.probe.raw_recv_fin, 0);
+    ASSERT_EQ(reset_hold_pattern_ok(h.probe.raw_recv_buf, h.probe.raw_recv_len), 1);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
+/* Key on: the same data-then-RST delivers every byte and then a FIN, never
+ * a reset. Client body sent after the origin reset is discarded (there is
+ * no origin to give it to) without failing the flow, and the client's own
+ * FIN completes the stream normally. */
+TEST(mqvpn_tcp_reset_hold_fin_after_flush)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0);
+    harness_t h;
+    g_reset_hold_ms = 10000;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
+                            harness_cfg_allow_127_reset_hold),
+              0);
+    char path[64];
+    reset_hold_open_flow(&h, &sink, path, sizeof(path));
+
+    ASSERT_EQ(sink_send_then_reset(&h, &sink, RESET_HOLD_BYTES), 0);
+    reset_hold_pump_wall(&h, &h.probe.raw_recv_fin, 5000);
+    ASSERT_EQ(h.probe.raw_recv_fin, 1);
+    ASSERT_EQ(h.probe.raw_recv_len, RESET_HOLD_BYTES);
+    ASSERT_EQ(reset_hold_pattern_ok(h.probe.raw_recv_buf, h.probe.raw_recv_len), 1);
+    ASSERT_EQ(h.probe.closing_notified, 0);
+
+    mqvpn_stats_t st;
+    reset_hold_stats(&h, &st);
+    ASSERT_EQ(st.tcp_flows_active, 1); /* held until the stream completes */
+    ASSERT_EQ(st.tcp_reset_econnreset, 1);
+    ASSERT_EQ(st.tcp_reset_econnreset_tail_flows, 1);
+    ASSERT_EQ(st.tcp_reset_held, 1);
+    ASSERT_EQ(st.tcp_reset_held_fin, 1);
+
+    const char *late = "written after the origin reset";
+    ASSERT_EQ(
+        probe_send_body_retry(&h, &h.probe, (const uint8_t *)late, strlen(late), 500), 0);
+    ASSERT_EQ(probe_send_fin_retry(&h, &h.probe, 500), 0);
+    reset_hold_pump_wall(&h, &h.probe.request_closed, 3000);
+    ASSERT_EQ(h.probe.request_closed, 1);
+    ASSERT_EQ(h.probe.closing_notified, 0);
+    reset_hold_pump_until_flow_gone(&h, 1000);
+
+    reset_hold_stats(&h, &st);
+    ASSERT_EQ(st.tcp_flows_active, 0);
+    ASSERT_EQ(st.tcp_reset_econnreset, 1);
+    ASSERT_EQ(st.tcp_reset_held, 1);
+    ASSERT_EQ(st.tcp_reset_held_fin, 1);
+    ASSERT_EQ(st.tcp_reset_held_expired, 0);
+    ASSERT_EQ(st.tcp_reset_error, 0);
+    ASSERT_EQ(st.tcp_idle_evicted, 0);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
+/* Key on, but the stream never completes (the client never sends its FIN):
+ * the hold runs out and the stream is reset as without the key, no earlier
+ * than the configured hold. The response itself was already complete. */
+TEST(mqvpn_tcp_reset_hold_expiry_resets)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0);
+    harness_t h;
+    g_reset_hold_ms = 1000;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
+                            harness_cfg_allow_127_reset_hold),
+              0);
+    char path[64];
+    reset_hold_open_flow(&h, &sink, path, sizeof(path));
+
+    ASSERT_EQ(sink_send_then_reset(&h, &sink, 256 * 1024), 0);
+    uint64_t t0 = test_now_us();
+    reset_hold_pump_wall(&h, &h.probe.raw_recv_fin, 3000);
+    ASSERT_EQ(h.probe.raw_recv_fin, 1);
+    ASSERT_EQ(h.probe.raw_recv_len, 256 * 1024);
+
+    reset_hold_pump_until_flow_gone(&h, 3000);
+    uint64_t held_ms = (test_now_us() - t0) / 1000;
+
+    mqvpn_stats_t st;
+    reset_hold_stats(&h, &st);
+    ASSERT_EQ(st.tcp_flows_active, 0);
+    ASSERT_EQ(st.tcp_reset_held, 1);
+    ASSERT_EQ(st.tcp_reset_held_fin, 1);
+    ASSERT_EQ(st.tcp_reset_held_expired, 1);
+    ASSERT_EQ(st.tcp_reset_error, 0);
+    ASSERT_EQ(held_ms >= 900, 1);
+    ASSERT_EQ(held_ms < 4000, 1);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
+/* Key on, with client body piled up behind a paused downlink when the origin
+ * resets (the origin stopped reading the request, the usual reason for a
+ * lingering close). The hold drains that body itself when it starts: the
+ * read notify fires only when another STREAM frame arrives, so without the
+ * drain the body would wait in the HTTP/3 receive buffer for one. The
+ * stream must complete normally once the client sends its FIN, with nothing
+ * expired. */
+TEST(mqvpn_tcp_reset_hold_drains_buffered_body)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0);
+    int small = 4096;
+    ASSERT_EQ(setsockopt(sink.listen_fd, SOL_SOCKET, SO_RCVBUF, &small, sizeof(small)),
+              0);
+    harness_t h;
+    g_reset_hold_ms = 10000;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
+                            harness_cfg_allow_127_reset_hold),
+              0);
+    char path[64];
+    reset_hold_open_flow(&h, &sink, path, sizeof(path));
+
+    /* Upload until the sink (never reading) backs the server up: the egress
+     * socket blocks and the downlink pauses (write interest armed), and the
+     * rest of the body waits in the request's receive buffer.
+     * probe_send_body_retry gives up once the probe is out of credit. */
+    size_t up_len = 8 * 1024 * 1024;
+    uint8_t *up = calloc(1, up_len);
+    ASSERT_EQ(up != NULL, 1);
+    (void)probe_send_body_retry(&h, &h.probe, up, up_len, 150);
+    free(up);
+    for (int i = 0; i < 100 && !harness_egress_wants_write(&h); i++) {
+        int never = 0;
+        harness_pump(&h, &never, 20);
+    }
+    ASSERT_EQ(harness_egress_wants_write(&h), 1);
+    {
+        int never = 0; /* let more body arrive behind the pause */
+        harness_pump(&h, &never, 500);
+    }
+    mqvpn_stats_t st;
+
+    ASSERT_EQ(sink_send_then_reset(&h, &sink, 64 * 1024), 0);
+    reset_hold_pump_wall(&h, &h.probe.raw_recv_fin, 5000);
+    ASSERT_EQ(h.probe.raw_recv_fin, 1);
+    ASSERT_EQ(h.probe.raw_recv_len, 64 * 1024);
+    ASSERT_EQ(reset_hold_pattern_ok(h.probe.raw_recv_buf, h.probe.raw_recv_len), 1);
+
+    ASSERT_EQ(probe_send_fin_retry(&h, &h.probe, 500), 0);
+    reset_hold_pump_wall(&h, &h.probe.request_closed, 4000);
+    ASSERT_EQ(h.probe.request_closed, 1);
+    ASSERT_EQ(h.probe.closing_notified, 0);
+    reset_hold_pump_until_flow_gone(&h, 1000);
+
+    reset_hold_stats(&h, &st);
+    ASSERT_EQ(st.tcp_flows_active, 0);
+    ASSERT_EQ(st.tcp_reset_held, 1);
+    ASSERT_EQ(st.tcp_reset_held_fin, 1);
+    ASSERT_EQ(st.tcp_reset_held_expired, 0);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
+/* Key on, origin sends its response and FIN, then resets (shutdown, then a
+ * lingering close): the FIN is relayed first, and the reset surfaces as
+ * EPIPE on the next send() of client body (the kernel reports a reset in
+ * CLOSE_WAIT that way). Without the hold that send resets the stream and
+ * drops whatever of the response is still unacknowledged; with it, the late
+ * body is discarded and the stream completes normally. Counted under
+ * tcp_reset_error, with the FIN already sent. */
+TEST(mqvpn_tcp_reset_hold_fin_then_reset)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0);
+    harness_t h;
+    g_reset_hold_ms = 10000;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
+                            harness_cfg_allow_127_reset_hold),
+              0);
+    char path[64];
+    reset_hold_open_flow(&h, &sink, path, sizeof(path));
+
+    const char *resp = "response, then FIN, then a reset";
+    size_t resp_len = strlen(resp);
+    ASSERT_EQ(send(sink.conn_fd, resp, resp_len, MSG_NOSIGNAL), (ssize_t)resp_len);
+    ASSERT_EQ(shutdown(sink.conn_fd, SHUT_WR), 0);
+    reset_hold_pump_wall(&h, &h.probe.raw_recv_fin, 3000);
+    ASSERT_EQ(h.probe.raw_recv_fin, 1);
+    ASSERT_EQ(h.probe.raw_recv_len, resp_len);
+
+    struct linger lg = {.l_onoff = 1, .l_linger = 0};
+    ASSERT_EQ(setsockopt(sink.conn_fd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg)), 0);
+    close(sink.conn_fd);
+    sink.conn_fd = -1;
+    int never = 0;
+    harness_pump(&h, &never, 100);
+
+    const char *late = "client bytes after the origin reset";
+    for (int i = 0; i < 3; i++) {
+        ASSERT_EQ(
+            probe_send_body_retry(&h, &h.probe, (const uint8_t *)late, strlen(late), 500),
+            0);
+        harness_pump(&h, &never, 100);
+    }
+    mqvpn_stats_t st;
+    reset_hold_stats(&h, &st);
+    ASSERT_EQ(st.tcp_reset_error, 1);
+    ASSERT_EQ(st.tcp_reset_held, 1);
+    ASSERT_EQ(st.tcp_reset_held_fin, 1);
+    ASSERT_EQ(h.probe.closing_notified, 0);
+
+    ASSERT_EQ(probe_send_fin_retry(&h, &h.probe, 500), 0);
+    reset_hold_pump_wall(&h, &h.probe.request_closed, 3000);
+    ASSERT_EQ(h.probe.request_closed, 1);
+    ASSERT_EQ(h.probe.closing_notified, 0);
+    reset_hold_pump_until_flow_gone(&h, 1000);
+    reset_hold_stats(&h, &st);
+    ASSERT_EQ(st.tcp_flows_active, 0);
+    ASSERT_EQ(st.tcp_reset_held_expired, 0);
+    ASSERT_EQ(st.tcp_reset_econnreset, 0);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
+/* Key on, but nothing behind the reset (the origin accepted and reset
+ * without sending): not held, reset at once as without the key. */
+TEST(mqvpn_tcp_reset_hold_no_tail_resets_at_once)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0);
+    harness_t h;
+    g_reset_hold_ms = 2000;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
+                            harness_cfg_allow_127_reset_hold),
+              0);
+    char path[64];
+    reset_hold_open_flow(&h, &sink, path, sizeof(path));
+
+    ASSERT_EQ(sink_send_then_reset(&h, &sink, 0), 0);
+    uint64_t t0 = test_now_us();
+    reset_hold_pump_until_flow_gone(&h, 2000);
+    uint64_t gone_ms = (test_now_us() - t0) / 1000;
+
+    mqvpn_stats_t st;
+    reset_hold_stats(&h, &st);
+    ASSERT_EQ(st.tcp_flows_active, 0);
+    ASSERT_EQ(st.tcp_reset_econnreset, 1);
+    ASSERT_EQ(st.tcp_reset_econnreset_tail_flows, 0);
+    ASSERT_EQ(st.tcp_reset_held, 0);
+    ASSERT_EQ(gone_ms < 1000, 1);
+    reset_hold_pump_wall(&h, &h.probe.closing_notified, 2000);
+    ASSERT_EQ(h.probe.closing_notified, 1);
+    ASSERT_EQ(h.probe.raw_recv_fin, 0);
+    ASSERT_EQ(h.probe.raw_recv_len, 0);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
+/* Key on, with the flow downlink-paused (want_write armed) when the origin
+ * sends data and then resets. A reset socket is level-triggered writable, so
+ * a held flow that kept want_write would be dispatched on every pass and
+ * send() to a dead socket each time (the storm a relay error used to cause).
+ * The hold must drop write interest when it starts: no write dispatch while
+ * it runs, and at its expiry one teardown that destroys the flow first and
+ * then resets the stream, so the flow is gone even though the client never
+ * answers the reset. */
+TEST(mqvpn_tcp_reset_hold_disarms_write_interest)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0); /* never reads */
+    int rcvbuf = 4096;
+    ASSERT_EQ(setsockopt(sink.listen_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)),
+              0);
+    harness_t h;
+    g_reset_hold_ms = 2000;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
+                            harness_cfg_allow_127_reset_hold),
+              0);
+    char path[64];
+    reset_hold_open_flow(&h, &sink, path, sizeof(path));
+
+    uint8_t chunk[16384];
+    memset(chunk, 0xA5, sizeof(chunk));
+    for (int i = 0; i < 2000 && !harness_egress_wants_write(&h); i++) {
+        ssize_t sent = xqc_h3_request_send_body(h.probe.req, chunk, sizeof(chunk), 0);
+        ASSERT_EQ(sent > 0 || sent == -XQC_EAGAIN, 1);
+        int never = 0;
+        harness_pump(&h, &never, 20);
+    }
+    ASSERT_EQ(harness_egress_wants_write(&h), 1);
+
+    ASSERT_EQ(sink_send_then_reset(&h, &sink, 64 * 1024), 0);
+    mqvpn_stats_t st;
+    for (int i = 0; i < 200; i++) {
+        reset_hold_stats(&h, &st);
+        if (st.tcp_reset_held) break;
+        int never = 0;
+        harness_pump(&h, &never, 1);
+    }
+    ASSERT_EQ(st.tcp_reset_held, 1);
+    ASSERT_EQ(harness_egress_wants_write(&h), 0);
+
+    h.egress_dispatches = 0;
+    h.egress_write_dispatches = 0;
+    for (int i = 0; i < 50; i++) {
+        int never = 0;
+        harness_pump(&h, &never, 1);
+    }
+    reset_hold_stats(&h, &st);
+    ASSERT_EQ(st.tcp_flows_active, 1); /* still held: the client sent no FIN */
+    ASSERT_EQ(st.tcp_reset_held_expired, 0);
+    ASSERT_EQ(h.egress_write_dispatches, 0);
+    ASSERT_EQ(harness_egress_wants_write(&h), 0);
+
+    /* Expiry with the client frozen: the stream reset is never answered, so
+     * the flow can only be gone if it was destroyed before the reset. */
+    h.freeze_probe = 1;
+    uint64_t end = test_now_us() + 4000000ull;
+    while (test_now_us() < end) {
+        reset_hold_stats(&h, &st);
+        if (st.tcp_reset_held_expired) break;
+        int never = 0;
+        harness_pump(&h, &never, 20);
+    }
+    ASSERT_EQ(st.tcp_reset_held_expired, 1);
+    ASSERT_EQ(st.tcp_flows_active, 0);
+    int registered = 0;
+    for (int i = 0; i < HARNESS_MAX_EGRESS_FDS; i++)
+        if (h.egress_fds[i].active) registered++;
+    ASSERT_EQ(registered, 0);
+    for (int i = 0; i < 20; i++) {
+        int never = 0;
+        harness_pump(&h, &never, 1);
+    }
+    reset_hold_stats(&h, &st);
+    ASSERT_EQ(st.tcp_reset_held, 1);
+    ASSERT_EQ(st.tcp_reset_held_expired, 1);
+    ASSERT_EQ(h.egress_write_dispatches, 0);
+
+    h.freeze_probe = 0;
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
+/* Key on, with 1 MiB of client body and the client's FIN buffered at the
+ * server behind a paused downlink when the origin resets. The hold discards
+ * that body through its own read loop, which the relay budget
+ * (TCP_EGRESS_RELAY_BUDGET) does not cut short. The discard, and the stream
+ * with it, must finish within ceil(1 MiB / 64 KiB) + 1 harness passes of the
+ * hold starting (the stream cannot complete before the FIN behind the body
+ * is read), not stall until the hold expires and not spin, and the response
+ * ends with FIN. */
+TEST(mqvpn_tcp_reset_hold_drain_is_bounded)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0); /* never reads */
+    int rcvbuf = 4096;
+    ASSERT_EQ(setsockopt(sink.listen_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)),
+              0);
+    harness_t h;
+    g_reset_hold_ms = 10000;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
+                            harness_cfg_allow_127_reset_hold),
+              0);
+    char path[64];
+    reset_hold_open_flow(&h, &sink, path, sizeof(path));
+
+    /* Upload until the server's send() blocks and the downlink pauses; from
+     * then on the server reads no client body. */
+    uint8_t chunk[16384];
+    memset(chunk, 0xA5, sizeof(chunk));
+    for (int i = 0; i < 2000 && !harness_egress_wants_write(&h); i++) {
+        ssize_t sent = xqc_h3_request_send_body(h.probe.req, chunk, sizeof(chunk), 0);
+        ASSERT_EQ(sent > 0 || sent == -XQC_EAGAIN, 1);
+        int never = 0;
+        harness_pump(&h, &never, 20);
+    }
+    ASSERT_EQ(harness_egress_wants_write(&h), 1);
+
+    /* 1 MiB more and the FIN, delivered to the server (a loopback transfer
+     * of that size settles well within the second pumped here): buffered
+     * there, unread, when the hold starts. */
+    const size_t body = 1024 * 1024;
+    uint8_t *up = calloc(1, body);
+    ASSERT_EQ(up != NULL, 1);
+    ASSERT_EQ(probe_send_body_retry(&h, &h.probe, up, body, 300), 0);
+    free(up);
+    ASSERT_EQ(probe_send_fin_retry(&h, &h.probe, 500), 0);
+    {
+        int never = 0;
+        reset_hold_pump_wall(&h, &never, 1000);
+    }
+    mqvpn_stats_t st;
+    reset_hold_stats(&h, &st);
+    ASSERT_EQ(harness_egress_wants_write(&h), 1); /* downlink still paused */
+    ASSERT_EQ(st.tcp_reset_held, 0);
+
+    ASSERT_EQ(sink_send_then_reset(&h, &sink, 64 * 1024), 0);
+    const size_t cap = 64 * 1024;
+    const int bound = (int)((body + cap - 1) / cap) + 1;
+    int passes = 0, held_at = -1;
+    for (; passes < 200; passes++) {
+        reset_hold_stats(&h, &st);
+        if (held_at < 0 && st.tcp_reset_held) held_at = passes;
+        if (held_at >= 0 && st.tcp_flows_active == 0) break;
+        int never = 0;
+        harness_pump(&h, &never, 1);
+    }
+    ASSERT_EQ(held_at >= 0, 1);
+    ASSERT_EQ(st.tcp_flows_active, 0);
+    ASSERT_EQ(passes - held_at <= bound, 1);
+    ASSERT_EQ(st.tcp_reset_held, 1);
+    ASSERT_EQ(st.tcp_reset_held_fin, 1);
+    ASSERT_EQ(st.tcp_reset_held_expired, 0);
+    ASSERT_EQ(st.tcp_reset_error, 0);
+
+    reset_hold_pump_wall(&h, &h.probe.request_closed, 3000);
+    ASSERT_EQ(h.probe.raw_recv_fin, 1);
+    ASSERT_EQ(h.probe.raw_recv_len, 64 * 1024);
+    ASSERT_EQ(reset_hold_pattern_ok(h.probe.raw_recv_buf, h.probe.raw_recv_len), 1);
+    ASSERT_EQ(h.probe.closing_notified, 0);
 
     harness_stop(&h);
     tcp_sink_close(&sink);
@@ -2427,6 +3094,16 @@ TEST(mqvpn_tcp_active_idle_timeout_evicts)
     }
     ASSERT_EQ(h.probe.request_closed, 1);
     ASSERT_EQ(sink.eof_seen, 1);
+
+    /* Counted as an idle eviction, never as a relay error. */
+    {
+        mqvpn_stats_t st;
+        memset(&st, 0, sizeof(st));
+        ASSERT_EQ(mqvpn_server_get_stats(h.svr, &st), MQVPN_OK);
+        ASSERT_EQ(st.tcp_idle_evicted, 1);
+        ASSERT_EQ(st.tcp_reset_econnreset, 0);
+        ASSERT_EQ(st.tcp_reset_error, 0);
+    }
 
     /* Regression, same shape as the connect-timeout/global-cap tests: the
      * evicted flow's counters must not be stuck elevated — a fresh
@@ -3263,6 +3940,15 @@ main(void)
     run_mqvpn_tcp_downlink_backpressure_pause_resume();
     run_mqvpn_tcp_relay_error_stops_fd_dispatch();
     run_mqvpn_tcp_uplink_backlog_stops_at_unsent_cap();
+    run_mqvpn_tcp_origin_reset_counts_tail();
+    run_mqvpn_tcp_reset_hold_off_resets_at_once();
+    run_mqvpn_tcp_reset_hold_fin_after_flush();
+    run_mqvpn_tcp_reset_hold_expiry_resets();
+    run_mqvpn_tcp_reset_hold_drains_buffered_body();
+    run_mqvpn_tcp_reset_hold_fin_then_reset();
+    run_mqvpn_tcp_reset_hold_no_tail_resets_at_once();
+    run_mqvpn_tcp_reset_hold_disarms_write_interest();
+    run_mqvpn_tcp_reset_hold_drain_is_bounded();
     run_mqvpn_tcp_closing_notify_idempotent();
     run_mqvpn_tcp_active_idle_timeout_evicts();
     run_mqvpn_tcp_two_flow_same_conn_idle_eviction();
