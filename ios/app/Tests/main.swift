@@ -47,45 +47,33 @@ check(ReorderSettings.reorderEnableDecision(ruleResults: [false, false]).enable 
 check(ReorderSettings.reorderEnableDecision(ruleResults: [false, true]) == (true, 1), "partial -> enabled, added=1")
 check(ReorderSettings.reorderEnableDecision(ruleResults: []).enable == false, "no rules -> disabled")
 
-// old-wire decode: JSON missing the new keys -> safe defaults, no throw
-let oldWire = #"{"timestamp":1.0,"clientState":4,"connectedSince":0.5,"footprint":100,"paths":[]}"#
-    .data(using: .utf8)!
-let old = try! JSONDecoder().decode(TunnelSnapshot.self, from: oldWire)
-check(old.seq == 0 && old.reorderConfigured == false && old.reorder == nil, "old-wire safe defaults")
-
-// new-wire round-trip
-let full = TunnelSnapshot(timestamp: 2, clientState: 4, connectedSince: 1, footprint: 1, paths: [],
+// wire round-trip
+let full = TunnelSnapshot(timestamp: 2, clientState: 4, connectedSince: 1, paths: [],
                           seq: 7, reorderConfigured: true,
                           reorder: ReorderStatsSnapshot(delivered: 5, gapCount: 1, gapFilled: 1,
                                                         gapTimeout: 0, ackDemote: 0,
-                                                        bufferedP50Ms: 1.5, bufferedP99Ms: 9.0))
+                                                        residenceBuckets: [1, 2]))
 let rt = try! JSONDecoder().decode(TunnelSnapshot.self, from: try! JSONEncoder().encode(full))
-check(rt.seq == 7 && rt.reorderConfigured && rt.reorder == full.reorder, "new-wire round-trip")
+check(rt.seq == 7 && rt.reorderConfigured && rt.reorder == full.reorder, "wire round-trip")
 
 // saveGuard order
-check(saveGuard(isSaving: true, isEditable: false, hasManager: false) == .inProgress, "inProgress first")
-check(saveGuard(isSaving: false, isEditable: false, hasManager: true) == .notEditable, "notEditable")
-check(saveGuard(isSaving: false, isEditable: true, hasManager: false) == .notReady, "notReady")
-check(saveGuard(isSaving: false, isEditable: true, hasManager: true) == nil, "proceed")
+check(saveGuard(isEditable: false, hasManager: false) == .notEditable, "notEditable first")
+check(saveGuard(isEditable: true, hasManager: false) == .notReady, "notReady")
+check(saveGuard(isEditable: true, hasManager: true) == nil, "proceed")
 
 // performAtomicSave (real rollback logic, fault-injected via a fake store)
 enum TestErr: Error { case boom }
-final class FakeStore: ReorderConfigStore {
+final class FakeStore: ProviderConfigStore {
     var providerConfiguration: [String: Any]?
     var commitThrows = false
     var refreshThrows = false
     func commit() async throws { if commitThrows { throw TestErr.boom } }
     func refresh() async throws { if refreshThrows { throw TestErr.boom } }
 }
-func runAsync(_ body: @escaping () async -> Void) {
-    let sem = DispatchSemaphore(value: 0)
-    Task { await body(); sem.signal() }
-    sem.wait()
-}
 func boolOf(_ store: FakeStore, _ k: String) -> Bool? {
     (store.providerConfiguration?[k] as? NSNumber)?.boolValue
 }
-runAsync {
+do {
     // commit fails -> providerConfiguration rolled back to the backup value
     let store = FakeStore(); store.providerConfiguration = ["reorderEnabled": NSNumber(value: false)]
     store.commitThrows = true
@@ -94,7 +82,7 @@ runAsync {
     catch { threw = true }
     check(threw && boolOf(store, "reorderEnabled") == false, "commit fail -> rethrow + rollback")
 }
-runAsync {
+do {
     // commit ok but refresh fails -> committed value stays (refresh non-fatal)
     let store = FakeStore(); store.providerConfiguration = [:]
     store.refreshThrows = true
@@ -103,23 +91,6 @@ runAsync {
     catch { threw = true }
     check(!threw && boolOf(store, "reorderEnabled") == true, "refresh fail -> committed")
 }
-
-// IngestGate
-check(!IngestGate.accept(capturedEpoch: 1, currentEpoch: 2, isUp: true, snapSeq: 5,
-                         snapTimestamp: 9, lastSeq: 0, lastTimestamp: 0), "stale epoch rejected")
-check(!IngestGate.accept(capturedEpoch: 1, currentEpoch: 1, isUp: false, snapSeq: 5,
-                         snapTimestamp: 9, lastSeq: 0, lastTimestamp: 0), "not-up rejected")
-check(!IngestGate.accept(capturedEpoch: 1, currentEpoch: 1, isUp: true, snapSeq: 5,
-                         snapTimestamp: 9, lastSeq: 5, lastTimestamp: 0), "seq regression rejected")
-check(IngestGate.accept(capturedEpoch: 1, currentEpoch: 1, isUp: true, snapSeq: 6,
-                        snapTimestamp: 9, lastSeq: 5, lastTimestamp: 0), "seq advance accepted")
-check(IngestGate.accept(capturedEpoch: 1, currentEpoch: 1, isUp: true, snapSeq: 0,
-                        snapTimestamp: 2, lastSeq: 0, lastTimestamp: 1), "legacy ts advance accepted")
-check(!IngestGate.accept(capturedEpoch: 1, currentEpoch: 1, isUp: true, snapSeq: 0,
-                         snapTimestamp: 1, lastSeq: 0, lastTimestamp: 2), "legacy ts regression rejected")
-// legacy response must NOT slip in after a modern snapshot (lastSeq != 0)
-check(!IngestGate.accept(capturedEpoch: 1, currentEpoch: 1, isUp: true, snapSeq: 0,
-                         snapTimestamp: 99, lastSeq: 5, lastTimestamp: 0), "legacy rejected once modern seen")
 
 // ── ServerSettings ──
 let ss = ServerSettings(host: "1.2.3.4", port: 443, serverName: "vpn.example.com", authKey: "k", insecure: true)
@@ -331,7 +302,7 @@ check(ServerSettings.emptyDraft.insecure == false, "emptyDraft defaults to Insec
 // one + a stale CLOSED slot, since get_paths never shrinks n_paths). Keyed by
 // interface name, that duplicate would fabricate en0 active<->closed churn.
 func evSnap(_ paths: [(String, Int32)], state: Int32 = 4) -> TunnelSnapshot {
-    TunnelSnapshot(timestamp: 0, clientState: state, connectedSince: nil, footprint: 0,
+    TunnelSnapshot(timestamp: 0, clientState: state, connectedSince: nil,
                    paths: paths.map { PathSnapshot(name: $0.0, status: $0.1, txBytes: 0, rxBytes: 0) })
 }
 func countStatus(_ log: EventLog) -> Int {
@@ -352,10 +323,21 @@ elReal.ingest(evSnap([("en0", 1)]), now: t0)
 elReal.ingest(evSnap([("en0", 2)]), now: t0)
 check(countStatus(elReal) == 1, "genuine active->degraded transition still logged")
 
+// Core-state lines use Android's class names; 1->2->3 collapses to one line.
+// (EventLog.swift is host-test (macOS) only; not runnable on Linux.)
+let elNames = EventLog()
+for st in [Int32(1), 2, 3, 4, 5] { elNames.ingest(evSnap([], state: st), now: t0) }
+check(elNames.events.map { eventText($0.kind) } == ["core → Reconnecting", "core → Connected", "core → Connecting"],
+      "core-state labels use Android class names, deduped")
+check(eventText(.error("boom")) == "error: boom" && eventLevel(.error("boom")) == .error, "error event text/level")
+check(eventLevel(.coreState(5)) == .warn && eventLevel(.coreState(4)) == .info, "coreState level")
+
 // ── PathReadSource (the read-source chain) ─────────────────────────────────────────
 // A loopback UDP socket, a fake hop that queues closures for the "tick
-// thread" (this thread) and runs or refuses them on demand.
-do {
+// thread" (this thread) and runs or refuses them on demand. A sync function,
+// not a top-level do block: top-level await makes top-level code async, where
+// DispatchGroup.wait and NSLock are unavailable.
+func runPathReadSourceCases() {
     func udpSocket() -> (fd: Int32, addr: sockaddr_in) {
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
         check(fd >= 0, "socket()")
@@ -479,5 +461,9 @@ do {
     src2 = nil
     close(peer)
 }
+runPathReadSourceCases()
+
+failures += runPureCases()
+failures += await runSettingsCoreCases()
 
 if failures == 0 { print("host tests: ALL PASS") } else { print("host tests: \(failures) FAILURES"); exit(1) }

@@ -41,7 +41,7 @@ permissions:
 
 jobs:
   formal:
-    # Pinned, unlike ci.yml's ubuntu-latest: its apt cbmc is 5.95.1, the
+    # Pinned to 24.04 for its apt cbmc 5.95.1, the
     # version formal/cbmc/run.sh is tested with (CBMC 6 enables more checks
     # by default). "Install CBMC" enforces it.
     runs-on: ubuntu-24.04

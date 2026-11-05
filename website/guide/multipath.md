@@ -144,7 +144,8 @@ Ref: [XLINK (SIGCOMM 2021)](https://conferences.sigcomm.org/sigcomm/2021/files/p
 
 ```ini
 [Multipath]
-Reinjection = deadline   # off | deadline | idle
+# off | deadline | idle
+Reinjection = deadline
 ```
 
 | Mode | What gets copied | Use it for |
@@ -164,9 +165,12 @@ reducing that wait.
 Deadline-mode tuning (defaults shown):
 
 ```ini
-ReinjectionSrttFactorPct = 110        # duplicate when older than 1.1 × min_srtt (100–1000)
-ReinjectionHardDeadlineMs = 500       # upper clamp on the deadline (1–60000)
-ReinjectionDeadlineLowerBoundMs = 20  # lower clamp (1–60000; clamped down to the hard deadline)
+# duplicate when older than 1.1 × min_srtt (100–1000)
+ReinjectionSrttFactorPct = 110
+# upper clamp on the deadline (1–60000)
+ReinjectionHardDeadlineMs = 500
+# lower clamp (1–60000; clamped down to the hard deadline)
+ReinjectionDeadlineLowerBoundMs = 20
 ```
 
 Notes:
@@ -187,8 +191,10 @@ usually keep a live stream going. Off by default.
 ```ini
 [Multipath]
 Redundant = true
-RedundantPorts = 4200    # optional: only UDP to these destination ports
-CC = bbr                 # recommended with redundant mode
+# optional: only UDP to these destination ports
+RedundantPorts = 4200
+# recommended with redundant mode
+CC = bbr
 ```
 
 On Android, turn on the **Redundant Mode** switch (the port list is the

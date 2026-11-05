@@ -6,7 +6,7 @@ mqvpn is an L3 multipath VPN built on MASQUE CONNECT-IP (RFC 9484) and Multipath
 
 ### Server
 
-On an Ubuntu/Debian VPS, run the following to install the binary and generate a certificate, auth key, and server config. The generated config turns on hybrid mode and the reorder buffer on the server side; each takes effect only for clients that also turn it on.
+On an Ubuntu/Debian VPS, run the following to install the binary and generate a certificate, auth key, and server config. The generated config turns on hybrid mode and the reorder buffer on the server side; each takes effect only for clients that also turn it on. It also sets `AllowClientScheduler = true`, so a client can ask for its own download scheduler.
 
 ```bash
 curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh | sudo bash

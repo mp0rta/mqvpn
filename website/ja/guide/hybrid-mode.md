@@ -36,7 +36,8 @@ classifier (per packet: protocol + Tcp mode + tunnel-subnet carve-out)
 # /etc/mqvpn/server.conf
 [Hybrid]
 Enabled = true
-# EgressAllow = 10.0.5.0/24   # 中継 TCP がプライベートレンジに到達する必要がある場合のみ
+# 中継 TCP がプライベートレンジに到達する必要がある場合のみ
+# EgressAllow = 10.0.5.0/24
 ```
 
 ### クライアント
@@ -45,7 +46,8 @@ Enabled = true
 # /etc/mqvpn/client.conf
 [Hybrid]
 Enabled = true
-Tcp = auto        # stream | raw | auto（デフォルト）
+# stream | raw | auto（デフォルト）
+Tcp = auto
 ```
 
 JSON の場合は `"hybrid": {"enabled": true, "tcp": "auto"}` が等価です。全キーのリファレンス（フロー上限、タイムアウト、egress ACL）は[設定 → `[Hybrid]`](./configuration#hybrid)を参照してください。
@@ -60,7 +62,8 @@ JSON の場合は `"hybrid": {"enabled": true, "tcp": "auto"}` が等価です�
 [Hybrid]
 Enabled = true
 EgressAllow = 10.0.5.0/24
-EgressDeny = 10.0.5.13/32   # EgressAllow の後に評価
+# EgressAllow の後に評価
+EgressDeny = 10.0.5.13/32
 ```
 
 ## モニタリング

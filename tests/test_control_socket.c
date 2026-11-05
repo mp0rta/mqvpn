@@ -264,11 +264,12 @@ static int g_dummy_server; /* opaque sentinel — stubs never dereference it */
  * and unequal so a get_stats regression that hardcodes 0 or swaps the pair
  * cannot pass. */
 static void
-test_rx_stats(void *ctx, uint64_t *receives, uint64_t *datagrams)
+test_rx_stats(void *ctx, uint64_t *receives, uint64_t *datagrams, uint64_t *queue_drops)
 {
     (void)ctx;
     *receives = 61;
     *datagrams = 83;
+    *queue_drops = 29;
 }
 
 static void
@@ -514,9 +515,10 @@ test_get_stats(void)
     CHECK_HAS("\"udp_tx_datagrams\":5678");
     CHECK_HAS("\"udp_rx_receives\":61");
     CHECK_HAS("\"udp_rx_datagrams\":83");
+    CHECK_HAS("\"udp_rx_drops\":29");
     /* Stream resets by cause, added between the offload counters and
      * uptime_sec; one adjacent pin so a swapped or dropped field fails. */
-    CHECK_HAS("\"udp_rx_datagrams\":83,\"tcp_reset_econnreset\":6101,"
+    CHECK_HAS("\"udp_rx_drops\":29,\"tcp_reset_econnreset\":6101,"
               "\"tcp_reset_econnreset_tail_flows\":3707,"
               "\"tcp_reset_econnreset_tail_bytes\":1048583,\"tcp_reset_error\":1301,"
               "\"tcp_reset_error_tail_flows\":307,\"tcp_reset_error_tail_bytes\":16411,"

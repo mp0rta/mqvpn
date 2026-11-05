@@ -221,6 +221,7 @@ datagram counters and uptime.
   "tcp_flows_rejected":2,"raw_markers_active":0,
   "udp_tx_sends":54120,"udp_tx_datagrams":889304,
   "udp_rx_receives":812004,"udp_rx_datagrams":1031887,
+  "udp_rx_drops":0,
   "tcp_reset_econnreset":4,"tcp_reset_econnreset_tail_flows":1,
   "tcp_reset_econnreset_tail_bytes":65536,
   "tcp_reset_error":1,"tcp_reset_error_tail_flows":0,
@@ -251,6 +252,7 @@ datagram counters and uptime.
 | `udp_tx_datagrams` | uint64 | Outer-UDP datagrams the kernel accepted. `udp_tx_datagrams / udp_tx_sends` is the achieved transmit batching factor; 1.0 means every datagram cost its own syscall. Exactly 1.0 with `UdpGso = false` and on platforms without the batched send path. |
 | `udp_rx_receives` | uint64 | Outer-UDP receive syscalls that returned data. |
 | `udp_rx_datagrams` | uint64 | Outer-UDP datagrams delivered to the library. `udp_rx_datagrams / udp_rx_receives` is the achieved receive coalescing factor. Exactly 1.0 with `UdpGro = false`; it also stays near 1.0 when the peer is not batching its sends, since the kernel then has nothing to coalesce, and over a loopback/veth path regardless of the peer. |
+| `udp_rx_drops` | uint64 | Receive-queue drops on the listen socket: outer-UDP datagrams the kernel discarded before the server could read them, nearly always because the queue was full (a burst the server could not read in time). With `UdpGro = true` one drop is a whole coalesced batch of up to 64 datagrams. They never reach QUIC, so no other field counts them, and inner packets carried in DATAGRAMs are lost for good (DATAGRAMs are not retransmitted). Learnt from the next datagram read after a drop (Linux `SO_RXQ_OVFL`); always 0 on other platforms. Assumes fewer than 2^31 drops between two datagrams read: the kernel's 32-bit count can arrive out of order, so a larger jump looks like a stale value and is not counted. |
 | `tcp_reset_econnreset` | uint64 | Hybrid mode: TCP-lane streams the server reset because its egress socket reported `ECONNRESET` (the origin reset the connection). A stream reset discards the data the transport still holds for that stream, so one that follows data can truncate it. A counter. |
 | `tcp_reset_econnreset_tail_flows` | uint64 | The subset of `tcp_reset_econnreset` whose reset left origin bytes behind (a non-zero tail, below). |
 | `tcp_reset_econnreset_tail_bytes` | uint64 | Summed tails of `tcp_reset_econnreset`. The tail is an estimate, because the transport exposes no per-stream acknowledged offset: the bytes the stream accepted within one second before the reset, plus bytes read from the origin that it had not accepted yet. It overstates the loss when the path drains that second's bytes sooner, and understates it when the send queue holds more than a second. |
@@ -345,7 +347,7 @@ Return per-client and per-path detail for all currently connected clients.
 | `bytes_tx`      | uint64 | TUN bytes sent to this client                      |
 | `bytes_rx`      | uint64 | TUN bytes received from this client                |
 | `n_paths`       | int    | Number of entries in `paths`                       |
-| `paths`         | array  | Per-path objects (see below), at most 8, in xquic's order. A closed path stays in the connection until it ends, so a client can have more than 8: then every path that is not closed is listed (the first 8 if there are more), and the first closed ones fill the entries left. Closed and open entries can alternate. |
+| `paths`         | array  | Per-path objects (see below), at most 8, in xquic's order: the paths that are not closed first, in the order they were created, then the closed ones, in the order they closed. A closed path stays in the connection until it ends, so a client can have more than 8: then every path that is not closed is listed (the first 8 if there are more), and the first closed ones fill the entries left. |
 
 **Path object**
 
@@ -568,6 +570,11 @@ mqvpn follows semantic versioning for the control API:
   UDP GRO is configured and un-coalesced entirely in the platform layer, which
   the library never observes, so those two are read straight from the platform
   by the control socket (`ctrl_socket_create`) instead.
+- `get_stats` gained `udp_rx_drops` in v0.19.1. Additive; existing JSON
+  consumers remain unaffected. Like the other `udp_rx_*` fields it comes from
+  the POSIX bind, not from `mqvpn_stats_t`: `mqvpn_bind_posix_stats_t` gained
+  `rx_queue_drops`, appended under `struct_size`, so callers built against
+  the older header keep working without a recompile.
 - `get_status` client objects gained `scheduler` in v0.18.0 (JSON only; the C
   struct `mqvpn_client_info_t` is unchanged). Additive; existing JSON
   consumers remain unaffected.

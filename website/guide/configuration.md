@@ -32,7 +32,9 @@ User = bob:<BOB_PSK>
 
 [Multipath]
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+AllowClientScheduler = true
+# Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2
 
 [Hybrid]
 Enabled = true
@@ -54,7 +56,8 @@ intermediate.
 # /etc/mqvpn/client.conf
 [Server]
 Address = 203.0.113.1:443
-# ServerName = vpn.example.com  # TLS SNI / cert verify name (default: use Address host)
+# TLS SNI / cert verify name (default: use Address host)
+# ServerName = vpn.example.com
 
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
@@ -67,7 +70,11 @@ LogLevel = info
 
 [Multipath]
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+# Override the server's scheduler with Scheduler above for this client's downloads
+# (needs AllowClientScheduler = true on the server):
+# RequestServerScheduler = true
+# Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2
 Path = eth0
 Path = wlan0
 
@@ -102,6 +109,7 @@ The file must be strict JSON (RFC 8259): no comments, no trailing commas, and ke
   ],
   "max_clients": 64,
   "scheduler": "wlb",
+  "allow_client_scheduler": true,
   "cc": "bbr2",
   "hybrid": { "enabled": true },
   "reorder": { "enabled": true }
@@ -213,7 +221,7 @@ In JSON, use `auth_key` on both client and server (as in the examples above).
 | `RequestServerScheduler` | Client only (`request_server_scheduler` in JSON, or pass `--request-server-scheduler`). When `true`, the client asks the server to use this client's `Scheduler` for its download direction too. Setting `Scheduler` alone still affects only the upload direction, as before. Takes effect only on servers with `AllowClientScheduler = true`. | `false` |
 | `CC` | Congestion control algorithm (`bbr2`, `bbr`, `cubic`, or `none`) | `bbr2` |
 | `Path` | Network interface to bind (repeatable) | Default interface |
-| `InitMaxPathId` | MP-QUIC draft-21 test knob: initial Maximum Path Identifier advertised in transport parameters (`1`–`4294967295`; `0` = xquic default `8`) | `0` |
+| `InitMaxPathId` | Initial number of path IDs the connection may use over its lifetime (IDs 0–N; each new path, including a re-added one, uses a fresh ID; the server grants more as needed, up to 128). `1`–`128`; unset or `0` uses `8` | `0` |
 | `Reinjection` | Speculative duplication mode (`off`, `deadline`, or `idle`). `dgram` is no longer supported; a config file that sets it gets a warning and runs with `off`. Use redundant mode (`Redundant = true`) to duplicate packets. | `off` |
 | `ReinjectionSrttFactorPct` | `deadline` mode: duplicate unacked packets older than factor × min_srtt, in percent (`100`–`1000`) | `110` |
 | `ReinjectionHardDeadlineMs` | `deadline` mode: upper clamp on the duplication deadline (`1`–`60000`) | `500` |

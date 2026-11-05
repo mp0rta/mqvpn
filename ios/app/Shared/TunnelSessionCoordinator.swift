@@ -56,6 +56,39 @@ struct TunnelSessionCoordinator<Info> {
     /// Shared/ compiles without the C module; T5 pins the values.
     private static var transientReasons: Set<Int32> { [-10, -6] }
 
+    /// False when the session does not reconnect (ProtectionSettings.reconnects):
+    /// any close after establishment ends it. Pre-establishment closes are
+    /// unaffected.
+    private let reconnectEnabled: Bool
+
+    /// Kill switch: once established the session never ends itself. A
+    /// failure that would cancel the tunnel holds it in reasserting instead —
+    /// the applied settings and routes stay, so traffic is blocked rather
+    /// than leaked — until stopTunnel. Pre-establishment failures still fail
+    /// the start (nothing was protected yet).
+    private let holdOnFailure: Bool
+
+    init(reconnectEnabled: Bool = true, holdOnFailure: Bool = false) {
+        self.reconnectEnabled = reconnectEnabled
+        self.holdOnFailure = holdOnFailure
+    }
+
+    private func transient(reason: Int32) -> Bool {
+        reconnectEnabled && Self.transientReasons.contains(reason)
+    }
+
+    /// The post-establishment end of the session: cancel, or hold under the
+    /// kill switch. Callers have already settled `apply`.
+    private mutating func endEstablished(_ failure: StartFailure) -> [Action] {
+        guard holdOnFailure else {
+            phase = .terminal
+            return [.cancelTunnel(failure)]
+        }
+        let entering = phase == .established
+        phase = .reasserting
+        return entering ? [.enterReasserting] : []
+    }
+
     private(set) var phase: Phase = .starting
     private(set) var apply: Apply = .idle
 
@@ -106,17 +139,22 @@ struct TunnelSessionCoordinator<Info> {
             }
 
         case .settingsApplied(.some(let err)):
-            if case .idle = apply { return [] }
-            let wasStarting = phase == .starting
-            phase = .terminal
-            return [wasStarting ? .failStart(.settings(err)) : .cancelTunnel(.settings(err))]
+            guard case .applying(let pending, _) = apply else { return [] }
+            if phase == .starting {
+                phase = .terminal
+                return [.failStart(.settings(err))]
+            }
+            // Held: a queued config (a newer connection) is still applied.
+            let retry = holdOnFailure ? pending : nil
+            apply = retry == nil ? .idle : .applying(pending: nil, stale: false)
+            return endEstablished(.settings(err)) + (retry.map { [.applySettings($0)] } ?? [])
 
         case .closed(let reason):
             if phase == .starting {
                 phase = .terminal
                 return [.failStart(.core(reason))]
             }
-            if Self.transientReasons.contains(reason) {
+            if transient(reason: reason) {
                 if case .applying = apply {
                     // The in-flight apply belongs to the dead connection.
                     apply = .applying(pending: nil, stale: true)
@@ -128,13 +166,17 @@ struct TunnelSessionCoordinator<Info> {
             // TLS (-4), AUTH (-5), unknown: fail closed (spec D6 — network
             // fetch is disallowed in SystemTrust, so a TLS failure during
             // reasserting is a certificate problem, not a transient).
-            phase = .terminal
-            return [.cancelTunnel(.core(reason))]
+            if case .applying = apply {
+                apply = .applying(pending: nil, stale: true)
+            }
+            return endEstablished(.core(reason))
 
         case .startFailed(let code):
-            let wasStarting = phase == .starting
-            phase = .terminal
-            return [wasStarting ? .failStart(.local(code)) : .cancelTunnel(.local(code))]
+            if phase == .starting {
+                phase = .terminal
+                return [.failStart(.local(code))]
+            }
+            return endEstablished(.local(code))
 
         case .stopRequested:
             let wasStarting = phase == .starting

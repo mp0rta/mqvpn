@@ -1,0 +1,6 @@
+- New look: a tabbed dashboard with live speed and reordering charts,
+  and per-network switches to use or skip Wi-Fi, mobile data, Ethernet
+  and Bluetooth.
+- The app no longer freezes or loses its Disconnect button when it is
+  reopened while the VPN keeps running.
+- Fix a crash when a connection ended right as the tunnel was starting.

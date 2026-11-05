@@ -140,7 +140,8 @@ Ref: [XLINK (SIGCOMM 2021)](https://conferences.sigcomm.org/sigcomm/2021/files/p
 
 ```ini
 [Multipath]
-Reinjection = deadline   # off | deadline | idle
+# off | deadline | idle
+Reinjection = deadline
 ```
 
 | モード | 何をコピーするか | 用途 |
@@ -159,9 +160,12 @@ head-of-line blocking）。無音で死んだ回線は最悪数百 ms のタイ�
 deadline モードのチューニング（デフォルト値）：
 
 ```ini
-ReinjectionSrttFactorPct = 110        # 最小往復時間（min_srtt）の 1.1 倍を超えて未確認ならコピー（100–1000）
-ReinjectionHardDeadlineMs = 500       # 待ち時間の上限 ms（1–60000）
-ReinjectionDeadlineLowerBoundMs = 20  # 待ち時間の下限 ms（1–60000。上限を超える設定は上限に切り詰め）
+# 最小往復時間（min_srtt）の 1.1 倍を超えて未確認ならコピー（100–1000）
+ReinjectionSrttFactorPct = 110
+# 待ち時間の上限 ms（1–60000）
+ReinjectionHardDeadlineMs = 500
+# 待ち時間の下限 ms（1–60000。上限を超える設定は上限に切り詰め）
+ReinjectionDeadlineLowerBoundMs = 20
 ```
 
 注意：
@@ -182,8 +186,10 @@ ReinjectionDeadlineLowerBoundMs = 20  # 待ち時間の下限 ms（1–60000。�
 ```ini
 [Multipath]
 Redundant = true
-RedundantPorts = 4200    # 任意: 宛先がこのポートの UDP だけ複製
-CC = bbr                 # 冗長モードでの推奨
+# 任意: 宛先がこのポートの UDP だけ複製
+RedundantPorts = 4200
+# 冗長モードでの推奨
+CC = bbr
 ```
 
 Android では **Redundant Mode** スイッチをオンにします（ポートの指定は

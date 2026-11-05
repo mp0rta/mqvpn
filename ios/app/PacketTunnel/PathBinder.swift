@@ -28,7 +28,14 @@ final class PathBinder {
     // every fd is closed AND its release was reported to the library.
     private let fence = DispatchGroup()
 
-    init(engine: MqvpnEngine) { self.engine = engine }
+    /// Interface types this session may use; an Off type is never probed or
+    /// registered. WiFi stays first (primary path ordering, see reconcile).
+    private let monitoredTypes: [NWInterface.InterfaceType]
+
+    init(engine: MqvpnEngine, policy: PathPolicy = PathPolicy()) {
+        self.engine = engine
+        monitoredTypes = policy.enabledKinds.map(\.interfaceType)
+    }
     /// True once stop() emptied the monitors (start() has run by the time
     /// any caller can observe this — reconcile/addPath are only reachable
     /// through triggers start() arms). One predicate for both guards so
@@ -51,7 +58,7 @@ final class PathBinder {
         // A handler can fire the instant its monitor starts and hop
         // reconcile() onto the tick thread, which reads `monitors` — the
         // dict must not be concurrently mutated by this loop at that point.
-        for type in [NWInterface.InterfaceType.wifi, .cellular] {
+        for type in monitoredTypes {
             let m = NWPathMonitor(requiredInterfaceType: type)
             m.pathUpdateHandler = { [weak self] _ in
                 guard let self else { return }
@@ -76,7 +83,7 @@ final class PathBinder {
         }
     }
 
-    /// Re-derive add/remove state for the managed interface types, WiFi
+    /// Re-derive add/remove state for the monitored interface types, WiFi
     /// strictly before cellular: probes resolve asynchronously, so the
     /// cellular probe only starts after the WiFi result was applied. This
     /// keeps the first registration (and therefore the QUIC primary path)
@@ -87,9 +94,12 @@ final class PathBinder {
     /// addPath/removePath, whose guards make repeats no-ops.
     func reconcile() {
         guard !isStopped else { return }   // after stop(): no-op
-        probe(.wifi) { [weak self] in
-            self?.probe(.cellular, then: nil)
-        }
+        probeChain(monitoredTypes[...])
+    }
+
+    private func probeChain(_ types: ArraySlice<NWInterface.InterfaceType>) {
+        guard let first = types.first else { return }
+        probe(first) { [weak self] in self?.probeChain(types.dropFirst()) }
     }
 
     /// One-shot fresh path lookup. A NEW NWPathMonitor registration always
@@ -243,6 +253,13 @@ final class PathBinder {
         fence.notify(queue: monitorQueue) { [engine] in
             engine.perform(completion)
         }
+    }
+
+    /// ifname -> transport of every bound path, for the app snapshot (tick thread).
+    func pathKinds() -> [String: TransportKind] {
+        var out: [String: TransportKind] = [:]
+        for (type, slot) in slots { out[slot.ifname] = TransportKind(interfaceType: type) }
+        return out
     }
 
     /// Current (ifname, fd) per live slot, for GateMetrics' getsockopt

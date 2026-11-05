@@ -19,3 +19,12 @@ mqvpn_ext_reorder_layout_id(void)
 // reorder.h edit that changes the layout fails the build here.
 _Static_assert(sizeof(mqvpn_reorder_stats_t) == 27 * sizeof(uint64_t),
                "mqvpn_reorder_stats_t layout changed — update the monitor + this assert");
+
+// Bounds-checked accessor for the residence histogram: Swift imports the
+// C array as a 12-element tuple, which is awkward to index.
+uint64_t
+mqvpn_shim_reorder_bucket(const mqvpn_reorder_stats_t *s, int i)
+{
+    if (!s || i < 0 || i >= MQVPN_REORDER_LAT_BUCKETS) return 0;
+    return s->residence_bucket[i];
+}
