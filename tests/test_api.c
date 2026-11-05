@@ -924,7 +924,12 @@ TEST(client_state_string)
 {
     /* The CLI logs these names; e2e scripts grep "state: .* CLOSED". */
     ASSERT_STR_EQ(mqvpn_client_state_string(MQVPN_STATE_IDLE), "IDLE");
+    ASSERT_STR_EQ(mqvpn_client_state_string(MQVPN_STATE_CONNECTING), "CONNECTING");
+    ASSERT_STR_EQ(mqvpn_client_state_string(MQVPN_STATE_AUTHENTICATING),
+                  "AUTHENTICATING");
     ASSERT_STR_EQ(mqvpn_client_state_string(MQVPN_STATE_TUNNEL_READY), "TUNNEL_READY");
+    ASSERT_STR_EQ(mqvpn_client_state_string(MQVPN_STATE_ESTABLISHED), "ESTABLISHED");
+    ASSERT_STR_EQ(mqvpn_client_state_string(MQVPN_STATE_RECONNECTING), "RECONNECTING");
     ASSERT_STR_EQ(mqvpn_client_state_string(MQVPN_STATE_CLOSED), "CLOSED");
     ASSERT_STR_EQ(mqvpn_client_state_string(MQVPN_STATE__COUNT), "?");
     ASSERT_STR_EQ(mqvpn_client_state_string((mqvpn_client_state_t)-1), "?");
