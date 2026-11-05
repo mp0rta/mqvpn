@@ -183,19 +183,32 @@ test_path_mtu_sizes_packets(void)
     static const struct {
         int path_mtu;
         size_t pkt;
+        size_t udp; /* advertised max_udp_payload_size, 0 = default */
     } cases[] = {
-        {0, MQVPN_MAX_PKT_OUT_SIZE},
-        {1280, 1200},
-        {1492, 1412},
-        {1499, 1419},
-        {1500, 1436},
-        {9000, 1436},
+        {0, MQVPN_MAX_PKT_OUT_SIZE, 0},
+        {1280, 1200, 1232},
+        {1492, 1412, 1444},
+        {1499, 1419, 1451},
+        {1500, 1436, 0},
+        {9000, 1436, 0},
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         in.path_mtu = cases[i].path_mtu;
         mqvpn_build_conn_settings(&in, &cs);
         ASSERT_EQ(cs.max_pkt_out_size, cases[i].pkt);
+        ASSERT_EQ(cs.max_udp_payload_size, cases[i].udp);
+        in.is_server = true;
+        mqvpn_build_conn_settings(&in, &cs);
+        ASSERT_EQ(cs.max_udp_payload_size, cases[i].udp);
+        in.is_server = false;
+    }
+    /* the advertised payload fits the path, IPv6 header included */
+    for (int mtu = 1280; mtu <= 1500; mtu++) {
+        in.path_mtu = mtu;
+        mqvpn_build_conn_settings(&in, &cs);
+        if (cs.max_udp_payload_size)
+            ASSERT_EQ(cs.max_udp_payload_size + 48 <= (size_t)mtu, 1);
     }
     /* the largest packet on the wire fits the path, IPv6 header included */
     for (int mtu = 1280; mtu <= 1500; mtu++) {
@@ -247,6 +260,13 @@ test_pmtud_sizes(void)
     }
     /* the base size still gives IPv6 its 1280-byte inner MTU */
     ASSERT_EQ(MQVPN_PMTUD_BASE_PKT_OUT_SIZE - MQVPN_DGRAM_HEADROOM, 1280);
+
+    /* with PMTUD, what is advertised is the PathMTU size it may grow to,
+     * not the smaller start size */
+    in.path_mtu = 1400;
+    in.is_server = false;
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_EQ(cs.max_udp_payload_size, (size_t)1320 + MQVPN_PKT_OUT_OVERHEAD);
 
     /* with reorder, the start size (also where xquic goes back to when a
      * path shrinks) leaves room for its header, PathMTU still capping it */

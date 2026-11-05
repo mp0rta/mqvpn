@@ -120,6 +120,12 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     out->proto_version = XQC_VERSION_V1;
     out->pacing_on = 1;
     out->max_pkt_out_size = mqvpn_pkt_out_size(in->path_mtu);
+    /* Advertise what a smaller PathMTU can receive (max_udp_payload_size),
+     * so a server with a bigger one sizes its packets for this client: xquic
+     * caps a server's packets to it minus the ACK and tag room, which gives
+     * back the size this side sends. At the cap the default (1500) is kept. */
+    if (in->path_mtu > 0 && out->max_pkt_out_size < MQVPN_XQC_MAX_PKT_OUT_SIZE)
+        out->max_udp_payload_size = out->max_pkt_out_size + MQVPN_PKT_OUT_OVERHEAD;
     /* PMTUD: start at the smallest size that still gives an IPv6 inner MTU
      * of 1280, with the reorder header when reorder may be negotiated, and
      * let xquic grow it while its probes are acknowledged, up to the PathMTU
