@@ -2853,7 +2853,9 @@ test_h3_close_runs_closing_notify_inline(void)
     mqvpn_hybrid_config_default(&cfg);
     mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xe003ULL, NULL, fake_clock, NULL);
     struct tcp_pcb pcb1, pcb2;
-    int req1, stream1, req2, stream2;
+    int req1, req2;
+    /* Static so g_h3_close_reenter_stream never holds a stack address. */
+    static int stream1, stream2;
 
     /* lwIP error path: close_h3, then remove_flow. */
     mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb1, 8300, &req1, &stream1, 1);
