@@ -7,7 +7,7 @@
 #   1. All 3 clients connect with correct PSK and get unique IPs
 #   2. All clients can ping through the tunnel
 #   3. One client disconnect doesn't affect others
-#   4. Wrong PSK is rejected within seconds, without a tunnel
+#   4. Wrong PSK is rejected by the PSK check within seconds, without a tunnel
 #   5. Per-client scheduler (--request-server-scheduler) shows in get_status
 #
 # Usage: sudo ./test_multiclient.sh [path-to-mqvpn-binary]
@@ -340,8 +340,14 @@ ip netns exec mc-client-bad "$MQVPN" \
 CLIENT_BAD_PID=$!
 
 # The rejection must reach the client quickly (its failure marker), not hang.
+# The client logs that marker for any refusal (a full server also sends 403),
+# so the server log must show that the PSK check refused it.
 if ! wait_for_log "${WORK_DIR}/client_bad.log" "CONNECT-IP request failed" 10; then
     echo "FAIL: Bad client did not report 'CONNECT-IP request failed' within 10s"
+    AUTH_PASS=0
+elif ! wait_for_log "${WORK_DIR}/server.log" \
+    "authentication failed: invalid or missing PSK" 5; then
+    echo "FAIL: Server did not log a PSK rejection for the bad client"
     AUTH_PASS=0
 elif ip netns exec mc-client-bad ip addr show dev mqvpn0 >/dev/null 2>&1; then
     echo "FAIL: Bad client got a TUN device (should have been rejected)"
