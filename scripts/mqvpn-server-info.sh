@@ -42,7 +42,22 @@ is_ipv4() {
 # Admins paste the client command into a root shell, so a value from the
 # certificate or the network goes into it only if it is a plain name or address.
 is_host_name() { [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$ ]]; }
-is_ipv6() { [[ "$1" =~ ^[0-9A-Fa-f:]{2,39}$ && "$1" == *:* ]]; }
+# The same address check as valid_subnet6 in mqvpn-server-setup.
+is_ipv6() {
+    local addr=$1 part colons n=0
+    if [[ "$addr" != *::* ]]; then
+        [[ "$addr" =~ ^[0-9A-Fa-f]{1,4}(:[0-9A-Fa-f]{1,4}){7}$ ]]
+        return
+    fi
+    [[ "$addr" != *::*::* ]] || return 1
+    for part in "${addr%%::*}" "${addr#*::}"; do
+        [ -n "$part" ] || continue
+        [[ "$part" =~ ^[0-9A-Fa-f]{1,4}(:[0-9A-Fa-f]{1,4})*$ ]] || return 1
+        colons=${part//[^:]/}
+        n=$(( n + ${#colons} + 1 ))
+    done
+    (( n <= 7 ))
+}
 
 # A certificate name other than the default "mqvpn" is the public hostname
 # that mqvpn-server-setup got (--hostname, debconf or MQVPN_HOSTNAME).
@@ -51,10 +66,10 @@ NOTE=
 if [ -r "$CERT" ]; then
     cn=$(openssl x509 -in "$CERT" -noout -subject -nameopt multiline 2>/dev/null \
         | sed -n 's/^[[:space:]]*commonName[[:space:]]*=[[:space:]]*//p' | head -n 1) || cn=
-    # A CA certificate can have its names only in subjectAltName, with no CN.
-    mapfile -t dns < <(openssl x509 -in "$CERT" -noout -ext subjectAltName 2>/dev/null \
-        | tr ',' '\n' | sed -n 's/^[[:space:]]*DNS://p')
-    for name in "$cn" "${dns[@]}"; do
+    # The client checks subjectAltName before the CN (RFC 6125), and a CA certificate can have no CN.
+    mapfile -t san < <(openssl x509 -in "$CERT" -noout -ext subjectAltName 2>/dev/null \
+        | tr ',' '\n' | sed -n -e 's/^[[:space:]]*DNS://p' -e 's/^[[:space:]]*IP Address://p')
+    for name in "${san[@]}" "$cn"; do
         if [ "$name" != mqvpn ] && { is_host_name "$name" || is_ipv6 "$name"; }; then
             SERVER=$name
             break

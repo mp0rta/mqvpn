@@ -233,8 +233,13 @@ elif [ "$crt_exists" -eq 0 ] && [ "$key_exists" -eq 0 ]; then
     record_generated "$KEY"
     record_hash "$tmp_crt" "$CRT"
     record_hash "$tmp_key" "$KEY"
-    mv "$tmp_key" "$KEY"
-    mv "$tmp_crt" "$CRT"
+    # ln and not mv: link() fails on an existing path, so a file made meanwhile stays.
+    ln "$tmp_key" "$KEY" 2>/dev/null || err "$KEY appeared during setup; it was not replaced"
+    if ! ln "$tmp_crt" "$CRT" 2>/dev/null; then
+        rm -f "$KEY"
+        err "$CRT appeared during setup; it was not replaced"
+    fi
+    rm -f "$tmp_key" "$tmp_crt"
     trap - EXIT
     ok "Generated self-signed certificate (CN=${MQVPN_HOSTNAME:-mqvpn})"
 else
@@ -257,7 +262,7 @@ if [ ! -f "$CONF" ]; then
         fi
     fi
 
-    # A temporary file and mv: a failure never leaves a partial server.conf.
+    # A temporary file and ln: a failure never leaves a partial server.conf, and ln never replaces one.
     tmp=$(mktemp "$CONF_DIR/.server.conf.XXXXXX")
     trap 'rm -f "$tmp"' EXIT
     {
@@ -297,7 +302,8 @@ if [ ! -f "$CONF" ]; then
         fi
     } > "$tmp"
     chmod 600 "$tmp"
-    mv "$tmp" "$CONF"
+    ln "$tmp" "$CONF" 2>/dev/null || err "$CONF appeared during setup; it was not replaced"
+    rm -f "$tmp"
     trap - EXIT
     record_generated "$CONF"
     ok "Generated $CONF"

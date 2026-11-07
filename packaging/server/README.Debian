@@ -119,7 +119,9 @@ The package enables and starts the service on the first install. To prevent
 this, preseed mqvpn-server/autostart to false or set
 MQVPN_SERVER_AUTOSTART=no. The package uses deb-systemd-invoke, so a
 policy-rc.d that refuses starts (containers, chroots, image builds) also
-prevents the start.
+prevents the start. The autostart answer and a failed setup do not disable a
+unit that an earlier mqvpn deb or install.sh enabled; to disable it, run
+"systemctl disable mqvpn-server".
 
 On an upgrade, the package restarts the server only if it is running. A
 server that you stopped stays stopped.
