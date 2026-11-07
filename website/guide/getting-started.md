@@ -6,7 +6,39 @@ mqvpn is an L3 multipath VPN built on MASQUE CONNECT-IP (RFC 9484) and Multipath
 
 ### Server
 
-On an Ubuntu/Debian VPS, run the following to install the binary and generate a certificate, auth key, and server config. The generated config turns on hybrid mode and the reorder buffer on the server side; each takes effect only for clients that also turn it on. It also sets `AllowClientScheduler = true`, so a client can ask for its own download scheduler.
+#### Debian and Ubuntu (deb packages)
+
+The `mqvpn` deb contains the VPN program for both client and server; `mqvpn-server` adds the server service, NAT setup, and first-run configuration. Download the `mqvpn` and `mqvpn-server` debs of the same version from [Releases](https://github.com/mp0rta/mqvpn/releases/latest), then install both.
+
+```bash
+# Replace VERSION and ARCH as needed (e.g., 0.19.3, amd64)
+curl -LO https://github.com/mp0rta/mqvpn/releases/latest/download/mqvpn_VERSION_ARCH.deb
+curl -LO https://github.com/mp0rta/mqvpn/releases/latest/download/mqvpn-server_VERSION_ARCH.deb
+sudo apt install ./mqvpn_VERSION_ARCH.deb ./mqvpn-server_VERSION_ARCH.deb
+```
+
+The install generates a certificate, auth key, and server config, then starts the server and registers it for automatic startup on boot. It keeps a certificate or config that already exists. The generated config turns on hybrid mode and the reorder buffer on the server side; each takes effect only for clients that also turn it on. It also sets `AllowClientScheduler = true`, so a client can ask for its own download scheduler.
+
+The install prints the auth key and a client command. Run `sudo mqvpn-server-info` to show them again.
+
+The install asks for an optional public hostname for the certificate. It asks for a client subnet only when the default `10.0.0.0/24` overlaps a network of the server, and for the port only when UDP 443 is already in use. To set values in advance, for example in automation:
+
+```bash
+echo 'mqvpn-server mqvpn-server/subnet string 10.8.0.0/24' | sudo debconf-set-selections
+sudo env MQVPN_PORT=10020 apt install ./mqvpn_VERSION_ARCH.deb ./mqvpn-server_VERSION_ARCH.deb
+```
+
+These values apply only to a new `/etc/mqvpn/server.conf`. To change a running server, edit `/etc/mqvpn/server.conf` and run `sudo systemctl restart mqvpn-server`.
+
+`sudo apt remove mqvpn-server` stops the server and keeps `/etc/mqvpn`. `sudo apt purge mqvpn-server` also deletes the generated config, auth key, and certificate, so every client then needs the new auth key. Files that you created yourself stay. More details: `/usr/share/doc/mqvpn-server/README.Debian`.
+
+::: tip Upgrading from 0.19.2 or earlier
+The server files moved from the `mqvpn` deb to the new `mqvpn-server` deb. Install both debs together. Your `/etc/mqvpn` config stays as it is. If you used the install script before, first run it with `--uninstall` (it keeps `/etc/mqvpn`).
+:::
+
+#### Other Linux distributions (install script)
+
+Run the following to install the binary to `/usr/local` and generate the same certificate, auth key, and server config as the deb.
 
 ```bash
 curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh | sudo bash
@@ -29,13 +61,13 @@ curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
 To uninstall, re-run the script with `--uninstall` (add `--purge` to also remove config files).
 
 ::: warning
-The install script generates a self-signed certificate. Clients must use `--insecure` to connect. For production, replace the certificate with a trusted one (e.g., Let's Encrypt) and omit `--insecure`.
+Both install methods generate a self-signed certificate when the server has none. With that certificate, clients must use `--insecure` to connect. For production, replace the certificate with a trusted one (e.g., Let's Encrypt) and omit `--insecure`. The deb keeps a certificate that is already in place, and `sudo mqvpn-server-info` adds `--insecure` to the client command only for a self-signed certificate.
 Point `--cert` (or `Cert` / `cert_file` in a config file) at the full chain file (for Let's Encrypt, `fullchain.pem`): clients do not fetch missing intermediates.
 :::
 
-### Client (deb package)
+### Client (Debian and Ubuntu)
 
-Download the latest `.deb` from [Releases](https://github.com/mp0rta/mqvpn/releases/latest).
+Download the latest `mqvpn` deb from [Releases](https://github.com/mp0rta/mqvpn/releases/latest).
 
 ```bash
 # Replace VERSION and ARCH as needed (e.g., 0.6.0, amd64)
@@ -57,7 +89,7 @@ See [Building](./building) for instructions.
 
 ## Quick Start
 
-After installing the server and client, connect using the auth key and address shown by the install script.
+After installing the server and client, connect using the auth key and address that the server install showed. On a deb install, `sudo mqvpn-server-info` shows them again. The commands below use `--insecure` for a self-signed certificate; omit it if the server has a trusted certificate.
 
 Single path:
 

@@ -1,0 +1,19 @@
+mqvpn (0.19.3) unstable; urgency=medium
+
+  The mqvpn deb is now three packages:
+
+   * mqvpn: the client, libmqvpn.so.4, libxquic.so and the client examples.
+   * mqvpn-server: mqvpn-server.service, the NAT helper and the server
+     examples. On the first install, it creates a TLS certificate and
+     /etc/mqvpn/server.conf if they are absent, and starts the server.
+   * mqvpn-dev: the headers and the libmqvpn.so link. Install it together
+     with the mqvpn deb of the same version.
+
+  If you run mqvpn-server.service from the mqvpn package, also install
+  mqvpn-server_<version>_<arch>.deb. Without it, this upgrade deletes the
+  unit file. mqvpn-server keeps your /etc/mqvpn/server.conf, certificate
+  and key.
+
+  No package ships libmqvpn.a now. Link with -lmqvpn (libmqvpn.so).
+
+ -- mp0rta <contact@mp0rta.dev>  Sun, 01 Nov 2026 00:00:00 +0000

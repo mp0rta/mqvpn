@@ -1,0 +1,24 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
+
+set -e
+
+UNIT=mqvpn-server.service
+STATE_DIR=/var/lib/mqvpn-server
+
+# Not on upgrade: postinst restarts an active server after the unpack.
+if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+    if systemctl --quiet is-active "$UNIT"; then
+        mkdir -p "$STATE_DIR"
+        touch "$STATE_DIR/start-after-reinstall"
+    fi
+    # ExecStopPost runs mqvpn-server-nat.sh teardown and reverts the NAT rules and sysctls.
+    deb-systemd-invoke stop "$UNIT" >/dev/null || true
+    # policy-rc.d can refuse the stop. Then the teardown script goes with the package.
+    if systemctl --quiet is-active "$UNIT"; then
+        echo "mqvpn-server: warning: $UNIT is still running (the stop was refused or failed). Stop it with 'systemctl stop mqvpn-server'. Its NAT teardown script goes with this package, so then delete the iptables and ip6tables rules with the comment mqvpn-server-nat by hand." >&2
+    fi
+fi
+
+exit 0

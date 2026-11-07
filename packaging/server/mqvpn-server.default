@@ -1,0 +1,36 @@
+# Settings for mqvpn-server-setup (mqvpn-server package).
+#
+# These settings apply ONLY when mqvpn-server-setup creates a new
+# /etc/mqvpn/server.conf: on the first install, or after you delete
+# server.conf and run /usr/lib/mqvpn/mqvpn-server-setup. They never change an
+# existing server.conf. To change a running server, edit
+# /etc/mqvpn/server.conf and run: systemctl restart mqvpn-server
+#
+# Precedence, lowest first: built-in defaults, debconf answers, this file,
+# environment variables, mqvpn-server-setup options.
+#
+# This file is a dpkg conffile. If you change it and a later package version
+# also changes it, dpkg asks which version to keep.
+
+# UDP port of the server.
+#MQVPN_PORT=443
+
+# IPv4 subnet for the VPN clients. It must not overlap a network of this host.
+#MQVPN_SUBNET=10.0.0.0/24
+
+# IPv6 subnet for the VPN clients. Empty: a random ULA /112, only when IPv6
+# works on this host.
+#MQVPN_SUBNET6=
+
+# Public hostname or IP address. The self-signed certificate and the printed
+# client command use it. Empty: the certificate name "mqvpn" and the detected
+# public IP address.
+#MQVPN_HOSTNAME=
+
+# Local control API on 127.0.0.1 (yes or no). It has no authentication and no
+# TLS.
+#MQVPN_ENABLE_CONTROL=no
+#MQVPN_CONTROL_PORT=9090
+
+# Enable and start mqvpn-server.service on the first install (yes or no).
+#MQVPN_SERVER_AUTOSTART=yes

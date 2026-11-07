@@ -2,3 +2,29 @@
 set -e
 ldconfig
 systemctl daemon-reload 2>/dev/null || true
+
+# CMake replaces @MQVPN_DEB_SPLIT_VERSION@ (configure_file).
+if [ "$1" = configure ] && [ -n "$2" ] && dpkg --compare-versions "$2" lt "@MQVPN_DEB_SPLIT_VERSION@~"; then
+    server_wanted=0
+    # dpkg already deleted the old unit file, so is-enabled cannot report it.
+    for link in /etc/systemd/system/*.wants/mqvpn-server.service; do
+        [ -L "$link" ] && server_wanted=1
+    done
+    if [ -d /run/systemd/system ] && systemctl --quiet is-active mqvpn-server.service 2>/dev/null; then
+        server_wanted=1
+    fi
+    server_status=$(dpkg-query -W -f='${db:Status-Status}' mqvpn-server 2>/dev/null) || server_status=
+    case "$server_status" in
+    ""|not-installed|config-files) server_absent=1 ;;
+    *) server_absent=0 ;;
+    esac
+    if [ "$server_wanted" = 1 ] && [ "$server_absent" = 1 ]; then
+        cat >&2 <<'EOF'
+mqvpn: WARNING: mqvpn-server.service is enabled or running, but the mqvpn
+mqvpn: package no longer contains it. The server files are now in the
+mqvpn: mqvpn-server package. Install mqvpn-server_@PROJECT_VERSION@_<arch>.deb
+mqvpn: to get the unit back. Your /etc/mqvpn configuration is unchanged.
+mqvpn: If you install mqvpn-server in this same apt run, ignore this warning.
+EOF
+    fi
+fi

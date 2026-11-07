@@ -588,7 +588,7 @@ All commands return a JSON response with an `"ok"` field. Each connection handle
 
 ## systemd
 
-If you installed via the deb package or install.sh, the systemd units are already in place. For source builds, install manually:
+If you installed the debs or used install.sh, the systemd units are already in place: the `mqvpn` deb has the client unit, and the `mqvpn-server` deb has the server unit. For source builds, install manually:
 
 ```bash
 sudo cmake --install build --prefix /usr/local
@@ -596,7 +596,7 @@ sudo cmake --install build --prefix /usr/local
 
 ### Server
 
-If you used install.sh, `/etc/mqvpn/server.conf` is already generated. To configure manually, copy the example:
+If you installed the `mqvpn-server` deb or used install.sh, `/etc/mqvpn/server.conf` is already generated. To configure manually, copy the example:
 
 ```bash
 sudo cp /etc/mqvpn/server.conf.example /etc/mqvpn/server.conf

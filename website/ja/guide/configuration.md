@@ -572,7 +572,7 @@ mqvpn --status --control-port 9090
 
 ## systemd
 
-deb パッケージや install.sh でインストール済みの場合、systemd ユニットは自動的に配置されます。ソースからビルドした場合は手動でインストールします：
+deb パッケージや install.sh でインストール済みの場合、systemd ユニットは自動的に配置されます。クライアントのユニットは `mqvpn` deb に、サーバーのユニットは `mqvpn-server` deb に含まれます。ソースからビルドした場合は手動でインストールします：
 
 ```bash
 sudo cmake --install build --prefix /usr/local
@@ -580,7 +580,7 @@ sudo cmake --install build --prefix /usr/local
 
 ### サーバー
 
-install.sh を使った場合は `/etc/mqvpn/server.conf` が自動生成されています。手動で設定する場合はサンプルをコピーします：
+`mqvpn-server` deb または install.sh でインストールした場合は `/etc/mqvpn/server.conf` が自動生成されています。手動で設定する場合はサンプルをコピーします：
 
 ```bash
 sudo cp /etc/mqvpn/server.conf.example /etc/mqvpn/server.conf
