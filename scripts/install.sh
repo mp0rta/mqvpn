@@ -179,6 +179,11 @@ for cmd in curl openssl systemctl iptables ip sysctl ip6tables; do
     command -v "$cmd" >/dev/null 2>&1 || err "Required command not found: $cmd"
 done
 
+# The mqvpn binary links libevent-2.1.so.7; minimal images may ship only
+# libevent_core. grep without -q reads to EOF (no SIGPIPE under pipefail).
+ldconfig -p | grep -F 'libevent-2.1.so.7 ' >/dev/null \
+    || err "Required library not found: libevent-2.1.so.7 (apt-get install libevent-2.1-7t64, or libevent-2.1-7 on older releases)"
+
 ok "Detected ${PRETTY_NAME:-$ID}, $ARCH"
 
 # --- Step 2: Download ---
