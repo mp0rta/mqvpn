@@ -64,6 +64,10 @@ rules belong here, reasons there.
   Android/iOS remove and add. Do not unify them. [DD §4]
 - Public structs that carry `struct_size` grow only by appending fields, each
   with an `appended under ABI N` comment. `MQVPN_MAX_PATHS` is ABI-frozen.
+- The getters write their whole output struct without reading the caller's
+  `struct_size`. Growing a struct a getter fills in also needs a
+  `MQVPN_SOVERSION` bump in `CMakeLists.txt`; `tests/test_abi_sizes.c` fails
+  until it is done.
 - In the xquic fork the trade is reversed: growing a struct is an acceptable
   ABI break (pinned pair, coordinated rebuild, SemVer bump), while publishing
   a new exported function is the irreversible direction. Never add public
@@ -107,7 +111,8 @@ rules belong here, reasons there.
 - Adding a config key = one row in the descriptor table (`src/config.c`) +
   one key in `test_ini_json_scalar_parity` (`tests/test_config.c`) + the key
   in `website/guide/configuration.md` and `website/ja/guide/configuration.md`.
-  [DD §10]
+  A key the library reads also needs the setter and CLI steps listed under
+  "Adding a config key" in CONTRIBUTING.md. [DD §10]
 - Test files that call `assert()` carry `#undef NDEBUG` (CI-checked). Claim
   test results only from a Debug or sanitizer build, never from `build.sh`'s
   Release build. [DD §10]

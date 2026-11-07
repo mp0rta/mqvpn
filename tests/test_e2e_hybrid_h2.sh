@@ -1164,7 +1164,11 @@ import sys, json
 FLOOR = 100000
 try:
     d = json.load(sys.stdin)
-    paths = d['clients'][0]['paths']
+    # A path that closed (e.g. replaced after a failed validation) stays in
+    # the list with the bytes it had, and one that is closing is not live
+    # either; only live paths show the spread.
+    paths = [p for p in d['clients'][0]['paths']
+             if p.get('state_label') not in ('closing', 'closed')]
 except Exception as e:
     print('FAIL parse: %s' % e); sys.exit()
 loads = sorted(p.get('bytes_tx', 0) + p.get('bytes_rx', 0) for p in paths)
@@ -1485,8 +1489,7 @@ echo "  flow_a bytes received at target before path bring-up: ${LANE_BYTES_A_BEF
 # ── Bring path 1 up live ──
 ip netns exec "$NS_CLIENT" ip link set "$LANE_PATH1_CLIENT_VETH" up
 # Re-add ONLY path 1's client-side host route to the server: taking veth-b0
-# down flushed the /32 route bound to it (same lesson as
-# test_e2e_dellink.sh's Test 2), and without it path 1's PATH_CHALLENGE has
+# down flushed the /32 route bound to it, and without it path 1's PATH_CHALLENGE has
 # no route to the VPN listen address. `ip route replace` + `|| true` is
 # idempotent whether or not the kernel kept it — deliberately NOT
 # bench_add_server_host_routes (its server-side `ip addr add .../32 dev lo`
@@ -1736,7 +1739,11 @@ import sys, json
 FLOOR = 50000
 try:
     d = json.load(sys.stdin)
-    paths = d['clients'][0]['paths']
+    # A path that closed (e.g. replaced after a failed validation) stays in
+    # the list with the bytes it had, and one that is closing is not live
+    # either; only live paths show the spread.
+    paths = [p for p in d['clients'][0]['paths']
+             if p.get('state_label') not in ('closing', 'closed')]
 except Exception as e:
     print('FAIL parse: %s' % e); sys.exit()
 loads = sorted(p.get('bytes_tx', 0) + p.get('bytes_rx', 0) for p in paths)

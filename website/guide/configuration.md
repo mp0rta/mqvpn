@@ -139,6 +139,16 @@ The file must be strict JSON (RFC 8259): no comments, no trailing commas, and ke
 }
 ```
 
+The `[Interface]` and `[Multipath]` keys these examples leave out are also
+top-level keys in JSON: `mtu` (`MTU`), `path_mtu` (`PathMTU`), `pmtud`
+(`PMTUD`), `manage_routes` (`ManageRoutes`), `init_max_path_id`
+(`InitMaxPathId`), `bbr2_fast_convergence` (`Bbr2FastConvergence`),
+`bbr2_rttvar_compensation` (`Bbr2RttvarCompensation`), `reinjection`
+(`Reinjection`), `reinjection_srtt_factor_pct` (`ReinjectionSrttFactorPct`),
+`reinjection_hard_deadline_ms` (`ReinjectionHardDeadlineMs`),
+`reinjection_deadline_lower_bound_ms` (`ReinjectionDeadlineLowerBoundMs`),
+`redundant` (`Redundant`) and `redundant_ports` (`RedundantPorts`).
+
 ## Multi-User Authentication
 
 The server can authenticate multiple users, each with their own PSK. In JSON config, add a `users` array where each entry is either an object (`{"name":"alice","key":"..."}`) or a shorthand string (`"alice:key"`). In INI config, use repeatable `User = NAME:KEY` lines in the `[Auth]` section. You can also use the [Control API](#control-api) to manage users at runtime.
@@ -222,6 +232,8 @@ In JSON, use `auth_key` on both client and server (as in the examples above).
 | `CC` | Congestion control algorithm (`bbr2`, `bbr`, `cubic`, or `none`) | `bbr2` |
 | `Path` | Network interface to bind (repeatable) | Default interface |
 | `InitMaxPathId` | Initial number of path IDs the connection may use over its lifetime (IDs 0–N; each new path, including a re-added one, uses a fresh ID; the server grants more as needed, up to 128). `1`–`128`; unset or `0` uses `8` | `0` |
+| `Bbr2FastConvergence` | With `CC = bbr2`, enables xquic's BBRv2 fast-convergence extension, which lets the bandwidth estimate drop sooner when the round-trip time rises by more than a quarter from one round trip to the next, and probes for more bandwidth every 5 to 8 round trips instead of every 2 to 3 seconds. `false` gives standard BBRv2 behaviour. Ignored for other `CC` values. | `true` |
+| `Bbr2RttvarCompensation` | With `CC = bbr2`, enables xquic's BBRv2 extension that allows more data in flight (sent but not yet acknowledged) when the round-trip time varies. `false` gives the standard BBRv2 limit on data in flight. Ignored for other `CC` values. | `true` |
 | `Reinjection` | Speculative duplication mode (`off`, `deadline`, or `idle`). `dgram` is no longer supported; a config file that sets it gets a warning and runs with `off`. Use redundant mode (`Redundant = true`) to duplicate packets. | `off` |
 | `ReinjectionSrttFactorPct` | `deadline` mode: duplicate unacked packets older than factor × min_srtt, in percent (`100`–`1000`) | `110` |
 | `ReinjectionHardDeadlineMs` | `deadline` mode: upper clamp on the duplication deadline (`1`–`60000`) | `500` |

@@ -122,8 +122,9 @@ parse_mtu_arg(const char *opt, const char *str, int *out)
     errno = 0;
     long lv = strtol(str, &end, 10);
     if (end == str || !end || *end != '\0' || errno == ERANGE ||
-        (lv != 0 && (lv < 1280 || lv > 9000))) {
-        fprintf(stderr, "error: %s must be 0 or 1280..9000\n", opt);
+        (lv != 0 && (lv < MQVPN_MTU_MIN || lv > MQVPN_MTU_MAX))) {
+        fprintf(stderr, "error: %s must be 0 or %d..%d\n", opt, MQVPN_MTU_MIN,
+                MQVPN_MTU_MAX);
         return -1;
     }
     *out = (int)lv;
@@ -593,6 +594,8 @@ main(int argc, char *argv[])
             .kill_switch = kill_switch >= 0 ? kill_switch : file_cfg.kill_switch,
             .manage_routes = manage_routes >= 0 ? manage_routes : file_cfg.manage_routes,
             .init_max_path_id = eff_init_max_path_id,
+            .bbr2_fast_convergence = file_cfg.bbr2_fast_convergence,
+            .bbr2_rttvar_compensation = file_cfg.bbr2_rttvar_compensation,
             .tun_mtu = eff_tun_mtu,
             .path_mtu = eff_path_mtu,
             .pmtud = eff_pmtud,
@@ -667,6 +670,8 @@ main(int argc, char *argv[])
             .control_addr = eff_control_addr,
             .control_port = eff_control_port,
             .init_max_path_id = eff_init_max_path_id,
+            .bbr2_fast_convergence = file_cfg.bbr2_fast_convergence,
+            .bbr2_rttvar_compensation = file_cfg.bbr2_rttvar_compensation,
             .tun_mtu = eff_tun_mtu,
             .path_mtu = eff_path_mtu,
             .pmtud = eff_pmtud,

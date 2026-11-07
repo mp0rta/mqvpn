@@ -981,17 +981,19 @@ tcp_lane_silent_abort_pcb(mqvpn_tcp_flow_t *f)
 static void
 tcp_lane_close_h3(mqvpn_tcp_flow_t *f)
 {
-    if (f->h3_request) {
-        cli_tcp_lane_h3_close(f->h3_request);
-        f->h3_request = NULL;
-        flow_set_stream(f->lane, f, NULL);
-    }
+    void *req = f->h3_request;
+    if (!req) return;
+    /* Unbind first: xquic can run the close notify inside the close call,
+     * and that notify must not find (and free) this flow. */
+    f->h3_request = NULL;
+    flow_set_stream(f->lane, f, NULL);
+    cli_tcp_lane_h3_close(req);
 }
 
 /* The one locally-initiated "kill this flow" sequence:
  * (1) RST the H3 request (close_h3=1) or just forget the pointers without
- * closing (close_h3=0 — the caller already closed it, or
- * never created one); (2) detach + tcp_abort the pcb; (3) unlink + free the
+ * closing (close_h3=0 — xquic or the caller closes it, or there is
+ * none); (2) detach + tcp_abort the pcb; (3) unlink + free the
  * flow. Used by on_relay_error, abort_pending, on_h3_closing, and
  * on_stream_rejected — see each call site's comment for which close_h3
  * value applies and why.
@@ -1282,10 +1284,9 @@ mqvpn_tcp_lane_abort_pending(void *flow_handle)
     /* Never close H3 here. cli_tcp_lane_open_stream (the
      * only caller) either never created a request yet (no live H3 conn /
      * stream calloc failure / xqc_h3_request_create failure — all three
-     * pre-bind) or already closed the just-created one itself on the
-     * send-headers-failure path (post-bind) — closing it again here would
-     * double-close. Just forget the pointers (they may point at a request
-     * already mid-close) and tear the pcb + flow down.
+     * pre-bind) or closes the just-created one itself right after this call
+     * on the send-headers-failure path (post-bind). Just forget the pointers
+     * and tear the pcb + flow down.
      *
      * Return 1 iff the pcb was tcp_abort()ed: this whole chain runs inside
      * lwIP's accept callback frame (accept -> cli_tcp_lane_open_stream ->

@@ -2209,23 +2209,9 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         .path_removed_notify = cb_path_removed,
     };
 
-    /* xquic INFO emits per-packet logs (effectively DEBUG-grade noise that
-     * also tanks throughput on slow consoles like Windows PowerShell). Map
-     * mqvpn INFO -> xquic WARN so --log-level info shows mqvpn state without
-     * the per-packet flood; users who want xquic detail use --log-level debug.
-     * Mirrors the client-side mapping in mqvpn_client.c. */
-    int xqc_log_level;
-    switch (cfg->log_level) {
-    case MQVPN_LOG_DEBUG: xqc_log_level = XQC_LOG_DEBUG; break;
-    case MQVPN_LOG_INFO: xqc_log_level = XQC_LOG_WARN; break;
-    case MQVPN_LOG_WARN: xqc_log_level = XQC_LOG_WARN; break;
-    case MQVPN_LOG_ERROR: xqc_log_level = XQC_LOG_ERROR; break;
-    default: xqc_log_level = XQC_LOG_WARN; break;
-    }
-
     xqc_config_t xconfig;
     if (xqc_engine_get_default_config(&xconfig, XQC_ENGINE_SERVER) < 0) goto cleanup;
-    xconfig.cfg_log_level = (xqc_log_level_t)xqc_log_level;
+    xconfig.cfg_log_level = mqvpn_xqc_log_level(cfg->log_level);
     if (mqvpn_engine_keys_set_server(&xconfig, cfg->tls_key) != 0) {
         LOG_E(s, "cannot make the engine keys from the TLS key file '%s'", cfg->tls_key);
         goto cleanup;
@@ -2283,8 +2269,20 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         /* set by the batched-send registration a few lines above; 0 on
          * non-Linux, where that block is compiled out entirely */
         .defer_send_flush = (s->tx_batch != 0),
+        .disable_bbr2_fast_convergence = (s->config.bbr2_fast_convergence == 0),
+        .disable_bbr2_rttvar_compensation = (s->config.bbr2_rttvar_compensation == 0),
     };
     mqvpn_build_conn_settings(&cs_input, &conn_settings);
+    /* Read back from the built settings, so this is the flag set xquic is
+     * handed (xqc_server_set_conn_settings copies cc_params whole). The
+     * "bbr2 flags: " line is byte-identical on both endpoints. */
+    if (conn_settings.cong_ctrl_callback.xqc_cong_ctl_init ==
+        xqc_bbr2_cb.xqc_cong_ctl_init) {
+        uint32_t f = conn_settings.cc_params.cc_optimization_flags;
+        LOG_I(s, "bbr2 flags: fast_convergence=%s rttvar_compensation=%s",
+              (f & XQC_BBR2_FLAG_FAST_CONVERGENCE) ? "on" : "off",
+              (f & XQC_BBR2_FLAG_RTTVAR_COMPENSATION) ? "on" : "off");
+    }
     xqc_server_set_conn_settings(s->engine, &conn_settings);
 
     if (cfg->reinjection == MQVPN_REINJ_DEADLINE) {

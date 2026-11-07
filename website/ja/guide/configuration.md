@@ -134,6 +134,8 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
 }
 ```
 
+上の例にない `[Interface]` と `[Multipath]` のキーも、JSON では最上位に書きます。JSON での名前は `mtu` (`MTU`)、`path_mtu` (`PathMTU`)、`pmtud` (`PMTUD`)、`manage_routes` (`ManageRoutes`)、`init_max_path_id` (`InitMaxPathId`)、`bbr2_fast_convergence` (`Bbr2FastConvergence`)、`bbr2_rttvar_compensation` (`Bbr2RttvarCompensation`)、`reinjection` (`Reinjection`)、`reinjection_srtt_factor_pct` (`ReinjectionSrttFactorPct`)、`reinjection_hard_deadline_ms` (`ReinjectionHardDeadlineMs`)、`reinjection_deadline_lower_bound_ms` (`ReinjectionDeadlineLowerBoundMs`)、`redundant` (`Redundant`)、`redundant_ports` (`RedundantPorts`) です。
+
 ## マルチユーザー認証
 
 サーバーでは複数のユーザーをそれぞれ個別の PSK で認証できます。JSON config では `users` 配列で設定します。各要素はオブジェクト形式（`{"name":"alice","key":"..."}`）または省略形の文字列（`"alice:key"`）のどちらでも指定可能です。INI config では `[Auth]` セクションに `User = NAME:KEY` 行を複数書きます。[Control API](#control-api) を使って実行中にユーザーを管理することもできます。
@@ -217,6 +219,8 @@ JSON ではクライアント・サーバーとも `auth_key` を使います（
 | `CC` | 輻輳制御アルゴリズム（`bbr2`, `bbr`, `cubic`, または `none`） | `bbr2` |
 | `Path` | バインドするネットワークインターフェース（複数指定可） | デフォルトインターフェース |
 | `InitMaxPathId` | 接続を通して使えるパス ID の初期数（番号は 0〜N。パスを作るたびに、作り直しも含めて新しい番号を使う。足りなくなるとサーバーが 128 まで追加する）。`1`–`128`。未設定（`0`）なら `8` | `0` |
+| `Bbr2FastConvergence` | `CC = bbr2` のとき、xquic の BBRv2 高速収束拡張を有効にします。往復時間が 1 往復ごとに 4 分の 1 を超えて増えると帯域の推定値を早めに下げられるようにし、帯域の探索を 2〜3 秒ごとではなく 5〜8 往復ごとに行います。`false` にすると標準の BBRv2 の動作になります。`CC` がほかの値のときは無視されます。 | `true` |
+| `Bbr2RttvarCompensation` | `CC = bbr2` のとき、往復時間がばらつく間は、送信済みで確認応答をまだ受け取っていないデータをより多く許す xquic の BBRv2 拡張を有効にします。`false` にすると標準の BBRv2 の上限になります。`CC` がほかの値のときは無視されます。 | `true` |
 | `Reinjection` | 投機的複製モード（`off`, `deadline`, または `idle`）。`dgram` は廃止されました。設定ファイルで指定すると警告が出て `off` で動作します。パケットを複製するには冗長モード（`Redundant = true`）を使ってください。 | `off` |
 | `ReinjectionSrttFactorPct` | `deadline` モード: factor × min_srtt を超えた未 ACK パケットを複製、パーセント指定（`100`–`1000`） | `110` |
 | `ReinjectionHardDeadlineMs` | `deadline` モード: 複製デッドラインの上限クランプ（`1`–`60000`） | `500` |

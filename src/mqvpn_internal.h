@@ -170,6 +170,11 @@ struct mqvpn_config_s {
      * 0 = use xquic default (XQC_DEFAULT_INIT_MAX_PATH_ID = 8). */
     uint64_t init_max_path_id;
 
+    /* [Multipath] Bbr2FastConvergence / Bbr2RttvarCompensation: xquic BBRv2
+     * optimisation flags. 1 (default) = set, unchanged; 0 = cleared. */
+    int bbr2_fast_convergence;
+    int bbr2_rttvar_compensation;
+
     int tun_mtu;  /* 0 = auto (client: negotiated; server: 1382), >0 = client cap / server
                      TUN MTU */
     int path_mtu; /* 0 = default packet size, >0 = underlay MTU to size packets for */
@@ -294,6 +299,73 @@ MQVPN_INTERNAL struct mqvpn_redundant_tx_s *
 mqvpn_client_test_redundant_tx(mqvpn_client_t *c);
 MQVPN_INTERNAL void mqvpn_client_test_set_slot(mqvpn_client_t *c, int idx, int live,
                                                uint64_t xqc_path_id);
+
+/* ── Other client internals the tests call (defined in mqvpn_client.c) ── */
+MQVPN_INTERNAL mqvpn_path_handle_t
+mqvpn_client_first_active_handle(const mqvpn_client_t *c);
+MQVPN_INTERNAL int mqvpn_client_apply_path_activation_failure(mqvpn_client_t *c,
+                                                              mqvpn_path_handle_t handle,
+                                                              uint64_t now_us);
+MQVPN_INTERNAL const char *
+mqvpn_client_test_get_path_state_name(mqvpn_client_t *c, mqvpn_path_handle_t handle,
+                                      int *out_retries);
+MQVPN_INTERNAL int mqvpn_client_test_force_validating_then_remove(
+    mqvpn_client_t *c, mqvpn_path_handle_t handle, uint64_t xqc_path_id);
+MQVPN_INTERNAL int mqvpn_client_test_force_validating(mqvpn_client_t *c,
+                                                      mqvpn_path_handle_t handle,
+                                                      uint64_t xqc_path_id);
+MQVPN_INTERNAL int mqvpn_client_test_abandon_due(mqvpn_client_t *c,
+                                                 mqvpn_path_handle_t handle);
+MQVPN_INTERNAL int
+mqvpn_client_test_apply_path_create_permanent_failure(mqvpn_client_t *c,
+                                                      mqvpn_path_handle_t handle);
+MQVPN_INTERNAL int mqvpn_client_test_set_primary_path_idx(mqvpn_client_t *c, int idx);
+MQVPN_INTERNAL mqvpn_path_handle_t
+mqvpn_client_test_get_send_handle_for_path(mqvpn_client_t *c, uint64_t xqc_path_id);
+MQVPN_INTERNAL int mqvpn_client_test_next_primary_idx(const mqvpn_client_t *c,
+                                                      int from_idx);
+MQVPN_INTERNAL uint64_t
+mqvpn_client_test_get_handshake_started_us(const mqvpn_client_t *c);
+MQVPN_INTERNAL int mqvpn_client_test_set_handshake_started_us(mqvpn_client_t *c,
+                                                              uint64_t us);
+MQVPN_INTERNAL int mqvpn_client_test_handshake_stalled(const mqvpn_client_t *c,
+                                                       uint64_t now_us);
+MQVPN_INTERNAL int mqvpn_client_test_force_state(mqvpn_client_t *c,
+                                                 mqvpn_client_state_t s);
+MQVPN_INTERNAL int mqvpn_client_test_classify_status(int status);
+MQVPN_INTERNAL int mqvpn_client_test_conn_alloc(mqvpn_client_t *c);
+MQVPN_INTERNAL int mqvpn_client_test_conn_free(mqvpn_client_t *c);
+MQVPN_INTERNAL int mqvpn_client_test_conn_tunnel_notified(const mqvpn_client_t *c);
+MQVPN_INTERNAL int mqvpn_client_test_signal_connect_fail(mqvpn_client_t *c, int reason,
+                                                         int status);
+MQVPN_INTERNAL int mqvpn_client_test_notify_conn_closed(mqvpn_client_t *c);
+MQVPN_INTERNAL int mqvpn_client_test_conn_tunnel_ok(const mqvpn_client_t *c);
+MQVPN_INTERNAL int mqvpn_client_test_set_shutting_down(mqvpn_client_t *c, int v);
+MQVPN_INTERNAL int mqvpn_client_test_scan_headers(mqvpn_client_t *c, const char **names,
+                                                  const char **values, int n);
+MQVPN_INTERNAL int mqvpn_client_test_conn_peer_reorder(const mqvpn_client_t *c);
+MQVPN_INTERNAL int mqvpn_client_test_request_close_connect_ip(mqvpn_client_t *c);
+MQVPN_INTERNAL int mqvpn_client_test_conn_peer_sched(mqvpn_client_t *c, int *out_sched);
+MQVPN_INTERNAL void mqvpn_client_test_set_hold_extra_paths(mqvpn_client_t *c, int v);
+MQVPN_INTERNAL int mqvpn_client_test_hold_extra_paths(mqvpn_client_t *c);
+MQVPN_INTERNAL void mqvpn_client_test_reset_paths_for_reconnect(mqvpn_client_t *c);
+MQVPN_INTERNAL void mqvpn_client_test_ready_to_create_path(mqvpn_client_t *c);
+MQVPN_INTERNAL void mqvpn_client_test_release_path_hold(mqvpn_client_t *c);
+MQVPN_INTERNAL int mqvpn_client_test_force_established(mqvpn_client_t *c);
+MQVPN_INTERNAL int mqvpn_client_test_set_next_wake_us(mqvpn_client_t *c, uint64_t us);
+MQVPN_INTERNAL int mqvpn_client_test_set_path_stable_us(mqvpn_client_t *c,
+                                                        mqvpn_path_handle_t handle,
+                                                        uint64_t stable_since_us,
+                                                        int xquic_live);
+MQVPN_INTERNAL int mqvpn_client_test_reactivate_slot_eligible(mqvpn_client_t *c,
+                                                              mqvpn_path_handle_t handle);
+MQVPN_INTERNAL int mqvpn_client_test_transport_send(mqvpn_client_t *c,
+                                                    mqvpn_path_handle_t h,
+                                                    const mqvpn_datagram_t *bufs,
+                                                    unsigned n);
+MQVPN_INTERNAL int mqvpn_client_test_kill_conn(mqvpn_client_t *c);
+MQVPN_INTERNAL uint64_t
+mqvpn_client_test_get_reconnect_scheduled_us(const mqvpn_client_t *c);
 
 /* Snapshot of FEC / multipath counters for one client.
  * INTERNAL — not in public libmqvpn.h. Field widths chosen to safely accept

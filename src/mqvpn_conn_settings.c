@@ -199,7 +199,9 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     case MQVPN_CC_BBR2:
         out->cong_ctrl_callback = xqc_bbr2_cb;
         out->cc_params.cc_optimization_flags =
-            XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
+            (in->disable_bbr2_rttvar_compensation ? 0
+                                                  : XQC_BBR2_FLAG_RTTVAR_COMPENSATION) |
+            (in->disable_bbr2_fast_convergence ? 0 : XQC_BBR2_FLAG_FAST_CONVERGENCE);
         break;
     }
 
@@ -237,6 +239,20 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
      */
     if (in->init_max_path_id > 0) {
         out->init_max_path_id = in->init_max_path_id;
+    }
+}
+
+xqc_log_level_t
+mqvpn_xqc_log_level(mqvpn_log_level_t level)
+{
+    /* mqvpn INFO maps to xquic WARN (DD §5): xquic INFO logs every packet,
+     * which floods slow consoles. --log-level debug gives the xquic detail. */
+    switch (level) {
+    case MQVPN_LOG_DEBUG: return XQC_LOG_DEBUG;
+    case MQVPN_LOG_INFO: return XQC_LOG_WARN;
+    case MQVPN_LOG_WARN: return XQC_LOG_WARN;
+    case MQVPN_LOG_ERROR: return XQC_LOG_ERROR;
+    default: return XQC_LOG_WARN;
     }
 }
 

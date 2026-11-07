@@ -62,12 +62,23 @@ typedef struct {
      * registration on — never a re-derived condition, which is what would let
      * them drift apart. */
     bool defer_send_flush;
+
+    /* disable_bbr2_fast_convergence / disable_bbr2_rttvar_compensation:
+     * clear the corresponding xquic BBRv2 optimisation flag, which is
+     * otherwise set whenever the congestion controller is BBR2. Phrased as
+     * opt-outs so that a zeroed input keeps the flags mqvpn has always set.
+     * No effect on any other congestion controller. */
+    bool disable_bbr2_fast_convergence;
+    bool disable_bbr2_rttvar_compensation;
 } mqvpn_conn_settings_input_t;
 
 /* Populates *out with mqvpn-canonical xquic conn settings. Always begins
  * with memset(0), so the caller is not required to zero `out` first. */
 MQVPN_INTERNAL void mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in,
                                               xqc_conn_settings_t *out);
+
+/* xquic engine log level for an mqvpn level, for client and server. */
+MQVPN_INTERNAL xqc_log_level_t mqvpn_xqc_log_level(mqvpn_log_level_t level);
 
 #if defined(__linux__)
 /* One definition of the batched-send registration for both endpoints (it is
