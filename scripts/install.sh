@@ -179,13 +179,6 @@ for cmd in curl openssl systemctl iptables ip sysctl ip6tables; do
     command -v "$cmd" >/dev/null 2>&1 || err "Required command not found: $cmd"
 done
 
-# The mqvpn binary links libevent-2.1.so.7; minimal images may ship only
-# libevent_core. Match the native arch so an i386-only copy does not pass.
-# grep without -q reads to EOF (no SIGPIPE under pipefail).
-case "$ARCH" in amd64) LDARCH="x86-64" ;; arm64) LDARCH="AArch64" ;; esac
-ldconfig -p | grep -F "libevent-2.1.so.7 (libc6,$LDARCH)" >/dev/null \
-    || err "Required library not found: libevent-2.1.so.7 (apt-get install libevent-2.1-7t64, or libevent-2.1-7 on older releases)"
-
 ok "Detected ${PRETTY_NAME:-$ID}, $ARCH"
 
 # --- Step 2: Download ---
@@ -218,6 +211,14 @@ cd "$WORK_DIR"
 grep -F "  ${TARBALL}" SHA256SUMS | sha256sum -c --quiet --strict \
     || err "Checksum verification failed"
 tar xzf "$TARBALL"
+
+# Check the binary's shared libraries before placing any file: a minimal
+# image may lack libevent. Capture first: ldd exits non-zero on a missing
+# library, which pipefail would let mask the grep match.
+missing=$(LD_LIBRARY_PATH="$WORK_DIR/lib" ldd bin/mqvpn 2>&1 | grep 'not found' || true)
+[ -z "$missing" ] || err "Missing shared libraries:
+$missing
+Install them first (libevent: apt-get install libevent-2.1-7t64, or libevent-2.1-7 on older releases)"
 
 install -m 755 bin/mqvpn "$INSTALL_PREFIX/bin/mqvpn"
 shopt -s nullglob
