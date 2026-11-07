@@ -180,8 +180,10 @@ for cmd in curl openssl systemctl iptables ip sysctl ip6tables; do
 done
 
 # The mqvpn binary links libevent-2.1.so.7; minimal images may ship only
-# libevent_core. grep without -q reads to EOF (no SIGPIPE under pipefail).
-ldconfig -p | grep -F 'libevent-2.1.so.7 ' >/dev/null \
+# libevent_core. Match the native arch so an i386-only copy does not pass.
+# grep without -q reads to EOF (no SIGPIPE under pipefail).
+case "$ARCH" in amd64) LDARCH="x86-64" ;; arm64) LDARCH="AArch64" ;; esac
+ldconfig -p | grep -F "libevent-2.1.so.7 (libc6,$LDARCH)" >/dev/null \
     || err "Required library not found: libevent-2.1.so.7 (apt-get install libevent-2.1-7t64, or libevent-2.1-7 on older releases)"
 
 ok "Detected ${PRETTY_NAME:-$ID}, $ARCH"
