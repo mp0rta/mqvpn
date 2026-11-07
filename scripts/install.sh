@@ -212,6 +212,14 @@ grep -F "  ${TARBALL}" SHA256SUMS | sha256sum -c --quiet --strict \
     || err "Checksum verification failed"
 tar xzf "$TARBALL"
 
+# Check the binary's shared libraries before placing any file: a minimal
+# image may lack libevent. "|| true": an ldd failure or no match must not
+# trip set -e / pipefail; only the captured "not found" lines decide.
+missing=$(LD_LIBRARY_PATH="$WORK_DIR/lib" ldd bin/mqvpn 2>&1 | grep 'not found' || true)
+[ -z "$missing" ] || err "Missing shared libraries:
+$missing
+Install them first (libevent: apt-get install libevent-2.1-7t64, or libevent-2.1-7 on older releases)"
+
 install -m 755 bin/mqvpn "$INSTALL_PREFIX/bin/mqvpn"
 shopt -s nullglob
 libmqvpn_files=(lib/libmqvpn.so.*)
