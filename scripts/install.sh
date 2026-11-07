@@ -213,8 +213,8 @@ grep -F "  ${TARBALL}" SHA256SUMS | sha256sum -c --quiet --strict \
 tar xzf "$TARBALL"
 
 # Check the binary's shared libraries before placing any file: a minimal
-# image may lack libevent. Capture first: ldd exits non-zero on a missing
-# library, which pipefail would let mask the grep match.
+# image may lack libevent. "|| true": an ldd failure or no match must not
+# trip set -e / pipefail; only the captured "not found" lines decide.
 missing=$(LD_LIBRARY_PATH="$WORK_DIR/lib" ldd bin/mqvpn 2>&1 | grep 'not found' || true)
 [ -z "$missing" ] || err "Missing shared libraries:
 $missing
