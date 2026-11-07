@@ -155,10 +155,12 @@ jobs:
       # systemd-test installs. No compiled file uses the prefix, so this
       # configure only regenerates the units and the install scripts.
       - name: Build debs (prefix /usr)
+        # From build/: CMakeLists resolves the relative XQUIC_BUILD_DIR against the working directory.
         run: |
-          cmake -DCMAKE_INSTALL_PREFIX=/usr build
-          cmake --build build -j"$(nproc)"
-          cd build && cpack -G DEB
+          cd build
+          cmake -DCMAKE_INSTALL_PREFIX=/usr ..
+          make -j"$(nproc)"
+          cpack -G DEB
 
       - name: Check deb contents
         run: scripts/ci_e2e/check_deb_contents.sh build
