@@ -62,6 +62,16 @@ class SettingsViewModel @Inject constructor(
     private val landedGen = MutableStateFlow(0L)
     private var lastPersisted: DemoSettings? = null
 
+    /**
+     * The address box's raw text once edited; null = mirror the draft. Setup and
+     * Settings share it, so an unparsable entry stays visible across screens while
+     * the draft keeps the last valid server (which must never be connected to then).
+     * Saved state, so an entry in progress survives process recreation too.
+     * Declared before init: a cached DataStore delivers the first settings inside
+     * the constructor (Main.immediate), and that replay reads this.
+     */
+    val addressText: StateFlow<String?> = savedState.getStateFlow(ADDRESS_TEXT_KEY, null)
+
     init {
         viewModelScope.launch {
             try {
@@ -111,14 +121,6 @@ class SettingsViewModel @Inject constructor(
             _saveError.value = "Save failed: ${t.message}"
         }
     }
-
-    /**
-     * The address box's raw text once edited; null = mirror the draft. Setup and
-     * Settings share it, so an unparsable entry stays visible across screens while
-     * the draft keeps the last valid server (which must never be connected to then).
-     * Saved state, so an entry in progress survives process recreation too.
-     */
-    val addressText: StateFlow<String?> = savedState.getStateFlow(ADDRESS_TEXT_KEY, null)
 
     /** The address box holds text that doesn't parse; Home blocks connect on it. */
     val addressTextInvalid: StateFlow<Boolean> = addressText

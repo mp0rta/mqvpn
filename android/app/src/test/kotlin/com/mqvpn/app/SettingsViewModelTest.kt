@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -223,6 +224,30 @@ class SettingsViewModelTest {
         assertEquals("vpn.example.com", viewModel.draft.value?.serverAddress)
         assertEquals(8443, viewModel.draft.value?.serverPort)
         assertFalse(viewModel.addressTextInvalid.value)
+    }
+
+    // A process that outlived its activity (the VPN service keeps it alive) hands
+    // the recreated ViewModel DataStore's cached settings inside the constructor
+    // (viewModelScope runs on Main.immediate); an unconfined Main reproduces that.
+    @Test
+    fun `settings emitted during construction still set the draft`() {
+        Dispatchers.setMain(UnconfinedTestDispatcher())
+        val vm = SettingsViewModel(mockRepository, mockManager, SavedStateHandle())
+        assertNull(vm.loadError.value)
+        assertEquals(testSettings, vm.draft.value)
+    }
+
+    @Test
+    fun `restored address text is replayed onto settings emitted during construction`() {
+        Dispatchers.setMain(UnconfinedTestDispatcher())
+        val vm = SettingsViewModel(
+            mockRepository, mockManager, SavedStateHandle(mapOf("address_text" to "new.example.com:9000")),
+        )
+        assertNull(vm.loadError.value)
+        assertEquals("new.example.com", vm.draft.value?.serverAddress)
+        assertEquals(9000, vm.draft.value?.serverPort)
+        // Queued before the save consumer launched; the conflated channel must keep it.
+        coVerify { mockRepository.save(match { it.serverAddress == "new.example.com" && it.serverPort == 9000 }) }
     }
 
     @Test
