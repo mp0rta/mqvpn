@@ -902,7 +902,10 @@ svr_tcp_egress_try_uplink_fin(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
  * normalizes that to a zero-byte accept before calling this). Drops
  * want_read via the interest helper: xquic's own per-stream flow control
  * then backpressures whatever is upstream of the egress socket, mirroring
- * the downlink direction's backpressure the other way. Returns 1 if `ef`
+ * the downlink direction's backpressure the other way. That reaches the
+ * peer only because max_body_buf_per_stream (MQVPN_STREAM_BODY_BUF_BYTES)
+ * stops the H3 layer from reading the stream ahead of this relay.
+ * Returns 1 if `ef`
  * is still alive, 0 if the alloc-failure path tore it down — same boolean
  * convention as svr_tcp_egress_stash_downlink. */
 static int

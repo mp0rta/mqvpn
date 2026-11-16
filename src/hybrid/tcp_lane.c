@@ -511,7 +511,10 @@ mqvpn_tcp_lane_tick(mqvpn_tcp_lane_t *lane, uint64_t now_us)
                  * notify — if the flow's own sndbuf is already empty (no
                  * more ACKs coming) AND xquic's per-stream flow-control
                  * window has filled (we stopped consuming recv_body, so
-                 * those notifies stopped too), NEITHER driver ever fires
+                 * those notifies stopped too; the window fills because
+                 * max_body_buf_per_stream, set from
+                 * MQVPN_STREAM_BODY_BUF_BYTES, makes the H3 layer stop
+                 * reading the stream), NEITHER driver ever fires
                  * again and the flow would stall holding its stash until
                  * idle eviction (or forever with tcp_idle_timeout_sec == 0).
                  * This 1 Hz sweep is the guaranteed third retry driver —
@@ -839,7 +842,11 @@ tcp_lane_downlink_pump_status(mqvpn_tcp_lane_t *lane, void *stream)
              * can't force it open; wait for the next lwIP sent-notify. Not
              * data loss: xquic's own per-stream flow control backpressures
              * the server the same way the uplink's EAGAIN path does in the
-             * other direction. A FIN cannot be lost across the pause,
+             * other direction. That holds because
+             * max_body_buf_per_stream (MQVPN_STREAM_BODY_BUF_BYTES) caps
+             * what the H3 layer reads ahead; without the cap it would keep
+             * reading and the window would never fill.
+             * A FIN cannot be lost across the pause,
              * in either shape: (a) fin still UNREAD in xquic's buffer at
              * pause time — the resumed drain simply reaches it on a later
              * recv call; (b) fin already READ, arriving ON the very chunk
