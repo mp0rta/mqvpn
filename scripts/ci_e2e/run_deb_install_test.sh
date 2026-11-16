@@ -120,7 +120,12 @@ EOF
     chmod 600 "$CONF"
 }
 # debconf code 10: the question does not exist, so purge deleted the answers.
-debconf_purged() { echo 'GET mqvpn-server/subnet' | debconf-communicate 2>/dev/null | grep -q '^10 '; }
+# debconf-communicate exits with the code of the last reply, so pipefail would fail this pipeline.
+debconf_purged() {
+    local reply
+    reply=$(echo 'GET mqvpn-server/subnet' | debconf-communicate 2>/dev/null) || true
+    [[ "$reply" == "10 "* ]]
+}
 
 # ── Prerequisites ────────────────────────────────────────────────────────────
 
