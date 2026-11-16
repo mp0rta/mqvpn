@@ -217,7 +217,7 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
 
     out->max_body_buf_per_stream = MQVPN_STREAM_BODY_BUF_BYTES;
 
-    /* --- intentional client/server asymmetry (4) ---
+    /* --- intentional client/server asymmetry (6) ---
      * Each branch documents why these fields differ between sides. Do not
      * collapse without revisiting tests/test_conn_settings.c
      * test_asymmetry_server_vs_client. */

@@ -48,6 +48,7 @@ test_asymmetry_server_vs_client(void)
         .enable_multipath = true,
         .scheduler = MQVPN_SCHED_WLB,
         .init_max_path_id = 0,
+        .recv_rate_bytes_per_sec = 125000000,
     };
     mqvpn_build_conn_settings(&s, &srv);
 
@@ -56,6 +57,7 @@ test_asymmetry_server_vs_client(void)
         .enable_multipath = true,
         .scheduler = MQVPN_SCHED_WLB,
         .init_max_path_id = 0,
+        .recv_rate_bytes_per_sec = 125000000,
     };
     mqvpn_build_conn_settings(&c_on, &cli_mp_on);
 
@@ -68,12 +70,16 @@ test_asymmetry_server_vs_client(void)
     ASSERT_EQ(srv.mp_ping_on, 1);
     ASSERT_EQ(srv.max_path_id_grant_max_value, 128);
     ASSERT_EQ(srv.ping_on, 0);
+    ASSERT_EQ(srv.enable_stream_rate_limit, 0);
+    ASSERT_EQ(srv.init_recv_window, 0);
 
     /* Client side mp-on: MP gated, ping_on set, no grant cap. */
     ASSERT_EQ(cli_mp_on.enable_multipath, 1);
     ASSERT_EQ(cli_mp_on.mp_ping_on, 1);
     ASSERT_EQ(cli_mp_on.ping_on, 1);
     ASSERT_EQ(cli_mp_on.max_path_id_grant_max_value, 0);
+    ASSERT_EQ(cli_mp_on.enable_stream_rate_limit, 1);
+    ASSERT_EQ(cli_mp_on.init_recv_window, MQVPN_STREAM_INIT_RECV_WINDOW);
 
     /* Client side mp-off: MP off, mp_ping_on follows. */
     ASSERT_EQ(cli_mp_off.enable_multipath, 0);
