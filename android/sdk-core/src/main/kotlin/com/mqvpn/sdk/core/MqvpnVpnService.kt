@@ -3,10 +3,7 @@
 
 package com.mqvpn.sdk.core
 
-import android.content.Intent
 import android.net.VpnService
-import android.os.Binder
-import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.util.Log
@@ -38,40 +35,6 @@ import java.net.InetAddress
  * [onCreateTun] is called from the executor thread (NOT the UI thread).
  */
 abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
-
-    /** Binder for local (in-process) binding from MqvpnManager. */
-    inner class LocalBinder : Binder() {
-        fun getService(): MqvpnVpnService = this@MqvpnVpnService
-    }
-
-    private val binder = LocalBinder()
-
-    override fun onBind(intent: Intent?): IBinder = binder
-
-    /**
-     * Set by [MqvpnManager] on (re)bind. A manager attaching to a service
-     * that already emitted a state gets it replayed so a recreated UI
-     * resyncs; a fresh service (null) replays nothing, so binding to it does
-     * not clobber the Connecting state [MqvpnManager.connect] just set.
-     * stateLock serializes the replay against [emitState]: the setter runs on
-     * the main thread while the executor emits, and an unserialized replay
-     * could overwrite a newer state with the one it read.
-     */
-    internal var manager: MqvpnManager? = null
-        set(value) {
-            synchronized(stateLock) {
-                field = value
-                val state = lastState
-                if (value != null && state != null) {
-                    value.updateState(state)
-                }
-            }
-        }
-
-    private val stateLock = Any()
-
-    /** Last state given to emitState, null until the first emit; guarded by [stateLock]. */
-    private var lastState: MqvpnState? = null
 
     /** The native reactor (poll loop + path table); lives as long as the service. */
     private lateinit var waiter: NativeReactorWaiter
@@ -113,12 +76,12 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
                     // sample would alias into alternating zero/double rates
                     if (now - lastStatsMs >= STATS_INTERVAL_MS) {
                         lastStatsMs = now
-                        manager?.updateStats(t.getStats())
-                        manager?.updatePaths(t.getPaths())
+                        SessionStore.stats.value = t.getStats()
+                        SessionStore.paths.value = t.getPaths()
                     }
                     if (now - lastReorderStatsMs >= 1000) {
                         lastReorderStatsMs = now
-                        manager?.updateReorderStats(t.getReorderStats())
+                        SessionStore.reorderStats.value = t.getReorderStats()
                     }
                 }
                 result
@@ -133,12 +96,14 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
             clientFn = { tunnel?.clientHandle ?: 0L },
             onBadFd = { handle -> pathManager?.handleBadFd(handle) })
         executor.start()
+        SessionStore.service = this
     }
 
     // Shutdown is atomic with the task queue: cleanup() is the LAST task the
     // engine thread runs (nothing can follow it), later tasks are refused, and
     // the thread frees the reactor itself; stop() waits at most 2 s.
     override fun onDestroy() {
+        if (SessionStore.service === this) SessionStore.service = null
         executor.stop { cleanup() }
         scope.cancel()
         super.onDestroy()
@@ -169,6 +134,8 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
             pendingCloseError = null
             sessionEstablished = false
             tearingDown = false
+            // first: this session's state replaces the last one's (an Error stays until here)
+            emitState(MqvpnState.Connecting)
             val t = MqvpnTunnel.create(config, this, waiter.reactorHandle)
             tunnel = t
 
@@ -206,8 +173,6 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
                 cleanup()
                 throw e
             }
-
-            emitState(MqvpnState.Connecting)
         }
     }
 
@@ -243,9 +208,10 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
                 pathManager = null
                 networkMonitor = null
                 currentTunPfd = null
+                SessionStore.resetMetrics()
                 // keep a terminal Error on display: cleanup after an error
                 // emit (service stopping) must not downgrade it
-                if (synchronized(stateLock) { lastState } !is MqvpnState.Error) {
+                if (SessionStore.state.value !is MqvpnState.Error) {
                     emitState(MqvpnState.Disconnected)
                 }
             }
@@ -339,7 +305,7 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
     override fun onNativeReconnectScheduled(delaySec: Int) {
         // a terminal Error emitted in the same native call, or a teardown in
         // progress, makes the schedule moot — it must not overwrite the Error
-        if (tearingDown || synchronized(stateLock) { lastState } is MqvpnState.Error) return
+        if (tearingDown || SessionStore.state.value is MqvpnState.Error) return
         if (!sessionEstablished) {
             // never connected (bad address or server down): fail fast instead
             // of an endless Reconnecting; the teardown cancels the armed timer
@@ -358,23 +324,17 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
      */
     private fun emitTerminalError(error: MqvpnError) {
         if (tearingDown) return
-        if (synchronized(stateLock) { lastState } is MqvpnState.Error) return
+        if (SessionStore.state.value is MqvpnState.Error) return
         emitState(MqvpnState.Error(error))
     }
 
-    /**
-     * Emit state to both Manager (StateFlow → UI) and app callback.
-     */
+    /** Emit state to the store (StateFlow → UI) and the app callback; executor thread only. */
     private fun emitState(newState: MqvpnState) {
         if (newState is MqvpnState.Connected) {
             sessionEstablished = true
             pendingCloseError = null
         }
-        synchronized(stateLock) {
-            lastState = newState
-            manager?.updateState(newState)
-        }
-        // app callback outside the lock: it may be slow or call back into us
+        SessionStore.state.value = newState
         onVpnStateChanged(newState)
     }
 
