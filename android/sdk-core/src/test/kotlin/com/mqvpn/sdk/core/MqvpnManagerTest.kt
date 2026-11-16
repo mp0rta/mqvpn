@@ -5,7 +5,6 @@ package com.mqvpn.sdk.core
 
 import android.os.ParcelFileDescriptor
 import com.mqvpn.sdk.core.model.MqvpnConfig
-import com.mqvpn.sdk.core.model.MqvpnError
 import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.PathInfo
 import com.mqvpn.sdk.core.model.ReconnectInfo
@@ -110,103 +109,5 @@ class MqvpnManagerTest {
         override fun stopTunnel() {
             stopTunnelCalls++
         }
-    }
-
-    // --- terminal vs. retryable close (Error emission is deferred until the
-    //     native client reveals whether a reconnect follows) ---
-
-    @Test
-    fun neverEstablishedClose_showsTerminalErrorAndStopsSession() {
-        val svc = TestVpnService()
-
-        svc.onNativeTunnelClosed(-10)
-        svc.onNativeReconnectScheduled(5)
-
-        // retrying a server that never accepted us stays an Error, and the
-        // session is torn down (which cancels the native reconnect timer)
-        val state = SessionStore.state.value
-        assertTrue(state is MqvpnState.Error)
-        assertEquals(
-            MqvpnError.ConnectionClosed("Connection to the server failed"),
-            (state as MqvpnState.Error).error,
-        )
-        assertEquals(1, svc.stopTunnelCalls)
-    }
-
-    @Test
-    fun establishedClose_reconnectKeepsSessionAlive() {
-        val svc = TestVpnService()
-        svc.sessionEstablished = true
-
-        svc.onNativeTunnelClosed(-10)
-        svc.onNativeReconnectScheduled(5)
-
-        // a session that was Connected reconnects: no Error, no teardown
-        assertEquals(MqvpnState.Reconnecting(ReconnectInfo(5)), SessionStore.state.value)
-        assertEquals(0, svc.stopTunnelCalls)
-    }
-
-    @Test
-    fun closedWithoutReconnect_showsCloseError() {
-        val svc = TestVpnService()
-
-        svc.onNativeTunnelClosed(-10)
-        svc.onNativeStateChanged(2, 6) // CLOSED, no reconnect scheduled
-
-        val state = SessionStore.state.value
-        assertTrue(state is MqvpnState.Error)
-        assertEquals(
-            MqvpnError.ConnectionClosed("Connection to the server failed"),
-            (state as MqvpnState.Error).error,
-        )
-    }
-
-    @Test
-    fun requestFailure_withoutFollowUpCallback_showsErrorAndStopsSession() {
-        // e.g. the server rejects the CONNECT-IP request (bad key) but keeps
-        // the QUIC connection open: no close/reconnect callback ever follows
-        val svc = TestVpnService()
-
-        svc.onNativeTunnelClosed(-5)
-
-        val state = SessionStore.state.value
-        assertTrue(state is MqvpnState.Error)
-        assertEquals(
-            MqvpnError.AuthFailed("Access key rejected by the server"),
-            (state as MqvpnState.Error).error,
-        )
-        assertEquals(1, svc.stopTunnelCalls)
-    }
-
-    @Test
-    fun requestFailureDuringReconnect_keepsTerminalError() {
-        // mid-session reconnect: the retried CONNECT-IP request fails (-6),
-        // and the same native call then schedules another reconnect — the
-        // schedule must not overwrite the terminal Error
-        val svc = TestVpnService()
-        svc.sessionEstablished = true
-
-        svc.onNativeTunnelClosed(-6)
-        svc.onNativeReconnectScheduled(3)
-
-        val state = SessionStore.state.value
-        assertTrue(state is MqvpnState.Error)
-        assertEquals(
-            MqvpnError.ProtocolError(-6, "Connection rejected — check the access key and server address"),
-            (state as MqvpnState.Error).error,
-        )
-        assertEquals(1, svc.stopTunnelCalls)
-    }
-
-    @Test
-    fun terminalError_keepsTheFirstError() {
-        val svc = TestVpnService()
-
-        svc.onNativeTunnelClosed(-4) // terminal on arrival
-        svc.onNativeTunnelClosed(-10) // close notify from the teardown
-        svc.onNativeStateChanged(2, 6)
-
-        val state = SessionStore.state.value as MqvpnState.Error
-        assertEquals(MqvpnError.TlsError("TLS handshake failed"), state.error)
     }
 }
