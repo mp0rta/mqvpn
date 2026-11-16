@@ -148,7 +148,8 @@ actually in flight).
 **Cross-check against the iOS profile.** The two profiles must tell the same story, and
 they do. iOS caps at 64 flows to fit a ~50 MB Network Extension ceiling; its per-flow
 uplink term is `TCP_WND` (262,140) + high-water (`TCP_WND`/2 = 131,070) = 393,210 B, so
-64 flows ≈ 24 MiB — comfortably inside that ceiling (§5c). Desktop/router is 64× the flow
+64 flows ≈ 24 MiB. That is one part of the profile's total, so it claims no margin
+against that ceiling; §5c adds the other parts and an on-device measurement decides. Desktop/router is 64× the flow
 count *and* 2× the per-flow term (786,424 / 393,210, from the 2× wider window against a
 2× smaller relative high-water), i.e. 128× the iOS total: 24 MiB × 128 = 3.0 GiB. The
 factor is 128, not 64, because the flow ceiling and the window sizing are independent
@@ -297,24 +298,25 @@ client-only (the builder hard-zeroes it for servers, since a server-side cap wou
 client uplink instead); the iOS engine sets it to 125 MB/s.
 
 The connection receive window starts at `rate × 60 ms` (at least 63,000 B), grows with the
-measured srtt, is capped at 16 MiB, and stays at the largest value it reached; it does not
+largest measured srtt (across paths), is capped at 16 MiB, and stays at the largest value it reached; it does not
 shrink. At 125 MB/s it starts at 7,500,000 B and settles at 16,777,216 B (the 16 MiB cap)
-once the srtt estimate is high enough. The cap therefore bounds the connection window, not
-a typical size.
+once the srtt estimate is high enough. 16 MiB is therefore the upper bound of the connection
+window, not its typical size.
 
 The connection window alone does not bound what one flow holds. Each TCP-lane flow also
 gets a receive rate of a quarter of the connection rate (`mqvpn_tcp_stream_recv_rate()`), so
-one stalled flow holds at most a quarter of the connection window and up to three stalled
+one stalled flow holds at most a quarter of the connection window in the transport and up to three stalled
 flows leave room for the others. Without that share one stalled flow could take the whole
 window and stall every other flow.
 
-Unread payload is held in three places for a flow whose receiver stalls: the QUIC stream
-(at most the stream window), the HTTP/3 layer, and mqvpn's own stash. The HTTP/3 layer
+Unread payload is held in four places for a flow whose receiver stalls: the QUIC stream
+(at most the stream window), the HTTP/3 layer, mqvpn's own stash, and kernel socket
+buffers. The HTTP/3 layer
 stops reading a request's stream once it holds `max_body_buf_per_stream`
 (`MQVPN_STREAM_BODY_BUF_BYTES`, 64 KiB; set on client and server, `src/mqvpn_conn_settings.c`).
 The stream's flow-control window then fills and the sender stops. Without that limit the
-HTTP/3 layer kept reading into a per-request buffer with no bound, and stream flow control
-never reached the sender.
+HTTP/3 layer would read into a per-request buffer with no bound, and stream flow control
+would never reach the sender.
 
 Payload held for one stalled flow, on the receiving side:
 

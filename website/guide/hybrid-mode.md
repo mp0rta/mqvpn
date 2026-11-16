@@ -76,9 +76,10 @@ iOS builds (`ios/build-ios.sh`) compile the lane with a reduced lwIP footprint
 (the `MQVPN_LWIP_IOS_PROFILE` build flag: ~256 KiB TCP windows and 64-flow
 pool sizing, against the 512 KiB windows every other profile uses) to fit the
 iOS Network Extension memory ceiling. Android builds use their own profile — desktop windows with the smaller 512-pcb pool, giving a 256-flow ceiling; desktop and router builds get a 8192-pcb pool and a 4096-flow ceiling. The profile is paired with the
-QUIC-side [`[Advanced] RecvRateLimit`](./configuration#advanced) receive-rate
-cap — shrinking the inner TCP windows alone does not bound the outer QUIC
-connection's own buffering, so the iOS client sets both. The full budget arithmetic and measured
+[`[Advanced] RecvRateLimit`](./configuration#advanced) receive-rate
+setting. Every client keeps a fixed 64 KiB receive buffer per TCP connection through the tunnel;
+`RecvRateLimit` additionally caps the connection's receive window at 16 MiB and shares it
+between TCP connections, so the iOS client sets both. The full budget arithmetic and measured
 numbers are in
 [docs/hybrid_h2_memory_budget.md §5](https://github.com/mp0rta/mqvpn/blob/main/docs/hybrid_h2_memory_budget.md).
 
