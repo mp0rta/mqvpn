@@ -16,6 +16,7 @@ import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -99,11 +100,38 @@ class SettingsViewModelTest {
 
     @Test
     fun `retryLoad is a no-op once the settings are loaded`() = runTest(testDispatcher) {
+        var reads = 0
+        val repo = mockk<SettingsRepository>(relaxed = true).also {
+            every { it.settings } returns flow { reads++; emit(testSettings) }
+        }
+        val vm = SettingsViewModel(repo, mockManager, SavedStateHandle())
         advanceUntilIdle()
-        settingsFlow.value = testSettings.copy(serverAddress = "other.example.com")
-        viewModel.retryLoad()
+        vm.retryLoad()
         advanceUntilIdle()
-        assertEquals(testSettings, viewModel.draft.value)
+        assertEquals(1, reads)
+        assertEquals(testSettings, vm.draft.value)
+    }
+
+    @Test
+    fun `retryLoad keeps the error shown and starts one read while a retry is pending`() = runTest(testDispatcher) {
+        var reads = 0
+        val repo = mockk<SettingsRepository>(relaxed = true).also {
+            every { it.settings } returns flow {
+                if (reads++ == 0) throw IllegalStateException("boom")
+                awaitCancellation()
+            }
+        }
+        val vm = SettingsViewModel(repo, mockManager, SavedStateHandle())
+        advanceUntilIdle()
+
+        vm.retryLoad()
+        vm.retryLoad()
+        advanceUntilIdle()
+
+        assertEquals(2, reads)
+        // The error screen must stay up while the retry is pending, never a blank window.
+        assertEquals("Load failed: boom", vm.loadError.value)
+        assertNull(vm.draft.value)
     }
 
     @Test

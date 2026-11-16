@@ -4,6 +4,8 @@
 package com.mqvpn.app.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -124,7 +126,8 @@ private fun MainTabs(vm: MqvpnViewModel, settingsVm: SettingsViewModel, nav: Nav
 private fun LoadErrorScreen(message: String, onRetry: () -> Unit) {
     val c = LocalMqColors.current
     Column(
-        Modifier.fillMaxSize().background(c.win).safeDrawingPadding().padding(24.dp),
+        // Scrolls so a long message can never push the only way out off a short window.
+        Modifier.fillMaxSize().background(c.win).safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {

@@ -92,11 +92,14 @@ class SettingsViewModel @Inject constructor(
     }
 
     private fun load() {
-        _loadError.value = null
         loadJob = viewModelScope.launch {
             try {
                 repository.settings.collect { loaded ->
-                    if (_draft.value == null) _draft.value = withRestoredAddress(loaded)
+                    if (_draft.value == null) {
+                        _draft.value = withRestoredAddress(loaded)
+                        // Cleared only on success: the error screen stays up while a retry is pending.
+                        _loadError.value = null
+                    }
                 }
             } catch (e: CancellationException) {
                 throw e
