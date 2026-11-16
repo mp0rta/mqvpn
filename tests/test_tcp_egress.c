@@ -3191,6 +3191,7 @@ hol_sink_send(hol_flow_t *x, uint64_t total, int *blocked)
             chunk[k] = bp_pat(x->sent + k);
         ssize_t w = send(x->sink.conn_fd, chunk, n, MSG_DONTWAIT | MSG_NOSIGNAL);
         if (w <= 0) {
+            ASSERT_EQ(errno == EAGAIN || errno == EWOULDBLOCK, 1);
             *blocked = 1;
             return;
         }
@@ -3263,6 +3264,15 @@ hol_run(int nstall, uint32_t delay_us, uint32_t drop_to_us, uint64_t limit_us)
     }
     ASSERT_EQ(m->r.body_rcvd, total);
     ASSERT_EQ(m->r.bad_pattern, 0);
+
+    /* The stalled flows were held the whole time, not reset or closed. */
+    for (int i = 0; i < nstall; i++) {
+        ASSERT_EQ(f[i].r.closed, 0);
+        ASSERT_EQ(f[i].r.body_rcvd, 0);
+        const harness_egress_fd_t *slot = hol_egress_slot(&h, &f[i].sink);
+        ASSERT_EQ(slot != NULL, 1);
+        ASSERT_EQ(slot->want_read, 0);
+    }
 
     harness_stop(&h);
     for (int i = 0; i <= nstall; i++)
