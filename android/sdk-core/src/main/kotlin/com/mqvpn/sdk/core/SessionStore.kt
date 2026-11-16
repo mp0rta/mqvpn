@@ -10,11 +10,17 @@ import com.mqvpn.sdk.core.model.VpnStats
 import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
- * The session's observable state, process-wide. The running session is the
- * only writer (from its engine thread, through [publish]); [MqvpnManager]
+ * The session's observable state, process-wide. The live service instance is
+ * the only writer (from its engine thread, through [publish]); [MqvpnManager]
  * only reads. The service and the UI share the process, so a recreated UI
  * or ViewModel sees the live state at once, with no binding to keep alive
  * or replay.
+ *
+ * Ownership spans onCreate → onDestroy, not the engine thread's life: the
+ * stop join is bounded (2 s), so a destroyed service's engine can still run
+ * — and finish a queued start or its teardown — after a replacement
+ * instance took over. Once retired, nothing it does reaches the store or
+ * the app callbacks.
  */
 internal object SessionStore {
     val state = MutableStateFlow<MqvpnState>(MqvpnState.Disconnected)
@@ -28,20 +34,28 @@ internal object SessionStore {
     private val lock = Any()
     private var owner: Any? = null // guarded by lock
 
-    /** Makes [session] the only writer: the last session to start owns the store. */
-    fun claim(session: Any) = synchronized(lock) { owner = session }
-
-    /** Gives the store up if [session] still owns it (its last writes are done). */
-    fun release(session: Any) = synchronized(lock) { if (owner === session) owner = null }
+    /** [service] (just created) becomes the only writer. Main thread. */
+    fun claim(service: Any) = synchronized(lock) { owner = service }
 
     /**
-     * Runs [write] only while [session] owns the store; false = superseded.
-     * A destroyed service's engine thread can outlive the 2 s stop join and
-     * finish its teardown after a replacement session started: its writes
-     * must not overwrite the live session's state.
+     * Runs [write] only while [from] owns the store; false = retired or
+     * superseded. [write] runs under the lock, app callbacks included, so a
+     * retire cannot slip between the check and the callback.
      */
-    fun publish(session: Any, write: SessionStore.() -> Unit): Boolean =
-        synchronized(lock) { (owner === session).also { if (it) write() } }
+    fun publish(from: Any, write: SessionStore.() -> Unit): Boolean =
+        synchronized(lock) { (owner === from).also { if (it) write() } }
+
+    /**
+     * [service] is destroyed: it gives the store up. A teardown that has not
+     * finished by now (the stop join timed out) never will for the UI, so a
+     * live state becomes Disconnected; a terminal Error stays. Main thread.
+     */
+    fun retire(service: Any) = synchronized(lock) {
+        if (owner !== service) return@synchronized
+        if (state.value !is MqvpnState.Error) state.value = MqvpnState.Disconnected
+        resetMetrics()
+        owner = null
+    }
 
     fun resetMetrics() {
         stats.value = VpnStats()

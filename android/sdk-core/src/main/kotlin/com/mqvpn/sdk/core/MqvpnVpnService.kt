@@ -49,6 +49,7 @@ abstract class MqvpnVpnService : VpnService() {
             clientFn = { session?.clientHandle ?: 0L },
             onBadFd = { handle -> session?.handleBadFd(handle) })
         executor.start()
+        SessionStore.claim(this)
         SessionStore.service = this
     }
 
@@ -58,6 +59,7 @@ abstract class MqvpnVpnService : VpnService() {
     override fun onDestroy() {
         if (SessionStore.service === this) SessionStore.service = null
         executor.stop { cleanup() }
+        SessionStore.retire(this) // after the join: a timed-out teardown writes nothing more
         scope.cancel()
         prefs().edit().remove(KEY_CONFIG_JSON).apply()
         super.onDestroy()
@@ -132,12 +134,19 @@ abstract class MqvpnVpnService : VpnService() {
     }
 
     /**
-     * Emit [from]'s state to the store (StateFlow → UI) and the app callback;
-     * executor thread only. A superseded session reaches neither: its app
-     * callback would stop the replacement's notification.
+     * Emit state to the store (StateFlow → UI) and the app callback; executor
+     * thread only. A retired service reaches neither: its callback would
+     * stop the replacement's notification (the app's IDs are shared).
      */
-    internal fun emitState(from: Session, newState: MqvpnState) {
-        if (SessionStore.publish(from) { state.value = newState }) onVpnStateChanged(newState)
+    internal fun emitState(newState: MqvpnState) {
+        SessionStore.publish(this) {
+            state.value = newState
+            onVpnStateChanged(newState)
+        }
+    }
+
+    internal fun notifyReconnectScheduled(delaySec: Int) {
+        SessionStore.publish(this) { onReconnectScheduled(delaySec) }
     }
 
     // --- Abstract methods (app implements) ---
@@ -153,7 +162,11 @@ abstract class MqvpnVpnService : VpnService() {
      */
     abstract fun onCreateTun(info: TunnelInfo, config: MqvpnConfig): ParcelFileDescriptor
 
-    /** State change notification. Update UI from here. */
+    /**
+     * State change notification. Update UI from here. Runs on the executor
+     * thread under the state store's lock (as does [onReconnectScheduled]):
+     * keep it short and never wait on the main thread from it.
+     */
     abstract fun onVpnStateChanged(newState: MqvpnState)
 
     // --- Optional callbacks ---

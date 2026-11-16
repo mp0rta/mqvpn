@@ -35,9 +35,9 @@ internal class Session(
 ) : TunnelCallbacks {
 
     private val machine = SessionStateMachine(
-        emit = { state -> service.emitState(this, state) },
+        emit = service::emitState,
         stop = { service.stopSession(this) },
-        onReconnectScheduled = service::onReconnectScheduled,
+        onReconnectScheduled = service::notifyReconnectScheduled,
     )
 
     // Null until open() built them; open() may fail part way.
@@ -59,7 +59,6 @@ internal class Session(
      * would otherwise refuse every later start).
      */
     fun open(reactorHandle: Long): Boolean {
-        SessionStore.claim(this)
         machine.started()
         try {
             val t = MqvpnTunnel.create(config, this, reactorHandle)
@@ -107,7 +106,7 @@ internal class Session(
             lastStatsMs = now
             val stats = t.getStats()
             val paths = t.getPaths()
-            SessionStore.publish(this) {
+            SessionStore.publish(service) {
                 this.stats.value = stats
                 this.paths.value = paths
             }
@@ -115,7 +114,7 @@ internal class Session(
         if (now - lastReorderStatsMs >= REORDER_STATS_INTERVAL_MS) {
             lastReorderStatsMs = now
             val reorder = t.getReorderStats()
-            SessionStore.publish(this) { reorderStats.value = reorder }
+            SessionStore.publish(service) { reorderStats.value = reorder }
         }
         return result
     }
@@ -149,9 +148,8 @@ internal class Session(
             } finally {
                 pathManager?.closeAllFds() // sockets are ours; closed AFTER the destroy
                 tunPfd?.close()
-                SessionStore.publish(this) { resetMetrics() }
+                SessionStore.publish(service) { resetMetrics() }
                 machine.closed()
-                SessionStore.release(this)
             }
         }
     }
