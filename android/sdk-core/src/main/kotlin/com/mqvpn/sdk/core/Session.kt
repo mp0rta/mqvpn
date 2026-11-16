@@ -47,7 +47,7 @@ internal class Session(
     private var bridge: TunnelBridge? = null
     private var tunPfd: ParcelFileDescriptor? = null
 
-    private var lastStatsMs = 0L
+    private val statsSampler = StatsSampler(STATS_INTERVAL_MS)
     private var lastReorderStatsMs = 0L
 
     val clientHandle: Long get() = tunnel?.clientHandle ?: 0L
@@ -102,8 +102,7 @@ internal class Session(
         val now = SystemClock.elapsedRealtime()
         // the UI divides byte deltas by its own 1 s tick: a coarser sample
         // would alias into alternating zero/double rates
-        if (now - lastStatsMs >= STATS_INTERVAL_MS) {
-            lastStatsMs = now
+        if (statsSampler.shouldSample(now)) {
             val stats = t.getStats()
             val paths = t.getPaths()
             SessionStore.publish(service) {
@@ -121,7 +120,8 @@ internal class Session(
 
     /** [nextTimerMs, tunReadable, isIdle] for the poller, null before open(). */
     fun interest(): IntArray? = tunnel?.getInterest()?.let {
-        intArrayOf(it.nextTimerMs, if (it.tunReadable) 1 else 0, if (it.isIdle) 1 else 0)
+        val wait = statsSampler.capWait(it.nextTimerMs, SystemClock.elapsedRealtime())
+        intArrayOf(wait, if (it.tunReadable) 1 else 0, if (it.isIdle) 1 else 0)
     }
 
     fun handleBadFd(handle: Long) {
@@ -224,4 +224,28 @@ internal class Session(
         private const val STATS_INTERVAL_MS = 100L
         private const val REORDER_STATS_INTERVAL_MS = 1000L
     }
+}
+
+/**
+ * Rate-limits stats reads to one per [intervalMs] without losing the last
+ * one: a tick that skipped a read leaves a sample due, and the engine's next
+ * wait is cut to that sample's time, so a burst that ends between samples
+ * still shows its final counters instead of waiting for the next packet.
+ */
+internal class StatsSampler(private val intervalMs: Long) {
+    private var lastMs = 0L
+    private var due = false
+
+    fun shouldSample(nowMs: Long): Boolean {
+        if (nowMs - lastMs >= intervalMs) {
+            lastMs = nowMs
+            due = false
+            return true
+        }
+        due = true
+        return false
+    }
+
+    fun capWait(waitMs: Int, nowMs: Long): Int =
+        if (!due) waitMs else minOf(waitMs.toLong(), (lastMs + intervalMs - nowMs).coerceAtLeast(1)).toInt()
 }
