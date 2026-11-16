@@ -856,7 +856,7 @@ tcp_lane_downlink_pump_status(mqvpn_tcp_lane_t *lane, void *stream)
              * re-report at the resumed drain (MQVPN_TCP_LANE_H3_RECV_*
              * contract in tcp_lane.h: xquic re-reports *fin=1 on every
              * call once the transport FIN arrived,
-             * xqc_h3_request.c:795-801). */
+             * xqc_h3_request_recv_body() in xqc_h3_request.c). */
             return TCP_LANE_FLOW_LIVE;
         }
         /* Stash flushed — fall through to resume draining recv_body below,

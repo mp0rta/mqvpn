@@ -149,8 +149,8 @@ actually in flight).
 they do. iOS caps at 64 flows to fit a ~50 MB Network Extension ceiling; its per-flow
 uplink term is `TCP_WND` (262,140) + high-water (`TCP_WND`/2 = 131,070) = 393,210 B, so
 64 flows ≈ 24 MiB. That is one part of the profile's total, so it claims no margin
-against that ceiling; §5c adds the other parts and an on-device measurement decides. Desktop/router is 64× the flow
-count *and* 2× the per-flow term (786,424 / 393,210, from the 2× wider window against a
+against that ceiling; §5c adds the other parts and an on-device measurement decides.
+Desktop/router is 64× the flow count *and* 2× the per-flow term (786,424 / 393,210, from the 2× wider window against a
 2× smaller relative high-water), i.e. 128× the iOS total: 24 MiB × 128 = 3.0 GiB. The
 factor is 128, not 64, because the flow ceiling and the window sizing are independent
 axes (§0). The two still differ on both, but far less than when desktop/router ran a

@@ -355,9 +355,8 @@ probe_open_request_with_body(probe_conn_t *p)
 static int
 probe_open_connect_ip(probe_conn_t *p)
 {
-    xqc_stream_settings_t ss;
-    xqc_h3_request_t *req =
-        xqc_h3_request_create(p->engine, &p->cid, probe_stream_settings(p, &ss), p);
+    /* NULL settings, as mqvpn_client passes for the tunnel request. */
+    xqc_h3_request_t *req = xqc_h3_request_create(p->engine, &p->cid, NULL, p);
     if (!req) return -1;
 
     xqc_http_header_t hdrs[6] = {
@@ -1305,6 +1304,7 @@ harness_held_bytes(harness_t *h, tcp_sink_t *sink, size_t sink_sent)
     }
     long long sendq = bp_queue_bytes(sink->conn_fd, SIOCOUTQ);
     long long recvq = bp_queue_bytes(egress_fd, SIOCINQ);
+    /* Assumes one relay stash is in use, so the result is a lower bound. */
     long long held = (long long)sink_sent - sendq - recvq - 16384;
     return held > 0 ? (size_t)held : 0;
 }
