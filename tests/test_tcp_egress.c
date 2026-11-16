@@ -2306,22 +2306,45 @@ TEST(mqvpn_tcp_bodiless_fin_becomes_shut_wr)
     free(h.probe.raw_recv_buf);
 }
 
+/* The egress socket the server opened for the (single) flow, or NULL. */
+static const harness_egress_fd_t *
+bp_egress_slot(const harness_t *h)
+{
+    for (int i = 0; i < HARNESS_MAX_EGRESS_FDS; i++)
+        if (h->egress_fds[i].active) return &h->egress_fds[i];
+    return NULL;
+}
+
+/* One slice of the loop every wait below runs: sink accept tick, then pump. */
+static void
+bp_pump(harness_t *h, tcp_sink_t *sink, int ms)
+{
+    tcp_sink_pump(sink);
+    int never = 0;
+    harness_pump(h, &never, ms);
+}
+
 /* Test 4: downlink backpressure pause/resume + deferred-shutdown ordering.
- * The sink accepts but NEVER reads; the probe pumps a large payload
- * (deliberately larger than the default loopback socket buffers) so
- * send()'s EWOULDBLOCK in svr_tcp_egress_drain_body is hit for real,
- * pausing the flow — which, through ordinary QUIC stream flow control
- * (the server stops draining recv_body while paused), backpressures the
- * probe's own sends too. The probe fins its side WHILE still paused/
- * backed up (before the sink ever drains), exercising the "fin arrives
- * during pause must not shutdown ahead of the still-stashed bytes"
- * ordering. The sink then starts draining and must receive every byte,
+ * The sink accepts but NEVER reads and has a 16 KiB receive buffer; the
+ * server's egress socket gets a 16 KiB send buffer. The probe sends 2 MiB,
+ * far more than the two socket buffers hold, so send()'s EWOULDBLOCK in
+ * svr_tcp_egress_drain_body is hit for real and the flow pauses
+ * (want_write armed; asserted before the FIN). The 2 MiB fits in the
+ * stream window, so the probe can send it all and the FIN while the flow
+ * is still paused (before the sink ever drains), exercising the "fin
+ * arrives during pause must not shutdown ahead of the still-stashed
+ * bytes" ordering. The sink then starts draining and must receive every byte,
  * in order, with nothing lost — which is only possible if the deferred
  * shutdown really waited for the stash to fully flush first. */
 TEST(mqvpn_tcp_downlink_backpressure_pause_resume)
 {
     tcp_sink_t sink;
     ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0); /* never reads */
+    /* Inherited by the accepted socket, so set before the server connects. */
+    int small_buf = 16 * 1024;
+    ASSERT_EQ(
+        setsockopt(sink.listen_fd, SOL_SOCKET, SO_RCVBUF, &small_buf, sizeof(small_buf)),
+        0);
 
     char path[64];
     snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
@@ -2342,7 +2365,12 @@ TEST(mqvpn_tcp_downlink_backpressure_pause_resume)
     ASSERT_EQ(h.probe.response_done, 1);
     ASSERT_STREQ(h.probe.status, "200");
 
-    size_t payload_len = 512 * 1024;
+    const harness_egress_fd_t *slot = bp_egress_slot(&h);
+    ASSERT_EQ(slot != NULL, 1);
+    ASSERT_EQ(setsockopt(slot->fd, SOL_SOCKET, SO_SNDBUF, &small_buf, sizeof(small_buf)),
+              0);
+
+    size_t payload_len = 2 * 1024 * 1024;
     uint8_t *payload = malloc(payload_len);
     ASSERT_EQ(payload != NULL, 1);
     for (size_t i = 0; i < payload_len; i++)
@@ -2373,8 +2401,16 @@ TEST(mqvpn_tcp_downlink_backpressure_pause_resume)
     }
     ASSERT_EQ(sent_ok, 1);
 
-    /* Fin while the flow is still (very likely) paused/backed up — the
-     * point of this test. */
+    /* The flow must really be paused (send() hit EWOULDBLOCK), with the sink
+     * not yet reading: a bounded wait for the want_write interest. */
+    for (int i = 0; i < 500 && !slot->want_write; i++) {
+        tcp_sink_pump(&sink);
+        int never = 0;
+        harness_pump(&h, &never, 20);
+    }
+    ASSERT_EQ(slot->want_write, 1);
+
+    /* Fin while the flow is paused — the point of this test. */
     ASSERT_EQ(probe_send_fin_retry(&h, &h.probe, 500), 0);
 
     /* Now start draining the sink and keep pumping until every byte has
@@ -2833,8 +2869,7 @@ TEST(mqvpn_tcp_two_flow_same_conn_idle_eviction)
     free(second.raw_recv_buf);
 }
 
-/* ── Limits (Step 2, carry-over from the relay review): parked-flow
- * eviction ──
+/* ── Limits: parked-flow eviction ──
  *
  * A flow parked by UPLINK backpressure (uplink_withheld=1: the server's
  * send_body() to the client is -XQC_EAGAIN'ing because the client's H3
@@ -2844,96 +2879,77 @@ TEST(mqvpn_tcp_two_flow_same_conn_idle_eviction)
  * its ONLY collector, which is exactly what last_activity_us's "no bytes
  * moved, no refresh" rule (see that field's comment in tcp_egress.c) is for.
  *
- * Forced black-box, no syscall interposition needed: the sink floods the
- * egress connection with more data than the default initial H3 stream
- * receive window (XQC_MIN_RECV_WINDOW = 63000 bytes, third_party/xquic/src/
- * transport/xqc_conn.h) while the probe (via suppress_body_drain) never
- * calls recv_body — so xquic never sends a MAX_STREAM_DATA update and the
- * window never reopens. This is a real, not mocked, EAGAIN. */
+ * Forced black-box, no syscall interposition needed: the probe opens its
+ * request with a per-stream receive rate (so the stream window is small,
+ * not the 16 MiB default) and never reads, so xquic never sends a
+ * MAX_STREAM_DATA update and the window never reopens. The sink floods the
+ * egress connection until the relay's send_body() returns a real -XQC_EAGAIN
+ * and the flow parks (want_read dropped, asserted before the idle check).
+ * What a parked flow holds is bounded by the H3 receive-buffer limit plus
+ * that stream window. */
 TEST(mqvpn_tcp_parked_flow_idle_eviction)
 {
     tcp_sink_t sink;
     ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0); /* we drive sends manually below */
 
-    char path[64];
-    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
-
     harness_t h;
-    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
-                            harness_cfg_allow_127_idle_timeout_1),
+    harness_probe_opts_t opts = {.recv_rate_bytes_per_sec = 125000000};
+    ASSERT_EQ(harness_start_opts(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
+                                 harness_cfg_allow_127_idle_timeout_1, &opts),
               0);
-    h.probe.path = path;
-    h.probe.suppress_body_drain = 1;
 
     harness_pump(&h, &h.probe.handshake_done, 10000);
     ASSERT_EQ(h.probe.handshake_done, 1);
-    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
 
-    harness_pump_with_sink(&h, &sink, &h.probe.response_done, 10000);
-    ASSERT_EQ(h.probe.response_done, 1);
-    ASSERT_STREQ(h.probe.status, "200");
+    probe_req_t r;
+    ASSERT_EQ(probe_open_tcp_request(&h, &r, (uint16_t)sink.port), 0);
+    r.reading = 0; /* the probe never reads the body */
+    for (int i = 0; i < 500 && !r.status[0]; i++)
+        bp_pump(&h, &sink, 20);
+    ASSERT_STREQ(r.status, "200");
+    for (int i = 0; i < 100 && sink.conn_fd < 0; i++)
+        bp_pump(&h, &sink, 20);
     ASSERT_EQ(sink.conn_fd >= 0, 1);
 
-    /* Flood up to 256 KiB from the sink's side — comfortably more than the
-     * ~63000-byte default window. Alternates send()+pump so the relay's
-     * recv()/send_body() loop actually runs while data is available;
-     * bails early if the sink's OWN kernel send buffer fills first (plenty
-     * has already been offered by then). */
-    uint8_t junk[4096];
+    /* Flood from the sink's side until the relay parks the flow (read
+     * interest dropped), bounded in real time. */
+    const harness_egress_fd_t *slot = bp_egress_slot(&h);
+    ASSERT_EQ(slot != NULL, 1);
+    uint8_t junk[65536];
     memset(junk, 0x5a, sizeof(junk));
-    for (int i = 0; i < 64; i++) {
-        ssize_t sent =
-            send(sink.conn_fd, junk, sizeof(junk), MSG_DONTWAIT | MSG_NOSIGNAL);
-        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
-        int never = 0;
-        harness_pump(&h, &never, 20);
+    uint64_t t0 = test_now_us();
+    while (slot->want_read && test_now_us() - t0 < 5000000ull) {
+        (void)send(sink.conn_fd, junk, sizeof(junk), MSG_DONTWAIT | MSG_NOSIGNAL);
+        bp_pump(&h, &sink, 5);
     }
+    ASSERT_EQ(slot->want_read, 0);
+    ASSERT_EQ(r.body_rcvd, 0);
 
-    /* Quiet now: no more sink sends, no probe reads. Same bounded wait as
-     * the ACTIVE idle-timeout test above. Checks both sides, like that
-     * test: the sink's real fd close AND the probe's H3 stream close (a
-     * server-initiated stream close/reset is a control-frame operation, not
-     * subject to the very stream-data flow control that's stuck full here,
-     * so it isn't blocked by the probe's own non-draining). */
+    /* Quiet now: no more sink sends, no probe reads. Bounded wait for the
+     * idle sweep, the flow's only collector. Checks both sides: the sink's
+     * real fd close AND the probe's H3 stream close (a server-initiated
+     * stream close/reset is a control-frame operation, not subject to the
+     * stream-data flow control that's stuck full here). */
     /* Real-wall-clock bound, not iteration count — the idle sweep fires on
      * real time (svr_now_us), while harness_pump's budget accounting can run
      * ahead of real time under CI poll churn (see idle-timeout-evicts). */
     int sink_eof = 0;
     uint64_t wait_start_us = test_now_us();
-    while (!(sink_eof && h.probe.request_closed) &&
-           test_now_us() - wait_start_us < 4000000ull) {
+    while (!(sink_eof && r.closed) && test_now_us() - wait_start_us < 4000000ull) {
         int never = 0;
         harness_pump(&h, &never, 20);
         if (!sink_eof) {
             uint8_t buf[4096];
-            ssize_t n = recv(sink.conn_fd, buf, sizeof(buf), MSG_DONTWAIT);
+            ssize_t n;
+            while ((n = recv(sink.conn_fd, buf, sizeof(buf), MSG_DONTWAIT)) > 0) {}
             if (n == 0) sink_eof = 1;
         }
     }
     ASSERT_EQ(sink_eof, 1);
-    ASSERT_EQ(h.probe.request_closed, 1);
+    ASSERT_EQ(r.closed, 1);
 
     harness_stop(&h);
     tcp_sink_close(&sink);
-    free(h.probe.raw_recv_buf);
-}
-
-/* The egress socket the server opened for the (single) flow, or NULL. */
-static const harness_egress_fd_t *
-bp_egress_slot(const harness_t *h)
-{
-    for (int i = 0; i < HARNESS_MAX_EGRESS_FDS; i++)
-        if (h->egress_fds[i].active) return &h->egress_fds[i];
-    return NULL;
-}
-
-/* One slice of the loop every wait below runs: sink accept tick, then pump. */
-static void
-bp_pump(harness_t *h, tcp_sink_t *sink, int ms)
-{
-    tcp_sink_pump(sink);
-    int never = 0;
-    harness_pump(h, &never, ms);
 }
 
 /* Uplink: the destination never reads, so the sender must stop. The bytes
