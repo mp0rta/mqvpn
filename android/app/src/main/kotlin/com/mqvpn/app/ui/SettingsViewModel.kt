@@ -13,6 +13,7 @@ import com.mqvpn.sdk.core.MqvpnManager
 import com.mqvpn.sdk.core.model.MqvpnState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -62,23 +63,48 @@ class SettingsViewModel @Inject constructor(
     private val landedGen = MutableStateFlow(0L)
     private var lastPersisted: DemoSettings? = null
 
+    /**
+     * The address box's raw text once edited; null = mirror the draft. Setup and
+     * Settings share it, so an unparsable entry stays visible across screens while
+     * the draft keeps the last valid server (which must never be connected to then).
+     * Saved state, so an entry in progress survives process recreation too.
+     * Declared before init: a cached DataStore delivers the first settings inside
+     * the constructor (Main.immediate), and that replay reads this.
+     */
+    val addressText: StateFlow<String?> = savedState.getStateFlow(ADDRESS_TEXT_KEY, null)
+
+    private var loadJob: Job? = null
+
     init {
-        viewModelScope.launch {
-            try {
-                repository.settings.collect { loaded ->
-                    if (_draft.value == null) _draft.value = withRestoredAddress(loaded)
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (t: Throwable) {
-                _loadError.value = "Load failed: ${t.message}"
-            }
-        }
+        load()
         viewModelScope.launch {
             for ((gen, d) in queue) {
                 // Same value already on disk (e.g. a duplicate update): nothing to do.
                 if (d != lastPersisted) persist(d)
                 landedGen.value = gen
+            }
+        }
+    }
+
+    /** Reads the stored settings again after a failed load; no-op once loaded or while a read runs. */
+    fun retryLoad() {
+        if (_draft.value == null && loadJob?.isActive != true) load()
+    }
+
+    private fun load() {
+        loadJob = viewModelScope.launch {
+            try {
+                repository.settings.collect { loaded ->
+                    if (_draft.value == null) {
+                        _draft.value = withRestoredAddress(loaded)
+                        // Cleared only on success: the error screen stays up while a retry is pending.
+                        _loadError.value = null
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                _loadError.value = "Load failed: ${t.message}"
             }
         }
     }
@@ -111,14 +137,6 @@ class SettingsViewModel @Inject constructor(
             _saveError.value = "Save failed: ${t.message}"
         }
     }
-
-    /**
-     * The address box's raw text once edited; null = mirror the draft. Setup and
-     * Settings share it, so an unparsable entry stays visible across screens while
-     * the draft keeps the last valid server (which must never be connected to then).
-     * Saved state, so an entry in progress survives process recreation too.
-     */
-    val addressText: StateFlow<String?> = savedState.getStateFlow(ADDRESS_TEXT_KEY, null)
 
     /** The address box holds text that doesn't parse; Home blocks connect on it. */
     val addressTextInvalid: StateFlow<Boolean> = addressText
