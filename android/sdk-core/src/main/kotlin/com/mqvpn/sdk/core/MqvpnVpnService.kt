@@ -131,10 +131,13 @@ abstract class MqvpnVpnService : VpnService() {
         s.close()
     }
 
-    /** Emit state to the store (StateFlow → UI) and the app callback; executor thread only. */
-    internal fun emitState(newState: MqvpnState) {
-        SessionStore.state.value = newState
-        onVpnStateChanged(newState)
+    /**
+     * Emit [from]'s state to the store (StateFlow → UI) and the app callback;
+     * executor thread only. A superseded session reaches neither: its app
+     * callback would stop the replacement's notification.
+     */
+    internal fun emitState(from: Session, newState: MqvpnState) {
+        if (SessionStore.publish(from) { state.value = newState }) onVpnStateChanged(newState)
     }
 
     // --- Abstract methods (app implements) ---
