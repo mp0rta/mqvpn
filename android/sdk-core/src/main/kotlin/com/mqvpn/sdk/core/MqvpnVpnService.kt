@@ -77,6 +77,7 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
     private lateinit var waiter: NativeReactorWaiter
     private lateinit var executor: MqvpnPoller
     private var tunnel: MqvpnTunnel? = null
+    private var lastStatsMs = 0L
     private var lastReorderStatsMs = 0L
     private var tunnelBridge: TunnelBridge? = null
     private var pathManager: PathManager? = null
@@ -104,12 +105,17 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
             tickFn = {
                 val t = tunnel
                 val result = t?.tick() ?: 0
-                // Poll stats/paths and push to MqvpnManager on each tick
+                // JNI arrays + boxed lists: sampled, not per poll (the loop can
+                // spin thousands of times a second under load)
                 if (t != null) {
-                    manager?.updateStats(t.getStats())
-                    manager?.updatePaths(t.getPaths())
-                    // JNI array + boxed list: once per wall-clock second, not per poll
                     val now = SystemClock.elapsedRealtime()
+                    // the UI divides byte deltas by its own 1 s tick: a coarser
+                    // sample would alias into alternating zero/double rates
+                    if (now - lastStatsMs >= STATS_INTERVAL_MS) {
+                        lastStatsMs = now
+                        manager?.updateStats(t.getStats())
+                        manager?.updatePaths(t.getPaths())
+                    }
                     if (now - lastReorderStatsMs >= 1000) {
                         lastReorderStatsMs = now
                         manager?.updateReorderStats(t.getReorderStats())
@@ -406,5 +412,7 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
 
         /** MQVPN_ERR_CLOSED in libmqvpn.h: connection closed. */
         private const val NATIVE_ERR_CLOSED = -10
+
+        private const val STATS_INTERVAL_MS = 100L
     }
 }
