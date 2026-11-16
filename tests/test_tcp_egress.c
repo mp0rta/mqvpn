@@ -3125,6 +3125,165 @@ TEST(mqvpn_tcp_downlink_stalled_probe_resumes)
     tcp_sink_close(&sink);
 }
 
+/* Head-of-line blocking: with a connection receive-rate limit the connection
+ * window is small, and every flow's share of it is a quarter. Flows whose
+ * reader stalled must not stop a flow that keeps reading. */
+#define HOL_MAX_FLOWS 4
+
+typedef struct {
+    tcp_sink_t sink;
+    probe_req_t r;
+    uint64_t sent;
+} hol_flow_t;
+
+static void
+hol_pump(harness_t *h, hol_flow_t *f, int nf, int ms)
+{
+    for (int i = 0; i < nf; i++)
+        tcp_sink_pump(&f[i].sink);
+    int never = 0;
+    harness_pump(h, &never, ms);
+}
+
+static const harness_egress_fd_t *
+hol_egress_slot(const harness_t *h, const tcp_sink_t *sink)
+{
+    for (int i = 0; i < HARNESS_MAX_EGRESS_FDS; i++) {
+        if (!h->egress_fds[i].active) continue;
+        struct sockaddr_in a;
+        socklen_t al = sizeof(a);
+        if (getpeername(h->egress_fds[i].fd, (struct sockaddr *)&a, &al) == 0 &&
+            ntohs(a.sin_port) == sink->port)
+            return &h->egress_fds[i];
+    }
+    return NULL;
+}
+
+/* Opens flow f[i] (a sink and a request to it) and waits until it is ACTIVE. */
+static void
+hol_open(harness_t *h, hol_flow_t *f, int i)
+{
+    hol_flow_t *x = &f[i];
+    x->sent = 0;
+    if (tcp_sink_open(&x->sink, /*echo=*/0) != 0 ||
+        probe_open_tcp_request(h, &x->r, (uint16_t)x->sink.port) != 0) {
+        printf("FAIL\n    %s:%d: cannot open flow %d\n", __FILE__, __LINE__, i + 1);
+        exit(1);
+    }
+    for (int k = 0; k < 500 && !x->r.status[0]; k++)
+        hol_pump(h, f, i + 1, 20);
+    ASSERT_STREQ(x->r.status, "200");
+    for (int k = 0; k < 100 && x->sink.conn_fd < 0; k++)
+        hol_pump(h, f, i + 1, 20);
+    ASSERT_EQ(x->sink.conn_fd >= 0, 1);
+}
+
+/* The sink offers pattern bytes up to `total`; returns once nothing more fits. */
+static void
+hol_sink_send(hol_flow_t *x, uint64_t total, int *blocked)
+{
+    uint8_t chunk[65536];
+    *blocked = 0;
+    while (x->sent < total) {
+        size_t n =
+            (size_t)(total - x->sent < sizeof(chunk) ? total - x->sent : sizeof(chunk));
+        for (size_t k = 0; k < n; k++)
+            chunk[k] = bp_pat(x->sent + k);
+        ssize_t w = send(x->sink.conn_fd, chunk, n, MSG_DONTWAIT | MSG_NOSIGNAL);
+        if (w <= 0) {
+            *blocked = 1;
+            return;
+        }
+        x->sent += (uint64_t)w;
+    }
+}
+
+/* Flow f[i], whose probe never reads, stalls: its egress fd keeps read
+ * interest off for 500 ms straight while the sink's send() is blocked. */
+static void
+hol_stall(harness_t *h, hol_flow_t *f, int i)
+{
+    hol_flow_t *x = &f[i];
+    x->r.reading = 0;
+    uint64_t t0 = test_now_us(), off_since = 0;
+    int stalled = 0;
+    while (!stalled && test_now_us() - t0 < 10000000ull) {
+        int blocked;
+        hol_sink_send(x, 64ull << 20, &blocked);
+        hol_pump(h, f, i + 1, 2);
+        const harness_egress_fd_t *slot = hol_egress_slot(h, &x->sink);
+        if (slot && !slot->want_read) {
+            if (!off_since) off_since = test_now_us();
+            if (blocked && test_now_us() - off_since >= 500000ull) stalled = 1;
+        } else {
+            off_since = 0;
+        }
+    }
+    ASSERT_EQ(stalled, 1);
+    ASSERT_EQ(x->r.body_rcvd, 0);
+    ASSERT_EQ(harness_held_bytes(h, &x->sink, (size_t)x->sent) > 0, 1);
+}
+
+/* `nstall` flows stall (with s2c delay `delay_us`, lowered to `drop_to_us`
+ * afterwards when non-zero); the next flow then downloads 4 MiB, intact,
+ * within `limit_us`. */
+static void
+hol_run(int nstall, uint32_t delay_us, uint32_t drop_to_us, uint64_t limit_us)
+{
+    harness_probe_opts_t opts = {.recv_rate_bytes_per_sec = 125000000,
+                                 .s2c_delay_us = delay_us};
+    harness_t h;
+    ASSERT_EQ(harness_start_opts(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
+                                 harness_cfg_allow_127, &opts),
+              0);
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+
+    hol_flow_t f[HOL_MAX_FLOWS];
+    for (int i = 0; i < nstall; i++) {
+        hol_open(&h, f, i);
+        hol_stall(&h, f, i);
+    }
+    if (drop_to_us) {
+        h.s2c_delay_us = drop_to_us;
+        uint64_t t0 = test_now_us();
+        while (test_now_us() - t0 < 2000000ull)
+            hol_pump(&h, f, nstall, 5);
+    }
+
+    const uint64_t total = 4ull << 20;
+    hol_flow_t *m = &f[nstall];
+    hol_open(&h, f, nstall);
+    m->r.check_pattern = 1;
+    uint64_t t0 = test_now_us();
+    while (m->r.body_rcvd < total && test_now_us() - t0 < limit_us) {
+        int blocked;
+        hol_sink_send(m, total, &blocked);
+        hol_pump(&h, f, nstall + 1, 2);
+    }
+    ASSERT_EQ(m->r.body_rcvd, total);
+    ASSERT_EQ(m->r.bad_pattern, 0);
+
+    harness_stop(&h);
+    for (int i = 0; i <= nstall; i++)
+        tcp_sink_close(&f[i].sink);
+}
+
+TEST(mqvpn_tcp_hol_one_stalled_flow)
+{
+    hol_run(1, 30000, 0, 5000000ull);
+}
+
+TEST(mqvpn_tcp_hol_three_stalled_flows)
+{
+    hol_run(3, 30000, 0, 10000000ull);
+}
+
+TEST(mqvpn_tcp_hol_rtt_drop)
+{
+    hol_run(1, 60000, 2000, 5000000ull);
+}
+
 /* ── svr_tcp_egress_errno_to_status — pure function ── */
 
 TEST(errno_to_status_maps_known_codes)
@@ -3736,6 +3895,9 @@ main(void)
     run_mqvpn_tcp_parked_flow_idle_eviction();
     run_mqvpn_tcp_uplink_stalled_destination_is_bounded();
     run_mqvpn_tcp_downlink_stalled_probe_resumes();
+    run_mqvpn_tcp_hol_one_stalled_flow();
+    run_mqvpn_tcp_hol_three_stalled_flows();
+    run_mqvpn_tcp_hol_rtt_drop();
     run_errno_to_status_maps_known_codes();
     run_non_tunnel_close_keeps_tunnel_established();
     run_connect_ip_v6_address_assign_is_slash_128();
