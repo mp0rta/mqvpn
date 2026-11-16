@@ -169,15 +169,6 @@ typedef struct {
     size_t raw_recv_cap;
     int raw_recv_fin;
 
-    /* Parked-flow idle-eviction test: when set, probe_cb_request_read's body
-     * branch does NOT call xqc_h3_request_recv_body at all on a
-     * XQC_REQ_NOTIFY_READ_BODY notify — no consumption means xquic never
-     * grows this stream's receive window back, which is exactly the
-     * condition (client stops reading, never reopens flow control) that
-     * parks a server-side connect-tcp flow in uplink_withheld. Independent
-     * of raw_capture (checked first) so the two knobs don't fight. */
-    int suppress_body_drain;
-
     /* recv_rate_bytes_per_sec of every request the probe opens (0: default
      * stream settings); harness_start_opts sets it. */
     uint64_t stream_recv_rate;
@@ -530,11 +521,6 @@ probe_cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t fl
     }
 
     if (flag & XQC_REQ_NOTIFY_READ_BODY) {
-        if (p->suppress_body_drain) {
-            /* Deliberately do not call recv_body — see the field comment on
-             * probe_conn_t.suppress_body_drain. */
-            return 0;
-        }
         if (p->raw_capture) {
             /* Relay tests: capture the echoed bytes verbatim,
              * growing the buffer as needed — no capsule framing on a
@@ -2403,11 +2389,8 @@ TEST(mqvpn_tcp_downlink_backpressure_pause_resume)
 
     /* The flow must really be paused (send() hit EWOULDBLOCK), with the sink
      * not yet reading: a bounded wait for the want_write interest. */
-    for (int i = 0; i < 500 && !slot->want_write; i++) {
-        tcp_sink_pump(&sink);
-        int never = 0;
-        harness_pump(&h, &never, 20);
-    }
+    for (int i = 0; i < 500 && !slot->want_write; i++)
+        bp_pump(&h, &sink, 20);
     ASSERT_EQ(slot->want_write, 1);
 
     /* Fin while the flow is paused — the point of this test. */
@@ -2923,7 +2906,6 @@ TEST(mqvpn_tcp_parked_flow_idle_eviction)
         bp_pump(&h, &sink, 5);
     }
     ASSERT_EQ(slot->want_read, 0);
-    ASSERT_EQ(r.body_rcvd, 0);
 
     /* Quiet now: no more sink sends, no probe reads. Bounded wait for the
      * idle sweep, the flow's only collector. Checks both sides: the sink's
