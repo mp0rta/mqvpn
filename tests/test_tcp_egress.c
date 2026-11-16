@@ -192,6 +192,10 @@ typedef struct {
     int fin;
     int closed;
     char status[8];
+    /* Test-local: when set, the read callback checks the body against bp_pat
+     * keyed on body_rcvd and latches a mismatch in bad_pattern. */
+    int check_pattern;
+    int bad_pattern;
 } probe_req_t;
 
 static xqc_stream_settings_t *
@@ -448,6 +452,20 @@ probe_cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_
     return 0;
 }
 
+/* Deterministic byte pattern for the backpressure tests. */
+static uint8_t
+bp_pat(uint64_t k)
+{
+    return (uint8_t)(k ^ (k >> 8) ^ (k >> 16));
+}
+
+static int
+bp_queue_bytes(int fd, unsigned long req)
+{
+    int v = 0;
+    return ioctl(fd, req, &v) == 0 ? v : 0;
+}
+
 static void
 probe_parse_status(xqc_h3_request_t *h3_request, char *status, size_t cap)
 {
@@ -474,8 +492,12 @@ probe_req_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
         unsigned char buf[4096];
         unsigned char fin = 0;
         ssize_t n;
-        while ((n = xqc_h3_request_recv_body(h3_request, buf, sizeof(buf), &fin)) > 0)
+        while ((n = xqc_h3_request_recv_body(h3_request, buf, sizeof(buf), &fin)) > 0) {
+            if (r->check_pattern)
+                for (ssize_t i = 0; i < n; i++)
+                    if (buf[i] != bp_pat(r->body_rcvd + (uint64_t)i)) r->bad_pattern = 1;
             r->body_rcvd += (size_t)n;
+        }
         if (fin) r->fin = 1;
     }
     return 0;
@@ -1276,19 +1298,27 @@ tcp_sink_close(tcp_sink_t *s)
 /* Bytes of `sink_sent` (what the sink wrote toward the egress socket) that sit
  * neither in the sink's send queue nor in the egress socket's receive queue,
  * minus the relay's own one-chunk stash (TCP_EGRESS_RELAY_CHUNK in
- * tcp_egress.c): what is parked in QUIC for that flow. Uses the first
- * registered egress fd, so run it with one flow. */
+ * tcp_egress.c): what is parked in QUIC for that flow. The egress socket is
+ * the one connected to the sink's port. */
 static size_t
 harness_held_bytes(harness_t *h, tcp_sink_t *sink, size_t sink_sent)
 {
-    long long sendq = 0, recvq = 0;
-    int v = 0;
-    if (ioctl(sink->conn_fd, SIOCOUTQ, &v) == 0) sendq = v;
-    for (int i = 0; i < HARNESS_MAX_EGRESS_FDS; i++) {
+    int egress_fd = -1;
+    for (int i = 0; i < HARNESS_MAX_EGRESS_FDS && egress_fd < 0; i++) {
         if (!h->egress_fds[i].active) continue;
-        if (ioctl(h->egress_fds[i].fd, SIOCINQ, &v) == 0) recvq = v;
-        break;
+        struct sockaddr_in a;
+        socklen_t al = sizeof(a);
+        if (getpeername(h->egress_fds[i].fd, (struct sockaddr *)&a, &al) == 0 &&
+            ntohs(a.sin_port) == sink->port)
+            egress_fd = h->egress_fds[i].fd;
     }
+    if (egress_fd < 0) {
+        printf("FAIL\n    %s:%d: no egress fd for the sink's port %d\n", __FILE__,
+               __LINE__, sink->port);
+        exit(1);
+    }
+    long long sendq = bp_queue_bytes(sink->conn_fd, SIOCOUTQ);
+    long long recvq = bp_queue_bytes(egress_fd, SIOCINQ);
     long long held = (long long)sink_sent - sendq - recvq - 16384;
     return held > 0 ? (size_t)held : 0;
 }
@@ -2888,13 +2918,6 @@ TEST(mqvpn_tcp_parked_flow_idle_eviction)
     free(h.probe.raw_recv_buf);
 }
 
-/* Deterministic byte pattern for the backpressure tests. */
-static uint8_t
-bp_pat(uint64_t k)
-{
-    return (uint8_t)(k ^ (k >> 8) ^ (k >> 16));
-}
-
 /* The egress socket the server opened for the (single) flow, or NULL. */
 static const harness_egress_fd_t *
 bp_egress_slot(const harness_t *h)
@@ -2902,13 +2925,6 @@ bp_egress_slot(const harness_t *h)
     for (int i = 0; i < HARNESS_MAX_EGRESS_FDS; i++)
         if (h->egress_fds[i].active) return &h->egress_fds[i];
     return NULL;
-}
-
-static int
-bp_queue_bytes(int fd, unsigned long req)
-{
-    int v = 0;
-    return ioctl(fd, req, &v) == 0 ? v : 0;
 }
 
 /* One slice of the loop every wait below runs: sink accept tick, then pump. */
@@ -3023,6 +3039,7 @@ TEST(mqvpn_tcp_downlink_stalled_probe_resumes)
     probe_req_t r;
     ASSERT_EQ(probe_open_tcp_request(&h, &r, (uint16_t)sink.port), 0);
     r.reading = 0; /* the probe never reads the body */
+    r.check_pattern = 1;
     for (int i = 0; i < 500 && !r.status[0]; i++)
         bp_pump(&h, &sink, 20);
     ASSERT_STREQ(r.status, "200");
@@ -3102,6 +3119,7 @@ TEST(mqvpn_tcp_downlink_stalled_probe_resumes)
     }
     ASSERT_EQ(sent, total);
     ASSERT_EQ(r.body_rcvd, total);
+    ASSERT_EQ(r.bad_pattern, 0);
 
     harness_stop(&h);
     tcp_sink_close(&sink);
