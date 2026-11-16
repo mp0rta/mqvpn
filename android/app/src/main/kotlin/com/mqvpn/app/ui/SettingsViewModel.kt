@@ -13,6 +13,7 @@ import com.mqvpn.sdk.core.MqvpnManager
 import com.mqvpn.sdk.core.model.MqvpnState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -72,8 +73,27 @@ class SettingsViewModel @Inject constructor(
      */
     val addressText: StateFlow<String?> = savedState.getStateFlow(ADDRESS_TEXT_KEY, null)
 
+    private var loadJob: Job? = null
+
     init {
+        load()
         viewModelScope.launch {
+            for ((gen, d) in queue) {
+                // Same value already on disk (e.g. a duplicate update): nothing to do.
+                if (d != lastPersisted) persist(d)
+                landedGen.value = gen
+            }
+        }
+    }
+
+    /** Reads the stored settings again after a failed load; no-op once loaded or while a read runs. */
+    fun retryLoad() {
+        if (_draft.value == null && loadJob?.isActive != true) load()
+    }
+
+    private fun load() {
+        _loadError.value = null
+        loadJob = viewModelScope.launch {
             try {
                 repository.settings.collect { loaded ->
                     if (_draft.value == null) _draft.value = withRestoredAddress(loaded)
@@ -82,13 +102,6 @@ class SettingsViewModel @Inject constructor(
                 throw e
             } catch (t: Throwable) {
                 _loadError.value = "Load failed: ${t.message}"
-            }
-        }
-        viewModelScope.launch {
-            for ((gen, d) in queue) {
-                // Same value already on disk (e.g. a duplicate update): nothing to do.
-                if (d != lastPersisted) persist(d)
-                landedGen.value = gen
             }
         }
     }

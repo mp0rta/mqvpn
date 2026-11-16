@@ -78,6 +78,35 @@ class SettingsViewModelTest {
     }
 
     @Test
+    fun `retryLoad after a failed read loads the settings and clears loadError`() = runTest(testDispatcher) {
+        var reads = 0
+        val flakyRepository = mockk<SettingsRepository>(relaxed = true).also {
+            every { it.settings } returns flow {
+                if (reads++ == 0) throw IllegalStateException("boom")
+                emit(testSettings)
+            }
+        }
+        val vm = SettingsViewModel(flakyRepository, mockManager, SavedStateHandle())
+        advanceUntilIdle()
+        assertEquals("Load failed: boom", vm.loadError.value)
+
+        vm.retryLoad()
+        advanceUntilIdle()
+
+        assertNull(vm.loadError.value)
+        assertEquals(testSettings, vm.draft.value)
+    }
+
+    @Test
+    fun `retryLoad is a no-op once the settings are loaded`() = runTest(testDispatcher) {
+        advanceUntilIdle()
+        settingsFlow.value = testSettings.copy(serverAddress = "other.example.com")
+        viewModel.retryLoad()
+        advanceUntilIdle()
+        assertEquals(testSettings, viewModel.draft.value)
+    }
+
+    @Test
     fun `isEditable reflects vpnState kind`() = runTest(testDispatcher) {
         advanceUntilIdle()
         assertTrue(viewModel.isEditable.value)
