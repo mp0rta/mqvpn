@@ -190,16 +190,6 @@ class MqvpnManager(private val context: Context) {
         _reorderStats.value = ReorderStats()
     }
 
-    @MainThread
-    fun destroy() {
-        boundService?.manager = null
-        serviceConnection?.let { conn ->
-            try { context.unbindService(conn) } catch (_: Exception) {}
-        }
-        serviceConnection = null
-        boundService = null
-    }
-
     companion object {
         private const val TAG = "MqvpnManager"
         internal const val EXTRA_CONFIG_JSON = "mqvpn_config_json"

@@ -25,12 +25,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
-/**
- * Backs the settings screen. Scoped to the settings NavBackStackEntry (not
- * app-singleton like [MqvpnViewModel]) — it must never call
- * [MqvpnManager.destroy]; destroying the shared manager instance is
- * exclusively [MqvpnViewModel]'s job.
- */
+/** Backs the settings screen; scoped to the settings NavBackStackEntry. */
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
     private val repository: SettingsRepository,

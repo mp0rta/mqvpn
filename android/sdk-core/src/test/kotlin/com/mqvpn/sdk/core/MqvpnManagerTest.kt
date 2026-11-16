@@ -136,13 +136,6 @@ class MqvpnManagerTest {
     }
 
     @Test
-    fun `destroy clears service binding`() {
-        manager.destroy()
-        // Should not throw
-        manager.destroy() // idempotent
-    }
-
-    @Test
     fun reorderStats_initialValueIsAllZero() {
         val mgr = MqvpnManager(RuntimeEnvironment.getApplication())
         assertEquals(ReorderStats(), mgr.reorderStats.value)
