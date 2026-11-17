@@ -827,7 +827,15 @@ target_include_directories(mqvpn_shared
     PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR}
 )
 # Shared lib needs shared xquic (static .a lacks -fPIC)
-target_link_libraries(mqvpn_shared xquic ${SSL_LIB} ${CRYPTO_LIB} pthread)
+# stdc++: BoringSSL's C++ internals (the Darwin twin links c++)
+target_link_libraries(mqvpn_shared xquic ${SSL_LIB} ${CRYPTO_LIB} pthread stdc++)
+# Fail the link when libxquic.so does not export a function libmqvpn calls
+# (the CLI links xquic statically and would not notice). Sanitizer builds
+# are left out: clang does not link the sanitizer runtime into a .so.
+if(NOT ENABLE_SANITIZERS AND NOT ENABLE_MSAN)
+    # LINK_FLAGS, not target_link_options(): that needs CMake 3.13
+    set_property(TARGET mqvpn_shared APPEND_STRING PROPERTY LINK_FLAGS " -Wl,--no-undefined")
+endif()
 if(MQVPN_HYBRID_TCP_LANE_BUILD)
     target_link_libraries(mqvpn_shared lwip_core)
     target_compile_definitions(mqvpn_shared PRIVATE MQVPN_HYBRID_TCP_LANE_ENABLED)
