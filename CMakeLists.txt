@@ -833,7 +833,8 @@ target_link_libraries(mqvpn_shared xquic ${SSL_LIB} ${CRYPTO_LIB} pthread stdc++
 # (the CLI links xquic statically and would not notice). Sanitizer builds
 # are left out: clang does not link the sanitizer runtime into a .so.
 if(NOT ENABLE_SANITIZERS AND NOT ENABLE_MSAN)
-    target_link_options(mqvpn_shared PRIVATE -Wl,--no-undefined)
+    # LINK_FLAGS, not target_link_options(): that needs CMake 3.13
+    set_property(TARGET mqvpn_shared APPEND_STRING PROPERTY LINK_FLAGS " -Wl,--no-undefined")
 endif()
 if(MQVPN_HYBRID_TCP_LANE_BUILD)
     target_link_libraries(mqvpn_shared lwip_core)
