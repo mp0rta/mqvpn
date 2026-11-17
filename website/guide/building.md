@@ -25,7 +25,8 @@
 ```bash
 cd third_party/xquic/third_party/boringssl
 mkdir -p build && cd build
-cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
 make -j$(nproc) ssl crypto
 cd ../../../../..
 ```
