@@ -5,7 +5,7 @@
 ### 必要なもの
 
 - Git
-- CMake 3.10+
+- CMake 3.22+
 - Make（GNU Make）
 - GCC または Clang（C11）
 - libevent 2.x
@@ -78,7 +78,7 @@ Windows ではクライアントのみサポートされています。サーバ
 | ツール | 用途 | インストール |
 |--------|------|-------------|
 | Visual Studio 2022 Build Tools | C/C++ コンパイラ (MSVC) | `winget install Microsoft.VisualStudio.2022.BuildTools`（C++ ワークロードを選択） |
-| CMake >= 3.10 | ビルドシステム | `winget install Kitware.CMake` |
+| CMake >= 3.22 | ビルドシステム | `winget install Kitware.CMake` |
 | Go | BoringSSL に必要 | `winget install GoLang.Go` |
 | NASM | BoringSSL に必要（アセンブリ） | `winget install NASM.NASM` |
 | Perl (Strawberry Perl) | BoringSSL に必要 | `winget install StrawberryPerl.StrawberryPerl` |
