@@ -9,7 +9,7 @@ How to build the mqvpn client on Windows using MSVC.
 | Tool | Purpose | Install |
 |------|---------|---------|
 | Visual Studio 2022 Build Tools | C/C++ compiler (MSVC) | `winget install Microsoft.VisualStudio.2022.BuildTools` (select C++ workload) |
-| CMake >= 3.10 | Build system | `winget install Kitware.CMake` |
+| CMake >= 3.22 | Build system | `winget install Kitware.CMake` |
 | Go | Required by BoringSSL | `winget install GoLang.Go` |
 | NASM | Required by BoringSSL (assembly) | `winget install NASM.NASM` |
 | Perl (Strawberry Perl) | Required by BoringSSL | `winget install StrawberryPerl.StrawberryPerl` |

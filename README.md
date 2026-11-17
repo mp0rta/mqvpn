@@ -653,7 +653,7 @@ Full report with all numbers: [`docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bond
 
 ## Building
 
-Requirements: Linux, CMake 3.10+, GCC/Clang (C11), libevent 2.x
+Requirements: Linux, CMake 3.22+, GCC/Clang (C11), libevent 2.x
 
 ```bash
 git clone --recurse-submodules https://github.com/mp0rta/mqvpn.git
