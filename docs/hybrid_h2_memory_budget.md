@@ -334,7 +334,8 @@ Worst cases, if every flow stalls with a full window:
 | `RecvRateLimit` client, 64 flows (iOS profile) | at most the connection window (16 MiB) in the transport + 64 × 68 KiB ≈ 4.3 MiB in HTTP/3 ≈ 20.3 MiB |
 | server | 16 MiB + 68 KiB + 16 KiB per flow; `TcpMaxFlows` × that per session, `TcpMaxGlobalFlows` × that overall (≈ 64 GiB at 4096) |
 
-These are payload bounds. No bound on total heap is claimed: allocator and bookkeeping
+These are payload bounds for the mqvpn process; kernel socket buffers are outside it and not
+counted. No bound on total heap is claimed: allocator and bookkeeping
 overhead (including the transport's per-frame bookkeeping) come on top.
 
 ### 5c. iOS-profile budget table

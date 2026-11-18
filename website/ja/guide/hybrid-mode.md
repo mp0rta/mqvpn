@@ -72,7 +72,7 @@ control API の `get_stats` がレーンのランタイムカウンタをクラ�
 
 ## iOS ビルド
 
-iOS ビルド（`ios/build-ios.sh`）では、iOS Network Extension のメモリ上限に収めるため、lwIP のフットプリントを削減した構成（`MQVPN_LWIP_IOS_PROFILE` ビルドフラグ: 他プロファイルの 512 KiB ウィンドウに対し約 256 KiB、フロー上限 64）でレーンをコンパイルします。Android ビルドは専用プロファイル（desktop と同じウィンドウ + 512 pcb プール = 256 フロー上限）を使用します。desktop / router ビルドは 8192 pcb プールで 4096 フロー上限です。このプロファイルは受信レート設定 [`[Advanced] RecvRateLimit`](./configuration#advanced) とセットで使います。小さくした lwIP のウィンドウが内側の TCP を抑え、`RecvRateLimit` が外側の QUIC 接続の受信ウィンドウ（最大 16 MiB、トンネル内の TCP 接続どうしで分け合う）を抑えるので、iOS クライアントは両方を設定します。どのクライアントでもサーバでも、TCP 接続 1 本につき、読み出し待ちの受信データが 64 KiB に達すると送信側を減速させます。予算計算と実測値の詳細は
+iOS ビルド（`ios/build-ios.sh`）では、iOS Network Extension のメモリ上限に収めるため、lwIP のフットプリントを削減した構成（`MQVPN_LWIP_IOS_PROFILE` ビルドフラグ: 他プロファイルの 512 KiB ウィンドウに対し約 256 KiB、フロー上限 64）でレーンをコンパイルします。Android ビルドは専用プロファイル（desktop と同じウィンドウ + 512 pcb プール = 256 フロー上限）を使用します。desktop / router ビルドは 8192 pcb プールで 4096 フロー上限です。このプロファイルは [`[Advanced] RecvRateLimit`](./configuration#advanced) とセットで使います。小さくした lwIP のウィンドウが内側の TCP のメモリを抑え、`RecvRateLimit` が QUIC 接続の保持する受信データ（最大 16 MiB）を抑えるので、iOS クライアントは両方を設定します。どのクライアントでもサーバでも、受信側が読まなくなった TCP 接続は送信側を止めるので、未読データが際限なくたまることはありません。予算計算と実測値の詳細は
 [docs/hybrid_h2_memory_budget.md §5](https://github.com/mp0rta/mqvpn/blob/main/docs/hybrid_h2_memory_budget.md) を参照してください。
 
 ## 既知の制限
