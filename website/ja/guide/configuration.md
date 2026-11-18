@@ -572,7 +572,7 @@ mqvpn --status --control-port 9090
 
 ## systemd
 
-deb パッケージや install.sh でインストール済みの場合、systemd ユニットは自動的に配置されます。ソースからビルドした場合は手動でインストールします：
+deb パッケージや install.sh でインストール済みの場合、systemd ユニットは自動的に配置されます。クライアントのユニットは `mqvpn` deb に、サーバーのユニットは `mqvpn-server` deb に含まれます。ソースからビルドした場合は手動でインストールします：
 
 ```bash
 sudo cmake --install build --prefix /usr/local
@@ -580,7 +580,18 @@ sudo cmake --install build --prefix /usr/local
 
 ### サーバー
 
-install.sh を使った場合は `/etc/mqvpn/server.conf` が自動生成されています。手動で設定する場合はサンプルをコピーします：
+`mqvpn-server` deb がセットアップの失敗を報告した場合、`server.conf` は作成されず、サーバーも起動していません。インストール時に表示されたエラーを修正してから、`sudo dpkg-reconfigure mqvpn-server` を実行してください。ポートなどインストール時の回答が使われますが、環境変数で指定した設定は保持されないため、`sudo env MQVPN_SUBNET=10.8.0.0/24 dpkg-reconfigure mqvpn-server` のように再度指定してください。エラーが報告されなければ `sudo systemctl enable --now mqvpn-server` を実行します。起動時に自動で開始しない場合は `sudo systemctl start mqvpn-server` を実行してください。
+
+`mqvpn-server` deb または install.sh でインストールした場合は `/etc/mqvpn/server.conf` が自動生成されており、クライアントが使う認証キーが含まれています。サンプルで置き換えずにこのファイルを編集し、変更を反映するためにサーバーを再起動します：
+
+```bash
+sudo vi /etc/mqvpn/server.conf
+sudo systemctl restart mqvpn-server
+```
+
+サーバーが起動時に自動で開始されない場合（インストール時に自動起動をオフにした場合など）は、`sudo systemctl enable mqvpn-server` を実行してください。
+
+`server.conf` がない場合（ソースからビルドした場合など）は、サンプルをコピーします：
 
 ```bash
 sudo cp /etc/mqvpn/server.conf.example /etc/mqvpn/server.conf

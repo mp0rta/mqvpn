@@ -588,7 +588,7 @@ All commands return a JSON response with an `"ok"` field. Each connection handle
 
 ## systemd
 
-If you installed via the deb package or install.sh, the systemd units are already in place. For source builds, install manually:
+If you installed the debs or used install.sh, the systemd units are already in place: the `mqvpn` deb has the client unit, and the `mqvpn-server` deb has the server unit. For source builds, install manually:
 
 ```bash
 sudo cmake --install build --prefix /usr/local
@@ -596,7 +596,18 @@ sudo cmake --install build --prefix /usr/local
 
 ### Server
 
-If you used install.sh, `/etc/mqvpn/server.conf` is already generated. To configure manually, copy the example:
+If the `mqvpn-server` deb reported that setup failed, it created no `server.conf` and did not start the server. Fix the error that the install showed, then run `sudo dpkg-reconfigure mqvpn-server`. It uses the answers from the install, such as the port, but it does not keep settings that you gave as environment variables: give them again, for example `sudo env MQVPN_SUBNET=10.8.0.0/24 dpkg-reconfigure mqvpn-server`. If it reports no error, run `sudo systemctl enable --now mqvpn-server`, or `sudo systemctl start mqvpn-server` if the server must not start at boot.
+
+If you installed the `mqvpn-server` deb or used install.sh, `/etc/mqvpn/server.conf` is already generated and contains the auth key that your clients use. Do not replace it with the example: edit it, then restart the server so that the changes take effect:
+
+```bash
+sudo vi /etc/mqvpn/server.conf
+sudo systemctl restart mqvpn-server
+```
+
+If the server does not start at boot (for example, you turned off autostart during the install), run `sudo systemctl enable mqvpn-server`.
+
+If there is no `server.conf` (for example, after a source build), copy the example:
 
 ```bash
 sudo cp /etc/mqvpn/server.conf.example /etc/mqvpn/server.conf

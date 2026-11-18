@@ -1,0 +1,7 @@
+# Build dependencies of the Linux build and of the CPack debs. Install with:
+#   sudo apt-get satisfy "$(sed -n 's/^Build-Depends: *//p' packaging/build-deps.control)"
+#   sudo mk-build-deps --install --remove packaging/build-deps.control
+# Keep Build-Depends on one line: ci.yml and release.yml read it with that sed.
+# build-essential brings dpkg-dev (dpkg-shlibdeps); CPack also needs file.
+Source: mqvpn
+Build-Depends: build-essential, cmake (>= 3.10), file, git, golang, libevent-dev
