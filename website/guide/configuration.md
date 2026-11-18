@@ -391,8 +391,9 @@ the cap is hit, both differ.
 **When a receiver stops reading:** if the application on the client side, or the
 destination on the server side, stops reading a TCP connection, mqvpn stops the sender.
 Until then the receiving side can hold up to about 16 MiB of unread data for that
-connection. Worst case, if every connection stalls this way: the number of connections
-× 16 MiB. A client with [`RecvRateLimit`](#advanced) holds about 16 MiB in total instead.
+connection, on top of the figures in the table. Worst case, if every connection stalls
+this way: the number of connections × 16 MiB. A client with
+[`RecvRateLimit`](#advanced) holds about 16 MiB in total plus 68 KiB per connection instead.
 
 **Client-side clamp:** the honored value is capped at half the lwIP TCP pcb pool —
 `4096` on desktop/router builds (Linux, Windows, macOS), `256` on Android, `64`
@@ -413,7 +414,7 @@ In JSON, the section is a `"hybrid"` object with snake_case keys (`enabled`, `tc
 
 | Key | Description | Default |
 |-----|-------------|---------|
-| `RecvRateLimit` | Limits how much received data the client keeps in memory, given as a rate in bytes/sec. It is meant for memory-constrained devices (mobile clients set it internally); leave `0` otherwise. It affects only TCP connections carried in [hybrid mode](./hybrid-mode); other tunnel traffic is not slowed. Each of those TCP connections gets roughly a quarter of this rate, so a single download is slower than the rate, while several together can use all of it. In return, a connection whose application stops reading does not block the others. Client-side only — the server ignores it (a server-side cap would throttle client upload). Maximum `10000000000` (10 GB/s); larger values are rejected with a warning and the key falls back to `0` | `0` (off) |
+| `RecvRateLimit` | Limits how much received data the client keeps in memory, given as a rate in bytes/sec. It is meant for memory-constrained devices (mobile clients set it internally); leave `0` otherwise. It affects only TCP connections carried in [hybrid mode](./hybrid-mode); other tunnel traffic is not slowed. Each of those TCP connections gets roughly a quarter of this rate, so a single download is slower than the rate, while several together can use all of it. In return, up to three connections whose application stops reading do not block the others. With more, every TCP connection in hybrid mode can stall until the stalled ones are closed or time out (`TcpIdleTimeoutSec`). Client-side only — the server ignores it (a server-side cap would throttle client upload). Maximum `10000000000` (10 GB/s); larger values are rejected with a warning and the key falls back to `0` | `0` (off) |
 | `UdpGso` | Batches UDP sends with kernel GSO for lower CPU use at high throughput. Automatically falls back to regular batched sends on kernels without support (< 4.18). Linux and Android only; no effect elsewhere. Set to `false` to restore the previous per-packet send path | `true` |
 | `UdpGro` | Lets the kernel hand over received packets in batches, lowering CPU use at high throughput. Automatically falls back to one-at-a-time receives on kernels without support (< 5.0). Linux only; no effect elsewhere. Set to `false` to restore the previous receive path | `true` |
 | `TunOffload` | Lets the kernel hand large batches of traffic to the tunnel interface in one read; mqvpn splits them, lowering CPU use at high throughput. Automatically falls back to one packet per read when the kernel does not support it. Linux only; no effect elsewhere. Set to `false` to restore the previous tunnel interface | `true` |

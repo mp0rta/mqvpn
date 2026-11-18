@@ -78,7 +78,7 @@ pool sizing, against the 512 KiB windows every other profile uses) to fit the
 iOS Network Extension memory ceiling. Android builds use their own profile — desktop windows with the smaller 512-pcb pool, giving a 256-flow ceiling; desktop and router builds get a 8192-pcb pool and a 4096-flow ceiling. The profile is paired with
 [`[Advanced] RecvRateLimit`](./configuration#advanced): the smaller lwIP windows limit the
 memory of the inner TCP side, and `RecvRateLimit` limits how much received data the QUIC
-connection holds (16 MiB at most), so the iOS client sets both. On every client and on the
+connection holds (16 MiB at most, plus 68 KiB per TCP connection), so the iOS client sets both. On every client and on the
 server, a TCP connection whose receiver stops reading stops its sender, so unread data does
 not pile up without limit.
 The full budget arithmetic and measured
