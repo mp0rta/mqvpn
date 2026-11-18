@@ -98,6 +98,8 @@ nat_rule_count() {
 nat_rule_present() { local n; n=$(nat_rule_count) && [ "$n" -gt 0 ]; }
 nat_rule_absent() { local n; n=$(nat_rule_count) && [ "$n" -eq 0 ]; }
 log_has() { grep -qF "$1" "$LOG"; }
+# ldd -r exits 0 when it reports an undefined symbol, so read its output.
+no_undefined_symbols() { local out; out=$(ldd -r "$1" 2>&1) || return 1; ! grep -q 'undefined symbol' <<< "$out"; }
 main_pid() { systemctl show -p MainPID --value "$UNIT"; }
 make_admin_cert() { # $1 = CN
     mkdir -p "$CERT_DIR"
@@ -180,8 +182,8 @@ cat > "$WORK/devtest.c" <<'EOF'
 #include <libmqvpn.h>
 int main(void) { puts(mqvpn_version_string()); return 0; }
 EOF
-# scripts/xquic.lds in the xquic fork does not export 12 functions that libmqvpn.so calls.
-check "18: gcc -lmqvpn links" gcc -o "$WORK/devtest" "$WORK/devtest.c" -lmqvpn -Wl,--allow-shlib-undefined
+check "18: gcc -lmqvpn links" gcc -o "$WORK/devtest" "$WORK/devtest.c" -lmqvpn
+check "18: libmqvpn.so.4 has no undefined symbol" no_undefined_symbols /usr/lib/libmqvpn.so.4
 check "18: the program prints $VERSION" test "$("$WORK/devtest")" = "$VERSION"
 apt_run remove mqvpn-dev || fail "apt-get remove mqvpn-dev"
 check "18: libmqvpn.so.4 stays after the removal of mqvpn-dev" test -e /usr/lib/libmqvpn.so.4
