@@ -101,7 +101,8 @@ wait_listening() {   # $1 = port
 }
 
 first_field() { cut -d' ' -f1 "$1" 2>/dev/null || echo 0; }
-rss_kb() { awk '/^VmRSS:/ {print $2}' "/proc/$1/status"; }
+# 0 for a process that died: the transfer checks then fail and print the log tails.
+rss_kb() { awk '/^VmRSS:/ {print $2}' "/proc/$1/status" 2>/dev/null || echo 0; }
 
 # Wait until the byte count in file $1 is non-zero and unchanged for 3 s
 # (max $2 s). Prints the count.

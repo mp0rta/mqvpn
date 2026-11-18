@@ -3,9 +3,8 @@
 
 /*
  * test_conn_settings.c — pins mqvpn_build_conn_settings() caller contract:
- * scheduler / init_max_path_id propagate and the asymmetric fields
- * (ping_on, enable_multipath, mp_ping_on, max_path_id_grant_max_value)
- * take the documented per-side values.
+ * scheduler / init_max_path_id propagate and the per-side fields take the
+ * documented values.
  */
 
 #include "libmqvpn.h"
