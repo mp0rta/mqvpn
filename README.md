@@ -19,20 +19,26 @@
     <a href="https://x.com/m9vpn">Official X account</a>
   </p>
 
-  <p>
-    <a href="https://play.google.com/store/apps/details?id=org.mqvpn.app">
-      <img
-        src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png"
-        alt="Get it on Google Play"
-        height="80">
-    </a>
-    <a href="https://f-droid.org/packages/org.mqvpn.app/">
-      <img
-        src="https://fdroid.gitlab.io/artwork/badge/get-it-on.png"
-        alt="Get it on F-Droid"
-        height="80">
-    </a>
-  </p>
+<p>
+  <a href="https://apps.apple.com/app/id6792797132">
+    <img
+      src="https://appure.io/badges/appstore/black/en.svg"
+      alt="Download on the App Store"
+      height="50">
+  </a>
+  <a href="https://play.google.com/store/apps/details?id=org.mqvpn.app">
+    <img
+      src="https://appure.io/badges/playstore/en.svg"
+      alt="Get it on Google Play"
+      height="40">
+  </a>
+<a href="https://f-droid.org/packages/org.mqvpn.app/">
+  <img
+    src="https://upload.wikimedia.org/wikipedia/commons/a/a3/Get_it_on_F-Droid_%28material_design%29.svg"
+    alt="Get it on F-Droid"
+    height="40">
+</a>
+</p>
 </div>
 
 mqvpn is an open-source VPN that combines multiple internet connections—such as Wi-Fi, cellular, Starlink, and multiple ISPs—for bandwidth aggregation and seamless failover.
@@ -96,7 +102,7 @@ https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
 | [Arch Linux (amd64/arm64)](https://aur.archlinux.org/packages/mqvpn) | rolling | ✅ | 📋 | AUR |
 | [Windows (amd64/arm64)](#windows-client) | Windows 10 | ✅ | 📋 | Release archive |
 | [macOS arm64](https://github.com/mp0rta/homebrew-tap#install) | macOS 14 (Sonoma) | ✅ | 📋 | Homebrew / Release archive |
-| iOS | iOS 15 | — | 🚧 | App Store planned |
+| [iOS](https://apps.apple.com/jp/app/mqvpn/id6792797132) | iOS 16 | — | 🧪 | App Store |
 | [Android](https://f-droid.org/packages/org.mqvpn.app/) | Android 8.0 (API 26) | — | 🧪 | F-Droid / APK / Play Store |
 
 > ✅ Supported · 🧪 Experimental · 🚧 In development · 📋 Planned
