@@ -60,8 +60,9 @@ if role == "tx":
         sent += len(chunk)
     done = True
     reporter.join()
-    conn.shutdown(socket.SHUT_WR)
+    # Before the EOF: the receiver's result must not appear before this one.
     put(progress, "%d %s" % (sent, sha.hexdigest()))
+    conn.shutdown(socket.SHUT_WR)
     while conn.recv(65536):  # hold the socket until the peer closes
         pass
 else:
