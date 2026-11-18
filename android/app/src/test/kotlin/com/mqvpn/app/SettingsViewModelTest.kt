@@ -16,12 +16,14 @@ import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -74,6 +76,62 @@ class SettingsViewModelTest {
 
         assertNull(failingViewModel.draft.value)
         assertEquals("Load failed: boom", failingViewModel.loadError.value)
+    }
+
+    @Test
+    fun `retryLoad after a failed read loads the settings and clears loadError`() = runTest(testDispatcher) {
+        var reads = 0
+        val flakyRepository = mockk<SettingsRepository>(relaxed = true).also {
+            every { it.settings } returns flow {
+                if (reads++ == 0) throw IllegalStateException("boom")
+                emit(testSettings)
+            }
+        }
+        val vm = SettingsViewModel(flakyRepository, mockManager, SavedStateHandle())
+        advanceUntilIdle()
+        assertEquals("Load failed: boom", vm.loadError.value)
+
+        vm.retryLoad()
+        advanceUntilIdle()
+
+        assertNull(vm.loadError.value)
+        assertEquals(testSettings, vm.draft.value)
+    }
+
+    @Test
+    fun `retryLoad is a no-op once the settings are loaded`() = runTest(testDispatcher) {
+        var reads = 0
+        val repo = mockk<SettingsRepository>(relaxed = true).also {
+            every { it.settings } returns flow { reads++; emit(testSettings) }
+        }
+        val vm = SettingsViewModel(repo, mockManager, SavedStateHandle())
+        advanceUntilIdle()
+        vm.retryLoad()
+        advanceUntilIdle()
+        assertEquals(1, reads)
+        assertEquals(testSettings, vm.draft.value)
+    }
+
+    @Test
+    fun `retryLoad keeps the error shown and starts one read while a retry is pending`() = runTest(testDispatcher) {
+        var reads = 0
+        val repo = mockk<SettingsRepository>(relaxed = true).also {
+            every { it.settings } returns flow {
+                if (reads++ == 0) throw IllegalStateException("boom")
+                awaitCancellation()
+            }
+        }
+        val vm = SettingsViewModel(repo, mockManager, SavedStateHandle())
+        advanceUntilIdle()
+
+        vm.retryLoad()
+        vm.retryLoad()
+        advanceUntilIdle()
+
+        assertEquals(2, reads)
+        // The error screen must stay up while the retry is pending, never a blank window.
+        assertEquals("Load failed: boom", vm.loadError.value)
+        assertNull(vm.draft.value)
     }
 
     @Test
@@ -223,6 +281,30 @@ class SettingsViewModelTest {
         assertEquals("vpn.example.com", viewModel.draft.value?.serverAddress)
         assertEquals(8443, viewModel.draft.value?.serverPort)
         assertFalse(viewModel.addressTextInvalid.value)
+    }
+
+    // A process that outlived its activity (the VPN service keeps it alive) hands
+    // the recreated ViewModel DataStore's cached settings inside the constructor
+    // (viewModelScope runs on Main.immediate); an unconfined Main reproduces that.
+    @Test
+    fun `settings emitted during construction still set the draft`() {
+        Dispatchers.setMain(UnconfinedTestDispatcher())
+        val vm = SettingsViewModel(mockRepository, mockManager, SavedStateHandle())
+        assertNull(vm.loadError.value)
+        assertEquals(testSettings, vm.draft.value)
+    }
+
+    @Test
+    fun `restored address text is replayed onto settings emitted during construction`() {
+        Dispatchers.setMain(UnconfinedTestDispatcher())
+        val vm = SettingsViewModel(
+            mockRepository, mockManager, SavedStateHandle(mapOf("address_text" to "new.example.com:9000")),
+        )
+        assertNull(vm.loadError.value)
+        assertEquals("new.example.com", vm.draft.value?.serverAddress)
+        assertEquals(9000, vm.draft.value?.serverPort)
+        // Queued before the save consumer launched; the conflated channel must keep it.
+        coVerify { mockRepository.save(match { it.serverAddress == "new.example.com" && it.serverPort == 9000 }) }
     }
 
     @Test

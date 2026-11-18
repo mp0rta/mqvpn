@@ -694,7 +694,7 @@ Full report with all numbers: [`docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bond
 
 ## Building
 
-Requirements: Linux, CMake 3.10+, GCC/Clang (C11), libevent 2.x
+Requirements: Linux, CMake 3.22+, GCC/Clang (C11), libevent 2.x
 
 ```bash
 git clone --recurse-submodules https://github.com/mp0rta/mqvpn.git
@@ -825,7 +825,7 @@ mqvpn is designed to comply with the following RFCs as much as possible.
 | MASQUE CONNECT-IP | [RFC 9484](https://www.rfc-editor.org/rfc/rfc9484) |
 | HTTP Datagrams | [RFC 9297](https://www.rfc-editor.org/rfc/rfc9297) |
 | QUIC Datagrams | [RFC 9221](https://www.rfc-editor.org/rfc/rfc9221) |
-| Multipath QUIC | [draft-ietf-quic-multipath](https://datatracker.ietf.org/doc/draft-ietf-quic-multipath/) |
+| Multipath QUIC | [RFC 10069](https://datatracker.ietf.org/doc/rfc10069/) |
 | HTTP/3 | [RFC 9114](https://www.rfc-editor.org/rfc/rfc9114) |
 
 ## Community

@@ -5,7 +5,7 @@
 ### Requirements
 
 - Git
-- CMake 3.10+
+- CMake 3.22+
 - GNU Make
 - GCC or Clang (C11)
 - libevent 2.x
@@ -34,7 +34,8 @@ sudo mk-build-deps --install --remove packaging/build-deps.control
 ```bash
 cd third_party/xquic/third_party/boringssl
 mkdir -p build && cd build
-cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
 make -j$(nproc) ssl crypto
 cd ../../../../..
 ```
@@ -84,7 +85,7 @@ Only the client is supported on Windows. The server is Linux-only.
 | Tool | Purpose | Install |
 |------|---------|---------|
 | Visual Studio 2022 Build Tools | C/C++ compiler (MSVC) | `winget install Microsoft.VisualStudio.2022.BuildTools` (select C++ workload) |
-| CMake >= 3.10 | Build system | `winget install Kitware.CMake` |
+| CMake >= 3.22 | Build system | `winget install Kitware.CMake` |
 | Go | Required by BoringSSL | `winget install GoLang.Go` |
 | NASM | Required by BoringSSL (assembly) | `winget install NASM.NASM` |
 | Perl (Strawberry Perl) | Required by BoringSSL | `winget install StrawberryPerl.StrawberryPerl` |

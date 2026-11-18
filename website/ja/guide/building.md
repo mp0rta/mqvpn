@@ -5,7 +5,7 @@
 ### 必要なもの
 
 - Git
-- CMake 3.10+
+- CMake 3.22+
 - Make（GNU Make）
 - GCC または Clang（C11）
 - libevent 2.x
@@ -37,7 +37,8 @@ sudo mk-build-deps --install --remove packaging/build-deps.control
 ```bash
 cd third_party/xquic/third_party/boringssl
 mkdir -p build && cd build
-cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
 make -j$(nproc) ssl crypto
 cd ../../../../..
 ```
@@ -87,7 +88,7 @@ Windows ではクライアントのみサポートされています。サーバ
 | ツール | 用途 | インストール |
 |--------|------|-------------|
 | Visual Studio 2022 Build Tools | C/C++ コンパイラ (MSVC) | `winget install Microsoft.VisualStudio.2022.BuildTools`（C++ ワークロードを選択） |
-| CMake >= 3.10 | ビルドシステム | `winget install Kitware.CMake` |
+| CMake >= 3.22 | ビルドシステム | `winget install Kitware.CMake` |
 | Go | BoringSSL に必要 | `winget install GoLang.Go` |
 | NASM | BoringSSL に必要（アセンブリ） | `winget install NASM.NASM` |
 | Perl (Strawberry Perl) | BoringSSL に必要 | `winget install StrawberryPerl.StrawberryPerl` |
