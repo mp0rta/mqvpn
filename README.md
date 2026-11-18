@@ -102,7 +102,7 @@ https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
 | [Arch Linux (amd64/arm64)](https://aur.archlinux.org/packages/mqvpn) | rolling | ✅ | 📋 | AUR |
 | [Windows (amd64/arm64)](#windows-client) | Windows 10 | ✅ | 📋 | Release archive |
 | [macOS arm64](https://github.com/mp0rta/homebrew-tap#install) | macOS 14 (Sonoma) | ✅ | 📋 | Homebrew / Release archive |
-| [iOS](https://apps.apple.com/jp/app/mqvpn/id6792797132) | iOS 16 | — | 🧪 | App Store |
+| [iOS](https://apps.apple.com/app/id6792797132) | iOS 16 | — | 🧪 | App Store |
 | [Android](https://f-droid.org/packages/org.mqvpn.app/) | Android 8.0 (API 26) | — | 🧪 | F-Droid / APK / Play Store |
 
 > ✅ Supported · 🧪 Experimental · 🚧 In development · 📋 Planned
