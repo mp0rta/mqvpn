@@ -805,9 +805,13 @@ MQVPN_API int mqvpn_config_set_hybrid_egress_acl(mqvpn_config_t *cfg, const char
                                                  int n_deny);
 
 /* Conn-level receive-rate cap in bytes/sec (0 = library default, no cap).
- * Bounds the aggregate QUIC transport receive window to rate x srtt.
- * CLIENT-ONLY: the server connection-settings path ignores it — a
- * server-side cap would throttle every client's uplink.
+ * Sizes the aggregate QUIC transport receive window from rate x srtt.
+ * The window starts at rate x 60 ms (at least 63000 bytes), follows the
+ * largest measured srtt (across paths) upward, is capped at 16 MiB and never shrinks.
+ * Each hybrid TCP-lane flow is also limited to about a quarter of this rate, so one
+ * stalled flow holds at most a quarter of the window. CLIENT-ONLY: the server
+ * connection-settings path ignores it — a server-side cap would throttle every client's
+ * uplink.
  *
  * Values above MQVPN_RECV_RATE_LIMIT_MAX are rejected
  * (MQVPN_ERR_INVALID_ARG): the transport computes the window as

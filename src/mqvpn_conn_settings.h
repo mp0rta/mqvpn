@@ -20,6 +20,18 @@
  * mqvpn_conn_settings.c explains the number. */
 #define MQVPN_STREAM_UNSENT_PACKETS 1024
 
+/* Per-request HTTP/3 receive buffer limit (max_body_buf_per_stream), both
+ * sides. Well above one transport read (4 KiB) and one server relay chunk
+ * (16 KiB); the stream window, not this value, absorbs bandwidth times
+ * delay. */
+#define MQVPN_STREAM_BODY_BUF_BYTES (64 * 1024)
+
+/* Initial receive window of a rate-limited stream (client with a receive
+ * rate only). At most a quarter of xquic's smallest connection window
+ * (63000 bytes, an xquic-internal constant), so a stream's initial credit
+ * never exceeds a quarter of the connection window. */
+#define MQVPN_STREAM_INIT_RECV_WINDOW (15 * 1024)
+
 /* Caller-driven inputs. The bools are parameterised (not a single
  * `is_server` flag) so each call site documents its intent. */
 typedef struct {
@@ -76,6 +88,12 @@ typedef struct {
  * with memset(0), so the caller is not required to zero `out` first. */
 MQVPN_INTERNAL void mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in,
                                               xqc_conn_settings_t *out);
+
+/* Receive rate for one connect-tcp stream: a quarter of the connection rate,
+ * so one stalled flow holds at most a quarter of the connection window
+ * (three stalled flows are tolerated; memory is preferred over per-flow speed
+ * on such clients). 0 for 0: a rate of 0 means "no rate". */
+MQVPN_INTERNAL uint64_t mqvpn_tcp_stream_recv_rate(uint64_t conn_recv_rate);
 
 /* xquic engine log level for an mqvpn level, for client and server. */
 MQVPN_INTERNAL xqc_log_level_t mqvpn_xqc_log_level(mqvpn_log_level_t level);

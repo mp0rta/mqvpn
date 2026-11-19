@@ -110,6 +110,16 @@ mqvpn_apply_reinjection(const mqvpn_conn_settings_input_t *in, xqc_conn_settings
     }
 }
 
+uint64_t
+mqvpn_tcp_stream_recv_rate(uint64_t conn_recv_rate)
+{
+    if (conn_recv_rate == 0) return 0;
+    /* max(1, ...): a rate of 0 means "no rate" and would give the stream a
+     * 16 MiB window. */
+    uint64_t r = conn_recv_rate / 4;
+    return r ? r : 1;
+}
+
 void
 mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settings_t *out)
 {
@@ -205,7 +215,9 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
         break;
     }
 
-    /* --- intentional client/server asymmetry (4) ---
+    out->max_body_buf_per_stream = MQVPN_STREAM_BODY_BUF_BYTES;
+
+    /* --- intentional client/server asymmetry (7) ---
      * Each branch documents why these fields differ between sides. Do not
      * collapse without revisiting tests/test_conn_settings.c
      * test_asymmetry_server_vs_client. */
@@ -226,6 +238,8 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
 
         if (in->recv_rate_bytes_per_sec) {
             out->recv_rate_bytes_per_sec = in->recv_rate_bytes_per_sec;
+            out->enable_stream_rate_limit = 1;
+            out->init_recv_window = MQVPN_STREAM_INIT_RECV_WINDOW;
         }
     }
 

@@ -221,7 +221,7 @@ final class MqvpnEngine: NSObject {
         if hybrid.enabled {
             let iosTcpMaxFlows: UInt32 = 64      // couples with iOS-profile MEMP_NUM_TCP_PCB=128
             let iosIdleTimeoutSec: UInt32 = 300  // library default, stated explicitly
-            let iosRecvRateLimit: UInt64 = 125_000_000  // 1 Gbps ceiling; QUIC window = rate x srtt
+            let iosRecvRateLimit: UInt64 = 125_000_000  // 1 Gbps for the connection, about 250 Mbit/s per hybrid TCP flow
             let rcs = [
                 mqvpn_config_set_hybrid_tcp_mode(cfg, Int32(hybrid.tcpMode)),
                 mqvpn_config_set_hybrid_limits(cfg, iosTcpMaxFlows, iosIdleTimeoutSec),

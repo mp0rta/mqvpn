@@ -11,6 +11,7 @@
 #include "mqvpn_internal.h"
 #include "mqvpn_scheduler.h"
 #include "mqvpn_sched_names.h" /* mqvpn_reinj_to_name for the startup log */
+#include "mqvpn_conn_settings.h"
 
 #include <inttypes.h> /* PRIu64 in the udp-tx teardown line */
 #include <stddef.h>   /* offsetof for the struct_size-guarded field copies */
@@ -1594,7 +1595,11 @@ cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_k
     stream->conn = conn;
     stream->role = CLI_STREAM_ROLE_CONNECT_TCP;
 
-    xqc_h3_request_t *req = xqc_h3_request_create(c->engine, &conn->cid, NULL, stream);
+    xqc_stream_settings_t ss = {
+        .recv_rate_bytes_per_sec = mqvpn_tcp_stream_recv_rate(c->config.recv_rate_limit),
+    };
+    xqc_h3_request_t *req = xqc_h3_request_create(
+        c->engine, &conn->cid, ss.recv_rate_bytes_per_sec ? &ss : NULL, stream);
     if (!req) {
         /* Known v1 simplification: NULL here is transient stream-credit
          * exhaustion, treated as a reject instead of queue-and-retry.
@@ -2894,7 +2899,6 @@ mqvpn_check_scheduler_preconditions(mqvpn_scheduler_t scheduler, int n_paths)
     return scheduler == MQVPN_SCHED_BACKUP_FEC && n_paths < 2;
 }
 
-#include "mqvpn_conn_settings.h"
 #include "mqvpn_engine_keys.h"
 
 /* ─── Start a QUIC/H3 connection ─── */

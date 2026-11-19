@@ -3,9 +3,8 @@
 
 /*
  * test_conn_settings.c — pins mqvpn_build_conn_settings() caller contract:
- * scheduler / init_max_path_id propagate and the four asymmetric fields
- * (ping_on, enable_multipath, mp_ping_on, max_path_id_grant_max_value)
- * take the documented per-side values.
+ * scheduler / init_max_path_id propagate and the per-side fields take the
+ * documented values.
  */
 
 #include "libmqvpn.h"
@@ -48,6 +47,7 @@ test_asymmetry_server_vs_client(void)
         .enable_multipath = true,
         .scheduler = MQVPN_SCHED_WLB,
         .init_max_path_id = 0,
+        .recv_rate_bytes_per_sec = 125000000,
     };
     mqvpn_build_conn_settings(&s, &srv);
 
@@ -56,6 +56,7 @@ test_asymmetry_server_vs_client(void)
         .enable_multipath = true,
         .scheduler = MQVPN_SCHED_WLB,
         .init_max_path_id = 0,
+        .recv_rate_bytes_per_sec = 125000000,
     };
     mqvpn_build_conn_settings(&c_on, &cli_mp_on);
 
@@ -68,17 +69,73 @@ test_asymmetry_server_vs_client(void)
     ASSERT_EQ(srv.mp_ping_on, 1);
     ASSERT_EQ(srv.max_path_id_grant_max_value, 128);
     ASSERT_EQ(srv.ping_on, 0);
+    ASSERT_EQ(srv.enable_stream_rate_limit, 0);
+    ASSERT_EQ(srv.init_recv_window, 0);
 
     /* Client side mp-on: MP gated, ping_on set, no grant cap. */
     ASSERT_EQ(cli_mp_on.enable_multipath, 1);
     ASSERT_EQ(cli_mp_on.mp_ping_on, 1);
     ASSERT_EQ(cli_mp_on.ping_on, 1);
     ASSERT_EQ(cli_mp_on.max_path_id_grant_max_value, 0);
+    ASSERT_EQ(cli_mp_on.enable_stream_rate_limit, 1);
+    ASSERT_EQ(cli_mp_on.init_recv_window, MQVPN_STREAM_INIT_RECV_WINDOW);
 
     /* Client side mp-off: MP off, mp_ping_on follows. */
     ASSERT_EQ(cli_mp_off.enable_multipath, 0);
     ASSERT_EQ(cli_mp_off.mp_ping_on, 0);
     ASSERT_EQ(cli_mp_off.ping_on, 1);
+    return 0;
+}
+
+static int
+test_body_buf_limit_both_sides(void)
+{
+    for (int srv = 0; srv < 2; srv++) {
+        xqc_conn_settings_t cs;
+        mqvpn_conn_settings_input_t in = {.is_server = srv != 0,
+                                          .scheduler = MQVPN_SCHED_WLB};
+        mqvpn_build_conn_settings(&in, &cs);
+        ASSERT_EQ(cs.max_body_buf_per_stream, MQVPN_STREAM_BODY_BUF_BYTES);
+    }
+    return 0;
+}
+
+static int
+test_stream_rate_limit_client_only(void)
+{
+    xqc_conn_settings_t cli, cli_norate, srv;
+    mqvpn_conn_settings_input_t c = {.is_server = false,
+                                     .scheduler = MQVPN_SCHED_WLB,
+                                     .recv_rate_bytes_per_sec = 125000000};
+    mqvpn_build_conn_settings(&c, &cli);
+    ASSERT_EQ(cli.enable_stream_rate_limit, 1);
+    ASSERT_EQ(cli.init_recv_window, MQVPN_STREAM_INIT_RECV_WINDOW);
+
+    c.recv_rate_bytes_per_sec = 0;
+    mqvpn_build_conn_settings(&c, &cli_norate);
+    ASSERT_EQ(cli_norate.enable_stream_rate_limit, 0);
+    ASSERT_EQ(cli_norate.init_recv_window, 0);
+
+    mqvpn_conn_settings_input_t s = {.is_server = true,
+                                     .scheduler = MQVPN_SCHED_WLB,
+                                     .recv_rate_bytes_per_sec = 125000000};
+    mqvpn_build_conn_settings(&s, &srv);
+    ASSERT_EQ(srv.enable_stream_rate_limit, 0);
+    ASSERT_EQ(srv.init_recv_window, 0);
+    return 0;
+}
+
+static int
+test_tcp_stream_recv_rate_helper(void)
+{
+    ASSERT_EQ(mqvpn_tcp_stream_recv_rate(0), 0);
+    ASSERT_EQ(mqvpn_tcp_stream_recv_rate(1), 1);
+    ASSERT_EQ(mqvpn_tcp_stream_recv_rate(2), 1);
+    ASSERT_EQ(mqvpn_tcp_stream_recv_rate(3), 1);
+    ASSERT_EQ(mqvpn_tcp_stream_recv_rate(4), 1);
+    ASSERT_EQ(mqvpn_tcp_stream_recv_rate(5), 1);
+    ASSERT_EQ(mqvpn_tcp_stream_recv_rate(8), 2);
+    ASSERT_EQ(mqvpn_tcp_stream_recv_rate(125000000), 31250000);
     return 0;
 }
 
@@ -565,6 +622,9 @@ main(void)
     failed += test_recv_rate_limit_wiring();
     failed += test_reinjection_mapping();
     failed += test_stream_unsent_cap_both_sides();
+    failed += test_body_buf_limit_both_sides();
+    failed += test_stream_rate_limit_client_only();
+    failed += test_tcp_stream_recv_rate_helper();
     if (failed) {
         fprintf(stderr, "test_conn_settings: %d FAILED\n", failed);
         return 1;

@@ -1612,6 +1612,9 @@ jobs:
       - name: E2E hybrid H2 TCP-lane suite (netns, functional phases)
         run: sudo -E tests/test_e2e_hybrid_h2.sh build/mqvpn
 
+      - name: E2E hybrid receive backpressure (netns)
+        run: sudo -E tests/test_e2e_hybrid_backpressure.sh build/mqvpn
+
       - name: E2E hybrid H2 throughput gate (netns, Release build)
         run: HYBRID_H2_PHASES=perf sudo -E tests/test_e2e_hybrid_h2.sh build-release/mqvpn
 
