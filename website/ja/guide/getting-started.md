@@ -11,10 +11,13 @@ mqvpn は MASQUE CONNECT-IP (RFC 9484) と、Multipath QUIC をベースとし�
 `mqvpn` deb にはクライアントとサーバーの両方で使う VPN プログラムが含まれ、`mqvpn-server` deb はサーバーのサービス・NAT 設定・初回設定を追加します。[Releases](https://github.com/mp0rta/mqvpn/releases/latest) から同じバージョンの `mqvpn` と `mqvpn-server` の deb をダウンロードし、両方をインストールします。
 
 ```bash
-# VERSION と ARCH は環境に合わせて置き換えてください（例: 0.19.3, amd64）
-curl -LO https://github.com/mp0rta/mqvpn/releases/latest/download/mqvpn_VERSION_ARCH.deb
-curl -LO https://github.com/mp0rta/mqvpn/releases/latest/download/mqvpn-server_VERSION_ARCH.deb
-sudo apt install ./mqvpn_VERSION_ARCH.deb ./mqvpn-server_VERSION_ARCH.deb
+# 最新リリースのバージョンと、このマシンのアーキテクチャ
+V=$(curl -fsSL https://api.github.com/repos/mp0rta/mqvpn/releases/latest \
+  | grep -Po '"tag_name": "v\K[^"]+')
+A=$(dpkg --print-architecture)
+B=https://github.com/mp0rta/mqvpn/releases/download/v$V
+curl -fLO $B/mqvpn_${V}_$A.deb -fLO $B/mqvpn-server_${V}_$A.deb
+sudo apt install ./mqvpn_${V}_$A.deb ./mqvpn-server_${V}_$A.deb
 ```
 
 インストール時に証明書・認証キー・設定ファイルを生成し、サーバーを起動して OS 起動時の自動起動も登録します。証明書や設定ファイルがすでにある場合は、そのまま使います。生成される設定ではサーバー側のハイブリッドモードと reorder バッファが有効になっており、クライアント側でも有効にしたときだけ動作します。`AllowClientScheduler = true` も設定されるので、クライアントは自分のダウンロード方向のスケジューラを指定できます。
@@ -25,7 +28,7 @@ sudo apt install ./mqvpn_VERSION_ARCH.deb ./mqvpn-server_VERSION_ARCH.deb
 
 ```bash
 echo 'mqvpn-server mqvpn-server/subnet string 10.8.0.0/24' | sudo debconf-set-selections
-sudo env MQVPN_PORT=10020 apt install ./mqvpn_VERSION_ARCH.deb ./mqvpn-server_VERSION_ARCH.deb
+sudo env MQVPN_PORT=10020 apt install ./mqvpn_${V}_$A.deb ./mqvpn-server_${V}_$A.deb
 ```
 
 これらの値は `/etc/mqvpn/server.conf` を新しく生成するときだけ使われます。稼働中のサーバーの設定を変えるには、`/etc/mqvpn/server.conf` を編集して `sudo systemctl restart mqvpn-server` を実行します。
@@ -70,9 +73,12 @@ curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
 [Releases](https://github.com/mp0rta/mqvpn/releases/latest) から `mqvpn` の deb をダウンロードしてインストールします。
 
 ```bash
-# VERSION と ARCH は環境に合わせて置き換えてください（例: 0.6.0, amd64）
-curl -LO https://github.com/mp0rta/mqvpn/releases/latest/download/mqvpn_VERSION_ARCH.deb
-sudo dpkg -i mqvpn_*.deb
+# 最新リリースのバージョンと、このマシンのアーキテクチャ
+V=$(curl -fsSL https://api.github.com/repos/mp0rta/mqvpn/releases/latest \
+  | grep -Po '"tag_name": "v\K[^"]+')
+A=$(dpkg --print-architecture)
+curl -fLO https://github.com/mp0rta/mqvpn/releases/download/v$V/mqvpn_${V}_$A.deb
+sudo apt install ./mqvpn_${V}_$A.deb
 ```
 
 ### Windows クライアント

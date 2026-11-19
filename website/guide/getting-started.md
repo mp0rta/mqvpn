@@ -11,10 +11,13 @@ mqvpn is an L3 multipath VPN built on MASQUE CONNECT-IP (RFC 9484) and Multipath
 The `mqvpn` deb contains the VPN program for both client and server; `mqvpn-server` adds the server service, NAT setup, and first-run configuration. Download the `mqvpn` and `mqvpn-server` debs of the same version from [Releases](https://github.com/mp0rta/mqvpn/releases/latest), then install both.
 
 ```bash
-# Replace VERSION and ARCH as needed (e.g., 0.19.3, amd64)
-curl -LO https://github.com/mp0rta/mqvpn/releases/latest/download/mqvpn_VERSION_ARCH.deb
-curl -LO https://github.com/mp0rta/mqvpn/releases/latest/download/mqvpn-server_VERSION_ARCH.deb
-sudo apt install ./mqvpn_VERSION_ARCH.deb ./mqvpn-server_VERSION_ARCH.deb
+# Latest release version and the architecture of this machine
+V=$(curl -fsSL https://api.github.com/repos/mp0rta/mqvpn/releases/latest \
+  | grep -Po '"tag_name": "v\K[^"]+')
+A=$(dpkg --print-architecture)
+B=https://github.com/mp0rta/mqvpn/releases/download/v$V
+curl -fLO $B/mqvpn_${V}_$A.deb -fLO $B/mqvpn-server_${V}_$A.deb
+sudo apt install ./mqvpn_${V}_$A.deb ./mqvpn-server_${V}_$A.deb
 ```
 
 The install generates a certificate, auth key, and server config, then starts the server and registers it for automatic startup on boot. It keeps a certificate or config that already exists. The generated config turns on hybrid mode and the reorder buffer on the server side; each takes effect only for clients that also turn it on. It also sets `AllowClientScheduler = true`, so a client can ask for its own download scheduler.
@@ -25,7 +28,7 @@ The install asks for a client subnet only when the default `10.0.0.0/24` overlap
 
 ```bash
 echo 'mqvpn-server mqvpn-server/subnet string 10.8.0.0/24' | sudo debconf-set-selections
-sudo env MQVPN_PORT=10020 apt install ./mqvpn_VERSION_ARCH.deb ./mqvpn-server_VERSION_ARCH.deb
+sudo env MQVPN_PORT=10020 apt install ./mqvpn_${V}_$A.deb ./mqvpn-server_${V}_$A.deb
 ```
 
 These values apply only to a new `/etc/mqvpn/server.conf`. To change a running server, edit `/etc/mqvpn/server.conf` and run `sudo systemctl restart mqvpn-server`.
@@ -70,9 +73,12 @@ Point `--cert` (or `Cert` / `cert_file` in a config file) at the full chain file
 Download the latest `mqvpn` deb from [Releases](https://github.com/mp0rta/mqvpn/releases/latest).
 
 ```bash
-# Replace VERSION and ARCH as needed (e.g., 0.6.0, amd64)
-curl -LO https://github.com/mp0rta/mqvpn/releases/latest/download/mqvpn_VERSION_ARCH.deb
-sudo dpkg -i mqvpn_*.deb
+# Latest release version and the architecture of this machine
+V=$(curl -fsSL https://api.github.com/repos/mp0rta/mqvpn/releases/latest \
+  | grep -Po '"tag_name": "v\K[^"]+')
+A=$(dpkg --print-architecture)
+curl -fLO https://github.com/mp0rta/mqvpn/releases/download/v$V/mqvpn_${V}_$A.deb
+sudo apt install ./mqvpn_${V}_$A.deb
 ```
 
 ### Windows client
