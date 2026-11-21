@@ -2,4 +2,3 @@
 - The connection status stays in step with the VPN service after the app is closed and reopened.
 - Fix downloads over the TCP lane stalling after the receiver's window fills.
 - A slow app over the TCP lane no longer holds up the other connections.
-- Update BoringSSL to 0.20261105.0, picking up upstream TLS/crypto fixes.
