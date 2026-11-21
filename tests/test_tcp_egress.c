@@ -3131,10 +3131,12 @@ TEST(mqvpn_tcp_downlink_stalled_probe_resumes)
 
 /* The head-of-line tests measure time, which MSan stretches about 100x, so
  * an MSan build leaves them out. */
-#if defined(__has_feature) && __has_feature(memory_sanitizer)
-#  define MQVPN_TEST_MSAN 1
-#else
-#  define MQVPN_TEST_MSAN 0
+#define MQVPN_TEST_MSAN 0
+#ifdef __has_feature /* nested: gcc 13 has no __has_feature and cannot parse it */
+#  if __has_feature(memory_sanitizer)
+#    undef MQVPN_TEST_MSAN
+#    define MQVPN_TEST_MSAN 1
+#  endif
 #endif
 
 #if !MQVPN_TEST_MSAN
