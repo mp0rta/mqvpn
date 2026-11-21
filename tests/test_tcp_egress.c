@@ -3102,8 +3102,14 @@ TEST(mqvpn_tcp_downlink_stalled_probe_resumes)
     ASSERT_EQ(h.probe_last_wake_us <= 1000, 1);
     r.reading = 1;
 
+    /* Fail on a stall, not on a slow build: the deadline restarts on progress. */
+    size_t last_rcvd = r.body_rcvd;
     t0 = test_now_us();
-    while (r.body_rcvd < total && test_now_us() - t0 < 30000000ull) {
+    while (r.body_rcvd < total && test_now_us() - t0 < 10000000ull) {
+        if (r.body_rcvd != last_rcvd) {
+            last_rcvd = r.body_rcvd;
+            t0 = test_now_us();
+        }
         while (sent < total) {
             size_t m =
                 (size_t)(total - sent < sizeof(chunk) ? total - sent : sizeof(chunk));
@@ -3123,10 +3129,19 @@ TEST(mqvpn_tcp_downlink_stalled_probe_resumes)
     tcp_sink_close(&sink);
 }
 
+/* The head-of-line tests measure time, which MSan stretches about 100x, so
+ * an MSan build leaves them out. */
+#if defined(__has_feature) && __has_feature(memory_sanitizer)
+#  define MQVPN_TEST_MSAN 1
+#else
+#  define MQVPN_TEST_MSAN 0
+#endif
+
+#if !MQVPN_TEST_MSAN
 /* Head-of-line blocking: with a connection receive-rate limit the connection
  * window is small, and every flow's share of it is a quarter. Flows whose
  * reader stalled must not stop a flow that keeps reading. */
-#define HOL_MAX_FLOWS 4
+#  define HOL_MAX_FLOWS 4
 
 typedef struct {
     tcp_sink_t sink;
@@ -3291,6 +3306,8 @@ TEST(mqvpn_tcp_hol_rtt_drop)
 {
     hol_run(1, 60000, 2000, 5000000ull);
 }
+
+#endif /* !MQVPN_TEST_MSAN */
 
 /* ── svr_tcp_egress_errno_to_status — pure function ── */
 
@@ -3903,9 +3920,11 @@ main(void)
     run_mqvpn_tcp_parked_flow_idle_eviction();
     run_mqvpn_tcp_uplink_stalled_destination_is_bounded();
     run_mqvpn_tcp_downlink_stalled_probe_resumes();
+#if !MQVPN_TEST_MSAN
     run_mqvpn_tcp_hol_one_stalled_flow();
     run_mqvpn_tcp_hol_three_stalled_flows();
     run_mqvpn_tcp_hol_rtt_drop();
+#endif
     run_errno_to_status_maps_known_codes();
     run_non_tunnel_close_keeps_tunnel_established();
     run_connect_ip_v6_address_assign_is_slash_128();
