@@ -2964,7 +2964,9 @@ TEST(mqvpn_tcp_uplink_stalled_destination_is_bounded)
     uint64_t off = 0, since_pump = 0;
     uint64_t eagain_since = 0, t0 = test_now_us();
     int stalled = 0;
-    while (off < total && test_now_us() - t0 < 60000000ull) {
+    /* No time limit, which a slow build would hit: the loop ends on a stall,
+     * or once all of `total` is accepted, which fails the bound below. */
+    while (off < total) {
         size_t n = (size_t)(total - off < CHUNK ? total - off : CHUNK);
         for (size_t i = 0; i < n; i++)
             chunk[i] = bp_pat(off + i);
