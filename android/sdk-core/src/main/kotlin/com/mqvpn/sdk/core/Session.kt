@@ -119,8 +119,13 @@ internal class Session(
         return result
     }
 
-    /** [nextTimerMs, tunReadable, isIdle] for the poller, null before open(). */
+    /**
+     * [nextTimerMs, tunReadable, isIdle] for the poller, null before open().
+     * The poller asks after every tick, so this is also where the bridge
+     * learns that backpressure is over.
+     */
     fun interest(): IntArray? = tunnel?.getInterest()?.let {
+        if (it.tunReadable) bridge?.onTunReadable()
         val wait = statsSampler.capWait(it.nextTimerMs, SystemClock.elapsedRealtime())
         intArrayOf(wait, if (it.tunReadable) 1 else 0, if (it.isIdle) 1 else 0)
     }

@@ -7,6 +7,7 @@ import android.system.Os
 import android.system.OsConstants
 import android.util.Log
 import com.mqvpn.sdk.runtime.MqvpnExecutor
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -22,7 +23,10 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * Uplink (TUN → libmqvpn):
  *   TUN reader (IO) → frameChannel → sender (Default) → coalesce batch
- *   → executor.enqueue { onTunPacket() × N }
+ *   → executor.call { onTunPacket() × N }, one batch at a time: while the
+ *   engine thread is busy, frameChannel fills, the reader stalls and packets
+ *   wait in the kernel's TUN queue. ERR_AGAIN drops that packet (the core's
+ *   contract); the rest of the batch waits for [onTunReadable].
  *
  * Downlink (libmqvpn → TUN):
  *   Direct write(tun_fd) from C tun_output callback — no Kotlin involvement.
@@ -37,6 +41,9 @@ internal class TunnelBridge(
 
     private var readerJob: Job? = null
     private var senderJob: Job? = null
+
+    // Engine thread only: what a sender held by ERR_AGAIN waits for.
+    private var readable: CompletableDeferred<Unit>? = null
 
     fun startTunReader(tun: InputStream, mtu: Int, scope: CoroutineScope) {
         readerJob = scope.launch(Dispatchers.IO) {
@@ -73,22 +80,14 @@ internal class TunnelBridge(
                         }
                     }
 
-                    // Submit batch to executor
                     val frames = batch.toList()
                     batch.clear()
-                    executor.enqueue {
-                        for (i in frames.indices) {
-                            val (frame, len) = frames[i]
-                            val rc = onTunPacket(frame, 0, len)
-                            releaseFrame(frame)
-                            if (rc == MqvpnTunnel.ERR_AGAIN) {
-                                // Backpressure: release ALL remaining frames before stop
-                                for (j in (i + 1) until frames.size) {
-                                    releaseFrame(frames[j].first)
-                                }
-                                break
-                            }
-                        }
+                    var next = 0
+                    while (next < frames.size) {
+                        val from = next
+                        val (fed, wait) = executor.call { feed(frames, from) }
+                        next = fed
+                        wait?.await()
                     }
                 }
             } catch (e: Exception) {
@@ -97,8 +96,30 @@ internal class TunnelBridge(
         }
     }
 
+    /**
+     * Engine thread: feeds frames[from..] until the core returns ERR_AGAIN.
+     * Returns where to go on and, after ERR_AGAIN, what to wait for first.
+     */
+    private fun feed(frames: List<Pair<ByteArray, Int>>, from: Int): Pair<Int, CompletableDeferred<Unit>?> {
+        for (i in from until frames.size) {
+            val (frame, len) = frames[i]
+            val rc = onTunPacket(frame, 0, len)
+            releaseFrame(frame)
+            if (rc == MqvpnTunnel.ERR_AGAIN) {
+                // the core dropped this packet and refuses every packet until tun_readable
+                val wait = CompletableDeferred<Unit>()
+                readable = wait
+                return Pair(i + 1, wait)
+            }
+        }
+        return Pair(frames.size, null)
+    }
+
     /** Engine thread: the poller's interest reported tun_readable. */
-    fun onTunReadable() {}
+    fun onTunReadable() {
+        readable?.complete(Unit)
+        readable = null
+    }
 
     fun stop() {
         readerJob?.cancel()
