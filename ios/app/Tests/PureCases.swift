@@ -542,6 +542,33 @@ func runPureCases() -> Int {
               && ProtectionSettings(killSwitch: false, autoReconnect: true).reconnects, "reconnects = auto || kill switch")
     }
 
+    // TunBacklog: a refused packet holds back the rest of its batch and the next read
+    do {
+        let b = TunBacklog()
+        var sent: [UInt8] = []
+        var refuse: UInt8? = nil   // the fake core refuses this packet
+        var rearms = 0
+        let send = { (p: Data) -> Bool in sent.append(p[0]); return p[0] != refuse }
+        let batch = (0..<4).map { Data([UInt8($0)]) }
+        b.feed(batch, send: send) { rearms += 1 }
+        check(sent == [0, 1, 2, 3] && rearms == 1 && !b.waiting, "backlog: all fed, then rearm")
+        sent = []; refuse = 1
+        b.feed(batch, send: send) { rearms += 1 }
+        check(sent == [0, 1] && rearms == 1 && b.waiting, "backlog: refused mid-batch holds rest and rearm")
+        refuse = 2
+        b.resume(send: send)
+        check(sent == [0, 1, 2] && rearms == 1 && b.waiting, "backlog: refused again on resume, still held")
+        refuse = nil
+        b.resume(send: send)
+        check(sent == [0, 1, 2, 3] && rearms == 2 && !b.waiting, "backlog: resume feeds the rest in order, then rearm")
+        sent = []; refuse = 3
+        b.feed(batch, send: send) { rearms += 1 }
+        check(sent == [0, 1, 2, 3] && rearms == 2 && b.waiting, "backlog: refused last packet still holds rearm")
+        refuse = nil
+        b.resume(send: send)
+        check(sent == [0, 1, 2, 3] && rearms == 3 && !b.waiting, "backlog: resume with nothing left rearms")
+    }
+
     // SnapshotIngestState: boot change ordering
     do {
         func smp(_ seq: UInt64) -> TunnelSample {

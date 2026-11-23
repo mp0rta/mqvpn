@@ -14,6 +14,7 @@ PURE_SOURCES=(
     "$SHARED/ProviderMessage.swift"
     "$SHARED/SampleRing.swift"
     "$SHARED/TunnelSessionCoordinator.swift"
+    "$SHARED/TunBacklog.swift"
     "$APP/BandwidthHistory.swift"
     "$APP/ReorderHistory.swift"
     "$APP/ChartGeometry.swift"

@@ -244,13 +244,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
+    /// readPackets delivers once, so each batch re-arms the read, but only
+    /// after the tick thread fed it (under backpressure, once the core took
+    /// the rest): the TUN is read no faster than the core takes packets. A
+    /// refused hop (thread gone) ends the loop.
     private func readLoop(_ engine: MqvpnEngine) {
         packetFlow.readPackets { [weak self] packets, _ in
-            guard let self else { return }
             engine.perform {
-                for p in packets { engine.feedTunPacket(p) }
+                // weak engine: the engine holds this closure while it waits
+                engine.feedTunPackets(packets) { [weak engine = engine] in
+                    if let engine { self?.readLoop(engine) }
+                }
             }
-            self.readLoop(engine)   // MUST re-arm: readPackets delivers once
         }
     }
 

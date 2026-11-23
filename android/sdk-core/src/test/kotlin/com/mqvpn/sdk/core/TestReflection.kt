@@ -3,8 +3,6 @@
 
 package com.mqvpn.sdk.core
 
-import com.mqvpn.sdk.runtime.MqvpnExecutor
-
 internal object TestReflection {
 
     fun createDummyTunnel(reorderEnabled: Boolean = false): MqvpnTunnel {
@@ -18,14 +16,5 @@ internal object TestReflection {
         )
         ctor.isAccessible = true
         return ctor.newInstance(0L, 0L, 1L, reorderEnabled) as MqvpnTunnel
-    }
-
-    fun createBridge(executor: MqvpnExecutor, tunnel: MqvpnTunnel): TunnelBridge {
-        val ctor = TunnelBridge::class.java.getDeclaredConstructor(
-            MqvpnExecutor::class.java,
-            MqvpnTunnel::class.java,
-        )
-        ctor.isAccessible = true
-        return ctor.newInstance(executor, tunnel) as TunnelBridge
     }
 }

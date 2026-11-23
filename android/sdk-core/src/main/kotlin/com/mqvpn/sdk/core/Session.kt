@@ -18,6 +18,7 @@ import com.mqvpn.sdk.runtime.MqvpnExecutor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import java.io.FileInputStream
 import java.net.InetAddress
 
 /**
@@ -118,10 +119,14 @@ internal class Session(
         return result
     }
 
-    /** [nextTimerMs, tunReadable, isIdle] for the poller, null before open(). */
+    /**
+     * [nextTimerMs, tunReadable, isIdle] for the poller, null before open().
+     * The poller asks after every tick, so this is also where the bridge
+     * learns that backpressure is over.
+     */
     fun interest(): IntArray? = tunnel?.getInterest()?.let {
         val wait = statsSampler.capWait(it.nextTimerMs, SystemClock.elapsedRealtime())
-        intArrayOf(wait, if (it.tunReadable) 1 else 0, if (it.isIdle) 1 else 0)
+        pollerInterest(it, wait) { bridge?.onTunReadable() }
     }
 
     fun handleBadFd(handle: Long) {
@@ -196,8 +201,8 @@ internal class Session(
         tunPfd?.close()
         tunPfd = pfd
 
-        bridge = TunnelBridge(executor, t).also {
-            it.startTunReader(pfd, mtu, scope)
+        bridge = TunnelBridge(executor, t::onTunPacket).also {
+            it.startTunReader(FileInputStream(pfd.fileDescriptor), mtu, scope)
             it.startSender(scope)
         }
 
@@ -248,4 +253,10 @@ internal class StatsSampler(private val intervalMs: Long) {
 
     fun capWait(waitMs: Int, nowMs: Long): Int =
         if (!due) waitMs else minOf(waitMs.toLong(), (lastMs + intervalMs - nowMs).coerceAtLeast(1)).toInt()
+}
+
+/** What the poller gets for [interest]; tun_readable also ends the bridge's backpressure wait. */
+internal fun pollerInterest(interest: MqvpnTunnel.Interest, wait: Int, onTunReadable: () -> Unit): IntArray {
+    if (interest.tunReadable) onTunReadable()
+    return intArrayOf(wait, if (interest.tunReadable) 1 else 0, if (interest.isIdle) 1 else 0)
 }
