@@ -2394,6 +2394,91 @@ TEST(client_conn_lost_in_tunnel_ready_reconnects)
     loopback_teardown(&lb);
 }
 
+/* A 1000-byte IPv4/UDP packet from the client's current tunnel address. */
+static void
+uplink_pkt(uint8_t pkt[1000])
+{
+    memset(pkt, 0, 1000);
+    pkt[0] = 0x45;
+    pkt[2] = 1000 >> 8;
+    pkt[3] = 1000 & 0xff;
+    pkt[8] = 64;
+    pkt[9] = 17;
+    memcpy(pkt + 12, g_cli_tunnel_info.assigned_ip, 4);
+    memset(pkt + 16, 8, 4);
+}
+
+static int
+done_never(loopback_t *lb)
+{
+    (void)lb;
+    return 0;
+}
+
+static int
+done_second_tunnel(loopback_t *lb)
+{
+    (void)lb;
+    return g_cli_tunnel_ready_called >= 2;
+}
+
+static int g_tun_output_want;
+
+static int
+done_server_tun_output(loopback_t *lb)
+{
+    (void)lb;
+    return g_tun_output_called >= g_tun_output_want;
+}
+
+/* A connection can die while its send queue is full and the client has
+ * stopped taking TUN packets (all paths dead under load). xquic announces
+ * free send space only on a connection whose own send failed, so the next
+ * connection must not inherit that stop: the uplink resumes once its tunnel
+ * is up. */
+TEST(client_reconnect_clears_backpressure)
+{
+    loopback_t lb;
+    loopback_setup(&lb, tweak_reconnect_hourly);
+    loopback_pump_until(&lb, done_established, 10000);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+    mqvpn_client_set_tun_active(lb.cli, 1, -1);
+
+    /* No pump: nothing leaves xquic's send queue, so it fills. */
+    uint8_t pkt[1000];
+    uplink_pkt(pkt);
+    int rc = MQVPN_OK;
+    for (int k = 0; k < 100000 && rc == MQVPN_OK; k++)
+        rc = mqvpn_client_on_tun_packet(lb.cli, pkt, sizeof(pkt));
+    ASSERT_EQ(rc, MQVPN_ERR_AGAIN);
+    mqvpn_interest_t in;
+    ASSERT_EQ(mqvpn_client_get_interest(lb.cli, &in), MQVPN_OK);
+    ASSERT_EQ(in.tun_readable, 0);
+
+    /* The connection dies before the queue drains. */
+    ASSERT_EQ(mqvpn_client_test_kill_conn(lb.cli), 0);
+    loopback_pump_until(&lb, done_client_reconnecting, 5000);
+    ASSERT_EQ(mqvpn_client_get_state(lb.cli), MQVPN_STATE_RECONNECTING);
+    mqvpn_client_set_tun_active(lb.cli, 0, -1); /* the platforms drop the TUN here */
+
+    ASSERT_EQ(mqvpn_client_connect(lb.cli), MQVPN_OK);
+    loopback_pump_until(&lb, done_second_tunnel, 10000);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 2);
+    mqvpn_client_set_tun_active(lb.cli, 1, -1);
+    ASSERT_EQ(mqvpn_client_get_state(lb.cli), MQVPN_STATE_ESTABLISHED);
+    loopback_pump_until(&lb, done_never, 500); /* any write notify xquic sends */
+
+    ASSERT_EQ(mqvpn_client_get_interest(lb.cli, &in), MQVPN_OK);
+    ASSERT_EQ(in.tun_readable, 1);
+    uplink_pkt(pkt);
+    g_tun_output_want = g_tun_output_called + 1;
+    ASSERT_EQ(mqvpn_client_on_tun_packet(lb.cli, pkt, sizeof(pkt)), MQVPN_OK);
+    loopback_pump_until(&lb, done_server_tun_output, 5000);
+    ASSERT_EQ(g_tun_output_called, g_tun_output_want);
+
+    loopback_teardown(&lb);
+}
+
 /* max_clients config boundary */
 
 /* ── A client's status lists its live paths, however many it closed ──
@@ -2660,6 +2745,7 @@ main(void)
     run_server_reconnect_manual_connect();
     run_server_reconnect_manual_failure_rearm();
     run_client_conn_lost_in_tunnel_ready_reconnects();
+    run_client_reconnect_clears_backpressure();
 
     run_server_status_lists_live_paths_after_path_churn();
 
