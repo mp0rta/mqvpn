@@ -95,12 +95,11 @@ MinRTT sends each packet on the path with the lowest current RTT. It is simpler 
 
 ### Failover
 
-One path carries all traffic. Backup paths are kept up, but carry no data and
-no probes while the primary works; only the connection's keep-alive PING
-reaches them, about every 15 seconds. When the primary stops delivering,
-traffic moves to a backup; when the primary comes back, traffic moves back to
-it. Use it when a backup link is metered or slow (e.g., wired primary with an
-LTE backup).
+One path carries all traffic. Backup paths are kept up, but carry no data, no
+probes and no keep-alive PING while the primary works. When the primary stops
+delivering, traffic moves to a backup; when the primary comes back, traffic
+moves back to it. Use it when a backup link is metered or slow (e.g., wired
+primary with an LTE backup).
 
 ```bash
 sudo ./build/mqvpn --mode client --server 203.0.113.1:443 \

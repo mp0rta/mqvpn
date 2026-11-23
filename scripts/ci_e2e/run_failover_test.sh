@@ -52,11 +52,12 @@ SERVER_ADDR="10.116.0.1"
 TUNNEL_IP="10.0.0.1"
 IPERF_PORT=5216
 
-# B may carry a keep-alive and its ACK while A works: a few hundred bytes.
-# Anything near the iperf3 rate means B carried data.
+# B sends no data, probe or keep-alive while A works (mp0rta/xquic#133);
+# the margin allows a few stray packets. Anything near the iperf3 rate means
+# B carried data.
 B_IDLE_MAX=65536
-# and only a few packets in the 4 s window (a keep-alive every 15 s, its
-# ACK, ARP): a probe every second would send about twice as many
+# and only a few packets in the 4 s window: a probe every second
+# would send about twice as many
 B_IDLE_PKTS=6
 A_BUSY_MIN=1000000
 
