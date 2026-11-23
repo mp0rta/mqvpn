@@ -240,17 +240,16 @@ echo "=== Test 3: A loses every packet, the tunnel moves to B ==="
 for d in "$VETH_A0:$NS_CLIENT" "$VETH_A1:$NS_SERVER"; do
     ip netns exec "${d#*:}" tc qdisc change dev "${d%%:*}" root netem "${NETEM_A[@]}" loss 100%
 done
-# 6 s of 20 pings a second; the first 2 s are for detecting the outage
+# 6 s of 20 pings a second; the first 2 s are for detecting the outage.
+# Count from the ping start: with no replies in the outage, the first one in
+# ping.log can come late.
+T0=$(date +%s.%N)
 ip netns exec "$NS_CLIENT" ping -D -n -i 0.05 -w 6 "$TUNNEL_IP" > "${WORK_DIR}/ping.log" 2>&1 || true
 for d in "$VETH_A0:$NS_CLIENT" "$VETH_A1:$NS_SERVER"; do
     ip netns exec "${d#*:}" tc qdisc change dev "${d%%:*}" root netem "${NETEM_A[@]}"
 done
-T0=$(grep -m1 -oE '^\[[0-9.]+\]' "${WORK_DIR}/ping.log" | tr -d '[]' || true)
-LATE=0
-if [ -n "$T0" ]; then
-    LATE=$(awk -v t0="$T0" '/bytes from/ { t = substr($1, 2, length($1) - 2); if (t - t0 >= 2) n++ } END { print n + 0 }' \
-        "${WORK_DIR}/ping.log")
-fi
+LATE=$(awk -v t0="$T0" '/bytes from/ { t = substr($1, 2, length($1) - 2); if (t - t0 >= 2) n++ } END { print n + 0 }' \
+    "${WORK_DIR}/ping.log")
 # 4 s at 20/s = 80 pings; want most of them answered
 if [ "$LATE" -ge 60 ]; then
     pass "tunnel worked over B during the outage ($LATE of ~80 late pings answered)"
