@@ -11,7 +11,8 @@ APP="$DIR/../App"
 TMPD="$(mktemp -d)"
 OUT="$TMPD/hosttests"
 trap 'rm -rf "$TMPD"' EXIT
-swiftc -framework Security -o "$OUT" \
+# libmqvpn.h only for its constants: main.swift checks the Swift mirrors.
+swiftc -framework Security -import-objc-header "$DIR/../../../include/libmqvpn.h" -o "$OUT" \
     "$SHARED/ServerSettings.swift" \
     "$SHARED/ServerResolve.swift" \
     "$SHARED/ServerAddressField.swift" \
@@ -24,6 +25,7 @@ swiftc -framework Security -o "$OUT" \
     "$SHARED/TeardownSequence.swift" \
     "$SHARED/SystemTrust.swift" \
     "$SHARED/PathReadSource.swift" \
+    "$SHARED/TunBacklog.swift" \
     "$APP/ControllerCore.swift" \
     "$APP/EventLog.swift" \
     "$APP/BandwidthHistory.swift" \

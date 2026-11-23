@@ -136,12 +136,20 @@ int mqvpn_udp_gro_enable(int fd);
  * loop's terminator. Pure function. */
 size_t mqvpn_gro_seg_len(size_t len, size_t seg, size_t off);
 
+/* Ask the kernel to report fd's receive-queue drop counter with every
+ * datagram once it is non-zero (SOL_SOCKET/SO_RXQ_OVFL, Linux 2.6.33).
+ * Returns 0 on success, -1 with errno preserved. */
+int mqvpn_udp_rxq_ovfl_enable(int fd);
+
 /* Receive one datagram — or one GRO-coalesced burst — from fd into buf.
  *   - Returns the byte count (> 0), 0 for a zero-length datagram, -1 on a
  *     syscall error (errno preserved; EAGAIN means the socket is drained),
  *     or MQVPN_RECV_DROP when the kernel reported truncation.
  *   - *seg_size is the UDP_GRO segment size, or 0 when the kernel sent no
  *     cmsg (an un-coalesced datagram). Feed it to mqvpn_gro_seg_len().
+ *   - *rxq_drops (nullable) receives the socket's cumulative receive-queue
+ *     drop count when the kernel attached one (see
+ *     mqvpn_udp_rxq_ovfl_enable); it is left untouched otherwise.
  *   - *peerlen is value-result: set it to the size of the peer buffer before
  *     the call; it is reset on every internal retry and written back with the
  *     kernel's value.
@@ -150,7 +158,8 @@ size_t mqvpn_gro_seg_len(size_t len, size_t seg, size_t off);
  * size is ignored, not fatal: *seg_size stays 0 and the buffer is delivered
  * as a single datagram — the pre-GRO behavior. */
 ssize_t mqvpn_udp_recv_segmented(int fd, void *buf, size_t buflen, struct sockaddr *peer,
-                                 socklen_t *peerlen, size_t *seg_size);
+                                 socklen_t *peerlen, size_t *seg_size,
+                                 uint32_t *rxq_drops);
 
 #endif /* __linux__ */
 #endif /* MQVPN_BIND_POSIX_OFFLOAD_H */

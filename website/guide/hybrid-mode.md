@@ -36,7 +36,8 @@ Hybrid mode is **disabled by default**; existing deployments see no behavior cha
 # /etc/mqvpn/server.conf
 [Hybrid]
 Enabled = true
-# EgressAllow = 10.0.5.0/24   # only if relayed TCP must reach private ranges
+# only if relayed TCP must reach private ranges
+# EgressAllow = 10.0.5.0/24
 ```
 
 ### Client
@@ -45,7 +46,8 @@ Enabled = true
 # /etc/mqvpn/client.conf
 [Hybrid]
 Enabled = true
-Tcp = auto        # stream | raw | auto (default)
+# stream | raw | auto (default)
+Tcp = auto
 ```
 
 …or the JSON equivalent (`"hybrid": {"enabled": true, "tcp": "auto"}`). The full key reference (flow caps, timeouts, egress ACL) is in [Configuration → `[Hybrid]`](./configuration#hybrid).
@@ -60,7 +62,8 @@ If relayed TCP legitimately needs to reach a private target, punch an explicit h
 [Hybrid]
 Enabled = true
 EgressAllow = 10.0.5.0/24
-EgressDeny = 10.0.5.13/32   # evaluated after EgressAllow
+# evaluated after EgressAllow
+EgressDeny = 10.0.5.13/32
 ```
 
 ## Monitoring
@@ -72,10 +75,13 @@ The control API's `get_stats` exposes the lane's runtime counters on both client
 iOS builds (`ios/build-ios.sh`) compile the lane with a reduced lwIP footprint
 (the `MQVPN_LWIP_IOS_PROFILE` build flag: ~256 KiB TCP windows and 64-flow
 pool sizing, against the 512 KiB windows every other profile uses) to fit the
-iOS Network Extension memory ceiling. Android builds use their own profile — desktop windows with the smaller 512-pcb pool, giving a 256-flow ceiling; desktop and router builds get a 8192-pcb pool and a 4096-flow ceiling. The profile is paired with the
-QUIC-side [`[Advanced] RecvRateLimit`](./configuration#advanced) receive-rate
-cap — shrinking the inner TCP windows alone does not bound the outer QUIC
-connection's own buffering, so the iOS client sets both. The full budget arithmetic and measured
+iOS Network Extension memory ceiling. Android builds use their own profile — desktop windows with the smaller 512-pcb pool, giving a 256-flow ceiling; desktop and router builds get a 8192-pcb pool and a 4096-flow ceiling. The profile is paired with
+[`[Advanced] RecvRateLimit`](./configuration#advanced): the smaller lwIP windows limit the
+memory of the inner TCP side, and `RecvRateLimit` limits how much received data the QUIC
+connection holds (16 MiB at most, plus 68 KiB per TCP connection), so the iOS client sets both. On every client and on the
+server, a TCP connection whose receiver stops reading stops its sender, so unread data does
+not pile up without limit.
+The full budget arithmetic and measured
 numbers are in
 [docs/hybrid_h2_memory_budget.md §5](https://github.com/mp0rta/mqvpn/blob/main/docs/hybrid_h2_memory_budget.md).
 

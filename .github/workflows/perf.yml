@@ -68,10 +68,8 @@ jobs:
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
-          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
-                -DXQC_ENABLE_BBR2=ON \
-                -DXQC_ENABLE_FEC=ON \
-                -DXQC_ENABLE_XOR=ON \
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                $(cat "$GITHUB_WORKSPACE/scripts/xquic-cmake-flags") \
                 -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
           make -j$(nproc)
 

@@ -50,6 +50,31 @@
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 
+/* C values the Kotlin side writes as plain numbers. If one fails, change the
+ * named Kotlin file in the same commit. */
+_Static_assert(MQVPN_STATE_CONNECTING == 1 && MQVPN_STATE_AUTHENTICATING == 2 &&
+                   MQVPN_STATE_RECONNECTING == 5 && MQVPN_STATE_CLOSED == 6,
+               "client states: MqvpnTunnel.kt, MqvpnVpnService.kt");
+_Static_assert(MQVPN_ERR_ENGINE == -3 && MQVPN_ERR_TLS == -4 && MQVPN_ERR_AUTH == -5 &&
+                   MQVPN_ERR_PROTOCOL == -6 && MQVPN_ERR_CLOSED == -10 &&
+                   MQVPN_ERR_ABI_MISMATCH == -11 && MQVPN_ERR_TIMEOUT == -12 &&
+                   MQVPN_ERR_INVALID_STATE == -13,
+               "error codes: MqvpnError.kt, MqvpnTunnel.kt, MqvpnVpnService.kt");
+_Static_assert(MQVPN_PATH_PENDING == 0 && MQVPN_PATH_ACTIVE == 1 &&
+                   MQVPN_PATH_DEGRADED == 2 && MQVPN_PATH_STANDBY == 3 &&
+                   MQVPN_PATH_CLOSED == 4,
+               "path status: app EventLog.kt, Derive.kt");
+_Static_assert(MQVPN_SCHED_MINRTT == 0 && MQVPN_SCHED_WLB == 1 &&
+                   MQVPN_SCHED_BACKUP_FEC == 2 && MQVPN_SCHED_WLB_UDP_PIN == 3,
+               "MqvpnConfig.Scheduler");
+_Static_assert(MQVPN_CC_BBR2 == 0 && MQVPN_CC_BBR == 1 && MQVPN_CC_CUBIC == 2,
+               "MqvpnConfig.CongestionControl");
+_Static_assert(MQVPN_LOG_DEBUG == 0 && MQVPN_LOG_INFO == 1 && MQVPN_LOG_WARN == 2 &&
+                   MQVPN_LOG_ERROR == 3,
+               "MqvpnConfig.LogLevel");
+_Static_assert(MQVPN_RPROF_CELLULAR_BOND == 3 && MQVPN_RPROF_FIBER_LTE == 4,
+               "MqvpnConfig.ReorderProfile");
+
 /* Android transport policy. Pushed to BOTH the core (mqvpn_config_set_udp_gso
  * in clientNew) and the bind (reactorAddPath), the way the Linux platform
  * pushes its parsed UdpGso to both, so core batching and bind GSO can never
@@ -784,6 +809,8 @@ JNI_FN(configSetKillswitchHint)(JNIEnv *env, jobject thiz, jlong cfg, jboolean e
 }
 
 /* configSetPathMtu(cfg, mtu) → int */
+_Static_assert(MQVPN_MTU_MIN == 1280 && MQVPN_MTU_MAX == 9000,
+               "MqvpnTunnel.kt checks pathMtu against 1280..9000");
 JNIEXPORT jint JNICALL
 JNI_FN(configSetPathMtu)(JNIEnv *env, jobject thiz, jlong cfg, jint mtu)
 {
@@ -1306,12 +1333,11 @@ JNIEXPORT jobjectArray JNICALL
 JNI_FN(getPaths)(JNIEnv *env, jobject thiz, jlong client)
 {
     (void)thiz;
-    enum { MAX_PATHS = 8 };
-    mqvpn_path_info_t paths[MAX_PATHS];
+    mqvpn_path_info_t paths[MQVPN_MAX_PATHS];
     int n_paths = 0;
 
     int rc = mqvpn_client_get_paths((const mqvpn_client_t *)(intptr_t)client, paths,
-                                    MAX_PATHS, &n_paths);
+                                    MQVPN_MAX_PATHS, &n_paths);
     if (rc != MQVPN_OK || n_paths <= 0) return NULL;
 
     /* Classes and boxing methods: looked up once per call. */

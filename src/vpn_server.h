@@ -34,13 +34,15 @@ typedef struct mqvpn_server_cfg_s {
     const char *control_addr;  /* bind address for JSON control API (default 127.0.0.1) */
     int control_port;          /* TCP port for JSON control API (0 = disabled) */
     uint64_t init_max_path_id; /* draft-21 §4.6 TP cap, 0=use xquic default 8 */
-    int tun_mtu;               /* 0=auto (1382 at startup), >0=override (floor 1280) */
-    int path_mtu;              /* 0=default packet size, >0=underlay MTU */
-    int pmtud;                 /* 1=discover the path MTU, path_mtu is the cap */
-    int cc;                    /* mqvpn_cc_t: congestion control algorithm */
-    int reinjection;           /* mqvpn_reinjection_t; 0=off (default) */
-    int reinj_srtt_factor_pct; /* deadline mode; percent, e.g. 110 = 1.10x srtt */
-    int reinj_hard_deadline_ms;        /* deadline mode */
+    int bbr2_fast_convergence; /* [Multipath] Bbr2FastConvergence; default 1 */
+    int bbr2_rttvar_compensation; /* [Multipath] Bbr2RttvarCompensation; default 1 */
+    int tun_mtu;                  /* 0=auto (1382 at startup), >0=override (floor 1280) */
+    int path_mtu;                 /* 0=default packet size, >0=underlay MTU */
+    int pmtud;                    /* 1=discover the path MTU, path_mtu is the cap */
+    int cc;                       /* mqvpn_cc_t: congestion control algorithm */
+    int reinjection;              /* mqvpn_reinjection_t; 0=off (default) */
+    int reinj_srtt_factor_pct;    /* deadline mode; percent, e.g. 110 = 1.10x srtt */
+    int reinj_hard_deadline_ms;   /* deadline mode */
     int reinj_deadline_lower_bound_ms; /* deadline mode */
     mqvpn_reorder_config_t
         reorder;                  /* INI [Reorder]/[ReorderRule] (mode OFF by default) */

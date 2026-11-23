@@ -355,7 +355,7 @@ EnvXqcValidate ==
                  dupCount, reqSched, hold>>
 
 \* xquic abandons a path on its own when its validation times out
-\* (xqc_path_validation_on_retx, xqc_multipath.c:460-484): multipath only,
+\* (xqc_timer_path_idle_timeout, xqc_timer.c:179-184): multipath only,
 \* and only a path that is still validating, so never an xquic-ACTIVE one.
 \* Bounded and not fair.
 EnvXqcSpontaneousAbandon ==

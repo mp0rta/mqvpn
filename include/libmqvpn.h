@@ -5,7 +5,7 @@
  * libmqvpn — Multipath QUIC VPN library
  *
  * Public API header (single file).
- * Version: 0.19.0 (callback ABI version 3)
+ * Version: 0.20.0 (callback ABI version 3)
  *
  * Thread safety: All functions must be called from a single thread
  * (the "tick thread"). Debug builds assert this (ASSERT_TICK_THREAD inside the library).
@@ -38,7 +38,7 @@ extern "C" {
 /* ─── Version ─── */
 
 #define MQVPN_VERSION_MAJOR 0
-#define MQVPN_VERSION_MINOR 19
+#define MQVPN_VERSION_MINOR 20
 #define MQVPN_VERSION_PATCH 0
 
 /* ─── ABI ─── */
@@ -255,6 +255,9 @@ typedef enum {
     MQVPN_STATE_CLOSED = 6,
     MQVPN_STATE__COUNT = 7,
 } mqvpn_client_state_t;
+
+/* State name as the CLI logs it ("IDLE" ... "CLOSED"); "?" for other values. */
+MQVPN_API const char *mqvpn_client_state_string(mqvpn_client_state_t state);
 
 /*
  * Path lifecycle:
@@ -700,11 +703,30 @@ MQVPN_API int mqvpn_config_set_killswitch_hint(mqvpn_config_t *cfg, int enable);
  * that grows with the square of the value. Set lower (e.g. 2) to
  * deterministically trigger G-P16 PATHS_BLOCKED. */
 MQVPN_API int mqvpn_config_set_init_max_path_id(mqvpn_config_t *cfg, uint64_t v);
-/* TUN MTU cap: 0 = auto (MSS-derived), 1280..9000 = upper bound. */
+
+/* [Multipath] Bbr2FastConvergence. Non-zero (default) enables xquic's BBRv2
+ * fast-convergence extension: in PROBE_BW cruise and down the max-bandwidth
+ * filter also advances whenever a round's smoothed RTT exceeds the previous
+ * round's by a quarter, probing is gated on an extra RTT-check round, and
+ * the wall-clock wait between bandwidth probes is not applied. 0 gives
+ * standard BBRv2 behaviour for all three. Ignored unless the congestion
+ * controller is BBR2. */
+MQVPN_API int mqvpn_config_set_bbr2_fast_convergence(mqvpn_config_t *cfg, int on);
+
+/* [Multipath] Bbr2RttvarCompensation. Non-zero (default) enables xquic's
+ * BBRv2 extension that adds congestion-window headroom for the windowed RTT
+ * variation. 0 gives standard BBRv2 cwnd sizing. Ignored unless the
+ * congestion controller is BBR2. */
+MQVPN_API int mqvpn_config_set_bbr2_rttvar_compensation(mqvpn_config_t *cfg, int on);
+
+/* Range of the two MTU settings below; 0 is also accepted. */
+#define MQVPN_MTU_MIN 1280
+#define MQVPN_MTU_MAX 9000
+/* TUN MTU cap: 0 = auto (MSS-derived), MQVPN_MTU_MIN..MAX = upper bound. */
 MQVPN_API int mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu);
 /* Underlay path MTU the outer QUIC packets are sized for: 0 = default
- * (1400-byte packets, TUN MTU ~1382), 1280..9000 = largest IP packet the
- * path carries. Packets are capped at xquic's limit (TUN MTU 1418).
+ * (1400-byte packets, TUN MTU ~1382), MQVPN_MTU_MIN..MAX = largest IP packet
+ * the path carries. Packets are capped at xquic's limit (TUN MTU 1418).
  * IPv6 requires capacity for 1280 inner bytes, including room for reorder:
  * insufficient capacity fails server_start or notifies client tunnel_closed
  * with MQVPN_ERR_INVALID_ARG when IPv6 is assigned. */
@@ -793,9 +815,13 @@ MQVPN_API int mqvpn_config_set_hybrid_egress_acl(mqvpn_config_t *cfg, const char
                                                  int n_deny);
 
 /* Conn-level receive-rate cap in bytes/sec (0 = library default, no cap).
- * Bounds the aggregate QUIC transport receive window to rate x srtt.
- * CLIENT-ONLY: the server connection-settings path ignores it — a
- * server-side cap would throttle every client's uplink.
+ * Sizes the aggregate QUIC transport receive window from rate x srtt.
+ * The window starts at rate x 60 ms (at least 63000 bytes), follows the
+ * largest measured srtt (across paths) upward, is capped at 16 MiB and never shrinks.
+ * Each hybrid TCP-lane flow is also limited to about a quarter of this rate, so one
+ * stalled flow holds at most a quarter of the window. CLIENT-ONLY: the server
+ * connection-settings path ignores it — a server-side cap would throttle every client's
+ * uplink.
  *
  * Values above MQVPN_RECV_RATE_LIMIT_MAX are rejected
  * (MQVPN_ERR_INVALID_ARG): the transport computes the window as
@@ -1033,7 +1059,12 @@ MQVPN_API int mqvpn_client_set_tun_active(mqvpn_client_t *client, int active, in
  * a consumer that ticks on a coarse timer adds up to one tick period of
  * latency to every packet accepted here. (Before the deferred flush every
  * call flushed synchronously, so this obligation is new as of UdpGso
- * batching — same contract as mqvpn_server_on_egress_fd_ready.) */
+ * batching — same contract as mqvpn_server_on_egress_fd_ready.)
+ *
+ * MQVPN_ERR_AGAIN is backpressure: the packet is dropped, not queued, and
+ * the client keeps refusing packets with MQVPN_ERR_AGAIN until it can send
+ * again. Stop reading the TUN until mqvpn_client_get_interest() reports
+ * tun_readable; ready_for_tun (when set) is only a hint that it changed. */
 MQVPN_API int mqvpn_client_on_tun_packet(mqvpn_client_t *client, const uint8_t *pkt,
                                          size_t len);
 
@@ -1139,7 +1170,9 @@ MQVPN_API int mqvpn_server_egress_fd_budget(mqvpn_server_t *server);
 /* Feed data from platform into the engine. Same accepted-not-sent contract
  * as mqvpn_client_on_tun_packet: with the batched send path engaged the
  * datagram may wait for the caller's next mqvpn_server_tick() — feed, then
- * tick promptly. */
+ * tick promptly. Unlike the client, it never returns MQVPN_ERR_AGAIN for
+ * backpressure: the TUN is shared by every client, so a packet xquic cannot
+ * take for its client right now is dropped and the TUN keeps being read. */
 MQVPN_API int mqvpn_server_on_tun_packet(mqvpn_server_t *server, const uint8_t *pkt,
                                          size_t len);
 

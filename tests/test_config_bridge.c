@@ -73,6 +73,8 @@ test_all_fields_forwarded(void)
     cfg.redundant_ports[0] = 4200;
     cfg.n_redundant_ports = 1;
     cfg.init_max_path_id = 17;
+    cfg.bbr2_fast_convergence = 0;    /* library default is 1 */
+    cfg.bbr2_rttvar_compensation = 0; /* library default is 1 */
     cfg.tun_mtu = 1400;
     cfg.path_mtu = 1492;
     cfg.pmtud = 1;
@@ -110,6 +112,8 @@ test_all_fields_forwarded(void)
     ASSERT_EQ_INT(lc->n_redundant_ports, 1, "n_redundant_ports");
     ASSERT_EQ_INT(lc->redundant_ports[0], 4200, "redundant_ports[0]");
     ASSERT_EQ_INT(lc->init_max_path_id, 17, "init_max_path_id");
+    ASSERT_EQ_INT(lc->bbr2_fast_convergence, 0, "bbr2_fast_convergence");
+    ASSERT_EQ_INT(lc->bbr2_rttvar_compensation, 0, "bbr2_rttvar_compensation");
     ASSERT_EQ_INT(lc->tun_mtu, 1400, "tun_mtu");
     ASSERT_EQ_INT(lc->path_mtu, 1492, "path_mtu");
     ASSERT_EQ_INT(lc->pmtud, 1, "pmtud");
@@ -126,7 +130,7 @@ test_all_fields_forwarded(void)
 }
 
 /* Default/edge mappings: single path, interval fallback, NULL strings,
- * scheduler fallback, recv_rate_limit=0 left untouched. */
+ * unknown scheduler, recv_rate_limit=0 left untouched. */
 static void
 test_defaults_and_fallbacks(void)
 {
@@ -138,7 +142,7 @@ test_defaults_and_fallbacks(void)
     cfg.server_addr = "198.51.100.9";
     cfg.server_port = 443;
     cfg.n_paths = 1;    /* → multipath 0 */
-    cfg.scheduler = 99; /* unknown → MINRTT fallback */
+    cfg.scheduler = 99; /* unknown → the setter refuses it */
     cfg.reconnect = 1;
     cfg.reconnect_interval = 0; /* → default 5 */
 
@@ -152,7 +156,7 @@ test_defaults_and_fallbacks(void)
     mqvpn_platform_apply_client_config(lc, &cfg);
 
     ASSERT_EQ_INT(lc->multipath, 0, "multipath (n_paths=1)");
-    ASSERT_EQ_INT(lc->scheduler, MQVPN_SCHED_MINRTT, "scheduler fallback");
+    ASSERT_EQ_INT(lc->scheduler, MQVPN_SCHED_WLB, "unknown scheduler keeps the default");
     ASSERT_EQ_INT(lc->reconnect_interval_sec, 5, "reconnect interval default 5");
     ASSERT_EQ_INT(lc->tls_server_name[0], '\0', "tls_server_name NULL → unset");
     ASSERT_EQ_INT(lc->auth_key[0], '\0', "auth_key NULL → unset");

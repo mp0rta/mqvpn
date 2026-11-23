@@ -105,8 +105,7 @@ EOF
 bench_setup_netns_n "$N_PATHS"
 bench_add_server_host_routes "$N_PATHS"
 
-# Parameterized wait_for_log (adapted from tests/test_e2e_dellink.sh, which
-# greps a hardcoded global log — here each phase has its own log file).
+# Parameterized wait_for_log: each phase has its own log file.
 # $1 = log file, $2 = grep -E pattern, $3 = timeout seconds (default 40).
 wait_for_log() {
     local logfile="$1"

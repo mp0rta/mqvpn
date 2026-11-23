@@ -36,7 +36,8 @@ classifier (per packet: protocol + Tcp mode + tunnel-subnet carve-out)
 # /etc/mqvpn/server.conf
 [Hybrid]
 Enabled = true
-# EgressAllow = 10.0.5.0/24   # 中継 TCP がプライベートレンジに到達する必要がある場合のみ
+# 中継 TCP がプライベートレンジに到達する必要がある場合のみ
+# EgressAllow = 10.0.5.0/24
 ```
 
 ### クライアント
@@ -45,7 +46,8 @@ Enabled = true
 # /etc/mqvpn/client.conf
 [Hybrid]
 Enabled = true
-Tcp = auto        # stream | raw | auto（デフォルト）
+# stream | raw | auto（デフォルト）
+Tcp = auto
 ```
 
 JSON の場合は `"hybrid": {"enabled": true, "tcp": "auto"}` が等価です。全キーのリファレンス（フロー上限、タイムアウト、egress ACL）は[設定 → `[Hybrid]`](./configuration#hybrid)を参照してください。
@@ -60,7 +62,8 @@ JSON の場合は `"hybrid": {"enabled": true, "tcp": "auto"}` が等価です�
 [Hybrid]
 Enabled = true
 EgressAllow = 10.0.5.0/24
-EgressDeny = 10.0.5.13/32   # EgressAllow の後に評価
+# EgressAllow の後に評価
+EgressDeny = 10.0.5.13/32
 ```
 
 ## モニタリング
@@ -69,7 +72,7 @@ control API の `get_stats` がレーンのランタイムカウンタをクラ�
 
 ## iOS ビルド
 
-iOS ビルド（`ios/build-ios.sh`）では、iOS Network Extension のメモリ上限に収めるため、lwIP のフットプリントを削減した構成（`MQVPN_LWIP_IOS_PROFILE` ビルドフラグ: 他プロファイルの 512 KiB ウィンドウに対し約 256 KiB、フロー上限 64）でレーンをコンパイルします。Android ビルドは専用プロファイル（desktop と同じウィンドウ + 512 pcb プール = 256 フロー上限）を使用します。desktop / router ビルドは 8192 pcb プールで 4096 フロー上限です。このプロファイルは QUIC 側の受信レート上限 [`[Advanced] RecvRateLimit`](./configuration#advanced) とセットで使います — 内側 TCP のウィンドウを縮めるだけでは外側 QUIC コネクション自体のバッファリングは抑えられないため、iOS クライアントは両方を設定します。予算計算と実測値の詳細は
+iOS ビルド（`ios/build-ios.sh`）では、iOS Network Extension のメモリ上限に収めるため、lwIP のフットプリントを削減した構成（`MQVPN_LWIP_IOS_PROFILE` ビルドフラグ: 他プロファイルの 512 KiB ウィンドウに対し約 256 KiB、フロー上限 64）でレーンをコンパイルします。Android ビルドは専用プロファイル（desktop と同じウィンドウ + 512 pcb プール = 256 フロー上限）を使用します。desktop / router ビルドは 8192 pcb プールで 4096 フロー上限です。このプロファイルは [`[Advanced] RecvRateLimit`](./configuration#advanced) とセットで使います。小さくした lwIP のウィンドウが内側の TCP のメモリを抑え、`RecvRateLimit` が QUIC 接続の保持する受信データ（最大 16 MiB に TCP 接続 1 本あたり 68 KiB を足した量）を抑えるので、iOS クライアントは両方を設定します。どのクライアントでもサーバでも、受信側が読まなくなった TCP 接続は送信側を止めるので、未読データが際限なくたまることはありません。予算計算と実測値の詳細は
 [docs/hybrid_h2_memory_budget.md §5](https://github.com/mp0rta/mqvpn/blob/main/docs/hybrid_h2_memory_budget.md) を参照してください。
 
 ## 既知の制限

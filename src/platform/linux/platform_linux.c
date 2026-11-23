@@ -227,12 +227,8 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
                  void *user_ctx)
 {
     platform_ctx_t *p = (platform_ctx_t *)user_ctx;
-    static const char *names[] = {"IDLE",         "CONNECTING",  "AUTHENTICATING",
-                                  "TUNNEL_READY", "ESTABLISHED", "RECONNECTING",
-                                  "CLOSED"};
-    const char *os = (old_state < 7) ? names[old_state] : "?";
-    const char *ns = (new_state < 7) ? names[new_state] : "?";
-    LOG_INF("state: %s → %s", os, ns);
+    LOG_INF("state: %s → %s", mqvpn_client_state_string(old_state),
+            mqvpn_client_state_string(new_state));
 
     /* On RECONNECTING or CLOSED, tear down TUN and platform resources so
      * that stale fd events don't fire ("tun read: Bad file descriptor").
@@ -1130,13 +1126,16 @@ svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_a
  * harvest runs after ctrl_socket_destroy, so no request survives to see a
  * ctx's numbers both live and accumulated. */
 static void
-svr_rx_stats(void *arg, uint64_t *receives, uint64_t *datagrams)
+svr_rx_stats(void *arg, uint64_t *receives, uint64_t *datagrams, uint64_t *queue_drops)
 {
     server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
     mqvpn_bind_posix_stats_t st = {.struct_size = sizeof(st)};
     if (sp->bind_ctx) mqvpn_bind_posix_server_get_stats(sp->bind_ctx, &st);
     *receives = sp->gro_receives + st.rx_receives;
     *datagrams = sp->gro_datagrams + st.rx_datagrams;
+    /* A property of the one listen socket, which outlives every control
+     * request: nothing to accumulate across transport ctxs. */
+    *queue_drops = st.rx_queue_drops;
 }
 
 int
@@ -1171,15 +1170,8 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
         }
     }
     mqvpn_config_set_max_clients(lib_cfg, cfg->max_clients);
-    mqvpn_scheduler_t lib_sched;
-    switch (cfg->scheduler) {
-    case 1: lib_sched = MQVPN_SCHED_WLB; break;
-    case 2: lib_sched = MQVPN_SCHED_BACKUP_FEC; break;
-    case 3: lib_sched = MQVPN_SCHED_WLB_UDP_PIN; break;
-    case 4: lib_sched = MQVPN_SCHED_FAILOVER; break;
-    default: lib_sched = MQVPN_SCHED_MINRTT; break;
-    }
-    mqvpn_config_set_scheduler(lib_cfg, lib_sched);
+    /* main.c fills scheduler from the name table; the setter rejects others. */
+    mqvpn_config_set_scheduler(lib_cfg, (mqvpn_scheduler_t)cfg->scheduler);
     mqvpn_config_set_allow_client_scheduler(lib_cfg, cfg->allow_client_scheduler);
     mqvpn_config_set_cc(lib_cfg, (mqvpn_cc_t)cfg->cc);
     mqvpn_config_set_reinjection(lib_cfg, (mqvpn_reinjection_t)cfg->reinjection);
@@ -1187,6 +1179,8 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
                                                  cfg->reinj_hard_deadline_ms,
                                                  cfg->reinj_deadline_lower_bound_ms);
     mqvpn_config_set_init_max_path_id(lib_cfg, cfg->init_max_path_id);
+    mqvpn_config_set_bbr2_fast_convergence(lib_cfg, cfg->bbr2_fast_convergence);
+    mqvpn_config_set_bbr2_rttvar_compensation(lib_cfg, cfg->bbr2_rttvar_compensation);
     mqvpn_config_set_tun_mtu(lib_cfg, cfg->tun_mtu);
     mqvpn_config_set_path_mtu(lib_cfg, cfg->path_mtu);
     mqvpn_config_set_pmtud(lib_cfg, cfg->pmtud);

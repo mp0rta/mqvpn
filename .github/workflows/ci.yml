@@ -54,7 +54,8 @@ jobs:
           # The Azure mirror is often throttled and stalls apt for 10+ minutes.
           sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update
-          sudo apt-get install -y cmake libevent-dev golang iptables
+          # The build dependencies are in packaging/build-deps.control.
+          sudo apt-get -y satisfy "$(sed -n 's/^Build-Depends: *//p' packaging/build-deps.control)" iptables
 
       - name: Compute xquic SHA
         id: xqsha
@@ -105,18 +106,15 @@ jobs:
           # v5: libxquic.so statically absorbs BoringSSL (hidden-visibility
           # symbols), so a cached xquic build outlives a BoringSSL flag change
           # unless this key moves with it.
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-gcc-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v5
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-gcc-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v5-${{ hashFiles('scripts/xquic-cmake-flags') }}
 
       - name: Build xquic
         if: steps.xquic-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
-          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
-                -DXQC_ENABLE_BBR2=ON \
-                -DXQC_ENABLE_UNLIMITED=ON \
-                -DXQC_ENABLE_FEC=ON \
-                -DXQC_ENABLE_XOR=ON \
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                $(cat "$GITHUB_WORKSPACE/scripts/xquic-cmake-flags") \
                 -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
           make -j$(nproc)
 
@@ -150,6 +148,28 @@ jobs:
             build/libxquic.so
             build/cmake_install.cmake
             build/systemd/
+            build/packaging/
+          retention-days: 1
+
+      # After the upload: the build artifact keeps the /usr/local prefix that
+      # systemd-test installs. No compiled file uses the prefix, so this
+      # configure only regenerates the units and the install scripts.
+      - name: Build debs (prefix /usr)
+        # From build/: CMakeLists resolves the relative XQUIC_BUILD_DIR against the working directory.
+        run: |
+          cd build
+          cmake -DCMAKE_INSTALL_PREFIX=/usr ..
+          make -j"$(nproc)"
+          cpack -G DEB
+
+      - name: Check deb contents
+        run: scripts/ci_e2e/check_deb_contents.sh build
+
+      - name: Upload debs
+        uses: actions/upload-artifact@v7
+        with:
+          name: debs
+          path: build/*.deb
           retention-days: 1
 
   # 32-bit build guard (OpenWrt/OMR routers run armhf): cross-compiles with
@@ -232,7 +252,7 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-armhf-gcc-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v1
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-armhf-gcc-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v1-${{ hashFiles('scripts/xquic-cmake-flags') }}
 
       # shortcut: the fork is not 32-bit warning-clean (xqc_log.c prints a
       # 64-bit tv_usec with %ld, xqc_send_ctl.c casts a pointer to a packet
@@ -243,11 +263,8 @@ jobs:
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
-          cmake $XC -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
-                -DXQC_ENABLE_BBR2=ON \
-                -DXQC_ENABLE_UNLIMITED=ON \
-                -DXQC_ENABLE_FEC=ON \
-                -DXQC_ENABLE_XOR=ON \
+          cmake $XC -DCMAKE_BUILD_TYPE=Release \
+                $(cat "$GITHUB_WORKSPACE/scripts/xquic-cmake-flags") \
                 -DCMAKE_C_FLAGS="-Wno-dangling-pointer -Wno-error=format -Wno-error=pointer-to-int-cast" ..
           make -j$(nproc)
 
@@ -321,18 +338,15 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-${{ steps.bssl-pin.outputs.sha }}-v4
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-${{ steps.bssl-pin.outputs.sha }}-v4-${{ hashFiles('scripts/xquic-cmake-flags') }}
 
       - name: Build xquic (clang)
         if: steps.xquic-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
-          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug -DSSL_TYPE=boringssl \
-                -DXQC_ENABLE_BBR2=ON \
-                -DXQC_ENABLE_UNLIMITED=ON \
-                -DXQC_ENABLE_FEC=ON \
-                -DXQC_ENABLE_XOR=ON \
+          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug \
+                $(cat "$GITHUB_WORKSPACE/scripts/xquic-cmake-flags") \
                 -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
           make -j$(nproc)
 
@@ -384,6 +398,12 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/test_multiclient.sh
+
+      - name: E2E multi-client isolation test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_multiclient_isolation_test.sh
 
       - name: E2E NAT test (netns)
         env:
@@ -686,18 +706,15 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-msan-bssl-${{ steps.bssl-pin.outputs.sha }}-v4
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-msan-bssl-${{ steps.bssl-pin.outputs.sha }}-v4-${{ hashFiles('scripts/xquic-cmake-flags') }}
 
       - name: Build xquic (clang + MSan)
         if: steps.xquic-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
-          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug -DSSL_TYPE=boringssl \
-                -DXQC_ENABLE_BBR2=ON \
-                -DXQC_ENABLE_UNLIMITED=ON \
-                -DXQC_ENABLE_FEC=ON \
-                -DXQC_ENABLE_XOR=ON \
+          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug \
+                $(cat "$GITHUB_WORKSPACE/scripts/xquic-cmake-flags") \
                 -DCMAKE_C_FLAGS="-fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins -Wno-unknown-warning-option" ..
           make -j$(nproc)
 
@@ -748,6 +765,9 @@ jobs:
 
       - name: Multi-client test (netns)
         run: sudo scripts/ci_e2e/test_multiclient.sh
+
+      - name: Multi-client isolation test (netns)
+        run: sudo scripts/ci_e2e/run_multiclient_isolation_test.sh
 
       - name: NAT test (netns)
         run: sudo scripts/ci_e2e/run_nat_test.sh
@@ -843,6 +863,46 @@ jobs:
       - name: Systemd service integration test
         run: sudo scripts/ci_e2e/run_systemd_test.sh
 
+  # Installs, upgrades and purges the debs on the runner itself; it binds UDP
+  # 10443 and changes iptables and sysctls, so keep it in its own job.
+  deb-install-test:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install test dependencies
+        # A stuck mirror otherwise eats the whole job timeout.
+        timeout-minutes: 5
+        run: |
+          # The Azure mirror is often throttled and stalls apt for 10+ minutes.
+          sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
+          sudo apt-get update
+          sudo apt-get install -y lintian
+
+      - name: Download debs
+        uses: actions/download-artifact@v8
+        with:
+          name: debs
+          path: debs
+
+      # The last release whose mqvpn deb still contains the server and dev files.
+      - name: Download the mqvpn 0.19.2 deb
+        run: |
+          mkdir -p old-deb && cd old-deb
+          base=https://github.com/mp0rta/mqvpn/releases/download/v0.19.2
+          curl -fsSL --retry 3 -o mqvpn_0.19.2_amd64.deb "$base/mqvpn_0.19.2_amd64.deb"
+          curl -fsSL --retry 3 -o SHA256SUMS "$base/SHA256SUMS"
+          grep -F '  mqvpn_0.19.2_amd64.deb' SHA256SUMS | sha256sum -c --strict
+
+      - name: lintian (advisory)
+        continue-on-error: true
+        run: lintian --no-tag-display-limit debs/*.deb
+
+      - name: Deb install, upgrade, remove and purge test
+        run: sudo scripts/ci_e2e/run_deb_install_test.sh debs old-deb/mqvpn_0.19.2_amd64.deb
+
   darwin:
     name: darwin build (core libs + platform TUs + CLI, unit tests)
     # Full Darwin build: mqvpn_lib, a real libmqvpn.dylib linked against
@@ -850,7 +910,7 @@ jobs:
     # Darwin platform TUs, the full mqvpn CLI (client mode; server mode +
     # control_socket are intentionally not ported — see CMakeLists.txt),
     # and the Darwin unit test binaries (run via ctest below).
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -873,7 +933,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: third_party/xquic/third_party/boringssl
-          key: bssl-${{ steps.bssl-pin.outputs.sha }}-darwin-arm64-clang-v2
+          key: bssl-${{ steps.bssl-pin.outputs.sha }}-darwin-arm64-macos15-clang-v2
 
       - name: Build BoringSSL
         if: steps.bssl-cache.outputs.cache-hit != 'true'
@@ -898,7 +958,7 @@ jobs:
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
           # v2: bumped with the BoringSSL cache — see the linux-build job.
-          key: xquic-${{ steps.xqsha.outputs.sha }}-darwin-arm64-clang-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v2
+          key: xquic-${{ steps.xqsha.outputs.sha }}-darwin-arm64-macos15-clang-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v2-${{ hashFiles('scripts/xquic-cmake-flags') }}
 
       - name: Build xquic
         if: steps.xquic-cache.outputs.cache-hit != 'true'
@@ -909,11 +969,8 @@ jobs:
           # gcc-only -Wno-dangling-pointer for every non-MSVC compiler;
           # AppleClang would otherwise error on the unknown warning flag
           # (same workaround as the sanitizer job's clang xquic build).
-          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
-                -DXQC_ENABLE_BBR2=ON \
-                -DXQC_ENABLE_UNLIMITED=ON \
-                -DXQC_ENABLE_FEC=ON \
-                -DXQC_ENABLE_XOR=ON \
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                $(cat "$GITHUB_WORKSPACE/scripts/xquic-cmake-flags") \
                 -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
           make -j"$(sysctl -n hw.ncpu)"
 
@@ -931,7 +988,8 @@ jobs:
             --target mqvpn_lib mqvpn_shared mqvpn_darwin_platform \
                      mqvpn test_route_parse_darwin test_dns_backup_darwin \
                      test_dns_state_darwin test_routing_seq_darwin test_killswitch_rules_darwin \
-                     test_tcp_lane test_config test_conn_settings test_bind_posix_socket test_path_line \
+                     test_tcp_lane test_tcp_lane_rto test_config test_conn_settings \
+                     test_bind_posix_socket test_path_line \
             -j "$(sysctl -n hw.ncpu)"
 
       - name: Verify artifacts
@@ -982,10 +1040,10 @@ jobs:
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DCMAKE_C_FLAGS="-Wall -Wextra -Werror"
           cmake --build build-darwin-ios --target mqvpn_lib test_tcp_lane \
-            -j "$(sysctl -n hw.ncpu)"
+            test_tcp_lane_rto -j "$(sysctl -n hw.ncpu)"
           python3 tests/check_profile_propagation.py build-darwin-ios
 
-      # Only test_tcp_lane: check_lwip_profile_invariance preprocesses BOTH
+      # Only the lane tests: check_lwip_profile_invariance preprocesses BOTH
       # profiles from source itself (build-dir-independent), so the default
       # tree's unfiltered ctest above already covers it — re-running it here
       # would imply extra coverage this tree does not add.
@@ -1111,7 +1169,7 @@ jobs:
         uses: ilammy/setup-nasm@v1
 
       - name: Setup Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@v7.1.0
         with:
           go-version: 'stable'
 
@@ -1169,7 +1227,7 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-windows-msvc-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v5
+          key: xquic-${{ steps.xqsha.outputs.sha }}-windows-msvc-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v5-${{ hashFiles('scripts/xquic-cmake-flags') }}
 
       - name: Build xquic
         if: steps.xquic-cache.outputs.cache-hit != 'true'
@@ -1184,12 +1242,8 @@ jobs:
           cmake -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_C_STANDARD=11 `
-            -DSSL_TYPE=boringssl `
-            -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" `
-            -DXQC_ENABLE_BBR2=ON `
-            -DXQC_ENABLE_UNLIMITED=ON `
-            -DXQC_ENABLE_FEC=ON `
-            -DXQC_ENABLE_XOR=ON ..
+            $(Get-Content "${{ github.workspace }}/scripts/xquic-cmake-flags") `
+            -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" ..
           cmake --build . --config Release
 
       - name: Build mqvpn
@@ -1212,17 +1266,11 @@ jobs:
             -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON ..
           cmake --build . --config Release
 
-      # The only place the CryptoAPI half of the verifier is compiled and run.
-      # Both tests use their own checks, not assert(), so Release is fine.
-      - name: Certificate verifier tests
-        run: ctest --test-dir build -C Release -R "test_cert_(identity|verify_win)" --no-tests=error --output-on-failure
-
-      # Bundled Winsock transport (seam + real loopback sockets) and the
-      # re-add decision shared with the POSIX path monitors and the path status
-      # log line; own checks, not
-      # assert(), so Release is fine.
-      - name: Winsock transport and path re-add tests
-        run: ctest --test-dir build -C Release -R "^(test_bind_winsock|test_path_readd|test_path_line|test_clock_source)$" --no-tests=error --output-on-failure
+      # Every test the Windows block of CMakeLists.txt registers, including
+      # the only run of the CryptoAPI half of the certificate verifier. Release
+      # is fine: the tests use their own checks or #undef NDEBUG.
+      - name: Unit tests (ctest)
+        run: ctest --test-dir build -C Release --no-tests=error --output-on-failure
 
       # Weak: presence and order of the install call only (see the script).
       - name: Verifier wiring tripwire
@@ -1319,7 +1367,7 @@ jobs:
           ls -lh android/sdk-native/prebuilt/arm64-v8a/
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v6.1.0
+        uses: actions/setup-java@v6.3.0
         with:
           distribution: temurin
           java-version: 21
@@ -1407,7 +1455,7 @@ jobs:
           ls -lh android/sdk-native/prebuilt/x86_64/
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v6.1.0
+        uses: actions/setup-java@v6.3.0
         with:
           distribution: temurin
           java-version: 21
@@ -1463,6 +1511,14 @@ jobs:
       - uses: actions/checkout@v7
       - name: Run check_dd_refs.sh
         run: bash scripts/lint/check_dd_refs.sh
+
+  lint-config-docs:
+    name: Lint - config keys documented
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run check_config_docs.sh
+        run: bash scripts/lint/check_config_docs.sh
 
   hybrid-e2e:
     # H2 hybrid TCP-lane end-to-end suite (7 scenarios, incl. iperf3
@@ -1520,18 +1576,15 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-${{ steps.bssl-pin.outputs.sha }}-v4
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-${{ steps.bssl-pin.outputs.sha }}-v4-${{ hashFiles('scripts/xquic-cmake-flags') }}
 
       - name: Build xquic (clang)
         if: steps.xquic-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
-          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug -DSSL_TYPE=boringssl \
-                -DXQC_ENABLE_BBR2=ON \
-                -DXQC_ENABLE_UNLIMITED=ON \
-                -DXQC_ENABLE_FEC=ON \
-                -DXQC_ENABLE_XOR=ON \
+          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug \
+                $(cat "$GITHUB_WORKSPACE/scripts/xquic-cmake-flags") \
                 -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
           make -j$(nproc)
 
@@ -1564,6 +1617,9 @@ jobs:
 
       - name: E2E hybrid H2 TCP-lane suite (netns, functional phases)
         run: sudo -E tests/test_e2e_hybrid_h2.sh build/mqvpn
+
+      - name: E2E hybrid receive backpressure (netns)
+        run: sudo -E tests/test_e2e_hybrid_backpressure.sh build/mqvpn
 
       - name: E2E hybrid H2 throughput gate (netns, Release build)
         run: HYBRID_H2_PHASES=perf sudo -E tests/test_e2e_hybrid_h2.sh build-release/mqvpn
@@ -1624,18 +1680,15 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-${{ steps.bssl-pin.outputs.sha }}-v4
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-${{ steps.bssl-pin.outputs.sha }}-v4-${{ hashFiles('scripts/xquic-cmake-flags') }}
 
       - name: Build xquic (clang)
         if: steps.xquic-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
-          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug -DSSL_TYPE=boringssl \
-                -DXQC_ENABLE_BBR2=ON \
-                -DXQC_ENABLE_UNLIMITED=ON \
-                -DXQC_ENABLE_FEC=ON \
-                -DXQC_ENABLE_XOR=ON \
+          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug \
+                $(cat "$GITHUB_WORKSPACE/scripts/xquic-cmake-flags") \
                 -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
           make -j$(nproc)
 

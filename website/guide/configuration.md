@@ -32,7 +32,9 @@ User = bob:<BOB_PSK>
 
 [Multipath]
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+AllowClientScheduler = true
+# Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2
 
 [Hybrid]
 Enabled = true
@@ -54,7 +56,8 @@ intermediate.
 # /etc/mqvpn/client.conf
 [Server]
 Address = 203.0.113.1:443
-# ServerName = vpn.example.com  # TLS SNI / cert verify name (default: use Address host)
+# TLS SNI / cert verify name (default: use Address host)
+# ServerName = vpn.example.com
 
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
@@ -67,7 +70,11 @@ LogLevel = info
 
 [Multipath]
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+# Override the server's scheduler with Scheduler above for this client's downloads
+# (needs AllowClientScheduler = true on the server):
+# RequestServerScheduler = true
+# Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2
 Path = eth0
 Path = wlan0
 
@@ -102,6 +109,7 @@ The file must be strict JSON (RFC 8259): no comments, no trailing commas, and ke
   ],
   "max_clients": 64,
   "scheduler": "wlb",
+  "allow_client_scheduler": true,
   "cc": "bbr2",
   "hybrid": { "enabled": true },
   "reorder": { "enabled": true }
@@ -130,6 +138,16 @@ The file must be strict JSON (RFC 8259): no comments, no trailing commas, and ke
   "paths": ["eth0", "wlan0"]
 }
 ```
+
+The `[Interface]` and `[Multipath]` keys these examples leave out are also
+top-level keys in JSON: `mtu` (`MTU`), `path_mtu` (`PathMTU`), `pmtud`
+(`PMTUD`), `manage_routes` (`ManageRoutes`), `init_max_path_id`
+(`InitMaxPathId`), `bbr2_fast_convergence` (`Bbr2FastConvergence`),
+`bbr2_rttvar_compensation` (`Bbr2RttvarCompensation`), `reinjection`
+(`Reinjection`), `reinjection_srtt_factor_pct` (`ReinjectionSrttFactorPct`),
+`reinjection_hard_deadline_ms` (`ReinjectionHardDeadlineMs`),
+`reinjection_deadline_lower_bound_ms` (`ReinjectionDeadlineLowerBoundMs`),
+`redundant` (`Redundant`) and `redundant_ports` (`RedundantPorts`).
 
 ## Multi-User Authentication
 
@@ -178,7 +196,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `ReconnectInterval` | Seconds between reconnection attempts | `5` |
 | `ManageRoutes` | Manage the host routing table (VPN routes and server pin route). Set to `false` (or pass `--no-manage-routes`) to handle routing yourself. Routing alone does not stop applications that bind their sockets to a specific adapter — see the note below. | `true` |
 | `MTU` | TUN MTU (1280–9000). Client: cap — if the negotiated MTU is lower, the negotiated value is used. Server: sets the TUN MTU directly. | auto (client ~1382 negotiated, server 1382) |
-| `PathMTU` | Largest IP packet the network between client and server carries without fragmenting (1280–9000). mqvpn sizes its QUIC packets to fit, assuming an IPv6 header so the value is safe for IPv4 too. Set the same value on both ends. See [Using a larger tunnel MTU](#using-a-larger-tunnel-mtu). | `0` (1400-byte packets) |
+| `PathMTU` | Largest IP packet the network between client and server carries without fragmenting (1280–9000). mqvpn sizes its QUIC packets to fit, assuming an IPv6 header so the value is safe for IPv4 too. Each end tells the other a value below 1500, so a client's smaller value also limits what the server sends it. See [Using a larger tunnel MTU](#using-a-larger-tunnel-mtu). | `0` (1400-byte packets) |
 | `PMTUD` | Discover the path MTU instead of trusting a fixed size. Packets start small and grow while larger probes get through; `PathMTU`, when set, is the upper limit. Both ends must enable it. See [Discovering the path MTU](#discovering-the-path-mtu). | `false` |
 
 > **Note: route management does not cover interface-bound applications**
@@ -215,6 +233,8 @@ In JSON, use `auth_key` on both client and server (as in the examples above).
 | `Path` | Network interface to bind (repeatable) | Default interface |
 | `BackupPath` | Client only (`backup_paths` in JSON, or pass `--backup-path`). Like `Path`, for a backup path: with `Scheduler = failover` it carries traffic only while no `Path` works. With no `BackupPath`, every path after the first is a backup. See [Failover](./multipath#failover). | none |
 | `InitMaxPathId` | Initial number of path IDs the connection may use over its lifetime (IDs 0–N; each new path, including a re-added one, uses a fresh ID; the server grants more as needed, up to 128). `1`–`128`; unset or `0` uses `8` | `0` |
+| `Bbr2FastConvergence` | With `CC = bbr2`, enables xquic's BBRv2 fast-convergence extension, which lets the bandwidth estimate drop sooner when the round-trip time rises by more than a quarter from one round trip to the next, and probes for more bandwidth every 5 to 8 round trips instead of every 2 to 3 seconds. `false` gives standard BBRv2 behaviour. Ignored for other `CC` values. | `true` |
+| `Bbr2RttvarCompensation` | With `CC = bbr2`, enables xquic's BBRv2 extension that allows more data in flight (sent but not yet acknowledged) when the round-trip time varies. `false` gives the standard BBRv2 limit on data in flight. Ignored for other `CC` values. | `true` |
 | `Reinjection` | Speculative duplication mode (`off`, `deadline`, or `idle`). `dgram` is no longer supported; a config file that sets it gets a warning and runs with `off`. Use redundant mode (`Redundant = true`) to duplicate packets. | `off` |
 | `ReinjectionSrttFactorPct` | `deadline` mode: duplicate unacked packets older than factor × min_srtt, in percent (`100`–`1000`) | `110` |
 | `ReinjectionHardDeadlineMs` | `deadline` mode: upper clamp on the duplication deadline (`1`–`60000`) | `500` |
@@ -369,6 +389,13 @@ the cap is hit, both differ.
 | Binding resource | RAM — worst case `TcpMaxFlows` × 0.75 MiB (≈ 192 MiB at the default 256, ≈ 3.0 GiB at 4096) | the **fd budget** — `TcpMaxGlobalFlows` is checked first, but size the RAM too: worst case `TcpMaxGlobalFlows` × 32 KiB (≈ 128 MiB at 4096) once every admitted flow has paused once in each direction |
 | Clamped | to **half** the lwIP TCP pcb pool (below) | not clamped (no lwIP involved) |
 
+**When a receiver stops reading:** if the application on the client side, or the
+destination on the server side, stops reading a TCP connection, mqvpn stops the sender.
+Until then the receiving side can hold up to about 16 MiB of unread data for that
+connection, on top of the figures in the table. Worst case, if every connection stalls
+this way: the number of connections × 16 MiB. A client with
+[`RecvRateLimit`](#advanced) holds about 16 MiB in total plus 68 KiB per connection instead.
+
 **Client-side clamp:** the honored value is capped at half the lwIP TCP pcb pool —
 `4096` on desktop/router builds (Linux, Windows, macOS), `256` on Android, `64`
 with the [iOS lwIP profile](./hybrid-mode#ios-builds).
@@ -388,7 +415,7 @@ In JSON, the section is a `"hybrid"` object with snake_case keys (`enabled`, `tc
 
 | Key | Description | Default |
 |-----|-------------|---------|
-| `RecvRateLimit` | Conn-level receive-rate cap in bytes/sec; bounds the aggregate QUIC receive window to `rate x RTT`. Client-side only — the server ignores it (a server-side cap would throttle client upload). Maximum `10000000000` (10 GB/s); larger values are rejected with a warning and the key falls back to `0`. Leave `0` unless memory-constrained (mobile clients set this internally) | `0` (off) |
+| `RecvRateLimit` | Limits how much received data the client keeps in memory, given as a rate in bytes/sec. It is meant for memory-constrained devices (mobile clients set it internally); leave `0` otherwise. It affects only TCP connections carried in [hybrid mode](./hybrid-mode); other tunnel traffic is not slowed. Each of those TCP connections gets roughly a quarter of this rate, so a single download is slower than the rate, while several together can use all of it. In return, up to three connections whose application stops reading do not block the others. With more, every TCP connection in hybrid mode can stall until the stalled ones are closed or time out (`TcpIdleTimeoutSec`). Client-side only — the server ignores it (a server-side cap would throttle client upload). Maximum `10000000000` (10 GB/s); larger values are rejected with a warning and the key falls back to `0` | `0` (off) |
 | `UdpGso` | Batches UDP sends with kernel GSO for lower CPU use at high throughput. Automatically falls back to regular batched sends on kernels without support (< 4.18). Linux and Android only; no effect elsewhere. Set to `false` to restore the previous per-packet send path | `true` |
 | `UdpGro` | Lets the kernel hand over received packets in batches, lowering CPU use at high throughput. Automatically falls back to one-at-a-time receives on kernels without support (< 5.0). Linux only; no effect elsewhere. Set to `false` to restore the previous receive path | `true` |
 | `TunOffload` | Lets the kernel hand large batches of traffic to the tunnel interface in one read; mqvpn splits them, lowering CPU use at high throughput. Automatically falls back to one packet per read when the kernel does not support it. Linux only; no effect elsewhere. Set to `false` to restore the previous tunnel interface | `true` |
@@ -448,6 +475,8 @@ PathMTU                    1500 bytes
 ```
 
 A packet at the upper limit never carries an ACK frame. Below it, mqvpn also leaves 16 bytes of room for one, so `PathMTU = 1492` gives 1412-byte packets and a TUN MTU of 1394. The QUIC library caps packets at 1436 bytes, so values above 1500 give the same result. If `PathMTU` is larger than what the network really carries, full-size packets get fragmented or dropped, so only set it when you know the path.
+
+A value below 1500 is also sent to the other end as the largest packet this end receives, and the other end keeps its packets within it. One server with `PathMTU = 1500` can then serve clients on smaller paths: each client sets its own `PathMTU`, and gets packets sized for it.
 
 When an explicit `MTU` exceeds the available inner packet size, the client warns and limits it. The server also warns, but keeps the configured TUN MTU; oversized tunnel packets may be dropped.
 
@@ -569,7 +598,7 @@ All commands return a JSON response with an `"ok"` field. Each connection handle
 
 ## systemd
 
-If you installed via the deb package or install.sh, the systemd units are already in place. For source builds, install manually:
+If you installed the debs or used install.sh, the systemd units are already in place: the `mqvpn` deb has the client unit, and the `mqvpn-server` deb has the server unit. For source builds, install manually:
 
 ```bash
 sudo cmake --install build --prefix /usr/local
@@ -577,7 +606,18 @@ sudo cmake --install build --prefix /usr/local
 
 ### Server
 
-If you used install.sh, `/etc/mqvpn/server.conf` is already generated. To configure manually, copy the example:
+If the `mqvpn-server` deb reported that setup failed, it created no `server.conf` and did not start the server. Fix the error that the install showed, then run `sudo dpkg-reconfigure mqvpn-server`. It uses the answers from the install, such as the port, but it does not keep settings that you gave as environment variables: give them again, for example `sudo env MQVPN_SUBNET=10.8.0.0/24 dpkg-reconfigure mqvpn-server`. If it reports no error, run `sudo systemctl enable --now mqvpn-server`, or `sudo systemctl start mqvpn-server` if the server must not start at boot.
+
+If you installed the `mqvpn-server` deb or used install.sh, `/etc/mqvpn/server.conf` is already generated and contains the auth key that your clients use. Do not replace it with the example: edit it, then restart the server so that the changes take effect:
+
+```bash
+sudo vi /etc/mqvpn/server.conf
+sudo systemctl restart mqvpn-server
+```
+
+If the server does not start at boot (for example, you turned off autostart during the install), run `sudo systemctl enable mqvpn-server`.
+
+If there is no `server.conf` (for example, after a source build), copy the example:
 
 ```bash
 sudo cp /etc/mqvpn/server.conf.example /etc/mqvpn/server.conf

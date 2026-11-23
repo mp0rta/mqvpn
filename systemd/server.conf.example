@@ -7,7 +7,8 @@ Subnet = 10.0.0.0/24
 # Subnet6 = fd00:abcd::/112
 TunName = mqvpn0
 LogLevel = info
-# MTU = 1280                   # TUN MTU (1280–9000, default: auto = ~1382)
+# TUN MTU (1280–9000, default: auto = ~1382)
+# MTU = 1280
 
 [TLS]
 Cert = /etc/mqvpn/server.crt
@@ -21,7 +22,8 @@ MaxClients = 64
 [Multipath]
 # Scheduler: wlb (weighted load balancing) or minrtt (lowest RTT)
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+# Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2
 
 # [Control]
 # Local-only TCP control/admin API (add/remove users, query stats).

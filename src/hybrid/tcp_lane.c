@@ -511,7 +511,10 @@ mqvpn_tcp_lane_tick(mqvpn_tcp_lane_t *lane, uint64_t now_us)
                  * notify — if the flow's own sndbuf is already empty (no
                  * more ACKs coming) AND xquic's per-stream flow-control
                  * window has filled (we stopped consuming recv_body, so
-                 * those notifies stopped too), NEITHER driver ever fires
+                 * those notifies stopped too; the window fills because
+                 * max_body_buf_per_stream, set from
+                 * MQVPN_STREAM_BODY_BUF_BYTES, makes the H3 layer stop
+                 * reading the stream), NEITHER driver ever fires
                  * again and the flow would stall holding its stash until
                  * idle eviction (or forever with tcp_idle_timeout_sec == 0).
                  * This 1 Hz sweep is the guaranteed third retry driver —
@@ -839,7 +842,11 @@ tcp_lane_downlink_pump_status(mqvpn_tcp_lane_t *lane, void *stream)
              * can't force it open; wait for the next lwIP sent-notify. Not
              * data loss: xquic's own per-stream flow control backpressures
              * the server the same way the uplink's EAGAIN path does in the
-             * other direction. A FIN cannot be lost across the pause,
+             * other direction. That holds because
+             * max_body_buf_per_stream (MQVPN_STREAM_BODY_BUF_BYTES) caps
+             * what the H3 layer reads ahead; without the cap it would keep
+             * reading and the window would never fill.
+             * A FIN cannot be lost across the pause,
              * in either shape: (a) fin still UNREAD in xquic's buffer at
              * pause time — the resumed drain simply reaches it on a later
              * recv call; (b) fin already READ, arriving ON the very chunk
@@ -849,7 +856,7 @@ tcp_lane_downlink_pump_status(mqvpn_tcp_lane_t *lane, void *stream)
              * re-report at the resumed drain (MQVPN_TCP_LANE_H3_RECV_*
              * contract in tcp_lane.h: xquic re-reports *fin=1 on every
              * call once the transport FIN arrived,
-             * xqc_h3_request.c:795-801). */
+             * xqc_h3_request_recv_body() in xqc_h3_request.c). */
             return TCP_LANE_FLOW_LIVE;
         }
         /* Stash flushed — fall through to resume draining recv_body below,
@@ -981,17 +988,19 @@ tcp_lane_silent_abort_pcb(mqvpn_tcp_flow_t *f)
 static void
 tcp_lane_close_h3(mqvpn_tcp_flow_t *f)
 {
-    if (f->h3_request) {
-        cli_tcp_lane_h3_close(f->h3_request);
-        f->h3_request = NULL;
-        flow_set_stream(f->lane, f, NULL);
-    }
+    void *req = f->h3_request;
+    if (!req) return;
+    /* Unbind first: xquic can run the close notify inside the close call,
+     * and that notify must not find (and free) this flow. */
+    f->h3_request = NULL;
+    flow_set_stream(f->lane, f, NULL);
+    cli_tcp_lane_h3_close(req);
 }
 
 /* The one locally-initiated "kill this flow" sequence:
  * (1) RST the H3 request (close_h3=1) or just forget the pointers without
- * closing (close_h3=0 — the caller already closed it, or
- * never created one); (2) detach + tcp_abort the pcb; (3) unlink + free the
+ * closing (close_h3=0 — xquic or the caller closes it, or there is
+ * none); (2) detach + tcp_abort the pcb; (3) unlink + free the
  * flow. Used by on_relay_error, abort_pending, on_h3_closing, and
  * on_stream_rejected — see each call site's comment for which close_h3
  * value applies and why.
@@ -1282,10 +1291,9 @@ mqvpn_tcp_lane_abort_pending(void *flow_handle)
     /* Never close H3 here. cli_tcp_lane_open_stream (the
      * only caller) either never created a request yet (no live H3 conn /
      * stream calloc failure / xqc_h3_request_create failure — all three
-     * pre-bind) or already closed the just-created one itself on the
-     * send-headers-failure path (post-bind) — closing it again here would
-     * double-close. Just forget the pointers (they may point at a request
-     * already mid-close) and tear the pcb + flow down.
+     * pre-bind) or closes the just-created one itself right after this call
+     * on the send-headers-failure path (post-bind). Just forget the pointers
+     * and tear the pcb + flow down.
      *
      * Return 1 iff the pcb was tcp_abort()ed: this whole chain runs inside
      * lwIP's accept callback frame (accept -> cli_tcp_lane_open_stream ->

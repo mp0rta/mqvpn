@@ -39,7 +39,8 @@ typedef struct ctrl_socket_s ctrl_socket_t;
  * time through this getter instead of borrowing pointers. rx_ctx is
  * opaque; fn may be NULL (reported as 0). No synchronization: the getter
  * runs on the same libevent loop as the RX path. */
-typedef void (*ctrl_rx_stats_fn)(void *rx_ctx, uint64_t *receives, uint64_t *datagrams);
+typedef void (*ctrl_rx_stats_fn)(void *rx_ctx, uint64_t *receives, uint64_t *datagrams,
+                                 uint64_t *queue_drops);
 
 /* addr defaults to "127.0.0.1" when NULL.
  *

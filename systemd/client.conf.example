@@ -13,14 +13,21 @@ Key = <YOUR_PSK_HERE>
 TunName = mqvpn0
 DNS = 1.1.1.1, 8.8.8.8
 LogLevel = info
-# MTU = 1280                   # TUN MTU (1280–9000, default: auto = ~1382)
-# KillSwitch = false             # also stops interface-bound apps (e.g. Tailscale on Windows) from bypassing the tunnel
-# ManageRoutes = true            # set to false on router/embedded integrations to keep host routes untouched
+# TUN MTU (1280–9000, default: auto = ~1382)
+# MTU = 1280
+# also stops interface-bound apps (e.g. Tailscale on Windows) from bypassing the tunnel
+# KillSwitch = false
+# set to false on router/embedded integrations to keep host routes untouched
+# ManageRoutes = true
 # Reconnect = true
 # ReconnectInterval = 5
 
 [Multipath]
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+# Override the server's scheduler with Scheduler above for this client's downloads
+# (needs AllowClientScheduler = true on the server):
+# RequestServerScheduler = true
+# Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2
 # Path = eth0
 # Path = wlan0
