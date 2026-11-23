@@ -125,9 +125,8 @@ internal class Session(
      * learns that backpressure is over.
      */
     fun interest(): IntArray? = tunnel?.getInterest()?.let {
-        if (it.tunReadable) bridge?.onTunReadable()
         val wait = statsSampler.capWait(it.nextTimerMs, SystemClock.elapsedRealtime())
-        intArrayOf(wait, if (it.tunReadable) 1 else 0, if (it.isIdle) 1 else 0)
+        pollerInterest(it, wait) { bridge?.onTunReadable() }
     }
 
     fun handleBadFd(handle: Long) {
@@ -254,4 +253,10 @@ internal class StatsSampler(private val intervalMs: Long) {
 
     fun capWait(waitMs: Int, nowMs: Long): Int =
         if (!due) waitMs else minOf(waitMs.toLong(), (lastMs + intervalMs - nowMs).coerceAtLeast(1)).toInt()
+}
+
+/** What the poller gets for [interest]; tun_readable also ends the bridge's backpressure wait. */
+internal fun pollerInterest(interest: MqvpnTunnel.Interest, wait: Int, onTunReadable: () -> Unit): IntArray {
+    if (interest.tunReadable) onTunReadable()
+    return intArrayOf(wait, if (interest.tunReadable) 1 else 0, if (interest.isIdle) 1 else 0)
 }
