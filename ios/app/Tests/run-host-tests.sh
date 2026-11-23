@@ -25,6 +25,7 @@ swiftc -framework Security -import-objc-header "$DIR/../../../include/libmqvpn.h
     "$SHARED/TeardownSequence.swift" \
     "$SHARED/SystemTrust.swift" \
     "$SHARED/PathReadSource.swift" \
+    "$SHARED/TunBacklog.swift" \
     "$APP/ControllerCore.swift" \
     "$APP/EventLog.swift" \
     "$APP/BandwidthHistory.swift" \
