@@ -124,6 +124,9 @@ struct cli_conn_s {
     xqc_h3_request_t *masque_request;
     uint64_t masque_stream_id;
     int tunnel_ok;
+    /* xquic refused a datagram: stop reading the TUN until this connection's
+     * write notify (a later connection never gets one for it) */
+    int backpressure;
     int tunnel_notified; /* one-shot: a tunnel_closed already fired for this conn */
     mqvpn_error_t notified_reason; /* the reason it fired with */
     int addr_assigned;
@@ -225,7 +228,6 @@ struct mqvpn_client_s {
     uint8_t assigned_prefix6;
     int has_v6;
     int tun_active;
-    int backpressure;
     int last_notified_mtu;
 
     /* Stats */
@@ -2484,8 +2486,8 @@ cb_dgram_write(xqc_h3_conn_t *h3_conn, void *user_data)
     if (!conn) return;
     mqvpn_client_t *c = conn->client;
 
-    if (c->backpressure) {
-        c->backpressure = 0;
+    if (conn->backpressure) {
+        conn->backpressure = 0;
         if (c->cbs.ready_for_tun) c->cbs.ready_for_tun(c->user_ctx);
     }
 }
@@ -4094,7 +4096,7 @@ tun_send_redundant(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *frame, si
         return 1;
     }
     if (eagain) {
-        c->backpressure = 1; /* as the ordinary send: this packet is dropped */
+        conn->backpressure = 1; /* as the ordinary send: this packet is dropped */
         return -1;
     }
     return 0;
@@ -4156,7 +4158,7 @@ tun_send_datagram(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_
          * which is exactly why counting it would inflate dgram_sent with
          * packets that never went out. Matches the server TX tail
          * (mqvpn_server.c), which counts on XQC_OK only. */
-        c->backpressure = 1;
+        conn->backpressure = 1;
         return MQVPN_ERR_AGAIN;
     }
     if (xret < 0) {
@@ -4185,7 +4187,7 @@ mqvpn_client_on_tun_packet(mqvpn_client_t *c, const uint8_t *pkt, size_t len)
 
     cli_conn_t *conn = c->conn;
     if (!conn || !conn->tunnel_ok) return MQVPN_ERR_INVALID_ARG;
-    if (c->backpressure) return MQVPN_ERR_AGAIN;
+    if (conn->backpressure) return MQVPN_ERR_AGAIN;
 
     uint8_t ip_ver = pkt[0] >> 4;
     /* Kept inline, NOT in tun_validate_src: this is the one validation
@@ -4688,7 +4690,7 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
 #endif
 
     out->next_timer_ms = ms > 0 ? ms : 1;
-    out->tun_readable = (c->tun_active && !c->backpressure) ? 1 : 0;
+    out->tun_readable = (c->tun_active && !(c->conn && c->conn->backpressure)) ? 1 : 0;
     out->is_idle = (c->state != MQVPN_STATE_ESTABLISHED) ? 1 : 0;
     return MQVPN_OK;
 }
