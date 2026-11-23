@@ -121,7 +121,9 @@ BackupPath = wwan0
 - ダウンロード方向はサーバーのスケジューラに従います。サーバーで
   `Scheduler = failover` を設定するか、サーバーで
   `AllowClientScheduler = true`、クライアントで
-  `RequestServerScheduler = true` を設定してください。
+  `RequestServerScheduler = true` を設定してください。サーバーの
+  `Scheduler` が `backup_fec` の場合、クライアントの要求は適用されず、
+  ダウンロードは `backup_fec` のままです。
 - リンクが上がったまますべてのパケットを失うプライマリは、数回の
   プローブタイムアウトで検出されます（10 ms のパスでは通常 1 秒未満）。
 

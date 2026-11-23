@@ -123,7 +123,9 @@ BackupPath = wwan0
   returns carries the traffic again.
 - The download direction follows the server's scheduler: set
   `Scheduler = failover` on the server, or `AllowClientScheduler = true` on
-  the server and `RequestServerScheduler = true` on the client.
+  the server and `RequestServerScheduler = true` on the client. A server with
+  `Scheduler = backup_fec` does not apply the client's request, so downloads
+  keep `backup_fec`.
 - A primary that loses every packet while its link stays up is detected after
   a few probe timeouts, typically well under a second on a 10 ms path.
 
