@@ -1049,7 +1049,12 @@ MQVPN_API int mqvpn_client_set_tun_active(mqvpn_client_t *client, int active, in
  * a consumer that ticks on a coarse timer adds up to one tick period of
  * latency to every packet accepted here. (Before the deferred flush every
  * call flushed synchronously, so this obligation is new as of UdpGso
- * batching — same contract as mqvpn_server_on_egress_fd_ready.) */
+ * batching — same contract as mqvpn_server_on_egress_fd_ready.)
+ *
+ * MQVPN_ERR_AGAIN is backpressure: the packet is dropped, not queued, and
+ * the client keeps refusing packets with MQVPN_ERR_AGAIN until it can send
+ * again — ready_for_tun fires (when set) and mqvpn_client_get_interest()
+ * reports tun_readable. Stop reading the TUN until then. */
 MQVPN_API int mqvpn_client_on_tun_packet(mqvpn_client_t *client, const uint8_t *pkt,
                                          size_t len);
 
