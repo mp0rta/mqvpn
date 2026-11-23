@@ -18,6 +18,7 @@ import com.mqvpn.sdk.runtime.MqvpnExecutor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import java.io.FileInputStream
 import java.net.InetAddress
 
 /**
@@ -196,8 +197,8 @@ internal class Session(
         tunPfd?.close()
         tunPfd = pfd
 
-        bridge = TunnelBridge(executor, t).also {
-            it.startTunReader(pfd, mtu, scope)
+        bridge = TunnelBridge(executor, t::onTunPacket).also {
+            it.startTunReader(FileInputStream(pfd.fileDescriptor), mtu, scope)
             it.startSender(scope)
         }
 

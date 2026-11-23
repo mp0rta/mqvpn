@@ -3,7 +3,6 @@
 
 package com.mqvpn.sdk.core
 
-import android.os.ParcelFileDescriptor
 import android.system.Os
 import android.system.OsConstants
 import android.util.Log
@@ -14,8 +13,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.io.FileDescriptor
-import java.io.FileInputStream
+import java.io.InputStream
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -31,7 +29,7 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 internal class TunnelBridge(
     private val executor: MqvpnExecutor,
-    private val tunnel: MqvpnTunnel,
+    private val onTunPacket: (ByteArray, Int, Int) -> Int, // MqvpnTunnel.onTunPacket
 ) {
     private val framePool = ConcurrentLinkedQueue<ByteArray>()
     private val poolSize = AtomicInteger(0)
@@ -40,14 +38,13 @@ internal class TunnelBridge(
     private var readerJob: Job? = null
     private var senderJob: Job? = null
 
-    fun startTunReader(tunPfd: ParcelFileDescriptor, mtu: Int, scope: CoroutineScope) {
-        val fis = FileInputStream(tunPfd.fileDescriptor)
+    fun startTunReader(tun: InputStream, mtu: Int, scope: CoroutineScope) {
         readerJob = scope.launch(Dispatchers.IO) {
             val bufSize = mtu + 4 // TUN header overhead
             try {
                 while (isActive) {
                     val frame = acquireFrame(bufSize)
-                    val n = fis.read(frame)
+                    val n = tun.read(frame)
                     if (n <= 0) break
                     frameChannel.send(Pair(frame, n))
                 }
@@ -82,7 +79,7 @@ internal class TunnelBridge(
                     executor.enqueue {
                         for (i in frames.indices) {
                             val (frame, len) = frames[i]
-                            val rc = tunnel.onTunPacket(frame, 0, len)
+                            val rc = onTunPacket(frame, 0, len)
                             releaseFrame(frame)
                             if (rc == MqvpnTunnel.ERR_AGAIN) {
                                 // Backpressure: release ALL remaining frames before stop
@@ -99,6 +96,9 @@ internal class TunnelBridge(
             }
         }
     }
+
+    /** Engine thread: the poller's interest reported tun_readable. */
+    fun onTunReadable() {}
 
     fun stop() {
         readerJob?.cancel()
