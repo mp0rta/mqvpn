@@ -1053,8 +1053,8 @@ MQVPN_API int mqvpn_client_set_tun_active(mqvpn_client_t *client, int active, in
  *
  * MQVPN_ERR_AGAIN is backpressure: the packet is dropped, not queued, and
  * the client keeps refusing packets with MQVPN_ERR_AGAIN until it can send
- * again — ready_for_tun fires (when set) and mqvpn_client_get_interest()
- * reports tun_readable. Stop reading the TUN until then. */
+ * again. Stop reading the TUN until mqvpn_client_get_interest() reports
+ * tun_readable; ready_for_tun (when set) is only a hint that it changed. */
 MQVPN_API int mqvpn_client_on_tun_packet(mqvpn_client_t *client, const uint8_t *pkt,
                                          size_t len);
 
