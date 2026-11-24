@@ -296,12 +296,14 @@ path_socket_open(platform_ctx_t *p, sa_family_t af, int *step)
  * re-add sibling). The "path_mgr:" lines keep the label of the module these
  * slots replaced: log wording is a compatibility surface. */
 int
-platform_paths_open(platform_ctx_t *p, int n_ifaces, const char *const *ifaces)
+platform_paths_open(platform_ctx_t *p, int n_ifaces, const char *const *ifaces,
+                    const int *backup)
 {
     int want = n_ifaces > 0 ? n_ifaces : 1;
     for (int i = 0; i < want; i++) {
         const char *iface = n_ifaces > 0 ? ifaces[i] : NULL;
         platform_path_t *s = platform_path_append(p, iface);
+        if (s) s->backup = n_ifaces > 0 && backup && backup[i];
         if (!s) {
             LOG_ERR("path_mgr: max paths (%d) reached", MQVPN_MAX_PATHS);
         } else {

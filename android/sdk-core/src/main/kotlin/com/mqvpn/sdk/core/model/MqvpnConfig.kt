@@ -95,6 +95,9 @@ data class MqvpnConfig(
         WLB(1),
         BACKUP_FEC(2),
         WLB_UDP_PIN(3),
+
+        /** One path carries the traffic; cellular paths are backups, used only while no other path works. */
+        FAILOVER(4),
     }
 
     @Serializable

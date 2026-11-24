@@ -58,6 +58,7 @@ func runPureCases() -> Int {
             check(SplitSettings(providerConfiguration: ["scheduler": NSNumber(value: raw)]).scheduler == nil, "scheduler \(raw) rejected")
         }
         check(SplitSettings(providerConfiguration: ["scheduler": NSNumber(value: 0)]).scheduler == .minrtt, "scheduler minrtt read")
+        check(SplitSettings(providerConfiguration: ["scheduler": NSNumber(value: 4)]).scheduler == .failover, "scheduler failover read")
         var merged: [String: Any] = [:]
         for section: ProviderConfigSection in [ProtectionSettings(killSwitch: true), PathPolicy(wifi: false, cellular: true)] {
             section.merged(into: &merged)
@@ -74,15 +75,18 @@ func runPureCases() -> Int {
         check(ch(.minrtt, false) == .lowLatency, "choice minrtt")
         check(ch(nil, false) == .throughput, "choice nil")
         check(ch(.wlb, true) == .redundant && ch(.minrtt, true) == .redundant && ch(nil, true) == .redundant, "choice redundant")
+        check(ch(.failover, false) == .backup, "choice failover")
         // write matrix; ports kept
         let base = SplitSettings(scheduler: nil, redundantEnabled: false, redundantPorts: [4200], redundantPortsMalformed: false)
         let t1 = base.tapped(.throughput), t2 = base.tapped(.lowLatency), t3 = base.tapped(.redundant)
+        let t4 = base.tapped(.backup)
+        check(t4.scheduler == .failover && !t4.redundantEnabled, "tap backup")
         check(t1.scheduler == .wlb && !t1.redundantEnabled, "tap throughput")
         check(t2.scheduler == .minrtt && !t2.redundantEnabled, "tap lowLatency")
         check(t3.scheduler == .minrtt && t3.redundantEnabled, "tap redundant")
         check(t1.redundantPorts == [4200] && t2.redundantPorts == [4200] && t3.redundantPorts == [4200], "tap keeps ports")
         // round trip
-        for s in [base, t1, t2, t3] {
+        for s in [base, t1, t2, t3, t4] {
             var m: [String: Any] = [:]
             s.merged(into: &m)
             check(SplitSettings(providerConfiguration: m) == s, "split round-trip")

@@ -64,6 +64,7 @@ typedef struct mqvpn_file_config_s {
 
     /* [Multipath] */
     char paths[MQVPN_CONFIG_MAX_PATHS][32];
+    int path_backup[MQVPN_CONFIG_MAX_PATHS]; /* 1 = BackupPath / backup_paths */
     int n_paths;
     char scheduler[16];
     int allow_client_scheduler;   /* server */

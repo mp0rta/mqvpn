@@ -8,6 +8,7 @@ import android.os.SystemClock
 import android.util.Log
 import com.mqvpn.sdk.core.internal.PathManager
 import com.mqvpn.sdk.core.internal.SessionStateMachine
+import com.mqvpn.sdk.core.internal.isBackupPath
 import com.mqvpn.sdk.core.internal.TunnelCallbacks
 import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.MqvpnError
@@ -83,6 +84,7 @@ internal class Session(
                     Log.e(TAG, "ending the session: $reason")
                     service.stopSession(this)
                 },
+                isBackup = { path -> isBackupPath(config.scheduler, path) },
             )
             pathManager = pm
             // a refused network request throws here

@@ -32,7 +32,7 @@ data class DemoSettings(
     val autoReconnect: Boolean = true,
     val scheduler: String = SchedulerChoice.DEFAULT.name,
 ) {
-    enum class SchedulerChoice { DEFAULT, MIN_RTT, WLB }
+    enum class SchedulerChoice { DEFAULT, MIN_RTT, WLB, FAILOVER }
 
     fun schedulerChoice(): SchedulerChoice =
         SchedulerChoice.entries.firstOrNull { it.name == scheduler } ?: SchedulerChoice.DEFAULT
@@ -100,6 +100,7 @@ data class DemoSettings(
             reconnect = autoReconnect,
             scheduler = when (schedulerChoice()) {
                 SchedulerChoice.WLB -> MqvpnConfig.Scheduler.WLB
+                SchedulerChoice.FAILOVER -> MqvpnConfig.Scheduler.FAILOVER
                 else -> MqvpnConfig.Scheduler.MIN_RTT
             },
             requestServerScheduler = schedulerChoice() != SchedulerChoice.DEFAULT,
@@ -135,13 +136,14 @@ data class DemoSettings(
     }
 }
 
-/** The three desktop-style "how to split traffic" choices. */
-enum class SplitChoice { THROUGHPUT, LOW_LATENCY, REDUNDANT }
+/** The desktop-style "how to split traffic" choices, plus BACKUP (failover). */
+enum class SplitChoice { THROUGHPUT, LOW_LATENCY, REDUNDANT, BACKUP }
 
 /** DEFAULT is shown as LOW_LATENCY (its real conversion is MIN_RTT without a server request). */
 fun DemoSettings.splitChoice(): SplitChoice = when {
     redundantEnabled -> SplitChoice.REDUNDANT
     schedulerChoice() == DemoSettings.SchedulerChoice.WLB -> SplitChoice.THROUGHPUT
+    schedulerChoice() == DemoSettings.SchedulerChoice.FAILOVER -> SplitChoice.BACKUP
     else -> SplitChoice.LOW_LATENCY
 }
 
@@ -149,4 +151,5 @@ fun DemoSettings.applySplitChoice(c: SplitChoice): DemoSettings = when (c) {
     SplitChoice.THROUGHPUT -> copy(scheduler = DemoSettings.SchedulerChoice.WLB.name, redundantEnabled = false)
     SplitChoice.LOW_LATENCY -> copy(scheduler = DemoSettings.SchedulerChoice.MIN_RTT.name, redundantEnabled = false)
     SplitChoice.REDUNDANT -> copy(scheduler = DemoSettings.SchedulerChoice.MIN_RTT.name, redundantEnabled = true)
+    SplitChoice.BACKUP -> copy(scheduler = DemoSettings.SchedulerChoice.FAILOVER.name, redundantEnabled = false)
 }

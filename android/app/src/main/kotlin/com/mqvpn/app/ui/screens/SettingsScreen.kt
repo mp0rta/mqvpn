@@ -266,6 +266,7 @@ private val SPLIT_OPTIONS = listOf(
         SplitChoice.REDUNDANT, "Redundant",
         "— sends UDP uploads on every connection at once, for streams that tolerate duplicates (SRT, RIST, RTP); uses more data",
     ),
+    Triple(SplitChoice.BACKUP, "Backup", "— one connection at a time; cellular only while Wi-Fi or Ethernet is down"),
 )
 
 @Composable

@@ -24,9 +24,9 @@ enum TransportKind: String, CaseIterable, Codable {
     case wifi, cellular
 }
 
-enum SplitChoice: Equatable { case throughput, lowLatency, redundant }
+enum SplitChoice: Equatable { case throughput, lowLatency, redundant, backup }
 
-/// Traffic-split settings. `scheduler` is minrtt or wlb; nil = key absent
+/// Traffic-split settings. `scheduler` is minrtt, wlb or failover; nil = key absent
 /// (legacy), which reads as throughput and is never written back until the
 /// user taps a choice.
 struct SplitSettings: Equatable, ProviderConfigSection {
@@ -54,7 +54,8 @@ struct SplitSettings: Equatable, ProviderConfigSection {
     init(providerConfiguration dict: [String: Any]?) {
         var sched: Scheduler?
         if let n = dict?[Key.scheduler] as? NSNumber, let v = ReorderSettings.exactInt(n),
-           let s = Int32(exactly: v).flatMap(Scheduler.init(rawValue:)), s == .minrtt || s == .wlb {
+           let s = Int32(exactly: v).flatMap(Scheduler.init(rawValue:)),
+           s == .minrtt || s == .wlb || s == .failover {
             sched = s
         }
         var enabled = false
@@ -76,6 +77,7 @@ struct SplitSettings: Equatable, ProviderConfigSection {
 
     var choice: SplitChoice {
         if redundantEnabled { return .redundant }
+        if scheduler == .failover { return .backup }
         return scheduler == .minrtt ? .lowLatency : .throughput
     }
 
@@ -85,6 +87,7 @@ struct SplitSettings: Equatable, ProviderConfigSection {
         case .throughput: s.scheduler = .wlb; s.redundantEnabled = false
         case .lowLatency: s.scheduler = .minrtt; s.redundantEnabled = false
         case .redundant: s.scheduler = .minrtt; s.redundantEnabled = true
+        case .backup: s.scheduler = .failover; s.redundantEnabled = false
         }
         return s
     }

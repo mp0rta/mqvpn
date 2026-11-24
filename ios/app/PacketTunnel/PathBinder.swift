@@ -194,6 +194,10 @@ final class PathBinder {
             _ = getsockname(fd, la.baseAddress!.assumingMemoryBound(to: sockaddr.self), &lalen)
         }
         desc.local_addr_len = UInt32(lalen)
+        // Failover: cellular carries traffic only while Wi-Fi does not.
+        if type == .cellular && engine.cellularIsBackup {
+            desc.flags |= 1   // MQVPN_PATH_FLAG_BACKUP
+        }
         // 6. register with the engine (we are on the tick thread already):
         //    the fd is wrapped in the bundled bind and handed to the library
         let (handle, outcome) = engine.addPath(fd, desc: &desc)
