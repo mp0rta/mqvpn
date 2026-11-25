@@ -1283,6 +1283,18 @@ if(BUILD_TESTING)
     set_target_properties(test_clock PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_clock COMMAND test_clock)
 
+    # When the paths of a multipath client come up: a client and a server in
+    # one process, on in-memory links and a virtual clock (no sockets).
+    add_executable(test_path_activation tests/test_path_activation.c)
+    target_link_libraries(test_path_activation mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
+    target_include_directories(test_path_activation PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
+    target_compile_definitions(test_path_activation PRIVATE
+        TEST_CERT_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.crt"
+        TEST_KEY_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.key"
+    )
+    set_target_properties(test_path_activation PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_path_activation COMMAND test_path_activation)
+
     # Duplicate CONNECT-IP regression: drives a raw xquic H3 client through a
     # real handshake, then sends a second connect-ip request on the same H3
     # connection, to prove the server rejects it (409) instead of leaking a

@@ -522,9 +522,8 @@ recovery_rollback(platform_win_ctx_t *p, platform_path_t *s,
         return;
     }
 
-    /* Transient failure (most commonly -XQC_EMP_NO_AVAIL_PATH_ID during
-     * WiFi reassoc CID-lag burst). Bump the consecutive-failure counter so
-     * the 3s recovery timer eventually gives up and waits for reconnect. */
+    /* Transient failure. Bump the consecutive-failure counter so the 3s
+     * recovery timer eventually gives up and waits for reconnect. */
     s->recover_failures++;
     if (s->recover_failures >= PATH_RECOVER_FAILURE_LIMIT) {
         LOG_WRN("netmon: path %s recovery abandoned after %d consecutive "
@@ -642,8 +641,8 @@ try_readd_removed_path(platform_win_ctx_t *p, const char *ifname)
  * Spec sec 3.4 "Stateless Platforms" compliance: this holds NO lifecycle
  * state of its own — it queries the library via mqvpn_client_get_paths()
  * each call and acts on the public MQVPN_PATH_* status. A slot's recover_failures
- * is pure backpressure to bound the busy-loop on transient xquic errors
- * during a WiFi reassoc CID-lag burst — not a state mirror. */
+ * is pure backpressure to bound the busy-loop on transient xquic errors —
+ * not a state mirror. */
 static void
 reconcile_all(platform_win_ctx_t *p)
 {

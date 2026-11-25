@@ -49,8 +49,8 @@ typedef struct platform_path {
     void *bind_ctx;             /* current transport ctx; NULL once finalised */
     /* Consecutive re-add failures. Pure backpressure, NOT a state mirror —
      * lifecycle state is queried via mqvpn_client_get_paths(). Bounds the
-     * busy-loop on transient xquic errors (e.g. -XQC_EMP_NO_AVAIL_PATH_ID
-     * during WiFi reassoc CID lag). Reset on success or Level-2 reconnect. */
+     * busy-loop on transient xquic errors. Reset on success or Level-2
+     * reconnect. */
     int recover_failures;
     int route_gate_blocked; /* consecutive route-gate blocks, warn debounce */
 } platform_path_t;

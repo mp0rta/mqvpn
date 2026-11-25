@@ -312,15 +312,18 @@ MQVPN_API const char *mqvpn_path_status_string(mqvpn_path_status_t status);
  *                     created; PATH_CHALLENGE validation will complete async
  *                     and the slot will land in ACTIVE/STANDBY when xquic
  *                     reports XQC_PATH_STATE_ACTIVE), OR multipath wasn't
- *                     ready yet and activation will fire from
- *                     cb_ready_to_create_path when handshake completes.
- *                     In both cases the caller keeps the transport (the ctx
+ *                     ready yet, or xquic had no path ID for a new path yet
+ *                     (-XQC_EMP_NO_AVAIL_PATH_ID: the server has not yet
+ *                     acknowledged our CIDs for the next path ID, or granted
+ *                     more path IDs), and activation will fire from
+ *                     cb_ready_to_create_path once xquic has one.
+ *                     In every case the caller keeps the transport (the ctx
  *                     stays installed; the library releases it via
  *                     mqvpn_client_on_platform_path_released() or destroy()).
  *
- *   TRANSIENT_FAIL  — xqc_conn_create_path returned a recoverable error
- *                     (e.g. -XQC_EMP_NO_AVAIL_PATH_ID — server hasn't
- *                     distributed CIDs yet). The library's tick recovery
+ *   TRANSIENT_FAIL  — xqc_conn_create_path returned another recoverable
+ *                     error (e.g. -XQC_CLOSING while the connection
+ *                     closes). The library's tick recovery
  *                     loop will retry with exponential backoff. A handle
  *                     was allocated, so the library owns the ctx: a
  *                     platform that rolls back here must do it with

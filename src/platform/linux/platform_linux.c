@@ -175,8 +175,8 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
 
     /* Start periodic dropped-path re-add timer. Carrier-up netlink events
      * fire only once and `netmon_try_readd_removed_path()` can fail synchronously
-     * (e.g. xqc_conn_create_path returning -XQC_EMP_NO_AVAIL_PATH_ID before
-     * the server has distributed enough CIDs). Without this timer the slot
+     * (e.g. re-adding is deferred while the interface has no route to the
+     * server yet). Without this timer the slot
      * would sit in CLOSED_DROPPED indefinitely — no further netlink event
      * arrives because IP and link state never change again. The library's
      * tick_drive_retry_timer only services CREATE_WAIT/DEGRADED, not
@@ -238,8 +238,7 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
          * to reset here. Library handles slot recycling across reconnects.
          * Each slot's recover_failures IS reset — Level-2 reconnect creates
          * a fresh xquic conn with fresh path_id namespace, so prior failures
-         * (e.g. -XQC_EMP_NO_AVAIL_PATH_ID due to CID lag) shouldn't count
-         * against the new connection's retry budget. */
+         * shouldn't count against the new connection's retry budget. */
         for (int i = 0; i < p->n_paths; i++)
             p->paths[i].recover_failures = 0;
         if (p->ev_status) event_del(p->ev_status); /* pause — reused on reconnect */
