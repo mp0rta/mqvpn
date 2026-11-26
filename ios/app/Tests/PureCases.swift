@@ -60,6 +60,11 @@ func runPureCases() -> Int {
         }
         check(SplitSettings(providerConfiguration: ["scheduler": NSNumber(value: 0)]).scheduler == .minrtt, "scheduler minrtt read")
         check(SplitSettings(providerConfiguration: ["scheduler": NSNumber(value: 4)]).scheduler == .failover, "scheduler failover read")
+        check(SplitSettings(providerConfiguration: ["scheduler": NSNumber(value: 4)]).usesBackupPaths, "failover uses backup paths")
+        for raw in [0, 1] {
+            check(!SplitSettings(providerConfiguration: ["scheduler": NSNumber(value: raw)]).usesBackupPaths, "scheduler \(raw) has no backup paths")
+        }
+        check(!ls.usesBackupPaths, "legacy has no backup paths")
         var merged: [String: Any] = [:]
         for section: ProviderConfigSection in [ProtectionSettings(killSwitch: true), PathPolicy(wifi: false, cellular: true)] {
             section.merged(into: &merged)

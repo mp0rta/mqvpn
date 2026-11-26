@@ -60,7 +60,7 @@ struct PathsTab: View {
         PathsScreen(live: controller.viewState == .connected,
                     cards: transportCards(live.frame, available: availability.kinds),
                     policy: controller.settings.draft.paths,
-                    backupMode: controller.settings.draft.split.choice == .backup, editable: controller.isEditable,
+                    backupMode: controller.settings.draft.split.usesBackupPaths, editable: controller.isEditable,
                     setPolicy: { p in controller.settings.update { $0.paths = p } })
     }
 }

@@ -26,9 +26,6 @@ enum TransportKind: String, CaseIterable, Codable {
 
 enum SplitChoice: Equatable { case throughput, lowLatency, redundant, backup }
 
-/// What a Paths card shows for a transport while the split is Backup.
-enum PathRole: Equatable { case use, backup, off }
-
 /// Traffic-split settings. `scheduler` is minrtt, wlb or failover; nil = key absent
 /// (legacy), which reads as throughput and is never written back until the
 /// user taps a choice.
@@ -77,6 +74,10 @@ struct SplitSettings: Equatable, ProviderConfigSection {
         self.init(scheduler: sched, redundantEnabled: enabled,
                   redundantPorts: malformed ? [] : ports, redundantPortsMalformed: malformed)
     }
+
+    /// Only the failover scheduler holds a backup path idle: under it alone
+    /// the Paths cards offer Backup and the provider flags the backup paths.
+    var usesBackupPaths: Bool { scheduler == .failover }
 
     var choice: SplitChoice {
         if redundantEnabled { return .redundant }
@@ -149,7 +150,8 @@ struct ProtectionSettings: Equatable, ProviderConfigSection {
     }
 }
 
-/// Which transports a session may use. All-off is a configuration error the
+/// Which transports a session may use, and which of them are backups
+/// (SplitSettings.usesBackupPaths). All-off is a configuration error the
 /// provider refuses to start with; it is never silently widened. A new
 /// TransportKind adds one stored flag, one key and one subscript case here.
 struct PathPolicy: Equatable, ProviderConfigSection {

@@ -84,6 +84,9 @@ func pathCards(paths: [LivePath], available: Set<TransportKind>, sample: Bandwid
     return cards
 }
 
+/// What a Paths card shows for a transport while the split is Backup.
+enum PathRole: Equatable { case use, backup, off }
+
 extension PathPolicy {
     /// The policy with `kind` set to `on`, or nil when that would turn the last
     /// connection off (never persistable).

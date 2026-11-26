@@ -85,7 +85,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // (2) Locals, not properties (D6 rule 4): nothing below reads
             // self.engine & co. until the publish in (3).
             let engine = MqvpnEngine()
-            let binder = PathBinder(engine: engine, policy: policy)
+            let binder = PathBinder(engine: engine, policy: policy, usesBackupPaths: split.usesBackupPaths)
             let metrics = GateMetrics(engine: engine, binder: binder)
             let snapshot = SnapshotCache(engine: engine, binder: binder)
 
