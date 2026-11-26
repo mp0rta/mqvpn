@@ -50,7 +50,8 @@ android {
 dependencies {
     implementation(project(":sdk-native"))
     implementation(project(":sdk-runtime"))
-    implementation(project(":sdk-network"))
+    // api: MqvpnConfig.backupPathTypes carries sdk-network's PathType.
+    api(project(":sdk-network"))
     implementation("androidx.core:core-ktx:1.19.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.13.0")
