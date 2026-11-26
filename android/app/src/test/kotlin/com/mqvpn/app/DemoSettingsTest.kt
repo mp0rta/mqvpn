@@ -384,6 +384,14 @@ class DemoSettingsTest {
     }
 
     @Test
+    fun `withRole OFF on the only connection fails the path policy`() {
+        val setCell = { d: DemoSettings, on: Boolean -> d.copy(pathCellular = on) }
+        val cellOnly = DemoSettings(pathWifi = false, pathEthernet = false)
+        assertTrue(cellOnly.withRole(PathType.CELLULAR, PathRole.USE, setCell).pathPolicyValid())
+        assertFalse(cellOnly.withRole(PathType.CELLULAR, PathRole.OFF, setCell).pathPolicyValid())
+    }
+
+    @Test
     fun `another split keeps the chosen backups`() {
         val s = DemoSettings(scheduler = "FAILOVER", backupPaths = setOf(PathType.WIFI))
         val back = s.applySplitChoice(SplitChoice.THROUGHPUT).applySplitChoice(SplitChoice.BACKUP)
