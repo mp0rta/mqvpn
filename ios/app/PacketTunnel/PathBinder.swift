@@ -35,7 +35,7 @@ final class PathBinder {
     /// the session uses backup paths (SplitSettings.usesBackupPaths).
     private let backupTypes: Set<NWInterface.InterfaceType>
 
-    init(engine: MqvpnEngine, policy: PathPolicy = PathPolicy(), usesBackupPaths: Bool = false) {
+    init(engine: MqvpnEngine, policy: PathPolicy = PathPolicy(), usesBackupPaths: Bool) {
         self.engine = engine
         monitoredTypes = policy.enabledKinds.map(\.interfaceType)
         backupTypes = usesBackupPaths ? Set(policy.backup.map(\.interfaceType)) : []
