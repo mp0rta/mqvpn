@@ -116,7 +116,7 @@ private fun MainTabs(vm: MqvpnViewModel, settingsVm: SettingsViewModel, nav: Nav
             Tab.HOME -> HomeScreen(vm, settingsVm, { tab = Tab.PATHS }, { tab = Tab.SETTINGS }, m)
             Tab.PATHS -> PathsScreen(vm, settingsVm, m)
             Tab.STATS -> StatsScreen(vm, settingsVm, { tab = Tab.HOME }, m)
-            Tab.SETTINGS -> SettingsScreen(vm, settingsVm, { nav.navigate(it) }, m)
+            Tab.SETTINGS -> SettingsScreen(vm, settingsVm, { nav.navigate(it) }, { tab = Tab.PATHS }, m)
         }
     }
 }

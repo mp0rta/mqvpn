@@ -4,10 +4,14 @@
 package com.mqvpn.app
 
 import com.mqvpn.app.data.DemoSettings
+import com.mqvpn.app.data.PathRole
 import com.mqvpn.app.data.SplitChoice
 import com.mqvpn.app.data.applySplitChoice
+import com.mqvpn.app.data.roleOf
 import com.mqvpn.app.data.splitChoice
+import com.mqvpn.app.data.withRole
 import com.mqvpn.sdk.core.model.MqvpnConfig
+import com.mqvpn.sdk.network.PathType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -342,5 +346,69 @@ class DemoSettingsTest {
         assertEquals(DemoSettings(scheduler = "MIN_RTT"), b.applySplitChoice(SplitChoice.LOW_LATENCY))
         assertEquals(DemoSettings(scheduler = "MIN_RTT", redundantEnabled = true), b.applySplitChoice(SplitChoice.REDUNDANT))
         assertEquals(DemoSettings(scheduler = "FAILOVER"), b.applySplitChoice(SplitChoice.BACKUP))
+    }
+
+    @Test
+    fun `backupPaths default to cellular and reach the config, unknown names ignored`() {
+        val d = DemoSettings().toMqvpnConfig()
+        assertTrue(d.cellularPathBackup)
+        assertFalse(d.wifiPathBackup || d.ethernetPathBackup || d.bluetoothPathBackup)
+        val c = DemoSettings(backupPaths = setOf("WIFI", "BLUETOOTH", "NOPE")).toMqvpnConfig()
+        assertTrue(c.wifiPathBackup && c.bluetoothPathBackup)
+        assertFalse(c.cellularPathBackup || c.ethernetPathBackup)
+        assertTrue(DemoSettings(backupPaths = setOf("ETHERNET")).toMqvpnConfig().ethernetPathBackup)
+    }
+
+    @Test
+    fun `every selectable type maps to exactly one backup flag`() {
+        // A PathType with no line in toMqvpnConfig would show Backup on its card and join as a primary.
+        for (t in PathType.entries - PathType.OTHER) {
+            val c = DemoSettings(backupPaths = setOf(t.name)).toMqvpnConfig()
+            val flags = listOf(c.wifiPathBackup, c.cellularPathBackup, c.ethernetPathBackup, c.bluetoothPathBackup)
+            assertEquals("$t", 1, flags.count { it })
+        }
+    }
+
+    @Test
+    fun `roleOf is off when disabled, else backup by membership`() {
+        val s = DemoSettings(backupPaths = setOf("CELLULAR"))
+        assertEquals(PathRole.OFF, s.roleOf(PathType.CELLULAR, on = false))
+        assertEquals(PathRole.BACKUP, s.roleOf(PathType.CELLULAR, on = true))
+        assertEquals(PathRole.USE, s.roleOf(PathType.WIFI, on = true))
+    }
+
+    @Test
+    fun `withRole switches the type on or off and moves it in or out of the backups`() {
+        val setWifi = { d: DemoSettings, on: Boolean -> d.copy(pathWifi = on) }
+        val s = DemoSettings(pathWifi = false)
+        val backup = s.withRole(PathType.WIFI, PathRole.BACKUP, setWifi)
+        assertTrue(backup.pathWifi)
+        assertEquals(setOf("CELLULAR", "WIFI"), backup.backupPaths)
+        val use = backup.withRole(PathType.WIFI, PathRole.USE, setWifi)
+        assertTrue(use.pathWifi)
+        assertEquals(setOf("CELLULAR"), use.backupPaths)
+    }
+
+    @Test
+    fun `withRole OFF keeps the type among the backups`() {
+        val setCell = { d: DemoSettings, on: Boolean -> d.copy(pathCellular = on) }
+        val off = DemoSettings().withRole(PathType.CELLULAR, PathRole.OFF, setCell)
+        assertFalse(off.pathCellular)
+        assertEquals(setOf("CELLULAR"), off.backupPaths)
+    }
+
+    @Test
+    fun `withRole OFF on the only connection fails the path policy`() {
+        val setCell = { d: DemoSettings, on: Boolean -> d.copy(pathCellular = on) }
+        val cellOnly = DemoSettings(pathWifi = false, pathEthernet = false)
+        assertTrue(cellOnly.withRole(PathType.CELLULAR, PathRole.USE, setCell).pathPolicyValid())
+        assertFalse(cellOnly.withRole(PathType.CELLULAR, PathRole.OFF, setCell).pathPolicyValid())
+    }
+
+    @Test
+    fun `another split keeps the chosen backups`() {
+        val s = DemoSettings(scheduler = "FAILOVER", backupPaths = setOf("WIFI"))
+        val back = s.applySplitChoice(SplitChoice.THROUGHPUT).applySplitChoice(SplitChoice.BACKUP)
+        assertEquals(setOf("WIFI"), back.backupPaths)
     }
 }

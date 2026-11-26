@@ -75,6 +75,7 @@ fun SettingsScreen(
     vm: MqvpnViewModel,
     settingsVm: SettingsViewModel,
     onNavigate: (String) -> Unit,
+    onOpenPaths: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val c = LocalMqColors.current
@@ -199,6 +200,12 @@ fun SettingsScreen(
                                     modifier = Modifier.padding(start = 26.dp).clickable { onNavigate("redundantDetail") },
                                 )
                             }
+                            if (opt == SplitChoice.BACKUP && opt == choice) {
+                                Text(
+                                    "Choose backup connections ›", color = c.accent, fontSize = 12.sp,
+                                    modifier = Modifier.padding(start = 26.dp).clickable(onClick = onOpenPaths),
+                                )
+                            }
                         }
                     }
                     Hairline()
@@ -266,7 +273,7 @@ private val SPLIT_OPTIONS = listOf(
         SplitChoice.REDUNDANT, "Redundant",
         "— sends UDP uploads on every connection at once, for streams that tolerate duplicates (SRT, RIST, RTP); uses more data",
     ),
-    Triple(SplitChoice.BACKUP, "Backup", "— one connection at a time; cellular only while Wi-Fi or Ethernet is down"),
+    Triple(SplitChoice.BACKUP, "Backup", "— backup connections stay idle until the others fail"),
 )
 
 @Composable

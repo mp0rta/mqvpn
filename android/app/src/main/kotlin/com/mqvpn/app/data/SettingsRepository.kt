@@ -11,6 +11,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
@@ -50,6 +51,7 @@ class SettingsRepository @Inject constructor(
         val PATH_ETHERNET = booleanPreferencesKey("path_ethernet")
         val AUTO_RECONNECT = booleanPreferencesKey("auto_reconnect")
         val SCHEDULER = stringPreferencesKey("scheduler")
+        val BACKUP_PATHS = stringSetPreferencesKey("backup_paths")
         val SCHEMA = intPreferencesKey("settings_schema_version")
     }
 
@@ -104,6 +106,7 @@ class SettingsRepository @Inject constructor(
                 pathEthernet = prefs[Keys.PATH_ETHERNET] ?: defaults.pathEthernet,
                 autoReconnect = prefs[Keys.AUTO_RECONNECT] ?: defaults.autoReconnect,
                 scheduler = prefs[Keys.SCHEDULER] ?: defaults.scheduler,
+                backupPaths = prefs[Keys.BACKUP_PATHS] ?: defaults.backupPaths,
             )
         }
 
@@ -128,6 +131,7 @@ class SettingsRepository @Inject constructor(
             prefs[Keys.PATH_ETHERNET] = newSettings.pathEthernet
             prefs[Keys.AUTO_RECONNECT] = newSettings.autoReconnect
             prefs[Keys.SCHEDULER] = newSettings.scheduler
+            prefs[Keys.BACKUP_PATHS] = newSettings.backupPaths
         }
     }
 }

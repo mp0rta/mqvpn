@@ -32,9 +32,15 @@ import kotlinx.coroutines.withContext
  * - tunnel.addPath/connect/removePath/pathReleased are serialized via executor.call
  * - handleBadFd() is called by the executor ON the engine thread
  */
-/** Failover: a cellular network is the backup of Wi-Fi and Ethernet. */
-internal fun isBackupPath(scheduler: MqvpnConfig.Scheduler, path: NetworkPath): Boolean =
-    scheduler == MqvpnConfig.Scheduler.FAILOVER && path.type == PathType.CELLULAR
+/** Failover: networks of a type the config marks as backup are the backups of the others. */
+internal fun isBackupPath(config: MqvpnConfig, path: NetworkPath): Boolean =
+    config.scheduler == MqvpnConfig.Scheduler.FAILOVER && when (path.type) {
+        PathType.WIFI -> config.wifiPathBackup
+        PathType.CELLULAR -> config.cellularPathBackup
+        PathType.ETHERNET -> config.ethernetPathBackup
+        PathType.BLUETOOTH -> config.bluetoothPathBackup
+        PathType.OTHER -> false
+    }
 
 internal class PathManager(
     private val executor: MqvpnExecutor,

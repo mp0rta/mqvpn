@@ -31,10 +31,14 @@ final class PathBinder {
     /// Interface types this session may use; an Off type is never probed or
     /// registered. WiFi stays first (primary path ordering, see reconcile).
     private let monitoredTypes: [NWInterface.InterfaceType]
+    /// Interface types that join with MQVPN_PATH_FLAG_BACKUP; empty unless
+    /// the session uses backup paths (SplitSettings.usesBackupPaths).
+    private let backupTypes: Set<NWInterface.InterfaceType>
 
-    init(engine: MqvpnEngine, policy: PathPolicy = PathPolicy()) {
+    init(engine: MqvpnEngine, policy: PathPolicy = PathPolicy(), usesBackupPaths: Bool) {
         self.engine = engine
         monitoredTypes = policy.enabledKinds.map(\.interfaceType)
+        backupTypes = usesBackupPaths ? Set(policy.backup.map(\.interfaceType)) : []
     }
     /// True once stop() emptied the monitors (start() has run by the time
     /// any caller can observe this — reconcile/addPath are only reachable
@@ -194,8 +198,8 @@ final class PathBinder {
             _ = getsockname(fd, la.baseAddress!.assumingMemoryBound(to: sockaddr.self), &lalen)
         }
         desc.local_addr_len = UInt32(lalen)
-        // Failover: cellular carries traffic only while Wi-Fi does not.
-        if type == .cellular && engine.cellularIsBackup {
+        // Failover: a backup carries traffic only while no other path does.
+        if backupTypes.contains(type) {
             desc.flags |= 1   // MQVPN_PATH_FLAG_BACKUP
         }
         // 6. register with the engine (we are on the tick thread already):

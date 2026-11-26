@@ -84,7 +84,7 @@ internal class Session(
                     Log.e(TAG, "ending the session: $reason")
                     service.stopSession(this)
                 },
-                isBackup = { path -> isBackupPath(config.scheduler, path) },
+                isBackup = { path -> isBackupPath(config, path) },
             )
             pathManager = pm
             // a refused network request throws here
