@@ -32,8 +32,12 @@ data class DemoSettings(
     val pathEthernet: Boolean = true,
     val autoReconnect: Boolean = true,
     val scheduler: String = SchedulerChoice.DEFAULT.name,
-    /** Connection types that are backups while the split is Backup; kept under the other splits. */
-    val backupPaths: Set<PathType> = setOf(PathType.CELLULAR),
+    /**
+     * [PathType] names of the connection types that are backups while the
+     * split is Backup; kept under the other splits. Stored as written, so
+     * renaming a PathType needs a migration.
+     */
+    val backupPaths: Set<String> = setOf(PathType.CELLULAR.name),
 ) {
     enum class SchedulerChoice { DEFAULT, MIN_RTT, WLB, FAILOVER }
 
@@ -100,7 +104,10 @@ data class DemoSettings(
             wifiPathEnabled = pathWifi,
             cellularPathEnabled = pathCellular,
             ethernetPathEnabled = pathEthernet,
-            backupPathTypes = backupPaths,
+            wifiPathBackup = PathType.WIFI.name in backupPaths,
+            cellularPathBackup = PathType.CELLULAR.name in backupPaths,
+            ethernetPathBackup = PathType.ETHERNET.name in backupPaths,
+            bluetoothPathBackup = PathType.BLUETOOTH.name in backupPaths,
             reconnect = autoReconnect,
             scheduler = when (schedulerChoice()) {
                 SchedulerChoice.WLB -> MqvpnConfig.Scheduler.WLB
@@ -163,7 +170,7 @@ enum class PathRole { USE, BACKUP, OFF }
 
 fun DemoSettings.roleOf(type: PathType, on: Boolean): PathRole = when {
     !on -> PathRole.OFF
-    type in backupPaths -> PathRole.BACKUP
+    type.name in backupPaths -> PathRole.BACKUP
     else -> PathRole.USE
 }
 
@@ -172,7 +179,7 @@ fun DemoSettings.withRole(type: PathType, role: PathRole, setOn: (DemoSettings, 
     val s = setOn(this, role != PathRole.OFF)
     return when (role) {
         PathRole.OFF -> s
-        PathRole.BACKUP -> s.copy(backupPaths = s.backupPaths + type)
-        PathRole.USE -> s.copy(backupPaths = s.backupPaths - type)
+        PathRole.BACKUP -> s.copy(backupPaths = s.backupPaths + type.name)
+        PathRole.USE -> s.copy(backupPaths = s.backupPaths - type.name)
     }
 }

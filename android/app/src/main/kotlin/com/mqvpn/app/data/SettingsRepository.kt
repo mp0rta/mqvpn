@@ -12,7 +12,6 @@ import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
-import com.mqvpn.sdk.network.PathType
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
@@ -107,10 +106,7 @@ class SettingsRepository @Inject constructor(
                 pathEthernet = prefs[Keys.PATH_ETHERNET] ?: defaults.pathEthernet,
                 autoReconnect = prefs[Keys.AUTO_RECONNECT] ?: defaults.autoReconnect,
                 scheduler = prefs[Keys.SCHEDULER] ?: defaults.scheduler,
-                // A name this build does not know is dropped; an empty set is the user's choice.
-                backupPaths = prefs[Keys.BACKUP_PATHS]
-                    ?.mapNotNull { name -> PathType.entries.firstOrNull { it.name == name } }?.toSet()
-                    ?: defaults.backupPaths,
+                backupPaths = prefs[Keys.BACKUP_PATHS] ?: defaults.backupPaths,
             )
         }
 
@@ -135,7 +131,7 @@ class SettingsRepository @Inject constructor(
             prefs[Keys.PATH_ETHERNET] = newSettings.pathEthernet
             prefs[Keys.AUTO_RECONNECT] = newSettings.autoReconnect
             prefs[Keys.SCHEDULER] = newSettings.scheduler
-            prefs[Keys.BACKUP_PATHS] = newSettings.backupPaths.map { it.name }.toSet()
+            prefs[Keys.BACKUP_PATHS] = newSettings.backupPaths
         }
     }
 }

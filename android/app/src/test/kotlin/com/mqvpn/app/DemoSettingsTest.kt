@@ -349,15 +349,19 @@ class DemoSettingsTest {
     }
 
     @Test
-    fun `backupPaths default to cellular and reach the config`() {
-        assertEquals(setOf(PathType.CELLULAR), DemoSettings().toMqvpnConfig().backupPathTypes)
-        val wifi = DemoSettings(backupPaths = setOf(PathType.WIFI))
-        assertEquals(setOf(PathType.WIFI), wifi.toMqvpnConfig().backupPathTypes)
+    fun `backupPaths default to cellular and reach the config, unknown names ignored`() {
+        val d = DemoSettings().toMqvpnConfig()
+        assertTrue(d.cellularPathBackup)
+        assertFalse(d.wifiPathBackup || d.ethernetPathBackup || d.bluetoothPathBackup)
+        val c = DemoSettings(backupPaths = setOf("WIFI", "BLUETOOTH", "NOPE")).toMqvpnConfig()
+        assertTrue(c.wifiPathBackup && c.bluetoothPathBackup)
+        assertFalse(c.cellularPathBackup || c.ethernetPathBackup)
+        assertTrue(DemoSettings(backupPaths = setOf("ETHERNET")).toMqvpnConfig().ethernetPathBackup)
     }
 
     @Test
     fun `roleOf is off when disabled, else backup by membership`() {
-        val s = DemoSettings(backupPaths = setOf(PathType.CELLULAR))
+        val s = DemoSettings(backupPaths = setOf("CELLULAR"))
         assertEquals(PathRole.OFF, s.roleOf(PathType.CELLULAR, on = false))
         assertEquals(PathRole.BACKUP, s.roleOf(PathType.CELLULAR, on = true))
         assertEquals(PathRole.USE, s.roleOf(PathType.WIFI, on = true))
@@ -369,10 +373,10 @@ class DemoSettingsTest {
         val s = DemoSettings(pathWifi = false)
         val backup = s.withRole(PathType.WIFI, PathRole.BACKUP, setWifi)
         assertTrue(backup.pathWifi)
-        assertEquals(setOf(PathType.CELLULAR, PathType.WIFI), backup.backupPaths)
+        assertEquals(setOf("CELLULAR", "WIFI"), backup.backupPaths)
         val use = backup.withRole(PathType.WIFI, PathRole.USE, setWifi)
         assertTrue(use.pathWifi)
-        assertEquals(setOf(PathType.CELLULAR), use.backupPaths)
+        assertEquals(setOf("CELLULAR"), use.backupPaths)
     }
 
     @Test
@@ -380,7 +384,7 @@ class DemoSettingsTest {
         val setCell = { d: DemoSettings, on: Boolean -> d.copy(pathCellular = on) }
         val off = DemoSettings().withRole(PathType.CELLULAR, PathRole.OFF, setCell)
         assertFalse(off.pathCellular)
-        assertEquals(setOf(PathType.CELLULAR), off.backupPaths)
+        assertEquals(setOf("CELLULAR"), off.backupPaths)
     }
 
     @Test
@@ -393,8 +397,8 @@ class DemoSettingsTest {
 
     @Test
     fun `another split keeps the chosen backups`() {
-        val s = DemoSettings(scheduler = "FAILOVER", backupPaths = setOf(PathType.WIFI))
+        val s = DemoSettings(scheduler = "FAILOVER", backupPaths = setOf("WIFI"))
         val back = s.applySplitChoice(SplitChoice.THROUGHPUT).applySplitChoice(SplitChoice.BACKUP)
-        assertEquals(setOf(PathType.WIFI), back.backupPaths)
+        assertEquals(setOf("WIFI"), back.backupPaths)
     }
 }

@@ -75,6 +75,7 @@ fun SettingsScreen(
     vm: MqvpnViewModel,
     settingsVm: SettingsViewModel,
     onNavigate: (String) -> Unit,
+    onOpenPaths: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val c = LocalMqColors.current
@@ -202,7 +203,7 @@ fun SettingsScreen(
                             if (opt == SplitChoice.BACKUP && opt == choice) {
                                 Text(
                                     "Choose backup connections ›", color = c.accent, fontSize = 12.sp,
-                                    modifier = Modifier.padding(start = 26.dp).clickable { onNavigate(ROUTE_PATHS_TAB) },
+                                    modifier = Modifier.padding(start = 26.dp).clickable(onClick = onOpenPaths),
                                 )
                             }
                         }
@@ -264,9 +265,6 @@ fun SettingsScreen(
         )
     }
 }
-
-/** Not a NavHost destination: MainTabs answers it by switching to the Paths tab. */
-internal const val ROUTE_PATHS_TAB = "paths"
 
 private val SPLIT_OPTIONS = listOf(
     Triple(SplitChoice.THROUGHPUT, "Throughput", "(recommended) — by each connection’s capacity"),

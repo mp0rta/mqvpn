@@ -40,6 +40,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.mqvpn.app.data.DemoSettings
 import com.mqvpn.app.data.PathRole
 import com.mqvpn.app.data.SplitChoice
 import com.mqvpn.app.data.roleOf
@@ -71,6 +72,13 @@ fun PathsScreen(vm: MqvpnViewModel, settingsVm: SettingsViewModel, modifier: Mod
     val cards = pathCardViews(paths, available, history.samples.lastOrNull())
     // Only the failover scheduler keeps a backup path idle, so the third choice shows under Backup alone.
     val backupMode = s.splitChoice() == SplitChoice.BACKUP
+    // Turning the last connection Off would leave no path (never persistable): refuse.
+    fun apply(change: (DemoSettings) -> DemoSettings) {
+        if (change(s).pathPolicyValid()) {
+            blocked = false
+            settingsVm.update(change)
+        } else blocked = true
+    }
 
     Column(
         modifier.fillMaxSize().background(c.win).verticalScroll(rememberScrollState()).padding(20.dp),
@@ -113,17 +121,10 @@ fun PathsScreen(vm: MqvpnViewModel, settingsVm: SettingsViewModel, modifier: Mod
                             Text("${fmtMbps(card.rateBps)} Mbps", color = c.t2, fontSize = 11.sp, textAlign = TextAlign.End, modifier = Modifier.width(78.dp))
                         }
                     }
-                    // Turning the last connection Off would leave no path (never persistable): refuse.
-                    if (card.available && backupMode) Segmented(ROLE_OPTIONS, s.roleOf(t.type, on), editable) { want ->
-                        if (s.withRole(t.type, want, t.set).pathPolicyValid()) {
-                            blocked = false
-                            settingsVm.update { it.withRole(t.type, want, t.set) }
-                        } else blocked = true
-                    } else if (card.available) UseOffSegmented(on, editable) { want ->
-                        if (want || t.set(s, false).pathPolicyValid()) {
-                            blocked = false
-                            settingsVm.update { t.set(it, want) }
-                        } else blocked = true
+                    if (card.available && backupMode) {
+                        Segmented(ROLE_OPTIONS, s.roleOf(t.type, on), editable) { want -> apply { it.withRole(t.type, want, t.set) } }
+                    } else if (card.available) {
+                        UseOffSegmented(on, editable) { want -> apply { t.set(it, want) } }
                     }
                 }
             }

@@ -47,7 +47,6 @@ import com.mqvpn.app.ui.screens.HybridDetailScreen
 import com.mqvpn.app.ui.screens.RedundantDetailScreen
 import com.mqvpn.app.ui.screens.ReorderDetailScreen
 import com.mqvpn.app.ui.screens.PathsScreen
-import com.mqvpn.app.ui.screens.ROUTE_PATHS_TAB
 import com.mqvpn.app.ui.screens.SettingsScreen
 import com.mqvpn.app.ui.screens.SetupScreen
 import com.mqvpn.app.ui.screens.StatsScreen
@@ -117,7 +116,7 @@ private fun MainTabs(vm: MqvpnViewModel, settingsVm: SettingsViewModel, nav: Nav
             Tab.HOME -> HomeScreen(vm, settingsVm, { tab = Tab.PATHS }, { tab = Tab.SETTINGS }, m)
             Tab.PATHS -> PathsScreen(vm, settingsVm, m)
             Tab.STATS -> StatsScreen(vm, settingsVm, { tab = Tab.HOME }, m)
-            Tab.SETTINGS -> SettingsScreen(vm, settingsVm, { if (it == ROUTE_PATHS_TAB) tab = Tab.PATHS else nav.navigate(it) }, m)
+            Tab.SETTINGS -> SettingsScreen(vm, settingsVm, { nav.navigate(it) }, { tab = Tab.PATHS }, m)
         }
     }
 }
