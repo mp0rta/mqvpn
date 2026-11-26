@@ -5,6 +5,7 @@ package com.mqvpn.sdk.core
 
 import android.os.Parcel
 import com.mqvpn.sdk.core.model.MqvpnConfig
+import com.mqvpn.sdk.network.PathType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -193,5 +194,20 @@ class MqvpnConfigTest {
     fun oldJsonWithoutBluetoothPath_decodesWithDefault() {
         val oldJson = """{"serverAddress":"h","authKey":"k"}"""
         assertFalse(MqvpnConfig.fromJson(oldJson).bluetoothPathEnabled)
+    }
+
+    @Test
+    fun backupPathTypes_defaultsToCellular() {
+        assertEquals(setOf(PathType.CELLULAR), MqvpnConfig(serverAddress = "h", authKey = "k").backupPathTypes)
+        val oldJson = """{"serverAddress":"h","authKey":"k"}"""
+        assertEquals(setOf(PathType.CELLULAR), MqvpnConfig.fromJson(oldJson).backupPathTypes)
+    }
+
+    @Test
+    fun backupPathTypes_jsonRoundTrip() {
+        for (types in listOf(setOf(PathType.WIFI, PathType.ETHERNET), emptySet())) {
+            val c = MqvpnConfig(serverAddress = "h", authKey = "k", backupPathTypes = types)
+            assertEquals(types, MqvpnConfig.fromJson(c.toJson()).backupPathTypes)
+        }
     }
 }

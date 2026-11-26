@@ -199,6 +199,12 @@ fun SettingsScreen(
                                     modifier = Modifier.padding(start = 26.dp).clickable { onNavigate("redundantDetail") },
                                 )
                             }
+                            if (opt == SplitChoice.BACKUP && opt == choice) {
+                                Text(
+                                    "Choose backup connections ›", color = c.accent, fontSize = 12.sp,
+                                    modifier = Modifier.padding(start = 26.dp).clickable { onNavigate(ROUTE_PATHS_TAB) },
+                                )
+                            }
                         }
                     }
                     Hairline()
@@ -259,6 +265,9 @@ fun SettingsScreen(
     }
 }
 
+/** Not a NavHost destination: MainTabs answers it by switching to the Paths tab. */
+internal const val ROUTE_PATHS_TAB = "paths"
+
 private val SPLIT_OPTIONS = listOf(
     Triple(SplitChoice.THROUGHPUT, "Throughput", "(recommended) — by each connection’s capacity"),
     Triple(SplitChoice.LOW_LATENCY, "Low latency", "— always pick the fastest-responding path"),
@@ -266,7 +275,7 @@ private val SPLIT_OPTIONS = listOf(
         SplitChoice.REDUNDANT, "Redundant",
         "— sends UDP uploads on every connection at once, for streams that tolerate duplicates (SRT, RIST, RTP); uses more data",
     ),
-    Triple(SplitChoice.BACKUP, "Backup", "— one connection at a time; cellular only while Wi-Fi or Ethernet is down"),
+    Triple(SplitChoice.BACKUP, "Backup", "— backup connections stay idle until the others fail"),
 )
 
 @Composable

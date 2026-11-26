@@ -143,15 +143,19 @@ class PathManagerRaceTest {
     }
 
     @Test
-    fun `under failover only cellular is a backup`() {
+    fun `under failover the configured types are backups, cellular by default`() {
         val net = newNetwork(netId = 400)
         fun p(t: PathType) = NetworkPath(net, t, "n", isMetered = false)
-        val fo = MqvpnConfig.Scheduler.FAILOVER
+        fun cfg(s: MqvpnConfig.Scheduler) = MqvpnConfig(serverAddress = "h", authKey = "k", scheduler = s)
+        val fo = cfg(MqvpnConfig.Scheduler.FAILOVER)
         assertTrue(isBackupPath(fo, p(PathType.CELLULAR)))
         assertFalse(isBackupPath(fo, p(PathType.WIFI)))
         assertFalse(isBackupPath(fo, p(PathType.ETHERNET)))
-        assertFalse(isBackupPath(MqvpnConfig.Scheduler.WLB, p(PathType.CELLULAR)))
-        assertFalse(isBackupPath(MqvpnConfig.Scheduler.BACKUP_FEC, p(PathType.CELLULAR)))
+        val eth = fo.copy(backupPathTypes = setOf(PathType.ETHERNET))
+        assertTrue(isBackupPath(eth, p(PathType.ETHERNET)))
+        assertFalse(isBackupPath(eth, p(PathType.CELLULAR)))
+        assertFalse(isBackupPath(cfg(MqvpnConfig.Scheduler.WLB), p(PathType.CELLULAR)))
+        assertFalse(isBackupPath(cfg(MqvpnConfig.Scheduler.BACKUP_FEC), p(PathType.CELLULAR)))
     }
 
     @Test

@@ -13,8 +13,10 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import com.mqvpn.app.data.DemoSettings
 import com.mqvpn.app.data.SettingsRepository
+import com.mqvpn.sdk.network.PathType
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
@@ -98,6 +100,7 @@ class SettingsRepositoryTest {
             pathWifi = false,
             pathCellular = false,
             pathEthernet = false,
+            backupPaths = setOf(PathType.WIFI, PathType.ETHERNET),
             autoReconnect = false,
             scheduler = "WLB",
         )
@@ -121,6 +124,26 @@ class SettingsRepositoryTest {
 
         val expected = DemoSettings(serverAddress = "198.51.100.9", serverPort = 51820)
         assertEquals(expected, result)
+    }
+
+    @Test
+    fun `backup paths without the key are cellular`() = runTest(testDispatcher) {
+        val repo = SettingsRepository(newDataStore(newFile()))
+        assertEquals(setOf(PathType.CELLULAR), repo.settings.first().backupPaths)
+    }
+
+    @Test
+    fun `an empty backup set stays empty`() = runTest(testDispatcher) {
+        val repo = SettingsRepository(newDataStore(newFile()))
+        repo.save(DemoSettings(backupPaths = emptySet()))
+        assertEquals(emptySet<PathType>(), repo.settings.first().backupPaths)
+    }
+
+    @Test
+    fun `an unknown backup path name is dropped`() = runTest(testDispatcher) {
+        val store = newDataStore(newFile())
+        store.edit { it[stringSetPreferencesKey("backup_paths")] = setOf("WIFI", "NOPE") }
+        assertEquals(setOf(PathType.WIFI), SettingsRepository(store).settings.first().backupPaths)
     }
 
     @Test
@@ -220,6 +243,7 @@ class SettingsRepositoryTest {
             pathWifi = false,
             pathCellular = false,
             pathEthernet = false,
+            backupPaths = setOf(PathType.WIFI, PathType.ETHERNET),
             autoReconnect = false,
             scheduler = "WLB",
         )

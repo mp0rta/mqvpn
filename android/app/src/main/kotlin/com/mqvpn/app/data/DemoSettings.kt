@@ -4,6 +4,7 @@
 package com.mqvpn.app.data
 
 import com.mqvpn.sdk.core.model.MqvpnConfig
+import com.mqvpn.sdk.network.PathType
 
 /**
  * Plain, persistable settings model backing the demo app's settings screen.
@@ -31,6 +32,8 @@ data class DemoSettings(
     val pathEthernet: Boolean = true,
     val autoReconnect: Boolean = true,
     val scheduler: String = SchedulerChoice.DEFAULT.name,
+    /** Connection types that are backups while the split is Backup; kept under the other splits. */
+    val backupPaths: Set<PathType> = setOf(PathType.CELLULAR),
 ) {
     enum class SchedulerChoice { DEFAULT, MIN_RTT, WLB, FAILOVER }
 
@@ -97,6 +100,7 @@ data class DemoSettings(
             wifiPathEnabled = pathWifi,
             cellularPathEnabled = pathCellular,
             ethernetPathEnabled = pathEthernet,
+            backupPathTypes = backupPaths,
             reconnect = autoReconnect,
             scheduler = when (schedulerChoice()) {
                 SchedulerChoice.WLB -> MqvpnConfig.Scheduler.WLB
@@ -152,4 +156,23 @@ fun DemoSettings.applySplitChoice(c: SplitChoice): DemoSettings = when (c) {
     SplitChoice.LOW_LATENCY -> copy(scheduler = DemoSettings.SchedulerChoice.MIN_RTT.name, redundantEnabled = false)
     SplitChoice.REDUNDANT -> copy(scheduler = DemoSettings.SchedulerChoice.MIN_RTT.name, redundantEnabled = true)
     SplitChoice.BACKUP -> copy(scheduler = DemoSettings.SchedulerChoice.FAILOVER.name, redundantEnabled = false)
+}
+
+/** What a Paths card shows for a connection type while the split is Backup. */
+enum class PathRole { USE, BACKUP, OFF }
+
+fun DemoSettings.roleOf(type: PathType, on: Boolean): PathRole = when {
+    !on -> PathRole.OFF
+    type in backupPaths -> PathRole.BACKUP
+    else -> PathRole.USE
+}
+
+/** [setOn] switches [type] on or off. Off leaves it among the backups, so switching it back on keeps the role. */
+fun DemoSettings.withRole(type: PathType, role: PathRole, setOn: (DemoSettings, Boolean) -> DemoSettings): DemoSettings {
+    val s = setOn(this, role != PathRole.OFF)
+    return when (role) {
+        PathRole.OFF -> s
+        PathRole.BACKUP -> s.copy(backupPaths = s.backupPaths + type)
+        PathRole.USE -> s.copy(backupPaths = s.backupPaths - type)
+    }
 }

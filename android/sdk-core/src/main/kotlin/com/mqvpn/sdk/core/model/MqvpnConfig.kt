@@ -4,6 +4,7 @@
 package com.mqvpn.sdk.core.model
 
 import android.os.Parcelable
+import com.mqvpn.sdk.network.PathType
 import kotlinx.parcelize.Parcelize
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -87,6 +88,8 @@ data class MqvpnConfig(
     val cellularPathEnabled: Boolean = true,
     /** Use Ethernet networks as paths. Fixed when the tunnel starts. */
     val ethernetPathEnabled: Boolean = true,
+    /** Network types that join as backup paths under [Scheduler.FAILOVER]. Fixed when the tunnel starts. */
+    val backupPathTypes: Set<PathType> = setOf(PathType.CELLULAR),
 ) : Parcelable {
 
     @Serializable
@@ -96,7 +99,7 @@ data class MqvpnConfig(
         BACKUP_FEC(2),
         WLB_UDP_PIN(3),
 
-        /** One path carries the traffic; cellular paths are backups, used only while no other path works. */
+        /** One path carries the traffic; [backupPathTypes] are backups, used only while no other path works. */
         FAILOVER(4),
     }
 
