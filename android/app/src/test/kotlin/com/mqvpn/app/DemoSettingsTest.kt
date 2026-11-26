@@ -360,6 +360,16 @@ class DemoSettingsTest {
     }
 
     @Test
+    fun `every selectable type maps to exactly one backup flag`() {
+        // A PathType with no line in toMqvpnConfig would show Backup on its card and join as a primary.
+        for (t in PathType.entries - PathType.OTHER) {
+            val c = DemoSettings(backupPaths = setOf(t.name)).toMqvpnConfig()
+            val flags = listOf(c.wifiPathBackup, c.cellularPathBackup, c.ethernetPathBackup, c.bluetoothPathBackup)
+            assertEquals("$t", 1, flags.count { it })
+        }
+    }
+
+    @Test
     fun `roleOf is off when disabled, else backup by membership`() {
         val s = DemoSettings(backupPaths = setOf("CELLULAR"))
         assertEquals(PathRole.OFF, s.roleOf(PathType.CELLULAR, on = false))
