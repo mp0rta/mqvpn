@@ -50,6 +50,7 @@ func runPureCases() -> Int {
         check(!pr.killSwitch && pr.autoReconnect, "protection defaults")
         let pp = PathPolicy(providerConfiguration: legacy)
         check(pp.wifi && pp.cellular && pp.anyEnabled, "path defaults")
+        check(pp.backup == [.cellular], "backup defaults to cellular")
         var kp = PathPolicy()
         kp[.wifi] = false
         check(kp == PathPolicy(wifi: false, cellular: true) && kp.enabledKinds == [.cellular] && kp[.cellular], "policy subscript")
@@ -63,7 +64,7 @@ func runPureCases() -> Int {
         for section: ProviderConfigSection in [ProtectionSettings(killSwitch: true), PathPolicy(wifi: false, cellular: true)] {
             section.merged(into: &merged)
         }
-        check(merged.count == 4 && ProtectionSettings(providerConfiguration: merged).killSwitch, "sections merge into one dict")
+        check(merged.count == 5 && ProtectionSettings(providerConfiguration: merged).killSwitch, "sections merge into one dict")
         for (w, c, any) in [(true, true, true), (true, false, true), (false, true, true), (false, false, false)] {
             check(PathPolicy(wifi: w, cellular: c).anyEnabled == any, "anyEnabled \(w) \(c)")
         }
@@ -99,7 +100,17 @@ func runPureCases() -> Int {
         PathPolicy(wifi: false, cellular: true).merged(into: &mk)
         check(ProtectionSettings(providerConfiguration: mk) == ProtectionSettings(killSwitch: true, autoReconnect: false), "protection round-trip")
         check(PathPolicy(providerConfiguration: mk) == PathPolicy(wifi: false, cellular: true), "path round-trip")
-        check(mk["pathWifi"] != nil && mk["pathCellular"] != nil && mk["killSwitch"] != nil && mk["autoReconnect"] != nil, "policy keys")
+        check(mk["pathWifi"] != nil && mk["pathCellular"] != nil && mk["pathBackup"] != nil && mk["killSwitch"] != nil && mk["autoReconnect"] != nil, "policy keys")
+        for b: Set<TransportKind> in [[.wifi], [], [.wifi, .cellular]] {
+            var bk: [String: Any] = [:]
+            PathPolicy(backup: b).merged(into: &bk)
+            check(PathPolicy(providerConfiguration: bk).backup == b, "backup round-trip \(b.count)")
+        }
+        var bo: [String: Any] = [:]
+        PathPolicy(backup: [.wifi, .cellular]).merged(into: &bo)
+        check(bo["pathBackup"] as? [String] == ["cellular", "wifi"], "backup written sorted")
+        check(PathPolicy(providerConfiguration: ["pathBackup": ["wifi", "nope"]]).backup == [.wifi], "unknown backup kind dropped")
+        check(PathPolicy(providerConfiguration: ["pathBackup": 3]).backup == [.cellular], "malformed backup reads default")
         // malformed ports
         let bad: [[Any]] = [[NSNumber(value: true)], [NSNumber(value: 0)], [NSNumber(value: 65536)],
                             [NSNumber(value: 80), "x"], [NSNumber(value: 1.5)],
@@ -472,6 +483,13 @@ func runPureCases() -> Int {
         check(both.setting(.wifi, on: false) == PathPolicy(wifi: false, cellular: true), "policy wifi off")
         check(PathPolicy(wifi: false, cellular: true).setting(.cellular, on: false) == nil, "policy refuses last off")
         check(PathPolicy(wifi: false, cellular: true).setting(.wifi, on: true) == both, "policy wifi back on")
+        check(both.role(.cellular) == .backup && both.role(.wifi) == .use, "role by backup membership")
+        check(PathPolicy(wifi: false, cellular: true, backup: [.wifi]).role(.wifi) == .off, "role off wins")
+        check(both.setting(.cellular, role: .use) == PathPolicy(wifi: true, cellular: true, backup: []), "role use leaves the backups")
+        check(both.setting(.wifi, role: .backup) == PathPolicy(wifi: true, cellular: true, backup: [.wifi, .cellular]), "role backup joins the backups")
+        check(both.setting(.cellular, role: .off) == PathPolicy(wifi: true, cellular: false, backup: [.cellular]), "role off keeps the backups")
+        check(PathPolicy(wifi: true, cellular: false).setting(.wifi, role: .off) == nil, "role refuses last off")
+        check(PathPolicy(wifi: false, cellular: true).setting(.wifi, role: .backup) == PathPolicy(wifi: true, cellular: true, backup: [.wifi, .cellular]), "role backup turns it on")
 
         check(fmtMbps(46_300_000) == "46.3" && fmtMbps(123_400_000) == "123", "dv fmtMbps")
         check(fmtDownloadRate(46_300_000) == "↓ 46.3 Mbps" && fmtDownloadRate(0) == "↓ 0.0 Mbps", "dv download rate label")

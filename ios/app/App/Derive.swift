@@ -92,6 +92,24 @@ extension PathPolicy {
         p[kind] = on
         return p.anyEnabled ? p : nil
     }
+
+    func role(_ kind: TransportKind) -> PathRole {
+        !self[kind] ? .off : backup.contains(kind) ? .backup : .use
+    }
+
+    /// The policy with `kind` in `role`, or nil when that would turn the last
+    /// connection off. Off leaves `kind` among the backups, so switching it
+    /// back on keeps the role.
+    func setting(_ kind: TransportKind, role: PathRole) -> PathPolicy? {
+        var p = self
+        p[kind] = role != .off
+        switch role {
+        case .use: p.backup.remove(kind)
+        case .backup: p.backup.insert(kind)
+        case .off: break
+        }
+        return p.anyEnabled ? p : nil
+    }
 }
 
 /// Android HomeScreen: m = available && active cards, n = those moving > 1 Mbps.

@@ -17,6 +17,7 @@ struct SettingsScreen: View {
     let tunnel: TunnelInfoSnapshot?
     let onNavigate: (SettingsRoute) -> Void
     let onRunSetup: () -> Void
+    let onOpenPaths: () -> Void
     @State private var keyShown = false
     @State private var advOpen = false
     @State private var logOpen = false
@@ -112,7 +113,7 @@ struct SettingsScreen: View {
         (.lowLatency, "Low latency", "— always pick the fastest-responding path"),
         (.redundant, "Redundant",
          "— sends UDP uploads on every connection at once, for streams that tolerate duplicates (SRT, RIST, RTP); uses more data"),
-        (.backup, "Backup", "— one connection at a time; cellular only while Wi-Fi is down"),
+        (.backup, "Backup", "— backup connections stay idle until the others fail"),
     ]
 
     private var advanced: some View {
@@ -144,6 +145,12 @@ struct SettingsScreen: View {
                                 if opt == .redundant && opt == choice {
                                     Button { onNavigate(.redundant) } label: {
                                         Label("Choose UDP ports", systemImage: "chevron.right")
+                                            .labelStyle(TrailingIconLabel()).mqFont(12).foregroundColor(mq.accent)
+                                    }.buttonStyle(.plain).padding(.leading, 26)
+                                }
+                                if opt == .backup && opt == choice {
+                                    Button(action: onOpenPaths) {
+                                        Label("Choose backup connections", systemImage: "chevron.right")
                                             .labelStyle(TrailingIconLabel()).mqFont(12).foregroundColor(mq.accent)
                                     }.buttonStyle(.plain).padding(.leading, 26)
                                 }
