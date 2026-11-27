@@ -10,6 +10,7 @@
 #include "flow_sched.h"
 #include "redundant_tx.h"
 #include "mqvpn_sched_names.h"
+#include "user_spec.h"
 
 #include <xquic/xquic.h> /* for XQC_ENABLE_* compile-time defines */
 
@@ -55,7 +56,8 @@ usage(const char *prog)
         "  --tls-server-name NAME    TLS SNI / cert verify name (client mode)\n"
         "  --insecure                Accept untrusted certs (client mode, testing only)\n"
         "  --auth-key KEY            PSK for authentication\n"
-        "  --user NAME:KEY           Add a server user credential (repeatable)\n"
+        "  --user NAME:KEY[:IP]      Add a server user credential; IP fixes the user's "
+        "VPN address (repeatable)\n"
         "  --genkey                  Generate a random PSK and exit\n"
         "  --path IFACE              Network interface for multipath (repeatable, client "
         "mode)\n"
@@ -200,6 +202,7 @@ main(int argc, char *argv[])
     const char *auth_key = NULL;
     char cli_user_names[MQVPN_CONFIG_MAX_USERS][64];
     char cli_user_keys[MQVPN_CONFIG_MAX_USERS][256];
+    char cli_user_ips[MQVPN_CONFIG_MAX_USERS][16];
     int n_cli_users = 0;
     int genkey = 0;
     const char *log_level_str = NULL;
@@ -247,26 +250,27 @@ main(int argc, char *argv[])
             }
             char pair[360];
             snprintf(pair, sizeof(pair), "%s", optarg);
-            char *sep = strchr(pair, ':');
-            if (!sep) {
-                fprintf(stderr, "error: --user must be NAME:KEY\n");
+            char *uname, *ukey, *uip;
+            int split_rc = mqvpn_user_spec_split(pair, &uname, &ukey, &uip);
+            if (split_rc == -2) {
+                fprintf(stderr, "error: --user: the IP is not an IPv4 address\n");
                 return 1;
             }
-            *sep = '\0';
-            if (strlen(pair) >= sizeof(cli_user_names[0])) {
+            if (split_rc < 0) {
+                fprintf(stderr, "error: --user must be NAME:KEY or NAME:KEY:IP\n");
+                return 1;
+            }
+            if (strlen(uname) >= sizeof(cli_user_names[0])) {
                 fprintf(stderr, "error: --user name exceeds %zu bytes\n",
                         sizeof(cli_user_names[0]) - 1);
                 return 1;
             }
             snprintf(cli_user_names[n_cli_users], sizeof(cli_user_names[n_cli_users]),
-                     "%.*s", (int)(sizeof(cli_user_names[n_cli_users]) - 1), pair);
+                     "%s", uname);
             snprintf(cli_user_keys[n_cli_users], sizeof(cli_user_keys[n_cli_users]),
-                     "%.*s", (int)(sizeof(cli_user_keys[n_cli_users]) - 1), sep + 1);
-            if (cli_user_names[n_cli_users][0] == '\0' ||
-                cli_user_keys[n_cli_users][0] == '\0') {
-                fprintf(stderr, "error: --user must be NAME:KEY\n");
-                return 1;
-            }
+                     "%.*s", (int)(sizeof(cli_user_keys[n_cli_users]) - 1), ukey);
+            snprintf(cli_user_ips[n_cli_users], sizeof(cli_user_ips[n_cli_users]), "%s",
+                     uip ? uip : "");
             n_cli_users++;
             break;
         }
@@ -421,18 +425,21 @@ main(int argc, char *argv[])
 
     const char *eff_user_names[MQVPN_CONFIG_MAX_USERS];
     const char *eff_user_keys[MQVPN_CONFIG_MAX_USERS];
+    const char *eff_user_ips[MQVPN_CONFIG_MAX_USERS];
     int eff_n_users = 0;
     if (n_cli_users > 0) {
         eff_n_users = n_cli_users;
         for (int i = 0; i < eff_n_users; i++) {
             eff_user_names[i] = cli_user_names[i];
             eff_user_keys[i] = cli_user_keys[i];
+            eff_user_ips[i] = cli_user_ips[i][0] ? cli_user_ips[i] : NULL;
         }
     } else if (file_cfg.n_users > 0) {
         eff_n_users = file_cfg.n_users;
         for (int i = 0; i < eff_n_users; i++) {
             eff_user_names[i] = file_cfg.user_names[i];
             eff_user_keys[i] = file_cfg.user_keys[i];
+            eff_user_ips[i] = file_cfg.user_ips[i][0] ? file_cfg.user_ips[i] : NULL;
         }
     }
 
@@ -718,6 +725,7 @@ main(int argc, char *argv[])
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];
             cfg.user_keys[i] = eff_user_keys[i];
+            cfg.user_ips[i] = eff_user_ips[i];
         }
 #ifdef _WIN32
         return win_platform_run_server(&cfg);

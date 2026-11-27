@@ -39,6 +39,8 @@ expect_error "error: invalid listen address 'host:70000'" \
 
 printf -v name '%064d' 0
 expect_error 'error: --user name exceeds 63 bytes' --mode server --user "$name:key"
+expect_error 'error: --user: the IP is not an IPv4 address' \
+    --mode server --user alice:key:10.0.0.999
 
 # Invalid JSON users must explain the failure before startup, in either form.
 for bad in '{"users":"x"}' \

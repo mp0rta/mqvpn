@@ -77,7 +77,7 @@ mqvpn_addr_pool_alloc(mqvpn_addr_pool_t *pool, struct in_addr *out)
         /* skip offset 1 (server) */
         if (off == 1) continue;
 
-        if (!pool->used[off]) {
+        if (!pool->used[off] && !pool->reserved[off]) {
             pool->used[off] = 1;
             pool->next = off + 1;
             uint32_t base_h = ntohl(pool->base.s_addr);
@@ -110,6 +110,41 @@ mqvpn_addr_pool_release(mqvpn_addr_pool_t *pool, const struct in_addr *addr)
         inet_ntop(AF_INET, addr, str, sizeof(str));
         LOG_INF("addr_pool: released %s", str);
     }
+}
+
+uint32_t
+mqvpn_addr_pool_offset(const mqvpn_addr_pool_t *pool, const struct in_addr *addr)
+{
+    uint32_t base_h = ntohl(pool->base.s_addr);
+    uint32_t addr_h = ntohl(addr->s_addr);
+    if (addr_h < base_h) return 0;
+    uint32_t off = addr_h - base_h;
+    return (off >= 2 && off <= pool->pool_size) ? off : 0;
+}
+
+int
+mqvpn_addr_pool_reserve(mqvpn_addr_pool_t *pool, const struct in_addr *addr)
+{
+    uint32_t off = mqvpn_addr_pool_offset(pool, addr);
+    if (off == 0 || pool->reserved[off]) return -1;
+    pool->reserved[off] = 1;
+    return 0;
+}
+
+void
+mqvpn_addr_pool_unreserve(mqvpn_addr_pool_t *pool, const struct in_addr *addr)
+{
+    uint32_t off = mqvpn_addr_pool_offset(pool, addr);
+    if (off) pool->reserved[off] = 0;
+}
+
+int
+mqvpn_addr_pool_claim(mqvpn_addr_pool_t *pool, const struct in_addr *addr)
+{
+    uint32_t off = mqvpn_addr_pool_offset(pool, addr);
+    if (off == 0 || !pool->reserved[off] || pool->used[off]) return -1;
+    pool->used[off] = 1;
+    return 0;
 }
 
 void

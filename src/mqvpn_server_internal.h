@@ -53,6 +53,8 @@ typedef struct {
 
 /* Test hook (mqvpn_server.c). */
 MQVPN_INTERNAL const char *mqvpn_server_test_sched_refusal_reason(int xqc_rc);
+/* Test hook: s->pool.used[off] (0 for an out-of-range offset). */
+MQVPN_INTERNAL int mqvpn_server_test_pool_used(const mqvpn_server_t *s, uint32_t off);
 
 /* Whether request-level auth (Bearer PSK) must be checked before granting a
  * MASQUE request. Identical condition for CONNECT-IP and connect-tcp on

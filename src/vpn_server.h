@@ -29,6 +29,7 @@ typedef struct mqvpn_server_cfg_s {
     const char *auth_key; /* PSK for client authentication (NULL = no auth) */
     const char *user_names[64];
     const char *user_keys[64];
+    const char *user_ips[64]; /* NULL = from the pool */
     int n_users;
     int max_clients;           /* max concurrent clients (default 64) */
     const char *control_addr;  /* bind address for JSON control API (default 127.0.0.1) */

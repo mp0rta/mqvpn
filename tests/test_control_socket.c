@@ -27,6 +27,9 @@
 /* ── Configurable stub state ──────────────────────────────────────────────── */
 
 static int g_add_user_rc = MQVPN_OK;
+static int g_add_user_calls = 0;
+static char g_add_user_ip[16];
+static int g_add_user_ip_null = 0;
 static char g_last_add_name[128];
 static int g_remove_user_rc = MQVPN_OK;
 
@@ -43,6 +46,8 @@ static mqvpn_internal_client_reinject_t g_reinject_tmpl; /* configured per test 
 static int g_reinject_n = 1;           /* copies the reinject getter returns */
 static int g_sched_n = 1;              /* entries the sched getter returns */
 static char g_sched_label[16] = "wlb"; /* scheduler name each entry carries */
+static char g_sched_vpn_ip[16] = "10.0.0.7";
+static char g_sched_vpn_ip6[46] = "";
 
 static int g_fec_rc = 1;
 static mqvpn_internal_fec_stats_t g_fec_tmpl;
@@ -56,10 +61,13 @@ static double g_reorder_p99 = 1.5;
 /* ── Stubs for the server-facing API the handlers call ────────────────────── */
 
 int
-mqvpn_server_add_user(mqvpn_server_t *s, const char *u, const char *k)
+mqvpn_server_add_user_ip(mqvpn_server_t *s, const char *u, const char *k, const char *ip)
 {
     (void)s;
     (void)k;
+    g_add_user_calls++;
+    g_add_user_ip_null = (ip == NULL);
+    snprintf(g_add_user_ip, sizeof(g_add_user_ip), "%s", ip ? ip : "");
     snprintf(g_last_add_name, sizeof(g_last_add_name), "%s", u);
     return g_add_user_rc;
 }
@@ -160,8 +168,11 @@ mqvpn_server_get_client_sched(const mqvpn_server_t *s, mqvpn_internal_client_sch
     (void)s;
     if (g_sched_n < 0) return -1;
     int n = g_sched_n < max ? g_sched_n : max;
-    for (int i = 0; i < n; i++)
+    for (int i = 0; i < n; i++) {
         snprintf(out[i].scheduler, sizeof(out[i].scheduler), "%s", g_sched_label);
+        snprintf(out[i].vpn_ip, sizeof(out[i].vpn_ip), "%s", g_sched_vpn_ip);
+        snprintf(out[i].vpn_ip6, sizeof(out[i].vpn_ip6), "%s", g_sched_vpn_ip6);
+    }
     return n;
 }
 
@@ -369,6 +380,44 @@ test_add_user_server_failure(void)
 }
 
 static void
+test_add_user_ip(void)
+{
+    g_add_user_rc = MQVPN_OK;
+    g_add_user_calls = 0;
+    call("{\"cmd\":\"add_user\",\"name\":\"alice\",\"key\":\"k\",\"ip\":\"10.0.0.10\"}");
+    CHECK_EQ_STR("{\"ok\":true}");
+    if (g_add_user_calls != 1 || g_add_user_ip_null ||
+        strcmp(g_add_user_ip, "10.0.0.10") != 0) {
+        fprintf(stderr, "FAIL: add_user ip not passed (calls=%d ip='%s')\n",
+                g_add_user_calls, g_add_user_ip);
+        g_failed++;
+    }
+
+    call("{\"cmd\":\"add_user\",\"name\":\"alice\",\"key\":\"k\"}");
+    if (g_add_user_calls != 2 || !g_add_user_ip_null) {
+        fprintf(stderr, "FAIL: add_user without ip must pass NULL\n");
+        g_failed++;
+    }
+}
+
+static void
+test_add_user_rejects(void)
+{
+    g_add_user_calls = 0;
+    call("{\"cmd\":\"add_user\",\"name\":\"alice\",\"key\":\"k\",\"ip\":5}");
+    CHECK_HAS("ip must be an IPv4 address string");
+    call("{\"cmd\":\"add_user\",\"name\":\"alice\",\"key\":\"k\","
+         "\"ip\":\"255.255.255.255junk\"}");
+    CHECK_HAS("ip must be an IPv4 address string");
+
+    if (g_add_user_calls != 0) {
+        fprintf(stderr, "FAIL: rejected add_user reached the server (%d calls)\n",
+                g_add_user_calls);
+        g_failed++;
+    }
+}
+
+static void
 test_add_user_name_decoded_and_bounded(void)
 {
     g_add_user_rc = MQVPN_OK;
@@ -536,7 +585,8 @@ test_get_status_one_client_with_path(void)
     CHECK_HAS("\"endpoint\":\"1.2.3.4:443\"");
     CHECK_HAS("\"path_id\":7");
     CHECK_HAS("\"state_label\":\"active\"");
-    CHECK_HAS("\"endpoint\":\"1.2.3.4:443\",\"scheduler\":\"wlb\"");
+    CHECK_HAS("\"endpoint\":\"1.2.3.4:443\",\"vpn_ip\":\"10.0.0.7\",\"vpn_ip6\":\"\","
+              "\"scheduler\":\"wlb\"");
 }
 
 /* Sched getter shorter than the client list (or failing): unknown. */
@@ -551,6 +601,7 @@ test_get_status_scheduler_missing(void)
         g_sched_n = n;
         call("{\"cmd\":\"get_status\"}");
         CHECK_HAS("\"scheduler\":\"unknown\"");
+        CHECK_HAS("\"vpn_ip\":\"\",\"vpn_ip6\":\"\"");
     }
     g_sched_n = 1;
 }
@@ -821,6 +872,10 @@ seed_worst_case(void)
     g_sched_n = MQVPN_MAX_USERS;
     memset(g_sched_label, 's', 15);
     g_sched_label[15] = '\0';
+    memset(g_sched_vpn_ip, '4', 15);
+    g_sched_vpn_ip[15] = '\0';
+    memset(g_sched_vpn_ip6, '6', 45);
+    g_sched_vpn_ip6[45] = '\0';
 }
 
 static void
@@ -901,6 +956,8 @@ main(void)
     test_add_user_missing_name();
     test_add_user_missing_key();
     test_add_user_server_failure();
+    test_add_user_ip();
+    test_add_user_rejects();
     test_add_user_name_decoded_and_bounded();
 
     test_remove_user_success();

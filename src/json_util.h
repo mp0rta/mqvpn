@@ -10,6 +10,7 @@
 #ifndef MQVPN_JSON_UTIL_H
 #define MQVPN_JSON_UTIL_H
 
+#include "user_spec.h"
 #include "yyjson.h"
 
 #include <limits.h>
@@ -66,14 +67,15 @@ json_get_u64(const yyjson_val *val, uint64_t *out)
 }
 
 /* "users" array shared by the file config and the Config API. Elements are
- * "name:key" strings (split at the first ':', the pair capped at 359 bytes
- * like the INI User= parser) or {"name":"..","key":".."} objects. Each pair
- * goes to add_user(ctx, name, key). Returns -1 if arr is not an array, an
- * element has the wrong shape, or add_user returns non-zero; elements before
- * the failing one stay applied. */
+ * "name:key[:ip]" strings (see mqvpn_user_spec_split; the whole string capped
+ * at 359 bytes like the INI User= parser) or {"name":"..","key":"..","ip":".."}
+ * objects; "ip" is optional but must be a string when present. Each entry goes
+ * to add_user(ctx, name, key, ip), ip NULL when absent. Returns -1 if arr is
+ * not an array, an element has the wrong shape, a name is 64 bytes or more, or
+ * add_user returns non-zero; elements before the failing one stay applied. */
 static inline int
 mqvpn_json_parse_users(yyjson_val *arr, void *ctx,
-                       int (*add_user)(void *, const char *, const char *))
+                       int (*add_user)(void *, const char *, const char *, const char *))
 {
     if (!yyjson_is_arr(arr) || !add_user) return -1;
 
@@ -82,23 +84,34 @@ mqvpn_json_parse_users(yyjson_val *arr, void *ctx,
     while ((el = yyjson_arr_iter_next(&it)) != NULL) {
         char name[64];
         char key[256];
+        char pair[360];
+        char ipbuf[16];
+        const char *ip = NULL;
         if (yyjson_is_str(el)) {
-            char pair[360];
+            char *n, *k, *i;
             if (json_copy_str(el, pair, sizeof(pair)) < 0) return -1;
-            char *sep = strchr(pair, ':');
-            if (!sep || (size_t)(sep - pair) >= sizeof(name)) return -1;
-            *sep = '\0';
-            snprintf(name, sizeof(name), "%.*s", (int)(sizeof(name) - 1), pair);
-            snprintf(key, sizeof(key), "%.*s", (int)(sizeof(key) - 1), sep + 1);
+            if (mqvpn_user_spec_split(pair, &n, &k, &i) < 0 || strlen(n) >= sizeof(name))
+                return -1;
+            snprintf(name, sizeof(name), "%s", n);
+            snprintf(key, sizeof(key), "%.*s", (int)(sizeof(key) - 1), k);
+            ip = i;
         } else if (yyjson_is_obj(el)) {
+            yyjson_val *ip_v = yyjson_obj_get(el, "ip");
             if (yyjson_get_len(yyjson_obj_get(el, "name")) >= sizeof(name) ||
                 json_copy_str(yyjson_obj_get(el, "name"), name, sizeof(name)) < 0 ||
                 json_copy_str(yyjson_obj_get(el, "key"), key, sizeof(key)) < 0)
                 return -1;
+            if (ip_v) {
+                /* 16+ bytes can never be IPv4; json_copy_str would cut it */
+                if (yyjson_get_len(ip_v) >= sizeof(ipbuf) ||
+                    json_copy_str(ip_v, ipbuf, sizeof(ipbuf)) < 0)
+                    return -1;
+                ip = ipbuf;
+            }
         } else {
             return -1;
         }
-        if (add_user(ctx, name, key) != 0) return -1;
+        if (add_user(ctx, name, key, ip) != 0) return -1;
     }
     return 0;
 }

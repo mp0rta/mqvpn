@@ -166,15 +166,20 @@ static int
 ctrl_cmd_add_user(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
-    char name[64] = {0}, key[256] = {0};
+    char name[64] = {0}, key[256] = {0}, ip[16] = {0};
     yyjson_val *name_val = yyjson_obj_get(req, "name");
+    yyjson_val *ip_val = yyjson_obj_get(req, "ip");
     if (json_copy_str(name_val, name, sizeof(name)) < 0 ||
         json_copy_str(yyjson_obj_get(req, "key"), key, sizeof(key)) < 0)
         return ctrl_error(resp, resp_len, "name and key required");
     if (yyjson_get_len(name_val) >= sizeof(name))
         return ctrl_error(resp, resp_len, "name exceeds 63 bytes");
+    /* A 16+ byte value is never a dotted quad; refuse it rather than cut it. */
+    if (ip_val && (yyjson_get_len(ip_val) >= sizeof(ip) ||
+                   json_copy_str(ip_val, ip, sizeof(ip)) < 0))
+        return ctrl_error(resp, resp_len, "ip must be an IPv4 address string");
 
-    int rc = mqvpn_server_add_user(server, name, key);
+    int rc = mqvpn_server_add_user_ip(server, name, key, ip_val ? ip : NULL);
     if (rc != MQVPN_OK) {
         char m[48];
         snprintf(m, sizeof(m), "add_user failed (%d)", rc);
@@ -320,6 +325,10 @@ ctrl_cmd_get_status(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t 
         yyjson_mut_val *jc = yyjson_mut_arr_add_obj(doc, jclients);
         ok &= yyjson_mut_obj_add_strcpy(doc, jc, "user", ci->username);
         ok &= yyjson_mut_obj_add_strcpy(doc, jc, "endpoint", ci->endpoint);
+        ok &= yyjson_mut_obj_add_strcpy(doc, jc, "vpn_ip",
+                                        i < n_sched ? sched[i].vpn_ip : "");
+        ok &= yyjson_mut_obj_add_strcpy(doc, jc, "vpn_ip6",
+                                        i < n_sched ? sched[i].vpn_ip6 : "");
         ok &= yyjson_mut_obj_add_strcpy(doc, jc, "scheduler",
                                         i < n_sched ? sched[i].scheduler : "unknown");
         ok &= yyjson_mut_obj_add_uint(doc, jc, "connected_sec", conn_sec);

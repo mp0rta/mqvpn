@@ -731,6 +731,14 @@ main(void)
         if (strcmp(g_req1.sched_echo, "minrtt") == 0 && ncs >= 1 &&
             strcmp(cs[0].scheduler, "minrtt") == 0) {
             printf("  client-requested scheduler: echo=minrtt, conn=minrtt     PASS\n");
+            char want[16];
+            snprintf(want, sizeof(want), "%d.%d.%d.%d", g_assigned_ip[0],
+                     g_assigned_ip[1], g_assigned_ip[2], g_assigned_ip[3]);
+            if (strcmp(cs[0].vpn_ip, want) != 0) {
+                printf("  get_client_sched vpn_ip='%s' (expected %s)   FAIL\n",
+                       cs[0].vpn_ip, want);
+                rc = 1;
+            }
         } else {
             printf("  client-requested scheduler: echo='%s' conn=%s (expected minrtt) "
                    "FAIL\n",

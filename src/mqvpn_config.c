@@ -20,9 +20,11 @@
 int mqvpn_config_add_user(mqvpn_config_t *cfg, const char *username, const char *key);
 
 static int
-json_add_user_cb(void *ctx, const char *name, const char *key)
+json_add_user_cb(void *ctx, const char *name, const char *key, const char *ip)
 {
-    return (mqvpn_config_add_user((mqvpn_config_t *)ctx, name, key) == MQVPN_OK) ? 0 : -1;
+    return (mqvpn_config_add_user_ip((mqvpn_config_t *)ctx, name, key, ip) == MQVPN_OK)
+               ? 0
+               : -1;
 }
 
 static int
@@ -168,6 +170,13 @@ mqvpn_config_set_auth_key(mqvpn_config_t *cfg, const char *key)
 int
 mqvpn_config_add_user(mqvpn_config_t *cfg, const char *username, const char *key)
 {
+    return mqvpn_config_add_user_ip(cfg, username, key, NULL);
+}
+
+int
+mqvpn_config_add_user_ip(mqvpn_config_t *cfg, const char *username, const char *key,
+                         const char *ip)
+{
     if (!cfg || !username || !key || username[0] == '\0' || key[0] == '\0' ||
         strlen(username) >= sizeof(cfg->user_names[0])) {
         return MQVPN_ERR_INVALID_ARG;
@@ -179,22 +188,34 @@ mqvpn_config_add_user(mqvpn_config_t *cfg, const char *username, const char *key
             return MQVPN_ERR_INVALID_ARG;
     }
 
+    uint32_t ip4 = 0;
+    if (ip) {
+        struct in_addr a;
+        if (inet_pton(AF_INET, ip, &a) != 1 || a.s_addr == 0)
+            return MQVPN_ERR_INVALID_ARG;
+        ip4 = a.s_addr;
+        /* Global-key logins are named "(global)"; that name must not own an address. */
+        if (strcmp(username, "(global)") == 0) return MQVPN_ERR_INVALID_ARG;
+    }
+
+    int idx = -1;
     for (int i = 0; i < cfg->n_users; i++) {
-        if (strcmp(cfg->user_names[i], username) == 0) {
-            snprintf(cfg->user_keys[i], sizeof(cfg->user_keys[i]), "%s", key);
-            return MQVPN_OK;
+        if (strcmp(cfg->user_names[i], username) == 0) idx = i;
+    }
+    if (ip4) {
+        for (int i = 0; i < cfg->n_users; i++) {
+            if (i != idx && cfg->user_ip4[i] == ip4) return MQVPN_ERR_INVALID_ARG;
         }
     }
 
-    if (cfg->n_users >= MQVPN_MAX_USERS) {
-        return MQVPN_ERR_MAX_CLIENTS;
+    if (idx < 0) {
+        if (cfg->n_users >= MQVPN_MAX_USERS) return MQVPN_ERR_MAX_CLIENTS;
+        idx = cfg->n_users++;
+        snprintf(cfg->user_names[idx], sizeof(cfg->user_names[idx]), "%s", username);
+        cfg->user_ip4[idx] = 0;
     }
-
-    snprintf(cfg->user_names[cfg->n_users], sizeof(cfg->user_names[cfg->n_users]), "%s",
-             username);
-    snprintf(cfg->user_keys[cfg->n_users], sizeof(cfg->user_keys[cfg->n_users]), "%s",
-             key);
-    cfg->n_users++;
+    snprintf(cfg->user_keys[idx], sizeof(cfg->user_keys[idx]), "%s", key);
+    if (ip4) cfg->user_ip4[idx] = ip4;
     return MQVPN_OK;
 }
 
@@ -212,6 +233,7 @@ mqvpn_config_remove_user(mqvpn_config_t *cfg, const char *username)
                        sizeof(cfg->user_names[j - 1]));
                 memcpy(cfg->user_keys[j - 1], cfg->user_keys[j],
                        sizeof(cfg->user_keys[j - 1]));
+                cfg->user_ip4[j - 1] = cfg->user_ip4[j];
             }
             cfg->n_users--;
             return MQVPN_OK;
