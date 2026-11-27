@@ -10,7 +10,7 @@
 #include "flow_sched.h"
 #include "redundant_tx.h"
 #include "mqvpn_sched_names.h"
-#include "json_util.h" /* mqvpn_user_spec_split */
+#include "user_spec.h"
 
 #include <xquic/xquic.h> /* for XQC_ENABLE_* compile-time defines */
 

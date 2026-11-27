@@ -11,6 +11,7 @@
  */
 #include "config.h"
 #include "json_util.h"
+#include "user_spec.h"
 #include "libmqvpn.h"
 #include "log.h"
 #include "redundant_tx.h"

@@ -10,7 +10,7 @@
 #include "config.h"
 #include "libmqvpn.h" /* MQVPN_RECV_RATE_LIMIT_MAX */
 #include "mqvpn_sched_names.h"
-#include "json_util.h"
+#include "user_spec.h"
 #include "log.h"
 #include <stdio.h>
 #include <stdlib.h>
