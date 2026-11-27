@@ -40,9 +40,16 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.mqvpn.app.data.DemoSettings
+import com.mqvpn.app.data.PathRole
+import com.mqvpn.app.data.SplitChoice
+import com.mqvpn.app.data.roleOf
+import com.mqvpn.app.data.splitChoice
+import com.mqvpn.app.data.withRole
 import com.mqvpn.app.ui.MqvpnViewModel
 import com.mqvpn.app.ui.SettingsViewModel
 import com.mqvpn.app.ui.components.LAST_PATH_CAPTION
+import com.mqvpn.app.ui.components.Segmented
 import com.mqvpn.app.ui.components.UseOffSegmented
 import com.mqvpn.app.ui.fmtMbps
 import com.mqvpn.app.ui.pathCardViews
@@ -63,6 +70,15 @@ fun PathsScreen(vm: MqvpnViewModel, settingsVm: SettingsViewModel, modifier: Mod
     val s = draft ?: return
     var blocked by remember { mutableStateOf(false) }
     val cards = pathCardViews(paths, available, history.samples.lastOrNull())
+    // Only the failover scheduler keeps a backup path idle, so the third choice shows under Backup alone.
+    val backupMode = s.splitChoice() == SplitChoice.BACKUP
+    // Turning the last connection Off would leave no path (never persistable): refuse.
+    fun apply(change: (DemoSettings) -> DemoSettings) {
+        if (change(s).pathPolicyValid()) {
+            blocked = false
+            settingsVm.update(change)
+        } else blocked = true
+    }
 
     Column(
         modifier.fillMaxSize().background(c.win).verticalScroll(rememberScrollState()).padding(20.dp),
@@ -70,7 +86,8 @@ fun PathsScreen(vm: MqvpnViewModel, settingsVm: SettingsViewModel, modifier: Mod
     ) {
         Text("Paths", color = c.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
         Text(
-            "Use carries your traffic. If one connection fails, the others take over. Off leaves it out.",
+            if (backupMode) "Use carries your traffic. Backup stays idle until no Use connection works. Off leaves it out."
+            else "Use carries your traffic. If one connection fails, the others take over. Off leaves it out.",
             color = c.t2, fontSize = 12.5.sp, lineHeight = 19.sp,
         )
         for (card in cards) {
@@ -104,12 +121,10 @@ fun PathsScreen(vm: MqvpnViewModel, settingsVm: SettingsViewModel, modifier: Mod
                             Text("${fmtMbps(card.rateBps)} Mbps", color = c.t2, fontSize = 11.sp, textAlign = TextAlign.End, modifier = Modifier.width(78.dp))
                         }
                     }
-                    if (card.available) UseOffSegmented(on, editable) { want ->
-                        // Turning the last connection Off would leave no path (never persistable): refuse.
-                        if (want || t.set(s, false).pathPolicyValid()) {
-                            blocked = false
-                            settingsVm.update { t.set(it, want) }
-                        } else blocked = true
+                    if (card.available && backupMode) {
+                        Segmented(ROLE_OPTIONS, s.roleOf(t.type, on), editable) { want -> apply { it.withRole(t.type, want, t.set) } }
+                    } else if (card.available) {
+                        UseOffSegmented(on, editable) { want -> apply { t.set(it, want) } }
                     }
                 }
             }
@@ -117,6 +132,8 @@ fun PathsScreen(vm: MqvpnViewModel, settingsVm: SettingsViewModel, modifier: Mod
         if (blocked) Text(LAST_PATH_CAPTION, color = c.red, fontSize = 12.sp)
     }
 }
+
+private val ROLE_OPTIONS = listOf("Use" to PathRole.USE, "Backup" to PathRole.BACKUP, "Off" to PathRole.OFF)
 
 private fun PathType.icon() = when (this) {
     PathType.WIFI -> Icons.Filled.Wifi

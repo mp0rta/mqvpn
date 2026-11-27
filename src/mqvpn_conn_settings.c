@@ -40,6 +40,13 @@ mqvpn_apply_scheduler(xqc_conn_settings_t *cs, mqvpn_scheduler_t sched)
     switch (sched) {
     case MQVPN_SCHED_WLB:
     case MQVPN_SCHED_WLB_UDP_PIN: cs->scheduler_callback = xqc_wlb_scheduler_cb; break;
+    case MQVPN_SCHED_FAILOVER:
+        /* xquic's backup scheduler: a STANDBY path is used only when no
+         * AVAILABLE path is usable. STANDBY paths are not probed
+         * (standby_path_probe_timeout stays 0): a PING every second keeps a
+         * cellular radio awake, and failing over is as fast without it. */
+        cs->scheduler_callback = xqc_backup_scheduler_cb;
+        break;
     case MQVPN_SCHED_BACKUP_FEC:
 #if defined(XQC_ENABLE_FEC) && defined(XQC_ENABLE_XOR)
         cs->scheduler_callback = xqc_backup_fec_scheduler_cb;
@@ -110,6 +117,16 @@ mqvpn_apply_reinjection(const mqvpn_conn_settings_input_t *in, xqc_conn_settings
     }
 }
 
+uint64_t
+mqvpn_tcp_stream_recv_rate(uint64_t conn_recv_rate)
+{
+    if (conn_recv_rate == 0) return 0;
+    /* max(1, ...): a rate of 0 means "no rate" and would give the stream a
+     * 16 MiB window. */
+    uint64_t r = conn_recv_rate / 4;
+    return r ? r : 1;
+}
+
 void
 mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settings_t *out)
 {
@@ -120,6 +137,12 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     out->proto_version = XQC_VERSION_V1;
     out->pacing_on = 1;
     out->max_pkt_out_size = mqvpn_pkt_out_size(in->path_mtu);
+    /* Advertise what a smaller PathMTU can receive (max_udp_payload_size),
+     * so a server with a bigger one sizes its packets for this client: xquic
+     * caps a server's packets to it minus the ACK and tag room, which gives
+     * back the size this side sends. At the cap the default (1500) is kept. */
+    if (in->path_mtu > 0 && out->max_pkt_out_size < MQVPN_XQC_MAX_PKT_OUT_SIZE)
+        out->max_udp_payload_size = out->max_pkt_out_size + MQVPN_PKT_OUT_OVERHEAD;
     /* PMTUD: start at the smallest size that still gives an IPv6 inner MTU
      * of 1280, with the reorder header when reorder may be negotiated, and
      * let xquic grow it while its probes are acknowledged, up to the PathMTU
@@ -205,7 +228,9 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
         break;
     }
 
-    /* --- intentional client/server asymmetry (4) ---
+    out->max_body_buf_per_stream = MQVPN_STREAM_BODY_BUF_BYTES;
+
+    /* --- intentional client/server asymmetry (7) ---
      * Each branch documents why these fields differ between sides. Do not
      * collapse without revisiting tests/test_conn_settings.c
      * test_asymmetry_server_vs_client. */
@@ -226,6 +251,8 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
 
         if (in->recv_rate_bytes_per_sec) {
             out->recv_rate_bytes_per_sec = in->recv_rate_bytes_per_sec;
+            out->enable_stream_rate_limit = 1;
+            out->init_recv_window = MQVPN_STREAM_INIT_RECV_WINDOW;
         }
     }
 

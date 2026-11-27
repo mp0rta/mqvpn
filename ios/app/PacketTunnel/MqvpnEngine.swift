@@ -70,6 +70,8 @@ final class MqvpnEngine: NSObject {
     /// Bind ctx per path handle (tick-thread confined). Library-owned once
     /// add_path succeeded; the pointer is read for stats and drains only.
     private var bindCtx: [mqvpn_path_handle_t: UnsafeMutableRawPointer] = [:]
+    /// The TUN batch the core is taking (tick-thread confined).
+    private let tunBacklog = TunBacklog()
 
     // Injected by PacketTunnelProvider:
     var onTunOutput: ((Data) -> Void)?          // -> packetFlow.writePackets
@@ -221,7 +223,7 @@ final class MqvpnEngine: NSObject {
         if hybrid.enabled {
             let iosTcpMaxFlows: UInt32 = 64      // couples with iOS-profile MEMP_NUM_TCP_PCB=128
             let iosIdleTimeoutSec: UInt32 = 300  // library default, stated explicitly
-            let iosRecvRateLimit: UInt64 = 125_000_000  // 1 Gbps ceiling; QUIC window = rate x srtt
+            let iosRecvRateLimit: UInt64 = 125_000_000  // 1 Gbps for the connection, about 250 Mbit/s per hybrid TCP flow
             let rcs = [
                 mqvpn_config_set_hybrid_tcp_mode(cfg, Int32(hybrid.tcpMode)),
                 mqvpn_config_set_hybrid_limits(cfg, iosTcpMaxFlows, iosIdleTimeoutSec),
@@ -379,19 +381,32 @@ final class MqvpnEngine: NSObject {
             interest.struct_size = UInt32(MemoryLayout<mqvpn_interest_t>.size)
             mqvpn_client_get_interest(c, &interest)
             self.scheduleTick(afterMs: interest.next_timer_ms)
+            // backpressure over: the held batch goes in, then the next read
+            if interest.tun_readable != 0 && self.tunBacklog.waiting {
+                self.tunBacklog.resume { Self.sendTun(c, $0) }
+                self.scheduleTick(afterMs: 0)
+            }
         }
         runLoop.add(t, forMode: .default)
         tickTimer = t
     }
 
     // All methods below assume the caller already hopped to the tick thread.
-    func feedTunPacket(_ data: Data) {
+    /// Feeds one readPackets batch and calls `rearm` once it is in: after a
+    /// packet refused with MQVPN_ERR_AGAIN, only when the tick sees
+    /// tun_readable again (TunBacklog). Never once the client is gone.
+    func feedTunPackets(_ packets: [Data], rearm: @escaping () -> Void) {
         guard let c = client else { return }
-        _ = data.withUnsafeBytes { buf in
-            mqvpn_client_on_tun_packet(c, buf.baseAddress?.assumingMemoryBound(to: UInt8.self),
-                                       data.count)
-        }
+        tunBacklog.feed(packets, send: { Self.sendTun(c, $0) }, then: rearm)
         scheduleTick(afterMs: 0)   // input may arm new engine work; tick soon
+    }
+
+    /// False = MQVPN_ERR_AGAIN (backpressure); any other result goes on.
+    private static func sendTun(_ c: OpaquePointer, _ p: Data) -> Bool {
+        let rc = p.withUnsafeBytes { buf in
+            mqvpn_client_on_tun_packet(c, buf.baseAddress?.assumingMemoryBound(to: UInt8.self), p.count)
+        }
+        return rc != Int32(MQVPN_ERR_AGAIN.rawValue)
     }
     /// Registers a path: wraps the (borrowed) fd in the bundled POSIX bind
     /// and hands ops + ctx to the library. Returns the handle and the

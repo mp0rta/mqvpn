@@ -155,22 +155,32 @@ struct SecondaryButton: View {
 
 /// Use / Off segmented control (android UseOffSegmented).
 struct UseOffSegmented: View {
-    @Environment(\.mq) private var mq
     let isOn: Bool
     var enabled: Bool = true
     let onChange: (Bool) -> Void
     var body: some View {
+        Segmented(options: [("Use", true), ("Off", false)], value: isOn, enabled: enabled, onChange: onChange)
+    }
+}
+
+/// Segmented control (android Segmented): one segment per option.
+struct Segmented<T: Equatable>: View {
+    @Environment(\.mq) private var mq
+    let options: [(String, T)]
+    let value: T
+    var enabled: Bool = true
+    let onChange: (T) -> Void
+    var body: some View {
         HStack(spacing: 0) {
-            segment("Use", true)
-            segment("Off", false)
+            ForEach(options.indices, id: \.self) { segment(options[$0].0, options[$0].1) }
         }
         .padding(2).background(mq.fill, in: RoundedRectangle(cornerRadius: 8))
         .disabled(!enabled).opacity(enabled ? 1 : 0.5)
     }
 
-    private func segment(_ label: String, _ value: Bool) -> some View {
-        let sel = isOn == value
-        return Button { if !sel { onChange(value) } } label: {
+    private func segment(_ label: String, _ option: T) -> some View {
+        let sel = value == option
+        return Button { if !sel { onChange(option) } } label: {
             Text(label).mqFont(13, sel ? .semibold : .regular).foregroundColor(mq.text)
                 .padding(.vertical, 6).frame(maxWidth: .infinity)
                 .background {

@@ -22,15 +22,22 @@ struct PathsScreen: View {
     let live: Bool                     // connected: show the per-path rate rows
     let cards: [PathCard]
     let policy: PathPolicy
+    /// The split is Backup: only the failover scheduler keeps a backup path
+    /// idle, so the cards offer the third choice under it alone.
+    let backupMode: Bool
     let editable: Bool
     let setPolicy: (PathPolicy) -> Void
     @State private var blocked = false
+
+    private static let roleOptions: [(String, PathRole)] = [("Use", .use), ("Backup", .backup), ("Off", .off)]
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Paths").mqFont(20, .bold).foregroundColor(mq.text).accessibilityAddTraits(.isHeader)
-                Text("Use carries your traffic. If one connection fails, the others take over. Off leaves it out.")
+                Text(backupMode
+                     ? "Use carries your traffic. Backup stays idle until no Use connection works. Off leaves it out."
+                     : "Use carries your traffic. If one connection fails, the others take over. Off leaves it out.")
                     .mqFont(12.5).lineSpacing(5).foregroundColor(mq.t2)
                 ForEach(cards, id: \.kind) { row($0) }
                 if blocked { Text(lastPathCaption).mqFont(12).foregroundColor(mq.red) }
@@ -66,16 +73,22 @@ struct PathsScreen: View {
                             .accessibilityLabel("Download \(fmtMbps(Double(card.rateBps))) megabits per second")
                     }
                 }
-                if card.available {
-                    UseOffSegmented(isOn: on, enabled: editable) { set(card.kind, $0) }
+                if card.available && backupMode {
+                    Segmented(options: Self.roleOptions, value: policy.role(card.kind), enabled: editable) {
+                        apply(policy.setting(card.kind, role: $0))
+                    }
+                    .accessibilityLabel("\(card.name)")
+                } else if card.available {
+                    UseOffSegmented(isOn: on, enabled: editable) { apply(policy.setting(card.kind, on: $0)) }
                         .accessibilityLabel("\(card.name)")
                 }
             }
         }.opacity(card.available ? 1 : 0.55)
     }
 
-    private func set(_ kind: TransportKind, _ want: Bool) {
-        guard let p = policy.setting(kind, on: want) else { blocked = true; return }
+    /// nil = the change would turn the last connection off (never persistable): refuse.
+    private func apply(_ p: PathPolicy?) {
+        guard let p else { blocked = true; return }
         blocked = false
         setPolicy(p)
     }

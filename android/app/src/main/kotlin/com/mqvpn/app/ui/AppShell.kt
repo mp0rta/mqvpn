@@ -3,7 +3,17 @@
 
 package com.mqvpn.app.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.Home
@@ -20,8 +30,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -50,7 +66,11 @@ fun startDestination(settings: DemoSettings): String =
 fun AppShell(vm: MqvpnViewModel, settingsVm: SettingsViewModel, nav: NavHostController) {
     // Wait for the persisted settings so an upgrader is never routed to Setup by defaults.
     val draft by settingsVm.draft.collectAsState()
-    val settings = draft ?: return
+    val loadError by settingsVm.loadError.collectAsState()
+    val settings = draft ?: run {
+        loadError?.let { LoadErrorScreen(it, settingsVm::retryLoad) }
+        return
+    }
     // Frozen at first load: saving a server later must not re-route the live NavHost.
     val start = rememberSaveable { startDestination(settings) }
     NavHost(nav, startDestination = start) {
@@ -96,7 +116,29 @@ private fun MainTabs(vm: MqvpnViewModel, settingsVm: SettingsViewModel, nav: Nav
             Tab.HOME -> HomeScreen(vm, settingsVm, { tab = Tab.PATHS }, { tab = Tab.SETTINGS }, m)
             Tab.PATHS -> PathsScreen(vm, settingsVm, m)
             Tab.STATS -> StatsScreen(vm, settingsVm, { tab = Tab.HOME }, m)
-            Tab.SETTINGS -> SettingsScreen(vm, settingsVm, { nav.navigate(it) }, m)
+            Tab.SETTINGS -> SettingsScreen(vm, settingsVm, { nav.navigate(it) }, { tab = Tab.PATHS }, m)
         }
+    }
+}
+
+/** Shown instead of a blank window when the stored settings cannot be read. */
+@Composable
+private fun LoadErrorScreen(message: String, onRetry: () -> Unit) {
+    val c = LocalMqColors.current
+    Column(
+        // Scrolls so a long message can never push the only way out off a short window.
+        Modifier.fillMaxSize().background(c.win).safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text("Couldn't load your settings", color = c.text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            message, color = c.t2, fontSize = 13.sp, textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = 8.dp, bottom = 20.dp),
+        )
+        Button(
+            onRetry, shape = RoundedCornerShape(10.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = Color.White),
+        ) { Text("Try again", fontSize = 15.sp, fontWeight = FontWeight.SemiBold) }
     }
 }

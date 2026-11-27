@@ -45,7 +45,8 @@ private struct RootView: View {
                 .tabItem { Label("Paths", systemImage: "point.3.connected.trianglepath.dotted") }.tag(Tab.paths)
             StatsTab(controller: controller, live: controller.live, onGoHome: { tab = .home })
                 .tabItem { Label("Stats", systemImage: "chart.bar") }.tag(Tab.stats)
-            SettingsTab(controller: controller, eventLog: controller.eventLog, onRunSetup: { showSetup = true })
+            SettingsTab(controller: controller, eventLog: controller.eventLog, onRunSetup: { showSetup = true },
+                        onOpenPaths: { tab = .paths })
                 .tabItem { Label("Settings", systemImage: "gearshape") }.tag(Tab.settings)
         }
         .tint(mq.accent)

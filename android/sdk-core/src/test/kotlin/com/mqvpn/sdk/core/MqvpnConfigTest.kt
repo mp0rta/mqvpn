@@ -60,6 +60,7 @@ class MqvpnConfigTest {
         assertEquals(1, MqvpnConfig.Scheduler.WLB.native)
         assertEquals(2, MqvpnConfig.Scheduler.BACKUP_FEC.native)
         assertEquals(3, MqvpnConfig.Scheduler.WLB_UDP_PIN.native)
+        assertEquals(4, MqvpnConfig.Scheduler.FAILOVER.native)
     }
 
     @Test
@@ -192,5 +193,22 @@ class MqvpnConfigTest {
     fun oldJsonWithoutBluetoothPath_decodesWithDefault() {
         val oldJson = """{"serverAddress":"h","authKey":"k"}"""
         assertFalse(MqvpnConfig.fromJson(oldJson).bluetoothPathEnabled)
+    }
+
+    @Test
+    fun pathBackup_defaultsToCellularOnly() {
+        for (c in listOf(
+            MqvpnConfig(serverAddress = "h", authKey = "k"),
+            MqvpnConfig.fromJson("""{"serverAddress":"h","authKey":"k"}"""),
+        )) {
+            assertTrue(c.cellularPathBackup)
+            assertFalse(c.wifiPathBackup || c.ethernetPathBackup || c.bluetoothPathBackup)
+        }
+    }
+
+    @Test
+    fun pathBackup_jsonRoundTrip() {
+        val c = MqvpnConfig(serverAddress = "h", authKey = "k", wifiPathBackup = true, cellularPathBackup = false)
+        assertEquals(c, MqvpnConfig.fromJson(c.toJson()))
     }
 }

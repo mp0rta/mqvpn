@@ -296,12 +296,14 @@ path_socket_open(platform_ctx_t *p, sa_family_t af, int *step)
  * re-add sibling). The "path_mgr:" lines keep the label of the module these
  * slots replaced: log wording is a compatibility surface. */
 int
-platform_paths_open(platform_ctx_t *p, int n_ifaces, const char *const *ifaces)
+platform_paths_open(platform_ctx_t *p, int n_ifaces, const char *const *ifaces,
+                    const int *backup)
 {
     int want = n_ifaces > 0 ? n_ifaces : 1;
     for (int i = 0; i < want; i++) {
         const char *iface = n_ifaces > 0 ? ifaces[i] : NULL;
         platform_path_t *s = platform_path_append(p, iface);
+        if (s) s->backup = n_ifaces > 0 && backup && backup[i];
         if (!s) {
             LOG_ERR("path_mgr: max paths (%d) reached", MQVPN_MAX_PATHS);
         } else {
@@ -422,9 +424,8 @@ recovery_rollback(platform_ctx_t *p, platform_path_t *s, mqvpn_add_path_outcome_
         return;
     }
 
-    /* Transient failure (most commonly -XQC_EMP_NO_AVAIL_PATH_ID during
-     * WiFi reassoc CID-lag burst). Bump the consecutive-failure counter so
-     * the 3s recovery timer eventually gives up and waits for reconnect. */
+    /* Transient failure. Bump the consecutive-failure counter so the 3s
+     * recovery timer eventually gives up and waits for reconnect. */
     s->recover_failures++;
     if (s->recover_failures >= PATH_RECOVER_FAILURE_LIMIT) {
         LOG_WRN("%s: path %s recovery abandoned after %d consecutive "
@@ -558,17 +559,16 @@ netmon_on_addr_removed(platform_ctx_t *p, const char *ifname, sa_family_t af)
  * Spec sec 3.4 "Stateless Platforms" compliance: this handler holds NO
  * lifecycle state — it queries the library via mqvpn_client_get_paths()
  * each tick and acts on the public path list. A slot's recover_failures is pure
- * backpressure to bound the busy-loop on transient xquic errors during a
- * WiFi reassoc CID-lag burst — not a state mirror.
+ * backpressure to bound the busy-loop on transient xquic errors — not a
+ * state mirror.
  *
  * Why this timer is necessary: on carrier loss/restore the kernel emits
  * a single link event with the running flag toggled — IP/admin state
  * don't change, so no address event follows. If the one-shot
  * netmon_try_readd_removed_path() driven by that single event fails
- * synchronously (e.g. xqc_conn_create_path returns
- * -XQC_EMP_NO_AVAIL_PATH_ID because the server hasn't replenished CIDs
- * yet, or the previous CLOSED_DROPPED slot hasn't drained xquic-side
- * fields), there is no further event to retry on. The library's
+ * synchronously (e.g. the interface has no route to the server yet, or
+ * the previous CLOSED_DROPPED slot hasn't drained xquic-side fields),
+ * there is no further event to retry on. The library's
  * tick_drive_retry_timer only services CREATE_WAIT/DEGRADED, not
  * CLOSED_DROPPED — so a platform-side periodic poll is the only way
  * to recover.

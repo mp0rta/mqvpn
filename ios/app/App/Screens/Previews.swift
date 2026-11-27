@@ -85,7 +85,7 @@ struct HomeScreen_Previews: PreviewProvider {
 struct PathsScreen_Previews: PreviewProvider {
     static var previews: some View {
         Themed {
-            PathsScreen(live: true, cards: PreviewData.cards, policy: PathPolicy(), editable: false, setPolicy: { _ in })
+            PathsScreen(live: true, cards: PreviewData.cards, policy: PathPolicy(), backupMode: true, editable: false, setPolicy: { _ in })
         }
     }
 }
@@ -104,7 +104,7 @@ struct SettingsScreen_Previews: PreviewProvider {
     static var previews: some View {
         Themed {
             SettingsScreen(form: SettingsForm(draft: PreviewData.draft), events: [], tunnel: nil,
-                           onNavigate: { _ in }, onRunSetup: {})
+                           onNavigate: { _ in }, onRunSetup: {}, onOpenPaths: {})
         }
     }
 }

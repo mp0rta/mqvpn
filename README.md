@@ -19,20 +19,26 @@
     <a href="https://x.com/m9vpn">Official X account</a>
   </p>
 
-  <p>
-    <a href="https://play.google.com/store/apps/details?id=org.mqvpn.app">
-      <img
-        src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png"
-        alt="Get it on Google Play"
-        height="80">
-    </a>
-    <a href="https://f-droid.org/packages/org.mqvpn.app/">
-      <img
-        src="https://fdroid.gitlab.io/artwork/badge/get-it-on.png"
-        alt="Get it on F-Droid"
-        height="80">
-    </a>
-  </p>
+<p>
+  <a href="https://apps.apple.com/app/id6792797132">
+    <img
+      src="https://appure.io/badges/appstore/black/en.svg"
+      alt="Download on the App Store"
+      height="50">
+  </a>
+  <a href="https://play.google.com/store/apps/details?id=org.mqvpn.app">
+    <img
+      src="https://appure.io/badges/playstore/en.svg"
+      alt="Get it on Google Play"
+      height="40">
+  </a>
+<a href="https://f-droid.org/packages/org.mqvpn.app/">
+  <img
+    src="https://upload.wikimedia.org/wikipedia/commons/a/a3/Get_it_on_F-Droid_%28material_design%29.svg"
+    alt="Get it on F-Droid"
+    height="40">
+</a>
+</p>
 </div>
 
 mqvpn is an open-source VPN that combines multiple internet connections—such as Wi-Fi, cellular, Starlink, and multiple ISPs—for bandwidth aggregation and seamless failover.
@@ -49,7 +55,7 @@ https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
 - [Key Use Cases](#key-use-cases)
 - [Installation](#installation)
   - [Server](#server)
-  - [Client (deb package)](#client-deb-package)
+  - [Client (Debian and Ubuntu)](#client-debian-and-ubuntu)
   - [Windows client](#windows-client)
   - [macOS client](#macos-client)
   - [Verifying downloads](#verifying-downloads)
@@ -92,11 +98,11 @@ https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
 
 | Platform | Minimum version | CLI | GUI/App | Distribution |
 |---|---|---:|---:|---:|
-| [Ubuntu/Debian (amd64/arm64)](#client-deb-package) | Ubuntu 22.04 / Debian 12 | ✅ | 📋 | Release package |
+| [Ubuntu/Debian (amd64/arm64)](#client-debian-and-ubuntu) | Ubuntu 22.04 / Debian 12 | ✅ | 📋 | Release package |
 | [Arch Linux (amd64/arm64)](https://aur.archlinux.org/packages/mqvpn) | rolling | ✅ | 📋 | AUR |
 | [Windows (amd64/arm64)](#windows-client) | Windows 10 | ✅ | 📋 | Release archive |
 | [macOS arm64](https://github.com/mp0rta/homebrew-tap#install) | macOS 14 (Sonoma) | ✅ | 📋 | Homebrew / Release archive |
-| iOS | iOS 15 | — | 🚧 | App Store planned |
+| [iOS](https://apps.apple.com/app/id6792797132) | iOS 16 | — | 🧪 | App Store |
 | [Android](https://f-droid.org/packages/org.mqvpn.app/) | Android 8.0 (API 26) | — | 🧪 | F-Droid / APK / Play Store |
 
 > ✅ Supported · 🧪 Experimental · 🚧 In development · 📋 Planned
@@ -123,18 +129,58 @@ https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
 
 ### Server
 
+#### Debian and Ubuntu (deb packages)
+
+The `mqvpn` deb contains the VPN program for both client and server; `mqvpn-server` adds the server service, NAT setup, and first-run configuration. Download the `mqvpn` and `mqvpn-server` debs of the same version from [Releases](https://github.com/mp0rta/mqvpn/releases/latest), then install both:
+
+```bash
+# Latest release version and the architecture of this machine
+V=$(curl -fsSL https://api.github.com/repos/mp0rta/mqvpn/releases/latest \
+  | grep -Po '"tag_name": "v\K[^"]+')
+A=$(dpkg --print-architecture)
+B=https://github.com/mp0rta/mqvpn/releases/download/v$V
+curl -fLO $B/mqvpn_${V}_$A.deb -fLO $B/mqvpn-server_${V}_$A.deb
+sudo apt install ./mqvpn_${V}_$A.deb ./mqvpn-server_${V}_$A.deb
+```
+
+The install generates a self-signed TLS certificate, an auth key, and the server config at `/etc/mqvpn/server.conf`, then starts the server and registers it for automatic startup on boot. It keeps a certificate or config that already exists. The generated config turns on hybrid mode and the reorder buffer on the server side; each takes effect only for clients that also turn it on. It also sets `AllowClientScheduler = true`, so a client can ask for its own download scheduler.
+
+The install prints the auth key. To show it again:
+
+```bash
+sudo mqvpn-server-info
+```
+
+The install asks for a client subnet only when the default `10.0.0.0/24` overlaps a network of the server, and for the port only when UDP 443 is already in use. To set values in advance, for example in automation:
+
+```bash
+echo 'mqvpn-server mqvpn-server/subnet string 10.8.0.0/24' | sudo debconf-set-selections
+sudo env MQVPN_PORT=10020 apt install ./mqvpn_${V}_$A.deb ./mqvpn-server_${V}_$A.deb
+```
+
+These values apply only to a new `/etc/mqvpn/server.conf`. To change a running server, edit `/etc/mqvpn/server.conf` and run `sudo systemctl restart mqvpn-server`.
+
+- `sudo apt remove mqvpn-server` stops the server and keeps `/etc/mqvpn`.
+- `sudo apt purge mqvpn-server` also deletes the generated config, auth key, and certificate. Every client then needs the new auth key. Files that you created yourself stay.
+
+More details, including all settings: `/usr/share/doc/mqvpn-server/README.Debian`.
+
+> **Upgrading from 0.19.2 or earlier:** the server files moved from the `mqvpn` deb to the new `mqvpn-server` deb. Install both debs together. Your `/etc/mqvpn` config stays as it is.
+>
+> **Switching from `install.sh`:** first run the install script with `--uninstall` (it keeps `/etc/mqvpn`), then install the debs. The debs use your existing config and certificate.
+
+#### Other Linux distributions (install script)
+
 ```bash
 curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh | sudo bash
 ```
 
-This downloads the latest release, installs the binary, and generates a self-signed TLS certificate, auth key, and server config at `/etc/mqvpn/server.conf`. The generated config turns on hybrid mode and the reorder buffer on the server side; each takes effect only for clients that also turn it on. It also sets `AllowClientScheduler = true`, so a client can ask for its own download scheduler. Add `--start` to start the server and register it for automatic startup on boot:
+This downloads the latest release, installs the binary to `/usr/local`, and generates the same certificate, auth key, and server config as the deb. Add `--start` to start the server and register it for automatic startup on boot:
 
 ```bash
 curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
     | sudo bash -s -- --start
 ```
-
-> **Note:** The self-signed certificate requires `--insecure` on the client. For production, replace with a trusted certificate (e.g. Let's Encrypt) and omit `--insecure`. Point `--cert` (or `Cert` / `cert_file` in a config file) at the full chain file (for Let's Encrypt, `fullchain.pem`): clients do not fetch missing intermediates.
 
 Options can be combined:
 
@@ -149,14 +195,19 @@ curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
     | sudo bash -s -- --uninstall
 ```
 
-### Client (deb package)
+> **Note:** The self-signed certificate requires `--insecure` on the client. For production, replace with a trusted certificate (e.g. Let's Encrypt) and omit `--insecure`. Point `--cert` (or `Cert` / `cert_file` in a config file) at the full chain file (for Let's Encrypt, `fullchain.pem`): clients do not fetch missing intermediates.
 
-Download the latest `.deb` from [Releases](https://github.com/mp0rta/mqvpn/releases/latest):
+### Client (Debian and Ubuntu)
+
+Download the latest `mqvpn` deb from [Releases](https://github.com/mp0rta/mqvpn/releases/latest):
 
 ```bash
-# Replace VERSION and ARCH as needed (e.g., 0.6.0, amd64)
-curl -LO https://github.com/mp0rta/mqvpn/releases/latest/download/mqvpn_VERSION_ARCH.deb
-sudo dpkg -i mqvpn_*.deb
+# Latest release version and the architecture of this machine
+V=$(curl -fsSL https://api.github.com/repos/mp0rta/mqvpn/releases/latest \
+  | grep -Po '"tag_name": "v\K[^"]+')
+A=$(dpkg --print-architecture)
+curl -fLO https://github.com/mp0rta/mqvpn/releases/download/v$V/mqvpn_${V}_$A.deb
+sudo apt install ./mqvpn_${V}_$A.deb
 ```
 
 ### Windows client
@@ -181,7 +232,7 @@ A `SHA256SUMS` file is also attached to each release.
 
 ## Quick Start
 
-After installing the server and client (see [Installation](#installation)):
+After installing the server and client (see [Installation](#installation)), run the commands below. Replace `443` with the port of your server. They use `--insecure` for a self-signed certificate; omit it if the server has a trusted certificate.
 
 ```bash
 # Client (single path)
@@ -344,6 +395,7 @@ sudo mqvpn --config /etc/mqvpn/client.conf
 | `minrtt`        | min RTT    | min RTT    | latency-first                                   |
 | `wlb` (default) | flow pin   | unpinned   | general use; UDP packets distributed per-packet |
 | `wlb_udp_pin`   | flow pin   | flow pin   | each UDP connection kept on a single path       |
+| `failover`      | primary    | primary    | backup paths idle until the primary fails       |
 | `backup_fec`    | redundant  | redundant  | resilience-first (requires XQC_ENABLE_FEC)      |
 
 **Choosing wlb vs wlb_udp_pin:** Plain `wlb` distributes UDP packets across
@@ -456,6 +508,8 @@ for the full config key reference, and
 [Control API §5.4](docs/control-api.md#54-get_stats) for runtime counters.
 
 ## systemd
+
+The `mqvpn-server` deb and `install.sh` generate the server config for you. To set up the server by hand instead:
 
 ```bash
 # Server
@@ -653,11 +707,15 @@ Full report with all numbers: [`docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bond
 
 ## Building
 
-Requirements: Linux, CMake 3.10+, GCC/Clang (C11), libevent 2.x
+Requirements: Linux, CMake 3.22+, GCC/Clang (C11), libevent 2.x
 
 ```bash
 git clone --recurse-submodules https://github.com/mp0rta/mqvpn.git
 cd mqvpn
+# Debian/Ubuntu: install the build dependencies (packaging/build-deps.control)
+sudo apt-get satisfy "$(sed -n 's/^Build-Depends: *//p' packaging/build-deps.control)"
+# or, with devscripts and equivs installed:
+#   sudo mk-build-deps --install --remove packaging/build-deps.control
 ./build.sh            # builds BoringSSL, xquic, and mqvpn
 ./build.sh --clean    # full rebuild
 ```
@@ -696,6 +754,17 @@ make -j$(nproc)
 
 </details>
 
+### Building against libmqvpn (Debian and Ubuntu)
+
+The `mqvpn-dev` deb has the headers and the `libmqvpn.so` link. Install it together with the `mqvpn` deb of the same version:
+
+```bash
+sudo apt install ./mqvpn_VERSION_ARCH.deb ./mqvpn-dev_VERSION_ARCH.deb
+cc -o app app.c -lmqvpn
+```
+
+No deb has the static `libmqvpn.a`. To link statically, build from source.
+
 ### Android SDK
 
 ```bash
@@ -732,6 +801,7 @@ mqvpn [--config PATH] --mode client|server [options]
 
   --server IP:PORT       Server address (client)
   --path IFACE           Multipath interface (repeatable)
+  --backup-path IFACE    Backup interface for --scheduler failover (repeatable)
   --auth-key KEY         PSK authentication
   --user NAME:KEY        Add server user credential (repeatable)
   --dns ADDR             DNS server (repeatable)
@@ -739,7 +809,7 @@ mqvpn [--config PATH] --mode client|server [options]
   --listen BIND:PORT     Listen address (server, default: 0.0.0.0:443)
   --subnet CIDR          Client IPv4 pool (server)
   --subnet6 CIDR         Client IPv6 pool (server)
-  --scheduler minrtt|wlb|wlb_udp_pin|backup_fec
+  --scheduler minrtt|wlb|wlb_udp_pin|failover|backup_fec
                          Multipath scheduler (default: wlb)
   --cc bbr2|bbr|cubic|none
                          Congestion control algorithm (default: bbr2)
@@ -769,7 +839,7 @@ mqvpn is designed to comply with the following RFCs as much as possible.
 | MASQUE CONNECT-IP | [RFC 9484](https://www.rfc-editor.org/rfc/rfc9484) |
 | HTTP Datagrams | [RFC 9297](https://www.rfc-editor.org/rfc/rfc9297) |
 | QUIC Datagrams | [RFC 9221](https://www.rfc-editor.org/rfc/rfc9221) |
-| Multipath QUIC | [draft-ietf-quic-multipath](https://datatracker.ietf.org/doc/draft-ietf-quic-multipath/) |
+| Multipath QUIC | [RFC 10069](https://datatracker.ietf.org/doc/rfc10069/) |
 | HTTP/3 | [RFC 9114](https://www.rfc-editor.org/rfc/rfc9114) |
 
 ## Community

@@ -24,9 +24,9 @@ enum TransportKind: String, CaseIterable, Codable {
     case wifi, cellular
 }
 
-enum SplitChoice: Equatable { case throughput, lowLatency, redundant }
+enum SplitChoice: Equatable { case throughput, lowLatency, redundant, backup }
 
-/// Traffic-split settings. `scheduler` is minrtt or wlb; nil = key absent
+/// Traffic-split settings. `scheduler` is minrtt, wlb or failover; nil = key absent
 /// (legacy), which reads as throughput and is never written back until the
 /// user taps a choice.
 struct SplitSettings: Equatable, ProviderConfigSection {
@@ -54,7 +54,8 @@ struct SplitSettings: Equatable, ProviderConfigSection {
     init(providerConfiguration dict: [String: Any]?) {
         var sched: Scheduler?
         if let n = dict?[Key.scheduler] as? NSNumber, let v = ReorderSettings.exactInt(n),
-           let s = Int32(exactly: v).flatMap(Scheduler.init(rawValue:)), s == .minrtt || s == .wlb {
+           let s = Int32(exactly: v).flatMap(Scheduler.init(rawValue:)),
+           s == .minrtt || s == .wlb || s == .failover {
             sched = s
         }
         var enabled = false
@@ -74,8 +75,13 @@ struct SplitSettings: Equatable, ProviderConfigSection {
                   redundantPorts: malformed ? [] : ports, redundantPortsMalformed: malformed)
     }
 
+    /// Only the failover scheduler holds a backup path idle: under it alone
+    /// the Paths cards offer Backup and the provider flags the backup paths.
+    var usesBackupPaths: Bool { scheduler == .failover }
+
     var choice: SplitChoice {
         if redundantEnabled { return .redundant }
+        if scheduler == .failover { return .backup }
         return scheduler == .minrtt ? .lowLatency : .throughput
     }
 
@@ -85,6 +91,7 @@ struct SplitSettings: Equatable, ProviderConfigSection {
         case .throughput: s.scheduler = .wlb; s.redundantEnabled = false
         case .lowLatency: s.scheduler = .minrtt; s.redundantEnabled = false
         case .redundant: s.scheduler = .minrtt; s.redundantEnabled = true
+        case .backup: s.scheduler = .failover; s.redundantEnabled = false
         }
         return s
     }
@@ -143,25 +150,36 @@ struct ProtectionSettings: Equatable, ProviderConfigSection {
     }
 }
 
-/// Which transports a session may use. All-off is a configuration error the
+/// Which transports a session may use, and which of them are backups
+/// (SplitSettings.usesBackupPaths). All-off is a configuration error the
 /// provider refuses to start with; it is never silently widened. A new
 /// TransportKind adds one stored flag, one key and one subscript case here.
 struct PathPolicy: Equatable, ProviderConfigSection {
+    static let defaultBackup: Set<TransportKind> = [.cellular]
+
     var wifi: Bool = true
     var cellular: Bool = true
+    /// Transports that are backups while the split is Backup; kept under the
+    /// other splits and while the transport is off.
+    var backup: Set<TransportKind> = defaultBackup
 
     private enum Key {
         static let wifi = "pathWifi"
         static let cellular = "pathCellular"
+        static let backup = "pathBackup"
     }
 
-    init(wifi: Bool = true, cellular: Bool = true) {
+    init(wifi: Bool = true, cellular: Bool = true, backup: Set<TransportKind> = defaultBackup) {
         self.wifi = wifi
         self.cellular = cellular
+        self.backup = backup
     }
 
+    /// A stored kind this build does not know is dropped; an empty list is the user's choice.
     init(providerConfiguration dict: [String: Any]?) {
-        self.init(wifi: readBool(dict, Key.wifi, true), cellular: readBool(dict, Key.cellular, true))
+        let backup = (dict?[Key.backup] as? [String]).map { Set($0.compactMap(TransportKind.init(rawValue:))) }
+        self.init(wifi: readBool(dict, Key.wifi, true), cellular: readBool(dict, Key.cellular, true),
+                  backup: backup ?? Self.defaultBackup)
     }
 
     subscript(kind: TransportKind) -> Bool {
@@ -187,6 +205,7 @@ struct PathPolicy: Equatable, ProviderConfigSection {
     func merged(into dict: inout [String: Any]) {
         dict[Key.wifi] = NSNumber(value: wifi)
         dict[Key.cellular] = NSNumber(value: cellular)
+        dict[Key.backup] = backup.map(\.rawValue).sorted()
     }
 }
 

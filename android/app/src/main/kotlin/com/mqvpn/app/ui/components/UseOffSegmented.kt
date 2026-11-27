@@ -26,14 +26,18 @@ import com.mqvpn.app.ui.theme.LocalMqColors
 
 /** Use / Off segmented control (desktop Segmented.svelte), shared by Setup and Paths. */
 @Composable
-fun UseOffSegmented(use: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
+fun UseOffSegmented(use: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) =
+    Segmented(listOf("Use" to true, "Off" to false), use, enabled, onChange)
+
+@Composable
+fun <T> Segmented(options: List<Pair<String, T>>, value: T, enabled: Boolean = true, onChange: (T) -> Unit) {
     val c = LocalMqColors.current
     Row(
         Modifier.fillMaxWidth().alpha(if (enabled) 1f else 0.5f).selectableGroup()
             .clip(RoundedCornerShape(8.dp)).background(c.fill).padding(2.dp),
     ) {
-        for ((label, v) in listOf("Use" to true, "Off" to false)) {
-            val sel = use == v
+        for ((label, v) in options) {
+            val sel = value == v
             Box(
                 Modifier.weight(1f).clip(RoundedCornerShape(6.dp))
                     .background(if (sel) c.card else Color.Transparent)

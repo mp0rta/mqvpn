@@ -42,14 +42,15 @@ typedef struct platform_ctx platform_ctx_t;
 typedef struct platform_path {
     platform_ctx_t *p;          /* back pointer: the read event's arg is the slot */
     char iface[IFNAMSIZ];       /* configured name, "" = any; kept across drops */
+    int backup;                 /* MQVPN_PATH_FLAG_BACKUP; kept across drops */
     int fd;                     /* -1 = the platform holds no open socket */
     struct event *ev;           /* read event; non-NULL implies fd >= 0 */
     mqvpn_path_handle_t handle; /* last successfully registered incarnation */
     void *bind_ctx;             /* current transport ctx; NULL once finalised */
     /* Consecutive re-add failures. Pure backpressure, NOT a state mirror —
      * lifecycle state is queried via mqvpn_client_get_paths(). Bounds the
-     * busy-loop on transient xquic errors (e.g. -XQC_EMP_NO_AVAIL_PATH_ID
-     * during WiFi reassoc CID lag). Reset on success or Level-2 reconnect. */
+     * busy-loop on transient xquic errors. Reset on success or Level-2
+     * reconnect. */
     int recover_failures;
     int route_gate_blocked; /* consecutive route-gate blocks, warn debounce */
 } platform_path_t;
@@ -169,7 +170,8 @@ void platform_read_rx_stats(const platform_path_t *s, uint64_t *receives,
 /* netmon_common.c — the startup slots: one per configured interface
  * (n_ifaces 0 = one "any" slot), each with its socket, each logged. 0, or -1
  * (already logged; the caller exits through its cleanup). */
-int platform_paths_open(platform_ctx_t *p, int n_ifaces, const char *const *ifaces);
+int platform_paths_open(platform_ctx_t *p, int n_ifaces, const char *const *ifaces,
+                        const int *backup);
 
 /* path_table.c — slot mechanics (its header states what stays out) */
 

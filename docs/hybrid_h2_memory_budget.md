@@ -148,8 +148,9 @@ actually in flight).
 **Cross-check against the iOS profile.** The two profiles must tell the same story, and
 they do. iOS caps at 64 flows to fit a ~50 MB Network Extension ceiling; its per-flow
 uplink term is `TCP_WND` (262,140) + high-water (`TCP_WND`/2 = 131,070) = 393,210 B, so
-64 flows ≈ 24 MiB — comfortably inside that ceiling (§5c). Desktop/router is 64× the flow
-count *and* 2× the per-flow term (786,424 / 393,210, from the 2× wider window against a
+64 flows ≈ 24 MiB. That is one part of the profile's total, so it claims no margin
+against that ceiling; §5c adds the other parts and an on-device measurement decides.
+Desktop/router is 64× the flow count *and* 2× the per-flow term (786,424 / 393,210, from the 2× wider window against a
 2× smaller relative high-water), i.e. 128× the iOS total: 24 MiB × 128 = 3.0 GiB. The
 factor is 128, not 64, because the flow ceiling and the window sizing are independent
 axes (§0). The two still differ on both, but far less than when desktop/router ran a
@@ -290,19 +291,52 @@ the link's real bandwidth-delay product.
 ### 5b. QUIC-side receive-rate cap
 
 Shrinking the inner TCP window does not, by itself, bound the outer QUIC connection's own
-receive buffering — an unconstrained QUIC flow-control window can still grow to whatever
-the peer/BDP estimate allows. The iOS profile pairs the lwIP shrink with a
-connection-level cap on the QUIC side: `[Advanced] RecvRateLimit` (config key) →
-`recv_rate_bytes_per_sec` (`mqvpn_conn_settings_input_t`, `src/mqvpn_conn_settings.h`) →
-xquic. The knob is client-only (the builder hard-zeroes it for servers, since a
-server-side cap would throttle client uplink instead); the iOS engine sets it to 125 MB/s.
+receive buffering. The iOS profile pairs the lwIP shrink with a connection-level cap on the
+QUIC side: `[Advanced] RecvRateLimit` (config key) → `recv_rate_bytes_per_sec`
+(`mqvpn_conn_settings_input_t`, `src/mqvpn_conn_settings.h`) → xquic. The knob is
+client-only (the builder hard-zeroes it for servers, since a server-side cap would throttle
+client uplink instead); the iOS engine sets it to 125 MB/s.
 
-The cap bounds the QUIC connection window to roughly `rate × srtt`, clamped at 16 MiB.
-Observed in the same measurement run (downlink, debug log): initial connection window
-7,500,000 B (= 125 MB/s × 60 ms srtt at connection start), steady-state 16,777,216 B (the
-16 MiB clamp) once the srtt estimate settles higher. Both are bounded values, not the
-engine's unbounded default — the cap is doing real work here, not sitting as a no-op
-ceiling above what the connection would reach anyway.
+The connection receive window starts at `rate × 60 ms` (at least 63,000 B), grows with the
+largest measured srtt (across paths), is capped at 16 MiB, and stays at the largest value it reached; it does not
+shrink. At 125 MB/s it starts at 7,500,000 B and settles at 16,777,216 B (the 16 MiB cap)
+once the srtt estimate is high enough. 16 MiB is therefore the upper bound of the connection
+window, not its typical size.
+
+The connection window alone does not bound what one flow holds. Each TCP-lane flow also
+gets a receive rate of a quarter of the connection rate (`mqvpn_tcp_stream_recv_rate()`), so
+one stalled flow holds at most a quarter of the connection window in the transport and up to three stalled
+flows leave room for the others. Without that share one stalled flow could take the whole
+window and stall every other flow.
+
+Unread payload is held in four places for a flow whose receiver stalls: the QUIC stream
+(at most the stream window), the HTTP/3 layer, mqvpn's own stash, and kernel socket
+buffers. The HTTP/3 layer
+stops reading a request's stream once it holds `max_body_buf_per_stream`
+(`MQVPN_STREAM_BODY_BUF_BYTES`, 64 KiB; set on client and server, `src/mqvpn_conn_settings.c`).
+The stream's flow-control window then fills and the sender stops. Without that limit the
+HTTP/3 layer would read into a per-request buffer with no bound, and stream flow control
+would never reach the sender.
+
+Payload held for one stalled flow, on the receiving side:
+
+- QUIC transport: at most the stream window (at most 16 MiB; on a `RecvRateLimit` client at
+  most a quarter of the connection window);
+- HTTP/3 layer: 64 KiB + 4 KiB;
+- mqvpn's stash: one 16 KiB relay chunk on the server, one TCP segment on the client;
+- kernel socket buffers.
+
+Worst cases, if every flow stalls with a full window:
+
+| Receiver | Payload bound |
+|---|---|
+| client without `RecvRateLimit` | 16 MiB + 68 KiB per flow; ≈ 4 GiB at the default 256 flows |
+| `RecvRateLimit` client, 64 flows (iOS profile) | at most the connection window (16 MiB) in the transport + 64 × 68 KiB ≈ 4.3 MiB in HTTP/3 ≈ 20.3 MiB |
+| server | 16 MiB + 68 KiB + 16 KiB per flow; `TcpMaxFlows` × that per session, `TcpMaxGlobalFlows` × that overall (≈ 64 GiB at 4096) |
+
+These are payload bounds for the mqvpn process; kernel socket buffers are outside it and not
+counted. No bound on total heap is claimed: allocator and bookkeeping
+overhead (including the transport's per-frame bookkeeping) come on top.
 
 ### 5c. iOS-profile budget table
 
@@ -339,10 +373,11 @@ already counted, pbuf metadata/struct overhead on top of the payload-only accoun
 and the hash bucket array (§4 — small, fixed, unaffected by the iOS marker-cap shrink).
 Final authority is on-device measurement, not this arithmetic.
 
-Add the QUIC-side receive-rate cap (§5b) on top: typically ≈ 7.15 MiB (`rate × srtt` at
-60 ms), up to the 16 MiB clamp in the worst case. All-up: ≈ 21.4 MiB (lwIP iOS profile)
-+ up to 16 MiB (QUIC cap, worst case) ≈ 37.4 MiB against the 50 MB Network Extension
-ceiling, leaving headroom for process/runtime overhead outside this doc's scope.
+Add the QUIC-side payload bound (§5b) on top: at most about 20.3 MiB for 64 stalled flows
+on the iOS profile (the 16 MiB connection window plus 64 × 68 KiB in HTTP/3). That is a
+payload bound only. Neither it nor the ≈ 21.4 MiB lwIP subtotal above is a heap ceiling, so
+this document does not claim that the profile fits the 50 MB Network Extension limit;
+on-device measurement decides.
 
 ### 5d. Router-topology window measurement (desktop/router scale 5 → 3)
 

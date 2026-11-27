@@ -50,6 +50,7 @@ func runPureCases() -> Int {
         check(!pr.killSwitch && pr.autoReconnect, "protection defaults")
         let pp = PathPolicy(providerConfiguration: legacy)
         check(pp.wifi && pp.cellular && pp.anyEnabled, "path defaults")
+        check(pp.backup == [.cellular], "backup defaults to cellular")
         var kp = PathPolicy()
         kp[.wifi] = false
         check(kp == PathPolicy(wifi: false, cellular: true) && kp.enabledKinds == [.cellular] && kp[.cellular], "policy subscript")
@@ -58,11 +59,17 @@ func runPureCases() -> Int {
             check(SplitSettings(providerConfiguration: ["scheduler": NSNumber(value: raw)]).scheduler == nil, "scheduler \(raw) rejected")
         }
         check(SplitSettings(providerConfiguration: ["scheduler": NSNumber(value: 0)]).scheduler == .minrtt, "scheduler minrtt read")
+        check(SplitSettings(providerConfiguration: ["scheduler": NSNumber(value: 4)]).scheduler == .failover, "scheduler failover read")
+        check(SplitSettings(providerConfiguration: ["scheduler": NSNumber(value: 4)]).usesBackupPaths, "failover uses backup paths")
+        for raw in [0, 1] {
+            check(!SplitSettings(providerConfiguration: ["scheduler": NSNumber(value: raw)]).usesBackupPaths, "scheduler \(raw) has no backup paths")
+        }
+        check(!ls.usesBackupPaths, "legacy has no backup paths")
         var merged: [String: Any] = [:]
         for section: ProviderConfigSection in [ProtectionSettings(killSwitch: true), PathPolicy(wifi: false, cellular: true)] {
             section.merged(into: &merged)
         }
-        check(merged.count == 4 && ProtectionSettings(providerConfiguration: merged).killSwitch, "sections merge into one dict")
+        check(merged.count == 5 && ProtectionSettings(providerConfiguration: merged).killSwitch, "sections merge into one dict")
         for (w, c, any) in [(true, true, true), (true, false, true), (false, true, true), (false, false, false)] {
             check(PathPolicy(wifi: w, cellular: c).anyEnabled == any, "anyEnabled \(w) \(c)")
         }
@@ -74,15 +81,18 @@ func runPureCases() -> Int {
         check(ch(.minrtt, false) == .lowLatency, "choice minrtt")
         check(ch(nil, false) == .throughput, "choice nil")
         check(ch(.wlb, true) == .redundant && ch(.minrtt, true) == .redundant && ch(nil, true) == .redundant, "choice redundant")
+        check(ch(.failover, false) == .backup, "choice failover")
         // write matrix; ports kept
         let base = SplitSettings(scheduler: nil, redundantEnabled: false, redundantPorts: [4200], redundantPortsMalformed: false)
         let t1 = base.tapped(.throughput), t2 = base.tapped(.lowLatency), t3 = base.tapped(.redundant)
+        let t4 = base.tapped(.backup)
+        check(t4.scheduler == .failover && !t4.redundantEnabled, "tap backup")
         check(t1.scheduler == .wlb && !t1.redundantEnabled, "tap throughput")
         check(t2.scheduler == .minrtt && !t2.redundantEnabled, "tap lowLatency")
         check(t3.scheduler == .minrtt && t3.redundantEnabled, "tap redundant")
         check(t1.redundantPorts == [4200] && t2.redundantPorts == [4200] && t3.redundantPorts == [4200], "tap keeps ports")
         // round trip
-        for s in [base, t1, t2, t3] {
+        for s in [base, t1, t2, t3, t4] {
             var m: [String: Any] = [:]
             s.merged(into: &m)
             check(SplitSettings(providerConfiguration: m) == s, "split round-trip")
@@ -95,7 +105,17 @@ func runPureCases() -> Int {
         PathPolicy(wifi: false, cellular: true).merged(into: &mk)
         check(ProtectionSettings(providerConfiguration: mk) == ProtectionSettings(killSwitch: true, autoReconnect: false), "protection round-trip")
         check(PathPolicy(providerConfiguration: mk) == PathPolicy(wifi: false, cellular: true), "path round-trip")
-        check(mk["pathWifi"] != nil && mk["pathCellular"] != nil && mk["killSwitch"] != nil && mk["autoReconnect"] != nil, "policy keys")
+        check(mk["pathWifi"] != nil && mk["pathCellular"] != nil && mk["pathBackup"] != nil && mk["killSwitch"] != nil && mk["autoReconnect"] != nil, "policy keys")
+        for b: Set<TransportKind> in [[.wifi], [], [.wifi, .cellular]] {
+            var bk: [String: Any] = [:]
+            PathPolicy(backup: b).merged(into: &bk)
+            check(PathPolicy(providerConfiguration: bk).backup == b, "backup round-trip \(b.count)")
+        }
+        var bo: [String: Any] = [:]
+        PathPolicy(backup: [.wifi, .cellular]).merged(into: &bo)
+        check(bo["pathBackup"] as? [String] == ["cellular", "wifi"], "backup written sorted")
+        check(PathPolicy(providerConfiguration: ["pathBackup": ["wifi", "nope"]]).backup == [.wifi], "unknown backup kind dropped")
+        check(PathPolicy(providerConfiguration: ["pathBackup": 3]).backup == [.cellular], "malformed backup reads default")
         // malformed ports
         let bad: [[Any]] = [[NSNumber(value: true)], [NSNumber(value: 0)], [NSNumber(value: 65536)],
                             [NSNumber(value: 80), "x"], [NSNumber(value: 1.5)],
@@ -468,6 +488,13 @@ func runPureCases() -> Int {
         check(both.setting(.wifi, on: false) == PathPolicy(wifi: false, cellular: true), "policy wifi off")
         check(PathPolicy(wifi: false, cellular: true).setting(.cellular, on: false) == nil, "policy refuses last off")
         check(PathPolicy(wifi: false, cellular: true).setting(.wifi, on: true) == both, "policy wifi back on")
+        check(both.role(.cellular) == .backup && both.role(.wifi) == .use, "role by backup membership")
+        check(PathPolicy(wifi: false, cellular: true, backup: [.wifi]).role(.wifi) == .off, "role off wins")
+        check(both.setting(.cellular, role: .use) == PathPolicy(wifi: true, cellular: true, backup: []), "role use leaves the backups")
+        check(both.setting(.wifi, role: .backup) == PathPolicy(wifi: true, cellular: true, backup: [.wifi, .cellular]), "role backup joins the backups")
+        check(both.setting(.cellular, role: .off) == PathPolicy(wifi: true, cellular: false, backup: [.cellular]), "role off keeps the backups")
+        check(PathPolicy(wifi: true, cellular: false).setting(.wifi, role: .off) == nil, "role refuses last off")
+        check(PathPolicy(wifi: false, cellular: true).setting(.wifi, role: .backup) == PathPolicy(wifi: true, cellular: true, backup: [.wifi, .cellular]), "role backup turns it on")
 
         check(fmtMbps(46_300_000) == "46.3" && fmtMbps(123_400_000) == "123", "dv fmtMbps")
         check(fmtDownloadRate(46_300_000) == "↓ 46.3 Mbps" && fmtDownloadRate(0) == "↓ 0.0 Mbps", "dv download rate label")
@@ -540,6 +567,33 @@ func runPureCases() -> Int {
         check(ProtectionSettings(killSwitch: false, autoReconnect: false).reconnects == false
               && ProtectionSettings(killSwitch: true, autoReconnect: false).reconnects
               && ProtectionSettings(killSwitch: false, autoReconnect: true).reconnects, "reconnects = auto || kill switch")
+    }
+
+    // TunBacklog: a refused packet holds back the rest of its batch and the next read
+    do {
+        let b = TunBacklog()
+        var sent: [UInt8] = []
+        var refuse: UInt8? = nil   // the fake core refuses this packet
+        var rearms = 0
+        let send = { (p: Data) -> Bool in sent.append(p[0]); return p[0] != refuse }
+        let batch = (0..<4).map { Data([UInt8($0)]) }
+        b.feed(batch, send: send) { rearms += 1 }
+        check(sent == [0, 1, 2, 3] && rearms == 1 && !b.waiting, "backlog: all fed, then rearm")
+        sent = []; refuse = 1
+        b.feed(batch, send: send) { rearms += 1 }
+        check(sent == [0, 1] && rearms == 1 && b.waiting, "backlog: refused mid-batch holds rest and rearm")
+        refuse = 2
+        b.resume(send: send)
+        check(sent == [0, 1, 2] && rearms == 1 && b.waiting, "backlog: refused again on resume, still held")
+        refuse = nil
+        b.resume(send: send)
+        check(sent == [0, 1, 2, 3] && rearms == 2 && !b.waiting, "backlog: resume feeds the rest in order, then rearm")
+        sent = []; refuse = 3
+        b.feed(batch, send: send) { rearms += 1 }
+        check(sent == [0, 1, 2, 3] && rearms == 2 && b.waiting, "backlog: refused last packet still holds rearm")
+        refuse = nil
+        b.resume(send: send)
+        check(sent == [0, 1, 2, 3] && rearms == 3 && !b.waiting, "backlog: resume with nothing left rearms")
     }
 
     // SnapshotIngestState: boot change ordering

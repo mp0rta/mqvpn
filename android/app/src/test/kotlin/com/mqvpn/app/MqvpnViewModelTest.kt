@@ -80,22 +80,14 @@ class MqvpnViewModelTest {
     }
 
     @Test
-    fun `init re-attaches the manager to a running service`() {
-        // a ViewModel recreated while the VPN kept running must restore the
-        // manager-service binding, or the UI stays frozen
-        verify { mockManager.attach(MyVpnService::class.java) }
-    }
-
-    @Test
     fun `onCleared must not sever the singleton manager`() {
-        // regression guard: onCleared() used to call manager.destroy(), which
-        // froze the dashboard and broke disconnect once the activity died
-        // while the VPN kept running
+        // regression guard: onCleared() used to sever the manager's service
+        // binding, which froze the dashboard and broke disconnect once the
+        // activity died while the VPN kept running
         val onCleared = androidx.lifecycle.ViewModel::class.java.getDeclaredMethod("onCleared")
         onCleared.isAccessible = true
         onCleared.invoke(viewModel)
 
-        verify(exactly = 0) { mockManager.destroy() }
         verify(exactly = 0) { mockManager.disconnect() }
     }
 

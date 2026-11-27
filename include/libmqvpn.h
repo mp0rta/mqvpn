@@ -5,7 +5,7 @@
  * libmqvpn — Multipath QUIC VPN library
  *
  * Public API header (single file).
- * Version: 0.19.2 (callback ABI version 3)
+ * Version: 0.20.0 (callback ABI version 3)
  *
  * Thread safety: All functions must be called from a single thread
  * (the "tick thread"). Debug builds assert this (ASSERT_TICK_THREAD inside the library).
@@ -38,8 +38,8 @@ extern "C" {
 /* ─── Version ─── */
 
 #define MQVPN_VERSION_MAJOR 0
-#define MQVPN_VERSION_MINOR 19
-#define MQVPN_VERSION_PATCH 2
+#define MQVPN_VERSION_MINOR 20
+#define MQVPN_VERSION_PATCH 0
 
 /* ─── ABI ─── */
 
@@ -211,6 +211,7 @@ typedef enum {
     MQVPN_SCHED_BACKUP_FEC =
         2, /* FEC repair on standby path. Requires XQC_ENABLE_FEC build. */
     MQVPN_SCHED_WLB_UDP_PIN = 3, /* WLB + 5-tuple pin for UDP flows. */
+    MQVPN_SCHED_FAILOVER = 4,    /* Backup paths idle until the others fail. */
 } mqvpn_scheduler_t;
 
 typedef enum {
@@ -269,8 +270,9 @@ MQVPN_API const char *mqvpn_client_state_string(mqvpn_client_state_t state);
  *               with the path PENDING (CLOSED on a permanent create failure).
  *   ACTIVE    → validated and usable. Entered only from PENDING, once
  *               validation completes asynchronously.
- *   STANDBY   → validated backup path: under MQVPN_SCHED_BACKUP_FEC, paths
- *               validated after connection setup land here instead of ACTIVE.
+ *   STANDBY   → validated backup path: under MQVPN_SCHED_FAILOVER and
+ *               MQVPN_SCHED_BACKUP_FEC, a backup path (MQVPN_PATH_FLAG_BACKUP)
+ *               lands here instead of ACTIVE.
  *   DEGRADED  → xquic closed a validated path (xquic_path_live==0); the
  *               transport is still attached and the library retries it.
  *   CLOSED    → one of:
@@ -310,15 +312,18 @@ MQVPN_API const char *mqvpn_path_status_string(mqvpn_path_status_t status);
  *                     created; PATH_CHALLENGE validation will complete async
  *                     and the slot will land in ACTIVE/STANDBY when xquic
  *                     reports XQC_PATH_STATE_ACTIVE), OR multipath wasn't
- *                     ready yet and activation will fire from
- *                     cb_ready_to_create_path when handshake completes.
- *                     In both cases the caller keeps the transport (the ctx
+ *                     ready yet, or xquic had no path ID for a new path yet
+ *                     (-XQC_EMP_NO_AVAIL_PATH_ID: the server has not yet
+ *                     acknowledged our CIDs for the next path ID, or granted
+ *                     more path IDs), and activation will fire from
+ *                     cb_ready_to_create_path once xquic has one.
+ *                     In every case the caller keeps the transport (the ctx
  *                     stays installed; the library releases it via
  *                     mqvpn_client_on_platform_path_released() or destroy()).
  *
- *   TRANSIENT_FAIL  — xqc_conn_create_path returned a recoverable error
- *                     (e.g. -XQC_EMP_NO_AVAIL_PATH_ID — server hasn't
- *                     distributed CIDs yet). The library's tick recovery
+ *   TRANSIENT_FAIL  — xqc_conn_create_path returned another recoverable
+ *                     error (e.g. -XQC_CLOSING while the connection
+ *                     closes). The library's tick recovery
  *                     loop will retry with exponential backoff. A handle
  *                     was allocated, so the library owns the ctx: a
  *                     platform that rolls back here must do it with
@@ -521,8 +526,16 @@ typedef struct {
     uint8_t local_addr[128]; /* sockaddr storage */
     uint32_t local_addr_len;
     int64_t platform_net_id; /* Android: Network handle */
-    uint32_t flags;
+    uint32_t flags;          /* MQVPN_PATH_FLAG_* */
 } mqvpn_path_desc_t;
+
+/* mqvpn_path_desc_t.flags: a backup path. Under MQVPN_SCHED_FAILOVER and
+ * MQVPN_SCHED_BACKUP_FEC it runs STANDBY: failover sends no data on it while
+ * a path without the flag works. Under failover only flagged paths are
+ * STANDBY. Under backup_fec, once any path is added with the flag, only
+ * flagged paths are; with the flag on no path, every path but the one the
+ * connection starts on is. */
+#define MQVPN_PATH_FLAG_BACKUP (1u << 0)
 
 /* ─── Callback function types ─── */
 
@@ -805,9 +818,13 @@ MQVPN_API int mqvpn_config_set_hybrid_egress_acl(mqvpn_config_t *cfg, const char
                                                  int n_deny);
 
 /* Conn-level receive-rate cap in bytes/sec (0 = library default, no cap).
- * Bounds the aggregate QUIC transport receive window to rate x srtt.
- * CLIENT-ONLY: the server connection-settings path ignores it — a
- * server-side cap would throttle every client's uplink.
+ * Sizes the aggregate QUIC transport receive window from rate x srtt.
+ * The window starts at rate x 60 ms (at least 63000 bytes), follows the
+ * largest measured srtt (across paths) upward, is capped at 16 MiB and never shrinks.
+ * Each hybrid TCP-lane flow is also limited to about a quarter of this rate, so one
+ * stalled flow holds at most a quarter of the window. CLIENT-ONLY: the server
+ * connection-settings path ignores it — a server-side cap would throttle every client's
+ * uplink.
  *
  * Values above MQVPN_RECV_RATE_LIMIT_MAX are rejected
  * (MQVPN_ERR_INVALID_ARG): the transport computes the window as
@@ -1045,7 +1062,12 @@ MQVPN_API int mqvpn_client_set_tun_active(mqvpn_client_t *client, int active, in
  * a consumer that ticks on a coarse timer adds up to one tick period of
  * latency to every packet accepted here. (Before the deferred flush every
  * call flushed synchronously, so this obligation is new as of UdpGso
- * batching — same contract as mqvpn_server_on_egress_fd_ready.) */
+ * batching — same contract as mqvpn_server_on_egress_fd_ready.)
+ *
+ * MQVPN_ERR_AGAIN is backpressure: the packet is dropped, not queued, and
+ * the client keeps refusing packets with MQVPN_ERR_AGAIN until it can send
+ * again. Stop reading the TUN until mqvpn_client_get_interest() reports
+ * tun_readable; ready_for_tun (when set) is only a hint that it changed. */
 MQVPN_API int mqvpn_client_on_tun_packet(mqvpn_client_t *client, const uint8_t *pkt,
                                          size_t len);
 

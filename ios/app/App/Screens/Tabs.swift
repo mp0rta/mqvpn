@@ -59,7 +59,8 @@ struct PathsTab: View {
     var body: some View {
         PathsScreen(live: controller.viewState == .connected,
                     cards: transportCards(live.frame, available: availability.kinds),
-                    policy: controller.settings.draft.paths, editable: controller.isEditable,
+                    policy: controller.settings.draft.paths,
+                    backupMode: controller.settings.draft.split.usesBackupPaths, editable: controller.isEditable,
                     setPolicy: { p in controller.settings.update { $0.paths = p } })
     }
 }
@@ -80,6 +81,7 @@ struct SettingsTab: View {
     @ObservedObject var controller: TunnelController
     @ObservedObject var eventLog: EventLog
     let onRunSetup: () -> Void
+    let onOpenPaths: () -> Void
     @State private var path: [SettingsRoute] = []
 
     var body: some View {
@@ -87,7 +89,7 @@ struct SettingsTab: View {
         NavigationStack(path: $path) {
             SettingsScreen(form: form, events: eventLog.events,
                            tunnel: controller.viewState == .connected ? controller.facts?.tunnel : nil,
-                           onNavigate: { path.append($0) }, onRunSetup: onRunSetup)
+                           onNavigate: { path.append($0) }, onRunSetup: onRunSetup, onOpenPaths: onOpenPaths)
                 .toolbar(.hidden, for: .navigationBar)
                 .navigationDestination(for: SettingsRoute.self) { route in
                     SettingsDetail(controller: controller, route: route, back: pop)

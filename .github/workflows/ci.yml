@@ -54,7 +54,8 @@ jobs:
           # The Azure mirror is often throttled and stalls apt for 10+ minutes.
           sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update
-          sudo apt-get install -y cmake libevent-dev golang iptables
+          # The build dependencies are in packaging/build-deps.control.
+          sudo apt-get -y satisfy "$(sed -n 's/^Build-Depends: *//p' packaging/build-deps.control)" iptables
 
       - name: Compute xquic SHA
         id: xqsha
@@ -151,6 +152,28 @@ jobs:
             build/libxquic.so
             build/cmake_install.cmake
             build/systemd/
+            build/packaging/
+          retention-days: 1
+
+      # After the upload: the build artifact keeps the /usr/local prefix that
+      # systemd-test installs. No compiled file uses the prefix, so this
+      # configure only regenerates the units and the install scripts.
+      - name: Build debs (prefix /usr)
+        # From build/: CMakeLists resolves the relative XQUIC_BUILD_DIR against the working directory.
+        run: |
+          cd build
+          cmake -DCMAKE_INSTALL_PREFIX=/usr ..
+          make -j"$(nproc)"
+          cpack -G DEB
+
+      - name: Check deb contents
+        run: scripts/ci_e2e/check_deb_contents.sh build
+
+      - name: Upload debs
+        uses: actions/upload-artifact@v7
+        with:
+          name: debs
+          path: build/*.deb
           retention-days: 1
 
   # 32-bit build guard (OpenWrt/OMR routers run armhf): cross-compiles with
@@ -524,6 +547,12 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_backup_fec_test.sh
 
+      - name: E2E failover scheduler test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_failover_test.sh
+
       - name: E2E G-P10 proactive CID issuance (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
@@ -852,6 +881,46 @@ jobs:
       - name: Systemd service integration test
         run: sudo scripts/ci_e2e/run_systemd_test.sh
 
+  # Installs, upgrades and purges the debs on the runner itself; it binds UDP
+  # 10443 and changes iptables and sysctls, so keep it in its own job.
+  deb-install-test:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install test dependencies
+        # A stuck mirror otherwise eats the whole job timeout.
+        timeout-minutes: 5
+        run: |
+          # The Azure mirror is often throttled and stalls apt for 10+ minutes.
+          sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
+          sudo apt-get update
+          sudo apt-get install -y lintian
+
+      - name: Download debs
+        uses: actions/download-artifact@v8
+        with:
+          name: debs
+          path: debs
+
+      # The last release whose mqvpn deb still contains the server and dev files.
+      - name: Download the mqvpn 0.19.2 deb
+        run: |
+          mkdir -p old-deb && cd old-deb
+          base=https://github.com/mp0rta/mqvpn/releases/download/v0.19.2
+          curl -fsSL --retry 3 -o mqvpn_0.19.2_amd64.deb "$base/mqvpn_0.19.2_amd64.deb"
+          curl -fsSL --retry 3 -o SHA256SUMS "$base/SHA256SUMS"
+          grep -F '  mqvpn_0.19.2_amd64.deb' SHA256SUMS | sha256sum -c --strict
+
+      - name: lintian (advisory)
+        continue-on-error: true
+        run: lintian --no-tag-display-limit debs/*.deb
+
+      - name: Deb install, upgrade, remove and purge test
+        run: sudo scripts/ci_e2e/run_deb_install_test.sh debs old-deb/mqvpn_0.19.2_amd64.deb
+
   darwin:
     name: darwin build (core libs + platform TUs + CLI, unit tests)
     # Full Darwin build: mqvpn_lib, a real libmqvpn.dylib linked against
@@ -1123,7 +1192,7 @@ jobs:
         uses: ilammy/setup-nasm@v1
 
       - name: Setup Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@v7.1.0
         with:
           go-version: 'stable'
 
@@ -1321,7 +1390,7 @@ jobs:
           ls -lh android/sdk-native/prebuilt/arm64-v8a/
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v6.1.0
+        uses: actions/setup-java@v6.3.0
         with:
           distribution: temurin
           java-version: 21
@@ -1409,7 +1478,7 @@ jobs:
           ls -lh android/sdk-native/prebuilt/x86_64/
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v6.1.0
+        uses: actions/setup-java@v6.3.0
         with:
           distribution: temurin
           java-version: 21
@@ -1571,6 +1640,9 @@ jobs:
 
       - name: E2E hybrid H2 TCP-lane suite (netns, functional phases)
         run: sudo -E tests/test_e2e_hybrid_h2.sh build/mqvpn
+
+      - name: E2E hybrid receive backpressure (netns)
+        run: sudo -E tests/test_e2e_hybrid_backpressure.sh build/mqvpn
 
       - name: E2E hybrid H2 throughput gate (netns, Release build)
         run: HYBRID_H2_PHASES=perf sudo -E tests/test_e2e_hybrid_h2.sh build-release/mqvpn
