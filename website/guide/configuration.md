@@ -162,8 +162,6 @@ To give a user the same VPN address every time, add the address: `User = alice:K
 
 In the `NAME:KEY:IP` form, the text after the last `:` is the address when it is a valid IPv4 address; otherwise it belongs to the key, because a key may contain `:`. A mistyped address (digits and dots that do not form an IPv4 address, for example `10.0.0.999`) is an error and the server does not start. A key that ends in `:` followed by only digits and dots, such as `secret:1.5`, is refused for the same reason; write that user as a JSON object.
 
-Because of this rule, a key that itself ends in `:` and an IPv4 address changes meaning in v0.21.0: `alice:secret:10.0.0.10` used to mean the key `secret:10.0.0.10`, and now means the key `secret` with the fixed address `10.0.0.10`. To keep such a key, write the user as a JSON object, `{"name":"alice","key":"secret:10.0.0.10"}`. INI and `--user` cannot express it, so use a JSON config or change the key.
-
 Removing a user via the Control API also disconnects any active sessions authenticated with that username.
 
 ::: warning Monitoring requires per-user keys
