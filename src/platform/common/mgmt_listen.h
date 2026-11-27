@@ -24,7 +24,7 @@ typedef struct mgmt_listen mgmt_listen_t;
 
 /*
  * Order (each step only after the previous one succeeded):
- *   1. create the parent directory (0755)
+ *   1. create the missing parent directories (0755, less the umask)
  *   2. open <path>.lock and take flock(LOCK_EX|LOCK_NB); a held lock means
  *      another endpoint owns the path
  *   3. stale check with lstat(path): absent is fine; a socket whose

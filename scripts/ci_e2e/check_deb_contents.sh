@@ -80,7 +80,7 @@ expect_in srv mqvpn-server "${SERVER_FILES[@]}" /usr/lib/mqvpn/mqvpn-server-setu
     /usr/share/doc/mqvpn-server/LICENSE /usr/share/doc/mqvpn-server/NOTICE
 expect_not_in rt mqvpn "${SERVER_FILES[@]}" "${DEV_FILES[@]}"
 expect_in dev mqvpn-dev "${DEV_FILES[@]}" /usr/share/doc/mqvpn-dev/LICENSE /usr/share/doc/mqvpn-dev/NOTICE
-expect_in rt mqvpn /usr/bin/mqvpn /usr/lib/libmqvpn.so.4 /usr/lib/libxquic.so \
+expect_in rt mqvpn /usr/bin/mqvpn /usr/bin/mqvpnctl /usr/lib/libmqvpn.so.4 /usr/lib/libxquic.so \
     /usr/lib/systemd/system/mqvpn-client@.service /etc/mqvpn/client.conf.example \
     /etc/mqvpn/client.json.example /usr/share/doc/mqvpn/LICENSE /usr/share/doc/mqvpn/NOTICE \
     /usr/share/doc/mqvpn/NEWS.Debian.gz

@@ -23,7 +23,7 @@ typedef struct {
 typedef struct {
     const mgmt_endpoint_ctx_t *ep;
     mgmt_conn_state_t *conn;
-    yyjson_val *params;  /* object; an empty object when the request had none */
+    yyjson_val *params;  /* object, or NULL when absent (yyjson getters accept NULL) */
     yyjson_mut_doc *doc; /* build result / err_data here */
 } mgmt_call_t;
 

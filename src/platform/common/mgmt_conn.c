@@ -385,8 +385,11 @@ dispatch_one(mgmt_conn_t *c)
     /* Before the reply is written: a hello that completed must not be timed out. */
     if (!was_done && c->st.handshake_done) event_del(c->deadline);
     if (rc == 0 && out.buf && out.len <= ep->lim.max_response_line) {
-        bufferevent_write(c->bev, out.buf, out.len); /* reads stay off: 1 in flight */
+        /* reads stay off: 1 in flight. A failed write has no write callback to turn
+         * them back on, so drop the connection instead of leaving it deaf. */
+        int wr = bufferevent_write(c->bev, out.buf, out.len);
         free(out.buf);
+        if (wr != 0) conn_destroy(c);
     } else if (rc == 1) {
         conn_next(c);
     } else {

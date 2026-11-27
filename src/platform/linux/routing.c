@@ -66,9 +66,9 @@ discover_route(const char *server_ip, sa_family_t af, char *gateway, size_t gw_l
      * musl-linked iproute2 (Alpine, OpenWrt) writes them with two separate
      * write()s: musl's stdout is line-buffered until its first flush. A
      * single read() can therefore return only the first line; closing the
-     * pipe then kills `ip` with SIGPIPE on its second write (Linux clients
-     * keep the default disposition, which survives exec), and the
-     * WIFEXITED check below discards an answer that was already complete,
+     * pipe then fails `ip`'s second write (SIGPIPE, or EPIPE where the
+     * client ignores SIGPIPE: the disposition survives exec), and the
+     * exit-status check below discards an answer that was already complete,
      * aborting the tunnel with "could not determine original iface".
      * Retry EINTR; treat buffer-full-before-EOF as a failed capture. */
     char out[1024];
